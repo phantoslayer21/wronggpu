@@ -28,6 +28,8 @@ Your results will vary with your system, game version and settings. Other games 
 
 This is alpha software. Expect rough edges, such as shimmer on thin geometry (fences, foliage) and screen-space reflections.
 
+**Path tracing in Cyberpunk 2077 is currently broken with WrongGPU.** Keep path tracing off. Regular ray tracing, up to Psycho, works.
+
 ## In-game overlay
 
 Press **Insert** in game to open or close the overlay. It shows the real presentation FPS, the model preset, the resolution, how many frames the model has processed and any errors. It can also show an FPS counter while closed.

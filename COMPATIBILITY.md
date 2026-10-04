@@ -16,7 +16,7 @@ WrongGPU is built to work with any DirectX 12 game that offers DLSS Super Resolu
 
 | Game | Status | Tested on |
 | --- | --- | --- |
-| Cyberpunk 2077 | **Validated** | Game version 2.31, Windows 11, Radeon RX 9070 XT, Adrenalin 32.0.31035.1003, DLSS Quality, ray tracing Psycho, frame generation off |
+| Cyberpunk 2077 | **Validated** | Game version 2.31, Windows 11, Radeon RX 9070 XT, Adrenalin 32.0.31035.1003, DLSS Quality, ray tracing Psycho, path tracing off (path tracing is currently broken), frame generation off |
 | Call of Duty titles, Marvel Rivals | Not working | Anti-cheat built into the game. The installer refuses them. |
 | Grand Theft Auto V Enhanced | Not working | BattlEye anti-cheat. The installer refuses it. |
 | Helldivers 2 | Not working | GameGuard anti-cheat. The installer refuses it. |
