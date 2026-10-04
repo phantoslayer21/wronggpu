@@ -11,7 +11,7 @@ Thank you for helping. The mod is validated on Cyberpunk 2077 only. What you rep
 
 ## Install
 
-1. Unzip the download and run `dlss45_amd_setup.exe`.
+1. Unzip the download and run `WrongGPU-Installer.exe`.
 2. Pick the game from the list (the installer finds Steam, Epic and GOG games), or choose the game's `.exe` or folder.
 3. Any game other than Cyberpunk 2077 is **Experimental**: tick the confirmation box to continue. If the installer refuses the game (for example because of anti-cheat), do not try to get around it.
 4. The installer needs an `nvngx_dlss.dll` from DLSS 310.5 or newer. If it cannot find one in your games, click **DLSS DLL...** and choose one.
