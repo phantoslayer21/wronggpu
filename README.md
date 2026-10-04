@@ -4,11 +4,11 @@ Run the DLSS 4.5 Super Resolution model on your AMD RDNA 4 GPU, using its native
 
 ## Download
 
-Get the latest `dlss45_amd_v<version>.zip` from the [Releases page](../../releases/latest), unzip it and run `dlss45_amd_setup.exe`. Every stable release is free for everyone.
+Get the latest `WrongGPU-Installer-v<version>.zip` from the [Releases page](../../releases/latest), unzip it and run `WrongGPU-Installer.exe`. Every stable release is free for everyone.
 
 ## Install
 
-1. Unzip the download and run **dlss45_amd_setup.exe**. Windows may say it protected your PC because the installer is not code-signed yet: click More info, then Run anyway.
+1. Unzip the download and run **WrongGPU-Installer.exe**. Windows may say it protected your PC because the installer is not code-signed yet: click More info, then Run anyway.
 2. Pick your game. The installer lists the DLSS games it finds in Steam, Epic and GOG, or you can choose any game `.exe` or folder. Cyberpunk 2077 is **Validated**. Every other game is **Experimental** and needs you to tick a confirmation box. Games with anti-cheat are refused.
 3. Give it a DLSS file. The installer needs an `nvngx_dlss.dll` from DLSS **310.5 or newer** (the version is under Properties > Details). It searches your installed games first. If none of them is new enough, click **DLSS DLL...** and choose a copy you are licensed to use, for example from another game you own that ships DLSS 310.5 or newer. The installer builds the DLSS 4.5 model files on your PC from that file, in moments. The download itself contains no NVIDIA files. The converted model file (`dlss45-amd.pak` in the game folder) is for your own use on your own PC. Do not share or upload it.
 4. Click Install. The installer backs up every file it replaces.
