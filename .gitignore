@@ -1,0 +1,7 @@
+# Binaries are published through GitHub Releases, never committed.
+*.exe
+*.dll
+*.zip
+*.hsaco
+*.bin
+*.log
