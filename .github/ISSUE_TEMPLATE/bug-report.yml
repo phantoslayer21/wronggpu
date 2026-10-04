@@ -1,0 +1,43 @@
+name: Bug report
+description: Something is broken in Cyberpunk 2077 or in the installer
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For other games, please use the **Game compatibility report** form instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What went wrong?
+      description: What you expected and what happened instead. Say when it happens.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+  - type: input
+    id: system
+    attributes:
+      label: Graphics card, driver, Windows version
+      placeholder: "RX 9070 XT, Adrenalin 32.0.31035.1003, Windows 11 24H2"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Installer / mod version
+      placeholder: "0.2.0"
+    validations:
+      required: true
+  - type: input
+    id: settings
+    attributes:
+      label: Game settings
+      placeholder: "2560x1440, DLSS Quality, RT Psycho, FG off, sharpening 0"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and screenshots
+      description: Drag in the zip from the installer's Collect logs button (or Modify in Installed apps). If the installer itself failed, also attach %LOCALAPPDATA%\DLSS45-AMD\setup.log. Add a screenshot or clip if you can.

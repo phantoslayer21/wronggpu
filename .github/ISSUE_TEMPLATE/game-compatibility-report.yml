@@ -1,0 +1,115 @@
+name: Game compatibility report
+description: Tell us how the mod behaves in a game other than Cyberpunk 2077
+title: "[Game] "
+labels: ["compatibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Only Cyberpunk 2077 is validated. Reports like this one are how other games get validated. Thank you.
+        Single-player games without anti-cheat only, please.
+  - type: input
+    id: game
+    attributes:
+      label: Game name
+      placeholder: "Example: Cyberpunk 2077"
+    validations:
+      required: true
+  - type: input
+    id: game_version
+    attributes:
+      label: Game version or build
+      description: Shown in the game's main menu, or in Steam under Properties > Updates.
+    validations:
+      required: true
+  - type: dropdown
+    id: store
+    attributes:
+      label: Where did you get the game?
+      options: [Steam, GOG, Epic Games Store, Xbox / Microsoft Store, Other]
+    validations:
+      required: true
+  - type: dropdown
+    id: api
+    attributes:
+      label: Graphics API the game used
+      options: [DirectX 12, DirectX 11, Vulkan, Not sure]
+    validations:
+      required: true
+  - type: input
+    id: upscalers
+    attributes:
+      label: Upscaling options the game offers
+      placeholder: "DLSS, FSR 3, XeSS, TAA only"
+    validations:
+      required: true
+  - type: input
+    id: other_mods
+    attributes:
+      label: Other mods or overlays running
+      description: For example OptiScaler, ReShade, Cyber Engine Tweaks, MSI Afterburner. Write "none" if there are none.
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: What happened?
+      options:
+        - Works well
+        - Works, with visual problems
+        - Game crashes or freezes
+        - Black or white screen
+        - No DLSS option in the game menu
+        - DLSS option is there but nothing changes
+        - Installer refused or failed
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: What looked wrong, when it happens, and anything that changed it (shimmer, ghosting, flicker, wrong colors, UI problems, stutter).
+    validations:
+      required: true
+  - type: input
+    id: settings
+    attributes:
+      label: Settings used
+      description: Resolution, DLSS mode, ray tracing, frame generation, sharpening.
+      placeholder: "2560x1440, DLSS Quality, RT off, FG off, sharpening 0"
+    validations:
+      required: true
+  - type: input
+    id: fps
+    attributes:
+      label: FPS without and with the mod (optional)
+      placeholder: "Native 83, with mod 91 (same scene and settings)"
+  - type: input
+    id: system
+    attributes:
+      label: Graphics card, driver, Windows version
+      placeholder: "RX 9070 XT, Adrenalin 32.0.31035.1003, Windows 11 24H2"
+    validations:
+      required: true
+  - type: input
+    id: installer
+    attributes:
+      label: Installer / mod version
+      placeholder: "0.2.0"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and screenshots
+      description: Drag in the dlss45-*.log files from the game's .exe folder, plus screenshots or a clip of any problem. See docs/TESTING-OTHER-GAMES.md.
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirmations
+      options:
+        - label: This is a single-player game without anti-cheat.
+          required: true
+        - label: I understand this game is not validated and I tested at my own risk.
+          required: true
