@@ -1,5 +1,7 @@
 # WrongGPU
 
+> **Public access to WrongGPU is paused until further notice.** Downloads are not available right now. Updates will be posted on the Discord: https://discord.gg/745z9MfKwm
+
 Run the DLSS 4.5 Super Resolution model on your AMD RDNA 4 GPU, using its native FP8 hardware, in DirectX 12 games. Validated on Cyberpunk 2077. Other games are experimental and tested by the community. Join the Discord for support and testing: https://discord.gg/745z9MfKwm
 
 ## Download
