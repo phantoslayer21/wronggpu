@@ -1,34 +1,28 @@
 # Game compatibility
 
-WrongGPU is built to work with any DirectX 12 game that offers DLSS Super Resolution. It has been **validated on Cyberpunk 2077 only**. Every other game is untested until someone reports back. If you try a game, please send the report. It is the only way a game gets validated.
+These notes apply to **WrongGPU 0.3.1**, which runs Model M through the game's **AMD FSR** integration.
 
-## Status levels
+## Tested games
 
-| Status | Meaning |
-| --- | --- |
-| **Validated** | The maintainer tested it on the listed game version against a fixed checklist: it loads, the DLSS 4.5 model runs every frame, a full benchmark pass finishes without a crash, the image is checked against native, and uninstall restores the game folder. |
-| **Community: works** | At least three independent reports with logs show it running correctly. Not yet reproduced by the maintainer. |
-| **Community: issues** | Reports show visual problems or crashes. The reports list what goes wrong. |
-| **Not working** | Confirmed incompatible, with the reason (for example no DirectX 12 path, no DLSS option, or anti-cheat). |
-| **Untested** | No reports yet. This is the default for every game not listed. |
-
-## Games
-
-| Game | Status | Tested on |
+| Game | Current status | Notes |
 | --- | --- | --- |
-| Cyberpunk 2077 | **Validated** | Game version 2.31, Windows 11, Radeon RX 9070 XT, Adrenalin 32.0.31035.1003, DLSS Quality, ray tracing Psycho, path tracing off (path tracing is currently broken), frame generation off |
-| Call of Duty titles, Marvel Rivals | Not working | Anti-cheat built into the game. The installer refuses them. |
-| Grand Theft Auto V Enhanced | Not working | BattlEye anti-cheat. The installer refuses it. |
-| Helldivers 2 | Not working | GameGuard anti-cheat. The installer refuses it. |
-| NBA 2K27 | Not working | Easy Anti-Cheat. The installer refuses it. |
-| Everything else | Untested | [Send a report](../../issues/new?template=game-compatibility-report.yml) |
+| **Cyberpunk 2077** | Tested | Select **AMD FSR 3**. FSR 2.1 and FSR 4 bypass WrongGPU. The game's bundled DLSS 310.1 is too old for conversion; supply a compatible 310.5+ file from another game you own. |
+| **Borderlands 4** | Tested, with a known issue | The HIP startup failure observed during testing was addressed in 0.3.1. Flickering at **4K Performance** remains under investigation. |
+| **Other games** | Experimental | A compatible FSR integration is required. Installer acceptance alone does not establish game compatibility. [Send a report](https://github.com/phantoslayer21/wronggpu/issues/new?template=game-compatibility-report.yml). |
 
-## Is my game a good candidate?
+“Tested” means the mod has run in the game. It does not mean every graphics setting, game version or quality mode has been verified. Path tracing and other unlisted modes have not been validated for 0.3.1.
 
-It needs all of these:
+## Requirements for another game
 
-- It uses DirectX 12. DirectX 11 and Vulkan games are not supported.
-- Its graphics menu offers DLSS Super Resolution on NVIDIA cards.
-- It is single-player. **Do not use this in games with anti-cheat** (Easy Anti-Cheat, BattlEye, Vanguard and similar). The mod replaces DLL files and presents an NVIDIA graphics card to the game, which anti-cheat can treat as tampering and punish with a ban.
+- The game uses **DirectX 12**.
+- It contains compatible **AMD FSR 3 or newer DLLs** that the installer recognizes. An FSR option alone does not guarantee a compatible integration.
+- It runs on supported hardware: **Radeon RX 9070 or RX 9070 XT**, with a working AMD HIP runtime.
+- It has **no anti-cheat**. Do not bypass an installer refusal.
 
-How to test and report: [docs/TESTING-OTHER-GAMES.md](docs/TESTING-OTHER-GAMES.md).
+DirectX 11, Vulkan and FSR 2-only integrations are unsupported. RX 9060-series and older Radeon cards are unsupported in this version.
+
+## Testing and reports
+
+Follow [Testing WrongGPU in other games](docs/TESTING-OTHER-GAMES.md). Check that the overlay confirms **Model M running**; performance measured during startup or AMD comparison mode is not WrongGPU neural performance.
+
+Reports should identify the game build, GPU and driver, WrongGPU version, output resolution and FSR mode. Include logs, visual problems and any matched performance comparison. Community reports help establish compatibility, but no fixed report count automatically makes a game validated.

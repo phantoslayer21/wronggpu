@@ -1,16 +1,17 @@
 name: Bug report
-description: Something is broken in Cyberpunk 2077 or in the installer
+description: Report a WrongGPU, installer or tested-game problem
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        For other games, please use the **Game compatibility report** form instead.
+        For a first report about another game's compatibility, use the **Game compatibility report** form.
+        Please do not attach NVIDIA DLLs or converted model files.
   - type: textarea
     id: what
     attributes:
       label: What went wrong?
-      description: What you expected and what happened instead. Say when it happens.
+      description: What you expected and what happened instead. Include the game and its version, or say if this is an installer problem.
     validations:
       required: true
   - type: textarea
@@ -21,23 +22,23 @@ body:
     id: system
     attributes:
       label: Graphics card, driver, Windows version
-      placeholder: "RX 9070 XT, Adrenalin 32.0.31035.1003, Windows 11 24H2"
+      placeholder: "RX 9070 XT, Adrenalin version, Windows 11 version"
     validations:
       required: true
   - type: input
     id: version
     attributes:
       label: Installer / mod version
-      placeholder: "0.2.0"
+      placeholder: "0.3.1"
     validations:
       required: true
   - type: input
     id: settings
     attributes:
-      label: Game settings
-      placeholder: "2560x1440, DLSS Quality, RT Psycho, FG off, sharpening 0"
+      label: Game settings and model state
+      placeholder: "2560x1440, AMD FSR 3 Quality, Model M running, RT off, FG off"
   - type: textarea
     id: logs
     attributes:
       label: Logs and screenshots
-      description: Drag in the zip from the installer's Collect logs button (or Modify in Installed apps). If the installer itself failed, also attach %LOCALAPPDATA%\DLSS45-AMD\setup.log. Add a screenshot or clip if you can.
+      description: Use Collect logs in the installer, or Modify for your game in Installed apps. If setup failed, attach %LOCALAPPDATA%\WrongGPU\setup.log. Add a screenshot or clip where useful. Review logs before sharing; paths may include your Windows user name.

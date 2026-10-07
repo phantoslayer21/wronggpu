@@ -1,41 +1,49 @@
 # Testing WrongGPU in other games
 
-Thank you for helping. The mod is validated on Cyberpunk 2077 only. What you report decides which games get validated next. Test at your own risk, in single-player games only.
+WrongGPU 0.3.1 has been tested in Cyberpunk 2077 and Borderlands 4. Other games are experimental. This guide helps produce a useful report without confusing AMD fallback with Model M inference.
 
 ## Before you start
 
-- **No anti-cheat.** Skip any game that uses Easy Anti-Cheat, BattlEye, Vanguard or similar, and skip online games in general. You could be banned.
-- The game must use **DirectX 12** and show a **DLSS Super Resolution** option in its graphics menu on NVIDIA cards.
-- Back up your save games. The installer backs up every game file it replaces, but saves are yours to protect.
-- Close the game before you install.
+- Use a **DirectX 12 game with compatible AMD FSR 3 or newer DLLs**. The installer checks the integration.
+- **Do not test in games with anti-cheat**, and do not bypass an installer refusal.
+- Use a supported **RX 9070 or RX 9070 XT** and a working AMD HIP runtime.
+- Close the game and back up your saves. The installer backs up the game files it replaces.
 
 ## Install
 
-1. Unzip the download and run `WrongGPU-Installer.exe`.
-2. Pick the game from the list (the installer finds Steam, Epic and GOG games), or choose the game's `.exe` or folder.
-3. Any game other than Cyberpunk 2077 is **Experimental**: tick the confirmation box to continue. If the installer refuses the game (for example because of anti-cheat), do not try to get around it.
-4. The installer needs an `nvngx_dlss.dll` from DLSS 310.5 or newer. If it cannot find one in your games, click **DLSS DLL...** and choose one.
-5. Click Install. It keeps a backup, so **uninstall** (Settings > Apps > Installed apps) returns the folder to how it was.
+1. Download and extract [WrongGPU 0.3.1](https://github.com/phantoslayer21/wronggpu/releases/tag/v0.3.1).
+2. Run `WrongGPU-Setup-0.3.1.exe` and select the game's executable or folder.
+3. Read the experimental-game prompt. If the installer cannot find a usable model source, click **Model file...** and select an `nvngx_dlss.dll` version 310.5 or newer that you are entitled to use.
+4. Click **Install**.
+5. Start the game and select **AMD FSR 3 or newer**, initially in **Quality** mode. In Cyberpunk 2077, select **AMD FSR 3** specifically.
 
-## Test
+## Check the game
 
-1. Start the game and open its graphics settings.
-2. Turn on DLSS Super Resolution and pick **Quality**. Set the sharpening slider to 0 if the game has one.
-3. Press **Insert** to open the overlay. Check that the model-submission count goes up and the error count stays at 0.
-4. Play for at least 10 minutes in a busy scene. Move the camera, drive, run, change the weather if the game has it.
-5. Note anything that looks wrong: shimmer or flicker, ghosting trails, black or white screen, wrong colors, UI drawn wrong, stutter, crashes.
-6. If you can, measure FPS with DLSS off (native or the game's own upscaler) and with the mod, at the same resolution and settings.
+1. Press **Insert** to show the full panel. Wait for **starting** to finish and confirm **Model M running**.
+2. Play for at least 10 minutes. Include camera motion, thin geometry, foliage, moving objects, particles and scene transitions where available.
+3. Check for flicker, ghosting, wrong colors, UI problems, stutter, crashes or a black screen. Record the scene and settings that trigger a problem.
+4. Press **Home** to compare with the game's AMD FSR upscaler. Return to WrongGPU before recording its results.
+5. Test changes to resolution or quality mode separately, and note whether the model restarts or errors appear.
 
-## What to send
+## Compare performance
 
-Open a [game compatibility report](../../issues/new?template=game-compatibility-report.yml) or post it in https://discord.gg/745z9MfKwm. Please attach:
+Use the same scene, output resolution, FSR mode and graphics settings. Keep frame generation, dynamic resolution, V-sync and frame caps the same between runs, and state whether they are enabled. For a straightforward comparison, disable frame generation and dynamic resolution.
 
-- The zip from **Collect logs** (click it in the installer, or choose **Modify** for the game in Installed apps). It bundles the mod's `dlss45-*` logs, the install record and the installer log, and tells you what is inside. The installer's own log is `%LOCALAPPDATA%\DLSS45-AMD\setup.log`.
-- A screenshot or short clip of any problem.
-- Your graphics card, driver version and Windows version.
+Let the model finish starting and let the scene settle before recording. Measure AMD FSR, then WrongGPU, then AMD FSR again. Report average FPS and 1% lows if your tool provides them, plus the overlay's upscaler time. If the two AMD control runs differ substantially, repeat the comparison before claiming a gain.
 
-The logs contain file paths and technical messages. They do not contain passwords or account data, but read them before you post if you want to be sure.
+Startup fallback and AMD comparison mode are not Model M results. An upscaler's time in milliseconds is not the game's total frame time.
 
-## What happens next
+## Send the report
 
-When at least three independent reports show a game working, it moves to **Community: works**. The maintainer then reproduces it on the listed game version and, if it passes the checklist, marks it **Validated**. Games that crash, show bad artifacts, or have no usable DLSS path are listed as **Community: issues** or **Not working**, with your data as the reason.
+Use [GitHub's game compatibility form](https://github.com/phantoslayer21/wronggpu/issues/new?template=game-compatibility-report.yml) or [Discord](https://discord.gg/745z9MfKwm). Include:
+
+- Game name, store and version/build.
+- WrongGPU version, GPU, AMD driver and Windows version.
+- Output resolution, FSR mode and graphics settings.
+- Whether the overlay confirmed Model M running, and whether it stayed active.
+- Reproduction steps, screenshots or clips, and any matched FPS / 1% low results.
+- The ZIP from **Collect logs** in the installer, or **Modify** for the game in Windows Installed apps.
+
+Collect logs before uninstalling. If setup failed, its log is `%LOCALAPPDATA%\WrongGPU\setup.log`. Review logs before posting: system information and file paths may include your Windows user name. Do not include your DLSS DLL or converted model files.
+
+Use **Settings → Apps → Installed apps → WrongGPU - your game** to uninstall and restore backed-up game files.

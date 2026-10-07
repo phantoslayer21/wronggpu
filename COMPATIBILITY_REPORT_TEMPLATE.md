@@ -1,31 +1,35 @@
-# Compatibility report template (for #compatibility and the README)
+# Game compatibility report
 
-Post one report per game. The more of this you fill in, the faster a game can be validated.
+Copy this template into a Discord report, or use the [GitHub form](https://github.com/phantoslayer21/wronggpu/issues/new?template=game-compatibility-report.yml). Please test only games without anti-cheat.
 
-**Game**
-- Name and store (Steam / Epic / other), and game version or build
-- Anti-cheat present? (yes / no / unknown)
-- What upscaling options does the game offer? (DLSS / FSR / XeSS / none)
+## Game and system
 
-**System**
-- GPU model and AMD driver (Adrenalin) version
-- Windows version
-- Mod version (installer version)
-- Other mods or overlays running (for example OptiScaler, ReShade, Cyber Engine Tweaks, MSI Afterburner)
+- Game, store and game version/build:
+- DirectX 12 and AMD FSR version/options:
+- WrongGPU version:
+- GPU, AMD driver and Windows version:
+- Other mods or overlays:
 
-**Result**
-- Does the game launch with the mod installed? (yes / no)
-- Does it crash? When?
-- Does the image look right? (black screen, ghosting, flicker, wrong colors, shimmer, none)
-- Resolution, quality mode and key settings (for example ray tracing on or off)
-- FPS without the mod and with the mod (average and 1% lows if you have them)
+## Settings
 
-**Evidence**
-- The zip from **Collect logs** (in the installer, or **Modify** for the game in Installed apps)
-- Screenshot or short clip of any problem
+- Output resolution and FSR quality mode:
+- Ray tracing / path tracing:
+- Frame generation, dynamic resolution, V-sync and frame cap:
+- Other relevant settings:
 
-**Maintainer's validation checklist** (what a game needs before it moves to "validated"):
-- At least 3 independent reports with no crash, from more than one GPU and driver
-- No visual corruption in normal play
-- FPS gain shown against the game's native or TAA setting
-- Uninstall restores the original files cleanly
+## Result
+
+- Did installation and game startup succeed?
+- Did the overlay confirm **Model M running** after startup?
+- Did Model M stay active during play? How long was the test?
+- Image or stability problems, with reproduction steps:
+- AMD FSR versus WrongGPU average FPS and 1% lows, if measured at matched settings:
+- Overlay upscaler time in each mode:
+- Did uninstall restore the game files successfully, if tested?
+
+## Evidence
+
+- ZIP from **Collect logs** in the installer, or **Modify** in Windows Installed apps.
+- Screenshots or a clip showing a problem.
+
+Review logs before posting; file paths may include your Windows user name. Do not attach NVIDIA DLLs or converted model files. Results recorded while the panel says **starting**, or while AMD comparison mode is selected, are not Model M performance.
