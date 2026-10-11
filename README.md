@@ -1,77 +1,77 @@
 # WrongGPU
 
-Run **DLSS 4.5 Model M neural upscaling** on **Radeon RX 9070 and RX 9070 XT** through AMD FSR in DirectX 12 games.
+**DLSS 4.5 Model M upscaling on AMD Radeon.**
 
-**[Download 0.3.1 — Experimental](https://github.com/phantoslayer21/wronggpu/releases/tag/v0.3.1)** · [Game compatibility](COMPATIBILITY.md) · [Discord](https://discord.gg/745z9MfKwm)
+WrongGPU adds Model M to OptiScaler's upscaler menu. Pick it the same way you would any other upscaler, and switch back to FSR 4.1.1 through the same menu.
 
-## Get started
+**[Download 0.4.1](https://github.com/phantoslayer21/wronggpu/releases/download/v0.4.1/WrongGPU-0.4.1-Sun-Fix.zip)** · [Release notes](https://github.com/phantoslayer21/wronggpu/releases/tag/v0.4.1) · [Discord](https://discord.gg/745z9MfKwm) · [Report a bug](https://github.com/phantoslayer21/wronggpu/issues/new?template=bug-report.yml)
 
-1. Close the game. Download `WrongGPU-0.3.1.zip` from the release's **Assets** and extract it.
-2. Run `WrongGPU-Setup-0.3.1.exe` and select your game. The installer finds Steam, Epic and GOG games, or you can select the game's executable or folder.
-3. Let the installer find a compatible `nvngx_dlss.dll`. If it cannot, use **Model file...** to select one from another game you own.
-4. Click **Install**. The installer backs up the game files it replaces.
-5. In the game, select **AMD FSR 3 or newer** and a quality mode. Check that the WrongGPU panel shows **Model M running**.
+Still experimental. The focus right now is getting it working in more games and making it easier to use. **This release is Model M only; Preset K isn't included yet.**
 
-Model M starts in the background. While the panel says **starting**, the game uses AMD FSR; neural upscaling takes over when initialization finishes.
+## Before you install
 
-**Cyberpunk 2077:** select **AMD FSR 3**. Its **FSR 2.1** and **FSR 4** options bypass WrongGPU. Its bundled DLSS 310.1 is too old for model conversion, so the installer needs a compatible file from another game.
+- **Windows 10 or 11, 64-bit.**
+- **Radeon RX 9070 or RX 9070 XT.** RX 9060 XT support is included, but needs more testing on actual cards, especially the 8 GB model. Older Radeon cards aren't supported by this release.
+- **AMD Adrenalin drivers and a working HIP runtime.** The installer checks for the runtime.
+- **A DirectX 12 game supported by OptiScaler.** Don't use this in games with anti-cheat.
+- **Your own [OptiScaler download](https://github.com/optiscaler/OptiScaler/releases).** Keep the archive or extracted folder handy.
+- **An `nvngx_dlss.dll` version 310.5 or newer that you are entitled to use.** The installer can look for one in your installed games.
 
-## Requirements
+The model is converted locally on your PC. NVIDIA's DLL and model weights aren't included in the download. Don't upload or redistribute the converted model files.
 
-- **64-bit Windows 10 or 11.**
-- **Radeon RX 9070 or RX 9070 XT.** RX 9060-series and older Radeon cards are not supported by 0.3.1.
-- **AMD Adrenalin drivers and a working AMD HIP runtime.** The installer checks this. If the runtime is unavailable, the Windows HIP SDK may be needed.
-- **A DirectX 12 game with compatible AMD FSR 3 or newer DLLs.** The installer checks the game's integration. DirectX 11, Vulkan and FSR 2-only games are unsupported.
-- **An `nvngx_dlss.dll` version 310.5 or newer that you are entitled to use**, already on your PC.
-- **No anti-cheat.** Do not use WrongGPU in games with anti-cheat.
+## Get it running
 
-The installer converts the model locally from your DLSS file. NVIDIA's DLL and model weights are **not included in the download**. Keep converted model files on your own PC; do not upload or redistribute them.
+1. **Close the game.** Download and extract `WrongGPU-0.4.1-Sun-Fix.zip`.
+2. Run **`WrongGPU-Setup-0.4.1.exe`**. Give it your OptiScaler archive or folder, then select your game.
+3. Let the installer find a compatible model file, or select your own `nvngx_dlss.dll`. Follow the setup prompts and install.
+4. Start the game and select **DLSS or XeSS** in its graphics settings.
+5. Press **Insert** to open OptiScaler, then select **WrongGPU (Model M)** from the upscaler list.
 
-## In-game controls
+That's the default setup now. Switch between Model M and FSR 4.1.1 in **OptiScaler's menu**. Some OptiScaler versions show an older FSR version number in the overlay header even with WrongGPU selected; check the selected provider in the menu.
 
-| Key | Action |
-| --- | --- |
-| **Insert** | Hide or show the overlay. Showing it restores the full panel for 10 seconds. |
-| **Home** | Switch between WrongGPU and the game's AMD FSR upscaler for comparison. |
+Direct FSR installation is still available under the installer's advanced option if you need it.
 
-The panel shows whether Model M is running and the upscaler's cost per frame. Use it to confirm that neural inference is active before measuring performance.
+## What's changed in 0.4.1?
 
-## Compatibility and image quality
+Everything from the unreleased 0.4.0 is included too.
 
-0.3.1 has been tested in **Cyberpunk 2077** and **Borderlands 4**. Other games are experimental, even when the installer accepts them.
+- OptiScaler is now the default, with a clearer installer layout and setup steps.
+- Fixed the black dots and arc around the sun in Cyberpunk 2077.
+- Fixed the reproduced Crimson Desert startup stalls.
+- Added the RX 9060 XT kernels and improved HIP runtime detection.
+- Includes runtime performance work since 0.3.1, compatibility fixes and safer update/uninstall cleanup.
+- Better support logs through the installer's **Collect logs** button.
 
-- **Borderlands 4:** flickering at **4K Performance** is still being investigated.
-- Game updates, different FSR integrations and untested settings can cause compatibility or image-quality problems.
-- Path tracing and other unlisted modes have not been validated for 0.3.1.
+[Full release notes and checksum →](https://github.com/phantoslayer21/wronggpu/releases/tag/v0.4.1)
 
-See the [compatibility page](COMPATIBILITY.md) for game-specific notes. To help test another game, follow the [testing guide](docs/TESTING-OTHER-GAMES.md).
+## How well does it work?
 
-## Performance
+It depends on the game and settings. The Cyberpunk sun fix was checked in fresh game runs, but that doesn't mean every game or rendering mode is sorted.
 
-Model M adds a significant cost per frame. **AMD FSR 4 is faster in the recorded comparisons.** WrongGPU offers another reconstruction option; the result depends on the game, resolution, quality mode, driver and GPU.
+- **Crimson Desert:** the startup fix is included; ground shimmer is still unresolved.
+- **Borderlands 4:** flickering at 4K Performance is still a known issue.
+- **RX 9060 XT:** more feedback is needed, especially from 8 GB cards.
 
-Compare the same scene and settings with **Home**, after Model M has finished starting. Upscaler time in milliseconds is only part of the total frame time. Stage-level improvements in the release notes are not overall FPS gains.
+Model M has a higher cost per frame than AMD FSR 4 in the recorded comparisons. Try both in the same scene through OptiScaler and use whichever looks and runs better for you.
 
-## Troubleshooting and reports
+## Something broken?
 
-Use **Collect logs** in the installer, or **Modify** for your game's WrongGPU entry in Windows Installed apps. Collect logs before uninstalling, since uninstall removes that installation's logs.
+Use **Collect logs** in the installer before uninstalling. It creates a support ZIP locally and doesn't upload anything itself. Check it before sharing; it can include your Windows username and other local file paths.
 
-For a report, include the game and version, WrongGPU version, GPU and driver, resolution and FSR mode, what happened, and a screenshot or clip where useful. Review the log ZIP before sharing it: it includes system information and file paths, which may contain your Windows user name.
+Include your game and version, GPU, driver, resolution, quality mode and what went wrong. A screenshot or clip helps with visual issues.
 
-- [Report a bug](https://github.com/phantoslayer21/wronggpu/issues/new?template=bug-report.yml)
-- [Report game compatibility](https://github.com/phantoslayer21/wronggpu/issues/new?template=game-compatibility-report.yml)
-- [Get help on Discord](https://discord.gg/745z9MfKwm)
+**[Report a bug](https://github.com/phantoslayer21/wronggpu/issues/new?template=bug-report.yml)** · [Report game compatibility](https://github.com/phantoslayer21/wronggpu/issues/new?template=game-compatibility-report.yml) · [Ask in Discord](https://discord.gg/745z9MfKwm)
 
-The setup log is `%LOCALAPPDATA%\WrongGPU\setup.log`. The installer makes no network calls and sends no telemetry.
+## Updating or removing it
 
-## Update or uninstall
+Close the game and run the new installer. Follow its prompts if you already have WrongGPU or another upscaler mod installed.
 
-Close the game before updating. If you have an older WrongGPU installation or another upscaler mod, follow the installer's prompts rather than copying DLLs over it manually.
-
-To uninstall, open **Settings → Apps → Installed apps → WrongGPU - your game**. The uninstaller restores the backed-up game files and removes that installation's settings and logs. Shared model data is retained while another WrongGPU installation needs it.
+To uninstall, go to **Windows Settings → Apps → Installed apps → WrongGPU - your game**. The uninstaller restores the backed-up game files. Shared model data stays while another WrongGPU installation still needs it.
 
 ## Licence
 
-WrongGPU is free for **personal, non-commercial use**. See `LICENSE.txt` in the release for its terms and `wronggpu-notices.txt` for third-party notices. This repository provides downloads, documentation and issue tracking; source code is not published here.
+Free for **personal, non-commercial use** under the `LICENSE.txt` included in the release. See `wronggpu-notices.txt` for third-party notices. OptiScaler is a separate project with its own licence.
 
-WrongGPU is an independent project and is not affiliated with or endorsed by NVIDIA, AMD or any game publisher. Trademarks belong to their respective owners.
+This repository is for downloads, documentation and issue tracking. Source code isn't published here.
+
+WrongGPU is an independent project and isn't affiliated with or endorsed by NVIDIA, AMD or any game publisher. Trademarks belong to their respective owners.
