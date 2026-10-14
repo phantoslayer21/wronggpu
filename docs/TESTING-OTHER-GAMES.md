@@ -1,49 +1,51 @@
 # Testing WrongGPU in other games
 
-WrongGPU 0.3.1 has been tested in Cyberpunk 2077 and Borderlands 4. Other games are experimental. This guide helps produce a useful report without confusing AMD fallback with Model M inference.
+This guide applies to **WrongGPU 0.4.5 through OptiScaler**. See [game compatibility](../COMPATIBILITY.md) for current results. It helps produce a useful report without confusing AMD fallback with Model M inference.
 
 ## Before you start
 
-- Use a **DirectX 12 game with compatible AMD FSR 3 or newer DLLs**. The installer checks the integration.
+- Use a **DirectX 12 game supported by OptiScaler**.
 - **Do not test in games with anti-cheat**, and do not bypass an installer refusal.
-- Use a supported **RX 9070 or RX 9070 XT** and a working AMD HIP runtime.
+- Use an **RX 9070 or RX 9070 XT**, AMD Adrenalin drivers and a working AMD HIP runtime. RX 9060 XT code is included but has not been tested on physical hardware; identify the VRAM capacity when reporting.
 - Close the game and back up your saves. The installer backs up the game files it replaces.
+- Keep your own [OptiScaler download](https://github.com/optiscaler/OptiScaler/releases) ready.
 
 ## Install
 
-1. Download and extract [WrongGPU 0.3.1](https://github.com/phantoslayer21/wronggpu/releases/tag/v0.3.1).
-2. Run `WrongGPU-Setup-0.3.1.exe` and select the game's executable or folder.
-3. Read the experimental-game prompt. If the installer cannot find a usable model source, click **Model file...** and select an `nvngx_dlss.dll` version 310.5 or newer that you are entitled to use.
-4. Click **Install**.
-5. Start the game and select **AMD FSR 3 or newer**, initially in **Quality** mode. In Cyberpunk 2077, select **AMD FSR 3** specifically.
+1. Download and extract [WrongGPU 0.4.5](https://github.com/phantoslayer21/wronggpu/releases/tag/v0.4.5).
+2. Run `WrongGPU-Setup-0.4.5.exe`, supply your OptiScaler archive or folder, and select the game's executable or folder.
+3. If the installer cannot find a usable model source, select an `nvngx_dlss.dll` version 310.5 or newer that you are entitled to use.
+4. Follow the prompts and install. Older direct installations are migrated to OptiScaler; the game's original FSR DLLs are restored.
+5. Start the game and select **DLSS or FSR input**, initially in **Quality** mode. Inputs without depth, such as Hogwarts Legacy's XeSS input, fall back to AMD FSR.
+6. Press **Insert** to open OptiScaler and select **`3.1.5 WrongGPU (Model M)`**.
 
 ## Check the game
 
-1. Press **Insert** to show the full panel. Wait for **starting** to finish and confirm **Model M running**.
+1. Let startup finish. Check the WrongGPU log for successful neural runtime activity and any AMD handoff. OptiScaler's selected menu entry or FPS header alone is insufficient to establish the active provider.
 2. Play for at least 10 minutes. Include camera motion, thin geometry, foliage, moving objects, particles and scene transitions where available.
 3. Check for flicker, ghosting, wrong colors, UI problems, stutter, crashes or a black screen. Record the scene and settings that trigger a problem.
-4. Press **Home** to compare with the game's AMD FSR upscaler. Return to WrongGPU before recording its results.
-5. Test changes to resolution or quality mode separately, and note whether the model restarts or errors appear.
+4. Switch to AMD FSR through **OptiScaler's menu** for a matched visual comparison, then return to WrongGPU before recording Model M results.
+5. Test resolution changes, quality switches, upscaler switches and fresh game starts separately. Note memory growth, model restarts, errors and whether Model M resumes.
 
 ## Compare performance
 
-Use the same scene, output resolution, FSR mode and graphics settings. Keep frame generation, dynamic resolution, V-sync and frame caps the same between runs, and state whether they are enabled. For a straightforward comparison, disable frame generation and dynamic resolution.
+Use the same scene, output resolution, input upscaler, quality mode and graphics settings. Keep frame generation, dynamic resolution, V-sync and frame caps the same between runs, and state whether they are enabled. For a straightforward comparison, disable frame generation and dynamic resolution.
 
-Let the model finish starting and let the scene settle before recording. Measure AMD FSR, then WrongGPU, then AMD FSR again. Report average FPS and 1% lows if your tool provides them, plus the overlay's upscaler time. If the two AMD control runs differ substantially, repeat the comparison before claiming a gain.
+Let the model finish starting and the scene settle before recording. Measure AMD FSR, then WrongGPU, then AMD FSR again. Report average FPS and 1% lows if your tool provides them, plus the upscaler time and its measurement source. If the two AMD controls differ substantially, repeat the comparison before claiming a gain.
 
-Startup fallback and AMD comparison mode are not Model M results. An upscaler's time in milliseconds is not the game's total frame time.
+Startup fallback, AMD comparison mode and plain fallback frames are not Model M results. GPU network time, D3D12/HIP transfer and synchronization time, CPU waits, and total game frame time are different measurements. Don't infer game FPS from an isolated network timing.
 
 ## Send the report
 
 Use [GitHub's game compatibility form](https://github.com/phantoslayer21/wronggpu/issues/new?template=game-compatibility-report.yml) or [Discord](https://discord.gg/745z9MfKwm). Include:
 
 - Game name, store and version/build.
-- WrongGPU version, GPU, AMD driver and Windows version.
-- Output resolution, FSR mode and graphics settings.
-- Whether the overlay confirmed Model M running, and whether it stayed active.
-- Reproduction steps, screenshots or clips, and any matched FPS / 1% low results.
-- The ZIP from **Collect logs** in the installer, or **Modify** for the game in Windows Installed apps.
+- WrongGPU and OptiScaler versions, GPU and VRAM, AMD driver, HIP runtime and Windows version.
+- Output resolution, input upscaler, quality mode and graphics settings.
+- Evidence that Model M ran, whether it stayed active, and any fallback or warning in the log.
+- Reproduction steps, screenshots or clips, and matched FPS / 1% low results.
+- The ZIP from **Collect logs** in the installer.
 
-Collect logs before uninstalling. If setup failed, its log is `%LOCALAPPDATA%\WrongGPU\setup.log`. Review logs before posting: system information and file paths may include your Windows user name. Do not include your DLSS DLL or converted model files.
+Collect logs before uninstalling. If setup failed, its log is `%LOCALAPPDATA%\WrongGPU\setup.log`. Review logs before posting: system information and file paths may include your Windows username. Do not include your DLSS DLL or converted model files.
 
 Use **Settings → Apps → Installed apps → WrongGPU - your game** to uninstall and restore backed-up game files.
