@@ -1,28 +1,44 @@
 # Game compatibility
 
-These notes apply to **WrongGPU 0.3.1**, which runs Model M through the game's **AMD FSR** integration.
+These notes apply to **WrongGPU 0.4.5**, running Model M through **OptiScaler**. Direct replacement of the game's FSR DLLs is no longer supported.
 
 ## Tested games
 
 | Game | Current status | Notes |
 | --- | --- | --- |
-| **Cyberpunk 2077** | Tested | Select **AMD FSR 3**. FSR 2.1 and FSR 4 bypass WrongGPU. The game's bundled DLSS 310.1 is too old for conversion; supply a compatible 310.5+ file from another game you own. |
-| **Borderlands 4** | Tested, with a known issue | The HIP startup failure observed during testing was addressed in 0.3.1. Flickering at **4K Performance** remains under investigation. |
-| **Other games** | Experimental | A compatible FSR integration is required. Installer acceptance alone does not establish game compatibility. [Send a report](https://github.com/phantoslayer21/wronggpu/issues/new?template=game-compatibility-report.yml). |
+| **Cyberpunk 2077** | Validated | Model M ran with the final 0.4.5 installer on an RX 9070 XT through OptiScaler 0.9.5.4. Supply an eligible DLSS 310.5+ model source if the game's bundled file is older. |
+| **Hogwarts Legacy** | Experimental; final installer tested | Model M ran on an RX 9070 XT. Use DLSS or FSR input; XeSS input lacks the depth WrongGPU needs and falls back to AMD FSR. Repeated quality switches were used to verify the main memory-leak fix. |
+| **Borderlands 4** | Experimental; final installer tested | Model M ran after updating an older direct installation to OptiScaler. This does not establish every quality mode or resolve every earlier visual report. |
+| **The Witcher 3 Remastered** | Experimental; final installer tested | Model M ran after the command-list fix. Longer gameplay testing of dynamic-resolution spikes is still pending. |
+| **Control** | Experimental; earlier 0.4.5 test build | Model M ran in an earlier test build; the final release has not received equivalent validation. This result does not cover Control Resonant. |
+| **Crimson Desert** | Experimental; earlier 0.4.5 test build | Model M ran in an earlier test build; final-release stability and image quality across settings are not fully validated. |
+| **Ratchet & Clank: Rift Apart** | Experimental; earlier 0.4.5 test build | Model M ran in an earlier test build; the final release has not received equivalent validation. |
+| **007 First Light** | Unsupported | Startup crash with WrongGPU as OptiScaler's FSR library, including AMD-forwarding mode. OptiScaler's own built-in FSR ran in the control. |
+| **Other games** | Experimental / unverified | OptiScaler support and installer acceptance alone do not establish WrongGPU compatibility. [Send a report](https://github.com/phantoslayer21/wronggpu/issues/new?template=game-compatibility-report.yml). |
 
-“Tested” means the mod has run in the game. It does not mean every graphics setting, game version or quality mode has been verified. Path tracing and other unlisted modes have not been validated for 0.3.1.
+A successful run does not establish every game build, graphics setting, quality mode or frame-generation configuration. Results from earlier test builds are identified separately from the final installer.
 
 ## Requirements for another game
 
-- The game uses **DirectX 12**.
-- It contains compatible **AMD FSR 3 or newer DLLs** that the installer recognizes. An FSR option alone does not guarantee a compatible integration.
-- It runs on supported hardware: **Radeon RX 9070 or RX 9070 XT**, with a working AMD HIP runtime.
-- It has **no anti-cheat**. Do not bypass an installer refusal.
+- A **DirectX 12 game supported by OptiScaler**, with inputs that provide the color, depth and motion information WrongGPU needs.
+- Your own OptiScaler archive, folder or DLL. The installer sets up WrongGPU as its FSR library.
+- **Radeon RX 9070 or RX 9070 XT**, AMD Adrenalin drivers and a working AMD HIP runtime.
+- An eligible local **`nvngx_dlss.dll` 310.5 or newer** for conversion.
+- **No anti-cheat.** Do not bypass an installer refusal.
 
-DirectX 11, Vulkan and FSR 2-only integrations are unsupported. RX 9060-series and older Radeon cards are unsupported in this version.
+RX 9060 XT code is included, but physical hardware qualification is pending, especially for the 8 GB model. Older Radeon cards, DirectX 11 and Vulkan are unsupported in this release.
+
+## Known limits
+
+- OptiScaler's FPS header may display an FSR version even with WrongGPU selected. The menu entry is `3.1.5 WrongGPU (Model M)`; check the WrongGPU log to confirm actual neural activity.
+- Inputs without depth can silently fall back to AMD FSR. Use DLSS or FSR input; the log records the handoff.
+- A handful of plain upscaled frames can occur when new AMD-driver command lists are first encountered, mostly at startup.
+- A rarely used memory-sharing fallback still retains memory across upscaler restarts. The log warns when it is used.
+- The three-second warm pool temporarily retains about 0.8 GB of VRAM.
+- Preset K is not included. Sparkle guard remains experimental and off by default.
 
 ## Testing and reports
 
-Follow [Testing WrongGPU in other games](docs/TESTING-OTHER-GAMES.md). Check that the overlay confirms **Model M running**; performance measured during startup or AMD comparison mode is not WrongGPU neural performance.
+Follow [Testing WrongGPU in other games](docs/TESTING-OTHER-GAMES.md). AMD fallback, AMD comparison mode and plain diagnostic frames are not Model M inference.
 
-Reports should identify the game build, GPU and driver, WrongGPU version, output resolution and FSR mode. Include logs, visual problems and any matched performance comparison. Community reports help establish compatibility, but no fixed report count automatically makes a game validated.
+Identify the game build, GPU and driver, WrongGPU and OptiScaler versions, output resolution, input upscaler and quality mode. Include the support ZIP, reproduction steps, visual problems and matched performance comparisons. Community reports help establish compatibility, but no fixed report count automatically makes a game validated.
