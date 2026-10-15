@@ -70,6 +70,10 @@ Close the game and run the new installer. Follow its prompts if you already have
 
 To uninstall, go to **Windows Settings → Apps → Installed apps → WrongGPU - your game**. The uninstaller restores the backed-up game files. Shared model data stays while another WrongGPU installation still needs it.
 
+## Support WrongGPU
+
+WrongGPU is free to download and use. If you'd like to support development, you can [leave an optional tip on Ko-fi](https://ko-fi.com/wronggpu). Donations are never required to download or use the mod.
+
 ## Licence
 
 Free for **personal, non-commercial use** under the `LICENSE.txt` included in the release. See `wronggpu-notices.txt` for third-party notices. OptiScaler is a separate project with its own licence.
