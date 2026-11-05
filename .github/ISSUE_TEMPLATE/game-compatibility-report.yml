@@ -1,12 +1,12 @@
 name: Game compatibility report
-description: Report how WrongGPU behaves through a game's AMD FSR integration
+description: Report how WrongGPU behaves in a game
 title: "[Game] "
 labels: ["compatibility"]
 body:
   - type: markdown
     attributes:
       value: |
-        WrongGPU 0.3.1 has been tested in Cyberpunk 2077 and Borderlands 4. Other games are experimental.
+        WrongGPU 0.6.0's tested games are listed in COMPATIBILITY.md. Other games are experimental.
         Use only games without anti-cheat. Do not attach NVIDIA DLLs or converted model files.
   - type: input
     id: game
@@ -59,17 +59,17 @@ body:
         - Works, with visual problems
         - Game crashes or freezes
         - Black or white screen
-        - No compatible AMD FSR option
-        - AMD FSR works but Model M does not become active
-        - Installer refused or failed
+        - No DLSS or other upscaler option
+        - WrongGPU does not become active (the overlay or Last run shows something else)
+        - Launcher refused or failed
         - Other
     validations:
       required: true
   - type: input
     id: model_state
     attributes:
-      label: Model M state and test duration
-      description: Did the overlay confirm Model M running after startup? Did it stay active, and for how long?
+      label: WrongGPU state and test duration
+      description: Did the FPS overlay show DLSS → WrongGPU Model M (or WrongGPU RR), and what did Last run show? Did it stay active, and for how long?
     validations:
       required: true
   - type: textarea
@@ -83,8 +83,8 @@ body:
     id: settings
     attributes:
       label: Settings used
-      description: Output resolution, AMD FSR mode, ray tracing, frame generation, dynamic resolution and sharpening.
-      placeholder: "2560x1440, AMD FSR 3 Quality, RT off, FG off, dynamic resolution off"
+      description: Output resolution, upscaler and quality mode, Ray Reconstruction on or off and its mode, ray tracing, frame generation, dynamic resolution and sharpening.
+      placeholder: "2560x1440, DLSS Quality, RR Fast, path tracing on, FG off, dynamic resolution off"
     validations:
       required: true
   - type: input
@@ -102,21 +102,21 @@ body:
   - type: input
     id: installer
     attributes:
-      label: Installer / mod version
-      placeholder: "0.3.1"
+      label: WrongGPU version
+      placeholder: "0.6.0"
     validations:
       required: true
   - type: textarea
     id: logs
     attributes:
       label: Logs and screenshots
-      description: Attach the ZIP from Collect logs in the installer, or Modify in Installed apps, plus screenshots or a clip of any problem. Review logs before sharing; paths may include your Windows user name. See docs/TESTING-OTHER-GAMES.md.
+      description: Attach the ZIP from Collect logs on the game's page in the launcher, plus screenshots or a clip of any problem. Review logs before sharing; paths may include your Windows user name. See docs/TESTING-OTHER-GAMES.md.
   - type: checkboxes
     id: confirm
     attributes:
       label: Confirmations
       options:
-        - label: This game has no anti-cheat, and I did not bypass an installer refusal.
+        - label: This game has no anti-cheat, and I did not bypass a launcher refusal.
           required: true
         - label: I understand compatibility is experimental and tested at my own risk.
           required: true

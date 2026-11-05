@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a WrongGPU, installer or tested-game problem
+description: Report a WrongGPU, launcher or tested-game problem
 labels: ["bug"]
 body:
   - type: markdown
@@ -11,7 +11,7 @@ body:
     id: what
     attributes:
       label: What went wrong?
-      description: What you expected and what happened instead. Include the game and its version, or say if this is an installer problem.
+      description: What you expected and what happened instead. Include the game and its version, or say if this is a launcher problem.
     validations:
       required: true
   - type: textarea
@@ -28,17 +28,17 @@ body:
   - type: input
     id: version
     attributes:
-      label: Installer / mod version
-      placeholder: "0.3.1"
+      label: WrongGPU version
+      placeholder: "0.6.0"
     validations:
       required: true
   - type: input
     id: settings
     attributes:
       label: Game settings and model state
-      placeholder: "2560x1440, AMD FSR 3 Quality, Model M running, RT off, FG off"
+      placeholder: "2560x1440, DLSS Quality, Ray Reconstruction Fast, path tracing on, FG off"
   - type: textarea
     id: logs
     attributes:
       label: Logs and screenshots
-      description: Use Collect logs in the installer, or Modify for your game in Installed apps. If setup failed, attach %LOCALAPPDATA%\WrongGPU\setup.log. Add a screenshot or clip where useful. Review logs before sharing; paths may include your Windows user name.
+      description: Use Collect logs on the game's page in the launcher. If the launcher itself failed, attach %LOCALAPPDATA%\WrongGPU\launcher.log. Add a screenshot or clip where useful. Review logs before sharing; paths may include your Windows user name.
