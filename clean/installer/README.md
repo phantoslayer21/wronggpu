@@ -178,7 +178,7 @@ With the defaults nothing of this section changes the installer.
   architecture from HIP's device properties and creates a context on a supported one: `gfx1201` (RX 9070 family);
   `gfx1200` (RX 9060 family) is reported as not supported yet (one line, `kSupportedArch`, when the owner decides).
   Search order: System32 (installed by the AMD Software: Adrenalin Edition driver), the PATH folders, the newest
-  `C:\Program Files\AMD\ROCm\<version>\bin`, `HIP_PATH`; `WRONGGPU_HIP_RUNTIME` overrides it (development). The child
+  `C:\Program Files\AMD\ROCm\<version>\bin`, `HIP_PATH`; `WRONGGPU_HIP_RUNTIME` overrides it in a `WRONGGPU_TESTING` build only (development; since 0.6.1). The child
   runs without `LLVM_PATH`. On failure the player is pointed to AMD's driver page
   (https://www.amd.com/en/support/download/drivers.html), the HIP SDK only as a second option. No SDK is needed.
 - **Model file (bring your own).** Candidates in this order: a file the player picks (`Model file...` / `/MODEL=`),
