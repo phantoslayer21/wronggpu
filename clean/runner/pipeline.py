@@ -54,6 +54,20 @@ from clean.runner.synthetic_model import read_raw  # noqa: E402
 DEFAULT_MAP = os.path.join(_ROOT, "data", "preset-M.v1.map.json")
 MODEL_FORMATS = {"auto": 0, "raw": 1, "wgcm": 2}
 SWIN_ORDER = ["enc1", "enc2", "b0", "b1", "b2", "b3", "b4", "b5", "dec2", "dec1"]
+# Model-keyed (#89): the Swin stage order per model (Model M: SWIN_ORDER); a model adds its row next to its stage
+# table (clean/reference/swin.py MODEL_STAGES).
+MODEL_SWIN_ORDER = {"M": SWIN_ORDER}
+
+
+def swin_order(model="M"):
+    """The Swin stages of `model` in frame order (Model M: SWIN_ORDER)."""
+    try:
+        return MODEL_SWIN_ORDER[model]
+    except KeyError:
+        known = ", ".join(sorted(MODEL_SWIN_ORDER))
+        raise ValueError(f"no Swin stage order for model {model!r}; known: {known}") from None
+
+
 SWIN_CHANNELS = {"enc1": (64, 96), "enc2": (96, 128), "dec2": (96, None), "dec1": (64, None)}
 
 

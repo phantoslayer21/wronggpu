@@ -24,11 +24,33 @@ STAGES = {
 }
 
 
-def window_offset(stage, parity):
-    """(ox, oy) from the table in spec 02 "Window partition"."""
-    if stage in ("b1", "b3", "b5", "dec2", "dec1"):
-        return (0, 0) if parity == 0 else (2, 0)
-    return (2, 2) if parity == 0 else (0, 2)
+# Model-keyed tables (#89): every function below takes `model` (default "M"); a model with a Swin stage table of its own
+# adds its rows here. STAGES stays Model M's table (the same object as MODEL_STAGES["M"]).
+MODEL_STAGES = {"M": STAGES}
+
+# The window offsets of spec 02 "Window partition" per model: (ox, oy) at parity 0 and parity 1 for the stages listed,
+# and the model's default pair for every other stage (also for a name the model does not have, as before).
+_M_SHIFTED = {s: ((0, 0), (2, 0)) for s in ("b1", "b3", "b5", "dec2", "dec1")}
+WINDOW_OFFSETS = {"M": {"stages": _M_SHIFTED, "default": ((2, 2), (0, 2))}}
+
+
+def _model_row(table, model, what):
+    try:
+        return table[model]
+    except KeyError:
+        raise ValueError(f"no {what} for model {model!r}; known: {', '.join(sorted(table))}") from None
+
+
+def stage_table(model="M"):
+    """The Swin stage table of `model` (Model M: STAGES)."""
+    return _model_row(MODEL_STAGES, model, "reference stage table")
+
+
+def window_offset(stage, parity, model="M"):
+    """(ox, oy) from the table in spec 02 "Window partition" (per model, WINDOW_OFFSETS)."""
+    row = _model_row(WINDOW_OFFSETS, model, "window offset table")
+    pair = row["stages"].get(stage, row["default"])
+    return pair[0] if parity == 0 else pair[1]
 
 
 def mirror(p, n):
@@ -200,9 +222,9 @@ def expand(y, skip, We, be):
     return x + skip
 
 
-def run_stage(stage, p, x, offset, skip=None, round_attn_f16=True, gelu="exact"):
+def run_stage(stage, p, x, offset, skip=None, round_attn_f16=True, gelu="exact", model="M"):
     """Reference for one stage with the inputs/outputs of spec/90-test-interface.md (float32 FP8-exact arrays)."""
-    cfg = STAGES[stage]
+    cfg = stage_table(model)[stage]
     if cfg["kind"] == "dec":
         xin = expand(x, skip, p["We"], p["be"])
     else:
@@ -214,9 +236,9 @@ def run_stage(stage, p, x, offset, skip=None, round_attn_f16=True, gelu="exact")
     return {"out": out.astype(np.float32)}
 
 
-def random_params(stage, rng, weight_scale=1.0):
+def random_params(stage, rng, weight_scale=1.0, model="M"):
     """Synthetic parameters with the shapes of spec/90 (matrices FP8-exact). Never model data."""
-    cfg = STAGES[stage]
+    cfg = stage_table(model)[stage]
     C, heads, mlp = cfg["C"], cfg["heads"], cfg["mlp"]
     D = heads * HEAD_DIM
 
@@ -245,9 +267,9 @@ def random_params(stage, rng, weight_scale=1.0):
     return p
 
 
-def random_inputs(stage, H, W, rng, scale=1.0):
+def random_inputs(stage, H, W, rng, scale=1.0, model="M"):
     """Synthetic FP8-exact inputs for a stage at stage resolution H x W: returns (x, skip)."""
-    cfg = STAGES[stage]
+    cfg = stage_table(model)[stage]
     C = cfg["C"]
     if cfg["kind"] == "dec":
         x = q8(rng.standard_normal((H // 2, W // 2, cfg["C_low"])) * scale).astype(np.float32)
