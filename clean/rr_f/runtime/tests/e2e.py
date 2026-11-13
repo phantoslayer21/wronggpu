@@ -230,7 +230,11 @@ def write_frame(path, c):
 
 
 # ------------------------------------------------------------------------------------------------- GPU run
-def run_gpu(out, stage, runs, perf_frames, name="e2e", leak=6, head=None, body="Z", inp="exact", front=True, mips=1):
+TAGLOOP_LIMIT_MIB = 256   # issue #8: 200 frames grew video memory by about 2.6 GiB before the fix, about 60 MiB after
+
+
+def run_gpu(out, stage, runs, perf_frames, name="e2e", leak=6, head=None, body="Z", inp="exact", front=True, mips=1,
+            tagloop=200):
     """runs: [(scenario name, calls)]; every scenario twice (WG_RR_ALIAS=0 and aliased)."""
     work = os.path.join(out, name)
     if os.path.exists(work):
@@ -250,6 +254,9 @@ def run_gpu(out, stage, runs, perf_frames, name="e2e", leak=6, head=None, body="
         job.append("env WG_RR_TAILPREP 0")
     if mips > 1:                               # 0.6.0 follow-up: the game's inputs with mips (mip 0 is read): the checks
         job.append(f"env WG_RR_TEST_MIPS {mips}")  # below then prove the same bits as with one mip
+    if tagloop:                                # issue #8: inputs copied and released every frame before any instance
+        job += [f"outdir {os.path.join(work, 'tagloop')}",  # exists; video memory may grow by at most TAGLOOP_LIMIT_MIB
+                f"tagloop {tagloop} 1706 960 {TAGLOOP_LIMIT_MIB}"]
     for sname, calls in runs:
         sc = SCEN[sname]
         for alias in (0, 1):
@@ -815,6 +822,8 @@ def main(argv=None):
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--perf", type=int, default=600)
     ap.add_argument("--leak", type=int, default=6)
+    ap.add_argument("--tagloop", type=int, default=200, help="issue #8: frames of inputs copied and released with no "
+                    "instance, before the scenarios (0: skip)")
     ap.add_argument("--body", default="Z", help="WG_RR_BODY for the GPU run (default Z: exact body + exact front-end MLP, "
                     "checked bit-exact; 'default': the runtime's default step E, which the exact body check flags)")
     ap.add_argument("--head", default="exact", help="WG_RR_HEAD for the GPU run (exact / fast / strict; default exact: since "
@@ -842,7 +851,8 @@ def main(argv=None):
     work = os.path.join(a.out, name)
     if not a.skip_gpu:
         work = run_gpu(a.out, stage, runs, a.perf, name, a.leak, None if a.head == "default" else a.head,
-                       None if a.body == "default" else a.body, None if a.input == "default" else a.input, mips=a.mips)
+                       None if a.body == "default" else a.body, None if a.input == "default" else a.input, mips=a.mips,
+                       tagloop=a.tagloop)
     rows, life, inv, al = [], [], [], []
     jobs = []
     metas = {}
@@ -875,6 +885,9 @@ def main(argv=None):
     p = os.path.join(work, f"run{runs[-1][0]}1", "leak.json")
     if os.path.exists(p):
         report["leak"] = json.load(open(p))
+    p = os.path.join(work, "tagloop", "tagloop.json")
+    if os.path.exists(p):
+        report["tagloop"] = json.load(open(p))
     p = os.path.join(work, f"run{runs[-1][0]}1", "perf.json")
     if os.path.exists(p):
         report["perf"] = [json.loads(l) for l in open(p) if l.strip()]
@@ -896,6 +909,10 @@ def main(argv=None):
     lines.append(f"| lifecycle (par / fc / reset / rebuild / failed call) | {sum(x['ok'] for x in life)} / {len(life)} |")
     lines.append(f"| failed call leaves state unchanged | {sum(x['state_unchanged'] for x in inv)} / {len(inv)} |")
     lines.append(f"| aliased run = unaliased run (outputs, state) | {sum(x['ok'] for x in al)} / {len(al)} |")
+    if "tagloop" in report:
+        t = report["tagloop"]
+        lines.append(f"| inputs released with no instance: video memory growth (limit {t['limit_mib']:.0f} MiB) | "
+                     f"{t['growth_mib']:.1f} MiB over {t['frames']} frames |")
     with open(os.path.join(work, "report.md"), "w") as fh:
         fh.write("\n".join(lines) + "\n")
     print("\n".join(lines))
