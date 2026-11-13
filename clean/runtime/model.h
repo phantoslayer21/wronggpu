@@ -68,4 +68,30 @@ const SwinStageInfo* swin_stage_info(const std::string& stage);
 
 DRow drow_gfx12();
 
+// Building blocks of the packers above, for the packers of other models of the same family (Model L,
+// clean/l/runtime; #89): the same code that packs Model M's blobs (ports of clean/runner/packing.py).
+namespace pack {
+
+using Order = std::vector<int>;  // R or K order of a matrix; -1 = padding (a zero)
+
+// Fragments of the row-major matrix m [rows][cols]: [mt][kc], each 256 bytes; lane 16 h + r, byte j holds
+// m[R[16 mt + r]][K[16 kc + 8 h + j]] as FP8 E4M3 (packing.frag_array).
+std::vector<std::vector<uint8_t>> frags(const float* m, int rows, int cols, const Order& R, const Order& K);
+void put_frags(std::vector<uint8_t>* b, const std::vector<std::vector<uint8_t>>& f);  // appended in order
+// Tile-ordered float32 vector: packed[16 mt + 8 h + v] = vec[R[16 mt + drow[h][v]]] (packing.pack_tile_vector)
+void put_tile_vector(std::vector<uint8_t>* b, const float* vec, const Order& R, const DRow& drow);
+Order rows_identity(int n);
+Order rows_layout_l(int C, const DRow& drow);  // R_L(C)
+Order kord_layout_l(int C);                    // K_L(C)
+Order kord_drow(int n, const DRow& drow);
+size_t align_up(size_t n);                     // to 256 bytes (packing.ALIGN)
+
+// One Swin block section at any width (packing.pack_block + the padding to 256 bytes of pack_stage), from the tensors
+// of `t` whose names start with `prefix` ("" for a stage of its own; e.g. "blk." for a block inside a stage).
+// False (and *err) when a tensor is missing or has the wrong number of values.
+bool pack_swin_block(const StageTensors& t, const std::string& prefix, int C, int heads, int mlp, const DRow& drow,
+                     std::vector<uint8_t>* out, std::string* err);
+
+}  // namespace pack
+
 }  // namespace wgrt
