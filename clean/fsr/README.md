@@ -72,6 +72,10 @@ cmake --build build/fsr --config Release
 ctest --test-dir build/fsr -C Release --output-on-failure
 ```
 
+A release build adds `-DWG_VERSION=x.y.z` (since 0.6.1): the release script's one version for the front end and
+`WrongGPU.asi` (their logs and version resources; `src/version.h`). Without it the default in `src/version.h` is used;
+version strings are never edited by hand for a release.
+
 Linux, MinGW-w64 cross build (`apt install g++-mingw-w64-x86-64-posix cmake`):
 
 ```
