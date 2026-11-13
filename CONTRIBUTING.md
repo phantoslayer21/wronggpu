@@ -22,7 +22,8 @@ a good first task is [building from a fresh clone](https://github.com/phantoslay
    - **Review** by someone who did not write the change.
    - **A GPU test on real hardware** (a Radeon RX 9000-series card) when the change touches kernels, the runtime,
      the front end or the Ray Reconstruction plugin.
-4. The project owner merges. Releases are built, tested on real hardware and published by the owner.
+4. The project owner merges. Releases are built, tested on real hardware and published by the owner (see
+   [RELEASING.md](RELEASING.md)).
 
 ## The clean-room statement
 
