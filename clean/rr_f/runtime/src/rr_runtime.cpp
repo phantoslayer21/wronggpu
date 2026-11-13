@@ -3542,6 +3542,12 @@ void release_transient_locked(void* copy) {
   ID3D12Resource* r = *it;
   rt.transient.erase(it);
   defer_release(r, rt.serial);
+  // issue #8: create, evaluate and destroy run pump() too, but a game that tags its inputs every frame while no
+  // instance exists (RR available, switched off) calls none of them, and the released copies were never freed.
+  // pump() frees only resources whose frame marker the GPU has written (the same test as at evaluate), takes no lock
+  // of its own and calls nothing back. The caller, a_release_transient, holds rt.mu, as every other user of the deferred
+  // list does.
+  pump();
 }
 
 // ---------------------------------------------------------------------------------------------------- the adapter

@@ -30,6 +30,9 @@
 //   retag <input file> <role>        bug hunt B: <role> copied as a lifetime-0 input and released again before any
 //                                    evaluate (the game re-tags it): the copy must stay until the list that recorded it
 //                                    has run (a deferred release), and be gone after it (exit 9 otherwise)
+//   tagloop <frames> <w> <h> [<limit MiB>]   issue #8: a lifetime-0 RGBA16F input copied and released every frame with
+//                                    no instance and no evaluate (RR available, switched off); video memory may grow
+//                                    by at most <limit MiB> (exit 12 otherwise)
 //   destroy
 //   leak <cycles> <input file>       create / 2 frames / destroy per cycle; live counters and video memory
 //   perfcap <passes> <file> ...       game-setup timing: the frames resident, evaluated <passes> times without waits
@@ -1008,6 +1011,56 @@ int main(int argc, char** argv) {
       for (ID3D12Resource* u : h.uploads) u->Release();
       h.uploads.clear();
       if (!ok) return 9;
+    } else if (cmd == "tagloop") {
+      // issue #8: a game that tags its RR inputs every frame while no RR instance exists (RR available, switched off).
+      // Each frame one lifetime-0 input is copied (retain_transient_state, as the plugin's tag handler does), the
+      // previous copy is released (the input tagged again), and the frame's list runs. No instance, no evaluate, no
+      // test drain or counters (both run the runtime's pump): only the adapter calls a game makes. Video memory is
+      // measured with QueryVideoMemoryInfo (CurrentUsage); the run stops early at +3 GiB.
+      int frames = 0;
+      uint32_t tw = 0, th = 0;
+      double limit_mib = 0;
+      s >> frames >> tw >> th >> limit_mib;
+      if (frames <= 0 || !tw || !th) {
+        fprintf(stderr, "usage: tagloop <frames> <width> <height> [<limit MiB>]\n");
+        return 7;
+      }
+      Tex t = make_tex(tw, th, DXGI_FORMAT_R16G16B16A16_FLOAT, false, D3D12_RESOURCE_STATE_COMMON);
+      const uint64_t v0 = vram(), cap = 3ull << 30;
+      uint64_t peak = v0;
+      void* prev = nullptr;
+      int ran = 0;
+      for (int i = 0; i < frames; ++i) {
+        void* copy = nullptr;
+        if (g_rt->retain_transient_state(g_rt->ctx, g_l, t.r, (uint32_t)t.f, (uint32_t)t.state, &copy) != WG_OK || !copy) {
+          fprintf(stderr, "retain_transient_state failed at frame %d\n", i);
+          return 8;
+        }
+        if (prev) g_rt->release_transient(g_rt->ctx, prev);   // the input tagged again: the previous copy goes
+        prev = copy;
+        submit_wait();                                        // the game's frame runs
+        ++ran;
+        const uint64_t v = vram();
+        peak = std::max(peak, v);
+        if (v > v0 + cap) break;
+      }
+      const uint64_t v1 = vram();
+      if (prev) g_rt->release_transient(g_rt->ctx, prev);
+      t.r->Release();
+      const double grow = ((double)v1 - (double)v0) / 1048576.0, peak_grow = ((double)peak - (double)v0) / 1048576.0;
+      const bool ok = limit_mib <= 0 || grow <= limit_mib;
+      FILE* fo = fopen((h.outdir + "\\tagloop.json").c_str(), "wb");
+      if (fo) {
+        fprintf(fo, "{\"frames\":%d,\"width\":%u,\"height\":%u,\"vram_before\":%llu,\"vram_after\":%llu,\"vram_peak\":%llu,"
+                    "\"growth_mib\":%.1f,\"limit_mib\":%.1f}\n", ran, tw, th, (unsigned long long)v0,
+                (unsigned long long)v1, (unsigned long long)peak, grow, limit_mib);
+        fclose(fo);
+      }
+      printf("tagloop: %d frames of a %ux%u RGBA16F lifetime-0 input, no instance: video memory %llu -> %llu bytes "
+             "(%+.1f MiB, peak %+.1f MiB; limit %.0f MiB): %s\n", ran, tw, th, (unsigned long long)v0,
+             (unsigned long long)v1, grow, peak_grow, limit_mib,
+             ok ? "ok" : "FAIL (released copies are not freed without an evaluate)");
+      if (!ok) return 12;
     } else if (cmd == "destroy") {
       destroy(h);
     } else if (cmd == "leak") {
