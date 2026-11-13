@@ -1,0 +1,122 @@
+name: Game compatibility report
+description: Report how WrongGPU behaves in a game
+title: "[Game] "
+labels: ["game-compatibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        WrongGPU 0.6.0's tested games are listed in COMPATIBILITY.md. Other games are experimental.
+        Use only games without anti-cheat. Do not attach DLSS files or converted model files.
+  - type: input
+    id: game
+    attributes:
+      label: Game name
+      placeholder: "Example: Borderlands 4"
+    validations:
+      required: true
+  - type: input
+    id: game_version
+    attributes:
+      label: Game version or build
+      description: Shown in the game's menu or its store's update information.
+    validations:
+      required: true
+  - type: dropdown
+    id: store
+    attributes:
+      label: Where did you get the game?
+      options: [Steam, GOG, Epic Games Store, Xbox / Microsoft Store, Other]
+    validations:
+      required: true
+  - type: dropdown
+    id: api
+    attributes:
+      label: Graphics API the game used
+      options: [DirectX 12, DirectX 11, Vulkan, Not sure]
+    validations:
+      required: true
+  - type: input
+    id: upscalers
+    attributes:
+      label: Upscaling options the game offers
+      placeholder: "AMD FSR 3, AMD FSR 4, DLSS, XeSS"
+    validations:
+      required: true
+  - type: input
+    id: other_mods
+    attributes:
+      label: Other mods or overlays running
+      description: For example OptiScaler, ReShade, Cyber Engine Tweaks or MSI Afterburner. Write "none" if there are none.
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: What happened?
+      options:
+        - Works well
+        - Works, with visual problems
+        - Game crashes or freezes
+        - Black or white screen
+        - No DLSS or other upscaler option
+        - WrongGPU does not become active (the overlay or Last run shows something else)
+        - Launcher refused or failed
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: model_state
+    attributes:
+      label: WrongGPU state and test duration
+      description: Did the FPS overlay show DLSS → WrongGPU Model M (or WrongGPU RR), and what did Last run show? Did it stay active, and for how long?
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: What looked wrong, when it happens and anything that changed it. Include reproduction steps and any flicker, ghosting, wrong colors, UI problems or stutter.
+    validations:
+      required: true
+  - type: input
+    id: settings
+    attributes:
+      label: Settings used
+      description: Output resolution, upscaler and quality mode, Ray Reconstruction on or off and its mode, ray tracing, frame generation, dynamic resolution and sharpening.
+      placeholder: "2560x1440, DLSS Quality, RR Fast, path tracing on, FG off, dynamic resolution off"
+    validations:
+      required: true
+  - type: input
+    id: fps
+    attributes:
+      label: Matched performance comparison (optional)
+      placeholder: "AMD FSR: average / 1% low; WrongGPU: average / 1% low; overlay ms in each mode"
+  - type: input
+    id: system
+    attributes:
+      label: Graphics card, driver, Windows version
+      placeholder: "RX 9070 XT, Adrenalin version, Windows 11 version"
+    validations:
+      required: true
+  - type: input
+    id: installer
+    attributes:
+      label: WrongGPU version
+      placeholder: "0.6.0"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and screenshots
+      description: Attach the ZIP from Collect logs on the game's page in the launcher, plus screenshots or a clip of any problem. Review logs before sharing; paths may include your Windows user name. See docs/TESTING-OTHER-GAMES.md.
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirmations
+      options:
+        - label: This game has no anti-cheat, and I did not bypass a launcher refusal.
+          required: true
+        - label: I understand compatibility is experimental and tested at my own risk.
+          required: true
