@@ -66,8 +66,9 @@ struct LoadedMap {
     std::unique_ptr<Map> map;
 };
 
-// Parses and validates a map (no DLL is read). On failure the result carries code 20 or 21.
-Result load_map_bytes(const std::string& bytes, LoadedMap& out, const LogSink& log);
+// Parses and validates a map (no DLL is read). On failure the result carries code 20 or 21. `expected_preset`: the
+// preset the caller loads the map for ("" : the map's own field, or its version's preset; map.h load_map).
+Result load_map_bytes(const std::string& bytes, LoadedMap& out, const LogSink& log, const std::string& expected_preset = "");
 
 // One converted file, held in memory (nothing is written).
 struct Converted {

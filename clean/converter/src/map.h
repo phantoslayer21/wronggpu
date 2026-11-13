@@ -241,6 +241,7 @@ struct Map {
     // The preset, by name ("M", "K", "F"): the map's "preset" field, or preset_for_version(version) without one.
     // load_map checks it is a known preset that allows the map's version.
     std::string preset_name;
+    bool preset_named = false;  // the map has the field "preset" (else the name came from the version, or the caller)
     std::vector<Source> sources;  // in file order
     std::vector<Array> arrays;    // what tensors index
     int key_source = -1;
@@ -275,6 +276,11 @@ struct MapError {
 
 // Parses and fully validates a map, including every index range (source lengths are part of the map).
 bool load_map(const std::string& file_bytes, Map& out, MapError& err);
+// The same, for a caller that knows which preset it loads the map for (`expected_preset`, e.g. "L"; "" : as above). A map
+// without the field "preset" then gets that preset, when it allows the map's version; a map with the field must name
+// the same preset. Anything else (an unknown name, a version the preset does not use, another name): damaged. This is
+// how a map written before maps named their preset (the delivered preset-L map has no field) is read as its preset.
+bool load_map(const std::string& file_bytes, Map& out, MapError& err, const std::string& expected_preset);
 
 // Hex helpers shared with the tests: optional 0x prefix, then 1..max_digits hex digits.
 bool parse_hex_u64(const std::string& s, int max_digits, std::uint64_t& out);

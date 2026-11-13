@@ -29,6 +29,8 @@ from synth import keyed_sha256, shipped_like_case  # noqa: E402
 
 DEFAULT_MAP = os.path.normpath(os.path.join(HERE, "..", "..", "..", "data", "preset-M.v1.map.json"))
 DEFAULT_KMAP = os.path.normpath(os.path.join(HERE, "..", "..", "..", "data", "preset-K.v1.map.json"))
+DEFAULT_LMAP = os.path.normpath(os.path.join(HERE, "..", "..", "..", "data", "preset-L.v1.map.json"))
+MSG_NO_PRESET_L = "This DLSS file has no preset-L model."  # the message's start (its minimum version: api.cpp)
 DEFAULT_T5 = os.path.normpath(os.path.join(HERE, "..", "..", "..", "data", "k48-capped-softmax-test.json"))
 DEFAULT_T7 = os.path.normpath(os.path.join(HERE, "..", "..", "..", "data", "lz4-block-test.json"))
 DTYPE_CODE = {"float32": 0, "uint8": 1, "int32": 2}
@@ -265,6 +267,47 @@ def test_shipped_map_validates(r, shipped_map):
     code, so, se = r.run(shipped_map, [big], out)
     r.check("real map: valid, W absent -> no preset-M", code == EXIT["no_preset_m"] and MSG["no_preset_m"] in so, so + se)
     r.check("real map: nothing written", not os.path.exists(os.path.join(out, "model.wgcm")))
+
+
+def test_l_real_map(r, lmap):
+    """Model L (#89): the delivered preset-L map (data/preset-L.v1.map.json; map version 1, W, D, K; no "preset" field,
+    so it is loaded with --preset L). It validates; our own random file gives preset L's message (and, without
+    --preset, preset M's, as for any version-1 map); a mismatching --preset is refused; and its exact layout converts
+    our own random data at two placements, every tensor of every stage checked against the reference."""
+    import random
+    with open(lmap, "rb") as f:
+        m = json.load(f)
+    r.check("preset-L map: version 1, sources W, D and K, no \"preset\" field",
+            m["version"] == 1 and sorted(m["sources"]) == ["D", "K", "W"] and "preset" not in m, (m["version"], sorted(m["sources"])))
+    rng = random.Random(29)
+    lw = m["sources"]["W"]["length"]
+    out = r.path("l-real/out", "x")[:-2]
+    big = r.write("l-real/nomodel.dll", rng.randbytes(lw + 100_000))
+    code, so, se = r.run(lmap, [big], out, extra=("--preset", "L"))
+    r.check("preset-L map --preset L: valid, W absent -> exit 12, preset L's message", code == EXIT["no_preset_m"] and MSG_NO_PRESET_L in so, so + se[-400:])
+    r.check("...the log names the preset", "preset L" in se, se[-400:])
+    code, so, se = r.run(lmap, [big], out)
+    r.check("preset-L map without --preset: read as version 1 (preset M's message)", code == EXIT["no_preset_m"] and MSG["no_preset_m"] in so, so)
+    for asked in ("K", "F"):
+        code, so, se = r.run(lmap, [big], out, extra=("--preset", asked))
+        r.check("preset-L map --preset %s: converter data damaged" % asked, code == EXIT["map_damaged"] and MSG["map_damaged"] in so, so)
+    code, so, se = r.run(lmap, [big], out, extra=("--preset", "Q"))
+    r.check("--preset Q (unknown): usage error", code == EXIT["usage"] and "unknown preset" in so, so)
+    r.check("preset-L map: nothing written", not os.path.exists(os.path.join(out, "model.wgcm")))
+    for seed, w_off in ((21, 4096), (22, 4096 + 6)):
+        t0 = time.time()
+        case = shipped_like_case(lmap, seed=seed, w_offset=w_off)
+        label = "preset-L layout(seed %d, W at %d)" % (seed, w_off)
+        dll = r.write("l-real/%d/fake.dll" % seed, case.file)
+        mp = r.write("l-real/%d/map.json" % seed, case.map)
+        o = r.path("l-real/%d/out" % seed, "x")[:-2]
+        code, so, se = r.run(mp, [dll], o, extra=("--preset", "L"))
+        r.check(label + ": exit 0", code == 0 and SUCCESS in so, so + se[-600:])
+        with open(mp, "rb") as f:
+            check_output(r, label, case, o, f.read())
+        r.check(label + ": offsets", logged_offsets(se) == case.placements, "%s vs %s" % (logged_offsets(se), case.placements))
+        r.check(label + ": every stage digest matches", ("all %d stage digests match" % len(case.map["stages"])) in se, se[-400:])
+        print("%s: %.1f s" % (label, time.time() - t0))
 
 
 def test_preset_l(r):
@@ -1087,6 +1130,7 @@ def main():
     ap.add_argument("--work", default=os.path.join(HERE, "..", "build", "test-work"))
     ap.add_argument("--map", default=DEFAULT_MAP, help="the shipped map (only its layout is used)")
     ap.add_argument("--kmap", default=DEFAULT_KMAP, help="the shipped preset-K map (only its layout is used)")
+    ap.add_argument("--lmap", default=DEFAULT_LMAP, help="the shipped preset-L map (only its layout is used)")
     ap.add_argument("--t5", default=DEFAULT_T5, help="spec 48-T5 capped_softmax vectors")
     ap.add_argument("--t7", default=DEFAULT_T7, help="spec 08-T7 block decompression vectors")
     ap.add_argument("--quick", action="store_true", help="skip the large cases")
@@ -1113,6 +1157,10 @@ def main():
             test_k_shipped_like(r, args.kmap)
     else:
         print("note: preset-K map not found at %s; skipping its layout tests" % args.kmap)
+    if os.path.exists(args.lmap):
+        test_l_real_map(r, args.lmap)
+    else:
+        print("note: preset-L map not found at %s; skipping its layout tests" % args.lmap)
     if os.path.exists(args.t5):
         test_k_t5(r, args.t5)
         if not args.quick:

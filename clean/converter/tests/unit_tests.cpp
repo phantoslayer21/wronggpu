@@ -626,6 +626,23 @@ static void test_api_files(const fs::path& work) {
               lm1.map->preset() == 'L' && lm1.map->preset_info() == find_preset("L"));
         CHECK(load_map_bytes(with_preset(u.map_v4, "4", "\"L\""), lm4, sink).code == kOk && lm4.map && lm4.map->preset_name == "L" &&
               lm4.map->stages.size() == m4.map->stages.size());
+        // the caller's preset (load_map_bytes expected_preset; wronggpu-convert --preset): a map without the field is read
+        // as that preset when it allows the version; a map with the field must agree
+        {
+            LoadedMap h1, h2, h3, h4;
+            CHECK(load_map_bytes(u.map_v1, h1, sink, "L").code == kOk && h1.map && h1.map->preset_name == "L" && !h1.map->preset_named &&
+                  h1.map->preset_info() == find_preset("L"));
+            CHECK(load_map_bytes(u.map_v4, h2, sink, "M").code == kOk && h2.map && h2.map->preset_name == "M");
+            CHECK(load_map_bytes(with_preset(u.map_v1, "1", "\"L\""), h3, sink, "L").code == kOk && h3.map && h3.map->preset_named);
+            CHECK(load_map_bytes(u.map_v1, h4, sink, "").code == kOk && h4.map && h4.map->preset_name == "M");
+            for (const char* asked : {"K", "F", "X", "l"}) {
+                LoadedMap hb;
+                CHECK(load_map_bytes(u.map_v1, hb, sink, asked).code == kMapDamaged && !hb.map);
+            }
+            LoadedMap hm;
+            CHECK(load_map_bytes(with_preset(u.map_v1, "1", "\"M\""), hm, sink, "L").code == kMapDamaged && !hm.map);
+            CHECK(logged("the map names preset M, preset L was asked for") && logged("preset \"X\" asked for is not known"));
+        }
         for (const char* bad : {"\"K\"", "\"F\"", "\"X\"", "\"m\"", "\"l\"", "\"\"", "7", "null"}) {
             LoadedMap bm;
             const Result r = load_map_bytes(with_preset(u.map_v1, "1", bad), bm, sink);

@@ -200,17 +200,18 @@ Result convert_rest_v5(const Map& map, const std::vector<std::uint8_t>& data, co
 
 }  // namespace
 
-Result load_map_bytes(const std::string& bytes, LoadedMap& out, const LogSink& log) {
+Result load_map_bytes(const std::string& bytes, LoadedMap& out, const LogSink& log, const std::string& expected_preset) {
     out.map = std::make_unique<Map>();
     MapError me;
-    if (!load_map(bytes, *out.map, me)) {
+    if (!load_map(bytes, *out.map, me, expected_preset)) {
         emit(log, "map: " + me.detail);
         out.map.reset();
         const bool range = me.kind == MapErrorKind::IndexRange;
         return fail(range ? kMapDoesNotFit : kMapDamaged, range ? kMsgMapDoesNotFit : kMsgMapDamaged);
     }
     emit(log, "map sha256 " + to_hex(out.map->file_sha256) + ", " + std::to_string(out.map->stages.size()) +
-                  " stages, model: " + out.map->model);
+                  " stages, model: " + out.map->model +
+                  (expected_preset.empty() ? std::string() : ", preset " + out.map->preset_name));
     return Result{};
 }
 

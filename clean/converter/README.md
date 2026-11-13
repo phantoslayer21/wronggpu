@@ -31,10 +31,16 @@ data damaged". This is how a further preset that reuses an existing map version 
 
 **Preset L** (Model L, issue #89) is such a row: `"preset": "L"` in a map of version 1 or 4. Its maps use the record
 kinds of preset M's (no new element format, op or source kind); its parameters are a block of their own in the same
-library file as preset M's, found by its own length and hashes like any source. The map file itself
-(`data/preset-L.v1.map.json`) comes with the converter data; until it exists, `tests/run_tests.py` covers preset L with a
-synthetic library file holding an L block directly before an M block, and maps for both: each converts its own block,
-and a file without a preset's block fails with that preset's message. It also converts an **L-shaped** map
+library file as preset M's, found by its own length and hashes like any source. Its map,
+`data/preset-L.v1.map.json` (map version 1; sources W, D and K), has no `"preset"` field, so the caller names the
+preset: `wronggpu-convert --map data\preset-L.v1.map.json --preset L --dll <nvngx_dlss.dll> --out <dir>` (API:
+`load_map_bytes(..., "L")`). `--preset` reads a map without the field as that preset when the preset uses the map's
+version; a map with the field must name the same preset; anything else is "converter data damaged", and an unknown
+`--preset` is a usage error (exit 1). Without `--preset` the preset-L map reads as a version-1 map (preset M's message).
+`tests/run_tests.py` checks the real map (validation, the messages, `--preset` mismatches) and converts our own random
+data in its exact layout at two placements. It also covers preset L with a synthetic library file holding an L block
+directly before an M block, and maps for both: each converts its own block, and a file without a preset's block fails
+with that preset's message. It also converts an **L-shaped** map
 (`tests/cases.py` `l_shaped_map`): preset M's map layout with the input encoder's output linear 64 x 128, and two new
 stages of L's record kinds (two linears and a C = 32 Swin block before `enc0`, a C = 32 Swin block before `dec0`),
 filled with our own random data. Its stage names and placement are stand-ins; the real map defines its own. A map of
