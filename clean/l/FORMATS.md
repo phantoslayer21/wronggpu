@@ -13,6 +13,10 @@ map at F/2 has `ntok = (fh / 2) * (fw / 2)` tokens in raster order. Blobs: `clea
 | `l_ops.co` | `clean/l/kernels/l_ops.hip` (`-I clean/kernels`) | `l_linear_80_32`, `l_linear_32_32`, `l_project_80_32`, `l_copy_channels` |
 | `l_swin.co` | `clean/l/kernels/l_swin.hip` (`-I clean/kernels`) | `l_swin_block_c32`, `l_swin_block_c32_nc`, `l_swin_block_c64` (check only) |
 
+The runtime loads `l_enc_values.co` under the tag `lev` (its kernel is launched as `lev/input_encoder`, next to Model
+M's own `input_encoder`); `l_ops.co` and `l_swin.co` are untagged. These are also the names the D3D12 ports will
+declare.
+
 All are built with `clean/runner/build.py`'s `device_command` (gfx1201). The build's `-cuid` comes from the output file
 name, so compare code objects only between outputs of the same name.
 
