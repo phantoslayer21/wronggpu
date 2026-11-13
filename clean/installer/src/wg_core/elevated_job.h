@@ -1,16 +1,21 @@
 // SPDX-License-Identifier: MIT
-// The elevated worker's side of "WrongGPU.exe apply": it runs only the job and batch files of the launcher's own request.
+// The launcher's elevated step ("WrongGPU.exe apply"): the launcher's side (RunElevatedJobs) and the worker's (RunWorker).
 //
-// The launcher writes the job files (launcher.h JobText) and, for several jobs, a batch file listing each job file with
-// its SHA-256 (BatchText), and passes the SHA-256 of the file it names on the elevation command line:
-//     apply --batch=<folder>\batch-<stamp>.txt --sha256=<hex>
-//     apply --job=<folder>\job-<name>.txt --sha256=<hex>
-// The worker reads each file once into memory, checks its SHA-256 and parses those same bytes. It works out every result
-// path itself, in the real folder of the file it was given: result-<stamp>-<n>.txt for the n-th job of a batch,
-// result-<name>.txt for a single job. That folder must not be a reparse point; it is held open (no delete sharing) while
-// the worker runs, and each result is written to a new temporary file there and then moved over the result name, never
-// through an existing link. A job's log= must be a file under the job's localappdata folder or under <data>\logs (the
-// folder next to the jobs folder), checked the same way and held open while the job runs.
+// The launcher writes one job file per operation (launcher.h JobText) and a batch file listing each job file with its
+// SHA-256 (BatchText) into its jobs folder, creates a reply pipe with a random name that only this account and
+// administrators can open (ReplyChannel), and starts the worker with runas:
+//     WrongGPU.exe apply --batch=<folder>\batch-<stamp>.txt --sha256=<hex> --pipe=\\.\pipe\WrongGPU-reply-<hex>
+// The worker
+//   - runs nothing without the reply pipe;
+//   - reads the batch file and every job file once into memory, checks each SHA-256 against the command line and the batch
+//     and parses those same bytes;
+//   - checks every job before the first one runs: every path absolute, and the OptiScaler package of an install, update or
+//     repair copied into a new folder only administrators can write, the copy's digest the job's (package_snapshot.h); the
+//     install uses that copy. A batch with one job that fails these checks runs no job at all;
+//   - writes no log or result file: its log lines and each job's result go back over the pipe, and the launcher writes the
+//     lines to its own log.
+// The launcher takes the reply only from the worker process it started (the pipe client's process id and start time) and
+// only from this run: a job without a result on the pipe did not report.
 #pragma once
 
 #include <functional>
@@ -19,27 +24,76 @@
 
 namespace wg {
 
-// One parsed job, as the worker runs it.
+// ---- both sides ---------------------------------------------------------------------------------------------------
+// A process as the launcher recognises the worker: its id and start time.
+struct ProcessIdentity {
+    DWORD pid = 0;
+    unsigned long long started = 0;
+    bool operator==(const ProcessIdentity& o) const { return pid && pid == o.pid && started == o.started; }
+};
+ProcessIdentity IdentityOf(HANDLE process);
+
+// The pipe name the launcher makes: \\.\pipe\WrongGPU-reply-<32 lower-case hex digits>; the worker opens nothing else.
+bool IsReplyPipeName(const wstring& name);
+
+// ---- the launcher's side ------------------------------------------------------------------------------------------
+// What the worker sent over the pipe in this run.
+struct WorkerReply {
+    bool connected = false;       // the worker connected
+    bool complete = false;        // its last record arrived
+    bool refused = false;         // it refused the request before running any job (refusal says why)
+    OpResult refusal;
+    std::vector<std::pair<bool, OpResult>> results;  // per job, in order: received, the result
+    std::vector<wstring> log;     // its log lines
+};
+
+// The reply pipe: made before the permission prompt (Create), read while the worker runs, finished after it exited.
+class ReplyChannel {
+public:
+    ReplyChannel();
+    ~ReplyChannel();
+    ReplyChannel(const ReplyChannel&) = delete;
+    ReplyChannel& operator=(const ReplyChannel&) = delete;
+    bool Create(wstring& why);
+    const wstring& Name() const;
+    // The reply of `worker` (nothing when it is the empty identity: the worker was not started) for `jobs` jobs.
+    WorkerReply Finish(const ProcessIdentity& worker, size_t jobs);
+private:
+    struct Impl;
+    Impl* impl_;
+};
+
+// Starts the worker with these arguments and waits until it exits; false: it was not started (permission not given).
+// `worker`: the process started; `exitCode`: its exit code.
+using StartWorkerFn = std::function<bool(const wstring& args, DWORD& exitCode, ProcessIdentity& worker)>;
+using LogFn = std::function<void(const wstring&)>;
+
+// The launcher's elevated step for these job texts (JobText), in order, in one worker run (one permission prompt). stop:
+// none runs after the first failure (kOpNotRun). A result per job; a job the worker did not report on gets a failure that
+// says so. The job and batch files are written to `jobsDir` and deleted afterwards; the worker's log lines go to `log`.
+std::vector<OpResult> RunElevatedJobs(const std::vector<string>& jobTexts, const wstring& jobsDir, bool stop, const StartWorkerFn& start, const LogFn& log);
+
+extern const wchar_t* const kElevationNotGranted;
+
+// ---- the worker's side --------------------------------------------------------------------------------------------
+// One checked job, as the worker runs it.
 struct WorkerJob {
     OpRequest r;
-    wstring localAppData, logFile, userSid, documents;
+    wstring localAppData, userSid, documents;
     int perGameEntry = -1;
 };
 // Runs one job's operation (the launcher: environment, registry hive, RunOp). The tests pass their own.
 using WorkerRunFn = std::function<OpResult(const WorkerJob&)>;
 
+struct WorkerArgs { wstring batch, sha256, pipe; };
 struct WorkerRun {
-    OpResult last;     // the batch's result: the last failure, or OK; for a single job, its result
-    int jobs = 0, ran = 0;  // ran: the jobs taken up, refused or run (not the ones stop=1 skipped)
-    bool refused = false;  // nothing was run and no result was written (the file given could not be verified)
+    OpResult last;          // the last failure, or OK; the refusal when refused
+    int jobs = 0, ran = 0;  // ran: the jobs run (not the ones stop=1 skipped)
+    bool refused = false;   // no job was run
 };
 
-// "apply --batch=<batch> --sha256=<hex>" (batch not empty) or "apply --job=<job> --sha256=<hex>".
-WorkerRun RunWorkerFiles(const wstring& batch, const wstring& job, const wstring& sha256, const WorkerRunFn& run);
-
-// The result file of the n-th (1-based) job of a batch, and of a single job, next to the file named on the command line
-// (the launcher reads its results from these names; empty when the name is not batch-<stamp>.txt / job-<name>.txt).
-wstring BatchResultPath(const wstring& batch, size_t n);
-wstring JobResultPath(const wstring& job);
+// "apply --batch=<file> --sha256=<hex> --pipe=<name>". ctx: its log lines go over the pipe while it runs, and its
+// temporary files under the worker's private folder (made in privateParent; empty: the Windows folder's Temp).
+WorkerRun RunWorker(const WorkerArgs& a, Context& ctx, const WorkerRunFn& run, const wstring& privateParent = L"");
 
 }  // namespace wg

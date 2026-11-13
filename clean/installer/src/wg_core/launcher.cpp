@@ -1142,12 +1142,18 @@ OpResult RunOp(Context& ctx, const OpRequest& r, Ui& ui) {
 }
 
 // ---- job file ------------------------------------------------------------------------------------------------------
-string JobText(const OpRequest& r, const wstring& localAppData, const wstring& logFile, const wstring& userSid, int perGameEntry, const wstring& documents) {
-    string t = "; WrongGPU launcher job (run by: WrongGPU.exe apply --job=<this file> --sha256=<its SHA-256>)\r\n";
+bool IsAbsolutePath(const wstring& p) {
+    if (p.size() > 2 && iswalpha(p[0]) && p[1] == L':' && (p[2] == L'\\' || p[2] == L'/')) return true;
+    // \\server\share\..., not the \\?\ and \\.\ device forms
+    return p.size() > 4 && p[0] == L'\\' && p[1] == L'\\' && p[2] != L'?' && p[2] != L'.' && p[2] != L'\\' && p.find(L'\\', 3) != wstring::npos;
+}
+string JobText(const OpRequest& r, const wstring& localAppData, const wstring& userSid, int perGameEntry, const wstring& documents) {
+    string t = "; WrongGPU launcher job (listed with its SHA-256 in the batch of: WrongGPU.exe apply --batch=<file>)\r\n";
     if (!userSid.empty()) t += "usersid=" + ToUtf8(userSid) + "\r\n";
     if (perGameEntry >= 0) t += string("perentry=") + (perGameEntry ? "1" : "0") + "\r\n";
     t += "op=" + ToUtf8(OpName(r.op)) + "\r\nexe=" + ToUtf8(r.exe) + "\r\ndir=" + ToUtf8(r.dir) + "\r\nopti=" + ToUtf8(r.optiPackage) +
-         "\r\nmodel=" + ToUtf8(r.modelDll) + "\r\nlocalappdata=" + ToUtf8(localAppData) + "\r\nlog=" + ToUtf8(logFile) + "\r\n";
+         "\r\nmodel=" + ToUtf8(r.modelDll) + "\r\nlocalappdata=" + ToUtf8(localAppData) + "\r\n";
+    if (!r.optiDigest.empty()) t += "optisha256=" + ToUtf8(r.optiDigest) + "\r\n";
     if (!documents.empty()) t += "documents=" + ToUtf8(documents) + "\r\n";
     t += string("movemods=") + (r.moveMods ? "1" : "0") + "\r\nremoveold=" + (r.removeOld ? "1" : "0") + "\r\nexperimental=" + (r.experimental ? "1" : "0") +
          "\r\nforce=" + (r.force ? "1" : "0") + "\r\nnoscan=" + (r.noScan ? "1" : "0") + "\r\n";
@@ -1161,7 +1167,7 @@ string JobText(const OpRequest& r, const wstring& localAppData, const wstring& l
     if (!r.rrConfigSet.empty()) t += "rrconfigset=" + r.rrConfigSet + "\r\n";
     return t;
 }
-bool ParseJob(const string& text, OpRequest& r, wstring& localAppData, wstring& logFile, wstring* why, wstring* userSid, int* perGameEntry, wstring* documents) {
+bool ParseJob(const string& text, OpRequest& r, wstring& localAppData, wstring* why, wstring* userSid, int* perGameEntry, wstring* documents) {
     wstring docs;
     bool haveOp = false;
     r = OpRequest();
@@ -1176,7 +1182,7 @@ bool ParseJob(const string& text, OpRequest& r, wstring& localAppData, wstring& 
         else if (k == "model") r.modelDll = v;
         else if (k == "localappdata") localAppData = v;
         else if (k == "documents") docs = v;
-        else if (k == "log") logFile = v;
+        else if (k == "optisha256") r.optiDigest = v;
         else if (k == "usersid") { if (userSid) *userSid = v; }
         else if (k == "perentry") { if (perGameEntry) *perGameEntry = Truthy(kv.second) ? 1 : 0; }
         else if (k == "movemods") r.moveMods = Truthy(kv.second);
@@ -1196,9 +1202,10 @@ bool ParseJob(const string& text, OpRequest& r, wstring& localAppData, wstring& 
         }
     }
     if (!haveOp) { if (why) *why = L"the job names no operation"; return false; }
-    // explicit absolute paths only: the worker never guesses from its own (possibly another account's) environment
-    for (const wstring* p : {&r.exe, &r.dir, &localAppData, &docs})
-        if (!p->empty() && !(p->size() > 2 && (*p)[1] == L':' && ((*p)[2] == L'\\' || (*p)[2] == L'/')) && p->rfind(L"\\\\", 0) != 0) {
+    // explicit absolute paths only (a drive path or \\server\share): the worker never guesses from its own (possibly another
+    // account's) environment or current folder
+    for (const wstring* p : {&r.exe, &r.dir, &r.optiPackage, &r.modelDll, &localAppData, &docs})
+        if (!p->empty() && !IsAbsolutePath(*p)) {
             if (why) *why = L"not an absolute path: " + *p;
             return false;
         }

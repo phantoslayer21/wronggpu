@@ -6,7 +6,9 @@
 // it), the log-tail parser on synthetic logs, the job and result files, the update reply, the game environment, Ray
 // Reconstruction (its settings, the RR settings file round trip, which games use it, the RR log).
 // Written for this project. Run by ctest ("launcher-core").
+#include <algorithm>
 #include <cstdio>
+#include <functional>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -19,14 +21,13 @@
 #include "wg_core/logs.h"
 #include "wg_core/logtail.h"
 #include "wg_core/optiedition.h"
+#include "wg_core/package_snapshot.h"
 #include "wg_core/pe.h"
 #include "wg_core/profile.h"
 #include "wg_core/record.h"
 #include "wg_core/rr.h"
 #include "wg_core/rrconfig.h"
 #include "wg_core/settings.h"
-
-#include <winioctl.h>  // FSCTL_SET_REPARSE_POINT (folder set-up of the elevated-step tests)
 
 using namespace wg;
 
@@ -36,6 +37,7 @@ void require(bool ok, const char* what) {
     if (!ok) throw std::runtime_error(what);
     ++checks;
 }
+void require(bool ok, const string& what) { require(ok, what.c_str()); }
 wstring TempFolder() {
     wchar_t tmp[MAX_PATH] = {};
     GetTempPathW(MAX_PATH, tmp);
@@ -46,141 +48,196 @@ wstring TempFolder() {
 }
 string OptionsOf(const string& ini) { string v, s; IniGetFrontEnd(ini, "runtime_options", &v, &s); return v; }
 
-// ---- the elevated step's job files (elevated_job.h), in this process, without elevation ---------------------------------
+// ---- the elevated step (elevated_job.h): the launcher's side and the worker, in this process, without elevation ----------
 void Put(const wstring& path, const string& text) { WriteFileAtomic(path, text.data(), text.size()); }
 string Get(const wstring& path) { string s; ReadAll(path, s); return s; }
 wstring Hash(const string& text) { return Sha256Bytes(text.data(), text.size()); }
-
-// A mount point folder `link` -> `target` (test set-up for the folder checks).
-bool MakeJunction(const wstring& link, const wstring& target) {
-    if (!CreateDirectoryW(link.c_str(), nullptr)) return false;
-    HANDLE h = CreateFileW(link.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return false;
-    const wstring sub = L"\\??\\" + target, print = target;
-    const USHORT subBytes = (USHORT)(sub.size() * 2), printBytes = (USHORT)(print.size() * 2);
-    std::vector<BYTE> buf(8 + 8 + subBytes + 2 + printBytes + 2, 0);
-    auto put16 = [&](size_t at, USHORT v) { memcpy(&buf[at], &v, 2); };
-    const DWORD tag = IO_REPARSE_TAG_MOUNT_POINT;
-    memcpy(&buf[0], &tag, 4);
-    put16(4, (USHORT)(buf.size() - 8));                       // ReparseDataLength
-    put16(8, 0); put16(10, subBytes);                         // SubstituteNameOffset, SubstituteNameLength
-    put16(12, (USHORT)(subBytes + 2)); put16(14, printBytes); // PrintNameOffset, PrintNameLength
-    memcpy(&buf[16], sub.data(), subBytes);
-    memcpy(&buf[16 + subBytes + 2], print.data(), printBytes);
-    DWORD got = 0;
-    const BOOL ok = DeviceIoControl(h, FSCTL_SET_REPARSE_POINT, buf.data(), (DWORD)buf.size(), nullptr, 0, &got, nullptr);
-    CloseHandle(h);
-    return ok != FALSE;
+size_t Entries(const wstring& dir) { return ListFiles(dir, L"*").size() + ListDirs(dir).size(); }
+// One argument of the worker's command line (--batch="..." is quoted; the others end at a space).
+wstring ArgOf(const wstring& args, const wstring& key) {
+    size_t p = args.find(key);
+    if (p == wstring::npos) return L"";
+    p += key.size();
+    const size_t e = args.find_first_of(L"\" ", p);
+    return args.substr(p, e == wstring::npos ? wstring::npos : e - p);
 }
 
 void ElevatedJobTests(const wstring& base) {
-    const wstring root = base + L"-elevated", data = Join(root, L"data"), jobs = Join(data, L"jobs"), logs = Join(data, L"logs");
-    const wstring lad = Join(root, L"lad"), other = Join(root, L"other"), otherFile = Join(other, L"other.txt");
+    const wstring root = base + L"-elevated", jobs = Join(root, L"jobs"), priv = Join(root, L"private"), pkg = Join(root, L"package");
+    const wstring lad = Join(root, L"lad");
     RemoveTree(root);
-    for (auto& d : {jobs, logs, Join(Join(lad, L"WrongGPU"), L"logs"), other}) EnsureDir(d);
-    Put(otherFile, "keep");
+    for (auto& d : {jobs, priv, Join(pkg, L"sub"), lad}) EnsureDir(d);
+    Put(Join(pkg, L"OptiScaler.dll"), "dll bytes");
+    Put(Join(pkg, L"OptiScaler.ini"), "[Libraries]\r\nFfxDx12SRPath=auto\r\n");
+    Put(Join(Join(pkg, L"sub"), L"extra.txt"), "extra");
+    const wstring archive = Join(root, L"Opti.7z");
+    Put(archive, "archive bytes");
+
+    Context ctx;
     int runs = 0;
     std::vector<WorkerJob> seen;
-    const WorkerRunFn run = [&](const WorkerJob& w) { ++runs; seen.push_back(w); OpResult r; r.message = L"ran"; return r; };
-    OpRequest req; req.op = Op::Apply; req.dir = L"C:\\Games\\X";
-    auto jobText = [&](const wstring& log) { return JobText(req, lad, log); };
-    const wstring okLog = Join(logs, L"elevated-1.log");
-    auto resultOf = [](const wstring& p) { OpResult r; return std::make_pair(ParseResult(Get(p), r), r); };
+    std::vector<string> copied;  // the package copy's OptiScaler.ini, as the run saw it
+    const WorkerRunFn run = [&](const WorkerJob& w) {
+        ++runs; seen.push_back(w);
+        if (!w.r.optiPackage.empty()) copied.push_back(IsDir(w.r.optiPackage) ? Get(Join(w.r.optiPackage, L"OptiScaler.ini")) : Get(w.r.optiPackage));
+        LogLine(ctx, L"job ran");
+        OpResult r; r.message = L"ran"; return r;
+    };
+    // the worker run here as the started process; `before` changes files after the launcher wrote them (null: nothing)
+    std::function<void(const wstring& batch)> before;
+    ProcessIdentity reported;  // the identity the start reports (empty: this process)
+    bool startIt = true, runWorker = true;
+    const StartWorkerFn start = [&](const wstring& args, DWORD& code, ProcessIdentity& who) {
+        if (!startIt) return false;
+        if (before) before(ArgOf(args, L"--batch="));
+        WorkerArgs wa;
+        wa.batch = ArgOf(args, L"--batch="); wa.sha256 = ArgOf(args, L"--sha256="); wa.pipe = ArgOf(args, L"--pipe=");
+        code = runWorker ? (DWORD)RunWorker(wa, ctx, run, priv).last.code : 0;
+        who = reported.pid ? reported : IdentityOf(GetCurrentProcess());
+        return true;
+    };
+    std::vector<wstring> logged;
+    const LogFn log = [&](const wstring& s) { logged.push_back(s); };
+    auto reset = [&] { runs = 0; seen.clear(); copied.clear(); logged.clear(); before = nullptr; reported = ProcessIdentity(); startIt = runWorker = true; };
+    OpRequest ap; ap.op = Op::Apply; ap.dir = Join(root, L"game1");
+    OpRequest in; in.op = Op::Install; in.exe = Join(Join(root, L"game2"), L"g.exe"); in.optiPackage = pkg;
+    wstring why;
+    require(PackageDigest(pkg, in.optiDigest, why), "package digest of a folder");
+    auto texts = [&](std::vector<OpRequest> rs) { std::vector<string> t; for (auto& r : rs) t.push_back(JobText(r, lad)); return t; };
+    // a job file of the batch the worker was given
+    auto jobFile = [](const wstring& batch, size_t n) {
+        std::vector<std::pair<wstring, wstring>> listed; bool stop = false;
+        ParseBatch(Get(batch), listed, stop);
+        return n < listed.size() ? listed[n].first : wstring();
+    };
+    auto allRefused = [&](const std::vector<OpResult>& rs, const wchar_t* says) {
+        for (auto& r : rs) if (r.code != EXIT_USAGE || r.message.find(says) == wstring::npos) return false;
+        return runs == 0;
+    };
 
-    {   // the launcher's own batch: both jobs run, each result at the path the worker works out, the log in data\logs
-        const string j1 = jobText(okLog), j2 = jobText(Join(Join(Join(lad, L"WrongGPU"), L"logs"), L"elevated-1.log"));
-        Put(Join(jobs, L"job-A-1.txt"), j1); Put(Join(jobs, L"job-A-2.txt"), j2);
-        const string bt = BatchText({{Join(jobs, L"job-A-1.txt"), Hash(j1)}, {Join(jobs, L"job-A-2.txt"), Hash(j2)}}, true);
-        Put(Join(jobs, L"batch-A.txt"), bt);
-        runs = 0; seen.clear();
-        const WorkerRun wr = RunWorkerFiles(Join(jobs, L"batch-A.txt"), L"", Hash(bt), run);
-        const auto r1 = resultOf(Join(jobs, L"result-A-1.txt")), r2 = resultOf(Join(jobs, L"result-A-2.txt"));
-        require(!wr.refused && wr.jobs == 2 && wr.ran == 2 && runs == 2 && r1.first && r1.second.code == 0 && r2.first && r2.second.message == L"ran" &&
-                    seen[0].logFile == okLog && seen[0].localAppData == lad && seen[0].r.dir == req.dir,
-                "elevated step: the launcher's batch runs every job; results at batch folder\\result-<stamp>-<n>.txt; log= in data\\logs or localappdata");
-        require(BatchResultPath(Join(jobs, L"batch-A.txt"), 2) == Join(jobs, L"result-A-2.txt") && JobResultPath(Join(jobs, L"job-B.txt")) == Join(jobs, L"result-B.txt") &&
-                    BatchResultPath(Join(jobs, L"list.txt"), 1).empty(), "elevated step: the result paths the launcher reads are the ones the worker writes");
+    {   // the normal flow: every job runs; the results and the log lines come back over the pipe; nothing stays in the jobs folder
+        reset();
+        const std::vector<OpResult> rs = RunElevatedJobs(texts({ap, in}), jobs, true, start, log);
+        require(rs.size() == 2 && rs[0].code == 0 && rs[0].message == L"ran" && rs[1].code == 0 && runs == 2 && seen[0].r.dir == ap.dir && seen[0].localAppData == lad,
+                "elevated step: the launcher's jobs run in order and their results come back");
+        require(std::find(logged.begin(), logged.end(), L"elevated step: job ran") != logged.end(), "elevated step: the worker's log lines reach the launcher's log");
+        require(Entries(jobs) == 0, "elevated step: the jobs folder is empty afterwards (no result or log file)");
+        require(seen[1].r.optiPackage != pkg && StartsWithI(seen[1].r.optiPackage, priv) && copied.size() == 1 && copied[0] == Get(Join(pkg, L"OptiScaler.ini")),
+                "elevated step: the install uses the worker's checked copy of the OptiScaler package");
+        require(seen[0].r.optiPackage.empty(), "elevated step: an operation that takes no package gets none");
+        require(Entries(priv) == 0, "elevated step: the worker's private folder is removed afterwards");
     }
-    {   // a batch with a result= line: refused, nothing run or written
-        const string j1 = jobText(okLog);
-        Put(Join(jobs, L"job-R-1.txt"), j1);
-        const string bt = "job=" + ToUtf8(Join(jobs, L"job-R-1.txt")) + "\r\nsha256=" + ToUtf8(Hash(j1)) + "\r\nresult=" + ToUtf8(otherFile) + "\r\n";
-        Put(Join(jobs, L"batch-R.txt"), bt);
-        runs = 0;
-        const WorkerRun wr = RunWorkerFiles(Join(jobs, L"batch-R.txt"), L"", Hash(bt), run);
-        require(wr.refused && runs == 0 && Get(otherFile) == "keep" && !Exists(Join(jobs, L"result-R-1.txt")) && wr.last.code == EXIT_USAGE,
-                "elevated step: a batch with a result= line is refused; nothing is run or written");
+    {   // an archive package
+        reset();
+        OpRequest ar = in; ar.optiPackage = archive;
+        require(PackageDigest(archive, ar.optiDigest, why), "package digest of an archive");
+        const std::vector<OpResult> rs = RunElevatedJobs(texts({ar}), jobs, false, start, log);
+        require(rs[0].code == 0 && runs == 1 && copied.size() == 1 && copied[0] == "archive bytes" && StartsWithI(seen[0].r.optiPackage, priv),
+                "elevated step: an archive package is installed from the worker's checked copy");
     }
-    {   // the batch changed after the launcher passed its SHA-256: refused, nothing run or written
-        const string j1 = jobText(okLog);
-        Put(Join(jobs, L"job-C-1.txt"), j1);
-        const string bt = BatchText({{Join(jobs, L"job-C-1.txt"), Hash(j1)}}, false);
-        Put(Join(jobs, L"batch-C.txt"), bt + "stop=1\r\n");
-        runs = 0;
-        const WorkerRun wr = RunWorkerFiles(Join(jobs, L"batch-C.txt"), L"", Hash(bt), run);
-        require(wr.refused && runs == 0 && !Exists(Join(jobs, L"result-C-1.txt")) && wr.last.message.find(L"SHA-256 mismatch") != wstring::npos,
-                "elevated step: a batch whose SHA-256 is not the launcher's is refused, with that reason");
-        runs = 0;
-        require(RunWorkerFiles(Join(jobs, L"batch-C.txt"), L"", L"", run).refused && runs == 0, "elevated step: no --sha256: refused");
+    // one job field changed after the launcher wrote the job: nothing runs
+    struct Field { const char* name; string from, to; };
+    const std::vector<Field> fields = {{"operation", "op=install", "op=uninstall"},
+                                       {"target", "exe=" + ToUtf8(in.exe), "exe=" + ToUtf8(Join(Join(root, L"other"), L"g.exe"))},
+                                       {"package path", "opti=" + ToUtf8(pkg), "opti=" + ToUtf8(Join(root, L"other"))},
+                                       {"package digest", "optisha256=" + ToUtf8(in.optiDigest), "optisha256=" + string(64, 'c')}};
+    for (auto& f : fields) {
+        reset();
+        before = [&](const wstring& batch) {
+            const wstring j = jobFile(batch, 1);
+            string t = Get(j);
+            const size_t at = t.find(f.from);
+            if (at != string::npos) t.replace(at, f.from.size(), f.to);
+            Put(j, t);
+        };
+        const std::vector<OpResult> rs = RunElevatedJobs(texts({ap, in}), jobs, false, start, log);
+        require(allRefused(rs, L"SHA-256 mismatch"), string("elevated step: a job whose ") + f.name + " was changed is refused; no job runs");
     }
-    {   // a job whose content is not the one the batch lists: that job is not run, its result says why
-        const string j1 = jobText(okLog);
-        const string bt = BatchText({{Join(jobs, L"job-D-1.txt"), Hash(j1)}}, false);
-        Put(Join(jobs, L"job-D-1.txt"), jobText(otherFile));
-        Put(Join(jobs, L"batch-D.txt"), bt);
-        runs = 0;
-        const WorkerRun wr = RunWorkerFiles(Join(jobs, L"batch-D.txt"), L"", Hash(bt), run);
-        const auto r1 = resultOf(Join(jobs, L"result-D-1.txt"));
-        require(!wr.refused && runs == 0 && r1.first && r1.second.code == EXIT_USAGE && r1.second.message.find(L"SHA-256 mismatch") != wstring::npos &&
-                    Get(otherFile) == "keep", "elevated step: a job whose SHA-256 does not match the batch is refused (not run; its result says so)");
+    {   // the package's content changed after the launcher took its digest: nothing runs
+        reset();
+        before = [&](const wstring&) { Put(Join(pkg, L"OptiScaler.ini"), "[Libraries]\r\nFfxDx12SRPath=other\r\n"); };
+        const std::vector<OpResult> rs = RunElevatedJobs(texts({ap, in}), jobs, false, start, log);
+        require(allRefused(rs, L"its files changed"), "elevated step: a package whose content changed is refused; no job runs");
+        Put(Join(pkg, L"OptiScaler.ini"), "[Libraries]\r\nFfxDx12SRPath=auto\r\n");
     }
-    {   // log= paths the step does not accept: not under the allowed folders, or not a plain file in a plain folder there
-        const wstring linked = Join(root, L"linked-logs");
-        require(MakeJunction(linked, other), "test setup (1)");
-        const wstring hard = Join(logs, L"hard.log");
-        require(CreateHardLinkW(hard.c_str(), otherFile.c_str(), nullptr) != FALSE, "test setup (2)");
-        const wstring subLog = Join(Join(logs, L"sub"), L"x.log");
-        require(MakeJunction(Join(logs, L"sub"), other), "test setup (3)");
-        int n = 0;
-        for (const wstring& bad : {otherFile, Join(linked, L"x.log"), hard, subLog}) {
-            const string jt = jobText(bad);
-            const wstring stamp = L"E" + std::to_wstring(++n);
-            Put(Join(jobs, L"job-" + stamp + L"-1.txt"), jt);
-            const string bt = BatchText({{Join(jobs, L"job-" + stamp + L"-1.txt"), Hash(jt)}}, false);
-            Put(Join(jobs, L"batch-" + stamp + L".txt"), bt);
-            runs = 0;
-            const WorkerRun wr = RunWorkerFiles(Join(jobs, L"batch-" + stamp + L".txt"), L"", Hash(bt), run);
-            const auto r1 = resultOf(Join(jobs, L"result-" + stamp + L"-1.txt"));
-            require(!wr.refused && runs == 0 && r1.first && r1.second.code == EXIT_USAGE && Get(otherFile) == "keep" && !Exists(Join(other, L"x.log")),
-                    "elevated step: a log= path the step does not accept is refused; the job is not run");
+    {   // another folder at the package's path: nothing runs
+        reset();
+        const wstring moved = Join(root, L"package-moved");
+        before = [&](const wstring&) {
+            MoveFileW(pkg.c_str(), moved.c_str());
+            EnsureDir(pkg);
+            Put(Join(pkg, L"OptiScaler.dll"), "other dll"); Put(Join(pkg, L"OptiScaler.ini"), "[Libraries]\r\nFfxDx12SRPath=auto\r\n");
+        };
+        const std::vector<OpResult> rs = RunElevatedJobs(texts({ap, in}), jobs, false, start, log);
+        require(allRefused(rs, L"its files changed"), "elevated step: another folder at the package's path is refused; no job runs");
+        RemoveTree(pkg); MoveFileW(moved.c_str(), pkg.c_str());
+    }
+    {   // a package named without its digest: nothing runs
+        reset();
+        OpRequest nd = in; nd.optiDigest.clear();
+        require(allRefused(RunElevatedJobs(texts({ap, nd}), jobs, false, start, log), L"no digest"), "elevated step: a package without its digest is refused; no job runs");
+    }
+    {   // a bad second job: the first does not run either
+        reset();
+        OpRequest bad = ap; bad.dir = L"relative\\folder";
+        const std::vector<OpResult> rs = RunElevatedJobs(texts({ap, bad}), jobs, true, start, log);
+        require(allRefused(rs, L"not an absolute path"), "elevated step: a batch with a bad second job runs no job (the first is not run)");
+        reset();
+        before = [&](const wstring& batch) { Put(jobFile(batch, 1), Get(jobFile(batch, 1)) + "force=1\r\n"); };
+        require(allRefused(RunElevatedJobs(texts({ap, ap}), jobs, true, start, log), L"SHA-256 mismatch"),
+                "elevated step: a batch whose second job file was changed runs no job (the first is not run)");
+        reset();
+        before = [&](const wstring& batch) { Put(batch, Get(batch) + "stop=1\r\n"); };
+        require(allRefused(RunElevatedJobs(texts({ap}), jobs, false, start, log), L"SHA-256 mismatch"), "elevated step: a changed batch file runs no job");
+    }
+    {   // results only from this run's pipe: result files on disk are never read
+        reset();
+        runWorker = false;
+        for (int i = 1; i <= 3; ++i) Put(Join(jobs, L"result-" + std::to_wstring(i) + L".txt"), "code=0\r\nmessage=done\r\n");
+        const std::vector<OpResult> rs = RunElevatedJobs(texts({ap, ap}), jobs, false, start, log);
+        require(rs[0].code == EXIT_FAILED && rs[1].code == EXIT_FAILED && rs[0].message.find(L"did not report") != wstring::npos && runs == 0,
+                "elevated step: result files on disk are ignored; a job not reported on the pipe is a failure that says so");
+        for (int i = 1; i <= 3; ++i) DeleteFileW(Join(jobs, L"result-" + std::to_wstring(i) + L".txt").c_str());
+    }
+    {   // a reply from a process other than the one started is not taken
+        reset();
+        reported.pid = GetCurrentProcessId() + 4; reported.started = 1;
+        const std::vector<OpResult> rs = RunElevatedJobs(texts({ap}), jobs, false, start, log);
+        require(rs[0].code == EXIT_FAILED && rs[0].message.find(L"did not report") != wstring::npos, "elevated step: only the started process's reply is taken");
+    }
+    {   // permission not given: nothing runs, the launcher says so
+        reset();
+        startIt = false;
+        const std::vector<OpResult> rs = RunElevatedJobs(texts({ap, ap}), jobs, false, start, log);
+        require(rs[0].code == EXIT_REFUSED && rs[1].message == kElevationNotGranted && runs == 0 && Entries(jobs) == 0, "elevated step: permission not given: nothing runs");
+    }
+    {   // the worker without a reply pipe: nothing runs and nothing is written
+        reset();
+        const string jt = JobText(ap, lad);
+        Put(Join(jobs, L"job-p-1.txt"), jt);
+        const string bt = BatchText({{Join(jobs, L"job-p-1.txt"), Hash(jt)}}, false);
+        Put(Join(jobs, L"batch-p.txt"), bt);
+        const wstring other = Join(root, L"other.txt");
+        for (const wstring& pipe : {wstring(), wstring(L"\\\\.\\pipe\\WrongGPU-reply-") + wstring(32, L'0'), other, wstring(L"\\\\.\\pipe\\something-else")}) {
+            const WorkerRun wr = RunWorker({Join(jobs, L"batch-p.txt"), Hash(bt), pipe}, ctx, run, priv);
+            require(wr.refused && runs == 0 && wr.last.code == EXIT_USAGE && !Exists(other) && Entries(priv) == 0,
+                    "elevated step: the worker without the launcher's reply pipe runs nothing and writes nothing");
         }
-        RemoveDirectoryW(linked.c_str()); RemoveDirectoryW(Join(logs, L"sub").c_str()); DeleteFileW(hard.c_str());
+        require(!ctx.logSink && ctx.workRoot.empty(), "elevated step: the worker leaves the log and the temporary folder as they were");
+        DeleteFileW(Join(jobs, L"job-p-1.txt").c_str()); DeleteFileW(Join(jobs, L"batch-p.txt").c_str());
     }
-    {   // one job (apply --job=): bound by its SHA-256, its result next to it; a folder that is not a plain folder is refused
-        const string jt = jobText(okLog);
-        Put(Join(jobs, L"job-one.txt"), jt);
-        runs = 0;
-        const WorkerRun ok = RunWorkerFiles(L"", Join(jobs, L"job-one.txt"), Hash(jt), run);
-        require(!ok.refused && runs == 1 && resultOf(Join(jobs, L"result-one.txt")).first, "elevated step: one job with its SHA-256 runs; result-<name>.txt next to it");
-        DeleteFileW(Join(jobs, L"result-one.txt").c_str());
-        runs = 0;
-        const WorkerRun bad = RunWorkerFiles(L"", Join(jobs, L"job-one.txt"), Hash(jt + "x"), run);
-        require(bad.refused && runs == 0 && !Exists(Join(jobs, L"result-one.txt")), "elevated step: one job with another SHA-256 is refused, no result written");
-        const wstring jlink = Join(data, L"jobs-link");
-        require(MakeJunction(jlink, jobs), "test setup (4)");
-        runs = 0;
-        const WorkerRun viaLink = RunWorkerFiles(L"", Join(jlink, L"job-one.txt"), Hash(jt), run);
-        require(viaLink.refused && runs == 0 && !Exists(Join(jobs, L"result-one.txt")), "elevated step: a jobs folder that is not a plain folder is refused");
-        RemoveDirectoryW(jlink.c_str());
-    }
-    {   // the result is written to a new file and moved into place, never written through an existing name
-        const string jt = jobText(okLog);
-        Put(Join(jobs, L"job-H.txt"), jt);
-        require(CreateHardLinkW(Join(jobs, L"result-H.txt").c_str(), otherFile.c_str(), nullptr) != FALSE, "test setup (5)");
-        runs = 0;
-        RunWorkerFiles(L"", Join(jobs, L"job-H.txt"), Hash(jt), run);
-        require(Get(otherFile) == "keep", "elevated step: the result is not written through an existing name");
-        DeleteFileW(Join(jobs, L"result-H.txt").c_str());
+    {   // the package digest: the same for the same files, another when a file changes; a private folder is new every time
+        wstring d1, d2, d3;
+        require(PackageDigest(pkg, d1, why) && PackageDigest(Join(pkg, L"OptiScaler.dll"), d2, why) && d1 == d2 && d1 == in.optiDigest,
+                "package digest: a folder and the OptiScaler.dll in it give the same digest, the same every time");
+        Put(Join(Join(pkg, L"sub"), L"extra.txt"), "changed");
+        require(PackageDigest(pkg, d3, why) && d3 != d1, "package digest: changes with any file of the package");
+        require(!PackageDigest(Join(root, L"none.zip"), d3, why), "package digest: a missing package has none");
+        wstring a, b;
+        require(MakePrivateFolder(priv, a, why) && MakePrivateFolder(priv, b, why) && a != b && IsDir(a) && IsDir(b), "private folder: a new one every time");
+        RemoveDirectoryW(a.c_str()); RemoveDirectoryW(b.c_str());
+        require(IsReplyPipeName(L"\\\\.\\pipe\\WrongGPU-reply-" + RandomHex()) && !IsReplyPipeName(L"C:\\x") && !IsReplyPipeName(L"\\\\.\\pipe\\WrongGPU-reply-XYZ"),
+                "reply pipe names: only the launcher's form");
     }
     RemoveTree(root);
 }
@@ -565,23 +622,31 @@ int main() {
         // ---- job and result files -----------------------------------------------------------------------------------------
         OpRequest job; job.op = Op::Update; job.exe = L"C:\\Games\\X\\x.exe"; job.dir = L"C:\\Games\\X"; job.optiPackage = L"C:\\dl\\Opti.7z"; job.moveMods = true;
         job.hasProfile = true; job.profile = DefaultProfile(); SetSetting(job.profile, "executor", "hip", nullptr);
-        const string jt = JobText(job, L"C:\\Users\\p\\AppData\\Local", L"C:\\log.txt");
-        OpRequest back; wstring lad, lf;
-        require(ParseJob(jt, back, lad, lf, &why) && back.op == Op::Update && back.exe == job.exe && back.dir == job.dir && back.moveMods && !back.removeOld &&
-                back.hasProfile && back.profile.get("executor") == "hip" && lad == L"C:\\Users\\p\\AppData\\Local" && lf == L"C:\\log.txt", "job file round trip");
+        job.optiDigest = wstring(64, L'b');
+        const string jt = JobText(job, L"C:\\Users\\p\\AppData\\Local");
+        OpRequest back; wstring lad;
+        require(ParseJob(jt, back, lad, &why) && back.op == Op::Update && back.exe == job.exe && back.dir == job.dir && back.moveMods && !back.removeOld &&
+                back.hasProfile && back.profile.get("executor") == "hip" && lad == L"C:\\Users\\p\\AppData\\Local" && back.optiPackage == job.optiPackage &&
+                back.optiDigest == job.optiDigest, "job file round trip (the OptiScaler package and its digest included)");
         {   // the player's account and whether a new install gets its own entry: carried to the worker (another account may run it)
             wstring sid; int per = 7;
-            require(ParseJob(JobText(job, L"C:\\Users\\p\\AppData\\Local", L"", L"S-1-5-21-1-2-3-1001", 0), back, lad, lf, &why, &sid, &per) && sid == L"S-1-5-21-1-2-3-1001" && per == 0 &&
-                        ParseJob(jt, back, lad, lf, &why, &sid, &per) && sid.empty() && per == -1, "job file: usersid and perentry round trip (absent: empty, -1)");
+            require(ParseJob(JobText(job, L"C:\\Users\\p\\AppData\\Local", L"S-1-5-21-1-2-3-1001", 0), back, lad, &why, &sid, &per) && sid == L"S-1-5-21-1-2-3-1001" && per == 0 &&
+                        ParseJob(jt, back, lad, &why, &sid, &per) && sid.empty() && per == -1, "job file: usersid and perentry round trip (absent: empty, -1)");
             OpRequest d; d.op = Op::Detach; d.dir = L"C:\\Games\\X";
-            require(ParseJob(JobText(d, L"C:\\x", L""), back, lad, lf, &why) && back.op == Op::Detach, "job file: the detach operation (the launcher's uninstall, games kept)");
+            require(ParseJob(JobText(d, L"C:\\x"), back, lad, &why) && back.op == Op::Detach, "job file: the detach operation (the launcher's uninstall, games kept)");
             OpRequest o; o.op = Op::Apply; o.dir = job.dir; o.optiKeep = o.optiOnly = true;
-            require(ParseJob(JobText(o, lad, L""), back, lad, lf, &why) && back.optiKeep && back.optiOnly && !back.hasProfile &&
-                        ParseJob(jt, back, lad, lf, &why) && !back.optiOnly, "job file: an OptiScaler-only apply round trip (absent: the profile is applied too)");
+            require(ParseJob(JobText(o, lad), back, lad, &why) && back.optiKeep && back.optiOnly && !back.hasProfile &&
+                        ParseJob(jt, back, lad, &why) && !back.optiOnly, "job file: an OptiScaler-only apply round trip (absent: the profile is applied too)");
         }
-        require(!ParseJob("op=install\r\nexe=relative\\x.exe\r\nlocalappdata=C:\\x\r\n", back, lad, lf, &why), "a job with a relative path is refused");
-        require(!ParseJob("op=format\r\nlocalappdata=C:\\x\r\n", back, lad, lf, &why) && !ParseJob("exe=C:\\x.exe\r\n", back, lad, lf, &why), "unknown or missing operation refused");
-        require(!ParseJob("op=apply\r\ndir=C:\\g\r\nlocalappdata=C:\\x\r\nprofile.executor=warp\r\n", back, lad, lf, &why), "a job with a bad setting is refused");
+        require(!ParseJob("op=install\r\nexe=relative\\x.exe\r\nlocalappdata=C:\\x\r\n", back, lad, &why), "a job with a relative path is refused");
+        for (const char* field : {"exe", "dir", "opti", "model", "localappdata", "documents"})
+            for (const char* path : {"relative\\x", "\\\\?\\C:\\x", "\\\\.\\C:", "\\x", "C:x"})
+                require(!ParseJob(string("op=install\r\nlocalappdata=C:\\x\r\n") + field + "=" + path + "\r\n", back, lad, &why),
+                        string("a job whose ") + field + " path is not a plain absolute path is refused (" + path + ")");
+        require(ParseJob("op=install\r\nexe=\\\\server\\share\\x.exe\r\nopti=C:/dl/o.7z\r\nmodel=C:\\m\\x.dll\r\nlocalappdata=C:\\x\r\n", back, lad, &why),
+                "job paths: drive and \\\\server\\share paths are accepted");
+        require(!ParseJob("op=format\r\nlocalappdata=C:\\x\r\n", back, lad, &why) && !ParseJob("exe=C:\\x.exe\r\n", back, lad, &why), "unknown or missing operation refused");
+        require(!ParseJob("op=apply\r\ndir=C:\\g\r\nlocalappdata=C:\\x\r\nprofile.executor=warp\r\n", back, lad, &why), "a job with a bad setting is refused");
         OpResult res; res.code = 6; res.message = L"switch?"; res.warnings = {L"w1"}; res.notes = {L"n1", L"n2"};
         OpResult rb;
         require(ParseResult(ResultText(res), rb) && rb.code == 6 && rb.message == L"switch?" && rb.warnings.size() == 1 && rb.notes.size() == 2, "result file round trip");

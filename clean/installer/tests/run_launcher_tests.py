@@ -24,12 +24,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import mockpe  # noqa: E402  (synthetic PE files with a version resource)
 import run_installer_tests as suite  # noqa: E402  (mock content, snapshots, the synthetic model case)
+import elevated_worker as ew  # noqa: E402  (the elevated worker run directly: job files, batch, reply pipe)
 from run_installer_tests import read, sha, snapshot, diff, write  # noqa: E402
-
-
-def sha256_of(path):
-    """A job or batch file's SHA-256, as the launcher passes it to the elevated worker (apply --sha256=)."""
-    return sha(read(path))
 
 
 OPTI_INI = ("[Upscalers]\nDx12Upscaler=auto\n[Libraries]\nFfxDx12SRPath=auto\n[FSR]\nFsr4Update=auto\nUpscalerIndex=auto\n"
@@ -49,6 +45,9 @@ class T:
         for k in [k for k in self.env if k.upper().startswith("WG_") or k.upper() in ("HIP_PATH", "ROCM_PATH", "LLVM_PATH", "HIP_DEVICE_LIB_PATH")]:
             self.env.pop(k)
         os.makedirs(self.env["LOCALAPPDATA"], exist_ok=True)
+        # the elevated worker's private folder (its checked package copy, its temporary files) in the work folder
+        self.env["WRONGGPU_TEST_PRIVATE_DIR"] = os.path.join(work, "worker-private")
+        os.makedirs(self.env["WRONGGPU_TEST_PRIVATE_DIR"], exist_ok=True)
         self.uninstall = suite.uninstall_root(self.env["LOCALAPPDATA"])  # this run's Apps & features root (the build's own)
         self.j = {}
 
@@ -419,46 +418,61 @@ def test_install_settings_uninstall(t, opti):
     rc = t.run("repair", exe, "--opti=" + opti, "--noscan", "--force")
     t.check("repair of an older version: wronggpu.ini back with the settings, the message says it updated from 0.5.1",
             rc == 0 and "output_filter=quality9" in (options_line(ini(b)) or "") and "updated from 0.5.1 to" in t.j.get("message", ""), (rc, t.j.get("message")))
-    # the elevated worker's job (run here without elevation: the same code path). --sha256: the job file's; the worker
-    # writes its result next to it, result-<name>.txt for job-<name>.txt
-    job = os.path.join(t.work, "job-main.txt")
-    result = os.path.join(t.work, "result-main.txt")
-    write(job, "op=apply\r\ndir=%s\r\nlocalappdata=%s\r\nprofile.output_filter=analytic\r\nprofile.fps_overlay=off\r\n" % (b, t.env["LOCALAPPDATA"]))
-    rc = t.run("apply", "--job=" + job, "--sha256=" + sha256_of(job))
-    res = read(result).decode("utf-8", "replace") if os.path.isfile(result) else ""
-    t.check("apply --job: the worker writes the result; the job's settings are in the files", rc == 0 and "code=0" in res and
-            "output_filter=analytic" in (options_line(ini(b)) or "") and "ShowFps=false" in ini(b, "OptiScaler.ini"), (rc, res))
-    write(job, "op=apply\r\ndir=relative\\folder\r\nlocalappdata=%s\r\n" % t.env["LOCALAPPDATA"])
-    rc = t.run("apply", "--job=" + job, "--sha256=" + sha256_of(job))
-    t.check("apply --job with a relative path: refused (exit 10)", rc == 10 and "code=10" in read(result).decode(), rc)
-    os.remove(result)
-    rc = t.run("apply", "--job=" + job, "--sha256=" + "0" * 64)
-    t.check("apply --job with another SHA-256: refused (exit 10), nothing written", rc == 10 and not os.path.exists(result), rc)
-    # several jobs in one worker run (the window's one permission prompt for every protected folder): each writes its result, in order
+    # the elevated worker (run here without elevation: the same code path): the batch's SHA-256 on the command line, each
+    # job's in the batch; its results and log lines come back over the reply pipe, and it writes no file of its own
     lad = t.env["LOCALAPPDATA"]
-    jobs = [os.path.join(t.work, "batch-job-%d.txt" % i) for i in (1, 2)]
-    batch = os.path.join(t.work, "batch-B.txt")
-    results = [os.path.join(t.work, "result-B-%d.txt" % i) for i in (1, 2)]   # the worker's own names
-    for f in results:
-        if os.path.exists(f):
-            os.remove(f)
-    write(jobs[0], "op=apply\r\ndir=%s\r\nlocalappdata=%s\r\nprofile.output_filter=quality5\r\n" % (b, lad))
-    write(jobs[1], "op=apply\r\ndir=%s\r\nlocalappdata=%s\r\nprofile.output_filter=analytic\r\nprofile.fps_overlay=off\r\n" % (b, lad))
-    write(batch, "stop=1\r\n" + "".join("job=%s\r\nsha256=%s\r\n" % (j, sha256_of(j)) for j in jobs))
-    rc = t.run("apply", "--batch=" + batch, "--sha256=" + sha256_of(batch))
-    res = [read(f).decode("utf-8", "replace") if os.path.isfile(f) else "" for f in results]
-    t.check("apply --batch: both jobs run in order, each writes its result (the last one's settings are in the files)",
-            rc == 0 and all("code=0" in r for r in res) and t.j.get("ran") == 2 and "output_filter=analytic" in (options_line(ini(b)) or ""), (rc, res, t.j))
-    for f in results:
-        if os.path.exists(f):
-            os.remove(f)
-    write(jobs[0], "op=apply\r\ndir=relative\\folder\r\nlocalappdata=%s\r\n" % lad)
-    write(jobs[1], "op=apply\r\ndir=%s\r\nlocalappdata=%s\r\nprofile.output_filter=quality5\r\n" % (b, lad))
-    write(batch, "stop=1\r\n" + "".join("job=%s\r\nsha256=%s\r\n" % (j, sha256_of(j)) for j in jobs))
-    rc = t.run("apply", "--batch=" + batch, "--sha256=" + sha256_of(batch))
-    res = [read(f).decode("utf-8", "replace") if os.path.isfile(f) else "" for f in results]
-    t.check("apply --batch with stop=1: the first fails (exit 10), the second is not run and its result says so (code -1, the files unchanged)",
-            rc == 10 and "code=10" in res[0] and "code=-1" in res[1] and t.j.get("ran") == 1 and "output_filter=analytic" in (options_line(ini(b)) or ""), (rc, res, t.j))
+
+    def work_files():  # the work folder without the suite's own JSON output (t.run deletes it before each run)
+        return sorted(n for n in os.listdir(t.work) if n != os.path.basename(t.out))
+
+    before_work = work_files()
+    rc, rep = ew.run_worker(t.run, t.work, ["op=apply\r\ndir=%s\r\nlocalappdata=%s\r\nprofile.output_filter=analytic\r\nprofile.fps_overlay=off\r\n" % (b, lad)])
+    t.check("apply: the worker's result comes back over the pipe; the job's settings are in the files", rc == 0 and "code=0" in rep.results.get(1, "") and
+            rep.complete and "output_filter=analytic" in (options_line(ini(b)) or "") and "ShowFps=false" in ini(b, "OptiScaler.ini"), (rc, vars(rep)))
+    t.check("apply: the worker's log lines come back over the pipe; it writes no file next to the jobs",
+            any("elevated worker: apply" in line for line in rep.log) and work_files() == before_work, (rep.log[:5], work_files()))
+    rc, rep = ew.run_worker(t.run, t.work, ["op=apply\r\ndir=relative\\folder\r\nlocalappdata=%s\r\n" % lad])
+    t.check("apply with a relative path: refused (exit 10), the refusal comes back", rc == 10 and rep.refused and "code=10" in rep.refused and not rep.results, (rc, vars(rep)))
+    rc, rep = ew.run_worker(t.run, t.work, ["op=apply\r\ndir=%s\r\nlocalappdata=%s\r\n" % (b, lad)], batch_sha="0" * 64)
+    t.check("apply with another SHA-256: refused (exit 10), nothing run", rc == 10 and rep.refused and "SHA-256 mismatch" in rep.refused and not rep.results, (rc, vars(rep)))
+    rc = t.run("apply", "--batch=" + os.path.join(t.work, "batch-none.txt"), "--sha256=" + "0" * 64)
+    t.check("apply without the reply pipe: refused (exit 10), nothing written", rc == 10 and work_files() == before_work, (rc, work_files()))
+    # several jobs in one worker run (the window's one permission prompt for every protected folder): a result each, in order
+    rc, rep = ew.run_worker(t.run, t.work, ["op=apply\r\ndir=%s\r\nlocalappdata=%s\r\nprofile.output_filter=quality5\r\n" % (b, lad),
+                                            "op=apply\r\ndir=%s\r\nlocalappdata=%s\r\nprofile.output_filter=analytic\r\nprofile.fps_overlay=off\r\n" % (b, lad)], stop=True)
+    t.check("apply, two jobs: both run in order, a result each (the last one's settings are in the files)",
+            rc == 0 and all("code=0" in rep.results.get(n, "") for n in (1, 2)) and "output_filter=analytic" in (options_line(ini(b)) or ""), (rc, vars(rep)))
+    rc, rep = ew.run_worker(t.run, t.work, ["op=apply\r\ndir=relative\\folder\r\nlocalappdata=%s\r\n" % lad,
+                                            "op=apply\r\ndir=%s\r\nlocalappdata=%s\r\nprofile.output_filter=quality5\r\n" % (b, lad)], stop=True)
+    t.check("apply, two jobs, the first one bad: the batch is refused (exit 10) and neither runs (the files unchanged)",
+            rc == 10 and rep.refused and not rep.results and "output_filter=analytic" in (options_line(ini(b)) or ""), (rc, vars(rep)))
+    missing = os.path.join(t.work, "not-installed")
+    rc, rep = ew.run_worker(t.run, t.work, ["op=apply\r\ndir=%s\r\nlocalappdata=%s\r\n" % (missing, lad),
+                                            "op=apply\r\ndir=%s\r\nlocalappdata=%s\r\nprofile.output_filter=quality5\r\n" % (b, lad)], stop=True)
+    t.check("apply, two jobs with stop=1: the first fails when it runs, the second is not run and its result says so (code -1, the files unchanged)",
+            rc != 0 and not rep.refused and "code=0" not in rep.results.get(1, "code=0") and "code=-1" in rep.results.get(2, "") and
+            "output_filter=analytic" in (options_line(ini(b)) or ""), (rc, vars(rep)))
+    # the OptiScaler package of a repair through the worker: its digest in the job; the worker installs from its own
+    # checked copy and leaves no copy behind; a package changed after the digest was taken is refused, nothing run
+    private = t.env["WRONGGPU_TEST_PRIVATE_DIR"]
+    repair = "op=repair\r\nexe=%s\r\nopti=%s\r\noptisha256=%s\r\nlocalappdata=%s\r\nforce=1\r\nnoscan=1\r\n"
+    rc, rep = ew.run_worker(t.run, t.work, [repair % (exe, opti, ew.package_digest(opti), lad)])
+    t.check("repair through the worker: the package is checked and installed from the worker's copy, none left behind",
+            rc == 0 and "code=0" in rep.results.get(1, "") and any("OptiScaler package" in line and "checked" in line for line in rep.log) and
+            read(os.path.join(b, "OptiScaler.ini")) is not None and os.listdir(private) == [], (rc, vars(rep), os.listdir(private)))
+    digest = ew.package_digest(opti)
+    ini_before = read(os.path.join(b, "wronggpu.ini"))
+
+    def change_package(batch, jobs):
+        write(os.path.join(opti, "OptiScaler.dll"), b"MZ another OptiScaler (synthetic)")
+
+    rc, rep = ew.run_worker(t.run, t.work, [repair % (exe, opti, digest, lad)], change=change_package)
+    t.check("repair through the worker, the package changed after its digest was taken: refused (exit 10), nothing run",
+            rc == 10 and rep.refused and "changed" in rep.refused and not rep.results and read(os.path.join(b, "wronggpu.ini")) == ini_before and
+            os.listdir(private) == [], (rc, vars(rep)))
+    write(os.path.join(opti, "OptiScaler.dll"), b"MZ mock OptiScaler (synthetic)")
+    rc, rep = ew.run_worker(t.run, t.work, [repair % (exe, opti, "", lad)])
+    t.check("repair through the worker without the package's digest: refused (exit 10)", rc == 10 and rep.refused and not rep.results, (rc, vars(rep)))
     # collect logs
     zpath = os.path.join(t.work, "support.zip")
     rc = t.run("collect", exe, "--zip=" + zpath)
@@ -2043,7 +2057,7 @@ def test_rr_config_fix(t, opti):
         t.check("...Fix it for me: the elevated worker saves the choice at once (one permission prompt, its apply job), on in the profile, nothing in "
                 "Engine.ini or the record, the card waits for the first start (r6 #7)",
                 ff.get("busy_started") is True and ff.get("done") is True and ff.get("saved") == "on" and ff.get("state") == -1 and
-                ff.get("notice") == "" and len(asks()) == 1 and "apply" in asks()[0] and "--job=" in asks()[0] and get_fix(exe)[1].get("profile") == "on" and
+                ff.get("notice") == "" and len(asks()) == 1 and "apply" in asks()[0] and "--batch=" in asks()[0] and "--pipe=" in asks()[0] and get_fix(exe)[1].get("profile") == "on" and
                 not os.listdir(docs) and "rrconfig\t" not in record_text(b), (ff, asks(), os.listdir(docs)))
         write(bl4_gus, b"[ScalabilityGroups]\r\n")  # the game's first start
         rx, pg, rcf = rr_page("protected-fixforme-then", prot_env, extra=("--apply=rrdue",))
@@ -2166,7 +2180,7 @@ def test_rr_config_fix(t, opti):
                 gd.get("fix_button") == "Fix Engine.ini now", gd)
         rec = record_text(b)
         t.check("...Fix it now, the player's click: one permission prompt (the elevated worker's job), the line added (45-byte file, read-only), recorded, the toast says so (r2c)",
-                fx.get("done") is True and fx.get("asks") == 1 and len(asks()) == 1 and "apply" in asks()[0] and "--job=" in asks()[0] and
+                fx.get("done") is True and fx.get("asks") == 1 and len(asks()) == 1 and "apply" in asks()[0] and "--batch=" in asks()[0] and "--pipe=" in asks()[0] and
                 fx.get("state") == 1 and fx.get("fixed") is True and "has the Ray Reconstruction setting now" in fx.get("toast", "") and
                 read(bl4_ini) == new_file and read_only(bl4_ini) and
                 re.search(r"(?m)^rrconfig\t" + re.escape(bl4_ini) + r"\tcr\tabsent\t-\r?$", rec) is not None,
@@ -2537,12 +2551,10 @@ def test_rr_config_fix(t, opti):
         t.run("install", exe, "--opti=" + opti, "--noscan", "--force", "--experimental")
         job_cfg = os.path.join(docs2, "My Games", "Borderlands 4", "Saved", "Config", "Windows")
         write(os.path.join(job_cfg, "GameUserSettings.ini"), b"[ScalabilityGroups]\r\n")  # the game's settings folder there
-        job, res = os.path.join(t.work, "job-rrconfig.txt"), os.path.join(t.work, "result-rrconfig.txt")
-        write(job, "op=apply\r\ndir=%s\r\nlocalappdata=%s\r\ndocuments=%s\r\nprofile.rr_config_fix=on\r\n" % (b, t.env["LOCALAPPDATA"], docs2))
-        rc = t.run("apply", "--job=" + job, "--sha256=" + sha256_of(job))
+        rc, rep = ew.run_worker(t.run, t.work, ["op=apply\r\ndir=%s\r\nlocalappdata=%s\r\ndocuments=%s\r\nprofile.rr_config_fix=on\r\n" % (b, t.env["LOCALAPPDATA"], docs2)])
         job_ini = os.path.join(docs2, "My Games", "Borderlands 4", "Saved", "Config", "Windows", "Engine.ini")
         t.check("elevated job with documents=: Engine.ini in the job's Documents folder, none in this process's", rc == 0 and os.path.isfile(job_ini) and
-                read(job_ini) == new_file and not os.listdir(docs), (rc, read(res) if os.path.exists(res) else b"", os.listdir(docs)))
+                read(job_ini) == new_file and not os.listdir(docs), (rc, vars(rep), os.listdir(docs)))
         rc = t.run("uninstall", exe)
         t.check("...and the uninstall takes it out there (the record's path)", rc == 0 and os.listdir(job_cfg) == ["GameUserSettings.ini"], (rc, os.listdir(job_cfg)))
         # 10. a test build without a Documents test root refuses (never this PC's Documents)

@@ -27,9 +27,9 @@
 //                                 installed launcher may use it)
 //   play <game>                   start the game (without the ROCm/HIP SDK variables)
 //   update-check                  the opt-in release check (no network while it is off or no URL is set)
-//   apply --job=<file> --sha256=<hex>   the elevated worker (started by the window with runas); apply --batch=<file>
-//                                 --sha256=<hex>: several jobs in one run (one permission prompt; job= / sha256= lines,
-//                                 stop=1). Results next to the file given (elevated_job.h)
+//   apply --batch=<file> --sha256=<hex> --pipe=<name>   the elevated worker (started by the window with runas): the jobs
+//                                 of one batch in one run (one permission prompt; job= / sha256= lines, stop=1); its log
+//                                 and results go back over the launcher's pipe (elevated_job.h)
 //   ui-dump --dump=<file.json> [--shots=<folder>] [--apply=fps|rrconfig|rrdue]   the window's pages painted offscreen, as JSON
 //                                 (tests; --apply: the checklist's FPS button, the Engine.ini choices, or the choice waiting for the game's folder, applied for real)
 //   ui-render --out-dir=<folder> --fixture=<file> [--size=1180x760] [--scales=1,1.5] [--frames=a,b] [--theme=light|dark]   fixture screenshots (development)
@@ -47,6 +47,7 @@
 #include "wg_core/model.h"
 #include "wg_core/optiedition.h"
 #include "wg_core/optiscaler.h"
+#include "wg_core/package_snapshot.h"
 #include "wg_core/payload.h"
 #include "wg_core/pe.h"
 #include "wg_core/rr.h"
@@ -141,9 +142,10 @@ void OpLogEnd() {
 }
 
 // The elevated worker started with runas for `args`, waited for; false: Windows did not start it (permission not given).
-// Called on a worker thread without a message loop: COM is set up for the shell on it, and the shell finishes before it
-// returns (SEE_MASK_NOASYNC), as ShellExecuteEx asks of such a thread.
-static bool StartElevated(const wstring& args, HWND owner, DWORD& code) {
+// `worker`: the process started (the reply pipe takes only its reply, elevated_job.h). Called on a worker thread without a
+// message loop: COM is set up for the shell on it, and the shell finishes before it returns (SEE_MASK_NOASYNC), as
+// ShellExecuteEx asks of such a thread.
+static bool StartElevated(const wstring& args, HWND owner, DWORD& code, ProcessIdentity& worker) {
     const wstring self = SelfPath();
 #ifdef WRONGGPU_TESTING
     // tests (r2c): every permission prompt the window would raise is written to WRONGGPU_TEST_ELEVATION_LOG. With protected
@@ -170,6 +172,7 @@ static bool StartElevated(const wstring& args, HWND owner, DWORD& code) {
         STARTUPINFOW si{}; si.cb = sizeof(si);
         PROCESS_INFORMATION pi{};
         if (!CreateProcessW(self.c_str(), &cmd[0], nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, &env[0], nullptr, &si, &pi)) return false;
+        worker = IdentityOf(pi.hProcess);
         WaitForSingleObject(pi.hProcess, INFINITE);
         code = 0; GetExitCodeProcess(pi.hProcess, &code);
         CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
@@ -182,81 +185,35 @@ static bool StartElevated(const wstring& args, HWND owner, DWORD& code) {
     const bool started = ShellExecuteExW(&sei) && sei.hProcess;
     if (SUCCEEDED(com)) CoUninitialize();
     if (!started) return false;
+    worker = IdentityOf(sei.hProcess);
     WaitForSingleObject(sei.hProcess, INFINITE);
     code = 0; GetExitCodeProcess(sei.hProcess, &code);
     CloseHandle(sei.hProcess);
     return true;
 }
-static const wchar_t* const kNotGranted = L"Administrator permission is needed to change this game folder and was not granted.";
-// No result file from the elevated step: exit 10 is its refusal of job files it could not check (elevated_job.h).
-static wstring NoResult(DWORD code) {
-    if (code == EXIT_USAGE)
-        return L"The elevated step did not run: its job files could not be checked against this request (they were changed or "
-               L"could not be read). Try again.";
-    return L"The elevated worker gave no result (exit " + std::to_wstring(code) + L").";
-}
 
-OpResult RunElevated(const OpRequest& r, HWND owner) {
-    OpResult res;
-    const wstring dir = Join(gl.paths.dataDir, L"jobs");
-    EnsureDir(dir);
-    const wstring stamp = NowStamp(true);
-    const wstring job = Join(dir, L"job-" + stamp + L".txt"), result = JobResultPath(job);
-    const string text = JobText(r, EnvVar(L"LOCALAPPDATA"), Join(Join(gl.paths.dataDir, L"logs"), L"elevated-" + stamp + L".log"), CurrentUserSid(), g.ctx.perGameEntry ? 1 : 0,
-                              PlayerDocumentsDir(g.ctx));
-    WriteFileAtomic(job, text.data(), text.size());
-    DWORD code = 0;
-    // the job's SHA-256 binds the elevated step to this file's content (elevated_job.h); it writes its result to `result`
-    if (!StartElevated(L"apply \"--job=" + job + L"\" --sha256=" + Sha256Bytes(text.data(), text.size()), owner, code)) {
-        DeleteFileW(job.c_str());
-        res.code = EXIT_REFUSED;
-        res.message = kNotGranted;
-        return res;
-    }
-    string out;
-    if (!ReadAll(result, out) || !ParseResult(out, res)) { res.code = code ? (int)code : EXIT_FAILED; res.message = NoResult(code); }
-    DeleteFileW(job.c_str()); DeleteFileW(result.c_str());
-    return res;
-}
-
-// Several operations in one elevated worker (one permission prompt): "apply --batch=<file>" runs the jobs in order; stop:
-// none after the first failure. A result per request (kOpNotRun: not run).
+// Several operations in one elevated worker (one permission prompt): the jobs run in order (elevated_job.h); stop: none
+// after the first failure. A result per request (kOpNotRun: not run).
 static std::vector<OpResult> RunElevatedBatch(const std::vector<OpRequest>& rs, HWND owner, bool stop) {
-    std::vector<OpResult> out(rs.size());
-    if (rs.empty()) return out;
-    const wstring dir = Join(gl.paths.dataDir, L"jobs");
-    EnsureDir(dir);
-    const wstring stamp = NowStamp(true);
-    const wstring log = Join(Join(gl.paths.dataDir, L"logs"), L"elevated-" + stamp + L".log");
-    const wstring batch = Join(dir, L"batch-" + stamp + L".txt");
-    std::vector<std::pair<wstring, wstring>> files, listed;  // (job, result); (job, its SHA-256) for the batch file
-    for (size_t i = 0; i < rs.size(); ++i) {
-        files.push_back({Join(dir, L"job-" + stamp + L"-" + std::to_wstring(i + 1) + L".txt"), BatchResultPath(batch, i + 1)});
-        const string text = JobText(rs[i], EnvVar(L"LOCALAPPDATA"), log, CurrentUserSid(), g.ctx.perGameEntry ? 1 : 0,
-                              PlayerDocumentsDir(g.ctx));
-        WriteFileAtomic(files[i].first, text.data(), text.size());
-        listed.push_back({files[i].first, Sha256Bytes(text.data(), text.size())});
+    std::vector<string> texts;
+    for (OpRequest r : rs) {
+        // the paths as this process sees them, and the OptiScaler package's digest before the permission prompt
+        // (package_snapshot.h: the worker installs only a copy with this digest); other operations take no package
+        if (!r.modelDll.empty()) r.modelDll = FullPath(r.modelDll);
+        if (r.op == Op::Install || r.op == Op::Update || r.op == Op::Repair) {
+            if (!r.optiPackage.empty()) {
+                r.optiPackage = FullPath(r.optiPackage);
+                wstring why;
+                if (!PackageDigest(r.optiPackage, r.optiDigest, why)) LogLine(g.ctx, L"elevated step: " + why);
+            }
+        } else r.optiPackage.clear();
+        texts.push_back(JobText(r, EnvVar(L"LOCALAPPDATA"), CurrentUserSid(), g.ctx.perGameEntry ? 1 : 0, PlayerDocumentsDir(g.ctx)));
     }
-    const string list = BatchText(listed, stop);
-    WriteFileAtomic(batch, list.data(), list.size());
-    DWORD code = 0;
-    // the batch's SHA-256 (and in it each job's) binds the elevated step to these files (elevated_job.h)
-    const bool started = StartElevated(L"apply \"--batch=" + batch + L"\" --sha256=" + Sha256Bytes(list.data(), list.size()), owner, code);
-    bool failed = false;
-    for (size_t i = 0; i < rs.size(); ++i) {
-        string text;
-        if (!started) { out[i].code = EXIT_REFUSED; out[i].message = kNotGranted; }
-        else if (!ReadAll(files[i].second, text) || !ParseResult(text, out[i])) {
-            out[i] = OpResult();
-            if (stop && failed) out[i].code = kOpNotRun;
-            else { out[i].code = code ? (int)code : EXIT_FAILED; out[i].message = NoResult(code); }
-        }
-        failed = failed || (out[i].code != EXIT_OK && out[i].code != kOpNotRun);
-        DeleteFileW(files[i].first.c_str()); DeleteFileW(files[i].second.c_str());
-    }
-    DeleteFileW(batch.c_str());
-    return out;
+    const StartWorkerFn start = [owner](const wstring& args, DWORD& code, ProcessIdentity& worker) { return StartElevated(args, owner, code, worker); };
+    return RunElevatedJobs(texts, Join(gl.paths.dataDir, L"jobs"), stop, start, [](const wstring& s) { LogLine(g.ctx, s); });
 }
+
+OpResult RunElevated(const OpRequest& r, HWND owner) { return RunElevatedBatch({r}, owner, false)[0]; }
 
 std::vector<OpResult> RunElevatedOps(const std::vector<OpRequest>& rs, HWND owner, bool stop) { return RunElevatedBatch(rs, owner, stop); }
 
@@ -664,13 +621,12 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
         ResultJson(o, res);
         return res.code;
     }
-    if (verb == L"apply") {  // the elevated worker: one job (--job), or several in one run (--batch: one prompt); --sha256
-        // binds it to the files of the launcher's request, and it works out the result paths itself (elevated_job.h)
+    if (verb == L"apply") {  // the elevated worker: the jobs of one batch (one prompt); --sha256 binds it to the files of the
+        // launcher's request, and its log lines and results go back over --pipe (elevated_job.h)
         bool hiveSet = false;
         auto runJob = [&hiveSet](const WorkerJob& w) {
             SetEnvironmentVariableW(L"LOCALAPPDATA", w.localAppData.c_str());  // the player's model and shared data, not this account's
             g.ctx.playerDocuments = w.documents;  // and the player's Documents (rrconfig.h), not this account's
-            if (!w.logFile.empty()) g.ctx.logFile = w.logFile;
             // run by another account (an administrator's name typed at the prompt): the Apps & features entries go to the
             // player's hive, where the player's launcher and Settings > Apps look
             HKEY hive = nullptr;
@@ -684,9 +640,15 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
             LogLine(g.ctx, wstring(L"elevated worker: ") + OpName(w.r.op) + L" " + (w.r.dir.empty() ? w.r.exe : w.r.dir) + (IsElevated() ? L" (elevated)" : L" (not elevated)"));
             return RunOp(g.ctx, w.r, ui);
         };
-        const WorkerRun run = RunWorkerFiles(a.get(L"batch"), a.get(L"job"), a.get(L"sha256"), runJob);
+        WorkerArgs wa;
+        wa.batch = a.get(L"batch"); wa.sha256 = a.get(L"sha256"); wa.pipe = a.get(L"pipe");
+        wstring privateParent;  // empty: the Windows folder's Temp (package_snapshot.h)
+#ifdef WRONGGPU_TESTING
+        privateParent = EnvVar(L"WRONGGPU_TEST_PRIVATE_DIR");  // tests: the worker's private folder in their work folder
+#endif
+        const WorkerRun run = RunWorker(wa, g.ctx, runJob, privateParent);
         if (run.refused) Print(run.last.message);
-        if (!a.get(L"batch").empty()) o.j.N("jobs", (long long)run.jobs).N("ran", run.ran);
+        o.j.N("jobs", (long long)run.jobs).N("ran", run.ran);
         ResultJson(o, run.last);
         return run.last.code;
     }
@@ -1013,10 +975,12 @@ int RunCli(int argc, wchar_t** argv) {
         } else a.pos.push_back(s);
     }
     gl.dataOverride = a.get(L"data");
-    logFile = a.get(L"log");
-    LauncherInit(logFile, verb == L"apply");
+    // the elevated worker writes no file of its own (no --log, no --out): its log and result go back over its pipe
+    const bool worker = verb == L"apply";
+    logFile = worker ? wstring() : a.get(L"log");
+    LauncherInit(logFile, worker);
     Output o;
-    o.outFile = a.get(L"out");
+    o.outFile = worker ? wstring() : a.get(L"out");
     // `collect` writes a zip: --out is the JSON as everywhere; --zip=<file> names the zip
     if (!a.get(L"zip").empty()) a.opt[L"out-zip"] = a.get(L"zip");
     o.j.Obj().S("verb", verb).S("version", g.ctx.data->version);

@@ -1,68 +1,274 @@
 // SPDX-License-Identifier: MIT
-// The elevated worker's side of "WrongGPU.exe apply" (elevated_job.h): the job and batch files are bound to the
-// launcher's request by SHA-256, results go to paths the worker works out itself, and the log stays in the player's
-// folders. Written for this project.
+// The launcher's elevated step (elevated_job.h): the reply pipe, the worker's checks before it runs anything, and the
+// launcher's side of one worker run. Written for this project.
 #include "elevated_job.h"
 
-#include <atomic>
-#include <memory>
+#include <sddl.h>
+
+#include <map>
+#include <mutex>
+#include <thread>
+
+#include "package_snapshot.h"
 
 namespace wg {
 
 namespace {
 
+const wchar_t* const kPipePrefix = L"\\\\.\\pipe\\WrongGPU-reply-";
+const size_t kMaxReply = 4u << 20;     // bytes one connection may send
+const DWORD kPipeBuffer = 64 * 1024;
+
+// Records the worker sends: a type byte, a 32-bit job number (1-based; 0: none), a 32-bit length, that many bytes (UTF-8).
+enum : char { kRecLog = 'L', kRecResult = 'R', kRecRefused = 'X', kRecEnd = 'E' };
+
 struct HandleCloser { void operator()(HANDLE h) const { if (h && h != INVALID_HANDLE_VALUE) CloseHandle(h); } };
 using Held = std::unique_ptr<void, HandleCloser>;
 Held Hold(HANDLE h) { return Held(h == INVALID_HANDLE_VALUE ? nullptr : h); }
 
-// GetFinalPathNameByHandle's path without its \\?\ prefix (\\?\UNC\server\share -> \\server\share).
-wstring FinalPath(HANDLE h) {
-    wstring buf(1024, L'\0');
-    DWORD n = GetFinalPathNameByHandleW(h, buf.data(), (DWORD)buf.size(), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
-    if (n >= buf.size()) { buf.resize(n + 1); n = GetFinalPathNameByHandleW(h, buf.data(), (DWORD)buf.size(), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS); }
-    if (!n || n >= buf.size()) return L"";
-    buf.resize(n);
-    if (buf.rfind(L"\\\\?\\UNC\\", 0) == 0) return L"\\\\" + buf.substr(8);
-    if (buf.rfind(L"\\\\?\\", 0) == 0) return buf.substr(4);
-    return buf;
+void PutU32(string& s, uint32_t v) { for (int i = 0; i < 4; ++i) s.push_back((char)((v >> (8 * i)) & 0xff)); }
+uint32_t GetU32(const string& s, size_t at) {
+    uint32_t v = 0;
+    for (int i = 0; i < 4; ++i) v |= (uint32_t)(unsigned char)s[at + i] << (8 * i);
+    return v;
 }
 
-// The long form of a path (8.3 short names such as RUNNER~1 expanded), as far as it exists; the rest kept as written.
-wstring LongOf(const wstring& p) {
-    wstring buf(1024, L'\0');
-    DWORD n = GetLongPathNameW(p.c_str(), buf.data(), (DWORD)buf.size());
-    if (n >= buf.size()) { buf.resize(n + 1); n = GetLongPathNameW(p.c_str(), buf.data(), (DWORD)buf.size()); }
-    if (n && n < buf.size()) { buf.resize(n); return buf; }
-    const wstring parent = Parent(p);
-    return parent.empty() || parent == p ? p : Join(LongOf(parent), BaseName(p));
+// The records of one connection, in order, into a reply.
+void ParseRecords(const string& bytes, size_t jobs, WorkerReply& out) {
+    out.results.assign(jobs, {false, OpResult()});
+    size_t at = 0;
+    while (at + 9 <= bytes.size()) {
+        const char type = bytes[at];
+        const uint32_t n = GetU32(bytes, at + 1), len = GetU32(bytes, at + 5);
+        if (len > bytes.size() - at - 9) break;
+        const string body = bytes.substr(at + 9, len);
+        at += 9 + len;
+        if (out.complete) break;  // nothing counts after the end record
+        if (type == kRecLog) out.log.push_back(FromUtf8(body));
+        else if (type == kRecResult && n >= 1 && n <= jobs) {
+            OpResult r;
+            if (ParseResult(body, r)) out.results[n - 1] = {true, r};
+        } else if (type == kRecRefused) {
+            out.refused = ParseResult(body, out.refusal);
+        } else if (type == kRecEnd) out.complete = true;
+    }
 }
 
-bool Under(const wstring& path, const wstring& root) {
-    return !root.empty() && (IEq(path, root) || StartsWithI(path, root.back() == L'\\' ? root : root + L'\\'));
+}  // namespace
+
+const wchar_t* const kElevationNotGranted = L"Administrator permission is needed to change this game folder and was not granted.";
+
+ProcessIdentity IdentityOf(HANDLE process) {
+    ProcessIdentity id;
+    FILETIME created{}, exited{}, kernel{}, user{};
+    if (!process || !GetProcessTimes(process, &created, &exited, &kernel, &user)) return id;
+    id.pid = GetProcessId(process);
+    id.started = ((unsigned long long)created.dwHighDateTime << 32) | created.dwLowDateTime;
+    return id;
 }
 
-// A file or folder opened as itself (FILE_FLAG_OPEN_REPARSE_POINT): refused when it is a reparse point, a file with more
-// than one name (hard links) or the wrong kind. No delete sharing: it cannot be renamed, deleted or replaced while held.
-bool OpenPlain(const wstring& path, bool folder, DWORD access, DWORD disposition, Held& out, wstring& finalPath, wstring& why) {
-    const DWORD flags = FILE_FLAG_OPEN_REPARSE_POINT | (folder ? FILE_FLAG_BACKUP_SEMANTICS : FILE_ATTRIBUTE_NORMAL);
-    Held h = Hold(CreateFileW(path.c_str(), access, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, disposition, flags, nullptr));
-    if (!h) { why = L"cannot open " + path + L" (" + ErrText(GetLastError()) + L")"; return false; }
-    BY_HANDLE_FILE_INFORMATION info{};
-    if (!GetFileInformationByHandle(h.get(), &info)) { why = L"cannot read the attributes of " + path; return false; }
-    if (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) { why = path + L" is a link or junction (reparse point)"; return false; }
-    if (!!(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != folder) { why = path + (folder ? L" is not a folder" : L" is a folder"); return false; }
-    if (!folder && info.nNumberOfLinks > 1) { why = path + L" has more than one name (hard link)"; return false; }
-    finalPath = FinalPath(h.get());
-    if (finalPath.empty()) { why = L"cannot resolve the path of " + path; return false; }
-    out = std::move(h);
+bool IsReplyPipeName(const wstring& name) {
+    const wstring pre = kPipePrefix;
+    if (name.size() != pre.size() + 32 || name.compare(0, pre.size(), pre) != 0) return false;
+    for (size_t i = pre.size(); i < name.size(); ++i)
+        if (!((name[i] >= L'0' && name[i] <= L'9') || (name[i] >= L'a' && name[i] <= L'f'))) return false;
     return true;
 }
 
-// Reads a file once, as itself, and returns its bytes and the real folder it is in.
-bool ReadOnce(const wstring& path, string& bytes, wstring& realFolder, wstring& why) {
-    Held h;
-    wstring fin;
-    if (!OpenPlain(path, false, GENERIC_READ, OPEN_EXISTING, h, fin, why)) return false;
+// ---- the reply pipe (the launcher's end) ------------------------------------------------------------------------------
+struct ReplyChannel::Impl {
+    wstring name;
+    Held pipe, stop, io;
+    std::thread reader;
+    struct Connection { ProcessIdentity who; string bytes; bool ended = false; };
+    std::mutex m;
+    std::vector<Connection> done;
+
+    // Waits for the pending operation on `ov`; false when stop was signalled first (the operation is then cancelled). The
+    // operation's own completion is looked at first, so what a finished worker left in the pipe is never cut off.
+    bool Wait(OVERLAPPED& ov, DWORD& got, bool& ok) {
+        HANDLE hs[2] = {io.get(), stop.get()};
+        const DWORD w = WaitForMultipleObjects(2, hs, FALSE, INFINITE);
+        if (w == WAIT_OBJECT_0) { ok = GetOverlappedResult(pipe.get(), &ov, &got, FALSE) != FALSE; return true; }
+        CancelIoEx(pipe.get(), &ov);
+        GetOverlappedResult(pipe.get(), &ov, &got, TRUE);
+        return false;
+    }
+    void Run() {
+        for (;;) {
+            OVERLAPPED ov{}; ov.hEvent = io.get();
+            ResetEvent(io.get());
+            DWORD got = 0;
+            bool ok = ConnectNamedPipe(pipe.get(), &ov) != FALSE;
+            DWORD e = ok ? 0 : GetLastError();
+            // connected before this call (and maybe closed again: what it sent is still read)
+            if (!ok && (e == ERROR_PIPE_CONNECTED || e == ERROR_NO_DATA)) ok = true;
+            else if (!ok && e == ERROR_IO_PENDING) { if (!Wait(ov, got, ok)) return; }
+            if (!ok) {
+                if (WaitForSingleObject(stop.get(), 10) == WAIT_OBJECT_0) return;
+                DisconnectNamedPipe(pipe.get());
+                continue;
+            }
+            Connection c;
+            ULONG pid = 0;
+            if (GetNamedPipeClientProcessId(pipe.get(), &pid)) {
+                Held p = Hold(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid));
+                c.who = IdentityOf(p.get());
+            }
+            bool stopped = false;
+            std::vector<char> buf(kPipeBuffer);
+            for (;;) {
+                OVERLAPPED rv{}; rv.hEvent = io.get();
+                ResetEvent(io.get());
+                got = 0;
+                ok = ReadFile(pipe.get(), buf.data(), (DWORD)buf.size(), &got, &rv) != FALSE;
+                e = ok ? 0 : GetLastError();
+                if (!ok && e == ERROR_IO_PENDING) { if (!Wait(rv, got, ok)) { stopped = true; break; } e = ok ? 0 : GetLastError(); }
+                if (!ok) { c.ended = e == ERROR_BROKEN_PIPE; break; }
+                c.bytes.append(buf.data(), got);
+                if (c.bytes.size() > kMaxReply) break;
+            }
+            DisconnectNamedPipe(pipe.get());
+            { std::lock_guard<std::mutex> l(m); done.push_back(std::move(c)); }
+            if (stopped) return;
+        }
+    }
+};
+
+ReplyChannel::ReplyChannel() : impl_(new Impl) {}
+ReplyChannel::~ReplyChannel() {
+    if (impl_->reader.joinable()) { SetEvent(impl_->stop.get()); impl_->reader.join(); }
+    delete impl_;
+}
+const wstring& ReplyChannel::Name() const { return impl_->name; }
+
+bool ReplyChannel::Create(wstring& why) {
+    // this account and administrators only; one instance, this computer only, made by this process first (a name that
+    // is taken is never used)
+    const wstring me = CurrentUserSid();
+    if (me.empty()) { why = L"cannot read this account's SID"; return false; }
+    const wstring sddl = L"D:P(A;;GA;;;" + me + L")(A;;GA;;;BA)";
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &sd, nullptr)) {
+        why = L"cannot make the reply pipe's permissions (" + ErrText(GetLastError()) + L")";
+        return false;
+    }
+    SECURITY_ATTRIBUTES sa{sizeof(sa), sd, FALSE};
+    for (int i = 0; i < 4 && !impl_->pipe; ++i) {
+        impl_->name = kPipePrefix + RandomHex();
+        impl_->pipe = Hold(CreateNamedPipeW(impl_->name.c_str(), PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                                            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, kPipeBuffer, kPipeBuffer, 0, &sa));
+    }
+    const DWORD e = GetLastError();
+    LocalFree(sd);
+    if (!impl_->pipe) { why = L"cannot make the reply pipe (" + ErrText(e) + L")"; return false; }
+    impl_->stop = Hold(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    impl_->io = Hold(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    if (!impl_->stop || !impl_->io) { why = L"cannot make the reply pipe's events"; impl_->pipe.reset(); return false; }
+    impl_->reader = std::thread([this] { impl_->Run(); });
+    return true;
+}
+
+WorkerReply ReplyChannel::Finish(const ProcessIdentity& worker, size_t jobs) {
+    WorkerReply out;
+    out.results.assign(jobs, {false, OpResult()});
+    if (impl_->reader.joinable()) { SetEvent(impl_->stop.get()); impl_->reader.join(); }
+    if (!worker.pid) return out;
+    // exactly one connection of the worker that ended normally
+    const Impl::Connection* from = nullptr;
+    int count = 0;
+    for (auto& c : impl_->done)
+        if (c.who == worker) { ++count; from = &c; }
+    if (count != 1 || !from->ended) return out;
+    ParseRecords(from->bytes, jobs, out);
+    out.connected = true;
+    return out;
+}
+
+// ---- the launcher's side of one worker run ----------------------------------------------------------------------------
+std::vector<OpResult> RunElevatedJobs(const std::vector<string>& jobTexts, const wstring& jobsDir, bool stop, const StartWorkerFn& start, const LogFn& log) {
+    const size_t n = jobTexts.size();
+    std::vector<OpResult> out(n);
+    if (!n) return out;
+    auto all = [&out](int code, const wstring& message) { for (auto& r : out) { r = OpResult(); r.code = code; r.message = message; } return out; };
+    std::vector<wstring> files;
+    const wstring stamp = NowStamp(true) + L"-" + RandomHex().substr(0, 8);
+    const wstring batch = Join(jobsDir, L"batch-" + stamp + L".txt");
+    auto cleanup = [&] { for (auto& f : files) DeleteFileW(f.c_str()); DeleteFileW(batch.c_str()); };
+    string list;
+    try {
+        EnsureDir(jobsDir);
+        std::vector<std::pair<wstring, wstring>> listed;
+        for (size_t i = 0; i < n; ++i) {
+            files.push_back(Join(jobsDir, L"job-" + stamp + L"-" + std::to_wstring(i + 1) + L".txt"));
+            WriteFileAtomic(files[i], jobTexts[i].data(), jobTexts[i].size());
+            listed.push_back({files[i], Sha256Bytes(jobTexts[i].data(), jobTexts[i].size())});
+        }
+        list = BatchText(listed, stop);
+        WriteFileAtomic(batch, list.data(), list.size());
+    } catch (const SetupError& e) {
+        cleanup();
+        return all(EXIT_FAILED, L"The elevated step could not be prepared: " + e.msg);
+    }
+    ReplyChannel channel;
+    wstring why;
+    if (!channel.Create(why)) { cleanup(); return all(EXIT_FAILED, L"The elevated step could not be prepared: " + why + L"."); }
+    DWORD code = 0;
+    ProcessIdentity worker;
+    const bool started = start(L"apply \"--batch=" + batch + L"\" --sha256=" + Sha256Bytes(list.data(), list.size()) + L" --pipe=" + channel.Name(), code, worker);
+    const WorkerReply reply = channel.Finish(started ? worker : ProcessIdentity(), n);
+    cleanup();
+    if (log) for (auto& line : reply.log) log(L"elevated step: " + line);
+    if (!started) return all(EXIT_REFUSED, kElevationNotGranted);
+    if (reply.refused) return all(reply.refusal.code ? reply.refusal.code : EXIT_USAGE, reply.refusal.message);
+    for (size_t i = 0; i < n; ++i) {
+        if (reply.results[i].first) { out[i] = reply.results[i].second; continue; }
+        out[i] = OpResult();
+        out[i].code = EXIT_FAILED;
+        out[i].message = L"The elevated step did not report a result for this game (exit " + std::to_wstring(code) + L"). Check the game before trying again.";
+    }
+    if (log && (!reply.connected || !reply.complete)) log(L"elevated step: no complete reply from the worker it started (exit " + std::to_wstring(code) + L")");
+    return out;
+}
+
+// ---- the worker -------------------------------------------------------------------------------------------------------
+namespace {
+
+// The worker's end of the reply pipe.
+class Reply {
+public:
+    bool Open(const wstring& name, wstring& why) {
+        if (!IsReplyPipeName(name)) { why = L"no reply pipe was named"; return false; }
+        for (int i = 0; i < 3 && !h_; ++i) {
+            // identification only: the launcher's end never acts as this process
+            h_ = Hold(CreateFileW(name.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr));
+            if (!h_ && GetLastError() == ERROR_PIPE_BUSY) WaitNamedPipeW(name.c_str(), 10000);
+            else if (!h_) break;
+        }
+        if (!h_ || GetFileType(h_.get()) != FILE_TYPE_PIPE) { why = L"the launcher's reply pipe cannot be opened (" + ErrText(GetLastError()) + L")"; h_.reset(); return false; }
+        return true;
+    }
+    void Send(char type, uint32_t n, const string& body) {
+        std::lock_guard<std::mutex> l(m_);
+        if (!h_) return;
+        string rec(1, type);
+        PutU32(rec, n);
+        PutU32(rec, (uint32_t)body.size());
+        rec += body;
+        DWORD wrote = 0;
+        if (!WriteFile(h_.get(), rec.data(), (DWORD)rec.size(), &wrote, nullptr) || wrote != rec.size()) h_.reset();
+    }
+    bool ok() const { return (bool)h_; }
+private:
+    Held h_;
+    std::mutex m_;
+};
+
+// A file read once into memory (a job or batch file: at most 1 MiB).
+bool ReadOnce(const wstring& path, string& bytes, wstring& why) {
+    if (!IsAbsolutePath(path)) { why = L"not an absolute path: " + path; return false; }
+    Held h = Hold(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (!h) { why = L"cannot open " + path + L" (" + ErrText(GetLastError()) + L")"; return false; }
     LARGE_INTEGER size{};
     if (!GetFileSizeEx(h.get(), &size) || size.QuadPart > (1 << 20)) { why = path + L" is not a job file (size)"; return false; }
     bytes.resize((size_t)size.QuadPart);
@@ -72,163 +278,115 @@ bool ReadOnce(const wstring& path, string& bytes, wstring& realFolder, wstring& 
         if (!ReadFile(h.get(), bytes.data() + done, (DWORD)(bytes.size() - done), &got, nullptr) || !got) { why = L"cannot read " + path; return false; }
         done += got;
     }
-    realFolder = Parent(fin);
     return true;
 }
 
 bool SameHash(const wstring& a, const wstring& b) { return a.size() == 64 && IEq(a, b); }
-
-// The folder results are written to: the folder named on the command line, opened as itself (not a reparse point), must
-// be the real folder the file was read from; it is held open while the worker runs.
-bool HoldFolder(const wstring& named, const wstring& folder, Held& held, wstring& why) {
-    wstring fin;
-    if (!OpenPlain(named, true, FILE_LIST_DIRECTORY | FILE_TRAVERSE, OPEN_EXISTING, held, fin, why)) return false;
-    if (!IEq(fin, folder)) { why = L"the folder " + named + L" resolves to " + fin + L", not " + folder; held.reset(); return false; }
-    return true;
-}
-
-// A result file in the held folder: a new temporary file there, then moved over the result name (which, when it is there
-// already, must be a plain file with one name). Never written through an existing name.
-bool WriteResult(const wstring& path, const string& text, wstring& why) {
-    if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        Held old;
-        wstring fin;
-        if (!OpenPlain(path, false, FILE_READ_ATTRIBUTES, OPEN_EXISTING, old, fin, why)) return false;
-    }
-    static std::atomic<unsigned> seq{0};
-    const wstring tmp = path + L".tmp-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(seq++);
-    Held h = Hold(CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
-    if (!h) { why = L"cannot write " + tmp + L" (" + ErrText(GetLastError()) + L")"; return false; }
-    DWORD wrote = 0;
-    const bool ok = WriteFile(h.get(), text.data(), (DWORD)text.size(), &wrote, nullptr) && wrote == text.size();
-    FlushFileBuffers(h.get());
-    h.reset();
-    if (!ok || !MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        why = L"cannot write " + path + L" (" + ErrText(GetLastError()) + L")";
-        DeleteFileW(tmp.c_str());
-        return false;
-    }
-    return true;
-}
-
-// log=: a file under one of the roots (each resolved to its real path), its folder and the file opened as themselves and
-// held while the job runs. An empty log= stays empty (no log); so does one whose folder is not there (noLog).
-bool HoldLog(const wstring& log, const std::vector<wstring>& roots, Held& folderHeld, Held& fileHeld, bool& noLog, wstring& why) {
-    noLog = false;
-    if (log.empty()) return true;
-    const wstring full = LongOf(FullPath(log)), folder = Parent(full);
-    std::vector<wstring> real;
-    for (auto& r : roots) {
-        if (r.empty()) continue;
-        Held h = Hold(CreateFileW(r.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-                                  FILE_FLAG_BACKUP_SEMANTICS, nullptr));
-        if (h) real.push_back(FinalPath(h.get()));
-    }
-    wstring folderFinal, fileFinal;
-    bool inside = false;
-    for (auto& r : roots) inside = inside || (!r.empty() && Under(full, LongOf(FullPath(r))));
-    if (!inside) { why = L"the log file " + log + L" is not in the player's data folders"; return false; }
-    if (GetFileAttributesW(folder.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        const DWORD e = GetLastError();
-        if (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND) { noLog = true; return true; }
-    }
-    if (!OpenPlain(folder, true, FILE_LIST_DIRECTORY | FILE_TRAVERSE, OPEN_EXISTING, folderHeld, folderFinal, why)) return false;
-    inside = false;
-    for (auto& r : real) inside = inside || Under(folderFinal, r);
-    if (!inside) { why = L"the log folder " + folder + L" resolves to " + folderFinal + L", outside the player's data folders"; return false; }
-    if (!OpenPlain(full, false, FILE_APPEND_DATA, OPEN_ALWAYS, fileHeld, fileFinal, why)) return false;
-    if (!IEq(Parent(fileFinal), folderFinal)) { why = L"the log file " + log + L" resolves to " + fileFinal; return false; }
-    return true;
-}
-
-bool NameAfter(const wstring& path, const wchar_t* prefix, wstring& rest) {
-    const wstring name = BaseName(path), pre = prefix;
-    if (name.size() <= pre.size() + 4 || !StartsWithI(name, pre) || !EndsWithI(name, L".txt")) return false;
-    rest = name.substr(pre.size(), name.size() - pre.size() - 4);
-    return true;
-}
+bool UsesPackage(Op op) { return op == Op::Install || op == Op::Update || op == Op::Repair; }
 
 }  // namespace
 
-wstring BatchResultPath(const wstring& batch, size_t n) {
-    wstring stamp;
-    return NameAfter(batch, L"batch-", stamp) ? Join(Parent(batch), L"result-" + stamp + L"-" + std::to_wstring(n) + L".txt") : L"";
-}
-wstring JobResultPath(const wstring& job) {
-    wstring name;
-    return NameAfter(job, L"job-", name) ? Join(Parent(job), L"result-" + name + L".txt") : L"";
-}
-
-WorkerRun RunWorkerFiles(const wstring& batch, const wstring& job, const wstring& sha256, const WorkerRunFn& run) {
+WorkerRun RunWorker(const WorkerArgs& a, Context& ctx, const WorkerRunFn& run, const wstring& privateParent) {
     WorkerRun out;
-    auto refuse = [&out](const wstring& why) {
+    Reply reply;
+    wstring why;
+    out.last.code = EXIT_USAGE;
+    if (!reply.Open(a.pipe, why)) {  // no way to report: nothing is run
         out.refused = true;
-        out.last.code = EXIT_USAGE;
         out.last.message = L"The elevated step did not run: " + why + L".";
         return out;
-    };
-    const bool isBatch = !batch.empty();
-    const wstring given = isBatch ? batch : job;
-    if (given.empty() || sha256.empty()) return refuse(L"apply needs --batch=<file> or --job=<file>, and --sha256=<its SHA-256>");
-    string text;
-    wstring folder, why;
-    if (!ReadOnce(given, text, folder, why)) return refuse(why);
-    if (!SameHash(Sha256Bytes(text.data(), text.size()), sha256))
-        return refuse(BaseName(given) + L" is not the file the launcher wrote for this request (SHA-256 mismatch)");
-    Held folderHeld;
-    if (!HoldFolder(Parent(FullPath(given)), folder, folderHeld, why)) return refuse(why);
-    const wstring real = Join(folder, BaseName(given));
-
-    // (job file, its SHA-256 from the batch; empty for the single job: its text is already checked) and its result path
-    struct Item { wstring file, sha, result; };
-    std::vector<Item> items;
-    bool stop = false;
-    if (isBatch) {
-        std::vector<std::pair<wstring, wstring>> jobs;
-        if (!ParseBatch(text, jobs, stop, &why)) return refuse(L"bad batch file: " + why);
-        for (size_t i = 0; i < jobs.size(); ++i) items.push_back({jobs[i].first, jobs[i].second, BatchResultPath(real, i + 1)});
-    } else {
-        items.push_back({real, L"", JobResultPath(real)});
     }
-    if (items.empty() || items[0].result.empty()) return refuse(L"the file name is not batch-<stamp>.txt or job-<name>.txt");
-    // <data>\logs: next to the jobs folder named on the command line (its real path is checked when the log is opened)
-    const std::vector<wstring> logRoots0 = {Join(Parent(Parent(FullPath(given))), L"logs")};
+    // from here on the log lines go back to the launcher; the private folder and the log sink are undone on every return
+    wstring privateDir;
+    const auto oldSink = ctx.logSink;
+    const wstring oldRoot = ctx.workRoot;
+    {
+        std::lock_guard<std::mutex> l(ctx.logMutex);
+        ctx.logSink = [&reply](const wstring& s) { reply.Send(kRecLog, 0, ToUtf8(s)); };
+    }
+    struct Undo {
+        Context& ctx; const std::function<void(const wstring&)>& sink; const wstring& root; wstring& dir;
+        ~Undo() {
+            if (!dir.empty()) {
+                if (!ctx.opti.tempDir.empty() && StartsWithI(ctx.opti.tempDir, dir)) ctx.opti = OptiPackage();
+                if (!ctx.opti.dir.empty() && StartsWithI(ctx.opti.dir, dir)) ctx.opti = OptiPackage();
+                try { RemoveTree(dir); } catch (const SetupError&) {}
+            }
+            ctx.workRoot = root;
+            std::lock_guard<std::mutex> l(ctx.logMutex);
+            ctx.logSink = sink;
+        }
+    } undo{ctx, oldSink, oldRoot, privateDir};
+    auto refuse = [&](const wstring& reason) {
+        out.refused = true;
+        out.ran = 0;
+        out.last = OpResult();
+        out.last.code = EXIT_USAGE;
+        out.last.message = L"The elevated step did not run: " + reason + L".";
+        LogLine(ctx, L"elevated worker: refused: " + reason);
+        reply.Send(kRecRefused, 0, ResultText(out.last));
+        reply.Send(kRecEnd, 0, "");
+        return out;
+    };
 
+    // 1. the batch and every job file, each read once and checked against the request
+    if (a.batch.empty() || a.sha256.empty()) return refuse(L"apply needs --batch=<file>, --sha256=<its SHA-256> and --pipe=<name>");
+    string text;
+    if (!ReadOnce(a.batch, text, why)) return refuse(why);
+    if (!SameHash(Sha256Bytes(text.data(), text.size()), a.sha256))
+        return refuse(BaseName(a.batch) + L" is not the file the launcher wrote for this request (SHA-256 mismatch)");
+    std::vector<std::pair<wstring, wstring>> listed;
+    bool stop = false;
+    if (!ParseBatch(text, listed, stop, &why)) return refuse(L"bad batch file: " + why);
+    out.jobs = (int)listed.size();
+    std::vector<WorkerJob> jobs(listed.size());
+    for (size_t i = 0; i < listed.size(); ++i) {
+        const wstring label = L"job " + std::to_wstring(i + 1) + L" (" + BaseName(listed[i].first) + L")";
+        string jt;
+        if (!ReadOnce(listed[i].first, jt, why)) return refuse(label + L": " + why);
+        if (!SameHash(Sha256Bytes(jt.data(), jt.size()), listed[i].second))
+            return refuse(label + L" is not the job file the launcher wrote for this request (SHA-256 mismatch)");
+        WorkerJob& w = jobs[i];
+        if (!ParseJob(jt, w.r, w.localAppData, &why, &w.userSid, &w.perGameEntry, &w.documents)) return refuse(label + L": bad job file: " + why);
+    }
+
+    // 2. the private folder for this run's temporary files, and the OptiScaler packages copied into it and checked
+    if (!MakePrivateFolder(privateParent, privateDir, why)) { privateDir.clear(); return refuse(why); }
+    ctx.workRoot = privateDir;
+    std::map<wstring, wstring> copies;  // package path + digest -> its checked copy
+    for (size_t i = 0; i < jobs.size(); ++i) {
+        OpRequest& r = jobs[i].r;
+        if (!UsesPackage(r.op)) { r.optiPackage.clear(); r.optiDigest.clear(); continue; }
+        if (r.optiPackage.empty()) continue;
+        const wstring key = Lower(FullPath(r.optiPackage)) + L"|" + Lower(r.optiDigest);
+        auto it = copies.find(key);
+        if (it == copies.end()) {
+            const wstring into = Join(privateDir, L"package-" + std::to_wstring(copies.size() + 1));
+            wstring copy;
+            try { EnsureDir(into); } catch (const SetupError& e) { return refuse(e.msg); }
+            if (!SnapshotPackage(r.optiPackage, r.optiDigest, into, copy, why)) return refuse(L"job " + std::to_wstring(i + 1) + L": " + why);
+            LogLine(ctx, L"elevated worker: OptiScaler package " + r.optiPackage + L" checked (" + r.optiDigest.substr(0, 12) + L")");
+            it = copies.emplace(key, copy).first;
+        }
+        r.optiPackage = it->second;
+    }
+
+    // 3. every job checked: run them in order
     bool failed = false;
-    for (auto& it : items) {
+    out.last = OpResult();
+    for (size_t i = 0; i < jobs.size(); ++i) {
         OpResult res;
         if (stop && failed) {
             res.code = kOpNotRun;
             res.message = L"not run: an earlier game failed";
         } else {
-            string jt = isBatch ? string() : text;
-            wstring jf, jwhy;
-            WorkerJob w;
-            Held logFolder, logFile;
-            if (isBatch && !ReadOnce(it.file, jt, jf, jwhy)) { res.code = EXIT_USAGE; res.message = L"Not run: " + jwhy + L"."; }
-            else if (isBatch && !SameHash(Sha256Bytes(jt.data(), jt.size()), it.sha)) {
-                res.code = EXIT_USAGE;
-                res.message = L"Not run: " + BaseName(it.file) + L" is not the job file the launcher wrote for this request (SHA-256 mismatch).";
-            } else if (!ParseJob(jt, w.r, w.localAppData, w.logFile, &jwhy, &w.userSid, &w.perGameEntry, &w.documents)) {
-                res.code = EXIT_USAGE; res.message = L"Not run: bad job file: " + jwhy + L".";
-            } else {
-                std::vector<wstring> roots = logRoots0;
-                roots.push_back(w.localAppData);
-                bool noLog = false;
-                if (!HoldLog(w.logFile, roots, logFolder, logFile, noLog, jwhy)) { res.code = EXIT_USAGE; res.message = L"Not run: " + jwhy + L"."; }
-                else {
-                    if (noLog) w.logFile.clear();
-                    res = run(w);
-                }
-            }
-            ++out.ran;  // taken up (as before: a job refused here counts too; only the ones stop=1 skips do not)
+            res = run(jobs[i]);
+            ++out.ran;
             if (res.code) { failed = true; out.last = res; }
         }
-        wstring wwhy;
-        WriteResult(it.result, ResultText(res), wwhy);
-        if (!isBatch) out.last = res;
+        reply.Send(kRecResult, (uint32_t)(i + 1), ResultText(res));
     }
-    out.jobs = (int)items.size();
+    reply.Send(kRecEnd, 0, "");
     return out;
 }
 

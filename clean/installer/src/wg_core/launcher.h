@@ -172,6 +172,7 @@ struct OpRequest {
     wstring dir;                   // the install folder (uninstall, rollback, apply, adopt)
     wstring optiPackage;           // install/update/repair: the player's OptiScaler download
     wstring modelDll;              // a DLSS model file to try first
+    wstring optiDigest;            // the elevated worker's job: optiPackage's digest as the launcher saw it (package_snapshot.h)
     bool moveMods = false, removeOld = false, experimental = false, force = false, noScan = true;
     bool hasProfile = false;       // apply: this profile (else the game's profile.ini); install: the profile a new install starts with
     Profile profile;
@@ -220,20 +221,21 @@ bool HasPrevious(const wstring& dir, wstring* version = nullptr);
 bool PreviousFits(const wstring& dir, const Record& m, wstring* version = nullptr);
 
 // ---- the elevated worker's job file -------------------------------------------------------------------------------
-// UTF-8 key=value lines: op, exe, dir, opti, model, flags, localappdata (the player's, so the model and the shared data
-// are the player's even when an administrator account runs the worker), log, profile.<key>; usersid (the player's
-// account: its Apps & features entries, when another account runs the worker) and perentry (1: a new install gets its own
-// entry, 0: the player's launcher is installed), each left out when empty / -1.
-// documents: the player's Documents folder (rrconfig.h; the worker may run as another account, whose Documents it is not).
-string JobText(const OpRequest& r, const wstring& localAppData, const wstring& logFile, const wstring& userSid = L"", int perGameEntry = -1,
-               const wstring& documents = L"");
-bool ParseJob(const string& text, OpRequest& r, wstring& localAppData, wstring& logFile, wstring* why, wstring* userSid = nullptr, int* perGameEntry = nullptr,
+// UTF-8 key=value lines: op, exe, dir, opti, optisha256 (the OptiScaler package's digest, package_snapshot.h), model,
+// flags, localappdata (the player's, so the model and the shared data are the player's even when an administrator account
+// runs the worker), profile.<key>; usersid (the player's account: its Apps & features entries, when another account runs
+// the worker) and perentry (1: a new install gets its own entry, 0: the player's launcher is installed), each left out when
+// empty / -1. documents: the player's Documents folder (rrconfig.h; the worker may run as another account, whose Documents
+// it is not). Every path in a job must be absolute.
+string JobText(const OpRequest& r, const wstring& localAppData, const wstring& userSid = L"", int perGameEntry = -1, const wstring& documents = L"");
+bool IsAbsolutePath(const wstring& p);  // C:\... or \\server\share\... (not \\?\ or \\.\)
+bool ParseJob(const string& text, OpRequest& r, wstring& localAppData, wstring* why, wstring* userSid = nullptr, int* perGameEntry = nullptr,
               wstring* documents = nullptr);
 string ResultText(const OpResult& res);
 bool ParseResult(const string& text, OpResult& res);
 // Several jobs for one elevated worker ("apply --batch=<file> --sha256=<hex>", one permission prompt): job=<file> /
 // sha256=<that file's SHA-256> pairs in the order they run; stop=1: none runs after the first that fails (its result then
-// has the code kOpNotRun). The worker works out the result paths itself (elevated_job.h); a result= line is refused.
+// has the code kOpNotRun). Results come back over the reply pipe (elevated_job.h); a result= line is refused.
 string BatchText(const std::vector<std::pair<wstring, wstring>>& jobs, bool stop);
 bool ParseBatch(const string& text, std::vector<std::pair<wstring, wstring>>& jobs, bool& stop, wstring* why = nullptr);
 
