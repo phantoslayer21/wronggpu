@@ -49,7 +49,8 @@ RrPrepState RrPrepStateOf(Context& ctx, const wstring& dataDir, const wstring& e
 const wchar_t* RrPrepStateName(RrPrepState s);  // "ready", "not-prepared", "driver-changed", ... (JSON, logs)
 // What the launcher's start prepares again in the background: prepared before, and the driver or the runtime changed.
 inline bool RrStaleAfterUpdate(RrPrepState s) { return s == RrPrepState::DriverChanged || s == RrPrepState::RuntimeChanged; }
-// gamerules.h: the game prepares RR's kernels at its own first start (the launcher's helper can't reach its cache)
+// gamerules.h, or any game under Wine (Proton): the game prepares RR's kernels at its own first start (the launcher's helper
+// can't reach its cache)
 bool RrKernelsInGame(const wstring& exe);
 // The helper run: the launcher's own program copied as rr-prepare\run\<game exe name>, started with --rr-prepare
 // <runtime dll> <passes>, its progress read line by line (progress answers false: cancel). 0 prepared (recorded), 1

@@ -12,6 +12,7 @@
 #include "wg_core/gamerules.h"
 #include "wg_core/model.h"
 #include "wg_core/record.h"
+#include "wg_core/rrprep.h"
 #include "wg_core/settings.h"
 
 using namespace wg;
@@ -155,6 +156,21 @@ int main() {
             require(refused, "Target refuses a path outside the folder");
         }
 
+        // RR's kernels under Wine: the game prepares them at its first start (its shader caches are under its own Proton);
+        // no helper runs. On Windows a game without a rule is prepared by the launcher.
+        {
+            Context rctx;
+            rctx.logFile = Join(dir, L"rr-prep.log");
+            const wstring game = Join(dir, L"No Rule Game\\NoRuleGame.exe");
+            wstring why;
+            if (UnderWine()) {
+                require(RrKernelsInGame(game) && RrPrepStateOf(rctx, dir, game, 1, &why) == RrPrepState::InGame && Contains(why, L"Proton"),
+                        "RR kernels under Wine: prepared by the game at its first start");
+                require(PrepareRr(rctx, dir, game, Join(dir, L"no-runtime.dll"), 1, nullptr, &why) == 4, "PrepareRr under Wine: no helper run (4)");
+            } else {
+                require(!RrKernelsInGame(game), "RR kernels on Windows: a game without a rule is prepared by the launcher");
+            }
+        }
         // anti-cheat: the game's top folder and the markers it owns (a sibling game's or a library's markers do not count)
         {
             const wstring lib = Join(dir, L"OpenNR Library"), steam = Join(dir, L"SteamLib");
