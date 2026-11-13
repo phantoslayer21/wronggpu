@@ -245,6 +245,7 @@ wstring EnvVar(const wchar_t* name) {
 }
 // System DLLs this exe uses only sometimes are loaded from System32 only, never from the download folder.
 HMODULE LoadSystemDll(const wchar_t* name) { return LoadLibraryExW(name, nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32); }
+bool UnderWine() { return GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") != nullptr; }
 wstring SelfPath() { wchar_t b[MAX_PATH * 2]; DWORD n = GetModuleFileNameW(nullptr, b, (DWORD)std::size(b)); return wstring(b, n); }
 
 }  // namespace wg

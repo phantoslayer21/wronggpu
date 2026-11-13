@@ -65,5 +65,7 @@ wstring Sha256File(const wstring& path);
 wstring NowStamp(bool forFileName);
 wstring EnvVar(const wchar_t* name);
 HMODULE LoadSystemDll(const wchar_t* name);
+// The launcher under Wine (Linux): Wine's ntdll exports wine_get_version.
+bool UnderWine();
 wstring SelfPath();
 }  // namespace wg
