@@ -11,13 +11,14 @@ On Windows the runtime library is wronggpu_runtime.dll: the core runtime plus th
 8; the FidelityFX front end loads it through wgGetUpscalerBackend), built with the HIP SDK's clang against the static
 Microsoft C runtime (/MT). The converter map is copied next to it (the runtime reads it to check model.wgcm).
 
-Each kernel source is compiled with the command given in spec 90:
-    clang -x hip --offload-arch=gfx1201 --cuda-device-only -nogpuinc -O3 --no-gpu-bundle-output
+Each kernel source is compiled with the command given in spec 90, plus a fixed compilation-unit id (device_command):
+    clang -x hip --offload-arch=gfx1201 --cuda-device-only -nogpuinc -O3 --no-gpu-bundle-output -cuid=wg_<out name>
           --rocm-path=<ROCm> --rocm-device-lib-path=<ROCm>/amdgcn/bitcode <src> -o <out>.co
 """
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -96,8 +97,11 @@ def find_clang(rocm):
 
 
 def device_command(clang, rocm, src, out, device_libs=True, report=False, extra=(), soft_fp8=False, defines=None):
+    # a fixed compilation-unit id from the output file's name, so the __hip_cuid_... symbol of a code object is the same
+    # in every build folder (without -cuid, clang derives the id itself)
+    cuid = "wg_" + re.sub(r"[^A-Za-z0-9_]", "_", os.path.splitext(os.path.basename(out))[0])
     cmd = [clang, "-x", "hip", f"--offload-arch={ARCH}", "--cuda-device-only", "-nogpuinc", "-O3",
-           "--no-gpu-bundle-output"]
+           "--no-gpu-bundle-output", f"-cuid={cuid}"]
     if device_libs:
         cmd += [f"--rocm-path={rocm}", f"--rocm-device-lib-path={os.path.join(rocm, 'amdgcn', 'bitcode')}"]
     else:

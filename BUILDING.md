@@ -176,8 +176,18 @@ repository (the synthetic converter library stand-ins `WGC_SYNTH_BINS`, a model 
 ### Comparing kernels with a release
 
 The kernels are deterministic for a given DXC / HIP SDK version: `out\rr-rt\kernels.json` (name, arguments, SHA-256 of
-each DXIL), `out\runtime\dx12\manifest.json` (SHA-256 of each DXIL) and the code objects `out\runtime\*.co` can be
-compared file by file with another build of the same source.
+each DXIL) and `out\runtime\dx12\manifest.json` (SHA-256 of each DXIL) can be compared with another build of the same
+source: for `kernels.json`, compare each kernel's `nargs` and `sha256`.
+
+The code objects `out\runtime\*.co` and `out\runtime\gfx1200\*.co` of builds made with `-cuid` (the compilation-unit
+id that `clean\runner\build.py` now fixes) can be compared file by file. In a check of two build folders, all 54
+compiled code objects (gfx1201 and gfx1200) were byte-identical.
+
+Release 0.6.0 was built without `-cuid`, so none of its code objects is byte-identical to a new build: the
+`__hip_cuid_...` symbol differs. Compare the `.text` and `.note` sections instead (extract them with an ELF tool, for
+example `llvm-objcopy --dump-section`); they were identical in all 54, as was the section list. The `.rodata` section
+was identical in 52. In `post_w64__orig.co` (both targets) it moves by 64 bytes, and its 93 kernel descriptors differ
+only in their code-entry offset, by that amount; so do not use `.rodata` as the comparison for 0.6.0.
 
 ## 7. GPU steps (optional; not needed to build)
 
