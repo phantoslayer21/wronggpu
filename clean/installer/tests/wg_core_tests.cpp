@@ -248,6 +248,29 @@ int main() {
             require(ResolveGameExe(Join(q, L"Game\\QuarryNine.exe")) == Join(q, L"Game\\QuarryNine.exe"), "an exe without a game of its name below it stays");
         }
 
+        // paths for a game in another Wine prefix (Proton): the Z: name of the same file; unchanged outside Wine
+        {
+            const wstring f = Join(dir, L"prefix-path.txt");
+            WriteFileAtomic(f, "same file", 9);
+            const wstring g = PathForGamePrefix(f);
+            string back;
+            if (UnderWine())
+                require(StartsWithI(g, L"Z:\\") && ReadAll(g, back) && back == "same file", "PathForGamePrefix under Wine: a Z: path to the same file");
+            else
+                require(g == f, "PathForGamePrefix outside Wine: the path unchanged");
+            // two folders that do not exist yet (the RR data's F\ before its first conversion): still the Z: path, the tail kept
+            const wstring deepTail = L"\\no-such-dir\\F\\model.wgcm", deep = PathForGamePrefix(dir + deepTail);
+            if (UnderWine())
+                require(StartsWithI(deep, L"Z:\\") && deep.size() > deepTail.size() && deep.compare(deep.size() - deepTail.size(), deepTail.size(), deepTail) == 0,
+                        "PathForGamePrefix under Wine: a Z: path for missing folders too");
+            require(PathForGamePrefix(L"").empty(), "PathForGamePrefix of an empty path");
+            // a drive the prefix doesn't map: no Z: path can be made, the path comes back as it is (the install then
+            // reports it, install.cpp ModelPathForGame)
+            if (UnderWine()) {
+                const wstring unmapped = L"Q:\\wg-no-such-drive\\model";
+                require(PathForGamePrefix(unmapped) == unmapped, "PathForGamePrefix under Wine: an unmapped drive comes back unchanged");
+            }
+        }
         // the Context's log file
         Context ctx;
         ctx.logFile = Join(dir, L"setup.log");

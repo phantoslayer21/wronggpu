@@ -246,6 +246,28 @@ wstring EnvVar(const wchar_t* name) {
 // System DLLs this exe uses only sometimes are loaded from System32 only, never from the download folder.
 HMODULE LoadSystemDll(const wchar_t* name) { return LoadLibraryExW(name, nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32); }
 bool UnderWine() { return GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") != nullptr; }
+wstring PathForGamePrefix(const wstring& path) {
+    if (path.empty() || !UnderWine()) return path;
+    // Wine's kernel32: the Unix name of a DOS path, allocated on the process heap (UTF-8). It fails when more than the last
+    // part is missing (the RR data's F\ folder before its first conversion), so the deepest folder that exists is converted
+    // and the missing rest appended.
+    using UnixNameFn = char*(CDECL*)(const wchar_t*);
+    auto unixName = reinterpret_cast<UnixNameFn>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "wine_get_unix_file_name")));
+    if (!unixName) return path;
+    wstring head = path, tail;
+    char* u = nullptr;
+    while (!(u = unixName(head.c_str()))) {
+        const size_t cut = head.find_last_of(L"\\/");
+        if (cut == wstring::npos || cut < 3) return path;
+        tail = head.substr(cut) + tail;
+        head.resize(cut);
+    }
+    wstring z = L"Z:" + FromUtf8(u) + tail;
+    HeapFree(GetProcessHeap(), 0, u);
+    for (wchar_t& c : z)
+        if (c == L'/') c = L'\\';
+    return z;
+}
 wstring SelfPath() { wchar_t b[MAX_PATH * 2]; DWORD n = GetModuleFileNameW(nullptr, b, (DWORD)std::size(b)); return wstring(b, n); }
 
 }  // namespace wg

@@ -190,7 +190,10 @@ With the defaults nothing of this section changes the installer.
   conversion runs in memory during the checks and is written at install time to
   `%LOCALAPPDATA%\WrongGPU\model\model.wgcm` with `model-source.txt` (which file, its version, where it was found,
   `filter` = whether that file had the weights, and a `not-used` line for each file that converts too but was passed
-  over). The DLSS file is never copied or modified.
+  over). The DLSS file is never copied or modified. Under Wine (Linux), where Proton runs each game in a prefix of its
+  own, the game's settings name this folder and the Ray Reconstruction data file by their `Z:` paths, which relies on
+  `Z:` mapping the Linux root in the game's prefix (Wine's default). A path that can't be made a `Z:` path is written
+  as it is, logged, and reported in the install result.
 - **A model file that is already on the PC.** A `model.wgcm` whose stage digests match the embedded map is valid. It
   is reused without searching when it has the group `filter` and was written with the map this installer carries.
   A valid model M file without the group (written before the group existed, or from a DLSS file whose filter was
