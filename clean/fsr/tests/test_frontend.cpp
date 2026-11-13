@@ -138,6 +138,7 @@ static std::string g_createOptions;
 static std::vector<WgFrame> g_frames;
 static std::atomic<int> g_destroyed{0};
 static bool g_failCreate = false;
+static uint32_t g_failCreateOutputWidth = 0;  // FakeCreate fails while the output width is this (a size-bound failure, e.g. out of VRAM at 4K)
 static int g_failDispatchAt = -1;
 static int g_notReadyUntil = 0;  // FakeDispatch answers WG_ERROR_NOT_READY for frames below this count
 static int g_parameterErrorAt = -1;  // FakeDispatch answers WG_ERROR_PARAMETER for this frame (inputs it cannot take)
@@ -161,7 +162,7 @@ static WgResult FakeCreate(const WgCreateInfo* info, WgUpscaler** out) {
     while (!g_createGate) std::this_thread::sleep_for(std::chrono::milliseconds(1));
     if (g_aboutTo) info->log(info->log_user, WG_LOG_INFO, "about to start the HIP runtime (test)");
     info->log(info->log_user, WG_LOG_INFO, "fake upscaler created");
-    if (g_failCreate) return WG_ERROR_DEVICE;
+    if (g_failCreate || (g_failCreateOutputWidth && info->output_width == g_failCreateOutputWidth)) return WG_ERROR_DEVICE;
     *out = reinterpret_cast<WgUpscaler*>(new FakeUpscaler{1});
     ++g_created;
     return WG_OK;
@@ -337,6 +338,7 @@ static void Reset() {
     g_log.clear();
     g_destroyed = 0;
     g_failCreate = false;
+    g_failCreateOutputWidth = 0;
     g_failDispatchAt = -1;
     g_notReadyUntil = 0;
     g_parameterErrorAt = -1;
@@ -2725,6 +2727,49 @@ static void TestCustomSlotFailedCreate() {
     ResetHost();
 }
 
+// Issue #60: a create that fails for a reason bound to the size (out of VRAM at 4K) is remembered per size: a create
+// with the same sizes and flags is still stopped, a create at another size gets its own attempt and works.
+static void TestCustomSlotFailureKeyHasSize() {
+    Reset();
+    ResetHost();
+    g_originalAvailable = false;
+    g_compareApi = &g_hostApi;
+    g_failCreateOutputWidth = 3840;  // the runtime cannot create at 4K, and only there
+    g_activateOn = true;
+    Config config;
+    config.hosted = true;
+    config.customSlot = true;
+    auto fe = MakeFrontEnd(config);
+    auto create = [&](uint32_t renderW, uint32_t renderH, uint32_t outW, uint32_t outH, uint32_t flags, ffxContext* ctx) {
+        UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE | flags, true);
+        c.version.versionId = kWrongGpuProviderVersionId;
+        c.upscale.maxRenderSize = {renderW, renderH};
+        c.upscale.maxUpscaleSize = {outW, outH};
+        return fe->CreateContext(ctx, &c.upscale.header, nullptr);
+    };
+    ffxContext ctx = nullptr;
+    // 4K: fails, and is remembered.
+    CHECK(create(2560, 1440, 3840, 2160, 0, &ctx) == FFX_API_RETURN_ERROR_RUNTIME_ERROR && !ctx);
+    CHECK(g_createCalls == 1 && CountLog("this failure is remembered for the session") == 1);
+    // The same parameters again (a host that re-creates in a loop): no new attempt.
+    CHECK(create(2560, 1440, 3840, 2160, 0, &ctx) == FFX_API_RETURN_ERROR_RUNTIME_ERROR && !ctx);
+    CHECK(g_createCalls == 1);
+    // 2560x1440: a new attempt, which works, and the context is WrongGPU's own.
+    CHECK(create(1706, 960, 2560, 1440, 0, &ctx) == FFX_API_RETURN_OK && ctx);
+    CHECK(g_createCalls == 2 && fe->OwnContextCount() == 1 && g_created == 1);
+    CHECK(g_hostCreates == 0 && g_amd.empty());  // not AMD's context
+    CHECK(fe->DestroyContext(&ctx, nullptr) == FFX_API_RETURN_OK && !ctx && fe->OwnContextCount() == 0);
+    // A different maximum render size at the failing output size is another attempt too (it fails again here: the
+    // fake fails at that width), and it is remembered for its own key.
+    CHECK(create(1920, 1080, 3840, 2160, 0, &ctx) == FFX_API_RETURN_ERROR_RUNTIME_ERROR && !ctx);
+    CHECK(g_createCalls == 3);
+    CHECK(create(1920, 1080, 3840, 2160, 0, &ctx) == FFX_API_RETURN_ERROR_RUNTIME_ERROR && g_createCalls == 3);
+    // The create flags are part of the key as well.
+    CHECK(create(2560, 1440, 3840, 2160, FFX_UPSCALE_ENABLE_DEPTH_INVERTED, &ctx) == FFX_API_RETURN_ERROR_RUNTIME_ERROR && !ctx);
+    CHECK(g_createCalls == 4);
+    ResetHost();
+}
+
 // 0.6.0 follow-up (a tester's CONTROL Resonant): custom slot, the upscaler refusing the game's inputs for good
 // (WG_ERROR_INPUT: a colour texture with mips before the runtime took them) and the host making a new context after
 // every failed dispatch (393 in 3 minutes): one create, one dispatch, then the remembered failure makes every new
@@ -3045,6 +3090,7 @@ static void TestModelLookup() {
 
 int main() {
     TestCustomSlotFailedCreate();
+    TestCustomSlotFailureKeyHasSize();
     TestCustomSlotInputRefused();
     TestOutputResize();
     TestBrokenNotCalledAgain();
