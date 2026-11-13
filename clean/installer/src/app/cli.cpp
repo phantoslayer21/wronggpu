@@ -20,7 +20,8 @@
 //   hipcheck                      the HIP runtime check alone
 //   model status | model convert [--model=<dll>]
 //   rr-data status | rr-data convert [--dll=<RR model file>]   the Ray Reconstruction data (shared by the RR games)
-//                                 both converts: --ignore=<path> | --ignore=sha256=<hex>, --ignore-list=<file> (repeatable; added
+//                                 both converts: --ignore=<path> | --ignore=<path> sha256=<hex> (both must match) |
+//                                 --ignore=sha256=<hex> (every identical copy), --ignore-list=<file> (repeatable; added
 //                                 to the well-known ignore lists, wg_core/convert_ignore.h), --library=<folder> (its sub-folders
 //                                 searched as games, this run only)
 //   rr-recheck <game> [--run]   what the window's start does: RR's kernels prepared again after a driver / runtime change
