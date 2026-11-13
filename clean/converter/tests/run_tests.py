@@ -331,7 +331,7 @@ def test_preset_l(r):
             "inenc_extra" in case_l.expected and "inenc_extra" not in case_m.expected and
             os.path.isdir(os.path.join(r.work, "preset-l", "out-pair-L", "raw", "inenc_extra")) and
             not os.path.exists(os.path.join(r.work, "preset-l", "out-pair-M", "raw", "inenc_extra")))
-    msg_l = "This DLSS file has no preset-L model. Version 310.9 or newer is needed."
+    msg_l = "This DLSS file has no preset-L model. Version 310.5 or newer is needed."
     for label, p, f, want in (("preset-L map, a file with only preset M's block", lp, mo, msg_l),
                               ("preset-M map, a file with only preset L's block", mp, lo, MSG["no_preset_m"])):
         code, so, se = r.run(p, [f], r.path("preset-l", "out-fail", "x")[:-2])

@@ -604,7 +604,7 @@ static void test_api_files(const fs::path& work) {
     // preset L (#89): the map versions of preset M, its own message; never the preset of a map without the field
     CHECK(find_preset("L") && find_preset("L")->allows(1) && find_preset("L")->allows(4) && !find_preset("L")->allows(2) &&
           !find_preset("L")->allows(3) && !find_preset("L")->allows(5) && std::string(find_preset("L")->no_model_message) == kMsgNoPresetL &&
-          std::string(kMsgNoPresetL).find("preset-L") != std::string::npos);
+          std::string(kMsgNoPresetL) == "This DLSS file has no preset-L model. Version 310.5 or newer is needed.");
     CHECK(std::string(find_preset("M")->no_model_message) == kMsgNoPresetM && std::string(find_preset("K")->no_model_message) == kMsgNoPresetK &&
           std::string(find_preset("F")->no_model_message) == kMsgNoPresetF);
     {
