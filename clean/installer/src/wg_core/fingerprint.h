@@ -11,7 +11,8 @@ namespace wg {
 enum class Tool {
     Unknown,         // a file none of the rules recognise (never overwritten, never taken as a proxy name)
     Microsoft,       // a Windows component the game ships (its version resource says Microsoft)
-    WrongGPU,        // ours (version resource "WrongGPU", or a hash of one of our releases)
+    WrongGPU,        // version resource or text "WrongGPU" (a hint only: what WrongGPU removes goes by the install record and
+                     // our releases' hashes); an OptiScaler build that also names WrongGPU is OptiScaler
     WrongGPULegacy,  // WrongGPU 0.1.x / 0.2.x, published as "DLSS 4.5 AMD"
     OptiScaler,
     ReShade,
@@ -28,6 +29,7 @@ enum class Tool {
     VendorDll,          // a DLL whose version resource or signer names NVIDIA (e.g. the game's DLSS DLL copied as nvngx.dll)
     NrOnAmd,         // the "DLSS-NR on AMD" mod
     ReFramework,     // REFramework (a mod framework of RE Engine games): recognised by gamerules.h, it stays
+    OtherPlugin,     // (rules table only, 0.6.1: another setup's .asi in OptiScaler's plugin folders, coexist.h ForeignPlugins)
     AntiCheat,       // (rules table only: anti-cheat markers, not a fingerprint)
     Overlay,         // (rules table only: a running overlay or injector)
     GameApi,         // (rules table only: the game's graphics API)

@@ -32,6 +32,11 @@ AMD's upscaler; on any other build the plugin changes nothing and WrongGPU stays
 `Dx12Upscaler=fsr31`, `FfxDx12SRPath` and `UpscalerIndex=0` stay as before. Uninstall removes the plugin, its folder
 when the install made it, and its files (`wronggpu-asi.log`, `wronggpu-asi.ini` in the OptiScaler folder), and puts the
 player's OptiScaler.ini back. Tests: `test_asi_plugin`.
+Other setups' plugins (0.6.1, `ForeignPlugins`): `.asi` files in `plugins\`, `OptiScaler\plugins\` or `wronggpu-plugins\` that
+the install record doesn't name with that hash. In a Ray Reconstruction game WrongGPU's RR stays out by default (they may
+hook RR too; the result says so); with the player's OK (the window's question, `--switch-plugins`) they are moved aside
+(backed up, put back on uninstall) and WrongGPU's RR goes in. Elsewhere they stay beside WrongGPU's plugin.
+WrongGPU RR from another package at exactly `plugins\WrongGPU-RR.asi` is overwritten by the install's RR plugin (backed up by its copy entry, put back on uninstall); under any other name it stays.
 
 For 007 First Light (`007FirstLight.exe`) the installer also sets OptiScaler's `[Spoofing] DxgiFactoryWrapping=true`:
 with OptiScaler 0.9.5.4 the game does not start otherwise when WrongGPU is OptiScaler's FSR library (the list is
@@ -227,11 +232,16 @@ With the defaults nothing of this section changes the installer.
   kept and the old renamed copy is removed; the other DLLs are restored as usual.
 - **Files that changed since the install** (uninstall and update alike). A file that is WrongGPU's own all the same is
   removed like the one the record names, and the game's original comes back: an FSR DLL with WrongGPU's version
-  resource (a newer build the player placed by hand), or another payload file named `wronggpu*`, such as
-  `wronggpu_runtime.dll` (not the settings file). Any other changed FSR DLL follows the rule for game updates above;
-  any other changed file is left in place. The game's original of an FSR DLL is never removed while WrongGPU's DLL is
+  resource (a newer build the player placed by hand), or another payload file whose hash is one of WrongGPU's releases
+  (`known_releases.h`) or of the embedded payload (0.6.1: never by a version resource, which another setup's build may
+  carry; not the settings file). Any other changed FSR DLL follows the rule for game updates above; any other changed
+  file is left in place with a warning (another setup's OptiScaler over the proxy is named as such). OptiScaler.ini is the
+  install's only while its keys point at WrongGPU's files; an uninstall that leaves an OptiScaler.ini naming WrongGPU's
+  files warns that its setup may need them. The game's original of an FSR DLL is never removed while WrongGPU's DLL is
   under the game's name: it comes back from the backup, or from its `*.wronggpu-original.dll` copy when the backup
-  is missing or damaged, checked against the hash in the record.
+  is missing or damaged, checked against the hash in the record. When neither is there (0.6.1), an uninstall leaves
+  WrongGPU's DLL under the game's name with a warning (verify the game's files in the store) and removes the rest; an
+  update or repair stops before anything changes, keeping the record and backup.
 - **Collect logs** (button, `/COLLECT`, or "Modify" in Apps & features): one .zip with WrongGPU's logs and crash
   notes, the install record, setup log, model source, system information (Windows, GPU, driver, HIP runtime, FSR DLL
   state, model state, where the output filter comes from, file hashes) and recent Windows crash / GPU-reset events.

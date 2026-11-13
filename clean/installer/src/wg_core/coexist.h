@@ -61,6 +61,8 @@ struct CoexistReport {
     bool asiLoader = false;       // Ultimate ASI Loader: WrongGPU's plugin goes to its own folder (kAsiPluginOwnDir)
     bool hipTool = false;         // another HIP-based tool: version.dll is never taken
     wstring playersOptiProxy;     // the name the player's OptiScaler loads as (reused by a switch)
+    std::vector<wstring> foreignPlugins;  // 0.6.1: other setups' .asi files in OptiScaler's plugin folders (ForeignPlugins)
+    bool foreignPluginsBlockRr = false;   // ...and the game uses Ray Reconstruction: WrongGPU's RR stays out unless they are moved aside
     GraphicsApi api;
     const Finding* refusal() const;   // the first Refuse finding, or null
     bool has(Tool t) const;
@@ -73,16 +75,29 @@ inline const wchar_t* const kProxyOrder[] = {L"dxgi.dll", L"winmm.dll", L"versio
 inline const wchar_t* const kNeverProxy[] = {L"d3d12.dll", L"dinput8.dll", L"dwmapi.dll", L"xinput1_3.dll", L"xinput1_4.dll", L"xinput9_1_0.dll"};
 // The plugin's folder when Ultimate ASI Loader is present (it would load plugins\WrongGPU.asi a second time).
 const wchar_t* const kAsiPluginOwnDir = L"wronggpu-plugins";
+// 0.6.1: the folders OptiScaler loads plugins from (next to it, in its own OptiScaler\ folder, or WrongGPU's own folder).
+inline const wchar_t* const kPluginDirs[] = {L"plugins", L"OptiScaler\\plugins", L"wronggpu-plugins"};
+// The .asi files in those folders next to the exe that are not WrongGPU's install's own (the record copied them there with
+// that hash), relative to exeDir. Another setup's plugin may hook Ray Reconstruction as WrongGPU's RR plugin does: by default
+// WrongGPU's RR stays out of such a game (with a warning); with the player's OK (Consent::movePlugins) they are moved aside
+// (backed up, put back on uninstall) and WrongGPU's RR goes in. Never by a plugin's name alone.
+std::vector<wstring> ForeignPlugins(const wstring& exeDir, const Record* ours);
+// 0.6.1 (gap 4): WrongGPU's RR plugin exports this marker (clean/rr_f/proxy/include/wg_rr_settings_contract.h,
+// WG_RR_CONTRACT_EXPORT). A plugin file that exports it is WrongGPU's own RR plugin whatever its name or hash (a copy another
+// package placed from the integration kit): never "another setup's plugin", never moved aside. Read from the file's PE
+// export table, never by loading it.
+const char* const kRrContractExport = "WrongGPU_GetSettingsContract";
+bool ExportsRrContract(const wstring& path);
+// Those copies in OptiScaler's plugin folders that the install record doesn't name with that hash (relative to exeDir): the
+// rules table shows them as "WrongGPU RR (from another package)".
+std::vector<wstring> OurPluginsFromOtherPackages(const wstring& exeDir, const Record* ours);
+// The warning when they keep WrongGPU's RR out, and the line of a plugin moved aside with the OK.
+wstring ForeignPluginsText(const std::vector<wstring>& plugins);
 
 // Every finding for one game (exe) and its install folder (dir): fingerprints of the DLLs next to the exe, the tools'
 // folders and marker files, running overlays, anti-cheat, the graphics API, older installs. ours: the game's install
 // record (its files are not "other tools"); null when there is none.
 CoexistReport AssessCoexistence(Context& ctx, const wstring& exe, const wstring& dir, const Record* ours);
-// WrongGPU's own OptiScaler (bug 2026-10-17: a hosted install's OptiScaler.log made it "your OptiScaler"): the hashes of
-// what the record wrote (owners wg / wg-optibundle) and of the package's OptiScaler.dll this run installs from. An
-// OptiScaler DLL with one of these hashes is never the player's, under whichever name it loads.
-std::set<wstring> OurOptiHashes(Context& ctx, const Record* ours);
-bool IsOurOptiScaler(const std::set<wstring>& ourHashes, const wstring& path);
 // The proxy picker (design section 5): our earlier install's name, else the first name of kProxyOrder that is free,
 // never a name a recognised tool, an unknown file or a game's own Windows DLL holds (version.dll never when hipTool);
 // the name the player's OptiScaler had (a switch moves it aside) only when no other is free. The reason says what

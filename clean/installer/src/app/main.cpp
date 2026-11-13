@@ -95,6 +95,9 @@ using std::wstring;
 #include "wg_core/payload.h"
 #include "wg_core/record.h"
 #include "wg_core/rrprep.h"
+#ifdef WRONGGPU_TESTING
+#include "wg_core/test_temp_guard.h"
+#endif
 
 namespace wg::app {
 
@@ -202,6 +205,9 @@ using namespace wg;
 using namespace wg::app;
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
+#ifdef WRONGGPU_TESTING
+    if (wg_test::TempGuardRefuses()) return wg_test::kTempGuardExit;  // test builds: never a temp folder outside the configured root
+#endif
     {   // release 0.6.0: the Ray Reconstruction helper (rrprep.h): this program copied under a game's program name, started by
         // the launcher with --rr-prepare <runtime> <passes>; nothing else of the launcher runs in it
         int hc = 0; LPWSTR* hv = CommandLineToArgvW(GetCommandLineW(), &hc);

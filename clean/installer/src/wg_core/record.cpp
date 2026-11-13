@@ -6,6 +6,7 @@
 #include <array>
 
 #include "detect.h"
+#include "fingerprint.h"
 #include "gamerules.h"
 #include "json_writer.h"
 #include "launcher.h"
@@ -14,6 +15,7 @@
 #include "payload.h"
 #include "rr.h"
 #include "rrconfig.h"
+#include "settings.h"
 
 namespace wg {
 
@@ -190,6 +192,22 @@ wstring Target(const wstring& dir, const wstring& rel) {
 // A record of this route: its OptiScaler was put there by this installer, and the logs that OptiScaler writes while the
 // game runs belong to the install (removed with it, never "another mod").
 bool HostedRecord(const Record& m) { for (auto& e : m.e) if (e.action == L"copy" && IEq(e.rel, L"OptiScaler.ini")) return true; return false; }
+bool OptiIniIsOurs(const wstring& dir, const Record& m) {
+    string text, v;
+    if (!ReadAll(Join(dir, L"OptiScaler.ini"), text)) return false;
+    auto trimmed = [](string s) {
+        const char* const ws = " \t\r\n\"";
+        const size_t a = s.find_first_not_of(ws), z = s.find_last_not_of(ws);
+        return a == string::npos ? string() : s.substr(a, z - a + 1);
+    };
+    if (RecordCopies(m, kOptiSlotFrontEnd)) return IniHasKey(text, "Upscalers", "Dx12Upscaler", &v) && IEq(FromUtf8(trimmed(v)), L"WrongGPU");
+    if (RecordCopies(m, kOptiFrontEnd)) {
+        if (!IniHasKey(text, "Libraries", "FfxDx12SRPath", &v)) return false;
+        const wstring path = FromUtf8(trimmed(v));
+        return !path.empty() && IEq(FullPath(path), FullPath(Join(dir, kOptiFrontEnd)));
+    }
+    return true;
+}
 
 // ------------------------------------------------------------------------------------------------
 // Uninstall registration (one entry per game)
@@ -380,7 +398,7 @@ void StartCleanup(Context& ctx, const wstring& state, const wstring& self, const
     }
 }
 
-std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool failedInstall, bool keepState) {
+std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool failedInstall, bool keepState, std::map<wstring, wstring>* keptWarnings) {
     Record m;
     if (!LoadRecord(RecordPath(dir), m) || m.legacy) Fail(L"No WrongGPU installation record was found in " + dir + L".", EXIT_NOT_INSTALLED);
     if (!IEq(m.game, dir)) Fail(L"The installation record belongs to a different folder: " + m.game);
@@ -405,7 +423,17 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
                 if (!Exists(b) || Sha256File(b) != e.orig) {
                     // The game's FSR DLL is in the folder a second time, next to WrongGPU's: that copy will do.
                     const wstring kept = sl ? Target(dir, sl->original) : wstring();
-                    if (kept.empty() || Sha256File(kept) != e.orig) Fail(L"The backup of " + e.rel + L" is missing or damaged. Nothing was changed.");
+                    const bool keptOk = !kept.empty() && Sha256File(kept) == e.orig;
+                    // 0.6.1: an uninstall never takes a game FSR DLL away without the game's original to put back (neither
+                    // the backup nor the kept copy): the file under the game's name stays, with a warning, and the rest of
+                    // the install goes. An update or repair still stops here (record and backup stay for the next try).
+                    if (!keptOk && sl && !keepState) {
+                        skip.insert(i);
+                        warnings.push_back(L"Left in place: " + e.rel + L" (WrongGPU's file under the game's name: the game's own " + e.rel +
+                                           L" isn't in the backup to put back). Verify the game's files in your store to get it back.");
+                        continue;
+                    }
+                    if (!keptOk) Fail(L"The backup of " + e.rel + L" is missing or damaged. Nothing was changed.");
                     from[i] = kept;
                 }
             }
@@ -421,23 +449,34 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
                             continue;
                         }
                         // rc6 L5: the OptiScaler.ini of this install's OptiScaler setup, saved by OptiScaler's own menu: the
-                        // install's all the same (removed with it; a player's file it replaced comes back from the backup)
-                        if (e.action == L"copy" && IEq(e.rel, L"OptiScaler.ini")) {
+                        // install's all the same (removed with it; a player's file it replaced comes back from the backup).
+                        // 0.6.1: only while its keys still point at WrongGPU's files (OptiIniIsOurs); else it is another
+                        // setup's: left in place with a warning (an update replaces it only with the switch question's OK,
+                        // and then backs it up)
+                        if (e.action == L"copy" && IEq(e.rel, L"OptiScaler.ini") && OptiIniIsOurs(dir, m)) {
                             ui.log(L"OptiScaler.ini was saved by OptiScaler's menu since the install: " +
                                    wstring(e.existed ? L"the file that was there before is put back" : L"removed with the rest"));
                             continue;
                         }
-                        // Changed since install, but WrongGPU's own all the same (a newer build placed by hand): an FSR
-                        // DLL by its version resource, the rest of the payload by its name (the settings file is the
-                        // player's). It goes like the file the record names, and the game's original comes back.
+                        // Changed since install, but WrongGPU's own all the same: an FSR DLL of a direct install by its
+                        // version resource (the game's original comes back in its place), any other file only when its
+                        // hash is one of WrongGPU's releases or of this build's payload (0.6.1: never by a version
+                        // resource; another setup's build may name WrongGPU, and is left in place). The settings file is
+                        // the player's.
                         if (e.action == L"copy" && (sl ? ClassifySlot(*sl, t, nullptr, info) == FFX_OURS
-                                                       : !EndsWithI(e.rel, L".ini") && ProvablyOurs(ctx, t))) {
-                            ui.log(e.rel + L" is not the file that was installed, but it is WrongGPU's own" + (sl ? L" (" + info + L")" : wstring()) + L": removed with the rest");
+                                                       : !EndsWithI(e.rel, L".ini") && KnownReleaseFile(ctx, t))) {
+                            ui.log(e.rel + L" is not the file that was installed, but it is WrongGPU's own" + (sl ? L" (" + info + L")" : wstring(L" (a release's file)")) + L": removed with the rest");
                             continue;
                         }
                         skip.insert(i);
+                        // 0.6.1: another tool's file there now (another setup's OptiScaler over WrongGPU's proxy) is named as such
+                        const Fingerprint fp = e.action == L"copy" && !IsSlotName(e.rel) ? IdentifyFile(t) : Fingerprint();
                         warnings.push_back(e.action == L"copy" && IsSlotName(e.rel) ? L"The game replaced " + e.rel + L" (probably an update); its new file was kept."
-                                                               : L"Left in place (changed since install): " + e.rel);
+                                           : e.action == L"copy" && IEq(e.rel, L"OptiScaler.ini")
+                                               ? L"Left in place: OptiScaler.ini no longer points at WrongGPU's files (another setup changed it), so it was not removed."
+                                           : fp.tool == Tool::OptiScaler ? L"Left in place: " + e.rel + L" is now another setup's OptiScaler (not the file WrongGPU installed)."
+                                                                         : L"Left in place (changed since install): " + e.rel);
+                        if (keptWarnings) (*keptWarnings)[Lower(e.rel)] = warnings.back();
                     }
                 }
             }
@@ -500,6 +539,21 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
         for (size_t k = m.e.size(); k-- > 0;)  // a folder the install made that held only those files
             if (m.e[k].action == L"dir" && !skip.count(k) && IsDir(Target(dir, m.e[k].rel)) && RemoveDirectoryW(Target(dir, m.e[k].rel).c_str()))
                 ui.log(L"removed folder " + m.e[k].rel);
+    }
+    // 0.6.1: an OptiScaler.ini that stays after the uninstall (another setup's) and names WrongGPU's files: that setup uses
+    // them and may stop working now that WrongGPU's copies are gone
+    if (!failedInstall && !keepState) {
+        const wstring exeDir = m.exe.empty() ? dir : Parent(m.exe);
+        std::set<wstring> seen;
+        for (const wstring& d : {dir, exeDir, Join(exeDir, L"OptiScaler")}) {
+            const wstring p = Join(d, L"OptiScaler.ini");
+            string text;
+            if (!seen.insert(Lower(FullPath(p))).second || !ReadAll(p, text)) continue;
+            for (auto& c : text) c = (char)tolower((unsigned char)c);
+            if (text.find("wronggpu") == string::npos) continue;
+            const wstring shown = p.size() > dir.size() + 1 && StartsWithI(p, dir + L"\\") ? p.substr(dir.size() + 1) : p;
+            warnings.push_back(L"Another setup's " + shown + L" still names WrongGPU's files: that setup may need them, and WrongGPU's copies were removed with it.");
+        }
     }
     // the game's Engine.ini outside the game folder (rrconfig.h, rr_config_fix=on): its line taken out again
     if (!failedInstall && !keepState && m.rrconfig.present) {

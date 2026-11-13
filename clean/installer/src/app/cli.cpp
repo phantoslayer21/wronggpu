@@ -4,6 +4,8 @@
 //   status [game]                 one game or all: status, versions, last run, problems
 //   install | repair | update <game>   (--opti=<OptiScaler download>, --model=<nvngx_dlss.dll>, --experimental,
 //                                      --switch: replace the player's own OptiScaler / other upscaler mod (backed up),
+//                                      --switch-plugins: other setups' OptiScaler plugins aside (backed up) so WrongGPU's
+//                                      Ray Reconstruction goes in (without it an RR game installs without WrongGPU's RR),
 //                                      --removeold: remove an older WrongGPU install first, --force: no GPU/HIP block,
 //                                      --rr-config-fix=on|off: Borderlands 4 / Hogwarts Legacy's Engine.ini question answered)
 //   uninstall | rollback | adopt <game>   (adopt --all: every 0.5.x install the scan finds)
@@ -437,6 +439,7 @@ void EntryJson(Json& j, const GameEntry& e) {
     FindingsJson(j, e.coexist);
     j.Key("proxy_plan").Obj().S("name", e.proxyPlan.name).S("reason", e.proxyPlan.reason).B("untested", e.proxyPlan.untested).End();
     if (!e.leftovers.empty()) {
+        if (e.leftoversOtherSetup) j.B("leftovers_other_setup", true);  // 0.6.1: used by another mod's setup (left alone)
         j.Key("leftovers").Arr();
         for (auto& l : e.leftovers) j.Obj().S("path", l.rel).S("sha256", l.sha).S("version", l.version).End();
         j.End();
@@ -600,6 +603,7 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
         if (!Game(a, o, exe, dir)) return o.code;
         if (NeedsElevation(dir)) { o.j.S("error", L"administrator permission is needed for " + dir); return EXIT_REFUSED; }
         OpRequest r; ParseOp(verb, r.op); r.exe = exe; r.dir = dir;
+        r.force = a.has(L"force");  // 0.6.1: files another mod's setup uses are left alone unless --force
         OpLogBegin();
         Ui ui; ui.step = [](int, int, const wstring&) {}; ui.log = [](const wstring& s) { LogLine(g.ctx, s); };
         const OpResult res = RunOp(g.ctx, r, ui);
@@ -636,6 +640,7 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
         r.optiPackage = op == Op::Install || op == Op::Update || op == Op::Repair ? OptiFor(a, gs) : (!a.get(L"opti").empty() ? a.get(L"opti") : gs.optiPackage);
         r.modelDll = a.get(L"model");
         r.moveMods = a.has(L"switch") || a.has(L"movemods");
+        r.movePlugins = a.has(L"switch-plugins") || a.has(L"moveplugins");  // 0.6.1: other setups' OptiScaler plugins aside (WrongGPU's RR then goes in)
         r.removeOld = a.has(L"removeold") || a.has(L"clean-leftovers");
         r.experimental = a.has(L"experimental");
         r.force = a.has(L"force");

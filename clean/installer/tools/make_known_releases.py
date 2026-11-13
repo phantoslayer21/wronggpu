@@ -3,23 +3,30 @@
 """Writes src/wg_core/known_releases.h: the SHA-256 and size of every file WrongGPU's releases installed (the launcher
 recognises leftover WrongGPU files without an install record by these hashes only; build/launcher-design.md section 6).
 
-    python make_known_releases.py --out src/wg_core/known_releases.h <version>=<payload folder> ...
+    python make_known_releases.py --out src/wg_core/known_releases.h [--keep <existing header>] <version>=<payload folder> ...
 
-The payload folders are our own release builds (build/release/<version>/payload*). Only .dll, .asi and wronggpu-*.txt
-files are listed. A hash that two releases share is listed once, with the earlier version. Written for this project;
-Python standard library only.
+The payload folders are our own release builds (build/release/<version>/payload*; 0.6.0: build/release-060-rc/payload and
+its RR folder rr). Only .dll, .asi and wronggpu-*.txt files are listed. A hash that two releases share is listed once, with
+the earlier version. --keep: the rows of an existing header come first, unchanged (a new release added without rebuilding
+the older folders). Written for this project; Python standard library only.
 """
 import argparse
 import hashlib
 import os
+import re
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
+    ap.add_argument("--keep", help="an existing known_releases.h whose rows are kept first")
     ap.add_argument("payloads", nargs="+", help="<version>=<folder>")
     a = ap.parse_args()
     rows, seen = [], set()
+    if a.keep:
+        for m in re.finditer(r'\{L"([^"]*)", L"((?:[^"\\]|\\.)*)", (\d+)ull, L"([0-9a-f]{64})"\}', open(a.keep, encoding="utf-8").read()):
+            rows.append((m.group(1), m.group(2).replace("\\\\", "\\"), int(m.group(3)), m.group(4)))
+            seen.add(m.group(4))
     for item in a.payloads:
         version, folder = item.split("=", 1)
         for dirpath, _, files in sorted(os.walk(folder)):

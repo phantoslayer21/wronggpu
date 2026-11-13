@@ -19,6 +19,7 @@
 #include "wg_core/pe.h"
 #include "wg_core/profile.h"
 #include "wg_core/record.h"
+#include "wg_core/test_temp_guard.h"
 #include "wg_core/rr.h"
 #include "wg_core/rrconfig.h"
 #include "wg_core/settings.h"
@@ -40,9 +41,62 @@ wstring TempFolder() {
     return dir;
 }
 string OptionsOf(const string& ini) { string v, s; IniGetFrontEnd(ini, "runtime_options", &v, &s); return v; }
+
+// A minimal PE32+ DLL with a version resource of `strings` and `extra` bytes after it (a port of tests/mockpe.py make_dll
+// without exports or imports, from Microsoft's public PE/COFF and VS_VERSIONINFO documentation): never loaded, only read.
+void Le(string& b, uint64_t v, int n) { for (int i = 0; i < n; ++i) b += char((v >> (8 * i)) & 0xFF); }
+string U16z(const wstring& s) { string r; for (wchar_t c : s) Le(r, (uint16_t)c, 2); Le(r, 0, 2); return r; }
+void Pad(string& b, size_t a) { while (b.size() % a) b += '\0'; }
+string VNode(const wstring& key, const string& value, bool text, std::vector<string> children = {}) {
+    string body;
+    Le(body, 0, 2); Le(body, 0, 2); Le(body, text ? 1 : 0, 2);
+    body += U16z(key);
+    Pad(body, 4);
+    body += value;
+    if (!children.empty()) { Pad(body, 4); for (auto& c : children) { Pad(c, 4); body += c; } }
+    string out;
+    Le(out, body.size(), 2); Le(out, text ? value.size() / 2 : value.size(), 2);
+    return out + body.substr(4);
+}
+string MockDll(const std::vector<std::pair<wstring, wstring>>& strings, const string& extra) {
+    string fixed;
+    for (uint32_t v : {0xFEEF04BDu, 0x00010000u, 0x00010000u, 0u, 0x00010000u, 0u, 0x3Fu, 0u, 0x40004u, 2u, 0u, 0u, 0u}) Le(fixed, v, 4);
+    std::vector<string> entries;
+    for (auto& s : strings) entries.push_back(VNode(s.first, U16z(s.second), true));
+    string tr; Le(tr, 0x409, 2); Le(tr, 1200, 2);
+    const string vi = VNode(L"VS_VERSION_INFO", fixed, false,
+                            {VNode(L"StringFileInfo", "", false, {VNode(L"040904B0", "", false, entries)}), VNode(L"VarFileInfo", "", false, {VNode(L"Translation", tr, false)})});
+    const uint32_t fa = 0x200, sa = 0x1000;
+    string rsrc;
+    auto dirHead = [&] { Le(rsrc, 0, 4); Le(rsrc, 0, 4); Le(rsrc, 0, 2); Le(rsrc, 0, 2); Le(rsrc, 0, 2); Le(rsrc, 1, 2); };
+    dirHead(); Le(rsrc, 16, 4); Le(rsrc, 0x80000000u | 0x18, 4);
+    dirHead(); Le(rsrc, 1, 4); Le(rsrc, 0x80000000u | 0x30, 4);
+    dirHead(); Le(rsrc, 0x409, 4); Le(rsrc, 0x48, 4);
+    Le(rsrc, sa + 0x58, 4); Le(rsrc, vi.size(), 4); Le(rsrc, 0, 4); Le(rsrc, 0, 4);
+    rsrc.resize(0x58, '\0');
+    rsrc += vi;
+    const size_t rsrcSize = rsrc.size();
+    string content = rsrc; Pad(content, 16);
+    string raw = content; Pad(raw, fa);
+    const uint32_t vsize = (uint32_t)content.size(), image = sa + ((vsize + sa - 1) / sa) * sa;
+    string h = "MZ"; h.resize(0x3C, '\0'); Le(h, 0x40, 4);
+    h += string("PE\0\0", 4);
+    Le(h, 0x8664, 2); Le(h, 1, 2); Le(h, 0, 4); Le(h, 0, 4); Le(h, 0, 4); Le(h, 240, 2); Le(h, 0x2022, 2);
+    Le(h, 0x20B, 2); Le(h, 14, 1); Le(h, 0, 1); Le(h, 0, 4); Le(h, raw.size(), 4); Le(h, 0, 4); Le(h, 0, 4); Le(h, sa, 4);
+    Le(h, 0x180000000ull, 8); Le(h, sa, 4); Le(h, fa, 4);
+    for (int v : {6, 0, 0, 0, 6, 0}) Le(h, v, 2);
+    Le(h, 0, 4); Le(h, image, 4); Le(h, 0x200, 4); Le(h, 0, 4); Le(h, 2, 2); Le(h, 0x160, 2);
+    Le(h, 0x100000, 8); Le(h, 0x1000, 8); Le(h, 0x100000, 8); Le(h, 0x1000, 8); Le(h, 0, 4); Le(h, 16, 4);
+    for (int d = 0; d < 16; ++d) { Le(h, d == 2 ? sa : 0, 4); Le(h, d == 2 ? rsrcSize : 0, 4); }
+    string name = ".rsrc"; name.resize(8, '\0');
+    h += name; Le(h, vsize, 4); Le(h, sa, 4); Le(h, raw.size(), 4); Le(h, fa, 4); Le(h, 0, 4); Le(h, 0, 4); Le(h, 0, 2); Le(h, 0, 2); Le(h, 0x40000040u, 4);
+    h.resize(fa, '\0');
+    return h + raw + extra;
+}
 }  // namespace
 
 int main() {
+    if (wg_test::TempGuardRefuses()) return wg_test::kTempGuardExit;  // never a temp folder outside the configured root
     try {
         // ---- validation -----------------------------------------------------------------------------------------
         string n; wstring why;
@@ -252,8 +306,8 @@ int main() {
                     "moved game: the record read from the new folder names it (game, exe), movedFrom the old one");
             require(r.inikeys.size() == 1 && r.inikeys[0].ours == ToUtf8(newDir) + "\\plugins" && r.inikeys[0].original == "auto", "moved game: the journal's paths follow");
             // another drive letter: only the changed part of the path is replaced
-            Record d = m; d.game = L"Q:\\Games\\Moved Game"; d.exe = L"Q:\\Games\\Moved Game\\Game.exe"; d.model = L"Q:\\model.wgcm";
-            SaveRecord(RecordPath(newDir), d);
+            Record drive = m; drive.game = L"Q:\\Games\\Moved Game"; drive.exe = L"Q:\\Games\\Moved Game\\Game.exe"; drive.model = L"Q:\\model.wgcm";
+            SaveRecord(RecordPath(newDir), drive);
             Record dr;
             require(LoadRecord(RecordPath(newDir), dr) && IEq(dr.exe, Join(newDir, L"Game.exe")) && dr.model == L"Q:\\model.wgcm" && dr.inikeys[0].ours == ToUtf8(oldDir) + "\\plugins",
                     "moved game: a drive letter change; the model path and values of other folders stay");
@@ -283,6 +337,88 @@ int main() {
             try { DoRestore(mc, newDir, quiet, false, false); } catch (const SetupError&) { refused = true; }
             require(!refused && !IsFile(Join(newDir, L"wronggpu_runtime.dll")) && !IsDir(StateDir(newDir)) && IsFile(Join(newDir, L"Game.exe")),
                     "moved game: the uninstall works in the new folder");
+
+            // ---- 0.6.1 (b): a hand-placed WrongGPU DLL under the game's FSR name (a direct install) goes only when the game's
+            // original is there to put back (the backup, or the kept *.wronggpu-original.dll); else it stays, with a warning ----
+            {
+                const FfxSlot& sl = kSlots[0];
+                const string orig = "the game's own FidelityFX DLL (synthetic)", installed = "WrongGPU's FSR DLL as installed (synthetic)";
+                const string hand = MockDll({{L"CompanyName", L"WrongGPU project"}, {L"ProductName", L"WrongGPU"}, {L"FileDescription", L"WrongGPU front end (synthetic)"}},
+                                            "a newer build placed by hand");
+                auto direct = [&](const wstring& name, bool backup, bool keptCopy) {
+                    const wstring d = Join(dir, L"Direct Slot\\" + name);
+                    file(Join(d, L"Game.exe"), "MZ");
+                    file(Join(d, sl.name), hand);
+                    if (keptCopy) file(Join(d, sl.original), orig);
+                    if (backup) file(BackupPath(d, sl.name), orig);
+                    Record m; m.version = L"0.4.5"; m.game = d; m.exe = Join(d, L"Game.exe"); m.status = L"experimental"; m.model = L"m.wgcm";
+                    Entry r; r.action = L"rename"; r.rel = sl.original; r.inst = Sha256Bytes(orig.data(), orig.size()); r.owner = L"moved"; m.e.push_back(r);
+                    Entry c; c.action = L"copy"; c.rel = sl.name; c.existed = true; c.orig = r.inst; c.inst = Sha256Bytes(installed.data(), installed.size()); c.owner = L"wg";
+                    m.e.push_back(c);
+                    SaveRecord(RecordPath(d), m);
+                    return d;
+                };
+                wstring info;
+                require(ClassifySlot(sl, [&] { const wstring p = Join(dir, L"slot-probe.dll"); file(p, hand); return p; }(), nullptr, info) == FFX_OURS,
+                        "(b): the hand-placed DLL is WrongGPU's by its version resource (the synthetic PE is read)");
+                for (int how = 0; how < 2; ++how) {  // the original from the backup, then from the kept copy alone
+                    const wstring d = direct(how ? L"Kept Copy" : L"Backup", how == 0, true);
+                    std::vector<wstring> w;
+                    bool threw = false;
+                    try { w = DoRestore(mc, d, quiet, false, false); } catch (const SetupError&) { threw = true; }
+                    string now;
+                    require(!threw && ReadAll(Join(d, sl.name), now) && now == orig && !IsFile(Join(d, sl.original)) && !IsDir(StateDir(d)),
+                            how ? "(b): no backup, the kept copy there: the hand-placed DLL is replaced by the game's original"
+                                : "(b): the backup there: the hand-placed DLL is replaced by the game's original");
+                }
+                {
+                    const wstring d = direct(L"No Original", false, false);
+                    std::vector<wstring> w;
+                    bool threw = false;
+                    try { w = DoRestore(mc, d, quiet, false, false); } catch (const SetupError&) { threw = true; }
+                    string now;
+                    bool warned = false;
+                    for (auto& x : w) warned = warned || (x.rfind(L"Left in place: " + wstring(sl.name), 0) == 0 && x.find(L"isn't in the backup") != wstring::npos);
+                    require(!threw && ReadAll(Join(d, sl.name), now) && now == hand && warned && IsFile(Join(d, L"Game.exe")) && !IsFile(RecordPath(d)),
+                            "(b): no original anywhere: the uninstall leaves the DLL under the game's name, with a warning, and removes the rest");
+                    const wstring u = direct(L"No Original Update", false, false);
+                    threw = false;
+                    try { DoRestore(mc, u, quiet, false, true); } catch (const SetupError&) { threw = true; }
+                    require(threw && ReadAll(Join(u, sl.name), now) && now == hand && IsFile(RecordPath(u)),
+                            "(b): no original anywhere, an update's restore: refused, nothing changed (record kept)");
+                }
+            }
+            // ---- 0.6.1 RR follow-up 3 (gap 5b): an update that now leaves RR out (the game no longer uses it, or another setup's
+            // plugin keeps it out) first runs the earlier install's restore with keepState (DoInstall step 2): the earlier RR plugin
+            // goes with it when it is the file installed; one changed since is left in place with a warning, never removed ----
+            {
+                const string rrAsi = "WrongGPU-RR.asi as installed (synthetic)", rrIni = "rr_mode=accurate\r\n";
+                auto earlier = [&](const wstring& name) {
+                    const wstring d = Join(dir, L"RR Update\\" + name);
+                    file(Join(d, L"Game.exe"), "MZ");
+                    file(Join(d, L"plugins\\WrongGPU-RR.asi"), rrAsi);
+                    file(Join(d, L"wronggpu-rr.ini"), rrIni);
+                    Record m; m.version = L"0.6.0"; m.format = 2; m.game = d; m.exe = Join(d, L"Game.exe"); m.status = L"experimental"; m.model = L"m.wgcm";
+                    Entry dirE; dirE.action = L"dir"; dirE.rel = L"plugins"; m.e.push_back(dirE);
+                    Entry a; a.action = L"copy"; a.rel = L"plugins\\WrongGPU-RR.asi"; a.inst = Sha256Bytes(rrAsi.data(), rrAsi.size()); a.owner = L"wg"; m.e.push_back(a);
+                    Entry i; i.action = L"copy"; i.rel = L"wronggpu-rr.ini"; i.inst = Sha256Bytes(rrIni.data(), rrIni.size()); i.owner = L"wg"; m.e.push_back(i);
+                    SaveRecord(RecordPath(d), m);
+                    return d;
+                };
+                const wstring d = earlier(L"Unchanged");
+                bool threw = false;
+                try { DoRestore(mc, d, quiet, false, true); } catch (const SetupError&) { threw = true; }
+                require(!threw && !IsFile(Join(d, L"plugins\\WrongGPU-RR.asi")) && !IsFile(Join(d, L"wronggpu-rr.ini")) && IsFile(Join(d, L"Game.exe")),
+                        "gap 5b: an update's restore removes the earlier install's RR plugin and its settings (the new install then places none)");
+                const wstring c = earlier(L"Changed");
+                file(Join(c, L"plugins\\WrongGPU-RR.asi"), "another build put here since (synthetic)");
+                std::vector<wstring> w;
+                threw = false;
+                try { w = DoRestore(mc, c, quiet, false, true); } catch (const SetupError&) { threw = true; }
+                bool warned = false;
+                for (auto& x : w) warned = warned || x == L"Left in place (changed since install): plugins\\WrongGPU-RR.asi";
+                require(!threw && IsFile(Join(c, L"plugins\\WrongGPU-RR.asi")) && warned, "gap 5b: an RR plugin changed since the install: left in place, with a warning");
+            }
             // the scan takes managed folders whose record is gone off the list, unless their drive isn't connected
             wstring offline;
             const DWORD drives = GetLogicalDrives();

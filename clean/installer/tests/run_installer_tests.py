@@ -1011,10 +1011,11 @@ def test_upgrade_paths(t, payload_dir):
     GOOD = t.model.file  # noqa: N806
     t.clear_model()
     game = {SLOTS[0]: AMD_V1, SLOTS[1]: FSR3, SLOTS[2]: FSR3UP}
-    # A newer WrongGPU build placed by hand: WrongGPU's version resource, but not the files the install record names.
+    # A newer WrongGPU build placed by hand: WrongGPU's version resource, but not the files the install record names. Under
+    # the game's FSR names (the original comes back in their place). 0.6.1: a hand-placed file under another name counts as
+    # WrongGPU's only by a release's hash (the hand-placed-runtime case below: left in place).
     hot = {SLOTS[0]: mockpe.make_dll(mockpe.FRONT_END, (0, 5, 0, 0), extra=b"hand-placed front end", exports=mockpe.FFX_API_EXPORTS, dll_name=SLOTS[0]),
-           SLOTS[2]: mockpe.make_dll(mockpe.FRONT_END, (0, 5, 0, 0), extra=b"hand-placed forwarder", exports=mockpe.FSR3UPSCALER_EXPORTS, dll_name=SLOTS[2]),
-           "wronggpu_runtime.dll": mockpe.make_dll({"ProductName": "WrongGPU", "FileDescription": "WrongGPU runtime"}, (0, 5, 0, 0), extra=b"hand-placed runtime")}
+           SLOTS[2]: mockpe.make_dll(mockpe.FRONT_END, (0, 5, 0, 0), extra=b"hand-placed forwarder", exports=mockpe.FSR3UPSCALER_EXPORTS, dll_name=SLOTS[2])}
 
     def same(path, data):
         return os.path.isfile(path) and read(path) == data
@@ -1041,7 +1042,7 @@ def test_upgrade_paths(t, payload_dir):
     # Defect of 0.4.5-rc: the restore kept the hand-placed DLL, removed the game's renamed original, then refused.
     root, b, before = installed("hotfix-upgrade", hand_placed=True)
     rc, log = setup_again(root)
-    t.check("setup over hand-placed WrongGPU DLLs (front end, a forwarder, the runtime): installed", rc == 0, tail(rc, log))
+    t.check("setup over hand-placed WrongGPU DLLs (front end, a forwarder): installed", rc == 0, tail(rc, log))
     t.check("...the new payload is in place and the game's three FSR DLLs are kept as *.wronggpu-original.dll", payload_installed(t, b, payload_dir) and kept(b, game), log[-700:])
     rec_path = os.path.join(b, "wronggpu-setup", "install.record")
     rec = read(rec_path).decode() if os.path.isfile(rec_path) else ""
@@ -1053,6 +1054,15 @@ def test_upgrade_paths(t, payload_dir):
     root, b, before = installed("hotfix-uninstall", hand_placed=True)
     rc = t.uninstall(b)
     t.check("uninstall with hand-placed WrongGPU DLLs: the game's originals are back, nothing of WrongGPU left", rc == 0 and snapshot(root) == before, tail(rc, t.logtext(), root, before))
+    # 0.6.1: a hand-placed runtime that names WrongGPU but has no release's hash is left in place with a warning
+    root, b, before = installed("hand-placed-runtime")
+    hand_runtime = mockpe.make_dll({"ProductName": "WrongGPU", "FileDescription": "WrongGPU runtime"}, (0, 5, 0, 0), extra=b"hand-placed runtime")
+    write(os.path.join(b, "wronggpu_runtime.dll"), hand_runtime)
+    rc = t.uninstall(b)
+    expect = dict(before)
+    expect[key("bin/x64/wronggpu_runtime.dll")] = sha(hand_runtime)
+    t.check("uninstall with a hand-placed runtime (WrongGPU's version resource, not a release's hash): left in place, the rest as before",
+            rc == 0 and snapshot(root) == expect and "changed since install" in t.logtext(), tail(rc, t.logtext(), root, expect))
     # The game's original is never removed while WrongGPU's DLL is under the game's name: without a backup, and with a
     # record that has no entry for WrongGPU's DLL, it comes back from its renamed copy (hash-checked against the record).
     root, b, before = installed("hotfix-no-backup", hand_placed=True)
@@ -1816,8 +1826,7 @@ def test_without_direct_route(t, payload_dir, direct_setup):
         return
     # A newer WrongGPU build placed by hand over the direct install (the states of test_upgrade_paths).
     hot = {SLOTS[0]: mockpe.make_dll(mockpe.FRONT_END, (0, 5, 0, 0), extra=b"hand-placed front end", exports=mockpe.FFX_API_EXPORTS, dll_name=SLOTS[0]),
-           SLOTS[2]: mockpe.make_dll(mockpe.FRONT_END, (0, 5, 0, 0), extra=b"hand-placed forwarder", exports=mockpe.FSR3UPSCALER_EXPORTS, dll_name=SLOTS[2]),
-           "wronggpu_runtime.dll": mockpe.make_dll({"ProductName": "WrongGPU", "FileDescription": "WrongGPU runtime"}, (0, 5, 0, 0), extra=b"hand-placed runtime")}
+           SLOTS[2]: mockpe.make_dll(mockpe.FRONT_END, (0, 5, 0, 0), extra=b"hand-placed forwarder", exports=mockpe.FSR3UPSCALER_EXPORTS, dll_name=SLOTS[2])}  # (0.6.1: no hand-placed runtime, see hand-placed-runtime)
 
     def direct_install(name, version=None, hand_placed=False):
         root, b = cyberpunk(t, name, model=GOOD)
@@ -1863,7 +1872,7 @@ def test_without_direct_route(t, payload_dir, direct_setup):
     root, b, before = direct_install("direct-hand-placed-to-hosted", hand_placed=True)
     rc = t.run(*hosted(root))
     log = t.logtext()
-    t.check("setup over a direct install with hand-placed WrongGPU DLLs (front end, a forwarder, the runtime): the originals are back byte for byte, hosted install",
+    t.check("setup over a direct install with hand-placed WrongGPU DLLs (front end, a forwarder): the originals are back byte for byte, hosted install",
             rc == 0 and originals_back(b) and hosted_ok(b), tail(rc, log))
     rc = t.uninstall(b)
     t.check("...and uninstall leaves the game as it was before WrongGPU", rc == 0 and snapshot(root) == before, tail(rc, t.logtext(), root, before))

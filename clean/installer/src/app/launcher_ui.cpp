@@ -809,6 +809,13 @@ bool PrepareOp(const GameEntry& e, Op op, OpRequest& r, bool* failed, bool* gone
                 return false;
             r.moveMods = true;
         }
+        if (t.coexist.foreignPluginsBlockRr) {  // 0.6.1: other setups' plugins may hook RR too; keeping them leaves WrongGPU's RR out
+            wstring list; for (auto& p : t.coexist.foreignPlugins) list += (list.empty() ? L"" : L", ") + p;
+            r.movePlugins = RunDialog(0, L"Move the other OptiScaler plugins aside?\n\n" + t.name + L" has other OptiScaler plugins (" + list + L"). They may hook "
+                                      L"Ray Reconstruction as WrongGPU's does, so WrongGPU's Ray Reconstruction goes in only if they are moved aside. They are backed "
+                                      L"up and put back when you uninstall WrongGPU. If you keep them, WrongGPU installs without its Ray Reconstruction.",
+                                      {{L"Move them aside", 1, false, false}, {L"Keep them", 0, true, false}}, 0) == 1;
+        }
         if (t.conflicts.oldFound()) {
             if (!Confirm(L"Remove the older WrongGPU install first?\n\nAn older WrongGPU (DLSS 4.5 AMD) install is in this game. The game's original files are put back exactly as they were.", 0,
                          L"Remove it first", L"Cancel"))
@@ -859,12 +866,13 @@ void OnLeftovers(const GameEntry& e, bool clean) {
     wstring names;
     for (auto& f : e.leftovers) names += (names.empty() ? L"" : L"\n") + f.rel + L" (WrongGPU " + f.version + L")";
     for (;;) {  // Show details: the files' names, then the question again
-        const int a = RunDialog(0, LeftoversText(e.name, e.leftovers, clean), LeftoversButtons(clean), 0);
+        const int a = RunDialog(0, LeftoversText(e.name, e.leftovers, clean, e.leftoversOtherSetup), LeftoversButtons(clean, e.leftoversOtherSetup), 0);
         if (a == 1) break;
         if (a != 2 || !v.live) return;
         Inform(L"Details\n\n" + names, 2);
     }
     OpRequest r; r.op = clean ? Op::CleanLeftovers : Op::AdoptLeftovers; r.exe = e.exe; r.dir = e.dir;
+    r.force = e.leftoversOtherSetup;  // (0.6.1: the player chose "anyway" for another mod's setup's files)
     StartOp(r);
 }
 // An install the launcher does not manage yet (WrongGPU setup 0.5, no profile.ini, its own uninstall entry): adopted,

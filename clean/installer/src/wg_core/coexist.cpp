@@ -10,6 +10,8 @@
 #include "checks.h"  // FindAntiCheat, VersionLess
 #include "gamerules.h"
 #include "optiscaler.h"
+#include "pe.h"
+#include "rr.h"
 
 namespace wg {
 
@@ -84,7 +86,8 @@ bool CoexistReport::has(Tool t) const { for (auto& f : findings) if (f.tool == t
 bool CoexistReport::needsSwitch() const { for (auto& f : findings) if (f.decision == Decision::AskSwitch) return true; return false; }
 std::vector<wstring> CoexistReport::Warnings() const {
     std::vector<wstring> w;
-    for (auto& f : findings) if (f.decision == Decision::Chain || f.decision == Decision::Warn) w.push_back(f.what + L": " + f.message);
+    for (auto& f : findings)  // (other plugins: the install says what it did about them in its own words)
+        if ((f.decision == Decision::Chain || f.decision == Decision::Warn) && f.tool != Tool::OtherPlugin) w.push_back(f.what + L": " + f.message);
     if (proxy.untested && !proxy.name.empty()) w.push_back(L"OptiScaler as " + proxy.name + L" next to ReShade / Special K: an untested combination");
     return w;
 }
@@ -185,20 +188,32 @@ ProxyChoice PickProxy(const wstring& exeDir, const Record* ours, const wstring& 
     return c;
 }
 
-// ---- WrongGPU's own OptiScaler setup ---------------------------------------------------------------------------------
-std::set<wstring> OurOptiHashes(Context& ctx, const Record* ours) {
-    std::set<wstring> h;
-    if (ours)  // what our install wrote (the record's copies: WrongGPU's payload and the OptiScaler files of its setup)
-        for (auto& e : ours->e)
-            if (e.action == L"copy" && !e.inst.empty() && e.owner != L"adopted" && e.owner != L"moved") h.insert(Lower(e.inst));
-    if (ctx.opti.ok()) {  // the OptiScaler package this launcher installs from
-        const wstring dll = Join(ctx.opti.dir, L"OptiScaler.dll");
-        if (IsFile(dll)) h.insert(Lower(Sha256File(dll)));
-    }
-    return h;
+// ---- other setups' OptiScaler plugins (0.6.1) ------------------------------------------------------------------------
+bool ExportsRrContract(const wstring& path) {
+    MappedFile f(path, 256ull << 20);  // the file's bytes only: never loaded as a module
+    return f.data && ReadPeExports(f.data, f.size).count(kRrContractExport) > 0;
 }
-bool IsOurOptiScaler(const std::set<wstring>& ourHashes, const wstring& path) {
-    return !ourHashes.empty() && IsFile(path) && ourHashes.count(Lower(Sha256File(path))) > 0;
+// The .asi files of OptiScaler's plugin folders that the install record does not name with that hash; withMarker: those that
+// export WrongGPU RR's marker (true) or the others (false)
+static std::vector<wstring> UnrecordedPlugins(const wstring& exeDir, const Record* ours, bool withMarker) {
+    std::vector<wstring> out;
+    for (auto sub : kPluginDirs)
+        for (auto& f : ListFiles(Join(exeDir, sub), L"*.asi")) {
+            const wstring rel = f.substr(exeDir.size() + 1);
+            bool mine = false;
+            if (ours)
+                for (auto& e : ours->e)
+                    if (e.action == L"copy" && IEq(e.rel, rel) && !e.inst.empty()) { mine = IEq(Sha256File(f), e.inst); break; }
+            if (!mine && ExportsRrContract(f) == withMarker) out.push_back(rel);
+        }
+    return out;
+}
+std::vector<wstring> ForeignPlugins(const wstring& exeDir, const Record* ours) { return UnrecordedPlugins(exeDir, ours, false); }
+std::vector<wstring> OurPluginsFromOtherPackages(const wstring& exeDir, const Record* ours) { return UnrecordedPlugins(exeDir, ours, true); }
+wstring ForeignPluginsText(const std::vector<wstring>& plugins) {
+    return L"Other OptiScaler plugins are in this game (" + JoinList(plugins) + L"). They may hook Ray Reconstruction as WrongGPU's RR plugin does, so "
+           L"WrongGPU's Ray Reconstruction was left out. To use it, install again and choose to move them aside (they are backed up and put back "
+           L"when WrongGPU is uninstalled).";
 }
 
 // ---- the assessment --------------------------------------------------------------------------------------------------
@@ -208,13 +223,14 @@ CoexistReport AssessCoexistence(Context& ctx, const wstring& exe, const wstring&
     std::map<wstring, wstring> ourHash;  // lower-case path relative to dir -> installed hash
     if (ours) for (auto& e : ours->e) if (e.action == L"copy") ourHash[Lower(e.rel)] = e.inst;
     const bool sameDir = IEq(FullPath(exeDir), FullPath(dir));
-    // WrongGPU's OptiScaler setup (the record has OptiScaler.ini): its log and settings are ours, and so is an OptiScaler
-    // DLL whose hash the record or the package this launcher installs from has (whatever name it loads as)
+    // WrongGPU's OptiScaler setup (the record has OptiScaler.ini): its log and settings are ours, and so is the OptiScaler
+    // DLL the record copied under that name with that hash (isOurs; 0.6.1: never by a hash alone under another name, never
+    // by the package's hash: another setup may use the same OptiScaler build)
     const bool hostedOurs = ours && HostedRecord(*ours) && sameDir;
-    const std::set<wstring> ourOpti = OurOptiHashes(ctx, hostedOurs ? ours : nullptr);
     auto isOurs = [&](const wstring& rel) {
         if (!sameDir) return false;
-        if (hostedOurs && (IEq(rel, L"OptiScaler.log") || IEq(rel, L"OptiScaler.ini"))) return true;
+        if (hostedOurs && IEq(rel, L"OptiScaler.log")) return true;
+        if (hostedOurs && IEq(rel, L"OptiScaler.ini")) return OptiIniIsOurs(dir, *ours);  // 0.6.1: while its keys point at WrongGPU's files
         auto it = ourHash.find(Lower(rel));
         if (it == ourHash.end()) return false;
         if (EndsWithI(rel, L".ini") || EndsWithI(rel, L".log")) return true;  // settings and logs of our install
@@ -250,9 +266,7 @@ CoexistReport AssessCoexistence(Context& ctx, const wstring& exe, const wstring&
         const wstring p = Join(exeDir, n);
         if (!IsFile(p) || isOurs(n)) continue;
         if (IEq(n, kReFrameworkDll) && IsReFrameworkDll(p)) { refw = true; continue; }
-        const Fingerprint fp = IdentifyFile(p);
-        if (fp.tool == Tool::OptiScaler && hostedOurs && IsOurOptiScaler(ourOpti, p)) continue;  // our setup's OptiScaler under another name
-        seen.push_back({n, fp});
+        seen.push_back({n, IdentifyFile(p)});
     }
     auto filesOf = [&](Tool t) { std::vector<wstring> v; for (auto& s : seen) if (s.fp.tool == t) v.push_back(s.rel); return v; };
     auto fpOf = [&](Tool t) -> const Fingerprint* { for (auto& s : seen) if (s.fp.tool == t) return &s.fp; return nullptr; };
@@ -268,10 +282,14 @@ CoexistReport AssessCoexistence(Context& ctx, const wstring& exe, const wstring&
                                            : wstring(L"Stays where it is; WrongGPU works next to it."));
     }
 
-    // our OptiScaler setup
-    if (ours && HostedRecord(*ours))
-        add(Tool::OptiScaler, Decision::Managed, L"WrongGPU's OptiScaler setup" + (ours->proxy.empty() ? wstring() : L" as " + ours->proxy),
-            ours->proxy.empty() ? std::vector<wstring>{} : std::vector<wstring>{ours->proxy}, L"install record", L"Installed by WrongGPU: updated and removed with it.");
+    // our OptiScaler setup. 0.6.1: one finding per file: a proxy name another setup's file holds now is that file's finding
+    // (listed below), not this one's
+    if (ours && HostedRecord(*ours)) {
+        const bool proxyOurs = !ours->proxy.empty() && (!IsFile(Join(exeDir, ours->proxy)) || isOurs(ours->proxy));
+        add(Tool::OptiScaler, Decision::Managed,
+            L"WrongGPU's OptiScaler setup" + (proxyOurs ? L" as " + ours->proxy : ours->proxy.empty() ? wstring() : L" (its " + ours->proxy + L" was replaced)"),
+            proxyOurs ? std::vector<wstring>{ours->proxy} : std::vector<wstring>{}, L"install record", L"Installed by WrongGPU: updated and removed with it.");
+    }
 
     // the player's OptiScaler: ask to switch (owner decision); two copies: refused until the player keeps one
     {
@@ -337,6 +355,25 @@ CoexistReport AssessCoexistence(Context& ctx, const wstring& exe, const wstring&
         add(Tool::AsiLoader, Decision::Warn, L"Ultimate ASI Loader" + verOf(Tool::AsiLoader) + L" as " + f[0], f, fpOf(Tool::AsiLoader)->evidence,
             L"It loads every .asi file from the game folder, scripts\\ and plugins\\: WrongGPU's OptiScaler plugin goes to " + wstring(kAsiPluginOwnDir) +
                 L"\\ instead (OptiScaler's [Plugins] Path), so it is not started twice.");
+    }
+
+    // 0.6.1: other setups' plugins in OptiScaler's plugin folders: in a Ray Reconstruction game WrongGPU's RR stays out unless
+    // the player moves them aside (they may hook RR too); elsewhere they stay beside WrongGPU's plugin
+    // (gap 5a: the plugin folders are the exe folder's; when the install folder is another one, the record that names their
+    // files is the exe folder's own, if there is one: an earlier install there is not "another setup")
+    Record exeDirRecord;
+    const Record* pluginRecord = sameDir ? ours : LoadRecord(RecordPath(exeDir), exeDirRecord) && !exeDirRecord.legacy ? &exeDirRecord : nullptr;
+    if (const auto kit = OurPluginsFromOtherPackages(exeDir, pluginRecord); !kit.empty())
+        add(Tool::WrongGPU, Decision::Inform, L"WrongGPU RR (from another package)", kit, L"export " + FromUtf8(kRrContractExport) + L" in " + kit[0],
+            L"WrongGPU's own Ray Reconstruction plugin, placed by another package. It stays where it is and is never moved aside.");
+    r.foreignPlugins = ForeignPlugins(exeDir, pluginRecord);
+    if (!r.foreignPlugins.empty()) {
+        r.foreignPluginsBlockRr = DetectRr(exe).uses;
+        add(Tool::OtherPlugin, r.foreignPluginsBlockRr ? Decision::Warn : Decision::Inform, L"Other OptiScaler plugins (" + JoinList(r.foreignPlugins) + L")",
+            r.foreignPlugins, L"file " + r.foreignPlugins[0],
+            r.foreignPluginsBlockRr ? L"They may hook Ray Reconstruction as WrongGPU's RR plugin does: WrongGPU's Ray Reconstruction stays out of this game unless "
+                                      L"you choose to move them aside when you install (backed up, put back when WrongGPU is uninstalled)."
+                                    : L"They stay; WrongGPU's plugin goes beside them.");
     }
 
     // CET, RED4ext, UE4SS: they keep their names (the picker never takes them)

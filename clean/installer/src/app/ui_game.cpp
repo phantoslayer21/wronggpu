@@ -47,7 +47,7 @@ static bool RrNoEdition(const GameEntry& e) { return e.rrDirect && e.hasRecord &
 // WrongGPU's Ray Reconstruction takes RR in this game: its files are in, it is on, the RR data is ready, and this build can
 // run it there
 bool RrOn(const GameEntry& e) { return e.rrInstalled && e.rrEnabled && v.rrReady && !RrBlocked(e) && !RrNoEdition(e); }
-bool RrAloneLastRun(const GameEntry& e) { return RrOn(e) && e.last.found && (e.last.rrOnly || e.last.rrUpscaled); }
+bool RrAloneLastRun(const GameEntry& e) { return RrOn(e) && e.last.RrAlone(); }  // (0.6.1: never a run whose guard kept WrongGPU RR off)
 static bool RrFailedRun(const LastRun& lr);  // (the Last run section, r7 #2)
 wstring RrModeName(const wstring& mode) { return mode == L"exact" ? L"Exact" : mode == L"fast" ? L"Fast" : L"Accurate"; }
 
@@ -456,6 +456,14 @@ FindingWords WordsOf(const Finding& f) {
             w.sub = L"It turns the game's graphics into Vulkan, and WrongGPU needs Windows' own Direct3D 12.";
             break;
         case Tool::AsiLoader: w.sub = L"It stays. WrongGPU keeps its plugin in a folder of its own, so it starts once."; break;
+        case Tool::OtherPlugin:  // 0.6.1: another setup's plugins beside OptiScaler
+            w.name = f.files.size() == 1 ? L"Another OptiScaler plugin" : L"Other OptiScaler plugins";
+            w.sub = f.decision == Decision::Warn ? L"It may hook Ray Reconstruction too, so WrongGPU's Ray Reconstruction stays out unless you move them aside when you install."
+                                                 : L"It stays. WrongGPU's plugin goes beside it.";
+            break;
+        case Tool::WrongGPU:  // 0.6.1 (gap 4): WrongGPU's RR plugin placed by another package (it exports WrongGPU RR's marker)
+            if (f.what == L"WrongGPU RR (from another package)") w.sub = L"It stays. WrongGPU never moves its own Ray Reconstruction plugin aside.";
+            break;
         case Tool::Cet: case Tool::Red4ext: case Tool::Ue4ss: w.sub = L"It stays. WrongGPU doesn't touch it."; break;
         case Tool::HipRuntime: w.name = L"Another HIP tool"; w.sub = L"Keep Runs on at Auto or Direct3D 12 so the two don't clash."; break;
         case Tool::NrOnAmd: w.name = L"Another upscaler mod"; w.sub = L"WrongGPU doesn't install next to it and doesn't touch it."; break;
@@ -1832,6 +1840,8 @@ static wstring RunWarning(const wstring& kind, const wstring& text, bool footSay
     if (kind == L"foreign-vtable") return L"An overlay or another mod (ReShade, Special K) took over some frames, so they used AMD FSR.";
     if (kind == L"xess-no-depth") return L"With XeSS chosen in the game, Model M gets less from the game and may look worse. Choose DLSS or FSR in the game's settings.";
     if (kind == L"no-depth") return L"The game gives the upscaler less than it needs, so Model M may look worse.";
+    // 0.6.1: the RR plugin's guard line itself (another Ray Reconstruction plugin, a second copy of WrongGPU RR, hooks replaced)
+    if (kind == L"rr-guard") return L"Ray Reconstruction: " + text + L".";
     (void)text;  // a kind this launcher does not know: the core's own sentence stays behind Show, with the log's lines
     return L"WrongGPU noted a warning in this run. Select Show to read it.";
 }
@@ -1883,6 +1893,14 @@ static float LastRunSection(Gfx& gx, float x, float y, float w) {
         auto times = [](const wstring& s) { wstring o; for (wchar_t ch : s) o += ch == L'x' ? wstring(L"\u202f\u00d7\u202f") : wstring(1, ch); return o; };
         // the run known from the RR log alone (r4 #1: Borderlands 4, Hogwarts Legacy and RE Requiem run Ray Reconstruction only, and
         // the front end logs nothing there): the Denoiser row leads, with its mode and cost, then the size; no upscaler rows
+        if (lr.rrGuardOff) {  // 0.6.1: a session whose guard kept WrongGPU RR off: its line says why
+            KvOpt dn;
+            dn.sub = RunWarning(L"rr-guard", lr.rrGuard, false);
+            yy += KvRow(gx, x, yy, w, true, L"Denoiser", L"WrongGPU RR stayed off", dn);
+            yy += ActRow(gx, x, yy, w, false, false, ID_G_LOG, L"Open log", ic::external, Rec());
+            yy += CollectRow(gx, x, yy, w);
+            return yy - top;
+        }
         if (lr.rrOnly) {
             KvOpt dn;
             wstring m = lr.rrMode.empty() ? wstring() : RrModeName(lr.rrMode);
@@ -1935,7 +1953,8 @@ static float LastRunSection(Gfx& gx, float x, float y, float w) {
                 // the RR data gone since that run: the page's Ray Reconstruction line says so, and this says it too
                 if (!v.rrReady) m += (m.empty() ? L"" : L"\n") + wstring(L"Its data is missing now, so the next run uses the game's own denoiser.");
                 dn.sub = m;
-            } else if (lr.rrFound) dn.sub = L"The game didn't ask for it in this run.";  // the RR plugin ran, the game never made an instance
+            } else if (!lr.rrGuard.empty()) dn.sub = L"WrongGPU RR stayed off in this run (its reason is below).";  // 0.6.1: the RR plugin's guard
+            else if (lr.rrFound) dn.sub = L"The game didn't ask for it in this run.";  // the RR plugin ran, the game never made an instance
             yy += KvRow(gx, x, yy, w, false, L"Denoiser", lr.rrUsed ? L"Ray Reconstruction" : L"Not used", dn);
         }
         if (!lr.renderSize.empty() && !lr.outputSize.empty()) yy += KvRow(gx, x, yy, w, false, L"Size", times(lr.renderSize) + L" \u2192 " + times(lr.outputSize));
@@ -2004,7 +2023,9 @@ static wstring StaysOutWhy(const GameEntry& e, wstring* tip) {
     // the status line's own lead-in ("Other upscaler mod: X", "Other upscaler mod (X): not touched"): the mod's name
     if (e.status == GameStatus::ForeignMod && why.rfind(L"Other upscaler mod: ", 0) == 0) why = why.substr(20);
     else if (e.status == GameStatus::ForeignMod && why.rfind(L"Other upscaler mod (", 0) == 0 && why.find(L')') != wstring::npos) why = why.substr(20, why.find(L')') - 20);
-    // the headline says another mod is here: the card names it and says why (not the headline again)
+    // the headline says another mod is here: the card names it and says why (not the headline again). 0.6.1: the mod that is
+    // never named ("Other upscaler mod: not touched") is "Another upscaler mod", not the status's last words
+    if (e.status == GameStatus::ForeignMod && (why.empty() || why == L"not touched" || why == L"Not touched")) why = L"Another upscaler mod";
     if (e.status == GameStatus::ForeignMod) why = why + L" is in this game. WrongGPU stays out so the two don't fight over the upscaler.";
     else why += why.empty() || why.back() == L'.' ? L"" : L".";
     return why;
@@ -2058,10 +2079,13 @@ static float FolderSection(Gfx& gx, float x, float y, float w) {
             wstring ver;
             for (size_t k = 0; k < vers.size(); ++k) ver += (k == 0 ? L"" : k + 1 == vers.size() ? L" and " : L", ") + vers[k];
             const size_t n = e.leftovers.size();
-            const wstring t = n == 1 ? L"A file from WrongGPU " + ver + L" is here that the launcher didn't install. Clean up removes only it; Adopt lets the launcher manage it."
-                                     : std::to_wstring(n) + L" files from WrongGPU " + ver + L" are here that the launcher didn't install. Clean up removes only these; Adopt lets the launcher manage them.";
+            const wstring t = e.leftoversOtherSetup  // 0.6.1: another mod's setup uses them (an OptiScaler WrongGPU didn't install is next to them)
+                ? (n == 1 ? L"A file from WrongGPU " + ver + L" is here that another mod's setup uses. WrongGPU leaves it alone; installing backs it up if it replaces it."
+                          : std::to_wstring(n) + L" files from WrongGPU " + ver + L" are here that another mod's setup uses. WrongGPU leaves them alone; installing backs up any it replaces.")
+                : n == 1 ? L"A file from WrongGPU " + ver + L" is here that the launcher didn't install. Clean up removes only it; Adopt lets the launcher manage it."
+                         : std::to_wstring(n) + L" files from WrongGPU " + ver + L" are here that the launcher didn't install. Clean up removes only these; Adopt lets the launcher manage them.";
             const float rowY = yy;
-            note(t, pal.amber);
+            note(t, e.leftoversOtherSetup ? pal.greyDot : pal.amber);
             AddHit(ID_G_FOUND, Rc{x, rowY, w, yy - rowY}, R_TEXT, t + L" Files: " + names, true, -1, L"", false);
             v.tips[ID_G_FOUND] = (n == 1 ? L"File: " : L"Files: ") + names;
         }

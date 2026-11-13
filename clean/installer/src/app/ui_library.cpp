@@ -308,6 +308,7 @@ static wstring LockupStatus(const GameEntry& e) {
                 t += L" Last run " + When(e.last.when) + L": " + noRrFrame;
             else if (e.last.found && e.last.ready) t += L" Last run " + When(e.last.when) + on + (rrFailed ? L"; " + noRrFrame : wstring(L"."));
             else if (e.last.found && e.last.upscaler == L"amd") t += L" Last run " + When(e.last.when) + L" with AMD FSR" + (rrFailed ? L"; " + noRrFrame : wstring(L"."));
+            else if (e.last.found && e.last.rrGuardOff) t += L" Last run " + When(e.last.when) + L": WrongGPU RR stayed off.";  // 0.6.1: its guard (the page says why)
             else if (!e.last.found) t += L" Not played yet.";  // the lockup's own words
             return t;
         }
@@ -1260,7 +1261,7 @@ static float FeatureBanner(Gfx& gx, float x0, float y, float cw, float h, int in
 // Clean up: their entries are not read yet, BusyWhy says so); Play and the games' pages work. A game that was running
 // is listed as it was before it ran.
 static const wchar_t kListHead[] = L"wronggpu-library-list 2";  // 2: the flags carry rrDirect and optiEdition (a list of 1 is not read)
-constexpr size_t kListFields = 23;
+constexpr size_t kListFields = 24;  // (0.6.1: the last run's guard line; a list of 23 fields, before it, is read too)
 static wstring ListPath() { return gl.paths.dataDir.empty() ? wstring() : Join(gl.paths.dataDir, L"library-list.txt"); }
 
 void SaveLibrarySnapshot() {
@@ -1279,11 +1280,10 @@ void SaveLibrarySnapshot() {
         const wstring flags = {bit(e.hasRecord), bit(e.recordV1), bit(e.perGameEntry), bit(e.hosted), bit(e.adoptable), bit(e.repairSuggested), bit(e.exeFound),
                                bit(e.hasPrevious), bit(e.rrUses), bit(e.rrInstalled), bit(e.rrEnabled), bit(e.rrPathTracingOnly), bit(e.needsFound),
                                bit(e.rrDirect), bit(e.optiEdition)};
-        const wstring lastFlags = {bit(e.last.found), bit(e.last.ready), bit(e.last.optiPlugin), bit(e.last.upscaled), bit(e.last.rrOnly),
-                                   bit(e.last.rrUpscaled)};  // (r4 #1, r6 #1)
+        const wstring lastFlags = LastRunCacheFlags(e.last);  // (r4 #1, r6 #1; 0.6.1: rrGuardOff, and its line in the last field)
         const wstring f[kListFields] = {e.name, e.exe, e.dir, e.source, e.appid, std::to_wstring((int)e.status), e.statusText, e.installedVersion, flags,
                                         e.previous, e.proxy, e.rrWhy, e.rrMode, e.needs, e.needsWhy, e.needsPage, e.needsGame, problems,
-                                        e.last.when, e.last.upscaler, e.last.executor, e.last.process, lastFlags};
+                                        e.last.when, e.last.upscaler, e.last.executor, e.last.process, lastFlags, e.last.rrGuard};
         for (size_t k = 0; k < kListFields; ++k) out += (k ? L"\t" : L"") + (k == 17 ? f[k] : field(f[k]));
         out += L"\n";
     }
@@ -1312,7 +1312,7 @@ bool LoadLibrarySnapshot() {
     std::vector<GameEntry> games;
     for (size_t i = 1; i < lines.size() && games.size() < (size_t)kTileSpan; ++i) {
         const std::vector<wstring> f = split(lines[i], L'\t');
-        if (f.size() != kListFields || f[0].empty() || f[8].size() != 15 || (f[22].size() != 3 && f[22].size() != 5 && f[22].size() != 6)) continue;  // (3: before r4; 5: before r6)
+        if ((f.size() != kListFields && f.size() != kListFields - 1) || f[0].empty() || f[8].size() != 15) continue;
         GameEntry e;
         e.name = f[0]; e.exe = f[1]; e.dir = f[2]; e.source = f[3]; e.appid = f[4];
         const int st = _wtoi(f[5].c_str());
@@ -1328,9 +1328,8 @@ bool LoadLibrarySnapshot() {
         e.needs = f[13]; e.needsWhy = f[14]; e.needsPage = f[15]; e.needsGame = f[16];
         if (!f[17].empty()) e.problems = split(f[17], (wchar_t)0x1f);
         e.last.when = f[18]; e.last.upscaler = f[19]; e.last.executor = f[20]; e.last.process = f[21];
-        e.last.found = f[22][0] == L'1'; e.last.ready = f[22][1] == L'1'; e.last.optiPlugin = f[22][2] == L'1';
-        if (f[22].size() >= 5) { e.last.upscaled = f[22][3] == L'1'; e.last.rrOnly = f[22][4] == L'1'; }
-        if (f[22].size() >= 6) e.last.rrUpscaled = f[22][5] == L'1';
+        if (!ReadLastRunCacheFlags(f[22], e.last)) continue;  // (3, 5, 6 or 7 flags: logtail.h)
+        if (f.size() == kListFields) e.last.rrGuard = f[23];  // 0.6.1: the RR plugin's guard line (the page's Last run and the banner from the start)
         if (e.status == GameStatus::Running) {  // not running any more, most likely: as it was before it ran
             e.status = !e.hasRecord ? GameStatus::Eligible : !e.problems.empty() ? GameStatus::NeedsRepair : GameStatus::Installed;
             e.statusText.clear();

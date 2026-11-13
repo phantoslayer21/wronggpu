@@ -104,6 +104,7 @@ struct GameEntry {
     std::vector<Finding> coexist;   // the rules table for this game (design section 5)
     ProxyChoice proxyPlan;          // where OptiScaler would go (not installed yet) or stays
     std::vector<Leftover> leftovers;  // WrongGPU files without a record (status Leftovers)
+    bool leftoversOtherSetup = false; // 0.6.1: ...used by another mod's setup (LeftoversUsedByOtherSetup): left alone, no Leftovers status
     LastRun last;
     wstring proxy;                 // OptiScaler's proxy DLL of our install
     // Ray Reconstruction (rr.h): only games that use it show anything of it
@@ -173,6 +174,7 @@ struct OpRequest {
     wstring optiPackage;           // install/update/repair: the player's OptiScaler download
     wstring modelDll;              // a DLSS model file to try first
     bool moveMods = false, removeOld = false, experimental = false, force = false, noScan = true;
+    bool movePlugins = false;      // 0.6.1: other setups' OptiScaler plugins moved aside with the player's OK (WrongGPU's RR then goes in)
     bool hasProfile = false;       // apply: this profile (else the game's profile.ini); install: the profile a new install starts with
     Profile profile;
     // apply, the OptiScaler tab: edits of editable keys ("Section.Key", value); reset: the editable keys back to what the

@@ -401,7 +401,7 @@ GameEntry EntryFor(Context& ctx, const wstring& exeIn, const wstring& name, cons
     else if (const Finding* no = t.coexist.refusal()) { g.status = GameStatus::Refused; g.statusText = L"Refused: " + no->what; }
     else if (!g.needs.empty() && !g.needsFound) { g.status = GameStatus::NeedsPrereq; g.statusText = L"Needs " + g.needs + L": " + g.needsGame + L" blocks OptiScaler without it"; }
     else if (t.conflicts.oldFound()) { g.status = GameStatus::OldInstall; g.statusText = L"Has an older WrongGPU (DLSS 4.5 AMD): Install removes it first"; }
-    else if (!(g.leftovers = FindLeftovers(ctx, g.dir)).empty()) {
+    else if (!(g.leftovers = FindLeftovers(ctx, g.dir)).empty() && !(g.leftoversOtherSetup = LeftoversUsedByOtherSetup(g.dir, g.leftovers))) {
         g.status = GameStatus::Leftovers;
         g.statusText = L"Leftover WrongGPU files without a record: " + LeftoverSummary(g.leftovers) + L" - Clean up or Adopt";
     }
@@ -977,7 +977,14 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
     if (int code = c.firstFailure(r.force, why)) Fail(why, code);
     if (!target.validated && !r.experimental && !target.installed) Fail(target.name + L" is experimental (not tested end to end). Confirm to install anyway.", EXIT_EXPERIMENTAL);
     // leftover WrongGPU files without a record: cleaned up first only with the player's OK (never automatic)
-    const std::vector<Leftover> leftovers = target.installed ? std::vector<Leftover>{} : FindLeftovers(ctx, dir);
+    std::vector<Leftover> leftovers = target.installed ? std::vector<Leftover>{} : FindLeftovers(ctx, dir);
+    // 0.6.1: beside another mod's OptiScaler they are that setup's: never removed first; the install backs up any it replaces
+    if (LeftoversUsedByOtherSetup(dir, leftovers)) {
+        res.notes.push_back(L"WrongGPU files " + wstring(kLeftoversOtherSetup) + L" were left alone: " + LeftoverSummary(leftovers) +
+                            L" (any the install replaces is backed up and put back when WrongGPU is uninstalled)");
+        LogLine(ctx, res.notes.back());
+        leftovers.clear();
+    }
     if (!leftovers.empty() && !r.removeOld)
         Fail(L"Leftover WrongGPU files without an install record are in this game: " + LeftoverSummary(leftovers) +
              L". Confirm to clean them up first (only files that match WrongGPU's releases are removed), or adopt them as an install.", EXIT_OLD_INSTALL);
@@ -1021,7 +1028,7 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
     oldJournal.erase(std::remove_if(oldJournal.begin(), oldJournal.end(), [&](const IniKeyChange& c) { return OptInKey(target.exe, c); }), oldJournal.end());
     // rc6 L5: values OptiScaler's own menu saved over the launcher's (the journal's keys, JournalOutside) carry over to the new
     // OptiScaler.ini as the player's choices, as the OptiScaler tab's Keep would make them (locked keys stay WrongGPU's)
-    if (target.installed && HostedRecord(target.record)) {
+    if (target.installed && HostedRecord(target.record) && OptiIniIsOurs(dir, target.record)) {  // (0.6.1: never another setup's values)
         string current;
         if (ReadAll(Join(dir, L"OptiScaler.ini"), current))
             for (auto& o : JournalOutside(current, oldJournal, L"OptiScaler.ini")) {
@@ -1035,7 +1042,7 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
     const RrConfigFix keepFix = target.installed ? target.record.rrconfig : !wrongDir.empty() ? wrong.rrconfig : RrConfigFix();
     string keepBackup = wrongDir.empty() ? string() : wrongFixBackup;
     if (keepFix.backup && wrongDir.empty()) ReadAll(RrConfigBackupPath(dir), keepBackup);
-    Consent consent; consent.moveMods = r.moveMods; consent.removeOld = r.removeOld;
+    Consent consent; consent.moveMods = r.moveMods; consent.removeOld = r.removeOld; consent.movePlugins = r.movePlugins;
     try {
         for (auto& w : DoInstall(ctx, target, model, consent, ui, sys.hip)) res.warnings.push_back(w);
     } catch (const SetupError&) {
@@ -1116,6 +1123,9 @@ OpResult RunOp(Context& ctx, const OpRequest& r, Ui& ui) {
                 const std::vector<Leftover> lo = FindLeftovers(ctx, r.dir);
                 if (lo.empty()) Fail(L"There are no leftover WrongGPU files (without an install record) in " + r.dir + L".", EXIT_NOT_INSTALLED);
                 if (!r.exe.empty() && GameRunning(r.exe)) Fail(BaseName(r.exe) + L" is running. Close it first.", EXIT_REFUSED);
+                if (!r.force && LeftoversUsedByOtherSetup(r.dir, lo))  // 0.6.1: left alone unless the player confirms (force)
+                    Fail(L"These WrongGPU files are " + wstring(kLeftoversOtherSetup) + L", so they are left alone: removing or adopting them can break that mod. "
+                         L"Confirm to " + (r.op == Op::CleanLeftovers ? L"remove" : L"adopt") + L" them anyway.", EXIT_REFUSED);
                 if (r.op == Op::CleanLeftovers) {
                     res.notes = CleanLeftovers(ctx, r.dir, lo);
                     res.message = L"Leftover WrongGPU files removed from " + r.dir + L" (" + LeftoverSummary(lo) + L")";
@@ -1154,6 +1164,7 @@ string JobText(const OpRequest& r, const wstring& localAppData, const wstring& l
     if (r.hasProfile)
         for (size_t i = 0; i < kSettingCount; ++i) t += string("profile.") + kSettings[i].key + "=" + r.profile.get(kSettings[i].key) + "\r\n";
     for (auto& e : r.optiEdits) t += "optikey." + e.first + "=" + e.second + "\r\n";
+    if (r.movePlugins) t += "moveplugins=1\r\n";
     if (r.optiReset) t += "optireset=1\r\n";
     if (r.optiKeep) t += "optikeep=1\r\n";
     if (r.optiOnly) t += "optionly=1\r\n";
@@ -1184,6 +1195,7 @@ bool ParseJob(const string& text, OpRequest& r, wstring& localAppData, wstring& 
         else if (k == "experimental") r.experimental = Truthy(kv.second);
         else if (k == "force") r.force = Truthy(kv.second);
         else if (k == "noscan") r.noScan = Truthy(kv.second);
+        else if (k == "moveplugins") r.movePlugins = Truthy(kv.second);
         else if (k == "optireset") r.optiReset = Truthy(kv.second);
         else if (k == "optikeep") r.optiKeep = Truthy(kv.second);
         else if (k == "optionly") r.optiOnly = Truthy(kv.second);

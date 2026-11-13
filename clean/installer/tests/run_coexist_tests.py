@@ -27,6 +27,7 @@ os.environ["WRONGGPU_TESTING"] = "1"
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import coexist_fixtures as fx  # noqa: E402
+import coexist_061_tests as c061  # noqa: E402
 import run_installer_tests as suite  # noqa: E402
 import run_launcher_tests as lt  # noqa: E402
 from run_installer_tests import diff, read, sha, snapshot, write  # noqa: E402
@@ -629,6 +630,7 @@ def main():
     test_leftovers_and_orphans(t, opti)
     test_engine_direct_leftovers(t, opti)
     test_status_lists_findings(t, opti)
+    c061.run_all(t, opti, full)
     drop_entries(t, work)  # nothing of this run stays in the test registry (the launcher tests share it)
     print("\n%d checks passed, %d failed (%.0f s)" % (t.passed, len(t.failures), time.time() - t0))
     for f in t.failures:

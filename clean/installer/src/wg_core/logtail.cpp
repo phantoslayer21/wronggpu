@@ -2,6 +2,8 @@
 // WrongGPU launcher core: "Last run" from wronggpu-fsr.log (logtail.h). Written for this project.
 #include "logtail.h"
 
+#include <algorithm>
+
 #include "gamerules.h"
 #include "optiscaler.h"
 
@@ -203,7 +205,8 @@ wstring LastRun::Summary() const {
     else if (upscaler == L"network" && !created) s = L"WrongGPU not used (the game asked for no upscaler)";
     else if (upscaler == L"network") s = L"Model M did not start";
     else s = L"started" + (upscaler.empty() ? wstring() : L" (" + upscaler + L")");
-    if ((rrOnly && upscaler.empty()) || rrUpscaled)  // a Ray Reconstruction session alone (r4 #1), or RR upscaling where Model M didn't (r6 #1)
+    if (rrGuardOff && upscaler.empty()) s = L"Ray Reconstruction: WrongGPU RR stayed off";  // 0.6.1: its guard (Last run says why)
+    else if ((rrOnly && upscaler.empty()) || rrUpscaled)  // a Ray Reconstruction session alone (r4 #1), or RR upscaling where Model M didn't (r6 #1)
         s = rrFrames <= 0 ? wstring(L"Ray Reconstruction: no successful frame")  // an attempt without one (r6 #2)
                           : L"Ray Reconstruction" + (rrMs.empty() ? wstring() : L" (" + rrMs + L" ms a frame)");
     if (!support.empty()) s += L" \u00b7 " + support;
@@ -240,7 +243,8 @@ void ParseRrLog(const string& text, LastRun& r) {
         // a long session: its "attached" line has scrolled out of the log's tail (ReadTail keeps 256 KB) while its instance
         // and timing lines are still there; with no other load line in the tail, the whole tail is that session
         if (text.find("load: process ") != string::npos ||
-            (text.find("runtime: create instance") == string::npos && text.find(" ms per frame") == string::npos))
+            (text.find("runtime: create instance") == string::npos && text.find(" ms per frame") == string::npos &&
+             std::none_of(std::begin(kRrGuardLines), std::end(kRrGuardLines), [&](const char* g) { return text.find(g) != string::npos; })))
             return;
         start = 0;
     }
@@ -281,6 +285,14 @@ void ParseRrLog(const string& text, LastRun& r) {
             r.rrNote = L"the game's request was refused (" + why(b.substr(nr + kRefused.size())) + L")";
         }
         if (b.find("colour passed through, success reported") != string::npos) r.rrPassThrough = true;
+        // 0.6.1: the plugin's coexistence guard (another RR plugin, a second copy of WrongGPU RR, hooks replaced): its line from
+        // the sentence on (the last one; its whole text up to 400 characters: the lines run to about 250)
+        for (const char* g : kRrGuardLines)
+            if (const size_t gp = b.find(g); gp != string::npos) {
+                const string line = b.substr(gp);
+                r.rrGuard = FromUtf8(line.size() > 400 ? line.substr(0, 397) + "..." : line);
+                break;
+            }
         // the mode: an Exact the plugin refused runs Accurate; a switch "rr_mode accurate -> fast"; "rr_mode=fast", "rr_mode fast"
         if (b.find("using accurate") != string::npos || b.find("accurate runs") != string::npos) r.rrMode = L"accurate";
         else if (const size_t arrow = b.find(" -> "); arrow != string::npos && b.find("rr_mode ") != string::npos && b.find("rr_mode ") < arrow) {
@@ -376,7 +388,8 @@ bool CountRrRun(LastRun& r) {
     // Requiem) run Ray Reconstruction only, and the front end writes no log there. An attempt counts whether or not a frame
     // succeeded (r6 #2: a failed one is a run that says so, never "Not played yet" or an older run's success); "upscaled" is RR
     // frames evaluated successfully (r5 #1)
-    if (!r.rrFound || !r.rrUsed) return false;
+    // 0.6.1: a session whose guard kept WrongGPU RR off (rrGuard) is a run too: Last run says why
+    if (!r.rrFound || (!r.rrUsed && r.rrGuard.empty())) return false;
     // the same game session in the front end's log too (r5 #3): its own evidence stays as it is (created: the game asked for
     // Model M; upscaled: Model M upscaled a frame), so the page never says Model M worked, or failed, on RR's frames; RR's
     // frames show on the Denoiser row. Where Model M upscaled none, RR did the upscaling (it denoises and upscales in one pass,
@@ -388,8 +401,24 @@ bool CountRrRun(LastRun& r) {
         return true;
     }
     r.rrOnly = true;
-    r.found = r.created = true;
+    r.found = true;
+    r.created = r.rrUsed;  // (a guard session alone: the game's request never reached WrongGPU RR)
+    r.rrGuardOff = !r.rrUsed && !r.rrGuard.empty();
     r.upscaled = r.rrFrames > 0;
+    return true;
+}
+
+wstring LastRunCacheFlags(const LastRun& r) {
+    auto bit = [](bool b) { return b ? L'1' : L'0'; };
+    return {bit(r.found), bit(r.ready), bit(r.optiPlugin), bit(r.upscaled), bit(r.rrOnly), bit(r.rrUpscaled), bit(r.rrGuardOff)};
+}
+bool ReadLastRunCacheFlags(const wstring& f, LastRun& r) {
+    if (f.size() != 3 && f.size() != 5 && f.size() != 6 && f.size() != 7) return false;  // (3: before r4; 5: before r6; 6: before 0.6.1)
+    for (wchar_t c : f) if (c != L'0' && c != L'1') return false;
+    r.found = f[0] == L'1'; r.ready = f[1] == L'1'; r.optiPlugin = f[2] == L'1';
+    if (f.size() >= 5) { r.upscaled = f[3] == L'1'; r.rrOnly = f[4] == L'1'; }
+    if (f.size() >= 6) r.rrUpscaled = f[5] == L'1';
+    if (f.size() >= 7) r.rrGuardOff = f[6] == L'1';
     return true;
 }
 
@@ -431,7 +460,8 @@ RrJoin JoinRrSession(const SessionSpan& front, const SessionSpan& rr) {
 // The RR session's evidence into the run (the same game session, or the RR session alone)
 static void TakeRr(LastRun& r, const LastRun& rr) {
     r.rrFound = rr.rrFound; r.rrUsed = rr.rrUsed; r.rrMode = rr.rrMode; r.rrMs = rr.rrMs; r.rrFrames = rr.rrFrames; r.rrClock = rr.rrClock;
-    r.rrNote = rr.rrNote; r.rrPassThrough = rr.rrPassThrough;
+    r.rrNote = rr.rrNote; r.rrPassThrough = rr.rrPassThrough; r.rrGuard = rr.rrGuard;
+    if (!rr.rrGuard.empty()) r.warnings.push_back({L"rr-guard", rr.rrGuard});  // 0.6.1: the RR plugin's guard line, shown in Last run
     if (r.renderSize.empty() && r.outputSize.empty()) { r.renderSize = rr.renderSize; r.outputSize = rr.outputSize; }  // (an RR-only run's sizes)
 }
 
@@ -458,7 +488,7 @@ LastRun ReadLastRun(const wstring& installDir) {
     if (rr.rrFound) {
         const RrJoin join = !have || !r.found ? RrJoin::RrNewer : JoinRrSession(SpanOf(r.clock, wt), SpanOf(rr.rrClock, rwt));
         if (join == RrJoin::Same || (join == RrJoin::RrNewer && !(have && r.found))) TakeRr(r, rr);
-        else if (join == RrJoin::RrNewer && rr.rrUsed) { r = LastRun(); TakeRr(r, rr); have = false; }
+        else if (join == RrJoin::RrNewer && (rr.rrUsed || !rr.rrGuard.empty())) { r = LastRun(); TakeRr(r, rr); have = false; }
     }
     r.plugin = asi.plugin;
     for (auto& w : asi.warnings) r.warnings.push_back(w);

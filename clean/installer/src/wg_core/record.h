@@ -108,6 +108,11 @@ void SaveRecord(const wstring& path, const Record& m);
 bool SaveRebasedRecord(Context& ctx, const wstring& dir, Record& m);
 wstring Target(const wstring& dir, const wstring& rel);
 bool HostedRecord(const Record& m);
+// 0.6.1: the OptiScaler.ini in `dir` is still the one of WrongGPU's setup: its keys point at WrongGPU's files (FfxDx12SRPath
+// at WrongGPU's front end, or Dx12Upscaler at WrongGPU's custom upscaler slot, whichever the record installed). OptiScaler's
+// menu saving it keeps them; a file whose keys point elsewhere is another setup's (it replaced or rewrote WrongGPU's): never
+// removed or replaced without the player's OK. A record with neither front end: true (nothing to compare).
+bool OptiIniIsOurs(const wstring& dir, const Record& m);
 // The hive the Apps & features entries go to (HKEY_CURRENT_USER unless set: the elevated worker of another account sets
 // the player's hive, HKEY_USERS\<sid>).
 HKEY UninstallHive();
@@ -135,7 +140,10 @@ void NotePortableLauncher(const wstring& exe);
 void UnregisterUninstall(const Record& m);
 size_t RemoveRuntimeFiles(const wstring& dir, const wstring& exeDir, const Record& m, bool settings);
 void StartCleanup(Context& ctx, const wstring& state, const wstring& self, const wstring& appData);
-std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool failedInstall, bool keepState);
+// keptWarnings (0.6.1): the warning of each recorded file left in place because it changed since the install, by its path (the
+// update path replaces the warning of a file it then moves aside with the player's OK).
+std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool failedInstall, bool keepState,
+                               std::map<wstring, wstring>* keptWarnings = nullptr);
 // rc6 L4: the player's things in the state folder that a failed install or update never removes when they were there before
 // it: profile.ini (the game's settings), previous\ (the version Roll back goes to) and rr-config\ (the Engine.ini fix's backup).
 bool StateHasSettings(const wstring& dir);
