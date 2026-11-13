@@ -264,7 +264,7 @@ def encode(x, params, parity=None, t=_table.TABLE, keep=False):
         # The 20 values depend only on the mirrored render position (clean/reference/encoder.py reflect), which is
         # a grid position, so the halo copies grid values; the dither is applied later at the unmirrored position.
         # Only for render sizes near the padding (fw + h > 2 rw - 2) would the mirrored position be negative; reflect
-        # clamps it to 0 there, which is not confirmed.
+        # clamps it to 0 there (table.UNCONFIRMED "U1").
         fh, fw = v.shape[:2]
         ry = _enc.reflect(np.arange(-h, fh + h), rh)
         rx = _enc.reflect(np.arange(-h, fw + h), rw)
@@ -314,17 +314,47 @@ def coefficients(x, a, S, T):
             "codes_A": cA, "codes_B": cB, "codes_L": cL, "p": p}
 
 
+def tanh32(v):
+    """tanh in float64, then one rounding to FP32."""
+    return np.tanh(np.asarray(v, dtype=np.float64)).astype(np.float32)
+
+
+def coefficients_l(a, S, T):
+    """Model L's per-pixel functions on a [rh, rw, 13] (table.L_DEC_VALUES order; FP16 block outputs held in FP32):
+    A, B and C with Model M's forms (C's gains from inputs clamped to [-20, 20]), latent = tanh(candidate). No gate,
+    no previous latent. Same outputs and codes as coefficients()."""
+    a = np.asarray(a, dtype=np.float32)
+    A = _dec.sigmoid16(a[..., 0:3])
+    B = _dec.softmax3(a[..., 3:6])
+    g = _dec.sigmoid16(np.clip(a[..., 6:8], np.float32(-20), np.float32(20)))
+    sx, sy = np.float32(S) * g[..., 0], np.float32(S) * g[..., 1]
+    rho = _dec.rho32(a[..., 8], float(np.asarray(T)))
+    C = np.stack([_dec.rn16(sx * sx), _dec.rn16(sy * sy), _dec.rn16((sx * sy) * rho)], axis=-1)
+    lat = tanh32(a[..., 9:13])
+    cA, cB, cL = _dec.unorm8_code(A), _dec.unorm8_code(B), _dec.snorm8_code(lat)
+    return {"A": (cA / 255.0).astype(np.float32), "B": (cB / 255.0).astype(np.float32),
+            "C": C.astype(np.float32), "latent": (cL / 127.0).astype(np.float32),
+            "codes_A": cA, "codes_B": cB, "codes_L": cL}
+
+
 def decode(x, params, parity, t=_table.TABLE, keep=False):
-    """Model L's coefficient decoder. x: Model M's dec0 input dict (features = dec1's output [fh/2, fw/2, 64]);
-    params: {stage: tensors} ("dec0", "dec0_block")."""
-    if t["dec_pixel"] != "m":
-        raise NotImplementedError("decoder per-pixel variant other than Model M's: pending")
+    """Model L's coefficient decoder. x: Model M's dec0 input dict (features = dec1's output [fh/2, fw/2, 64]; with
+    dec_pixel "l" the motion / latent_prev / jitter / reset entries are not read); params: {stage: tensors} ("dec0",
+    "dec0_block")."""
+    kind = t["dec_pixel"]
+    if kind not in _table.DEC_PIXEL_VALUES:
+        raise NotImplementedError(f"decoder per-pixel variant {kind!r}: not known")
     _table.decoder_plan(t)
+    if len(t["dec_ops"][-1]["values"]) != _table.DEC_PIXEL_VALUES[kind]:
+        raise ValueError(f"dec_pixel {kind!r} needs {_table.DEC_PIXEL_VALUES[kind]} picked values")
     rw, rh = _dec.check_inputs(x)[:2]
     maps = {"features": np.asarray(x["features"], dtype=np.float64)}
     a = _run_ops(t["dec_ops"], maps, params, parity, t, "dec0")
     dec = params["dec0"]
-    out = coefficients(x, a[:rh, :rw], dec["S"], dec["T"])
+    if kind == "l":
+        out = coefficients_l(a[:rh, :rw], dec["S"], dec["T"])
+    else:
+        out = coefficients(x, a[:rh, :rw], dec["S"], dec["T"])
     out["a"] = a[:rh, :rw].astype(np.float32)
     if keep:
         out["maps"] = maps

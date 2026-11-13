@@ -251,7 +251,7 @@ class DecoderTest(unittest.TestCase):
     def test_model_m_op_list_equals_model_m_decoder(self):
         """With Model M's projection rows and no block, the L decoder is Model M's decoder byte for byte."""
         rng = np.random.default_rng(9)
-        t = T.table(dec_ops=M_DEC_OPS)
+        t = T.table(dec_ops=M_DEC_OPS, dec_pixel="m")
         for reset in (False, True):
             x = MD.random_inputs(rng, rw=29, rh=19, reset=reset)
             p = MD.random_params(rng)
@@ -269,7 +269,7 @@ class DecoderTest(unittest.TestCase):
         m = out["maps"]
         self.assertEqual(m["y"].shape, (fh // 2, fw // 2, 128))
         self.assertEqual(m["p"].shape, (fh, fw, 32))
-        self.assertEqual(out["a"].shape, (18, 30, 17))
+        self.assertEqual(out["a"].shape, (18, 30, 13))
         y = L.dec_project(x["features"], params["dec0"]["W"], params["dec0"]["b"])
         hw = fw // 2
 
@@ -280,15 +280,41 @@ class DecoderTest(unittest.TestCase):
             return y[yy // 2, q, 32 * ((xx % 2) + 2 * (yy % 2)):][:32]
 
         self.assertTrue(_same(member(0, -1), member(0, 3)) and _same(member(1, fw), member(1, fw - 4)))
-        p = q8(_block_by_windows(member, fh, fw, T.block_offset(T.TABLE, "second", 1), params["dec0_block"]))
-        np.testing.assert_array_equal(m["p"], p)
-        fine = q8(L.swin_block(L.depth_to_space(y), params["dec0_block"], T.block_offset(T.TABLE, "second", 1), 2,
-                               T.M_BLOCK_CONSTS))
+        p = L.f16(_block_by_windows(member, fh, fw, T.block_offset(T.TABLE, "second", 1), params["dec0_block"]))
+        np.testing.assert_array_equal(m["p"], p)                                 # FP16 block output, no FP8
+        self.assertFalse(is_fp8_exact(p))
+        fine = L.f16(L.swin_block(L.depth_to_space(y), params["dec0_block"], T.block_offset(T.TABLE, "second", 1),
+                                  2, T.M_BLOCK_CONSTS))
         self.assertFalse(_same(fine, p))                                         # not a fine-pixel mirror
         self.assertTrue(_same(fine[:, 2:-2], p[:, 2:-2]))                        # ... only the edge windows differ
-        self.assertTrue(_same(out["a"], p[:18, :30][..., list(T.DEC0_VALUES)].astype(np.float32)))
+        a = p[:18, :30][..., [0, 1, 6, 7, 8, 9, 10, 11, 12, 2, 3, 4, 5]].astype(np.float32)
+        self.assertTrue(_same(out["a"], a))
+        # The per-pixel functions value by value.
+        S, Tc = np.float32(params["dec0"]["S"]), np.float32(params["dec0"]["T"])
+        for (r, c) in ((0, 0), (5, 7), (17, 29)):
+            v = a[r, c]
+            sig = [np.float16(np.float32(1) / (np.float32(1) + np.exp(-v[i]))) for i in range(3)]
+            self.assertEqual(list(out["codes_A"][r, c]), [int(np.rint(np.float32(s) * np.float32(255))) for s in sig])
+            e = np.exp(v[3:6] - v[3:6].max())
+            self.assertTrue(np.allclose(out["B"][r, c], e / e.sum(), atol=0.5 / 255 + 1e-6))
+            g = [np.float32(np.float16(np.float32(1) / (np.float32(1) + np.exp(-np.clip(v[i], -20, 20)))))
+                 for i in (6, 7)]
+            sx, sy = S * g[0], S * g[1]
+            rho = np.float32(np.tanh(np.float64(Tc * v[8])))
+            want_c = [np.float16(sx * sx), np.float16(sy * sy), np.float16((sx * sy) * rho)]
+            self.assertEqual([np.float16(q) for q in out["C"][r, c]], want_c)
+            want_l = [int(np.rint(np.clip(np.float32(np.tanh(np.float64(v[9 + i]))), -1, 1) * np.float32(127)))
+                      for i in range(4)]
+            self.assertEqual(list(out["codes_L"][r, c]), want_l)
+        # No previous latent, motion or jitter is read.
+        x2 = dict(x, latent_prev=-np.asarray(x["latent_prev"]), motion=np.asarray(x["motion"]) + 5.0,
+                  jitter=(0.3, -0.2), reset=not x["reset"])
+        out2 = L.decode(x2, params, 1)
         for k in ("A", "B", "C", "latent"):
             self.assertTrue(np.isfinite(out[k]).all(), k)
+            self.assertTrue(_same(out[k], out2[k]), k)
+        with self.assertRaises(ValueError):                                      # 13 values for "l", 17 for "m"
+            L.decode(x, params, 1, T.table(dec_pixel="m"))
 
     def test_depth_to_space_inverts_space_to_depth(self):
         v = np.random.default_rng(11).normal(size=(6, 8, 5))
@@ -315,7 +341,7 @@ class NetworkTest(unittest.TestCase):
         """With Model M's encoder and decoder op lists, the L network is Model M's oracle chain."""
         rng = np.random.default_rng(13)
         xe, xd = self._inputs(rng, 40, 24)
-        t = T.table(enc_ops=M_ENC_OPS, dec_ops=M_DEC_OPS)
+        t = T.table(enc_ops=M_ENC_OPS, dec_ops=M_DEC_OPS, dec_pixel="m")
         p = L.random_params(rng, t)
         p["enc0"] = ME.random_params(rng)
         pm_dec = MD.random_params(rng)
@@ -380,7 +406,7 @@ class TableTest(unittest.TestCase):
     def test_table_copy(self):
         t = T.table(dec_pixel="x")
         self.assertEqual(t["dec_pixel"], "x")
-        self.assertEqual(T.TABLE["dec_pixel"], "m")
+        self.assertEqual(T.TABLE["dec_pixel"], "l")
         with self.assertRaises(KeyError):
             T.table(nonsense=1)
 

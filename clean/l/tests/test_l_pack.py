@@ -127,9 +127,16 @@ class ModelTest(unittest.TestCase):
         self.assertEqual((ln[1]["src"], ln[1]["C_in"], ln[1]["C_out"], ln[1]["out_round"]), ("q", 32, 32, "relu_q8"))
         self.assertEqual((ln[2]["src"], ln[2]["C_in"]), ("x", 32))
         self.assertEqual(ln[3]["blob"], "enc0_block")
+        self.assertEqual([(x.get("in_format"), x.get("out_format")) for x in ln[1:4]],
+                         [("fp8", "fp8"), ("fp8", "fp16"), ("fp16", "fp8")])
+        self.assertEqual(ln[3]["border"], "input")
         dn = LP.decoder_launches()
         self.assertEqual([x["kind"] for x in dn], ["dec_project", "swin", "coef"])
-        self.assertEqual(dn[2]["values"], T.DEC0_VALUES)
+        self.assertEqual((dn[0]["out_format"], dn[1]["in_format"], dn[1]["out_format"], dn[1]["border"]),
+                         ("fp8", "fp8", "fp16", "coarse"))
+        self.assertEqual((dn[2]["values"], dn[2]["dec_pixel"], dn[2]["in_format"]), (T.L_DEC_VALUES, "l", "fp16"))
+        with self.assertRaises(ValueError):
+            LP.map_format(None, "none")
 
     def test_pack_model_l(self):
         rng = np.random.default_rng(8)
