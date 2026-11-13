@@ -1580,7 +1580,7 @@ bool RemoveSharedData(Context& ctx, wstring* why, wstring* kept) {
             return false;
         }
         // the ignore list stays (an integrator's installer registered its files there; convert_ignore.h)
-        const wstring keptList = PutIgnoreListBack(trash, shared);
+        const wstring keptList = PutIgnoreListBack(ctx, trash, shared);
         if (kept) *kept = keptList;
         const bool ordinaryTrash = RemoveSharedTree(ctx, trash);
         if (!ordinaryTrash && IsDir(trash)) { if (why) *why = L"Could not remove the WrongGPU data folder link."; return false; }
@@ -1745,7 +1745,7 @@ bool SelfUninstall(Context& ctx, const LauncherPaths& p, bool removeGames, const
             // the ignore list stays (an integrator's installer registered its files there; convert_ignore.h)
             const wstring list = Join(shared, kIgnoreListName);
             wstring keptList;
-            if (trashMade) keptList = PutIgnoreListBack(trash, shared);
+            if (trashMade) keptList = PutIgnoreListBack(ctx, trash, shared);
             if (!trashMade) {
                 const bool hadList = IsFile(list);
                 const bool ordinaryShared = RemoveSharedTree(ctx, shared, list);

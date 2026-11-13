@@ -43,6 +43,24 @@ std::vector<ModelCandidate> ModelCandidates(const GameTarget* t, const wstring& 
     for (auto& g : libraries) for (auto& f : FindFilesNamed(g.root, L"nvngx_dlss.dll", 30000)) add(f, L"another game (" + g.name + L")");
     return c;
 }
+// ModelCandidates minus the files the ignore lists leave out (the order of the others stays); the files left out and why go to
+// m.ignored, the player's line for a chosen file that is left out to m.chosenSkipped. With no entries it is ModelCandidates.
+std::vector<ModelCandidate> AllowedModelCandidates(Context& ctx, const IgnoreLists& ign, const GameTarget* t, const wstring& userDll,
+                                                   const std::vector<StoreGame>& libraries, ModelState& m) {
+    const std::vector<ModelCandidate> all = ModelCandidates(t, userDll, libraries);
+    std::vector<ModelCandidate> cands;
+    std::vector<wstring> paths;
+    for (auto& c : all) paths.push_back(c.path);
+    const std::vector<bool> skip = IgnoredMask(ctx, ign, paths, L"model", m.ignored);
+    for (size_t i = 0; i < all.size(); ++i) if (!skip[i]) cands.push_back(all[i]);
+    if (!userDll.empty() && !all.empty() && skip[0]) {
+        const wstring& s = m.ignored.skipped.front();
+        m.chosenSkipped = L"The file you chose (" + all[0].path + L") is not converted: it is " + s.substr(std::min(s.size(), all[0].path.size() + 2)) +
+                          L". If it was listed by mistake, remove that line (or that --ignore argument).";
+        LogLine(ctx, L"model: " + m.chosenSkipped);
+    }
+    return cands;
+}
 ModelState FindModel(Context& ctx, const GameTarget* t, const wstring& userDll, const std::vector<StoreGame>& libraries) {
     ModelState m;
     if (!LoadEmbeddedMap(ctx)) { m.status = ModelState::FAILED; m.damaged = true; m.error = L"The installer is damaged (" + ctx.mapError + L"). Download it again."; return m; }
@@ -103,20 +121,7 @@ ModelState FindModel(Context& ctx, const GameTarget* t, const wstring& userDll, 
     // the order only decides whether the weights come along. The candidates are the same as before.
     // A file on a list is left out before anything is tried; the order of the others stays. The rule is absolute:
     // a file the player chose is left out too, and the player is told which list and line (or --ignore=) matched.
-    const std::vector<ModelCandidate> all = ModelCandidates(t, userDll, libraries);
-    std::vector<ModelCandidate> cands;
-    {
-        std::vector<wstring> paths;
-        for (auto& c : all) paths.push_back(c.path);
-        const std::vector<bool> skip = IgnoredMask(ctx, ign, paths, L"model", m.ignored);
-        for (size_t i = 0; i < all.size(); ++i) if (!skip[i]) cands.push_back(all[i]);
-        if (!userDll.empty() && !all.empty() && skip[0]) {
-            const wstring& s = m.ignored.skipped.front();
-            m.chosenSkipped = L"The file you chose (" + all[0].path + L") is not converted: it is " + s.substr(std::min(s.size(), all[0].path.size() + 2)) +
-                              L". If it was listed by mistake, remove that line (or that --ignore argument).";
-            LogLine(ctx, L"model: " + m.chosenSkipped);
-        }
-    }
+    const std::vector<ModelCandidate> cands = AllowedModelCandidates(ctx, ign, t, userDll, libraries, m);
     wgc::SearchOptions opt;
     std::shared_ptr<wgc::Converted> chosen, without;  // `without`: the first that converts without the weights
     ModelCandidate chosenCand, withoutCand;

@@ -354,6 +354,7 @@ size_t RemoveRuntimeFiles(const wstring& dir, const wstring& exeDir, const Recor
 static std::atomic<CleanupMoveFn> g_cleanupMove{nullptr};  // test seam (record.h SetCleanupMoveForTest)
 void SetCleanupMoveForTest(CleanupMoveFn fn) { g_cleanupMove = fn; }
 
+// Returns the line "kept ignore-files.txt ..." when the shared folder's ignore list was put back (convert_ignore.h), else "".
 wstring StartCleanup(Context& ctx, const wstring& state, const wstring& self, const wstring& appData) {
     // Detach this generation now. Delayed cleanup must never recursively delete the shared pathname,
     // which a following install can already have recreated with its new model and runtime selection.
@@ -396,7 +397,7 @@ wstring StartCleanup(Context& ctx, const wstring& state, const wstring& self, co
         } else {
             if (StartsWithI(ctx.logFile, appData + L"\\")) ctx.logFile = retired + ctx.logFile.substr(appData.size());
             // the ignore list stays (an integrator's installer registered its files there; convert_ignore.h)
-            kept = PutIgnoreListBack(retired, appData);
+            kept = PutIgnoreListBack(ctx, retired, appData);
             if (!kept.empty()) LogLine(ctx, kept);
         }
     }

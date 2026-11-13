@@ -510,6 +510,9 @@ static bool ConvertIgnoreArgs(const Args& a, Output& o) {
     g.ctx.ignoreListFiles.clear();
     g.ctx.ignoreEntries.clear();
     auto refuse = [&o](const wstring& msg) { o.code = EXIT_USAGE; o.j.S("error", msg); Print(msg); return false; };
+    // a bare --ignore / --ignore-list (no "=", or nothing after it): never takes the next argument as its value
+    if (a.has(L"ignore")) return refuse(L"--ignore needs its entry after an equals sign: --ignore=<full path> or --ignore=sha256=<hex>; nothing was converted");
+    if (a.has(L"ignore-list")) return refuse(L"--ignore-list needs its file: --ignore-list=<file>; nothing was converted");
     for (auto& f : a.ignoreLists) {
         const wstring full = FullPath(f);
         string bytes;
@@ -519,10 +522,28 @@ static bool ConvertIgnoreArgs(const Args& a, Output& o) {
     for (auto& s : a.ignores) {
         IgnoreEntry e;
         wstring why;
-        if (!ParseIgnoreLine(s, e, why) || e.text.empty())
+        // a hash alone (--ignore=sha256=<hex>) is the player's own choice here; it matches every copy of that file with the same bytes
+        if (!ParseIgnoreLine(s, e, why, nullptr, true) || e.text.empty())
             return refuse(L"--ignore=" + s + L": " + (why.empty() ? wstring(L"no path or sha256=<hex>") : why) + L"; nothing was converted");
         g.ctx.ignoreEntries.push_back(s);
     }
+    return true;
+}
+// --ignore and --ignore-list are read by model convert and rr-data convert / prepare only: on any other verb they would be
+// accepted and do nothing, so the player thinks a file is protected. Exit 10 and a message instead.
+static bool IgnoreArgsMisplaced(const wstring& verb, const Args& a, Output& o) {
+    if (a.ignores.empty() && a.ignoreLists.empty() && !a.has(L"ignore") && !a.has(L"ignore-list")) return false;
+    const wstring sub = a.pos.empty() ? L"status" : a.pos[0];
+    bool applies = (verb == L"model" && sub == L"convert") || (verb == L"rr-data" && sub == L"convert");
+#ifdef WRONGGPU_TESTING
+    applies = applies || (verb == L"rr-data" && sub == L"prepare");
+#endif
+    if (applies) return false;
+    const wstring msg = L"--ignore and --ignore-list apply only to \"model convert\" and \"rr-data convert\" (the well-known ignore lists are read by every conversion, "
+                        L"also an install's); \"" + verb + (a.pos.empty() ? wstring() : L" " + a.pos[0]) + L"\" would ignore them, so it was not run";
+    o.code = EXIT_USAGE;
+    o.j.S("error", msg);
+    Print(msg);
     return true;
 }
 // The files the ignore lists left out, with the reason, and the lists' warnings: in the result and on the console.
@@ -536,6 +557,7 @@ static void IgnoreJson(Output& o, const IgnoreReport& r) {
 }
 
 int Verb(const wstring& verb, const Args& a, Output& o) {
+    if (IgnoreArgsMisplaced(verb, a, o)) return o.code;
     const bool noScan = a.has(L"noscan");
     GlobalSettings& gs = gl.global;
     GlobalSettings scan = gs;  // --library=<folder>: scanned this time only, never saved
@@ -1107,7 +1129,7 @@ int RunCli(int argc, wchar_t** argv) {
             if (eq != wstring::npos) {
                 put(s.substr(eq + 1));
             } else if ((name == L"out" || name == L"job" || name == L"result" || name == L"batch" || name == L"data" || name == L"log" || name == L"dir" || name == L"opti" ||
-                        name == L"model" || name == L"library" || name == L"startmenu" || name == L"ignore" || name == L"ignore-list") && i + 1 < argc) {
+                        name == L"model" || name == L"library" || name == L"startmenu" || name == L"ignore-list") && i + 1 < argc) {  // (--ignore needs its "=")
                 put(argv[++i]);
             } else a.flags.insert(name);
         } else a.pos.push_back(s);

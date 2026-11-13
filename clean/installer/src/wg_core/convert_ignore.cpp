@@ -10,11 +10,6 @@ bool FileIdent::operator==(const FileIdent& o) const {
     return valid && o.valid && volume == o.volume && std::memcmp(id, o.id, sizeof(id)) == 0;
 }
 
-bool IgnoreLists::hasHashes() const {
-    for (auto& e : entries) if (!e.sha256.empty()) return true;
-    return false;
-}
-
 static wstring TrimW(const wstring& s) {
     size_t a = 0, b = s.size();
     while (a < b && (s[a] == L' ' || s[a] == L'\t' || s[a] == L'\r' || s[a] == L'\n' || s[a] == 0xFEFF)) ++a;
@@ -79,7 +74,7 @@ wstring FinalPath(const wstring& p, FileIdent* ident) {
     return out;
 }
 
-bool ParseIgnoreLine(const wstring& raw, IgnoreEntry& e, wstring& why, int* version) {
+bool ParseIgnoreLine(const wstring& raw, IgnoreEntry& e, wstring& why, int* version, bool allowHashAlone) {
     e = IgnoreEntry();
     const wstring line = TrimW(raw);
     if (line.empty() || line[0] == L'#') return true;
@@ -115,10 +110,24 @@ bool ParseIgnoreLine(const wstring& raw, IgnoreEntry& e, wstring& why, int* vers
     if (hasHash && !IsHex64(hash)) { why = L"sha256= needs the file's SHA-256 as 64 hex digits"; return false; }
     if (path.size() >= 2 && path.front() == L'"' && path.back() == L'"') path = TrimW(path.substr(1, path.size() - 2));
     path = StripLongPrefix(path);  // "\\?\C:\..." and "\\?\UNC\server\share\..." are full paths too
+    if (hasHash && path.empty() && !allowHashAlone) {
+        // a hash alone would skip every copy of the file with the same bytes, the player's own too (an installer places an unmodified
+        // vendor DLL): only the command line takes one, as the player's own choice
+        why = L"a hash alone is not accepted in a list (it would skip every copy of that file with the same bytes, also your own): write the file's "
+              L"path and its hash, \"<full path>  sha256=<hex>\", or use --ignore=sha256=<hex> on the command line";
+        return false;
+    }
     if (!hasHash || !path.empty()) {
         if (path.empty()) { why = L"no path"; return false; }
         if (!IsFullPath(path)) { why = L"not a full path (a drive letter or \\\\server\\share, no wildcards): " + path; return false; }
         e.path = StripLongPrefix(FullPath(path));  // '/', '.', '..' and repeated separators normalised
+        const DWORD attrs = GetFileAttributesW(e.path.c_str());
+        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+            // a folder would never match a candidate file: say so instead of ignoring nothing
+            why = L"that is a folder, not a file (name the file's full path): " + e.path;
+            e = IgnoreEntry();
+            return false;
+        }
         e.resolved = FinalPath(e.path, &e.ident);
         if (e.resolved.empty()) e.resolved = e.path;
     }
@@ -127,14 +136,34 @@ bool ParseIgnoreLine(const wstring& raw, IgnoreEntry& e, wstring& why, int* vers
     return true;
 }
 
-void ParseIgnoreText(const string& bytes, const wstring& source, IgnoreLists& into) {
-    wstring text;
-    if (bytes.size() >= 2 && (unsigned char)bytes[0] == 0xFF && (unsigned char)bytes[1] == 0xFE) {  // UTF-16 LE with its BOM
+// The list's text: UTF-16 LE with its BOM, or UTF-8 (BOM or not). Anything else is not guessed at (a list read wrongly would
+// skip nothing, silently): UTF-16 big-endian, UTF-16 or UTF-32 without a BOM (they hold NUL bytes), bytes that are not UTF-8.
+static bool DecodeListBytes(const string& bytes, wstring& text, wstring& why) {
+    const auto u = [&](size_t i) { return (unsigned char)bytes[i]; };
+    if (bytes.size() >= 2 && u(0) == 0xFF && u(1) == 0xFE) {  // UTF-16 LE with its BOM
+        if ((bytes.size() - 2) % 2 != 0) { why = L"it is UTF-16 with a byte missing"; return false; }
+        if (bytes.size() >= 4 && u(2) == 0 && u(3) == 0) { why = L"it is UTF-32 (save it as UTF-8, or UTF-16 LE with its BOM)"; return false; }
         text.resize((bytes.size() - 2) / 2);
         if (!text.empty()) std::memcpy(&text[0], bytes.data() + 2, text.size() * 2);
-    } else {
-        const size_t skip = bytes.size() >= 3 && (unsigned char)bytes[0] == 0xEF && (unsigned char)bytes[1] == 0xBB && (unsigned char)bytes[2] == 0xBF ? 3 : 0;
-        text = FromUtf8(bytes.substr(skip));
+        return true;
+    }
+    if (bytes.size() >= 2 && u(0) == 0xFE && u(1) == 0xFF) { why = L"it is UTF-16 big-endian (save it as UTF-8, or UTF-16 LE with its BOM)"; return false; }
+    if (bytes.find('\0') != string::npos) { why = L"it holds NUL bytes: UTF-16 without a BOM, or UTF-32 (save it as UTF-8, or UTF-16 LE with its BOM)"; return false; }
+    const size_t skip = bytes.size() >= 3 && u(0) == 0xEF && u(1) == 0xBB && u(2) == 0xBF ? 3 : 0;
+    if (bytes.size() > skip) {
+        const int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, bytes.data() + skip, (int)(bytes.size() - skip), nullptr, 0);
+        if (n <= 0) { why = L"it is not UTF-8 text (save it as UTF-8, or UTF-16 LE with its BOM)"; return false; }
+        text.resize(n);
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, bytes.data() + skip, (int)(bytes.size() - skip), &text[0], n);
+    }
+    return true;
+}
+
+bool ParseIgnoreText(const string& bytes, const wstring& source, IgnoreLists& into, wstring* whyNot) {
+    wstring text;
+    {
+        wstring w;
+        if (!DecodeListBytes(bytes, text, w)) { if (whyNot) *whyNot = w; return false; }
     }
     int lineNo = 0, version = 0;
     bool newerSaid = false;
@@ -160,12 +189,17 @@ void ParseIgnoreText(const string& bytes, const wstring& source, IgnoreLists& in
         entry.where = where;
         into.entries.push_back(entry);
     }
+    return true;
 }
 
 // The list's bytes. A sharing violation (an installer writing the list at this moment) is waited for: 5 tries 200 ms apart.
 static bool ReadListBytes(const wstring& file, string& out, wstring& why) {
     const DWORD attrs = GetFileAttributesW(file.c_str());
-    if (attrs == INVALID_FILE_ATTRIBUTES) { why = L"there is no such file"; return false; }
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        const DWORD err = GetLastError();
+        why = err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND ? wstring(L"there is no such file") : ErrText(err);
+        return false;
+    }
     if (attrs & FILE_ATTRIBUTE_DIRECTORY) { why = L"it is a folder, not a file"; return false; }
     HANDLE h = INVALID_HANDLE_VALUE;
     DWORD err = 0;
@@ -201,7 +235,7 @@ bool ReadIgnoreList(const wstring& file, IgnoreLists& into, wstring* why) {
     string bytes;
     wstring w;
     if (!ReadListBytes(file, bytes, w)) { if (why) *why = w; return false; }
-    ParseIgnoreText(bytes, file, into);
+    if (!ParseIgnoreText(bytes, file, into, &w)) { if (why) *why = w; return false; }
     into.lists.push_back(file);
     return true;
 }
@@ -219,36 +253,68 @@ std::vector<wstring> WellKnownIgnoreLists(const wstring& ownDataDir) {
 static wstring Source(const IgnoreEntry& e) {
     return StartsWithI(e.where, L"--ignore") ? L"named by " + e.where : L"on the ignore list " + e.where;
 }
-// The path entries only (no file is read).
-static wstring PathReason(const IgnoreLists& l, const wstring& path) {
+// How a path (a candidate, or a recorded source) is looked at: its fully resolved final path and its file identity.
+struct PathLook {
+    wstring fin;
     FileIdent id;
-    wstring fin = FinalPath(path, &id);
-    if (fin.empty()) fin = StripLongPrefix(FullPath(path));
-    for (auto& e : l.entries) {
-        if (e.path.empty()) continue;
-        if (SameText(fin, e.resolved) || SameText(fin, e.path)) return Source(e) + L" (path " + e.path + L")";
-        if (id == e.ident) return Source(e) + L" (path " + e.path + L": the same file)";
+    explicit PathLook(const wstring& path) {
+        if (path.empty()) return;
+        fin = FinalPath(path, &id);
+        if (fin.empty()) fin = StripLongPrefix(FullPath(path));
     }
-    return L"";
+};
+// Whether the entry's path is this file: the same resolved path, or the same file identity (*sameFile). No path entry: no.
+static bool PathMatches(const IgnoreEntry& e, const PathLook& p, bool* sameFile) {
+    *sameFile = false;
+    if (e.path.empty() || p.fin.empty()) return false;
+    if (SameText(p.fin, e.resolved) || SameText(p.fin, e.path)) return true;
+    if (p.id == e.ident) { *sameFile = true; return true; }
+    return false;
 }
-static wstring HashReason(const IgnoreLists& l, const wstring& sha) {
-    if (sha.empty()) return L"";
-    for (auto& e : l.entries)
-        if (!e.sha256.empty() && e.sha256 == Lower(sha)) return Source(e) + L" (SHA-256 " + e.sha256 + L")";
+// "(path ...)", "(path ...; SHA-256 ...)" or, for a hash alone (--ignore=sha256=), "(SHA-256 ...)"
+static wstring EntryText(const IgnoreEntry& e, bool sameFile) {
+    wstring t = e.path.empty() ? wstring() : L"path " + e.path + (sameFile ? L": the same file" : L"");
+    if (!e.sha256.empty()) t += (t.empty() ? L"SHA-256 " : L"; SHA-256 ") + e.sha256;
+    return L" (" + t + L")";
+}
+
+// One rule for both searches. A path entry matches the same file; a path + hash entry only when the file is the same AND has
+// that SHA-256; a hash alone (--ignore=sha256=) when the SHA-256 matches. `hash()` gives the SHA-256 of the thing looked at
+// ("" when it can't be had: a file that can't be read); it is asked only when an entry needs it. A hash that can't be had
+// while an entry applies is not a "no": `unchecked` names that entry, and the caller leaves the file out.
+template <class HashFn>
+static wstring EntryReason(const IgnoreLists& l, const PathLook& p, HashFn hash, wstring* unchecked) {
+    for (auto& e : l.entries) {
+        bool same = false;
+        if (!e.path.empty() && !PathMatches(e, p, &same)) continue;  // a path entry that names another file
+        if (e.sha256.empty()) return Source(e) + EntryText(e, same);
+        const wstring h = hash();
+        if (h.empty()) { if (unchecked && unchecked->empty()) *unchecked = e.where; continue; }
+        if (h == e.sha256) return Source(e) + EntryText(e, same);
+    }
     return L"";
 }
 
 wstring IgnoreReason(const IgnoreLists& l, const wstring& candidate) {
     if (l.empty()) return L"";
-    const wstring byPath = PathReason(l, candidate);
-    if (!byPath.empty() || !l.hasHashes()) return byPath;
-    return HashReason(l, Sha256File(candidate));
+    const PathLook p(candidate);
+    wstring sha;
+    bool hashed = false;
+    wstring unchecked;
+    const wstring why = EntryReason(l, p, [&] {
+        if (!hashed) { hashed = true; sha = Lower(Sha256File(candidate)); }
+        return sha;
+    }, &unchecked);
+    if (!why.empty() || unchecked.empty()) return why;
+    // fail closed: a file that can't be hashed might be the very file the entry names
+    return L"unreadable, so it can't be checked against the SHA-256 entry " + unchecked + L"; it is left out";
 }
 
 wstring RecordedSourceReason(const IgnoreLists& l, const wstring& source, const wstring& sha) {
     if (l.empty()) return L"";
-    const wstring byPath = source.empty() ? wstring() : PathReason(l, source);
-    return byPath.empty() ? HashReason(l, sha) : byPath;
+    const PathLook p(source);  // the recorded path (the file may have gone or changed since: it is not read)
+    const wstring recorded = Lower(sha);
+    return EntryReason(l, p, [&] { return recorded; }, nullptr);
 }
 
 wstring SourceField(const wstring& file, const wchar_t* key) {
@@ -275,13 +341,21 @@ IgnoreLists LoadConvertIgnore(Context& ctx, const wchar_t* what, IgnoreReport* r
                                                  L"that holds it, or fix the file, and try again.";
         LogLine(ctx, wstring(what) + L": the ignore list " + f + L" can't be read: " + why);
     };
-    for (auto& f : WellKnownIgnoreLists(ctx.ownDataDir))
-        if (GetFileAttributesW(f.c_str()) != INVALID_FILE_ATTRIBUTES && !ReadIgnoreList(f, l, &why)) unreadable(f);
+    for (auto& f : WellKnownIgnoreLists(ctx.ownDataDir)) {
+        if (GetFileAttributesW(f.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            const DWORD err = GetLastError();
+            if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) continue;  // not there: nothing to read
+            why = ErrText(err);  // there, or may be, but not to be looked at (no permission, a bad name): fail closed
+            unreadable(f);
+            continue;
+        }
+        if (!ReadIgnoreList(f, l, &why)) unreadable(f);
+    }
     for (auto& f : ctx.ignoreListFiles)
         if (!ReadIgnoreList(f, l, &why)) unreadable(f);
     for (auto& s : ctx.ignoreEntries) {
         IgnoreEntry e;
-        if (!ParseIgnoreLine(s, e, why)) { l.warnings.push_back(L"--ignore=" + s + L": " + why + L"; skipped"); continue; }
+        if (!ParseIgnoreLine(s, e, why, nullptr, true)) { l.warnings.push_back(L"--ignore=" + s + L": " + why + L"; skipped"); continue; }
         if (e.text.empty()) continue;
         e.where = L"--ignore=" + s;
         l.entries.push_back(e);
@@ -313,13 +387,20 @@ std::vector<bool> IgnoredMask(Context& ctx, const IgnoreLists& l, const std::vec
     return skip;
 }
 
-wstring PutIgnoreListBack(const wstring& moved, const wstring& shared) {
+wstring PutIgnoreListBack(Context& ctx, const wstring& moved, const wstring& shared) {
     const wstring from = Join(moved, kIgnoreListName), to = Join(shared, kIgnoreListName);
     const DWORD a = GetFileAttributesW(from.c_str());
     if (a == INVALID_FILE_ATTRIBUTES || (a & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))) return L"";
     CreateDirectoryW(shared.c_str(), nullptr);
     if (!MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_WRITE_THROUGH)) {  // another volume can't happen (a rename beside it); copy as a fallback
-        if (!CopyFileW(from.c_str(), to.c_str(), TRUE)) return L"";
+        const DWORD moveErr = GetLastError();
+        if (!CopyFileW(from.c_str(), to.c_str(), TRUE)) {
+            // both failed: the list goes with the folder that is deleted; never silently
+            const DWORD copyErr = GetLastError();
+            LogLine(ctx, L"cleanup: could not put " + wstring(kIgnoreListName) + L" back into " + shared + L" (move: " + ErrText(moveErr) + L"; copy: " +
+                             ErrText(copyErr) + L"); it is deleted with " + moved);
+            return L"";
+        }
     }
     return wstring(kKeptIgnoreListText) + L": " + to;
 }

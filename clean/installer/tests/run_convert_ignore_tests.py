@@ -6,7 +6,7 @@ launcher's own data folder's), --ignore-list= and --ignore=.
 
 Written for this project; Python standard library only. Runs WrongGPU.exe (a WRONGGPU_TESTING build made with the
 installer suite's test map) against GENERATED library folders only: synthetic model files from the converter's test
-generator, the spec team's synthetic preset-F file, names and bytes of our own. Only the two convert verbs run: no
+generator, the synthetic preset-F file, names and bytes of our own. Only the two convert verbs run: no
 install, no window, no GPU; --noscan always (the tester's own store libraries are never read).
 
     python run_convert_ignore_tests.py --launcher <WrongGPU.exe> --work <dir> [--synth-f <folder of synth-common-v0.bin>]
@@ -245,17 +245,53 @@ def test_model_lists(t):
             "Every DLSS model file found (3) is on an ignore list" in t.stdout, (s["error"], s["skipped"], t.stdout[-600:]))
     del before
 
-    # a hash alone: the file is skipped wherever it is, under any name
+    # a hash alone is not a list entry (it would skip every identical copy, the player's own too): warned, nothing skipped
     sha_a = hashlib.sha256(with_f.file).hexdigest()
     t.set_lists("sha256=%s\r\n" % sha_a, None)
     s = convert_model(t, lib)
-    t.check("a hash-only entry: A (that hash) skipped, B converted; the reason names the hash",
-            s["code"] == 0 and source_of(s).lower() == b.lower() and len(s["skipped"]) == 1 and ("SHA-256 " + sha_a) in s["skipped"][0], (s["code"], source_of(s), s["skipped"]))
+    t.check("a hash alone in a list: warned (list, line, why), skipped; nothing is left out, A converts",
+            s["code"] == 0 and source_of(s).lower() == a.lower() and s["skipped"] == [] and len(s["warnings"]) == 1 and
+            (shared_list + ", line 1").lower() in s["warnings"][0].lower() and "hash alone is not accepted in a list" in s["warnings"][0], (s["code"], source_of(s), s["skipped"], s["warnings"]))
+    # --ignore=sha256=<hex> (the command line only): the file is skipped wherever it is, under any name
+    t.set_lists(None, None)
+    s = convert_model(t, lib, extra=("--ignore=sha256=" + sha_a,))
+    t.check("--ignore=sha256=: A (that hash) skipped, B converted; the reason names the argument and the hash",
+            s["code"] == 0 and source_of(s).lower() == b.lower() and len(s["skipped"]) == 1 and ("SHA-256 " + sha_a) in s["skipped"][0] and "--ignore=sha256=" in s["skipped"][0],
+            (s["code"], source_of(s), s["skipped"]))
     copy = os.path.join(t.work, "elsewhere", "renamed", DLL)
     write(copy, with_f.file)
-    s = convert_model(t, lib, model=copy)
+    s = convert_model(t, lib, model=copy, extra=("--ignore=sha256=" + sha_a,))
     t.check("...the same bytes chosen with --model= from another folder: skipped too, B converted",
             s["code"] == 0 and source_of(s).lower() == b.lower() and len(s["skipped"]) == 2 and s["skipped"][0].lower().startswith(copy.lower()), (s["code"], source_of(s), s["skipped"]))
+
+    # a path + hash entry matches only when BOTH match; an identical copy under another path is still converted
+    t.set_lists("%s  sha256=%s\r\n" % (a, sha_a), None)
+    s = convert_model(t, lib)
+    t.check("a path + hash entry (both match): A skipped, B converted; the reason names the path and the hash",
+            s["code"] == 0 and source_of(s).lower() == b.lower() and len(s["skipped"]) == 1 and "(path %s; SHA-256 %s)" % (a, sha_a) in s["skipped"][0], (s["code"], source_of(s), s["skipped"]))
+    s = convert_model(t, lib, model=copy)
+    t.check("...the same bytes at another path (--model=): NOT skipped by the path + hash entry, converted (it is the first candidate)",
+            s["code"] == 0 and source_of(s).lower() == copy.lower() and len(s["skipped"]) == 1 and s["skipped"][0].lower().startswith(a.lower()), (s["code"], source_of(s), s["skipped"]))
+    t.set_lists("%s  sha256=%s\r\n" % (a, hashlib.sha256(with_f2.file).hexdigest()), None)
+    s = convert_model(t, lib)
+    t.check("a path + hash entry whose hash is not the file's: nothing skipped, A converts", s["code"] == 0 and source_of(s).lower() == a.lower() and s["skipped"] == [],
+            (s["code"], source_of(s), s["skipped"]))
+    # two identical stand-ins in two folders, only one listed by path + hash: the other is still converted
+    twin_lib, (t1, t2) = library(t, "twins", [("Twin One", (DLL, with_f.file)), ("Twin Two", (DLL, with_f.file))])
+    t.set_lists("%s  sha256=%s\r\n" % (t1, sha_a), None)
+    s = convert_model(t, twin_lib)
+    t.check("two identical files, one listed by path + hash: the listed one is skipped, the identical other one is converted",
+            s["code"] == 0 and source_of(s).lower() == t2.lower() and len(s["skipped"]) == 1 and s["skipped"][0].lower().startswith(t1.lower()), (s["code"], source_of(s), s["skipped"]))
+    t.set_lists("%s\r\n" % t1, None)
+    s = convert_model(t, twin_lib, extra=("--ignore=" + t2,))
+    t.check("...and both listed (by path, one from the command line): exit 5, nothing converted", s["code"] == 5 and s["model"] == b"" and len(s["skipped"]) == 2, (s["code"], s["error"], s["skipped"]))
+
+    # a folder entry is warned about like any bad line (it would ignore nothing)
+    t.set_lists("%s\r\n%s\r\n" % (os.path.dirname(a), a), None)
+    s = convert_model(t, lib)
+    t.check("a folder in a list: warned (list, line, folder), the file line after it still used (A skipped, B converted)",
+            s["code"] == 0 and source_of(s).lower() == b.lower() and len(s["warnings"]) == 1 and "folder" in s["warnings"][0] and (shared_list + ", line 1").lower() in s["warnings"][0].lower(),
+            (s["code"], source_of(s), s["warnings"]))
 
     # a bad line: warned (with its list and line), skipped; the rest of the list is used
     t.set_lists("this is not a path\r\nsha256=12345\r\n%s\r\n" % a, None)
@@ -356,8 +392,18 @@ def test_model_lists(t):
     t.check("--ignore= that is not a path or a hash: exit 10, nothing converted", s["code"] == 10 and s["model"] == b"" and "not a full path" in s["error"],
             (s["code"], s["error"]))
     s = convert_model(t, lib, extra=("--ignore", b))
-    t.check("--ignore <path> (two arguments) works as --ignore=<path>", s["code"] == 0 and source_of(s).lower() == a.lower() and len(s["skipped"]) == 1,
-            (s["code"], source_of(s), s["skipped"]))
+    t.check("a bare --ignore (no '='): exit 10, nothing converted; it does not take the next argument as its value",
+            s["code"] == 10 and s["model"] == b"" and "--ignore needs its entry after an equals sign" in s["error"], (s["code"], s["error"]))
+    s = convert_model(t, lib, extra=("--ignore-list",))
+    t.check("a bare --ignore-list with nothing after it: exit 10, nothing converted", s["code"] == 10 and s["model"] == b"" and "--ignore-list needs its file" in s["error"],
+            (s["code"], s["error"]))
+    # --ignore / --ignore-list are applied by model convert and rr-data convert only: elsewhere exit 10 and a message
+    for verb_args in (["scan"], ["model", "status"], ["rr-data", "status"], ["hipcheck"]):
+        for arg in ("--ignore=" + b, "--ignore-list=" + cli_list):
+            t.clear_models()
+            code = t.run(*(verb_args + [arg]))
+            t.check("%s %s: exit 10, not run, the message says where they apply" % (" ".join(verb_args), arg.split("=")[0]),
+                    code == 10 and "apply only to" in t.j.get("error", "") and "apply only to" in t.stdout, (code, t.j.get("error"), t.stdout[-300:]))
     # the chosen file alone, on a list: the message names the argument (or the list and the line)
     s = convert_model(t, None, model=a, extra=("--ignore=" + a,))
     t.check("--model= of a file named by --ignore= with nothing else found: exit 5, nothing converted; the message names the file and the --ignore= argument",
@@ -418,10 +464,23 @@ def test_rr_lists(t, synth_f):
     t.check("every candidate ignored: exit 5, no RR data written, a clear message",
             s["code"] == 5 and s["data"] == b"" and "every Ray Reconstruction model file found (2) is on an ignore list" in s["error"] and len(s["skipped"]) == 2,
             (s["code"], s["error"], s["skipped"]))
+    t.set_lists(None, None)
+    s = convert_rr(t, lib, extra=("--ignore=sha256=" + hashlib.sha256(src).hexdigest(),))
+    t.check("--ignore=sha256=: A skipped by its SHA-256, B converted", s["code"] == 0 and s["source"].lower() == b.lower() and "SHA-256 " in "".join(s["skipped"]),
+            (s["code"], s["source"], s["skipped"]))
+    t.set_lists("%s  sha256=%s\r\n" % (a, hashlib.sha256(src).hexdigest()), None)
+    s = convert_rr(t, lib)
+    t.check("a path + hash entry (both match): A skipped, B converted", s["code"] == 0 and s["source"].lower() == b.lower() and "; SHA-256 " in "".join(s["skipped"]),
+            (s["code"], s["source"], s["skipped"]))
+    twin_lib, (t1, t2) = library(t, "rr-twins", [("Twin One", (RR_DLL, src)), ("Twin Two", (RR_DLL, src))])
+    t.set_lists("%s  sha256=%s\r\n" % (t1, hashlib.sha256(src).hexdigest()), None)
+    s = convert_rr(t, twin_lib)
+    t.check("two identical RR files, one listed by path + hash: the identical other one is converted", s["code"] == 0 and s["source"].lower() == t2.lower() and len(s["skipped"]) == 1,
+            (s["code"], s["source"], s["skipped"]))
     t.set_lists("sha256=%s\r\n" % hashlib.sha256(src).hexdigest(), None)
     s = convert_rr(t, lib)
-    t.check("a hash-only entry: A skipped by its SHA-256, B converted", s["code"] == 0 and s["source"].lower() == b.lower() and "SHA-256 " in "".join(s["skipped"]),
-            (s["code"], s["source"], s["skipped"]))
+    t.check("a hash alone in a list: warned, nothing skipped (A converts)", s["code"] == 0 and s["source"].lower() == a.lower() and s["skipped"] == [] and len(s["warnings"]) == 1,
+            (s["code"], s["source"], s["skipped"], s["warnings"]))
     t.set_lists("%s\r\nnot a path\r\n" % a, None)
     s = convert_rr(t, dll=a)
     t.check("--dll= of a listed file: exit 5, nothing converted (never another file instead); the message names the list and the line; the bad line warned",
@@ -470,12 +529,27 @@ def test_model_reuse(t):
     t.check("a list that doesn't name its source (SHA-256 on record): reused", s["code"] == 0 and s["outcome"].startswith("reused"), (s["code"], s["outcome"]))
 
     before = first()
-    t.set_lists("sha256=%s\r\n" % sha(with_f.file), None)
-    s = convert_model(t, lib_b, keep=True)
-    t.check("its source's SHA-256 listed, an allowed file found: not reused, converted again from the allowed file (B)",
+    t.set_lists(None, None)
+    s = convert_model(t, lib_b, keep=True, extra=("--ignore=sha256=" + sha(with_f.file),))
+    t.check("its source's SHA-256 named by --ignore=sha256=, an allowed file found: not reused, converted again from the allowed file (B)",
             s["code"] == 0 and source_of(s).lower() == b.lower() and s["model"] != before["model"] and ("sha256\t" + sha(with_f2.file)) in s["source"] and
-            s["outcome"].lower().startswith(("replaced: it was converted from %s, which is on the ignore list %s, line 1 (SHA-256 " % (a, shared_list)).lower()),
+            s["outcome"].lower().startswith(("replaced: it was converted from %s, which is named by --ignore=sha256=%s (SHA-256 " % (a, sha(with_f.file))).lower()),
             (s["code"], source_of(s), s["outcome"]))
+    first()
+    t.set_lists("%s  sha256=%s\r\n" % (a, sha(with_f.file)), None)
+    s = convert_model(t, lib_b, keep=True)
+    t.check("its recorded path and recorded SHA-256 both match a path + hash entry: not reused, converted again from B",
+            s["code"] == 0 and source_of(s).lower() == b.lower() and s["outcome"].startswith("replaced: it was converted from") and "; SHA-256 " in s["outcome"],
+            (s["code"], source_of(s), s["outcome"]))
+    first()
+    t.set_lists("%s  sha256=%s\r\n" % (a, sha(with_f2.file)), None)
+    s = convert_model(t, None, keep=True)
+    t.check("a path + hash entry for its source path with another hash (an identical-path file with other bytes): the model data is reused",
+            s["code"] == 0 and s["outcome"].startswith("reused"), (s["code"], s["outcome"]))
+    t.set_lists("%s  sha256=%s\r\n" % (unrelated, sha(with_f.file)), None)
+    s = convert_model(t, None, keep=True)
+    t.check("a path + hash entry with its source's hash but another path (a copy placed elsewhere): the model data converted from the legitimate file is reused",
+            s["code"] == 0 and s["outcome"].startswith("reused"), (s["code"], s["outcome"]))
     first()
     t.set_lists("%s\r\n" % a, None)
     s = convert_model(t, lib_n, keep=True)
@@ -545,10 +619,15 @@ def test_rr_reuse(t, synth_f):
     t.set_lists("%s\r\n" % unrelated, None)
     s = prepare_rr(t)
     t.check("a list that doesn't name its source: reused", s["code"] == 0 and s["reused"] is True, (s["code"], s["reused"], s["error"]))
-    t.set_lists("sha256=%s\r\n" % sha(src), None)
+    t.set_lists("%s  sha256=%s\r\n" % (a, sha(src)), None)
     s = prepare_rr(t, lib_b)
-    t.check("its source's SHA-256 listed, an allowed file found: converted again from it (B), its SHA-256 recorded",
+    t.check("its recorded path and SHA-256 both match a path + hash entry, an allowed file found: converted again from it (B), its SHA-256 recorded",
             s["code"] == 0 and s["reused"] is False and s["source"].lower() == b.lower() and ("sha256\t" + sha(src2)) in s["text"], (s["code"], s["reused"], s["source"], s["error"]))
+    first()
+    t.set_lists("%s  sha256=%s\r\n" % (unrelated, sha(src)), None)
+    s = prepare_rr(t, lib_b)
+    t.check("a path + hash entry with its source's hash but another path: the RR data is reused", s["code"] == 0 and s["reused"] is True and s["source"].lower() == a.lower(),
+            (s["code"], s["reused"], s["source"], s["error"]))
     first()
     before = read(t.shared("model", "F", "model.wgcm"))
     t.set_lists("%s\r\n" % a, None)

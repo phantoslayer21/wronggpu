@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 // Unit tests of the converter search's ignore lists (wg_core/convert_ignore.h): the list format (version line, comments,
-// a path, a path with its SHA-256, a hash alone, quotes, UTF-8 / UTF-16 LE, CRLF), bad lines (warned, skipped, the rest
-// read), path matching (case, '/' and '\', '.' and '..', a hard link, a junction, a symbolic link when this account may
-// make one), a hash that matches wherever the file is, the well-known list locations, and an empty list that leaves every
-// candidate set exactly as it was. Synthetic files only, in the temp folder. Written for this project. Run by ctest
-// ("convert-ignore").
-#include <atomic>
+// a path, a path with its SHA-256, quotes, UTF-8 / UTF-16 LE, CRLF; a hash alone, a folder and an undecodable list refused),
+// bad lines (warned, skipped, the rest read), path matching (case, '/' and '\', '.' and '..', a hard link, a junction, a
+// symbolic link when this account may make one), a path + hash entry that matches only when both match (an identical copy
+// elsewhere is not skipped), --ignore=sha256= that matches wherever the file is, the well-known list locations, and an empty
+// list that leaves the real candidate search (AllowedModelCandidates, the one FindModel uses) exactly as it was. Synthetic
+// files only, in the temp folder. Written for this project. Run by ctest ("convert-ignore").
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -39,18 +39,27 @@ wstring Slashes(wstring s) { for (auto& c : s) if (c == L'\\') c = L'/'; return 
 wstring Upper(wstring s) { for (auto& c : s) c = (wchar_t)towupper(c); return s; }
 IgnoreLists Parse(const string& text) { IgnoreLists l; ParseIgnoreText(text, L"test.txt", l); return l; }
 bool Has(const wstring& s, const wstring& part) { return s.find(part) != wstring::npos; }
-// StartCleanup's folder move for the retry cases (record.h SetCleanupMoveForTest): the first g_moveFailFirst calls fail
-// with g_moveError, later ones really move.
-std::atomic<int> g_moveCalls{0}, g_moveFailFirst{0};
-std::atomic<DWORD> g_moveError{0};
-BOOL WINAPI FakeMove(LPCWSTR from, LPCWSTR to, DWORD flags) {
-    if (++g_moveCalls <= g_moveFailFirst) { SetLastError(g_moveError); return FALSE; }
-    return MoveFileExW(from, to, flags);
+// A list of --ignore= entries (the command line takes "sha256=<hex>" alone; a list does not)
+IgnoreLists Cli(const std::vector<wstring>& entries) {
+    IgnoreLists l;
+    for (auto& s : entries) {
+        IgnoreEntry e;
+        wstring why;
+        if (!ParseIgnoreLine(s, e, why, nullptr, true) || e.text.empty()) throw std::runtime_error("a --ignore= entry of the test is not understood: " + U8(s) + ": " + U8(why));
+        e.where = L"--ignore=" + s;
+        l.entries.push_back(e);
+    }
+    return l;
 }
-size_t CountIn(const string& s, const string& part) {
-    size_t n = 0;
-    for (size_t at = 0; (at = s.find(part, at)) != string::npos; ++at) ++n;
-    return n;
+// The paths of the candidates the search tries (AllowedModelCandidates: what FindModel uses), and what it left out
+struct Search { std::vector<wstring> tried; IgnoreReport ignored; wstring chosenSkipped; };
+Search RunSearch(Context& ctx, const IgnoreLists& ign, const GameTarget* t, const wstring& user, const std::vector<StoreGame>& libs) {
+    ModelState m;
+    Search s;
+    for (auto& c : AllowedModelCandidates(ctx, ign, t, user, libs, m)) s.tried.push_back(c.path);
+    s.ignored = m.ignored;
+    s.chosenSkipped = m.chosenSkipped;
+    return s;
 }
 }  // namespace
 
@@ -74,20 +83,57 @@ int main() {
             const string text = "wronggpu-ignore-files 1\r\n# placed by an installer\r\n\r\n   \r\n" + U8(a) + "\r\n" + U8(b) + "  sha256=" + U8(Upper(shaB)) +
                                 "\r\nsha256=" + string(64, 'a') + "\r\n\"" + U8(c) + "\"\r\n";
             IgnoreLists l = Parse(text);
-            require(l.warnings.empty() && l.entries.size() == 4, "a list with a version line, comments, blank lines, a path, a path with its hash, a hash alone, a quoted path");
+            require(l.entries.size() == 3 && l.warnings.size() == 1, "a list with a version line, comments, blank lines, a path, a path with its hash, a quoted path; a hash alone is warned about");
             require(l.entries[0].path == a && l.entries[0].sha256.empty() && Has(l.entries[0].where, L"line 5"), "a path entry, where it is written");
             require(l.entries[1].path == b && l.entries[1].sha256 == shaB, "a path with its SHA-256 (hex read in either case)");
-            require(l.entries[2].path.empty() && l.entries[2].sha256 == wstring(64, L'a'), "a hash alone");
-            require(l.entries[3].path == c, "quotes around a path");
+            require(l.entries[2].path == c, "quotes around a path");
+            require(Has(l.warnings[0], L"test.txt, line 7") && Has(l.warnings[0], L"hash alone is not accepted in a list") && Has(l.warnings[0], L"--ignore=sha256=") &&
+                        Has(l.warnings[0], L"skipped"), "a hash alone in a list: skipped with a warning (list, line, why, what to write instead)");
+            IgnoreEntry ce;
+            wstring cwhy;
+            require(ParseIgnoreLine(L"sha256=" + wstring(64, L'a'), ce, cwhy, nullptr, true) && ce.path.empty() && ce.sha256 == wstring(64, L'a') && !ce.text.empty(),
+                    "a hash alone is an entry for --ignore=");
             IgnoreLists lf = Parse("\xEF\xBB\xBF" + U8(a) + "\n" + U8(b) + "\n");
             require(lf.warnings.empty() && lf.entries.size() == 2 && lf.entries[0].path == a, "UTF-8 with a BOM, LF line ends");
-            const wstring w16 = L"\xFEFF" + a + L"\r\nsha256=" + shaB + L"\r\n";
+            const wstring w16 = L"\xFEFF" + a + L"\r\n" + b + L"  sha256=" + shaB + L"\r\n";
             string bytes(w16.size() * 2, '\0');
             std::memcpy(&bytes[0], w16.data(), bytes.size());
             IgnoreLists lw = Parse(string("\xFF\xFE", 2) + bytes.substr(2));
-            require(lw.warnings.empty() && lw.entries.size() == 2 && lw.entries[0].path == a && lw.entries[1].sha256 == shaB, "UTF-16 LE with its BOM");
+            require(lw.warnings.empty() && lw.entries.size() == 2 && lw.entries[0].path == a && lw.entries[1].path == b && lw.entries[1].sha256 == shaB, "UTF-16 LE with its BOM");
             IgnoreLists ln = Parse("wronggpu-ignore-files 7\n" + U8(a) + "\n");
             require(ln.entries.size() == 1 && ln.warnings.size() == 1 && Has(ln.warnings[0], L"newer"), "a newer format version: said once, its lines still read");
+        }
+        // ---- a list that can't be decoded is not guessed at (fail closed): UTF-16 big-endian, UTF-16 without a BOM, not UTF-8 ----
+        {
+            auto wide = [](const wstring& w, bool bigEndian, bool bom) {
+                string s;
+                if (bom) s += bigEndian ? string("\xFE\xFF", 2) : string("\xFF\xFE", 2);
+                for (wchar_t ch : w) {
+                    const char lo = (char)(ch & 0xFF), hi = (char)(ch >> 8);
+                    s += bigEndian ? string{hi, lo} : string{lo, hi};
+                }
+                return s;
+            };
+            IgnoreLists none;
+            wstring why;
+            require(!ParseIgnoreText(wide(a + L"\r\n", true, true), L"be.txt", none, &why) && Has(why, L"big-endian") && none.entries.empty() && none.warnings.empty(),
+                    "UTF-16 big-endian (with its BOM): not decoded, nothing added");
+            why.clear();
+            require(!ParseIgnoreText(wide(a + L"\r\n", false, false), L"nobom.txt", none, &why) && Has(why, L"NUL") && none.entries.empty(), "UTF-16 LE without a BOM: not decoded");
+            why.clear();
+            require(!ParseIgnoreText(wide(a + L"\r\n", true, false), L"nobom-be.txt", none, &why) && Has(why, L"NUL"), "UTF-16 BE without a BOM: not decoded");
+            why.clear();
+            require(!ParseIgnoreText(U8(a) + "\xC3\x28\r\n", L"latin.txt", none, &why) && Has(why, L"not UTF-8") && none.entries.empty(), "bytes that are not UTF-8: not decoded");
+            why.clear();
+            require(!ParseIgnoreText(string("\xFF\xFE", 2) + string("a\0b", 3), L"odd.txt", none, &why), "UTF-16 with a byte missing: not decoded");
+            require(ParseIgnoreText("", L"empty.txt", none) && ParseIgnoreText("\xEF\xBB\xBF", L"bom.txt", none) && ParseIgnoreText(U8(L"café ") + "\n", L"u8.txt", none),
+                    "an empty file, a BOM alone, UTF-8 with an accent: decoded");
+            IgnoreEntry fe;
+            wstring fwhy;
+            require(!ParseIgnoreLine(lib, fe, fwhy) && Has(fwhy, L"folder") && fe.text.empty(), "a folder entry: not understood (it would ignore nothing)");
+            IgnoreLists fl = Parse(U8(lib) + "\n" + U8(a) + "\n");
+            require(fl.entries.size() == 1 && fl.warnings.size() == 1 && Has(fl.warnings[0], L"test.txt, line 1") && Has(fl.warnings[0], L"folder"),
+                    "a folder in a list: warned with the list and the line like any bad line, the rest read");
         }
         // ---- bad lines: each skipped with a warning naming the list and the line; the rest is read --------------------
         {
@@ -119,14 +165,61 @@ int main() {
             require(IgnoreReason(l, b).empty() && IgnoreReason(l, c).empty(), "other files are not skipped");
             IgnoreLists gone = Parse(U8(Join(root, L"Gone\\nvngx_dlss.dll")) + "\n");
             require(gone.entries.size() == 1 && IgnoreReason(gone, a).empty(), "a listed path that does not exist matches nothing else");
-            // a hash alone: wherever the file is; a path with a hash matches by either
-            IgnoreLists h = Parse("sha256=" + U8(shaB) + "\n");
+            // --ignore=sha256=<hex> (the only hash alone): wherever the file is, under any name
+            IgnoreLists h = Cli({L"sha256=" + shaB});
             const wstring copy = Join(root, L"Elsewhere\\renamed.dll");
             File(copy, "synthetic file B");
-            require(Has(IgnoreReason(h, b), L"SHA-256 " + shaB) && !IgnoreReason(h, copy).empty(), "a hash alone skips the file wherever it is, under any name");
+            require(Has(IgnoreReason(h, b), L"SHA-256 " + shaB) && !IgnoreReason(h, copy).empty(), "--ignore=sha256= skips the file wherever it is, under any name");
             require(IgnoreReason(h, a).empty(), "a file with other bytes is not skipped by the hash");
-            IgnoreLists ph = Parse(U8(c) + "  sha256=" + U8(shaB) + "\n");
-            require(!IgnoreReason(ph, c).empty() && !IgnoreReason(ph, copy).empty() && IgnoreReason(ph, a).empty(), "a path with a hash: either matches");
+            // a path with a hash matches only when BOTH match: that file, with that SHA-256
+            IgnoreLists pb = Parse(U8(b) + "  sha256=" + U8(shaB) + "\n");
+            require(pb.entries.size() == 1 && pb.warnings.empty(), "a path with its hash is one entry");
+            const wstring pbWhy = IgnoreReason(pb, b);
+            require(!pbWhy.empty() && Has(pbWhy, L"test.txt, line 1") && Has(pbWhy, L"(path " + b) && Has(pbWhy, L"; SHA-256 " + shaB), "path + hash, both match: skipped, the reason names both");
+            require(IgnoreReason(pb, copy).empty() && IgnoreReason(pb, a).empty(), "an identical copy under another path is NOT skipped by a path + hash entry (nor another file)");
+            IgnoreLists pc = Parse(U8(c) + "  sha256=" + U8(shaB) + "\n");  // c's path with b's bytes' hash
+            require(IgnoreReason(pc, c).empty() && IgnoreReason(pc, copy).empty() && IgnoreReason(pc, b).empty(),
+                    "a path + hash entry whose hash is not the file's: the file is not skipped, and neither is the file with that hash elsewhere");
+            // two identical stand-ins in two folders; only one is listed, by path and hash: the other is still a candidate
+            const wstring twin1 = Join(root, L"Twin\\One\\nvngx_dlss.dll"), twin2 = Join(root, L"Twin\\Two\\nvngx_dlss.dll");
+            File(twin1, "synthetic twin bytes");
+            File(twin2, "synthetic twin bytes");
+            const wstring shaT = Lower(Sha256File(twin1));
+            require(shaT == Lower(Sha256File(twin2)), "the stand-ins are identical");
+            IgnoreLists pt = Parse(U8(twin1) + "  sha256=" + U8(shaT) + "\n");
+            require(!IgnoreReason(pt, twin1).empty() && IgnoreReason(pt, twin2).empty(), "two identical files, one listed by path + hash: the listed one is skipped, the other is not");
+            {   // the real search: the other is the one that is tried
+                Context sctx;
+                const std::vector<StoreGame> tw{{L"One", Join(root, L"Twin\\One"), L"", L"Folder"}, {L"Two", Join(root, L"Twin\\Two"), L"", L"Folder"}};
+                const Search sr = RunSearch(sctx, pt, nullptr, L"", tw);
+                require(sr.tried == std::vector<wstring>{twin2} && sr.ignored.skipped.size() == 1 && sr.ignored.skipped[0].rfind(twin1 + L": ", 0) == 0,
+                        "the candidate search tries the unlisted identical copy (twin 2) and names the listed one (twin 1) as skipped");
+                const Search none = RunSearch(sctx, IgnoreLists(), nullptr, L"", tw);
+                require(none.tried == std::vector<wstring>{twin1, twin2}, "and with no entry both are tried, in order");
+            }
+            // a path + hash entry for a file that now holds other bytes (a game update replaced it): not skipped
+            const wstring changed = Join(root, L"Changed\\nvngx_dlss.dll");
+            File(changed, "the bytes it had when it was listed");
+            const wstring shaOld = Lower(Sha256File(changed));
+            IgnoreLists pold = Parse(U8(changed) + "  sha256=" + U8(shaOld) + "\n");
+            require(!IgnoreReason(pold, changed).empty(), "path + hash entry, the file as listed: skipped");
+            File(changed, "other bytes after an update");
+            require(IgnoreReason(pold, changed).empty(), "...the same path now holding other bytes: not skipped");
+            // a hash is computed only when an entry that needs it applies; a file that can't be hashed then is left out (fail closed)
+            {
+                const wstring locked = Join(root, L"Locked\\nvngx_dlss.dll");
+                File(locked, "synthetic locked file");
+                HANDLE held = CreateFileW(locked.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                require(held != INVALID_HANDLE_VALUE, "the test holds a candidate open without sharing");
+                require(Lower(Sha256File(locked)).empty(), "...so it can't be hashed");
+                IgnoreLists byHashOnly = Cli({L"sha256=" + shaB}), byPathHash = Parse(U8(locked) + "  sha256=" + U8(shaB) + "\n"), elsewhereHash = Parse(U8(b) + "  sha256=" + U8(shaB) + "\n"),
+                            byPathOnly = Parse(U8(a) + "\n");
+                const wstring r1 = IgnoreReason(byHashOnly, locked), r2 = IgnoreReason(byPathHash, locked);
+                require(Has(r1, L"unreadable") && Has(r1, L"--ignore=sha256=") && Has(r2, L"unreadable") && Has(r2, L"test.txt, line 1"),
+                        "a candidate that can't be hashed, a hash entry applying to it (--ignore=sha256=, or a path + hash entry for its path): left out, the entry named");
+                require(IgnoreReason(elsewhereHash, locked).empty() && IgnoreReason(byPathOnly, locked).empty(), "no hash entry applies (another path, or a path alone): it is not hashed, not skipped");
+                CloseHandle(held);
+            }
             // a hard link to a listed file
             const wstring hard = Join(root, L"Hard\\nvngx_dlss.dll");
             EnsureDir(Parent(hard));
@@ -175,19 +268,19 @@ int main() {
             IgnoreReport rep;
             require(LoadConvertIgnore(ctx, L"model", &rep).empty() && rep.warnings.empty(), "no list anywhere: empty, no warning");
             File(Join(shared, L"ignore-files.txt"), "wronggpu-ignore-files 1\r\n" + U8(a) + "\r\nnot a path\r\n");
-            File(Join(portable, L"ignore-files.txt"), "sha256=" + U8(shaB) + "\r\n");
+            File(Join(portable, L"ignore-files.txt"), U8(b) + "  sha256=" + U8(shaB) + "\r\n");
             const wstring cli = Join(root, L"cli-list.txt");
             File(cli, U8(c) + "\n");
             ctx.ignoreListFiles = {cli};
-            ctx.ignoreEntries = {chosen, L"bad entry"};
+            ctx.ignoreEntries = {chosen, L"bad entry", L"sha256=" + shaB};
             rep = IgnoreReport();
             IgnoreLists l = LoadConvertIgnore(ctx, L"model", &rep);
-            require(l.entries.size() == 4 && l.lists.size() == 3, "the well-known lists, then the command line's list and entries");
+            require(l.entries.size() == 5 && l.lists.size() == 3, "the well-known lists, then the command line's list and entries (--ignore=sha256= too)");
             require(rep.warnings.size() == 2 && Has(rep.warnings[0], L"line 3") && Has(rep.warnings[1], L"--ignore=bad entry"), "their bad lines are warned about");
             const std::vector<bool> skip = IgnoredMask(ctx, l, {chosen, a, b, c, Join(root, L"Elsewhere\\renamed.dll")}, L"model", rep);
             require(skip == std::vector<bool>({true, true, true, true, true}) && rep.skipped.size() == 5, "every list and entry is honoured");
             require(Has(rep.skipped[0], L"named by --ignore=" + chosen) && Has(rep.skipped[1], L"on the ignore list " + Join(shared, L"ignore-files.txt") + L", line 2") &&
-                        Has(rep.skipped[2], L"WrongGPU-data") && Has(rep.skipped[3], L"cli-list.txt, line 1"),
+                        Has(rep.skipped[2], L"WrongGPU-data") && Has(rep.skipped[3], L"cli-list.txt, line 1") && Has(rep.skipped[4], L"named by --ignore=sha256="),
                     "each skipped file names the list and line, or the --ignore= argument, that skips it");
 
             // a well-known list that is there but can't be read fails closed, after a short wait on a sharing violation
@@ -214,6 +307,21 @@ int main() {
             rep = IgnoreReport();
             require(Has(LoadConvertIgnore(ctx, L"model", &rep).unreadable, L"a folder"), "a folder named ignore-files.txt: unreadable (fail closed)");
             RemoveDirectoryW(wk.c_str());
+            // a list that can't be decoded fails closed too (UTF-16 big-endian here), the reason named; a bad hash line only warns
+            File(wk, string("\xFE\xFF\0a\0b", 6));
+            rep = IgnoreReport();
+            const IgnoreLists undecoded = LoadConvertIgnore(ctx, L"model", &rep);
+            require(Has(undecoded.unreadable, wk) && Has(undecoded.unreadable, L"big-endian") && Has(undecoded.unreadable, L"nothing was converted") && rep.unreadable == undecoded.unreadable,
+                    "a well-known list in UTF-16 big-endian: unreadable (fail closed), the file and the reason named");
+            DeleteFileW(wk.c_str());
+            // GetFileAttributesW failing for a reason other than "not there" (a name the system refuses) is an unreadable list too
+            const wstring saved = ctx.ownDataDir;
+            ctx.ownDataDir = Join(root, L"bad?name");
+            rep = IgnoreReport();
+            const IgnoreLists refused = LoadConvertIgnore(ctx, L"model", &rep);
+            std::printf("convert-ignore: a name the system refuses: %ls\n", refused.unreadable.c_str());
+            require(!refused.unreadable.empty() && Has(refused.unreadable, L"bad?name"), "a well-known list whose attributes can't be read (not \"not found\"): unreadable, fail closed");
+            ctx.ownDataDir = saved;
             DeleteFileW(Join(portable, L"ignore-files.txt").c_str());
             rep = IgnoreReport();
             require(LoadConvertIgnore(ctx, L"model", &rep).unreadable.empty(), "no list at all: nothing unreadable");
@@ -223,11 +331,19 @@ int main() {
             const wstring src = Join(root, L"source.txt");
             File(src, "source\t" + U8(a) + "\r\nversion\t310.5.0.0\r\nsha256\t" + U8(shaB) + "\r\n");
             require(SourceField(src, L"source") == a && SourceField(src, L"sha256") == shaB && SourceField(src, L"none").empty(), "model-source.txt fields read");
-            IgnoreLists byPath = Parse(U8(a) + "\n"), byHash = Parse("sha256=" + U8(shaB) + "\n"), other = Parse(U8(c) + "\n");
+            IgnoreLists byPath = Parse(U8(a) + "\n"), byHash = Cli({L"sha256=" + shaB}), other = Parse(U8(c) + "\n");
             require(Has(RecordedSourceReason(byPath, a, L""), L"line 1"), "a recorded source path on a list");
-            require(Has(RecordedSourceReason(byHash, Join(root, L"Gone\\nvngx_dlss.dll"), shaB), L"SHA-256"), "a recorded SHA-256 on a list (the source file itself gone)");
+            require(Has(RecordedSourceReason(byHash, Join(root, L"Gone\\nvngx_dlss.dll"), shaB), L"SHA-256"), "a recorded SHA-256 on --ignore=sha256= (the source file itself gone)");
             require(RecordedSourceReason(other, a, shaB).empty() && RecordedSourceReason(byHash, a, L"").empty() && RecordedSourceReason(IgnoreLists(), a, shaB).empty(),
                     "not on a list; no hash recorded (the file is not hashed again); no list");
+            // a path + hash entry lists a recorded source only when its recorded path AND recorded SHA-256 are both the entry's
+            IgnoreLists pathHash = Parse(U8(a) + "  sha256=" + U8(shaB) + "\n");
+            const wstring otherSha = wstring(64, L'1');
+            require(Has(RecordedSourceReason(pathHash, a, shaB), L"line 1") && Has(RecordedSourceReason(pathHash, a, Upper(shaB)), L"SHA-256 " + shaB),
+                    "recorded path and recorded SHA-256 both match the path + hash entry: listed");
+            require(RecordedSourceReason(pathHash, a, otherSha).empty() && RecordedSourceReason(pathHash, a, L"").empty() && RecordedSourceReason(pathHash, c, shaB).empty() &&
+                        RecordedSourceReason(pathHash, Join(root, L"Gone\\nvngx_dlss.dll"), shaB).empty(),
+                    "only one of them matches (the hash, or the path; or no hash on record): not listed, so a model converted from a legitimate identical copy is reused");
         }
         // ---- the shared folder removed: its ignore list stays (StartCleanup: the last game's uninstall, the restorer) --
         {
@@ -243,66 +359,22 @@ int main() {
                     "the list is back in place byte for byte, the rest of the folder went");
             DeleteFileW(Join(appData, L"ignore-files.txt").c_str());
             File(Join(appData, L"model\\model.wgcm"), "synthetic model data");
+            Sleep(100);  // the folder's new name carries GetTickCount64 (~16 ms steps): another step than the first cleanup's
             require(StartCleanup(ctx, L"", L"", appData).empty() && !IsDir(appData), "no list: nothing kept, the folder goes as before");
-            // 0.6.1 stress (every build, the release configuration too): the two cases above back to back, 200 times on the
-            // same folder, mostly within one GetTickCount64 step of each other. Before the fix the second move aimed at the
-            // first one's folder whenever both fell in the same step (ERROR_ALREADY_EXISTS) and the folder stayed.
+            // PutIgnoreListBack when neither the move nor the copy can put the list back (the target folder can't be made: a
+            // file is where it should be): nothing is kept and the log says the list is lost, never silently
             {
-                Context sctx;
-                sctx.logFile = Join(root, L"cleanup-stress.log");  // outside the folder that is moved
-                const int runs = 200;
-                int gone = 0;
-                for (int i = 0; i < runs; ++i) {
-                    File(Join(appData, L"model\\model.wgcm"), "synthetic model data");
-                    File(Join(appData, L"ignore-files.txt"), listBytes);
-                    const wstring k1 = StartCleanup(sctx, L"", L"", appData);
-                    DeleteFileW(Join(appData, L"ignore-files.txt").c_str());
-                    File(Join(appData, L"model\\model.wgcm"), "synthetic model data");
-                    const wstring k2 = StartCleanup(sctx, L"", L"", appData);
-                    if (StartsWithI(k1, kKeptIgnoreListText) && k2.empty() && !IsDir(appData)) ++gone;
-                }
-                string slog;
-                ReadAll(sctx.logFile, slog);
-                size_t retries = 0, deferred = 0;
-                for (size_t at = 0; (at = slog.find("); trying again in ", at)) != string::npos; ++at) ++retries;
-                for (size_t at = 0; (at = slog.find("cleanup deferred", at)) != string::npos; ++at) ++deferred;
-                std::printf("convert-ignore: cleanup stress %d/%d (retries %zu, deferred %zu)\n", gone, runs, retries, deferred);
-                require(gone == runs && deferred == 0, "cleanup stress: the list kept, then no list: the folder goes, 200 of 200 times");
-            }
-            // 0.6.1: the move's bounded retry (error 32 sharing violation, error 5 access denied: a scanner's open file),
-            // through the test seam: fails for the first N tries, then moves; or fails every time and ends deferred
-            {
-                Context rctx;
-                rctx.logFile = Join(root, L"cleanup-retry.log");
-                struct Case { DWORD error; int failFirst; bool gone; int calls; size_t retries; const char* what; };
-                const Case cases[] = {
-                    {ERROR_ACCESS_DENIED, 3, true, 4, 3, "error 5 for 3 tries, then the move: the folder goes after 3 logged retries"},
-                    {ERROR_ACCESS_DENIED, 1000, false, kCleanupMoveTries, kCleanupMoveTries - 1,
-                     "error 5 every time: 5 tries (4 logged retries), then deferred with the error, the folder left in place"},
-                    {ERROR_SHARING_VIOLATION, 2, true, 3, 2, "error 32 for 2 tries, then the move: the folder goes"},
-                    {ERROR_ALREADY_EXISTS, 1000, false, 1, 0, "another error (183): no retry, deferred at once"}};
-                for (const Case& rc : cases) {
-                    DeleteFileW(rctx.logFile.c_str());
-                    File(Join(appData, L"model\\model.wgcm"), "synthetic model data");
-                    g_moveCalls = 0; g_moveFailFirst = rc.failFirst; g_moveError = rc.error;
-                    SetCleanupMoveForTest(&FakeMove);
-                    const ULONGLONG t0 = GetTickCount64();
-                    const wstring rkept = StartCleanup(rctx, L"", L"", appData);
-                    const ULONGLONG took = GetTickCount64() - t0;
-                    SetCleanupMoveForTest(nullptr);
-                    string rlog;
-                    ReadAll(rctx.logFile, rlog);
-                    const string code = "(error " + std::to_string(rc.error);
-                    const size_t retries = CountIn(rlog, code + (rc.error == ERROR_SHARING_VIOLATION ? ", sharing violation); trying again" : ", access denied); trying again"));
-                    const size_t deferred = CountIn(rlog, "cleanup deferred: cannot detach " + U8(appData) + " " + code + ":");
-                    std::printf("convert-ignore: cleanup retry, error %lu x %d: %d tries, %zu retries logged, deferred %zu, %llu ms\n",
-                                rc.error, rc.failFirst, g_moveCalls.load(), retries, deferred, (unsigned long long)took);
-                    require(rkept.empty() && IsDir(appData) == !rc.gone && g_moveCalls == rc.calls && retries == rc.retries &&
-                                deferred == (rc.gone ? 0u : 1u) && took < 5000, rc.what);
-                }
-                if (IsDir(appData)) {  // the deferred cases left it: the real move now
-                    require(StartCleanup(rctx, L"", L"", appData).empty() && !IsDir(appData), "after the retry cases: the folder goes");
-                }
+                const wstring moved = Join(root, L"moved-aside"), blocker = Join(root, L"not-a-folder");
+                File(Join(moved, L"ignore-files.txt"), listBytes);
+                File(blocker, "a file where the shared folder should be");
+                Context pctx;
+                pctx.logFile = Join(root, L"put-back.log");
+                require(PutIgnoreListBack(pctx, moved, blocker).empty(), "the list can't be put back: nothing is said to be kept");
+                string plog;
+                ReadAll(pctx.logFile, plog);
+                require(plog.find("could not put ignore-files.txt back") != string::npos && plog.find("it is deleted with") != string::npos,
+                        "...and the log says the list could not be put back and goes with the folder");
+                require(PutIgnoreListBack(pctx, Join(root, L"no-such-folder"), blocker).empty(), "no list in the moved folder: nothing to put back, nothing said");
             }
             for (int i = 0; i < 600; ++i) {  // the hidden cleanup deletes the moved-aside folders (ping -n 3 first)
                 bool left = false;
@@ -324,56 +396,96 @@ int main() {
                 // the share's path and the local path are two names of one file: the file identity matches them
                 require(Has(IgnoreReason(l, a), L"the same file"), "a UNC entry matches the same file reached by its local path");
                 require(Has(IgnoreReason(local, unc), L"the same file"), "a local entry matches the same file reached through the UNC path");
-                IgnoreLists lh = Parse("sha256=" + U8(Lower(Sha256File(a))) + "\n");
-                require(!IgnoreReason(lh, unc).empty(), "a hash entry matches the file read through its UNC path");
+                IgnoreLists lh = Cli({L"sha256=" + Lower(Sha256File(a))});
+                require(!IgnoreReason(lh, unc).empty(), "an --ignore=sha256= entry matches the file read through its UNC path");
             } else {
                 std::printf("convert-ignore: UNC-SKIPPED: %ls is not reachable here\n", unc.c_str());
             }
         }
-        // ---- an empty list never changes the candidates (and so never which file wins) ------------------------------
+        // ---- an empty list never changes the candidate search (and so never which file wins) -----------------------------
+        // The search is AllowedModelCandidates, the code FindModel runs before it converts (the conversion needs the embedded
+        // map, which the CI build has not: this test compares what the search hands to the converter, in its order, whose first
+        // entry is the file that converts first). No list anywhere is the baseline; an empty list in each place one is read.
         {
             Context ctx;
-            const wstring shared = Join(Join(root, L"localappdata"), L"WrongGPU");
+            const wstring shared = Join(Join(root, L"localappdata"), L"WrongGPU"), portable = Join(root, L"Portable\\WrongGPU-data");
+            const wstring sharedList = Join(shared, L"ignore-files.txt"), portableList = Join(portable, L"ignore-files.txt");
+            DeleteFileW(sharedList.c_str());
+            DeleteFileW(portableList.c_str());
             GameTarget t;
             t.root = Join(lib, L"Game A");
             const std::vector<StoreGame> libs{{L"Game B", Join(lib, L"Game B"), L"", L"Folder"}, {L"Game C", Join(lib, L"Game C"), L"", L"Folder"},
                                               {L"Game A", Join(lib, L"Game A"), L"", L"Folder"}};
             const std::vector<StoreGame> rev(libs.rbegin(), libs.rend());
-            struct Set { const char* name; const GameTarget* t; wstring user; std::vector<StoreGame> libs; };
-            const Set sets[] = {{"chosen file, this game, three library games", &t, chosen, libs},
-                                {"library games only", nullptr, L"", libs},
-                                {"library games in the other order", nullptr, L"", rev},
-                                {"chosen file only", nullptr, chosen, {}},
-                                {"this game only", &t, L"", {}},
-                                {"nothing found", nullptr, L"", {}}};
+            struct Set { const char* name; const GameTarget* t; wstring user; std::vector<StoreGame> libs; size_t count; };
+            const Set sets[] = {{"chosen file, this game, three library games", &t, chosen, libs, 4},
+                                {"library games only", nullptr, L"", libs, 3},
+                                {"library games in the other order", nullptr, L"", rev, 3},
+                                {"chosen file only", nullptr, chosen, {}, 1},
+                                {"this game only", &t, L"", {}, 1},
+                                {"nothing found", nullptr, L"", {}, 0}};
+            // the baseline: no list at all (nothing in either well-known place, nothing on the command line)
+            ctx.ownDataDir = portable;
+            IgnoreReport baseRep;
+            const IgnoreLists none = LoadConvertIgnore(ctx, L"model", &baseRep);
+            require(none.empty() && baseRep.warnings.empty() && none.unreadable.empty(), "no list anywhere: no entry, no warning");
+            std::vector<Search> base;
+            for (const Set& s : sets) {
+                base.push_back(RunSearch(ctx, none, s.t, s.user, s.libs));
+                std::vector<wstring> plain;
+                for (auto& x : ModelCandidates(s.t, s.user, s.libs)) plain.push_back(x.path);
+                if (base.back().tried != plain || base.back().tried.size() != s.count || !base.back().ignored.skipped.empty()) {
+                    std::printf("set: %s\n", s.name);
+                    require(false, "with no list the search hands over ModelCandidates unchanged");
+                }
+                ++checks;
+            }
+            // an empty list in each place one is read: %LOCALAPPDATA%\WrongGPU, the launcher's own data folder, both, and
+            // --ignore-list=; each text that is empty (blank, a BOM alone, comments and the version line, blank lines)
+            const wstring cliEmpty = Join(root, L"cli-empty.txt");
             const string emptyLists[] = {"", "\xEF\xBB\xBF", "# nothing\r\n\r\nwronggpu-ignore-files 1\r\n", "\r\n\r\n"};
+            struct Place { const char* name; bool shared, own, cli; };
+            const Place places[] = {{"%LOCALAPPDATA%\\WrongGPU\\ignore-files.txt", true, false, false}, {"the launcher's own data folder", false, true, false},
+                                    {"both well-known lists", true, true, false}, {"--ignore-list=", false, false, true}};
             for (const string& listText : emptyLists) {
-                File(Join(shared, L"ignore-files.txt"), listText);
-                IgnoreReport rep;
-                const IgnoreLists l = LoadConvertIgnore(ctx, L"model", &rep);
-                require(l.empty() && rep.warnings.empty(), "an empty list file (blank, a BOM alone, comments and the version line): no entry, no warning");
-                for (const Set& s : sets) {
-                    const std::vector<ModelCandidate> cands = ModelCandidates(s.t, s.user, s.libs);
-                    std::vector<wstring> paths;
-                    for (auto& x : cands) paths.push_back(x.path);
-                    const std::vector<bool> skip = IgnoredMask(ctx, l, paths, L"model", rep);
-                    std::vector<wstring> kept;
-                    for (size_t i = 0; i < paths.size(); ++i) if (!skip[i]) kept.push_back(paths[i]);
-                    if (kept != paths || !rep.skipped.empty()) { std::printf("set: %s\n", s.name); require(false, "an empty list keeps every candidate in its order"); }
-                    ++checks;
+                for (const Place& pl : places) {
+                    DeleteFileW(sharedList.c_str());
+                    DeleteFileW(portableList.c_str());
+                    ctx.ignoreListFiles.clear();
+                    if (pl.shared) File(sharedList, listText);
+                    if (pl.own) File(portableList, listText);
+                    if (pl.cli) { File(cliEmpty, listText); ctx.ignoreListFiles = {cliEmpty}; }
+                    IgnoreReport rep;
+                    const IgnoreLists l = LoadConvertIgnore(ctx, L"model", &rep);
+                    if (!l.empty() || !rep.warnings.empty() || !l.unreadable.empty()) { std::printf("place: %s\n", pl.name); require(false, "an empty list file: no entry, no warning, readable"); }
+                    for (size_t i = 0; i < std::size(sets); ++i) {
+                        const Search got = RunSearch(ctx, l, sets[i].t, sets[i].user, sets[i].libs);
+                        const bool sameWinner = got.tried.empty() == base[i].tried.empty() && (got.tried.empty() || got.tried.front() == base[i].tried.front());
+                        if (got.tried != base[i].tried || !sameWinner || !got.ignored.skipped.empty() || !got.chosenSkipped.empty()) {
+                            std::printf("set: %s, empty list in %s\n", sets[i].name, pl.name);
+                            require(false, "an empty list leaves the candidates, their order and the winner as they were");
+                        }
+                        ++checks;
+                    }
                 }
             }
-            // and a list whose entries match none of them changes nothing either
-            File(Join(shared, L"ignore-files.txt"), U8(Join(root, L"Gone\\nvngx_dlss.dll")) + "\r\nsha256=" + string(64, '0') + "\r\n");
-            IgnoreReport rep;
-            const IgnoreLists l = LoadConvertIgnore(ctx, L"model", &rep);
-            const std::vector<ModelCandidate> cands = ModelCandidates(&t, chosen, libs);
-            std::vector<wstring> paths;
-            for (auto& x : cands) paths.push_back(x.path);
-            require(paths.size() == 4 && l.entries.size() == 2, "the full candidate set: the chosen file and three games' files");
-            const std::vector<bool> skip = IgnoredMask(ctx, l, paths, L"model", rep);
-            require(std::find(skip.begin(), skip.end(), true) == skip.end() && rep.skipped.empty(), "a list that names none of the candidates keeps them all");
-            DeleteFileW(Join(shared, L"ignore-files.txt").c_str());
+            ctx.ignoreListFiles.clear();
+            DeleteFileW(sharedList.c_str());
+            DeleteFileW(portableList.c_str());
+            // the search does change with an entry (the test can fail): the first candidate listed, the next one is the winner
+            File(sharedList, U8(chosen) + "\r\n");
+            IgnoreReport rep1;
+            const IgnoreLists one = LoadConvertIgnore(ctx, L"model", &rep1);
+            const Search s1 = RunSearch(ctx, one, &t, chosen, libs);
+            require(one.entries.size() == 1 && s1.tried.size() == 3 && s1.tried.front() == base[0].tried[1] && s1.ignored.skipped.size() == 1 && !s1.chosenSkipped.empty(),
+                    "a list that names the chosen file: it is left out (and said), the next candidate is the first tried");
+            // and a list whose entries match none of them changes nothing either: another path, a path whose hash is not the file's
+            File(sharedList, U8(Join(root, L"Gone\\nvngx_dlss.dll")) + "\r\n" + U8(a) + "  sha256=" + string(64, '0') + "\r\n");
+            IgnoreReport rep2;
+            const IgnoreLists nomatch = LoadConvertIgnore(ctx, L"model", &rep2);
+            const Search s2 = RunSearch(ctx, nomatch, &t, chosen, libs);
+            require(nomatch.entries.size() == 2 && rep2.warnings.empty() && s2.tried == base[0].tried && s2.ignored.skipped.empty(), "a list that names none of the candidates keeps them all");
+            DeleteFileW(sharedList.c_str());
         }
     } catch (const std::exception& e) {
         std::cerr << "FAILED: " << e.what() << " (after " << checks << " checks)\n";

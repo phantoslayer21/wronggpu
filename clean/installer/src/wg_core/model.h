@@ -46,6 +46,10 @@ bool ExistingModelValid(Context& ctx, wstring* why = nullptr, wgc::ModelFileInfo
 bool MapHasOptionalGroup(const wgc::Map& map);
 wstring FilterText(Context& ctx, bool present);
 std::vector<ModelCandidate> ModelCandidates(const GameTarget* t, const wstring& userDll, const std::vector<StoreGame>& libraries);
+// The candidates FindModel tries: ModelCandidates minus the files the ignore lists leave out (convert_ignore.h). The files left
+// out, with the reason, go to m.ignored; the player's line for a chosen file that is left out to m.chosenSkipped. Needs no map.
+std::vector<ModelCandidate> AllowedModelCandidates(Context& ctx, const IgnoreLists& ign, const GameTarget* t, const wstring& userDll,
+                                                   const std::vector<StoreGame>& libraries, ModelState& m);
 ModelState FindModel(Context& ctx, const GameTarget* t, const wstring& userDll, const std::vector<StoreGame>& libraries);
 bool ReplaceModel(Context& ctx, const ModelState& m, wstring& problem);
 ModelResult WriteModel(Context& ctx, const ModelState& m, Ui& ui);
