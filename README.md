@@ -37,7 +37,7 @@ A few games need one more step:
 
 - **The WrongGPU launcher replaces the setup.** One window for all your games: Install, Update, Repair, Roll back and Uninstall per game, a settings page per game with an Apply bar, an optional Play button, **Last run** (what the game used the last time it ran) and **Collect logs**. Games set up with 0.5.x are picked up and keep their settings.
 - **No more hunting for OptiScaler.** The launcher downloads the WrongGPU edition of OptiScaler itself and checks it.
-- **No AMD HIP runtime needed.** Model M runs on Direct3D 12 inside the game's own command list, in every mode up to native resolution (DLAA). Measured on an RX 9070 XT: about 2.0 ms a frame at 1080p Quality, about 3.3 ms at 1440p Quality.
+- **No AMD HIP runtime needed.** Model M runs on Direct3D 12 inside the game's own command list, in every mode up to native resolution (DLAA). Measured on an RX 9070 XT: about 1.3 ms a frame at 1080p Quality and about 2.2 ms at 1440p Quality on a synthetic benchmark; in Cyberpunk 2077, about 1.2 ms and 1.8 ms.
 - **Ray Reconstruction (new).** In games that use DLSS Ray Reconstruction, WrongGPU denoises and upscales the ray-traced image with its own network. Three modes: **Fast** (default), **Accurate** and **Exact**. In Cyberpunk 2077 with path tracing at 1080p Quality on an RX 9070 XT, Fast takes about 3.35 ms a frame. The launcher prepares its GPU code for you, so the game's first start has it ready.
 - **New games:** RESIDENT EVIL requiem (experimental, with Ray Reconstruction), Marvel's Spider-Man 2 and LEGO Batman (Model M).
 - **Preset K** isn't part of 0.6.0; it returns in 0.6.1.
