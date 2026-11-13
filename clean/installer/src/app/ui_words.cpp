@@ -764,9 +764,13 @@ void RemoveDataAsked() {
         InformDetails(L"WrongGPU's data couldn't be removed.\n\nA file in it may be in use. Close what uses it, then try again. Nothing was removed.", kIconError, *why);
         return;
     }
-    // the ignore list stays (convert_ignore.h): said once in the toast
-    ShowToast(kept->empty() ? L"WrongGPU's data is removed. You can delete this portable copy once you close it."
-                            : L"WrongGPU's data is removed; kept ignore-files.txt (your/integrators' ignore list). You can delete this portable copy once you close it.", 1);
+    // the ignore list stays (convert_ignore.h): said once in the toast; kept elsewhere than in place (another program's new
+    // list was there, or it could not be put back): where it is, in full
+    if (!kept->empty() && !StartsWithI(*kept, kKeptIgnoreListText))
+        Inform(L"WrongGPU's data is removed, but your ignore list was not put back as it was\n\n" + *kept, 1);
+    else
+        ShowToast(kept->empty() ? L"WrongGPU's data is removed. You can delete this portable copy once you close it."
+                                : L"WrongGPU's data is removed; kept ignore-files.txt (your/integrators' ignore list). You can delete this portable copy once you close it.", 1);
     StartHealth(false);  // the model and RR data are gone: the status line and Settings follow
     Invalidate();
 }

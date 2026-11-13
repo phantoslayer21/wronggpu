@@ -2,6 +2,7 @@
 // WrongGPU launcher core: the ignore lists of the converter's file search (convert_ignore.h). Written for this project.
 #include "convert_ignore.h"
 
+#include <atomic>
 #include <cstring>
 
 namespace wg {
@@ -193,7 +194,9 @@ bool ParseIgnoreText(const string& bytes, const wstring& source, IgnoreLists& in
 }
 
 // The list's bytes. A sharing violation (an installer writing the list at this moment) is waited for: 5 tries 200 ms apart.
-static bool ReadListBytes(const wstring& file, string& out, wstring& why) {
+// The size is checked on the open handle before anything is read.
+bool ReadIgnoreListBytes(const wstring& file, string& out, wstring& why) {
+    out.clear();
     const DWORD attrs = GetFileAttributesW(file.c_str());
     if (attrs == INVALID_FILE_ATTRIBUTES) {
         const DWORD err = GetLastError();
@@ -219,8 +222,9 @@ static bool ReadListBytes(const wstring& file, string& out, wstring& why) {
         return false;
     }
     LARGE_INTEGER sz{};
-    bool ok = GetFileSizeEx(h, &sz) && sz.QuadPart < (16ll << 20);
-    if (!ok) why = L"it is larger than 16 MB";
+    bool ok = GetFileSizeEx(h, &sz) && sz.QuadPart < kIgnoreListMaxBytes;
+    if (!ok) why = L"it is 16 MB or larger, too large for a list";
+    if (ok && GetFileType(h) != FILE_TYPE_DISK) { ok = false; why = L"it is not a file on a disk"; }
     if (ok) {
         out.resize((size_t)sz.QuadPart);
         DWORD got = 0;
@@ -234,7 +238,7 @@ static bool ReadListBytes(const wstring& file, string& out, wstring& why) {
 bool ReadIgnoreList(const wstring& file, IgnoreLists& into, wstring* why) {
     string bytes;
     wstring w;
-    if (!ReadListBytes(file, bytes, w)) { if (why) *why = w; return false; }
+    if (!ReadIgnoreListBytes(file, bytes, w)) { if (why) *why = w; return false; }
     if (!ParseIgnoreText(bytes, file, into, &w)) { if (why) *why = w; return false; }
     into.lists.push_back(file);
     return true;
@@ -253,14 +257,15 @@ std::vector<wstring> WellKnownIgnoreLists(const wstring& ownDataDir) {
 static wstring Source(const IgnoreEntry& e) {
     return StartsWithI(e.where, L"--ignore") ? L"named by " + e.where : L"on the ignore list " + e.where;
 }
-// How a path (a candidate, or a recorded source) is looked at: its fully resolved final path and its file identity.
+// How a path is looked at. A candidate (open): its fully resolved final path and its file identity, as it is now. A recorded
+// source (not open): its text as recorded, normalised, and no identity; what is at that path now is not the file converted.
 struct PathLook {
     wstring fin;
     FileIdent id;
-    explicit PathLook(const wstring& path) {
+    explicit PathLook(const wstring& path, bool open = true) {
         if (path.empty()) return;
-        fin = FinalPath(path, &id);
-        if (fin.empty()) fin = StripLongPrefix(FullPath(path));
+        if (open) fin = FinalPath(path, &id);
+        if (fin.empty()) fin = StripLongPrefix(FullPath(StripLongPrefix(path)));
     }
 };
 // Whether the entry's path is this file: the same resolved path, or the same file identity (*sameFile). No path entry: no.
@@ -282,14 +287,20 @@ static wstring EntryText(const IgnoreEntry& e, bool sameFile) {
 // that SHA-256; a hash alone (--ignore=sha256=) when the SHA-256 matches. `hash()` gives the SHA-256 of the thing looked at
 // ("" when it can't be had: a file that can't be read); it is asked only when an entry needs it. A hash that can't be had
 // while an entry applies is not a "no": `unchecked` names that entry, and the caller leaves the file out.
+// pathAloneWithoutHash: a path + hash entry whose path matches decides by the path when there is no hash to compare (an old
+// recorded source without a SHA-256); else that is `unchecked`.
 template <class HashFn>
-static wstring EntryReason(const IgnoreLists& l, const PathLook& p, HashFn hash, wstring* unchecked) {
+static wstring EntryReason(const IgnoreLists& l, const PathLook& p, HashFn hash, wstring* unchecked, bool pathAloneWithoutHash = false) {
     for (auto& e : l.entries) {
         bool same = false;
         if (!e.path.empty() && !PathMatches(e, p, &same)) continue;  // a path entry that names another file
         if (e.sha256.empty()) return Source(e) + EntryText(e, same);
         const wstring h = hash();
-        if (h.empty()) { if (unchecked && unchecked->empty()) *unchecked = e.where; continue; }
+        if (h.empty()) {
+            if (pathAloneWithoutHash && !e.path.empty()) return Source(e) + EntryText(e, same) + L"; no SHA-256 on record, so the path alone decides";
+            if (unchecked && unchecked->empty()) *unchecked = e.where;
+            continue;
+        }
         if (h == e.sha256) return Source(e) + EntryText(e, same);
     }
     return L"";
@@ -312,9 +323,21 @@ wstring IgnoreReason(const IgnoreLists& l, const wstring& candidate) {
 
 wstring RecordedSourceReason(const IgnoreLists& l, const wstring& source, const wstring& sha) {
     if (l.empty()) return L"";
-    const PathLook p(source);  // the recorded path (the file may have gone or changed since: it is not read)
+    // the recorded path as text: never opened (the file may have gone, changed, or the path may lead to another file now)
+    const PathLook p(source, false);
     const wstring recorded = Lower(sha);
-    return EntryReason(l, p, [&] { return recorded; }, nullptr);
+    return EntryReason(l, p, [&] { return recorded; }, nullptr, true);
+}
+
+wstring IgnoredExample(const Context& ctx, const IgnoreReport& rep) {
+    if (rep.skipped.empty()) return L"";
+    const size_t others = rep.skipped.size() - 1;
+    wstring t = L"Skipped: " + rep.skipped.front() + L".";
+    if (others) t += L" " + std::to_wstring(others) + L" other file" + (others == 1 ? L" was" : L"s were") + L" skipped too";
+    if (!ctx.logFile.empty()) t += (others ? L"; each, with its list and line, is in the log: " : L" The log has the details: ") + ctx.logFile + L".";
+    else if (others) t += L"; each, with its list and line, is in the log.";
+    t += L" If a line names a file that came with one of your own games, remove that line from the list (a text file).";
+    return t;
 }
 
 wstring SourceField(const wstring& file, const wchar_t* key) {
@@ -337,8 +360,11 @@ IgnoreLists LoadConvertIgnore(Context& ctx, const wchar_t* what, IgnoreReport* r
     wstring why;
     auto unreadable = [&](const wstring& f) {
         // fail closed: a list that is there but can't be read might name the very file the search would take
-        if (l.unreadable.empty()) l.unreadable = L"The ignore list " + f + L" can't be read (" + why + L"), so nothing was converted. Close the program "
-                                                 L"that holds it, or fix the file, and try again.";
+        // the player is told which file stopped WrongGPU, and what to do: a list another program wrote never switches it off unnamed
+        if (l.unreadable.empty())
+            l.unreadable = L"The ignore list " + f + L" can't be read (" + why + L"), so nothing was converted or reused. It is a list of files WrongGPU "
+                           L"must not convert, written by you or by another program's installer. Close the program that holds it, or fix the file (a text "
+                           L"file: UTF-8, one full path per line) or delete it, and try again.";
         LogLine(ctx, wstring(what) + L": the ignore list " + f + L" can't be read: " + why);
     };
     for (auto& f : WellKnownIgnoreLists(ctx.ownDataDir)) {
@@ -351,8 +377,15 @@ IgnoreLists LoadConvertIgnore(Context& ctx, const wchar_t* what, IgnoreReport* r
         }
         if (!ReadIgnoreList(f, l, &why)) unreadable(f);
     }
-    for (auto& f : ctx.ignoreListFiles)
-        if (!ReadIgnoreList(f, l, &why)) unreadable(f);
+    for (size_t i = 0; i < ctx.ignoreListFiles.size(); ++i) {
+        const wstring& f = ctx.ignoreListFiles[i];
+        if (i < ctx.ignoreListBytes.size()) {  // read once already, by the command line (bounded): only parsed here
+            if (ParseIgnoreText(ctx.ignoreListBytes[i], f, l, &why)) l.lists.push_back(f);
+            else unreadable(f);
+        } else if (!ReadIgnoreList(f, l, &why)) {
+            unreadable(f);
+        }
+    }
     for (auto& s : ctx.ignoreEntries) {
         IgnoreEntry e;
         if (!ParseIgnoreLine(s, e, why, nullptr, true)) { l.warnings.push_back(L"--ignore=" + s + L": " + why + L"; skipped"); continue; }
@@ -387,22 +420,72 @@ std::vector<bool> IgnoredMask(Context& ctx, const IgnoreLists& l, const std::vec
     return skip;
 }
 
-wstring PutIgnoreListBack(Context& ctx, const wstring& moved, const wstring& shared) {
+static std::atomic<PutBackHookFn> g_putBackHook{nullptr};
+void SetPutBackHookForTest(PutBackHookFn fn) { g_putBackHook = fn; }
+
+static wstring ErrShort(DWORD err) {
+    wstring t = ErrText(err);
+    while (!t.empty() && (t.back() == L'\n' || t.back() == L'\r' || t.back() == L' ' || t.back() == L'.')) t.pop_back();
+    return t;
+}
+// The list to `to`, never over a file that is there: moved (a rename beside it), else copied (a link as the link). 0: done.
+static DWORD MoveOrCopyList(const wstring& from, const wstring& to, bool link) {
+    if (MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_WRITE_THROUGH)) return 0;
+    const DWORD moveErr = GetLastError();
+    BOOL cancel = FALSE;
+    if (CopyFileExW(from.c_str(), to.c_str(), nullptr, nullptr, &cancel, COPY_FILE_FAIL_IF_EXISTS | (link ? COPY_FILE_COPY_SYMLINK : 0))) return 0;
+    return moveErr;
+}
+
+ListKept PutIgnoreListBack(Context& ctx, const wstring& moved, const wstring& shared) {
+    ListKept r;
     const wstring from = Join(moved, kIgnoreListName), to = Join(shared, kIgnoreListName);
     const DWORD a = GetFileAttributesW(from.c_str());
-    if (a == INVALID_FILE_ATTRIBUTES || (a & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))) return L"";
-    CreateDirectoryW(shared.c_str(), nullptr);
-    if (!MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_WRITE_THROUGH)) {  // another volume can't happen (a rename beside it); copy as a fallback
-        const DWORD moveErr = GetLastError();
-        if (!CopyFileW(from.c_str(), to.c_str(), TRUE)) {
-            // both failed: the list goes with the folder that is deleted; never silently
-            const DWORD copyErr = GetLastError();
-            LogLine(ctx, L"cleanup: could not put " + wstring(kIgnoreListName) + L" back into " + shared + L" (move: " + ErrText(moveErr) + L"; copy: " +
-                             ErrText(copyErr) + L"); it is deleted with " + moved);
-            return L"";
+    if (a == INVALID_FILE_ATTRIBUTES || (a & FILE_ATTRIBUTE_DIRECTORY)) return r;  // no list (a folder of that name is none)
+    const bool link = (a & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+    if (const PutBackHookFn hook = g_putBackHook.load()) hook(shared);
+#ifdef WRONGGPU_TESTING
+    else {
+        // the command-line suites: another program made the folder again with its own list, or a file is where it should be
+        const wstring how = EnvVar(L"WRONGGPU_TEST_LIST_PUTBACK");
+        if (how == L"exists") {
+            CreateDirectoryW(shared.c_str(), nullptr);
+            const string other = "wronggpu-ignore-files 1\r\n# another program's new list (test)\r\n";
+            WriteFileAtomic(to, other.data(), other.size());
+        } else if (how == L"blocked") {
+            const string other = "a file where the folder should be (test)";
+            WriteFileAtomic(shared, other.data(), other.size());
         }
     }
-    return wstring(kKeptIgnoreListText) + L": " + to;
+#endif
+    CreateDirectoryW(shared.c_str(), nullptr);
+    const DWORD err = MoveOrCopyList(from, to, link);
+    if (!err) {
+        r.said = wstring(kKeptIgnoreListText) + L": " + to;
+        r.inPlace = true;
+        LogLine(ctx, L"cleanup: " + r.said);
+        return r;
+    }
+    // Another program made the list again meanwhile (or something else is in the way): the player's list is kept beside it,
+    // under the first free ignore-files.txt.kept-<n>, never over it and never deleted.
+    for (int n = 1; n <= 99; ++n) {
+        const wstring keptAs = to + L".kept-" + std::to_wstring(n);
+        if (GetFileAttributesW(keptAs.c_str()) != INVALID_FILE_ATTRIBUTES) continue;
+        if (MoveOrCopyList(from, keptAs, link)) break;  // the folder can't take it: not one name of this kind will do
+        const bool other = GetFileAttributesW(to.c_str()) != INVALID_FILE_ATTRIBUTES;
+        r.said = L"kept your ignore-files.txt as " + keptAs + L": " + (other ? L"another program made " + to + L" again meanwhile, so both are kept"
+                                                                              : L"it could not go back to " + to + L" (" + ErrShort(err) + L")") +
+                 L". WrongGPU reads only ignore-files.txt: copy the lines you still need from " + BaseName(keptAs) + L" into it, then delete " +
+                 BaseName(keptAs) + L".";
+        LogLine(ctx, L"cleanup: " + r.said);
+        return r;
+    }
+    // It can't leave the moved folder: it stays there, and the caller deletes everything else of that folder, never the list.
+    r.leftIn = from;
+    r.said = L"could not put your ignore-files.txt back into " + shared + L" (" + ErrShort(err) + L"); it is kept at " + from +
+             L". Move it back to " + to + L" yourself (WrongGPU reads only that one); everything else in that folder is removed.";
+    LogLine(ctx, L"cleanup: " + r.said);
+    return r;
 }
 
 }  // namespace wg

@@ -509,16 +509,21 @@ static std::vector<StoreGame> ConvertLibraries(const Args& a, bool noScan) {
 // converted (a file meant to be skipped is never converted because of a typo); a bad line inside a list is skipped with a warning.
 static bool ConvertIgnoreArgs(const Args& a, Output& o) {
     g.ctx.ignoreListFiles.clear();
+    g.ctx.ignoreListBytes.clear();
     g.ctx.ignoreEntries.clear();
     auto refuse = [&o](const wstring& msg) { o.code = EXIT_USAGE; o.j.S("error", msg); Print(msg); return false; };
     // a bare --ignore / --ignore-list (no "=", or nothing after it): never takes the next argument as its value
     if (a.has(L"ignore")) return refuse(L"--ignore needs its entry after an equals sign: --ignore=<full path> or --ignore=sha256=<hex>; nothing was converted");
     if (a.has(L"ignore-list")) return refuse(L"--ignore-list needs its file: --ignore-list=<file>; nothing was converted");
     for (auto& f : a.ignoreLists) {
+        // read once, with the lists' own bounded reader (the size is checked before anything is read); the search parses
+        // these bytes (LoadConvertIgnore), it does not read the file again
         const wstring full = FullPath(f);
         string bytes;
-        if (!IsFile(full) || !ReadAll(full, bytes)) return refuse(L"--ignore-list=" + f + L": the file can't be read (" + full + L"); nothing was converted");
+        wstring why;
+        if (!ReadIgnoreListBytes(full, bytes, why)) return refuse(L"--ignore-list=" + f + L": the file can't be read (" + full + L": " + why + L"); nothing was converted");
         g.ctx.ignoreListFiles.push_back(full);
+        g.ctx.ignoreListBytes.push_back(std::move(bytes));
     }
     for (auto& s : a.ignores) {
         IgnoreEntry e;

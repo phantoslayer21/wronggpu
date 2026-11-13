@@ -1544,6 +1544,20 @@ static bool RemoveSharedTree(Context& ctx, const wstring& dir, const wstring& ke
     return !link;
 }
 
+// What is still in `dir` after RemoveTree(dir, keep) (held open somewhere) goes file by file once it is free: never `keep`
+// (the player's ignore list that could not leave the folder: PutIgnoreListBack), and never the folder's whole tree.
+static void DeleteLeftWhenFree(Context& ctx, const wstring& dir, const wstring& keep, const wstring& thenDir = L"", const wstring& upTo = L"") {
+    std::vector<wstring> left, dirs{dir};
+    for (size_t i = 0; i < dirs.size(); ++i) {
+        for (auto& f : ListFiles(dirs[i], L"*")) if (!IEq(f, keep)) left.push_back(f);
+        for (auto& d : ListDirs(dirs[i])) dirs.push_back(d);
+    }
+    for (auto& f : left) {
+        LogLine(ctx, L"cleanup: deleted once free: " + f);
+        DeleteWhenFree(ctx, f, false, thenDir.empty() ? Parent(f) : thenDir, upTo);
+    }
+}
+
 bool RemoveSharedData(Context& ctx, wstring* why, wstring* kept) {
     if (kept) kept->clear();
     try {
@@ -1579,13 +1593,17 @@ bool RemoveSharedData(Context& ctx, wstring* why, wstring* kept) {
             LogLine(ctx, L"remove data: " + shared + L" could not be moved aside: " + ErrText(err));
             return false;
         }
-        // the ignore list stays (an integrator's installer registered its files there; convert_ignore.h)
-        const wstring keptList = PutIgnoreListBack(ctx, trash, shared);
-        if (kept) *kept = keptList;
-        const bool ordinaryTrash = RemoveSharedTree(ctx, trash);
+        // the ignore list stays (an integrator's installer registered its files there; convert_ignore.h): put back, kept beside
+        // another program's new one, or left in the moved folder; never deleted
+        const ListKept keptList = PutIgnoreListBack(ctx, trash, shared);
+        if (kept) *kept = keptList.said;
+        const bool ordinaryTrash = RemoveSharedTree(ctx, trash, keptList.leftIn);
         if (!ordinaryTrash && IsDir(trash)) { if (why) *why = L"Could not remove the WrongGPU data folder link."; return false; }
-        if (ordinaryTrash && IsDir(trash)) DeleteWhenFree(ctx, trash, true, L"");  // what is still held goes once it is free
-        LogLine(ctx, L"remove data: removed " + shared + (keptList.empty() ? wstring() : L"; " + keptList));
+        if (ordinaryTrash && IsDir(trash)) {  // what is still held goes once it is free
+            if (keptList.leftIn.empty()) DeleteWhenFree(ctx, trash, true, L"");
+            else DeleteLeftWhenFree(ctx, trash, keptList.leftIn);
+        }
+        LogLine(ctx, L"remove data: removed " + shared + (keptList.said.empty() ? wstring() : L"; " + keptList.said));
         return true;
     } catch (const SetupError& e) {
         if (why) *why = e.msg;
@@ -1727,6 +1745,7 @@ bool SelfUninstall(Context& ctx, const LauncherPaths& p, bool removeGames, const
         const bool gamesLeft = AnyGameHasWrongGPU() || !offline.empty() || portableUses;
         const wstring trash = shared.empty() ? wstring() : shared + L".removed-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
         bool trashMade = false;
+        wstring listLeftIn;  // the player's ignore list when it could not leave the trash (PutIgnoreListBack): kept there
         const DWORD sharedAttrs = shared.empty() ? INVALID_FILE_ATTRIBUTES : GetFileAttributesW(shared.c_str());
         const bool sharedIsLink = sharedAttrs != INVALID_FILE_ATTRIBUTES && (sharedAttrs & FILE_ATTRIBUTE_REPARSE_POINT);
         if (!shared.empty() && !gamesLeft && sharedIsLink) {
@@ -1745,21 +1764,18 @@ bool SelfUninstall(Context& ctx, const LauncherPaths& p, bool removeGames, const
             // the ignore list stays (an integrator's installer registered its files there; convert_ignore.h)
             const wstring list = Join(shared, kIgnoreListName);
             wstring keptList;
-            if (trashMade) keptList = PutIgnoreListBack(ctx, trash, shared);
+            if (trashMade) {
+                const ListKept k = PutIgnoreListBack(ctx, trash, shared);
+                keptList = k.said;
+                listLeftIn = k.leftIn;  // the trash keeps it: never deleted with the trash below
+            }
             if (!trashMade) {
                 const bool hadList = IsFile(list);
                 const bool ordinaryShared = RemoveSharedTree(ctx, shared, list);
                 if (!ordinaryShared && IsDir(shared)) { if (why) *why = L"Could not remove the WrongGPU data folder link."; return false; }
                 if (ordinaryShared && hadList && IsFile(list)) keptList = wstring(kKeptIgnoreListText) + L": " + list;
                 // Only enumerate an ordinary folder; a linked root must never be followed, even after an unlink failure.
-                if (ordinaryShared) {
-                    std::vector<wstring> left, dirs{shared};
-                    for (size_t i = 0; i < dirs.size(); ++i) {
-                        for (auto& f : ListFiles(dirs[i], L"*")) if (!IEq(f, list)) left.push_back(f);
-                        for (auto& d : ListDirs(dirs[i])) dirs.push_back(d);
-                    }
-                    for (auto& f : left) { LogLine(ctx, L"launcher uninstall: deleted once free: " + f); DeleteWhenFree(ctx, f, false, Parent(f)); }
-                }
+                if (ordinaryShared) DeleteLeftWhenFree(ctx, shared, list);
             }
             if (!keptList.empty()) ui.log(keptList);
         }
@@ -1801,9 +1817,12 @@ bool SelfUninstall(Context& ctx, const LauncherPaths& p, bool removeGames, const
         // the install folder that could not go yet goes after the moved exe (rmdir without /s: only while it is empty), and the
         // folders above it that the first install made with it (madeAbove), so no empty %LOCALAPPDATA%\Programs stays
         if (trashMade) {
-            const bool ordinaryTrash = RemoveSharedTree(ctx, trash);
+            const bool ordinaryTrash = RemoveSharedTree(ctx, trash, listLeftIn);
             if (!ordinaryTrash && IsDir(trash)) { if (why) *why = L"Could not remove the WrongGPU data folder link."; return false; }
-            if (ordinaryTrash && IsDir(trash)) DeleteWhenFree(ctx, trash, true, exeDirLeft, upTo, true);
+            if (ordinaryTrash && IsDir(trash)) {
+                if (listLeftIn.empty()) DeleteWhenFree(ctx, trash, true, exeDirLeft, upTo, true);
+                else DeleteLeftWhenFree(ctx, trash, listLeftIn, exeDirLeft, upTo);  // the trash stays with the list in it
+            }
         }
         if (!exeDirLeft.empty() && !IsDir(trash)) RemoveEmptyUpTo(exeDirLeft, upTo);
         return true;

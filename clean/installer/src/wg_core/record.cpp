@@ -396,9 +396,17 @@ wstring StartCleanup(Context& ctx, const wstring& state, const wstring& self, co
             retired.clear();
         } else {
             if (StartsWithI(ctx.logFile, appData + L"\\")) ctx.logFile = retired + ctx.logFile.substr(appData.size());
-            // the ignore list stays (an integrator's installer registered its files there; convert_ignore.h)
-            kept = PutIgnoreListBack(ctx, retired, appData);
-            if (!kept.empty()) LogLine(ctx, kept);
+            // the ignore list stays (an integrator's installer registered its files there; convert_ignore.h): put back, kept
+            // beside another program's new one, or left in the moved folder; never deleted
+            const ListKept k = PutIgnoreListBack(ctx, retired, appData);
+            kept = k.said;
+            if (!k.leftIn.empty()) {
+                // it could not leave the moved folder: everything else in it goes now; the folder and the list stay, and the
+                // hidden cleanup below never deletes that folder's tree
+                RemoveTree(retired, k.leftIn);
+                LogLine(ctx, L"Shared data cleanup: " + retired + L" stays with the ignore list in it (what was held open in it stays too)");
+                retired.clear();
+            }
         }
     }
     wchar_t sys[MAX_PATH]; GetSystemDirectoryW(sys, MAX_PATH);

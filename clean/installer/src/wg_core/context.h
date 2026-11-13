@@ -94,6 +94,9 @@ struct Context {
     // command line (--ignore-list=<file>, --ignore=<entry>), added to the well-known lists.
     wstring ownDataDir;
     std::vector<wstring> ignoreListFiles, ignoreEntries;
+    // ignoreListBytes[i]: the bytes of ignoreListFiles[i] when the command line read them already (once, with the bounded
+    // reader: convert_ignore.h ReadIgnoreListBytes); a file without them is read when the search loads the lists.
+    std::vector<string> ignoreListBytes;
     Context() = default;
     Context(const Context&) = delete;
     Context& operator=(const Context&) = delete;

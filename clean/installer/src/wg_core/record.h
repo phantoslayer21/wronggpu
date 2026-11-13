@@ -135,8 +135,10 @@ void NotePortableLauncher(const wstring& exe);
 void UnregisterUninstall(const Record& m);
 size_t RemoveRuntimeFiles(const wstring& dir, const wstring& exeDir, const Record& m, bool settings);
 // The shared folder (appData) is moved aside, to a free name made unique with a process-wide sequence number, and deleted by a
-// hidden cmd.exe; its ignore-files.txt is put back first (convert_ignore.h PutIgnoreListBack). Returns that line ("kept
-// ignore-files.txt ...") or "". The move: a sharing violation (32) or an access denied (5: a scanner holding a file in the
+// hidden cmd.exe; its ignore-files.txt is put back first (convert_ignore.h PutIgnoreListBack). Returns PutIgnoreListBack's line
+// for the player ("kept ignore-files.txt ...", the list kept as ignore-files.txt.kept-<n>, or left in the moved folder) or "".
+// A list that could not leave the moved folder is never deleted: the rest of that folder goes at once, the folder stays with
+// the list, and the hidden cmd.exe does not delete it. The move: a sharing violation (32) or an access denied (5: a scanner holding a file in the
 // folder) is tried again, at most kCleanupMoveTries times (waits from kCleanupMoveFirstWaitMs doubling: 50, 100, 200, 400 ms),
 // each wait logged with the error; any other error, or the last try, leaves the folder in place ("Shared data cleanup deferred
 // ... (error N: ...)").

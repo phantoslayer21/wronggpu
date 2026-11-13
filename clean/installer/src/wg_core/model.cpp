@@ -202,7 +202,7 @@ ModelState FindModel(Context& ctx, const GameTarget* t, const wstring& userDll, 
                       ? m.chosenSkipped + L" No other DLSS model file was found."
                       : L"Every DLSS model file found (" + std::to_wstring(skipped) + L") is on an ignore list, so none was converted. "
                         L"WrongGPU converts only the DLSS model file (nvngx_dlss.dll) that came with one of your own games, never a copy "
-                        L"another program placed. The files skipped, and the list and line that skipped each, are named in the log." +
+                        L"another program placed. " + IgnoredExample(ctx, m.ignored) +
                         (m.chosenSkipped.empty() ? wstring() : L" " + m.chosenSkipped);
         LogLine(ctx, L"model: every DLSS model file found is on an ignore list; nothing converted");
         return m;
@@ -210,7 +210,7 @@ ModelState FindModel(Context& ctx, const GameTarget* t, const wstring& userDll, 
     m.error = L"No DLSS model file that WrongGPU can use was found. WrongGPU needs the DLSS model file (nvngx_dlss.dll) of "
               L"version 310.5 or newer, which comes with many recent games and apps. Install or update such a game, or choose its "
               L"nvngx_dlss.dll yourself. The file stays where it is: only the model data is read, on this PC." +
-              (skipped ? L" (" + std::to_wstring(skipped) + L" file(s) on an ignore list were skipped; they are named in the log.)" : wstring()) +
+              (skipped ? L" " + std::to_wstring(skipped) + L" file(s) on an ignore list were not tried. " + IgnoredExample(ctx, m.ignored) : wstring()) +
               (m.chosenSkipped.empty() ? wstring() : L" " + m.chosenSkipped);
     return m;
 }

@@ -336,13 +336,15 @@ RrDataState FindRrData(Context& ctx, const GameTarget* t, const wstring& userDll
         cands.swap(kept);
     }
     const size_t skipped = m.ignored.skipped.size();
+    // the player's line naming the first file skipped, its list and line (the error is a fragment: no full stop at its end)
+    wstring example = IgnoredExample(ctx, m.ignored);
+    if (!example.empty() && example.back() == L'.') example.pop_back();
     if (cands.empty() && skipped) {  // nothing left to try
         if (existing && m.trust == RrDataState::UNKNOWN) { keepUnknown(); return m; }
         m.error = !chosenSkipped.empty() && skipped == 1
                       ? chosenSkipped
                       : L"every Ray Reconstruction model file found (" + std::to_wstring(skipped) + L") is on an ignore list, so none was converted "
-                        L"(WrongGPU converts only the files that came with your own games; the files skipped, and the list and line that skipped each, "
-                        L"are named in the log)";
+                        L"(WrongGPU converts only the files that came with your own games). " + example;
         if (existing) m.error = L"the Ray Reconstruction data on this PC is not used: " + distrustWhy + L"; and " + m.error + kRrChooseOwnFile;
         LogLine(ctx, L"RR data: " + m.error);
         return m;
@@ -372,7 +374,7 @@ RrDataState FindRrData(Context& ctx, const GameTarget* t, const wstring& userDll
     else
         m.error = cands.empty() ? L"no Ray Reconstruction model file was found in this game or your other games"
                                 : L"none of the " + std::to_wstring(cands.size()) + L" Ray Reconstruction model file(s) found can be converted by this version";
-    if (skipped) m.error += L" (" + std::to_wstring(skipped) + L" file(s) on an ignore list were skipped)";
+    if (skipped) m.error += L" (" + std::to_wstring(skipped) + L" file(s) on an ignore list were not tried). " + example;
     if (!chosenSkipped.empty()) m.error += L"; " + chosenSkipped;
     if (existing) m.error = L"the Ray Reconstruction data on this PC is not used: " + distrustWhy + L"; and " + m.error + kRrChooseOwnFile;
     return m;

@@ -24,8 +24,9 @@
 // A list that is there but can't be read, or can't be decoded (UTF-16 big-endian, UTF-16 without a BOM, bytes that are not
 // UTF-8), fails closed: nothing is converted or reused (after kIgnoreReadTries on a sharing violation). So does a candidate
 // whose SHA-256 can't be computed while a hash entry applies to it (it is left out). A conversion on this PC is checked
-// against the lists (the source path and SHA-256 its model-source.txt records) before it is reused (model.cpp FindModel,
-// rr.cpp FindRrData). The uninstalls and remove-data keep the list (PutIgnoreListBack).
+// against the lists (the source path text and SHA-256 its model-source.txt records, as recorded: the path is not opened
+// again) before it is reused (model.cpp FindModel, rr.cpp FindRrData). The uninstalls and remove-data keep the list
+// (PutIgnoreListBack): a player's list is never deleted.
 #pragma once
 #include "context.h"
 
@@ -76,8 +77,11 @@ bool ParseIgnoreLine(const wstring& line, IgnoreEntry& e, wstring& why, int* ver
 // A whole list's bytes (`source`: its name in the messages). Bad lines go to into.warnings and are skipped. False: the bytes
 // can't be decoded (UTF-16 big-endian or without a BOM, not UTF-8; `why`); nothing is added then.
 bool ParseIgnoreText(const string& bytes, const wstring& source, IgnoreLists& into, wstring* why = nullptr);
-// Reads and parses one list file (a sharing violation is tried kIgnoreReadTries times, kIgnoreReadWaitMs apart). False: it
-// could not be read or decoded (`why`); nothing is added then.
+// One list file's bytes, the one bounded reader of every list (a sharing violation is tried kIgnoreReadTries times,
+// kIgnoreReadWaitMs apart; a file of kIgnoreListMaxBytes or more is refused before anything is read). False: `why`.
+const long long kIgnoreListMaxBytes = 16ll << 20;
+bool ReadIgnoreListBytes(const wstring& file, string& out, wstring& why);
+// Reads (ReadIgnoreListBytes) and parses one list file. False: it could not be read or decoded (`why`); nothing is added then.
 bool ReadIgnoreList(const wstring& file, IgnoreLists& into, wstring* why = nullptr);
 // The well-known lists, in the order they are read: %LOCALAPPDATA%\WrongGPU\ignore-files.txt, then ignore-files.txt in the
 // launcher's own data folder when that is another folder (a portable launcher's WrongGPU-data, a --data= folder).
@@ -88,22 +92,46 @@ wstring FinalPath(const wstring& p, FileIdent* ident = nullptr);
 // (SHA-256 ...)"; a candidate whose SHA-256 can't be computed while a hash entry applies to it gets "unreadable, ..." (left
 // out). An empty list never opens or reads the file; a file is hashed only when an entry that needs its hash applies.
 wstring IgnoreReason(const IgnoreLists& l, const wstring& candidate);
-// The same for a conversion on this PC: the source path and SHA-256 its model-source.txt recorded (the file is not read
-// again; it may have changed or gone since). A path entry needs the recorded path, a path + hash entry both the recorded path
-// and the recorded SHA-256, a hash entry (--ignore=sha256=) the recorded SHA-256. "" : not on a list (or nothing recorded to
-// compare).
+// The same for a conversion on this PC: the source path and SHA-256 its model-source.txt recorded, compared as recorded.
+// The recorded path is never opened again: what is at that path now (the file replaced, or the path made a hard link or a
+// symbolic link to another file) says nothing about the file that was converted. The recorded path's text, normalised
+// (case, '/' or '\', '.', '..'), is compared with the entry's path as written and as it resolves now. A path entry needs the
+// recorded path; a path + hash entry the recorded path and the recorded SHA-256 (an old record without a SHA-256: the path
+// text alone, its bytes can't be checked); a hash entry (--ignore=sha256=) the recorded SHA-256. "" : not on a list (or
+// nothing recorded to compare).
 wstring RecordedSourceReason(const IgnoreLists& l, const wstring& source, const wstring& sha);
+// The player's line when files were left out of a search (rep.skipped not empty): the first file with its list and line
+// (or --ignore=), the number of the others and where the log is. "" when nothing was left out.
+wstring IgnoredExample(const Context& ctx, const IgnoreReport& rep);
 // A "key<TAB>value" line of a model-source.txt ("" when the file or the key is not there).
 wstring SourceField(const wstring& file, const wchar_t* key);
-// The lists of one search: the well-known lists, then this run's (ctx.ignoreListFiles, ctx.ignoreEntries). Their warnings
+// The lists of one search: the well-known lists, then this run's (ctx.ignoreListFiles, read from ctx.ignoreListBytes when
+// the command line read them already, and ctx.ignoreEntries). Their warnings
 // are logged (`what`: the log prefix, "model" or "RR data") and added to rep->warnings; a list that is there but can't be
 // read sets l.unreadable and rep->unreadable (the caller converts and reuses nothing then).
 IgnoreLists LoadConvertIgnore(Context& ctx, const wchar_t* what, IgnoreReport* rep);
 // For each path: true when it is skipped (logged, and "path: reason" added to rep.skipped). An empty list skips nothing.
 std::vector<bool> IgnoredMask(Context& ctx, const IgnoreLists& l, const std::vector<wstring>& paths, const wchar_t* what, IgnoreReport& rep);
+// What PutIgnoreListBack did with the list of the folder moved aside.
+struct ListKept {
+    wstring said;    // the player's line, also logged: kKeptIgnoreListText + ": <path>" when it is back in place; another line when
+                     // it was kept beside another program's new list (".kept-<n>") or left in the moved folder; "" : no list
+    wstring leftIn;  // not "": the list could not leave the moved folder and is kept there, at this path. The caller deletes
+                     // the rest of the folder but never this file, and never the folder's whole tree (no recursive delete).
+    bool inPlace = false;  // back at <shared>\ignore-files.txt as it was
+};
 // The shared folder (%LOCALAPPDATA%\WrongGPU) was moved aside to `moved` to be deleted: its ignore-files.txt goes back into
-// `shared` (made again for it), as the uninstalls and remove-data keep it. Returns kKeptIgnoreListText and the path, or ""
-// when there was no list, or when it could not be put back (said in the log: the list is then lost with the moved folder).
-wstring PutIgnoreListBack(Context& ctx, const wstring& moved, const wstring& shared);
+// `shared` (made again for it), as the uninstalls and remove-data keep it. A player's list is never deleted: when another
+// program made <shared>\ignore-files.txt again meanwhile, the list is kept beside it as ignore-files.txt.kept-<n> (the first
+// free n); when it can't be moved or copied out at all, it stays in the moved folder (ListKept::leftIn). A list that is a
+// link (a reparse point) is moved as the link (a copy copies the link, never what it points to). Each case is said in
+// ListKept::said for the player's result.
+ListKept PutIgnoreListBack(Context& ctx, const wstring& moved, const wstring& shared);
+// Test seam: called by PutIgnoreListBack after the folder was moved aside, before the list is put back (`shared`: where it
+// goes). The tests make the folder again with another list in it, or put a file where it should be. nullptr: none.
+// Test builds (WRONGGPU_TESTING) also read WRONGGPU_TEST_LIST_PUTBACK ("exists" or "blocked") when no seam is set, for the
+// command-line suites (tests/run_convert_ignore_tests.py).
+using PutBackHookFn = void (*)(const wstring& shared);
+void SetPutBackHookForTest(PutBackHookFn fn);
 
 }  // namespace wg

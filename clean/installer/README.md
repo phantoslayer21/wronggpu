@@ -382,7 +382,8 @@ Reconstruction data; the window, the install, `model convert`, `rr-data convert`
 - `ignore-files.txt` in the launcher's own data folder when that is another folder: `WrongGPU-data\ignore-files.txt` next to
   a portable launcher, or the `--data=` folder.
 
-`model convert` and `rr-data convert` add `--ignore-list=<file>` (repeatable; a file that can't be read stops the command,
+`model convert` and `rr-data convert` add `--ignore-list=<file>` (repeatable; read once, by the same bounded reader as the
+well-known lists, so a file of 16 MB or more is refused before it is read; a file that can't be read stops the command,
 exit 10, nothing converted) and `--ignore=<entry>` (repeatable; one line of the format below, `--ignore=<path>`,
 `--ignore=<path>  sha256=<hex>` or `--ignore=sha256=<hex>`; an entry that is not understood stops the command, exit 10). For
 both the `=` is required: a bare `--ignore` or `--ignore-list` is an error (exit 10) and never takes the next argument as
@@ -432,7 +433,10 @@ is not converted: it is on the ignore list <file>, line <n> (path ...)" or "... 
 remove that line if it was listed by mistake (the result's `notes`, the install's warnings, the error when nothing else was
 found). Every skipped file is named with the reason (the list and its line, or the `--ignore=` argument, and the path or the
 hash) in the log (`model: skipped ...`, `RR data: skipped ...`), on the console and in the JSON result (`skipped`,
-`ignore_warnings`). When every file found is on a list, nothing is converted, the message says so and the exit code is 5.
+`ignore_warnings`). When every file found is on a list, nothing is converted and the exit code is 5; the message itself names
+the first file skipped with its list and line (or `--ignore=` argument), says how many others were skipped and where the log
+is, and to remove that line if it names a file that came with one of the player's own games. A list another program wrote
+never switches the conversion off without the player being told which file did it.
 
 "An empty list, or none, changes nothing" means the **choice of file**: the candidates, their order and so the file that
 converts first are the same (`tests/convert_ignore_tests.cpp` runs the real candidate search with no list and with an
@@ -443,7 +447,8 @@ more in that file; the converted data itself is unchanged.
 **A list that can't be read fails closed.** A well-known list that is there but can't be read (another program holds it
 open without sharing, no permission, a folder of that name, a name the system refuses) is tried 5 times, 200 ms apart, when
 the cause is a sharing violation (an installer may be writing it); still unreadable, nothing is converted or reused, the
-message names the file and the reason, and the exit code is 10 (`model convert`, `rr-data convert`, and an install or
+message names the file and the reason and says what to do (close the program that holds it, or fix the file or delete it),
+and the exit code is 10 (`model convert`, `rr-data convert`, and an install or
 repair, whose model check fails with it). So does a list that can't be decoded: only UTF-8 and UTF-16 LE with its BOM are
 read (UTF-16 big-endian, UTF-16 without a BOM and bytes that are not UTF-8 are not guessed at). A list that isn't there
 (file or folder not found) is simply not read. A candidate whose SHA-256 can't be computed (it can't be read) while a hash
@@ -460,8 +465,13 @@ list has entries:
   why, and an RR game's install goes on with RR off and a warning. The file itself is not deleted (other installed games'
   runtime reads it; nothing in the runtime changed). Data converted from a legitimate copy that has the same bytes as a
   listed file, at another path, is reused.
-- no SHA-256 is on record (converted by 0.6.0 or earlier): unknown; converted again when an allowed file is found, else kept
-  with a warning for the player.
+- The recorded source is compared **as it was recorded**: the recorded path's text (normalised: case, `/` or `\`, `.`, `..`)
+  with the entry's path, as written and as it resolves now, and the recorded SHA-256 with the entry's. The recorded path is
+  never opened again: if it was later replaced by a hard link or a symbolic link to a listed file, the data converted from
+  the file that was there then is still reused.
+- no SHA-256 is on record (converted by 0.6.0 or earlier): the path text alone decides (a path + hash entry naming the
+  recorded path lists it, since its bytes can't be checked); not listed, it is unknown: converted again when an allowed file
+  is found, else kept with a warning for the player.
 With no list entries, a conversion is reused exactly as before.
 
 **The uninstalls keep the list.** `remove-data` (and the window's Remove data), the launcher's uninstall (`self-uninstall`,
@@ -469,7 +479,13 @@ Apps & features) and the last game's uninstall (also through a game's own restor
 before but put `ignore-files.txt` back in it, and say "kept ignore-files.txt (your/integrators' ignore list): <path>" (the
 console and `kept` in `remove-data`'s result; the uninstall's output and log; a game uninstall's result warnings; the
 window's toast). The launcher's own data folder's list (portable, `--data=`) was never removed and is now named the same way.
-Without a list, the folder goes as before.
+Without a list, the folder goes as before. **A player's list is never deleted**: when another program made
+`ignore-files.txt` again between the folder's move and the put-back, the player's list is kept beside it as
+`ignore-files.txt.kept-<n>` (the first free n; WrongGPU reads only `ignore-files.txt`, so the result says to copy the lines
+still needed into it); when it can't be moved or copied out at all (a file where the folder should be), it stays in the
+moved-aside folder, everything else in that folder goes, nothing deletes that folder's tree, and the result names where it
+is. A list that is a link is moved as the link (what it points to is never touched). The tests drive each cleanup path
+(`StartCleanup`, `RemoveSharedData`, `SelfUninstall`) through both cases.
 
 A `WRONGGPU_TESTING` build has `rr-data prepare [--library=<folder>]`: the install's RR data step (reuse when the lists allow
 it, else convert) without a game, for the tests.

@@ -120,6 +120,17 @@ def model_state(t):
             "source": read(src).decode("utf-8", "replace") if os.path.isfile(src) else ""}
 
 
+def named_log_has(message, prefix, count):
+    """The log a player's message names ("... is in the log: <file>.") exists and holds at least `count` lines with `prefix`."""
+    at = message.find("is in the log: ")
+    if at < 0:
+        return False
+    rest = message[at + len("is in the log: "):]
+    end = rest.lower().find(".log")
+    path = rest[:end + 4] if end >= 0 else ""
+    return bool(path) and os.path.isfile(path) and read(path).decode("utf-8", "replace").count(prefix) >= count
+
+
 def source_lines(text):
     """model-source.txt without its time stamp (converted\\t...)."""
     return [l for l in text.replace("\r", "").split("\n") if l and not l.startswith("converted\t")]
@@ -243,6 +254,10 @@ def test_model_lists(t):
     t.check("...a clear message: every file found is on an ignore list, and all three are named",
             "Every DLSS model file found (3) is on an ignore list, so none was converted" in s["error"] and len(s["skipped"]) == 3 and
             "Every DLSS model file found (3) is on an ignore list" in t.stdout, (s["error"], s["skipped"], t.stdout[-600:]))
+    t.check("...the message itself names the first file skipped with its list and line, and points to the log for the other two",
+            ("Skipped: " + s["skipped"][0] + ".") in s["error"] and (shared_list + ", line 1").lower() in s["error"].lower() and
+            "2 other files were skipped too" in s["error"] and named_log_has(s["error"], "model: skipped ", len(s["skipped"])) and
+            "remove that line" in s["error"], (s["error"], s["skipped"]))
     del before
 
     # a hash alone is not a list entry (it would skip every identical copy, the player's own too): warned, nothing skipped
@@ -467,6 +482,9 @@ def test_rr_lists(t, synth_f):
     t.check("every candidate ignored: exit 5, no RR data written, a clear message",
             s["code"] == 5 and s["data"] == b"" and "every Ray Reconstruction model file found (2) is on an ignore list" in s["error"] and len(s["skipped"]) == 2,
             (s["code"], s["error"], s["skipped"]))
+    t.check("...the message names the first file skipped with its list and line, and points to the log for the other",
+            ("Skipped: " + s["skipped"][0]) in s["error"] and (t.shared("ignore-files.txt") + ", line 1").lower() in s["error"].lower() and
+            "1 other file was skipped too" in s["error"] and named_log_has(s["error"], "RR data: skipped ", len(s["skipped"])), (s["error"], s["skipped"]))
     t.set_lists(None, None)
     s = convert_rr(t, lib, extra=("--ignore=sha256=" + hashlib.sha256(src).hexdigest(),))
     t.check("--ignore=sha256=: A skipped by its SHA-256, B converted", s["code"] == 0 and s["source"].lower() == b.lower() and "SHA-256 " in "".join(s["skipped"]),
@@ -553,6 +571,26 @@ def test_model_reuse(t):
     s = convert_model(t, None, keep=True)
     t.check("a path + hash entry with its source's hash but another path (a copy placed elsewhere): the model data converted from the legitimate file is reused",
             s["code"] == 0 and s["outcome"].startswith("reused"), (s["code"], s["outcome"]))
+    # the recorded source is matched as it was recorded: its path made a link to a listed file (same bytes) after the conversion
+    placed = os.path.join(t.work, "elsewhere", "placed", DLL)
+    write(placed, with_f.file)
+    for kind in ("hard link", "symbolic link"):
+        first()
+        os.remove(a)
+        try:
+            os.link(placed, a) if kind == "hard link" else os.symlink(placed, a)
+        except OSError as e:
+            write(a, with_f.file)
+            t.skip("model reuse: source path made a %s" % kind, "not made here (%s)" % e)
+            continue
+        for entry in ("%s\r\n" % placed, "%s  sha256=%s\r\n" % (placed, sha(with_f.file))):
+            t.set_lists(entry, None)
+            s = convert_model(t, None, keep=True)
+            t.check("its source path made a %s to a listed file with the same bytes after the conversion (%s): the model data is still reused" %
+                    (kind, "path + hash entry" if "sha256=" in entry else "path entry"), s["code"] == 0 and s["outcome"].startswith("reused"), (s["code"], s["outcome"], s["error"]))
+        os.remove(a)
+        write(a, with_f.file)
+    os.remove(placed)
     first()
     t.set_lists("%s\r\n" % a, None)
     s = convert_model(t, lib_n, keep=True)
@@ -631,6 +669,27 @@ def test_rr_reuse(t, synth_f):
     s = prepare_rr(t, lib_b)
     t.check("a path + hash entry with its source's hash but another path: the RR data is reused", s["code"] == 0 and s["reused"] is True and s["source"].lower() == a.lower(),
             (s["code"], s["reused"], s["source"], s["error"]))
+    # the recorded source is matched as it was recorded: its path made a link to a listed file (same bytes) after the conversion
+    placed = os.path.join(t.work, "elsewhere", "placed-rr", RR_DLL)
+    write(placed, src)
+    for kind in ("hard link", "symbolic link"):
+        first()
+        os.remove(a)
+        try:
+            os.link(placed, a) if kind == "hard link" else os.symlink(placed, a)
+        except OSError as e:
+            write(a, src)
+            t.skip("RR reuse: source path made a %s" % kind, "not made here (%s)" % e)
+            continue
+        for entry in ("%s\r\n" % placed, "%s  sha256=%s\r\n" % (placed, sha(src))):
+            t.set_lists(entry, None)
+            s = prepare_rr(t)
+            t.check("its source path made a %s to a listed file with the same bytes after the conversion (%s): the RR data is still reused" %
+                    (kind, "path + hash entry" if "sha256=" in entry else "path entry"), s["code"] == 0 and s["reused"] is True and s["source"].lower() == a.lower(),
+                    (s["code"], s["reused"], s["error"]))
+        os.remove(a)
+        write(a, src)
+    os.remove(placed)
     first()
     before = read(t.shared("model", "F", "model.wgcm"))
     t.set_lists("%s\r\n" % a, None)
@@ -698,6 +757,8 @@ def test_fail_closed(t, synth_f):
     t.check("%LOCALAPPDATA% list held open by another program: exit 10, nothing converted, the file and the reason named",
             s["code"] == 10 and s["model"] == b"" and shared_list.lower() in s["error"].lower() and "another program holds it open" in s["error"] and
             "nothing was converted" in s["error"], (s["code"], s["error"]))
+    t.check("...and it says what to do: close the program that holds it, or fix the file or delete it",
+            "Close the program that holds it" in s["error"] and "or delete it" in s["error"], s["error"])
     t.check("...after the retries (about 5 x 200 ms), not at once and not forever (%.2f s)" % took, 0.75 <= took < 10, took)
     h = Held(shared_list, release_after=0.3)
     s = convert_model(t, lib)
@@ -714,6 +775,21 @@ def test_fail_closed(t, synth_f):
     s = convert_model(t, lib)
     os.rmdir(os.path.join(t.data, "ignore-files.txt"))
     t.check("the data folder's ignore-files.txt is a folder: exit 10, nothing converted", s["code"] == 10 and s["model"] == b"" and "a folder" in s["error"], (s["code"], s["error"]))
+    # a list that can't be decoded (written by another program as UTF-16 without a BOM): named, and what to do said
+    t.set_lists(("%s\r\n" % a).encode("utf-16-le"), None)
+    s = convert_model(t, lib)
+    t.check("a well-known list that can't be decoded: exit 10, nothing converted; the message names the file and says fix it or delete it",
+            s["code"] == 10 and s["model"] == b"" and shared_list.lower() in s["error"].lower() and "NUL bytes" in s["error"] and "or delete it" in s["error"],
+            (s["code"], s["error"]))
+    t.set_lists(None, None)
+    # --ignore-list= goes through the lists' bounded reader once: a file of 16 MB or more is refused before it is read
+    big = os.path.join(t.work, "big-list.txt")
+    with open(big, "wb") as f:
+        f.truncate(16 << 20)
+    s = convert_model(t, lib, extra=("--ignore-list=" + big,))
+    os.remove(big)
+    t.check("--ignore-list= of a file of 16 MB: exit 10, nothing converted, the size named",
+            s["code"] == 10 and s["model"] == b"" and "16 MB or larger" in s["error"] and "big-list.txt" in s["error"], (s["code"], s["error"]))
     if synth_f and os.path.isfile(os.path.join(synth_f, "synth-common-v0.bin")):
         rlib, _ = library(t, "closed-rr", [("A Game", (RR_DLL, synth_f_dll(synth_f)))])
         t.set_lists("# nothing\r\n", None)
@@ -775,6 +851,63 @@ def test_keep_list(t):
     t.check("...the installed copy goes (the hidden cleanup)", wait_trash_gone(t) and not os.path.exists(os.path.join(programs, "WrongGPU.exe")), os.listdir(t.lad))
     os.remove(t.shared("ignore-files.txt"))
     os.remove(os.path.join(t.data, "ignore-files.txt"))
+    test_list_never_lost(t, list_bytes, programs)
+
+
+def test_list_never_lost(t, list_bytes, programs):
+    """The list can't go back as it was (WRONGGPU_TEST_LIST_PUTBACK, test builds: between the folder's move and the put-back,
+    another program makes the folder again with its own list ("exists"), or a file is where the folder should be ("blocked")).
+    remove-data and the launcher's uninstall never delete it: kept as ignore-files.txt.kept-1 beside the new list, or left in
+    the moved-aside folder (nothing deletes that folder's tree), and the player's result says where."""
+    print("\n[8] the list can't go back as it was: never deleted, kept beside the new one or in the moved folder, and said")
+    other = b"wronggpu-ignore-files 1\r\n# another program's new list (test)\r\n"
+
+    def trash_dirs():
+        return [os.path.join(t.lad, x) for x in os.listdir(t.lad) if ".removed-" in x or ".cleanup-" in x]
+
+    def said():
+        return " ".join([t.stdout, t.j.get("kept", "") or "", t.j.get("error", "") or ""])
+
+    for verb in ("remove-data", "self-uninstall"):
+        for how in ("exists", "blocked"):
+            if verb == "self-uninstall":
+                rc = t.run("self-install", "--dir=" + programs, "--startmenu=-")
+                if rc != 0:
+                    t.check("self-install for the %s case" % how, False, (rc, t.j))
+                    continue
+            write(t.shared("model", "model.wgcm"), b"synthetic model data")
+            write(t.shared("ignore-files.txt"), list_bytes)
+            t.env["WRONGGPU_TEST_LIST_PUTBACK"] = how
+            try:
+                rc = t.run(verb, "--startmenu=-") if verb == "self-uninstall" else t.run(verb)
+            finally:
+                t.env.pop("WRONGGPU_TEST_LIST_PUTBACK", None)
+            if how == "exists":
+                kept = t.shared("ignore-files.txt.kept-1")
+                t.check("%s, another program made the list again meanwhile: exit 0, the player's list kept byte for byte as ignore-files.txt.kept-1, "
+                        "the other program's list untouched, the rest gone" % verb,
+                        rc == 0 and shared_names(t) == ["ignore-files.txt", "ignore-files.txt.kept-1"] and read(kept) == list_bytes and
+                        read(t.shared("ignore-files.txt")) == other, (rc, shared_names(t), t.j, t.stdout[-600:]))
+                t.check("...and the result says where it is kept", ("kept your ignore-files.txt as " + kept).lower() in said().lower(), said()[-800:])
+                t.check("...the moved-aside folder still goes", wait_trash_gone(t), os.listdir(t.lad))
+                os.remove(kept)
+                os.remove(t.shared("ignore-files.txt"))
+            else:
+                trash = trash_dirs()
+                left = os.path.join(trash[0], "ignore-files.txt") if len(trash) == 1 else ""
+                t.check("%s, the list can't be moved or copied out of the moved folder: exit 0, it stays there byte for byte, the rest of that folder "
+                        "goes" % verb, rc == 0 and left and os.path.isfile(left) and read(left) == list_bytes and os.listdir(trash[0]) == ["ignore-files.txt"],
+                        (rc, trash, os.listdir(trash[0]) if trash else None, t.j, t.stdout[-600:]))
+                t.check("...and the result says where it is kept", left and ("it is kept at " + left).lower() in said().lower(), said()[-800:])
+                time.sleep(4)  # a hidden cleanup starts with a 3 s wait: none may delete it
+                t.check("...nothing deletes it afterwards (no cleanup of that folder's tree)", left and os.path.isfile(left) and read(left) == list_bytes, trash_dirs())
+                if left:
+                    os.remove(left)
+                    os.rmdir(trash[0])
+                if os.path.isfile(t.shared()):
+                    os.remove(t.shared())  # the test's file where the folder should be
+            if verb == "self-uninstall":
+                t.check("...the installed copy goes", not os.path.exists(os.path.join(programs, "WrongGPU.exe")), programs)
 
 
 def main():

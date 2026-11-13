@@ -4,8 +4,11 @@
 // bad lines (warned, skipped, the rest read), path matching (case, '/' and '\', '.' and '..', a hard link, a junction, a
 // symbolic link when this account may make one), a path + hash entry that matches only when both match (an identical copy
 // elsewhere is not skipped), --ignore=sha256= that matches wherever the file is, the well-known list locations, and an empty
-// list that leaves the real candidate search (AllowedModelCandidates, the one FindModel uses) exactly as it was. Synthetic
-// files only, in the temp folder. Written for this project. Run by ctest ("convert-ignore").
+// list that leaves the real candidate search (AllowedModelCandidates, the one FindModel uses) exactly as it was; a recorded
+// source matched as recorded (its path made a hard or symbolic link to a listed file after the conversion is still not
+// listed); and a player's list never deleted by the cleanups (StartCleanup, RemoveSharedData, SelfUninstall: another
+// program's new list there meanwhile, or no way to put it back; RemoveSharedData and SelfUninstall against a private registry
+// hive of the test's own). Synthetic files only, in the temp folder. Written for this project. Run by ctest ("convert-ignore").
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -14,6 +17,7 @@
 #include <thread>
 
 #include "wg_core/convert_ignore.h"
+#include "wg_core/launcher.h"
 #include "wg_core/model.h"
 #include "wg_core/record.h"
 
@@ -39,6 +43,12 @@ wstring Slashes(wstring s) { for (auto& c : s) if (c == L'\\') c = L'/'; return 
 wstring Upper(wstring s) { for (auto& c : s) c = (wchar_t)towupper(c); return s; }
 IgnoreLists Parse(const string& text) { IgnoreLists l; ParseIgnoreText(text, L"test.txt", l); return l; }
 bool Has(const wstring& s, const wstring& part) { return s.find(part) != wstring::npos; }
+string Bytes(const wstring& p) { string b; return ReadAll(p, b) ? b : string("<none>"); }
+// PutIgnoreListBack's test seam (convert_ignore.h SetPutBackHookForTest), run between the folder's move and the put-back:
+// another program makes the folder again with its own list, or a file is where the folder should be
+const string kOtherList = "wronggpu-ignore-files 1\r\n# another program's new list (test)\r\n";
+void OtherProgramMakesList(const wstring& shared) { File(Join(shared, L"ignore-files.txt"), kOtherList); }
+void FileWhereFolderShouldBe(const wstring& shared) { const string t = "a file where the folder should be (test)"; WriteFileAtomic(shared, t.data(), t.size()); }
 // A list of --ignore= entries (the command line takes "sha256=<hex>" alone; a list does not)
 IgnoreLists Cli(const std::vector<wstring>& entries) {
     IgnoreLists l;
@@ -341,9 +351,41 @@ int main() {
             const wstring otherSha = wstring(64, L'1');
             require(Has(RecordedSourceReason(pathHash, a, shaB), L"line 1") && Has(RecordedSourceReason(pathHash, a, Upper(shaB)), L"SHA-256 " + shaB),
                     "recorded path and recorded SHA-256 both match the path + hash entry: listed");
-            require(RecordedSourceReason(pathHash, a, otherSha).empty() && RecordedSourceReason(pathHash, a, L"").empty() && RecordedSourceReason(pathHash, c, shaB).empty() &&
+            require(RecordedSourceReason(pathHash, a, otherSha).empty() && RecordedSourceReason(pathHash, c, shaB).empty() &&
                         RecordedSourceReason(pathHash, Join(root, L"Gone\\nvngx_dlss.dll"), shaB).empty(),
-                    "only one of them matches (the hash, or the path; or no hash on record): not listed, so a model converted from a legitimate identical copy is reused");
+                    "only one of them matches (the hash, or the path): not listed, so a model converted from a legitimate identical copy is reused");
+            // an old record without a SHA-256: the path text alone decides (its bytes can't be checked)
+            require(Has(RecordedSourceReason(pathHash, a, L""), L"the path alone decides") && RecordedSourceReason(pathHash, c, L"").empty(),
+                    "no hash on record: a path + hash entry naming the recorded path lists it, one naming another path does not");
+            require(Has(RecordedSourceReason(byPath, Slashes(Upper(a)), L""), L"line 1") && Has(RecordedSourceReason(byPath, L"\\\\?\\" + a, shaB), L"line 1"),
+                    "the recorded path text is normalised (case, '/', a \\\\?\\ prefix)");
+        }
+        // ---- a recorded source is matched as it was recorded: its path retargeted after the conversion -----------------
+        // The conversion was made from `orig`; later `orig` is made a hard link or a symbolic link to `placed`, a file another
+        // program placed and listed, with the same bytes. Today a candidate at `orig` is that listed file (skipped), but the
+        // model data converted earlier came from the file that was at `orig` then: it is not listed, and is reused.
+        {
+            const wstring orig = Join(root, L"Retarget\\Game\\nvngx_dlss.dll"), placed = Join(root, L"Retarget\\Placed\\nvngx_dlss.dll");
+            const string bytes = "synthetic retarget bytes (the same in both files)";
+            File(placed, bytes);
+            File(orig, bytes);
+            const wstring shaR = Lower(Sha256File(orig));
+            const IgnoreLists byPath = Parse(U8(placed) + "\n"), byPathHash = Parse(U8(placed) + "  sha256=" + U8(shaR) + "\n");
+            require(RecordedSourceReason(byPath, orig, shaR).empty() && RecordedSourceReason(byPathHash, orig, shaR).empty(), "retarget: before, not listed");
+            auto retargeted = [&](const char* kind) {
+                std::printf("convert-ignore: recorded source retargeted through a %s: checked\n", kind);
+                require(!IgnoreReason(byPath, orig).empty() && !IgnoreReason(byPathHash, orig).empty(),
+                        "retarget: today a candidate at the source path is the listed file (skipped)");
+                require(RecordedSourceReason(byPath, orig, shaR).empty() && RecordedSourceReason(byPathHash, orig, shaR).empty() &&
+                            RecordedSourceReason(byPathHash, orig, L"").empty(),
+                        "retarget: the recorded source is matched as recorded (path text and SHA-256): not listed, the data converted from it is reused");
+            };
+            DeleteFileW(orig.c_str());
+            if (CreateHardLinkW(orig.c_str(), placed.c_str(), nullptr)) retargeted("hard link");
+            else std::printf("convert-ignore: hard link not made here (error %lu): the retarget check is skipped\n", GetLastError());
+            DeleteFileW(orig.c_str());
+            if (CreateSymbolicLinkW(orig.c_str(), placed.c_str(), SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) { links.push_back(orig); retargeted("symbolic link"); }
+            else std::printf("convert-ignore: SYMLINK-SKIPPED: retarget through a symbolic link not made here (error %lu)\n", GetLastError());
         }
         // ---- the shared folder removed: its ignore list stays (StartCleanup: the last game's uninstall, the restorer) --
         {
@@ -361,20 +403,139 @@ int main() {
             File(Join(appData, L"model\\model.wgcm"), "synthetic model data");
             Sleep(100);  // the folder's new name carries GetTickCount64 (~16 ms steps): another step than the first cleanup's
             require(StartCleanup(ctx, L"", L"", appData).empty() && !IsDir(appData), "no list: nothing kept, the folder goes as before");
-            // PutIgnoreListBack when neither the move nor the copy can put the list back (the target folder can't be made: a
-            // file is where it should be): nothing is kept and the log says the list is lost, never silently
+            // PutIgnoreListBack: a player's list is never deleted. Back in place; beside another program's new list
+            // (.kept-1, then .kept-2); left in the moved folder when it can't leave it; a list that is a link moved as the link
             {
-                const wstring moved = Join(root, L"moved-aside"), blocker = Join(root, L"not-a-folder");
-                File(Join(moved, L"ignore-files.txt"), listBytes);
-                File(blocker, "a file where the shared folder should be");
+                const wstring moved = Join(root, L"moved-aside"), again = Join(root, L"made-again"), blocker = Join(root, L"not-a-folder");
+                const wstring from = Join(moved, L"ignore-files.txt"), to = Join(again, L"ignore-files.txt");
                 Context pctx;
                 pctx.logFile = Join(root, L"put-back.log");
-                require(PutIgnoreListBack(pctx, moved, blocker).empty(), "the list can't be put back: nothing is said to be kept");
-                string plog;
-                ReadAll(pctx.logFile, plog);
-                require(plog.find("could not put ignore-files.txt back") != string::npos && plog.find("it is deleted with") != string::npos,
-                        "...and the log says the list could not be put back and goes with the folder");
-                require(PutIgnoreListBack(pctx, Join(root, L"no-such-folder"), blocker).empty(), "no list in the moved folder: nothing to put back, nothing said");
+                File(from, listBytes);
+                File(to, kOtherList);
+                ListKept k = PutIgnoreListBack(pctx, moved, again);
+                require(!k.inPlace && k.leftIn.empty() && Has(k.said, L"kept your ignore-files.txt as " + to + L".kept-1") && Has(k.said, L"another program made " + to),
+                        "put back over another program's new list: kept beside it as ignore-files.txt.kept-1, and said");
+                require(Bytes(to + L".kept-1") == listBytes && Bytes(to) == kOtherList && !IsFile(from), "...byte for byte; the other list untouched; nothing left behind");
+                File(from, listBytes);
+                k = PutIgnoreListBack(pctx, moved, again);
+                require(Has(k.said, to + L".kept-2") && Bytes(to + L".kept-2") == listBytes && Bytes(to + L".kept-1") == listBytes, "...a second time: .kept-2, .kept-1 untouched");
+                File(blocker, "a file where the shared folder should be");
+                File(from, listBytes);
+                k = PutIgnoreListBack(pctx, moved, blocker);
+                require(!k.inPlace && IEq(k.leftIn, from) && Has(k.said, L"it is kept at " + from) && Bytes(from) == listBytes,
+                        "it can't be moved or copied out (a file where the folder should be): it stays in the moved folder (leftIn), and said where");
+                require(Has(FromUtf8(Bytes(pctx.logFile)), L"could not put your ignore-files.txt back into " + blocker), "...and logged");
+                require(PutIgnoreListBack(pctx, Join(root, L"no-such-folder"), blocker).said.empty(), "no list in the moved folder: nothing to put back, nothing said");
+                DeleteFileW(from.c_str());
+                // a list that is a link (a reparse point): moved as the link; what it points to is never touched
+                const wstring target = Join(root, L"list-target.txt"), linkDir = Join(root, L"made-again-link"), linkTo = Join(linkDir, L"ignore-files.txt");
+                File(target, listBytes);
+                auto isLink = [](const wstring& p) { const DWORD x = GetFileAttributesW(p.c_str()); return x != INVALID_FILE_ATTRIBUTES && (x & FILE_ATTRIBUTE_REPARSE_POINT); };
+                if (CreateSymbolicLinkW(from.c_str(), target.c_str(), SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
+                    k = PutIgnoreListBack(pctx, moved, linkDir);
+                    require(k.inPlace && isLink(linkTo) && Bytes(linkTo) == listBytes && !isLink(from) && !IsFile(from), "a list that is a link: put back as the link");
+                    CreateSymbolicLinkW(from.c_str(), target.c_str(), SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE);
+                    k = PutIgnoreListBack(pctx, moved, linkDir);
+                    require(Has(k.said, linkTo + L".kept-1") && isLink(linkTo + L".kept-1") && Bytes(linkTo + L".kept-1") == listBytes, "...beside another list: .kept-1, still the link");
+                    CreateSymbolicLinkW(from.c_str(), target.c_str(), SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE);
+                    k = PutIgnoreListBack(pctx, moved, blocker);
+                    require(IEq(k.leftIn, from) && isLink(from) && Bytes(target) == listBytes, "...that can't leave the moved folder: the link stays there (leftIn), its target untouched");
+                    for (auto& l : {from, linkTo, linkTo + L".kept-1"}) DeleteFileW(l.c_str());
+                    require(Bytes(target) == listBytes, "...removing the links never touched the file they point to");
+                } else {
+                    std::printf("convert-ignore: SYMLINK-SKIPPED: a list that is a link not made here (error %lu)\n", GetLastError());
+                }
+                DeleteFileW(blocker.c_str());
+            }
+            // ---- each cleanup path, when the list can't go back as it was (the seam runs between the move and the put-back)
+            {
+                const wstring list = Join(appData, L"ignore-files.txt"), lad = Parent(appData);
+                auto fill = [&] { File(Join(appData, L"model\\model.wgcm"), "synthetic model data"); File(list, listBytes); };
+                auto movedWithList = [&](const wchar_t* tag) {  // the moved-aside folder that holds the list (others may still be deleted)
+                    for (auto& d : ListDirs(lad)) if (Has(d, tag) && IsFile(Join(d, L"ignore-files.txt"))) return d;
+                    return wstring();
+                };
+                auto cleanAfterExists = [&](const char* what) {
+                    require(Bytes(list + L".kept-1") == listBytes && Bytes(list) == kOtherList && !IsDir(Join(appData, L"model")), what);
+                    DeleteFileW((list + L".kept-1").c_str());
+                    DeleteFileW(list.c_str());
+                    RemoveDirectoryW(appData.c_str());
+                };
+                auto checkBlocked = [&](const wstring& said, const wchar_t* tag, const char* what) {
+                    const wstring d = movedWithList(tag);
+                    require(!d.empty() && Has(said, L"it is kept at " + Join(d, L"ignore-files.txt")) && Bytes(Join(d, L"ignore-files.txt")) == listBytes &&
+                                !IsDir(Join(d, L"model")) && ListFiles(d, L"*").size() == 1, what);
+                    return d;
+                };
+                auto cleanAfterBlocked = [&](const wstring& d) {
+                    DeleteFileW(Join(d, L"ignore-files.txt").c_str());
+                    RemoveDirectoryW(d.c_str());
+                    DeleteFileW(appData.c_str());  // the test's file where the folder should be
+                };
+                // StartCleanup (the last game's uninstall, the restorer: record.cpp)
+                Sleep(100);
+                fill();
+                SetPutBackHookForTest(&OtherProgramMakesList);
+                wstring said = StartCleanup(ctx, L"", L"", appData);
+                SetPutBackHookForTest(nullptr);
+                require(Has(said, L"kept your ignore-files.txt as " + list + L".kept-1"), "StartCleanup, the list made again meanwhile: kept as .kept-1, said in its result");
+                cleanAfterExists("StartCleanup: .kept-1 holds the player's list, the other program's list untouched, the rest went");
+                Sleep(100);
+                fill();
+                SetPutBackHookForTest(&FileWhereFolderShouldBe);
+                said = StartCleanup(ctx, L"", L"", appData);
+                SetPutBackHookForTest(nullptr);
+                const wstring sd = checkBlocked(said, L".cleanup-", "StartCleanup, the list can't be put back: it stays in the moved folder (the rest went), said where");
+                Sleep(4500);  // its hidden cmd.exe waits ~2 s (ping -n 3) before it deletes: never this folder's tree now
+                require(Bytes(Join(sd, L"ignore-files.txt")) == listBytes, "StartCleanup: the hidden cleanup does not delete the list afterwards");
+                cleanAfterBlocked(sd);
+                // RemoveSharedData (a portable copy's Remove data...) and SelfUninstall (the launcher's uninstall): launcher.cpp. A
+                // private registry hive of the test's own (RegLoadAppKey: a file in the temp folder, nothing in the user's registry)
+                // stands in for Apps & features, so no WrongGPU installed on this PC is seen or changed.
+                HKEY hive = nullptr;
+                const LONG hr = RegLoadAppKeyW(Join(root, L"test-hive.dat").c_str(), &hive, KEY_ALL_ACCESS, 0, 0);
+                if (hr == ERROR_SUCCESS) {
+                    SetUninstallHive(hive);
+                    wstring why, kept;
+                    fill();
+                    SetPutBackHookForTest(&OtherProgramMakesList);
+                    const bool ok1 = RemoveSharedData(ctx, &why, &kept);
+                    SetPutBackHookForTest(nullptr);
+                    require(ok1 && Has(kept, L"kept your ignore-files.txt as " + list + L".kept-1"), "RemoveSharedData, the list made again meanwhile: done, kept as .kept-1, said");
+                    cleanAfterExists("RemoveSharedData: .kept-1 holds the player's list, the other program's list untouched, the rest went");
+                    fill();
+                    SetPutBackHookForTest(&FileWhereFolderShouldBe);
+                    const bool ok2 = RemoveSharedData(ctx, &why, &kept);
+                    SetPutBackHookForTest(nullptr);
+                    require(ok2, "RemoveSharedData, the list can't be put back: done");
+                    cleanAfterBlocked(checkBlocked(kept, L".removed-", "RemoveSharedData: the list stays in the moved folder (the rest went), said where"));
+                    LauncherPaths lp;
+                    lp.dataDir = Join(root, L"own-data");
+                    lp.custom = true;
+                    std::vector<wstring> uiLines;
+                    Ui ui{[](int, int, const wstring&) {}, [&uiLines](const wstring& s) { uiLines.push_back(s); }};
+                    auto uiSaid = [&uiLines] { wstring all; for (auto& s : uiLines) all += s + L"\n"; return all; };
+                    fill();
+                    SetPutBackHookForTest(&OtherProgramMakesList);
+                    const bool ok3 = SelfUninstall(ctx, lp, false, L"-", ui, &why);
+                    SetPutBackHookForTest(nullptr);
+                    require(ok3 && Has(uiSaid(), L"kept your ignore-files.txt as " + list + L".kept-1"), "SelfUninstall, the list made again meanwhile: done, kept as .kept-1, said");
+                    cleanAfterExists("SelfUninstall: .kept-1 holds the player's list, the other program's list untouched, the rest went");
+                    uiLines.clear();
+                    fill();
+                    SetPutBackHookForTest(&FileWhereFolderShouldBe);
+                    const bool ok4 = SelfUninstall(ctx, lp, false, L"-", ui, &why);
+                    SetPutBackHookForTest(nullptr);
+                    require(ok4, "SelfUninstall, the list can't be put back: done");
+                    const wstring ud = checkBlocked(uiSaid(), L".removed-", "SelfUninstall: the list stays in the moved folder (the rest went), said where");
+                    Sleep(2500);
+                    require(Bytes(Join(ud, L"ignore-files.txt")) == listBytes, "SelfUninstall: nothing deletes the list afterwards");
+                    cleanAfterBlocked(ud);
+                    SetUninstallHive(nullptr);
+                    RegCloseKey(hive);
+                } else {
+                    std::printf("convert-ignore: HIVE-SKIPPED: no private registry hive here (error %ld): RemoveSharedData / SelfUninstall cases skipped\n", hr);
+                }
             }
             for (int i = 0; i < 600; ++i) {  // the hidden cleanup deletes the moved-aside folders (ping -n 3 first)
                 bool left = false;
