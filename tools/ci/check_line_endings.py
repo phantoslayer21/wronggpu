@@ -12,7 +12,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-CRLF_ALLOWED = set()   # repository-relative paths of files that are meant to hold CR LF (none today)
+# repository-relative paths of files that are meant to hold CR LF. The preset-L converter map is kept byte for byte as
+# the spec side delivered it (CR LF; data/ is spec-side output, never edited by the clean team; .gitattributes: -text).
+CRLF_ALLOWED = {"data/preset-L.v1.map.json"}
 
 
 def main():

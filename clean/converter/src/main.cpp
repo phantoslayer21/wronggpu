@@ -31,11 +31,12 @@ void log_line(const std::string& line) { std::cerr << "[wronggpu-convert] " << l
 
 void usage() {
     std::cout << "usage: wronggpu-convert --map <map.json> --dll <model dll> [--dll <other> ...]\n"
-                 "                        --out <dir> [--raw] [--threads N]\n"
+                 "                        --out <dir> [--raw] [--threads N] [--preset M|K|F|L]\n"
                  "  --dll may be given several times; the files are tried in order: the first that converts\n"
                  "  completely is used (for a map with an optional group, such as preset M's output filter: the\n"
                  "  first that has the group, if any has it). The map names its preset (field \"preset\", or by its\n"
-                 "  version: 1 and 4 M, 2 and 3 K, 5 F).\n"
+                 "  version: 1 and 4 M, 2 and 3 K, 5 F). --preset names the preset the map is for: a map without the\n"
+                 "  field is read as that preset (data/preset-L.v1.map.json: --preset L); a map with it must agree.\n"
                  "  --raw also writes <dir>/raw/<group>/<name>.bin for every tensor.\n";
 }
 
@@ -43,6 +44,7 @@ int run(const std::vector<fs::path>& args) {
     fs::path map_path, out_dir;
     std::vector<fs::path> dlls;
     bool raw = false;
+    std::string preset;  // --preset: the preset the map is loaded for ("" : the map's field, or its version's preset)
     SearchOptions opt;
     for (std::size_t i = 0; i < args.size(); ++i) {
         const std::string a = args[i].u8string();
@@ -59,6 +61,15 @@ int run(const std::vector<fs::path>& args) {
             fs::path p;
             if (!value(p)) return usage(), kUsage;
             dlls.push_back(p);
+        } else if (a == "--preset") {
+            fs::path p;
+            if (!value(p)) return usage(), kUsage;
+            preset = p.u8string();
+            if (!find_preset(preset)) {
+                std::cout << "unknown preset: " << preset << "\n";
+                usage();
+                return kUsage;
+            }
         } else if (a == "--raw") {
             raw = true;
         } else if (a == "--threads") {
@@ -99,7 +110,7 @@ int run(const std::vector<fs::path>& args) {
     }
     LoadedMap lm;
     log_line("map " + map_path.u8string());
-    const Result mr = load_map_bytes(map_bytes, lm, log_line);
+    const Result mr = load_map_bytes(map_bytes, lm, log_line, preset);
     if (mr.code != kOk) {
         std::cout << mr.message << std::endl;
         return mr.code;
