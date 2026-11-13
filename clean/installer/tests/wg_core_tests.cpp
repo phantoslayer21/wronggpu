@@ -2,6 +2,7 @@
 // Unit tests of wg_core (the installer's / launcher's engine) that need no game, no payload and no GPU: strings and
 // paths, the install record, wronggpu.ini keys, the runtime options of a Model-M-only build, the Context's log file.
 // Written for this project. Run by ctest ("wg-core") in a WRONGGPU_TESTING build.
+#include <atomic>
 #include <cstdio>
 #include <iostream>
 #include <stdexcept>
@@ -28,6 +29,19 @@ wstring TempFolder() {
     RemoveTree(dir);
     EnsureDir(dir);
     return dir;
+}
+// StartCleanup's folder move for the retry cases (record.h SetCleanupMoveForTest): the first g_moveFailFirst calls fail
+// with g_moveError, later ones really move.
+std::atomic<int> g_moveCalls{0}, g_moveFailFirst{0};
+std::atomic<DWORD> g_moveError{0};
+BOOL WINAPI FakeMove(LPCWSTR from, LPCWSTR to, DWORD flags) {
+    if (++g_moveCalls <= g_moveFailFirst) { SetLastError(g_moveError); return FALSE; }
+    return MoveFileExW(from, to, flags);
+}
+size_t CountIn(const string& s, const string& part) {
+    size_t n = 0;
+    for (size_t at = 0; (at = s.find(part, at)) != string::npos; ++at) ++n;
+    return n;
 }
 }  // namespace
 
@@ -241,6 +255,78 @@ int main() {
         LogLine(ctx, L"second \u00e9");
         string log;
         require(ReadAll(ctx.logFile, log) && log.find("] first\r\n") != string::npos && log.find("] second \xc3\xa9\r\n") != string::npos, "LogLine appends UTF-8 lines");
+
+        // StartCleanup: the shared folder moved aside to a name that is free, with bounded retries. Synthetic folder in the
+        // temp folder; the hidden cmd.exe it starts deletes each moved-aside folder a few seconds later.
+        {
+            const wstring cleanRoot = Join(dir, L"cleanup"), appData = Join(cleanRoot, L"WrongGPU");
+            const wstring modelFile = Join(appData, L"model\\model.wgcm");
+            auto makeShared = [&] { EnsureDir(Parent(modelFile)); const char d[] = "synthetic model data"; WriteFileAtomic(modelFile, d, sizeof d - 1); };
+            auto contains = [](const string& s, const string& part) { return s.find(part) != string::npos; };
+            // two cleanups of one folder back to back, 20 runs (CI has one runner: not more). Within one GetTickCount64 step
+            // (~16 ms) the second move used to aim at the first one's folder, which its cmd.exe deletes seconds later: error
+            // 183, the folder left in place.
+            {
+                Context sctx;
+                sctx.logFile = Join(cleanRoot, L"cleanup-stress.log");  // outside the folder that is moved
+                const int runs = 20;
+                int gone = 0;
+                for (int i = 0; i < runs; ++i) {
+                    makeShared();
+                    StartCleanup(sctx, L"", L"", appData);
+                    const bool first = !IsDir(appData);
+                    makeShared();
+                    StartCleanup(sctx, L"", L"", appData);
+                    if (first && !IsDir(appData)) ++gone;
+                }
+                string slog;
+                ReadAll(sctx.logFile, slog);
+                std::printf("wg-core: cleanup stress %d/%d (deferred %zu)\n", gone, runs, CountIn(slog, "cleanup deferred"));
+                require(gone == runs && !contains(slog, "cleanup deferred"), "two cleanups of one folder back to back: it goes both times, 20 of 20 runs");
+            }
+            // the bounded retry (error 32 sharing violation, error 5 access denied: a scanner's open file), through the test
+            // seam: fails for the first N tries, then moves; or fails every time and ends deferred; any other error is final
+            {
+                Context rctx;
+                rctx.logFile = Join(cleanRoot, L"cleanup-retry.log");
+                struct Case { DWORD error; int failFirst; bool gone; int calls; size_t retries; const char* what; };
+                const Case cases[] = {
+                    {ERROR_ACCESS_DENIED, 3, true, 4, 3, "error 5 for 3 tries, then the move: the folder goes after 3 logged retries"},
+                    {ERROR_ACCESS_DENIED, 1000, false, kCleanupMoveTries, kCleanupMoveTries - 1,
+                     "error 5 every time: 5 tries (4 logged retries), then deferred with the error named, the folder left in place"},
+                    {ERROR_SHARING_VIOLATION, 2, true, 3, 2, "error 32 for 2 tries, then the move: the folder goes"},
+                    {ERROR_ALREADY_EXISTS, 1, false, 1, 0, "error 183 once: no retry, deferred at once"}};
+                for (const Case& rc : cases) {
+                    DeleteFileW(rctx.logFile.c_str());
+                    makeShared();
+                    g_moveCalls = 0; g_moveFailFirst = rc.failFirst; g_moveError = rc.error;
+                    SetCleanupMoveForTest(&FakeMove);
+                    const ULONGLONG t0 = GetTickCount64();
+                    StartCleanup(rctx, L"", L"", appData);
+                    const ULONGLONG took = GetTickCount64() - t0;
+                    SetCleanupMoveForTest(nullptr);
+                    string rlog;
+                    ReadAll(rctx.logFile, rlog);
+                    const string code = "(error " + std::to_string(rc.error);
+                    const size_t retries = CountIn(rlog, code + (rc.error == ERROR_SHARING_VIOLATION ? ", sharing violation); trying again" : ", access denied); trying again"));
+                    const size_t deferred = CountIn(rlog, "cleanup deferred: cannot detach " + ToUtf8(appData) + " " + code + ":");
+                    std::printf("wg-core: cleanup retry, error %lu x %d: %d tries, %zu retries logged, deferred %zu, %llu ms\n", rc.error, rc.failFirst,
+                                g_moveCalls.load(), retries, deferred, (unsigned long long)took);
+                    require(IsDir(appData) == !rc.gone && g_moveCalls == rc.calls && retries == rc.retries && deferred == (rc.gone ? 0u : 1u) && took < 5000, rc.what);
+                }
+                if (IsDir(appData)) {  // the deferred cases left it: the real move now
+                    StartCleanup(rctx, L"", L"", appData);
+                    require(!IsDir(appData), "after the retry cases: the folder goes");
+                }
+            }
+            for (int i = 0; i < 600; ++i) {  // the hidden cleanups delete the moved-aside folders (ping -n 3 first)
+                bool left = false;
+                for (auto& d : ListDirs(cleanRoot)) left = left || d.find(L".cleanup-") != wstring::npos;
+                if (!left) break;
+                Sleep(100);
+            }
+        }
+
         RemoveTree(dir);
         require(!IsDir(dir), "RemoveTree");
     } catch (const std::exception& ex) {
