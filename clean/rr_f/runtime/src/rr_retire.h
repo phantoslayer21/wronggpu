@@ -74,16 +74,16 @@ class RetireList {
   std::vector<Entry> entries_;
 };
 
-// Instance destroy: the objects the instance's recorded frames may use. Buffers (counted) go to the list with the
-// instance's last serial; the shader-visible descriptor heap and the timestamp query heap are released here (the
-// caller has waited for the serial, bounded). Returns the number of counted objects released now.
+// Instance destroy: every object the instance's recorded frames may use goes to the list with the instance's last
+// serial, the shader-visible descriptor heap and the timestamp query heap (the game's list dispatches with the one and
+// runs EndQuery / ResolveQueryData on the other) exactly as the buffers; only the buffers are counted. Nothing waits:
+// what the marker has not reached yet stays on the list. Returns the number of counted objects released now.
 template <class T>
 int retire_instance(RetireList<T>& l, T* const* buffers, size_t nb, T* const* heaps, size_t nh, uint64_t serial,
                     uint64_t done) {
   int counted = 0;
   for (size_t i = 0; i < nb; ++i) counted += l.retire(buffers[i], serial, done, true);
-  for (size_t i = 0; i < nh; ++i)
-    if (heaps[i]) heaps[i]->Release();
+  for (size_t i = 0; i < nh; ++i) counted += l.retire(heaps[i], serial, done, false);
   return counted;
 }
 

@@ -150,6 +150,7 @@ python -m unittest discover -s clean\rr_f\head\tests -t .
 rem Folders with GPU modules (clean\k\tests, clean\rr_f\runtime\tests): one module at a time, leaving out the GPU
 rem modules listed below, e.g.
 python -m unittest clean.k.tests.test_k_reference clean.k.tests.test_k_runtime_tables clean.k.tests.test_k_runtime_pack
+python -m unittest clean.rr_f.runtime.tests.test_rr_retire
 rem Test folders without __init__.py (clean\dx12\tests, clean\fsr\tests, clean\rr_f\proxy\tests) run from their own
 rem folder, one file at a time where the folder has a GPU module:
 python -m unittest discover -s clean\dx12\tests -t clean\dx12\tests
