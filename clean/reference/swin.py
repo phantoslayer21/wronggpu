@@ -32,6 +32,10 @@ MODEL_STAGES = {"M": STAGES}
 # and the model's default pair for every other stage (also for a name the model does not have, as before).
 _M_SHIFTED = {s: ((0, 0), (2, 0)) for s in ("b1", "b3", "b5", "dec2", "dec1")}
 WINDOW_OFFSETS = {"M": {"stages": _M_SHIFTED, "default": ((2, 2), (0, 2))}}
+# Model L (#89, clean/l): its ten Swin stages are Model M's stages (same shapes, offsets and blobs, its own weights), so
+# its rows are Model M's rows (the same objects). Its extra width-32 blocks live in clean/l/reference/table.py.
+MODEL_STAGES["L"] = MODEL_STAGES["M"]
+WINDOW_OFFSETS["L"] = WINDOW_OFFSETS["M"]
 
 
 def _model_row(table, model, what):

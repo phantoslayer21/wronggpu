@@ -265,7 +265,7 @@ def pack_stage(stage, tensors, d_row="gfx12", model="M"):
 BNECK_STAGES = tuple(f"b{k}" for k in range(6))
 # Model-keyed (#89): the bneck and mid stage lists per model (Model M: BNECK_STAGES, MID_STAGES below); a model adds
 # its rows next to its stage table (clean/reference/swin.py MODEL_STAGES).
-MODEL_BNECK_STAGES = {"M": BNECK_STAGES}
+MODEL_BNECK_STAGES = {"M": BNECK_STAGES, "L": BNECK_STAGES}  # L: Model M's stages (clean/reference/swin.py)
 _COUNT_WORDS = {6: "six", 8: "eight"}
 
 
@@ -313,7 +313,7 @@ def split_bneck(blob, model="M"):
 # Pseudo-stage "mid": enc2 (with its merge), b0..b5, dec2 (with its expand) as one unit (persistent kernel swin_mid,
 # FORMATS.md). Its blob is the eight stage blobs back to back, in this order.
 MID_STAGES = ("enc2",) + BNECK_STAGES + ("dec2",)
-MODEL_MID_STAGES = {"M": MID_STAGES}
+MODEL_MID_STAGES = {"M": MID_STAGES, "L": MID_STAGES}
 
 
 def mid_stages(model="M"):
