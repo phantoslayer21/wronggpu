@@ -1,0 +1,505 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:wronggpu:rr-f:prepared-known-subset:v1",
+  "title": "Synthetic prepared known-subset metadata, structural validation only",
+  "type": "object",
+  "properties": {
+    "contract_id": {
+      "const": "wronggpu.rr_f.prepared_known_subset.v1"
+    },
+    "request": {
+      "enum": [
+        "synthetic_known_subset",
+        "complete_player_model"
+      ]
+    },
+    "provenance": {
+      "const": "original_synthetic"
+    },
+    "complete_player_model": {
+      "const": false
+    },
+    "source_frontend": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "synthetic_IN0_boundary"
+        },
+        "supplies": {
+          "const": [
+            "IN0 block x e4m3 [Ht,Wt,32]",
+            "IN0 hold f16 [Ht,Wt,4]"
+          ]
+        },
+        "claims_original_frontend": {
+          "const": false
+        }
+      },
+      "required": [
+        "kind",
+        "supplies",
+        "claims_original_frontend"
+      ],
+      "additionalProperties": false
+    },
+    "tensors": {
+      "type": "array",
+      "minItems": 197,
+      "maxItems": 197,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "enum": [
+              "IN0.Wq",
+              "IN0.Wv",
+              "IN0.Tb",
+              "IN0.Wo",
+              "IN0.bo",
+              "IN0.W1",
+              "IN0.b1",
+              "IN0.W2",
+              "IN0.b2",
+              "IN0.Wh",
+              "IN0.bh",
+              "E1.Wq",
+              "E1.Wv",
+              "E1.Tb",
+              "E1.Wo",
+              "E1.bo",
+              "E1.W1",
+              "E1.b1",
+              "E1.W2",
+              "E1.b2",
+              "E1.Wm",
+              "E1.bm",
+              "E1.Wa",
+              "E1.ba",
+              "E1.Wh",
+              "E1.bh",
+              "E2.Wq",
+              "E2.Wv",
+              "E2.Tb",
+              "E2.Wo",
+              "E2.bo",
+              "E2.W1",
+              "E2.b1",
+              "E2.W2",
+              "E2.b2",
+              "E2.Wm",
+              "E2.bm",
+              "E2.Wh",
+              "E2.bh",
+              "E3.Wq",
+              "E3.Wv",
+              "E3.Tb",
+              "E3.Wo",
+              "E3.bo",
+              "E3.W1",
+              "E3.b1",
+              "E3.W2",
+              "E3.b2",
+              "E3.Wm",
+              "E3.bm",
+              "E3.Wh",
+              "E3.bh",
+              "E4.Wq",
+              "E4.Wv",
+              "E4.Tb",
+              "E4.Wo",
+              "E4.bo",
+              "E4.W1",
+              "E4.b1",
+              "E4.W2",
+              "E4.b2",
+              "E4.Wm",
+              "E4.bm",
+              "E4.Wh",
+              "E4.bh",
+              "E5.Wq",
+              "E5.Wv",
+              "E5.Tb",
+              "E5.Wo",
+              "E5.bo",
+              "E5.W1",
+              "E5.b1",
+              "E5.W2",
+              "E5.b2",
+              "E5.Wh",
+              "E5.bh",
+              "D4-F.Wq",
+              "D4-F.Wv",
+              "D4-F.Tb",
+              "D4-F.Wo",
+              "D4-F.bo",
+              "D4-F.W1",
+              "D4-F.b1",
+              "D4-F.W2",
+              "D4-F.b2",
+              "D4-F.Wup",
+              "D4-F.bup",
+              "D4-R.Wq",
+              "D4-R.Wv",
+              "D4-R.Tb",
+              "D4-R.Wo",
+              "D4-R.bo",
+              "D4-R.W1",
+              "D4-R.b1",
+              "D4-R.W2",
+              "D4-R.b2",
+              "D4-R.Wh",
+              "D4-R.bh",
+              "D3-F.Wq",
+              "D3-F.Wv",
+              "D3-F.Tb",
+              "D3-F.Wo",
+              "D3-F.bo",
+              "D3-F.W1",
+              "D3-F.b1",
+              "D3-F.W2",
+              "D3-F.b2",
+              "D3-F.Wup",
+              "D3-F.bup",
+              "D3-R.Wq",
+              "D3-R.Wv",
+              "D3-R.Tb",
+              "D3-R.Wo",
+              "D3-R.bo",
+              "D3-R.W1",
+              "D3-R.b1",
+              "D3-R.W2",
+              "D3-R.b2",
+              "D3-R.Wh",
+              "D3-R.bh",
+              "D2-F.Wq",
+              "D2-F.Wv",
+              "D2-F.Tb",
+              "D2-F.Wo",
+              "D2-F.bo",
+              "D2-F.W1",
+              "D2-F.b1",
+              "D2-F.W2",
+              "D2-F.b2",
+              "D2-F.Wup",
+              "D2-F.bup",
+              "D2-R.Wq",
+              "D2-R.Wv",
+              "D2-R.Tb",
+              "D2-R.Wo",
+              "D2-R.bo",
+              "D2-R.W1",
+              "D2-R.b1",
+              "D2-R.W2",
+              "D2-R.b2",
+              "D2-R.Wh",
+              "D2-R.bh",
+              "D1-F.Wq",
+              "D1-F.Wv",
+              "D1-F.Tb",
+              "D1-F.Wo",
+              "D1-F.bo",
+              "D1-F.W1",
+              "D1-F.b1",
+              "D1-F.W2",
+              "D1-F.b2",
+              "D1-F.Wup",
+              "D1-F.bup",
+              "D1-R.Wq",
+              "D1-R.Wv",
+              "D1-R.Tb",
+              "D1-R.Wo",
+              "D1-R.bo",
+              "D1-R.W1",
+              "D1-R.b1",
+              "D1-R.W2",
+              "D1-R.b2",
+              "D1-R.Wh",
+              "D1-R.bh",
+              "D0-F.Wq",
+              "D0-F.Wv",
+              "D0-F.Tb",
+              "D0-F.Wo",
+              "D0-F.bo",
+              "D0-F.W1",
+              "D0-F.b1",
+              "D0-F.W2",
+              "D0-F.b2",
+              "D0-F.Wup",
+              "D0-F.bup",
+              "D0-R.Wq",
+              "D0-R.Wv",
+              "D0-R.Tb",
+              "D0-R.Wo",
+              "D0-R.bo",
+              "D0-R.W1",
+              "D0-R.b1",
+              "D0-R.W2",
+              "D0-R.b2",
+              "IN0.g",
+              "E1.g",
+              "E2.g",
+              "E3.g",
+              "E4.g",
+              "E5.g",
+              "D4.g",
+              "D3.g",
+              "D2.g",
+              "D1.g",
+              "D0.g",
+              "D0-R.s1",
+              "D0-R.s2"
+            ]
+          },
+          "shape": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 4,
+            "items": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "precision": {
+            "enum": [
+              "e4m3",
+              "f16",
+              "f32"
+            ]
+          },
+          "logical_axes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "synthetic_fill_bits": {
+            "type": "string",
+            "pattern": "^([0-9a-f]{2}|[0-9a-f]{4}|[0-9a-f]{8})$"
+          }
+        },
+        "required": [
+          "id",
+          "shape",
+          "precision",
+          "logical_axes",
+          "synthetic_fill_bits"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "symbols": {
+      "type": "array",
+      "minItems": 47,
+      "maxItems": 47,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "enum": [
+              "IN0.ra",
+              "IN0.m",
+              "E1.ra",
+              "E1.m",
+              "E2.ra",
+              "E2.m",
+              "E3.ra",
+              "E3.m",
+              "E4.ra",
+              "E4.m",
+              "E5.ra",
+              "E5.m",
+              "D4-F.ra",
+              "D4-F.m",
+              "D4-R.ra",
+              "D4-R.m",
+              "D3-F.ra",
+              "D3-F.m",
+              "D3-R.ra",
+              "D3-R.m",
+              "D2-F.ra",
+              "D2-F.m",
+              "D2-R.ra",
+              "D2-R.m",
+              "D1-F.ra",
+              "D1-F.m",
+              "D1-R.ra",
+              "D1-R.m",
+              "D0-F.ra",
+              "D0-F.m",
+              "D0-R.ra",
+              "D0-R.m",
+              "D0.f",
+              "D1.f",
+              "D2.f",
+              "D3.f",
+              "D4.f",
+              "A_SCALE",
+              "A_CLAMP",
+              "A_CLAMPn",
+              "A_P1",
+              "A_P0",
+              "ACT_CL",
+              "ACT_CLn",
+              "ACT_C1",
+              "ACT_C2",
+              "ACT_C3"
+            ]
+          },
+          "precision": {
+            "const": "f16"
+          },
+          "bits": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{4}$"
+          }
+        },
+        "required": [
+          "id",
+          "precision",
+          "bits"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "shifts": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "properties": {
+          "parity": {
+            "enum": [
+              0,
+              1
+            ]
+          },
+          "rows": {
+            "type": "array",
+            "minItems": 11,
+            "maxItems": 11,
+            "items": {
+              "type": "object",
+              "properties": {
+                "stage": {
+                  "enum": [
+                    "IN0",
+                    "E1",
+                    "E2",
+                    "E3",
+                    "E4",
+                    "E5",
+                    "D4",
+                    "D3",
+                    "D2",
+                    "D1",
+                    "D0"
+                  ]
+                },
+                "xy": {
+                  "type": "array",
+                  "minItems": 2,
+                  "maxItems": 2,
+                  "items": {
+                    "enum": [
+                      0,
+                      2,
+                      4,
+                      6
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "stage",
+                "xy"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "parity",
+          "rows"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "head_derivation": {
+      "type": "object",
+      "properties": {
+        "h0_bits": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4}$"
+        },
+        "h1_bits": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{4}$"
+        },
+        "synthetic_S1CAP_f32_bits": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}$"
+        }
+      },
+      "required": [
+        "h0_bits",
+        "h1_bits",
+        "synthetic_S1CAP_f32_bits"
+      ],
+      "additionalProperties": false
+    },
+    "exposure_symbols": {
+      "type": "array",
+      "minItems": 9,
+      "maxItems": 9,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "enum": [
+              "X_LWrb",
+              "X_LWg",
+              "X_LMAX",
+              "X_KEY",
+              "X_MFL",
+              "X_EFL",
+              "X_CL",
+              "X_CLn",
+              "X_NRM"
+            ]
+          },
+          "precision": {
+            "const": "f32"
+          },
+          "bits": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}$"
+          }
+        },
+        "required": [
+          "id",
+          "precision",
+          "bits"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "source_head": {
+      "const": "4e61d0747211161483c7b2218347e1f892947158"
+    }
+  },
+  "required": [
+    "contract_id",
+    "request",
+    "provenance",
+    "complete_player_model",
+    "source_frontend",
+    "tensors",
+    "symbols",
+    "shifts",
+    "head_derivation",
+    "exposure_symbols",
+    "source_head"
+  ],
+  "additionalProperties": false
+}

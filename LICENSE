@@ -1,58 +1,21 @@
-WrongGPU - End User Licence
-Version 1.1 (WrongGPU 0.6.0)
+MIT License
 
-Copyright (c) 2026 phantoslayer21. All rights reserved.
+Copyright (c) 2026 phantoslayer21
 
-"WrongGPU" means the WrongGPU software in every form in which it is distributed: the WrongGPU launcher, the DLL
-and plugin files and every other file the launcher places on your computer, including the compiled GPU code inside
-them, together with their documentation. WrongGPU is licensed to you, not sold.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-1. What you may do
-   You may download WrongGPU from an official source named by the author, install it on computers you own or
-   control, and use it for your own personal, non-commercial purposes.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-2. What you may not do
-   Except where applicable law expressly allows it despite this restriction, you may not:
-   a) modify, adapt, translate, patch or otherwise change WrongGPU or any of its files;
-   b) reverse engineer, decompile or disassemble WrongGPU, or extract the GPU code or other data contained in it;
-   c) create derivative works based on WrongGPU or on any part of it;
-   d) copy, redistribute, re-upload, mirror, sell, rent, lend, sublicense or otherwise make WrongGPU or any of its
-      files available to anyone else, alone or bundled with other software (point others to an official source
-      instead);
-   e) remove, change or hide any copyright notice, licence text or other notice in or with WrongGPU;
-   f) bypass, disable or work around any integrity check, signature check or other protection in WrongGPU;
-   g) use WrongGPU, or any part of it, for any commercial purpose without the author's prior written permission.
-
-3. Other parties' software and data
-   a) WrongGPU contains declarations from AMD's FidelityFX SDK headers, used under the MIT licence; that licence
-      notice is in the file wronggpu-notices.txt.
-   b) WrongGPU works with files that are not part of WrongGPU and are not supplied with it: the game and its own
-      AMD FidelityFX files, AMD's graphics driver, and the DLSS files (nvngx_dlss.dll, and for Ray Reconstruction
-      nvngx_dlssd.dll) that are already on your computer. Those files belong to their respective owners and are
-      governed by their own licences. You are responsible for having the right to use them. WrongGPU does not
-      include, copy or distribute any of them.
-   c) WrongGPU is not made, endorsed or supported by NVIDIA, AMD, CD PROJEKT RED or any game publisher. All
-      trademarks belong to their owners and are used only to describe compatibility.
-   d) OptiScaler is not part of WrongGPU. The launcher downloads the WrongGPU edition of OptiScaler from that
-      project's own release page when a game needs it; OptiScaler is licensed under its own terms (GPL), which are
-      included with it, and this licence does not apply to it.
-
-4. No warranty
-   WrongGPU is provided "as is", without warranty of any kind, express or implied, including fitness for a
-   particular purpose and non-infringement. You use it at your own risk. It modifies game folders (with a backup
-   that the launcher restores when you uninstall); keep your own backups. Do not use it in games with anti-cheat.
-
-5. Limitation of liability
-   To the maximum extent permitted by law, the author is not liable for any damages arising from the use of, or the
-   inability to use, WrongGPU, including loss of data, damage to software or hardware, or account actions taken by
-   game publishers or platforms.
-
-6. Termination
-   This licence ends automatically if you break any of its terms. You must then stop using WrongGPU and uninstall it.
-
-7. Reports and logs
-   Log files and reports that you choose to send to the author may be used to fix problems and improve WrongGPU.
-
-8. Everything else
-   All rights not expressly granted here are reserved by the author. If any part of this licence cannot be enforced,
-   the rest remains in effect.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

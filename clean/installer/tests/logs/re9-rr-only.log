@@ -1,0 +1,4 @@
+00:58:39.701 runtime: instance 1 timing, 300 frames from frame 11401: GPU 3.961 ms per frame (pre 0.024, input 0.381, body 2.156, head 0.471, output 0.563, resolve 0.302, store 0.064, in.dec 0.000, in.feat 0.378, in.rep 0.002, in.mlp 0.000), render 1280x720, output 1920x1080
+00:58:53.121 runtime: instance 1 timing, 300 frames from frame 11701: GPU 3.971 ms per frame (pre 0.024, input 0.382, body 2.157, head 0.471, output 0.571, resolve 0.302, store 0.064, in.dec 0.000, in.feat 0.379, in.rep 0.003, in.mlp 0.000), render 1280x720, output 1920x1080
+00:59:11.001 runtime: instance 1 timing, 17 frames from frame 12301: GPU 3.988 ms per frame (pre 0.024, input 0.384, body 2.159, head 0.475, output 0.577, resolve 0.303, store 0.066, in.dec 0.000, in.feat 0.382, in.rep 0.002, in.mlp 0.000), render 1280x720, output 1920x1080
+00:59:11.001 runtime: destroy instance 1 after 12317 frames (0 failed)

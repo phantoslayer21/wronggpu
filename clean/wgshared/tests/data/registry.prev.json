@@ -1,0 +1,67 @@
+{
+  "schema": "wronggpu.registry.v1",
+  "doc": "THE WrongGPU registry: providers, options, text options, SR models, RR modes, kernel-variant words. Generated from it: include/wg_registry_gen.h, include/wg_registry_ini_gen.h, ini/wronggpu.default.ini, REGISTRY.md (python clean/wgshared/tools/gen_registry.py). Option ids are shared-block slots: append only, never renumber or reuse. See registry/schema.md.",
+  "api_level_prefix": "3.1.0",
+  "entry_id_base": "0x5747000000000000",
+  "readers": ["sr-frontend", "sr-runtime", "rr-plugin", "rr-runtime"],
+  "latches": ["next-frame", "rr-create", "sr-create", "start"],
+  "kinds": ["choice", "onoff", "int"],
+  "providers": [
+    {"id": "sr", "label": "WrongGPU", "kind": "upscaler", "choice_option": "sr_model"},
+    {"id": "rr", "label": "WrongGPU RR", "kind": "ray-reconstruction", "choice_option": "rr_mode"}
+  ],
+  "options": [
+    {"id": 0, "key": "sr_model", "type": "choice", "values": ["M", "K"], "default": "M",
+     "readers": ["sr-frontend", "sr-runtime"], "live": false, "latch": "sr-create", "ini_section": "wronggpu", "env": "WG_RUNTIME_MODEL",
+     "menu": {"list": "versions", "label": "WrongGPU Model {value}", "folder_label": "WrongGPU {value}"},
+     "values_from": "models", "doc": "super-resolution model"},
+    {"id": 1, "key": "rr_mode", "type": "choice", "values": ["exact", "accurate", "fast"], "default": "accurate",
+     "readers": ["rr-plugin", "rr-runtime"], "live": true, "latch": "next-frame", "ini_section": "wronggpu", "env": "WG_RR_MODE",
+     "menu": {"list": "versions", "label": "WrongGPU RR {value}", "folder_label": "WrongGPU RR {value}"},
+     "values_from": "modes", "doc": "ray-reconstruction mode"},
+    {"id": 2, "key": "rr_enabled", "type": "onoff", "default": 1, "readers": ["rr-plugin"], "live": false, "latch": "rr-create",
+     "ini_section": "wronggpu", "contract": true, "doc": "WrongGPU RR on/off (60.9 key 0)"},
+    {"id": 3, "key": "rr_specular_motion_from_v", "type": "onoff", "default": 0, "readers": ["rr-plugin"], "live": true,
+     "latch": "next-frame", "ini_section": "wronggpu", "contract": true, "opt_in": true, "doc": "62.4 / 52.7.1 SV = V (opt-in)"},
+    {"id": 4, "key": "rr_reset_after_failed_evaluate", "type": "onoff", "default": 0, "readers": ["rr-plugin"], "live": true,
+     "latch": "next-frame", "ini_section": "wronggpu", "contract": true, "opt_in": true, "doc": "61.6 / 53.10 deviation (opt-in)"},
+    {"id": 5, "key": "rr_change_frame_reset", "type": "onoff", "default": 0, "readers": ["rr-plugin"], "live": true,
+     "latch": "next-frame", "ini_section": "wronggpu", "contract": true, "opt_in": true, "doc": "53.9 deviation (opt-in)"},
+    {"id": 6, "key": "rr_bounded_stores", "type": "onoff", "default": 0, "readers": ["rr-plugin", "rr-runtime"], "live": true,
+     "latch": "next-frame", "ini_section": "wronggpu", "contract": true, "opt_in": true, "doc": "54b.0.1 bounded stores (opt-in)"},
+    {"id": 7, "key": "sr_fallback_to_amd", "type": "onoff", "default": 1, "readers": ["sr-frontend"], "live": false,
+     "latch": "sr-create", "ini_section": "wronggpu", "doc": "hand a failed SR context to AMD's upscaler"},
+    {"id": 8, "key": "rr_accept_provisional_families", "type": "onoff", "default": 0, "readers": ["rr-plugin"], "live": false,
+     "latch": "start", "ini_section": "wronggpu", "doc": "hook a game-interface family whose layouts are not confirmed"},
+    {"id": 9, "key": "entry_source", "type": "choice", "values": ["versions", "folders"], "default": "versions",
+     "readers": ["sr-frontend"], "live": false, "latch": "start", "ini_section": "wronggpu",
+     "doc": "how the host offers the choices: one version list, or one folder per choice"}
+  ],
+  "text_options": [
+    {"key": "rr_model", "default": "", "readers": ["rr-plugin", "rr-runtime"], "env": "WG_RR_MODEL", "doc": "path of the RR model file"},
+    {"key": "sr_runtime_dll", "default": "wronggpu_runtime.dll", "readers": ["sr-frontend"], "doc": "SR runtime library in the data folder"},
+    {"key": "rr_runtime_dll", "default": "wronggpu_rr_runtime.dll", "readers": ["rr-plugin"], "doc": "RR runtime library in the data folder"},
+    {"key": "diag_env_1", "default": "", "readers": ["rr-plugin"], "doc": "WG_RR_<NAME>=<value> handed to the RR runtime (diagnostics)"},
+    {"key": "diag_env_2", "default": "", "readers": ["rr-plugin"], "doc": ""},
+    {"key": "diag_env_3", "default": "", "readers": ["rr-plugin"], "doc": ""},
+    {"key": "diag_env_4", "default": "", "readers": ["rr-plugin"], "doc": ""}
+  ],
+  "models": [
+    {"id": "M", "option": "sr_model", "runtime_option": "model=M", "kernels": "clean/kernels (Model M)"},
+    {"id": "K", "option": "sr_model", "runtime_option": "model=K", "kernels": "clean/k", "build_flag": "WRONGGPU_MODEL_K"}
+  ],
+  "variants": [
+    {"group": "head", "words": ["exact", "relaxed"]},
+    {"group": "input", "words": ["exact", "lite", "split"]},
+    {"group": "body", "words": ["relaxed", "exact"]},
+    {"group": "output", "words": ["default", "fast"]},
+    {"group": "resolve", "words": ["hw", "exact"]}
+  ],
+  "modes": [
+    {"id": "exact", "option": "rr_mode", "head": "exact", "input": "exact", "body": "exact", "output": "default", "resolve": "exact"},
+    {"id": "accurate", "option": "rr_mode", "head": "exact", "input": "exact", "body": "relaxed", "output": "default", "resolve": "exact"},
+    {"id": "fast", "option": "rr_mode", "head": "relaxed", "input": "lite", "body": "relaxed", "output": "fast", "resolve": "hw"}
+  ],
+  "gi_layouts": ["A10-2.7", "A10-2.14"],
+  "families_index": "clean/rr_f/proxy/binding/families.json"
+}

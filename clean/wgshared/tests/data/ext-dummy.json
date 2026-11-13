@@ -1,0 +1,15 @@
+{
+  "schema": "wronggpu.registry.ext.v1",
+  "doc": "Test-only extension that proves the extension path: one RR mode and one game-interface family added through the tables only. Consumed by clean/wgshared/tests/test_dummy_extension.py (registry half) and by the RR plugin's dummy-family test (hook half). Never shipped.",
+  "options": [],
+  "text_options": [],
+  "models": [],
+  "modes": [
+    {"id": "dummy", "option": "rr_mode", "head": "relaxed", "input": "exact", "body": "relaxed", "output": "default", "resolve": "exact",
+     "doc": "same kernel-variant words as accurate"}
+  ],
+  "families": [
+    {"family": "2.99", "min": [2, 99, 0], "max": [2, 99, 99], "table": "rr-f-2.99.json", "base_table": "rr-f-2.14.json",
+     "layout": "A10-2.14", "status": "confirmed", "note": "dummy family for the extension test; table = the 2.14 table with the version range changed"}
+  ]
+}

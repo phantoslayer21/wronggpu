@@ -1,0 +1,6 @@
+{
+ "schema": "wronggpu.rr-proxy.interposer.v1",
+ "comment": "File name of the game's interposer library that the proxy replaces (annex A9, the library both supported games import). The install tool renames the game's file to <stem>.wg-original.dll in the same directory and copies the proxy under this exact name. The name stands alone on its own line (leak-scan allow rule for this directory, owner OK 2026-10-20); everything else in clean/ refers to it as the interposer file name. Read by tools/gen_forwarding.py and tools/build.py.",
+ "file_name":
+  "sl.interposer.dll"
+}

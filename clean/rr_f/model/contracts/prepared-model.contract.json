@@ -1,0 +1,3958 @@
+{
+  "contract_id": "wronggpu.rr_f.prepared_known_subset.v1",
+  "status": "finalized_own_synthetic_admission_contract_not_complete_player_model",
+  "schema_kind": "declarative_semantic_contract",
+  "source_head": "4e61d0747211161483c7b2218347e1f892947158",
+  "sources": [
+    {
+      "path": "spec/50-rr-f-overview.md",
+      "sha256": "dc91895b02c8dce6018873230cc0ddfe59b70488bc22dbd83c729cb08b112f81"
+    },
+    {
+      "path": "spec/51-rr-f-window-block.md",
+      "sha256": "91f39b47ab820c8c5736f35803a2c2a8dcc694537e54d45520a8c3b6fa7b0d3a"
+    },
+    {
+      "path": "spec/55-rr-f-final-head.md",
+      "sha256": "0a5c32b0081c43a092baa39010d8ded37eacb34eda6a38d1b5ddee4390fc4c7a"
+    },
+    {
+      "path": "spec/58-rr-f-auto-exposure.md",
+      "sha256": "f417fe88d0dbb2311694e52b38eb9479cf3ed62f749bdfdf9f87a0b6e6d2d295"
+    }
+  ],
+  "provenance": "Original project-owned contract derived only from approved pages and earlier values-free metadata; no implementation inspected.",
+  "precision": {
+    "f16": {
+      "encoding": "IEEE754_binary16",
+      "rounding": "nearest_ties_even",
+      "subnormals": "preserve"
+    },
+    "f32": {
+      "encoding": "IEEE754_binary32",
+      "rounding": "nearest_ties_even",
+      "note": "Final-head runtime FTZ convention is separate from converter exp correctness."
+    },
+    "e4m3": {
+      "sign_bit": 7,
+      "exponent_bits": [
+        6,
+        3
+      ],
+      "mantissa_bits": [
+        2,
+        0
+      ],
+      "exponent_bias": 7,
+      "nan_codes": [
+        127,
+        255
+      ],
+      "negative_zero_code": 128,
+      "maximum_finite_magnitude": 448,
+      "infinity_codes": [],
+      "quantizer_source": "51.1"
+    }
+  },
+  "stages": [
+    {
+      "id": "IN0",
+      "level": 0,
+      "C": 32,
+      "H": 2,
+      "kind": "single"
+    },
+    {
+      "id": "E1",
+      "level": 1,
+      "C": 64,
+      "H": 2,
+      "kind": "single"
+    },
+    {
+      "id": "E2",
+      "level": 2,
+      "C": 96,
+      "H": 4,
+      "kind": "single"
+    },
+    {
+      "id": "E3",
+      "level": 3,
+      "C": 128,
+      "H": 4,
+      "kind": "single"
+    },
+    {
+      "id": "E4",
+      "level": 4,
+      "C": 160,
+      "H": 8,
+      "kind": "single"
+    },
+    {
+      "id": "E5",
+      "level": 5,
+      "C": 160,
+      "H": 8,
+      "kind": "single"
+    },
+    {
+      "id": "D4-F",
+      "level": 4,
+      "C": 160,
+      "H": 8,
+      "kind": "fusion",
+      "coarse_channels": 160
+    },
+    {
+      "id": "D4-R",
+      "level": 4,
+      "C": 160,
+      "H": 8,
+      "kind": "recurrent",
+      "coarse_channels": 160
+    },
+    {
+      "id": "D3-F",
+      "level": 3,
+      "C": 128,
+      "H": 4,
+      "kind": "fusion",
+      "coarse_channels": 160
+    },
+    {
+      "id": "D3-R",
+      "level": 3,
+      "C": 128,
+      "H": 4,
+      "kind": "recurrent",
+      "coarse_channels": 160
+    },
+    {
+      "id": "D2-F",
+      "level": 2,
+      "C": 96,
+      "H": 4,
+      "kind": "fusion",
+      "coarse_channels": 128
+    },
+    {
+      "id": "D2-R",
+      "level": 2,
+      "C": 96,
+      "H": 4,
+      "kind": "recurrent",
+      "coarse_channels": 128
+    },
+    {
+      "id": "D1-F",
+      "level": 1,
+      "C": 64,
+      "H": 2,
+      "kind": "fusion",
+      "coarse_channels": 96
+    },
+    {
+      "id": "D1-R",
+      "level": 1,
+      "C": 64,
+      "H": 2,
+      "kind": "recurrent",
+      "coarse_channels": 96
+    },
+    {
+      "id": "D0-F",
+      "level": 0,
+      "C": 32,
+      "H": 2,
+      "kind": "fusion",
+      "coarse_channels": 64
+    },
+    {
+      "id": "D0-R",
+      "level": 0,
+      "C": 32,
+      "H": 2,
+      "kind": "recurrent",
+      "coarse_channels": 64
+    }
+  ],
+  "tensors": [
+    {
+      "id": "IN0.Wq",
+      "owner": "IN0",
+      "name": "Wq",
+      "shape": [
+        2,
+        32,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "IN0.Wv",
+      "owner": "IN0",
+      "name": "Wv",
+      "shape": [
+        2,
+        32,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "IN0.Tb",
+      "owner": "IN0",
+      "name": "Tb",
+      "shape": [
+        2,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3.2"
+    },
+    {
+      "id": "IN0.Wo",
+      "owner": "IN0",
+      "name": "Wo",
+      "shape": [
+        2,
+        32,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "IN0.bo",
+      "owner": "IN0",
+      "name": "bo",
+      "shape": [
+        32
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "IN0.W1",
+      "owner": "IN0",
+      "name": "W1",
+      "shape": [
+        32,
+        128
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "IN0.b1",
+      "owner": "IN0",
+      "name": "b1",
+      "shape": [
+        128
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "IN0.W2",
+      "owner": "IN0",
+      "name": "W2",
+      "shape": [
+        128,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "IN0.b2",
+      "owner": "IN0",
+      "name": "b2",
+      "shape": [
+        32
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "IN0.Wh",
+      "owner": "IN0",
+      "name": "Wh",
+      "shape": [
+        32,
+        3
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "state_logit"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.4"
+    },
+    {
+      "id": "IN0.bh",
+      "owner": "IN0",
+      "name": "bh",
+      "shape": [
+        3
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "state_logit"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.4"
+    },
+    {
+      "id": "E1.Wq",
+      "owner": "E1",
+      "name": "Wq",
+      "shape": [
+        2,
+        64,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "E1.Wv",
+      "owner": "E1",
+      "name": "Wv",
+      "shape": [
+        2,
+        64,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "E1.Tb",
+      "owner": "E1",
+      "name": "Tb",
+      "shape": [
+        2,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3.2"
+    },
+    {
+      "id": "E1.Wo",
+      "owner": "E1",
+      "name": "Wo",
+      "shape": [
+        2,
+        32,
+        64
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "E1.bo",
+      "owner": "E1",
+      "name": "bo",
+      "shape": [
+        64
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E1.W1",
+      "owner": "E1",
+      "name": "W1",
+      "shape": [
+        64,
+        256
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E1.b1",
+      "owner": "E1",
+      "name": "b1",
+      "shape": [
+        256
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E1.W2",
+      "owner": "E1",
+      "name": "W2",
+      "shape": [
+        256,
+        64
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E1.b2",
+      "owner": "E1",
+      "name": "b2",
+      "shape": [
+        64
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E1.Wm",
+      "owner": "E1",
+      "name": "Wm",
+      "shape": [
+        256,
+        96
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "child_then_channel",
+        "next_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.4",
+      "input_index_rule": "child=2*dy+dx; index=child*C+channel"
+    },
+    {
+      "id": "E1.bm",
+      "owner": "E1",
+      "name": "bm",
+      "shape": [
+        96
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "next_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E1.Wa",
+      "owner": "E1",
+      "name": "Wa",
+      "shape": [
+        128,
+        64
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "grouped_input_channel",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.5"
+    },
+    {
+      "id": "E1.ba",
+      "owner": "E1",
+      "name": "ba",
+      "shape": [
+        64
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E1.Wh",
+      "owner": "E1",
+      "name": "Wh",
+      "shape": [
+        64,
+        3
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "state_logit"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.4"
+    },
+    {
+      "id": "E1.bh",
+      "owner": "E1",
+      "name": "bh",
+      "shape": [
+        3
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "state_logit"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.4"
+    },
+    {
+      "id": "E2.Wq",
+      "owner": "E2",
+      "name": "Wq",
+      "shape": [
+        4,
+        96,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "E2.Wv",
+      "owner": "E2",
+      "name": "Wv",
+      "shape": [
+        4,
+        96,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "E2.Tb",
+      "owner": "E2",
+      "name": "Tb",
+      "shape": [
+        4,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3.2"
+    },
+    {
+      "id": "E2.Wo",
+      "owner": "E2",
+      "name": "Wo",
+      "shape": [
+        4,
+        32,
+        96
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "E2.bo",
+      "owner": "E2",
+      "name": "bo",
+      "shape": [
+        96
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E2.W1",
+      "owner": "E2",
+      "name": "W1",
+      "shape": [
+        96,
+        384
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E2.b1",
+      "owner": "E2",
+      "name": "b1",
+      "shape": [
+        384
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E2.W2",
+      "owner": "E2",
+      "name": "W2",
+      "shape": [
+        384,
+        96
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E2.b2",
+      "owner": "E2",
+      "name": "b2",
+      "shape": [
+        96
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E2.Wm",
+      "owner": "E2",
+      "name": "Wm",
+      "shape": [
+        384,
+        128
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "child_then_channel",
+        "next_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.4",
+      "input_index_rule": "child=2*dy+dx; index=child*C+channel"
+    },
+    {
+      "id": "E2.bm",
+      "owner": "E2",
+      "name": "bm",
+      "shape": [
+        128
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "next_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E2.Wh",
+      "owner": "E2",
+      "name": "Wh",
+      "shape": [
+        96,
+        3
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "state_logit"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.4"
+    },
+    {
+      "id": "E2.bh",
+      "owner": "E2",
+      "name": "bh",
+      "shape": [
+        3
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "state_logit"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.4"
+    },
+    {
+      "id": "E3.Wq",
+      "owner": "E3",
+      "name": "Wq",
+      "shape": [
+        4,
+        128,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "E3.Wv",
+      "owner": "E3",
+      "name": "Wv",
+      "shape": [
+        4,
+        128,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "E3.Tb",
+      "owner": "E3",
+      "name": "Tb",
+      "shape": [
+        4,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3.2"
+    },
+    {
+      "id": "E3.Wo",
+      "owner": "E3",
+      "name": "Wo",
+      "shape": [
+        4,
+        32,
+        128
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "E3.bo",
+      "owner": "E3",
+      "name": "bo",
+      "shape": [
+        128
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E3.W1",
+      "owner": "E3",
+      "name": "W1",
+      "shape": [
+        128,
+        512
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E3.b1",
+      "owner": "E3",
+      "name": "b1",
+      "shape": [
+        512
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E3.W2",
+      "owner": "E3",
+      "name": "W2",
+      "shape": [
+        512,
+        128
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E3.b2",
+      "owner": "E3",
+      "name": "b2",
+      "shape": [
+        128
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E3.Wm",
+      "owner": "E3",
+      "name": "Wm",
+      "shape": [
+        512,
+        160
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "child_then_channel",
+        "next_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.4",
+      "input_index_rule": "child=2*dy+dx; index=child*C+channel"
+    },
+    {
+      "id": "E3.bm",
+      "owner": "E3",
+      "name": "bm",
+      "shape": [
+        160
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "next_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E3.Wh",
+      "owner": "E3",
+      "name": "Wh",
+      "shape": [
+        128,
+        3
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "state_logit"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.4"
+    },
+    {
+      "id": "E3.bh",
+      "owner": "E3",
+      "name": "bh",
+      "shape": [
+        3
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "state_logit"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.4"
+    },
+    {
+      "id": "E4.Wq",
+      "owner": "E4",
+      "name": "Wq",
+      "shape": [
+        8,
+        160,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "E4.Wv",
+      "owner": "E4",
+      "name": "Wv",
+      "shape": [
+        8,
+        160,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "E4.Tb",
+      "owner": "E4",
+      "name": "Tb",
+      "shape": [
+        8,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3.2"
+    },
+    {
+      "id": "E4.Wo",
+      "owner": "E4",
+      "name": "Wo",
+      "shape": [
+        8,
+        32,
+        160
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "E4.bo",
+      "owner": "E4",
+      "name": "bo",
+      "shape": [
+        160
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E4.W1",
+      "owner": "E4",
+      "name": "W1",
+      "shape": [
+        160,
+        640
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E4.b1",
+      "owner": "E4",
+      "name": "b1",
+      "shape": [
+        640
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E4.W2",
+      "owner": "E4",
+      "name": "W2",
+      "shape": [
+        640,
+        160
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E4.b2",
+      "owner": "E4",
+      "name": "b2",
+      "shape": [
+        160
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E4.Wm",
+      "owner": "E4",
+      "name": "Wm",
+      "shape": [
+        640,
+        160
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "child_then_channel",
+        "next_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.4",
+      "input_index_rule": "child=2*dy+dx; index=child*C+channel"
+    },
+    {
+      "id": "E4.bm",
+      "owner": "E4",
+      "name": "bm",
+      "shape": [
+        160
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "next_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E4.Wh",
+      "owner": "E4",
+      "name": "Wh",
+      "shape": [
+        160,
+        3
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "state_logit"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.4"
+    },
+    {
+      "id": "E4.bh",
+      "owner": "E4",
+      "name": "bh",
+      "shape": [
+        3
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "state_logit"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.4"
+    },
+    {
+      "id": "E5.Wq",
+      "owner": "E5",
+      "name": "Wq",
+      "shape": [
+        8,
+        160,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "E5.Wv",
+      "owner": "E5",
+      "name": "Wv",
+      "shape": [
+        8,
+        160,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "E5.Tb",
+      "owner": "E5",
+      "name": "Tb",
+      "shape": [
+        8,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3.2"
+    },
+    {
+      "id": "E5.Wo",
+      "owner": "E5",
+      "name": "Wo",
+      "shape": [
+        8,
+        32,
+        160
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "E5.bo",
+      "owner": "E5",
+      "name": "bo",
+      "shape": [
+        160
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E5.W1",
+      "owner": "E5",
+      "name": "W1",
+      "shape": [
+        160,
+        640
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E5.b1",
+      "owner": "E5",
+      "name": "b1",
+      "shape": [
+        640
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E5.W2",
+      "owner": "E5",
+      "name": "W2",
+      "shape": [
+        640,
+        160
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E5.b2",
+      "owner": "E5",
+      "name": "b2",
+      "shape": [
+        160
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "E5.Wh",
+      "owner": "E5",
+      "name": "Wh",
+      "shape": [
+        160,
+        3
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "state_logit"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.4"
+    },
+    {
+      "id": "E5.bh",
+      "owner": "E5",
+      "name": "bh",
+      "shape": [
+        3
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "state_logit"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.4"
+    },
+    {
+      "id": "D4-F.Wq",
+      "owner": "D4-F",
+      "name": "Wq",
+      "shape": [
+        8,
+        160,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D4-F.Wv",
+      "owner": "D4-F",
+      "name": "Wv",
+      "shape": [
+        8,
+        160,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D4-F.Tb",
+      "owner": "D4-F",
+      "name": "Tb",
+      "shape": [
+        8,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3.2"
+    },
+    {
+      "id": "D4-F.Wo",
+      "owner": "D4-F",
+      "name": "Wo",
+      "shape": [
+        8,
+        32,
+        160
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D4-F.bo",
+      "owner": "D4-F",
+      "name": "bo",
+      "shape": [
+        160
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D4-F.W1",
+      "owner": "D4-F",
+      "name": "W1",
+      "shape": [
+        160,
+        640
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D4-F.b1",
+      "owner": "D4-F",
+      "name": "b1",
+      "shape": [
+        640
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D4-F.W2",
+      "owner": "D4-F",
+      "name": "W2",
+      "shape": [
+        640,
+        160
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D4-F.b2",
+      "owner": "D4-F",
+      "name": "b2",
+      "shape": [
+        160
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D4-F.Wup",
+      "owner": "D4-F",
+      "name": "Wup",
+      "shape": [
+        160,
+        640
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "coarse_channel",
+        "child_then_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.5"
+    },
+    {
+      "id": "D4-F.bup",
+      "owner": "D4-F",
+      "name": "bup",
+      "shape": [
+        640
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "child_then_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.5"
+    },
+    {
+      "id": "D4-R.Wq",
+      "owner": "D4-R",
+      "name": "Wq",
+      "shape": [
+        8,
+        160,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D4-R.Wv",
+      "owner": "D4-R",
+      "name": "Wv",
+      "shape": [
+        8,
+        160,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D4-R.Tb",
+      "owner": "D4-R",
+      "name": "Tb",
+      "shape": [
+        8,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3.2"
+    },
+    {
+      "id": "D4-R.Wo",
+      "owner": "D4-R",
+      "name": "Wo",
+      "shape": [
+        8,
+        32,
+        160
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D4-R.bo",
+      "owner": "D4-R",
+      "name": "bo",
+      "shape": [
+        160
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D4-R.W1",
+      "owner": "D4-R",
+      "name": "W1",
+      "shape": [
+        160,
+        640
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D4-R.b1",
+      "owner": "D4-R",
+      "name": "b1",
+      "shape": [
+        640
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D4-R.W2",
+      "owner": "D4-R",
+      "name": "W2",
+      "shape": [
+        640,
+        160
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D4-R.b2",
+      "owner": "D4-R",
+      "name": "b2",
+      "shape": [
+        160
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D4-R.Wh",
+      "owner": "D4-R",
+      "name": "Wh",
+      "shape": [
+        160,
+        4
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "state_logit"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.4"
+    },
+    {
+      "id": "D4-R.bh",
+      "owner": "D4-R",
+      "name": "bh",
+      "shape": [
+        4
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "state_logit"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.4"
+    },
+    {
+      "id": "D3-F.Wq",
+      "owner": "D3-F",
+      "name": "Wq",
+      "shape": [
+        4,
+        128,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D3-F.Wv",
+      "owner": "D3-F",
+      "name": "Wv",
+      "shape": [
+        4,
+        128,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D3-F.Tb",
+      "owner": "D3-F",
+      "name": "Tb",
+      "shape": [
+        4,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3.2"
+    },
+    {
+      "id": "D3-F.Wo",
+      "owner": "D3-F",
+      "name": "Wo",
+      "shape": [
+        4,
+        32,
+        128
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D3-F.bo",
+      "owner": "D3-F",
+      "name": "bo",
+      "shape": [
+        128
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D3-F.W1",
+      "owner": "D3-F",
+      "name": "W1",
+      "shape": [
+        128,
+        512
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D3-F.b1",
+      "owner": "D3-F",
+      "name": "b1",
+      "shape": [
+        512
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D3-F.W2",
+      "owner": "D3-F",
+      "name": "W2",
+      "shape": [
+        512,
+        128
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D3-F.b2",
+      "owner": "D3-F",
+      "name": "b2",
+      "shape": [
+        128
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D3-F.Wup",
+      "owner": "D3-F",
+      "name": "Wup",
+      "shape": [
+        160,
+        512
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "coarse_channel",
+        "child_then_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.5"
+    },
+    {
+      "id": "D3-F.bup",
+      "owner": "D3-F",
+      "name": "bup",
+      "shape": [
+        512
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "child_then_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.5"
+    },
+    {
+      "id": "D3-R.Wq",
+      "owner": "D3-R",
+      "name": "Wq",
+      "shape": [
+        4,
+        128,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D3-R.Wv",
+      "owner": "D3-R",
+      "name": "Wv",
+      "shape": [
+        4,
+        128,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D3-R.Tb",
+      "owner": "D3-R",
+      "name": "Tb",
+      "shape": [
+        4,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3.2"
+    },
+    {
+      "id": "D3-R.Wo",
+      "owner": "D3-R",
+      "name": "Wo",
+      "shape": [
+        4,
+        32,
+        128
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D3-R.bo",
+      "owner": "D3-R",
+      "name": "bo",
+      "shape": [
+        128
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D3-R.W1",
+      "owner": "D3-R",
+      "name": "W1",
+      "shape": [
+        128,
+        512
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D3-R.b1",
+      "owner": "D3-R",
+      "name": "b1",
+      "shape": [
+        512
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D3-R.W2",
+      "owner": "D3-R",
+      "name": "W2",
+      "shape": [
+        512,
+        128
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D3-R.b2",
+      "owner": "D3-R",
+      "name": "b2",
+      "shape": [
+        128
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D3-R.Wh",
+      "owner": "D3-R",
+      "name": "Wh",
+      "shape": [
+        128,
+        4
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "state_logit"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.4"
+    },
+    {
+      "id": "D3-R.bh",
+      "owner": "D3-R",
+      "name": "bh",
+      "shape": [
+        4
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "state_logit"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.4"
+    },
+    {
+      "id": "D2-F.Wq",
+      "owner": "D2-F",
+      "name": "Wq",
+      "shape": [
+        4,
+        96,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D2-F.Wv",
+      "owner": "D2-F",
+      "name": "Wv",
+      "shape": [
+        4,
+        96,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D2-F.Tb",
+      "owner": "D2-F",
+      "name": "Tb",
+      "shape": [
+        4,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3.2"
+    },
+    {
+      "id": "D2-F.Wo",
+      "owner": "D2-F",
+      "name": "Wo",
+      "shape": [
+        4,
+        32,
+        96
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D2-F.bo",
+      "owner": "D2-F",
+      "name": "bo",
+      "shape": [
+        96
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D2-F.W1",
+      "owner": "D2-F",
+      "name": "W1",
+      "shape": [
+        96,
+        384
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D2-F.b1",
+      "owner": "D2-F",
+      "name": "b1",
+      "shape": [
+        384
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D2-F.W2",
+      "owner": "D2-F",
+      "name": "W2",
+      "shape": [
+        384,
+        96
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D2-F.b2",
+      "owner": "D2-F",
+      "name": "b2",
+      "shape": [
+        96
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D2-F.Wup",
+      "owner": "D2-F",
+      "name": "Wup",
+      "shape": [
+        128,
+        384
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "coarse_channel",
+        "child_then_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.5"
+    },
+    {
+      "id": "D2-F.bup",
+      "owner": "D2-F",
+      "name": "bup",
+      "shape": [
+        384
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "child_then_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.5"
+    },
+    {
+      "id": "D2-R.Wq",
+      "owner": "D2-R",
+      "name": "Wq",
+      "shape": [
+        4,
+        96,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D2-R.Wv",
+      "owner": "D2-R",
+      "name": "Wv",
+      "shape": [
+        4,
+        96,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D2-R.Tb",
+      "owner": "D2-R",
+      "name": "Tb",
+      "shape": [
+        4,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3.2"
+    },
+    {
+      "id": "D2-R.Wo",
+      "owner": "D2-R",
+      "name": "Wo",
+      "shape": [
+        4,
+        32,
+        96
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D2-R.bo",
+      "owner": "D2-R",
+      "name": "bo",
+      "shape": [
+        96
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D2-R.W1",
+      "owner": "D2-R",
+      "name": "W1",
+      "shape": [
+        96,
+        384
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D2-R.b1",
+      "owner": "D2-R",
+      "name": "b1",
+      "shape": [
+        384
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D2-R.W2",
+      "owner": "D2-R",
+      "name": "W2",
+      "shape": [
+        384,
+        96
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D2-R.b2",
+      "owner": "D2-R",
+      "name": "b2",
+      "shape": [
+        96
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D2-R.Wh",
+      "owner": "D2-R",
+      "name": "Wh",
+      "shape": [
+        96,
+        4
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "state_logit"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.4"
+    },
+    {
+      "id": "D2-R.bh",
+      "owner": "D2-R",
+      "name": "bh",
+      "shape": [
+        4
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "state_logit"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.4"
+    },
+    {
+      "id": "D1-F.Wq",
+      "owner": "D1-F",
+      "name": "Wq",
+      "shape": [
+        2,
+        64,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D1-F.Wv",
+      "owner": "D1-F",
+      "name": "Wv",
+      "shape": [
+        2,
+        64,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D1-F.Tb",
+      "owner": "D1-F",
+      "name": "Tb",
+      "shape": [
+        2,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3.2"
+    },
+    {
+      "id": "D1-F.Wo",
+      "owner": "D1-F",
+      "name": "Wo",
+      "shape": [
+        2,
+        32,
+        64
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D1-F.bo",
+      "owner": "D1-F",
+      "name": "bo",
+      "shape": [
+        64
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D1-F.W1",
+      "owner": "D1-F",
+      "name": "W1",
+      "shape": [
+        64,
+        256
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D1-F.b1",
+      "owner": "D1-F",
+      "name": "b1",
+      "shape": [
+        256
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D1-F.W2",
+      "owner": "D1-F",
+      "name": "W2",
+      "shape": [
+        256,
+        64
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D1-F.b2",
+      "owner": "D1-F",
+      "name": "b2",
+      "shape": [
+        64
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D1-F.Wup",
+      "owner": "D1-F",
+      "name": "Wup",
+      "shape": [
+        96,
+        256
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "coarse_channel",
+        "child_then_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.5"
+    },
+    {
+      "id": "D1-F.bup",
+      "owner": "D1-F",
+      "name": "bup",
+      "shape": [
+        256
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "child_then_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.5"
+    },
+    {
+      "id": "D1-R.Wq",
+      "owner": "D1-R",
+      "name": "Wq",
+      "shape": [
+        2,
+        64,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D1-R.Wv",
+      "owner": "D1-R",
+      "name": "Wv",
+      "shape": [
+        2,
+        64,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D1-R.Tb",
+      "owner": "D1-R",
+      "name": "Tb",
+      "shape": [
+        2,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3.2"
+    },
+    {
+      "id": "D1-R.Wo",
+      "owner": "D1-R",
+      "name": "Wo",
+      "shape": [
+        2,
+        32,
+        64
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D1-R.bo",
+      "owner": "D1-R",
+      "name": "bo",
+      "shape": [
+        64
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D1-R.W1",
+      "owner": "D1-R",
+      "name": "W1",
+      "shape": [
+        64,
+        256
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D1-R.b1",
+      "owner": "D1-R",
+      "name": "b1",
+      "shape": [
+        256
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D1-R.W2",
+      "owner": "D1-R",
+      "name": "W2",
+      "shape": [
+        256,
+        64
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D1-R.b2",
+      "owner": "D1-R",
+      "name": "b2",
+      "shape": [
+        64
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D1-R.Wh",
+      "owner": "D1-R",
+      "name": "Wh",
+      "shape": [
+        64,
+        4
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "state_logit"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.4"
+    },
+    {
+      "id": "D1-R.bh",
+      "owner": "D1-R",
+      "name": "bh",
+      "shape": [
+        4
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "state_logit"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.4"
+    },
+    {
+      "id": "D0-F.Wq",
+      "owner": "D0-F",
+      "name": "Wq",
+      "shape": [
+        2,
+        32,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D0-F.Wv",
+      "owner": "D0-F",
+      "name": "Wv",
+      "shape": [
+        2,
+        32,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D0-F.Tb",
+      "owner": "D0-F",
+      "name": "Tb",
+      "shape": [
+        2,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3.2"
+    },
+    {
+      "id": "D0-F.Wo",
+      "owner": "D0-F",
+      "name": "Wo",
+      "shape": [
+        2,
+        32,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D0-F.bo",
+      "owner": "D0-F",
+      "name": "bo",
+      "shape": [
+        32
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D0-F.W1",
+      "owner": "D0-F",
+      "name": "W1",
+      "shape": [
+        32,
+        128
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D0-F.b1",
+      "owner": "D0-F",
+      "name": "b1",
+      "shape": [
+        128
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D0-F.W2",
+      "owner": "D0-F",
+      "name": "W2",
+      "shape": [
+        128,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D0-F.b2",
+      "owner": "D0-F",
+      "name": "b2",
+      "shape": [
+        32
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D0-F.Wup",
+      "owner": "D0-F",
+      "name": "Wup",
+      "shape": [
+        64,
+        128
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "coarse_channel",
+        "child_then_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.5"
+    },
+    {
+      "id": "D0-F.bup",
+      "owner": "D0-F",
+      "name": "bup",
+      "shape": [
+        128
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "child_then_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.5"
+    },
+    {
+      "id": "D0-R.Wq",
+      "owner": "D0-R",
+      "name": "Wq",
+      "shape": [
+        2,
+        32,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D0-R.Wv",
+      "owner": "D0-R",
+      "name": "Wv",
+      "shape": [
+        2,
+        32,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D0-R.Tb",
+      "owner": "D0-R",
+      "name": "Tb",
+      "shape": [
+        2,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3.2"
+    },
+    {
+      "id": "D0-R.Wo",
+      "owner": "D0-R",
+      "name": "Wo",
+      "shape": [
+        2,
+        32,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;51.3"
+    },
+    {
+      "id": "D0-R.bo",
+      "owner": "D0-R",
+      "name": "bo",
+      "shape": [
+        32
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D0-R.W1",
+      "owner": "D0-R",
+      "name": "W1",
+      "shape": [
+        32,
+        128
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D0-R.b1",
+      "owner": "D0-R",
+      "name": "b1",
+      "shape": [
+        128
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D0-R.W2",
+      "owner": "D0-R",
+      "name": "W2",
+      "shape": [
+        128,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "D0-R.b2",
+      "owner": "D0-R",
+      "name": "b2",
+      "shape": [
+        32
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "authority": "source_fact",
+      "source": "51.2"
+    },
+    {
+      "id": "IN0.g",
+      "owner": "IN0",
+      "name": "g",
+      "shape": [
+        1
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "scalar"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;55.4",
+      "consumer": "IN0"
+    },
+    {
+      "id": "E1.g",
+      "owner": "E1",
+      "name": "g",
+      "shape": [
+        1
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "scalar"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;55.4",
+      "consumer": "E1"
+    },
+    {
+      "id": "E2.g",
+      "owner": "E2",
+      "name": "g",
+      "shape": [
+        1
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "scalar"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;55.4",
+      "consumer": "E2"
+    },
+    {
+      "id": "E3.g",
+      "owner": "E3",
+      "name": "g",
+      "shape": [
+        1
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "scalar"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;55.4",
+      "consumer": "E3"
+    },
+    {
+      "id": "E4.g",
+      "owner": "E4",
+      "name": "g",
+      "shape": [
+        1
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "scalar"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;55.4",
+      "consumer": "E4"
+    },
+    {
+      "id": "E5.g",
+      "owner": "E5",
+      "name": "g",
+      "shape": [
+        1
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "scalar"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;55.4",
+      "consumer": "E5"
+    },
+    {
+      "id": "D4.g",
+      "owner": "D4",
+      "name": "g",
+      "shape": [
+        1
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "scalar"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;55.4",
+      "consumer": "D4-R"
+    },
+    {
+      "id": "D3.g",
+      "owner": "D3",
+      "name": "g",
+      "shape": [
+        1
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "scalar"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;55.4",
+      "consumer": "D3-R"
+    },
+    {
+      "id": "D2.g",
+      "owner": "D2",
+      "name": "g",
+      "shape": [
+        1
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "scalar"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;55.4",
+      "consumer": "D2-R"
+    },
+    {
+      "id": "D1.g",
+      "owner": "D1",
+      "name": "g",
+      "shape": [
+        1
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "scalar"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;55.4",
+      "consumer": "D1-R"
+    },
+    {
+      "id": "D0.g",
+      "owner": "D0",
+      "name": "g",
+      "shape": [
+        1
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "scalar"
+      ],
+      "authority": "source_fact",
+      "source": "51.2;55.4",
+      "consumer": "D0-R"
+    },
+    {
+      "id": "D0-R.s1",
+      "owner": "D0-R",
+      "name": "s1",
+      "shape": [
+        1
+      ],
+      "precision": "f32",
+      "logical_axes": [
+        "scalar"
+      ],
+      "authority": "source_fact",
+      "source": "55.3;55.4",
+      "origin": "derived_at_conversion",
+      "finite": "source_asserted_for_supported_builds"
+    },
+    {
+      "id": "D0-R.s2",
+      "owner": "D0-R",
+      "name": "s2",
+      "shape": [
+        1
+      ],
+      "precision": "f32",
+      "logical_axes": [
+        "scalar"
+      ],
+      "authority": "source_fact",
+      "source": "55.3;55.4",
+      "origin": "derived_at_conversion",
+      "finite": "required_by_source"
+    }
+  ],
+  "tb_block_pairs": [
+    [
+      0,
+      0
+    ],
+    [
+      1,
+      0
+    ],
+    [
+      0,
+      1
+    ],
+    [
+      1,
+      1
+    ],
+    [
+      0,
+      2
+    ],
+    [
+      1,
+      2
+    ],
+    [
+      0,
+      3
+    ],
+    [
+      1,
+      3
+    ],
+    [
+      2,
+      2
+    ],
+    [
+      3,
+      2
+    ],
+    [
+      2,
+      3
+    ],
+    [
+      3,
+      3
+    ]
+  ],
+  "symbols": [
+    {
+      "id": "IN0.ra",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "IN0.m",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "E1.ra",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "E1.m",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "E2.ra",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "E2.m",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "E3.ra",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "E3.m",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "E4.ra",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "E4.m",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "E5.ra",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "E5.m",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "D4-F.ra",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "D4-F.m",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "D4-R.ra",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "D4-R.m",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "D3-F.ra",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "D3-F.m",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "D3-R.ra",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "D3-R.m",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "D2-F.ra",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "D2-F.m",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "D2-R.ra",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "D2-R.m",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "D1-F.ra",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "D1-F.m",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "D1-R.ra",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "D1-R.m",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "D0-F.ra",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "D0-F.m",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "D0-R.ra",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "D0-R.m",
+      "precision": "f16",
+      "source": "51.2",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "D0.f",
+      "precision": "f16",
+      "consumer": "D0-F",
+      "source": "51.2;51.5",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "D1.f",
+      "precision": "f16",
+      "consumer": "D1-F",
+      "source": "51.2;51.5",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "D2.f",
+      "precision": "f16",
+      "consumer": "D2-F",
+      "source": "51.2;51.5",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "D3.f",
+      "precision": "f16",
+      "consumer": "D3-F",
+      "source": "51.2;51.5",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "D4.f",
+      "precision": "f16",
+      "consumer": "D4-F",
+      "source": "51.2;51.5",
+      "domain_status": "numeric_range_not_specified",
+      "authority": "source_fact"
+    },
+    {
+      "id": "A_SCALE",
+      "precision": "f16",
+      "scope": "global_consistent_across_stages",
+      "source": "51.2",
+      "domain_status": "subject_to_cross_symbol_checks_only; no supplied_value",
+      "authority": "source_fact"
+    },
+    {
+      "id": "A_CLAMP",
+      "precision": "f16",
+      "scope": "global_consistent_across_stages",
+      "source": "51.2",
+      "domain_status": "subject_to_cross_symbol_checks_only; no supplied_value",
+      "authority": "source_fact"
+    },
+    {
+      "id": "A_CLAMPn",
+      "precision": "f16",
+      "scope": "global_consistent_across_stages",
+      "source": "51.2",
+      "domain_status": "subject_to_cross_symbol_checks_only; no supplied_value",
+      "authority": "source_fact"
+    },
+    {
+      "id": "A_P1",
+      "precision": "f16",
+      "scope": "global_consistent_across_stages",
+      "source": "51.2",
+      "domain_status": "subject_to_cross_symbol_checks_only; no supplied_value",
+      "authority": "source_fact"
+    },
+    {
+      "id": "A_P0",
+      "precision": "f16",
+      "scope": "global_consistent_across_stages",
+      "source": "51.2",
+      "domain_status": "subject_to_cross_symbol_checks_only; no supplied_value",
+      "authority": "source_fact"
+    },
+    {
+      "id": "ACT_CL",
+      "precision": "f16",
+      "scope": "global_consistent_across_stages",
+      "source": "51.2",
+      "domain_status": "subject_to_cross_symbol_checks_only; no supplied_value",
+      "authority": "source_fact"
+    },
+    {
+      "id": "ACT_CLn",
+      "precision": "f16",
+      "scope": "global_consistent_across_stages",
+      "source": "51.2",
+      "domain_status": "subject_to_cross_symbol_checks_only; no supplied_value",
+      "authority": "source_fact"
+    },
+    {
+      "id": "ACT_C1",
+      "precision": "f16",
+      "scope": "global_consistent_across_stages",
+      "source": "51.2",
+      "domain_status": "subject_to_cross_symbol_checks_only; no supplied_value",
+      "authority": "source_fact"
+    },
+    {
+      "id": "ACT_C2",
+      "precision": "f16",
+      "scope": "global_consistent_across_stages",
+      "source": "51.2",
+      "domain_status": "subject_to_cross_symbol_checks_only; no supplied_value",
+      "authority": "source_fact"
+    },
+    {
+      "id": "ACT_C3",
+      "precision": "f16",
+      "scope": "global_consistent_across_stages",
+      "source": "51.2",
+      "domain_status": "subject_to_cross_symbol_checks_only; no supplied_value",
+      "authority": "source_fact"
+    }
+  ],
+  "shifts": {
+    "id": "SH",
+    "logical_axes": [
+      "parity",
+      "stage",
+      "xy"
+    ],
+    "parity_count": 2,
+    "stage_keys": [
+      "IN0",
+      "E1",
+      "E2",
+      "E3",
+      "E4",
+      "E5",
+      "D4",
+      "D3",
+      "D2",
+      "D1",
+      "D0"
+    ],
+    "component_domain": [
+      0,
+      2,
+      4,
+      6
+    ],
+    "recurrent_rule": "(component+4)%8",
+    "source": "51.6",
+    "authority": "source_fact",
+    "unknown_fields": [
+      "physical_row_order",
+      "source_element_encoding"
+    ]
+  },
+  "exposure_symbols": [
+    {
+      "id": "X_LWrb",
+      "precision": "f32",
+      "source": "58.1"
+    },
+    {
+      "id": "X_LWg",
+      "precision": "f32",
+      "source": "58.1"
+    },
+    {
+      "id": "X_LMAX",
+      "precision": "f32",
+      "source": "58.1"
+    },
+    {
+      "id": "X_KEY",
+      "precision": "f32",
+      "source": "58.1"
+    },
+    {
+      "id": "X_MFL",
+      "precision": "f32",
+      "source": "58.1"
+    },
+    {
+      "id": "X_EFL",
+      "precision": "f32",
+      "source": "58.1"
+    },
+    {
+      "id": "X_CL",
+      "precision": "f32",
+      "source": "58.1"
+    },
+    {
+      "id": "X_CLn",
+      "precision": "f32",
+      "source": "58.1"
+    },
+    {
+      "id": "X_NRM",
+      "precision": "f32",
+      "source": "58.1"
+    }
+  ],
+  "converter_only_inputs": {
+    "h0": "finite f16",
+    "h1": "finite f16",
+    "S1CAP": "source dtype/domain unavailable; synthetic profile explicitly supplies finite f32"
+  },
+  "counts": {
+    "known_tensors": 197,
+    "blocks": 16,
+    "stage_ra_m": 32,
+    "fusion_f": 5,
+    "global_window_symbols": 10,
+    "X_symbols": 9,
+    "shift_rows_per_parity": 11
+  },
+  "rules": [
+    {
+      "id": "SOURCE_VERSION",
+      "authority": "own_admission_policy",
+      "source": "approved snapshot",
+      "rule": "Require the exact source_head and contract_id; no newer or unknown source accepted implicitly."
+    },
+    {
+      "id": "TENSOR_SET",
+      "authority": "source_derived",
+      "source": "51.2;55.3",
+      "rule": "Exactly the 197 unique known tensor IDs, shapes, logical axes and precisions below for the synthetic known-subset profile; not a complete player-model inventory."
+    },
+    {
+      "id": "NO_INVENTED_TENSOR",
+      "authority": "source_derived",
+      "source": "51.2;51.3;55.1",
+      "rule": "Reject extra Wk/query-key biases/D0-R Wh,bh in this profile. Additional source tensors cannot be inferred from tensor count."
+    },
+    {
+      "id": "FINITE_PREPARED",
+      "authority": "own_admission_policy",
+      "source": "55.3 cross-reference to absent 56.1",
+      "rule": "Prepared learned tensor elements and stage/window scalars must be finite. This is a conservative synthetic preparation policy; original stored-model inventory and full checks require page 56. Runtime intermediates may overflow."
+    },
+    {
+      "id": "SCALAR_SET",
+      "authority": "source_fact",
+      "source": "51.2",
+      "rule": "Require 32 distinct ra/m values, five decoder f values, ten distinct global symbols, exact f16 encodings. No default, inferred negative bound or duplicated per-stage copy of a global symbol."
+    },
+    {
+      "id": "SHIFT_SET",
+      "authority": "source_fact",
+      "source": "51.6",
+      "rule": "Two parity blocks, each containing the eleven named stage/level rows exactly once. Each xy component is 0,2,4,6. Dk-R derives each component (s+4)%8 from Dk; do not accept independent recurrent rows."
+    },
+    {
+      "id": "CLAMP_DOMAIN",
+      "authority": "own_admission_policy",
+      "source": "51.3.3",
+      "rule": "Require finite ordered A_CLAMPn <= A_CLAMP and ACT_CLn <= ACT_CL, preventing vacuous attention validation. Lower endpoints remain independent symbols. Original full symbol-domain validation is not established."
+    },
+    {
+      "id": "ATTENTION_RANGE",
+      "authority": "source_fact",
+      "source": "51.3.3",
+      "rule": "For every binary16 c in inclusive [A_CLAMPn,A_CLAMP], evaluate p=R(c*R(A_P1-c*c)+A_P0), y=32*(p-1); reject unless 1<=y<31. Products within each R are exact; no extra rounding."
+    },
+    {
+      "id": "ATTENTION_OVERFLOW_RECORD",
+      "authority": "source_fact",
+      "source": "51.3.4",
+      "rule": "Compute w=2^(floor(y)-15)*(1+y-floor(y)); record max w and boolean 64*max(w)>=65520. A true record alone must not reject."
+    },
+    {
+      "id": "HEAD_DERIVATION",
+      "authority": "source_fact",
+      "source": "55.3;55.4",
+      "rule": "h0,h1 are finite stored f16, widened exactly; e0=correctly-rounded-f32-exp(h0), s2=correctly-rounded-f32-exp(h1), s1=min(e0,S1CAP). s2 nonfinite rejects. h0 overflow is allowed if cap produces finite s1; s2=0 from underflow is not prohibited."
+    },
+    {
+      "id": "HEAD_SYNTHETIC_CAP",
+      "authority": "own_admission_policy",
+      "source": "55.3;55.4",
+      "rule": "Synthetic profile requires explicitly supplied finite f32 S1CAP and finite s1/s2. This cap dtype/domain is solely our synthetic input convention; page 57 original dtype/domain is unknown. Require derived f32 bits to match both prepared head tensors."
+    },
+    {
+      "id": "X_SYMBOL_DOMAIN",
+      "authority": "source_fact_wronggpu_choice",
+      "source": "58.1",
+      "rule": "Nine X_ values must be finite f32 zero or normal; X_LMAX>=0, X_KEY>0, X_MFL>0, X_EFL>0, X_CLn<=X_CL, exact-real X_KEY/X_MFL<65520. No sign bound is supplied for X_LWrb,X_LWg,X_NRM."
+    },
+    {
+      "id": "X_SOURCE_CONFLICT",
+      "authority": "unresolved_source_constraint",
+      "source": "58.1;58.2 steps 3,4,7",
+      "rule": "The declared X domain does not prove E_raw positive, its f16 rounding finite, or X3 finite. Counterexamples are in synthetic-cases.json. Report declared-domain result separately from derived operational hazards; do not silently amend the source domain or claim source-wide conformance."
+    },
+    {
+      "id": "PAYLOAD_LENGTH",
+      "authority": "own_admission_policy",
+      "source": "logical shapes",
+      "rule": "When the worker expands a recipe, require exactly product(shape) elements and the specified dtype. Never accept a descriptor or recipe as validation of a real allocation."
+    },
+    {
+      "id": "NO_PHYSICAL_MAPPING",
+      "authority": "source_boundary",
+      "source": "50.3;51.2;missing56/57",
+      "rule": "Reject physical offsets, strides, source permutations, container/build IDs, source paths, signatures or learned payloads in this values-free interchange; logical axis order is not serialized order."
+    },
+    {
+      "id": "PLAYER_MODEL_BLOCKED",
+      "authority": "missing_source_gate",
+      "source": "missing52/56/57;ARCH",
+      "rule": "Complete player-model admission is always blocked under this version, even if every known descriptor and all synthetic validation checks pass. Unknown frontend/model mapping cannot be defaulted."
+    }
+  ],
+  "admission_outcomes": {
+    "ADMISSIBLE_SYNTHETIC_KNOWN_SUBSET": "all structural and semantic profile rules passed; permits only original synthetic source plus known body/head harness",
+    "REJECTED_KNOWN_SUBSET": "known supplied metadata violates a rule",
+    "BLOCKED_PLAYER_MODEL": "unconditional for complete player-model requests under this contract version",
+    "UNRESOLVED_X_OPERATIONAL_DOMAIN": "declared X domain passes but operational finiteness not implied; not an original-model rejection fact"
+  },
+  "source_gates": [
+    "IN0 frontend from page 52 absent",
+    "page 56 complete inventory and transforms absent",
+    "page 57 supported builds and extraction absent",
+    "ARCH contradiction: 50.3 no architecture table versus 51.2 reads ARCH",
+    "S1CAP original precision and domain absent",
+    "page58 declared domains insufficient for claimed operational finiteness"
+  ],
+  "forbidden_defaults": true,
+  "runtime_validation_claims": false
+}

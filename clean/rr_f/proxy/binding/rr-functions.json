@@ -1,0 +1,10 @@
+{
+ "schema": "wronggpu.rr-proxy.rr-functions.v1",
+ "comment": "The three RR feature-function names the game requests by name through <get-function> for feature 1001 (annex A9.5, A10.3), the same in 2.7.x and 2.14.1. names[i] belongs to roles[i]. Each name stands alone on its own line (leak-scan allow rule for this directory, owner OK 2026-10-20); everything else in clean/ refers to them by role only. Read by tools/gen_forwarding.py.",
+ "roles": ["rr-optimal", "rr-state", "rr-options"],
+ "names": [
+  "slDLSSDGetOptimalSettings",
+  "slDLSSDGetState",
+  "slDLSSDSetOptions"
+ ]
+}

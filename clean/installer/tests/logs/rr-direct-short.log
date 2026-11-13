@@ -1,0 +1,5 @@
+00:25:10.553 load: process 1000 attached C:\Games\Example\OakGame\Binaries\Win64\plugins\WrongGPU-RR.asi (hook mode)
+00:25:10.553 RR provider registered with the host (plugin interface 5): games that create RR themselves get WrongGPU RR
+00:25:55.310 runtime: create instance 1: output 1920x1080, render 642x361, mode 4, packing 0, hdr 1, depth inverted 0, jittered motion 0, linear depth, alpha upscaling 0, history 2880x1620, arena 302 MiB (state 119 MiB, work 182 MiB)
+00:25:55.311 RR feature 1 created: render 642x361 -> output 1920x1080, quality 3 (mode 4), flags 0x43 (HDR 1, jittered vectors 0, depth inverted 0, alpha 0), linear depth, separate normals/roughness, output subrects 0
+00:25:55.321 RR feature 1 first evaluate: render 642x361 -> output 1920x1080, jitter (-0.2500, 0.1667), vector scale (1, 1), reset 1; inputs: colour, output, depth, motion, diffuse albedo, specular albedo, normals, roughness; runtime returned 0 (0 frame(s) passed through so far)

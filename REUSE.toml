@@ -1,0 +1,70 @@
+version = 1
+# Licence information in the REUSE format (https://reuse.software). Own source files also carry
+# "SPDX-License-Identifier: MIT" in their first lines. The licence text is in LICENSES/MIT.txt (= LICENSE).
+# Later annotations take precedence over earlier ones for the files they match.
+
+# Everything of WrongGPU itself, including documents, data, test vectors and fixtures, generated sources, the logo and
+# icon (clean/installer/assets: WrongGPU's own artwork), unless a later annotation says otherwise.
+[[annotations]]
+path = "**"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 phantoslayer21"
+SPDX-License-Identifier = "MIT"
+
+# The files below are listed explicitly as well (they cannot carry a header): generated sources and data.
+# Documents, data, test vectors and fixtures, generated sources and project assets of WrongGPU itself.
+[[annotations]]
+path = [
+    "**/*.md",
+    "**/*.json",
+    "**/*.hex",
+    "**/*.log",
+    "**/*.ini",
+    "**/*.manifest",
+    "**/SHA256SUMS",
+    "clean/fsr/NOTICES.txt",
+    "clean/installer/assets/**",
+    "clean/dx12/hlsl/wg_gelu_lds.hlsli",
+    "clean/dx12/hlsl/wg_gelu_lut.hlsli",
+    "clean/dx12/kernels/fused_bneck.hlsl",
+    "clean/dx12/kernels/fused_dec.hlsl",
+    "clean/dx12/kernels/fused_swin.hlsl",
+    "clean/installer/src/wg_core/known_releases.h",
+    "clean/kernels/output_quality5.h",
+    "clean/kernels/rates.hip",
+    "clean/kernels/swin_v2_gelu_table.h",
+    "clean/rr_f/kernels/rr_elem_consts.hlsli",
+    "clean/rr_f/kernels/rr_rf_tables.hlsli",
+    "clean/runtime/gelu_lut_table.h",
+    "clean/wgshared/include/wg_registry_gen.h",
+    "clean/wgshared/include/wg_registry_ini_gen.h",
+    "clean/wgshared/tests/data/wg_registry_gen.initial.h",
+    "LICENSE",
+    "THIRD-PARTY-NOTICES",
+    "REUSE.toml",
+    ".github/**",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 phantoslayer21"
+SPDX-License-Identifier = "MIT"
+
+# AMD FidelityFX SDK 1.1.4: FidelityFX API headers (unmodified)
+[[annotations]]
+path = "clean/third_party/fidelityfx-sdk-1.1.4/**"
+precedence = "override"
+SPDX-FileCopyrightText = "2024 Advanced Micro Devices, Inc."
+SPDX-License-Identifier = "MIT"
+
+# AMD FidelityFX SDK fsr3-v3.0.4: FSR 3.0 host headers (unmodified)
+[[annotations]]
+path = "clean/third_party/fidelityfx-sdk-fsr3-v3.0.4/**"
+precedence = "override"
+SPDX-FileCopyrightText = "2023 Advanced Micro Devices, Inc."
+SPDX-License-Identifier = "MIT"
+
+# WrongGPU's own notes about the vendored headers (written by the clean team, not AMD's)
+[[annotations]]
+path = ["clean/third_party/fidelityfx-sdk-1.1.4/README.md", "clean/third_party/fidelityfx-sdk-fsr3-v3.0.4/README.md"]
+precedence = "override"
+SPDX-FileCopyrightText = "2026 phantoslayer21"
+SPDX-License-Identifier = "MIT"

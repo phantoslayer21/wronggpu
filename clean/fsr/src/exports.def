@@ -1,0 +1,8 @@
+; SPDX-License-Identifier: MIT
+LIBRARY amd_fidelityfx_dx12
+EXPORTS
+    ffxConfigure
+    ffxCreateContext
+    ffxDestroyContext
+    ffxDispatch
+    ffxQuery

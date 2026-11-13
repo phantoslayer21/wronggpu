@@ -1,0 +1,3935 @@
+{
+ "format": "wronggpu-converter-map",
+ "version": 3,
+ "model": "DLSS super-resolution preset K (transformer, in DLSS 310.1 and later)",
+ "channel_order": "natural",
+ "sources": {
+  "T": {
+   "what": "preset-K parameter text block (Base64 segments)",
+   "element": "base64",
+   "length": 4325996,
+   "locate": "block",
+   "fnv1a64": "0x1ebaaefa1b7b97cb",
+   "sha256": "a57362adb0b0f13c39c7e60a2f495b88f22aa0598439574532cae568073ffbeb",
+   "segments": [
+    [
+     0,
+     88
+    ],
+    [
+     96,
+     1928
+    ],
+    [
+     2032,
+     16384
+    ],
+    [
+     18432,
+     5464
+    ],
+    [
+     23904,
+     88
+    ],
+    [
+     24000,
+     88
+    ],
+    [
+     24096,
+     10924
+    ],
+    [
+     35024,
+     344
+    ],
+    [
+     35376,
+     10924
+    ],
+    [
+     46304,
+     88
+    ],
+    [
+     46400,
+     172
+    ],
+    [
+     46576,
+     1928
+    ],
+    [
+     48512,
+     32768
+    ],
+    [
+     81296,
+     10924
+    ],
+    [
+     92224,
+     172
+    ],
+    [
+     92400,
+     172
+    ],
+    [
+     92576,
+     43692
+    ],
+    [
+     136272,
+     684
+    ],
+    [
+     136960,
+     43692
+    ],
+    [
+     180656,
+     172
+    ],
+    [
+     180832,
+     172
+    ],
+    [
+     181008,
+     1928
+    ],
+    [
+     182944,
+     32768
+    ],
+    [
+     215728,
+     10924
+    ],
+    [
+     226656,
+     172
+    ],
+    [
+     226832,
+     172
+    ],
+    [
+     227008,
+     43692
+    ],
+    [
+     270704,
+     684
+    ],
+    [
+     271392,
+     43692
+    ],
+    [
+     315088,
+     172
+    ],
+    [
+     315264,
+     256
+    ],
+    [
+     315536,
+     3852
+    ],
+    [
+     319392,
+     98304
+    ],
+    [
+     417712,
+     32768
+    ],
+    [
+     450496,
+     256
+    ],
+    [
+     450768,
+     256
+    ],
+    [
+     451040,
+     98304
+    ],
+    [
+     549360,
+     1024
+    ],
+    [
+     550400,
+     98304
+    ],
+    [
+     648720,
+     256
+    ],
+    [
+     648992,
+     344
+    ],
+    [
+     649344,
+     3852
+    ],
+    [
+     653200,
+     131072
+    ],
+    [
+     784288,
+     43692
+    ],
+    [
+     827984,
+     344
+    ],
+    [
+     828336,
+     344
+    ],
+    [
+     828688,
+     174764
+    ],
+    [
+     1003456,
+     1368
+    ],
+    [
+     1004832,
+     174764
+    ],
+    [
+     1179600,
+     344
+    ],
+    [
+     1179952,
+     428
+    ],
+    [
+     1180384,
+     7704
+    ],
+    [
+     1188096,
+     327680
+    ],
+    [
+     1515792,
+     109228
+    ],
+    [
+     1625024,
+     428
+    ],
+    [
+     1625456,
+     428
+    ],
+    [
+     1625888,
+     273068
+    ],
+    [
+     1898960,
+     1708
+    ],
+    [
+     1900672,
+     273068
+    ],
+    [
+     2173744,
+     428
+    ],
+    [
+     2174176,
+     344
+    ],
+    [
+     2174528,
+     3852
+    ],
+    [
+     2178384,
+     131072
+    ],
+    [
+     2309472,
+     43692
+    ],
+    [
+     2353168,
+     344
+    ],
+    [
+     2353520,
+     344
+    ],
+    [
+     2353872,
+     174764
+    ],
+    [
+     2528640,
+     1368
+    ],
+    [
+     2530016,
+     174764
+    ],
+    [
+     2704784,
+     344
+    ],
+    [
+     2705136,
+     256
+    ],
+    [
+     2705408,
+     3852
+    ],
+    [
+     2709264,
+     98304
+    ],
+    [
+     2807584,
+     32768
+    ],
+    [
+     2840368,
+     256
+    ],
+    [
+     2840640,
+     256
+    ],
+    [
+     2840912,
+     98304
+    ],
+    [
+     2939232,
+     1024
+    ],
+    [
+     2940272,
+     98304
+    ],
+    [
+     3038592,
+     256
+    ],
+    [
+     3038864,
+     172
+    ],
+    [
+     3039040,
+     1928
+    ],
+    [
+     3040976,
+     32768
+    ],
+    [
+     3073760,
+     10924
+    ],
+    [
+     3084688,
+     172
+    ],
+    [
+     3084864,
+     172
+    ],
+    [
+     3085040,
+     43692
+    ],
+    [
+     3128736,
+     684
+    ],
+    [
+     3129424,
+     43692
+    ],
+    [
+     3173120,
+     172
+    ],
+    [
+     3173296,
+     172
+    ],
+    [
+     3173472,
+     1928
+    ],
+    [
+     3175408,
+     32768
+    ],
+    [
+     3208192,
+     10924
+    ],
+    [
+     3219120,
+     172
+    ],
+    [
+     3219296,
+     172
+    ],
+    [
+     3219472,
+     43692
+    ],
+    [
+     3263168,
+     684
+    ],
+    [
+     3263856,
+     43692
+    ],
+    [
+     3307552,
+     172
+    ],
+    [
+     3307728,
+     88
+    ],
+    [
+     3307824,
+     1928
+    ],
+    [
+     3309760,
+     16384
+    ],
+    [
+     3326160,
+     5464
+    ],
+    [
+     3331632,
+     88
+    ],
+    [
+     3331728,
+     88
+    ],
+    [
+     3331824,
+     10924
+    ],
+    [
+     3342752,
+     344
+    ],
+    [
+     3343104,
+     10924
+    ],
+    [
+     3354032,
+     88
+    ],
+    [
+     3354128,
+     21848
+    ],
+    [
+     3375984,
+     172
+    ],
+    [
+     3376160,
+     43692
+    ],
+    [
+     3419856,
+     172
+    ],
+    [
+     3420032,
+     65536
+    ],
+    [
+     3485584,
+     256
+    ],
+    [
+     3485856,
+     131072
+    ],
+    [
+     3616944,
+     344
+    ],
+    [
+     3617296,
+     218456
+    ],
+    [
+     3835760,
+     428
+    ],
+    [
+     3836192,
+     218456
+    ],
+    [
+     4054656,
+     1368
+    ],
+    [
+     4056032,
+     131072
+    ],
+    [
+     4187120,
+     1024
+    ],
+    [
+     4188160,
+     65536
+    ],
+    [
+     4253712,
+     684
+    ],
+    [
+     4254400,
+     43692
+    ],
+    [
+     4298096,
+     684
+    ],
+    [
+     4298784,
+     21848
+    ],
+    [
+     4320640,
+     344
+    ],
+    [
+     4320992,
+     1368
+    ],
+    [
+     4322368,
+     88
+    ],
+    [
+     4322464,
+     3416
+    ],
+    [
+     4325888,
+     108
+    ]
+   ]
+  },
+  "O": {
+   "what": "window offset table (spec 44)",
+   "element": "i32le",
+   "length": 64,
+   "locate": "block",
+   "keyed": true,
+   "fnv1a64": "0xa61537e3f8d3a9c0",
+   "sha256": "c1c3b3d702166c50d12006e701229f29b65a6bcd59aeb9ad7c16400a330016c0"
+  }
+ },
+ "key": {
+  "label": "WrongGPU converter key K v1",
+  "from": "T"
+ },
+ "perms": {},
+ "stages": [
+  {
+   "stage": "e0",
+   "digest": "a2a39804ae0ebe3c71697e2c13a78a2bc78f064f07f63130deca168d9c798127",
+   "tensors": [
+    {
+     "name": "We",
+     "shape": [
+      32,
+      16
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1619908,
+     "axes": [
+      {
+       "stride": 16
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "be",
+     "shape": [
+      32
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1620420,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "g1",
+     "shape": [
+      32
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x40b504f3",
+      "div": "0x3f800000",
+      "note": "mul = RN32(sqrt C)"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wv",
+     "shape": [
+      2,
+      32,
+      32
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 4850,
+     "axes": [
+      {
+       "stride": 1024
+      },
+      {
+       "stride": 32
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "M",
+     "shape": [
+      2,
+      8,
+      8,
+      8,
+      8
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "capped_softmax",
+      "cap": "0x41700000",
+      "div": "0x4428c000",
+      "sub": "0x40600000"
+     },
+     "base": 212,
+     "axes": [
+      {
+       "stride": 361
+      },
+      {
+       "stride": -19
+      },
+      {
+       "stride": -1
+      },
+      {
+       "stride": 19
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wo",
+     "shape": [
+      32,
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 6898,
+     "axes": [
+      {
+       "stride": 64
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "bo",
+     "shape": [
+      32
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 8946,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "g2",
+     "shape": [
+      32
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 8978,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "W1",
+     "shape": [
+      128,
+      32
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 9010,
+     "axes": [
+      {
+       "stride": 32
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b1",
+     "shape": [
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 13106,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "W2",
+     "shape": [
+      32,
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 13234,
+     "axes": [
+      {
+       "stride": 128
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b2",
+     "shape": [
+      32
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 17330,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wm",
+     "shape": [
+      64,
+      4,
+      32
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1257412,
+     "axes": [
+      {
+       "stride": 128
+      },
+      {
+       "stride": 1
+      },
+      {
+       "stride": 4
+      }
+     ]
+    },
+    {
+     "name": "bm",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1265604,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "e1",
+   "digest": "5249ce062b37a316d972c310eaee7cc21b433299584555c9759b0fc00246efe0",
+   "tensors": [
+    {
+     "name": "g1",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x41000000",
+      "div": "0x3f800000",
+      "note": "mul = RN32(sqrt C)"
+     },
+     "base": 17362,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wv",
+     "shape": [
+      2,
+      32,
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 26340,
+     "axes": [
+      {
+       "stride": 2048
+      },
+      {
+       "stride": 64
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "M",
+     "shape": [
+      2,
+      8,
+      8,
+      8,
+      8
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "capped_softmax",
+      "cap": "0x41700000",
+      "div": "0x4428c000",
+      "sub": "0x40600000"
+     },
+     "base": 17606,
+     "axes": [
+      {
+       "stride": 361
+      },
+      {
+       "stride": -19
+      },
+      {
+       "stride": -1
+      },
+      {
+       "stride": 19
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wo",
+     "shape": [
+      64,
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 30436,
+     "axes": [
+      {
+       "stride": 64
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "bo",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 34532,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "g2",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 34596,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "W1",
+     "shape": [
+      256,
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 34660,
+     "axes": [
+      {
+       "stride": 64
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b1",
+     "shape": [
+      256
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 51044,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "W2",
+     "shape": [
+      64,
+      256
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 51300,
+     "axes": [
+      {
+       "stride": 256
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b2",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 67684,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wm",
+     "shape": [
+      64,
+      4,
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1265668,
+     "axes": [
+      {
+       "stride": 256
+      },
+      {
+       "stride": 1
+      },
+      {
+       "stride": 4
+      }
+     ]
+    },
+    {
+     "name": "bm",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1282052,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "e2",
+   "digest": "5e3434f6c5f7f12f0263fbba3fe74fd5a0fe3be77c8555bd9a23f98755308462",
+   "tensors": [
+    {
+     "name": "g1",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x41000000",
+      "div": "0x3f800000",
+      "note": "mul = RN32(sqrt C)"
+     },
+     "base": 67748,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wq",
+     "shape": [
+      2,
+      32,
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x3e8293ee",
+      "div": "0x3f800000",
+      "note": "mul = query scale, RN32(RN32(1/RN32(ln 2)) * RN32(1/RN32(sqrt 32)))"
+     },
+     "base": 68534,
+     "axes": [
+      {
+       "stride": 2048
+      },
+      {
+       "stride": 64
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wk",
+     "shape": [
+      2,
+      32,
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 72630,
+     "axes": [
+      {
+       "stride": 2048
+      },
+      {
+       "stride": 64
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wv",
+     "shape": [
+      2,
+      32,
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 76726,
+     "axes": [
+      {
+       "stride": 2048
+      },
+      {
+       "stride": 64
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "B",
+     "shape": [
+      2,
+      8,
+      8,
+      8,
+      8
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x3fb8aa3b",
+      "div": "0x3f800000",
+      "note": "mul = position scale, RN32(1/RN32(ln 2))"
+     },
+     "base": 67992,
+     "axes": [
+      {
+       "stride": 361
+      },
+      {
+       "stride": -19
+      },
+      {
+       "stride": -1
+      },
+      {
+       "stride": 19
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wo",
+     "shape": [
+      64,
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 80822,
+     "axes": [
+      {
+       "stride": 64
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "bo",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 84918,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "g2",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 84982,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "W1",
+     "shape": [
+      256,
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 85046,
+     "axes": [
+      {
+       "stride": 64
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b1",
+     "shape": [
+      256
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 101430,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "W2",
+     "shape": [
+      64,
+      256
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 101686,
+     "axes": [
+      {
+       "stride": 256
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b2",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 118070,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wm",
+     "shape": [
+      96,
+      4,
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1282116,
+     "axes": [
+      {
+       "stride": 256
+      },
+      {
+       "stride": 1
+      },
+      {
+       "stride": 4
+      }
+     ]
+    },
+    {
+     "name": "bm",
+     "shape": [
+      96
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1306692,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "e3",
+   "digest": "e13fdff4c5b88ea50afadfed9f570b6fb3787ad893dc8528ee5699e7cd03608d",
+   "tensors": [
+    {
+     "name": "g1",
+     "shape": [
+      96
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x411cc471",
+      "div": "0x3f800000",
+      "note": "mul = RN32(sqrt C)"
+     },
+     "base": 118134,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wq",
+     "shape": [
+      4,
+      32,
+      96
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x3e8293ee",
+      "div": "0x3f800000",
+      "note": "mul = query scale, RN32(RN32(1/RN32(ln 2)) * RN32(1/RN32(sqrt 32)))"
+     },
+     "base": 119674,
+     "axes": [
+      {
+       "stride": 3072
+      },
+      {
+       "stride": 96
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wk",
+     "shape": [
+      4,
+      32,
+      96
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 131962,
+     "axes": [
+      {
+       "stride": 3072
+      },
+      {
+       "stride": 96
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wv",
+     "shape": [
+      4,
+      32,
+      96
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 144250,
+     "axes": [
+      {
+       "stride": 3072
+      },
+      {
+       "stride": 96
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "B",
+     "shape": [
+      4,
+      8,
+      8,
+      8,
+      8
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x3fb8aa3b",
+      "div": "0x3f800000",
+      "note": "mul = position scale, RN32(1/RN32(ln 2))"
+     },
+     "base": 118410,
+     "axes": [
+      {
+       "stride": 361
+      },
+      {
+       "stride": -19
+      },
+      {
+       "stride": -1
+      },
+      {
+       "stride": 19
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wo",
+     "shape": [
+      96,
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 156538,
+     "axes": [
+      {
+       "stride": 128
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "bo",
+     "shape": [
+      96
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 168826,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "g2",
+     "shape": [
+      96
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 168922,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "W1",
+     "shape": [
+      384,
+      96
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 169018,
+     "axes": [
+      {
+       "stride": 96
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b1",
+     "shape": [
+      384
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 205882,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "W2",
+     "shape": [
+      96,
+      384
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 206266,
+     "axes": [
+      {
+       "stride": 384
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b2",
+     "shape": [
+      96
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 243130,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wm",
+     "shape": [
+      128,
+      4,
+      96
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1306788,
+     "axes": [
+      {
+       "stride": 384
+      },
+      {
+       "stride": 1
+      },
+      {
+       "stride": 4
+      }
+     ]
+    },
+    {
+     "name": "bm",
+     "shape": [
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1355940,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "e4",
+   "digest": "497e9fcf93ea05b0e200be2c6e38a7582865617b81511b1a029290f87b13a2f3",
+   "tensors": [
+    {
+     "name": "g1",
+     "shape": [
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x413504f3",
+      "div": "0x3f800000",
+      "note": "mul = RN32(sqrt C)"
+     },
+     "base": 243226,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wq",
+     "shape": [
+      4,
+      32,
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x3e8293ee",
+      "div": "0x3f800000",
+      "note": "mul = query scale, RN32(RN32(1/RN32(ln 2)) * RN32(1/RN32(sqrt 32)))"
+     },
+     "base": 244798,
+     "axes": [
+      {
+       "stride": 4096
+      },
+      {
+       "stride": 128
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wk",
+     "shape": [
+      4,
+      32,
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 261182,
+     "axes": [
+      {
+       "stride": 4096
+      },
+      {
+       "stride": 128
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wv",
+     "shape": [
+      4,
+      32,
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 277566,
+     "axes": [
+      {
+       "stride": 4096
+      },
+      {
+       "stride": 128
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "B",
+     "shape": [
+      4,
+      8,
+      8,
+      8,
+      8
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x3fb8aa3b",
+      "div": "0x3f800000",
+      "note": "mul = position scale, RN32(1/RN32(ln 2))"
+     },
+     "base": 243534,
+     "axes": [
+      {
+       "stride": 361
+      },
+      {
+       "stride": -19
+      },
+      {
+       "stride": -1
+      },
+      {
+       "stride": 19
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wo",
+     "shape": [
+      128,
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 293950,
+     "axes": [
+      {
+       "stride": 128
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "bo",
+     "shape": [
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 310334,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "g2",
+     "shape": [
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 310462,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "W1",
+     "shape": [
+      512,
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 310590,
+     "axes": [
+      {
+       "stride": 128
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b1",
+     "shape": [
+      512
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 376126,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "W2",
+     "shape": [
+      128,
+      512
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 376638,
+     "axes": [
+      {
+       "stride": 512
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b2",
+     "shape": [
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 442174,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wm",
+     "shape": [
+      160,
+      4,
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1356068,
+     "axes": [
+      {
+       "stride": 512
+      },
+      {
+       "stride": 1
+      },
+      {
+       "stride": 4
+      }
+     ]
+    },
+    {
+     "name": "bm",
+     "shape": [
+      160
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1437988,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "m",
+   "digest": "fbd934a09a9bbc42621edb483f9c181dfed2690c2e436a4b3a141926a011098c",
+   "tensors": [
+    {
+     "name": "g1",
+     "shape": [
+      160
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x414a62c2",
+      "div": "0x3f800000",
+      "note": "mul = RN32(sqrt C)"
+     },
+     "base": 442302,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wq",
+     "shape": [
+      8,
+      32,
+      160
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x3e8293ee",
+      "div": "0x3f800000",
+      "note": "mul = query scale, RN32(RN32(1/RN32(ln 2)) * RN32(1/RN32(sqrt 32)))"
+     },
+     "base": 445350,
+     "axes": [
+      {
+       "stride": 5120
+      },
+      {
+       "stride": 160
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wk",
+     "shape": [
+      8,
+      32,
+      160
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 486310,
+     "axes": [
+      {
+       "stride": 5120
+      },
+      {
+       "stride": 160
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wv",
+     "shape": [
+      8,
+      32,
+      160
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 527270,
+     "axes": [
+      {
+       "stride": 5120
+      },
+      {
+       "stride": 160
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "B",
+     "shape": [
+      8,
+      8,
+      8,
+      8,
+      8
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x3fb8aa3b",
+      "div": "0x3f800000",
+      "note": "mul = position scale, RN32(1/RN32(ln 2))"
+     },
+     "base": 442642,
+     "axes": [
+      {
+       "stride": 361
+      },
+      {
+       "stride": -19
+      },
+      {
+       "stride": -1
+      },
+      {
+       "stride": 19
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wo",
+     "shape": [
+      160,
+      256
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 568230,
+     "axes": [
+      {
+       "stride": 256
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "bo",
+     "shape": [
+      160
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 609190,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "g2",
+     "shape": [
+      160
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 609350,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "W1",
+     "shape": [
+      640,
+      160
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 609510,
+     "axes": [
+      {
+       "stride": 160
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b1",
+     "shape": [
+      640
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 711910,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "W2",
+     "shape": [
+      160,
+      640
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 712550,
+     "axes": [
+      {
+       "stride": 640
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b2",
+     "shape": [
+      160
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 814950,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "d4",
+   "digest": "68e767f588b986dedc8d7319395e94eefdeaef54f5a1b4c7119548c35db0c404",
+   "tensors": [
+    {
+     "name": "g1",
+     "shape": [
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x413504f3",
+      "div": "0x3f800000",
+      "note": "mul = RN32(sqrt C)"
+     },
+     "base": 815110,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wq",
+     "shape": [
+      4,
+      32,
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x3e8293ee",
+      "div": "0x3f800000",
+      "note": "mul = query scale, RN32(RN32(1/RN32(ln 2)) * RN32(1/RN32(sqrt 32)))"
+     },
+     "base": 816682,
+     "axes": [
+      {
+       "stride": 4096
+      },
+      {
+       "stride": 128
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wk",
+     "shape": [
+      4,
+      32,
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 833066,
+     "axes": [
+      {
+       "stride": 4096
+      },
+      {
+       "stride": 128
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wv",
+     "shape": [
+      4,
+      32,
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 849450,
+     "axes": [
+      {
+       "stride": 4096
+      },
+      {
+       "stride": 128
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "B",
+     "shape": [
+      4,
+      8,
+      8,
+      8,
+      8
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x3fb8aa3b",
+      "div": "0x3f800000",
+      "note": "mul = position scale, RN32(1/RN32(ln 2))"
+     },
+     "base": 815418,
+     "axes": [
+      {
+       "stride": 361
+      },
+      {
+       "stride": -19
+      },
+      {
+       "stride": -1
+      },
+      {
+       "stride": 19
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wo",
+     "shape": [
+      128,
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 865834,
+     "axes": [
+      {
+       "stride": 128
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "bo",
+     "shape": [
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 882218,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "g2",
+     "shape": [
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 882346,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "W1",
+     "shape": [
+      512,
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 882474,
+     "axes": [
+      {
+       "stride": 128
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b1",
+     "shape": [
+      512
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 948010,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "W2",
+     "shape": [
+      128,
+      512
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 948522,
+     "axes": [
+      {
+       "stride": 512
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b2",
+     "shape": [
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1014058,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wx",
+     "shape": [
+      4,
+      128,
+      160
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1438148,
+     "axes": [
+      {
+       "stride": 160
+      },
+      {
+       "stride": 640
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "bx",
+     "shape": [
+      4,
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1520068,
+     "axes": [
+      {
+       "stride": 1
+      },
+      {
+       "stride": 4
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "d3",
+   "digest": "efe4aa47356f99ea1a96dd9abb2cb820b32d4f23f4de9ec058aead63efe5e3e5",
+   "tensors": [
+    {
+     "name": "g1",
+     "shape": [
+      96
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x411cc471",
+      "div": "0x3f800000",
+      "note": "mul = RN32(sqrt C)"
+     },
+     "base": 1014186,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wq",
+     "shape": [
+      4,
+      32,
+      96
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x3e8293ee",
+      "div": "0x3f800000",
+      "note": "mul = query scale, RN32(RN32(1/RN32(ln 2)) * RN32(1/RN32(sqrt 32)))"
+     },
+     "base": 1015726,
+     "axes": [
+      {
+       "stride": 3072
+      },
+      {
+       "stride": 96
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wk",
+     "shape": [
+      4,
+      32,
+      96
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1028014,
+     "axes": [
+      {
+       "stride": 3072
+      },
+      {
+       "stride": 96
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wv",
+     "shape": [
+      4,
+      32,
+      96
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1040302,
+     "axes": [
+      {
+       "stride": 3072
+      },
+      {
+       "stride": 96
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "B",
+     "shape": [
+      4,
+      8,
+      8,
+      8,
+      8
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x3fb8aa3b",
+      "div": "0x3f800000",
+      "note": "mul = position scale, RN32(1/RN32(ln 2))"
+     },
+     "base": 1014462,
+     "axes": [
+      {
+       "stride": 361
+      },
+      {
+       "stride": -19
+      },
+      {
+       "stride": -1
+      },
+      {
+       "stride": 19
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wo",
+     "shape": [
+      96,
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1052590,
+     "axes": [
+      {
+       "stride": 128
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "bo",
+     "shape": [
+      96
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1064878,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "g2",
+     "shape": [
+      96
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1064974,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "W1",
+     "shape": [
+      384,
+      96
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1065070,
+     "axes": [
+      {
+       "stride": 96
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b1",
+     "shape": [
+      384
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1101934,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "W2",
+     "shape": [
+      96,
+      384
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1102318,
+     "axes": [
+      {
+       "stride": 384
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b2",
+     "shape": [
+      96
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1139182,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wx",
+     "shape": [
+      4,
+      96,
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1520580,
+     "axes": [
+      {
+       "stride": 128
+      },
+      {
+       "stride": 512
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "bx",
+     "shape": [
+      4,
+      96
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1569732,
+     "axes": [
+      {
+       "stride": 1
+      },
+      {
+       "stride": 4
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "d2",
+   "digest": "347a30141ed9458235e0558c30557bf05980ee39c6f7a32836dc3a9fe5bd59a1",
+   "tensors": [
+    {
+     "name": "g1",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x41000000",
+      "div": "0x3f800000",
+      "note": "mul = RN32(sqrt C)"
+     },
+     "base": 1139278,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wq",
+     "shape": [
+      2,
+      32,
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x3e8293ee",
+      "div": "0x3f800000",
+      "note": "mul = query scale, RN32(RN32(1/RN32(ln 2)) * RN32(1/RN32(sqrt 32)))"
+     },
+     "base": 1140064,
+     "axes": [
+      {
+       "stride": 2048
+      },
+      {
+       "stride": 64
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wk",
+     "shape": [
+      2,
+      32,
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1144160,
+     "axes": [
+      {
+       "stride": 2048
+      },
+      {
+       "stride": 64
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wv",
+     "shape": [
+      2,
+      32,
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1148256,
+     "axes": [
+      {
+       "stride": 2048
+      },
+      {
+       "stride": 64
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "B",
+     "shape": [
+      2,
+      8,
+      8,
+      8,
+      8
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x3fb8aa3b",
+      "div": "0x3f800000",
+      "note": "mul = position scale, RN32(1/RN32(ln 2))"
+     },
+     "base": 1139522,
+     "axes": [
+      {
+       "stride": 361
+      },
+      {
+       "stride": -19
+      },
+      {
+       "stride": -1
+      },
+      {
+       "stride": 19
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wo",
+     "shape": [
+      64,
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1152352,
+     "axes": [
+      {
+       "stride": 64
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "bo",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1156448,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "g2",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1156512,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "W1",
+     "shape": [
+      256,
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1156576,
+     "axes": [
+      {
+       "stride": 64
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b1",
+     "shape": [
+      256
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1172960,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "W2",
+     "shape": [
+      64,
+      256
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1173216,
+     "axes": [
+      {
+       "stride": 256
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b2",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1189600,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wx",
+     "shape": [
+      4,
+      64,
+      96
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1570116,
+     "axes": [
+      {
+       "stride": 96
+      },
+      {
+       "stride": 384
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "bx",
+     "shape": [
+      4,
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1594692,
+     "axes": [
+      {
+       "stride": 1
+      },
+      {
+       "stride": 4
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "d1",
+   "digest": "77fad0d9e454d0898930b1af9dcb25babd8870cad275c6fb003fcfd7f24274b8",
+   "tensors": [
+    {
+     "name": "g1",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x41000000",
+      "div": "0x3f800000",
+      "note": "mul = RN32(sqrt C)"
+     },
+     "base": 1189664,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wq",
+     "shape": [
+      2,
+      32,
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x3e8293ee",
+      "div": "0x3f800000",
+      "note": "mul = query scale, RN32(RN32(1/RN32(ln 2)) * RN32(1/RN32(sqrt 32)))"
+     },
+     "base": 1190450,
+     "axes": [
+      {
+       "stride": 2048
+      },
+      {
+       "stride": 64
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wk",
+     "shape": [
+      2,
+      32,
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1194546,
+     "axes": [
+      {
+       "stride": 2048
+      },
+      {
+       "stride": 64
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wv",
+     "shape": [
+      2,
+      32,
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1198642,
+     "axes": [
+      {
+       "stride": 2048
+      },
+      {
+       "stride": 64
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "B",
+     "shape": [
+      2,
+      8,
+      8,
+      8,
+      8
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x3fb8aa3b",
+      "div": "0x3f800000",
+      "note": "mul = position scale, RN32(1/RN32(ln 2))"
+     },
+     "base": 1189908,
+     "axes": [
+      {
+       "stride": 361
+      },
+      {
+       "stride": -19
+      },
+      {
+       "stride": -1
+      },
+      {
+       "stride": 19
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wo",
+     "shape": [
+      64,
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1202738,
+     "axes": [
+      {
+       "stride": 64
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "bo",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1206834,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "g2",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1206898,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "W1",
+     "shape": [
+      256,
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1206962,
+     "axes": [
+      {
+       "stride": 64
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b1",
+     "shape": [
+      256
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1223346,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "W2",
+     "shape": [
+      64,
+      256
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1223602,
+     "axes": [
+      {
+       "stride": 256
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b2",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1239986,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wx",
+     "shape": [
+      4,
+      64,
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1594948,
+     "axes": [
+      {
+       "stride": 64
+      },
+      {
+       "stride": 256
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "bx",
+     "shape": [
+      4,
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1611332,
+     "axes": [
+      {
+       "stride": 1
+      },
+      {
+       "stride": 4
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "d0",
+   "digest": "28bb31d7db0da98325e8f8d9f504c266de04e33913a157d11eff73cb467a8ba8",
+   "tensors": [
+    {
+     "name": "g1",
+     "shape": [
+      32
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16_scaled",
+      "mul": "0x40b504f3",
+      "div": "0x3f800000",
+      "note": "mul = RN32(sqrt C)"
+     },
+     "base": 1240050,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wv",
+     "shape": [
+      2,
+      32,
+      32
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1244900,
+     "axes": [
+      {
+       "stride": 1024
+      },
+      {
+       "stride": 32
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "M",
+     "shape": [
+      2,
+      8,
+      8,
+      8,
+      8
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "capped_softmax",
+      "cap": "0x41700000",
+      "div": "0x4428c000",
+      "sub": "0x40600000"
+     },
+     "base": 1240262,
+     "axes": [
+      {
+       "stride": 361
+      },
+      {
+       "stride": -19
+      },
+      {
+       "stride": -1
+      },
+      {
+       "stride": 19
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wo",
+     "shape": [
+      32,
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1246948,
+     "axes": [
+      {
+       "stride": 64
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "bo",
+     "shape": [
+      32
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1248996,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "g2",
+     "shape": [
+      32
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1249028,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "W1",
+     "shape": [
+      128,
+      32
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1249060,
+     "axes": [
+      {
+       "stride": 32
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b1",
+     "shape": [
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1253156,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "W2",
+     "shape": [
+      32,
+      128
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1253284,
+     "axes": [
+      {
+       "stride": 128
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b2",
+     "shape": [
+      32
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1257380,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wh",
+     "shape": [
+      40,
+      32
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1620452,
+     "axes": [
+      {
+       "stride": 32
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "bh",
+     "shape": [
+      40
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1621732,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "Wx",
+     "shape": [
+      4,
+      32,
+      64
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1611588,
+     "axes": [
+      {
+       "stride": 64
+      },
+      {
+       "stride": 256
+      },
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "bx",
+     "shape": [
+      4,
+      32
+     ],
+     "dtype": "float32",
+     "src": "W",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1619780,
+     "axes": [
+      {
+       "stride": 1
+      },
+      {
+       "stride": 4
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "net",
+   "digest": "c1c3b3d702166c50d12006e701229f29b65a6bcd59aeb9ad7c16400a330016c0",
+   "tensors": [
+    {
+     "name": "window_offsets",
+     "shape": [
+      8,
+      2
+     ],
+     "dtype": "int32",
+     "src": "O",
+     "op": {
+      "name": "i32"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 2
+      },
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

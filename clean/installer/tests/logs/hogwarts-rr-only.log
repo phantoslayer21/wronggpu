@@ -1,0 +1,5 @@
+00:44:59.906 runtime: instance 1 timing, 300 frames from frame 3601: GPU 6.110 ms per frame (pre 0.038, input 0.433, body 3.542, head 0.776, output 0.844, resolve 0.431, store 0.045, in.dec 0.000, in.feat 0.429, in.rep 0.004, in.mlp 0.000), render 1279x720, output 1920x1080
+00:45:11.580 runtime: instance 1 timing, 300 frames from frame 3901: GPU 6.104 ms per frame (pre 0.038, input 0.427, body 3.530, head 0.773, output 0.860, resolve 0.431, store 0.045, in.dec 0.000, in.feat 0.423, in.rep 0.003, in.mlp 0.000), render 1279x720, output 1920x1080
+00:48:49.758 runtime: instance 1 timing, 154 frames from frame 9601: GPU 6.223 ms per frame (pre 0.038, input 0.448, body 3.547, head 0.780, output 0.936, resolve 0.431, store 0.045, in.dec 0.000, in.feat 0.444, in.rep 0.004, in.mlp 0.000), render 1279x720, output 1920x1080
+00:48:49.758 runtime: destroy instance 1 after 9754 frames (0 failed)
+00:48:52.959 diag: summary (process exit): the game interface's calls never reached the plugin

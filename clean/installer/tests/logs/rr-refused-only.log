@@ -1,0 +1,5 @@
+19:30:00.000 load: process 5200 attached C:\Games\Example\plugins\WrongGPU-RR.asi (hook mode)
+19:30:00.020 RR provider registered with the host (plugin interface 5): games that create RR themselves get WrongGPU RR
+19:30:40.100 RR feature refused (the game keeps its own path): WrongGPU's runtime or model is not available
+19:30:41.200 RR feature refused (the game keeps its own path): WrongGPU's runtime or model is not available
+19:35:00.000 diag: summary (process exit): the game interface's calls never reached the plugin; game-interface calls that reached us 0; direct route: RR creates 2 (created 0), evaluates 0; slot checks 0

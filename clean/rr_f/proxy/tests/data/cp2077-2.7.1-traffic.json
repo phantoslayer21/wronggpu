@@ -1,0 +1,2364 @@
+{
+ "schema": "wronggpu.rr-proxy.game-profile.v1",
+ "game": "cp2077",
+ "source": {
+  "origin": "synthetic: the call structure of a game-interface 2.7 session in hook mode (call order, roles, return codes, resource descriptions, counts); measured values replaced by made-up ones",
+  "hook_mode": true
+ },
+ "probe_caveats": [
+  {
+   "line": 6,
+   "what": "hook mode: the probe adopted an unseen <init> at plugin load (flags taken as 0) before the game's real <init>; the real <init> calls were then seen and logged; the adoption is a probe-build artefact, not a game call"
+  },
+  {
+   "what": "frames are counted at <new-frame-token> (several per frame index); the full-log window of 600 frames ended during loading (frame index 149), so every RR-phase record is the first one plus changes only"
+  }
+ ],
+ "api_minor": 7,
+ "init_sessions": [
+  {
+   "line": 22,
+   "sdk": "2.7.1",
+   "magic": 65244,
+   "flags": 105,
+   "flag_bits": {
+    "0": "command-list state tracking disabled",
+    "3": "allow over-the-air updates",
+    "5": "DXGI factory proxy",
+    "6": "load downloaded plugins"
+   },
+   "features": [
+    3,
+    0,
+    1000,
+    1001
+   ],
+   "render_api": 1,
+   "engine": 0,
+   "log_level": 0,
+   "app_id": 100152211,
+   "plugin_paths": 0,
+   "prefs_version": 1,
+   "rc": 0
+  },
+  {
+   "line": 33,
+   "sdk": "2.7.1",
+   "magic": 65244,
+   "flags": 105,
+   "flag_bits": {
+    "0": "command-list state tracking disabled",
+    "3": "allow over-the-air updates",
+    "5": "DXGI factory proxy",
+    "6": "load downloaded plugins"
+   },
+   "features": [
+    3,
+    0,
+    1001,
+    1001
+   ],
+   "render_api": 1,
+   "engine": 0,
+   "log_level": 0,
+   "app_id": 100152211,
+   "plugin_paths": 0,
+   "prefs_version": 1,
+   "rc": 0
+  }
+ ],
+ "set_device": {
+  "device": "given",
+  "unwrapped": "0",
+  "render_api": "1",
+  "line": 37
+ },
+ "is_supported_adapter": {
+  "luid_size": "8",
+  "vulkan": "0",
+  "line": 45
+ },
+ "setup_calls": [
+  {
+   "seq": 1,
+   "line": 24,
+   "role": "init",
+   "rc": 0
+  },
+  {
+   "seq": 2,
+   "line": 27,
+   "role": "is-supported",
+   "feature": 1000,
+   "rc": 6
+  },
+  {
+   "seq": 3,
+   "line": 29,
+   "role": "shutdown",
+   "rc": 0
+  },
+  {
+   "seq": 4,
+   "line": 34,
+   "role": "init",
+   "rc": 0
+  },
+  {
+   "seq": 5,
+   "line": 36,
+   "role": "upgrade-interface",
+   "rc": 0
+  },
+  {
+   "seq": 6,
+   "line": 39,
+   "role": "set-device",
+   "rc": 0
+  },
+  {
+   "seq": 7,
+   "line": 41,
+   "role": "is-supported",
+   "feature": 0,
+   "rc": 0
+  },
+  {
+   "seq": 8,
+   "line": 43,
+   "role": "set-loaded",
+   "feature": 0,
+   "value": 0,
+   "rc": 0
+  },
+  {
+   "seq": 9,
+   "line": 46,
+   "role": "is-supported",
+   "feature": 1001,
+   "rc": 0
+  },
+  {
+   "seq": 10,
+   "line": 47,
+   "role": "set-loaded",
+   "feature": 1001,
+   "value": 0,
+   "rc": 0
+  },
+  {
+   "seq": 11,
+   "line": 49,
+   "role": "is-supported",
+   "feature": 1000,
+   "rc": 31
+  },
+  {
+   "seq": 12,
+   "line": 51,
+   "role": "is-supported",
+   "feature": 3,
+   "rc": 0
+  },
+  {
+   "seq": 13,
+   "line": 52,
+   "role": "set-loaded",
+   "feature": 3,
+   "value": 0,
+   "rc": 0
+  },
+  {
+   "seq": 14,
+   "line": 54,
+   "role": "is-supported",
+   "feature": 2,
+   "rc": 31
+  },
+  {
+   "seq": 15,
+   "line": 55,
+   "role": "set-loaded",
+   "feature": 0,
+   "value": 1,
+   "rc": 0
+  },
+  {
+   "seq": 16,
+   "line": 57,
+   "role": "is-loaded",
+   "feature": 0,
+   "value": 1,
+   "rc": 0
+  },
+  {
+   "seq": 17,
+   "line": 58,
+   "role": "set-loaded",
+   "feature": 1001,
+   "value": 1,
+   "rc": 0
+  },
+  {
+   "seq": 18,
+   "line": 59,
+   "role": "is-loaded",
+   "feature": 1001,
+   "value": 1,
+   "rc": 0
+  },
+  {
+   "seq": 19,
+   "line": 60,
+   "role": "set-loaded",
+   "feature": 3,
+   "value": 1,
+   "rc": 0
+  },
+  {
+   "seq": 20,
+   "line": 61,
+   "role": "is-loaded",
+   "feature": 3,
+   "value": 1,
+   "rc": 0
+  },
+  {
+   "seq": 21,
+   "line": 63,
+   "role": "get-function",
+   "feature": 3,
+   "function_role": null,
+   "rc": 0
+  },
+  {
+   "seq": 22,
+   "line": 64,
+   "role": "get-function",
+   "feature": 0,
+   "function_role": null,
+   "rc": 0
+  }
+ ],
+ "get_function_calls": [
+  {
+   "seq": 21,
+   "line": 63,
+   "frame": 0,
+   "feature": 3,
+   "function_role": null,
+   "rc": 0
+  },
+  {
+   "seq": 22,
+   "line": 64,
+   "frame": 0,
+   "feature": 0,
+   "function_role": null,
+   "rc": 0
+  },
+  {
+   "seq": 25,
+   "line": 73,
+   "frame": 1,
+   "feature": 3,
+   "function_role": null,
+   "rc": 0
+  },
+  {
+   "seq": 27,
+   "line": 76,
+   "frame": 2,
+   "feature": 4,
+   "function_role": null,
+   "rc": 0
+  },
+  {
+   "seq": 9535,
+   "line": 1720,
+   "frame": 7611,
+   "feature": 3,
+   "function_role": null,
+   "rc": 0
+  },
+  {
+   "seq": 25364,
+   "line": 1761,
+   "frame": 21671,
+   "feature": 1001,
+   "function_role": "rr-options",
+   "rc": 0
+  },
+  {
+   "seq": 34187,
+   "line": 1792,
+   "frame": 25001,
+   "feature": 1000,
+   "function_role": null,
+   "rc": 31
+  }
+ ],
+ "frame_tokens": {
+  "token_layout": {
+   "line": 65,
+   "guid_at_16_is_frame_token_guid": true,
+   "version_at_32": 1
+  },
+  "index_argument": "given",
+  "index_from_table_equals_argument_frames_1_600": true,
+  "loading_window": {
+   "frames": [
+    1,
+    600
+   ],
+   "frame_indices": [
+    0,
+    149
+   ],
+   "tokens_per_index": {
+    "5": [
+     0
+    ],
+    "4": "148 indices (1..148)"
+   },
+   "last_index_cut_by_window": 149,
+   "constants_per_index": [
+    1
+   ],
+   "constants_on_first_token_of_index": true,
+   "index_step_per_new_index": 1
+  }
+ },
+ "constants": {
+  "viewport": 0,
+  "changes": [
+   {
+    "reset": 1,
+    "mv_scale": [
+     0.0,
+     0.0
+    ],
+    "camera_motion_included": 1,
+    "mv_jittered": 0,
+    "depth_inverted": 1,
+    "mv_3d": 0,
+    "mv_dilated": 0,
+    "orthographic": 0,
+    "version": 2,
+    "frame_index": 0,
+    "line": 70
+   },
+   {
+    "reset": 1,
+    "mv_scale": [
+     1.0,
+     1.0
+    ],
+    "camera_motion_included": 1,
+    "mv_jittered": 0,
+    "depth_inverted": 1,
+    "mv_3d": 0,
+    "mv_dilated": 0,
+    "orthographic": 0,
+    "version": 2,
+    "frame_index": 2613,
+    "line": 1721
+   },
+   {
+    "reset": 0,
+    "mv_scale": [
+     1.0,
+     1.0
+    ],
+    "camera_motion_included": 1,
+    "mv_jittered": 0,
+    "depth_inverted": 1,
+    "mv_3d": 0,
+    "mv_dilated": 0,
+    "orthographic": 0,
+    "version": 2,
+    "frame_index": 3654,
+    "line": 1722
+   },
+   {
+    "reset": 1,
+    "mv_scale": [
+     1.0,
+     1.0
+    ],
+    "camera_motion_included": 1,
+    "mv_jittered": 0,
+    "depth_inverted": 1,
+    "mv_3d": 0,
+    "mv_dilated": 0,
+    "orthographic": 0,
+    "version": 2,
+    "frame_index": 3967,
+    "line": 1788
+   },
+   {
+    "reset": 0,
+    "mv_scale": [
+     1.0,
+     1.0
+    ],
+    "camera_motion_included": 1,
+    "mv_jittered": 0,
+    "depth_inverted": 1,
+    "mv_3d": 0,
+    "mv_dilated": 0,
+    "orthographic": 0,
+    "version": 2,
+    "frame_index": 3968,
+    "line": 1789
+   }
+  ],
+  "note": "a change list over the whole run: before frame 600 every call was logged, afterwards only changes; the values hold from frame_index until the next entry"
+ },
+ "tags": {
+  "api": "tag (viewport tags; no local tags, no frame-scoped tags)",
+  "count_per_call": [
+   1
+  ],
+  "chained_extension_seen": false,
+  "list": [
+   {
+    "order": 0,
+    "line": 1726,
+    "viewport": 0,
+    "type": 3,
+    "role": "scaling input colour",
+    "rr_use": "required",
+    "lifetime": 1,
+    "extent": [
+     0,
+     0,
+     1706,
+     960
+    ],
+    "resource": {
+     "kind": 0,
+     "desc_format": 0,
+     "desc_size": [
+      0,
+      0
+     ],
+     "state": 8,
+     "state_names": [
+      "UNORDERED_ACCESS"
+     ],
+     "desc_mips": 0,
+     "desc_layers": 0,
+     "version": 1,
+     "native": {
+      "format": 10,
+      "format_name": "R16G16B16A16_FLOAT",
+      "size": [
+       1706,
+       960
+      ],
+      "dimension": 3,
+      "samples": 1,
+      "flags": 5,
+      "flag_names": [
+       "ALLOW_RENDER_TARGET",
+       "ALLOW_UNORDERED_ACCESS"
+      ],
+      "layers": 1,
+      "mips": 1
+     }
+    }
+   },
+   {
+    "order": 1,
+    "line": 1731,
+    "viewport": 0,
+    "type": 1,
+    "role": "motion vectors",
+    "rr_use": "required",
+    "lifetime": 1,
+    "extent": [
+     0,
+     0,
+     1706,
+     960
+    ],
+    "resource": {
+     "kind": 0,
+     "desc_format": 0,
+     "desc_size": [
+      0,
+      0
+     ],
+     "state": 192,
+     "state_names": [
+      "NON_PIXEL_SHADER_RESOURCE",
+      "PIXEL_SHADER_RESOURCE"
+     ],
+     "desc_mips": 0,
+     "desc_layers": 0,
+     "version": 1,
+     "native": {
+      "format": 10,
+      "format_name": "R16G16B16A16_FLOAT",
+      "size": [
+       1706,
+       960
+      ],
+      "dimension": 3,
+      "samples": 1,
+      "flags": 5,
+      "flag_names": [
+       "ALLOW_RENDER_TARGET",
+       "ALLOW_UNORDERED_ACCESS"
+      ],
+      "layers": 1,
+      "mips": 1
+     }
+    }
+   },
+   {
+    "order": 2,
+    "line": 1734,
+    "viewport": 0,
+    "type": 29,
+    "role": "current-colour-bias hint mask",
+    "rr_use": "not used",
+    "lifetime": 1,
+    "extent": [
+     0,
+     0,
+     1706,
+     960
+    ],
+    "resource": {
+     "kind": 0,
+     "desc_format": 0,
+     "desc_size": [
+      0,
+      0
+     ],
+     "state": 8,
+     "state_names": [
+      "UNORDERED_ACCESS"
+     ],
+     "desc_mips": 0,
+     "desc_layers": 0,
+     "version": 1,
+     "native": {
+      "format": 61,
+      "format_name": "R8_UNORM",
+      "size": [
+       1706,
+       960
+      ],
+      "dimension": 3,
+      "samples": 1,
+      "flags": 5,
+      "flag_names": [
+       "ALLOW_RENDER_TARGET",
+       "ALLOW_UNORDERED_ACCESS"
+      ],
+      "layers": 1,
+      "mips": 1
+     }
+    }
+   },
+   {
+    "order": 3,
+    "line": 1737,
+    "viewport": 0,
+    "type": 0,
+    "role": "hardware depth",
+    "rr_use": "one-of depth",
+    "lifetime": 1,
+    "extent": [
+     0,
+     0,
+     1706,
+     960
+    ],
+    "resource": {
+     "kind": 0,
+     "desc_format": 0,
+     "desc_size": [
+      0,
+      0
+     ],
+     "state": 192,
+     "state_names": [
+      "NON_PIXEL_SHADER_RESOURCE",
+      "PIXEL_SHADER_RESOURCE"
+     ],
+     "desc_mips": 0,
+     "desc_layers": 0,
+     "version": 1,
+     "native": {
+      "format": 39,
+      "format_name": "R32_TYPELESS",
+      "size": [
+       1706,
+       960
+      ],
+      "dimension": 3,
+      "samples": 1,
+      "flags": 2,
+      "flag_names": [
+       "ALLOW_DEPTH_STENCIL"
+      ],
+      "layers": 1,
+      "mips": 1
+     }
+    }
+   },
+   {
+    "order": 4,
+    "line": 1740,
+    "viewport": 0,
+    "type": 39,
+    "role": "colour before particles",
+    "rr_use": "optional: the layer (replaces 51)",
+    "lifetime": 1,
+    "extent": [
+     0,
+     0,
+     1706,
+     960
+    ],
+    "resource": {
+     "kind": 0,
+     "desc_format": 0,
+     "desc_size": [
+      0,
+      0
+     ],
+     "state": 8,
+     "state_names": [
+      "UNORDERED_ACCESS"
+     ],
+     "desc_mips": 0,
+     "desc_layers": 0,
+     "version": 1,
+     "native": {
+      "format": 10,
+      "format_name": "R16G16B16A16_FLOAT",
+      "size": [
+       1706,
+       960
+      ],
+      "dimension": 3,
+      "samples": 1,
+      "flags": 5,
+      "flag_names": [
+       "ALLOW_RENDER_TARGET",
+       "ALLOW_UNORDERED_ACCESS"
+      ],
+      "layers": 1,
+      "mips": 1
+     }
+    }
+   },
+   {
+    "order": 5,
+    "line": 1743,
+    "viewport": 0,
+    "type": 7,
+    "role": "diffuse albedo",
+    "rr_use": "required",
+    "lifetime": 1,
+    "extent": [
+     0,
+     0,
+     1706,
+     960
+    ],
+    "resource": {
+     "kind": 0,
+     "desc_format": 0,
+     "desc_size": [
+      0,
+      0
+     ],
+     "state": 8,
+     "state_names": [
+      "UNORDERED_ACCESS"
+     ],
+     "desc_mips": 0,
+     "desc_layers": 0,
+     "version": 1,
+     "native": {
+      "format": 28,
+      "format_name": "R8G8B8A8_UNORM",
+      "size": [
+       1706,
+       960
+      ],
+      "dimension": 3,
+      "samples": 1,
+      "flags": 5,
+      "flag_names": [
+       "ALLOW_RENDER_TARGET",
+       "ALLOW_UNORDERED_ACCESS"
+      ],
+      "layers": 1,
+      "mips": 1
+     }
+    }
+   },
+   {
+    "order": 6,
+    "line": 1746,
+    "viewport": 0,
+    "type": 8,
+    "role": "specular albedo",
+    "rr_use": "required",
+    "lifetime": 1,
+    "extent": [
+     0,
+     0,
+     1706,
+     960
+    ],
+    "resource": {
+     "kind": 0,
+     "desc_format": 0,
+     "desc_size": [
+      0,
+      0
+     ],
+     "state": 8,
+     "state_names": [
+      "UNORDERED_ACCESS"
+     ],
+     "desc_mips": 0,
+     "desc_layers": 0,
+     "version": 1,
+     "native": {
+      "format": 28,
+      "format_name": "R8G8B8A8_UNORM",
+      "size": [
+       1706,
+       960
+      ],
+      "dimension": 3,
+      "samples": 1,
+      "flags": 5,
+      "flag_names": [
+       "ALLOW_RENDER_TARGET",
+       "ALLOW_UNORDERED_ACCESS"
+      ],
+      "layers": 1,
+      "mips": 1
+     }
+    }
+   },
+   {
+    "order": 7,
+    "line": 1749,
+    "viewport": 0,
+    "type": 14,
+    "role": "normals + roughness",
+    "rr_use": "required with packing 1",
+    "lifetime": 1,
+    "extent": [
+     0,
+     0,
+     1706,
+     960
+    ],
+    "resource": {
+     "kind": 0,
+     "desc_format": 0,
+     "desc_size": [
+      0,
+      0
+     ],
+     "state": 8,
+     "state_names": [
+      "UNORDERED_ACCESS"
+     ],
+     "desc_mips": 0,
+     "desc_layers": 0,
+     "version": 1,
+     "native": {
+      "format": 10,
+      "format_name": "R16G16B16A16_FLOAT",
+      "size": [
+       1706,
+       960
+      ],
+      "dimension": 3,
+      "samples": 1,
+      "flags": 5,
+      "flag_names": [
+       "ALLOW_RENDER_TARGET",
+       "ALLOW_UNORDERED_ACCESS"
+      ],
+      "layers": 1,
+      "mips": 1
+     }
+    }
+   },
+   {
+    "order": 8,
+    "line": 1752,
+    "viewport": 0,
+    "type": 42,
+    "role": "specular hit distance",
+    "rr_use": "optional, read (specular-motion reconstruction)",
+    "lifetime": 1,
+    "extent": [
+     0,
+     0,
+     1706,
+     960
+    ],
+    "resource": {
+     "kind": 0,
+     "desc_format": 0,
+     "desc_size": [
+      0,
+      0
+     ],
+     "state": 8,
+     "state_names": [
+      "UNORDERED_ACCESS"
+     ],
+     "desc_mips": 0,
+     "desc_layers": 0,
+     "version": 1,
+     "native": {
+      "format": 41,
+      "format_name": "R32_FLOAT",
+      "size": [
+       1706,
+       960
+      ],
+      "dimension": 3,
+      "samples": 1,
+      "flags": 5,
+      "flag_names": [
+       "ALLOW_RENDER_TARGET",
+       "ALLOW_UNORDERED_ACCESS"
+      ],
+      "layers": 1,
+      "mips": 1
+     }
+    }
+   },
+   {
+    "order": 9,
+    "line": 1754,
+    "viewport": 0,
+    "type": 40,
+    "role": "colour before transparency",
+    "rr_use": "optional, read",
+    "lifetime": 1,
+    "extent": [
+     0,
+     0,
+     0,
+     0
+    ],
+    "resource": null
+   },
+   {
+    "order": 10,
+    "line": 1757,
+    "viewport": 0,
+    "type": 58,
+    "role": "subsurface-scattering guide",
+    "rr_use": "optional: G1",
+    "lifetime": 1,
+    "extent": [
+     0,
+     0,
+     1706,
+     960
+    ],
+    "resource": {
+     "kind": 0,
+     "desc_format": 0,
+     "desc_size": [
+      0,
+      0
+     ],
+     "state": 8,
+     "state_names": [
+      "UNORDERED_ACCESS"
+     ],
+     "desc_mips": 0,
+     "desc_layers": 0,
+     "version": 1,
+     "native": {
+      "format": 54,
+      "format_name": "R16_FLOAT",
+      "size": [
+       1706,
+       960
+      ],
+      "dimension": 3,
+      "samples": 1,
+      "flags": 5,
+      "flag_names": [
+       "ALLOW_RENDER_TARGET",
+       "ALLOW_UNORDERED_ACCESS"
+      ],
+      "layers": 1,
+      "mips": 1
+     }
+    }
+   },
+   {
+    "order": 11,
+    "line": 1760,
+    "viewport": 0,
+    "type": 4,
+    "role": "scaling output colour",
+    "rr_use": "required (written)",
+    "lifetime": 1,
+    "extent": [
+     0,
+     0,
+     2560,
+     1440
+    ],
+    "resource": {
+     "kind": 0,
+     "desc_format": 0,
+     "desc_size": [
+      0,
+      0
+     ],
+     "state": 8,
+     "state_names": [
+      "UNORDERED_ACCESS"
+     ],
+     "desc_mips": 0,
+     "desc_layers": 0,
+     "version": 1,
+     "native": {
+      "format": 10,
+      "format_name": "R16G16B16A16_FLOAT",
+      "size": [
+       2560,
+       1440
+      ],
+      "dimension": 3,
+      "samples": 1,
+      "flags": 5,
+      "flag_names": [
+       "ALLOW_RENDER_TARGET",
+       "ALLOW_UNORDERED_ACCESS"
+      ],
+      "layers": 1,
+      "mips": 1
+     }
+    }
+   }
+  ]
+ },
+ "rr_options": {
+  "line": 1763,
+  "mode": 3,
+  "output": [
+   2560,
+   1440
+  ],
+  "sharpness": 0.0,
+  "pre_exposure": 1.0,
+  "exposure_scale": 1.0,
+  "hdr": 1,
+  "invert_x": 0,
+  "invert_y": 0,
+  "normal_roughness_packing": 1,
+  "version": 3,
+  "alpha_upscaling": 0,
+  "presets": [
+   0,
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "release_rc": 0,
+  "changed_during_run": false
+ },
+ "evaluate": {
+  "line": 1767,
+  "render": [
+   1706,
+   960
+  ],
+  "output": [
+   2560,
+   1440
+  ],
+  "output_rect": [
+   0,
+   0,
+   2560,
+   1440
+  ],
+  "mode": 3,
+  "options_given": 1,
+  "constants_for_token": 1,
+  "normal_type": 14,
+  "normal_format": 10,
+  "roughness": "in-normal",
+  "colour_format": 10,
+  "output_format": 10,
+  "local_tags": 0,
+  "inputs": [
+   "viewport"
+  ],
+  "command_list": "given",
+  "changed_during_run": false
+ },
+ "probe_upscale": {
+  "line": 1770,
+  "rc": 0,
+  "first_ms": 30
+ },
+ "call_order": {
+  "first_rr_frame": {
+   "tag_seq_first": 25351,
+   "tag_calls": 12,
+   "tag_seq_last_derived": 25362,
+   "new_frame_tokens_between_tags_and_options": 1,
+   "get_function_rr_options_seq": 25364,
+   "rr_options_seq": 25365,
+   "evaluate_seq": 25366
+  },
+  "calls_between_evaluate_1_and_2": 25,
+  "tokens_between_evaluate_1_and_2": 10,
+  "per_frame": [
+   "new-frame-token (first of the frame index)",
+   "constants (frame index N)",
+   "tag x 12 (count=1 each, order of tags.list)",
+   "new-frame-token (same frame index; the token later passed to evaluate)",
+   "get-function(1001, rr-options role) - first RR frame only",
+   "rr-options",
+   "evaluate(1001, token of index N, inputs=[viewport], count=1)"
+  ],
+  "per_frame_note": "constants -> tags -> token -> options -> evaluate is read from the first RR frame (log order and seq numbers); other new-frame-token calls of the same index (about 9 per index in the RR phase) and their exact positions are not logged after frame 600"
+ },
+ "jitter_camera": {
+  "samples": [
+   {
+    "evaluate": 1,
+    "line": 1768,
+    "frame_index": 3654,
+    "jitter": [
+     0.0,
+     -0.1666666716337204
+    ],
+    "v2c20": 0.0,
+    "v2c21": 0.0
+   },
+   {
+    "evaluate": 2,
+    "line": 1773,
+    "frame_index": 3655,
+    "jitter": [
+     -0.25,
+     0.1666666716337204
+    ],
+    "v2c20": 0.0,
+    "v2c21": 0.0
+   }
+  ],
+  "camera_pair_changed_after_evaluate_2": false,
+  "note": "after frame 600 the camera record (and the jitter in it) is logged only when the camera-view-to-clip pair [2][0], [2][1] changes; no change was logged, so the pair stayed 0, 0 for every evaluate and only these jitter samples exist"
+ },
+ "normal_samples": [
+  {
+   "sample": 0,
+   "line": 1775,
+   "evaluate": 60,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -70.71067810058594,
+    -10.0,
+    70.71067810058594,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 1,
+   "line": 1776,
+   "evaluate": 80,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -71.41778564453125,
+    -10.0,
+    71.41778564453125,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 2,
+   "line": 1777,
+   "evaluate": 100,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -72.12489318847656,
+    -10.0,
+    72.12489318847656,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 3,
+   "line": 1778,
+   "evaluate": 120,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -72.83200073242188,
+    -10.0,
+    72.83200073242188,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 4,
+   "line": 1779,
+   "evaluate": 140,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -73.53910827636719,
+    -10.0,
+    73.53910827636719,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 5,
+   "line": 1780,
+   "evaluate": 160,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -74.2462158203125,
+    -10.0,
+    74.2462158203125,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 6,
+   "line": 1781,
+   "evaluate": 180,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -74.95331573486328,
+    -10.0,
+    74.95331573486328,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 7,
+   "line": 1782,
+   "evaluate": 200,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -75.6604232788086,
+    -10.0,
+    75.6604232788086,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 8,
+   "line": 1783,
+   "evaluate": 220,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -76.3675308227539,
+    -10.0,
+    76.3675308227539,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 9,
+   "line": 1784,
+   "evaluate": 240,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -77.07463836669922,
+    -10.0,
+    77.07463836669922,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 10,
+   "line": 1785,
+   "evaluate": 260,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -77.78174591064453,
+    -10.0,
+    77.78174591064453,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 11,
+   "line": 1786,
+   "evaluate": 280,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -78.48885345458984,
+    -10.0,
+    78.48885345458984,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 12,
+   "line": 1787,
+   "evaluate": 300,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -79.19596099853516,
+    -10.0,
+    79.19596099853516,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 13,
+   "line": 1790,
+   "evaluate": 320,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -79.90306854248047,
+    -10.0,
+    79.90306854248047,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 14,
+   "line": 1791,
+   "evaluate": 340,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -80.61017608642578,
+    -10.0,
+    80.61017608642578,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 15,
+   "line": 1793,
+   "evaluate": 360,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -81.3172836303711,
+    -10.0,
+    81.3172836303711,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 16,
+   "line": 1794,
+   "evaluate": 380,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -82.02438354492188,
+    -10.0,
+    82.02438354492188,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 17,
+   "line": 1795,
+   "evaluate": 400,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -82.73149108886719,
+    -10.0,
+    82.73149108886719,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 18,
+   "line": 1796,
+   "evaluate": 420,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -83.4385986328125,
+    -10.0,
+    83.4385986328125,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 19,
+   "line": 1797,
+   "evaluate": 440,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -84.14570617675781,
+    -10.0,
+    84.14570617675781,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 20,
+   "line": 1798,
+   "evaluate": 460,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -84.85281372070312,
+    -10.0,
+    84.85281372070312,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 21,
+   "line": 1799,
+   "evaluate": 480,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -85.55992126464844,
+    -10.0,
+    85.55992126464844,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 22,
+   "line": 1800,
+   "evaluate": 500,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -86.26702880859375,
+    -10.0,
+    86.26702880859375,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 23,
+   "line": 1801,
+   "evaluate": 520,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -86.97413635253906,
+    -10.0,
+    86.97413635253906,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 24,
+   "line": 1802,
+   "evaluate": 540,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -87.68124389648438,
+    -10.0,
+    87.68124389648438,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 25,
+   "line": 1803,
+   "evaluate": 560,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -88.38835144042969,
+    -10.0,
+    88.38835144042969,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 26,
+   "line": 1804,
+   "evaluate": 580,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -89.09545135498047,
+    -10.0,
+    89.09545135498047,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 27,
+   "line": 1805,
+   "evaluate": 600,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -89.80255889892578,
+    -10.0,
+    89.80255889892578,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 28,
+   "line": 1806,
+   "evaluate": 620,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -90.5096664428711,
+    -10.0,
+    90.5096664428711,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  },
+  {
+   "sample": 29,
+   "line": 1807,
+   "evaluate": 640,
+   "type": 14,
+   "format": 10,
+   "origin": [
+    845,
+    472
+   ],
+   "size": "16x16",
+   "mean": [
+    0.5,
+    -0.25,
+    0.0,
+    0.25
+   ],
+   "world_to_view": [
+    0.7071067690849304,
+    0.0,
+    -0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.7071067690849304,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -91.2167739868164,
+    -10.0,
+    91.2167739868164,
+    1.0
+   ],
+   "derived_view_xyz_if_world_space": [
+    0.25,
+    0.0,
+    -0.5
+   ]
+  }
+ ],
+ "totals_at_shutdown": {
+  "allocate": 0,
+  "free": 0,
+  "tag": 53988,
+  "tag-for-frame": 0,
+  "requirements": 0,
+  "version": 0,
+  "get-function": 7,
+  "constants": 8154,
+  "new-frame-token": 62536,
+  "evaluate": 4499,
+  "rr-optimal": 0,
+  "rr-state": 0,
+  "rr-options": 4499,
+  "upgrade-interface": 1,
+  "native-interface": 0,
+  "set-vulkan-info": 0,
+  "rr_evaluates": 4499,
+  "line": 1808
+ },
+ "sessions_ended_by_shutdown": 2,
+ "timing": {
+  "init_ms": [
+   100,
+   100
+  ],
+  "plugin_load_to_first_token_ms": 4000,
+  "first_token_to_first_evaluate_ms": 5000,
+  "evaluate_1_to_2_ms": 100,
+  "ms_per_evaluate_from_normal_samples": {
+   "mean": 17.0,
+   "min": 16.0,
+   "median": 17.0,
+   "max": 30.0,
+   "intervals_over_25ms_per_evaluate": [
+    {
+     "from_evaluate": 180,
+     "ms_per_evaluate": 30.0
+    }
+   ]
+  },
+  "tokens_per_evaluate_from_normal_samples": [
+   9.05,
+   9.15
+  ],
+  "rr_phase_ms": 75000,
+  "rr_phase_ms_per_evaluate_upper_bound": 17.0,
+  "tokens_per_evaluate_rr_phase": 9.083
+ },
+ "rr_phase": {
+  "first_evaluate_frame_index": 3654,
+  "evaluates": 4499,
+  "evaluate_rc_nonzero_records": 0,
+  "frame_index_step_per_evaluate": 1,
+  "constants_after_first_evaluate_derived": 4500,
+  "note": "constants_after_first_evaluate_derived = total constants - first RR frame index (one constants call per frame index before it); it matches evaluates + 1"
+ }
+}

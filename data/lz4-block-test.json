@@ -1,0 +1,144 @@
+{
+ "what": "Test vectors for spec 08 section 4.4 (block decompression). Made by the spec team from its own text with its own encoder; no third-party data. block: hexadecimal input bytes. For result \"ok\" the output must have decoded_length bytes and the given unkeyed SHA-256 (decoded: the hexadecimal output, for short cases). For result \"error\" the decoder must report an error for this block and decoded_length.",
+ "cases": [
+  {
+   "name": "literals only",
+   "block": "6077696e646f77",
+   "decoded_length": 6,
+   "decoded_sha256": "44ff7b02c80d38b26dd6aa31d9470aed81b32e10331a3c994fb1a9945fd847ba",
+   "decoded": "77696e646f77",
+   "result": "ok",
+   "note": ""
+  },
+  {
+   "name": "long literal run (length 528: extension bytes 255, 255, 3)",
+   "block": "f0ffff0354686520636f6e7665727465722072756e7320617420696e7374616c6c2074696d65206f6e2074686520706c6179657227732050432e2049742072656164732074686520706c617965722773206f776e20636f7079206f6620746865206d6f64656c2066696c652e2049742066696e647320746865206c6561726e6564206461746120696e20746861742066696c6520616e642070726f647563657320746865206e616d656420706172616d657465722074656e736f7273206f66206576657279206e6574776f726b207374616765206173206578616374206e756d626572732e204e6f7468696e67206c6561726e656420697320736869707065642e2054686520636f6e766572746572207368697073206f6e6c792061206d61702066696c652c20776869636820686f6c647320706f736974696f6e732c207368617065732c206f7065726174696f6e20636f6465732c2073686170652d6465726976656420636f6e7374616e747320616e64206861736865732e2054686520636f6e7665727465722072756e7320617420696e7374616c6c2074696d65206f6e2074686520706c6179657227732050432e2049742072656164732074686520706c617965722773206f776e20636f7079206f6620746865206d6f64656c2066696c652e2049742066696e647320746865206c6561726e6564206461746120696e20746861742066696c6520616e642070726f6475",
+   "decoded_length": 528,
+   "decoded_sha256": "a3ae9d1bee03d00053a1989dc35ea77a8d457ffeea1803c2c55d0570b3ebd761",
+   "decoded": null,
+   "result": "ok",
+   "note": ""
+  },
+  {
+   "name": "literal run of exactly 15 (extension byte 0)",
+   "block": "f00054686520636f6e7665727465722072",
+   "decoded_length": 15,
+   "decoded_sha256": "7cc1b8bfcb8d126afa4e2bae4595f9ed17780b96d979cb9a065a1818e4aab103",
+   "decoded": "54686520636f6e7665727465722072",
+   "result": "ok",
+   "note": ""
+  },
+  {
+   "name": "literal run of 270 (extension bytes 255, 0)",
+   "block": "f0ff0054686520636f6e7665727465722072756e7320617420696e7374616c6c2074696d65206f6e2074686520706c6179657227732050432e2049742072656164732074686520706c617965722773206f776e20636f7079206f6620746865206d6f64656c2066696c652e2049742066696e647320746865206c6561726e6564206461746120696e20746861742066696c6520616e642070726f647563657320746865206e616d656420706172616d657465722074656e736f7273206f66206576657279206e6574776f726b207374616765206173206578616374206e756d626572732e204e6f7468696e67206c6561726e656420697320736869707065642e2054686520636f6e766572746572207368",
+   "decoded_length": 270,
+   "decoded_sha256": "9932aea64a87c8113f2787cede20a5178d0c154f0a2a05638e553d1812f30fc4",
+   "decoded": null,
+   "result": "ok",
+   "note": ""
+  },
+  {
+   "name": "overlapping match, distance 1, length 274 (extension bytes 255, 0), then literals",
+   "block": "1f610100ff003078797a",
+   "decoded_length": 278,
+   "decoded_sha256": "0c49e8f42a0e7d25fe4a48037629873448411c8b321549f1b87b3143d0ae2bd3",
+   "decoded": null,
+   "result": "ok",
+   "note": ""
+  },
+  {
+   "name": "overlapping match, distance 3, length 19 (extension byte 0)",
+   "block": "3f616263030000507461696c21",
+   "decoded_length": 27,
+   "decoded_sha256": "fce85e282fb07af2cd86bc5573a50cb9810555e1cfad42a2f35f6dfe42dfb986",
+   "decoded": "616263616263616263616263616263616263616263617461696c21",
+   "result": "ok",
+   "note": ""
+  },
+  {
+   "name": "match of minimum length 4",
+   "block": "a0303132333435363738390a00502d656e642d",
+   "decoded_length": 19,
+   "decoded_sha256": "a5ea8be093869e253a86a5151f8e3867deda781cad0f03d4bbf9d09a228c211a",
+   "decoded": "30313233343536373839303132332d656e642d",
+   "result": "ok",
+   "note": ""
+  },
+  {
+   "name": "block that ends directly after a match (no final literals); accepted",
+   "block": "44616263640400",
+   "decoded_length": 12,
+   "decoded_sha256": "887f2749b07e559d140605a4b9de9af5721e2accad06fade91301f0410ad5cdf",
+   "decoded": "616263646162636461626364",
+   "result": "ok",
+   "note": ""
+  },
+  {
+   "name": "sequence with no literals before a match",
+   "block": "407778797a04000208005066696e616c",
+   "decoded_length": 19,
+   "decoded_sha256": "06c2e83e447c3819f37298cdc8f1797f3bd157bb526653a519dcf255b995bc96",
+   "decoded": "7778797a7778797a7778797a777866696e616c",
+   "result": "ok",
+   "note": ""
+  },
+  {
+   "name": "our own text, greedy encoder (1618 -> 353 bytes)",
+   "block": "fa3054686520636f6e7665727465722072756e7320617420696e7374616c6c2074696d65206f6e2074686520706c6179657227732050432e2049742072656164731a00b16f776e20636f7079206f661900a16d6f64656c2066696c6532003366696e3200e06c6561726e65642064617461206960002161742800c220616e642070726f647563655d00c06e616d656420706172616d65a3007074656e736f72736300f41f6576657279206e6574776f726b207374616765206173206578616374206e756d626572732e204e6f7468696e67207400ca697320736869707065642e20fe00001700c173206f6e6c792061206d61709200f0172c20776869636820686f6c647320706f736974696f6e732c207368617065732c206f7065726114004020636f641100011900802d646572697665645d01617374616e7473db006c68617368657379000f7701ffffcf3f6162630300ffcb4020656e64910550746578742e",
+   "decoded_length": 1618,
+   "decoded_sha256": "550be7d6a55df4005f8a93dbafd29236c5f77efe83c68fcece35d2f1920c7d41",
+   "decoded": null,
+   "result": "ok",
+   "note": ""
+  },
+  {
+   "name": "distance 0",
+   "block": "406162636400005066696e616c",
+   "decoded_length": 13,
+   "result": "error",
+   "note": "distance 0 (bad distance)"
+  },
+  {
+   "name": "distance beyond the output",
+   "block": "406162636405005066696e616c",
+   "decoded_length": 13,
+   "result": "error",
+   "note": "distance 5 with 4 bytes written (bad distance)"
+  },
+  {
+   "name": "input ends inside a literal run",
+   "block": "a030313233",
+   "decoded_length": 19,
+   "result": "error",
+   "note": "truncated (input ends early)"
+  },
+  {
+   "name": "input ends inside the distance",
+   "block": "a0303132333435363738390a",
+   "decoded_length": 19,
+   "result": "error",
+   "note": "truncated (input ends early)"
+  },
+  {
+   "name": "input ends inside a length extension",
+   "block": "1f610100",
+   "decoded_length": 275,
+   "result": "error",
+   "note": "truncated (input ends early)"
+  },
+  {
+   "name": "decoded_length too small",
+   "block": "a0303132333435363738390a00502d656e642d",
+   "decoded_length": 18,
+   "result": "error",
+   "note": "the block decodes to 19 bytes (output too long)"
+  },
+  {
+   "name": "decoded_length too large",
+   "block": "a0303132333435363738390a00502d656e642d",
+   "decoded_length": 20,
+   "result": "error",
+   "note": "the block decodes to 19 bytes (wrong output size)"
+  }
+ ]
+}

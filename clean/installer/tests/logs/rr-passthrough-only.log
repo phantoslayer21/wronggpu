@@ -1,0 +1,8 @@
+21:00:00.000 load: process 4200 attached C:\Games\Example\plugins\WrongGPU-RR.asi (hook mode)
+21:00:04.800 runtime: create instance 1: output 1920x1080, render 1280x720, mode 3, packing 1, hdr 1, depth inverted 1, jittered motion 0, hardware depth, alpha upscaling 0, history 1920x1080, arena 900 MiB (state 300 MiB, work 600 MiB)
+21:00:04.810 runtime: instance 1 evaluate failed before any pass: runtime not ready
+21:00:04.811 rr: evaluate 1: runtime returned 13; colour passed through, success reported, reset on the next evaluate
+21:00:04.830 runtime: instance 1 evaluate failed before any pass: runtime not ready
+21:00:04.850 runtime: instance 1 evaluate failed before any pass: runtime not ready
+21:02:10.000 runtime: destroy instance 1 after 250 frames (250 failed)
+21:02:10.400 diag: summary (process exit): support queries 4 (RR: yes 1 / no 0), RR lookups 1, RR instances created 1, RR evaluates 250

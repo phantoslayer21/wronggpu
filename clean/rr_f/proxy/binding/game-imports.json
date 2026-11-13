@@ -1,0 +1,73 @@
+{
+ "schema": "wronggpu.rr-proxy.game-imports.v1",
+ "comment": "Names each supported game imports from the interposer library (spec 60-63 annex A9.2): static import, all by name, no ordinal imports, no delay load. Every name must be exported by the proxy built for that game's interposer version.",
+ "games": [
+  {
+   "game": "Cyberpunk 2077",
+   "interposer_version": "2.7.1",
+   "sdk_version_value": "0x000200070001fedc",
+   "imports": [
+    "slEvaluateFeature",
+    "slGetFeatureFunction",
+    "slGetNewFrameToken",
+    "slInit",
+    "slIsFeatureLoaded",
+    "slIsFeatureSupported",
+    "slSetConstants",
+    "slSetD3DDevice",
+    "slSetFeatureLoaded",
+    "slSetTag",
+    "slShutdown",
+    "slUpgradeInterface",
+    "CreateDXGIFactory",
+    "CreateDXGIFactory2",
+    "D3D11CreateDeviceAndSwapChain",
+    "D3D12CreateDevice",
+    "D3D12GetDebugInterface",
+    "D3D12SerializeRootSignature",
+    "D3D12SerializeVersionedRootSignature"
+   ]
+  },
+  {
+   "game": "Resident Evil Requiem",
+   "interposer_version": "2.8.0",
+   "sdk_version_value": "0x000200080000fedc",
+   "comment": "no import entry: the exe loads the interposer at run time and resolves these names with get-procedure-address (spec answer SL-2.8-RE-Requiem); tag-for-frame only, no plain set-tag",
+   "imports": [
+    "slEvaluateFeature",
+    "slGetFeatureFunction",
+    "slGetFeatureRequirements",
+    "slGetFeatureVersion",
+    "slGetNewFrameToken",
+    "slInit",
+    "slIsFeatureLoaded",
+    "slIsFeatureSupported",
+    "slSetConstants",
+    "slSetD3DDevice",
+    "slSetFeatureLoaded",
+    "slSetTagForFrame",
+    "slShutdown"
+   ]
+  },
+  {
+   "game": "Crimson Desert",
+   "interposer_version": "2.14.1",
+   "sdk_version_value": "0x0002000b0001fedc",
+   "imports": [
+    "slEvaluateFeature",
+    "slGetFeatureFunction",
+    "slGetFeatureRequirements",
+    "slGetFeatureVersion",
+    "slGetNewFrameToken",
+    "slInit",
+    "slIsFeatureLoaded",
+    "slIsFeatureSupported",
+    "slSetConstants",
+    "slSetD3DDevice",
+    "slSetFeatureLoaded",
+    "slSetTag",
+    "slShutdown"
+   ]
+  }
+ ]
+}

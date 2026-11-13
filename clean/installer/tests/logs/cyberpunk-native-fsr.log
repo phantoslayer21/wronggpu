@@ -1,0 +1,28 @@
+[19:21:56.952 1000] [amd_fidelityfx_dx12] ==== session start: Cyberpunk2077.exe (process 1000) ====
+[19:25:06.066 1001] [amd_fidelityfx_dx12] ==== session start: Cyberpunk2077.exe (process 1001) ====
+[19:25:06.067 1001] [amd_fidelityfx_dx12] settings: sr_model=M (ini), sr_fallback_to_amd=1 (default), entry_source=versions (default)
+[19:25:06.067 1001] [amd_fidelityfx_dx12] settings: upscaler=network runtime_dll=wronggpu_runtime.dll fallback_to_amd=1 create_wait_ms=3000 context_park_ms=3000 view=upscale;filter=bilinear;jitter_compensation=1;warp_weight=0.9;debug_gain=4;split_test=0;model=M;executor=dx12;ready_wait=fence jitter_sign=(1,1) motion_sign=(1,1) fsr3_route=auto fsr3_amd_first=auto d3d12_hooks=auto split_timeout_ms=2000 log_dispatches=
+[19:25:06.067 1001] [amd_fidelityfx_dx12] hosted in OptiScaler's custom upscaler folder "WrongGPU": the entry "WrongGPU" of its main upscaler list; WrongGPU's choices (SR models, RR modes: 1 entries) are its versions; WrongGPU's overlay and compare key are off
+[19:25:06.070 1001] [amd_fidelityfx_dx12] #3 ffxCreateContext CREATE_UPSCALE{flags=HDR|DEPTH_INVERTED|AUTO_EXPOSURE maxRenderSize=1920x1080 maxUpscaleSize=1920x1080 fpMessage=null} -> CREATE_BACKEND_DX12{device=0x10000000000} -> OVERRIDE_VERSION{versionId=0x5747000000000001} memCb=null
+[19:25:06.070 1001] [amd_fidelityfx_dx12] #3 the host chose WrongGPU Model M (0x5747000000000001): settings: sr_model=M (menu)
+[19:25:06.389 1001] [amd_fidelityfx_dx12]   U1 upscaler info: copy paths requested: output_copy (each frame falls back to the pass if the formats do not allow a copy; path changes are logged)
+[19:25:06.389 1001] [amd_fidelityfx_dx12]   U1 upscaler info: network runtime ready: executor dx12, sync inline, max render 1920x1080, output 1920x1080, flags 0x7, GPU memory 400 MiB, D3D12 device "AMD Radeon RX 9070 XT (native D3D12)" (the game's; native D3D12: arena 400 MiB; no HIP runtime or fallback; timestamp frequency 100000000 Hz; borrowed device/queue; exact FP16/FP8 driver-channel probe passed; direct resou
+[support] WG-HOOK-TABLE incident=1001-134000000000000000-amd_fidelityfx_dx12-1; collect logs with WrongGPU Setup (metadata, not a GPU replay)
+[19:25:06.399 1001] [amd_fidelityfx_dx12] d3d12 hooks: installed (device 1, queue 1, command list 3 vtables); split timeout 2000 ms. Command lists already being recorded are tracked from their next Reset; until then a split of them answers WG_ERROR_NOT_READY
+[19:25:06.402 1001] [amd_fidelityfx_dx12] #4 WrongGPU frame: frame=0 R=1280x720 at (0,0) O=1920x1080 jitter=(-0.245122,0.43016) motion=raw*(1280,720)+(0,0) exposure=compute pre_exposure=1 reset=1
+[19:25:06.402 1001] [amd_fidelityfx_dx12] #4 -> OK (WrongGPU)
+[19:25:06.405 1001] [amd_fidelityfx_dx12] #5 WrongGPU frame: frame=1 R=1280x720 at (0,0) O=1920x1080 jitter=(-0.490245,-0.139681) motion=raw*(1280,720)+(0,0) exposure=compute pre_exposure=1 reset=0
+[19:25:06.406 1001] [amd_fidelityfx_dx12] #5 -> OK (WrongGPU)
+[19:25:06.412 1001] [amd_fidelityfx_dx12] #6 WrongGPU frame: frame=2 R=1280x720 at (0,0) O=1920x1080 jitter=(0.264633,0.290479) motion=raw*(1280,720)+(0,0) exposure=compute pre_exposure=1 reset=0
+[19:25:06.414 1001] [amd_fidelityfx_dx12] #6 -> OK (WrongGPU)
+[19:32:04.694 1001] [amd_fidelityfx_dx12] #58123 ffxCreateContext CREATE_UPSCALE{flags=HDR|DEPTH_INVERTED|AUTO_EXPOSURE maxRenderSize=1920x1080 maxUpscaleSize=1920x1080 fpMessage=null} -> CREATE_BACKEND_DX12{device=0x10000000000} -> OVERRIDE_VERSION{versionId=0x5747000000000001} memCb=null
+[19:32:04.694 1001] [amd_fidelityfx_dx12] #58123 the host chose WrongGPU Model M (0x5747000000000001): settings: sr_model=M (menu)
+[19:32:04.978 1001] [amd_fidelityfx_dx12]   U2 upscaler info: copy paths requested: output_copy (each frame falls back to the pass if the formats do not allow a copy; path changes are logged)
+[19:32:04.978 1001] [amd_fidelityfx_dx12]   U2 upscaler info: network runtime ready: executor dx12, sync inline, max render 1920x1080, output 1920x1080, flags 0x7, GPU memory 400 MiB, D3D12 device "AMD Radeon RX 9070 XT (native D3D12)" (the game's; native D3D12: arena 400 MiB; no HIP runtime or fallback; timestamp frequency 100000000 Hz; borrowed device/queue; exact FP16/FP8 driver-channel probe passed; direct resou
+[19:32:04.981 1001] [amd_fidelityfx_dx12] #58124 WrongGPU frame: frame=0 R=1920x1080 at (0,0) O=1920x1080 jitter=(-0.0195312,0.0195312) motion=raw*(1920,1080)+(0,0) exposure=compute pre_exposure=1 reset=1
+[19:32:04.981 1001] [amd_fidelityfx_dx12] #58124 -> OK (WrongGPU)
+[19:32:04.984 1001] [amd_fidelityfx_dx12] #58125 WrongGPU frame: frame=1 R=1920x1080 at (0,0) O=1920x1080 jitter=(-0.265625,0.449219) motion=raw*(1920,1080)+(0,0) exposure=compute pre_exposure=1 reset=0
+[19:32:04.984 1001] [amd_fidelityfx_dx12] #58125 -> OK (WrongGPU)
+[19:32:04.991 1001] [amd_fidelityfx_dx12] #58126 WrongGPU frame: frame=2 R=1920x1080 at (0,0) O=1920x1080 jitter=(0.492188,-0.117188) motion=raw*(1920,1080)+(0,0) exposure=compute pre_exposure=1 reset=0
+[19:32:04.992 1001] [amd_fidelityfx_dx12] #58126 -> OK (WrongGPU)
+[19:32:05.014 1001] [amd_fidelityfx_dx12] #58128 -> OK (U1 destroyed after 58117 dispatches; its upscaler is destroyed now, not parked: another upscaler context is in use (the host switched upscalers))

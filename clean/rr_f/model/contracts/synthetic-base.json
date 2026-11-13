@@ -1,0 +1,3031 @@
+{
+  "contract_id": "wronggpu.rr_f.prepared_known_subset.v1",
+  "request": "synthetic_known_subset",
+  "provenance": "original_synthetic",
+  "complete_player_model": false,
+  "source_frontend": {
+    "kind": "synthetic_IN0_boundary",
+    "supplies": [
+      "IN0 block x e4m3 [Ht,Wt,32]",
+      "IN0 hold f16 [Ht,Wt,4]"
+    ],
+    "claims_original_frontend": false
+  },
+  "tensors": [
+    {
+      "id": "IN0.Wq",
+      "shape": [
+        2,
+        32,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "IN0.Wv",
+      "shape": [
+        2,
+        32,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "IN0.Tb",
+      "shape": [
+        2,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "IN0.Wo",
+      "shape": [
+        2,
+        32,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "IN0.bo",
+      "shape": [
+        32
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "IN0.W1",
+      "shape": [
+        32,
+        128
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "IN0.b1",
+      "shape": [
+        128
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "IN0.W2",
+      "shape": [
+        128,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "IN0.b2",
+      "shape": [
+        32
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "IN0.Wh",
+      "shape": [
+        32,
+        3
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "state_logit"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "IN0.bh",
+      "shape": [
+        3
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "state_logit"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E1.Wq",
+      "shape": [
+        2,
+        64,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E1.Wv",
+      "shape": [
+        2,
+        64,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E1.Tb",
+      "shape": [
+        2,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E1.Wo",
+      "shape": [
+        2,
+        32,
+        64
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E1.bo",
+      "shape": [
+        64
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E1.W1",
+      "shape": [
+        64,
+        256
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E1.b1",
+      "shape": [
+        256
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E1.W2",
+      "shape": [
+        256,
+        64
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E1.b2",
+      "shape": [
+        64
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E1.Wm",
+      "shape": [
+        256,
+        96
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "child_then_channel",
+        "next_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E1.bm",
+      "shape": [
+        96
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "next_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E1.Wa",
+      "shape": [
+        128,
+        64
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "grouped_input_channel",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E1.ba",
+      "shape": [
+        64
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E1.Wh",
+      "shape": [
+        64,
+        3
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "state_logit"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E1.bh",
+      "shape": [
+        3
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "state_logit"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E2.Wq",
+      "shape": [
+        4,
+        96,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E2.Wv",
+      "shape": [
+        4,
+        96,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E2.Tb",
+      "shape": [
+        4,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E2.Wo",
+      "shape": [
+        4,
+        32,
+        96
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E2.bo",
+      "shape": [
+        96
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E2.W1",
+      "shape": [
+        96,
+        384
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E2.b1",
+      "shape": [
+        384
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E2.W2",
+      "shape": [
+        384,
+        96
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E2.b2",
+      "shape": [
+        96
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E2.Wm",
+      "shape": [
+        384,
+        128
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "child_then_channel",
+        "next_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E2.bm",
+      "shape": [
+        128
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "next_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E2.Wh",
+      "shape": [
+        96,
+        3
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "state_logit"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E2.bh",
+      "shape": [
+        3
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "state_logit"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E3.Wq",
+      "shape": [
+        4,
+        128,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E3.Wv",
+      "shape": [
+        4,
+        128,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E3.Tb",
+      "shape": [
+        4,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E3.Wo",
+      "shape": [
+        4,
+        32,
+        128
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E3.bo",
+      "shape": [
+        128
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E3.W1",
+      "shape": [
+        128,
+        512
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E3.b1",
+      "shape": [
+        512
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E3.W2",
+      "shape": [
+        512,
+        128
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E3.b2",
+      "shape": [
+        128
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E3.Wm",
+      "shape": [
+        512,
+        160
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "child_then_channel",
+        "next_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E3.bm",
+      "shape": [
+        160
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "next_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E3.Wh",
+      "shape": [
+        128,
+        3
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "state_logit"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E3.bh",
+      "shape": [
+        3
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "state_logit"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E4.Wq",
+      "shape": [
+        8,
+        160,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E4.Wv",
+      "shape": [
+        8,
+        160,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E4.Tb",
+      "shape": [
+        8,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E4.Wo",
+      "shape": [
+        8,
+        32,
+        160
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E4.bo",
+      "shape": [
+        160
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E4.W1",
+      "shape": [
+        160,
+        640
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E4.b1",
+      "shape": [
+        640
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E4.W2",
+      "shape": [
+        640,
+        160
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E4.b2",
+      "shape": [
+        160
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E4.Wm",
+      "shape": [
+        640,
+        160
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "child_then_channel",
+        "next_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E4.bm",
+      "shape": [
+        160
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "next_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E4.Wh",
+      "shape": [
+        160,
+        3
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "state_logit"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E4.bh",
+      "shape": [
+        3
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "state_logit"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E5.Wq",
+      "shape": [
+        8,
+        160,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E5.Wv",
+      "shape": [
+        8,
+        160,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E5.Tb",
+      "shape": [
+        8,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E5.Wo",
+      "shape": [
+        8,
+        32,
+        160
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E5.bo",
+      "shape": [
+        160
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E5.W1",
+      "shape": [
+        160,
+        640
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E5.b1",
+      "shape": [
+        640
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E5.W2",
+      "shape": [
+        640,
+        160
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E5.b2",
+      "shape": [
+        160
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "E5.Wh",
+      "shape": [
+        160,
+        3
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "state_logit"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "E5.bh",
+      "shape": [
+        3
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "state_logit"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D4-F.Wq",
+      "shape": [
+        8,
+        160,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D4-F.Wv",
+      "shape": [
+        8,
+        160,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D4-F.Tb",
+      "shape": [
+        8,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D4-F.Wo",
+      "shape": [
+        8,
+        32,
+        160
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D4-F.bo",
+      "shape": [
+        160
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D4-F.W1",
+      "shape": [
+        160,
+        640
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D4-F.b1",
+      "shape": [
+        640
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D4-F.W2",
+      "shape": [
+        640,
+        160
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D4-F.b2",
+      "shape": [
+        160
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D4-F.Wup",
+      "shape": [
+        160,
+        640
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "coarse_channel",
+        "child_then_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D4-F.bup",
+      "shape": [
+        640
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "child_then_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D4-R.Wq",
+      "shape": [
+        8,
+        160,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D4-R.Wv",
+      "shape": [
+        8,
+        160,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D4-R.Tb",
+      "shape": [
+        8,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D4-R.Wo",
+      "shape": [
+        8,
+        32,
+        160
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D4-R.bo",
+      "shape": [
+        160
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D4-R.W1",
+      "shape": [
+        160,
+        640
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D4-R.b1",
+      "shape": [
+        640
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D4-R.W2",
+      "shape": [
+        640,
+        160
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D4-R.b2",
+      "shape": [
+        160
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D4-R.Wh",
+      "shape": [
+        160,
+        4
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "state_logit"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D4-R.bh",
+      "shape": [
+        4
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "state_logit"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D3-F.Wq",
+      "shape": [
+        4,
+        128,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D3-F.Wv",
+      "shape": [
+        4,
+        128,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D3-F.Tb",
+      "shape": [
+        4,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D3-F.Wo",
+      "shape": [
+        4,
+        32,
+        128
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D3-F.bo",
+      "shape": [
+        128
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D3-F.W1",
+      "shape": [
+        128,
+        512
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D3-F.b1",
+      "shape": [
+        512
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D3-F.W2",
+      "shape": [
+        512,
+        128
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D3-F.b2",
+      "shape": [
+        128
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D3-F.Wup",
+      "shape": [
+        160,
+        512
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "coarse_channel",
+        "child_then_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D3-F.bup",
+      "shape": [
+        512
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "child_then_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D3-R.Wq",
+      "shape": [
+        4,
+        128,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D3-R.Wv",
+      "shape": [
+        4,
+        128,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D3-R.Tb",
+      "shape": [
+        4,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D3-R.Wo",
+      "shape": [
+        4,
+        32,
+        128
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D3-R.bo",
+      "shape": [
+        128
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D3-R.W1",
+      "shape": [
+        128,
+        512
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D3-R.b1",
+      "shape": [
+        512
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D3-R.W2",
+      "shape": [
+        512,
+        128
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D3-R.b2",
+      "shape": [
+        128
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D3-R.Wh",
+      "shape": [
+        128,
+        4
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "state_logit"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D3-R.bh",
+      "shape": [
+        4
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "state_logit"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D2-F.Wq",
+      "shape": [
+        4,
+        96,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D2-F.Wv",
+      "shape": [
+        4,
+        96,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D2-F.Tb",
+      "shape": [
+        4,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D2-F.Wo",
+      "shape": [
+        4,
+        32,
+        96
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D2-F.bo",
+      "shape": [
+        96
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D2-F.W1",
+      "shape": [
+        96,
+        384
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D2-F.b1",
+      "shape": [
+        384
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D2-F.W2",
+      "shape": [
+        384,
+        96
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D2-F.b2",
+      "shape": [
+        96
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D2-F.Wup",
+      "shape": [
+        128,
+        384
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "coarse_channel",
+        "child_then_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D2-F.bup",
+      "shape": [
+        384
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "child_then_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D2-R.Wq",
+      "shape": [
+        4,
+        96,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D2-R.Wv",
+      "shape": [
+        4,
+        96,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D2-R.Tb",
+      "shape": [
+        4,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D2-R.Wo",
+      "shape": [
+        4,
+        32,
+        96
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D2-R.bo",
+      "shape": [
+        96
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D2-R.W1",
+      "shape": [
+        96,
+        384
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D2-R.b1",
+      "shape": [
+        384
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D2-R.W2",
+      "shape": [
+        384,
+        96
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D2-R.b2",
+      "shape": [
+        96
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D2-R.Wh",
+      "shape": [
+        96,
+        4
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "state_logit"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D2-R.bh",
+      "shape": [
+        4
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "state_logit"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D1-F.Wq",
+      "shape": [
+        2,
+        64,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D1-F.Wv",
+      "shape": [
+        2,
+        64,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D1-F.Tb",
+      "shape": [
+        2,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D1-F.Wo",
+      "shape": [
+        2,
+        32,
+        64
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D1-F.bo",
+      "shape": [
+        64
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D1-F.W1",
+      "shape": [
+        64,
+        256
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D1-F.b1",
+      "shape": [
+        256
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D1-F.W2",
+      "shape": [
+        256,
+        64
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D1-F.b2",
+      "shape": [
+        64
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D1-F.Wup",
+      "shape": [
+        96,
+        256
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "coarse_channel",
+        "child_then_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D1-F.bup",
+      "shape": [
+        256
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "child_then_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D1-R.Wq",
+      "shape": [
+        2,
+        64,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D1-R.Wv",
+      "shape": [
+        2,
+        64,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D1-R.Tb",
+      "shape": [
+        2,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D1-R.Wo",
+      "shape": [
+        2,
+        32,
+        64
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D1-R.bo",
+      "shape": [
+        64
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D1-R.W1",
+      "shape": [
+        64,
+        256
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D1-R.b1",
+      "shape": [
+        256
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D1-R.W2",
+      "shape": [
+        256,
+        64
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D1-R.b2",
+      "shape": [
+        64
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D1-R.Wh",
+      "shape": [
+        64,
+        4
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "state_logit"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D1-R.bh",
+      "shape": [
+        4
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "state_logit"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D0-F.Wq",
+      "shape": [
+        2,
+        32,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D0-F.Wv",
+      "shape": [
+        2,
+        32,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D0-F.Tb",
+      "shape": [
+        2,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D0-F.Wo",
+      "shape": [
+        2,
+        32,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D0-F.bo",
+      "shape": [
+        32
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D0-F.W1",
+      "shape": [
+        32,
+        128
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D0-F.b1",
+      "shape": [
+        128
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D0-F.W2",
+      "shape": [
+        128,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D0-F.b2",
+      "shape": [
+        32
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D0-F.Wup",
+      "shape": [
+        64,
+        128
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "coarse_channel",
+        "child_then_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D0-F.bup",
+      "shape": [
+        128
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "child_then_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D0-R.Wq",
+      "shape": [
+        2,
+        32,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D0-R.Wv",
+      "shape": [
+        2,
+        32,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "input_channel",
+        "head_feature"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D0-R.Tb",
+      "shape": [
+        2,
+        12,
+        16,
+        16
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "head",
+        "stored_block",
+        "query_inner",
+        "key_inner"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D0-R.Wo",
+      "shape": [
+        2,
+        32,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "head",
+        "head_feature",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D0-R.bo",
+      "shape": [
+        32
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D0-R.W1",
+      "shape": [
+        32,
+        128
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "input_channel",
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D0-R.b1",
+      "shape": [
+        128
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "mlp_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "D0-R.W2",
+      "shape": [
+        128,
+        32
+      ],
+      "precision": "e4m3",
+      "logical_axes": [
+        "mlp_channel",
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "00"
+    },
+    {
+      "id": "D0-R.b2",
+      "shape": [
+        32
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "output_channel"
+      ],
+      "synthetic_fill_bits": "0000"
+    },
+    {
+      "id": "IN0.g",
+      "shape": [
+        1
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "scalar"
+      ],
+      "synthetic_fill_bits": "3c00"
+    },
+    {
+      "id": "E1.g",
+      "shape": [
+        1
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "scalar"
+      ],
+      "synthetic_fill_bits": "3c00"
+    },
+    {
+      "id": "E2.g",
+      "shape": [
+        1
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "scalar"
+      ],
+      "synthetic_fill_bits": "3c00"
+    },
+    {
+      "id": "E3.g",
+      "shape": [
+        1
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "scalar"
+      ],
+      "synthetic_fill_bits": "3c00"
+    },
+    {
+      "id": "E4.g",
+      "shape": [
+        1
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "scalar"
+      ],
+      "synthetic_fill_bits": "3c00"
+    },
+    {
+      "id": "E5.g",
+      "shape": [
+        1
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "scalar"
+      ],
+      "synthetic_fill_bits": "3c00"
+    },
+    {
+      "id": "D4.g",
+      "shape": [
+        1
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "scalar"
+      ],
+      "synthetic_fill_bits": "3c00"
+    },
+    {
+      "id": "D3.g",
+      "shape": [
+        1
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "scalar"
+      ],
+      "synthetic_fill_bits": "3c00"
+    },
+    {
+      "id": "D2.g",
+      "shape": [
+        1
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "scalar"
+      ],
+      "synthetic_fill_bits": "3c00"
+    },
+    {
+      "id": "D1.g",
+      "shape": [
+        1
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "scalar"
+      ],
+      "synthetic_fill_bits": "3c00"
+    },
+    {
+      "id": "D0.g",
+      "shape": [
+        1
+      ],
+      "precision": "f16",
+      "logical_axes": [
+        "scalar"
+      ],
+      "synthetic_fill_bits": "3c00"
+    },
+    {
+      "id": "D0-R.s1",
+      "shape": [
+        1
+      ],
+      "precision": "f32",
+      "logical_axes": [
+        "scalar"
+      ],
+      "synthetic_fill_bits": "3f800000"
+    },
+    {
+      "id": "D0-R.s2",
+      "shape": [
+        1
+      ],
+      "precision": "f32",
+      "logical_axes": [
+        "scalar"
+      ],
+      "synthetic_fill_bits": "3f800000"
+    }
+  ],
+  "symbols": [
+    {
+      "id": "IN0.ra",
+      "precision": "f16",
+      "bits": "3800"
+    },
+    {
+      "id": "IN0.m",
+      "precision": "f16",
+      "bits": "3400"
+    },
+    {
+      "id": "E1.ra",
+      "precision": "f16",
+      "bits": "3800"
+    },
+    {
+      "id": "E1.m",
+      "precision": "f16",
+      "bits": "3400"
+    },
+    {
+      "id": "E2.ra",
+      "precision": "f16",
+      "bits": "3800"
+    },
+    {
+      "id": "E2.m",
+      "precision": "f16",
+      "bits": "3400"
+    },
+    {
+      "id": "E3.ra",
+      "precision": "f16",
+      "bits": "3800"
+    },
+    {
+      "id": "E3.m",
+      "precision": "f16",
+      "bits": "3400"
+    },
+    {
+      "id": "E4.ra",
+      "precision": "f16",
+      "bits": "3800"
+    },
+    {
+      "id": "E4.m",
+      "precision": "f16",
+      "bits": "3400"
+    },
+    {
+      "id": "E5.ra",
+      "precision": "f16",
+      "bits": "3800"
+    },
+    {
+      "id": "E5.m",
+      "precision": "f16",
+      "bits": "3400"
+    },
+    {
+      "id": "D4-F.ra",
+      "precision": "f16",
+      "bits": "3800"
+    },
+    {
+      "id": "D4-F.m",
+      "precision": "f16",
+      "bits": "3400"
+    },
+    {
+      "id": "D4-R.ra",
+      "precision": "f16",
+      "bits": "3800"
+    },
+    {
+      "id": "D4-R.m",
+      "precision": "f16",
+      "bits": "3400"
+    },
+    {
+      "id": "D3-F.ra",
+      "precision": "f16",
+      "bits": "3800"
+    },
+    {
+      "id": "D3-F.m",
+      "precision": "f16",
+      "bits": "3400"
+    },
+    {
+      "id": "D3-R.ra",
+      "precision": "f16",
+      "bits": "3800"
+    },
+    {
+      "id": "D3-R.m",
+      "precision": "f16",
+      "bits": "3400"
+    },
+    {
+      "id": "D2-F.ra",
+      "precision": "f16",
+      "bits": "3800"
+    },
+    {
+      "id": "D2-F.m",
+      "precision": "f16",
+      "bits": "3400"
+    },
+    {
+      "id": "D2-R.ra",
+      "precision": "f16",
+      "bits": "3800"
+    },
+    {
+      "id": "D2-R.m",
+      "precision": "f16",
+      "bits": "3400"
+    },
+    {
+      "id": "D1-F.ra",
+      "precision": "f16",
+      "bits": "3800"
+    },
+    {
+      "id": "D1-F.m",
+      "precision": "f16",
+      "bits": "3400"
+    },
+    {
+      "id": "D1-R.ra",
+      "precision": "f16",
+      "bits": "3800"
+    },
+    {
+      "id": "D1-R.m",
+      "precision": "f16",
+      "bits": "3400"
+    },
+    {
+      "id": "D0-F.ra",
+      "precision": "f16",
+      "bits": "3800"
+    },
+    {
+      "id": "D0-F.m",
+      "precision": "f16",
+      "bits": "3400"
+    },
+    {
+      "id": "D0-R.ra",
+      "precision": "f16",
+      "bits": "3800"
+    },
+    {
+      "id": "D0-R.m",
+      "precision": "f16",
+      "bits": "3400"
+    },
+    {
+      "id": "D0.f",
+      "precision": "f16",
+      "bits": "3a00"
+    },
+    {
+      "id": "D1.f",
+      "precision": "f16",
+      "bits": "3a00"
+    },
+    {
+      "id": "D2.f",
+      "precision": "f16",
+      "bits": "3a00"
+    },
+    {
+      "id": "D3.f",
+      "precision": "f16",
+      "bits": "3a00"
+    },
+    {
+      "id": "D4.f",
+      "precision": "f16",
+      "bits": "3a00"
+    },
+    {
+      "id": "A_SCALE",
+      "precision": "f16",
+      "bits": "3c00"
+    },
+    {
+      "id": "A_CLAMP",
+      "precision": "f16",
+      "bits": "3400"
+    },
+    {
+      "id": "A_CLAMPn",
+      "precision": "f16",
+      "bits": "0000"
+    },
+    {
+      "id": "A_P1",
+      "precision": "f16",
+      "bits": "0000"
+    },
+    {
+      "id": "A_P0",
+      "precision": "f16",
+      "bits": "3e00"
+    },
+    {
+      "id": "ACT_CL",
+      "precision": "f16",
+      "bits": "4000"
+    },
+    {
+      "id": "ACT_CLn",
+      "precision": "f16",
+      "bits": "c000"
+    },
+    {
+      "id": "ACT_C1",
+      "precision": "f16",
+      "bits": "0000"
+    },
+    {
+      "id": "ACT_C2",
+      "precision": "f16",
+      "bits": "3800"
+    },
+    {
+      "id": "ACT_C3",
+      "precision": "f16",
+      "bits": "3800"
+    }
+  ],
+  "shifts": [
+    {
+      "parity": 0,
+      "rows": [
+        {
+          "stage": "IN0",
+          "xy": [
+            0,
+            2
+          ]
+        },
+        {
+          "stage": "E1",
+          "xy": [
+            2,
+            4
+          ]
+        },
+        {
+          "stage": "E2",
+          "xy": [
+            4,
+            6
+          ]
+        },
+        {
+          "stage": "E3",
+          "xy": [
+            6,
+            0
+          ]
+        },
+        {
+          "stage": "E4",
+          "xy": [
+            0,
+            2
+          ]
+        },
+        {
+          "stage": "E5",
+          "xy": [
+            2,
+            4
+          ]
+        },
+        {
+          "stage": "D4",
+          "xy": [
+            4,
+            6
+          ]
+        },
+        {
+          "stage": "D3",
+          "xy": [
+            6,
+            0
+          ]
+        },
+        {
+          "stage": "D2",
+          "xy": [
+            0,
+            2
+          ]
+        },
+        {
+          "stage": "D1",
+          "xy": [
+            2,
+            4
+          ]
+        },
+        {
+          "stage": "D0",
+          "xy": [
+            4,
+            6
+          ]
+        }
+      ]
+    },
+    {
+      "parity": 1,
+      "rows": [
+        {
+          "stage": "IN0",
+          "xy": [
+            2,
+            4
+          ]
+        },
+        {
+          "stage": "E1",
+          "xy": [
+            4,
+            6
+          ]
+        },
+        {
+          "stage": "E2",
+          "xy": [
+            6,
+            0
+          ]
+        },
+        {
+          "stage": "E3",
+          "xy": [
+            0,
+            2
+          ]
+        },
+        {
+          "stage": "E4",
+          "xy": [
+            2,
+            4
+          ]
+        },
+        {
+          "stage": "E5",
+          "xy": [
+            4,
+            6
+          ]
+        },
+        {
+          "stage": "D4",
+          "xy": [
+            6,
+            0
+          ]
+        },
+        {
+          "stage": "D3",
+          "xy": [
+            0,
+            2
+          ]
+        },
+        {
+          "stage": "D2",
+          "xy": [
+            2,
+            4
+          ]
+        },
+        {
+          "stage": "D1",
+          "xy": [
+            4,
+            6
+          ]
+        },
+        {
+          "stage": "D0",
+          "xy": [
+            6,
+            0
+          ]
+        }
+      ]
+    }
+  ],
+  "head_derivation": {
+    "h0_bits": "0000",
+    "h1_bits": "0000",
+    "synthetic_S1CAP_f32_bits": "40000000"
+  },
+  "exposure_symbols": [
+    {
+      "id": "X_LWrb",
+      "precision": "f32",
+      "bits": "3e800000"
+    },
+    {
+      "id": "X_LWg",
+      "precision": "f32",
+      "bits": "3f000000"
+    },
+    {
+      "id": "X_LMAX",
+      "precision": "f32",
+      "bits": "41800000"
+    },
+    {
+      "id": "X_KEY",
+      "precision": "f32",
+      "bits": "3f800000"
+    },
+    {
+      "id": "X_MFL",
+      "precision": "f32",
+      "bits": "3f800000"
+    },
+    {
+      "id": "X_EFL",
+      "precision": "f32",
+      "bits": "3d800000"
+    },
+    {
+      "id": "X_CL",
+      "precision": "f32",
+      "bits": "40800000"
+    },
+    {
+      "id": "X_CLn",
+      "precision": "f32",
+      "bits": "c0800000"
+    },
+    {
+      "id": "X_NRM",
+      "precision": "f32",
+      "bits": "3e800000"
+    }
+  ],
+  "source_head": "4e61d0747211161483c7b2218347e1f892947158"
+}

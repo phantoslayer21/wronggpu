@@ -1,0 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Version resource of WrongGPU.asi (the OptiScaler menu plugin). Identifies the file as WrongGPU's in Explorer and
+// bug reports.
+#define WG_RC_DESCRIPTION "WrongGPU OptiScaler plugin (adds WrongGPU to OptiScaler's upscaler menu)"
+#define WG_RC_FILENAME "WrongGPU.asi"
+#include "../src/version_common.rc"

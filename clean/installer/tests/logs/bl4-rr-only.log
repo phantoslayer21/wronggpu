@@ -1,0 +1,5 @@
+00:26:26.147 runtime: instance 1 timing, 300 frames from frame 3601: GPU 1.589 ms per frame (pre 0.010, input 0.114, body 0.643, head 0.118, output 0.421, resolve 0.246, store 0.038, in.dec 0.000, in.feat 0.112, in.rep 0.002, in.mlp 0.000), render 642x361, output 1920x1080
+00:26:28.496 runtime: instance 1 timing, 300 frames from frame 3901: GPU 1.592 ms per frame (pre 0.010, input 0.114, body 0.644, head 0.119, output 0.422, resolve 0.246, store 0.038, in.dec 0.000, in.feat 0.112, in.rep 0.002, in.mlp 0.000), render 642x361, output 1920x1080
+00:31:48.973 runtime: instance 1 timing, 44 frames from frame 36001: GPU 1.589 ms per frame (pre 0.010, input 0.115, body 0.651, head 0.122, output 0.411, resolve 0.243, store 0.037, in.dec 0.000, in.feat 0.113, in.rep 0.002, in.mlp 0.000), render 642x361, output 1920x1080
+00:31:48.974 runtime: destroy instance 1 after 36044 frames (0 failed)
+00:31:49.536 diag: summary (process exit): support queries 13 (RR: yes 0 / no 0), RR lookups 0, RR instances created 0, RR evaluates 0

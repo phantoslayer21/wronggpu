@@ -1,0 +1,56 @@
+{
+  "artifact_checks": "pass",
+  "known_tensor_count": 197,
+  "symbol_count": 47,
+  "metadata_cases": 28,
+  "source_counterexamples": 3,
+  "synthetic_attention_checks": {
+    "base": {
+      "count": 13314,
+      "range": [
+        15.5,
+        16.0
+      ],
+      "all_in_range": true,
+      "max_w": 2.0
+    },
+    "lower_inclusive": {
+      "count": 2,
+      "range": [
+        1.0,
+        1.0
+      ],
+      "all_in_range": true,
+      "max_w": 6.103515625e-05
+    },
+    "overflow_admissible": {
+      "count": 2,
+      "range": [
+        30.0,
+        30.0
+      ],
+      "all_in_range": true,
+      "max_w": 32768.0
+    },
+    "upper_rejected": {
+      "count": 13314,
+      "range": [
+        30.5,
+        31.0
+      ],
+      "all_in_range": false,
+      "max_w": 64512.0
+    },
+    "low_rejected": {
+      "count": 13314,
+      "range": [
+        -0.5,
+        0.0
+      ],
+      "all_in_range": false,
+      "max_w": null
+    }
+  },
+  "numeric_scope": "Only original synthetic fixture arithmetic, no implementation testing or complete model admission.",
+  "json_schema_validation": "not executed; required field set and JSON parse checked"
+}

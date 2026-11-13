@@ -1,0 +1,500 @@
+{
+  "format_version": 1,
+  "provenance": "All scalar bit patterns and fill recipes are authored synthetic values; none derived from player model data.",
+  "edit_semantics": "Deep-copy base for each case, apply edits in order. set_selected locates unique id. set sets top-level field; set_head changes head_derivation; set_shift locates parity and stage. Missing or duplicated selectors are errors. Runtime buffers must be expanded before payload validation.",
+  "cases": [
+    {
+      "id": "known_subset_only",
+      "base": "synthetic-base.json",
+      "edits": [],
+      "expected": "ADMISSIBLE_SYNTHETIC_KNOWN_SUBSET",
+      "note": "All 197 known tensors with explicit synthetic source; never a complete model."
+    },
+    {
+      "id": "player_request",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "set",
+          "field": "request",
+          "value": "complete_player_model"
+        }
+      ],
+      "expected": "BLOCKED_PLAYER_MODEL",
+      "note": "",
+      "error": "PLAYER_MODEL_BLOCKED"
+    },
+    {
+      "id": "missing_weight",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "remove_selected",
+          "collection": "tensors",
+          "id": "E1.Wq"
+        }
+      ],
+      "expected": "REJECTED_KNOWN_SUBSET",
+      "note": "",
+      "error": "TENSOR_SET"
+    },
+    {
+      "id": "duplicate_weight",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "duplicate_selected",
+          "collection": "tensors",
+          "id": "E1.Wq"
+        }
+      ],
+      "expected": "REJECTED_KNOWN_SUBSET",
+      "note": "",
+      "error": "TENSOR_SET"
+    },
+    {
+      "id": "wrong_heads",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "set_selected",
+          "collection": "tensors",
+          "id": "E4.Wq",
+          "field": "shape",
+          "value": [
+            5,
+            160,
+            32
+          ]
+        }
+      ],
+      "expected": "REJECTED_KNOWN_SUBSET",
+      "note": "",
+      "error": "TENSOR_SET"
+    },
+    {
+      "id": "wrong_precision",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "set_selected",
+          "collection": "tensors",
+          "id": "D0-R.s1",
+          "field": "precision",
+          "value": "f16"
+        }
+      ],
+      "expected": "REJECTED_KNOWN_SUBSET",
+      "note": "",
+      "error": "TENSOR_SET"
+    },
+    {
+      "id": "e4m3_nan",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "set_selected",
+          "collection": "tensors",
+          "id": "IN0.Wq",
+          "field": "synthetic_fill_bits",
+          "value": "7f"
+        }
+      ],
+      "expected": "REJECTED_KNOWN_SUBSET",
+      "note": "",
+      "error": "FINITE_PREPARED"
+    },
+    {
+      "id": "f16_infinity",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "set_selected",
+          "collection": "tensors",
+          "id": "E1.bo",
+          "field": "synthetic_fill_bits",
+          "value": "7c00"
+        }
+      ],
+      "expected": "REJECTED_KNOWN_SUBSET",
+      "note": "",
+      "error": "FINITE_PREPARED"
+    },
+    {
+      "id": "physical_offset",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "set_selected",
+          "collection": "tensors",
+          "id": "IN0.Wq",
+          "field": "physical_offset",
+          "value": 0
+        }
+      ],
+      "expected": "REJECTED_KNOWN_SUBSET",
+      "note": "",
+      "error": "NO_PHYSICAL_MAPPING"
+    },
+    {
+      "id": "missing_ra_no_default",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "remove_selected",
+          "collection": "symbols",
+          "id": "D0-R.ra"
+        }
+      ],
+      "expected": "REJECTED_KNOWN_SUBSET",
+      "note": "",
+      "error": "SCALAR_SET"
+    },
+    {
+      "id": "missing_independent_lower",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "remove_selected",
+          "collection": "symbols",
+          "id": "A_CLAMPn"
+        }
+      ],
+      "expected": "REJECTED_KNOWN_SUBSET",
+      "note": "",
+      "error": "SCALAR_SET"
+    },
+    {
+      "id": "duplicate_global",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "duplicate_selected",
+          "collection": "symbols",
+          "id": "A_SCALE"
+        }
+      ],
+      "expected": "REJECTED_KNOWN_SUBSET",
+      "note": "",
+      "error": "SCALAR_SET"
+    },
+    {
+      "id": "reversed_attention",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "set_selected",
+          "collection": "symbols",
+          "id": "A_CLAMPn",
+          "field": "bits",
+          "value": "3c00"
+        }
+      ],
+      "expected": "REJECTED_KNOWN_SUBSET",
+      "note": "",
+      "error": "CLAMP_DOMAIN"
+    },
+    {
+      "id": "attention_low",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "set_selected",
+          "collection": "symbols",
+          "id": "A_P0",
+          "field": "bits",
+          "value": "3c00"
+        }
+      ],
+      "expected": "REJECTED_KNOWN_SUBSET",
+      "note": "",
+      "error": "ATTENTION_RANGE"
+    },
+    {
+      "id": "attention_upper_exclusive",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "set_selected",
+          "collection": "symbols",
+          "id": "A_P0",
+          "field": "bits",
+          "value": "3fe0"
+        }
+      ],
+      "expected": "REJECTED_KNOWN_SUBSET",
+      "note": "",
+      "error": "ATTENTION_RANGE"
+    },
+    {
+      "id": "attention_overflow_record_true",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "set_selected",
+          "collection": "symbols",
+          "id": "A_CLAMP",
+          "field": "bits",
+          "value": "0000"
+        },
+        {
+          "op": "set_selected",
+          "collection": "symbols",
+          "id": "A_P0",
+          "field": "bits",
+          "value": "3fc0"
+        }
+      ],
+      "expected": "ADMISSIBLE_SYNTHETIC_KNOWN_SUBSET",
+      "note": "y=30, w_max=32768, overflow record true; not rejection."
+    },
+    {
+      "id": "attention_lower_inclusive",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "set_selected",
+          "collection": "symbols",
+          "id": "A_CLAMP",
+          "field": "bits",
+          "value": "0000"
+        },
+        {
+          "op": "set_selected",
+          "collection": "symbols",
+          "id": "A_P0",
+          "field": "bits",
+          "value": "3c20"
+        }
+      ],
+      "expected": "ADMISSIBLE_SYNTHETIC_KNOWN_SUBSET",
+      "note": "y=1 is permitted."
+    },
+    {
+      "id": "odd_shift",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "set_shift",
+          "parity": 0,
+          "stage": "E1",
+          "xy": [
+            1,
+            0
+          ]
+        }
+      ],
+      "expected": "REJECTED_KNOWN_SUBSET",
+      "note": "",
+      "error": "SHIFT_SET"
+    },
+    {
+      "id": "missing_parity",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "remove_parity",
+          "parity": 1
+        }
+      ],
+      "expected": "REJECTED_KNOWN_SUBSET",
+      "note": "",
+      "error": "SHIFT_SET"
+    },
+    {
+      "id": "head_nan_input",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "set_head",
+          "field": "h0_bits",
+          "value": "7e00"
+        }
+      ],
+      "expected": "REJECTED_KNOWN_SUBSET",
+      "note": "",
+      "error": "HEAD_DERIVATION"
+    },
+    {
+      "id": "head_mismatch",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "set_selected",
+          "collection": "tensors",
+          "id": "D0-R.s2",
+          "field": "synthetic_fill_bits",
+          "value": "40000000"
+        }
+      ],
+      "expected": "REJECTED_KNOWN_SUBSET",
+      "note": "",
+      "error": "HEAD_DERIVATION"
+    },
+    {
+      "id": "head_s2_overflow",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "set_head",
+          "field": "h1_bits",
+          "value": "63d0"
+        },
+        {
+          "op": "set_selected",
+          "collection": "tensors",
+          "id": "D0-R.s2",
+          "field": "synthetic_fill_bits",
+          "value": "7f800000"
+        }
+      ],
+      "expected": "REJECTED_KNOWN_SUBSET",
+      "note": "",
+      "error": "HEAD_DERIVATION"
+    },
+    {
+      "id": "head_e0_overflow_capped",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "set_head",
+          "field": "h0_bits",
+          "value": "63d0"
+        },
+        {
+          "op": "set_selected",
+          "collection": "tensors",
+          "id": "D0-R.s1",
+          "field": "synthetic_fill_bits",
+          "value": "40000000"
+        }
+      ],
+      "expected": "ADMISSIBLE_SYNTHETIC_KNOWN_SUBSET",
+      "note": "exp h0 overflows but s1=finite cap; do not reject e0 alone."
+    },
+    {
+      "id": "head_s2_underflow_zero",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "set_head",
+          "field": "h1_bits",
+          "value": "e3d0"
+        },
+        {
+          "op": "set_selected",
+          "collection": "tensors",
+          "id": "D0-R.s2",
+          "field": "synthetic_fill_bits",
+          "value": "00000000"
+        }
+      ],
+      "expected": "ADMISSIBLE_SYNTHETIC_KNOWN_SUBSET",
+      "note": "No positive lower bound for s2 supplied; correctly rounded exp underflows to zero."
+    },
+    {
+      "id": "x_subnormal",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "set_selected",
+          "collection": "exposure_symbols",
+          "id": "X_NRM",
+          "field": "bits",
+          "value": "00000001"
+        }
+      ],
+      "expected": "REJECTED_KNOWN_SUBSET",
+      "note": "",
+      "error": "X_SYMBOL_DOMAIN"
+    },
+    {
+      "id": "x_zero_floor",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "set_selected",
+          "collection": "exposure_symbols",
+          "id": "X_EFL",
+          "field": "bits",
+          "value": "00000000"
+        }
+      ],
+      "expected": "REJECTED_KNOWN_SUBSET",
+      "note": "",
+      "error": "X_SYMBOL_DOMAIN"
+    },
+    {
+      "id": "x_negative_luma_weights_allowed",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "set_selected",
+          "collection": "exposure_symbols",
+          "id": "X_LWrb",
+          "field": "bits",
+          "value": "bf800000"
+        }
+      ],
+      "expected": "ADMISSIBLE_SYNTHETIC_KNOWN_SUBSET",
+      "note": "Do not invent positive luminance weight restriction."
+    },
+    {
+      "id": "wrong_source_head",
+      "base": "synthetic-base.json",
+      "edits": [
+        {
+          "op": "set",
+          "field": "source_head",
+          "value": "0000000000000000000000000000000000000000"
+        }
+      ],
+      "expected": "REJECTED_KNOWN_SUBSET",
+      "error": "SOURCE_VERSION",
+      "note": "Pinned approved source version is mandatory."
+    }
+  ],
+  "source_constraint_counterexamples": [
+    {
+      "id": "exposure_f16_overflow_despite_exact_ratio",
+      "symbol_edits": {
+        "X_KEY": "45d1962c",
+        "X_MFL": "3dd1a347"
+      },
+      "input": "zero RGB, reset true",
+      "declared_domain": "passes",
+      "exact_ratio": "900167630848/13738823 < 65520",
+      "evaluation": "f32 reciprocal then f32 product = 65520; f16 round = +inf",
+      "source_claim_in_conflict": "58.1 bound implies finite f16 E;58.2.4",
+      "rounded_f32_direct_ratio": 65519.99609375
+    },
+    {
+      "id": "exposure_raw_zero",
+      "symbol_edits": {
+        "X_LWrb": "3f800000",
+        "X_LWg": "00000000",
+        "X_LMAX": "7f7fffff",
+        "X_KEY": "3f800000",
+        "X_MFL": "3f800000"
+      },
+      "input": "one pixel R=max finite f32, G=B=0",
+      "declared_domain": "passes",
+      "evaluation": "mean=max finite f32; reciprocal is subnormal then FTZ=0; E_raw=0; E fallback=1",
+      "source_claim_in_conflict": "58.2.3 E_raw finite and positive"
+    },
+    {
+      "id": "exposure_x3_overflow",
+      "symbol_edits": {
+        "X_KEY": "40800000",
+        "X_MFL": "3f800000",
+        "X_CL": "40000000",
+        "X_CLn": "c0000000",
+        "X_NRM": "7f7fffff"
+      },
+      "input": "zero RGB, Ep=1, reset false",
+      "declared_domain": "passes",
+      "evaluation": "E=4; log2(E/Ep)=2; clamp=2; f32 2*maxfinite=+inf",
+      "source_claim_in_conflict": "58.2.7 X3 always finite"
+    }
+  ]
+}

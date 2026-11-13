@@ -1,0 +1,931 @@
+// SPDX-License-Identifier: MIT
+// D3D12 ports of the Swin block kernels of clean/kernels/swin.hip as built into swin.co (default knobs: 256 lanes, one
+// window per wave, WG_MLP_GROUP 2, WG_UNIT_BYTES 16384, GELU mode 2, WG_AV8 0, WG_SMAX16 0, WG_NORM_DOT4 0) - the
+// template swin_block<C, HEADS, MLP, WPW = 1, ADD, GROUP = 2, SAFE, THREADS = 256, MCO = 0, ECL> once, instantiated per
+// kernel by the defines of its @wg-kernel line:
+//   SW_C, SW_HEADS, SW_MLP  block width, heads, MLP hidden width
+//   SW_ADD                  1: the block input is x + xadd (decoder blocks)
+//   SW_SAFE                 1: the "_nc" kernels (inner FP8 packs without the +-448 clamp; the output pack clamps)
+//   SW_ECL                  >0: fused expand (the "_ex" kernels): x is the low-resolution map with SW_ECL channels
+// HIP ISA: <build>\dx12-m\isa\swin_block_c64_nc.s, swin_block_c96_nc.s, swin_block_c96_add_ex_nc.s.
+// Every FP32 operation follows that ISA: the RMSNorm sums of squares pair as fma(a_even, a_even, a_odd * a_odd); the
+// soft cap is fma(c^3, -1 / (3 cap^2), c), the max is over t * (tau log2 e) but the exponent is fma(t, tau log2 e, -max);
+// the probabilities are rounded once to FP16 (v_fma_mixlo_f16 e, 1 / sum, 0); GELU tt = fma(x^2, b, a).
+//
+// swin_block_c64_nc: declared in swin_c64w2.hlsl (launch-shape switch: two windows per wave in 128-lane workgroups, or
+// with SW_W2=0 this file's kernel in HIP's 256-lane shape)
+// @wg-kernel swin_block_c96_nc co=swin.co block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=0,SW_SAFE=1,SW_ECL=0
+// @wg-kernel swin_block_c96_add_ex_nc co=swin.co block=256 wave=32 args=p,p,p,p,u,u,u,u,p defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=1,SW_SAFE=1,SW_ECL=128
+#include "wg_platform.hlsli"
+#include "wg_gelu_lut.hlsli"
+
+WG_ARGS_BEGIN
+    uint x, xadd, out_p, w;   // pointers
+    int H, W, ox, oy;
+#if SW_ECL > 0
+    uint aux;                 // unused by the expand kernels (null)
+#endif
+WG_ARGS_END
+
+// ---- BlockLayout<C, HEADS, MLP> (FORMATS.md, "Swin block section") ---------------------------------------------------
+#define KC (SW_C / 16)
+#define HALF (SW_C / 2)
+#define MTH (SW_MLP / 16)
+#define L_G1 16
+#define L_G2 (L_G1 + 4 * SW_C)
+#define L_BP (L_G2 + 4 * SW_C)
+#define L_B2 (L_BP + 4 * SW_C)
+#define L_B1 (L_B2 + 4 * SW_C)
+#define L_BIAS (L_B1 + 4 * SW_MLP)
+#define L_STREAM (L_BIAS + 4 * SW_HEADS * 256)
+#define QKV_FRAGS (4 * KC)
+#define HEAD_BYTES ((QKV_FRAGS + 2 * KC) * 256)
+// q8(GELU) of the MLP (SW_GELU), all exact (bit-identical to HIP's wg_gelu + pack_in<SAFE>):
+// 1 = the 16 KB arena table (wg_gelu_lut.hlsli; default for C = 64: one 8-byte load per value),
+// 2 = the 2 KB table in groupshared memory (wg_gelu_lds.hlsli; default for C = 96, whose kernels are VALU-issue bound
+//     and measured slower with the arena table), 0 = HIP's transcendental chain (gelu_group).
+// Measured against the transcendental chain (warm A/B): c64 arena + 8 KB units -41 us (groupshared -33, arena with
+// 16 KB units -28); c96 groupshared -12 us, c96_add_ex groupshared -11 us.
+// c96 (track diet-c96, round 2): mode 3 with pattern 12212 (the first tile of every odd group by the arena table, the
+// rest by the groupshared table): vector-memory gathers take a quarter of the table reads off the LDS, whose random
+// 8-byte gathers are bank-conflict bound (measured in the captured stages: -2.2 us c96, -1.3 us c96_add_ex; one arena
+// tile in the even groups or two arena tiles were 2 to 45 us slower).
+#ifndef SW_GELU
+#define SW_GELU 3
+#if SW_C == 96 && !defined(SW_GELU_PAT)
+#define SW_GELU_PAT 12212
+#endif
+#endif
+// HPU = largest divisor of MTH not above WG_UNIT_BYTES / (2 KC 256) = 16384 / (512 KC) (HIP), except C = 64 with a GELU
+// table: 4 (8 KB MLP units; the staging buffers shrink from 2 x 16 KB to 2 x 8 KB, which leaves room for the groupshared
+// table under the 32 KB limit and lets more workgroups share a CU; measured: alone -23 us). Same multiplies in the same
+// order.
+#if defined(SW_HPU)
+#define HPU SW_HPU
+#elif SW_C == 64 && SW_GELU != 0
+#define HPU 4     // MTH 16
+#elif SW_C == 64
+#define HPU 8     // MTH 16, limit 8
+#elif SW_C == 96
+#define HPU 4     // MTH 24, limit 5
+#else
+#error "SW_C: 64 or 96"
+#endif
+#define MLP_BYTES (2 * KC * HPU * 256)
+#define NMLP (MTH / HPU)
+#define MAXU (HEAD_BYTES > MLP_BYTES ? HEAD_BYTES : MLP_BYTES)
+#define L_SIZE (L_STREAM + SW_HEADS * HEAD_BYTES + NMLP * MLP_BYTES)
+#define L_TAIL (((L_SIZE + 255) / 256) * 256)   // merge / expand weights follow the block
+#ifndef SW_GROUP
+#define SW_GROUP 2   // hidden tiles per MLP group (HIP WG_MLP_GROUP 2; any divisor of HPU gives the same accumulation order)
+#endif
+#define GROUP SW_GROUP
+#define THREADS WG_BLOCK
+#define PFMAX ((MAXU / 16 + THREADS - 1) / THREADS)   // staged 16-byte chunks per lane, largest unit
+
+#define SW_LDS_BYTES (2 * MAXU)
+#include "swin_common.hlsli"
+#include "speed_swin.hlsli"
+#include "speed_c64.hlsli"
+#if SW_GELU == 3 && !defined(SW_GELU_PAT)
+#define SW_GELU_PAT 13033
+#endif
+// SW_GL_LDS: the kernel uses the 2 KB groupshared GELU table (SW_GELU 2, or a digit 2 in SW_GELU_PAT); otherwise no
+// table fill at kernel start and no 2 KB of groupshared memory.
+#if SW_GELU == 2
+#define SW_GL_LDS 1
+#elif SW_GELU == 3
+#define SW_GL_LDS ((SW_GELU_PAT / 1000) % 10 == 2 || (SW_GELU_PAT / 100) % 10 == 2 || (SW_GELU_PAT / 10) % 10 == 2 || SW_GELU_PAT % 10 == 2)
+#else
+#define SW_GL_LDS 0
+#endif
+#if SW_GL_LDS
+#if SW_C == 96 && SW_ECL > 0
+groupshared uint64_t sw_gl_tab[512];   // the GELU table (wg_gelu_lds.hlsli) and its swapped copy (b, a), filled at start
+#else
+groupshared uint64_t sw_gl_tab[256];   // the 2 KB GELU table (wg_gelu_lds.hlsli), filled at kernel start
+#endif
+#define WG_GL_GET(off) sw_q2(sw_gl_tab[(off) >> (WG_GL_SCALE == 8u ? 3u : 0u)])
+#include "wg_gelu_lds.hlsli"
+#endif
+
+// q8(GELU) of a group of 2 hidden tiles by a table, in two parts (same operations as wg_gelu_q8_lds2 /
+// wg_gelu_q8_lut): sw_gelu_pre = the offsets and the table loads, sw_gelu_fin = the fmas and the FP8 conversions.
+#if SW_GELU == 2
+struct SwGeluPre { uint2 e[16]; };
+SwGeluPre sw_gelu_pre(v8f h[2])
+{
+    uint o0[8], o1[8];
+    wg_gl_offs8(h[0], o0);
+    wg_gl_offs8(h[1], o1);
+    SwGeluPre r;
+    [unroll] for (uint i = 0; i < 8; ++i) { r.e[i] = WG_GL_GET(o0[i]); r.e[8 + i] = WG_GL_GET(o1[i]); }
+    return r;
+}
+void sw_gelu_fin(v8f h[2], SwGeluPre p, out uint2 q[2])
+{
+    v8f y0, y1;
+    [unroll] for (uint i = 0; i < 8; ++i) {
+        y0.v[i] = mad(h[0].v[i], asfloat(p.e[i].x), asfloat(p.e[i].y));
+        y1.v[i] = mad(h[1].v[i], asfloat(p.e[8 + i].x), asfloat(p.e[8 + i].y));
+    }
+    q[0] = wg_pack_q8_nc_ags(y0);
+    q[1] = wg_pack_q8_nc_ags(y1);
+}
+#elif SW_GELU == 3
+// c96_add_ex: the groupshared-table tiles read a swapped copy (b, a) of the entries for their odd values, so that the
+// final fmas accumulate alternately into the high and the low register of the loaded pairs and the driver dual-issues
+// them (same entries, same fma; measured -1.5 us in c96_add_ex, +0.4 us in c96, which keeps the single table).
+#if SW_C == 96 && SW_ECL > 0
+// wg_gl_offs8 with the odd values' offsets into the swapped copy (+ 2048 bytes, the v_dot4 accumulator)
+void sw_gl_offs8s(v8f h, out uint o[8])
+{
+    v8f w;
+    [unroll] for (uint i = 0; i < 8; ++i) w.v[i] = mad(h.v[i], h.v[i], WG_GL_A);
+    [unroll] for (uint i1 = 0; i1 < 8; ++i1) w.v[i1] = mad(w.v[i1], h.v[i1], WG_GL_B);
+    const uint2 c = wg_pack_q8_nc_ags(w);
+    [unroll] for (uint i2 = 0; i2 < 4; ++i2) {
+        o[i2] = dot4add_u8packed(c.x, 8u << (8u * i2), (i2 & 1u) * 2048u);
+        o[4 + i2] = dot4add_u8packed(c.y, 8u << (8u * i2), (i2 & 1u) * 2048u);
+    }
+}
+#define SW_GL_SWAP 1
+#else
+#define sw_gl_offs8s wg_gl_offs8
+#define SW_GL_SWAP 0
+#endif
+// Mixed: tile g of the group with parity j (j0 / GROUP of the unrolled unit) by method digit (2 j + g) of SW_GELU_PAT
+// (written 1abcd: a, b = tiles 0, 1 of even groups, c, d = of odd groups; 1 = arena table: vector-memory loads,
+// 2 = groupshared table: LDS loads, 0 = HIP's transcendental chain: VALU + TRANS, 3 = the arena table with the cheaper
+// offsets of sw_gelu_fetch8_bn: about 32 issue slots per tile against 40 for the groupshared table, whose
+// dot4 + mask offsets cost two operations per value). Every method gives HIP's bytes;
+// mixing spreads the work over the units instead of queueing it all on one. c64: 10022 (the first group of every unit,
+// whose W1 is not overlapped, by the transcendental chain, the second by the groupshared table) measured -12.6 us
+// against the arena table alone (10012 -11.1, 10021 -9.8, 10011 -8.4; patterns that raised the VGPRs above 120 lost
+// a workgroup per CU and were slower). With SW_GELU_LATE0 (below): 10222 (only tile 0 of the even groups by the chain)
+// -4.4 us against 10022 (12022 -2.9, 10202 +1.1; all-table 12222 needs 140 VGPRs). Tile digits generalize to GROUP 1
+// (digit = the tile's index in its unit; measured slower: +8..+19 us). Round 2 (stage A/B on a capture whose arena
+// holds the table): 10333 -5.0 us against 10222 (13333 / 10033 / 13033 need more than 120 VGPRs or were slower).
+// Round 3 (without the unused groupshared table, see SW_GL_LDS): 13033 -1.3 us against 10333 (117 VGPRs; 10303 +4.4,
+// 13333 / 13330 142 VGPRs, 12333 and the patterns with a groupshared tile 144 VGPRs or +1.4..+4.3 us).
+static uint sw_gj = 0;   // parity of the current group (set by the MLP loop; a compile-time constant after unrolling)
+uint sw_gelu_m(uint g)
+{
+    const uint ix = (sw_gj * GROUP + g) & 3u;   // the tile's index in its unit of 4
+    return (SW_GELU_PAT / (ix == 0u ? 1000u : ix == 1u ? 100u : ix == 2u ? 10u : 1u)) % 10u;
+}
+struct SwGeluPre { uint2 e[GROUP][8]; };
+SwGeluPre sw_gelu_pre(v8f h[GROUP])
+{
+    SwGeluPre r;
+    [unroll] for (uint g = 0; g < GROUP; ++g) {
+        if (sw_gelu_m(g) == 1u) {
+            const wg_gelu_lut_e a = wg_gelu_lut_fetch8(h[g]);
+            [unroll] for (uint i = 0; i < 8; ++i) r.e[g][i] = a.e[i];
+        } else if (sw_gelu_m(g) == 3u) {
+            const wg_gelu_lut_e a = sw_gelu_fetch8_bn(h[g]);
+            [unroll] for (uint i = 0; i < 8; ++i) r.e[g][i] = a.e[i];
+#if SW_GL_LDS
+        } else if (sw_gelu_m(g) == 2u) {
+            uint o[8];
+            sw_gl_offs8s(h[g], o);
+            [unroll] for (uint i = 0; i < 8; ++i) r.e[g][i] = WG_GL_GET(o[i]);
+#endif
+        } else {
+            [unroll] for (uint i = 0; i < 8; ++i) r.e[g][i] = uint2(0, 0);
+        }
+    }
+    return r;
+}
+void sw_gelu_fin(v8f h[GROUP], SwGeluPre p, out uint2 q[GROUP])
+{
+    [unroll] for (uint g = 0; g < GROUP; ++g) {
+        v8f y;
+        if (sw_gelu_m(g) != 0u) {
+            [unroll] for (uint i = 0; i < 8; ++i) {
+                const uint2 e = (SW_GL_SWAP && sw_gelu_m(g) == 2u && (i & 1u)) ? p.e[g][i].yx : p.e[g][i];
+                y.v[i] = mad(h[g].v[i], asfloat(e.x), asfloat(e.y));
+            }
+        } else {
+            float t[8];
+            [unroll] for (uint i = 0; i < 8; ++i) t[i] = h[g].v[i] * h[g].v[i];
+            [unroll] for (uint i1 = 0; i1 < 8; ++i1) t[i1] = mad(t[i1], asfloat(0xbdcd6502u), asfloat(0xc013b8edu));
+            [unroll] for (uint i2 = 0; i2 < 8; ++i2) t[i2] = h[g].v[i2] * t[i2];
+            [unroll] for (uint i3 = 0; i3 < 8; ++i3) t[i3] = wg_exp2(t[i3]);
+            [unroll] for (uint i4 = 0; i4 < 8; ++i4) t[i4] = 1.0f + t[i4];
+            [unroll] for (uint i5 = 0; i5 < 8; ++i5) t[i5] = wg_rcp(t[i5]);
+            [unroll] for (uint i6 = 0; i6 < 8; ++i6) y.v[i6] = h[g].v[i6] * t[i6];
+        }
+        q[g] = wg_pack_q8_nc_ags(y);
+    }
+}
+#elif SW_GELU == 1
+struct SwGeluPre { wg_gelu_lut_e e[GROUP]; };
+SwGeluPre sw_gelu_pre(v8f h[GROUP])
+{
+    SwGeluPre r;
+    [unroll] for (uint g = 0; g < GROUP; ++g) r.e[g] = wg_gelu_lut_fetch8(h[g]);
+    return r;
+}
+void sw_gelu_fin(v8f h[GROUP], SwGeluPre p, out uint2 q[GROUP])
+{
+    [unroll] for (uint g = 0; g < GROUP; ++g) q[g] = wg_gelu_lut_finish8(h[g], p.e[g]);
+}
+#endif
+// SW_GELU_EARLY 1: with a table, the table loads of group j0 are issued before W1 of group j0 + GROUP (their latency
+// under the multiplies), the fmas and conversions after; 0: the whole lookup after W1 of the next group (measured with
+// all three kernels: 0 is about 20 us per frame slower).
+// SW_SMAX_MIX 1: the softmax probabilities through the driver's folded v_fma_mixlo_f16 (HIP's instruction); 0: the FP32
+// round-to-odd emulation followed by the RNE conversion.
+#ifndef SW_SMAX_MIX
+#define SW_SMAX_MIX 1
+#endif
+// SW_NORM1_EARLY / SW_NORM2_EARLY 1: the RMSNorm gamma / beta loads issued before the barrier ahead of the norm (the
+// first barrier / the last head's) instead of in the norm; measured per kernel (c64 norm1 -1.4 us, norm2 +2.9; c96
+// norm2 -1.5, norm1 +2.1; c96_add_ex neither).
+#ifndef SW_NORM1_EARLY
+#define SW_NORM1_EARLY (SW_C == 64)
+#endif
+#ifndef SW_NORM2_EARLY
+#define SW_NORM2_EARLY (SW_C == 96 && SW_ECL == 0)
+#endif
+// SW_CLAMP_SKIP 1: the output packs skip the +-448 clamp when the whole wave is inside it (sw_in448; exact either way).
+#ifndef SW_CLAMP_SKIP
+#define SW_CLAMP_SKIP 1
+#endif
+#ifndef SW_GELU_EARLY
+#define SW_GELU_EARLY 1
+#endif
+// SW_GELU_LATE0 bit 0 / 1: the even / odd groups' table loads issued after W1 of the next group instead of before it
+// (fewer registers in flight: c64 with SW_GELU_PAT 10222 stays at 120 VGPRs).
+#ifndef SW_GELU_LATE0
+#define SW_GELU_LATE0 (SW_C == 64 ? 1 : 0)
+#endif
+// SW_MLP_STEP n: the MLP loop runs n units per pass (NMLP % n == 0); c64: 2 (2 passes of 2 units, -4.4 us).
+// SW_REV_PHI 1: the MLP loop carries the residual accumulator with each fragment's 8 values in reverse order
+// (sw_perm8: a renaming, the same values). The driver's register allocator gave the loop-carried values descending
+// registers, so every W2 chain copied its accumulator into an ascending tuple and the back edge copied it back;
+// reversed (with SW_MLP_STEP 2) -2.8 us more. Fully unrolled loops: no copies, but 140 VGPRs (one workgroup less per
+// CU), slower.
+// SW_COMMIT_EARLY g > 0: the next MLP unit's staging stores after group g - 1 of the unit instead of at its end (the
+// other buffer is free for the whole unit: every wave passed the previous unit's barrier after its last read of it;
+// the barrier stays at the end of the unit). c64: 1, -1.3 us.
+#ifndef SW_MLP_STEP
+#define SW_MLP_STEP (SW_C == 64 ? 2 : 1)
+#endif
+#ifndef SW_REV_PHI
+#define SW_REV_PHI (SW_C == 64 ? 1 : 0)
+#endif
+#ifndef SW_COMMIT_EARLY
+#define SW_COMMIT_EARLY (SW_C == 64 ? 1 : 0)
+#endif
+// SW_HEAD_UNROLL 1: the head loop unrolled (no loop-carried accumulator copies; each head's staging with constant
+// sizes). c64 with SW_GELU_PAT 10333: -4.1 us (at 120 VGPRs).
+// SW_N2_BATCH n > 0: norm2's gamma2 / beta2 loads n k at a time: the next batch's bases depend (by an opaque zero) on
+// the previous batch's last FP8 pack, so the driver cannot hoist all of them at once (same values; fewer registers
+// live at norm2, fewer moves into the MLP loop). c64 with the two above: 1, -2.4 us.
+// Round 3 knobs (c64, stage A/B on the cap-a2 capture; the driver's register allocation decides most of them):
+// SW_NORM_R2 bit 0 / 1 (norm1 / norm2): the odd values of every fragment multiplied by an opaque copy of r (same value):
+// all 32 products by r read one VGPR, which a dual-issue pair cannot read twice; two copies let them pair. -50 issue
+// slots, but outside the MLP loop a slot is worth about 0.03 us (inside about 0.09): 3 = -1.6 us on the old base;
+// with SW_GL_LDS 0 it moved the loop's register allocation (+20 loop slots), not kept.
+// SW_SMAX_ADDST 1: the soft cap's 8 bias additions as their own stage (they pair; same operations): c64 -0.9 us.
+// SW_MLP_STEP NMLP: the MLP loop fully unrolled (no loop-carried copies: 1293 issue slots against 1439, but 140 VGPRs,
+// +9.6 us). SW_MLP_DEP 1 / 2 / 3: the next units' loads (1), also the LDS fragment bases and staging commits per group
+// (2) or per unit (3), through an opaque zero from the latest GELU pack (no hoisting across units): 131-144 VGPRs,
+// +12..+19 us. SW_STAGE_LATE g > 0: the next MLP unit's staging loads after group g - 1's GELU (address through its
+// pack; commit with SW_COMMIT_EARLY > g - 1): no VGPR gain. SW_F2_LATE bit 0 / 1: the even / odd groups' W2 fragments
+// loaded after their GELU: 117-118 VGPRs but +0.2..+5.4 us (loop version), 137 VGPRs (unrolled).
+#ifndef SW_F2_LATE
+#define SW_F2_LATE 0
+#endif
+#ifndef SW_STAGE_LATE
+#define SW_STAGE_LATE 0
+#endif
+#ifndef SW_MLP_DEP
+#define SW_MLP_DEP 0
+#endif
+#ifndef SW_NORM_R2
+#define SW_NORM_R2 0
+#endif
+#ifndef SW_SMAX_ADDST
+#define SW_SMAX_ADDST (SW_C == 64)
+#endif
+#ifndef SW_HEAD_UNROLL
+#define SW_HEAD_UNROLL (SW_C == 64)
+#endif
+#ifndef SW_N2_BATCH
+#define SW_N2_BATCH (SW_C == 64 ? 1 : 0)
+#endif
+// SW_HEAD_PAIRS / SW_MLP_PAIRS 1: the head / MLP loop runs pairs (MLP: triples, NMLP 6 = two iterations; round 2:
+// -1.6 us c96_add_ex against pairs) of iterations (SW_HEADS even, NMLP a multiple of 3): fewer
+// back-edges, at each of which the driver copies the residual accumulators it left outside their loop registers
+// (same operations in the same order). Measured per kernel (c96: MLP pairs -1.4 us, both -0.9..-1.2; c96_add_ex:
+// both -2.4 us, MLP only -1.0, heads only +0.8).
+#ifndef SW_HEAD_PAIRS
+#define SW_HEAD_PAIRS (SW_C == 96 && SW_ECL > 0)
+#endif
+#ifndef SW_MLP_PAIRS
+#define SW_MLP_PAIRS (SW_C == 96)
+#endif
+// SW_SMAX_STAGED 1 (c96): the bias add as its own stage before the clamp (dual-issued adds), and the exponent argument
+// fma(t, k, nmx) with nmx = RN(max * -k) = -RN(max * k) (round to nearest is symmetric; one multiply, no negation
+// modifier on the eight fmas). Same values.
+#ifndef SW_SMAX_STAGED
+#define SW_SMAX_STAGED (SW_C == 96)
+#endif
+#if SW_HEAD_PAIRS && SW_HEADS % 2 != 0
+#error "SW_HEAD_PAIRS: SW_HEADS must be even"
+#endif
+#if SW_MLP_PAIRS && NMLP % 3 != 0
+#error "SW_MLP_PAIRS: NMLP must be a multiple of 3"
+#endif
+
+uint L_head(uint hd) { return L_STREAM + hd * HEAD_BYTES; }
+uint L_mlp(uint u) { return L_STREAM + SW_HEADS * HEAD_BYTES + u * MLP_BYTES; }
+
+// Inner FP8 pack (HIP pack_in<SAFE>) with the driver conversion (wave-uniform control flow); the output pack is sw_pack_q8.
+uint2 pack_in(v8f d)
+{
+#if SW_SAFE
+    return wg_pack_q8_nc_ags(d);
+#else
+    return wg_pack_q8_inner_ags(d);
+#endif
+}
+
+// ---- Stager<MAXU, THREADS>: global -> registers (fetch) -> LDS (commit), `chunks` 16-byte chunks (a compile-time
+// constant at every call, so the row tests fold): lane tid moves chunks tid, tid + THREADS, ...; in a partial last row the
+// lanes past the end re-load / re-store the unit's last chunk (same value: no per-lane branch).
+struct Stager { uint4 pre[PFMAX]; };
+void st_fetch(inout Stager s, uint src, uint chunks, uint tid)
+{
+    [unroll] for (uint i = 0; i < PFMAX; ++i) {
+        if (i * THREADS >= chunks) break;
+        uint idx = tid + i * THREADS;
+        if ((i + 1u) * THREADS > chunks) idx = min(idx, chunks - 1u);
+        s.pre[i] = wg_ld128(src, idx * 16u);
+    }
+}
+void st_commit(Stager s, uint dst, uint chunks, uint tid)
+{
+    const uint base = (dst >> 3) + (tid + sw_zero_bits()) * 2u;   // element of chunk tid (sw_zero_bits: see sw_lane_base)
+    [unroll] for (uint i = 0; i < PFMAX; ++i) {
+        if (i * THREADS >= chunks) break;
+        if ((i + 1u) * THREADS > chunks) {
+            sw_lds_st128(dst + min(tid + i * THREADS, chunks - 1u) * 16u, s.pre[i]);
+        } else {
+            SW_LDS_PUT(base + i * THREADS * 2u, s.pre[i].xy);
+            SW_LDS_PUT(base + i * THREADS * 2u + 1u, s.pre[i].zw);
+        }
+    }
+}
+
+void load_frags_g(uint base, uint off, out uint2 f[KC])
+{
+    [unroll] for (uint i = 0; i < KC / 2; ++i) {
+        uint4 v = wg_ld128(base, off + 16u * i);
+        f[2 * i] = v.xy; f[2 * i + 1] = v.zw;
+    }
+}
+
+// sum of squares of a token's channels in this lane (k = 0 .. KC - 1, in order), the other half of the wave added
+float norm_r(v8f a[KC])
+{
+    float ss = sw_sumsq8(a[0]);
+    [unroll] for (uint k = 1; k < KC; ++k) ss = ss + sw_sumsq8(a[k]);
+    ss = ss + wg_xor16(ss);
+#if SW_C == 64
+    return wg_rsq((ss + asfloat(0x39000000u)) * asfloat(0x3c800000u));   // (ss + 2^-13) * (1 / 64)
+#else
+    return wg_rsq((ss + asfloat(0x39000000u)) * asfloat(0x3c2aaaabu));   // (ss + 2^-13) * (1 / 96)
+#endif
+}
+
+// GELU mode 2 of GROUP = 2 tiles: x / (1 + 2^(x (b x^2 + a))), with HIP's fma(x^2, b, a)
+void gelu_group(v8f h[2], out v8f y[2])
+{
+    float t[16];
+    [unroll] for (uint i = 0; i < 16; ++i) t[i] = h[i >> 3].v[i & 7] * h[i >> 3].v[i & 7];
+    [unroll] for (uint i1 = 0; i1 < 16; ++i1) t[i1] = mad(t[i1], asfloat(0xbdcd6502u), asfloat(0xc013b8edu));   // -0.10029031, -2.30816186
+    [unroll] for (uint i2 = 0; i2 < 16; ++i2) t[i2] = h[i2 >> 3].v[i2 & 7] * t[i2];
+    [unroll] for (uint i3 = 0; i3 < 16; ++i3) t[i3] = wg_exp2(t[i3]);
+    [unroll] for (uint i4 = 0; i4 < 16; ++i4) t[i4] = 1.0f + t[i4];
+    [unroll] for (uint i5 = 0; i5 < 16; ++i5) t[i5] = wg_rcp(t[i5]);
+    [unroll] for (uint i6 = 0; i6 < 16; ++i6) y[i6 >> 3].v[i6 & 7] = h[i6 >> 3].v[i6 & 7] * t[i6];
+}
+
+#if SW_ECL > 0
+// HIP wg_low0: smallest low-resolution coordinate any of the 4 window rows / columns from p0 maps to.
+int wg_low0(int p0, int n)
+{
+    int m = sw_mirror(p0, n);
+    int m1 = sw_mirror(p0 + 1, n), m2 = sw_mirror(p0 + 2, n), m3 = sw_mirror(p0 + 3, n);
+    m = m1 < m ? m1 : m;
+    m = m2 < m ? m2 : m;
+    m = m3 < m ? m3 : m;
+    return m >> 1;
+}
+
+#define EKC (SW_ECL / 16)
+#if (4 * SW_C / 16) % 8 != 0
+#error "fused_expand: MT = 4 C / 16 must be a multiple of the 8 waves"
+#endif
+// HIP fused_expand<C, CL>: the 8 windows' expanded block input e = q8(We y + be) into LDS records
+// [window][low token][sub-pixel][C] at e_lds. tail = expand weights (bias [4C] f32, then the fragments, in global memory).
+#include "diet_c96.hlsli"
+// lowp: sw_win_low0 of this lane (the 8 windows' low-resolution bases, computed once per lane instead of per lane and
+// window pair; the same integers)
+void fused_expand(uint tail, uint e_lds, int nwx, int nwin, uint tid, int blk, uint lowp)
+{
+    const uint G = SW_C / 16, MT = 4 * G, WE = 16 * SW_C;   // MT % 8 == 0 (C = 96)
+    uint lane = tid & 31u, t = lane & 15u, hh = lane >> 4, wave = tid >> 5;
+    int Hl = H >> 1, Wl = W >> 1;
+    uint2 yf[2][EKC];
+    [unroll] for (int n = 0; n < 2; ++n) {
+        const uint lp = WaveReadLaneAt(lowp, 4u * (uint)n + (t >> 2));   // window blk * 8 + 4 n + (t >> 2)
+        int lr = (int)(lp & 0xffffu) + (int)((t >> 1) & 1u), lc = (int)(lp >> 16) + (int)(t & 1u);
+        lr = lr < Hl ? lr : Hl - 1;
+        lc = lc < Wl ? lc : Wl - 1;
+        uint off = (uint)(lr * Wl + lc) * SW_ECL + hh * (SW_ECL / 2);
+        [unroll] for (uint i = 0; i < EKC / 2; ++i) {
+            uint4 v = wg_ld128(x, off + 16u * i);
+            yf[n][2 * i] = v.xy; yf[n][2 * i + 1] = v.zw;
+        }
+    }
+    uint be = tail + hh * 32u;
+    // MT = 24 = 3 x 8 waves: every wave runs exactly MT / 8 tiles, unrolled with all weight fragments and biases issued
+    // first (one exposed global latency instead of one per tile)
+    const uint wv = (uint)wg_uniform((int)wave);
+    uint2 fa[MT / 8][EKC];
+    v8f ba[MT / 8];
+    const uint fwb = tail + WE + wv * (EKC * 256u) + (lane * 8u + sw_zero_bits());
+    [unroll] for (uint it = 0; it < MT / 8; ++it) {
+        const uint mt = wv + 8u * it;
+        [unroll] for (uint kc = 0; kc < EKC; ++kc) fa[it][kc] = wg_ld64(fwb, (8u * it * EKC + kc) * 256u);
+        ba[it] = wg_load8f(be, mt * 64u);
+    }
+    [unroll] for (uint it2 = 0; it2 < MT / 8; ++it2) {
+        const uint mt = wv + 8u * it2;
+        uint k = mt / G, g = mt - k * G;
+        v8f acc0 = ba[it2], acc1 = ba[it2];
+        [unroll] for (uint kc2 = 0; kc2 < EKC; ++kc2) {
+            acc0 = wg_wmma_fp8(fa[it2][kc2], yf[0][kc2], acc0);
+            acc1 = wg_wmma_fp8(fa[it2][kc2], yf[1][kc2], acc1);
+        }
+        uint2 q0, q1;
+#if SW_CLAMP_SKIP
+        if (sw_in448(sw_absmax8(sw_absmax8(0.0f, acc0), acc1))) {
+            q0 = wg_pack_q8_nc_ags(acc0); q1 = wg_pack_q8_nc_ags(acc1);
+        } else
+#endif
+        {
+            q0 = sw_pack_q8_v2(acc0); q1 = sw_pack_q8_v2(acc1);
+        }
+        uint slot0 = (0u + (t >> 2)) * 16u + (t & 3u) * 4u + k, slot1 = (4u + (t >> 2)) * 16u + (t & 3u) * 4u + k;
+        sw_lds_st64(e_lds + slot0 * SW_C + hh * (SW_C / 2) + 8u * g, q0);
+        sw_lds_st64(e_lds + slot1 * SW_C + hh * (SW_C / 2) + 8u * g, q1);
+    }
+}
+#endif
+
+#if SW_ECL > 0
+#define SW_ENTRY swin_block_c96_add_ex_nc
+#elif SW_C == 64
+#define SW_ENTRY swin_block_c64_nc
+#else
+#define SW_ENTRY swin_block_c96_nc
+#endif
+#ifdef SW_ENTRY_OVERRIDE   // swin_c64w2.hlsl: its own kernel has the name; this one is renamed (and not compiled)
+#undef SW_ENTRY
+#define SW_ENTRY SW_ENTRY_OVERRIDE
+#endif
+
+WG_KERNEL(SW_ENTRY)
+{
+    WG_SETUP();
+    const uint tid = wg_lane_id();
+    const uint lane = tid & 31u, t = lane & 15u, hh = lane >> 4;
+    const int nwx = (W + ox + 3) >> 2, nwy = (H + oy + 3) >> 2, nwin = nwx * nwy;
+    const uint wave_id = (uint)wg_uniform((int)(tid >> 5));
+    const int win0 = (int)(wg_block_id() * (THREADS / 32) + wave_id);
+
+    Stager stage;
+    st_fetch(stage, w + L_head(0), HEAD_BYTES / 16, tid);   // unit 0
+#if SW_GL_LDS
+    sw_gl_tab[tid] = sw_2q(wg_gl_entry(tid));   // THREADS = 256 entries; the first barrier orders it before the MLP
+#if SW_C == 96 && SW_ECL > 0
+    sw_gl_tab[tid + 256u] = sw_2q(wg_gl_entry(tid).yx);
+#endif
+#endif
+
+    // Gather: token t of the window, mirrored at the borders.
+    const int win = win0 < nwin ? win0 : nwin - 1;
+    const int wy = win / nwx, wx = win - wy * nwx;
+    const int pr = 4 * wy - oy + (int)(t >> 2), pc = 4 * wx - ox + (int)(t & 3u);
+    const bool real = win0 < nwin && pr >= 0 && pr < H && pc >= 0 && pc < W;
+    const int dst = real ? pr * W + pc : -1;
+    const int mr = sw_mirror(pr, H), mc = sw_mirror(pc, W);
+    const uint src = (uint)(mr * W + mc) * SW_C + hh * HALF;
+    uint2 xa[KC];
+#if SW_ADD
+    uint2 xb[KC];
+#endif
+#if SW_ECL > 0
+    const uint lowp = sw_win_low0(nwx, nwin, lane, (int)wg_block_id());
+    fused_expand(w + L_TAIL, MAXU, nwx, nwin, tid, (int)wg_block_id(), lowp);
+    const uint lpw = WaveReadLaneAt(lowp, wave_id);   // this wave's window (win: the same clamp)
+    const int low = ((mr >> 1) - (int)(lpw & 0xffffu)) * 2 + ((mc >> 1) - (int)(lpw >> 16));
+    const uint eslot = (tid >> 5) * 16u + (uint)low * 4u + (uint)(((mr & 1) << 1) | (mc & 1));
+#else
+    load_frags_g(x, src, xa);
+#endif
+#if SW_ADD
+    load_frags_g(xadd, src, xb);
+#endif
+#if SW_NORM1_EARLY
+    v8f ng[KC], nb[KC];
+    {
+        const uint g1 = w + L_G1 + hh * (HALF * 4), bp = w + L_BP + hh * 32u;
+        [unroll] for (uint k = 0; k < KC; ++k) { ng[k] = wg_load8f(g1, 32u * k); nb[k] = wg_load8f(bp, 64u * k); }
+    }
+#endif
+    st_commit(stage, 0u, HEAD_BYTES / 16, tid);
+    wg_barrier_lds();
+#if SW_ECL > 0
+    [unroll] for (uint i = 0; i < KC / 2; ++i) {
+        uint4 v = sw_lds_ld128(MAXU + eslot * SW_C + hh * HALF + 16u * i);
+        xa[2 * i] = v.xy; xa[2 * i + 1] = v.zw;
+    }
+    wg_barrier_lds();   // read before the buffer they live in is refilled
+#endif
+    uint buf = 0u;
+
+    // Steps 1-2: a = q8(RMSNorm(x; gamma1)); the residual accumulator starts as x + bp.
+    uint2 af[KC];
+    v8f acc[KC];
+    {
+        [unroll] for (uint k = 0; k < KC; ++k) {
+            acc[k] = sw_unpack_fp8(xa[k]);
+#if SW_ADD
+            acc[k] = sw_add8(acc[k], sw_unpack_fp8(xb[k]));
+#endif
+        }
+        const float r = norm_r(acc);
+#if SW_NORM_R2 & 1
+        const float r2 = sw_opaque_copy(r);
+#endif
+#if !SW_NORM1_EARLY
+        const uint g1 = w + L_G1 + hh * (HALF * 4), bp = w + L_BP + hh * 32u;
+#endif
+        [unroll] for (uint k2 = 0; k2 < KC; ++k2) {
+#if SW_NORM1_EARLY
+            const v8f g = ng[k2], b = nb[k2];
+#else
+            const v8f g = wg_load8f(g1, 32u * k2), b = wg_load8f(bp, 64u * k2);
+#endif
+            v8f d;
+#if SW_NORM_R2 & 1
+            d = sw_norm_mul8(acc[k2], r, r2, g);
+#else
+            [unroll] for (uint v = 0; v < 8; ++v) d.v[v] = acc[k2].v[v] * r * g.v[v];
+#endif
+            af[k2] = pack_in(d);
+            acc[k2] = sw_add8(acc[k2], b);
+        }
+    }
+
+    // Steps 3-7, one head at a time; one staged unit per head (QKV fragments, then the head's slice of Wp).
+#if SW_HEAD_UNROLL
+    const uint nheads = SW_HEADS;
+    [unroll] for (uint hd = 0; hd < nheads; ++hd) {
+#else
+    const uint nheads = SW_HEADS + sw_zero();
+#if SW_C != 64
+    const uint biasl = w + L_BIAS + ((t * 2u + hh) * 32u + sw_zero_bits());   // lane part of the bias address
+#endif
+#if SW_HEAD_PAIRS
+    [loop] for (uint h2 = 0; h2 < nheads; h2 += 2u) [unroll] for (uint hq = 0; hq < 2u; ++hq) {
+        const uint hd = h2 + hq;
+#else
+    [loop] for (uint hd = 0; hd < nheads; ++hd) {
+#endif
+#endif
+        const bool last = hd + 1u == nheads;
+        if (last) st_fetch(stage, w + L_mlp(0), MLP_BYTES / 16, tid);   // uniform branches: unit sizes stay constants
+        else st_fetch(stage, w + L_head(hd + 1u), HEAD_BYTES / 16, tid);
+        const uint U = buf * MAXU, fb = sw_lane_base(U, lane);
+#if SW_C == 64
+        // c64: the head's position bias issued before the QKV products (load latency hidden; about 1 us faster). The
+        // c96 kernels keep it below: there the earlier load made the register allocator add about 60 moves (+23 us).
+        const v8f bias = wg_load8f(w + L_BIAS, ((hd * 16u + t) * 2u + hh) * 32u);
+#endif
+        uint2 uf[2];
+        uint4 vt[2];
+        [unroll] for (uint mt = 0; mt < 2; ++mt) {
+            uint2 fq[KC], fv[KC];
+            [unroll] for (uint kc = 0; kc < KC; ++kc) {
+                fq[kc] = sw_lfrag_b(fb, (mt * KC + kc) * 2u);
+                fv[kc] = sw_lfrag_b(fb, (mt * KC + kc) * 2u + 1u);
+            }
+            v8f accq = sw_zero8(), accv = sw_zero8();
+            [unroll] for (uint kc2 = 0; kc2 < KC; ++kc2) {
+                accq = wg_wmma_fp8(fq[kc2], af[kc2], accq);
+                accv = wg_wmma_fp8(af[kc2], fv[kc2], accv);
+            }
+            uf[mt] = pack_in(accq);
+            vt[mt] = wg_to_f16_ags(accv);
+        }
+        // Lane (t, h) holds the logits S(t, s) of 8 keys; the position bias is packed in the same order.
+#if SW_C != 64
+        const v8f bias = wg_load8f(biasl, hd * 1024u);
+#endif
+        v8f s = wg_wmma_fp8(uf[0], uf[0], sw_zero8());   // S = U^T U
+        s = wg_wmma_fp8(uf[1], uf[1], s);
+        // soft cap: c = clamp(S + B, -cap, cap); t = c - c^3 / (3 cap^2) (fused); z = t tau log2(e). Written stage by stage
+        // (one loop per operation over the 8 values) so that the driver's compiler interleaves the 8 independent chains.
+        v8f c, tc;
+#if SW_SMAX_ADDST || SW_SMAX_STAGED   // c64 / c96: the same stage
+        [unroll] for (uint va0 = 0; va0 < 8; ++va0) c.v[va0] = s.v[va0] + bias.v[va0];
+        [unroll] for (uint v = 0; v < 8; ++v) c.v[v] = min(max(c.v[v], asfloat(0xc20179dbu)), asfloat(0x420179dbu));
+#else
+        [unroll] for (uint v = 0; v < 8; ++v) c.v[v] = min(max(s.v[v] + bias.v[v], asfloat(0xc20179dbu)), asfloat(0x420179dbu));
+#endif
+        [unroll] for (uint v1 = 0; v1 < 8; ++v1) tc.v[v1] = c.v[v1] * c.v[v1];
+        [unroll] for (uint v2 = 0; v2 < 8; ++v2) tc.v[v2] = mad(c.v[v2] * tc.v[v2], asfloat(0xb9a6cc38u), c.v[v2]);
+        // max over the rounded products RN(t tau log2e) = RN(tau log2e max t) (rounding is monotone, the factor > 0, t
+        // never NaN after the clamp): one multiply instead of eight
+        float mx = sw_hmax8(tc);
+        mx = max(mx, wg_xor16(mx));
+#if SW_SMAX_STAGED
+        const float nmx = mx * asfloat(0xbf028297u);   // -RN(k max)
+        const float nmx1 = asfloat(asuint(nmx) | sw_zero());   // the same value in a second register (dual issue)
+        v8f e;
+        [unroll] for (uint v4 = 0; v4 < 8; ++v4) e.v[v4] = mad(tc.v[v4], asfloat(0x3f028297u), (v4 & 1u) ? nmx1 : nmx);
+#else
+        mx = mx * asfloat(0x3f028297u);
+        v8f e;
+        [unroll] for (uint v4 = 0; v4 < 8; ++v4) e.v[v4] = mad(tc.v[v4], asfloat(0x3f028297u), -mx);
+#endif
+        [unroll] for (uint v5 = 0; v5 < 8; ++v5) e.v[v5] = wg_exp2(e.v[v5]);
+        float sum = sw_hsum8(e);
+        sum = sum + wg_xor16(sum);
+        const float rs = wg_rcp(sum);
+#if SW_SMAX_MIX
+        // p = (f16)(e / sum) with one rounding (HIP: v_fma_mixlo_f16 e, rcp, 0): the driver folds mad(e, rs, 0) into its
+        // F32 -> F16 matrix conversion as exactly that instruction (one rounding of the exact product; HIP's own operation).
+        v8f pm;
+        [unroll] for (uint v6 = 0; v6 < 8; ++v6) pm.v[v6] = mad(e.v[v6], rs, 0.0f);
+        const uint4 p = wg_to_f16_ags(pm);
+#else
+        // p = (f16)(e / sum) with one rounding (HIP: v_fma_mixlo_f16 e, rcp, 0 = wg_mul_f16): the product q rounded to odd
+        // at FP32 precision (its exact residual by fma gives the direction), then the driver's round-to-nearest-even FP16
+        // conversion. q >= 0 here (e = 2^x, rs > 0), so the round to odd needs no sign / infinity / zero cases: a nonzero
+        // residual with q even moves q one ulp toward the exact product (a zero q has a zero residual under FTZ).
+        // Same bits as wg_mul_f16 for these operands.
+        v8f q, r;
+        [unroll] for (uint v6 = 0; v6 < 8; ++v6) q.v[v6] = e.v[v6] * rs;
+        [unroll] for (uint v7 = 0; v7 < 8; ++v7) r.v[v7] = mad(e.v[v7], rs, -q.v[v7]);
+        // Select-free form (no compare / VCC chains): with nz = (r != 0) as 0 / 1 and s = 0 / -1 the residual sign,
+        // po = (q + s) | nz. nz = 0: q. r > 0: q | 1 (q even: q + 1; odd: q). r < 0: (q - 1) | 1 (q even: q - 1;
+        // odd: q). The bits of r: e > 0 and rs > 0 are finite (e = 2^x with x bounded by the soft cap, sum in [1, 16]),
+        // so r is finite and an exact-zero residual is +0 (x - x rounds to +0): r's sign bit is set only for r < 0.
+        v8f po;
+        uint nz[8], qs[8];
+        [unroll] for (uint v8 = 0; v8 < 8; ++v8) nz[v8] = asuint(r.v[v8]) << 1;
+        [unroll] for (uint v9 = 0; v9 < 8; ++v9) qs[v9] = asuint(q.v[v9]) + (uint)(asint(r.v[v9]) >> 31);
+        [unroll] for (uint va = 0; va < 8; ++va) nz[va] = min(nz[va], 1u);
+        [unroll] for (uint vb = 0; vb < 8; ++vb) po.v[vb] = asfloat(qs[vb] | nz[vb]);
+        const uint4 p = wg_to_f16_ags(po);
+#endif
+        // o = A V (rows value channels, columns tokens)
+        uint2 of[2];
+        [unroll] for (uint dt = 0; dt < 2; ++dt) of[dt] = pack_in(wg_wmma_f16(vt[dt], p, sw_zero8()));
+        // x1 += Wp[:, head hd] q8(o_hd)
+        uint2 fp[KC][2];
+        [unroll] for (uint m = 0; m < KC; ++m) {
+            fp[m][0] = sw_lfrag_b(fb, QKV_FRAGS + m * 2u);
+            fp[m][1] = sw_lfrag_b(fb, QKV_FRAGS + m * 2u + 1u);
+        }
+        [unroll] for (uint m2 = 0; m2 < KC; ++m2) {
+            acc[m2] = wg_wmma_fp8(fp[m2][0], of[0], acc[m2]);
+            acc[m2] = wg_wmma_fp8(fp[m2][1], of[1], acc[m2]);
+        }
+#if SW_NORM2_EARLY
+        if (!last) {
+            st_commit(stage, (buf ^ 1u) * MAXU, HEAD_BYTES / 16, tid);
+            wg_barrier_lds();
+            buf ^= 1u;
+        }
+#else
+        if (last) st_commit(stage, (buf ^ 1u) * MAXU, MLP_BYTES / 16, tid);
+        else st_commit(stage, (buf ^ 1u) * MAXU, HEAD_BYTES / 16, tid);
+        wg_barrier_lds();
+        buf ^= 1u;
+#endif
+    }
+#if SW_NORM2_EARLY
+    // the last head's commit after the loop, with norm2's gamma / beta issued before its barrier
+    v8f ng2[KC], nb2[KC];
+    {
+        const uint g2 = w + L_G2 + hh * (HALF * 4), b2 = w + L_B2 + hh * 32u;
+        [unroll] for (uint k = 0; k < KC; ++k) { ng2[k] = wg_load8f(g2, 32u * k); nb2[k] = wg_load8f(b2, 64u * k); }
+    }
+    st_commit(stage, (buf ^ 1u) * MAXU, MLP_BYTES / 16, tid);
+    wg_barrier_lds();
+    buf ^= 1u;
+#endif
+
+    // Step 8: m = q8(RMSNorm(x1; gamma2)), then b2 into the residual accumulator.
+    uint2 mf[KC];
+    {
+        const float r = norm_r(acc);
+#if SW_NORM_R2 & 2
+        const float r2 = sw_opaque_copy(r);
+#endif
+#if !SW_NORM2_EARLY
+        uint g2 = w + L_G2 + hh * (HALF * 4), b2 = w + L_B2 + hh * 32u;
+#endif
+        [unroll] for (uint k = 0; k < KC; ++k) {
+#if SW_N2_BATCH && !SW_NORM2_EARLY
+            if (k > 0u && k % SW_N2_BATCH == 0u) {
+                const uint dz = mf[k - 1u].x & sw_zero_bits();   // 0 at run time
+                g2 += dz; b2 += dz;
+            }
+#endif
+#if SW_NORM2_EARLY
+            const v8f g = ng2[k], b = nb2[k];
+#else
+            const v8f g = wg_load8f(g2, 32u * k), b = wg_load8f(b2, 64u * k);
+#endif
+            v8f d;
+#if SW_NORM_R2 & 2
+            d = sw_norm_mul8(acc[k], r, r2, g);
+#else
+            [unroll] for (uint v = 0; v < 8; ++v) d.v[v] = acc[k].v[v] * r * g.v[v];
+#endif
+            mf[k] = pack_in(d);
+            acc[k] = sw_add8(acc[k], b);
+        }
+    }
+
+    // Steps 9-10: x2 = x1 + W2 q8(GELU(W1 m + b1)) + b2, GROUP hidden tiles of 16 at a time.
+    const uint b1 = w + L_B1 + hh * 32u;
+#if SW_REV_PHI
+    v8f racc[KC];
+    [unroll] for (uint rk = 0; rk < KC; ++rk) racc[rk] = sw_perm8(acc[rk], 7u, 7u);
+#endif
+#if SW_MLP_DEP
+    uint mdz = 0u;   // opaque zero from the latest GELU pack: later loads' addresses depend on it (no early hoisting)
+#endif
+#if SW_MLP_DEP >= 2
+#define SW_MDZ mdz   // 2: also the LDS fragment bases and the staging commit (every group)
+#else
+#define SW_MDZ 0u
+#endif
+#if SW_MLP_STEP == NMLP
+    const uint nmlp = NMLP;
+    [unroll] for (uint u = 0; u < NMLP; ++u) {
+#elif SW_MLP_STEP > 1
+    const uint nmlp = NMLP + sw_zero();
+    [loop] for (uint us = 0; us < nmlp; us += SW_MLP_STEP) [unroll] for (uint ui = 0; ui < SW_MLP_STEP; ++ui) {
+        const uint u = us + ui;
+#else
+    const uint nmlp = NMLP + sw_zero();
+#if SW_MLP_PAIRS
+    [loop] for (uint u2 = 0; u2 < nmlp; u2 += 3u) [unroll] for (uint uq = 0; uq < 3u; ++uq) {
+        const uint u = u2 + uq;
+#else
+    [loop] for (uint u = 0; u < nmlp; ++u) {
+#endif
+#endif
+        const bool more = u + 1u < nmlp;
+#if SW_MLP_DEP
+        const uint wd = w + mdz, b1d = b1 + mdz;
+#else
+        const uint wd = w, b1d = b1;
+#endif
+#if SW_REV_PHI
+        [unroll] for (uint rk0 = 0; rk0 < KC; ++rk0) acc[rk0] = sw_unperm8(racc[rk0], 7u, 7u);
+#endif
+#if !SW_STAGE_LATE
+        st_fetch(stage, wd + L_mlp(more ? u + 1u : u), MLP_BYTES / 16, tid);
+#endif
+        const uint U = buf * MAXU;
+        // the tile groups of a unit unrolled (C = 96: as a loop, the register allocator moved the 48 accumulator registers
+        // around on every iteration, about 90 moves per group; C = 64: measured 3.6 % faster unrolled) and
+        // software-pipelined by one group (c64 / c96 about 4 % faster): W1 of group j0 + GROUP is issued before the GELU
+        // of group j0, so the GELU's exp / rcp can issue under independent matrix multiplies (same operations per value)
+        v8f hcur[GROUP];
+        {
+            const uint fb0 = sw_lane_base(buf * MAXU, lane) + SW_MDZ;
+            uint2 f1[GROUP][KC];
+            [unroll] for (uint g = 0; g < GROUP; ++g)
+                [unroll] for (uint kc = 0; kc < KC; ++kc) f1[g][kc] = sw_lfrag_b(fb0, g * 2u * KC + kc);
+            [unroll] for (uint g2 = 0; g2 < GROUP; ++g2) hcur[g2] = wg_load8f(b1d, (u * HPU + g2) * 64u);
+            [unroll] for (uint kc2 = 0; kc2 < KC; ++kc2)
+                [unroll] for (uint g3 = 0; g3 < GROUP; ++g3) hcur[g3] = wg_wmma_fp8(f1[g3][kc2], mf[kc2], hcur[g3]);
+        }
+        [unroll] for (uint j0 = 0; j0 < HPU; j0 += GROUP) {
+#if SW_GELU == 3
+            sw_gj = j0 / GROUP;
+#endif
+            const uint fb = sw_lane_base(buf * MAXU, lane) + SW_MDZ + j0 * (2u * KC * 32u);
+            uint2 f2[GROUP][KC];
+#if SW_F2_LATE
+            if (!((SW_F2_LATE >> ((j0 / GROUP) % 2u)) & 1u))
+#endif
+            [unroll] for (uint g4 = 0; g4 < GROUP; ++g4)
+                [unroll] for (uint m = 0; m < KC; ++m) f2[g4][m] = sw_lfrag_b(fb, g4 * 2u * KC + KC + m);
+#if SW_GELU != 0
+#if !SW_SAFE
+#error "the GELU tables give HIP's pack_in<SAFE> bytes (no clamp)"
+#endif
+#if SW_GELU_EARLY
+            // q8(GELU) by the exact table (HIP: wg_gelu + pack_in<SAFE>): the loads now, the rest after W1(j0 + GROUP)
+            SwGeluPre gp;
+            if (!((SW_GELU_LATE0 >> ((j0 / GROUP) % 2u)) & 1u)) gp = sw_gelu_pre(hcur);
+#endif
+#endif
+            v8f hnext[GROUP];
+            if (j0 + GROUP < HPU) {
+                const uint fbn = fb + GROUP * (2u * KC * 32u);
+                uint2 f1[GROUP][KC];
+                [unroll] for (uint g = 0; g < GROUP; ++g)
+                    [unroll] for (uint kc = 0; kc < KC; ++kc) f1[g][kc] = sw_lfrag_b(fbn, g * 2u * KC + kc);
+                [unroll] for (uint g2 = 0; g2 < GROUP; ++g2) hnext[g2] = wg_load8f(b1d, (u * HPU + j0 + GROUP + g2) * 64u);
+                [unroll] for (uint kc2 = 0; kc2 < KC; ++kc2)
+                    [unroll] for (uint g3 = 0; g3 < GROUP; ++g3) hnext[g3] = wg_wmma_fp8(f1[g3][kc2], mf[kc2], hnext[g3]);
+            } else {
+                [unroll] for (uint g7 = 0; g7 < GROUP; ++g7) hnext[g7] = hcur[g7];
+            }
+            uint2 hf[GROUP];
+#if SW_GELU != 0
+#if SW_GELU_EARLY
+            if ((SW_GELU_LATE0 >> ((j0 / GROUP) % 2u)) & 1u) gp = sw_gelu_pre(hcur);
+            sw_gelu_fin(hcur, gp, hf);
+#else
+            sw_gelu_fin(hcur, sw_gelu_pre(hcur), hf);
+#endif
+#else
+            // GELU of the GROUP x 8 values, written stage by stage so that the independent chains interleave (written
+            // value by value, the driver's compiler emitted each 7-operation chain on its own)
+            v8f ge[GROUP];
+            gelu_group(hcur, ge);
+            [unroll] for (uint g5 = 0; g5 < GROUP; ++g5) hf[g5] = pack_in(ge[g5]);
+#endif
+#if SW_F2_LATE
+            // W2 fragments loaded after the GELU (their base through its first pack: the driver cannot hoist them)
+            if ((SW_F2_LATE >> ((j0 / GROUP) % 2u)) & 1u) {
+                const uint fbl = fb + (hf[0].x & sw_zero_bits());
+                [unroll] for (uint g4 = 0; g4 < GROUP; ++g4)
+                    [unroll] for (uint m = 0; m < KC; ++m) f2[g4][m] = sw_lfrag_b(fbl, g4 * 2u * KC + KC + m);
+            }
+#endif
+#if SW_MLP_DEP
+            if (SW_MLP_DEP == 2 || j0 + GROUP == HPU) mdz = hf[0].x & sw_zero_bits();
+#endif
+#if SW_STAGE_LATE
+            // the next unit's staging loads after group SW_STAGE_LATE - 1's GELU (their address through its pack)
+            if (j0 == GROUP * (SW_STAGE_LATE - 1) && (SW_MLP_STEP != NMLP || more))
+                st_fetch(stage, wd + (hf[0].x & sw_zero_bits()) + L_mlp(more ? u + 1u : u), MLP_BYTES / 16, tid);
+#endif
+            [unroll] for (uint m2 = 0; m2 < KC; ++m2)
+                [unroll] for (uint g6 = 0; g6 < GROUP; ++g6) acc[m2] = wg_wmma_fp8(f2[g6][m2], hf[g6], acc[m2]);
+            [unroll] for (uint g8 = 0; g8 < GROUP; ++g8) hcur[g8] = hnext[g8];
+#if SW_COMMIT_EARLY
+            if (more && j0 == GROUP * (SW_COMMIT_EARLY - 1)) st_commit(stage, (buf ^ 1u) * MAXU + 8u * SW_MDZ, MLP_BYTES / 16, tid);
+#endif
+        }
+        if (more) {
+#if !SW_COMMIT_EARLY
+            st_commit(stage, (buf ^ 1u) * MAXU, MLP_BYTES / 16, tid);
+#endif
+            wg_barrier_lds();
+            buf ^= 1u;
+        }
+#if SW_REV_PHI
+        [unroll] for (uint rk1 = 0; rk1 < KC; ++rk1) racc[rk1] = sw_perm8(acc[rk1], 7u, 7u);
+#endif
+    }
+#if SW_REV_PHI
+    [unroll] for (uint rk2 = 0; rk2 < KC; ++rk2) acc[rk2] = sw_unperm8(racc[rk2], 7u, 7u);
+#endif
+
+    // Output q8(x2), real window members only.
+    uint2 o[KC];
+#if SW_CLAMP_SKIP
+    float am = 0.0f;
+    [unroll] for (uint k0 = 0; k0 < KC; ++k0) am = sw_absmax8(am, acc[k0]);
+    if (sw_in448(am)) {
+        [unroll] for (uint k = 0; k < KC; ++k) o[k] = wg_pack_q8_nc_ags(acc[k]);
+    } else
+#endif
+    {
+        [unroll] for (uint k = 0; k < KC; ++k) o[k] = sw_pack_q8_v2(acc[k]);
+    }
+    if (dst >= 0) {
+        const uint ob = (uint)dst * SW_C + hh * HALF;
+        [unroll] for (uint i = 0; i < KC / 2; ++i) wg_st128(out_p, ob + 16u * i, uint4(o[2 * i], o[2 * i + 1]));
+    }
+}

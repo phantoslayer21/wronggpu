@@ -1,0 +1,16 @@
+; SPDX-License-Identifier: MIT
+LIBRARY ffx_fsr3_x64.wronggpu-original
+EXPORTS
+    ffxFsr3DispatchFrameGeneration
+    ffxFsr3ContextCreate
+    ffxFsr3ContextDispatchUpscale
+    ffxFsr3SkipPresent
+    ffxFsr3ContextGenerateReactiveMask
+    ffxFsr3ConfigureFrameGeneration
+    ffxFsr3ContextDestroy
+    ffxFsr3GetUpscaleRatioFromQualityMode
+    ffxFsr3GetRenderResolutionFromQualityMode
+    ffxFsr3GetJitterPhaseCount
+    ffxFsr3GetJitterOffset
+    ffxFsr3ResourceIsNull
+    fakeLog

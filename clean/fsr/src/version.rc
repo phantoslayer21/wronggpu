@@ -1,0 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Version resource of amd_fidelityfx_dx12.dll (WrongGPU).
+#define WG_RC_DESCRIPTION "WrongGPU FSR front end (replaces the FidelityFX API DLL; forwards to AMD's original)"
+#define WG_RC_FILENAME "amd_fidelityfx_dx12.dll"
+#include "version_common.rc"

@@ -1,0 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Version resource of ffx_fsr3_x64.dll (WrongGPU).
+#define WG_RC_DESCRIPTION "WrongGPU FSR 3.0 forwarder (replaces ffx_fsr3_x64.dll; forwards to AMD's original)"
+#define WG_RC_FILENAME "ffx_fsr3_x64.dll"
+#include "version_common.rc"

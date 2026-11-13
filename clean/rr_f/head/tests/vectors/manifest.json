@@ -1,0 +1,4108 @@
+{
+ "spec": "pages 55 (D0-R head) and 51 (window block at level 0), drafts 7 / 6",
+ "generator": "python -m clean.rr_f.head.vectors",
+ "synthetic": "all weights, constants (window-block constants, ra, m, g, h0, h1, S1CAP) and inputs are synthetic test inputs chosen by this generator; none comes from model data",
+ "format": {
+  "files": "each array is stored in one or more text files (parts, concatenated in the listed order); a file holds whitespace-separated lower-case hexadecimal words, 16 per line, in C (row-major) order of the stated shape; no 0x prefix",
+  "dtypes": {
+   "e4m3": "2 hex digits: the e4m3 code byte (page 51.1)",
+   "u8": "2 hex digits: unsigned 8-bit code",
+   "i8": "2 hex digits: two's-complement signed 8-bit code (ff = -1)",
+   "f16": "4 hex digits: IEEE binary16 bit pattern (NaN written as 7e00 / fe00)",
+   "f32": "8 hex digits: IEEE binary32 bit pattern"
+  },
+  "layout": "tensors are [Y][X][channel] with absolute token coordinates; window-indexed arrays use the window order j-major, i-minor (window (i, j) covers X = 8i - sx + lx, Y = 8j - sy + ly) and t = 8*ly + lx",
+  "weights": "page 51.2 logical tensors: Wq, Wv [H][C][32]; Tb [H][12][16][16] (block k = k-th pair of tb_pair_order); Wo [H][32][C]; bo [C]; W1 [C][4C]; b1 [4C]; W2 [4C][C]; b2 [C]",
+  "f16_steps": "distance on the ordered line of binary16 values; +0 and -0 are the same point; +-inf follow +-65504; NaN matches only NaN (any NaN bit pattern)"
+ },
+ "assumptions": "see clean/rr_f/head/QUESTIONS-55.md (provisional readings)",
+ "channels": "block-output channel picks of 55.2 / 55.3 in the page 55 erratum's natural numbering: gate logits 0, 1, 2, 3; HID tanh(y14), tanh(y16); GATES y4, y5, y6; PREC y7, y8, y9; CANDW y10, y12",
+ "cases": [
+  {
+   "name": "stage_basic",
+   "kind": "stage",
+   "description": "random weights and inputs, full render size, recurrent shift (6, 2)",
+   "tensor_extent": {
+    "Wt": 32,
+    "Ht": 32
+   },
+   "render_size": {
+    "Wr": 32,
+    "Hr": 32
+   },
+   "scalars": {
+    "g": {
+     "dtype": "f16",
+     "bits": "3b88",
+     "value": 0.94140625
+    },
+    "h0": {
+     "dtype": "f16",
+     "bits": "3d7b",
+     "value": 1.3701171875
+    },
+    "h1": {
+     "dtype": "f16",
+     "bits": "b4cd",
+     "value": -0.300048828125
+    },
+    "S1CAP": {
+     "dtype": "f32",
+     "bits": "41a40000",
+     "value": 20.5
+    },
+    "s1": {
+     "dtype": "f32",
+     "bits": "407be458",
+     "value": 3.935811996459961
+    },
+    "s2": {
+     "dtype": "f32",
+     "bits": "3f3da3e4",
+     "value": 0.7407820224761963
+    }
+   },
+   "inputs": {
+    "x": {
+     "dtype": "e4m3",
+     "shape": [
+      32,
+      32,
+      32
+     ],
+     "files": [
+      "stage_basic/x.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "what": "D0-F output tensor (block input)"
+    },
+    "Wq": {
+     "dtype": "e4m3",
+     "shape": [
+      2,
+      32,
+      32
+     ],
+     "files": [
+      "stage_basic/Wq.hex"
+     ]
+    },
+    "Wv": {
+     "dtype": "e4m3",
+     "shape": [
+      2,
+      32,
+      32
+     ],
+     "files": [
+      "stage_basic/Wv.hex"
+     ]
+    },
+    "Wo": {
+     "dtype": "e4m3",
+     "shape": [
+      2,
+      32,
+      32
+     ],
+     "files": [
+      "stage_basic/Wo.hex"
+     ]
+    },
+    "W1": {
+     "dtype": "e4m3",
+     "shape": [
+      32,
+      128
+     ],
+     "files": [
+      "stage_basic/W1.hex"
+     ]
+    },
+    "W2": {
+     "dtype": "e4m3",
+     "shape": [
+      128,
+      32
+     ],
+     "files": [
+      "stage_basic/W2.hex"
+     ]
+    },
+    "Tb": {
+     "dtype": "f16",
+     "shape": [
+      2,
+      12,
+      16,
+      16
+     ],
+     "files": [
+      "stage_basic/Tb.hex"
+     ],
+     "tb_pair_order": [
+      [
+       0,
+       0
+      ],
+      [
+       1,
+       0
+      ],
+      [
+       0,
+       1
+      ],
+      [
+       1,
+       1
+      ],
+      [
+       0,
+       2
+      ],
+      [
+       1,
+       2
+      ],
+      [
+       0,
+       3
+      ],
+      [
+       1,
+       3
+      ],
+      [
+       2,
+       2
+      ],
+      [
+       3,
+       2
+      ],
+      [
+       2,
+       3
+      ],
+      [
+       3,
+       3
+      ]
+     ]
+    },
+    "bo": {
+     "dtype": "f16",
+     "shape": [
+      32
+     ],
+     "files": [
+      "stage_basic/bo.hex"
+     ]
+    },
+    "b1": {
+     "dtype": "f16",
+     "shape": [
+      128
+     ],
+     "files": [
+      "stage_basic/b1.hex"
+     ]
+    },
+    "b2": {
+     "dtype": "f16",
+     "shape": [
+      32
+     ],
+     "files": [
+      "stage_basic/b2.hex"
+     ]
+    },
+    "hold": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "stage_basic/hold.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "what": "own hidden: IN0's level-0 hnew, same frame"
+    },
+    "Hc": {
+     "dtype": "f16",
+     "shape": [
+      16,
+      16,
+      4
+     ],
+     "files": [
+      "stage_basic/Hc.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "what": "coarse hidden: D1-R's hnew (level 1), same frame"
+    }
+   },
+   "outputs": {
+    "Cnet": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "stage_basic/Cnet.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "HID": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "stage_basic/HID.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "GATES": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "stage_basic/GATES.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "PREC": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "stage_basic/PREC.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "CANDW": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "stage_basic/CANDW.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 3,
+      "provisional": true,
+      "exact": "per token: the two values of each pair identical; equal finite CANDW logits (natural y10 == y12, page 55's y20 == y24) -> four values 0.25; an infinite logit (or two of opposite sign) -> (1/2, 1/2, 0, 0) or (0, 0, 1/2, 1/2); two infinite logits of the same sign or a NaN logit -> four NaN",
+      "note": "page 55.3 (3 f16 steps provisional, 55.6 item 2)"
+     }
+    },
+    "HID_code": {
+     "dtype": "i8",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "stage_basic/HID_code.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "store_of_own_values",
+      "store": "snorm8 (page 53.3 / 55.3): NaN -> 0, clamp [-1, 1], round(c * 127), +-0.5 -> +-64",
+      "max_code_diff": 1,
+      "note": "codes are checked by applying the store rule to the implementation's own f16 values; the listed codes are the reference's (within one code of an implementation within tolerance)"
+     }
+    },
+    "GATES_code": {
+     "dtype": "u8",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "stage_basic/GATES_code.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "store_of_own_values",
+      "store": "unorm8 (page 55.3): NaN -> 0, clamp [0, 1], round(c * 255), 0.5 -> 128",
+      "max_code_diff": 1,
+      "note": "codes are checked by applying the store rule to the implementation's own f16 values"
+     }
+    },
+    "CANDW_code": {
+     "dtype": "u8",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "stage_basic/CANDW_code.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "store_of_own_values",
+      "store": "unorm8 (page 55.3): NaN -> 0, clamp [0, 1], round(c * 255), 0.5 -> 128",
+      "max_code_diff": 1,
+      "note": "codes are checked by applying the store rule to the implementation's own f16 values"
+     }
+    }
+   },
+   "diagnostics": {
+    "y2h": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      32
+     ],
+     "files": [
+      "stage_basic/y2h.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 0,
+      "note": "bit-exact when the implementation uses the reference row sums Z (diagnostic Z); with its own Z order, page 51.3 step 4 accepts one-step Z differences and their consequences (51.8 item 1). Zero signs not compared."
+     }
+    },
+    "Z": {
+     "dtype": "f16",
+     "shape": [
+      25,
+      2,
+      64
+     ],
+     "files": [
+      "stage_basic/Z.hex"
+     ],
+     "layout": "[window][head][query token]",
+     "windows": 25,
+     "what": "row sums Z of 51.3 step 4 (exact sum rounded once)",
+     "rows_with_Z_inf": 0
+    }
+   },
+   "shift": {
+    "SH_row": [
+     2,
+     6
+    ],
+    "recurrent_shift": [
+     6,
+     2
+    ],
+    "rule": "((s + 4) mod 8) per component (page 51.6)"
+   },
+   "constants": {
+    "A_SCALE": {
+     "dtype": "f16",
+     "bits": "2da8",
+     "value": 0.08837890625
+    },
+    "A_CLAMP": {
+     "dtype": "f16",
+     "bits": "3800",
+     "value": 0.5
+    },
+    "A_CLAMPn": {
+     "dtype": "f16",
+     "bits": "b780",
+     "value": -0.46875
+    },
+    "A_P1": {
+     "dtype": "f16",
+     "bits": "3a01",
+     "value": 0.75048828125
+    },
+    "A_P0": {
+     "dtype": "f16",
+     "bits": "3d9a",
+     "value": 1.400390625
+    },
+    "ACT_CL": {
+     "dtype": "f16",
+     "bits": "4200",
+     "value": 3.0
+    },
+    "ACT_CLn": {
+     "dtype": "f16",
+     "bits": "c282",
+     "value": -3.25390625
+    },
+    "ACT_C1": {
+     "dtype": "f16",
+     "bits": "2ca1",
+     "value": 0.07232666015625
+    },
+    "ACT_C2": {
+     "dtype": "f16",
+     "bits": "3658",
+     "value": 0.396484375
+    },
+    "ACT_C3": {
+     "dtype": "f16",
+     "bits": "3800",
+     "value": 0.5
+    },
+    "ra": {
+     "dtype": "f16",
+     "bits": "3ad0",
+     "value": 0.8515625
+    },
+    "m": {
+     "dtype": "f16",
+     "bits": "3970",
+     "value": 0.6796875
+    }
+   },
+   "converter_check": {
+    "attention_range_ok": true,
+    "w_max": 58.0,
+    "z_can_overflow": false
+   },
+   "counts": {
+    "Cnet": {
+     "nan": 0,
+     "inf": 0,
+     "zero": 1024,
+     "total": 4096
+    },
+    "HID": {
+     "nan": 0,
+     "inf": 0,
+     "zero": 0,
+     "total": 4096
+    },
+    "GATES": {
+     "nan": 0,
+     "inf": 0,
+     "zero": 1024,
+     "total": 4096
+    },
+    "PREC": {
+     "nan": 0,
+     "inf": 0,
+     "zero": 1024,
+     "total": 4096
+    },
+    "CANDW": {
+     "nan": 0,
+     "inf": 0,
+     "zero": 0,
+     "total": 4096
+    }
+   }
+  },
+  {
+   "name": "stage_border",
+   "kind": "stage",
+   "description": "non-square tensor, render size smaller than the tensor (tokens X >= Wr / Y >= Hr write nothing), recurrent shift (4, 4); generic hold[.][3] != 0",
+   "tensor_extent": {
+    "Wt": 64,
+    "Ht": 32
+   },
+   "render_size": {
+    "Wr": 57,
+    "Hr": 19
+   },
+   "scalars": {
+    "g": {
+     "dtype": "f16",
+     "bits": "3d30",
+     "value": 1.296875
+    },
+    "h0": {
+     "dtype": "f16",
+     "bits": "399a",
+     "value": 0.7001953125
+    },
+    "h1": {
+     "dtype": "f16",
+     "bits": "3733",
+     "value": 0.449951171875
+    },
+    "S1CAP": {
+     "dtype": "f32",
+     "bits": "41a40000",
+     "value": 20.5
+    },
+    "s1": {
+     "dtype": "f32",
+     "bits": "4000e7c5",
+     "value": 2.014146089553833
+    },
+    "s2": {
+     "dtype": "f32",
+     "bits": "3fc8bbf2",
+     "value": 1.5682356357574463
+    }
+   },
+   "inputs": {
+    "x": {
+     "dtype": "e4m3",
+     "shape": [
+      32,
+      64,
+      32
+     ],
+     "files": [
+      "stage_border/x.part0.hex",
+      "stage_border/x.part1.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "what": "D0-F output tensor (block input)"
+    },
+    "Wq": {
+     "dtype": "e4m3",
+     "shape": [
+      2,
+      32,
+      32
+     ],
+     "files": [
+      "stage_border/Wq.hex"
+     ]
+    },
+    "Wv": {
+     "dtype": "e4m3",
+     "shape": [
+      2,
+      32,
+      32
+     ],
+     "files": [
+      "stage_border/Wv.hex"
+     ]
+    },
+    "Wo": {
+     "dtype": "e4m3",
+     "shape": [
+      2,
+      32,
+      32
+     ],
+     "files": [
+      "stage_border/Wo.hex"
+     ]
+    },
+    "W1": {
+     "dtype": "e4m3",
+     "shape": [
+      32,
+      128
+     ],
+     "files": [
+      "stage_border/W1.hex"
+     ]
+    },
+    "W2": {
+     "dtype": "e4m3",
+     "shape": [
+      128,
+      32
+     ],
+     "files": [
+      "stage_border/W2.hex"
+     ]
+    },
+    "Tb": {
+     "dtype": "f16",
+     "shape": [
+      2,
+      12,
+      16,
+      16
+     ],
+     "files": [
+      "stage_border/Tb.hex"
+     ],
+     "tb_pair_order": [
+      [
+       0,
+       0
+      ],
+      [
+       1,
+       0
+      ],
+      [
+       0,
+       1
+      ],
+      [
+       1,
+       1
+      ],
+      [
+       0,
+       2
+      ],
+      [
+       1,
+       2
+      ],
+      [
+       0,
+       3
+      ],
+      [
+       1,
+       3
+      ],
+      [
+       2,
+       2
+      ],
+      [
+       3,
+       2
+      ],
+      [
+       2,
+       3
+      ],
+      [
+       3,
+       3
+      ]
+     ]
+    },
+    "bo": {
+     "dtype": "f16",
+     "shape": [
+      32
+     ],
+     "files": [
+      "stage_border/bo.hex"
+     ]
+    },
+    "b1": {
+     "dtype": "f16",
+     "shape": [
+      128
+     ],
+     "files": [
+      "stage_border/b1.hex"
+     ]
+    },
+    "b2": {
+     "dtype": "f16",
+     "shape": [
+      32
+     ],
+     "files": [
+      "stage_border/b2.hex"
+     ]
+    },
+    "hold": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      64,
+      4
+     ],
+     "files": [
+      "stage_border/hold.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "what": "own hidden: IN0's level-0 hnew, same frame"
+    },
+    "Hc": {
+     "dtype": "f16",
+     "shape": [
+      16,
+      32,
+      4
+     ],
+     "files": [
+      "stage_border/Hc.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "what": "coarse hidden: D1-R's hnew (level 1), same frame"
+    }
+   },
+   "outputs": {
+    "Cnet": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      64,
+      4
+     ],
+     "files": [
+      "stage_border/Cnet.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "HID": {
+     "dtype": "f16",
+     "shape": [
+      19,
+      57,
+      4
+     ],
+     "files": [
+      "stage_border/HID.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "GATES": {
+     "dtype": "f16",
+     "shape": [
+      19,
+      57,
+      4
+     ],
+     "files": [
+      "stage_border/GATES.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "PREC": {
+     "dtype": "f16",
+     "shape": [
+      19,
+      57,
+      4
+     ],
+     "files": [
+      "stage_border/PREC.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "CANDW": {
+     "dtype": "f16",
+     "shape": [
+      19,
+      57,
+      4
+     ],
+     "files": [
+      "stage_border/CANDW.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 3,
+      "provisional": true,
+      "exact": "per token: the two values of each pair identical; equal finite CANDW logits (natural y10 == y12, page 55's y20 == y24) -> four values 0.25; an infinite logit (or two of opposite sign) -> (1/2, 1/2, 0, 0) or (0, 0, 1/2, 1/2); two infinite logits of the same sign or a NaN logit -> four NaN",
+      "note": "page 55.3 (3 f16 steps provisional, 55.6 item 2)"
+     }
+    },
+    "HID_code": {
+     "dtype": "i8",
+     "shape": [
+      19,
+      57,
+      4
+     ],
+     "files": [
+      "stage_border/HID_code.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "store_of_own_values",
+      "store": "snorm8 (page 53.3 / 55.3): NaN -> 0, clamp [-1, 1], round(c * 127), +-0.5 -> +-64",
+      "max_code_diff": 1,
+      "note": "codes are checked by applying the store rule to the implementation's own f16 values; the listed codes are the reference's (within one code of an implementation within tolerance)"
+     }
+    },
+    "GATES_code": {
+     "dtype": "u8",
+     "shape": [
+      19,
+      57,
+      4
+     ],
+     "files": [
+      "stage_border/GATES_code.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "store_of_own_values",
+      "store": "unorm8 (page 55.3): NaN -> 0, clamp [0, 1], round(c * 255), 0.5 -> 128",
+      "max_code_diff": 1,
+      "note": "codes are checked by applying the store rule to the implementation's own f16 values"
+     }
+    },
+    "CANDW_code": {
+     "dtype": "u8",
+     "shape": [
+      19,
+      57,
+      4
+     ],
+     "files": [
+      "stage_border/CANDW_code.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "store_of_own_values",
+      "store": "unorm8 (page 55.3): NaN -> 0, clamp [0, 1], round(c * 255), 0.5 -> 128",
+      "max_code_diff": 1,
+      "note": "codes are checked by applying the store rule to the implementation's own f16 values"
+     }
+    }
+   },
+   "diagnostics": {
+    "y2h": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      64,
+      32
+     ],
+     "files": [
+      "stage_border/y2h.part0.hex",
+      "stage_border/y2h.part1.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 0,
+      "note": "bit-exact when the implementation uses the reference row sums Z (diagnostic Z); with its own Z order, page 51.3 step 4 accepts one-step Z differences and their consequences (51.8 item 1). Zero signs not compared."
+     }
+    },
+    "Z": {
+     "dtype": "f16",
+     "shape": [
+      45,
+      2,
+      64
+     ],
+     "files": [
+      "stage_border/Z.hex"
+     ],
+     "layout": "[window][head][query token]",
+     "windows": 45,
+     "what": "row sums Z of 51.3 step 4 (exact sum rounded once)",
+     "rows_with_Z_inf": 0
+    }
+   },
+   "shift": {
+    "SH_row": [
+     0,
+     0
+    ],
+    "recurrent_shift": [
+     4,
+     4
+    ],
+    "rule": "((s + 4) mod 8) per component (page 51.6)"
+   },
+   "constants": {
+    "A_SCALE": {
+     "dtype": "f16",
+     "bits": "2da8",
+     "value": 0.08837890625
+    },
+    "A_CLAMP": {
+     "dtype": "f16",
+     "bits": "3800",
+     "value": 0.5
+    },
+    "A_CLAMPn": {
+     "dtype": "f16",
+     "bits": "b780",
+     "value": -0.46875
+    },
+    "A_P1": {
+     "dtype": "f16",
+     "bits": "3a01",
+     "value": 0.75048828125
+    },
+    "A_P0": {
+     "dtype": "f16",
+     "bits": "3d9a",
+     "value": 1.400390625
+    },
+    "ACT_CL": {
+     "dtype": "f16",
+     "bits": "4200",
+     "value": 3.0
+    },
+    "ACT_CLn": {
+     "dtype": "f16",
+     "bits": "c282",
+     "value": -3.25390625
+    },
+    "ACT_C1": {
+     "dtype": "f16",
+     "bits": "2ca1",
+     "value": 0.07232666015625
+    },
+    "ACT_C2": {
+     "dtype": "f16",
+     "bits": "3658",
+     "value": 0.396484375
+    },
+    "ACT_C3": {
+     "dtype": "f16",
+     "bits": "3800",
+     "value": 0.5
+    },
+    "ra": {
+     "dtype": "f16",
+     "bits": "3cb0",
+     "value": 1.171875
+    },
+    "m": {
+     "dtype": "f16",
+     "bits": "3728",
+     "value": 0.447265625
+    }
+   },
+   "converter_check": {
+    "attention_range_ok": true,
+    "w_max": 58.0,
+    "z_can_overflow": false
+   },
+   "counts": {
+    "Cnet": {
+     "nan": 0,
+     "inf": 0,
+     "zero": 0,
+     "total": 8192
+    },
+    "HID": {
+     "nan": 0,
+     "inf": 0,
+     "zero": 0,
+     "total": 4332
+    },
+    "GATES": {
+     "nan": 0,
+     "inf": 0,
+     "zero": 1083,
+     "total": 4332
+    },
+    "PREC": {
+     "nan": 0,
+     "inf": 0,
+     "zero": 1083,
+     "total": 4332
+    },
+    "CANDW": {
+     "nan": 0,
+     "inf": 0,
+     "zero": 0,
+     "total": 4332
+    }
+   }
+  },
+  {
+   "name": "stage_shift",
+   "kind": "stage",
+   "description": "recurrent shift (2, 0); s1 capped (expf(4) > S1CAP); wider input distribution",
+   "tensor_extent": {
+    "Wt": 32,
+    "Ht": 64
+   },
+   "render_size": {
+    "Wr": 31,
+    "Hr": 64
+   },
+   "scalars": {
+    "g": {
+     "dtype": "f16",
+     "bits": "3b88",
+     "value": 0.94140625
+    },
+    "h0": {
+     "dtype": "f16",
+     "bits": "4400",
+     "value": 4.0
+    },
+    "h1": {
+     "dtype": "f16",
+     "bits": "bc66",
+     "value": -1.099609375
+    },
+    "S1CAP": {
+     "dtype": "f32",
+     "bits": "41a40000",
+     "value": 20.5
+    },
+    "s1": {
+     "dtype": "f32",
+     "bits": "41a40000",
+     "value": 20.5
+    },
+    "s2": {
+     "dtype": "f32",
+     "bits": "3eaa7f20",
+     "value": 0.33300113677978516
+    }
+   },
+   "inputs": {
+    "x": {
+     "dtype": "e4m3",
+     "shape": [
+      64,
+      32,
+      32
+     ],
+     "files": [
+      "stage_shift/x.part0.hex",
+      "stage_shift/x.part1.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "what": "D0-F output tensor (block input)"
+    },
+    "Wq": {
+     "dtype": "e4m3",
+     "shape": [
+      2,
+      32,
+      32
+     ],
+     "files": [
+      "stage_shift/Wq.hex"
+     ]
+    },
+    "Wv": {
+     "dtype": "e4m3",
+     "shape": [
+      2,
+      32,
+      32
+     ],
+     "files": [
+      "stage_shift/Wv.hex"
+     ]
+    },
+    "Wo": {
+     "dtype": "e4m3",
+     "shape": [
+      2,
+      32,
+      32
+     ],
+     "files": [
+      "stage_shift/Wo.hex"
+     ]
+    },
+    "W1": {
+     "dtype": "e4m3",
+     "shape": [
+      32,
+      128
+     ],
+     "files": [
+      "stage_shift/W1.hex"
+     ]
+    },
+    "W2": {
+     "dtype": "e4m3",
+     "shape": [
+      128,
+      32
+     ],
+     "files": [
+      "stage_shift/W2.hex"
+     ]
+    },
+    "Tb": {
+     "dtype": "f16",
+     "shape": [
+      2,
+      12,
+      16,
+      16
+     ],
+     "files": [
+      "stage_shift/Tb.hex"
+     ],
+     "tb_pair_order": [
+      [
+       0,
+       0
+      ],
+      [
+       1,
+       0
+      ],
+      [
+       0,
+       1
+      ],
+      [
+       1,
+       1
+      ],
+      [
+       0,
+       2
+      ],
+      [
+       1,
+       2
+      ],
+      [
+       0,
+       3
+      ],
+      [
+       1,
+       3
+      ],
+      [
+       2,
+       2
+      ],
+      [
+       3,
+       2
+      ],
+      [
+       2,
+       3
+      ],
+      [
+       3,
+       3
+      ]
+     ]
+    },
+    "bo": {
+     "dtype": "f16",
+     "shape": [
+      32
+     ],
+     "files": [
+      "stage_shift/bo.hex"
+     ]
+    },
+    "b1": {
+     "dtype": "f16",
+     "shape": [
+      128
+     ],
+     "files": [
+      "stage_shift/b1.hex"
+     ]
+    },
+    "b2": {
+     "dtype": "f16",
+     "shape": [
+      32
+     ],
+     "files": [
+      "stage_shift/b2.hex"
+     ]
+    },
+    "hold": {
+     "dtype": "f16",
+     "shape": [
+      64,
+      32,
+      4
+     ],
+     "files": [
+      "stage_shift/hold.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "what": "own hidden: IN0's level-0 hnew, same frame"
+    },
+    "Hc": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      16,
+      4
+     ],
+     "files": [
+      "stage_shift/Hc.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "what": "coarse hidden: D1-R's hnew (level 1), same frame"
+    }
+   },
+   "outputs": {
+    "Cnet": {
+     "dtype": "f16",
+     "shape": [
+      64,
+      32,
+      4
+     ],
+     "files": [
+      "stage_shift/Cnet.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "HID": {
+     "dtype": "f16",
+     "shape": [
+      64,
+      31,
+      4
+     ],
+     "files": [
+      "stage_shift/HID.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "GATES": {
+     "dtype": "f16",
+     "shape": [
+      64,
+      31,
+      4
+     ],
+     "files": [
+      "stage_shift/GATES.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "PREC": {
+     "dtype": "f16",
+     "shape": [
+      64,
+      31,
+      4
+     ],
+     "files": [
+      "stage_shift/PREC.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "CANDW": {
+     "dtype": "f16",
+     "shape": [
+      64,
+      31,
+      4
+     ],
+     "files": [
+      "stage_shift/CANDW.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 3,
+      "provisional": true,
+      "exact": "per token: the two values of each pair identical; equal finite CANDW logits (natural y10 == y12, page 55's y20 == y24) -> four values 0.25; an infinite logit (or two of opposite sign) -> (1/2, 1/2, 0, 0) or (0, 0, 1/2, 1/2); two infinite logits of the same sign or a NaN logit -> four NaN",
+      "note": "page 55.3 (3 f16 steps provisional, 55.6 item 2)"
+     }
+    },
+    "HID_code": {
+     "dtype": "i8",
+     "shape": [
+      64,
+      31,
+      4
+     ],
+     "files": [
+      "stage_shift/HID_code.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "store_of_own_values",
+      "store": "snorm8 (page 53.3 / 55.3): NaN -> 0, clamp [-1, 1], round(c * 127), +-0.5 -> +-64",
+      "max_code_diff": 1,
+      "note": "codes are checked by applying the store rule to the implementation's own f16 values; the listed codes are the reference's (within one code of an implementation within tolerance)"
+     }
+    },
+    "GATES_code": {
+     "dtype": "u8",
+     "shape": [
+      64,
+      31,
+      4
+     ],
+     "files": [
+      "stage_shift/GATES_code.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "store_of_own_values",
+      "store": "unorm8 (page 55.3): NaN -> 0, clamp [0, 1], round(c * 255), 0.5 -> 128",
+      "max_code_diff": 1,
+      "note": "codes are checked by applying the store rule to the implementation's own f16 values"
+     }
+    },
+    "CANDW_code": {
+     "dtype": "u8",
+     "shape": [
+      64,
+      31,
+      4
+     ],
+     "files": [
+      "stage_shift/CANDW_code.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "store_of_own_values",
+      "store": "unorm8 (page 55.3): NaN -> 0, clamp [0, 1], round(c * 255), 0.5 -> 128",
+      "max_code_diff": 1,
+      "note": "codes are checked by applying the store rule to the implementation's own f16 values"
+     }
+    }
+   },
+   "diagnostics": {
+    "y2h": {
+     "dtype": "f16",
+     "shape": [
+      64,
+      32,
+      32
+     ],
+     "files": [
+      "stage_shift/y2h.part0.hex",
+      "stage_shift/y2h.part1.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 0,
+      "note": "bit-exact when the implementation uses the reference row sums Z (diagnostic Z); with its own Z order, page 51.3 step 4 accepts one-step Z differences and their consequences (51.8 item 1). Zero signs not compared."
+     }
+    },
+    "Z": {
+     "dtype": "f16",
+     "shape": [
+      40,
+      2,
+      64
+     ],
+     "files": [
+      "stage_shift/Z.hex"
+     ],
+     "layout": "[window][head][query token]",
+     "windows": 40,
+     "what": "row sums Z of 51.3 step 4 (exact sum rounded once)",
+     "rows_with_Z_inf": 0
+    }
+   },
+   "shift": {
+    "SH_row": [
+     6,
+     4
+    ],
+    "recurrent_shift": [
+     2,
+     0
+    ],
+    "rule": "((s + 4) mod 8) per component (page 51.6)"
+   },
+   "constants": {
+    "A_SCALE": {
+     "dtype": "f16",
+     "bits": "2da8",
+     "value": 0.08837890625
+    },
+    "A_CLAMP": {
+     "dtype": "f16",
+     "bits": "3800",
+     "value": 0.5
+    },
+    "A_CLAMPn": {
+     "dtype": "f16",
+     "bits": "b780",
+     "value": -0.46875
+    },
+    "A_P1": {
+     "dtype": "f16",
+     "bits": "3a01",
+     "value": 0.75048828125
+    },
+    "A_P0": {
+     "dtype": "f16",
+     "bits": "3d9a",
+     "value": 1.400390625
+    },
+    "ACT_CL": {
+     "dtype": "f16",
+     "bits": "4200",
+     "value": 3.0
+    },
+    "ACT_CLn": {
+     "dtype": "f16",
+     "bits": "c282",
+     "value": -3.25390625
+    },
+    "ACT_C1": {
+     "dtype": "f16",
+     "bits": "2ca1",
+     "value": 0.07232666015625
+    },
+    "ACT_C2": {
+     "dtype": "f16",
+     "bits": "3658",
+     "value": 0.396484375
+    },
+    "ACT_C3": {
+     "dtype": "f16",
+     "bits": "3800",
+     "value": 0.5
+    },
+    "ra": {
+     "dtype": "f16",
+     "bits": "3ad0",
+     "value": 0.8515625
+    },
+    "m": {
+     "dtype": "f16",
+     "bits": "3970",
+     "value": 0.6796875
+    }
+   },
+   "converter_check": {
+    "attention_range_ok": true,
+    "w_max": 58.0,
+    "z_can_overflow": false
+   },
+   "counts": {
+    "Cnet": {
+     "nan": 0,
+     "inf": 0,
+     "zero": 2048,
+     "total": 8192
+    },
+    "HID": {
+     "nan": 0,
+     "inf": 0,
+     "zero": 0,
+     "total": 7936
+    },
+    "GATES": {
+     "nan": 0,
+     "inf": 0,
+     "zero": 1984,
+     "total": 7936
+    },
+    "PREC": {
+     "nan": 0,
+     "inf": 0,
+     "zero": 1984,
+     "total": 7936
+    },
+    "CANDW": {
+     "nan": 0,
+     "inf": 0,
+     "zero": 2,
+     "total": 7936
+    }
+   }
+  },
+  {
+   "name": "stage_zovf",
+   "kind": "stage",
+   "description": "constants with 64 * w_max >= 65520: rows with Z = +inf (r = +0, zero P codes, zero value mixing)",
+   "tensor_extent": {
+    "Wt": 32,
+    "Ht": 32
+   },
+   "render_size": {
+    "Wr": 30,
+    "Hr": 29
+   },
+   "scalars": {
+    "g": {
+     "dtype": "f16",
+     "bits": "3d30",
+     "value": 1.296875
+    },
+    "h0": {
+     "dtype": "f16",
+     "bits": "b8f6",
+     "value": -0.6201171875
+    },
+    "h1": {
+     "dtype": "f16",
+     "bits": "3f9a",
+     "value": 1.900390625
+    },
+    "S1CAP": {
+     "dtype": "f32",
+     "bits": "41a40000",
+     "value": 20.5
+    },
+    "s1": {
+     "dtype": "f32",
+     "bits": "3f09b298",
+     "value": 0.5378813743591309
+    },
+    "s2": {
+     "dtype": "f32",
+     "bits": "40d6083f",
+     "value": 6.688506603240967
+    }
+   },
+   "inputs": {
+    "x": {
+     "dtype": "e4m3",
+     "shape": [
+      32,
+      32,
+      32
+     ],
+     "files": [
+      "stage_zovf/x.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "what": "D0-F output tensor (block input)"
+    },
+    "Wq": {
+     "dtype": "e4m3",
+     "shape": [
+      2,
+      32,
+      32
+     ],
+     "files": [
+      "stage_zovf/Wq.hex"
+     ]
+    },
+    "Wv": {
+     "dtype": "e4m3",
+     "shape": [
+      2,
+      32,
+      32
+     ],
+     "files": [
+      "stage_zovf/Wv.hex"
+     ]
+    },
+    "Wo": {
+     "dtype": "e4m3",
+     "shape": [
+      2,
+      32,
+      32
+     ],
+     "files": [
+      "stage_zovf/Wo.hex"
+     ]
+    },
+    "W1": {
+     "dtype": "e4m3",
+     "shape": [
+      32,
+      128
+     ],
+     "files": [
+      "stage_zovf/W1.hex"
+     ]
+    },
+    "W2": {
+     "dtype": "e4m3",
+     "shape": [
+      128,
+      32
+     ],
+     "files": [
+      "stage_zovf/W2.hex"
+     ]
+    },
+    "Tb": {
+     "dtype": "f16",
+     "shape": [
+      2,
+      12,
+      16,
+      16
+     ],
+     "files": [
+      "stage_zovf/Tb.hex"
+     ],
+     "tb_pair_order": [
+      [
+       0,
+       0
+      ],
+      [
+       1,
+       0
+      ],
+      [
+       0,
+       1
+      ],
+      [
+       1,
+       1
+      ],
+      [
+       0,
+       2
+      ],
+      [
+       1,
+       2
+      ],
+      [
+       0,
+       3
+      ],
+      [
+       1,
+       3
+      ],
+      [
+       2,
+       2
+      ],
+      [
+       3,
+       2
+      ],
+      [
+       2,
+       3
+      ],
+      [
+       3,
+       3
+      ]
+     ]
+    },
+    "bo": {
+     "dtype": "f16",
+     "shape": [
+      32
+     ],
+     "files": [
+      "stage_zovf/bo.hex"
+     ]
+    },
+    "b1": {
+     "dtype": "f16",
+     "shape": [
+      128
+     ],
+     "files": [
+      "stage_zovf/b1.hex"
+     ]
+    },
+    "b2": {
+     "dtype": "f16",
+     "shape": [
+      32
+     ],
+     "files": [
+      "stage_zovf/b2.hex"
+     ]
+    },
+    "hold": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "stage_zovf/hold.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "what": "own hidden: IN0's level-0 hnew, same frame"
+    },
+    "Hc": {
+     "dtype": "f16",
+     "shape": [
+      16,
+      16,
+      4
+     ],
+     "files": [
+      "stage_zovf/Hc.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "what": "coarse hidden: D1-R's hnew (level 1), same frame"
+    }
+   },
+   "outputs": {
+    "Cnet": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "stage_zovf/Cnet.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "HID": {
+     "dtype": "f16",
+     "shape": [
+      29,
+      30,
+      4
+     ],
+     "files": [
+      "stage_zovf/HID.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "GATES": {
+     "dtype": "f16",
+     "shape": [
+      29,
+      30,
+      4
+     ],
+     "files": [
+      "stage_zovf/GATES.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "PREC": {
+     "dtype": "f16",
+     "shape": [
+      29,
+      30,
+      4
+     ],
+     "files": [
+      "stage_zovf/PREC.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "CANDW": {
+     "dtype": "f16",
+     "shape": [
+      29,
+      30,
+      4
+     ],
+     "files": [
+      "stage_zovf/CANDW.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 3,
+      "provisional": true,
+      "exact": "per token: the two values of each pair identical; equal finite CANDW logits (natural y10 == y12, page 55's y20 == y24) -> four values 0.25; an infinite logit (or two of opposite sign) -> (1/2, 1/2, 0, 0) or (0, 0, 1/2, 1/2); two infinite logits of the same sign or a NaN logit -> four NaN",
+      "note": "page 55.3 (3 f16 steps provisional, 55.6 item 2)"
+     }
+    },
+    "HID_code": {
+     "dtype": "i8",
+     "shape": [
+      29,
+      30,
+      4
+     ],
+     "files": [
+      "stage_zovf/HID_code.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "store_of_own_values",
+      "store": "snorm8 (page 53.3 / 55.3): NaN -> 0, clamp [-1, 1], round(c * 127), +-0.5 -> +-64",
+      "max_code_diff": 1,
+      "note": "codes are checked by applying the store rule to the implementation's own f16 values; the listed codes are the reference's (within one code of an implementation within tolerance)"
+     }
+    },
+    "GATES_code": {
+     "dtype": "u8",
+     "shape": [
+      29,
+      30,
+      4
+     ],
+     "files": [
+      "stage_zovf/GATES_code.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "store_of_own_values",
+      "store": "unorm8 (page 55.3): NaN -> 0, clamp [0, 1], round(c * 255), 0.5 -> 128",
+      "max_code_diff": 1,
+      "note": "codes are checked by applying the store rule to the implementation's own f16 values"
+     }
+    },
+    "CANDW_code": {
+     "dtype": "u8",
+     "shape": [
+      29,
+      30,
+      4
+     ],
+     "files": [
+      "stage_zovf/CANDW_code.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "store_of_own_values",
+      "store": "unorm8 (page 55.3): NaN -> 0, clamp [0, 1], round(c * 255), 0.5 -> 128",
+      "max_code_diff": 1,
+      "note": "codes are checked by applying the store rule to the implementation's own f16 values"
+     }
+    }
+   },
+   "diagnostics": {
+    "y2h": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      32
+     ],
+     "files": [
+      "stage_zovf/y2h.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 0,
+      "note": "bit-exact when the implementation uses the reference row sums Z (diagnostic Z); with its own Z order, page 51.3 step 4 accepts one-step Z differences and their consequences (51.8 item 1). Zero signs not compared."
+     }
+    },
+    "Z": {
+     "dtype": "f16",
+     "shape": [
+      20,
+      2,
+      64
+     ],
+     "files": [
+      "stage_zovf/Z.hex"
+     ],
+     "layout": "[window][head][query token]",
+     "windows": 20,
+     "what": "row sums Z of 51.3 step 4 (exact sum rounded once)",
+     "rows_with_Z_inf": 934
+    }
+   },
+   "shift": {
+    "SH_row": [
+     4,
+     2
+    ],
+    "recurrent_shift": [
+     0,
+     6
+    ],
+    "rule": "((s + 4) mod 8) per component (page 51.6)"
+   },
+   "constants": {
+    "A_SCALE": {
+     "dtype": "f16",
+     "bits": "3000",
+     "value": 0.125
+    },
+    "A_CLAMP": {
+     "dtype": "f16",
+     "bits": "3800",
+     "value": 0.5
+    },
+    "A_CLAMPn": {
+     "dtype": "f16",
+     "bits": "b780",
+     "value": -0.46875
+    },
+    "A_P1": {
+     "dtype": "f16",
+     "bits": "3b33",
+     "value": 0.89990234375
+    },
+    "A_P0": {
+     "dtype": "f16",
+     "bits": "3e33",
+     "value": 1.5498046875
+    },
+    "ACT_CL": {
+     "dtype": "f16",
+     "bits": "4200",
+     "value": 3.0
+    },
+    "ACT_CLn": {
+     "dtype": "f16",
+     "bits": "c282",
+     "value": -3.25390625
+    },
+    "ACT_C1": {
+     "dtype": "f16",
+     "bits": "2ca1",
+     "value": 0.07232666015625
+    },
+    "ACT_C2": {
+     "dtype": "f16",
+     "bits": "3658",
+     "value": 0.396484375
+    },
+    "ACT_C3": {
+     "dtype": "f16",
+     "bits": "3800",
+     "value": 0.5
+    },
+    "ra": {
+     "dtype": "f16",
+     "bits": "3cb0",
+     "value": 1.171875
+    },
+    "m": {
+     "dtype": "f16",
+     "bits": "3728",
+     "value": 0.447265625
+    }
+   },
+   "converter_check": {
+    "attention_range_ok": true,
+    "w_max": 8192.0,
+    "z_can_overflow": true
+   },
+   "counts": {
+    "Cnet": {
+     "nan": 0,
+     "inf": 0,
+     "zero": 1024,
+     "total": 4096
+    },
+    "HID": {
+     "nan": 0,
+     "inf": 0,
+     "zero": 0,
+     "total": 3480
+    },
+    "GATES": {
+     "nan": 0,
+     "inf": 0,
+     "zero": 870,
+     "total": 3480
+    },
+    "PREC": {
+     "nan": 0,
+     "inf": 0,
+     "zero": 870,
+     "total": 3480
+    },
+    "CANDW": {
+     "nan": 0,
+     "inf": 0,
+     "zero": 0,
+     "total": 3480
+    }
+   }
+  },
+  {
+   "name": "stage_edge",
+   "kind": "stage",
+   "description": "every finite e4m3 code in weights and inputs: f16 overflow to +-inf / NaN inside the block, Q8 saturation, +-inf and NaN channel values reaching the head",
+   "tensor_extent": {
+    "Wt": 32,
+    "Ht": 32
+   },
+   "render_size": {
+    "Wr": 32,
+    "Hr": 32
+   },
+   "scalars": {
+    "g": {
+     "dtype": "f16",
+     "bits": "3b88",
+     "value": 0.94140625
+    },
+    "h0": {
+     "dtype": "f16",
+     "bits": "4080",
+     "value": 2.25
+    },
+    "h1": {
+     "dtype": "f16",
+     "bits": "3000",
+     "value": 0.125
+    },
+    "S1CAP": {
+     "dtype": "f32",
+     "bits": "40c00000",
+     "value": 6.0
+    },
+    "s1": {
+     "dtype": "f32",
+     "bits": "40c00000",
+     "value": 6.0
+    },
+    "s2": {
+     "dtype": "f32",
+     "bits": "3f910b02",
+     "value": 1.133148431777954
+    }
+   },
+   "inputs": {
+    "x": {
+     "dtype": "e4m3",
+     "shape": [
+      32,
+      32,
+      32
+     ],
+     "files": [
+      "stage_edge/x.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "what": "D0-F output tensor (block input)"
+    },
+    "Wq": {
+     "dtype": "e4m3",
+     "shape": [
+      2,
+      32,
+      32
+     ],
+     "files": [
+      "stage_edge/Wq.hex"
+     ]
+    },
+    "Wv": {
+     "dtype": "e4m3",
+     "shape": [
+      2,
+      32,
+      32
+     ],
+     "files": [
+      "stage_edge/Wv.hex"
+     ]
+    },
+    "Wo": {
+     "dtype": "e4m3",
+     "shape": [
+      2,
+      32,
+      32
+     ],
+     "files": [
+      "stage_edge/Wo.hex"
+     ]
+    },
+    "W1": {
+     "dtype": "e4m3",
+     "shape": [
+      32,
+      128
+     ],
+     "files": [
+      "stage_edge/W1.hex"
+     ]
+    },
+    "W2": {
+     "dtype": "e4m3",
+     "shape": [
+      128,
+      32
+     ],
+     "files": [
+      "stage_edge/W2.hex"
+     ]
+    },
+    "Tb": {
+     "dtype": "f16",
+     "shape": [
+      2,
+      12,
+      16,
+      16
+     ],
+     "files": [
+      "stage_edge/Tb.hex"
+     ],
+     "tb_pair_order": [
+      [
+       0,
+       0
+      ],
+      [
+       1,
+       0
+      ],
+      [
+       0,
+       1
+      ],
+      [
+       1,
+       1
+      ],
+      [
+       0,
+       2
+      ],
+      [
+       1,
+       2
+      ],
+      [
+       0,
+       3
+      ],
+      [
+       1,
+       3
+      ],
+      [
+       2,
+       2
+      ],
+      [
+       3,
+       2
+      ],
+      [
+       2,
+       3
+      ],
+      [
+       3,
+       3
+      ]
+     ]
+    },
+    "bo": {
+     "dtype": "f16",
+     "shape": [
+      32
+     ],
+     "files": [
+      "stage_edge/bo.hex"
+     ]
+    },
+    "b1": {
+     "dtype": "f16",
+     "shape": [
+      128
+     ],
+     "files": [
+      "stage_edge/b1.hex"
+     ]
+    },
+    "b2": {
+     "dtype": "f16",
+     "shape": [
+      32
+     ],
+     "files": [
+      "stage_edge/b2.hex"
+     ]
+    },
+    "hold": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "stage_edge/hold.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "what": "own hidden: IN0's level-0 hnew, same frame"
+    },
+    "Hc": {
+     "dtype": "f16",
+     "shape": [
+      16,
+      16,
+      4
+     ],
+     "files": [
+      "stage_edge/Hc.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "what": "coarse hidden: D1-R's hnew (level 1), same frame"
+    }
+   },
+   "outputs": {
+    "Cnet": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "stage_edge/Cnet.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "HID": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "stage_edge/HID.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "GATES": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "stage_edge/GATES.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "PREC": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "stage_edge/PREC.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "CANDW": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "stage_edge/CANDW.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 3,
+      "provisional": true,
+      "exact": "per token: the two values of each pair identical; equal finite CANDW logits (natural y10 == y12, page 55's y20 == y24) -> four values 0.25; an infinite logit (or two of opposite sign) -> (1/2, 1/2, 0, 0) or (0, 0, 1/2, 1/2); two infinite logits of the same sign or a NaN logit -> four NaN",
+      "note": "page 55.3 (3 f16 steps provisional, 55.6 item 2)"
+     }
+    },
+    "HID_code": {
+     "dtype": "i8",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "stage_edge/HID_code.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "store_of_own_values",
+      "store": "snorm8 (page 53.3 / 55.3): NaN -> 0, clamp [-1, 1], round(c * 127), +-0.5 -> +-64",
+      "max_code_diff": 1,
+      "note": "codes are checked by applying the store rule to the implementation's own f16 values; the listed codes are the reference's (within one code of an implementation within tolerance)"
+     }
+    },
+    "GATES_code": {
+     "dtype": "u8",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "stage_edge/GATES_code.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "store_of_own_values",
+      "store": "unorm8 (page 55.3): NaN -> 0, clamp [0, 1], round(c * 255), 0.5 -> 128",
+      "max_code_diff": 1,
+      "note": "codes are checked by applying the store rule to the implementation's own f16 values"
+     }
+    },
+    "CANDW_code": {
+     "dtype": "u8",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "stage_edge/CANDW_code.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "store_of_own_values",
+      "store": "unorm8 (page 55.3): NaN -> 0, clamp [0, 1], round(c * 255), 0.5 -> 128",
+      "max_code_diff": 1,
+      "note": "codes are checked by applying the store rule to the implementation's own f16 values"
+     }
+    }
+   },
+   "diagnostics": {
+    "y2h": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      32
+     ],
+     "files": [
+      "stage_edge/y2h.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 0,
+      "note": "bit-exact when the implementation uses the reference row sums Z (diagnostic Z); with its own Z order, page 51.3 step 4 accepts one-step Z differences and their consequences (51.8 item 1). Zero signs not compared."
+     }
+    },
+    "Z": {
+     "dtype": "f16",
+     "shape": [
+      25,
+      2,
+      64
+     ],
+     "files": [
+      "stage_edge/Z.hex"
+     ],
+     "layout": "[window][head][query token]",
+     "windows": 25,
+     "what": "row sums Z of 51.3 step 4 (exact sum rounded once)",
+     "rows_with_Z_inf": 0
+    }
+   },
+   "shift": {
+    "SH_row": [
+     0,
+     6
+    ],
+    "recurrent_shift": [
+     4,
+     2
+    ],
+    "rule": "((s + 4) mod 8) per component (page 51.6)"
+   },
+   "constants": {
+    "A_SCALE": {
+     "dtype": "f16",
+     "bits": "2da8",
+     "value": 0.08837890625
+    },
+    "A_CLAMP": {
+     "dtype": "f16",
+     "bits": "3800",
+     "value": 0.5
+    },
+    "A_CLAMPn": {
+     "dtype": "f16",
+     "bits": "b780",
+     "value": -0.46875
+    },
+    "A_P1": {
+     "dtype": "f16",
+     "bits": "3a01",
+     "value": 0.75048828125
+    },
+    "A_P0": {
+     "dtype": "f16",
+     "bits": "3d9a",
+     "value": 1.400390625
+    },
+    "ACT_CL": {
+     "dtype": "f16",
+     "bits": "4200",
+     "value": 3.0
+    },
+    "ACT_CLn": {
+     "dtype": "f16",
+     "bits": "c282",
+     "value": -3.25390625
+    },
+    "ACT_C1": {
+     "dtype": "f16",
+     "bits": "2ca1",
+     "value": 0.07232666015625
+    },
+    "ACT_C2": {
+     "dtype": "f16",
+     "bits": "3658",
+     "value": 0.396484375
+    },
+    "ACT_C3": {
+     "dtype": "f16",
+     "bits": "3800",
+     "value": 0.5
+    },
+    "ra": {
+     "dtype": "f16",
+     "bits": "3ad0",
+     "value": 0.8515625
+    },
+    "m": {
+     "dtype": "f16",
+     "bits": "3970",
+     "value": 0.6796875
+    }
+   },
+   "converter_check": {
+    "attention_range_ok": true,
+    "w_max": 58.0,
+    "z_can_overflow": false
+   },
+   "counts": {
+    "Cnet": {
+     "nan": 970,
+     "inf": 0,
+     "zero": 1837,
+     "total": 4096
+    },
+    "HID": {
+     "nan": 969,
+     "inf": 0,
+     "zero": 0,
+     "total": 4096
+    },
+    "GATES": {
+     "nan": 647,
+     "inf": 0,
+     "zero": 3442,
+     "total": 4096
+    },
+    "PREC": {
+     "nan": 1054,
+     "inf": 0,
+     "zero": 2234,
+     "total": 4096
+    },
+    "CANDW": {
+     "nan": 4096,
+     "inf": 0,
+     "zero": 0,
+     "total": 4096
+    }
+   }
+  },
+  {
+   "name": "stage_nan",
+   "kind": "stage",
+   "description": "every input channel of every token NaN (both NaN codes): every PREC, GATES and CANDW value NaN, codes 0; HID codes 0; PREC values 0 and 1 are not s1^2",
+   "tensor_extent": {
+    "Wt": 32,
+    "Ht": 32
+   },
+   "render_size": {
+    "Wr": 27,
+    "Hr": 32
+   },
+   "scalars": {
+    "g": {
+     "dtype": "f16",
+     "bits": "3d30",
+     "value": 1.296875
+    },
+    "h0": {
+     "dtype": "f16",
+     "bits": "3d7b",
+     "value": 1.3701171875
+    },
+    "h1": {
+     "dtype": "f16",
+     "bits": "b4cd",
+     "value": -0.300048828125
+    },
+    "S1CAP": {
+     "dtype": "f32",
+     "bits": "41a40000",
+     "value": 20.5
+    },
+    "s1": {
+     "dtype": "f32",
+     "bits": "407be458",
+     "value": 3.935811996459961
+    },
+    "s2": {
+     "dtype": "f32",
+     "bits": "3f3da3e4",
+     "value": 0.7407820224761963
+    }
+   },
+   "inputs": {
+    "x": {
+     "dtype": "e4m3",
+     "shape": [
+      32,
+      32,
+      32
+     ],
+     "files": [
+      "stage_nan/x.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "what": "D0-F output tensor (block input)"
+    },
+    "Wq": {
+     "dtype": "e4m3",
+     "shape": [
+      2,
+      32,
+      32
+     ],
+     "files": [
+      "stage_nan/Wq.hex"
+     ]
+    },
+    "Wv": {
+     "dtype": "e4m3",
+     "shape": [
+      2,
+      32,
+      32
+     ],
+     "files": [
+      "stage_nan/Wv.hex"
+     ]
+    },
+    "Wo": {
+     "dtype": "e4m3",
+     "shape": [
+      2,
+      32,
+      32
+     ],
+     "files": [
+      "stage_nan/Wo.hex"
+     ]
+    },
+    "W1": {
+     "dtype": "e4m3",
+     "shape": [
+      32,
+      128
+     ],
+     "files": [
+      "stage_nan/W1.hex"
+     ]
+    },
+    "W2": {
+     "dtype": "e4m3",
+     "shape": [
+      128,
+      32
+     ],
+     "files": [
+      "stage_nan/W2.hex"
+     ]
+    },
+    "Tb": {
+     "dtype": "f16",
+     "shape": [
+      2,
+      12,
+      16,
+      16
+     ],
+     "files": [
+      "stage_nan/Tb.hex"
+     ],
+     "tb_pair_order": [
+      [
+       0,
+       0
+      ],
+      [
+       1,
+       0
+      ],
+      [
+       0,
+       1
+      ],
+      [
+       1,
+       1
+      ],
+      [
+       0,
+       2
+      ],
+      [
+       1,
+       2
+      ],
+      [
+       0,
+       3
+      ],
+      [
+       1,
+       3
+      ],
+      [
+       2,
+       2
+      ],
+      [
+       3,
+       2
+      ],
+      [
+       2,
+       3
+      ],
+      [
+       3,
+       3
+      ]
+     ]
+    },
+    "bo": {
+     "dtype": "f16",
+     "shape": [
+      32
+     ],
+     "files": [
+      "stage_nan/bo.hex"
+     ]
+    },
+    "b1": {
+     "dtype": "f16",
+     "shape": [
+      128
+     ],
+     "files": [
+      "stage_nan/b1.hex"
+     ]
+    },
+    "b2": {
+     "dtype": "f16",
+     "shape": [
+      32
+     ],
+     "files": [
+      "stage_nan/b2.hex"
+     ]
+    },
+    "hold": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "stage_nan/hold.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "what": "own hidden: IN0's level-0 hnew, same frame"
+    },
+    "Hc": {
+     "dtype": "f16",
+     "shape": [
+      16,
+      16,
+      4
+     ],
+     "files": [
+      "stage_nan/Hc.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "what": "coarse hidden: D1-R's hnew (level 1), same frame"
+    }
+   },
+   "outputs": {
+    "Cnet": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "stage_nan/Cnet.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "HID": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      27,
+      4
+     ],
+     "files": [
+      "stage_nan/HID.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "GATES": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      27,
+      4
+     ],
+     "files": [
+      "stage_nan/GATES.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "PREC": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      27,
+      4
+     ],
+     "files": [
+      "stage_nan/PREC.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "CANDW": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      27,
+      4
+     ],
+     "files": [
+      "stage_nan/CANDW.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 3,
+      "provisional": true,
+      "exact": "per token: the two values of each pair identical; equal finite CANDW logits (natural y10 == y12, page 55's y20 == y24) -> four values 0.25; an infinite logit (or two of opposite sign) -> (1/2, 1/2, 0, 0) or (0, 0, 1/2, 1/2); two infinite logits of the same sign or a NaN logit -> four NaN",
+      "note": "page 55.3 (3 f16 steps provisional, 55.6 item 2)"
+     }
+    },
+    "HID_code": {
+     "dtype": "i8",
+     "shape": [
+      32,
+      27,
+      4
+     ],
+     "files": [
+      "stage_nan/HID_code.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "store_of_own_values",
+      "store": "snorm8 (page 53.3 / 55.3): NaN -> 0, clamp [-1, 1], round(c * 127), +-0.5 -> +-64",
+      "max_code_diff": 1,
+      "note": "codes are checked by applying the store rule to the implementation's own f16 values; the listed codes are the reference's (within one code of an implementation within tolerance)"
+     }
+    },
+    "GATES_code": {
+     "dtype": "u8",
+     "shape": [
+      32,
+      27,
+      4
+     ],
+     "files": [
+      "stage_nan/GATES_code.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "store_of_own_values",
+      "store": "unorm8 (page 55.3): NaN -> 0, clamp [0, 1], round(c * 255), 0.5 -> 128",
+      "max_code_diff": 1,
+      "note": "codes are checked by applying the store rule to the implementation's own f16 values"
+     }
+    },
+    "CANDW_code": {
+     "dtype": "u8",
+     "shape": [
+      32,
+      27,
+      4
+     ],
+     "files": [
+      "stage_nan/CANDW_code.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "store_of_own_values",
+      "store": "unorm8 (page 55.3): NaN -> 0, clamp [0, 1], round(c * 255), 0.5 -> 128",
+      "max_code_diff": 1,
+      "note": "codes are checked by applying the store rule to the implementation's own f16 values"
+     }
+    }
+   },
+   "diagnostics": {
+    "y2h": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      32
+     ],
+     "files": [
+      "stage_nan/y2h.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 0,
+      "note": "bit-exact when the implementation uses the reference row sums Z (diagnostic Z); with its own Z order, page 51.3 step 4 accepts one-step Z differences and their consequences (51.8 item 1). Zero signs not compared."
+     }
+    },
+    "Z": {
+     "dtype": "f16",
+     "shape": [
+      25,
+      2,
+      64
+     ],
+     "files": [
+      "stage_nan/Z.hex"
+     ],
+     "layout": "[window][head][query token]",
+     "windows": 25,
+     "what": "row sums Z of 51.3 step 4 (exact sum rounded once)",
+     "rows_with_Z_inf": 0
+    }
+   },
+   "shift": {
+    "SH_row": [
+     2,
+     2
+    ],
+    "recurrent_shift": [
+     6,
+     6
+    ],
+    "rule": "((s + 4) mod 8) per component (page 51.6)"
+   },
+   "constants": {
+    "A_SCALE": {
+     "dtype": "f16",
+     "bits": "2da8",
+     "value": 0.08837890625
+    },
+    "A_CLAMP": {
+     "dtype": "f16",
+     "bits": "3800",
+     "value": 0.5
+    },
+    "A_CLAMPn": {
+     "dtype": "f16",
+     "bits": "b780",
+     "value": -0.46875
+    },
+    "A_P1": {
+     "dtype": "f16",
+     "bits": "3a01",
+     "value": 0.75048828125
+    },
+    "A_P0": {
+     "dtype": "f16",
+     "bits": "3d9a",
+     "value": 1.400390625
+    },
+    "ACT_CL": {
+     "dtype": "f16",
+     "bits": "4200",
+     "value": 3.0
+    },
+    "ACT_CLn": {
+     "dtype": "f16",
+     "bits": "c282",
+     "value": -3.25390625
+    },
+    "ACT_C1": {
+     "dtype": "f16",
+     "bits": "2ca1",
+     "value": 0.07232666015625
+    },
+    "ACT_C2": {
+     "dtype": "f16",
+     "bits": "3658",
+     "value": 0.396484375
+    },
+    "ACT_C3": {
+     "dtype": "f16",
+     "bits": "3800",
+     "value": 0.5
+    },
+    "ra": {
+     "dtype": "f16",
+     "bits": "3cb0",
+     "value": 1.171875
+    },
+    "m": {
+     "dtype": "f16",
+     "bits": "3728",
+     "value": 0.447265625
+    }
+   },
+   "converter_check": {
+    "attention_range_ok": true,
+    "w_max": 58.0,
+    "z_can_overflow": false
+   },
+   "counts": {
+    "Cnet": {
+     "nan": 4096,
+     "inf": 0,
+     "zero": 0,
+     "total": 4096
+    },
+    "HID": {
+     "nan": 3456,
+     "inf": 0,
+     "zero": 0,
+     "total": 3456
+    },
+    "GATES": {
+     "nan": 2592,
+     "inf": 0,
+     "zero": 864,
+     "total": 3456
+    },
+    "PREC": {
+     "nan": 2592,
+     "inf": 0,
+     "zero": 864,
+     "total": 3456
+    },
+    "CANDW": {
+     "nan": 3456,
+     "inf": 0,
+     "zero": 0,
+     "total": 3456
+    }
+   }
+  },
+  {
+   "name": "head_edge",
+   "kind": "head",
+   "description": "head only: y2h given; edge channel values (+-0, +-inf, NaN, +-65504, subnormals, saturation thresholds, sig = 0.5, R(tanh) = +-0.5), CANDW pairs (equal, tie cases, infinite of equal and opposite sign, NaN, inexact d)",
+   "tensor_extent": {
+    "Wt": 32,
+    "Ht": 32
+   },
+   "render_size": {
+    "Wr": 29,
+    "Hr": 30
+   },
+   "scalars": {
+    "g": {
+     "dtype": "f16",
+     "bits": "3b88",
+     "value": 0.94140625
+    },
+    "h0": {
+     "dtype": "f16",
+     "bits": "3d7b",
+     "value": 1.3701171875
+    },
+    "h1": {
+     "dtype": "f16",
+     "bits": "b4cd",
+     "value": -0.300048828125
+    },
+    "S1CAP": {
+     "dtype": "f32",
+     "bits": "41a40000",
+     "value": 20.5
+    },
+    "s1": {
+     "dtype": "f32",
+     "bits": "407be458",
+     "value": 3.935811996459961
+    },
+    "s2": {
+     "dtype": "f32",
+     "bits": "3f3da3e4",
+     "value": 0.7407820224761963
+    }
+   },
+   "inputs": {
+    "y2h": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      32
+     ],
+     "files": [
+      "head_edge/y2h.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "what": "block output before e4m3 quantisation"
+    },
+    "hold": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "head_edge/hold.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "what": "own hidden: IN0's level-0 hnew, same frame"
+    },
+    "Hc": {
+     "dtype": "f16",
+     "shape": [
+      16,
+      16,
+      4
+     ],
+     "files": [
+      "head_edge/Hc.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "what": "coarse hidden: D1-R's hnew (level 1), same frame"
+    }
+   },
+   "outputs": {
+    "Cnet": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "head_edge/Cnet.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "HID": {
+     "dtype": "f16",
+     "shape": [
+      30,
+      29,
+      4
+     ],
+     "files": [
+      "head_edge/HID.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "GATES": {
+     "dtype": "f16",
+     "shape": [
+      30,
+      29,
+      4
+     ],
+     "files": [
+      "head_edge/GATES.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "PREC": {
+     "dtype": "f16",
+     "shape": [
+      30,
+      29,
+      4
+     ],
+     "files": [
+      "head_edge/PREC.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "CANDW": {
+     "dtype": "f16",
+     "shape": [
+      30,
+      29,
+      4
+     ],
+     "files": [
+      "head_edge/CANDW.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 3,
+      "provisional": true,
+      "exact": "per token: the two values of each pair identical; equal finite CANDW logits (natural y10 == y12, page 55's y20 == y24) -> four values 0.25; an infinite logit (or two of opposite sign) -> (1/2, 1/2, 0, 0) or (0, 0, 1/2, 1/2); two infinite logits of the same sign or a NaN logit -> four NaN",
+      "note": "page 55.3 (3 f16 steps provisional, 55.6 item 2)"
+     }
+    },
+    "HID_code": {
+     "dtype": "i8",
+     "shape": [
+      30,
+      29,
+      4
+     ],
+     "files": [
+      "head_edge/HID_code.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "store_of_own_values",
+      "store": "snorm8 (page 53.3 / 55.3): NaN -> 0, clamp [-1, 1], round(c * 127), +-0.5 -> +-64",
+      "max_code_diff": 1,
+      "note": "codes are checked by applying the store rule to the implementation's own f16 values; the listed codes are the reference's (within one code of an implementation within tolerance)"
+     }
+    },
+    "GATES_code": {
+     "dtype": "u8",
+     "shape": [
+      30,
+      29,
+      4
+     ],
+     "files": [
+      "head_edge/GATES_code.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "store_of_own_values",
+      "store": "unorm8 (page 55.3): NaN -> 0, clamp [0, 1], round(c * 255), 0.5 -> 128",
+      "max_code_diff": 1,
+      "note": "codes are checked by applying the store rule to the implementation's own f16 values"
+     }
+    },
+    "CANDW_code": {
+     "dtype": "u8",
+     "shape": [
+      30,
+      29,
+      4
+     ],
+     "files": [
+      "head_edge/CANDW_code.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "store_of_own_values",
+      "store": "unorm8 (page 55.3): NaN -> 0, clamp [0, 1], round(c * 255), 0.5 -> 128",
+      "max_code_diff": 1,
+      "note": "codes are checked by applying the store rule to the implementation's own f16 values"
+     }
+    }
+   },
+   "diagnostics": {},
+   "counts": {
+    "Cnet": {
+     "nan": 8,
+     "inf": 0,
+     "zero": 1024,
+     "total": 4096
+    },
+    "HID": {
+     "nan": 32,
+     "inf": 0,
+     "zero": 157,
+     "total": 3480
+    },
+    "GATES": {
+     "nan": 7,
+     "inf": 0,
+     "zero": 913,
+     "total": 3480
+    },
+    "PREC": {
+     "nan": 6,
+     "inf": 0,
+     "zero": 1081,
+     "total": 3480
+    },
+    "CANDW": {
+     "nan": 232,
+     "inf": 0,
+     "zero": 408,
+     "total": 3480
+    }
+   }
+  },
+  {
+   "name": "head_random",
+   "kind": "head",
+   "description": "head only: random y2h, hold, Hc; non-power-of-two s1, s2 (rounding order of the PREC products)",
+   "tensor_extent": {
+    "Wt": 32,
+    "Ht": 32
+   },
+   "render_size": {
+    "Wr": 32,
+    "Hr": 32
+   },
+   "scalars": {
+    "g": {
+     "dtype": "f16",
+     "bits": "3d30",
+     "value": 1.296875
+    },
+    "h0": {
+     "dtype": "f16",
+     "bits": "3c0e",
+     "value": 1.013671875
+    },
+    "h1": {
+     "dtype": "f16",
+     "bits": "ba1f",
+     "value": -0.76513671875
+    },
+    "S1CAP": {
+     "dtype": "f32",
+     "bits": "41a40000",
+     "value": 20.5
+    },
+    "s1": {
+     "dtype": "f32",
+     "bits": "40305d68",
+     "value": 2.7557010650634766
+    },
+    "s2": {
+     "dtype": "f32",
+     "bits": "3eee37e9",
+     "value": 0.4652703106403351
+    }
+   },
+   "inputs": {
+    "y2h": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      32
+     ],
+     "files": [
+      "head_random/y2h.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "what": "block output before e4m3 quantisation"
+    },
+    "hold": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "head_random/hold.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "what": "own hidden: IN0's level-0 hnew, same frame"
+    },
+    "Hc": {
+     "dtype": "f16",
+     "shape": [
+      16,
+      16,
+      4
+     ],
+     "files": [
+      "head_random/Hc.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "what": "coarse hidden: D1-R's hnew (level 1), same frame"
+    }
+   },
+   "outputs": {
+    "Cnet": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "head_random/Cnet.hex"
+     ],
+     "layout": "[Y][X][c]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "HID": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "head_random/HID.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "GATES": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "head_random/GATES.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "PREC": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "head_random/PREC.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 1,
+      "target": "bit-exact",
+      "note": "page 55.3 test-vector tolerance (Cnet: 55.5 'hidden state' with the same tolerance); NaN must be NaN; zero signs not compared"
+     }
+    },
+    "CANDW": {
+     "dtype": "f16",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "head_random/CANDW.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "f16_steps",
+      "max": 3,
+      "provisional": true,
+      "exact": "per token: the two values of each pair identical; equal finite CANDW logits (natural y10 == y12, page 55's y20 == y24) -> four values 0.25; an infinite logit (or two of opposite sign) -> (1/2, 1/2, 0, 0) or (0, 0, 1/2, 1/2); two infinite logits of the same sign or a NaN logit -> four NaN",
+      "note": "page 55.3 (3 f16 steps provisional, 55.6 item 2)"
+     }
+    },
+    "HID_code": {
+     "dtype": "i8",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "head_random/HID_code.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "store_of_own_values",
+      "store": "snorm8 (page 53.3 / 55.3): NaN -> 0, clamp [-1, 1], round(c * 127), +-0.5 -> +-64",
+      "max_code_diff": 1,
+      "note": "codes are checked by applying the store rule to the implementation's own f16 values; the listed codes are the reference's (within one code of an implementation within tolerance)"
+     }
+    },
+    "GATES_code": {
+     "dtype": "u8",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "head_random/GATES_code.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "store_of_own_values",
+      "store": "unorm8 (page 55.3): NaN -> 0, clamp [0, 1], round(c * 255), 0.5 -> 128",
+      "max_code_diff": 1,
+      "note": "codes are checked by applying the store rule to the implementation's own f16 values"
+     }
+    },
+    "CANDW_code": {
+     "dtype": "u8",
+     "shape": [
+      32,
+      32,
+      4
+     ],
+     "files": [
+      "head_random/CANDW_code.hex"
+     ],
+     "layout": "[Y][X][value]",
+     "compare": {
+      "rule": "store_of_own_values",
+      "store": "unorm8 (page 55.3): NaN -> 0, clamp [0, 1], round(c * 255), 0.5 -> 128",
+      "max_code_diff": 1,
+      "note": "codes are checked by applying the store rule to the implementation's own f16 values"
+     }
+    }
+   },
+   "diagnostics": {},
+   "counts": {
+    "Cnet": {
+     "nan": 0,
+     "inf": 0,
+     "zero": 1024,
+     "total": 4096
+    },
+    "HID": {
+     "nan": 0,
+     "inf": 0,
+     "zero": 0,
+     "total": 4096
+    },
+    "GATES": {
+     "nan": 0,
+     "inf": 0,
+     "zero": 1024,
+     "total": 4096
+    },
+    "PREC": {
+     "nan": 0,
+     "inf": 0,
+     "zero": 1024,
+     "total": 4096
+    },
+    "CANDW": {
+     "nan": 0,
+     "inf": 0,
+     "zero": 0,
+     "total": 4096
+    }
+   }
+  },
+  {
+   "name": "converter_scalars",
+   "kind": "scalars",
+   "description": "s1 = min(expf(h0), S1CAP), s2 = expf(h1), expf correctly rounded; refused when s2 is not finite (55.3). Exact (bit-for-bit).",
+   "rows": [
+    {
+     "h0": {
+      "dtype": "f16",
+      "bits": "3d7b",
+      "value": 1.3701171875
+     },
+     "h1": {
+      "dtype": "f16",
+      "bits": "b4cd",
+      "value": -0.300048828125
+     },
+     "S1CAP": {
+      "dtype": "f32",
+      "bits": "41a40000",
+      "value": 20.5
+     },
+     "s1": {
+      "dtype": "f32",
+      "bits": "407be458",
+      "value": 3.935811996459961
+     },
+     "s2": {
+      "dtype": "f32",
+      "bits": "3f3da3e4",
+      "value": 0.7407820224761963
+     }
+    },
+    {
+     "h0": {
+      "dtype": "f16",
+      "bits": "0000",
+      "value": 0.0
+     },
+     "h1": {
+      "dtype": "f16",
+      "bits": "0000",
+      "value": 0.0
+     },
+     "S1CAP": {
+      "dtype": "f32",
+      "bits": "41a40000",
+      "value": 20.5
+     },
+     "s1": {
+      "dtype": "f32",
+      "bits": "3f800000",
+      "value": 1.0
+     },
+     "s2": {
+      "dtype": "f32",
+      "bits": "3f800000",
+      "value": 1.0
+     }
+    },
+    {
+     "h0": {
+      "dtype": "f16",
+      "bits": "4400",
+      "value": 4.0
+     },
+     "h1": {
+      "dtype": "f16",
+      "bits": "bc66",
+      "value": -1.099609375
+     },
+     "S1CAP": {
+      "dtype": "f32",
+      "bits": "41a40000",
+      "value": 20.5
+     },
+     "s1": {
+      "dtype": "f32",
+      "bits": "41a40000",
+      "value": 20.5
+     },
+     "s2": {
+      "dtype": "f32",
+      "bits": "3eaa7f20",
+      "value": 0.33300113677978516
+     }
+    },
+    {
+     "h0": {
+      "dtype": "f16",
+      "bits": "41fe",
+      "value": 2.99609375
+     },
+     "h1": {
+      "dtype": "f16",
+      "bits": "41fe",
+      "value": 2.99609375
+     },
+     "S1CAP": {
+      "dtype": "f32",
+      "bits": "41a00000",
+      "value": 20.0
+     },
+     "s1": {
+      "dtype": "f32",
+      "bits": "41a00000",
+      "value": 20.0
+     },
+     "s2": {
+      "dtype": "f32",
+      "bits": "41a00ecf",
+      "value": 20.007230758666992
+     }
+    },
+    {
+     "h0": {
+      "dtype": "f16",
+      "bits": "4980",
+      "value": 11.0
+     },
+     "h1": {
+      "dtype": "f16",
+      "bits": "c880",
+      "value": -9.0
+     },
+     "S1CAP": {
+      "dtype": "f32",
+      "bits": "447a0000",
+      "value": 1000.0
+     },
+     "s1": {
+      "dtype": "f32",
+      "bits": "447a0000",
+      "value": 1000.0
+     },
+     "s2": {
+      "dtype": "f32",
+      "bits": "39016791",
+      "value": 0.00012340980174485594
+     }
+    },
+    {
+     "h0": {
+      "dtype": "f16",
+      "bits": "5640",
+      "value": 100.0
+     },
+     "h1": {
+      "dtype": "f16",
+      "bits": "3c00",
+      "value": 1.0
+     },
+     "S1CAP": {
+      "dtype": "f32",
+      "bits": "41a40000",
+      "value": 20.5
+     },
+     "s1": {
+      "dtype": "f32",
+      "bits": "41a40000",
+      "value": 20.5
+     },
+     "s2": {
+      "dtype": "f32",
+      "bits": "402df854",
+      "value": 2.7182817459106445
+     }
+    },
+    {
+     "h0": {
+      "dtype": "f16",
+      "bits": "7bff",
+      "value": 65504.0
+     },
+     "h1": {
+      "dtype": "f16",
+      "bits": "3800",
+      "value": 0.5
+     },
+     "S1CAP": {
+      "dtype": "f32",
+      "bits": "40700000",
+      "value": 3.75
+     },
+     "s1": {
+      "dtype": "f32",
+      "bits": "40700000",
+      "value": 3.75
+     },
+     "s2": {
+      "dtype": "f32",
+      "bits": "3fd3094c",
+      "value": 1.6487212181091309
+     }
+    },
+    {
+     "h0": {
+      "dtype": "f16",
+      "bits": "fbff",
+      "value": -65504.0
+     },
+     "h1": {
+      "dtype": "f16",
+      "bits": "fbff",
+      "value": -65504.0
+     },
+     "S1CAP": {
+      "dtype": "f32",
+      "bits": "41a40000",
+      "value": 20.5
+     },
+     "s1": {
+      "dtype": "f32",
+      "bits": "00000000",
+      "value": 0.0
+     },
+     "s2": {
+      "dtype": "f32",
+      "bits": "00000000",
+      "value": 0.0
+     }
+    },
+    {
+     "h0": {
+      "dtype": "f16",
+      "bits": "d570",
+      "value": -87.0
+     },
+     "h1": {
+      "dtype": "f16",
+      "bits": "d568",
+      "value": -86.5
+     },
+     "S1CAP": {
+      "dtype": "f32",
+      "bits": "41a40000",
+      "value": 20.5
+     },
+     "s1": {
+      "dtype": "f32",
+      "bits": "00b33687",
+      "value": 1.6458114537543937e-38
+     },
+     "s2": {
+      "dtype": "f32",
+      "bits": "0113bc74",
+      "value": 2.713484435667519e-38
+     }
+    },
+    {
+     "h0": {
+      "dtype": "f16",
+      "bits": "d5a0",
+      "value": -90.0
+     },
+     "h1": {
+      "dtype": "f16",
+      "bits": "3c00",
+      "value": 1.0
+     },
+     "S1CAP": {
+      "dtype": "f32",
+      "bits": "41a40000",
+      "value": 20.5
+     },
+     "s1": {
+      "dtype": "f32",
+      "bits": "0008ec28",
+      "value": 8.194008692231508e-40
+     },
+     "s2": {
+      "dtype": "f32",
+      "bits": "402df854",
+      "value": 2.7182817459106445
+     }
+    },
+    {
+     "h0": {
+      "dtype": "f16",
+      "bits": "c780",
+      "value": -7.5
+     },
+     "h1": {
+      "dtype": "f16",
+      "bits": "5588",
+      "value": 88.5
+     },
+     "S1CAP": {
+      "dtype": "f32",
+      "bits": "7149f2ca",
+      "value": 1.0000000150474662e+30
+     },
+     "s1": {
+      "dtype": "f32",
+      "bits": "3a10fcdd",
+      "value": 0.0005530843627639115
+     },
+     "s2": {
+      "dtype": "f32",
+      "bits": "7f4cdcc4",
+      "value": 2.723087918012828e+38
+     }
+    },
+    {
+     "h0": {
+      "dtype": "f16",
+      "bits": "2e65",
+      "value": 0.09991455078125
+     },
+     "h1": {
+      "dtype": "f16",
+      "bits": "ae65",
+      "value": -0.09991455078125
+     },
+     "S1CAP": {
+      "dtype": "f32",
+      "bits": "3f8d7732",
+      "value": 1.1052000522613525
+     },
+     "s1": {
+      "dtype": "f32",
+      "bits": "3f8d7325",
+      "value": 1.1050764322280884
+     },
+     "s2": {
+      "dtype": "f32",
+      "bits": "3f67a87e",
+      "value": 0.9049147367477417
+     }
+    },
+    {
+     "h0": {
+      "dtype": "f16",
+      "bits": "3c0e",
+      "value": 1.013671875
+     },
+     "h1": {
+      "dtype": "f16",
+      "bits": "ba1f",
+      "value": -0.76513671875
+     },
+     "S1CAP": {
+      "dtype": "f32",
+      "bits": "41a40000",
+      "value": 20.5
+     },
+     "s1": {
+      "dtype": "f32",
+      "bits": "40305d68",
+      "value": 2.7557010650634766
+     },
+     "s2": {
+      "dtype": "f32",
+      "bits": "3eee37e9",
+      "value": 0.4652703106403351
+     }
+    }
+   ]
+  },
+  {
+   "name": "tables",
+   "kind": "tables",
+   "description": "exhaustive scalar rules, index = the f16 input bit pattern (0000 .. ffff) or the code; all exact (bit-for-bit)",
+   "arrays": {
+    "sig": {
+     "dtype": "f16",
+     "shape": [
+      65536
+     ],
+     "files": [
+      "tables/sig.part0.hex",
+      "tables/sig.part1.hex"
+     ],
+     "layout": "[f16 bits of v]",
+     "what": "R(sig(v)) of page 51.4 / 55.1"
+    },
+    "tanh16": {
+     "dtype": "f16",
+     "shape": [
+      65536
+     ],
+     "files": [
+      "tables/tanh16.part0.hex",
+      "tables/tanh16.part1.hex"
+     ],
+     "layout": "[f16 bits of v]",
+     "what": "R(tanh(v)), correctly rounded (HID)"
+    },
+    "unorm8_store": {
+     "dtype": "u8",
+     "shape": [
+      65536
+     ],
+     "files": [
+      "tables/unorm8_store.part0.hex",
+      "tables/unorm8_store.part1.hex"
+     ],
+     "layout": "[f16 bits of v]",
+     "what": "GATES / CANDW code of the f16 value v"
+    },
+    "snorm8_store": {
+     "dtype": "i8",
+     "shape": [
+      65536
+     ],
+     "files": [
+      "tables/snorm8_store.part0.hex",
+      "tables/snorm8_store.part1.hex"
+     ],
+     "layout": "[f16 bits of v]",
+     "what": "HID code of the f16 value v"
+    },
+    "unorm8_read": {
+     "dtype": "f16",
+     "shape": [
+      256
+     ],
+     "files": [
+      "tables/unorm8_read.hex"
+     ],
+     "layout": "[code]",
+     "what": "read-back: f16 nearest to k/255"
+    },
+    "q8": {
+     "dtype": "e4m3",
+     "shape": [
+      65536
+     ],
+     "files": [
+      "tables/q8.part0.hex",
+      "tables/q8.part1.hex"
+     ],
+     "layout": "[f16 bits of v]",
+     "what": "Q8 of page 51.1"
+    }
+   }
+  }
+ ]
+}

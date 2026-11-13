@@ -1,0 +1,8 @@
+20:00:00.000 load: process 4100 attached C:\Games\Example\plugins\WrongGPU-RR.asi (hook mode)
+20:00:05.120 runtime: create instance 1: output 1920x1080, render 1280x720, mode 3, packing 1, hdr 1, depth inverted 1, jittered motion 0, hardware depth, alpha upscaling 0, history 1920x1080, arena 900 MiB (state 300 MiB, work 600 MiB)
+20:00:05.130 runtime: instance 1 evaluate failed before any pass: frame kernels still being prepared (first start with a cold driver cache)
+20:00:05.131 rr: evaluate 1: runtime returned 13; no pass-through (11), the code goes to the game
+20:00:05.150 runtime: instance 1 evaluate failed before any pass: frame kernels still being prepared (first start with a cold driver cache)
+20:00:05.170 runtime: instance 1 evaluate failed before any pass: frame kernels still being prepared (first start with a cold driver cache)
+20:01:40.000 runtime: destroy instance 1 after 100 frames (100 failed)
+20:01:40.500 diag: summary (process exit): support queries 4 (RR: yes 1 / no 0), RR lookups 1, RR instances created 1, RR evaluates 100

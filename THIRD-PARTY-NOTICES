@@ -1,0 +1,107 @@
+WrongGPU: third-party notices
+=============================
+
+WrongGPU's own code is under the MIT licence (LICENSE). This file lists every third-party component in this
+repository or used to build or test it, with its version, licence and where it is used.
+
+No file, code, kernel or model data of the upscaler WrongGPU re-implements (named in README.md) is included in this
+repository. The model weights are read on the player's own PC from that upscaler's file, which the player already has
+(see README.md and docs/CLEAN-ROOM.md).
+
+
+1. Included in this repository
+------------------------------
+
+1.1 AMD FidelityFX SDK 1.1.4: FidelityFX API headers
+    Files:    clean/third_party/fidelityfx-sdk-1.1.4/ffx_api/ (ffx_api.h, ffx_api_types.h, ffx_upscale.h,
+              ffx_framegeneration.h, dx12/ffx_api_dx12.h), unmodified; LICENSE.txt beside them
+    Source:   https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK, tag v1.1.4,
+              commit c6efa6bf7f2027b3ec94f28578bb5965eabb9e55
+    Licence:  MIT (text below; clean/third_party/fidelityfx-sdk-1.1.4/LICENSE.txt)
+    Used by:  the FSR front end (clean/fsr) as type declarations of the FidelityFX API; compiled into
+              amd_fidelityfx_dx12.dll as declarations only (no AMD code)
+
+1.2 AMD FidelityFX SDK fsr3-v3.0.4: FSR 3.0 host headers
+    Files:    clean/third_party/fidelityfx-sdk-fsr3-v3.0.4/FidelityFX/host/ (9 headers), unmodified
+    Source:   https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK, tag fsr3-v3.0.4,
+              commit 55ff22bb6981a9b9c087b9465101769fc0acd447
+    Licence:  MIT (text below; clean/third_party/fidelityfx-sdk-fsr3-v3.0.4/LICENSE.txt)
+    Used by:  clean/fsr/src/fsr30_layout_check.cpp only (a compile-time layout check of WrongGPU's own mirror types)
+
+
+2. Not included; used at build or test time (installed by the developer)
+-------------------------------------------------------------------------
+
+    Component                                    Licence                        Used for
+    Microsoft Visual Studio 2026 (MSVC, CMake,   Microsoft software licence     C++ builds; the release builds link
+      Ninja), Windows SDK 10.0.26100                                            the MSVC runtime statically (/MT)
+    Microsoft DirectX Shader Compiler 1.10       University of Illinois/NCSA    compiling the D3D12 kernels (dxc, dxv,
+      (DXC)                                        Open Source licence            dxcompiler.dll)
+    AMD Radeon GPU Analyzer 2.15 (RGA)           MIT                            the D3D12 kernels' register check
+    AMD HIP SDK for Windows 7.2 (ROCm clang)     Apache-2.0 with LLVM exception  compiling the HIP kernels (gfx1201,
+                                                   and other ROCm licences         gfx1200) and the runtime library
+    Python 3.12                                  PSF License                    build scripts, reference, tests
+    NumPy 2.x                                    BSD-3-Clause                   reference implementation and tests
+    Pillow (optional)                            MIT-CMU (HPND)                 two optional research tools only
+    MinGW-w64 GCC 13 (optional)                  GPL with runtime exception     development builds and Wine tests only;
+                                                                                never used for a release
+
+3. Not included; used at run time on the player's PC
+----------------------------------------------------
+
+    Windows' own d3d12.dll / dxgi.dll; AMD's driver and, optionally, the AMD HIP runtime (amdhip64_7.dll);
+    the game's own AMD FidelityFX DLLs (renamed by the launcher, never modified or redistributed); the player's
+    own file of the original upscaler (read by the converter on the player's PC, never redistributed); OptiScaler (its own
+    project, GPL-3.0; the launcher downloads the WrongGPU edition from its own release page, it is not part of
+    this repository or of WrongGPU's packages).
+
+
+Licence texts
+-------------
+
+AMD FidelityFX SDK 1.1.4 (clean/third_party/fidelityfx-sdk-1.1.4/LICENSE.txt):
+
+This file is part of the FidelityFX SDK.
+
+Copyright (C) 2024 Advanced Micro Devices, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files(the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and /or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions :
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+
+AMD FidelityFX SDK fsr3-v3.0.4 (clean/third_party/fidelityfx-sdk-fsr3-v3.0.4/LICENSE.txt):
+
+Copyright © 2023 Advanced Micro Devices, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files(the “Software”), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and /or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions :
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.

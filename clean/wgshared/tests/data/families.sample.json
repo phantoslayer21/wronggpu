@@ -1,0 +1,11 @@
+{
+ "schema": "wronggpu.gi-families.v1",
+ "comment": "Test fixture: the shape of the RR plugin's game-interface family index (clean/rr_f/proxy/binding/families.json, DESIGN-i15 5.5), used by test_gen_registry.py through WG_FAMILIES_INDEX. Not read by any DLL.",
+ "families": [
+  {"family": "2.6", "min": [2, 6, 0], "max": [2, 6, 99], "table": "rr-f-2.6.json", "layout": "A10-2.7", "status": "provisional"},
+  {"family": "2.7", "min": [2, 7, 0], "max": [2, 7, 99], "table": "rr-f-2.7.json", "layout": "A10-2.7", "status": "confirmed"},
+  {"family": "2.8", "min": [2, 8, 0], "max": [2, 9, 99], "table": "rr-f-2.8.json", "layout": "A10-2.7", "status": "provisional"},
+  {"family": "2.10", "min": [2, 10, 0], "max": [2, 13, 99], "table": "rr-f-2.10.json", "layout": "A10-2.14", "status": "provisional"},
+  {"family": "2.14", "min": [2, 14, 0], "max": [2, 14, 99], "table": "rr-f-2.14.json", "layout": "A10-2.14", "status": "confirmed"}
+ ]
+}

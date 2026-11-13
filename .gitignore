@@ -1,7 +1,8 @@
-# Binaries are published through GitHub Releases, never committed.
-*.exe
-*.dll
-*.zip
-*.hsaco
-*.bin
-*.log
+# SPDX-License-Identifier: MIT
+__pycache__/
+*.pyc
+/build/
+*.co
+*.so
+/toolchains/
+/out/

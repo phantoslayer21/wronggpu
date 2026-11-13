@@ -1,0 +1,3149 @@
+{
+ "note": "Export tables of the interposer library of pages 60-63 as shipped by games (names and ordinals only). Ordinal = 1-based position in ASCII order of the names; no forwarders, no unnamed exports.",
+ "2.7.1": [
+  {
+   "ordinal": 1,
+   "name": "CreateDXGIFactory"
+  },
+  {
+   "ordinal": 2,
+   "name": "CreateDXGIFactory1"
+  },
+  {
+   "ordinal": 3,
+   "name": "CreateDXGIFactory2"
+  },
+  {
+   "ordinal": 4,
+   "name": "D3D11CreateDevice"
+  },
+  {
+   "ordinal": 5,
+   "name": "D3D11CreateDeviceAndSwapChain"
+  },
+  {
+   "ordinal": 6,
+   "name": "D3D12CreateDevice"
+  },
+  {
+   "ordinal": 7,
+   "name": "D3D12CreateRootSignatureDeserializer"
+  },
+  {
+   "ordinal": 8,
+   "name": "D3D12CreateVersionedRootSignatureDeserializer"
+  },
+  {
+   "ordinal": 9,
+   "name": "D3D12EnableExperimentalFeatures"
+  },
+  {
+   "ordinal": 10,
+   "name": "D3D12GetDebugInterface"
+  },
+  {
+   "ordinal": 11,
+   "name": "D3D12GetInterface"
+  },
+  {
+   "ordinal": 12,
+   "name": "D3D12SerializeRootSignature"
+  },
+  {
+   "ordinal": 13,
+   "name": "D3D12SerializeVersionedRootSignature"
+  },
+  {
+   "ordinal": 14,
+   "name": "DXGIGetDebugInterface1"
+  },
+  {
+   "ordinal": 15,
+   "name": "slAllocateResources"
+  },
+  {
+   "ordinal": 16,
+   "name": "slEvaluateFeature"
+  },
+  {
+   "ordinal": 17,
+   "name": "slFreeResources"
+  },
+  {
+   "ordinal": 18,
+   "name": "slGetFeatureFunction"
+  },
+  {
+   "ordinal": 19,
+   "name": "slGetFeatureRequirements"
+  },
+  {
+   "ordinal": 20,
+   "name": "slGetFeatureVersion"
+  },
+  {
+   "ordinal": 21,
+   "name": "slGetNativeInterface"
+  },
+  {
+   "ordinal": 22,
+   "name": "slGetNewFrameToken"
+  },
+  {
+   "ordinal": 23,
+   "name": "slInit"
+  },
+  {
+   "ordinal": 24,
+   "name": "slIsFeatureLoaded"
+  },
+  {
+   "ordinal": 25,
+   "name": "slIsFeatureSupported"
+  },
+  {
+   "ordinal": 26,
+   "name": "slSetConstants"
+  },
+  {
+   "ordinal": 27,
+   "name": "slSetD3DDevice"
+  },
+  {
+   "ordinal": 28,
+   "name": "slSetFeatureLoaded"
+  },
+  {
+   "ordinal": 29,
+   "name": "slSetTag"
+  },
+  {
+   "ordinal": 30,
+   "name": "slSetVulkanInfo"
+  },
+  {
+   "ordinal": 31,
+   "name": "slShutdown"
+  },
+  {
+   "ordinal": 32,
+   "name": "slUpgradeInterface"
+  },
+  {
+   "ordinal": 33,
+   "name": "vkAcquireNextImageKHR"
+  },
+  {
+   "ordinal": 34,
+   "name": "vkAllocateCommandBuffers"
+  },
+  {
+   "ordinal": 35,
+   "name": "vkAllocateDescriptorSets"
+  },
+  {
+   "ordinal": 36,
+   "name": "vkAllocateMemory"
+  },
+  {
+   "ordinal": 37,
+   "name": "vkBeginCommandBuffer"
+  },
+  {
+   "ordinal": 38,
+   "name": "vkBindBufferMemory"
+  },
+  {
+   "ordinal": 39,
+   "name": "vkBindBufferMemory2"
+  },
+  {
+   "ordinal": 40,
+   "name": "vkBindImageMemory"
+  },
+  {
+   "ordinal": 41,
+   "name": "vkBindImageMemory2"
+  },
+  {
+   "ordinal": 42,
+   "name": "vkCmdBeginQuery"
+  },
+  {
+   "ordinal": 43,
+   "name": "vkCmdBeginRenderPass"
+  },
+  {
+   "ordinal": 44,
+   "name": "vkCmdBeginRenderPass2"
+  },
+  {
+   "ordinal": 45,
+   "name": "vkCmdBeginRendering"
+  },
+  {
+   "ordinal": 46,
+   "name": "vkCmdBindDescriptorSets"
+  },
+  {
+   "ordinal": 47,
+   "name": "vkCmdBindIndexBuffer"
+  },
+  {
+   "ordinal": 48,
+   "name": "vkCmdBindPipeline"
+  },
+  {
+   "ordinal": 49,
+   "name": "vkCmdBindVertexBuffers"
+  },
+  {
+   "ordinal": 50,
+   "name": "vkCmdBindVertexBuffers2"
+  },
+  {
+   "ordinal": 51,
+   "name": "vkCmdBlitImage"
+  },
+  {
+   "ordinal": 52,
+   "name": "vkCmdBlitImage2"
+  },
+  {
+   "ordinal": 53,
+   "name": "vkCmdClearAttachments"
+  },
+  {
+   "ordinal": 54,
+   "name": "vkCmdClearColorImage"
+  },
+  {
+   "ordinal": 55,
+   "name": "vkCmdClearDepthStencilImage"
+  },
+  {
+   "ordinal": 56,
+   "name": "vkCmdCopyBuffer"
+  },
+  {
+   "ordinal": 57,
+   "name": "vkCmdCopyBuffer2"
+  },
+  {
+   "ordinal": 58,
+   "name": "vkCmdCopyBufferToImage"
+  },
+  {
+   "ordinal": 59,
+   "name": "vkCmdCopyBufferToImage2"
+  },
+  {
+   "ordinal": 60,
+   "name": "vkCmdCopyImage"
+  },
+  {
+   "ordinal": 61,
+   "name": "vkCmdCopyImage2"
+  },
+  {
+   "ordinal": 62,
+   "name": "vkCmdCopyImageToBuffer"
+  },
+  {
+   "ordinal": 63,
+   "name": "vkCmdCopyImageToBuffer2"
+  },
+  {
+   "ordinal": 64,
+   "name": "vkCmdCopyQueryPoolResults"
+  },
+  {
+   "ordinal": 65,
+   "name": "vkCmdDispatch"
+  },
+  {
+   "ordinal": 66,
+   "name": "vkCmdDispatchBase"
+  },
+  {
+   "ordinal": 67,
+   "name": "vkCmdDispatchIndirect"
+  },
+  {
+   "ordinal": 68,
+   "name": "vkCmdDraw"
+  },
+  {
+   "ordinal": 69,
+   "name": "vkCmdDrawIndexed"
+  },
+  {
+   "ordinal": 70,
+   "name": "vkCmdDrawIndexedIndirect"
+  },
+  {
+   "ordinal": 71,
+   "name": "vkCmdDrawIndexedIndirectCount"
+  },
+  {
+   "ordinal": 72,
+   "name": "vkCmdDrawIndirect"
+  },
+  {
+   "ordinal": 73,
+   "name": "vkCmdDrawIndirectCount"
+  },
+  {
+   "ordinal": 74,
+   "name": "vkCmdEndQuery"
+  },
+  {
+   "ordinal": 75,
+   "name": "vkCmdEndRenderPass"
+  },
+  {
+   "ordinal": 76,
+   "name": "vkCmdEndRenderPass2"
+  },
+  {
+   "ordinal": 77,
+   "name": "vkCmdEndRendering"
+  },
+  {
+   "ordinal": 78,
+   "name": "vkCmdExecuteCommands"
+  },
+  {
+   "ordinal": 79,
+   "name": "vkCmdFillBuffer"
+  },
+  {
+   "ordinal": 80,
+   "name": "vkCmdNextSubpass"
+  },
+  {
+   "ordinal": 81,
+   "name": "vkCmdNextSubpass2"
+  },
+  {
+   "ordinal": 82,
+   "name": "vkCmdPipelineBarrier"
+  },
+  {
+   "ordinal": 83,
+   "name": "vkCmdPipelineBarrier2"
+  },
+  {
+   "ordinal": 84,
+   "name": "vkCmdPushConstants"
+  },
+  {
+   "ordinal": 85,
+   "name": "vkCmdResetEvent"
+  },
+  {
+   "ordinal": 86,
+   "name": "vkCmdResetEvent2"
+  },
+  {
+   "ordinal": 87,
+   "name": "vkCmdResetQueryPool"
+  },
+  {
+   "ordinal": 88,
+   "name": "vkCmdResolveImage"
+  },
+  {
+   "ordinal": 89,
+   "name": "vkCmdResolveImage2"
+  },
+  {
+   "ordinal": 90,
+   "name": "vkCmdSetBlendConstants"
+  },
+  {
+   "ordinal": 91,
+   "name": "vkCmdSetCullMode"
+  },
+  {
+   "ordinal": 92,
+   "name": "vkCmdSetDepthBias"
+  },
+  {
+   "ordinal": 93,
+   "name": "vkCmdSetDepthBiasEnable"
+  },
+  {
+   "ordinal": 94,
+   "name": "vkCmdSetDepthBounds"
+  },
+  {
+   "ordinal": 95,
+   "name": "vkCmdSetDepthBoundsTestEnable"
+  },
+  {
+   "ordinal": 96,
+   "name": "vkCmdSetDepthCompareOp"
+  },
+  {
+   "ordinal": 97,
+   "name": "vkCmdSetDepthTestEnable"
+  },
+  {
+   "ordinal": 98,
+   "name": "vkCmdSetDepthWriteEnable"
+  },
+  {
+   "ordinal": 99,
+   "name": "vkCmdSetDeviceMask"
+  },
+  {
+   "ordinal": 100,
+   "name": "vkCmdSetEvent"
+  },
+  {
+   "ordinal": 101,
+   "name": "vkCmdSetEvent2"
+  },
+  {
+   "ordinal": 102,
+   "name": "vkCmdSetFrontFace"
+  },
+  {
+   "ordinal": 103,
+   "name": "vkCmdSetLineWidth"
+  },
+  {
+   "ordinal": 104,
+   "name": "vkCmdSetPrimitiveRestartEnable"
+  },
+  {
+   "ordinal": 105,
+   "name": "vkCmdSetPrimitiveTopology"
+  },
+  {
+   "ordinal": 106,
+   "name": "vkCmdSetRasterizerDiscardEnable"
+  },
+  {
+   "ordinal": 107,
+   "name": "vkCmdSetScissor"
+  },
+  {
+   "ordinal": 108,
+   "name": "vkCmdSetScissorWithCount"
+  },
+  {
+   "ordinal": 109,
+   "name": "vkCmdSetStencilCompareMask"
+  },
+  {
+   "ordinal": 110,
+   "name": "vkCmdSetStencilOp"
+  },
+  {
+   "ordinal": 111,
+   "name": "vkCmdSetStencilReference"
+  },
+  {
+   "ordinal": 112,
+   "name": "vkCmdSetStencilTestEnable"
+  },
+  {
+   "ordinal": 113,
+   "name": "vkCmdSetStencilWriteMask"
+  },
+  {
+   "ordinal": 114,
+   "name": "vkCmdSetViewport"
+  },
+  {
+   "ordinal": 115,
+   "name": "vkCmdSetViewportWithCount"
+  },
+  {
+   "ordinal": 116,
+   "name": "vkCmdUpdateBuffer"
+  },
+  {
+   "ordinal": 117,
+   "name": "vkCmdWaitEvents"
+  },
+  {
+   "ordinal": 118,
+   "name": "vkCmdWaitEvents2"
+  },
+  {
+   "ordinal": 119,
+   "name": "vkCmdWriteTimestamp"
+  },
+  {
+   "ordinal": 120,
+   "name": "vkCmdWriteTimestamp2"
+  },
+  {
+   "ordinal": 121,
+   "name": "vkCreateBuffer"
+  },
+  {
+   "ordinal": 122,
+   "name": "vkCreateBufferView"
+  },
+  {
+   "ordinal": 123,
+   "name": "vkCreateCommandPool"
+  },
+  {
+   "ordinal": 124,
+   "name": "vkCreateComputePipelines"
+  },
+  {
+   "ordinal": 125,
+   "name": "vkCreateDescriptorPool"
+  },
+  {
+   "ordinal": 126,
+   "name": "vkCreateDescriptorSetLayout"
+  },
+  {
+   "ordinal": 127,
+   "name": "vkCreateDescriptorUpdateTemplate"
+  },
+  {
+   "ordinal": 128,
+   "name": "vkCreateDevice"
+  },
+  {
+   "ordinal": 129,
+   "name": "vkCreateEvent"
+  },
+  {
+   "ordinal": 130,
+   "name": "vkCreateFence"
+  },
+  {
+   "ordinal": 131,
+   "name": "vkCreateFramebuffer"
+  },
+  {
+   "ordinal": 132,
+   "name": "vkCreateGraphicsPipelines"
+  },
+  {
+   "ordinal": 133,
+   "name": "vkCreateImage"
+  },
+  {
+   "ordinal": 134,
+   "name": "vkCreateImageView"
+  },
+  {
+   "ordinal": 135,
+   "name": "vkCreateInstance"
+  },
+  {
+   "ordinal": 136,
+   "name": "vkCreatePipelineCache"
+  },
+  {
+   "ordinal": 137,
+   "name": "vkCreatePipelineLayout"
+  },
+  {
+   "ordinal": 138,
+   "name": "vkCreatePrivateDataSlot"
+  },
+  {
+   "ordinal": 139,
+   "name": "vkCreateQueryPool"
+  },
+  {
+   "ordinal": 140,
+   "name": "vkCreateRenderPass"
+  },
+  {
+   "ordinal": 141,
+   "name": "vkCreateRenderPass2"
+  },
+  {
+   "ordinal": 142,
+   "name": "vkCreateSampler"
+  },
+  {
+   "ordinal": 143,
+   "name": "vkCreateSamplerYcbcrConversion"
+  },
+  {
+   "ordinal": 144,
+   "name": "vkCreateSemaphore"
+  },
+  {
+   "ordinal": 145,
+   "name": "vkCreateShaderModule"
+  },
+  {
+   "ordinal": 146,
+   "name": "vkCreateSwapchainKHR"
+  },
+  {
+   "ordinal": 147,
+   "name": "vkCreateWin32SurfaceKHR"
+  },
+  {
+   "ordinal": 148,
+   "name": "vkDestroyBuffer"
+  },
+  {
+   "ordinal": 149,
+   "name": "vkDestroyBufferView"
+  },
+  {
+   "ordinal": 150,
+   "name": "vkDestroyCommandPool"
+  },
+  {
+   "ordinal": 151,
+   "name": "vkDestroyDescriptorPool"
+  },
+  {
+   "ordinal": 152,
+   "name": "vkDestroyDescriptorSetLayout"
+  },
+  {
+   "ordinal": 153,
+   "name": "vkDestroyDescriptorUpdateTemplate"
+  },
+  {
+   "ordinal": 154,
+   "name": "vkDestroyDevice"
+  },
+  {
+   "ordinal": 155,
+   "name": "vkDestroyEvent"
+  },
+  {
+   "ordinal": 156,
+   "name": "vkDestroyFence"
+  },
+  {
+   "ordinal": 157,
+   "name": "vkDestroyFramebuffer"
+  },
+  {
+   "ordinal": 158,
+   "name": "vkDestroyImage"
+  },
+  {
+   "ordinal": 159,
+   "name": "vkDestroyImageView"
+  },
+  {
+   "ordinal": 160,
+   "name": "vkDestroyInstance"
+  },
+  {
+   "ordinal": 161,
+   "name": "vkDestroyPipeline"
+  },
+  {
+   "ordinal": 162,
+   "name": "vkDestroyPipelineCache"
+  },
+  {
+   "ordinal": 163,
+   "name": "vkDestroyPipelineLayout"
+  },
+  {
+   "ordinal": 164,
+   "name": "vkDestroyPrivateDataSlot"
+  },
+  {
+   "ordinal": 165,
+   "name": "vkDestroyQueryPool"
+  },
+  {
+   "ordinal": 166,
+   "name": "vkDestroyRenderPass"
+  },
+  {
+   "ordinal": 167,
+   "name": "vkDestroySampler"
+  },
+  {
+   "ordinal": 168,
+   "name": "vkDestroySamplerYcbcrConversion"
+  },
+  {
+   "ordinal": 169,
+   "name": "vkDestroySemaphore"
+  },
+  {
+   "ordinal": 170,
+   "name": "vkDestroyShaderModule"
+  },
+  {
+   "ordinal": 171,
+   "name": "vkDestroySurfaceKHR"
+  },
+  {
+   "ordinal": 172,
+   "name": "vkDestroySwapchainKHR"
+  },
+  {
+   "ordinal": 173,
+   "name": "vkDeviceWaitIdle"
+  },
+  {
+   "ordinal": 174,
+   "name": "vkEndCommandBuffer"
+  },
+  {
+   "ordinal": 175,
+   "name": "vkEnumerateDeviceExtensionProperties"
+  },
+  {
+   "ordinal": 176,
+   "name": "vkEnumerateDeviceLayerProperties"
+  },
+  {
+   "ordinal": 177,
+   "name": "vkEnumerateInstanceExtensionProperties"
+  },
+  {
+   "ordinal": 178,
+   "name": "vkEnumerateInstanceLayerProperties"
+  },
+  {
+   "ordinal": 179,
+   "name": "vkEnumerateInstanceVersion"
+  },
+  {
+   "ordinal": 180,
+   "name": "vkEnumeratePhysicalDeviceGroups"
+  },
+  {
+   "ordinal": 181,
+   "name": "vkEnumeratePhysicalDevices"
+  },
+  {
+   "ordinal": 182,
+   "name": "vkFlushMappedMemoryRanges"
+  },
+  {
+   "ordinal": 183,
+   "name": "vkFreeCommandBuffers"
+  },
+  {
+   "ordinal": 184,
+   "name": "vkFreeDescriptorSets"
+  },
+  {
+   "ordinal": 185,
+   "name": "vkFreeMemory"
+  },
+  {
+   "ordinal": 186,
+   "name": "vkGetBufferDeviceAddress"
+  },
+  {
+   "ordinal": 187,
+   "name": "vkGetBufferMemoryRequirements"
+  },
+  {
+   "ordinal": 188,
+   "name": "vkGetBufferMemoryRequirements2"
+  },
+  {
+   "ordinal": 189,
+   "name": "vkGetBufferOpaqueCaptureAddress"
+  },
+  {
+   "ordinal": 190,
+   "name": "vkGetDescriptorSetLayoutSupport"
+  },
+  {
+   "ordinal": 191,
+   "name": "vkGetDeviceBufferMemoryRequirements"
+  },
+  {
+   "ordinal": 192,
+   "name": "vkGetDeviceGroupPeerMemoryFeatures"
+  },
+  {
+   "ordinal": 193,
+   "name": "vkGetDeviceImageMemoryRequirements"
+  },
+  {
+   "ordinal": 194,
+   "name": "vkGetDeviceImageSparseMemoryRequirements"
+  },
+  {
+   "ordinal": 195,
+   "name": "vkGetDeviceMemoryCommitment"
+  },
+  {
+   "ordinal": 196,
+   "name": "vkGetDeviceMemoryOpaqueCaptureAddress"
+  },
+  {
+   "ordinal": 197,
+   "name": "vkGetDeviceProcAddr"
+  },
+  {
+   "ordinal": 198,
+   "name": "vkGetDeviceQueue"
+  },
+  {
+   "ordinal": 199,
+   "name": "vkGetDeviceQueue2"
+  },
+  {
+   "ordinal": 200,
+   "name": "vkGetEventStatus"
+  },
+  {
+   "ordinal": 201,
+   "name": "vkGetFenceStatus"
+  },
+  {
+   "ordinal": 202,
+   "name": "vkGetImageMemoryRequirements"
+  },
+  {
+   "ordinal": 203,
+   "name": "vkGetImageMemoryRequirements2"
+  },
+  {
+   "ordinal": 204,
+   "name": "vkGetImageMemoryRequirements2KHR"
+  },
+  {
+   "ordinal": 205,
+   "name": "vkGetImageSparseMemoryRequirements"
+  },
+  {
+   "ordinal": 206,
+   "name": "vkGetImageSparseMemoryRequirements2"
+  },
+  {
+   "ordinal": 207,
+   "name": "vkGetImageSubresourceLayout"
+  },
+  {
+   "ordinal": 208,
+   "name": "vkGetInstanceProcAddr"
+  },
+  {
+   "ordinal": 209,
+   "name": "vkGetPhysicalDeviceExternalBufferProperties"
+  },
+  {
+   "ordinal": 210,
+   "name": "vkGetPhysicalDeviceExternalFenceProperties"
+  },
+  {
+   "ordinal": 211,
+   "name": "vkGetPhysicalDeviceExternalSemaphoreProperties"
+  },
+  {
+   "ordinal": 212,
+   "name": "vkGetPhysicalDeviceFeatures"
+  },
+  {
+   "ordinal": 213,
+   "name": "vkGetPhysicalDeviceFeatures2"
+  },
+  {
+   "ordinal": 214,
+   "name": "vkGetPhysicalDeviceFeatures2KHR"
+  },
+  {
+   "ordinal": 215,
+   "name": "vkGetPhysicalDeviceFormatProperties"
+  },
+  {
+   "ordinal": 216,
+   "name": "vkGetPhysicalDeviceFormatProperties2"
+  },
+  {
+   "ordinal": 217,
+   "name": "vkGetPhysicalDeviceImageFormatProperties"
+  },
+  {
+   "ordinal": 218,
+   "name": "vkGetPhysicalDeviceImageFormatProperties2"
+  },
+  {
+   "ordinal": 219,
+   "name": "vkGetPhysicalDeviceMemoryProperties"
+  },
+  {
+   "ordinal": 220,
+   "name": "vkGetPhysicalDeviceMemoryProperties2"
+  },
+  {
+   "ordinal": 221,
+   "name": "vkGetPhysicalDeviceProperties"
+  },
+  {
+   "ordinal": 222,
+   "name": "vkGetPhysicalDeviceProperties2"
+  },
+  {
+   "ordinal": 223,
+   "name": "vkGetPhysicalDeviceProperties2KHR"
+  },
+  {
+   "ordinal": 224,
+   "name": "vkGetPhysicalDeviceQueueFamilyProperties"
+  },
+  {
+   "ordinal": 225,
+   "name": "vkGetPhysicalDeviceQueueFamilyProperties2"
+  },
+  {
+   "ordinal": 226,
+   "name": "vkGetPhysicalDeviceSparseImageFormatProperties"
+  },
+  {
+   "ordinal": 227,
+   "name": "vkGetPhysicalDeviceSparseImageFormatProperties2"
+  },
+  {
+   "ordinal": 228,
+   "name": "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"
+  },
+  {
+   "ordinal": 229,
+   "name": "vkGetPhysicalDeviceSurfaceFormatsKHR"
+  },
+  {
+   "ordinal": 230,
+   "name": "vkGetPhysicalDeviceSurfacePresentModesKHR"
+  },
+  {
+   "ordinal": 231,
+   "name": "vkGetPhysicalDeviceSurfaceSupportKHR"
+  },
+  {
+   "ordinal": 232,
+   "name": "vkGetPhysicalDeviceToolProperties"
+  },
+  {
+   "ordinal": 233,
+   "name": "vkGetPipelineCacheData"
+  },
+  {
+   "ordinal": 234,
+   "name": "vkGetPrivateData"
+  },
+  {
+   "ordinal": 235,
+   "name": "vkGetQueryPoolResults"
+  },
+  {
+   "ordinal": 236,
+   "name": "vkGetRenderAreaGranularity"
+  },
+  {
+   "ordinal": 237,
+   "name": "vkGetSemaphoreCounterValue"
+  },
+  {
+   "ordinal": 238,
+   "name": "vkGetSwapchainImagesKHR"
+  },
+  {
+   "ordinal": 239,
+   "name": "vkInvalidateMappedMemoryRanges"
+  },
+  {
+   "ordinal": 240,
+   "name": "vkMapMemory"
+  },
+  {
+   "ordinal": 241,
+   "name": "vkMergePipelineCaches"
+  },
+  {
+   "ordinal": 242,
+   "name": "vkQueueBindSparse"
+  },
+  {
+   "ordinal": 243,
+   "name": "vkQueuePresentKHR"
+  },
+  {
+   "ordinal": 244,
+   "name": "vkQueueSubmit"
+  },
+  {
+   "ordinal": 245,
+   "name": "vkQueueSubmit2"
+  },
+  {
+   "ordinal": 246,
+   "name": "vkQueueWaitIdle"
+  },
+  {
+   "ordinal": 247,
+   "name": "vkResetCommandBuffer"
+  },
+  {
+   "ordinal": 248,
+   "name": "vkResetCommandPool"
+  },
+  {
+   "ordinal": 249,
+   "name": "vkResetDescriptorPool"
+  },
+  {
+   "ordinal": 250,
+   "name": "vkResetEvent"
+  },
+  {
+   "ordinal": 251,
+   "name": "vkResetFences"
+  },
+  {
+   "ordinal": 252,
+   "name": "vkResetQueryPool"
+  },
+  {
+   "ordinal": 253,
+   "name": "vkSetEvent"
+  },
+  {
+   "ordinal": 254,
+   "name": "vkSetPrivateData"
+  },
+  {
+   "ordinal": 255,
+   "name": "vkSignalSemaphore"
+  },
+  {
+   "ordinal": 256,
+   "name": "vkTrimCommandPool"
+  },
+  {
+   "ordinal": 257,
+   "name": "vkUnmapMemory"
+  },
+  {
+   "ordinal": 258,
+   "name": "vkUpdateDescriptorSetWithTemplate"
+  },
+  {
+   "ordinal": 259,
+   "name": "vkUpdateDescriptorSets"
+  },
+  {
+   "ordinal": 260,
+   "name": "vkWaitForFences"
+  },
+  {
+   "ordinal": 261,
+   "name": "vkWaitSemaphores"
+  }
+ ],
+ "2.8.0": [
+  {
+   "ordinal": 1,
+   "name": "CreateDXGIFactory"
+  },
+  {
+   "ordinal": 2,
+   "name": "CreateDXGIFactory1"
+  },
+  {
+   "ordinal": 3,
+   "name": "CreateDXGIFactory2"
+  },
+  {
+   "ordinal": 4,
+   "name": "D3D11CreateDevice"
+  },
+  {
+   "ordinal": 5,
+   "name": "D3D11CreateDeviceAndSwapChain"
+  },
+  {
+   "ordinal": 6,
+   "name": "D3D12CreateDevice"
+  },
+  {
+   "ordinal": 7,
+   "name": "D3D12CreateRootSignatureDeserializer"
+  },
+  {
+   "ordinal": 8,
+   "name": "D3D12CreateVersionedRootSignatureDeserializer"
+  },
+  {
+   "ordinal": 9,
+   "name": "D3D12EnableExperimentalFeatures"
+  },
+  {
+   "ordinal": 10,
+   "name": "D3D12GetDebugInterface"
+  },
+  {
+   "ordinal": 11,
+   "name": "D3D12GetInterface"
+  },
+  {
+   "ordinal": 12,
+   "name": "D3D12SerializeRootSignature"
+  },
+  {
+   "ordinal": 13,
+   "name": "D3D12SerializeVersionedRootSignature"
+  },
+  {
+   "ordinal": 14,
+   "name": "DXGIGetDebugInterface1"
+  },
+  {
+   "ordinal": 15,
+   "name": "slAllocateResources"
+  },
+  {
+   "ordinal": 16,
+   "name": "slEvaluateFeature"
+  },
+  {
+   "ordinal": 17,
+   "name": "slFreeResources"
+  },
+  {
+   "ordinal": 18,
+   "name": "slGetFeatureFunction"
+  },
+  {
+   "ordinal": 19,
+   "name": "slGetFeatureRequirements"
+  },
+  {
+   "ordinal": 20,
+   "name": "slGetFeatureVersion"
+  },
+  {
+   "ordinal": 21,
+   "name": "slGetNativeInterface"
+  },
+  {
+   "ordinal": 22,
+   "name": "slGetNewFrameToken"
+  },
+  {
+   "ordinal": 23,
+   "name": "slInit"
+  },
+  {
+   "ordinal": 24,
+   "name": "slIsFeatureLoaded"
+  },
+  {
+   "ordinal": 25,
+   "name": "slIsFeatureSupported"
+  },
+  {
+   "ordinal": 26,
+   "name": "slSetConstants"
+  },
+  {
+   "ordinal": 27,
+   "name": "slSetD3DDevice"
+  },
+  {
+   "ordinal": 28,
+   "name": "slSetFeatureLoaded"
+  },
+  {
+   "ordinal": 29,
+   "name": "slSetTag"
+  },
+  {
+   "ordinal": 30,
+   "name": "slSetTagForFrame"
+  },
+  {
+   "ordinal": 31,
+   "name": "slSetVulkanInfo"
+  },
+  {
+   "ordinal": 32,
+   "name": "slShutdown"
+  },
+  {
+   "ordinal": 33,
+   "name": "slUpgradeInterface"
+  },
+  {
+   "ordinal": 34,
+   "name": "vkAcquireNextImageKHR"
+  },
+  {
+   "ordinal": 35,
+   "name": "vkAllocateCommandBuffers"
+  },
+  {
+   "ordinal": 36,
+   "name": "vkAllocateDescriptorSets"
+  },
+  {
+   "ordinal": 37,
+   "name": "vkAllocateMemory"
+  },
+  {
+   "ordinal": 38,
+   "name": "vkBeginCommandBuffer"
+  },
+  {
+   "ordinal": 39,
+   "name": "vkBindBufferMemory"
+  },
+  {
+   "ordinal": 40,
+   "name": "vkBindBufferMemory2"
+  },
+  {
+   "ordinal": 41,
+   "name": "vkBindImageMemory"
+  },
+  {
+   "ordinal": 42,
+   "name": "vkBindImageMemory2"
+  },
+  {
+   "ordinal": 43,
+   "name": "vkCmdBeginQuery"
+  },
+  {
+   "ordinal": 44,
+   "name": "vkCmdBeginRenderPass"
+  },
+  {
+   "ordinal": 45,
+   "name": "vkCmdBeginRenderPass2"
+  },
+  {
+   "ordinal": 46,
+   "name": "vkCmdBeginRendering"
+  },
+  {
+   "ordinal": 47,
+   "name": "vkCmdBindDescriptorSets"
+  },
+  {
+   "ordinal": 48,
+   "name": "vkCmdBindIndexBuffer"
+  },
+  {
+   "ordinal": 49,
+   "name": "vkCmdBindPipeline"
+  },
+  {
+   "ordinal": 50,
+   "name": "vkCmdBindVertexBuffers"
+  },
+  {
+   "ordinal": 51,
+   "name": "vkCmdBindVertexBuffers2"
+  },
+  {
+   "ordinal": 52,
+   "name": "vkCmdBlitImage"
+  },
+  {
+   "ordinal": 53,
+   "name": "vkCmdBlitImage2"
+  },
+  {
+   "ordinal": 54,
+   "name": "vkCmdClearAttachments"
+  },
+  {
+   "ordinal": 55,
+   "name": "vkCmdClearColorImage"
+  },
+  {
+   "ordinal": 56,
+   "name": "vkCmdClearDepthStencilImage"
+  },
+  {
+   "ordinal": 57,
+   "name": "vkCmdCopyBuffer"
+  },
+  {
+   "ordinal": 58,
+   "name": "vkCmdCopyBuffer2"
+  },
+  {
+   "ordinal": 59,
+   "name": "vkCmdCopyBufferToImage"
+  },
+  {
+   "ordinal": 60,
+   "name": "vkCmdCopyBufferToImage2"
+  },
+  {
+   "ordinal": 61,
+   "name": "vkCmdCopyImage"
+  },
+  {
+   "ordinal": 62,
+   "name": "vkCmdCopyImage2"
+  },
+  {
+   "ordinal": 63,
+   "name": "vkCmdCopyImageToBuffer"
+  },
+  {
+   "ordinal": 64,
+   "name": "vkCmdCopyImageToBuffer2"
+  },
+  {
+   "ordinal": 65,
+   "name": "vkCmdCopyQueryPoolResults"
+  },
+  {
+   "ordinal": 66,
+   "name": "vkCmdDispatch"
+  },
+  {
+   "ordinal": 67,
+   "name": "vkCmdDispatchBase"
+  },
+  {
+   "ordinal": 68,
+   "name": "vkCmdDispatchIndirect"
+  },
+  {
+   "ordinal": 69,
+   "name": "vkCmdDraw"
+  },
+  {
+   "ordinal": 70,
+   "name": "vkCmdDrawIndexed"
+  },
+  {
+   "ordinal": 71,
+   "name": "vkCmdDrawIndexedIndirect"
+  },
+  {
+   "ordinal": 72,
+   "name": "vkCmdDrawIndexedIndirectCount"
+  },
+  {
+   "ordinal": 73,
+   "name": "vkCmdDrawIndirect"
+  },
+  {
+   "ordinal": 74,
+   "name": "vkCmdDrawIndirectCount"
+  },
+  {
+   "ordinal": 75,
+   "name": "vkCmdEndQuery"
+  },
+  {
+   "ordinal": 76,
+   "name": "vkCmdEndRenderPass"
+  },
+  {
+   "ordinal": 77,
+   "name": "vkCmdEndRenderPass2"
+  },
+  {
+   "ordinal": 78,
+   "name": "vkCmdEndRendering"
+  },
+  {
+   "ordinal": 79,
+   "name": "vkCmdExecuteCommands"
+  },
+  {
+   "ordinal": 80,
+   "name": "vkCmdFillBuffer"
+  },
+  {
+   "ordinal": 81,
+   "name": "vkCmdNextSubpass"
+  },
+  {
+   "ordinal": 82,
+   "name": "vkCmdNextSubpass2"
+  },
+  {
+   "ordinal": 83,
+   "name": "vkCmdPipelineBarrier"
+  },
+  {
+   "ordinal": 84,
+   "name": "vkCmdPipelineBarrier2"
+  },
+  {
+   "ordinal": 85,
+   "name": "vkCmdPushConstants"
+  },
+  {
+   "ordinal": 86,
+   "name": "vkCmdResetEvent"
+  },
+  {
+   "ordinal": 87,
+   "name": "vkCmdResetEvent2"
+  },
+  {
+   "ordinal": 88,
+   "name": "vkCmdResetQueryPool"
+  },
+  {
+   "ordinal": 89,
+   "name": "vkCmdResolveImage"
+  },
+  {
+   "ordinal": 90,
+   "name": "vkCmdResolveImage2"
+  },
+  {
+   "ordinal": 91,
+   "name": "vkCmdSetBlendConstants"
+  },
+  {
+   "ordinal": 92,
+   "name": "vkCmdSetCullMode"
+  },
+  {
+   "ordinal": 93,
+   "name": "vkCmdSetDepthBias"
+  },
+  {
+   "ordinal": 94,
+   "name": "vkCmdSetDepthBiasEnable"
+  },
+  {
+   "ordinal": 95,
+   "name": "vkCmdSetDepthBounds"
+  },
+  {
+   "ordinal": 96,
+   "name": "vkCmdSetDepthBoundsTestEnable"
+  },
+  {
+   "ordinal": 97,
+   "name": "vkCmdSetDepthCompareOp"
+  },
+  {
+   "ordinal": 98,
+   "name": "vkCmdSetDepthTestEnable"
+  },
+  {
+   "ordinal": 99,
+   "name": "vkCmdSetDepthWriteEnable"
+  },
+  {
+   "ordinal": 100,
+   "name": "vkCmdSetDeviceMask"
+  },
+  {
+   "ordinal": 101,
+   "name": "vkCmdSetEvent"
+  },
+  {
+   "ordinal": 102,
+   "name": "vkCmdSetEvent2"
+  },
+  {
+   "ordinal": 103,
+   "name": "vkCmdSetFrontFace"
+  },
+  {
+   "ordinal": 104,
+   "name": "vkCmdSetLineWidth"
+  },
+  {
+   "ordinal": 105,
+   "name": "vkCmdSetPrimitiveRestartEnable"
+  },
+  {
+   "ordinal": 106,
+   "name": "vkCmdSetPrimitiveTopology"
+  },
+  {
+   "ordinal": 107,
+   "name": "vkCmdSetRasterizerDiscardEnable"
+  },
+  {
+   "ordinal": 108,
+   "name": "vkCmdSetScissor"
+  },
+  {
+   "ordinal": 109,
+   "name": "vkCmdSetScissorWithCount"
+  },
+  {
+   "ordinal": 110,
+   "name": "vkCmdSetStencilCompareMask"
+  },
+  {
+   "ordinal": 111,
+   "name": "vkCmdSetStencilOp"
+  },
+  {
+   "ordinal": 112,
+   "name": "vkCmdSetStencilReference"
+  },
+  {
+   "ordinal": 113,
+   "name": "vkCmdSetStencilTestEnable"
+  },
+  {
+   "ordinal": 114,
+   "name": "vkCmdSetStencilWriteMask"
+  },
+  {
+   "ordinal": 115,
+   "name": "vkCmdSetViewport"
+  },
+  {
+   "ordinal": 116,
+   "name": "vkCmdSetViewportWithCount"
+  },
+  {
+   "ordinal": 117,
+   "name": "vkCmdUpdateBuffer"
+  },
+  {
+   "ordinal": 118,
+   "name": "vkCmdWaitEvents"
+  },
+  {
+   "ordinal": 119,
+   "name": "vkCmdWaitEvents2"
+  },
+  {
+   "ordinal": 120,
+   "name": "vkCmdWriteTimestamp"
+  },
+  {
+   "ordinal": 121,
+   "name": "vkCmdWriteTimestamp2"
+  },
+  {
+   "ordinal": 122,
+   "name": "vkCreateBuffer"
+  },
+  {
+   "ordinal": 123,
+   "name": "vkCreateBufferView"
+  },
+  {
+   "ordinal": 124,
+   "name": "vkCreateCommandPool"
+  },
+  {
+   "ordinal": 125,
+   "name": "vkCreateComputePipelines"
+  },
+  {
+   "ordinal": 126,
+   "name": "vkCreateDescriptorPool"
+  },
+  {
+   "ordinal": 127,
+   "name": "vkCreateDescriptorSetLayout"
+  },
+  {
+   "ordinal": 128,
+   "name": "vkCreateDescriptorUpdateTemplate"
+  },
+  {
+   "ordinal": 129,
+   "name": "vkCreateDevice"
+  },
+  {
+   "ordinal": 130,
+   "name": "vkCreateEvent"
+  },
+  {
+   "ordinal": 131,
+   "name": "vkCreateFence"
+  },
+  {
+   "ordinal": 132,
+   "name": "vkCreateFramebuffer"
+  },
+  {
+   "ordinal": 133,
+   "name": "vkCreateGraphicsPipelines"
+  },
+  {
+   "ordinal": 134,
+   "name": "vkCreateImage"
+  },
+  {
+   "ordinal": 135,
+   "name": "vkCreateImageView"
+  },
+  {
+   "ordinal": 136,
+   "name": "vkCreateInstance"
+  },
+  {
+   "ordinal": 137,
+   "name": "vkCreatePipelineCache"
+  },
+  {
+   "ordinal": 138,
+   "name": "vkCreatePipelineLayout"
+  },
+  {
+   "ordinal": 139,
+   "name": "vkCreatePrivateDataSlot"
+  },
+  {
+   "ordinal": 140,
+   "name": "vkCreateQueryPool"
+  },
+  {
+   "ordinal": 141,
+   "name": "vkCreateRenderPass"
+  },
+  {
+   "ordinal": 142,
+   "name": "vkCreateRenderPass2"
+  },
+  {
+   "ordinal": 143,
+   "name": "vkCreateSampler"
+  },
+  {
+   "ordinal": 144,
+   "name": "vkCreateSamplerYcbcrConversion"
+  },
+  {
+   "ordinal": 145,
+   "name": "vkCreateSemaphore"
+  },
+  {
+   "ordinal": 146,
+   "name": "vkCreateShaderModule"
+  },
+  {
+   "ordinal": 147,
+   "name": "vkCreateSwapchainKHR"
+  },
+  {
+   "ordinal": 148,
+   "name": "vkCreateWin32SurfaceKHR"
+  },
+  {
+   "ordinal": 149,
+   "name": "vkDestroyBuffer"
+  },
+  {
+   "ordinal": 150,
+   "name": "vkDestroyBufferView"
+  },
+  {
+   "ordinal": 151,
+   "name": "vkDestroyCommandPool"
+  },
+  {
+   "ordinal": 152,
+   "name": "vkDestroyDescriptorPool"
+  },
+  {
+   "ordinal": 153,
+   "name": "vkDestroyDescriptorSetLayout"
+  },
+  {
+   "ordinal": 154,
+   "name": "vkDestroyDescriptorUpdateTemplate"
+  },
+  {
+   "ordinal": 155,
+   "name": "vkDestroyDevice"
+  },
+  {
+   "ordinal": 156,
+   "name": "vkDestroyEvent"
+  },
+  {
+   "ordinal": 157,
+   "name": "vkDestroyFence"
+  },
+  {
+   "ordinal": 158,
+   "name": "vkDestroyFramebuffer"
+  },
+  {
+   "ordinal": 159,
+   "name": "vkDestroyImage"
+  },
+  {
+   "ordinal": 160,
+   "name": "vkDestroyImageView"
+  },
+  {
+   "ordinal": 161,
+   "name": "vkDestroyInstance"
+  },
+  {
+   "ordinal": 162,
+   "name": "vkDestroyPipeline"
+  },
+  {
+   "ordinal": 163,
+   "name": "vkDestroyPipelineCache"
+  },
+  {
+   "ordinal": 164,
+   "name": "vkDestroyPipelineLayout"
+  },
+  {
+   "ordinal": 165,
+   "name": "vkDestroyPrivateDataSlot"
+  },
+  {
+   "ordinal": 166,
+   "name": "vkDestroyQueryPool"
+  },
+  {
+   "ordinal": 167,
+   "name": "vkDestroyRenderPass"
+  },
+  {
+   "ordinal": 168,
+   "name": "vkDestroySampler"
+  },
+  {
+   "ordinal": 169,
+   "name": "vkDestroySamplerYcbcrConversion"
+  },
+  {
+   "ordinal": 170,
+   "name": "vkDestroySemaphore"
+  },
+  {
+   "ordinal": 171,
+   "name": "vkDestroyShaderModule"
+  },
+  {
+   "ordinal": 172,
+   "name": "vkDestroySurfaceKHR"
+  },
+  {
+   "ordinal": 173,
+   "name": "vkDestroySwapchainKHR"
+  },
+  {
+   "ordinal": 174,
+   "name": "vkDeviceWaitIdle"
+  },
+  {
+   "ordinal": 175,
+   "name": "vkEndCommandBuffer"
+  },
+  {
+   "ordinal": 176,
+   "name": "vkEnumerateDeviceExtensionProperties"
+  },
+  {
+   "ordinal": 177,
+   "name": "vkEnumerateDeviceLayerProperties"
+  },
+  {
+   "ordinal": 178,
+   "name": "vkEnumerateInstanceExtensionProperties"
+  },
+  {
+   "ordinal": 179,
+   "name": "vkEnumerateInstanceLayerProperties"
+  },
+  {
+   "ordinal": 180,
+   "name": "vkEnumerateInstanceVersion"
+  },
+  {
+   "ordinal": 181,
+   "name": "vkEnumeratePhysicalDeviceGroups"
+  },
+  {
+   "ordinal": 182,
+   "name": "vkEnumeratePhysicalDevices"
+  },
+  {
+   "ordinal": 183,
+   "name": "vkFlushMappedMemoryRanges"
+  },
+  {
+   "ordinal": 184,
+   "name": "vkFreeCommandBuffers"
+  },
+  {
+   "ordinal": 185,
+   "name": "vkFreeDescriptorSets"
+  },
+  {
+   "ordinal": 186,
+   "name": "vkFreeMemory"
+  },
+  {
+   "ordinal": 187,
+   "name": "vkGetBufferDeviceAddress"
+  },
+  {
+   "ordinal": 188,
+   "name": "vkGetBufferMemoryRequirements"
+  },
+  {
+   "ordinal": 189,
+   "name": "vkGetBufferMemoryRequirements2"
+  },
+  {
+   "ordinal": 190,
+   "name": "vkGetBufferOpaqueCaptureAddress"
+  },
+  {
+   "ordinal": 191,
+   "name": "vkGetDescriptorSetLayoutSupport"
+  },
+  {
+   "ordinal": 192,
+   "name": "vkGetDeviceBufferMemoryRequirements"
+  },
+  {
+   "ordinal": 193,
+   "name": "vkGetDeviceGroupPeerMemoryFeatures"
+  },
+  {
+   "ordinal": 194,
+   "name": "vkGetDeviceImageMemoryRequirements"
+  },
+  {
+   "ordinal": 195,
+   "name": "vkGetDeviceImageSparseMemoryRequirements"
+  },
+  {
+   "ordinal": 196,
+   "name": "vkGetDeviceMemoryCommitment"
+  },
+  {
+   "ordinal": 197,
+   "name": "vkGetDeviceMemoryOpaqueCaptureAddress"
+  },
+  {
+   "ordinal": 198,
+   "name": "vkGetDeviceProcAddr"
+  },
+  {
+   "ordinal": 199,
+   "name": "vkGetDeviceQueue"
+  },
+  {
+   "ordinal": 200,
+   "name": "vkGetDeviceQueue2"
+  },
+  {
+   "ordinal": 201,
+   "name": "vkGetEventStatus"
+  },
+  {
+   "ordinal": 202,
+   "name": "vkGetFenceStatus"
+  },
+  {
+   "ordinal": 203,
+   "name": "vkGetImageMemoryRequirements"
+  },
+  {
+   "ordinal": 204,
+   "name": "vkGetImageMemoryRequirements2"
+  },
+  {
+   "ordinal": 205,
+   "name": "vkGetImageMemoryRequirements2KHR"
+  },
+  {
+   "ordinal": 206,
+   "name": "vkGetImageSparseMemoryRequirements"
+  },
+  {
+   "ordinal": 207,
+   "name": "vkGetImageSparseMemoryRequirements2"
+  },
+  {
+   "ordinal": 208,
+   "name": "vkGetImageSubresourceLayout"
+  },
+  {
+   "ordinal": 209,
+   "name": "vkGetInstanceProcAddr"
+  },
+  {
+   "ordinal": 210,
+   "name": "vkGetPhysicalDeviceExternalBufferProperties"
+  },
+  {
+   "ordinal": 211,
+   "name": "vkGetPhysicalDeviceExternalFenceProperties"
+  },
+  {
+   "ordinal": 212,
+   "name": "vkGetPhysicalDeviceExternalSemaphoreProperties"
+  },
+  {
+   "ordinal": 213,
+   "name": "vkGetPhysicalDeviceFeatures"
+  },
+  {
+   "ordinal": 214,
+   "name": "vkGetPhysicalDeviceFeatures2"
+  },
+  {
+   "ordinal": 215,
+   "name": "vkGetPhysicalDeviceFeatures2KHR"
+  },
+  {
+   "ordinal": 216,
+   "name": "vkGetPhysicalDeviceFormatProperties"
+  },
+  {
+   "ordinal": 217,
+   "name": "vkGetPhysicalDeviceFormatProperties2"
+  },
+  {
+   "ordinal": 218,
+   "name": "vkGetPhysicalDeviceImageFormatProperties"
+  },
+  {
+   "ordinal": 219,
+   "name": "vkGetPhysicalDeviceImageFormatProperties2"
+  },
+  {
+   "ordinal": 220,
+   "name": "vkGetPhysicalDeviceMemoryProperties"
+  },
+  {
+   "ordinal": 221,
+   "name": "vkGetPhysicalDeviceMemoryProperties2"
+  },
+  {
+   "ordinal": 222,
+   "name": "vkGetPhysicalDeviceProperties"
+  },
+  {
+   "ordinal": 223,
+   "name": "vkGetPhysicalDeviceProperties2"
+  },
+  {
+   "ordinal": 224,
+   "name": "vkGetPhysicalDeviceProperties2KHR"
+  },
+  {
+   "ordinal": 225,
+   "name": "vkGetPhysicalDeviceQueueFamilyProperties"
+  },
+  {
+   "ordinal": 226,
+   "name": "vkGetPhysicalDeviceQueueFamilyProperties2"
+  },
+  {
+   "ordinal": 227,
+   "name": "vkGetPhysicalDeviceSparseImageFormatProperties"
+  },
+  {
+   "ordinal": 228,
+   "name": "vkGetPhysicalDeviceSparseImageFormatProperties2"
+  },
+  {
+   "ordinal": 229,
+   "name": "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"
+  },
+  {
+   "ordinal": 230,
+   "name": "vkGetPhysicalDeviceSurfaceFormatsKHR"
+  },
+  {
+   "ordinal": 231,
+   "name": "vkGetPhysicalDeviceSurfacePresentModesKHR"
+  },
+  {
+   "ordinal": 232,
+   "name": "vkGetPhysicalDeviceSurfaceSupportKHR"
+  },
+  {
+   "ordinal": 233,
+   "name": "vkGetPhysicalDeviceToolProperties"
+  },
+  {
+   "ordinal": 234,
+   "name": "vkGetPipelineCacheData"
+  },
+  {
+   "ordinal": 235,
+   "name": "vkGetPrivateData"
+  },
+  {
+   "ordinal": 236,
+   "name": "vkGetQueryPoolResults"
+  },
+  {
+   "ordinal": 237,
+   "name": "vkGetRenderAreaGranularity"
+  },
+  {
+   "ordinal": 238,
+   "name": "vkGetSemaphoreCounterValue"
+  },
+  {
+   "ordinal": 239,
+   "name": "vkGetSwapchainImagesKHR"
+  },
+  {
+   "ordinal": 240,
+   "name": "vkInvalidateMappedMemoryRanges"
+  },
+  {
+   "ordinal": 241,
+   "name": "vkMapMemory"
+  },
+  {
+   "ordinal": 242,
+   "name": "vkMergePipelineCaches"
+  },
+  {
+   "ordinal": 243,
+   "name": "vkQueueBindSparse"
+  },
+  {
+   "ordinal": 244,
+   "name": "vkQueuePresentKHR"
+  },
+  {
+   "ordinal": 245,
+   "name": "vkQueueSubmit"
+  },
+  {
+   "ordinal": 246,
+   "name": "vkQueueSubmit2"
+  },
+  {
+   "ordinal": 247,
+   "name": "vkQueueWaitIdle"
+  },
+  {
+   "ordinal": 248,
+   "name": "vkResetCommandBuffer"
+  },
+  {
+   "ordinal": 249,
+   "name": "vkResetCommandPool"
+  },
+  {
+   "ordinal": 250,
+   "name": "vkResetDescriptorPool"
+  },
+  {
+   "ordinal": 251,
+   "name": "vkResetEvent"
+  },
+  {
+   "ordinal": 252,
+   "name": "vkResetFences"
+  },
+  {
+   "ordinal": 253,
+   "name": "vkResetQueryPool"
+  },
+  {
+   "ordinal": 254,
+   "name": "vkSetEvent"
+  },
+  {
+   "ordinal": 255,
+   "name": "vkSetPrivateData"
+  },
+  {
+   "ordinal": 256,
+   "name": "vkSignalSemaphore"
+  },
+  {
+   "ordinal": 257,
+   "name": "vkTrimCommandPool"
+  },
+  {
+   "ordinal": 258,
+   "name": "vkUnmapMemory"
+  },
+  {
+   "ordinal": 259,
+   "name": "vkUpdateDescriptorSetWithTemplate"
+  },
+  {
+   "ordinal": 260,
+   "name": "vkUpdateDescriptorSets"
+  },
+  {
+   "ordinal": 261,
+   "name": "vkWaitForFences"
+  },
+  {
+   "ordinal": 262,
+   "name": "vkWaitSemaphores"
+  }
+ ],
+ "2.14.1": [
+  {
+   "ordinal": 1,
+   "name": "CreateDXGIFactory"
+  },
+  {
+   "ordinal": 2,
+   "name": "CreateDXGIFactory1"
+  },
+  {
+   "ordinal": 3,
+   "name": "CreateDXGIFactory2"
+  },
+  {
+   "ordinal": 4,
+   "name": "D3D11CreateDevice"
+  },
+  {
+   "ordinal": 5,
+   "name": "D3D11CreateDeviceAndSwapChain"
+  },
+  {
+   "ordinal": 6,
+   "name": "D3D12CreateDevice"
+  },
+  {
+   "ordinal": 7,
+   "name": "D3D12CreateRootSignatureDeserializer"
+  },
+  {
+   "ordinal": 8,
+   "name": "D3D12CreateVersionedRootSignatureDeserializer"
+  },
+  {
+   "ordinal": 9,
+   "name": "D3D12EnableExperimentalFeatures"
+  },
+  {
+   "ordinal": 10,
+   "name": "D3D12GetDebugInterface"
+  },
+  {
+   "ordinal": 11,
+   "name": "D3D12GetInterface"
+  },
+  {
+   "ordinal": 12,
+   "name": "D3D12SerializeRootSignature"
+  },
+  {
+   "ordinal": 13,
+   "name": "D3D12SerializeVersionedRootSignature"
+  },
+  {
+   "ordinal": 14,
+   "name": "DXGIGetDebugInterface1"
+  },
+  {
+   "ordinal": 15,
+   "name": "slAllocateResources"
+  },
+  {
+   "ordinal": 16,
+   "name": "slEvaluateFeature"
+  },
+  {
+   "ordinal": 17,
+   "name": "slFreeResources"
+  },
+  {
+   "ordinal": 18,
+   "name": "slGetFeatureFunction"
+  },
+  {
+   "ordinal": 19,
+   "name": "slGetFeatureRequirements"
+  },
+  {
+   "ordinal": 20,
+   "name": "slGetFeatureVersion"
+  },
+  {
+   "ordinal": 21,
+   "name": "slGetNativeInterface"
+  },
+  {
+   "ordinal": 22,
+   "name": "slGetNewFrameToken"
+  },
+  {
+   "ordinal": 23,
+   "name": "slInit"
+  },
+  {
+   "ordinal": 24,
+   "name": "slIsFeatureLoaded"
+  },
+  {
+   "ordinal": 25,
+   "name": "slIsFeatureSupported"
+  },
+  {
+   "ordinal": 26,
+   "name": "slSetConstants"
+  },
+  {
+   "ordinal": 27,
+   "name": "slSetD3DDevice"
+  },
+  {
+   "ordinal": 28,
+   "name": "slSetFeatureLoaded"
+  },
+  {
+   "ordinal": 29,
+   "name": "slSetTag"
+  },
+  {
+   "ordinal": 30,
+   "name": "slSetTagForFrame"
+  },
+  {
+   "ordinal": 31,
+   "name": "slSetVulkanInfo"
+  },
+  {
+   "ordinal": 32,
+   "name": "slShutdown"
+  },
+  {
+   "ordinal": 33,
+   "name": "slUpgradeInterface"
+  },
+  {
+   "ordinal": 34,
+   "name": "vkAcquireNextImageKHR"
+  },
+  {
+   "ordinal": 35,
+   "name": "vkAllocateCommandBuffers"
+  },
+  {
+   "ordinal": 36,
+   "name": "vkAllocateDescriptorSets"
+  },
+  {
+   "ordinal": 37,
+   "name": "vkAllocateMemory"
+  },
+  {
+   "ordinal": 38,
+   "name": "vkBeginCommandBuffer"
+  },
+  {
+   "ordinal": 39,
+   "name": "vkBindBufferMemory"
+  },
+  {
+   "ordinal": 40,
+   "name": "vkBindBufferMemory2"
+  },
+  {
+   "ordinal": 41,
+   "name": "vkBindImageMemory"
+  },
+  {
+   "ordinal": 42,
+   "name": "vkBindImageMemory2"
+  },
+  {
+   "ordinal": 43,
+   "name": "vkCmdBeginQuery"
+  },
+  {
+   "ordinal": 44,
+   "name": "vkCmdBeginRenderPass"
+  },
+  {
+   "ordinal": 45,
+   "name": "vkCmdBeginRenderPass2"
+  },
+  {
+   "ordinal": 46,
+   "name": "vkCmdBeginRendering"
+  },
+  {
+   "ordinal": 47,
+   "name": "vkCmdBindDescriptorSets"
+  },
+  {
+   "ordinal": 48,
+   "name": "vkCmdBindIndexBuffer"
+  },
+  {
+   "ordinal": 49,
+   "name": "vkCmdBindPipeline"
+  },
+  {
+   "ordinal": 50,
+   "name": "vkCmdBindVertexBuffers"
+  },
+  {
+   "ordinal": 51,
+   "name": "vkCmdBindVertexBuffers2"
+  },
+  {
+   "ordinal": 52,
+   "name": "vkCmdBlitImage"
+  },
+  {
+   "ordinal": 53,
+   "name": "vkCmdBlitImage2"
+  },
+  {
+   "ordinal": 54,
+   "name": "vkCmdClearAttachments"
+  },
+  {
+   "ordinal": 55,
+   "name": "vkCmdClearColorImage"
+  },
+  {
+   "ordinal": 56,
+   "name": "vkCmdClearDepthStencilImage"
+  },
+  {
+   "ordinal": 57,
+   "name": "vkCmdCopyBuffer"
+  },
+  {
+   "ordinal": 58,
+   "name": "vkCmdCopyBuffer2"
+  },
+  {
+   "ordinal": 59,
+   "name": "vkCmdCopyBufferToImage"
+  },
+  {
+   "ordinal": 60,
+   "name": "vkCmdCopyBufferToImage2"
+  },
+  {
+   "ordinal": 61,
+   "name": "vkCmdCopyImage"
+  },
+  {
+   "ordinal": 62,
+   "name": "vkCmdCopyImage2"
+  },
+  {
+   "ordinal": 63,
+   "name": "vkCmdCopyImageToBuffer"
+  },
+  {
+   "ordinal": 64,
+   "name": "vkCmdCopyImageToBuffer2"
+  },
+  {
+   "ordinal": 65,
+   "name": "vkCmdCopyQueryPoolResults"
+  },
+  {
+   "ordinal": 66,
+   "name": "vkCmdDispatch"
+  },
+  {
+   "ordinal": 67,
+   "name": "vkCmdDispatchBase"
+  },
+  {
+   "ordinal": 68,
+   "name": "vkCmdDispatchIndirect"
+  },
+  {
+   "ordinal": 69,
+   "name": "vkCmdDraw"
+  },
+  {
+   "ordinal": 70,
+   "name": "vkCmdDrawIndexed"
+  },
+  {
+   "ordinal": 71,
+   "name": "vkCmdDrawIndexedIndirect"
+  },
+  {
+   "ordinal": 72,
+   "name": "vkCmdDrawIndexedIndirectCount"
+  },
+  {
+   "ordinal": 73,
+   "name": "vkCmdDrawIndirect"
+  },
+  {
+   "ordinal": 74,
+   "name": "vkCmdDrawIndirectCount"
+  },
+  {
+   "ordinal": 75,
+   "name": "vkCmdEndQuery"
+  },
+  {
+   "ordinal": 76,
+   "name": "vkCmdEndRenderPass"
+  },
+  {
+   "ordinal": 77,
+   "name": "vkCmdEndRenderPass2"
+  },
+  {
+   "ordinal": 78,
+   "name": "vkCmdEndRendering"
+  },
+  {
+   "ordinal": 79,
+   "name": "vkCmdExecuteCommands"
+  },
+  {
+   "ordinal": 80,
+   "name": "vkCmdFillBuffer"
+  },
+  {
+   "ordinal": 81,
+   "name": "vkCmdNextSubpass"
+  },
+  {
+   "ordinal": 82,
+   "name": "vkCmdNextSubpass2"
+  },
+  {
+   "ordinal": 83,
+   "name": "vkCmdPipelineBarrier"
+  },
+  {
+   "ordinal": 84,
+   "name": "vkCmdPipelineBarrier2"
+  },
+  {
+   "ordinal": 85,
+   "name": "vkCmdPushConstants"
+  },
+  {
+   "ordinal": 86,
+   "name": "vkCmdResetEvent"
+  },
+  {
+   "ordinal": 87,
+   "name": "vkCmdResetEvent2"
+  },
+  {
+   "ordinal": 88,
+   "name": "vkCmdResetQueryPool"
+  },
+  {
+   "ordinal": 89,
+   "name": "vkCmdResolveImage"
+  },
+  {
+   "ordinal": 90,
+   "name": "vkCmdResolveImage2"
+  },
+  {
+   "ordinal": 91,
+   "name": "vkCmdSetBlendConstants"
+  },
+  {
+   "ordinal": 92,
+   "name": "vkCmdSetCullMode"
+  },
+  {
+   "ordinal": 93,
+   "name": "vkCmdSetDepthBias"
+  },
+  {
+   "ordinal": 94,
+   "name": "vkCmdSetDepthBiasEnable"
+  },
+  {
+   "ordinal": 95,
+   "name": "vkCmdSetDepthBounds"
+  },
+  {
+   "ordinal": 96,
+   "name": "vkCmdSetDepthBoundsTestEnable"
+  },
+  {
+   "ordinal": 97,
+   "name": "vkCmdSetDepthCompareOp"
+  },
+  {
+   "ordinal": 98,
+   "name": "vkCmdSetDepthTestEnable"
+  },
+  {
+   "ordinal": 99,
+   "name": "vkCmdSetDepthWriteEnable"
+  },
+  {
+   "ordinal": 100,
+   "name": "vkCmdSetDeviceMask"
+  },
+  {
+   "ordinal": 101,
+   "name": "vkCmdSetEvent"
+  },
+  {
+   "ordinal": 102,
+   "name": "vkCmdSetEvent2"
+  },
+  {
+   "ordinal": 103,
+   "name": "vkCmdSetFrontFace"
+  },
+  {
+   "ordinal": 104,
+   "name": "vkCmdSetLineWidth"
+  },
+  {
+   "ordinal": 105,
+   "name": "vkCmdSetPrimitiveRestartEnable"
+  },
+  {
+   "ordinal": 106,
+   "name": "vkCmdSetPrimitiveTopology"
+  },
+  {
+   "ordinal": 107,
+   "name": "vkCmdSetRasterizerDiscardEnable"
+  },
+  {
+   "ordinal": 108,
+   "name": "vkCmdSetScissor"
+  },
+  {
+   "ordinal": 109,
+   "name": "vkCmdSetScissorWithCount"
+  },
+  {
+   "ordinal": 110,
+   "name": "vkCmdSetStencilCompareMask"
+  },
+  {
+   "ordinal": 111,
+   "name": "vkCmdSetStencilOp"
+  },
+  {
+   "ordinal": 112,
+   "name": "vkCmdSetStencilReference"
+  },
+  {
+   "ordinal": 113,
+   "name": "vkCmdSetStencilTestEnable"
+  },
+  {
+   "ordinal": 114,
+   "name": "vkCmdSetStencilWriteMask"
+  },
+  {
+   "ordinal": 115,
+   "name": "vkCmdSetViewport"
+  },
+  {
+   "ordinal": 116,
+   "name": "vkCmdSetViewportWithCount"
+  },
+  {
+   "ordinal": 117,
+   "name": "vkCmdUpdateBuffer"
+  },
+  {
+   "ordinal": 118,
+   "name": "vkCmdWaitEvents"
+  },
+  {
+   "ordinal": 119,
+   "name": "vkCmdWaitEvents2"
+  },
+  {
+   "ordinal": 120,
+   "name": "vkCmdWriteTimestamp"
+  },
+  {
+   "ordinal": 121,
+   "name": "vkCmdWriteTimestamp2"
+  },
+  {
+   "ordinal": 122,
+   "name": "vkCreateBuffer"
+  },
+  {
+   "ordinal": 123,
+   "name": "vkCreateBufferView"
+  },
+  {
+   "ordinal": 124,
+   "name": "vkCreateCommandPool"
+  },
+  {
+   "ordinal": 125,
+   "name": "vkCreateComputePipelines"
+  },
+  {
+   "ordinal": 126,
+   "name": "vkCreateDescriptorPool"
+  },
+  {
+   "ordinal": 127,
+   "name": "vkCreateDescriptorSetLayout"
+  },
+  {
+   "ordinal": 128,
+   "name": "vkCreateDescriptorUpdateTemplate"
+  },
+  {
+   "ordinal": 129,
+   "name": "vkCreateDevice"
+  },
+  {
+   "ordinal": 130,
+   "name": "vkCreateEvent"
+  },
+  {
+   "ordinal": 131,
+   "name": "vkCreateFence"
+  },
+  {
+   "ordinal": 132,
+   "name": "vkCreateFramebuffer"
+  },
+  {
+   "ordinal": 133,
+   "name": "vkCreateGraphicsPipelines"
+  },
+  {
+   "ordinal": 134,
+   "name": "vkCreateImage"
+  },
+  {
+   "ordinal": 135,
+   "name": "vkCreateImageView"
+  },
+  {
+   "ordinal": 136,
+   "name": "vkCreateInstance"
+  },
+  {
+   "ordinal": 137,
+   "name": "vkCreatePipelineCache"
+  },
+  {
+   "ordinal": 138,
+   "name": "vkCreatePipelineLayout"
+  },
+  {
+   "ordinal": 139,
+   "name": "vkCreatePrivateDataSlot"
+  },
+  {
+   "ordinal": 140,
+   "name": "vkCreateQueryPool"
+  },
+  {
+   "ordinal": 141,
+   "name": "vkCreateRenderPass"
+  },
+  {
+   "ordinal": 142,
+   "name": "vkCreateRenderPass2"
+  },
+  {
+   "ordinal": 143,
+   "name": "vkCreateSampler"
+  },
+  {
+   "ordinal": 144,
+   "name": "vkCreateSamplerYcbcrConversion"
+  },
+  {
+   "ordinal": 145,
+   "name": "vkCreateSemaphore"
+  },
+  {
+   "ordinal": 146,
+   "name": "vkCreateShaderModule"
+  },
+  {
+   "ordinal": 147,
+   "name": "vkCreateSwapchainKHR"
+  },
+  {
+   "ordinal": 148,
+   "name": "vkCreateWin32SurfaceKHR"
+  },
+  {
+   "ordinal": 149,
+   "name": "vkDestroyBuffer"
+  },
+  {
+   "ordinal": 150,
+   "name": "vkDestroyBufferView"
+  },
+  {
+   "ordinal": 151,
+   "name": "vkDestroyCommandPool"
+  },
+  {
+   "ordinal": 152,
+   "name": "vkDestroyDescriptorPool"
+  },
+  {
+   "ordinal": 153,
+   "name": "vkDestroyDescriptorSetLayout"
+  },
+  {
+   "ordinal": 154,
+   "name": "vkDestroyDescriptorUpdateTemplate"
+  },
+  {
+   "ordinal": 155,
+   "name": "vkDestroyDevice"
+  },
+  {
+   "ordinal": 156,
+   "name": "vkDestroyEvent"
+  },
+  {
+   "ordinal": 157,
+   "name": "vkDestroyFence"
+  },
+  {
+   "ordinal": 158,
+   "name": "vkDestroyFramebuffer"
+  },
+  {
+   "ordinal": 159,
+   "name": "vkDestroyImage"
+  },
+  {
+   "ordinal": 160,
+   "name": "vkDestroyImageView"
+  },
+  {
+   "ordinal": 161,
+   "name": "vkDestroyInstance"
+  },
+  {
+   "ordinal": 162,
+   "name": "vkDestroyPipeline"
+  },
+  {
+   "ordinal": 163,
+   "name": "vkDestroyPipelineCache"
+  },
+  {
+   "ordinal": 164,
+   "name": "vkDestroyPipelineLayout"
+  },
+  {
+   "ordinal": 165,
+   "name": "vkDestroyPrivateDataSlot"
+  },
+  {
+   "ordinal": 166,
+   "name": "vkDestroyQueryPool"
+  },
+  {
+   "ordinal": 167,
+   "name": "vkDestroyRenderPass"
+  },
+  {
+   "ordinal": 168,
+   "name": "vkDestroySampler"
+  },
+  {
+   "ordinal": 169,
+   "name": "vkDestroySamplerYcbcrConversion"
+  },
+  {
+   "ordinal": 170,
+   "name": "vkDestroySemaphore"
+  },
+  {
+   "ordinal": 171,
+   "name": "vkDestroyShaderModule"
+  },
+  {
+   "ordinal": 172,
+   "name": "vkDestroySurfaceKHR"
+  },
+  {
+   "ordinal": 173,
+   "name": "vkDestroySwapchainKHR"
+  },
+  {
+   "ordinal": 174,
+   "name": "vkDeviceWaitIdle"
+  },
+  {
+   "ordinal": 175,
+   "name": "vkEndCommandBuffer"
+  },
+  {
+   "ordinal": 176,
+   "name": "vkEnumerateDeviceExtensionProperties"
+  },
+  {
+   "ordinal": 177,
+   "name": "vkEnumerateDeviceLayerProperties"
+  },
+  {
+   "ordinal": 178,
+   "name": "vkEnumerateInstanceExtensionProperties"
+  },
+  {
+   "ordinal": 179,
+   "name": "vkEnumerateInstanceLayerProperties"
+  },
+  {
+   "ordinal": 180,
+   "name": "vkEnumerateInstanceVersion"
+  },
+  {
+   "ordinal": 181,
+   "name": "vkEnumeratePhysicalDeviceGroups"
+  },
+  {
+   "ordinal": 182,
+   "name": "vkEnumeratePhysicalDevices"
+  },
+  {
+   "ordinal": 183,
+   "name": "vkFlushMappedMemoryRanges"
+  },
+  {
+   "ordinal": 184,
+   "name": "vkFreeCommandBuffers"
+  },
+  {
+   "ordinal": 185,
+   "name": "vkFreeDescriptorSets"
+  },
+  {
+   "ordinal": 186,
+   "name": "vkFreeMemory"
+  },
+  {
+   "ordinal": 187,
+   "name": "vkGetBufferDeviceAddress"
+  },
+  {
+   "ordinal": 188,
+   "name": "vkGetBufferMemoryRequirements"
+  },
+  {
+   "ordinal": 189,
+   "name": "vkGetBufferMemoryRequirements2"
+  },
+  {
+   "ordinal": 190,
+   "name": "vkGetBufferOpaqueCaptureAddress"
+  },
+  {
+   "ordinal": 191,
+   "name": "vkGetDescriptorSetLayoutSupport"
+  },
+  {
+   "ordinal": 192,
+   "name": "vkGetDeviceBufferMemoryRequirements"
+  },
+  {
+   "ordinal": 193,
+   "name": "vkGetDeviceGroupPeerMemoryFeatures"
+  },
+  {
+   "ordinal": 194,
+   "name": "vkGetDeviceImageMemoryRequirements"
+  },
+  {
+   "ordinal": 195,
+   "name": "vkGetDeviceImageSparseMemoryRequirements"
+  },
+  {
+   "ordinal": 196,
+   "name": "vkGetDeviceMemoryCommitment"
+  },
+  {
+   "ordinal": 197,
+   "name": "vkGetDeviceMemoryOpaqueCaptureAddress"
+  },
+  {
+   "ordinal": 198,
+   "name": "vkGetDeviceProcAddr"
+  },
+  {
+   "ordinal": 199,
+   "name": "vkGetDeviceQueue"
+  },
+  {
+   "ordinal": 200,
+   "name": "vkGetDeviceQueue2"
+  },
+  {
+   "ordinal": 201,
+   "name": "vkGetEventStatus"
+  },
+  {
+   "ordinal": 202,
+   "name": "vkGetFenceStatus"
+  },
+  {
+   "ordinal": 203,
+   "name": "vkGetImageMemoryRequirements"
+  },
+  {
+   "ordinal": 204,
+   "name": "vkGetImageMemoryRequirements2"
+  },
+  {
+   "ordinal": 205,
+   "name": "vkGetImageMemoryRequirements2KHR"
+  },
+  {
+   "ordinal": 206,
+   "name": "vkGetImageSparseMemoryRequirements"
+  },
+  {
+   "ordinal": 207,
+   "name": "vkGetImageSparseMemoryRequirements2"
+  },
+  {
+   "ordinal": 208,
+   "name": "vkGetImageSubresourceLayout"
+  },
+  {
+   "ordinal": 209,
+   "name": "vkGetInstanceProcAddr"
+  },
+  {
+   "ordinal": 210,
+   "name": "vkGetPhysicalDeviceExternalBufferProperties"
+  },
+  {
+   "ordinal": 211,
+   "name": "vkGetPhysicalDeviceExternalFenceProperties"
+  },
+  {
+   "ordinal": 212,
+   "name": "vkGetPhysicalDeviceExternalSemaphoreProperties"
+  },
+  {
+   "ordinal": 213,
+   "name": "vkGetPhysicalDeviceFeatures"
+  },
+  {
+   "ordinal": 214,
+   "name": "vkGetPhysicalDeviceFeatures2"
+  },
+  {
+   "ordinal": 215,
+   "name": "vkGetPhysicalDeviceFeatures2KHR"
+  },
+  {
+   "ordinal": 216,
+   "name": "vkGetPhysicalDeviceFormatProperties"
+  },
+  {
+   "ordinal": 217,
+   "name": "vkGetPhysicalDeviceFormatProperties2"
+  },
+  {
+   "ordinal": 218,
+   "name": "vkGetPhysicalDeviceImageFormatProperties"
+  },
+  {
+   "ordinal": 219,
+   "name": "vkGetPhysicalDeviceImageFormatProperties2"
+  },
+  {
+   "ordinal": 220,
+   "name": "vkGetPhysicalDeviceMemoryProperties"
+  },
+  {
+   "ordinal": 221,
+   "name": "vkGetPhysicalDeviceMemoryProperties2"
+  },
+  {
+   "ordinal": 222,
+   "name": "vkGetPhysicalDeviceProperties"
+  },
+  {
+   "ordinal": 223,
+   "name": "vkGetPhysicalDeviceProperties2"
+  },
+  {
+   "ordinal": 224,
+   "name": "vkGetPhysicalDeviceProperties2KHR"
+  },
+  {
+   "ordinal": 225,
+   "name": "vkGetPhysicalDeviceQueueFamilyProperties"
+  },
+  {
+   "ordinal": 226,
+   "name": "vkGetPhysicalDeviceQueueFamilyProperties2"
+  },
+  {
+   "ordinal": 227,
+   "name": "vkGetPhysicalDeviceSparseImageFormatProperties"
+  },
+  {
+   "ordinal": 228,
+   "name": "vkGetPhysicalDeviceSparseImageFormatProperties2"
+  },
+  {
+   "ordinal": 229,
+   "name": "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"
+  },
+  {
+   "ordinal": 230,
+   "name": "vkGetPhysicalDeviceSurfaceFormatsKHR"
+  },
+  {
+   "ordinal": 231,
+   "name": "vkGetPhysicalDeviceSurfacePresentModesKHR"
+  },
+  {
+   "ordinal": 232,
+   "name": "vkGetPhysicalDeviceSurfaceSupportKHR"
+  },
+  {
+   "ordinal": 233,
+   "name": "vkGetPhysicalDeviceToolProperties"
+  },
+  {
+   "ordinal": 234,
+   "name": "vkGetPipelineCacheData"
+  },
+  {
+   "ordinal": 235,
+   "name": "vkGetPrivateData"
+  },
+  {
+   "ordinal": 236,
+   "name": "vkGetQueryPoolResults"
+  },
+  {
+   "ordinal": 237,
+   "name": "vkGetRenderAreaGranularity"
+  },
+  {
+   "ordinal": 238,
+   "name": "vkGetSemaphoreCounterValue"
+  },
+  {
+   "ordinal": 239,
+   "name": "vkGetSwapchainImagesKHR"
+  },
+  {
+   "ordinal": 240,
+   "name": "vkInvalidateMappedMemoryRanges"
+  },
+  {
+   "ordinal": 241,
+   "name": "vkMapMemory"
+  },
+  {
+   "ordinal": 242,
+   "name": "vkMergePipelineCaches"
+  },
+  {
+   "ordinal": 243,
+   "name": "vkQueueBindSparse"
+  },
+  {
+   "ordinal": 244,
+   "name": "vkQueuePresentKHR"
+  },
+  {
+   "ordinal": 245,
+   "name": "vkQueueSubmit"
+  },
+  {
+   "ordinal": 246,
+   "name": "vkQueueSubmit2"
+  },
+  {
+   "ordinal": 247,
+   "name": "vkQueueWaitIdle"
+  },
+  {
+   "ordinal": 248,
+   "name": "vkResetCommandBuffer"
+  },
+  {
+   "ordinal": 249,
+   "name": "vkResetCommandPool"
+  },
+  {
+   "ordinal": 250,
+   "name": "vkResetDescriptorPool"
+  },
+  {
+   "ordinal": 251,
+   "name": "vkResetEvent"
+  },
+  {
+   "ordinal": 252,
+   "name": "vkResetFences"
+  },
+  {
+   "ordinal": 253,
+   "name": "vkResetQueryPool"
+  },
+  {
+   "ordinal": 254,
+   "name": "vkSetEvent"
+  },
+  {
+   "ordinal": 255,
+   "name": "vkSetPrivateData"
+  },
+  {
+   "ordinal": 256,
+   "name": "vkSignalSemaphore"
+  },
+  {
+   "ordinal": 257,
+   "name": "vkTrimCommandPool"
+  },
+  {
+   "ordinal": 258,
+   "name": "vkUnmapMemory"
+  },
+  {
+   "ordinal": 259,
+   "name": "vkUpdateDescriptorSetWithTemplate"
+  },
+  {
+   "ordinal": 260,
+   "name": "vkUpdateDescriptorSets"
+  },
+  {
+   "ordinal": 261,
+   "name": "vkWaitForFences"
+  },
+  {
+   "ordinal": 262,
+   "name": "vkWaitSemaphores"
+  }
+ ]
+}

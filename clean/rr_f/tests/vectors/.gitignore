@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: MIT
+# generated binaries are not committed (see manifest.json 'files')
+*
+!.gitignore
+!manifest.json
+!SHA256SUMS
+!README.md

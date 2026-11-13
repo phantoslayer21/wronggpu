@@ -1,0 +1,19 @@
+; SPDX-License-Identifier: MIT
+LIBRARY ffx_fsr3upscaler_x64
+EXPORTS
+    ffxFsr3UpscalerContextCreate
+    ffxFsr3UpscalerGetSharedResourceDescriptions
+    ffxFsr3UpscalerContextDispatch
+    ffxFsr3UpscalerContextGenerateReactiveMask
+    ffxFsr3UpscalerContextDestroy
+    ffxFsr3UpscalerGetUpscaleRatioFromQualityMode
+    ffxFsr3UpscalerGetRenderResolutionFromQualityMode
+    ffxFsr3UpscalerGetJitterPhaseCount
+    ffxFsr3UpscalerGetJitterOffset
+    ffxFsr3UpscalerResourceIsNull
+    ffxFsr3UpscalerContextGetGpuMemoryUsage
+    ffxFsr3UpscalerGetEffectVersion
+    ffxFsr3UpscalerSetConstant
+    ffxFsr3UpscalerSetGlobalDebugMessage
+    wgFsr3UpscalerSeenOnThread
+    wgFsr3UpscalerHintUpscalingOnly
