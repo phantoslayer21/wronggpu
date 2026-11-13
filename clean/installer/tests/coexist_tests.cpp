@@ -262,7 +262,7 @@ int main() {
                                       "[4] [fsr3] #9 -> FFX_OK (AMD's output kept; C1 stays on AMD)", "[4] [fsr3] #9 -> FFX_OK (WrongGPU stand-in)",
                                       "[4] [fsr3] #9 -> FFX_OK (AMD)", "[4] [fsr3] #9 -> FFX_OK (AMD after WrongGPU network failed; C1 stays on AMD)"};
             bool allYes = true, anyNo = false;
-            for (const char* l : yes) { const LastRun d = ParseLastRun(d0 + l + "\r\n"); allYes = allYes && d.upscaled && d.created && d.ready; }
+            for (const char* l : yes) { const LastRun one = ParseLastRun(d0 + l + "\r\n"); allYes = allYes && one.upscaled && one.created && one.ready; }
             for (const char* l : no) anyNo = anyNo || ParseLastRun(d0 + l + "\r\n").upscaled;
             const LastRun beforeReady = ParseLastRun("[1] [x] ==== session start: Game.exe (process 1) ====\r\n[1] [x] settings: upscaler=network\r\n"
                                                      "[2] [fsr3] #9 WrongGPU frame: R=1280x720 O=2560x1440 reset=1\r\n[2] [fsr3] #9 -> FFX_OK (WrongGPU network)\r\n" + readyLine);
@@ -370,7 +370,7 @@ int main() {
                 require(ReadAll(Join(FromUtf8(WG_TEST_LOGS), f), lt), "the failed RR fixture is there");
                 for (int cut = 0; cut < 2; ++cut) {
                     string t2 = lt;
-                    if (cut) { const size_t d = t2.find("runtime: destroy instance"); t2.erase(t2.rfind('\n', d) + 1, t2.find('\n', d) - t2.rfind('\n', d)); }
+                    if (cut) { const size_t at = t2.find("runtime: destroy instance"); t2.erase(t2.rfind('\n', at) + 1, t2.find('\n', at) - t2.rfind('\n', at)); }
                     const wstring fd = Join(dir, L"rr-failed");
                     RemoveTree(fd);
                     Put(Join(fd, L"wronggpu-rr.log"), t2);
@@ -502,32 +502,32 @@ int main() {
                     "LastRunLog: the RR plugin's log for an RR-only run beside an older front-end log; the front end's for its own newer run (r6 #3)");
             // ...the same with an RR session that evaluated nothing: no RR-only run; the front end's older run stays, without RR
             {
-                const wstring d = Join(dir, L"rr-newer-none");
-                RemoveTree(d);
-                Put(Join(d, L"wronggpu-fsr.log"), feLog(1500, 18));
-                Put(Join(d, L"wronggpu-rr.log"), "21:00:00.000 load: process 1600 attached C:\\Games\\Example\\plugins\\WrongGPU-RR.asi (hook mode)\r\n"
+                const wstring noneDir = Join(dir, L"rr-newer-none");
+                RemoveTree(noneDir);
+                Put(Join(noneDir, L"wronggpu-fsr.log"), feLog(1500, 18));
+                Put(Join(noneDir, L"wronggpu-rr.log"), "21:00:00.000 load: process 1600 attached C:\\Games\\Example\\plugins\\WrongGPU-RR.asi (hook mode)\r\n"
                                                  "21:20:00.000 diag: summary (process exit): support queries 6 (RR: yes 0 / no 1), RR lookups 0, RR instances created 0, RR evaluates 0\r\n");
-                touch(Join(d, L"wronggpu-fsr.log"), 2, 18, 20);
-                touch(Join(d, L"wronggpu-rr.log"), 2, 21, 20);
-                const LastRun n = ReadLastRun(d);
-                require(n.found && n.ready && !n.rrOnly && !n.rrFound && n.when == L"2026-10-02 18:20",
+                touch(Join(noneDir, L"wronggpu-fsr.log"), 2, 18, 20);
+                touch(Join(noneDir, L"wronggpu-rr.log"), 2, 21, 20);
+                const LastRun noneRun = ReadLastRun(noneDir);
+                require(noneRun.found && noneRun.ready && !noneRun.rrOnly && !noneRun.rrFound && noneRun.when == L"2026-10-02 18:20",
                         "a newer RR session that evaluated nothing: the front end's run, without that session's RR lines (r5 #2)");
             }
             // r6 #2: a newer RR attempt that failed (another process, after the front end's successful run): that attempt is the last
             // run, never the older success ("Worked last time you played" would be about another launch)
             {
-                string failed;
-                require(ReadAll(Join(FromUtf8(WG_TEST_LOGS), L"rr-failed-only.log"), failed), "the failed RR fixture is there");
-                const wstring d = Join(dir, L"rr-newer-failed");
-                RemoveTree(d);
-                Put(Join(d, L"wronggpu-fsr.log"), feLog(1500, 18) + "[18:20:01.000 1500] [fe] #12 WrongGPU frame: R=1280x720 O=1920x1080\r\n"
+                string failedLog;
+                require(ReadAll(Join(FromUtf8(WG_TEST_LOGS), L"rr-failed-only.log"), failedLog), "the failed RR fixture is there");
+                const wstring failDir = Join(dir, L"rr-newer-failed");
+                RemoveTree(failDir);
+                Put(Join(failDir, L"wronggpu-fsr.log"), feLog(1500, 18) + "[18:20:01.000 1500] [fe] #12 WrongGPU frame: R=1280x720 O=1920x1080\r\n"
                                                                     "[18:20:01.000 1500] [fe] #12 -> OK (WrongGPU)\r\n");
-                Put(Join(d, L"wronggpu-rr.log"), failed);  // (process 4100, 20:00 to 20:01)
-                touch(Join(d, L"wronggpu-fsr.log"), 2, 18, 21);
-                touch(Join(d, L"wronggpu-rr.log"), 2, 20, 2);
-                const LastRun n = ReadLastRun(d);
-                require(n.found && n.rrOnly && !n.upscaled && !n.AnyUpscaled() && !n.ready && n.upscaler.empty() && n.rrUsed && n.rrFrames == 0 &&
-                            n.rrClock.pid == 4100 && n.when == L"2026-10-02 20:02" && !n.rrNote.empty(),
+                Put(Join(failDir, L"wronggpu-rr.log"), failedLog);  // (process 4100, 20:00 to 20:01)
+                touch(Join(failDir, L"wronggpu-fsr.log"), 2, 18, 21);
+                touch(Join(failDir, L"wronggpu-rr.log"), 2, 20, 2);
+                const LastRun failRun = ReadLastRun(failDir);
+                require(failRun.found && failRun.rrOnly && !failRun.upscaled && !failRun.AnyUpscaled() && !failRun.ready && failRun.upscaler.empty() && failRun.rrUsed && failRun.rrFrames == 0 &&
+                            failRun.rrClock.pid == 4100 && failRun.when == L"2026-10-02 20:02" && !failRun.rrNote.empty(),
                         "a newer RR attempt that failed after the front end's successful run: the failed attempt is the last run (no older success, "
                         "no Worked), its time and reason (r6 #2)");
             }
@@ -537,16 +537,16 @@ int main() {
             {
                 string refused;
                 require(ReadAll(Join(FromUtf8(WG_TEST_LOGS), L"rr-refused-only.log"), refused), "the refused RR fixture is there");
-                const wstring d = Join(dir, L"rr-newer-refused");
-                RemoveTree(d);
-                Put(Join(d, L"wronggpu-fsr.log"), feLog(1500, 18) + "[18:20:01.000 1500] [fe] #12 WrongGPU frame: R=1280x720 O=1920x1080\r\n"
+                const wstring refDir = Join(dir, L"rr-newer-refused");
+                RemoveTree(refDir);
+                Put(Join(refDir, L"wronggpu-fsr.log"), feLog(1500, 18) + "[18:20:01.000 1500] [fe] #12 WrongGPU frame: R=1280x720 O=1920x1080\r\n"
                                                                     "[18:20:01.000 1500] [fe] #12 -> OK (WrongGPU)\r\n");
-                Put(Join(d, L"wronggpu-rr.log"), refused);  // (process 5200, 19:30 to 19:35)
-                touch(Join(d, L"wronggpu-fsr.log"), 2, 18, 21);
-                touch(Join(d, L"wronggpu-rr.log"), 2, 19, 36);
-                const LastRun n = ReadLastRun(d);
-                require(n.found && n.rrOnly && !n.upscaled && !n.AnyUpscaled() && !n.ready && n.rrUsed && n.rrFrames == 0 && n.rrClock.pid == 5200 &&
-                            n.when == L"2026-10-02 19:36" && n.rrNote.find(L"refused") != wstring::npos,
+                Put(Join(refDir, L"wronggpu-rr.log"), refused);  // (process 5200, 19:30 to 19:35)
+                touch(Join(refDir, L"wronggpu-fsr.log"), 2, 18, 21);
+                touch(Join(refDir, L"wronggpu-rr.log"), 2, 19, 36);
+                const LastRun refRun = ReadLastRun(refDir);
+                require(refRun.found && refRun.rrOnly && !refRun.upscaled && !refRun.AnyUpscaled() && !refRun.ready && refRun.rrUsed && refRun.rrFrames == 0 && refRun.rrClock.pid == 5200 &&
+                            refRun.when == L"2026-10-02 19:36" && refRun.rrNote.find(L"refused") != wstring::npos,
                         "the direct route's refusal newer than the front end's successful run: the refusal is the last run (no older success, no "
                         "Worked), its time and reason (r7 #3)");
                 const wstring d2 = Join(dir, L"rr-same-refused");
@@ -558,9 +558,9 @@ int main() {
                                                   "20:20:00.500 diag: summary (process exit): direct route: RR creates 1 (created 0), evaluates 0\r\n");
                 touch(Join(d2, L"wronggpu-fsr.log"), 2, 20, 21);
                 touch(Join(d2, L"wronggpu-rr.log"), 2, 20, 21);
-                const LastRun m = ReadLastRun(d2);
-                require(m.found && m.ready && m.upscaled && !m.rrOnly && !m.rrUpscaled && m.rrUsed && m.rrFrames == 0 &&
-                            m.rrNote == L"the game's request was refused (render or output size missing (0x0 -> 1920x1080))",
+                const LastRun refSame = ReadLastRun(d2);
+                require(refSame.found && refSame.ready && refSame.upscaled && !refSame.rrOnly && !refSame.rrUpscaled && refSame.rrUsed && refSame.rrFrames == 0 &&
+                            refSame.rrNote == L"the game's request was refused (render or output size missing (0x0 -> 1920x1080))",
                         "one session, Model M upscaled, the direct route refused RR: Model M's run, RR's attempt and its reason kept (r7 #3)");
             }
             // one game session (the same process id, the same launch): combined, not RR-only
@@ -596,24 +596,24 @@ int main() {
                 // r6 #2: one session where Model M upscaled and RR was attempted without a successful frame: Model M's run, RR's attempt
                 // kept for the Denoiser row (no frames, its reason), not RR's upscaling
                 {
-                    const wstring d = Join(dir, L"rr-same-rrfailed");
-                    RemoveTree(d);
-                    Put(Join(d, L"wronggpu-fsr.log"), feLog(1500, 20) + "[20:20:01.000 1500] [fe] #12 WrongGPU frame: R=1280x720 O=1920x1080\r\n"
+                    const wstring rfDir = Join(dir, L"rr-same-rrfailed");
+                    RemoveTree(rfDir);
+                    Put(Join(rfDir, L"wronggpu-fsr.log"), feLog(1500, 20) + "[20:20:01.000 1500] [fe] #12 WrongGPU frame: R=1280x720 O=1920x1080\r\n"
                                                                         "[20:20:01.000 1500] [fe] #12 -> OK (WrongGPU)\r\n");
-                    Put(Join(d, L"wronggpu-rr.log"), "20:00:00.000 load: process 1500 attached C:\\Games\\Example\\plugins\\WrongGPU-RR.asi (hook mode)\r\n"
+                    Put(Join(rfDir, L"wronggpu-rr.log"), "20:00:00.000 load: process 1500 attached C:\\Games\\Example\\plugins\\WrongGPU-RR.asi (hook mode)\r\n"
                                                      "20:00:06.000 runtime: create instance 1: output 1920x1080, render 1280x720\r\n"
                                                      "20:00:06.100 runtime: instance 1 evaluate failed before any pass: runtime not ready\r\n"
                                                      "20:20:00.500 runtime: destroy instance 1 after 20 frames (20 failed)\r\n");
-                    touch(Join(d, L"wronggpu-fsr.log"), 2, 20, 21);
-                    touch(Join(d, L"wronggpu-rr.log"), 2, 20, 21);
-                    const LastRun rf = ReadLastRun(d);
+                    touch(Join(rfDir, L"wronggpu-fsr.log"), 2, 20, 21);
+                    touch(Join(rfDir, L"wronggpu-rr.log"), 2, 20, 21);
+                    const LastRun rf = ReadLastRun(rfDir);
                     require(rf.found && rf.ready && rf.upscaled && !rf.rrOnly && !rf.rrUpscaled && rf.rrUsed && rf.rrFrames == 0 && rf.rrNote == L"runtime not ready",
                             "one session, Model M upscaled, RR attempted without a frame: Model M's run, RR's attempt and reason kept, not RR's upscaling (r6 #2)");
                     // r7 #1: the game asked Model M for nothing in that session (RR instead): the summary says RR's story, not "not used"
-                    Put(Join(d, L"wronggpu-fsr.log"), "[20:00:00.000 1500] [x] ==== session start: Game.exe (process 1500) ====\r\n"
+                    Put(Join(rfDir, L"wronggpu-fsr.log"), "[20:00:00.000 1500] [x] ==== session start: Game.exe (process 1500) ====\r\n"
                                                       "[20:00:00.100 1500] [x] settings: upscaler=network\r\n[20:20:00.000 1500] [x] exit\r\n");
-                    touch(Join(d, L"wronggpu-fsr.log"), 2, 20, 21);
-                    const LastRun ru = ReadLastRun(d);
+                    touch(Join(rfDir, L"wronggpu-fsr.log"), 2, 20, 21);
+                    const LastRun ru = ReadLastRun(rfDir);
                     require(ru.found && !ru.created && !ru.rrOnly && !ru.rrUpscaled && ru.rrUsed && ru.rrFrames == 0 &&
                                 ru.Summary().rfind(L"Ray Reconstruction: no successful frame", 0) == 0 && ru.Summary().find(L"not used") == wstring::npos,
                             "one session, Model M asked for nothing, RR attempted without a frame: the summary says no successful RR frame, not "

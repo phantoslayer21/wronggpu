@@ -1026,8 +1026,8 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
         if (ReadAll(Join(dir, L"OptiScaler.ini"), current))
             for (auto& o : JournalOutside(current, oldJournal, L"OptiScaler.ini")) {
                 if (o.fileValue == "(missing)" || IsOptiLocked(o.section, o.key)) continue;
-                for (auto& c : oldJournal)
-                    if (IEq(c.file, L"OptiScaler.ini") && c.section == o.section && c.key == o.key) c.ours = o.fileValue;
+                for (auto& j : oldJournal)
+                    if (IEq(j.file, L"OptiScaler.ini") && j.section == o.section && j.key == o.key) j.ours = o.fileValue;
                 LogLine(ctx, L"OptiScaler.ini: [" + FromUtf8(o.section) + L"] " + FromUtf8(o.key) + L" = " + FromUtf8(o.fileValue) + L" (saved by OptiScaler's menu) carried over");
             }
     }

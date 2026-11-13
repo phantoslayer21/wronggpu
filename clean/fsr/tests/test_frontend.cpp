@@ -642,7 +642,7 @@ static void TestBrokenNotCalledAgain() {
     CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
     ffxDispatchDescUpscale d = MakeDispatch();
     for (int i = 0; i < 30; ++i) fe->Dispatch(&ctx, &d.header);
-    std::printf("broken: upscaler frames %zu, stand-in frames %zu, lines %d\n", g_frames.size(), g_standInFrames.size(),
+    std::printf("broken: upscaler frames %zu, stand-in frames %zu, lines %zu\n", g_frames.size(), g_standInFrames.size(),
                 CountLog("it is not called again"));
     CHECK(g_frames.size() == 2);                         // frame 0 taken, frame 1 failed, never called again
     CHECK(CountLog("it is not called again") == 4);      // 28 frames: lines at 1, 2, 3 and 10
@@ -676,7 +676,7 @@ static void TestForwarding() {
     // Bug hunt F2: frame generation configures every frame: the first 3 of the type are logged, later ones only when
     // they fail (and every call still reaches AMD)
     {
-        const int lines = CountLog(" ffxConfigure "), results = CountLog("(forwarded to AMD)");
+        const size_t lines = CountLog(" ffxConfigure "), results = CountLog("(forwarded to AMD)");
         const size_t calls = g_amd.size();
         for (int i = 0; i < 50; ++i) CHECK(fe->Configure(&fgctx, &cfg.header) == FFX_API_RETURN_OK);
         CHECK(g_amd.size() == calls + 50);
