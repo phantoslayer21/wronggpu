@@ -609,7 +609,7 @@ static void TestOutputResize() {
     d.upscaleSize = {1920, 1080};
     CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
     CHECK(g_createCalls == 2 && g_createInfo.output_width == 1920 && g_createInfo.output_height == 1080);
-    CHECK(g_destroyed == 1);  // the old upscaler
+    CHECK(g_destroyed == 0);  // issue #58: the old upscaler is kept (the game's lists may still use it)
     CHECK(g_frames.size() == 2 && g_frames[1].output_width == 1920 && g_frames[1].output_height == 1080 && g_frames[1].reset == 2);
     CHECK(CountLog("output size 1920x1080 (the upscaler was created for 2560x1440") == 1);
     CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
@@ -626,8 +626,74 @@ static void TestOutputResize() {
     }
     CHECK(g_createCalls == 1 + 8);
     CHECK(CountLog("the upscaler is not created again for this context") == 1);
+    CHECK(g_destroyed == 0);  // the 8 replaced upscalers are all kept until the context goes
     CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK && fe->OwnContextCount() == 0);
     CHECK(g_destroyed == 9);
+}
+
+// Issue #58: an upscaler (and its stand-in) replaced by an output resize may still be used by command lists the game
+// recorded before (the copy into the output after the split, or a whole list not yet submitted). The front end has no
+// fence of its own; its completion boundary is the context's destroy, so the replaced ones are destroyed only then, or
+// at once when the device is lost (nothing of it runs any more).
+static void TestResizeKeepsRetired() {
+    Reset();
+    auto fe = MakeFrontEnd(Config{});
+    UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
+    c.upscale.maxRenderSize = {2560, 1440};
+    ffxContext ctx = nullptr;
+    CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
+    ffxDispatchDescUpscale d = MakeDispatch();
+    CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
+    // a frame the upscaler cannot take: the stand-in is made and upscales it
+    ffxDispatchDescUpscale bad = MakeDispatch();
+    void* const smallColor = reinterpret_cast<void*>(uintptr_t(0xC058));
+    g_resources[smallColor] = {dxgi::R16G16B16A16_FLOAT, 1280, 720};
+    bad.color = Res(smallColor, FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT, 1280, 720, FFX_API_RESOURCE_STATE_COMPUTE_READ);
+    CHECK(fe->Dispatch(&ctx, &bad.header) == FFX_API_RETURN_OK && g_standInFrames.size() == 1);
+    d.upscaleSize = {1920, 1080};  // first resize: the old upscaler and the stand-in are kept, not destroyed
+    CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK && g_createCalls == 2);
+    CHECK(g_destroyed == 0 && g_standInDestroyed == 0);
+    CHECK(CountLog("the old upscaler and its stand-in are kept until the context is destroyed") == 1);
+    d.upscaleSize = {1600, 900};   // second resize: the first replaced upscaler is still kept
+    CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK && g_createCalls == 3);
+    CHECK(g_destroyed == 0 && g_standInDestroyed == 0);
+    CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK && fe->OwnContextCount() == 0);
+    CHECK(g_destroyed == 3 && g_standInDestroyed == 1);  // both replaced upscalers, the current one and the stand-in
+
+    // the device is lost: nothing of it runs any more, the replaced upscaler is destroyed at once
+    Reset();
+    g_useTimer = true;  // (the fake platform has deviceLost only with the timer)
+    Config noPark;
+    noPark.contextParkMs = 0;
+    fe = MakeFrontEnd(noPark);
+    ctx = nullptr;
+    CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
+    d.upscaleSize = {0, 0};
+    CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
+    g_deviceLost = true;
+    d.upscaleSize = {1920, 1080};
+    fe->Dispatch(&ctx, &d.header);
+    CHECK(g_createCalls == 2 && g_destroyed == 1);
+    g_deviceLost = false;
+    CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK && g_destroyed == 2);
+
+    // a parked context (destroyed with a working upscaler) destroys its replaced upscalers at the destroy
+    Reset();
+    Config parkCfg;
+    parkCfg.contextParkMs = 1;
+    g_useTimer = true;
+    fe = MakeFrontEnd(parkCfg);
+    ctx = nullptr;
+    CHECK(fe->CreateContext(&ctx, &c.upscale.header, nullptr) == FFX_API_RETURN_OK && ctx);
+    d.upscaleSize = {0, 0};
+    CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
+    d.upscaleSize = {1920, 1080};
+    CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK && g_destroyed == 0);
+    CHECK(fe->DestroyContext(&ctx, nullptr) == FFX_API_RETURN_OK && fe->HasParked());
+    CHECK(g_destroyed == 1);  // the replaced one; the current one is parked
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK(g_timerFn() == 0 && !fe->HasParked() && g_destroyed == 2);
+    g_useTimer = false;
 }
 
 // Bug hunt F1 (a): an upscaler that failed for good, without AMD's FSR to take the context over, is not called again:
@@ -3047,6 +3113,7 @@ int main() {
     TestCustomSlotFailedCreate();
     TestCustomSlotInputRefused();
     TestOutputResize();
+    TestResizeKeepsRetired();
     TestBrokenNotCalledAgain();
     TestHostReentryStopped();
     TestCustomSlotDestroyPath();
