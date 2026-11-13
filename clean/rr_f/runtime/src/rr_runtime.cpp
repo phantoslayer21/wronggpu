@@ -3483,6 +3483,14 @@ uint32_t retain_locked(void* cmd, void* resource, uint32_t format, uint32_t stat
   if (!rt.dev || !cmd || !resource) return WG_E_INVALID_PARAMETER;
   ID3D12GraphicsCommandList* l = nullptr;
   if (FAILED(((IUnknown*)cmd)->QueryInterface(IID_PPV_ARGS(&l)))) return WG_E_INVALID_PARAMETER;
+  // Issue #65: the completion marker below needs ID3D12GraphicsCommandList2 (evaluate refuses a list without it). Ask
+  // first: nothing is created or recorded for a list that cannot take the marker, as without the marker the copy's
+  // release would not wait for the list.
+  ID3D12GraphicsCommandList2* l2 = nullptr;
+  if (FAILED(l->QueryInterface(IID_PPV_ARGS(&l2)))) {
+    release(l);
+    return WG_E_INVALID_PARAMETER;
+  }
   ID3D12Resource* src = (ID3D12Resource*)resource;
   D3D12_RESOURCE_DESC d = src->GetDesc();
   // bug hunt C: a texture with mips is copied as its mip 0 (texture_shape.h: a copy uses subresource 0; the runtime reads
@@ -3497,6 +3505,7 @@ uint32_t retain_locked(void* cmd, void* resource, uint32_t format, uint32_t stat
   ID3D12Resource* c = nullptr;
   if (FAILED(rt.dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                                              IID_PPV_ARGS(&c)))) {
+    release(l2);
     release(l);
     return WG_E_D3D_API;
   }
@@ -3521,15 +3530,14 @@ uint32_t retain_locked(void* cmd, void* resource, uint32_t format, uint32_t stat
   // bug hunt B: the copy runs when the game's list does, and a copy alone never advanced rt.serial: a release before the
   // next frame (the input re-tagged or untagged) freed it at once, before its CopyResource ran. The copy gets a serial of
   // its own, written into the same list after it (the frames' marker), so release_transient's defer waits for that list.
-  ID3D12GraphicsCommandList2* l2 = nullptr;
-  if (rt.marker && SUCCEEDED(l->QueryInterface(IID_PPV_ARGS(&l2)))) {
+  if (rt.marker) {
     const uint64_t serial = rt.serial + 1;
     D3D12_WRITEBUFFERIMMEDIATE_PARAMETER p{rt.marker->GetGPUVirtualAddress(), (UINT)(serial & 0xffffffffu)};
     D3D12_WRITEBUFFERIMMEDIATE_MODE mode = D3D12_WRITEBUFFERIMMEDIATE_MODE_MARKER_OUT;
     l2->WriteBufferImmediate(1, &p, &mode);
     rt.serial = serial;
-    release(l2);
   }
+  release(l2);
   release(l);
   rt.transient.push_back(c);
   *out = c;
