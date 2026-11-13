@@ -63,7 +63,8 @@ def metrics(got, ref):
     d = np.abs(np.where(finite, got, 0.0) - ref)
     u = ulp_distance(np.where(finite, got, 0.0), ref)
     return {"nonfinite": int(np.sum(~finite)), "frac_over_1_step": float(np.mean(u > 1)),
-            "frac_differ": float(np.mean(u > 0)), "mean_abs_err": float(d.mean()),
+            "frac_differ": float(np.mean(u > 0)), "values": int(u.size), "differ": int(np.sum(u > 0)),
+            "max_steps": int(u.max()) if u.size else 0, "mean_abs_err": float(d.mean()),
             "ref_rms": float(np.sqrt(np.mean(ref * ref)))}
 
 
@@ -103,13 +104,13 @@ class Gpu:
         return fp8_decode(out)
 
 
-def run(build, rocm, seed=89):
+def run(build, rocm, seeds=(89,)):
     g = Gpu(build, rocm)
-    rng = np.random.default_rng(seed)
+    rngs = [np.random.default_rng(s) for s in seeds]
     consts = dict(T.M_BLOCK_CONSTS, gelu="sigmoid")
     res = {"c32": [], "c32_nc_identical": None, "c64_template_identical": None}
     nc_same = []
-    for H, W, off in CASES:
+    for rng, (H, W, off) in ((r, c) for r in rngs for c in CASES):
         p = L.random_block_params(rng, 32, 2, 128, "blk.")
         blob = LP.pack_block(p, "blk.", 32, 2, 128)
         x = q8(rng.normal(0, 1.5, (H, W, 32)))
@@ -127,7 +128,7 @@ def run(build, rocm, seed=89):
     res["c32_nc_identical"] = all(nc_same) if nc_same else None
     if "swin.co" in g.mods:
         same = []
-        for H, W, off in CASES:
+        for rng, (H, W, off) in ((r, c) for r in rngs for c in CASES):
             p = MS.random_params("enc1", rng)
             blob = P.pack_stage("enc1", p)
             x = q8(rng.normal(0, 1.5, (H, W, 64)))
@@ -136,6 +137,9 @@ def run(build, rocm, seed=89):
             same.append(a.tobytes() == b.tobytes())
         res["c64_template_identical"] = all(same)
         res["c64_cases"] = len(same)
+    res["c32_total"] = {"cases": len(res["c32"]), "values": sum(m["values"] for m in res["c32"]),
+                        "differ": sum(m["differ"] for m in res["c32"]),
+                        "max_steps": max(m["max_steps"] for m in res["c32"])}
     res["pass"] = (all(m["pass"] for m in res["c32"]) and res["c32_nc_identical"] in (True, None)
                    and res["c64_template_identical"] in (True, None))
     return res
@@ -149,6 +153,7 @@ def main(argv=None):
     ap.add_argument("--compile", action="store_true")
     ap.add_argument("--compile-only", action="store_true")
     ap.add_argument("--with-swin-co", action="store_true")
+    ap.add_argument("--seeds", type=int, default=1, help="run the case list with this many seeds (89, 90, ...)")
     ap.add_argument("--json", required=True)
     a = ap.parse_args(argv)
     os.makedirs(a.build, exist_ok=True)
@@ -156,7 +161,7 @@ def main(argv=None):
         compile_kernels(a.build, a.rocm, a.with_swin_co, a.clang)
         if a.compile_only:
             return 0
-    res = run(a.build, a.rocm)
+    res = run(a.build, a.rocm, tuple(range(89, 89 + a.seeds)))
     with open(a.json, "w") as f:
         json.dump(res, f, indent=1)
     for m in res["c32"]:
