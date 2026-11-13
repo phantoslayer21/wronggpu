@@ -403,6 +403,7 @@ def main():
     ap.add_argument("--proxy-name", help="file name of the built release proxy, or 'interposer'")
     ap.add_argument("--probe-name", help="file name of the built probe proxy, or 'interposer'")
     a = ap.parse_args()
+    a.out = os.path.abspath(a.out)  # the compiles run inside the output folder
     os.makedirs(a.out, exist_ok=True)
     if a.binding:
         try:
