@@ -20,6 +20,7 @@
 #include <initializer_list>
 #include <set>
 
+#include "api.h"
 #include "json.h"
 #include "numeric.h"
 
@@ -248,6 +249,17 @@ public:
         m.version = version_ = static_cast<int>(version);
         k_ = version_ == 2 || version_ == 3;
         if (!need_string(root, "model", "map", m.model)) return false;
+        // The preset, by name: the optional field "preset", else the one this version always meant (the shipped maps).
+        if (const Json* pj = root.find("preset")) {
+            if (!pj->is_string()) return damaged("map: field \"preset\" must be text");
+            const PresetInfo* p = find_preset(pj->text);
+            if (!p) return damaged("map: unknown preset \"" + pj->text + "\"");
+            if (!p->allows(version_))
+                return damaged("map: preset " + pj->text + " does not use map version " + std::to_string(version_));
+            m.preset_name = p->name;
+        } else {
+            m.preset_name = preset_for_version(version_);
+        }
         std::string order;
         if (!need_string(root, "channel_order", "map", order)) return false;
         if (order != "natural") return damaged("unknown channel_order \"" + order + "\"");
@@ -1359,6 +1371,28 @@ private:
 };
 
 }  // namespace
+
+const std::vector<PresetInfo>& known_presets() {
+    // the map versions each preset's maps use (bit v: version v), as they were before maps named their preset
+    static const std::vector<PresetInfo> presets = {
+        {"M", (1u << 1) | (1u << 4), kMsgNoPresetM},  // spec 08 (version 4 adds the source F)
+        {"K", (1u << 2) | (1u << 3), kMsgNoPresetK},  // spec 48
+        {"F", 1u << 5, kMsgNoPresetF},                // spec 57
+    };
+    return presets;
+}
+
+const PresetInfo* find_preset(const std::string& name) {
+    for (const PresetInfo& p : known_presets())
+        if (name == p.name) return &p;
+    return nullptr;
+}
+
+std::string preset_for_version(int version) {
+    for (const PresetInfo& p : known_presets())
+        if (p.allows(version)) return p.name;
+    return "";
+}
 
 bool load_map(const std::string& file_bytes, Map& out, MapError& err) {
     out = Map();

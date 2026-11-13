@@ -33,7 +33,9 @@ void usage() {
     std::cout << "usage: wronggpu-convert --map <map.json> --dll <model dll> [--dll <other> ...]\n"
                  "                        --out <dir> [--raw] [--threads N]\n"
                  "  --dll may be given several times; the files are tried in order: the first that converts\n"
-                 "  completely is used (for preset M: the first with the output-filter weights, if any has them).\n"
+                 "  completely is used (for a map with an optional group, such as preset M's output filter: the\n"
+                 "  first that has the group, if any has it). The map names its preset (field \"preset\", or by its\n"
+                 "  version: 1 and 4 M, 2 and 3 K, 5 F).\n"
                  "  --raw also writes <dir>/raw/<group>/<name>.bin for every tensor.\n";
 }
 

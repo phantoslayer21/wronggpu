@@ -594,6 +594,37 @@ static void test_api_files(const fs::path& work) {
     CHECK(load_map_bytes(u.map_v1, m1, sink).code == kOk);
     if (!m4.map || !m1.map) return;
     CHECK(m4.map->version == 4 && m4.map->preset() == 'M' && m1.map->preset() == 'M');
+    // The preset by name: a map without the field gets its version's preset as before; with it, the name must be known
+    // and allow the map's version (map.h known_presets)
+    CHECK(m4.map->preset_name == "M" && m1.map->preset_name == "M" && m1.map->preset_info() == find_preset("M"));
+    CHECK(preset_for_version(1) == "M" && preset_for_version(4) == "M" && preset_for_version(2) == "K" && preset_for_version(3) == "K" &&
+          preset_for_version(5) == "F" && preset_for_version(0).empty() && preset_for_version(6).empty());
+    CHECK(find_preset("M") && find_preset("K") && find_preset("F") && !find_preset("m") && !find_preset("") && !find_preset("X") &&
+          known_presets().size() == 3);
+    CHECK(std::string(find_preset("M")->no_model_message) == kMsgNoPresetM && std::string(find_preset("K")->no_model_message) == kMsgNoPresetK &&
+          std::string(find_preset("F")->no_model_message) == kMsgNoPresetF);
+    {
+        auto with_preset = [&](const std::string& map, const std::string& version, const std::string& field) {
+            std::string t = map;
+            const std::string v = "\"version\":" + version;
+            const std::size_t at = t.find(v);
+            if (at != std::string::npos) t.insert(at + v.size(), ",\"preset\":" + field);
+            return t;
+        };
+        LoadedMap pm1, pm4;
+        CHECK(load_map_bytes(with_preset(u.map_v1, "1", "\"M\""), pm1, sink).code == kOk && pm1.map && pm1.map->preset_name == "M" &&
+              pm1.map->preset() == 'M');
+        CHECK(load_map_bytes(with_preset(u.map_v4, "4", "\"M\""), pm4, sink).code == kOk && pm4.map && pm4.map->preset_info() == find_preset("M"));
+        // the same map bytes with and without "preset":"M" describe the same tensors (only the file hash differs)
+        CHECK(pm4.map && pm4.map->stages.size() == m4.map->stages.size() && pm4.map->sources.size() == m4.map->sources.size());
+        for (const char* bad : {"\"K\"", "\"F\"", "\"X\"", "\"m\"", "\"\"", "7", "null"}) {
+            LoadedMap bm;
+            const Result r = load_map_bytes(with_preset(u.map_v1, "1", bad), bm, sink);
+            if (r.code != kMapDamaged) std::printf("preset field %s\n", bad);
+            CHECK(r.code == kMapDamaged && !bm.map);
+        }
+        CHECK(logged("unknown preset \"X\"") && logged("preset K does not use map version 1") && logged("field \"preset\" must be text"));
+    }
     const int fi = m4.map->find_source("F");
     CHECK(fi >= 0 && m4.map->sources[static_cast<std::size_t>(fi)].variants.size() == 2 && m4.map->stages.size() == 2);
     CHECK(m4.map->stages[1].optional() && m4.map->stages[1].variant_source == fi && !m4.map->stages[0].optional());

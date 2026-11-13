@@ -233,7 +233,9 @@ Result convert_file(const Map& map, const fs::path& dll, const SearchOptions& op
     Found fw = locate_source(data.data(), data.size(), ks, nullptr, opt);
     if (!fw.found) {
         emit(log, "source " + ks.name + " not found (" + hex64(ks.fnv) + ")");
-        std::string msg = map.preset() == 'F' ? kMsgNoPresetF : map.preset() == 'K' ? kMsgNoPresetK : kMsgNoPresetM;
+        // the message of the map's preset, by name (map.h known_presets)
+        const PresetInfo* preset = map.preset_info();
+        std::string msg = preset ? preset->no_model_message : kMsgNoPresetM;
         if (!out.version.empty()) msg += " This file is version " + out.version + ".";
         return fail(kNoPresetM, msg);
     }

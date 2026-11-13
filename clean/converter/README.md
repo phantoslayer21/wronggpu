@@ -22,6 +22,13 @@ versions 1-4 that uses a version-5-only feature (`groups`, `field`, `encoding: n
 (spec 57 section 5.1); the op names `f16` and `exp` mean spec 08's operations in versions 1-4 and spec 57's in
 version 5.
 
+**The preset, by name.** A map may name its preset in the optional top-level field `"preset"` (text: `"M"`, `"K"` or
+`"F"`; the table `known_presets` in `src/map.cpp`). The name decides the player's "no preset-X model" message (exit 12);
+the version still decides the map's features. A map without the field gets the preset its version always meant
+(versions 1 and 4: M; 2 and 3: K; 5: F), so the shipped maps are read exactly as before. A preset name that is not known,
+not text, or whose preset does not use the map's version (for example `"preset": "K"` in a version-1 map) is "converter
+data damaged". This is how a further preset that reuses an existing map version is added: one row in that table.
+
 ## Preset F (map version 5, spec 57)
 
     wronggpu-convert --map data\preset-F.v1.map.json --dll <nvngx_dlssd.dll> [--dll <other> ...] --out <dir> [--raw]
