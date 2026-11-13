@@ -18,6 +18,7 @@
 #include "native_direct_pi.h"
 #include "embedded.h"
 #include "rdna4.h"
+#include "wmma_probe.h"
 
 #include <algorithm>
 #include <array>
@@ -1337,20 +1338,20 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
         probe->second.block != 32 || probe->second.wave != 32 || probe->second.dwords != 1 ||
         probe->second.args.size() != 1 || probe->second.args[0].kind != 'p')
       return fail("native D3D12 borrowed device requires native_driver_probe (co=-, buffer, block/wave=32, args=p)");
+    // Operands with distinct values per lane and element, expected results computed on the CPU (wmma_probe.h).
     DevPtr output = 0;
-    if (!alloc(&output, 512 * sizeof(float))) return false;
-    float values[512] = {};
+    if (!alloc(&output, wmma_probe::kBytes)) return false;
+    uint8_t buffer[wmma_probe::kBytes];
+    wmma_probe::fill(buffer);
+    float values[wmma_probe::kResults] = {};
     void* args[] = {&output};
-    bool ok = upload(output, values, sizeof values) && launch("native_driver_probe", 1, 32, args) &&
+    bool ok = upload(output, buffer, sizeof buffer) && launch("native_driver_probe", 1, 32, args) &&
               download(values, output, sizeof values);
     // tests of the fallback (interop test, WG_TEST_DRIVER_PROBE_FAIL=1): the probe reports a mismatch
     const char* fail_test = std::getenv("WG_TEST_DRIVER_PROBE_FAIL");
     if (ok && fail_test && fail_test[0] == '1') values[7] = -1.0f;
-    if (ok) for (unsigned i = 0; i < 512; ++i) {
-      if (values[i] != static_cast<float>(32 + (i % 32))) {
-        ok = fail("native D3D12 borrowed driver-channel probe mismatch at float " + std::to_string(i)); break;
-      }
-    }
+    const int bad = ok ? wmma_probe::first_mismatch(values) : -1;
+    if (bad >= 0) ok = fail("native D3D12 borrowed driver-channel probe mismatch at float " + std::to_string(bad));
     const std::string error = err_;
     free(output);
     if (!ok) err_ = error;
