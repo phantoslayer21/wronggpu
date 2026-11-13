@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: MIT
 """Model L's raw model loading in the runtime (clean/l/runtime/l_model.cpp) on the CPU (#89):
 
-- the tensor list against the default table (clean/l/reference/table.py encoder_shapes / decoder_shapes: same names,
-  same number of values) and, for the ten Swin stages and post, against Model M's raw tensors
-  (clean/runner/synthetic_model.py);
+- the tensor list against the preset-L map (data/preset-L.v1.map.json: stages, names, shapes, types, in order),
+  against the structure table (clean/l/reference/table.py param_shapes: names, number of values) and, for the ten
+  Swin stages and post, against Model M's raw tensors (clean/runner/synthetic_model.py);
 - a synthetic Model L in the raw layout (clean/l/reference/oracle.py random_params) loads with every tensor's bytes
   unchanged;
 - the refusals (missing tensor, wrong size, T above 127).
@@ -15,6 +15,7 @@ Run (repository root):
     python -m unittest discover -s clean/l/runtime/tests -t clean/l/runtime/tests -p test_l_runtime_load.py
 """
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -116,25 +117,34 @@ def numel(shape):
 
 
 class Specs(unittest.TestCase):
-    def test_table(self):
+    def test_map(self):
+        """Stages, names, shapes and types of the preset-L map (data/preset-L.v1.map.json), in its order."""
+        with open(os.path.join(ROOT, "data", "preset-L.v1.map.json"), encoding="utf-8") as f:
+            m = json.load(f)
+        want = {st["stage"]: {t["name"]: (tuple(t["shape"]), t["dtype"] == "uint8") for t in st["tensors"]}
+                for st in m["stages"]}
         s = specs()
-        self.assertEqual(list(s), ["enc0"] + list(SHARED) + ["dec0", "post"])
-        for stage, want in (("enc0", T.encoder_shapes()), ("dec0", T.decoder_shapes())):
+        self.assertEqual(list(s), list(want))
+        for stage in want:
+            self.assertEqual(list(s[stage].items()), list(want[stage].items()), stage)
+
+    def test_table(self):
+        """The structure table's parameters (table.param_shapes): same stages and names, same number of values."""
+        s = specs()
+        for stage, want in T.param_shapes().items():
             self.assertEqual(sorted(s[stage]), sorted(want), stage)
             for name, shape in want.items():
                 self.assertEqual(numel(s[stage][name][0]), numel(shape), "%s/%s" % (stage, name))
-                self.assertEqual(s[stage][name][1], name == "T" and stage == "enc0", "%s/%s" % (stage, name))
+        self.assertEqual(list(s)[0], "enc0")
         self.assertEqual(list(s["enc0"])[0], "W")  # the raw root is found by enc0/W.bin, as for Model M
 
     def test_shared_stages_are_model_m(self):
         s, m = specs(), SM.synthetic_tensors(1)
         for stage in SHARED + ("post",):
             self.assertEqual({k: v[0] for k, v in s[stage].items()}, {k: a.shape for k, a in m[stage].items()}, stage)
-        for name, a in m["dec0"].items():  # Model M's dec0 tensors keep their raw shapes inside L's dec0
-            self.assertEqual(s["dec0"][name][0], a.shape, name)
-        for name, a in m["enc0"].items():
-            if name != "W":  # L's projection is 64 x 128 (Model M: 64 x 80)
-                self.assertEqual(s["enc0"][name][0], a.shape, name)
+        for stage, names in (("enc0", ("b", "T", "sigma1", "sigma2")), ("dec0", ("S", "T"))):
+            for name in names:  # Model M's raw shapes (L: projection 64 x 128, dec0 32 outputs per sub-pixel)
+                self.assertEqual(s[stage][name][0], m[stage][name].shape, name)
 
 
 class Load(unittest.TestCase):
@@ -160,13 +170,13 @@ class Load(unittest.TestCase):
         try:
             write_raw(d, model)
             raw = d + "/raw"  # as the loader names it
-            f = os.path.join(d, "raw", "dec0", "blk.W1.bin")
+            f = os.path.join(d, "raw", "dec0_block", "W1.bin")
             os.remove(f)
-            self.assertEqual(dump("load", d), ["ERR model data missing: " + raw + "/dec0/blk.W1.bin"])
-            model["dec0"]["blk.W1"][:64].tofile(f)
-            self.assertEqual(dump("load", d), ["ERR model data damaged: " + raw + "/dec0/blk.W1.bin has 8192 bytes,"
+            self.assertEqual(dump("load", d), ["ERR model data missing: " + raw + "/dec0_block/W1.bin"])
+            model["dec0_block"]["W1"][:64].tofile(f)
+            self.assertEqual(dump("load", d), ["ERR model data damaged: " + raw + "/dec0_block/W1.bin has 8192 bytes,"
                                                                               " expected 16384"])
-            model["dec0"]["blk.W1"].tofile(f)
+            model["dec0_block"]["W1"].tofile(f)
             t = model["enc0"]["T"].copy()
             t.flat[7] = 200
             t.tofile(os.path.join(d, "raw", "enc0", "T.bin"))
