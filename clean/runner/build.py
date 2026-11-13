@@ -415,6 +415,11 @@ def main(argv=None):
             sub += (["--rocm", args.rocm] if args.rocm else []) + (["--clang", args.clang] if args.clang else [])
             sub += (["--no-device-libs"] if args.no_device_libs else []) + (["--soft-fp8"] if args.soft_fp8 else [])
             sub += ["--no-resource-gate"] if args.no_resource_gate else []
+            # as the ordinary branch's child: the defines of an experiment build (without them the child builds the
+            # kernels the experiment changes unchanged, and runs the resource gate that the parent skips for defines)
+            sub += ["--report"] if args.report else []
+            for d in args.define:
+                sub += ["--define", d]
             print(f"-- motion-at-output-resolution code objects for {arch}", flush=True)
             if subprocess.run(sub, env={**os.environ, "WG_GPU_ARCH": arch}).returncode != 0:
                 raise SystemExit(f"build for {arch} failed")
