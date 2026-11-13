@@ -266,14 +266,14 @@ int main() {
             Context mc; mc.logFile = Join(dir, L"moved.log");
             mc.data = &noPayload;  // an empty payload table (the scan and EntryFor read it)
             require(LoadRecord(RecordPath(newDir), r) && SaveRebasedRecord(mc, newDir, r) && r.movedFrom.empty(), "moved game: the rebased record is written");
-            Record saved;
+            Record savedRec;
             string rawRec, iniNow;
             ReadAll(RecordPath(newDir), rawRec);
-            require(rawRec.find("game\t" + ToUtf8(newDir) + "\r\n") != string::npos && LoadRecord(RecordPath(newDir), saved) && saved.movedFrom.empty(), "moved game: the saved record names the new folder");
+            require(rawRec.find("game\t" + ToUtf8(newDir) + "\r\n") != string::npos && LoadRecord(RecordPath(newDir), savedRec) && savedRec.movedFrom.empty(), "moved game: the saved record names the new folder");
             require(ReadAll(Join(newDir, L"OptiScaler.ini"), iniNow) && iniNow.find("FfxDx12SRPath = " + ToUtf8(newDir) + "\\wronggpu_ffx_dx12.dll\r\n") != string::npos &&
                         iniNow.find("Path=" + ToUtf8(newDir) + "\\plugins\r\n") != string::npos && iniNow.find("UpscalerIndex=0\r\n") != string::npos,
                     "moved game: OptiScaler.ini's paths into the old folder point into the new one");
-            require(saved.e[1].inst == Sha256Bytes(iniNow.data(), iniNow.size()), "moved game: the record's OptiScaler.ini hash follows the rewritten file");
+            require(savedRec.e[1].inst == Sha256Bytes(iniNow.data(), iniNow.size()), "moved game: the record's OptiScaler.ini hash follows the rewritten file");
             auto managed = [&](const wstring& f) { for (auto& l : ManagedGames()) if (IEq(FullPath(l), FullPath(f))) return true; return false; };
             require(managed(newDir) && !managed(oldDir), "moved game: the new folder is on the managed list in the old one's place");
             // Uninstall (and uninstall.exe) of a record that still names the old folder: no refusal, the new folder's files go
@@ -829,15 +829,15 @@ int main() {
             bool changed = false;
             const string added = RrConfigAddText(noLine, fx, &changed, true);
             size_t sections = 0;
-            for (size_t p = added.find("[SystemSettings]"); p != string::npos; p = added.find("[SystemSettings]", p + 1)) ++sections;
+            for (size_t at = added.find("[SystemSettings]"); at != string::npos; at = added.find("[SystemSettings]", at + 1)) ++sections;
             const string lineOnly = line.substr(line.find('\n') + 1);  // the line itself, with its CRLF
             require(changed && sections == 1 && !fx.sectionAdded && added.compare(0, 3, bom) == 0 &&
                         added == bom + "[SystemSettings]\r\nr.Other=1\r\n" + lineOnly + "\r\n[Core.Log]\r\nLogNet=Log\r\n",
                     "Engine.ini add with a BOM: the line under the existing [SystemSettings], no second section, the BOM kept (r4 #5)");
             require(RrConfigRemoveText(added, fx) == noLine, "Engine.ini revert with a BOM: byte for byte as before, the BOM kept (r4 #5)");
-            bool again = true;
+            bool againBom = true;
             RrConfigFix fx2;
-            require(RrConfigAddText(withLine, fx2, &again, true) == withLine && !again, "Engine.ini add with a BOM and the line there: nothing to change (r4 #5)");
+            require(RrConfigAddText(withLine, fx2, &againBom, true) == withLine && !againBom, "Engine.ini add with a BOM and the line there: nothing to change (r4 #5)");
             // ...a file with the BOM alone: the section added after it, and taken out again leaves the BOM alone (reverted as empty)
             RrConfigFix fx3;
             const string onlyBom = RrConfigAddText(bom, fx3, &changed, true);
