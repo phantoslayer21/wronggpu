@@ -148,62 +148,61 @@ def stage(name, got, ref):
     return m
 
 
-def run(build, rocm, seed=89):
+def run(build, rocm, seeds=(89,)):
     g = Gpu(build, rocm)
-    rng = np.random.default_rng(seed)
     consts = dict(T.M_BLOCK_CONSTS, gelu="sigmoid")
     t = T.TABLE
     out = []
-    for rw, rh in FRAMES:
-        for parity in (0, 1):
-            params = L.random_params(rng)
-            enc = params["enc0"]
-            blobs = LP.pack_model_l(params)
-            x = ME.random_inputs(rng, rw=rw, rh=rh, frame=parity)
-            fw, fh = x["feature_size"]
-            hw = (fh // 2, fw // 2)
-            steps = []
-            raw, raw_p, ntok = run_values(g, x, enc)
-            ref = L.encode(x, enc, parity, t, keep=True)
-            steps.append(stage("values", raw, ref["maps"]["raw"]))
-            h1, h1_p = run_linear(g, "l_linear_80_32", raw_p, ntok, blobs["enc0.Wa"], 32, hw)
-            steps.append(stage("linear1", h1, q8(raw[..., :20] @ np.asarray(enc["Wa"], np.float64).T + enc["ba"])))
-            h2, h2_p = run_linear(g, "l_linear_32_32", h1_p, ntok, blobs["enc0.Wb"], 32, hw)
-            steps.append(stage("linear2", h2, q8(h1 @ np.asarray(enc["Wb"], np.float64).T + enc["bb"])))
-            off = T.block_offset(t, "first", parity)
-            bp = {k[4:]: v for k, v in enc.items() if k.startswith("blk.")}
-            h3, h3_p = run_block(g, h2, h2_p, blobs["enc0.blk"], off)
-            steps.append(stage("block", h3, q8(L.swin_block(h2, bp, off, 2, consts))))
-            feat_p = g.buf(nbytes=ntok * 64)
-            wproj = g.buf(blobs["enc0.project"])
-            g.launch("l_ops.co", "l_project_80_32", -(-ntok // 128),
-                     [V(raw_p), V(h3_p), V(feat_p), V(wproj), ctypes.c_int(ntok)])
-            feat = g.get_fp8(feat_p, hw + (64,))
-            z = np.concatenate([raw, h3, np.zeros(hw + (16,))], axis=-1)
-            steps.append(stage("project", feat, L.project_groups(z, enc["W"], enc["b"], (32, 32, 32, 32))))
-            ref_sig = L.encode(x, enc, parity, T.table(consts={"default": consts}))
-            steps.append(stage("encoder_chain", feat, ref_sig["features"]))
-            # decoder front: split dec1's map, block on channels 0..31, join
-            dec = params["dec0"]
-            Z = q8(rng.normal(0, 1.5, hw + (64,)))
-            Z_p = g.buf(fp8_encode(Z).tobytes())
-            y_p = g.buf(nbytes=ntok * 32)
-            copy_channels(g, Z_p, 64, 0, y_p, 32, 0, 32, ntok)
-            y = g.get_fp8(y_p, hw + (32,))
-            steps.append(stage("split", y, Z[..., :32]))
-            offd = T.block_offset(t, "second", parity)
-            dbp = {k[4:]: v for k, v in dec.items() if k.startswith("blk.")}
-            yb, yb_p = run_block(g, y, y_p, blobs["dec0.blk"], offd)
-            front_p = g.buf(nbytes=ntok * 64)
-            copy_channels(g, yb_p, 32, 0, front_p, 64, 0, 32, ntok)
-            copy_channels(g, Z_p, 64, 32, front_p, 64, 32, 32, ntok)
-            front = g.get_fp8(front_p, hw + (64,))
-            want = L.decoder_front(Z, dec, parity, T.table(consts={"default": consts}))
-            steps.append(stage("decoder_front", front, want))
-            steps.append({"step": "join_exact", "identical": bool(np.array_equal(front[..., :32], yb) and
-                                                                  np.array_equal(front[..., 32:], Z[..., 32:]))})
-            out.append({"frame": [rw, rh], "parity": parity, "steps": steps})
-            g.free_all()
+    for seed, (rw, rh), parity in ((s, f, p) for s in seeds for f in FRAMES for p in (0, 1)):
+        rng = np.random.default_rng([seed, rw, rh, parity])
+        params = L.random_params(rng)
+        enc = params["enc0"]
+        blobs = LP.pack_model_l(params)
+        x = ME.random_inputs(rng, rw=rw, rh=rh, frame=parity)
+        fw, fh = x["feature_size"]
+        hw = (fh // 2, fw // 2)
+        steps = []
+        raw, raw_p, ntok = run_values(g, x, enc)
+        ref = L.encode(x, enc, parity, t, keep=True)
+        steps.append(stage("values", raw, ref["maps"]["raw"]))
+        h1, h1_p = run_linear(g, "l_linear_80_32", raw_p, ntok, blobs["enc0.Wa"], 32, hw)
+        steps.append(stage("linear1", h1, q8(raw[..., :20] @ np.asarray(enc["Wa"], np.float64).T + enc["ba"])))
+        h2, h2_p = run_linear(g, "l_linear_32_32", h1_p, ntok, blobs["enc0.Wb"], 32, hw)
+        steps.append(stage("linear2", h2, q8(h1 @ np.asarray(enc["Wb"], np.float64).T + enc["bb"])))
+        off = T.block_offset(t, "first", parity)
+        bp = {k[4:]: v for k, v in enc.items() if k.startswith("blk.")}
+        h3, h3_p = run_block(g, h2, h2_p, blobs["enc0.blk"], off)
+        steps.append(stage("block", h3, q8(L.swin_block(h2, bp, off, 2, consts))))
+        feat_p = g.buf(nbytes=ntok * 64)
+        wproj = g.buf(blobs["enc0.project"])
+        g.launch("l_ops.co", "l_project_80_32", -(-ntok // 128),
+                 [V(raw_p), V(h3_p), V(feat_p), V(wproj), ctypes.c_int(ntok)])
+        feat = g.get_fp8(feat_p, hw + (64,))
+        z = np.concatenate([raw, h3, np.zeros(hw + (16,))], axis=-1)
+        steps.append(stage("project", feat, L.project_groups(z, enc["W"], enc["b"], (32, 32, 32, 32))))
+        ref_sig = L.encode(x, enc, parity, T.table(consts={"default": consts}))
+        steps.append(stage("encoder_chain", feat, ref_sig["features"]))
+        # decoder front: split dec1's map, block on channels 0..31, join
+        dec = params["dec0"]
+        Z = q8(rng.normal(0, 1.5, hw + (64,)))
+        Z_p = g.buf(fp8_encode(Z).tobytes())
+        y_p = g.buf(nbytes=ntok * 32)
+        copy_channels(g, Z_p, 64, 0, y_p, 32, 0, 32, ntok)
+        y = g.get_fp8(y_p, hw + (32,))
+        steps.append(stage("split", y, Z[..., :32]))
+        offd = T.block_offset(t, "second", parity)
+        dbp = {k[4:]: v for k, v in dec.items() if k.startswith("blk.")}
+        yb, yb_p = run_block(g, y, y_p, blobs["dec0.blk"], offd)
+        front_p = g.buf(nbytes=ntok * 64)
+        copy_channels(g, yb_p, 32, 0, front_p, 64, 0, 32, ntok)
+        copy_channels(g, Z_p, 64, 32, front_p, 64, 32, 32, ntok)
+        front = g.get_fp8(front_p, hw + (64,))
+        want = L.decoder_front(Z, dec, parity, T.table(consts={"default": consts}))
+        steps.append(stage("decoder_front", front, want))
+        steps.append({"step": "join_exact", "identical": bool(np.array_equal(front[..., :32], yb) and
+                                                              np.array_equal(front[..., 32:], Z[..., 32:]))})
+        out.append({"frame": [rw, rh], "parity": parity, "steps": steps})
+        g.free_all()
     return out
 
 
@@ -215,6 +214,7 @@ def main(argv=None):
     ap.add_argument("--compile", action="store_true")
     ap.add_argument("--compile-only", action="store_true")
     ap.add_argument("--main", help="a checkout of main: compare its encoder.co with this tree's")
+    ap.add_argument("--seeds", type=int, default=1, help="run the frames with this many seeds (89, 90, ...)")
     ap.add_argument("--json", required=True)
     a = ap.parse_args(argv)
     os.makedirs(a.build, exist_ok=True)
@@ -226,13 +226,28 @@ def main(argv=None):
             with open(a.json, "w") as f:
                 json.dump(res, f, indent=1)
             return 0
-    res["frames"] = run(a.build, a.rocm)
+    res["frames"] = run(a.build, a.rocm, tuple(range(89, 89 + a.seeds)))
+    tot = {}
+    for fr in res["frames"]:
+        for st in fr["steps"]:
+            if "values" in st:
+                t = tot.setdefault(st["step"], {"values": 0, "differ": 0, "max_steps": 0, "nonfinite": 0,
+                                                "max_frac_over_1_step": 0.0, "spec09_mean_ok": True})
+                t["values"] += st["values"]
+                t["differ"] += st["differ"]
+                t["max_steps"] = max(t["max_steps"], st["max_steps"])
+                t["nonfinite"] += st["nonfinite"]
+                t["max_frac_over_1_step"] = max(t["max_frac_over_1_step"], st["frac_over_1_step"])
+                t["spec09_mean_ok"] &= st["mean_abs_err"] <= 0.01 * st["ref_rms"]
+            elif "identical" in st:
+                t = tot.setdefault(st["step"], {"cases": 0, "identical": 0})
+                t["cases"] += 1
+                t["identical"] += int(st["identical"])
+    res["totals"] = tot
     with open(a.json, "w") as f:
         json.dump(res, f, indent=1)
-    for fr in res["frames"]:
-        for s in fr["steps"]:
-            keys = ("step", "frac_differ", "frac_over_1_step", "nonfinite", "identical")
-            print(fr["frame"], fr["parity"], {k: s[k] for k in keys if k in s})
+    for k, v in res["totals"].items():
+        print(k, v)
     return 0
 
 
