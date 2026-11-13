@@ -9,6 +9,7 @@
 #include <string>
 
 #include "../k/runtime/model_k.h"
+#include "model_select.h"
 #include "wg_runtime.h"
 
 namespace wgrt {
@@ -18,25 +19,18 @@ bool model_from_options(const WgRtConfig& c, ModelId* model, std::string* err) {
   const char* env = std::getenv("WG_RUNTIME_OPTIONS");
   const std::string text = std::string(c.runtime_options ? c.runtime_options : "") + ";" + (env ? env : "");
   *model = ModelId::M;
-  bool k = false;
-  for (size_t a = 0; a <= text.size();) {
-    size_t b = text.find_first_of(";,", a);
-    if (b == std::string::npos) b = text.size();
-    const std::string kv = text.substr(a, b - a);
-    a = b + 1;
-    if (kv.compare(0, 6, "model=") != 0) continue;
-    const std::string v = kv.substr(6);
-    if (v == "M" || v == "m") {
-      k = false;
-    } else if (v == "K" || v == "k") {
-      k = true;
-    } else {
-      *err = "unknown model \"" + v + "\" in the runtime options (known: M)";
-      return false;
-    }
+  ModelId last = ModelId::M;
+  std::string bad;
+  if (!last_model_option(text, &last, &bad)) {
+    *err = "unknown model \"" + bad + "\" in the runtime options (known: M)";
+    return false;
   }
-  if (k) {
+  if (last == ModelId::K) {
     *err = "Model K is not part of this build (runtime option model=K); remove the option to use Model M";
+    return false;
+  }
+  if (last == ModelId::L) {  // #89: recognised, not part of the runtime yet
+    *err = model_not_built_yet(ModelId::L);
     return false;
   }
   return true;

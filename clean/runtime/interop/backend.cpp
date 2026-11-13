@@ -33,6 +33,7 @@
 #include "../runtime_core.h"
 #include "../embedded.h"
 #include "../../k/runtime/model_k.h"
+#include "../model_select.h"
 #include "convert.h"
 #include "executor.h"
 #include "executor_select.h"
@@ -45,8 +46,10 @@ namespace wgi {
 
 namespace {
 
-const char kMapName[] = "preset-M.v1.map.json";
-const char kKMapName[] = "preset-K.v1.map.json";  // model K (runtime option model=K)
+// the converter maps and model K's folder, from the model table (clean/runtime/model_select.h)
+const char* const kMapName = wgrt::model_info(wgrt::ModelId::M).map_file;   // preset-M.v1.map.json
+const char* const kKMapName = wgrt::model_info(wgrt::ModelId::K).map_file;  // model K (runtime option model=K)
+const char* const kKSubdir = wgrt::model_info(wgrt::ModelId::K).model_subdir;  // <model_dir>\K
 
 // Value of `key` in a "key=value;..." string (the last one wins), "" if absent.
 std::string option_value(const std::string& text, const std::string& key) {
@@ -1400,7 +1403,7 @@ class Context {
       // model K: <model_dir>\K\model.wgcm (runtime option model_k_dir=<folder> overrides) and the preset-K map
       // next to this library or built into it (model_k_map=<file> overrides); the runtime loads and checks both
       std::string kdir = option_value(o.runtime, "model_k_dir");
-      if (kdir.empty()) kdir = model_dir_ + "\\K";
+      if (kdir.empty()) kdir = model_dir_ + "\\" + kKSubdir;
       model_path_ = kdir + "\\model.wgcm";
       if (!exists(model_path_))
         return *err = "model K: no converted model at " + model_path_ + " (convert the preset-K model there)", false;
