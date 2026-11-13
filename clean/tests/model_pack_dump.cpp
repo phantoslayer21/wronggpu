@@ -6,7 +6,7 @@
 //       every stage with a blob (enc0, enc1 ... dec1, dec0); prints "OK <n>" or "ERR <message>"
 //   model_pack_dump block <tensor dir> <prefix> <C> <heads> <mlp> <out file>
 //       reads <tensor dir>/<name>.bin (float32, the file name is the tensor name, e.g. "blk.W1.bin"), packs one Swin
-//       block section with pack::pack_swin_block and writes it; prints "OK <bytes>" or "ERR <message>"
+//       block section with pack_parts::pack_swin_block and writes it; prints "OK <bytes>" or "ERR <message>"
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -63,8 +63,8 @@ int main(int argc, char** argv) {
       if (read_f32(dir + "/" + prefix + nm + ".bin", &x.f)) t[prefix + nm] = x;  // a missing file: the packer says so
     }
     std::vector<uint8_t> blob;
-    if (!wgrt::pack::pack_swin_block(t, prefix, std::atoi(argv[4]), std::atoi(argv[5]), std::atoi(argv[6]), d, &blob,
-                                     &err))
+    if (!wgrt::pack_parts::pack_swin_block(t, prefix, std::atoi(argv[4]), std::atoi(argv[5]), std::atoi(argv[6]), d,
+                                           &blob, &err))
       return std::printf("ERR %s\n", err.c_str()), 0;
     if (!write_file(argv[7], blob)) return std::printf("ERR write\n"), 0;
     std::printf("OK %zu\n", blob.size());

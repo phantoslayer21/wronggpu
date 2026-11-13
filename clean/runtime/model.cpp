@@ -632,8 +632,8 @@ bool load_wgcm_model(const std::string& path, const std::string& map_path, std::
   return true;
 }
 
-// ---- the building blocks for other models' packers (model.h, namespace pack): the packers' own helpers
-namespace pack {
+// ---- the building blocks for other models' packers (model.h, namespace pack_parts): the packers' own helpers
+namespace pack_parts {
 
 std::vector<std::vector<uint8_t>> frags(const float* m, int rows, int cols, const Order& R, const Order& K) {
   return wgrt::frags(Mat{m, rows, cols}, R, K);
@@ -678,7 +678,7 @@ bool pack_swin_block(const StageTensors& t, const std::string& prefix, int C, in
   return true;
 }
 
-}  // namespace pack
+}  // namespace pack_parts
 
 bool pack_stage_blob(const std::string& stage, const StageTensors& t, const DRow& drow, std::vector<uint8_t>* out,
                      std::string* err) {

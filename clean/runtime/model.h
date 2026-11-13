@@ -70,7 +70,7 @@ DRow drow_gfx12();
 
 // Building blocks of the packers above, for the packers of other models of the same family (Model L,
 // clean/l/runtime; #89): the same code that packs Model M's blobs (ports of clean/runner/packing.py).
-namespace pack {
+namespace pack_parts {
 
 using Order = std::vector<int>;  // R or K order of a matrix; -1 = padding (a zero)
 
@@ -92,6 +92,6 @@ size_t align_up(size_t n);                     // to 256 bytes (packing.ALIGN)
 bool pack_swin_block(const StageTensors& t, const std::string& prefix, int C, int heads, int mlp, const DRow& drow,
                      std::vector<uint8_t>* out, std::string* err);
 
-}  // namespace pack
+}  // namespace pack_parts
 
 }  // namespace wgrt

@@ -3,8 +3,8 @@
 
 - every stage blob of a synthetic Model M (enc0, the ten Swin stages, dec0) loaded from the converter's raw layout:
   pack_stage_blob against clean/runner/enc0.py pack, clean/runner/packing.py pack_stage and clean/runner/dec0.py pack;
-- the building block for other models' packers, pack::pack_swin_block: at Model M's widths (equal to the block section
-  of the stage blob) and at width 32 with a name prefix (Model L's blocks), against packing.pack_block, plus its
+- the building block for other models' packers, pack_parts::pack_swin_block: at Model M's widths (equal to the block
+  section of the stage blob) and at width 32 with a name prefix (Model L's blocks), against packing.pack_block, plus its
   refusals (missing tensor, wrong size).
 
 No GPU and no model data: clean/tests/model_pack_dump.cpp is built with the host C++ compiler (CXX, clang++ or g++; on
