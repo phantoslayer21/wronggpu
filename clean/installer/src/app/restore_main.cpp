@@ -18,9 +18,6 @@
 #include "wg_core/launcher.h"
 #include "wg_core/logs.h"
 #include "wg_core/record.h"
-#ifdef WRONGGPU_TESTING
-#include "wg_core/test_temp_guard.h"
-#endif
 
 #ifndef WRONGGPU_VERSION_STR
 #define WRONGGPU_VERSION_STR L"0.0.0"
@@ -69,9 +66,6 @@ wstring PlainError(const SetupError& e) {
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
-#ifdef WRONGGPU_TESTING
-    if (wg_test::TempGuardRefuses()) return wg_test::kTempGuardExit;  // test builds: never a temp folder outside the configured root
-#endif
     SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
     static const EmbeddedData data{nullptr, 0, 0, L"", 0, L"", 0, WRONGGPU_VERSION_STR};
     Context ctx;

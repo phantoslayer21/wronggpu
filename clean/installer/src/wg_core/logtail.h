@@ -32,7 +32,7 @@ struct LastRun {
     wstring support;              // the last [support] WG-... code
     wstring renderSize, outputSize;  // the last "WrongGPU frame:" line's R=WxH and O=WxH (the window's stat tiles)
     wstring plugin;               // WrongGPU.asi: "hooked", "not-hooked" (wronggpu-asi.log), empty without its log
-    struct Warning { wstring kind, text; };  // kind: foreign-vtable, no-depth, xess-no-depth, plugin-not-hooked, rr-guard
+    struct Warning { wstring kind, text; };  // kind: foreign-vtable, no-depth, xess-no-depth, plugin-not-hooked
     std::vector<Warning> warnings;
     // Ray Reconstruction (wronggpu-rr.log, the RR plugin's log next to the exe; its last session)
     bool rrFound = false;         // the RR plugin's log has a session
@@ -49,13 +49,6 @@ struct LastRun {
     wstring rrNote;               // the RR log's last failure reason (r6 #2): the runtime's "evaluate failed before any pass: <why>" or
                                   // "create: failed (<why>)", or the direct route's "RR feature refused (...): <why>" (r7 #3); empty without one
     bool rrPassThrough = false;   // the plugin passed the game's colour through for a failed evaluate ("colour passed through")
-    // 0.6.1: the RR plugin's coexistence guard line in that session (kRrGuardLines; clean/rr_f/proxy/HOOK-MODE.md, "Another Ray
-    // Reconstruction plugin"), from its sentence on: WrongGPU RR stayed off, or was replaced, in that run. The last one; empty
-    // without one. Last run shows it (warning kind "rr-guard"); an RR-only session with one is a run that says so
-    wstring rrGuard;
-    // ...and the run is that RR-only session alone, where the guard kept WrongGPU RR off (no RR request reached it; CountRrRun):
-    // no Ray Reconstruction in it, whatever the RR setup. Kept in the game list's startup cache (LastRunCacheFlags)
-    bool rrGuardOff = false;
     // A session of the RR plugin where the game asked for RR counts as a run (r4 #1: Borderlands 4, Hogwarts Legacy and RE Requiem
     // run Ray Reconstruction only, so the front end writes no log there; r6 #2: an attempt counts whether or not a frame succeeded):
     // without a front-end session ReadLastRun sets found and created for it, and upscaled only with frames evaluated ("upscaled" for
@@ -77,15 +70,7 @@ struct LastRun {
     // WrongGPU upscaled frames in the run: Model M's own frames (upscaled; for an RR-only run its RR frames), or Ray Reconstruction's
     // in one session with the front end where Model M upscaled none (rrUpscaled, r6 #1). The checklist and the header's Worked test
     bool AnyUpscaled() const { return found && (upscaled || rrUpscaled); }
-    // Ray Reconstruction alone in the run (r4 #1, r6 #1): an RR-only run, or RR upscaling where Model M didn't; never a run whose
-    // guard kept WrongGPU RR off (0.6.1)
-    bool RrAlone() const { return found && ((rrOnly && !rrGuardOff) || rrUpscaled); }
 };
-// 0.6.1: the last run in the game list's startup cache (library-list.txt, ui_library.cpp): its flags as 0 / 1 characters (found,
-// ready, optiPlugin, upscaled, rrOnly, rrUpscaled, rrGuardOff) and, in a field of its own, the guard line (rrGuard). Read back:
-// 3, 5, 6 or 7 characters (lists of earlier builds); false for anything else.
-wstring LastRunCacheFlags(const LastRun& r);
-bool ReadLastRunCacheFlags(const wstring& flags, LastRun& r);
 
 // A log's last session on the PC's local clock (seconds): its process id, its start and its end. From the times of day the log
 // has, on the day of the file's last write (the day before when the last one is later than the write: a copied log).
@@ -121,13 +106,6 @@ void ParseAsiLog(const string& text, LastRun& r);
 // a switch in OptiScaler's menu or in the runtime), the last timing line's GPU time a frame. A session whose "attached" line has
 // scrolled out of the tail (no other load line in it, but its instance or timing lines): the whole tail.
 void ParseRrLog(const string& text, LastRun& r);
-// 0.6.1: the beginnings of the RR plugin's guard lines where WrongGPU RR stays off (clean/rr_f/proxy/HOOK-MODE.md at
-// the RR guard, "Log lines"; each right after the log's time stamp), matched in a line of its session. Never
-// the take mode's "another Ray Reconstruction plugin is active; rr_other_plugin=take: WrongGPU RR goes in front of it (":
-// WrongGPU RR is on there.
-inline const char* const kRrGuardLines[] = {"another Ray Reconstruction plugin is active; WrongGPU RR stays off (",
-                                            "a second copy of WrongGPU RR is loaded (",
-                                            "a plugin loaded after WrongGPU replaced its hooks; rr_other_plugin=take cannot be applied"};
 // OptiScaler.log names XeSS as the game's upscaler input (only used to name the cause of a "no depth" warning).
 bool OptiLogMentionsXess(const string& text);
 // Reads the last 256 KB of <dir>\wronggpu-fsr.log, the plugin's log (next to OptiScaler or in its own folder), the RR

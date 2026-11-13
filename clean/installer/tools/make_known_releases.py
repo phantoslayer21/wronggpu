@@ -6,7 +6,8 @@ recognises leftover WrongGPU files without an install record by these hashes onl
     python make_known_releases.py --out src/wg_core/known_releases.h [--keep <existing header>] <version>=<payload folder> ...
 
 The payload folders are our own release builds (build/release/<version>/payload*; 0.6.0: build/release-060-rc/payload and
-its RR folder rr). Only .dll, .asi and wronggpu-*.txt files are listed. A hash that two releases share is listed once, with
+its RR folder rr; its six rows match the files of the published 0.6.0 release by size and SHA-256: the payload its
+launcher embeds, and the licence and notices files of its zip). Only .dll, .asi and wronggpu-*.txt files are listed. A hash that two releases share is listed once, with
 the earlier version. --keep: the rows of an existing header come first, unchanged (a new release added without rebuilding
 the older folders). Written for this project; Python standard library only.
 """

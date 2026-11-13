@@ -12,7 +12,6 @@
 #include "wg_core/model.h"
 #include "wg_core/record.h"
 #include "wg_core/settings.h"
-#include "wg_core/test_temp_guard.h"
 
 using namespace wg;
 
@@ -33,15 +32,7 @@ wstring TempFolder() {
 }  // namespace
 
 int main() {
-    if (wg_test::TempGuardRefuses()) return wg_test::kTempGuardExit;  // never a temp folder outside the configured root
     try {
-        // 0.6.1: the test programs' temp-folder guard (test_temp_guard.h): below the root by full path, never by a bare prefix
-        require(wg_test::UnderRoot(L"Q:\\work\\tmp\\x", L"Q:\\work") && wg_test::UnderRoot(L"q:/work/TMP/", L"Q:\\work\\") &&
-                    wg_test::UnderRoot(L"Q:\\work", L"Q:\\work"), "temp guard: a folder below the root (either slash, any case), the root itself");
-        require(!wg_test::UnderRoot(L"Q:\\work-x\\tmp", L"Q:\\work") && !wg_test::UnderRoot(L"C:\\Windows\\Temp", L"Q:\\work") &&
-                    !wg_test::UnderRoot(L"Q:\\work\\..\\other", L"Q:\\work") && !wg_test::UnderRoot(L"", L"Q:\\work"),
-                "temp guard: not by a bare prefix, not another drive, not out by .., not an empty path");
-        require(wg_test::TempOutsideRoot(L"").empty(), "temp guard: no root configured, no check");
         // strings and paths
         require(Join(L"C:\\a", L"b") == L"C:\\a\\b" && Join(L"C:\\a\\", L"b") == L"C:\\a\\b" && Join(L"", L"b") == L"b", "Join");
         require(Parent(L"C:\\a\\b.exe") == L"C:\\a" && BaseName(L"C:\\a\\b.exe") == L"b.exe" && Stem(L"C:\\a\\b.exe") == L"b", "Parent/BaseName/Stem");

@@ -9,7 +9,12 @@
 namespace wg {
 
 struct CompareDll { wstring path, version, game; std::vector<int> v; };
-struct Consent { bool moveMods = false, removeOld = false, movePlugins = false; };  // movePlugins (0.6.1): other setups' plugins aside (ForeignPlugins)
+// movePlugins (0.6.1): other setups' plugins aside (ForeignPlugins): those in `plugins` (paths relative to the exe folder, as
+// the player's question listed them), or every one there when it is empty (--switch-plugins)
+struct Consent {
+    bool moveMods = false, removeOld = false, movePlugins = false;
+    std::vector<wstring> plugins;
+};
 
 void RemoveEarlierDirect(Context& ctx, const GameTarget& target, Ui& ui, std::vector<wstring>& warnings);
 wstring CompareRecordFile();

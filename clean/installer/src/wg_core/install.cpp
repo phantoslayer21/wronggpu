@@ -181,14 +181,33 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     // Ray Reconstruction (rr.h): a game that uses it gets this build's RR files too (OptiScaler setup only: the RR plugin is
     // one of OptiScaler's plugins)
     const bool rrGame = (!kDirectRoute || ctx.opti.ok()) && RrPayloadAvailable(ctx) && DetectRr(target.exe).uses;
-    // 0.6.1: another setup's plugins in OptiScaler's plugin folders may hook RR too: WrongGPU's RR stays out unless the player
-    // chose to move them aside (then backed up as moved, below); the earlier install's own plugins are not "another setup's"
-    const std::vector<wstring> foreignAsi = rrGame ? ForeignPlugins(target.exeDir, target.installed ? &target.record : nullptr) : std::vector<wstring>{};
-    const bool rr = rrGame && (foreignAsi.empty() || consent.movePlugins);
-    if (rrGame && !rr) {
-        const wstring w = ForeignPluginsText(foreignAsi);
+    // 0.6.1: other setups' plugins in OptiScaler's plugin folders may hook RR too: WrongGPU's RR goes in only when every one of
+    // them is moved aside (backed up as moved, below): those the player agreed to move (the plugins the question listed;
+    // --switch-plugins: those in the folder now), and those the earlier install moved aside with that OK (its record's
+    // disable entries, byte for byte: they come back with its restore and go aside again). Any other one keeps WrongGPU's RR
+    // out, as does one outside the install folder (nothing to move it with). Decided here, before anything changes, against
+    // what the folder holds now (the plugins moved before are still in the backup; one put back by hand since is asked
+    // about like any other); checked again after the earlier install's restore (below). The earlier install's own plugins
+    // are not "another setup's".
+    std::map<wstring, wstring> pluginsMovedBefore;  // lower-case path relative to dir -> the hash the player's OK was for
+    if (target.installed)
+        for (auto& e : target.record.e)
+            if (e.action == L"disable" && !e.orig.empty() && EndsWithI(e.rel, L".asi")) pluginsMovedBefore[Lower(e.rel)] = e.orig;
+    const std::vector<wstring> pluginsNow = rrGame ? ForeignPlugins(target.exeDir, target.installed ? &target.record : nullptr, dir) : std::vector<wstring>{};
+    const std::vector<wstring> pluginsOk = !consent.movePlugins ? std::vector<wstring>{} : consent.plugins.empty() ? pluginsNow : consent.plugins;
+    auto pluginsKeepRrOut = [&](const PluginPlan& p) {
+        wstring list;
+        for (auto& f : p.blocking) list += (list.empty() ? L"" : L", ") + f;
+        const wstring w = p.outside ? L"Other OptiScaler plugins are in this game (" + list + L") outside the folder WrongGPU installs to, so they "
+                                      L"can't be moved aside: WrongGPU's Ray Reconstruction was left out (they may hook Ray Reconstruction as WrongGPU's RR plugin does)."
+                                    : ForeignPluginsText(p.blocking);
         LogLine(ctx, L"Ray Reconstruction: " + w);
         warnings.push_back(w);
+    };
+    bool rr = rrGame;
+    if (rr) {
+        const PluginPlan before = PlanPluginsAside(target.exeDir, dir, pluginsNow, pluginsOk, {});
+        if (!before.blocking.empty()) { rr = false; pluginsKeepRrOut(before); }
     }
     if (rr)
         for (size_t i = 0; i < ctx.data->rrCount; ++i) {
@@ -214,6 +233,8 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
         }
     }
     if (!model.ok()) Fail(model.error.empty() ? L"No usable DLSS model file." : model.error, model.damaged ? EXIT_DAMAGED : EXIT_NO_MODEL);
+    // (the player's OK for other mods' files, before anything changes: target.conflicts is the folder as the earlier install's
+    // restore leaves it, apart from the files that restore brings back, which are those the player's OK was for)
     if (target.conflicts.modsFound() && !consent.moveMods) Fail(L"Other upscaler mods were found. They have to be moved aside first (with a backup).", EXIT_OTHER_MODS);
     if (target.conflicts.oldFound() && !consent.removeOld) Fail(L"An older WrongGPU (DLSS 4.5 AMD) install was found. It has to be removed first.", EXIT_OLD_INSTALL);
     if (DWORD e = WriteTest(dir)) Fail(L"Cannot write to the game folder: " + ErrText(e));
@@ -470,6 +491,14 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
         }
         LogLine(ctx, L"OptiScaler mode: OptiScaler " + ctx.opti.version + L" as " + proxy + L", WrongGPU as " + (slot ? kOptiSlotFrontEnd : kOptiFrontEnd) + L", " + std::to_wstring(optiFiles.size()) + L" OptiScaler files");
     }
+    // 0.6.1: the other setups' plugins as the restore left the folder (the ones the earlier install moved aside are back):
+    // each goes aside again only with the OK it had (the player's, or byte for byte the earlier install's move); any other
+    // one keeps WrongGPU's RR out after all (nothing is moved without that OK)
+    PluginPlan pluginsAside;
+    if (rr) {
+        pluginsAside = PlanPluginsAside(target.exeDir, dir, ForeignPlugins(target.exeDir, nullptr), pluginsOk, pluginsMovedBefore);
+        if (!pluginsAside.blocking.empty()) { rr = false; pluginsKeepRrOut(pluginsAside); pluginsAside = PluginPlan(); }
+    }
     if (rr) {
         // the RR plugin beside WrongGPU's plugin (OptiScaler's plugins folder, or the plugin's own next to Ultimate ASI
         // Loader), the RR runtime next to the exe, wronggpu-rr.ini (the RR data) and the plugin's settings file: from a
@@ -510,26 +539,11 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     const Conflicts now = FindConflicts(dir, target.exeDir);
     if (!now.outside.empty() || !now.legacyRecordDir.empty()) Fail(L"Files of another mod or an older install could not be handled automatically: " +
                                                                    (now.outside.empty() ? now.legacyRecordDir : now.outside[0]), EXIT_OTHER_MODS);
-    // 0.6.1: the player's OK is checked against what is in the folder now, after the restore: another setup's OptiScaler that
-    // replaced WrongGPU's proxy stays through the restore and is never moved aside without the switch question's answer. The
-    // files the earlier install moved aside or replaced with the player's OK (its record's disable entries, and copies over a
-    // file that was there, backed up) come back through the restore: byte for byte those, they go aside again on that OK;
-    // anything else needs it anew
-    if (now.modsFound() && !consent.moveMods) {
-        std::map<wstring, wstring> movedBefore;  // lower-case name -> the hash the player's OK was for
-        if (target.installed)
-            for (auto& e : target.record.e)
-                if ((e.action == L"disable" || (e.action == L"copy" && e.existed)) && !e.orig.empty()) movedBefore[Lower(e.rel)] = e.orig;
-        wstring list;
-        for (auto& f : now.modFiles) {
-            const auto it = movedBefore.find(Lower(f));
-            if (it != movedBefore.end() && IEq(Sha256File(Join(dir, f)), it->second)) continue;
-            list += (list.empty() ? L"" : L", ") + f;
-        }
-        if (!list.empty())
-            Fail(L"This game has its own OptiScaler or another upscaler mod (" + list + L"). Switch to WrongGPU's OptiScaler setup? "
-                 L"Your files are backed up and put back byte for byte when WrongGPU is uninstalled.", EXIT_OTHER_MODS);
-    }
+    // (0.6.1: other mods' files after the restore need no question here: the player's OK was checked before anything changed,
+    // at the top, against target.conflicts. The restore leaves in place only files that were there then (another setup's
+    // OptiScaler over WrongGPU's proxy is among them, so it was asked about), and what it brings back is byte for byte what
+    // the earlier install moved aside or replaced with the player's OK (its disable entries, its copies over a file that
+    // was there): those go aside again below on that OK.)
     Record m; m.version = ctx.data->version; m.game = dir; m.exe = target.exe;
     m.status = target.validated ? L"validated" : L"experimental"; m.regkey = ctx.perGameEntry ? RegKeyFor(dir) : L""; m.model = ModelFile(ctx); m.modelM = modelM.outcome;
     LogLine(ctx, L"target " + target.exe + L" | install folder " + dir + L" | status " + m.status);
@@ -591,12 +605,12 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
         if (!IsAmdFidelityFxName(f) && std::find_if(optiFiles.begin(), optiFiles.end(), [&](const OptiFile& o) { return IEq(o.rel, f); }) == optiFiles.end())
             disable.push_back(f);
     for (auto& f : now.legacyFiles) disable.push_back(f);
-    // other setups' plugins, moved aside with the player's OK so WrongGPU's RR plugin is the only one (fix 2); one at a path
-    // this install writes is backed up by its copy entry instead
-    if (rr && consent.movePlugins)
-        for (auto& f : ForeignPlugins(target.exeDir, nullptr)) {
-            const wstring rel = IEq(FullPath(target.exeDir), FullPath(dir)) ? f : wstring();
-            if (rel.empty() || std::find_if(optiFiles.begin(), optiFiles.end(), [&](const OptiFile& o) { return IEq(o.rel, rel); }) != optiFiles.end()) continue;
+    // other setups' plugins, moved aside with the player's OK so WrongGPU's RR plugin is the only one (exactly those the plan
+    // above found: the ones the player agreed to, and the ones the earlier install had moved aside; paths relative to the
+    // install folder); one at a path this install writes is backed up by its copy entry instead
+    if (rr)
+        for (auto& rel : pluginsAside.moveAside) {
+            if (std::find_if(optiFiles.begin(), optiFiles.end(), [&](const OptiFile& o) { return IEq(o.rel, rel); }) != optiFiles.end()) continue;
             bool written = false;
             for (auto& pf : *ctx.data) written = written || (payloadUsed(pf) && IEq(payloadRel(pf), rel));
             if (written || std::find_if(disable.begin(), disable.end(), [&](const wstring& d) { return IEq(d, rel); }) != disable.end()) continue;
@@ -615,7 +629,7 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
             for (auto& w : warnings)
                 if (w == k->second) w = L"Moved aside with your OK: " + name + L" (another setup's file that had replaced WrongGPU's; kept in the backup and put back when WrongGPU is uninstalled).";
     }
-    // another setup's file the restore left in place (fix 4: its OptiScaler.ini) that this install now replaces with the
+    // another setup's file the restore left in place (its OptiScaler.ini, beside its OptiScaler) that this install now replaces with the
     // switch question's OK: backed up (an entry that existed) and said as that
     for (auto& e : m.e) {
         const auto k = e.action == L"copy" && e.existed ? keptByRestore.find(Lower(e.rel)) : keptByRestore.end();

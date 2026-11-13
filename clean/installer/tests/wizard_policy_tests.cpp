@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: MIT
 #include "../src/wizard_policy.h"
-#include "../src/wg_core/test_temp_guard.h"
 #include <iostream>
 #include <stdexcept>
 
 int main() {
-    if (wg_test::TempGuardRefuses()) return wg_test::kTempGuardExit;  // never a temp folder outside the configured root
     using namespace wg_wizard;
     int checks = 0;
     auto require = [&](bool ok, const char* message) {

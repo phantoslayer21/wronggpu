@@ -80,12 +80,25 @@ inline const wchar_t* const kPluginDirs[] = {L"plugins", L"OptiScaler\\plugins",
 // The .asi files in those folders next to the exe that are not WrongGPU's install's own (the record copied them there with
 // that hash), relative to exeDir. Another setup's plugin may hook Ray Reconstruction as WrongGPU's RR plugin does: by default
 // WrongGPU's RR stays out of such a game (with a warning); with the player's OK (Consent::movePlugins) they are moved aside
-// (backed up, put back on uninstall) and WrongGPU's RR goes in. Never by a plugin's name alone.
-std::vector<wstring> ForeignPlugins(const wstring& exeDir, const Record* ours);
-// 0.6.1 (gap 4): WrongGPU's RR plugin exports this marker (clean/rr_f/proxy/include/wg_rr_settings_contract.h,
+// (backed up, put back on uninstall) and WrongGPU's RR goes in. Never by a plugin's name alone. recordDir: the folder the
+// record's paths are relative to (the install folder; empty: exeDir); a record of a folder that exeDir is not in names none.
+std::vector<wstring> ForeignPlugins(const wstring& exeDir, const Record* ours, const wstring& recordDir = L"");
+// 0.6.1: what an install does with those plugins (exeDir-relative, from ForeignPlugins) in a Ray Reconstruction game. Each
+// one the player agreed to move (`agreed`, as the question listed them) or that an earlier install moved aside with the
+// player's OK (`movedBefore`: its record's disable entries, lower-case path relative to dir -> the hash moved; byte for byte
+// that file) goes into moveAside, as a path relative to the install folder dir. Any other one is in `blocking`: WrongGPU's RR
+// stays out. When exeDir is not dir or a folder below it nothing can be moved: every plugin is blocking (outside: true).
+struct PluginPlan {
+    std::vector<wstring> moveAside;  // relative to dir
+    std::vector<wstring> blocking;   // relative to exeDir
+    bool outside = false;            // a blocking plugin is outside the install folder
+};
+PluginPlan PlanPluginsAside(const wstring& exeDir, const wstring& dir, const std::vector<wstring>& plugins, const std::vector<wstring>& agreed,
+                            const std::map<wstring, wstring>& movedBefore);
+// 0.6.1: WrongGPU's RR plugin exports this marker (clean/rr_f/proxy/include/wg_rr_settings_contract.h,
 // WG_RR_CONTRACT_EXPORT). A plugin file that exports it is WrongGPU's own RR plugin whatever its name or hash (a copy another
-// package placed from the integration kit): never "another setup's plugin", never moved aside. Read from the file's PE
-// export table, never by loading it.
+// package placed): never "another setup's plugin", never moved aside. Read from the file's PE export table, never by
+// loading it.
 const char* const kRrContractExport = "WrongGPU_GetSettingsContract";
 bool ExportsRrContract(const wstring& path);
 // Those copies in OptiScaler's plugin folders that the install record doesn't name with that hash (relative to exeDir): the

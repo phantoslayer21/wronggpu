@@ -24,12 +24,12 @@ struct Leftover { wstring rel, sha, version, abs; };
 std::vector<Leftover> FindLeftovers(Context& ctx, const wstring& dir);
 wstring LeftoverSummary(const std::vector<Leftover>& files);  // "3 files of WrongGPU 0.4.5 (wronggpu_runtime.dll, ...)"
 // 0.6.1: an OptiScaler that WrongGPU didn't install is next to them (its marker files, or a DLL a game loads by name whose
-// fingerprint is OptiScaler; there is no install record): another mod's setup that uses WrongGPU's files (its integration
-// kit). They are "used by another mod's setup" and left alone by default: no Leftovers status, Clean up and Adopt only when
-// confirmed, an install backs up any it replaces (put back on uninstall) instead of removing them first. Not when `files`
-// hold one only WrongGPU's launcher installs (plugins\WrongGPU.asi, wronggpu-license.txt; the integration kit ships neither
-// under those names): that is WrongGPU's own OptiScaler setup that lost its record, and the OptiScaler is its own.
-bool LeftoversUsedByOtherSetup(const wstring& dir, const std::vector<Leftover>& files);
+// fingerprint is OptiScaler; there is no install record): another mod's setup that uses WrongGPU's files. They are "used by
+// another mod's setup" and left alone by default: no Leftovers status, Clean up and Adopt only when confirmed, an install
+// backs up any it replaces (put back on uninstall) instead of removing them first. Not when `files` hold WrongGPU's menu
+// plugin, by its hash (a build of WrongGPU.asi from a release or the embedded payload): that is WrongGPU's own OptiScaler
+// setup that lost its record, and the OptiScaler is its own. Never by a file's name, never by the licence text.
+bool LeftoversUsedByOtherSetup(Context& ctx, const wstring& dir, const std::vector<Leftover>& files);
 const wchar_t* const kLeftoversOtherSetup = L"used by another mod's setup (an OptiScaler that WrongGPU didn't install is next to them)";
 // Clean up: each file's hash is checked again right before it is removed; anything else stays. A FidelityFX DLL of ours
 // in an engine plugin folder is removed only when the game's own DLL (kept as <name>.wronggpu-original.dll) is there to

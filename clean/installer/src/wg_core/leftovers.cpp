@@ -130,12 +130,16 @@ std::vector<Leftover> FindLeftovers(Context& ctx, const wstring& dir) {
     return out;
 }
 
-bool LeftoversUsedByOtherSetup(const wstring& dir, const std::vector<Leftover>& files) {
+bool LeftoversUsedByOtherSetup(Context& ctx, const wstring& dir, const std::vector<Leftover>& files) {
     if (files.empty() || dir.empty() || IsFile(RecordPath(dir)) || !FindConflicts(dir, dir).modsFound()) return false;
-    // WrongGPU's own setup that lost its record: a file only the launcher installs is among them (the menu plugin, or the
-    // licence under its payload name); the integration kit ships neither under these names
-    for (auto& f : files)
-        if (IEq(f.rel, kAsiPlugin) || IEq(f.rel, Join(kAsiPluginOwnDir, BaseName(kAsiPlugin))) || IEq(f.rel, L"wronggpu-license.txt")) return false;
+    // WrongGPU's own OptiScaler setup that lost its record: WrongGPU's menu plugin is among them, by its hash (a build of
+    // WrongGPU.asi from a release or this program's payload), wherever it is. Never by a file's name, and never by the
+    // licence text (any package that ships WrongGPU's files carries it)
+    const KnownSet k = KnownFiles(ctx);
+    for (auto& f : files) {
+        const auto it = k.byHash.find(Lower(f.sha));
+        if (it != k.byHash.end() && IEq(BaseName(it->second.name), BaseName(kAsiPlugin))) return false;
+    }
     return true;
 }
 

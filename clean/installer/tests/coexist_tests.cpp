@@ -13,7 +13,6 @@
 #include "wg_core/logtail.h"
 #include "wg_core/optikeys.h"
 #include "wg_core/record.h"
-#include "wg_core/test_temp_guard.h"
 
 using namespace wg;
 
@@ -34,7 +33,7 @@ wstring TempFolder() {
 void Put(const wstring& path, const string& data) { EnsureDir(Parent(path)); WriteFileAtomic(path, data.data(), data.size()); }
 Tool ToolOf(const string& bytes, const wstring& name = L"") { return IdentifyBytes((const uint8_t*)bytes.data(), bytes.size(), name).tool; }
 string Utf16(const char* s) { string r; for (; *s; ++s) { r += *s; r += '\0'; } return r; }
-// 0.6.1 (gap 4): a minimal PE32+ DLL whose export table names `names` (Microsoft's public PE/COFF documentation, ".edata"; as
+// 0.6.1: a minimal PE32+ DLL whose export table names `names` (Microsoft's public PE/COFF documentation, ".edata"; as
 // tests/mockpe.py _export_table): never loaded, only read. Every function points at the section start.
 void Le(string& b, uint64_t v, int n) { for (int i = 0; i < n; ++i) b += char((v >> (8 * i)) & 0xFF); }
 string ExportDll(const std::vector<string>& names) {
@@ -74,9 +73,8 @@ bool Has(const std::vector<wstring>& v, const wstring& s) { for (auto& x : v) if
 }  // namespace
 
 int main() {
-    if (wg_test::TempGuardRefuses()) return wg_test::kTempGuardExit;  // never a temp folder outside the configured root
     try {
-        // ---- 0.6.1 fix 7: the 0.6.0 release's files, the RR plugin among them, are known (known_releases.h) ------------
+        // ---- 0.6.1: the 0.6.0 release's files, the RR plugin among them, are known (known_releases.h) ------------------
         {
             int rows060 = 0;
             bool rrPlugin = false;
@@ -743,98 +741,12 @@ int main() {
         for (auto& w : all.warnings) { xessWarn |= w.kind == L"xess-no-depth"; plug |= w.kind == L"plugin-not-hooked"; }
         require(all.found && xessWarn && plug && all.plugin == L"not-hooked", "ReadLastRun: XeSS without depth (OptiScaler.log), the plugin's log in its own folder");
 
-        // ---- 0.6.1 RR follow-up 1: the RR plugin's guard line (HOOK-MODE.md, "Another Ray Reconstruction plugin") in Last run --------
-        {
-            const string head = "21:00:00.000 load: process 4242 attached C:\\Games\\Example\\plugins\\WrongGPU-RR.asi (hook mode)\r\n";
-            // the guard's lines as HOOK-MODE.md ("Log lines") gives them, right after the time stamp
-            const string otherText = "another Ray Reconstruction plugin is active; WrongGPU RR stays off (synthetic detail; nothing patched; "
-                                     "rr_other_plugin=take in wronggpu-rr.ini uses WrongGPU's instead)";
-            const string other = "21:00:00.100 " + otherText + "\r\n";
-            LastRun g1;
-            ParseRrLog(head + other, g1);
-            require(g1.rrFound && !g1.rrUsed && g1.rrGuard == FromUtf8(otherText), "RR guard: another RR plugin: its whole line after the time stamp");
-            const char* const finals[] = {
-                "another Ray Reconstruction plugin is active; WrongGPU RR stays off (synthetic detail; it loaded after WrongGPU: WrongGPU passes every call on "
-                "unchanged; to use WrongGPU RR, move it aside)",
-                "a second copy of WrongGPU RR is loaded (C:\\Games\\Example\\plugins\\WrongGPU-RR.asi is active); this copy "
-                "(C:\\Games\\Example\\OptiScaler\\plugins\\Kit.asi) stays off",
-                "a plugin loaded after WrongGPU replaced its hooks; rr_other_plugin=take cannot be applied: WrongGPU RR stays off and passes every call on "
-                "unchanged (synthetic detail); move it aside to use WrongGPU RR"};
-            for (const char* line : finals) {
-                LastRun gx;
-                ParseRrLog(head + "21:00:01.000 " + line + "\r\n", gx);
-                require(gx.rrGuard == FromUtf8(line), "RR guard: each of the guard's final lines is found, whole");
-            }
-            // take mode (rr_other_plugin=take): WrongGPU RR goes in front of the other plugin and is on: never a guard line
-            LastRun take;
-            ParseRrLog(head + "21:00:00.100 another Ray Reconstruction plugin is active; rr_other_plugin=take: WrongGPU RR goes in front of it "
-                              "(synthetic detail; it gets the game's other calls, no RR work)\r\n", take);
-            require(take.rrFound && take.rrGuard.empty() && !take.rrGuardOff, "RR guard: the take mode's line is not WrongGPU RR off");
-            {
-                const wstring td = Join(dir, L"rr-guard-take");
-                Put(Join(td, L"wronggpu-rr.log"), head + "21:00:00.100 another Ray Reconstruction plugin is active; rr_other_plugin=take: WrongGPU RR goes in "
-                                                         "front of it (synthetic detail)\r\n21:00:30.000 runtime: create instance 1: output 1920x1080, render 960x540\r\n");
-                const LastRun tr = ReadLastRun(td);
-                bool guardWarn = false;
-                for (auto& w : tr.warnings) guardWarn |= w.kind == L"rr-guard";
-                require(tr.found && tr.rrUsed && !tr.rrGuardOff && !guardWarn && tr.Summary().find(L"stayed off") == wstring::npos,
-                        "RR guard: a take-mode run where RR was asked for: an RR run, no guard warning, never \"stayed off\"");
-            }
-            LastRun older;
-            ParseRrLog(head + other + "21:05:00.000 load: process 4343 attached (hook mode)\r\n", older);
-            require(older.rrFound && older.rrGuard.empty(), "RR guard: an earlier session's guard line is not the last session's");
-            LastRun none;
-            ParseRrLog(head + "21:00:00.100 RR provider registered with the host (plugin interface 5)\r\n", none);
-            require(none.rrGuard.empty(), "RR guard: none without its line");
-            // read as the launcher reads a game's folder: the RR log alone, the guard kept WrongGPU RR off: a run that says why
-            const wstring gd = Join(dir, L"rr-guard");
-            Put(Join(gd, L"wronggpu-rr.log"), head + other);
-            const LastRun gr = ReadLastRun(gd);
-            bool shown = false;
-            for (auto& w : gr.warnings) shown |= w.kind == L"rr-guard" && w.text == g1.rrGuard;
-            require(gr.found && gr.rrOnly && !gr.rrUsed && !gr.created && shown && !gr.AnyUpscaled() && gr.Summary().rfind(L"Ray Reconstruction: WrongGPU RR stayed off", 0) == 0,
-                    "RR guard: the RR log alone with the guard line: a run (RR-only, nothing upscaled), the guard line among its warnings, the summary says RR stayed off");
-            // with RR frames before a later plugin replaced the hooks: the frames count, the guard line shows too
-            const string replaced = "21:00:30.000 runtime: create instance 1: output 1920x1080, render 960x540\r\n"
-                                    "21:01:00.000 runtime: instance 1 timing, 300 frames from frame 1: GPU 2.000 ms per frame (pre 0.010), render 960x540, output 1920x1080\r\n"
-                                    "21:01:05.000 a plugin loaded after WrongGPU replaced its hooks; rr_other_plugin=take cannot be applied: WrongGPU RR stays "
-                                    "off and passes every call on unchanged (synthetic detail); move it aside to use WrongGPU RR\r\n";
-            Put(Join(gd, L"wronggpu-rr.log"), head + replaced);
-            const LastRun gf = ReadLastRun(gd);
-            shown = false;
-            for (auto& w : gf.warnings) shown |= w.kind == L"rr-guard" && w.text.rfind(L"a plugin loaded after WrongGPU replaced its hooks", 0) == 0;
-            require(gf.found && gf.rrUsed && gf.rrFrames == 300 && gf.upscaled && shown, "RR guard: RR frames and then the hooks replaced: the run's frames, and the guard line");
-            Put(Join(gd, L"wronggpu-rr.log"), head + "21:00:00.100 RR provider registered with the host (plugin interface 5)\r\n");
-            require(!ReadLastRun(gd).found, "RR guard: no guard line, no RR request: still not a run");
-
-            // the game list's startup cache (library-list.txt: LastRunCacheFlags, and the guard line in a field of its own): read
-            // back, the run is the same for the tile and the page from the start (0.6.1)
-            require(gr.rrGuardOff && !gr.RrAlone() && !gf.rrGuardOff && gf.RrAlone(),
-                    "RR guard: the guard kept WrongGPU RR off: no Ray Reconstruction alone in the run (the banner's words); frames before the hooks were replaced: RR alone");
-            auto cached = [](const LastRun& live) {
-                LastRun c;
-                require(ReadLastRunCacheFlags(LastRunCacheFlags(live), c), "startup cache: the flags read back");
-                c.when = live.when; c.rrGuard = live.rrGuard;  // (their own fields of the list)
-                return c;
-            };
-            const LastRun cg = cached(gr), cf = cached(gf);
-            require(LastRunCacheFlags(gr) == L"1000101" && cg.found && cg.rrOnly && cg.rrGuardOff && !cg.RrAlone() && cg.rrGuard == gr.rrGuard &&
-                        cg.Summary() == gr.Summary() && !cg.AnyUpscaled(),
-                    "startup cache: a guard run read back is still a guard run (flag, line, summary; no RR alone, nothing upscaled)");
-            require(!cf.rrGuardOff && cf.RrAlone() && cf.upscaled && cf.rrGuard == gf.rrGuard, "startup cache: RR frames, then the hooks replaced: as it was");
-            LastRun old6, bad;
-            require(ReadLastRunCacheFlags(L"100011", old6) && old6.found && old6.rrOnly && old6.rrUpscaled && !old6.rrGuardOff,
-                    "startup cache: a list of an earlier build (6 flags) is read, without the guard flag");
-            require(!ReadLastRunCacheFlags(L"10", bad) && !ReadLastRunCacheFlags(L"10x0101", bad) && !ReadLastRunCacheFlags(L"10001010", bad),
-                    "startup cache: flags of another length or with other characters are not read");
-        }
-
-        // ---- 0.6.1 RR follow-up 2 (gap 4): a plugin exporting WrongGPU RR's marker is WrongGPU's own, whatever its name or hash -----
+        // ---- 0.6.1: a plugin exporting WrongGPU RR's marker is WrongGPU's own, whatever its name or hash -----
         {
             string hdr;
             require(ReadAll(Join(FromUtf8(WG_TEST_LOGS), L"..\\..\\..\\rr_f\\proxy\\include\\wg_rr_settings_contract.h"), hdr), "the RR settings contract header is there");
             require(hdr.find(string("#define WG_RR_CONTRACT_EXPORT \"") + kRrContractExport + "\"") != string::npos,
-                    "gap 4: kRrContractExport is the RR plugin's WG_RR_CONTRACT_EXPORT (wg_rr_settings_contract.h)");
+                    "RR marker: kRrContractExport is the RR plugin's WG_RR_CONTRACT_EXPORT (wg_rr_settings_contract.h)");
             const wstring kitDir = Join(dir, L"kit-game"), x = Join(kitDir, L"Game.exe");
             Put(x, "MZ synthetic game");
             const string kit = ExportDll({"WrongGPU_RrOther", kRrContractExport}), plain = ExportDll({"InitPlugin", "WrongGPU_RrOther"});
@@ -845,12 +757,12 @@ int main() {
             require(ExportsRrContract(Join(kitDir, L"plugins\\KitRR.asi")) && ExportsRrContract(Join(kitDir, L"OptiScaler\\plugins\\renamed.asi")) &&
                         !ExportsRrContract(Join(kitDir, L"plugins\\Other.asi")) && !ExportsRrContract(Join(kitDir, L"plugins\\Words.asi")) &&
                         !ExportsRrContract(Join(kitDir, L"plugins\\Missing.asi")),
-                    "gap 4: the marker from the PE export table (never its text alone, never a missing file)");
+                    "RR marker: the marker from the PE export table (never its text alone, never a missing file)");
             const auto ourKit = OurPluginsFromOtherPackages(kitDir, nullptr), foreign = ForeignPlugins(kitDir, nullptr);
             require(ourKit.size() == 2 && Has(ourKit, L"plugins\\KitRR.asi") && Has(ourKit, L"OptiScaler\\plugins\\renamed.asi"),
-                    "gap 4: both copies are WrongGPU RR from another package");
+                    "RR marker: both copies are WrongGPU RR from another package");
             require(foreign.size() == 2 && Has(foreign, L"plugins\\Other.asi") && Has(foreign, L"plugins\\Words.asi"),
-                    "gap 4: they are not other setups' plugins (so never moved aside); the others still are");
+                    "RR marker: they are not other setups' plugins (so never moved aside); the others still are");
             Context ctx;
             ctx.logFile = Join(dir, L"kit.log");
             const CoexistReport r = AssessCoexistence(ctx, x, kitDir, nullptr);
@@ -858,16 +770,57 @@ int main() {
             for (auto& f : r.findings) if (f.what == L"WrongGPU RR (from another package)") kf = &f;
             require(kf && kf->tool == Tool::WrongGPU && kf->decision == Decision::Inform && kf->files.size() == 2 &&
                         kf->evidence.find(FromUtf8(kRrContractExport)) != wstring::npos,
-                    "gap 4: the rules table shows them as \"WrongGPU RR (from another package)\" (inform, by the export)");
+                    "RR marker: the rules table shows them as \"WrongGPU RR (from another package)\" (inform, by the export)");
             require(r.foreignPlugins == foreign && !Has(r.foreignPlugins, L"plugins\\KitRR.asi") && IsFile(Join(kitDir, L"plugins\\KitRR.asi")),
-                    "gap 4: the report's other-setup plugins (what an install moves aside with the OK) leave them out");
+                    "RR marker: the report's other-setup plugins (what an install moves aside with the OK) leave them out");
             // only those copies: an install folder with just WrongGPU RR from another package has no other-setup plugins at all
             DeleteFileW(Join(kitDir, L"plugins\\Other.asi").c_str());
             DeleteFileW(Join(kitDir, L"plugins\\Words.asi").c_str());
-            require(AssessCoexistence(ctx, x, kitDir, nullptr).foreignPlugins.empty(), "gap 4: only WrongGPU RR copies: nothing for an install to move aside");
+            require(AssessCoexistence(ctx, x, kitDir, nullptr).foreignPlugins.empty(), "RR marker: only WrongGPU RR copies: nothing for an install to move aside");
         }
 
-        // ---- 0.6.1 RR follow-up 3 (gap 5a): the install folder is not the exe folder: the exe folder's record names its plugins ---
+        // ---- 0.6.1: what an install moves aside of other setups' plugins (PlanPluginsAside) ------------------------------
+        {
+            const wstring g = Join(dir, L"plan-game"), exeDir = Join(g, L"bin\\x64");
+            const string a = "another setup's plugin A (synthetic)", b = "another setup's plugin B (synthetic)";
+            Put(Join(exeDir, L"plugins\\A.asi"), a);
+            Put(Join(exeDir, L"plugins\\B.asi"), b);
+            const std::vector<wstring> both = {L"plugins\\A.asi", L"plugins\\B.asi"};
+            // the player agreed to the plugins the question listed: exactly those move, a plugin not listed keeps RR out
+            PluginPlan p = PlanPluginsAside(exeDir, exeDir, both, both, {});
+            require(p.moveAside == both && p.blocking.empty() && !p.outside, "plugin plan: both listed and agreed: both moved aside, RR goes in");
+            p = PlanPluginsAside(exeDir, exeDir, both, {L"plugins\\A.asi"}, {});
+            require(p.moveAside.size() == 1 && IEq(p.moveAside[0], L"plugins\\A.asi") && p.blocking.size() == 1 && IEq(p.blocking[0], L"plugins\\B.asi"),
+                    "plugin plan: a plugin the question didn't list is never moved; it keeps RR out");
+            p = PlanPluginsAside(exeDir, exeDir, both, {}, {});
+            require(p.moveAside.empty() && p.blocking == both, "plugin plan: no OK: nothing moved, RR out");
+            // a Repair after "Move them aside": the plugins the earlier install moved aside are back from its backup; byte for
+            // byte those go aside again on that OK, a different file under that name is asked about
+            const std::map<wstring, wstring> before = {{L"plugins\\a.asi", Sha256Bytes(a.data(), a.size())}, {L"plugins\\b.asi", Sha256Bytes(a.data(), a.size())}};
+            p = PlanPluginsAside(exeDir, exeDir, both, {}, before);
+            require(p.moveAside.size() == 1 && IEq(p.moveAside[0], L"plugins\\A.asi") && p.blocking.size() == 1 && IEq(p.blocking[0], L"plugins\\B.asi"),
+                    "plugin plan: moved before with the OK: the same file goes aside again; another file under a moved name keeps RR out");
+            // the install folder above the exe folder: the paths moved are the install folder's
+            p = PlanPluginsAside(exeDir, g, both, both, {});
+            require(p.moveAside.size() == 2 && IEq(p.moveAside[0], L"bin\\x64\\plugins\\A.asi") && p.blocking.empty(),
+                    "plugin plan: install folder above the exe folder: moved by their paths in the install folder");
+            const std::map<wstring, wstring> beforeSplit = {{L"bin\\x64\\plugins\\a.asi", Sha256Bytes(a.data(), a.size())}};
+            p = PlanPluginsAside(exeDir, g, {L"plugins\\A.asi"}, {}, beforeSplit);
+            require(p.moveAside.size() == 1 && IEq(p.moveAside[0], L"bin\\x64\\plugins\\A.asi"), "plugin plan: install folder above the exe folder: moved before, by that path");
+            // the exe folder outside the install folder: nothing can be moved, so RR stays out (never RR beside them)
+            p = PlanPluginsAside(exeDir, Join(dir, L"elsewhere"), both, both, {});
+            require(p.moveAside.empty() && p.blocking == both && p.outside, "plugin plan: exe folder outside the install folder: nothing moved, RR out");
+            p = PlanPluginsAside(exeDir, Join(g, L"bin\\x6"), both, both, {});  // (a folder whose name is a prefix of the exe folder's)
+            require(p.moveAside.empty() && p.outside, "plugin plan: never by a bare name prefix");
+            // the record of the install folder names WrongGPU's own plugin by its path there
+            Record rec;
+            Entry own; own.action = L"copy"; own.rel = L"bin\\x64\\plugins\\A.asi"; own.inst = Sha256Bytes(a.data(), a.size()); rec.e.push_back(own);
+            const auto fp = ForeignPlugins(exeDir, &rec, g);
+            require(fp.size() == 1 && IEq(fp[0], L"plugins\\B.asi"), "plugin plan: a record of the install folder names its plugins by their paths there");
+            require(ForeignPlugins(exeDir, &rec, Join(dir, L"elsewhere")).size() == 2, "plugin plan: a record of another folder names none of them");
+        }
+
+        // ---- 0.6.1: the install folder is not the exe folder: the exe folder's record names its plugins ---
         {
             const wstring root = Join(dir, L"split-game"), exeDir = Join(root, L"bin\\x64"), x = Join(exeDir, L"Game.exe");
             Put(x, "MZ synthetic game");
@@ -881,15 +834,15 @@ int main() {
             Context ctx;
             ctx.logFile = Join(dir, L"split.log");
             require(AssessCoexistence(ctx, x, root, nullptr).foreignPlugins.empty(),
-                    "gap 5a: install folder above the exe folder: WrongGPU's RR .asi that the exe folder's record installed is not another setup's");
+                    "split folders: install folder above the exe folder: WrongGPU's RR .asi that the exe folder's record installed is not another setup's");
             Put(Join(exeDir, L"plugins\\Other.asi"), "another setup's plugin (synthetic)");
             const auto both = AssessCoexistence(ctx, x, root, nullptr).foreignPlugins;
-            require(both.size() == 1 && IEq(both[0], L"plugins\\Other.asi"), "gap 5a: ...another setup's plugin there still is");
-            // gap 5b's other half: with the record, an RR .asi changed since the install (not the file installed) is not ours
+            require(both.size() == 1 && IEq(both[0], L"plugins\\Other.asi"), "split folders: ...another setup's plugin there still is");
+            // with the record, an RR .asi changed since the install (not the file installed) is not ours
             Put(Join(exeDir, L"plugins\\WrongGPU-RR.asi"), rrAsi + " changed");
-            require(Has(ForeignPlugins(exeDir, &rec), L"plugins\\WrongGPU-RR.asi"), "gap 5b: an RR .asi that is no longer the installed file is not counted as ours");
+            require(Has(ForeignPlugins(exeDir, &rec), L"plugins\\WrongGPU-RR.asi"), "RR plugin changed: an RR .asi that is no longer the installed file is not counted as ours");
             Put(Join(exeDir, L"plugins\\WrongGPU-RR.asi"), rrAsi);
-            require(!Has(ForeignPlugins(exeDir, &rec), L"plugins\\WrongGPU-RR.asi"), "gap 5b: the installed file with the record: ours");
+            require(!Has(ForeignPlugins(exeDir, &rec), L"plugins\\WrongGPU-RR.asi"), "RR plugin changed: the installed file with the record: ours");
         }
 
         RemoveTree(dir);

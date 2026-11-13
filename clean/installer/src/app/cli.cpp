@@ -9,7 +9,8 @@
 //                                      --removeold: remove an older WrongGPU install first, --force: no GPU/HIP block,
 //                                      --rr-config-fix=on|off: Borderlands 4 / Hogwarts Legacy's Engine.ini question answered)
 //   uninstall | rollback | adopt <game>   (adopt --all: every 0.5.x install the scan finds)
-//   clean-leftovers | adopt-leftovers <game>   WrongGPU files without a record (hash-matched to our releases only)
+//   clean-leftovers | adopt-leftovers <game>   WrongGPU files without a record (hash-matched to our releases only);
+//                                 --confirm-other-setup: also when another mod's setup uses them (refused without it)
 //   set <game> key=value ...      per-game settings (written to the game at once); set --global key=value ...
 //                                 set <game> opti.<Section>.<Key>=value: an editable key of the game's OptiScaler.ini
 //   get <game> [key] | get --global
@@ -603,7 +604,7 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
         if (!Game(a, o, exe, dir)) return o.code;
         if (NeedsElevation(dir)) { o.j.S("error", L"administrator permission is needed for " + dir); return EXIT_REFUSED; }
         OpRequest r; ParseOp(verb, r.op); r.exe = exe; r.dir = dir;
-        r.force = a.has(L"force");  // 0.6.1: files another mod's setup uses are left alone unless --force
+        r.otherSetupOk = a.has(L"confirm-other-setup");  // 0.6.1: files another mod's setup uses are left alone unless confirmed
         OpLogBegin();
         Ui ui; ui.step = [](int, int, const wstring&) {}; ui.log = [](const wstring& s) { LogLine(g.ctx, s); };
         const OpResult res = RunOp(g.ctx, r, ui);

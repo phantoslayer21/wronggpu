@@ -175,6 +175,8 @@ struct OpRequest {
     wstring modelDll;              // a DLSS model file to try first
     bool moveMods = false, removeOld = false, experimental = false, force = false, noScan = true;
     bool movePlugins = false;      // 0.6.1: other setups' OptiScaler plugins moved aside with the player's OK (WrongGPU's RR then goes in)
+    std::vector<wstring> movePluginsList;  // ...exactly these (relative to the exe folder, as the question listed them); empty: every one there
+    bool otherSetupOk = false;     // 0.6.1: Clean up / Adopt of WrongGPU files another mod's setup uses, confirmed (--confirm-other-setup)
     bool hasProfile = false;       // apply: this profile (else the game's profile.ini); install: the profile a new install starts with
     Profile profile;
     // apply, the OptiScaler tab: edits of editable keys ("Section.Key", value); reset: the editable keys back to what the

@@ -495,7 +495,7 @@ GameTarget InspectGame(Context& ctx, const wstring& exe, const wstring& displayN
         auto isOurs = [&](const wstring& f) {
             const auto it = ours.find(Lower(f));
             if (it == ours.end()) return false;
-            if (IEq(f, L"OptiScaler.ini")) return OptiIniIsOurs(t.dir, t.record);  // (fix 4: its keys still point at WrongGPU's files)
+            if (IEq(f, L"OptiScaler.ini")) return OptiIniIsOurs(t.dir, t.record);  // (beside WrongGPU's OptiScaler, or pointing at WrongGPU's files)
             if (EndsWithI(f, L".ini") || EndsWithI(f, L".log")) return true;
             return !it->second.empty() && IEq(Sha256File(Join(t.dir, f)), it->second);
         };

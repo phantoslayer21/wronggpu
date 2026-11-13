@@ -19,7 +19,6 @@
 #include "wg_core/pe.h"
 #include "wg_core/profile.h"
 #include "wg_core/record.h"
-#include "wg_core/test_temp_guard.h"
 #include "wg_core/rr.h"
 #include "wg_core/rrconfig.h"
 #include "wg_core/settings.h"
@@ -96,7 +95,6 @@ string MockDll(const std::vector<std::pair<wstring, wstring>>& strings, const st
 }  // namespace
 
 int main() {
-    if (wg_test::TempGuardRefuses()) return wg_test::kTempGuardExit;  // never a temp folder outside the configured root
     try {
         // ---- validation -----------------------------------------------------------------------------------------
         string n; wstring why;
@@ -338,8 +336,8 @@ int main() {
             require(!refused && !IsFile(Join(newDir, L"wronggpu_runtime.dll")) && !IsDir(StateDir(newDir)) && IsFile(Join(newDir, L"Game.exe")),
                     "moved game: the uninstall works in the new folder");
 
-            // ---- 0.6.1 (b): a hand-placed WrongGPU DLL under the game's FSR name (a direct install) goes only when the game's
-            // original is there to put back (the backup, or the kept *.wronggpu-original.dll); else it stays, with a warning ----
+            // ---- a hand-placed WrongGPU DLL under the game's FSR name (a direct install) goes only when the game's
+            // original is there to put back (the backup, or the kept *.wronggpu-original.dll); else the uninstall refuses ----
             {
                 const FfxSlot& sl = kSlots[0];
                 const string orig = "the game's own FidelityFX DLL (synthetic)", installed = "WrongGPU's FSR DLL as installed (synthetic)";
@@ -360,7 +358,7 @@ int main() {
                 };
                 wstring info;
                 require(ClassifySlot(sl, [&] { const wstring p = Join(dir, L"slot-probe.dll"); file(p, hand); return p; }(), nullptr, info) == FFX_OURS,
-                        "(b): the hand-placed DLL is WrongGPU's by its version resource (the synthetic PE is read)");
+                        "hand-placed FSR DLL: the hand-placed DLL is WrongGPU's by its version resource (the synthetic PE is read)");
                 for (int how = 0; how < 2; ++how) {  // the original from the backup, then from the kept copy alone
                     const wstring d = direct(how ? L"Kept Copy" : L"Backup", how == 0, true);
                     std::vector<wstring> w;
@@ -368,27 +366,126 @@ int main() {
                     try { w = DoRestore(mc, d, quiet, false, false); } catch (const SetupError&) { threw = true; }
                     string now;
                     require(!threw && ReadAll(Join(d, sl.name), now) && now == orig && !IsFile(Join(d, sl.original)) && !IsDir(StateDir(d)),
-                            how ? "(b): no backup, the kept copy there: the hand-placed DLL is replaced by the game's original"
-                                : "(b): the backup there: the hand-placed DLL is replaced by the game's original");
+                            how ? "hand-placed FSR DLL: no backup, the kept copy there: the hand-placed DLL is replaced by the game's original"
+                                : "hand-placed FSR DLL: the backup there: the hand-placed DLL is replaced by the game's original");
                 }
-                {
+                {  // neither the backup nor the kept copy: the uninstall refuses, as before 0.6.1 ("Nothing was changed")
                     const wstring d = direct(L"No Original", false, false);
-                    std::vector<wstring> w;
                     bool threw = false;
-                    try { w = DoRestore(mc, d, quiet, false, false); } catch (const SetupError&) { threw = true; }
+                    wstring msg;
+                    try { DoRestore(mc, d, quiet, false, false); } catch (const SetupError& ex) { threw = true; msg = ex.msg; }
                     string now;
-                    bool warned = false;
-                    for (auto& x : w) warned = warned || (x.rfind(L"Left in place: " + wstring(sl.name), 0) == 0 && x.find(L"isn't in the backup") != wstring::npos);
-                    require(!threw && ReadAll(Join(d, sl.name), now) && now == hand && warned && IsFile(Join(d, L"Game.exe")) && !IsFile(RecordPath(d)),
-                            "(b): no original anywhere: the uninstall leaves the DLL under the game's name, with a warning, and removes the rest");
+                    require(threw && msg.find(L"Nothing was changed") != wstring::npos && ReadAll(Join(d, sl.name), now) && now == hand && IsFile(RecordPath(d)) &&
+                                IsFile(Join(d, L"Game.exe")),
+                            "game FSR DLL, no original anywhere: the uninstall refuses (\"Nothing was changed\"), the DLL and the record stay");
                     const wstring u = direct(L"No Original Update", false, false);
                     threw = false;
                     try { DoRestore(mc, u, quiet, false, true); } catch (const SetupError&) { threw = true; }
                     require(threw && ReadAll(Join(u, sl.name), now) && now == hand && IsFile(RecordPath(u)),
-                            "(b): no original anywhere, an update's restore: refused, nothing changed (record kept)");
+                            "game FSR DLL, no original anywhere, an update's restore: refused, nothing changed (record kept)");
                 }
             }
-            // ---- 0.6.1 RR follow-up 3 (gap 5b): an update that now leaves RR out (the game no longer uses it, or another setup's
+            // ---- 0.6.1: a file left in place whose original is in the backup never loses that backup ----------------------
+            {
+                const string mine = "the player's own file from before WrongGPU (synthetic)", ours = "WrongGPU's file as installed (synthetic)",
+                             other = "another setup's file put here since (synthetic)", moved = "a plugin moved aside with the OK (synthetic)";
+                auto keptGame = [&](const wstring& name, bool disable) {
+                    const wstring d = Join(dir, L"Kept Backup\\" + name);
+                    file(Join(d, L"Game.exe"), "MZ");
+                    file(Join(d, disable ? L"plugins\\Other.asi" : L"other.dll"), other);
+                    file(BackupPath(d, disable ? L"plugins\\Other.asi" : L"other.dll"), disable ? moved : mine);
+                    Record m; m.version = L"0.6.0"; m.format = 2; m.game = d; m.exe = Join(d, L"Game.exe"); m.status = L"experimental"; m.model = L"m.wgcm";
+                    Entry e; e.action = disable ? L"disable" : L"copy"; e.rel = disable ? L"plugins\\Other.asi" : L"other.dll"; e.existed = true;
+                    e.orig = disable ? Sha256Bytes(moved.data(), moved.size()) : Sha256Bytes(mine.data(), mine.size());
+                    if (!disable) e.inst = Sha256Bytes(ours.data(), ours.size());
+                    e.owner = disable ? L"moved" : L"wg";
+                    m.e.push_back(e);
+                    SaveRecord(RecordPath(d), m);
+                    return d;
+                };
+                for (int disable = 0; disable < 2; ++disable) {
+                    const wstring rel = disable ? L"plugins\\Other.asi" : L"other.dll";
+                    const wstring u = keptGame(disable ? L"Update Moved" : L"Update Copy", disable == 1);
+                    bool threw = false;
+                    wstring msg;
+                    try { DoRestore(mc, u, quiet, false, true); } catch (const SetupError& ex) { threw = true; msg = ex.msg; }
+                    string now, kept;
+                    require(threw && msg.rfind(L"Nothing was changed", 0) == 0 && ReadAll(Join(u, rel), now) && now == other && IsFile(RecordPath(u)) &&
+                                ReadAll(BackupPath(u, rel), kept) && kept == (disable ? moved : mine),
+                            disable ? "kept backup: an update's restore with another file where one was moved aside: refused before anything changes"
+                                    : "kept backup: an update's restore with another file over a backed-up original: refused before anything changes");
+                    const wstring d = keptGame(disable ? L"Uninstall Moved" : L"Uninstall Copy", disable == 1);
+                    std::vector<wstring> w;
+                    threw = false;
+                    try { w = DoRestore(mc, d, quiet, false, false); } catch (const SetupError&) { threw = true; }
+                    bool said = false;
+                    for (auto& x : w) said = said || x.rfind(L"The backup folder was kept", 0) == 0;
+                    require(!threw && said && ReadAll(Join(d, rel), now) && now == other && ReadAll(BackupPath(d, rel), kept) && kept == (disable ? moved : mine),
+                            disable ? "kept backup: the uninstall leaves the other file and keeps the moved file's backup, and says so"
+                                    : "kept backup: the uninstall leaves the other file and keeps the original's backup, and says so");
+                }
+                // WrongGPU's settings file over an earlier one (an entry that existed), changed since (the launcher's settings, or
+                // edited by hand): an update keeps it for the new install, never refused; an uninstall removes it and says so
+                // (never "left in place"), and the backup folder goes as usual
+                auto settingsGame = [&](const wstring& name) {
+                    const wstring d = Join(dir, L"Settings Ini\\" + name);
+                    const string before = "[fsr]\r\nupscaler=network\r\n; an earlier one\r\n", installed = "[fsr]\r\nupscaler=network\r\n";
+                    file(Join(d, L"Game.exe"), "MZ");
+                    file(Join(d, L"wronggpu.ini"), "[fsr]\r\nupscaler=network\r\noutput_filter=quality9\r\n");  // changed since the install
+                    file(BackupPath(d, L"wronggpu.ini"), before);
+                    Record m; m.version = L"0.6.0"; m.format = 2; m.game = d; m.exe = Join(d, L"Game.exe"); m.status = L"experimental"; m.model = L"m.wgcm";
+                    Entry e; e.action = L"copy"; e.rel = L"wronggpu.ini"; e.existed = true; e.orig = Sha256Bytes(before.data(), before.size());
+                    e.inst = Sha256Bytes(installed.data(), installed.size()); e.owner = L"wg";
+                    m.e.push_back(e);
+                    SaveRecord(RecordPath(d), m);
+                    return d;
+                };
+                {
+                    const wstring u = settingsGame(L"Update");
+                    std::vector<wstring> w;
+                    bool threw = false;
+                    try { w = DoRestore(mc, u, quiet, false, true); } catch (const SetupError&) { threw = true; }
+                    string now;
+                    bool leftInPlace = false;
+                    for (auto& x : w) leftInPlace = leftInPlace || x.find(L"wronggpu.ini") != wstring::npos;
+                    require(!threw && ReadAll(Join(u, L"wronggpu.ini"), now) && now.find("quality9") != string::npos && !leftInPlace && !IsFile(RecordPath(u)),
+                            "settings file: an update's restore keeps the changed wronggpu.ini for the new install, no refusal, no warning");
+                    const wstring d = settingsGame(L"Uninstall");
+                    w.clear();
+                    threw = false;
+                    try { w = DoRestore(mc, d, quiet, false, false); } catch (const SetupError&) { threw = true; }
+                    bool saidRemoved = false, saidKept = false;
+                    for (auto& x : w) {
+                        saidRemoved = saidRemoved || (x.rfind(L"wronggpu.ini had changed", 0) == 0 && x.find(L"removed with the rest") != wstring::npos);
+                        saidKept = saidKept || (x.find(L"Left in place") != wstring::npos && x.find(L"wronggpu.ini") != wstring::npos);
+                    }
+                    require(!threw && saidRemoved && !saidKept && !IsFile(Join(d, L"wronggpu.ini")) && !IsDir(StateDir(d)),
+                            "settings file: an uninstall removes the changed wronggpu.ini and says it was removed (never \"left in place\")");
+                }
+                // a log the OptiScaler of WrongGPU's setup wrote over the player's moved-aside OptiScaler.log: an update's restore
+                // puts the player's back (never refused, never the backup lost)
+                {
+                    const string players = "the player's own OptiScaler.log (synthetic)", wrote = "a log WrongGPU's OptiScaler wrote (synthetic)",
+                                 optiIni = "[Upscalers]\r\nDx12Upscaler=auto\r\n";
+                    const wstring d = Join(dir, L"Moved Log\\Update");
+                    file(Join(d, L"Game.exe"), "MZ");
+                    file(Join(d, L"OptiScaler.log"), wrote);
+                    file(BackupPath(d, L"OptiScaler.log"), players);
+                    file(Join(d, L"OptiScaler.ini"), optiIni);
+                    Record lr; lr.version = L"0.6.0"; lr.format = 2; lr.game = d; lr.exe = Join(d, L"Game.exe"); lr.status = L"experimental"; lr.model = L"m.wgcm";
+                    Entry optiEntry; optiEntry.action = L"copy"; optiEntry.rel = L"OptiScaler.ini"; optiEntry.inst = Sha256Bytes(optiIni.data(), optiIni.size()); optiEntry.owner = L"wg-optibundle";
+                    lr.e.push_back(optiEntry);
+                    Entry lg; lg.action = L"disable"; lg.rel = L"OptiScaler.log"; lg.existed = true; lg.orig = Sha256Bytes(players.data(), players.size()); lg.owner = L"moved";
+                    lr.e.push_back(lg);
+                    SaveRecord(RecordPath(d), lr);
+                    bool threw = false;
+                    try { DoRestore(mc, d, quiet, false, true); } catch (const SetupError&) { threw = true; }
+                    string now;
+                    require(!threw && ReadAll(Join(d, L"OptiScaler.log"), now) && now == players,
+                            "moved-aside OptiScaler.log: the log WrongGPU's OptiScaler wrote goes, the player's comes back (an update is not refused)");
+                }
+            }
+            // ---- 0.6.1: an update that now leaves RR out (the game no longer uses it, or another setup's
             // plugin keeps it out) first runs the earlier install's restore with keepState (DoInstall step 2): the earlier RR plugin
             // goes with it when it is the file installed; one changed since is left in place with a warning, never removed ----
             {
@@ -409,7 +506,7 @@ int main() {
                 bool threw = false;
                 try { DoRestore(mc, d, quiet, false, true); } catch (const SetupError&) { threw = true; }
                 require(!threw && !IsFile(Join(d, L"plugins\\WrongGPU-RR.asi")) && !IsFile(Join(d, L"wronggpu-rr.ini")) && IsFile(Join(d, L"Game.exe")),
-                        "gap 5b: an update's restore removes the earlier install's RR plugin and its settings (the new install then places none)");
+                        "RR update: an update's restore removes the earlier install's RR plugin and its settings (the new install then places none)");
                 const wstring c = earlier(L"Changed");
                 file(Join(c, L"plugins\\WrongGPU-RR.asi"), "another build put here since (synthetic)");
                 std::vector<wstring> w;
@@ -417,7 +514,7 @@ int main() {
                 try { w = DoRestore(mc, c, quiet, false, true); } catch (const SetupError&) { threw = true; }
                 bool warned = false;
                 for (auto& x : w) warned = warned || x == L"Left in place (changed since install): plugins\\WrongGPU-RR.asi";
-                require(!threw && IsFile(Join(c, L"plugins\\WrongGPU-RR.asi")) && warned, "gap 5b: an RR plugin changed since the install: left in place, with a warning");
+                require(!threw && IsFile(Join(c, L"plugins\\WrongGPU-RR.asi")) && warned, "RR update: an RR plugin changed since the install: left in place, with a warning");
             }
             // the scan takes managed folders whose record is gone off the list, unless their drive isn't connected
             wstring offline;

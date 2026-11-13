@@ -401,7 +401,7 @@ GameEntry EntryFor(Context& ctx, const wstring& exeIn, const wstring& name, cons
     else if (const Finding* no = t.coexist.refusal()) { g.status = GameStatus::Refused; g.statusText = L"Refused: " + no->what; }
     else if (!g.needs.empty() && !g.needsFound) { g.status = GameStatus::NeedsPrereq; g.statusText = L"Needs " + g.needs + L": " + g.needsGame + L" blocks OptiScaler without it"; }
     else if (t.conflicts.oldFound()) { g.status = GameStatus::OldInstall; g.statusText = L"Has an older WrongGPU (DLSS 4.5 AMD): Install removes it first"; }
-    else if (!(g.leftovers = FindLeftovers(ctx, g.dir)).empty() && !(g.leftoversOtherSetup = LeftoversUsedByOtherSetup(g.dir, g.leftovers))) {
+    else if (!(g.leftovers = FindLeftovers(ctx, g.dir)).empty() && !(g.leftoversOtherSetup = LeftoversUsedByOtherSetup(ctx, g.dir, g.leftovers))) {
         g.status = GameStatus::Leftovers;
         g.statusText = L"Leftover WrongGPU files without a record: " + LeftoverSummary(g.leftovers) + L" - Clean up or Adopt";
     }
@@ -979,7 +979,7 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
     // leftover WrongGPU files without a record: cleaned up first only with the player's OK (never automatic)
     std::vector<Leftover> leftovers = target.installed ? std::vector<Leftover>{} : FindLeftovers(ctx, dir);
     // 0.6.1: beside another mod's OptiScaler they are that setup's: never removed first; the install backs up any it replaces
-    if (LeftoversUsedByOtherSetup(dir, leftovers)) {
+    if (LeftoversUsedByOtherSetup(ctx, dir, leftovers)) {
         res.notes.push_back(L"WrongGPU files " + wstring(kLeftoversOtherSetup) + L" were left alone: " + LeftoverSummary(leftovers) +
                             L" (any the install replaces is backed up and put back when WrongGPU is uninstalled)");
         LogLine(ctx, res.notes.back());
@@ -1042,7 +1042,7 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
     const RrConfigFix keepFix = target.installed ? target.record.rrconfig : !wrongDir.empty() ? wrong.rrconfig : RrConfigFix();
     string keepBackup = wrongDir.empty() ? string() : wrongFixBackup;
     if (keepFix.backup && wrongDir.empty()) ReadAll(RrConfigBackupPath(dir), keepBackup);
-    Consent consent; consent.moveMods = r.moveMods; consent.removeOld = r.removeOld; consent.movePlugins = r.movePlugins;
+    Consent consent; consent.moveMods = r.moveMods; consent.removeOld = r.removeOld; consent.movePlugins = r.movePlugins; consent.plugins = r.movePluginsList;
     try {
         for (auto& w : DoInstall(ctx, target, model, consent, ui, sys.hip)) res.warnings.push_back(w);
     } catch (const SetupError&) {
@@ -1123,7 +1123,7 @@ OpResult RunOp(Context& ctx, const OpRequest& r, Ui& ui) {
                 const std::vector<Leftover> lo = FindLeftovers(ctx, r.dir);
                 if (lo.empty()) Fail(L"There are no leftover WrongGPU files (without an install record) in " + r.dir + L".", EXIT_NOT_INSTALLED);
                 if (!r.exe.empty() && GameRunning(r.exe)) Fail(BaseName(r.exe) + L" is running. Close it first.", EXIT_REFUSED);
-                if (!r.force && LeftoversUsedByOtherSetup(r.dir, lo))  // 0.6.1: left alone unless the player confirms (force)
+                if (!r.otherSetupOk && LeftoversUsedByOtherSetup(ctx, r.dir, lo))  // 0.6.1: left alone unless the player confirms (--confirm-other-setup)
                     Fail(L"These WrongGPU files are " + wstring(kLeftoversOtherSetup) + L", so they are left alone: removing or adopting them can break that mod. "
                          L"Confirm to " + (r.op == Op::CleanLeftovers ? L"remove" : L"adopt") + L" them anyway.", EXIT_REFUSED);
                 if (r.op == Op::CleanLeftovers) {
@@ -1165,6 +1165,8 @@ string JobText(const OpRequest& r, const wstring& localAppData, const wstring& l
         for (size_t i = 0; i < kSettingCount; ++i) t += string("profile.") + kSettings[i].key + "=" + r.profile.get(kSettings[i].key) + "\r\n";
     for (auto& e : r.optiEdits) t += "optikey." + e.first + "=" + e.second + "\r\n";
     if (r.movePlugins) t += "moveplugins=1\r\n";
+    for (size_t i = 0; i < r.movePluginsList.size(); ++i) t += "moveplugin." + std::to_string(i) + "=" + ToUtf8(r.movePluginsList[i]) + "\r\n";
+    if (r.otherSetupOk) t += "othersetupok=1\r\n";
     if (r.optiReset) t += "optireset=1\r\n";
     if (r.optiKeep) t += "optikeep=1\r\n";
     if (r.optiOnly) t += "optionly=1\r\n";
@@ -1196,6 +1198,8 @@ bool ParseJob(const string& text, OpRequest& r, wstring& localAppData, wstring& 
         else if (k == "force") r.force = Truthy(kv.second);
         else if (k == "noscan") r.noScan = Truthy(kv.second);
         else if (k == "moveplugins") r.movePlugins = Truthy(kv.second);
+        else if (k.rfind("moveplugin.", 0) == 0) r.movePluginsList.push_back(v);
+        else if (k == "othersetupok") r.otherSetupOk = Truthy(kv.second);
         else if (k == "optireset") r.optiReset = Truthy(kv.second);
         else if (k == "optikeep") r.optiKeep = Truthy(kv.second);
         else if (k == "optionly") r.optiOnly = Truthy(kv.second);

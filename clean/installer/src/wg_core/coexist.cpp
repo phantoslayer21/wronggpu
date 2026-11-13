@@ -5,6 +5,7 @@
 
 #include <tlhelp32.h>
 
+#include <algorithm>
 #include <mutex>
 
 #include "checks.h"  // FindAntiCheat, VersionLess
@@ -193,22 +194,53 @@ bool ExportsRrContract(const wstring& path) {
     MappedFile f(path, 256ull << 20);  // the file's bytes only: never loaded as a module
     return f.data && ReadPeExports(f.data, f.size).count(kRrContractExport) > 0;
 }
+// exeDir relative to dir ("" when the same folder); false when exeDir is not dir or a folder below it
+static bool RelativeTo(const wstring& dir, const wstring& exeDir, wstring& rel) {
+    const wstring d = FullPath(dir), x = FullPath(exeDir);
+    rel.clear();
+    if (IEq(d, x)) return true;
+    const wstring base = !d.empty() && d.back() == L'\\' ? d : d + L"\\";
+    if (x.size() <= base.size() || !StartsWithI(x, base)) return false;
+    rel = x.substr(base.size());
+    return true;
+}
 // The .asi files of OptiScaler's plugin folders that the install record does not name with that hash; withMarker: those that
-// export WrongGPU RR's marker (true) or the others (false)
-static std::vector<wstring> UnrecordedPlugins(const wstring& exeDir, const Record* ours, bool withMarker) {
+// export WrongGPU RR's marker (true) or the others (false). The record's paths are relative to recordDir (empty: exeDir)
+static std::vector<wstring> UnrecordedPlugins(const wstring& exeDir, const Record* ours, bool withMarker, const wstring& recordDir = L"") {
     std::vector<wstring> out;
+    wstring prefix;
+    if (ours && !recordDir.empty() && !RelativeTo(recordDir, exeDir, prefix)) ours = nullptr;  // (it cannot name them)
     for (auto sub : kPluginDirs)
         for (auto& f : ListFiles(Join(exeDir, sub), L"*.asi")) {
-            const wstring rel = f.substr(exeDir.size() + 1);
+            const wstring rel = f.substr(exeDir.size() + 1), recRel = prefix.empty() ? rel : Join(prefix, rel);
             bool mine = false;
             if (ours)
                 for (auto& e : ours->e)
-                    if (e.action == L"copy" && IEq(e.rel, rel) && !e.inst.empty()) { mine = IEq(Sha256File(f), e.inst); break; }
+                    if (e.action == L"copy" && IEq(e.rel, recRel) && !e.inst.empty()) { mine = IEq(Sha256File(f), e.inst); break; }
             if (!mine && ExportsRrContract(f) == withMarker) out.push_back(rel);
         }
     return out;
 }
-std::vector<wstring> ForeignPlugins(const wstring& exeDir, const Record* ours) { return UnrecordedPlugins(exeDir, ours, false); }
+std::vector<wstring> ForeignPlugins(const wstring& exeDir, const Record* ours, const wstring& recordDir) {
+    return UnrecordedPlugins(exeDir, ours, false, recordDir);
+}
+PluginPlan PlanPluginsAside(const wstring& exeDir, const wstring& dir, const std::vector<wstring>& plugins, const std::vector<wstring>& agreed,
+                            const std::map<wstring, wstring>& movedBefore) {
+    PluginPlan p;
+    wstring prefix;
+    const bool inside = RelativeTo(dir, exeDir, prefix);
+    for (auto& f : plugins) {
+        const wstring rel = prefix.empty() ? f : Join(prefix, f);
+        bool ok = std::any_of(agreed.begin(), agreed.end(), [&](const wstring& a) { return IEq(a, f); });
+        if (!ok && inside) {
+            const auto it = movedBefore.find(Lower(rel));
+            ok = it != movedBefore.end() && IEq(Sha256File(Join(exeDir, f)), it->second);
+        }
+        if (ok && inside) p.moveAside.push_back(rel);
+        else { p.blocking.push_back(f); p.outside = p.outside || !inside; }
+    }
+    return p;
+}
 std::vector<wstring> OurPluginsFromOtherPackages(const wstring& exeDir, const Record* ours) { return UnrecordedPlugins(exeDir, ours, true); }
 wstring ForeignPluginsText(const std::vector<wstring>& plugins) {
     return L"Other OptiScaler plugins are in this game (" + JoinList(plugins) + L"). They may hook Ray Reconstruction as WrongGPU's RR plugin does, so "
@@ -230,7 +262,7 @@ CoexistReport AssessCoexistence(Context& ctx, const wstring& exe, const wstring&
     auto isOurs = [&](const wstring& rel) {
         if (!sameDir) return false;
         if (hostedOurs && IEq(rel, L"OptiScaler.log")) return true;
-        if (hostedOurs && IEq(rel, L"OptiScaler.ini")) return OptiIniIsOurs(dir, *ours);  // 0.6.1: while its keys point at WrongGPU's files
+        if (hostedOurs && IEq(rel, L"OptiScaler.ini")) return OptiIniIsOurs(dir, *ours);  // 0.6.1: beside WrongGPU's OptiScaler, or pointing at WrongGPU's files
         auto it = ourHash.find(Lower(rel));
         if (it == ourHash.end()) return false;
         if (EndsWithI(rel, L".ini") || EndsWithI(rel, L".log")) return true;  // settings and logs of our install
@@ -359,8 +391,8 @@ CoexistReport AssessCoexistence(Context& ctx, const wstring& exe, const wstring&
 
     // 0.6.1: other setups' plugins in OptiScaler's plugin folders: in a Ray Reconstruction game WrongGPU's RR stays out unless
     // the player moves them aside (they may hook RR too); elsewhere they stay beside WrongGPU's plugin
-    // (gap 5a: the plugin folders are the exe folder's; when the install folder is another one, the record that names their
-    // files is the exe folder's own, if there is one: an earlier install there is not "another setup")
+    // (the plugin folders are the exe folder's; when the install folder is another one, the record that names their files is
+    // the exe folder's own, if there is one: an earlier install there is not "another setup")
     Record exeDirRecord;
     const Record* pluginRecord = sameDir ? ours : LoadRecord(RecordPath(exeDir), exeDirRecord) && !exeDirRecord.legacy ? &exeDirRecord : nullptr;
     if (const auto kit = OurPluginsFromOtherPackages(exeDir, pluginRecord); !kit.empty())

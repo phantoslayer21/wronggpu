@@ -108,10 +108,12 @@ void SaveRecord(const wstring& path, const Record& m);
 bool SaveRebasedRecord(Context& ctx, const wstring& dir, Record& m);
 wstring Target(const wstring& dir, const wstring& rel);
 bool HostedRecord(const Record& m);
-// 0.6.1: the OptiScaler.ini in `dir` is still the one of WrongGPU's setup: its keys point at WrongGPU's files (FfxDx12SRPath
-// at WrongGPU's front end, or Dx12Upscaler at WrongGPU's custom upscaler slot, whichever the record installed). OptiScaler's
-// menu saving it keeps them; a file whose keys point elsewhere is another setup's (it replaced or rewrote WrongGPU's): never
-// removed or replaced without the player's OK. A record with neither front end: true (nothing to compare).
+// 0.6.1: the OptiScaler.ini in `dir` is still the one of WrongGPU's setup: the OptiScaler DLL the record installed is still
+// there under its name with its hash (OptiScaler's menu saves the ini with whatever the player picks, the upscaler too), or,
+// with that DLL replaced, the ini's keys still point at WrongGPU's files (FfxDx12SRPath at WrongGPU's front end, or
+// Dx12Upscaler at WrongGPU's custom upscaler slot, whichever the record installed). Otherwise it is another setup's (its
+// OptiScaler replaced WrongGPU's, with its own settings): never removed or replaced without the player's OK. A record with
+// neither front end: true (nothing to compare). False without the file.
 bool OptiIniIsOurs(const wstring& dir, const Record& m);
 // The hive the Apps & features entries go to (HKEY_CURRENT_USER unless set: the elevated worker of another account sets
 // the player's hive, HKEY_USERS\<sid>).
@@ -142,6 +144,9 @@ size_t RemoveRuntimeFiles(const wstring& dir, const wstring& exeDir, const Recor
 void StartCleanup(Context& ctx, const wstring& state, const wstring& self, const wstring& appData);
 // keptWarnings (0.6.1): the warning of each recorded file left in place because it changed since the install, by its path (the
 // update path replaces the warning of a file it then moves aside with the player's OK).
+// 0.6.1: a file left in place whose original (from before the install) is in the backup never loses that backup: an
+// uninstall keeps the backup folder (with a warning), an update or repair (keepState) refuses before anything changes
+// (EXIT_REFUSED), as it does for a file it moved aside that is back with other content.
 std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool failedInstall, bool keepState,
                                std::map<wstring, wstring>* keptWarnings = nullptr);
 // rc6 L4: the player's things in the state folder that a failed install or update never removes when they were there before

@@ -195,6 +195,14 @@ bool HostedRecord(const Record& m) { for (auto& e : m.e) if (e.action == L"copy"
 bool OptiIniIsOurs(const wstring& dir, const Record& m) {
     string text, v;
     if (!ReadAll(Join(dir, L"OptiScaler.ini"), text)) return false;
+    // OptiScaler's menu saves the ini with whatever the player picks there (the upscaler too): while the OptiScaler DLL the
+    // record installed is in place with that hash, the ini beside it is the install's
+    if (!m.proxy.empty())
+        for (auto& e : m.e)
+            if (e.action == L"copy" && IEq(e.rel, m.proxy) && !e.inst.empty()) {
+                if (IsFile(Target(dir, e.rel)) && IEq(Sha256File(Target(dir, e.rel)), e.inst)) return true;
+                break;
+            }
     auto trimmed = [](string s) {
         const char* const ws = " \t\r\n\"";
         const size_t a = s.find_first_not_of(ws), z = s.find_last_not_of(ws);
@@ -398,6 +406,20 @@ void StartCleanup(Context& ctx, const wstring& state, const wstring& self, const
     }
 }
 
+// A log the OptiScaler of WrongGPU's setup writes next to itself while the game runs (as RemoveRuntimeFiles removes them):
+// over a player's log that the install moved aside, it is the install's own, never "another file there now"
+static bool OptiRuntimeLog(const Record& m, const wstring& rel) {
+    if (!HostedRecord(m) || rel.find(L'\\') != wstring::npos) return false;
+    return IEq(rel, L"OptiScaler.log") || IEq(rel, L"fakenvapi.log") || (StartsWithI(rel, L"OptiScaler.previous") && EndsWithI(rel, L".log"));
+}
+
+// An update or repair that would lose the backup of a file that was there before WrongGPU (another file is in its place now)
+static wstring KeptBackupRefusal(const wstring& rel) {
+    return L"Nothing was changed: " + rel + L" is not the file WrongGPU installed or moved aside (another file is there now), and the backup holds the " +
+           rel + L" that was there before WrongGPU. A repair or update would replace that backup. Uninstall WrongGPU instead (it keeps the backup "
+           L"folder), or move the other " + rel + L" away first.";
+}
+
 std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool failedInstall, bool keepState, std::map<wstring, wstring>* keptWarnings) {
     Record m;
     if (!LoadRecord(RecordPath(dir), m) || m.legacy) Fail(L"No WrongGPU installation record was found in " + dir + L".", EXIT_NOT_INSTALLED);
@@ -423,17 +445,7 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
                 if (!Exists(b) || Sha256File(b) != e.orig) {
                     // The game's FSR DLL is in the folder a second time, next to WrongGPU's: that copy will do.
                     const wstring kept = sl ? Target(dir, sl->original) : wstring();
-                    const bool keptOk = !kept.empty() && Sha256File(kept) == e.orig;
-                    // 0.6.1: an uninstall never takes a game FSR DLL away without the game's original to put back (neither
-                    // the backup nor the kept copy): the file under the game's name stays, with a warning, and the rest of
-                    // the install goes. An update or repair still stops here (record and backup stay for the next try).
-                    if (!keptOk && sl && !keepState) {
-                        skip.insert(i);
-                        warnings.push_back(L"Left in place: " + e.rel + L" (WrongGPU's file under the game's name: the game's own " + e.rel +
-                                           L" isn't in the backup to put back). Verify the game's files in your store to get it back.");
-                        continue;
-                    }
-                    if (!keptOk) Fail(L"The backup of " + e.rel + L" is missing or damaged. Nothing was changed.");
+                    if (kept.empty() || Sha256File(kept) != e.orig) Fail(L"The backup of " + e.rel + L" is missing or damaged. Nothing was changed.");
                     from[i] = kept;
                 }
             }
@@ -441,16 +453,37 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
                 wstring t = Target(dir, e.rel);
                 if (Exists(t)) {
                     wstring h = Sha256File(t), info;
+                    // 0.6.1: a file that cannot be read (another program holds it open without sharing, such as the game) is
+                    // never taken for "changed since the install" and left behind: the restore stops before anything changes
+                    if (h.empty()) Fail(L"Cannot read " + e.rel + L": another program may have it open (the game?). Close it and try again. Nothing was changed.", EXIT_REFUSED);
                     if (h != e.inst && h != e.orig) {
                         // the RR plugin's settings files: it rewrites them itself (its keys, the mode chosen in OptiScaler's
-                        // menu); they are WrongGPU's all the same and go with the install
-                        if (e.action == L"copy" && !e.existed && IsRrSettingsFile(e.rel)) {
-                            ui.log(e.rel + L" was rewritten by WrongGPU's Ray Reconstruction plugin: removed with the rest");
+                        // menu); they are WrongGPU's all the same and go with the install (0.6.1: also over a file that was
+                        // there, an earlier install's: that one comes back from the backup)
+                        if (e.action == L"copy" && IsRrSettingsFile(e.rel)) {
+                            ui.log(e.rel + L" was rewritten by WrongGPU's Ray Reconstruction plugin: " +
+                                   wstring(e.existed ? L"the file that was there before is put back" : L"removed with the rest"));
+                            continue;
+                        }
+                        // 0.6.1: WrongGPU's settings file (wronggpu.ini beside the front end): the launcher's settings and the
+                        // player's edits change it; it is the install's all the same. An update or repair keeps it in place
+                        // for the new install, which carries its settings over; an uninstall removes it, as it always does
+                        // (RemoveRuntimeFiles; a file that was there before comes back from the backup first and goes with
+                        // it), and says so (never "left in place")
+                        if (e.action == L"copy" && IEq(e.rel, L"wronggpu.ini")) {
+                            if (keepState) {
+                                skip.insert(i);
+                                ui.log(L"wronggpu.ini was changed since the install (WrongGPU's settings): kept for the new install");
+                            } else {
+                                warnings.push_back(L"wronggpu.ini had changed since the install (WrongGPU's settings, edited by hand or by the launcher): "
+                                                   L"removed with the rest, as an uninstall does.");
+                            }
                             continue;
                         }
                         // rc6 L5: the OptiScaler.ini of this install's OptiScaler setup, saved by OptiScaler's own menu: the
                         // install's all the same (removed with it; a player's file it replaced comes back from the backup).
-                        // 0.6.1: only while its keys still point at WrongGPU's files (OptiIniIsOurs); else it is another
+                        // 0.6.1: only while WrongGPU's OptiScaler DLL is still there or its keys point at WrongGPU's files
+                        // (OptiIniIsOurs); else it is another
                         // setup's: left in place with a warning (an update replaces it only with the switch question's OK,
                         // and then backs it up)
                         if (e.action == L"copy" && IEq(e.rel, L"OptiScaler.ini") && OptiIniIsOurs(dir, m)) {
@@ -468,18 +501,33 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
                             ui.log(e.rel + L" is not the file that was installed, but it is WrongGPU's own" + (sl ? L" (" + info + L")" : wstring(L" (a release's file)")) + L": removed with the rest");
                             continue;
                         }
+                        // 0.6.1: the file that was there before the install is in the backup (e.existed; a game FSR DLL the
+                        // game itself replaced is the exception: its new file is the game's): a restore that leaves this file
+                        // in place never deletes that backup. An uninstall keeps the backup folder (said at the end); an update
+                        // or repair would replace it with the new install's backup, so it stops here, before anything changes
+                        if (e.existed && !IsSlotName(e.rel)) {
+                            if (keepState) Fail(KeptBackupRefusal(e.rel), EXIT_REFUSED);
+                            keepBackup = true;
+                            warnings.push_back(L"The " + e.rel + L" that was there before WrongGPU stays in the backup: " + BackupPath(dir, e.rel));
+                        }
                         skip.insert(i);
                         // 0.6.1: another tool's file there now (another setup's OptiScaler over WrongGPU's proxy) is named as such
                         const Fingerprint fp = e.action == L"copy" && !IsSlotName(e.rel) ? IdentifyFile(t) : Fingerprint();
                         warnings.push_back(e.action == L"copy" && IsSlotName(e.rel) ? L"The game replaced " + e.rel + L" (probably an update); its new file was kept."
                                            : e.action == L"copy" && IEq(e.rel, L"OptiScaler.ini")
-                                               ? L"Left in place: OptiScaler.ini no longer points at WrongGPU's files (another setup changed it), so it was not removed."
+                                               ? L"Left in place: OptiScaler.ini no longer points at WrongGPU's files and WrongGPU's OptiScaler DLL was replaced (another setup's), so it was not removed."
                                            : fp.tool == Tool::OptiScaler ? L"Left in place: " + e.rel + L" is now another setup's OptiScaler (not the file WrongGPU installed)."
                                                                          : L"Left in place (changed since install): " + e.rel);
                         if (keptWarnings) (*keptWarnings)[Lower(e.rel)] = warnings.back();
                     }
                 }
             }
+            // 0.6.1: a file the install moved aside that is back with other content: its original stays in the backup (the
+            // restore below keeps the backup folder on an uninstall); an update or repair would replace that backup with
+            // the new install's, so it stops here, before anything changes
+            // (a log WrongGPU's OptiScaler wrote there is the install's: it goes and the player's comes back, OptiRuntimeLog)
+            if (keepState && e.action == L"disable" && !OptiRuntimeLog(m, e.rel) && Exists(Target(dir, e.rel)) && Sha256File(Target(dir, e.rel)) != e.orig)
+                Fail(KeptBackupRefusal(e.rel), EXIT_REFUSED);
         }
     }
     for (size_t k = m.e.size(); k-- > 0;) {  // reverse order of installation
@@ -511,7 +559,13 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
             } else if (Exists(t)) { ForceDelete(t); ui.log(L"removed " + e.rel); }
         } else {  // disable: put the original file back
             if (!Exists(b)) { if (failedInstall) continue; Fail(L"Backup of " + e.rel + L" is missing."); }
-            if (Exists(t)) {
+            if (Exists(t) && Sha256File(t) != e.orig && OptiRuntimeLog(m, e.rel)) {
+                // 0.6.1: the log WrongGPU's OptiScaler wrote over the player's moved-aside one: removed, the player's comes back
+                ForceDelete(t);
+                CopyChecked(b, t);
+                if (Sha256File(t) != e.orig) Fail(L"Restore verification failed for " + e.rel);
+                ui.log(L"restored " + e.rel + L" (the log WrongGPU's OptiScaler wrote there was removed)");
+            } else if (Exists(t)) {
                 if (Sha256File(t) != e.orig) { keepBackup = true; warnings.push_back(e.rel + L" exists again with different content; the original stays in the backup folder."); }
             } else { CopyChecked(b, t); ui.log(L"restored " + e.rel); }
         }
