@@ -20,6 +20,9 @@
 //   hipcheck                      the HIP runtime check alone
 //   model status | model convert [--model=<dll>]
 //   rr-data status | rr-data convert [--dll=<RR model file>]   the Ray Reconstruction data (shared by the RR games)
+//                                 both converts: --ignore=<path> | --ignore=sha256=<hex>, --ignore-list=<file> (repeatable; added
+//                                 to the well-known ignore lists, wg_core/convert_ignore.h), --library=<folder> (its sub-folders
+//                                 searched as games, this run only)
 //   rr-recheck <game> [--run]   what the window's start does: RR's kernels prepared again after a driver / runtime change
 //   self-install [--dir=<folder>] [--startmenu=<folder>|-]   the launcher for this user (one Apps & features entry)
 //   self-uninstall [--keep-games] [--startmenu=<folder>]   (no window; Apps & features runs "uninstall-launcher", the window's)
@@ -60,6 +63,7 @@ const int kRestorerResourceId = 960;  // WrongGPU-Restore.exe, embedded by CMake
 void LauncherInit(const wstring& logOverride, bool worker, bool window) {
     gl.paths = ResolvePaths(SelfPath(), gl.dataOverride);
     gl.global = LoadGlobal(gl.paths);
+    g.ctx.ownDataDir = gl.paths.dataDir;  // its ignore-files.txt is a well-known list too (convert_ignore.h)
     g.ctx.hipOptional = true;
     g.ctx.hostedLayout = !kDirectRoute;
     g.ctx.perGameEntry = !LauncherInstalled();
@@ -346,6 +350,8 @@ struct Args {
     std::map<wstring, wstring> opt;      // --name=value (and --name value for the path options)
     std::set<wstring> flags;             // --name
     std::vector<wstring> libraries;      // --library=<folder> (repeatable)
+    std::vector<wstring> ignores;        // --ignore=<path, or sha256=<hex>> (repeatable; convert_ignore.h)
+    std::vector<wstring> ignoreLists;    // --ignore-list=<file> (repeatable)
     bool has(const wchar_t* f) const { return flags.count(f) > 0; }
     wstring get(const wchar_t* k) const { auto it = opt.find(k); return it == opt.end() ? wstring() : it->second; }
 };
@@ -487,6 +493,46 @@ static void RrConfigAfterInstall(const Args& a, const wstring& dir, OpResult& re
     o.j.Key("rr_config_question").Obj().S("game", rg->name).S("text", RrConfigNotice(*rg)).S("steps", steps).S("fix", set)
         .S("myself", L"WrongGPU.exe set \"" + m.exe + L"\" rr_config_fix=off").End();
     Print(RrConfigNotice(*rg) + L"\n\nFix it for me: " + set + L"\nDo it yourself: the steps below (rr_config_fix=off stops this question).\n\n" + steps);
+}
+
+// model convert / rr-data convert: the store libraries (unless --noscan) and the sub-folders of each --library=<folder> (one
+// game each, as `scan` reads them; this run only).
+static std::vector<StoreGame> ConvertLibraries(const Args& a, bool noScan) {
+    std::vector<StoreGame> libs = noScan ? std::vector<StoreGame>{} : ScanLibraries();
+    for (auto& lib : a.libraries)
+        for (auto& sub : ListDirs(FullPath(lib))) libs.push_back({BaseName(sub), sub, L"", L"Folder"});
+    return libs;
+}
+// --ignore-list=<file> and --ignore=<entry> of model convert / rr-data convert (convert_ignore.h), added to the well-known
+// lists. A list file that can't be read, or an --ignore= that is not understood, stops the command before anything is
+// converted (a file meant to be skipped is never converted because of a typo); a bad line inside a list is skipped with a warning.
+static bool ConvertIgnoreArgs(const Args& a, Output& o) {
+    g.ctx.ignoreListFiles.clear();
+    g.ctx.ignoreEntries.clear();
+    auto refuse = [&o](const wstring& msg) { o.code = EXIT_USAGE; o.j.S("error", msg); Print(msg); return false; };
+    for (auto& f : a.ignoreLists) {
+        const wstring full = FullPath(f);
+        string bytes;
+        if (!IsFile(full) || !ReadAll(full, bytes)) return refuse(L"--ignore-list=" + f + L": the file can't be read (" + full + L"); nothing was converted");
+        g.ctx.ignoreListFiles.push_back(full);
+    }
+    for (auto& s : a.ignores) {
+        IgnoreEntry e;
+        wstring why;
+        if (!ParseIgnoreLine(s, e, why) || e.text.empty())
+            return refuse(L"--ignore=" + s + L": " + (why.empty() ? wstring(L"no path or sha256=<hex>") : why) + L"; nothing was converted");
+        g.ctx.ignoreEntries.push_back(s);
+    }
+    return true;
+}
+// The files the ignore lists left out, with the reason, and the lists' warnings: in the result and on the console.
+static void IgnoreJson(Output& o, const IgnoreReport& r) {
+    o.j.Key("skipped").Arr();
+    for (auto& s : r.skipped) { o.j.Str(s); Print(L"  skipped: " + s); }
+    o.j.End();
+    o.j.Key("ignore_warnings").Arr();
+    for (auto& w : r.warnings) { o.j.Str(w); Print(L"  ignore list warning: " + w); }
+    o.j.End();
 }
 
 int Verb(const wstring& verb, const Args& a, Output& o) {
@@ -813,15 +859,24 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
     if (verb == L"model") {
         const wstring sub = a.pos.empty() ? L"status" : a.pos[0];
         if (sub == L"convert") {
+            if (!ConvertIgnoreArgs(a, o)) return o.code;
             OpLogBegin();
-            const std::vector<StoreGame> libs = noScan ? std::vector<StoreGame>{} : ScanLibraries();
+            const std::vector<StoreGame> libs = ConvertLibraries(a, noScan);
             ModelState m = FindModel(g.ctx, nullptr, a.get(L"model").empty() ? wstring() : FullPath(a.get(L"model")), libs);
+            IgnoreJson(o, m.ignored);
             int code = EXIT_OK;
+            std::vector<wstring> notes = m.notes;  // the player's lines (a chosen file on a list, a model kept unchecked, ...)
             if (m.ok()) {
                 Ui ui; ui.step = [](int, int, const wstring&) {}; ui.log = [](const wstring& s) { LogLine(g.ctx, s); };
-                try { const ModelResult r = WriteModel(g.ctx, m, ui); o.j.S("outcome", r.outcome); Print(L"model: " + r.outcome); }
+                try { const ModelResult r = WriteModel(g.ctx, m, ui); notes = r.notes; o.j.S("outcome", r.outcome); Print(L"model: " + r.outcome); }
                 catch (const SetupError& e) { o.j.S("error", e.msg); Print(e.msg); code = e.code; }
-            } else { o.j.S("error", m.error); Print(L"model: " + m.error); code = m.damaged ? EXIT_DAMAGED : EXIT_NO_MODEL; }
+            } else {
+                o.j.S("error", m.error); Print(L"model: " + m.error);
+                code = m.damaged ? EXIT_DAMAGED : m.code ? m.code : EXIT_NO_MODEL;  // 10: an ignore list can't be read
+            }
+            o.j.Key("notes").Arr();
+            for (auto& n : notes) { o.j.Str(n); Print(L"  " + n); }
+            o.j.End();
             OpLogEnd();
             if (code) return code;
         }
@@ -890,17 +945,38 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
     if (verb == L"rr-data") {  // Ray Reconstruction data (rr.h): status, or "convert" [--dll=<RR model file>]
         const wstring sub = a.pos.empty() ? L"status" : a.pos[0];
         if (sub == L"convert") {
+            if (!ConvertIgnoreArgs(a, o)) return o.code;
             OpLogBegin();
-            const std::vector<StoreGame> libs = noScan ? std::vector<StoreGame>{} : ScanLibraries();
+            const std::vector<StoreGame> libs = ConvertLibraries(a, noScan);
             wstring why;
             std::vector<RrSettingsFailure> notWritten;
             std::vector<wstring> warnings;
-            const bool ok = ConvertRrData(g.ctx, a.get(L"dll").empty() ? wstring() : FullPath(a.get(L"dll")), libs, &why, &notWritten);
+            IgnoreReport ignored;
+            const bool ok = ConvertRrData(g.ctx, a.get(L"dll").empty() ? wstring() : FullPath(a.get(L"dll")), libs, &why, &notWritten, &ignored);
             if (ok) SyncRrSettings(nullptr, L"", warnings, &notWritten);
             OpLogEnd();
-            if (!ok) { o.j.S("error", why); Print(L"Ray Reconstruction data: " + why); return EXIT_NO_MODEL; }
+            IgnoreJson(o, ignored);
+            if (!ok) { o.j.S("error", why); Print(L"Ray Reconstruction data: " + why); return ignored.unreadable.empty() ? EXIT_NO_MODEL : EXIT_USAGE; }
             o.j.Key("warnings").Arr(); for (auto& w : warnings) { o.j.Str(w); Print(L"  warning: " + w); } o.j.End();
         }
+#ifdef WRONGGPU_TESTING
+        // tests: what an install does with the RR data (FindRrData without `fresh`: the data on this PC reused when the ignore
+        // lists allow it, else converted again from --library= games), without a game or a device
+        if (sub == L"prepare") {
+            if (!ConvertIgnoreArgs(a, o)) return o.code;
+            const RrDataState st = FindRrData(g.ctx, nullptr, L"", ConvertLibraries(a, noScan), false);
+            wstring why;
+            const bool ok = st.ok && WriteRrData(g.ctx, st, &why);
+            IgnoreJson(o, st.ignored);
+            o.j.B("reused", st.reused).Key("notes").Arr();
+            for (auto& n : st.notes) { o.j.Str(n); Print(L"  " + n); }
+            o.j.End();
+            if (!ok) {
+                o.j.S("error", why.empty() ? st.error : why); Print(L"Ray Reconstruction data: " + (why.empty() ? st.error : why));
+                return st.ignored.unreadable.empty() ? EXIT_NO_MODEL : EXIT_USAGE;
+            }
+        }
+#endif
         wstring why;
         const bool valid = RrDataValid(g.ctx, &why);
         o.j.Key("rr_data").Obj().S("file", RrDataFile()).B("valid", valid).S("source", RrDataSource()).S("why", why).B("payload", RrPayloadAvailable(g.ctx)).End();
@@ -948,10 +1024,11 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
     }
     if (verb == L"remove-data") {  // a portable copy's Settings > Remove data... without the window (RemoveSharedData)
         const SharedDataLook look = LookAtSharedData(g.ctx);
-        wstring why;
-        if (!RemoveSharedData(g.ctx, &why)) { o.j.S("error", why); Print(why); return EXIT_REFUSED; }
-        o.j.B("removed", look.there);
+        wstring why, kept;
+        if (!RemoveSharedData(g.ctx, &why, &kept)) { o.j.S("error", why); Print(why); return EXIT_REFUSED; }
+        o.j.B("removed", look.there).S("kept", kept);
         Print(look.there ? L"WrongGPU's data is removed from this PC." : L"There is no WrongGPU data to remove.");
+        if (!kept.empty()) Print(kept);  // the ignore list stays (convert_ignore.h)
         return EXIT_OK;
     }
     if (verb == L"play") {
@@ -1021,12 +1098,17 @@ int RunCli(int argc, wchar_t** argv) {
         if (s.rfind(L"--", 0) == 0) {
             const size_t eq = s.find(L'=');
             const wstring name = Lower(s.substr(2, eq == wstring::npos ? wstring::npos : eq - 2));
+            auto put = [&a, &name](const wstring& v) {
+                if (name == L"library") a.libraries.push_back(v);
+                else if (name == L"ignore") a.ignores.push_back(v);
+                else if (name == L"ignore-list") a.ignoreLists.push_back(v);
+                else a.opt[name] = v;
+            };
             if (eq != wstring::npos) {
-                const wstring v = s.substr(eq + 1);
-                if (name == L"library") a.libraries.push_back(v); else a.opt[name] = v;
+                put(s.substr(eq + 1));
             } else if ((name == L"out" || name == L"job" || name == L"result" || name == L"batch" || name == L"data" || name == L"log" || name == L"dir" || name == L"opti" ||
-                        name == L"model" || name == L"library" || name == L"startmenu") && i + 1 < argc) {
-                if (name == L"library") a.libraries.push_back(argv[++i]); else a.opt[name] = argv[++i];
+                        name == L"model" || name == L"library" || name == L"startmenu" || name == L"ignore" || name == L"ignore-list") && i + 1 < argc) {
+                put(argv[++i]);
             } else a.flags.insert(name);
         } else a.pos.push_back(s);
     }

@@ -255,6 +255,11 @@ wstring RrDataSource() {
     return s.substr(p + 7, e == wstring::npos ? wstring::npos : e - p - 7);
 }
 
+// RR data converted from a listed file and nothing allowed found: what the player does (name the listed source,
+// ask for an allowed file from the player's own game)
+static const wchar_t* const kRrChooseOwnFile =
+    L". To use Ray Reconstruction, choose the Ray Reconstruction model file (nvngx_dlssd.dll) that came with one of your own games "
+    L"(Convert on the game's page, or Settings > Ray Reconstruction data), or install or update such a game";
 RrDataState FindRrData(Context& ctx, const GameTarget* t, const wstring& userDll, const std::vector<StoreGame>& libraries, bool fresh) {
     RrDataState m;
     if (!LoadFMap(ctx)) {
@@ -264,22 +269,84 @@ RrDataState FindRrData(Context& ctx, const GameTarget* t, const wstring& userDll
         return m;
     }
     RecoverRrData(ctx);  // a swap that did not finish: its data back first (it may be valid)
+    // The ignore lists (convert_ignore.h), read first: what may be converted, and whether the data on this PC may be reused.
+    // A list that is there but can't be read: nothing is converted or reused (fail closed).
+    const IgnoreLists ign = LoadConvertIgnore(ctx, L"RR data", &m.ignored);
+    if (!ign.unreadable.empty()) { m.error = ign.unreadable; LogLine(ctx, L"RR data: " + m.error); return m; }
     wstring why;
-    if (!fresh && userDll.empty() && RrDataValid(ctx, &why)) {
+    const bool existing = !fresh && userDll.empty() && RrDataValid(ctx, &why);
+    // As the model data (model.cpp FindModel): while a list has entries, data converted from a listed file (path or SHA-256 in
+    // its model-source.txt) is not reused, and data without a recorded SHA-256 (an earlier version) is converted again when an
+    // allowed file is found, else kept with a note.
+    const wstring source = existing ? RrDataSource() : wstring();
+    wstring distrustWhy;
+    if (existing && !ign.empty()) {
+        const wstring sha = SourceField(Join(RrDataDir(), L"model-source.txt"), L"sha256");
+        const wstring listed = RecordedSourceReason(ign, source, sha);
+        if (!listed.empty()) {
+            m.trust = RrDataState::LISTED;
+            distrustWhy = L"it was converted from " + (source.empty() ? wstring(L"a file") : source) + L", which is " + listed;
+        } else if (sha.empty()) {
+            m.trust = RrDataState::UNKNOWN;
+            distrustWhy = L"the SHA-256 of the file it was converted from is not on record (an earlier version converted it), so the ignore lists can't check it";
+        }
+    }
+    auto keep = [&] {
         m.ok = m.reused = true;
         m.origin = L"converted earlier on this PC";
-        m.dll = RrDataSource();
+        m.dll = source;
+    };
+    if (existing && m.trust == RrDataState::TRUSTED) {
+        keep();
         LogLine(ctx, L"RR data: reusing " + RrDataFile());
         return m;
     }
+    if (existing) why = RrDataFile() + L" is valid, but " + distrustWhy;
     if (why.empty()) why = fresh ? L"converted again" : L"a file was chosen";
     LogLine(ctx, L"RR data: " + why + L"; looking for a DLSS Ray Reconstruction model file (nvngx_dlssd.dll)");
+    auto keepUnknown = [&] {
+        keep();
+        m.notes.push_back(L"The Ray Reconstruction data on this PC was converted by an earlier version of WrongGPU, which did not record the SHA-256 of "
+                          L"the file it came from, so the ignore lists can't check it. No other Ray Reconstruction model file was found to convert it "
+                          L"again, so it stays in use.");
+        LogLine(ctx, L"RR data: keeping " + RrDataFile() + L" (its source can't be checked against the ignore lists; nothing else to convert)");
+    };
     std::vector<std::pair<wstring, wstring>> cands;
     std::set<wstring> seen;
     auto add = [&](const wstring& p, const wstring& origin) { if (seen.insert(Lower(FullPath(p))).second) cands.push_back({FullPath(p), origin}); };
     if (!userDll.empty()) add(userDll, L"the file you chose");
     if (t && !t->root.empty()) for (auto& f : FindFilesNamed(t->root, L"nvngx_dlssd.dll")) add(f, L"this game");  // DLSS RR
     for (auto& g : libraries) for (auto& f : FindFilesNamed(g.root, L"nvngx_dlssd.dll", 30000)) add(f, L"another game (" + g.name + L")");  // DLSS RR
+    // A file on a list is left out before anything is tried; the order of the others stays. The rule is absolute: a
+    // file the player chose is left out too, and the player is told which list and line (or --ignore=) matched.
+    wstring chosenSkipped;
+    {
+        std::vector<wstring> paths;
+        for (auto& c : cands) paths.push_back(c.first);
+        const std::vector<bool> skip = IgnoredMask(ctx, ign, paths, L"RR data", m.ignored);
+        std::vector<std::pair<wstring, wstring>> kept;
+        for (size_t i = 0; i < cands.size(); ++i) {
+            if (!skip[i]) kept.push_back(cands[i]);
+            else if (i == 0 && !userDll.empty()) {
+                const wstring& s = m.ignored.skipped.front();
+                chosenSkipped = L"the file you chose (" + cands[0].first + L") is not converted: it is " + s.substr(std::min(s.size(), cands[0].first.size() + 2)) +
+                                L". If it was listed by mistake, remove that line (or that --ignore argument)";
+            }
+        }
+        cands.swap(kept);
+    }
+    const size_t skipped = m.ignored.skipped.size();
+    if (cands.empty() && skipped) {  // nothing left to try
+        if (existing && m.trust == RrDataState::UNKNOWN) { keepUnknown(); return m; }
+        m.error = !chosenSkipped.empty() && skipped == 1
+                      ? chosenSkipped
+                      : L"every Ray Reconstruction model file found (" + std::to_wstring(skipped) + L") is on an ignore list, so none was converted "
+                        L"(WrongGPU converts only the files that came with your own games; the files skipped, and the list and line that skipped each, "
+                        L"are named in the log)";
+        if (existing) m.error = L"the Ray Reconstruction data on this PC is not used: " + distrustWhy + L"; and " + m.error + kRrChooseOwnFile;
+        LogLine(ctx, L"RR data: " + m.error);
+        return m;
+    }
     wgc::SearchOptions opt;
     for (auto& c : cands) {
         auto conv = std::make_shared<wgc::Converted>();
@@ -287,18 +354,27 @@ RrDataState FindRrData(Context& ctx, const GameTarget* t, const wstring& userDll
                                                 [&ctx](const string& s) { LogLine(ctx, L"converter (RR): " + FromUtf8(s)); });
         if (r.code == wgc::kOk) {
             m.ok = true; m.dll = c.first; m.origin = c.second; m.version = FromUtf8(conv->version); m.converted = conv;
-            LogLine(ctx, L"RR data: using " + c.first + L" (" + c.second + L")");
+            m.dllSha256 = Lower(Sha256File(c.first));
+            LogLine(ctx, L"RR data: using " + c.first + L" (" + c.second + L")" + (existing ? L"; it replaces the data on this PC (" + distrustWhy + L")" : wstring()));
             return m;
         }
         m.rejections.push_back(c.first + L": " + FromUtf8(r.message));
         LogLine(ctx, L"RR data: rejected " + c.first + L": " + FromUtf8(r.message));
-        if (wgc::is_installer_error(r.code)) { m.error = FromUtf8(r.message); return m; }
+        if (wgc::is_installer_error(r.code)) {
+            if (existing && m.trust == RrDataState::UNKNOWN) { keepUnknown(); return m; }
+            m.error = FromUtf8(r.message);
+            return m;
+        }
     }
+    if (existing && m.trust == RrDataState::UNKNOWN) { keepUnknown(); return m; }
     if (!userDll.empty() && cands.size() == 1 && !m.rejections.empty())  // only the chosen file was tried: its own reason
         m.error = L"the file you chose can't be converted by this version: " + m.rejections[0];
     else
         m.error = cands.empty() ? L"no Ray Reconstruction model file was found in this game or your other games"
                                 : L"none of the " + std::to_wstring(cands.size()) + L" Ray Reconstruction model file(s) found can be converted by this version";
+    if (skipped) m.error += L" (" + std::to_wstring(skipped) + L" file(s) on an ignore list were skipped)";
+    if (!chosenSkipped.empty()) m.error += L"; " + chosenSkipped;
+    if (existing) m.error = L"the Ray Reconstruction data on this PC is not used: " + distrustWhy + L"; and " + m.error + kRrChooseOwnFile;
     return m;
 }
 
@@ -323,7 +399,9 @@ bool WriteRrData(Context& ctx, const RrDataState& m, wstring* why) {
         return false;
     }
     const wstring text = L"source\t" + m.dll + L"\r\nversion\t" + m.version + L"\r\norigin\t" + m.origin + L"\r\nconverted\t" + NowStamp(false) +
-                         L"\r\nmap\t" + FromUtf8(wgc::to_hex(ctx.fMap.map->file_sha256)) + L"\r\n";
+                         L"\r\nmap\t" + FromUtf8(wgc::to_hex(ctx.fMap.map->file_sha256)) + L"\r\n" +
+                         // the source file's SHA-256: a later reuse is checked against the ignore lists with it (FindRrData)
+                         (m.dllSha256.empty() ? wstring() : L"sha256\t" + m.dllSha256 + L"\r\n");
     const string info = ToUtf8(text);
     WriteFileAtomic(Join(side, L"model-source.txt"), info.data(), info.size());
     // the folder in use moves aside first (a running game may hold its file: then nothing changes). A reader that holds it
@@ -351,7 +429,8 @@ bool WriteRrData(Context& ctx, const RrDataState& m, wstring* why) {
     return RrDataValid(ctx, why);
 }
 
-bool ConvertRrData(Context& ctx, const wstring& dll, const std::vector<StoreGame>& libraries, wstring* why, std::vector<RrSettingsFailure>* notWritten) {
+bool ConvertRrData(Context& ctx, const wstring& dll, const std::vector<StoreGame>& libraries, wstring* why, std::vector<RrSettingsFailure>* notWritten,
+                   IgnoreReport* ignored) {
     // a chosen file is the only one tried: when it does not convert, that is the answer (never another game's file instead)
     std::vector<StoreGame> where;
     if (dll.empty()) {
@@ -362,6 +441,7 @@ bool ConvertRrData(Context& ctx, const wstring& dll, const std::vector<StoreGame
         for (auto& g : libraries) where.push_back(g);
     }
     const RrDataState st = FindRrData(ctx, nullptr, dll, where, true);
+    if (ignored) *ignored = st.ignored;
     if (!st.ok) { if (why) *why = st.error; return false; }
     if (!WriteRrData(ctx, st, why)) return false;
     const std::vector<RrSettingsFailure> failed = RefreshAllRrSettings(ctx);

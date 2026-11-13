@@ -757,13 +757,16 @@ void RemoveDataAsked() {
     if (look->anyGame) { Inform(L"Your games still use WrongGPU's data\n\nUninstall WrongGPU from each game first, then remove the data.", 1); return; }
     if (!Confirm(RemoveDataText(look->modelData, look->rrData), 0, L"Remove data", L"Cancel", true)) return;
     auto why = std::make_shared<wstring>();
+    auto kept = std::make_shared<wstring>();
     auto ok = std::make_shared<bool>(false);
-    if (!WaitForRead(L"", L"Removing…", T_NONE, [why, ok] { *ok = RemoveSharedData(g.ctx, why.get()); })) return;
+    if (!WaitForRead(L"", L"Removing…", T_NONE, [why, kept, ok] { *ok = RemoveSharedData(g.ctx, why.get(), kept.get()); })) return;
     if (!*ok) {
         InformDetails(L"WrongGPU's data couldn't be removed.\n\nA file in it may be in use. Close what uses it, then try again. Nothing was removed.", kIconError, *why);
         return;
     }
-    ShowToast(L"WrongGPU's data is removed. You can delete this portable copy once you close it.", 1);
+    // the ignore list stays (convert_ignore.h): said once in the toast
+    ShowToast(kept->empty() ? L"WrongGPU's data is removed. You can delete this portable copy once you close it."
+                            : L"WrongGPU's data is removed; kept ignore-files.txt (your/integrators' ignore list). You can delete this portable copy once you close it.", 1);
     StartHealth(false);  // the model and RR data are gone: the status line and Settings follow
     Invalidate();
 }

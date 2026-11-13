@@ -354,10 +354,10 @@ size_t RemoveRuntimeFiles(const wstring& dir, const wstring& exeDir, const Recor
 static std::atomic<CleanupMoveFn> g_cleanupMove{nullptr};  // test seam (record.h SetCleanupMoveForTest)
 void SetCleanupMoveForTest(CleanupMoveFn fn) { g_cleanupMove = fn; }
 
-void StartCleanup(Context& ctx, const wstring& state, const wstring& self, const wstring& appData) {
+wstring StartCleanup(Context& ctx, const wstring& state, const wstring& self, const wstring& appData) {
     // Detach this generation now. Delayed cleanup must never recursively delete the shared pathname,
     // which a following install can already have recreated with its new model and runtime selection.
-    wstring retired;
+    wstring retired, kept;
     if (!appData.empty() && IsDir(appData)) {
         // The name the folder is moved to is free and unique. It was <pid>-<GetTickCount64()> alone; that clock moves in
         // ~16 ms steps, so a second cleanup of the same folder within one step (an install's restore, then the last game's
@@ -393,8 +393,11 @@ void StartCleanup(Context& ctx, const wstring& state, const wstring& self, const
             LogLine(ctx, L"Shared data cleanup deferred: cannot detach " + appData + L" (error " + std::to_wstring(err) + L": " + why +
                              L"); it was left in place.");
             retired.clear();
-        } else if (StartsWithI(ctx.logFile, appData + L"\\")) {
-            ctx.logFile = retired + ctx.logFile.substr(appData.size());
+        } else {
+            if (StartsWithI(ctx.logFile, appData + L"\\")) ctx.logFile = retired + ctx.logFile.substr(appData.size());
+            // the ignore list stays (an integrator's installer registered its files there; convert_ignore.h)
+            kept = PutIgnoreListBack(retired, appData);
+            if (!kept.empty()) LogLine(ctx, kept);
         }
     }
     wchar_t sys[MAX_PATH]; GetSystemDirectoryW(sys, MAX_PATH);
@@ -412,6 +415,7 @@ void StartCleanup(Context& ctx, const wstring& state, const wstring& self, const
     } else {
         LogLine(ctx, L"cleanup not started (error " + std::to_wstring(GetLastError()) + L"); remove " + state + L" by hand");
     }
+    return kept;
 }
 
 std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool failedInstall, bool keepState) {
@@ -562,15 +566,20 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
     }
 
     wstring state = StateDir(dir);
-    if (keepBackup) { warnings.push_back(L"The backup folder was kept: " + Join(state, L"backup")); if (!appData.empty()) StartCleanup(ctx, L"", L"", appData); return warnings; }
+    // the shared folder goes, its ignore-files.txt stays (StartCleanup): said in the result
+    auto cleanup = [&](const wstring& st, const wstring& sf) {
+        const wstring kept = StartCleanup(ctx, st, sf, appData);
+        if (!kept.empty()) { ui.log(kept); warnings.push_back(kept); }
+    };
+    if (keepBackup) { warnings.push_back(L"The backup folder was kept: " + Join(state, L"backup")); if (!appData.empty()) cleanup(L"", L""); return warnings; }
     if (keepState) { RemoveTree(Join(state, L"backup")); DeleteFileW(RecordPath(dir).c_str()); return warnings; }
     wstring self = SelfPath();
     if (IEq(Parent(self), state)) {
         RemoveTree(state, self);
-        StartCleanup(ctx, state, self, appData);
+        cleanup(state, self);
     } else {
         RemoveTree(state);
-        if (!appData.empty()) StartCleanup(ctx, L"", L"", appData);
+        if (!appData.empty()) cleanup(L"", L"");
     }
     return warnings;
 }
