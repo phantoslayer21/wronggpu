@@ -27,11 +27,7 @@ const std::map<std::string, SwinStageInfo>& swin_table() {
   return t;
 }
 
-struct TensorSpec {
-  std::string name;
-  std::vector<int> shape;
-  bool u8;
-};
+}  // namespace
 
 std::vector<TensorSpec> stage_specs(const std::string& stage) {
   if (stage == "enc0")
@@ -56,6 +52,8 @@ std::vector<TensorSpec> stage_specs(const std::string& stage) {
   }
   return v;
 }
+
+namespace {
 
 size_t numel(const std::vector<int>& shape) {
   size_t n = 1;
@@ -418,11 +416,19 @@ bool read_raw_tensor(const std::string& path, const TensorSpec& ts, Tensor* out,
 }  // namespace
 
 bool load_raw_model(const std::string& model_dir, std::map<std::string, StageTensors>* out, std::string* err) {
+  StageSpecs stages;
+  for (const std::string& stage : model_stages()) stages.emplace_back(stage, stage_specs(stage));
+  return load_raw_stages(model_dir, stages, out, err);
+}
+
+bool load_raw_stages(const std::string& model_dir, const StageSpecs& stages,
+                     std::map<std::string, StageTensors>* out, std::string* err) {
+  if (stages.empty() || stages[0].second.empty()) return *err = "no stages to load", false;
   std::string root = model_dir + "/raw";
-  if (!file_exists(root + "/enc0/W.bin")) root = model_dir;
-  for (const std::string& stage : model_stages()) {
+  if (!file_exists(root + "/" + stages[0].first + "/" + stages[0].second[0].name + ".bin")) root = model_dir;
+  for (const auto& [stage, specs] : stages) {
     StageTensors st;
-    for (const TensorSpec& ts : stage_specs(stage)) {
+    for (const TensorSpec& ts : specs) {
       const std::string path = root + "/" + stage + "/" + ts.name + ".bin";
       if (!read_raw_tensor(path, ts, &st[ts.name], err)) return false;
     }
