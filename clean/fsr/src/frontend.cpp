@@ -1769,8 +1769,26 @@ ffxReturnCode_t FrontEnd::Dispatch(ffxContext* context, const ffxDispatchDescHea
                 return DispatchUpscale(*u, d, call);
             }
             if (desc->type == FFX_API_DISPATCH_DESC_TYPE_UPSCALE_GENERATEREACTIVEMASK) {
-                // The reactive mask only feeds AMD's upscaler; WrongGPU's does not read it.
-                if (log) Log(tag + " -> OK (WrongGPU: reactive mask not needed, nothing recorded)");
+                // The reactive mask only feeds AMD's upscaler; WrongGPU's does not read it. But some frames of this context
+                // still go to AMD's upscaler (frames WrongGPU cannot take, the player's comparison) with the game's own
+                // reactive resource, which then needs this frame's mask: with an AMD context at hand the call goes to it
+                // (the generation does not depend on which context runs it). Issue #59.
+                const bool comparing = !config_.customSlot && platform_.compareAmd && platform_.compareAmd();
+                const OriginalApi* api = nullptr;
+                ffxContext* target = nullptr;
+                const char* what = "";
+                if (comparing && u->comparison.context && u->comparison.api) {
+                    api = u->comparison.api, target = &u->comparison.context, what = "comparison";
+                } else if (u->amd && u->amdApi) {
+                    api = u->amdApi, target = &u->amd, what = "AMD";
+                }
+                if (api && target) {
+                    const ffxReturnCode_t rc = api->dispatch(target, desc);
+                    if (log || rc != FFX_API_RETURN_OK)
+                        Log(tag + " -> " + RcName(rc) + " (reactive mask forwarded to AMD's context, " + what + ")");
+                    return rc;
+                }
+                if (log) Log(tag + " -> OK (WrongGPU: reactive mask not needed, nothing recorded: no AMD context yet)");
                 return FFX_API_RETURN_OK;
             }
             Log(tag + " -> ERROR_UNKNOWN_DESCTYPE (WrongGPU)");
