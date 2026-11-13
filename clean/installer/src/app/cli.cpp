@@ -27,8 +27,9 @@
 //                                 installed launcher may use it)
 //   play <game>                   start the game (without the ROCm/HIP SDK variables)
 //   update-check                  the opt-in release check (no network while it is off or no URL is set)
-//   apply --job=<file> --result=<file>   the elevated worker (started by the window with runas); apply --batch=<file>:
-//                                 several jobs in one run (one permission prompt; job= / result= lines, stop=1)
+//   apply --job=<file> --sha256=<hex>   the elevated worker (started by the window with runas); apply --batch=<file>
+//                                 --sha256=<hex>: several jobs in one run (one permission prompt; job= / sha256= lines,
+//                                 stop=1). Results next to the file given (elevated_job.h)
 //   ui-dump --dump=<file.json> [--shots=<folder>] [--apply=fps|rrconfig|rrdue]   the window's pages painted offscreen, as JSON
 //                                 (tests; --apply: the checklist's FPS button, the Engine.ini choices, or the choice waiting for the game's folder, applied for real)
 //   ui-render --out-dir=<folder> --fixture=<file> [--size=1180x760] [--scales=1,1.5] [--frames=a,b] [--theme=light|dark]   fixture screenshots (development)
@@ -40,6 +41,7 @@
 
 #include <cstdio>
 
+#include "wg_core/elevated_job.h"
 #include "wg_core/json_writer.h"
 #include "wg_core/logs.h"
 #include "wg_core/model.h"
@@ -186,25 +188,33 @@ static bool StartElevated(const wstring& args, HWND owner, DWORD& code) {
     return true;
 }
 static const wchar_t* const kNotGranted = L"Administrator permission is needed to change this game folder and was not granted.";
+// No result file from the elevated step: exit 10 is its refusal of job files it could not check (elevated_job.h).
+static wstring NoResult(DWORD code) {
+    if (code == EXIT_USAGE)
+        return L"The elevated step did not run: its job files could not be checked against this request (they were changed or "
+               L"could not be read). Try again.";
+    return L"The elevated worker gave no result (exit " + std::to_wstring(code) + L").";
+}
 
 OpResult RunElevated(const OpRequest& r, HWND owner) {
     OpResult res;
     const wstring dir = Join(gl.paths.dataDir, L"jobs");
     EnsureDir(dir);
     const wstring stamp = NowStamp(true);
-    const wstring job = Join(dir, L"job-" + stamp + L".txt"), result = Join(dir, L"result-" + stamp + L".txt");
+    const wstring job = Join(dir, L"job-" + stamp + L".txt"), result = JobResultPath(job);
     const string text = JobText(r, EnvVar(L"LOCALAPPDATA"), Join(Join(gl.paths.dataDir, L"logs"), L"elevated-" + stamp + L".log"), CurrentUserSid(), g.ctx.perGameEntry ? 1 : 0,
                               PlayerDocumentsDir(g.ctx));
     WriteFileAtomic(job, text.data(), text.size());
     DWORD code = 0;
-    if (!StartElevated(L"apply \"--job=" + job + L"\" \"--result=" + result + L"\"", owner, code)) {
+    // the job's SHA-256 binds the elevated step to this file's content (elevated_job.h); it writes its result to `result`
+    if (!StartElevated(L"apply \"--job=" + job + L"\" --sha256=" + Sha256Bytes(text.data(), text.size()), owner, code)) {
         DeleteFileW(job.c_str());
         res.code = EXIT_REFUSED;
         res.message = kNotGranted;
         return res;
     }
     string out;
-    if (!ReadAll(result, out) || !ParseResult(out, res)) { res.code = code ? (int)code : EXIT_FAILED; res.message = L"The elevated worker gave no result (exit " + std::to_wstring(code) + L")."; }
+    if (!ReadAll(result, out) || !ParseResult(out, res)) { res.code = code ? (int)code : EXIT_FAILED; res.message = NoResult(code); }
     DeleteFileW(job.c_str()); DeleteFileW(result.c_str());
     return res;
 }
@@ -218,19 +228,20 @@ static std::vector<OpResult> RunElevatedBatch(const std::vector<OpRequest>& rs, 
     EnsureDir(dir);
     const wstring stamp = NowStamp(true);
     const wstring log = Join(Join(gl.paths.dataDir, L"logs"), L"elevated-" + stamp + L".log");
-    std::vector<std::pair<wstring, wstring>> files;
+    const wstring batch = Join(dir, L"batch-" + stamp + L".txt");
+    std::vector<std::pair<wstring, wstring>> files, listed;  // (job, result); (job, its SHA-256) for the batch file
     for (size_t i = 0; i < rs.size(); ++i) {
-        const wstring n = std::to_wstring(i + 1);
-        files.push_back({Join(dir, L"job-" + stamp + L"-" + n + L".txt"), Join(dir, L"result-" + stamp + L"-" + n + L".txt")});
+        files.push_back({Join(dir, L"job-" + stamp + L"-" + std::to_wstring(i + 1) + L".txt"), BatchResultPath(batch, i + 1)});
         const string text = JobText(rs[i], EnvVar(L"LOCALAPPDATA"), log, CurrentUserSid(), g.ctx.perGameEntry ? 1 : 0,
                               PlayerDocumentsDir(g.ctx));
         WriteFileAtomic(files[i].first, text.data(), text.size());
+        listed.push_back({files[i].first, Sha256Bytes(text.data(), text.size())});
     }
-    const wstring batch = Join(dir, L"batch-" + stamp + L".txt");
-    const string list = BatchText(files, stop);
+    const string list = BatchText(listed, stop);
     WriteFileAtomic(batch, list.data(), list.size());
     DWORD code = 0;
-    const bool started = StartElevated(L"apply \"--batch=" + batch + L"\"", owner, code);
+    // the batch's SHA-256 (and in it each job's) binds the elevated step to these files (elevated_job.h)
+    const bool started = StartElevated(L"apply \"--batch=" + batch + L"\" --sha256=" + Sha256Bytes(list.data(), list.size()), owner, code);
     bool failed = false;
     for (size_t i = 0; i < rs.size(); ++i) {
         string text;
@@ -238,7 +249,7 @@ static std::vector<OpResult> RunElevatedBatch(const std::vector<OpRequest>& rs, 
         else if (!ReadAll(files[i].second, text) || !ParseResult(text, out[i])) {
             out[i] = OpResult();
             if (stop && failed) out[i].code = kOpNotRun;
-            else { out[i].code = code ? (int)code : EXIT_FAILED; out[i].message = L"The elevated worker gave no result (exit " + std::to_wstring(code) + L")."; }
+            else { out[i].code = code ? (int)code : EXIT_FAILED; out[i].message = NoResult(code); }
         }
         failed = failed || (out[i].code != EXIT_OK && out[i].code != kOpNotRun);
         DeleteFileW(files[i].first.c_str()); DeleteFileW(files[i].second.c_str());
@@ -653,60 +664,31 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
         ResultJson(o, res);
         return res.code;
     }
-    if (verb == L"apply") {  // the elevated worker: one job (--job, --result), or several in one run (--batch: one prompt)
+    if (verb == L"apply") {  // the elevated worker: one job (--job), or several in one run (--batch: one prompt); --sha256
+        // binds it to the files of the launcher's request, and it works out the result paths itself (elevated_job.h)
         bool hiveSet = false;
-        auto runJob = [&hiveSet](const wstring& job, const wstring& result) {
-            string text;
-            OpRequest r; wstring lad, logFile, why, sid, docs;
-            int perEntry = -1;
-            OpResult res;
-            if (job.empty() || result.empty() || !ReadAll(job, text)) { res.code = EXIT_USAGE; res.message = L"apply needs --job=<file> and --result=<file>"; }
-            else if (!ParseJob(text, r, lad, logFile, &why, &sid, &perEntry, &docs)) { res.code = EXIT_USAGE; res.message = L"bad job file: " + why; }
-            else {
-                SetEnvironmentVariableW(L"LOCALAPPDATA", lad.c_str());  // the player's model and shared data, not this account's
-                g.ctx.playerDocuments = docs;  // and the player's Documents (rrconfig.h), not this account's
-                if (!logFile.empty()) g.ctx.logFile = logFile;
-                // run by another account (an administrator's name typed at the prompt): the Apps & features entries go to the
-                // player's hive, where the player's launcher and Settings > Apps look
-                HKEY hive = nullptr;
-                if (!hiveSet && !sid.empty() && !IEq(sid, CurrentUserSid())) {
-                    hiveSet = true;
-                    if (RegOpenKeyExW(HKEY_USERS, sid.c_str(), 0, KEY_READ | KEY_WRITE, &hive) == ERROR_SUCCESS) SetUninstallHive(hive);
-                    else LogLine(g.ctx, L"elevated worker: the player's registry hive cannot be opened; Apps & features entries go to this account");
-                }
-                g.ctx.perGameEntry = perEntry >= 0 ? perEntry == 1 : !LauncherInstalled();
-                Ui ui; ui.step = [](int, int, const wstring&) {}; ui.log = [](const wstring& s) { LogLine(g.ctx, s); };
-                LogLine(g.ctx, wstring(L"elevated worker: ") + OpName(r.op) + L" " + (r.dir.empty() ? r.exe : r.dir) + (IsElevated() ? L" (elevated)" : L" (not elevated)"));
-                res = RunOp(g.ctx, r, ui);
+        auto runJob = [&hiveSet](const WorkerJob& w) {
+            SetEnvironmentVariableW(L"LOCALAPPDATA", w.localAppData.c_str());  // the player's model and shared data, not this account's
+            g.ctx.playerDocuments = w.documents;  // and the player's Documents (rrconfig.h), not this account's
+            if (!w.logFile.empty()) g.ctx.logFile = w.logFile;
+            // run by another account (an administrator's name typed at the prompt): the Apps & features entries go to the
+            // player's hive, where the player's launcher and Settings > Apps look
+            HKEY hive = nullptr;
+            if (!hiveSet && !w.userSid.empty() && !IEq(w.userSid, CurrentUserSid())) {
+                hiveSet = true;
+                if (RegOpenKeyExW(HKEY_USERS, w.userSid.c_str(), 0, KEY_READ | KEY_WRITE, &hive) == ERROR_SUCCESS) SetUninstallHive(hive);
+                else LogLine(g.ctx, L"elevated worker: the player's registry hive cannot be opened; Apps & features entries go to this account");
             }
-            if (!result.empty()) { const string rt = ResultText(res); try { WriteFileAtomic(result, rt.data(), rt.size()); } catch (const SetupError&) {} }
-            return res;
+            g.ctx.perGameEntry = w.perGameEntry >= 0 ? w.perGameEntry == 1 : !LauncherInstalled();
+            Ui ui; ui.step = [](int, int, const wstring&) {}; ui.log = [](const wstring& s) { LogLine(g.ctx, s); };
+            LogLine(g.ctx, wstring(L"elevated worker: ") + OpName(w.r.op) + L" " + (w.r.dir.empty() ? w.r.exe : w.r.dir) + (IsElevated() ? L" (elevated)" : L" (not elevated)"));
+            return RunOp(g.ctx, w.r, ui);
         };
-        if (!a.get(L"batch").empty()) {
-            string text;
-            std::vector<std::pair<wstring, wstring>> jobs;
-            bool stop = false, failed = false;
-            OpResult last;
-            if (!ReadAll(a.get(L"batch"), text) || !ParseBatch(text, jobs, stop)) { last.code = EXIT_USAGE; last.message = L"apply --batch needs a file of job= and result= lines"; }
-            int ran = 0;
-            for (auto& j : jobs) {
-                if (stop && failed) {  // an earlier game failed: this one is not run, and its result says so
-                    OpResult skip; skip.code = kOpNotRun; skip.message = L"not run: an earlier game failed";
-                    const string rt = ResultText(skip);
-                    try { WriteFileAtomic(j.second, rt.data(), rt.size()); } catch (const SetupError&) {}
-                    continue;
-                }
-                const OpResult res = runJob(j.first, j.second);
-                ++ran;
-                if (res.code) { failed = true; last = res; }
-            }
-            o.j.N("jobs", (long long)jobs.size()).N("ran", ran);
-            ResultJson(o, last);
-            return last.code;
-        }
-        const OpResult res = runJob(a.get(L"job"), a.get(L"result"));
-        ResultJson(o, res);
-        return res.code;
+        const WorkerRun run = RunWorkerFiles(a.get(L"batch"), a.get(L"job"), a.get(L"sha256"), runJob);
+        if (run.refused) Print(run.last.message);
+        if (!a.get(L"batch").empty()) o.j.N("jobs", (long long)run.jobs).N("ran", run.ran);
+        ResultJson(o, run.last);
+        return run.last.code;
     }
     if (verb == L"set" || verb == L"get") {
         if (a.has(L"global")) {

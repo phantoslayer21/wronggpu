@@ -379,7 +379,7 @@ def test_opti_tab(t, full):
     # the elevated worker's job carries OptiScaler edits too
     job, result = os.path.join(t.work, "job-opti.txt"), os.path.join(t.work, "result-opti.txt")
     write(job, "op=apply\r\ndir=%s\r\nlocalappdata=%s\r\noptikey.Menu.FpsOverlayType=2\r\n" % (b, t.env["LOCALAPPDATA"]))
-    rc = t.run("apply", "--job=" + job, "--result=" + result)
+    rc = t.run("apply", "--job=" + job, "--sha256=" + sha(read(job)))   # the result: result-opti.txt next to the job
     t.check("apply --job: optikey lines applied", rc == 0 and b"FpsOverlayType=2" in read(os.path.join(b, "OptiScaler.ini")), (rc, read(result) if os.path.isfile(result) else ""))
     rc = t.run("opti", exe, "--reset")
     t.check("--reset: the editable keys back byte for byte to what the install wrote", rc == 0 and read(os.path.join(b, "OptiScaler.ini")) == installed and

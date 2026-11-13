@@ -231,10 +231,11 @@ bool ParseJob(const string& text, OpRequest& r, wstring& localAppData, wstring& 
               wstring* documents = nullptr);
 string ResultText(const OpResult& res);
 bool ParseResult(const string& text, OpResult& res);
-// Several jobs for one elevated worker ("apply --batch=<file>", one permission prompt): job=<file> / result=<file> pairs in
-// the order they run; stop=1: none runs after the first that fails (its result then has the code kOpNotRun).
+// Several jobs for one elevated worker ("apply --batch=<file> --sha256=<hex>", one permission prompt): job=<file> /
+// sha256=<that file's SHA-256> pairs in the order they run; stop=1: none runs after the first that fails (its result then
+// has the code kOpNotRun). The worker works out the result paths itself (elevated_job.h); a result= line is refused.
 string BatchText(const std::vector<std::pair<wstring, wstring>>& jobs, bool stop);
-bool ParseBatch(const string& text, std::vector<std::pair<wstring, wstring>>& jobs, bool& stop);
+bool ParseBatch(const string& text, std::vector<std::pair<wstring, wstring>>& jobs, bool& stop, wstring* why = nullptr);
 
 // ---- the launcher's own install ------------------------------------------------------------------------------------
 // Copies the exe to `dir` (default DefaultInstallDir()), adds the Start-menu shortcut (startMenu: a folder; empty:

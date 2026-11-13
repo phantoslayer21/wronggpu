@@ -1143,7 +1143,7 @@ OpResult RunOp(Context& ctx, const OpRequest& r, Ui& ui) {
 
 // ---- job file ------------------------------------------------------------------------------------------------------
 string JobText(const OpRequest& r, const wstring& localAppData, const wstring& logFile, const wstring& userSid, int perGameEntry, const wstring& documents) {
-    string t = "; WrongGPU launcher job (run by: WrongGPU.exe apply --job <this file> --result <file>)\r\n";
+    string t = "; WrongGPU launcher job (run by: WrongGPU.exe apply --job=<this file> --sha256=<its SHA-256>)\r\n";
     if (!userSid.empty()) t += "usersid=" + ToUtf8(userSid) + "\r\n";
     if (perGameEntry >= 0) t += string("perentry=") + (perGameEntry ? "1" : "0") + "\r\n";
     t += "op=" + ToUtf8(OpName(r.op)) + "\r\nexe=" + ToUtf8(r.exe) + "\r\ndir=" + ToUtf8(r.dir) + "\r\nopti=" + ToUtf8(r.optiPackage) +
@@ -1207,21 +1207,28 @@ bool ParseJob(const string& text, OpRequest& r, wstring& localAppData, wstring& 
     return true;
 }
 string BatchText(const std::vector<std::pair<wstring, wstring>>& jobs, bool stop) {
-    string t = "; WrongGPU launcher batch (run by: WrongGPU.exe apply --batch <this file>)\r\n";
+    string t = "; WrongGPU launcher batch (run by: WrongGPU.exe apply --batch=<this file> --sha256=<its SHA-256>)\r\n";
     if (stop) t += "stop=1\r\n";
-    for (auto& j : jobs) t += "job=" + ToUtf8(j.first) + "\r\nresult=" + ToUtf8(j.second) + "\r\n";
+    for (auto& j : jobs) t += "job=" + ToUtf8(j.first) + "\r\nsha256=" + ToUtf8(j.second) + "\r\n";
     return t;
 }
-bool ParseBatch(const string& text, std::vector<std::pair<wstring, wstring>>& jobs, bool& stop) {
+bool ParseBatch(const string& text, std::vector<std::pair<wstring, wstring>>& jobs, bool& stop, wstring* why) {
     jobs.clear();
     stop = false;
     wstring job;
+    auto fail = [&](const wstring& w) { if (why) *why = w; jobs.clear(); return false; };
     for (auto& kv : KeyValues(text)) {
         if (kv.first == "stop") stop = Truthy(kv.second);
-        else if (kv.first == "job") job = FromUtf8(kv.second);
-        else if (kv.first == "result" && !job.empty()) { jobs.push_back({job, FromUtf8(kv.second)}); job.clear(); }
+        else if (kv.first == "job") { if (!job.empty()) return fail(L"a job line without its sha256 line"); job = FromUtf8(kv.second); }
+        else if (kv.first == "sha256") {
+            if (job.empty() || kv.second.size() != 64) return fail(L"a sha256 line without a job line, or not 64 hex digits");
+            jobs.push_back({job, FromUtf8(kv.second)});
+            job.clear();
+        } else if (kv.first == "result") return fail(L"result= is not accepted (the result paths are the worker's own)");
     }
-    return !jobs.empty();
+    if (!job.empty()) return fail(L"a job line without its sha256 line");
+    if (jobs.empty()) return fail(L"no job");
+    return true;
 }
 string ResultText(const OpResult& res) {
     string t = "code=" + std::to_string(res.code) + "\r\nmessage=" + ToUtf8(res.message) + "\r\n";

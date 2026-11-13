@@ -314,13 +314,17 @@ ctest `source-size`.
   dialogs, DPI aware per monitor. Every widget is a UI Automation element with a name (`ui_uia.cpp`); typed text
   stays in native `EDIT` windows. A game folder that needs
   administrator rights goes to the elevated worker: the window writes a job file (operation, exact paths, the
-  player's `%LOCALAPPDATA%`, the profile) and starts `WrongGPU.exe apply --job=<file> --result=<file>` with `runas`;
-  the window itself never runs elevated.
+  player's `%LOCALAPPDATA%`, the profile) and starts `WrongGPU.exe apply --job=<file> --sha256=<its SHA-256>` with
+  `runas` (several games: `apply --batch=<file> --sha256=<its SHA-256>`, the batch listing each job file with its
+  SHA-256); the window itself never runs elevated. The elevated step verifies its job files: it reads each one once,
+  runs it only when its SHA-256 is the one the launcher passed or listed, works out the result paths itself (next to
+  the file it was given: `result-<name>.txt`, `result-<stamp>-<n>.txt`; not through a link or junction) and keeps the
+  job's log in the player's data folders (`src/wg_core/elevated_job.h`).
 - **Command line** (a verb as the first argument; `src/app/cli.cpp`): `scan`, `status [game]`, `install`, `repair`,
   `update`, `uninstall`, `rollback`, `adopt [game | --all]`, `set <game> key=value ...`, `set --global key=value`,
   `get <game> [key]`, `get --global`, `collect <game> [--zip=<file>]`, `hipcheck`, `model status|convert`,
   `self-install [--dir=] [--startmenu=<folder>|-]`, `self-uninstall [--keep-games]`, `play <game>`, `update-check`,
-  `apply --job= --result=` (the elevated worker), `version`, `ui-dump --dump=<json> [--shots=<folder>]` (the window's
+  `apply --job= --sha256=` / `apply --batch= --sha256=` (the elevated worker), `version`, `ui-dump --dump=<json> [--shots=<folder>]` (the window's
   pages painted offscreen, never shown: their widgets as JSON, PNGs, for tests), `ui-render --out-dir=<folder>
   --fixture=tests/ui_fixture.ini [--size=1180x760] [--scales=1,1.5] [--frames=library,game,...]` (fixture screenshots for development: named frames, among them empty and busy states, a big library, long names, dialogs). A game is its exe, its folder or its install
   folder. Options: `--out=<file.json>` (the result as JSON; console output of a GUI program is unreliable),

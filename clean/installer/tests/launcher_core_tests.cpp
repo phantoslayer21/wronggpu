@@ -9,9 +9,11 @@
 #include <cstdio>
 #include <iostream>
 #include <stdexcept>
+#include <vector>
 
 #include "app/ui_palette.h"
 #include "wg_core/detect.h"
+#include "wg_core/elevated_job.h"
 #include "wg_core/gamerules.h"
 #include "wg_core/launcher.h"
 #include "wg_core/logs.h"
@@ -23,6 +25,8 @@
 #include "wg_core/rr.h"
 #include "wg_core/rrconfig.h"
 #include "wg_core/settings.h"
+
+#include <winioctl.h>  // FSCTL_SET_REPARSE_POINT (folder set-up of the elevated-step tests)
 
 using namespace wg;
 
@@ -41,6 +45,145 @@ wstring TempFolder() {
     return dir;
 }
 string OptionsOf(const string& ini) { string v, s; IniGetFrontEnd(ini, "runtime_options", &v, &s); return v; }
+
+// ---- the elevated step's job files (elevated_job.h), in this process, without elevation ---------------------------------
+void Put(const wstring& path, const string& text) { WriteFileAtomic(path, text.data(), text.size()); }
+string Get(const wstring& path) { string s; ReadAll(path, s); return s; }
+wstring Hash(const string& text) { return Sha256Bytes(text.data(), text.size()); }
+
+// A mount point folder `link` -> `target` (test set-up for the folder checks).
+bool MakeJunction(const wstring& link, const wstring& target) {
+    if (!CreateDirectoryW(link.c_str(), nullptr)) return false;
+    HANDLE h = CreateFileW(link.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    const wstring sub = L"\\??\\" + target, print = target;
+    const USHORT subBytes = (USHORT)(sub.size() * 2), printBytes = (USHORT)(print.size() * 2);
+    std::vector<BYTE> buf(8 + 8 + subBytes + 2 + printBytes + 2, 0);
+    auto put16 = [&](size_t at, USHORT v) { memcpy(&buf[at], &v, 2); };
+    const DWORD tag = IO_REPARSE_TAG_MOUNT_POINT;
+    memcpy(&buf[0], &tag, 4);
+    put16(4, (USHORT)(buf.size() - 8));                       // ReparseDataLength
+    put16(8, 0); put16(10, subBytes);                         // SubstituteNameOffset, SubstituteNameLength
+    put16(12, (USHORT)(subBytes + 2)); put16(14, printBytes); // PrintNameOffset, PrintNameLength
+    memcpy(&buf[16], sub.data(), subBytes);
+    memcpy(&buf[16 + subBytes + 2], print.data(), printBytes);
+    DWORD got = 0;
+    const BOOL ok = DeviceIoControl(h, FSCTL_SET_REPARSE_POINT, buf.data(), (DWORD)buf.size(), nullptr, 0, &got, nullptr);
+    CloseHandle(h);
+    return ok != FALSE;
+}
+
+void ElevatedJobTests(const wstring& base) {
+    const wstring root = base + L"-elevated", data = Join(root, L"data"), jobs = Join(data, L"jobs"), logs = Join(data, L"logs");
+    const wstring lad = Join(root, L"lad"), other = Join(root, L"other"), otherFile = Join(other, L"other.txt");
+    RemoveTree(root);
+    for (auto& d : {jobs, logs, Join(Join(lad, L"WrongGPU"), L"logs"), other}) EnsureDir(d);
+    Put(otherFile, "keep");
+    int runs = 0;
+    std::vector<WorkerJob> seen;
+    const WorkerRunFn run = [&](const WorkerJob& w) { ++runs; seen.push_back(w); OpResult r; r.message = L"ran"; return r; };
+    OpRequest req; req.op = Op::Apply; req.dir = L"C:\\Games\\X";
+    auto jobText = [&](const wstring& log) { return JobText(req, lad, log); };
+    const wstring okLog = Join(logs, L"elevated-1.log");
+    auto resultOf = [](const wstring& p) { OpResult r; return std::make_pair(ParseResult(Get(p), r), r); };
+
+    {   // the launcher's own batch: both jobs run, each result at the path the worker works out, the log in data\logs
+        const string j1 = jobText(okLog), j2 = jobText(Join(Join(Join(lad, L"WrongGPU"), L"logs"), L"elevated-1.log"));
+        Put(Join(jobs, L"job-A-1.txt"), j1); Put(Join(jobs, L"job-A-2.txt"), j2);
+        const string bt = BatchText({{Join(jobs, L"job-A-1.txt"), Hash(j1)}, {Join(jobs, L"job-A-2.txt"), Hash(j2)}}, true);
+        Put(Join(jobs, L"batch-A.txt"), bt);
+        runs = 0; seen.clear();
+        const WorkerRun wr = RunWorkerFiles(Join(jobs, L"batch-A.txt"), L"", Hash(bt), run);
+        const auto r1 = resultOf(Join(jobs, L"result-A-1.txt")), r2 = resultOf(Join(jobs, L"result-A-2.txt"));
+        require(!wr.refused && wr.jobs == 2 && wr.ran == 2 && runs == 2 && r1.first && r1.second.code == 0 && r2.first && r2.second.message == L"ran" &&
+                    seen[0].logFile == okLog && seen[0].localAppData == lad && seen[0].r.dir == req.dir,
+                "elevated step: the launcher's batch runs every job; results at batch folder\\result-<stamp>-<n>.txt; log= in data\\logs or localappdata");
+        require(BatchResultPath(Join(jobs, L"batch-A.txt"), 2) == Join(jobs, L"result-A-2.txt") && JobResultPath(Join(jobs, L"job-B.txt")) == Join(jobs, L"result-B.txt") &&
+                    BatchResultPath(Join(jobs, L"list.txt"), 1).empty(), "elevated step: the result paths the launcher reads are the ones the worker writes");
+    }
+    {   // a batch with a result= line: refused, nothing run or written
+        const string j1 = jobText(okLog);
+        Put(Join(jobs, L"job-R-1.txt"), j1);
+        const string bt = "job=" + ToUtf8(Join(jobs, L"job-R-1.txt")) + "\r\nsha256=" + ToUtf8(Hash(j1)) + "\r\nresult=" + ToUtf8(otherFile) + "\r\n";
+        Put(Join(jobs, L"batch-R.txt"), bt);
+        runs = 0;
+        const WorkerRun wr = RunWorkerFiles(Join(jobs, L"batch-R.txt"), L"", Hash(bt), run);
+        require(wr.refused && runs == 0 && Get(otherFile) == "keep" && !Exists(Join(jobs, L"result-R-1.txt")) && wr.last.code == EXIT_USAGE,
+                "elevated step: a batch with a result= line is refused; nothing is run or written");
+    }
+    {   // the batch changed after the launcher passed its SHA-256: refused, nothing run or written
+        const string j1 = jobText(okLog);
+        Put(Join(jobs, L"job-C-1.txt"), j1);
+        const string bt = BatchText({{Join(jobs, L"job-C-1.txt"), Hash(j1)}}, false);
+        Put(Join(jobs, L"batch-C.txt"), bt + "stop=1\r\n");
+        runs = 0;
+        const WorkerRun wr = RunWorkerFiles(Join(jobs, L"batch-C.txt"), L"", Hash(bt), run);
+        require(wr.refused && runs == 0 && !Exists(Join(jobs, L"result-C-1.txt")) && wr.last.message.find(L"SHA-256 mismatch") != wstring::npos,
+                "elevated step: a batch whose SHA-256 is not the launcher's is refused, with that reason");
+        runs = 0;
+        require(RunWorkerFiles(Join(jobs, L"batch-C.txt"), L"", L"", run).refused && runs == 0, "elevated step: no --sha256: refused");
+    }
+    {   // a job whose content is not the one the batch lists: that job is not run, its result says why
+        const string j1 = jobText(okLog);
+        const string bt = BatchText({{Join(jobs, L"job-D-1.txt"), Hash(j1)}}, false);
+        Put(Join(jobs, L"job-D-1.txt"), jobText(otherFile));
+        Put(Join(jobs, L"batch-D.txt"), bt);
+        runs = 0;
+        const WorkerRun wr = RunWorkerFiles(Join(jobs, L"batch-D.txt"), L"", Hash(bt), run);
+        const auto r1 = resultOf(Join(jobs, L"result-D-1.txt"));
+        require(!wr.refused && runs == 0 && r1.first && r1.second.code == EXIT_USAGE && r1.second.message.find(L"SHA-256 mismatch") != wstring::npos &&
+                    Get(otherFile) == "keep", "elevated step: a job whose SHA-256 does not match the batch is refused (not run; its result says so)");
+    }
+    {   // log= paths the step does not accept: not under the allowed folders, or not a plain file in a plain folder there
+        const wstring linked = Join(root, L"linked-logs");
+        require(MakeJunction(linked, other), "test setup (1)");
+        const wstring hard = Join(logs, L"hard.log");
+        require(CreateHardLinkW(hard.c_str(), otherFile.c_str(), nullptr) != FALSE, "test setup (2)");
+        const wstring subLog = Join(Join(logs, L"sub"), L"x.log");
+        require(MakeJunction(Join(logs, L"sub"), other), "test setup (3)");
+        int n = 0;
+        for (const wstring& bad : {otherFile, Join(linked, L"x.log"), hard, subLog}) {
+            const string jt = jobText(bad);
+            const wstring stamp = L"E" + std::to_wstring(++n);
+            Put(Join(jobs, L"job-" + stamp + L"-1.txt"), jt);
+            const string bt = BatchText({{Join(jobs, L"job-" + stamp + L"-1.txt"), Hash(jt)}}, false);
+            Put(Join(jobs, L"batch-" + stamp + L".txt"), bt);
+            runs = 0;
+            const WorkerRun wr = RunWorkerFiles(Join(jobs, L"batch-" + stamp + L".txt"), L"", Hash(bt), run);
+            const auto r1 = resultOf(Join(jobs, L"result-" + stamp + L"-1.txt"));
+            require(!wr.refused && runs == 0 && r1.first && r1.second.code == EXIT_USAGE && Get(otherFile) == "keep" && !Exists(Join(other, L"x.log")),
+                    "elevated step: a log= path the step does not accept is refused; the job is not run");
+        }
+        RemoveDirectoryW(linked.c_str()); RemoveDirectoryW(Join(logs, L"sub").c_str()); DeleteFileW(hard.c_str());
+    }
+    {   // one job (apply --job=): bound by its SHA-256, its result next to it; a folder that is not a plain folder is refused
+        const string jt = jobText(okLog);
+        Put(Join(jobs, L"job-one.txt"), jt);
+        runs = 0;
+        const WorkerRun ok = RunWorkerFiles(L"", Join(jobs, L"job-one.txt"), Hash(jt), run);
+        require(!ok.refused && runs == 1 && resultOf(Join(jobs, L"result-one.txt")).first, "elevated step: one job with its SHA-256 runs; result-<name>.txt next to it");
+        DeleteFileW(Join(jobs, L"result-one.txt").c_str());
+        runs = 0;
+        const WorkerRun bad = RunWorkerFiles(L"", Join(jobs, L"job-one.txt"), Hash(jt + "x"), run);
+        require(bad.refused && runs == 0 && !Exists(Join(jobs, L"result-one.txt")), "elevated step: one job with another SHA-256 is refused, no result written");
+        const wstring jlink = Join(data, L"jobs-link");
+        require(MakeJunction(jlink, jobs), "test setup (4)");
+        runs = 0;
+        const WorkerRun viaLink = RunWorkerFiles(L"", Join(jlink, L"job-one.txt"), Hash(jt), run);
+        require(viaLink.refused && runs == 0 && !Exists(Join(jobs, L"result-one.txt")), "elevated step: a jobs folder that is not a plain folder is refused");
+        RemoveDirectoryW(jlink.c_str());
+    }
+    {   // the result is written to a new file and moved into place, never written through an existing name
+        const string jt = jobText(okLog);
+        Put(Join(jobs, L"job-H.txt"), jt);
+        require(CreateHardLinkW(Join(jobs, L"result-H.txt").c_str(), otherFile.c_str(), nullptr) != FALSE, "test setup (5)");
+        runs = 0;
+        RunWorkerFiles(L"", Join(jobs, L"job-H.txt"), Hash(jt), run);
+        require(Get(otherFile) == "keep", "elevated step: the result is not written through an existing name");
+        DeleteFileW(Join(jobs, L"result-H.txt").c_str());
+    }
+    RemoveTree(root);
+}
 }  // namespace
 
 int main() {
@@ -442,6 +585,15 @@ int main() {
         OpResult res; res.code = 6; res.message = L"switch?"; res.warnings = {L"w1"}; res.notes = {L"n1", L"n2"};
         OpResult rb;
         require(ParseResult(ResultText(res), rb) && rb.code == 6 && rb.message == L"switch?" && rb.warnings.size() == 1 && rb.notes.size() == 2, "result file round trip");
+        {   // the batch file: job= / sha256= pairs; result= lines and a job without its SHA-256 are refused
+            std::vector<std::pair<wstring, wstring>> bj; bool stop = false;
+            const wstring h(64, L'a');
+            require(ParseBatch(BatchText({{L"C:\\j\\job-1.txt", h}, {L"C:\\j\\job-2.txt", h}}, true), bj, stop) && bj.size() == 2 && stop && bj[1].second == h,
+                    "batch file round trip (job and its SHA-256)");
+            require(!ParseBatch("job=C:\\j\\job-1.txt\r\nresult=C:\\x.txt\r\n", bj, stop) && !ParseBatch("job=C:\\j\\job-1.txt\r\n", bj, stop) &&
+                        !ParseBatch("job=C:\\j\\job-1.txt\r\nsha256=abc\r\n", bj, stop), "batch file: result=, a missing or short SHA-256: refused");
+        }
+        ElevatedJobTests(TempFolder());
 
         // ---- update reply -----------------------------------------------------------------------------------------------
         wstring ver, page;

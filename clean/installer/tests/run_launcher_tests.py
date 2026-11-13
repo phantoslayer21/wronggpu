@@ -26,6 +26,12 @@ import mockpe  # noqa: E402  (synthetic PE files with a version resource)
 import run_installer_tests as suite  # noqa: E402  (mock content, snapshots, the synthetic model case)
 from run_installer_tests import read, sha, snapshot, diff, write  # noqa: E402
 
+
+def sha256_of(path):
+    """A job or batch file's SHA-256, as the launcher passes it to the elevated worker (apply --sha256=)."""
+    return sha(read(path))
+
+
 OPTI_INI = ("[Upscalers]\nDx12Upscaler=auto\n[Libraries]\nFfxDx12SRPath=auto\n[FSR]\nFsr4Update=auto\nUpscalerIndex=auto\n"
             "[Menu]\nShortcutKey=auto\nShowFps=auto\n")
 
@@ -413,29 +419,33 @@ def test_install_settings_uninstall(t, opti):
     rc = t.run("repair", exe, "--opti=" + opti, "--noscan", "--force")
     t.check("repair of an older version: wronggpu.ini back with the settings, the message says it updated from 0.5.1",
             rc == 0 and "output_filter=quality9" in (options_line(ini(b)) or "") and "updated from 0.5.1 to" in t.j.get("message", ""), (rc, t.j.get("message")))
-    # the elevated worker's job (run here without elevation: the same code path)
-    job = os.path.join(t.work, "job.txt")
-    result = os.path.join(t.work, "result.txt")
+    # the elevated worker's job (run here without elevation: the same code path). --sha256: the job file's; the worker
+    # writes its result next to it, result-<name>.txt for job-<name>.txt
+    job = os.path.join(t.work, "job-main.txt")
+    result = os.path.join(t.work, "result-main.txt")
     write(job, "op=apply\r\ndir=%s\r\nlocalappdata=%s\r\nprofile.output_filter=analytic\r\nprofile.fps_overlay=off\r\n" % (b, t.env["LOCALAPPDATA"]))
-    rc = t.run("apply", "--job=" + job, "--result=" + result)
+    rc = t.run("apply", "--job=" + job, "--sha256=" + sha256_of(job))
     res = read(result).decode("utf-8", "replace") if os.path.isfile(result) else ""
     t.check("apply --job: the worker writes the result; the job's settings are in the files", rc == 0 and "code=0" in res and
             "output_filter=analytic" in (options_line(ini(b)) or "") and "ShowFps=false" in ini(b, "OptiScaler.ini"), (rc, res))
     write(job, "op=apply\r\ndir=relative\\folder\r\nlocalappdata=%s\r\n" % t.env["LOCALAPPDATA"])
-    rc = t.run("apply", "--job=" + job, "--result=" + result)
+    rc = t.run("apply", "--job=" + job, "--sha256=" + sha256_of(job))
     t.check("apply --job with a relative path: refused (exit 10)", rc == 10 and "code=10" in read(result).decode(), rc)
+    os.remove(result)
+    rc = t.run("apply", "--job=" + job, "--sha256=" + "0" * 64)
+    t.check("apply --job with another SHA-256: refused (exit 10), nothing written", rc == 10 and not os.path.exists(result), rc)
     # several jobs in one worker run (the window's one permission prompt for every protected folder): each writes its result, in order
     lad = t.env["LOCALAPPDATA"]
     jobs = [os.path.join(t.work, "batch-job-%d.txt" % i) for i in (1, 2)]
-    results = [os.path.join(t.work, "batch-result-%d.txt" % i) for i in (1, 2)]
-    batch = os.path.join(t.work, "batch.txt")
+    batch = os.path.join(t.work, "batch-B.txt")
+    results = [os.path.join(t.work, "result-B-%d.txt" % i) for i in (1, 2)]   # the worker's own names
     for f in results:
         if os.path.exists(f):
             os.remove(f)
     write(jobs[0], "op=apply\r\ndir=%s\r\nlocalappdata=%s\r\nprofile.output_filter=quality5\r\n" % (b, lad))
     write(jobs[1], "op=apply\r\ndir=%s\r\nlocalappdata=%s\r\nprofile.output_filter=analytic\r\nprofile.fps_overlay=off\r\n" % (b, lad))
-    write(batch, "stop=1\r\n" + "".join("job=%s\r\nresult=%s\r\n" % (j, r) for j, r in zip(jobs, results)))
-    rc = t.run("apply", "--batch=" + batch)
+    write(batch, "stop=1\r\n" + "".join("job=%s\r\nsha256=%s\r\n" % (j, sha256_of(j)) for j in jobs))
+    rc = t.run("apply", "--batch=" + batch, "--sha256=" + sha256_of(batch))
     res = [read(f).decode("utf-8", "replace") if os.path.isfile(f) else "" for f in results]
     t.check("apply --batch: both jobs run in order, each writes its result (the last one's settings are in the files)",
             rc == 0 and all("code=0" in r for r in res) and t.j.get("ran") == 2 and "output_filter=analytic" in (options_line(ini(b)) or ""), (rc, res, t.j))
@@ -444,7 +454,8 @@ def test_install_settings_uninstall(t, opti):
             os.remove(f)
     write(jobs[0], "op=apply\r\ndir=relative\\folder\r\nlocalappdata=%s\r\n" % lad)
     write(jobs[1], "op=apply\r\ndir=%s\r\nlocalappdata=%s\r\nprofile.output_filter=quality5\r\n" % (b, lad))
-    rc = t.run("apply", "--batch=" + batch)
+    write(batch, "stop=1\r\n" + "".join("job=%s\r\nsha256=%s\r\n" % (j, sha256_of(j)) for j in jobs))
+    rc = t.run("apply", "--batch=" + batch, "--sha256=" + sha256_of(batch))
     res = [read(f).decode("utf-8", "replace") if os.path.isfile(f) else "" for f in results]
     t.check("apply --batch with stop=1: the first fails (exit 10), the second is not run and its result says so (code -1, the files unchanged)",
             rc == 10 and "code=10" in res[0] and "code=-1" in res[1] and t.j.get("ran") == 1 and "output_filter=analytic" in (options_line(ini(b)) or ""), (rc, res, t.j))
@@ -2528,7 +2539,7 @@ def test_rr_config_fix(t, opti):
         write(os.path.join(job_cfg, "GameUserSettings.ini"), b"[ScalabilityGroups]\r\n")  # the game's settings folder there
         job, res = os.path.join(t.work, "job-rrconfig.txt"), os.path.join(t.work, "result-rrconfig.txt")
         write(job, "op=apply\r\ndir=%s\r\nlocalappdata=%s\r\ndocuments=%s\r\nprofile.rr_config_fix=on\r\n" % (b, t.env["LOCALAPPDATA"], docs2))
-        rc = t.run("apply", "--job=" + job, "--result=" + res)
+        rc = t.run("apply", "--job=" + job, "--sha256=" + sha256_of(job))
         job_ini = os.path.join(docs2, "My Games", "Borderlands 4", "Saved", "Config", "Windows", "Engine.ini")
         t.check("elevated job with documents=: Engine.ini in the job's Documents folder, none in this process's", rc == 0 and os.path.isfile(job_ini) and
                 read(job_ini) == new_file and not os.listdir(docs), (rc, read(res) if os.path.exists(res) else b"", os.listdir(docs)))
