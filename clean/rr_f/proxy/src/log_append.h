@@ -10,7 +10,9 @@
 // Now every write is ONE WriteFile of the whole text (timestamp, line, newline; a rotation notice in the same buffer)
 // on a handle opened with FILE_APPEND_DATA alone, which the system appends at the end of the file as one piece. A
 // process-wide named mutex, named after the log file's full path, puts the two copies' writes (and the size check and
-// rotation) in one order; its wait is bounded, and when it fails the line is still written with the one append call.
+// rotation) in one order while it is held. Its wait is bounded: after a timeout (or when the mutex cannot be created)
+// the line is still written with the one append call but without the lock and without a size check, so it may land in
+// the file another copy is just moving aside. Best effort, not a guarantee (HOOK-MODE.md, "The log with two copies").
 #pragma once
 
 #include <windows.h>

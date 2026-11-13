@@ -1,26 +1,33 @@
 // SPDX-License-Identifier: MIT
 // RR guard: the coexistence guard of the hook-mode RR plugin (HOOK-MODE.md, "Another Ray Reconstruction
-// plugin"). When another Ray Reconstruction plugin demonstrably holds the game's RR path in this process, WrongGPU RR
-// stays off and logs one line; Model M is not touched. Generic and read-only: it looks at where the game's RR calls
-// lead (import slots, the first bytes of the interface's RR exports, the host's continuation pointers), never at
-// another plugin's files or internals.
+// plugin"). Generic and read-only: it looks at where the game's RR calls lead (import slots, the first bytes of the
+// interface's RR exports, the host's continuation pointers), never at another plugin's files or internals.
 //
-// Only a POSITIVE finding stops the plugin: an address that ends in a named foreign module (also through decoded hook
-// jumps), or in our own second copy. Everything else the scan cannot explain (unreadable memory, too many hops, code
-// outside every module that does not jump on, the exe's own code) is logged once as inconclusive and the plugin stays
-// active: a game's copy protection or a hooking library's trampolines must never switch RR off for a player who has no
-// other plugin.
+// WrongGPU RR switches itself off automatically ONLY on evidence that is positive by contract:
+//   - a second copy of WrongGPU RR (the process-wide marker, or an address that ends in a module exporting
+//     kOwnRrExport);
+//   - the host's plugin API saying the RR provider slot is taken, or refusing our registration (hook_dll.cpp).
+// Nothing else. A named foreign module on the call path is INCONCLUSIVE: it may be another RR plugin, but it may as well
+// be a game's own wrapper DLL, an overlay, a security shim, a host helper in a third image or a forwarded export's
+// implementation DLL. WrongGPU RR stays active (as in 0.6.0) and one line names the module and the place
+// (line_foreign). wronggpu-rr.ini rr_other_plugin=yield makes such a module switch WrongGPU RR off; take puts WrongGPU RR
+// in front of it. What the scan cannot explain at all (unreadable memory, too many hops, code outside every module that
+// does not jump on, the exe's own code) is logged once as inconclusive (line_inconclusive) and changes nothing either.
 //
 // This header holds the parts without process state, so the CPU tests can drive them with synthetic memory:
 //   - safe_read: every read of memory we do not own (VirtualQuery for committed, readable, non-guard pages, then a
-//     structured-exception-guarded copy); a failed read is "unknown", never a fault;
+//     structured-exception-guarded copy); a failed read is "unknown", never a fault. The check and the copy are not
+//     atomic (HOOK-MODE.md says what that leaves);
+//   - PeView: a module's PE64 headers read through the reader, with e_lfanew, every data directory and every RVA the
+//     scan follows checked against SizeOfImage before any address is formed from them;
 //   - decode_jump: the jump forms a hook puts at the start of a function (jmp rel32 / rel8, jmp [rip+disp32],
 //     mov rax|r11, imm64 + jmp reg);
 //   - classify: who an address belongs to (our module, the game interface, the host, another copy of WrongGPU RR,
 //     another WrongGPU module, the exe's own delay-load thunk, code outside every module, another module), following
 //     hook jumps out of the interface and out of anonymous memory, at most kMaxHops of them;
-//   - Verdict: the positive finding (if any) of several classifications, the inconclusive ones, and the words for the
-//     log;
+//   - Verdict: what several classifications found (a copy of WrongGPU RR, the first foreign module, the inconclusive
+//     ones) and the words for the log;
+//   - Mode / decide: what a verdict means for WrongGPU RR under rr_other_plugin (one table, tested on its own);
 //   - Decision: the once-only late decision (several game threads may make the first call at the same time).
 #pragma once
 #include <stddef.h>
@@ -38,12 +45,12 @@ namespace guard {
 // other WrongGPU plugin (WrongGPU.asi, Model M's menu plugin). Documented in HOOK-MODE.md (the launcher matches them).
 constexpr const char* kOwnRrExport = "WrongGPU_GetSettingsContract";
 constexpr const char* kWrongGpuAsiExport = "WrongGpuAsiQuery";
-// wronggpu-rr.ini: rr_other_plugin = off (default) | take
+// wronggpu-rr.ini: rr_other_plugin = off (default) | take | yield
 constexpr const char* kOverrideKey = "rr_other_plugin";
 constexpr int kMaxHops = 4;  // hook jumps followed from one address (a fifth one is "too many hops": inconclusive)
 
 // True when [p, p + n) lies in committed pages that are readable (execute-only pages count: code is read from them and
-// the structured-exception guard of the copy covers a fault) and not guard pages (VirtualQuery only).
+// the structured-exception guard of the copy covers a fault) and not guard pages, as VirtualQuery reports them now.
 bool readable(const void* p, size_t n);
 // Copies n bytes from p to out when readable() and the copy raises no structured exception. False: unknown.
 bool safe_read(const void* p, void* out, size_t n);
@@ -69,6 +76,29 @@ class Reader {
   uintptr_t lo_ = 0, hi_ = 0;
 };
 
+// A loaded module's PE64 headers as the scan may use them. open() reads the DOS and NT headers through the reader and
+// accepts them only when e_lfanew points inside the image (and the NT headers fit), the optional header is PE32+ and
+// SizeOfImage is plausible; dir() hands out a data directory only when its RVA and size lie inside SizeOfImage. at()
+// forms an address from an RVA only after checking [rva, rva + n) against SizeOfImage (integers first, no pointer
+// arithmetic on unchecked values). Anything that fails is "not readable": the caller treats it as nothing found.
+class PeView {
+ public:
+  bool open(const void* module, Reader& r);
+  // the directory `index` when present and inside the image (false: absent or out of bounds)
+  bool dir(unsigned index, uint32_t* rva, uint32_t* size) const;
+  // base + rva when [rva, rva + n) lies inside the image, else null
+  const uint8_t* at(uint64_t rva, uint64_t n) const;
+  uint32_t size_of_image() const { return size_; }
+  const uint8_t* base() const { return base_; }
+
+ private:
+  const uint8_t* base_ = nullptr;
+  uint32_t size_ = 0;
+  uint32_t ndirs_ = 0;
+  uint32_t dir_rva_[16] = {};
+  uint32_t dir_size_[16] = {};
+};
+
 // A hook jump at `at` (code holds the first bytes read from there, n of them). On success *target is where it goes;
 // for jmp [rip+disp32] *cell is the pointer cell (read with safe_read; a failed read makes the decode fail).
 bool decode_jump(const uint8_t* code, size_t n, const uint8_t* at, const void** target, const void** cell);
@@ -78,11 +108,11 @@ enum class Owner {
   kSelf,        // this WrongGPU RR module
   kInterface,   // the game interface module (its own code)
   kHost,        // the host that loaded us, or the module holding its API table (it patches the interface itself)
-  kOwnCopy,     // another loaded copy of WrongGPU RR (exports kOwnRrExport): positive
+  kOwnCopy,     // another loaded copy of WrongGPU RR (exports kOwnRrExport): positive, it switches this copy off
   kWrongGpu,    // another WrongGPU module (exports kWrongGpuAsiExport)
   kExeThunk,    // the exe's own code (a delay-load slot not bound yet holds the delay helper's thunk there): inconclusive
   kAnonymous,   // readable code outside every module that does not jump on (a trampoline): inconclusive
-  kForeign,     // another named module: another plugin (positive)
+  kForeign,     // another named module: inconclusive (named in the log; only rr_other_plugin=yield acts on it)
 };
 const char* owner_word(Owner o);
 
@@ -116,16 +146,18 @@ struct Where {
 // interface's own code. Jumps are always followed out of anonymous memory.
 Where classify(const void* p, const Env& env, bool follow_iface);
 
-// What a scan found. kOther / kOwnCopy are positive findings only (an address that ends in another named module, or in
-// a second copy of WrongGPU RR; the first foreign one decides, a copy of WrongGPU RR before anything else). Whatever
-// could not be explained (unreadable, too many hops, anonymous code that does not jump on, the exe's own code) is
-// counted in `unclear` and leaves the kind at kClean: the plugin stays active.
+// What a scan found. kOwnCopy: an address ends in a second copy of WrongGPU RR (it wins over everything). kForeign: an
+// address ends in another named module (the first one is kept for the log; inconclusive, see decide()). Whatever could
+// not be explained at all (unreadable, too many hops, anonymous code that does not jump on, the exe's own code) is
+// counted in `unclear` and leaves the kind as it is.
 struct Verdict {
-  enum Kind { kClean, kOwnCopy, kOther } kind = kClean;
-  std::string detail;  // e.g. "the import slot slEvaluateFeature of Game.exe leads to other.asi"
-  const void* other_module = nullptr;  // kOther: the module the first foreign finding ends in
+  enum Kind { kClean, kOwnCopy, kForeign } kind = kClean;
+  std::string detail;  // e.g. "the import slot slEvaluateFeature of Game.exe leads to other.dll"
+  std::string module;  // kForeign: the file name of the module the first foreign address ends in ("another module")
+  const void* other_module = nullptr;  // kForeign: that module
+  unsigned foreign = 0;  // addresses that end in another named module
   unsigned reads = 0;  // addresses looked at
-  unsigned unclear = 0;          // addresses that were neither trusted nor a positive finding
+  unsigned unclear = 0;          // addresses that were neither trusted nor a named module
   std::string unclear_detail;    // the first of them, e.g. "the import slot X of Y could not be read"
   // Takes one classification. `what` names the place ("the import slot X of Y"); anon_ok: code outside every
   // module is accepted here (the host's own trampolines); exe_ok: the exe's own code is accepted (delay thunks).
@@ -133,23 +165,42 @@ struct Verdict {
 };
 bool trusted(Owner o, bool anon_ok, bool exe_ok);
 
-// rr_other_plugin from wronggpu-rr.ini: false = off (the default, also for an unknown value; *note says so).
-bool override_take(const std::string& value, std::string* note);
+// rr_other_plugin from wronggpu-rr.ini. Unknown or empty values are off (*note says so for a nonempty unknown one).
+enum class Mode { kOff, kTake, kYield };
+Mode parse_mode(const std::string& value, std::string* note);
+const char* mode_word(Mode m);
 
-// The log lines (stable; HOOK-MODE.md documents them, the launcher's Last run page matches them).
-// stays off at load (passing: WrongGPU's handlers were already installed by the host and pass every call on)
-std::string line_other(const std::string& detail, bool passing = false);
-std::string line_other_later(const std::string& detail);        // stays off, found at the late check (pass-through)
-std::string line_take(const std::string& detail);               // rr_other_plugin=take: WrongGPU RR in front
-std::string line_cannot_take(const std::string& detail);        // take asked, the other plugin loaded later
+// The guard's state for the whole process run. Active until a decision says otherwise; the late decision is taken once.
+enum class State : int { kActive = 0, kOff = 1, kOwnCopy = 2, kPassThrough = 3, kTaken = 4 };
+
+// When a scan runs: before anything of ours is in place (kLoad: the exe's import slots and the exports at InitializeASI,
+// the exports before the host routes), right after our host routes were installed in front (kRoutes: the host's next
+// functions), or after our handlers were installed (kLate: OptiPluginInit, the game's first call).
+enum class Stage { kLoad, kRoutes, kLate };
+
+// What a scan's verdict means for WrongGPU RR (the whole policy, in one place):
+//   - not active already (off, own copy, passing): stays as it is;
+//   - clean: stays as it is;
+//   - a copy of WrongGPU RR: off at load (nothing patched), passing once our handlers or routes are in place;
+//   - a named foreign module: off -> stays as it is (active; the caller logs line_foreign); take -> kTaken while
+//     WrongGPU can still go in front of it (load, routes), else as it is; yield -> off at load, passing later.
+State decide(Verdict::Kind kind, Mode mode, Stage stage, State current);
+
+// The log lines (stable; HOOK-MODE.md documents them; the beginnings are what a reader such as the launcher's Last run
+// page can match: kForeignStem, the "stays off" stem of line_ngx_other, the own-copy stem).
+// A named foreign module on the RR path: "another module hooks the game's RR calls: <module> (<detail>); <tail>"
+enum class Tail {
+  kStaysActive,   // rr_other_plugin=off (also take after our handlers are in place): RR stays WrongGPU's
+  kTakeInFront,   // take, at load or with our routes in front: WrongGPU RR in front, the module gets the other calls
+  kYieldOff,      // yield at load: nothing patched
+  kYieldPassing,  // yield with our handlers or routes in place: they pass every call on unchanged
+};
+std::string line_foreign(const std::string& module, const std::string& detail, Tail tail);
 std::string line_own_copy(const std::string& active, const std::string& self);
 std::string line_ngx_other();                                   // the host refused our NGX provider
-// The stay-on diagnostic (starts with "hook: "; never with the beginnings above): the scan could not explain `n`
-// address(es), `first` is the first one. No finding, RR stays active.
+// The stay-on diagnostic (starts with "hook: "; never with a beginning above): the scan could not explain `n`
+// address(es), `first` is the first one. RR stays active.
 std::string line_inconclusive(const std::string& when, unsigned n, const std::string& first);
-
-// The guard's state for the whole process run. Active until a scan says otherwise; the late decision is taken once.
-enum class State : int { kActive = 0, kOff = 1, kOwnCopy = 2, kPassThrough = 3, kTaken = 4 };
 
 class Decision {
  public:

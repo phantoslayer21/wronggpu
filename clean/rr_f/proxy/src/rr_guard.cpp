@@ -64,6 +64,11 @@ int32_t rd32(const uint8_t* b) {
   memcpy(&v, b, 4);
   return v;
 }
+
+// at + d as an address (integer arithmetic: a jump target may lie anywhere, it is only ever read through safe reads)
+const void* rel(const uint8_t* at, intptr_t d) {
+  return reinterpret_cast<const void*>(reinterpret_cast<uintptr_t>(at) + (uintptr_t)d);
+}
 }  // namespace
 
 bool safe_read(const void* p, void* out, size_t n) {
@@ -96,19 +101,60 @@ bool Reader::str(const void* p, char* out, size_t max) {
   return false;
 }
 
+bool PeView::open(const void* module, Reader& r) {
+  base_ = nullptr;
+  size_ = 0;
+  ndirs_ = 0;
+  const uint8_t* base = static_cast<const uint8_t*>(module);
+  IMAGE_DOS_HEADER dos;
+  if (!base || !r.get(base, &dos) || dos.e_magic != IMAGE_DOS_SIGNATURE) return false;
+  // e_lfanew is a signed 32-bit offset: checked as an integer (positive, past the DOS header, not absurd) before the NT
+  // headers are read at all; against SizeOfImage once that is known
+  const LONG lfanew = dos.e_lfanew;
+  if (lfanew < (LONG)sizeof(IMAGE_DOS_HEADER) || lfanew > 0x100000) return false;
+  IMAGE_NT_HEADERS64 nt;
+  if (!r.get(base + lfanew, &nt) || nt.Signature != IMAGE_NT_SIGNATURE ||
+      nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+    return false;
+  const uint32_t size = nt.OptionalHeader.SizeOfImage;
+  if ((uint64_t)lfanew + sizeof(IMAGE_NT_HEADERS64) > size) return false;  // the headers lie inside the image
+  if ((uintptr_t)base + size < (uintptr_t)base) return false;              // the image does not wrap the address space
+  base_ = base;
+  size_ = size;
+  ndirs_ = nt.OptionalHeader.NumberOfRvaAndSizes < 16 ? nt.OptionalHeader.NumberOfRvaAndSizes : 16;
+  for (uint32_t i = 0; i < ndirs_; ++i) {
+    dir_rva_[i] = nt.OptionalHeader.DataDirectory[i].VirtualAddress;
+    dir_size_[i] = nt.OptionalHeader.DataDirectory[i].Size;
+  }
+  return true;
+}
+
+bool PeView::dir(unsigned index, uint32_t* rva, uint32_t* size) const {
+  if (!base_ || index >= ndirs_ || !dir_rva_[index] || !dir_size_[index]) return false;
+  if (!at(dir_rva_[index], dir_size_[index])) return false;  // the directory lies inside the image
+  *rva = dir_rva_[index];
+  *size = dir_size_[index];
+  return true;
+}
+
+const uint8_t* PeView::at(uint64_t rva, uint64_t n) const {
+  if (!base_ || rva > size_ || n > (uint64_t)size_ - rva) return nullptr;
+  return base_ + rva;
+}
+
 bool decode_jump(const uint8_t* c, size_t n, const uint8_t* at, const void** target, const void** cell) {
   if (cell) *cell = nullptr;
   if (n >= 5 && c[0] == 0xE9) {  // jmp rel32
-    *target = at + 5 + rd32(c + 1);
+    *target = rel(at, 5 + (intptr_t)rd32(c + 1));
     return true;
   }
   if (n >= 2 && c[0] == 0xEB) {  // jmp rel8
-    *target = at + 2 + static_cast<int8_t>(c[1]);
+    *target = rel(at, 2 + (intptr_t)static_cast<int8_t>(c[1]));
     return true;
   }
   const size_t r = (n >= 1 && c[0] == 0x48) ? 1 : 0;  // REX.W jmp [rip+disp32] (same meaning)
   if (n >= r + 6 && c[r] == 0xFF && c[r + 1] == 0x25) {  // jmp [rip+disp32]
-    const uint8_t* slot = at + r + 6 + rd32(c + r + 2);
+    const void* slot = rel(at, (intptr_t)(r + 6) + rd32(c + r + 2));
     const void* t = nullptr;
     if (!safe_get(slot, &t)) return false;
     if (cell) *cell = slot;
@@ -230,14 +276,16 @@ void Verdict::add(const Where& w, const std::string& what, bool anon_ok, bool ex
     return;
   }
   if (trusted(w.owner, anon_ok, exe_ok)) return;
-  if (w.owner == Owner::kForeign) {  // the one positive sign of another plugin: a named module that is not ours
-    if (kind == kOther) return;
-    kind = kOther;
+  if (w.owner == Owner::kForeign) {  // a named module that is not ours: inconclusive, named (the first one) in the log
+    ++foreign;
+    if (kind == kForeign) return;
+    kind = kForeign;
     other_module = w.module_handle;
-    detail = what + " leads to " + (w.module.empty() ? std::string("another module") : w.module) + via;
+    module = w.module.empty() ? std::string("another module") : w.module;
+    detail = what + " leads to " + module + via;
     return;
   }
-  // not a sign of another plugin: counted, the first one named for the log
+  // nothing could be told: counted, the first one named for the log
   ++unclear;
   if (unclear > 1) return;
   if (w.owner == Owner::kUnknown)
@@ -247,40 +295,62 @@ void Verdict::add(const Where& w, const std::string& what, bool anon_ok, bool ex
   else unclear_detail = what + " leads into the exe's own code" + via;
 }
 
-bool override_take(const std::string& value, std::string* note) {
+Mode parse_mode(const std::string& value, std::string* note) {
   std::string v;
   for (char c : value)
     if (c != ' ' && c != '\t' && c != '\r' && c != '\n') v.push_back((char)(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c));
   if (note) note->clear();
-  if (v == "take") return true;
+  if (v == "take") return Mode::kTake;
+  if (v == "yield") return Mode::kYield;
   if (!v.empty() && v != "off" && note)
-    *note = std::string(kOverrideKey) + "=" + value + " in wronggpu-rr.ini not recognised (off | take); off is used";
-  return false;
+    *note = std::string(kOverrideKey) + "=" + value + " in wronggpu-rr.ini not recognised (off | take | yield); off is used";
+  return Mode::kOff;
 }
 
-// The lines start with the words the launcher's Last run page matches (no "hook: " prefix): kStem, kOwnCopyStem,
-// kLaterStem. HOOK-MODE.md documents them; changing a beginning breaks that page.
+const char* mode_word(Mode m) {
+  switch (m) {
+    case Mode::kOff: return "off";
+    case Mode::kTake: return "take";
+    case Mode::kYield: return "yield";
+  }
+  return "?";
+}
+
+State decide(Verdict::Kind kind, Mode mode, Stage stage, State current) {
+  if (current != State::kActive && current != State::kTaken) return current;  // off, own copy, passing: final
+  switch (kind) {
+    case Verdict::kClean:
+      return current;
+    case Verdict::kOwnCopy:  // positive by contract
+      return stage == Stage::kLoad ? State::kOwnCopy : State::kPassThrough;
+    case Verdict::kForeign:  // inconclusive: only the player's setting acts on it
+      if (mode == Mode::kYield) return stage == Stage::kLoad ? State::kOff : State::kPassThrough;
+      if (mode == Mode::kTake && stage != Stage::kLate) return State::kTaken;
+      return current;
+  }
+  return current;
+}
+
+// The beginnings a reader can match (HOOK-MODE.md documents them; keep them exactly): kForeignStem, kStem (the NGX
+// route's "stays off" line), kOwnCopyStem. None of them has the "hook: " prefix of the diagnostics.
+static const char kForeignStem[] = "another module hooks the game's RR calls: ";
 static const char kStem[] = "another Ray Reconstruction plugin is active; WrongGPU RR stays off (";
 static const char kOwnCopyStem[] = "a second copy of WrongGPU RR is loaded (";
-static const char kLaterStem[] = "a plugin loaded after WrongGPU replaced its hooks; ";
 
-std::string line_other(const std::string& d, bool passing) {
-  return std::string(kStem) + d +
-         (passing ? "; WrongGPU's handlers pass every call on unchanged; " : "; nothing patched; ") + kOverrideKey +
-         "=take in wronggpu-rr.ini uses WrongGPU's instead)";
-}
-std::string line_other_later(const std::string& d) {
-  return std::string(kStem) + d +
-         "; it loaded after WrongGPU: WrongGPU passes every call on unchanged; to use WrongGPU RR, move it aside)";
-}
-std::string line_take(const std::string& d) {
-  return std::string("another Ray Reconstruction plugin is active; ") + kOverrideKey +
-         "=take: WrongGPU RR goes in front of it (" + d + "; it gets the game's other calls, no RR work)";
-}
-std::string line_cannot_take(const std::string& d) {
-  return std::string(kLaterStem) + kOverrideKey +
-         "=take cannot be applied: WrongGPU RR stays off and passes every call on unchanged (" + d +
-         "); move it aside to use WrongGPU RR";
+std::string line_foreign(const std::string& module, const std::string& detail, Tail tail) {
+  std::string s = std::string(kForeignStem) + module + " (" + detail + "); ";
+  switch (tail) {
+    case Tail::kStaysActive:
+      return s + "it is not known to be a Ray Reconstruction plugin: WrongGPU RR stays active (" + kOverrideKey +
+             "=yield in wronggpu-rr.ini keeps WrongGPU RR off in this case)";
+    case Tail::kTakeInFront:
+      return s + kOverrideKey + "=take: WrongGPU RR goes in front of it (it gets the game's other calls, no RR work)";
+    case Tail::kYieldOff:
+      return s + kOverrideKey + "=yield: WrongGPU RR stays off (nothing patched)";
+    case Tail::kYieldPassing:
+      return s + kOverrideKey + "=yield: WrongGPU RR stays off (WrongGPU's handlers pass every call on unchanged)";
+  }
+  return s;
 }
 std::string line_own_copy(const std::string& active, const std::string& self) {
   return std::string(kOwnCopyStem) + active + " is active); this copy (" + self + ") stays off";
@@ -343,17 +413,14 @@ Env process_env(const void* self, const void* iface, const void* host, const voi
     return GetProcAddress(static_cast<HMODULE>(const_cast<void*>(m)), name) != nullptr;
   };
   e.name_of = leaf_utf8;
-  // the interface's own import address table (IMAGE_DIRECTORY_ENTRY_IAT), read through safe reads
-  const uint8_t* base = static_cast<const uint8_t*>(iface);
-  IMAGE_DOS_HEADER dos;
-  IMAGE_NT_HEADERS64 nt;
-  if (base && safe_get(base, &dos) && dos.e_magic == IMAGE_DOS_SIGNATURE && safe_get(base + dos.e_lfanew, &nt) &&
-      nt.Signature == IMAGE_NT_SIGNATURE) {
-    const IMAGE_DATA_DIRECTORY& d = nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IAT];
-    if (d.VirtualAddress && d.Size) {
-      e.iface_iat_begin = base + d.VirtualAddress;
-      e.iface_iat_end = base + d.VirtualAddress + d.Size;
-    }
+  // the interface's own import address table (IMAGE_DIRECTORY_ENTRY_IAT), read through safe reads and checked against
+  // the image's size (PeView)
+  Reader r;
+  PeView pe;
+  uint32_t rva = 0, size = 0;
+  if (iface && pe.open(iface, r) && pe.dir(IMAGE_DIRECTORY_ENTRY_IAT, &rva, &size)) {
+    e.iface_iat_begin = pe.at(rva, size);
+    e.iface_iat_end = e.iface_iat_begin + size;
   }
   return e;
 }

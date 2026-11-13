@@ -1,16 +1,22 @@
 // SPDX-License-Identifier: MIT
 // RR guard: CPU unit test of the coexistence guard's pieces without process state (src/rr_guard.h).
 //   - safe reads: a readable buffer; a PAGE_NOACCESS page, a reserved page, a guard page (the guard flag must survive the
-//     check: nothing touched it); a read across a readable / unreadable boundary; the cached reader's structured-exception
-//     path (a page made unreadable after its region was cached); the cache keeps VirtualQuery calls few;
+//     check, with no other thread changing the page meanwhile); a read across a readable / unreadable boundary; the
+//     cached reader's structured-exception path (a page made unreadable after its region was cached); the cache keeps
+//     VirtualQuery calls few;
+//   - PeView: the real exe's headers; synthetic headers with a bad e_lfanew (negative, inside the DOS header, absurd, NT
+//     headers past SizeOfImage), directories past SizeOfImage or wrapping, too few directories, PE32, no signature;
 //   - decode_jump: every jump form, and a jmp [rip+disp32] whose cell is not readable;
 //   - classify: synthetic modules (ranges of one allocation) and anonymous relays: the interface's own code, a hook jump
 //     to another module, a jump inside the interface, the linker's import thunk, a relay chain to the host, exactly
 //     kMaxHops jumps (followed) and one more (too many hops), a relay loop, anonymous code, an unreadable target, an
 //     execute-only relay page (read), a copy of WrongGPU RR, WrongGPU.asi, the exe's thunk, the host's second module;
-//   - Verdict: only a positive finding (a named foreign module, a copy of WrongGPU RR) is a finding; unreadable memory,
-//     too many hops, non-jumping anonymous code and the exe's own code are inconclusive (counted, kind stays clean);
-//     precedence, override parsing, the exact log lines;
+//   - Verdict: a copy of WrongGPU RR wins; a named foreign module is kept (the first one) as kForeign; unreadable memory,
+//     too many hops, non-jumping anonymous code and the exe's own code are counted as unclear;
+//   - decide: with NO second RR provider (a game-owned wrapper DLL, a host helper in a third image, an overlay-style
+//     wrapper, a forwarded export, the heap-table and helper-table host layouts) RR stays active at every stage unless
+//     rr_other_plugin=yield (take: in front, never off); a copy of WrongGPU RR switches it off in every mode; a decision
+//     already taken stays; override parsing (off | take | yield), the exact log lines;
 //   - Decision: 32 threads make the "first call" at once: decide runs exactly once, every thread sees the same state.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -73,7 +79,7 @@ int main() {
     CHECK(!safe_read(blk + 3 * kPage, b, 8));          // reserved, not committed
     CHECK(!safe_read(blk + kPage - 4, b, 8));          // across readable -> unreadable
     MEMORY_BASIC_INFORMATION m;
-    CHECK(VirtualQuery(blk + 2 * kPage, &m, sizeof m) && (m.Protect & PAGE_GUARD));  // never touched: still a guard page
+    CHECK(VirtualQuery(blk + 2 * kPage, &m, sizeof m) && (m.Protect & PAGE_GUARD));  // untouched by the check
     uint64_t p64 = 0;
     CHECK(!safe_get(blk + 3 * kPage, &p64));
     // an execute-only page counts as readable (a hooking library's trampolines); the copy is guarded either way
@@ -315,7 +321,7 @@ int main() {
     CHECK(ok.kind == Verdict::kClean && ok.unclear == 0);
     // positive findings
     v.add(classify(iface + 384, env, true), "the export E of iface.dll", false, false);
-    CHECK(v.kind == Verdict::kOther && v.other_module == foreign);
+    CHECK(v.kind == Verdict::kForeign && v.other_module == foreign && v.module == "other.asi" && v.foreign == 1);
     CHECK(v.detail == "the export E of iface.dll leads to other.asi (through 3 hook jumps)");
     v.add(classify(foreign + 8, env, false), "the import slot M of game.exe", false, false);
     CHECK(v.detail == "the export E of iface.dll leads to other.asi (through 3 hook jumps)");  // the first one stays
@@ -325,39 +331,164 @@ int main() {
     CHECK(v.kind == Verdict::kOwnCopy && v.reads == 13);
     Verdict f4;  // a decoded chain of exactly kMaxHops jumps that ends in a foreign module is positive
     f4.add(classify(anon + 2048, env, false), "the import slot P of game.exe", false, false);
-    CHECK(f4.kind == Verdict::kOther && f4.detail == "the import slot P of game.exe leads to other.asi (through 4 hook jumps)");
+    CHECK(f4.kind == Verdict::kForeign && f4.detail == "the import slot P of game.exe leads to other.asi (through 4 hook jumps)");
     Verdict f5;  // the unreadable first read does not hide a later positive finding
     f5.add(classify(dead + 32, env, false), "the import slot F of game.exe", false, false);
     f5.add(classify(foreign + 8, env, false), "the import slot Q of game.exe", false, false);
-    CHECK(f5.kind == Verdict::kOther && f5.unclear == 1 && f5.detail == "the import slot Q of game.exe leads to other.asi");
+    CHECK(f5.kind == Verdict::kForeign && f5.unclear == 1 && f5.detail == "the import slot Q of game.exe leads to other.asi");
     CHECK(trusted(Owner::kWrongGpu, false, false) && !trusted(Owner::kUnknown, true, true) &&
           !trusted(Owner::kForeign, true, true) && !trusted(Owner::kOwnCopy, true, true));
+
+    // ---- layouts with NO second RR provider: a named module on the path is inconclusive, RR stays active (off) at
+    // every stage; only rr_other_plugin=yield switches it off, take puts WrongGPU RR in front while it still can
+    {
+      Env heap = env;  // the host's API table on the heap: no module, so nothing but InitializeASI's caller is the host
+      heap.host_alt = nullptr;
+      Env helper_table = env;  // the table in a helper image: a module, but not the one that patched
+      helper_table.host_alt = wgasi;
+      void* fwd_fn = foreign + 200;           // a forwarded export: GetProcAddress resolves into the implementation DLL
+      struct Layout { const char* name; Where w; };
+      const Layout layouts[] = {
+          {"game-owned wrapper DLL", classify(foreign + 8, env, false)},           // the exe's slot wraps through it
+          {"host helper in a third image", classify(foreign + 16, env, false)},    // the host is host.dll, not it
+          {"overlay-style wrapper", classify(iface + 384, env, true)},             // export -> relay -> relay -> module
+          {"forwarded export", classify(fwd_fn, env, true)},                       // the export's address is in it
+          {"heap-table host layout", classify(foreign + 24, heap, false)},         // the real host's own patch
+          {"helper-table host layout", classify(foreign + 32, helper_table, false)},
+      };
+      for (const Layout& l : layouts) {
+        Verdict lv;
+        lv.add(l.w, std::string("the import slot X of game.exe (") + l.name + ")", false, false);
+        CHECK(lv.kind == Verdict::kForeign && lv.module == "other.asi");
+        for (Stage st : {Stage::kLoad, Stage::kRoutes, Stage::kLate}) {
+          CHECK(decide(lv.kind, Mode::kOff, st, State::kActive) == State::kActive);  // stays active
+          CHECK(decide(lv.kind, Mode::kOff, st, State::kTaken) == State::kTaken);
+          CHECK(decide(lv.kind, Mode::kTake, st, State::kActive) ==
+                (st == Stage::kLate ? State::kActive : State::kTaken));  // never off with take
+          CHECK(decide(lv.kind, Mode::kYield, st, State::kActive) ==
+                (st == Stage::kLoad ? State::kOff : State::kPassThrough));
+        }
+      }
+      // the host's own patch, when the host is known (caller of InitializeASI or the table's module), is not named
+      Env split = env;
+      split.host_alt = foreign;
+      Verdict hv;
+      hv.add(classify(foreign + 24, split, false), "the import slot X of game.exe", false, false);
+      CHECK(hv.kind == Verdict::kClean && hv.unclear == 0 && hv.foreign == 0);
+    }
+    // ---- evidence that is positive by contract: a second copy of WrongGPU RR, at every stage and in every mode
+    for (Mode m : {Mode::kOff, Mode::kTake, Mode::kYield}) {
+      CHECK(decide(Verdict::kOwnCopy, m, Stage::kLoad, State::kActive) == State::kOwnCopy);
+      CHECK(decide(Verdict::kOwnCopy, m, Stage::kRoutes, State::kActive) == State::kPassThrough);
+      CHECK(decide(Verdict::kOwnCopy, m, Stage::kLate, State::kTaken) == State::kPassThrough);
+      for (Stage st : {Stage::kLoad, Stage::kRoutes, Stage::kLate}) {
+        CHECK(decide(Verdict::kClean, m, st, State::kActive) == State::kActive);  // clean: nothing changes
+        CHECK(decide(Verdict::kClean, m, st, State::kTaken) == State::kTaken);
+        for (State done : {State::kOff, State::kOwnCopy, State::kPassThrough})  // a decision already taken stays
+          for (Verdict::Kind k : {Verdict::kClean, Verdict::kOwnCopy, Verdict::kForeign})
+            CHECK(decide(k, m, st, done) == done);
+      }
+    }
     VirtualFree(blk, 0, MEM_RELEASE);
+  }
+
+  // ---------------------------------------------------------------- PeView: header and directory bounds
+  {
+    // the real exe: headers accepted, its import directory inside the image
+    Reader r;
+    PeView pe;
+    CHECK(pe.open(GetModuleHandleW(nullptr), r) && pe.size_of_image() > 0);
+    uint32_t rva = 0, size = 0;
+    CHECK(pe.dir(IMAGE_DIRECTORY_ENTRY_IMPORT, &rva, &size) && pe.at(rva, size) != nullptr);
+    CHECK(pe.at(pe.size_of_image(), 0) != nullptr && pe.at(pe.size_of_image(), 1) == nullptr);
+    CHECK(pe.at(0xFFFFFFFFull, 2) == nullptr && pe.at(8, 0xFFFFFFFFFFFFFFF0ull) == nullptr);  // no wrap-around
+    // a synthetic image: DOS header, NT headers at 0x80, SizeOfImage 0x2000, in 3 committed pages (one past the image)
+    uint8_t* img = static_cast<uint8_t*>(VirtualAlloc(nullptr, 3 * kPage, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    CHECK(img != nullptr);
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(img);
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(img + 0x80);
+    auto reset = [&] {
+      memset(img, 0, 3 * kPage);
+      dos->e_magic = IMAGE_DOS_SIGNATURE;
+      dos->e_lfanew = 0x80;
+      nt->Signature = IMAGE_NT_SIGNATURE;
+      nt->OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+      nt->OptionalHeader.SizeOfImage = 0x2000;
+      nt->OptionalHeader.NumberOfRvaAndSizes = 16;
+      nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT] = {0x1000, 0x100};
+    };
+    reset();
+    PeView s;
+    CHECK(s.open(img, r) && s.size_of_image() == 0x2000 && s.dir(IMAGE_DIRECTORY_ENTRY_IMPORT, &rva, &size) &&
+          rva == 0x1000 && size == 0x100);
+    // e_lfanew negative, inside the DOS header, absurdly far, or with the NT headers past SizeOfImage: refused
+    for (LONG bad : {(LONG)-8, (LONG)4, (LONG)0x7FFFFFF0, (LONG)0x1FF0}) {
+      reset();
+      if (bad == 0x1FF0) {  // the NT headers copied there (readable memory, but outside the image's 0x2000 bytes)
+        memcpy(img + 0x1FF0, nt, sizeof(IMAGE_NT_HEADERS64));
+      }
+      dos->e_lfanew = bad;
+      PeView b;
+      CHECK(!b.open(img, r));
+    }
+    // a directory whose RVA or size runs past SizeOfImage (or wraps): not handed out
+    const IMAGE_DATA_DIRECTORY bad_dirs[] = {{0x2000, 1}, {0x1F00, 0x200}, {0xFFFFFFF0, 0x20}, {0x10, 0xFFFFFFF8}};
+    for (const IMAGE_DATA_DIRECTORY& d : bad_dirs) {
+      reset();
+      nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT] = d;
+      PeView b;
+      CHECK(b.open(img, r) && !b.dir(IMAGE_DIRECTORY_ENTRY_IMPORT, &rva, &size));
+    }
+    // fewer directories than the index: absent; a PE32 optional header or a wrong signature: refused
+    reset();
+    nt->OptionalHeader.NumberOfRvaAndSizes = 1;
+    PeView few;
+    CHECK(few.open(img, r) && !few.dir(IMAGE_DIRECTORY_ENTRY_IMPORT, &rva, &size));
+    reset();
+    nt->OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR32_MAGIC;
+    PeView p32;
+    CHECK(!p32.open(img, r));
+    reset();
+    nt->Signature = 0;
+    PeView nosig;
+    CHECK(!nosig.open(img, r));
+    VirtualFree(img, 0, MEM_RELEASE);
   }
 
   // ---------------------------------------------------------------- the override, the log lines
   {
     std::string note;
-    CHECK(!override_take("", &note) && note.empty());
-    CHECK(!override_take("off", &note) && note.empty());
-    CHECK(override_take("take", &note) && note.empty());
-    CHECK(override_take(" Take \r", &note) && note.empty());
-    CHECK(!override_take("ours", &note) &&
-          note == "rr_other_plugin=ours in wronggpu-rr.ini not recognised (off | take); off is used");
-    // the beginnings the launcher's Last run page matches (HOOK-MODE.md): exact, no prefix
+    CHECK(parse_mode("", &note) == Mode::kOff && note.empty());
+    CHECK(parse_mode("off", &note) == Mode::kOff && note.empty());
+    CHECK(parse_mode("take", &note) == Mode::kTake && note.empty());
+    CHECK(parse_mode(" Take \r", &note) == Mode::kTake && note.empty());
+    CHECK(parse_mode("yield", &note) == Mode::kYield && note.empty());
+    CHECK(parse_mode("YIELD\t", &note) == Mode::kYield && note.empty());
+    CHECK(parse_mode("ours", &note) == Mode::kOff &&
+          note == "rr_other_plugin=ours in wronggpu-rr.ini not recognised (off | take | yield); off is used");
+    CHECK(strcmp(mode_word(Mode::kOff), "off") == 0 && strcmp(mode_word(Mode::kTake), "take") == 0 &&
+          strcmp(mode_word(Mode::kYield), "yield") == 0);
+    // the beginnings a reader matches (HOOK-MODE.md): exact, no prefix
+    const std::string fstem = "another module hooks the game's RR calls: ";
+    const std::string d = "the import slot X of Game.exe leads to Other.dll";
+    CHECK(line_foreign("Other.dll", d, Tail::kStaysActive) ==
+          fstem + "Other.dll (" + d + "); it is not known to be a Ray Reconstruction plugin: WrongGPU RR stays active "
+                  "(rr_other_plugin=yield in wronggpu-rr.ini keeps WrongGPU RR off in this case)");
+    CHECK(line_foreign("Other.dll", d, Tail::kTakeInFront) ==
+          fstem + "Other.dll (" + d + "); rr_other_plugin=take: WrongGPU RR goes in front of it (it gets the game's "
+                  "other calls, no RR work)");
+    CHECK(line_foreign("Other.dll", d, Tail::kYieldOff) ==
+          fstem + "Other.dll (" + d + "); rr_other_plugin=yield: WrongGPU RR stays off (nothing patched)");
+    CHECK(line_foreign("Other.dll", d, Tail::kYieldPassing) ==
+          fstem + "Other.dll (" + d + "); rr_other_plugin=yield: WrongGPU RR stays off (WrongGPU's handlers pass every "
+                  "call on unchanged)");
+    // only yield says "stays off"; nothing about a named module claims it is a Ray Reconstruction plugin
     const std::string stem = "another Ray Reconstruction plugin is active; WrongGPU RR stays off";
-    CHECK(line_other("D") == stem + " (D; nothing patched; rr_other_plugin=take in wronggpu-rr.ini uses WrongGPU's "
-                                    "instead)");
-    CHECK(line_other("D", true) == stem + " (D; WrongGPU's handlers pass every call on unchanged; rr_other_plugin=take "
-                                          "in wronggpu-rr.ini uses WrongGPU's instead)");
-    CHECK(line_other_later("D") == stem + " (D; it loaded after WrongGPU: WrongGPU passes every call on unchanged; to "
-                                          "use WrongGPU RR, move it aside)");
-    CHECK(line_cannot_take("D") == "a plugin loaded after WrongGPU replaced its hooks; rr_other_plugin=take cannot be "
-                                   "applied: WrongGPU RR stays off and passes every call on unchanged (D); move it aside "
-                                   "to use WrongGPU RR");
-    CHECK(line_take("D") == "another Ray Reconstruction plugin is active; rr_other_plugin=take: WrongGPU RR goes in "
-                            "front of it (D; it gets the game's other calls, no RR work)");
-    CHECK(line_take("D").compare(0, stem.size(), stem) != 0);  // RR is on: not a "stays off" line
+    for (Tail t : {Tail::kStaysActive, Tail::kTakeInFront, Tail::kYieldOff, Tail::kYieldPassing}) {
+      const std::string l = line_foreign("M", "D", t);
+      CHECK(l.compare(0, fstem.size(), fstem) == 0 && l.find("plugin is active") == std::string::npos);
+      CHECK((l.find("stays off") != std::string::npos) == (t == Tail::kYieldOff || t == Tail::kYieldPassing));
+    }
     CHECK(line_own_copy("A", "B") == "a second copy of WrongGPU RR is loaded (A is active); this copy (B) stays off");
     CHECK(line_ngx_other() == stem + " (NGX route only: the host refused WrongGPU's RR provider, another provider "
                                      "holds it; the game-interface route is decided on its own)");

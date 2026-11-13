@@ -118,118 +118,136 @@ the display adapter's PCI identity through SetupAPI as well as DXGI; with the ho
 ## Another Ray Reconstruction plugin (0.6.1)
 
 A player can end up with two RR plugins in one game (an integrator's installer may put this plugin next to another
-one; the launcher is not involved then). Default: **when another RR plugin is positively found, WrongGPU RR stays off
-and says so in one line**; Model M is not touched. The guard is generic and read-only (`src/rr_guard.{h,cpp}`, wired in
+one; the launcher is not involved then). The guard is generic and read-only (`src/rr_guard.{h,cpp}`, wired in
 `src/hook_dll.cpp`): it looks at where the game's RR calls lead, never at another plugin's files or internals. Release
-and probe builds behave the same.
+and probe builds behave the same. Model M is never touched.
 
-**What counts as a finding.** Only a positive sign stops the plugin: an address that ends in **another named module**
-(directly, or through decoded hook jumps), or in **a second copy of WrongGPU RR**. Anything the scan cannot explain is
-**not** a sign of another plugin: it is logged once as inconclusive (see "Log lines") and WrongGPU RR **stays active**.
+**When WrongGPU RR switches itself off.** Only on evidence that is positive by contract:
+- **a second copy of WrongGPU RR** (below, "Counting as WrongGPU");
+- **the host's plugin API** saying its RR provider slot is taken (the NGX route), or refusing our game-interface routes.
 
-**Signals, most reliable first** (each address is classified: this module, the game interface, the host = the module
-that called `InitializeASI` and the module holding the host's API table, a copy of WrongGPU RR, another WrongGPU module,
-the exe, code outside every module, another module; hook jumps are followed out of the interface and out of anonymous
-memory, at most 4 of them per address; a fifth is "too many hops", inconclusive):
+Nothing else switches RR off on its own. In particular a **named module on the call path is inconclusive**: it may be
+another RR plugin, but it may as well be a game's own wrapper DLL, an overlay, a security shim, a host helper in a
+third image, a forwarded export's implementation DLL or an API-set target. WrongGPU RR then **stays active, as in
+0.6.0**, and one line names the module and the place (see "Log lines"), so a bug report shows it. The player decides
+with `rr_other_plugin` (below).
+
+**Signals** (each address is classified: this module, the game interface, the host, a copy of WrongGPU RR, another
+WrongGPU module, the exe, code outside every module, another module; hook jumps are followed out of the interface and
+out of anonymous memory, at most 4 of them per address; a fifth is "too many hops", inconclusive):
 1. **A second copy of WrongGPU RR** (`S0`): a process-wide marker (`Local\WrongGPU.rr-active.v1.<pid>`, holding the
    active copy's path) taken at `InitializeASI`; a copy that finds it taken starts nothing (no hook, routes, NGX
-   provider, menu box, SetupAPI shim). A slot or export that leads into a module counting as WrongGPU RR (below) is the
-   same case.
+   provider, menu box, SetupAPI shim). A slot or export that leads into a module counting as WrongGPU RR is the same
+   case.
 2. **Import slots** (`S1`): before anything is patched, every loaded module's import slots of the game interface for
-   the roles this build would patch (and the exe's delay-load slots) are read. A slot that leads into another named
-   module is a finding; a slot that leads into the interface, the host, another WrongGPU module (or, for a delay slot
-   not bound yet, the exe's own thunk) is fine; any other slot is inconclusive.
+   the roles this build would patch (and the exe's delay-load slots) are read. A slot that leads into the interface,
+   the host, another WrongGPU module (or, for a delay slot not bound yet, the exe's own thunk) is fine; a slot that
+   leads into another named module is named; anything else is inconclusive.
 3. **The RR exports' first bytes** (`S2`): the exports of is-supported, get-function, allocate and evaluate are read:
-   a jump out of the interface that ends in another named module is a finding (`jmp rel32/rel8`, `jmp [rip+disp32]`,
+   a jump out of the interface that ends in another named module is named (`jmp rel32/rel8`, `jmp [rip+disp32]`,
    `mov rax|r11, imm64; jmp reg`; a `jmp [rip]` through the interface's own import table is its own code). The init
    export is not read: the host patches it itself.
 4. **Host routes** (plugin interface 3): `S2` on the module the host hooked (the host's trampolines, code outside every
-   module, are accepted there), then each route's next function (the host's `next`) after registering: another
-   plugin's route under ours leads to that plugin. Our routes cannot be taken back: they pass every call on.
+   module, are accepted there), then each route's next function (the host's `next`) after registering. Our routes are
+   in front and cannot be taken back. A refused registration keeps the game-interface route off.
 5. **The NGX route** (plugin interface 4): the host keeps one RR provider; a refused registration means another
-   provider holds it, **for the NGX route only** (the game-interface route goes by its own signals).
-6. **Later plugins** (`S4`): a plugin that loads after ours is found at `OptiPluginInit` and at the game's first call
-   into any of our handlers (decided once: concurrent first calls wait for the one decision): a slot we patched that
-   no longer holds our handler, or (while active) an RR export that now jumps away. Our handlers then pass every call
-   on unchanged (to the genuine export, which carries any later patch), and the NGX provider refuses creates.
+   provider holds it: **the NGX route stays off** (the game-interface route goes by its own signals).
+6. **Later modules** (`S4`): a module that hooks after ours is looked for at `OptiPluginInit` and at the game's first
+   call into any of our handlers (decided once: concurrent first calls wait for the one decision): a slot we patched
+   that no longer holds our handler, or (while active) an RR export that now jumps somewhere else than at load.
 
-**Load orders.** Ours second: found at load, nothing patched, the core and the runtime are not loaded, no NGX provider.
-Ours first: found at `OptiPluginInit` or the game's first call; pass-through from then on (the runtime is loaded but no
-RR instance exists). Both late (run-time interface): the host-route checks above. The SetupAPI identity shim (not part
-of the RR path) runs as configured while WrongGPU RR stays off because of another plugin; a second copy starts nothing.
+**The host.** The host is taken to be the module that called `InitializeASI` and also the module holding the host's API
+table (`OptiPluginInit`). Their own patches are accepted and not named. This is a guess (a separate ASI loader may call
+`InitializeASI`; the table may live on the heap or in a helper image), so it is used for the log's wording only: with
+the default setting a wrong guess can no longer switch RR off.
 
-**Never a crash, and a positive finding only.** Every read of memory we do not own (slot values, export bytes, jump
-cells, the host's next pointers, the module headers the scan walks) goes through `rr_guard`'s safe read: `VirtualQuery`
-for committed, readable, non-guard pages (execute-only pages count as readable: code is read from them), then a
-structured-exception-guarded copy (a cached region is re-checked by the exception guard). A failed read is **unknown**.
-Unknown is not a finding. Only the positive findings above stop the plugin. These are **inconclusive**: they are
-counted, one diagnostic line names the first of them, and WrongGPU RR stays active:
+**Override** (`wronggpu-rr.ini` next to the game exe), `rr_other_plugin =`:
+- `off` (the default; also any unknown value, with a line): only the positive evidence above switches WrongGPU RR off; a
+  named module is logged and WrongGPU RR stays active (it patches over a slot that leads to the module, its handlers
+  continue to the genuine export, as in 0.6.0).
+- `take`: as `off`, and with a module named at load (or below our host routes) WrongGPU RR goes in front of it and
+  continues the other calls of the same functions through what the slot held before (that module), so it sees the
+  game's other calls but never an RR create: one RR evaluate per frame. A module that hooks after ours is only named
+  (we never patch again; no patch fights). `take` never switches WrongGPU RR off.
+- `yield`: WrongGPU RR stays off whenever any named module is on the path: found at load, nothing is patched (the core
+  and the runtime are not loaded, no NGX provider); found later or below our host routes, our handlers pass every call
+  on unchanged and the NGX provider refuses creates.
+
+**Load orders** (with `yield`, or a second copy). Ours second: found at load, nothing patched. Ours first: found at
+`OptiPluginInit` or the game's first call; pass-through from then on (the runtime is loaded but no RR instance exists).
+Both late (run-time interface): the host-route checks above. The SetupAPI identity shim (not part of the RR path) runs
+as configured; a second copy starts nothing.
+
+**Reads of memory we do not own.** Every read (slot values, export bytes, jump cells, the host's next pointers, the
+module headers the scan walks) goes through `rr_guard`'s safe read: `VirtualQuery` for committed, readable, non-guard
+pages (execute-only pages count as readable: code is read from them), then a structured-exception-guarded copy. A
+failed read is **unknown**. The check and the copy are not one atomic step: if another thread unmaps or reprotects a
+page in between, an access fault is caught (unknown), but a page made a guard page in that moment is touched and loses
+its one-shot guard state. The cached region of the header walk is not queried again (only the exception guard covers
+it). Another module's PE headers are used only after `e_lfanew`, every data directory and every RVA the walk follows
+are checked against `SizeOfImage` (integers first, no address formed from an unchecked value); a header or table that
+fails is treated as nothing found there. These are **inconclusive** (counted, one diagnostic line names the first,
+WrongGPU RR stays active):
 - memory that cannot be read (an import slot, an export, a jump cell, a PAGE_NOACCESS or guard page, a null pointer);
 - a jump chain longer than 4 hops;
 - code outside every module that does not jump on (a game's copy protection or a hooking library's trampoline may sit
   there);
 - a slot or export that leads into the exe's own code (a delay-load helper's thunk, or a game's own wrapper).
 
-**Fail-open cases (known).** The guard does not see these, so WrongGPU RR stays active next to such a plugin: a plugin
-hooks after the game's first call (the late check runs at `OptiPluginInit` and once, at the first call, and never
-again); inline hooks in forms other than the jump forms above (for example a hook placed deeper than the first bytes of
-the export, or through a different instruction sequence); a plugin that hooks the function pointers the game-interface's
-get-function export returns. In these cases the other plugin and WrongGPU RR may both answer RR and the log shows no
-finding; remove the other plugin.
-
-**False positives, known and accepted.** A mod that is not an RR plugin but hooks the interface's RR functions so that
-its code lives in a named module (for example a frame-generation mod working through the same functions) makes WrongGPU
-RR stay off too: the line names its module and `rr_other_plugin=take` puts WrongGPU RR back. Not triggers: the game's
-own RR (the calls lead into the interface), the host's own init patch, WrongGPU.asi, a second copy of WrongGPU RR (its
-own line). The host is the module that called `InitializeASI` and also the module holding the host's API table
-(`OptiPluginInit`): with a separate ASI loader the host's own patches look like another plugin at the load check, which
-runs before the table is known. When `OptiPluginInit` then shows that the module named at load holds the host's table, a
-`the module the load check took for another Ray Reconstruction plugin (...) holds the host's API table` line follows and
-the load check runs again with that module as the host (nothing was patched before); the earlier "stays off" line stays
-in the log.
-
-**Override** (`wronggpu-rr.ini` next to the game exe): `rr_other_plugin = off` (default; also any unknown value, with a
-line) or `take`. `take` with a plugin found at load: WrongGPU RR patches on top, answers the RR calls itself and
-continues the other calls of the same functions through what the slot held before (the other plugin), so the other
-plugin sees the game's other calls but never an RR create: one RR evaluate per frame. In host-route mode the same
-through the host's next functions. `take` cannot be applied to a plugin that loads after ours (we never patch again;
-no patch fights), to the NGX route, or to a second copy of WrongGPU RR.
+**What the guard does not see (known).** A module that hooks after the game's first call (the late check runs at
+`OptiPluginInit` and once, at the first call, and never again); inline hooks in forms other than the jump forms above
+(for example deeper than the first bytes of the export); hooks on the function pointers the game-interface's
+get-function export returns. Such a module is not named; with another RR plugin among them, both may answer RR.
 
 **Counting as WrongGPU.** A module counts as a copy of WrongGPU RR when it exports `WrongGPU_GetSettingsContract`
-(the 60.9 contract export), and as another WrongGPU module (accepted, never "another plugin") when it exports
-`WrongGpuAsiQuery` (WrongGPU.asi). The launcher can use the same exports to recognise WrongGPU's files.
+(the 60.9 contract export), and as another WrongGPU module (accepted, never named) when it exports `WrongGpuAsiQuery`
+(WrongGPU.asi). The launcher can use the same exports to recognise WrongGPU's files.
 
-**Log lines** (`wronggpu-rr.log`, after the time stamp; the probe log adds `f=<frame>`). The launcher's Last run page
-matches the **beginnings** of the first three; keep them exactly:
-- `another Ray Reconstruction plugin is active; WrongGPU RR stays off (<detail>; nothing patched; rr_other_plugin=take in wronggpu-rr.ini uses WrongGPU's instead)` (found at load);
-  with host routes already installed: `...; WrongGPU's handlers pass every call on unchanged; rr_other_plugin=take ...)`;
-  found later: `another Ray Reconstruction plugin is active; WrongGPU RR stays off (<detail>; it loaded after WrongGPU: WrongGPU passes every call on unchanged; to use WrongGPU RR, move it aside)`;
-  NGX route: `another Ray Reconstruction plugin is active; WrongGPU RR stays off (NGX route only: the host refused WrongGPU's RR provider, another provider holds it; the game-interface route is decided on its own)`.
+**Log lines** (`wronggpu-rr.log`, after the time stamp; the probe log adds `f=<frame>`). A reader such as the launcher's
+Last run page can match these **beginnings**; keep them exactly:
+- `another module hooks the game's RR calls: <module> (<detail>); <tail>` with `<tail>` one of
+  - `it is not known to be a Ray Reconstruction plugin: WrongGPU RR stays active (rr_other_plugin=yield in wronggpu-rr.ini keeps WrongGPU RR off in this case)` (`off`; also `take` for a module that hooked after ours);
+  - `rr_other_plugin=take: WrongGPU RR goes in front of it (it gets the game's other calls, no RR work)`;
+  - `rr_other_plugin=yield: WrongGPU RR stays off (nothing patched)` (found at load) or
+    `rr_other_plugin=yield: WrongGPU RR stays off (WrongGPU's handlers pass every call on unchanged)` (later).
+  The launcher can say "another module hooks the game's RR calls: `<module>`" from it. One such line per check that
+  names a module (the first module found; at the late checks once per run).
 - `a second copy of WrongGPU RR is loaded (<active copy> is active); this copy (<this copy>) stays off`
-- `a plugin loaded after WrongGPU replaced its hooks; rr_other_plugin=take cannot be applied: WrongGPU RR stays off and passes every call on unchanged (<detail>); move it aside to use WrongGPU RR`
-- with take, found at load (RR is on): `another Ray Reconstruction plugin is active; rr_other_plugin=take: WrongGPU RR goes in front of it (<detail>; it gets the game's other calls, no RR work)`
+- `another Ray Reconstruction plugin is active; WrongGPU RR stays off (NGX route only: the host refused WrongGPU's RR provider, another provider holds it; the game-interface route is decided on its own)`
 
-`<detail>` names the place and the module file of a positive finding, e.g. `the import slot <name> of Game.exe leads to
-Other.asi`, `the export <name> of <interface file> leads to Other.asi (through 2 hook jumps)`. Diagnostics (not
-matched): `hook: coexistence check at load: <result> (<n> address(es) read in <t> ms)` once per run (with its measured
-cost), `hook: coexistence re-check at <when>: ...`, `NGX: RR provider not registered: WrongGPU RR stays off in this
-process (see the line above)`, and the stay-on line `hook: coexistence check <when>: inconclusive for <n> address(es)
-(first: <place> could not be read | leads to code outside every module | leads into the exe's own code | leads through
-more than 4 hook jumps); no other plugin was positively found, WrongGPU RR stays active` (it starts with `hook: `, never
-with a matched beginning above).
+`<detail>` names the place, e.g. `the import slot <name> of Game.exe leads to Other.dll`, `the export <name> of
+<interface file> leads to Other.dll (through 2 hook jumps)`, `the import slot <name> of Game.exe (WrongGPU's hook)
+leads to Other.dll` (after ours). Diagnostics (all starting with `hook: ` or `NGX: `, never with a beginning above):
+`hook: coexistence check at load: <result> (<n> address(es) read in <t> ms)` once per run (with its measured cost;
+`<result>` is `no other Ray Reconstruction plugin found`, `another module on the RR path (inconclusive)` or `a second
+copy of WrongGPU RR found`), `hook: coexistence re-check at <when>: ...`, `hook: the host refused our game-interface
+routes; nothing was patched: WrongGPU RR stays off on the game-interface route`, `NGX: RR provider not registered:
+WrongGPU RR stays off in this process (see the line above)`, and the stay-on line `hook: coexistence check <when>:
+inconclusive for <n> address(es) (first: <place> could not be read | leads to code outside every module | leads into the
+exe's own code | leads through more than 4 hook jumps); no other plugin was positively found, WrongGPU RR stays active`.
 
-**Tests** (CPU only): `tests/test_rr_guard.cpp` (safe reads on PAGE_NOACCESS, reserved, guard and execute-only pages and a
-page made unreadable after caching; every jump form; synthetic modules; exactly 4 hops followed and a fifth one too
-many; which classifications are findings and which are inconclusive; 32 threads at one decision);
-`tests/test_rr_guard_dll.cpp` with our own stand-in other plugin `tests/fake_other_rr.cpp` (modes clean, first, inline,
-relay, execonly, anon, noaccess, guardpage, exe, hops, hostsplit, late, late-replace, provider, owncopy, route,
-route-other, route-inline; `--take`; 16 threads at the first call): the foreign-module modes switch off (release: the
-RR runtime is then not loaded; in clean it is); anon, noaccess,
-guardpage, exe and hops log the inconclusive line and stay active; hostsplit has a separate loader DLL call
-`InitializeASI` while the real host's DLL holds the API table; owncopy loads four more copies and runs their
-`InitializeASI` / `OptiPluginInit` from threads while 16 game threads make the first call, then checks that no line is
-torn and that freeing an inactive copy writes no exit summary; build.py repeats owncopy 200 times. Run for every interface
-version, release and probe (build.py); the existing hook runs check that no guard line appears.
+**The log with two copies.** Every line is one `WriteFile` on a `FILE_APPEND_DATA` handle (`src/log_append.h`), which
+the system appends as one piece, so two copies' lines do not run into each other. The size check and the rotation run
+under a process-wide named mutex; its wait is bounded (`kLogLockWaitMs`; no wait at all at process exit, under the loader lock). After a
+timeout, or when the mutex cannot be created, a copy writes **without** it and does not rotate: the line is still one
+append, but it may land in the file the other copy is just moving aside (`wronggpu-rr.log.old`). The serialisation is
+best effort after a timeout, not a guarantee.
+
+**Tests** (CPU only, run by build.py and CI): `tests/test_rr_guard.cpp` (safe reads on PAGE_NOACCESS, reserved, guard
+and execute-only pages and a page made unreadable after caching; PE header and directory bounds against SizeOfImage;
+every jump form; synthetic modules; exactly 4 hops followed and a fifth one too many; the whole `decide` table: with no
+second RR provider (a game-owned wrapper DLL, a host helper in a third image, an overlay-style wrapper, a forwarded
+export, the heap-table and helper-table host layouts) RR stays active at every stage unless `yield`, `take` never
+switches off, a copy of WrongGPU RR switches off in every mode; 32 threads at one decision);
+`tests/test_rr_guard_dll.cpp` with our own stand-in `tests/fake_other_rr.cpp` (also staged under other file names as
+innocent modules): the named-module modes (first, inline, relay, execonly, wrapper, overlay, forward, helper,
+hostsplit, heaptable, helpertable, late, late-replace, route-other, route-inline) keep WrongGPU RR active and log the
+one line (release: the RR runtime is loaded, the NGX provider is ours); `wrapper --yield` stays off with nothing
+patched and the runtime not loaded; `route-other --yield` passes every call on; `--take` goes in front; owncopy (four
+more copies, from threads, while 16 game threads make the first call; no torn line; no exit summary from an inactive
+copy; build.py repeats it 200 times), provider (the NGX route stays off) and route-refused (the game-interface route
+stays off) switch off; anon, noaccess, guardpage, exe and hops log the inconclusive line and stay active. Run for every
+interface version, release and probe (build.py); the existing hook runs check that no guard line appears.
 
 ## Unload
 

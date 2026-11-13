@@ -399,14 +399,20 @@ def test_hook(built, binding, out, logs, probe, n=None, gen=None):
     return n, built
 
 
-# RR guard: the coexistence guard's modes (tests/test_rr_guard_dll.cpp) against our own stand-in "other Ray
-# Reconstruction plugin" (tests/fake_other_rr.cpp); "route*" modes use the build without an import of the interface
+# RR guard: the coexistence guard's modes (tests/test_rr_guard_dll.cpp) against our own stand-in "other module"
+# (tests/fake_other_rr.cpp, also staged under other file names for the innocent layouts); "route*" modes use the build
+# without an import of the interface
 GUARD_MODES_RELEASE = (["clean"], ["first"], ["first", "--take"], ["inline"], ["inline", "--take"], ["relay"], ["execonly"],
-                       ["anon"], ["noaccess"], ["guardpage"], ["exe"], ["hops"], ["hostsplit"], ["late"], ["late", "--take"],
-                       ["late-replace"], ["provider"], ["owncopy"], ["route"], ["route-other"], ["route-other", "--take"],
-                       ["route-inline"])
-GUARD_MODES_PROBE = (["clean"], ["first"], ["inline"], ["execonly"], ["noaccess"], ["hops"], ["hostsplit"], ["late"],
-                     ["owncopy"], ["route-other"])
+                       ["wrapper"], ["wrapper", "--yield"], ["overlay"], ["forward"], ["helper"], ["hostsplit"],
+                       ["heaptable"], ["helpertable"], ["anon"], ["noaccess"], ["guardpage"], ["exe"], ["hops"], ["late"],
+                       ["late", "--take"], ["late-replace"], ["provider"], ["owncopy"], ["route"], ["route-other"],
+                       ["route-other", "--take"], ["route-other", "--yield"], ["route-inline"], ["route-refused"])
+GUARD_MODES_PROBE = (["clean"], ["first"], ["inline"], ["execonly"], ["wrapper"], ["wrapper", "--yield"], ["overlay"],
+                     ["forward"], ["heaptable"], ["noaccess"], ["hops"], ["late"], ["owncopy"], ["route-other"],
+                     ["route-refused"])
+# the stand-in under other file names (each its own image and state): the loader, the innocent modules, the table image
+GUARD_STUB_COPIES = ("wgtest_loader.dll", "wgtest_gamewrap.dll", "wgtest_hosthelper.dll", "wgtest_hosttable.dll",
+                     "wgtest_overlay.dll", "wgtest_impl.dll")
 
 
 def test_guard(built, out, logs, probe, n, gen, iface_dll, implib, iface_name):
@@ -434,7 +440,8 @@ def test_guard(built, out, logs, probe, n, gen, iface_dll, implib, iface_name):
         shutil.copy(built, os.path.join(stage, n["proxy_file"]))
         for k in ("", "2", "3", "4"):  # the owncopy mode's other copies of WrongGPU RR (separate files, separate images)
             shutil.copy(built, os.path.join(stage, f"WrongGPU-RR-copy{k}.asi"))
-        shutil.copy(stub, os.path.join(stage, "wgtest_loader.dll"))  # the hostsplit mode's separate ASI loader (a second image)
+        for copy in GUARD_STUB_COPIES:
+            shutil.copy(stub, os.path.join(stage, copy))
         if not probe:
             shutil.copy(os.path.join(out, "wronggpu_runtime.dll"), stage)
         for m in (GUARD_MODES_PROBE if probe else GUARD_MODES_RELEASE):

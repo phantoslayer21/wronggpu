@@ -13,8 +13,13 @@
 //   wgtest_or_host_table    keeps a copy of a host API table in this module (the host's table lives in a module of its own)
 //   wgtest_or_call_init     calls a function from inside this module (a separate ASI loader calling InitializeASI; the test
 //                           loads a second copy of this DLL under another name for that)
+//   wgtest_or_bind_one      binds one import slot to this module's handler, which continues with the interface's export
+//                           (as the loader binds a forwarded export to its implementation DLL)
+//   wgtest_or_innocent      1: this copy is NOT an RR plugin (a game's wrapper DLL, an overlay, a host helper, a forwarded
+//                           export's implementation): its handlers pass every call on, RR included
 // Its handlers answer the RR feature themselves (is-supported 0, evaluate / allocate / get-function counted and 0) and
-// pass every other call on. The role names and order come from the hook binding (wg_binding.inc).
+// pass every other call on, unless innocent. The test loads further copies of this DLL under other file names for the
+// innocent layouts (each copy has its own state). The role names and order come from the hook binding (wg_binding.inc).
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -37,6 +42,7 @@ struct OrState {
 OrState g_st;
 Fwd g_next[32];       // where each handler continues
 bool g_inline[32];    // the export of this role was overwritten (no way back to it): non-RR calls are answered here
+bool g_innocent;      // not an RR plugin: every call is passed on (wgtest_or_innocent)
 
 // the feature argument of a role, if it has one
 bool feature_of(int role, uint64_t a, uint64_t b, uint32_t* f) {
@@ -51,7 +57,8 @@ template <int R>
 uint64_t handler(uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e, uint64_t f) {
   InterlockedIncrement(&g_st.calls[R]);
   uint32_t feat = 0;
-  if (feature_of(R, a, b, &feat) && feat == WG_FEAT_RAY_RECONSTRUCTION && (R == 2 || R == 7 || R == 8 || R == 16)) {
+  if (!g_innocent && feature_of(R, a, b, &feat) && feat == WG_FEAT_RAY_RECONSTRUCTION &&
+      (R == 2 || R == 7 || R == 8 || R == 16)) {
     InterlockedIncrement(&g_st.rr_calls);
     if (R == 7 && c) *reinterpret_cast<void**>(c) = reinterpret_cast<void*>(&handler<R>);  // "its" feature function
     return 0;
@@ -147,6 +154,19 @@ __declspec(dllexport) int wgtest_or_patch_iat(HMODULE exe, const char* iface_lea
   each_import(exe, iface_leaf, [&](int role, const char* nm, void** slot) {
     if (role < 0) return;
     g_next[role] = forward ? reinterpret_cast<Fwd>(*slot) : reinterpret_cast<Fwd>(GetProcAddress(iface, nm));
+    if (write_ptr(slot, kHandlers[role])) ++n;
+  });
+  return n;
+}
+
+__declspec(dllexport) void wgtest_or_innocent(int on) { g_innocent = on != 0; }
+
+__declspec(dllexport) int wgtest_or_bind_one(HMODULE exe, const char* iface_leaf, const char* import_name) {
+  HMODULE iface = GetModuleHandleA(iface_leaf);
+  int n = 0;
+  each_import(exe, iface_leaf, [&](int role, const char* nm, void** slot) {
+    if (role < 0 || strcmp(nm, import_name) != 0) return;
+    g_next[role] = reinterpret_cast<Fwd>(GetProcAddress(iface, nm));
     if (write_ptr(slot, kHandlers[role])) ++n;
   });
   return n;
