@@ -100,6 +100,7 @@ void put_frags(std::vector<uint8_t>* b, const std::vector<std::vector<uint8_t>>&
 void put_tile_vector(std::vector<uint8_t>* b, const float* vec, const Order& R, const DRow& drow);
 Order rows_identity(int n);
 Order rows_layout_l(int C, const DRow& drow);  // R_L(C)
+Order rows_expand(int C, const DRow& drow);    // R_E(C): rows of an expand section (packing.rows_expand)
 Order kord_layout_l(int C);                    // K_L(C)
 Order kord_drow(int n, const DRow& drow);
 size_t align_up(size_t n);                     // to 256 bytes (packing.ALIGN)
