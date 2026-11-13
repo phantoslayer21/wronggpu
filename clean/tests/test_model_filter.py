@@ -3,7 +3,7 @@
 loaders (clean/runtime/model.cpp, raw layout and model.wgcm) and the synthetic model writer.
 
 No GPU and no model data: clean/tests/test_model_filter.cpp is built with the host C++ compiler (CXX, clang++ or g++;
-skipped without one) and loads synthetic models written by clean/runner/synthetic_model.py. The model.wgcm files come
+on Windows MSVC cl after them, from PATH or through vcvars64.bat; skipped without one) and loads synthetic models written by clean/runner/synthetic_model.py. The model.wgcm files come
 from write_wgcm (the container of clean/converter/OUTPUT-FORMAT.md with a synthetic map), since the group is written
 "like every other stage group"; the converter's own output is covered by clean/tests/test_model_wgcm.py.
 
@@ -29,17 +29,48 @@ SOURCES = [os.path.join("clean", "tests", "test_model_filter.cpp"), os.path.join
 _EXE = None
 
 
+def _vcvars64():
+    """vcvars64.bat of the newest Visual Studio (vswhere), or None."""
+    vswhere = os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                           "Microsoft Visual Studio", "Installer", "vswhere.exe")
+    if not os.path.exists(vswhere):
+        return None
+    r = subprocess.run([vswhere, "-latest", "-products", "*", "-property", "installationPath"], capture_output=True,
+                       text=True)
+    vcvars = os.path.join(r.stdout.strip(), "VC", "Auxiliary", "Build", "vcvars64.bat")
+    return vcvars if r.returncode == 0 and r.stdout.strip() and os.path.exists(vcvars) else None
+
+
+def _build_msvc(exe, vcvars):
+    """MSVC cl: directly when it is on PATH (a developer prompt, CI), else through vcvars64.bat."""
+    objdir = os.path.join(os.path.dirname(exe), "obj")
+    os.makedirs(objdir, exist_ok=True)
+    cl = ('cl /nologo /std:c++17 /O1 /EHsc /utf-8 /D_CRT_SECURE_NO_WARNINGS %s /Fo"%s\\\\" /Fe"%s"'
+          % (" ".join('"%s"' % os.path.join(ROOT, s) for s in SOURCES), objdir, exe))
+    bat = os.path.join(os.path.dirname(exe), "build.bat")
+    with open(bat, "w") as f:
+        f.write("@echo off\r\n")
+        if vcvars:
+            f.write('call "%s" >nul || exit /b 1\r\n' % vcvars)
+        f.write(cl + " || exit /b 1\r\n")
+    return subprocess.run(["cmd", "/d", "/c", bat], capture_output=True, text=True)
+
+
 def loader_exe():
     global _EXE
     if _EXE is None:
-        cxx = os.environ.get("CXX") or shutil.which("clang++") or shutil.which("g++")
-        if not cxx:
-            raise unittest.SkipTest("no host C++ compiler (CXX, clang++, g++)")
         exe = os.path.join(tempfile.mkdtemp(prefix="wg_mf_"), "test_model_filter" + (".exe" if os.name == "nt" else ""))
-        cmd = [cxx, "-std=c++17", "-O1"] + (["-D_CRT_SECURE_NO_WARNINGS"] if os.name == "nt" else [])
-        r = subprocess.run(cmd + [os.path.join(ROOT, s) for s in SOURCES] + ["-o", exe], capture_output=True, text=True)
+        cxx = os.environ.get("CXX") or shutil.which("clang++") or shutil.which("g++")
+        if cxx:
+            cmd = [cxx, "-std=c++17", "-O1"] + (["-D_CRT_SECURE_NO_WARNINGS"] if os.name == "nt" else [])
+            r = subprocess.run(cmd + [os.path.join(ROOT, s) for s in SOURCES] + ["-o", exe], capture_output=True,
+                               text=True)
+        elif os.name == "nt" and (shutil.which("cl") or _vcvars64()):
+            r = _build_msvc(exe, None if shutil.which("cl") else _vcvars64())
+        else:
+            raise unittest.SkipTest("no host C++ compiler (CXX, clang++, g++ or MSVC cl)")
         if r.returncode != 0:
-            raise RuntimeError("build of test_model_filter failed:\n" + r.stderr)
+            raise RuntimeError("build of test_model_filter failed:\n" + r.stdout + r.stderr)
         _EXE = exe
     return _EXE
 
