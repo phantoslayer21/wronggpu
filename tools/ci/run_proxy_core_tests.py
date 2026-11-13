@@ -18,7 +18,8 @@ def main():
     data = os.path.join('clean', 'rr_f', 'proxy', 'tests', 'data')
     runs = [('core', [os.path.join(core, 'test_proxy_core.exe')]),
             ('probe core', [os.path.join(core, 'test_probe_core.exe')]),
-            ('setupapi identity', [os.path.join(core, 'test_setupapi_identity.exe')])]
+            ('setupapi identity', [os.path.join(core, 'test_setupapi_identity.exe')]),
+            ('rr guard', [os.path.join(core, 'test_rr_guard.exe')])]
     runs += [('RR provider ' + os.path.basename(f), [os.path.join(core, 'test_ngx_rr.exe'), f])
              for f in sorted(glob.glob(os.path.join(data, '*-rr-frames.json')))]
     runs += [('replay ' + os.path.basename(f), [os.path.join(core, 'test_replay_profile.exe'), f])

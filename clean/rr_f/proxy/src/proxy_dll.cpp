@@ -26,6 +26,7 @@
 #include <string>
 #include <vector>
 
+#include "log_append.h"
 #include "proxy_core.h"
 #include "rr_enabled.h"
 #include "settings.h"
@@ -59,7 +60,7 @@ std::mutex g_log_mutex;
 wgrr::RrProbe* g_probe = nullptr;
 wgrr::ProbeLog* g_probe_log = nullptr;
 std::once_flag g_probe_log_once;
-FILE* g_probe_file = nullptr;
+std::wstring g_probe_path;  // wronggpu-rr-probe.log (0.6.1: one append call per line, log_append.h)
 #else
 wgrr::RrProxy* g_proxy = nullptr;
 #endif
@@ -107,16 +108,19 @@ wgrr::ProbeLog* probe_log() {
   std::call_once(g_probe_log_once, [] {
     std::wstring path = own_dir() + L"wronggpu-rr-probe.log";
     std::wstring prev = own_dir() + L"wronggpu-rr-probe.prev.log";
-    MoveFileExW(path.c_str(), prev.c_str(), MOVEFILE_REPLACE_EXISTING);
-    g_probe_file = _wfopen(path.c_str(), L"wb");
+    {
+      const wgrr::LogLock shared(path, wgrr::kLogLockWaitMs);
+      MoveFileExW(path.c_str(), prev.c_str(), MOVEFILE_REPLACE_EXISTING);
+      // a new, empty log (as the earlier "wb" open did, also when the old one could not be moved aside)
+      HANDLE fresh = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                 CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+      if (fresh != INVALID_HANDLE_VALUE) CloseHandle(fresh);
+    }
+    g_probe_path = path;  // 0.6.1: one append call per line under the log's process-wide lock (log_append.h)
     g_probe_log = new wgrr::ProbeLog([](const std::string& line) {
       std::lock_guard<std::mutex> lock(g_log_mutex);
-      if (!g_probe_file) return;
-      SYSTEMTIME t;
-      GetLocalTime(&t);
-      fprintf(g_probe_file, "%02u:%02u:%02u.%03u %s\r\n", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds,
-              line.c_str());
-      fflush(g_probe_file);  // a crash keeps everything logged so far
+      const wgrr::LogLock shared(g_probe_path, wgrr::kLogLockWaitMs);
+      wgrr::append_log_text(g_probe_path, wgrr::log_stamp() + line + "\r\n");  // on disk at once: a crash keeps it
     });
     g_probe_log->note(std::string("probe start: build Streamline 2.") + std::to_string(WG_BINDING_API_MINOR) +
                       ", loaded as " + narrow(own_stem()) + ", process " + std::to_string(GetCurrentProcessId()));
@@ -131,12 +135,8 @@ void log_line(const std::string& s) {
 #else
   std::lock_guard<std::mutex> lock(g_log_mutex);
   std::wstring path = own_dir() + L"wronggpu-rr.log";
-  FILE* f = _wfopen(path.c_str(), L"ab");
-  if (!f) return;
-  SYSTEMTIME t;
-  GetLocalTime(&t);
-  fprintf(f, "%02u:%02u:%02u.%03u %s\r\n", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, s.c_str());
-  fclose(f);
+  const wgrr::LogLock shared(path, wgrr::kLogLockWaitMs);  // 0.6.1: one append call under the process-wide lock
+  wgrr::append_log_text(path, wgrr::log_stamp() + s + "\r\n");
 #endif
 }
 

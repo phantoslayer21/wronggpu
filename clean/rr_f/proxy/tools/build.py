@@ -31,6 +31,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -235,6 +236,7 @@ def build_hook(binding, out, probe, name):
     sh(f'rc /nologo /fo "{res}" "{os.path.join(gen, "wg_version.rc")}"', out)
     files = CORE + (PROBE if probe else ["rr_panel.cpp", "ngx_rr.cpp"])  # the menu tab, the NGX route: release only
     files = files + ["setupapi_identity.cpp"]  # clean/rr-sm2-shim: the SetupAPI identity shim (Spider-Man2.exe only)
+    files = files + ["rr_guard.cpp"]  # RR guard: another Ray Reconstruction plugin (both builds)
     sources = " ".join(src("src", c) for c in files)
     flags = CLFLAGS + (" /DWG_RR_PROBE=1" if probe else "")
     built = os.path.join(out, n["proxy_file"])
@@ -393,7 +395,77 @@ def test_hook(built, binding, out, logs, probe, n=None, gen=None):
                         + (f"\n{r.stderr.strip()}" if r.stderr.strip() else ""))
             if r.returncode:
                 raise SystemExit("\n".join(logs))
+    test_guard(built, out, logs, probe, n, gen, iface_dll, implib, iface_name)
     return n, built
+
+
+# RR guard: the coexistence guard's modes (tests/test_rr_guard_dll.cpp) against our own stand-in "other Ray
+# Reconstruction plugin" (tests/fake_other_rr.cpp); "route*" modes use the build without an import of the interface
+GUARD_MODES_RELEASE = (["clean"], ["first"], ["first", "--take"], ["inline"], ["inline", "--take"], ["relay"], ["anon"],
+                       ["noaccess"], ["guardpage"], ["late"], ["late", "--take"], ["late-replace"], ["provider"], ["owncopy"],
+                       ["route"], ["route-other"], ["route-other", "--take"], ["route-inline"])
+GUARD_MODES_PROBE = (["clean"], ["first"], ["inline"], ["noaccess"], ["late"], ["owncopy"], ["route-other"])
+
+
+def test_guard(built, out, logs, probe, n, gen, iface_dll, implib, iface_name):
+    minor = n["minor"]
+    kind = "probe" if probe else "release"
+    g = os.path.join(out, "guard")
+    os.makedirs(g, exist_ok=True)
+    stub = os.path.join(g, "wgtest_other_rr.dll")
+    sh(f'cl {CLFLAGS} /LD /I"{gen}" {src("tests", "fake_other_rr.cpp")} /Fo"{g}\\\\" /Fe"{stub}"', out)
+    exes = {}
+    for noimport in (False, True):
+        sub = os.path.join(g, "noimport" if noimport else "import")
+        os.makedirs(sub, exist_ok=True)
+        exe = os.path.join(sub, "test_rr_guard_dll.exe")
+        sh(f'cl {CLFLAGS} {"/DWG_RR_PROBE=1 " if probe else ""}{"/DWG_TEST_NOIMPORT=1 " if noimport else ""}'
+           f'/I"{gen}" {src("tests", "test_rr_guard_dll.cpp")} {"" if noimport else chr(34) + implib + chr(34)} '
+           f'/Fo"{sub}\\\\" /Fe"{exe}"', out)
+        exes[noimport] = exe
+    for noimport in (False, True):
+        stage = os.path.join(g, "stage-noimport" if noimport else "stage")
+        shutil.rmtree(stage, ignore_errors=True)
+        os.makedirs(stage)
+        for f in (exes[noimport], iface_dll, stub):
+            shutil.copy(f, stage)
+        shutil.copy(built, os.path.join(stage, n["proxy_file"]))
+        shutil.copy(built, os.path.join(stage, "WrongGPU-RR-copy.asi"))  # the owncopy mode's second copy
+        if not probe:
+            shutil.copy(os.path.join(out, "wronggpu_runtime.dll"), stage)
+        for m in (GUARD_MODES_PROBE if probe else GUARD_MODES_RELEASE):
+            if m[0].startswith("route") != noimport:
+                continue
+            r = subprocess.run([os.path.join(stage, "test_rr_guard_dll.exe"), stage] + m, capture_output=True, text=True,
+                               timeout=300)
+            logs.append(f"[2.{minor} guard {kind} {' '.join(m)}] {r.stdout.strip()}"
+                        + (f"\n{r.stderr.strip()}" if r.stderr.strip() else ""))
+            if r.returncode:
+                raise SystemExit("\n".join(logs))
+        if not probe and not noimport and minor == 14:
+            owncopy_stress(stage, logs)
+
+
+# 0.6.1: two copies of WrongGPU RR in one process write one log: the owncopy case GUARD_OWNCOPY_STRESS times (release
+# build); every run must pass and no line may be torn (one append call per line under the log's process-wide lock)
+GUARD_OWNCOPY_STRESS = 200
+
+
+def owncopy_stress(stage, logs):
+    exe = os.path.join(stage, "test_rr_guard_dll.exe")
+    ok, torn, failed = 0, 0, []
+    for i in range(GUARD_OWNCOPY_STRESS):
+        r = subprocess.run([exe, stage, "owncopy"], capture_output=True, text=True, timeout=300)
+        t = [int(x) for x in re.findall(r"log lines \d+, torn (\d+)", r.stdout)]
+        torn += sum(t)
+        if r.returncode == 0 and t:
+            ok += 1
+        elif len(failed) < 3:
+            failed.append(f"run {i + 1}: exit {r.returncode}: {r.stdout.strip()[-600:]}")
+    logs.append(f"[2.14 guard release owncopy stress] {ok}/{GUARD_OWNCOPY_STRESS} runs passed, torn lines {torn}"
+                + ("".join("\n  " + f for f in failed)))
+    if ok != GUARD_OWNCOPY_STRESS or torn:
+        raise SystemExit("\n".join(logs))
 
 
 def sha256(path):
@@ -452,6 +524,12 @@ def main():
     os.makedirs(sobj, exist_ok=True)
     sh(f'cl {CLFLAGS} {src("tests", "test_setupapi_identity.cpp")} {src("src", "setupapi_identity.cpp")} /Fo"{sobj}\\\\" '
        f'/Fe"{sexe}"', core_dir)
+    # RR guard: the coexistence guard's pieces (safe reads, jump decoding, classification, one decision)
+    gexe = os.path.join(core_dir, "test_rr_guard.exe")
+    gobj = os.path.join(core_dir, "guard-obj")
+    os.makedirs(gobj, exist_ok=True)
+    sh(f'cl {CLFLAGS} {src("tests", "test_rr_guard.cpp")} {src("src", "rr_guard.cpp")} /Fo"{gobj}\\\\" /Fe"{gexe}"',
+       core_dir)
     pexe = os.path.join(core_dir, "test_probe_core.exe")
     pobj = os.path.join(core_dir, "probe-obj")
     os.makedirs(pobj, exist_ok=True)
@@ -467,7 +545,7 @@ def main():
             raise SystemExit(r.stderr)
         profiles = sorted(os.path.join(PROXY, "tests", "data", f) for f in os.listdir(os.path.join(PROXY, "tests", "data"))
                           if f.endswith("-traffic.json"))
-        runs = [("core", [exe]), ("probe core", [pexe]), ("setupapi identity", [sexe]),
+        runs = [("core", [exe]), ("probe core", [pexe]), ("setupapi identity", [sexe]), ("rr guard", [gexe]),
                 ("NGX provider", [nexe, os.path.join(PROXY, "tests", "data", "cp2077-2.14-rr-frames.json")])] + [(f"replay {os.path.basename(f)}", [rexe, f]) for f in profiles]
         for label, e in runs:
             r = subprocess.run(e, capture_output=True, text=True, timeout=300)

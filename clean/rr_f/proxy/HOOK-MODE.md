@@ -115,6 +115,88 @@ the display adapter's PCI identity through SetupAPI as well as DXGI; with the ho
 - **Tests:** `tests/test_setupapi_identity.cpp` (synthetic IDs through fake SetupAPI functions, the decision, and the
   redirect on the test exe's own imports with read-only SetupAPI queries of the PC's Display-class devices).
 
+## Another Ray Reconstruction plugin (0.6.1)
+
+A player can end up with two RR plugins in one game (an integrator's installer may put this plugin next to another
+one; the launcher is not involved then). Default: **WrongGPU RR stays off and says so in one line**; Model M is not
+touched. The guard is generic and read-only (`src/rr_guard.{h,cpp}`, wired in `src/hook_dll.cpp`): it looks at where
+the game's RR calls lead, never at another plugin's files or internals. Release and probe builds behave the same.
+
+**Signals, most reliable first** (each address is classified: this module, the game interface, the host = the module
+that called `InitializeASI`, a copy of WrongGPU RR, another WrongGPU module, the exe, code outside every module, another
+module; hook jumps are followed out of the interface and out of anonymous memory, up to 4):
+1. **A second copy of WrongGPU RR** (`S0`): a process-wide marker (`Local\WrongGPU.rr-active.v1.<pid>`, holding the
+   active copy's path) taken at `InitializeASI`; a copy that finds it taken starts nothing (no hook, routes, NGX
+   provider, menu box, SetupAPI shim). A slot or export that leads into a module counting as WrongGPU RR (below) is the
+   same case.
+2. **Import slots** (`S1`): before anything is patched, every loaded module's import slots of the game interface for
+   the roles this build would patch (and the exe's delay-load slots) must lead into the interface (a delay slot not
+   bound yet: the exe's own thunk; the host is accepted too).
+3. **The RR exports' first bytes** (`S2`): the exports of is-supported, get-function, allocate and evaluate must not
+   jump out of the interface into another module (`jmp rel32/rel8`, `jmp [rip+disp32]`, `mov rax|r11, imm64; jmp reg`;
+   a `jmp [rip]` through the interface's own import table is its own code). The init export is not read: the host
+   patches it itself.
+4. **Host routes** (plugin interface 3): `S2` on the module the host hooked (the host's trampolines, code outside every
+   module, are accepted there), then each route's next function (the host's `next`) after registering: another
+   plugin's route under ours leads to that plugin. Our routes cannot be taken back: they pass every call on.
+5. **The NGX route** (plugin interface 4): the host keeps one RR provider; a refused registration means another
+   provider holds it, **for the NGX route only** (the game-interface route goes by its own signals).
+6. **Later plugins** (`S4`): a plugin that loads after ours is found at `OptiPluginInit` and at the game's first call
+   into any of our handlers (decided once: concurrent first calls wait for the one decision): a slot we patched that
+   no longer holds our handler, or (while active) an RR export that now jumps away. Our handlers then pass every call
+   on unchanged (to the genuine export, which carries any later patch), and the NGX provider refuses creates.
+
+**Load orders.** Ours second: found at load, nothing patched, the core and the runtime are not loaded, no NGX provider.
+Ours first: found at `OptiPluginInit` or the game's first call; pass-through from then on (the runtime is loaded but no
+RR instance exists). Both late (run-time interface): the host-route checks above. The SetupAPI identity shim (not part
+of the RR path) runs as configured while WrongGPU RR stays off because of another plugin; a second copy starts nothing.
+
+**Never a crash, and the safe side.** Every read of memory we do not own (slot values, export bytes, jump cells, the
+host's next pointers, the module headers the scan walks) goes through `rr_guard`'s safe read: `VirtualQuery` for
+committed, readable, non-guard pages, then a structured-exception-guarded copy (a cached region is re-checked by the
+exception guard). A failed read is **unknown**, and unknown counts as another plugin (stays off, with the line).
+
+**False positives, known and accepted.** A mod that is not an RR plugin but hooks the interface's RR functions (for
+example a frame-generation mod working through the same functions) makes WrongGPU RR stay off too: the line names its
+module and `rr_other_plugin=take` puts WrongGPU RR back. Not triggers: the game's own RR (the calls lead into the
+interface), the host's own init patch, WrongGPU.asi, a second copy of WrongGPU RR (its own line).
+
+**Override** (`wronggpu-rr.ini` next to the game exe): `rr_other_plugin = off` (default; also any unknown value, with a
+line) or `take`. `take` with a plugin found at load: WrongGPU RR patches on top, answers the RR calls itself and
+continues the other calls of the same functions through what the slot held before (the other plugin), so the other
+plugin sees the game's other calls but never an RR create: one RR evaluate per frame. In host-route mode the same
+through the host's next functions. `take` cannot be applied to a plugin that loads after ours (we never patch again;
+no patch fights), to the NGX route, or to a second copy of WrongGPU RR.
+
+**Counting as WrongGPU.** A module counts as a copy of WrongGPU RR when it exports `WrongGPU_GetSettingsContract`
+(the 60.9 contract export), and as another WrongGPU module (accepted, never "another plugin") when it exports
+`WrongGpuAsiQuery` (WrongGPU.asi). The launcher can use the same exports to recognise WrongGPU's files.
+
+**Log lines** (`wronggpu-rr.log`, after the time stamp; the probe log adds `f=<frame>`). The launcher's Last run page
+matches the **beginnings** of the first three; keep them exactly:
+- `another Ray Reconstruction plugin is active; WrongGPU RR stays off (<detail>; nothing patched; rr_other_plugin=take in wronggpu-rr.ini uses WrongGPU's instead)` (found at load);
+  with host routes already installed: `...; WrongGPU's handlers pass every call on unchanged; rr_other_plugin=take ...)`;
+  found later: `another Ray Reconstruction plugin is active; WrongGPU RR stays off (<detail>; it loaded after WrongGPU: WrongGPU passes every call on unchanged; to use WrongGPU RR, move it aside)`;
+  NGX route: `another Ray Reconstruction plugin is active; WrongGPU RR stays off (NGX route only: the host refused WrongGPU's RR provider, another provider holds it; the game-interface route is decided on its own)`.
+- `a second copy of WrongGPU RR is loaded (<active copy> is active); this copy (<this copy>) stays off`
+- `a plugin loaded after WrongGPU replaced its hooks; rr_other_plugin=take cannot be applied: WrongGPU RR stays off and passes every call on unchanged (<detail>); move it aside to use WrongGPU RR`
+- with take, found at load (RR is on): `another Ray Reconstruction plugin is active; rr_other_plugin=take: WrongGPU RR goes in front of it (<detail>; it gets the game's other calls, no RR work)`
+
+`<detail>` names the place and the module file, e.g. `the import slot <name> of Game.exe leads to Other.asi`, `the
+export <name> of <interface file> leads to Other.asi (through 2 hook jumps)`, `... could not be read`, `... leads to
+code outside every module`. Diagnostics (not matched): `hook: coexistence check at load: <result> (<n> address(es) read
+in <t> ms)` once per run (with its measured cost), `hook: coexistence re-check at <when>: ...`,
+`NGX: RR provider not registered: WrongGPU RR stays off in this process (see the line above)`.
+
+**Tests** (CPU only): `tests/test_rr_guard.cpp` (safe reads on PAGE_NOACCESS, reserved and guard pages and a page made
+unreadable after caching; every jump form; synthetic modules; 32 threads at one decision); `tests/test_rr_guard_dll.cpp`
+with our own stand-in other plugin `tests/fake_other_rr.cpp` (modes clean, first, inline, relay, anon, noaccess,
+guardpage, late, late-replace, provider, owncopy, route, route-other, route-inline; `--take`; 16 threads at the first call),
+for every interface version, release and probe (build.py); the existing hook runs check that no guard line appears.
+`tools/guard_modelm.py` runs Model M's own ctest list unchanged with WrongGPU RR loaded into each test process before
+its main and the guard tripped (none / off / take / owncopy / passthrough; `tests/guard_inject.cpp`,
+`tests/guard_scene.cpp`).
+
 ## Unload
 
 The plugin does **not** unload. OptiScaler keeps ASI plugins loaded for the process lifetime, and a patched IAT

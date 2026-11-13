@@ -498,6 +498,7 @@ int main(int argc, char** argv) {
 #endif
     CHECK(count(L, "patched IAT slot") == 0);
     CHECK(count(L, "patched delay-load IAT slot") == 0);
+    CHECK(count(L, "another Ray Reconstruction plugin is active") == 0);  // RR guard: not reached, quiet
     TEST_SUMMARY("test_hook_dll (wrong version)");
   }
 
@@ -529,6 +530,12 @@ int main(int argc, char** argv) {
   // Matching version: the ASI redirected our RR-role IAT slots (observed through the log).
   {
     std::vector<std::string> L = read_lines(log_path);
+    // RR guard: no other RR plugin here (the stand-in host's init patch, the delay helper's thunks): the guard
+    // stays quiet (one clean check line, no "stays off" / second-copy / later-plugin line)
+    CHECK(count(L, "hook: coexistence check at load: no other Ray Reconstruction plugin found (") == 1);
+    CHECK(count(L, "another Ray Reconstruction plugin is active") == 0);
+    CHECK(count(L, "a second copy of WrongGPU RR is loaded") == 0);
+    CHECK(count(L, "a plugin loaded after WrongGPU replaced its hooks") == 0);
 #if WG_TEST_DELAYLOAD
     CHECK(count(L, "loaded for the exe's delay-load import") == 1);
     CHECK(count(L, "patched IAT slot") == 0);  // the exe has no plain import of the interface
