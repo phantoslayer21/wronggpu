@@ -56,8 +56,10 @@ void flag(uint3 id : SV_DispatchThreadID) { flagBuf[0] = rx; }
 #if defined(PASS_SPIN)
 // done_mode=spin: one thread polls the done flag (written by the HIP stream after the network) until it reaches rx,
 // for at most ry polls; a timeout is counted in the second word. The poll is an atomic: a plain globallycoherent load
-// in the loop is hoisted by the shader compiler.
-globallycoherent RWBuffer<uint> spinBuf : register(u0);
+// in the loop is hoisted by the shader compiler. spinBuf is touched only by atomics, which are coherent across thread
+// groups and the device without globallycoherent (D3D11.3 functional spec 7.14.4: that tag concerns non-atomic loads
+// only), so the buffer is declared without it; some HLSL compilers (e.g. Wine's d3dcompiler_47) reject the modifier.
+RWBuffer<uint> spinBuf : register(u0);
 [numthreads(1, 1, 1)]
 void spin(uint3 id : SV_DispatchThreadID) {
   uint o = 0;
