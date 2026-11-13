@@ -1130,7 +1130,7 @@ int RunCli(int argc, wchar_t** argv) {
             if (eq != wstring::npos) {
                 put(s.substr(eq + 1));
             } else if ((name == L"out" || name == L"job" || name == L"result" || name == L"batch" || name == L"data" || name == L"log" || name == L"dir" || name == L"opti" ||
-                        name == L"model" || name == L"library" || name == L"startmenu" || name == L"ignore-list") && i + 1 < argc) {  // (--ignore needs its "=")
+                        name == L"model" || name == L"library" || name == L"startmenu") && i + 1 < argc) {  // (--ignore and --ignore-list need their "=")
                 put(argv[++i]);
             } else a.flags.insert(name);
         } else a.pos.push_back(s);

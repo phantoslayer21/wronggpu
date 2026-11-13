@@ -395,8 +395,11 @@ def test_model_lists(t):
     t.check("a bare --ignore (no '='): exit 10, nothing converted; it does not take the next argument as its value",
             s["code"] == 10 and s["model"] == b"" and "--ignore needs its entry after an equals sign" in s["error"], (s["code"], s["error"]))
     s = convert_model(t, lib, extra=("--ignore-list",))
-    t.check("a bare --ignore-list with nothing after it: exit 10, nothing converted", s["code"] == 10 and s["model"] == b"" and "--ignore-list needs its file" in s["error"],
-            (s["code"], s["error"]))
+    t.check("a bare --ignore-list followed by another option: exit 10, nothing converted; it does not take that option as its file",
+            s["code"] == 10 and s["model"] == b"" and "--ignore-list needs its file" in s["error"], (s["code"], s["error"]))
+    s = convert_model(t, lib, extra=("--ignore-list", cli_list))
+    t.check("a bare --ignore-list followed by a file (no '='): exit 10, nothing converted; the file is not taken as its value",
+            s["code"] == 10 and s["model"] == b"" and "--ignore-list needs its file" in s["error"], (s["code"], s["error"]))
     # --ignore / --ignore-list are applied by model convert and rr-data convert only: elsewhere exit 10 and a message
     for verb_args in (["scan"], ["model", "status"], ["rr-data", "status"], ["hipcheck"]):
         for arg in ("--ignore=" + b, "--ignore-list=" + cli_list):

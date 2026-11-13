@@ -384,8 +384,9 @@ Reconstruction data; the window, the install, `model convert`, `rr-data convert`
 
 `model convert` and `rr-data convert` add `--ignore-list=<file>` (repeatable; a file that can't be read stops the command,
 exit 10, nothing converted) and `--ignore=<entry>` (repeatable; one line of the format below, `--ignore=<path>`,
-`--ignore=<path>  sha256=<hex>` or `--ignore=sha256=<hex>`; an entry that is not understood stops the command, exit 10; the
-`=` is required: a bare `--ignore` is an error and never takes the next argument). `--library=<folder>` searches that
+`--ignore=<path>  sha256=<hex>` or `--ignore=sha256=<hex>`; an entry that is not understood stops the command, exit 10). For
+both the `=` is required: a bare `--ignore` or `--ignore-list` is an error (exit 10) and never takes the next argument as
+its value. `--library=<folder>` searches that
 folder's sub-folders as games too (this run only; `--noscan` leaves out the store libraries). These options are read by
 those two verbs only (and, in a `WRONGGPU_TESTING` build, `rr-data prepare`); on any other verb they stop it with exit 10 and
 a message, so a file is never believed protected by an option that was ignored.
