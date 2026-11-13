@@ -189,6 +189,48 @@ int main() {
                     "ShortenMiddle keeps the drive and the marker");
         }
 
+        // Linux's device list from a made-up folder (any host): every card in number order, connectors skipped, junk and
+        // missing files ignored, the reported name says the card was not confirmed as the game's adapter
+        {
+            const wstring drm = Join(dir, L"drm-fixture");
+            auto card = [&](const wstring& name, const char* vendor, const char* device) {
+                EnsureDir(Join(drm, name + L"\\device"));
+                if (vendor) WriteFileAtomic(Join(drm, name + L"\\device\\vendor"), vendor, strlen(vendor));
+                if (device) WriteFileAtomic(Join(drm, name + L"\\device\\device"), device, strlen(device));
+            };
+            card(L"card0", "0x1002\n", "0x15bf\n");      // an integrated Radeon, not RDNA 4
+            card(L"card1", "0x10de\n", "0x7550\n");      // another vendor with an RDNA 4 device id
+            card(L"card2", "zz\n", "0x7550\n");          // a vendor that is not a number
+            card(L"card3", "0x1002\n", nullptr);          // the device file missing
+            card(L"card4-DP-1", "0x1002\n", "0x7550\n"); // a connector, not a card
+            require(LinuxRdna4Name(drm).empty(), "LinuxRdna4Name: none among an iGPU, another vendor, junk, a missing file, a connector");
+            require(LinuxRdna4Name(Join(dir, L"no-such-drm")).empty(), "LinuxRdna4Name: a missing device list");
+            card(L"card20", "0x1002\n", "0x7590\n");     // past the first 16 cards
+            const wstring past16 = LinuxRdna4Name(drm);
+            require(Contains(past16, L"7590") && Contains(past16, L"not confirmed"), "LinuxRdna4Name: a card numbered 20, reported as not confirmed");
+            card(L"card17", "0x1002\n", "0x7550 \n");    // two RDNA 4 cards: the lower number first
+            require(Contains(LinuxRdna4Name(drm), L"7550"), "LinuxRdna4Name: cards in number order");
+        }
+        // under Wine an RDNA 4 card that Linux reports is found even when Wine's own DXGI names an old Radeon
+        if (UnderWine()) {
+            auto sysfs = [](const wstring& p) {  // the C runtime reads to the end of file (sysfs reports 4096 bytes)
+                string s;
+                if (FILE* f = _wfopen(p.c_str(), L"rb")) { char b[64]; size_t n; while ((n = fread(b, 1, sizeof b, f)) > 0) s.append(b, n); fclose(f); }
+                return s;
+            };
+            bool linuxRdna4 = false;
+            for (int i = 0; i < 16 && !linuxRdna4; ++i) {
+                const wstring dev = L"Z:\\sys\\class\\drm\\card" + std::to_wstring(i) + L"\\device\\";
+                const unsigned long v = strtoul(sysfs(dev + L"vendor").c_str(), nullptr, 16), id = strtoul(sysfs(dev + L"device").c_str(), nullptr, 16);
+                linuxRdna4 = v == 0x1002 && (id == 0x7550 || id == 0x7551 || id == 0x7590 || id == 0x7591);
+            }
+            const wstring fromLinux = LinuxRdna4Name();
+            const GpuInfo gpu = DetectGpu();
+            std::wcout << L"under Wine: Linux reports RDNA 4: " << linuxRdna4 << L"; LinuxRdna4Name: \"" << fromLinux << L"\"; DetectGpu: " << gpu.name << L" (rdna4 " << gpu.rdna4 << L")\n";
+            require(fromLinux.empty() != linuxRdna4, "LinuxRdna4Name: the RDNA 4 card Linux reports, and only then");
+            if (linuxRdna4) require(gpu.amd && gpu.rdna4, "DetectGpu under Wine: the RDNA 4 card Linux reports");
+        }
+
         // a store's launch exe is a hint only: a launcher stub (REDprelauncher.exe) gives way to the exe discovery
         {
             auto file = [](const wstring& p) { EnsureDir(Parent(p)); WriteFileAtomic(p, "MZ", 2); };
