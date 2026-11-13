@@ -56,7 +56,7 @@ MODEL_FORMATS = {"auto": 0, "raw": 1, "wgcm": 2}
 SWIN_ORDER = ["enc1", "enc2", "b0", "b1", "b2", "b3", "b4", "b5", "dec2", "dec1"]
 # Model-keyed (#89): the Swin stage order per model (Model M: SWIN_ORDER); a model adds its row next to its stage
 # table (clean/reference/swin.py MODEL_STAGES).
-MODEL_SWIN_ORDER = {"M": SWIN_ORDER}
+MODEL_SWIN_ORDER = {"M": SWIN_ORDER, "L": SWIN_ORDER}  # L: Model M's ten Swin stages, same order (#89)
 
 
 def swin_order(model="M"):

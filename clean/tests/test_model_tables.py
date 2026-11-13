@@ -24,6 +24,10 @@ M_STAGES = {
 M_SWIN_ORDER = ["enc1", "enc2", "b0", "b1", "b2", "b3", "b4", "b5", "dec2", "dec1"]
 
 
+# the two kinds of window offsets of the rule below (parity 0, parity 1): the default stages and the shifted ones
+WINDOW_KINDS = {"first": ((2, 2), (0, 2)), "second": ((0, 0), (2, 0))}
+
+
 def m_window_offset(stage, parity):  # the rule as it was written before
     if stage in ("b1", "b3", "b5", "dec2", "dec1"):
         return (0, 0) if parity == 0 else (2, 0)
@@ -51,7 +55,7 @@ class ModelMRows(unittest.TestCase):
         from clean.runner import pipeline
         self.assertEqual(pipeline.SWIN_ORDER, M_SWIN_ORDER)
         self.assertIs(pipeline.swin_order(), pipeline.SWIN_ORDER)
-        self.assertEqual(R.MODELS, ("M", "K"))
+        self.assertEqual(R.MODELS, ("M", "L", "K"))  # L: Model M's stage table (ModelLRows)
 
     def test_messages_unchanged_for_m(self):
         with self.assertRaisesRegex(ValueError, r"^bneck needs the tensors of the six blocks b0\.\.b5$"):
@@ -68,8 +72,42 @@ class ModelMRows(unittest.TestCase):
     def test_unknown_model(self):
         for f in (lambda: S.stage_table("Z"), lambda: S.window_offset("b0", 0, "Z"), lambda: P.bneck_stages("Z"),
                   lambda: P.mid_stages("Z"), lambda: P.stage_sections("b0", "Z")):
-            with self.assertRaisesRegex(ValueError, r"for model 'Z'; known: M"):
+            with self.assertRaisesRegex(ValueError, r"for model 'Z'; known: L, M"):
                 f()
+
+
+class ModelLRows(unittest.TestCase):
+    """Model L's ten Swin stages are Model M's (#89): its rows are Model M's rows, the same objects."""
+
+    def test_rows_are_m_rows(self):
+        from clean.runner import pipeline
+        self.assertIs(S.stage_table("L"), S.STAGES)
+        self.assertIs(S.WINDOW_OFFSETS["L"], S.WINDOW_OFFSETS["M"])
+        self.assertIs(P.bneck_stages("L"), P.BNECK_STAGES)
+        self.assertIs(P.mid_stages("L"), P.MID_STAGES)
+        self.assertIs(pipeline.swin_order("L"), pipeline.SWIN_ORDER)
+        for stage in M_STAGES:
+            for parity in (0, 1):
+                self.assertEqual(S.window_offset(stage, parity, "L"), m_window_offset(stage, parity))
+
+    def test_same_bytes_as_m(self):
+        rng = np.random.default_rng(11)
+        for s in M_STAGES:
+            p = S.random_params(s, rng, model="L")
+            self.assertEqual(P.pack_stage(s, p, model="L"), P.pack_stage(s, p))
+            self.assertEqual(P.stage_blob_size(s, "L"), P.stage_blob_size(s))
+
+    def test_matches_l_table_offsets(self):
+        """The L table's window offsets (clean/l/reference/table.py) are the two kinds of these rows."""
+        try:
+            from clean.l.reference import table as LT
+        except ImportError:
+            self.skipTest("no clean/l/reference/table.py")
+        t = LT.TABLE if hasattr(LT, "TABLE") else None
+        if t is None or "window_offsets" not in t:
+            self.skipTest("the L table has no window_offsets entry")
+        self.assertEqual(tuple(t["window_offsets"]["first"]), WINDOW_KINDS["first"])
+        self.assertEqual(tuple(t["window_offsets"]["second"]), WINDOW_KINDS["second"])
 
 
 class SecondModel(unittest.TestCase):
