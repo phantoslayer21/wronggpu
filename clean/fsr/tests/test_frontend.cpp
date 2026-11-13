@@ -1189,6 +1189,71 @@ static void TestCompare() {
     CHECK(g_amd.back().fn == "destroy" && g_amd.back().memCb == nullptr);
 }
 
+// Issue #59: the reactive-mask generation call of a WrongGPU context goes to AMD's context when one exists (frames of
+// the context that went to AMD with the game's own reactive resource need this frame's mask): in a comparison and
+// after a frame the stand-in could not take. Without an AMD context there is nothing to send it to (OK, nothing
+// recorded, as before). A failure of AMD's call is the call's result.
+static void TestReactiveMaskForwarded() {
+    auto maskCalls = [] {
+        size_t n = 0;
+        for (const AmdCall& c : g_amd) n += c.fn == "dispatch" && c.type == FFX_API_DISPATCH_DESC_TYPE_UPSCALE_GENERATEREACTIVEMASK;
+        return n;
+    };
+    ffxDispatchDescUpscaleGenerateReactiveMask mask{};
+    mask.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE_GENERATEREACTIVEMASK;
+
+    // Comparison.
+    Reset();
+    g_resources[kColor] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+    g_resources[kDepth] = {dxgi::R32_FLOAT, 2560, 1440};
+    g_resources[kMotion] = {dxgi::R16G16_FLOAT, 2560, 1440};
+    g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+    {
+        auto fe = MakeFrontEnd(Config{});
+        UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE, /*withOverride=*/true);
+        ffxContext ctx = nullptr;
+        CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK);
+        ffxDispatchDescUpscale d = MakeDispatch();
+        CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);  // WrongGPU
+        CHECK(fe->Dispatch(&ctx, &mask.header) == FFX_API_RETURN_OK && g_amd.empty());  // no AMD context yet
+        g_compare = true;
+        CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);  // AMD's context is made and dispatched
+        CHECK(g_amd.size() == 3 && maskCalls() == 0);
+        const size_t before = g_amd.size();
+        CHECK(fe->Dispatch(&ctx, &mask.header) == FFX_API_RETURN_OK);
+        CHECK(g_amd.size() == before + 1 && maskCalls() == 1 && g_amd.back().context == g_amd[0].context);
+        g_amdDispatchResult = FFX_API_RETURN_ERROR_RUNTIME_ERROR;
+        CHECK(fe->Dispatch(&ctx, &mask.header) == FFX_API_RETURN_ERROR_RUNTIME_ERROR && maskCalls() == 2);
+        g_amdDispatchResult = FFX_API_RETURN_OK;
+        g_compare = false;  // back to WrongGPU: AMD's context still exists, the call still reaches it (next frames may go to AMD)
+        CHECK(fe->Dispatch(&ctx, &mask.header) == FFX_API_RETURN_OK && maskCalls() == 3);
+        CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    }
+
+    // A frame the stand-in cannot take (no output): AMD's context is made from the saved create parameters.
+    Reset();
+    g_resources[kColor] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+    g_resources[kDepth] = {dxgi::R32_FLOAT, 2560, 1440};
+    g_resources[kMotion] = {dxgi::R16G16_FLOAT, 2560, 1440};
+    g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+    {
+        auto fe = MakeFrontEnd(Config{});
+        UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
+        ffxContext ctx = nullptr;
+        CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK);
+        ffxDispatchDescUpscale good = MakeDispatch();
+        CHECK(fe->Dispatch(&ctx, &good.header) == FFX_API_RETURN_OK);
+        CHECK(fe->Dispatch(&ctx, &mask.header) == FFX_API_RETURN_OK && g_amd.empty());  // no AMD context yet
+        ffxDispatchDescUpscale bad = MakeDispatch();
+        bad.output.resource = nullptr;
+        CHECK(fe->Dispatch(&ctx, &bad.header) == FFX_API_RETURN_OK);
+        CHECK(g_amd.size() == 2 && g_amd[0].fn == "create" && g_amd[1].fn == "dispatch" && maskCalls() == 0);
+        CHECK(fe->Dispatch(&ctx, &mask.header) == FFX_API_RETURN_OK);
+        CHECK(g_amd.size() == 3 && maskCalls() == 1 && g_amd.back().context == g_amd[0].context);
+        CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    }
+}
+
 // Interface version 2: a version 2 backend gets the services and the version 2 frame; a version 1 backend gets the
 // version 1 structures; WG_ERROR_NOT_READY runs the stand-in for that frame only and keeps the context on the backend.
 static void TestInterfaceVersions() {
@@ -3156,6 +3221,7 @@ int main() {
     TestParkedContexts();
     TestHostedSwitchNotParked();
     TestCompare();
+    TestReactiveMaskForwarded();
     TestSlowCreate();
     TestInterfaceVersions();
     TestAmdMode();
