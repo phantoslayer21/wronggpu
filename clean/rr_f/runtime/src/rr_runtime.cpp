@@ -1091,7 +1091,7 @@ void drop_device() {
   release(rt.rm_fence);
   if (rt.rm_ev) CloseHandle(rt.rm_ev), rt.rm_ev = nullptr;
   if (rt.rm_quit) CloseHandle(rt.rm_quit), rt.rm_quit = nullptr;
-  if (rt.marker) rt.marker->Unmap(0, nullptr);
+  if (rt.marker && rt.marker_map) rt.marker->Unmap(0, nullptr);  // only a buffer that was mapped (set_device's Map can fail)
   rt.marker_map = nullptr;
   drop(rt.marker);
   release(rt.l);
@@ -1264,7 +1264,11 @@ uint32_t set_device_locked(ID3D12Device* given) {
   {
     void* m = nullptr;
     D3D12_RANGE r{0, 256};
-    rt.marker->Map(0, &r, &m);
+    // Issue #67: a failed Map leaves m null; the writes below would dereference it (the Model M runtime checks it too).
+    if (FAILED(rt.marker->Map(0, &r, &m)) || !m) {
+      drop_device();
+      return WG_E_D3D_API;
+    }
     rt.marker_map = (volatile uint32_t*)m;
     *rt.marker_map = 0;
     rt.marker_map[2] = rt.marker_map[3] = 0;
