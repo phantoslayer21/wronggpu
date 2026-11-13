@@ -10,6 +10,11 @@ this source onward, WrongGPU's source code and its official builds are under the
 **Help and bug reports:** the [WrongGPU Discord server](https://discord.gg/745z9MfKwm) (channel #bug-reports) or
 [GitHub issues](https://github.com/phantoslayer21/wronggpu/issues).
 
+**WrongGPU is a community project.** Anyone can report games, fix bugs, write tests or work on the
+[roadmap](ROADMAP.md) by pull request; see [Contributing](#contributing). Start with the
+[welcome discussion](https://github.com/phantoslayer21/wronggpu/discussions/1). The project owner reviews and merges,
+and builds and publishes the official releases.
+
 ## For players
 
 ### What you need
@@ -48,7 +53,8 @@ requiem needs REFramework, which you install yourself.
 | LEGO Batman | yes | the game offers none |
 | 007 First Light | not supported (crashes at start under OptiScaler) | |
 
-Other games are experimental. Known issues in 0.6.0: Ray Reconstruction can still show occasional artifacts (ghosting
+Other games are experimental; the full list, with requirements and how to add your game, is
+[COMPATIBILITY.md](COMPATIBILITY.md). Known issues in 0.6.0: Ray Reconstruction can still show occasional artifacts (ghosting
 on thin lines in reflections, blotches in Cyberpunk 2077 with path tracing); in RESIDENT EVIL requiem a single frame
 can very occasionally come out far too bright or dark at a scene change. Full details: the release notes
 ([clean/installer/RELEASE-NOTES.md](clean/installer/RELEASE-NOTES.md)).
@@ -122,9 +128,22 @@ implementation's own design and format notes (per-file provenance records are ke
 | `clean/third_party` | AMD FidelityFX SDK headers (MIT) |
 | `data` | converter maps and synthetic test vectors |
 
-Building: [BUILDING.md](BUILDING.md). Contributing: [CONTRIBUTING.md](CONTRIBUTING.md) (every contributor makes the
-clean-room statement described there). Security issues: [SECURITY.md](SECURITY.md). Code of conduct:
+Building: [BUILDING.md](BUILDING.md). Security issues: [SECURITY.md](SECURITY.md). Code of conduct:
 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+
+## Contributing
+
+WrongGPU is developed in the open by its community. Ways to help:
+
+- **Players:** test games and report them ([COMPATIBILITY.md](COMPATIBILITY.md), "How to add your game"); report
+  bugs with the launcher's **Collect logs** zip.
+- **Developers:** pick an item from [ROADMAP.md](ROADMAP.md) or an open issue, and open a pull request. A good first
+  step: [build WrongGPU from a fresh clone](https://github.com/phantoslayer21/wronggpu/issues/2) and report where
+  BUILDING.md breaks.
+
+Every pull request: the clean-room statement and a `Signed-off-by` line on each commit ([CONTRIBUTING.md](CONTRIBUTING.md)),
+passing CI (licence, line endings, CPU builds and tests on Windows), then a maintainer's clean-room scan, review and,
+for kernel or runtime changes, a test on a Radeon RX 9000-series card before the owner merges.
 
 ## Licence
 

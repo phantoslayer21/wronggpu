@@ -1,13 +1,19 @@
 **What this changes and why**
 
-**How it was tested** (CPU tests of BUILDING.md; GPU or game tests if any, with synthetic data)
+**What each new or substantially changed file is based on** (public document, test result or own design)
+
+**How it was tested** (CI runs the CPU tests; say what else you ran: GPU or game tests, with synthetic data)
 
 **Checklist**
-- [ ] I have made the clean-room statement of CONTRIBUTING.md (first pull request: copy it here).
-- [ ] Every commit has a `Signed-off-by:` line.
-- [ ] New source files carry `SPDX-License-Identifier: MIT`; this description says what each new or changed file is
-      based on.
-- [ ] No files of the original upscaler (see CONTRIBUTING.md), no model data, game files, captures, screenshots or binaries; no paths, user or machine names of
-      my PC.
+- [ ] I make the clean-room statement of [CONTRIBUTING.md](../CONTRIBUTING.md#the-clean-room-statement) for this and all
+      my contributions (required once; tick it in every pull request).
+- [ ] Every commit has a `Signed-off-by:` line (`git commit -s`; Developer Certificate of Origin 1.1).
+- [ ] New source files carry the SPDX licence line for MIT, or are covered in `REUSE.toml`.
+- [ ] No files of the original upscaler (see CONTRIBUTING.md), no model data, game files, captures, screenshots or
+      binaries; no paths, user or machine names of my PC.
 - [ ] Any new third-party component is under a permitted licence and listed in THIRD-PARTY-NOTICES and REUSE.toml.
-- [ ] Kernel changes meant to be bit-identical: the comparison is shown.
+- [ ] Numbers in documents come with their measurement record.
+- [ ] Kernel or runtime changes: I say whether the output is meant to stay bit-identical and show the comparison.
+
+A maintainer scans every pull request on their side before merge (clean-room gate), reviews it, and tests it on a GPU
+when kernels or the runtime change (CONTRIBUTING.md, "How a pull request gets merged").
