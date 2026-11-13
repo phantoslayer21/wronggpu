@@ -46,7 +46,15 @@ CORE = ["proxy_core.cpp", "settings.cpp", "formats.cpp", "optimal.cpp", "answers
 PROBE = ["probe.cpp", "probe_log.cpp", "probe_gpu_d3d12.cpp"]  # probe build only
 SHADERS = (("WG_PROBE_UPSCALE", "kProbeUpscaleCs", "probe_upscale_cs.h"),
            ("WG_PROBE_PATCH", "kProbePatchCs", "probe_patch_cs.h"))
-CLFLAGS = "/nologo /EHsc /std:c++17 /O2 /MD /W3 /wd4996 /DNOMINMAX"
+# /MT: the static C/C++ runtime, as WrongGPU.asi and wronggpu_runtime.dll are built (BUILDING.md). The plugin then
+# needs no msvcp140.dll / vcruntime140.dll of the game's (or Wine prefix's) choosing: with /MD, a msvcp140.dll older
+# than 14.40 crashed it at its first std::mutex lock (#9). Only plain C structures and function pointers cross the
+# plugin's boundaries (include/*.h), so no C runtime object is shared with the game, OptiScaler or the runtime.
+CLFLAGS = "/nologo /EHsc /std:c++17 /O2 /MT /W3 /wd4996 /DNOMINMAX"
+# Test-only: the fake runtime library and the two test programs that load it (test_proxy_dll, test_hook_dll) share
+# C++ objects (tests/fake_runtime.h: std::vector, std::map, std::function filled by the test, freed by the library),
+# so those three use the shared runtime, one heap. The plugins under test are built with CLFLAGS.
+SHARED_CRT_CLFLAGS = CLFLAGS.replace(" /MT ", " /MD ")
 VERSIONS = (7, 8, 14)
 PROBE_LOG = "wronggpu-rr-probe.log"
 
@@ -178,10 +186,10 @@ def build_release(binding, out, logs, imports, name):
     if PROBE_LOG.encode("utf-16-le") in blob or PROBE_LOG.encode() in blob:
         raise SystemExit(f"{built}: the release build contains the probe")
     fake, orig_name = fake_original(binding, out, n)
-    sh(f'cl {CLFLAGS} /LD {src("tests", "fake_runtime_dll.cpp")} /Fo"{fake}\\\\" '
+    sh(f'cl {SHARED_CRT_CLFLAGS} /LD {src("tests", "fake_runtime_dll.cpp")} /Fo"{fake}\\\\" '
        f'/Fe"{os.path.join(fake, "wronggpu_runtime.dll")}"', out)
     exe = os.path.join(out, "test_proxy_dll.exe")
-    sh(f'cl {CLFLAGS} /I"{gen}" {src("tests", "test_proxy_dll.cpp")} /Fo"{out}\\\\" /Fe"{exe}" /link psapi.lib', out)
+    sh(f'cl {SHARED_CRT_CLFLAGS} /I"{gen}" {src("tests", "test_proxy_dll.cpp")} /Fo"{out}\\\\" /Fe"{exe}" /link psapi.lib', out)
     for runtime in (True, False):
         extra = [os.path.join(fake, "wronggpu_runtime.dll")] if runtime else []
         stage, pname = run_stage(exe, built, fake, orig_name, n,
@@ -312,7 +320,7 @@ def test_hook(built, binding, out, logs, probe, n=None, gen=None):
         sub = os.path.join(out, "delay") if delay else out
         os.makedirs(sub, exist_ok=True)
         dexe = os.path.join(sub, "test_hook_dll.exe")
-        sh(f'cl {CLFLAGS} {"/DWG_RR_PROBE=1 " if probe else ""}{"/DWG_TEST_DELAYLOAD=1 " if delay else ""}'
+        sh(f'cl {SHARED_CRT_CLFLAGS} {"/DWG_RR_PROBE=1 " if probe else ""}{"/DWG_TEST_DELAYLOAD=1 " if delay else ""}'
            f'/I"{gen}" {src("tests", "test_hook_dll.cpp")} "{implib}" /Fo"{sub}\\\\" /Fe"{dexe}" /link {libs}'
            + (f' delayimp.lib /DELAYLOAD:{iface_name}' if delay else ''), out)
     exe = os.path.join(out, "test_hook_dll.exe")
@@ -326,7 +334,7 @@ def test_hook(built, binding, out, logs, probe, n=None, gen=None):
     shutil.copy(built, os.path.join(stage, n["proxy_file"]))
     if not probe:
         rt = os.path.join(out, "wronggpu_runtime.dll")
-        sh(f'cl {CLFLAGS} /LD {src("tests", "fake_runtime_dll.cpp")} /Fo"{out}\\\\" /Fe"{rt}"', out)
+        sh(f'cl {SHARED_CRT_CLFLAGS} /LD {src("tests", "fake_runtime_dll.cpp")} /Fo"{out}\\\\" /Fe"{rt}"', out)
         shutil.copy(rt, stage)
     staged_exe = os.path.join(stage, "test_hook_dll.exe")
     r = subprocess.run([staged_exe, stage], capture_output=True, text=True, timeout=600)

@@ -564,7 +564,9 @@ void test_import_slots() {
   CHECK_EQ(wgsi::install(GetModuleHandleW(nullptr), [dec] { wgsi::Resolution r; r.final = true; r.d = dec; return r; },
                          wgsi::Shim::kDecisionTries, [](const std::string& l) { g_log.push_back(l); }, &detail), 2u);
   CHECK(!wgsi::process_shim().decided());  // deferred to the first call
-  CHECK(detail == "SetupDiGetDeviceInstanceIdW (import), SetupDiGetDeviceRegistryPropertyW (import)");
+  // in this exe's import-table order, which the linker chooses (it differs between /MD and /MT builds)
+  CHECK(detail == "SetupDiGetDeviceInstanceIdW (import), SetupDiGetDeviceRegistryPropertyW (import)" ||
+        detail == "SetupDiGetDeviceRegistryPropertyW (import), SetupDiGetDeviceInstanceIdW (import)");
 
   // the calls through this exe's imports now meet the shim
   wchar_t after[MAX_DEVICE_ID_LEN] = {};
