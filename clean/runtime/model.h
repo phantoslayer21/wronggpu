@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace wgrt {
@@ -36,9 +37,26 @@ extern const char* const kFilterTaps;   // "output_taps"
 // The five weights when the model has the group; false when it has not.
 bool model_output_taps(const std::map<std::string, StageTensors>& model, float taps[5]);
 
+// One tensor of a stage: name, shape (raw layout), uint8 (else float32).
+struct TensorSpec {
+  std::string name;
+  std::vector<int> shape;
+  bool u8;
+};
+using StageSpecs = std::vector<std::pair<std::string, std::vector<TensorSpec>>>;  // (stage, its tensors), in order
+
+// Model M's tensors of one stage of model_stages() (spec 08 section 7.2).
+std::vector<TensorSpec> stage_specs(const std::string& stage);
+
 // Reads and checks every tensor (sizes, finite values, T in 0..127). model_dir may hold raw/ or be raw/ itself.
-// Test path (spec 10 answers: --raw is kept for tests).
+// Test path (spec 10 answers: --raw is kept for tests). Model M: load_raw_stages with model_stages() / stage_specs.
 bool load_raw_model(const std::string& model_dir, std::map<std::string, StageTensors>* out, std::string* err);
+
+// The same for any list of stages (another model's): <root>/<stage>/<name>.bin per tensor, where root is
+// model_dir/raw when that holds the first tensor of the first stage, else model_dir; uint8 tensors at most 127; plus
+// the optional group "filter" as above.
+bool load_raw_stages(const std::string& model_dir, const StageSpecs& stages,
+                     std::map<std::string, StageTensors>* out, std::string* err);
 
 // Normal path: the converter's model.wgcm (clean/converter/OUTPUT-FORMAT.md). Checks the whole-file SHA-256, every
 // stage and tensor (names, dtypes, shapes), and recomputes each stage's keyed digest (spec 08 section 7.3, with the
