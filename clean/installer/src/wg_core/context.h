@@ -65,6 +65,11 @@ struct Context {
     const EmbeddedData* data = nullptr;  // set before anything else (app/payload_embed.cpp)
     wstring logFile;                     // /LOG= or %LOCALAPPDATA%\WrongGPU\setup.log; empty: no log
     std::mutex logMutex;
+    // Set: every log line goes here instead of logFile (the elevated worker: back to the launcher, elevated_job.h).
+    std::function<void(const wstring&)> logSink;
+    // Set: temporary files (the OptiScaler package unpacked, the files an install prepares) go under this folder instead of
+    // the temp folder (the elevated worker: its folder only administrators can write, package_snapshot.h).
+    wstring workRoot;
 #if WRONGGPU_PRESET_K
     bool presetK = false;                // Preset K starts first (/PRESET=K, the wizard's choice)
 #else

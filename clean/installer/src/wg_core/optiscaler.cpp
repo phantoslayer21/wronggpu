@@ -9,10 +9,15 @@
 
 namespace wg {
 
+// The folder temporary files go under: the Context's work folder (the elevated worker's), else the temp folder.
+static wstring TempRoot(Context& ctx) {
+    if (!ctx.workRoot.empty()) return ctx.workRoot;
+    wchar_t tmp[MAX_PATH] = {}; GetTempPathW(MAX_PATH, tmp);
+    return tmp;
+}
 wstring OptiTempDir(Context& ctx) {
     if (!ctx.opti.tempDir.empty()) return ctx.opti.tempDir;
-    wchar_t tmp[MAX_PATH] = {}; GetTempPathW(MAX_PATH, tmp);
-    ctx.opti.tempDir = Join(tmp, L"wronggpu-optiscaler-" + std::to_wstring(GetCurrentProcessId()));
+    ctx.opti.tempDir = Join(TempRoot(ctx), L"wronggpu-optiscaler-" + std::to_wstring(GetCurrentProcessId()));
     EnsureDir(ctx.opti.tempDir);
     return ctx.opti.tempDir;
 }
@@ -39,8 +44,7 @@ OptiPackage PrepareOptiScaler(Context& ctx, const wstring& chosen) {
     if (IsDir(p.source)) root = p.source;
     else if (IsFile(p.source) && IEq(BaseName(p.source), L"OptiScaler.dll")) root = Parent(p.source);
     else if (IsFile(p.source) && (EndsWithI(p.source, L".7z") || EndsWithI(p.source, L".zip"))) {
-        wchar_t tmp[MAX_PATH] = {}; GetTempPathW(MAX_PATH, tmp);
-        p.tempDir = Join(tmp, L"wronggpu-optiscaler-" + std::to_wstring(GetCurrentProcessId()));
+        p.tempDir = Join(TempRoot(ctx), L"wronggpu-optiscaler-" + std::to_wstring(GetCurrentProcessId()));
         RemoveTree(p.tempDir); EnsureDir(Join(p.tempDir, L"package"));
         wchar_t sys[MAX_PATH] = {}; GetSystemDirectoryW(sys, MAX_PATH);
         const wstring tar = Join(sys, L"tar.exe");

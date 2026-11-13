@@ -313,14 +313,22 @@ ctest `source-size`.
   copied or shipped; games without art get a generated tile), a page per game with cards, custom-drawn menus and
   dialogs, DPI aware per monitor. Every widget is a UI Automation element with a name (`ui_uia.cpp`); typed text
   stays in native `EDIT` windows. A game folder that needs
-  administrator rights goes to the elevated worker: the window writes a job file (operation, exact paths, the
-  player's `%LOCALAPPDATA%`, the profile) and starts `WrongGPU.exe apply --job=<file> --result=<file>` with `runas`;
-  the window itself never runs elevated.
+  administrator rights goes to the elevated worker: the window writes a job file per game (operation, exact paths,
+  the player's `%LOCALAPPDATA%`, the profile, the OptiScaler package's digest) and a batch file listing each job file
+  with its SHA-256, makes a reply pipe that only this account and administrators can open, and starts
+  `WrongGPU.exe apply --batch=<file> --sha256=<its SHA-256> --pipe=<name>` with `runas` (one permission prompt for
+  every game); the window itself never runs elevated. The elevated step reads each file once and checks every job
+  before the first one runs: each SHA-256, every path absolute, and the OptiScaler package of an install, update or
+  repair copied into a new folder that only administrators can write, installed only from that copy when its digest
+  is the job's. One job that fails a check: no job runs. The worker writes no log or result file; its log lines and
+  each job's result come back over the pipe, the window takes them only from the worker it started and only in that
+  run, and a game without a result there is shown as not reported (`src/wg_core/elevated_job.h`,
+  `src/wg_core/package_snapshot.h`).
 - **Command line** (a verb as the first argument; `src/app/cli.cpp`): `scan`, `status [game]`, `install`, `repair`,
   `update`, `uninstall`, `rollback`, `adopt [game | --all]`, `set <game> key=value ...`, `set --global key=value`,
   `get <game> [key]`, `get --global`, `collect <game> [--zip=<file>]`, `hipcheck`, `model status|convert`,
   `self-install [--dir=] [--startmenu=<folder>|-]`, `self-uninstall [--keep-games]`, `play <game>`, `update-check`,
-  `apply --job= --result=` (the elevated worker), `version`, `ui-dump --dump=<json> [--shots=<folder>]` (the window's
+  `apply --batch= --sha256= --pipe=` (the elevated worker), `version`, `ui-dump --dump=<json> [--shots=<folder>]` (the window's
   pages painted offscreen, never shown: their widgets as JSON, PNGs, for tests), `ui-render --out-dir=<folder>
   --fixture=tests/ui_fixture.ini [--size=1180x760] [--scales=1,1.5] [--frames=library,game,...]` (fixture screenshots for development: named frames, among them empty and busy states, a big library, long names, dialogs). A game is its exe, its folder or its install
   folder. Options: `--out=<file.json>` (the result as JSON; console output of a GUI program is unreliable),
