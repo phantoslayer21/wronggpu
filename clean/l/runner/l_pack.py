@@ -1,18 +1,19 @@
 # SPDX-License-Identifier: MIT
 """Model L weight packing (issue #89): the device blobs of Model L's own launches, from the structure table
-(clean/l/reference/table.py) and the logical tensors of the oracle (clean/l/reference/oracle.py).
+(clean/l/reference/table.py) and the parameters of the oracle ({stage: tensors}, clean/l/reference/oracle.py).
 
-Model L's encoder and decoder are run as a chain of small FP8-map kernels, each with a blob in a format Model M
-already uses (clean/FORMATS.md):
+Model L's encoder and decoder run as a chain of small FP8-map kernels, each with a blob in a format Model M already
+uses (clean/FORMATS.md). Maps are [tokens][C] FP8, channel fastest; pixel maps are on the padded grid F, token maps
+on F/2.
 
 | Blob | Format | Kernel input -> output |
 |---|---|---|
-| `enc0.values` | Model M's enc0 blob (clean/runner/enc0.py pack) with W = 0 and b = 0 | frame -> the quantised values as a token map [F/2][80] (space_to_depth order 20 p + i) |
-| `enc0.<w>` per linear | merge / expand section format: bias tile vector (rows R_L(C_out)), then fragments [mt < C_out/16][kc < C_in/16], rows R_L(C_out), K order K_L(C_in) | FP8 map [C_in] -> FP8 map [C_out]; a `select` feeding the linear is folded in as zero weights outside its channels |
-| `enc0.<prefix>` per block | Model M's Swin block section (packing.pack_block) at the block's width, padded to 256 | FP8 map -> FP8 map |
-| `enc0.project` | bias tile vector (rows R_L(n_out)), then fragments [mt][kb], rows R_L(n_out), K order: groups of 32 channels, block 2i + s holds channel 32 i + 16 h + 8 s + j (dec0's order, clean/runner/dec0.py kord_decoder, over every group) | the concatenated maps -> the 64 FP8 features enc1 reads |
-| `dec0.<prefix>` | Model M's Swin block section at the decoder block's width | dec1's channels of the block segment -> same width |
-| `dec0` | Model M's dec0 blob (clean/runner/dec0.py pack) | as Model M |
+| `enc0.values` | Model M's enc0 blob (clean/runner/enc0.py pack) with W = 0 and b = 0 | frame -> the quantized values as a pixel map [F][32] (values 0..19, 12 zero bytes) |
+| `enc0.<w>` per linear | merge / expand section format: bias tile vector (rows R_L(C_out)), then fragments [mt < C_out/16][kc < C_in/16], rows R_L(C_out), K order K_L(C_in); inputs narrower than C_in (20 values) get zero weights | FP8 map [C_in] -> FP8 map [C_out] |
+| `enc0_block`, `dec0_block` | Model M's Swin block section (packing.pack_block) at the block's width, padded to 256 | FP8 map -> FP8 map |
+| `enc0.project` | bias tile vector (rows R_L(64)), then fragments [mt][kb], rows R_L(64), K order: block 2i + s of group i holds channel 32 i + 16 h + 8 s + j (dec0's order, clean/runner/dec0.py kord_decoder, over every group) | the 2 x 2 pixels of each token (channel 32 p + i, p = dx + 2 dy) -> the 64 FP8 features enc1 reads |
+| `dec0.project` | expand section format: bias tile vector (rows R_E(32)), then fragments [mt < 8][kb < 4], rows R_E(32) (tile 2 s + g: sub-pixel s, channels 16 g ..), K order as `enc0.project` (two groups of 32) | dec1's map [F/2][64] -> pixel map [F][32] |
+| `dec0.coef` | Model M's dec0 blob (clean/runner/dec0.py pack) with W = 0 and b = 0: the scalars S, T and the code tables | the decoder block's pixel map -> A, B, C, latent |
 
 The ten shared Swin stages use clean/runner/packing.py pack_stage unchanged.
 """
@@ -33,7 +34,7 @@ def kord_groups32(n):
     """K slot (h, j) of block kb holds channel 32 (kb // 2) + 16 h + 8 (kb % 2) + j: each group of 32 channels is two
     whole blocks, so a kernel can round its running sum after every second block."""
     if n % 32:
-        raise ValueError(f"project input of {n} channels: groups of 32 only")
+        raise ValueError(f"input of {n} channels: groups of 32 only")
     K = np.empty(n, dtype=np.int64)
     for kb in range(n // 16):
         for h in range(2):
@@ -67,10 +68,20 @@ def pack_project(W, b, groups, d_row="gfx12"):
     return P.pack_tile_vector(b, RL, drow) + P.pack_frags(W, RL, kord_groups32(n))
 
 
-def pack_block(tensors, prefix, C, heads, mlp, d_row="gfx12"):
+def pack_dec_project(W, b, groups=(32, 32), d_row="gfx12"):
+    """W [4, 32, n], b [4, 32] -> bias (rows R_E(32)) + fragments (rows R_E(32), K order kord_groups32(n))."""
     drow = P.resolve_d_row(d_row)
-    p = {k[len(prefix):]: v for k, v in tensors.items() if k.startswith(prefix)}
-    blob = P.pack_block(p, C, heads, mlp, drow)
+    W = np.asarray(W, dtype=np.float64).reshape(128, -1)
+    if any(g != 32 for g in groups) or sum(groups) != W.shape[1]:
+        raise ValueError(f"dec_project groups {groups}: groups of 32 covering {W.shape[1]} channels only")
+    RE = P.rows_expand(32, drow)
+    return P.pack_tile_vector(np.asarray(b, np.float32).reshape(128), RE, drow) + \
+        P.pack_frags(W, RE, kord_groups32(W.shape[1]))
+
+
+def pack_block(tensors, C, heads, mlp, d_row="gfx12"):
+    drow = P.resolve_d_row(d_row)
+    blob = P.pack_block(tensors, C, heads, mlp, drow)
     return blob + bytes((-len(blob)) % ALIGN)
 
 
@@ -82,76 +93,98 @@ def pack_values(tensors, d_row="gfx12"):
     return _enc0.pack(t, d_row)
 
 
-# ---- the encoder's launch list --------------------------------------------------------------------------------------
+def pack_coef(tensors, d_row="gfx12"):
+    """Model M's dec0 blob with zero projection: the scalars S, T and the code tables."""
+    return _dec0.pack({"W": np.zeros((68, 64), np.float32), "b": np.zeros(68, np.float32),
+                       "S": tensors["S"], "T": tensors["T"]}, d_row)
+
+
+# ---- launch lists ---------------------------------------------------------------------------------------------------
 
 def encoder_launches(t=_table.TABLE):
-    """The kernels of the table's encoder, in order: [{"kind", "blob", "src", "dst", ...}]. kinds: "values" (quant
-    + space_to_depth into the raw map), "linear", "swin", "project". A select is folded into the linear it feeds."""
-    ops = t["enc_ops"]
-    plan = _table.encoder_plan(t)
-    chans = {"values": 20}
-    launches = []
-    selects = {}
-    i = 0
-    while i < len(ops):
-        op = ops[i]
+    """The encoder's kernels in order: [{"kind", "blob", ...}]. kinds: "values" (quant into a pixel map of 32
+    channels), "linear", "swin", "project" (with the space_to_depth gather folded in)."""
+    ops = list(t["enc_ops"])
+    _table.encoder_plan(t)
+    width = {"values": 20}
+    out = []
+    for i, op in enumerate(ops):
         k = op["op"]
         if k == "quant":
-            nxt = ops[i + 1] if i + 1 < len(ops) else None
-            if not nxt or nxt["op"] != "space_to_depth" or nxt["src"] != op["dst"]:
-                raise ValueError("the encoder's kernels need quant directly followed by its space_to_depth")
-            if op["mode"] != "dither":
-                raise ValueError("the encoder's value kernel quantises with the dither table")
-            launches.append({"kind": "values", "blob": "enc0.values", "dst": nxt["dst"]})
-            chans[nxt["dst"]] = 80
-            i += 2
-            continue
-        if k == "select":
-            selects[op["dst"]] = (op["src"], op["lo"], op["hi"])
-            chans[op["dst"]] = op["hi"] - op["lo"]
+            if op["mode"] != "dither" or i != 0:
+                raise ValueError("the encoder's value kernel quantizes the per-pixel values with the dither table")
+            out.append({"kind": "values", "blob": "enc0.values", "dst": op["dst"], "C": 32})
+            width[op["dst"]] = 32
         elif k == "linear":
-            src, lo = op["src"], 0
-            if src in selects:
-                src, lo, _ = selects[src]
-            launches.append({"kind": "linear", "blob": "enc0." + op["w"], "src": src, "dst": op["dst"],
-                             "C_in": chans[src], "C_out": op["n_out"], "lo": lo, "w": op["w"], "b": op["b"]})
-            chans[op["dst"]] = op["n_out"]
+            c_in = width[op["src"]]
+            out.append({"kind": "linear", "blob": "enc0." + op["w"], "src": op["src"], "dst": op["dst"],
+                        "C_in": c_in, "C_out": op["n_out"], "w": op["w"], "b": op["b"], "acc": op.get("acc"),
+                        "out_round": op.get("out_round", "q8")})
+            width[op["dst"]] = op["n_out"]
         elif k == "swin":
-            launches.append({"kind": "swin", "blob": "enc0." + op["prefix"].rstrip("."), "src": op["src"],
-                             "dst": op["dst"], "prefix": op["prefix"], "C": op["C"], "heads": op["heads"],
-                             "mlp": op["mlp"], "offsets": op["offsets"]})
-        elif k == "concat":
-            chans[op["dst"]] = plan[i][2]
-            launches.append({"kind": "concat", "srcs": op["srcs"], "dst": op["dst"], "pad_to": plan[i][2]})
+            out.append({"kind": "swin", "blob": op["params"], "src": op["src"], "dst": op["dst"], "C": op["C"],
+                        "heads": op["heads"], "mlp": op["mlp"], "offsets": op["offsets"], "params": op["params"]})
+        elif k == "space_to_depth":
+            nxt = ops[i + 1] if i + 1 < len(ops) else None
+            if not nxt or nxt["op"] != "project" or nxt["src"] != op["dst"]:
+                raise ValueError("space_to_depth must feed the project directly (one gather kernel)")
+            width[op["dst"]] = 4 * width[op["src"]]
+            out.append({"kind": "project", "blob": "enc0.project", "src": op["src"], "groups": nxt["groups"],
+                        "w": nxt["w"], "b": nxt["b"], "clamp": nxt.get("clamp")})
         elif k == "project":
-            launches.append({"kind": "project", "blob": "enc0.project", "src": op["src"], "groups": op["groups"]})
+            continue                                   # folded into the gather above
         else:
             raise ValueError(f"no kernel for encoder op {k!r}")
-        if k != "select":
-            selects.pop(op.get("dst"), None)          # the name now holds this op's output
-        i += 1
-    return launches
+    return out
+
+
+def decoder_launches(t=_table.TABLE):
+    """The decoder's kernels in order: "dec_project" (with depth_to_space folded in), "swin", "coef" (pick + the
+    coefficient functions)."""
+    ops = list(t["dec_ops"])
+    _table.decoder_plan(t)
+    out = []
+    for i, op in enumerate(ops):
+        k = op["op"]
+        if k == "dec_project":
+            nxt = ops[i + 1] if i + 1 < len(ops) else None
+            if not nxt or nxt["op"] != "depth_to_space" or nxt["src"] != op["dst"]:
+                raise ValueError("dec_project must feed depth_to_space directly (one scatter kernel)")
+            out.append({"kind": "dec_project", "blob": "dec0.project", "w": op["w"], "b": op["b"],
+                        "groups": op["groups"], "dst": nxt["dst"]})
+        elif k == "depth_to_space":
+            continue
+        elif k == "swin":
+            out.append({"kind": "swin", "blob": op["params"], "src": op["src"], "dst": op["dst"], "C": op["C"],
+                        "heads": op["heads"], "mlp": op["mlp"], "offsets": op["offsets"], "params": op["params"]})
+        elif k == "pick":
+            out.append({"kind": "coef", "blob": "dec0.coef", "src": op["src"], "values": tuple(op["values"])})
+        else:
+            raise ValueError(f"no kernel for decoder op {k!r}")
+    return out
 
 
 def pack_model_l(params, t=_table.TABLE, d_row="gfx12"):
     """{blob name: bytes} of Model L's own launches (the shared Swin stages: packing.pack_stage)."""
-    enc = params["enc0"]
     out = {}
+    enc = params["enc0"]
     for ln in encoder_launches(t):
         if ln["kind"] == "values":
             out[ln["blob"]] = pack_values(enc, d_row)
         elif ln["kind"] == "linear":
-            out[ln["blob"]] = pack_linear(enc[ln["w"]], enc[ln["b"]], ln["C_in"], ln["C_out"], ln["lo"], d_row)
+            out[ln["blob"]] = pack_linear(enc[ln["w"]], enc[ln["b"]], ln["C_in"], ln["C_out"], 0, d_row)
         elif ln["kind"] == "swin":
-            out[ln["blob"]] = pack_block(enc, ln["prefix"], ln["C"], ln["heads"], ln["mlp"], d_row)
+            out[ln["blob"]] = pack_block(params[ln["params"]], ln["C"], ln["heads"], ln["mlp"], d_row)
         elif ln["kind"] == "project":
-            op = t["enc_ops"][-1]
-            out[ln["blob"]] = pack_project(enc[op["w"]], enc[op["b"]], ln["groups"], d_row)
+            out[ln["blob"]] = pack_project(enc[ln["w"]], enc[ln["b"]], ln["groups"], d_row)
     dec = params["dec0"]
-    if any(s[0] == "block" for s in t["dec_connect"]):
-        b = t["dec_block"]
-        out["dec0." + b["prefix"].rstrip(".")] = pack_block(dec, b["prefix"], b["C"], b["heads"], b["mlp"], d_row)
-    out["dec0"] = _dec0.pack({k: dec[k] for k in ("W", "b", "S", "T")}, d_row)
+    for ln in decoder_launches(t):
+        if ln["kind"] == "dec_project":
+            out[ln["blob"]] = pack_dec_project(dec[ln["w"]], dec[ln["b"]], ln["groups"], d_row)
+        elif ln["kind"] == "swin":
+            out[ln["blob"]] = pack_block(params[ln["params"]], ln["C"], ln["heads"], ln["mlp"], d_row)
+        elif ln["kind"] == "coef":
+            out[ln["blob"]] = pack_coef(dec, d_row)
     return out
 
 
@@ -190,3 +223,12 @@ def unpack_project(blob, n_in, n_out, d_row="gfx12"):
     RL = P.rows_layout_l(n_out, drow)
     b = unpack_tile_vector(blob[:4 * n_out], RL, drow)
     return unpack_frags(blob[4 * n_out:], RL, kord_groups32(n_in)), b
+
+
+def unpack_dec_project(blob, n_in=64, d_row="gfx12"):
+    """(W [4, 32, n_in], b [4, 32]) from a dec0.project blob."""
+    drow = P.resolve_d_row(d_row)
+    RE = P.rows_expand(32, drow)
+    b = unpack_tile_vector(blob[:4 * 128], RE, drow)
+    W = unpack_frags(blob[4 * 128:], RE, kord_groups32(n_in))
+    return W.reshape(4, 32, n_in), b.reshape(4, 32)

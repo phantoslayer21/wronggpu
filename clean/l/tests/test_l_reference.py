@@ -3,8 +3,8 @@
 
 Run: python -m unittest discover -s clean/l/tests -t .
 
-The strongest checks reduce Model L to Model M through the table and require the L oracle to give Model M's oracle
-results byte for byte: the block with M's constants, the encoder with M's op list, the decoder without a block, and
+The strongest checks reduce Model L to Model M through the table and require Model M's oracle results byte for byte:
+the block with M's constants, the encoder with M's op list, the decoder with M's projection rows and no block, and
 the whole network chain.
 """
 import unittest
@@ -22,7 +22,13 @@ from clean.reference.fp8 import is_fp8_exact, q8
 M_ENC_OPS = (
     {"op": "quant", "mode": "dither", "src": "values", "dst": "q"},
     {"op": "space_to_depth", "src": "q", "dst": "z"},
-    {"op": "project", "src": "z", "w": "W", "b": "b", "groups": (20, 20, 20, 20), "n_out": 64},
+    {"op": "project", "src": "z", "w": "W", "b": "b", "groups": (20, 20, 20, 20), "n_out": 64, "clamp": 6.28125},
+)
+# Model M's decoder written as an L op list: the projection, then the value positions straight away (no block).
+M_DEC_OPS = (
+    {"op": "dec_project", "src": "features", "dst": "y", "w": "W", "b": "b", "groups": (32, 32)},
+    {"op": "depth_to_space", "src": "y", "dst": "p"},
+    {"op": "pick", "src": "p", "values": T.DEC0_VALUES},
 )
 
 
@@ -30,6 +36,19 @@ def _same(a, b):
     a = np.asarray(a)
     b = np.asarray(b)
     return a.shape == b.shape and a.dtype == b.dtype and a.tobytes() == b.tobytes()
+
+
+def m_dec_as_l(p):
+    """Model M's dec0 tensors (W [68, 64], b [68]) as L's [4, 32, 64] / [4, 32] with zeros outside the value rows."""
+    W = np.zeros((4, 32, 64), np.float32)
+    b = np.zeros((4, 32), np.float32)
+    Wm = np.asarray(p["W"], np.float32).reshape(4, 17, 64)
+    bm = np.asarray(p["b"], np.float32).reshape(4, 17)
+    for s in range(4):
+        for k, c in enumerate(T.DEC0_VALUES):
+            W[s, c] = Wm[s, k]
+            b[s, c] = bm[s, k]
+    return {"W": W, "b": b, "S": p["S"], "T": p["T"]}
 
 
 class BlockTest(unittest.TestCase):
@@ -100,94 +119,84 @@ class EncoderTest(unittest.TestCase):
             x = ME.random_inputs(rng, rw=37, rh=21, reset=reset)
             p = ME.random_params(rng)
             want = ME.encode(x, p)
-            got = L.encode(x, p, t=t)
+            got = L.encode(x, {"enc0": p}, t=t)
             for k in ("features", "m_near", "m_far", "m_center"):
                 self.assertTrue(_same(got[k], want[k]), (k, reset))
 
     def test_default_encoder(self):
         rng = np.random.default_rng(5)
         x = ME.random_inputs(rng, rw=40, rh=24)
-        p = L.random_params(rng)["enc0"]
-        self.assertEqual(set(p), set(T.encoder_shapes()))
-        for name, shape in T.encoder_shapes().items():
-            self.assertEqual(np.shape(p[name]), shape, name)
-        out = L.encode(x, p, keep=True)
+        params = L.random_params(rng)
+        for stage, shapes in T.param_shapes().items():
+            self.assertEqual(set(params[stage]), set(shapes), stage)
+            for name, shape in shapes.items():
+                self.assertEqual(np.shape(params[stage][name]), shape, (stage, name))
+        out = L.encode(x, params, keep=True)
         fw, fh = x["feature_size"]
         self.assertEqual(out["features"].shape, (fh // 2, fw // 2, 64))
         self.assertTrue(np.isfinite(out["features"]).all())
         self.assertTrue(is_fp8_exact(out["features"]))
         maps = out["maps"]
-        self.assertEqual(maps["raw"].shape, (fh // 2, fw // 2, 80))
-        self.assertEqual(maps["x"].shape, (fh // 2, fw // 2, 32))
+        self.assertEqual(maps["q"].shape, (fh, fw, 20))
+        self.assertEqual(maps["x"].shape, (fh, fw, 32))
         self.assertEqual(maps["z"].shape, (fh // 2, fw // 2, 128))
-        self.assertTrue(np.all(maps["z"][..., 112:] == 0))
-        again = L.encode(x, p)
-        self.assertTrue(_same(again["features"], out["features"]))
+        self.assertTrue(_same(L.encode(x, params)["features"], out["features"]))
 
     def test_parts_by_hand(self):
-        """linear, select, concat and project of the default op list recomputed directly."""
+        """The default op list recomputed step by step."""
         rng = np.random.default_rng(6)
         x = ME.random_inputs(rng, rw=33, rh=17)
-        p = L.random_params(rng)["enc0"]
-        out = L.encode(x, p, parity=1, keep=True)
+        params = L.random_params(rng)
+        enc = params["enc0"]
+        out = L.encode(x, params, parity=1, keep=True)
         m = out["maps"]
         fw, fh = x["feature_size"]
-        q = ME.dither_fp8(ME.pixel_values(x, p), ME.dither_table(p["T"], x["frame"], fw, fh)[..., None])
+        q = ME.dither_fp8(ME.pixel_values(x, enc), ME.dither_table(enc["T"], x["frame"], fw, fh)[..., None])
         self.assertTrue(_same(m["q"], q))
-        raw = np.zeros((fh // 2, fw // 2, 80))
+        h = q8(np.maximum(L.f16(q @ np.asarray(enc["Win1"], np.float64).T + enc["bin1"]), 0))
+        h = q8(L.f16(h @ np.asarray(enc["Win2"], np.float64).T + enc["bin2"]))
+        h = q8(L.swin_block(h, params["enc0_block"], T.block_offset(T.TABLE, "first", 1), 2, T.M_BLOCK_CONSTS))
+        self.assertTrue(_same(m["x"], h))
+        z = np.zeros((fh // 2, fw // 2, 128))
         for r in range(fh // 2):
             for c in range(fw // 2):
-                for pp in range(4):
-                    raw[r, c, 20 * pp:20 * pp + 20] = q[2 * r + pp // 2, 2 * c + pp % 2]
-        self.assertTrue(_same(m["raw"], raw))
-        h = q8(raw[..., :20] @ np.asarray(p["Wa"], np.float64).T + p["ba"])
-        h = q8(h @ np.asarray(p["Wb"], np.float64).T + p["bb"])
-        bp = {k[4:]: v for k, v in p.items() if k.startswith("blk.")}
-        h = q8(L.swin_block(h, bp, T.block_offset(T.TABLE, "first", 1), 2, T.M_BLOCK_CONSTS))
-        self.assertTrue(_same(m["x"], h))
-        z = np.concatenate([raw, h, np.zeros(h.shape[:-1] + (16,))], axis=-1)
-        W = np.asarray(p["W"], np.float64)
-        s = np.broadcast_to(np.asarray(p["b"], np.float64), z.shape[:-1] + (64,))
+                for p in range(4):
+                    z[r, c, 32 * p:32 * p + 32] = h[2 * r + p // 2, 2 * c + p % 2]
+        self.assertTrue(_same(m["z"], z))
+        W = np.asarray(enc["W"], np.float64)
+        s = np.broadcast_to(np.asarray(enc["b"], np.float64), z.shape[:-1] + (64,))
         for g in range(4):
             s = L.f16(s + z[..., 32 * g:32 * g + 32] @ W[:, 32 * g:32 * g + 32].T)
         self.assertTrue(_same(out["features"], q8(np.clip(s, -6.28125, 6.28125)).astype(np.float32)))
 
     def test_table_edits(self):
-        """Provisional entries are table edits: other op orders, a pixel-level pre-network, plain q8 inputs."""
+        """Provisional entries are table edits: no ReLU, no FP16 accumulation, plain FP8 quantization, no clamp."""
         rng = np.random.default_rng(7)
         x = ME.random_inputs(rng, rw=24, rh=20)
         base = T.TABLE["enc_ops"]
         variants = {
-            "block_first": (base[0], base[1], base[2],
-                            {**base[5], "C": 20, "heads": 1, "mlp": 80, "prefix": "blk."},
-                            base[3], base[4], base[6], base[7]),
-            "pixel_level": (
-                base[0],
-                {**base[3], "src": "q"}, base[4], base[5],
-                {"op": "space_to_depth", "src": "x", "dst": "z"},
-                {"op": "project", "src": "z", "w": "W", "b": "b", "groups": (32, 32, 32, 32), "n_out": 64}),
-            "plain_q8": ({"op": "quant", "mode": "q8", "src": "values", "dst": "q"},) + tuple(base[1:]),
+            "no_relu": (base[0], dict(base[1], out_round="q8")) + tuple(base[2:]),
+            "no_f16": (base[0], dict(base[1], acc=None), dict(base[2], acc=None)) + tuple(base[3:]),
+            "plain_q8": (dict(base[0], mode="q8"),) + tuple(base[1:]),
+            "no_clamp": tuple(base[:-1]) + (dict(base[-1], clamp=None),),
         }
-        feats = {}
+        params = L.random_params(np.random.default_rng(8))
+        ref = L.encode(x, params)["features"]
         for name, ops in variants.items():
             t = T.table(enc_ops=ops)
-            plan = T.encoder_plan(t)
-            p = L.random_params(np.random.default_rng(8), t)["enc0"]
-            self.assertEqual(set(p), set(T.encoder_shapes(t)), name)
-            out = L.encode(x, p, t=t)
+            out = L.encode(x, params, t=t)
             self.assertTrue(is_fp8_exact(out["features"]), name)
-            feats[name] = out["features"]
-            self.assertEqual(plan[-1], ("project", "token", 64))
-        self.assertNotIn("T", T.encoder_shapes(T.table(enc_ops=variants["plain_q8"])))
-        self.assertEqual(T.encoder_plan(T.table(enc_ops=variants["pixel_level"]))[1], ("linear", "pixel", 32))
+            if name != "no_clamp":
+                self.assertFalse(_same(out["features"], ref), name)
+        self.assertNotIn("T", T.param_shapes(T.table(enc_ops=variants["plain_q8"]))["enc0"])
 
     def test_plan_refuses_bad_lists(self):
         base = T.TABLE["enc_ops"]
         bad = [
-            base[:-1],                                                     # no project at the end
-            (base[0], {**base[3], "src": "q", "n_in": 32}) + tuple(base[4:]),   # 20 channels into a 32-input linear
-            (base[0], base[1], {**base[2], "hi": 99}) + tuple(base[3:]),   # select outside the map
+            base[:-1],                                                         # no project at the end
+            (base[0], dict(base[1], n_in=32)) + tuple(base[2:]),               # 20 channels into a 32-input linear
             (base[0], {"op": "frobnicate", "src": "q"}, base[-1]),
+            tuple(base[:4]) + (base[5],),                                      # project on a pixel-level map
         ]
         for ops in bad:
             with self.assertRaises(ValueError):
@@ -195,48 +204,47 @@ class EncoderTest(unittest.TestCase):
 
 
 class DecoderTest(unittest.TestCase):
-    def test_no_block_equals_model_m_decoder(self):
+    def test_model_m_op_list_equals_model_m_decoder(self):
+        """With Model M's projection rows and no block, the L decoder is Model M's decoder byte for byte."""
         rng = np.random.default_rng(9)
-        t = T.table(dec_connect=(("pass", 0, 64),))
+        t = T.table(dec_ops=M_DEC_OPS)
         for reset in (False, True):
             x = MD.random_inputs(rng, rw=29, rh=19, reset=reset)
             p = MD.random_params(rng)
             want = MD.decode(x, p)
-            got = L.decode(x, p, 0, t)
-            for k in ("A", "B", "C", "latent", "codes_A", "codes_B", "codes_L", "h"):
+            got = L.decode(x, {"dec0": m_dec_as_l(p)}, 0, t)
+            for k in ("A", "B", "C", "latent", "codes_A", "codes_B", "codes_L"):
                 self.assertTrue(_same(got[k], want[k]), (k, reset))
 
     def test_default_decoder(self):
         rng = np.random.default_rng(10)
         x = MD.random_inputs(rng, rw=30, rh=18)
-        p = L.random_params(rng)["dec0"]
-        self.assertEqual(set(p), set(T.decoder_shapes()))
-        out = L.decode(x, p, 1)
-        front = out["front"]
-        self.assertTrue(_same(front[..., 32:], x["features"][..., 32:]))
-        bp = {k[4:]: v for k, v in p.items() if k.startswith("blk.")}
-        y = q8(L.swin_block(x["features"][..., :32], bp, T.block_offset(T.TABLE, "second", 1), 2,
-                            T.M_BLOCK_CONSTS)).astype(np.float32)
-        self.assertTrue(_same(front[..., :32], y))
-        xx = dict(x)
-        xx["features"] = front
-        want = MD.decode(xx, {k: p[k] for k in ("W", "b", "S", "T")})
-        self.assertTrue(_same(out["A"], want["A"]))
-        self.assertTrue(_same(out["latent"], want["latent"]))
+        params = L.random_params(rng)
+        out = L.decode(x, params, 1, keep=True)
+        fw, fh = x["feature_size"]
+        m = out["maps"]
+        self.assertEqual(m["y"].shape, (fh // 2, fw // 2, 128))
+        self.assertEqual(m["p"].shape, (fh, fw, 32))
+        self.assertEqual(out["a"].shape, (18, 30, 17))
+        y = L.dec_project(x["features"], params["dec0"]["W"], params["dec0"]["b"])
+        p = q8(L.swin_block(L.depth_to_space(y), params["dec0_block"], T.block_offset(T.TABLE, "second", 1), 2,
+                            T.M_BLOCK_CONSTS))
+        self.assertTrue(_same(m["p"], p))
+        self.assertTrue(_same(out["a"], p[:18, :30][..., list(T.DEC0_VALUES)].astype(np.float32)))
+        for k in ("A", "B", "C", "latent"):
+            self.assertTrue(np.isfinite(out[k]).all(), k)
 
-    def test_other_segments(self):
-        rng = np.random.default_rng(11)
-        x = MD.random_inputs(rng, rw=20, rh=12)
-        p = L.random_params(rng)["dec0"]
-        t = T.table(dec_connect=(("pass", 0, 32), ("block", 32, 64)))
-        out = L.decode(x, p, 0, t)
-        self.assertTrue(_same(out["front"][..., :32], x["features"][..., :32]))
-        with self.assertRaises(ValueError):
-            L.decode(x, p, 0, T.table(dec_connect=(("block", 0, 48), ("pass", 48, 64))))
-        with self.assertRaises(NotImplementedError):
-            L.decode(x, p, 0, T.table(dec_block_level="pixel"))
+    def test_depth_to_space_inverts_space_to_depth(self):
+        v = np.random.default_rng(11).normal(size=(6, 8, 5))
+        self.assertTrue(_same(L.depth_to_space(L.space_to_depth(v)), v))
+
+    def test_pending(self):
         with self.assertRaises(NotImplementedError):
             L.reconstruct()
+        rng = np.random.default_rng(12)
+        x = MD.random_inputs(rng, rw=20, rh=12)
+        with self.assertRaises(NotImplementedError):
+            L.decode(x, L.random_params(rng), 0, T.table(dec_pixel="other"))
 
 
 class NetworkTest(unittest.TestCase):
@@ -248,12 +256,14 @@ class NetworkTest(unittest.TestCase):
         return xe, xd
 
     def test_reduces_to_model_m_chain(self):
-        """With M's encoder op list and no decoder block, the L network is Model M's oracle chain."""
-        rng = np.random.default_rng(12)
+        """With Model M's encoder and decoder op lists, the L network is Model M's oracle chain."""
+        rng = np.random.default_rng(13)
         xe, xd = self._inputs(rng, 40, 24)
-        t = T.table(enc_ops=M_ENC_OPS, dec_connect=(("pass", 0, 64),))
+        t = T.table(enc_ops=M_ENC_OPS, dec_ops=M_DEC_OPS)
         p = L.random_params(rng, t)
         p["enc0"] = ME.random_params(rng)
+        pm_dec = MD.random_params(rng)
+        p["dec0"] = m_dec_as_l(pm_dec)
         for parity in (0, 1):
             got = L.network(xe, xd, p, parity, t)
             x = ME.encode(xe, p["enc0"])["features"]
@@ -273,12 +283,12 @@ class NetworkTest(unittest.TestCase):
                 self.assertTrue(_same(got[s][key], x), (s, parity))
             xx = dict(xd)
             xx["features"] = x
-            want = MD.decode(xx, p["dec0"])
+            want = MD.decode(xx, pm_dec)
             for k in ("A", "B", "C", "latent"):
                 self.assertTrue(_same(got["dec0"][k], want[k]), (k, parity))
 
     def test_default_network_runs(self):
-        rng = np.random.default_rng(13)
+        rng = np.random.default_rng(14)
         xe, xd = self._inputs(rng, 36, 20)
         p = L.random_params(rng)
         out = L.network(xe, xd, p, 0)
@@ -292,6 +302,16 @@ class TableTest(unittest.TestCase):
     def test_shared_stages_are_model_m(self):
         self.assertEqual(tuple(T.SHARED_STAGES), tuple(k for k in MS.STAGES))
 
+    def test_param_shapes_are_the_maps(self):
+        """Model L's own stages with the shapes of the preset-L converter map's records."""
+        blk = {"gamma1": (32,), "gamma2": (32,), "Wqk": (2, 32, 32), "Wv": (2, 32, 32), "B": (2, 16, 16),
+               "Wp": (32, 64), "bp": (32,), "W1": (128, 32), "b1": (128,), "W2": (32, 128), "b2": (32,)}
+        want = {"enc0": {"W": (64, 128), "b": (64,), "T": (8, 16, 16), "sigma1": (), "sigma2": (),
+                         "Win1": (32, 20), "bin1": (32,), "Win2": (32, 32), "bin2": (32,)},
+                "enc0_block": blk, "dec0_block": blk,
+                "dec0": {"W": (4, 32, 64), "b": (4, 32), "S": (), "T": ()}, "post": {"s": ()}}
+        self.assertEqual(T.param_shapes(), want)
+
     def test_macs(self):
         self.assertEqual(T.block_macs_per_token(64, 2, 256), 47104)
         self.assertEqual(T.block_macs_per_token(96, 4, 384), 114688)
@@ -299,15 +319,12 @@ class TableTest(unittest.TestCase):
         self.assertEqual(T.block_macs_per_token(32, 2, 128), 16384)
         r = T.frame_macs(T.TABLE, 1706, 960)
         self.assertEqual(r["M"], 103089438720)
-        self.assertGreater(r["L"], r["M"])
-
-    def test_provisional_keys_cover_entries(self):
-        self.assertEqual(set(T.PROVISIONAL), {f"I{i}" for i in range(1, 11)})
+        self.assertEqual(round(r["L"] / 1e9), 163)
 
     def test_table_copy(self):
-        t = T.table(recon_ratio=(3, 1))
-        self.assertEqual(t["recon_ratio"], (3, 1))
-        self.assertEqual(T.TABLE["recon_ratio"], (3, 2))
+        t = T.table(dec_pixel="x")
+        self.assertEqual(t["dec_pixel"], "x")
+        self.assertEqual(T.TABLE["dec_pixel"], "m")
         with self.assertRaises(KeyError):
             T.table(nonsense=1)
 
