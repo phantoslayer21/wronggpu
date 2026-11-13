@@ -83,6 +83,11 @@
 #ifndef WG_ENC_AB_STORE
 #define WG_ENC_AB_STORE 0  // no motion-surface stores
 #endif
+// Model L (clean/l, #89): instead of the projection, store the quantized values as a token map [fh/2][fw/2][80]
+// (sub-pixel p = dx + 2 dy, value i at byte 20 p + i). Built as its own code object; off: this file's kernel unchanged.
+#ifndef WG_ENC_VALUES_OUT
+#define WG_ENC_VALUES_OUT 0
+#endif
 
 // Per-frame constants, passed by value (all 4-byte fields; must match EncParams in clean/runner/enc0.py).
 struct WgEncParams {
@@ -524,7 +529,7 @@ WG_FN void encoder_main(const Frame& f, u8* __restrict__ features, u32* __restri
     else
       pixel_values<kHistRaw>(f, P, U, (int)xs[dx], y, c, px);
     quantize(px.v, dx ? t2 >> 8 : t2 & 0xffu, q[dx]);
-#if !WG_ENC_AB_PROJ
+#if !WG_ENC_AB_PROJ && !WG_ENC_VALUES_OUT
     // Values 8..15 go to the partner lane (the other lane half of the same token).
     x8[dx][0] = wg_xor16_u(q[dx][2]);
     x8[dx][1] = wg_xor16_u(q[dx][3]);
@@ -534,7 +539,18 @@ WG_FN void encoder_main(const Frame& f, u8* __restrict__ features, u32* __restri
 #endif
   }
 
-#if WG_ENC_AB_PROJ
+#if WG_ENC_VALUES_OUT
+  // Lane half hh holds sub-pixels 2 hh and 2 hh + 1 (row dy = hh): 40 contiguous bytes of the token at 40 hh.
+  if (tok < ntok) {
+    const u32 o = (u32)tok * 80u + hh * 40u;
+    wg_st64(features, o, (v2u){q[0][0], q[0][1]});
+    wg_st64(features, o + 8u, (v2u){q[0][2], q[0][3]});
+    wg_st64(features, o + 16u, (v2u){q[0][4], q[1][0]});
+    wg_st64(features, o + 24u, (v2u){q[1][1], q[1][2]});
+    wg_st64(features, o + 32u, (v2u){q[1][3], q[1][4]});
+  }
+  (void)w; (void)x8;
+#elif WG_ENC_AB_PROJ
   if (tok < ntok) {
     v4u o0 = {q[0][0], q[0][1], q[0][2], q[0][3]}, o1 = {q[1][0], q[1][1], q[1][2], q[1][3] ^ q[0][4] ^ q[1][4]};
     wg_st128(features, (u32)tok * kFeat + hh * 32u, o0);
