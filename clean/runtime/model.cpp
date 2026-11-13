@@ -454,7 +454,8 @@ struct Reader {
   size_t pos, end;
   bool ok = true;
   bool need(size_t n) {
-    if (!ok || pos + n > end || pos + n < pos) ok = false;
+    // Written so that no sum can wrap, and so that no range reaches past the buffer whatever `end` was set to.
+    if (!ok || end > d.size() || pos > end || n > end - pos) ok = false;
     return ok;
   }
   uint64_t le(int n) {
@@ -505,7 +506,8 @@ bool load_wgcm_model(const std::string& path, const std::string& map_path, std::
   r.bytes(key.data(), 32);
   r.bytes(map_hash.data(), 32);
   const uint64_t isize = r.le(8);
-  if (!r.ok || isize > d.size()) return *err = bad + ": bad header", false;
+  // The index lies between the 88-byte header and the trailing hash (d.size() >= 88 + 32 is known here).
+  if (!r.ok || isize > d.size() - 32 - 88) return *err = bad + ": bad header", false;
 
   // The map shipped with the runtime: its digests are the reference.
   std::vector<uint8_t> mbytes;
@@ -559,12 +561,18 @@ bool load_wgcm_model(const std::string& path, const std::string& map_path, std::
       const uint64_t dtype = ix.le(1), rank = ix.le(1);
       Tensor ten;
       size_t n = 1;
-      for (uint64_t a = 0; a < rank && ix.ok; ++a) {
-        ten.shape.push_back((int)ix.le(4));
-        n *= (size_t)ten.shape.back();
+      bool shape_ok = true;  // every dimension above 0, and the element count never above the file's size (no wrap)
+      for (uint64_t a = 0; a < rank && ix.ok && shape_ok; ++a) {
+        const int dim = (int)ix.le(4);
+        if (dim <= 0 || n > d.size() / (size_t)dim) {
+          shape_ok = false;
+          break;
+        }
+        ten.shape.push_back(dim);
+        n *= (size_t)dim;
       }
       const uint64_t off = ix.le(8), size = ix.le(8);
-      if (!ix.ok || dtype > 1 || off % 64 || size != n * (dtype ? 1 : 4) || off > d.size() - 32 ||
+      if (!ix.ok || !shape_ok || dtype > 1 || off % 64 || size != n * (dtype ? 1 : 4) || off > d.size() - 32 ||
           size > d.size() - 32 - off)
         return *err = bad + ": bad tensor entry " + stage + "/" + name, false;
       h.update(&d[off], (size_t)size);
