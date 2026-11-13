@@ -6,6 +6,8 @@ block), not pixels. The base for checking other models' frames against Model M's
 encoder and decoder steps replaced).
 
 - a synthetic Model M (converter raw layout): create, the code objects loaded, the launches of four frames;
+- a full build's optional code objects (names only) select the default paths: pack12 decoder, dec1 fused with dec0,
+  wave64 post;
 - the same run twice gives the same trace;
 - model=L is refused at create for now.
 
@@ -47,9 +49,16 @@ def model_dir():
     return _MODEL
 
 
-def run_trace(rw=64, rh=64, ow=96, oh=96, frames=3, options=""):
-    """The program's output lines. The build folder is empty: the recording device loads nothing."""
+# the optional code objects of a full build (clean/runner/build.py) that select the runtime's default paths
+SHIPPING = ("decoder__pack12.co", "dec1_dec0__pack12.co", "post_w64.co")
+
+
+def run_trace(rw=64, rh=64, ow=96, oh=96, frames=3, options="", build_files=()):
+    """The program's output lines. The build folder holds empty files of the names in build_files (the recording
+    device reads no code object; the runtime chooses its paths by the names present)."""
     build = tempfile.mkdtemp(prefix="wg_ftb_")
+    for n in build_files:
+        open(os.path.join(build, n), "wb").close()
     env = {k: v for k, v in os.environ.items() if not k.upper().startswith("WG_")}
     try:
         r = subprocess.run([trace_exe(), build, model_dir(), str(rw), str(rh), str(ow), str(oh), str(frames), options],
@@ -97,6 +106,18 @@ class ModelM(unittest.TestCase):
         self.assertNotEqual(frames[0], frames[1])
         self.assertEqual(frames[0], frames[2])
         self.assertEqual(frames[1], frames[3])
+
+    def test_shipping_build(self):
+        """With the optional code objects of a full build: the pack12 decoder, dec1 fused with dec0, wave64 post."""
+        create, loads, frames, kernels = parse(run_trace(frames=2, build_files=SHIPPING))
+        self.assertEqual(create, "create ok model M")
+        for want in ("decoder__pack12.co as d0p12", "dec1_dec0__pack12.co as d1p12", "post_w64.co as w64"):
+            self.assertIn(want, loads)
+        for f in frames:
+            names = [k for k, _, _ in f]
+            self.assertIn("d1p12/swin_block_c64_add_dec0_nc", names)
+            self.assertNotIn("coef_decoder", names)
+            self.assertTrue(any(n.startswith("w64/") for n in names))
 
     def test_repeatable(self):
         self.assertEqual(run_trace(rw=80, rh=48, ow=120, oh=72), run_trace(rw=80, rh=48, ow=120, oh=72))

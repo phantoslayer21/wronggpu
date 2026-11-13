@@ -5,8 +5,10 @@
 //   runtime_frame_trace <build dir> <model dir> <rw> <rh> <ow> <oh> <frames> [runtime options]
 //
 // The model is read in the converter's raw layout (model_format 1). Prints the create result, then one line per
-// device event of every frame: "load <code object file>", "launch <kernel> <grid> <block>"; "ERR <message>" on a
-// failure. Inputs are zeros (the recording device does not compute), so only the sequence is meaningful.
+// device event of every frame: "load <code object file>[ as <tag>]", "launch <kernel> <grid> <block>"; "ERR <message>"
+// on a failure. The code object files are not read: names in the build folder (empty files) select the runtime's
+// optional paths as real code objects would. Inputs are zeros (the recording device does not compute), so only the
+// sequence is meaningful.
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -67,6 +69,11 @@ class RecordingDevice : public Device {
   bool load_module(const std::string& path) override {
     const size_t s = path.find_last_of("\\/");
     log->push_back("load " + (s == std::string::npos ? path : path.substr(s + 1)));
+    return true;
+  }
+  bool load_module_tagged(const std::string& path, const std::string& tag) override {
+    if (!load_module(path)) return false;
+    log->back() += " as " + tag;
     return true;
   }
   bool launch(const std::string& kernel, unsigned grid, unsigned block, void**) override {
