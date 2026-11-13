@@ -2,9 +2,11 @@
 """Model L NumPy oracle (issue #89): float64 arithmetic with only the prescribed roundings (q8, f16), as Model M's
 oracle in clean/reference. Model L's structure comes from clean/l/reference/table.py; nothing here hard-codes it.
 
-    enc = encode(x, params["enc0"], parity)            # x: Model M's enc0 input dict (clean/reference/encoder.py)
+    enc = encode(x, params, parity)                    # x: Model M's enc0 input dict (clean/reference/encoder.py)
     out = network(x_enc, x_dec, params, parity)        # encoder -> enc1 ... dec1 (Model M's stages) -> decoder
-    dec = decode(x, params["dec0"], parity)            # x: Model M's dec0 input dict (features = dec1's output)
+    dec = decode(x, params, parity)                    # x: Model M's dec0 input dict (features = dec1's output)
+
+params: {stage: tensors} with the converter map's stages (enc0, enc0_block, enc1 ... dec1, dec0_block, dec0, post).
 
 The Swin stages shared with Model M call clean/reference/swin.py, so for them this oracle is Model M's oracle.
 """
@@ -108,11 +110,6 @@ def swin_block(x, p, offset, heads, consts, max_tokens=1 << 16):
     return out
 
 
-def _block_params(params, prefix):
-    n = len(prefix)
-    return {k[n:]: v for k, v in params.items() if k.startswith(prefix)}
-
-
 # ---- encoder --------------------------------------------------------------------------------------------------------
 
 def space_to_depth(v):
@@ -122,9 +119,19 @@ def space_to_depth(v):
     return np.concatenate([a[:, p // 2, :, p % 2, :] for p in range(4)], axis=-1)
 
 
+def depth_to_space(v):
+    """Inverse of space_to_depth: [h, w, 4n] -> [2h, 2w, n]."""
+    h, w, c = v.shape
+    n = c // 4
+    out = np.empty((2 * h, 2 * w, n), dtype=np.asarray(v).dtype)
+    for p in range(4):
+        out[p // 2::2, p % 2::2, :] = v[..., n * p:n * (p + 1)]
+    return out
+
+
 def project_groups(z, W, b, groups, clamp=_enc.FEATURE_CLAMP):
-    """Running sum s = b; for each channel group g: s = FP16(s + W[:, g] z[g]) (exact group sums); then clamp and
-    round to FP8. With groups (20, 20, 20, 20) this is clean/reference/encoder.py project."""
+    """Running sum s = b; for each channel group g: s = FP16(s + W[:, g] z[g]) (exact group sums); then clamp (None:
+    no clamp) and round to FP8. With groups (20, 20, 20, 20) this is clean/reference/encoder.py project."""
     W = np.asarray(W, dtype=np.float64)
     z = np.asarray(z, dtype=np.float64)
     s = np.broadcast_to(np.asarray(b, dtype=np.float64), z.shape[:-1] + (W.shape[0],))
@@ -132,26 +139,38 @@ def project_groups(z, W, b, groups, clamp=_enc.FEATURE_CLAMP):
     for g in groups:
         s = f16(s + z[..., lo:lo + g] @ W[:, lo:lo + g].T)
         lo += g
-    return q8(np.clip(s, -clamp, clamp))
+    if clamp is not None:
+        s = np.clip(s, -clamp, clamp)
+    return q8(s)
 
 
-def encode(x, params, parity=None, t=_table.TABLE, keep=False):
-    """Model L's input encoder. x: Model M's enc0 input dict; params: logical names of table.encoder_shapes(t).
-    Returns Model M's enc0 outputs ("features" [fh/2, fw/2, 64] FP8-exact, motion surfaces) and, with keep=True, every
-    named map ("maps")."""
-    _table.encoder_plan(t)
-    if parity is None:
-        parity = int(x["frame"]) & 1
-    rw, rh, fw, fh, dw, dh = _enc.check_inputs(x)
-    pv_params = {"sigma1": params.get("sigma1", 0.0), "sigma2": params.get("sigma2", 0.0)}
-    maps = {"values": _enc.pixel_values(x, pv_params)}
-    feats = None
-    for op in t["enc_ops"]:
+def _out_round(y, mode):
+    if mode == "relu_q8":
+        return q8(np.maximum(y, 0.0))
+    return _round(y, mode)
+
+
+def linear(x, W, b, acc=None, out_round="q8"):
+    """out_round(acc(W x + b)) with exact sums; acc "f16" rounds the sum to FP16 first."""
+    y = np.asarray(x, dtype=np.float64) @ np.asarray(W, dtype=np.float64).T + np.asarray(b, dtype=np.float64)
+    if acc == "f16":
+        y = f16(y)
+    elif acc not in (None, "none"):
+        raise ValueError(f"unknown accumulation {acc!r}")
+    return _out_round(y, out_round)
+
+
+def _run_ops(ops, maps, params, parity, t, default_stage, frame=None):
+    """Interprets an op list over named maps; returns the last op's output."""
+    last = None
+    for op in ops:
         k = op["op"]
+        st = params[op.get("params", default_stage)]
         if k == "quant":
             v = maps[op["src"]]
+            fw, fh = frame["feature_size"]
             if op["mode"] == "dither":
-                d = _enc.dither_table(params["T"], x["frame"], fw, fh)
+                d = _enc.dither_table(st["T"], frame["frame"], fw, fh)
                 out = _enc.dither_fp8(v, d[..., None])
             elif op["mode"] == "q8":
                 out = q8(v)
@@ -159,16 +178,16 @@ def encode(x, params, parity=None, t=_table.TABLE, keep=False):
                 raise ValueError(f"unknown quant mode {op['mode']!r}")
         elif k == "space_to_depth":
             out = space_to_depth(maps[op["src"]])
+        elif k == "depth_to_space":
+            out = depth_to_space(maps[op["src"]])
         elif k == "select":
             out = maps[op["src"]][..., op["lo"]:op["hi"]]
         elif k == "linear":
-            W = np.asarray(params[op["w"]], dtype=np.float64)
-            b = np.asarray(params[op["b"]], dtype=np.float64)
-            out = _round(maps[op["src"]] @ W.T + b, op.get("out_round", "q8"))
+            out = linear(maps[op["src"]], st[op["w"]], st[op["b"]], op.get("acc"), op.get("out_round", "q8"))
         elif k == "swin":
-            consts = _table.block_consts(t, op.get("name", "enc0." + op["prefix"]))
+            consts = _table.block_consts(t, op["params"])
             off = _table.block_offset(t, op["offsets"], parity)
-            y = swin_block(maps[op["src"]], _block_params(params, op["prefix"]), off, op["heads"], consts)
+            y = swin_block(maps[op["src"]], st, off, op["heads"], consts)
             out = _round(y, op.get("out_round", "q8"))
         elif k == "concat":
             parts = [maps[s] for s in op["srcs"]]
@@ -178,9 +197,30 @@ def encode(x, params, parity=None, t=_table.TABLE, keep=False):
                 parts.append(np.zeros(parts[0].shape[:-1] + (pad - c,)))
             out = np.concatenate(parts, axis=-1)
         elif k == "project":
-            out = project_groups(maps[op["src"]], params[op["w"]], params[op["b"]], op["groups"])
-            feats = out
-        maps[op.get("dst", "features")] = out
+            out = project_groups(maps[op["src"]], st[op["w"]], st[op["b"]], op["groups"], op.get("clamp"))
+        elif k == "dec_project":
+            out = dec_project(maps[op["src"]], st[op["w"]], st[op["b"]], op["groups"], op.get("out_round", "q8"))
+        elif k == "pick":
+            out = np.asarray(maps[op["src"]])[..., list(op["values"])]
+        else:
+            raise ValueError(f"unknown op {k!r}")
+        maps[op.get("dst", "out")] = out
+        last = out
+    return last
+
+
+def encode(x, params, parity=None, t=_table.TABLE, keep=False):
+    """Model L's input encoder. x: Model M's enc0 input dict; params: {stage: tensors} with the stages of
+    table.param_shapes(t) ("enc0", "enc0_block"). Returns Model M's enc0 outputs ("features" [fh/2, fw/2, 64]
+    FP8-exact, motion surfaces) and, with keep=True, every named map ("maps")."""
+    _table.encoder_plan(t)
+    if parity is None:
+        parity = int(x["frame"]) & 1
+    _enc.check_inputs(x)
+    enc = params["enc0"]
+    pv_params = {"sigma1": enc.get("sigma1", 0.0), "sigma2": enc.get("sigma2", 0.0)}
+    maps = {"values": _enc.pixel_values(x, pv_params)}
+    feats = _run_ops(t["enc_ops"], maps, params, parity, t, "enc0", frame=x)
     m_near, m_far, m_center = _enc.motion_surfaces(x)
     res = {"features": feats.astype(np.float32),
            "m_near": f16(m_near).astype(np.float32),
@@ -193,41 +233,49 @@ def encode(x, params, parity=None, t=_table.TABLE, keep=False):
 
 # ---- decoder --------------------------------------------------------------------------------------------------------
 
-def decoder_front(features, params, parity, t=_table.TABLE):
-    """dec1's FP8 map [fh/2, fw/2, 64] -> the 64-channel map Model M's decoder projects (table entry dec_connect)."""
-    Z = np.asarray(features, dtype=np.float64)
-    segs = t["dec_connect"]
-    blk = [s for s in segs if s[0] == "block"]
-    if not blk:
-        return Z
-    if t["dec_block_level"] != "token":
-        raise NotImplementedError("decoder block level other than token: pending")
-    b = t["dec_block"]
-    lo = min(s[1] for s in blk)
-    hi = max(s[2] for s in blk)
-    if sum(s[2] - s[1] for s in blk) != hi - lo or hi - lo != b["C"]:
-        raise ValueError("block segments must be one contiguous range of the block's width")
-    consts = _table.block_consts(t, b.get("name", "dec0." + b["prefix"]))
-    off = _table.block_offset(t, b["offsets"], parity)
-    y = _round(swin_block(Z[..., lo:hi], _block_params(params, b["prefix"]), off, b["heads"], consts),
-               b.get("out_round", "q8"))
-    out = Z.copy()
-    for kind, s0, s1 in segs:
-        if kind == "block":
-            out[..., s0:s1] = y[..., s0 - lo:s1 - lo]
-        elif kind != "pass":
-            raise ValueError(f"unknown decoder segment {kind!r}")
-    return out
+def dec_project(Z, W, b, groups=(32, 32), out_round="q8"):
+    """Z [h, w, 64], W [4, 32, 64], b [4, 32] -> [h, w, 128] (channel 32 s + c): Model M's dec0 projection arithmetic
+    (clean/reference/decoder.py project) over all 4 x 32 rows."""
+    Z = np.asarray(Z, dtype=np.float64)
+    W = np.asarray(W, dtype=np.float64).reshape(128, -1)
+    s = np.broadcast_to(np.asarray(b, dtype=np.float64).reshape(128), Z.shape[:-1] + (128,))
+    lo = 0
+    for g in groups:
+        s = f16(s + Z[..., lo:lo + g] @ W[:, lo:lo + g].T)
+        lo += g
+    return _round(s, out_round)
 
 
-def decode(x, params, parity, t=_table.TABLE):
-    """Model L's coefficient decoder: decoder_front, then Model M's decoder (table entry dec_pixel = "m")."""
+def coefficients(x, a, S, T):
+    """Model M's coefficient and latent functions (clean/reference/decoder.py decode after its projection) on the
+    per-pixel values a [rh, rw, 17]."""
+    rw, rh, fw, fh, dw, dh = _dec.check_inputs(x)
+    a = np.asarray(a, dtype=np.float32)
+    A = _dec.sigmoid16(a[..., 0:3])
+    B = _dec.softmax3(a[..., 3:6])
+    C = _dec.coefficient_c(a[..., 6], a[..., 7], a[..., 8], float(np.asarray(S)), float(np.asarray(T)))
+    p = _dec.previous_latent(x, rw, rh, dw, dh)
+    lat = _dec.latent_update(a, p)
+    cA, cB, cL = _dec.unorm8_code(A), _dec.unorm8_code(B), _dec.snorm8_code(lat)
+    return {"A": (cA / 255.0).astype(np.float32), "B": (cB / 255.0).astype(np.float32),
+            "C": C.astype(np.float32), "latent": (cL / 127.0).astype(np.float32),
+            "codes_A": cA, "codes_B": cB, "codes_L": cL, "p": p}
+
+
+def decode(x, params, parity, t=_table.TABLE, keep=False):
+    """Model L's coefficient decoder. x: Model M's dec0 input dict (features = dec1's output [fh/2, fw/2, 64]);
+    params: {stage: tensors} ("dec0", "dec0_block")."""
     if t["dec_pixel"] != "m":
         raise NotImplementedError("decoder per-pixel variant other than Model M's: pending")
-    xx = dict(x)
-    xx["features"] = decoder_front(x["features"], params, parity, t).astype(np.float32)
-    out = _dec.decode(xx, {k: params[k] for k in ("W", "b", "S", "T")})
-    out["front"] = xx["features"]
+    _table.decoder_plan(t)
+    rw, rh = _dec.check_inputs(x)[:2]
+    maps = {"features": np.asarray(x["features"], dtype=np.float64)}
+    a = _run_ops(t["dec_ops"], maps, params, parity, t, "dec0")
+    dec = params["dec0"]
+    out = coefficients(x, a[:rh, :rw], dec["S"], dec["T"])
+    out["a"] = a[:rh, :rw].astype(np.float32)
+    if keep:
+        out["maps"] = maps
     return out
 
 
@@ -241,9 +289,9 @@ def network(x_enc, x_dec, params, parity, t=_table.TABLE, keep=False):
     """Encoder -> the ten shared Swin stages (Model M's oracle, L's weights) -> decoder.
 
     x_enc: Model M's enc0 input dict. x_dec: Model M's dec0 input dict without "features" (motion, latent_prev,
-    jitter, jitter_prev, reset, feature_size, recon_size). params: {"enc0": ..., "enc1": ..., ..., "dec0": ...}.
+    jitter, jitter_prev, reset, feature_size, recon_size). params: {stage: tensors} for every stage.
     Returns {"enc0": ..., stage outputs ..., "dec0": ...}."""
-    res = {"enc0": encode(x_enc, params["enc0"], parity, t, keep)}
+    res = {"enc0": encode(x_enc, params, parity, t, keep)}
     x = res["enc0"]["features"]
     skips = {}
     for s in _table.SHARED_STAGES:
@@ -263,7 +311,7 @@ def network(x_enc, x_dec, params, parity, t=_table.TABLE, keep=False):
         res[s] = o
     xd = dict(x_dec)
     xd["features"] = x
-    res["dec0"] = decode(xd, params["dec0"], parity, t)
+    res["dec0"] = decode(xd, params, parity, t, keep)
     return res
 
 
@@ -288,28 +336,33 @@ def random_block_params(rng, C, heads, mlp, prefix="", weight_scale=1.0):
 
 
 def random_params(rng, t=_table.TABLE):
-    """Synthetic parameters for every stage of Model L (shapes from the table and Model M's stages)."""
-    enc = {}
-    for name, shape in _table.encoder_shapes(t).items():
-        if name == "T":
-            enc[name] = rng.integers(0, 128, size=shape).astype(np.float32)
-        elif name in ("sigma1", "sigma2"):
-            enc[name] = np.array(rng.uniform(0.5, 1.5), dtype=np.float32)
-    for op in t["enc_ops"]:
-        if op["op"] == "linear":
-            enc[op["w"]] = q8(rng.normal(0, 1.0 / math.sqrt(op["n_in"]), (op["n_out"], op["n_in"]))).astype(np.float32)
-            enc[op["b"]] = f16(rng.normal(0, 0.1, op["n_out"])).astype(np.float32)
-        elif op["op"] == "swin":
-            enc.update(random_block_params(rng, op["C"], op["heads"], op["mlp"], op["prefix"]))
-        elif op["op"] == "project":
-            n = sum(op["groups"])
-            enc[op["w"]] = q8(rng.normal(0, 0.6 / math.sqrt(n), (op["n_out"], n))).astype(np.float32)
-            enc[op["b"]] = f16(rng.normal(0, 0.3, op["n_out"])).astype(np.float32)
-    dec = _dec.random_params(rng)
-    if any(s[0] == "block" for s in t["dec_connect"]):
-        b = t["dec_block"]
-        dec.update(random_block_params(rng, b["C"], b["heads"], b["mlp"], b["prefix"]))
-    p = {"enc0": enc, "dec0": dec}
+    """Synthetic parameters for every stage of Model L ({stage: tensors}; shapes from the table and Model M's
+    stages). Never model data."""
+    p = {}
+    for stage, sh in _table.param_shapes(t).items():
+        st = {}
+        if "Wqk" in sh:
+            st.update(random_block_params(rng, sh["gamma1"][0], sh["Wqk"][0], sh["W1"][0]))
+        for name, shape in sh.items():
+            if name in st:
+                continue
+            if stage == "enc0" and name == "T":
+                st[name] = rng.integers(0, 128, size=shape).astype(np.float32)
+            elif name in ("sigma1", "sigma2"):
+                st[name] = np.array(rng.uniform(0.5, 1.5), dtype=np.float32)
+            elif stage == "dec0" and name == "S":
+                st[name] = np.array(rng.uniform(1.0, 4.0), dtype=np.float32)
+            elif stage == "dec0" and name == "T":
+                st[name] = np.array(rng.uniform(0.2, 1.5), dtype=np.float32)
+            elif name == "s":
+                st[name] = np.array(rng.uniform(0.5, 2.0), dtype=np.float32)
+            elif len(shape) >= 2:
+                fan_in = shape[-1]
+                scale = {"enc0": 0.6 if name == "W" else 1.0, "dec0": 0.25 * np.sqrt(fan_in)}.get(stage, 1.0)
+                st[name] = q8(rng.normal(0, scale / np.sqrt(fan_in), shape)).astype(np.float32)
+            else:
+                st[name] = f16(rng.normal(0, 0.3 if stage == "dec0" else 0.1, shape)).astype(np.float32)
+        p[stage] = st
     for s in _table.SHARED_STAGES:
         p[s] = {k: np.asarray(v, dtype=np.float32) for k, v in _swin.random_params(s, rng).items()}
     return p
