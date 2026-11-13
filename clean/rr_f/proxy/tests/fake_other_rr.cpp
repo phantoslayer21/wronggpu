@@ -10,6 +10,9 @@
 //   wgtest_or_set_slot      writes any value into one import slot (code outside every module, an unreadable page)
 //   wgtest_or_routes        registers its handlers as game-interface routes with the host (plugin interface 3)
 //   wgtest_or_register_ngx  registers an NGX RR provider with the host (plugin interface 4)
+//   wgtest_or_host_table    keeps a copy of a host API table in this module (the host's table lives in a module of its own)
+//   wgtest_or_call_init     calls a function from inside this module (a separate ASI loader calling InitializeASI; the test
+//                           loads a second copy of this DLL under another name for that)
 // Its handlers answer the RR feature themselves (is-supported 0, evaluate / allocate / get-function counted and 0) and
 // pass every other call on. The role names and order come from the hook binding (wg_binding.inc).
 #define WIN32_LEAN_AND_MEAN
@@ -186,6 +189,22 @@ __declspec(dllexport) int wgtest_or_routes(const WgHostMenuApi* api, WgHostMenuP
   if (!api->register_streamline_routes(plugin, routes, 4)) return 0;
   for (int i = 0; i < 4; ++i) g_next[roles[i]] = reinterpret_cast<Fwd>(g_route_next[roles[i]]);
   return 4;
+}
+
+// "the host's API table held in this module": a copy of the caller's table kept in this DLL's data (the host that owns
+// the table is a module of its own, as with OptiScaler); the pointer is what OptiPluginInit gets
+__declspec(dllexport) const WgHostMenuApi* wgtest_or_host_table(const WgHostMenuApi* src) {
+  static WgHostMenuApi table;
+  table = *src;
+  return &table;
+}
+
+// "a separate ASI loader": calls f (WrongGPU RR's InitializeASI) from inside this module, so that the module that
+// called it is this one (not the exe). The volatile write keeps the call from becoming a tail jump.
+__declspec(dllexport) void __declspec(noinline) wgtest_or_call_init(void (*f)()) {
+  static volatile int sink;
+  f();
+  sink = 1;
 }
 
 __declspec(dllexport) bool wgtest_or_register_ngx(const WgHostMenuApi* api, WgHostMenuPlugin* plugin) {

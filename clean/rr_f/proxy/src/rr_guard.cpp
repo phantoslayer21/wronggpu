@@ -21,7 +21,8 @@ bool readable(const void* p, size_t n) {
     if (m.State != MEM_COMMIT) return false;
     const DWORD pr = m.Protect;
     if (pr & (PAGE_GUARD | PAGE_NOACCESS)) return false;
-    if (!(pr & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
+    // PAGE_EXECUTE counts: a hooking library's trampolines may be execute-only, and the copy that follows is guarded
+    if (!(pr & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
                 PAGE_EXECUTE_WRITECOPY)))
       return false;
     const uintptr_t next = reinterpret_cast<uintptr_t>(m.BaseAddress) + m.RegionSize;
@@ -131,7 +132,7 @@ bool decode_jump(const uint8_t* c, size_t n, const uint8_t* at, const void** tar
 
 const char* owner_word(Owner o) {
   switch (o) {
-    case Owner::kUnknown: return "unknown (not readable)";
+    case Owner::kUnknown: return "unknown (not readable, or too many hook jumps)";
     case Owner::kSelf: return "WrongGPU RR (this copy)";
     case Owner::kInterface: return "the game interface";
     case Owner::kHost: return "the host";
@@ -147,15 +148,27 @@ const char* owner_word(Owner o) {
 Where classify(const void* p, const Env& env, bool follow_iface) {
   Where w;
   const void* cur = p;
+  // follows one hook jump to `target`; false (kUnknown, too_many_hops) when kMaxHops jumps were followed already
+  auto follow = [&](const void* target) {
+    if (w.hops >= kMaxHops) {
+      w.owner = Owner::kUnknown;
+      w.too_many_hops = true;
+      return false;
+    }
+    cur = target;
+    ++w.hops;
+    return true;
+  };
   for (;;) {
-    if (!cur || w.hops > kMaxHops) {
+    if (!cur) {
       w.owner = Owner::kUnknown;
       return w;
     }
     const void* m = env.module_of ? env.module_of(cur) : nullptr;
     w.module = m && env.name_of ? env.name_of(m) : std::string();
+    w.module_handle = m;
     if (m && m == env.self) { w.owner = Owner::kSelf; return w; }
-    if (m && m == env.host) { w.owner = Owner::kHost; return w; }
+    if (m && (m == env.host || (env.host_alt && m == env.host_alt))) { w.owner = Owner::kHost; return w; }
     if (m && m == env.iface) {
       if (!follow_iface || w.hops != 0) { w.owner = Owner::kInterface; return w; }
       uint8_t code[16];
@@ -173,8 +186,7 @@ Where classify(const void* p, const Env& env, bool follow_iface) {
       const uint8_t* c8 = static_cast<const uint8_t*>(cell);
       if (c8 && c8 >= env.iface_iat_begin && c8 < env.iface_iat_end) { w.owner = Owner::kInterface; return w; }
       if (env.module_of && env.module_of(target) == env.iface) { w.owner = Owner::kInterface; return w; }
-      cur = target;
-      ++w.hops;
+      if (!follow(target)) return w;
       continue;
     }
     if (m) {
@@ -194,8 +206,7 @@ Where classify(const void* p, const Env& env, bool follow_iface) {
       w.owner = (got >= r + 6 && code[r] == 0xFF && code[r + 1] == 0x25) ? Owner::kUnknown : Owner::kAnonymous;
       return w;
     }
-    cur = target;
-    ++w.hops;
+    if (!follow(target)) return w;
   }
 }
 
@@ -218,11 +229,22 @@ void Verdict::add(const Where& w, const std::string& what, bool anon_ok, bool ex
     detail = w.module;
     return;
   }
-  if (kind == kOther || trusted(w.owner, anon_ok, exe_ok)) return;
-  kind = kOther;
-  if (w.owner == Owner::kUnknown) detail = what + " could not be read" + via;
-  else if (w.owner == Owner::kAnonymous) detail = what + " leads to code outside every module" + via;
-  else detail = what + " leads to " + (w.module.empty() ? std::string("another module") : w.module) + via;
+  if (trusted(w.owner, anon_ok, exe_ok)) return;
+  if (w.owner == Owner::kForeign) {  // the one positive sign of another plugin: a named module that is not ours
+    if (kind == kOther) return;
+    kind = kOther;
+    other_module = w.module_handle;
+    detail = what + " leads to " + (w.module.empty() ? std::string("another module") : w.module) + via;
+    return;
+  }
+  // not a sign of another plugin: counted, the first one named for the log
+  ++unclear;
+  if (unclear > 1) return;
+  if (w.owner == Owner::kUnknown)
+    unclear_detail = w.too_many_hops ? what + " leads through more than " + std::to_string(kMaxHops) + " hook jumps"
+                                     : what + " could not be read" + via;
+  else if (w.owner == Owner::kAnonymous) unclear_detail = what + " leads to code outside every module" + via;
+  else unclear_detail = what + " leads into the exe's own code" + via;
 }
 
 bool override_take(const std::string& value, std::string* note) {
@@ -268,6 +290,10 @@ std::string line_ngx_other() {
          "NGX route only: the host refused WrongGPU's RR provider, another provider holds it; the game-interface "
          "route is decided on its own)";
 }
+std::string line_inconclusive(const std::string& when, unsigned n, const std::string& first) {
+  return "hook: coexistence check " + when + ": inconclusive for " + std::to_string(n) + " address(es) (first: " + first +
+         "); no other plugin was positively found, WrongGPU RR stays active";
+}
 
 void Decision::freeze_once(const std::function<State()>& decide) {
   if (frozen()) return;
@@ -299,11 +325,12 @@ std::string leaf_utf8(const void* m) {
 }
 }  // namespace
 
-Env process_env(const void* self, const void* iface, const void* host) {
+Env process_env(const void* self, const void* iface, const void* host, const void* host_alt) {
   Env e;
   e.self = self;
   e.iface = iface;
   e.host = host;
+  e.host_alt = host_alt;
   e.exe = GetModuleHandleW(nullptr);
   e.module_of = [](const void* a) -> const void* {
     HMODULE m = nullptr;

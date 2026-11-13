@@ -4,19 +4,31 @@
 // interface (tests/gen_fake_original.py). The "other Ray Reconstruction plugin" is our own stand-in,
 // wgtest_other_rr.dll (tests/fake_other_rr.cpp); no third-party file is used.
 //   test_rr_guard_dll.exe <stage dir> <mode> [--take]
+// Only a POSITIVE finding switches WrongGPU RR off (a named foreign module, also through decoded hook jumps; a second
+// copy of WrongGPU RR); what the scan cannot explain is logged once as inconclusive and WrongGPU RR stays active.
 // Modes (import build):
 //   clean        no other plugin: active; 16 threads make the first call at once: one re-check line; the scan cost
 //   first        the other plugin redirected the exe's import slots before ours loaded (wrapping): off, nothing patched
 //   inline       the other plugin put a jmp [rip] on the evaluate export: off
 //   relay        the same through a jmp rel32 to an anonymous relay: off ("through 2 hook jumps")
-//   anon         one import slot leads to code outside every module: off
-//   noaccess     one import slot leads to a PAGE_NOACCESS page: "could not be read", off, no fault
+//   execonly     one import slot leads to an execute-only relay page that jumps into the other plugin: off (the relay
+//                page is read although it is PAGE_EXECUTE)
+//   anon         one import slot leads to code outside every module that does not jump on: inconclusive, stays active
+//   noaccess     one import slot leads to a PAGE_NOACCESS page: "could not be read", inconclusive, stays active, no fault
 //   guardpage    one import slot leads to a guard page: the same, and the page is still a guard page afterwards
+//   exe          one import slot leads into the exe's own code (a separate loader DLL calls InitializeASI, so the exe is
+//                not the host): inconclusive, stays active
+//   hops         one import slot leads through five relay jumps (more than kMaxHops) to the other plugin: inconclusive,
+//                stays active
+//   hostsplit    a separate loader DLL calls InitializeASI; the real host (a DLL holding the API table) patched the slots:
+//                found at load, then OptiPluginInit shows the module is the host and the load check runs again: active
 //   late         the other plugin wrapped our hooks after InitializeASI: 16 threads make the first call at once: one
 //                decision, one line, every call passed on unchanged
 //   late-replace the other plugin replaced our hooks after InitializeASI (no call reaches us): found at OptiPluginInit
 //   provider     the other plugin holds the host's NGX RR provider: NGX route only, the game-interface route stays
-//   owncopy      two copies of WrongGPU RR: the second stays off and registers nothing
+//   owncopy      WrongGPU RR and four more copies under other file names: the others stay off and register nothing; the
+//                copies' InitializeASI / OptiPluginInit run from threads while 16 game threads make the first call (every
+//                copy writes the one log at once: no torn line); freeing an inactive copy writes no exit summary
 // --take (wronggpu-rr.ini rr_other_plugin=take): first / inline: WrongGPU RR in front; late: the can't-take line.
 // Modes (built with WG_TEST_NOIMPORT: the exe does not link the interface, the host routes are used):
 //   route        no other plugin: our routes continue to the interface
@@ -216,6 +228,7 @@ int main(int argc, char** argv) {
   auto or_patch_export = reinterpret_cast<int (*)(HMODULE, const char*, int)>(GetProcAddress(other, "wgtest_or_patch_export"));
   auto or_routes = reinterpret_cast<int (*)(const WgHostMenuApi*, WgHostMenuPlugin*)>(GetProcAddress(other, "wgtest_or_routes"));
   auto or_ngx = reinterpret_cast<bool (*)(const WgHostMenuApi*, WgHostMenuPlugin*)>(GetProcAddress(other, "wgtest_or_register_ngx"));
+  auto or_host_table = reinterpret_cast<const WgHostMenuApi* (*)(const WgHostMenuApi*)>(GetProcAddress(other, "wgtest_or_host_table"));
   const OrState* os = or_state();
   HMODULE exe = GetModuleHandleW(nullptr);
   const std::string exe_leaf = "test_rr_guard_dll.exe";
@@ -240,9 +253,10 @@ int main(int argc, char** argv) {
   host::iface = iface;
   FoState* fo = reinterpret_cast<FoState* (*)()>(GetProcAddress(iface, "wgtest_fo_state"))();
   const bool late = mode == "late" || mode == "late-replace";
+  const bool stays_on = mode == "anon" || mode == "noaccess" || mode == "guardpage" || mode == "exe" || mode == "hops";
   // ---- the other plugin before ours
   void* odd_page = nullptr;
-  if (mode == "first") CHECK(or_patch_iat(exe, kWgInterposerFile, 1) >= 6);
+  if (mode == "first" || mode == "hostsplit") CHECK(or_patch_iat(exe, kWgInterposerFile, 1) >= 6);  // (hostsplit: the host's own)
   if (mode == "inline") CHECK(or_patch_export(iface, evaluate_name.c_str(), 0) == 1);
   if (mode == "relay") CHECK(or_patch_export(iface, evaluate_name.c_str(), 1) == 1);
   if (mode == "anon") {
@@ -255,40 +269,114 @@ int main(int argc, char** argv) {
                             mode == "noaccess" ? PAGE_NOACCESS : (PAGE_EXECUTE_READ | PAGE_GUARD));
     CHECK(or_set_slot(exe, kWgInterposerFile, evaluate_name.c_str(), odd_page) == 1);
   }
+  if (mode == "exe") CHECK(or_set_slot(exe, kWgInterposerFile, evaluate_name.c_str(), reinterpret_cast<void*>(&read_lines)) == 1);
+  if (mode == "hops" || mode == "execonly") {
+    // relay jumps (jmp [rip+0]; dq target) in code outside every module that lead to a function of the other plugin
+    uint8_t* p = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
+    CHECK(p != nullptr);
+    const void* to_other = reinterpret_cast<const void*>(GetProcAddress(other, "wgtest_or_state"));
+    const int jumps = mode == "hops" ? 5 : 1;  // five is more than kMaxHops (4)
+    for (int i = 0; i < jumps; ++i) {
+      const void* t = i + 1 < jumps ? static_cast<const void*>(p + 32 * (i + 1)) : to_other;
+      p[32 * i] = 0xFF;
+      p[32 * i + 1] = 0x25;
+      memset(p + 32 * i + 2, 0, 4);
+      memcpy(p + 32 * i + 6, &t, sizeof t);
+    }
+    if (mode == "execonly") {
+      DWORD old = 0;
+      CHECK(VirtualProtect(p, 4096, PAGE_EXECUTE, &old));  // execute-only: the guard still reads the relay
+    }
+    odd_page = p;
+    CHECK(or_set_slot(exe, kWgInterposerFile, evaluate_name.c_str(), p) == 1);
+  }
   if (mode == "provider") CHECK(or_ngx(&api, host::kTheirs));
 
   // ---- WrongGPU RR (the host loads it and runs its entry)
   load_asi(widen(kWgHookFile), &init, &plugin_init);
   if (!init || !plugin_init) TEST_SUMMARY(label.c_str());
-  init();
-  if (mode == "owncopy") {  // a second copy under another file name (build.py stages it)
-    void (*init2)() = nullptr;
-    WgHostMenuInitFn plugin_init2 = nullptr;
-    load_asi(L"WrongGPU-RR-copy.asi", &init2, &plugin_init2);
-    if (init2) init2();
-    CHECK(plugin_init2 && !plugin_init2(&api, host::kOurs));  // the copy registers nothing
+  const WgHostMenuApi* host_api = &api;  // the table OptiPluginInit gets
+  if (mode == "hostsplit" || mode == "exe") {
+    // a separate ASI loader (another module) calls InitializeASI. A second instance of the stand-in DLL plays the
+    // loader. hostsplit: the real host is wgtest_other_rr.dll, which holds the API table and patched the slots itself.
+    // exe: the host is a DLL, as in a game (when this test exe called InitializeASI itself, the exe would be the host
+    // and its code trusted), so a slot that leads into the exe's code is the exe's own code.
+    HMODULE loader = LoadLibraryW((ws + L"wgtest_loader.dll").c_str());
+    CHECK(loader != nullptr);
+    auto call_init = loader ? reinterpret_cast<void (*)(void (*)())>(GetProcAddress(loader, "wgtest_or_call_init")) : nullptr;
+    CHECK(call_init != nullptr && or_host_table != nullptr);
+    if (!call_init || !or_host_table) TEST_SUMMARY(label.c_str());
+    call_init(init);
+    if (mode == "hostsplit") {
+      host_api = or_host_table(&api);
+      CHECK(host_api != nullptr);
+    }
+  } else {
+    init();  // (owncopy: this copy is the active one, the others follow below)
   }
+  struct Copy {
+    HMODULE module = nullptr;
+    void (*init)() = nullptr;
+    WgHostMenuInitFn plugin_init = nullptr;
+  };
+  std::vector<Copy> copies;  // owncopy: more copies of WrongGPU RR under other file names (build.py stages them)
+  if (mode == "owncopy")
+    for (const wchar_t* f : {L"WrongGPU-RR-copy.asi", L"WrongGPU-RR-copy2.asi", L"WrongGPU-RR-copy3.asi", L"WrongGPU-RR-copy4.asi"}) {
+      Copy c;
+      c.module = load_asi(f, &c.init, &c.plugin_init);
+      CHECK(c.module != nullptr && c.init != nullptr && c.plugin_init != nullptr);
+      if (c.module) copies.push_back(c);
+    }
   // ---- the other plugin after ours
   if (mode == "late") CHECK(or_patch_iat(exe, kWgInterposerFile, 1) >= 6);          // wraps our handlers
   if (mode == "late-replace") CHECK(or_patch_iat(exe, kWgInterposerFile, 0) >= 6);  // replaces them
   // OptiPluginInit (late-replace: the check that finds it, as no call reaches our handlers any more); "late" makes the
   // first call before it, so that the first call decides
-  if (mode != "late") plugin_init(&api, host::kOurs);
+  if (mode == "owncopy") {
+    // every copy at once: the active copy's OptiPluginInit and the game's first call (16 threads), and in each other
+    // copy InitializeASI (two threads: the second waits for the first) followed by its OptiPluginInit. All of them
+    // write wronggpu-rr.log at the same moment; no line may be torn, the other copies register nothing.
+    std::atomic<int> go{0}, answered{0}, registered{0};
+    std::vector<std::thread> th;
+    auto spawn = [&](auto fn) {
+      th.emplace_back([&go, fn] {
+        while (!go.load()) std::this_thread::yield();
+        fn();
+      });
+    };
+    spawn([&] { plugin_init(host_api, host::kOurs); });
+    for (int i = 0; i < 16; ++i) spawn([&] { answered += slIsFeatureSupported(kOther, nullptr) == kIfaceAnswer; });
+    for (const Copy& c : copies) {
+      spawn([&c, &registered, host_api] {
+        c.init();
+        registered += c.plugin_init(host_api, host::kOurs) ? 1 : 0;
+      });
+      spawn([&c] { c.init(); });
+    }
+    go.store(1);
+    for (auto& t : th) t.join();
+    CHECK_EQ(answered.load(), 16);
+    CHECK_EQ(registered.load(), 0);  // the other copies register nothing
+  } else if (mode != "late") {
+    plugin_init(host_api, host::kOurs);
+  }
 
   // ---- the game's calls
-  if (mode == "clean" || mode == "late" || mode == "owncopy" || mode == "provider") {
+  if (mode == "clean" || mode == "late" || mode == "provider") {
     // 16 threads make the game's first interface call at once
     const int ok = at_once(16, [] { return slIsFeatureSupported(kOther, nullptr); }, kIfaceAnswer);
     CHECK_EQ(ok, 16);
   }
-  if (mode == "late") plugin_init(&api, host::kOurs);
+  if (mode == "late") plugin_init(host_api, host::kOurs);
   std::vector<std::string> L = read_lines(log_path);
   printf("log lines %zu, torn %zu\n", L.size(), torn_lines(L));
-  CHECK(torn_lines(L) == 0);  // 0.6.1: one append call per line, also with two copies
+  CHECK(torn_lines(L) == 0);  // 0.6.1: one append call per line, also with several copies
   const double load_cost = cost_of(L, "hook: coexistence check at load: ");
   CHECK(load_cost >= 0.0 && load_cost < 5.0);
   printf("coexistence check at load: %.3f ms\n", load_cost);
-  CHECK(count(L, "hook: coexistence check at load: ") == (mode == "owncopy" ? 1u : 1u));
+  // the check's result lines (the stay-on line is a second line of the same check); hostsplit: the check runs again
+  CHECK(count(L, "hook: coexistence check at load: ") - count(L, "hook: coexistence check at load: inconclusive") ==
+        (mode == "hostsplit" ? 2u : 1u));
   const long rr_before = os->rr_calls;
   const WgResultCode rr = slIsFeatureSupported(kRR, nullptr);
   const bool rr_by_other = os->rr_calls == rr_before + 1;
@@ -298,25 +386,75 @@ int main(int argc, char** argv) {
     CHECK(count(L, "hook: coexistence check at load: no other Ray Reconstruction plugin found (") == 1);
     CHECK(count(L, "hook: coexistence re-check at the game's first call: no other Ray Reconstruction plugin found (") == 1);
     CHECK(count(L, "another Ray Reconstruction plugin is active") == 0);
+    CHECK(count(L, "hook: coexistence check at load: inconclusive") == 0);
     CHECK(count(L, std::string("hook: patched IAT slot ") + kWgRoleNames[kIsSupported] + " in ") == 1);  // only one copy patched
     CHECK(!rr_by_other);
     if (mode == "owncopy") {
-      CHECK(count_starting(L, "a second copy of WrongGPU RR is loaded (") == 1);
-      CHECK(count(L, std::string(kWgHookFile) + " is active); this copy (") == 1);
+      CHECK(count_starting(L, "a second copy of WrongGPU RR is loaded (") == copies.size());  // one line per other copy
+      CHECK(count(L, std::string(kWgHookFile) + " is active); this copy (") == copies.size());
       CHECK(count(L, "WrongGPU-RR-copy.asi) stays off") == 1);
+      CHECK(count(L, "WrongGPU-RR-copy2.asi) stays off") == 1);
+      CHECK(count(L, "WrongGPU-RR-copy3.asi) stays off") == 1);
+      CHECK(count(L, "WrongGPU-RR-copy4.asi) stays off") == 1);
+      // an inactive copy has no calls to summarise: freeing it (DLL_PROCESS_DETACH under the loader lock) writes no
+      // exit summary (the line would say the calls never reached the plugin); the log lock is only tried there
+      for (const Copy& c : copies) CHECK(FreeLibrary(c.module));
+      CHECK(count(read_lines(log_path), "diag: summary") == 0);
     }
 #if !WG_BINDING_PROBE
     CHECK(count(L, "NGX: RR provider registered with the host") == 1);
     CHECK(host::ngx_regs == 1 && host::ngx_owner == host::kOurs);
+    CHECK(GetModuleHandleW(L"wronggpu_runtime.dll") != nullptr);  // active: the core loaded the RR runtime
 #endif
-  } else if (mode == "first" || mode == "inline" || mode == "relay" || mode == "anon" || mode == "noaccess" ||
-             mode == "guardpage") {
+  } else if (mode == "hostsplit") {
+    // the load check took the host's own patches for another plugin (it ran before the host's table was known: the same
+    // line as for any plugin), then OptiPluginInit showed that the module holds the host's API table: the load check
+    // ran again with it as the host, nothing is switched off
+    CHECK(count_starting(L, stem + self_slot) == 1);
+    CHECK(count(L, "hook: coexistence check at load: another Ray Reconstruction plugin found (") == 1);
+    CHECK(count(L, "hook: coexistence check at load: no other Ray Reconstruction plugin found (") == 1);
+    CHECK(count_starting(L, "hook: the module the load check took for another Ray Reconstruction plugin (wgtest_other_rr.dll) "
+                            "holds the host's API table: it is the host") == 1);
+    const std::vector<std::string> L2 = read_lines(log_path);  // after the game's first call (made above)
+    CHECK(count(L2, "hook: coexistence re-check at the game's first call: no other Ray Reconstruction plugin found (") == 1);
+    CHECK(count(L, std::string("hook: patched IAT slot ") + kWgRoleNames[kIsSupported] + " in ") == 1);
+    CHECK(count(L2, "took the RR calls after WrongGPU") == 0);
+    CHECK(!rr_by_other);  // RR is WrongGPU's
+    CHECK_EQ(slIsFeatureSupported(kOther, nullptr), kIfaceAnswer);  // the other calls reach the interface
+#if !WG_BINDING_PROBE
+    CHECK(count(L, "NGX: RR provider registered with the host") == 1);
+    CHECK(host::ngx_owner == host::kOurs);
+#endif
+  } else if (stays_on) {
+    // not a positive finding: logged once as inconclusive, WrongGPU RR stays active (it patched, RR is its own)
+    const std::string unclear =
+        mode == "anon"       ? self_slot + evaluate_name + " of " + exe_leaf + " leads to code outside every module"
+        : mode == "exe"      ? self_slot + evaluate_name + " of " + exe_leaf + " leads into the exe's own code"
+        : mode == "hops"     ? self_slot + evaluate_name + " of " + exe_leaf + " leads through more than 4 hook jumps"
+                             : self_slot + evaluate_name + " of " + exe_leaf + " could not be read";
+    CHECK(count(L, "hook: coexistence check at load: no other Ray Reconstruction plugin found (") == 1);
+    CHECK(count_starting(L, "hook: coexistence check at load: inconclusive for 1 address(es) (first: " + unclear +
+                            "); no other plugin was positively found, WrongGPU RR stays active") == 1);
+    CHECK(count(L, "another Ray Reconstruction plugin is active") == 0);
+    CHECK(count(L, "stays off") == 0);
+    CHECK(count(L, std::string("hook: patched IAT slot ") + kWgRoleNames[kIsSupported] + " in ") == 1);
+    CHECK(count(read_lines(log_path), "hook: coexistence re-check at the game's first call: no other Ray Reconstruction plugin found (") == 1);
+    CHECK(!rr_by_other);
+    CHECK_EQ(slIsFeatureSupported(kOther, nullptr), kIfaceAnswer);
+    if (mode == "guardpage") {
+      MEMORY_BASIC_INFORMATION m;
+      CHECK(VirtualQuery(odd_page, &m, sizeof m) && (m.Protect & PAGE_GUARD));  // never touched
+    }
+#if !WG_BINDING_PROBE
+    CHECK(count(L, "NGX: RR provider registered with the host") == 1);
+    CHECK(host::ngx_owner == host::kOurs);
+#endif
+  } else if (mode == "first" || mode == "inline" || mode == "relay" || mode == "execonly") {
     const std::string detail =
         mode == "first"    ? self_slot  // the first redirected slot in import order; the module is checked below
         : mode == "inline" ? "the export " + evaluate_name + " of " + iface_leaf + " leads to wgtest_other_rr.dll (through 1 hook jump)"
         : mode == "relay"  ? "the export " + evaluate_name + " of " + iface_leaf + " leads to wgtest_other_rr.dll (through 2 hook jumps)"
-        : mode == "anon"   ? self_slot + evaluate_name + " of " + exe_leaf + " leads to code outside every module"
-                           : self_slot + evaluate_name + " of " + exe_leaf + " could not be read";
+                           : self_slot + evaluate_name + " of " + exe_leaf + " leads to wgtest_other_rr.dll (through 1 hook jump)";
     CHECK(count(L, "hook: coexistence check at load: another Ray Reconstruction plugin found (") == 1);
     if (take && (mode == "first" || mode == "inline")) {
       CHECK(count_starting(L, "another Ray Reconstruction plugin is active; rr_other_plugin=take: WrongGPU RR goes in "
@@ -345,11 +483,9 @@ int main(int argc, char** argv) {
 #if !WG_BINDING_PROBE
       CHECK(count(L, "NGX: RR provider not registered: WrongGPU RR stays off in this process") == 1);
       CHECK(host::ngx_owner == nullptr);
+      // off at load: the core is not built, so the RR runtime (staged next to the exe) is never loaded
+      CHECK(GetModuleHandleW(L"wronggpu_runtime.dll") == nullptr);
 #endif
-    }
-    if (mode == "guardpage") {
-      MEMORY_BASIC_INFORMATION m;
-      CHECK(VirtualQuery(odd_page, &m, sizeof m) && (m.Protect & PAGE_GUARD));  // never touched
     }
   } else if (late) {
     CHECK(count(L, "hook: coexistence check at load: no other Ray Reconstruction plugin found (") == 1);

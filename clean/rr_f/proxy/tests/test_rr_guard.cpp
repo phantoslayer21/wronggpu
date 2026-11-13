@@ -5,9 +5,12 @@
 //     path (a page made unreadable after its region was cached); the cache keeps VirtualQuery calls few;
 //   - decode_jump: every jump form, and a jmp [rip+disp32] whose cell is not readable;
 //   - classify: synthetic modules (ranges of one allocation) and anonymous relays: the interface's own code, a hook jump
-//     to another module, a jump inside the interface, the linker's import thunk, a relay chain to the host, a relay loop
-//     (more than kMaxHops), anonymous code, an unreadable target, a copy of WrongGPU RR, WrongGPU.asi, the exe's thunk;
-//   - Verdict precedence, override parsing, the exact log lines;
+//     to another module, a jump inside the interface, the linker's import thunk, a relay chain to the host, exactly
+//     kMaxHops jumps (followed) and one more (too many hops), a relay loop, anonymous code, an unreadable target, an
+//     execute-only relay page (read), a copy of WrongGPU RR, WrongGPU.asi, the exe's thunk, the host's second module;
+//   - Verdict: only a positive finding (a named foreign module, a copy of WrongGPU RR) is a finding; unreadable memory,
+//     too many hops, non-jumping anonymous code and the exe's own code are inconclusive (counted, kind stays clean);
+//     precedence, override parsing, the exact log lines;
 //   - Decision: 32 threads make the "first call" at once: decide runs exactly once, every thread sees the same state.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -73,6 +76,15 @@ int main() {
     CHECK(VirtualQuery(blk + 2 * kPage, &m, sizeof m) && (m.Protect & PAGE_GUARD));  // never touched: still a guard page
     uint64_t p64 = 0;
     CHECK(!safe_get(blk + 3 * kPage, &p64));
+    // an execute-only page counts as readable (a hooking library's trampolines); the copy is guarded either way
+    uint8_t* xo = static_cast<uint8_t*>(VirtualAlloc(nullptr, kPage, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    CHECK(xo != nullptr);
+    memset(xo, 0xC3, kPage);
+    DWORD xold = 0;
+    CHECK(VirtualProtect(xo, kPage, PAGE_EXECUTE, &xold));
+    CHECK(readable(xo, 16));
+    (void)safe_read(xo, b, 1);  // hardware without read-through-execute faults here: caught, false; no crash either way
+    VirtualFree(xo, 0, MEM_RELEASE);
 
     // the cached reader: many reads in one region take one VirtualQuery; a page made unreadable after its region was
     // cached is caught by the structured-exception path (no fault, false)
@@ -209,10 +221,38 @@ int main() {
     put_rel32(iface + 384, anon + 64);
     w = classify(iface + 384, env, true);
     CHECK(w.owner == Owner::kForeign && w.module == "other.asi" && w.hops == 3);
-    // a relay loop: more than kMaxHops -> unknown (the safe side)
+    // a relay loop: more than kMaxHops -> unknown (inconclusive: not a sign of another plugin)
     put_abs(anon + 256, anon + 512);
     put_abs(anon + 512, anon + 256);
-    CHECK(classify(anon + 256, env, false).owner == Owner::kUnknown);
+    w = classify(anon + 256, env, false);
+    CHECK(w.owner == Owner::kUnknown && w.too_many_hops && w.hops == kMaxHops);
+    // exactly kMaxHops (4) jumps are followed to a foreign module; a fifth one is too many
+    static_assert(kMaxHops == 4, "the chains below are written for four hops");
+    put_abs(anon + 2048, anon + 2112);
+    put_abs(anon + 2112, anon + 2176);
+    put_abs(anon + 2176, anon + 2240);
+    put_abs(anon + 2240, foreign + 72);
+    w = classify(anon + 2048, env, false);
+    CHECK(w.owner == Owner::kForeign && w.module == "other.asi" && w.hops == 4 && !w.too_many_hops);
+    put_abs(anon + 2240, anon + 2304);  // lengthen it by one jump
+    put_abs(anon + 2304, foreign + 72);
+    w = classify(anon + 2048, env, false);
+    CHECK(w.owner == Owner::kUnknown && w.too_many_hops && w.hops == 4);
+    put_abs(anon + 2240, foreign + 72);  // (kept four hops for the Verdict checks below)
+    // the host's API-table module (a separate loader called InitializeASI): a second host module
+    {
+      Env env2 = env;
+      env2.host_alt = foreign;
+      CHECK(classify(foreign + 8, env, false).owner == Owner::kForeign);
+      CHECK(classify(foreign + 8, env2, false).owner == Owner::kHost);
+      CHECK(classify(anon + 2048, env2, false).owner == Owner::kHost);  // a hook chain that ends in it
+    }
+    // an execute-only relay page is read like any other
+    put_abs(anon + kPage + 16, foreign + 80);
+    CHECK(VirtualProtect(anon + kPage, kPage, PAGE_EXECUTE, &old));
+    w = classify(anon + kPage + 16, env, false);
+    CHECK(w.owner == Owner::kForeign && w.hops == 1);
+    CHECK(VirtualProtect(anon + kPage, kPage, PAGE_EXECUTE_READWRITE, &old));
     // anonymous code that does not jump on
     CHECK(classify(anon + 1024, env, false).owner == Owner::kAnonymous);
     // an unreadable target: unknown, and an export whose jmp [rip] cell is unreadable: unknown
@@ -241,25 +281,55 @@ int main() {
     v.add(classify(host + 8, env, false), "the import slot B of game.exe", false, false);
     v.add(classify(exe + 8, env, false), "the delay-load slot C of game.exe", false, true);
     v.add(classify(anon + 1024, env, false), "the host's next function of D", true, false);
-    CHECK(v.kind == Verdict::kClean && v.reads == 4);
-    v.add(classify(iface + 384, env, true), "the export E of iface.dll", false, false);
-    CHECK(v.kind == Verdict::kOther);
-    CHECK(v.detail == "the export E of iface.dll leads to other.asi (through 3 hook jumps)");
+    CHECK(v.kind == Verdict::kClean && v.reads == 4 && v.unclear == 0);
+    // not positive findings: unreadable memory, a null slot, too many hops, anonymous code that does not jump on (not
+    // accepted here), the exe's own code (not accepted here), a hook chain that ends in the exe: counted, kind stays clean
     v.add(classify(dead + 32, env, false), "the import slot F of game.exe", false, false);
+    CHECK(v.kind == Verdict::kClean && v.unclear == 1 && v.unclear_detail == "the import slot F of game.exe could not be read");
+    v.add(classify(nullptr, env, false), "the import slot N of game.exe", false, false);
+    v.add(classify(anon + 256, env, false), "the import slot L of game.exe", false, false);
+    v.add(classify(anon + 1024, env, false), "the import slot I of game.exe", false, false);
+    v.add(classify(exe + 8, env, false), "the import slot J of game.exe", false, false);
+    CHECK(v.kind == Verdict::kClean && v.unclear == 5 && v.reads == 9);
+    CHECK(v.unclear_detail == "the import slot F of game.exe could not be read");  // the first one stays
+    Verdict u;
+    u.add(classify(anon + 256, env, false), "the import slot L of game.exe", false, false);
+    CHECK(u.kind == Verdict::kClean && u.unclear == 1 &&
+          u.unclear_detail == "the import slot L of game.exe leads through more than 4 hook jumps");
+    Verdict a;
+    a.add(classify(anon + 1024, env, false), "the import slot I of game.exe", false, false);
+    CHECK(a.kind == Verdict::kClean && a.unclear == 1 &&
+          a.unclear_detail == "the import slot I of game.exe leads to code outside every module");
+    put_rel32(iface + 640, exe + 24);  // an export hooked into the exe's own code
+    Verdict e;
+    e.add(classify(exe + 8, env, false), "the import slot J of game.exe", false, false);
+    e.add(classify(iface + 640, env, true), "the export K of iface.dll", false, false);
+    CHECK(e.kind == Verdict::kClean && e.unclear == 2 &&
+          e.unclear_detail == "the import slot J of game.exe leads into the exe's own code");
+    Verdict e2;
+    e2.add(classify(iface + 640, env, true), "the export K of iface.dll", false, false);
+    CHECK(e2.unclear_detail == "the export K of iface.dll leads into the exe's own code (through 1 hook jump)");
+    Verdict ok;  // the accepted places stay trusted
+    ok.add(classify(anon + 1024, env, false), "the host's next function of D", true, false);
+    ok.add(classify(exe + 8, env, false), "the delay-load slot C of game.exe", false, true);
+    CHECK(ok.kind == Verdict::kClean && ok.unclear == 0);
+    // positive findings
+    v.add(classify(iface + 384, env, true), "the export E of iface.dll", false, false);
+    CHECK(v.kind == Verdict::kOther && v.other_module == foreign);
+    CHECK(v.detail == "the export E of iface.dll leads to other.asi (through 3 hook jumps)");
+    v.add(classify(foreign + 8, env, false), "the import slot M of game.exe", false, false);
     CHECK(v.detail == "the export E of iface.dll leads to other.asi (through 3 hook jumps)");  // the first one stays
     v.add(classify(copy + 8, env, false), "the import slot G of game.exe", false, false);
     CHECK(v.kind == Verdict::kOwnCopy && v.detail == "WrongGPU-RR-copy.asi");  // a copy of WrongGPU RR before all
     v.add(classify(foreign + 8, env, false), "the import slot H of game.exe", false, false);
-    CHECK(v.kind == Verdict::kOwnCopy && v.reads == 8);
-    Verdict u;
-    u.add(classify(dead + 32, env, false), "the import slot F of game.exe", false, false);
-    CHECK(u.kind == Verdict::kOther && u.detail == "the import slot F of game.exe could not be read");
-    Verdict a;
-    a.add(classify(anon + 1024, env, false), "the import slot I of game.exe", false, false);  // anon not accepted here
-    CHECK(a.kind == Verdict::kOther && a.detail == "the import slot I of game.exe leads to code outside every module");
-    Verdict e;
-    e.add(classify(exe + 8, env, false), "the import slot J of game.exe", false, false);  // exe code not accepted here
-    CHECK(e.kind == Verdict::kOther && e.detail == "the import slot J of game.exe leads to game.exe");
+    CHECK(v.kind == Verdict::kOwnCopy && v.reads == 13);
+    Verdict f4;  // a decoded chain of exactly kMaxHops jumps that ends in a foreign module is positive
+    f4.add(classify(anon + 2048, env, false), "the import slot P of game.exe", false, false);
+    CHECK(f4.kind == Verdict::kOther && f4.detail == "the import slot P of game.exe leads to other.asi (through 4 hook jumps)");
+    Verdict f5;  // the unreadable first read does not hide a later positive finding
+    f5.add(classify(dead + 32, env, false), "the import slot F of game.exe", false, false);
+    f5.add(classify(foreign + 8, env, false), "the import slot Q of game.exe", false, false);
+    CHECK(f5.kind == Verdict::kOther && f5.unclear == 1 && f5.detail == "the import slot Q of game.exe leads to other.asi");
     CHECK(trusted(Owner::kWrongGpu, false, false) && !trusted(Owner::kUnknown, true, true) &&
           !trusted(Owner::kForeign, true, true) && !trusted(Owner::kOwnCopy, true, true));
     VirtualFree(blk, 0, MEM_RELEASE);
@@ -291,6 +361,12 @@ int main() {
     CHECK(line_own_copy("A", "B") == "a second copy of WrongGPU RR is loaded (A is active); this copy (B) stays off");
     CHECK(line_ngx_other() == stem + " (NGX route only: the host refused WrongGPU's RR provider, another provider "
                                      "holds it; the game-interface route is decided on its own)");
+    // the stay-on diagnostic: never one of the matched beginnings
+    const std::string inc = line_inconclusive("at load", 2, "the import slot X of Game.exe could not be read");
+    CHECK(inc == "hook: coexistence check at load: inconclusive for 2 address(es) (first: the import slot X of Game.exe "
+                 "could not be read); no other plugin was positively found, WrongGPU RR stays active");
+    CHECK(inc.compare(0, 6, "hook: ") == 0 && inc.find("plugin is active") == std::string::npos &&
+          inc.find("stays off") == std::string::npos);
   }
 
   // ---------------------------------------------------------------- Decision: one decision under concurrent first calls

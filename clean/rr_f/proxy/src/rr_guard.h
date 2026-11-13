@@ -1,9 +1,15 @@
 // SPDX-License-Identifier: MIT
 // RR guard: the coexistence guard of the hook-mode RR plugin (HOOK-MODE.md, "Another Ray Reconstruction
-// plugin"). When another Ray Reconstruction plugin already holds the game's RR path in this process, WrongGPU RR stays
-// off and logs one line; Model M is not touched. Generic and read-only: it looks at where the game's RR calls lead
-// (import slots, the first bytes of the interface's RR exports, the host's continuation pointers), never at another
-// plugin's files or internals.
+// plugin"). When another Ray Reconstruction plugin demonstrably holds the game's RR path in this process, WrongGPU RR
+// stays off and logs one line; Model M is not touched. Generic and read-only: it looks at where the game's RR calls
+// lead (import slots, the first bytes of the interface's RR exports, the host's continuation pointers), never at
+// another plugin's files or internals.
+//
+// Only a POSITIVE finding stops the plugin: an address that ends in a named foreign module (also through decoded hook
+// jumps), or in our own second copy. Everything else the scan cannot explain (unreadable memory, too many hops, code
+// outside every module that does not jump on, the exe's own code) is logged once as inconclusive and the plugin stays
+// active: a game's copy protection or a hooking library's trampolines must never switch RR off for a player who has no
+// other plugin.
 //
 // This header holds the parts without process state, so the CPU tests can drive them with synthetic memory:
 //   - safe_read: every read of memory we do not own (VirtualQuery for committed, readable, non-guard pages, then a
@@ -12,8 +18,9 @@
 //     mov rax|r11, imm64 + jmp reg);
 //   - classify: who an address belongs to (our module, the game interface, the host, another copy of WrongGPU RR,
 //     another WrongGPU module, the exe's own delay-load thunk, code outside every module, another module), following
-//     hook jumps out of the interface and out of anonymous memory, up to kMaxHops;
-//   - Verdict: the worst of several classifications, and the words for the log;
+//     hook jumps out of the interface and out of anonymous memory, at most kMaxHops of them;
+//   - Verdict: the positive finding (if any) of several classifications, the inconclusive ones, and the words for the
+//     log;
 //   - Decision: the once-only late decision (several game threads may make the first call at the same time).
 #pragma once
 #include <stddef.h>
@@ -33,9 +40,10 @@ constexpr const char* kOwnRrExport = "WrongGPU_GetSettingsContract";
 constexpr const char* kWrongGpuAsiExport = "WrongGpuAsiQuery";
 // wronggpu-rr.ini: rr_other_plugin = off (default) | take
 constexpr const char* kOverrideKey = "rr_other_plugin";
-constexpr int kMaxHops = 4;
+constexpr int kMaxHops = 4;  // hook jumps followed from one address (a fifth one is "too many hops": inconclusive)
 
-// True when [p, p + n) lies in committed pages that are readable and not guard pages (VirtualQuery only).
+// True when [p, p + n) lies in committed pages that are readable (execute-only pages count: code is read from them and
+// the structured-exception guard of the copy covers a fault) and not guard pages (VirtualQuery only).
 bool readable(const void* p, size_t n);
 // Copies n bytes from p to out when readable() and the copy raises no structured exception. False: unknown.
 bool safe_read(const void* p, void* out, size_t n);
@@ -66,15 +74,15 @@ class Reader {
 bool decode_jump(const uint8_t* code, size_t n, const uint8_t* at, const void** target, const void** cell);
 
 enum class Owner {
-  kUnknown,     // the memory could not be read (or a null pointer): the safe side is "another plugin"
+  kUnknown,     // the memory could not be read, a null pointer, or more than kMaxHops jumps: inconclusive
   kSelf,        // this WrongGPU RR module
   kInterface,   // the game interface module (its own code)
-  kHost,        // the host that loaded us (it patches the interface's init export itself)
-  kOwnCopy,     // another loaded copy of WrongGPU RR (exports kOwnRrExport)
+  kHost,        // the host that loaded us, or the module holding its API table (it patches the interface itself)
+  kOwnCopy,     // another loaded copy of WrongGPU RR (exports kOwnRrExport): positive
   kWrongGpu,    // another WrongGPU module (exports kWrongGpuAsiExport)
-  kExeThunk,    // the exe's own code (a delay-load slot not bound yet holds the delay helper's thunk there)
-  kAnonymous,   // readable code outside every module that does not jump on (a trampoline)
-  kForeign,     // another module: another plugin
+  kExeThunk,    // the exe's own code (a delay-load slot not bound yet holds the delay helper's thunk there): inconclusive
+  kAnonymous,   // readable code outside every module that does not jump on (a trampoline): inconclusive
+  kForeign,     // another named module: another plugin (positive)
 };
 const char* owner_word(Owner o);
 
@@ -82,7 +90,8 @@ const char* owner_word(Owner o);
 struct Env {
   const void* self = nullptr;
   const void* iface = nullptr;
-  const void* host = nullptr;
+  const void* host = nullptr;      // the module that called InitializeASI
+  const void* host_alt = nullptr;  // the module holding the host's API table, when it is another module (a separate loader)
   const void* exe = nullptr;
   // the interface's import address table (its own imports): a jmp [rip+disp32] through a cell in it is the linker's
   // import thunk, not a hook
@@ -93,23 +102,31 @@ struct Env {
   std::function<std::string(const void* module)> name_of;        // the module's file name (for the log)
 };
 // The real process: GetModuleHandleExW (from address, refcount unchanged), GetProcAddress, GetModuleFileNameW.
-Env process_env(const void* self, const void* iface, const void* host);
+Env process_env(const void* self, const void* iface, const void* host, const void* host_alt = nullptr);
 
 struct Where {
   Owner owner = Owner::kUnknown;
   std::string module;  // file name of the module the address ends in ("" when none)
+  const void* module_handle = nullptr;  // the module the address ends in (null when none)
   int hops = 0;        // hook jumps followed
+  bool too_many_hops = false;  // kUnknown because the jump chain was longer than kMaxHops
 };
 // Where code at `p` leads. follow_iface: follow a hook jump at p when p is inside the interface (the first bytes of
 // an export); a jump that stays inside the interface, or goes through the interface's own import table, is the
 // interface's own code. Jumps are always followed out of anonymous memory.
 Where classify(const void* p, const Env& env, bool follow_iface);
 
-// What a scan found: the first not-trusted address decides (a copy of WrongGPU RR before anything else).
+// What a scan found. kOther / kOwnCopy are positive findings only (an address that ends in another named module, or in
+// a second copy of WrongGPU RR; the first foreign one decides, a copy of WrongGPU RR before anything else). Whatever
+// could not be explained (unreadable, too many hops, anonymous code that does not jump on, the exe's own code) is
+// counted in `unclear` and leaves the kind at kClean: the plugin stays active.
 struct Verdict {
   enum Kind { kClean, kOwnCopy, kOther } kind = kClean;
   std::string detail;  // e.g. "the import slot slEvaluateFeature of Game.exe leads to other.asi"
+  const void* other_module = nullptr;  // kOther: the module the first foreign finding ends in
   unsigned reads = 0;  // addresses looked at
+  unsigned unclear = 0;          // addresses that were neither trusted nor a positive finding
+  std::string unclear_detail;    // the first of them, e.g. "the import slot X of Y could not be read"
   // Takes one classification. `what` names the place ("the import slot X of Y"); anon_ok: code outside every
   // module is accepted here (the host's own trampolines); exe_ok: the exe's own code is accepted (delay thunks).
   void add(const Where& w, const std::string& what, bool anon_ok, bool exe_ok);
@@ -127,6 +144,9 @@ std::string line_take(const std::string& detail);               // rr_other_plug
 std::string line_cannot_take(const std::string& detail);        // take asked, the other plugin loaded later
 std::string line_own_copy(const std::string& active, const std::string& self);
 std::string line_ngx_other();                                   // the host refused our NGX provider
+// The stay-on diagnostic (starts with "hook: "; never with the beginnings above): the scan could not explain `n`
+// address(es), `first` is the first one. No finding, RR stays active.
+std::string line_inconclusive(const std::string& when, unsigned n, const std::string& first);
 
 // The guard's state for the whole process run. Active until a scan says otherwise; the late decision is taken once.
 enum class State : int { kActive = 0, kOff = 1, kOwnCopy = 2, kPassThrough = 3, kTaken = 4 };

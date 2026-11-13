@@ -401,10 +401,12 @@ def test_hook(built, binding, out, logs, probe, n=None, gen=None):
 
 # RR guard: the coexistence guard's modes (tests/test_rr_guard_dll.cpp) against our own stand-in "other Ray
 # Reconstruction plugin" (tests/fake_other_rr.cpp); "route*" modes use the build without an import of the interface
-GUARD_MODES_RELEASE = (["clean"], ["first"], ["first", "--take"], ["inline"], ["inline", "--take"], ["relay"], ["anon"],
-                       ["noaccess"], ["guardpage"], ["late"], ["late", "--take"], ["late-replace"], ["provider"], ["owncopy"],
-                       ["route"], ["route-other"], ["route-other", "--take"], ["route-inline"])
-GUARD_MODES_PROBE = (["clean"], ["first"], ["inline"], ["noaccess"], ["late"], ["owncopy"], ["route-other"])
+GUARD_MODES_RELEASE = (["clean"], ["first"], ["first", "--take"], ["inline"], ["inline", "--take"], ["relay"], ["execonly"],
+                       ["anon"], ["noaccess"], ["guardpage"], ["exe"], ["hops"], ["hostsplit"], ["late"], ["late", "--take"],
+                       ["late-replace"], ["provider"], ["owncopy"], ["route"], ["route-other"], ["route-other", "--take"],
+                       ["route-inline"])
+GUARD_MODES_PROBE = (["clean"], ["first"], ["inline"], ["execonly"], ["noaccess"], ["hops"], ["hostsplit"], ["late"],
+                     ["owncopy"], ["route-other"])
 
 
 def test_guard(built, out, logs, probe, n, gen, iface_dll, implib, iface_name):
@@ -430,7 +432,9 @@ def test_guard(built, out, logs, probe, n, gen, iface_dll, implib, iface_name):
         for f in (exes[noimport], iface_dll, stub):
             shutil.copy(f, stage)
         shutil.copy(built, os.path.join(stage, n["proxy_file"]))
-        shutil.copy(built, os.path.join(stage, "WrongGPU-RR-copy.asi"))  # the owncopy mode's second copy
+        for k in ("", "2", "3", "4"):  # the owncopy mode's other copies of WrongGPU RR (separate files, separate images)
+            shutil.copy(built, os.path.join(stage, f"WrongGPU-RR-copy{k}.asi"))
+        shutil.copy(stub, os.path.join(stage, "wgtest_loader.dll"))  # the hostsplit mode's separate ASI loader (a second image)
         if not probe:
             shutil.copy(os.path.join(out, "wronggpu_runtime.dll"), stage)
         for m in (GUARD_MODES_PROBE if probe else GUARD_MODES_RELEASE):

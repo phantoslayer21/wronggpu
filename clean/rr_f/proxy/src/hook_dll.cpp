@@ -143,11 +143,22 @@ std::atomic<WgHostMenuPlugin*> g_host_api_plugin{nullptr};
 std::mutex g_host_restore_mutex;
 // RR guard (rr_guard.h): the guard's state for this process, the override, and the pass-through targets
 wgrr::guard::Decision g_guard;
-bool g_take = false;                    // wronggpu-rr.ini rr_other_plugin=take
+// g_take, g_host_module, g_host_api_module and g_fwd are written on the host's callback thread (OptiPluginInit, the
+// host's hook callback) and read by the game's threads (the handlers, the late check): atomics, published with release
+std::atomic<bool> g_take{false};        // wronggpu-rr.ini rr_other_plugin=take
 std::atomic<bool> g_hook_done{false};   // our handlers are installed: the late check may run
-HMODULE g_host_module = nullptr;        // the module that called InitializeASI (the host)
+std::atomic<HMODULE> g_host_module{nullptr};      // the module that called InitializeASI (taken as the host)
+std::atomic<HMODULE> g_host_api_module{nullptr};  // the module holding the host's API table (when another module)
+// the module the first positive finding of a "stays off" load decision led to: when OptiPluginInit then shows that this
+// module holds the host's API table (a separate loader called InitializeASI, and the real host's own patches were taken
+// for another plugin), the load decision runs again with it as the host (see OptiPluginInit)
+std::atomic<const void*> g_load_off_module{nullptr};
+std::atomic<bool> g_load_rerun_done{false};
+// g_prev is written once by guard_at_load on the thread that then builds the core (do_hook): no other thread reads it
+// before the core exists (bind() runs inside the core's construction), so it stays a plain array
 void* g_prev[32] = {};                  // take: what the exe's import slots held before us (the other plugin), by role
-wgrr::OriginalApi g_fwd;                // where a passing handler sends the call (the genuine export or the host's next)
+// where a passing handler sends the call (the genuine export or the host's next): an immutable snapshot, replaced whole
+std::atomic<const wgrr::OriginalApi*> g_fwd{nullptr};
 HANDLE g_marker = nullptr;              // the process-wide marker of the active WrongGPU RR copy (held for the run)
 #if WG_RR_PROBE
 wgrr::RrProbe* g_probe = nullptr;
@@ -195,6 +206,10 @@ wgrr::ProbeLog* probe_log() {
     {
       const wgrr::LogLock shared(path, wgrr::kLogLockWaitMs);
       MoveFileExW(path.c_str(), prev.c_str(), MOVEFILE_REPLACE_EXISTING);
+      // a new, empty log (as proxy_dll.cpp does), also when the old one could not be moved aside: never append to it
+      HANDLE fresh = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                 nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+      if (fresh != INVALID_HANDLE_VALUE) CloseHandle(fresh);
     }
     // RR guard, 0.6.1: a second WrongGPU RR copy appends its line to this file too: every line is one append
     // call under the log's process-wide lock (log_append.h), so neither copy's line is torn or overwritten
@@ -331,7 +346,7 @@ void bind(F& slot, int role) {
     slot = reinterpret_cast<F>(g_route_next[role]);  // host route: continue through the host's chain
     return;
   }
-  if (g_take && g_prev[role]) {  // RR guard, take: continue through the other plugin (it sees no RR work)
+  if (g_take.load() && g_prev[role]) {  // RR guard, take: continue through the other plugin (it sees no RR work)
     slot = reinterpret_cast<F>(g_prev[role]);
     return;
   }
@@ -715,8 +730,14 @@ bool guard_pass() {
   if (!g_guard.frozen() && g_hook_done.load(std::memory_order_acquire)) guard_first_call();
   return !g_guard.active();
 }
-#define WG_PASS(field, ...) \
-  if (guard_pass()) return g_fwd.field ? g_fwd.field(__VA_ARGS__) : WG_E_MISSING_OR_INVALID_API
+// publishes the pass-through targets (an immutable snapshot; a replaced one is leaked: a handful per run at most)
+void set_fwd(const wgrr::OriginalApi& o) { g_fwd.store(new wgrr::OriginalApi(o), std::memory_order_release); }
+#define WG_PASS(field, ...)                                                                  \
+  if (guard_pass()) {                                                                        \
+    const wgrr::OriginalApi* fwd_ = g_fwd.load(std::memory_order_acquire);                   \
+    return fwd_ && fwd_->field ? fwd_->field(__VA_ARGS__) : WG_E_MISSING_OR_INVALID_API;     \
+  }                                                                                          \
+  (void)0
 
 }  // namespace
 
@@ -1224,8 +1245,19 @@ bool guard_claim_marker() {
 void guard_read_override() {
   ensure_settings();
   std::string note;
-  g_take = wgrr::guard::override_take(g_settings.text(wgrr::guard::kOverrideKey), &note);
+  g_take.store(wgrr::guard::override_take(g_settings.text(wgrr::guard::kOverrideKey), &note));
   if (!note.empty()) log_line("hook: " + note);
+}
+
+// The guard's view of the process: the module that called InitializeASI and the one holding the host's API table are
+// both the host (a separate ASI loader may be the first, OptiScaler the second).
+wgrr::guard::Env guard_env(const void* iface) {
+  return wgrr::guard::process_env(g_self, iface, g_host_module.load(), g_host_api_module.load());
+}
+
+// One diagnostic line when a scan could not explain some addresses (never a finding: RR stays active)
+void guard_log_unclear(const char* when, const wgrr::guard::Verdict& v) {
+  if (v.unclear) log_line(wgrr::guard::line_inconclusive(when, v.unclear, v.unclear_detail));
 }
 
 // S2: the first bytes of the interface's RR-deciding exports (module = the interface). anon_ok: code outside every module
@@ -1248,7 +1280,7 @@ bool guard_at_load(const IMAGE_DELAYLOAD_DESCRIPTOR* delay) {
   guard_read_override();
   LARGE_INTEGER t0;
   QueryPerformanceCounter(&t0);
-  const g::Env env = g::process_env(g_self, g_interposer, g_host_module);
+  const g::Env env = guard_env(g_interposer);
   g::Reader r;
   g::Verdict v;
   std::wstring leaf_w;
@@ -1296,13 +1328,15 @@ bool guard_at_load(const IMAGE_DELAYLOAD_DESCRIPTOR* delay) {
                                                         : "another Ray Reconstruction plugin found";
   log_line("hook: coexistence check at load: " + std::string(result) + " (" + std::to_string(v.reads) +
            " address(es) read in " + ms_text(ms) + ")");
+  guard_log_unclear("at load", v);
   if (v.kind == g::Verdict::kOwnCopy) {
     g_guard.set(g::State::kOwnCopy);
     log_line(g::line_own_copy(v.detail, ascii(narrow(own_path()))));
     return false;
   }
   if (v.kind == g::Verdict::kOther) {
-    if (!g_take) {
+    if (!g_take.load()) {
+      g_load_off_module.store(v.other_module);  // OptiPluginInit may find that this module is the host (see there)
       g_guard.set(g::State::kOff);
       log_line(g::line_other(v.detail));
       return false;
@@ -1323,7 +1357,7 @@ wgrr::guard::State guard_late(const char* why, bool log_clean) {
   if (s != g::State::kActive && s != g::State::kTaken) return s;
   LARGE_INTEGER t0;
   QueryPerformanceCounter(&t0);
-  const g::Env env = g::process_env(g_self, g_interposer, g_host_module);
+  const g::Env env = guard_env(g_interposer);
   g::Verdict v;
   {
     std::lock_guard<std::mutex> lock(g_watch_mutex);
@@ -1345,13 +1379,14 @@ wgrr::guard::State guard_late(const char* why, bool log_clean) {
     if (log_clean)
       log_line(std::string("hook: coexistence re-check at ") + why + ": no other Ray Reconstruction plugin found (" +
                std::to_string(v.reads) + " address(es) read in " + ms_text(ms) + ")");
+    guard_log_unclear((std::string("re-check at ") + why).c_str(), v);
     return s;
   }
   log_line(std::string("hook: coexistence re-check at ") + why + ": " +
            (v.kind == g::Verdict::kOwnCopy ? "a second copy of WrongGPU RR" : "another Ray Reconstruction plugin") +
            " took the RR calls after WrongGPU (" + std::to_string(v.reads) + " address(es) read in " + ms_text(ms) + ")");
   if (v.kind == g::Verdict::kOwnCopy) log_line(g::line_own_copy(v.detail, ascii(narrow(own_path()))));
-  else log_line(g_take ? g::line_cannot_take(v.detail) : g::line_other_later(v.detail));
+  else log_line(g_take.load() ? g::line_cannot_take(v.detail) : g::line_other_later(v.detail));
   return g::State::kPassThrough;
 }
 
@@ -1400,7 +1435,7 @@ void do_hook() {
 
   // RR guard: another RR plugin already holding these calls keeps WrongGPU RR off (nothing built or patched)
   if (!guard_at_load(delay)) return;
-  g_fwd = bind_original();  // where a passing handler sends a call (the late decision, guard_first_call)
+  set_fwd(bind_original());  // where a passing handler sends a call (the late decision, guard_first_call)
 
   // Build the core now, so our handlers forward to the genuine exports (the IAT's pre-patch addresses).
   (void)target();
@@ -1492,16 +1527,17 @@ void on_host_hooked(void* module, uint32_t major, uint32_t minor, uint32_t patch
     LARGE_INTEGER t0;
     QueryPerformanceCounter(&t0);
     g::Verdict v;
-    guard_scan_exports(static_cast<HMODULE>(module), g::process_env(g_self, module, g_host_module), true, &v);
+    guard_scan_exports(static_cast<HMODULE>(module), guard_env(module), true, &v);
     log_line(std::string("hook: coexistence check before the host routes: ") +
              (v.kind == g::Verdict::kClean ? "no other Ray Reconstruction plugin found" : "another plugin found") + " (" +
              std::to_string(v.reads) + " address(es) read in " + ms_text(ms_since(t0)) + ")");
+    guard_log_unclear("before the host routes", v);
     if (v.kind == g::Verdict::kOwnCopy) {
       g_guard.set(g::State::kOwnCopy);
       log_line(g::line_own_copy(v.detail, ascii(narrow(own_path()))));
       return;
     }
-    if (v.kind == g::Verdict::kOther && !g_take) {
+    if (v.kind == g::Verdict::kOther && !g_take.load()) {
       g_guard.set(g::State::kOff);
       log_line(g::line_other(v.detail));
       return;
@@ -1533,7 +1569,7 @@ void on_host_hooked(void* module, uint32_t major, uint32_t minor, uint32_t patch
   {
     LARGE_INTEGER t0;
     QueryPerformanceCounter(&t0);
-    const g::Env env = g::process_env(g_self, module, g_host_module);
+    const g::Env env = guard_env(module);
     g::Verdict v;
     for (const WgHostSlRoute& r : routes)
       if (*r.next) v.add(g::classify(*r.next, env, false), std::string("the host's next function of ") + r.export_name,
@@ -1541,9 +1577,10 @@ void on_host_hooked(void* module, uint32_t major, uint32_t minor, uint32_t patch
     log_line(std::string("hook: coexistence check of the host routes: ") +
              (v.kind == g::Verdict::kClean ? "no other Ray Reconstruction plugin found" : "another plugin found") + " (" +
              std::to_string(v.reads) + " address(es) read in " + ms_text(ms_since(t0)) + ")");
-    g_fwd = bind_original();  // the host's next functions
+    guard_log_unclear("of the host routes", v);
+    set_fwd(bind_original());  // the host's next functions
     if (v.kind != g::Verdict::kClean) {
-      if (v.kind == g::Verdict::kOther && g_take) {
+      if (v.kind == g::Verdict::kOther && g_take.load()) {
         g_guard.set(g::State::kTaken);
         log_line(g::line_take(v.detail));
       } else {
@@ -1923,7 +1960,7 @@ extern "C" __declspec(dllexport) void InitializeASI() {
     HMODULE host = nullptr;
     if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                            static_cast<LPCWSTR>(caller), &host) && host != g_self)
-      g_host_module = host;
+      g_host_module.store(host);
     if (!guard_claim_marker()) return;  // a second copy of WrongGPU RR: nothing of this copy starts (one line)
 #if !WG_RR_PROBE
     // RR runs while the core accepted an evaluate within the last second
@@ -1949,11 +1986,23 @@ extern "C" __declspec(dllexport) void InitializeASI() {
 extern "C" __declspec(dllexport) bool OptiPluginInit(const WgHostMenuApi* api, WgHostMenuPlugin* plugin) {
   // RR guard: a second copy of WrongGPU RR registers nothing (no second tab, routes or provider)
   if (g_guard.state() == wgrr::guard::State::kOwnCopy) return false;
-  if (!g_host_module && api) {  // the host, when InitializeASI could not tell: the module holding its table
+  if (api) {  // the module holding the host's table is the host as well (a separate ASI loader may have called InitializeASI)
     HMODULE host = nullptr;
     if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           reinterpret_cast<LPCWSTR>(api), &host) && host != g_self)
-      g_host_module = host;
+                           reinterpret_cast<LPCWSTR>(api), &host) && host && host != g_self &&
+        host != g_host_module.load()) {
+      g_host_api_module.store(host);
+      // The load decision took this very module for another plugin (it ran before the host's table was known): it is
+      // the host; its own patches are not a second plugin. Nothing was patched then, so the load decision runs again.
+      if (g_guard.state() == wgrr::guard::State::kOff && host == g_load_off_module.load() &&
+          !g_load_rerun_done.exchange(true)) {
+        log_line("hook: the module the load check took for another Ray Reconstruction plugin (" + leaf_text(host) +
+                 ") holds the host's API table: it is the host (a separate loader called InitializeASI); the load "
+                 "check runs again with it as the host");
+        g_guard.set(wgrr::guard::State::kActive);
+        do_hook();
+      }
+    }
   }
   // a plugin that took the RR calls after our InitializeASI (a non-freezing check; the game's first call decides last)
   if (g_hook_done.load(std::memory_order_acquire))
@@ -1975,10 +2024,15 @@ extern "C" __declspec(dllexport) bool OptiPluginInit(const WgHostMenuApi* api, W
 
 #if !WG_RR_PROBE
 namespace {
-// clean/rr-sl-diag: the call summary at process exit (or unload). Other threads may be gone while holding the log's or the
-// proxy's lock, so neither is taken: the counters are atomic and the line is appended with WriteFile.
+// clean/rr-sl-diag: the call summary at process exit (or unload). This runs at DLL_PROCESS_DETACH, under the loader lock,
+// and other threads may be gone while holding the log's in-process mutex or the proxy's lock: neither is taken, the
+// counters are atomic, and the line is appended with one WriteFile. The log's process-wide named mutex is only tried
+// (no wait, see the end): a copy stuck holding it must never hold up the process exit.
 void exit_summary() {
   if (!g_log_path[0]) return;  // nothing was logged in this process
+  // a second copy of WrongGPU RR (it stays off) has no calls to summarise: the "never reached the plugin" line would
+  // mislead (the active copy writes its own summary)
+  if (g_guard.state() == wgrr::guard::State::kOwnCopy) return;
   std::string line = g_proxy ? g_proxy->diag_summary("process exit")
                              : std::string("diag: summary (process exit): the game interface's calls never reached the plugin");
   // clean/rr-sl-diag 2: the calls that reached each handler, the NGX route's calls, the slot checks done
@@ -2022,9 +2076,9 @@ void exit_summary() {
               "remove it for Ray Reconstruction\r\n";
     }
   }
-  // 0.6.1: under the log's process-wide lock (a short bounded wait: this can run while the process unloads us), one
-  // append call either way (log_append.h)
-  const wgrr::LogLock shared(g_log_path, 500);
+  // 0.6.1: the log's process-wide lock is tried with no wait (loader lock held here: waiting could deadlock or stall the
+  // exit); one append call either way (log_append.h), so the line is whole even when the lock was not ours
+  const wgrr::LogLock shared(g_log_path, 0);
   wgrr::append_log_text(g_log_path, line, OPEN_EXISTING);
 }
 }  // namespace
