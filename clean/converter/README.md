@@ -34,7 +34,12 @@ kinds of preset M's (no new element format, op or source kind); its parameters a
 library file as preset M's, found by its own length and hashes like any source. The map file itself
 (`data/preset-L.v1.map.json`) comes with the converter data; until it exists, `tests/run_tests.py` covers preset L with a
 synthetic library file holding an L block directly before an M block, and maps for both: each converts its own block,
-and a file without a preset's block fails with that preset's message.
+and a file without a preset's block fails with that preset's message. It also converts an **L-shaped** map
+(`tests/cases.py` `l_shaped_map`): preset M's map layout with the input encoder's output linear 64 x 128, and two new
+stages of L's record kinds (two linears and a C = 32 Swin block before `enc0`, a C = 32 Swin block before `dec0`),
+filled with our own random data. Its stage names and placement are stand-ins; the real map defines its own. A map of
+versions 1-4 must still have the sources W, D and K: should preset L have no dither table or constants, that rule
+becomes per preset.
 
 ## Preset F (map version 5, spec 57)
 

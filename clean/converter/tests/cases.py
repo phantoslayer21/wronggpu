@@ -320,6 +320,76 @@ def preset_pair_case(seed=31):
     return out[0], out[1], l_only, m_only
 
 
+# ---------------------------------------------------------------- an L-shaped map (Model L, #89)
+
+SQRT32 = "0x40b504f3"
+
+
+def _swin_block_c32(base):
+    """The usual Swin block record set at width C = 32 (2 heads x 32, 16 x 16 position bias, MLP 128), laid out one
+    after the other from element `base` of W. Returns (tensors, next free element)."""
+    t, at = [], base
+
+    def add(name, shape, op, axes):
+        nonlocal at
+        t.append(tensor(name, shape, "float32", "W", op, at, axes))
+        n = 1
+        for s in shape:
+            n *= s
+        at += n
+
+    scaled32 = {"name": "f16_scaled", "mul": SQRT32, "div": SQRT32}
+    add("gamma1", [32], scaled32, [lin(1)])
+    add("gamma2", [32], scaled32, [lin(1)])
+    add("Wqk", [2, 32, 32], {"name": "fp8"}, [lin(1024), lin(32), lin(1)])
+    add("Wv", [2, 32, 32], {"name": "fp8"}, [lin(1024), lin(32), lin(1)])
+    add("B", [2, 16, 16], {"name": "f16_scaled", "mul": SQRT8, "div": "0x3f800000"}, [lin(256), lin(16), lin(1)])
+    add("Wp", [32, 32], {"name": "fp8"}, [lin(32), lin(1)])
+    add("bp", [32], {"name": "f16"}, [lin(1)])
+    add("W1", [128, 32], {"name": "fp8"}, [lin(32), lin(1)])
+    add("b1", [128], {"name": "f16"}, [lin(1)])
+    add("W2", [32, 128], {"name": "fp8"}, [lin(128), lin(1)])
+    add("b2", [32], {"name": "f16"}, [lin(1)])
+    return t, at
+
+
+def l_shaped_map(m_map):
+    """An L-shaped map made from a preset-M map's layout (the dict of data/preset-M.v1.map.json): every M stage as it is,
+    the input encoder's output linear 64 x 128 (M: 64 x 80), and two new stages: `enc0_pre` (linears 20 -> 32 and
+    32 -> 32 with biases, then a C = 32 Swin block) before enc0, and `dec0_pre` (a C = 32 Swin block) before dec0.
+    Named "preset": "L", map version 1 (no source F: whether L has the output filter group is open). The new records
+    are appended after M's block in W, so W is longer; the stage names, order and placement are our own stand-ins
+    (the real preset-L map defines its own), only the record kinds and shapes follow L's description."""
+    m = copy.deepcopy(m_map)
+    m["preset"] = "L"
+    m["version"] = 1
+    m["model"] = "synthetic L-shaped layout (made from the preset-M map's layout)"
+    m["sources"].pop("F", None)
+    m["stages"] = [st for st in m["stages"] if not any(t["src"] == "F" for t in st["tensors"])]
+    at = (m["sources"]["W"]["length"] // 2 + 31) // 32 * 32  # the first free element after M's block
+    enc0 = next(st for st in m["stages"] if st["stage"] == "enc0")
+    w = next(t for t in enc0["tensors"] if t["name"] == "W")
+    w.update(shape=[64, 128], base=at, axes=[lin(128), lin(1)])
+    at += 64 * 128
+    pre = [tensor("L0_W", [32, 20], "float32", "W", {"name": "fp8"}, at, [lin(20), lin(1)])]
+    at += 32 * 20
+    pre.append(tensor("L0_b", [32], "float32", "W", {"name": "f16"}, at, [lin(1)]))
+    at += 32
+    pre.append(tensor("L1_W", [32, 32], "float32", "W", {"name": "fp8"}, at, [lin(32), lin(1)]))
+    at += 32 * 32
+    pre.append(tensor("L1_b", [32], "float32", "W", {"name": "f16"}, at, [lin(1)]))
+    at += 32
+    block, at = _swin_block_c32(at)
+    pre += block
+    dec_block, at = _swin_block_c32(at)
+    i = next(n for n, st in enumerate(m["stages"]) if st["stage"] == "enc0")
+    m["stages"].insert(i, {"stage": "enc0_pre", "digest": "", "tensors": pre})
+    i = next(n for n, st in enumerate(m["stages"]) if st["stage"] == "dec0")
+    m["stages"].insert(i, {"stage": "dec0_pre", "digest": "", "tensors": dec_block})
+    m["sources"]["W"]["length"] = 2 * at
+    return m
+
+
 # ---------------------------------------------------------------- source F (spec 08 sections 4.3, 4.4; map version 4)
 
 def f_elements(rng, n=5):
