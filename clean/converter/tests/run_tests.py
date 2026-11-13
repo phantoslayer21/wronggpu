@@ -312,6 +312,45 @@ def test_preset_l(r):
         r.check("\"preset\": %r in a version-1 map: converter data damaged" % bad, code == EXIT["map_damaged"] and MSG["map_damaged"] in so, so)
 
 
+def test_l_shaped(r, m_map_path):
+    """Model L (#89): an L-shaped map made from the shipped preset-M map's layout (cases.l_shaped_map: the encoder's
+    output linear 64 x 128, a stage with two linears and a C = 32 Swin block before enc0, a C = 32 Swin block before
+    dec0; "preset": "L"), filled with our own random data like the shipped-like cases. Every tensor of every stage is
+    checked against the reference, at two placements of the block; a file without the block gives preset L's message."""
+    with open(m_map_path, "rb") as f:
+        lmap = cases.l_shaped_map(json.load(f))
+    mp_in = r.write("l-shaped/layout.json", lmap)
+    names = [st["stage"] for st in lmap["stages"]]
+    r.check("L-shaped map: enc0_pre before enc0, dec0_pre before dec0, no filter group",
+            names.index("enc0_pre") + 1 == names.index("enc0") and names.index("dec0_pre") + 1 == names.index("dec0") and "filter" not in names, names)
+    for seed, w_off in ((7, 4096), (8, 4096 + 2)):
+        t0 = time.time()
+        case = shipped_like_case(mp_in, seed=seed, w_offset=w_off)
+        label = "L-shaped(seed %d, W at %d)" % (seed, w_off)
+        dll = r.write("l-shaped/%d/fake.dll" % seed, case.file)
+        mp = r.write("l-shaped/%d/map.json" % seed, case.map)
+        out = r.path("l-shaped/%d/out" % seed, "x")[:-2]
+        code, so, se = r.run(mp, [dll], out)
+        r.check(label + ": exit 0", code == 0 and SUCCESS in so, so + se[-600:])
+        with open(mp, "rb") as f:
+            check_output(r, label, case, out, f.read())
+        r.check(label + ": offsets", logged_offsets(se) == case.placements, "%s vs %s" % (logged_offsets(se), case.placements))
+        r.check(label + ": every stage digest matches", ("all %d stage digests match" % len(case.map["stages"])) in se, se[-400:])
+        enc0 = dict((t[0], t) for t in case.expected["enc0"])
+        r.check(label + ": the encoder's output linear is 64 x 128 (float32)", len(enc0["W"][1]) == 64 * 128 * 4)
+        r.check(label + ": the C = 32 blocks have their 11 records",
+                [t[0] for t in case.expected["dec0_pre"]] == ["gamma1", "gamma2", "Wqk", "Wv", "B", "Wp", "bp", "W1", "b1", "W2", "b2"] and
+                len(case.expected["enc0_pre"]) == 15)
+        print("%s: %.1f s" % (label, time.time() - t0))
+    # the same layout against a file without its block: preset L's message (exit 12)
+    case = shipped_like_case(mp_in, seed=9)
+    mp = r.write("l-shaped/9/map.json", case.map)
+    other = shipped_like_case(mp_in, seed=10)  # another random block of the same layout: not this map's
+    code, so, se = r.run(mp, [r.write("l-shaped/9/other.dll", other.file)], r.path("l-shaped/9/out", "x")[:-2])
+    r.check("L-shaped map, a file without its block: exit 12 with preset L's message",
+            code == EXIT["no_preset_m"] and "This DLSS file has no preset-L model." in so, "code %d, out %r" % (code, so))
+
+
 def mutate(m, fn):
     m2 = copy.deepcopy(m)
     fn(m2)
@@ -1065,6 +1104,7 @@ def main():
         test_shipped_map_validates(r, args.map)
         if not args.quick:
             test_shipped_like(r, args.map)
+            test_l_shaped(r, args.map)
     else:
         print("note: shipped map not found at %s; skipping the layout tests" % args.map)
     if os.path.exists(args.kmap):
