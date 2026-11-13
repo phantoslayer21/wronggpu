@@ -398,8 +398,12 @@ def run_all(t, payload_dir):
         t.check("bundle: system info, logs, record, model source, events", all(n in names for n in (
             "system-info.txt", "windows-events.txt", "wronggpu-fsr.log", "wronggpu-fsr.ini", "wronggpu-runtime.log", "wronggpu-report.json",
             "crash/wronggpu-crash-20261005-1.txt", "install/install.record", "install/model-source.txt", "game-root/wronggpu-root.log")), str(names))
+        # 0.6.1: uninstall.exe has no converter data: it says the file is there and its size, never that the map is invalid
+        # (WrongGPU.exe's own /COLLECT verifies it: test_collect_logs, run by every build)
+        mbytes = os.path.getsize(t.model_file()) if os.path.isfile(t.model_file()) else -1
         t.check("system info: status, FSR DLL, model, GPU", "Game status: Validated" in info and "amd_fidelityfx_dx12.dll: WrongGPU" in info and "ffx_fsr3upscaler_x64.wronggpu-original.dll: the game's" in info and
-                "Model data: present and matching" in info and "GPU:" in info, info[:1500])
+                ("Model data: present, %d bytes, not verified here (uninstall.exe has no converter data; use Collect logs in the WrongGPU launcher to verify)" % mbytes) in info and
+                "GPU:" in info, info[:1500])
         t.check("structured diagnostics and support manifest included", "wronggpu-diagnostics.jsonl" in names and "support-manifest.json" in names, str(names))
         if "support-manifest.json" in names:
             support = json.loads(z.read("support-manifest.json"))
@@ -1478,6 +1482,68 @@ def optiscaler_package(t, name):
     return opti
 
 
+def test_collect_logs(t):
+    """0.6.1, run by every build (with or without the direct route: the release builds have none, and the case above that
+    collects through uninstall.exe is one of the direct route's): Collect logs through the game's uninstall.exe, which has
+    no converter data, says what it can see of the model file (present with its size, missing, unreadable), never that the
+    map is invalid; its version line has no empty fields and its file list has WrongGPU's runtime (the install record's
+    files). WrongGPU.exe's own /COLLECT still verifies the file (present and matching)."""
+    print("\n[collect logs] uninstall.exe and WrongGPU.exe: the Model data line, in every build")
+    t.clear_model()
+    root, b = cyberpunk(t, "collect-restorer", model=t.model.file)
+    rc = t.run("/DIR=" + root, "/FORCE", "/NOSCAN", *t.route)
+    t.check("collect logs: installed", rc == 0, "exit %d; %s" % (rc, t.logtext()[-400:]))
+    un = os.path.join(b, "wronggpu-setup", "uninstall.exe")
+    model = t.model_file()
+    tail = " bytes, not verified here (uninstall.exe has no converter data; use Collect logs in the WrongGPU launcher to verify)\r\n"
+
+    def info_of(exe, name):
+        z = os.path.join(t.work, name)
+        if os.path.exists(z):
+            os.remove(z)
+        code = t.run("/COLLECT", "/DIR=" + b, "/OUT=" + z, exe=exe)
+        text = zipfile.ZipFile(z).read("system-info.txt").decode("utf-8", "replace") if os.path.isfile(z) else ""
+        return code, text
+
+    def model_line(text):
+        at = text.find("Model data: ")
+        return text[at:text.find("\r\n", at) + 2] if at >= 0 else ""
+
+    rc, info = info_of(un, "collect-un.zip")
+    size = os.path.getsize(model) if os.path.isfile(model) else -1
+    t.check("uninstall.exe /COLLECT: \"Model data: present, <size> bytes, not verified here (...)\", never \"the embedded converter map is invalid\"",
+            rc == 0 and model_line(info) == "Model data: present, %d%s" % (size, tail) and "converter map is invalid" not in info, (rc, model_line(info)))
+    t.check("uninstall.exe /COLLECT: no empty build/payload fields; the files list has WrongGPU's runtime",
+            "(build , payload )" not in info and "(uninstall.exe of this version; build and payload not known here)" in info and
+            "\r\n    wronggpu_runtime.dll  " in info, info[:900])
+    rc, info2 = info_of(None, "collect-launcher.zip")
+    t.check("WrongGPU.exe /COLLECT: the model is verified (present and matching), as before", rc == 0 and model_line(info2).startswith("Model data: present and matching ("),
+            (rc, model_line(info2)))
+    if t.env.native:  # the model file open elsewhere without sharing: unreadable
+        import ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateFileW.restype = ctypes.c_void_p
+        k32.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+        k32.CloseHandle.argtypes = [ctypes.c_void_p]
+        handle = k32.CreateFileW(model, 0x80000000, 0, None, 3, 0, None)  # GENERIC_READ, no sharing, OPEN_EXISTING
+        try:
+            rc, info = info_of(un, "collect-un-locked.zip")
+        finally:
+            k32.CloseHandle(handle)
+        t.check("uninstall.exe /COLLECT, the model file locked: \"Model data: present but unreadable (<reason>)\"",
+                rc == 0 and model_line(info).startswith("Model data: present but unreadable (") and model_line(info).endswith(")\r\n"), (rc, model_line(info)))
+    else:
+        print("  (skipped: the locked model file needs native Windows)")
+    saved = read(model)
+    os.remove(model)
+    rc, info = info_of(un, "collect-un-missing.zip")
+    t.check("uninstall.exe /COLLECT, no model file: \"Model data: missing\"", rc == 0 and model_line(info) == "Model data: missing\r\n", (rc, model_line(info)))
+    write(model, saved)
+    rc = t.uninstall(b)
+    t.check("collect logs: uninstalled", rc == 0, "exit %d" % rc)
+    t.clear_model()
+
+
 def test_amd_provider(t):
     """0.4.5.1: the hosted front end lists AMD's FSR versions after WrongGPU's only when it can load an AMD DLL past
     OptiScaler's redirection (0.4.5 player report: FSR 4 gone from OptiScaler's list and the game's menu). The install
@@ -2083,6 +2149,7 @@ def main():
         test_game_exe(t)
         test_anticheat_scope(t)
         test_amd_provider(t)
+        test_collect_logs(t)  # (0.6.1: every build; the release builds have no direct route)
         test_asi_plugin(t, os.path.join(prep, "payload"))
         test_filter_group(t)
         if direct:

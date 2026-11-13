@@ -14,6 +14,7 @@
 #include "wg_core/detect.h"
 #include "wg_core/gamerules.h"
 #include "wg_core/launcher.h"
+#include "wg_core/logs.h"
 #include "wg_core/logtail.h"
 #include "wg_core/optiedition.h"
 #include "wg_core/pe.h"
@@ -44,6 +45,35 @@ string OptionsOf(const string& ini) { string v, s; IniGetFrontEnd(ini, "runtime_
 
 int main() {
     try {
+        // ---- 0.6.1: Collect logs in uninstall.exe (no converter data) never claims the map is invalid ----------------
+        {
+            const wstring cl = TempFolder() + L"-collect";
+            RemoveTree(cl);
+            EnsureDir(cl);
+            const wstring model = Join(cl, L"model.wgcm");
+            const wstring tail = L" bytes, not verified here (uninstall.exe has no converter data; use Collect logs in the WrongGPU launcher to verify)";
+            require(ModelDataUnverified(model) == L"missing", "uninstall.exe's Model data: missing");
+            const string bytes(1234, 'm');
+            WriteFileAtomic(model, bytes.data(), bytes.size());
+            require(ModelDataUnverified(model) == L"present, 1234" + tail, "uninstall.exe's Model data: present, its size, not verified here");
+            HANDLE lock = CreateFileW(model.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);  // no sharing: unreadable
+            const wstring locked = ModelDataUnverified(model);
+            if (lock != INVALID_HANDLE_VALUE) CloseHandle(lock);
+            require(lock != INVALID_HANDLE_VALUE && locked.rfind(L"present but unreadable (", 0) == 0 && locked.back() == L')' && locked.size() > 26,
+                    "uninstall.exe's Model data: present but unreadable (the reason)");
+            DeleteFileW(model.c_str());
+            EnsureDir(model);
+            require(ModelDataUnverified(model) == L"present but unreadable (a folder, not a file)", "uninstall.exe's Model data: a folder in its place");
+            // which process says what: uninstall.exe's table (as restore_main.cpp makes it) has no converter data; WrongGPU.exe's
+            // has (its lines are the 0.6.0 code, unchanged: the suite's collect comparison checks them byte for byte)
+            static const EmbeddedData restorer{nullptr, 0, 0, L"", 0, L"", 0, L"0.6.1"};
+            static const EmbeddedData launcherLike{nullptr, 0, 901, L"00", 902, L"00", 0, L"0.6.1", L"0.6.1", L"0.6.1"};
+            Context rc, lc;
+            rc.data = &restorer;
+            lc.data = &launcherLike;
+            require(!HasConverterData(rc, false) && !HasConverterData(rc, true) && HasConverterData(lc, false), "the converter data: uninstall.exe none, WrongGPU.exe its map");
+            RemoveTree(cl);
+        }
         // ---- validation -----------------------------------------------------------------------------------------
         string n; wstring why;
         const SettingDef* exec = FindSetting("executor");

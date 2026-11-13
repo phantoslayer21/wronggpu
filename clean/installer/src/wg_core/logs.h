@@ -15,6 +15,11 @@ bool SupportReadTail(const wstring& path, string& out, uint64_t limit, uint64_t&
 string SupportDriverRegistry();
 string SupportAdapters();
 Bundle CollectLogs(Context& ctx, const wstring& dirIn, const wstring& outZip, const SystemInfo& sys);
+// 0.6.1: whether this process carries the converter map (WrongGPU.exe does; uninstall.exe, the restorer, does not), and the
+// Model data line of a process without it: "missing", "present but unreadable (<reason>)", or "present, <size> bytes, not
+// verified here (uninstall.exe has no converter data; use Collect logs in the WrongGPU launcher to verify)".
+bool HasConverterData(Context& ctx, bool k);
+wstring ModelDataUnverified(const wstring& file);
 wstring DefaultBundlePath(const wstring& dir);
 wstring BundleMessage(const Bundle& b);
 }  // namespace wg

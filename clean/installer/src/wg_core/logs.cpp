@@ -221,6 +221,27 @@ string SupportAdapters() {
     }
     factory->Release(); return out + "]";
 }
+// 0.6.1: what a process without the converter data or the payload table (uninstall.exe, the restorer: wg_core without them)
+// can say truthfully; WrongGPU.exe, which embeds both, keeps its own lines byte for byte.
+bool HasConverterData(Context& ctx, bool k) { return ctx.data && MapResourceId(ctx, k) != 0; }
+wstring ModelDataUnverified(const wstring& file) {
+    if (!IsFile(file)) return IsDir(file) ? L"present but unreadable (a folder, not a file)" : L"missing";
+    HANDLE h = CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return L"present but unreadable (" + ErrText(GetLastError()) + L")";
+    LARGE_INTEGER size{};
+    char first = 0;
+    DWORD got = 0;
+    const bool sized = GetFileSizeEx(h, &size) != 0;
+    const DWORD sizeError = sized ? 0 : GetLastError();
+    const bool read = sized && ReadFile(h, &first, 1, &got, nullptr) != 0;
+    const DWORD readError = read ? 0 : GetLastError();
+    CloseHandle(h);
+    if (!sized) return L"present but unreadable (" + ErrText(sizeError) + L")";
+    if (!read) return L"present but unreadable (" + ErrText(readError) + L")";
+    return L"present, " + std::to_wstring(size.QuadPart) + L" bytes, not verified here (uninstall.exe has no converter data; use Collect logs in the WrongGPU "
+           L"launcher to verify)";
+}
+
 // Collects from the install folder (and the exe folder and game root, where some games write logs).
 Bundle CollectLogs(Context& ctx, const wstring& dirIn, const wstring& outZip, const SystemInfo& sys) {
     if (dirIn.empty() || !IsDir(dirIn)) Fail(L"Choose the game first: logs are collected from its folder.", EXIT_REFUSED);
@@ -280,7 +301,10 @@ Bundle CollectLogs(Context& ctx, const wstring& dirIn, const wstring& outZip, co
 
     // System information.
     wstring s = L"WrongGPU - log bundle (attach this file to your game report)\r\n";
-    s += L"Created: " + NowStamp(false) + L"\r\nInstaller version: " + wstring(ctx.data->version) + L" (build " + ctx.data->buildId + L", payload " + ctx.data->payloadName + L")\r\n";
+    if (*ctx.data->buildId)
+        s += L"Created: " + NowStamp(false) + L"\r\nInstaller version: " + wstring(ctx.data->version) + L" (build " + ctx.data->buildId + L", payload " + ctx.data->payloadName + L")\r\n";
+    else  // uninstall.exe: its own version; it carries no build name or payload (0.6.1: no empty fields)
+        s += L"Created: " + NowStamp(false) + L"\r\nInstaller version: " + wstring(ctx.data->version) + L" (uninstall.exe of this version; build and payload not known here)\r\n";
     s += L"Install folder: " + dir + L"\r\n";
     if (!exe.empty()) s += L"Game executable: " + exe + L" (file version " + FileVersion(exe) + L")\r\n";
     s += L"Game status: " + wstring(t.validated ? L"Validated" : L"Experimental (not validated yet)") + L"\r\n";
@@ -297,6 +321,10 @@ Bundle CollectLogs(Context& ctx, const wstring& dirIn, const wstring& outZip, co
     wstring why;
     // Collection must use the installed preset, independent of the wizard's default M choice.
     // Keep a private map so a concurrent conversion worker's map is never changed.
+    // 0.6.1: a process without the converter data (uninstall.exe) never claims the map is invalid: it says what it can see
+    if (!HasConverterData(ctx, reportK)) {
+        s += L"Model data: " + ModelDataUnverified(reportModelFile) + L"\r\n";
+    } else {
     DWORD reportMapSize = 0;
     const void* reportMapBytes = ResourceData(MapResourceId(ctx, reportK), reportMapSize);
     wgc::LoadedMap reportMap;
@@ -306,6 +334,7 @@ Bundle CollectLogs(Context& ctx, const wstring& dirIn, const wstring& outZip, co
     if (modelMatches) modelMatches = wgc::verify_model_file(*reportMap.map, std::filesystem::path(reportModelFile), reportWhy);
     else reportWhy = "the embedded converter map is invalid";
     s += L"Model data: " + (modelMatches ? L"present and matching (" + reportModelFile + L")" : L"not usable (" + FromUtf8(reportWhy) + L")") + L"\r\n";
+    }  // (WrongGPU.exe's lines above: unchanged, kept at their indentation so the diff shows it)
 #if WRONGGPU_PRESET_K
     s += L"Installed startup preset: " + wstring(reportK ? L"K" : L"M") + L"\r\n";
 #endif
@@ -336,6 +365,10 @@ Bundle CollectLogs(Context& ctx, const wstring& dirIn, const wstring& outZip, co
     std::vector<wstring> names{L"dxgi.dll", L"d3d12.dll", L"version.dll", L"winmm.dll", L"OptiScaler.ini", L"OptiScaler.dll", L"wronggpu_ffx_dx12.dll", kOptiSlotFrontEnd, L"wronggpu-amd-compare.dll", L"amd_fidelityfx_upscaler_dx12.dll"};
     for (auto& sl : kSlots) { names.push_back(sl.name); names.push_back(sl.original); }
     for (auto& f : *ctx.data) names.push_back(f.rel);
+    // 0.6.1: uninstall.exe has no payload table: the install record's files instead, so the list is not silently missing
+    // WrongGPU's runtime, plugins and text files (WrongGPU.exe's list: unchanged)
+    if (!ctx.data->count && installed)
+        for (auto& e : m.e) if (e.action == L"copy") names.push_back(e.rel);
     std::set<wstring> listed;
     string inventory = "["; bool firstInventory = true;
     for (auto& n : names) {
