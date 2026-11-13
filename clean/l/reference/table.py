@@ -37,18 +37,22 @@ TABLE = {
     # size: the pixel grid F, or the token grid F/2 after space_to_depth (2 x 2 pixels, sub-pixel p = dx + 2 dy,
     # channel = n p + i). Tensors are read from the stage named by "params" (default "enc0"). A linear's "acc" is the
     # rounding of bias + products before "out_round" ("relu_q8" = q8(max(0, .))). The last op is "project" (the 64 FP8
-    # features enc1 reads): running sum s = b, s = RN16(s + group) per channel group, clamp, FP8.
+    # features enc1 reads): running sum s = b, s = RN16(s + group) per channel group, clamp, FP8. out_round "none"
+    # after acc "f16" keeps the FP16 value (the block then starts from FP16, not FP8). A swin op's "border" names how
+    # window members outside the grid get their values: "mirror" (clean/reference/swin.py, about the map size),
+    # "input" (the per-pixel ops before the block are evaluated at those positions: the 20 values at the mirrored
+    # render position, the dither at the unmirrored one) or "coarse" (the token-grid mirror, sub-pixel kept).
     "enc_ops": (
-        {"op": "quant", "mode": "dither", "src": "values", "dst": "q"},                                   # I5
+        {"op": "quant", "mode": "dither", "src": "values", "dst": "q"},
         {"op": "linear", "src": "q", "dst": "x", "w": "Win1", "b": "bin1", "n_in": 20, "n_out": 32,
-         "acc": "f16", "out_round": "relu_q8"},                                                           # I11
+         "acc": "f16", "out_round": "relu_q8"},
         {"op": "linear", "src": "x", "dst": "x", "w": "Win2", "b": "bin2", "n_in": 32, "n_out": 32,
-         "acc": "f16", "out_round": "q8"},                                                                # I11
+         "acc": "f16", "out_round": "none"},
         {"op": "swin", "src": "x", "dst": "x", "params": "enc0_block", **C32_BLOCK, "offsets": "first",
-         "out_round": "q8"},                                                                              # I10, I6
+         "border": "input", "out_round": "q8"},                                                           # I6
         {"op": "space_to_depth", "src": "x", "dst": "z"},
         {"op": "project", "src": "z", "w": "W", "b": "b", "groups": (32, 32, 32, 32), "n_out": 64,
-         "clamp": 6.28125},                                                                               # I12
+         "clamp": 6.28125},
     ),
     # Coefficient decoder: ops on dec1's map ("features", [fh/2, fw/2, 64]). "dec_project": rows W [4, 32, 64] with
     # Model M's dec0 rounding (RN16 after each group of 32 input channels, then FP8), output [fh/2, fw/2, 4 x 32]
@@ -59,7 +63,7 @@ TABLE = {
          "out_round": "q8"},                                                                              # I13
         {"op": "depth_to_space", "src": "y", "dst": "p"},
         {"op": "swin", "src": "p", "dst": "p", "params": "dec0_block", **C32_BLOCK, "offsets": "second",
-         "out_round": "q8"},                                                                              # I10, I14
+         "border": "coarse", "out_round": "q8"},                                                          # I6, I14
         {"op": "pick", "src": "p", "values": DEC0_VALUES},                                                # I14
     ),
     "dec_pixel": "m",                                                                                     # I8
@@ -67,20 +71,17 @@ TABLE = {
     # Reconstruction variants and the rule that picks one per frame from the render and output sizes ("rule" names
     # the comparison, "ratio" its factor). Only the 3/2 form (D = floor((3 O + 1) / 2)) exists in WrongGPU so far.
     "recon": {"rule": "both_axes_at_least", "ratio": 3, "variants": ("3/2", "3/1")},                    # I7
-    # Window offsets (ox, oy) of an L block for frame parity 0 and 1; the blocks run on the padded grid F.
-    "window_offsets": {"first": ((2, 2), (0, 2)), "second": ((0, 0), (2, 0))},                          # I10
+    # Window offsets (ox, oy) of an L block for frame parity 0 and 1, in pixels; the blocks run on the padded grid F
+    # and keep every grid position's output.
+    "window_offsets": {"first": ((2, 2), (0, 2)), "second": ((0, 0), (2, 0))},
     # Per-block constants; a block's own entry (key = its params stage) wins over "default".
     "consts": {"default": dict(M_BLOCK_CONSTS)},                                                          # I6
 }
 
 PROVISIONAL = {
-    "I5": "enc_ops quant mode (dither table or plain FP8 rounding)",
     "I6": "consts of the width-32 blocks",
     "I7": "recon: the 3/1 form and the exact rule",
     "I8": "dec_pixel (coefficient functions as Model M's), post_variant",
-    "I10": "window_offsets of the width-32 blocks, and their grid (F)",
-    "I11": "acc / out_round of the input linears",
-    "I12": "project clamp and group structure",
     "I13": "dec_project rounding",
     "I14": "pick value positions and the rounding of the decoder block's output",
 }
@@ -104,6 +105,14 @@ def block_consts(t, name):
 
 def block_offset(t, kind, parity):
     return tuple(t["window_offsets"][kind][int(parity) & 1])
+
+
+BORDERS = ("mirror", "input", "coarse")
+
+
+def block_halo(t, kind):
+    """Pixels beyond the grid that a block's windows reach (grid sides multiples of the window): the largest offset."""
+    return max(max(o) for o in t["window_offsets"][kind])
 
 
 # ---- parameter shapes -----------------------------------------------------------------------------------------------
@@ -177,6 +186,13 @@ def _plan(ops, maps, what, last):
         elif k == "swin":
             if src[1] != op["C"]:
                 raise ValueError(f"swin: input has {src[1]} channels, block width {op['C']}")
+            border = op.get("border", "mirror")
+            if border not in BORDERS:
+                raise ValueError(f"swin: unknown border {border!r}")
+            if border != "mirror" and src[0] != "pixel":
+                raise ValueError(f"swin: border {border!r} needs a pixel-level map")
+            if border == "input" and any(p[0] not in ("quant", "linear", "select", "concat") for p in plan):
+                raise ValueError("swin: border 'input' needs only per-pixel ops before the block")
             out = src
         elif k == "concat":
             parts = [maps[s] for s in op["srcs"]]
