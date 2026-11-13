@@ -134,6 +134,16 @@ bool PortableLauncherUsesSharedData();
 void NotePortableLauncher(const wstring& exe);
 void UnregisterUninstall(const Record& m);
 size_t RemoveRuntimeFiles(const wstring& dir, const wstring& exeDir, const Record& m, bool settings);
+// The shared folder (appData) is moved aside, to a free name made unique with a process-wide sequence number, and deleted by a
+// hidden cmd.exe. The move: a sharing violation (32) or an access denied (5: a scanner holding a file in the folder) is tried
+// again, at most kCleanupMoveTries times (waits from kCleanupMoveFirstWaitMs doubling: 50, 100, 200, 400 ms), each wait logged
+// with the error; any other error, or the last try, leaves the folder in place ("Shared data cleanup deferred ... (error N: ...)").
+constexpr int kCleanupMoveTries = 5;
+constexpr unsigned long kCleanupMoveFirstWaitMs = 50;
+// Test seam: the call StartCleanup moves the folder with (MoveFileExW when unset). The tests put in one that fails with
+// a chosen error for the first tries; nullptr puts MoveFileExW back.
+using CleanupMoveFn = BOOL (WINAPI*)(LPCWSTR from, LPCWSTR to, DWORD flags);
+void SetCleanupMoveForTest(CleanupMoveFn fn);
 void StartCleanup(Context& ctx, const wstring& state, const wstring& self, const wstring& appData);
 std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool failedInstall, bool keepState);
 // rc6 L4: the player's things in the state folder that a failed install or update never removes when they were there before
