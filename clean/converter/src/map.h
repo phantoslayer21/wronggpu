@@ -221,7 +221,7 @@ struct Perm {
 // model of that preset. A map names its preset in the optional top-level field "preset"; a map without it gets the preset
 // its version had before the field existed (versions 1 and 4: M; 2 and 3: K; 5: F), so the shipped maps load as before.
 struct PresetInfo {
-    const char* name;              // "M", "K", "F"
+    const char* name;              // "M", "K", "F", "L"
     unsigned versions;             // bit v set: map version v is allowed for this preset
     const char* no_model_message;  // api.cpp kMsgNoPreset*: the DLL has no model of this preset
     bool allows(int version) const { return version >= 0 && version < 32 && (versions >> version & 1u) != 0; }
@@ -229,7 +229,8 @@ struct PresetInfo {
 // The known presets, in a fixed order; find_preset: by name (exact, upper case), nullptr when unknown.
 const std::vector<PresetInfo>& known_presets();
 const PresetInfo* find_preset(const std::string& name);
-// The preset a map without a "preset" field has: the one its version always meant ("" for no known version).
+// The preset a map without a "preset" field has: the one its version always meant ("" for no known version). The first
+// row of known_presets that allows the version: M before L, so a map without the field is never preset L.
 std::string preset_for_version(int version);
 
 struct Map {

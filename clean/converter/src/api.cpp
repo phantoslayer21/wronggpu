@@ -23,6 +23,9 @@ const char* const kMsgNoPresetK = "This DLSS file has no preset-K model. Version
 // Spec 57 section 8.
 const char* const kMsgNoPresetF =
     "This DLSS file has no preset-F (Ray Reconstruction) model. Version 310.7 or newer is needed.";
+// Model L (#89). The DLSS version named is provisional: the first version known to carry a preset-L model; one line to
+// change when the first shipping version is confirmed.
+const char* const kMsgNoPresetL = "This DLSS file has no preset-L model. Version 310.9 or newer is needed.";
 const char* const kMsgUnsupported = "This DLSS build is not supported yet (model data found, but other parts differ).";
 const char* const kMsgMapDamaged = "Installer error: the converter data is damaged. Please reinstall WrongGPU.";
 const char* const kMsgMapDoesNotFit =
