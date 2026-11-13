@@ -236,6 +236,90 @@ def mini_case(seed=3, version=None):
     return case
 
 
+# ---------------------------------------------------------------- two presets in one file (Model L, #89)
+
+def _pair_map(rng, preset, label, w_halves, extra_stage):
+    """One preset's synthetic map and sources: W (f16le), D (u16le), K (keyed pair), and for preset L one stage more
+    (a stand-in for its extra blocks: an fp8 matrix, a bias, a scaled norm scale)."""
+    w = bytes(random_finite_halves(rng, w_halves, max_exp_field=0x14))
+    d = bytes(rng.randbytes(2048))
+    k = struct.pack("<ff", rng.choice([0.5, 0.75, 1.25]), rng.choice([-1.5, -2.0, 3.0]))
+    key = sha256(label.encode() + w)
+    m = {
+        "format": "wronggpu-converter-map",
+        "version": 1,
+        "model": "synthetic preset-%s case" % preset,
+        "channel_order": "natural",
+        "sources": {
+            "W": source_entry("W", "fake preset-%s parameter block" % preset, "f16le", w),
+            "D": source_entry("D", "fake dither table", "u16le", d),
+            "K": source_entry("K", "fake constants", "u32le", k, locate="pair", gaps=[12], keyed=True, key=key),
+        },
+        "key": {"label": label, "from": "W"},
+        "perms": {},
+        "stages": [
+            {"stage": "enc0", "digest": "", "tensors": [
+                tensor("W", [8, 12], "float32", "W", {"name": "fp8"}, 0, [lin(12), lin(1)]),
+                tensor("b", [8], "float32", "W", {"name": "f16"}, 96, [lin(1)]),
+                tensor("T", [4, 16, 16], "uint8", "D", {"name": "u16_shr", "shift": 9}, 0, [lin(256), lin(16), lin(1)]),
+                tensor("sigma1", [1], "float32", "K", {"name": "u32_as_f32"}, 0, [lin(0)]),
+                tensor("sigma2", [1], "float32", "K", {"name": "u32_as_f32"}, 1, [lin(0)]),
+            ]},
+            {"stage": "enc1", "digest": "", "tensors": [
+                tensor("gamma1", [16], "float32", "W", {"name": "f16_scaled", "mul": SQRT96, "div": SQRT96}, 200, [lin(1)]),
+            ]},
+        ],
+    }
+    if extra_stage:
+        m["stages"].insert(0, {"stage": "inenc_extra", "digest": "", "tensors": [
+            tensor("W1", [32, 20], "float32", "W", {"name": "fp8"}, 1200, [lin(20), lin(1)]),
+            tensor("b1", [32], "float32", "W", {"name": "f16"}, 1840, [lin(1)]),
+            tensor("gamma", [32], "float32", "W", {"name": "f16_scaled", "mul": SQRT8, "div": "0x3f800000"}, 1872, [lin(1)]),
+        ]})
+    return m, {"W": w, "D": d, "K": k}
+
+
+def preset_pair_case(seed=31):
+    """A synthetic library file with two presets' parameter blocks: preset L's W block directly before preset M's, each
+    with its own D and K elsewhere, and maps for both (the L map names its preset; the M map has no "preset" field, as
+    the shipped one). Returns (case_l, case_m, file_l_only, file_m_only); each case's file holds both blocks. Our own
+    sizes and bytes, nothing taken from a real file."""
+    rng = random.Random(seed)
+    ml, sl = _pair_map(rng, "L", "pair label L", 2304, True)
+    ml["preset"] = "L"
+    mm, sm = _pair_map(rng, "M", "pair label M", 2048, False)
+
+    def layout(with_l, with_m):
+        buf = bytearray(rng_file.randbytes(96 * 1024))
+        at = {}
+        if with_l:
+            at["L"] = {"W": 1600, "D": 40_000, "K": 60_001}
+        if with_m:
+            at["M"] = {"W": 1600 + len(sl["W"]), "D": 50_000 + 6, "K": 70_003}  # M's W directly after L's
+        for p, src in (("L", sl), ("M", sm)):
+            if p in at:
+                place(buf, at[p]["W"], src["W"])
+                place(buf, at[p]["D"], src["D"])
+                place(buf, at[p]["K"], src["K"][:4])
+                place(buf, at[p]["K"] + 12, src["K"][4:])
+        return bytes(buf), at
+
+    rng_file = random.Random(seed + 1)
+    both, at = layout(True, True)
+    l_only, _ = layout(True, False)
+    m_only, _ = layout(False, True)
+    out = []
+    for name, m, s in (("pair-L", ml, sl), ("pair-M", mm, sm)):
+        c = Case(name)
+        c.file = both
+        c.map = m
+        c.sources = s
+        c.expected, c.key = finalize_map(m, s)
+        c.placements = at[name[-1]]
+        out.append(c)
+    return out[0], out[1], l_only, m_only
+
+
 # ---------------------------------------------------------------- source F (spec 08 sections 4.3, 4.4; map version 4)
 
 def f_elements(rng, n=5):

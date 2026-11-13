@@ -267,6 +267,51 @@ def test_shipped_map_validates(r, shipped_map):
     r.check("real map: nothing written", not os.path.exists(os.path.join(out, "model.wgcm")))
 
 
+def test_preset_l(r):
+    """Model L (#89): a map that names preset L ("preset": "L", map version 1) next to a preset-M map, both reading one
+    synthetic library file in which L's parameter block lies directly before M's. Each map converts its own block, and
+    only it; a file without a preset's block fails with that preset's message (exit 12)."""
+    case_l, case_m, l_only, m_only = cases.preset_pair_case()
+    lp = r.write("preset-l/map-L.json", case_l.map)
+    mp = r.write("preset-l/map-M.json", case_m.map)
+    both = r.write("preset-l/both.dll", case_l.file)
+    lo = r.write("preset-l/l-only.dll", l_only)
+    mo = r.write("preset-l/m-only.dll", m_only)
+    for label, c, p in (("preset L", case_l, lp), ("preset M next to L", case_m, mp)):
+        out = r.path("preset-l", "out-" + c.name, "x")[:-2]
+        code, so, se = r.run(p, [both], out)
+        r.check(label + ": exit 0", code == 0 and SUCCESS in so, so + se[-600:])
+        with open(p, "rb") as f:
+            check_output(r, label, c, out, f.read())
+        r.check(label + ": W found where it was placed", ("source W at offset %d " % c.placements["W"]) in se, se[-800:])
+    r.check("preset L: its extra stage is in the L output only",
+            "inenc_extra" in case_l.expected and "inenc_extra" not in case_m.expected and
+            os.path.isdir(os.path.join(r.work, "preset-l", "out-pair-L", "raw", "inenc_extra")) and
+            not os.path.exists(os.path.join(r.work, "preset-l", "out-pair-M", "raw", "inenc_extra")))
+    msg_l = "This DLSS file has no preset-L model. Version 310.9 or newer is needed."
+    for label, p, f, want in (("preset-L map, a file with only preset M's block", lp, mo, msg_l),
+                              ("preset-M map, a file with only preset L's block", mp, lo, MSG["no_preset_m"])):
+        code, so, se = r.run(p, [f], r.path("preset-l", "out-fail", "x")[:-2])
+        r.check(label + ": exit 12 with that preset's message", code == EXIT["no_preset_m"] and want in so, "code %d, out %r" % (code, so))
+    # the preset name decides only the message: the same L map without its field reads as preset M, and converts the same
+    plain = copy.deepcopy(case_l.map)
+    del plain["preset"]
+    pp = r.write("preset-l/map-L-no-field.json", plain)
+    code, so, se = r.run(pp, [mo], r.path("preset-l", "out-fail2", "x")[:-2])
+    r.check("the L map without its \"preset\" field: read as preset M (its message)", code == 12 and MSG["no_preset_m"] in so, so)
+    out = r.path("preset-l", "out-no-field", "x")[:-2]
+    code, so, se = r.run(pp, [both], out)
+    r.check("...and it converts the same tensors", code == 0, so + se[-400:])
+    with open(pp, "rb") as f:
+        check_output(r, "L map without the field", case_l, out, f.read())
+    # a preset name that does not fit the map version, or is not known: converter data damaged, before any file is read
+    for bad in ("K", "F", "X", "l"):
+        m2 = copy.deepcopy(case_l.map)
+        m2["preset"] = bad
+        code, so, se = r.run(r.write("preset-l/bad-%s.json" % bad, m2), [both], r.path("preset-l", "out-bad", "x")[:-2])
+        r.check("\"preset\": %r in a version-1 map: converter data damaged" % bad, code == EXIT["map_damaged"] and MSG["map_damaged"] in so, so)
+
+
 def mutate(m, fn):
     m2 = copy.deepcopy(m)
     fn(m2)
@@ -1013,6 +1058,7 @@ def main():
     r = Runner(os.path.abspath(args.exe), os.path.abspath(args.work))
     t0 = time.time()
     test_errors(r)
+    test_preset_l(r)
     test_filter(r, args.t7)
     test_k_errors(r)
     if os.path.exists(args.map):

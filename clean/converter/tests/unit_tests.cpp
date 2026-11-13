@@ -600,7 +600,11 @@ static void test_api_files(const fs::path& work) {
     CHECK(preset_for_version(1) == "M" && preset_for_version(4) == "M" && preset_for_version(2) == "K" && preset_for_version(3) == "K" &&
           preset_for_version(5) == "F" && preset_for_version(0).empty() && preset_for_version(6).empty());
     CHECK(find_preset("M") && find_preset("K") && find_preset("F") && !find_preset("m") && !find_preset("") && !find_preset("X") &&
-          known_presets().size() == 3);
+          known_presets().size() == 4);
+    // preset L (#89): the map versions of preset M, its own message; never the preset of a map without the field
+    CHECK(find_preset("L") && find_preset("L")->allows(1) && find_preset("L")->allows(4) && !find_preset("L")->allows(2) &&
+          !find_preset("L")->allows(3) && !find_preset("L")->allows(5) && std::string(find_preset("L")->no_model_message) == kMsgNoPresetL &&
+          std::string(kMsgNoPresetL).find("preset-L") != std::string::npos);
     CHECK(std::string(find_preset("M")->no_model_message) == kMsgNoPresetM && std::string(find_preset("K")->no_model_message) == kMsgNoPresetK &&
           std::string(find_preset("F")->no_model_message) == kMsgNoPresetF);
     {
@@ -617,7 +621,12 @@ static void test_api_files(const fs::path& work) {
         CHECK(load_map_bytes(with_preset(u.map_v4, "4", "\"M\""), pm4, sink).code == kOk && pm4.map && pm4.map->preset_info() == find_preset("M"));
         // the same map bytes with and without "preset":"M" describe the same tensors (only the file hash differs)
         CHECK(pm4.map && pm4.map->stages.size() == m4.map->stages.size() && pm4.map->sources.size() == m4.map->sources.size());
-        for (const char* bad : {"\"K\"", "\"F\"", "\"X\"", "\"m\"", "\"\"", "7", "null"}) {
+        LoadedMap lm1, lm4;
+        CHECK(load_map_bytes(with_preset(u.map_v1, "1", "\"L\""), lm1, sink).code == kOk && lm1.map && lm1.map->preset_name == "L" &&
+              lm1.map->preset() == 'L' && lm1.map->preset_info() == find_preset("L"));
+        CHECK(load_map_bytes(with_preset(u.map_v4, "4", "\"L\""), lm4, sink).code == kOk && lm4.map && lm4.map->preset_name == "L" &&
+              lm4.map->stages.size() == m4.map->stages.size());
+        for (const char* bad : {"\"K\"", "\"F\"", "\"X\"", "\"m\"", "\"l\"", "\"\"", "7", "null"}) {
             LoadedMap bm;
             const Result r = load_map_bytes(with_preset(u.map_v1, "1", bad), bm, sink);
             if (r.code != kMapDamaged) std::printf("preset field %s\n", bad);

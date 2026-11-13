@@ -1378,6 +1378,9 @@ const std::vector<PresetInfo>& known_presets() {
         {"M", (1u << 1) | (1u << 4), kMsgNoPresetM},  // spec 08 (version 4 adds the source F)
         {"K", (1u << 2) | (1u << 3), kMsgNoPresetK},  // spec 48
         {"F", 1u << 5, kMsgNoPresetF},                // spec 57
+        // Model L (#89): the same record kinds as preset M's map (no new element format, op or source kind), so the
+        // same map versions; its parameters are a block of their own in the same library file, found by its own hashes
+        {"L", (1u << 1) | (1u << 4), kMsgNoPresetL},
     };
     return presets;
 }
