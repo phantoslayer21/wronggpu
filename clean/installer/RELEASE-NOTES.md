@@ -2,9 +2,9 @@
 
 Download **WrongGPU-0.6.1.zip** from the release page and extract it, then run **WrongGPU-0.6.1.exe** (see Quick start).
 
-WrongGPU 0.6.1 is a bug-fix release for 0.6.0. It fixes a video-memory leak and a crash of the Ray Reconstruction
-plugin, a Model M start failure under Proton, and several launcher problems with other mods. If you use 0.6.0, update
-your games with the launcher (each game's page offers **Update**).
+WrongGPU 0.6.1 is a bug-fix release for 0.6.0. It fixes a video-memory leak and a crash in the Ray Reconstruction
+plugin, and a Model M start failure under Proton. If you use 0.6.0, update your games with the launcher (each game's
+page offers **Update**).
 
 **Still a work in progress.** WrongGPU is still being worked on, and 0.6.1 is a pre-release. In some games or scenes
 you may still see visual bugs, such as artifacts or flicker. If you do, we'd like to hear about it: on the game's page
@@ -25,24 +25,12 @@ scene, your settings) and a screenshot. Every report helps us fix it.
   rest of WrongGPU, and needs no `msvcp140.dll` (#9).
 - **Model M under Proton:** one of WrongGPU's small helper shaders used a keyword that Wine's shader compiler rejects,
   so Model M could not start under Proton. The keyword is gone (it was not needed). Model M under Proton also needs a fix
-  in vkd3d-proton's shader translator; see Discussion #10 for the state of that (#7).
+  in vkd3d-proton's shader translator; see Discussion #10 for the state of that (#7). We have not tested Model M under
+  Proton ourselves.
 - **Model M's driver check at start is stricter:** it now tells apart drivers or translation layers that lay out the
   matrix data differently, instead of passing them (#14).
 - **Collect logs from a game's uninstaller** (Apps & features, **Modify**) no longer reports valid model data as
   invalid: it says the data is not verified there and points to Collect logs in the launcher (#24).
-
-### Works better next to other mods
-- **Other OptiScaler setups:** when a game already has an OptiScaler setup from another source, the launcher no longer
-  takes it over or removes its files. Repair and Update ask before they move another setup's files aside, and an
-  uninstall removes a changed file only when it is one of WrongGPU's own releases (#23).
-- **Two Ray Reconstruction plugins:** if a game already has another Ray Reconstruction plugin active, WrongGPU's plugin
-  stays off and writes one line saying why to `wronggpu-rr.log` (the game page's **Last run** shows it). Model M is
-  not affected. To use WrongGPU's Ray Reconstruction there anyway, set `rr_other_plugin = take` in `wronggpu-rr.ini`
-  next to the game's exe (#22).
-- **Ignore list for the converter:** another program's installer can list the DLSS files it placed in a game, and the
-  launcher's converter then never uses them; WrongGPU converts only the files that came with your own games. The list
-  is `%LOCALAPPDATA%\WrongGPU\ignore-files.txt`; its format is in the launcher's README on GitHub. An empty list, or
-  none, changes nothing, and the uninstalls keep it (#21).
 
 ### Also changed
 - The launcher reads the developer-only HIP runtime setting only in test builds, so a setting left on a PC can't
@@ -127,7 +115,8 @@ For players coming from 0.4.5, in short (the 0.6.0 release page has the full lis
 
 ## Tested games
 Tested on a Radeon RX 9070 XT. "Ray Reconstruction" means WrongGPU's Ray Reconstruction ran in the game; Model M means
-super resolution only. 0.6.1 was tested in Cyberpunk 2077; the other results are from 0.6.0.
+super resolution only. [COMPATIBILITY.md](https://github.com/phantoslayer21/wronggpu/blob/main/COMPATIBILITY.md) says
+which WrongGPU version each result comes from.
 - **Cyberpunk 2077**: Ray Reconstruction and Model M.
 - **RESIDENT EVIL requiem** (experimental): Ray Reconstruction when the game's **Ray Tracing** setting is **Path
   Tracing** and its upscaler is **DLSS**. Needs your own REFramework (see Known issues).
@@ -168,8 +157,8 @@ ray-traced reflections off. We don't recommend it. To try it anyway:
 The exact launch option is on the release page.
 
 ## Requirements
-- Windows 10 or 11, a Radeon RX 9000-series graphics card (RX 9070 series; RX 9060 XT supported, not yet tested), a
-  recent AMD driver.
+- Windows 10 or 11, a Radeon RX 9000-series graphics card (RX 9070 series; RX 9060 XT and RX 9060 supported, not yet
+  tested), a recent AMD driver.
 - **No AMD HIP runtime needed:** Model M runs on Direct3D 12. HIP is only used for the optional sparkle guard.
 - An internet connection the first time, for the WrongGPU edition of OptiScaler, which the launcher downloads itself
   (offline you can choose an OptiScaler download yourself, in Settings).
