@@ -46,7 +46,7 @@ requiem needs REFramework, which you install yourself.
 | Game | Model M | Ray Reconstruction |
 |---|---|---|
 | Cyberpunk 2077 | yes | yes (main test game) |
-| Borderlands 4 | yes | yes, with the Engine.ini setting |
+| Borderlands 4 | yes (tested with 0.4.5) | yes, with the Engine.ini setting |
 | RESIDENT EVIL requiem | yes | yes, experimental (needs your own REFramework) |
 | Hogwarts Legacy | yes | not available since the game's November 2026 update |
 | Marvel's Spider-Man 2 | yes (choose FSR in the game) | experimental opt-in, not recommended |
@@ -143,7 +143,8 @@ WrongGPU is developed in the open by its community. Ways to help:
 
 Every pull request: the clean-room statement and a `Signed-off-by` line on each commit ([CONTRIBUTING.md](CONTRIBUTING.md)),
 passing CI (licence, line endings, CPU builds and tests on Windows), then a maintainer's clean-room scan, review and,
-for kernel or runtime changes, a test on a Radeon RX 9000-series card before the owner merges.
+when the change touches kernels, the runtime, the front end or the Ray Reconstruction plugin, a test on a Radeon
+RX 9000-series card before the owner merges.
 
 ## Licence
 

@@ -37,7 +37,8 @@ def run_one(root, rel, timeout):
         r = subprocess.run(args, cwd=root, capture_output=True, text=True, timeout=timeout)
         out, rc = r.stdout + r.stderr, r.returncode
     except subprocess.TimeoutExpired as e:
-        out = (e.stdout if isinstance(e.stdout, str) else '') + (e.stderr if isinstance(e.stderr, str) else '')
+        # TimeoutExpired carries the captured output as bytes, even with text=True
+        out = ''.join(s.decode(errors='replace') if isinstance(s, bytes) else (s or '') for s in (e.stdout, e.stderr))
         rc = 'timeout'
     ran = re.findall(r'Ran (\d+) tests?', out)
     skipped = re.findall(r'skipped=(\d+)', out)

@@ -33,7 +33,8 @@ a release is a separate decision. Nobody else uploads release packages or create
 
 - The notes live in the repository (`clean/installer/RELEASE-NOTES.md`) and go through a pull request like any other
   change.
-- They list the **SHA-256 of every file of the package** (the zip and the files in it), so a download can be checked.
+- They point to the release page, which lists the **SHA-256 of the zip**, and to `SHA256SUMS.txt` inside the zip, which
+  lists the SHA-256 of every file in it, so a download can be checked.
 - **The number rule:** every figure in the release notes, the release page and the README (timings, quality figures,
   version requirements, hardware lists) is traced to its measurement record: which game, resolution, mode, WrongGPU
   build and log or result file. A figure without a record is left out. Before publishing, someone who did not write
@@ -45,7 +46,7 @@ a release is a separate decision. Nobody else uploads release packages or create
 - Uploaded to the Releases page only on the owner's order: the package (`WrongGPU-<version>.zip`), its SHA-256 file
   and the release notes, attached to the tag of step 1.
 - Pre-releases are marked as such.
-- After publishing, the downloaded package is checked against the SHA-256 values in the notes.
+- After publishing, the downloaded package is checked against the SHA-256 on the release page and in `SHA256SUMS.txt`.
 
 ## Licence of releases
 

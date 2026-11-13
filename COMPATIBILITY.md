@@ -11,7 +11,7 @@ Tested on a Radeon RX 9070 XT.
 | Game | Model M | Ray Reconstruction | Notes |
 | --- | --- | --- | --- |
 | **Cyberpunk 2077** | Yes | Yes | Our main test game. |
-| **Borderlands 4** | Yes (tested with 0.4.5) | Yes | Ray Reconstruction needs one Engine.ini setting, and the game removes it on every start. After the install the launcher asks: **Fix it for me** adds the setting and makes the file read-only (uninstalling WrongGPU undoes both); **Show me how** gives the steps. The game creates Ray Reconstruction itself, so it needs the WrongGPU edition of OptiScaler. About 1.6 ms a frame at 1080p output (from 642x361). |
+| **Borderlands 4** | Yes (tested with 0.4.5) | Yes | Ray Reconstruction needs one Engine.ini setting, and the game removes it on every start. After the install the launcher asks: **Fix it for me** adds the setting and makes the file read-only (uninstalling WrongGPU undoes both); **Show me how** gives the steps. The game creates Ray Reconstruction itself, so it needs the WrongGPU edition of OptiScaler. About 1.6 ms a frame at 1080p output (from 642x361): 1.589 ms in `clean/installer/tests/logs/bl4-rr-only.log`. |
 | **RESIDENT EVIL requiem** | Yes | Yes, experimental | Needs **REFramework**, installed by you first: the game blocks OptiScaler without it. WrongGPU never installs, downloads or replaces REFramework; the launcher tells you when it is missing. Ray Reconstruction runs when the game's **Ray Tracing** setting is **Path Tracing** and its upscaler is **DLSS**. The game prepares Ray Reconstruction at its first start, not in the launcher. Very occasionally a single frame comes out far too bright or too dark at a scene change (see Known limits). |
 | **Hogwarts Legacy** | Yes | Not available | Since the game's November 2026 update its Ray Reconstruction option is greyed out and WrongGPU's Ray Reconstruction isn't available, so the launcher doesn't offer it there. Ray Reconstruction worked before that update. |
 | **Marvel's Spider-Man 2** | Yes (choose **FSR** as the game's upscaler: its menu doesn't offer DLSS) | Experimental opt-in, not recommended | With Ray Reconstruction the game often freezes the GPU or crashes. The release notes explain the opt-in for those who want to try it anyway. |
@@ -25,7 +25,9 @@ Tested on a Radeon RX 9070 XT.
 
 A successful run does not cover every game build, graphics setting, quality mode or frame-generation configuration.
 Results from earlier WrongGPU versions are labelled as such. The Borderlands 4 figure is Ray Reconstruction's own GPU
-time per frame from WrongGPU's log of a test run.
+time per frame, from `clean/installer/tests/logs/bl4-rr-only.log`, a trimmed excerpt of WrongGPU's plugin log from a
+test run (about 1.59 ms per frame, render 642x361, output 1920x1080). The Ray Reconstruction mode and the WrongGPU
+version of that run are not recorded in the excerpt.
 
 ## Requirements for another game
 

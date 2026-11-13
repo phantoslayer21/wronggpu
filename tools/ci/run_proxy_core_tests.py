@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: MIT
 """Run the Ray Reconstruction plugin's CPU test executables (CI, and locally), as clean/rr_f/proxy/tools/build.py runs
-them, after `python clean/rr_f/proxy/tools/build.py --out <dir> --no-tests`. The plugin's other test executables create
-a Direct3D 12 device and are not run here (BUILDING.md, section 7).
+them, after `python clean/rr_f/proxy/tools/build.py --out <dir> --no-tests`. That build still builds and runs the
+WARP-based probe and hook tests (build.py: the probe test's fake game host and the hook tests' WARP sequence); it skips
+only the Python unit tests and the core executables, and this script runs the core executables. The plugin's other
+test executables create a Direct3D 12 device and are not run here (BUILDING.md, section 7).
 Usage (from the repository root): python tools/ci/run_proxy_core_tests.py <out dir of the plugin build>
 """
 import glob

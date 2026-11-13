@@ -9,8 +9,8 @@ change with what contributors pick up and what testing on real hardware shows. D
 
 - **Preset K** back as a second Model choice (the code is in `clean/k`; it is built and tested, but not offered in
   0.6.0).
-- **Hogwarts Legacy:** Ray Reconstruction again after the game's November 2026 update changed its game-interface
-  integration.
+- **Hogwarts Legacy:** Ray Reconstruction again. Its Ray Reconstruction option has been greyed out since the game's
+  November 2026 update; the cause is not yet known.
 - **RESIDENT EVIL requiem:** find the cause of the rare single over- or under-exposed frame at a scene change.
 - Test tooling: the Ray Reconstruction end-to-end test (`clean/rr_f/runtime/tests/e2e.py`) should set the compile-wait
   setting it needs by itself; tidy the remaining compiler warnings of the launcher build.

@@ -11,7 +11,8 @@ a good first task is [building from a fresh clone](https://github.com/phantoslay
 1. You open a pull request against `main`, with the clean-room statement (first pull request) and every commit signed
    off (see below). The pull-request template has checkboxes for both.
 2. **CI** runs on a Windows runner (`.github/workflows/ci.yml`); it must pass:
-   - licence check: [REUSE](https://reuse.software) lint (every file has its licence and copyright information);
+   - licence check: [REUSE](https://reuse.software) lint (the licence and copyright data in `REUSE.toml` is valid and
+     covers every file);
    - line endings: files are stored exactly as committed (`.gitattributes` is `* -text`; no CR LF);
    - CPU builds and tests: the converter, the shared settings, the FSR front end, the launcher core and the Ray
      Reconstruction plugin with their CPU tests, and the CPU Python test set (`tools/ci/run_python_tests.py`).
@@ -68,8 +69,9 @@ them, game files, screenshots or frame captures from games, or binaries.
 ## Every change
 
 - An SPDX licence line for MIT (`SPDX-License-Identifier` followed by `MIT`, as at the top of every source file) in
-  every new source file; files that cannot carry one, such as JSON, are covered in `REUSE.toml`. CI's REUSE lint fails
-  otherwise.
+  every new source file; files that cannot carry one, such as JSON, are covered in `REUSE.toml`. The `**` rule in
+  `REUSE.toml` already covers every file, so CI's REUSE lint passes without a header: a missing header is caught in
+  review, not by CI.
 - In the pull request, say for each new or substantially changed file what it is based on (public document, test
   result or own design).
 - Tests with synthetic data for what you change; the CPU tests pass (CI runs them; locally: [BUILDING.md](BUILDING.md)).
