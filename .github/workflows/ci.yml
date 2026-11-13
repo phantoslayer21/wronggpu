@@ -28,6 +28,7 @@ jobs:
         run: python tools/ci/check_line_endings.py
       - name: Licence (REUSE)
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           python -m pip install --disable-pip-version-check reuse==5.0.2
           reuse lint
 
@@ -50,31 +51,38 @@ jobs:
           arch: x64
       - name: Converter
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           cmake -S clean/converter -B out/converter -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
           cmake --build out/converter
           ctest --test-dir out/converter --output-on-failure
       - name: Shared settings
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           cmake -S clean/wgshared -B out/wgshared -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
           cmake --build out/wgshared
           ctest --test-dir out/wgshared --output-on-failure
       - name: FSR front end (CPU tests)
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           cmake -S clean/fsr -B out/frontend -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DWG_MODEL_K=OFF -DWG_BUILD_ID=ci -DWG_BUILD_ASI=ON
           cmake --build out/frontend
           ctest --test-dir out/frontend --output-on-failure -R "unit|hosted|diagnostic|support" -E "overlay|split|d3d12"
       - name: HIP runtime stand-in for the launcher tests
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           New-Item -ItemType Directory -Force out/mockhip | Out-Null
           cl /nologo /LD /O2 clean/installer/tests/mock_hip.c /Fe:out/mockhip/amdhip64_7.dll /Fo:out/mockhip/
           "WRONGGPU_HIP_RUNTIME=$PWD\out\mockhip\amdhip64_7.dll" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Launcher core (CPU tests)
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           cmake -S clean/installer -B out/launcher-tests -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DWRONGGPU_PAYLOAD_DIR="$PWD/out/no-payload" -DWRONGGPU_TESTING=OFF -DWRONGGPU_PRESET_K=OFF -DWRONGGPU_DIRECT_ROUTE=OFF
           cmake --build out/launcher-tests --target wg-core-tests launcher-core-tests coexist-core-tests
           ctest --test-dir out/launcher-tests --output-on-failure -R "^(wg-core|launcher-core|coexist-core|source-size|wording)$"
       - name: Ray Reconstruction plugin (build and CPU tests)
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $env:VSDEVCMD = Join-Path $env:VSINSTALLDIR 'Common7\Tools\VsDevCmd.bat'
           python clean/rr_f/proxy/tools/build.py --out out/rr-proxy --no-tests
           python tools/ci/run_proxy_core_tests.py out/rr-proxy
           "WG_RR_PROXY_BUILD=$PWD\out\rr-proxy" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
