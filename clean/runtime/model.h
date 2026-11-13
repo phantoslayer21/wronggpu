@@ -70,6 +70,10 @@ bool load_raw_stages(const std::string& model_dir, const StageSpecs& stages,
 bool load_wgcm_model(const std::string& path, const std::string& map_path, std::map<std::string, StageTensors>* out,
                      std::string* err, bool* other_map = nullptr);
 
+// The same for any list of stages (another model's, with its map): load_wgcm_model is Model M's list through it.
+bool load_wgcm_stages(const std::string& path, const std::string& map_path, const StageSpecs& stages,
+                      std::map<std::string, StageTensors>* out, std::string* err, bool* other_map = nullptr);
+
 // Packed weight blob of one stage (enc0, enc1..dec1, dec0); post has no blob of its own (its scalar s is passed to
 // the post kernels).
 bool pack_stage_blob(const std::string& stage, const StageTensors& t, const DRow& drow, std::vector<uint8_t>* out,

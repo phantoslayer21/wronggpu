@@ -497,6 +497,13 @@ bool check_values(const std::string& where, const Tensor& t, std::string* err) {
 
 bool load_wgcm_model(const std::string& path, const std::string& map_path, std::map<std::string, StageTensors>* out,
                      std::string* err, bool* other_map) {
+  StageSpecs stages;
+  for (const std::string& stage : model_stages()) stages.emplace_back(stage, stage_specs(stage));
+  return load_wgcm_stages(path, map_path, stages, out, err, other_map);
+}
+
+bool load_wgcm_stages(const std::string& path, const std::string& map_path, const StageSpecs& specs,
+                      std::map<std::string, StageTensors>* out, std::string* err, bool* other_map) {
   if (other_map) *other_map = false;
   std::vector<uint8_t> d;
   if (!read_all(path, &d)) return *err = "model data missing: " + path, false;
@@ -608,10 +615,10 @@ bool load_wgcm_model(const std::string& path, const std::string& map_path, std::
   if (!ix.ok) return *err = bad + ": truncated index", false;
 
   // Every stage and tensor the runtime needs, with the shapes of spec 08 section 7.2.
-  for (const std::string& stage : model_stages()) {
+  for (const auto& [stage, stage_tensors] : specs) {
     auto it = got.find(stage);
     if (it == got.end()) return *err = same_map ? bad + ": stage " + stage + " missing" : not_this_map, false;
-    for (const TensorSpec& ts : stage_specs(stage)) {
+    for (const TensorSpec& ts : stage_tensors) {
       auto t = it->second.find(ts.name);
       const std::string where = stage + "/" + ts.name;
       if (t == it->second.end()) return *err = bad + ": tensor " + where + " missing", false;
