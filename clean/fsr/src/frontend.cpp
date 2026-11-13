@@ -1000,7 +1000,11 @@ void FrontEnd::ResizeForFrame(UpscaleContext& u, WgFrame& frame, const std::stri
 }
 
 std::string FrontEnd::FailureKey(const WgUpscalerBackend* backend, const UpscaleContext& u) const {
-    return std::string(backend && backend->name ? backend->name : "?") + "|" + u.options;
+    // The sizes and the create flags are part of the key: a create that failed for a size (out of memory at 4K) must not
+    // stop a create at another size, while the same parameters again are still stopped.
+    return std::string(backend && backend->name ? backend->name : "?") + "|" + u.options + "|" + std::to_string(u.create.maxRenderSize.width) + "x" +
+           std::to_string(u.create.maxRenderSize.height) + "|" + std::to_string(u.create.maxUpscaleSize.width) + "x" +
+           std::to_string(u.create.maxUpscaleSize.height) + "|" + std::to_string(u.create.flags);
 }
 
 void FrontEnd::ApplyModelDir(UpscaleContext& u, const std::string& tag) {
