@@ -13,13 +13,19 @@
 WG_ARGS_BEGIN
   uint dst;
 WG_ARGS_END
+// D = A x B + C with FP16 and with FP8 operands. The host (clean/runtime/wmma_probe.h) writes A, B and C in fragment
+// layout with distinct values per lane and element and checks every result, so a different fragment layout fails.
+// Buffer byte offsets: wmma_probe.h kOutF16 0, kOutFp8 1024, kInC 2048, kInAF16 3072, kInBF16 3584, kInAFp8 4096,
+// kInBFp8 4352. All loads come before the first matrix call (wg_ags.hlsli rules).
 WG_KERNEL(native_driver_probe) {
   WG_SETUP();
   uint lane=wg_lane_id();
-  v8f c=wg_splat((float)lane);
-  v8f h=wg_wmma_f16(uint4(0x3c003c00u,0x3c003c00u,0x3c003c00u,0x3c003c00u),
-                    uint4(0x40004000u,0x40004000u,0x40004000u,0x40004000u),c);
-  v8f q=wg_wmma_fp8(uint2(0x38383838u,0x38383838u),uint2(0x40404040u,0x40404040u),c);
+  uint4 a16=wg_ld128(dst,3072u+lane*16u),b16=wg_ld128(dst,3584u+lane*16u);
+  uint2 a8=wg_ld64(dst,4096u+lane*8u),b8=wg_ld64(dst,4352u+lane*8u);
+  v8f c;
+  [unroll] for(uint i=0;i<8u;++i) c.v[i]=wg_ldf(dst,2048u+(i*32u+lane)*4u);
+  v8f h=wg_wmma_f16(a16,b16,c);
+  v8f q=wg_wmma_fp8(a8,b8,c);
   [unroll] for(uint k=0;k<8u;++k) {
     wg_stf(dst,(k*32u+lane)*4u,h.v[k]);
     wg_stf(dst,1024u+(k*32u+lane)*4u,q.v[k]);

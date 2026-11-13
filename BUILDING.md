@@ -159,6 +159,10 @@ python -m unittest discover -s clean\rr_f\proxy\tests -t clean\rr_f\proxy\tests 
 python -m unittest discover -s clean\rr_f\proxy\tests -t clean\rr_f\proxy\tests -p test_gen_forwarding.py
 ```
 
+`clean\runtime\tests\test_wmma_probe.cpp` checks Model M's driver-channel probe (`clean\runtime\wmma_probe.h`) on
+any host: build it with any C++17 compiler (`clang++ -std=c++17 test_wmma_probe.cpp`) and run it; exit status 0 when
+it passes. `clean\dx12\tests\native_probe_test.cpp` runs the same probe on the GPU (see 7).
+
 `clean\wgshared\tests\*.py` are scripts that the wgshared ctest runs. The Ray Reconstruction plugin's CPU tests are
 executables that `clean\rr_f\proxy\tools\build.py --no-tests` builds; run them as that script does:
 `out\rr-proxy\core\test_proxy_core.exe`, `test_probe_core.exe`, `test_setupapi_identity.exe`,
