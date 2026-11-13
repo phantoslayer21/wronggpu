@@ -11,7 +11,7 @@ the only place that depends on it; the default is the gfx12 layout assumed by th
 import numpy as np
 
 from clean.reference.fp8 import fp8_encode
-from clean.reference.swin import STAGES, HEAD_DIM
+from clean.reference.swin import STAGES, HEAD_DIM, stage_table  # noqa: F401  (STAGES: Model M's table)
 
 D_ROW_LAYOUTS = {
     "gfx12": np.array([[v + 8 * h for v in range(8)] for h in range(2)]),   # row = v + 8h
@@ -208,15 +208,15 @@ def pack_expand(We, be, C, C_low, drow):
     return pack_tile_vector(be, RE, drow) + pack_frags(We, RE, kord_layout_l(C_low))
 
 
-def stage_sections(stage):
+def stage_sections(stage, model="M"):
     """(block size, offset of the merge/expand section) inside a packed stage blob."""
-    cfg = STAGES[stage]
+    cfg = stage_table(model)[stage]
     size = block_layout(cfg["C"], cfg["heads"], cfg["mlp"])["SIZE"]
     return size, size + (-size) % ALIGN
 
 
-def check_tensors(stage, t):
-    cfg = STAGES[stage]
+def check_tensors(stage, t, model="M"):
+    cfg = stage_table(model)[stage]
     C, heads, mlp, D = cfg["C"], cfg["heads"], cfg["mlp"], cfg["heads"] * HEAD_DIM
     shapes = {
         "gamma1": (C,), "gamma2": (C,), "Wqk": (heads, HEAD_DIM, C), "Wv": (heads, HEAD_DIM, C),
@@ -247,11 +247,11 @@ def resolve_d_row(d_row):
     return t
 
 
-def pack_stage(stage, tensors, d_row="gfx12"):
+def pack_stage(stage, tensors, d_row="gfx12", model="M"):
     """Logical tensors of spec/90 -> one byte blob: [block weights][pad to 256][merge or expand weights]."""
-    check_tensors(stage, tensors)
+    check_tensors(stage, tensors, model)
     drow = resolve_d_row(d_row)
-    cfg = STAGES[stage]
+    cfg = stage_table(model)[stage]
     blob = _pad(pack_block(tensors, cfg["C"], cfg["heads"], cfg["mlp"], drow))
     if cfg["kind"] == "enc":
         blob += pack_merge(tensors["Wm"], tensors["bm"], cfg["C"], cfg["C_out"], drow)
@@ -263,68 +263,98 @@ def pack_stage(stage, tensors, d_row="gfx12"):
 # Pseudo-stage "bneck": the six bottleneck blocks b0..b5 as one unit (megakernel swin_bneck6, FORMATS.md). Its blob is
 # the six b-stage blobs back to back (equal sizes), so block k's section starts at k * len(blob) / 6.
 BNECK_STAGES = tuple(f"b{k}" for k in range(6))
+# Model-keyed (#89): the bneck and mid stage lists per model (Model M: BNECK_STAGES, MID_STAGES below); a model adds
+# its rows next to its stage table (clean/reference/swin.py MODEL_STAGES).
+MODEL_BNECK_STAGES = {"M": BNECK_STAGES}
+_COUNT_WORDS = {6: "six", 8: "eight"}
 
 
-def pack_bneck(tensors, d_row="gfx12"):
+def _count(n):
+    return _COUNT_WORDS.get(n, str(n))
+
+
+def _model_list(table, model, what):
+    try:
+        return table[model]
+    except KeyError:
+        raise ValueError(f"no {what} for model {model!r}; known: {', '.join(sorted(table))}") from None
+
+
+def bneck_stages(model="M"):
+    """The stages of the pseudo-stage \"bneck\" of `model` (Model M: b0..b5)."""
+    return _model_list(MODEL_BNECK_STAGES, model, "bneck stage list")
+
+
+def pack_bneck(tensors, d_row="gfx12", model="M"):
     """tensors: {"b0": tensors of b0, ..., "b5": ...} or a sequence of the six -> the six packed b-stage blobs, joined."""
-    seq = [tensors[s] for s in BNECK_STAGES] if isinstance(tensors, dict) else list(tensors)
-    if len(seq) != 6:
-        raise ValueError("bneck needs the tensors of the six blocks b0..b5")
-    return b"".join(pack_stage(s, t, d_row) for s, t in zip(BNECK_STAGES, seq))
+    names = bneck_stages(model)
+    seq = [tensors[s] for s in names] if isinstance(tensors, dict) else list(tensors)
+    if len(seq) != len(names):
+        raise ValueError(f"bneck needs the tensors of the {_count(len(names))} blocks {names[0]}..{names[-1]}")
+    return b"".join(pack_stage(s, t, d_row, model) for s, t in zip(names, seq))
 
 
-def split_bneck(blob):
+def split_bneck(blob, model="M"):
     """The six b-stage blobs of a bneck blob (or a sequence of six blobs, returned as a list)."""
+    k_n = len(bneck_stages(model))
     if not isinstance(blob, (bytes, bytearray, memoryview)):
         seq = [bytes(b) for b in blob]
     else:
         blob = bytes(blob)
-        n = len(blob) // 6
-        if n * 6 != len(blob) or n == 0:
-            raise ValueError("a bneck blob holds six equal b-stage blobs")
-        seq = [blob[k * n:(k + 1) * n] for k in range(6)]
-    if len(seq) != 6:
-        raise ValueError("bneck needs six blobs")
+        n = len(blob) // k_n
+        if n * k_n != len(blob) or n == 0:
+            raise ValueError(f"a bneck blob holds {_count(k_n)} equal b-stage blobs")
+        seq = [blob[k * n:(k + 1) * n] for k in range(k_n)]
+    if len(seq) != k_n:
+        raise ValueError(f"bneck needs {_count(k_n)} blobs")
     return seq
 
 
 # Pseudo-stage "mid": enc2 (with its merge), b0..b5, dec2 (with its expand) as one unit (persistent kernel swin_mid,
 # FORMATS.md). Its blob is the eight stage blobs back to back, in this order.
 MID_STAGES = ("enc2",) + BNECK_STAGES + ("dec2",)
+MODEL_MID_STAGES = {"M": MID_STAGES}
 
 
-def stage_blob_size(stage):
+def mid_stages(model="M"):
+    """The stages of the pseudo-stage \"mid\" of `model`, in blob order (Model M: enc2, b0..b5, dec2)."""
+    return _model_list(MODEL_MID_STAGES, model, "mid stage list")
+
+
+def stage_blob_size(stage, model="M"):
     """Length of pack_stage(stage, ...): the padded block section plus the merge or expand section."""
-    cfg = STAGES[stage]
+    cfg = stage_table(model)[stage]
     C = cfg["C"]
     tail = 0
     if cfg["kind"] == "enc":
         tail = 4 * cfg["C_out"] + cfg["C_out"] * 4 * C        # bias, then (C_out / 16) x (4 C / 16) fragments
     elif cfg["kind"] == "dec":
         tail = 4 * (4 * C) + (4 * C) * cfg["C_low"]           # bias, then (4 C / 16) x (C_low / 16) fragments
-    return stage_sections(stage)[1] + tail
+    return stage_sections(stage, model)[1] + tail
 
 
-def pack_mid(tensors, d_row="gfx12"):
+def pack_mid(tensors, d_row="gfx12", model="M"):
     """tensors: {"enc2": ..., "b0": ..., ..., "b5": ..., "dec2": ...} or the eight in that order -> blobs joined."""
-    seq = [tensors[s] for s in MID_STAGES] if isinstance(tensors, dict) else list(tensors)
-    if len(seq) != len(MID_STAGES):
-        raise ValueError("mid needs the tensors of enc2, b0..b5 and dec2")
-    return b"".join(pack_stage(s, t, d_row) for s, t in zip(MID_STAGES, seq))
+    names = mid_stages(model)
+    seq = [tensors[s] for s in names] if isinstance(tensors, dict) else list(tensors)
+    if len(seq) != len(names):
+        raise ValueError(f"mid needs the tensors of {names[0]}, {names[1]}..{names[-2]} and {names[-1]}")
+    return b"".join(pack_stage(s, t, d_row, model) for s, t in zip(names, seq))
 
 
-def split_mid(blob):
+def split_mid(blob, model="M"):
     """The eight stage blobs of a mid blob (or a sequence of eight blobs, returned as a list)."""
+    names = mid_stages(model)
     if not isinstance(blob, (bytes, bytearray, memoryview)):
         seq = [bytes(b) for b in blob]
     else:
         blob, seq, o = bytes(blob), [], 0
-        for s in MID_STAGES:
-            n = stage_blob_size(s)
+        for s in names:
+            n = stage_blob_size(s, model)
             seq.append(blob[o:o + n])
             o += n
         if o != len(blob):
             raise ValueError(f"a mid blob holds {o} bytes, got {len(blob)}")
-    if len(seq) != len(MID_STAGES):
-        raise ValueError("mid needs eight blobs")
+    if len(seq) != len(names):
+        raise ValueError(f"mid needs {_count(len(names))} blobs")
     return seq

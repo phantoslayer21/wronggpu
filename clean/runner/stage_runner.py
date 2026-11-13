@@ -28,7 +28,7 @@ import json  # noqa: E402
 import numpy as np  # noqa: E402
 
 from clean.reference.fp8 import fp8_decode, fp8_encode  # noqa: E402
-from clean.reference.swin import STAGES, window_offset  # noqa: E402
+from clean.reference.swin import MODEL_STAGES, STAGES, stage_table, window_offset  # noqa: E402,F401
 from clean.runner import dec0, dec1dec0, enc0, exposure, post  # noqa: E402
 from clean.runner import perf_variants as PV  # noqa: E402
 from clean.runner import variants as V  # noqa: E402
@@ -73,7 +73,8 @@ KERNEL_CODE_OBJECTS = {k: m.CODE_OBJECT for m in (enc0, dec0, exposure, post) fo
 # Model K (spec 40/41, clean/k): stages "k.<stage>" (or plain stage names with Runner(..., model="K")).
 from clean.k.runner import k_stages  # noqa: E402
 KERNEL_CODE_OBJECTS.update(k_stages.KERNEL_CODE_OBJECTS)
-MODELS = ("M", "K")
+# Models: the ones with a reference stage table (clean/reference/swin.py MODEL_STAGES: "M") and model K (clean/k)
+MODELS = tuple(MODEL_STAGES) + ("K",)
 EMU_LIBRARY = "wg_emu.so"
 
 
@@ -129,15 +130,15 @@ class Runner:
         if self._k_stage(stage) is not None:
             return k_stages.pack(self._k_stage(stage), tensors, self.d_row)
         if stage == "bneck":  # {"b0": ..., "b5": ...} (or the six in order) -> the six b-stage blobs joined
-            return pack_bneck(tensors, self.d_row)
+            return pack_bneck(tensors, self.d_row, self.model)
         if stage == "mid":  # {"enc2": ..., "b0": ..., ..., "b5": ..., "dec2": ...} -> the eight stage blobs joined
-            return pack_mid(tensors, self.d_row)
+            return pack_mid(tensors, self.d_row, self.model)
         if stage in EXTRA_STAGES:
             packer = EXTRA_STAGES[stage][0]
             if packer is None:
                 raise ValueError(f"stage {stage!r} has no weights")
             return packer(tensors, self.d_row)
-        return pack_stage(stage, tensors, self.d_row)
+        return pack_stage(stage, tensors, self.d_row, self.model)
 
     def run(self, stage: str, weights: bytes, x, offset=None, skip=None) -> dict:
         return self._run_plan(self._prepare(stage, weights, x, offset, skip))
@@ -440,20 +441,21 @@ class Runner:
         if self._k_stage(stage) is not None:
             return k_stages.prepare(self.dev, self._k_stage(stage), weights, x, offset, skip)
         if stage == "bneck":  # b0..b5; offset = b0's window offset (it gives the parity)
-            parity = [p for p in (0, 1) if tuple(window_offset("b0", p)) == tuple(int(v) for v in offset)]
+            parity = [p for p in (0, 1) if tuple(window_offset("b0", p, self.model)) == tuple(int(v) for v in offset)]
             if not parity:
                 raise ValueError(f"bneck offset {offset} is not a b0 window offset")
             return self._prepare_bneck(weights, x, parity[0], "mega" in self.geo, None)
         if stage == "mid":  # enc2 (+ merge), b0..b5, dec2 (+ expand); offset = enc2's window offset
-            parity = [p for p in (0, 1) if tuple(window_offset("enc2", p)) == tuple(int(v) for v in offset)]
+            parity = [p for p in (0, 1) if tuple(window_offset("enc2", p, self.model)) == tuple(int(v) for v in offset)]
             if not parity:
                 raise ValueError(f"mid offset {offset} is not an enc2 window offset")
             return self._prepare_mid(weights, x, parity[0], "mid" in self.geo, None)
         if stage in EXTRA_STAGES:
             return EXTRA_STAGES[stage][1](self.dev, weights, x)
-        if stage not in STAGES:
+        stages = stage_table(self.model)
+        if stage not in stages:
             raise ValueError(f"unknown stage {stage!r}")
-        cfg = STAGES[stage]
+        cfg = stages[stage]
         C = cfg["C"]
         ox, oy = (int(v) for v in offset)
         if not (0 <= ox < 4 and 0 <= oy < 4):
@@ -475,7 +477,7 @@ class Runner:
             raise ValueError(f"H and W must be multiples of 4, got {H}x{W}")
 
         weights = bytes(weights)
-        block_size, tail_off = stage_sections(stage)
+        block_size, tail_off = stage_sections(stage, self.model)
         bufs, sizes = {}, {}
 
         def alloc(name, nbytes, data=None):
