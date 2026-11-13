@@ -1327,8 +1327,10 @@ public:
             for (const Axis& ax : t.axes) {
                 const std::int64_t n = ax.limit >= 0 ? std::min(ax.limit, ax.length) : ax.length;
                 if (n == 0) {
+                    // The tensor reads nothing, but the axes after this one are still checked: the map is validated
+                    // completely before any input is read (an empty axis adds no span).
                     any = false;
-                    break;
+                    continue;
                 }
                 std::int64_t span;
                 if (!checked_mul(ax.stride, n - 1, span) || !checked_add(hi, span, hi))

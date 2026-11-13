@@ -429,6 +429,10 @@ def corrupt_map_cases(fm):
     add("negative base", lambda m: t(m, "G1", "D").update(base=-1))
     add("negative stride", lambda m: t(m, "G1", "b")["axes"][1].update(stride=-1))
     add("negative limit", lambda m: t(m, "G1", "fe")["axes"][0].update(limit=-1))
+    # Issue #54: every axis is checked, also the ones after an empty axis (limit 0): the stride times the index of the
+    # second axis does not fit 64 bits.
+    add("huge stride after an empty axis",
+        lambda m: (t(m, "G1", "b")["axes"][0].update(limit=0), t(m, "G1", "b")["axes"][1].update(stride=9223372036854775807)))
     add("negative site index", lambda m: t(m, "constants", "SUB")["sites"][0].update(elements=[-1]))
     add("zero shape dimension", lambda m: t(m, "G1", "D").update(shape=[0]))
     add("empty shape", lambda m: t(m, "constants", "SUB").update(shape=[]))
