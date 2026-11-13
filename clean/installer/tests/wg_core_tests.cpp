@@ -58,6 +58,29 @@ int main() {
         // VersionLess (the launcher's start, Update due, the update check, ROCm folders): a pre-release before its release
         require(VersionLess(L"0.6.1-rc1", L"0.6.1") && !VersionLess(L"0.6.1", L"0.6.1-rc1"), "VersionLess: 0.6.1-rc1 < 0.6.1");
         require(VersionLess(L"0.6.0", L"0.6.1-rc1") && !VersionLess(L"0.6.1-rc1", L"0.6.0"), "VersionLess: 0.6.0 < 0.6.1-rc1");
+        // 0.6.1: WRONGGPU_HIP_RUNTIME (the development override of the HIP runtime search) is read only by a WRONGGPU_TESTING
+        // build. The candidate list only names files that exist (nothing is loaded): a few bytes of text stand in for the
+        // library in the test's own temp folder; the test's variables are put back afterwards.
+        {
+            const wstring savedHip = EnvVar(L"WRONGGPU_HIP_RUNTIME"), savedMocks = EnvVar(L"WRONGGPU_TEST_HIP_CANDIDATES");
+            const wstring hipDir = TempFolder(), fake = Join(hipDir, L"amdhip64_7.dll");
+            if (FILE* f = _wfopen(fake.c_str(), L"wb")) { std::fputs("not a HIP runtime (wg-core-tests)", f); std::fclose(f); }
+            require(IsFile(fake), "HIP search: the stand-in file is there");
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_HIP_CANDIDATES", nullptr);
+            SetEnvironmentVariableW(L"WRONGGPU_HIP_RUNTIME", fake.c_str());
+            const std::vector<wstring> cands = HipCandidates();
+            bool named = false;
+            for (auto& c : cands) named = named || IEq(c, fake);
+            SetEnvironmentVariableW(L"WRONGGPU_HIP_RUNTIME", savedHip.empty() ? nullptr : savedHip.c_str());
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_HIP_CANDIDATES", savedMocks.empty() ? nullptr : savedMocks.c_str());
+            RemoveTree(hipDir);
+#ifdef WRONGGPU_TESTING
+            require(!cands.empty() && IEq(cands[0], fake), "HIP search: a testing build tries WRONGGPU_HIP_RUNTIME first");
+#else
+            require(!named, "HIP search: a release build never reads WRONGGPU_HIP_RUNTIME");
+#endif
+            (void)named;
+        }
         require(VersionLess(L"0.6.1-rc2", L"0.6.1-rc10") && VersionLess(L"0.6.1-beta2", L"0.6.1-rc1") && !VersionLess(L"0.6.1-rc1", L"0.6.1-rc1"),
                 "VersionLess: two pre-releases by their words, then their numbers");
         require(!VersionLess(L"v0.6.1", L"0.6.1") && !VersionLess(L"0.6.1", L"v0.6.1") && VersionLess(L"v0.6.0", L"0.6.1"), "VersionLess: a leading v doesn't count");

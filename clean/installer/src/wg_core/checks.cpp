@@ -61,7 +61,8 @@ GpuInfo DetectGpu() {
 
 // The AMD HIP runtime (amdhip64_7.dll) the clean runtime loads (spec 30 answer 7): from the system search path first
 // (System32, where the AMD Software: Adrenalin Edition driver installs it; then the PATH folders), then the newest
-// C:\Program Files\AMD\ROCm\<version>\bin (HIP SDK), then HIP_PATH. WRONGGPU_HIP_RUNTIME overrides (development).
+// C:\Program Files\AMD\ROCm\<version>\bin (HIP SDK), then HIP_PATH. WRONGGPU_HIP_RUNTIME overrides (development; read
+// only by a WRONGGPU_TESTING build).
 const wchar_t* const kHipDll = L"amdhip64_7.dll";
 const wchar_t* const kDriverPage = L"https://www.amd.com/en/support/download/drivers.html";
 const char* const kSupportedArch[] = {"gfx1201", "gfx1200"};  // RDNA 4: the RX 9070 family and the RX 9060 family
@@ -103,9 +104,11 @@ std::vector<wstring> HipCandidates() {
         }
         return c;
     }
-#endif
-    wstring env = EnvVar(L"WRONGGPU_HIP_RUNTIME");
+    // 0.6.1: the development override only in a WRONGGPU_TESTING build; a release build never reads it (a developer's
+    // mock HIP library set at install time was recorded in hip-runtime.txt)
+    const wstring env = EnvVar(L"WRONGGPU_HIP_RUNTIME");
     if (!env.empty()) c.push_back(env);
+#endif
     wchar_t sys[MAX_PATH];
     if (GetSystemDirectoryW(sys, MAX_PATH)) c.push_back(Join(sys, kHipDll));
     wstring path = EnvVar(L"PATH");
