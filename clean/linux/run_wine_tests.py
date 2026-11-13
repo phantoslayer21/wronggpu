@@ -3,7 +3,7 @@
 vkd3d-shader), the stack a game runs on in Steam.
 
     python3 clean/linux/run_wine_tests.py --proton <Proton dir> [--vkd3d <dir>] [--runtime <wronggpu_runtime.dll>]
-                                          [--tests interop,rr-leak,ags-layout] [--work <dir>]
+                                          [--tests interop,rr-leak,ags-layout,launcher] [--work <dir>]
 
 Tests (all run by default; each prints PASS, FAIL or SKIP with the reason; the exit status is 1 when one fails):
   interop     clean/runtime/interop/tests/run-tests.sh: MinGW build of the runtime with the d3d12-test executor, run
@@ -15,11 +15,15 @@ Tests (all run by default; each prints PASS, FAIL or SKIP with the reason; the e
   ags-layout  WrongGPU's driver-channel helpers (wg_ags.hlsli: FP16 and FP8 WMMA, matrix conversions, the F16
               conversion, a wave64 conversion) on fixed register values, against a CPU reference of the gfx12 register
               semantics. Under Proton the channel is translated by vkd3d-proton's dxil-spirv.
+  launcher    the launcher's unit tests (clean/installer: wg-core-tests, launcher-core-tests, coexist-core-tests,
+              wizard-policy-tests), a WRONGGPU_TESTING MinGW build with the installer suite's generated payload, run in
+              the prefix: the launcher as Linux players run it, under Wine.
 rr-leak and ags-layout need the WMMA channel, i.e. a vkd3d-proton with dxil-spirv's shader-packed fragment support
 (https://github.com/HansKristian-Work/dxil-spirv/pull/362): pass a self-built one with --vkd3d until Proton ships it.
 
 Tools (environment): MINGW_CXX (default x86_64-w64-mingw32-g++-posix, then x86_64-w64-mingw32-g++), WG_DXC (a Linux
-dxc binary of the DXC release, default `dxc` on PATH). Python with NumPy. Needs an AMD RDNA 4 GPU with RADV.
+dxc binary of the DXC release, default `dxc` on PATH). Python with NumPy. Needs an AMD RDNA 4 GPU with RADV. The
+launcher test also needs CMake, Ninja and the MinGW-w64 windres beside MINGW_CXX.
 """
 import argparse
 import os
@@ -255,7 +259,47 @@ def test_ags_layout(a, env, work):
                                         "results differ from the gfx12 register semantics (see above)")
 
 
-TESTS = {"interop": test_interop, "rr-leak": test_rr_leak, "ags-layout": test_ags_layout}
+# ---- launcher -------------------------------------------------------------------------------------------------------
+LAUNCHER_TESTS = ("wg-core-tests", "launcher-core-tests", "coexist-core-tests", "wizard-policy-tests")
+
+
+def test_launcher(a, env, work):
+    cxx = mingw_cxx()
+    if not cxx:
+        return "SKIP", "no MinGW-w64 C++ compiler (MINGW_CXX)"
+    windres = Path(cxx).with_name(Path(cxx).name.split("-g++")[0].split("-clang++")[0] + "-windres")
+    missing = [t for t in ("cmake", "ninja") if not shutil.which(t)] + ([] if windres.is_file() else [str(windres)])
+    if missing:
+        return "SKIP", "missing " + ", ".join(missing)
+    installer = REPO / "clean" / "installer"
+    prep, build = work / "launcher-prep", work / "launcher-build"
+    # the installer suite's payload and test map (generated: names and synthetic bytes only)
+    r = subprocess.run([sys.executable, str(installer / "tests" / "run_installer_tests.py"), "--work", str(prep), "--prepare-only"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError("run_installer_tests.py --prepare-only failed:\n" + (r.stdout + r.stderr)[-3000:])
+    r = subprocess.run(["cmake", "-S", str(installer), "-B", str(build), "-G", "Ninja", "-DCMAKE_SYSTEM_NAME=Windows",
+                        f"-DCMAKE_CXX_COMPILER={cxx}", f"-DCMAKE_RC_COMPILER={windres}", "-DCMAKE_EXE_LINKER_FLAGS=-static",
+                        "-DWRONGGPU_TESTING=ON", f"-DWRONGGPU_PAYLOAD_DIR={prep / 'prepared' / 'payload'}",
+                        f"-DWRONGGPU_MAP={prep / 'prepared' / 'test-map.json'}"], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError("configuring clean/installer failed:\n" + (r.stdout + r.stderr)[-3000:])
+    r = subprocess.run(["cmake", "--build", str(build), "--target", *LAUNCHER_TESTS], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError("building the launcher's unit tests failed:\n" + (r.stdout + r.stderr)[-3000:])
+    passed, failed = [], []
+    for t in LAUNCHER_TESTS:
+        rc, text = run_wine(env, [str(build / (t + ".exe"))], build, 600)
+        # the test's own summary line (Wine's messages are mixed into the output)
+        last = [line.strip() for line in text.splitlines() if "checks passed" in line or "FAILED" in line][-1:] or ["(no summary line)"]
+        log(f"  {t}: exit {rc}, {last[0]}")
+        (passed if rc == 0 and "checks passed" in last[0] else failed).append(f"{t} ({last[0]})")
+    if failed:
+        return "FAIL", "; ".join(failed)
+    return "PASS", "; ".join(passed)
+
+
+TESTS = {"interop": test_interop, "rr-leak": test_rr_leak, "ags-layout": test_ags_layout, "launcher": test_launcher}
 
 
 def main(argv=None):

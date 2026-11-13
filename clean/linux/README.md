@@ -17,6 +17,7 @@ The tests use WrongGPU's own synthetic data only: no model converted from a DLSS
 |---|---|---|
 | `interop` | `clean/runtime/interop/tests/run-tests.sh` (31 tests): MinGW build of the runtime with the `d3d12-test` executor | interop shaders that Wine's `d3dcompiler_47` rejects (`globallycoherent` in `PASS_SPIN` failed all 31), copy / convert / split regressions on vkd3d-proton |
 | `rr-leak` | the RR runtime test host's `tagloop` job against `--runtime`, with a synthetic RR model (`pack_model --synthetic 5100`) | RR input copies retained and released every frame with no RR instance piling up in video memory (+2,635 MiB in 200 frames before the fix in `release_transient_locked`, +37 MiB after) |
+| `launcher` | the launcher's unit tests (`wg-core-tests`, `launcher-core-tests`, `coexist-core-tests`, `wizard-policy-tests`): a `WRONGGPU_TESTING` MinGW build of `clean/installer` with the installer suite's generated payload and test map | launcher code that breaks under Wine, the way Linux players run the launcher: the same unit tests as on Windows, run with Wine's DLLs and Proton's Direct3D 12 |
 | `ags-layout` | `ags_layout.hlsl`: `wg_ags_mma` (FP16, FP8), `wg_ags_convert` (F32 accumulator to F16 accumulator and FP8 B, FP8 B to F32 for all 256 codes), the F16 `FloatConversion` call, a wave64 conversion | a translation of the driver channel that does not keep the gfx12 register semantics the kernels rely on; checked against a CPU reference (multiplies within 1e-5, everything else bit-exact) |
 
 The `--runtime` DLL is the one to be released: the MSVC release build works as it is. `interop` builds its own
@@ -32,6 +33,7 @@ programs only, never shipped (the release rule in `clean/fsr/build-mingw.sh`).
   on `PATH`. llvm-mingw works too. The tests add `-fms-extensions` for clang.
 - For `ags-layout`: the Linux `dxc` from the DXC release named in BUILDING.md, in `WG_DXC` or on `PATH`.
 - Python 3 with NumPy.
+- For `launcher`: CMake, Ninja, and the MinGW-w64 `windres` in the same folder as `MINGW_CXX`.
 
 ## vkd3d-proton
 
@@ -50,9 +52,11 @@ test failed. Everything a test writes goes to `--work`, by default `build/linux-
 
 - `interop/result.txt`: the 31 tests' output;
 - `rr-leak/host.log`, and `rr-leak/stage/wronggpu-rr.log` for the runtime's own log;
-- `ags-layout/host.log`, `inputs.bin` and `outputs.bin`.
+- `ags-layout/host.log`, `inputs.bin` and `outputs.bin`;
+- `launcher-build/`: the launcher's test build (each test's output is in the run's own output).
 
 Each failure was checked to show up in this suite. Run on the unfixed `convert.cpp`, `interop` fails 29 of 31 with
 `Unknown modifier "globallycoherent"`. With the 0.6.0 RR runtime, `rr-leak` reports +2,635 MiB. On stock
 vkd3d-proton, `ags-layout` stops at `CreateComputePipelineState`. Fed results with lanes in the wrong order or F16
-halves swapped, its comparison fails.
+halves swapped, its comparison fails. With the vkd3d-proton rule of `coexist.cpp` taken back to the Windows refusal,
+`launcher` fails in `coexist-core-tests`.
