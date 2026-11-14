@@ -321,6 +321,13 @@ int main() {
             if (UnderWine())
                 require(StartsWithI(deep, L"Z:\\") && deep.size() > deepTail.size() && deep.compare(deep.size() - deepTail.size(), deepTail.size(), deepTail) == 0,
                         "PathForGamePrefix under Wine: a Z: path for missing folders too");
+            // only the drive's root converts (Wine cannot make a Unix name for a DOS device name like CON, so the first folder fails too):
+            // the walk still reaches the root, so the path is converted
+            const wstring rootTail = L"\\con\\F\\model.wgcm", atRoot = PathForGamePrefix(L"C:" + rootTail);
+            if (UnderWine())
+                require(StartsWithI(atRoot, L"Z:\\") && atRoot.size() > rootTail.size() && atRoot.compare(atRoot.size() - rootTail.size(), rootTail.size(), rootTail) == 0 &&
+                            atRoot.find(L"\\\\") == wstring::npos,
+                        "PathForGamePrefix under Wine: a Z: path when only the drive's root exists");
             require(PathForGamePrefix(L"").empty(), "PathForGamePrefix of an empty path");
             // a drive the prefix doesn't map: no Z: path can be made, the path comes back as it is (the install then
             // reports it, install.cpp ModelPathForGame)

@@ -257,12 +257,15 @@ wstring PathForGamePrefix(const wstring& path) {
     wstring head = path, tail;
     char* u = nullptr;
     while (!(u = unixName(head.c_str()))) {
+        if (head.size() <= 3) return path;
         const size_t cut = head.find_last_of(L"\\/");
-        if (cut == wstring::npos || cut < 3) return path;
+        if (cut == wstring::npos || cut < 2) return path;
         tail = head.substr(cut) + tail;
-        head.resize(cut);
+        head.resize(cut == 2 ? 3 : cut);  // keep the separator on a drive root: "C:\" converts, "C:" alone is not tried
     }
-    wstring z = L"Z:" + FromUtf8(u) + tail;
+    string unixPath = u;
+    if (!tail.empty() && unixPath.size() > 1 && unixPath.back() == '/') unixPath.pop_back();  // a root's Unix name ends in '/'; the tail brings its own separator
+    wstring z = L"Z:" + FromUtf8(unixPath.c_str()) + tail;
     HeapFree(GetProcessHeap(), 0, u);
     for (wchar_t& c : z)
         if (c == L'/') c = L'\\';
