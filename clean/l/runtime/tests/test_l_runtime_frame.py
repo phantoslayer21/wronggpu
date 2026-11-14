@@ -170,7 +170,7 @@ def base(kernel):
     return "l_coef" if k == "l_coef_pack12" else k
 
 
-def check_roles(t, f, digests):
+def check_roles(t, f, digests, l_post=True):
     """Raises AssertionError naming every Model L launch argument that is not the expected buffer or blob."""
     exp = expected_args(t, f, digests)
     seen, bad = set(), []
@@ -185,7 +185,7 @@ def check_roles(t, f, digests):
             continue
         bad += ["%s argument %d: %s, expected %s" % (k, i, a, e) for i, (a, e) in enumerate(zip(ln.args, want))
                 if e is not None and a != e]
-    missing = [k for k in L_KERNELS if k not in seen]
+    missing = [k for k in L_KERNELS if k not in seen and (l_post or k != "l_post_recon")]
     if bad or missing:
         raise AssertionError("; ".join(bad + ["not launched: " + k for k in missing]))
 
@@ -306,7 +306,7 @@ class Frame(unittest.TestCase):
 class Arguments(unittest.TestCase):
     """The recorder's view of every Model L launch (clean/l/FORMATS.md, "Maps" and "Kernels")."""
 
-    def check_frame(self, t, f, roles=True):
+    def check_frame(self, t, f, roles=True, l_post=True):
         info, ls = f["info"], f["launches"]
         rw, rh = info["rw"], info["rh"]
         fw, fh = cdiv(rw, 32) * 32, cdiv(rh, 32) * 32
@@ -357,13 +357,14 @@ class Arguments(unittest.TestCase):
         self.assertEqual(e[5], info["reset"])
         self.assertEqual(d, [rw, rh, fw, fh, info["reset"]])
         post = [ln for ln in ls if ln.kernel == "l_post_recon"]
-        self.assertEqual(len(post), 1)
-        self.assertEqual(post[0].params(12), [rw, rh, (3 * 120 + 1) // 2, (3 * 72 + 1) // 2, info["reset"]])
-        self.assertEqual(post[0].grid, cdiv((3 * 120 + 1) // 2, 32) * cdiv(cdiv((3 * 72 + 1) // 2, 2), 8))
-        self.assertTrue(ls[ls.index(post[0]) + 1].kernel.endswith("post_filter_c1_s4"))  # Model M's filter next
+        self.assertEqual(len(post), 1 if l_post else 0)  # (native D3D12: Model M's fused pack12 post for now)
+        if l_post:
+            self.assertEqual(post[0].params(12), [rw, rh, (3 * 120 + 1) // 2, (3 * 72 + 1) // 2, info["reset"]])
+            self.assertEqual(post[0].grid, cdiv((3 * 120 + 1) // 2, 32) * cdiv(cdiv((3 * 72 + 1) // 2, 2), 8))
+            self.assertTrue(ls[ls.index(post[0]) + 1].kernel.endswith("post_filter_c1_s4"))  # Model M's filter next
         self.assertTrue(lev.args[11].startswith("b"))  # the values blob: an allocation
         if roles:  # every argument against the named buffers and blobs
-            check_roles(t, f, blob_digests())
+            check_roles(t, f, blob_digests(), l_post)
         return lev, coef
 
     def test_sizes_reset_history(self):
@@ -512,7 +513,7 @@ class D3D12(unittest.TestCase):
         self.assertTrue(all(not n.startswith(("d1p12/", "d0p12/")) and n != "input_encoder" for n in names), names)
         dec1 = [ln for ln in f["launches"] if ln.kernel.startswith("swin_block_c64_add")]
         self.assertEqual([ln.kernel for ln in dec1], ["swin_block_c64_add_ex_nc"])  # dec1's own block, not fused
-        lev, coef = Arguments.check_frame(self, t, f)
+        lev, coef = Arguments.check_frame(self, t, f, l_post=False)
         self.assertGreaterEqual(t.extent(coef.args[1]), 8 * rw * rh)  # pack12 image A: 8 bytes per pixel
         self.assertGreaterEqual(t.extent(coef.args[3]), 4 * rw * rh)  # pack12 image C: 4 bytes per pixel
         i = names.index("l_coef_pack12")
