@@ -505,8 +505,10 @@ Checks RunChecks(Context& ctx, const GameTarget& t, SystemInfo& sys, const Model
     else if (model->ok()) set(L_MODEL, CK_OK, L"Model data: " + (model->reused ? wstring(L"already prepared on this PC")
                                                                              : BaseName(model->dll) + L" " + (model->version.empty() ? wstring() : model->version + L" ") +
                                                                                    L"from " + model->origin + L", converted on this PC"));
-    else set(L_MODEL, CK_FAIL, model->damaged ? model->error : L"No usable DLSS model file (nvngx_dlss.dll 310.5 or newer) - click \"Model file...\"",
-             model->damaged ? EXIT_DAMAGED : EXIT_NO_MODEL);
+    // model->code: an ignore-list case (convert_ignore.h) with its own words: a list that can't be read (10), every file found
+    // listed, the model data on this PC converted from a listed file (5)
+    else set(L_MODEL, CK_FAIL, model->damaged || model->code ? model->error : L"No usable DLSS model file (nvngx_dlss.dll 310.5 or newer) - click \"Model file...\"",
+             model->damaged ? EXIT_DAMAGED : model->code ? model->code : EXIT_NO_MODEL);
     if (!have) set(L_CONFLICT, CK_NA, L"Other upscaler mods and older installs");
     else if (const Finding* no = t.coexist.refusal(); no && no->tool != Tool::AntiCheat)  // the rules table: no override
         set(L_CONFLICT, CK_FAIL, no->what + L": " + no->message, no->code ? no->code : EXIT_REFUSED);
