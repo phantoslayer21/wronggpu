@@ -397,6 +397,8 @@ float norm_r(v8f a[KC])
     ss = ss + wg_xor16(ss);
 #if SW_C == 64
     return wg_rsq((ss + asfloat(0x39000000u)) * asfloat(0x3c800000u));   // (ss + 2^-13) * (1 / 64)
+#elif SW_C == 32
+    return wg_rsq((ss + asfloat(0x39000000u)) * asfloat(0x3d000000u));   // (ss + 2^-13) * (1 / 32) (Model L, #89)
 #else
     return wg_rsq((ss + asfloat(0x39000000u)) * asfloat(0x3c2aaaabu));   // (ss + 2^-13) * (1 / 96)
 #endif
