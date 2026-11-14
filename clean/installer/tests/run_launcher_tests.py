@@ -316,8 +316,8 @@ def test_install_settings_uninstall(t, opti):
     t.check("owned-files.json: valid JSON, every recorded file with its owner", owned.get("format") == "wronggpu-owned-files/1" and
             any(f["path"] == "wronggpu_runtime.dll" and f["owner"] == "wg" for f in owned.get("files", [])), owned)
     un = os.path.join(b, "wronggpu-setup", "uninstall.exe")
-    if t.native:
-        t.skip("restorer", "uninstall.exe is the small restorer, not the launcher")
+    if t.native:  # Linux embeds no restorer, and a copy of the ELF launcher would not start in a Wine prefix: none is written
+        t.check("Linux: no uninstall.exe written (no restorer; the launcher uninstalls)", not os.path.exists(un), os.listdir(os.path.dirname(un)))
     else:
         t.check("uninstall.exe is the small restorer, not the launcher", os.path.isfile(un) and os.path.getsize(un) < os.path.getsize(t.exe) // 4,
                 (os.path.getsize(un) if os.path.isfile(un) else None, os.path.getsize(t.exe)))

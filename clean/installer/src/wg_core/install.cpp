@@ -646,7 +646,11 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
             WriteFileAtomic(un, ctx.restorer, ctx.restorerSize);
             if (Sha256File(un) != Sha256Bytes(ctx.restorer, ctx.restorerSize)) Fail(L"Verification failed after writing the uninstaller");
         } else {
+#ifdef _WIN32
             CopyChecked(SelfPath(), Join(state, L"uninstall.exe"));
+#endif
+            // Linux: no restorer is embedded and a copy of this ELF program would not start in the game's Wine prefix; the
+            // launcher's own uninstall removes the install (README-linux.md)
         }
         if (ctx.perGameEntry) RegisterUninstall(ctx, m, state, target.name);
         WriteOwnedFiles(dir, m);
