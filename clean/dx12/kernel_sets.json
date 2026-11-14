@@ -203,10 +203,6 @@
    "-"
   ],
   [
-   "l_direct_store",
-   "-"
-  ],
-  [
    "l_linear_32_32_f16",
    "l_ops.co"
   ],
@@ -217,6 +213,10 @@
   [
    "l_linear_32_32_relu",
    "l_ops.co"
+  ],
+  [
+   "l_post_filter_direct",
+   "-"
   ],
   [
    "l_post_recon",

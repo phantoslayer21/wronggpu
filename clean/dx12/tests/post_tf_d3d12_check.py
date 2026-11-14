@@ -24,10 +24,11 @@ Kernels:
   of post_w64.co: display image -> FP32 output, dec_scale from the argument or the exposure pair;
 - control: w64/post_tf_f32_p12_diet_vsit (original-filter port, five FP16 weights as arguments) vs post_w64__orig.co.
   The same name as the first: the D3D12 device runs the port of the code object the case loads under "w64".
---direct: the direct forms (DIRECT). --store: Model L's own post on the direct route, its output-copy store
-(STORE_FRAMES): HIP's RGBA16F output-copy rows (post_filter_c1_s4_o16 / post_filter_h) against w64/post_filter_c1_s4
-then l_direct_store with output_rne16 = 1 into an RGBA16F texture (filled with 0x5A beforehand: every texel must be
-written), with FP16 subnormals, values past 65504, infinities, NaN and rounding ties among the stored values.
+--direct: the direct forms (DIRECT). --store: Model L's own post on the direct route, the filter's direct form
+l_post_filter_direct (STORE_FRAMES): HIP's RGBA16F output-copy rows (post_filter_c1_s4_o16 / post_filter_h) against its
+RGBA16F texture with output_rne16 = 1 (filled with 0x5A beforehand: every texel must be written), with FP16 subnormals,
+values past 65504, infinities, NaN and rounding ties among the stored values; an RGBA32F texture against HIP's FP32
+output.
 """
 import argparse
 import json
@@ -264,17 +265,19 @@ def direct_run(build, rocm, seeds):
     return res
 
 
-# ---- Model L's own post on the direct route: the output-copy store (l_direct_store, output_rne16 = 1) --------------
+# ---- Model L's own post on the direct route: the filter's direct form (l_post_filter_direct) ----------------------
 # HIP's output copy of the same display image: post_filter_c1_s4_o16 (pi = 1) or post_filter_h (pi folded in, pitch 8 O)
-# -> RGBA16F rows, framebuffer_half((Dec dec_scale) pi). D3D12: w64/post_filter_c1_s4 (FP32), then l_direct_store
-# (dx12/kernels/l_post_direct.hlsl) on HIP's FP32 output into an RGBA16F output texture with color_pi and output_rne16 = 1.
+# -> RGBA16F rows, framebuffer_half((Dec dec_scale) pi). D3D12: l_post_filter_direct (dx12/kernels/post_filter.hlsl) on
+# the display image into an RGBA16F output texture with color_pi and output_rne16 = 1 (its out_p buffer untouched); also
+# w64/post_filter_c1_s4 (FP32) against HIP's. Frames marked f32: an RGBA32F texture, output_rne16 = 0, pi 1: the texels
+# are HIP's FP32 output with alpha 1.
 # dec_scale / pi choices drive the stored values into FP16 subnormals, past 65504 (clamp), to +-infinity (clamp) and
 # NaN (by the argument, with a payload, or from the exposure pair); ties of the FP16 rounding come from the many values.
 # (ow, oh, pi, dec_scale: a float, or "expo_nan" = the exposure pair's e is NaN)
 STORE_FRAMES = [(96, 54, 1.0, None), (99, 57, 1.375, None), (161, 83, 1.0, 2.0 ** -22), (161, 83, 1.375, 2.0 ** -22),
                 (1281, 140, 1.0, 2.0 ** -8), (1281, 140, 1.25, 2.0 ** -12), (40, 16, 1.0, float("inf")),
                 (40, 16, 1.375, float("-inf")), (7, 5, 1.0, "expo_nan"), (99, 57, 1.375, "nan_payload"),
-                (161, 83, 30000.0, None)]
+                (161, 83, 30000.0, None), (96, 54, 1.0, None, "f32"), (1281, 140, 1.0, 2.0 ** -12, "f32")]
 TEX_FILL16 = 0x5A5A
 
 
@@ -285,7 +288,9 @@ def _s32(bits):
 def store_cases(rng):
     """[(HIP FP32 filter case, HIP output-copy case, D3D12 filter case, pi, ow, oh, label)]"""
     out = []
-    for ow, oh, pi, ds in STORE_FRAMES:
+    for fr in STORE_FRAMES:
+        ow, oh, pi, ds = fr[:4]
+        f32tex = len(fr) > 4 and fr[4] == "f32"
         dw, dh = MP.recon_size_for(ow), MP.recon_size_for(oh)
         disp = _display(rng, dw, dh)
         e = float(np.float32(rng.uniform(0.5, 2.0)))
@@ -313,8 +318,9 @@ def store_cases(rng):
                        grid=PZ.PS._cdiv(ow, 128) * PZ.PS._cdiv(PZ.PS._cdiv(oh, 2), 16),
                        args=[base[0], ("out", n16 + SLACK)] + base[2:] +
                             [("u32", _s32(_f32_bits(np.float32(pi)))), ("u32", 8 * ow)])
-        label = f"O {ow}x{oh} pi {pi} dec_scale {ds if ds is not None else '0.01/e'} ({o16['hip_kernel']})"
-        out.append((f32, o16, pi, ow, oh, label))
+        label = f"O {ow}x{oh} pi {pi} dec_scale {ds if ds is not None else '0.01/e'} " + \
+            ("(RGBA32F: post_filter_c1_s4)" if f32tex else f"({o16['hip_kernel']})")
+        out.append((f32, None if f32tex else o16, pi, ow, oh, label))
     return out
 
 
@@ -347,16 +353,16 @@ def store_run(build, rocm, seeds):
         for ci, (f32, o16, pi, ow, oh, label) in enumerate(store_cases(rng)):
             name = f"store_s{si}_{ci}"
             w32 = OPS.hip_run(g, mod, f32)[0]
-            w16 = OPS.hip_run(g, mod, o16)[0]
+            w16 = OPS.hip_run(g, mod, o16)[0] if o16 is not None else None
             lines += OPS.replay_lines(f"{name}_filter", f32, cdir)
-            st = {"kernel": "l_direct_store", "co": "post_w64.co", "tag": "w64", "grid": PZ.PS._cdiv(ow * oh, 256),
-                  "block": 256, "args": [("buf", w32[:ow * oh * 12]), ("u32", ow), ("u32", oh)],
-                  "direct": [("color", OPS.DXGI_R32G32B32A32_FLOAT, 8, 8, bytes(8 * 8 * 16)),
-                             ("depth", OPS.DXGI_R32_FLOAT, 8, 8, bytes(8 * 8 * 4)),
-                             ("motion", OPS.DXGI_R32G32_FLOAT, 8, 8, bytes(8 * 8 * 8)),
-                             ("output", OPS.DXGI_R16G16B16A16_FLOAT, ow, oh,
-                              np.full(ow * oh * 4, TEX_FILL16, np.uint16).tobytes())],
-                  "direct_params": (0, 0, 8, 8, repr(float(np.float32(pi))), 1)}
+            f16 = o16 is not None
+            st = dict(f32, kernel="l_post_filter_direct", hip_kernel=None, args=f32["args"],
+                      direct=[("color", OPS.DXGI_R32G32B32A32_FLOAT, 8, 8, bytes(8 * 8 * 16)),
+                              ("depth", OPS.DXGI_R32_FLOAT, 8, 8, bytes(8 * 8 * 4)),
+                              ("motion", OPS.DXGI_R32G32_FLOAT, 8, 8, bytes(8 * 8 * 8)),
+                              ("output", OPS.DXGI_R16G16B16A16_FLOAT if f16 else OPS.DXGI_R32G32B32A32_FLOAT, ow, oh,
+                               bytes([0x5A]) * (ow * oh * (8 if f16 else 16)))],
+                      direct_params=(0, 0, 8, 8, repr(float(np.float32(pi))), 1 if f16 else 0))
             body = OPS.replay_lines(f"{name}_store", st, cdir)
             lines += body[:-1] + [f"direct_out {name}_store.tex", ""]
             if neg is None and st["grid"] >= 4:
@@ -375,7 +381,19 @@ def store_run(build, rocm, seeds):
     def read(path):
         return open(path, "rb").read() if os.path.exists(path) else b""
 
-    def tex_judge(path, w16, ow, oh):
+    def tex_judge(path, w16, ow, oh, w32=None, outp_path=None):
+        if outp_path is not None:   # the direct form's out_p: untouched
+            a = np.frombuffer(read(outp_path), np.uint8)
+            if not (a.size and np.all(a == OPS.D3D12_SENTINEL)):
+                return False, {"out_p_written": True}
+        if w16 is None:   # RGBA32F: HIP's FP32 output, alpha 1
+            t = np.frombuffer(read(path), np.uint32)
+            ref = np.frombuffer(w32[:ow * oh * 12], np.uint32).reshape(-1, 3)
+            if t.size != ow * oh * 4:
+                return False, {"bytes": ow * oh * 16, "missing": True}
+            t = t.reshape(-1, 4)
+            d = int(np.sum(t[:, :3] != ref)) + int(np.sum(t[:, 3] != 0x3F800000))
+            return d == 0, {"bytes": ow * oh * 16, "format": "RGBA32F", "differ_words": d}
         n16 = ow * oh * 8
         t = np.frombuffer(read(path), np.uint8)
         h = np.frombuffer(w16, np.uint8)
@@ -396,7 +414,8 @@ def store_run(build, rocm, seeds):
                 "differ": int(np.sum((got32 != b32) & m)) if got32.size == b32.size else -1,
                 "unwritten_bad": int(np.sum(~m & ((b32 != OPS.HIP_SENTINEL) | (got32 != OPS.D3D12_SENTINEL))))
                 if got32.size == b32.size else -1}
-        ok_t, tex = tex_judge(os.path.join(cdir, f"{name}_store.tex"), w16, ow, oh)
+        ok_t, tex = tex_judge(os.path.join(cdir, f"{name}_store.tex"), w16, ow, oh, w32,
+                              os.path.join(cdir, f"{name}_store.o0"))
         cls = _store_classes(np.frombuffer(w32[:ow * oh * 12], np.float32), pi)
         for k, v in cls.items():
             classes[k] = classes.get(k, 0) + v
@@ -405,11 +424,11 @@ def store_run(build, rocm, seeds):
                              "stored_values": cls})
     if neg:
         t = next(x for x in todo if x[0] == neg)
-        ok, o = tex_judge(os.path.join(cdir, f"negative_{neg}_store.tex"), t[3], t[5], t[6])
+        ok, o = tex_judge(os.path.join(cdir, f"negative_{neg}_store.tex"), t[3], t[5], t[6], t[2])
         res["negative_control"] = {"case": neg, "half_grid": True, "caught": not ok, "differ": o.get("differ")}
     res["stored_value_classes"] = classes
     res["summary"] = {"cases": len(res["cases"]), "identical": sum(c["identical"] for c in res["cases"]),
-                      "rgba16f_bytes": sum(c["store_rgba16f"]["bytes"] for c in res["cases"]),
+                      "texture_bytes": sum(c["store_rgba16f"].get("bytes", 0) for c in res["cases"]),
                       "filter_f32_bytes": sum(c["filter_f32"]["bytes"] for c in res["cases"])}
     res["pass"] = (r.returncode == 0 and bool(neg) and res["negative_control"]["caught"] and
                    res["summary"]["identical"] == res["summary"]["cases"] > 0 and
@@ -425,7 +444,7 @@ def main(argv=None):
     ap.add_argument("--seeds", type=int, default=2)
     ap.add_argument("--kernels", default=",".join(KINDS))
     ap.add_argument("--direct", action="store_true", help="the direct forms instead (see DIRECT)")
-    ap.add_argument("--store", action="store_true", help="Model L's output-copy store instead (see STORE_FRAMES)")
+    ap.add_argument("--store", action="store_true", help="Model L's direct filter instead (see STORE_FRAMES)")
     ap.add_argument("--json")
     a = ap.parse_args(argv)
     if not a.run:
