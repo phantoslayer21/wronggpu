@@ -1421,8 +1421,7 @@ class Context {
         return *err = "model K: the network's kernel files are missing in " + kernels_dir_ + " (reinstall WrongGPU)",
                false;
     } else if (format == 2) {
-      model_path_ = model_dir_ + (model_l ? std::string("\\") + wgrt::model_info(wgrt::ModelId::L).model_subdir : "") +
-                    "\\model.wgcm";
+      model_path_ = wgrt::model_wgcm_path(model_dir_, model_l ? wgrt::ModelId::L : wgrt::ModelId::M);
       if (!exists(model_path_))
         return *err = "no converted model at " + model_path_ + " (run the WrongGPU installer)", false;
       if (!wg_file_exists(map_)) return *err = "the converter map " + map_ + " is missing (reinstall WrongGPU)", false;
