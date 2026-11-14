@@ -9,6 +9,7 @@
 
 #include "wg_core/coexist.h"
 #include "wg_core/fingerprint.h"
+#include "wg_core/known_releases.h"
 #include "wg_core/logtail.h"
 #include "wg_core/optikeys.h"
 #include "wg_core/record.h"
@@ -32,10 +33,55 @@ wstring TempFolder() {
 void Put(const wstring& path, const string& data) { EnsureDir(Parent(path)); WriteFileAtomic(path, data.data(), data.size()); }
 Tool ToolOf(const string& bytes, const wstring& name = L"") { return IdentifyBytes((const uint8_t*)bytes.data(), bytes.size(), name).tool; }
 string Utf16(const char* s) { string r; for (; *s; ++s) { r += *s; r += '\0'; } return r; }
+// 0.6.1: a minimal PE32+ DLL whose export table names `names` (Microsoft's public PE/COFF documentation, ".edata"; as
+// tests/mockpe.py _export_table): never loaded, only read. Every function points at the section start.
+void Le(string& b, uint64_t v, int n) { for (int i = 0; i < n; ++i) b += char((v >> (8 * i)) & 0xFF); }
+string ExportDll(const std::vector<string>& names) {
+    const uint32_t sa = 0x1000, fa = 0x200, k = (uint32_t)names.size();
+    const uint32_t funcs = sa + 40, nameArr = funcs + 4 * k, ords = nameArr + 4 * k, strs = ords + 2 * k;
+    string strings = "plugin.asi";
+    strings += '\0';
+    std::vector<uint32_t> nameRva;
+    for (auto& n : names) { nameRva.push_back(strs + (uint32_t)strings.size()); strings += n; strings += '\0'; }
+    string sec;
+    Le(sec, 0, 4); Le(sec, 0, 4); Le(sec, 0, 2); Le(sec, 0, 2); Le(sec, strs, 4); Le(sec, 1, 4); Le(sec, k, 4); Le(sec, k, 4);
+    Le(sec, funcs, 4); Le(sec, nameArr, 4); Le(sec, ords, 4);
+    for (uint32_t i = 0; i < k; ++i) Le(sec, sa, 4);
+    for (uint32_t i = 0; i < k; ++i) Le(sec, nameRva[i], 4);
+    for (uint32_t i = 0; i < k; ++i) Le(sec, i, 2);
+    sec += strings;
+    const uint32_t edSize = (uint32_t)sec.size();
+    while (sec.size() % fa) sec += '\0';
+    string h = "MZ";
+    h.resize(0x3C, '\0');
+    Le(h, 0x40, 4);
+    h += string("PE\0\0", 4);
+    Le(h, 0x8664, 2); Le(h, 1, 2); Le(h, 0, 4); Le(h, 0, 4); Le(h, 0, 4); Le(h, 240, 2); Le(h, 0x2022, 2);
+    string opt(240, '\0');
+    auto put32 = [&](size_t o, uint32_t v) { for (int i = 0; i < 4; ++i) opt[o + i] = char((v >> (8 * i)) & 0xFF); };
+    opt[0] = 0x0B; opt[1] = 0x02;  // PE32+
+    put32(32, sa); put32(36, fa); put32(56, sa + (uint32_t)sec.size()); put32(60, fa); put32(108, 16); put32(112, sa); put32(116, edSize);
+    h += opt;
+    string name = ".edata";
+    name.resize(8, '\0');
+    h += name;
+    Le(h, sec.size(), 4); Le(h, sa, 4); Le(h, sec.size(), 4); Le(h, fa, 4); Le(h, 0, 4); Le(h, 0, 4); Le(h, 0, 2); Le(h, 0, 2); Le(h, 0x40000040u, 4);
+    h.resize(fa, '\0');
+    return h + sec;
+}
+bool Has(const std::vector<wstring>& v, const wstring& s) { for (auto& x : v) if (IEq(x, s)) return true; return false; }
 }  // namespace
 
 int main() {
     try {
+        // ---- 0.6.1: the 0.6.0 release's files, the RR plugin among them, are known (known_releases.h) ------------------
+        {
+            int rows060 = 0;
+            bool rrPlugin = false;
+            for (auto& f : kKnownFiles)
+                if (!wcscmp(f.version, L"0.6.0")) { ++rows060; rrPlugin = rrPlugin || !wcscmp(f.name, L"plugins\\WrongGPU-RR.asi"); }
+            require(rows060 >= 5 && rrPlugin, "known_releases.h has 0.6.0's files, its RR plugin among them");
+        }
         // ---- marker scan -------------------------------------------------------------------------------------------
         const char* const needles[] = {"reshade", "dxvk", "optiscaler"};
         const string text = "xx RESHADE yy" + Utf16("DxVk") + "zz";
@@ -694,6 +740,119 @@ int main() {
         bool xessWarn = false, plug = false;
         for (auto& w : all.warnings) { xessWarn |= w.kind == L"xess-no-depth"; plug |= w.kind == L"plugin-not-hooked"; }
         require(all.found && xessWarn && plug && all.plugin == L"not-hooked", "ReadLastRun: XeSS without depth (OptiScaler.log), the plugin's log in its own folder");
+
+        // ---- 0.6.1: a plugin exporting WrongGPU RR's marker is WrongGPU's own, whatever its name or hash -----
+        {
+            string hdr;
+            require(ReadAll(Join(FromUtf8(WG_TEST_LOGS), L"..\\..\\..\\rr_f\\proxy\\include\\wg_rr_settings_contract.h"), hdr), "the RR settings contract header is there");
+            require(hdr.find(string("#define WG_RR_CONTRACT_EXPORT \"") + kRrContractExport + "\"") != string::npos,
+                    "RR marker: kRrContractExport is the RR plugin's WG_RR_CONTRACT_EXPORT (wg_rr_settings_contract.h)");
+            const wstring kitDir = Join(dir, L"kit-game"), x = Join(kitDir, L"Game.exe");
+            Put(x, "MZ synthetic game");
+            const string kit = ExportDll({"WrongGPU_RrOther", kRrContractExport}), plain = ExportDll({"InitPlugin", "WrongGPU_RrOther"});
+            Put(Join(kitDir, L"plugins\\KitRR.asi"), kit);
+            Put(Join(kitDir, L"OptiScaler\\plugins\\renamed.asi"), kit + "another build of it");  // another name, another hash
+            Put(Join(kitDir, L"plugins\\Other.asi"), plain);
+            Put(Join(kitDir, L"plugins\\Words.asi"), string("MZ not a PE file, only the words ") + kRrContractExport);
+            require(ExportsRrContract(Join(kitDir, L"plugins\\KitRR.asi")) && ExportsRrContract(Join(kitDir, L"OptiScaler\\plugins\\renamed.asi")) &&
+                        !ExportsRrContract(Join(kitDir, L"plugins\\Other.asi")) && !ExportsRrContract(Join(kitDir, L"plugins\\Words.asi")) &&
+                        !ExportsRrContract(Join(kitDir, L"plugins\\Missing.asi")),
+                    "RR marker: the marker from the PE export table (never its text alone, never a missing file)");
+            const auto ourKit = OurPluginsFromOtherPackages(kitDir, nullptr), foreign = ForeignPlugins(kitDir, nullptr);
+            require(ourKit.size() == 2 && Has(ourKit, L"plugins\\KitRR.asi") && Has(ourKit, L"OptiScaler\\plugins\\renamed.asi"),
+                    "RR marker: both copies are WrongGPU RR from another package");
+            require(foreign.size() == 2 && Has(foreign, L"plugins\\Other.asi") && Has(foreign, L"plugins\\Words.asi"),
+                    "RR marker: they are not other setups' plugins (so never moved aside); the others still are");
+            Context ctx;
+            ctx.logFile = Join(dir, L"kit.log");
+            const CoexistReport r = AssessCoexistence(ctx, x, kitDir, nullptr);
+            const Finding* kf = nullptr;
+            for (auto& f : r.findings) if (f.what == L"WrongGPU RR (from another package)") kf = &f;
+            require(kf && kf->tool == Tool::WrongGPU && kf->decision == Decision::Inform && kf->files.size() == 2 &&
+                        kf->evidence.find(FromUtf8(kRrContractExport)) != wstring::npos,
+                    "RR marker: the rules table shows them as \"WrongGPU RR (from another package)\" (inform, by the export)");
+            require(r.foreignPlugins == foreign && !Has(r.foreignPlugins, L"plugins\\KitRR.asi") && IsFile(Join(kitDir, L"plugins\\KitRR.asi")),
+                    "RR marker: the report's other-setup plugins (what an install moves aside with the OK) leave them out");
+            // only those copies: an install folder with just WrongGPU RR from another package has no other-setup plugins at all
+            DeleteFileW(Join(kitDir, L"plugins\\Other.asi").c_str());
+            DeleteFileW(Join(kitDir, L"plugins\\Words.asi").c_str());
+            require(AssessCoexistence(ctx, x, kitDir, nullptr).foreignPlugins.empty(), "RR marker: only WrongGPU RR copies: nothing for an install to move aside");
+        }
+
+        // ---- 0.6.1: what an install moves aside of other setups' plugins (PlanPluginsAside) ------------------------------
+        {
+            const wstring g = Join(dir, L"plan-game"), exeDir = Join(g, L"bin\\x64");
+            const string a = "another setup's plugin A (synthetic)", b = "another setup's plugin B (synthetic)";
+            Put(Join(exeDir, L"plugins\\A.asi"), a);
+            Put(Join(exeDir, L"plugins\\B.asi"), b);
+            const std::vector<wstring> both = {L"plugins\\A.asi", L"plugins\\B.asi"};
+            const wstring ha = Sha256Bytes(a.data(), a.size()), hb = Sha256Bytes(b.data(), b.size());
+            const std::vector<std::pair<wstring, wstring>> agreedBoth = {{L"plugins\\A.asi", ha}, {L"plugins\\B.asi", hb}};
+            // the player agreed to the plugins the question listed (with their bytes then): exactly those move, a plugin not
+            // listed keeps RR out
+            PluginPlan p = PlanPluginsAside(exeDir, exeDir, both, agreedBoth, {});
+            require(p.moveAside == both && p.blocking.empty() && !p.outside, "plugin plan: both listed and agreed: both moved aside, RR goes in");
+            p = PlanPluginsAside(exeDir, exeDir, both, {{L"plugins\\A.asi", ha}}, {});
+            require(p.moveAside.size() == 1 && IEq(p.moveAside[0], L"plugins\\A.asi") && p.blocking.size() == 1 && IEq(p.blocking[0], L"plugins\\B.asi"),
+                    "plugin plan: a plugin the question didn't list is never moved; it keeps RR out");
+            // consent is bound to bytes: a listed plugin that changed after the question is not moved (it keeps RR out)
+            p = PlanPluginsAside(exeDir, exeDir, both, {{L"plugins\\A.asi", ha}, {L"plugins\\B.asi", ha}}, {});
+            require(p.moveAside.size() == 1 && IEq(p.moveAside[0], L"plugins\\A.asi") && p.blocking.size() == 1 && IEq(p.blocking[0], L"plugins\\B.asi"),
+                    "plugin plan: a listed plugin whose bytes changed since the question is not moved; it keeps RR out");
+            p = PlanPluginsAside(exeDir, exeDir, both, {{L"plugins\\A.asi", L""}}, {});
+            require(p.moveAside.empty() && p.blocking == both, "plugin plan: a listed plugin without its hash is agreed to nothing");
+            p = PlanPluginsAside(exeDir, exeDir, both, {}, {});
+            require(p.moveAside.empty() && p.blocking == both, "plugin plan: no OK: nothing moved, RR out");
+            // a Repair after "Move them aside": the plugins the earlier install moved aside are back from its backup; byte for
+            // byte those go aside again on that OK, a different file under that name is asked about
+            const std::map<wstring, wstring> before = {{L"plugins\\a.asi", Sha256Bytes(a.data(), a.size())}, {L"plugins\\b.asi", Sha256Bytes(a.data(), a.size())}};
+            p = PlanPluginsAside(exeDir, exeDir, both, {}, before);
+            require(p.moveAside.size() == 1 && IEq(p.moveAside[0], L"plugins\\A.asi") && p.blocking.size() == 1 && IEq(p.blocking[0], L"plugins\\B.asi"),
+                    "plugin plan: moved before with the OK: the same file goes aside again; another file under a moved name keeps RR out");
+            // the install folder above the exe folder: the paths moved are the install folder's
+            p = PlanPluginsAside(exeDir, g, both, agreedBoth, {});
+            require(p.moveAside.size() == 2 && IEq(p.moveAside[0], L"bin\\x64\\plugins\\A.asi") && p.blocking.empty(),
+                    "plugin plan: install folder above the exe folder: moved by their paths in the install folder");
+            const std::map<wstring, wstring> beforeSplit = {{L"bin\\x64\\plugins\\a.asi", Sha256Bytes(a.data(), a.size())}};
+            p = PlanPluginsAside(exeDir, g, {L"plugins\\A.asi"}, {}, beforeSplit);
+            require(p.moveAside.size() == 1 && IEq(p.moveAside[0], L"bin\\x64\\plugins\\A.asi"), "plugin plan: install folder above the exe folder: moved before, by that path");
+            // the exe folder outside the install folder: nothing can be moved, so RR stays out (never RR beside them)
+            p = PlanPluginsAside(exeDir, Join(dir, L"elsewhere"), both, agreedBoth, {});
+            require(p.moveAside.empty() && p.blocking == both && p.outside, "plugin plan: exe folder outside the install folder: nothing moved, RR out");
+            p = PlanPluginsAside(exeDir, Join(g, L"bin\\x6"), both, agreedBoth, {});  // (a folder whose name is a prefix of the exe folder's)
+            require(p.moveAside.empty() && p.outside, "plugin plan: never by a bare name prefix");
+            // the record of the install folder names WrongGPU's own plugin by its path there
+            Record rec;
+            Entry own; own.action = L"copy"; own.rel = L"bin\\x64\\plugins\\A.asi"; own.inst = Sha256Bytes(a.data(), a.size()); rec.e.push_back(own);
+            const auto fp = ForeignPlugins(exeDir, &rec, g);
+            require(fp.size() == 1 && IEq(fp[0], L"plugins\\B.asi"), "plugin plan: a record of the install folder names its plugins by their paths there");
+            require(ForeignPlugins(exeDir, &rec, Join(dir, L"elsewhere")).size() == 2, "plugin plan: a record of another folder names none of them");
+        }
+
+        // ---- 0.6.1: the install folder is not the exe folder: the exe folder's record names its plugins ---
+        {
+            const wstring root = Join(dir, L"split-game"), exeDir = Join(root, L"bin\\x64"), x = Join(exeDir, L"Game.exe");
+            Put(x, "MZ synthetic game");
+            const string rrAsi = "WrongGPU-RR.asi of an earlier install (synthetic)";
+            Put(Join(exeDir, L"plugins\\WrongGPU-RR.asi"), rrAsi);
+            Record rec;
+            rec.version = L"0.6.0"; rec.format = 2; rec.game = exeDir; rec.exe = x; rec.status = L"experimental"; rec.model = L"m.wgcm";
+            Entry ent; ent.action = L"copy"; ent.rel = L"plugins\\WrongGPU-RR.asi"; ent.inst = Sha256Bytes(rrAsi.data(), rrAsi.size()); ent.owner = L"wg";
+            rec.e.push_back(ent);
+            SaveRecord(RecordPath(exeDir), rec);
+            Context ctx;
+            ctx.logFile = Join(dir, L"split.log");
+            require(AssessCoexistence(ctx, x, root, nullptr).foreignPlugins.empty(),
+                    "split folders: install folder above the exe folder: WrongGPU's RR .asi that the exe folder's record installed is not another setup's");
+            Put(Join(exeDir, L"plugins\\Other.asi"), "another setup's plugin (synthetic)");
+            const auto both = AssessCoexistence(ctx, x, root, nullptr).foreignPlugins;
+            require(both.size() == 1 && IEq(both[0], L"plugins\\Other.asi"), "split folders: ...another setup's plugin there still is");
+            // with the record, an RR .asi changed since the install (not the file installed) is not ours
+            Put(Join(exeDir, L"plugins\\WrongGPU-RR.asi"), rrAsi + " changed");
+            require(Has(ForeignPlugins(exeDir, &rec), L"plugins\\WrongGPU-RR.asi"), "RR plugin changed: an RR .asi that is no longer the installed file is not counted as ours");
+            Put(Join(exeDir, L"plugins\\WrongGPU-RR.asi"), rrAsi);
+            require(!Has(ForeignPlugins(exeDir, &rec), L"plugins\\WrongGPU-RR.asi"), "RR plugin changed: the installed file with the record: ours");
+        }
 
         RemoveTree(dir);
         std::printf("coexist-core: %d checks passed\n", checks);

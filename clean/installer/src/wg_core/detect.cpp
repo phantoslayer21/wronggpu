@@ -486,12 +486,22 @@ GameTarget InspectGame(Context& ctx, const wstring& exe, const wstring& displayN
     t.antiCheat = FindAntiCheat(exe);
     t.conflicts = FindConflicts(t.dir, t.exeDir);
     if (t.installed) {  // the OptiScaler files of our own earlier install are not "another mod", nor is the log it wrote
-        std::set<wstring> ours;
-        for (auto& e : t.record.e) if (e.action == L"copy") ours.insert(Lower(e.rel));
-        if (HostedRecord(t.record)) ours.insert(L"optiscaler.log");
-        const std::set<wstring> optiHashes = HostedRecord(t.record) ? OurOptiHashes(ctx, &t.record) : std::set<wstring>{};
+        // 0.6.1: a DLL under a name the record copied counts as ours only with the record's hash; another setup's OptiScaler
+        // that replaced WrongGPU's proxy is another mod (Repair and Update ask the switch question for it). Settings and
+        // logs of our setup are not asked about (OptiScaler's menu saves its ini, its OptiScaler writes the log); this decides
+        // the question only: what a restore or install deletes or overwrites goes by bytes (record.h, the ownership rule).
+        std::map<wstring, wstring> ours;  // lower-case name -> installed hash
+        for (auto& e : t.record.e) if (e.action == L"copy") ours[Lower(e.rel)] = e.inst;
+        if (HostedRecord(t.record)) ours[L"optiscaler.log"] = L"";
+        auto isOurs = [&](const wstring& f) {
+            const auto it = ours.find(Lower(f));
+            if (it == ours.end()) return false;
+            if (IEq(f, L"OptiScaler.ini")) return OptiSetupIsOurs(t.dir, t.record);  // (what the scan asks about; the restore goes by bytes)
+            if (EndsWithI(f, L".ini") || EndsWithI(f, L".log")) return true;
+            return !it->second.empty() && IEq(Sha256File(Join(t.dir, f)), it->second);
+        };
         auto& mf = t.conflicts.modFiles;
-        mf.erase(std::remove_if(mf.begin(), mf.end(), [&](const wstring& f) { return ours.count(Lower(f)) > 0 || IsOurOptiScaler(optiHashes, Join(t.dir, f)); }), mf.end());
+        mf.erase(std::remove_if(mf.begin(), mf.end(), isOurs), mf.end());
         if (mf.empty() && t.conflicts.outside.empty()) t.conflicts.mods.clear();
     }
     t.coexist = AssessCoexistence(ctx, exe, t.dir, t.installed ? &t.record : nullptr);

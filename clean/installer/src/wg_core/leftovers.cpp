@@ -20,13 +20,16 @@ struct KnownSet {
 KnownSet KnownFiles(Context& ctx) {
     KnownSet k;
     for (auto& f : kKnownFiles) { k.byHash.emplace(Lower(f.sha256), Known{f.version, f.name}); k.sizes.insert(f.size); }
-    if (ctx.data)
-        for (auto& f : *ctx.data) {
-            const wstring rel = f.rel;
-            if (!EndsWithI(rel, L".dll") && !EndsWithI(rel, L".asi") && !StartsWithI(BaseName(rel), L"wronggpu-")) continue;
-            k.byHash.emplace(Lower(f.sha256), Known{ctx.data->version, BaseName(rel)});
-            k.sizes.insert(f.size);
-        }
+    auto add = [&](const PayloadFile& f) {
+        const wstring rel = f.rel;
+        if (!EndsWithI(rel, L".dll") && !EndsWithI(rel, L".asi") && !StartsWithI(BaseName(rel), L"wronggpu-")) return;
+        k.byHash.emplace(Lower(f.sha256), Known{ctx.data->version, BaseName(rel)});
+        k.sizes.insert(f.size);
+    };
+    if (ctx.data) {
+        for (auto& f : *ctx.data) add(f);
+        for (size_t i = 0; i < ctx.data->rrCount; ++i) add(ctx.data->rrFiles[i]);  // 0.6.1: the RR plugin builds too (WrongGPU-RR.asi)
+    }
     return k;
 }
 }  // namespace
@@ -34,6 +37,11 @@ KnownSet KnownFiles(Context& ctx) {
 // The files an older direct install wrote beside its DLLs in an engine plugin folder (removed only beside a DLL of ours).
 static const wchar_t* const kDirectCompanions[] = {L"wronggpu.ini", L"wronggpu-fsr.log", L"wronggpu-fsr.log.old",
                                                     L"wronggpu-license.txt", L"wronggpu-notices.txt"};
+
+bool KnownReleaseFile(Context& ctx, const wstring& path) {
+    const KnownSet k = KnownFiles(ctx);
+    return IsFile(path) && k.sizes.count(FileSize(path)) && k.byHash.count(Lower(Sha256File(path)));
+}
 
 bool ProvablyOurs(Context& ctx, const wstring& path) {
     const Fingerprint f = IdentifyFile(path);
@@ -120,6 +128,19 @@ std::vector<Leftover> FindLeftovers(Context& ctx, const wstring& dir) {
     }
     std::sort(out.begin(), out.end(), [](const Leftover& a, const Leftover& b) { return Lower(a.rel) < Lower(b.rel); });
     return out;
+}
+
+bool LeftoversUsedByOtherSetup(Context& ctx, const wstring& dir, const std::vector<Leftover>& files) {
+    if (files.empty() || dir.empty() || IsFile(RecordPath(dir)) || !FindConflicts(dir, dir).modsFound()) return false;
+    // WrongGPU's own OptiScaler setup that lost its record: WrongGPU's menu plugin is among them, by its hash (a build of
+    // WrongGPU.asi from a release or this program's payload), wherever it is. Never by a file's name, and never by the
+    // licence text (any package that ships WrongGPU's files carries it)
+    const KnownSet k = KnownFiles(ctx);
+    for (auto& f : files) {
+        const auto it = k.byHash.find(Lower(f.sha));
+        if (it != k.byHash.end() && IEq(BaseName(it->second.name), BaseName(kAsiPlugin))) return false;
+    }
+    return true;
 }
 
 wstring LeftoverSummary(const std::vector<Leftover>& files) {
@@ -215,6 +236,7 @@ std::vector<wstring> AdoptLeftovers(Context& ctx, const wstring& exe, const wstr
         m.e.push_back(e);
     }
     // folders that already exist are not provably ours: no "dir" entries
+    SetRuntimeLines(m, dir, Parent(exe));  // the adopted install's own wronggpu-* files
     const wstring state = StateDir(dir);
     EnsureDir(state);
     SaveRecord(RecordPath(dir), m);

@@ -191,6 +191,12 @@ wstring PlainWarning(const wstring& w) {
         const wstring game = NameBetween(w, L"isn't offered in ", L", and the game", L"this game");
         return L"WrongGPU's Ray Reconstruction isn't available in " + game + L" with the OptiScaler you chose. It needs the WrongGPU edition of OptiScaler, which the launcher downloads when it can. The game keeps its own ray tracing.";
     }
+    // a player's original that could not go back (another file is at its place now): kept, and where (record.h, the ownership rule)
+    if (w.rfind(kPartlyRestored, 0) == 0) {
+        const size_t at = w.find(L" is kept in ");
+        return L"A file WrongGPU had replaced or moved aside couldn't go back, because another file is at its place now; that file was left as it is." +
+               (at == wstring::npos ? wstring() : L" Your original is kept in " + w.substr(at + 12));
+    }
     if (Has(w, L"The game replaced ")) return L"The game had replaced one of its files since WrongGPU was installed (probably a game update). Its newer file was kept.";
     if (Has(w, L"exists again with different content") || Has(w, L"The backup folder was kept"))
         return L"A game file the game changed was kept as it is. Its original stays in a backup folder in the game's folder.";
@@ -327,17 +333,22 @@ wstring PlainTaskCause(const wstring& raw, int what) {
 // ---- the install's own questions and results (moved from launcher_ui.cpp, which uses them) ----
 // Clean up / Adopt's question: what the files are in words; their names wait behind Show details (as on the game page,
 // where they are the tooltip)
-wstring LeftoversText(const wstring& name, const std::vector<Leftover>& files, bool clean) {
+wstring LeftoversText(const wstring& name, const std::vector<Leftover>& files, bool clean, bool otherSetup) {
     std::vector<wstring> vers;
     for (auto& f : files)
         if (std::find(vers.begin(), vers.end(), f.version) == vers.end()) vers.push_back(f.version);
     wstring ver;
     for (size_t k = 0; k < vers.size(); ++k) ver += (k == 0 ? L"" : k + 1 == vers.size() ? L" and " : L", ") + vers[k];
     const wstring what = (files.size() == 1 ? wstring(L"1 file") : std::to_wstring(files.size()) + L" files") + L" from WrongGPU " + ver + L" that the launcher didn't install.";
-    return clean ? L"Remove the leftover WrongGPU files from " + name + L"?\n\n" + what + L" Only these files are removed."
-                 : L"Adopt the leftover WrongGPU files as an install of " + name + L"?\n\n" + what + L" Then Update, Repair and Uninstall work as for any install.";
+    // 0.6.1: beside an OptiScaler WrongGPU didn't install they are another mod's setup's: said first, Cancel the default
+    const wstring other = otherSetup ? L" Another mod's setup uses them: an OptiScaler that WrongGPU didn't install is next to them. Removing or adopting them "
+                                       L"can break that mod, so leave them alone unless you removed it."
+                                     : L"";
+    return clean ? L"Remove the leftover WrongGPU files from " + name + L"?\n\n" + what + other + L" Only these files are removed."
+                 : L"Adopt the leftover WrongGPU files as an install of " + name + L"?\n\n" + what + other + L" Then Update, Repair and Uninstall work as for any install.";
 }
-std::vector<lui::DialogButton> LeftoversButtons(bool clean) {
+std::vector<lui::DialogButton> LeftoversButtons(bool clean, bool otherSetup) {
+    if (otherSetup) return {{L"Show details", 2}, {clean ? L"Clean up anyway" : L"Adopt anyway", 1, false, clean}, {L"Leave them alone", 0, true}};
     return {{L"Show details", 2}, {L"Cancel", 0}, {clean ? L"Clean up" : L"Adopt", 1, true, clean}};
 }
 // "Installed for this user" with the games that kept their own uninstall entry (an adoption that failed), if any

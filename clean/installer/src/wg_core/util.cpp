@@ -212,7 +212,7 @@ std::vector<wstring> FindFilesNamed(const wstring& root, const wchar_t* name, si
             wstring n = fd.cFileName;
             if (n == L"." || n == L"..") continue;
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                if (depth < maxDepth && !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && !IEq(n, kStateDirName) && !IEq(n, kLegacyStateDir))
+                if (depth < maxDepth && !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && !IEq(n, kStateDirName) && !IEq(n, kLegacyStateDir) && !IEq(n, kKeptDirName))
                     stack.push_back({Join(dir, n), depth + 1});
             } else if (IEq(n, name)) out.push_back(Join(dir, n));
         } while (FindNextFileW(h, &fd));

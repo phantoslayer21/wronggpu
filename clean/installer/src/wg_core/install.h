@@ -9,7 +9,16 @@
 namespace wg {
 
 struct CompareDll { wstring path, version, game; std::vector<int> v; };
-struct Consent { bool moveMods = false, removeOld = false; };
+// movePlugins (0.6.1): other setups' plugins aside (ForeignPlugins): those in `plugins` (paths relative to the exe folder, as
+// the player's question listed them, each with the SHA-256 it had then), or every one there when it is empty
+// (--switch-plugins: as they are when the install decides, before anything changes). moveMods: the same for the other
+// setup's files of the switch question (`mods`, relative to the install folder). A file is moved only while its bytes are
+// the ones agreed to (or byte for byte what the earlier install moved aside with the OK); one changed since is never moved.
+using AgreedFiles = std::vector<std::pair<wstring, wstring>>;  // (path, SHA-256)
+struct Consent {
+    bool moveMods = false, removeOld = false, movePlugins = false;
+    AgreedFiles plugins, mods;
+};
 
 void RemoveEarlierDirect(Context& ctx, const GameTarget& target, Ui& ui, std::vector<wstring>& warnings);
 wstring CompareRecordFile();

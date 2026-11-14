@@ -33,6 +33,11 @@ namespace wg {
 //                                    the player's rr_config_fix=on changed; flags: c created, s section added, w was read-only,
 //                                    r set read-only, b backup kept; previous: "absent" or "=value" of the key before; folder:
 //                                    the topmost folder the fix created, or "-")
+//   runtime <TAB> folder <TAB> pattern   (0.6.1: files the install's own programs write while the game runs, by WrongGPU's own
+//                                    unique name: in that folder (relative to the install folder, "." for it) the files matching
+//                                    pattern, which starts with "wronggpu-"; the only files an uninstall removes by name)
+// Copy entries of settings files (wronggpu.ini, OptiScaler.ini, the RR plugin's): installedSha256 is the hash of what the
+// launcher last wrote there (every write of the launcher updates it).
 // Owners: wg (WrongGPU's payload and its folders), wg-optibundle (OptiScaler files copied from the player's package:
 // ours to remove), adopted (a player's file used but never deleted), moved (a player's or the game's file moved or
 // renamed aside and put back byte for byte). Action lines keep their five fields, so a 0.5.x uninstaller still reads a
@@ -48,6 +53,8 @@ struct RrConfigFix {
     string prev;                  // else its value before
     wstring folder;               // the topmost folder the fix created ("" none)
 };
+// A runtime line's folder for the game root (GameRoot of the record's exe folder) when it is above the install folder.
+inline const wchar_t* const kRuntimeGameRoot = L"<game-root>";
 struct Record {
     wstring version, game, exe, status, regkey, model, modelM;
     std::vector<Entry> e;
@@ -60,6 +67,8 @@ struct Record {
     struct CoexistLine { wstring tool, fingerprint, decision; };
     std::vector<CoexistLine> coexist;
     RrConfigFix rrconfig;
+    struct RuntimeLine { wstring folder, pattern; };  // folder: relative to the install folder, or kRuntimeGameRoot
+    std::vector<RuntimeLine> runtime;                 // the runtime lines (an older record has none: nothing removed by name)
     // rc6 L1 (in memory only): the record was read from RecordPath(dir) but named another folder (the game folder was moved:
     // Steam's "Move install folder", another drive letter): LoadRecord rebased game, exe and the journal's paths to dir, and
     // this is the folder it named. SaveRebasedRecord writes the rebased record.
@@ -108,6 +117,33 @@ void SaveRecord(const wstring& path, const Record& m);
 bool SaveRebasedRecord(Context& ctx, const wstring& dir, Record& m);
 wstring Target(const wstring& dir, const wstring& rel);
 bool HostedRecord(const Record& m);
+// ---- the file-ownership rule (0.6.1; README "What the launcher removes") ----------------------------------------------
+// Every restore, uninstall, repair, update, move out of a wrong folder and cleanup deletes or overwrites a file only when
+// its current bytes are WrongGPU's: the hash the record says WrongGPU last wrote there, or a WrongGPU release's (size and
+// SHA-256). Not by its name, a neighbouring file, an ini key or because it is a log. The one exception: the game's FSR DLL
+// slots, where WrongGPU's DLL is recognised by its version resource (ClassifySlot), because the game may update that DLL.
+// The other exception the rule names: files with WrongGPU's own unique names (wronggpu-* created by the install, the RR
+// plugin's files in its WrongGPU folder) that the record lists as created by WrongGPU.
+// Anything else at a recorded path stays as it is; a player's original that cannot be put back because of it is kept in
+// <install dir>\WrongGPU-originals\<time>\ (KeptOriginal), and the result says "partly" (kPartlyRestored).
+enum class Holds { Missing, Ours, Original, Other };
+// What the path of entry `e` holds now (h: its current SHA-256; empty when missing).
+Holds WhatIsThere(Context& ctx, const wstring& dir, const Entry& e, const wstring& h);
+// The warnings of files a restore could not put back or had to leave begin with this ("partly" in the result).
+extern const wchar_t* const kPartlyRestored;
+bool AnyPartly(const std::vector<wstring>& warnings);
+// The player's original of `rel` (from `source`, its SHA-256 `sha`) kept in the folder that survives: an earlier kept copy
+// with these bytes is used again, else a new <time> generation. Checked byte for byte; throws on failure. Returns its path.
+wstring KeptOriginal(const wstring& dir, const wstring& rel, const wstring& source, const wstring& sha);
+// The OptiScaler.ini in `dir` is the one WrongGPU last wrote (its hash is the record's). The restore goes by this alone.
+bool OptiIniWrittenByUs(const wstring& dir, const Record& m);
+// The OptiScaler setup next to the game is still WrongGPU's: the OptiScaler DLL the record installed is there under its name
+// with its hash, or the ini is the one WrongGPU last wrote. Used only to decide what the scan reports and asks about (the
+// switch question) and which menu-saved values carry over; never to delete or overwrite a file.
+bool OptiSetupIsOurs(const wstring& dir, const Record& m);
+// Test hook: called at the named steps of DoRestore ("restored", "kept", "record-removed"); a test stops the restore there
+// (as a killed process would). Test builds also stop the process at the step named by WRONGGPU_TEST_STOP_AT.
+void SetRestoreStepHook(std::function<void(const char*)> hook);
 // The hive the Apps & features entries go to (HKEY_CURRENT_USER unless set: the elevated worker of another account sets
 // the player's hive, HKEY_USERS\<sid>).
 HKEY UninstallHive();
@@ -133,7 +169,12 @@ bool LauncherKeepsSharedData();
 bool PortableLauncherUsesSharedData();
 void NotePortableLauncher(const wstring& exe);
 void UnregisterUninstall(const Record& m);
-size_t RemoveRuntimeFiles(const wstring& dir, const wstring& exeDir, const Record& m, bool settings);
+// The files the record's runtime lines name (WrongGPU's own unique names, not in the record's entries): removed. Returns
+// how many.
+size_t RemoveRuntimeFiles(const wstring& dir, const Record& m);
+// The runtime lines for an install in `dir` with its game program in exeDir (folders inside dir only), from the record's
+// dir entries too: call after those are in m.
+void SetRuntimeLines(Record& m, const wstring& dir, const wstring& exeDir);
 // The shared folder (appData) is moved aside, to a free name made unique with a process-wide sequence number, and deleted by a
 // hidden cmd.exe; its ignore-files.txt is put back first (convert_ignore.h PutIgnoreListBack). Returns PutIgnoreListBack's line
 // for the player ("kept ignore-files.txt ...", the list kept as ignore-files.txt.kept-<n>, or left in the moved folder) or "".
@@ -149,7 +190,17 @@ constexpr unsigned long kCleanupMoveFirstWaitMs = 50;
 using CleanupMoveFn = BOOL (WINAPI*)(LPCWSTR from, LPCWSTR to, DWORD flags);
 void SetCleanupMoveForTest(CleanupMoveFn fn);
 wstring StartCleanup(Context& ctx, const wstring& state, const wstring& self, const wstring& appData);
-std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool failedInstall, bool keepState);
+// The restore of an install, by the file-ownership rule above. Before anything changes it checks every recorded file
+// (refused, "Nothing was changed", when one cannot be read or replaced: another program holds it, or a backup is missing).
+// Then, per entry: WrongGPU's file goes (or the player's original from the backup takes its place); the original already
+// there stays; anything else stays as it is, and a backed-up original that cannot go back is kept (KeptOriginal) with a
+// kPartlyRestored warning naming both. Each file is checked again right before it is changed. The record is deleted
+// before the backup, so a stop at any point leaves either a record that a second run completes, or every original at its
+// path or in the kept folder. keepState (update, repair, a move): the state folder stays (record and backup cleared).
+// keptWarnings: the warning of each recorded file left in place, by its path (the update path replaces the warning of a
+// file it then moves aside with the player's OK).
+std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool failedInstall, bool keepState,
+                               std::map<wstring, wstring>* keptWarnings = nullptr);
 // rc6 L4: the player's things in the state folder that a failed install or update never removes when they were there before
 // it: profile.ini (the game's settings), previous\ (the version Roll back goes to) and rr-config\ (the Engine.ini fix's backup).
 bool StateHasSettings(const wstring& dir);

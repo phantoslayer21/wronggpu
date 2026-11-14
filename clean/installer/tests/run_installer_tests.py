@@ -82,6 +82,20 @@ def snapshot(root):
     return snap
 
 
+def without_kept(snap):
+    """A snapshot without its WrongGPU-originals folders (0.6.1: a player's original that cannot go back is kept there, never
+    deleted), and the kept files as sorted (name, SHA-256) pairs."""
+    rest, kept = {}, []
+    for k, v in snap.items():
+        parts = [p for p in k.split("/") if p]
+        if "wronggpu-originals" in parts:
+            if v != "dir":
+                kept.append((parts[-1], v))
+        else:
+            rest[k] = v
+    return rest, sorted(kept)
+
+
 def diff(a, b):
     out = []
     for k in sorted(set(a) | set(b)):
@@ -414,11 +428,16 @@ def run_all(t, payload_dir):
                     for a in support["artifacts"] if a["status"] == "included"))
     os.remove(os.path.join(b, "wronggpu-diagnostics.jsonl"))  # Keep the pre-existing uninstall fixture scope.
     t.check("collect changed nothing", os.path.isfile(os.path.join(b, "wronggpu-setup", "uninstall.exe")))
-    write(os.path.join(b, "wronggpu.ini"), "[settings]")  # the player's settings: removed by a full uninstall
+    # the player's own settings over WrongGPU's file: not WrongGPU's bytes any more, so the uninstall leaves them (0.6.1 rule)
+    write(os.path.join(b, "wronggpu.ini"), "[settings]")
     rc = t.uninstall(b)
     t.check("uninstall exit 0", rc == 0, "exit %d; %s" % (rc, t.logtext()[-500:]))
-    t.check("uninstall removes the player's wronggpu.ini", not os.path.exists(os.path.join(b, "wronggpu.ini")))
-    t.check("folder restored byte for byte (logs and settings removed, state folder gone)", snapshot(root) == before, diff(before, snapshot(root)))
+    t.check("uninstall leaves the player's changed wronggpu.ini as it is", os.path.isfile(os.path.join(b, "wronggpu.ini")) and read(os.path.join(b, "wronggpu.ini")) == b"[settings]")
+    ini_key = key(os.path.relpath(os.path.join(b, "wronggpu.ini"), root))
+    after = {k: v for k, v in snapshot(root).items() if k != ini_key}
+    t.check("folder restored byte for byte apart from that file (WrongGPU's logs in the install folder and the game root removed, state folder gone)",
+            after == before, diff(before, after))
+    os.remove(os.path.join(b, "wronggpu.ini"))
     t.check("Apps & features entry removed", not t.keys_for(b))
     t.check("model data removed with the last game", not os.path.exists(os.path.join(t.appdata(), "model")))
     app = t.appdata()
@@ -461,9 +480,21 @@ def run_all(t, payload_dir):
     # Update from an older WrongGPU: settings still at that version's own outdated defaults are brought up to date, the
     # player's own changes stay; a newer old version keeps everything.
     def fake_old_version(b, version, ini):
+        """The record of an older version that wrote `ini` as its wronggpu.ini: its version, and the hash it recorded for
+        the file it wrote (0.6.1 rule: only a file with WrongGPU's recorded bytes is WrongGPU's to bring up to date)."""
         rec = os.path.join(b, "wronggpu-setup", "install.record")
         text = read(rec).decode("utf-8")
-        write(rec, "\n".join(("version\t" + version) if l.startswith("version\t") else l for l in text.split("\n")).encode("utf-8"))
+        ini_sha = sha(ini.encode("utf-8"))
+
+        def line(l):
+            if l.startswith("version\t"):
+                return "version\t" + version
+            f = l.rstrip("\r").split("\t")
+            if len(f) == 5 and f[4].lower() == "wronggpu.ini":
+                f[3] = ini_sha.upper() if f[3].isupper() else ini_sha
+                return "\t".join(f) + ("\r" if l.endswith("\r") else "")
+            return l
+        write(rec, "\n".join(line(l) for l in text.split("\n")).encode("utf-8"))
         write(os.path.join(b, "wronggpu.ini"), ini.encode("utf-8"))
     root, b = cyberpunk(t, "update-030", model=GOOD)
     t.check("update test: first install", t.run("/DIR=" + root, "/FORCE") == 0)
@@ -618,7 +649,9 @@ def run_all(t, payload_dir):
     rc = t.uninstall(b)
     expect = dict(before)
     expect[key("bin/x64/amd_fidelityfx_dx12.dll")] = sha(AMD_V2)
-    t.check("uninstall keeps the game's new DLL, removes everything else", rc == 0 and snapshot(root) == expect, diff(expect, snapshot(root)))
+    rest, kept = without_kept(snapshot(root))
+    t.check("uninstall keeps the game's new DLL, removes everything else; the DLL from before WrongGPU is kept in WrongGPU-originals",
+            rc == 0 and rest == expect and kept == [("amd_fidelityfx_dx12.dll", sha(AMD_V1))], (diff(expect, rest), kept))
     t.check("the log explains it", "its new file was kept" in t.logtext())
     t.check("re-install over the updated game", t.run("/DIR=" + root, "/FORCE") == 0 and
             read(os.path.join(b, "amd_fidelityfx_dx12.wronggpu-original.dll")) == AMD_V2)
@@ -627,7 +660,12 @@ def run_all(t, payload_dir):
             read(os.path.join(b, "amd_fidelityfx_dx12.wronggpu-original.dll")) == AMD_V1)
     rc = t.uninstall(b)
     expect[key("bin/x64/amd_fidelityfx_dx12.dll")] = sha(AMD_V1)
-    t.check("and uninstall restores that state", rc == 0 and snapshot(root) == expect, diff(expect, snapshot(root)))
+    rest, kept = without_kept(snapshot(root))
+    # kept: the first generation (v1 from before the first install) and the second (v2: the restore before the install over
+    # the update could not put it back, because v1 was in its place by then); neither is overwritten
+    t.check("and uninstall restores that state; both earlier originals are kept in WrongGPU-originals",
+            rc == 0 and rest == expect and kept == sorted([("amd_fidelityfx_dx12.dll", sha(AMD_V1)), ("amd_fidelityfx_dx12.dll", sha(AMD_V2))]),
+            (diff(expect, rest), kept))
     root, b = cyberpunk(t, "update-fsr30", model=GOOD)
     before = snapshot(root)
     t.check("install (three DLLs)", t.run("/DIR=" + root, "/FORCE") == 0)
@@ -635,7 +673,9 @@ def run_all(t, payload_dir):
     rc = t.uninstall(b)
     expect = dict(before)
     expect[key("bin/x64/ffx_fsr3upscaler_x64.dll")] = sha(FSR3UP_V2)
-    t.check("game update of ffx_fsr3upscaler_x64.dll: the new file is kept, the other two restored", rc == 0 and snapshot(root) == expect, diff(expect, snapshot(root)))
+    rest, kept = without_kept(snapshot(root))
+    t.check("game update of ffx_fsr3upscaler_x64.dll: the new file is kept, the other two restored, the earlier one kept in WrongGPU-originals",
+            rc == 0 and rest == expect and kept == [("ffx_fsr3upscaler_x64.dll", sha(FSR3UP))], (diff(expect, rest), kept))
 
     print("\n[9] 30-T2: model file search and converter integration (synthetic model files)")
     t.clear_model()
@@ -1015,10 +1055,11 @@ def test_upgrade_paths(t, payload_dir):
     GOOD = t.model.file  # noqa: N806
     t.clear_model()
     game = {SLOTS[0]: AMD_V1, SLOTS[1]: FSR3, SLOTS[2]: FSR3UP}
-    # A newer WrongGPU build placed by hand: WrongGPU's version resource, but not the files the install record names.
+    # A newer WrongGPU build placed by hand: WrongGPU's version resource, but not the files the install record names. Under
+    # the game's FSR names (the original comes back in their place). 0.6.1: a hand-placed file under another name counts as
+    # WrongGPU's only by a release's hash (the hand-placed-runtime case below: left in place).
     hot = {SLOTS[0]: mockpe.make_dll(mockpe.FRONT_END, (0, 5, 0, 0), extra=b"hand-placed front end", exports=mockpe.FFX_API_EXPORTS, dll_name=SLOTS[0]),
-           SLOTS[2]: mockpe.make_dll(mockpe.FRONT_END, (0, 5, 0, 0), extra=b"hand-placed forwarder", exports=mockpe.FSR3UPSCALER_EXPORTS, dll_name=SLOTS[2]),
-           "wronggpu_runtime.dll": mockpe.make_dll({"ProductName": "WrongGPU", "FileDescription": "WrongGPU runtime"}, (0, 5, 0, 0), extra=b"hand-placed runtime")}
+           SLOTS[2]: mockpe.make_dll(mockpe.FRONT_END, (0, 5, 0, 0), extra=b"hand-placed forwarder", exports=mockpe.FSR3UPSCALER_EXPORTS, dll_name=SLOTS[2])}
 
     def same(path, data):
         return os.path.isfile(path) and read(path) == data
@@ -1045,7 +1086,7 @@ def test_upgrade_paths(t, payload_dir):
     # Defect of 0.4.5-rc: the restore kept the hand-placed DLL, removed the game's renamed original, then refused.
     root, b, before = installed("hotfix-upgrade", hand_placed=True)
     rc, log = setup_again(root)
-    t.check("setup over hand-placed WrongGPU DLLs (front end, a forwarder, the runtime): installed", rc == 0, tail(rc, log))
+    t.check("setup over hand-placed WrongGPU DLLs (front end, a forwarder): installed", rc == 0, tail(rc, log))
     t.check("...the new payload is in place and the game's three FSR DLLs are kept as *.wronggpu-original.dll", payload_installed(t, b, payload_dir) and kept(b, game), log[-700:])
     rec_path = os.path.join(b, "wronggpu-setup", "install.record")
     rec = read(rec_path).decode() if os.path.isfile(rec_path) else ""
@@ -1057,6 +1098,15 @@ def test_upgrade_paths(t, payload_dir):
     root, b, before = installed("hotfix-uninstall", hand_placed=True)
     rc = t.uninstall(b)
     t.check("uninstall with hand-placed WrongGPU DLLs: the game's originals are back, nothing of WrongGPU left", rc == 0 and snapshot(root) == before, tail(rc, t.logtext(), root, before))
+    # 0.6.1: a hand-placed runtime that names WrongGPU but has no release's hash is left in place with a warning
+    root, b, before = installed("hand-placed-runtime")
+    hand_runtime = mockpe.make_dll({"ProductName": "WrongGPU", "FileDescription": "WrongGPU runtime"}, (0, 5, 0, 0), extra=b"hand-placed runtime")
+    write(os.path.join(b, "wronggpu_runtime.dll"), hand_runtime)
+    rc = t.uninstall(b)
+    expect = dict(before)
+    expect[key("bin/x64/wronggpu_runtime.dll")] = sha(hand_runtime)
+    t.check("uninstall with a hand-placed runtime (WrongGPU's version resource, not a release's hash): left in place, the rest as before",
+            rc == 0 and snapshot(root) == expect and "changed since install" in t.logtext(), tail(rc, t.logtext(), root, expect))
     # The game's original is never removed while WrongGPU's DLL is under the game's name: without a backup, and with a
     # record that has no entry for WrongGPU's DLL, it comes back from its renamed copy (hash-checked against the record).
     root, b, before = installed("hotfix-no-backup", hand_placed=True)
@@ -1070,7 +1120,8 @@ def test_upgrade_paths(t, payload_dir):
     t.check("a record without the entry for WrongGPU's amd_fidelityfx_dx12.dll: uninstall puts the game's DLL back from its renamed copy",
             rc == 0 and snapshot(root) == before, tail(rc, t.logtext(), root, before))
 
-    # Control: files that are not WrongGPU's keep the rule for game updates (the new file stays, the old copy goes).
+    # Control: files that are not WrongGPU's keep the rule for game updates (the new file stays; 0.6.1: the old copy is kept
+    # in WrongGPU-originals, never deleted).
     root, b, before = installed("update-upgrade")
     write(os.path.join(b, SLOTS[0]), AMD_V2)
     write(os.path.join(b, SLOTS[2]), FSR3UP_V2)
@@ -1080,7 +1131,10 @@ def test_upgrade_paths(t, payload_dir):
     expect = dict(before)
     expect[key("bin/x64/" + SLOTS[0])], expect[key("bin/x64/" + SLOTS[2])] = sha(AMD_V2), sha(FSR3UP_V2)
     rc = t.uninstall(b)
-    t.check("...and uninstall leaves the updated game", rc == 0 and snapshot(root) == expect, tail(rc, t.logtext(), root, expect))
+    outside = {k: v for k, v in snapshot(root).items() if "wronggpu-originals" not in k}
+    kept_old = sorted(v for k, v in snapshot(root).items() if "/wronggpu-originals/" in k and not k.endswith("/"))
+    t.check("...and uninstall leaves the updated game; the two DLLs from before WrongGPU are kept in WrongGPU-originals",
+            rc == 0 and outside == expect and kept_old == sorted([sha(AMD_V1), sha(FSR3UP)]), tail(rc, t.logtext(), root, expect))
     root, b, before = installed("foreign-upgrade")
     write(os.path.join(b, SLOTS[0]), FOREIGN)
     state = snapshot(root)
@@ -1113,13 +1167,17 @@ def test_upgrade_paths(t, payload_dir):
         k32.CloseHandle.argtypes = [ctypes.c_void_p]
         root, b, before = installed("hotfix-upgrade-in-use", hand_placed=True)
         handle = k32.CreateFileW(os.path.join(b, SLOTS[0]), 0x80000000, 1, None, 3, 0, None)  # GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING
+        state = snapshot(root)
         try:
             rc, log = setup_again(root)
         finally:
             k32.CloseHandle(handle)
-        t.check("a file of the earlier install is in use (exit 1): no original of the game is lost, the record and the backup stay",
-                handle not in (None, ctypes.c_void_p(-1).value) and rc == 1 and all(same(os.path.join(b, n), d) or kept(b, {n: d}) for n, d in game.items()) and
-                os.path.isfile(os.path.join(b, "wronggpu-setup", "install.record")) and same(os.path.join(b, "wronggpu-setup", "backup", SLOTS[0]), AMD_V1), tail(rc, log))
+        # 0.6.1 rule: every recorded file is checked before anything changes; one that cannot be replaced stops the setup
+        # there (exit 2, "Nothing was changed"), so the earlier install, its record and its backup are exactly as they were
+        t.check("a file of the earlier install is in use: refused before anything changes (exit 2), the record and the backup stay",
+                handle not in (None, ctypes.c_void_p(-1).value) and rc == 2 and snapshot(root) == state and "Nothing was changed" in log and
+                os.path.isfile(os.path.join(b, "wronggpu-setup", "install.record")) and same(os.path.join(b, "wronggpu-setup", "backup", SLOTS[0]), AMD_V1),
+                tail(rc, log, root, state))
         rc, log = setup_again(root)
         t.check("...setup run again finishes the upgrade", rc == 0 and payload_installed(t, b, payload_dir) and kept(b, game), tail(rc, log))
         rc = t.uninstall(b) if rc == 0 else -1
@@ -1142,10 +1200,15 @@ def test_upgrade_paths(t, payload_dir):
     t.check("setup over WrongGPU's own OptiScaler-hosted install: no /MOVEMODS needed, no warning about another mod",
             rc == 0 and "No other upscaler mod or older install found" in log and "needs your OK" not in log and "Other upscaler mods" not in log, tail(rc, log))
     rec = read(os.path.join(b, "wronggpu-setup", "install.record")).decode()
-    t.check("...nothing was moved aside as another mod's file, and OptiScaler's logs of the earlier install are gone",
-            "\ndisable\t" not in rec and not any(os.path.exists(os.path.join(b, n)) for n in run_time), rec[:900])
+    shared = run_time[:3]  # 0.6.1 rule: shared names are never deleted by name; WrongGPU's own wronggpu-* log goes
+    t.check("...nothing was moved aside as another mod's file; OptiScaler's shared logs stay as they are, WrongGPU's own log is gone",
+            "\ndisable\t" not in rec and all(os.path.isfile(os.path.join(b, n)) and read(os.path.join(b, n)) == b"written while the game ran" for n in shared) and
+            not os.path.exists(os.path.join(b, "wronggpu-fsr.log")), rec[:900])
     rc = t.uninstall(b)
-    t.check("...and uninstall restores the game byte for byte", rc == 0 and snapshot(root) == before, tail(rc, t.logtext(), root, before))
+    left = {key(os.path.relpath(os.path.join(b, n), root)) for n in shared}
+    rest = {k: v for k, v in snapshot(root).items() if k not in left}
+    t.check("...and uninstall restores the game byte for byte apart from OptiScaler's shared logs, which stay",
+            rc == 0 and rest == before and all(os.path.isfile(os.path.join(b, n)) for n in shared), tail(rc, t.logtext(), root, before))
     root, b, before = installed("foreign-opti-upgrade")
     foreign = {"OptiScaler.ini": b"[Upscalers]", "OptiScaler.log": b"log", "dxgi.dll": b"proxy of an OptiScaler build"}
     for n, data in foreign.items():
@@ -1226,12 +1289,17 @@ def test_without_preset_k(t, payload_dir):
             "present and matching" in info and "startup preset" not in info and "Preset K" not in info and "\\K\\" not in info, "exit %d; %s" % (rc, info[:600]))
     # An install made by a build with Preset K left model=K in the settings: the one model is named again.
     write(ini_path, ini.replace("model=M", "timing_log=1;model=" + "K"))
+    earlier = read(ini_path)
     rc = t.run("/DIR=" + root, "/PRESET=M", *t.route)
     ini = read(ini_path).decode()
     t.check("install over settings of a build with Preset K: Model M again, the player's other options kept",
             rc == 0 and re.search(r"(?m)^runtime_options\s*=\s*timing_log=1;model=M\s*$", ini) is not None and "model=" + "K" not in ini, "exit %d; %s" % (rc, ini[-300:]))
     rc = t.uninstall(b)
-    t.check("uninstall restores the game byte for byte", rc == 0 and snapshot(root) == before, diff(before, snapshot(root)))
+    # (0.6.1, the ownership rule: that wronggpu.ini was not as WrongGPU last wrote it, so the install backed it up and the
+    # uninstall puts it back; never deleted by its name)
+    want = dict(before)
+    want[key(os.path.relpath(ini_path, root))] = sha(earlier)
+    t.check("uninstall restores the game byte for byte (the earlier settings file back as it was)", rc == 0 and snapshot(root) == want, diff(want, snapshot(root)))
     t.check("...and the model folder goes with the earlier build's model\\K in it", not os.path.exists(os.path.join(t.appdata(), "model")))
     # OptiScaler route: UpscalerIndex 0 whatever the package's or an earlier install's file says (index 1 was Model K;
     # without it index 1 is AMD's first version).
@@ -1882,8 +1950,7 @@ def test_without_direct_route(t, payload_dir, direct_setup):
         return
     # A newer WrongGPU build placed by hand over the direct install (the states of test_upgrade_paths).
     hot = {SLOTS[0]: mockpe.make_dll(mockpe.FRONT_END, (0, 5, 0, 0), extra=b"hand-placed front end", exports=mockpe.FFX_API_EXPORTS, dll_name=SLOTS[0]),
-           SLOTS[2]: mockpe.make_dll(mockpe.FRONT_END, (0, 5, 0, 0), extra=b"hand-placed forwarder", exports=mockpe.FSR3UPSCALER_EXPORTS, dll_name=SLOTS[2]),
-           "wronggpu_runtime.dll": mockpe.make_dll({"ProductName": "WrongGPU", "FileDescription": "WrongGPU runtime"}, (0, 5, 0, 0), extra=b"hand-placed runtime")}
+           SLOTS[2]: mockpe.make_dll(mockpe.FRONT_END, (0, 5, 0, 0), extra=b"hand-placed forwarder", exports=mockpe.FSR3UPSCALER_EXPORTS, dll_name=SLOTS[2])}  # (0.6.1: no hand-placed runtime, see hand-placed-runtime)
 
     def direct_install(name, version=None, hand_placed=False):
         root, b = cyberpunk(t, name, model=GOOD)
@@ -1924,12 +1991,16 @@ def test_without_direct_route(t, payload_dir, direct_setup):
     t.check("...the player's wronggpu.ini is kept, the settings of the direct route as they are (only what a hosted install sets is written)",
             mine(new_ini) == mine(old_ini) and "overlay = 1" in new_ini and "compare_key = home" in new_ini and "view = depth" in new_ini, new_ini)
     rc = t.uninstall(b)
-    t.check("...uninstall then removes everything: the game as it was before WrongGPU", rc == 0 and snapshot(root) == before and not t.keys_for(b), tail(rc, t.logtext(), root, before))
+    # (0.6.1, the ownership rule: the player's edited wronggpu.ini was backed up by the hosted install and comes back)
+    want = dict(before)
+    want[key(os.path.relpath(ini_path, root))] = sha(old_ini.encode("utf-8"))
+    t.check("...uninstall then removes everything of WrongGPU: the game as it was before WrongGPU, the player's edited wronggpu.ini back as it was",
+            rc == 0 and snapshot(root) == want and not t.keys_for(b), tail(rc, t.logtext(), root, want))
 
     root, b, before = direct_install("direct-hand-placed-to-hosted", hand_placed=True)
     rc = t.run(*hosted(root))
     log = t.logtext()
-    t.check("setup over a direct install with hand-placed WrongGPU DLLs (front end, a forwarder, the runtime): the originals are back byte for byte, hosted install",
+    t.check("setup over a direct install with hand-placed WrongGPU DLLs (front end, a forwarder): the originals are back byte for byte, hosted install",
             rc == 0 and originals_back(b) and hosted_ok(b), tail(rc, log))
     rc = t.uninstall(b)
     t.check("...and uninstall leaves the game as it was before WrongGPU", rc == 0 and snapshot(root) == before, tail(rc, t.logtext(), root, before))
@@ -1949,7 +2020,12 @@ def test_without_direct_route(t, payload_dir, direct_setup):
     t.check("setup over a direct install after a game update of amd_fidelityfx_dx12.dll: the game's new file stays, the other two are back, hosted install",
             rc == 0 and originals_back(b, {SLOTS[0]: AMD_V2, SLOTS[1]: FSR3, SLOTS[2]: FSR3UP}) and hosted_ok(b), tail(rc, log))
     rc = t.uninstall(b)
-    t.check("...and uninstall leaves the updated game", rc == 0 and snapshot(root) == expect, tail(rc, t.logtext(), root, expect))
+    # (0.6.1, the ownership rule: the game's FSR DLL from before WrongGPU, which the game's update replaced, is kept in
+    # WrongGPU-originals, never deleted)
+    kept_old = [v for k, v in snapshot(root).items() if "/wronggpu-originals/" in k and not k.endswith("/")]
+    outside = {k: v for k, v in snapshot(root).items() if "wronggpu-originals" not in k}
+    t.check("...and uninstall leaves the updated game; the game's FSR DLL from before WrongGPU is kept in WrongGPU-originals",
+            rc == 0 and outside == expect and kept_old == [sha(AMD_V1)], tail(rc, t.logtext(), root, expect))
 
     # The game's FSR DLL in a plugin folder: the direct install is there, the hosted one goes next to the exe.
     root, win64, ffx_dir = unreal(t, "direct-plugin-to-hosted", model=GOOD, ffx_in_plugin=True)
@@ -1958,6 +2034,7 @@ def test_without_direct_route(t, payload_dir, direct_setup):
     t.check("an earlier direct install in a plugin folder", rc == 0 and "\nrename\t" in record(ffx_dir) and len(t.keys_for(ffx_dir)) == 1 and not record(win64), tail(rc, t.logtext()))
     plugin_ini = os.path.join(ffx_dir, "wronggpu.ini")
     write(plugin_ini, read(plugin_ini).decode("utf-8").rstrip("\r\n") + "\r\nview = depth\r\n")
+    edited_plugin_ini = read(plugin_ini)
     state = snapshot(root)
     rc = t.run("/DIR=" + root, "/FORCE", "/NOSCAN", "/EXPERIMENTAL")
     t.check("...without /OPTISCALER=: refused (exit 2), left as it is", rc == 2 and snapshot(root) == state, tail(rc, t.logtext(), root, state))
@@ -1968,7 +2045,12 @@ def test_without_direct_route(t, payload_dir, direct_setup):
     win_ini = os.path.join(win64, "wronggpu.ini")
     t.check("...the hosted install is next to the exe, with the player's settings", rc == 0 and hosted_ok(win64) and os.path.isfile(win_ini) and "view = depth" in read(win_ini).decode("utf-8"), record(win64)[:900])
     rc = t.uninstall(win64)
-    t.check("...and uninstall leaves the game as it was before WrongGPU", rc == 0 and snapshot(root) == before, tail(rc, t.logtext(), root, before))
+    # (0.6.1, the ownership rule: the player's edited settings, moved next to the exe, were backed up by the hosted install
+    # and come back as they were; never deleted by their name)
+    want = dict(before)
+    want[key(os.path.relpath(win_ini, root))] = sha(edited_plugin_ini)
+    t.check("...and uninstall leaves the game as it was before WrongGPU, the player's edited settings back as they were",
+            rc == 0 and snapshot(root) == want, tail(rc, t.logtext(), root, want))
 
     # A failure while the hosted install is written, and the old install's removal by this installer.
     root, b, before = direct_install("direct-to-hosted-fails")

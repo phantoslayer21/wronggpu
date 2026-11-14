@@ -456,6 +456,14 @@ FindingWords WordsOf(const Finding& f) {
             w.sub = L"It turns the game's graphics into Vulkan, and WrongGPU needs Windows' own Direct3D 12.";
             break;
         case Tool::AsiLoader: w.sub = L"It stays. WrongGPU keeps its plugin in a folder of its own, so it starts once."; break;
+        case Tool::OtherPlugin:  // 0.6.1: another setup's plugins beside OptiScaler
+            w.name = f.files.size() == 1 ? L"Another OptiScaler plugin" : L"Other OptiScaler plugins";
+            w.sub = f.decision == Decision::Warn ? L"It may hook Ray Reconstruction too, so WrongGPU's Ray Reconstruction stays out unless you move them aside when you install."
+                                                 : L"It stays. WrongGPU's plugin goes beside it.";
+            break;
+        case Tool::WrongGPU:  // 0.6.1: WrongGPU's RR plugin placed by another package (it exports WrongGPU RR's marker)
+            if (f.what == L"WrongGPU RR (from another package)") w.sub = L"It stays. WrongGPU never moves its own Ray Reconstruction plugin aside.";
+            break;
         case Tool::Cet: case Tool::Red4ext: case Tool::Ue4ss: w.sub = L"It stays. WrongGPU doesn't touch it."; break;
         case Tool::HipRuntime: w.name = L"Another HIP tool"; w.sub = L"Keep Runs on at Auto or Direct3D 12 so the two don't clash."; break;
         case Tool::NrOnAmd: w.name = L"Another upscaler mod"; w.sub = L"WrongGPU doesn't install next to it and doesn't touch it."; break;
@@ -2004,7 +2012,9 @@ static wstring StaysOutWhy(const GameEntry& e, wstring* tip) {
     // the status line's own lead-in ("Other upscaler mod: X", "Other upscaler mod (X): not touched"): the mod's name
     if (e.status == GameStatus::ForeignMod && why.rfind(L"Other upscaler mod: ", 0) == 0) why = why.substr(20);
     else if (e.status == GameStatus::ForeignMod && why.rfind(L"Other upscaler mod (", 0) == 0 && why.find(L')') != wstring::npos) why = why.substr(20, why.find(L')') - 20);
-    // the headline says another mod is here: the card names it and says why (not the headline again)
+    // the headline says another mod is here: the card names it and says why (not the headline again). 0.6.1: the mod that is
+    // never named ("Other upscaler mod: not touched") is "Another upscaler mod", not the status's last words
+    if (e.status == GameStatus::ForeignMod && (why.empty() || why == L"not touched" || why == L"Not touched")) why = L"Another upscaler mod";
     if (e.status == GameStatus::ForeignMod) why = why + L" is in this game. WrongGPU stays out so the two don't fight over the upscaler.";
     else why += why.empty() || why.back() == L'.' ? L"" : L".";
     return why;
@@ -2058,10 +2068,13 @@ static float FolderSection(Gfx& gx, float x, float y, float w) {
             wstring ver;
             for (size_t k = 0; k < vers.size(); ++k) ver += (k == 0 ? L"" : k + 1 == vers.size() ? L" and " : L", ") + vers[k];
             const size_t n = e.leftovers.size();
-            const wstring t = n == 1 ? L"A file from WrongGPU " + ver + L" is here that the launcher didn't install. Clean up removes only it; Adopt lets the launcher manage it."
-                                     : std::to_wstring(n) + L" files from WrongGPU " + ver + L" are here that the launcher didn't install. Clean up removes only these; Adopt lets the launcher manage them.";
+            const wstring t = e.leftoversOtherSetup  // 0.6.1: another mod's setup uses them (an OptiScaler WrongGPU didn't install is next to them)
+                ? (n == 1 ? L"A file from WrongGPU " + ver + L" is here that another mod's setup uses. WrongGPU leaves it alone; installing backs it up if it replaces it."
+                          : std::to_wstring(n) + L" files from WrongGPU " + ver + L" are here that another mod's setup uses. WrongGPU leaves them alone; installing backs up any it replaces.")
+                : n == 1 ? L"A file from WrongGPU " + ver + L" is here that the launcher didn't install. Clean up removes only it; Adopt lets the launcher manage it."
+                         : std::to_wstring(n) + L" files from WrongGPU " + ver + L" are here that the launcher didn't install. Clean up removes only these; Adopt lets the launcher manage them.";
             const float rowY = yy;
-            note(t, pal.amber);
+            note(t, e.leftoversOtherSetup ? pal.greyDot : pal.amber);
             AddHit(ID_G_FOUND, Rc{x, rowY, w, yy - rowY}, R_TEXT, t + L" Files: " + names, true, -1, L"", false);
             v.tips[ID_G_FOUND] = (n == 1 ? L"File: " : L"Files: ") + names;
         }
