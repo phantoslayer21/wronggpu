@@ -10,11 +10,7 @@
 //   ui_library.cpp  the Library page        ui_game.cpp  a game's page        ui_settings.cpp  Settings, first run
 //   ui_uia.cpp      UI Automation provider  launcher_ui.cpp  the window, input, operations, ui-dump / ui-render
 #pragma once
-#ifdef _WIN32
 #include "app/launcher_app.h"
-#else
-#include "wg_core/base.h"  // the window's app headers need GDI+ and the rest of the window layer, which the Linux build does not have yet
-#endif
 
 #ifdef _WIN32
 #include <d2d1_1.h>
@@ -198,6 +194,9 @@ public:
     // material. A dry pass returns true and draws nothing.
     bool Backdrop(const Rc& r, float rad, float blur, float opacity = 1);
     void SetOffset(float dx, float dy);  // content scroll: everything drawn after this is moved
+    // Everything drawn until PopRotate is turned by `degrees` (clockwise) round (cx, cy): the Library's busy glyph.
+    void PushRotate(float cx, float cy, float degrees);
+    void PopRotate();
     float OffsetY() const { return oy_; }  // the vertical offset SetOffset set (the Library's scroll anchoring moves it)
 #ifdef _WIN32
     ID2D1RenderTarget* rt = nullptr;
@@ -264,15 +263,18 @@ private:
     ID2D1PathGeometry* RoundPath(const Rc& r, float tl, float tr, float br, float bl);
     std::vector<ID2D1Layer*> layers_;
     int clips_ = 0;  // axis-aligned clips open (PushClip)
+    std::vector<D2D1_MATRIX_3X2_F> rotations_;  // the transforms PushRotate replaced
     float ox_ = 0, oy_ = 0;
     void PushMask(const Rc& r, float rad, float opacity);  // a rounded mask layer at `opacity` (popped with PopRoundClip)
 #else
     // Cairo and Pango (ui_gfx_cairo.cpp); the state lives behind one pointer so this header needs neither library
     bool iconFont = true;
+    bool rt = false;  // a drawing target exists (the Windows member of this name is Direct2D's render target: the window tests it)
 
 private:
     GfxCairo* im_ = nullptr;
     float ox_ = 0, oy_ = 0;
+    int rotationsOpen_ = 0;  // PushRotate's not yet popped
     void Trim();
 #endif
 };
@@ -320,7 +322,6 @@ const wchar_t external = 0xE8A7;
 const wchar_t processor = 0xE950;
 }
 
-#ifdef _WIN32  // the pages and the window: the Linux build has only the drawing above until its window layer exists
 // ---- art (ui_art.cpp) ----------------------------------------------------------------------------------------------------
 // hero: the wide library_hero.jpg at a tile's size and logo: the game's logo.png (alpha) at the banner's (the Library's tiles
 // and banner, the game page's banner); header: header.jpg (a tile without a hero: it has the title on it); cover: the
@@ -969,5 +970,4 @@ wstring FieldInvalidWhy(int id);                // a text field's hit whose valu
 void UiaShutdown(HWND hwnd);
 bool UiaInvokeMessage(UINT msg, WPARAM wp, LPARAM lp);  // Invoke / Toggle / Scroll from UI Automation, run on the window's thread
 
-#endif  // _WIN32
 }  // namespace wg::app::lui

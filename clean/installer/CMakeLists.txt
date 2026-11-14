@@ -239,12 +239,45 @@ if(NOT WIN32)
   # The launcher's drawing on Linux (Gfx on Cairo and Pango, fonts through fontconfig) and its smoke test (offscreen PNGs)
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(WG_CAIRO REQUIRED IMPORTED_TARGET cairo pangocairo fontconfig)
+  # The window layer: the Win32 window calls the launcher's window makes, on SDL3 (static; -DCMAKE_PREFIX_PATH=<its install> or
+  # -DSDL3_DIR=<its lib/cmake/SDL3>). Only the drawing's live frame and the text fields reach into it; ui-dump and ui-render
+  # (a message-only window) never start SDL.
+  find_package(SDL3 CONFIG REQUIRED)
+  if(TARGET SDL3::SDL3-static)
+    set(WG_SDL3_TARGET SDL3::SDL3-static)
+  else()
+    set(WG_SDL3_TARGET SDL3::SDL3)
+  endif()
+  add_library(wg_window STATIC src/platform/posix/win32_window_sdl.cpp src/platform/posix/win32_window_edit.cpp
+              src/platform/posix/win32_window_misc.cpp)
+  target_link_libraries(wg_window PUBLIC wg_core ${WG_SDL3_TARGET})
   add_library(wg_gfx_cairo STATIC src/app/ui_gfx_cairo.cpp)
-  target_link_libraries(wg_gfx_cairo PUBLIC wg_core PkgConfig::WG_CAIRO)
+  target_link_libraries(wg_gfx_cairo PUBLIC wg_core wg_window PkgConfig::WG_CAIRO)
   target_compile_definitions(wg_gfx_cairo PRIVATE WRONGGPU_FONT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts")
   add_executable(gfx-linux-smoke tests/gfx_linux_smoke.cpp)
   target_link_libraries(gfx-linux-smoke PRIVATE wg_gfx_cairo)
   add_test(NAME gfx-linux-smoke COMMAND gfx-linux-smoke ${CMAKE_CURRENT_BINARY_DIR}/gfx-smoke)
+  # The launcher itself on Linux: the same window code as Windows (src/app, the Win32 calls answered by src/platform/posix), without
+  # the old GDI+ wizard (wizard.cpp, wg_ui), the DWM title bar, tooltips and UI Automation, which Windows alone has.
+  add_executable(WrongGPU src/app/main.cpp src/app/cli.cpp src/app/launcher_ui.cpp src/app/ui_art.cpp src/app/ui_widgets.cpp
+                 src/app/ui_library.cpp src/app/ui_game.cpp src/app/ui_settings.cpp src/app/ui_uia.cpp src/app/ui_render.cpp
+                 src/app/ui_words.cpp src/app/ui_dump.cpp src/app/ui_frame.cpp src/app/ui_play.cpp src/app/ui_rrprep.cpp
+                 src/app/ui_rrconfig.cpp src/app/ui_activate.cpp src/app/ui_checks.cpp src/app/payload_embed.cpp
+                 src/app/ui_live_hook_linux.cpp)
+  target_compile_definitions(WrongGPU PRIVATE ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION} UNICODE _UNICODE
+                             WRONGGPU_VERSION_TEXT="${WRONGGPU_VERSION}" WRONGGPU_BUILD_ID_TEXT="${WRONGGPU_BUILD_ID}"
+                             WRONGGPU_FONT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts")
+  target_link_libraries(WrongGPU PRIVATE wg_gfx_cairo wg_window wg_core)
+  # an installed launcher finds its fonts at ../share/wronggpu/assets/fonts from its binary (ui_gfx_cairo.cpp FontDir)
+  if(WRONGGPU_TESTING)
+    # the window's pages (ui-dump, ui-render) and the live window under SDL's offscreen driver with scripted events (a click, a
+    # scroll, typing, WM_CLOSE): each on a home, XDG folders and registry file of its own
+    add_test(NAME linux-ui COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_linux_ui_tests.py
+             --exe $<TARGET_FILE:WrongGPU> --work ${CMAKE_CURRENT_BINARY_DIR}/linux-ui-tests)
+    set_tests_properties(linux-ui PROPERTIES TIMEOUT 900)
+  endif()
+  install(TARGETS WrongGPU RUNTIME DESTINATION bin)
+  install(DIRECTORY assets/fonts DESTINATION share/wronggpu/assets)
 endif()
 if(WRONGGPU_TESTING)
   add_test(NAME wizard-policy COMMAND wizard-policy-tests)

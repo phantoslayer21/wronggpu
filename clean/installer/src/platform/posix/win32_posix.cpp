@@ -348,7 +348,7 @@ BOOL CloseHandle(HANDLE hv) {
             if (h->fd >= 0) close(h->fd);
             if (h->deleteOnClose) unlink(h->path.c_str());
             break;
-        case Kind::Pipe: case Kind::Map: if (h->fd >= 0 && !h->borrowed) close(h->fd); break;
+        case Kind::Pipe: case Kind::Map: case Kind::Mutex: if (h->fd >= 0 && !h->borrowed) close(h->fd); break;
         case Kind::Job: ReleaseJob(h); break;
         case Kind::Process: ReleaseProcess(h); break;
         default: break;

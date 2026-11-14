@@ -13,7 +13,7 @@
 namespace wgposix {
 
 // One object type behind every HANDLE. Kind says which fields mean something.
-enum class Kind { File, Pipe, Map, Process, Thread, Find, Job, Snapshot, Token };
+enum class Kind { File, Pipe, Map, Process, Thread, Find, Job, Snapshot, Token, Mutex };
 struct Handle {
     Kind kind;
     int fd = -1;                    // File, Pipe, Map (dup of the file)

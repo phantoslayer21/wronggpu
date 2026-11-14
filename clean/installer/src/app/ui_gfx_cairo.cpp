@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: MIT
 // WrongGPU launcher window on Linux: the Gfx class (ui_shell.h) drawn with Cairo, Pango and fontconfig instead of Direct2D,
 // DirectWrite and WIC (ui_gfx.cpp), so the pages' drawing code is the same on both systems. Offscreen frames (ui-render,
-// ui-dump) work; the live window's swap chain has no counterpart here yet (BeginHwnd, Resize: the window layer, slice 1b).
+// ui-dump) go to PNG. A live frame (BeginHwnd) is drawn into a Cairo image surface the size of the window's client area and
+// shown with SDL's window surface (EndFrame, through the window layer's Present): the page is drawn by the CPU anyway, so
+// a renderer and a texture would add a GPU context, its start-up cost and its driver problems for one copy of the same
+// pixels; the window surface works on X11, Wayland, in a VM and under SDL's offscreen driver alike. The window's text fields
+// are drawn on top of the page at the end of the frame (DrawEdits).
 // Fonts: Selawik (text, display) and Fluent System Icons (icons), vendored under assets/fonts and registered with fontconfig
 // in Init; the mono face is the system's "monospace". Written for this project.
 #include "app/ui_shell.h"
+#include "platform/posix/win32_posix_internal.h"
 
 #include <cairo.h>
 #include <fontconfig/fontconfig.h>
@@ -171,6 +176,7 @@ const IconPair kIcons[] = {
 struct GfxCairo {
     cairo_surface_t* surf = nullptr;
     cairo_t* cr = nullptr;
+    HWND live = nullptr;  // the window this live frame is for (null: an offscreen frame)
     int pw = 0, ph = 0;  // the target's size in pixels
     PangoFontMap* map = nullptr;
     PangoContext* ctx = nullptr;
@@ -228,7 +234,7 @@ struct GfxCairo {
         while (!layers.empty()) PopLayer();
         if (cr) cairo_destroy(cr);
         if (surf) cairo_surface_destroy(surf);
-        cr = nullptr; surf = nullptr;
+        cr = nullptr; surf = nullptr; live = nullptr;
         if (frozen) cairo_surface_destroy(frozen);
         frozen = nullptr; frozenKey = 0;
     }
@@ -282,15 +288,90 @@ bool Gfx::Init() {
     return true;
 }
 
-// The live window is slice 1b's: no swap chain here, so there is nothing to begin.
-bool Gfx::BeginHwnd(HWND, UINT) { return false; }
-void Gfx::Resize(HWND) {}
-void Gfx::DropTarget() { if (im_) im_->DropTarget(); }
+void Gfx::DropTarget() { rt = false; if (im_) im_->DropTarget(); }
 
 static void ApplyMatrix(GfxCairo& g, float scale, float ox, float oy) {
     cairo_identity_matrix(g.cr);
     cairo_scale(g.cr, scale, scale);
     cairo_translate(g.cr, ox, oy);
+}
+
+// A live frame: the window's client area in pixels at its DPI. The surface is kept while the size stays (every frame draws the
+// whole page, and the scrim's frozen picture stays with it); a new size makes a new one.
+bool Gfx::BeginHwnd(HWND hwnd, UINT dpi) {
+    if (!im_ || !hwnd) return false;
+    GfxCairo& g = *im_;
+    RECT rc{};
+    if (!GetClientRect(hwnd, &rc) || rc.right < 1 || rc.bottom < 1) { DropTarget(); return false; }
+    ++g.frame;
+    Trim();
+    if (g.surf && !(g.live == hwnd && g.pw == rc.right && g.ph == rc.bottom)) g.DropTarget();
+    if (g.cr) {  // a new context: the clips and the matrix of the last frame are gone
+        while (!g.layers.empty()) g.PopLayer();
+        cairo_destroy(g.cr);
+        g.cr = nullptr;
+    }
+    if (!g.surf) {
+        g.surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, rc.right, rc.bottom);
+        if (cairo_surface_status(g.surf) != CAIRO_STATUS_SUCCESS) { g.DropTarget(); rt = false; return false; }
+    }
+    g.cr = cairo_create(g.surf);
+    g.live = hwnd;
+    g.pw = rc.right; g.ph = rc.bottom;
+    offscreen = false;
+    occluded = false;
+    scale = std::max(0.5f, dpi / 96.f);
+    rt = true;
+    pango_cairo_update_context(g.cr, g.ctx);
+    ox_ = oy_ = 0;
+    ApplyMatrix(g, scale, 0, 0);
+    // the window layer's text fields place the caret by the page's own text measure
+    wgwin::SetEditMeasure([this](const wstring& t, int px, int upTo) {
+        TS ts;
+        ts.size = px / scale;
+        return TextW(t.substr(0, (size_t)std::max(0, upTo)), ts) * scale;
+    });
+    return true;
+}
+// The next BeginHwnd sees the new size
+void Gfx::Resize(HWND) {}
+
+// The window's text fields over the finished page: the field's fill, its text (or its placeholder), the selection and the caret
+// (the window layer keeps their state: win32_window_edit.cpp). The text is the page's own face and size.
+static void DrawEdits(Gfx& gx, GfxCairo& g) {
+    std::vector<wgwin::EditView> views;
+    wgwin::EditViews(g.live, views);
+    if (views.empty()) return;
+    gx.SetOffset(0, 0);  // window coordinates: the page's scroll does not move them
+    const float k = 1.f / gx.scale;
+    for (const wgwin::EditView& ev : views) {
+        const Rc box{ev.rc.left * k, ev.rc.top * k, (ev.rc.right - ev.rc.left) * k, (ev.rc.bottom - ev.rc.top) * k};
+        if (box.w < 1 || box.h < 1) continue;
+        TS ts;
+        ts.size = ev.fontPx * k; ts.color = pal.text; ts.valign = 1;
+        const Rc tr{box.x + ev.marginL * k, box.y, std::max(1.f, box.w - (ev.marginL + ev.marginR) * k), box.h};
+        const float lineH = gx.TextH(L"Ag", 1e5f, ts);
+        auto x = [&](int i) { return i <= 0 ? 0.f : gx.TextW(ev.text.substr(0, (size_t)i), ts); };
+        float sc = ev.scroll * k;  // the text moved left so the caret stays in view
+        const float cx = x(ev.caret), vis = tr.w - 1;
+        if (cx - sc > vis) sc = cx - vis;
+        if (cx - sc < 0) sc = cx;
+        if (x((int)ev.text.size()) <= vis) sc = 0;
+        wgwin::SetEditScroll(ev.h, (int)std::lround(sc * gx.scale));
+        gx.Fill(box, pal.fill);
+        gx.PushClip(tr);
+        const float ty = tr.y + (tr.h - lineH) / 2;
+        if (ev.focused && ev.selStart != ev.selEnd)
+            gx.Fill(Rc{tr.x - sc + x(ev.selStart), ty, x(ev.selEnd) - x(ev.selStart), lineH}, Col{pal.tint.r, pal.tint.g, pal.tint.b, 0.35f});
+        if (ev.text.empty()) {
+            if (!ev.cue.empty()) { TS c = ts; c.color = pal.text2; gx.Text(ev.cue, tr, c); }
+        } else {
+            gx.Text(ev.text, Rc{tr.x - sc, tr.y, 1e5f, tr.h}, ts);
+        }
+        if (ev.caretOn && ev.selStart == ev.selEnd)
+            gx.Fill(Rc{tr.x - sc + cx, ty, std::max(1.f, std::round(gx.scale)) * k, lineH}, pal.text);
+        gx.PopClip();
+    }
 }
 
 bool Gfx::BeginOffscreen(int w, int h, float s) {
@@ -307,6 +388,7 @@ bool Gfx::BeginOffscreen(int w, int h, float s) {
     g.surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, g.pw, g.ph);  // premultiplied BGRA on little-endian, as WIC's
     if (cairo_surface_status(g.surf) != CAIRO_STATUS_SUCCESS) { g.DropTarget(); return false; }
     g.cr = cairo_create(g.surf);
+    rt = true;
     pango_cairo_update_context(g.cr, g.ctx);
     ox_ = oy_ = 0;
     ApplyMatrix(g, scale, 0, 0);
@@ -317,9 +399,11 @@ void Gfx::EndFrame() {
     if (!im_ || !im_->cr) return;
     GfxCairo& g = *im_;
     while (!g.layers.empty()) g.PopLayer();
+    if (g.live) DrawEdits(*this, g);
     cairo_surface_flush(g.surf);
     // the scrim's frozen picture this frame did not draw (the dialog closed) is let go
     if (g.frozen && g.frozenUsed != g.frame) { cairo_surface_destroy(g.frozen); g.frozen = nullptr; g.frozenKey = 0; }
+    if (g.live) wgwin::Present(g.live, cairo_image_surface_get_data(g.surf), g.pw, g.ph, cairo_image_surface_get_stride(g.surf));
 }
 
 bool Gfx::Pixels(std::vector<uint8_t>& bgra, UINT& w, UINT& h) {
@@ -340,7 +424,9 @@ bool Gfx::SavePng(const wstring& path) {
     if (!im_ || !im_->surf) return false;
     while (!im_->layers.empty()) im_->PopLayer();
     cairo_surface_flush(im_->surf);
-    return cairo_surface_write_to_png(im_->surf, U8(path).c_str()) == CAIRO_STATUS_SUCCESS;
+    std::string file;  // the app's paths are Windows-style ("Z:\\home\\...", as Wine has them): the layer's own conversion
+    if (!wgposix::ToPosix(path.c_str(), file)) return false;
+    return cairo_surface_write_to_png(im_->surf, file.c_str()) == CAIRO_STATUS_SUCCESS;
 }
 
 // The caches let go of what has not been used for a while, and the surfaces of images the art cache let go
@@ -363,6 +449,19 @@ void Gfx::Trim() {
 void Gfx::SetOffset(float dx, float dy) {
     ox_ = dx; oy_ = dy;
     if (im_ && im_->cr) ApplyMatrix(*im_, scale, dx, dy);
+}
+void Gfx::PushRotate(float cx, float cy, float degrees) {
+    if (!im_ || !im_->cr) { ++rotationsOpen_; return; }
+    cairo_save(im_->cr);
+    cairo_translate(im_->cr, cx, cy);
+    cairo_rotate(im_->cr, degrees * kPi / 180);  // clockwise on a y-down page, as Direct2D's
+    cairo_translate(im_->cr, -cx, -cy);
+    ++rotationsOpen_;
+}
+void Gfx::PopRotate() {
+    if (rotationsOpen_ <= 0) return;
+    --rotationsOpen_;
+    if (im_ && im_->cr) cairo_restore(im_->cr);
 }
 void Gfx::Clear(Col c) {
     if (!LIVE) return;

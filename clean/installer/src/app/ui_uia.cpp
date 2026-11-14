@@ -30,6 +30,7 @@
 #include "app/ui_shell.h"
 #include "app/launcher_window.h"
 
+#ifdef _WIN32  // UI Automation is Windows' own: the Linux build has the stand-ins at the end of this part (AT-SPI is a later step)
 #include <oleacc.h>
 #include <uiautomation.h>
 
@@ -1067,6 +1068,37 @@ bool UiaInvokeMessage(UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 }  // namespace wg::app::lui
+#else
+namespace wg::app::lui {
+// No accessibility tree yet: the calls the window makes into UI Automation do nothing. EditOf and FieldInvalidWhy are the
+// window's own lookups (the same as above, which UI Automation shares).
+LRESULT UiaGetObject(HWND, WPARAM, LPARAM) { return 0; }
+void UiaFocusChanged(int) {}
+void UiaNotify(const wstring&, bool, int) {}
+void UiaFrame() {}
+void UiaNameEdit(HWND, const wstring&) {}
+void UiaForgetEdit(HWND) {}
+void UiaMarkEdit(HWND, const wstring&) {}
+void UiaShutdown(HWND) {}
+bool UiaInvokeMessage(UINT, WPARAM, LPARAM) { return false; }
+HWND EditOf(int id) {
+    if (id == ID_SEARCH) return v.edSearch.h;
+    if (id == ID_S_URL) return v.edUrl.h;
+    if (id >= ID_G_OPTI0 && id < ID_G_OPTI_END && (id - ID_G_OPTI0) % 10 == 0) {
+        const size_t row = (size_t)(id - ID_G_OPTI0) / 10;
+        if (row < v.edOpti.size()) return v.edOpti[row].h;
+    }
+    return nullptr;
+}
+wstring FieldInvalidWhy(int id) {
+    const auto& b = v.optiBad;
+    if (id < ID_G_OPTI0 || id >= ID_G_OPTI_END || (id - ID_G_OPTI0) % 10 != 0 || v.page != P_GAME) return L"";
+    const size_t row = (size_t)(id - ID_G_OPTI0) / 10;
+    if (row != b.row || row >= v.optiValues.size() || v.optiValues[row] != b.value || b.dir.empty() || !IEq(b.dir, v.cur.dir)) return L"";
+    return b.why;
+}
+}  // namespace wg::app::lui
+#endif
 
 // ---- the keyboard focus on the Library's places --------------------------------------------------------------------------
 // A lockup's ids (ID_TILE, ID_TILEQA + its index) are its game's place in v.games, and the featured banner's (ID_FEAT0 + 1, + 2)
