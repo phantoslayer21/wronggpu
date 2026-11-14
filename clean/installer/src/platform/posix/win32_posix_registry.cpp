@@ -108,8 +108,10 @@ struct Store {
             i = j + 1;
         }
     }
-    void Save() {
-        if (file.empty() || readOnly) return;
+    // True when the file now holds the store (or the store has no file); `err` is the errno of the failure otherwise.
+    bool Save(int& err) {
+        err = 0;
+        if (file.empty() || readOnly) return true;
         const size_t cut = file.find_last_of('/');
         if (cut != std::string::npos && cut > 0) {
             std::string dir;
@@ -117,7 +119,9 @@ struct Store {
         }
         const std::string tmp = file + ".write";
         FILE* f = std::fopen(tmp.c_str(), "w");
-        if (!f) return;
+        if (!f) { err = errno; return false; }
+        bool ok = true;
+        auto put = [&](int n) { if (n < 0) ok = false; };
         std::map<std::string, std::string> shown;   // lower path -> path as written
         for (auto& [lower, k] : keys) {
             if (lower.empty()) continue;
@@ -126,24 +130,37 @@ struct Store {
         }
         for (auto& [lower, k] : keys) {
             if (lower.empty()) { if (k.values.empty()) continue; }
-            std::fprintf(f, "[%s]\n", Escape(lower.empty() ? std::string() : shown[lower]).c_str());
+            put(std::fprintf(f, "[%s]\n", Escape(lower.empty() ? std::string() : shown[lower]).c_str()));
             for (auto& [vl, v] : k.values) {
                 const std::string n = v.name.empty() ? "@" : Escape(v.name);
                 switch (v.type) {
-                    case REG_SZ: std::fprintf(f, "%s=s:%s\n", n.c_str(), Escape(v.data).c_str()); break;
-                    case REG_EXPAND_SZ: std::fprintf(f, "%s=e:%s\n", n.c_str(), Escape(v.data).c_str()); break;
-                    case REG_DWORD: { uint32_t x = 0; std::memcpy(&x, v.data.data(), std::min<size_t>(4, v.data.size())); std::fprintf(f, "%s=d:%u\n", n.c_str(), x); break; }
-                    case REG_QWORD: { uint64_t x = 0; std::memcpy(&x, v.data.data(), std::min<size_t>(8, v.data.size())); std::fprintf(f, "%s=q:%llu\n", n.c_str(), (unsigned long long)x); break; }
-                    case REG_MULTI_SZ: std::fprintf(f, "%s=m:%s\n", n.c_str(), Hex(v.data).c_str()); break;
-                    default: std::fprintf(f, "%s=b:%s\n", n.c_str(), Hex(v.data).c_str()); break;
+                    case REG_SZ: put(std::fprintf(f, "%s=s:%s\n", n.c_str(), Escape(v.data).c_str())); break;
+                    case REG_EXPAND_SZ: put(std::fprintf(f, "%s=e:%s\n", n.c_str(), Escape(v.data).c_str())); break;
+                    case REG_DWORD: { uint32_t x = 0; std::memcpy(&x, v.data.data(), std::min<size_t>(4, v.data.size())); put(std::fprintf(f, "%s=d:%u\n", n.c_str(), x)); break; }
+                    case REG_QWORD: { uint64_t x = 0; std::memcpy(&x, v.data.data(), std::min<size_t>(8, v.data.size())); put(std::fprintf(f, "%s=q:%llu\n", n.c_str(), (unsigned long long)x)); break; }
+                    case REG_MULTI_SZ: put(std::fprintf(f, "%s=m:%s\n", n.c_str(), Hex(v.data).c_str())); break;
+                    default: put(std::fprintf(f, "%s=b:%s\n", n.c_str(), Hex(v.data).c_str())); break;
                 }
             }
         }
-        const bool ok = std::fclose(f) == 0;
-        if (ok) std::rename(tmp.c_str(), file.c_str());
-        else std::remove(tmp.c_str());
+        if (std::fflush(f) != 0 || ferror(f)) ok = false;
+        if (ok && fsync(fileno(f)) != 0) ok = false;
+        if (!ok) err = errno ? errno : EIO;
+        if (std::fclose(f) != 0 && ok) { ok = false; err = errno ? errno : EIO; }
+        if (ok && std::rename(tmp.c_str(), file.c_str()) != 0) { ok = false; err = errno; }
+        if (!ok) std::remove(tmp.c_str());
+        return ok;
     }
 };
+// the Windows error for a failed save
+DWORD SaveError(int err) { return err == EACCES || err == EPERM || err == EROFS ? ERROR_ACCESS_DENIED : ERROR_WRITE_FAULT; }
+// Write the store out; when that fails, put `before` back so memory keeps matching the file, and give the error.
+LSTATUS SaveOrUndo(Store* s, std::map<std::string, Key>& before) {
+    int err = 0;
+    if (s->Save(err)) return ERROR_SUCCESS;
+    s->keys = std::move(before);
+    return SaveError(err);
+}
 
 std::string UserFile() {
     if (const char* e = std::getenv("WRONGGPU_REGISTRY_FILE")) if (*e) return e;
@@ -241,8 +258,10 @@ LSTATUS RegCreateKeyExW(HKEY key, LPCWSTR sub, DWORD, LPWSTR, DWORD, REGSAM sam,
     const bool existed = r.store->keys.count(path) != 0;
     if (!existed) {
         // the key's own spelling for the new parts, the parent's for the rest (parents keep the names they were made with)
+        std::map<std::string, Key> before = r.store->keys;
         r.store->Make(shown);
-        r.store->Save();
+        const LSTATUS saved = SaveOrUndo(r.store, before);
+        if (saved != ERROR_SUCCESS) return saved;
     }
     if (disposition) *disposition = existed ? REG_OPENED_EXISTING_KEY : REG_CREATED_NEW_KEY;
     *out = NewKey(r.store, path, sam);
@@ -309,9 +328,9 @@ LSTATUS RegSetValueExW(HKEY key, LPCWSTR name, DWORD, DWORD type, const BYTE* da
     }
     std::lock_guard<std::mutex> g(r.store->mu);
     r.store->Load();
+    std::map<std::string, Key> before = r.store->keys;
     r.store->keys[r.path].values[LowerAscii(v.name)] = v;
-    r.store->Save();
-    return ERROR_SUCCESS;
+    return SaveOrUndo(r.store, before);
 }
 LSTATUS RegDeleteKeyW(HKEY key, LPCWSTR sub) {
     Resolved r;
@@ -323,9 +342,9 @@ LSTATUS RegDeleteKeyW(HKEY key, LPCWSTR sub) {
     if (!r.store->keys.count(path)) return ERROR_FILE_NOT_FOUND;
     if (r.store->readOnly) return ERROR_ACCESS_DENIED;
     if (!Children(r.store, path).empty()) return ERROR_ACCESS_DENIED;   // a key with subkeys stays, as on Windows
+    std::map<std::string, Key> before = r.store->keys;
     r.store->keys.erase(path);
-    r.store->Save();
-    return ERROR_SUCCESS;
+    return SaveOrUndo(r.store, before);
 }
 LSTATUS RegEnumKeyExW(HKEY key, DWORD index, LPWSTR name, LPDWORD nameLen, LPDWORD, LPWSTR, LPDWORD, FILETIME*) {
     Resolved r;
@@ -356,7 +375,8 @@ LSTATUS RegLoadAppKeyW(LPCWSTR file, PHKEY out, REGSAM sam, DWORD, DWORD) {
     s->keys.clear();   // what the file holds now, not what an earlier load saw
     s->loaded = false;
     s->Load();
-    s->Save();   // an app hive file exists once it is loaded, as on Windows
+    int saveErr = 0;
+    s->Save(saveErr);   // an app hive file exists once it is loaded, as on Windows; if it cannot be written, the first write says so
     *out = NewKey(s, "", sam, true);
     return ERROR_SUCCESS;
 }

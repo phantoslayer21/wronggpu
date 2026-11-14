@@ -349,7 +349,7 @@ wstring SignatureInfo(const wstring& path) {
                 }
             }
         }
-    } else if ((unsigned long)r == 0x800B0100u) out = L"no Authenticode signature";
+    } else if ((uint32_t)r == 0x800B0100u) out = L"no Authenticode signature";
     else out = L"Authenticode check failed (" + Hex32((DWORD)r) + L")";
     td.stateAction = 2;  // WTD_STATEACTION_CLOSE
     verify(reinterpret_cast<HWND>(INVALID_HANDLE_VALUE), &action, &td);

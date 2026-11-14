@@ -48,6 +48,8 @@ inline std::wstring FromUtf8(const std::string& s) { return FromUtf8(s.data(), s
 bool ToPosix(const wchar_t* w, std::string& out, DWORD& err);
 bool ToPosix(const wchar_t* w, std::string& out);   // sets the last error
 std::string FixCase(const std::string& p);
+wint_t FoldChar(wint_t c);   // simple Unicode case folding, for names
+std::wstring WinPath(const std::string& posix);   // an absolute POSIX path as "Z:\..."; a relative one as it is
 
 DWORD ErrorFromErrno(int e, const std::string& path);
 void SetErrorFromErrno(int e, const std::string& path);
@@ -61,7 +63,7 @@ void FillFind(WIN32_FIND_DATAW& d, const struct stat& lst, const std::string& pa
 // sharing: does a delete, move or replace of the file with this identity clash with another open handle?
 bool ShareAllowsDelete(const struct stat& st);
 // a child process, reaped once however many handles name it
-struct ChildState { bool exited = false; int code = 0; int forcedCode = -1; };
+struct ChildState { bool exited = false; int code = 0; int forcedCode = -1; int refs = 0; /* open process handles */ bool suspended = false; };
 bool PollChild(int pid, ChildState& out);
 void KillChild(int pid, int code);
 

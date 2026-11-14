@@ -9,6 +9,13 @@
 
 #include <windows.h>
 
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include "win32_posix_internal.h"
+
 namespace {
 int checks = 0, failures = 0;
 void check(bool ok, const char* what) {
@@ -227,6 +234,128 @@ void Processes() {
     check(!CreateProcessW(nullptr, nb.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si2, &mp), "a Windows program does not start here");
 }
 
+// ---- the review findings of the process, case, suspended-start and registry-write code ----------------------------------
+std::wstring WinOf(const std::string& posix) {
+    std::wstring w(posix.begin(), posix.end());
+    for (auto& c : w) if (c == L'/') c = L'\\';
+    return L"Z:" + w;
+}
+char StateOf(int pid) {   // the state letter of /proc/<pid>/stat
+    std::string s;
+    if (FILE* f = std::fopen(("/proc/" + std::to_string(pid) + "/stat").c_str(), "r")) { char b[512]; size_t n = std::fread(b, 1, sizeof(b) - 1, f); s.assign(b, n); std::fclose(f); }
+    const size_t p = s.rfind(')');
+    return p == std::string::npos || p + 2 >= s.size() ? '?' : s[p + 2];
+}
+
+void ProcessImage() {
+    const std::string dirPosix(Tmp.begin() + 2, Tmp.end());
+    std::string dir = dirPosix;
+    for (auto& c : dir) if (c == '\\') c = '/';
+    const std::string exeName = "a-program-with-a-long-name.exe";   // 29 characters: /proc/<pid>/comm keeps 15
+    const std::string exePath = dir + "/" + exeName;
+    std::error_code ec;
+    std::filesystem::copy_file("/bin/sleep", exePath, std::filesystem::copy_options::overwrite_existing, ec);
+    chmod(exePath.c_str(), 0755);
+    const std::string real = std::filesystem::canonical(exePath, ec).string();
+    const std::wstring winForm = WinOf(real);
+    std::wstring cmd = L"\"" + In(L"a-program-with-a-long-name.exe") + L"\" 30";
+    std::vector<wchar_t> cb(cmd.begin(), cmd.end()); cb.push_back(0);
+    STARTUPINFOW si{}; si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    check(CreateProcessW(nullptr, cb.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi), "start a copy of sleep with a long .exe name");
+    std::wstring seen = L"<none>";
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    PROCESSENTRY32W pe{}; pe.dwSize = sizeof(pe);
+    for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) if (pe.th32ProcessID == pi.dwProcessId) seen = pe.szExeFile;
+    CloseHandle(snap);
+    check(seen == L"a-program-with-a-long-name.exe", "the snapshot shows the whole name, not the kernel's 15 characters");
+    wchar_t path[MAX_PATH * 2]; DWORD n = (DWORD)(sizeof(path) / sizeof(path[0]));
+    HANDLE op = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pi.dwProcessId);
+    const bool got = op && QueryFullProcessImageNameW(op, 0, path, &n);
+    check(got && std::wstring(path) == winForm, "the image path is the Z:\\ form of the file");
+    check(got && _wcsicmp(path, winForm.c_str()) == 0, "and it equals the path the caller holds (the GameRunning comparison)");
+    if (op) CloseHandle(op);
+    TerminateProcess(pi.hProcess, 1);
+    WaitForSingleObject(pi.hProcess, 5000);
+    CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+}
+
+void Suspended() {
+    std::wstring cmd = L"sleep 5";
+    std::vector<wchar_t> cb(cmd.begin(), cmd.end()); cb.push_back(0);
+    STARTUPINFOW si{}; si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    check(CreateProcessW(nullptr, cb.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED, nullptr, nullptr, &si, &pi), "start sleep suspended");
+    check(StateOf((int)pi.dwProcessId) == 'T', "a suspended process is stopped before it runs");
+    check(ResumeThread(pi.hThread) == 1, "ResumeThread: the previous suspend count was 1");
+    char st = 'T';
+    for (int i = 0; i < 100 && (st = StateOf((int)pi.dwProcessId)) == 'T'; ++i) Sleep(10);
+    check(st != 'T', "and it runs after ResumeThread");
+    check(ResumeThread(pi.hThread) == 0, "a second ResumeThread: count 0");
+    check(ResumeThread(nullptr) == (DWORD)-1, "ResumeThread of a bad handle: -1");
+    TerminateProcess(pi.hProcess, 1);
+    WaitForSingleObject(pi.hProcess, 5000);
+    CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+}
+
+void CaseFolding() {
+    check(Put(In(L"\u00C9.txt"), "e"), "create \xC3\x89.txt");
+    check(GetFileAttributesW(In(L"\u00E9.txt").c_str()) != INVALID_FILE_ATTRIBUTES, "GetFileAttributesW finds it spelled with the lower-case letter");
+    WIN32_FIND_DATAW fd;
+    HANDLE f = FindFirstFileW(In(L"\u00E9.txt").c_str(), &fd);
+    check(f != INVALID_HANDLE_VALUE && std::wstring(fd.cFileName) == L"\u00C9.txt", "FindFirstFileW finds it by the lower-case name");
+    if (f != INVALID_HANDLE_VALUE) FindClose(f);
+    f = FindFirstFileW(In(L"\u00E9*").c_str(), &fd);
+    check(f != INVALID_HANDLE_VALUE, "and by a wildcard");
+    if (f != INVALID_HANDLE_VALUE) FindClose(f);
+    check(CompareStringOrdinal(L"\u00C9", 1, L"\u00E9", 1, TRUE) == CSTR_EQUAL, "CompareStringOrdinal ignores the case of an accented letter");
+    check(CompareStringOrdinal(L"\u00C9", 1, L"\u00E9", 1, FALSE) != CSTR_EQUAL, "and not when asked to be exact");
+    check(_wcsicmp(L"\u00C9", L"\u00E9") == 0 && _wcsnicmp(L"\u00C9x", L"\u00E9y", 1) == 0, "_wcsicmp and _wcsnicmp too");
+}
+
+void RegistryWrites() {
+    // a hive whose file cannot be written: its folder is a regular file
+    Put(In(L"not-a-folder"), "x");
+    HKEY h = nullptr, key = nullptr;
+    check(RegLoadAppKeyW(In(L"not-a-folder\\hive.dat").c_str(), &h, KEY_ALL_ACCESS, 0, 0) == ERROR_SUCCESS, "load a hive whose file cannot be written");
+    const LSTATUS c = RegCreateKeyExW(h, L"K", 0, nullptr, 0, KEY_ALL_ACCESS, nullptr, &key, nullptr);
+    check(c != ERROR_SUCCESS, "creating a key that cannot be saved fails");
+    check(RegOpenKeyExW(h, L"K", 0, KEY_READ, &key) != ERROR_SUCCESS, "and the key is not kept in memory");
+    // the value case on a key that exists in memory only because the load made the root
+    check(RegSetValueExW(h, L"v", 0, REG_SZ, (const BYTE*)L"x", 4) != ERROR_SUCCESS, "setting a value that cannot be saved fails");
+    wchar_t buf[8]{}; DWORD sz = sizeof(buf);
+    check(RegQueryValueExW(h, L"v", nullptr, nullptr, (LPBYTE)buf, &sz) == ERROR_FILE_NOT_FOUND, "and a fresh read does not see it");
+    RegCloseKey(h);
+    // the error code is the one for the cause: a read-only folder is access denied
+    if (geteuid() != 0) {
+        const std::string dir(Tmp.begin() + 2, Tmp.end());
+        std::string d = dir; for (auto& ch : d) if (ch == '\\') ch = '/';
+        mkdir((d + "/ro").c_str(), 0755);
+        HKEY r = nullptr;
+        check(RegLoadAppKeyW(In(L"ro\\hive.dat").c_str(), &r, KEY_ALL_ACCESS, 0, 0) == ERROR_SUCCESS, "load a hive in a folder");
+        chmod((d + "/ro").c_str(), 0555);
+        check(RegSetValueExW(r, L"v", 0, REG_SZ, (const BYTE*)L"x", 4) == ERROR_ACCESS_DENIED, "a read-only folder: access denied");
+        RegCloseKey(r);
+        chmod((d + "/ro").c_str(), 0755);
+    }
+}
+
+void FinishedChildren() {
+    std::wstring cmd = L"true";
+    std::vector<wchar_t> cb(cmd.begin(), cmd.end()); cb.push_back(0);
+    STARTUPINFOW si{}; si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    CreateProcessW(nullptr, cb.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi);
+    WaitForSingleObject(pi.hProcess, 5000);
+    wgposix::ChildState c;
+    check(wgposix::PollChild((int)pi.dwProcessId, c) && c.exited, "a finished child is known while its handle is open");
+    CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+    check(!wgposix::PollChild((int)pi.dwProcessId, c), "and forgotten once its handle is closed");
+    wchar_t* msg = nullptr;
+    check(FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_ALLOCATE_BUFFER, nullptr, ERROR_INVALID_NAME, 0, (LPWSTR)&msg, 0, nullptr) > 0, "FormatMessageW has text for ERROR_INVALID_NAME");
+    std::free(msg);
+}
+
 void NotAvailable() {
     check(LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32) == nullptr && GetLastError() == ERROR_MOD_NOT_FOUND, "no Windows DLL loads");
     check(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion") == nullptr, "and GetProcAddress of a missing module is null");
@@ -271,6 +400,11 @@ int main() {
     Strings();
     Registry();
     Processes();
+    ProcessImage();
+    Suspended();
+    CaseFolding();
+    RegistryWrites();
+    FinishedChildren();
     NotAvailable();
     Folders();
     std::remove(regFile.c_str());

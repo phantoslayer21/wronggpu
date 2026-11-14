@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: MIT
 // Linux: Windows process, pipe, job object, token and ShellExecute calls on POSIX (see win32_posix.h).
 //
-// A process is a child spawned with posix_spawn, reaped once however many handles name it. CREATE_SUSPENDED is not honoured
-// (ResumeThread does nothing): a job object here is a list of process ids, killed one by one, so a child of a child is not in
-// it. No window or priority class exists; those flags are ignored.
+// A process is a child spawned with posix_spawn, reaped once however many handles name it, and forgotten once it is reaped and
+// no handle names it. CREATE_SUSPENDED forks instead: the child stops itself (SIGSTOP) before it execs, and ResumeThread sends
+// SIGCONT; a program that then fails to exec exits with 127, since CreateProcessW has returned by then. A job object here is a
+// list of process ids, killed one by one, so a child of a child is not in it. No window or priority class exists; those flags
+// are ignored.
 #include <dirent.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -55,9 +57,19 @@ void KillChild(int pid, int code) {
     it->second.forcedCode = code;
     kill(pid, SIGKILL);
 }
-static void SweepChildren() {   // children nobody waits for are reaped here, on the next start
+static void SweepChildren() {   // children nobody waits for are reaped here, on the next start; finished ones no handle names go
     std::lock_guard<std::mutex> g(g_childLock);
-    for (auto& [pid, c] : g_children) Reap(pid, c);
+    for (auto it = g_children.begin(); it != g_children.end();) {
+        Reap(it->first, it->second);
+        it = it->second.exited && it->second.refs == 0 ? g_children.erase(it) : std::next(it);
+    }
+}
+static void AddChild(int pid, int handles, bool suspended) {
+    std::lock_guard<std::mutex> g(g_childLock);
+    ChildState c;
+    c.refs = handles;
+    c.suspended = suspended;
+    g_children[pid] = c;
 }
 
 // ---- jobs --------------------------------------------------------------------------------------------------------------
@@ -75,7 +87,15 @@ void ReleaseJob(Handle* h) {
     if (h->killOnClose) KillJobMembers(h, 1);
     g_jobs.erase(std::remove(g_jobs.begin(), g_jobs.end(), h), g_jobs.end());
 }
-void ReleaseProcess(Handle*) {}
+void ReleaseProcess(Handle* h) {
+    std::lock_guard<std::mutex> g(g_childLock);
+    auto it = g_children.find(h->pid);
+    if (it == g_children.end()) return;
+    if (it->second.refs > 0) --it->second.refs;
+    if (it->second.refs > 0) return;
+    Reap(h->pid, it->second);
+    if (it->second.exited) g_children.erase(it);
+}
 
 }  // namespace wgposix
 
@@ -155,31 +175,55 @@ BOOL CreateProcessW(LPCWSTR app, LPWSTR cmdline, LPSECURITY_ATTRIBUTES, LPSECURI
         envp.push_back(nullptr);
     }
 
-    posix_spawn_file_actions_t fa;
-    posix_spawn_file_actions_init(&fa);
-    if (!cwd.empty()) posix_spawn_file_actions_addchdir_np(&fa, cwd.c_str());
+    int stdFd[3] = {-2, -2, -2};   // what the child gets as 0, 1, 2: a descriptor, -1 for /dev/null, -2 for the parent's own
     if (si && (si->dwFlags & STARTF_USESTDHANDLES)) {
         const HANDLE std3[3] = {si->hStdInput, si->hStdOutput, si->hStdError};
         for (int n = 0; n < 3; ++n) {
             Handle* h = std3[n] && std3[n] != INVALID_HANDLE_VALUE ? Lookup(std3[n], Kind::File) : nullptr;
             if (!h && std3[n] && std3[n] != INVALID_HANDLE_VALUE) h = Lookup(std3[n], Kind::Pipe);
-            if (h) posix_spawn_file_actions_adddup2(&fa, h->fd, n);
-            else posix_spawn_file_actions_addopen(&fa, n, "/dev/null", n == 0 ? O_RDONLY : O_WRONLY, 0);
+            stdFd[n] = h ? h->fd : -1;
         }
     }
+    char** const childEnv = env ? envp.data() : environ;
     SweepChildren();
     pid_t pid = 0;
-    const int rc = search ? posix_spawnp(&pid, exe.c_str(), &fa, nullptr, argv.data(), env ? envp.data() : environ)
-                          : posix_spawn(&pid, exe.c_str(), &fa, nullptr, argv.data(), env ? envp.data() : environ);
-    posix_spawn_file_actions_destroy(&fa);
-    if (rc != 0) {
-        SetErrorFromErrno(rc, exe);   // ENOEXEC: a file that is no program here (a Windows .exe) is a bad format
-        return FALSE;
+    if (flags & CREATE_SUSPENDED) {
+        // fork, not posix_spawn: the child must stop before it runs a line of the program, and the parent waits to see that
+        pid = fork();
+        if (pid < 0) { SetErrorFromErrno(errno, exe); return FALSE; }
+        if (pid == 0) {   // only calls that are safe between fork and exec
+            for (int n = 0; n < 3; ++n) {
+                if (stdFd[n] == n) fcntl(n, F_SETFD, 0);
+                else if (stdFd[n] >= 0) dup2(stdFd[n], n);
+                else if (stdFd[n] == -1) { const int f = open("/dev/null", n == 0 ? O_RDONLY : O_WRONLY); if (f >= 0) { dup2(f, n); if (f != n) close(f); } }
+            }
+            if (!cwd.empty() && chdir(cwd.c_str()) != 0) _exit(126);
+            kill(getpid(), SIGSTOP);
+            if (search) execvpe(exe.c_str(), argv.data(), childEnv);
+            else execve(exe.c_str(), argv.data(), childEnv);
+            _exit(127);
+        }
+        int status = 0;
+        pid_t w;
+        while ((w = waitpid(pid, &status, WUNTRACED)) < 0 && errno == EINTR) {}
+        if (w != pid || !WIFSTOPPED(status)) { SetLastError(ERROR_GEN_FAILURE); return FALSE; }   // the child died before it stopped
+    } else {
+        posix_spawn_file_actions_t fa;
+        posix_spawn_file_actions_init(&fa);
+        if (!cwd.empty()) posix_spawn_file_actions_addchdir_np(&fa, cwd.c_str());
+        for (int n = 0; n < 3; ++n) {
+            if (stdFd[n] >= 0) posix_spawn_file_actions_adddup2(&fa, stdFd[n], n);
+            else if (stdFd[n] == -1) posix_spawn_file_actions_addopen(&fa, n, "/dev/null", n == 0 ? O_RDONLY : O_WRONLY, 0);
+        }
+        const int rc = search ? posix_spawnp(&pid, exe.c_str(), &fa, nullptr, argv.data(), childEnv)
+                              : posix_spawn(&pid, exe.c_str(), &fa, nullptr, argv.data(), childEnv);
+        posix_spawn_file_actions_destroy(&fa);
+        if (rc != 0) {
+            SetErrorFromErrno(rc, exe);   // ENOEXEC: a file that is no program here (a Windows .exe) is a bad format
+            return FALSE;
+        }
     }
-    {
-        std::lock_guard<std::mutex> g(g_childLock);
-        g_children[pid] = ChildState{};
-    }
+    AddChild(pid, 1, (flags & CREATE_SUSPENDED) != 0);
     Handle* p = NewHandle(Kind::Process);
     p->pid = pid;
     Handle* t = NewHandle(Kind::Thread);
@@ -219,13 +263,28 @@ BOOL TerminateProcess(HANDLE hv, UINT code) {
     KillChild(h->pid, (int)code);
     return TRUE;
 }
-DWORD ResumeThread(HANDLE hv) { return Lookup(hv, Kind::Thread) ? 1 : (DWORD)-1; }
+// The suspend count is 1 for a process started suspended and not yet resumed, else 0.
+DWORD ResumeThread(HANDLE hv) {
+    Handle* t = Lookup(hv, Kind::Thread);
+    if (!t) return (DWORD)-1;
+    std::lock_guard<std::mutex> g(g_childLock);
+    auto it = g_children.find(t->pid);
+    if (it == g_children.end() || !it->second.suspended) return 0;
+    it->second.suspended = false;
+    kill(t->pid, SIGCONT);
+    return 1;
+}
 HANDLE GetCurrentProcess() {
     static Handle* self = [] { Handle* h = NewHandle(Kind::Process); h->pid = getpid(); return h; }();
     return self;
 }
 HANDLE OpenProcess(DWORD, BOOL, DWORD pid) {
     if (kill((pid_t)pid, 0) != 0 && errno != EPERM) { SetErrorFromErrno(errno, ""); return nullptr; }
+    {
+        std::lock_guard<std::mutex> g(g_childLock);
+        auto it = g_children.find((int)pid);
+        if (it != g_children.end()) ++it->second.refs;
+    }
     Handle* h = NewHandle(Kind::Process);
     h->pid = (int)pid;
     return h;
@@ -311,6 +370,47 @@ BOOL TerminateJobObject(HANDLE hv, UINT code) {
     return TRUE;
 }
 
+// What /proc says about a process. The name the kernel keeps (comm) stops at 15 characters, so names come from the command line.
+static std::string Slurp(const std::string& f) {
+    std::string r;
+    if (FILE* fp = std::fopen(f.c_str(), "r")) { char b[4096]; size_t n; while ((n = std::fread(b, 1, sizeof(b), fp)) > 0) r.append(b, n); std::fclose(fp); }
+    return r;
+}
+static std::vector<std::string> CommandLine(int pid) {
+    const std::string raw = Slurp("/proc/" + std::to_string(pid) + "/cmdline");
+    std::vector<std::string> out;
+    for (size_t i = 0; i < raw.size();) {
+        const size_t e = raw.find('\0', i);
+        out.push_back(raw.substr(i, e == std::string::npos ? std::string::npos : e - i));
+        if (e == std::string::npos) break;
+        i = e + 1;
+    }
+    return out;
+}
+static std::string BaseOf(const std::string& p) {
+    const size_t cut = p.find_last_of("\\/");
+    return cut == std::string::npos ? p : p.substr(cut + 1);
+}
+static bool EndsExe(const std::string& s) { return s.size() > 4 && strcasecmp(s.c_str() + s.size() - 4, ".exe") == 0; }
+static std::string Lower(std::string s) { for (auto& c : s) c = (char)std::tolower((unsigned char)c); return s; }
+// Wine's own program: the Windows program it runs is named in the command line, not in the image.
+static bool IsWineLoader(const std::string& image) {
+    const std::string base = Lower(BaseOf(image));
+    if (base == "wine" || base == "wine64" || base == "wine-preloader" || base == "wine64-preloader") return true;
+    const std::string low = Lower(image);
+    return low.find("/bin/") != std::string::npos && (low.find("proton") != std::string::npos || low.find("wine") != std::string::npos);
+}
+// The Windows program a Wine process runs: its own name when that is one (Wine sets it), else the first .exe argument.
+static bool WineProgram(const std::vector<std::string>& args, std::string& out) {
+    for (const std::string& a : args) if (EndsExe(a)) { out = a; return true; }
+    return false;
+}
+static std::string ImageOf(int pid) {
+    char link[4096];
+    const ssize_t n = readlink(("/proc/" + std::to_string(pid) + "/exe").c_str(), link, sizeof(link) - 1);
+    return n < 0 ? std::string() : std::string(link, (size_t)n);
+}
+
 // Processes by name: the Windows name of a Wine process is in its command line; any other process has its own name.
 HANDLE CreateToolhelp32Snapshot(DWORD, DWORD) {
     Handle* s = NewHandle(Kind::Snapshot);
@@ -321,22 +421,20 @@ HANDLE CreateToolhelp32Snapshot(DWORD, DWORD) {
         const long pid = std::strtol(e->d_name, &end, 10);
         if (*end || pid <= 0) continue;
         const std::string base = std::string("/proc/") + e->d_name;
-        auto slurp = [](const std::string& f) {
-            std::string r;
-            if (FILE* fp = std::fopen(f.c_str(), "r")) { char b[4096]; size_t n; while ((n = std::fread(b, 1, sizeof(b), fp)) > 0) r.append(b, n); std::fclose(fp); }
-            return r;
-        };
-        std::string name = slurp(base + "/comm");
-        while (!name.empty() && name.back() == '\n') name.pop_back();
-        const std::string cmd = slurp(base + "/cmdline").c_str();   // up to the first NUL: argv[0]
-        const size_t cut = cmd.find_last_of("\\/");
-        const std::string first = cut == std::string::npos ? cmd : cmd.substr(cut + 1);
-        if (first.size() > 4 && strcasecmp(first.c_str() + first.size() - 4, ".exe") == 0) name = first;
+        const std::vector<std::string> cmd = CommandLine((int)pid);
+        std::string name;
+        std::string prog;
+        if (IsWineLoader(ImageOf((int)pid)) && WineProgram(cmd, prog)) name = BaseOf(prog);
+        if (name.empty() && !cmd.empty()) name = BaseOf(cmd[0]);
+        if (name.empty()) {   // a process with no command line (a kernel thread): the kernel's own name
+            name = Slurp(base + "/comm");
+            while (!name.empty() && name.back() == '\n') name.pop_back();
+        }
         if (name.empty()) continue;
         PROCESSENTRY32W pe{};
         pe.dwSize = sizeof(pe);
         pe.th32ProcessID = (DWORD)pid;
-        const std::string stat = slurp(base + "/stat");
+        const std::string stat = Slurp(base + "/stat");
         const size_t paren = stat.rfind(')');
         if (paren != std::string::npos) { int ppid = 0; std::sscanf(stat.c_str() + paren + 2, "%*c %d", &ppid); pe.th32ParentProcessID = (DWORD)ppid; }
         const std::wstring w = FromUtf8(name);
@@ -362,15 +460,31 @@ BOOL Process32NextW(HANDLE snap, PROCESSENTRY32W* pe) {
     return TRUE;
 }
 
-// The Windows path of a Wine process is not one this layer can give; a caller that cannot tell takes the process for the one it
-// looks for, and so does a process it cannot open.
+// The Windows spelling of the program a process runs. A Wine process runs the loader; its program is the .exe in the command line, and
+// with none there the call fails, so a caller that cannot tell takes the process for the one it looks for, as it does for a
+// process it cannot open.
 BOOL QueryFullProcessImageNameW(HANDLE process, DWORD, LPWSTR out, LPDWORD size) {
     Handle* p = Lookup(process, Kind::Process);
     if (!p) return FALSE;
-    char link[4096];
-    const ssize_t n = readlink(("/proc/" + std::to_string(p->pid) + "/exe").c_str(), link, sizeof(link) - 1);
-    if (n < 0) { SetErrorFromErrno(errno, ""); return FALSE; }
-    const std::wstring w = FromUtf8(link, (size_t)n);
+    const std::string image = ImageOf(p->pid);
+    if (image.empty()) { SetLastError(ERROR_ACCESS_DENIED); return FALSE; }
+    std::wstring w;
+    std::string prog;
+    if (IsWineLoader(image)) {
+        if (!WineProgram(CommandLine(p->pid), prog)) return Fail(ERROR_NOT_FOUND);
+        const bool windows = prog.size() >= 2 && ((prog[1] == ':') || prog.compare(0, 2, "\\\\") == 0);
+        if (windows) w = FromUtf8(prog);
+        else {
+            if (prog[0] != '/') {   // relative to the process's own folder
+                char cwd[4096];
+                const ssize_t n = readlink(("/proc/" + std::to_string(p->pid) + "/cwd").c_str(), cwd, sizeof(cwd) - 1);
+                if (n > 0) prog = std::string(cwd, (size_t)n) + "/" + prog;
+            }
+            w = WinPath(prog);
+        }
+    } else {
+        w = WinPath(image);
+    }
     if (!size || *size < w.size() + 1) { if (size) *size = (DWORD)w.size() + 1; return Fail(ERROR_INSUFFICIENT_BUFFER); }
     std::memcpy(out, w.c_str(), (w.size() + 1) * sizeof(wchar_t));
     *size = (DWORD)w.size();
@@ -432,10 +546,7 @@ BOOL ShellExecuteExW(SHELLEXECUTEINFOW* sei) {
     const int rc = posix_spawnp(&pid, "xdg-open", &fa, nullptr, argv.data(), environ);
     posix_spawn_file_actions_destroy(&fa);
     if (rc != 0) return Fail(rc == ENOENT ? ERROR_NO_ASSOCIATION : ErrorFromErrno(rc, ""));
-    {
-        std::lock_guard<std::mutex> g(g_childLock);
-        g_children[pid] = ChildState{};
-    }
+    AddChild(pid, (sei->fMask & SEE_MASK_NOCLOSEPROCESS) ? 1 : 0, false);
     sei->hInstApp = reinterpret_cast<HINSTANCE>(static_cast<uintptr_t>(33));
     if (sei->fMask & SEE_MASK_NOCLOSEPROCESS) { Handle* p = NewHandle(Kind::Process); p->pid = pid; sei->hProcess = p; }
     return TRUE;

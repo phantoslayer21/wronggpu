@@ -2,6 +2,7 @@
 // Linux: Windows file, string, time, environment and shell calls on POSIX (see win32_posix.h). Registry and processes are in
 // win32_posix_registry.cpp and win32_posix_process.cpp.
 #include <dirent.h>
+#include <locale.h>
 #include <fcntl.h>
 #include <pwd.h>
 #include <sys/mman.h>
@@ -94,6 +95,13 @@ std::wstring FromUtf8(const char* s, size_t n) {
     return w;
 }
 
+// Case folding for names: Unicode simple case mapping through a C.UTF-8 locale object of our own, so the process locale stays as
+// it is; without that locale, whatever towlower does in the current one.
+wint_t FoldChar(wint_t c) {
+    static const locale_t loc = newlocale(LC_CTYPE_MASK, "C.UTF-8", (locale_t)0);
+    return loc ? towlower_l(towupper_l(c, loc), loc) : towlower(towupper(c));
+}
+
 // ---- paths -------------------------------------------------------------------------------------------------------------
 std::string FixCase(const std::string& p) {
     struct stat st;
@@ -109,9 +117,10 @@ std::string FixCase(const std::string& p) {
         std::string comp = p.substr(pos, e - pos);
         if (!comp.empty() && comp != "." && comp != ".." && !broken && lstat((out + comp).c_str(), &st) != 0) {
             bool found = false;
+            const std::wstring wcomp = FromUtf8(comp);
             if (DIR* d = opendir(out.empty() ? "." : out.c_str())) {
                 while (dirent* ent = readdir(d)) {
-                    if (strcasecmp(ent->d_name, comp.c_str()) == 0) { comp = ent->d_name; found = true; break; }
+                    if (_wcsicmp(FromUtf8(ent->d_name, std::strlen(ent->d_name)).c_str(), wcomp.c_str()) == 0) { comp = ent->d_name; found = true; break; }
                 }
                 closedir(d);
             }
@@ -238,7 +247,7 @@ using namespace wgposix;
 
 // The Windows spelling of an absolute POSIX path: drive Z:, backslashes (the core's path code, and FullPath's equality tests,
 // are written for that form). Relative paths come back as they are.
-static std::wstring WinPath(const std::string& posix) {
+std::wstring wgposix::WinPath(const std::string& posix) {
     std::wstring w = FromUtf8(posix);
     if (w.empty() || w[0] != L'/') return w;
     for (auto& c : w) if (c == L'/') c = L'\\';
@@ -676,7 +685,7 @@ static bool WildMatch(const wchar_t* p, const wchar_t* s) {
         return WildMatch(p, s);
     }
     if (!*s) return false;
-    return (*p == L'?' || towlower(*p) == towlower(*s)) && WildMatch(p + 1, s + 1);
+    return (*p == L'?' || FoldChar((wint_t)*p) == FoldChar((wint_t)*s)) && WildMatch(p + 1, s + 1);
 }
 HANDLE FindFirstFileW(LPCWSTR pattern, WIN32_FIND_DATAW* data) {
     if (!pattern || !*pattern) { SetLastError(ERROR_PATH_NOT_FOUND); return INVALID_HANDLE_VALUE; }
@@ -892,14 +901,14 @@ int WideCharToMultiByte(UINT, DWORD, const wchar_t* s, int n, char* out, int out
 }
 int _wcsicmp(const wchar_t* a, const wchar_t* b) {
     for (;; ++a, ++b) {
-        const wint_t x = towlower((wint_t)*a), y = towlower((wint_t)*b);
+        const wint_t x = FoldChar((wint_t)*a), y = FoldChar((wint_t)*b);
         if (x != y) return x < y ? -1 : 1;
         if (!x) return 0;
     }
 }
 int _wcsnicmp(const wchar_t* a, const wchar_t* b, size_t n) {
     for (; n; --n, ++a, ++b) {
-        const wint_t x = towlower((wint_t)*a), y = towlower((wint_t)*b);
+        const wint_t x = FoldChar((wint_t)*a), y = FoldChar((wint_t)*b);
         if (x != y) return x < y ? -1 : 1;
         if (!x) return 0;
     }
@@ -908,7 +917,7 @@ int _wcsnicmp(const wchar_t* a, const wchar_t* b, size_t n) {
 int CompareStringOrdinal(const wchar_t* a, int an, const wchar_t* b, int bn, BOOL ignoreCase) {
     const size_t x = an < 0 ? wcslen(a) : (size_t)an, y = bn < 0 ? wcslen(b) : (size_t)bn;
     for (size_t i = 0; i < x && i < y; ++i) {
-        const wint_t p = ignoreCase ? towlower((wint_t)a[i]) : (wint_t)a[i], q = ignoreCase ? towlower((wint_t)b[i]) : (wint_t)b[i];
+        const wint_t p = ignoreCase ? FoldChar((wint_t)a[i]) : (wint_t)a[i], q = ignoreCase ? FoldChar((wint_t)b[i]) : (wint_t)b[i];
         if (p != q) return p < q ? CSTR_LESS_THAN : CSTR_GREATER_THAN;
     }
     return x == y ? CSTR_EQUAL : x < y ? CSTR_LESS_THAN : CSTR_GREATER_THAN;
@@ -948,7 +957,7 @@ DWORD FormatMessageW(DWORD flags, LPCVOID, DWORD id, DWORD, LPWSTR buf, DWORD si
         {ERROR_CALL_NOT_IMPLEMENTED, L"This function is not supported on this system."}, {ERROR_DIR_NOT_EMPTY, L"The directory is not empty."},
         {ERROR_ALREADY_EXISTS, L"Cannot create a file when that file already exists."}, {ERROR_NOT_SAME_DEVICE, L"The system cannot move the file to a different disk drive."},
         {ERROR_MOD_NOT_FOUND, L"The specified module could not be found."}, {ERROR_PROC_NOT_FOUND, L"The specified procedure could not be found."},
-        {ERROR_DIRECTORY, L"The directory name is invalid."}, {ERROR_CANCELLED, L"The operation was canceled by the user."},
+        {ERROR_DIRECTORY, L"The directory name is invalid."}, {ERROR_INVALID_NAME, L"The filename, directory name, or volume label syntax is incorrect."}, {ERROR_CANCELLED, L"The operation was canceled by the user."},
     };
     const wchar_t* text = nullptr;
     for (auto& t : kText) if (t.id == id) text = t.text;
