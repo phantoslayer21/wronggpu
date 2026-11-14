@@ -2,21 +2,21 @@
 """Frame generation (issue #96): CPU reference of both networks' forward pass, as far as it is delivered.
 
 Written for this project. The layers are settled: their shapes (clean/fg/layout.py), the weights in natural order and
-the biases the converter map gives per stage (data/fg.v1.map.json, revision v1.1; clean/fg/reference/natural.py),
-float16 convolutions with bias, ReLU, 2x pooling, bilinear 2x upscale, element-wise combines, and net1's 2 x 2 fold
-(clean/fg/reference/ops.py). net1's blob 2 is a 1 x 1 convolution. How the layers are connected is not delivered, so a
-network is run from a wiring the caller supplies. When the real wiring arrives it is passed in as data; the layers do
-not change.
+the biases the converter map gives per stage (data/fg.v1.map.json, revision v1.1; clean/fg/reference/natural.py).
 
-Required arguments for what is OPEN (clean/fg/FORMATS.md):
+net1 is complete: net1_forward runs its delivered wiring and arithmetic (clean/fg/reference/net1.py: the fold, 32
+steps, leaky ReLU, zero border, float16 chunk accumulation, the unfold); it takes no other arguments.
+
+net2's wiring is not delivered, so net2 is run from a wiring the caller supplies (run_graph, net2_forward). Required
+arguments for what is OPEN there (clean/fg/FORMATS.md):
 - `wiring`: the list of steps (which layer reads which buffers, where the pooling, upscales, combines and channel
-  splits sit, ReLU after each convolution, the pooling kind). Format: see run_graph.
+  splits sit, the activation after each convolution, the pooling kind). Format: see run_graph.
 - `pad`: the border rule of the 3 x 3 convolutions (ops.PAD_MODES).
-- `fold_order`: the order of the values inside net1's 48-value cells.
 
 Parameters are {layer name: (weights [out, k, k, in] float16, bias [out] float16)} with the layout's layer names
 (net1_01 .. net1_17, net2_01 .. net2_25): from blobs (params_from_blobs: stored weights put in natural order by the
-map's own offsets) or from the converter's raw output (params_from_raw: stages dl1.lNN / dl2.lNN, tensors W and b).
+map's own offsets), from the converter's raw output (params_from_raw) or from its model file (params_from_model_file);
+stages dl1.lNN / dl2.lNN, tensors W and b.
 """
 import os
 
@@ -59,6 +59,64 @@ def params_from_raw(raw_dir, m=None):
         if not (np.array_equal(w16.astype("<f4"), w) and np.array_equal(b16.astype("<f4"), b)):
             raise ValueError("%s: a value is not exact in float16" % name)
         out[name] = (_natural.to_canonical(w16.reshape(shape)), b16)
+    return out
+
+
+def read_model_file(path):
+    """{stage: {tensor: float32 array}} from a converter output file model.wgcm (container version 1, float32 tensors;
+    clean/converter/OUTPUT-FORMAT.md). The trailing SHA-256 is checked."""
+    import hashlib
+    import struct
+    with open(path, "rb") as f:
+        data = f.read()
+    if data[:8] != b"WGCMODEL":
+        raise ValueError("not a WrongGPU model file")
+    if hashlib.sha256(data[:-32]).digest() != data[-32:]:
+        raise ValueError("model file checksum does not match")
+    version, nstages = struct.unpack_from("<II", data, 8)
+    if version != 1:
+        raise ValueError("container version %d (preset FG uses 1)" % version)
+    pos = 88
+    out = {}
+    for _ in range(nstages):
+        (n,) = struct.unpack_from("<H", data, pos)
+        stage = data[pos + 2:pos + 2 + n].decode()
+        pos += 2 + n + 32
+        (nt,) = struct.unpack_from("<I", data, pos)
+        pos += 4
+        tensors = {}
+        for _ in range(nt):
+            (n,) = struct.unpack_from("<H", data, pos)
+            name = data[pos + 2:pos + 2 + n].decode()
+            pos += 2 + n
+            dtype, rank = data[pos], data[pos + 1]
+            pos += 2
+            shape = struct.unpack_from("<%dI" % rank, data, pos)
+            pos += 4 * rank
+            off, size = struct.unpack_from("<QQ", data, pos)
+            pos += 16
+            if dtype != 0:
+                raise ValueError("%s/%s: dtype %d, preset FG writes float32" % (stage, name, dtype))
+            tensors[name] = np.frombuffer(data, dtype="<f4", count=size // 4, offset=off).reshape(shape)
+        out[stage] = tensors
+    return out
+
+
+def params_from_model_file(path, m=None):
+    """{layer name: (canonical weights, bias)} from a converter output file of the preset-FG map (stages dl1.lNN /
+    dl2.lNN with W in the map's natural shape and b). Every value must be exact in float16."""
+    m = m if m is not None else _natural.load_map()
+    stages = read_model_file(path)
+    out = {}
+    for name, l in LAYERS.items():
+        st = stages[map_stage_name(l)]
+        w, b = st["W"], st["b"]
+        if tuple(w.shape) != _natural.weight_shape(l, m) or b.shape != (l.out,):
+            raise ValueError("%s: shapes %s / %s do not fit the map" % (name, w.shape, b.shape))
+        w16, b16 = w.astype("<f2"), b.astype("<f2")
+        if not (np.array_equal(w16.astype("<f4"), w) and np.array_equal(b16.astype("<f4"), b)):
+            raise ValueError("%s: a value is not exact in float16" % name)
+        out[name] = (_natural.to_canonical(w16), b16)
     return out
 
 
@@ -165,18 +223,11 @@ def run_graph(wiring, inputs, params, *, pad):
     return buf
 
 
-def net1_forward(features, params, *, wiring, pad, fold_order, output):
-    """net1 on its per-pixel features [10, H, W] (ops.net1_features): fold 2 x 2 into 48-value cells (fold_order:
-    OPEN, required), run the wiring on the input buffer "cells", and unfold the buffer named `output` (16 values per
-    cell) back to 4 values per pixel -> [4, H, W]."""
-    if features.shape[0] != ops.NET1_FEATURES:
-        raise ValueError("net1 takes %d features per pixel" % ops.NET1_FEATURES)
-    cells = ops.fold2x2(features, order=fold_order)
-    buf = run_graph(wiring, {"cells": cells}, params, pad=pad)
-    out = buf[output]
-    if out.shape[0] != 16:
-        raise ValueError("net1's output has 16 values per cell, got %d" % out.shape[0])
-    return ops.unfold2x2(out, 4, order=fold_order)
+def net1_forward(values, params):
+    """net1 on its per-pixel values [10, G1h, G1w] -> [4, G1h, G1w], with the delivered wiring and arithmetic
+    (clean/fg/reference/net1.py: fold, 32 steps, leaky ReLU, zero border, float16 chunk accumulation, unfold)."""
+    from clean.fg.reference import net1 as _net1
+    return _net1.forward(values, params)
 
 
 def net2_forward(inputs, params, *, wiring, pad, outputs):

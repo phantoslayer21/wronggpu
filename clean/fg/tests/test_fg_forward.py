@@ -157,23 +157,18 @@ class Networks(unittest.TestCase):
             {"op": "conv", "layer": "net1_16", "in": "d0", "out": "d0b", "relu": True},       # 32 -> 32
             {"op": "conv", "layer": "net1_17", "in": "d0b", "out": "out", "relu": False},     # 32 -> 16
         ]
+        # the generic engine (kept for net2) still runs any wiring over net1's layers; net1 itself has its delivered
+        # wiring (clean/fg/reference/net1.py, tested in test_fg_net1.py)
+        cells = ops.fold2x2(feats, order="c dy dx")
         for pad in ("zero", "replicate"):
-            got = F.net1_forward(feats, self.params, wiring=wiring, pad=pad, fold_order="dy dx c", output="out")
-            cells = ops.fold2x2(feats, order="dy dx c")
+            got = F.run_graph(wiring, {"cells": cells}, self.params, pad=pad)["out"]
             e1 = self.direct("net1_02", self.direct("net1_01", cells, pad, True), pad, True)
             d1 = self.direct("net1_14", ops.pool2x(e1, kind="max"), pad, True)
             s1 = f16(ops.upscale2x_bilinear(d1) + e1)
             d0 = self.direct("net1_16", self.direct("net1_15", s1, pad, True), pad, True)
-            want = ops.unfold2x2(self.direct("net1_17", d0, pad, False), 4, order="dy dx c")
-            self.assertEqual(got.shape, (4, 8, 12))
-            np.testing.assert_array_equal(got, want, err_msg=pad)
-        for missing in ("wiring", "pad", "fold_order", "output"):
-            kw = dict(wiring=wiring, pad="zero", fold_order="dy dx c", output="out")
-            del kw[missing]
-            with self.assertRaises(TypeError, msg=missing):
-                F.net1_forward(feats, self.params, **kw)
-        with self.assertRaises(ValueError):    # the output must have 16 values per cell
-            F.net1_forward(feats, self.params, wiring=wiring, pad="zero", fold_order="dy dx c", output="d0")
+            np.testing.assert_array_equal(got, self.direct("net1_17", d0, pad, False), err_msg=pad)
+        with self.assertRaises(TypeError):     # net1_forward takes no wiring: it has its own
+            F.net1_forward(feats, self.params, wiring=wiring)
 
     def test_net2_stand_in(self):
         rng = np.random.default_rng(8)
