@@ -119,7 +119,8 @@ def _coef_map(rng, n):
 
 def coef_cases(kernel, rng):
     """l_coef: y2 [fh][fw][32] FP16 -> A, B, latent [rh][rw] (4 bytes each), C [rh][rw] (8 bytes); blob dec0.coef
-    (Model M's dec0 blob with W = 0, b = 0: S, T at byte 320); LDecParams (56 bytes) by value."""
+    (Model M's dec0 blob with W = 0, b = 0: S, T at byte 320); LDecParams (56 bytes) by value.
+    l_coef_pack12: the same inputs -> image A [rh][rw] (8 bytes), B null, image C [rh][rw] (4 bytes), latent."""
     from clean.runner import dec0
     cases = []
     for (rw, rh, fw, fh) in COEF_FRAMES:
@@ -131,8 +132,10 @@ def coef_cases(kernel, rng):
         assert len(P) == 56
         ntok = (fh // 2) * (fw // 2)
         cases.append({"kernel": kernel, "grid": -(-ntok // 128), "block": 256,
-                      "args": [("buf", _coef_map(rng, fw * fh)), ("out", npx * 4), ("out", npx * 4), ("out", npx * 8),
-                               ("out", npx * 4), ("buf", blob), ("bytes", P)]})
+                      "args": [("buf", _coef_map(rng, fw * fh))] +
+                              ([("out", npx * 8), ("null",), ("out", npx * 4)] if kernel == "l_coef_pack12" else
+                               [("out", npx * 4), ("out", npx * 4), ("out", npx * 8)]) +
+                              [("out", npx * 4), ("buf", blob), ("bytes", P)]})
     return cases
 
 
@@ -196,7 +199,7 @@ def dec1_ex_cases(kernel, rng):
 
 KINDS = {"l_linear_32_32_relu": linear_cases, "l_linear_32_32_f16": linear_cases,
          "l_project_gather": project_cases, "l_dec_project": project_cases, "l_coef": coef_cases,
-         "lev/input_encoder": enc_cases,
+         "l_coef_pack12": coef_cases, "lev/input_encoder": enc_cases,
          "swin_block_c64_add_ex_nc": dec1_ex_cases}
 CONTROL_KINDS = {"swin_block_c96_nc": control_cases}
 CO = "l_ops.co"
