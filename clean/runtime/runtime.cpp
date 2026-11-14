@@ -241,10 +241,16 @@ struct Runtime {
   // decoder in step 4 (clean/l/FORMATS.md); the ten Swin stages, exposure and post are Model M's.
   bool model_l = false;
   // runtime option l_post=own (native D3D12): Model L's own reconstruction l_post_recon_p12 (l_post.co's D3D12 port),
-  // then the unbanded analytic filter w64/post_filter_c1_s4, in place of Model M's fused pack12 post (l_post=m, the
-  // default there for now). On the direct-resource route the colour is staged into color_net (l_direct_color) and the
-  // filter writes the game's texture itself (l_post_filter_direct, dx12/kernels/post_filter.hlsl).
+  // then the unbanded analytic filter w64/post_filter_c1_s4, in place of Model M's fused pack12 post (l_post=m). On the
+  // direct-resource route the colour is staged into color_net (l_direct_color) and the filter writes the game's texture
+  // itself (l_post_filter_direct, dx12/kernels/post_filter.hlsl).
+  // Default (no l_post option): own wherever its route applies (HDR colour, the default pack12 post route, its D3D12
+  // ports present: l_own_post_fits), else m. Why: Model M's post is another algorithm (3 x 3 gather, encoded-domain
+  // history); against Model L's post oracle it fails every frame (about 76 % of the full history's FP16 values more
+  // than one ulp off), Model L's own post passes Model L's post acceptance on every frame (real weights:
+  // clean/l/runner/l_default_post_check.py). LDR keeps m: l_post_recon's LDR form is not written yet.
   bool l_own_post = false;
+  int l_post_choice = 0;  // the l_post option: 0 not given (the default above), 1 m, 2 own
 #ifdef WG_MODEL_L
   // The maps of clean/l/FORMATS.md in three buffers (no kernel works in place):
   //   l_wide [fh + 4][fw + 4] x 64 bytes: q (FP8 halo, 32 bytes a pixel), then x2 (FP16 halo; q is dead after the
@@ -707,10 +713,11 @@ struct Runtime {
       if (motion_outres == 1) return fail("Model L: motion_outres=original needs Model M's encoder (encoder_mo.co)");
       d1d0_p12_opt = false;
 #ifdef WG_MODEL_L
+      if (c.backend == 3 && l_post_choice == 0) l_own_post = l_own_post_fits(c);
       if (l_own_post && c.backend == 3 && !l_own_post_setup(c)) return false;
 #endif
     }
-    if (l_own_post && !model_l) return fail("l_post=own is a Model L option (its own reconstruction)");
+    if (l_post_choice == 2 && !model_l) return fail("l_post=own is a Model L option (its own reconstruction)");
     if (!mid_setup(c)) return false;
     if (!bneck_setup(c)) return false;
     // D = O (fast mode, recon=output) runs without pack12, so dec1 + dec0 fused is the default there (bit-identical;
@@ -1107,6 +1114,7 @@ struct Runtime {
       if (k == "l_post") {
         if (v != "m" && v != "own") return fail("l_post must be m or own (Model L on native D3D12)");
         l_own_post = v == "own";
+        l_post_choice = l_own_post ? 2 : 1;
       }
       if (k == "post_diet") post_diet = !(v == "0" || v == "off" || v == "false");
       if (k == "tf_vdiet") tf_vdiet = !(v == "0" || v == "off" || v == "false");
@@ -1643,6 +1651,17 @@ struct Runtime {
   // place of Model M's fused post. p12 stays (l_coef_pack12 feeds l_post_recon_p12; frames the pack12 kernels do not
   // take run l_coef and l_post_recon); post_recon_stage launches Model L's kernel, step 6 the unbanded default filter
   // (w64/post_filter_c1_s4, the analytic build: Model L's file has no output-filter weights).
+  // The default's test: l_own_post_setup's conditions, without failing
+  bool l_own_post_fits(const WgRtConfig& c) {
+    if (!c.hdr || !p12 || post_kernel != "post_recon2_r_band_p12" || filter_kernel != "post_filter_c1_s4_band" || out_f16)
+      return false;
+    std::vector<std::string> need = {"l_post_recon_p12", "l_post_recon", "l_coef", "w64/post_filter_c1_s4"};
+    if (native_direct_io) {
+      need.push_back("l_direct_color");
+      need.push_back("l_post_filter_direct");
+    }
+    return manifest_missing(need).empty();
+  }
   bool l_own_post_setup(const WgRtConfig& c) {
     if (!c.hdr)
       return fail("Model L: l_post=own needs HDR colour (WgRtConfig.hdr = 1): l_post_recon is HDR, its LDR form is "

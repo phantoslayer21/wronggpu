@@ -48,10 +48,11 @@ Native D3D12 (runtime backend 3), after --run:
     python clean/l/runner/l_frame_check.py --build <dir> --compare-d3d12 --json out.json
 
 <dir>/dx12 holds the D3D12 ports (python clean/dx12/build_dx12.py --out <dir>). The same frames run on D3D12 with the
-runtime's default kernels there (Model L: its encoder and decoder ports, the pack12 store l_coef_pack12, Model M's
-pack12 post path; Model M: its native frame), and every stage output both backends write is compared with the HIP
-run's ("default"), byte for byte: the D3D12 ports reproduce their HIP kernels byte for byte, and Model M's pack12 post
-path the banded one bit for bit. The pack12 images (A: A0 A1 A2 B0 | B1 B2 C2, C: C0 C1; clean/FORMATS.md) are
+runtime's default kernels there (Model L: its encoder and decoder ports, the pack12 store l_coef_pack12, its own
+reconstruction l_post_recon_p12 and the analytic filter; with l_post=m Model M's pack12 post path instead; Model M:
+its native frame), and every stage output both backends write is compared with the HIP run's ("default"), byte for
+byte: the D3D12 ports reproduce their HIP kernels byte for byte, and Model M's pack12 post path the banded one bit for
+bit. (Where the D3D12 run's reconstruction is not the HIP run's, l_post=m for Model L, its post is checked on its own.) The pack12 images (A: A0 A1 A2 B0 | B1 B2 C2, C: C0 C1; clean/FORMATS.md) are
 rearranged into the base layout's bytes and compared with the HIP run's A, B and C.
 
 Byte identity (every "byte for byte" above): the RAW defined bytes of every output (RAW_OUTPUTS, the sizes wg_rt_buffer
@@ -369,14 +370,16 @@ def compare_backends(hip, dx, same_post=True):
     """Per frame: the raw defined bytes of every output, HIP run against D3D12 run (raw_compare; the D3D12 pack12
     images in the base layout). same_post False (the backends run different reconstruction kernels): the post outputs
     are left out. Not written by design: b0 ... b4 on both (the bottleneck megakernels), on D3D12 the maps its fusions
-    keep on chip (enc1's merged map; Model M's dec2 / dec1 outputs, which its fused decoder reads on chip) and the display
-    image (the fused pack12 post writes none), on the first frame the previous frame's state on both."""
+    keep on chip (enc1's merged map; Model M's dec2 / dec1 outputs, which its fused decoder reads on chip) and, with the
+    fused pack12 post, the display image (that kernel writes none; Model L's own post writes it), on the first frame the
+    previous frame's state on both."""
     fused_onchip = ("enc1.merged",) + (("dec2.out", "dec1.out") if hip["model"] == "M" else ())
+    no_display = "post_tf" in str(dx["kernels"].get("post_last", ""))
 
     def unwritten(k, n):
         if n in BNECK_UNWRITTEN or (k == 0 and n in UNWRITTEN_ON_FIRST):
             return "both"
-        if n in fused_onchip or n == "post.display":
+        if n in fused_onchip or (n == "post.display" and no_display):
             return "b"
         return None
     skip = () if same_post else POST_OUTPUTS_RAW
@@ -452,9 +455,12 @@ def compare_d3d12(build, json_path):
         for config in ("default", "d3d12"):
             with open(os.path.join(build, f"lframe_{model}_{config}.pkl"), "rb") as f:
                 recs[config] = pickle.load(f)
-        # the HIP run's reconstruction: Model M's (bit-identical to the D3D12 fused pack12 post) or Model L's own
+        # the HIP run's reconstruction: Model M's (bit-identical to the D3D12 fused pack12 post) or Model L's own; the
+        # D3D12 run's: for Model L its own (l_post_recon: the runtime's default where its route applies) or Model M's
+        # fused pack12 post (l_post=m: m_pack12)
         hip_post = recs["default"]["kernels"].get("l_post") or recs["default"]["kernels"].get("post_last")
-        same_post = hip_post != "l_post_recon"
+        same_post = hip_post != "l_post_recon" or recs["d3d12"]["kernels"].get("l_post") == "l_post_recon"
+        no_display = "post_tf" in str(recs["d3d12"]["kernels"].get("post_last", ""))
         frames = compare_backends(recs["default"], recs["d3d12"], same_post)
         res[model] = {"kernels_d3d12": recs["d3d12"]["kernels"], "frames": frames,
                       "outputs_compared": sorted({n for f in frames for n in f["differ"]}),
@@ -466,7 +472,8 @@ def compare_d3d12(build, json_path):
             res[model]["negative_controls"] = negative_controls(
                 dflt, recs["d3d12"], dflt["sentinel"], recs["d3d12"]["sentinel"],
                 lambda k, n: ("both" if n in BNECK_UNWRITTEN or (k == 0 and n in UNWRITTEN_ON_FIRST) else
-                              "b" if n in ("enc1.merged", "dec2.out", "dec1.out", "post.display") else None),
+                              "b" if n in ("enc1.merged", "dec2.out", "dec1.out") or (n == "post.display" and
+                                                                                       no_display) else None),
                 convert_b=True)
         if not same_post:
             # Model L: HIP runs l_post_recon, D3D12 Model M's fused pack12 post, and each frame's encoder reads the
