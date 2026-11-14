@@ -126,10 +126,10 @@ bool model_from_options(const WgRtConfig& c, ModelId* model, std::string* err) {
   *model = ModelId::M;
   std::string bad;
   if (!last_model_option(text, model, &bad)) {
-    *err = "unknown model \"" + bad + "\" in the runtime options (known: M, K)";
+    *err = "unknown model \"" + bad + "\" in the runtime options (known: M, K" + (model_l_built() ? ", L)" : ")");
     return false;
   }
-  if (*model == ModelId::L) {  // #89: recognised, not part of the runtime yet
+  if (*model == ModelId::L && !model_l_built()) {  // #89: recognised; runs when its sources are compiled in
     *err = model_not_built_yet(ModelId::L);
     return false;
   }

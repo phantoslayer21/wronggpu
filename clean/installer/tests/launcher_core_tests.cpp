@@ -74,6 +74,29 @@ int main() {
             require(!HasConverterData(rc, false) && !HasConverterData(rc, true) && HasConverterData(lc, false), "the converter data: uninstall.exe none, WrongGPU.exe its map");
             RemoveTree(cl);
         }
+        // ---- Model L (#89): the model by name (model convert/status --preset=); its converter map and model folder --------
+        {
+            static const EmbeddedData withL{nullptr, 0, 900, L"00", 0, L"", 0, L"0.7.0", L"0.7.0", L"0.7.0", nullptr, 0, 0, L"", L"", 903, L"00"};
+            static const EmbeddedData noL{nullptr, 0, 900, L"00", 0, L"", 0, L"0.7.0"};
+            Context lc, nc;
+            lc.data = &withL;
+            nc.data = &noL;
+            wstring err;
+            require(SelectedPreset(lc) == L'M' && ModelDir(lc) == ModelBaseDir(), "Model M by default: the model folder itself");
+            lc.mapError = L"an earlier load";
+            require(SelectPreset(lc, L"l", err) && lc.presetL && SelectedPreset(lc) == L'L' && ModelDir(lc) == Join(ModelBaseDir(), L"L") &&
+                        ModelFile(lc) == Join(Join(ModelBaseDir(), L"L"), L"model.wgcm") && lc.mapError.empty(),
+                    "--preset=l: Model L, its folder <model>\\L (the runtime's folder for model=L); the earlier map state is dropped");
+            require(SelectPreset(lc, L"L", err) && lc.presetL, "the same model again: nothing changes");
+            require(SelectPreset(lc, L"M", err) && !lc.presetL && SelectedPreset(lc) == L'M' && ModelDir(lc) == ModelBaseDir(), "back to Model M: the model folder itself");
+            require(!SelectPreset(lc, L"Q", err) && err.rfind(L"Unknown model \"Q\"", 0) == 0 && SelectedPreset(lc) == L'M', "an unknown name is refused; nothing changes");
+            require(!SelectPreset(lc, L"ML", err) && !SelectPreset(lc, L"", err) && SelectedPreset(lc) == L'M', "a model name is one letter");
+            require(!SelectPreset(nc, L"L", err) && err == L"This build of WrongGPU has no converter data for Model L." && !nc.presetL && ModelDir(nc) == ModelBaseDir(),
+                    "a build without Model L's map refuses L by name; nothing changes");
+#if !WRONGGPU_PRESET_K
+            require(!SelectPreset(lc, L"K", err) && err.find(L"M or L") != wstring::npos, "K is not a model of a build without Preset K");
+#endif
+        }
         // ---- validation -----------------------------------------------------------------------------------------
         string n; wstring why;
         const SettingDef* exec = FindSetting("executor");

@@ -9,6 +9,10 @@ encoder and decoder steps replaced).
 - a full build's optional code objects (names only) select the default paths: pack12 decoder, dec1 fused with dec0,
   wave64 post;
 - the same run twice gives the same trace;
+- the recorder's arguments: the encoder's features are enc1's input and dec1's output the decoder's (same buffer),
+  every one large enough for its map; the render size, the padded grid, reset and parity in the encoder's and
+  decoder's parameters, with the render size changing between frames (aligned and non-aligned) and a game reset;
+- a launch that fails stops its frame there (nothing after it), and the next frame runs whole;
 - model=L is refused at create for now.
 
 The runtime options of the environment (WG_*) are removed for the runs. Built with the host C++ compiler
@@ -53,16 +57,16 @@ def model_dir():
 SHIPPING = ("decoder__pack12.co", "dec1_dec0__pack12.co", "post_w64.co")
 
 
-def run_trace(rw=64, rh=64, ow=96, oh=96, frames=3, options="", build_files=()):
+def run_trace(rw=64, rh=64, ow=96, oh=96, frames=3, options="", build_files=(), flags=()):
     """The program's output lines. The build folder holds empty files of the names in build_files (the recording
-    device reads no code object; the runtime chooses its paths by the names present)."""
+    device reads no code object; the runtime chooses its paths by the names present). flags: the program's --flags."""
     build = tempfile.mkdtemp(prefix="wg_ftb_")
     for n in build_files:
         open(os.path.join(build, n), "wb").close()
     env = {k: v for k, v in os.environ.items() if not k.upper().startswith("WG_")}
     try:
-        r = subprocess.run([trace_exe(), build, model_dir(), str(rw), str(rh), str(ow), str(oh), str(frames), options],
-                           capture_output=True, text=True, env=env, timeout=600)
+        r = subprocess.run([trace_exe(), build, model_dir(), str(rw), str(rh), str(ow), str(oh), str(frames), options,
+                            *flags], capture_output=True, text=True, env=env, timeout=600)
     finally:
         shutil.rmtree(build, ignore_errors=True)
     if r.returncode != 0:
@@ -70,22 +74,81 @@ def run_trace(rw=64, rh=64, ow=96, oh=96, frames=3, options="", build_files=()):
     return r.stdout.splitlines()
 
 
+class Trace:
+    """A parsed run: create (the first line), allocs {k: bytes}, uploads {address: (bytes, SHA-256 hex)} (create's),
+    loads, frames [{"info": {...}, "launches": [Launch], "failed": kernel or None, "error": message or None, "names":
+    {buffer name: address}}], kernels {key: value}."""
+
+    def __init__(self, lines):
+        self.create, self.allocs, self.uploads, self.loads, self.frames, self.kernels = lines[0], {}, {}, [], [], {}
+        for ln in lines[1:]:
+            if ln.startswith("alloc b"):
+                k, n = ln[7:].split(" ")
+                self.allocs[int(k)] = int(n)
+            elif ln.startswith("upload "):
+                addr, n, digest = ln[7:].split(" ")
+                self.uploads[addr] = (int(n), digest)
+            elif ln.startswith("name "):
+                nm, addr, _ = ln[5:].split(" ")
+                self.frames[-1]["names"][nm] = addr
+            elif ln.startswith("load "):
+                self.loads.append(ln[5:])
+            elif ln.startswith("frame "):
+                f = ln.split(" ")
+                info = {f[i]: int(f[i + 1]) for i in range(2, len(f) - 1, 2)}
+                self.frames.append({"info": info, "launches": [], "failed": None, "error": None, "names": {}})
+            elif ln.startswith("launch "):
+                self.frames[-1]["launches"].append(Launch(ln[7:]))
+            elif ln.startswith("failed "):
+                self.frames[-1]["failed"] = ln[7:]
+            elif ln.startswith("ERR frame "):
+                self.frames[-1]["error"] = ln.split(": ", 1)[1]
+            elif ln.startswith("kernels "):
+                self.kernels = dict(kv.split("=", 1) for kv in ln[8:].split(" ") if "=" in kv)
+            else:
+                raise AssertionError("unexpected line: " + ln)
+
+    def unknown(self):
+        """Decoded arguments that are no allocation's address (a wrong entry in the recorder's table shows here)."""
+        return [(ln.kernel, a) for f in self.frames for ln in f["launches"] for a in ln.args if a.startswith("?")]
+
+    def uploaded(self, digest):
+        """The address create uploaded these bytes to (SHA-256 hex), the whole allocation; None if none."""
+        hits = [a for a, (_, d) in self.uploads.items() if d == digest and a.endswith("+0")]
+        return hits[0] if len(hits) == 1 else None
+
+    def extent(self, addr):
+        """Bytes from a decoded address b<k>+<offset> to the end of its allocation."""
+        k, off = addr[1:].split("+")
+        return self.allocs[int(k)] - int(off)
+
+
+class Launch:
+    """One launch line: kernel, grid, block and, for the kernels the recorder decodes, args (strings: b<k>+<offset>,
+    0, an int, E{...} / D{...})."""
+
+    def __init__(self, text):
+        head, _, tail = text.partition(" | ")
+        self.kernel, g, b = head.split(" ")
+        self.grid, self.block = int(g), int(b)
+        self.args = tail.split(" ") if tail else []
+
+    def kgb(self):
+        return (self.kernel, self.grid, self.block)
+
+    def params(self, i):
+        """The values of E{...} / D{...} at argument i, as ints."""
+        return [int(v) for v in self.args[i][2:-1].split(",")]
+
+
 def parse(lines):
     """(create line, [loaded code objects], [[(kernel, grid, block)] per frame], kernels line)."""
-    loads, frames, kernels = [], [], None
-    for ln in lines[1:]:
-        if ln.startswith("load "):
-            loads.append(ln[5:])
-        elif ln.startswith("frame "):
-            frames.append([])
-        elif ln.startswith("launch "):
-            k, g, b = ln[7:].split(" ")
-            frames[-1].append((k, int(g), int(b)))
-        elif ln.startswith("kernels "):
-            kernels = dict(kv.split("=", 1) for kv in ln[8:].split(" ") if "=" in kv)
-        else:
-            raise AssertionError("unexpected line: " + ln)
-    return lines[0], loads, frames, kernels
+    t = Trace(lines)
+    return t.create, t.loads, [[ln.kgb() for ln in f["launches"]] for f in t.frames], t.kernels
+
+
+def ceil32(v):
+    return -(-v // 32) * 32
 
 
 class ModelM(unittest.TestCase):
@@ -109,7 +172,10 @@ class ModelM(unittest.TestCase):
 
     def test_shipping_build(self):
         """With the optional code objects of a full build: the pack12 decoder, dec1 fused with dec0, wave64 post."""
-        create, loads, frames, kernels = parse(run_trace(frames=2, build_files=SHIPPING))
+        t = Trace(run_trace(frames=2, build_files=SHIPPING))
+        self.assertEqual(t.unknown(), [])
+        create, loads, kernels = t.create, t.loads, t.kernels
+        frames = [[ln.kgb() for ln in f["launches"]] for f in t.frames]
         self.assertEqual(create, "create ok model M")
         for want in ("decoder__pack12.co as d0p12", "dec1_dec0__pack12.co as d1p12", "post_w64.co as w64"):
             self.assertIn(want, loads)
@@ -121,6 +187,68 @@ class ModelM(unittest.TestCase):
 
     def test_repeatable(self):
         self.assertEqual(run_trace(rw=80, rh=48, ow=120, oh=72), run_trace(rw=80, rh=48, ow=120, oh=72))
+
+    def test_dataflow_and_extents(self):
+        """The encoder's features are what enc1's first block reads, dec1's output what the decoder reads; every buffer
+        holds the map it gets (allocation sizes from the recorder)."""
+        for rw, rh in ((64, 64), (80, 48)):
+            t = Trace(run_trace(rw=rw, rh=rh, ow=96, oh=96, frames=2))
+            self.assertEqual(t.unknown(), [])
+            fw, fh = ceil32(rw), ceil32(rh)
+            tokens = (fw // 2) * (fh // 2)
+            for f in t.frames:
+                ls = f["launches"]
+                enc = next(i for i, ln in enumerate(ls) if ln.kernel == "input_encoder")
+                dec = next(i for i, ln in enumerate(ls) if ln.kernel == "coef_decoder")
+                feat = ls[enc].args[6]
+                self.assertEqual(ls[enc + 1].kernel.startswith("swin_block_c64"), True, ls[enc + 1].kernel)
+                self.assertEqual(ls[enc + 1].args[0], feat)  # enc1 reads enc0's features
+                self.assertGreaterEqual(t.extent(feat), tokens * 64)
+                dec1 = [ln for ln in ls[:dec] if ln.kernel.startswith("swin_block_c64")][-1]
+                self.assertEqual(ls[dec].args[0], dec1.args[2])  # the decoder reads dec1's output
+                self.assertGreaterEqual(t.extent(dec1.args[2]), tokens * 64)
+                self.assertEqual(ls[enc].params(12)[:4], [rw, rh, fw, fh])
+                self.assertEqual(ls[dec].params(8)[:4], [rw, rh, fw, fh])
+                self.assertEqual(dec1.args[4:6], [str(fh // 2), str(fw // 2)])  # H, W of dec1: the F/2 grid
+            # the history between frames: the latent the decoder writes (its argument 6) and the near motion the
+            # encoder writes (its argument 7) are what the next frame's encoder reads (its arguments 4 and 5)
+            for a, b in zip(t.frames, t.frames[1:]):
+                prev = {ln.kernel: ln for ln in a["launches"]}
+                cur = {ln.kernel: ln for ln in b["launches"]}
+                self.assertEqual(cur["input_encoder"].args[4], prev["coef_decoder"].args[6])
+                self.assertEqual(cur["input_encoder"].args[5], prev["input_encoder"].args[7])
+                self.assertNotEqual(cur["input_encoder"].args[4], prev["input_encoder"].args[4])
+
+    def test_reset_parity_and_sizes(self):
+        """Reset (first frame, the game's reset, a size change) and parity reach the encoder and decoder; the render
+        size can change from frame to frame (non-aligned sizes included)."""
+        sizes = "--sizes=96x96,96x96,96x96,80x48,80x48,64x64"
+        t = Trace(run_trace(rw=96, rh=96, ow=144, oh=144, frames=6, flags=(sizes, "--reset=2")))
+        resets = [f["info"]["reset"] for f in t.frames]
+        self.assertEqual(resets, [1, 0, 1, 1, 0, 1])  # first frame, the game's reset, two size changes
+        parities = [f["info"]["parity"] for f in t.frames]
+        self.assertTrue(all(p in (0, 1) for p in parities) and parities[0] != parities[1])
+        for f, (rw, rh) in zip(t.frames, [(96, 96)] * 3 + [(80, 48)] * 2 + [(64, 64)]):
+            self.assertEqual((f["info"]["rw"], f["info"]["rh"]), (rw, rh))
+            ls = {ln.kernel: ln for ln in f["launches"]}
+            e, d = ls["input_encoder"].params(12), ls["coef_decoder"].params(8)
+            self.assertEqual(e[:4], [rw, rh, ceil32(rw), ceil32(rh)])
+            self.assertEqual(d[:4], [rw, rh, ceil32(rw), ceil32(rh)])
+            self.assertEqual(e[5], f["info"]["reset"])
+            self.assertEqual(d[4], f["info"]["reset"])
+
+    def test_failed_launch_stops_the_frame(self):
+        t = Trace(run_trace(frames=3, flags=("--fail=coef_decoder@1",)))
+        ok0, bad, ok2 = t.frames
+        self.assertIsNone(ok0["error"])
+        self.assertEqual(bad["failed"], "coef_decoder")
+        self.assertIn("injected launch failure: coef_decoder", bad["error"])
+        names = [ln.kernel for ln in bad["launches"]]
+        self.assertNotIn("coef_decoder", names)
+        self.assertEqual(names, [ln.kernel for ln in ok0["launches"]][:len(names)])  # nothing after the failure
+        self.assertTrue(names and names[-1].startswith("swin_block_c64"))  # it stopped right after dec1
+        self.assertIsNone(ok2["error"])
+        self.assertIn("coef_decoder", [ln.kernel for ln in ok2["launches"]])  # the next frame runs whole
 
     def test_model_l_refused(self):
         lines = run_trace(options="model=L")

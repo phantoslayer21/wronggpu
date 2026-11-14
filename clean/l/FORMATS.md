@@ -61,6 +61,7 @@ No kernel works in place.
 |---|---|---|
 | `l_enc_values.co` (loaded under the tag `lev`) | `clean/kernels/encoder.hip` with `-DWG_ENC_VALUES_OUT=1` | `input_encoder` |
 | `l_ops.co` | `clean/l/kernels/l_ops.hip` | `l_linear_32_32_relu`, `l_linear_32_32_f16`, `l_project_gather`, `l_dec_project`, `l_coef`, `l_coef_pack12` |
+| `l_post.co` | `clean/l/kernels/l_post.hip` (includes Model M's `clean/kernels/post.hip` for its functions; Model M's kernels come along unused) | `l_post_recon` (HDR) |
 | `l_swin.co` | `clean/l/kernels/l_swin.hip` | `l_swin_block_c32[_nc]` (exists, #102: FP8 in / FP8 out, mirror border; block checks only), `l_swin_block_c32_enc[_nc]`, `l_swin_block_c32_dec[_nc]` |
 
 All are built with `clean/runner/build.py`'s `device_command`. The build's `-cuid` comes from the output file name,
@@ -102,7 +103,43 @@ the frame parity, as Model M's.
    3. `l_coef` y2 -> A, B, C, new latent. Model L's latent recurrence runs only through the next frame's input
       encoder, which samples this latent.
 
-The reconstruction (post) stage is still open.
+5. Reconstruction (post) and output filter. The float64 oracle is `clean/l/reference/recon.py`, driven by the
+   table's `recon` entry. It is Model M's reconstruction with:
+   - a 4 x 4 colour gather;
+   - history candidates combined in linear colour;
+   - the plain linear colour as the fallback of an invalid or reset sample;
+   - the post stage's learned scale.
+
+   Behaviour pinned in the oracle:
+   - The tiling variant (3/2 or 3/1) follows `table.recon_variant`, a D / render ratio. Both variants compute the same
+     function.
+   - A zero total gather weight follows the normal formulas with NaN: history h(E(NaN)) = -1.4404296875 in HDR, NaN
+     in LDR; display and reduced code 0.
+   - LDR writes 11/11/10-bit display codes of the plain colour. The output stage unpacks them (code RN32(1/N), FP16)
+     and filters them with no decode and no exposure (`recon.output_filter`).
+   - The output filter is Model M's (the project's own taps).
+
+   The reconstruction kernel `l_post_recon` (`l_post.co`, HDR; exists, GPU-checked by
+   `clean/l/runner/l_post_check.py`):
+   - arguments, buffers, layouts and grid are Model M's `post_recon` (Model M's `clean/FORMATS.md`), with `w` = the
+     post blob (`w[0]` = Model L's s);
+   - its colour gather runs in the model's precision, as confirmed by the spec side (the oracle's `recon.gather_half`):
+     - fused target positions;
+     - FP16 offsets and exponent with the fused cross term;
+     - float32 weights flushed to +0 below 2^-126;
+     - FP16 weights into half accumulators;
+     - a float32 weight sum;
+     - tap order i (columns) outer, j (rows) inner.
+
+     So the kernel and the oracle agree on which weights underflow. Two regimes follow: total weight 0, the
+     zero-weight values; and total weight > 0 with every FP16 weight 0, where the output is the candidate history.
+   - its candidate combination is one fused multiply-add w1 L1 + (w2 L2), then times e;
+   - its blend is the fused form beta' = fused(alpha (1 - beta-bar) + beta-bar), H^ = fused((C - Hl) beta' + Hl);
+   - the decode passes a NaN through.
+
+   The LDR kernel is planned, with the same arguments. Still open for the kernel-order model: the hardware exp2,
+   reciprocal and divisions, and the Catmull-Rom weight forms, which the kernel takes from Model M's `post.hip`
+   (part of the Model M fidelity decision).
 
 ## Checks (GPU, synthetic data)
 
