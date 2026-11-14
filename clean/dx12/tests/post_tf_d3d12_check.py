@@ -20,6 +20,8 @@ Kernels:
   post_tf_f32_p12_diet_vsit (frames that its cap of 352 takes) or post_tf_dl_f32_p12 (native AA: D = 1.5 R), whose
   every output pixel is the same function (the exposure pair holds the ratio and dec_scale that the non-diet kernel
   computes itself);
+- w64/post_filter_c1_s4 (the analytic standalone filter, clean/dx12/kernels/post_filter.hlsl) vs HIP post_filter_c1_s4
+  of post_w64.co: display image -> FP32 output, dec_scale from the argument or the exposure pair;
 - control: w64/post_tf_f32_p12_diet_vsit (original-filter port, five FP16 weights as arguments) vs post_w64__orig.co.
   The same name as the first: the D3D12 device runs the port of the code object the case loads under "w64".
 """
@@ -110,8 +112,46 @@ def control_cases(kernel, rng):
                  kernel="w64/post_tf_f32_p12_diet_vsit") for i, f in enumerate(TF_FRAMES[:4])]
 
 
+# (ow, oh, expo) of the standalone filter: D = recon_size_for(O); widths with partly filled tile columns (ow % 40), one
+# column group of 4 cut short (ow % 4), odd heights (a last row pair of one row), several tile rows, and a wide frame
+FILTER_FRAMES = [(96, 54, False), (99, 57, True), (40, 16, False), (161, 83, True), (7, 5, False), (1281, 140, True)]
+
+
+def _display(rng, dw, dh):
+    """Three FP16 planes of display_pitch(dw) x dh: E values in [0, 2.45] (clamp(E(o), 0, 2.45)), with exact zeros, the
+    top value and values below Dec's polynomial bound (q < 0.0547) mixed in; the pitch padding random as well (never a
+    tap)."""
+    from clean.runner import post as RP
+    pitch = RP.display_pitch(dw)
+    v = rng.uniform(0.0, 2.45, (3, dh, pitch))
+    pick = rng.random((3, dh, pitch))
+    v = np.where(pick < 0.08, 0.0, v)
+    v = np.where((pick >= 0.08) & (pick < 0.12), 2.45, v)
+    v = np.where((pick >= 0.12) & (pick < 0.3), rng.uniform(0.0, 0.06, v.shape), v)
+    return v.astype(np.float16).tobytes()
+
+
+def filter_cases(kernel, rng):
+    """w64/post_filter_c1_s4 (analytic, post_w64.co) vs HIP post_filter_c1_s4: display -> out (O, 3 x f32), with
+    dec_scale from the argument or from the exposure pair (expo[0]; 0 means 1)."""
+    out = []
+    for ow, oh, expo in FILTER_FRAMES:
+        dw, dh = MP.recon_size_for(ow), MP.recon_size_for(oh)
+        e = float(np.float32(rng.uniform(0.5, 2.0)))
+        n_out = ow * oh * 12
+        args = [("buf", _display(rng, dw, dh)), ("out", n_out + SLACK), ("u32", dw), ("u32", dh), ("u32", ow),
+                ("u32", oh), ("u32", _f32_bits(np.float32(0.01 / e)))]
+        args += [("buf", np.array([0.0 if rng.random() < 0.3 else e, 1.0, 0.0, 0.0, 0.0], np.float32).tobytes())] \
+            if expo else [("null",)]
+        out.append({"kernel": kernel, "co": "post_w64.co", "tag": "w64", "hip_kernel": "post_filter_c1_s4",
+                    "grid": PZ.PS._cdiv(ow, 40) * PZ.PS._cdiv(PZ.PS._cdiv(oh, 2), 8), "block": 64, "args": args,
+                    "defined": [np.concatenate([np.ones(n_out, bool), np.zeros(SLACK, bool)])],
+                    "label": f"O {ow}x{oh} (D {dw}x{dh})" + (" expo" if expo else "")})
+    return out
+
+
 KINDS = {"w64/post_tf_f32_p12_diet_vsit": tf_cases, "w64/post_tf4_dl_f32_p12_diet_vsit": tf4_cases,
-         "orig_w64/post_tf_f32_p12_diet_vsit": control_cases}
+         "orig_w64/post_tf_f32_p12_diet_vsit": control_cases, "w64/post_filter_c1_s4": filter_cases}
 
 # ---- the direct forms (rs=direct: the colour from a texture, the output into a texture) -------------------------------
 # No HIP kernel of their own: form 3 is form 0 followed by the output store (post.hlsl). With color_pi 1, an RGBA32F
