@@ -101,7 +101,26 @@ the frame parity, as Model M's.
    3. `l_coef` y2 -> A, B, C, new latent. Model L's latent recurrence runs only through the next frame's input
       encoder, which samples this latent.
 
-The reconstruction (post) stage is still open.
+5. Reconstruction (post) and output filter. The float64 oracle is `clean/l/reference/recon.py`, driven by the
+   table's `recon` entry. It is Model M's reconstruction with:
+   - a 4 x 4 colour gather;
+   - history candidates combined in linear colour;
+   - the plain linear colour as the fallback of an invalid or reset sample;
+   - the post stage's learned scale.
+
+   Behaviour pinned in the oracle:
+   - The tiling variant (3/2 or 3/1) follows `table.recon_variant`, a D / render ratio. Both variants compute the same
+     function.
+   - A zero total gather weight follows the normal formulas with NaN: history h(E(NaN)) = -1.4404296875 in HDR, NaN
+     in LDR; display and reduced code 0.
+   - LDR writes 11/11/10-bit display codes of the plain colour. The output stage unpacks them (code RN32(1/N), FP16)
+     and filters them with no decode and no exposure (`recon.output_filter`).
+   - The output filter is Model M's (the project's own taps).
+
+   The reconstruction kernel is **planned**. Its arguments and buffers will be Model M's `post` kernels' (Model M's
+   `clean/FORMATS.md`). Its summation order (taps, candidates) is not fixed yet: the oracle sums the gather columns
+   first, while Model M's reference sums rows first. The kernel's order decides, and the kernel-order model follows
+   it.
 
 ## Checks (GPU, synthetic data)
 

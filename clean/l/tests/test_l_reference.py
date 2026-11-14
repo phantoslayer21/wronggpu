@@ -320,9 +320,7 @@ class DecoderTest(unittest.TestCase):
         v = np.random.default_rng(11).normal(size=(6, 8, 5))
         self.assertTrue(_same(L.depth_to_space(L.space_to_depth(v)), v))
 
-    def test_pending(self):
-        with self.assertRaises(NotImplementedError):
-            L.reconstruct()
+    def test_unknown_decoder_variant(self):
         rng = np.random.default_rng(12)
         x = MD.random_inputs(rng, rw=20, rh=12)
         with self.assertRaises(NotImplementedError):

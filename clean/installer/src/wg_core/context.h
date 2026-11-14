@@ -37,6 +37,10 @@ struct EmbeddedData {
     // the file name of the game interface the RR plugin hooks (the RR folder's interposer.json; empty: none given): which
     // build of the plugin a game gets follows its version (rr.h, RrPluginFor)
     const wchar_t* rrInterface = L"";
+    // Model L (#89): its converter map (data/preset-L.v1.map.json, revision v1.1; CMake WRONGGPU_MAP_L). lMapId 0: not in
+    // this build.
+    int lMapId = 0;
+    const wchar_t* lMapSha256 = L"";
     const PayloadFile* begin() const { return files; }
     const PayloadFile* end() const { return files + count; }
 };
@@ -70,6 +74,9 @@ struct Context {
 #else
     static constexpr bool presetK = false;  // CMake WRONGGPU_PRESET_K=OFF: Model M only
 #endif
+    // Model L (#89): the converter map and model folder (<model>\L, the runtime's folder for model=L) are Model L's.
+    // Chosen by name (SelectPreset); it takes precedence over presetK.
+    bool presetL = false;
     // The converter map of the selected preset, loaded and validated once (spec 08 section 5; LoadEmbeddedMap).
     wgc::LoadedMap map;
     wstring mapError;
@@ -110,6 +117,12 @@ wstring DefaultLogPath();
 wstring ModelBaseDir();
 int MapResourceId(Context& ctx, bool k);
 const wchar_t* MapSha256(Context& ctx, bool k);
+// The selected model's name: L'L' (presetL), L'K' (presetK) or L'M'.
+wchar_t SelectedPreset(const Context& ctx);
+// Selects a model by its name (M, L, and K in a build with Preset K; either case) for the converter map, the model folder
+// and the conversion. A different model than before drops the loaded map. False: `error` says why (an unknown name, or a
+// model whose converter data this build does not have); nothing changes.
+bool SelectPreset(Context& ctx, const wstring& name, wstring& error);
 wstring ModelDir(Context& ctx);
 wstring ModelFile(Context& ctx);
 wstring ModelSourceFile(Context& ctx);

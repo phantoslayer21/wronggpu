@@ -12,6 +12,8 @@ shared stages, "dec0_block", "dec0", "post". SHARED_STAGES run with Model M's co
 """
 import copy
 
+import numpy as np
+
 from clean.reference import swin as _swin
 
 # ---- stages shared with Model M -------------------------------------------------------------------------------------
@@ -75,10 +77,18 @@ TABLE = {
         {"op": "pick", "src": "y2", "values": L_DEC_VALUES},
     ),
     "dec_pixel": "l",
-    "post_variant": "unfolded",                                                                           # I8
-    # Reconstruction variants and the rule that picks one per frame from the render and output sizes ("rule" names
-    # the comparison, "ratio" its factor). Only the 3/2 form (D = floor((3 O + 1) / 2)) exists in WrongGPU so far.
-    "recon": {"rule": "both_axes_at_least", "ratio": 3, "variants": ("3/2", "3/1")},                    # I7
+    # The reconstruction (clean/l/reference/recon.py): Model M's (spec 06) with a "window" x "window" colour gather,
+    # history candidates combined in linear colour ("history_combine"), and the plain linear colour as the fallback
+    # of an invalid or reset sample ("fallback"). Model M: window 3, "encoded", "encoded_colour". The output stage
+    # (D -> output filter) is Model M's unchanged. "post_variant" names Model L's kernel set (one function, both
+    # tilings).
+    "post_variant": "unfolded",
+    # Which tiling (both compute the same function) a frame takes: with D = ((3 ow + 1) div 2, (3 oh + 1) div 2) and
+    # the render size R (not padded), "3/1" when float32(Dw) / float32(rw) >= ratio AND float32(Dh) / float32(rh) >=
+    # ratio (single-precision division and comparison), else "3/2" (recon_variant). The ratio is D / render, not
+    # output / render: 3.0 here is about output >= 2 x render.
+    "recon": {"rule": "d_over_render_at_least", "ratio": 3.0, "variants": ("3/2", "3/1"), "window": 4,
+              "history_combine": "linear", "fallback": "linear_colour"},
     # Window offsets (ox, oy) of an L block for frame parity 0 and 1, in pixels; the blocks run on the padded grid F
     # and keep every grid position's output.
     "window_offsets": {"first": ((2, 2), (0, 2)), "second": ((0, 0), (2, 0))},
@@ -88,10 +98,29 @@ TABLE = {
 
 DEC_PIXEL_VALUES = {"l": len(L_DEC_VALUES), "m": len(M_DEC0_VALUES)}
 
-PROVISIONAL = {
-    "I7": "recon: the 3/1 form and the exact rule",
-    "I8": "post_variant",
-}
+PROVISIONAL = {}
+
+# Model M's reconstruction in the same terms (clean/reference/post.py reconstruct): for reductions and tests.
+M_RECON = {"rule": "d_over_render_at_least", "ratio": 3.0, "variants": ("3/2", "3/1"), "window": 3,
+           "history_combine": "encoded", "fallback": "encoded_colour"}
+
+
+def recon_size(output_w, output_h):
+    """D = ((3 ow + 1) div 2, (3 oh + 1) div 2) (spec 01)."""
+    return (3 * int(output_w) + 1) // 2, (3 * int(output_h) + 1) // 2
+
+
+def recon_variant(t, render_w, render_h, output_w, output_h):
+    """The tiling a frame takes ("3/1" or "3/2"): float32(D) / float32(render) >= ratio on both axes, render size not
+    padded, single-precision division and comparison."""
+    rc = t["recon"]
+    if rc["rule"] != "d_over_render_at_least":
+        raise ValueError(f"unknown recon rule {rc['rule']!r}")
+    dw, dh = recon_size(output_w, output_h)
+    r = np.float32(rc["ratio"])
+    rx = np.float32(dw) / np.float32(render_w)
+    ry = np.float32(dh) / np.float32(render_h)
+    return rc["variants"][1] if (rx >= r and ry >= r) else rc["variants"][0]
 
 UNCONFIRMED = {
     "U1": "encoder halo: a mirrored render position below 0 (only when fw + halo > 2 rw - 2, i.e. render sizes near "

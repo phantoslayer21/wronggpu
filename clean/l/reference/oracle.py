@@ -361,8 +361,11 @@ def decode(x, params, parity, t=_table.TABLE, keep=False):
     return out
 
 
-def reconstruct(*args, **kwargs):
-    raise NotImplementedError("Model L output reconstruction (table entry post_variant): pending")
+def reconstruct(x, params, t=_table.TABLE, ldr=False):
+    """Model L's output reconstruction (clean/l/reference/recon.py) with the post stage's learned scale.
+    x: Model M's reconstruction input dict (clean/reference/post.py reconstruct)."""
+    from . import recon as _recon
+    return _recon.reconstruct(x, params["post"]["s"], t, ldr)
 
 
 # ---- whole network --------------------------------------------------------------------------------------------------
