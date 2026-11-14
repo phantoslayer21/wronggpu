@@ -20,7 +20,8 @@ the native D3D12 device in a child process, then:
 Cases: fg_conv_f16: every net1 layer shape (cin, cout, kernel size, chunk order, activation) on small grids of several
 sizes, and special values (NaN, +-inf, subnormals, +-65504, -0) in the inputs and weights; fg_maxpool2_f16: random maps
 of several sizes (odd ones too) and every 2 x 2 window over ten special values; fg_upscale_f16: net1's level pairs,
-other sizes, an output extent of 1, equal sizes, special values. Output: counts only, no timing.
+other sizes, an output extent of 1, equal sizes, special values; fg_add_f16: random pairs of several lengths and every
+pair of thirteen special values. Output: counts only, no timing. The whole network: fg_net1_gpu.py.
 """
 import argparse
 import ctypes
@@ -168,8 +169,34 @@ def _upscale_case(kernel, x, ho, wo, label):
             "defined": 2 * n, "cpu": lambda: N.upscale_to(x.astype(np.float64), wo, ho)}
 
 
+ADD_SPECIALS = np.array([np.nan, np.inf, -np.inf, 65504.0, -65504.0, 2.0 ** -24, -2.0 ** -24, -0.0, 0.0, 1.0, -1.0,
+                         32768.0, 0.000999], dtype=np.float16)
+
+
+def add_cases(kernel, rng):
+    """Random pairs of several lengths, and every pair over ADD_SPECIALS (overflow, inf - inf, -0 + -0, subnormal
+    sums)."""
+    cases = []
+    for n in (1, 255, 256, 1000, 4096 * 3 + 7):
+        a = _f16(rng.uniform(-100, 100, n))
+        b = _f16(rng.uniform(-100, 100, n))
+        cases.append(_add_case(kernel, a, b, f"n {n}"))
+    v = ADD_SPECIALS
+    a = np.repeat(v, len(v)).astype(np.float16)
+    b = np.tile(v, len(v)).astype(np.float16)
+    cases.append(_add_case(kernel, a, b, "every special pair"))
+    return cases
+
+
+def _add_case(kernel, a, b, label):
+    n = a.size
+    return {"kernel": kernel, "grid": -(-n // 256), "block": 256, "label": label,
+            "args": [("buf", a.tobytes()), ("buf", b.tobytes()), ("out", 2 * n + SLACK), ("u32", n)],
+            "defined": 2 * n, "cpu": lambda: N.add16(a.astype(np.float64), b.astype(np.float64))}
+
+
 KINDS = {"fg_conv_f16": lambda kernel, rng: conv_cases(kernel, rng, specials=True),
-         "fg_maxpool2_f16": pool_cases, "fg_upscale_f16": upscale_cases}
+         "fg_maxpool2_f16": pool_cases, "fg_upscale_f16": upscale_cases, "fg_add_f16": add_cases}
 
 
 # ---- prepare --------------------------------------------------------------------------------------------------------

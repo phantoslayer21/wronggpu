@@ -112,10 +112,15 @@ delivered by the spec side; the code never guesses it (it raises, or takes the c
   (0 for an extent of 1), so no division runs on the GPU. Positions in single precision one operation at a time
   (HIP: no contraction); every product and sum rounded to float16 (a product of two float16 values is exact in single
   precision, and single precision then float16 equals one rounding of a sum of two float16 values).
+- `fg_add_f16(a, b, y, n)`: net1's skip add exactly as `net1.add16`: y = h(a + b) per element (single precision then
+  float16, one rounding of the exact sum).
+- net1 on the GPU is these four kernels in NET1_WIRING's order, one launch per step, every buffer resident on the
+  device (`runner/fg_net1_gpu.py`; on D3D12 a kernel_replay `chain` block, with a UAV barrier between launches).
 - The arithmetic is integer code shared by both back ends (`kernels/fg_exact16.h`), the method of `fp16acc.py`; NaN
   results are written as 0x7E00. The D3D12 build compiles `fg_` kernels only when `--only` names them, so Model M's
   and Model L's kernel sets and DXILs do not change.
-- `runner/fg_d3d12_check.py` proves each kernel on HIP against D3D12 (raw bytes) and against the CPU reference.
+- `runner/fg_d3d12_check.py` proves each kernel on HIP against D3D12 (raw bytes) and against the CPU reference;
+  `runner/fg_net1_gpu.py` the whole network, every step output.
 
 ## Configuration (`reference/config.py`)
 
