@@ -129,7 +129,7 @@ def encoder_launches(t=_table.TABLE):
         if k == "quant":
             if op["mode"] != "dither" or i != 0:
                 raise ValueError("the encoder's value kernel quantizes the per-pixel values with the dither table")
-            out.append({"kind": "values", "blob": "enc0.values", "dst": op["dst"], "C": 32})
+            out.append({"kind": "values", "blob": "enc0.values", "dst": op["dst"], "C": 32, "out_format": "fp8"})
             width[op["dst"]] = 32
             fmt[op["dst"]] = "fp8"
         elif k == "linear":
@@ -144,13 +144,15 @@ def encoder_launches(t=_table.TABLE):
             fo = map_format("f16", op.get("out_round", "q8"))
             out.append(_swin_launch(op, fmt[op["src"]], fo))
             fmt[op["dst"]] = fo
+            width[op["dst"]] = width[op["src"]]
         elif k == "space_to_depth":
             nxt = ops[i + 1] if i + 1 < len(ops) else None
             if not nxt or nxt["op"] != "project" or nxt["src"] != op["dst"]:
                 raise ValueError("space_to_depth must feed the project directly (one gather kernel)")
             width[op["dst"]] = 4 * width[op["src"]]
-            out.append({"kind": "project", "blob": "enc0.project", "src": op["src"], "groups": nxt["groups"],
-                        "w": nxt["w"], "b": nxt["b"], "clamp": nxt.get("clamp")})
+            out.append({"kind": "project", "blob": "enc0.project", "src": op["src"],
+                        "dst": nxt.get("dst", "enc0.features"), "groups": nxt["groups"], "w": nxt["w"], "b": nxt["b"],
+                        "clamp": nxt.get("clamp"), "in_format": fmt[op["src"]], "out_format": "fp8"})
         elif k == "project":
             continue                                   # folded into the gather above
         else:
@@ -172,8 +174,9 @@ def decoder_launches(t=_table.TABLE):
             if not nxt or nxt["op"] != "depth_to_space" or nxt["src"] != op["dst"]:
                 raise ValueError("dec_project must feed depth_to_space directly (one scatter kernel)")
             fmt[nxt["dst"]] = map_format("f16", op.get("out_round", "q8"))
-            out.append({"kind": "dec_project", "blob": "dec0.project", "w": op["w"], "b": op["b"],
-                        "groups": op["groups"], "dst": nxt["dst"], "out_format": fmt[nxt["dst"]]})
+            out.append({"kind": "dec_project", "blob": "dec0.project", "src": op["src"], "dst": nxt["dst"],
+                        "w": op["w"], "b": op["b"], "groups": op["groups"], "in_format": "fp8",
+                        "out_format": fmt[nxt["dst"]]})
         elif k == "depth_to_space":
             continue
         elif k == "swin":
@@ -182,7 +185,7 @@ def decoder_launches(t=_table.TABLE):
             fmt[op["dst"]] = fo
         elif k == "pick":
             out.append({"kind": "coef", "blob": "dec0.coef", "src": op["src"], "values": tuple(op["values"]),
-                        "dec_pixel": t["dec_pixel"], "in_format": fmt[op["src"]]})
+                        "dec_pixel": t["dec_pixel"], "in_format": fmt[op["src"]], "dst": "codes"})
         else:
             raise ValueError(f"no kernel for decoder op {k!r}")
     return out

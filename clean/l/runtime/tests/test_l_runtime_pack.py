@@ -152,7 +152,7 @@ class Blobs(unittest.TestCase):
 class Launches(unittest.TestCase):
     FIELDS = (("kind", ""), ("blob", ""), ("src", ""), ("dst", ""), ("C_in", 0), ("C_out", 0), ("w", ""),
               ("b", ""), ("acc", ""), ("out_round", ""), ("C", 0), ("heads", 0), ("mlp", 0), ("offsets", ""),
-              ("params", ""))
+              ("params", ""), ("in_format", ""), ("out_format", ""), ("border", ""), ("dec_pixel", ""))
 
     def line(self, where, ln):
         f = [where] + [str(ln.get(k) if ln.get(k) is not None else d) for k, d in self.FIELDS]
@@ -165,7 +165,26 @@ class Launches(unittest.TestCase):
         want = [self.line("enc", ln) for ln in LP.encoder_launches()]
         want += [self.line("dec", ln) for ln in LP.decoder_launches()]
         self.assertEqual(dump("launches").splitlines(), want)
-        self.assertEqual(want[-1].split("|")[-1], ",".join(str(v) for v in T.L_DEC_VALUES))
+        self.assertEqual(want[-1].split("|")[-1], "0,1,6,7,8,9,10,11,12,2,3,4,5")    # the exact 13-value sequence
+
+    def test_map_identities(self):
+        """Every launch reads and writes distinct maps (no kernel works in place), each map is written once, and every
+        map read is written earlier (or is the stage input)."""
+        for launches, inputs in ((LP.encoder_launches(), {"values"}), (LP.decoder_launches(), {"features"})):
+            written = set(inputs)
+            for ln in launches:
+                src, dst = ln.get("src"), ln.get("dst")
+                self.assertTrue(dst and dst != src, ln)
+                self.assertNotIn(dst, written, ln)
+                if src:
+                    self.assertIn(src, written, ln)
+                written.add(dst)
+        fmts = [(ln["kind"], ln.get("in_format", ""), ln.get("out_format", ""), ln.get("border", ""))
+                for ln in LP.encoder_launches() + LP.decoder_launches()]
+        self.assertEqual(fmts, [("values", "", "fp8", ""), ("linear", "fp8", "fp8", ""), ("linear", "fp8", "fp16", ""),
+                                ("swin", "fp16", "fp8", "input"), ("project", "fp8", "fp8", ""),
+                                ("dec_project", "fp8", "fp8", ""), ("swin", "fp8", "fp16", "coarse"),
+                                ("coef", "fp16", "", "")])
 
 
 if __name__ == "__main__":
