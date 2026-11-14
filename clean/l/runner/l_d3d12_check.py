@@ -9,7 +9,9 @@
 --only <the Model L kernels>, needs WG_TOOLCHAINS / WG_DXC_DIR as BUILDING.md describes) and
 clean/dx12/tests/kernel_replay.exe (host clang++ of the HIP SDK).
 --run (GPU, one GPU slot) runs every case on HIP in this process, writes the same inputs for kernel_replay, runs it on
-the native D3D12 device in a child process, and compares the outputs. Output: counts only, no timing.
+the native D3D12 device in a child process, and compares the outputs: the RAW downloaded bytes of both (nothing is
+decoded and encoded again), each output buffer filled beforehand with its own non-zero sentinel (HIP 0xA5, D3D12
+0x5A), so a byte either path leaves unwritten shows up as a difference. Output: counts only, no timing.
 
 Kernels: l_swin_block_c32_nc (the D3D12 port has only the `_nc` form, as Model M's ports).
 """
@@ -73,12 +75,39 @@ def _params_c96(rng):
 
 KINDS = {"l_swin_block_c32_nc": ("l_swin.co", 32, _params_c32), "swin_block_c96_nc": ("swin.co", 96, _params_c96)}
 
+# Each back end's output buffer starts filled with its own non-zero sentinel byte, different from the other's: a byte
+# that one path (or both) never writes then differs between the two outputs instead of comparing equal as zeros.
+HIP_SENTINEL, D3D12_SENTINEL = 0xA5, 0x5A
+
+
+def hip_block_raw(g, co, kernel, xb, blob, H, W, off, C):
+    """The block on HIP; returns the output buffer's downloaded bytes as they are (never decoded and encoded again, so
+    for example the two FP8 NaN codes stay distinct). The output starts filled with HIP_SENTINEL."""
+    h = g.hip
+    n = H * W * C
+    px, pw, po = h.malloc(len(xb)), h.malloc(len(blob)), h.malloc(n)
+    try:
+        h.upload(px, xb)
+        h.upload(pw, blob)
+        h.memset(po, HIP_SENTINEL, n)
+        ox, oy = off
+        nwin = -(-(W + ox) // 4) * -(-(H + oy) // 4)
+        args = [ctypes.c_void_p(px), ctypes.c_void_p(0), ctypes.c_void_p(po), ctypes.c_void_p(pw),
+                ctypes.c_int(H), ctypes.c_int(W), ctypes.c_int(ox), ctypes.c_int(oy)]
+        h.launch(h.get_function(g.mods[co], kernel), -(-nwin // 8), 256, args)
+        h.sync()
+        return bytes(h.download(po, n))
+    finally:
+        for p in (px, pw, po):
+            h.free(p)
+
 
 def run(build, rocm, seeds, kernels):
     g = C32.Gpu(build, rocm)
     cdir = os.path.join(build, "replay")
     os.makedirs(cdir, exist_ok=True)
     lines, hip_out = [], {}
+    neg = None  # (case name, kernel) of the negative control
     for kernel in kernels:
         co, C, gen = KINDS[kernel]
         for si, seed in enumerate(seeds):
@@ -89,15 +118,22 @@ def run(build, rocm, seeds, kernels):
                 if not np.frombuffer(blob[:4], np.uint32)[0] & 1:
                     continue                                    # only the _nc forms are ported
                 x = q8(rng.normal(0, 1.5, (H, W, C)))
-                got = g.block(co, kernel, x, blob, off, C)
-                hip_out[name] = (kernel, fp8_encode(got).tobytes())
-                _write(os.path.join(cdir, name + ".x"), fp8_encode(x).tobytes())
+                xb = fp8_encode(x).tobytes()
+                hip_out[name] = (kernel, hip_block_raw(g, co, kernel, xb, blob, H, W, off, C))
+                _write(os.path.join(cdir, name + ".x"), xb)
                 _write(os.path.join(cdir, name + ".w"), blob)
                 ox, oy = off
                 nwin = -(-(W + ox) // 4) * -(-(H + oy) // 4)
                 lines += [f"case {name}", f"module {co}", f"kernel {kernel} {-(-nwin // 8)} 256",
-                          f"arg buf {name}.x", "arg null", f"arg out {H * W * C} {name}.out", f"arg buf {name}.w",
+                          f"arg buf {name}.x", "arg null", f"arg out {H * W * C} {name}.out {D3D12_SENTINEL}", f"arg buf {name}.w",
                           f"arg u32 {H}", f"arg u32 {W}", f"arg u32 {ox}", f"arg u32 {oy}", ""]
+                if neg is None and nwin > 8:
+                    # Negative control: this case again on D3D12 with half its workgroups. The windows never processed
+                    # keep the D3D12 sentinel, so the comparison must find them: the check can fail.
+                    neg = (name, kernel)
+                    lines += [f"case negative_{name}", f"module {co}", f"kernel {kernel} {max(1, -(-nwin // 8) // 2)} 256",
+                              f"arg buf {name}.x", "arg null", f"arg out {H * W * C} negative_{name}.out {D3D12_SENTINEL}",
+                              f"arg buf {name}.w", f"arg u32 {H}", f"arg u32 {W}", f"arg u32 {ox}", f"arg u32 {oy}", ""]
     with open(os.path.join(cdir, "cases.txt"), "w", newline="\n") as f:
         f.write("\n".join(lines))
     env = {k: v for k, v in os.environ.items()
@@ -113,12 +149,25 @@ def run(build, rocm, seeds, kernels):
         b = np.frombuffer(want, np.uint8)
         res["cases"].append({"case": name, "kernel": kernel, "bytes": len(want),
                              "identical": got == want,
-                             "differ": int(np.sum(a != b)) if a.size == b.size else -1})
+                             "differ": int(np.sum(a != b)) if a.size == b.size else -1,
+                             # bytes still equal to their buffer's sentinel (a value the kernel may also write)
+                             "hip_sentinel_bytes": int(np.sum(b == HIP_SENTINEL)),
+                             "d3d12_sentinel_bytes": int(np.sum(a == D3D12_SENTINEL)) if a.size else -1})
     res["per_kernel"] = {k: {"cases": sum(c["kernel"] == k for c in res["cases"]),
                              "identical": sum(c["identical"] for c in res["cases"] if c["kernel"] == k)}
                          for k in kernels}
-    res["pass"] = r.returncode == 0 and all(v["cases"] > 0 and v["identical"] == v["cases"]
-                                            for v in res["per_kernel"].values())
+    caught = None
+    if neg:
+        path = os.path.join(cdir, "negative_" + neg[0] + ".out")
+        got = open(path, "rb").read() if os.path.exists(path) else b""
+        want = hip_out[neg[0]][1]
+        a, b = np.frombuffer(got, np.uint8), np.frombuffer(want, np.uint8)
+        caught = len(got) == len(want) and got != want
+        res["negative_control"] = {"case": neg[0], "kernel": neg[1], "half_grid": True, "caught": caught,
+                                   "differ": int(np.sum(a != b)) if a.size == b.size else -1,
+                                   "d3d12_sentinel_bytes": int(np.sum(a == D3D12_SENTINEL)) if a.size else -1}
+    res["pass"] = r.returncode == 0 and caught is not False and all(v["cases"] > 0 and v["identical"] == v["cases"]
+                                                                    for v in res["per_kernel"].values())
     return res
 
 

@@ -10,7 +10,8 @@
 //   module <code object name> [<tag>]          (zero or more)
 //   kernel <launch name> <grid> <block>
 //   arg buf <file>                             device buffer with the file's bytes
-//   arg out <bytes> <file>                     device buffer of that size (zero-filled), written to <file> afterwards
+//   arg out <bytes> <file> [fill]              device buffer of that size, every byte set to fill (0..255, default 0)
+//                                              before the launch, written to <file> afterwards
 //   arg null                                   null pointer
 //   arg u32 <value>                            32-bit scalar (decimal, may be negative)
 //   arg bytes <file>                           a struct passed by value (the file's bytes)
@@ -81,7 +82,7 @@ int run_case(Device* d, Case& c, const std::string& base) {
       owned.push_back(a.ptr);
       argv.push_back(&a.ptr);
     } else if (a.kind == "out") {
-      if (!d->alloc(&a.ptr, a.bytes) || !d->memset(a.ptr, 0, a.bytes)) {
+      if (!d->alloc(&a.ptr, a.bytes) || !d->memset(a.ptr, (int)(a.value & 0xff), a.bytes)) {
         std::printf("%s: output: %s\n", c.name.c_str(), d->err().c_str());
         return 1;
       }
@@ -147,7 +148,10 @@ int main(int argc, char** argv) {
       Arg a;
       s >> a.kind;
       if (a.kind == "buf" || a.kind == "bytes") s >> a.file;
-      else if (a.kind == "out") s >> a.bytes >> a.file;
+      else if (a.kind == "out") {
+        s >> a.bytes >> a.file;
+        if (!(s >> a.value)) a.value = 0;  // the fill byte (a sentinel), default 0
+      }
       else if (a.kind == "u32") s >> a.value;
       else if (a.kind != "null") { std::printf("unknown arg kind %s\n", a.kind.c_str()); return 2; }
       c.args.push_back(a);
