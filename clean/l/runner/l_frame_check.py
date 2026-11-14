@@ -41,6 +41,19 @@ but against the float64 references with the kernels' GELU (sigmoid):
 Output: counts only, no timing. The summary gives per stage the values differing, the largest difference (FP8 steps,
 FP16 ulps or codes, as the stage's metric has it), the non-finite values on each side and the largest finite magnitude
 on each side (saturation shows as one side stopping where the other goes on).
+
+Native D3D12 (runtime backend 3), after --run:
+
+    python clean/l/runner/l_frame_check.py --build <dir> --run --backend d3d12   # GPU, inside a GPU slot
+    python clean/l/runner/l_frame_check.py --build <dir> --compare-d3d12 --json out.json
+
+<dir>/dx12 holds the D3D12 ports (python clean/dx12/build_dx12.py --out <dir>). The same frames run on D3D12 with the
+runtime's default kernels there (Model L: its encoder and decoder ports, the pack12 store l_coef_pack12, Model M's
+pack12 post path; Model M: its native frame), and every stage output both backends write is compared with the HIP
+run's ("default"), byte for byte: the D3D12 ports reproduce their HIP kernels byte for byte, and Model M's pack12 post
+path the banded one bit for bit. The pack12 images (A: A0 A1 A2 B0 | B1 B2 C2, C: C0 C1; clean/FORMATS.md) are
+unpacked and compared with the HIP run's A, B and C. Not compared: b0 ... b4 (the bottleneck megakernels write only
+b5), the display image (the fused pack12 post writes none), and on the first frame the previous frame's state.
 """
 import argparse
 import copy
@@ -157,6 +170,148 @@ def frame_inputs(rng, rw, rh, reset, special=True):
     x = En.random_inputs(rng, rw=rw, rh=rh, fw=-(-rw // 32) * 32, fh=-(-rh // 32) * 32, special=special)
     return {"color": x["color"], "depth": x["depth"], "motion": x["motion"], "mv_scale": x["mv_scale"],
             "jitter": x["jitter"], "exposure": 1.0, "pre_exposure": PRE_EXPOSURE, "reset": reset}
+
+
+def run_d3d12(build, special=True):
+    """The frame sequence on native D3D12 (backend 3), default kernels; also the raw pack12 images."""
+    from clean.runner.pipeline import Pipeline
+    d = model_dir(build)
+    setups = {"L": dict(map_path=l_map(build), check_packing=False, kernels={"options": "model=L"}),
+              "M": dict(check_packing=True, kernels={})}
+    flags = {"L": {"depth_inverted": False, "auto_exposure": True, "hdr": True},  # as the HIP run's
+             "M": {"depth_inverted": False, "auto_exposure": True}}
+    for model, kw in setups.items():
+        p = Pipeline(build, "", d, MAX_RENDER, OUTPUT, flags[model], backend="d3d12", **kw)
+        rng = np.random.default_rng(SEED)
+        frames = []
+        for (rw, rh), reset in SEQUENCE:
+            fr = frame_inputs(rng, rw, rh, reset, special)
+            out = p.frame(fr, debug=True)
+            raw = {n: p._get(n, np.uint8).copy() for n in ("dec0.A", "dec0.C")}
+            frames.append({"inputs": fr, "out": out, "raw": raw})
+        rec = {"model": model, "config": "d3d12", "kernels": p.kernels(), "notes": p.notes(),
+               "model_source": p.model_source, "dw": p.dw, "dh": p.dh, "ow": p.ow, "oh": p.oh, "frames": frames}
+        with open(os.path.join(build, f"lframe_{model}_d3d12.pkl"), "wb") as f:
+            pickle.dump(rec, f)
+        print(model, "d3d12 frames", len(frames), "post", rec["kernels"].get("post"), "pack",
+              rec["kernels"].get("post_pack"))
+        del p
+
+
+def unpack12(raw_a, raw_c, rw, rh):
+    """The pack12 images -> A, B codes [rh, rw, 3] (uint8) and C [rh, rw, 3] (FP16 as float32)."""
+    a = np.frombuffer(raw_a.tobytes()[:rw * rh * 8], np.uint8).reshape(rh, rw, 8)
+    c = np.frombuffer(raw_c.tobytes()[:rw * rh * 4], np.uint8).reshape(rh, rw, 4)
+    A = a[..., 0:3]
+    B = np.stack([a[..., 3], a[..., 4], a[..., 5]], -1)
+    C = np.stack([c[..., 0:2].copy().view(np.float16)[..., 0], c[..., 2:4].copy().view(np.float16)[..., 0],
+                  a[..., 6:8].copy().view(np.float16)[..., 0]], -1).astype(np.float32)
+    return A, B, C
+
+
+POST_OUTPUTS = ("post.history", "post.reduced", "state.history_prev", "out")
+
+
+def compare_backends(hip, dx, same_post=True):
+    """Per frame: {stage output: values differing (0 = byte-identical)} between the HIP and the D3D12 run. same_post
+    False (the backends run different reconstruction kernels): the post-dependent outputs are left out."""
+    res = []
+    for k, (fh_, fd_) in enumerate(zip(hip["frames"], dx["frames"])):
+        a, b = fh_["out"], fd_["out"]
+        rh, rw = fh_["inputs"]["color"].shape[:2]
+        m, compared = {}, []
+
+        def walk(x, y, prefix=""):
+            for key in x:
+                name = prefix + key
+                if name in ("b0", "b1", "b2", "b3", "b4", "dec0.A", "dec0.B", "dec0.C", "post.display", "filter",
+                            "state.info") or (k == 0 and name in UNWRITTEN_ON_FIRST) or (
+                        not same_post and name in POST_OUTPUTS):
+                    continue
+                u, v = x[key], y.get(key)
+                if isinstance(u, dict):
+                    walk(u, v, name + ".")
+                elif isinstance(u, np.ndarray) and isinstance(v, np.ndarray):
+                    if u.shape != v.shape or u.dtype != v.dtype:
+                        m[name] = -1  # not comparable: counts as differing
+                    else:  # values whose bit patterns differ
+                        iv = np.dtype("u%d" % u.dtype.itemsize)
+                        m[name] = int(np.sum(np.ascontiguousarray(u).view(iv) != np.ascontiguousarray(v).view(iv)))
+                    compared.append(name)
+                elif isinstance(u, (int, float)) and isinstance(v, (int, float)):
+                    m[name] = int(u != v)
+        walk(a, b)
+        A, B, C = unpack12(fd_["raw"]["dec0.A"], fd_["raw"]["dec0.C"], rw, rh)
+        dec = a["dec0"]
+        m["dec0.A"] = int(np.sum(A != np.rint(dec["A"] * 255.0).astype(np.uint8)))
+        m["dec0.B"] = int(np.sum(B != np.rint(dec["B"] * 255.0).astype(np.uint8)))
+        m["dec0.C"] = int(np.sum(~((C == dec["C"]) | (np.isnan(C) & np.isnan(dec["C"])))))
+        if same_post:
+            m["out"] = int(np.sum(a["out"].view(np.uint32) != b["out"].view(np.uint32)))
+        res.append({"frame": k, "render": [rw, rh], "differ": m,
+                    "identical": all(v == 0 for v in m.values())})
+    return res
+
+
+def check_m_post(dx, params):
+    """Model L's D3D12 frame runs Model M's fused pack12 post: its history and reduced codes against Model M's post
+    reference (clean/reference/post.py) on the frame's own inputs (the unpacked pack12 coefficients), under
+    test_post_emu.py's acceptance as in --compare."""
+    from clean.reference import post as Po
+    s = float(np.asarray(params["post"]["s"]).reshape(-1)[0])
+    D = (dx["dw"], dx["dh"])
+    res, prev, prev_size = [], None, None
+    for k, fd in enumerate(dx["frames"]):
+        fr, out = fd["inputs"], fd["out"]
+        rh, rw = fr["color"].shape[:2]
+        reset = prev is None or bool(fr["reset"]) or prev_size != (rw, rh)
+        A, B, C = unpack12(fd["raw"]["dec0.A"], fd["raw"]["dec0.C"], rw, rh)
+        xp = {"color": (fr["color"] / np.float32(fr["pre_exposure"])).astype(np.float32),
+              "exposure": out["exposure"]["e"], "exposure_prev": out["exposure"]["e_prev"],
+              "A": (A / 255.0).astype(np.float32), "B": (B / 255.0).astype(np.float32), "C": C,
+              "history": out["state"]["history_prev"] if not reset else np.zeros((D[1], D[0], 3), np.float32),
+              "m_near": out["enc0"]["m_near"], "m_center": out["enc0"]["m_center"], "m_far": out["enc0"]["m_far"],
+              "jitter": fr["jitter"], "reset": reset, "recon_size": D}
+        ref = Po.reconstruct(xp, s)
+        h = post_fp16(out["post"]["history"], ref["history"])
+        dc = codes(out["post"]["reduced"], ref["reduced"], 1023.0)
+        dc["pass"] = dc["max_code_diff"] <= 1 and dc["differ"] <= 0.01 * dc["values"]
+        res.append({"frame": k, "history": h, "reduced": dc, "pass": h["pass"] and dc["pass"]})
+        prev, prev_size = out, (rw, rh)
+    return res
+
+
+def compare_d3d12(build, json_path):
+    with open(os.path.join(model_dir(build), "params.pkl"), "rb") as f:
+        params = pickle.load(f)
+    res = {}
+    for model in ("L", "M"):
+        recs = {}
+        for config in ("default", "d3d12"):
+            with open(os.path.join(build, f"lframe_{model}_{config}.pkl"), "rb") as f:
+                recs[config] = pickle.load(f)
+        same_post = recs["default"]["kernels"].get("post_last") == recs["d3d12"]["kernels"].get("post_last") or \
+            "l_post_recon" not in (recs["default"]["kernels"].get("post_last"), recs["default"]["kernels"].get("l_post"))
+        frames = compare_backends(recs["default"], recs["d3d12"], same_post)
+        res[model] = {"kernels_d3d12": recs["d3d12"]["kernels"], "frames": frames,
+                      "identical_frames": sum(f["identical"] for f in frames),
+                      "differing": sorted({k for f in frames for k, v in f["differ"].items() if v}),
+                      "post_compared_with_hip": same_post}
+        if not same_post:  # Model L: HIP runs l_post_recon, D3D12 Model M's fused pack12 post
+            mp = check_m_post(recs["d3d12"], params[model])
+            res[model]["m_post_reference"] = {"frames": mp, "passed": sum(f["pass"] for f in mp)}
+    res["pass"] = all(res[m]["identical_frames"] == len(res[m]["frames"]) and
+                      res[m].get("m_post_reference", {"passed": len(res[m]["frames"])})["passed"] == len(res[m]["frames"])
+                      for m in ("L", "M"))
+    with open(json_path, "w") as f:
+        json.dump(res, f, indent=1, default=lambda o: o.item() if hasattr(o, "item") else str(o))
+    for model in ("L", "M"):
+        print(model, "D3D12 against HIP: frames byte-identical", res[model]["identical_frames"], "of",
+              len(res[model]["frames"]), "differing outputs", res[model]["differing"])
+        if "m_post_reference" in res[model]:
+            print("  its post (Model M's fused pack12 post; HIP runs l_post_recon) against Model M's post reference:",
+                  res[model]["m_post_reference"]["passed"], "of", len(res[model]["frames"]), "frames pass")
+    return 0 if res["pass"] else 1
 
 
 def run(build, rocm, special=True):
@@ -481,6 +636,9 @@ def main(argv=None):
     g.add_argument("--prepare", action="store_true")
     g.add_argument("--run", action="store_true")
     g.add_argument("--compare", action="store_true")
+    g.add_argument("--compare-d3d12", action="store_true")
+    ap.add_argument("--backend", choices=("hip", "d3d12"), default="hip", help="--run: HIP (both bottleneck forms) "
+                    "or native D3D12 (default kernels)")
     ap.add_argument("--json")
     ap.add_argument("--plain", action="store_true",
                     help="--run: frames without random_inputs' special values (NaN / huge / negative colours, NaN "
@@ -497,8 +655,13 @@ def main(argv=None):
         prepare(a.build, a.rocm, a.model, a.map)
         return 0
     if a.run:
-        run(a.build, a.rocm, special=not a.plain)
+        if a.backend == "d3d12":
+            run_d3d12(a.build, special=not a.plain)
+        else:
+            run(a.build, a.rocm, special=not a.plain)
         return 0
+    if a.compare_d3d12:
+        return compare_d3d12(a.build, a.json or os.path.join(a.build, "lframe_d3d12.json"))
     return compare(a.build, a.json or os.path.join(a.build, "lframe_check.json"))
 
 
