@@ -9,6 +9,9 @@
 // No branch: a lane past the last token computes the last token (its inputs are clamped there, as HIP's) and stores
 // that token's bytes to that token's place, the same bytes its own lane stores (a branch around the store let the
 // compiler sink the matrix instructions into it, see l_ops_linear.hlsl).
+// Conversions by the driver's instructions (wg_platform.hlsli; the same bits as the software wg_rn16 / wg_pack_q8, and
+// this kernel has no branch): RN16 = v_cvt_f16_f32 then the exact widening, the FP8 pack v_cvt_pk_fp8_f32 after the
+// clamp. The software forms were most of the kernels' instructions.
 //
 // @wg-kernel l_project_gather co=l_ops.co block=256 wave=32 args=p,p,p,u,u defines=PJ_DEC=0
 // @wg-kernel l_dec_project co=l_ops.co block=256 wave=32 args=p,p,p,u,u defines=PJ_DEC=1
@@ -28,6 +31,15 @@ WG_ARGS_END
 #define KB 8
 #define FRAG0 256u   // 4 * 64: after the bias tile vector, rows R_L(64)
 #endif
+
+// RN16 of 8 values by the driver's conversion
+v8f pj_rn16(v8f a)
+{
+    const uint4 h = wg_to_f16_ags(a);
+    v8f r;
+    [unroll] for (uint j = 0; j < 4u; ++j) { r.v[2 * j] = wg_h2f_lo(h[j]); r.v[2 * j + 1] = wg_h2f_hi(h[j]); }
+    return r;
+}
 
 #if PJ_DEC
 WG_KERNEL(l_dec_project)
@@ -60,15 +72,15 @@ WG_KERNEL(l_project_gather)
         [unroll] for (uint g = 0; g < KB / 2; ++g) {
             acc = wg_wmma_fp8(fr[2u * g], zf[2u * g], acc);
             acc = wg_wmma_fp8(fr[2u * g + 1u], zf[2u * g + 1u], acc);
-            [unroll] for (uint i = 0; i < 8u; ++i) acc.v[i] = wg_rn16(acc.v[i]);
+            acc = pj_rn16(acc);
         }
 #if PJ_DEC
         const int s = (int)(mt >> 1), gg = (int)(mt & 1u);
         const int pix = (2 * r + (s >> 1)) * (2 * tw) + 2 * c + (s & 1);
-        wg_st64(dst, (uint)pix * 32u + 16u * hh + 8u * (uint)gg, wg_pack_q8(acc));
+        wg_st64(dst, (uint)pix * 32u + 16u * hh + 8u * (uint)gg, wg_pack_q8_ags(acc));
 #else
         [unroll] for (uint j = 0; j < 8u; ++j) acc.v[j] = wg_fmin(wg_fmax(acc.v[j], -6.28125f), 6.28125f);
-        wg_st64(dst, (uint)tk * 64u + hh * 32u + 8u * mt, wg_pack_q8(acc));
+        wg_st64(dst, (uint)tk * 64u + hh * 32u + 8u * mt, wg_pack_q8_ags(acc));
 #endif
     }
 }
