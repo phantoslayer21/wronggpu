@@ -289,6 +289,46 @@
    "k_io.co"
   ],
   [
+   "k_stage2_d0_hidden",
+   "k_block.co"
+  ],
+  [
+   "k_stage2_d0_hp",
+   "k_block.co"
+  ],
+  [
+   "k_stage2_d1",
+   "k_block.co"
+  ],
+  [
+   "k_stage2_e0",
+   "k_block.co"
+  ],
+  [
+   "k_stage2_e1",
+   "k_block.co"
+  ],
+  [
+   "k_stage_d1",
+   "k_block.co"
+  ],
+  [
+   "k_stage_d2",
+   "k_block.co"
+  ],
+  [
+   "k_stage_e0",
+   "k_block.co"
+  ],
+  [
+   "k_stage_e1",
+   "k_block.co"
+  ],
+  [
+   "k_stage_e2",
+   "k_block.co"
+  ],
+  [
    "k_warm",
    "k_block_wide.co"
   ]

@@ -32,9 +32,10 @@
 //   module <code object name> [<tag>]          (zero or more)
 //   buf <id> <bytes> <file | -> [fill]         device buffer: the file's bytes (padded with fill when the file is
 //                                              shorter), or every byte set to fill (0..255, default 0) with "-"
-//   step <launch name> <grid> <block> <arg>... a launch; each arg is @<id> (a buffer's pointer), a 32-bit decimal
+//   step <launch name> <grid> <block> <arg>... a launch; each arg is @<id>[+<bytes>] (a buffer's pointer, optionally
+//                                              that many bytes into it), null (a null pointer), a 32-bit decimal
 //                                              value, B:<file> (a struct passed by value: the file's bytes) or
-//                                              S:<file>[:<offset>=@<id>[,<offset>=@<id>...]] (a struct with pointers
+//                                              S:<file>[:<offset>=@<id>[+<bytes>][,...]] (a struct with pointers
 //                                              inside, manifest argument kind s<N>:...: the file's bytes with the 8
 //                                              bytes at each byte offset replaced by that buffer's device pointer)
 //   save <id> <file>                           after the run, the buffer's bytes are written to <file>
@@ -386,6 +387,14 @@ int run_chain(Device* d, Chain& c, const std::string& base) {
       if (b.id == id) return &b;
     return nullptr;
   };
+  // "<id>" or "<id>+<byte offset>": a buffer's device pointer, optionally that many bytes into it
+  auto resolve = [&](const std::string& ref, DevPtr* out) -> bool {
+    const size_t plus = ref.find('+');
+    ChainBuf* b = find(ref.substr(0, plus));
+    if (!b) return false;
+    *out = b->ptr + (plus == std::string::npos ? 0 : (DevPtr)std::stoull(ref.substr(plus + 1)));
+    return true;
+  };
   int rc = 0;
   for (auto& b : c.bufs) {
     std::vector<uint8_t> data(b.bytes, (uint8_t)(b.fill & 0xff));
@@ -431,10 +440,13 @@ int run_chain(Device* d, Chain& c, const std::string& base) {
           const size_t comma = a.find(',', at);
           const std::string item = a.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
           const size_t eq = item.find("=@");
-          ChainBuf* b = eq == std::string::npos ? nullptr : find(item.substr(eq + 2));
+          DevPtr target = 0;
           const size_t off = eq == std::string::npos ? 0 : (size_t)std::stoull(item.substr(0, eq));
-          if (!b || off + 8 > blob.size()) { ok = false; break; }
-          for (int k = 0; k < 8; ++k) blob[off + k] = (uint8_t)((uint64_t)b->ptr >> (8 * k));
+          if (eq == std::string::npos || off + 8 > blob.size() || !resolve(item.substr(eq + 2), &target)) {
+            ok = false;
+            break;
+          }
+          for (int k = 0; k < 8; ++k) blob[off + k] = (uint8_t)((uint64_t)target >> (8 * k));
           at = comma == std::string::npos ? std::string::npos : comma + 1;
         }
         if (!ok) {
@@ -444,10 +456,17 @@ int run_chain(Device* d, Chain& c, const std::string& base) {
         }
         blobs[i].push_back(std::move(blob));
         argv[i].push_back(blobs[i].back().data());
+      } else if (a == "null") {   // a null pointer
+        ptrs[i].push_back(0);
+        argv[i].push_back(&ptrs[i].back());
       } else if (!a.empty() && a[0] == '@') {
-        ChainBuf* b = find(a.substr(1));
-        if (!b) { std::printf("%s: step %zu: unknown buffer %s\n", c.name.c_str(), i, a.c_str()); rc = 1; break; }
-        ptrs[i].push_back(b->ptr);
+        DevPtr target = 0;
+        if (!resolve(a.substr(1), &target)) {
+          std::printf("%s: step %zu: unknown buffer %s\n", c.name.c_str(), i, a.c_str());
+          rc = 1;
+          break;
+        }
+        ptrs[i].push_back(target);
         argv[i].push_back(&ptrs[i].back());
       } else {
         vals[i].push_back((uint32_t)std::stoll(a));
