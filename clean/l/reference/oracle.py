@@ -82,20 +82,42 @@ def window_grid(H, W, offset, win):
     return rows, cols
 
 
-def swin_block(x, p, offset, heads, consts, max_tokens=1 << 16):
-    """One block on a whole map x [H, W, C] with mirrored borders (as clean/reference/swin.py swin_block); returns the
-    block output in float64, not yet rounded."""
+def border_index(border, n, halo=0):
+    """Grid position -> index into the block's input along one axis of n grid positions.
+    "mirror": about the edge pixel, edge not repeated (clean/reference/swin.py); "input": the input holds halo extra
+    positions on each side (position -halo is index 0); "coarse": the mirror of the 2 x 2 token grid (n / 2 tokens),
+    the sub-pixel kept."""
+    if border == "mirror":
+        return lambda q: _swin.mirror(q, n)
+    if border == "input":
+        def f(q):
+            i = np.asarray(q) + halo
+            if (i < 0).any() or (i >= n + 2 * halo).any():
+                raise AssertionError("window reaches beyond the input halo")
+            return i
+        return f
+    if border == "coarse":
+        return lambda q: 2 * _swin.mirror(np.asarray(q) // 2, n // 2) + np.asarray(q) % 2
+    raise ValueError(f"unknown border {border!r}")
+
+
+def swin_block(x, p, offset, heads, consts, border="mirror", halo=0, max_tokens=1 << 16):
+    """One block on a whole map x [H, W, C] (border "input": [H + 2 halo, W + 2 halo, C], the grid in the middle);
+    window members outside the grid per border_index. Returns the block output on the grid [H, W, C] in float64, not
+    yet rounded."""
     x = np.asarray(x, dtype=np.float64)
-    H, W, C = x.shape
+    h = halo if border == "input" else 0
+    H, W, C = x.shape[0] - 2 * h, x.shape[1] - 2 * h, x.shape[2]
     win = int(consts["window"])
     p = {k: np.asarray(v, dtype=np.float64) for k, v in p.items()}
     rows, cols = window_grid(H, W, offset, win)
-    out = np.full_like(x, np.nan)
+    out = np.full((H, W, C), np.nan)
+    fr, fc = border_index(border, H, h), border_index(border, W, h)
     rows_per_chunk = max(1, max_tokens // (win * win * cols.shape[0]))
     for l0 in range(0, rows.shape[0], rows_per_chunk):
         r = rows[l0:l0 + rows_per_chunk]
-        rr = _swin.mirror(r, H)[:, None, :, None]
-        cc = _swin.mirror(cols, W)[None, :, None, :]
+        rr = fr(r)[:, None, :, None]
+        cc = fc(cols)[None, :, None, :]
         xw = x[rr, cc]
         nl, nk = xw.shape[:2]
         x2 = _block_tokens(xw.reshape(nl, nk, win * win, C), p, heads, consts).reshape(nl, nk, win, win, C)
@@ -168,9 +190,9 @@ def _run_ops(ops, maps, params, parity, t, default_stage, frame=None):
         st = params[op.get("params", default_stage)]
         if k == "quant":
             v = maps[op["src"]]
-            fw, fh = frame["feature_size"]
             if op["mode"] == "dither":
-                d = _enc.dither_table(st["T"], frame["frame"], fw, fh)
+                h = maps.get("_halo", 0)
+                d = dither_table(st["T"], frame["frame"], v.shape[1], v.shape[0], h)
                 out = _enc.dither_fp8(v, d[..., None])
             elif op["mode"] == "q8":
                 out = q8(v)
@@ -187,7 +209,10 @@ def _run_ops(ops, maps, params, parity, t, default_stage, frame=None):
         elif k == "swin":
             consts = _table.block_consts(t, op["params"])
             off = _table.block_offset(t, op["offsets"], parity)
-            y = swin_block(maps[op["src"]], st, off, op["heads"], consts)
+            border = op.get("border", "mirror")
+            y = swin_block(maps[op["src"]], st, off, op["heads"], consts, border, maps.get("_halo", 0))
+            if border == "input":
+                maps["_halo"] = 0
             out = _round(y, op.get("out_round", "q8"))
         elif k == "concat":
             parts = [maps[s] for s in op["srcs"]]
@@ -209,6 +234,20 @@ def _run_ops(ops, maps, params, parity, t, default_stage, frame=None):
     return last
 
 
+def dither_table(T, frame, w, h, halo=0):
+    """t = T[n][|y| mod 16][|x| mod 16] at grid positions x = -halo ... w - halo - 1 (y likewise), [h, w]."""
+    T = np.asarray(T)
+    Y, X = np.mgrid[0:h, 0:w] - halo
+    return T[int(frame)][np.abs(Y) % 16, np.abs(X) % 16]
+
+
+def encoder_halo(t):
+    """Extra positions per side the encoder's per-pixel ops run on (a block with border "input"), else 0."""
+    hs = [_table.block_halo(t, op["offsets"]) for op in t["enc_ops"]
+          if op["op"] == "swin" and op.get("border") == "input"]
+    return max(hs, default=0)
+
+
 def encode(x, params, parity=None, t=_table.TABLE, keep=False):
     """Model L's input encoder. x: Model M's enc0 input dict; params: {stage: tensors} with the stages of
     table.param_shapes(t) ("enc0", "enc0_block"). Returns Model M's enc0 outputs ("features" [fh/2, fw/2, 64]
@@ -216,11 +255,24 @@ def encode(x, params, parity=None, t=_table.TABLE, keep=False):
     _table.encoder_plan(t)
     if parity is None:
         parity = int(x["frame"]) & 1
-    _enc.check_inputs(x)
+    rw, rh = _enc.check_inputs(x)[:2]
     enc = params["enc0"]
     pv_params = {"sigma1": enc.get("sigma1", 0.0), "sigma2": enc.get("sigma2", 0.0)}
-    maps = {"values": _enc.pixel_values(x, pv_params)}
+    v = _enc.pixel_values(x, pv_params)
+    h = encoder_halo(t)
+    if h:
+        # The 20 values depend only on the mirrored render position (clean/reference/encoder.py reflect), which is
+        # a grid position, so the halo copies grid values; the dither is applied later at the unmirrored position.
+        # Only for render sizes near the padding (fw + h > 2 rw - 2) would the mirrored position be negative; reflect
+        # clamps it to 0 there (table.UNCONFIRMED "U1").
+        fh, fw = v.shape[:2]
+        ry = _enc.reflect(np.arange(-h, fh + h), rh)
+        rx = _enc.reflect(np.arange(-h, fw + h), rw)
+        v = v[ry][:, rx]
+    maps = {"values": v, "_halo": h}
     feats = _run_ops(t["enc_ops"], maps, params, parity, t, "enc0", frame=x)
+    if maps.pop("_halo"):
+        raise ValueError("encoder: the per-pixel halo was not consumed by a block")
     m_near, m_far, m_center = _enc.motion_surfaces(x)
     res = {"features": feats.astype(np.float32),
            "m_near": f16(m_near).astype(np.float32),
@@ -262,17 +314,47 @@ def coefficients(x, a, S, T):
             "codes_A": cA, "codes_B": cB, "codes_L": cL, "p": p}
 
 
+def tanh32(v):
+    """tanh in float64, then one rounding to FP32."""
+    return np.tanh(np.asarray(v, dtype=np.float64)).astype(np.float32)
+
+
+def coefficients_l(a, S, T):
+    """Model L's per-pixel functions on a [rh, rw, 13] (table.L_DEC_VALUES order; FP16 block outputs held in FP32):
+    A, B and C with Model M's forms (C's gains from inputs clamped to [-20, 20]), latent = tanh(candidate). No gate,
+    no previous latent. Same outputs and codes as coefficients()."""
+    a = np.asarray(a, dtype=np.float32)
+    A = _dec.sigmoid16(a[..., 0:3])
+    B = _dec.softmax3(a[..., 3:6])
+    g = _dec.sigmoid16(np.clip(a[..., 6:8], np.float32(-20), np.float32(20)))
+    sx, sy = np.float32(S) * g[..., 0], np.float32(S) * g[..., 1]
+    rho = _dec.rho32(a[..., 8], float(np.asarray(T)))
+    C = np.stack([_dec.rn16(sx * sx), _dec.rn16(sy * sy), _dec.rn16((sx * sy) * rho)], axis=-1)
+    lat = tanh32(a[..., 9:13])
+    cA, cB, cL = _dec.unorm8_code(A), _dec.unorm8_code(B), _dec.snorm8_code(lat)
+    return {"A": (cA / 255.0).astype(np.float32), "B": (cB / 255.0).astype(np.float32),
+            "C": C.astype(np.float32), "latent": (cL / 127.0).astype(np.float32),
+            "codes_A": cA, "codes_B": cB, "codes_L": cL}
+
+
 def decode(x, params, parity, t=_table.TABLE, keep=False):
-    """Model L's coefficient decoder. x: Model M's dec0 input dict (features = dec1's output [fh/2, fw/2, 64]);
-    params: {stage: tensors} ("dec0", "dec0_block")."""
-    if t["dec_pixel"] != "m":
-        raise NotImplementedError("decoder per-pixel variant other than Model M's: pending")
+    """Model L's coefficient decoder. x: Model M's dec0 input dict (features = dec1's output [fh/2, fw/2, 64]; with
+    dec_pixel "l" the motion / latent_prev / jitter / reset entries are not read); params: {stage: tensors} ("dec0",
+    "dec0_block")."""
+    kind = t["dec_pixel"]
+    if kind not in _table.DEC_PIXEL_VALUES:
+        raise NotImplementedError(f"decoder per-pixel variant {kind!r}: not known")
     _table.decoder_plan(t)
+    if len(t["dec_ops"][-1]["values"]) != _table.DEC_PIXEL_VALUES[kind]:
+        raise ValueError(f"dec_pixel {kind!r} needs {_table.DEC_PIXEL_VALUES[kind]} picked values")
     rw, rh = _dec.check_inputs(x)[:2]
     maps = {"features": np.asarray(x["features"], dtype=np.float64)}
     a = _run_ops(t["dec_ops"], maps, params, parity, t, "dec0")
     dec = params["dec0"]
-    out = coefficients(x, a[:rh, :rw], dec["S"], dec["T"])
+    if kind == "l":
+        out = coefficients_l(a[:rh, :rw], dec["S"], dec["T"])
+    else:
+        out = coefficients(x, a[:rh, :rw], dec["S"], dec["T"])
     out["a"] = a[:rh, :rw].astype(np.float32)
     if keep:
         out["maps"] = maps
