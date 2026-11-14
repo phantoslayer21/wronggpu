@@ -9,10 +9,13 @@
 // HIP's transcendental chain (SW_GELU 0).
 //   l_swin_block_c32_nc      FP8 map in, FP8 out, mirror border (#117)
 //   l_swin_block_c32_enc_nc  the encoder block: FP16 halo map [H + 4][W + 4][32] in (SW_SRC 1), FP8 out
+//                            with its workgroups in reverse order (WG_REV_ORDER, wg_platform.hlsli; the same bytes): it
+//                            reads first the rows of x2 the linears wrote last, and its last-written rows of x3 are the
+//                            ones l_project_gather reads first (more cache hits at both hand-offs)
 //   l_swin_block_c32_dec_nc  the decoder block: FP8 map in with the token-grid mirror (SW_SRC 2), FP16 out (SW_OUT_F16)
 //
 // @wg-kernel l_swin_block_c32_nc co=l_swin.co block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=0,SW_ENTRY_OVERRIDE=l_swin_block_c32_nc
-// @wg-kernel l_swin_block_c32_enc_nc co=l_swin.co block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=3,SW_GELU_PAT=13333,SW_SRC=1,SW_ENTRY_OVERRIDE=l_swin_block_c32_enc_nc
+// @wg-kernel l_swin_block_c32_enc_nc co=l_swin.co block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=3,SW_GELU_PAT=13333,SW_SRC=1,SW_ENTRY_OVERRIDE=l_swin_block_c32_enc_nc,WG_REV_ORDER=1
 // @wg-kernel l_swin_block_c32_dec_nc co=l_swin.co block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=1,SW_SRC=2,SW_OUT_F16=1,SW_ENTRY_OVERRIDE=l_swin_block_c32_dec_nc
 //   l_swin_block_c32_dec_coef12_nc  D3D12 only: the decoder block with l_coef_pack12 as its epilogue (SW_OUT_COEF12;
 //                                   byte for byte the pair _dec_nc -> l_coef_pack12, which stays the fallback route);
