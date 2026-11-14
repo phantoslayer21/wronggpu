@@ -78,6 +78,7 @@ const Signature kSignatures[] = {
     {"l_swin_block_c32*", "ppppiiii"},      // Model L's blocks (clean/l/FORMATS.md)
     {"l_linear_32_32_relu", "pppi"},
     {"l_linear_32_32_f16", "pppi"},
+    {"l_linear_32_32_fused", "ppppi"},  // the two in one: q, x2, Win1, Win2, npix (native D3D12, fusion ll)
     {"l_project_gather", "pppii"},
     {"l_dec_project", "pppii"},
     {"l_coef", "ppppppD"},
