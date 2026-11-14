@@ -161,6 +161,9 @@ bool ApplyRrConfigDueNow(const wstring& dir, const wstring& exe);
 void RrConfigNeedsClick(const wstring& dir);
 void ForgetRrConfigDue(const wstring& dir);
 void RrConfigAction(int id);                  // the Engine.ini steps' Open folder, Copy, Check again
+#ifndef _WIN32
+void CopyLaunchOption(const wstring& line);  // Linux: the Steam launch option for Proton on the clipboard, and the toast that says so
+#endif
 void ShowRrConfigSteps(const wstring& dir);  // "Show me how": the game's page at its Engine.ini steps, the keyboard on Open folder
 // r3 #5: the toast the launcher shows once when a protected game's Engine.ini line is ready to add (RrConfigReadyToAdd);
 // empty without one

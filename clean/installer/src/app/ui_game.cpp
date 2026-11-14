@@ -1676,6 +1676,40 @@ static float RrSection(Gfx& gx, float x, float y, float w) {
 // OptiScaler with WrongGPU's setup: what it is (version, the name it loads as), what can be set (the FPS overlay, the
 // editable keys this build has: the menu key first, the rest behind "More OptiScaler settings"), the keys WrongGPU manages
 // under the list.
+#ifndef _WIN32
+// The line Steam's launch options need under Proton for OptiScaler's proxy DLL to load: Wine uses its own dxgi.dll (or winmm.dll,
+// version.dll...) unless the override says native first ("n"), then its own ("b").
+wstring ProtonLaunchOption(const wstring& proxy) {
+    wstring name = Lower(proxy);
+    if (name.size() > 4 && name.compare(name.size() - 4, 4, L".dll") == 0) name.resize(name.size() - 4);
+    return L"WINEDLLOVERRIDES=\"" + name + L"=n,b\" %command%";
+}
+
+// After OptiScaler's list, on Linux: the launch option the game needs in Steam, in a box to read exactly, with Copy. WrongGPU
+// does not write Steam's config (it belongs to Steam and its client rewrites it); the player pastes the line once.
+static float ProtonLaunchNote(Gfx& gx, float x, float y, float w, const wstring& proxy) {
+    const wstring title = L"Steam launch option", line = ProtonLaunchOption(proxy);
+    const wstring body = L"Under Proton, Steam needs this line to load OptiScaler's " + proxy + L" instead of Wine's own. In Steam, open the game's Properties and paste it under Launch options.";
+    return GroupList(gx, x, y, w, [&](float top) {
+        const float bw = ButtonW(gx, L"Copy", 0, 30, B_SECONDARY), tx = x + kCellPad, cw = w - 2 * kCellPad;
+        const TS hs = Ts(13.5f, 600, pal.text), bs = Wrap(12.5f, pal.text2, 18);
+        TS ms = Wrap(12.5f, pal.text, 18); ms.face = F_MONO;
+        float yy = top + 14;
+        gx.Text(title, Rc{tx, yy, cw - bw - 12, 22}, hs);
+        Button(gx, ID_G_PROTONOPT_COPY, x + w - kCellPad, yy - 5, L"Copy", B_SECONDARY, 0, true, 30, 0, true, L"Copy the launch option");
+        yy += 28;
+        const float bh = gx.TextH(body, cw, bs), mh = gx.TextH(line, cw - 20, ms);
+        gx.Text(body, Rc{tx, yy, cw, bh + 2}, bs);
+        yy += bh + 10;
+        gx.FillRound(Rc{tx, yy, cw, mh + 14}, 6, pal.fill);
+        gx.Text(line, Rc{tx + 10, yy + 7, cw - 20, mh + 2}, ms);
+        yy += mh + 14;
+        AddText(Rc{tx, top + 14, cw, yy - top - 14}, title + L". " + body + L" " + line);
+        return yy + 14 - top;
+    });
+}
+#endif
+
 static float OptiSection(Gfx& gx, float x, float y, float w) {
     const GameEntry& e = v.cur;
     const OptiView& o = v.opti;
@@ -1730,6 +1764,9 @@ static float OptiSection(Gfx& gx, float x, float y, float w) {
         }
         return yy - top;
     });
+#ifndef _WIN32
+    if (o.have && !o.proxy.empty()) y += 12 + ProtonLaunchNote(gx, x, y + 12, w, o.proxy);
+#endif
     // values OptiScaler's menu (or a hand edit) saved over ours
     if (!o.outside.empty()) {
         // in the page's words: "Menu key F1 (WrongGPU's: Insert)"

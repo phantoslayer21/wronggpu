@@ -437,6 +437,7 @@ enum : int {
     // Borderlands 4 / Hogwarts Legacy's Engine.ini setting (UI review #2): its segments (+ 0 WrongGPU, 1 Myself) and the steps'
     // Open folder, Copy and Check again; Fix it again (WrongGPU's line gone or the file no longer read-only: r2 #6)
     ID_G_RRCFG0 = 3093, ID_G_RRCFG_OPEN = 3095, ID_G_RRCFG_COPY, ID_G_RRCFG_CHECK, ID_G_RRCFG_FIX,
+    ID_G_PROTONOPT_COPY,  // Linux: OptiScaler section's Steam launch option (Copy)
     ID_G_OPTI0 = 3100,  // + editable OptiScaler row (x10: + option)
     ID_G_OPTI_END = ID_G_OPTI0 + 10 * 64,  // room for 64 rows; the Settings ids start above it
     ID_S_MODELFILE = 4000, ID_S_RECONVERT, ID_S_OPTIFILE, ID_S_OPTIDIR, ID_S_ADDFOLDER, ID_S_CLEARFOLDERS, ID_S_PLAY, ID_S_UPDATE,

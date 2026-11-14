@@ -9,6 +9,7 @@ Every run uses a home of its own under --work, its own XDG folders and registry 
              class, text, id, place, state), the games read from the fake library, the PNGs of the pages
   ui-render  the fixture screenshots (Library, Settings, a game's page) at two scales: PNG files of the sizes asked for
   jpeg       ui-render of a game whose Steam cache holds a synthetic JPEG hero: its colours are on the page (needs --jpeg-tool)
+  proton     the installed fixture game's page shows the Steam launch option Proton needs for OptiScaler (dxgi=n,b) with Copy
   live       the real window under the offscreen driver with scripted SDL events (win32_window_sdl.cpp, WRONGGPU_UI_SCRIPT): a click
              on Settings, a scroll, a click on the Library's search field and typing in it, Ctrl+A and Backspace; the page each step
              left is read back as JSON; the window then closes on WM_CLOSE and the program exits 0
@@ -189,6 +190,22 @@ def test_jpeg_art(exe, work, home, jpeg_tool):
     check(with_art > 20000 and without < 500, f"the hero's green block is on the page with the art ({with_art} pixels) and not without ({without})")
 
 
+def test_proton_note(exe, work, home):
+    """An installed game's page says which Steam launch option Proton needs for OptiScaler's dxgi.dll, with a Copy button
+    (ui-render writes each frame's controls to <frame>.png.texts: id, role, name)."""
+    print("Steam launch option note")
+    env, _ = environment(work, home, "proton")
+    out = work / "proton"
+    r = run(exe, ["ui-render", f"--out-dir={out}", f"--fixture={HERE / 'ui_fixture.ini'}", "--size=1180x1500", "--scales=1", "--frames=game,library"], env, 600)
+    check(r.returncode == 0, f"ui-render (proton note) exits 0 (got {r.returncode}: {r.stderr[-300:]})")
+    game = (out / "game@100.png.texts").read_text(encoding="utf-8").splitlines()
+    line = 'WINEDLLOVERRIDES="dxgi=n,b" %command%'
+    check(any(line in t and "Steam launch option" in t for t in game), "the installed game's page shows the dxgi launch option line")
+    check(any(t.split("\t")[2:] == ["Copy the launch option"] for t in game), "the page has the Copy button of the launch option")
+    check(not any("WINEDLLOVERRIDES" in t for t in (out / "library@100.png.texts").read_text(encoding="utf-8").splitlines()),
+          "the Library does not show it")
+
+
 SCRIPT = """# a click on Settings, a scroll, a click on the Library's search field and typing in it
 until games 2
 dump {o}/d0.json
@@ -247,7 +264,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--exe", required=True)
     ap.add_argument("--work", default=None)
-    ap.add_argument("--only", default="dump,render,jpeg,live")
+    ap.add_argument("--only", default="dump,render,jpeg,proton,live")
     ap.add_argument("--jpeg-tool", default=None, help="jpeg-linux-tests, which writes the synthetic JPEG art")
     a = ap.parse_args()
     work = Path(a.work or "linux-ui-tests").resolve()
@@ -257,7 +274,7 @@ def main():
     real_data = Path.home() / ".local" / "share" / "WrongGPU"
     had = real_data.exists()
     home = make_home(work)
-    for name, fn in (("dump", test_dump), ("render", test_render), ("live", test_live)):
+    for name, fn in (("dump", test_dump), ("render", test_render), ("proton", test_proton_note), ("live", test_live)):
         if name in a.only.split(","):
             fn(Path(a.exe), work, home)
     if "jpeg" in a.only.split(",") and a.jpeg_tool:

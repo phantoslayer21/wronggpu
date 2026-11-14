@@ -164,6 +164,17 @@ bool RenderFrame(float w, float h, float scale, const wstring& png) {
     if (!gfx.BeginOffscreen((int)w, (int)h, scale)) return false;
     PaintAll(gfx);
     gfx.EndFrame();
+#ifndef _WIN32
+    // Linux tests read what the frame says and offers, a line per control (id, role, name), next to its PNG
+    if (FILE* f = fopen((FsPath(png).string() + ".texts").c_str(), "w")) {
+        for (const Hit& hit : v.hits) {
+            wstring name = hit.name;
+            for (wchar_t& c : name) if (c == L'\n' || c == L'\r') c = L' ';
+            fprintf(f, "%d\t%d\t%s\n", hit.id, (int)hit.role, ToUtf8(name).c_str());
+        }
+        fclose(f);
+    }
+#endif
     return gfx.SavePng(png);
 }
 

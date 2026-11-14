@@ -242,6 +242,13 @@ void AskRrConfigLater(const wstring& dir, const wstring& exe, const Profile& sav
 
 // The game page's "Engine.ini setting" steps: Open folder (never made here: the game makes it at its first start), Copy (the
 // line on the clipboard), Check again (the file read again; a small file in the player's profile, read on a click).
+#ifndef _WIN32
+void CopyLaunchOption(const wstring& line) {
+    ShowToast(CopyToClipboard(line) ? L"The launch option is on the clipboard. In Steam, paste it under the game's Properties, Launch options."
+                                    : L"The launch option couldn't be put on the clipboard. Type it as the page shows it.", 0);
+}
+#endif
+
 void RrConfigAction(int id) {
     const RrConfigGame* rg = RrConfigGameFor(v.cur.exe);
     if (!rg) return;
