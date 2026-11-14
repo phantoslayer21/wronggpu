@@ -1,0 +1,526 @@
+{
+ "what": "Model L's reconstruction in LDR (l_post_recon_ldr, l_post_recon_p12_ldr; output stage l_post_filter_ldr, l_post_filter_ldr_h, l_post_filter_direct_ldr): HIP against Model L's LDR oracle (clean/l/reference/recon.py, ldr=True), the D3D12 ports against HIP byte for byte; spec preset L part 3 item 6, Q1 (LDR column), Q2",
+ "rule": "Model L's post acceptance: FP16 values more than 1 ulp off at most 0.05 % per frame / case and 0.01 % over the run (history and display), no non-finite value the reference does not hold too, at most 1 % differing, mean error at most 0.1 % of the reference RMS; reduced codes within 1 and 99 % exact",
+ "oracle_check_kernel_level": {
+  "tool": "clean/l/runner/l_post_check.py --ldr --seeds 6 (synthetic cases: random, extreme kernel shapes, special colours, total weight 0 everywhere, every FP16 weight 0)",
+  "pass": true,
+  "run": {
+   "history": {
+    "values": 431784,
+    "over_1": 0,
+    "frac_over_1": 0.0,
+    "pass": true
+   },
+   "display": {
+    "values": 431784,
+    "over_1": 4,
+    "frac_over_1": 9.26389120486169e-06,
+    "pass": true
+   }
+  },
+  "negative_control_fails": true,
+  "cases": 60,
+  "cases_passed": 60,
+  "known_answers": [
+   {
+    "case": "offset_0.1",
+    "known_answer": true
+   },
+   {
+    "case": "offset_0.05",
+    "known_answer": true
+   },
+   {
+    "case": "offset_0.1",
+    "known_answer": true
+   },
+   {
+    "case": "offset_0.05",
+    "known_answer": true
+   }
+  ],
+  "hdr_unchanged_run": {
+   "history": {
+    "values": 431784,
+    "over_1": 6,
+    "frac_over_1": 1.3895836807292535e-05,
+    "pass": true
+   },
+   "display": {
+    "values": 431784,
+    "over_1": 6,
+    "frac_over_1": 1.3895836807292535e-05,
+    "pass": true
+   }
+  }
+ },
+ "frames_real_weights": {
+  "model_source": {
+   "kind": "converter",
+   "model_sha256": "d3c040191ec7ab0164efc03ee76413277e7fb54e6e6d2b168f2c0202aa1ad806",
+   "map_sha256": "58e6d0e7cd6926817cfea28a0b4a65c056e9bfa5ca62aa05b968b62590c9e857"
+  },
+  "frames": "l_frame_check's 11 synthetic frames, real-weight Model L, LDR colour (--ldr)",
+  "hip_against_ldr_reference": {
+   "L_pass": true,
+   "M_pass": true,
+   "post_run": {
+    "history": {
+     "values": 641520,
+     "over_1": 0,
+     "frac_over_1": 0.0,
+     "pass": true
+    },
+    "display": {
+     "values": 641520,
+     "over_1": 6,
+     "frac_over_1": 9.352787130564908e-06,
+     "pass": true
+    }
+   },
+   "per_frame": [
+    {
+     "frame": 0,
+     "pass": true,
+     "history_over_1": [
+      0,
+      58320
+     ],
+     "display_over_1": [
+      0,
+      58320
+     ],
+     "history_nonfinite_agreeing": 9652,
+     "reduced_max_code_diff": 0,
+     "filter_outside": 0
+    },
+    {
+     "frame": 1,
+     "pass": true,
+     "history_over_1": [
+      0,
+      58320
+     ],
+     "display_over_1": [
+      0,
+      58320
+     ],
+     "history_nonfinite_agreeing": 9652,
+     "reduced_max_code_diff": 0,
+     "filter_outside": 0
+    },
+    {
+     "frame": 2,
+     "pass": true,
+     "history_over_1": [
+      0,
+      58320
+     ],
+     "display_over_1": [
+      0,
+      58320
+     ],
+     "history_nonfinite_agreeing": 9152,
+     "reduced_max_code_diff": 1,
+     "filter_outside": 0
+    },
+    {
+     "frame": 3,
+     "pass": true,
+     "history_over_1": [
+      0,
+      58320
+     ],
+     "display_over_1": [
+      0,
+      58320
+     ],
+     "history_nonfinite_agreeing": 9394,
+     "reduced_max_code_diff": 1,
+     "filter_outside": 0
+    },
+    {
+     "frame": 4,
+     "pass": true,
+     "history_over_1": [
+      0,
+      58320
+     ],
+     "display_over_1": [
+      1,
+      58320
+     ],
+     "history_nonfinite_agreeing": 10140,
+     "reduced_max_code_diff": 0,
+     "filter_outside": 0
+    },
+    {
+     "frame": 5,
+     "pass": true,
+     "history_over_1": [
+      0,
+      58320
+     ],
+     "display_over_1": [
+      1,
+      58320
+     ],
+     "history_nonfinite_agreeing": 8842,
+     "reduced_max_code_diff": 0,
+     "filter_outside": 0
+    },
+    {
+     "frame": 6,
+     "pass": true,
+     "history_over_1": [
+      0,
+      58320
+     ],
+     "display_over_1": [
+      2,
+      58320
+     ],
+     "history_nonfinite_agreeing": 8660,
+     "reduced_max_code_diff": 0,
+     "filter_outside": 0
+    },
+    {
+     "frame": 7,
+     "pass": true,
+     "history_over_1": [
+      0,
+      58320
+     ],
+     "display_over_1": [
+      0,
+      58320
+     ],
+     "history_nonfinite_agreeing": 8790,
+     "reduced_max_code_diff": 0,
+     "filter_outside": 0
+    },
+    {
+     "frame": 8,
+     "pass": true,
+     "history_over_1": [
+      0,
+      58320
+     ],
+     "display_over_1": [
+      1,
+      58320
+     ],
+     "history_nonfinite_agreeing": 8802,
+     "reduced_max_code_diff": 0,
+     "filter_outside": 0
+    },
+    {
+     "frame": 9,
+     "pass": true,
+     "history_over_1": [
+      0,
+      58320
+     ],
+     "display_over_1": [
+      1,
+      58320
+     ],
+     "history_nonfinite_agreeing": 9178,
+     "reduced_max_code_diff": 0,
+     "filter_outside": 0
+    },
+    {
+     "frame": 10,
+     "pass": true,
+     "history_over_1": [
+      0,
+      58320
+     ],
+     "display_over_1": [
+      0,
+      58320
+     ],
+     "history_nonfinite_agreeing": 9576,
+     "reduced_max_code_diff": 0,
+     "filter_outside": 0
+    }
+   ]
+  },
+  "d3d12_against_hip_raw_bytes": {
+   "L": {
+    "identical_frames": 11,
+    "frames": 11,
+    "outputs_compared": 28,
+    "differing": [],
+    "negative_controls_caught": {
+     "history": true,
+     "reduced": true,
+     "reduced_frame": true,
+     "missing": true
+    },
+    "l_post_d3d12": "l_post_recon_ldr"
+   },
+   "M": {
+    "identical_frames": 11,
+    "frames": 11,
+    "outputs_compared": 28,
+    "differing": [],
+    "negative_controls_caught": {
+     "history": true,
+     "reduced": true,
+     "reduced_frame": true,
+     "missing": true
+    },
+    "l_post_d3d12": null
+   }
+  },
+  "hdr_same_build": {
+   "L_pass": true,
+   "post_run": {
+    "history": {
+     "values": 641520,
+     "over_1": 2,
+     "frac_over_1": 3.117595710188303e-06,
+     "pass": true
+    },
+    "display": {
+     "values": 641520,
+     "over_1": 4,
+     "frac_over_1": 6.235191420376606e-06,
+     "pass": true
+    }
+   },
+   "d3d12_against_hip": {
+    "identical_frames": 11,
+    "frames": 11,
+    "outputs_compared": 28,
+    "differing": [],
+    "negative_controls_caught": {
+     "history": true,
+     "reduced": true,
+     "reduced_frame": true,
+     "missing": true
+    },
+    "l_post_d3d12": "l_post_recon"
+   }
+  }
+ },
+ "frames_synthetic_weights": {
+  "hip_against_ldr_reference": {
+   "L_pass": true,
+   "M_pass": true,
+   "post_run": {
+    "history": {
+     "values": 641520,
+     "over_1": 0,
+     "frac_over_1": 0.0,
+     "pass": true
+    },
+    "display": {
+     "values": 641520,
+     "over_1": 2,
+     "frac_over_1": 3.117595710188303e-06,
+     "pass": true
+    }
+   }
+  },
+  "d3d12_against_hip_raw_bytes": {
+   "L": {
+    "identical_frames": 11,
+    "frames": 11,
+    "outputs_compared": 28,
+    "differing": [],
+    "negative_controls_caught": {
+     "history": true,
+     "reduced": true,
+     "reduced_frame": true,
+     "missing": true
+    },
+    "l_post_d3d12": "l_post_recon_ldr"
+   },
+   "M": {
+    "identical_frames": 11,
+    "frames": 11,
+    "outputs_compared": 28,
+    "differing": [],
+    "negative_controls_caught": {
+     "history": true,
+     "reduced": true,
+     "reduced_frame": true,
+     "missing": true
+    },
+    "l_post_d3d12": null
+   }
+  }
+ },
+ "d3d12_kernels_against_hip": {
+  "tool": "clean/l/runner/l_d3d12_ops_check.py --seeds 6 (sentinels HIP 0xA5 / D3D12 0x5A, 64 slack bytes)",
+  "per_kernel": {
+   "l_post_recon": {
+    "cases": 72,
+    "identical": 72,
+    "bytes": 2271840,
+    "differ": 0
+   },
+   "l_post_recon_p12": {
+    "cases": 72,
+    "identical": 72,
+    "bytes": 2271840,
+    "differ": 0
+   },
+   "l_post_recon_ldr": {
+    "cases": 72,
+    "identical": 72,
+    "bytes": 2271840,
+    "differ": 0
+   },
+   "l_post_recon_p12_ldr": {
+    "cases": 72,
+    "identical": 72,
+    "bytes": 2271840,
+    "differ": 0
+   },
+   "l_post_filter_ldr": {
+    "cases": 30,
+    "identical": 30,
+    "bytes": 1061760,
+    "differ": 0
+   },
+   "swin_block_c96_nc": {
+    "cases": 36,
+    "identical": 36,
+    "bytes": 3167424,
+    "differ": 0
+   }
+  },
+  "negative_control": {
+   "case": "l_post_recon_s0_0",
+   "half_grid": true,
+   "caught": true,
+   "differ": 8498
+  },
+  "p12_equals_base_on_hip": {
+   "cases": 72,
+   "identical": 72
+  },
+  "p12_equals_base_on_hip_ldr": {
+   "cases": 72,
+   "identical": 72
+  },
+  "pass": true
+ },
+ "fallback_route": {
+  "tool": "clean/l/runner/l_d3d12_fallback_check.py --ldr --seeds 2",
+  "per_step": {
+   "control swin_block_c96_nc": {
+    "cases": 12,
+    "identical": 12,
+    "bytes": 1055808,
+    "differ": 0
+   },
+   "l_coef": {
+    "cases": 10,
+    "identical": 10,
+    "bytes": 1380480,
+    "differ": 0
+   },
+   "l_post_filter_ldr": {
+    "cases": 10,
+    "identical": 10,
+    "bytes": 493504,
+    "differ": 0
+   },
+   "l_post_recon_ldr": {
+    "cases": 10,
+    "identical": 10,
+    "bytes": 1494328,
+    "differ": 0
+   }
+  },
+  "negative_control": {
+   "case": "l_post_recon_ldr_s0_f0",
+   "half_grid": true,
+   "caught": true,
+   "differ": 145998
+  },
+  "pass": true,
+  "hdr_per_step": {
+   "control swin_block_c96_nc": {
+    "cases": 12,
+    "identical": 12,
+    "bytes": 1055808,
+    "differ": 0
+   },
+   "l_coef": {
+    "cases": 10,
+    "identical": 10,
+    "bytes": 1380480,
+    "differ": 0
+   },
+   "l_post_recon": {
+    "cases": 10,
+    "identical": 10,
+    "bytes": 1494328,
+    "differ": 0
+   },
+   "w64/post_filter_c1_s4": {
+    "cases": 10,
+    "identical": 10,
+    "bytes": 493504,
+    "differ": 0
+   }
+  }
+ },
+ "direct_filter_store": {
+  "tool": "clean/dx12/tests/post_tf_d3d12_check.py --store --ldr --seeds 2",
+  "summary": {
+   "cases": 20,
+   "identical": 20,
+   "texture_bytes": 9599664,
+   "filter_f32_bytes": 9970920
+  },
+  "stored_value_classes": {
+   "values": 2492730,
+   "nan": 0,
+   "beyond_65504": 28176,
+   "infinite": 0,
+   "f16_subnormal_range": 44042,
+   "ties": 1098
+  },
+  "negative_control": {
+   "case": "store_s0_0",
+   "half_grid": true,
+   "caught": true,
+   "differ": 16874
+  },
+  "pass": true
+ },
+ "native_direct_route": {
+  "tool": "native_direct_test matrix (direct textures against the staged route, synthetic Model L), 4 frames x 24 texture format combinations",
+  "ldr": "PASS, 96 frames compared, mutation caught",
+  "hdr": "PASS, 96 frames compared, mutation caught",
+  "ldr_kernels_launched": [
+   "l_direct_color",
+   "l_post_recon_p12_ldr",
+   "l_post_filter_direct_ldr",
+   "l_post_filter_ldr",
+   "scale_rgb"
+  ]
+ },
+ "model_m_unchanged": {
+  "m_dxils_rebuilt_identical": [
+   16,
+   16
+  ],
+  "hip_l_post_hdr_isa_identical": [
+   "l_post_recon",
+   "l_post_recon_p12"
+  ],
+  "hdr_dxils_identical": [
+   "l_post_recon",
+   "l_post_recon_p12",
+   "w64/post_filter_c1_s4",
+   "l_post_filter_direct"
+  ]
+ }
+}

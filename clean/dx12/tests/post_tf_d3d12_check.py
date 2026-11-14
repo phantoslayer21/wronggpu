@@ -324,6 +324,52 @@ def store_cases(rng):
     return out
 
 
+# --store --ldr: Model L's LDR output stage on the direct route, l_post_filter_direct_ldr, against HIP's
+# l_post_filter_ldr (FP32, l_post.co) and l_post_filter_ldr_h (RGBA16F rows, framebuffer_half(v pi), pitch 8 O) on the
+# same display image: the LDR display (unpacked 11 / 11 / 10-bit codes), and on frames marked wide also values beyond
+# the codes' range (large ones, so the stored value passes 65504 and is clamped, and tiny ones, FP16 subnormal
+# results), which the store path must take as the HDR form does. (ow, oh, pi, wide[, "f32"])
+LDR_STORE_FRAMES = [(96, 54, 1.0, False), (99, 57, 1.375, False), (161, 83, 1.0, True), (161, 83, 1.375, True),
+                    (1281, 140, 1.25, False), (40, 16, 1.0, True), (7, 5, 1.0, False), (161, 83, 30000.0, True),
+                    (96, 54, 1.0, False, "f32"), (1281, 140, 1.0, True, "f32")]
+
+
+def _display_ldr(rng, dw, dh, wide):
+    from clean.l.reference import recon as R
+    from clean.runner import post as RP
+    pitch = RP.display_pitch(dw)
+    codes = np.stack([rng.integers(0, int(n) + 1, (dh, pitch)) for n in R.LDR_CODE_MAX], -1).astype(np.float64)
+    v = R.ldr_unpack(codes).transpose(2, 0, 1).astype(np.float64)
+    if wide:
+        pick = rng.random(v.shape)
+        v = np.where(pick < 0.05, rng.uniform(30000.0, 65504.0, v.shape), v)
+        v = np.where((pick >= 0.05) & (pick < 0.15), rng.uniform(0.0, 2.0 ** -20, v.shape), v)
+    return v.astype(np.float16).tobytes()
+
+
+def store_cases_ldr(rng):
+    """[(HIP FP32 filter case, HIP RGBA16F-rows case or None, pi, ow, oh, label)] of LDR_STORE_FRAMES."""
+    out = []
+    for fr in LDR_STORE_FRAMES:
+        ow, oh, pi, wide = fr[:4]
+        f32tex = len(fr) > 4 and fr[4] == "f32"
+        dw, dh = MP.recon_size_for(ow), MP.recon_size_for(oh)
+        disp = _display_ldr(rng, dw, dh, wide)
+        n32, n16 = ow * oh * 12, ow * oh * 8
+        base = [("buf", disp), None, ("u32", dw), ("u32", dh), ("u32", ow), ("u32", oh), ("u32", 0), ("null",)]
+        grid = PZ.PS._cdiv(ow, 40) * PZ.PS._cdiv(PZ.PS._cdiv(oh, 2), 8)
+        f32 = {"kernel": "l_post_filter_ldr", "co": "l_post.co", "hip_kernel": "l_post_filter_ldr", "grid": grid,
+               "block": 64, "args": [base[0], ("out", n32 + SLACK)] + base[2:],
+               "defined": [np.concatenate([np.ones(n32, bool), np.zeros(SLACK, bool)])]}
+        h = dict(f32, kernel="l_post_filter_ldr_h", hip_kernel="l_post_filter_ldr_h",
+                 args=[base[0], ("out", n16 + SLACK)] + base[2:] +
+                      [("u32", _s32(_f32_bits(np.float32(pi)))), ("u32", 8 * ow)])
+        label = f"LDR O {ow}x{oh} pi {pi}" + (" wide" if wide else "") + \
+            (" (RGBA32F: l_post_filter_ldr)" if f32tex else " (l_post_filter_ldr_h)")
+        out.append((f32, None if f32tex else h, pi, ow, oh, label))
+    return out
+
+
 def _store_classes(v32, pi):
     """Counts of the values stored (FP32 filter output times pi, numpy's FP32 product): NaN, beyond +-65504 (clamped;
     infinities included), FP16 subnormal range, exact ties of the FP16 rounding (normal and subnormal range)."""
@@ -339,24 +385,26 @@ def _store_classes(v32, pi):
             "ties": int(np.sum(normal & ((bits & 0x1FFF) == 0x1000)) + np.sum(sub & (t - np.floor(t) == 0.5)))}
 
 
-def store_run(build, rocm, seeds):
+def store_run(build, rocm, seeds, ldr=False):
+    """ldr: Model L's LDR direct filter (LDR_STORE_FRAMES) instead of the HDR one (STORE_FRAMES)."""
     import subprocess
     from clean.l.runner import l_c32_check as C32
     g = C32.Gpu(build, rocm)
-    with open(os.path.join(build, "post_w64.co"), "rb") as f:
+    with open(os.path.join(build, "l_post.co" if ldr else "post_w64.co"), "rb") as f:
         mod = g.hip.load_module(f.read())
-    cdir = os.path.join(build, "replay-store")
+    cdir = os.path.join(build, "replay-store-ldr" if ldr else "replay-store")
     os.makedirs(cdir, exist_ok=True)
     lines, todo, neg = [], [], None
     for si, seed in enumerate(seeds):
         rng = np.random.default_rng(seed)
-        for ci, (f32, o16, pi, ow, oh, label) in enumerate(store_cases(rng)):
+        for ci, (f32, o16, pi, ow, oh, label) in enumerate(store_cases_ldr(rng) if ldr else store_cases(rng)):
             name = f"store_s{si}_{ci}"
             w32 = OPS.hip_run(g, mod, f32)[0]
             w16 = OPS.hip_run(g, mod, o16)[0] if o16 is not None else None
             lines += OPS.replay_lines(f"{name}_filter", f32, cdir)
             f16 = o16 is not None
-            st = dict(f32, kernel="l_post_filter_direct", hip_kernel=None, args=f32["args"],
+            st = dict(f32, kernel="l_post_filter_direct_ldr" if ldr else "l_post_filter_direct", hip_kernel=None,
+                      args=f32["args"],
                       direct=[("color", OPS.DXGI_R32G32B32A32_FLOAT, 8, 8, bytes(8 * 8 * 16)),
                               ("depth", OPS.DXGI_R32_FLOAT, 8, 8, bytes(8 * 8 * 4)),
                               ("motion", OPS.DXGI_R32G32_FLOAT, 8, 8, bytes(8 * 8 * 8)),
@@ -430,9 +478,12 @@ def store_run(build, rocm, seeds):
     res["summary"] = {"cases": len(res["cases"]), "identical": sum(c["identical"] for c in res["cases"]),
                       "texture_bytes": sum(c["store_rgba16f"].get("bytes", 0) for c in res["cases"]),
                       "filter_f32_bytes": sum(c["filter_f32"]["bytes"] for c in res["cases"])}
+    # (LDR: no exposure scale, so no NaN or infinite stored values; the clamp past 65504, subnormals and ties)
+    need = ("beyond_65504", "f16_subnormal_range", "ties") if ldr else \
+        ("nan", "beyond_65504", "infinite", "f16_subnormal_range", "ties")
     res["pass"] = (r.returncode == 0 and bool(neg) and res["negative_control"]["caught"] and
                    res["summary"]["identical"] == res["summary"]["cases"] > 0 and
-                   all(classes.get(k, 0) > 0 for k in ("nan", "beyond_65504", "infinite", "f16_subnormal_range", "ties")))
+                   all(classes.get(k, 0) > 0 for k in need))
     return res
 
 
@@ -445,13 +496,15 @@ def main(argv=None):
     ap.add_argument("--kernels", default=",".join(KINDS))
     ap.add_argument("--direct", action="store_true", help="the direct forms instead (see DIRECT)")
     ap.add_argument("--store", action="store_true", help="Model L's direct filter instead (see STORE_FRAMES)")
+    ap.add_argument("--ldr", action="store_true", help="with --store: Model L's LDR direct filter (LDR_STORE_FRAMES)")
     ap.add_argument("--json")
     a = ap.parse_args(argv)
     if not a.run:
         return 0
     kernels = [k for k in a.kernels.split(",") if k]
     seeds = tuple(range(89, 89 + a.seeds))
-    res = store_run(a.build, a.rocm, seeds) if a.store else direct_run(a.build, a.rocm, seeds) if a.direct else \
+    res = store_run(a.build, a.rocm, seeds, ldr=a.ldr) if a.store else \
+        direct_run(a.build, a.rocm, seeds) if a.direct else \
         OPS.run(a.build, a.rocm, seeds, kernels, kinds=KINDS)
     if a.json:
         with open(a.json, "w") as f:

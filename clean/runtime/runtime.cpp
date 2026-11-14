@@ -240,17 +240,18 @@ struct Runtime {
   // Model L (runtime option model=L, builds with WG_MODEL_L): Model M's frame with Model L's encoder in step 2 and its
   // decoder in step 4 (clean/l/FORMATS.md); the ten Swin stages, exposure and post are Model M's.
   bool model_l = false;
-  // runtime option l_post=own (native D3D12): Model L's own reconstruction l_post_recon_p12 (l_post.co's D3D12 port),
-  // then the unbanded analytic filter w64/post_filter_c1_s4, in place of Model M's fused pack12 post (l_post=m). On the
-  // direct-resource route the colour is staged into color_net (l_direct_color) and the filter writes the game's texture
-  // itself (l_post_filter_direct, dx12/kernels/post_filter.hlsl).
-  // Default (no l_post option): own wherever its route applies (HDR colour, the default pack12 post route, its D3D12
-  // ports present: l_own_post_fits), else m. Why: Model M's post is another algorithm (3 x 3 gather, encoded-domain
-  // history); against Model L's post oracle it fails every frame (about 76 % of the full history's FP16 values more
-  // than one ulp off), Model L's own post passes Model L's post acceptance on every frame (real weights:
-  // clean/l/runner/l_default_post_check.py). LDR keeps m: l_post_recon's LDR form is not written yet.
+  // Model L reconstructs with its own kernel only, on every backend and route: l_post_recon (HDR) or l_post_recon_ldr
+  // (LDR colour, WgRtConfig.hdr = 0; spec preset L part 3 item 6), on native D3D12 their pack12 forms
+  // l_post_recon_p12[_ldr] on the frames l_coef_pack12 stores, then the output filter (HDR: the unbanded analytic
+  // w64/post_filter_c1_s4; LDR: l_post_filter_ldr, no decode and no exposure). On the direct-resource route the colour
+  // is staged into color_net (l_direct_color) and the filter's direct form writes the game's texture
+  // (l_post_filter_direct[_ldr], dx12/kernels/post_filter.hlsl). Model L has no Model M post route: where its own
+  // route cannot run (l_own_post_fits) the runtime refuses with the reason, never a different algorithm. Model M's
+  // post is another algorithm (3 x 3 gather, encoded-domain history): against Model L's post oracle it failed every
+  // frame (clean/l/records/l_default_post_real_weights.json). l_own_post: native D3D12 with Model L (its pack12 route).
   bool l_own_post = false;
-  int l_post_choice = 0;  // the l_post option: 0 not given (the default above), 1 m, 2 own
+  bool l_ldr = false;     // Model L with LDR colour: the _ldr kernels
+  bool l_post_own_given = false;  // the runtime option l_post=own (accepted: Model L's only route)
 #ifdef WG_MODEL_L
   // The maps of clean/l/FORMATS.md in three buffers (no kernel works in place):
   //   l_wide [fh + 4][fw + 4] x 64 bytes: q (FP8 halo, 32 bytes a pixel), then x2 (FP16 halo; q is dead after the
@@ -580,17 +581,13 @@ struct Runtime {
     if (c.wpw128) wpw[2] = c.wpw128;
     if (!choose_kernels(c)) return false;
     if (model_l && recon_output) return fail("Model L: recon=output (D = O) is Model M's experimental mode");
-    // Model L's reconstruction kernel l_post_recon is HDR; its LDR form (11/11/10-bit display codes) is not written yet.
-    // (Native D3D12 runs Model M's pack12 post for Model L, which takes both.)
-    if (model_l && !c.hdr && c.backend != 3)
-      return fail("Model L: LDR colour (WgRtConfig.hdr = 0) needs Model L's LDR reconstruction kernel, which is not "
-                  "written yet (l_post_recon is HDR)");
+    // (Model L's reconstruction has HDR and LDR forms: l_post_recon / l_post_recon_ldr; the frame chooses by hdr.)
     if (model_l && enc0_co != "encoder.co")
       return fail("Model L: enc0 variants are Model M's encoder; Model L's runs from l_enc_values.co");
     // Model L's coefficient kernel (l_coef) writes Model M's coef_decoder formats, not pack12: the _p12 post kernels
     // are not for it (choose_kernels does not choose pack12 by default for Model L; asked for, it is refused here)
-    // On native D3D12 Model L stores its coefficients in pack12 (l_coef_pack12, lossless) for Model M's pack12 post
-    // path, the only post path ported there; on HIP it writes the base format (l_coef) for the post_recon path.
+    // On native D3D12 Model L stores its coefficients in pack12 (l_coef_pack12, lossless) for its
+    // l_post_recon_p12[_ldr]; on HIP it writes the base format (l_coef) for l_post_recon[_ldr].
     if (model_l && p12 && c.backend != 3)
       return fail("Model L: post_pack=p12 (the pack12 decoder) is Model M's; Model L's l_coef writes the base "
                   "coefficient format (pack12 is Model L's native D3D12 form only)");
@@ -713,11 +710,12 @@ struct Runtime {
       if (motion_outres == 1) return fail("Model L: motion_outres=original needs Model M's encoder (encoder_mo.co)");
       d1d0_p12_opt = false;
 #ifdef WG_MODEL_L
-      if (c.backend == 3 && l_post_choice == 0) l_own_post = l_own_post_fits(c);
-      if (l_own_post && c.backend == 3 && !l_own_post_setup(c)) return false;
+      l_ldr = !c.hdr;
+      l_own_post = c.backend == 3;
+      if (l_own_post && !l_own_post_setup(c)) return false;
 #endif
     }
-    if (l_post_choice == 2 && !model_l) return fail("l_post=own is a Model L option (its own reconstruction)");
+    if (l_post_own_given && !model_l) return fail("l_post=own is a Model L option (its own reconstruction)");
     if (!mid_setup(c)) return false;
     if (!bneck_setup(c)) return false;
     // D = O (fast mode, recon=output) runs without pack12, so dec1 + dec0 fused is the default there (bit-identical;
@@ -924,11 +922,10 @@ struct Runtime {
       if (!post_given && !filter_unbanded && !recon_output) post_kernel = kDefaultBandPost;
     }
 #ifdef WG_MODEL_L
-    // Model L reconstructs with its own kernel, l_post_recon (l_post.co; clean/l/FORMATS.md step 5), which takes Model
-    // M's post_recon arguments and buffers: the unbanded post_recon route (8-byte history, base coefficient format,
-    // no pack12), then Model M's output filter (unbanded). Model M's post kernels are not for Model L. On native D3D12
-    // Model L's frames run Model M's pack12 post path for now (l_coef_pack12 feeds it); frames that path does not take
-    // run l_post_recon there too (its D3D12 port, then the analytic filter).
+    // Model L reconstructs with its own kernel, l_post_recon[_ldr] (l_post.co; clean/l/FORMATS.md step 5), which takes
+    // Model M's post_recon arguments and buffers: the unbanded post_recon route (8-byte history, base coefficient
+    // format, no pack12), then the output filter (unbanded; LDR: l_post_filter_ldr). Model M's post kernels are not for
+    // Model L. On native D3D12 its pack12 forms run (l_own_post_setup); there is no Model M post route for Model L.
     if (model_l && c.backend != 3) {
       if ((c.post_kernel && *c.post_kernel) || choose(nullptr, "WG_POST_KERNEL", "") != "")
         return fail("Model L: its reconstruction is l_post_recon; a post kernel (post_kernel / WG_POST_KERNEL) "
@@ -1111,10 +1108,11 @@ struct Runtime {
         if (v != "auto" && v != "force") return fail("post_tf4 must be auto or force");
         post_tf4_force = v == "force";
       }
-      if (k == "l_post") {
-        if (v != "m" && v != "own") return fail("l_post must be m or own (Model L on native D3D12)");
-        l_own_post = v == "own";
-        l_post_choice = l_own_post ? 2 : 1;
+      if (k == "l_post") {  // Model L runs its own reconstruction only (no Model M post route): l_post=own is a no-op
+        if (v == "m")
+          return fail("l_post=m: Model L has no Model M post route (its reconstruction is l_post_recon[_ldr] only)");
+        if (v != "own") return fail("l_post must be own (Model L's reconstruction; there is no other)");
+        l_post_own_given = true;
       }
       if (k == "post_diet") post_diet = !(v == "0" || v == "off" || v == "false");
       if (k == "tf_vdiet") tf_vdiet = !(v == "0" || v == "off" || v == "false");
@@ -1421,10 +1419,10 @@ struct Runtime {
     kernels_text += std::string(" model_map=") + (model_source == "raw" ? "none" : model_other_map ? "other" : "same");
     if (native_direct_io) kernels_text += " native_io=direct_textures";
     // Model L: its encoder and decoder (enc0= / dec0= above name Model M's, not loaded for Model L)
-    // (l_post: Model L's own reconstruction, or on native D3D12 by default Model M's fused pack12 post)
+    // (l_post: Model L's own reconstruction, HDR or LDR, on every backend)
     if (model_l)
       kernels_text += std::string(" model=L l_kernels=l_enc_values.co,l_ops.co,l_swin.co,l_post.co l_post=") +
-                      (d3d12_native && !l_own_post ? "m_pack12" : "l_post_recon");
+                      (l_ldr ? "l_post_recon_ldr" : "l_post_recon");
     if (l_fold_built) kernels_text += std::string(" l_dec_fold=") + (fz_lc ? "on" : "off");  // (native D3D12 only)
     if (l_lin_built) kernels_text += std::string(" l_lin_fused=") + (fz_ll ? "on" : "off");
     return kernels_text.c_str();
@@ -1647,35 +1645,37 @@ struct Runtime {
     return missing;
   }
 
-  // l_post=own on native D3D12 (after runtime_options): the unbanded pack12 route with Model L's reconstruction in
-  // place of Model M's fused post. p12 stays (l_coef_pack12 feeds l_post_recon_p12; frames the pack12 kernels do not
-  // take run l_coef and l_post_recon); post_recon_stage launches Model L's kernel, step 6 the unbanded default filter
-  // (w64/post_filter_c1_s4, the analytic build: Model L's file has no output-filter weights).
-  // The default's test: l_own_post_setup's conditions, without failing
-  bool l_own_post_fits(const WgRtConfig& c) {
-    if (!c.hdr || !p12 || post_kernel != "post_recon2_r_band_p12" || filter_kernel != "post_filter_c1_s4_band" || out_f16)
-      return false;
-    std::vector<std::string> need = {"l_post_recon_p12", "l_post_recon", "l_coef", "w64/post_filter_c1_s4"};
+  // Model L on native D3D12 (after runtime_options): the unbanded pack12 route with Model L's reconstruction. p12 stays
+  // (l_coef_pack12 feeds l_post_recon_p12[_ldr]; frames the pack12 kernels do not take run l_coef and
+  // l_post_recon[_ldr]); post_recon_stage launches Model L's kernel, step 6 the unbanded filter (HDR:
+  // w64/post_filter_c1_s4, the analytic build, as Model L's file has no output-filter weights; LDR: l_post_filter_ldr).
+  // The kernels Model L's route needs on native D3D12 (HDR or LDR colour; the direct route's two more).
+  std::vector<std::string> l_own_post_kernels(bool ldr) const {
+    std::vector<std::string> need = ldr ? std::vector<std::string>{"l_post_recon_p12_ldr", "l_post_recon_ldr", "l_coef",
+                                                                    "l_post_filter_ldr"}
+                                        : std::vector<std::string>{"l_post_recon_p12", "l_post_recon", "l_coef",
+                                                                    "w64/post_filter_c1_s4"};
     if (native_direct_io) {
       need.push_back("l_direct_color");
-      need.push_back("l_post_filter_direct");
+      need.push_back(ldr ? "l_post_filter_direct_ldr" : "l_post_filter_direct");
     }
-    return manifest_missing(need).empty();
+    return need;
+  }
+  // Whether Model L's own route runs here, HDR and LDR alike: the default pack12 post route (not one of Model M's other
+  // post / filter routes, no RGBA16F filter output) and its D3D12 ports present. "" = it runs; otherwise why not.
+  std::string l_own_post_fits(const WgRtConfig& c) const {
+    if (!p12 || post_kernel != "post_recon2_r_band_p12" || filter_kernel != "post_filter_c1_s4_band" || out_f16)
+      return "Model L's reconstruction runs on the default pack12 post route only (asked: post " + post_kernel +
+             ", filter " + filter_kernel + (out_f16 ? ", RGBA16F output" : "") + ")";
+    const std::string missing = manifest_missing(l_own_post_kernels(!c.hdr));
+    if (!missing.empty()) return "not yet ported to D3D12: " + missing;
+    return "";
   }
   bool l_own_post_setup(const WgRtConfig& c) {
-    if (!c.hdr)
-      return fail("Model L: l_post=own needs HDR colour (WgRtConfig.hdr = 1): l_post_recon is HDR, its LDR form is "
-                  "not written yet");
-    if (!p12 || post_kernel != "post_recon2_r_band_p12" || filter_kernel != "post_filter_c1_s4_band" || out_f16)
-      return fail("Model L: l_post=own replaces the default pack12 post route (post " + post_kernel + ", filter " +
-                  filter_kernel + ")");
-    std::vector<std::string> need = {"l_post_recon_p12", "l_post_recon", "l_coef", "w64/post_filter_c1_s4"};
-    if (native_direct_io) {
-      need.push_back("l_direct_color");
-      need.push_back("l_post_filter_direct");
-    }
-    const std::string missing = manifest_missing(need);
-    if (!missing.empty()) return fail("Model L on native D3D12 (l_post=own): not yet ported to D3D12: " + missing);
+    const std::string why = l_own_post_fits(c);
+    if (!why.empty())  // no other post route for Model L: refused, with the reason
+      return fail(std::string("Model L on native D3D12 (") + (c.hdr ? "HDR" : "LDR") + "): " + why +
+                  "; Model L has no other reconstruction (no Model M post route)");
     post_kernel = "post_recon2_r_p12";  // unbanded pack12 route; the reconstruction itself is Model L's (post_recon_stage)
     post_band = false;
     filter_kernel = kDefaultFilter;
@@ -1848,8 +1848,9 @@ struct Runtime {
                   "-byte history) cannot fall back to post_recon here");
 #ifdef WG_MODEL_L
     if (model_l) {  // Model L: l_post_recon (l_post.co, untagged) with post_recon's arguments
-      // (native D3D12, l_post=own: l_post_recon_p12 on the frames whose coefficients l_coef_pack12 stored)
-      post_last = p12_frame ? "l_post_recon_p12" : "l_post_recon";
+      // (native D3D12: l_post_recon_p12 on the frames whose coefficients l_coef_pack12 stored; LDR colour: the _ldr
+      // form)
+      post_last = std::string(p12_frame ? "l_post_recon_p12" : "l_post_recon") + (l_ldr ? "_ldr" : "");
       return launch(post_last.c_str(), grid, 256,
                     {&cnet, &A, &B, &C, &hist[cur], &mnear[nxt], &mcenter, &mfar, &w, &hist[nxt], &reduced, &display,
                      &p, &expo});
@@ -2447,6 +2448,13 @@ struct Runtime {
                     {&display, &outp, &c, &d, &dec_scale, &expo, &p_h, &hpitch}))
           return false;
         filter_last = "post_copy_h";
+      } else if (hp > 0 && model_l && l_ldr) {  // Model L, LDR colour: its LDR output stage, RGBA16F rows, pi folded in
+        int tx = 0, fs = 0;
+        filter_shape(kDefaultFilter, &tx, &fs);
+        if (!launch("l_post_filter_ldr_h", cdiv(ow, tx) * cdiv(cdiv(oh, 2), 2 * fs), 64,
+                    {&display, &outp, &a, &b, &c, &d, &dec_scale, &expo, &p_h, &hpitch}))
+          return false;
+        filter_last = "l_post_filter_ldr_h";
       } else if (hp > 0) {
         // interop output copy: RGBA16F rows. With the default filter, pi = 1 and dense rows (pitch 8 ow):
         // post_filter_c1_s4_o16 (the FP16 rounding of post_filter_c1_s4); otherwise post_filter_h (pi folded in,
@@ -2485,10 +2493,15 @@ struct Runtime {
         // (post_filter_quality9 is its own filter and never runs with output_filter=original)
         // l_post=own on the direct route: the filter's direct form writes the game's output texture (times pi as
         // scale_rgb, the Converter's typed store or the output-copy bytes); out_p is not written
-        const std::string fname = own_direct ? std::string("l_post_filter_direct") : post_pre + fk;
-        if (!launch(fname.c_str(), grid, 64, with_taps({&display, &outp, &a, &b, &c, &d, &dec_scale, &expo})))
+        // (Model L with LDR colour: its LDR output stage l_post_filter_ldr[_direct], no decode, no exposure, Q2)
+        const std::string fname = own_direct ? std::string(l_ldr ? "l_post_filter_direct_ldr" : "l_post_filter_direct")
+                                  : model_l && l_ldr ? std::string("l_post_filter_ldr")
+                                                     : post_pre + fk;
+        if (!launch(fname.c_str(), grid, 64,
+                    model_l && l_ldr ? std::vector<void*>{&display, &outp, &a, &b, &c, &d, &dec_scale, &expo}
+                                     : with_taps({&display, &outp, &a, &b, &c, &d, &dec_scale, &expo})))
           return false;
-        filter_last = own_direct ? "l_post_filter_direct" : fk;
+        filter_last = own_direct || (model_l && l_ldr) ? fname : fk;
       }
       if (!own_direct && hp <= 0 && pi != 1.0f) {  // spec 10 draft 2: the filter's result times pi
         int n3 = 3 * ow * oh;

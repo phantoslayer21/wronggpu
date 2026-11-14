@@ -85,8 +85,9 @@ def make_case(rng, rw, rh, dw, dh, reset, kind):
     return x
 
 
-def run_kernel(hip, mod, x, s):
-    """Launch l_post_recon with sentinel-filled outputs; returns the raw output buffers (with slack) and sizes."""
+def run_kernel(hip, mod, x, s, kernel="l_post_recon"):
+    """Launch l_post_recon (or kernel: its LDR form l_post_recon_ldr) with sentinel-filled outputs; returns the raw
+    output buffers (with slack) and sizes."""
     prm = RP.post_params(x)
     data = RP.post_device_inputs(x)
     dw, dh = prm.dw, prm.dh
@@ -105,7 +106,7 @@ def run_kernel(hip, mod, x, s):
     args = [ctypes.c_void_p(bufs[k]) for k in ("color", "A", "B", "C", "hist_prev", "m_near", "m_center", "m_far")]
     args += [ctypes.c_void_p(pw), ctypes.c_void_p(outs["history"]), ctypes.c_void_p(outs["reduced"]),
              ctypes.c_void_p(outs["display"]), prm, ctypes.c_void_p(0)]
-    hip.launch(hip.get_function(mod, "l_post_recon"), RP.recon_grid(dw, dh), 256, args)
+    hip.launch(hip.get_function(mod, kernel), RP.recon_grid(dw, dh), 256, args)
     hip.sync()
     raw = {k: np.frombuffer(hip.download(outs[k], n + SLACK), np.uint8) for k, n in sizes.items()}
     for ptr in list(bufs.values()) + [pw] + list(outs.values()):
@@ -146,16 +147,23 @@ def l_post_run(items):
 
 
 def m_rule(got, ref):
+    """A non-finite value counts as agreeing only where the reference has the same one (both NaN, or the same
+    infinity: LDR stores H^ as it is, so a zero total gather weight gives NaN on both sides, spec part 3 Q1); every
+    other non-finite value fails the rule. FP16 steps, differences and the reference RMS are over the finite pairs (in
+    HDR the reference is always finite)."""
     res = {}
     for k in ("history", "display"):
         g, r = np.asarray(got[k], np.float32), np.asarray(ref[k], np.float32)
-        fin = np.isfinite(g)
-        s = C32.f16_steps(np.where(fin, g, 0), r)
-        d = np.abs(np.where(fin, g, 0.0).astype(np.float64) - r)
-        res[k] = {"values": int(s.size), "nonfinite": int(np.sum(~fin)), "frac_over_1": float(np.mean(s > 1)),
+        fin_g, fin_r = np.isfinite(g), np.isfinite(r)
+        both = fin_g & fin_r
+        same_nf = ~fin_g & ~fin_r & ((g == r) | (np.isnan(g) & np.isnan(r)))
+        s = C32.f16_steps(np.where(both, g, 0), np.where(both, r, 0))
+        d = np.abs(np.where(both, g, 0.0).astype(np.float64) - np.where(both, r, 0.0))
+        rms = np.sqrt(np.mean(np.square(r[fin_r], dtype=np.float64))) if fin_r.any() else 0.0
+        res[k] = {"values": int(s.size), "nonfinite": int(np.sum(~(both | same_nf))),
+                  "nonfinite_agreeing": int(np.sum(same_nf)), "frac_over_1": float(np.mean(s > 1)),
                   "over_1": int(np.sum(s > 1)), "differ": int(np.sum(s > 0)), "frac_diff": float(np.mean(s > 0)),
-                  "max_steps": int(s.max()),
-                  "mean_rel_rms": float(d.mean() / max(np.sqrt(np.mean(np.square(r, dtype=np.float64))), 1e-30))}
+                  "max_steps": int(s.max()), "mean_rel_rms": float(d.mean() / max(rms, 1e-30))}
         res[k]["pass"] = l_post_rule(res[k]["values"], res[k]["nonfinite"], res[k]["over_1"], res[k]["differ"],
                                      res[k]["mean_rel_rms"])
     rc = np.rint(np.asarray(ref["reduced"], np.float64) * 1023.0).astype(np.int64)
@@ -166,10 +174,10 @@ def m_rule(got, ref):
     return res
 
 
-def check_case(hip, mod, x, kind, s=S):
-    raw, sizes, dims = run_kernel(hip, mod, x, s)
+def check_case(hip, mod, x, kind, s=S, ldr=False):
+    raw, sizes, dims = run_kernel(hip, mod, x, s, "l_post_recon_ldr" if ldr else "l_post_recon")
     got = decode(raw, sizes, dims)
-    ref = R.reconstruct(x, s)
+    ref = R.reconstruct(x, s, ldr=ldr)
     m = m_rule(got, ref)
     m.update({"alpha_zero": got["alpha_zero"], "reduced_top_zero": got["reduced_top_zero"],
               "slack_untouched": got["slack_untouched"]})
@@ -189,38 +197,43 @@ def check_case(hip, mod, x, kind, s=S):
                                 "over_1": int((st[ill] > 1).sum())}
         m["well_conditioned"] = {"max_steps": int(st[~ill].max(initial=0)), "over_1": int((st[~ill] > 1).sum()),
                                  "values": int(st[~ill].size)}
-    if kind == "offset_0.1":
-        known = ((got["history"] == np.float32(-1.4404296875)).all() and (got["display"] == 0).all()
-                 and (got["reduced_codes"] == 0).all() and m["weight_zero_pixels"] == W.size)
+    if kind == "offset_0.1":   # total weight 0 everywhere (Q1): history -1.4404296875 (HDR) or NaN (LDR), code 0
+        hist_ok = np.isnan(got["history"]).all() if ldr else (got["history"] == np.float32(-1.4404296875)).all()
+        known = (hist_ok and (got["display"] == 0).all() and (got["reduced_codes"] == 0).all()
+                 and m["weight_zero_pixels"] == W.size)
         m["known_answer"] = bool(known)
         ok = ok and known
     if kind == "offset_0.05":
-        Hl = np.asarray(x["color"], np.float64) * float(np.asarray(x["exposure"]))
-        known = bool((W > 0).all()) and np.array_equal(got["history"], MP.f16(MP.enc(Hl)))
+        if ldr:   # LDR: the linear colour as it is (no exposure, identity transfer)
+            want = MP.f16(np.asarray(x["color"], np.float64))
+        else:
+            want = MP.f16(MP.enc(np.asarray(x["color"], np.float64) * float(np.asarray(x["exposure"]))))
+        known = bool((W > 0).all()) and np.array_equal(got["history"], want, equal_nan=True)
         m["known_answer"] = bool(known)
         ok = ok and known
     m["pass"] = bool(ok)
     return m
 
 
-def run(build, rocm, seeds=(89,)):
+def run(build, rocm, seeds=(89,), ldr=False):
     from clean.runner.hip import Hip
     hip = Hip(rocm)
     with open(os.path.join(build, "l_post.co"), "rb") as f:
         mod = hip.load_module(f.read())
-    res = {"cases": []}
+    res = {"cases": [], "kernel": "l_post_recon_ldr" if ldr else "l_post_recon", "ldr": ldr}
     for seed in seeds:
         rng = np.random.default_rng(seed)
         for rw, rh, dw, dh, reset, kind in CASES:
             x = make_case(rng, rw, rh, dw, dh, reset, kind)
-            m = check_case(hip, mod, x, kind)
+            m = check_case(hip, mod, x, kind, ldr=ldr)
             m["case"] = [rw, rh, dw, dh, reset, kind]
             res["cases"].append(m)
     # Negative control: the first random case with the jitter moved by half a render pixel must fail.
     rng = np.random.default_rng(seeds[0])
     x = make_case(rng, *CASES[0])
-    raw, sizes, dims = run_kernel(hip, mod, dict(x, jitter=np.asarray(x["jitter"], np.float32) + 0.5), S)
-    neg = m_rule(decode(raw, sizes, dims), R.reconstruct(x, S))
+    raw, sizes, dims = run_kernel(hip, mod, dict(x, jitter=np.asarray(x["jitter"], np.float32) + 0.5), S,
+                                  "l_post_recon_ldr" if ldr else "l_post_recon")
+    neg = m_rule(decode(raw, sizes, dims), R.reconstruct(x, S, ldr=ldr))
     res["negative_control_fails"] = not neg["pass"]
     res["run"] = {k: l_post_run([c[k] for c in res["cases"]]) for k in ("history", "display")}
     res["pass"] = (all(c["pass"] for c in res["cases"]) and res["negative_control_fails"]
@@ -233,9 +246,10 @@ def main(argv=None):
     ap.add_argument("--build", required=True)
     ap.add_argument("--rocm", required=True)
     ap.add_argument("--seeds", type=int, default=1, help="run the case list with this many seeds (89, 90, ...)")
+    ap.add_argument("--ldr", action="store_true", help="the LDR form l_post_recon_ldr against the LDR oracle")
     ap.add_argument("--json", required=True)
     a = ap.parse_args(argv)
-    res = run(a.build, a.rocm, tuple(range(89, 89 + a.seeds)))
+    res = run(a.build, a.rocm, tuple(range(89, 89 + a.seeds)), ldr=a.ldr)
     with open(a.json, "w") as f:
         json.dump(res, f, indent=1)
     for c in res["cases"]:
