@@ -38,24 +38,9 @@ WG_ARGS_BEGIN
     int npix;
 WG_ARGS_END
 
-#if LIN_FUSED   // (helpers of the fused kernel only: the pair keeps its own code and DXIL)
-// the blob's bias tile vectors and weight fragments of lane (t, h)
-void lin_blob(uint wb, uint lane, uint hh, out v8f bias[2], out uint2 fr[2][2])
-{
-    [unroll] for (uint mt = 0; mt < 2u; ++mt) {
-        bias[mt] = wg_load8f(wb, (hh * 8u + mt * 16u) * 4u);
-        [unroll] for (uint kc2 = 0; kc2 < 2u; ++kc2) fr[mt][kc2] = wg_ld64(wb, 128u + (mt * 2u + kc2) * 256u + lane * 8u);
-    }
-}
-
-// output tile m before the rounding: b + W x
-v8f lin_acc(v8f bias, uint2 fr[2], uint2 xf[2])
-{
-    v8f acc = bias;
-    acc = wg_wmma_fp8(fr[0], xf[0], acc);
-    return wg_wmma_fp8(fr[1], xf[1], acc);
-}
-
+#if LIN_FUSED   // (helpers of the fused kernel only, shared with the encoder block's prologue: the pair keeps its own
+                // code and DXIL)
+#include "l_lin_px.hlsli"
 #endif
 
 #if LIN_FUSED
@@ -97,6 +82,7 @@ WG_KERNEL(l_linear_32_32_f16)
     // conversion (rounding to FP16 is idempotent, NaN payloads included)
     [unroll] for (uint m = 0; m < 2u; ++m)
         wg_st128(y, ((uint)pk * 32u + hh * 16u + 8u * m) * 2u, wg_to_f16_ags(lin_acc(bias2[m], fr2[m], x1)));
+    // (hlsl/l_lin_px.hlsli lin_pair is this code for the encoder block's prologue; kept inline here: the kernel's DXIL)
 #else
     // (the pair's own code, unchanged)
     [unroll] for (uint mt = 0; mt < 2u; ++mt) {

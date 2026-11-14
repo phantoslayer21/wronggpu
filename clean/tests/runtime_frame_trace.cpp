@@ -75,6 +75,8 @@ const Signature kSignatures[] = {
     {"swin_block_*", "ppppiiii"},           // Model M's blocks: x, skip, out, w, H, W, ox, oy
     {"l_swin_block_c32_dec_coef12_nc", "ppppiiiippppii"},  // the decoder block with l_coef_pack12 folded in: then
                                                            // A, C, latent, dec0.coef, rw, rh (native D3D12, fusion lc)
+    {"l_swin_block_c32_enc_lin_nc", "ppppiiiipp"},  // the encoder block with the linears as its prologue (fusion
+                                                    // le): x = q, then enc0.Win1, enc0.Win2
     {"l_swin_block_c32*", "ppppiiii"},      // Model L's blocks (clean/l/FORMATS.md)
     {"l_linear_32_32_relu", "pppi"},
     {"l_linear_32_32_f16", "pppi"},

@@ -125,9 +125,9 @@ std::string emu_lib_dir(const WgRtConfig& c) {
 // 10 faster; one 8-round run -11.5 us with every round faster). Re-measured in one process (runtime A/B, the same frames
 // alternating every 300 frames; inter-process noise was +-25 us): xd is +5.0 us at 1707x960 and +7.5 us at 1920x1080,
 // -2.25 us at 1280x720, so it now runs on frames of at most kXdMaxPixels render pixels only.
-// lc, ll: Model L only (its decoder block with l_coef_pack12 as the epilogue, its two input linears in one kernel; see
-// fz_lc, fz_ll).
-const char* const kDefaultD3d12Fusion = "pm,xe,mb,rv,xo,xd,lc,ll";
+// lc, ll, le: Model L only (its decoder block with l_coef_pack12 as the epilogue, its two input linears in one kernel,
+// its encoder block with the two input linears as the prologue; see fz_lc, fz_ll, fz_le).
+const char* const kDefaultD3d12Fusion = "pm,xe,mb,rv,xo,xd,lc,ll,le";
 // xd only up to this many render pixels per frame (see fz_xd): it is faster at 1280x720 and slower at 1707x960 and above
 constexpr long long kXdMaxPixels = 1200000;
 
@@ -339,16 +339,22 @@ struct Runtime {
   //       in registers. The input encoder then writes q to l_narrow (x2 over q in l_wide would overwrite q that other
   //       workgroups have not read yet). Without ll, or with a manifest that lacks the kernel, the pair runs
   bool fz_ll = false, l_lin_built = false;
+  //   le  Model L: its encoder block with the two input linears as the prologue (l_swin_block_c32_enc_lin_nc,
+  //       l_swin.hlsl SW_SRC 3; byte for byte the linears -> l_swin_block_c32_enc_nc): one launch less, and x2 (64 bytes
+  //       a pixel of the halo map) is neither stored nor read back: the block reads q (32 bytes) from l_narrow. Over ll
+  //       when both are on. Without le, or with a manifest that lacks the kernel, the linears and the block run
+  bool fz_le = false, l_le_built = false;
   long long xd_max_pixels = [] {
     const char* e = std::getenv("WG_D3D12_XD_MAX_PIXELS");
     return e && *e ? std::atoll(e) : kXdMaxPixels;
   }();
   // A/B diagnostics (WG_AB_*): the two fusion sets and the block length (0: off)
   struct FzSet {
-    bool pm = false, xe = false, mb = false, mb0 = false, rv = false, xo = false, xd = false, lc = false, ll = false;
+    bool pm = false, xe = false, mb = false, mb0 = false, rv = false, xo = false, xd = false, lc = false, ll = false,
+         le = false;
     template <class R> void apply(R* r) const {
       r->fz_pm = pm, r->fz_xe = xe, r->fz_mb = mb, r->fz_mb0 = mb0, r->fz_rv = rv, r->fz_xo = xo, r->fz_xd = xd;
-      r->fz_lc = lc, r->fz_ll = ll;
+      r->fz_lc = lc, r->fz_ll = ll, r->fz_le = le;
     }
   };
   FzSet fz_set[2];
@@ -379,8 +385,9 @@ struct Runtime {
       else if (f == "xd") z->xd = true;
       else if (f == "lc") z->lc = true;
       else if (f == "ll") z->ll = true;
+      else if (f == "le") z->le = true;
       else if (!f.empty())
-        return fail("WG_D3D12_FUSION: unknown fusion \"" + f + "\" (pm, xe, mb, rv, xo, xd, lc, ll or none)");
+        return fail("WG_D3D12_FUSION: unknown fusion \"" + f + "\" (pm, xe, mb, rv, xo, xd, lc, ll, le or none)");
     }
     return true;
   }
@@ -553,6 +560,7 @@ struct Runtime {
       const std::vector<std::string> have = manifest_kernels();
       l_fold_built = std::find(have.begin(), have.end(), "l_swin_block_c32_dec_coef12_nc") != have.end();
       l_lin_built = std::find(have.begin(), have.end(), "l_linear_32_32_fused") != have.end();
+      l_le_built = std::find(have.begin(), have.end(), "l_swin_block_c32_enc_lin_nc") != have.end();
     }
 #endif
     if (c.max_rw <= 0 || c.max_rh <= 0 || c.ow <= 0 || c.oh <= 0) return fail("invalid render or output size");
@@ -1411,7 +1419,7 @@ struct Runtime {
     kernels_text += std::string(" dec_rdiv=") + (dec_div.find('r') == std::string::npos ? "1" : "0");
     kernels_text += std::string(" dec_bdiv=") + (dec_div.find('b') == std::string::npos ? "1" : "0");
     kernels_text += std::string(" dec1_dec0=") + (dec1_dec0 ? "fused" : "separate");
-    if (fz_pm || fz_xe || fz_mb || fz_rv || fz_xo || fz_xd || fz_lc || fz_ll) kernels_text += " d3d12_fusion=" + fz_text;
+    if (fz_pm || fz_xe || fz_mb || fz_rv || fz_xo || fz_xd || fz_lc || fz_ll || fz_le) kernels_text += " d3d12_fusion=" + fz_text;
     kernels_text += " swin_mid=" + (mid_variant.empty() ? std::string("none") : mid_variant);
     kernels_text += std::string(" post_pack=") + (p12 ? "p12" : "none");
     kernels_text += std::string(" pre_exposure=") + (pi_original ? "original" : "scale");
@@ -1429,6 +1437,7 @@ struct Runtime {
                       (l_ldr ? "l_post_recon_ldr" : "l_post_recon");
     if (l_fold_built) kernels_text += std::string(" l_dec_fold=") + (fz_lc ? "on" : "off");  // (native D3D12 only)
     if (l_lin_built) kernels_text += std::string(" l_lin_fused=") + (fz_ll ? "on" : "off");
+    if (l_le_built) kernels_text += std::string(" l_enc_lin=") + (fz_le ? "on" : "off");
     return kernels_text.c_str();
   }
 
@@ -1578,7 +1587,21 @@ struct Runtime {
     DevPtr wv = wdev["enc0.values"], w1 = wdev["enc0.Win1"], w2 = wdev["enc0.Win2"], wp = wdev["enc0.project"];
     int npix = (fh + 4) * (fw + 4), tw = fw / 2, th = fh / 2;
     const bool fused = fz_ll && l_lin_built;  // (native D3D12 only: l_lin_built)
-    DevPtr& q = fused ? l_narrow : l_wide;  // q's map (fused: not under x2)
+    const bool in_block = fz_le && l_le_built && l_nc[0];  // fusion le: the linears in the block (its _nc form)
+    DevPtr& q = fused || in_block ? l_narrow : l_wide;  // q's map (fused / in the block: not under x2)
+    if (in_block) {
+      DevPtr none = 0, wb = wdev["enc0_block"];
+      int ox = 0, oy = 0;
+      l_offsets(false, f, &ox, &oy);
+      const int nwin = ((fw + ox + 3) / 4) * ((fh + oy + 3) / 4);
+      return launch(native_direct_io ? "lev/input_encoder_direct" : "lev/input_encoder",
+                    cdiv(((fh + 4) / 2) * ((fw + 4) / 2), 128), 256,
+                    {&cnet, &din, &min_, &reduced, &latent[cur], &mnear[cur], &q, &mnear[nxt], &mfar, &mcenter,
+                     &expo, &wv, &p}) &&
+             launch("l_swin_block_c32_enc_lin_nc", cdiv(nwin, 8), 256,
+                    {&l_narrow, &none, &l_x3, &wb, &fh, &fw, &ox, &oy, &w1, &w2}) &&
+             launch("l_project_gather", cdiv(tw * th, 128), 256, {&l_x3, &feat0, &wp, &tw, &th});
+    }
     return launch(native_direct_io ? "lev/input_encoder_direct" : "lev/input_encoder",
                   cdiv(((fh + 4) / 2) * ((fw + 4) / 2), 128), 256,
                   {&cnet, &din, &min_, &reduced, &latent[cur], &mnear[cur], &q, &mnear[nxt], &mfar, &mcenter,
