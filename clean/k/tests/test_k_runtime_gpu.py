@@ -11,8 +11,9 @@ same bits.
   and a texel with auto-exposure on, with the exposure rule of spec 42 draft 3 section 4 (clean/k/reference/exposure.py:
   E_cur = the game's exposure or 1, E_aux = the auto-exposure value; KFrame is given the rule's inputs and the
   runtime's measured value, and the runtime's [E_cur, E_prev, E_aux] are checked), pre-exposure != 1, both
-  output layouts of the interop (dense RGB float32; RGBA16F rows with alpha 1) and the input-copy path (raw RGBA16F
-  colour, R32F depth, FP16 motion converted on the GPU).
+  output layouts of the interop (dense RGB float32; RGBA16F rows, whose alpha is the colour input's alpha through the
+  output stage's bilinear, issue #26) and the input-copy path (raw RGBA16F
+  colour, R32F depth, FP16 motion with ms / mo folded into the motion factor on the GPU).
 - The input stage: exact (k_io_exact.co) by default, the fast one (k_io.co) with k_fast_in=1.
 - 1440p Quality (2560 x 1440 from 1706 x 960): the runtime's timing marks (as timing_log=1 in game) per part.
 
@@ -271,8 +272,11 @@ class KRuntimeExt:
 
 
 def inputs(rng, rw, rh, hdr, reset=False, jitter=None):
-    color = np.zeros((rh, rw, 4), np.float32)  # alpha 0, as the interop's input pass writes it
+    color = np.zeros((rh, rw, 4), np.float32)
     color[..., :3] = rng.random((rh, rw, 3)) * (6.0 if hdr else 1.0)
+    # the colour's alpha, as the interop's input passes carry it for model K (its own generator: the other values of
+    # the sequences stay what they were); negative and above-1 values included
+    color[..., 3] = np.random.default_rng(1000 * rw + rh).uniform(-1.0, 2.0, (rh, rw)).astype(np.float32)
     color[rng.random((rh, rw)) < 0.01, 0] = -0.25  # negative values (max(RGB, 0) in specs 42, 43)
     return dict(color=color, motion=(rng.standard_normal((rh, rw, 2)) * 1.5).astype(np.float32),
                 depth=rng.random((rh, rw)).astype(np.float32), render_size=(rw, rh),
@@ -311,7 +315,7 @@ class TestKRuntimeGpu(unittest.TestCase):
                 if i == 2:  # a motion scale and offset (the runtime passes WgRtFrame.mv_scale / mv_bias to K)
                     x["mv_scale"], x["mv_offset"] = (0.75, 1.25), (0.125, -0.25)
                 rawio = None
-                if raw:  # the game's textures as the interop copies them: RGBA16F colour, FP16 motion, m = ms raw + mo
+                if raw:  # the game's textures as the interop copies them: RGBA16F colour, FP16 motion with ms, mo
                     x["color"] = x["color"].astype(np.float16).astype(np.float32)
                     cp = pitch256(8 * rw) // 2
                     crow = np.zeros((rh, cp), np.float16)
@@ -329,6 +333,14 @@ class TestKRuntimeGpu(unittest.TestCase):
                 runs = flags["hdr"] and (auto or mode == 2)
                 measured = float(rt.buffer("exposure.measured", np.float32)[0]) if runs else None
                 kx = {k: v for k, v in x.items() if k not in ("E_cur", "E_aux", "e1", "e2")}
+                if raw:  # KIO_M16 (issue #26): the raw motion with the scale folded into the factor and the
+                    # offset in raw units, as the runtime applies io.ms / io.mo with WgRtFrame's scale / offset: the
+                    # reference's mv_scale RN(sx ms), mv_offset RN(ox + RN(mo / ms)) (mo != 0), on the raw texels
+                    f32 = np.float32
+                    kx["motion"] = mraw[..., :2].astype(np.float32)
+                    kx["mv_scale"] = tuple(float(f32(f32(s) * ms[c])) for c, s in enumerate(x["mv_scale"]))
+                    kx["mv_offset"] = tuple(float(f32(f32(o) + f32(mo[c] / ms[c]))) if mo[c] != 0 else float(o)
+                                            for c, o in enumerate(x["mv_offset"]))
                 kx.update(game_exposure=None if mode == 2 else x["E_cur"], measured=measured)
                 want = kf.frame(kx)
                 # the runtime's exposure state [E_cur, E_prev, E_aux] (raw values) follows the rule
@@ -343,7 +355,11 @@ class TestKRuntimeGpu(unittest.TestCase):
                 if half:
                     np.testing.assert_array_equal(got.astype(np.float16).view(np.uint16),
                                                   ref.astype(np.float16).view(np.uint16), err_msg=f"frame {info}")
-                    self.assertTrue(np.all(alpha == 1.0))
+                    # the output alpha: the colour input's alpha through the 4.3 bilinear (issue #26), the
+                    # reference's fourth channel, as it is
+                    np.testing.assert_array_equal(alpha.astype(np.float16).view(np.uint16),
+                                                  want["out"][..., 3].astype(np.float16).view(np.uint16),
+                                                  err_msg=f"alpha frame {info}")
                 else:
                     np.testing.assert_array_equal(got.view(np.uint32), ref.view(np.uint32), err_msg=f"frame {info}")
                 self.assertTrue(np.all(np.isfinite(got)), f"frame {info}")

@@ -56,8 +56,10 @@ class KRuntime {
   bool create(const WgRtConfig& cfg, Device* dev, AllocFn alloc, bool external_io);
   // Enqueues one frame (does not wait).
   bool frame(const WgRtFrame& fr, const FrameIo* io);
-  // Test path (wg_rt_upload_inputs): dense RGB float32, depth, motion (render pixels) into the own input buffers.
-  bool upload_inputs(int rw, int rh, const float* rgb, const float* depth, const float* motion);
+  // Test path (wg_rt_upload_inputs / wg_rt_upload_inputs_rgba): dense colour float32 of `channels` values per pixel (3:
+  // RGB, the alpha is 1 as for a colour without an alpha channel; 4: RGBA, the alpha as given), depth, motion (render
+  // pixels) into the own input buffers. The output alpha follows the colour's alpha (issue #26).
+  bool upload_inputs(int rw, int rh, const float* color, const float* depth, const float* motion, int channels = 3);
   const char* kernels();
   bool buffer(const std::string& name, DevPtr* p, size_t* bytes);
   const WgRtFrameInfo& info() const { return info_; }
