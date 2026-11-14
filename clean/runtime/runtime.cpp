@@ -500,7 +500,8 @@ struct Runtime {
     ModelId model_id = ModelId::M;  // runtime option model=K (clean/k/runtime/model_k.h); default model M
     if (std::string merr; !model_from_options(c, &model_id, &merr)) return fail(merr);
     if (c.backend < 0 || c.backend > 3) return fail("unknown runtime backend");
-    const bool native_ok = model_info(model_id).native_d3d12;  // model_select.h (Model M only today)
+    // model_select.h (Model M); Model L on native D3D12 in builds with it (its missing D3D12 ports are refused below)
+    const bool native_ok = model_info(model_id).native_d3d12 || (model_id == ModelId::L && model_l_built());
     if (native_direct_io && (!external_io || c.backend != 3 || !native_ok))
       return fail("native direct resources require external_io, backend 3 and " + native_d3d12_models());
     if (c.backend == 3 && !native_ok) return fail("native D3D12 supports " + native_d3d12_models() + " only");
@@ -514,7 +515,13 @@ struct Runtime {
 #endif
     model_l = model_id == ModelId::L;  // (model_from_options accepts it only in builds with WG_MODEL_L)
     if (model_l && (c.backend == 1 || c.backend == 2))
-      return fail("Model L runs on the HIP backend (backend 0) only for now");
+      return fail("Model L runs on the HIP backend (backend 0) and native D3D12 (backend 3) only");
+#ifdef WG_MODEL_L
+    if (model_l && c.backend == 3) {
+      const std::string missing = l_native_missing();
+      if (!missing.empty()) return fail("Model L on native D3D12: not yet ported to D3D12: " + missing);
+    }
+#endif
     if (c.max_rw <= 0 || c.max_rh <= 0 || c.ow <= 0 || c.oh <= 0) return fail("invalid render or output size");
     // post_core's fallback colour read uses a 32-bit byte offset (mul24, kernels/post.hip): the render colour image
     // must stay within 4 GB (16 rw rh <= 2^32, 16 rw < 2^24; any D3D12 texture, at most 16384 x 16384, does)
@@ -541,16 +548,23 @@ struct Runtime {
     if (c.wpw128) wpw[2] = c.wpw128;
     if (!choose_kernels(c)) return false;
     if (model_l && recon_output) return fail("Model L: recon=output (D = O) is Model M's experimental mode");
-    // Model L's reconstruction kernel l_post_recon is HDR; its LDR form (11/11/10-bit display codes) is not written yet
-    if (model_l && !c.hdr)
+    // Model L's reconstruction kernel l_post_recon is HDR; its LDR form (11/11/10-bit display codes) is not written yet.
+    // (Native D3D12 runs Model M's pack12 post for Model L, which takes both.)
+    if (model_l && !c.hdr && c.backend != 3)
       return fail("Model L: LDR colour (WgRtConfig.hdr = 0) needs Model L's LDR reconstruction kernel, which is not "
                   "written yet (l_post_recon is HDR)");
     if (model_l && enc0_co != "encoder.co")
       return fail("Model L: enc0 variants are Model M's encoder; Model L's runs from l_enc_values.co");
     // Model L's coefficient kernel (l_coef) writes Model M's coef_decoder formats, not pack12: the _p12 post kernels
     // are not for it (choose_kernels does not choose pack12 by default for Model L; asked for, it is refused here)
-    if (model_l && p12) return fail("Model L: post_pack=p12 (the pack12 decoder) is Model M's; Model L's l_coef "
-                                    "writes the base coefficient format");
+    // On native D3D12 Model L stores its coefficients in pack12 (l_coef_pack12, lossless) for Model M's pack12 post
+    // path, the only post path ported there; on HIP it writes the base format (l_coef) for the post_recon path.
+    if (model_l && p12 && c.backend != 3)
+      return fail("Model L: post_pack=p12 (the pack12 decoder) is Model M's; Model L's l_coef writes the base "
+                  "coefficient format (pack12 is Model L's native D3D12 form only)");
+    if (model_l && !p12 && c.backend == 3)
+      return fail("Model L on native D3D12 needs the pack12 post path (post_pack=p12; Model M's decoder__pack12.co "
+                  "selects it)");
     bool any = false;
     for (int i = 0; i < 16; ++i) any |= c.d_row[i] != 0;
     drow = drow_gfx12();
@@ -603,6 +617,9 @@ struct Runtime {
         uint32_t flags = 0;
         std::memcpy(&flags, blobs[i ? "dec0_block" : "enc0_block"].data(), 4);
         l_nc[i] = (flags & 1u) != 0;
+        if (!l_nc[i] && c.backend == 3)
+          return fail(std::string("Model L on native D3D12: ") + (i ? "dec0_block" : "enc0_block") +
+                      "'s weights need the clamped block, which is not ported to D3D12 (only the _nc forms are)");
       }
     }
 #endif
@@ -872,8 +889,10 @@ struct Runtime {
 #ifdef WG_MODEL_L
     // Model L reconstructs with its own kernel, l_post_recon (l_post.co; clean/l/FORMATS.md step 5), which takes Model
     // M's post_recon arguments and buffers: the unbanded post_recon route (8-byte history, base coefficient format,
-    // no pack12), then Model M's output filter (unbanded). Model M's post kernels are not for Model L.
-    if (model_l) {
+    // no pack12), then Model M's output filter (unbanded). Model M's post kernels are not for Model L. On native D3D12
+    // Model L's frames run Model M's pack12 post path for now (l_coef_pack12 feeds it); frames that path does not take
+    // run l_post_recon there too (its D3D12 port, then the analytic filter).
+    if (model_l && c.backend != 3) {
       if ((c.post_kernel && *c.post_kernel) || choose(nullptr, "WG_POST_KERNEL", "") != "")
         return fail("Model L: its reconstruction is l_post_recon; a post kernel (post_kernel / WG_POST_KERNEL) "
                     "chooses among Model M's");
@@ -891,7 +910,8 @@ struct Runtime {
     {
       const bool post_given = (c.post_kernel && *c.post_kernel) || choose(nullptr, "WG_POST_KERNEL", "") != "";
       const bool dec0_given = (c.dec0_variant && *c.dec0_variant) || choose(nullptr, "WG_DEC0_VARIANT", "") != "";
-      p12_default = !model_l && module_available(p12_path) && !post_given && !dec0_given && !recon_output &&
+      p12_default = (!model_l || c.backend == 3) && module_available(p12_path) && !post_given && !dec0_given &&
+                    !recon_output &&
                     choose(c.dec1_dec0, "WG_DEC1_DEC0", "separate") != "fused";
     }
     const std::string pack = choose(c.post_pack, "WG_POST_PACK", p12_default ? "p12" : "none");
@@ -1124,7 +1144,7 @@ struct Runtime {
         post_kernel != "post_recon2_r_band_p12" || filter_kernel != "post_filter_c1_s4_band" ||
         !post_tf || !post_diet || !tf_vdiet || !post_sel || !post_idx || !post_trim)
       return fail("native direct resources support only post_tf_f32_p12_diet_vsit; alternate post/TF routes are unsupported");
-    if (!d1d0_p12 || !dec_div.empty() || dec1_dec0 || bneck_variant != "bmegahg" ||
+    if ((!d1d0_p12 && !model_l) || !dec_div.empty() || dec1_dec0 || bneck_variant != "bmegahg" ||
         bneck_threads != 256 || bneck_groups != 128 || !mid_variant.empty() || swin_resident || force_clamp || fuse)
       return fail("native direct resources require default pack12 decoder, bmegahg bottleneck and nonresident unclamped Swin routes");
     if (gemm_threads != 256 || nt != 2 || wpw[0] != 1 || wpw[1] != 1 || wpw[2] != 1)
@@ -1497,7 +1517,8 @@ struct Runtime {
   bool l_encoder(EncParams& p, DevPtr cnet, DevPtr din, DevPtr min_, int cur, int nxt, int fh, int fw, int f) {
     DevPtr wv = wdev["enc0.values"], w1 = wdev["enc0.Win1"], w2 = wdev["enc0.Win2"], wp = wdev["enc0.project"];
     int npix = (fh + 4) * (fw + 4), tw = fw / 2, th = fh / 2;
-    return launch("lev/input_encoder", cdiv(((fh + 4) / 2) * ((fw + 4) / 2), 128), 256,
+    return launch(native_direct_io ? "lev/input_encoder_direct" : "lev/input_encoder",
+                  cdiv(((fh + 4) / 2) * ((fw + 4) / 2), 128), 256,
                   {&cnet, &din, &min_, &reduced, &latent[cur], &mnear[cur], &l_wide, &mnear[nxt], &mfar, &mcenter,
                    &expo, &wv, &p}) &&
            launch("l_linear_32_32_relu", cdiv(npix, 128), 256, {&l_wide, &l_narrow, &w1, &npix}) &&
@@ -1514,7 +1535,34 @@ struct Runtime {
     int tw = fw / 2, th = fh / 2;
     return launch("l_dec_project", cdiv(tw * th, 128), 256, {&out1, &l_narrow, &wd, &tw, &th}) &&
            l_block("dec", l_narrow, l_wide, wdev["dec0_block"], l_nc[1], fh, fw, true, f) &&
-           launch("l_coef", cdiv(tw * th, 128), 256, {&l_wide, &A, &B, &C, &latent[nxt], &wc, &p});
+           launch(p12_frame ? "l_coef_pack12" : "l_coef", cdiv(tw * th, 128), 256,
+                  {&l_wide, &A, &B, &C, &latent[nxt], &wc, &p});
+  }
+
+  // Model L's kernels on native D3D12 that <build_dir>/dx12/manifest.json lacks, comma-separated ("" = all there):
+  // its encoder (the direct form on the direct-resource route), linears, clamp-free blocks (the only D3D12 forms),
+  // projections and pack12 coefficient store, and dec1's own block with its expand (Model M runs dec1 inside its fused
+  // decoder there; Model L's decoder reads dec1's map). Model M's other kernels are its native frame's.
+  std::string l_native_missing() const {
+    std::string text, error, missing;
+    wgc::Json manifest;
+    std::vector<std::string> have;
+    if (read_text(build_dir + "/dx12/manifest.json", &text) && wgc::parse_json(text, manifest, error)) {
+      const auto* kernels = manifest.find("kernels");
+      if (kernels && kernels->is_array())
+        for (const auto& k : kernels->items) {
+          const auto* name = k.find("name");
+          if (name && name->is_string()) have.push_back(name->text);
+        }
+    }
+    const std::vector<std::string> need = {native_direct_io ? "lev/input_encoder_direct" : "lev/input_encoder",
+                                           "l_linear_32_32_relu",     "l_linear_32_32_f16",
+                                           "l_swin_block_c32_enc_nc", "l_project_gather",
+                                           "swin_block_c64_add_ex_nc", "l_dec_project",
+                                           "l_swin_block_c32_dec_nc", "l_coef_pack12"};
+    for (const std::string& k : need)
+      if (std::find(have.begin(), have.end(), k) == have.end()) missing += (missing.empty() ? "" : ", ") + k;
+    return missing;
   }
 #endif
 

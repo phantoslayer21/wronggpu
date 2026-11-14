@@ -7,6 +7,7 @@
 //
 // rw x rh is the maximum render size. Flags:
 //   --format=<n>      model_format (default 1: the converter's raw layout; 2: model.wgcm, with --map)
+//   --backend=<n>     WgRtConfig.backend (default 0; the recording device stands in for every backend)
 //   --map=<path>      the converter map (map_path)
 //   --sizes=WxH,...   the render size of frame 0, 1, ... (repeated; default: the maximum every frame)
 //   --reset=f,...     frames the game asks for a reset (WgRtFrame.reset = 1)
@@ -79,6 +80,7 @@ const Signature kSignatures[] = {
     {"l_dec_project", "pppii"},
     {"l_coef", "ppppppD"},
     {"l_post_recon", "ppppppppppppPp"},  // Model M's post_recon arguments (clean/l/FORMATS.md step 5)
+    {"l_coef_pack12", "ppppppD"},  // the same arguments (B unused)
 };
 
 const char* kinds_of(const std::string& kernel) {
@@ -266,6 +268,8 @@ int main(int argc, char** argv) {
     const std::string s = argv[a];
     if (s.compare(0, 9, "--format=") == 0) {
       cfg.model_format = std::atoi(s.c_str() + 9);
+    } else if (s.compare(0, 10, "--backend=") == 0) {
+      cfg.backend = std::atoi(s.c_str() + 10);
     } else if (s.compare(0, 6, "--map=") == 0) {
       map_path = s.substr(6);
     } else if (s.compare(0, 8, "--sizes=") == 0) {
