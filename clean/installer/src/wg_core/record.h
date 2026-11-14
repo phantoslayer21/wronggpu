@@ -199,16 +199,17 @@ constexpr unsigned long kCleanupMoveFirstWaitMs = 50;
 // a chosen error for the first tries; nullptr puts MoveFileExW back.
 using CleanupMoveFn = BOOL (WINAPI*)(LPCWSTR from, LPCWSTR to, DWORD flags);
 void SetCleanupMoveForTest(CleanupMoveFn fn);
-// `left` (when given) receives the full paths of what stays in the shared folder because it is not WrongGPU's (below).
-wstring StartCleanup(Context& ctx, const wstring& state, const wstring& self, const wstring& appData, std::vector<wstring>* left = nullptr);
-// What the state folder (<dir>\wronggpu-setup) and the shared data folder (%LOCALAPPDATA%\WrongGPU) hold is deleted only when it is
-// WrongGPU's: the fixed names it gives its own files (install.record, owned-files.json, uninstall.exe, setup.log, profile.ini),
-// the backups the record lists, the previous version's files that previous.txt lists, and in the shared folder its model files
-// (model.wgcm, model-source.txt) and its cache, helper, job and log folders. Anything else stays, with the folder, and the result
-// lists it (kLeftUnrecorded); only a folder that holds nothing else is removed. A shared folder with only WrongGPU's files
-// (and the ignore list, put back by its own rule) is moved aside and removed as before.
-// RemoveStateFolder: the state folder of `dir` without a record in hand (relocation: the restore has removed the backup);
-// m: the record, when it is (its backups are named by it). keepFile: the running uninstaller. Returns what stays, below the folder.
+// appData (%LOCALAPPDATA%\WrongGPU) is WrongGPU's own application folder: it goes whole, with everything under it, as an
+// uninstaller removes its own folder. Only the player's ignore list is put back (PutIgnoreListBack).
+wstring StartCleanup(Context& ctx, const wstring& state, const wstring& self, const wstring& appData);
+// The state folder (<dir>\wronggpu-setup) is in the game's folder, so it keeps the own-files-only rule: a file is deleted only
+// when it is WrongGPU's and, where a hash is known, its bytes are those: the backups the record lists (the entry's hash), the
+// previous version's files that previous.txt lists with their hashes, owned-files.json (the bytes WrongGPU makes of the record).
+// The record, previous.txt, uninstall.exe, setup.log and profile.ini carry no recorded hash and go by their fixed names (stated
+// in the README). Anything else, or a listed file whose bytes changed, stays with the folder and the result lists it
+// (kLeftUnrecorded); only a folder that holds nothing else is removed.
+// RemoveStateFolder: the state folder of `dir` (relocation: the restore has removed the backup); m: the record the install had
+// (the hashes of its backups and of owned-files.json come from it; without it those two are left). keepFile: the running uninstaller. Returns what stays, below the folder.
 std::vector<wstring> RemoveStateFolder(const wstring& dir, const Record* m = nullptr, const wstring& keepFile = L"");
 // "Left in place (not recorded by the install): <where>: a, b, c and N more": the warning that lists what stays (the first five).
 wstring LeftText(const wstring& where, const std::vector<wstring>& rels);

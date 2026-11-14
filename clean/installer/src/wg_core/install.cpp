@@ -111,7 +111,7 @@ void RemoveEarlierDirect(Context& ctx, const GameTarget& target, Ui& ui, std::ve
         }
         // (record and backup are gone; an original that could not go back is in WrongGPU-originals.) The state folder goes the way
         // an uninstall's does: what WrongGPU wrote, nothing else; a file that is not its stays with the folder, and is said.
-        const std::vector<wstring> stay = RemoveStateFolder(old);
+        const std::vector<wstring> stay = RemoveStateFolder(old, &r);
         for (auto& f : stay) ui.log(L"kept " + Join(StateDir(old), f) + L" (not WrongGPU's, or in use)");
         if (!stay.empty()) { warnings.push_back(LeftText(L"wronggpu-setup of the earlier installation", stay)); ui.log(warnings.back()); }
         // a wronggpu.ini the restore left there (changed since WrongGPU wrote it: the player's): moved to the exe folder when

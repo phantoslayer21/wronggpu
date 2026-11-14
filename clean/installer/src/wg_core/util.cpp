@@ -304,7 +304,7 @@ DeleteIf DeleteIfSha(const wstring& path, const std::vector<wstring>& shas, DWOR
 }
 
 namespace {
-void WalkOwned(const wstring& root, const wstring& rel, const std::function<bool(const wstring&)>& ours, const wstring& keepFile, std::vector<wstring>& left) {
+void WalkOwned(const wstring& root, const wstring& rel, const std::function<bool(const wstring&, PinnedFile&)>& ours, const wstring& keepFile, std::vector<wstring>& left) {
     const wstring dir = rel.empty() ? root : Join(root, rel);
     struct Item { wstring name; DWORD attrs; };
     std::vector<Item> items;
@@ -328,11 +328,11 @@ void WalkOwned(const wstring& root, const wstring& rel, const std::function<bool
         if (!keepFile.empty() && IEq(FullPath(p), FullPath(keepFile))) continue;
         PinnedFile f;
         DWORD e = 0;
-        if (!ours(relN) || !f.Open(p, false, &e) || !f.Delete(&e)) left.push_back(relN);
+        if (!f.Open(p, false, &e) || !ours(relN, f) || !f.Delete(&e)) left.push_back(relN);  // (ours: by name, and by the bytes where a hash is known)
     }
 }
 }  // namespace
-std::vector<wstring> RemoveOwned(const wstring& root, const std::function<bool(const wstring&)>& ours, const wstring& keepFile) {
+std::vector<wstring> RemoveOwned(const wstring& root, const std::function<bool(const wstring&, PinnedFile&)>& ours, const wstring& keepFile) {
     std::vector<wstring> left;
     const DWORD a = GetFileAttributesW(root.c_str());
     if (a == INVALID_FILE_ATTRIBUTES || (a & FILE_ATTRIBUTE_REPARSE_POINT) || !(a & FILE_ATTRIBUTE_DIRECTORY)) return left;

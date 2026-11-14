@@ -402,6 +402,11 @@ int main() {
             require(managed(newDir) && !managed(oldDir), "moved game: the new folder is on the managed list in the old one's place");
             // Uninstall (and uninstall.exe) of a record that still names the old folder: no refusal, the new folder's files go
             SaveRecord(RecordPath(newDir), m);
+            {  // (owned-files.json is what WrongGPU makes of the record; the test put an older record back, so it is made again)
+                Record again;
+                LoadRecord(RecordPath(newDir), again);
+                WriteOwnedFiles(newDir, again);
+            }
             Ui quiet{[](int, int, const wstring&) {}, [](const wstring&) {}};
             bool refused = false;
             try { DoRestore(mc, newDir, quiet, false, false); } catch (const SetupError&) { refused = true; }
@@ -832,11 +837,14 @@ int main() {
                     const wstring d = ownGame(L"State foreign", {{L"wronggpu_runtime.dll", L"copy", "", W, W}, {L"wronggpu.ini", L"copy", A, W, W}});
                     const wstring st = StateDir(d);
                     file(Join(st, L"uninstall.exe"), "the restorer");
-                    file(Join(st, L"owned-files.json"), "{}");
+                    Record recd;
+                    LoadRecord(RecordPath(d), recd);
+                    file(Join(st, L"owned-files.json"), OwnedFilesJson(recd));  // the bytes WrongGPU makes of the record
                     file(Join(st, L"setup.log"), "log");
                     file(Join(st, L"profile.ini"), "[game]");
-                    file(Join(st, L"previous\\previous.txt"), "version=0.5.1\r\nfile=" + ToUtf8(H(P)) + "|wronggpu_runtime.dll\r\n");
+                    file(Join(st, L"previous\\previous.txt"), "version=0.5.1\r\nfile=" + ToUtf8(H(P)) + "|wronggpu_runtime.dll\r\nfile=" + ToUtf8(H(P)) + "|changed-by-the-player.dll\r\n");
                     file(Join(st, L"previous\\wronggpu_runtime.dll"), P);
+                    file(Join(st, L"previous\\changed-by-the-player.dll"), "a player's file at a listed path of the previous version, other bytes than listed");
                     file(Join(st, L"notes.txt"), "the player's notes, saved after the install");
                     file(Join(st, L"backup\\not-ours.bin"), "a file in the backup folder that no record lists");
                     file(Join(st, L"previous\\kept-by-the-player.dll"), "in the previous version's folder, not listed in previous.txt");
@@ -848,37 +856,41 @@ int main() {
                                 !IsFile(Join(st, L"backup\\wronggpu.ini")) && !IsFile(Join(st, L"previous\\previous.txt")) && !IsFile(Join(st, L"previous\\wronggpu_runtime.dll")),
                             "state folder: what WrongGPU wrote goes (its fixed names, the recorded backups, the previous version's listed files)");
                     require(read(Join(st, L"notes.txt")) == "the player's notes, saved after the install" && IsFile(Join(st, L"backup\\not-ours.bin")) &&
-                                IsFile(Join(st, L"previous\\kept-by-the-player.dll")) && IsFile(Join(st, L"rr-config\\Engine.ini")) && IsDir(st),
-                            "state folder: a file saved there after the install, an unlisted file in backup\\ and previous\\, and the player's Engine.ini copy stay, and so does the folder");
+                                IsFile(Join(st, L"previous\\kept-by-the-player.dll")) && IsFile(Join(st, L"rr-config\\Engine.ini")) && IsDir(st) &&
+                                IsFile(Join(st, L"previous\\changed-by-the-player.dll")),
+                            "state folder: a file saved there after the install, an unlisted file in backup\\ and previous\\, a listed previous-version file whose bytes changed, and the player's Engine.ini copy stay, and so does the folder");
+                    require(said(w, L"changed-by-the-player.dll"), "state folder: the changed previous-version file is listed in the result");
+                    // owned-files.json that is not what WrongGPU makes of the record (the player's own content) stays too
+                    const wstring d2 = ownGame(L"State owned-files changed", {{L"wronggpu_runtime.dll", L"copy", "", W, W}});
+                    file(Join(StateDir(d2), L"owned-files.json"), "{\"the player's own file\": 1}");
+                    std::vector<wstring> w2;
+                    require(restore(d2, false, &w2) && read(Join(StateDir(d2), L"owned-files.json")) == "{\"the player's own file\": 1}" && said(w2, L"owned-files.json"),
+                            "state folder: owned-files.json whose bytes are not WrongGPU's stays and is listed");
                     require(said(w, L"wronggpu-setup") && said(w, L"notes.txt") && !AnyPartly(w), "state folder: the result lists what was left");
                     // the same without a record (relocation: the restore has removed the backup): RemoveStateFolder
                     const wstring o = Join(dir, L"Ownership\\Relocated");
                     file(Join(StateDir(o), L"uninstall.exe"), "the restorer");
-                    file(Join(StateDir(o), L"owned-files.json"), "{}");
+                    Record relocated;
+                    relocated.version = L"0.6.0"; relocated.game = o; relocated.exe = Join(o, L"Game.exe");
+                    file(Join(StateDir(o), L"owned-files.json"), OwnedFilesJson(relocated));
                     file(Join(StateDir(o), L"keep-me.txt"), "a player's file");
-                    const auto stay = RemoveStateFolder(o);
+                    const auto stay = RemoveStateFolder(o, &relocated);
                     require(stay.size() == 1 && IEq(stay[0], L"keep-me.txt") && IsFile(Join(StateDir(o), L"keep-me.txt")) && !IsFile(Join(StateDir(o), L"uninstall.exe")) && !IsFile(Join(StateDir(o), L"owned-files.json")),
                             "state folder: relocation's removal deletes WrongGPU's files and returns what stays");
                     DeleteFileW(Join(StateDir(o), L"keep-me.txt").c_str());
-                    require(RemoveStateFolder(o).empty() && !IsDir(StateDir(o)), "state folder: with nothing foreign in it the folder itself goes");
-                    // the shared data folder: a foreign file keeps the folder, WrongGPU's own files go (in place, nothing moved aside)
+                    require(RemoveStateFolder(o, &relocated).empty() && !IsDir(StateDir(o)), "state folder: with nothing foreign in it the folder itself goes");
+                    // the shared data folder is WrongGPU's own application folder: the last game's cleanup removes it whole, whatever
+                    // is in it (README "Uninstall"), by moving it aside at once; the hidden cleanup then deletes the moved folder
                     const wstring ad = Join(dir, L"Ownership\\shared-data\\WrongGPU");
                     file(Join(ad, L"model\\model.wgcm"), "model");
-                    file(Join(ad, L"model\\K\\model-source.txt"), "source");
-                    file(Join(ad, L"model\\readme-from-player.txt"), "a player's file in the model folder");
+                    file(Join(ad, L"model\\readme-from-player.txt"), "a file in the model folder that is not WrongGPU's");
                     file(Join(ad, L"launcher.ini"), "[launcher]");
-                    file(Join(ad, L"jobs\\job1.txt"), "job");
-                    file(Join(ad, L"photos.txt"), "a player's file");
-                    std::vector<wstring> staying;
+                    file(Join(ad, L"logs\\notes.txt"), "a file in the log folder");
+                    file(Join(ad, L"photos.txt"), "a file in WrongGPU's own folder");
                     Context cc; cc.logFile = Join(dir, L"Ownership\\shared-cleanup.log");
-                    const wstring kept = StartCleanup(cc, L"", L"", ad, &staying);
-                    require(kept.empty() && IsFile(Join(ad, L"photos.txt")) && IsFile(Join(ad, L"model\\readme-from-player.txt")) && !IsFile(Join(ad, L"model\\model.wgcm")) &&
-                                !IsFile(Join(ad, L"model\\K\\model-source.txt")) && !IsFile(Join(ad, L"launcher.ini")) && !IsFile(Join(ad, L"jobs\\job1.txt")) && !IsDir(Join(ad, L"jobs")) && IsDir(ad) &&
-                                staying.size() == 2,
-                            "shared data: with foreign files in it the folder stays with them and only WrongGPU's files go (nothing detached, nothing recursive)");
-                    bool moved = false;
-                    for (auto& s : ListDirs(Parent(ad))) moved = moved || s.find(L".cleanup-") != wstring::npos;
-                    require(!moved, "shared data: no folder was moved aside for a hidden cleanup when something in it is not WrongGPU's");
+                    const wstring kept = StartCleanup(cc, L"", L"", ad);
+                    require(kept.empty() && !IsDir(ad) && !IsFile(Join(ad, L"photos.txt")),
+                            "shared data: the last game's cleanup removes %LOCALAPPDATA%\\WrongGPU whole, with everything in it");
                 }
                 // (2) the plugin's settings file is rewritten only when it is demonstrably WrongGPU's (recorded, bytes match)
                 {

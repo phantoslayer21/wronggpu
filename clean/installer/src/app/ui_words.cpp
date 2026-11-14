@@ -393,8 +393,10 @@ std::vector<lui::DialogButton> UninstallLauncherButtons(bool anyGame, bool logs)
 // files from the old folder (its button "Remove files", never "Uninstall", which reads as uninstalling the game); data: it is
 // the last game with WrongGPU, so the converted data goes too (0 none, 1 Model M, 2 Model M and Ray Reconstruction)
 wstring UninstallGameText(const wstring& name, bool gone, int data) {
-    const wstring last = data == 2 ? L" It's the last game with WrongGPU, so the converted Model M and Ray Reconstruction data are deleted too."
-                         : data == 1 ? L" It's the last game with WrongGPU, so the converted Model M data is deleted too." : L"";
+    // the last game: WrongGPU's own application folder goes with it (the README's uninstall section says the same)
+    const wstring folder = L" WrongGPU's own folder %LOCALAPPDATA%\\WrongGPU is deleted with everything in it. Your ignore list, if you have one, is kept.";
+    const wstring last = data == 2 ? L" It's the last game with WrongGPU, so the converted Model M and Ray Reconstruction data are deleted too." + folder
+                         : data == 1 ? L" It's the last game with WrongGPU, so the converted Model M data is deleted too." + folder : L"";
     if (gone)
         return L"Remove WrongGPU's files from " + name + L"'s old folder?\n\n" + name + L" isn't in its folder any more. WrongGPU removes the files it left there." + last;
     return L"Uninstall WrongGPU from " + name + L"?\n\nThe game's original files are put back exactly as they were." + last +

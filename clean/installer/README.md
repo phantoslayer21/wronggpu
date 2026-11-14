@@ -232,13 +232,17 @@ With the defaults nothing of this section changes the installer.
   setup, or its uninstaller, can be run again. The logs that the OptiScaler of WrongGPU's own earlier hosted install
   wrote (`OptiScaler.log`) belong to that install: no `/MOVEMODS`, no warning. An OptiScaler that is not in the
   install record is another mod, as before.
-- **Uninstall.** Restores every original byte for byte (hash-verified), removes what WrongGPU added (by the rule below),
-  and the entry, and WrongGPU's own files in `%LOCALAPPDATA%\WrongGPU` (model and logs) when no other game uses it. The `wronggpu-*` logs and
-  reports that WrongGPU's own programs wrote while the game ran are not in the record, so nothing proves them WrongGPU's
-  (a player's `wronggpu-notes.txt` carries the same prefix): they are never deleted. They stay in their folders, each is
-  in the setup log, and the result lists them ("left in place").
+- **Uninstall.** Restores every original byte for byte (hash-verified) and removes what WrongGPU added in the game's folders
+  (by the rule below), and the entry. **WrongGPU's own folder `%LOCALAPPDATA%\WrongGPU` is deleted with everything in it** when
+  the last game that uses it is uninstalled (model, shared data, logs, jobs; the way an uninstaller removes its own application
+  folder; it is not a place for your files). The one thing kept is a shared ignore list (`ignore-files.txt`), which is put
+  back, never deleted. The launcher's uninstall question for the last game says so: "WrongGPU's own folder
+  %LOCALAPPDATA%\WrongGPU is deleted with everything in it." In the game's folders the `wronggpu-*` logs and reports that
+  WrongGPU's own programs wrote while the game ran are not in the record, so nothing proves them WrongGPU's (a player's
+  `wronggpu-notes.txt` carries the same prefix): they are not deleted. They stay in their folders, each is in the setup
+  log, and the result lists them ("left in place").
 - **What the launcher removes or overwrites: the file-ownership rule** (0.6.1; the restore, uninstall, repair, update, move
-  out of a wrong folder and the cleanups of WrongGPU's own folders; `src/wg_core/record.h`). In the restore paths, a file
+  out of a wrong folder and the state-folder cleanup; `src/wg_core/record.h`). In the game's folders, a file
   is deleted or overwritten only when its current bytes are WrongGPU's: the hash the install record says WrongGPU last
   wrote there (every write of the launcher to `wronggpu.ini`, `OptiScaler.ini` and the RR plugin's settings updates that
   hash). Nothing else proves it: not the file's name, not a file next to it, not an ini key, not "it is a log", not "the
@@ -258,14 +262,14 @@ With the defaults nothing of this section changes the installer.
     says so. A recorded hard-linked file with nothing to put back loses only the recorded name.
   - **REFramework's mirror.** A mirror copy of a root DLL (`_storage_`) is deleted only when the record lists it. An
     unrecorded copy, even byte for byte the file the install wrote, stays and the result says so.
-  - **WrongGPU's own folders.** The state folder (`wronggpu-setup`) and the shared data folder (`%LOCALAPPDATA%\WrongGPU`)
-    are cleaned the same way: only what WrongGPU wrote goes. In the state folder that is its fixed file names
-    (`install.record`, `owned-files.json`, `uninstall.exe`, `setup.log`, `profile.ini`), the backups the record lists and
-    the files the kept previous version lists in `previous.txt`; the player's Engine.ini copy (`rr-config`) goes only
-    through the Engine.ini revert. In the shared folder it is its fixed names, the model files (`model.wgcm`,
-    `model-source.txt`) and its cache, helper, job and log folders. Any other file stays, the folder stays with it, and
-    the result lists what was left. The same applies when an install is moved out of a wrong folder. A shared folder with
-    only WrongGPU's files (and the ignore list, which has its own put-back rule) is removed as before.
+  - **The state folder** (`wronggpu-setup`, in the game's folder) keeps the rule: a file goes only when it is WrongGPU's and,
+    where a hash is known, its bytes are those. The backups the record lists go while they match the entry's hash; the
+    previous version's files that `previous.txt` lists go while they match the hashes it states (a changed one stays and
+    is listed); `owned-files.json` goes while it is byte for byte what WrongGPU makes of the record. The record,
+    `previous.txt`, `uninstall.exe`, `setup.log` and `profile.ini` carry no recorded hash and go by their fixed names (the one
+    place the rule is by name). The player's Engine.ini copy (`rr-config`) goes only through the Engine.ini revert. Any other
+    file stays, the folder stays with it, and the result lists what was left. The same applies when an install is moved
+    out of a wrong folder. The shared folder `%LOCALAPPDATA%\WrongGPU` is not in a game's folder; see Uninstall.
   - **A settings file in a build without Preset K.** The plugin's `wronggpu-asi.ini` is rewritten (its `selection=wronggpu-k`
     line changed) only when an earlier record lists it and its bytes still match. Otherwise it stays as it is and the
     result tells the player how to change it.

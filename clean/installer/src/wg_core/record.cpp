@@ -391,25 +391,30 @@ std::vector<wstring> UnrecordedRuntimeFiles(const wstring& dir, const Record& m)
 // programs it starts share one invisible console, so nothing appears on screen.
 // state / self: the wronggpu-setup folder and the running uninstaller in it (empty: not this case); appData:
 // %LOCALAPPDATA%\WrongGPU, removed with everything in it (empty: other games still use it).
-// ---- what WrongGPU's own folders hold that is WrongGPU's (the state folder, the shared data folder) ---------------------
-// A folder of WrongGPU's own is not a licence to delete what is in it: a player can save a file there. Only what WrongGPU wrote
-// is deleted: the fixed names it gives its own files, the backups the record lists, the files the kept previous version
-// lists with their hashes, and (in the shared data folder) its cache, job and log folders and the model files by their names.
-// Everything else stays, the folder stays with it, and the result lists what was left.
+// ---- the state folder (<game folder>\wronggpu-setup) ----------------------------------------------------------------------
+// It is in the game's folder, so it keeps the own-files-only rule: a file a player saved there is not deleted. Only what WrongGPU
+// wrote goes, with its bytes checked where a hash is known (StateOwned). Everything else stays, the folder stays with it, and
+// the result lists what was left. (The shared data folder %LOCALAPPDATA%\WrongGPU is WrongGPU's own application folder: the last
+// game's uninstall removes it whole, StartCleanup.)
 static wstring LowerRel(wstring r) {
     for (auto& c : r) if (c == L'/') c = L'\\';
-    r = Lower(r);
-    const wstring tmp = Lower(kTmpSuffix);
-    if (r.size() > tmp.size() && r.compare(r.size() - tmp.size(), tmp.size(), tmp) == 0) r.resize(r.size() - tmp.size());  // (an atomic write's temporary)
-    return r;
+    return Lower(r);
 }
-static std::function<bool(const wstring&)> StateOwned(const wstring& dir, const Record* m) {
-    auto names = std::make_shared<std::set<wstring>>();
-    for (const wchar_t* n : {L"install.record", L"owned-files.json", L"uninstall.exe", L"setup.log", L"profile.ini"}) names->insert(n);
-    if (m) for (auto& e : m->e) if (e.action != L"dir") names->insert(LowerRel(L"backup\\" + e.rel));
+// What the state folder holds that WrongGPU wrote, with the bytes it must have: its path below the folder (lower case) -> SHA-256
+// ("": by name only). The backups the record lists (the hash is the entry's `orig`), the previous version's files (the hash
+// previous.txt states) and owned-files.json (the bytes WrongGPU makes of this record) are deleted only while their bytes are
+// those; the record, previous.txt, uninstall.exe, setup.log and profile.ini carry no recorded hash and go by their fixed names.
+static std::function<bool(const wstring&, PinnedFile&)> StateOwned(const wstring& dir, const Record* m) {
+    auto names = std::make_shared<std::map<wstring, wstring>>();
+    for (const wchar_t* n : {L"install.record", L"uninstall.exe", L"setup.log", L"profile.ini"}) (*names)[n] = L"";
+    if (m) {
+        const string json = OwnedFilesJson(*m);
+        (*names)[L"owned-files.json"] = Sha256Bytes(json.data(), json.size());
+        for (auto& e : m->e) if (e.action != L"dir" && !e.orig.empty()) (*names)[LowerRel(L"backup\\" + e.rel)] = Lower(e.orig);
+    }
     string raw;
     if (ReadAll(Join(Join(StateDir(dir), L"previous"), L"previous.txt"), raw)) {  // the kept version: "file=<sha>|<rel>" lines
-        names->insert(L"previous\\previous.txt");
+        (*names)[L"previous\\previous.txt"] = L"";
         for (size_t a = 0; a < raw.size();) {
             size_t e = raw.find('\n', a);
             if (e == string::npos) e = raw.size();
@@ -417,42 +422,17 @@ static std::function<bool(const wstring&)> StateOwned(const wstring& dir, const 
             a = e + 1;
             while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
             const size_t bar = line.find('|');
-            if (line.rfind("file=", 0) == 0 && bar != string::npos) names->insert(LowerRel(L"previous\\" + FromUtf8(line.substr(bar + 1))));
+            if (line.rfind("file=", 0) == 0 && bar != string::npos)
+                (*names)[LowerRel(L"previous\\" + FromUtf8(line.substr(bar + 1)))] = Lower(FromUtf8(line.substr(5, bar - 5)));
         }
     }
-    return [names](const wstring& rel) { return names->count(LowerRel(rel)) > 0; };
+    return [names](const wstring& rel, PinnedFile& f) {
+        const auto it = names->find(LowerRel(rel));
+        return it != names->end() && (it->second.empty() || IEq(f.Sha256(), it->second));
+    };
 }
 std::vector<wstring> RemoveStateFolder(const wstring& dir, const Record* m, const wstring& keepFile) {
     return RemoveOwned(StateDir(dir), StateOwned(dir, m), keepFile);
-}
-static bool ModelOwned(const wstring& rel) {  // below the model folder, at any depth
-    const wstring b = LowerRel(BaseName(rel));
-    return b == L"model.wgcm" || b == L"model-source.txt";
-}
-static bool SharedOwned(const wstring& rel) {  // below %LOCALAPPDATA%\WrongGPU
-    static const std::set<wstring> top = {L"setup.log", L"compare.txt", L"hip-runtime.txt", L"launcher.ini", L"launcher.log", L"library-list.txt",
-                                          L"managed-games.txt", L"portable-launchers.txt"};
-    const wstring r = LowerRel(rel);
-    if (top.count(r)) return true;
-    const size_t cut = r.find(L'\\');
-    if (cut == wstring::npos) return false;
-    const wstring head = r.substr(0, cut);
-    if (head == L"model") return ModelOwned(r);
-    return head == L"optiscaler" || head == L"rr-prepare" || head == L"jobs" || head == L"logs";  // its cache, helper, job and log folders
-}
-// Files in the shared data folder that are not WrongGPU's (the ignore list has a way of its own: StartCleanup puts it back).
-static std::vector<wstring> ForeignInSharedData(const wstring& root) {
-    std::vector<wstring> out;
-    std::vector<wstring> dirs{L""};
-    for (size_t i = 0; i < dirs.size(); ++i) {
-        const wstring d = dirs[i].empty() ? root : Join(root, dirs[i]);
-        for (auto& f : ListFiles(d, L"*")) {
-            const wstring rel = dirs[i].empty() ? BaseName(f) : dirs[i] + L"\\" + BaseName(f);
-            if (!IEq(rel, kIgnoreListName) && !SharedOwned(rel)) out.push_back(rel);
-        }
-        for (auto& sub : ListDirs(d)) dirs.push_back(dirs[i].empty() ? BaseName(sub) : dirs[i] + L"\\" + BaseName(sub));
-    }
-    return out;
 }
 // "<prefix><where>: a, b, c and N more" (the first five).
 wstring LeftText(const wstring& where, const std::vector<wstring>& rels) {
@@ -466,24 +446,11 @@ static std::atomic<CleanupMoveFn> g_cleanupMove{nullptr};  // test seam (record.
 void SetCleanupMoveForTest(CleanupMoveFn fn) { g_cleanupMove = fn; }
 
 // Returns the line "kept ignore-files.txt ..." when the shared folder's ignore list was put back (convert_ignore.h), else "".
-wstring StartCleanup(Context& ctx, const wstring& state, const wstring& self, const wstring& appData, std::vector<wstring>* left) {
-    // A shared data folder that holds something that is not WrongGPU's (a file a player saved there) is not detached and not
-    // deleted by the hidden cleanup: what is WrongGPU's goes now, in place, and the folder and the rest stay (the log of this
-    // run too: it is being written). Only a folder of which every file is WrongGPU's (or the ignore list, which has a way of
-    // its own below) is moved aside and removed with its contents.
-    bool onlyOurs = true;
-    if (!appData.empty() && IsDir(appData) && !ForeignInSharedData(appData).empty()) {
-        onlyOurs = false;
-        const std::vector<wstring> stay = RemoveOwned(appData, SharedOwned, ctx.logFile);
-        for (auto& f : stay) {
-            LogLine(ctx, L"Shared data cleanup: kept " + Join(appData, f) + L" (not WrongGPU's, or in use); the folder stays");
-            if (left) left->push_back(Join(appData, f));
-        }
-    }
+wstring StartCleanup(Context& ctx, const wstring& state, const wstring& self, const wstring& appData) {
     // Detach this generation now. Delayed cleanup must never recursively delete the shared pathname,
     // which a following install can already have recreated with its new model and runtime selection.
     wstring retired, kept;
-    if (onlyOurs && !appData.empty() && IsDir(appData)) {
+    if (!appData.empty() && IsDir(appData)) {
         // The name the folder is moved to is free and unique. It was <pid>-<GetTickCount64()> alone; that clock moves in
         // ~16 ms steps, so a second cleanup of the same folder within one step (an install's restore, then the last game's
         // uninstall) aimed at the previous cleanup's folder, which its cmd.exe deletes only seconds later: the move failed
@@ -900,12 +867,7 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
         if (!other.empty()) LogLine(ctx, L"the shared model data stays: " + other + L" still uses it");
         else if (LauncherKeepsSharedData()) LogLine(ctx, L"the shared model data stays: the launcher uses it (its own uninstall removes it)");
         else {
-            if (IsDir(ModelDir(ctx))) {
-                const std::vector<wstring> stay = RemoveOwned(ModelDir(ctx), ModelOwned);  // the model files by their names; anything else stays
-                ui.log(L"removed the model data (no other game uses it)");
-                for (auto& f : stay) LogLine(ctx, L"kept " + Join(ModelDir(ctx), f) + L" (not WrongGPU's model data, or in use)");
-                if (!stay.empty()) { warnings.push_back(LeftText(L"the model data folder", stay)); ui.log(warnings.back()); }
-            }
+            if (IsDir(ModelDir(ctx))) { RemoveTree(ModelDir(ctx)); ui.log(L"removed the model data (no other game uses it)"); }
             const wstring base = EnvVar(L"LOCALAPPDATA");
             if (!base.empty()) appData = Join(base, L"WrongGPU");
         }
@@ -919,28 +881,26 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
     RestoreStep("record-removed");
     // the shared folder goes, its ignore-files.txt stays (StartCleanup): said in the result
     auto cleanup = [&](const wstring& st, const wstring& sf) {
-        std::vector<wstring> stay;
-        const wstring kept = StartCleanup(ctx, st, sf, appData, &stay);
+        const wstring kept = StartCleanup(ctx, st, sf, appData);
         if (!kept.empty()) { ui.log(kept); warnings.push_back(kept); }
-        if (!stay.empty()) { warnings.push_back(LeftText(L"the shared data folder", stay)); ui.log(warnings.back()); }
     };
     // The state folder: what WrongGPU wrote goes (RemoveStateFolder); anything else in it, and the folder, stay and are said.
     const auto stateOwned = StateOwned(dir, &m);
     if (keepState) {
-        for (auto& f : RemoveOwned(Join(state, L"backup"), [&](const wstring& rel) { return stateOwned(L"backup\\" + rel); }))
-            LogLine(ctx, L"kept " + Join(Join(state, L"backup"), f) + L" (not a backup of a recorded file)");
+        for (auto& f : RemoveOwned(Join(state, L"backup"), [&](const wstring& rel, PinnedFile& h) { return stateOwned(L"backup\\" + rel, h); }))
+            LogLine(ctx, L"kept " + Join(Join(state, L"backup"), f) + L" (not the backup of a recorded file, or changed since)");
         return warnings;
     }
     const wstring self = SelfPath();
     std::vector<wstring> stay;
     if (IEq(Parent(self), state)) {
         stay = RemoveOwned(state, stateOwned, self);
-        for (auto& f : stay) LogLine(ctx, L"kept " + Join(state, f) + L" (not WrongGPU's, or in use)");
+        for (auto& f : stay) LogLine(ctx, L"kept " + Join(state, f) + L" (not WrongGPU's, changed since, or in use)");
         if (!stay.empty()) { warnings.push_back(LeftText(L"wronggpu-setup", stay)); ui.log(warnings.back()); }
         cleanup(state, self);
     } else {
         stay = RemoveOwned(state, stateOwned);
-        for (auto& f : stay) LogLine(ctx, L"kept " + Join(state, f) + L" (not WrongGPU's, or in use)");
+        for (auto& f : stay) LogLine(ctx, L"kept " + Join(state, f) + L" (not WrongGPU's, changed since, or in use)");
         if (!stay.empty()) { warnings.push_back(LeftText(L"wronggpu-setup", stay)); ui.log(warnings.back()); }
         if (!appData.empty()) cleanup(L"", L"");
     }

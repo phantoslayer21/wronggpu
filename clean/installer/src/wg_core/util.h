@@ -101,11 +101,12 @@ enum class DeleteIf { Deleted, Gone, Changed, Failed };
 // Deletes path when its bytes are one of `shas` (pinned: hashed and deleted through one handle). Gone: nothing was there.
 // Changed: other bytes (or a link or folder): nothing was done. Failed: held by another program or not deletable (err).
 DeleteIf DeleteIfSha(const wstring& path, const std::vector<wstring>& shas, DWORD* err = nullptr);
-// Deletes below `root` only the files `ours` accepts (their path below root, backslashes) and the folders left empty by that
-// (RemoveDirectoryW: a folder with anything in it stays). A file is deleted through a handle (PinnedFile); a link, a file
+// Deletes below `root` only the files `ours` accepts (their path below root, backslashes, and the file held: it can hash it) and
+// the folders left empty by that (RemoveDirectoryW: a folder with anything in it stays). A file is deleted through the handle
+// it was checked through (PinnedFile); a link, a file
 // another program holds and every file that is not ours stay. keepFile (a full path, the running uninstaller) is skipped
 // without being listed. Returns what stays, as paths below root. root itself goes only when it is empty at the end.
-std::vector<wstring> RemoveOwned(const wstring& root, const std::function<bool(const wstring&)>& ours, const wstring& keepFile = L"");
+std::vector<wstring> RemoveOwned(const wstring& root, const std::function<bool(const wstring&, PinnedFile&)>& ours, const wstring& keepFile = L"");
 void RemoveTree(const wstring& dir, const wstring& keepFile = L"");
 std::vector<wstring> ListFiles(const wstring& dir, const wchar_t* pattern);
 std::vector<wstring> ListDirs(const wstring& dir);
