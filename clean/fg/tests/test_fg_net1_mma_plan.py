@@ -68,5 +68,54 @@ class PlanTest(unittest.TestCase):
             self.assertEqual(pooled, [["a0", "p1"], ["a1", "p2"], ["a2", "p3"], ["a3", "p4"], ["a4", "p5"]])
 
 
+class FusedPlanTest(unittest.TestCase):
+    def test_eleven_launches_and_shapes(self):
+        params = G.synthetic_params(np.random.default_rng(4))
+        for gh, gw in ((64, 64), (70, 90), (768, 768)):
+            cells = N.fold(np.zeros((10, gh, gw)))
+            H0, W0 = cells.shape[1:]
+            data, acts, steps = M.plan_fused(H0, W0, params)
+            self.assertEqual(len(steps), 11)
+            self.assertEqual([s[0] for s in steps][5:],
+                             ["fg_mpair_b", "fg_mpair_d4", "fg_mpair_d3", "fg_mpair_d2", "fg_mpair_d1", "fg_mpair_d0"])
+            self.assertEqual(set(acts), {"a0", "a1", "a2", "a3", "a4", "p1", "p2", "p3", "p4", "p5",
+                                         "d5", "d4", "d3", "d2", "d1", "out"})
+            _, tacts, _ = M.plan_tierb(H0, W0, params)
+            for k, v in acts.items():
+                self.assertEqual(v, tacts[k], k)                    # the same buffers as the 27-launch path
+            for kernel, grid, args, outs, op in steps[5:]:
+                mode, c1t, c2t, nt = M.MPAIR[kernel]
+                C, H, W = args[7], args[8], args[9]
+                self.assertEqual(len(args), 15)
+                self.assertEqual(grid, -(-(H * W) // (128 * nt)))
+                self.assertEqual(acts[outs[0]][0], (H, W, 16 * c2t))
+                if mode == 1:
+                    hi, wi = args[10], args[11]
+                    self.assertEqual(acts[args[0][1:]][0][:2], (hi, wi))   # the coarse level
+                    self.assertEqual(acts[args[1][1:]][0], (H, W, C))      # the skip
+            if (gh, gw) == (768, 768):
+                self.assertTrue(all(s[1] >= 2 for s in steps))     # every kernel has a half grid
+
+
+class LeakyFastTest(unittest.TestCase):
+    def test_every_float16_input(self):
+        """fg_leaky_fast16's formula (one single-precision product, one float16 rounding, max by order with -0 == +0,
+        NaN kept) against the CPU reference's leaky on all 65,536 inputs."""
+        x = np.arange(65536, dtype=np.uint32).astype(np.uint16)
+        xf = x.view(np.float16)
+        with np.errstate(invalid="ignore", over="ignore"):
+            t = (np.float32(N.LEAKY_SLOPE) * xf.astype(np.float32)).astype(np.float16).view(np.uint16)
+            ref = N.leaky(xf.astype(np.float64)).astype(np.float16).view(np.uint16)
+
+        def key(b):
+            b = b.astype(np.int64)
+            return np.where(b & 0x8000, -(b & 0x7FFF), b & 0x7FFF)
+        nan = ((x & 0x7C00) == 0x7C00) & ((x & 0x3FF) != 0)
+        fast = np.where(nan, x, np.where(key(t) > key(x), t, x))
+        rn = ((ref & 0x7C00) == 0x7C00) & ((ref & 0x3FF) != 0)
+        same = (fast == ref) | (nan & rn)
+        self.assertTrue(np.all(same), np.flatnonzero(~same)[:10])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,77 @@
+# Posts what matters on GitHub to the WrongGPU Discord (#github-feed): merged pull requests with a short summary and
+# their milestone's progress, new issues from the community, and published releases. Nothing else (no pushes, no
+# opened or edited pull requests). It never checks out pull request code; it only reads the event and the milestone.
+# The digest job posts a summary written elsewhere (workflow_dispatch with a message; maintainers only).
+name: Discord feed
+
+on:
+  pull_request_target:
+    types: [closed]
+  issues:
+    types: [opened]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      title:
+        description: Digest title
+        required: true
+      message:
+        description: Digest text (Discord markdown, up to 4000 characters)
+        required: true
+
+permissions:
+  issues: read
+  pull-requests: read
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    if: >-
+      (github.event_name == 'pull_request_target' && github.event.pull_request.merged == true) ||
+      (github.event_name == 'issues' && github.event.issue.user.login != 'phantoslayer21') ||
+      github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Build and send the message
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_GITHUB_FEED }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DIGEST_TITLE: ${{ inputs.title }}
+          DIGEST_MESSAGE: ${{ inputs.message }}
+        run: |
+          set -euo pipefail
+          [ -n "$WEBHOOK" ] || { echo "no webhook secret"; exit 0; }
+          ev="$GITHUB_EVENT_PATH"
+          # first real paragraph of a body: no headings, comments, checklists or bot lines; 350 characters at most
+          summary() { jq -r "$1 // \"\"" "$ev" | tr -d '\r' | sed -e '/^<!--/,/-->/d' -e '/^#/d' -e '/^- \[[ x]\]/d' \
+            -e '/^Signed-off-by:/d' -e '/^Co-Authored-By:/d' -e '/^Refs\? #/d' -e '/^Fixes #/d' -e '/^Closes #/d' \
+            | awk 'BEGIN{p=0} /^[[:space:]]*$/{if(p)exit; next} {p=1; printf "%s ", $0}' \
+            | sed -e 's/\*\*//g' -e 's/  */ /g' | cut -c1-350; }
+          progress() {
+            local n; n=$(jq -r "$1 // empty" "$ev"); [ -n "$n" ] || return 0
+            gh api "repos/$REPO/milestones/$n" --jq '"\(.title): \(.closed_issues) of \(.open_issues + .closed_issues) done"' 2>/dev/null || true; }
+          case "$GITHUB_EVENT_NAME" in
+            pull_request_target)
+              title="Merged #$(jq -r .pull_request.number "$ev"): $(jq -r .pull_request.title "$ev")"
+              url=$(jq -r .pull_request.html_url "$ev"); desc=$(summary .pull_request.body); color=5763719
+              ms=$(progress .pull_request.milestone.number)
+              if [ -z "$ms" ]; then  # the PR itself may not carry a milestone; use the first issue it closes or refers to
+                ref=$(jq -r '.pull_request.body // ""' "$ev" | grep -oiE '(fixes|closes|refs?) #[0-9]+' | head -1 | grep -oE '[0-9]+' || true)
+                [ -n "$ref" ] && ms=$(gh api "repos/$REPO/issues/$ref" --jq 'select(.milestone)|.milestone.number' 2>/dev/null \
+                  | xargs -r -I{} gh api "repos/$REPO/milestones/{}" --jq '"\(.title): \(.closed_issues) of \(.open_issues + .closed_issues) done"' 2>/dev/null || true)
+              fi ;;
+            issues)
+              title="New issue #$(jq -r .issue.number "$ev"): $(jq -r .issue.title "$ev")"
+              url=$(jq -r .issue.html_url "$ev"); desc="by $(jq -r .issue.user.login "$ev") — $(summary .issue.body)"; color=15105570; ms="" ;;
+            release)
+              title="Released: $(jq -r '.release.name // .release.tag_name' "$ev")"
+              url=$(jq -r .release.html_url "$ev"); desc=$(summary .release.body); color=3447003; ms="" ;;
+            workflow_dispatch)
+              title="$DIGEST_TITLE"; url="https://github.com/$REPO"; desc=$(printf '%s' "$DIGEST_MESSAGE" | cut -c1-4000); color=10181046; ms="" ;;
+          esac
+          payload=$(jq -n --arg t "${title:0:250}" --arg u "$url" --arg d "$desc" --arg m "$ms" --argjson c "$color" \
+            '{username:"GitHub", embeds:[{title:$t, url:$u, description:$d, color:$c,
+              fields:(if $m=="" then [] else [{name:"Milestone", value:$m, inline:true}] end)}]}')
+          curl -fsS -X POST -H "Content-Type: application/json" --data "$payload" "$WEBHOOK" >/dev/null
+          echo "posted: $title"

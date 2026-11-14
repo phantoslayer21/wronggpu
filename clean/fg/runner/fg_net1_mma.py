@@ -1,23 +1,32 @@
 # SPDX-License-Identifier: MIT
-"""Frame generation (issue #96): net1 on gfx12's matrix instructions (tier B of the fast path), HIP and D3D12.
+"""Frame generation (issue #96): net1 on gfx12's matrix instructions (tier B of the fast path), HIP and D3D12, with the
+exact path selectable.
 
     python clean/fg/runner/fg_net1_mma.py --build <dir> --rocm "C:\\Program Files\\AMD\\ROCm\\7.2" --prepare
-    python clean/fg/runner/fg_net1_mma.py --build <dir> --rocm ... --run [--model <model.wgcm>] [--json out.json]
-    python clean/fg/runner/fg_net1_mma.py --build <dir> --rocm ... --timing [--json out.json]
+    python clean/fg/runner/fg_net1_mma.py --build <dir> --rocm ... --run [--paths fused,tierb] [--model <model.wgcm>]
+        [--json out.json]
+    python clean/fg/runner/fg_net1_mma.py --build <dir> --rocm ... --timing [--paths fused,tierb] [--json out.json]
 
-The network (NET1_WIRING) on NHWC float16 buffers in 27 launches: the 17 convolutions as fg_mconv (one
-v_wmma_f32_16x16x16_f16 per spec chunk in the layer's chunk order, the float16 accumulator from the bias as C and the
-result rounded to float16 after every chunk; leaky ReLU, and for net1_01..05 the 2 x 2 max-pool, in the epilogue),
-five NHWC upscales and five adds (fg_add_f16).
+Paths (all on the same weights and input):
+- fused (11 launches): the five encoder convolutions (fg_mconv, the 2 x 2 pool in the epilogue), the bottleneck
+  net1_06 + net1_07 as one fg_mpair, and each decoder level (upscale + add + two 1 x 1 convolutions) as one fg_mpair;
+- tierb (27 launches): every convolution as fg_mconv, the upscales and adds as their own launches;
+- exact (32 launches, clean/fg/runner/fg_net1_gpu.py's kernels): bit-exact to the CPU reference; the validation mode
+  and the fallback.
+Tier B: one v_wmma_f32_16x16x16_f16 per spec chunk in the layer's chunk order, the float16 accumulator from the bias as
+C, the result rounded to float16 after every chunk. The fused and tierb paths compute the same arithmetic, so their
+common buffers (a_k, p_k, d5, d_k, out) must be byte-identical.
 
 Gates (the port standard) -- HIP against D3D12, byte for byte:
-- every saved buffer (a_k, p_k, b5, d5, u_k, s_k, e_k, d_k, out) compared raw, each filled with its back end's
-  sentinel (HIP 0xA5, D3D12 0x5A) and followed by 64 slack bytes nobody may write;
-- a negative control per kernel: the first launch of that kernel (with 4 or more workgroups) on half of its grid on
-  D3D12 must change its output.
-Reported only (oversight 2026-11-14: the gate is the generated frame against the oracle): every buffer and the
-unfolded output against the CPU reference (net1.run), as the largest distance in float16 steps and the number of
-values more than 1 and more than 4 steps off (non-finite disagreements counted apart).
+- every buffer a path writes, each filled with its back end's sentinel (HIP 0xA5, D3D12 0x5A) and followed by 64 slack
+  bytes nobody may write;
+- a negative control per kernel: its first launch (with 4 or more workgroups, else its only launch) on half of its
+  grid on D3D12 must change its output;
+- the fast leaky ReLU (fg_leaky_fast16) on all 65,536 float16 inputs: HIP == D3D12 == the CPU reference's leaky;
+- fused == tierb on their common buffers (HIP).
+Reported only (oversight 2026-11-14: the gate is the generated frame against the oracle): every written buffer and
+every output value against the CPU reference (net1.run): values more than 1 and more than 4 float16 steps off, the
+largest step distance, the largest absolute difference and that divided by the buffer's largest reference magnitude.
 Cases: synthetic weights at 64 x 64 and 70 x 90 pixels, special values in the input and biases, and with --model the
 weights of a converter output file (execute-only: the files written for the replay are deleted after the run).
 --timing (information only): a 512 x 512 probe times every launch first; 1920 x 1080 and 2560 x 1440 input pixels run
@@ -29,7 +38,6 @@ import hashlib
 import json
 import os
 import sys
-import time
 
 import numpy as np
 
@@ -44,14 +52,20 @@ import fg_net1_gpu as G  # noqa: E402
 
 CO_MMA, CO_NET1 = "fg_net1_mma.co", "fg_net1.co"
 MCONV = ["fg_mconv%d" % mt for mt in (1, 2, 4)]
-KERNELS = MCONV + ["fg_upscale_hwc_f16", "fg_add_f16"]
-MODULE_OF = dict([(k, CO_MMA) for k in MCONV + ["fg_upscale_hwc_f16"]] + [("fg_add_f16", CO_NET1)])
+# fused 1 x 1 pairs: name -> (mode, first conv's output tiles, second conv's output tiles, 16-pixel groups per wave)
+MPAIR = {"fg_mpair_b": (0, 32, 16, 1), "fg_mpair_d4": (1, 16, 8, 1), "fg_mpair_d3": (1, 8, 8, 1),
+         "fg_mpair_d2": (1, 8, 4, 1), "fg_mpair_d1": (1, 4, 2, 2), "fg_mpair_d0": (1, 2, 1, 2)}
+EXACT = ["fg_conv_f16", "fg_maxpool2_f16", "fg_upscale_f16"]
+KERNELS = MCONV + list(MPAIR) + ["fg_upscale_hwc_f16", "fg_leaky_fast_f16", "fg_add_f16"] + EXACT
+MODULE_OF = dict([(k, CO_MMA) for k in MCONV + list(MPAIR) + ["fg_upscale_hwc_f16", "fg_leaky_fast_f16"]] +
+                 [(k, CO_NET1) for k in ["fg_add_f16"] + EXACT])
+PATHS = ("fused", "tierb", "exact")
 MAX_LAUNCH_MS = 100.0
 TIMING_SIZES = G.TIMING_SIZES
 PROBE = G.PROBE
 
 
-# ---- the fast plan ------------------------------------------------------------------------------------------------------
+# ---- plans ----------------------------------------------------------------------------------------------------------------
 
 def swizzle(w, order):
     """Canonical weights [out, k, k, in] -> A fragments in chunk order: [out / 16][chunks][32 lanes][8] float16; lane l
@@ -79,10 +93,39 @@ def mconv_mt(cout):
     return 4 if cout % 64 == 0 else (2 if cout % 32 == 0 else 1)
 
 
-def plan(H0, W0, params):
-    """(data, acts, steps) of net1 on cells [H0, W0, 48]: data {id: bytes}; acts {id: (shape HWC, bytes)}; steps
-    [(kernel, grid, args, outs, op)] with args "@id" or integers."""
-    data, acts, steps = {}, {}, []
+def _conv_step(s, params, shape, data, pooled):
+    w, b = params[s["layer"]]
+    cout, k, _, cin = np.shape(w)
+    wid, bid = "wf_" + s["layer"], "b_" + s["layer"]
+    data[wid] = swizzle(w, s["chunks"])
+    data[bid] = np.asarray(b, np.float16).tobytes()
+    H, W, C = shape[s["in"]]
+    if C != cin:
+        raise ValueError("%s: %d input channels, %s has %d" % (s["layer"], cin, s["in"], C))
+    mt = mconv_mt(cout)
+    tx, ty = -(-W // 16), -(-H // 16)
+    shape[s["out"]] = (H, W, cout)
+    outs = [s["out"]]
+    pool = s["out"] in pooled
+    if pool:
+        shape[pooled[s["out"]]] = (H // 2, W // 2, cout)
+        outs.append(pooled[s["out"]])
+    args = ["@" + s["in"], "@" + wid, "@" + bid, "@" + s["out"], "@" + outs[-1], cin, cout, H, W, k,
+            K.ORDER_CODE[s["chunks"]], 1 if s["act"] == "leaky" else 0, 1 if pool else 0, tx, ty]
+    return ("fg_mconv%d" % mt, tx * ty * (cout // (16 * mt)), args, outs, "conv")
+
+
+def _finish(steps, shape):
+    acts = {}
+    for s in steps:
+        for o in s[3]:
+            acts[o] = (shape[o], 2 * int(np.prod(shape[o])))
+    return acts
+
+
+def plan_tierb(H0, W0, params):
+    """27 launches (#199): (data, acts, steps); acts {id: (shape HWC, bytes)}; steps [(kernel, grid, args, outs, op)]."""
+    data, steps = {}, []
     shape = {"cells": (H0, W0, N.CELL)}
     pooled = {s["in"]: s["out"] for s in N.NET1_WIRING if s["op"] == "pool"}
     for s in N.NET1_WIRING:
@@ -90,25 +133,7 @@ def plan(H0, W0, params):
         if op == "pool":
             continue                                                # fused into the convolution before it
         if op == "conv":
-            w, b = params[s["layer"]]
-            cout, k, _, cin = np.shape(w)
-            wid, bid = "wf_" + s["layer"], "b_" + s["layer"]
-            data[wid] = swizzle(w, s["chunks"])
-            data[bid] = np.asarray(b, np.float16).tobytes()
-            H, W, C = shape[s["in"]]
-            if C != cin:
-                raise ValueError("%s: %d input channels, %s has %d" % (s["layer"], cin, s["in"], C))
-            mt = mconv_mt(cout)
-            tx, ty = -(-W // 16), -(-H // 16)
-            shape[s["out"]] = (H, W, cout)
-            outs = [s["out"]]
-            pool = s["out"] in pooled
-            if pool:
-                shape[pooled[s["out"]]] = (H // 2, W // 2, cout)
-                outs.append(pooled[s["out"]])
-            args = ["@" + s["in"], "@" + wid, "@" + bid, "@" + s["out"], "@" + (outs[-1]), cin, cout, H, W, k,
-                    K.ORDER_CODE[s["chunks"]], 1 if s["act"] == "leaky" else 0, 1 if pool else 0, tx, ty]
-            steps.append(("fg_mconv%d" % mt, tx * ty * (cout // (16 * mt)), args, outs, "conv"))
+            steps.append(_conv_step(s, params, shape, data, pooled))
         elif op == "upscale":
             hi, wi, C = shape[s["in"]]
             ho, wo, _ = shape[s["like"]]
@@ -122,10 +147,61 @@ def plan(H0, W0, params):
             shape[s["out"]] = shape[a]
             n = int(np.prod(shape[a]))
             steps.append(("fg_add_f16", -(-n // 256), ["@" + a, "@" + b, "@" + s["out"], n], [s["out"]], "add"))
-    for s in steps:
-        for o in s[3]:
-            acts[o] = (shape[o], 2 * int(np.prod(shape[o])))
-    return data, acts, steps
+    return data, _finish(steps, shape), steps
+
+
+plan = plan_tierb          # the name #199's tests use
+
+
+def plan_fused(H0, W0, params):
+    """11 launches: encoders (fg_mconv with pool), the bottleneck pair and five decoder pairs (fg_mpair)."""
+    data, steps = {}, []
+    shape = {"cells": (H0, W0, N.CELL)}
+    wiring = N.NET1_WIRING
+    pooled = {s["in"]: s["out"] for s in wiring if s["op"] == "pool"}
+    by_out = {s["out"]: s for s in wiring}
+    for s in wiring:                                                # encoders: a0..a4 with p1..p5
+        if s["op"] == "conv" and s["out"] in pooled:
+            steps.append(_conv_step(s, params, shape, data, pooled))
+
+    def pair(kernel, x, a, l1, l2, out, coarse):
+        mode, c1t, c2t, nt = MPAIR[kernel]
+        w1, b1 = params[l1["layer"]]
+        w2, b2 = params[l2["layer"]]
+        for l, w, b in ((l1, w1, b1), (l2, w2, b2)):
+            data["wf_" + l["layer"]] = swizzle(w, l["chunks"])
+            data["b_" + l["layer"]] = np.asarray(b, np.float16).tobytes()
+        H, W, C = shape[a if mode == 1 else x]
+        if (np.shape(w1)[3], np.shape(w1)[0], np.shape(w2)[0]) != (C, 16 * c1t, 16 * c2t) or np.shape(w1)[1] != 1:
+            raise ValueError("%s does not fit %s / %s" % (kernel, l1["layer"], l2["layer"]))
+        hi, wi = (shape[x][0], shape[x][1]) if mode == 1 else (1, 1)
+        shape[out] = (H, W, 16 * c2t)
+        args = ["@" + x, "@" + a, "@wf_" + l1["layer"], "@b_" + l1["layer"], "@wf_" + l2["layer"], "@b_" + l2["layer"],
+                "@" + out, C, H, W, hi, wi, K._ratio_bits(wi, W) if mode == 1 else 0,
+                K._ratio_bits(hi, H) if mode == 1 else 0, 1 if l2["act"] == "leaky" else 0]
+        steps.append((kernel, -(-(H * W) // (128 * nt)), args, [out], "pair"))
+
+    pair("fg_mpair_b", "p5", "p5", by_out["b5"], by_out["d5"], "d5", None)
+    for lvl in (4, 3, 2, 1, 0):
+        e = by_out["e%d" % lvl]
+        d = by_out["d%d" % lvl] if lvl else by_out["out"]
+        pair("fg_mpair_d%d" % lvl, "d%d" % (lvl + 1), "a%d" % lvl, e, d, d["out"], True)
+    return data, _finish(steps, shape), steps
+
+
+def plan_exact(H0, W0, params):
+    """#191's 32 launches on [C][H][W] buffers: (data, acts, steps) in this module's step format."""
+    data, acts, steps = G.plan(H0, W0, params)
+    return data, acts, [(s[0], s[1], s[2], [s[3]], s[4]) for s in steps]
+
+
+def plan_path(path, H0, W0, params, cells):
+    """(layout, data with the cells, acts, steps) of one path."""
+    if path == "exact":
+        data, acts, steps = plan_exact(H0, W0, params)
+        return "chw", dict(cells=G.cells_bytes(cells), **data), acts, steps
+    data, acts, steps = (plan_fused if path == "fused" else plan_tierb)(H0, W0, params)
+    return "hwc", dict(cells=cells_hwc(cells), **data), acts, steps
 
 
 def cells_hwc(cells):
@@ -190,8 +266,9 @@ def chain_lines(name, files, acts, steps, half=None, stop=None, saves=None, time
 # ---- report against the CPU reference ------------------------------------------------------------------------------------
 
 def step_report(got_bits, want):
-    """got: float16 bits; want: float64 values (float16-valued). Largest finite distance in float16 steps, counts over
-    1 and over 4 steps, non-finite disagreements."""
+    """got: float16 bits; want: float64 values (float16-valued). Values over 1 / over 4 float16 steps, the largest step
+    distance, the largest absolute difference (finite values) and that over the largest reference magnitude, and
+    non-finite disagreements."""
     w = np.asarray(want, np.float64).astype(np.float16).view(np.uint16).reshape(-1)
     g = np.asarray(got_bits, np.uint16).reshape(-1)
 
@@ -200,16 +277,52 @@ def step_report(got_bits, want):
         return np.where(b & 0x8000, -(b & 0x7FFF), b & 0x7FFF)
     fin = ((g & 0x7C00) != 0x7C00) & ((w & 0x7C00) != 0x7C00)
     d = np.where(fin, np.abs(key(g) - key(w)), 0)
+    gv, wv = g.view(np.float16).astype(np.float64), w.view(np.float16).astype(np.float64)
+    ad = np.where(fin, np.abs(gv - wv), 0.0)
+    mref = float(np.max(np.abs(wv[fin]))) if fin.any() else 0.0
     gn = ((g & 0x7C00) == 0x7C00) & ((g & 0x3FF) != 0)
     wn = ((w & 0x7C00) == 0x7C00) & ((w & 0x3FF) != 0)
     nonfin_bad = ~fin & ~((g == w) | (gn & wn))
-    return {"values": int(g.size), "steps_max": int(d.max()) if d.size else 0, "over_1_step": int(np.sum(d > 1)),
-            "over_4_steps": int(np.sum(d > 4)), "nonfinite_mismatch": int(np.sum(nonfin_bad))}
+    return {"values": int(g.size), "over_1_step": int(np.sum(d > 1)), "over_4_steps": int(np.sum(d > 4)),
+            "steps_max": int(d.max()) if d.size else 0, "max_abs_diff": float(ad.max()) if ad.size else 0.0,
+            "max_abs_ref": mref, "rel": float(ad.max() / mref) if mref else 0.0,
+            "nonfinite_mismatch": int(np.sum(nonfin_bad))}
+
+
+def to_chw(raw, shape, layout):
+    a = np.frombuffer(raw, np.uint16).reshape(shape)
+    return a.transpose(2, 0, 1) if layout == "hwc" else a
 
 
 # ---- run --------------------------------------------------------------------------------------------------------------------
 
-def run(build, rocm, model):
+def leaky_check(h, mods, build, cdir, lines, written):
+    """All 65,536 float16 inputs through fg_leaky_fast_f16 on HIP; the D3D12 case lines; the CPU reference's leaky."""
+    x = np.arange(65536, dtype=np.uint32).astype(np.uint16)
+    n = x.size
+    xp = h.malloc(2 * n)
+    yp = h.malloc(2 * n + K.SLACK)
+    try:
+        h.upload(xp, x.tobytes())
+        h.memset(yp, K.HIP_SENTINEL, 2 * n + K.SLACK)
+        h.launch(h.get_function(mods[CO_MMA], "fg_leaky_fast_f16"), n // 256, 256,
+                 [ctypes.c_void_p(xp), ctypes.c_void_p(yp), ctypes.c_uint32(n)])
+        h.sync()
+        hip = bytes(h.download(yp, 2 * n + K.SLACK))
+    finally:
+        h.free(xp)
+        h.free(yp)
+    with open(os.path.join(cdir, "leaky.x"), "wb") as f:
+        f.write(x.tobytes())
+    written += ["leaky.x", "leaky.y"]
+    lines += ["case leaky", "module " + CO_MMA, "kernel fg_leaky_fast_f16 %d 256" % (n // 256), "arg buf leaky.x",
+              "arg out %d leaky.y %d" % (2 * n + K.SLACK, K.D3D12_SENTINEL), "arg u32 %d" % n, ""]
+    with np.errstate(invalid="ignore", over="ignore"):
+        ref = N.leaky(x.view(np.float16).astype(np.float64))
+    return hip, ref
+
+
+def run(build, rocm, paths, model):
     from clean.runner.hip import Hip, clean_process_environment
     clean_process_environment(rocm)
     h = Hip(rocm)
@@ -219,34 +332,42 @@ def run(build, rocm, model):
     lines, runs, written = [], [], []
     need_mb = 256
     try:
-        for cname, values, params in G.cases(model):
+        leaky_hip, leaky_ref = leaky_check(h, mods, build, cdir, lines, written)
+        cases = [(c[0], c[1], c[2], True) for c in G.cases(model)]
+        # 768 x 768 pixels: every kernel gets 2 or more workgroups (the bottleneck level is 12 x 12 cells), so each has a
+        # half-grid negative control (the coarse levels of the small cases fit in one workgroup); gates only, no CPU
+        # reference (report) at this size
+        rng = np.random.default_rng(768)
+        cases.append(("synthetic_768", rng.uniform(0, 1, (10, 768, 768)), G.synthetic_params(rng), False))
+        for cname, values, params, with_ref in cases:
             cells = N.fold(values)
             _, gh, gw = values.shape
             H0, W0 = cells.shape[1:]
-            ref = N.run(cells, params)
-            name = cname
-            data, acts, steps = plan(H0, W0, params)
-            data = dict(cells=cells_hwc(cells), **data)
-            net = HipNet(h, mods, data, acts, steps)
-            try:
-                hip = net.run()
-            finally:
-                net.free()
-            files = G.write_files(cdir, name, data)
-            written += [f["name"] for f in files.values()] + ["%s.%s" % (name, i) for i in acts]
-            lines += chain_lines(name, files, acts, steps)
-            negs = {}
-            for kernel in sorted(set(s[0] for s in steps)):
-                j = next((j for j, s in enumerate(steps) if s[0] == kernel and s[1] >= 4), None)
-                if j is None:
-                    continue
-                nn = "negative_%s_%s" % (name, kernel)
-                negs[kernel] = (nn, j, steps[j][3])
-                lines += chain_lines(nn, files, acts, steps, half=j, stop=j, saves=steps[j][3])
-                written += ["%s.%s" % (nn, o) for o in steps[j][3]]
-            need_mb = max(need_mb, G.arena_mb(data, acts))
-            runs.append({"name": name, "case": cname, "acts": acts, "steps": steps, "hip": hip,
-                         "ref": ref, "negs": negs, "dims": (H0, W0, gh, gw)})
+            ref = N.run(cells, params) if with_ref else None
+            for path in paths:
+                name = "%s_%s" % (cname, path)
+                layout, data, acts, steps = plan_path(path, H0, W0, params, cells)
+                net = HipNet(h, mods, data, acts, steps)
+                try:
+                    hip = net.run()
+                finally:
+                    net.free()
+                files = G.write_files(cdir, name, data)
+                written += [f["name"] for f in files.values()] + ["%s.%s" % (name, i) for i in acts]
+                lines += chain_lines(name, files, acts, steps)
+                negs = {}
+                for kernel in sorted(set(s[0] for s in steps)):
+                    cand = [j for j, s in enumerate(steps) if s[0] == kernel]
+                    j = next((j for j in cand if steps[j][1] >= 4), cand[0])
+                    if steps[j][1] < 2:
+                        continue                                    # a single workgroup has no half grid
+                    nn = "negative_%s_%s" % (name, kernel)
+                    negs[kernel] = (nn, j, steps[j][3])
+                    lines += chain_lines(nn, files, acts, steps, half=j, stop=j, saves=steps[j][3])
+                    written += ["%s.%s" % (nn, o) for o in steps[j][3]]
+                need_mb = max(need_mb, G.arena_mb(data, acts))
+                runs.append({"name": name, "case": cname, "path": path, "layout": layout, "acts": acts, "steps": steps,
+                             "hip": hip, "ref": ref, "negs": negs, "dims": (H0, W0, gh, gw)})
         r, secs = G.replay(build, cdir, lines, need_mb, timeout=150)
 
         def read(fn):
@@ -256,14 +377,21 @@ def run(build, rocm, model):
         res = {"replay_exit": r.returncode, "replay_s": round(secs, 1), "replay_tail": r.stdout[-400:] + r.stderr[-200:],
                "cases": []}
         ok = r.returncode == 0
+        # the leaky check
+        lr = K.compare_raw(read("leaky.y"), leaky_hip, 2 * 65536)
+        lcpu = K.compare_cpu(leaky_hip[:2 * 65536], leaky_ref)
+        res["leaky_check"] = {"inputs": 65536, "hip_equals_d3d12": lr["differ"] == 0 and lr["slack_ok"],
+                              "differ_from_cpu": lcpu["differ"]}
+        ok = ok and res["leaky_check"]["hip_equals_d3d12"] and lcpu["differ"] == 0
+        by_name = {c["name"]: c for c in runs}
         for c in runs:
             raw_bad, rep = [], {}
             for out, (shape, n) in c["acts"].items():
                 raw = K.compare_raw(read("%s.%s" % (c["name"], out)), c["hip"][out], n)
                 if raw["differ"] != 0 or not raw["slack_ok"]:
                     raw_bad.append({"buffer": out, **raw})
-                got = np.frombuffer(c["hip"][out][:n], np.uint16).reshape(shape)       # HWC
-                rep[out] = step_report(got.transpose(2, 0, 1), c["ref"][out])
+                if c["ref"] is not None:
+                    rep[out] = step_report(to_chw(c["hip"][out][:n], shape, c["layout"]), c["ref"][out])
             negs = {}
             for kernel, (nn, j, outs) in c["negs"].items():
                 diff = 0
@@ -272,22 +400,33 @@ def run(build, rocm, model):
                     nraw = K.compare_raw(read("%s.%s" % (nn, o)), c["hip"][o], n)
                     diff += max(nraw["differ"], 0) + (0 if nraw["slack_ok"] else 1)
                 negs[kernel] = {"step": j, "caught": diff != 0, "differ": diff}
+            fused_vs_tierb = None
+            if c["path"] == "fused" and ("%s_tierb" % c["case"]) in by_name:
+                t = by_name["%s_tierb" % c["case"]]
+                fused_vs_tierb = {o: c["hip"][o][:c["acts"][o][1]] == t["hip"][o][:c["acts"][o][1]] for o in c["acts"]}
             H0, W0, gh, gw = c["dims"]
             shape, n = c["acts"]["out"]
-            o_hwc = np.frombuffer(c["hip"]["out"][:n], np.uint16).reshape(shape).astype(np.uint16)
-            o = o_hwc.transpose(2, 0, 1).view(np.float16).astype(np.float64)
+            o = to_chw(c["hip"]["out"][:n], shape, c["layout"]).view(np.float16).astype(np.float64)
             px = N.unfold(o, gh, gw)
-            rpx = N.unfold(c["ref"]["out"], gh, gw)
-            out_rep = step_report(px.astype(np.float16).view(np.uint16), rpx)
-            per_value = [step_report(px[t].astype(np.float16).view(np.uint16), rpx[t]) for t in range(px.shape[0])]
-            good = not raw_bad and all(v["caught"] for v in negs.values()) and len(negs) >= 3
+            out_rep, per_value = None, None
+            if c["ref"] is not None:
+                rpx = N.unfold(c["ref"]["out"], gh, gw)
+                out_rep = step_report(px.astype(np.float16).view(np.uint16), rpx)
+                per_value = [step_report(px[t].astype(np.float16).view(np.uint16), rpx[t]) for t in range(px.shape[0])]
+            # the 768 case must give every kernel its negative control
+            full_negs = c["case"] != "synthetic_768" or len(negs) == len(set(s[0] for s in c["steps"]))
+            good = not raw_bad and all(v["caught"] for v in negs.values()) and full_negs and \
+                (fused_vs_tierb is None or all(fused_vs_tierb.values()))
             ok = ok and good
-            res["cases"].append({"case": c["case"], "input_pixels": [gw, gh], "hip_equals_d3d12": not raw_bad,
+            res["cases"].append({"case": c["case"], "path": c["path"], "launches": len(c["steps"]),
+                                 "input_pixels": [gw, gh], "hip_equals_d3d12": not raw_bad,
                                  "raw_differences": raw_bad[:5], "negative_controls": negs,
+                                 "fused_equals_tierb": fused_vs_tierb,
                                  "vs_cpu_output": out_rep, "vs_cpu_output_per_value": per_value, "vs_cpu_buffers": rep,
                                  "output_sha256": hashlib.sha256(px.astype("<f2").tobytes()).hexdigest(), "ok": good})
         res["summary"] = {"cases": len(res["cases"]), "cases_ok": sum(c["ok"] for c in res["cases"]),
-                          "hip_equals_d3d12_all": all(c["hip_equals_d3d12"] for c in res["cases"]), "pass": bool(ok)}
+                          "hip_equals_d3d12_all": all(c["hip_equals_d3d12"] for c in res["cases"]),
+                          "leaky_check": res["leaky_check"], "pass": bool(ok)}
         return res
     finally:
         G.remove_written(cdir, written)
@@ -295,7 +434,7 @@ def run(build, rocm, model):
 
 # ---- timing (information only) ---------------------------------------------------------------------------------------------
 
-def timing(build, rocm, reps=10):
+def timing(build, rocm, paths, reps=10):
     from clean.runner.hip import Hip, clean_process_environment
     clean_process_environment(rocm)
     h = Hip(rocm)
@@ -304,18 +443,18 @@ def timing(build, rocm, reps=10):
     params = G.synthetic_params(rng)
     cdir = os.path.join(build, "replay-mma")
     os.makedirs(cdir, exist_ok=True)
-    res = {"reps": reps, "max_launch_ms": MAX_LAUNCH_MS, "modes": {}}
+    res = {"reps": reps, "max_launch_ms": MAX_LAUNCH_MS, "paths": {}}
 
-    def setup(w, hgt):
+    def setup(w, hgt, path):
         H0, W0 = -(-hgt // 2), -(-w // 2)
         cells = rng.uniform(0, 1, (N.CELL, H0, W0))
         cells[4 * N.VALUES:] = 0
-        data, acts, steps = plan(H0, W0, params)
-        return dict(cells=cells_hwc(cells), **data), acts, steps, H0 * W0
+        layout, data, acts, steps = plan_path(path, H0, W0, params, cells)
+        return data, acts, steps, H0 * W0
 
-    for acc in ("tier_b",):
+    for path in paths:
         mode = {}
-        data, acts, steps, probe_cells = setup(*PROBE)
+        data, acts, steps, probe_cells = setup(*PROBE, path)
         net = HipNet(h, mods, data, acts, steps)
         try:
             net.launch()
@@ -334,20 +473,21 @@ def timing(build, rocm, reps=10):
             if predicted >= MAX_LAUNCH_MS:
                 entry["skipped"] = "a launch is predicted at %.0f ms (limit %.0f ms)" % (predicted, MAX_LAUNCH_MS)
                 continue
-            data, acts, steps, _ = setup(w, hgt)
+            data, acts, steps, _ = setup(w, hgt, path)
             net = HipNet(h, mods, data, acts, steps)
             try:
                 net.launch()
                 h.sync()
                 st = net.time_steps(2)
+                entry["launches"] = len(steps)
                 entry["max_launch_ms_measured"] = round(max(st), 3)
                 entry["per_op_ms"] = {op: round(sum(t for t, s in zip(st, steps) if s[4] == op), 3)
-                                      for op in ("conv", "upscale", "add")}
+                                      for op in sorted(set(s[4] for s in steps))}
                 entry["hip_ms"] = round(net.time_network(reps), 3)
                 hip_out = net.run()["out"]
             finally:
                 net.free()
-            name = "timing_%s_%s" % (acc, label)
+            name = "timing_%s_%s" % (path, label)
             files = G.write_files(cdir, name, data)
             written = [f["name"] for f in files.values()] + ["%s.out" % name]
             try:
@@ -356,17 +496,17 @@ def timing(build, rocm, reps=10):
                 entry["d3d12_exit"] = r.returncode
                 for line in r.stdout.splitlines():
                     if line.startswith("chain %s: time" % name):
-                        entry["d3d12_ms"] = float(line.split("time ")[1].split(" ms")[0])
+                        entry["d3d12_wall_ms"] = float(line.split("time ")[1].split(" ms")[0])
                 p = os.path.join(cdir, "%s.out" % name)
                 got = open(p, "rb").read() if (r.returncode == 0 and os.path.exists(p)) else b""
                 entry["out_hip_equals_d3d12"] = bool(got) and K.compare_raw(got, hip_out, acts["out"][1])["differ"] == 0
             finally:
                 G.remove_written(cdir, written)
-        res["modes"][acc] = mode
+        res["paths"][path] = mode
     res["method"] = ("HIP: device events around %d back-to-back network runs, mean per run (per-op: events around each "
                      "launch). D3D12: kernel_replay chain wall time from submission to completion, synchronised after each "
-                     "of %d runs, mean per run. Synthetic weights, buffers resident, warm-up first. Information only."
-                     % (reps, reps))
+                     "of %d runs, mean per run (includes host submission and the wait). Synthetic weights, buffers "
+                     "resident, warm-up first. Information only." % (reps, reps))
     return res
 
 
@@ -390,24 +530,30 @@ def main(argv=None):
     ap.add_argument("--prepare", action="store_true")
     ap.add_argument("--run", action="store_true")
     ap.add_argument("--timing", action="store_true")
+    ap.add_argument("--paths", default="fused,tierb", help="any of %s" % ",".join(PATHS))
     ap.add_argument("--model", default=None)
     ap.add_argument("--json", default=None)
     a = ap.parse_args(argv)
+    paths = a.paths.split(",")
+    if any(p not in PATHS for p in paths):
+        ap.error("paths: %s" % ",".join(PATHS))
     if a.prepare:
         prepare(a.build, a.rocm)
     res = None
     if a.run:
-        res = run(a.build, a.rocm, a.model)
+        res = run(a.build, a.rocm, paths, a.model)
         print(json.dumps(res["summary"]))
         for c in res["cases"]:
-            print(c["case"], "ok" if c["ok"] else "FAIL", "| hip == d3d12:", c["hip_equals_d3d12"],
+            fv = c["fused_equals_tierb"]
+            print(c["case"], c["path"], "ok" if c["ok"] else "FAIL", "| hip == d3d12:", c["hip_equals_d3d12"],
                   "| negatives caught:", sum(v["caught"] for v in c["negative_controls"].values()), "of",
-                  len(c["negative_controls"]), "| output vs cpu:", json.dumps(c["vs_cpu_output"]))
+                  len(c["negative_controls"]), "| fused == tierb:", None if fv is None else all(fv.values()),
+                  "| output vs cpu:", json.dumps(c["vs_cpu_output"]))
             for d in c["raw_differences"]:
                 print("   raw difference", json.dumps(d))
         print("replay exit", res["replay_exit"], res["replay_tail"][-200:] if res["replay_exit"] else "")
     elif a.timing:
-        res = timing(a.build, a.rocm)
+        res = timing(a.build, a.rocm, paths)
         print(json.dumps(res, indent=1))
     if res is not None and a.json:
         with open(a.json, "w", encoding="utf-8", newline="\n") as f:
