@@ -23,7 +23,7 @@
  "release_version": [
   0,
   6,
-  1
+  5
  ],
  "roles": {
   "init": "slInit",

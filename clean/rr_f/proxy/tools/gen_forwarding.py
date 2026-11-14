@@ -513,7 +513,7 @@ def generate_from(b, out_dir, digests=None, source="(in memory)", probe=False, o
 
 
 def generate(binding_path, out_dir, probe=False, output_name=None, hook=False, release_version=None):
-    """release_version (0.6.1): [x, y, z] from the release script's one version, in place of the table's
+    """release_version (since 0.6.5): [x, y, z] from the release script's one version, in place of the table's
     release_version (the hook plugin's VERSIONINFO and the version its core reports); None: the table's."""
     b, digests = load(binding_path)
     if release_version is not None:

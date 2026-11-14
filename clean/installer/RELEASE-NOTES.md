@@ -1,18 +1,34 @@
-# WrongGPU 0.6.1
+# WrongGPU 0.6.5
 
-Download **WrongGPU-0.6.1.zip** from the release page and extract it, then run **WrongGPU-0.6.1.exe** (see Quick start).
+Download **WrongGPU-0.6.5.zip** from the release page and extract it, then run **WrongGPU-0.6.5.exe** (see Quick start).
 
-WrongGPU 0.6.1 is a bug-fix release for 0.6.0. It fixes a video-memory leak and a crash in the Ray Reconstruction
-plugin, and a Model M start failure under Proton. If you use 0.6.0, update your games with the launcher (each game's
-page offers **Update**).
+WrongGPU 0.6.5 adds **Model L**, a second super-resolution model you can choose per game, and brings the fixes planned
+for 0.6.1 (0.6.1 was not released; everything in it is in 0.6.5). Model M stays the default. If you use 0.6.0, update
+your games with the launcher (each game's page offers **Update**).
 
-**Still a work in progress.** WrongGPU is still being worked on, and 0.6.1 is a pre-release. In some games or scenes
+**Still a work in progress.** WrongGPU is still being worked on, and 0.6.5 is a pre-release. In some games or scenes
 you may still see visual bugs, such as artifacts or flicker. If you do, we'd like to hear about it: on the game's page
 in the launcher, click **Collect logs**, and send the zip it makes to us in the **#bug-reports** channel of the
 **WrongGPU Discord server** or in an issue on GitHub, together with a short description of what you saw (the game, the
 scene, your settings) and a screenshot. Every report helps us fix it.
 
-## What's new in 0.6.1 (since 0.6.0)
+## What's new in 0.6.5 (since 0.6.0)
+
+### Model L (new)
+- **A second model, off by default.** Model L is a larger super-resolution model than Model M: it has a
+  full-resolution encoder and decoder and its own reconstruction step. Model M stays the default for every game; Model
+  L is a choice you make per game.
+- **Converted on your PC.** Like Model M, Model L's data is converted once on your PC from a DLSS model file
+  (`nvngx_dlss.dll`) of version 310.5 or newer from any game or app you have installed; WrongGPU never downloads or
+  ships it. Convert it once from a command prompt in WrongGPU's folder: `WrongGPU.exe model convert --preset=L`.
+- **Choosing it.** For one game: `WrongGPU.exe set "<the game's .exe>" model=L` (`model=M` goes back). In OptiScaler's
+  menu it is the upscaler **WrongGPU Model L**, next to **WrongGPU Model M**.
+- **Runs on Direct3D 12** inside the game's own command list, like Model M: no AMD HIP runtime needed.
+- **It costs more GPU time than Model M.** In Cyberpunk 2077 at 1080p Quality (1280x720 upscaled to 1920x1080) on a
+  Radeon RX 9070 XT, the network takes 2.25 ms per frame with Model L and 1.17 ms with Model M, measured in the same
+  session at the same spot
+  ([clean/l/SPEED.md](https://github.com/phantoslayer21/wronggpu/blob/main/clean/l/SPEED.md) has the record and the
+  per-step split). At higher output resolutions the difference grows.
 
 ### Fixed
 - **Ray Reconstruction: video memory no longer grows while Ray Reconstruction is available but switched off.** In
@@ -42,7 +58,7 @@ Discussion #10.
 
 ## Quick start
 
-1. **Install.** Run **WrongGPU-0.6.1.exe** from the zip. Its first-run check looks at your PC, then offers **Install
+1. **Install.** Run **WrongGPU-0.6.5.exe** from the zip. Its first-run check looks at your PC, then offers **Install
    for this user** (the default; afterwards it is **WrongGPU** in the Start menu) or **Run portable**, and then shows
    your games. Open a game and click **Install** (the launcher gets OptiScaler for it the first time). The game's page
    then shows a checklist, **Turn it on in the game**, with the next two steps. **Borderlands 4** needs one Engine.ini
@@ -98,9 +114,12 @@ For players coming from 0.4.5, in short (the 0.6.0 release page has the full lis
   loading a save, or during flashes of lightning). It lasts one frame; we're investigating it (#17).
 - Hogwarts Legacy: since the game's November 2026 update, Ray Reconstruction isn't available with WrongGPU yet. Model M
   works. We're investigating it (#16).
-- Preset K is not part of 0.6.1; it returns in a later version (#15). If a game still starts on Preset K from an older
+- Preset K is not part of 0.6.5; it returns in a later version (#15). If a game still starts on Preset K from an older
   WrongGPU, the launcher asks before it updates the game: **Switch to Model M** updates it and moves it to Model M (its
   other settings stay); **Not now** leaves the game as it is.
+- Model L: tested for super resolution in Cyberpunk 2077 and RESIDENT EVIL requiem, both of which hand the upscaler
+  HDR colour. Model L also has a path for games that hand it SDR colour, but we haven't tested that path in a game yet.
+  Ray Reconstruction always uses its own network; Model L is a super-resolution choice only.
 - Radeon RX 9060 XT / RX 9060: supported, not yet tested; 8 GB cards are untested.
 - RESIDENT EVIL requiem prepares Ray Reconstruction at its own first start (OptiScaler's overlay says "WrongGPU RR
   (preparing...)" meanwhile), not in the launcher.
@@ -117,9 +136,9 @@ For players coming from 0.4.5, in short (the 0.6.0 release page has the full lis
 Tested on a Radeon RX 9070 XT. "Ray Reconstruction" means WrongGPU's Ray Reconstruction ran in the game; Model M means
 super resolution only. [COMPATIBILITY.md](https://github.com/phantoslayer21/wronggpu/blob/main/COMPATIBILITY.md) says
 which WrongGPU version each result comes from.
-- **Cyberpunk 2077**: Ray Reconstruction and Model M.
-- **RESIDENT EVIL requiem** (experimental): Ray Reconstruction when the game's **Ray Tracing** setting is **Path
-  Tracing** and its upscaler is **DLSS**. Needs your own REFramework (see Known issues).
+- **Cyberpunk 2077**: Ray Reconstruction, Model M and Model L.
+- **RESIDENT EVIL requiem** (experimental): Model M and Model L, and Ray Reconstruction when the game's **Ray
+  Tracing** setting is **Path Tracing** and its upscaler is **DLSS**. Needs your own REFramework (see Known issues).
 - **Borderlands 4**: Ray Reconstruction (the game creates it itself; this needs the WrongGPU edition of OptiScaler).
   Ray Reconstruction needs one setting, and Borderlands 4 removes it on every start. After you install WrongGPU into it,
   the launcher asks. **Fix it for me** adds the setting and makes the file read-only, so the game keeps it
@@ -159,24 +178,25 @@ The exact launch option is on the release page.
 ## Requirements
 - Windows 10 or 11, a Radeon RX 9000-series graphics card (RX 9070 series; RX 9060 XT and RX 9060 supported, not yet
   tested), a recent AMD driver.
-- **No AMD HIP runtime needed:** Model M runs on Direct3D 12. HIP is only used for the optional sparkle guard.
+- **No AMD HIP runtime needed:** Model M and Model L run on Direct3D 12. HIP is only used for the optional sparkle
+  guard.
 - An internet connection the first time, for the WrongGPU edition of OptiScaler, which the launcher downloads itself
   (offline you can choose an OptiScaler download yourself, in Settings).
-- For Model M, a DLSS file of version 310.5 or newer, and for Ray Reconstruction, a DLSS Ray Reconstruction file
-  of version 310.7 or newer, each from any game or app on your PC (not necessarily the game you play); WrongGPU
+- For Model M and Model L, a DLSS file of version 310.5 or newer, and for Ray Reconstruction, a DLSS Ray
+  Reconstruction file of version 310.7 or newer, each from any game or app on your PC (not necessarily the game you play); WrongGPU
   converts them on your PC and never ships them.
 
 ## Downloading and starting WrongGPU safely
 WrongGPU's download is not signed with a code-signing certificate (they cost money every year and this is a free
 project). That has three visible effects:
-- **"Windows protected your PC"** (Microsoft Defender SmartScreen) can show when you start WrongGPU-0.6.1.exe the first
-  time. Click **More info**, check that the file name is WrongGPU-0.6.1.exe, then click **Run anyway**. SmartScreen
+- **"Windows protected your PC"** (Microsoft Defender SmartScreen) can show when you start WrongGPU-0.6.5.exe the first
+  time. Click **More info**, check that the file name is WrongGPU-0.6.5.exe, then click **Run anyway**. SmartScreen
   may show this warning for an unsigned program.
 - **Check that your download is the real one** before you run it. The release page lists the SHA-256 of the zip, and
   SHA256SUMS.txt in the zip lists the SHA-256 of every file in it. In PowerShell (in the folder with the file):
-  `Get-FileHash .\WrongGPU-0.6.1.zip -Algorithm SHA256` (or `certutil -hashfile WrongGPU-0.6.1.zip SHA256` in a
+  `Get-FileHash .\WrongGPU-0.6.5.zip -Algorithm SHA256` (or `certutil -hashfile WrongGPU-0.6.5.zip SHA256` in a
   Command Prompt). The long number it prints must be exactly the one on the release page. For the launcher itself, use
-  `Get-FileHash .\WrongGPU-0.6.1.exe -Algorithm SHA256` and compare it with its line in SHA256SUMS.txt. If a number
+  `Get-FileHash .\WrongGPU-0.6.5.exe -Algorithm SHA256` and compare it with its line in SHA256SUMS.txt. If a number
   differs, delete the file and download it again from the release page only.
 - **If Microsoft Defender flags or removes it**: first check the SHA-256 as above. If the numbers match, the file
   matches the published checksum, but that alone does not establish whether a detection is a false positive. You can

@@ -4,7 +4,7 @@
     python clean/rr_f/proxy/tools/build.py [--out DIR] [--binding FILE [--probe] [--hook]] [--no-tests]
                                            [--proxy-name NAME|interposer] [--probe-name NAME|interposer]
                                            [--release-version x.y.z]
---release-version (0.6.1): the release script's one version for the hook plugin (its VERSIONINFO and the version its
+--release-version (since 0.6.5): the release script's one version for the hook plugin (its VERSIONINFO and the version its
 core reports) in place of the tables' release_version.
 
 Default: builds, per Streamline version, the file-replacement proxy (release + probe), and ONE hook-mode ASI plugin
@@ -46,7 +46,7 @@ import gen_forwarding as gf  # noqa: E402
 
 VSDEVCMD = os.environ.get("VSDEVCMD", r"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat")
 DEFAULT_OUT = os.environ.get("WG_RR_PROXY_BUILD", os.path.join(os.environ.get("WG_BUILD_ROOT", os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))), "build")), "rr-f-proxy", "out"))
-RELEASE_VERSION = None  # 0.6.1: --release-version x.y.z (the release script's one version) for the hook plugin
+RELEASE_VERSION = None  # since 0.6.5: --release-version x.y.z (the release script's one version) for the hook plugin
 CORE = ["proxy_core.cpp", "settings.cpp", "formats.cpp", "optimal.cpp", "answers.cpp"]
 PROBE = ["probe.cpp", "probe_log.cpp", "probe_gpu_d3d12.cpp"]  # probe build only
 SHADERS = (("WG_PROBE_UPSCALE", "kProbeUpscaleCs", "probe_upscale_cs.h"),
