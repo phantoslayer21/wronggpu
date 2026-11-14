@@ -1080,7 +1080,7 @@ int main() {
                     // ---- #209 review: Engine.ini policy (only WrongGPU's line goes, also from a file changed elsewhere) and crash
                     // safety (a corrected copy replaces it); the backup goes only while it is the recorded copy; read-only checked ------
                     string fault;
-                    SetFaultHook([&](const char* s) { return fault == s; });
+                    SetFaultHook([&](const char* s) { return (";" + fault + ";").find(";" + string(s) + ";") != string::npos; });  // (';'-separated names)
                     const wstring bak = RrConfigBackupPath(d);
                     auto leftovers = [&] { return ListFiles(Parent(ini), L"Engine.ini.wronggpu-*").size(); };
                     auto fileId = [](const wstring& p) {
@@ -1182,6 +1182,75 @@ int main() {
                                 "Engine.ini (#209 review): a read-only attribute that cannot be put back is said, and the backup stays");
                         clear(ini);
                         clear(bak);
+                    }
+                    // ---- #209 re-check (REVIEW-209b) -------------------------------------------------------------------------
+                    const wstring copy = ini + L".wronggpu-new", old = ini + L".wronggpu-old";
+                    const string F = "[SystemSettings]\r\n; bytes another program put in place of the corrected copy (synthetic)\r\n",
+                                 Z = "[Core.Log]\r\nLogNet=Warning\r\n; a second change, made after the replace (synthetic)\r\n";
+                    {  // a: the corrected copy swapped after it was verified and closed: the live file is not trusted, left as it is, said
+                        Record m = fixFor(false);
+                        m.rrconfig.backupSha = H(own);
+                        file(ini, edited);
+                        SetRestoreStepHook([&](const char* s) { if (string(s) == "rrconfig-replace") file(copy, F); });
+                        std::vector<wstring> notes, w;
+                        RevertRrConfig(mc, d, m, notes, w);
+                        SetRestoreStepHook(nullptr);
+                        require(read(ini) == F && read(old) == edited && read(bak) == own && w.size() == 1 && w[0].find(L"not the corrected copy") != wstring::npos &&
+                                    w[0].find(old) != wstring::npos && !IsFile(copy) && notes.empty(),
+                                "Engine.ini (REVIEW-209b a): a corrected copy swapped before the replace is caught after it (the live file held and hashed): left as "
+                                "it is, the file it replaced kept beside it, the backup kept, the result says so");
+                        clear(ini);
+                        clear(old);
+                        clear(bak);
+                    }
+                    {  // b: a change before the replace and a second one after it: the second is never overwritten; the first kept beside it
+                        Record m = fixFor(false);
+                        file(ini, edited);
+                        SetRestoreStepHook([&](const char* s) {
+                            if (string(s) == "rrconfig-replace") file(ini, Y);
+                            if (string(s) == "rrconfig-replaced") file(ini, Z);
+                        });
+                        std::vector<wstring> notes, w;
+                        RevertRrConfig(mc, d, m, notes, w);
+                        SetRestoreStepHook(nullptr);
+                        require(read(ini) == Z && read(old) == Y && read(bak) == own && w.size() == 1 && w[0].find(L"not the corrected copy") != wstring::npos,
+                                "Engine.ini (REVIEW-209b b): a second change after the replace is never overwritten by the recovery; the first change is kept beside "
+                                "it, the backup kept, the result says so");
+                        clear(ini);
+                        clear(old);
+                        clear(bak);
+                    }
+                    {  // c: the player deleted their own settings and kept only WrongGPU's: the revert leaves an empty file, never the old backup
+                        Record m = fixFor(false);
+                        m.rrconfig.backupSha = H(own);
+                        file(ini, RrConfigNewFile());
+                        const string want = RrConfigRemoveText(RrConfigNewFile(), m.rrconfig);
+                        std::vector<wstring> notes, w;
+                        RevertRrConfig(mc, d, m, notes, w);
+                        require(want.find_first_not_of(" \t\r\n") == string::npos && IsFile(ini) && read(ini) == want && w.empty() && leftovers() == 0,
+                                "Engine.ini (REVIEW-209b c): taking out WrongGPU's line from a file the player emptied of their own settings leaves it empty; the "
+                                "backup from before the fix is not put back");
+                        clear(ini);
+                        clear(bak);
+                    }
+                    {  // d: the replace fails: the read-only bit goes back, and a failure to put it back is said
+                        for (int roFails = 0; roFails < 2; ++roFails) {
+                            Record m = fixFor(false);
+                            m.rrconfig.wasReadOnly = true;
+                            file(ini, edited);
+                            SetFileAttributesW(ini.c_str(), FILE_ATTRIBUTE_READONLY);
+                            fault = roFails ? "rrconfig-replacefile;rrconfig-readonly" : "rrconfig-replacefile";
+                            std::vector<wstring> notes, w;
+                            RevertRrConfig(mc, d, m, notes, w);
+                            fault.clear();
+                            const bool saidRo = w.size() == 1 && w[0].find(L"read-only attribute could not be set again") != wstring::npos;
+                            require(read(ini) == edited && read(bak) == own && leftovers() == 0 && w.size() == 1 && w[0].find(L"Cannot replace") != wstring::npos &&
+                                        (roFails ? saidRo && !readOnly(ini) : !saidRo && readOnly(ini)),
+                                    roFails ? "Engine.ini (REVIEW-209b d): a failed replace whose read-only restore fails says so in the warning; the file and the backup stay"
+                                            : "Engine.ini (REVIEW-209b d): a failed replace puts the read-only bit back; the file and the backup stay");
+                            clear(ini);
+                            clear(bak);
+                        }
                     }
                     SetFaultHook(nullptr);
                 }

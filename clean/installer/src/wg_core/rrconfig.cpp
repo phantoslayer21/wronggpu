@@ -364,11 +364,16 @@ static wstring FreeSibling(const wstring& file, const wchar_t* tag, int n) { ret
 // is), flushed and hashed through its handle; the held original is read again and must still be the bytes `in` the edit was
 // computed from; then ReplaceFileW puts the new file at Engine.ini's name and keeps the original's attributes, ACL and creation
 // time (the original's read-only bit is cleared first and set again by the caller as the player had it). The handle on the
-// original is closed just before the replace (the replace needs the file unshared): a program that changes Engine.ini in that
-// moment has its bytes moved aside by the replace, and they are checked against `in`: when they differ, they go back to
-// Engine.ini's name (that program's file wins, and the result says so). A stop between the replace and that check leaves the
-// original next to Engine.ini as <Engine.ini>.wronggpu-old. Returns false when that program's file was put back (said).
-static bool ReplaceEngineIni(Context& ctx, const wstring& file, PinnedFile& held, const string& in, const string& out, std::vector<wstring>& warnings) {
+// original and on the copy is closed just before the replace (the replace needs both unshared), so neither is trusted after
+// it: the live file is then held (`live`: no write, rename or delete sharing) and must hash to `out`. When it does not (the
+// copy was swapped or changed before the replace, or Engine.ini changed after it), it is left as it is, never overwritten;
+// the file it replaced stays beside it as <Engine.ini>.wronggpu-old and the result says so. When it does, the replaced file is
+// checked against `in`: when it differs (another program changed Engine.ini in that moment), its bytes go back through the
+// held, verified live file (that program's file wins, and the result says so). A failed replace puts the read-only bit back
+// and says when that fails. A stop between the replace and those checks leaves the original beside it as
+// <Engine.ini>.wronggpu-old. Returns true with `live` held (the corrected copy) when the line is out; false when it is said.
+static bool ReplaceEngineIni(Context& ctx, const wstring& file, PinnedFile& held, const string& in, const string& out, std::vector<wstring>& warnings,
+                             PinnedFile& live) {
     const wstring outSha = Sha256Bytes(out.data(), out.size()), inSha = Sha256Bytes(in.data(), in.size());
     PinnedFile next;
     wstring tmp;
@@ -379,7 +384,20 @@ static bool ReplaceEngineIni(Context& ctx, const wstring& file, PinnedFile& held
         if (next.Create(tmp, &err)) break;
     }
     if (err) Fail(L"Cannot write the corrected copy of " + file + L" next to it: " + ErrText(err));
-    auto giveUp = [&](const wstring& why) { next.Delete(); Fail(why); };  // (the new file is ours: created just now, held since)
+    bool cleared = false;  // the original's read-only bit, cleared here for the replace (set again below when it fails)
+    // The read-only bit put back on `f` after a failure; "" or what failed, for the result (never ignored).
+    auto readOnlyBack = [&](PinnedFile& f) -> wstring {
+        wstring why;
+        if (cleared) return PutReadOnly(f, true, &why) ? wstring() : L"; its read-only attribute could not be set again (" + why + L"), so it is not read-only now";
+        if (f.IsOpen() && !f.Close()) return L"; its read-only attribute could not be set again, so it is not read-only now";
+        return f.ReadOnlyLost() ? L"; its read-only attribute could not be set again, so it is not read-only now" : wstring();
+    };
+    auto giveUp = [&](const wstring& why) {  // (the new file is ours: created just now, held since)
+        next.Delete();
+        const wstring ro = readOnlyBack(held);
+        held.Close();
+        Fail(why + ro);
+    };
     if (TestFault("rrconfig-write")) {  // tests: the write stops part way (a full disk, a stop)
         next.OverwriteBytes(out.data(), out.size() / 2);
         giveUp(L"Cannot write the corrected copy of " + file + L": " + ErrText(ERROR_WRITE_FAULT));
@@ -388,30 +406,52 @@ static bool ReplaceEngineIni(Context& ctx, const wstring& file, PinnedFile& held
     if (!IEq(next.Sha256(), outSha)) giveUp(L"The corrected copy of " + file + L" did not read back as written");
     string now;
     if (!held.ReadBytes(now) || now != in) giveUp(file + L" changed while WrongGPU held it");
-    const bool wasReadOnly = held.WasReadOnly();
-    if (wasReadOnly && !held.SetReadOnly(false, &err)) giveUp(L"Cannot clear the read-only attribute of " + file + L": " + ErrText(err));
+    if (held.WasReadOnly()) {
+        if (!held.SetReadOnly(false, &err)) giveUp(L"Cannot clear the read-only attribute of " + file + L": " + ErrText(err));
+        cleared = true;
+    }
     next.Close();
     held.Close();
-    RestoreStep("rrconfig-replace");  // the moment between the close and the replace: the tests change Engine.ini here
+    RestoreStep("rrconfig-replace");  // the moment between the close and the replace: the tests change Engine.ini or the copy here
     wstring bak;
     for (int n = 1; n < 100; ++n) {
         bak = FreeSibling(file, L".wronggpu-old", n);
         if (GetFileAttributesW(bak.c_str()) == INVALID_FILE_ATTRIBUTES) break;
     }
-    auto readOnlyAgain = [&] {
-        PinnedFile f;
-        if (wasReadOnly && f.Open(file, false)) f.SetReadOnly(true);
-    };
-    if (!ReplaceFileW(file.c_str(), tmp.c_str(), bak.c_str(), 0, nullptr, nullptr)) {
-        const DWORD e = GetLastError();
-        if (e == ERROR_UNABLE_TO_MOVE_REPLACEMENT_2) MoveFileExW(bak.c_str(), file.c_str(), MOVEFILE_WRITE_THROUGH);  // the original went aside: back to its name
+    DWORD re = ERROR_UNABLE_TO_REMOVE_REPLACED;  // (tests: a replace that fails, nothing moved)
+    const bool faulted = TestFault("rrconfig-replacefile");
+    const bool replaced = !faulted && ReplaceFileW(file.c_str(), tmp.c_str(), bak.c_str(), 0, nullptr, nullptr);
+    if (!replaced) {
+        if (!faulted) re = GetLastError();
+        wstring where;
+        if (re == ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 && !MoveFileExW(bak.c_str(), file.c_str(), MOVEFILE_WRITE_THROUGH))  // only into a free name
+            where = L"; the original is kept as " + bak;
         DeleteIfSha(tmp, {outSha});
-        readOnlyAgain();
-        Fail(L"Cannot replace " + file + L": " + ErrText(e) + L" (another program may have it open)");
+        wstring ro;
+        if (cleared) {
+            PinnedFile f;
+            DWORD oe = 0;
+            ro = f.Open(file, false, &oe) ? readOnlyBack(f) : L"; its read-only attribute could not be set again (" + ErrText(oe) + L"), so it may not be read-only now";
+        }
+        Fail(L"Cannot replace " + file + L": " + ErrText(re) + L" (another program may have it open)" + where + ro);
     }
+    RestoreStep("rrconfig-replaced");  // the replace done, nothing held yet: the tests change Engine.ini here
     PinnedFile old;
     const bool oldOpen = old.Open(bak, false);
-    if (oldOpen && IEq(old.Sha256(), inSha)) {  // the file the edit was computed from: it goes
+    const bool oldIsIn = oldOpen && IEq(old.Sha256(), inSha);
+    // The live file must be the corrected copy byte for byte: it is held from here (no write, rename or delete by another
+    // program) and hashed. Anything else (the copy swapped or changed before the replace, or Engine.ini changed after it) is
+    // left as it is: never overwritten, the file it replaced kept beside it, the player told.
+    DWORD le = 0;
+    if (!live.Open(file, true, &le) || !IEq(live.Sha256(), outSha)) {
+        live.Close();
+        old.Close();
+        warnings.push_back(L"Left in place: " + file + L" is not the corrected copy WrongGPU wrote (another program changed it just now), so it was left as it is. "
+                           L"The Engine.ini it replaced is kept beside it as " + bak + L". Take the line " + RrConfigLineW() + L" out of it yourself if it is there");
+        LogLine(ctx, L"rr_config_fix off: " + warnings.back());
+        return false;
+    }
+    if (oldIsIn) {  // the file the edit was computed from: it goes
         DWORD de = 0;
         if (!old.Delete(&de)) {
             warnings.push_back(L"Left in place: " + bak + L" (the copy of Engine.ini from before the change; it could not be removed: " + ErrText(de) + L")");
@@ -419,13 +459,20 @@ static bool ReplaceEngineIni(Context& ctx, const wstring& file, PinnedFile& held
         }
         return true;
     }
-    old.Close();  // another program changed Engine.ini in that moment: its file goes back to the name, WrongGPU's copy goes
-    if (!oldOpen || !MoveFileExW(bak.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-        warnings.push_back(L"Left in place: " + file + L" changed while WrongGPU was taking its line out; that version is kept in " + bak +
-                           L". Take the line " + RrConfigLineW() + L" out of it yourself if it is there");
-    else
+    // Another program changed Engine.ini in the moment before the replace: its version (moved aside by the replace) goes back,
+    // written through the held live file, which is verified as WrongGPU's own corrected copy (nobody else's change is
+    // overwritten); it stays beside it until that write is verified.
+    string theirs;
+    DWORD we = 0;
+    const bool back = oldOpen && old.ReadBytes(theirs) && live.OverwriteBytes(theirs.data(), theirs.size(), &we) && live.Flush(&we) &&
+                      IEq(live.Sha256(), Sha256Bytes(theirs.data(), theirs.size()));
+    live.Close();
+    if (back && old.Delete())
         warnings.push_back(L"Left in place: " + file + L" changed while WrongGPU was taking its line out, so that version was put back as it is. "
                            L"Take the line " + RrConfigLineW() + L" out of it yourself if it is there");
+    else
+        warnings.push_back(L"Left in place: " + file + L" changed while WrongGPU was taking its line out; that version is kept in " + bak +
+                           L". Take the line " + RrConfigLineW() + L" out of it yourself if it is there");
     LogLine(ctx, L"rr_config_fix off: " + warnings.back());
     return false;
 }
@@ -462,23 +509,20 @@ void RevertRrConfig(Context& ctx, const wstring& dir, Record& m, std::vector<wst
             string in;
             if (!held.ReadBytes(in)) Fail(L"Cannot read " + file);
             RestoreStep("rrconfig-held");  // held and read: the tests try to replace, delete or write it here (they cannot)
-            string out = RrConfigRemoveText(in, fix);
-            string bare = out;
-            StripBom(bare);  // a file left with its byte order mark alone is empty too (r4 #5)
-            const bool empty = bare.find_first_not_of(" \t\r\n") == string::npos;
+            // WrongGPU's line (and the section it added, when empty) out, nothing else changed. What is left can be empty (the
+            // player deleted their own settings since): the file then stays, empty; the backup from before the fix is never put
+            // back over it (that would bring back settings the player removed).
+            const string out = RrConfigRemoveText(in, fix);
             if (fix.created && in == RrConfigNewFile()) {  // the file WrongGPU created, byte for byte: it goes
                 if (!held.Delete(&err)) Fail(L"Cannot delete " + file + L": " + ErrText(err));
                 LogLine(ctx, L"rr_config_fix off: " + file + L" deleted (WrongGPU created it)");
             } else {  // (one WrongGPU created and something changed since stays, without WrongGPU's line)
-                if (!fix.created && empty && fix.backup && backupGood) out = backup;  // nothing but our edit left: the player's file as it was
-                if (out != in) lineOut = ReplaceEngineIni(ctx, file, held, in, out, warnings);
+                PinnedFile live;  // after a replace: the corrected copy, held and verified
+                if (out != in) lineOut = ReplaceEngineIni(ctx, file, held, in, out, warnings, live);
                 if (lineOut) {
                     wstring why;
-                    PinnedFile f;
-                    DWORD oe = 0;
-                    PinnedFile& target = held.IsOpen() ? held : f;  // (after a replace: the new file, opened again)
-                    if (!target.IsOpen() && !f.Open(file, false, &oe)) readOnlyWarning(ErrText(oe));
-                    else if (!PutReadOnly(target, fix.wasReadOnly, &why)) readOnlyWarning(why);  // as the player had it (not when only WrongGPU made it so)
+                    PinnedFile& target = held.IsOpen() ? held : live;
+                    if (!PutReadOnly(target, fix.wasReadOnly, &why)) readOnlyWarning(why);  // as the player had it (not when only WrongGPU made it so)
                     LogLine(ctx, L"rr_config_fix off: " + file + L" put back");
                 } else keepBackup = true;
                 held.Close();
@@ -524,9 +568,9 @@ void RevertRrConfig(Context& ctx, const wstring& dir, Record& m, std::vector<wst
         } else if (err == ERROR_TOO_MANY_LINKS) {
             Fail(file + L" has another name (a hard link), and writing through it would change that file too");
         } else if (err == ERROR_NOT_SUPPORTED) {
-            Fail(file + L" is a link or a folder now, not a plain file");
+            Fail(file + L" is a link or a folder now, not a plain file" + (held.ReadOnlyLost() ? L"; its read-only attribute could not be set again, so it is not read-only now" : L""));
         } else {
-            Fail(L"Cannot open " + file + L": " + ErrText(err) + L" (another program may have it open)");
+            Fail(L"Cannot open " + file + L": " + ErrText(err) + L" (another program may have it open)" + (held.ReadOnlyLost() ? L"; its read-only attribute could not be set again, so it is not read-only now" : L""));
         }
         if (!fix.folder.empty())  // the folders the fix made, when nothing else is in them
             for (wstring d = Parent(file); d.size() >= fix.folder.size() && IsDir(d); d = Parent(d)) {

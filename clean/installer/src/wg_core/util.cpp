@@ -202,7 +202,10 @@ bool PinnedFile::Open(const wstring& path, bool forWrite, DWORD* err) {
     // (the open fails, it is another file, or the caller leaves it: Close).
     const bool readOnly = forWrite && (pi.dwFileAttributes & FILE_ATTRIBUTE_READONLY);
     if (readOnly && !SetAttrsByHandle(probe, pi.dwFileAttributes & ~FILE_ATTRIBUTE_READONLY)) return fail(GetLastError());
-    auto giveUp = [&](DWORD e) { if (readOnly) SetAttrsByHandle(probe, pi.dwFileAttributes); return fail(e); };
+    auto giveUp = [&](DWORD e) {  // (a read-only bit that cannot be put back is noted: ReadOnlyLost)
+        if (readOnly && !SetAttrsByHandle(probe, pi.dwFileAttributes)) readOnlyLost_ = true;
+        return fail(e);
+    };
     const DWORD access = GENERIC_READ | DELETE | FILE_WRITE_ATTRIBUTES | (forWrite ? GENERIC_WRITE : 0);
     h_ = CreateFileW(path.c_str(), access, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
     if (h_ == INVALID_HANDLE_VALUE) return giveUp(GetLastError());
@@ -216,13 +219,16 @@ bool PinnedFile::Open(const wstring& path, bool forWrite, DWORD* err) {
     restoreAttrs_ = readOnly ? pi.dwFileAttributes : 0;
     return true;
 }
-void PinnedFile::Close() {
+bool PinnedFile::Close() {
+    bool ok = true;
     if (h_ != INVALID_HANDLE_VALUE) {
-        if (restoreAttrs_) SetAttrsByHandle(h_, restoreAttrs_);  // the file was not changed: its read-only bit is as it was
+        if (restoreAttrs_) ok = SetAttrsByHandle(h_, restoreAttrs_);  // the file was not changed: its read-only bit is as it was
+        if (!ok) readOnlyLost_ = true;
         CloseHandle(h_);
     }
     h_ = INVALID_HANDLE_VALUE;
     restoreAttrs_ = 0;
+    return ok;
 }
 wstring PinnedFile::Sha256() { return h_ == INVALID_HANDLE_VALUE ? wstring() : HashHandle(h_); }
 bool PinnedFile::Delete(DWORD* err) {

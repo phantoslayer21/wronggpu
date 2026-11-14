@@ -112,12 +112,17 @@ public:
     // Replaces the bytes through the handle (forWrite) with `data`: the conditional write of a file that was hashed through this
     // same handle (a settings migration). The file's attributes stay.
     bool OverwriteBytes(const void* data, size_t size, DWORD* err = nullptr);
-    void Close();  // a read-only bit that Open cleared for a write that did not happen is put back
+    // A read-only bit that Open cleared for a write that did not happen is put back. false: that failed (the file stays
+    // writable; ReadOnlyLost then says so too).
+    bool Close();
+    // A read-only bit this object cleared could not be put back (by a failed Open or by Close): the file is writable now.
+    bool ReadOnlyLost() const { return readOnlyLost_; }
 
 private:
     bool CopyFrom(HANDLE src, const wstring& srcSha, DWORD* err);
     HANDLE h_ = INVALID_HANDLE_VALUE;
-    DWORD restoreAttrs_ = 0;  // the attributes to put back on Close (a read-only file that Open made writable); 0: none
+    DWORD restoreAttrs_ = 0;
+    bool readOnlyLost_ = false;  // the attributes to put back on Close (a read-only file that Open made writable); 0: none
 };
 enum class DeleteIf { Deleted, Gone, Changed, Failed };
 // Deletes path when its bytes are one of `shas` (pinned: hashed and deleted through one handle). Gone: nothing was there.

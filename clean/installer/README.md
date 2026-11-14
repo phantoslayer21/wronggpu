@@ -305,11 +305,16 @@ With the defaults nothing of this section changes the installer.
     The corrected bytes never go over the file in place: they are written into a new file in the same folder, flushed and
     read back; the held file is read again and must still hold the bytes the correction was computed from; then
     `ReplaceFileW` puts the new file at the name and keeps the original's attributes, ACL and creation time. A stop or a
-    power cut leaves the old file or the new one, whole. The window that remains: the handle is closed just before the
-    replace (the replace needs the file unshared). A program that changes `Engine.ini` in that moment has its version moved
-    aside by the replace; WrongGPU checks it against the bytes it read and, when they differ, puts that version back at the
-    name and says so (that program's file wins, the line may still be in it). A stop right after the replace can leave the
-    old bytes next to it as `Engine.ini.wronggpu-old`. When the file is gone, the player's copy is created only where
+    power cut leaves the old file or the new one, whole. The window that remains: the handles on the file and on the copy
+    are closed just before the replace (the replace needs both unshared), so neither is trusted after it. The live file is
+    then held and must hash to the corrected bytes; when it does not (the copy was swapped or changed before the replace, or
+    `Engine.ini` changed after it), it is left as it is and never overwritten, the file it replaced stays beside it as
+    `Engine.ini.wronggpu-old`, and the result says so. When it does, the replaced file is checked against the bytes WrongGPU
+    read: a program that changed `Engine.ini` in that moment has its version written back through the held, verified file
+    (that program's file wins, the line may still be in it) and the result says so. A stop right after the replace can leave
+    the old bytes next to it as `Engine.ini.wronggpu-old`. A failed replace puts the read-only attribute back, and the
+    result says when that fails. When taking out WrongGPU's line leaves nothing (the player deleted their own settings
+    since), the file stays, empty: the backup from before the fix is never put back over it. When the file is gone, the player's copy is created only where
     nothing is: a file another program created meanwhile stays, the copy is kept in `wronggpu-setup\rr-config`, and the
     result says where. A hard-linked or linked `Engine.ini` is not written; the result says to take the line out by hand.
     The read-only attribute goes back as the player had it; when that fails, the result says so and the backup stays. The
