@@ -41,11 +41,17 @@ CASES = C32.CASES + [(96, 160, (2, 2)), (240, 432, (0, 2))]
 
 
 def prepare(build, rocm):
-    from clean.runner.hip import hip_child_environment
     C32.compile_kernels(build, rocm, with_swin=True)
+    return prepare_replay(build, rocm, D3D12_KERNELS + CONTROL_KERNELS)
+
+
+def prepare_replay(build, rocm, kernels):
+    """The D3D12 ports `kernels` (and native_fill, the device's memset) into <build>/dx12, and kernel_replay.exe."""
+    from clean.runner.hip import hip_child_environment
     env, _ = hip_child_environment(rocm_dir=rocm)
+    names = list(kernels) + ([] if "native_fill" in kernels else ["native_fill"])
     subprocess.check_call([sys.executable, os.path.join(ROOT, "clean", "dx12", "build_dx12.py"), "--out", build,
-                           "--only", ",".join(D3D12_KERNELS + CONTROL_KERNELS), "-j", "1"], env=env, cwd=ROOT)
+                           "--only", ",".join(names), "-j", "1"], env=env, cwd=ROOT)
     rt = os.path.join(ROOT, "clean", "runtime")
     conv = os.path.join(ROOT, "clean", "converter", "src")
     exe = os.path.join(build, "kernel_replay.exe")
