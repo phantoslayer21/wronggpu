@@ -30,11 +30,21 @@ and starts filled with its run's own sentinel (HIP `0xA5`, D3D12 `0x5A`); the de
 slack must keep its sentinel; special values are among the inputs; a negative control (the port given another input
 than HIP) must be caught; Model M's `scale_rgb` runs through the same replay as a control. Output: counts and verdicts.
 
-Families: `narrow` (the narrow network stages of `k_block.co`: `k_stage_e2`, `k_stage_e0`, `k_stage_e1`, `k_stage_d2`,
+Families: `output` (the output stage of `k_io.co`: `k_out_color` followed by `k_out_pixel_c` or `k_out_pixel`, the
+three game-output formats (RGBA32F, RGBA16F rows, RGB32F), colour alphas that are negative, above 1 or out of the FP16
+range, special values in the colour, depth, motion and head map; the stored colour taps and the filter-tap values of
+`k_out_color` are compared as well as the image and the histories; the raw bytes are identical in every case; the `_f`
+kernels of `k_fast` and `k_out_hidden` are not ported); `input` (the exact tiled input stage `kx/k_in_tiled` of `k_io_exact.co`: 16 flag sets of HDR, low-resolution
+motion, inverted depth and reset, odd and tiny base grids down to 1 x 1, the exposure scalars from a device buffer as the
+runtime passes them, infinity, huge values, zero and -0 in the colour, depth, motion and histories, NaN in a third of
+the cases; the raw bytes are identical in every case; the port needs the adapter's binary64 fma and division (manifest
+`fp64: ext`, dropped on an adapter without them), and flushes FP32 denormals); `narrow` (the narrow network stages of `k_block.co`: `k_stage_e2`, `k_stage_e0`, `k_stage_e1`, `k_stage_d2`,
 `k_stage_d1`, `k_stage2_e0`, `k_stage2_e1`, `k_stage2_d1`, `k_stage2_d0_hp`, `k_stage2_d0_hidden`) on random stage weights
 and inputs, the stage runner's launch plans run on HIP and replayed on D3D12 (`k_plan_bridge.py`); the inputs of every
 third case carry special values (infinity, +-65504, zero, -0, subnormals) and of every third case NaN as well; the
-half-grid control launches a stage with half its workgroups. `expo` (`k_expo_scalars`) against `k_io.co`; `warm`
+half-grid control launches a stage with half its workgroups. `wide` (the wide stages of `k_block_wide.co`:
+`k_stagew2_e3`, `k_stagew4_e4`, `k_stagew2_e4`, `k_stagew4_m`, `k_stagew4_d4`, `k_stagew2_d4`, `k_stagew2_d3`: one window
+per 128 NG lanes) is checked the same way. `expo` (`k_expo_scalars`) against `k_io.co`; `warm`
 (`k_warm`, a cache warm-up with no HIP kernel: checked against its definition, through the struct argument path).
 
 NaN: IEEE 754 does not define the sign or payload of a NaN, and where a NaN is generated or propagated the two devices

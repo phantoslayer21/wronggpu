@@ -18,7 +18,11 @@ bytes. The rules are the Model L checks' (clean/l/runner/l_fold_check.py):
   the half-grid control (the port again with half its workgroups) is used by the families whose grid has more than one
   workgroup;
 - Model M's scale_rgb (frame.co, its port already proven) runs through the same replay as a control.
-The families: narrow = the narrow network stages (k_block.co: k_stage_e2 .. k_stage2_d0_hidden; the stage runner's
+The families: output = the output stage (k_io.co: k_out_color with k_out_pixel_c or k_out_pixel) on the same frame
+flags, the three game-output formats (RGBA32F, RGBA16F rows, RGB32F), colour alphas that are negative, above 1 or out of the
+FP16 range, special values in the colour, depth, motion and head; input = the exact tiled input stage (k_io_exact.co, kx/k_in_tiled) on frames of every flag combination (HDR,
+low-resolution motion, inverted depth, reset), odd and tiny base grids, exposure scalars from a device buffer, special values
+in the colour, depth, motion and histories (the same three levels as the stage families); wide = the wide network stages (k_block_wide.co: k_stagew<NG>_e3 .. _d3), as narrow; narrow = the narrow network stages (k_block.co: k_stage_e2 .. k_stage2_d0_hidden; the stage runner's
 launch plans, clean/k/dx12/k_plan_bridge.py), on random stage weights and inputs with special values (NaN, infinity,
 +-65504, zero, -0, subnormal) in every other case; expo = k_expo_scalars against k_io.co (HIP); warm = k_warm (D3D12 only, no HIP kernel: it is checked
 against its own definition, the dummy word is written exactly when the key equals a lane's loaded value).
@@ -49,7 +53,11 @@ CONTROL = "scale_rgb"   # Model M, frame.co
 NARROW_KERNELS = ["k_stage_e2", "k_stage_e0", "k_stage_e1", "k_stage_d2", "k_stage_d1", "k_stage2_e0", "k_stage2_e1",
                   "k_stage2_d1", "k_stage2_d0_hp", "k_stage2_d0_hidden"]
 FAMILY_KERNELS = {"expo": (["k_io.co"], ["k_expo_scalars"]), "warm": ([], ["k_warm"]),
-                  "narrow": (["k_block.co"], NARROW_KERNELS)}
+                  "narrow": (["k_block.co"], NARROW_KERNELS),
+                  "input": (["k_io_exact.co"], ["kx/k_in_tiled"]),
+                  "output": (["k_io.co"], ["k_out_color", "k_out_pixel_c", "k_out_pixel"]),
+                  "wide": (["k_block_wide.co"], ["k_stagew2_e3", "k_stagew4_e4", "k_stagew2_e4", "k_stagew4_m",
+                                                 "k_stagew4_d4", "k_stagew2_d4", "k_stagew2_d3"])}
 CONTROL_CO = "frame.co"
 
 
@@ -321,11 +329,21 @@ def narrow_inputs(stage, size, rng, specials):
     return x, skip
 
 
+# the wide stage kernels (k_block_wide.co: k_stagew<NG>_<stage>, 128 NG lanes per window) the runtime launches:
+# kernel -> (stage, stage-runner suffix, None)
+WIDE = {"k_stagew2_e3": ("e3", "@wide2", None), "k_stagew4_e4": ("e4", "@wide4", None),
+        "k_stagew2_e4": ("e4", "@wide2", None), "k_stagew4_m": ("m", "@wide4", None),
+        "k_stagew4_d4": ("d4", "@wide4", None), "k_stagew2_d4": ("d4", "@wide2", None),
+        "k_stagew2_d3": ("d3", "@wide2", None)}
+# block-level grids (W, H) of the wide stages: fewer windows than a workgroup, ragged edges, more windows than the GPU runs at once
+WIDE_SIZES = [(8, 8), (16, 24), (13, 9), (24, 16), (33, 17), (12, 20)]
+
+
 def itemsize(name):
     return 4 if name == "out" else 2
 
 
-def run_narrow(build, rocm, seeds, cdir, hip, only=None):
+def run_stages(table, co_name, tag, build, rocm, seeds, cdir, hip, grid_list=None, only=None):
     from clean.k.reference.layout import STAGE
     from clean.k.reference.network import random_stage_params
     from clean.k.runner import k_launch as KL
@@ -335,14 +353,15 @@ def run_narrow(build, rocm, seeds, cdir, hip, only=None):
     items, lines, neg = [], [], None
     for si, seed in enumerate(seeds):
         rng = np.random.default_rng(seed)
-        for kernel, (stage, suffix, d0) in NARROW.items():
+        for kernel, (stage, suffix, d0) in table.items():
             if only and kernel not in only:
                 continue
             st = STAGE[stage]
-            for ci in range(len(NARROW_SIZES)):
-                size, offset = NARROW_SIZES[ci], NARROW_OFFSETS[(ci + si) % len(NARROW_OFFSETS)]
+            grids = grid_list or NARROW_SIZES
+            for ci in range(len(grids)):
+                size, offset = grids[ci], NARROW_OFFSETS[(ci + si) % len(NARROW_OFFSETS)]
                 special = ci % 3   # 0 none, 1 specials without NaN, 2 with NaN
-                name = f"nar_s{si}_{kernel}_{ci}"
+                name = f"{tag}_s{si}_{kernel}_{ci}"
                 blob = k_stages.pack(stage, random_stage_params(st, rng))
                 x, skip = narrow_inputs(stage, size, rng, special)
                 pdev = PB.PlanDev(hip.h)
@@ -368,12 +387,12 @@ def run_narrow(build, rocm, seeds, cdir, hip, only=None):
                     sizes = {n: pdev.sizes[plan["bufs"][n]] for n in outputs}
                     got = {n: bytes(hip.h.download(plan["bufs"][n], sizes[n] + SLACK)) for n in outputs}
                     defined = {n: min(int(np.prod(sh)) * itemsize(n), sizes[n]) for n, sh in plan["outputs"]}
-                    lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k.split(":")[-1]], cdir, ["k_block.co"],
+                    lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k], cdir, [co_name],
                                             outputs)
                     if neg is None and plan["launches"][0][1] >= 4:   # the dropped windows hold output pixels
                         neg = name
-                        lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k.split(":")[-1]], cdir,
-                                                ["k_block.co"], outputs, prefix="negative_", grid_div=2)
+                        lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k], cdir,
+                                                [co_name], outputs, prefix="negative_", grid_div=2)
                     items.append({"case": name, "kernel": kernel, "stage": stage, "size": list(size),
                                   "offset": list(offset), "specials": special, "outputs": outputs, "hip": got,
                                   "defined": defined})
@@ -405,7 +424,8 @@ def check_narrow(state, read):
         if not raw and it["specials"] == 2:   # NaN inputs: a NaN's sign / payload is not defined (see nan_equivalent_differ)
             for n, v in per.items():
                 if not v["identical"] and v["slack_bad"] == 0:
-                    d, same = nan_equivalent_differ(read(f"{it['case']}.{n}.d3d12"), it["hip"][n], it["defined"][n])
+                    d, same = nan_equivalent_differ(read(f"{it['case']}.{n}.d3d12"), it["hip"][n], it["defined"][n],
+                                                    it.get("widths", {}).get(n, 2))
                     v["differ_outside_nan"], v["nan_elements_differing_in_sign"] = d, same
                     nan_only += same
         ok_case = raw or all(v["identical"] or (v["slack_bad"] == 0 and v.get("differ_outside_nan", 1) == 0)
@@ -432,6 +452,160 @@ def check_narrow(state, read):
             "failures": [o for o in out if not o["identical"]][:4]}, ok
 
 
+# ---- family input: the exact tiled input stage (k_io_exact.co) -----------------------------------------------------
+
+INPUT_BASES = [(1, 1), (7, 9), (8, 8), (9, 7), (33, 17)]
+INPUT_FLAG_SETS = [(h, m, i, r) for h in (True, False) for m in (True, False) for i in (True, False)
+                   for r in (False, True)]
+
+
+def input_specials(x, rng, level):
+    """level 1: infinity, huge, zero and -0 values in the colour, depth and motion, and non-finite history; level 2: NaN
+    as well (in the colour, depth, motion and histories)."""
+    pool = [np.inf, -np.inf, 3.0e38, -3.0e38, 0.0, -0.0, 65504.0, -65504.0, 1e-30]
+    if level == 2:
+        pool += [np.nan]
+    pool = np.array(pool, np.float32)
+    for k in ("color", "depth", "motion"):
+        a = x[k]
+        pick = rng.random(a.shape) < 0.004
+        a[pick] = rng.choice(pool, int(pick.sum()))
+    for k in ("Hc", "Hh"):
+        a = x[k]
+        pick = rng.random(a.shape) < 0.01
+        a[pick] = rng.choice(pool.astype(np.float32), int(pick.sum())).astype(np.float16)
+
+
+def run_input(build, rocm, seeds, cdir, hip):
+    from clean.k.dx12 import k_plan_bridge as PB
+    from clean.k.runner import k_io, k_stages
+    from clean.k.tests.test_k_io_emu import frame
+    tokens = PB.manifest_args(build)
+    items, lines, neg = [], [], None
+    for si, seed in enumerate(seeds):
+        rng = np.random.default_rng(seed + 500)
+        for ci, (hdr, mvlo, inv, reset) in enumerate(INPUT_FLAG_SETS):
+            base = INPUT_BASES[(ci + si) % len(INPUT_BASES)]
+            special = (ci // 2) % 3   # 0 none, 1 specials without NaN, 2 with NaN
+            name = f"inp_s{si}_{ci}"
+            x = frame(rng, hdr, mvlo, inv, reset=reset, base=base)
+            x["base"] = base
+            x.update(E_cur=1.5, E_prev=1.0, E_aux=0.75, pre_exposure=2.0)
+            if special:
+                input_specials(x, rng, special)
+            pdev = PB.PlanDev(hip.h)
+            plan = k_stages.prepare(pdev, "input@exact", b"", x, None, None)
+            try:
+                prm = plan["launches"][-1][3][0]
+                # the exposure scalars come from a device buffer, as in the runtime (the host values are wrong on purpose)
+                xs = np.array([prm.f.kappa, prm.f.rho, prm.f.lam, np.float32(1.0) / np.float32(prm.f.kappa)], np.float32)
+                ptr = pdev.malloc(xs.nbytes)
+                pdev.upload(ptr, xs.tobytes())
+                plan["bufs"]["xs"], plan["sizes"]["xs"] = ptr, xs.nbytes
+                prm.f.xs = ptr
+                prm.f.kappa, prm.f.rho, prm.f.lam = -17.0, 7.0, 9.0
+                bufs = {n: getattr(prm, n) for n in ("Hc", "Hh", "x0", "cpre", "cpre2")}
+                plan["launches"] = k_io.input_launches(prm.f, bufs, exact=True, tiled=True)
+                if len(plan["launches"]) != 1:
+                    continue   # unsupported geometry: the runtime falls back to HIP's untiled pair
+                if reset:   # a reset frame reads no history, motion or depth
+                    act = plan["launches"][0][3][0]
+                    act.Hc = act.Hh = None
+                    act.f.motion = act.f.depth = None
+                outputs = [n for n, _ in plan["outputs"]]
+                for n, p in plan["bufs"].items():
+                    if p in pdev.inputs:
+                        write(os.path.join(cdir, f"{name}.{n}.in"), bytes(hip.h.download(p, pdev.sizes[p])))
+                for k, grid, block, a in plan["launches"]:
+                    co, kernel = k.split(":")
+                    hip.h.launch(hip.h.get_function(hip.mods[co], kernel), grid, block, a)
+                hip.h.sync()
+                sizes = {n: pdev.sizes[plan["bufs"][n]] for n in outputs}
+                got = {n: bytes(hip.h.download(plan["bufs"][n], sizes[n] + SLACK)) for n in outputs}
+                defined = {n: min(int(np.prod(sh)) * 2, sizes[n]) for n, sh in plan["outputs"]}
+                kw = dict(modules=["k_io_exact.co kx"], outputs=outputs, d3d12_name=lambda k: "kx/" + k.split(":")[-1])
+                lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k], cdir, **kw)
+                if neg is None and plan["launches"][0][1] >= 4 and not reset:
+                    neg = name
+                    lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k], cdir, prefix="negative_", grid_div=2,
+                                            **kw)
+                items.append({"case": name, "kernel": "kx/k_in_tiled", "stage": "input", "size": list(base),
+                              "offset": [0, 0], "specials": special, "outputs": outputs, "hip": got, "defined": defined})
+            finally:
+                for p in plan["bufs"].values():
+                    pdev.free(p)
+    return items, lines, neg
+
+
+# ---- family output: the output stage (k_io.co) ---------------------------------------------------------------------
+
+OUT_BYTES = {0: 16, 1: 8, 2: 12}   # bytes per pixel of KOutParams.omode 0 RGBA32F, 1 RGBA16F rows, 2 RGB32F
+
+
+def run_output(build, rocm, seeds, cdir, hip):
+    from clean.k.dx12 import k_plan_bridge as PB
+    from clean.k.runner import k_io, k_stages
+    from clean.k.tests.test_k_io_emu import frame
+    tokens = PB.manifest_args(build)
+    items, lines, neg = [], [], None
+    for si, seed in enumerate(seeds):
+        rng = np.random.default_rng(seed + 900)
+        for ci, (hdr, mvlo, inv, reset) in enumerate(INPUT_FLAG_SETS):
+            base = INPUT_BASES[(ci + si) % len(INPUT_BASES)]
+            special = (ci // 2) % 3
+            omode, compact = (ci + si) % 3, (ci // 3 + si) % 2 == 0
+            name = f"out_s{si}_{ci}"
+            x = frame(rng, hdr, mvlo, inv, reset=reset, base=base)
+            x["base"] = base
+            # the colour input's alpha: negative, above 1 and out of the FP16 range values among them
+            x["color"][..., 3] = rng.uniform(-1.0, 2.0, x["color"].shape[:2]).astype(np.float32)
+            x["color"][rng.random(x["color"].shape[:2]) < 0.01, 3] = 7e4
+            if special:
+                input_specials(x, rng, special)
+                x["N"][rng.random(x["N"].shape) < 0.002] = np.array(np.inf if special == 1 else np.nan, np.float16)
+            pdev = PB.PlanDev(hip.h)
+            plan = k_stages.prepare(pdev, "output@compact" if compact else "output", b"", x, None, None)
+            try:
+                launches = [ln for ln in plan["launches"] if ln[0] != "k_out_hidden"]
+                prm = launches[0][3][0]
+                xs = np.array([prm.f.kappa, prm.f.rho, prm.f.lam, np.float32(1.0) / np.float32(prm.f.kappa)], np.float32)
+                ptr = pdev.malloc(xs.nbytes)
+                pdev.upload(ptr, xs.tobytes())
+                plan["bufs"]["xs"], plan["sizes"]["xs"] = ptr, xs.nbytes
+                prm.f.xs = ptr
+                prm.f.kappa, prm.f.rho, prm.f.lam = -17.0, 7.0, 9.0
+                prm.omode, prm.opitch = omode, prm.f.W
+                plan["launches"] = launches
+                W, H = prm.f.W, prm.f.H
+                plan["outputs"] = [(n, sh) for n, sh in plan["outputs"] if n != "Hhout"]   # k_out_hidden is not ported
+                # k_out_color's own results too: the stored colour tap (4 FP16) and the filter-tap value (FP16) per pixel
+                plan["outputs"] += [("ctap", (prm.f.rh, prm.f.rw, 4)), ("ctapT", (prm.f.rh, prm.f.rw))]
+                outputs = [n for n, _ in plan["outputs"]]
+                for n, p in plan["bufs"].items():
+                    if p in pdev.inputs:
+                        write(os.path.join(cdir, f"{name}.{n}.in"), bytes(hip.h.download(p, pdev.sizes[p])))
+                for k, grid, block, a in plan["launches"]:
+                    hip.h.launch(hip.h.get_function(hip.mods["k_io.co"], k), grid, block, a)
+                hip.h.sync()
+                sizes = {n: pdev.sizes[plan["bufs"][n]] for n in outputs}
+                got = {n: bytes(hip.h.download(plan["bufs"][n], sizes[n] + SLACK)) for n in outputs}
+                defined = {n: min(int(np.prod(sh)) * 2, sizes[n]) for n, sh in plan["outputs"]}
+                defined["out"] = W * H * OUT_BYTES[omode]
+                kw = dict(modules=["k_io.co"], outputs=outputs)
+                lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k], cdir, **kw)
+                if neg is None and plan["launches"][1][1] >= 4 and not reset:
+                    neg = name
+                    lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k], cdir, prefix="negative_", grid_div=2,
+                                            **kw)
+                items.append({"case": name, "kernel": "k_out_pixel_c" if compact else "k_out_pixel", "stage": "output",
+                              "size": list(base), "offset": [0, 0], "specials": special, "outputs": outputs,
+                              "hip": got, "defined": defined, "widths": {"out": 2 if omode == 1 else 4}})
+            finally:
+                for p in plan["bufs"].values():
+                    pdev.free(p)
+    return items, lines, neg
+
+
 # ---- run -----------------------------------------------------------------------------------------------------------
 
 def run(build, rocm, families, seeds, json_out):
@@ -450,8 +624,17 @@ def run(build, rocm, families, seeds, json_out):
         state["warm"] = run_warm(build, rocm, seeds, cdir, hip)
         lines += state["warm"][1]
     if "narrow" in families:
-        state["narrow"] = run_narrow(build, rocm, seeds, cdir, hip)
+        state["narrow"] = run_stages(NARROW, "k_block.co", "nar", build, rocm, seeds, cdir, hip)
         lines += state["narrow"][1]
+    if "input" in families:
+        state["input"] = run_input(build, rocm, seeds, cdir, hip)
+        lines += state["input"][1]
+    if "output" in families:
+        state["output"] = run_output(build, rocm, seeds, cdir, hip)
+        lines += state["output"][1]
+    if "wide" in families:
+        state["wide"] = run_stages(WIDE, "k_block_wide.co", "wid", build, rocm, seeds, cdir, hip, WIDE_SIZES)
+        lines += state["wide"][1]
     # the control: Model M's scale_rgb, same replay, against HIP
     rng = np.random.default_rng(seeds[0])
     cn = 1000
@@ -504,9 +687,10 @@ def run(build, rocm, families, seeds, json_out):
                 fails.append(it["case"])
         res["results"]["warm"] = {"cases": len(state["warm"][0]), "as_defined": good, "failures": fails[:5]}
         ok = ok and good == len(state["warm"][0]) and good > 0
-    if "narrow" in state:
-        res["results"]["narrow"], good = check_narrow(state["narrow"], read)
-        ok = ok and good
+    for fam in ("narrow", "wide", "input", "output"):
+        if fam in state:
+            res["results"][fam], good = check_narrow(state[fam], read)
+            ok = ok and good
     ctl_got = read("ctl.out")
     ctl = compare(ctl_got, h[0], 1000 * 4, D3D12_SENTINEL, HIP_SENTINEL)
     res["control"] = {"kernel": CONTROL, "identical": bool(ctl["identical"]), "differ": ctl["differ"],
