@@ -221,9 +221,12 @@ struct Perm {
 // model of that preset. A map names its preset in the optional top-level field "preset"; a map without it gets the preset
 // its version had before the field existed (versions 1 and 4: M; 2 and 3: K; 5: F), so the shipped maps load as before.
 struct PresetInfo {
-    const char* name;              // "M", "K", "F", "L"
+    const char* name;              // "M", "K", "F", "L", "FG"
     unsigned versions;             // bit v set: map version v is allowed for this preset
     const char* no_model_message;  // api.cpp kMsgNoPreset*: the DLL has no model of this preset
+    // Map versions 1 and 4: the sources a map of this preset must have, by name (M and L: W, D and K). Preset FG names
+    // none: its sources are the frame-generation library's weight blobs, each with its own name.
+    std::vector<std::string> required_sources;
     bool allows(int version) const { return version >= 0 && version < 32 && (versions >> version & 1u) != 0; }
 };
 // The known presets, in a fixed order; find_preset: by name (exact, upper case), nullptr when unknown.
@@ -253,7 +256,8 @@ struct Map {
     int find_source(const std::string& name) const;
     int find_array(const std::string& name) const;
     // The preset the player messages name, as one letter (the first of preset_name; without one, by the version as before:
-    // 'M' for versions 1 and 4, 'K' for versions 2 and 3, 'F' for 5).
+    // 'M' for versions 1 and 4, 'K' for versions 2 and 3, 'F' for 5). Not unique: preset FG also gives 'F'; code that
+    // must tell presets apart uses preset_name or preset_info().
     char preset() const {
         if (!preset_name.empty()) return preset_name[0];
         const std::string p = preset_for_version(version);

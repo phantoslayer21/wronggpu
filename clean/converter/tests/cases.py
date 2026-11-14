@@ -589,3 +589,115 @@ def flip_bit(data, offset, bit=0):
     b = bytearray(data)
     b[offset] ^= 1 << bit
     return bytes(b)
+
+
+# ---------------------------------------------------------------- frame generation (#96): preset FG
+
+def _fg_layout():
+    """clean/fg/layout.py: the frame-generation weight layout (structure only)."""
+    import os
+    import sys
+    root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from clean.fg import layout
+    return layout
+
+
+def _small_halves(rng, n):
+    """n random finite binary16 patterns with |x| < 2 (exponent field at most 15), fast."""
+    from array import array
+    a = array("H", rng.randbytes(2 * n))
+    a = array("H", (x & 0xBFFF for x in a))
+    if struct.pack("<H", 1) != b"\x01\x00":
+        a.byteswap()
+    return a.tobytes()
+
+
+FG_NAN = struct.pack("<H", 0x7E00)  # a quiet NaN: decoding it is an error, so an area holding it must never be read
+
+
+def fg_blobs(rng):
+    """Our own random blobs in the frame-generation layout (clean/fg/layout.py), in upload order: {name: bytes}.
+    net1: random weights; the zero area and bias copies 1..15 hold NaN (a converter that reads them fails), copy 0 of
+    the bias is random. net2: random weight and bias blobs. Nothing comes from a real file."""
+    L = _fg_layout()
+    out = {}
+    for l in L.NET1:
+        bias = bytearray(FG_NAN * l.bias_elements)
+        b0 = _small_halves(rng, l.out)
+        for c in range(l.out):
+            e = L.net1_bias_index(c)
+            bias[2 * e: 2 * e + 2] = b0[2 * c: 2 * c + 2]
+        out[l.name] = _small_halves(rng, l.weight_elements) + FG_NAN * l.weight_elements + bytes(bias)
+    for l in L.NET2:
+        out[l.name + "_w"] = _small_halves(rng, l.weight_elements)
+        out[l.name + "_b"] = _small_halves(rng, l.out)
+    for b in L.blobs():
+        assert len(out[b.name]) == b.nbytes
+    return out
+
+
+def fg_map(blobs, label="synthetic FG label", key_from="net1_01"):
+    """A version-1 map with "preset": "FG" for the blobs of fg_blobs: one block source per blob (map order = upload
+    order) and one stage per layer. The tensor layout is a stand-in (weights as [out, K] rows, net1's bias as copy 0
+    of each group of 8, net2's bias as [out]); the spec side's map defines the real names, axis order and stages."""
+    L = _fg_layout()
+    m = {
+        "format": "wronggpu-converter-map",
+        "version": 1,
+        "model": "synthetic frame-generation case",
+        "preset": "FG",
+        "channel_order": "natural",
+        "sources": {b.name: source_entry(b.name, "fake frame-generation weight blob", "f16le", blobs[b.name])
+                    for b in L.blobs()},
+        "key": {"label": label, "from": key_from},
+        "perms": {},
+        "stages": [],
+    }
+    f16 = {"name": "f16"}
+    for l in L.NET1:
+        m["stages"].append({"stage": l.name, "digest": "", "tensors": [
+            tensor("W", [l.out, l.k], "float32", l.name, f16, 0, [lin(l.k), lin(1)]),
+            tensor("b", [l.out // L.NET1_BIAS_GROUP, L.NET1_BIAS_GROUP], "float32", l.name, f16, l.bias_offset,
+                   [lin(L.NET1_BIAS_GROUP * L.NET1_BIAS_COPIES), lin(1)]),
+        ]})
+    for l in L.NET2:
+        m["stages"].append({"stage": l.name, "digest": "", "tensors": [
+            tensor("W", [l.out, 9 * l.cin], "float32", l.name + "_w", f16, 0, [lin(9 * l.cin), lin(1)]),
+            tensor("b", [l.out], "float32", l.name + "_b", f16, 0, [lin(1)]),
+        ]})
+    return m
+
+
+def fg_case(seed=41, drop=(), decoy="net2_07_w"):
+    """A synthetic frame-generation library: random bytes holding the 67 blobs of fg_blobs in a shuffled order, at
+    16-aligned, even and odd offsets, with a decoy of one blob (its first 64 bytes, then other bytes) before it.
+    drop: blob names left out of the file (the map still lists them). Returns the Case (placements: {blob: offset})."""
+    rng = random.Random(seed)
+    blobs = fg_blobs(rng)
+    m = fg_map(blobs)
+    order = list(blobs)
+    rng.shuffle(order)
+    buf = bytearray(rng.randbytes(4096))
+    placements = {}
+    for i, name in enumerate(order):
+        if name == decoy:
+            fake = bytearray(blobs[name])
+            fake[-1] ^= 0x01
+            buf += rng.randbytes(16 - len(buf) % 16) + fake
+        buf += rng.randbytes(rng.randrange(1, 64))
+        pad = (16 - len(buf) % 16) % 16 if i % 3 == 0 else (len(buf) % 2 if i % 3 == 1 else 1 - len(buf) % 2)
+        buf += rng.randbytes(pad)
+        if name in drop:
+            continue
+        placements[name] = len(buf)
+        buf += blobs[name]
+    buf += rng.randbytes(4096)
+    case = Case("fg")
+    case.file = bytes(buf)
+    case.map = m
+    case.sources = blobs
+    case.expected, case.key = finalize_map(m, blobs)
+    case.placements = placements
+    return case

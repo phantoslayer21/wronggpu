@@ -600,13 +600,21 @@ static void test_api_files(const fs::path& work) {
     CHECK(preset_for_version(1) == "M" && preset_for_version(4) == "M" && preset_for_version(2) == "K" && preset_for_version(3) == "K" &&
           preset_for_version(5) == "F" && preset_for_version(0).empty() && preset_for_version(6).empty());
     CHECK(find_preset("M") && find_preset("K") && find_preset("F") && !find_preset("m") && !find_preset("") && !find_preset("X") &&
-          known_presets().size() == 4);
+          known_presets().size() == 5);
     // preset L (#89): the map versions of preset M, its own message; never the preset of a map without the field
     CHECK(find_preset("L") && find_preset("L")->allows(1) && find_preset("L")->allows(4) && !find_preset("L")->allows(2) &&
           !find_preset("L")->allows(3) && !find_preset("L")->allows(5) && std::string(find_preset("L")->no_model_message) == kMsgNoPresetL &&
           std::string(kMsgNoPresetL) == "This DLSS file has no preset-L model. Version 310.5 or newer is needed.");
     CHECK(std::string(find_preset("M")->no_model_message) == kMsgNoPresetM && std::string(find_preset("K")->no_model_message) == kMsgNoPresetK &&
           std::string(find_preset("F")->no_model_message) == kMsgNoPresetF);
+    // preset FG (frame generation, #96): map version 1 only, its own message, no source required by name; M and L need
+    // W, D and K; never the preset of a map without the field
+    CHECK(find_preset("FG") && find_preset("FG")->allows(1) && !find_preset("FG")->allows(2) && !find_preset("FG")->allows(3) &&
+          !find_preset("FG")->allows(4) && !find_preset("FG")->allows(5) && find_preset("FG")->required_sources.empty() &&
+          std::string(find_preset("FG")->no_model_message) == kMsgNoPresetFG && !find_preset("fg") && !find_preset("G") &&
+          std::string(kMsgNoPresetFG) == "This DLSS Frame Generation file has no frame-generation model. Version 310.1 or newer is needed.");
+    CHECK(find_preset("M")->required_sources == std::vector<std::string>({"W", "D", "K"}) &&
+          find_preset("L")->required_sources == std::vector<std::string>({"W", "D", "K"}) && preset_for_version(1) != "FG");
     {
         auto with_preset = [&](const std::string& map, const std::string& version, const std::string& field) {
             std::string t = map;
@@ -642,6 +650,13 @@ static void test_api_files(const fs::path& work) {
             LoadedMap hm;
             CHECK(load_map_bytes(with_preset(u.map_v1, "1", "\"M\""), hm, sink, "L").code == kMapDamaged && !hm.map);
             CHECK(logged("the map names preset M, preset L was asked for") && logged("preset \"X\" asked for is not known"));
+            // preset FG: a version-1 map with or without the field (W, D and K are allowed, just not required); version 4 is not FG's
+            LoadedMap g1, g2, g3, g4;
+            CHECK(load_map_bytes(with_preset(u.map_v1, "1", "\"FG\""), g1, sink).code == kOk && g1.map && g1.map->preset_name == "FG" &&
+                  g1.map->preset_info() == find_preset("FG"));
+            CHECK(load_map_bytes(u.map_v1, g2, sink, "FG").code == kOk && g2.map && g2.map->preset_name == "FG" && !g2.map->preset_named);
+            CHECK(load_map_bytes(with_preset(u.map_v4, "4", "\"FG\""), g3, sink).code == kMapDamaged && !g3.map);
+            CHECK(load_map_bytes(u.map_v4, g4, sink, "FG").code == kMapDamaged && !g4.map);
         }
         for (const char* bad : {"\"K\"", "\"F\"", "\"X\"", "\"m\"", "\"l\"", "\"\"", "7", "null"}) {
             LoadedMap bm;

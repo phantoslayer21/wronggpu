@@ -405,6 +405,72 @@ def test_l_shaped(r, m_map_path):
             code == EXIT["no_preset_m"] and "This DLSS file has no preset-L model." in so, "code %d, out %r" % (code, so))
 
 
+MSG_NO_PRESET_FG = "This DLSS Frame Generation file has no frame-generation model. Version 310.1 or newer is needed."
+
+
+def test_fg(r):
+    """Frame generation (#96): a version-1 map with "preset": "FG" (cases.fg_map: one block source per weight blob, no W,
+    D or K) on a synthetic library holding our own random blobs in the frame-generation layout (clean/fg/layout.py:
+    17 + 50 blobs, the real byte sizes) in a shuffled order at aligned, even and odd offsets, with a decoy. Every tensor
+    is checked against the reference; net1's zero area and bias copies 1..15 hold NaN, so reading them would fail."""
+    t0 = time.time()
+    case = cases.fg_case()
+    mp = r.write("fg/map.json", case.map)
+    dll = r.write("fg/fake.dll", case.file)
+    out = r.path("fg", "out", "x")[:-2]
+    code, so, se = r.run(mp, [dll], out)
+    r.check("FG: exit 0", code == 0 and SUCCESS in so, so + se[-600:])
+    with open(mp, "rb") as f:
+        check_output(r, "FG", case, out, f.read())
+    r.check("FG: every blob found where it was placed", logged_offsets(se) == case.placements,
+            "%d of %d" % (sum(logged_offsets(se).get(k) == v for k, v in case.placements.items()), len(case.placements)))
+    r.check("FG: 42 stage digests match", "all 42 stage digests match" in se, se[-400:])
+    print("FG synthetic case: %.1f s" % (time.time() - t0))
+
+    # the preset by name: without the field the map would be preset M's (W, D and K required): damaged; --preset FG
+    # reads it as preset FG; a map naming FG with another --preset, or FG in a version-4 map: damaged
+    plain = copy.deepcopy(case.map)
+    del plain["preset"]
+    pp = r.write("fg/map-no-field.json", plain)
+    code, so, se = r.run(pp, [dll], r.path("fg", "out-fail", "x")[:-2])
+    r.check("FG map without its field and without --preset: preset M's sources missing -> converter data damaged",
+            code == EXIT["map_damaged"] and MSG["map_damaged"] in so and "missing source W" in se, so + se[-300:])
+    out2 = r.path("fg", "out-hint", "x")[:-2]
+    code, so, se = r.run(pp, [dll], out2, extra=["--preset", "FG"])
+    r.check("FG map without its field, --preset FG: converts", code == 0 and "preset FG" in se, so + se[-300:])
+    with open(pp, "rb") as f:
+        check_output(r, "FG via --preset", case, out2, f.read())
+    for asked in ("L", "M"):
+        code, so, se = r.run(mp, [dll], r.path("fg", "out-fail", "x")[:-2], extra=["--preset", asked])
+        r.check("FG map, --preset %s: converter data damaged" % asked, code == EXIT["map_damaged"], so)
+    v4 = copy.deepcopy(case.map)
+    v4["version"] = 4
+    code, so, se = r.run(r.write("fg/map-v4.json", v4), [dll], r.path("fg", "out-fail", "x")[:-2])
+    r.check("\"preset\": \"FG\" in a version-4 map: converter data damaged", code == EXIT["map_damaged"], so)
+
+    # missing blobs: the key's blob missing -> no frame-generation model (exit 12, FG's message); another blob missing ->
+    # not supported yet (exit 13), the log names it
+    no_key = cases.fg_case(seed=41, drop=("net1_01",))
+    code, so, se = r.run(mp, [r.write("fg/no-key.dll", no_key.file)], r.path("fg", "out-fail", "x")[:-2])
+    r.check("FG: a file without the key's blob: exit 12 with FG's message", code == 12 and MSG_NO_PRESET_FG in so,
+            "code %d, out %r" % (code, so))
+    one_less = cases.fg_case(seed=41, drop=("net2_25_b",))
+    code, so, se = r.run(mp, [r.write("fg/one-less.dll", one_less.file)], r.path("fg", "out-fail", "x")[:-2])
+    r.check("FG: a file without one blob: exit 13, the log names it",
+            code == EXIT["unsupported"] and MSG["unsupported"] in so and "missing sources: net2_25_b" in se, so + se[-300:])
+    r.check("FG: after the failures the first output is unchanged", os.path.exists(os.path.join(out, "model.wgcm")))
+
+    # a map that reads net1's zero area (or a bias copy other than 0) meets the test's NaN: exit 22. This shows the
+    # success case above really skipped them.
+    for label, fn in (("zero area", lambda t: t.update(base=t["shape"][0] * t["shape"][1])),
+                      ("bias copy 1", lambda t: t.update(base=t["base"] + 8))):
+        bad = copy.deepcopy(case.map)
+        st = bad["stages"][0]
+        fn(st["tensors"][0] if label == "zero area" else st["tensors"][1])
+        code, so, se = r.run(r.write("fg/reads-%s.json" % label.replace(" ", "-"), bad), [dll], r.path("fg", "out-fail", "x")[:-2])
+        r.check("FG map reading net1's %s: exit 22 (NaN)" % label, code == EXIT["bad_value"], so + se[-300:])
+
+
 def mutate(m, fn):
     m2 = copy.deepcopy(m)
     fn(m2)
@@ -1153,6 +1219,7 @@ def main():
     t0 = time.time()
     test_errors(r)
     test_preset_l(r)
+    test_fg(r)
     test_filter(r, args.t7)
     test_k_errors(r)
     if os.path.exists(args.map):
