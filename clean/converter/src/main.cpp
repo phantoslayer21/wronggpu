@@ -36,7 +36,7 @@ void usage() {
                  "  completely is used (for a map with an optional group, such as preset M's output filter: the\n"
                  "  first that has the group, if any has it). The map names its preset (field \"preset\", or by its\n"
                  "  version: 1 and 4 M, 2 and 3 K, 5 F). --preset names the preset the map is for: a map without the\n"
-                 "  field is read as that preset (data/preset-L.v1.map.json: --preset L); a map with it must agree.\n"
+                 "  field is read as that preset; a map with it must agree.\n"
                  "  --raw also writes <dir>/raw/<group>/<name>.bin for every tensor.\n";
 }
 

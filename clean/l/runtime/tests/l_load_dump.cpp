@@ -6,6 +6,8 @@
 //   l_load_dump load <model dir>
 //       wgrt::l::load_raw_model; prints "OK <stages>" and one line per loaded tensor, "<stage> <name> <values>
 //       <sha256 of the values' bytes>", or "ERR <message>"
+//   l_load_dump wgcm <model.wgcm> <map>
+//       wgrt::l::load_wgcm_model; the same output
 #include <cstdio>
 #include <map>
 #include <string>
@@ -24,10 +26,12 @@ int main(int argc, char** argv) {
       }
     return 0;
   }
-  if (mode == "load" && argc > 2) {
+  if ((mode == "load" && argc > 2) || (mode == "wgcm" && argc > 3)) {
     std::map<std::string, wgrt::StageTensors> model;
     std::string err;
-    if (!wgrt::l::load_raw_model(argv[2], &model, &err)) return std::printf("ERR %s\n", err.c_str()), 0;
+    if (mode == "load" ? !wgrt::l::load_raw_model(argv[2], &model, &err)
+                       : !wgrt::l::load_wgcm_model(argv[2], argv[3], &model, &err))
+      return std::printf("ERR %s\n", err.c_str()), 0;
     std::printf("OK %zu\n", model.size());
     for (const auto& [stage, tensors] : model)
       for (const auto& [name, t] : tensors) {

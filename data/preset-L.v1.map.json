@@ -2,6 +2,7 @@
  "format": "wronggpu-converter-map",
  "version": 1,
  "model": "super-resolution preset L (same model family as preset M)",
+ "preset": "L",
  "channel_order": "natural",
  "sources": {
   "W": {
@@ -41,21 +42,17 @@
   "dec0_values": [
    0,
    1,
-   10,
-   11,
-   12,
-   13,
-   14,
-   15,
-   16,
-   2,
-   3,
-   4,
-   5,
    6,
    7,
    8,
-   9
+   9,
+   10,
+   11,
+   12,
+   2,
+   3,
+   4,
+   5
   ]
  },
  "stages": [
@@ -3333,7 +3330,7 @@
      ]
     }
    ],
-   "note": "L uses all 32 projection outputs per sub-pixel (M: 17); the width-32 block (stage dec0_block) runs on them; 17 of the block outputs feed the spec-05 coefficient functions, expected at the positions perm dec0_values gives (to be confirmed by the reference test)."
+   "note": "L uses all 32 projection outputs per sub-pixel; the width-32 block (stage dec0_block) runs on them. 13 of the 32 block outputs feed the coefficient functions: perm dec0_values in role order A0, A1, A2, B0, B1, B2, Cx, Cy, Crho, latent candidate 0..3 (L has no latent gate); role i reads block channel dec0_values[i]."
   },
   {
    "stage": "post",
