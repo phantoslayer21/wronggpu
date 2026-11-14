@@ -638,45 +638,33 @@ def fg_blobs(rng):
     return out
 
 
-def fg_map(blobs, label="synthetic FG label", key_from="net1_01"):
-    """A version-1 map with "preset": "FG" for the blobs of fg_blobs: one block source per blob (map order = upload
-    order) and one stage per layer. The tensor layout is a stand-in (weights as [out, K] rows, net1's bias as copy 0
-    of each group of 8, net2's bias as [out]); the spec side's map defines the real names, axis order and stages."""
+def fg_map(fg_map_obj, layout_blobs):
+    """The delivered preset-FG map (data/fg.v1.map.json, parsed) with our own blobs in place of the real ones: every
+    stage, tensor, base, axis and offset stays as delivered; each source keeps its name and text but gets the hashes of
+    our blob. The map's sources are in upload order, so the n-th source is layout blob n (clean/fg/layout.py; the
+    lengths are checked). Returns (map, {source name: bytes})."""
     L = _fg_layout()
-    m = {
-        "format": "wronggpu-converter-map",
-        "version": 1,
-        "model": "synthetic frame-generation case",
-        "preset": "FG",
-        "channel_order": "natural",
-        "sources": {b.name: source_entry(b.name, "fake frame-generation weight blob", "f16le", blobs[b.name])
-                    for b in L.blobs()},
-        "key": {"label": label, "from": key_from},
-        "perms": {},
-        "stages": [],
-    }
-    f16 = {"name": "f16"}
-    for l in L.NET1:
-        m["stages"].append({"stage": l.name, "digest": "", "tensors": [
-            tensor("W", [l.out, l.k], "float32", l.name, f16, 0, [lin(l.k), lin(1)]),
-            tensor("b", [l.out // L.NET1_BIAS_GROUP, L.NET1_BIAS_GROUP], "float32", l.name, f16, l.bias_offset,
-                   [lin(L.NET1_BIAS_GROUP * L.NET1_BIAS_COPIES), lin(1)]),
-        ]})
-    for l in L.NET2:
-        m["stages"].append({"stage": l.name, "digest": "", "tensors": [
-            tensor("W", [l.out, 9 * l.cin], "float32", l.name + "_w", f16, 0, [lin(9 * l.cin), lin(1)]),
-            tensor("b", [l.out], "float32", l.name + "_b", f16, 0, [lin(1)]),
-        ]})
-    return m
+    m = copy.deepcopy(fg_map_obj)
+    names = list(m["sources"])
+    assert len(names) == len(L.blobs())
+    blobs = {}
+    for name, b in zip(names, L.blobs()):
+        data = layout_blobs[b.name]
+        assert m["sources"][name]["length"] == len(data), name
+        m["sources"][name] = source_entry(name, m["sources"][name]["what"], "f16le", data)
+        blobs[name] = data
+    for st in m["stages"]:
+        st["digest"] = ""
+    return m, blobs
 
 
-def fg_case(seed=41, drop=(), decoy="net2_07_w"):
-    """A synthetic frame-generation library: random bytes holding the 67 blobs of fg_blobs in a shuffled order, at
-    16-aligned, even and odd offsets, with a decoy of one blob (its first 64 bytes, then other bytes) before it.
-    drop: blob names left out of the file (the map still lists them). Returns the Case (placements: {blob: offset})."""
+def fg_case(fg_map_obj, seed=41, drop=(), decoy="B07w"):
+    """A synthetic frame-generation library for the delivered map's layout: random bytes holding our own 67 blobs
+    (fg_blobs) in a shuffled order, at 16-aligned, even and odd offsets, with a decoy of one blob (its first 64 bytes,
+    then other bytes) before it. drop: source names left out of the file (the map still lists them). Returns the Case
+    (placements: {source: offset})."""
     rng = random.Random(seed)
-    blobs = fg_blobs(rng)
-    m = fg_map(blobs)
+    m, blobs = fg_map(fg_map_obj, fg_blobs(rng))
     order = list(blobs)
     rng.shuffle(order)
     buf = bytearray(rng.randbytes(4096))
