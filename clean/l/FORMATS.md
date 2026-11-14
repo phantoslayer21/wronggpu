@@ -1,7 +1,7 @@
 # Model L: kernels, maps, blobs and launch order (issue #89)
 
 This is the interface the Model L runtime frame builds against.
-- A row marked **exists** has a merged HIP kernel.
+- A row marked **exists** has a HIP kernel that passed its GPU check (merged, or in the open Model L kernel PR).
 - A row marked **planned** is the interface the kernel is being written to. Its names, arguments, grids and maps are
   fixed here, and a change goes through this file first.
 - Each D3D12 port declares the same code object, kernel name and arguments as its HIP kernel (`clean/dx12/kernels/l_*.hlsl`).
@@ -74,14 +74,14 @@ workgroup, in raster order of their map.
 
 | Kernel | Status | Arguments | Grid | Does |
 |---|---|---|---|---|
-| `lev/input_encoder` | planned (rework of the old values-only variant) | as Model M's `input_encoder`, with `features` replaced by `q` | ceil(((fh + 4) / 2) ((fw + 4) / 2) / 128) (2 x 2 pixel groups of the halo map) | the 20 values and their dithered FP8 for every halo-map pixel, into `q`. The motion surfaces as Model M, only for pixels inside R. w = `enc0.values` |
-| `l_linear_32_32_relu` | planned | `x, y, w, npix` | ceil(npix / 128), npix = (fh + 4)(fw + 4) | y = q8(max(0, RN16(b + W x))), FP8 -> FP8. w = `enc0.Win1` |
-| `l_linear_32_32_f16` | planned | `x, y, w, npix` | as above | y = RN16(b + W x), FP8 -> **FP16**. w = `enc0.Win2` |
-| `l_swin_block_c32_enc[_nc]` | planned | `x, xadd (null), out, w, H, W, ox, oy` | ceil(nwin / 8), nwin = ceil((W + ox) / 4) ceil((H + oy) / 4) | the encoder block. x = `x2` (FP16 halo map; member at grid (gx, gy) read at map pixel (gy + 2, gx + 2)). out = `x3` (FP8, grid only). H = fh, W = fw. (ox, oy) = `window_offsets["first"]` for the frame parity. w = `enc0_block` |
-| `l_project_gather` | planned | `x, features, w, tw, th` | ceil(tw th / 128), tw = fw / 2, th = fh / 2 | token (r, c) gathers pixels (2r + p / 2, 2c + p % 2), p = 0..3, as channels 32 p + i. Running FP16 sum per group of 32 from the bias, clamp +-6.28125, FP8 -> `enc0.features`. w = `enc0.project` |
-| `l_dec_project` | planned | `z, y, w, tw, th` | ceil(tw th / 128) | per token of dec1's output z [th][tw][64]: 128 outputs (two RN16 groups of 32 inputs, then FP8). Output 32 s + k goes to pixel (2r + s / 2, 2c + s % 2), channel k, of `y`. w = `dec0.project` |
-| `l_swin_block_c32_dec[_nc]` | planned | `x, xadd (null), out, w, H, W, ox, oy` | as the encoder block | the decoder block. x = `y` (FP8). A member outside the grid takes token-grid mirrored pixels with the sub-pixel kept. out = `y2` (**FP16**). (ox, oy) = `window_offsets["second"]`. w = `dec0_block` |
-| `l_coef` | planned (new) | `y2, A, B, C, latent, w, params` | ceil((fh / 2)(fw / 2) / 128), lanes as Model M's `coef_decoder` | Model L's per-pixel functions on the 13 channels `table.L_DEC_VALUES` of `y2`: A, B, C in Model M's forms, latent = tanh(candidate). Writes the same buffers and formats as `coef_decoder`, pixels inside R only. **Reads no motion, previous latent, jitter or reset.** params = Model M's `WgDecParams` (only rw, rh, fw, fh are read). w = `dec0.coef` |
+| `lev/input_encoder` | exists (GPU-checked) | as Model M's `input_encoder`, with `features` replaced by `q` | ceil(((fh + 4) / 2) ((fw + 4) / 2) / 128) (2 x 2 pixel groups of the halo map) | the 20 values and their dithered FP8 for every halo-map pixel, into `q`. The motion surfaces as Model M, only for pixels inside R. w = `enc0.values` |
+| `l_linear_32_32_relu` | exists (GPU-checked) | `x, y, w, npix` | ceil(npix / 128), npix = (fh + 4)(fw + 4) | y = q8(max(0, RN16(b + W x))), FP8 -> FP8. w = `enc0.Win1` |
+| `l_linear_32_32_f16` | exists (GPU-checked) | `x, y, w, npix` | as above | y = RN16(b + W x), FP8 -> **FP16**. w = `enc0.Win2` |
+| `l_swin_block_c32_enc[_nc]` | exists (GPU-checked) | `x, xadd (null), out, w, H, W, ox, oy` | ceil(nwin / 8), nwin = ceil((W + ox) / 4) ceil((H + oy) / 4) | the encoder block. x = `x2` (FP16 halo map; member at grid (gx, gy) read at map pixel (gy + 2, gx + 2)). out = `x3` (FP8, grid only). H = fh, W = fw. (ox, oy) = `window_offsets["first"]` for the frame parity. w = `enc0_block` |
+| `l_project_gather` | exists (GPU-checked) | `x, features, w, tw, th` | ceil(tw th / 128), tw = fw / 2, th = fh / 2 | token (r, c) gathers pixels (2r + p / 2, 2c + p % 2), p = 0..3, as channels 32 p + i. Running FP16 sum per group of 32 from the bias, clamp +-6.28125, FP8 -> `enc0.features`. w = `enc0.project` |
+| `l_dec_project` | exists (GPU-checked) | `z, y, w, tw, th` | ceil(tw th / 128) | per token of dec1's output z [th][tw][64]: 128 outputs (two RN16 groups of 32 inputs, then FP8). Output 32 s + k goes to pixel (2r + s / 2, 2c + s % 2), channel k, of `y`. w = `dec0.project` |
+| `l_swin_block_c32_dec[_nc]` | exists (GPU-checked) | `x, xadd (null), out, w, H, W, ox, oy` | as the encoder block | the decoder block. x = `y` (FP8). A member outside the grid takes token-grid mirrored pixels with the sub-pixel kept. out = `y2` (**FP16**). (ox, oy) = `window_offsets["second"]`. w = `dec0_block` |
+| `l_coef` | exists (GPU-checked) | `y2, A, B, C, latent, w, params` | ceil((fh / 2)(fw / 2) / 128), lanes as Model M's `coef_decoder` | Model L's per-pixel functions on the 13 channels `table.L_DEC_VALUES` of `y2`: A, B, C in Model M's forms, latent = tanh(candidate). Writes the same buffers and formats as `coef_decoder`, pixels inside R only. **Reads no motion, previous latent, jitter or reset.** params = Model M's `WgDecParams` (only rw, rh, fw, fh are read). w = `dec0.coef` |
 
 ## Launch order of one frame
 
@@ -105,6 +105,8 @@ The reconstruction (post) stage is still open.
 
 ## Checks (GPU, synthetic data)
 
-- `clean/l/runner/l_c32_check.py`: the C = 32 block against the oracle.
+- `clean/l/runner/l_c32_check.py`: the C = 32 blocks (`l_swin_block_c32`, `_enc`, `_dec`) against the oracle.
+- `clean/l/runner/l_ops_check.py`: the linears, both projections and `l_coef` against the oracle steps.
+- `clean/l/runner/l_enc_check.py`: `lev/input_encoder` (halo map and motion surfaces) against the oracle.
 - `clean/l/runner/l_d3d12_check.py` (with its D3D12 port): each D3D12 port against its HIP kernel, byte for byte.
 - One check per new kernel follows with that kernel.
