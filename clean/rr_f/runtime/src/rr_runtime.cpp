@@ -38,6 +38,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <string>
@@ -142,6 +143,35 @@ void log_line(const std::string& s) {
   fprintf(f, "%02u:%02u:%02u.%03u runtime: %s\r\n", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, s.c_str());
   fclose(f);
 }
+
+// The worker thread of the pipeline compiles, with a 64 MB stack reservation (address space only; pages are committed
+// as they are used). Under Proton, vkd3d-proton translates each kernel on the thread that calls
+// CreateComputePipelineState, and the structurizer in current dxil-spirv (HansKristian-Work/dxil-spirv#366) recurses
+// about once per branch. With a std::thread (the process's default stack: 1 MB in rr_test_host, 2 MB in Cyberpunk 2077)
+// the opt-in kernels stage.IN0 and stage.D4-F overflowed the stack; the thread died without setting compile_failed, so
+// the opt-in variants never became ready.
+class CompileThread {
+ public:
+  bool start(std::function<void()> f) {
+    fn_ = std::move(f);
+    h_ = CreateThread(nullptr, 64u << 20, run, this, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
+    return h_ != nullptr;
+  }
+  bool joinable() const { return h_ != nullptr; }
+  void join() {
+    WaitForSingleObject(h_, INFINITE);
+    CloseHandle(h_);
+    h_ = nullptr;
+  }
+
+ private:
+  static DWORD WINAPI run(void* self) {
+    static_cast<CompileThread*>(self)->fn_();
+    return 0;
+  }
+  HANDLE h_ = nullptr;
+  std::function<void()> fn_;
+};
 
 // RDNA 4 boards (the rule of clean/runtime/rdna4.h on clean/rdna4-dx12, WrongGPU's own code)
 bool rdna4_adapter(uint32_t vendor, bool software, const std::string& d) {
@@ -388,7 +418,7 @@ struct Runtime {
   // clean/rr-f-live2: the frame kernels' pipelines are made on a worker thread (a cold driver cache needs minutes
   // for them; set-device must not block the game that long). Evaluates fail (the proxy passes the frame through)
   // until kernels_ready. The worker never takes mu; drop_device cancels and joins it.
-  std::thread compile_thread;
+  CompileThread compile_thread;
   std::atomic<bool> kernels_ready{false}, compile_cancel{false};
   // clean/rr-f-flow: kernels_ready = the default frame's kernels (compiled first); all_ready = every kernel, the opt-in
   // variants' too (WG_RR_HEAD=exact/strict/debug, WG_RR_BODY=X/Z, WG_RR_PATHS=verified), compiled after them
@@ -884,7 +914,11 @@ ID3D12PipelineState* make_pso(ID3D12Device* dev, ID3D12RootSignature* rs, const 
   pd.pRootSignature = rs;
   pd.CS = {b->data, b->size};
   ID3D12PipelineState* p = nullptr;
-  if (FAILED(dev->CreateComputePipelineState(&pd, IID_PPV_ARGS(&p)))) return nullptr;
+  const HRESULT hr = dev->CreateComputePipelineState(&pd, IID_PPV_ARGS(&p));
+  if (FAILED(hr)) {
+    log_line(fmt("pipeline state for %s (%u bytes) failed: hr 0x%08lx", b->name, (unsigned)b->size, (unsigned long)hr));
+    return nullptr;
+  }
   return p;
 }
 
@@ -1338,7 +1372,7 @@ uint32_t set_device_locked(ID3D12Device* given) {
                      "(the default is used)", bad ? bad : "?"));
     }
     const unsigned start_vbits = rt.start_vbits;
-    rt.compile_thread = std::thread([dev, rs, blobs, start_vbits] {
+    const bool started = rt.compile_thread.start([dev, rs, blobs, start_vbits] {
       Runtime& r = R();
       const ULONGLONG t0 = GetTickCount64();
       // the helper (g_prep.on): its passes only, progress per kernel (the two made at set-device count as done)
@@ -1396,6 +1430,11 @@ uint32_t set_device_locked(ID3D12Device* given) {
       }
       }
     });
+    if (!started) {
+      log_line(fmt("set-device: the kernel compile thread could not start (error %lu)", (unsigned long)GetLastError()));
+      drop_device();
+      return WG_E_D3D_API;
+    }
     // a warm driver cache needs well under a second: wait a little so that warm starts run RR from the first frame
     char wv[16] = {};
     const DWORD wait_ms = GetEnvironmentVariableA("WG_RR_COMPILE_WAIT_MS", wv, sizeof wv) ? (DWORD)atoi(wv) : 3000u;
