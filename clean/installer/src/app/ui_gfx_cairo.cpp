@@ -195,6 +195,7 @@ struct GfxCairo {
         PangoAttrList* base = nullptr;  // the layout's attributes without the lead's colour
         std::string u8;
         float w = 0, h = 0, dx = 0;     // logical size; Balance's shift
+        float dy = 0;                   // the text's shift down, onto Segoe UI's baseline (SegoeLineBox)
         unsigned long long used = 0;
         int leadBytes = -1;             // TextLead's lead length in bytes (-1: not a lead layout)
         Col leadCol{-1, -1, -1, -1};    // the colour set on the lead now
@@ -710,7 +711,12 @@ static CachedLayout MakeLayout(GfxCairo& g, const wstring& t, float w, float h, 
     }
     c.base = pango_attr_list_new();
     if (s.spacing != 0) pango_attr_list_insert(c.base, pango_attr_letter_spacing_new((int)std::lround(s.spacing * PANGO_SCALE)));
-    if (s.lineH > 0) pango_attr_list_insert(c.base, pango_attr_line_height_new_absolute((int)std::lround(s.lineH * PANGO_SCALE)));
+    // Windows lays text out on Segoe UI's line box (ascent 1.079 + descent 0.251 em: a line is 1.33 em, the baseline 1.079 em
+    // down; a set line height puts the baseline at 0.8 of it); Selawik's is 0.990 + 0.210 em, so the lines are made 1.33 em
+    // and the text shifted onto Segoe's baseline. The icon font has its own box and is left alone.
+    const bool segoe = s.face != F_ICON;
+    const float lineH = s.lineH > 0 ? s.lineH : segoe ? 1.33f * s.size : 0;
+    if (lineH > 0) pango_attr_list_insert(c.base, pango_attr_line_height_new_absolute((int)std::lround(lineH * PANGO_SCALE)));
     if (s.underline) pango_attr_list_insert(c.base, pango_attr_underline_new(PANGO_UNDERLINE_SINGLE));
     if (leadLen >= 0) {
         c.leadBytes = (int)U8(t.substr(0, (size_t)leadLen)).size();
@@ -725,6 +731,7 @@ static CachedLayout MakeLayout(GfxCairo& g, const wstring& t, float w, float h, 
     pango_layout_get_extents(l, nullptr, &lr);
     c.w = lr.width / (float)PANGO_SCALE;
     c.h = lr.height / (float)PANGO_SCALE;
+    if (segoe && s.lineH <= 0) c.dy = (1.079f * s.size) - pango_layout_get_baseline(l) / (float)PANGO_SCALE;
     c.used = g.frame;
     return c;
 }
@@ -757,7 +764,7 @@ static float VAlign(const CachedLayout& c, const Rc& r, const TS& s) { return s.
 float Gfx::Text(const wstring& t, const Rc& r, const TS& s) {
     if (t.empty() || !im_) return 0;
     const CachedLayout* c = Cached(*im_, t, r.w, std::max(r.h, 1.f), s, true);
-    if (!dry && im_->cr) ShowLayout(*im_, c->l, r.x + c->dx, r.y + VAlign(*c, r, s), s.color);
+    if (!dry && im_->cr) ShowLayout(*im_, c->l, r.x + c->dx, r.y + VAlign(*c, r, s) + c->dy, s.color);
     return c->h;
 }
 float Gfx::TextW(const wstring& t, const TS& s) {
@@ -780,7 +787,7 @@ void Gfx::TextEnd(const wstring& t, float width, const TS& s, float& x, float& y
     PangoRectangle pos;
     pango_layout_index_to_pos(c->l, (int)i, &pos);
     x = (pos.x + pos.width) / (float)PANGO_SCALE;
-    y = pos.y / (float)PANGO_SCALE;
+    y = pos.y / (float)PANGO_SCALE + c->dy;
 }
 
 // Warn once for a glyph the table has nothing for (a new icon constant that was not mapped)
@@ -830,7 +837,7 @@ float Gfx::TextLead(const wstring& t, size_t leadLen, Col leadC, int leadWeight,
             pango_attr_list_unref(al);
             c.leadCol = leadC;
         }
-        ShowLayout(g, c.l, r.x + c.dx, r.y + VAlign(c, r, s), s.color);
+        ShowLayout(g, c.l, r.x + c.dx, r.y + VAlign(c, r, s) + c.dy, s.color);
     }
     return c.h;
 }
