@@ -199,6 +199,14 @@
    "l_ops.co"
   ],
   [
+   "l_direct_color",
+   "-"
+  ],
+  [
+   "l_direct_store",
+   "-"
+  ],
+  [
    "l_linear_32_32_f16",
    "l_ops.co"
   ],
