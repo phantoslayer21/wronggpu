@@ -167,7 +167,7 @@ def base(kernel):
     """A Model L launch's kernel without its clamp-free suffix; the pack12 coefficient store (native D3D12) as l_coef,
     whose arguments it shares."""
     k = kernel.replace("_nc", "")
-    return "l_coef" if k == "l_coef_pack12" else k
+    return "l_coef" if k == "l_coef_pack12" else "l_post_recon" if k == "l_post_recon_p12" else k
 
 
 def check_roles(t, f, digests, l_post=True):
@@ -356,8 +356,8 @@ class Arguments(unittest.TestCase):
         self.assertEqual(e[:4], [rw, rh, fw, fh])
         self.assertEqual(e[5], info["reset"])
         self.assertEqual(d, [rw, rh, fw, fh, info["reset"]])
-        post = [ln for ln in ls if ln.kernel == "l_post_recon"]
-        self.assertEqual(len(post), 1 if l_post else 0)  # (native D3D12: Model M's fused pack12 post for now)
+        post = [ln for ln in ls if base(ln.kernel) == "l_post_recon"]
+        self.assertEqual(len(post), 1 if l_post else 0)  # (native D3D12: Model M's fused pack12 post by default)
         if l_post:
             self.assertEqual(post[0].params(12), [rw, rh, (3 * 120 + 1) // 2, (3 * 72 + 1) // 2, info["reset"]])
             self.assertEqual(post[0].grid, cdiv((3 * 120 + 1) // 2, 32) * cdiv(cdiv((3 * 72 + 1) // 2, 2), 8))
@@ -560,6 +560,71 @@ class D3D12(unittest.TestCase):
         """On HIP Model L keeps the base coefficient format (l_coef) and refuses pack12."""
         self.assertTrue(run("model=L", build_files=FT.SHIPPING, env={"WG_POST_PACK": "p12"})[0].startswith(
             "ERR create: Model L: post_pack=p12"))
+
+    # runtime option l_post=own: Model L's own reconstruction on native D3D12 (its D3D12 ports, then the analytic filter)
+    OWN = [("l_post_recon_p12", "l_post.co"), ("l_post_recon", "l_post.co"), ("l_coef", "l_ops.co"),
+           ("w64/post_filter_c1_s4", "post_w64.co")]
+
+    def own_ports(self):
+        have = full_ports()
+        return have + [kc for kc in self.OWN if kc not in have]
+
+    def test_own_post(self):
+        """l_post=own: l_post_recon_p12 on the frames l_coef_pack12 stores, with post_recon's arguments (the #111 role
+        checks), then the unbanded filter w64/post_filter_c1_s4 from its display image into the output; no fused post.
+        A frame the pack12 kernels do not take (render 180 x 108 = D) runs l_coef and l_post_recon."""
+        sizes = "--sizes=96x64,96x64,180x108,80x48,77x45,180x108"
+        t = FT.Trace(run("model=L;l_post=own", frames=6, build_files=FT.SHIPPING, rw=180, rh=108,
+                         flags=("--backend=3", sizes, "--reset=4"), manifest=self.own_ports()))
+        self.assertEqual(t.create, "create ok model L")
+        self.assertEqual(t.unknown(), [])
+        self.assertEqual(t.kernels.get("l_post"), "l_post_recon")
+        prev = None
+        for f in t.frames:
+            self.assertIsNone(f["error"])
+            info, ls = f["info"], f["launches"]
+            names = [ln.kernel for ln in ls]
+            p12 = (info["rw"], info["rh"]) != (180, 108)
+            self.assertIn("l_coef_pack12" if p12 else "l_coef", names)
+            self.assertNotIn("l_coef" if p12 else "l_coef_pack12", names)
+            self.assertFalse([n for n in names if "post_tf" in n or "post_recon2" in n or n.endswith("_band")], names)
+            post = [ln for ln in ls if ln.kernel == ("l_post_recon_p12" if p12 else "l_post_recon")]
+            self.assertEqual(len(post), 1, names)
+            lev, coef = Arguments.check_frame(self, t, f)  # the roles of every argument, the filter after the post
+            flt = ls[ls.index(post[0]) + 1]
+            self.assertEqual(flt.kernel, "w64/post_filter_c1_s4")
+            self.assertEqual((flt.grid, flt.block), (cdiv(120, 40) * cdiv(cdiv(72, 2), 8), 64))
+            self.assertEqual(flt.args[:2], [f["names"]["post.display"], f["names"]["filter.out"]])
+            self.assertEqual(flt.args[2:6], [str((3 * 120 + 1) // 2), str((3 * 72 + 1) // 2), "120", "72"])
+            self.assertEqual(flt.args[7], f["names"]["exposure.pair"])
+            if p12:
+                self.assertGreaterEqual(t.extent(coef.args[1]), 8 * info["rw"] * info["rh"])  # pack12 image A
+            if prev:
+                self.assertEqual(lev.args[4], prev[1].args[4])  # the latent the last frame's store wrote
+            prev = (lev, coef)
+
+    def test_own_post_refusals(self):
+        def first(options, **kw):
+            return run(options, frames=1, build_files=FT.SHIPPING, **kw)[0]
+        d3d12 = dict(flags=("--backend=3",), manifest=self.own_ports())
+        self.assertEqual(first("model=L;l_post=yes", **d3d12),
+                         "ERR create: l_post must be m or own (Model L on native D3D12)")
+        self.assertTrue(first("model=L;l_post=own", hdr=0, **d3d12).startswith(
+            "ERR create: Model L: l_post=own needs HDR colour"))
+        self.assertEqual(first("l_post=own", **d3d12), "ERR create: l_post=own is a Model L option (its own "
+                                                        "reconstruction)")
+        for k, _ in self.OWN:
+            with self.subTest(port=k):
+                got = first("model=L;l_post=own", flags=("--backend=3",),
+                            manifest=[kc for kc in self.own_ports() if kc[0] != k])
+                self.assertEqual(got, "ERR create: Model L on native D3D12 (l_post=own): not yet ported to D3D12: " + k)
+        # the default stays Model M's fused pack12 post (test_frame), named so; on HIP Model L runs its own post either way
+        self.assertEqual(FT.Trace(run("model=L", frames=1, build_files=FT.SHIPPING, **d3d12)).kernels.get("l_post"),
+                         "m_pack12")
+
+        def hip(options):
+            return [re.sub(r"wg_lfb_\w+", "B", x) for x in run(options, frames=2, build_files=FT.SHIPPING)]
+        self.assertEqual(hip("model=L;l_post=own"), hip("model=L"))
 
 
 class Refusals(unittest.TestCase):
