@@ -281,7 +281,8 @@ def hip_run(g, mod, case):
         elif a[0] == "bytes":
             args.append((ctypes.c_ubyte * len(a[1])).from_buffer_copy(a[1]))
     try:
-        h.launch(h.get_function(mod, case.get("hip_kernel", case["kernel"])), case["grid"], case["block"], args)
+        h.launch(h.get_function(mod, case.get("hip_kernel", case["kernel"])), case["grid"],
+                 case.get("hip_block", case["block"]), args)
         h.sync()
         return [bytes(h.download(p, n)) for p, n in outs]
     finally:
@@ -310,7 +311,9 @@ def replay_lines(name, case, cdir, grid=None, prefix=""):
     return lines + [""]
 
 
-def run(build, rocm, seeds, kernels):
+def run(build, rocm, seeds, kernels, kinds=None):
+    """kinds: {kernel: case generator} (default this file's KINDS and CONTROL_KINDS). A case may name its HIP kernel
+    (hip_kernel) and HIP block size (hip_block) when the D3D12 port has none of its own."""
     g = C32.Gpu(build, rocm)
     mods = {}
 
@@ -320,7 +323,7 @@ def run(build, rocm, seeds, kernels):
                 mods[co] = g.hip.load_module(f.read())
         return mods[co]
 
-    kinds = dict(KINDS, **CONTROL_KINDS)
+    kinds = kinds or dict(KINDS, **CONTROL_KINDS)
     cdir = os.path.join(build, "replay-ops")
     os.makedirs(cdir, exist_ok=True)
     lines, hip_out, neg = [], {}, None

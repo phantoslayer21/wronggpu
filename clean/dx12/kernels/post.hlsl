@@ -50,7 +50,21 @@
 // @wg-kernel w64/post_tf4_dl_f32_p12_diet_vsit_direct co=post_w64__orig.co rs=direct entry=post_tf_f32_p12_diet_vsit_direct block=256 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u,u,u,u,u,u defines=WG_DIRECT_TEXTURES=1,POST_OUT=3,WG_TF_NW=4,WG_TF_CAP=448
 // @wg-kernel pmo/post_tf4_dl_f32_p12_mo co=post_mo_w64__orig.co entry=post_tf_f32_p12_diet_vsit block=256 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u,b40,u,u,u,u,u defines=WG_POST_MO=1,WG_TF_NW=4,WG_TF_CAP=448
 // @wg-kernel pmo/post_tf4_dl_f32_p12_mo_direct co=post_mo_w64__orig.co rs=direct entry=post_tf_f32_p12_diet_vsit_direct block=256 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u,b40,u,u,u,u,u defines=WG_DIRECT_TEXTURES=1,POST_OUT=3,WG_POST_MO=1,WG_TF_NW=4,WG_TF_CAP=448
+//
+// Analytic output filter (WG_LZ_ANALYTIC = 1; HIP: post_w64.co, post.hip built with -mwavefrontsize64 and the default
+// WG_LZ_PROFILE = 0, the build the runtime loads under "w64" when the model file has no output-filter weights, e.g.
+// Model L's): the same kernels with spec 06's own Lanczos weights as FP32 constants (kLz0 ... kLz4): v = kLz0 t0, then
+// one fused multiply-add per tap, clamp to the taps' range, every value FP32 (the horizontal results go to the ring as
+// FP32, the vertical result straight into Dec). No weight arguments. Buffer forms 0 only (POST_OUT = 0).
+// @wg-kernel w64/post_tf_f32_p12_diet_vsit co=post_w64.co file=w64__post_tf_f32_p12_diet_vsit__analytic entry=post_tf_f32_p12_diet_vsit block=512 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u defines=WG_LZ_ANALYTIC=1
+// @wg-kernel w64/post_tf4_dl_f32_p12_diet_vsit co=post_w64.co file=w64__post_tf4_dl_f32_p12_diet_vsit__analytic entry=post_tf_f32_p12_diet_vsit block=256 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u defines=WG_TF_NW=4,WG_TF_CAP=448,WG_LZ_ANALYTIC=1
 #include "wg_platform.hlsli"
+#ifndef WG_LZ_ANALYTIC
+#define WG_LZ_ANALYTIC 0
+#endif
+#if WG_LZ_ANALYTIC && (POST_OUT != 0 || defined(WG_POST_MO))
+#error "analytic output filter: buffer form 0 only"
+#endif
 #if defined(WG_DIRECT_TEXTURES)
 #include "native_direct.hlsli"
 #include "wg_f16lut.hlsli"
@@ -85,7 +99,9 @@ WG_ARGS_BEGIN
     int mo_mw, mo_mh, mo_pitch, mo_wide;   // WgMoParams (40 bytes)
     float mo_sx, mo_sy, mo_bx, mo_by, mo_idw, mo_idh;
 #endif
+#if !WG_LZ_ANALYTIC
     uint lz_w0, lz_w1, lz_w2, lz_w3, lz_w4;   // FP16 bit patterns of the filter weights of taps -2 ... +2
+#endif
 WG_ARGS_END
 
 // ---- constants (FP32 bit patterns of post.hip's constexpr values) ---------------------------------------------------
@@ -697,6 +713,26 @@ void mo_core(Gather g, float2 mv, int x, int y, int fx, int fy, float s, out flo
 }
 #endif
 
+#if WG_LZ_ANALYTIC
+// ---- output filter, profile 0 ("analytic", post_w64.co): FP32 constant weights of taps -2 ... +2 for an even output
+// index (post.hip kLz0 ... kLz4; mirrored for an odd one), v = w0 t0, one fma per further tap, clamp to the taps' range
+static const float kLz0 = asfloat(0xbdba3b4bu), kLz1 = asfloat(0x3de71ca9u), kLz2 = asfloat(0x3f23b70fu);
+static const float kLz3 = asfloat(0x3ed182b5u), kLz4 = asfloat(0xbd90a4acu);
+float lz5a(float t0, float t1, float t2, float t3, float t4, float w0, float w1, float w3, float w4)
+{
+    float v = w0 * t0;
+    v = mad(w1, t1, v);
+    v = mad(kLz2, t2, v);
+    v = mad(w3, t3, v);
+    v = mad(w4, t4, v);
+    const float mid_lo = min(min(t1, t2), t3), mid_hi = max(max(t1, t2), t3);
+    const float lo = min(min(mid_lo, t0), t4), hi = max(max(mid_hi, t0), t4);
+    return min(max(v, lo), hi);   // med3 (the taps are finite, lo <= hi)
+}
+// lz5<kEven> / lz5<false> on the FP32 taps t[o ... o + 4], as FP32 bits
+uint lz5a_even(float t[10], int o) { return asuint(lz5a(t[o], t[o + 1], t[o + 2], t[o + 3], t[o + 4], kLz0, kLz1, kLz3, kLz4)); }
+uint lz5a_odd(float t[10], int o) { return asuint(lz5a(t[o], t[o + 1], t[o + 2], t[o + 3], t[o + 4], kLz4, kLz3, kLz1, kLz0)); }
+#else
 // ---- output filter, profile 2 ("original"): FP16 weights, one FP16 fma per tap, clamp to the taps' range -------------
 // Values are "boxes": FP16 bits in the low half of a dword.
 half hbox(uint v) { return asfloat16((uint16_t)(v & 0xffffu)); }
@@ -726,6 +762,7 @@ uint lz5_odd(uint t[10], int o)
     return lz5_original(t[o], t[o + 1], t[o + 2], t[o + 3], t[o + 4], hbox(lz_w4), hbox(lz_w3), hbox(lz_w2), hbox(lz_w1),
                         hbox(lz_w0));
 }
+#endif
 
 // The reduced history's 10-bit code of one channel from its 2 x 2 sum (the chain of post.hip's reduced store)
 uint rh_code(float sum)
@@ -1173,6 +1210,18 @@ WG_KERNEL(post_tf_p12_diet_vsit)
 #else
             const uint src = scr + (uint)hk * kRowDw + (uint)hc * 32u + (uint)hg * 3u;
 #endif
+#if WG_LZ_ANALYTIC
+            float t[10];   // the FP16 display taps as FP32 values (exact); results FP32 bits
+            [unroll] for (int i = 0; i < 5; ++i) {
+                const uint q = lds[src + (uint)i];
+                t[2 * i] = f16tof32(q);
+                t[2 * i + 1] = f16tof32(q >> 16);
+            }
+            hv[0] = lz5a_even(t, 0);
+            hv[1] = lz5a_odd(t, 2);
+            hv[2] = lz5a_even(t, 3);
+            hv[3] = lz5a_odd(t, 5);
+#else
             uint t[10];
             [unroll] for (int i = 0; i < 5; ++i) {
                 const uint q = lds[src + (uint)i];
@@ -1183,6 +1232,7 @@ WG_KERNEL(post_tf_p12_diet_vsit)
             hv[1] = lz5_odd(t, 2);
             hv[2] = lz5_even(t, 3);
             hv[3] = lz5_odd(t, 5);
+#endif
         }
         tf_row_sync();
         if (hact) {
@@ -1255,13 +1305,22 @@ WG_KERNEL(post_tf_p12_diet_vsit)
             }
             // emit (n = 1): weights of the lane's phase by selects (lz_wsel), lz5w, Dec, store 3 x f32
             const bool ev = dy == 0;
+#if WG_LZ_ANALYTIC
+            const float w0 = ev ? kLz0 : kLz4, w4 = ev ? kLz4 : kLz0, w1 = ev ? kLz1 : kLz3, w3 = ev ? kLz3 : kLz1;
+#else
             const half w0 = hbox(ev ? lz_w0 : lz_w4), w4 = hbox(ev ? lz_w4 : lz_w0);
             const half w1 = hbox(ev ? lz_w1 : lz_w3), w3 = hbox(ev ? lz_w3 : lz_w1);
+#endif
             float vo[3], qv[3];
             bool vsmall = false;
             [unroll] for (int c = 0; c < 3; ++c) {
+#if WG_LZ_ANALYTIC
+                qv[c] = clampf(lz5a(asfloat(t[0][c]), asfloat(t[1][c]), asfloat(t[2][c]), asfloat(t[3][c]), asfloat(t[4][c]),
+                                    w0, w1, w3, w4), k1em4, 3.0f);
+#else
                 const uint r = lz5_original(t[0][c], t[1][c], t[2][c], t[3][c], t[4][c], w0, w1, hbox(lz_w2), w3, w4);
                 qv[c] = clampf(f16tof32(r), k1em4, 3.0f);
+#endif
                 vo[c] = exp2(qv[c] * kDecK) - 1.0f;
                 vsmall = or(vsmall, qv[c] < kDecPolyMax);
             }
