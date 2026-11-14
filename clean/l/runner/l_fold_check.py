@@ -54,10 +54,19 @@ def rects(H, W):
     return sorted({(W, H), (max(1, W - 3), max(1, H - 1)), (max(1, W // 2 + 1), max(1, H // 2 - 1))})
 
 
+# FP8 codes the network does not produce but the per-pixel functions must treat as the pair does: both NaN codes,
+# +-448, +-0, subnormals
+SPECIAL = np.array([0x7f, 0xff, 0x7e, 0xfe, 0x00, 0x80, 0x01, 0x81, 0x07, 0x87], np.uint8)
+
+
 def cases(rng):
-    """(H, W, offset, rw, rh, y bytes, block blob, coefficient blob, LDecParams bytes) of every case."""
+    """(H, W, offset, rw, rh, y bytes, block blob, coefficient blob, LDecParams bytes) of every case. The cases cycle
+    through four kinds: the network's range; large inputs (outputs past the +-20 clamp and tanh's saturation); special
+    FP8 codes in a tenth of y (NaN outputs); extreme coefficient scalars S, T (FP16 products from subnormal to
+    infinite)."""
     from clean.runner import dec0
     kind = "second"
+    n = 0
     for (H, W) in GRIDS:
         for parity in (0, 1):
             off = T.block_offset(T.TABLE, kind, parity)
@@ -65,9 +74,16 @@ def cases(rng):
                 blob = LD._params_c32(rng)
                 if not LD._nc(blob):
                     continue                                   # the folded kernel is the _nc form only
-                scale = float(rng.choice([1.5, 4.0]))
-                yb = fp8_encode(q8(rng.normal(0, scale, (H, W, 32)))).tobytes()
+                mode, n = n % 4, n + 1
+                scale = 60.0 if mode == 1 else float(rng.choice([1.5, 4.0]))
+                y = fp8_encode(q8(rng.normal(0, scale, (H, W, 32)))).astype(np.uint8)
+                if mode == 2:
+                    pick = rng.random(y.shape) < 0.1
+                    y[pick] = rng.choice(SPECIAL, int(pick.sum()))
+                yb = y.tobytes()
                 S, T_ = float(rng.uniform(0.5, 4.0)), float(rng.uniform(0.3, 3.0))
+                if mode == 3:
+                    S, T_ = float(rng.choice([1e-3, 3e-3, 300.0, 1000.0])), float(rng.choice([1e-3, 50.0]))
                 cw = dec0.pack({"W": np.zeros((68, 64), np.float32), "b": np.zeros(68, np.float32), "S": S, "T": T_})
                 P = bytes(dec0.DecParams(rw=rw, rh=rh, fw=W, fh=H, reset=0, pad0=0, dw=2 * rw, dh=2 * rh, kx=0.5,
                                          ky=0.5, jx=0.25, jy=-0.25, pjx=0.0, pjy=0.0))

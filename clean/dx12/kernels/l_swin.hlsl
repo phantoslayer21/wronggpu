@@ -16,5 +16,5 @@
 //                                   byte for byte the pair _dec_nc -> l_coef_pack12, which stays the fallback route);
 //                                   the FP16 map is not written. Arguments: _dec_nc's (out unused), then A, C, latent,
 //                                   dec0.coef, rw, rh
-// @wg-kernel l_swin_block_c32_dec_coef12_nc co=- block=256 wave=32 args=p,p,p,p,u,u,u,u,p,p,p,p,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=1,SW_SRC=2,SW_OUT_F16=1,SW_OUT_COEF12=1,SW_ENTRY_OVERRIDE=l_swin_block_c32_dec_coef12_nc
+// @wg-kernel l_swin_block_c32_dec_coef12_nc co=- block=256 wave=32 args=p,p,p,p,u,u,u,u,p,p,p,p,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=1,SW_SRC=2,SW_OUT_F16=1,SW_OUT_COEF12=1,COEF_CVT_HW=1,SW_ENTRY_OVERRIDE=l_swin_block_c32_dec_coef12_nc
 #include "swin_block.hlsl"
