@@ -109,6 +109,43 @@ def point_index(px, py, rw, rh):
     return fy[:, None], fx[None, :]
 
 
+# ---- motion candidate positions in float32 (spec 06 step 3 / preset L item 3: float32 unless stated) ----------------
+# The validity test 0 <= q <= D is a discontinuity: a position computed in float64 can fall on the other side of an edge
+# than the kernel's float32 one (a real-weight frame had qy = 108.0000089 in float64 and exactly 108 = Dh in float32,
+# invalid against valid). So the render position, the point reads' texel, m_center's bilinear and q = X + m are
+# computed in float32 in the kernel's order (clean/kernels/post.hip pos_x / pos_y, motion_bilinear, q = X + m).
+
+# Each multiply and add is rounded to float32 on its own: measured against the kernel's outputs, a fused multiply-add
+# in the bilinear keeps the real-weight edge case apart, and a fused position matches fewer reduced codes.
+_F = np.float32
+
+
+def target_positions_f32(rw, rh, dw, dh, jx, jy):
+    """The render position of every D column (px) and row (py) in float32: (x + 1/2) * (R / D) + j, the scale rounded
+    once from double as the runtime passes it (WgPostParams rx, ry)."""
+    rx, ry = _F(float(rw) / dw), _F(float(rh) / dh)
+    xs, ys = np.arange(dw, dtype=_F) + _F(0.5), np.arange(dh, dtype=_F) + _F(0.5)
+    return xs * rx + _F(jx), ys * ry + _F(jy)
+
+
+def bilinear_f32(img, px, py):
+    """m_center's bilinear read as the kernel's motion_bilinear: float32 throughout, texel centres at i + 1/2,
+    clamp-to-edge, top = a (1 - wx) + b wx, bottom likewise, then top (1 - wy) + bottom wy."""
+    h, w = img.shape[:2]
+    tx, ty = (np.asarray(px, _F) - _F(0.5)), (np.asarray(py, _F) - _F(0.5))
+    x0, y0 = np.floor(tx), np.floor(ty)
+    wx, wy = (tx - x0)[None, :, None], (ty - y0)[:, None, None]
+    xi, yi = x0.astype(np.int64), y0.astype(np.int64)
+    c0, c1 = np.clip(xi, 0, w - 1), np.clip(xi + 1, 0, w - 1)
+    r0, r1 = np.clip(yi, 0, h - 1), np.clip(yi + 1, 0, h - 1)
+    img = np.asarray(img, _F)
+    owx, owy = _F(1) - wx, _F(1) - wy
+    with np.errstate(invalid="ignore", over="ignore"):
+        top = img[r0][:, c0] * owx + img[r0][:, c1] * wx
+        bot = img[r1][:, c0] * owx + img[r1][:, c1] * wx
+        return top * owy + bot * wy
+
+
 def bilinear(img, px, py):
     """Bilinear sample of img [h, w, c] at render-space positions (texel centres at i + 1/2, clamp-to-edge)."""
     h, w = img.shape[:2]
@@ -209,8 +246,9 @@ def reconstruct(x, s):
     W, fbar = gather(feat, x["C"], px, py, rw, rh)
     cbar, sig, gbar, bh, bo = fbar[..., 0:3], fbar[..., 3:6], fbar[..., 6], fbar[..., 7], fbar[..., 8]
 
-    # 3. motion candidates
-    fy, fx = point_index(px, py, rw, rh)
+    # 3. motion candidates (positions in float32: target_positions_f32)
+    px32, py32 = target_positions_f32(rw, rh, dw, dh, jx, jy)
+    fy, fx = point_index(px32, py32, rw, rh)
     hi = bool(x.get("motion_output_res", False))
     # x["nan_position_valid"]: spec 06 draft 4 section 4 for a NaN previous position: it counts as valid, its sample is
     # NaN, and step 5's NaN guard replaces both results by C_lin. Default: on for motion at output resolution (that
@@ -247,10 +285,11 @@ def reconstruct(x, s):
         h1, nan_h = along(qx.astype(np.float64), qy.astype(np.float64))
         h2 = h1
     else:
-        m = [np.asarray(x["m_near"], np.float64)[fy, fx], bilinear(x["m_center"], px, py),
-             np.asarray(x["m_far"], np.float64)[fy, fx]]
-        with np.errstate(invalid="ignore"):
-            al = [along(X + mk[..., 0], Y + mk[..., 1]) for mk in m]
+        m = [np.asarray(x["m_near"], _F)[fy, fx], bilinear_f32(x["m_center"], px32, py32),
+             np.asarray(x["m_far"], _F)[fy, fx]]
+        X32, Y32 = X.astype(_F), Y.astype(_F)
+        with np.errstate(invalid="ignore", over="ignore"):   # q = X + m in float32, then compared and sampled
+            al = [along((X32 + mk[..., 0]).astype(np.float64), (Y32 + mk[..., 1]).astype(np.float64)) for mk in m]
         Hk = np.stack([a[0] for a in al], axis=-1)  # [dh, dw, 3, 3 candidates]
         nk = np.stack([a[1] for a in al], axis=-1)
         h1 = np.take_along_axis(Hk, first[..., None, None], -1)[..., 0]

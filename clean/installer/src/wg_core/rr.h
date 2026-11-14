@@ -11,6 +11,7 @@
 // model data is (model.h), into %LOCALAPPDATA%\WrongGPU\model\F\model.wgcm: shared by every game (a game whose own file is
 // too old uses it too). The file is never copied or changed, and never downloaded or shipped. Written for this project.
 #pragma once
+#include "convert_ignore.h"
 #include "detect.h"
 #include "profile.h"
 
@@ -85,6 +86,12 @@ struct RrDataState {
     bool available = true;    // false: this build has no RR converter data
     wstring dll, origin, version, error;
     std::vector<wstring> rejections;  // "path: reason" for every file tried
+    IgnoreReport ignored;             // the files the ignore lists left out of the search, and the lists' warnings (convert_ignore.h)
+    // The data on this PC checked against the ignore lists before it is reused (as ModelState::Trust): LISTED is never
+    // reused; UNKNOWN (no SHA-256 on record) is converted again from an allowed file, else kept with a line in `notes`.
+    enum Trust { TRUSTED, LISTED, UNKNOWN } trust = TRUSTED;
+    std::vector<wstring> notes;       // lines for the player (the install's warnings)
+    wstring dllSha256;                // the SHA-256 of `dll` (written to model-source.txt)
     std::shared_ptr<wgc::Converted> converted;
 };
 bool LoadFMap(Context& ctx);
@@ -109,8 +116,10 @@ struct RrSettingsFailure { wstring dir, why; };
 // Settings' Convert again / Choose a DLSS file... and a game page's Convert: a fresh conversion (`dll` alone when given: no
 // other file is tried; else the RR model files of the launcher's games, then of `libraries`), written while the data in
 // use stays until the new one is checked; then every installed RR game's settings file follows (RR turns on where its
-// profile wants it; the ones that could not be written in *notWritten). False with *why.
-bool ConvertRrData(Context& ctx, const wstring& dll, const std::vector<StoreGame>& libraries, wstring* why, std::vector<RrSettingsFailure>* notWritten = nullptr);
+// profile wants it; the ones that could not be written in *notWritten). False with *why. *ignored: the files the ignore lists
+// left out (convert_ignore.h; a chosen file on a list is not converted either) and the lists' warnings.
+bool ConvertRrData(Context& ctx, const wstring& dll, const std::vector<StoreGame>& libraries, wstring* why, std::vector<RrSettingsFailure>* notWritten = nullptr,
+                   IgnoreReport* ignored = nullptr);
 // A managed game that uses the RR data and runs now (its name; empty: none): the data cannot be replaced meanwhile.
 wstring RunningRrGame();
 

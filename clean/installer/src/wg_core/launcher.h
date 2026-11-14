@@ -281,7 +281,8 @@ LauncherUninstallLook LookBeforeLauncherUninstall(Context& ctx);
 // installed: the installed launcher, or its settings, use the folder).
 struct SharedDataLook { bool there = false, anyGame = false, installed = false, modelData = false, rrData = false; };
 SharedDataLook LookAtSharedData(Context& ctx);
-bool RemoveSharedData(Context& ctx, wstring* why);
+// ignore-files.txt stays (convert_ignore.h): *kept gets "kept ignore-files.txt (...)" and its path when there was one.
+bool RemoveSharedData(Context& ctx, wstring* why, wstring* kept = nullptr);
 // The hidden cleanups this process started (SelfUninstall's moved exe and folders) handed again for what is still there,
 // as the program ends: they try for an hour, and a window may stay open longer than that. The window calls it last.
 void RetryCleanupsAtExit(Context& ctx);

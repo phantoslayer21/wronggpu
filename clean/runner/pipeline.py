@@ -54,6 +54,20 @@ from clean.runner.synthetic_model import read_raw  # noqa: E402
 DEFAULT_MAP = os.path.join(_ROOT, "data", "preset-M.v1.map.json")
 MODEL_FORMATS = {"auto": 0, "raw": 1, "wgcm": 2}
 SWIN_ORDER = ["enc1", "enc2", "b0", "b1", "b2", "b3", "b4", "b5", "dec2", "dec1"]
+# Model-keyed (#89): the Swin stage order per model (Model M: SWIN_ORDER); a model adds its row next to its stage
+# table (clean/reference/swin.py MODEL_STAGES).
+MODEL_SWIN_ORDER = {"M": SWIN_ORDER, "L": SWIN_ORDER}  # L: Model M's ten Swin stages, same order (#89)
+
+
+def swin_order(model="M"):
+    """The Swin stages of `model` in frame order (Model M: SWIN_ORDER)."""
+    try:
+        return MODEL_SWIN_ORDER[model]
+    except KeyError:
+        known = ", ".join(sorted(MODEL_SWIN_ORDER))
+        raise ValueError(f"no Swin stage order for model {model!r}; known: {known}") from None
+
+
 SWIN_CHANNELS = {"enc1": (64, 96), "enc2": (96, 128), "dec2": (96, None), "dec1": (64, None)}
 
 
@@ -183,6 +197,9 @@ class Pipeline:
         lib.wg_rt_info.argtypes = [vp, P(WgRtFrameInfo)]
         lib.wg_rt_buffer.argtypes = [vp, ctypes.c_char_p, P(ctypes.c_size_t), P(sz)]
         lib.wg_rt_download.argtypes = [vp, ctypes.c_size_t, vp, sz]
+        self._has_fill = hasattr(lib, "wg_rt_fill")   # diagnostics, not in older runtime libraries
+        if self._has_fill:
+            lib.wg_rt_fill.argtypes = [vp, ctypes.c_char_p, ctypes.c_int]
         lib.wg_rt_stage_blob.argtypes = [vp, ctypes.c_char_p, P(vp), P(sz)]
         lib.wg_rt_model_source.argtypes = [vp]
         lib.wg_rt_model_source.restype = ctypes.c_char_p
@@ -479,6 +496,16 @@ class Pipeline:
     def _submit(self, x):
         fr = self._upload(x)
         self._check(self.lib.wg_rt_frame(self.rt, ctypes.byref(fr)), "frame")
+
+    def fill(self, name, value):
+        """Diagnostics: the named buffer's allocation set to the byte value (wg_rt_fill; the frame checks' sentinels)."""
+        if not self._has_fill:
+            raise RuntimeError("this runtime library has no wg_rt_fill")
+        self._check(self.lib.wg_rt_fill(self.rt, name.encode(), int(value)), "fill " + name)
+
+    def raw(self, name):
+        """The named buffer's defined bytes as the runtime reports them (wg_rt_buffer), uint8."""
+        return self._get(name, np.uint8).copy()
 
     def _get(self, name, dtype):
         p, n = ctypes.c_size_t(), ctypes.c_size_t()

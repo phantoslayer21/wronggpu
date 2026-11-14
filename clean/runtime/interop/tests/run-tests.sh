@@ -16,6 +16,8 @@ if ! command -v "$cxx" >/dev/null; then echo "SKIP: $cxx not installed"; exit 0;
 
 rt="$repo/clean/runtime"
 flags=(-std=c++17 -O2 -Wall -Wextra -static -static-libgcc -static-libstdc++ -D_CRT_SECURE_NO_WARNINGS)
+# clang-based MinGW (llvm-mingw) accepts the SEH __try in interop/descriptor_publish.h only with MS extensions
+if "$cxx" --version 2>/dev/null | grep -qi clang; then flags+=(-fms-extensions); fi
 echo "== MinGW build"
 "$cxx" "${flags[@]}" -shared -o "$work/wronggpu_runtime.dll" \
   "$rt/device.cpp" "$rt/embedded.cpp" "$rt/model.cpp" "$rt/runtime.cpp" "$repo/clean/k/runtime/model_k.cpp" \
@@ -27,12 +29,15 @@ echo "== MinGW build"
 "$cxx" "${flags[@]}" -o "$work/test_interop_d3d12.exe" "$here/tests/test_interop_d3d12.cpp" || exit 1
 x86_64-w64-mingw32-objdump -p "$work/wronggpu_runtime.dll" | grep -E "DLL Name|wgGetUpscalerBackend" | sed 's/^/  /'
 
-wine=$(command -v wine64 || command -v wine || true)
+wine=${WG_WINE:-$(command -v wine64 || command -v wine || true)}  # WG_WINE: a Proton's wine (clean/linux/wine_env.py)
 if [ -z "$wine" ]; then echo "== Wine tests skipped (no Wine)"; exit 0; fi
 echo "== Wine tests"
 export WINEDEBUG=${WINEDEBUG:--all} WINEPREFIX=${WINEPREFIX:-$work/wineprefix}
 run=("$wine")
 if [ -z "${DISPLAY:-}" ] && command -v xvfb-run >/dev/null; then run=(xvfb-run -a "$wine"); fi
-(cd "$work" && "${run[@]}" test_interop_d3d12.exe wronggpu_runtime.dll "$@" 2>&1 | tr -d "\r" |
-  grep -v -E "X connection|XIO|requests \(") | tee "$work/result.txt"
-grep -q "ALL TESTS PASSED\|^SKIP" "$work/result.txt"
+# Both count: the test program's own exit status (a crash after the marker is a failure) and the marker.
+(cd "$work" && { "${run[@]}" test_interop_d3d12.exe wronggpu_runtime.dll "$@" 2>&1 | tr -d "\r" |
+  grep -v -E "X connection|XIO|requests \("; exit "${PIPESTATUS[0]}"; }) | tee "$work/result.txt"
+status=${PIPESTATUS[0]}
+if [ "$status" -ne 0 ]; then echo "== Wine test run failed (exit status $status)"; exit 1; fi
+grep -q "ALL TESTS PASSED\|^SKIP" "$work/result.txt" || { echo "== Wine test run printed no pass marker"; exit 1; }

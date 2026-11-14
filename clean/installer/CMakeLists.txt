@@ -11,6 +11,12 @@
 # payload folder are not built in (src/setup_route.h).
 cmake_minimum_required(VERSION 3.16)
 project(wronggpu_installer LANGUAGES CXX RC)
+# MinGW's headers set _WIN32_WINNT to Windows 7 as soon as a standard header comes first (context.h includes
+# <functional> before base.h), which hides the Windows 8+ declarations the core uses (FILE_ID_INFO in convert_ignore.cpp):
+# the whole build gets base.h's Windows 10 instead. MSVC's headers leave it unset.
+if(MINGW)
+  add_compile_definitions(_WIN32_WINNT=0x0A00 WINVER=0x0A00)
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -33,6 +39,17 @@ set(WRONGGPU_MAP_K "${CMAKE_CURRENT_SOURCE_DIR}/../../data/preset-K.v1.map.json"
 # team's synthetic preset-F map, so its tests never need a real RR file.
 set(WRONGGPU_RR_DIR "" CACHE PATH "Folder with the RR plugin (plugins/WrongGPU-RR.asi) and the RR runtime (wronggpu_rr_runtime.dll)")
 set(WRONGGPU_MAP_F "" CACHE FILEPATH "RR converter map (preset F); empty: data/preset-F.v1.map.json (test builds: the synthetic rr-f-synth/synth-r0 map)")
+# Model L (#89): its converter map, embedded for "model convert --preset=L" (the model's folder: <model>\L). Default: the
+# shipped map (data/preset-L.v1.map.json, the spec side's revision v1.1). Tests of the conversion itself give a map of
+# its exact layout with their own digests (tests/run_model_l_tests.py --write-test-map); empty: a build without Model L.
+set(WRONGGPU_MAP_L "${CMAKE_CURRENT_SOURCE_DIR}/../../data/preset-L.v1.map.json" CACHE FILEPATH "Model L converter map (preset L); empty: none")
+if(WRONGGPU_MAP_L AND EXISTS "${WRONGGPU_MAP_L}")
+  set(MAP_L_ARGS --map-l ${WRONGGPU_MAP_L})
+  set(MAP_L_FILE ${WRONGGPU_MAP_L})
+else()
+  set(MAP_L_ARGS)
+  set(MAP_L_FILE)
+endif()
 option(WRONGGPU_PRESET_K "Preset K in the installer (second model choice, /PRESET=K, its converter map); OFF = Model M only" ON)
 if(WRONGGPU_PRESET_K)
   set(PRESET_K_MAP_ARGS --map-k ${WRONGGPU_MAP_K})
@@ -42,6 +59,13 @@ else()
   set(PRESET_K_MAP_ARGS)
   set(PRESET_K_MAP_FILE)
   set(PRESET_K_DEFINITION WRONGGPU_PRESET_K=0)
+endif()
+# The Model L choice in the launcher (src/wizard_policy.h): ON only for a release whose front end and runtime run Model L.
+option(WRONGGPU_MODEL_L "The Model L choice in the launcher (model=L, the OptiScaler entry); OFF = no model setting" OFF)
+if(WRONGGPU_MODEL_L)
+  set(MODEL_L_DEFINITION WRONGGPU_MODEL_L=1)
+else()
+  set(MODEL_L_DEFINITION WRONGGPU_MODEL_L=0)
 endif()
 option(WRONGGPU_DIRECT_ROUTE "The direct FSR route in the installer (the wizard's advanced choice, /DIRECTFSR, a silent install without /OPTISCALER=); OFF = OptiScaler is required" ON)
 if(WRONGGPU_DIRECT_ROUTE)
@@ -105,9 +129,11 @@ add_library(wg_core STATIC
   src/wg_core/model.cpp src/wg_core/checks.cpp src/wg_core/install.cpp src/wg_core/logs.cpp
   src/wg_core/profile.cpp src/wg_core/logtail.cpp src/wg_core/launcher.cpp
   src/wg_core/fingerprint.cpp src/wg_core/optikeys.cpp src/wg_core/leftovers.cpp src/wg_core/rr.cpp src/wg_core/rrprep.cpp src/wg_core/gamerules.cpp
-  src/wg_core/rrconfig.cpp)
+  src/wg_core/rrconfig.cpp src/wg_core/convert_ignore.cpp)
 target_include_directories(wg_core PUBLIC src)
 target_compile_definitions(wg_core PUBLIC ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION})
+# (private: model-choice-tests compiles profile.cpp with the Model L choice on, against this library)
+target_compile_definitions(wg_core PRIVATE ${MODEL_L_DEFINITION})
 if(WRONGGPU_TESTING)
   target_compile_definitions(wg_core PUBLIC WRONGGPU_TESTING)
 endif()
@@ -143,8 +169,8 @@ add_custom_command(
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/make_payload.py
           --payload ${WRONGGPU_PAYLOAD_DIR} --map ${WRONGGPU_MAP} ${PRESET_K_MAP_ARGS} --version ${WRONGGPU_VERSION}
           --build-id=${WRONGGPU_BUILD_ID} --payload-name=${WRONGGPU_PAYLOAD_NAME}
-          ${DIRECT_ROUTE_PAYLOAD_ARGS} ${RR_PAYLOAD_ARGS} ${MAP_F_ARGS} ${MANIFEST_ARGS} --out ${GEN}
-  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/make_payload.py ${MANIFEST} ${WRONGGPU_MAP} ${PRESET_K_MAP_FILE} ${MAP_F_FILE} ${WRONGGPU_PAYLOAD_FILES} ${WRONGGPU_RR_FILES}
+          ${DIRECT_ROUTE_PAYLOAD_ARGS} ${RR_PAYLOAD_ARGS} ${MAP_F_ARGS} ${MAP_L_ARGS} ${MANIFEST_ARGS} --out ${GEN}
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/make_payload.py ${MANIFEST} ${WRONGGPU_MAP} ${PRESET_K_MAP_FILE} ${MAP_F_FILE} ${MAP_L_FILE} ${WRONGGPU_PAYLOAD_FILES} ${WRONGGPU_RR_FILES}
   COMMENT "Embedding the payload and the converter map")
 
 # WrongGPU-Restore.exe: the per-game restorer (uninstall.exe in each game's wronggpu-setup folder): wg_core without the
@@ -173,7 +199,7 @@ add_executable(WrongGPU WIN32 src/app/main.cpp src/app/wizard.cpp src/app/cli.cp
 add_dependencies(WrongGPU WrongGPU-Restore)
 if(WRONGGPU_TESTING)
   add_executable(wizard-policy-tests tests/wizard_policy_tests.cpp)
-  target_compile_definitions(wizard-policy-tests PRIVATE ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION})
+  target_compile_definitions(wizard-policy-tests PRIVATE ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION} ${MODEL_L_DEFINITION})
 endif()
 # wg_core's unit tests (strings and paths, install record, wronggpu.ini keys, the log file; no game, payload or GPU).
 add_executable(wg-core-tests tests/wg_core_tests.cpp)
@@ -182,24 +208,37 @@ target_link_libraries(wg-core-tests PRIVATE wg_core)
 # job files, the update reply, the game environment; no game, payload or GPU).
 add_executable(launcher-core-tests tests/launcher_core_tests.cpp)
 target_link_libraries(launcher-core-tests PRIVATE wg_core)
+target_compile_definitions(launcher-core-tests PRIVATE ${MODEL_L_DEFINITION})
 # The coexistence tests (M2): fingerprints on synthetic bytes, the proxy picker, byte-exact OptiScaler.ini edits and the
 # inikey journal, the OptiScaler tab's key rules, the record's inikey and coexist lines, the log warnings.
 add_executable(coexist-core-tests tests/coexist_tests.cpp)
 target_link_libraries(coexist-core-tests PRIVATE wg_core)
 # real front-end log excerpts (trimmed, paths replaced) for the Last run parser (UI review r3 #2)
 target_compile_definitions(coexist-core-tests PRIVATE WG_TEST_LOGS="${CMAKE_CURRENT_SOURCE_DIR}/tests/logs")
+# The converter search's ignore lists (src/wg_core/convert_ignore.h): the list format, bad lines, path and hash matching
+# (case, slashes, '.' and '..', hard link, junction, symbolic link where the account may make one), the well-known lists,
+# and an empty list keeping every candidate set as it was (synthetic files in the temp folder).
+add_executable(convert-ignore-tests tests/convert_ignore_tests.cpp)
+target_link_libraries(convert-ignore-tests PRIVATE wg_core)
 enable_testing()
 add_test(NAME source-size COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_source_size.py)
 # The launcher's words never claim the same output as the original ("bit for bit", "identical", "(native)": rr-notes.md)
 add_test(NAME wording COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_wording.py)
 add_test(NAME wg-core COMMAND wg-core-tests)
+# The Model L choice (profile.cpp with WRONGGPU_MODEL_L on, whatever this build's switch): the model setting, wronggpu.ini's
+# model item and OptiScaler's UpscalerIndex. Its own copy of profile.cpp comes first; the rest is wg_core.
+add_executable(model-choice-tests tests/model_choice_tests.cpp src/wg_core/profile.cpp)
+target_compile_definitions(model-choice-tests PRIVATE WRONGGPU_MODEL_L=1)
+target_link_libraries(model-choice-tests PRIVATE wg_core)
 add_test(NAME launcher-core COMMAND launcher-core-tests)
+add_test(NAME model-choice COMMAND model-choice-tests)
 add_test(NAME coexist-core COMMAND coexist-core-tests)
+add_test(NAME convert-ignore COMMAND convert-ignore-tests)
 if(WRONGGPU_TESTING)
   add_test(NAME wizard-policy COMMAND wizard-policy-tests)
 endif()
 target_include_directories(WrongGPU PRIVATE ${GEN})
-target_compile_definitions(WrongGPU PRIVATE ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION})
+target_compile_definitions(WrongGPU PRIVATE ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION} ${MODEL_L_DEFINITION})
 target_link_libraries(WrongGPU PRIVATE wg_ui wg_core wgc_core comctl32 shell32 ole32 oleaut32 uuid advapi32 user32 gdi32 gdiplus dwmapi uxtheme d2d1 d3d11 dxgi dwrite windowscodecs uiautomationcore)
 if(MSVC)
   target_compile_options(WrongGPU PRIVATE /Zi)
