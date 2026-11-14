@@ -43,6 +43,7 @@ extern const char* const kMsgNoPresetM;
 extern const char* const kMsgNoPresetK;
 extern const char* const kMsgNoPresetF;
 extern const char* const kMsgNoPresetL;
+extern const char* const kMsgNoPresetFG;
 extern const char* const kMsgUnsupported;
 extern const char* const kMsgMapDamaged;
 extern const char* const kMsgMapDoesNotFit;
