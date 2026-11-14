@@ -8,12 +8,15 @@
 namespace wg {
 
 struct SetupError { wstring msg; int code = EXIT_FAILED; };
+// CreateFileW(path, GENERIC_READ, share, OPEN_EXISTING), through the elevated worker's guard while one is active
+// (secure_fs.h). INVALID_HANDLE_VALUE with the last error set.
+HANDLE OpenForRead(const wstring& path, DWORD share);
 // Read-only view of a whole file (large files are scanned without copying them).
 struct MappedFile {
     HANDLE file = INVALID_HANDLE_VALUE, map = nullptr;
     const uint8_t* data = nullptr; size_t size = 0;
     explicit MappedFile(const wstring& path, unsigned long long limit = 1ull << 30) {
-        file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        file = OpenForRead(path, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
         if (file == INVALID_HANDLE_VALUE) return;
         LARGE_INTEGER sz{};
         if (!GetFileSizeEx(file, &sz) || sz.QuadPart == 0 || (unsigned long long)sz.QuadPart > limit) return;
@@ -56,6 +59,21 @@ void ForceDelete(const wstring& p);
 void WriteFileAtomic(const wstring& path, const void* data, size_t size);
 void CopyChecked(const wstring& src, const wstring& dst);
 void RemoveTree(const wstring& dir, const wstring& keepFile = L"");
+// The modules' other path-based Win32 calls, through the elevated worker's guard while one is active (secure_fs.h; its
+// refusals throw SetupError). Each returns what the Win32 call returns and sets the last error as it does.
+DWORD GetAttrs(const wstring& p);                                  // GetFileAttributesW
+bool SetAttrs(const wstring& p, DWORD attrs);                      // SetFileAttributesW
+bool DeletePath(const wstring& p);                                 // DeleteFileW
+bool RemoveDirPath(const wstring& p);                              // RemoveDirectoryW (an empty folder)
+bool MakeDir(const wstring& p);                                    // CreateDirectoryW(p, nullptr)
+bool MovePath(const wstring& from, const wstring& to, DWORD flags); // MoveFileExW (MOVEFILE_REPLACE_EXISTING, _COPY_ALLOWED; written through)
+bool CopyPath(const wstring& from, const wstring& to);             // CopyFileW(from, to, FALSE)
+HANDLE CreateNewFile(const wstring& p);                            // CreateFileW(GENERIC_WRITE, no sharing, CREATE_NEW)
+// The entries of `dir` (no "." or ".."); false (last error set) when it cannot be listed. Links are marked
+// FILE_ATTRIBUTE_REPARSE_POINT; reparse points that only store a file differently (secure_fs.h) are not. Through the
+// elevated worker's guard while one is active.
+struct DirEntry { wstring name; DWORD attrs; unsigned long long size; };
+bool ListEntries(const wstring& dir, std::vector<DirEntry>& out);
 std::vector<wstring> ListFiles(const wstring& dir, const wchar_t* pattern);
 std::vector<wstring> ListDirs(const wstring& dir);
 std::vector<wstring> FindFilesNamed(const wstring& root, const wchar_t* name, size_t budget = 60000, int maxDepth = 10);

@@ -11,6 +11,7 @@
 #include "optiscaler.h"
 #include "payload.h"
 #include "pe.h"
+#include "secure_fs.h"
 #include "settings.h"
 
 namespace wg {
@@ -67,15 +68,13 @@ RrUse DetectRrUncached(const wstring& exe) {
     bool frameGen = false;  // rc6: the game interface's frame-generation plugin seen (kIfaceFrameGen)
     while (!stack.empty() && visited < 40000) {
         auto [dir, depth] = stack.back(); stack.pop_back();
-        WIN32_FIND_DATAW fd;
-        HANDLE h = FindFirstFileExW(Join(dir, L"*").c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
-        if (h == INVALID_HANDLE_VALUE) continue;
-        do {
+        std::vector<DirEntry> entries;
+        try { if (!ListEntries(dir, entries)) continue; } catch (const SetupError&) { continue; }  // (a folder the worker's guard refuses)
+        for (auto& en : entries) {
             ++visited;
-            const wstring n = fd.cFileName;
-            if (n == L"." || n == L"..") continue;
-            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                if (depth < 9 && !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && !IEq(n, kStateDirName) && !IEq(n, kLegacyStateDir))
+            const wstring& n = en.name;
+            if (en.attrs & FILE_ATTRIBUTE_DIRECTORY) {
+                if (depth < 9 && !(en.attrs & FILE_ATTRIBUTE_REPARSE_POINT) && !IEq(n, kStateDirName) && !IEq(n, kLegacyStateDir))
                     stack.push_back({Join(dir, n), depth + 1});
             } else if (IEq(n, kIfaceFrameGen)) {
                 frameGen = true;
@@ -85,13 +84,11 @@ RrUse DetectRrUncached(const wstring& exe) {
                 if (IEq(n, kRrIfacePlugin)) {
                     r.uses = true;
                     r.why = rel;
-                    FindClose(h);
                     return known(r);
                 }
                 if (library.empty()) library = rel;
             }
-        } while (FindNextFileW(h, &fd));
-        FindClose(h);
+        }
     }
     if (frameGen && IEq(BaseName(exe), L"HogwartsLegacy.exe")) {  // rc6: the updated Hogwarts Legacy (kIfaceFrameGen)
         RrUse n;
@@ -233,14 +230,15 @@ wstring RrDataFile() { return Join(RrDataDir(), FromUtf8(wgc::kModelFileName)); 
 void RecoverRrData(Context& ctx) {
     const wstring old = RrDataDir() + L".old";
     if (IsDir(RrDataDir()) || !IsDir(old)) return;
-    if (MoveFileExW(old.c_str(), RrDataDir().c_str(), MOVEFILE_WRITE_THROUGH)) LogLine(ctx, L"RR data: put back from " + old + L" (an earlier swap did not finish)");
+    if (MovePath(old, RrDataDir(), 0)) LogLine(ctx, L"RR data: put back from " + old + L" (an earlier swap did not finish)");
 }
 
 bool RrDataValid(Context& ctx, wstring* why) {
     if (!LoadFMap(ctx)) { if (why) *why = ctx.fMapError; return false; }
     if (!IsFile(RrDataFile())) { if (why) *why = L"no converted Ray Reconstruction data on this PC"; return false; }
     string w;
-    const bool ok = wgc::verify_model_file(*ctx.fMap.map, std::filesystem::path(RrDataFile()), w);
+    const ConverterFile in(RrDataFile(), ctx.workRoot);  // (the elevated worker: a checked private copy, secure_fs.h)
+    const bool ok = wgc::verify_model_file(*ctx.fMap.map, std::filesystem::path(in.path()), w);
     if (why) *why = FromUtf8(w);
     return ok;
 }
@@ -352,7 +350,8 @@ RrDataState FindRrData(Context& ctx, const GameTarget* t, const wstring& userDll
     wgc::SearchOptions opt;
     for (auto& c : cands) {
         auto conv = std::make_shared<wgc::Converted>();
-        const wgc::Result r = wgc::convert_file(*ctx.fMap.map, std::filesystem::path(c.first), opt, *conv,
+        const ConverterFile in(c.first, ctx.workRoot);
+        const wgc::Result r = wgc::convert_file(*ctx.fMap.map, std::filesystem::path(in.path()), opt, *conv,
                                                 [&ctx](const string& s) { LogLine(ctx, L"converter (RR): " + FromUtf8(s)); });
         if (r.code == wgc::kOk) {
             m.ok = true; m.dll = c.first; m.origin = c.second; m.version = FromUtf8(conv->version); m.converted = conv;
@@ -387,11 +386,12 @@ bool WriteRrData(Context& ctx, const RrDataState& m, wstring* why) {
     const wstring side = RrDataDir() + L".new";
     if (IsDir(side)) RemoveTree(side);
     EnsureDir(ModelBaseDir());
-    const wgc::Result r = wgc::write_converted(*ctx.fMap.map, *m.converted, std::filesystem::path(side), false,
+    ConverterDir out(side, ctx.workRoot);  // (the elevated worker: written and checked in its private folder: secure_fs.h)
+    const wgc::Result r = wgc::write_converted(*ctx.fMap.map, *m.converted, std::filesystem::path(out.path()), false,
                                                [&ctx](const string& s) { LogLine(ctx, L"converter (RR): " + FromUtf8(s)); });
-    const wstring sideFile = Join(side, FromUtf8(wgc::kModelFileName));
+    const wstring checkFile = Join(out.path(), FromUtf8(wgc::kModelFileName));
     string w;
-    if (r.code != wgc::kOk || !wgc::verify_model_file(*ctx.fMap.map, std::filesystem::path(sideFile), w)) {
+    if (r.code != wgc::kOk || !wgc::verify_model_file(*ctx.fMap.map, std::filesystem::path(checkFile), w)) {
         if (why) *why = r.code != wgc::kOk ? FromUtf8(r.message) : L"the converted Ray Reconstruction data failed its check (" + FromUtf8(w) + L")";
         // the converter names no cause: a full disk is the one the player can fix, so it is said when it is the case
         ULARGE_INTEGER freeBytes{};
@@ -400,6 +400,7 @@ bool WriteRrData(Context& ctx, const RrDataState& m, wstring* why) {
         RemoveTree(side);
         return false;
     }
+    out.Publish();
     const wstring text = L"source\t" + m.dll + L"\r\nversion\t" + m.version + L"\r\norigin\t" + m.origin + L"\r\nconverted\t" + NowStamp(false) +
                          L"\r\nmap\t" + FromUtf8(wgc::to_hex(ctx.fMap.map->file_sha256)) + L"\r\n" +
                          // the source file's SHA-256: a later reuse is checked against the ignore lists with it (FindRrData)
@@ -411,7 +412,7 @@ bool WriteRrData(Context& ctx, const RrDataState& m, wstring* why) {
     const wstring old = RrDataDir() + L".old";
     if (IsDir(old)) RemoveTree(old);
     DWORD moveErr = 0;
-    for (int i = 0; i < 20 && IsDir(RrDataDir()) && !MoveFileExW(RrDataDir().c_str(), old.c_str(), MOVEFILE_WRITE_THROUGH); ++i) {
+    for (int i = 0; i < 20 && IsDir(RrDataDir()) && !MovePath(RrDataDir(), old, 0); ++i) {
         moveErr = GetLastError();
         Sleep(150);
     }
@@ -420,9 +421,9 @@ bool WriteRrData(Context& ctx, const RrDataState& m, wstring* why) {
         RemoveTree(side);
         return false;
     }
-    if (!MoveFileExW(side.c_str(), RrDataDir().c_str(), MOVEFILE_WRITE_THROUGH)) {
+    if (!MovePath(side, RrDataDir(), 0)) {
         const DWORD e = GetLastError();
-        if (IsDir(old)) MoveFileExW(old.c_str(), RrDataDir().c_str(), MOVEFILE_WRITE_THROUGH);
+        if (IsDir(old)) MovePath(old, RrDataDir(), 0);
         if (why) *why = L"the converted Ray Reconstruction data could not be put in place (" + ErrText(e) + L")";
         return false;
     }

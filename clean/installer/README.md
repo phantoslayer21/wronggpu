@@ -316,9 +316,28 @@ ctest `source-size`.
   copied or shipped; games without art get a generated tile), a page per game with cards, custom-drawn menus and
   dialogs, DPI aware per monitor. Every widget is a UI Automation element with a name (`ui_uia.cpp`); typed text
   stays in native `EDIT` windows. A game folder that needs
-  administrator rights goes to the elevated worker: the window writes a job file (operation, exact paths, the
-  player's `%LOCALAPPDATA%`, the profile) and starts `WrongGPU.exe apply --job=<file> --result=<file>` with `runas`;
-  the window itself never runs elevated.
+  administrator rights goes to the elevated worker: the window writes a job file per game (operation, exact paths,
+  the player's `%LOCALAPPDATA%`, the profile, the OptiScaler package's digest) and a batch file listing each job file
+  with its SHA-256, makes a reply pipe that only this account and administrators can open, and starts
+  `WrongGPU.exe apply --batch=<file> --sha256=<its SHA-256> --pipe=<name>` with `runas` (one permission prompt for
+  every game); the window itself never runs elevated. The elevated step reads each file once and checks every job
+  before the first one runs: each SHA-256, every path absolute, and the OptiScaler package of an install, update or
+  repair copied into a new folder that only administrators can write, installed only from that copy when its digest
+  is the job's. One job that fails a check: no job runs. The worker writes no log or result file; its log lines and
+  each job's result come back over the pipe, the window takes them only from the worker it started and only in that
+  run, and a game without a result there is shown as not reported (`src/wg_core/elevated_job.h`,
+  `src/wg_core/package_snapshot.h`). The worker acts on files through held handles (`src/wg_core/secure_fs.h`): each
+  job's folders (the game's, the player's local app data and Documents folders, its own private folder) are opened
+  before any job runs, from the volume root one folder at a time without following a link, checked to be where the
+  job's path says (their final path), and held so that none of them can be renamed or replaced until the job ends.
+  Every file and folder below them is opened the same way relative to the held folder; a junction, a symbolic link or
+  any other reparse point that leads elsewhere, on any part of a path, is refused with the path named (reparse points
+  that only store a file differently, such as Windows' compression or OneDrive's files on demand, are opened as the
+  file itself). Files are written under a new name next to their target and renamed over it through the handle;
+  renames and deletes go through the file's handle; nothing outside the job's folders is written. The converter reads
+  private copies and writes into the private folder, from where its output is copied into place through the handles.
+  The window binds each path of a job to the path Windows reports for it before the prompt, so a game reached through
+  a link the player made is bound to the real folder.
 - **Command line** (a verb as the first argument; `src/app/cli.cpp`): `scan`, `status [game]`, `install`, `repair`,
   `update`, `uninstall`, `rollback`, `adopt [game | --all]`, `set <game> key=value ...`, `set --global key=value`,
   `get <game> [key]`, `get --global`, `collect <game> [--zip=<file>]`, `hipcheck`, `model status|convert [--preset=M|L]`
@@ -326,7 +345,7 @@ ctest `source-size`.
   `rr-data status|convert [--dll=<RR model file>]` (both converts also take `--ignore=`, `--ignore-list=` and `--library=`:
   "Ignore lists" below),
   `self-install [--dir=] [--startmenu=<folder>|-]`, `self-uninstall [--keep-games]`, `play <game>`, `update-check`,
-  `apply --job= --result=` (the elevated worker), `version`, `ui-dump --dump=<json> [--shots=<folder>]` (the window's
+  `apply --batch= --sha256= --pipe=` (the elevated worker), `version`, `ui-dump --dump=<json> [--shots=<folder>]` (the window's
   pages painted offscreen, never shown: their widgets as JSON, PNGs, for tests), `ui-render --out-dir=<folder>
   --fixture=tests/ui_fixture.ini [--size=1180x760] [--scales=1,1.5] [--frames=library,game,...]` (fixture screenshots for development: named frames, among them empty and busy states, a big library, long names, dialogs). A game is its exe, its folder or its install
   folder. Options: `--out=<file.json>` (the result as JSON; console output of a GUI program is unreliable),

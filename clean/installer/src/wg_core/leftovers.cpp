@@ -161,14 +161,14 @@ std::vector<wstring> CleanLeftovers(Context& ctx, const wstring& dir, const std:
             const wstring orig = Join(Parent(p), sl->original);
             wstring info;
             if (IsFile(orig) && ClassifySlot(*sl, orig, nullptr, info) == FFX_GAME) {
-                if (!MoveFileExW(orig.c_str(), p.c_str(), MOVEFILE_WRITE_THROUGH)) Fail(L"Cannot put the game's " + wstring(sl->name) + L" back: " + ErrText(GetLastError()));
+                if (!MovePath(orig, p, 0)) Fail(L"Cannot put the game's " + wstring(sl->name) + L" back: " + ErrText(GetLastError()));
                 notes.push_back(L"the game's " + wstring(sl->name) + L" is back under its own name");
             }
         }
     }
     for (const wchar_t* sub : {L"plugins", kAsiPluginOwnDir}) {
         const wstring d = Join(dir, sub);
-        if (IsDir(d) && ListFiles(d, L"*").empty() && ListDirs(d).empty() && RemoveDirectoryW(d.c_str())) notes.push_back(L"removed the empty folder " + wstring(sub));
+        if (IsDir(d) && ListFiles(d, L"*").empty() && ListDirs(d).empty() && RemoveDirPath(d)) notes.push_back(L"removed the empty folder " + wstring(sub));
     }
     LogLine(ctx, L"leftovers cleaned up in " + dir + L": " + std::to_wstring(files.size()) + L" file(s)");
     return notes;

@@ -117,24 +117,21 @@ wstring FindGameExe(const wstring& root, const wstring& hint) {
     size_t visited = 0;
     while (!stack.empty() && visited < 20000) {
         auto [dir, depth] = stack.back(); stack.pop_back();
-        WIN32_FIND_DATAW fd;
-        HANDLE h = FindFirstFileW(Join(dir, L"*").c_str(), &fd);
-        if (h == INVALID_HANDLE_VALUE) continue;
+        std::vector<DirEntry> entries;
+        try { if (!ListEntries(dir, entries)) continue; } catch (const SetupError&) { continue; }  // (a folder the worker's guard refuses)
         const size_t first = all.size();
-        do {
+        for (auto& en : entries) {
             ++visited;
-            wstring n = fd.cFileName;
-            if (n == L"." || n == L"..") continue;
+            const wstring& n = en.name;
             wstring p = Join(dir, n);
-            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                if (depth < 4 && !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && !IEq(n, kStateDirName) && !IEq(n, kLegacyStateDir)) stack.push_back({p, depth + 1});
+            if (en.attrs & FILE_ATTRIBUTE_DIRECTORY) {
+                if (depth < 4 && !(en.attrs & FILE_ATTRIBUTE_REPARSE_POINT) && !IEq(n, kStateDirName) && !IEq(n, kLegacyStateDir)) stack.push_back({p, depth + 1});
             } else if (EndsWithI(n, L".exe") && !LooksLikeHelperExe(p)) {
                 const int name = Contains(n, L"dx12") || Contains(n, L"d3d12") ? 1
                                : Contains(n, L"dx11") || Contains(n, L"d3d11") || Contains(n, L"vulkan") || Contains(n, L"_vk") ? -1 : 0;
-                all.push_back({p, ((long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow, 0, name});
+                all.push_back({p, (long long)en.size, 0, name});
             }
-        } while (FindNextFileW(h, &fd));
-        FindClose(h);
+        }
         if (first == all.size()) continue;
         int where = 0;
         for (auto& sl : kSlots) if (IsFile(Join(dir, sl.name))) where = 2;
@@ -205,8 +202,10 @@ wstring StoreExe(const wstring& root, const wstring& hint) {
 // Every game folder of the Steam, Epic and GOG libraries on this PC. Read-only.
 std::vector<StoreGame> ScanLibraries() {
     std::vector<StoreGame> roots;
+    // In the elevated worker a folder its guard refuses (a link on the way: secure_fs.h) is left out, as a missing one is.
+    auto isDir = [](const wstring& d) { try { return IsDir(d); } catch (const SetupError&) { return false; } };
     auto add = [&](const wstring& name, const wstring& root, const wstring& hint, const wchar_t* source) {
-        if (name.empty() || root.empty() || !IsDir(root)) return;
+        if (name.empty() || root.empty() || !isDir(root)) return;
         for (auto& r : roots) if (IEq(FullPath(r.root), FullPath(root))) return;
         roots.push_back({name, FullPath(root), hint, source});
     };
@@ -216,7 +215,9 @@ std::vector<StoreGame> ScanLibraries() {
         for (auto& c : steam) if (c == L'/') c = L'\\';
         std::vector<wstring> libs{steam};
         string raw;
-        if (ReadAll(Join(steam, L"steamapps\\libraryfolders.vdf"), raw)) {
+        bool readable = false;
+        try { readable = ReadAll(Join(steam, L"steamapps\\libraryfolders.vdf"), raw); } catch (const SetupError&) {}
+        if (readable) {
             wstring t = FromUtf8(raw); size_t pos = 0;
             while (pos < t.size()) {
                 size_t nl = t.find(L'\n', pos); wstring line = t.substr(pos, nl == wstring::npos ? wstring::npos : nl - pos); pos = nl == wstring::npos ? t.size() : nl + 1;
@@ -228,9 +229,11 @@ std::vector<StoreGame> ScanLibraries() {
             }
         }
         for (auto& lib : libs) {
-            for (auto& acf : ListFiles(Join(lib, L"steamapps"), L"appmanifest_*.acf")) {
+            std::vector<wstring> acfs;
+            try { acfs = ListFiles(Join(lib, L"steamapps"), L"appmanifest_*.acf"); } catch (const SetupError&) { continue; }
+            for (auto& acf : acfs) {
                 string a;
-                if (!ReadAll(acf, a)) continue;
+                try { if (!ReadAll(acf, a)) continue; } catch (const SetupError&) { continue; }
                 wstring t = FromUtf8(a), dir = KeyValue(t, L"installdir");
                 // benchmarks that ship upscaler test files but are not games (3DMark and its demo)
                 static const wchar_t* const kNotGames[] = {L"223850", L"231350"};
@@ -244,9 +247,11 @@ std::vector<StoreGame> ScanLibraries() {
     // Epic Games Store.
     wstring pd = EnvVar(L"ProgramData");
     if (!pd.empty()) {
-        for (auto& item : ListFiles(Join(pd, L"Epic\\EpicGamesLauncher\\Data\\Manifests"), L"*.item")) {
+        std::vector<wstring> items;
+        try { items = ListFiles(Join(pd, L"Epic\\EpicGamesLauncher\\Data\\Manifests"), L"*.item"); } catch (const SetupError&) {}
+        for (auto& item : items) {
             string raw;
-            if (!ReadAll(item, raw)) continue;
+            try { if (!ReadAll(item, raw)) continue; } catch (const SetupError&) { continue; }
             const StoreGame e = EpicItemGame(FromUtf8(raw));
             add(e.name, e.root, e.hint, L"Epic");
         }

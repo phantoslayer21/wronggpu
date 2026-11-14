@@ -243,14 +243,14 @@ string RrConfigRemoveText(const string& in, const RrConfigFix& fix) {
 wstring RrConfigBackupPath(const wstring& dir) { return Join(Join(StateDir(dir), L"rr-config"), L"Engine.ini"); }
 
 static bool ReadOnly(const wstring& p) {
-    const DWORD a = GetFileAttributesW(p.c_str());
+    const DWORD a = GetAttrs(p);
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_READONLY);
 }
 static void SetReadOnly(const wstring& p, bool on) {
-    const DWORD a = GetFileAttributesW(p.c_str());
+    const DWORD a = GetAttrs(p);
     if (a == INVALID_FILE_ATTRIBUTES) return;
     const DWORD b = on ? (a | FILE_ATTRIBUTE_READONLY) : (a & ~(DWORD)FILE_ATTRIBUTE_READONLY);
-    if (b != a && !SetFileAttributesW(p.c_str(), b)) Fail(L"Cannot change the read-only attribute of " + p + L": " + ErrText(GetLastError()));
+    if (b != a && !SetAttrs(p, b)) Fail(L"Cannot change the read-only attribute of " + p + L": " + ErrText(GetLastError()));
 }
 static bool Utf16(const string& t) { return t.size() >= 2 && (((unsigned char)t[0] == 0xFF && (unsigned char)t[1] == 0xFE) || ((unsigned char)t[0] == 0xFE && (unsigned char)t[1] == 0xFF)); }
 
@@ -384,12 +384,12 @@ void RevertRrConfig(Context& ctx, const wstring& dir, Record& m, std::vector<wst
         }
         if (!fix.folder.empty())  // the folders the fix made, when nothing else is in them
             for (wstring d = Parent(file); d.size() >= fix.folder.size() && IsDir(d); d = Parent(d)) {
-                if (!RemoveDirectoryW(d.c_str())) break;
+                if (!RemoveDirPath(d)) break;
                 if (IEq(d, fix.folder)) break;
             }
         notes.push_back(L"Engine.ini's Ray Reconstruction setting was taken out again (" + file + L")");
-        DeleteFileW(RrConfigBackupPath(dir).c_str());
-        RemoveDirectoryW(Parent(RrConfigBackupPath(dir)).c_str());
+        DeletePath(RrConfigBackupPath(dir));
+        RemoveDirPath(Parent(RrConfigBackupPath(dir)));
     } catch (const SetupError& e) {
         warnings.push_back(L"Engine.ini could not be put back (" + e.msg + L"): take the line " + RrConfigLineW() + L" out of " + file + L" yourself" +
                            (fix.setReadOnly ? L" and clear its read-only attribute" : L""));
@@ -410,7 +410,7 @@ int RrConfigLineState(Context& ctx, const RrConfigGame& g, wstring* file, wstrin
     if (!known) return -1;
     // no file: no line (0); a file that can't be read, or isn't text WrongGPU reads: said as such (3), never "no line", which
     // would send the player to Fix it again for nothing (r3 #8)
-    HANDLE h = CreateFileW(f.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+    HANDLE h = OpenForRead(f, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
     if (h == INVALID_HANDLE_VALUE) {
         const DWORD e = GetLastError();
         if (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND) return 0;
@@ -426,7 +426,7 @@ int RrConfigLineState(Context& ctx, const RrConfigGame& g, wstring* file, wstrin
     RrConfigAddText(text, fix, &changed, true);  // adding the line would change nothing: it is there
     if (changed) return 0;
     if (!g.readOnly) return 1;
-    const DWORD a = GetFileAttributesW(f.c_str());
+    const DWORD a = GetAttrs(f);
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_READONLY) ? 1 : 2;
 }
 

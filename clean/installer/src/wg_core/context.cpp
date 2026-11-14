@@ -12,6 +12,7 @@ void LogLine(Context& ctx, const wstring& s) {
     wchar_t ts[40]; swprintf(ts, 40, L"[%02d:%02d:%02d] ", t.wHour, t.wMinute, t.wSecond);
     string line = ToUtf8(wstring(ts) + s + L"\r\n");
     std::lock_guard<std::mutex> lock(ctx.logMutex);  // the file's name read under it too (the window can move the log meanwhile)
+    if (ctx.logSink) { ctx.logSink(s); return; }
     if (ctx.logFile.empty()) return;
     // Logging must not write through a junction used as the shared data-folder root, even before uninstall starts.
     const wstring shared = AppDataPath(), fullShared = FullPath(shared), fullLog = FullPath(ctx.logFile);
@@ -37,7 +38,7 @@ wstring AppDataPath() {
 // %LOCALAPPDATA%\WrongGPU (created on first use).
 wstring AppDataDir() {
     const wstring dir = AppDataPath();
-    CreateDirectoryW(dir.c_str(), nullptr);
+    if (!IsDir(dir)) MakeDir(dir);
     return dir;
 }
 wstring DefaultLogPath() { return Join(AppDataDir(), L"setup.log"); }

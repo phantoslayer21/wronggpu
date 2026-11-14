@@ -27,6 +27,7 @@ os.environ["WRONGGPU_TESTING"] = "1"
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import coexist_fixtures as fx  # noqa: E402
+import elevated_worker as ew  # noqa: E402  (the elevated worker run directly: job files, batch, reply pipe)
 import run_installer_tests as suite  # noqa: E402
 import run_launcher_tests as lt  # noqa: E402
 from run_installer_tests import diff, read, sha, snapshot, write  # noqa: E402
@@ -377,10 +378,8 @@ def test_opti_tab(t, full):
     t.check("update: the OptiScaler tab's values carried over to the new ini, the journal kept", rc == 0 and b"ShortcutKey = 0x2E" in now and b"EnableXeSSInputs=false" in now and
             b"DxgiFactoryWrapping=true" in now and sum(1 for l in rec_lines(b) if l.startswith("inikey\t")) == 3, (rc, t.j.get("message"), now[-400:]))
     # the elevated worker's job carries OptiScaler edits too
-    job, result = os.path.join(t.work, "job-opti.txt"), os.path.join(t.work, "result-opti.txt")
-    write(job, "op=apply\r\ndir=%s\r\nlocalappdata=%s\r\noptikey.Menu.FpsOverlayType=2\r\n" % (b, t.env["LOCALAPPDATA"]))
-    rc = t.run("apply", "--job=" + job, "--result=" + result)
-    t.check("apply --job: optikey lines applied", rc == 0 and b"FpsOverlayType=2" in read(os.path.join(b, "OptiScaler.ini")), (rc, read(result) if os.path.isfile(result) else ""))
+    rc, rep = ew.run_worker(t.run, t.work, ["op=apply\r\ndir=%s\r\nlocalappdata=%s\r\noptikey.Menu.FpsOverlayType=2\r\n" % (b, t.env["LOCALAPPDATA"])])
+    t.check("apply (the elevated worker): optikey lines applied", rc == 0 and b"FpsOverlayType=2" in read(os.path.join(b, "OptiScaler.ini")), (rc, vars(rep)))
     rc = t.run("opti", exe, "--reset")
     t.check("--reset: the editable keys back byte for byte to what the install wrote", rc == 0 and read(os.path.join(b, "OptiScaler.ini")) == installed and
             not any(l.startswith("inikey\t") and "\tMenu\tShowFps\t" not in l for l in rec_lines(b)), (rc, t.j.get("message")))
