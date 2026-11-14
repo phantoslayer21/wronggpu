@@ -1,6 +1,8 @@
 {
  "_doc": "build_dx12.py VGPR check: the RGA (gfx1201) USED_VGPRs bound of every Swin / bottleneck kernel (a name with a swin_ part). Each bound is the largest count that keeps the kernel's present occupancy: VGPR file 1536 per SIMD lane, granule 8, a 256-lane wave32 workgroup = 4 waves on each of a CU's 2 SIMDs, so 2 workgroups per CU need <= 192, 3 need <= 128 (a 128-lane workgroup = 2 waves per SIMD: 4 per CU need <= 192). A kernel over its bound fails the build (a merge or an edit lost a workgroup per CU: swin_block_c96_add_xe_* at 215 VGPRs ran 1 per CU, +38 us per frame at 1440p Q). A new Swin / bottleneck kernel needs an entry. WG_DX12_VGPR_CHECK=0 skips the check.",
   "l_swin_block_c32_nc": 96,
+  "l_swin_block_c32_enc_nc": 96,
+  "l_swin_block_c32_dec_nc": 96,
  "swin_block_c64_nc": 192,
  "swin_block_c96_nc": 192,
  "swin_block_c96_add_ex_nc": 192,
