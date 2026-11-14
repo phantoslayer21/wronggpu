@@ -42,6 +42,28 @@ class LayoutTotals(unittest.TestCase):
         self.assertEqual([l.subnet for l in L.NET2].count("A"), 13)
         self.assertEqual(L.NET2[0].cin_used, 10)
 
+    def test_net2_levels(self):
+        self.assertEqual([l.level for l in L.NET2 if l.subnet == "A"], [2, 4, 8] + [8] * 8 + [8, None])
+        self.assertEqual([l.level for l in L.NET2 if l.subnet == "B"], [2, 4] + [4] * 8 + [4, 1])
+        self.assertEqual([l.index for l in L.NET2 if l.upscaled], [12, 24])
+        # an upscaled output of 3 groups feeds a layer one level up whose input is one group (96 = 3 x 32, 48 = 3 x 16)
+        for i in (12, 24):
+            up, nxt = L.NET2[i - 1], L.NET2[i]
+            self.assertEqual(up.out, 3 * nxt.cin)
+        # each sub-net's eight-layer block keeps width and level
+        for s, w in (("A", 64), ("B", 32)):
+            block = [l for l in L.NET2 if l.subnet == s and l.cin == l.out == w]
+            self.assertEqual(len(block), 8)
+            self.assertEqual(len({l.level for l in block}), 1)
+
+    def test_net2_work(self):
+        # the spec side's per-pixel work: sub-net A about 7.6k, B 6.7k to 7.6k (computed, counting used inputs)
+        self.assertEqual(L.net2_macs_per_pixel("B"), 7560)
+        self.assertEqual(L.net2_macs_per_pixel("A", open_level=2), 7632)
+        with self.assertRaises(ValueError):
+            L.net2_macs_per_pixel("A")
+        self.assertGreater(L.net2_macs_per_pixel("A", used_inputs=False, open_level=2), 7632)
+
     def test_blob_order(self):
         names = [b.name for b in L.blobs()]
         self.assertEqual(names[:17], ["net1_%02d" % i for i in range(1, 18)])

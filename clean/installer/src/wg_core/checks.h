@@ -28,6 +28,10 @@ struct SystemInfo { WinInfo win; GpuInfo gpu; HipInfo hip; };
 
 WinInfo WindowsInfo();
 bool IsRdna4Name(const wstring& name);
+// Under Wine: the name DetectGpu gives an RDNA 4 card from Linux's PCI ids when Wine's DXGI names it otherwise; empty
+// when Linux reports no RDNA 4 card (or outside Wine, where Z:\sys does not exist). drmRoot: the folder holding card0,
+// card1, ... (Linux's /sys/class/drm; tests point it at a made-up folder). Every card is looked at, in number order.
+wstring LinuxRdna4Name(const wstring& drmRoot = L"Z:\\sys\\class\\drm");
 GpuInfo DetectGpu();
 bool VersionLess(const wstring& a, const wstring& b);
 std::vector<wstring> HipCandidates();

@@ -169,6 +169,21 @@ wstring GameAmdFfxDll(Context& ctx, const wstring& dir, const wstring& exeDir) {
 // ------------------------------------------------------------------------------------------------
 // Install engine
 // ------------------------------------------------------------------------------------------------
+// Under Wine: a model path for the game's own Proton prefix (PathForGamePrefix). When it can't be made a Z: path (Wine's
+// wine_get_unix_file_name missing, or no part of the path resolvable), the launcher-prefix path is written as it is and
+// the game will most likely not find the model: logged, and a line in the install result.
+static wstring ModelPathForGame(Context& ctx, Ui& ui, std::vector<wstring>& warnings, const wstring& path) {
+    const wstring z = PathForGamePrefix(path);
+    if (UnderWine() && !path.empty() && !StartsWithI(z, L"Z:\\")) {
+        const wstring w = L"The model path could not be made reachable from the game's own Proton prefix, so the game may "
+                          L"not find the model: " + z + L" (a Z: path is needed; Z: maps the Linux root in every prefix).";
+        LogLine(ctx, w);
+        ui.log(w);
+        warnings.push_back(w);
+    }
+    return z;
+}
+
 std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const ModelState& model, const Consent& consent, Ui& ui, const HipInfo& hip) {
     std::vector<wstring> warnings;
     const wstring dir = target.dir;
@@ -336,6 +351,12 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     selectedOptions = OnlyModelM(selectedOptions);
 #endif
     selectedIni = IniSet(selectedIni, "fsr", "runtime_options", selectedOptions);
+    // Under Wine the game runs in a prefix of its own (Proton), where this launcher's %LOCALAPPDATA% does not exist: the
+    // model folder is named by its Z: path, which that prefix reaches too. A model_dir the player set stays.
+    string playerModelDir, playerModelDirSection;
+    IniGetFrontEnd(selectedIni, "model_dir", &playerModelDir, &playerModelDirSection);
+    if (UnderWine() && playerModelDir.empty())
+        selectedIni = IniSet(selectedIni, "fsr", "model_dir", ToUtf8(ModelPathForGame(ctx, ui, warnings, ModelBaseDir())));
     const wstring selectedIniSrc = Join(OptiTempDir(ctx), L"WrongGPU.selected.ini");
     WriteFileAtomic(selectedIniSrc, selectedIni.data(), selectedIni.size());
     optiFiles.push_back({L"wronggpu.ini", selectedIniSrc});
@@ -485,7 +506,7 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
             WriteFileAtomic(src, d, sz);
             optiFiles.push_back({IsRrPayloadPlugin(f.rel) ? Join(Parent(pluginRel), kRrPluginName) : wstring(f.rel), src});
         }
-        const string rini = RrIniText(RrDataFile());
+        const string rini = RrIniText(ModelPathForGame(ctx, ui, warnings, RrDataFile()));  // Z: under Wine, as model_dir above
         const wstring rsrc = Join(tmp, kRrIni);
         WriteFileAtomic(rsrc, rini.data(), rini.size());
         optiFiles.push_back({kRrIni, rsrc});

@@ -68,3 +68,10 @@ path = ["clean/third_party/fidelityfx-sdk-1.1.4/README.md", "clean/third_party/f
 precedence = "override"
 SPDX-FileCopyrightText = "2026 phantoslayer21"
 SPDX-License-Identifier = "MIT"
+
+# The Linux test runner (clean/linux): its author's copyright line as well as the project's
+[[annotations]]
+path = "clean/linux/**"
+precedence = "aggregate"
+SPDX-FileCopyrightText = ["2026 phantoslayer21", "2026 j0nsh1n"]
+SPDX-License-Identifier = "MIT"

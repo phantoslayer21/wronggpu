@@ -16,6 +16,8 @@ if ! command -v "$cxx" >/dev/null; then echo "SKIP: $cxx not installed"; exit 0;
 
 rt="$repo/clean/runtime"
 flags=(-std=c++17 -O2 -Wall -Wextra -static -static-libgcc -static-libstdc++ -D_CRT_SECURE_NO_WARNINGS)
+# clang-based MinGW (llvm-mingw) accepts the SEH __try in interop/descriptor_publish.h only with MS extensions
+if "$cxx" --version 2>/dev/null | grep -qi clang; then flags+=(-fms-extensions); fi
 echo "== MinGW build"
 "$cxx" "${flags[@]}" -shared -o "$work/wronggpu_runtime.dll" \
   "$rt/device.cpp" "$rt/embedded.cpp" "$rt/model.cpp" "$rt/runtime.cpp" "$repo/clean/k/runtime/model_k.cpp" \
@@ -27,7 +29,7 @@ echo "== MinGW build"
 "$cxx" "${flags[@]}" -o "$work/test_interop_d3d12.exe" "$here/tests/test_interop_d3d12.cpp" || exit 1
 x86_64-w64-mingw32-objdump -p "$work/wronggpu_runtime.dll" | grep -E "DLL Name|wgGetUpscalerBackend" | sed 's/^/  /'
 
-wine=$(command -v wine64 || command -v wine || true)
+wine=${WG_WINE:-$(command -v wine64 || command -v wine || true)}  # WG_WINE: a Proton's wine (clean/linux/wine_env.py)
 if [ -z "$wine" ]; then echo "== Wine tests skipped (no Wine)"; exit 0; fi
 echo "== Wine tests"
 export WINEDEBUG=${WINEDEBUG:--all} WINEPREFIX=${WINEPREFIX:-$work/wineprefix}
