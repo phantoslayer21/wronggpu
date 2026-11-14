@@ -451,7 +451,8 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
       !alloc(&expo_, 32, true) || !alloc(&expo_partials_, 4 * (size_t)cdiv(ny, 4)) || !alloc(&expo_computed_, 4, true) ||
       !alloc(&expo_sync_, 4, true) || !alloc(&xs_, 16, true) || !alloc(&kexpo_, 16, true))
     return false;
-  if (!external_io_ && !alloc(&out_, (size_t)W_ * H_ * 12, true)) return false;
+  // the own output buffer (tests): dense RGB f32, dense RGBA f32 (FrameIo.out_rgba32f) or RGBA16F rows that fit
+  if (!external_io_ && !alloc(&out_, (size_t)W_ * H_ * 16, true)) return false;
   // the filter-shape table (spec 43 section 7) of every level, computed once; a frame reads its level's set
   std::vector<uint16_t> tab((size_t)8 * kFilterEntries * kFilterValues);
   for (int l = 0; l < 8; ++l) k_filter_table(l, 1, tab.data() + (size_t)l * kFilterEntries * kFilterValues);
@@ -471,14 +472,18 @@ bool KRuntime::launch(const char* kernel, unsigned grid, unsigned block, void* a
   return dev_->launch(kernel, grid, block, args) || dfail();
 }
 
-bool KRuntime::upload_inputs(int rw, int rh, const float* rgb, const float* dep, const float* mot) {
+bool KRuntime::upload_inputs(int rw, int rh, const float* color, const float* dep, const float* mot, int channels) {
   if (rw <= 0 || rh <= 0 || rw > max_rw_ || rh > max_rh_) return fail("render size larger than the maximum");
   if (external_io_) return fail("inputs come from the interop (external_io)");
+  if (channels != 3 && channels != 4) return fail("model K: the colour has 3 or 4 values per pixel");
   if (!dev_->sync()) return dfail();
   const size_t n = (size_t)rw * rh;
-  std::vector<float> c(n * 4, 0.0f);
+  // the dense colour's fourth value is the colour input's alpha, unmodified (the output alpha follows it through the
+  // output stage's current-colour bilinear; issue #26); an RGB colour has none: 1, the value a texture fetch
+  // gives a missing alpha
+  std::vector<float> c(n * 4, 1.0f);
   for (size_t i = 0; i < n; ++i)
-    for (int k = 0; k < 3; ++k) c[4 * i + k] = rgb[3 * i + k];
+    for (int k = 0; k < channels; ++k) c[4 * i + k] = color[(size_t)channels * i + k];
   return (dev_->upload(color_, c.data(), n * 16) && dev_->upload(depth_, dep, n * 4) &&
           dev_->upload(motion_, mot, n * 8) && dev_->sync()) ||
          dfail();
@@ -789,8 +794,9 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
   // network (spec 41 / 44)
   if (!mark(2) || !network(f)) return false;
 
-  // output stage (spec 43) into the caller's output: RGBA16F rows (interop output copy), dense RGB f32 (interop
-  // output pass, FORMATS.md "Per-frame runtime"), or the own RGB f32 buffer (tests)
+  // output stage (spec 43) into the caller's output: RGBA16F rows (interop output copy), dense RGBA f32 (the interop's
+  // output pass for model K, FrameIo.out_rgba32f: the fourth value is the output alpha), dense RGB f32 (FORMATS.md
+  // "Per-frame runtime"; no alpha), or the own buffer (tests) in one of these layouts
   if (!mark(3)) return false;
   // interop option handover=staged: the output stage is next (FrameIo.out_signal)
   if (io && io->out_signal && !dev_->signal_fence(io->out_signal, io->out_signal_value)) return dfail();
@@ -810,10 +816,16 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
   const int hp = io ? io->out_half_pitch : 0;
   op.out = io && io->out ? io->out : out_;
   if (!op.out) return fail("frame without an output buffer (interop)");
+  // the own output buffer (no FrameIo output) holds RGBA16F rows only if they fit
+  if (hp > 0 && op.out == out_ && (size_t)hp * H_ > (size_t)W_ * H_ * 16)
+    return fail("model K: RGBA16F rows do not fit the own output buffer");
   if (hp > 0) {
     if (hp % 8) return fail("model K: output rows must be a multiple of 8 bytes");
     op.omode = OUT_RGBA16F;
     op.opitch = hp / 8;
+  } else if (io && io->out_rgba32f) {
+    op.omode = OUT_RGBA32F;
+    op.opitch = W_;
   } else {
     op.omode = OUT_RGB32F;
     op.opitch = W_;
@@ -871,7 +883,7 @@ const char* KRuntime::kernels() {
                   " base=" + std::to_string(Bw_) + "x" + std::to_string(Bh_) +
                   " hdr=" + (hdr_ ? "1" : "0") + " mv=render" +
                   " filter_level=" + std::to_string(level_last_) +
-                  " out=" + (omode_last_ == OUT_RGBA16F ? "rgba16f" : "f32") +
+                  " out=" + (omode_last_ == OUT_RGBA16F ? "rgba16f" : omode_last_ == OUT_RGBA32F ? "rgba32f" : "f32") +
                   std::string(compact_head_ ? " post=k_out_pixel_c filter=fused post_last=k_out_pixel_c filter_last=fused"
                                             : " post=k_out_pixel filter=fused post_last=k_out_pixel filter_last=fused") +
                   (diag_input2_ || diag_copyin_
@@ -895,7 +907,7 @@ bool KRuntime::buffer(const std::string& name, DevPtr* p, size_t* bytes) {
       {"exposure.pair", {kexpo_, 12}},      {"k.scalars", {xs_, 16}}, {"exposure.measured", {expo_computed_, 4}},
       {"k.x0", {net_["X0"], net_bytes_["X0"]}}, {"k.N", {net_["OUT"], net_bytes_["OUT"]}},
       {"k.Hc", {Hc_[lp], P16 * 8}},         {"k.L", {L_[lp], P16 * 8}},
-      {"k.Hh", {Hh_[lp], (size_t)Bw_ * Bh_ * 8}}, {"filter.out", {out_, (size_t)W_ * H_ * 12}},
+      {"k.Hh", {Hh_[lp], (size_t)Bw_ * Bh_ * 8}}, {"filter.out", {out_, (size_t)W_ * H_ * (omode_last_ == OUT_RGBA32F ? 16 : 12)}},
       {"input.color", {color_, R * 16}},    {"input.depth", {depth_, R * 4}},
       {"input.motion", {motion_, R * 8}},
   };
