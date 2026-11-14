@@ -1,0 +1,329 @@
+{
+ "timer": "the runtime's D3D12 timestamps in the game's command list (timing_log=1, timing_stages=1): each sample is one 'timing, last 300 dispatches' line = the mean over 300 frames; stage spans [0] start of the network -> [1] first Swin kernel -> [2] dec0 -> [3] post -> [4] after the last kernel; network_total = [0]->[4]; TOTAL_t3_t0 = the frame's full D3D12 span",
+ "statistics": "over the 300-frame windows of each scene: median, p95, min of the window means; max_ms = the largest window mean; the largest single frame per window is in the log (max ...) and given as worst_frame_network_ms / worst_frame_total_ms",
+ "what": "Model L with its default post (since #170: its own reconstruction l_post_recon_p12 + filter), Model L with l_post=m (Model M's fused pack12 post) and Model M as a control, in Cyberpunk 2077, one session, one build, the same settings, save and spot",
+ "game": "Cyberpunk 2077 (Steam), Quality mode (the game sends 1280x720), output 1920x1080 R16G16B16A16_FLOAT, borderless, ray tracing as the save had it, path tracing off, frame generation off",
+ "render": [
+  1280,
+  720
+ ],
+ "output": [
+  1920,
+  1080
+ ],
+ "mode": "1080p Quality",
+ "hdr": "HDR: the game creates the upscaler with flags=HDR|DEPTH_INVERTED|AUTO_EXPOSURE; the runtime reports flags 0x7 (WG_CREATE_HDR = bit 0) in all three runs; the own post runs only with HDR colour (runtime.cpp refuses l_post_recon on LDR) and ran with no refusal",
+ "executor": "dx12 (native D3D12, the game device, no HIP)",
+ "build": "main 8ed26e8f (#170) + #155 (front-end Model L choice) + #156 (launch_trace option), the same two harness PRs as the earlier game builds; RR objects reused from the earlier Model L build (RR not under test); kernel_sets.json check passes (Model M 46, Model L 18)",
+ "model_digests": {
+  "L": "d3c040191ec7ab0164efc03ee76413277e7fb54e6e6d2b168f2c0202aa1ad806 (<game>\\bin\\x64\\WrongGPU\\model\\L\\model.wgcm)",
+  "M": "bfbd9dad238721fb51ed60e85ceb9789ddb3468c3538efb651d09f8ca820c35 (<local app data>\\WrongGPU\\model\\model.wgcm, this PC's converted Model M)"
+ },
+ "network_kernels_lines": {
+  "41328 (a) L default": "post=post_recon2_r_p12 filter=post_filter_c1_s4 post_last=l_post_recon_p12 filter_last=l_post_filter_direct post_bands=0 ... model=L l_post=l_post_recon",
+  "4560 (b) L l_post=m": "post=post_recon2_r_band_p12 filter=post_filter_c1_s4_band post_last=post_tf_f32_p12_diet_vsit_direct filter_last=fused post_bands=4 ... model=L l_post=m_pack12",
+  "30152 (c) M": "post=post_recon2_r_band_p12 filter=post_filter_c1_s4_band post_last=post_tf_f32_p12_diet_vsit_direct filter_last=fused post_bands=4 (UpscalerIndex=0 = WrongGPU Model M)"
+ },
+ "launch_traces": {
+  "(a)": "launch-trace-102346.txt: l_post_recon_p12, l_post_filter_direct, l_direct_color 11764 each; fused post 0",
+  "(b)": "launch-trace-103052.txt: w64/post_tf_f32_p12_diet_vsit_direct 13332; own-post kernels 0",
+  "(c)": "launch-trace-103733.txt: w64/post_tf_f32_p12_diet_vsit_direct 19999; no Model L kernel"
+ },
+ "earlier_records": {
+  "cp2077-model-l-ownpost-timing.json (build main d79338f + #162)": "gameplay: L own post network 2.912, post 1.003; L default (M's post) network 2.223, post 0.310; title+menu own post 0.976",
+  "cp2077-model-l-timing.json (adea429)": "gameplay: L 2.503, M 1.173"
+ },
+ "gpu_driver": "AMD Radeon RX 9070 XT | driver 32.0.32015.7029",
+ "build_commit": "b56bdef11ec4244d20248a2a08aba7f8cf0ede1f",
+ "dispatches_per_process": {
+  "41328": 26877,
+  "4560": 26890,
+  "30152": 30894
+ },
+ "failed_dispatches_per_process": {},
+ "log": "<run folder>\\logs\\wronggpu-fsr.log",
+ "scenes": {
+  "(a) L default post (own): title + main menu": {
+   "model": "L (no l_post option: default = own post)",
+   "pid": "41328",
+   "scene": "title screen and main menu (shot 01)",
+   "windows": 33,
+   "frames": 9898,
+   "from": "10:24:52",
+   "to": "10:25:41",
+   "enc0": {
+    "median_ms": 0.473,
+    "p95_ms": 0.474,
+    "max_ms": 0.479,
+    "min_ms": 0.469
+   },
+   "Swin": {
+    "median_ms": 0.729,
+    "p95_ms": 0.735,
+    "max_ms": 0.737,
+    "min_ms": 0.721
+   },
+   "dec0": {
+    "median_ms": 0.336,
+    "p95_ms": 0.339,
+    "max_ms": 0.34,
+    "min_ms": 0.332
+   },
+   "post": {
+    "median_ms": 0.633,
+    "p95_ms": 0.637,
+    "max_ms": 0.638,
+    "min_ms": 0.624
+   },
+   "network_total": {
+    "median_ms": 2.172,
+    "p95_ms": 2.186,
+    "max_ms": 2.194,
+    "min_ms": 2.146
+   },
+   "TOTAL_t3_t0": {
+    "median_ms": 2.178,
+    "p95_ms": 2.192,
+    "max_ms": 2.2,
+    "min_ms": 2.152
+   },
+   "worst_frame_network_ms": 2.869,
+   "worst_frame_total_ms": 2.874
+  },
+  "(a) L default post (own): gameplay street": {
+   "model": "L (no l_post option: default = own post)",
+   "pid": "41328",
+   "scene": "gameplay, standing still: the street spot under the overpass (save AutoSave-3, shots 02/03)",
+   "windows": 36,
+   "frames": 10800,
+   "from": "10:28:52",
+   "to": "10:30:36",
+   "enc0": {
+    "median_ms": 0.503,
+    "p95_ms": 0.505,
+    "max_ms": 0.508,
+    "min_ms": 0.498
+   },
+   "Swin": {
+    "median_ms": 0.751,
+    "p95_ms": 0.752,
+    "max_ms": 0.753,
+    "min_ms": 0.749
+   },
+   "dec0": {
+    "median_ms": 0.345,
+    "p95_ms": 0.346,
+    "max_ms": 0.346,
+    "min_ms": 0.344
+   },
+   "post": {
+    "median_ms": 0.651,
+    "p95_ms": 0.652,
+    "max_ms": 0.67,
+    "min_ms": 0.65
+   },
+   "network_total": {
+    "median_ms": 2.25,
+    "p95_ms": 2.253,
+    "max_ms": 2.27,
+    "min_ms": 2.245
+   },
+   "TOTAL_t3_t0": {
+    "median_ms": 2.256,
+    "p95_ms": 2.259,
+    "max_ms": 2.276,
+    "min_ms": 2.251
+   },
+   "worst_frame_network_ms": 8.07,
+   "worst_frame_total_ms": 8.076
+  },
+  "(b) L l_post=m: title + main menu": {
+   "model": "L (l_post=m: Model M's fused post)",
+   "pid": "4560",
+   "scene": "title screen and main menu (shot 04)",
+   "windows": 34,
+   "frames": 10198,
+   "from": "10:31:46",
+   "to": "10:32:33",
+   "enc0": {
+    "median_ms": 0.478,
+    "p95_ms": 0.478,
+    "max_ms": 0.482,
+    "min_ms": 0.475
+   },
+   "Swin": {
+    "median_ms": 0.744,
+    "p95_ms": 0.746,
+    "max_ms": 0.747,
+    "min_ms": 0.736
+   },
+   "dec0": {
+    "median_ms": 0.344,
+    "p95_ms": 0.344,
+    "max_ms": 0.345,
+    "min_ms": 0.34
+   },
+   "post": {
+    "median_ms": 0.268,
+    "p95_ms": 0.268,
+    "max_ms": 0.302,
+    "min_ms": 0.264
+   },
+   "network_total": {
+    "median_ms": 1.834,
+    "p95_ms": 1.838,
+    "max_ms": 1.873,
+    "min_ms": 1.817
+   },
+   "TOTAL_t3_t0": {
+    "median_ms": 1.84,
+    "p95_ms": 1.844,
+    "max_ms": 1.879,
+    "min_ms": 1.823
+   },
+   "worst_frame_network_ms": 2.273,
+   "worst_frame_total_ms": 2.278
+  },
+  "(b) L l_post=m: gameplay street": {
+   "model": "L (l_post=m: Model M's fused post)",
+   "pid": "4560",
+   "scene": "gameplay, standing still: the same street spot (same save, shots 05/06)",
+   "windows": 39,
+   "frames": 11700,
+   "from": "10:35:20",
+   "to": "10:37:09",
+   "enc0": {
+    "median_ms": 0.504,
+    "p95_ms": 0.508,
+    "max_ms": 0.509,
+    "min_ms": 0.501
+   },
+   "Swin": {
+    "median_ms": 0.753,
+    "p95_ms": 0.754,
+    "max_ms": 0.755,
+    "min_ms": 0.749
+   },
+   "dec0": {
+    "median_ms": 0.346,
+    "p95_ms": 0.347,
+    "max_ms": 0.347,
+    "min_ms": 0.345
+   },
+   "post": {
+    "median_ms": 0.31,
+    "p95_ms": 0.311,
+    "max_ms": 0.311,
+    "min_ms": 0.309
+   },
+   "network_total": {
+    "median_ms": 1.912,
+    "p95_ms": 1.915,
+    "max_ms": 1.916,
+    "min_ms": 1.91
+   },
+   "TOTAL_t3_t0": {
+    "median_ms": 1.918,
+    "p95_ms": 1.921,
+    "max_ms": 1.922,
+    "min_ms": 1.917
+   },
+   "worst_frame_network_ms": 1.961,
+   "worst_frame_total_ms": 1.968
+  },
+  "(c) M control: title + main menu": {
+   "model": "M",
+   "pid": "30152",
+   "scene": "title screen and main menu (shot 07)",
+   "windows": 42,
+   "frames": 12598,
+   "from": "10:39:19",
+   "to": "10:40:08",
+   "enc0": {
+    "median_ms": 0.1,
+    "p95_ms": 0.1,
+    "max_ms": 0.103,
+    "min_ms": 0.099
+   },
+   "Swin": {
+    "median_ms": 0.574,
+    "p95_ms": 0.575,
+    "max_ms": 0.576,
+    "min_ms": 0.568
+   },
+   "dec0": {
+    "median_ms": 0.188,
+    "p95_ms": 0.188,
+    "max_ms": 0.188,
+    "min_ms": 0.185
+   },
+   "post": {
+    "median_ms": 0.248,
+    "p95_ms": 0.248,
+    "max_ms": 0.276,
+    "min_ms": 0.246
+   },
+   "network_total": {
+    "median_ms": 1.11,
+    "p95_ms": 1.112,
+    "max_ms": 1.142,
+    "min_ms": 1.099
+   },
+   "TOTAL_t3_t0": {
+    "median_ms": 1.116,
+    "p95_ms": 1.118,
+    "max_ms": 1.148,
+    "min_ms": 1.105
+   },
+   "worst_frame_network_ms": 1.425,
+   "worst_frame_total_ms": 1.43
+  },
+  "(c) M control: gameplay street": {
+   "model": "M",
+   "pid": "30152",
+   "scene": "gameplay, standing still: the same street spot (same save, shots 08/09)",
+   "windows": 43,
+   "frames": 12900,
+   "from": "10:42:51",
+   "to": "10:44:40",
+   "enc0": {
+    "median_ms": 0.111,
+    "p95_ms": 0.111,
+    "max_ms": 0.111,
+    "min_ms": 0.11
+   },
+   "Swin": {
+    "median_ms": 0.585,
+    "p95_ms": 0.587,
+    "max_ms": 0.587,
+    "min_ms": 0.583
+   },
+   "dec0": {
+    "median_ms": 0.189,
+    "p95_ms": 0.189,
+    "max_ms": 0.19,
+    "min_ms": 0.188
+   },
+   "post": {
+    "median_ms": 0.289,
+    "p95_ms": 0.29,
+    "max_ms": 0.291,
+    "min_ms": 0.288
+   },
+   "network_total": {
+    "median_ms": 1.174,
+    "p95_ms": 1.177,
+    "max_ms": 1.178,
+    "min_ms": 1.17
+   },
+   "TOTAL_t3_t0": {
+    "median_ms": 1.18,
+    "p95_ms": 1.184,
+    "max_ms": 1.185,
+    "min_ms": 1.177
+   },
+   "worst_frame_network_ms": 1.213,
+   "worst_frame_total_ms": 1.22
+  }
+ }
+}
