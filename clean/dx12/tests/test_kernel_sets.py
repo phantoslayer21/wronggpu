@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MIT
 """The D3D12 kernel sets, from the sources' declarations (clean/dx12/build_dx12.py kernel_set; nothing is compiled):
 the cheap check before a build, in seconds. kernel_sets.json lists them: "model_m" = what a build without --model-l
-compiles (Model M's kernel set; Model L's kernels never enter it), "model_l" = what --model-l adds (#89).
+compiles (Model M's kernel set; Model L's and Model K's kernels never enter it), "model_l" = what --model-l adds
+(#89), "model_k" = what --model-k adds (clean/k/dx12/kernels, #15).
 
 A kernel added, removed or moved between the sets changes kernel_sets.json in the same change; regenerate it with
     python clean/dx12/tests/test_kernel_sets.py --write
@@ -22,7 +23,9 @@ SETS = os.path.join(DX12, "kernel_sets.json")
 def current():
     m = B.kernel_set(False)
     full = B.kernel_set(True)
-    return {"model_m": [list(k) for k in m], "model_l": [list(k) for k in full if k not in set(m)]}
+    k = B.kernel_set(False, True)
+    return {"model_m": [list(x) for x in m], "model_l": [list(x) for x in full if x not in set(m)],
+            "model_k": [list(x) for x in k if x not in set(m)]}
 
 
 class TestKernelSets(unittest.TestCase):
@@ -30,7 +33,7 @@ class TestKernelSets(unittest.TestCase):
         with open(SETS) as f:
             want = json.load(f)
         got = current()
-        for name in ("model_m", "model_l"):
+        for name in ("model_m", "model_l", "model_k"):
             w, g = set(map(tuple, want[name])), set(map(tuple, got[name]))
             self.assertEqual(g, w, "%s: added %s, removed %s (update kernel_sets.json: python "
                                    "clean/dx12/tests/test_kernel_sets.py --write)" % (name, sorted(g - w), sorted(w - g)))
@@ -47,6 +50,30 @@ class TestKernelSets(unittest.TestCase):
         self.assertTrue(extra)
         self.assertFalse([k for k in extra if not (k[1].startswith("l_") or k[0].startswith("l_") or k[0] in B.MODEL_L_ONLY)])
 
+
+    def test_model_k_adds_only_model_k_kernels(self):
+        """--model-k adds Model K's kernels to Model M's set and nothing else; with --model-l it is all three sets."""
+        m, k = set(B.kernel_set(False)), set(B.kernel_set(False, True))
+        self.assertTrue(m <= k)
+        extra = k - m
+        self.assertTrue(extra)
+        self.assertFalse([x for x in extra if not (x[1].startswith("k_") or x[0].startswith("k_") or x[0].startswith("kx/"))])
+        self.assertEqual(set(B.kernel_set(True, True)), set(B.kernel_set(True)) | extra)
+
+    def test_no_k_kernel_in_the_other_sets(self):
+        """Neither Model M's nor Model L's set holds a Model K kernel (a K port is declared in clean/k/dx12/kernels)."""
+        for full in (B.kernel_set(False), B.kernel_set(True)):
+            self.assertFalse([x for x in full if x[1].startswith("k_") or x[0].startswith("k_") or x[0].startswith("kx/")])
+
+    def test_struct_argument_tokens(self):
+        """s<N>:<fields>: pointers are one root constant each, copied bytes one per four, skipped bytes none."""
+        self.assertEqual(B.struct_dwords("s184:p19.b32", "t"), 27)
+        self.assertEqual(B.struct_dwords("s160:p13.b56", "t"), 27)
+        self.assertEqual(B.struct_dwords("s32:p1.x8.b16", "t"), 5)
+        self.assertEqual(B.arg_dwords("p,u,s184:p19.b32,b36", "t"), 1 + 1 + 27 + 9)
+        for bad in ("s16:p1", "s16:p1.b4", "s12:p1.b3", "s8:q1", "s0:p0", "s8", "s8:p1.x4", "s12:p1.b4.x"):
+            with self.assertRaises(SystemExit, msg=bad):
+                B.struct_dwords(bad, "t")
 
     def test_frame_gen_kernels_are_in_no_set(self):
         """Frame generation's ports (#96, co=fg_*.co or named fg_*) are declared but enter neither set: only --only
