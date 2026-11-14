@@ -15,10 +15,19 @@
 //   arg null                                   null pointer
 //   arg u32 <value>                            32-bit scalar (decimal, may be negative)
 //   arg bytes <file>                           a struct passed by value (the file's bytes)
+//   direct <slot> <DXGI format> <w> <h> <file> a texture of a direct-resource kernel (rs=direct; native_direct.hlsli):
+//                                              slot color, depth, motion or output; <file> holds the w x h texels row
+//                                              by row (tightly packed), "-" for none (the output, written by no
+//                                              kernel replayed here). The case binds them as one direct frame
+//                                              (NativeD3D12Ext::bind_direct_frame) around its launch.
+//   direct_params <rx> <ry> <rw> <rh>          the frame's active render rectangle; motion scale 1, offset 0,
+//                                              color_pi 1, no exposure texture
 #include "../../runtime/device.h"
+#include "../../runtime/device_d3d12.h"
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <memory>
 #include <sstream>
@@ -52,12 +61,135 @@ struct Arg {
   std::vector<uint8_t> blob;
 };
 
+struct DirectTex {
+  std::string slot, file;
+  unsigned format = 0, width = 0, height = 0;
+  ID3D12Resource* tex = nullptr;
+  ID3D12Resource* upload = nullptr;
+};
+
 struct Case {
   std::string name, kernel;
   unsigned grid = 0, block = 0;
   std::vector<std::pair<std::string, std::string>> modules;
   std::vector<Arg> args;
+  std::vector<DirectTex> direct;
+  NativeDirectParams dparams;
 };
+
+void release_direct(Case& c) {
+  for (auto& t : c.direct) {
+    if (t.tex) t.tex->Release();
+    if (t.upload) t.upload->Release();
+    t.tex = t.upload = nullptr;
+  }
+}
+
+// The case's direct textures: created (default heap), filled from their files through an upload buffer in one recorded
+// pass, left in the states a direct dispatch needs (inputs NON_PIXEL_SHADER_RESOURCE, output UNORDERED_ACCESS), then
+// bound as the device's direct frame.
+bool bind_direct(NativeD3D12Ext* ext, Case& c, const std::string& base) {
+  ID3D12Device* dev = nullptr;
+  if (FAILED(ext->arena_resource()->GetDevice(__uuidof(ID3D12Device), (void**)&dev))) {
+    std::printf("%s: direct: no D3D12 device\n", c.name.c_str());
+    return false;
+  }
+  bool ok = true;
+  std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> fp(c.direct.size());
+  for (size_t i = 0; ok && i < c.direct.size(); ++i) {
+    DirectTex& t = c.direct[i];
+    const bool out = t.slot == "output";
+    D3D12_HEAP_PROPERTIES hp = {};
+    hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC rd = {};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    rd.Width = t.width;
+    rd.Height = t.height;
+    rd.DepthOrArraySize = 1;
+    rd.MipLevels = 1;
+    rd.Format = (DXGI_FORMAT)t.format;
+    rd.SampleDesc.Count = 1;
+    rd.Flags = out ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE;
+    ok = SUCCEEDED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                nullptr, __uuidof(ID3D12Resource), (void**)&t.tex));
+    if (!ok || t.file == "-") continue;
+    std::vector<uint8_t> data;
+    UINT64 row_bytes = 0, total = 0;
+    UINT rows = 0;
+    dev->GetCopyableFootprints(&rd, 0, 1, 0, &fp[i], &rows, &row_bytes, &total);
+    if (!read_file(base + "/" + t.file, &data) || data.size() != row_bytes * rows) {
+      std::printf("%s: direct %s: %s is not %llu bytes\n", c.name.c_str(), t.slot.c_str(), t.file.c_str(),
+                  (unsigned long long)(row_bytes * rows));
+      ok = false;
+      break;
+    }
+    D3D12_HEAP_PROPERTIES up = {};
+    up.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC bd = {};
+    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bd.Width = total;
+    bd.Height = 1;
+    bd.DepthOrArraySize = 1;
+    bd.MipLevels = 1;
+    bd.SampleDesc.Count = 1;
+    bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ok = SUCCEEDED(dev->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ,
+                                                nullptr, __uuidof(ID3D12Resource), (void**)&t.upload));
+    uint8_t* map = nullptr;
+    if (ok) ok = SUCCEEDED(t.upload->Map(0, nullptr, (void**)&map));
+    if (!ok) break;
+    for (UINT r = 0; r < rows; ++r)
+      std::memcpy(map + fp[i].Offset + (size_t)r * fp[i].Footprint.RowPitch, data.data() + (size_t)r * row_bytes,
+                  (size_t)row_bytes);
+    t.upload->Unmap(0, nullptr);
+  }
+  dev->Release();
+  if (!ok) {
+    std::printf("%s: direct: texture setup failed\n", c.name.c_str());
+    return false;
+  }
+  std::string err;
+  ok = ext->record_pass(D3D12_RESOURCE_STATE_UNORDERED_ACCESS, [&](ID3D12GraphicsCommandList* l, std::string&) {
+    for (size_t i = 0; i < c.direct.size(); ++i) {
+      DirectTex& t = c.direct[i];
+      if (t.upload) {
+        D3D12_TEXTURE_COPY_LOCATION dst = {}, src = {};
+        dst.pResource = t.tex;
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        src.pResource = t.upload;
+        src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint = fp[i];
+        l->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+      }
+      D3D12_RESOURCE_BARRIER b = {};
+      b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      b.Transition.pResource = t.tex;
+      b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+      b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+      b.Transition.StateAfter = t.slot == "output" ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+                                                   : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+      l->ResourceBarrier(1, &b);
+    }
+    return true;
+  }, &err);
+  if (!ok) {
+    std::printf("%s: direct: upload pass: %s\n", c.name.c_str(), err.c_str());
+    return false;
+  }
+  NativeDirectFrame f;
+  for (auto& t : c.direct) {
+    if (t.slot == "color") f.color = t.tex, f.color_format = (DXGI_FORMAT)t.format;
+    else if (t.slot == "depth") f.depth = t.tex, f.depth_format = (DXGI_FORMAT)t.format;
+    else if (t.slot == "motion") f.motion = t.tex, f.motion_format = (DXGI_FORMAT)t.format;
+    else if (t.slot == "output") f.output = t.tex, f.output_format = (DXGI_FORMAT)t.format;
+  }
+  f.params = c.dparams;
+  if (!ext->bind_direct_frame(f, &err)) {
+    std::printf("%s: direct: bind: %s\n", c.name.c_str(), err.c_str());
+    return false;
+  }
+  return true;
+}
 
 std::string dir_of(const std::string& path) {
   const size_t s = path.find_last_of("/\\");
@@ -99,11 +231,25 @@ int run_case(Device* d, Case& c, const std::string& base) {
       argv.push_back(a.blob.data());
     }
   }
+  NativeD3D12Ext* ext = c.direct.empty() ? nullptr : d3d12_ext(d);
+  if (!c.direct.empty() && (!ext || !bind_direct(ext, c, base))) {
+    release_direct(c);
+    return 1;
+  }
   if (!d->launch(c.kernel, c.grid, c.block, argv.data())) {
     std::printf("%s: launch %s: %s\n", c.name.c_str(), c.kernel.c_str(), d->err().c_str());
     return 1;
   }
+  if (ext) {
+    std::string err;
+    if (!ext->end_direct_frame(&err) || !ext->sync(&err)) {
+      std::printf("%s: direct: %s\n", c.name.c_str(), err.c_str());
+      release_direct(c);
+      return 1;
+    }
+  }
   if (!d->sync()) { std::printf("%s: sync: %s\n", c.name.c_str(), d->err().c_str()); return 1; }
+  release_direct(c);
   for (auto& a : c.args) {
     if (a.kind != "out") continue;
     std::vector<uint8_t> data(a.bytes);
@@ -144,6 +290,16 @@ int main(int argc, char** argv) {
       c.modules.emplace_back(m, tag);
     } else if (w == "kernel") {
       s >> c.kernel >> c.grid >> c.block;
+    } else if (w == "direct") {
+      DirectTex t;
+      s >> t.slot >> t.format >> t.width >> t.height >> t.file;
+      if (t.slot != "color" && t.slot != "depth" && t.slot != "motion" && t.slot != "output") {
+        std::printf("unknown direct slot %s\n", t.slot.c_str());
+        return 2;
+      }
+      c.direct.push_back(t);
+    } else if (w == "direct_params") {
+      s >> c.dparams.rx >> c.dparams.ry >> c.dparams.rw >> c.dparams.rh;
     } else if (w == "arg") {
       Arg a;
       s >> a.kind;
