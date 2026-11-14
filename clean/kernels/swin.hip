@@ -452,8 +452,16 @@ struct SwinStoreEpi {
   static constexpr bool kFused = false;
 };
 
+// Gather source hook (SRC): the default reads the FP8 map x [H][W][C] at the mirrored member position. A custom SRC
+// (kCustom; Model L, clean/l/kernels/l_swin.hip) provides SRC::load<C, KC>(x, pr, pc, H, W, hh, f): the FP32 values
+// of the lane's channels hh * C/2 + 8 k + j (k < KC) of the member at grid position (pr, pc), which may lie outside
+// the grid. Plain blocks only (no ADD, merge or expand).
+struct SwinFp8Src {
+  static constexpr bool kCustom = false;
+};
+
 template <int C, int HEADS, int MLP, int WPW, bool ADD, int GROUP, bool SAFE, int THREADS, int MCO = 0, int ECL = 0,
-          class EPI = SwinStoreEpi, bool RESIDENT = false>
+          class EPI = SwinStoreEpi, bool RESIDENT = false, class SRC = SwinFp8Src>
 WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8* __restrict__ out,
                       const u8* __restrict__ w, int H, int W, int ox, int oy, u8* __restrict__ aux WG_PROF_ARG_DECL,
                       const void* epi = nullptr, int nwg = 0) {
@@ -464,6 +472,7 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
   // copy. Same arithmetic per window as the staged kernel (bit-identical).
   constexpr int RES = L::SIZE - L::STREAM;
   static_assert(!RESIDENT || (MCO == 0 && ECL == 0 && !EPI::kFused && WPW == 1), "resident: plain block kernels only");
+  static_assert(!SRC::kCustom || (MCO == 0 && ECL == 0 && !ADD), "custom gather source: plain block kernels only");
   WG_LDS __attribute__((aligned(16))) u8 lds[RESIDENT ? (RES + 15) / 16 * 16 : 2 * MAXU];
   Stager<MAXU, THREADS> stage;
   const u32 tid = wg_lane_id();
@@ -493,6 +502,7 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
   int dst[WPW];
   int eslot[WPW];  // fused expand: LDS record of this token
   v2i xa[WPW][KC], xb[WPW][ADD ? KC : 1];
+  v8f xf[WPW][SRC::kCustom ? KC : 1];
   if constexpr (ECL > 0) fused_expand<C, ECL>(x, w + TAIL, lds + MAXU, H, W, nwx, nwin, ox, oy, tid, (int)wg_block_id());
 #pragma unroll
   for (int i = 0; i < WPW; ++i) {
@@ -518,8 +528,12 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
       if (ADD) xb[i][k] = xa[i][k];
     }
 #else
-    if constexpr (ECL == 0) load_frags<KC>(x + src, xa[i]);
-    if (ADD) load_frags<KC>(xadd + src, xb[i]);
+    if constexpr (SRC::kCustom) {
+      SRC::template load<C, KC>(x, pr, pc, H, W, hh, xf[i]);
+    } else {
+      if constexpr (ECL == 0) load_frags<KC>(x + src, xa[i]);
+      if (ADD) load_frags<KC>(xadd + src, xb[i]);
+    }
 #endif
   }
 
@@ -559,11 +573,12 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
       float ss = 0.0f;
 #pragma unroll
       for (int k = 0; k < KC; ++k) {
-        acc[i][k] = wg_unpack_fp8(xa[i][k]);
+        if constexpr (SRC::kCustom) acc[i][k] = xf[i][k];
+        else acc[i][k] = wg_unpack_fp8(xa[i][k]);
         if (ADD) acc[i][k] += wg_unpack_fp8(xb[i][k]);
-        if (!(WG_NORM_DOT4 && !ADD)) ss += hsum8(acc[i][k] * acc[i][k]);
+        if (!(WG_NORM_DOT4 && !ADD && !SRC::kCustom)) ss += hsum8(acc[i][k] * acc[i][k]);
       }
-      if (WG_NORM_DOT4 && !ADD) {
+      if (WG_NORM_DOT4 && !ADD && !SRC::kCustom) {
 #pragma unroll
         for (int k = 0; k < KC; ++k) {
           ss = wg_dot4_fp8(xa[i][k][0], xa[i][k][0], ss);
