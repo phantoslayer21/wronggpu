@@ -44,7 +44,7 @@ and inputs, the stage runner's launch plans run on HIP and replayed on D3D12 (`k
 third case carry special values (infinity, +-65504, zero, -0, subnormals) and of every third case NaN as well; the
 half-grid control launches a stage with half its workgroups. `wide` (the wide stages of `k_block_wide.co`:
 `k_stagew2_e3`, `k_stagew4_e4`, `k_stagew2_e4`, `k_stagew4_m`, `k_stagew4_d4`, `k_stagew2_d4`, `k_stagew2_d3`: one window
-per 128 NG lanes) is checked the same way. `expo` (`k_expo_scalars`) against `k_io.co`; `warm`
+per 128 NG lanes) is checked the same way. Not ported: the NG = 4 forms of `e3` and `d3` (`k_stagew4_e3`, `k_stagew4_d3`), which the HIP build has but the runtime never launches (`e3` and `d3` always take NG = 2); a replay of `k_stagew4_d3` on D3D12 was reported to differ from the HIP capture, so the form is left out of the D3D12 set until it is checked and fixed. `expo` (`k_expo_scalars`) against `k_io.co`; `warm`
 (`k_warm`, a cache warm-up with no HIP kernel: checked against its definition, through the struct argument path).
 
 NaN: IEEE 754 does not define the sign or payload of a NaN, and where a NaN is generated or propagated the two devices
