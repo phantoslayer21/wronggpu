@@ -118,6 +118,10 @@ the frame parity, as Model M's.
    - LDR writes 11/11/10-bit display codes of the plain colour. The output stage unpacks them (code RN32(1/N), FP16)
      and filters them with no decode and no exposure (`recon.output_filter`).
    - The output filter is Model M's (the project's own taps).
+   - Steps 4 to 6 (history candidates, combination, blend) run in float32 with the fused forms, one rounding per
+     operation, as the spec side states the order (table `"blend": "float32"`; Model M's entry keeps float64). This
+     matters where a large fallback colour (about 1e3 and up) is cancelled in the blend: H^ = fused((C - Hl) beta' +
+     Hl) rounds C - Hl to float32 first, and the float64 form lands many FP16 steps away there.
 
    The reconstruction kernel `l_post_recon` (`l_post.co`, HDR; exists, GPU-checked by
    `clean/l/runner/l_post_check.py`):

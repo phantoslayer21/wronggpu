@@ -13,12 +13,29 @@ import numpy as np
 from clean.l.reference import oracle as L
 from clean.l.reference import recon as R
 from clean.l.reference import table as T
+from clean.reference import motion_hi as MH
 from clean.reference import post as MP
+
+
+def _comb32(w1, w2, h1, h2, e):
+    """Model L's combination in float32 (the spec side's order): f32(fused(w1 h1 + f32(w2 h2)) e), w1 h1 alone when
+    w2 = 0, w1 and w2 rounded to float32 first."""
+    w1, w2 = R._f32(w1)[..., None], R._f32(w2)[..., None]
+    c = np.where(w2 == 0, R._f32(w1 * h1), np.asarray(MH.fma32(w1, h1, R._f32(w2 * h2)), np.float64))
+    return R._f32(c * e)
 
 
 def _same(a, b):
     a, b = np.asarray(a), np.asarray(b)
     return a.shape == b.shape and a.dtype == b.dtype and a.tobytes() == b.tobytes()
+
+
+def _f16_steps(a, b):
+    """Distance in FP16 steps (ordered bit patterns) of FP16-exact arrays."""
+    ia, ib = (np.asarray(v, np.float32).astype(np.float16).view(np.int16).astype(np.int64) for v in (a, b))
+    ia = np.where(ia < 0, -(ia & 0x7FFF), ia)
+    ib = np.where(ib < 0, -(ib & 0x7FFF), ib)
+    return np.abs(ia - ib)
 
 
 def _inputs(rng, rw=23, rh=15, reset=False):
@@ -97,8 +114,7 @@ class ReconTest(unittest.TestCase):
         dw, dh = x["recon_size"]
         px, py = R.target_positions_f32(rw, rh, dw, dh, *np.asarray(x["jitter"], np.float64))
         fy, fx = MP.point_index(px, py, rw, rh)
-        w = lin["w1"] + np.where(lin["w2"] == 0, 0.0, lin["w2"])
-        H_lin = w[..., None] * color[fy, fx] * float(x["exposure"])
+        H_lin = _comb32(lin["w1"], lin["w2"], color[fy, fx], color[fy, fx], float(x["exposure"]))
         self.assertTrue(np.isfinite(lin["H_hat"]).all())
         m = R.reconstruct(x, 2.0, T.table(recon=dict(T.M_RECON)))
         self.assertFalse(np.allclose(m["_lin"]["H_hat"], lin["H_hat"]))
@@ -108,7 +124,8 @@ class ReconTest(unittest.TestCase):
         # s = 0 gives alpha = 0: H^ = H_lin + (C_lin - H_lin) beta_h, linear in H_lin; with beta_h = 0 it is H_lin.
         x0 = dict(x, A=np.zeros_like(np.asarray(x["A"])))           # beta_h = beta_o = 0 (and g = 0)
         z = R.reconstruct(x0, 0.0)
-        np.testing.assert_allclose(z["_lin"]["H_hat"], H_lin, rtol=1e-12)
+        H_lin = _comb32(z["_lin"]["w1"], z["_lin"]["w2"], color[fy, fx], color[fy, fx], float(x["exposure"]))
+        self.assertTrue(np.array_equal(z["_lin"]["H_hat"], H_lin))   # beta' = 0 exactly: H^ = Hl
 
     def test_linear_combination(self):
         """A valid sample is decoded and divided by e_prev before the two candidates are combined; the result is
@@ -133,14 +150,19 @@ class ReconTest(unittest.TestCase):
         for mk in m:
             qx, qy = X + mk[..., 0], Y + mk[..., 1]
             valid = (qx >= 0) & (qx <= dw) & (qy >= 0) & (qy <= dh)
-            hs = MP.dec(MP.history_sample(hist, np.where(valid, qx, 0.5), np.where(valid, qy, 0.5))) / ep
+            hs = R._f32(R._f32(MP.dec(MP.history_sample(hist, np.where(valid, qx, 0.5), np.where(valid, qy, 0.5))))
+                        / ep)
             cands.append(np.where(valid[..., None], hs, color[fy, fx]))
         Hk = np.stack(cands, -1)
         h1 = np.take_along_axis(Hk, lin["first"][..., None, None], -1)[..., 0]
         h2 = np.take_along_axis(Hk, lin["second"][..., None, None], -1)[..., 0]
-        w1, w2 = lin["w1"][..., None], lin["w2"][..., None]
-        H_lin = np.where(w2 == 0, w1 * h1, w1 * h1 + w2 * h2) * e
-        np.testing.assert_allclose(lin["H_hat"], H_lin, rtol=1e-12)
+        self.assertTrue(np.array_equal(lin["H_hat"], _comb32(lin["w1"], lin["w2"], h1, h2, e)))
+        # The same with the blend in float64 (Model M's precision): the float64 combination.
+        lin64 = R.reconstruct(x0, 0.0, T.table(recon=dict(T.TABLE["recon"], blend="float64")))["_lin"]
+        w1, w2 = lin64["w1"][..., None], lin64["w2"][..., None]
+        h1d = np.take_along_axis(Hk, lin64["first"][..., None, None], -1)[..., 0]
+        h2d = np.take_along_axis(Hk, lin64["second"][..., None, None], -1)[..., 0]
+        np.testing.assert_allclose(lin64["H_hat"], np.where(w2 == 0, w1 * h1d, w1 * h1d + w2 * h2d) * e, rtol=1e-6)
 
     def test_ldr_reads_no_exposure(self):
         rng = np.random.default_rng(7)
@@ -231,11 +253,11 @@ class ReconTest(unittest.TestCase):
             self.assertTrue((W > 0).all() and np.isfinite(W).all())
             e, ep = 1.5, 0.75
             if reset:
-                Hl = np.asarray(x["color"], np.float64) * e        # D = R, floor p = the pixel itself
+                Hl = R._f32(np.asarray(x["color"], np.float64) * e)        # D = R, floor p = the pixel itself; w1 = 1
             else:
-                Hl = np.full(out["history"].shape, float(MP.dec(0.75)) / ep * e)
-            np.testing.assert_allclose(out["_lin"]["H_hat"], Hl, rtol=1e-12)
-            np.testing.assert_allclose(out["_lin"]["O_hat"], Hl, rtol=1e-12)
+                Hl = np.full(out["history"].shape, R._f32(R._f32(R._f32(MP.dec(0.75)) / ep) * e))
+            self.assertTrue(np.array_equal(out["_lin"]["H_hat"], Hl))     # alpha = 0, beta-bar = 0: H^ = Hl
+            self.assertTrue(np.array_equal(out["_lin"]["O_hat"], Hl))
 
     def test_offset_01_is_zero_weight(self):
         """Offset 0.1 (beyond 0.0516): W = 0 everywhere, the confirmed zero-weight values."""
@@ -245,6 +267,25 @@ class ReconTest(unittest.TestCase):
         self.assertTrue((out["history"] == np.float32(-1.4404296875)).all())
         self.assertTrue((out["display"] == 0).all())
         self.assertTrue((out["reduced"] == 0).all())
+
+    def test_blend_in_float32_with_large_colours(self):
+        """Steps 4 to 6 in float32 with the fused forms (the spec side's order): H^ = fused(f32(C - Hl) beta' + Hl)
+        exactly, also where the fallback colour is large (1e3 ... 1e6, reset: every sample is the fallback). There
+        H^ comes from cancelling large terms, so the float64 form lands several FP16 steps away: the case of the
+        frame check's special colours."""
+        rng = np.random.default_rng(14)
+        x = _inputs(rng, reset=True)
+        col = np.asarray(x["color"], np.float32).copy()
+        big = rng.random(col.shape[:2]) < 0.1
+        col[big] = rng.uniform(1e3, 1e6, (int(big.sum()), 3))
+        x["color"] = col
+        lin = R.reconstruct(x, 2.9796233)["_lin"]
+        C, Hl, bh, bo = lin["C_lin"], lin["H_lin"], lin["beta_h"][..., None], lin["beta_o"][..., None]
+        self.assertTrue(np.array_equal(lin["H_hat"], np.asarray(MH.fma32(R._f32(C - Hl), bh, Hl), np.float64)))
+        self.assertTrue(np.array_equal(lin["O_hat"], np.asarray(MH.fma32(R._f32(C - Hl), bo, Hl), np.float64)))
+        out64 = R.reconstruct(x, 2.9796233, T.table(recon=dict(T.TABLE["recon"], blend="float64")))
+        st = _f16_steps(R.reconstruct(x, 2.9796233)["history"], out64["history"])
+        self.assertGreater(int(st.max()), 1)
 
     def test_history_of_another_size_needs_reset(self):
         rng = np.random.default_rng(11)
