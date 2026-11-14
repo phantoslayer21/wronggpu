@@ -118,8 +118,8 @@ For players coming from 0.4.5, in short (the 0.6.0 release page has the full lis
   WrongGPU, the launcher asks before it updates the game: **Switch to Model M** updates it and moves it to Model M (its
   other settings stay); **Not now** leaves the game as it is.
 - Model L: tested for super resolution in Cyberpunk 2077 and RESIDENT EVIL requiem, both of which hand the upscaler
-  HDR colour. Model L also has a path for games that hand it SDR colour, but we haven't tested that path in a game yet.
-  Ray Reconstruction always uses its own network; Model L is a super-resolution choice only.
+  HDR colour. Model L's path for games that hand the upscaler SDR colour is tested offline only: every game we tried
+  sends HDR colour. Ray Reconstruction always uses its own network; Model L is a super-resolution choice only.
 - Radeon RX 9060 XT / RX 9060: supported, not yet tested; 8 GB cards are untested.
 - RESIDENT EVIL requiem prepares Ray Reconstruction at its own first start (OptiScaler's overlay says "WrongGPU RR
   (preparing...)" meanwhile), not in the launcher.
