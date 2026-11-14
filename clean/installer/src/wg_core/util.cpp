@@ -148,6 +148,123 @@ void CopyChecked(const wstring& src, const wstring& dst) {
     if (Exists(dst)) SetFileAttributesW(dst.c_str(), FILE_ATTRIBUTE_NORMAL);
     if (!CopyFileW(src.c_str(), dst.c_str(), FALSE)) Fail(L"Cannot copy " + src + L" to " + dst + L": " + ErrText(GetLastError()));
 }
+bool CopyNew(const wstring& src, const wstring& dst, DWORD* err) {
+    if (CopyFileW(src.c_str(), dst.c_str(), TRUE)) return true;  // TRUE: fail when dst exists (creation, not a check)
+    if (err) *err = GetLastError();
+    return false;
+}
+
+// ---- PinnedFile (util.h) ----------------------------------------------------------------------------------------------
+namespace {
+// FILE_DISPOSITION_INFO_EX and FileDispositionInfoEx (Windows 10 1709+) are declared here so older SDK and MinGW headers build.
+struct DispositionInfoEx { DWORD Flags; };
+constexpr DWORD kDispositionDelete = 0x1, kDispositionPosix = 0x2, kDispositionIgnoreReadOnly = 0x10;
+constexpr int kFileDispositionInfoEx = 21;
+wstring HashHandle(HANDLE h) {
+    LARGE_INTEGER zero{};
+    if (!SetFilePointerEx(h, zero, nullptr, FILE_BEGIN)) return L"";
+    wgc::Sha256 sha;
+    std::vector<char> buf(1u << 20);
+    for (;;) {
+        DWORD n = 0;
+        if (!ReadFile(h, buf.data(), (DWORD)buf.size(), &n, nullptr)) return L"";
+        if (n == 0) break;
+        sha.update(buf.data(), n);
+    }
+    return HexW(sha.finish());
+}
+}  // namespace
+
+bool PinnedFile::Open(const wstring& path, bool forWrite, DWORD* err) {
+    Close();
+    DWORD access = GENERIC_READ | DELETE | FILE_WRITE_ATTRIBUTES | (forWrite ? GENERIC_WRITE : 0);
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        h_ = CreateFileW(path.c_str(), access, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        if (h_ != INVALID_HANDLE_VALUE) break;
+        const DWORD e = GetLastError();
+        const DWORD a = e == ERROR_ACCESS_DENIED && forWrite && attempt == 0 ? GetFileAttributesW(path.c_str()) : INVALID_FILE_ATTRIBUTES;
+        if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_READONLY) && !(a & FILE_ATTRIBUTE_DIRECTORY)) {
+            SetFileAttributesW(path.c_str(), a & ~FILE_ATTRIBUTE_READONLY);  // (an attribute only: what is read and changed is checked through the handle)
+            continue;
+        }
+        if (err) *err = e;
+        return false;
+    }
+    BY_HANDLE_FILE_INFORMATION bi{};
+    if (!GetFileInformationByHandle(h_, &bi) || (bi.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))) {
+        if (err) *err = ERROR_NOT_SUPPORTED;
+        Close();
+        return false;
+    }
+    return true;
+}
+void PinnedFile::Close() {
+    if (h_ != INVALID_HANDLE_VALUE) CloseHandle(h_);
+    h_ = INVALID_HANDLE_VALUE;
+}
+wstring PinnedFile::Sha256() { return h_ == INVALID_HANDLE_VALUE ? wstring() : HashHandle(h_); }
+bool PinnedFile::Delete(DWORD* err) {
+    if (h_ == INVALID_HANDLE_VALUE) { if (err) *err = ERROR_INVALID_HANDLE; return false; }
+    DispositionInfoEx ex{kDispositionDelete | kDispositionPosix | kDispositionIgnoreReadOnly};
+    bool ok = SetFileInformationByHandle(h_, static_cast<FILE_INFO_BY_HANDLE_CLASS>(kFileDispositionInfoEx), &ex, sizeof(ex)) != 0;
+    DWORD e = ok ? 0 : GetLastError();
+    if (!ok) {  // no POSIX delete here (an older Windows, another file system, Wine): the classic disposition, read-only cleared first
+        FILE_BASIC_INFO basic{};
+        if (GetFileInformationByHandleEx(h_, FileBasicInfo, &basic, sizeof(basic)) && (basic.FileAttributes & FILE_ATTRIBUTE_READONLY)) {
+            FILE_BASIC_INFO clear{};
+            clear.FileAttributes = (basic.FileAttributes & ~FILE_ATTRIBUTE_READONLY) ? (basic.FileAttributes & ~FILE_ATTRIBUTE_READONLY) : FILE_ATTRIBUTE_NORMAL;
+            SetFileInformationByHandle(h_, FileBasicInfo, &clear, sizeof(clear));
+        }
+        FILE_DISPOSITION_INFO d{TRUE};
+        ok = SetFileInformationByHandle(h_, FileDispositionInfo, &d, sizeof(d)) != 0;
+        e = ok ? 0 : GetLastError();
+    }
+    Close();  // (the classic disposition takes effect when the handle closes; nobody else can hold the file open for delete)
+    if (!ok && err) *err = e;
+    return ok;
+}
+bool PinnedFile::Overwrite(const wstring& src, const wstring& srcSha, DWORD* err) {
+    auto fail = [&](DWORD e) { if (err) *err = e; return false; };
+    if (h_ == INVALID_HANDLE_VALUE) return fail(ERROR_INVALID_HANDLE);
+    HANDLE s = CreateFileW(src.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (s == INVALID_HANDLE_VALUE) return fail(GetLastError());
+    struct Closer { HANDLE h; ~Closer() { CloseHandle(h); } } closer{s};
+    if (!IEq(HashHandle(s), srcSha)) return fail(ERROR_FILE_CORRUPT);
+    BY_HANDLE_FILE_INFORMATION si{};
+    GetFileInformationByHandle(s, &si);
+    LARGE_INTEGER zero{};
+    if (!SetFilePointerEx(s, zero, nullptr, FILE_BEGIN) || !SetFilePointerEx(h_, zero, nullptr, FILE_BEGIN)) return fail(GetLastError());
+    std::vector<char> buf(1u << 20);
+    for (;;) {
+        DWORD n = 0, w = 0;
+        if (!ReadFile(s, buf.data(), (DWORD)buf.size(), &n, nullptr)) return fail(GetLastError());
+        if (n == 0) break;
+        if (!WriteFile(h_, buf.data(), n, &w, nullptr) || w != n) return fail(GetLastError());
+    }
+    if (!SetEndOfFile(h_)) return fail(GetLastError());
+    FlushFileBuffers(h_);
+    FILE_BASIC_INFO b{};  // the original's attributes and times (a restored file is the file it was)
+    b.CreationTime.u.LowPart = si.ftCreationTime.dwLowDateTime; b.CreationTime.u.HighPart = (LONG)si.ftCreationTime.dwHighDateTime;
+    b.LastWriteTime.u.LowPart = si.ftLastWriteTime.dwLowDateTime; b.LastWriteTime.u.HighPart = (LONG)si.ftLastWriteTime.dwHighDateTime;
+    b.FileAttributes = si.dwFileAttributes & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_ARCHIVE);
+    if (!b.FileAttributes) b.FileAttributes = FILE_ATTRIBUTE_NORMAL;
+    SetFileInformationByHandle(h_, FileBasicInfo, &b, sizeof(b));  // (best effort: the content is what matters)
+    return true;
+}
+DeleteIf DeleteIfSha(const wstring& path, const std::vector<wstring>& shas, DWORD* err) {
+    PinnedFile f;
+    DWORD e = 0;
+    if (!f.Open(path, false, &e)) {
+        if (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND) return DeleteIf::Gone;
+        if (err) *err = e;
+        return e == ERROR_NOT_SUPPORTED ? DeleteIf::Changed : DeleteIf::Failed;
+    }
+    const wstring h = f.Sha256();
+    if (h.empty()) { if (err) *err = ERROR_READ_FAULT; return DeleteIf::Failed; }
+    if (std::none_of(shas.begin(), shas.end(), [&](const wstring& s) { return IEq(s, h); })) return DeleteIf::Changed;
+    return f.Delete(err) ? DeleteIf::Deleted : DeleteIf::Failed;
+}
+
 void RemoveTree(const wstring& dir, const wstring& keepFile) {
     // Check the root too: enumerating dir\* would otherwise follow a root junction into its target.
     const DWORD attrs = GetFileAttributesW(dir.c_str());

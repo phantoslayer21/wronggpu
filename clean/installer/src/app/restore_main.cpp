@@ -51,6 +51,8 @@ wstring PlainWarning(const wstring& w) {
         return L"A file WrongGPU had replaced or moved aside couldn't go back, because another file is at its place now; that file was left as it is." +
                (at == wstring::npos ? wstring() : L" Your original is kept in " + w.substr(at + 12));
     }
+    if (w.rfind(kLeftUnrecorded, 0) == 0)  // named like WrongGPU's own files, but not in the install's record: never deleted by their names
+        return L"Some log or report files named like WrongGPU's were left in the game's folder: WrongGPU deletes only files it can prove are its own. Delete them yourself if you don't need them.";
     if (Has(w, L"The game replaced ")) return L"The game had replaced one of its files since WrongGPU was installed (probably a game update). Its newer file was kept.";
     if (Has(w, L"exists again with different content") || Has(w, L"The backup folder was kept"))
         return L"A game file the game changed was kept as it is. Its original stays in a backup folder in the game's folder.";

@@ -176,7 +176,10 @@ std::vector<wstring> CleanLeftovers(Context& ctx, const wstring& dir, const std:
                     continue;
                 }
             }
-        ForceDelete(p);
+        DWORD derr = 0;
+        const DeleteIf gone = DeleteIfSha(p, {f.sha}, &derr);  // hashed and deleted through one handle: what was checked is what goes
+        if (gone == DeleteIf::Failed) Fail(L"Cannot delete " + p + L": " + ErrText(derr));
+        if (gone == DeleteIf::Changed) { notes.push_back(L"kept " + f.rel + L" (it changed since it was checked)"); continue; }
         notes.push_back(L"removed " + f.rel + L" (WrongGPU " + f.version + L")");
         if (const FfxSlot* sl = SlotOf(f.rel)) {
             const wstring orig = Join(Parent(p), sl->original);

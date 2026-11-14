@@ -233,20 +233,31 @@ With the defaults nothing of this section changes the installer.
   wrote (`OptiScaler.log`) belong to that install: no `/MOVEMODS`, no warning. An OptiScaler that is not in the
   install record is another mod, as before.
 - **Uninstall.** Restores every original byte for byte (hash-verified), removes what WrongGPU added (by the rule below),
-  including the `wronggpu-*` files WrongGPU's own programs wrote while the game ran in the folders the record lists, and
-  the entry, and `%LOCALAPPDATA%\WrongGPU` (model and logs) when no other game uses it.
+  and the entry, and `%LOCALAPPDATA%\WrongGPU` (model and logs) when no other game uses it. The `wronggpu-*` logs and
+  reports that WrongGPU's own programs wrote while the game ran are not in the record, so nothing proves them WrongGPU's
+  (a player's `wronggpu-notes.txt` carries the same prefix): they are never deleted. They stay in their folders, each is
+  in the setup log, and the result lists them ("left in place").
 - **What the launcher removes or overwrites: the file-ownership rule** (0.6.1; every restore, uninstall, repair, update,
   move out of a wrong folder and cleanup; `src/wg_core/record.h`). A file is deleted or overwritten only when its
   current bytes are WrongGPU's: the hash the install record says WrongGPU last wrote there (every write of the launcher
   to `wronggpu.ini`, `OptiScaler.ini` and the RR plugin's settings updates that hash), or a WrongGPU release's
   (`known_releases.h`, size and SHA-256) or the embedded payload's. Nothing else proves it: not the file's name, not a
-  file next to it, not an ini key, not "it is a log". Two exceptions, and only these: the game's FSR DLL slots, where
-  WrongGPU's DLL is recognised by its version resource (the game may update that DLL; a newer WrongGPU build placed by
-  hand counts as WrongGPU's), and settings, log and text files with WrongGPU's own unique names (`wronggpu-*`, the RR
-  plugin's `WrongGPU\wronggpu.ini`) that the record lists as created by WrongGPU. Shared names such as `OptiScaler.log`
-  or `fakenvapi.log` are never deleted by their name.
-  - Any other file at a recorded path (edited by hand, saved by OptiScaler's menu, replaced by another setup or a game
-    update) stays where it is, untouched, with a warning.
+  file next to it, not an ini key, not "it is a log", not "the install created that path". One exception, and only
+  this: the game's FSR DLL slots, where WrongGPU's DLL is recognised by its version resource (the game may update that
+  DLL; a newer WrongGPU build placed by hand counts as WrongGPU's). A file that is not in the record is never touched,
+  whatever its name (`wronggpu-*`, `OptiScaler.log`, `fakenvapi.log`, ...).
+  - Any other file at a recorded path (edited by hand, saved by OptiScaler's menu or by WrongGPU's own plugin, replaced
+    by another setup or a game update, a settings file the install created and a program rewrote since) stays where it
+    is, untouched, with a warning.
+  - **The replace race.** A file is checked and changed through one handle: it is opened once with read and delete
+    access and without sharing for writing, renaming or deleting, hashed through that handle, and then deleted
+    (`FileDispositionInfoEx`) or overwritten through it. The file that was hashed is the file that goes; a file that
+    another program swaps in after the plan was made is found by the hash and left. Where nothing was at a path when
+    the plan was made, the original is created only if the path is still free (a file that appeared is never overwritten).
+    Not covered, and said here: the folders above a file are resolved by name when it is opened (a program that can
+    rename a folder of the game's path between the plan and the open can make the open reach another file, which is then
+    compared with the plan's hash like any file); the game's FSR DLL, in the one step where WrongGPU's DLL is deleted
+    and the game's file takes its name, is held until deleted and the move that follows creates the name only if free.
   - When the original from before WrongGPU cannot go back because of such a file, it is kept in
     `<install folder>\WrongGPU-originals\<time>\` (a folder no operation removes), checked byte for byte; a second
     generation goes into a folder of its own, neither is overwritten. The result then says "partly" and names each file

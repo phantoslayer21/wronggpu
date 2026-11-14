@@ -335,8 +335,9 @@ void UnregisterUninstall(const Record& m) {
 // Files WrongGPU's own programs write while the game runs are named wronggpu-* (README contract with the front end and
 // runtime). The install lists the folders they write to in its record (runtime lines, SetRuntimeLines): the install folder,
 // the exe folder and REFramework's mirror when they are in it, OptiScaler 10's custom upscaler slot, and the folders the
-// install created. Only those files go by name; shared names (OptiScaler.log, fakenvapi.log, ...) and wronggpu.ini never do
-// (wronggpu.ini is a recorded file: it goes by its hash like any other).
+// install created. A file there that the install did not record has no bytes to prove it WrongGPU's (a player can save
+// wronggpu-notes.txt, another program can write a similar name): it is never deleted. The restore finds them
+// (UnrecordedRuntimeFiles) and says so; wronggpu.ini and the other recorded files go by their hash like any other.
 void SetRuntimeLines(Record& m, const wstring& dir, const wstring& exeDir) {
     m.runtime.clear();
     auto add = [&](const wstring& folder) {
@@ -362,19 +363,19 @@ void SetRuntimeLines(Record& m, const wstring& dir, const wstring& exeDir) {
     else if (std::none_of(m.runtime.begin(), m.runtime.end(), [](const auto& r) { return r.folder == kRuntimeGameRoot; }))
         m.runtime.push_back({kRuntimeGameRoot, L"wronggpu-*"});
 }
-size_t RemoveRuntimeFiles(const wstring& dir, const Record& m) {
-    std::set<wstring> recorded;
+std::vector<wstring> UnrecordedRuntimeFiles(const wstring& dir, const Record& m) {
+    std::set<wstring> recorded, seen;
     for (auto& e : m.e) recorded.insert(Lower(FullPath(Join(dir, e.rel))));
-    size_t removed = 0;
+    std::vector<wstring> found;
     for (auto& r : m.runtime) {
         wstring d;
         if (r.folder == kRuntimeGameRoot) d = GameRoot(m.exe.empty() ? dir : Parent(m.exe));
         else try { d = r.folder == L"." ? dir : Target(dir, r.folder); } catch (const SetupError&) { continue; }
         if (!IsDir(d)) continue;
         for (auto& f : ListFiles(d, r.pattern.c_str()))
-            if (StartsWithI(BaseName(f), L"wronggpu-") && !recorded.count(Lower(FullPath(f))) && DeleteFileW(f.c_str())) ++removed;
+            if (StartsWithI(BaseName(f), L"wronggpu-") && !recorded.count(Lower(FullPath(f))) && seen.insert(Lower(FullPath(f))).second) found.push_back(f);
     }
-    return removed;
+    return found;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -468,6 +469,7 @@ wstring StartCleanup(Context& ctx, const wstring& state, const wstring& self, co
 
 // ---- the file-ownership rule (record.h) -------------------------------------------------------------------------------
 const wchar_t* const kPartlyRestored = L"Partly restored: ";
+const wchar_t* const kLeftUnrecorded = L"Left in place (not recorded by the install): ";
 bool AnyPartly(const std::vector<wstring>& warnings) {
     for (auto& w : warnings) if (w.rfind(kPartlyRestored, 0) == 0) return true;
     return false;
@@ -482,17 +484,9 @@ static void RestoreStep(const char* name) {
 #endif
 }
 
-// WrongGPU's own unique names (the rule's second exception): a settings, log or text file the install created (no file was
-// there) whose name says it is WrongGPU's: wronggpu-* (the RR data file wronggpu-rr.ini among them), or one in a WrongGPU
-// folder of its own (the RR plugin's settings file WrongGPU\wronggpu.ini). WrongGPU's programs rewrite these themselves
-// (the RR plugin keeps its keys and the mode chosen in OptiScaler's menu there). Never a program file (.dll, .asi, ...): a
-// changed one is WrongGPU's only by its hash.
-static bool OwnUniqueName(const Entry& e) {
-    if (e.action != L"copy" || e.existed || e.owner == L"adopted") return false;
-    if (!EndsWithI(e.rel, L".ini") && !EndsWithI(e.rel, L".log") && !EndsWithI(e.rel, L".txt") && !EndsWithI(e.rel, L".json")) return false;
-    if (StartsWithI(BaseName(e.rel), L"wronggpu-")) return true;
-    return StartsWithI(e.rel, L"WrongGPU\\") || e.rel.find(L"\\WrongGPU\\") != wstring::npos;
-}
+// (A recorded file that the install created and whose bytes changed since is not WrongGPU's by its name either: WrongGPU's
+// programs rewrite wronggpu-rr.ini and the RR plugin's WrongGPU\wronggpu.ini themselves, and so can a player. It stays,
+// and the result says so: no operation deletes a file it cannot prove WrongGPU's by its bytes.)
 static const FfxSlot* SlotOf(const Entry& e) {
     for (auto& sl : kSlots) if (IEq(e.rel, e.action == L"rename" ? sl.original : sl.name)) return &sl;
     return nullptr;
@@ -505,7 +499,6 @@ Holds WhatIsThere(Context& ctx, const wstring& dir, const Entry& e, const wstrin
     if (e.action != L"copy") return Holds::Other;
     if (!e.inst.empty() && IEq(h, e.inst)) return Holds::Ours;
     if (e.existed && !e.orig.empty() && IEq(h, e.orig)) return Holds::Original;
-    if (OwnUniqueName(e)) return Holds::Ours;
     const wstring t = Target(dir, e.rel);
     wstring info;
     if (const FfxSlot* sl = SlotOf(e)) return ClassifySlot(*sl, t, nullptr, info) == FFX_OURS ? Holds::Ours : Holds::Other;  // the slot exception
@@ -522,13 +515,21 @@ wstring KeptOriginal(const wstring& dir, const wstring& rel, const wstring& sour
     SYSTEMTIME st; GetLocalTime(&st);
     wchar_t stamp[32];
     swprintf(stamp, 32, L"%04d%02d%02d-%02d%02d%02d", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-    wstring gen = Join(base, stamp);
-    for (int n = 2; IsFile(Join(gen, rel)); ++n) gen = Join(base, wstring(stamp) + L"-" + std::to_wstring(n));  // never over another generation
-    const wstring p = Join(gen, rel);
-    EnsureDir(Parent(p));
-    CopyChecked(source, p);
-    if (!IEq(Sha256File(p), sha)) Fail(L"Could not keep the original of " + rel + L" in " + Parent(p) + L". Nothing more was changed.");
-    return p;
+    // never over another generation: the copy is created only where nothing is (CopyNew), the next free name otherwise
+    for (int n = 1; n < 1000; ++n) {
+        const wstring gen = Join(base, n == 1 ? wstring(stamp) : wstring(stamp) + L"-" + std::to_wstring(n));
+        const wstring p = Join(gen, rel);
+        if (Exists(p)) continue;
+        EnsureDir(Parent(p));
+        DWORD err = 0;
+        if (!CopyNew(source, p, &err)) {
+            if (err == ERROR_FILE_EXISTS || err == ERROR_ALREADY_EXISTS) continue;  // another file appeared there a moment ago
+            Fail(L"Could not keep the original of " + rel + L" in " + Parent(p) + L": " + ErrText(err) + L" Nothing more was changed.");
+        }
+        if (!IEq(Sha256File(p), sha)) Fail(L"Could not keep the original of " + rel + L" in " + Parent(p) + L". Nothing more was changed.");
+        return p;
+    }
+    Fail(L"Could not keep the original of " + rel + L" in " + base + L": no free name. Nothing more was changed.");
 }
 
 // The file can be deleted or replaced now (no other program holds it without sharing deletion; read-only is fine).
@@ -602,13 +603,25 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
                 Fail(L"Cannot change " + e.rel + L": another program has it open (the game?). Close it and try again. Nothing was changed.", EXIT_REFUSED);
         }
     } else {
-        // a half-finished install: everything it wrote goes, what was there comes back (nothing else was there to change)
+        // a half-finished install: what it wrote goes, what was there comes back. By the same rule as any restore: only a file
+        // whose bytes are the installed ones (or the original's, which stays) is touched; anything else at the path stays and
+        // is said (a file another program put there while the install ran; a copy cut off halfway).
         for (size_t i = 0; i < m.e.size(); ++i) {
             const Entry& e = m.e[i];
+            Plan& p = plan[i];
             if (e.action == L"dir" || e.action == L"rename") continue;
-            plan[i].source = BackupPath(dir, e.rel);
-            plan[i].what = e.action == L"disable" || e.existed ? Do::PutBack : e.owner == L"adopted" ? Do::Nothing : Do::Remove;
-            if (Exists(Target(dir, e.rel))) plan[i].now = Sha256File(Target(dir, e.rel));
+            p.source = BackupPath(dir, e.rel);
+            if (e.action == L"copy" && e.owner == L"adopted") continue;
+            const bool hasOriginal = e.action == L"disable" || e.existed;
+            const wstring t = Target(dir, e.rel);
+            if (Exists(t)) p.now = Sha256File(t);
+            if (Exists(t) && p.now.empty()) { p.what = Do::Leave; p.keep = hasOriginal && Exists(p.source); continue; }  // unreadable: not touched
+            switch (WhatIsThere(ctx, dir, e, p.now)) {
+                case Holds::Ours: p.what = hasOriginal ? Do::PutBack : Do::Remove; break;
+                case Holds::Missing: p.what = hasOriginal ? Do::PutBack : Do::Nothing; break;
+                case Holds::Original: p.what = Do::Nothing; break;
+                case Holds::Other: p.what = Do::Leave; p.keep = hasOriginal && Exists(p.source); break;
+            }
         }
     }
 
@@ -637,45 +650,95 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
             // the game's FSR DLL, renamed aside: back under its name when WrongGPU's DLL is still under it (no entry or no
             // backup for that one: the renamed file is the game's only copy)
             const FfxSlot* sl = SlotOf(e);
+            const wstring slot = sl ? Join(dir, sl->name) : wstring();
             wstring info;
-            if (sl && Exists(t) && (e.inst.empty() || IEq(Sha256File(t), e.inst)) && ClassifySlot(*sl, Join(dir, sl->name), nullptr, info) == FFX_OURS) {
-                if (!Replaceable(Join(dir, sl->name))) Fail(L"Cannot put " + wstring(sl->name) + L" back: another program has it open.");
-                SetFileAttributesW(Join(dir, sl->name).c_str(), FILE_ATTRIBUTE_NORMAL);
-                if (!MoveFileExW(t.c_str(), Join(dir, sl->name).c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-                    Fail(L"Cannot put " + wstring(sl->name) + L" back: " + ErrText(GetLastError()));
-                ui.log(L"restored " + wstring(sl->name) + L" from " + e.rel);
+            if (sl && Exists(t) && (e.inst.empty() || IEq(Sha256File(t), e.inst))) {
+                // WrongGPU's DLL is held (pinned) while it is recognised and deleted through that handle; the game's file then
+                // takes the name without replacing anything (a file that appears at the name in between stays, and the branch
+                // below keeps the game's file). A name that is empty (a stop between the two steps, or the DLL removed) gets it.
+                PinnedFile held;
+                DWORD err = 0;
+                if (held.Open(slot, false, &err)) {
+                    if (ClassifySlot(*sl, slot, nullptr, info) == FFX_OURS) {
+                        RestoreStep("locked");
+                        if (!held.Delete(&err)) Fail(L"Cannot put " + wstring(sl->name) + L" back: " + ErrText(err));
+                        if (MoveFileExW(t.c_str(), slot.c_str(), MOVEFILE_WRITE_THROUGH)) ui.log(L"restored " + wstring(sl->name) + L" from " + e.rel);
+                        else if (GetLastError() != ERROR_ALREADY_EXISTS && GetLastError() != ERROR_FILE_EXISTS)
+                            Fail(L"Cannot put " + wstring(sl->name) + L" back: " + ErrText(GetLastError()));
+                    }
+                } else if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+                    if (MoveFileExW(t.c_str(), slot.c_str(), MOVEFILE_WRITE_THROUGH)) ui.log(L"restored " + wstring(sl->name) + L" from " + e.rel);
+                } else if (err != ERROR_NOT_SUPPORTED) {
+                    Fail(L"Cannot put " + wstring(sl->name) + L" back: another program has it open.");
+                }
             }
             // still there: the game's file under WrongGPU's name for it. It goes only when its bytes are safe elsewhere: back
             // under the game's name, or kept (a game update put another file under that name)
             if (sl && Exists(t) && !e.inst.empty() && IEq(Sha256File(t), e.inst)) {
-                const wstring at = Join(dir, sl->name);
+                const wstring at = slot;
                 if (!(IsFile(at) && IEq(Sha256File(at), e.inst))) {
                     const wstring keptAt = KeptOriginal(dir, sl->name, t, e.inst);
                     warnings.push_back(kPartlyRestored + wstring(L"The game replaced ") + sl->name + L" (probably an update); its new file was kept. The " +
                                        sl->name + L" from before WrongGPU is kept in " + keptAt);
                 }
-                ForceDelete(t);
-                ui.log(L"removed " + e.rel + L" (the game's file is back under its name, or kept)");
+                DWORD derr = 0;
+                const DeleteIf r = DeleteIfSha(t, {e.inst}, &derr);  // (hashed and deleted through one handle)
+                if (r == DeleteIf::Failed) Fail(L"Cannot delete " + t + L": " + ErrText(derr));
+                if (r == DeleteIf::Changed) {
+                    warnings.push_back(L"Left in place (changed since install): " + e.rel);
+                    LogLine(ctx, warnings.back());
+                } else ui.log(L"removed " + e.rel + L" (the game's file is back under its name, or kept)");
             }
             continue;
         }
         if (p.what == Do::Nothing || p.what == Do::Leave) { if (p.what == Do::Leave) ui.log(L"kept " + e.rel + L" as it is"); continue; }
-        // checked again right before it changes: a file that is not what the plan saw is left as it is (its original kept)
-        const wstring h = Exists(t) ? Sha256File(t) : wstring();
-        if (!failedInstall && !h.empty() && !IEq(h, p.now)) {  // (gone since: nothing to lose; an original simply goes back)
-            const wstring keptAt = p.what == Do::PutBack ? KeptOriginal(dir, e.rel, p.source, e.orig) : wstring();
+        // The file is checked again, and changed, through one handle (PinnedFile, util.h): opened once without sharing for
+        // writing, renaming or deleting, hashed through that handle, and deleted or overwritten through it. A file that is not
+        // what the plan saw (it changed after the check) is left as it is, its original kept, and said; one that appeared at
+        // a path the plan found empty is never overwritten (CopyNew creates only where nothing is).
+        auto leaveChanged = [&] {
+            const wstring keptAt = p.what == Do::PutBack && (!failedInstall || Exists(p.source)) ? KeptOriginal(dir, e.rel, p.source, e.orig) : wstring();
             warnings.push_back(leaveWarning(e, t, keptAt));
             if (keptWarnings) (*keptWarnings)[Lower(e.rel)] = warnings.back();
+            LogLine(ctx, warnings.back());
+        };
+        auto isGone = [](DWORD err) { return err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND; };
+        auto cannot = [&](DWORD err) {
+            if (err == ERROR_SHARING_VIOLATION || err == ERROR_ACCESS_DENIED || err == ERROR_LOCK_VIOLATION)
+                Fail(L"Cannot change " + e.rel + L": another program has it open (the game?). Close it and try again.", EXIT_REFUSED);
+            Fail(L"Cannot change " + e.rel + L": " + ErrText(err));
+        };
+        PinnedFile held;
+        DWORD err = 0;
+        const bool opened = held.Open(t, p.what == Do::PutBack, &err);
+        if (!opened && err == ERROR_NOT_SUPPORTED) { leaveChanged(); continue; }  // a folder or a link there now: not WrongGPU's file
+        if (!opened && !isGone(err)) cannot(err);
+        if (opened) {
+            const wstring h = held.Sha256();
+            if (h.empty()) Fail(L"Cannot read " + e.rel + L": another program may have it open (the game?). Close it and try again.", EXIT_REFUSED);
+            if (!IEq(h, p.now)) { held.Close(); leaveChanged(); continue; }
+            RestoreStep("locked");  // the file is held and checked: the tests try to change it here (they cannot)
+            if (p.what == Do::Remove) {
+                if (!held.Delete(&err)) Fail(L"Cannot delete " + t + L": " + ErrText(err));
+                ui.log(L"removed " + e.rel);
+            } else {  // PutBack
+                if (failedInstall && !Exists(p.source)) continue;
+                if (!held.Overwrite(p.source, e.orig, &err)) Fail(L"Cannot restore " + e.rel + L": " + ErrText(err));
+                if (!failedInstall && !IEq(held.Sha256(), e.orig)) Fail(L"Restore verification failed for " + e.rel);
+                ui.log(L"restored " + e.rel);
+            }
             continue;
         }
-        if (p.what == Do::Remove) {
-            if (Exists(t)) { ForceDelete(t); ui.log(L"removed " + e.rel); }
-        } else {  // PutBack
-            if (failedInstall && !Exists(p.source)) continue;
-            CopyChecked(p.source, t);
-            if (!failedInstall && !IEq(Sha256File(t), e.orig)) Fail(L"Restore verification failed for " + e.rel);
-            ui.log(L"restored " + e.rel);
+        // gone since the plan: nothing to lose; an original simply goes back, created where nothing is
+        if (p.what == Do::Remove || (failedInstall && !Exists(p.source))) continue;
+        RestoreStep("absent");  // nothing is there: the tests create a file here (CopyNew must not overwrite it)
+        EnsureDir(Parent(t));
+        if (!CopyNew(p.source, t, &err)) {
+            if (err == ERROR_FILE_EXISTS || err == ERROR_ALREADY_EXISTS) { leaveChanged(); continue; }  // a file appeared there a moment ago
+            Fail(L"Cannot copy " + p.source + L" to " + t + L": " + ErrText(err));
         }
+        if (!failedInstall && !IEq(Sha256File(t), e.orig)) Fail(L"Restore verification failed for " + e.rel);
+        ui.log(L"restored " + e.rel);
     }
     RestoreStep("restored");
     // REFramework's copies of the install's root DLLs that the install did not write itself (REFramework came, or made its
@@ -688,15 +751,29 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
             const Entry& e = m.e[k];
             if (e.action != L"copy" || !MirroredRel(e.rel) || e.inst.empty() || plan[k].what == Do::Leave || tracked.count(Lower(MirrorRel(e.rel)))) continue;
             const wstring t = Target(dir, MirrorRel(e.rel));
-            if (IsFile(t) && IEq(Sha256File(t), e.inst)) {
-                ForceDelete(t);
-                ui.log(L"removed " + MirrorRel(e.rel) + L" (REFramework's copy of WrongGPU's " + e.rel + L")");
-            }
+            DWORD derr = 0;
+            if (!IsFile(t)) continue;
+            const DeleteIf r = DeleteIfSha(t, {e.inst}, &derr);  // (hashed and deleted through one handle)
+            if (r == DeleteIf::Failed) Fail(L"Cannot delete " + t + L": " + ErrText(derr));
+            if (r == DeleteIf::Deleted) ui.log(L"removed " + MirrorRel(e.rel) + L" (REFramework's copy of WrongGPU's " + e.rel + L")");
         }
     }
     ui.step(++done, total, L"Cleaning up");
     if (!failedInstall) {
-        if (size_t n = RemoveRuntimeFiles(dir, m)) ui.log(L"removed " + std::to_wstring(n) + L" log and report file(s) written by WrongGPU");
+        // wronggpu-* files in the folders the record lists that the install did not record: never deleted (nothing proves them
+        // WrongGPU's: a player's notes or another program's file can carry the name); each is logged, and an uninstall says so
+        const std::vector<wstring> left = UnrecordedRuntimeFiles(dir, m);
+        for (auto& f : left) LogLine(ctx, L"kept " + f + L" (named like WrongGPU's own files, but the install did not record it, so it is not deleted)");
+        if (!left.empty() && !keepState) {
+            wstring names;
+            for (size_t i = 0; i < left.size() && i < 5; ++i) {
+                const wstring& f = left[i];
+                names += (names.empty() ? L"" : L", ") + (StartsWithI(f, dir + L"\\") ? f.substr(dir.size() + 1) : f);
+            }
+            if (left.size() > 5) names += L" and " + std::to_wstring(left.size() - 5) + L" more";
+            warnings.push_back(kLeftUnrecorded + names);
+            ui.log(warnings.back());
+        }
         for (size_t k = m.e.size(); k-- > 0;)  // a folder the install made that held only those files
             if (m.e[k].action == L"dir" && IsDir(Target(dir, m.e[k].rel)) && RemoveDirectoryW(Target(dir, m.e[k].rel).c_str()))
                 ui.log(L"removed folder " + m.e[k].rel);
@@ -805,17 +882,58 @@ std::vector<wstring> LegacyRestore(Context& ctx, const wstring& dir, Ui& ui) {
         if (skip.count(i)) continue;
         wstring t = Target(dir, e.rel), b = LegacyBackupPath(dir, e.rel);
         if (e.action == L"copy") {
-            if (e.existed) { CopyChecked(b, t); if (Sha256File(t) != e.orig) Fail(L"Restore verification failed for " + e.rel); ui.log(L"older install: restored " + e.rel); }
-            else if (Exists(t)) { ForceDelete(t); ui.log(L"older install: removed " + e.rel); }
-        } else if (!Exists(t)) { CopyChecked(b, t); ui.log(L"older install: restored " + e.rel); }
+            // checked and changed through one handle (PinnedFile); only the bytes the check above accepted (installed, original)
+            DWORD err = 0;
+            if (e.existed) {
+                PinnedFile held;
+                const bool opened = held.Open(t, true, &err);
+                if (!opened && err != ERROR_FILE_NOT_FOUND && err != ERROR_PATH_NOT_FOUND) {
+                    warnings.push_back(L"Older install: left in place (changed since install): " + e.rel);
+                    continue;
+                }
+                if (opened) {
+                    const wstring h = held.Sha256();
+                    if (h != e.inst && h != e.orig) { warnings.push_back(L"Older install: left in place (changed since install): " + e.rel); continue; }
+                    if (!held.Overwrite(b, e.orig, &err)) Fail(L"Cannot restore " + e.rel + L": " + ErrText(err));
+                } else {
+                    EnsureDir(Parent(t));
+                    if (!CopyNew(b, t, &err)) { warnings.push_back(L"Older install: left in place (changed since install): " + e.rel); continue; }
+                }
+                if (Sha256File(t) != e.orig) Fail(L"Restore verification failed for " + e.rel);
+                ui.log(L"older install: restored " + e.rel);
+            } else {
+                const DeleteIf r = DeleteIfSha(t, {e.inst, e.orig}, &err);
+                if (r == DeleteIf::Failed) Fail(L"Cannot delete " + t + L": " + ErrText(err));
+                if (r == DeleteIf::Changed) warnings.push_back(L"Older install: left in place (changed since install): " + e.rel);
+                else if (r == DeleteIf::Deleted) ui.log(L"older install: removed " + e.rel);
+            }
+        } else if (!Exists(t)) {
+            EnsureDir(Parent(t));
+            DWORD err = 0;
+            if (CopyNew(b, t, &err)) ui.log(L"older install: restored " + e.rel);
+        }
     }
     for (const wchar_t* d : {L"dlss45-model\\gpu-build", L"dlss45-model\\exposure-build", L"dlss45-model"}) RemoveDirectoryW(Join(dir, d).c_str());
     std::set<wstring> recorded;
     for (auto& e : m.e) recorded.insert(Lower(FullPath(Target(dir, e.rel))));
+    // the older install's own log and report names: never deleted by name (a file that is not in the record is not provably the
+    // older install's); each is logged and listed in the result
+    std::vector<wstring> unrecorded;
     for (const wstring& d : {dir, GameRoot(dir)})
         for (auto pat : {L"dlss45-*.log", L"dlss45-*.log.old", L"dlss45-report.txt", L"dlss45-report.json", L"dlss45-dred.txt", L"dlss45-crash-*.txt",
                          L"dlss45-crash-*.dmp", L"dlss45-capture-*.bin", L"dlss45-capture-*.txt", L"dlss45-capture-*.jpg"})
-            for (auto& f : ListFiles(d, pat)) if (!recorded.count(Lower(FullPath(f)))) DeleteFileW(f.c_str());
+            for (auto& f : ListFiles(d, pat))
+                if (!recorded.count(Lower(FullPath(f))) && std::none_of(unrecorded.begin(), unrecorded.end(), [&](const wstring& u) { return IEq(FullPath(u), FullPath(f)); }))
+                    unrecorded.push_back(f);
+    if (!unrecorded.empty()) {
+        wstring names;
+        for (size_t i = 0; i < unrecorded.size(); ++i) {
+            LogLine(ctx, L"kept " + unrecorded[i] + L" (named like the older install's files, but its record does not list it, so it is not deleted)");
+            if (i < 5) names += (names.empty() ? L"" : L", ") + BaseName(unrecorded[i]);
+        }
+        if (unrecorded.size() > 5) names += L" and " + std::to_wstring(unrecorded.size() - 5) + L" more";
+        warnings.push_back(kLeftUnrecorded + names);
+    }
     wstring key = m.regkey.empty() ? RegKeyFor(dir, kLegacyKeyPrefix) : m.regkey;
     RegDeleteKeyW(UninstallHive(), (UninstallRoot() + key).c_str());
     wstring legacy = UninstallRoot() + kLegacyKey;

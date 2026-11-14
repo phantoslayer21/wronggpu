@@ -55,6 +55,43 @@ void EnsureDir(const wstring& dir, std::vector<wstring>* created = nullptr);
 void ForceDelete(const wstring& p);
 void WriteFileAtomic(const wstring& path, const void* data, size_t size);
 void CopyChecked(const wstring& src, const wstring& dst);
+// Copies src to dst only when nothing is at dst (the creation itself fails when something is: ERROR_FILE_EXISTS, so a file
+// that appeared a moment ago is never overwritten). false: not copied, `err` holds why.
+bool CopyNew(const wstring& src, const wstring& dst, DWORD* err = nullptr);
+
+// A plain file held while it is checked and then deleted or overwritten (record.h, "the replace race"). It is opened once with
+// DELETE and read access (and write access when forWrite) and FILE_SHARE_READ only: while this object holds it, no other
+// program can write to it, rename it, replace it or delete it, so the bytes hashed through the handle are the bytes the delete
+// or the overwrite through the same handle acts on. Links and folders are refused. What it does not cover: the folders
+// above the file are resolved by name when it is opened (a program that can rename or replace one of them can make the open
+// reach another file; the open then hashes that file, and the hash is compared with the one the plan was made on).
+class PinnedFile {
+public:
+    PinnedFile() = default;
+    PinnedFile(const PinnedFile&) = delete;
+    PinnedFile& operator=(const PinnedFile&) = delete;
+    ~PinnedFile() { Close(); }
+    // false: nothing is held; err is ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND (nothing there), a sharing violation or access
+    // denied (another program holds it), or ERROR_NOT_SUPPORTED (a folder or a link, not a plain file).
+    bool Open(const wstring& path, bool forWrite, DWORD* err = nullptr);
+    bool IsOpen() const { return h_ != INVALID_HANDLE_VALUE; }
+    wstring Sha256();  // of the bytes through the handle (empty: cannot be read)
+    // Deletes the file through the handle (FileDispositionInfoEx with POSIX semantics, the read-only attribute ignored; the
+    // older FileDispositionInfo where that is not supported) and closes it. The name is free when this returns true.
+    bool Delete(DWORD* err = nullptr);
+    // Replaces the bytes through the handle (forWrite) with src's, which are hashed first and must be `srcSha` (nothing is
+    // touched otherwise); the attributes and times of src are put on the file. false: err holds why (ERROR_FILE_CORRUPT when
+    // src is not srcSha). Not atomic against a stop: the record and the backup are kept until the restore is complete.
+    bool Overwrite(const wstring& src, const wstring& srcSha, DWORD* err = nullptr);
+    void Close();
+
+private:
+    HANDLE h_ = INVALID_HANDLE_VALUE;
+};
+enum class DeleteIf { Deleted, Gone, Changed, Failed };
+// Deletes path when its bytes are one of `shas` (pinned: hashed and deleted through one handle). Gone: nothing was there.
+// Changed: other bytes (or a link or folder): nothing was done. Failed: held by another program or not deletable (err).
+DeleteIf DeleteIfSha(const wstring& path, const std::vector<wstring>& shas, DWORD* err = nullptr);
 void RemoveTree(const wstring& dir, const wstring& keepFile = L"");
 std::vector<wstring> ListFiles(const wstring& dir, const wchar_t* pattern);
 std::vector<wstring> ListDirs(const wstring& dir);

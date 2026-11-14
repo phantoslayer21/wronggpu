@@ -455,6 +455,37 @@ int main() {
                     require(threw && ReadAll(Join(u, sl.name), now) && now == hand && IsFile(RecordPath(u)),
                             "game FSR DLL, no original anywhere, an update's restore: refused, nothing changed (record kept)");
                 }
+                {  // a stop after WrongGPU's DLL was deleted and before the game's file took its name: the second run puts it there
+                    const wstring d = Join(dir, L"Direct Slot\\Name Free");
+                    file(Join(d, L"Game.exe"), "MZ");
+                    file(Join(d, sl.original), orig);
+                    Record rm; rm.version = L"0.4.5"; rm.game = d; rm.exe = Join(d, L"Game.exe"); rm.status = L"experimental"; rm.model = L"m.wgcm";
+                    Entry re; re.action = L"rename"; re.rel = sl.original; re.inst = Sha256Bytes(orig.data(), orig.size()); re.owner = L"moved"; rm.e.push_back(re);
+                    SaveRecord(RecordPath(d), rm);
+                    std::vector<wstring> w;
+                    bool threw = false;
+                    try { w = DoRestore(mc, d, quiet, false, false); } catch (const SetupError&) { threw = true; }
+                    string now;
+                    require(!threw && ReadAll(Join(d, sl.name), now) && now == orig && !IsFile(Join(d, sl.original)) && !AnyPartly(w),
+                            "game FSR DLL: the name is free and the game's file is kept aside: it goes back under its name (no warning, nothing lost)");
+                }
+                {  // another file at the name: it is never replaced; the game's file is kept (WrongGPU-originals) and said
+                    const wstring d = Join(dir, L"Direct Slot\\Name Taken");
+                    file(Join(d, L"Game.exe"), "MZ");
+                    file(Join(d, sl.original), orig);
+                    file(Join(d, sl.name), "a file another program put here (synthetic)");
+                    Record rm; rm.version = L"0.4.5"; rm.game = d; rm.exe = Join(d, L"Game.exe"); rm.status = L"experimental"; rm.model = L"m.wgcm";
+                    Entry re; re.action = L"rename"; re.rel = sl.original; re.inst = Sha256Bytes(orig.data(), orig.size()); re.owner = L"moved"; rm.e.push_back(re);
+                    SaveRecord(RecordPath(d), rm);
+                    std::vector<wstring> w;
+                    bool threw = false;
+                    try { w = DoRestore(mc, d, quiet, false, false); } catch (const SetupError&) { threw = true; }
+                    string now, keptNow;
+                    bool kept = false;
+                    for (auto& g : ListDirs(Join(d, kKeptDirName))) kept = kept || (ReadAll(Join(g, sl.name), keptNow) && keptNow == orig);
+                    require(!threw && ReadAll(Join(d, sl.name), now) && now == "a file another program put here (synthetic)" && kept && AnyPartly(w),
+                            "game FSR DLL: another program's file at the name stays, the game's own file is kept in WrongGPU-originals, the result says partly");
+                }
             }
             // ---- 0.6.1: the file-ownership rule (record.h): a restore deletes or overwrites only WrongGPU's bytes; anything else
             // stays as it is, and a player's original that cannot go back is kept in WrongGPU-originals (both generations
@@ -556,16 +587,64 @@ int main() {
                                 read(Join(nextGen, L"wronggpu.ini")) == C,
                             "ownership: two generations (A, then B) are both kept, neither overwritten; C stays");
                 }
-                // WrongGPU's own unique names that the record lists: removed by name; shared names never
+                // files under WrongGPU's names that the install never recorded (what its programs wrote while the game ran, or a
+                // file a player or another program created there after the install): never deleted by their names, listed
                 {
                     const wstring d = ownGame(L"Runtime names", {{L"wronggpu_runtime.dll", L"copy", "", W, W}});
                     file(Join(d, L"wronggpu-frame.log"), "a log WrongGPU's runtime wrote");
+                    file(Join(d, L"wronggpu-notes.txt"), "the player's notes, saved after the install");
                     file(Join(d, L"OptiScaler.log"), "a log another program wrote");
                     file(Join(d, L"fakenvapi.log"), "a log another program wrote");
                     file(Join(d, L"sub\\wronggpu-other.log"), "in a folder the record does not list");
-                    require(restore(d, false) && !IsFile(Join(d, L"wronggpu-frame.log")) && IsFile(Join(d, L"OptiScaler.log")) && IsFile(Join(d, L"fakenvapi.log")) &&
-                                IsFile(Join(d, L"sub\\wronggpu-other.log")) && !IsFile(Join(d, L"wronggpu_runtime.dll")),
-                            "ownership: wronggpu-* in a folder the record lists goes; OptiScaler.log and fakenvapi.log stay; a folder not listed is left alone");
+                    const auto found = UnrecordedRuntimeFiles(d, [&] { Record r; LoadRecord(RecordPath(d), r); return r; }());
+                    require(found.size() == 2 && IEq(found[0], Join(d, L"wronggpu-frame.log")) && IEq(found[1], Join(d, L"wronggpu-notes.txt")),
+                            "ownership: the unrecorded wronggpu-* files of the listed folders are found (the recorded one, other names and unlisted folders are not)");
+                    std::vector<wstring> w;
+                    const auto listed = [](const std::vector<wstring>& ws, const wchar_t* name) {
+                        for (auto& x : ws) if (x.rfind(kLeftUnrecorded, 0) == 0 && x.find(name) != wstring::npos) return true;
+                        return false;
+                    };
+                    require(restore(d, false, &w) && !IsFile(Join(d, L"wronggpu_runtime.dll")) && !IsFile(RecordPath(d)),
+                            "ownership: an uninstall with unrecorded wronggpu-* files runs to its end (the recorded file goes)");
+                    require(read(Join(d, L"wronggpu-frame.log")) == "a log WrongGPU's runtime wrote" && read(Join(d, L"wronggpu-notes.txt")) == "the player's notes, saved after the install" &&
+                                IsFile(Join(d, L"OptiScaler.log")) && IsFile(Join(d, L"fakenvapi.log")) && IsFile(Join(d, L"sub\\wronggpu-other.log")),
+                            "ownership: a file created under our prefix after the install is not deleted (no file of the folder is: logs, notes, other names, unlisted folders)");
+                    require(listed(w, L"wronggpu-notes.txt") && listed(w, L"wronggpu-frame.log") && !AnyPartly(w),
+                            "ownership: the uninstall's result lists the files it left in place (\"left in place\", not \"partly\": nothing was lost)");
+                    // an update's or repair's restore leaves them too, and does not list them again
+                    const wstring u = ownGame(L"Runtime names update", {{L"wronggpu_runtime.dll", L"copy", "", W, W}});
+                    file(Join(u, L"wronggpu-notes.txt"), "the player's notes");
+                    w.clear();
+                    require(restore(u, true, &w) && read(Join(u, L"wronggpu-notes.txt")) == "the player's notes" && !listed(w, L"wronggpu-notes.txt"),
+                            "ownership: an update's restore leaves them in place without a warning each time");
+                }
+                // a recorded file the install created (nothing was there) whose bytes changed since is not WrongGPU's by its name:
+                // wronggpu-*.ini/log/txt, a file in a WrongGPU folder, a program file; unchanged, each goes
+                {
+                    const std::vector<wstring> names = {L"wronggpu-rr.ini", L"wronggpu-frame.log", L"WrongGPU\\wronggpu.ini", L"wronggpu_runtime.dll"};
+                    for (int keep = 0; keep < 2; ++keep) {
+                        const string howA = keep ? " (an update or repair's restore)" : " (an uninstall)";
+                        for (auto& name : names) {
+                            const wstring d = ownGame(L"Created changed " + wstring(keep ? L"keep " : L"") + Stem(name) + L"-" + std::to_wstring(&name - &names[0]), {{name, L"copy", "", W, B}});
+                            std::vector<wstring> w;
+                            bool said = false;
+                            const bool ok = restore(d, keep == 1, &w);
+                            for (auto& x : w) said = said || x == L"Left in place (changed since install): " + name;
+                            require(ok && read(Join(d, name)) == B && said && !AnyPartly(w) && !IsFile(RecordPath(d)),
+                                    "ownership: a recorded file created by the install and changed since (" + ToUtf8(name) + ") stays with its new bytes and is said" + howA);
+                            const wstring g = ownGame(L"Created same " + wstring(keep ? L"keep " : L"") + Stem(name) + L"-" + std::to_wstring(&name - &names[0]), {{name, L"copy", "", W, W}});
+                            require(restore(g, keep == 1) && !IsFile(Join(g, name)),
+                                    "ownership: ...the same file as the install wrote it goes (" + ToUtf8(name) + ")" + howA);
+                        }
+                    }
+                }
+                // a recorded file replaced after the install by another program's file: stays, with the player's original kept
+                {
+                    const wstring d = ownGame(L"Replaced after install", {{L"wronggpu_runtime.dll", L"copy", "", W, C}, {L"wronggpu.ini", L"copy", A, W, C}});
+                    std::vector<wstring> w;
+                    require(restore(d, false, &w) && read(Join(d, L"wronggpu_runtime.dll")) == C && read(Join(d, L"wronggpu.ini")) == C &&
+                                keptOf(d, L"wronggpu.ini") == std::vector<string>{A} && partly(w, L"wronggpu.ini"),
+                            "ownership: recorded files replaced after the install stay (both), the player's original of the one that had one is kept, and the result says so");
                 }
                 // the game root above the install folder (bin\x64 under it): a named runtime line, resolved from the record's exe
                 {
@@ -581,9 +660,9 @@ int main() {
                     require(LoadRecord(RecordPath(bx), back) && back.runtime.size() == m.runtime.size(), "runtime lines: the game-root line is read back");
                     file(Join(g, L"wronggpu-root.log"), "a log WrongGPU's runtime wrote in the game's working folder");
                     file(Join(g, L"OptiScaler.log"), "a log another program wrote");
-                    const size_t removed = RemoveRuntimeFiles(bx, back);
-                    require(removed == 1 && !IsFile(Join(g, L"wronggpu-root.log")) && IsFile(Join(g, L"OptiScaler.log")),
-                            "runtime lines: wronggpu-* in the game root goes; OptiScaler.log there stays");
+                    const auto unrecorded = UnrecordedRuntimeFiles(bx, back);
+                    require(unrecorded.size() == 1 && IEq(unrecorded[0], Join(g, L"wronggpu-root.log")) && IsFile(Join(g, L"wronggpu-root.log")) && IsFile(Join(g, L"OptiScaler.log")),
+                            "runtime lines: the game root's wronggpu-* is found (and never deleted); OptiScaler.log there is not a candidate");
                 }
                 // checked again right before the change: a file that changed after the check is left, its original kept
                 {
@@ -592,6 +671,61 @@ int main() {
                     std::vector<wstring> w;
                     require(restore(d, false, &w) && read(Join(d, L"wronggpu.ini")) == C && keptOf(d, L"wronggpu.ini") == std::vector<string>{A} && partly(w, L"wronggpu.ini"),
                             "ownership: a file changed between the check and the restore is left as it is; the original is kept");
+                    SetRestoreStepHook([&](const char* s) { if (stopAt == s) throw Killed{}; });
+                }
+                // the replace race: a swap between the check and the action. Before the file is held (the hook "kept" runs after
+                // the plan, before the action): found by the hash, the file is left and said. After it is held (the hook "locked"
+                // runs with the file held and checked): no program can delete, rename, replace or write it, so the action acts on
+                // the file that was checked. A path found empty that gets a file a moment later (the hook "absent") is not
+                // overwritten.
+                {
+                    auto said = [](const std::vector<wstring>& ws, const wstring& what) { for (auto& x : ws) if (x == what) return true; return false; };
+                    {  // 1. a recorded file to delete, swapped for another program's bytes before it is held
+                        const wstring d = ownGame(L"Swap remove", {{L"wronggpu_runtime.dll", L"copy", "", W, W}});
+                        SetRestoreStepHook([&](const char* s) { if (string(s) == "kept") file(Join(d, L"wronggpu_runtime.dll"), C); });
+                        std::vector<wstring> w;
+                        require(restore(d, false, &w) && read(Join(d, L"wronggpu_runtime.dll")) == C && said(w, L"Left in place (changed since install): wronggpu_runtime.dll"),
+                                "swap: a recorded file swapped for other bytes between the check and the delete is not deleted, and the result says so");
+                    }
+                    {  // 2. the same before an original goes back over a file WrongGPU installed
+                        const wstring d = ownGame(L"Swap put back", {{L"wronggpu.ini", L"copy", A, W, W}});
+                        SetRestoreStepHook([&](const char* s) { if (string(s) == "kept") file(Join(d, L"wronggpu.ini"), C); });
+                        std::vector<wstring> w;
+                        require(restore(d, false, &w) && read(Join(d, L"wronggpu.ini")) == C && keptOf(d, L"wronggpu.ini") == std::vector<string>{A} && partly(w, L"wronggpu.ini"),
+                                "swap: a file swapped for other bytes before the original goes back is not overwritten; the original is kept");
+                    }
+                    {  // 3. a path that was empty at the plan gets a file after the open found nothing: created, never overwritten
+                        const wstring d = ownGame(L"Swap absent", {{L"OptiScaler.log", L"disable", A, "", ""}});
+                        SetRestoreStepHook([&](const char* s) { if (string(s) == "absent") file(Join(d, L"OptiScaler.log"), C); });
+                        std::vector<wstring> w;
+                        require(restore(d, false, &w) && read(Join(d, L"OptiScaler.log")) == C && keptOf(d, L"OptiScaler.log") == std::vector<string>{A} && partly(w, L"OptiScaler.log"),
+                                "swap: a file created at an empty path a moment before the original goes back is not overwritten; the original is kept");
+                    }
+                    // 4. the file held and checked: every way to swap it fails
+                    for (int back = 0; back < 2; ++back) {
+                        const wstring name = back ? L"wronggpu.ini" : L"wronggpu_runtime.dll";
+                        const wstring d = ownGame(back ? L"Swap held put back" : L"Swap held remove", {{name, L"copy", back ? A : string(), W, W}});
+                        const wstring other = Join(d, L"another-program.tmp"), p = Join(d, name);
+                        file(other, C);
+                        int attacks = 0, calls = 0;
+                        SetRestoreStepHook([&](const char* s) {
+                            if (string(s) != "locked") return;
+                            ++calls;
+                            const DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+                            if (DeleteFileW(p.c_str())) ++attacks;
+                            if (MoveFileExW(p.c_str(), (p + L".moved").c_str(), 0)) ++attacks;
+                            if (MoveFileExW(other.c_str(), p.c_str(), MOVEFILE_REPLACE_EXISTING)) ++attacks;
+                            for (DWORD access : {(DWORD)GENERIC_WRITE, (DWORD)DELETE}) {
+                                HANDLE h = CreateFileW(p.c_str(), access, share, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                                if (h != INVALID_HANDLE_VALUE) { ++attacks; CloseHandle(h); }
+                            }
+                        });
+                        std::vector<wstring> w;
+                        const bool ok = restore(d, false, &w);
+                        require(ok && calls == 1 && attacks == 0 && read(other) == C && !AnyPartly(w) && (back ? read(p) == A : !IsFile(p)),
+                                string("swap: while the file is held and checked, deleting, renaming, replacing and writing it all fail (") + (back ? "the original goes back over it" : "it is deleted") +
+                                    "); the restore then finishes on the file that was checked");
+                    }
                     SetRestoreStepHook([&](const char* s) { if (stopAt == s) throw Killed{}; });
                 }
                 // interrupted: a stop after the record is gone (before the backup) loses nothing; a stop before it is finished by
@@ -636,6 +770,57 @@ int main() {
                             "interrupted: ...once it is free, the restore runs (the original back, WrongGPU's file gone)");
                 }
                 SetRestoreStepHook(nullptr);
+                // ---- PinnedFile, DeleteIfSha and CopyNew (util.h): the handle-based primitives under the restore ----------------
+                {
+                    const wstring base = Join(dir, L"Pinned"), p = Join(base, L"a.bin");
+                    DWORD err = 0;
+                    file(p, W);
+                    {
+                        PinnedFile f, second;
+                        require(f.Open(p, false, &err) && f.IsOpen() && f.Sha256() == H(W), "pinned: a plain file is opened and hashed through the handle");
+                        require(!second.Open(p, false, &err) && err == ERROR_SHARING_VIOLATION, "pinned: while held, another open for delete (a replace, a rename) is refused");
+                        require(!DeleteFileW(p.c_str()) && !MoveFileExW(p.c_str(), (p + L".x").c_str(), 0) && read(p) == W, "pinned: while held, it cannot be deleted or renamed by its path; it can still be read");
+                        require(!DeleteFileW(Join(base, L"missing").c_str()) && !f.Open(Join(base, L"missing"), false, &err) && err == ERROR_FILE_NOT_FOUND,
+                                "pinned: a path with nothing there: ERROR_FILE_NOT_FOUND");
+                    }
+                    require(DeleteIfSha(p, {H(C)}, &err) == DeleteIf::Changed && read(p) == W, "pinned: DeleteIfSha with other bytes: Changed, the file stays");
+                    {
+                        PinnedFile held;
+                        held.Open(p, false, &err);
+                        require(DeleteIfSha(p, {H(W)}, &err) == DeleteIf::Failed && read(p) == W, "pinned: DeleteIfSha on a file another program holds: Failed, the file stays");
+                    }
+                    require(DeleteIfSha(p, {H(C), H(W)}, &err) == DeleteIf::Deleted && !IsFile(p) && DeleteIfSha(p, {H(W)}, &err) == DeleteIf::Gone,
+                            "pinned: DeleteIfSha with one of the hashes: Deleted; then nothing there: Gone");
+                    file(p, W);
+                    SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_READONLY);
+                    require(DeleteIfSha(p, {H(W)}, &err) == DeleteIf::Deleted && !IsFile(p), "pinned: a read-only file is deleted through the handle");
+                    // Overwrite: the bytes of src (hashed first), its attributes; a src that is not the expected bytes touches nothing
+                    const wstring src = Join(base, L"src.bin");
+                    file(src, "short original");
+                    file(p, W);
+                    SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_READONLY);
+                    {
+                        PinnedFile f;
+                        require(f.Open(p, true, &err) && !f.Overwrite(src, H(C), &err) && err == ERROR_FILE_CORRUPT && f.Sha256() == H(W),
+                                "pinned: Overwrite from a file that is not the expected bytes fails and changes nothing");
+                        require(f.Overwrite(src, H("short original"), &err) && f.Sha256() == H("short original"), "pinned: Overwrite puts the source's bytes through the handle (a read-only target too)");
+                    }
+                    require(read(p) == "short original" && !(GetFileAttributesW(p.c_str()) & FILE_ATTRIBUTE_READONLY), "pinned: ...the file is the source's bytes, shorter than before, with the source's attributes");
+                    // a link is not a plain file (when the account may make one)
+                    const wstring link = Join(base, L"link.bin");
+                    if (CreateSymbolicLinkW(link.c_str(), p.c_str(), SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
+                        PinnedFile f;
+                        require(!f.Open(link, false, &err) && err == ERROR_NOT_SUPPORTED && DeleteIfSha(link, {H("short original")}, &err) == DeleteIf::Changed && read(p) == "short original",
+                                "pinned: a symbolic link is refused (not followed): its target is untouched");
+                        DeleteFileW(link.c_str());
+                    }
+                    // CopyNew creates only where nothing is
+                    const wstring dst = Join(base, L"dst.bin");
+                    require(CopyNew(src, dst, &err) && read(dst) == "short original", "CopyNew: copies where nothing is");
+                    file(dst, "another file");
+                    require(!CopyNew(src, dst, &err) && err == ERROR_FILE_EXISTS && read(dst) == "another file", "CopyNew: a file that is there is not overwritten (ERROR_FILE_EXISTS)");
+                    SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_NORMAL);
+                }
             }
             // ---- 0.6.1: an update that now leaves RR out (the game no longer uses it, or another setup's
             // plugin keeps it out) first runs the earlier install's restore with keepState (DoInstall step 2): the earlier RR plugin

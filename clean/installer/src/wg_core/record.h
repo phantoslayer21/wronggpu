@@ -120,12 +120,17 @@ bool HostedRecord(const Record& m);
 // ---- the file-ownership rule (0.6.1; README "What the launcher removes") ----------------------------------------------
 // Every restore, uninstall, repair, update, move out of a wrong folder and cleanup deletes or overwrites a file only when
 // its current bytes are WrongGPU's: the hash the record says WrongGPU last wrote there, or a WrongGPU release's (size and
-// SHA-256). Not by its name, a neighbouring file, an ini key or because it is a log. The one exception: the game's FSR DLL
+// SHA-256). Not by its name, a neighbouring file, an ini key or because it is a log, and not because the install created the
+// path (a file the install created whose bytes changed since is preserved too). The one exception: the game's FSR DLL
 // slots, where WrongGPU's DLL is recognised by its version resource (ClassifySlot), because the game may update that DLL.
-// The other exception the rule names: files with WrongGPU's own unique names (wronggpu-* created by the install, the RR
-// plugin's files in its WrongGPU folder) that the record lists as created by WrongGPU.
 // Anything else at a recorded path stays as it is; a player's original that cannot be put back because of it is kept in
-// <install dir>\WrongGPU-originals\<time>\ (KeptOriginal), and the result says "partly" (kPartlyRestored).
+// <install dir>\WrongGPU-originals\<time>\ (KeptOriginal), and the result says "partly" (kPartlyRestored). A file that is
+// not in the record at all is never touched, whatever its name (UnrecordedRuntimeFiles: listed, kLeftUnrecorded).
+// The replace race: the bytes are checked and the file is deleted or overwritten through ONE handle (PinnedFile, util.h:
+// opened without sharing for writing, renaming or deleting), so the file that was hashed is the file that goes; a file
+// created where the plan found none is never overwritten (CopyNew). What stays path based: the folders above the file are
+// resolved by name when it is opened; the preflight (Replaceable) is advice, the action decides; and the slot DLL's
+// version-resource check reads the held file by its path (the held file cannot change meanwhile).
 enum class Holds { Missing, Ours, Original, Other };
 // What the path of entry `e` holds now (h: its current SHA-256; empty when missing).
 Holds WhatIsThere(Context& ctx, const wstring& dir, const Entry& e, const wstring& h);
@@ -169,9 +174,12 @@ bool LauncherKeepsSharedData();
 bool PortableLauncherUsesSharedData();
 void NotePortableLauncher(const wstring& exe);
 void UnregisterUninstall(const Record& m);
-// The files the record's runtime lines name (WrongGPU's own unique names, not in the record's entries): removed. Returns
-// how many.
-size_t RemoveRuntimeFiles(const wstring& dir, const Record& m);
+// The wronggpu-* files in the folders the record's runtime lines name that are not entries of the record (what WrongGPU's own
+// programs write while the game runs, or what a player or another program put there under a similar name). Nothing proves
+// them WrongGPU's, so no restore deletes them: DoRestore logs each, and an uninstall's warnings list them (kLeftUnrecorded).
+std::vector<wstring> UnrecordedRuntimeFiles(const wstring& dir, const Record& m);
+// The warning that lists those files; the result of an uninstall says it ("left in place", never "partly": nothing was lost).
+extern const wchar_t* const kLeftUnrecorded;
 // The runtime lines for an install in `dir` with its game program in exeDir (folders inside dir only), from the record's
 // dir entries too: call after those are in m.
 void SetRuntimeLines(Record& m, const wstring& dir, const wstring& exeDir);
