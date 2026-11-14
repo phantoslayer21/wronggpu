@@ -15,10 +15,10 @@ zero area.
 Network 2 ("net2"): two small encoder-decoders (sub-nets A and B), 25 layers, all 3 x 3, each a weight blob of
 9 * in * out float16 followed by a bias blob of out float16 (50 blobs).
 
-The blob order below is the order the library uploads them, which is also their data order. OPEN (not delivered yet;
-see FORMATS.md): the in-blob axis order of the weights (tap, input and output channel, any tiling), which launch reads
-which blob, whether net1's blob 2 is a 1 x 1 or a 2 x 2 convolution, the grid sizes of both networks relative to the
-output, and the converter map itself. Nothing here guesses them.
+The blob order below is the order the library uploads them, which is also their data order. The order of the weights
+inside each blob is given by the converter map (data/fg.v1.map.json, revision v1.1: natural order by explicit offsets;
+clean/fg/reference/natural.py). net1's blob 2 is a 1 x 1 convolution. OPEN (not delivered yet; see FORMATS.md): which
+launch reads which blob and the grid sizes of both networks relative to the output. Nothing here guesses them.
 """
 from dataclasses import dataclass
 
@@ -32,12 +32,12 @@ class Net1Layer:
     index: int       # 1-based, upload order
     out: int         # output channels (= distinct bias values)
     k: int           # taps * input channels
-    taps: object     # 9 (3 x 3), 1 (1 x 1), or None where the reading is OPEN
+    taps: int        # 9 (3 x 3) or 1 (1 x 1)
 
     @property
     def cin(self):
-        """Input channels, or None while the tap count is OPEN."""
-        return None if self.taps is None else self.k // self.taps
+        """Input channels."""
+        return self.k // self.taps
 
     @property
     def weight_elements(self):
@@ -108,7 +108,7 @@ class Net2Layer:
 def _net1():
     rows = [  # (out, K, taps)
         (32, 432, 9),     # 3 x 3, 48 -> 32 (level 0)
-        (64, 32, None),   # 32 -> 64: 1 x 1, or 2 x 2 over 8 channels (OPEN)
+        (64, 32, 1),      # 32 -> 64, 1 x 1 (map v1.1)
         (128, 576, 9),
         (128, 1152, 9),
         (256, 1152, 9),
