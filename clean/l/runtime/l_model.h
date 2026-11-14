@@ -26,5 +26,10 @@ StageSpecs stage_specs();
 // load_raw_stages with stage_specs(): <model_dir>[/raw]/<stage>/<name>.bin.
 bool load_raw_model(const std::string& model_dir, std::map<std::string, StageTensors>* out, std::string* err);
 
+// load_wgcm_stages with stage_specs(): the converter's model.wgcm, checked against the preset-L map at map_path
+// (whole-file hash, every stage's keyed digest, names, types, shapes, values; clean/runtime/model.h).
+bool load_wgcm_model(const std::string& path, const std::string& map_path, std::map<std::string, StageTensors>* out,
+                     std::string* err, bool* other_map = nullptr);
+
 }  // namespace l
 }  // namespace wgrt
