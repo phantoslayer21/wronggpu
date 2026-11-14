@@ -535,7 +535,9 @@ class D3D12(unittest.TestCase):
     coefficient store for Model M's pack12 post path; each missing D3D12 port refused by name, never replaced."""
 
     def l_run(self, ports, frames=3, flags=(), **kw):
-        return run("model=L", frames=frames, build_files=FT.SHIPPING, flags=("--backend=3",) + tuple(flags),
+        # Model M's fused pack12 post (l_post=m): the route these tests trace; Model L's own post (the default where
+        # its ports are present) is test_own_post's
+        return run("model=L;l_post=m", frames=frames, build_files=FT.SHIPPING, flags=("--backend=3",) + tuple(flags),
                    manifest=ports, **kw)
 
     def test_missing_ports_named(self):
@@ -700,9 +702,16 @@ class D3D12(unittest.TestCase):
                 got = first("model=L;l_post=own", flags=("--backend=3",),
                             manifest=[kc for kc in self.own_ports() if kc[0] != k])
                 self.assertEqual(got, "ERR create: Model L on native D3D12 (l_post=own): not yet ported to D3D12: " + k)
-        # the default stays Model M's fused pack12 post (test_frame), named so; on HIP Model L runs its own post either way
-        self.assertEqual(FT.Trace(run("model=L", frames=1, build_files=FT.SHIPPING, **d3d12)).kernels.get("l_post"),
-                         "m_pack12")
+        # the default: Model L's own post where its route applies (HDR, its ports present), else Model M's fused pack12
+        # post; l_post=m chooses Model M's; on HIP Model L runs its own post either way
+        def default(options="model=L", **kw):
+            return FT.Trace(run(options, frames=1, build_files=FT.SHIPPING, **dict(d3d12, **kw))).kernels.get("l_post")
+        self.assertEqual(default(), "l_post_recon")
+        self.assertEqual(default("model=L;l_post=m"), "m_pack12")
+        self.assertEqual(default(hdr=0), "m_pack12")
+        for k, _ in self.OWN:
+            with self.subTest(default_without=k):
+                self.assertEqual(default(manifest=[kc for kc in self.own_ports() if kc[0] != k]), "m_pack12")
 
         def hip(options):
             return [re.sub(r"wg_lfb_\w+", "B", x) for x in run(options, frames=2, build_files=FT.SHIPPING)]
