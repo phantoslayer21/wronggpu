@@ -63,6 +63,7 @@ HOST_LIBS=(
 APT_PACKAGES=(
   ca-certificates curl git binutils file python3 cmake ninja-build pkg-config build-essential
   libcairo2-dev libpango1.0-dev libfontconfig-dev                                  # the launcher's drawing
+  libjpeg-turbo8-dev                                                               # Steam's JPEG art (bundled; THIRD-PARTY-NOTICES 4.1)
   libx11-dev libxext-dev libxcursor-dev libxi-dev libxfixes-dev libxrandr-dev libxtst-dev  # SDL3's X11 backend
   libxkbcommon-dev libwayland-dev wayland-protocols libdbus-1-dev libudev-dev      # SDL3's Wayland, D-Bus and udev
   libasound2-dev libpulse-dev                                                      # SDL3's audio

@@ -73,6 +73,21 @@ repository. The model weights are read on the player's own PC from that upscaler
     this repository or of WrongGPU's packages).
 
 
+4. Not included; bundled into the Linux AppImage when it is built
+------------------------------------------------------------------
+
+4.1 libjpeg-turbo 2.1.2 (Ubuntu 22.04's libjpeg-turbo8): JPEG decoding in the Linux launcher
+    Files:    none in this repository; build-appimage.sh installs libjpeg-turbo8-dev from the Ubuntu 22.04 archive and
+              linuxdeploy copies libjpeg.so.8 into the AppImage, unmodified. The AppImage carries this file in
+              share/doc/wronggpu/THIRD-PARTY-NOTICES.
+    Source:   https://github.com/libjpeg-turbo/libjpeg-turbo, tag 2.1.2 (the source of Ubuntu's package)
+    Licence:  the IJG (Independent JPEG Group) licence for the libjpeg API library, which the launcher uses, and the
+              Modified (3-clause) BSD licence (D. R. Commander and others) for the rest of the project; texts below
+    Notice:   This software is based in part on the work of the Independent JPEG Group.
+    Used by:  clean/installer/src/app/jpeg_decode_linux.cpp, which reads Steam's JPEG art (hero, header, capsule); the
+              Windows launcher decodes art with WIC and does not carry it
+
+
 Licence texts
 -------------
 
@@ -122,3 +137,48 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+
+
+libjpeg-turbo 2.1.2, the IJG licence (README.ijg of the libjpeg-turbo source):
+
+This software is the work of Tom Lane, Guido Vollbeding, Philip Gladstone, Bill Allombert, Jim Boucher, Lee Crocker,
+Bob Friesenhahn, Ben Jackson, Julian Minguillon, Luis Ortiz, George Phillips, Davide Rossi, Ge' Weijers, and other
+members of the Independent JPEG Group. This software is based in part on the work of the Independent JPEG Group.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+
+libjpeg-turbo 2.1.2, the Modified (3-clause) BSD licence (LICENSE.md of the libjpeg-turbo source):
+
+Copyright (C)2009-2021 D. R. Commander.  All Rights Reserved.
+Copyright (C)2015 Viktor Szathmáry.  All Rights Reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+- Redistributions of source code must retain the above copyright notice,
+  this list of conditions and the following disclaimer.
+- Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+- Neither the name of the libjpeg-turbo Project nor the names of its
+  contributors may be used to endorse or promote products derived from this
+  software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS",
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS BE
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.

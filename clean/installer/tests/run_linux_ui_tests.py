@@ -8,6 +8,7 @@ Every run uses a home of its own under --work, its own XDG folders and registry 
   ui-dump    the pages as JSON: the structure the launcher tests expect (first run, Library, Settings, a page per game; each widget's
              class, text, id, place, state), the games read from the fake library, the PNGs of the pages
   ui-render  the fixture screenshots (Library, Settings, a game's page) at two scales: PNG files of the sizes asked for
+  jpeg       ui-render of a game whose Steam cache holds a synthetic JPEG hero: its colours are on the page (needs --jpeg-tool)
   live       the real window under the offscreen driver with scripted SDL events (win32_window_sdl.cpp, WRONGGPU_UI_SCRIPT): a click
              on Settings, a scroll, a click on the Library's search field and typing in it, Ctrl+A and Backspace; the page each step
              left is read back as JSON; the window then closes on WM_CLOSE and the program exits 0
@@ -19,6 +20,7 @@ import os
 import shutil
 import struct
 import subprocess
+import zlib
 import sys
 from pathlib import Path
 
@@ -42,6 +44,48 @@ def png_size(path):
     if b[:8] != b"\x89PNG\r\n\x1a\n" or b[12:16] != b"IHDR":
         return None
     return struct.unpack(">II", b[16:24])
+
+
+def png_pixels(path):
+    """(width, height, rows of RGB tuples-as-bytes) of an 8-bit RGB or RGBA PNG, from the standard library alone."""
+    b = Path(path).read_bytes()
+    pos, idat, w = 8, b"", 0
+    while pos < len(b):
+        n, kind = struct.unpack(">I4s", b[pos:pos + 8])
+        data = b[pos + 8:pos + 8 + n]
+        if kind == b"IHDR":
+            w, h, depth, ctype = struct.unpack(">IIBB", data[:10])
+            assert depth == 8 and ctype in (2, 6), "8-bit RGB or RGBA only"
+        elif kind == b"IDAT":
+            idat += data
+        pos += 12 + n
+    bpp = 4 if ctype == 6 else 3
+    raw, stride, rows, prev = zlib.decompress(idat), w * bpp, [], bytearray(w * bpp)
+    for y in range(h):
+        f, line = raw[y * (stride + 1)], bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+        for i in range(stride):
+            a = line[i - bpp] if i >= bpp else 0
+            up = prev[i]
+            c = prev[i - bpp] if i >= bpp else 0
+            if f == 1: line[i] = (line[i] + a) & 255
+            elif f == 2: line[i] = (line[i] + up) & 255
+            elif f == 3: line[i] = (line[i] + (a + up) // 2) & 255
+            elif f == 4:
+                pa, pb, pc = abs(up - c), abs(a - c), abs(a + up - 2 * c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else up if pb <= pc else c)) & 255
+        rows.append(bytes(line)); prev = line
+    return w, h, rows, bpp
+
+
+def count_near(png, want, tol):
+    """How many pixels of the PNG are within `tol` of the RGB colour `want`."""
+    _, _, rows, bpp = png
+    n = 0
+    for r in rows:
+        for x in range(0, len(r), bpp):
+            if abs(r[x] - want[0]) <= tol and abs(r[x + 1] - want[1]) <= tol and abs(r[x + 2] - want[2]) <= tol:
+                n += 1
+    return n
 
 
 def make_home(work):
@@ -122,6 +166,29 @@ def test_render(exe, work, home):
         check((out / f"{frame}@100.png").stat().st_size > 20000, f"{frame}@100.png is not blank")
 
 
+def test_jpeg_art(exe, work, home, jpeg_tool):
+    """Steam's art is JPEG: a fixture game whose cache holds a synthetic hero (jpeg-linux-tests --make: red, green, blue and white
+    blocks) shows it on its page; the same render without the file shows none of those colours."""
+    print("ui-render with JPEG art")
+    art_home = work / "home-art"
+    shutil.copytree(home, art_home)
+    cache = art_home / ".local" / "share" / "Steam" / "appcache" / "librarycache" / "1091500"
+    cache.mkdir(parents=True)
+    r = subprocess.run([str(jpeg_tool), "--make", str(cache / "library_hero.jpg"), "1920", "620"], capture_output=True, text=True)
+    check(r.returncode == 0, "the synthetic hero is written")
+    shots = {}
+    for name, h in (("render-noart", home), ("render-jpeg", art_home)):
+        env, _ = environment(work, h, name)
+        out = work / name
+        r = run(exe, ["ui-render", f"--out-dir={out}", f"--fixture={HERE / 'ui_fixture.ini'}", "--size=1180x760", "--scales=1", "--frames=game"], env, 600)
+        check(r.returncode == 0, f"ui-render ({name}) exits 0 (got {r.returncode}: {r.stderr[-300:]})")
+        shots[name] = png_pixels(out / "game@100.png")
+    # the page's own light background is near the white block, so the green block (top right of the picture) is the check
+    green = (32, 200, 40)
+    with_art, without = count_near(shots["render-jpeg"], green, 24), count_near(shots["render-noart"], green, 24)
+    check(with_art > 20000 and without < 500, f"the hero's green block is on the page with the art ({with_art} pixels) and not without ({without})")
+
+
 SCRIPT = """# a click on Settings, a scroll, a click on the Library's search field and typing in it
 until games 2
 dump {o}/d0.json
@@ -180,7 +247,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--exe", required=True)
     ap.add_argument("--work", default=None)
-    ap.add_argument("--only", default="dump,render,live")
+    ap.add_argument("--only", default="dump,render,jpeg,live")
+    ap.add_argument("--jpeg-tool", default=None, help="jpeg-linux-tests, which writes the synthetic JPEG art")
     a = ap.parse_args()
     work = Path(a.work or "linux-ui-tests").resolve()
     if work.exists():
@@ -192,6 +260,8 @@ def main():
     for name, fn in (("dump", test_dump), ("render", test_render), ("live", test_live)):
         if name in a.only.split(","):
             fn(Path(a.exe), work, home)
+    if "jpeg" in a.only.split(",") and a.jpeg_tool:
+        test_jpeg_art(Path(a.exe), work, home, a.jpeg_tool)
     check(had or not real_data.exists(), "nothing was written to the real ~/.local/share/WrongGPU")
     if failures:
         print(f"{len(failures)} check(s) failed")

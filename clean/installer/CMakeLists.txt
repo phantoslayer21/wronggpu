@@ -158,8 +158,8 @@ set(WRONGGPU_APP_SOURCES src/app/main.cpp src/app/cli.cpp src/app/launcher_ui.cp
     src/app/ui_checks.cpp src/app/payload_embed.cpp)
 # Windows only: the GDI+ wizard and the Direct2D/DirectWrite drawing (Linux draws through ui_gfx_cairo.cpp, in wg_gfx_cairo).
 set(WRONGGPU_APP_SOURCES_WINDOWS src/app/wizard.cpp src/app/ui_gfx.cpp)
-# Linux only: the live-frame hook for the SDL window layer.
-set(WRONGGPU_APP_SOURCES_LINUX src/app/ui_live_hook_linux.cpp)
+# Linux only: the live-frame hook for the SDL window layer, and the JPEG decoder (libjpeg-turbo; Windows decodes art with WIC).
+set(WRONGGPU_APP_SOURCES_LINUX src/app/ui_live_hook_linux.cpp src/app/jpeg_decode_linux.cpp)
 
 # wg_core: the installer's engine, split into modules (src/wg_core; build/launcher-design.md section 2). No globals:
 # a wg::Context is passed in. The wizard (and later the launcher) is built on top of it.
@@ -269,6 +269,8 @@ if(NOT WIN32)
   # The launcher's drawing on Linux (Gfx on Cairo and Pango, fonts through fontconfig) and its smoke test (offscreen PNGs)
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(WG_CAIRO REQUIRED IMPORTED_TARGET cairo pangocairo fontconfig)
+  # Steam's art is JPEG: libjpeg-turbo's libjpeg API (Ubuntu libjpeg-turbo8-dev), shared, bundled into the AppImage
+  pkg_check_modules(WG_JPEG REQUIRED IMPORTED_TARGET libjpeg)
   # The window layer: the Win32 window calls the launcher's window makes, on SDL3 (static; -DCMAKE_PREFIX_PATH=<its install> or
   # -DSDL3_DIR=<its lib/cmake/SDL3>). Only the drawing's live frame and the text fields reach into it; ui-dump and ui-render
   # (a message-only window) never start SDL.
@@ -284,6 +286,11 @@ if(NOT WIN32)
   add_library(wg_gfx_cairo STATIC src/app/ui_gfx_cairo.cpp)
   target_link_libraries(wg_gfx_cairo PUBLIC wg_core wg_window PkgConfig::WG_CAIRO)
   target_compile_definitions(wg_gfx_cairo PRIVATE WRONGGPU_FONT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts")
+  # the JPEG decoder: a synthetic JPEG made at test time (size, colours, damaged and missing files)
+  add_executable(jpeg-linux-tests tests/jpeg_linux_tests.cpp src/app/jpeg_decode_linux.cpp)
+  target_include_directories(jpeg-linux-tests PRIVATE src)
+  target_link_libraries(jpeg-linux-tests PRIVATE PkgConfig::WG_JPEG)
+  add_test(NAME jpeg-linux COMMAND jpeg-linux-tests)
   add_executable(gfx-linux-smoke tests/gfx_linux_smoke.cpp)
   target_link_libraries(gfx-linux-smoke PRIVATE wg_gfx_cairo)
   add_test(NAME gfx-linux-smoke COMMAND gfx-linux-smoke ${CMAKE_CURRENT_BINARY_DIR}/gfx-smoke)
@@ -296,13 +303,14 @@ if(NOT WIN32)
   target_compile_definitions(WrongGPU PRIVATE ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION} UNICODE _UNICODE
                              WRONGGPU_VERSION_TEXT="${WRONGGPU_VERSION}" WRONGGPU_BUILD_ID_TEXT="${WRONGGPU_BUILD_ID}"
                              WRONGGPU_FONT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts")
-  target_link_libraries(WrongGPU PRIVATE wg_gfx_cairo wg_window wg_core)
+  target_link_libraries(WrongGPU PRIVATE wg_gfx_cairo wg_window wg_core PkgConfig::WG_JPEG)
   # an installed launcher finds its fonts at ../share/wronggpu/assets/fonts from its binary (ui_gfx_cairo.cpp FontDir)
   if(WRONGGPU_TESTING)
     # the window's pages (ui-dump, ui-render) and the live window under SDL's offscreen driver with scripted events (a click, a
     # scroll, typing, WM_CLOSE): each on a home, XDG folders and registry file of its own
     add_test(NAME linux-ui COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_linux_ui_tests.py
-             --exe $<TARGET_FILE:WrongGPU> --work ${CMAKE_CURRENT_BINARY_DIR}/linux-ui-tests)
+             --exe $<TARGET_FILE:WrongGPU> --jpeg-tool $<TARGET_FILE:jpeg-linux-tests>
+             --work ${CMAKE_CURRENT_BINARY_DIR}/linux-ui-tests)
     set_tests_properties(linux-ui PROPERTIES TIMEOUT 900)
     if(MOCK_PAYLOAD_WORK)
       # the launcher's verbs suite (tests/run_launcher_tests.py) against this binary: it needs the test map and stand-in payload
@@ -320,6 +328,8 @@ if(NOT WIN32)
   endif()
   install(TARGETS WrongGPU RUNTIME DESTINATION bin)
   install(DIRECTORY assets/fonts DESTINATION share/wronggpu/assets)
+  # the notices the bundled libraries' licences ask the AppImage to carry (libjpeg-turbo: THIRD-PARTY-NOTICES section 4)
+  install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../../THIRD-PARTY-NOTICES DESTINATION share/doc/wronggpu)
   # the AppImage (build-appimage.sh) takes everything it ships from these install rules: the menu entry and the app's own icon
   # (the biggest frame of assets/wronggpu.ico)
   file(MAKE_DIRECTORY ${GEN})

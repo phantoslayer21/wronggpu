@@ -45,7 +45,7 @@ Two mistakes get past a Windows-only build, so `tools/ci/check_portable.py` look
 
 ## Build and test on Linux
 
-You need CMake 3.16+, Ninja, GCC 11+, Python 3, the development files of Cairo, Pango and fontconfig, and SDL3 3.4
+You need CMake 3.16+, Ninja, GCC 11+, Python 3, the development files of Cairo, Pango, fontconfig and libjpeg-turbo (`libjpeg-turbo8-dev`), and SDL3 3.4
 (static; most distributions do not ship it yet: `build-appimage.sh` builds it, and `-DCMAKE_PREFIX_PATH=<its install>`
 points CMake at one).
 
@@ -86,8 +86,8 @@ checksum together, taken from the project's own release page. Use exact release 
 
 ## Known limits
 
-- **Art:** Cairo reads PNG only. Steam's JPEG art (hero, header, capsule) shows the page's plain plate, as for a game
-  without art. Adding a JPEG decoder is a dependency decision.
+- **Art:** Cairo reads PNG and libjpeg-turbo reads JPEG (`src/app/jpeg_decode_linux.cpp`; Windows uses WIC), so Steam's
+  art (hero, header, capsule) shows. Other formats give the page's plain plate, as for a game without art.
 - **No HTTP client:** WinHTTP is answered "not available", so the in-launcher downloads (OptiScaler's edition, the
   update check) do not run on Linux.
 - **No restorer:** `WrongGPU-Restore.exe` is a Windows program. A Linux install does not embed or write it.

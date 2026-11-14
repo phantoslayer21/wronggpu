@@ -21,6 +21,8 @@
 
 #ifndef _WIN32
 #include <cairo.h>
+
+#include "app/jpeg_decode_linux.h"
 #endif
 
 namespace wg::app::lui {
@@ -108,15 +110,25 @@ ImageP Decode(IWICImagingFactory* wic, const wstring& path, UINT maxW) {
     return out;
 }
 #else
-// Linux: Cairo reads PNG. JPEG (Steam's hero, header and capsule art) has no decoder in this build (a dependency decision still
-// open): a JPEG gives no image and the page's own plate shows, as for a game without art.
+// Linux: Cairo reads PNG and libjpeg-turbo reads JPEG (Steam's hero, header and capsule art); anything else gives no image and
+// the page's own plate shows, as for a game without art.
 struct IWICImagingFactory { void Release() {} };
 IWICImagingFactory* MakeWic() { static IWICImagingFactory none; return &none; }
 
-// Decodes a PNG to premultiplied BGRA (Cairo's ARGB32), scaled down to at most maxW pixels wide.
+// Decodes a PNG or JPEG to premultiplied BGRA (Cairo's ARGB32), scaled down to at most maxW pixels wide.
 ImageP Decode(IWICImagingFactory* wic, const wstring& path, UINT maxW) {
     if (path.empty() || !wic) return nullptr;
-    cairo_surface_t* src = cairo_image_surface_create_from_png(ToUtf8(path).c_str());
+    const std::string file = FsPath(path).string();  // a Windows-style path spelled for this host
+    std::vector<uint8_t> jpegPx;  // the JPEG's pixels: the surface below reads them in place
+    cairo_surface_t* src;
+    int jw = 0, jh = 0;
+    if (LooksLikeJpeg(file.c_str())) {
+        src = DecodeJpegFile(file.c_str(), maxW, jw, jh, jpegPx)
+                  ? cairo_image_surface_create_for_data(jpegPx.data(), CAIRO_FORMAT_ARGB32, jw, jh, jw * 4)
+                  : cairo_image_surface_create(CAIRO_FORMAT_INVALID, 0, 0);
+    } else {
+        src = cairo_image_surface_create_from_png(file.c_str());
+    }
     if (cairo_surface_status(src) != CAIRO_STATUS_SUCCESS) { cairo_surface_destroy(src); return nullptr; }
     const int sw = cairo_image_surface_get_width(src), sh = cairo_image_surface_get_height(src);
     ImageP out;
