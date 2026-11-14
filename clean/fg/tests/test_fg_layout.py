@@ -30,9 +30,8 @@ class LayoutTotals(unittest.TestCase):
         self.assertEqual([l.blob_bytes for l in L.NET1], want)
         for l in L.NET1:
             self.assertEqual(l.out % L.NET1_BIAS_GROUP, 0)
-            if l.taps is not None:
-                self.assertEqual(l.k % l.taps, 0)
-        self.assertIsNone(L.NET1[1].taps)  # blob 2: 1 x 1 or 2 x 2, OPEN
+            self.assertEqual(l.k % l.taps, 0)
+        self.assertEqual((L.NET1[1].taps, L.NET1[1].cin), (1, 32))  # blob 2: 1 x 1 (map v1.1)
         self.assertEqual(L.NET1[0].cin, 48)
 
     def test_net2_blob_sizes(self):

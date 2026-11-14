@@ -58,17 +58,17 @@ the key is made from is searched first: when it is missing, the file has no fram
 message); any other missing blob is exit 13. A map without the field is still read as preset M (so it must have W, D
 and K) unless the caller names the preset (`--preset FG`).
 
-Its map is `data/fg.v1.map.json` (the spec side's v1; 67 sources `A01`..`A17`, `B01w`/`B01b`..`B25w`/`B25b`; 42
-stages `dl1.l01`..`dl2.l25`): `wronggpu-convert --map data\fg.v1.map.json --dll <frame-generation library> --out <dir>`.
-It uses two map features of its own:
+Its map is `data/fg.v1.map.json` (the spec side's revision v1.1; 67 sources `A01`..`A17`, `B01w`/`B01b`..`B25w`/`B25b`;
+42 stages `dl1.l01`..`dl2.l25`): `wronggpu-convert --map data\fg.v1.map.json --dll <frame-generation library> --out <dir>`.
+Each stage has `W` in natural order ([out, in, 3, 3] or [out, in]) and `b` [out]. It uses a map feature of its own:
 
-- `"channel_order": "storage"`: the weight tensors (`W_storage`) are the blobs' weight spans as stored, 1-D, not yet
-  reshaped to natural axes (that follows in a later map revision). Accepted only in a version-1 map of preset FG; the
-  converter reads the tensors the same way either way.
 - An axis given by **explicit offsets** (`{"offsets": [o0, o1, ...]}`, one per index, in place of `stride` and `perm`;
-  map versions 1 and 4): the axis contributes `offsets[i]` to the element index. The net1 biases use it to take copy 0
-  of each group of eight. The index range is checked when the map is loaded (smallest and largest offset); a list of
-  the wrong length, a non-integer, or `offsets` together with `stride` or `perm` is "converter data damaged".
+  map versions 1 and 4): the axis contributes `offsets[i]` to the element index. Every weight axis of the FG map uses
+  it, and the net1 biases use it to take copy 0 of each group of eight. The index range is checked when the map is
+  loaded (smallest and largest offset); a list of the wrong length, a non-integer, or `offsets` together with `stride`
+  or `perm` is "converter data damaged".
+- `"channel_order": "storage"` (the form of the map's first revision: weight tensors as the stored spans, 1-D) is
+  still accepted, only in a version-1 map of preset FG; the converter reads the tensors the same way either way.
 
 `tests/run_tests.py` pins the map's SHA-256 (`FG_MAP_SHA256`), checks its sources and stages against
 [`clean/fg/layout.py`](../fg/layout.py), and converts a synthetic library with our own random blobs in exactly the map's

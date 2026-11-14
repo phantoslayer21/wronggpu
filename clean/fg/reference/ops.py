@@ -10,7 +10,7 @@ What is not settled is OPEN (clean/fg/FORMATS.md). The code never picks a defaul
 argument (the caller states it, and tests run every allowed value), or the function raises OpenItem.
 
 Tensors are channel-first: x[c, y, x]. Weights here are in this module's own canonical order w[out, ky, kx, in];
-the order inside the library's blobs is OPEN, so converting a blob into this order is not part of this module.
+converting stored blob weights into this order is clean/fg/reference/natural.py's job (the converter map's offsets).
 """
 import numpy as np
 
@@ -195,13 +195,11 @@ def unfold2x2(cells, c, *, order):
 # ---- the layers of clean/fg/layout.py in this module's canonical order -----------------------------------------------
 
 def weight_shape(layer):
-    """Canonical weight shape [out, k, k, in] of a layout layer (layout.Net1Layer or layout.Net2Layer). net1's blob 2
-    (1 x 1 or 2 x 2) raises OpenItem."""
+    """Canonical weight shape [out, k, k, in] of a layout layer (layout.Net1Layer or layout.Net2Layer). `in` is the
+    number of input channels that carry data: net2's first layer stores 16 and reads 10 (the map reads only those)."""
     taps = getattr(layer, "taps", 9)
-    if taps is None:
-        raise OpenItem("net1 blob 2: 1 x 1 or 2 x 2")
     k = 3 if taps == 9 else 1
-    return (layer.out, k, k, layer.cin)
+    return (layer.out, k, k, getattr(layer, "cin_used", layer.cin))
 
 
 # ---- the networks as a whole ----------------------------------------------------------------------------------------

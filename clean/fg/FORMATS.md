@@ -17,21 +17,23 @@ delivered by the spec side; the code never guesses it (it raises, or takes the c
 - Splitting a blob into its parts: [`reference/blobs.py`](reference/blobs.py). net1: the weights in stored order, the
   zero area checked to hold only +0 / -0, the bias as copy 0 of each group of eight with the other fifteen copies
   checked to be bit-identical (`check=False` skips both checks). net2: weight and bias blob sizes checked. The weights
-  stay flat until the in-blob axis order (OPEN item 2) is delivered.
+  come out flat in stored order; [`reference/natural.py`](reference/natural.py) puts them in natural order with the
+  map's own offsets.
+- net1's blob 2 is a 1 x 1 convolution (32 -> 64). net2's first layer stores 16 input channels and reads 10: its
+  natural weights are [32, 10, 3, 3].
 
 ## Converter map
 
 - Map version 1 with `"preset": "FG"` (converter README, "Preset FG"): one block source per blob, located by length
   and hashes, `f16` reads. net1's zero area is skipped by the tensor's base; its bias is read as copy 0 of each group of
   eight (`layout.net1_bias_index`).
-- The map is `data/fg.v1.map.json` (the spec side's v1; digest pinned in `tests/test_fg_map.py` and the converter's
-  tests): sources `A01`..`A17` (net1) and `B01w`/`B01b`..`B25w`/`B25b` (net2), stages `dl1.l01`..`dl1.l17` and
-  `dl2.l01`..`dl2.l25`, in upload order, exactly the blobs and spans of `layout.py`. Per stage: `W_storage` (the
-  weight span as stored, 1-D) and `b` (net1: copy 0 of each bias group, natural order) or `b_storage` (net2: the bias
-  blob as stored).
-- `"channel_order": "storage"`: the weights are not yet in natural axes. The natural view comes with a later map
-  revision (v1.1), with the same shapes and spans; whether net2's stored bias order is the natural channel order is
-  confirmed then too (OPEN until it is).
+- The map is `data/fg.v1.map.json`, the spec side's revision v1.1 (digest pinned in `tests/test_fg_map.py` and the
+  converter's tests): sources `A01`..`A17` (net1) and `B01w`/`B01b`..`B25w`/`B25b` (net2), stages `dl1.l01`..`dl1.l17`
+  and `dl2.l01`..`dl2.l25`, in upload order, exactly the blobs and spans of `layout.py`. `"channel_order": "natural"`.
+  Per stage: `W` in natural order, [out, in, 3, 3] for 3 x 3 layers and [out, in] for 1 x 1 layers, every axis by
+  explicit offsets into the blob; `b` [out] (net1: copy 0 of each bias group; net2: the bias blob, natural order).
+- The first revision (v1) gave the weights as stored (`"channel_order": "storage"`, 1-D `W_storage`); the converter
+  still accepts that form for preset FG.
 - A conversion of a real library is checked by digests only (the converter compares every stage digest the map
   gives); no value or byte of it is ever written into the repository or any public text. `tools/real_check.py` runs
   that check and keeps only the verdict and digests (`python -m clean.fg.tools.real_check --exe <converter> --dll
@@ -40,7 +42,8 @@ delivered by the spec side; the code never guesses it (it raises, or takes the c
 ## CPU reference (`reference/ops.py`)
 
 - Tensors are channel-first `x[c, y, x]`; weights use the module's own canonical order `w[out, ky, kx, in]`
-  (`weight_shape(layer)` for every layout layer). Converting a blob into that order waits for item 2 below.
+  (`weight_shape(layer)` for every layout layer). `natural.py` turns the map's natural `W` ([out, in, ky, kx] or
+  [out, in]) into that order (`to_canonical`), and stored blob weights into natural ones with the map's offsets.
 - Settled and implemented: float16 operands and outputs; convolution with bias, one float16 rounding of the output,
   then ReLU; 2x pooling over 2 x 2 blocks; bilinear 2x upscale in the align-corners form (output sample i reads input
   position i (n - 1) / (2n - 1)); element-wise add and channel concatenation; net1's features: luma with fixed RGB
@@ -56,17 +59,16 @@ delivered by the spec side; the code never guesses it (it raises, or takes the c
 
 ## Forward pass (`reference/forward.py`)
 
-- Parameters per layer (layout names `net1_01`..`net2_25`): storage-order weights and the bias, from blobs
-  (`params_from_blobs`) or from the converter's `--raw` output of the preset-FG map (`params_from_raw`, stages
-  `dl1.lNN` / `dl2.lNN`; every value checked to be exact in float16).
+- Parameters per layer (layout names `net1_01`..`net2_25`): canonical natural weights `[out, k, k, in]` and the bias,
+  from blobs (`params_from_blobs`: stored weights gathered with the map's offsets) or from the converter's `--raw`
+  output of the preset-FG map (`params_from_raw`, stages `dl1.lNN` / `dl2.lNN`, tensors `W` and `b`; every value
+  checked to be exact in float16).
 - `run_layer`: one convolution with `ops.conv2d`. `run_graph`: a network as a list of steps (`conv` with its layer and
   ReLU flag, `pool` with its kind, `upscale`, `add`, `concat`, `slice`), checked before it runs (known steps, exact
   fields, buffers written once before they are read, each layer used at most once). `net1_forward` adds the 2 x 2
   fold before and the unfold (16 values per cell to 4 per pixel) after; `net2_forward` returns the named buffers.
-- Required arguments (OPEN): `wiring` (the steps); `weight_view` (storage to natural `[out, k, k, in]`: map v1 holds
-  the weights as stored, the natural view comes with v1.1; `view_by_axes` covers a plain axis reorder); `pad`; `blob2`
-  ("1x1" runs net1's blob 2 as a 1 x 1 convolution, "2x2" raises `OpenItem`); `fold_order`. The real wiring plugs in
-  as data; the layers do not change.
+- Required arguments (OPEN): `wiring` (the steps), `pad`, `fold_order`. The weight order and net1's blob 2 are settled
+  by map v1.1 and are no longer arguments. The real wiring plugs in as data; the layers do not change.
 
 ## Configuration (`reference/config.py`)
 
@@ -81,10 +83,10 @@ delivered by the spec side; the code never guesses it (it raises, or takes the c
 
 ## OPEN (waiting for the spec side)
 
-1. The converter map's natural-order revision (v1.1). v1 is delivered (`data/fg.v1.map.json`, weights as stored).
-2. The in-blob axis order of the weights (tap, input channel, output channel, any tiling), for both networks.
+1. (closed: map v1.1, natural order, is `data/fg.v1.map.json`.)
+2. (closed: the in-blob axis order is the map's offsets.)
 3. Which launch reads which blob (upload order is known; launch order is not).
-4. net1's blob 2: a 1 x 1 convolution or a 2 x 2 one.
+4. (closed: net1's blob 2 is a 1 x 1 convolution.)
 5. Both networks' grid sizes relative to the output size.
 6. What the UI-recomposition preset changes in the stage order.
 7. Launch order, the motion-field scatter, the pull pyramid and the UI handling (part 3).

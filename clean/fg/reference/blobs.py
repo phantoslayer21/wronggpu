@@ -9,8 +9,8 @@ endian). Output: flat float16 arrays in the order they are stored, plus checks o
   holds only zeros (+0 or -0) and that the 16 copies of every group are bit-identical, unless told not to.
 - net2: a weight blob of 9 * in * out values and a bias blob of out values; split_net2 checks the sizes.
 
-The order of the weights inside a blob (tap, input and output channel, any tiling) is OPEN, so the weights stay flat in
-stored order; reshaping them into clean/fg/reference/ops.py's canonical order waits for it.
+The weights stay flat in stored order here; clean/fg/reference/natural.py puts them in natural order with the converter
+map's own offsets.
 """
 import numpy as np
 
