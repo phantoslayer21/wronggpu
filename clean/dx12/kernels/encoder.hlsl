@@ -26,7 +26,22 @@
 // motion buffer (wg_motion_hi.hlsli); direct form: the game's motion texture (its `motion` pointer is not read).
 // @wg-kernel emo/input_encoder_mo co=encoder_mo.co entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,b116,b24 defines=WG_ENC_MO=1
 // @wg-kernel emo/input_encoder_mo_direct co=encoder_mo.co entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,b116,b24 rs=direct defines=WG_DIRECT_TEXTURES=1,WG_ENC_MO=1
+//
+// Model L's value kernel (WG_ENC_VALUES_OUT; HIP: encoder.hip built with WG_ENC_VALUES_OUT=1 as l_enc_values.co, issue
+// #89, clean/l/FORMATS.md `lev/input_encoder`): no projection. The grid is the padded grid plus a 2-pixel halo per side,
+// X0 = 2 c - 2, Y = 2 r + h - 2; each pixel's 20 dithered FP8 values (12 zero bytes after them) go to the halo map
+// `features` [fh + 4][fw + 4][32]. The values come from the mirrored render position, the dither from the unmirrored
+// one (two byte loads at |Y| mod 16, |x| mod 16). When both halo columns of a lane mirror onto one render column
+// (x0 == x1), slot 1 takes slot 0's depth neighbourhood and centre motion and keeps its own dither. Motion surfaces only
+// for pixels inside R (0 <= Y < rh, 0 <= X0 < rw). Buffer form only.
+// @wg-kernel lev/input_encoder co=l_enc_values.co entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 defines=WG_ENC_VALUES_OUT=1
 #include "wg_platform.hlsli"
+#ifndef WG_ENC_VALUES_OUT
+#define WG_ENC_VALUES_OUT 0
+#endif
+#if WG_ENC_VALUES_OUT && (defined(WG_DIRECT_TEXTURES) || defined(WG_ENC_MO))
+#error "WG_ENC_VALUES_OUT: buffer form at render resolution only"
+#endif
 #if defined(WG_DIRECT_TEXTURES)
 #include "native_direct.hlsli"
 #include "wg_f16lut.hlsli"
@@ -292,7 +307,11 @@ void encoder_main()
 {
     uint tid = wg_lane_id();
     uint lane = tid & 31u, t = lane & 15u, hh = lane >> 4;
+#if WG_ENC_VALUES_OUT
+    int Wt = (P_fw + 4) >> 1, ntok = ((P_fh + 4) >> 1) * Wt;   // the padded grid plus the 2-pixel halo
+#else
     int Wt = P_fw >> 1, ntok = (P_fh >> 1) * Wt;
+#endif
     // Workgroups in reverse token order (the last token rows first; the per-token work does not depend on the order):
     // the encoder starts on the rows whose colour the exposure pass read last, and its last writes are the rows enc1
     // reads first, so both find more of their data in the Infinity Cache (-3.3 us per frame at 1706x960).
@@ -301,7 +320,11 @@ void encoder_main()
     int r = tk / Wt, cc = tk - r * Wt;
 
     int rw = P_rw, rh = P_rh;
+#if WG_ENC_VALUES_OUT
+    int X0 = 2 * cc - 2, Y = 2 * r + (int)hh - 2;
+#else
     int X0 = 2 * cc, Y = 2 * r + (int)hh;
+#endif
     int y = enc_reflect(Y, rh);
     int x0 = enc_reflect(X0, rw), x1 = enc_reflect(X0 + 1, rw);
     bool rev = x0 > x1;   // right padding: slot 0 is pixel B
@@ -348,7 +371,13 @@ void encoder_main()
     float4 mcab = wg_ld4f(motion, (rc + (uint)xa) * 8u);
 #endif
 #endif
+#if WG_ENC_VALUES_OUT
+    // dither word per pixel at the unmirrored position (X0, Y may be negative): |y| mod 16, |x| mod 16
+    const uint trow = kOffDither + 256u * (uint)P_frame + (((uint)abs(Y) & 15u) << 4);
+    uint t2 = wg_ld8(w, trow + ((uint)abs(X0) & 15u)) | (wg_ld8(w, trow + ((uint)abs(X0 + 1) & 15u)) << 8);
+#else
     uint t2 = wg_ld16(w, kOffDither + 256u * (uint)P_frame + (((uint)Y & 15u) << 4) + ((uint)X0 & 15u));
+#endif
 
     // Uniform values
     Uni U;
@@ -409,10 +438,21 @@ void encoder_main()
     }
 
     // Per slot: near / far pixel indices, centre motion
+#if WG_ENC_VALUES_OUT
+    // both halo columns mirrored onto one render column (x0 == x1): slot 1 is that pixel too
+    const bool same = x0 == x1;
+    uint ins[2] = {rev ? inB : inA, same ? inA : (rev ? inA : inB)}, ifs[2] = {rev ? ifB : ifA, same ? ifA : (rev ? ifA : ifB)};
+    float2 mcs[2] = {rev ? mcab.zw : mcab.xy, same ? mcab.xy : (rev ? mcab.xy : mcab.zw)};
+#else
     uint ins[2] = {rev ? inB : inA, rev ? inA : inB}, ifs[2] = {rev ? ifB : ifA, rev ? ifA : ifB};
     float2 mcs[2] = {rev ? mcab.zw : mcab.xy, rev ? mcab.xy : mcab.zw};
 #endif
+#endif
+#if WG_ENC_VALUES_OUT
+    bool store = tok < ntok && Y >= 0 && Y < rh && X0 >= 0;
+#else
     bool store = tok < ntok && Y < rh;
+#endif
     uint so = (uint)(Y * rw + X0) * 4u;
 
     float2 mn[2], mf[2], mc[2];
@@ -486,9 +526,23 @@ void encoder_main()
         uint qq[5];
         quantize(v, dx2 != 0u ? t2 >> 8 : t2 & 0xffu, qq);
         [unroll] for (uint i = 0; i < 5; ++i) q[dx2][i] = qq[i];
+#if !WG_ENC_VALUES_OUT
         x8[dx2][0] = wg_xor16_u(qq[2]);
         x8[dx2][1] = wg_xor16_u(qq[3]);
+#endif
     }
+
+#if WG_ENC_VALUES_OUT
+    // pixel (X0 + dx, Y) of the halo map: 20 value bytes and 12 zero bytes
+    if (tok < ntok) {
+        const uint mw = (uint)(P_fw + 4);
+        [unroll] for (uint dx3 = 0; dx3 < 2; ++dx3) {
+            const uint ho = ((uint)(Y + 2) * mw + (uint)(X0 + (int)dx3 + 2)) * 32u;
+            wg_st128(features, ho, uint4(q[dx3][0], q[dx3][1], q[dx3][2], q[dx3][3]));
+            wg_st128(features, ho + 16u, uint4(q[dx3][4], 0u, 0u, 0u));
+        }
+    }
+#else
 
     // B fragments (this lane's slots) of the 8 K blocks
     uint2 bf[8];
@@ -528,6 +582,7 @@ void encoder_main()
         wg_st128(features, fo, uint4(o[0], o[1], o[2], o[3]));
         wg_st128(features, fo + 16u, uint4(o[4], o[5], o[6], o[7]));
     }
+#endif
 }
 
 WG_KERNEL(input_encoder)
