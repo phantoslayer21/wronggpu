@@ -13,7 +13,12 @@ the native D3D12 device in a child process, and compares the outputs: the RAW do
 decoded and encoded again), each output buffer filled beforehand with its own non-zero sentinel (HIP 0xA5, D3D12
 0x5A), so a byte either path leaves unwritten shows up as a difference. Output: counts only, no timing.
 
-Kernels: l_swin_block_c32_nc (the D3D12 port has only the `_nc` form, as Model M's ports).
+Kernels (the D3D12 ports have only the `_nc` forms, as Model M's ports):
+- l_swin_block_c32_nc: FP8 map in, FP8 out, mirror border;
+- l_swin_block_c32_enc_nc: Model L's encoder block, the FP16 halo map [H + 4][W + 4][32] in, FP8 out, the "first"
+  window offsets (clean/l/FORMATS.md);
+- l_swin_block_c32_dec_nc: Model L's decoder block, the FP8 map in with the token-grid mirror, FP16 out, the "second"
+  window offsets.
 """
 import argparse
 import ctypes
@@ -29,15 +34,20 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
 sys.path.insert(0, ROOT)
 
 from clean.l.reference import oracle as L  # noqa: E402
+from clean.l.reference import table as T  # noqa: E402
 from clean.l.runner import l_c32_check as C32  # noqa: E402
 from clean.reference.fp8 import fp8_encode, q8  # noqa: E402
 from clean.runner import packing as P  # noqa: E402
 
-D3D12_KERNELS = ["l_swin_block_c32_nc", "native_fill"]   # native_fill: the device's memset
+L_KERNELS = ["l_swin_block_c32_nc", "l_swin_block_c32_enc_nc", "l_swin_block_c32_dec_nc"]
+D3D12_KERNELS = L_KERNELS + ["native_fill"]   # native_fill: the device's memset
 # Control: Model M's swin_block_c96_nc, whose port is already proven byte for byte (clean/dx12/compare.py on whole
 # frames): if it matches here too, the harness is sound.
 CONTROL_KERNELS = ["swin_block_c96_nc"]
 CASES = C32.CASES + [(96, 160, (2, 2)), (240, 432, (0, 2))]
+# Model L's encoder / decoder blocks: grid sides multiples of 4, each with both window offsets of its kind. 4 x 8 and
+# 12 x 4: fewer windows than a workgroup's 8.
+L_BLOCK_GRIDS = C32.L_CASES + [(96, 160), (4, 8), (12, 4)]
 
 
 def prepare(build, rocm):
@@ -73,18 +83,51 @@ def _params_c96(rng):
     return P.pack_stage("enc2", MS.random_params("enc2", rng))[:P.stage_sections("enc2")[1]]
 
 
-KINDS = {"l_swin_block_c32_nc": ("l_swin.co", 32, _params_c32), "swin_block_c96_nc": ("swin.co", 96, _params_c96)}
+KINDS = {"l_swin_block_c32_nc": ("l_swin.co", 32, _params_c32), "l_swin_block_c32_enc_nc": ("l_swin.co", 32, _params_c32),
+         "l_swin_block_c32_dec_nc": ("l_swin.co", 32, _params_c32), "swin_block_c96_nc": ("swin.co", 96, _params_c96)}
+
+
+def _nc(blob):
+    return bool(np.frombuffer(blob[:4], np.uint32)[0] & 1)
+
+
+def block_cases(kernel, rng):
+    """(H, W, offset, input bytes, output bytes, blob) of every case of `kernel` whose blob has the `_nc` flag (only
+    the _nc forms are ported); a blob without it draws no input."""
+    gen = KINDS[kernel][2]
+    if kernel in ("l_swin_block_c32_enc_nc", "l_swin_block_c32_dec_nc"):
+        enc = kernel == "l_swin_block_c32_enc_nc"
+        kind = "first" if enc else "second"
+        h = T.block_halo(T.TABLE, kind)
+        assert not enc or h == 2, "the ports read a 2-pixel halo"
+        for (H, W) in L_BLOCK_GRIDS:
+            for parity in (0, 1):
+                blob = gen(rng)
+                if not _nc(blob):
+                    continue
+                off = T.block_offset(T.TABLE, kind, parity)
+                if enc:
+                    xb = rng.normal(0, 1.5, (H + 2 * h, W + 2 * h, 32)).astype(np.float16).tobytes()
+                    yield H, W, off, xb, H * W * 32, blob
+                else:
+                    yield H, W, off, fp8_encode(q8(rng.normal(0, 1.5, (H, W, 32)))).tobytes(), H * W * 64, blob
+        return
+    C = KINDS[kernel][1]
+    for (H, W, off) in CASES:
+        blob = gen(rng)
+        if not _nc(blob):
+            continue
+        yield H, W, off, fp8_encode(q8(rng.normal(0, 1.5, (H, W, C)))).tobytes(), H * W * C, blob
 
 # Each back end's output buffer starts filled with its own non-zero sentinel byte, different from the other's: a byte
 # that one path (or both) never writes then differs between the two outputs instead of comparing equal as zeros.
 HIP_SENTINEL, D3D12_SENTINEL = 0xA5, 0x5A
 
 
-def hip_block_raw(g, co, kernel, xb, blob, H, W, off, C):
-    """The block on HIP; returns the output buffer's downloaded bytes as they are (never decoded and encoded again, so
-    for example the two FP8 NaN codes stay distinct). The output starts filled with HIP_SENTINEL."""
+def hip_block_raw(g, co, kernel, xb, blob, H, W, off, n):
+    """The block on HIP; returns the output buffer's `n` downloaded bytes as they are (never decoded and encoded again,
+    so for example the two FP8 NaN codes stay distinct). The output starts filled with HIP_SENTINEL."""
     h = g.hip
-    n = H * W * C
     px, pw, po = h.malloc(len(xb)), h.malloc(len(blob)), h.malloc(n)
     try:
         h.upload(px, xb)
@@ -109,30 +152,25 @@ def run(build, rocm, seeds, kernels):
     lines, hip_out = [], {}
     neg = None  # (case name, kernel) of the negative control
     for kernel in kernels:
-        co, C, gen = KINDS[kernel]
+        co = KINDS[kernel][0]
         for si, seed in enumerate(seeds):
             rng = np.random.default_rng(seed)
-            for ci, (H, W, off) in enumerate(CASES):
+            for ci, (H, W, off, xb, nout, blob) in enumerate(block_cases(kernel, rng)):
                 name = f"{kernel}_s{si}_{ci}"
-                blob = gen(rng)
-                if not np.frombuffer(blob[:4], np.uint32)[0] & 1:
-                    continue                                    # only the _nc forms are ported
-                x = q8(rng.normal(0, 1.5, (H, W, C)))
-                xb = fp8_encode(x).tobytes()
-                hip_out[name] = (kernel, hip_block_raw(g, co, kernel, xb, blob, H, W, off, C))
+                hip_out[name] = (kernel, hip_block_raw(g, co, kernel, xb, blob, H, W, off, nout))
                 _write(os.path.join(cdir, name + ".x"), xb)
                 _write(os.path.join(cdir, name + ".w"), blob)
                 ox, oy = off
                 nwin = -(-(W + ox) // 4) * -(-(H + oy) // 4)
                 lines += [f"case {name}", f"module {co}", f"kernel {kernel} {-(-nwin // 8)} 256",
-                          f"arg buf {name}.x", "arg null", f"arg out {H * W * C} {name}.out {D3D12_SENTINEL}", f"arg buf {name}.w",
+                          f"arg buf {name}.x", "arg null", f"arg out {nout} {name}.out {D3D12_SENTINEL}", f"arg buf {name}.w",
                           f"arg u32 {H}", f"arg u32 {W}", f"arg u32 {ox}", f"arg u32 {oy}", ""]
                 if neg is None and nwin > 8:
                     # Negative control: this case again on D3D12 with half its workgroups. The windows never processed
                     # keep the D3D12 sentinel, so the comparison must find them: the check can fail.
                     neg = (name, kernel)
                     lines += [f"case negative_{name}", f"module {co}", f"kernel {kernel} {max(1, -(-nwin // 8) // 2)} 256",
-                              f"arg buf {name}.x", "arg null", f"arg out {H * W * C} negative_{name}.out {D3D12_SENTINEL}",
+                              f"arg buf {name}.x", "arg null", f"arg out {nout} negative_{name}.out {D3D12_SENTINEL}",
                               f"arg buf {name}.w", f"arg u32 {H}", f"arg u32 {W}", f"arg u32 {ox}", f"arg u32 {oy}", ""]
     with open(os.path.join(cdir, "cases.txt"), "w", newline="\n") as f:
         f.write("\n".join(lines))
@@ -178,6 +216,7 @@ def main(argv=None):
     ap.add_argument("--prepare", action="store_true")
     ap.add_argument("--run", action="store_true")
     ap.add_argument("--seeds", type=int, default=2)
+    ap.add_argument("--kernels", default=",".join(L_KERNELS))
     ap.add_argument("--no-control", action="store_true", help="skip Model M's swin_block_c96_nc control")
     ap.add_argument("--json")
     a = ap.parse_args(argv)
@@ -185,7 +224,7 @@ def main(argv=None):
     if a.prepare:
         print("built", prepare(a.build, a.rocm))
     if a.run:
-        kernels = ["l_swin_block_c32_nc"] + ([] if a.no_control else CONTROL_KERNELS)
+        kernels = [k for k in a.kernels.split(",") if k] + ([] if a.no_control else CONTROL_KERNELS)
         res = run(a.build, a.rocm, tuple(range(89, 89 + a.seeds)), kernels)
         if a.json:
             with open(a.json, "w") as f:
