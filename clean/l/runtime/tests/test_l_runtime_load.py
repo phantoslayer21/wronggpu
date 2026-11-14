@@ -6,7 +6,9 @@
   Swin stages and post, against Model M's raw tensors (clean/runner/synthetic_model.py);
 - a synthetic Model L in the raw layout (clean/l/reference/oracle.py random_params) loads with every tensor's bytes
   unchanged;
-- the refusals (missing tensor, wrong size, T above 127).
+- the refusals (missing tensor, wrong size, T above 127);
+- model.wgcm with Model L's stages (synthetic file and map): the same tensors as from the raw layout; refused: a map
+  shape not kept, a Model M file, a file whose digests the shipped preset-L map does not list.
 
 No GPU: clean/l/runtime/tests/l_load_dump.cpp is built with the runtime's model.cpp by the host C++ compiler (CXX,
 clang++ or g++; on Windows MSVC cl after them, from PATH or through vcvars64.bat; skipped without one).
@@ -183,6 +185,49 @@ class Load(unittest.TestCase):
             self.assertEqual(dump("load", d), ["ERR model data damaged: " + raw + "/enc0/T.bin has a value above 127"])
         finally:
             shutil.rmtree(d, ignore_errors=True)
+
+
+class Wgcm(unittest.TestCase):
+    """model.wgcm (clean/converter/OUTPUT-FORMAT.md) with Model L's stages: a synthetic file and its synthetic map
+    (synthetic_model.write_wgcm in the map's stage order), as the converter writes with the preset-L map."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="wg_lw_")
+
+    def tearDown(self):
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def write(self, model, sub="L"):
+        """(model.wgcm path, synthetic map path) in <tmp>/<sub>."""
+        d = os.path.join(self.d, sub)
+        return os.path.join(d, "model.wgcm"), SM.write_wgcm(d, model, order=list(specs()))
+
+    def test_bytes(self):
+        model = raw_model(7)
+        path, map_path = self.write(model)
+        lines = dump("wgcm", path, map_path)
+        self.assertEqual(lines[0], "OK %d" % len(model))
+        got = {tuple(ln.split(" ")[:2]): ln.split(" ")[2:] for ln in lines[1:]}
+        want = {(st, n): [str(a.size), hashlib.sha256(np.ascontiguousarray(a).tobytes()).hexdigest()]
+                for st, ts in model.items() for n, a in ts.items()}
+        self.assertEqual(got, want)
+        write_raw(os.path.join(self.d, "raw_copy"), model)  # the same tensors as from the raw layout
+        self.assertEqual(dump("load", os.path.join(self.d, "raw_copy")), lines)
+
+    def test_refusals(self):
+        model = raw_model(8)
+        bad = {st: dict(ts) for st, ts in model.items()}
+        bad["dec0"]["W"] = bad["dec0"]["W"].reshape(8, 16, 64)  # same values, not the map's shape
+        path, map_path = self.write(bad)
+        self.assertEqual(dump("wgcm", path, map_path),
+                         ["ERR model data damaged: %s: tensor dec0/W has the wrong shape or type" % path])
+        m_dir = os.path.join(self.d, "M")  # a Model M file (with its map) is not a Model L file
+        m_map, m_path = SM.write_wgcm(m_dir, SM.synthetic_tensors(1)), os.path.join(m_dir, "model.wgcm")
+        self.assertEqual(dump("wgcm", m_path, m_map),
+                         ["ERR model data damaged: %s: tensor enc0/W has the wrong shape or type" % m_path])
+        path, _ = self.write(model)  # the shipped preset-L map: its digests are not those of synthetic data
+        self.assertEqual(dump("wgcm", path, os.path.join(ROOT, "data", "preset-L.v1.map.json")),
+                         ["ERR model data does not match this installation (converted with a different map): " + path])
 
 
 if __name__ == "__main__":

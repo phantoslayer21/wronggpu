@@ -55,5 +55,10 @@ bool load_raw_model(const std::string& model_dir, std::map<std::string, StageTen
   return load_raw_stages(model_dir, stage_specs(), out, err);
 }
 
+bool load_wgcm_model(const std::string& path, const std::string& map_path, std::map<std::string, StageTensors>* out,
+                     std::string* err, bool* other_map) {
+  return load_wgcm_stages(path, map_path, stage_specs(), out, err, other_map);
+}
+
 }  // namespace l
 }  // namespace wgrt
