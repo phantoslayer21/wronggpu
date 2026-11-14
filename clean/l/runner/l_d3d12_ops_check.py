@@ -13,7 +13,9 @@ D3D12 device in a child process, then compares every output buffer. The rules (a
 - the RAW downloaded bytes of both back ends are compared (nothing is decoded and encoded again);
 - each output buffer starts filled with its back end's own non-zero sentinel (HIP 0xA5, D3D12 0x5A), so a byte that
   either path, or both, leaves unwritten differs;
-- a negative control (one case again on D3D12 with half its workgroups) must be caught.
+- a negative control (one case again on D3D12 with half its workgroups) must be caught;
+- Model M's swin_block_c96_nc (swin.co, its port already proven) runs through the same engine as a control
+  (--no-control skips it).
 Output: counts only, no timing.
 """
 import argparse
@@ -59,12 +61,29 @@ def linear_cases(kernel, rng):
     return cases
 
 
+def control_cases(kernel, rng):
+    """Control: Model M's swin_block_c96_nc (swin.co), whose D3D12 port is already proven byte for byte (whole frames,
+    clean/dx12/compare.py), through this harness's engine: if it is identical here too, the harness is sound."""
+    from clean.l.runner.l_d3d12_check import _params_c96
+    cases = []
+    for (H, W, (ox, oy)) in C32.CASES:
+        blob = _params_c96(rng)
+        if not np.frombuffer(blob[:4], np.uint32)[0] & 1:
+            continue                                   # only the _nc form is ported
+        nwin = -(-(W + ox) // 4) * -(-(H + oy) // 4)
+        cases.append({"kernel": kernel, "co": "swin.co", "grid": -(-nwin // 8), "block": 256,
+                      "args": [("buf", _fp8_map(rng, H * W * 96)), ("null",), ("out", H * W * 96), ("buf", blob),
+                               ("u32", H), ("u32", W), ("u32", ox), ("u32", oy)]})
+    return cases
+
+
 KINDS = {"l_linear_32_32_relu": linear_cases, "l_linear_32_32_f16": linear_cases}
+CONTROL_KINDS = {"swin_block_c96_nc": control_cases}
 CO = "l_ops.co"
 
 
 def prepare(build, rocm, kernels):
-    C32.compile_kernels(build, rocm)
+    C32.compile_kernels(build, rocm, with_swin=True)   # swin.co (the control); l_ops.co: with #115's compile_kernels
     return prepare_replay(build, rocm, kernels)
 
 
@@ -100,7 +119,8 @@ def hip_run(g, mod, case):
 
 
 def replay_lines(name, case, cdir, grid=None, prefix=""):
-    lines = [f"case {prefix}{name}", f"module {CO}", f"kernel {case['kernel']} {grid or case['grid']} {case['block']}"]
+    lines = [f"case {prefix}{name}", f"module {case.get('co', CO)}",
+             f"kernel {case['kernel']} {grid or case['grid']} {case['block']}"]
     oi = 0
     for i, a in enumerate(case["args"]):
         if a[0] in ("buf", "bytes"):
@@ -121,17 +141,24 @@ def replay_lines(name, case, cdir, grid=None, prefix=""):
 
 def run(build, rocm, seeds, kernels):
     g = C32.Gpu(build, rocm)
-    with open(os.path.join(build, CO), "rb") as f:
-        mod = g.hip.load_module(f.read())
+    mods = {}
+
+    def module(co):
+        if co not in mods:
+            with open(os.path.join(build, co), "rb") as f:
+                mods[co] = g.hip.load_module(f.read())
+        return mods[co]
+
+    kinds = dict(KINDS, **CONTROL_KINDS)
     cdir = os.path.join(build, "replay-ops")
     os.makedirs(cdir, exist_ok=True)
     lines, hip_out, neg = [], {}, None
     for kernel in kernels:
         for si, seed in enumerate(seeds):
             rng = np.random.default_rng(seed)
-            for ci, case in enumerate(KINDS[kernel](kernel, rng)):
+            for ci, case in enumerate(kinds[kernel](kernel, rng)):
                 name = f"{kernel}_s{si}_{ci}"
-                hip_out[name] = (kernel, hip_run(g, mod, case))
+                hip_out[name] = (kernel, hip_run(g, module(case.get("co", CO)), case))
                 for oi, data in enumerate(hip_out[name][1]):   # kept next to the D3D12 outputs, for a look at a difference
                     with open(os.path.join(cdir, f"{name}.hip.o{oi}"), "wb") as fh:
                         fh.write(data)
@@ -187,9 +214,10 @@ def main(argv=None):
     ap.add_argument("--run", action="store_true")
     ap.add_argument("--seeds", type=int, default=2)
     ap.add_argument("--kernels", default=",".join(KINDS))
+    ap.add_argument("--no-control", action="store_true", help="skip Model M's swin_block_c96_nc control")
     ap.add_argument("--json")
     a = ap.parse_args(argv)
-    kernels = [k for k in a.kernels.split(",") if k]
+    kernels = [k for k in a.kernels.split(",") if k] + ([] if a.no_control else list(CONTROL_KINDS))
     os.makedirs(a.build, exist_ok=True)
     if a.prepare:
         print("built", prepare(a.build, a.rocm, kernels))
