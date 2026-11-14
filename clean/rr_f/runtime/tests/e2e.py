@@ -234,8 +234,9 @@ TAGLOOP_LIMIT_MIB = 256   # issue #8: 200 frames grew video memory by about 2.6 
 
 
 def run_gpu(out, stage, runs, perf_frames, name="e2e", leak=6, head=None, body="Z", inp="exact", front=True, mips=1,
-            tagloop=200):
-    """runs: [(scenario name, calls)]; every scenario twice (WG_RR_ALIAS=0 and aliased)."""
+            tagloop=200, gpu_timeout=900):
+    """runs: [(scenario name, calls)]; every scenario twice (WG_RR_ALIAS=0 and aliased). gpu_timeout: seconds the host
+    run may take (then it is stopped and the log names its last step)."""
     work = os.path.join(out, name)
     if os.path.exists(work):
         shutil.rmtree(work)
@@ -307,12 +308,21 @@ def run_gpu(out, stage, runs, perf_frames, name="e2e", leak=6, head=None, body="
         fh.write("\n".join(job) + "\n")
     host = os.path.join(out, "rr_test_host.exe")
     t0 = time.time()
-    r = subprocess.run(_locked([host, jf]), capture_output=True, text=True,
-                       timeout=7200)
+    print(f"e2e phase: GPU run ({len(job)} job lines, timeout {gpu_timeout} s)", flush=True)
+    try:
+        r = subprocess.run(_locked([host, jf]), capture_output=True, text=True, timeout=gpu_timeout)
+        rc, so, se = r.returncode, r.stdout, r.stderr
+    except subprocess.TimeoutExpired as e:   # the host's own output is unbuffered: what it printed is kept
+        rc = "timeout after %d s" % gpu_timeout
+        so = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        se = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
     with open(os.path.join(work, "host.log"), "w") as fh:
-        fh.write(r.stdout + "\n--- stderr\n" + r.stderr)
-    if r.returncode != 0:
-        raise SystemExit(f"rr_test_host failed ({r.returncode}):\n{r.stdout[-3000:]}\n{r.stderr[-3000:]}")
+        fh.write(so + "\n--- stderr\n" + se)
+    if rc != 0:
+        # the host's stderr has one "step N <command> at T s" line per job command: the last one names where it stopped
+        steps = [l for l in se.splitlines() if l.startswith("step ") or l.startswith("  perf:")]
+        raise SystemExit(f"rr_test_host failed ({rc}) after {time.time() - t0:.1f} s; last step: "
+                         f"{steps[-1] if steps else 'none'}\n{so[-3000:]}\n{se[-3000:]}")
     print(f"GPU run {time.time() - t0:.1f} s", flush=True)
     return work
 
@@ -824,7 +834,10 @@ def main(argv=None):
     ap.add_argument("--calls-b", type=int, default=14)
     ap.add_argument("--skip-gpu", action="store_true", help="analyse an earlier run")
     ap.add_argument("--jobs", type=int, default=8)
-    ap.add_argument("--perf", type=int, default=600)
+    ap.add_argument("--perf", type=int, default=600, help="timing frames per perf line (0: none). The exact head's perf "
+                    "frames at 2560x1440 take most of a second each on the GPU: use 0 inside a short GPU time slot")
+    ap.add_argument("--gpu-timeout", type=int, default=900, help="seconds the GPU host run may take before it is stopped "
+                    "(its log then names the last job step)")
     ap.add_argument("--leak", type=int, default=6)
     ap.add_argument("--tagloop", type=int, default=200, help="issue #8: frames of inputs copied and released with no "
                     "instance, before the scenarios (0: skip)")
@@ -856,7 +869,7 @@ def main(argv=None):
     if not a.skip_gpu:
         work = run_gpu(a.out, stage, runs, a.perf, name, a.leak, None if a.head == "default" else a.head,
                        None if a.body == "default" else a.body, None if a.input == "default" else a.input, mips=a.mips,
-                       tagloop=a.tagloop)
+                       tagloop=a.tagloop, gpu_timeout=a.gpu_timeout)
     rows, life, inv, al = [], [], [], []
     jobs = []
     metas = {}
@@ -878,6 +891,7 @@ def main(argv=None):
         inv += [dict(r, scenario=sname) for r in li]
         al += [dict(r, scenario=sname) for r in alias_checks(work, sname, m0, m1)]
     t0 = time.time()
+    print(f"e2e phase: CPU reference of {len(jobs)} frames ({a.jobs} jobs)", flush=True)
     if a.jobs > 1:
         import multiprocessing as mp
         with mp.Pool(a.jobs) as pool:

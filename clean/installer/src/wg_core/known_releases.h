@@ -70,6 +70,12 @@ inline const KnownFile kKnownFiles[] = {
     {L"0.5.5-ea", L"amd_fidelityfx_dx12.dll", 2182144ull, L"3511adb5994cb217a85bd06a662989338f7e219b3f18c49b9d12de3ac0c7300f"},
     {L"0.5.5-ea", L"wronggpu_runtime.dll", 24689152ull, L"331bc00e02f048a990a4c37362f8001b2c1eb31c27bd57b9ed58f6a66222a1be"},
     {L"0.5.5-ea", L"plugins\\WrongGPU.asi", 910336ull, L"e9aab52cc1b4a5e411a65560eacdfe26a442c6b8085d318a125e114e2e0bac25"},
+    {L"0.6.0", L"amd_fidelityfx_dx12.dll", 2402816ull, L"5de1610d611d882f9d6aadd86ebba58b5ce496d298a1975c916099105346164f"},
+    {L"0.6.0", L"wronggpu-license.txt", 3826ull, L"1578d31524b3d6b3da4371637275e3f46ba183a47874e7f43d6cbe9c373a6230"},
+    {L"0.6.0", L"wronggpu-notices.txt", 4417ull, L"ebdd1bf59e6b3a401892c16b707fe3f98213835ba3b97ee4be23a28a878dce6f"},
+    {L"0.6.0", L"wronggpu_runtime.dll", 73618432ull, L"8087a1e613224ac18d082553d5fa75ecef36a15d5752b80ee0f0aabed8eef4ba"},
+    {L"0.6.0", L"plugins\\WrongGPU.asi", 916480ull, L"ca0a2d9434a0bdadbe334e13af1c20689cadd45ec59001c0f92d48da50874e89"},
+    {L"0.6.0", L"plugins\\WrongGPU-RR.asi", 366080ull, L"349062ecad3756b1d1b0e33ec922f959d17f93c78c1372e82c5f0763a9e7b19a"},
 };
 
 }  // namespace wg
