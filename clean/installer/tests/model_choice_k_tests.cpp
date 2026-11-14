@@ -76,8 +76,17 @@ int main() {
                 "Model K: every model item out (an L item too), model=K last (the last one wins); timing_log kept");
         const string backM = Wini(DefaultProfile(), "[fsr]\r\nruntime_options = timing_log=1;model=K\r\n");
         require(backM.find("runtime_options=timing_log=1;model=M\r\n") != string::npos, "back to Model M: Model K's item becomes model=M");
-        require(Wini(DefaultProfile(), toK) == fresh.substr(0, fresh.find("runtime_options")) + "runtime_options=model=M\r\n",
-                "K then M: only the runtime_options line is rewritten (the installer's comment on it is gone as it is for L)");
+        // (model_chosen: the time of the launcher's model choice, written on every model change, profile.h)
+        auto noTime = [](string s) {
+            const size_t a = s.find("model_chosen=");
+            if (a != string::npos) s.erase(a, s.find("\r\n", a) + 2 - a);
+            return s;
+        };
+        require(toK.find("model_chosen=") != string::npos, "Model K chosen: model_chosen written");
+        const string kThenM = Wini(DefaultProfile(), toK);
+        require(noTime(kThenM) == fresh.substr(0, fresh.find("runtime_options")) + "runtime_options=model=M\r\n" && kThenM.find("model_chosen=") != string::npos,
+                "K then M: only the runtime_options line is rewritten (the installer's comment on it is gone as it is for L), "
+                "and model_chosen is the time of that change");
         const string withLItem = "[fsr]\r\nruntime_options = model=L\r\n";
         if (withL) {
             require(Wini(DefaultProfile(), withLItem).find("model=M") != string::npos, "Model M control: Model L's item still goes back to model=M");
