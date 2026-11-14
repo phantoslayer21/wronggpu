@@ -23,7 +23,7 @@ Every map is `[rows][cols][C]`, channel fastest, as Model M's feature maps (`cle
 | Map | Shape | Element | Written by | Read by |
 |---|---|---|---|---|
 | `q` | `[fh + 4][fw + 4][32]` halo | FP8: values 0..19, bytes 20..31 zero | `lev/input_encoder` | `l_linear_32_32_relu` |
-| `x1` | `[fh + 4][fw + 4][32]` halo | FP8 | `l_linear_32_32_relu` | `l_linear_32_32_f16` |
+| `x1` | `[fh + 4][fw + 4][32]` halo | FP8 (not stored by `l_linear_32_32_fused`) | `l_linear_32_32_relu` | `l_linear_32_32_f16` |
 | `x2` | `[fh + 4][fw + 4][32]` halo | **FP16** (64 bytes per pixel) | `l_linear_32_32_f16` | `l_swin_block_c32_enc` |
 | `x3` | `[fh][fw][32]` | FP8 | `l_swin_block_c32_enc` | `l_project_gather` |
 | `enc0.features` | `[fh/2][fw/2][64]` | FP8 | `l_project_gather` | enc1 (Model M's stage) |
@@ -78,12 +78,14 @@ workgroup, in raster order of their map.
 | `lev/input_encoder` | exists (GPU-checked) | as Model M's `input_encoder`, with `features` replaced by `q` | ceil(((fh + 4) / 2) ((fw + 4) / 2) / 128) (2 x 2 pixel groups of the halo map) | the 20 values and their dithered FP8 for every halo-map pixel, into `q`. The motion surfaces as Model M, only for pixels inside R. w = `enc0.values` |
 | `l_linear_32_32_relu` | exists (GPU-checked) | `x, y, w, npix` | ceil(npix / 128), npix = (fh + 4)(fw + 4) | y = q8(max(0, RN16(b + W x))), FP8 -> FP8. w = `enc0.Win1` |
 | `l_linear_32_32_f16` | exists (GPU-checked) | `x, y, w, npix` | as above | y = RN16(b + W x), FP8 -> **FP16**. w = `enc0.Win2` |
+| `l_linear_32_32_fused` | exists (GPU-checked), D3D12 only | `x, y, w1, w2, npix` | as above | the two above in one kernel, `x1` kept in registers: the same bytes in `y` (`x2`), `x1` not stored. x = `q`, y = `x2` in two different buffers. w1 = `enc0.Win1`, w2 = `enc0.Win2`. The native D3D12 frame runs it in place of the two (fusion `ll`, on by default); without `ll` or without the kernel in the build, the two run |
 | `l_swin_block_c32_enc[_nc]` | exists (GPU-checked) | `x, xadd (null), out, w, H, W, ox, oy` | ceil(nwin / 8), nwin = ceil((W + ox) / 4) ceil((H + oy) / 4) | the encoder block. x = `x2` (FP16 halo map; member at grid (gx, gy) read at map pixel (gy + 2, gx + 2)). out = `x3` (FP8, grid only). H = fh, W = fw. (ox, oy) = `window_offsets["first"]` for the frame parity. w = `enc0_block` |
 | `l_project_gather` | exists (GPU-checked) | `x, features, w, tw, th` | ceil(tw th / 128), tw = fw / 2, th = fh / 2 | token (r, c) gathers pixels (2r + p / 2, 2c + p % 2), p = 0..3, as channels 32 p + i. Running FP16 sum per group of 32 from the bias, clamp +-6.28125, FP8 -> `enc0.features`. w = `enc0.project` |
 | `l_dec_project` | exists (GPU-checked) | `z, y, w, tw, th` | ceil(tw th / 128) | per token of dec1's output z [th][tw][64]: 128 outputs (two RN16 groups of 32 inputs, then FP8). Output 32 s + k goes to pixel (2r + s / 2, 2c + s % 2), channel k, of `y`. w = `dec0.project` |
 | `l_swin_block_c32_dec[_nc]` | exists (GPU-checked) | `x, xadd (null), out, w, H, W, ox, oy` | as the encoder block | the decoder block. x = `y` (FP8). A member outside the grid takes token-grid mirrored pixels with the sub-pixel kept. out = `y2` (**FP16**). (ox, oy) = `window_offsets["second"]`. w = `dec0_block` |
 | `l_coef` | exists (GPU-checked) | `y2, A, B, C, latent, w, params` | ceil((fh / 2)(fw / 2) / 128), lanes as Model M's `coef_decoder` | Model L's per-pixel functions on the 13 channels `table.L_DEC_VALUES` of `y2`: A, B, C in Model M's forms, latent = tanh(candidate). Writes the same buffers and formats as `coef_decoder`, pixels inside R only. **Reads no motion, previous latent, jitter or reset.** params = Model M's `WgDecParams` (only rw, rh, fw, fh are read). w = `dec0.coef` |
 | `l_coef_pack12` | exists (GPU-checked) | as `l_coef` (`B` unused, may be null) | as `l_coef` | `l_coef`'s values in Model M's dec0 "pack12" layout (`clean/kernels/decoder.hip` `WG_DEC_PACK12`, read by the output stage's `_p12` kernels): image A, 8 bytes per pixel = A0 A1 A2 B0 | B1 B2 C2 (FP16); image C, 4 bytes per pixel = C0 C1 (FP16); latent as `l_coef`. Only padding bytes are left out: unpacked, byte-identical to `l_coef` (`l_ops_check.py`) |
+| `l_swin_block_c32_dec_coef12_nc` | exists (GPU-checked), D3D12 only | the decoder block's, `out` unused (null), then `A, C, latent, w_coef, rw, rh` | as the decoder block | the decoder block with `l_coef_pack12` as its epilogue: the same bytes in `A`, `C` and `latent`, `y2` not written. w = `dec0_block`, w_coef = `dec0.coef`. The native D3D12 frame runs it in place of the two (fusion `lc`, on by default); without `lc` or without the kernel in the build, the two run |
 
 ## Launch order of one frame
 
@@ -156,4 +158,8 @@ the frame parity, as Model M's.
 - `clean/l/runner/l_ops_check.py`: the linears, both projections and `l_coef` against the oracle steps.
 - `clean/l/runner/l_enc_check.py`: `lev/input_encoder` (halo map and motion surfaces) against the oracle.
 - `clean/l/runner/l_d3d12_check.py` (with its D3D12 port): each D3D12 port against its HIP kernel, byte for byte.
+- `clean/l/runner/l_fold_check.py`: `l_swin_block_c32_dec_coef12_nc` against `l_swin_block_c32_dec_nc` ->
+  `l_coef_pack12` on D3D12 and on HIP, byte for byte.
+- `clean/l/runner/l_linfuse_check.py`: `l_linear_32_32_fused` against `l_linear_32_32_relu` -> `l_linear_32_32_f16`
+  on D3D12 and on HIP, byte for byte.
 - One check per new kernel follows with that kernel.

@@ -31,33 +31,9 @@ WG_ARGS_BEGIN
     float P_dw, P_dh, P_kx, P_ky, P_jx, P_jy, P_pjx, P_pjy;
 WG_ARGS_END
 
-static uint g_z;   // 0, opaque to the compiler (set from the grid size)
-float opq(float x) { return asfloat(asuint(x) ^ g_z); }
-float bits(uint b) { return asfloat(b); }
-
-// sigma(x) = 1 / (1 + 2^(x * -log2 e)): v_mul, v_exp, v_add 1.0, v_rcp
-float l_sigma(float x) { return wg_rcp(1.0f + wg_exp2(x * bits(0xBFB8AA3Bu))); }
-
-// tanh(t): for |t| >= 0.6 (and not NaN), 1 - 2 / (2^(2 |t| log2 e) + 1), 1 from about 9.01 on, sign of t; below, the odd
-// polynomial. Both sides are computed; the ISA's branch selects one, select() here (both are pure).
-float l_tanh(float t)
-{
-    const float a = abs(t);
-    float big = mad(wg_rcp(wg_exp2(a * bits(0x4038AA3Bu)) + 1.0f), -2.0f, 1.0f);
-    big = select(bits(0x41102CB4u) > a || isnan(a), big, 1.0f);   // v_cmp_nle 9.01, |t|; v_cndmask
-    big = asfloat((asuint(big) & 0x7fffffffu) | (asuint(t) & 0x80000000u));   // v_bfi copysign
-    const float t2 = t * t;
-    const float p = mad(mad(mad(bits(0x3C80F082u), t2, bits(0xBD563CAEu)), t2, bits(0x3E085941u)), t2, bits(0xBEAAA9EDu));
-    const float p2 = mad(p, t2, asfloat(g_z));   // fma(p, t2, +0), the zero opaque
-    const float small = mad(p2, t, t);
-    return select(a >= bits(0x3F19999Au), big, small);   // v_cmp_le 0.6, |t| (false for a NaN: the polynomial)
-}
-
-uint unorm8_code(float v) { return wg_f2u(wg_rint(v * 255.0f)); }   // v in [0, 1]: v_mul 255, v_rndne, v_cvt_u32
-uint snorm8_code(float v) { return (uint)wg_f2i(wg_rint(wg_med3f(v, -1.0f, 1.0f) * 127.0f)) & 0xffu; }
-
-// the clamp of a spread input (an FP16 value) to +-20, NaN kept: HIP's v >= 20 ? 20 : (v <= -20 ? -20 : v)
-float clamp20(float v) { return select(v >= 20.0f, 20.0f, select(v <= -20.0f, -20.0f, v)); }
+// the per-pixel functions (sigma, tanh, the codes, the clamp, the stores): hlsl/l_coef_px.hlsli, shared with the decoder
+// block that ends in this step (l_swin.hlsl, l_swin_block_c32_dec_coef12_nc)
+#include "l_coef_px.hlsli"
 
 #if COEF_PACK12
 WG_KERNEL(l_coef_pack12)
@@ -80,42 +56,9 @@ WG_KERNEL(l_coef)
     [unroll] for (int dx = 0; dx < 2; ++dx) {
         const int x = 2 * c + dx;
         if (x >= P_rw) continue;
-        // channels 0..15 of the pixel (8 dwords, two FP16 each); Model L's 13 values are channels
-        // a0..a12 = 0, 1, 6, 7, 8, 9, 10, 11, 12, 2, 3, 4, 5 (clean/l/reference/table.py L_DEC_VALUES)
+        // channels 0..15 of the pixel (8 dwords, two FP16 each)
         const uint off = (uint)(y * P_fw + x) * 64u;
         const uint4 lo = wg_ld128(y2, off), hi = wg_ld128(y2, off + 16u);
-        const float a0 = wg_h2f_lo(lo.x), a1 = wg_h2f_hi(lo.x), a2 = wg_h2f_lo(lo.w), a3 = wg_h2f_hi(lo.w);
-        const float a4 = wg_h2f_lo(hi.x), a5 = wg_h2f_hi(hi.x), a6 = wg_h2f_lo(hi.y), a7 = wg_h2f_hi(hi.y);
-        const float a8 = wg_h2f_lo(hi.z);
-        const float a9 = wg_h2f_lo(lo.y), a10 = wg_h2f_hi(lo.y), a11 = wg_h2f_lo(lo.z), a12 = wg_h2f_hi(lo.z);
-        // A: unorm codes of RN16(sigma(a0..a2))
-        const uint cA = unorm8_code(wg_rn16(l_sigma(a0))) | (unorm8_code(wg_rn16(l_sigma(a1))) << 8) |
-                        (unorm8_code(wg_rn16(l_sigma(a2))) << 16);
-        // B: softmax of a3..a5
-        const float m = max(max(a3, a4), a5);
-        const float e0 = wg_exp2((a3 - m) * bits(0x3FB8AA3Bu)), e1 = wg_exp2((a4 - m) * bits(0x3FB8AA3Bu)),
-                    e2 = wg_exp2((a5 - m) * bits(0x3FB8AA3Bu));
-        const float rs = wg_rcp(e2 + (e0 + e1));
-        const uint cB = unorm8_code(opq(e0 * rs)) | (unorm8_code(opq(e1 * rs)) << 8) | (unorm8_code(opq(e2 * rs)) << 16);
-        // C: spreads and correlation
-        const float g0 = wg_rn16(l_sigma(clamp20(a6))), g1 = wg_rn16(l_sigma(clamp20(a7)));
-        const float sx = S * g0, sy = S * g1;
-        const float sxy = sx * sy;
-        const float rho = l_tanh(a8 * T);
-        const uint c0 = wg_mul_f16(sx, sx) | (wg_mul_f16(sy, sy) << 16);
-        const uint c1 = wg_mul_f16(sxy, rho);
-        // latent: snorm codes of tanh(a9..a12)
-        const uint cL = snorm8_code(l_tanh(a9)) | (snorm8_code(l_tanh(a10)) << 8) | (snorm8_code(l_tanh(a11)) << 16) |
-                        (snorm8_code(l_tanh(a12)) << 24);
-        const uint i = (uint)(y * P_rw + x);
-#if COEF_PACK12
-        wg_st64(pA, i * 8u, uint2(cA | (cB << 24), (cB >> 8) | (c1 << 16)));
-        wg_st32(pC, i * 4u, c0);
-#else
-        wg_st32(pA, i * 4u, cA);
-        wg_st32(pB, i * 4u, cB);
-        wg_st64(pC, i * 8u, uint2(c0, c1));
-#endif
-        wg_st32(pL, i * 4u, cL);
+        l_coef_px(lo, hi, S, T, pA, pB, pC, pL, (uint)(y * P_rw + x));
     }
 }
