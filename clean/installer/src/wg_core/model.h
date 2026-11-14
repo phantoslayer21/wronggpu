@@ -50,6 +50,14 @@ inline wstring ModelLNotReady(const wstring& why) {
     return L"Model L's data on this PC is not ready (" + why + L"). Convert it first: WrongGPU.exe model convert --preset=L "
            L"(optionally --model=<the nvngx_dlss.dll of one of your games, version 310.5 or newer>).";
 }
+// The same for Model K (a build with the Model K choice, WRONGGPU_MODEL_K).
+inline wstring ModelKNotReady(const wstring& why) {
+    return L"Model K's data on this PC is not ready (" + why + L"). Convert it first: WrongGPU.exe model convert --preset=K "
+           L"(optionally --model=<the nvngx_dlss.dll of one of your games>).";
+}
+// The model a profile asks for besides Model M: L'L' or L'K' (a build with that choice), else 0 (Model M).
+inline wchar_t ChosenPreset(const std::string& model) { return model == "l" ? L'L' : model == "k" ? L'K' : L'\0'; }
+inline wstring ModelNotReady(wchar_t preset, const wstring& why) { return preset == L'K' ? ModelKNotReady(why) : ModelLNotReady(why); }
 bool MapHasOptionalGroup(const wgc::Map& map);
 wstring FilterText(Context& ctx, bool present);
 std::vector<ModelCandidate> ModelCandidates(const GameTarget* t, const wstring& userDll, const std::vector<StoreGame>& libraries);

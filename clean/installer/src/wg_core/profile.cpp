@@ -41,11 +41,21 @@ const SettingDef kSettings[] = {
     // (not decided yet: the launcher asks after the install) and off leave the file alone.
     {"rr_config_fix", Layer::Rr, Tier::Advanced, "ask", "ask|on|off", L"Ray Reconstruction engine setting",
      L"On: WrongGPU adds the one Engine.ini line this game's Ray Reconstruction needs (and takes it out again on uninstall)."},
-#if WRONGGPU_MODEL_L
-    // Model L (#89; only in a release whose front end and runtime run it): the model the game starts with. L needs Model L's
-    // data on this PC (model\L\model.wgcm, checked against Model L's converter data); M changes nothing in the game's files.
+#if WRONGGPU_MODEL_L || WRONGGPU_MODEL_K
+    // Model L (#89; only in a release whose front end and runtime run it) and Model K (only in a build with its choice,
+    // WRONGGPU_MODEL_K): the model the game starts with. L and K need their data on this PC (model\L\model.wgcm and
+    // model\K\model.wgcm, each checked against its own converter data); M changes nothing in the game's files.
+#if WRONGGPU_MODEL_K && WRONGGPU_MODEL_L
+    {"model", Layer::Model, Tier::Basic, "m", "m|k|l", L"Model",
+     L"M: Model M (default). K: Model K, converted on this PC from a DLSS file of one of your games. "
+     L"L: Model L, converted from a DLSS file of version 310.5 or newer that has it."},
+#elif WRONGGPU_MODEL_K
+    {"model", Layer::Model, Tier::Basic, "m", "m|k", L"Model",
+     L"M: Model M (default). K: Model K, converted on this PC from a DLSS file of one of your games."},
+#else
     {"model", Layer::Model, Tier::Basic, "m", "m|l", L"Model",
      L"M: Model M (default). L: Model L, converted from a DLSS file of version 310.5 or newer that has it."},
+#endif
 #endif
 };
 const size_t kSettingCount = sizeof(kSettings) / sizeof(kSettings[0]);
@@ -260,7 +270,7 @@ std::map<string, string> EffectiveSettings(const string& wronggpuIni, const stri
     if (FindSetting("model")) {  // the last model item of runtime_options (the one the front end uses): Model L or not
         string model;
         for (auto& kv : SplitOptions(options)) if (LowerA(kv.first) == "model") model = LowerA(kv.second);
-        eff["model"] = model == "l" ? "l" : "m";
+        eff["model"] = (WRONGGPU_MODEL_L && model == "l") ? "l" : (WRONGGPU_MODEL_K && model == "k") ? "k" : "m";
     }
     string fps;
     if (IniHasKey(optiIni, "Menu", "ShowFps", &fps)) {
@@ -304,17 +314,25 @@ bool RenderWronggpuIni(const Profile& p, const string& in, string& out, wstring*
         const string rv = RuntimeValue(d.key, p.get(d.key));
         if (!p.isDefault(d.key) && !rv.empty()) items.push_back({d.key, rv});
     }
-    // the model (WRONGGPU_MODEL_L builds): L, every model item out and model=L last (the last model item wins); M, only Model
-    // L's items go back to model=M (the installer's model=M, and Model K's item of a build with it, stay as they are)
+    // the model (WRONGGPU_MODEL_L / WRONGGPU_MODEL_K builds): L or K, every model item out and model=L / model=K last (the last
+    // model item wins); M, only the items of the models this build can choose go back to model=M: Model L's, and in a build
+    // with the Model K choice Model K's too (the profile says M, so a K item is not wanted; an install that starts on Preset K
+    // has no profile yet, so one is imported from its files: K). The installer's model=M, and Model K's item of a build
+    // without the K choice, stay as they are.
     if (FindSetting("model")) {
         auto isModel = [](const std::pair<string, string>& kv) { return LowerA(kv.first) == "model"; };
-        if (p.get("model") == "l") {
+        const string want = p.get("model");
+        if (want == "l" || want == "k") {
             std::vector<std::pair<string, string>> kept;
             for (auto& kv : items) if (!isModel(kv)) kept.push_back(kv);
-            kept.push_back({"model", "L"});
+            kept.push_back({"model", want == "k" ? "K" : "L"});
             items = kept;
         } else {
-            for (auto& kv : items) if (isModel(kv) && LowerA(kv.second) == "l") kv.second = "M";
+            for (auto& kv : items) {
+                if (!isModel(kv)) continue;
+                const string v = LowerA(kv.second);
+                if ((WRONGGPU_MODEL_L && v == "l") || (WRONGGPU_MODEL_K && v == "k")) kv.second = "M";
+            }
         }
     }
     const string joined = JoinOptions(items);
@@ -335,18 +353,26 @@ bool RenderWronggpuIni(const Profile& p, const string& in, string& out, wstring*
 
 bool RenderOptiIni(const Profile& p, const string& in, string& out, std::vector<wstring>* notes) {
     out = in;
-    // the model (WRONGGPU_MODEL_L builds): the entry of WrongGPU's list OptiScaler starts with. OptiScaler 10's custom
-    // upscaler slot: [WrongGPU] UpscalerIndex; else [FSR] UpscalerIndex (the list of WrongGPU's FFX DLL). L: Model L's entry;
-    // M: back to Model M's entry (0) only when the file names Model L's (another value, such as Model K's, stays).
+    // the model (WRONGGPU_MODEL_L / WRONGGPU_MODEL_K builds): the entry of WrongGPU's list OptiScaler starts with. OptiScaler
+    // 10's custom upscaler slot: [WrongGPU] UpscalerIndex; else [FSR] UpscalerIndex (the list of WrongGPU's FFX DLL). L: Model
+    // L's entry; K: Model K's; M: back to Model M's entry (0) only when the file names the entry of a model this build can
+    // choose (L's; in a build with the K choice K's too); another value, such as Model K's in a build without the K choice,
+    // or an entry the player chose in OptiScaler's menu, stays.
     if (FindSetting("model")) {
+        const string want = p.get("model");
+        const char* wantIndex = want == "l" ? kModelLEntryIndex : want == "k" ? kModelKEntryIndex : nullptr;
         string cur;
         const char* sec = IniHasKey(out, "WrongGPU", "UpscalerIndex", &cur) ? "WrongGPU" : IniHasKey(out, "FSR", "UpscalerIndex", &cur) ? "FSR" : nullptr;
         if (sec) {
             cur = TrimA(cur);
-            if (p.get("model") == "l" && cur != kModelLEntryIndex) out = IniSet(out, sec, "UpscalerIndex", kModelLEntryIndex);
-            else if (p.get("model") != "l" && cur == kModelLEntryIndex) out = IniSet(out, sec, "UpscalerIndex", "0");
-        } else if (p.get("model") == "l" && notes) {
-            notes->push_back(L"Model L: this OptiScaler.ini has no UpscalerIndex key; choose WrongGPU Model L in OptiScaler's menu");
+            if (wantIndex) {
+                if (cur != wantIndex) out = IniSet(out, sec, "UpscalerIndex", wantIndex);
+            } else if ((WRONGGPU_MODEL_L && cur == kModelLEntryIndex) || (WRONGGPU_MODEL_K && cur == kModelKEntryIndex)) {
+                out = IniSet(out, sec, "UpscalerIndex", "0");
+            }
+        } else if (wantIndex && notes) {
+            notes->push_back(want == "k" ? L"Model K: this OptiScaler.ini has no UpscalerIndex key; choose WrongGPU (Model K) in OptiScaler's menu"
+                                         : L"Model L: this OptiScaler.ini has no UpscalerIndex key; choose WrongGPU Model L in OptiScaler's menu");
         }
     }
     const string fps = p.get("fps_overlay");

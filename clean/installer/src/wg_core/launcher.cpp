@@ -755,14 +755,15 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
     if (!LoadRecord(RecordPath(dir), m) || m.legacy) Fail(L"WrongGPU is not installed in " + dir + L".", EXIT_NOT_INSTALLED);
     InferOwners(ctx, m);
     bool recordChanged = m.format < 2;
-    // Model L saved while its data on this PC is not ready (removed since, or an install of a game set to L before the data
-    // was converted): the game's files say Model M until it is; the profile keeps the player's choice
+    // Model L (or Model K, a build with its choice) saved while its data on this PC is not ready (removed since, or an install
+    // of a game set to it before the data was converted): the game's files say Model M until it is; the profile keeps the
+    // player's choice
     Profile q = p;
-    if (p.get("model") == "l") {
+    if (const wchar_t chosen = ChosenPreset(p.get("model"))) {
         wstring why;
-        if (!ModelFileReady(ctx, L'L', &why)) {
+        if (!ModelFileReady(ctx, chosen, &why)) {
             q.v["model"] = "m";
-            const wstring w = ModelLNotReady(why) + L" Until then the game starts on Model M.";
+            const wstring w = ModelNotReady(chosen, why) + L" Until then the game starts on Model M.";
             notes.push_back(w);
             if (warnings) warnings->push_back(w);
         }
@@ -1141,10 +1142,14 @@ OpResult RunOp(Context& ctx, const OpRequest& r, Ui& ui) {
                     res.message = L"Engine.ini setting applied; it takes effect the next time the game starts";
                     break;
                 }
-                // Model L chosen now (it was not the game's model before): only with its data on this PC; nothing changes otherwise
-                if (!r.optiOnly && r.hasProfile && r.profile.get("model") == "l" && GameProfile(r.dir).get("model") != "l") {
-                    wstring why;
-                    if (!ModelFileReady(ctx, L'L', &why)) Fail(L"Model L can't be chosen. " + ModelLNotReady(why) + L" Nothing was changed.", EXIT_NO_MODEL);
+                // Model L (or Model K) chosen now (it was not the game's model before): only with its data on this PC; nothing
+                // changes otherwise
+                if (!r.optiOnly && r.hasProfile && r.profile.get("model") != GameProfile(r.dir).get("model")) {
+                    if (const wchar_t chosen = ChosenPreset(r.profile.get("model"))) {
+                        wstring why;
+                        if (!ModelFileReady(ctx, chosen, &why))
+                            Fail(wstring(L"Model ") + chosen + L" can't be chosen. " + ModelNotReady(chosen, why) + L" Nothing was changed.", EXIT_NO_MODEL);
+                    }
                 }
                 if (!r.optiOnly) ApplyProfile(ctx, r.dir, r.hasProfile ? r.profile : GameProfile(r.dir), res.notes, &res.warnings);
                 ApplyOptiTab(ctx, r.dir, r, res.notes);
