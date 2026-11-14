@@ -13,11 +13,13 @@ the native D3D12 device in a child process, then:
 - compares the RAW downloaded bytes of both back ends; each output buffer starts filled with its back end's own
   sentinel (HIP 0xA5, D3D12 0x5A) and has 64 slack bytes after it that neither may write, so an unwritten byte or a
   write past the end differs;
-- a negative control (the first case with 4 or more workgroups, again on D3D12 with half of them) must be caught;
+- a negative control per kernel (its first case with 4 or more workgroups, again on D3D12 with half of them) must be
+  caught;
 - compares the HIP output with the CPU reference, value for value (float16 bits; NaN equals NaN, the reference's NaN
   payload is not specified).
-Cases: every net1 layer shape (cin, cout, kernel size, chunk order, activation) on small grids of several sizes, and
-special values (NaN, +-inf, subnormals, +-65504, -0) in the inputs and weights. Output: counts only, no timing.
+Cases: fg_conv_f16: every net1 layer shape (cin, cout, kernel size, chunk order, activation) on small grids of several
+sizes, and special values (NaN, +-inf, subnormals, +-65504, -0) in the inputs and weights; fg_maxpool2_f16: random maps
+of several sizes (odd ones too) and every 2 x 2 window over ten special values. Output: counts only, no timing.
 """
 import argparse
 import ctypes
@@ -103,7 +105,37 @@ def _conv_case(kernel, x, w, b, k, order, act, label):
                                     b.astype(np.float64), chunks=order, act=act)}
 
 
-KINDS = {"fg_conv_f16": lambda kernel, rng: conv_cases(kernel, rng, specials=True)}
+POOL_SPECIALS = np.array([1.0, -2.0, np.inf, -np.inf, np.nan, 0.0, -0.0, 65504.0, -65504.0, 2.0 ** -24],
+                         dtype=np.float16)
+
+
+def pool_cases(kernel, rng):
+    """Random maps (odd sizes drop their last row / column), and every window of four taps over POOL_SPECIALS (10^4
+    windows side by side in one 2-row map)."""
+    cases = []
+    for C, H, W in ((3, 7, 9), (32, 8, 8), (64, 5, 5), (1, 2, 2), (16, 3, 17), (128, 4, 6)):
+        x = _f16(rng.uniform(-4, 4, (C, H, W)))
+        cases.append(_pool_case(kernel, x, f"{C}x{H}x{W}"))
+    v = POOL_SPECIALS
+    n = len(v)
+    idx = np.arange(n ** 4)
+    taps = [v[(idx // n ** p) % n] for p in range(4)]          # (0,0), (0,1), (1,0), (1,1) of each window
+    x = np.zeros((1, 2, 2 * n ** 4), np.float16)
+    x[0, 0, 0::2], x[0, 0, 1::2], x[0, 1, 0::2], x[0, 1, 1::2] = taps
+    cases.append(_pool_case(kernel, x, "every special window"))
+    return cases
+
+
+def _pool_case(kernel, x, label):
+    C, H, W = x.shape
+    n = C * (H // 2) * (W // 2)
+    return {"kernel": kernel, "grid": -(-n // 256), "block": 256, "label": label,
+            "args": [("buf", x.tobytes()), ("out", 2 * n + SLACK), ("u32", C), ("u32", H), ("u32", W)],
+            "defined": 2 * n, "cpu": lambda: N.maxpool2(x.astype(np.float64))}
+
+
+KINDS = {"fg_conv_f16": lambda kernel, rng: conv_cases(kernel, rng, specials=True),
+         "fg_maxpool2_f16": pool_cases}
 
 
 # ---- prepare --------------------------------------------------------------------------------------------------------
@@ -193,7 +225,7 @@ def run(build, rocm, seeds, kernels):
         mod = h.load_module(f.read())
     cdir = os.path.join(build, "replay-fg")
     os.makedirs(cdir, exist_ok=True)
-    lines, hip_out, neg = [], {}, None
+    lines, hip_out, negs = [], {}, {}     # negs: per kernel, its first case with 4 or more workgroups
     for kernel in kernels:
         for si, seed in enumerate(seeds):
             rng = np.random.default_rng(seed)
@@ -202,8 +234,8 @@ def run(build, rocm, seeds, kernels):
                 outs = hip_run(h, mod, case)
                 hip_out[name] = (kernel, case, outs)
                 lines += replay_lines(name, case, cdir)
-                if neg is None and case["grid"] >= 4:
-                    neg = name
+                if kernel not in negs and case["grid"] >= 4:
+                    negs[kernel] = name
                     lines += replay_lines(name, case, cdir, grid=case["grid"] // 2, prefix="negative_")
     with open(os.path.join(cdir, "cases.txt"), "w", newline="\n") as f:
         f.write("\n".join(lines))
@@ -227,15 +259,18 @@ def run(build, rocm, seeds, kernels):
         ok = ok and good
         res["cases"].append({"case": name, "kernel": kernel, "label": case["label"], "raw": raw, "cpu": cpu,
                              "ok": good})
-    if neg:
-        kernel, case, outs = hip_out[neg]
+    res["negative_controls"] = {}
+    for kernel in kernels:                # every kernel needs its own caught negative control
+        neg = negs.get(kernel)
+        if neg is None:
+            res["negative_controls"][kernel] = None
+            ok = False
+            continue
+        _, case, outs = hip_out[neg]
         nraw = compare_raw(read(os.path.join(cdir, f"negative_{neg}.o0")), outs[0], case["defined"])
         caught = nraw["differ"] != 0 or not nraw["slack_ok"]
-        res["negative_control"] = {"case": neg, "half_grid": True, "caught": caught, "differ": nraw["differ"]}
+        res["negative_controls"][kernel] = {"case": neg, "half_grid": True, "caught": caught, "differ": nraw["differ"]}
         ok = ok and caught
-    else:
-        res["negative_control"] = None
-        ok = False
     res["summary"] = {"cases": len(res["cases"]), "cases_ok": sum(c["ok"] for c in res["cases"]),
                       "values": sum(c["cpu"]["values"] for c in res["cases"]),
                       "nan_values": sum(c["cpu"]["nan"] for c in res["cases"]),
@@ -262,7 +297,7 @@ def main(argv=None):
         if a.json:
             with open(a.json, "w", encoding="utf-8", newline="\n") as f:
                 f.write(text + "\n")
-        print(json.dumps(res["summary"]), "negative control:", json.dumps(res["negative_control"]))
+        print(json.dumps(res["summary"]), "negative controls:", json.dumps(res["negative_controls"]))
         for c in res["cases"]:
             if not c["ok"]:
                 print("FAIL", c["case"], c["label"], json.dumps(c["raw"]), json.dumps(c["cpu"]))

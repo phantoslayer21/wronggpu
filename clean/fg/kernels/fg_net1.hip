@@ -58,3 +58,22 @@ WG_KERNEL_N(fg_conv_f16, 256)(const u16* __restrict__ x, const u16* __restrict__
     if (act == 1) acc = fg_leaky16(acc);
     y[idx] = (u16)acc;
 }
+
+// fg_maxpool2_f16: net1's 2 x 2 max-pool, stride 2, floor sizes (Ho = H / 2, Wo = W / 2): from the first tap (dy, dx) =
+// (0, 0), then (0, 1), (1, 0), (1, 1), the delivered step m <- (x > m) * x + (x <= m) * m in float16 (fg_pool_step16).
+// x [C][H][W], y [C][Ho][Wo]; output element idx = (c * Ho + oy) * Wo + ox.
+WG_KERNEL_N(fg_maxpool2_f16, 256)(const u16* __restrict__ x, u16* __restrict__ y, int C, int H, int W) {
+    const int Ho = H / 2, Wo = W / 2;
+    const int idx = (int)(wg_block_id() * 256u + wg_lane_id());
+    if (idx >= C * Ho * Wo) return;
+    const int c = idx / (Ho * Wo);
+    const int rem = idx - c * (Ho * Wo);
+    const int oy = rem / Wo;
+    const int ox = rem - oy * Wo;
+    const u16* p = x + (c * H + 2 * oy) * W + 2 * ox;
+    uint m = p[0];
+    m = fg_pool_step16(m, p[1]);
+    m = fg_pool_step16(m, p[W]);
+    m = fg_pool_step16(m, p[W + 1]);
+    y[idx] = (u16)m;
+}
