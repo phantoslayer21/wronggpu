@@ -184,6 +184,9 @@ def reconstruct(x, s, t=_table.TABLE, ldr=False):
     window = int(rc["window"])
     linear = rc["history_combine"] == "linear"
     lin_fallback = rc["fallback"] == "linear_colour"
+    f32 = rc.get("blend", "float64") == "float32"
+    r32 = _f32 if f32 else (lambda v: v)
+    fma = lambda a, b, c: np.asarray(_motion_hi.fma32(a, b, c), np.float64)  # noqa: E731 (float32, one rounding)
     enc, dec, enc_in = _transfer(ldr)
 
     color = np.asarray(x["color"], np.float64)
@@ -236,7 +239,7 @@ def reconstruct(x, s, t=_table.TABLE, ldr=False):
         hs = _post.history_sample(hist, np.where(valid, qx, 0.5), np.where(valid, qy, 0.5)) if not reset else 0.0
         if linear:
             with np.errstate(invalid="ignore", over="ignore"):
-                hs = dec(hs) / e_prev
+                hs = r32(r32(dec(hs)) / e_prev)
         return np.where(valid[..., None], hs, fallback), nanq
 
     if hi:
@@ -256,16 +259,33 @@ def reconstruct(x, s, t=_table.TABLE, ldr=False):
         h2 = np.take_along_axis(Hk, second[..., None, None], -1)[..., 0]
         nan_h = sel(nk, first) | ((w2 != 0) & sel(nk, second))
     with np.errstate(invalid="ignore", over="ignore"):
-        H = np.where((w2 == 0)[..., None], w1[..., None] * h1, w1[..., None] * h1 + w2[..., None] * h2)
+        if f32:
+            # float32, one rounding per operation: Hl = f32(fused(w1 L1 + f32(w2 L2)) e) (w1 L1 alone when w2 = 0).
+            w1, w2 = r32(w1), r32(w2)
+            H = np.where((w2 == 0)[..., None], r32(w1[..., None] * h1),
+                         fma(w1[..., None], h1, r32(w2[..., None] * h2)))
+        else:
+            H = np.where((w2 == 0)[..., None], w1[..., None] * h1, w1[..., None] * h1 + w2[..., None] * h2)
 
         # 5. blend
-        C_lin = dec(cbar)
-        H_lin = H * e if linear else dec(H) / e_prev * e
-        alpha = _post.clamp(s * W * gbar, 0.0, 1.0)
-        bh2 = (alpha * (1.0 - bh) + bh)[..., None]
-        bo2 = (alpha * (1.0 - bo) + bo)[..., None]
-        Hh = H_lin + (C_lin - H_lin) * bh2
-        Oh = H_lin + (C_lin - H_lin) * bo2
+        if f32:
+            # alpha = sat(f32(f32(s W) g-bar)), beta' = fused(alpha f32(1 - beta-bar) + beta-bar),
+            # H^ = fused(f32(C - Hl) beta' + Hl), O^ likewise.
+            C_lin = r32(dec(cbar))
+            H_lin = r32(H * e)
+            alpha = _post.clamp(r32(r32(np.float32(s) * W) * gbar), 0.0, 1.0)
+            bh2 = fma(alpha, r32(1.0 - bh), bh)[..., None]
+            bo2 = fma(alpha, r32(1.0 - bo), bo)[..., None]
+            Hh = fma(r32(C_lin - H_lin), bh2, H_lin)
+            Oh = fma(r32(C_lin - H_lin), bo2, H_lin)
+        else:
+            C_lin = dec(cbar)
+            H_lin = H * e if linear else dec(H) / e_prev * e
+            alpha = _post.clamp(s * W * gbar, 0.0, 1.0)
+            bh2 = (alpha * (1.0 - bh) + bh)[..., None]
+            bo2 = (alpha * (1.0 - bo) + bo)[..., None]
+            Hh = H_lin + (C_lin - H_lin) * bh2
+            Oh = H_lin + (C_lin - H_lin) * bo2
         Hh = np.where((np.isnan(Hh.sum(-1)) | nan_h)[..., None], C_lin, Hh)
         Oh = np.where((np.isnan(Oh.sum(-1)) | nan_h)[..., None], C_lin, Oh)
 
@@ -286,5 +306,6 @@ def reconstruct(x, s, t=_table.TABLE, ldr=False):
             disp = _post.clamp(enc(Oh), 0.0, _post.DISPLAY_MAX)
     return {"history": _post.f16(enc(Hh)), "reduced": (code / 1023.0).astype(np.float32),
             "display": _post.f16(disp),
-            "_lin": {"H_hat": Hh, "O_hat": Oh, "W": W, "first": first, "second": second, "w1": w1, "w2": w2},
+            "_lin": {"H_hat": Hh, "O_hat": Oh, "W": W, "first": first, "second": second, "w1": w1, "w2": w2,
+                     "C_lin": C_lin, "H_lin": H_lin, "beta_h": bh2[..., 0], "beta_o": bo2[..., 0]},
             **({"display_codes": codes.astype(np.uint16)} if codes is not None else {})}
