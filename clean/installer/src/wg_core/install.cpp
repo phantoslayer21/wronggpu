@@ -228,6 +228,7 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     if (rr) {
         ui.step(0, 1, L"Preparing the Ray Reconstruction data");
         const RrDataState rd = FindRrData(ctx, &target, L"", {});
+        for (auto& n : rd.notes) { ui.log(n); warnings.push_back(n); }  // the ignore lists' lines (an RR data kept unchecked)
         wstring why;
         rrData = rd.ok && WriteRrData(ctx, rd, &why);
         if (!rrData) {  // nothing fails silently: the operation's result says it too (the window's note after its success)

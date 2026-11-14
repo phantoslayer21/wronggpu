@@ -497,6 +497,13 @@ bool check_values(const std::string& where, const Tensor& t, std::string* err) {
 
 bool load_wgcm_model(const std::string& path, const std::string& map_path, std::map<std::string, StageTensors>* out,
                      std::string* err, bool* other_map) {
+  StageSpecs stages;
+  for (const std::string& stage : model_stages()) stages.emplace_back(stage, stage_specs(stage));
+  return load_wgcm_stages(path, map_path, stages, out, err, other_map);
+}
+
+bool load_wgcm_stages(const std::string& path, const std::string& map_path, const StageSpecs& specs,
+                      std::map<std::string, StageTensors>* out, std::string* err, bool* other_map) {
   if (other_map) *other_map = false;
   std::vector<uint8_t> d;
   if (!read_all(path, &d)) return *err = "model data missing: " + path, false;
@@ -608,10 +615,10 @@ bool load_wgcm_model(const std::string& path, const std::string& map_path, std::
   if (!ix.ok) return *err = bad + ": truncated index", false;
 
   // Every stage and tensor the runtime needs, with the shapes of spec 08 section 7.2.
-  for (const std::string& stage : model_stages()) {
+  for (const auto& [stage, stage_tensors] : specs) {
     auto it = got.find(stage);
     if (it == got.end()) return *err = same_map ? bad + ": stage " + stage + " missing" : not_this_map, false;
-    for (const TensorSpec& ts : stage_specs(stage)) {
+    for (const TensorSpec& ts : stage_tensors) {
       auto t = it->second.find(ts.name);
       const std::string where = stage + "/" + ts.name;
       if (t == it->second.end()) return *err = bad + ": tensor " + where + " missing", false;
@@ -637,6 +644,55 @@ bool load_wgcm_model(const std::string& path, const std::string& map_path, std::
   if (other_map) *other_map = !same_map;
   return true;
 }
+
+// ---- the building blocks for other models' packers (model.h, namespace pack_parts): the packers' own helpers
+namespace pack_parts {
+
+std::vector<std::vector<uint8_t>> frags(const float* m, int rows, int cols, const Order& R, const Order& K) {
+  return wgrt::frags(Mat{m, rows, cols}, R, K);
+}
+void put_frags(std::vector<uint8_t>* b, const std::vector<std::vector<uint8_t>>& f) { wgrt::put_frags(b, f); }
+void put_tile_vector(std::vector<uint8_t>* b, const float* vec, const Order& R, const DRow& drow) {
+  wgrt::put_tile_vector(b, vec, R, drow);
+}
+Order rows_identity(int n) { return wgrt::rows_identity(n); }
+Order rows_layout_l(int C, const DRow& drow) { return wgrt::rows_layout_l(C, drow); }
+Order rows_expand(int C, const DRow& drow) { return wgrt::rows_expand(C, drow); }
+Order kord_layout_l(int C) { return wgrt::kord_layout_l(C); }
+Order kord_drow(int n, const DRow& drow) { return wgrt::kord_drow(n, drow); }
+size_t align_up(size_t n) { return wgrt::align_up(n); }
+
+bool pack_swin_block(const StageTensors& t, const std::string& prefix, int C, int heads, int mlp, const DRow& drow,
+                     std::vector<uint8_t>* out, std::string* err) {
+  out->clear();
+  if (C <= 0 || C % 16 || heads <= 0 || mlp <= 0 || mlp % 16) {
+    *err = "block shape C " + std::to_string(C) + ", " + std::to_string(heads) + " heads, MLP " + std::to_string(mlp) +
+           ": C and MLP multiples of 16 needed";
+    return false;
+  }
+  const size_t D = (size_t)heads * kHeadDim;
+  const std::pair<const char*, size_t> want[] = {
+      {"gamma1", (size_t)C}, {"gamma2", (size_t)C}, {"Wqk", D * C}, {"Wv", D * C}, {"B", (size_t)heads * 256},
+      {"Wp", (size_t)C * D}, {"bp", (size_t)C},     {"W1", (size_t)mlp * C}, {"b1", (size_t)mlp},
+      {"W2", (size_t)C * mlp}, {"b2", (size_t)C}};
+  StageTensors block;  // the block's tensors under their plain names
+  for (const auto& w : want) {
+    const auto it = t.find(prefix + w.first);
+    if (it == t.end()) return *err = "missing tensor " + prefix + w.first, false;
+    if (it->second.f.size() != w.second)
+      return *err = "tensor " + prefix + w.first + " has " + std::to_string(it->second.f.size()) + " values, expected " +
+                    std::to_string(w.second),
+             false;
+    block[w.first] = it->second;
+  }
+  const SwinStageInfo s = {'b', C, heads, mlp, 0, 0};
+  wgrt::pack_block(block, s, drow, out);
+  if (out->size() != block_layout(C, heads, mlp).size) return *err = "block size mismatch", false;
+  pad_to(out, wgrt::align_up(out->size()));
+  return true;
+}
+
+}  // namespace pack_parts
 
 bool pack_stage_blob(const std::string& stage, const StageTensors& t, const DRow& drow, std::vector<uint8_t>* out,
                      std::string* err) {
