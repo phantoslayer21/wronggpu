@@ -297,6 +297,18 @@
    "k_io.co"
   ],
   [
+   "k_out_color",
+   "k_io.co"
+  ],
+  [
+   "k_out_pixel",
+   "k_io.co"
+  ],
+  [
+   "k_out_pixel_c",
+   "k_io.co"
+  ],
+  [
    "k_stage2_d0_hidden",
    "k_block.co"
   ],
