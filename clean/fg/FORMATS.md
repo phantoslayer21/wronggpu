@@ -95,6 +95,20 @@ delivered by the spec side; the code never guesses it (it raises, or takes the c
 - Not part of net1 and still open: what the 10 input values are made of (images A-D, the warps) and the input grid
   size relative to the output.
 
+## GPU kernels (`kernels/`, code object `fg_net1.co`; D3D12 ports `clean/dx12/kernels/fg_*.hlsl`)
+
+- Groundwork: no runtime launches them yet. Tensors float16 channel-first `[c][h][w]`, weights natural
+  `[out][in][k][k]` float16 (the map's `W`), biases `[out]` float16; a 1-D grid of 256-lane workgroups, one output
+  element per lane.
+- `fg_conv_f16(x, w, b, y, cin, cout, H, W, k, order, act)`: one net1 convolution exactly as `net1.conv16`: stride 1,
+  zero border, float16 accumulator from the bias, 16-term chunks each summed exactly and rounded once, chunk order
+  `order` (0 ascending, 1 channel block / kx / ky, 2 kx / channel block / ky), `act` 0 none or 1 leaky ReLU. cin is a
+  multiple of 16.
+- The arithmetic is integer code shared by both back ends (`kernels/fg_exact16.h`), the method of `fp16acc.py`; NaN
+  results are written as 0x7E00. The D3D12 build compiles `fg_` kernels only when `--only` names them, so Model M's
+  and Model L's kernel sets and DXILs do not change.
+- `runner/fg_d3d12_check.py` proves each kernel on HIP against D3D12 (raw bytes) and against the CPU reference.
+
 ## Configuration (`reference/config.py`)
 
 - No configuration value changes the networks or their weights.

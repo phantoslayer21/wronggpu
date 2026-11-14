@@ -5,7 +5,8 @@ clean/runtime/device_dx12.cpp): <out>/dx12/<tag>__<kernel>.dxil (or <kernel>.dxi
     python clean/dx12/build_dx12.py --out build/dx12-m/hip [--isa] [--only exposure_auto_diet,...] [-j N] [--model-l]
 
 Model L's kernels (#89: those that reproduce one of Model L's code objects, co=l_*.co, direct-route kernels named l_*, and MODEL_L_ONLY) are built only with --model-l
-or when --only names them, so that a build without the option is Model M's kernel set unchanged.
+or when --only names them, so that a build without the option is Model M's kernel set unchanged. Frame generation's
+kernels (#96: co=fg_*.co or named fg_*) are built only when --only names them, never by a full build.
 
 Every kernel source declares its kernels in header lines (clean/dx12/README.md):
 
@@ -186,13 +187,23 @@ def is_model_l(decl):
     return decl["co"].startswith("l_") or decl["name"].startswith("l_") or decl["name"] in MODEL_L_ONLY
 
 
+def is_frame_gen(decl):
+    """A port of frame generation's kernels (#96: code objects fg_*.co, or named fg_*). They are groundwork that no model
+    build launches yet: built only when --only names them, never by a full build (with or without --model-l), so the
+    Model M and Model L kernel sets and their DXILs stay as they are."""
+    return decl["co"].startswith("fg_") or decl["name"].startswith("fg_")
+
+
 def kernel_set(model_l=False):
     """(name, code object) of every kernel a full build compiles (no --only), sorted: Model M's set, plus Model L's
-    with model_l. From the sources' declarations alone (nothing is compiled)."""
+    with model_l. From the sources' declarations alone (nothing is compiled). Frame generation's kernels are never in
+    it (is_frame_gen)."""
     keys = set()
     for fn in sorted(os.listdir(KERNEL_DIR)) if os.path.isdir(KERNEL_DIR) else []:
         if fn.endswith(".hlsl"):
             for d in kernel_decls(os.path.join(KERNEL_DIR, fn)):
+                if is_frame_gen(d):
+                    continue
                 if model_l or not is_model_l(d):
                     keys.add((d["name"], d["co"]))
     return sorted(keys)
@@ -320,6 +331,8 @@ def main(argv=None):
             if only and d["name"] not in only:
                 continue
             if not only and not a.model_l and is_model_l(d):
+                continue
+            if not only and is_frame_gen(d):
                 continue
             key = (d["name"], d["co"])
             if key in kernels and key not in old:
