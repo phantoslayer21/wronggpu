@@ -68,7 +68,7 @@ UNFUSED_FRAME_KERNELS = {"exposure_auto_diet", "input_encoder", "swin_block_c64_
                          "expand_c96", "d1p12/swin_block_c64_add_dec0_nc", "w64/post_tf_f32_p12_diet_vsit"}
 # The native backend (--backend d3d12) runs the D3D12 fusions of WG_D3D12_FUSION (default: runtime.cpp's
 # kDefaultD3d12Fusion, mirrored here), which replace some launches (kernels/fused_swin.hlsl, fused_bneck.hlsl, fused_dec.hlsl).
-DEFAULT_D3D12_FUSION = "pm,xe,mb,rv,xo,xd,lc"  # lc: Model L only
+DEFAULT_D3D12_FUSION = "pm,xe,mb,rv,xo,xd,lc,ll"  # lc, ll: Model L only
 
 
 def d3d12_fusion():
