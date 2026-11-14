@@ -122,12 +122,23 @@ the frame parity, as Model M's.
    `clean/l/runner/l_post_check.py`):
    - arguments, buffers, layouts and grid are Model M's `post_recon` (Model M's `clean/FORMATS.md`), with `w` = the
      post blob (`w[0]` = Model L's s);
-   - its gather order is i (columns) outer, j (rows) inner, as the oracle;
+   - its colour gather runs in the model's precision, as confirmed by the spec side (the oracle's `recon.gather_half`):
+     - fused target positions;
+     - FP16 offsets and exponent with the fused cross term;
+     - float32 weights flushed to +0 below 2^-126;
+     - FP16 weights into half accumulators;
+     - a float32 weight sum;
+     - tap order i (columns) outer, j (rows) inner.
+
+     So the kernel and the oracle agree on which weights underflow. Two regimes follow: total weight 0, the
+     zero-weight values; and total weight > 0 with every FP16 weight 0, where the output is the candidate history.
    - its candidate combination is one fused multiply-add w1 L1 + (w2 L2), then times e;
+   - its blend is the fused form beta' = fused(alpha (1 - beta-bar) + beta-bar), H^ = fused((C - Hl) beta' + Hl);
    - the decode passes a NaN through.
 
-   The LDR kernel is planned, with the same arguments. The kernel-order model (the half-precision and fused-rounding
-   forms) is not fixed yet.
+   The LDR kernel is planned, with the same arguments. Still open for the kernel-order model: the hardware exp2,
+   reciprocal and divisions, and the Catmull-Rom weight forms, which the kernel takes from Model M's `post.hip`
+   (part of the Model M fidelity decision).
 
 ## Checks (GPU, synthetic data)
 

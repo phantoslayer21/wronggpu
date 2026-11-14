@@ -95,7 +95,7 @@ class ReconTest(unittest.TestCase):
         color = np.asarray(x["color"], np.float64)
         rh, rw = color.shape[:2]
         dw, dh = x["recon_size"]
-        px, py = MP.target_positions(rw, rh, dw, dh, *np.asarray(x["jitter"], np.float64))
+        px, py = R.target_positions_f32(rw, rh, dw, dh, *np.asarray(x["jitter"], np.float64))
         fy, fx = MP.point_index(px, py, rw, rh)
         w = lin["w1"] + np.where(lin["w2"] == 0, 0.0, lin["w2"])
         H_lin = w[..., None] * color[fy, fx] * float(x["exposure"])
@@ -122,7 +122,7 @@ class ReconTest(unittest.TestCase):
         rh, rw = color.shape[:2]
         dw, dh = x["recon_size"]
         e, ep = float(x["exposure"]), float(x["exposure_prev"])
-        px, py = MP.target_positions(rw, rh, dw, dh, *np.asarray(x["jitter"], np.float64))
+        px, py = R.target_positions_f32(rw, rh, dw, dh, *np.asarray(x["jitter"], np.float64))
         fy, fx = MP.point_index(px, py, rw, rh)
         X = np.arange(dw)[None, :] + 0.5
         Y = np.arange(dh)[:, None] + 0.5
@@ -182,6 +182,7 @@ class ReconTest(unittest.TestCase):
         x = _inputs(rng, rw=20, rh=12)
         x["color"] = np.full(np.shape(x["color"]), 0.5, np.float32)
         x["history"] = np.full(np.shape(x["history"]), 0.5, np.float32)
+        x["C"] = np.zeros(np.shape(x["C"]), np.float32)          # every weight exactly 1: the half gather is exact
         dw, dh = x["recon_size"]
         ow, oh = (2 * dw) // 3, (2 * dh) // 3
         self.assertEqual(T.recon_size(ow, oh), (dw, dh))
@@ -197,6 +198,53 @@ class ReconTest(unittest.TestCase):
             self.assertTrue((img == want).all())
         self.assertEqual(np.float32(1 / 2047).view(np.uint32), 0x3A001002)
         self.assertEqual(np.float32(1 / 1023).view(np.uint32), 0x3A802008)
+
+    def _extreme(self, offset, reset):
+        """D = R, every target `offset` render pixels right of a texel centre (jitter), C = (65504, 65504, 0)."""
+        rng = np.random.default_rng(12)
+        x = MP.random_inputs(rng, 16, 12, 16, 12, reset=reset)
+        x["jitter"] = np.array([offset, 0.0], np.float32)
+        x["exposure"], x["exposure_prev"] = np.float32(1.5), np.float32(0.75)
+        x["C"] = np.broadcast_to(np.array([65504.0, 65504.0, 0.0], np.float32), np.shape(x["C"])).copy()
+        for k in ("m_near", "m_center", "m_far"):
+            x[k] = np.zeros(np.shape(x[k]), np.float32)
+        x["history"] = np.full(np.shape(x["history"]), 0.75, np.float32)  # E-encoded, constant
+        return x
+
+    def test_gather_precision_constants(self):
+        """A = B = h(f32(65504 -0.721325)) = -47264; at offset 0.1: u = h(0.1) = 0.0999755859375, h(u u) =
+        0.0099945068359375, eps = -472.5."""
+        self.assertEqual(R._h(R._f32(65504.0 * R._f32(-0.721325))), -47264.0)
+        u = R._h(0.1)
+        self.assertEqual(u, 0.0999755859375)
+        self.assertEqual(R._h(u * u), 0.0099945068359375)
+        self.assertEqual(R._h(R._h(u * u) * -47264.0), -472.5)
+
+    def test_offset_005_is_the_candidate_history(self):
+        """Offset 0.05 (between the h(w) = 0 and w = 0 thresholds): W > 0, every FP16 weight 0, all features 0, so the
+        output is candidate 1's history: with reset the linear colour times e; without, D(history) / e_prev times e
+        (the history is constant and every position valid)."""
+        for reset in (True, False):
+            x = self._extreme(0.05, reset)
+            out = R.reconstruct(x, 2.9796233)
+            W = out["_lin"]["W"]
+            self.assertTrue((W > 0).all() and np.isfinite(W).all())
+            e, ep = 1.5, 0.75
+            if reset:
+                Hl = np.asarray(x["color"], np.float64) * e        # D = R, floor p = the pixel itself
+            else:
+                Hl = np.full(out["history"].shape, float(MP.dec(0.75)) / ep * e)
+            np.testing.assert_allclose(out["_lin"]["H_hat"], Hl, rtol=1e-12)
+            np.testing.assert_allclose(out["_lin"]["O_hat"], Hl, rtol=1e-12)
+
+    def test_offset_01_is_zero_weight(self):
+        """Offset 0.1 (beyond 0.0516): W = 0 everywhere, the confirmed zero-weight values."""
+        x = self._extreme(0.1, False)
+        out = R.reconstruct(x, 2.9796233)
+        self.assertTrue((out["_lin"]["W"] == 0).all())
+        self.assertTrue((out["history"] == np.float32(-1.4404296875)).all())
+        self.assertTrue((out["display"] == 0).all())
+        self.assertTrue((out["reduced"] == 0).all())
 
     def test_history_of_another_size_needs_reset(self):
         rng = np.random.default_rng(11)
