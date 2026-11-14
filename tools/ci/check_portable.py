@@ -115,6 +115,15 @@ def check_fs_path(rel, text):
             continue
         found.append("%s:%d: std::filesystem::path built directly (%s); use wg::FsPath(wstring) from wg_core/util.h"
                      % (rel, line, " ".join(code[m.start():j].split())[:80]))
+    # copy-initialisation compiles from a wstring too: `fs::path p = w;` (a narrow literal or wg::FsPath on the right is fine)
+    init = re.compile(r"\b(?:%s)::path\s+\w+\s*=\s*([^;]+);" % "|".join(re.escape(n) for n in names))
+    for m in init.finditer(code):
+        rhs = m.group(1).strip()
+        line = code.count("\n", 0, m.start()) + 1
+        if NARROW_LITERAL.match(rhs) or rhs.startswith(("FsPath(", "wg::FsPath(")) or line in win:
+            continue
+        found.append("%s:%d: std::filesystem::path copy-initialised (%s); use wg::FsPath(wstring) from wg_core/util.h"
+                     % (rel, line, " ".join(code[m.start():m.end()].split())[:80]))
     return found
 
 
@@ -172,7 +181,7 @@ std::filesystem::path FsPath(const std::wstring& p);
 // std::filesystem::path(wide) and ID2D1Factory in a comment, "fs::path(x)" and "DwmSetWindowAttribute" in a string
 const char* s = "fs::path(x) DwmSetWindowAttribute";
 void F(const fs::path& a, const std::filesystem::path* b) { std::filesystem::path none; auto c = fs::path("narrow"); fs::path d; }
-void G(const std::wstring& w) { auto p = wg::FsPath(w); (void)p; }
+void G(const std::wstring& w) { auto p = wg::FsPath(w); (void)p; std::filesystem::path q = wg::FsPath(w); fs::path r = "narrow"; }
 std::filesystem::path FsPath(const std::wstring& p);
 #ifndef _WIN32
 struct IWICImagingFactory { void Release() {} };  // the Linux branch's own stub of a name Windows has
@@ -186,6 +195,7 @@ PLANTED = {
     "(a) path from a wstring, fully qualified": ("src/wg_core/x.cpp", "void F(const std::wstring& w) { auto p = std::filesystem::path(w); }\n", check_fs_path),
     "(a) path from a wstring, through an alias": ("src/app/x.cpp", "namespace fs = std::filesystem;\nvoid F(const std::wstring& w) { fs::path p(w); }\n", check_fs_path),
     "(a) path from a wstring, in the Linux branch": ("src/app/x.cpp", "#ifdef _WIN32\n#else\nvoid F(const std::wstring& w) { std::filesystem::path p{w}; }\n#endif\n", check_fs_path),
+    "(a) path copy-initialised from a wstring": ("src/wg_core/x.cpp", "void F(const std::wstring& w) { std::filesystem::path p = w; }\n", check_fs_path),
     "(b) Direct2D outside #ifdef _WIN32": ("src/app/ui_x.cpp", "ID2D1Factory* g = nullptr;\n", check_windows_api),
     "(b) DWM call in the Linux branch": ("src/app/ui_x.cpp", "#ifndef _WIN32\nvoid F(HWND h) { DwmSetWindowAttribute(h, 13, 0, 0); }\n#endif\n", check_windows_api),
     "(b) UI Automation header": ("src/app/ui_x.cpp", "#include <uiautomation.h>\n", check_windows_api),
