@@ -30,7 +30,11 @@ and starts filled with its run's own sentinel (HIP `0xA5`, D3D12 `0x5A`); the de
 slack must keep its sentinel; special values are among the inputs; a negative control (the port given another input
 than HIP) must be caught; Model M's `scale_rgb` runs through the same replay as a control. Output: counts and verdicts.
 
-Families: `narrow` (the narrow network stages of `k_block.co`: `k_stage_e2`, `k_stage_e0`, `k_stage_e1`, `k_stage_d2`,
+Families: `input` (the exact tiled input stage `kx/k_in_tiled` of `k_io_exact.co`: 16 flag sets of HDR, low-resolution
+motion, inverted depth and reset, odd and tiny base grids down to 1 x 1, the exposure scalars from a device buffer as the
+runtime passes them, infinity, huge values, zero and -0 in the colour, depth, motion and histories, NaN in a third of
+the cases; the raw bytes are identical in every case; the port needs the adapter's binary64 fma and division (manifest
+`fp64: ext`, dropped on an adapter without them), and flushes FP32 denormals); `narrow` (the narrow network stages of `k_block.co`: `k_stage_e2`, `k_stage_e0`, `k_stage_e1`, `k_stage_d2`,
 `k_stage_d1`, `k_stage2_e0`, `k_stage2_e1`, `k_stage2_d1`, `k_stage2_d0_hp`, `k_stage2_d0_hidden`) on random stage weights
 and inputs, the stage runner's launch plans run on HIP and replayed on D3D12 (`k_plan_bridge.py`); the inputs of every
 third case carry special values (infinity, +-65504, zero, -0, subnormals) and of every third case NaN as well; the

@@ -367,6 +367,10 @@
   [
    "k_warm",
    "k_block_wide.co"
+  ],
+  [
+   "kx/k_in_tiled",
+   "k_io_exact.co"
   ]
  ]
 }
