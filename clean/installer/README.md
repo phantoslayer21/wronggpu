@@ -414,6 +414,27 @@ model choice and the runtime settings for Model L are not part of this step. `te
 end to end: once with a build of the shipped map, and once with a build of a test map in its exact layout
 (`--write-test-map`).
 
+**The model choice** (#89; CMake `WRONGGPU_MODEL_L`, default `OFF`, on only in a release whose front end and runtime run
+Model L; `src/wizard_policy.h`). With it off there is no model setting anywhere (profile, `get`, the window), and
+`set <game> model=L` is refused by name (exit 10). With it on, `set <game> model=L|M` (profile key `model`, values `m`, `l`):
+- **L** is accepted only while Model L's data on this PC (`model\L\model.wgcm`) passes its check against Model L's converter
+  data. Otherwise: "Model L can't be chosen. Model L's data on this PC is not ready (...). Convert it first: ..." (exit 5,
+  nothing changed). It writes wronggpu.ini's `runtime_options`: every model item out, `model=L` last (the last model item
+  wins). It also writes OptiScaler.ini's `UpscalerIndex`, so OptiScaler starts with Model L's entry: `[WrongGPU]` in
+  OptiScaler 10's slot, else `[FSR]`. The index is 1, or 2 in a build with Preset K (after Model M and Model K in the
+  front end's list). Both writes go through the settings apply, so the install record's hashes follow them (the
+  file-ownership rule).
+- **M** is the default and changes nothing. Model L's items become `model=M` again, and an `UpscalerIndex` naming Model
+  L's entry goes back to 0. Anything else (the installer's `model=M`, another entry the player chose in OptiScaler's
+  menu) stays as it is. profile.ini has a `model` line only for L.
+- A game saved on L whose Model L data is gone (removed, or not converted before an install, repair or update) is not
+  refused. Its files say Model M with a warning saying how to convert the data, and the profile keeps L.
+- The window has no model control yet. The choice is made with `set` (or a `profile.model=` line of an elevated job).
+
+Tested by `model-choice` (ctest: profile.cpp built with the choice on) and `tests/run_model_l_tests.py --launcher-choice`
+(a build with the choice on: refusal, both files, record hashes, back to M byte for byte, repair without the data,
+uninstall), and with it off by `launcher-core` and the same script's build without the choice.
+
 **Ignore lists** (`src/wg_core/convert_ignore.*`): WrongGPU converts only the vendor DLL files that came with the player's
 own games, never a copy that another program's installer placed in a game. Such an installer registers the files it placed
 in a list the launcher always reads, and the player does nothing. Every search for a file to convert (the model and the Ray
