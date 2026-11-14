@@ -597,10 +597,13 @@ static void TestOwnUpscalerPath() {
 
 // Bug hunt H: a frame whose output size (upscaleSize) is smaller than the create's maxUpscaleSize: the upscaler is created
 // again for that size (the context stays), its first frame without history; the same size again creates nothing; a
-// size over the maximum is not; after 8 sizes no more creates.
+// size over the maximum is not; after Config::maxOutputResizes sizes no more creates (the tests raise it to 8; the
+// default, 1, is TestResizeCapDefault).
 static void TestOutputResize() {
     Reset();
-    auto fe = MakeFrontEnd(Config{});
+    Config eight;
+    eight.maxOutputResizes = 8;
+    auto fe = MakeFrontEnd(eight);
     UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
     ffxContext ctx = nullptr;
     CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
@@ -639,7 +642,9 @@ static void TestOutputResize() {
 // at once when the device is lost (nothing of it runs any more).
 static void TestResizeKeepsRetired() {
     Reset();
-    auto fe = MakeFrontEnd(Config{});
+    Config eight;
+    eight.maxOutputResizes = 8;  // (the default of 1 allows only one kept upscaler: TestResizeCapDefault)
+    auto fe = MakeFrontEnd(eight);
     UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
     c.upscale.maxRenderSize = {2560, 1440};
     ffxContext ctx = nullptr;
@@ -700,6 +705,33 @@ static void TestResizeKeepsRetired() {
 
 // Bug hunt F1 (a): an upscaler that failed for good, without AMD's FSR to take the context over, is not called again:
 // the stand-in (or an error) for the later frames, logged at 1, 2, 3, 10... frames, not two ERROR lines per frame.
+// The default bound (Config::maxOutputResizes = 1, from the GPU memory measured for PR #85: one Model M upscaler is about
+// 0.9 GiB at 4K output): one output-size change creates an upscaler again and keeps the old one until the context is
+// destroyed; the next size change creates nothing (the kept one is not replaced, nothing else is destroyed), and the
+// log says so once.
+static void TestResizeCapDefault() {
+    Reset();
+    Config defaults;
+    CHECK(defaults.maxOutputResizes == 1);
+    auto fe = MakeFrontEnd(defaults);
+    UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
+    ffxContext ctx = nullptr;
+    CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
+    ffxDispatchDescUpscale d = MakeDispatch();
+    CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
+    d.upscaleSize = {1920, 1080};
+    CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK && g_createCalls == 2 && g_destroyed == 0);
+    d.upscaleSize = {1600, 900};  // the second size change: over the bound
+    fe->Dispatch(&ctx, &d.header);
+    d.upscaleSize = {1280, 720};
+    fe->Dispatch(&ctx, &d.header);
+    CHECK(g_createCalls == 2 && g_destroyed == 0);
+    CHECK(CountLog("the upscaler is not created again for this context") == 1);
+    CHECK(CountLog("again after 1 size change;") == 1);
+    CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK && fe->OwnContextCount() == 0);
+    CHECK(g_destroyed == 2);  // the kept one and the current one
+}
+
 static void TestBrokenNotCalledAgain() {
     Reset();
     g_originalAvailable = false;
@@ -3388,6 +3420,7 @@ int main() {
     TestCustomSlotInputRefused();
     TestOutputResize();
     TestResizeKeepsRetired();
+    TestResizeCapDefault();
     TestBrokenNotCalledAgain();
     TestHostReentryStopped();
     TestCustomSlotDestroyPath();

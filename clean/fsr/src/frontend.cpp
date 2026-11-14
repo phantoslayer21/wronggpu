@@ -58,12 +58,12 @@ struct FrontEnd::UpscaleContext {
     bool amdLast = false;         // the last frame was one of AMD's FSR for such a frame (AMD's history continues)
     bool broken = false;          // the upscaler failed for good: it is not parked
     uint64_t brokenFrames = 0;    // bug hunt F1: frames since the upscaler failed for good (it is not called again)
-    uint32_t resizes = 0;         // bug hunt H: upscalers created again for the frames' output size (kMaxResizes)
+    uint32_t resizes = 0;         // bug hunt H: upscalers created again for the frames' output size (Config::maxOutputResizes)
     bool resizeFailed = false;    // ... and such a create failed: no more attempts for this context
     // Issue #58: upscalers and stand-ins a resize replaced. Command lists the game recorded before may still use them
     // (the copy into the output after the split, or a whole list not yet submitted); the front end has no fence of its
     // own, so they are destroyed only when the context is destroyed (its completion boundary, as for Fail's handoff),
-    // or at once while the device is lost. At most kMaxResizes upscalers (and their stand-ins) per context.
+    // or at once while the device is lost. At most Config::maxOutputResizes upscalers (and their stand-ins) per context.
     struct Replaced {
         const WgUpscalerBackend* backend;
         WgUpscaler* upscaler;
@@ -982,10 +982,11 @@ ffxReturnCode_t FrontEnd::BrokenFrame(UpscaleContext& u, WgFrame& frame, const s
 // output size is fixed at create: every such frame was refused with WG_ERROR_PARAMETER). Within the context's
 // maxUpscaleSize the upscaler is created again for the frame's size, here on the game's thread (as a create without
 // AMD's FSR to upscale meanwhile); the outer FidelityFX context stays, the new upscaler starts without history. At most
-// kMaxResizes times per context (a game that changes the size every few frames gets the old behaviour after that), and
-// never again after a failed create (the old upscaler stays).
+// Config::maxOutputResizes times per context (a game that changes the size more often gets the old behaviour after that;
+// each kept replaced upscaler holds its GPU memory until the context is destroyed), and never again after a failed create
+// (the old upscaler stays).
 void FrontEnd::ResizeForFrame(UpscaleContext& u, WgFrame& frame, const std::string& tag) {
-    constexpr uint32_t kMaxResizes = 8;
+    const uint32_t kMaxResizes = config_.maxOutputResizes;
     if (!u.backend || !u.upscaler || u.pending || u.broken || u.resizeFailed) return;
     const uint32_t w = frame.output_width, h = frame.output_height;
     if ((w == u.createInfo.output_width && h == u.createInfo.output_height) || !w || !h) return;
@@ -995,7 +996,8 @@ void FrontEnd::ResizeForFrame(UpscaleContext& u, WgFrame& frame, const std::stri
     if (u.resizes >= kMaxResizes) {
         if (u.resizes++ == kMaxResizes)
             Log(tag + " note U" + std::to_string(u.id) + ": output size " + now + " again after " + std::to_string(kMaxResizes) +
-                " sizes; the upscaler is not created again for this context (frames of another size are refused)");
+                (kMaxResizes == 1 ? " size change" : " size changes") +
+                "; the upscaler is not created again for this context (frames of another size are refused)");
         return;
     }
     WgCreateInfo info = u.createInfo;
