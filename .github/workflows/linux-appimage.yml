@@ -1,0 +1,45 @@
+# Builds the Linux AppImage of the launcher in the pinned Ubuntu 22.04 container (glibc 2.35, the oldest system the AppImage
+# supports) with a test payload: the build proves the launcher's shared code still compiles and links on Linux and that the
+# AppImage still bundles what it needs. A release AppImage is built by the maintainer with the release payload
+# (clean/installer/README-linux.md); this job's file is a smoke build and never ships.
+# Its own workflow, so ci.yml and its required check stay as they are.
+name: Linux AppImage
+
+on:
+  pull_request:
+    paths:
+      - "clean/installer/**"
+      - "clean/converter/**"
+      - "tools/ci/check_portable.py"
+      - ".github/workflows/linux-appimage.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-appimage-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  appimage:
+    name: "AppImage (Ubuntu 22.04, glibc 2.35)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # The same digest as CONTAINER_IMAGE in clean/installer/build-appimage.sh (the step below fails if they differ).
+    container: docker.io/library/ubuntu:22.04@sha256:74b12b11ffa550fba1929ad4d8d16533c34f6612728469671afba1b03b66881c
+    steps:
+      # checkout wants git, and the portability check wants python3; the build script installs the rest itself
+      - name: Packages for checkout and the check
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends ca-certificates git python3
+      - uses: actions/checkout@v4.2.2
+      - name: Container digest matches the build script
+        run: |
+          image="$(grep -o 'ubuntu:22.04@sha256:[0-9a-f]*' .github/workflows/linux-appimage.yml | head -1)"
+          grep -qF "$image" clean/installer/build-appimage.sh
+      - name: Portability check
+        run: python3 tools/ci/check_portable.py --root clean/installer
+      - name: Build the AppImage (test payload)
+        run: bash clean/installer/build-appimage.sh --test-payload --out out
