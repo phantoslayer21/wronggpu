@@ -104,19 +104,24 @@ class Gpu:
         return fp8_decode(out)
 
 
+CONSTS = dict(T.M_BLOCK_CONSTS, gelu="sigmoid")
+
+
+def make_case(rng, H, W):
+    """Synthetic block parameters, their blob and an FP8 input map [H, W, 32] (CPU only)."""
+    p = L.random_block_params(rng, 32, 2, 128)
+    return p, LP.pack_block(p, 32, 2, 128), q8(rng.normal(0, 1.5, (H, W, 32)))
+
+
 def run(build, rocm, seeds=(89,)):
     g = Gpu(build, rocm)
     rngs = [np.random.default_rng(s) for s in seeds]
-    consts = dict(T.M_BLOCK_CONSTS, gelu="sigmoid")
     res = {"c32": [], "c32_nc_identical": None, "c64_template_identical": None}
     nc_same = []
     for rng, (H, W, off) in ((r, c) for r in rngs for c in CASES):
-        p = L.random_block_params(rng, 32, 2, 128, "blk.")
-        blob = LP.pack_block(p, "blk.", 32, 2, 128)
-        x = q8(rng.normal(0, 1.5, (H, W, 32)))
+        p, blob, x = make_case(rng, H, W)
         got = g.block("l_swin.co", "l_swin_block_c32", x, blob, off, 32)
-        bp = {k[4:]: v for k, v in p.items()}
-        ref = q8(L.swin_block(x, bp, off, 2, consts))
+        ref = q8(L.swin_block(x, p, off, 2, CONSTS))
         m = metrics(got, ref)
         m.update({"case": [H, W, list(off)], "pass": passes(m)})
         res["c32"].append(m)
