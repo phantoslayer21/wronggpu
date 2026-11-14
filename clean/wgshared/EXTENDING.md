@@ -47,12 +47,16 @@ A mode is a choice of kernel variants, one word per variant group (`head`, `inpu
    front end may be built without it) and append `"L"` to `options[id 0].values`.
 2. The SR runtime must accept `model=L` (the front end passes `runtime_option` in the create options); the model's
    kernels live with the runtime.
-3. Regenerate: `WG_SR_MODEL_L 2`, `kWgModelRows[2] = {"L", "model=L"}`, the entry `3.1.5 WrongGPU (Model L)` with id
-   `0x5747000000000003`. The SR entries come before the RR entries because entries are ordered by option id, so the
-   index of every RR entry in the host's list moves by one; that is why the host is given ids, not indexes, and why
+3. Regenerate: `WG_SR_MODEL_L 2`, `kWgModelRows[2] = {"L", "model=L"}`, the entry `WrongGPU Model L##3.1.0` with id
+   `0x5747000000000003`. The version list holds only the SR models (the RR modes left it for their own box), so a new
+   model is appended after the released ones; the append-only check (`--previous`, the tests' `registry.prev.json`,
+   release 0.6.0's registry) refuses a model put before a released one. The host is given ids, not indexes, and
    OptiScaler.ini's `UpscalerIndex` is read against the list of the running build.
 4. Front end: nothing, unless the model has a build flag; then one line in `ModelBuiltIn` (`clean/fsr/src/config.cpp`),
-   the single place that maps a model to its CMake option (Model K: `WG_MODEL_K`).
+   the single place that maps a model to its CMake option (Model K: `WG_MODEL_K`, `src/model_k.h`; Model L:
+   `WG_MODEL_L`, `src/model_l.h`, default OFF). A build without the model refuses `model=<id>` and `sr_model=<id>` by
+   name in its log and runs Model M. A model with its own model folder (K, L) also needs its letter in
+   `ChooseModelDir` (`<place>\<id>\model.wgcm`).
 
 ## 3. Add a game-interface version (example: 2.15)
 

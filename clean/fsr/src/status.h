@@ -7,6 +7,7 @@
 #include <string>
 
 #include "model_k.h"
+#include "model_l.h"
 
 namespace wgfsr {
 
