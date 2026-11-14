@@ -104,10 +104,23 @@ delivered by the spec side; the code never guesses it (it raises, or takes the c
   zero border, float16 accumulator from the bias, 16-term chunks each summed exactly and rounded once, chunk order
   `order` (0 ascending, 1 channel block / kx / ky, 2 kx / channel block / ky), `act` 0 none or 1 leaky ReLU. cin is a
   multiple of 16.
+- `fg_maxpool2_f16(x, y, C, H, W)`: net1's max-pool exactly as `net1.maxpool2`: 2 x 2, stride 2, floor sizes, taps
+  (0, 0), (0, 1), (1, 0), (1, 1) through the delivered step m <- (x > m) x + (x <= m) m with IEEE products and sums
+  (0 * inf is NaN; a sum of zeros is -0 only when both are -0).
+- `fg_upscale_f16(x, y, C, hi, wi, ho, wo, rx, ry)`: net1's upscale exactly as `net1.upscale_to`: bilinear, align
+  corners; rx / ry are the ratios (n_in - 1) / (n_out - 1) as correctly rounded single-precision bits from the caller
+  (0 for an extent of 1), so no division runs on the GPU. Positions in single precision one operation at a time
+  (HIP: no contraction); every product and sum rounded to float16 (a product of two float16 values is exact in single
+  precision, and single precision then float16 equals one rounding of a sum of two float16 values).
+- `fg_add_f16(a, b, y, n)`: net1's skip add exactly as `net1.add16`: y = h(a + b) per element (single precision then
+  float16, one rounding of the exact sum).
+- net1 on the GPU is these four kernels in NET1_WIRING's order, one launch per step, every buffer resident on the
+  device (`runner/fg_net1_gpu.py`; on D3D12 a kernel_replay `chain` block, with a UAV barrier between launches).
 - The arithmetic is integer code shared by both back ends (`kernels/fg_exact16.h`), the method of `fp16acc.py`; NaN
   results are written as 0x7E00. The D3D12 build compiles `fg_` kernels only when `--only` names them, so Model M's
   and Model L's kernel sets and DXILs do not change.
-- `runner/fg_d3d12_check.py` proves each kernel on HIP against D3D12 (raw bytes) and against the CPU reference.
+- `runner/fg_d3d12_check.py` proves each kernel on HIP against D3D12 (raw bytes) and against the CPU reference;
+  `runner/fg_net1_gpu.py` the whole network, every step output.
 
 ## Configuration (`reference/config.py`)
 
