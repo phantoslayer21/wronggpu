@@ -10,7 +10,9 @@ delivered by the spec side; the code never guesses it (it raises, or takes the c
 - Two networks, float16 elements, ReLU activations, no attention, no FP8:
   - **net1**: a six-level encoder-decoder on a 2 x 2-folded grid; 17 blobs, each `[weights][zero area][bias x 16]`.
   - **net2**: two small encoder-decoders (sub-nets A and B) of 3 x 3 convolutions; 25 layers, a weight blob and a bias
-    blob each.
+    blob each. Each layer's grid level relative to the network grid (`Net2Layer.level`, and `upscaled` for the two
+    layers whose output is upscaled 2x) is in the table; sub-net A's last layer has no stated level (OPEN), and
+    `net2_macs_per_pixel` takes it as an argument.
 - Shapes and byte sizes per layer: [`layout.py`](layout.py) (checked by `tests/test_fg_layout.py`).
 
 ## Converter map
