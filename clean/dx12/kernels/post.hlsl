@@ -55,15 +55,18 @@
 // WG_LZ_PROFILE = 0, the build the runtime loads under "w64" when the model file has no output-filter weights, e.g.
 // Model L's): the same kernels with spec 06's own Lanczos weights as FP32 constants (kLz0 ... kLz4): v = kLz0 t0, then
 // one fused multiply-add per tap, clamp to the taps' range, every value FP32 (the horizontal results go to the ring as
-// FP32, the vertical result straight into Dec). No weight arguments. Buffer forms 0 only (POST_OUT = 0).
+// FP32, the vertical result straight into Dec). No weight arguments. Forms 0 and 3 (direct; without the FP16-indexed
+// output table, which needs the original's FP16 filter result).
 // @wg-kernel w64/post_tf_f32_p12_diet_vsit co=post_w64.co file=w64__post_tf_f32_p12_diet_vsit__analytic entry=post_tf_f32_p12_diet_vsit block=512 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u defines=WG_LZ_ANALYTIC=1
 // @wg-kernel w64/post_tf4_dl_f32_p12_diet_vsit co=post_w64.co file=w64__post_tf4_dl_f32_p12_diet_vsit__analytic entry=post_tf_f32_p12_diet_vsit block=256 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u defines=WG_TF_NW=4,WG_TF_CAP=448,WG_LZ_ANALYTIC=1
+// @wg-kernel w64/post_tf_f32_p12_diet_vsit_direct co=post_w64.co file=w64__post_tf_f32_p12_diet_vsit_direct__analytic rs=direct entry=post_tf_f32_p12_diet_vsit_direct block=512 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u defines=WG_DIRECT_TEXTURES=1,POST_OUT=3,WG_LZ_ANALYTIC=1
+// @wg-kernel w64/post_tf4_dl_f32_p12_diet_vsit_direct co=post_w64.co file=w64__post_tf4_dl_f32_p12_diet_vsit_direct__analytic rs=direct entry=post_tf_f32_p12_diet_vsit_direct block=256 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u defines=WG_DIRECT_TEXTURES=1,POST_OUT=3,WG_TF_NW=4,WG_TF_CAP=448,WG_LZ_ANALYTIC=1
 #include "wg_platform.hlsli"
 #ifndef WG_LZ_ANALYTIC
 #define WG_LZ_ANALYTIC 0
 #endif
-#if WG_LZ_ANALYTIC && (POST_OUT != 0 || defined(WG_POST_MO))
-#error "analytic output filter: buffer form 0 only"
+#if WG_LZ_ANALYTIC && ((POST_OUT != 0 && POST_OUT != 3) || defined(WG_POST_MO))
+#error "analytic output filter: forms 0 and 3 (direct) only"
 #endif
 #if defined(WG_DIRECT_TEXTURES)
 #include "native_direct.hlsli"
@@ -811,6 +814,19 @@ void pd_vitem(int y, int xg, int xo, int urel, uint wa, uint wb, int p_next, boo
                 t[k][c] = lds[kRingBase + (uint)sl * kRowDw + (uint)(c * kTfOutX + xo)];
         }
     }
+#if WG_LZ_ANALYTIC
+    // the analytic filter: wa = 1 for the even phase (pd_vsplit); FP32 results, so no FP16-indexed output table
+    const bool ev = wa != 0u;
+    const float w0 = ev ? kLz0 : kLz4, w4 = ev ? kLz4 : kLz0, w1 = ev ? kLz1 : kLz3, w3 = ev ? kLz3 : kLz1;
+    float vo[3], qv[3];
+    bool vsmall = false;
+    [unroll] for (int c = 0; c < 3; ++c) {
+        qv[c] = clampf(lz5a(asfloat(t[0][c]), asfloat(t[1][c]), asfloat(t[2][c]), asfloat(t[3][c]), asfloat(t[4][c]),
+                            w0, w1, w3, w4), k1em4, 3.0f);
+        vo[c] = exp2(qv[c] * kDecK) - 1.0f;
+        vsmall = or(vsmall, qv[c] < kDecPolyMax);
+    }
+#else
     const half w0 = hbox(wa), w4 = hbox(wa >> 16), w1 = hbox(wb), w3 = hbox(wb >> 16);
     if (lut) {   // the output values T[r] (wg_f16lut.hlsli, lev-f16lut d7149e2): the chain below, looked up
         float3 res;
@@ -829,6 +845,7 @@ void pd_vitem(int y, int xg, int xo, int urel, uint wa, uint wb, int p_next, boo
         vo[c] = exp2(qv[c] * kDecK) - 1.0f;
         vsmall = or(vsmall, qv[c] < kDecPolyMax);
     }
+#endif
     if (WaveActiveAnyTrue(vsmall)) {   // Dec's polynomial only when some lane needs it (post.hip's branches)
         [unroll] for (int c = 0; c < 3; ++c) vo[c] = qv[c] < kDecPolyMax ? dec_m1_poly(qv[c]) : vo[c];
     }
@@ -860,8 +877,13 @@ void pd_vsplit(int it, out int yrel, out int xo, out int urel, out uint wa, out 
     yrel = 2 * pr + dy;
     urel = 3 * pr + 2 * dy;
     const bool ev = dy == 0;
+#if WG_LZ_ANALYTIC
+    wa = ev ? 1u : 0u;   // the phase only (pd_vitem selects the constant weights)
+    wb = 0u;
+#else
     wa = ((ev ? lz_w0 : lz_w4) & 0xffffu) | ((ev ? lz_w4 : lz_w0) << 16);
     wb = ((ev ? lz_w1 : lz_w3) & 0xffffu) | ((ev ? lz_w3 : lz_w1) << 16);
+#endif
 }
 #endif
 
@@ -965,7 +987,11 @@ WG_KERNEL(post_tf_p12_diet_vsit)
         dec_scale = unif(wg_ldf(expo, 16u));
     }
     // the output table of this frame (wg_f16lut.hlsli; color: the table, 0 = none), wave-uniform
+#if WG_LZ_ANALYTIC
+    const bool lut = false;   // the table is indexed by an FP16 filter result (the original's); the analytic one is FP32
+#else
     const bool lut = WaveReadLaneFirst(f16lut_valid(color, dec_scale, nd_color_pi, nd_output_rne16) ? 1u : 0u) != 0u;
+#endif
 #endif
 
     // this lane's D column (fixed over the walk)

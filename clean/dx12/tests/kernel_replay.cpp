@@ -22,6 +22,9 @@
 //                                              (NativeD3D12Ext::bind_direct_frame) around its launch.
 //   direct_params <rx> <ry> <rw> <rh>          the frame's active render rectangle; motion scale 1, offset 0,
 //                                              color_pi 1, no exposure texture
+//   direct_out <file>                          after the launch, the output texture's texels are written to <file>,
+//                                              row by row (tightly packed); its initial texels come from the output
+//                                              slot's file (a sentinel fill, so that an unwritten texel shows)
 #include "../../runtime/device.h"
 #include "../../runtime/device_d3d12.h"
 
@@ -75,7 +78,70 @@ struct Case {
   std::vector<Arg> args;
   std::vector<DirectTex> direct;
   NativeDirectParams dparams;
+  std::string direct_out;   // the output texture's readback file ("" = none)
 };
+
+// The output texture (UNORDERED_ACCESS) copied to a readback buffer after the case's work, rows packed into `out`.
+bool read_direct_output(NativeD3D12Ext* ext, Case& c, std::vector<uint8_t>& out, std::string& err) {
+  DirectTex* t = nullptr;
+  for (auto& x : c.direct)
+    if (x.slot == "output") t = &x;
+  if (!t || !t->tex) return err = "no output texture", false;
+  ID3D12Device* dev = nullptr;
+  if (FAILED(ext->arena_resource()->GetDevice(__uuidof(ID3D12Device), (void**)&dev))) return err = "GetDevice", false;
+  const D3D12_RESOURCE_DESC rd = t->tex->GetDesc();
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = {};
+  UINT rows = 0;
+  UINT64 row_bytes = 0, total = 0;
+  dev->GetCopyableFootprints(&rd, 0, 1, 0, &fp, &rows, &row_bytes, &total);
+  D3D12_HEAP_PROPERTIES hp = {};
+  hp.Type = D3D12_HEAP_TYPE_READBACK;
+  D3D12_RESOURCE_DESC bd = {};
+  bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  bd.Width = total;
+  bd.Height = 1;
+  bd.DepthOrArraySize = 1;
+  bd.MipLevels = 1;
+  bd.SampleDesc.Count = 1;
+  bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  ID3D12Resource* rb = nullptr;
+  const bool made = SUCCEEDED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                           nullptr, __uuidof(ID3D12Resource), (void**)&rb));
+  dev->Release();
+  if (!made) return err = "readback buffer", false;
+  ID3D12Resource* tex = t->tex;
+  bool ok = ext->record_pass(D3D12_RESOURCE_STATE_UNORDERED_ACCESS, [&](ID3D12GraphicsCommandList* l, std::string&) {
+    D3D12_RESOURCE_BARRIER b = {};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource = tex;
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    b.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    l->ResourceBarrier(1, &b);
+    D3D12_TEXTURE_COPY_LOCATION dst = {}, src = {};
+    dst.pResource = rb;
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint = fp;
+    src.pResource = tex;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    l->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    return true;
+  }, &err) && ext->sync(&err);
+  uint8_t* map = nullptr;
+  if (ok) ok = SUCCEEDED(rb->Map(0, nullptr, (void**)&map));
+  if (ok) {
+    out.resize((size_t)row_bytes * rows);
+    for (UINT r = 0; r < rows; ++r)
+      std::memcpy(out.data() + (size_t)r * row_bytes, map + fp.Offset + (size_t)r * fp.Footprint.RowPitch,
+                  (size_t)row_bytes);
+    D3D12_RANGE none = {0, 0};
+    rb->Unmap(0, &none);
+  } else if (err.empty()) {
+    err = "readback";
+  }
+  rb->Release();
+  return ok;
+}
 
 void release_direct(Case& c) {
   for (auto& t : c.direct) {
@@ -247,6 +313,14 @@ int run_case(Device* d, Case& c, const std::string& base) {
       release_direct(c);
       return 1;
     }
+    if (!c.direct_out.empty()) {
+      std::vector<uint8_t> texels;
+      if (!read_direct_output(ext, c, texels, err) || !write_file(base + "/" + c.direct_out, texels)) {
+        std::printf("%s: direct output: %s\n", c.name.c_str(), err.c_str());
+        release_direct(c);
+        return 1;
+      }
+    }
   }
   if (!d->sync()) { std::printf("%s: sync: %s\n", c.name.c_str(), d->err().c_str()); return 1; }
   release_direct(c);
@@ -300,6 +374,8 @@ int main(int argc, char** argv) {
       c.direct.push_back(t);
     } else if (w == "direct_params") {
       s >> c.dparams.rx >> c.dparams.ry >> c.dparams.rw >> c.dparams.rh;
+    } else if (w == "direct_out") {
+      s >> c.direct_out;
     } else if (w == "arg") {
       Arg a;
       s >> a.kind;
