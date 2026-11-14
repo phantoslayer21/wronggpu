@@ -4,7 +4,8 @@
 // (clean/l/reference/recon.py, the oracle):
 //  1. a 4 x 4 colour gather: columns ax - 1 ... ax + 2 and rows b - 1 ... b + 2 (b from the even row of the pair);
 //  2. each history candidate decoded and divided by the previous exposure before the two are combined:
-//     H_lin = (w1 L1 + w2 L2) e, with L_i = D(H_i) / e_prev (L2 only when w2 > 0);
+//     H_lin = (w1 L1 + w2 L2) e, with L_i = D(H_i) r_prev, r_prev = 1 / e_prev (L2 only when w2 > 0; the spec's
+//     division by e_prev as a product with its reciprocal: free within the post tolerance, spec answer Q5);
 //  3. an invalid or reset sample falls back to the render pixel's linear colour (no exposure, no encode).
 // The colour gather runs in the model's own precision as confirmed by the spec side (oracle: recon.gather_half):
 // fused target positions, FP16 offsets and exponent with the fused cross term, float32 weights flushed to +0 below
@@ -149,6 +150,7 @@ WG_FN void l_post_core(const LGather& g, int x, int y, int fx, int fy, const flo
   const LSel sl = l_select(g);
   const float X = (float)x + 0.5f, Y = (float)y + 0.5f;
   const int ncand = sl.w2 != 0.0f ? 2 : 1;
+  const float rp = 1.0f / p.e_prev;  // IEEE division
   float L[2][3];
   for (int n = 0; n < ncand; ++n) {
     const int k = n == 0 ? sl.first : sl.second;
@@ -158,7 +160,7 @@ WG_FN void l_post_core(const LGather& g, int x, int y, int fx, int fy, const flo
       float h[3];
       history_cr<false>(hist_prev, p.dw, p.dh, qx, qy, h);
 #pragma unroll
-      for (int i = 0; i < 3; ++i) L[n][i] = l_dec(h[i]) / p.e_prev;
+      for (int i = 0; i < 3; ++i) L[n][i] = l_dec(h[i]) * rp;
     } else {
       const v4f c = color[fy * p.rw + fx];
 #pragma unroll

@@ -4,7 +4,8 @@
 // ceil(dw / 32) * ceil(ceil(dh / 2) / 8) workgroups of 256 lanes; lane (l, k) of wave k handles D column x0 + l and the
 // row pair k0 + k. w = the post blob (w[0] = s). Model L's changes against post_recon: the 4 x 4 colour gather in the
 // model's precision (FP16 features, offsets, exponent and accumulators), linear-colour history candidates
-// L = D(h) / e_prev combined as fma(w1, L1, w2 L2) e, and the render pixel's colour as the fallback.
+// L = D(h) r_prev (r_prev = 1 / e_prev) combined as fma(w1, L1, w2 L2) e, and the render pixel's colour as the
+// fallback.
 //
 // The operations follow HIP's ISA of l_post_recon (llvm-objdump of l_post.co), not only its source:
 // - E_in(e c) and the B / A codes k / 255 (an IEEE division: wg_div) are rounded to FP16 by v_cvt_f16_f32 (wg_f2h);
@@ -17,7 +18,8 @@
 // - the tap weight w = 2^eps (v_exp_f32) is flushed to +0 below 2^-126 and rounded to FP16 by v_cvt_f16_f32 (wg_f2h);
 // - the full history's texel is (_Float16)(kEncK log2(..)) in one rounding (v_fma_mixlo_f16: wg_mul_f16); the display
 //   value is clamp(E(o), 0, 2.45) rounded by v_cvt_f16_f32 (wg_f2h);
-// - D(h) / e_prev is an IEEE division (wg_div).
+// - r_prev = 1 / e_prev is one IEEE division per launch (wg_div), then L = D(h) r_prev (HIP: the same product; the
+//   spec's division as a product with its reciprocal is free within the post tolerance, spec answer Q5).
 // Model M's DXILs are untouched: this file only adds the kernel (bound to l_post.co).
 // l_post_recon_p12 (LP_P12 = 1): the same kernel on the pack12 coefficients of l_coef_pack12: A = image A8 (8 bytes per
 // render pixel: codes A0 A1 A2 B0 | B1 B2, C2 FP16), C = image C4 (4 bytes per render pixel: C0, C1 FP16), B unused.
@@ -65,7 +67,7 @@ groupshared uint sh_tex[kStageCap * kTexDw];
 
 static uint g_z;          // 0, opaque to the compiler (from the grid size)
 static float g_e, g_ep;   // exposures (0 replaced by 1)
-static float g_epy, g_eplo, g_ephi;   // the division window of e_prev (ep_window)
+static float g_rp;       // 1 / e_prev (IEEE division, round to nearest even)
 float opq(float x) { return asfloat(asuint(x) ^ g_z); }
 half opqh(half x) { return asfloat16((uint16_t)(asuint16(x) ^ (uint16_t)g_z)); }
 half h_bits(uint b) { return asfloat16((uint16_t)b); }
@@ -213,36 +215,6 @@ void gather_acc(inout LGather g, uint t[kTexDw], float w, uint hwb)
     }
 }
 
-// a / e_prev as wg_div (IEEE, round to nearest even) for the three channels. e_prev is one value per launch: with
-// y = RN(1 / e_prev) the lanes whose |a| lies in [lo, hi) take q0 = a y, rn = fma(e_prev, q0, -a), q = fma(-rn, y, q0),
-// which is the correctly rounded quotient there (clean/runtime/native_direct_pi.h: every intermediate normal, the
-// [1, 2) significand form checked for all significand pairs; the direct route's colour division,
-// native_direct.hlsli native_direct_color_div3); every other lane (NaN, infinity, zero, a quotient near the FP32 range
-// ends, an e_prev outside the window's domain: hi = 0) runs wg_div itself.
-void ep_window()
-{
-    const uint ub = asuint(g_ep);
-    const int eb = (int)((ub >> 23) & 255u), B = eb - 127;
-    const bool ok = (ub >> 31) == 0u && eb >= 1 && eb <= 252;
-    g_epy = wg_div(1.0f, g_ep);
-    g_eplo = asfloat((uint)(max(B - 125, -79) + 127) << 23);
-    g_ephi = !ok ? 0.0f : (B > 0 ? asfloat(0x7f800000u) : asfloat((uint)(B + 254) << 23));
-}
-float3 ep_div3(float3 a)
-{
-    const float3 q0 = a * g_epy;
-    const float3 rn = mad(g_ep, q0, -a);
-    float3 q = mad(-rn, g_epy, q0);
-    const float3 m = abs(a);
-    const bool3 fast = and(m < g_ephi, m >= g_eplo);
-    [branch] if (!all(fast)) {
-        q.x = fast.x ? q.x : wg_div(a.x, g_ep);
-        q.y = fast.y ? q.y : wg_div(a.y, g_ep);
-        q.z = fast.z ? q.z : wg_div(a.z, g_ep);
-    }
-    return q;
-}
-
 // ---- history: 12-tap Catmull-Rom of the previous full history (history_cr<false>, 8-byte RGBA16F texels) ------------
 float4 cr_weights(float f)
 {
@@ -319,7 +291,7 @@ void l_post_core(LGather g, int x, int y, int fx, int fy, float mx[3], float my[
             const bool valid = P_reset == 0 && qx >= 0.0f && qx <= (float)P_dw && qy >= 0.0f && qy <= (float)P_dh;
             if (valid) {
                 const float3 h = history_cr(qx, qy);
-                const float3 lq = ep_div3(float3(l_dec(h.x), l_dec(h.y), l_dec(h.z)));
+                const float3 lq = float3(l_dec(h.x), l_dec(h.y), l_dec(h.z)) * g_rp;
                 L[n][0] = lq.x;
                 L[n][1] = lq.y;
                 L[n][2] = lq.z;
@@ -397,7 +369,7 @@ WG_KERNEL(l_post_recon)
         g_e = e0 == 0.0f ? 1.0f : e0;
         g_ep = e1 == 0.0f ? 1.0f : e1;
     }
-    ep_window();
+    g_rp = wg_div(1.0f, g_ep);
     const int lane = (int)wg_lane_id();
     const int tiles_x = (P_dw + kTileX - 1) / kTileX;
     const int tile = (int)wg_block_id();
