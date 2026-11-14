@@ -77,7 +77,32 @@ def control_cases(kernel, rng):
     return cases
 
 
-KINDS = {"l_linear_32_32_relu": linear_cases, "l_linear_32_32_f16": linear_cases}
+# (th, tw) token grids of the projections; the pixel maps are [2 th][2 tw]. 3 x 5 and 2 x 9: partly filled waves.
+TOKENS = [(8, 12), (18, 34), (4, 4), (34, 50), (3, 5), (2, 9)]
+
+
+def _project_blob(rng, rows, frags):
+    """Projection blob: bias tile vector (`rows` floats), then `frags` fragments of 256 FP8 bytes."""
+    return rng.normal(0, 0.5, rows).astype(np.float32).tobytes() + fp8_encode(q8(rng.normal(0, 0.2, frags * 256))).tobytes()
+
+
+def project_cases(kernel, rng):
+    """l_project_gather: x [2 th][2 tw][32] -> features [th][tw][64] (blob enc0.project: 64 bias rows, 4 x 8 fragments).
+    l_dec_project: z [th][tw][64] -> y [2 th][2 tw][32] (blob dec0.project: 128 bias rows, 8 x 4 fragments)."""
+    cases = []
+    for (th, tw) in TOKENS:
+        ntok = th * tw
+        npx = 4 * ntok
+        if kernel == "l_project_gather":
+            args = [("buf", _fp8_map(rng, npx * 32)), ("out", ntok * 64), ("buf", _project_blob(rng, 64, 32))]
+        else:
+            args = [("buf", _fp8_map(rng, ntok * 64)), ("out", npx * 32), ("buf", _project_blob(rng, 128, 32))]
+        cases.append({"kernel": kernel, "grid": -(-ntok // 128), "block": 256, "args": args + [("u32", tw), ("u32", th)]})
+    return cases
+
+
+KINDS = {"l_linear_32_32_relu": linear_cases, "l_linear_32_32_f16": linear_cases,
+         "l_project_gather": project_cases, "l_dec_project": project_cases}
 CONTROL_KINDS = {"swin_block_c96_nc": control_cases}
 CO = "l_ops.co"
 
