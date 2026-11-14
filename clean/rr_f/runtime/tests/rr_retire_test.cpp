@@ -7,6 +7,7 @@
 // Original WrongGPU code.
 #include <stdio.h>
 
+#include <map>
 #include <vector>
 
 #include "rr_retire.h"
@@ -34,14 +35,13 @@ void check(bool ok, const char* what) {
 struct Gpu {
   ListMarks marks;
   std::vector<uint32_t> words;
-  std::vector<uint32_t> slot_of;   // by serial
-  explicit Gpu(uint32_t n = 16) : marks(n), words(n, 0), slot_of(1, 0) {}
+  std::map<uint64_t, uint32_t> slot_of;   // serial -> slot (a map: the wraparound test uses serials above 2^32)
+  explicit Gpu(uint32_t n = 16) : marks(n), words(n, 0) {}
   uint64_t record() {   // the runtime records a list: serial and slot
     uint32_t s = 0;
     const uint64_t serial = marks.begin(&s);
     if (serial) {
-      if (slot_of.size() <= serial) slot_of.resize((size_t)serial + 1, 0);
-      slot_of[(size_t)serial] = s;
+      slot_of[serial] = s;
     }
     return serial;
   }
@@ -165,11 +165,13 @@ void device_switch_keeps_old_objects() {
   p.deferred.retire(&pso, {a}, p.marks, false);
   p.last = {&marker, &device};
   p.last_counted = 1;
-  ps.park(std::move(p));
   std::vector<std::string> log;
   bool removed = false;
   auto is_removed = [&](Parked<Fake>&) { return removed; };
-  int c = ps.pump(is_removed, &log);
+  auto no_sleep = [](uint32_t) {};
+  int c = ps.park(std::move(p), is_removed, no_sleep, 0, &log);
+  log.clear();
+  c += ps.pump(is_removed, &log);
   check(c == 0 && heap.releases + arena.releases + pso.releases + marker.releases + device.releases == 0 && ps.size() == 1,
         "device switched with list A in flight: the old device's objects, marker buffer and device are all kept");
   old.run(a);   // the old device's queue runs A later
@@ -190,8 +192,8 @@ void device_switch_keeps_old_objects() {
   q.deferred.retire(&h2, {b}, q.marks, false);
   q.last = {&m2, &d2};
   q.last_counted = 1;
-  ps.park(std::move(q));
-  c = ps.pump(is_removed, &log);
+  c = ps.park(std::move(q), is_removed, no_sleep, 0, &log);
+  c += ps.pump(is_removed, &log);
   check(c == 0 && h2.releases == 0, "second old device, list in flight, not removed: kept");
   removed = true;
   c = ps.pump(is_removed, &log);
@@ -199,24 +201,105 @@ void device_switch_keeps_old_objects() {
         "old device removed (GetDeviceRemovedReason): its objects released once each");
 }
 
-void device_switch_bound() {
-  ParkedSet<Fake> ps;
-  std::vector<Gpu> gpus(ParkedSet<Fake>::kMaxParked + 1);
-  std::vector<Fake> objs(gpus.size());
-  for (size_t i = 0; i < gpus.size(); ++i) {
-    const uint64_t s = gpus[i].record();   // each old device has a list that never completes
+void wraparound_stale_marker() {
+  // The #82 final review: the GPU writes only the low 32 bits of a serial and a free slot keeps its last value. A slot
+  // that stays free while the serials go round 2^32 must not let that stale value prove its next holder.
+  Gpu g(2);
+  const uint64_t x = g.record();   // slot 0
+  g.run(x);
+  g.poll();                        // x complete: slot 0 free, still holding (uint32_t)x
+  const uint64_t y = g.record();   // slot 1, kept in flight so that the next list goes to slot 0
+  check(g.slot_of[(size_t)y] == 1 && !g.marks.done(y), "list Y holds slot 1, in flight");
+  g.marks.skip_to(x + 0xffffffffull);   // the next serial would be x + 2^32: the same low 32 bits as slot 0's value
+  const uint64_t z = g.record();
+  check(z != 0 && g.slot_of[(size_t)z] == 0, "the next list takes slot 0 (the slot with the stale value)");
+  check((uint32_t)z != (uint32_t)x && z > x + 0xffffffffull,
+        "after 2^32 serials: the serial matching slot 0's stale value was skipped");
+  g.poll();   // Z has not run; slot 0 still holds x's value
+  check(!g.marks.done(z), "the stale value of slot 0 does not prove the new list (never submitted)");
+  g.run(z);
+  g.poll();
+  check(g.marks.done(z) && !g.marks.done(y), "Z completes when it writes its own value; Y still in flight");
+
+  // a fresh slot reads 0: a serial whose low 32 bits are 0 is never handed to it
+  Gpu h(4);
+  h.marks.skip_to(0xffffffffull);
+  const uint64_t w = h.record();
+  check(w != 0 && (uint32_t)w != 0 && h.words[h.slot_of[(size_t)w]] == 0, "a fresh slot never gets a serial ending in 32 zero bits");
+  h.poll();
+  check(!h.marks.done(w), "a fresh slot's 0 does not prove its first list");
+}
+
+// one old device with a list in flight (never completing on its own) and one counted object
+struct OldDevice {
+  Gpu gpu;
+  uint64_t list = 0;
+  Fake obj, marker, device;
+  Parked<Fake> make(uint64_t id) {
+    list = gpu.record();
     Parked<Fake> p;
-    p.id = i + 1;
-    p.marks = gpus[i].marks;
-    p.words = gpus[i].words.data();
-    p.deferred.retire(&objs[i], {s}, p.marks, true);
-    const std::string line = ps.park(std::move(p));
-    if (i == gpus.size() - 1) check(line.find("no longer tracked") != std::string::npos, "the bound is logged");
+    p.id = id;
+    p.marks = gpu.marks;
+    p.words = gpu.words.data();
+    p.deferred.retire(&obj, {list}, p.marks, true);
+    p.last = {&marker, &device};
+    p.last_counted = 1;
+    return p;
   }
-  int released = 0;
-  for (const Fake& f : objs) released += f.releases;
-  check(ps.size() == ParkedSet<Fake>::kMaxParked && released == 0,
-        "more old devices than the bound: the oldest is no longer tracked, and nothing is released without proof");
+  int releases() const { return obj.releases + marker.releases + device.releases; }
+};
+
+void device_switch_soft_cap() {
+  // six device switches, each with a list still in flight on the device switched away from
+  const size_t N = 6;
+  std::vector<std::string> log;
+  {   // none completes, none removed: all six stay tracked (the cap is soft), nothing released, each wait bounded
+    ParkedSet<Fake> ps;
+    std::vector<OldDevice> d(N);
+    int sleeps = 0, c = 0;
+    auto never = [](Parked<Fake>&) { return false; };
+    auto count_sleep = [&](uint32_t ms) { sleeps += (int)ms; };
+    for (size_t i = 0; i < N; ++i) c += ps.park(d[i].make(i + 1), never, count_sleep, 2000, &log);
+    int rel = 0;
+    for (const OldDevice& o : d) rel += o.releases();
+    check(ps.size() == N && rel == 0 && c == 0,
+          "6 switches with work pending, nothing completes: all 6 old devices stay tracked, nothing released");
+    check(sleeps == 2 * 2000, "the 5th and 6th switch each waited at most 2000 ms (bounded) for the oldest");
+    bool soft = false;
+    for (const std::string& s : log) soft = soft || s.find("stays tracked") != std::string::npos;
+    check(soft, "the soft cap is logged");
+    for (OldDevice& o : d) o.gpu.run(o.list);   // later, every old device's list completes
+    c = ps.pump(never, &log);
+    bool once = true;
+    for (const OldDevice& o : d) once = once && o.obj.releases == 1 && o.marker.releases == 1 && o.device.releases == 1;
+    check(ps.empty() && once && c == (int)(2 * N), "their lists complete later: every object of all 6 released exactly once");
+  }
+  {   // the oldest one's list completes during the bounded wait of the 5th switch: it is released then
+    ParkedSet<Fake> ps;
+    std::vector<OldDevice> d(N);
+    auto never = [](Parked<Fake>&) { return false; };
+    int calls = 0;
+    auto gpu_runs_oldest = [&](uint32_t) { if (++calls == 3) d[0].gpu.run(d[0].list); };
+    int c = 0;
+    for (size_t i = 0; i < 5; ++i) c += ps.park(d[i].make(i + 1), never, gpu_runs_oldest, 2000, &log);
+    check(ps.size() == 4 && d[0].obj.releases == 1 && d[0].marker.releases == 1 && d[0].device.releases == 1 && c == 2,
+          "5th switch: the oldest's list completes within the wait, it is released once (4 tracked)");
+    check(calls == 3, "the wait ended as soon as the oldest completed");
+    int rel = 0;
+    for (size_t i = 1; i < 5; ++i) rel += d[i].releases();
+    check(rel == 0, "the other old devices are untouched");
+  }
+  {   // the oldest one's device is removed: released at the 5th switch without waiting
+    ParkedSet<Fake> ps;
+    std::vector<OldDevice> d(N);
+    int sleeps = 0;
+    auto oldest_removed = [](Parked<Fake>& p) { return p.id == 1; };
+    auto count_sleep = [&](uint32_t ms) { sleeps += (int)ms; };
+    for (size_t i = 0; i < 4; ++i) ps.park(d[i].make(i + 1), [](Parked<Fake>&) { return false; }, count_sleep, 2000, &log);
+    const int c = ps.park(d[4].make(5), oldest_removed, count_sleep, 2000, &log);
+    check(ps.size() == 4 && d[0].releases() == 3 && c == 2 && sleeps == 0,
+          "5th switch, the oldest's device removed: released at once, no wait");
+  }
 }
 
 }  // namespace
@@ -227,7 +310,8 @@ int main() {
   never_submitted_list();
   slot_reuse_needs_the_holders_proof();
   device_switch_keeps_old_objects();
-  device_switch_bound();
+  wraparound_stale_marker();
+  device_switch_soft_cap();
   printf("%s (%d of %d checks failed)\n", g_failed ? "FAILED" : "passed", g_failed, g_checks);
   return g_failed ? 1 : 0;
 }

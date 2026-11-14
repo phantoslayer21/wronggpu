@@ -542,6 +542,11 @@ void note_transient_use(const void* res, uint64_t serial) {
   for (Runtime::Transient& t : R().transient)
     if (t.r == res && t.gen == R().gen) prune_done(t.users, R().marks), t.users.push_back(serial);
 }
+// an old device of an earlier device switch is removed (its parked state: the device reference goes last)
+bool parked_removed(Parked<IUnknown>& p) {
+  ID3D12Device* d = p.last.empty() ? nullptr : (ID3D12Device*)p.last.back();
+  return d && FAILED(d->GetDeviceRemovedReason());
+}
 // releases deferred objects whose lists have all proved complete; once the device is removed nothing of it runs any more
 // and everything left is released (issue #63: kept objects go at completion or device removal, never on a timeout).
 // The old devices of earlier device switches are pumped the same way.
@@ -556,12 +561,7 @@ void pump() {
   }
   if (!rt.parked.empty()) {
     std::vector<std::string> lines;
-    rt.live_resources -= rt.parked.pump(
-        [](Parked<IUnknown>& p) {
-          ID3D12Device* d = p.last.empty() ? nullptr : (ID3D12Device*)p.last.back();
-          return d && FAILED(d->GetDeviceRemovedReason());
-        },
-        &lines);
+    rt.live_resources -= rt.parked.pump(parked_removed, &lines);
     for (const std::string& s : lines) log_line(s);
   }
 }
@@ -1178,7 +1178,12 @@ void drop_device() {
     p.last = {rt.marker, rt.dev};   // the marker buffer the lists write (still mapped), then the device reference
     p.last_counted = 1;
     rt.marker = nullptr, rt.marker_map = nullptr, rt.dev = nullptr;
-    log_line(rt.parked.park(std::move(p)));
+    // beyond the cap of tracked old devices: the oldest one is released if its lists complete within a bounded wait
+    // (at most 2 s, under the runtime lock, only at this device switch) or its device is removed; else kept, logged
+    std::vector<std::string> lines;
+    rt.live_resources -= rt.parked.park(std::move(p), parked_removed, [](uint32_t ms) { Sleep(ms); },
+                                        ParkedSet<IUnknown>::kParkWaitMs, &lines);
+    for (const std::string& s : lines) log_line(s);
     rt.marks = ListMarks(kMarkSlots);
     rt.deferred = RetireList<IUnknown>();
   } else {
