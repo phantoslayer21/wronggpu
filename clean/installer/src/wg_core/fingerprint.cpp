@@ -32,6 +32,7 @@ const ToolInfo kTools[] = {
     // what players read (owner 2026-11-04): its name and key are generic
     {Tool::NrOnAmd, L"Another upscaler mod", "other-upscaler-mod"},
     {Tool::ReFramework, L"REFramework", "reframework"},
+    {Tool::OtherPlugin, L"another OptiScaler plugin", "optiscaler-plugin"},
     {Tool::AntiCheat, L"anti-cheat", "anti-cheat"},
     {Tool::Overlay, L"an overlay", "overlay"},
     {Tool::GameApi, L"the game's graphics API", "graphics-api"},
@@ -96,10 +97,16 @@ bool SignerMentions(const PeImage& img, const char* needle) {
 const char* const kVendorSigner = "nvidia corporation";  // the signer of the DLSS DLL (what older OptiScaler layouts copy as nvngx.dll)
 
 // Product words of the version resource (CompanyName, ProductName, FileDescription, InternalName, OriginalFilename).
+// OptiScaler first (0.6.1): an OptiScaler build whose version resource also names WrongGPU (an edition of it) is an
+// OptiScaler, never WrongGPU's file; whether it is the OptiScaler of WrongGPU's own setup is decided by the install record's
+// name and hash only (coexist.cpp AssessCoexistence, detect.cpp InspectGame). WrongGPU's menu plugin says "WrongGPU OptiScaler plugin": a plugin for
+// OptiScaler, not OptiScaler (kOptiPluginWords).
 struct ResourceWord { const wchar_t* word; Tool tool; };
+const wchar_t* const kOptiPluginWords = L"optiscaler plugin";
 const ResourceWord kResourceWords[] = {
+    {L"optiscaler", Tool::OptiScaler},
     {L"wronggpu", Tool::WrongGPU}, {L"dlss 4.5 amd", Tool::WrongGPULegacy}, {L"dlss45", Tool::WrongGPULegacy},
-    {L"optiscaler", Tool::OptiScaler}, {L"reshade", Tool::ReShade}, {L"special k", Tool::SpecialK}, {L"specialk", Tool::SpecialK},
+    {L"reshade", Tool::ReShade}, {L"special k", Tool::SpecialK}, {L"specialk", Tool::SpecialK},
     {L"ultimate asi loader", Tool::AsiLoader}, {L"cyber engine tweaks", Tool::Cet}, {L"red4ext", Tool::Red4ext}, {L"ue4ss", Tool::Ue4ss},
     {L"fakenvapi", Tool::FakeNvapi},
 };
@@ -168,8 +175,9 @@ Fingerprint IdentifyBytes(const uint8_t* b, size_t n, const wstring& name) {
         f.company = v.Get(L"CompanyName");
         f.product = v.Get(L"ProductName");
         const wstring words = LowerW(f.company + L"|" + f.product + L"|" + v.Get(L"FileDescription") + L"|" + v.Get(L"InternalName") + L"|" + v.Get(L"OriginalFilename"));
+        const bool optiPlugin = words.find(kOptiPluginWords) != wstring::npos;  // a plugin for OptiScaler (WrongGPU.asi), not OptiScaler
         for (auto& w : kResourceWords)
-            if (words.find(w.word) != wstring::npos) { f.tool = w.tool; f.evidence = wstring(L"version resource: ") + (f.product.empty() ? f.company : f.product); return f; }
+            if (words.find(w.word) != wstring::npos && !(optiPlugin && w.tool == Tool::OptiScaler)) { f.tool = w.tool; f.evidence = wstring(L"version resource: ") + (f.product.empty() ? f.company : f.product); return f; }
         if ((api == Tool::Dxvk && words.find(L"dxvk") != wstring::npos) || (api == Tool::Vkd3d && words.find(L"vkd3d") != wstring::npos)) {
             f.tool = api; f.evidence = L"version resource: " + (f.product.empty() ? f.company : f.product) + as; return f;
         }
