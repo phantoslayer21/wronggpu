@@ -73,9 +73,12 @@ const Signature kSignatures[] = {
     {"input_encoder", "ppppppppppppE"},     // Model M's encoder and Model L's values (q in place of the features)
     {"coef_decoder", "ppppppppD"},          // Model M's decoder (also its pack12 form)
     {"swin_block_*", "ppppiiii"},           // Model M's blocks: x, skip, out, w, H, W, ox, oy
+    {"l_swin_block_c32_dec_coef12_nc", "ppppiiiippppii"},  // the decoder block with l_coef_pack12 folded in: then
+                                                           // A, C, latent, dec0.coef, rw, rh (native D3D12, fusion lc)
     {"l_swin_block_c32*", "ppppiiii"},      // Model L's blocks (clean/l/FORMATS.md)
     {"l_linear_32_32_relu", "pppi"},
     {"l_linear_32_32_f16", "pppi"},
+    {"l_linear_32_32_fused", "ppppi"},  // the two in one: q, x2, Win1, Win2, npix (native D3D12, fusion ll)
     {"l_project_gather", "pppii"},
     {"l_dec_project", "pppii"},
     {"l_coef", "ppppppD"},

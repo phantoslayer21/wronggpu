@@ -12,6 +12,9 @@
 //                           (pr + 2, pc + 2) (LHaloF16Src); 2 Model L's decoder block, the FP8 map with the token-grid
 //                           mirror, sub-pixel kept (LCoarseFp8Src)
 //   SW_OUT_F16              1: the output is RN16(x2) as an FP16 map [H][W][C] (Model L's decoder block, LStoreF16Epi)
+//   SW_OUT_COEF12           1 (with SW_OUT_F16, C = 32): instead of the FP16 map, l_coef_pack12 of it as the epilogue:
+//                           the lane that holds a pixel's channels 0..15 (hh = 0) runs hlsl/l_coef_px.hlsli on those
+//                           FP16 values, the bytes the map would hold, for the pixels inside the render rectangle
 // HIP ISA: <build>\dx12-m\isa\swin_block_c64_nc.s, swin_block_c96_nc.s, swin_block_c96_add_ex_nc.s.
 // Every FP32 operation follows that ISA: the RMSNorm sums of squares pair as fma(a_even, a_even, a_odd * a_odd); the
 // soft cap is fma(c^3, -1 / (3 cap^2), c), the max is over t * (tau log2 e) but the exponent is fma(t, tau log2 e, -max);
@@ -29,6 +32,10 @@ WG_ARGS_BEGIN
     int H, W, ox, oy;
 #if SW_ECL > 0
     uint aux;                 // unused by the expand kernels (null)
+#endif
+#if SW_OUT_COEF12
+    uint coefA, coefC, coefL, coefW;   // pointers: l_coef_pack12's A, C, latent and coefficient blob (out_p unused)
+    int coefRw, coefRh;                // the render rectangle
 #endif
 WG_ARGS_END
 
@@ -402,6 +409,16 @@ void load_frags_g(uint base, uint off, out uint2 f[KC])
 #endif
 #if (SW_SRC != 0 || SW_OUT_F16) && (SW_ADD || SW_ECL > 0)
 #error "SW_SRC / SW_OUT_F16: plain blocks only"
+#endif
+#ifndef SW_OUT_COEF12
+#define SW_OUT_COEF12 0
+#endif
+#if SW_OUT_COEF12
+#if !SW_OUT_F16 || SW_C != 32
+#error "SW_OUT_COEF12: Model L's decoder block only (SW_OUT_F16, C = 32)"
+#endif
+#define COEF_PACK12 1
+#include "l_coef_px.hlsli"
 #endif
 #if SW_SRC == 1
 // LHaloF16Src: the lane's channels hh * C/2 + 8 k + j of the member at grid position (pr, pc) (inside the 2-pixel halo),
@@ -963,6 +980,18 @@ WG_KERNEL(SW_ENTRY)
     // Output RN16(x2) as FP16, real window members only (HIP LStoreF16Epi).
     uint4 o16[KC];
     [unroll] for (uint kf = 0; kf < KC; ++kf) o16[kf] = wg_to_f16(acc[kf]);
+#if SW_OUT_COEF12
+    // l_coef_pack12 of the map: o16[0] / o16[1] of the hh = 0 lane are the pixel's channels 0..7 / 8..15 (the map's
+    // bytes dst * 64 + 0 .. 31, its lo / hi loads); Model L's 13 values are all among them
+    if (dst >= 0 && hh == 0u && pr < coefRh && pc < coefRw) {
+        g_z = wg_grid_ >> 31;
+        const float S = wg_ldf(coefW, 320u), T = wg_ldf(coefW, 324u);
+        const uint pA = (uint)wg_uniform((int)coefA), pC = (uint)wg_uniform((int)coefC),
+                   pL = (uint)wg_uniform((int)coefL);
+        l_coef_px(o16[0], o16[1], S, T, pA, 0u, pC, pL, (uint)(pr * coefRw + pc));
+    }
+    return;
+#endif
     if (dst >= 0) {
         const uint ob16 = ((uint)dst * SW_C + hh * HALF) * 2u;
         [unroll] for (uint kg = 0; kg < KC; ++kg) wg_st128(out_p, ob16 + 16u * kg, o16[kg]);
