@@ -60,7 +60,7 @@ No kernel works in place.
 | File | Source | Kernels |
 |---|---|---|
 | `l_enc_values.co` (loaded under the tag `lev`) | `clean/kernels/encoder.hip` with `-DWG_ENC_VALUES_OUT=1` | `input_encoder` |
-| `l_ops.co` | `clean/l/kernels/l_ops.hip` | `l_linear_32_32_relu`, `l_linear_32_32_f16`, `l_project_gather`, `l_dec_project`, `l_coef` |
+| `l_ops.co` | `clean/l/kernels/l_ops.hip` | `l_linear_32_32_relu`, `l_linear_32_32_f16`, `l_project_gather`, `l_dec_project`, `l_coef`, `l_coef_pack12` |
 | `l_swin.co` | `clean/l/kernels/l_swin.hip` | `l_swin_block_c32[_nc]` (exists, #102: FP8 in / FP8 out, mirror border; block checks only), `l_swin_block_c32_enc[_nc]`, `l_swin_block_c32_dec[_nc]` |
 
 All are built with `clean/runner/build.py`'s `device_command`. The build's `-cuid` comes from the output file name,
@@ -82,6 +82,7 @@ workgroup, in raster order of their map.
 | `l_dec_project` | exists (GPU-checked) | `z, y, w, tw, th` | ceil(tw th / 128) | per token of dec1's output z [th][tw][64]: 128 outputs (two RN16 groups of 32 inputs, then FP8). Output 32 s + k goes to pixel (2r + s / 2, 2c + s % 2), channel k, of `y`. w = `dec0.project` |
 | `l_swin_block_c32_dec[_nc]` | exists (GPU-checked) | `x, xadd (null), out, w, H, W, ox, oy` | as the encoder block | the decoder block. x = `y` (FP8). A member outside the grid takes token-grid mirrored pixels with the sub-pixel kept. out = `y2` (**FP16**). (ox, oy) = `window_offsets["second"]`. w = `dec0_block` |
 | `l_coef` | exists (GPU-checked) | `y2, A, B, C, latent, w, params` | ceil((fh / 2)(fw / 2) / 128), lanes as Model M's `coef_decoder` | Model L's per-pixel functions on the 13 channels `table.L_DEC_VALUES` of `y2`: A, B, C in Model M's forms, latent = tanh(candidate). Writes the same buffers and formats as `coef_decoder`, pixels inside R only. **Reads no motion, previous latent, jitter or reset.** params = Model M's `WgDecParams` (only rw, rh, fw, fh are read). w = `dec0.coef` |
+| `l_coef_pack12` | exists (GPU-checked) | as `l_coef` (`B` unused, may be null) | as `l_coef` | `l_coef`'s values in Model M's dec0 "pack12" layout (`clean/kernels/decoder.hip` `WG_DEC_PACK12`, read by the output stage's `_p12` kernels): image A, 8 bytes per pixel = A0 A1 A2 B0 | B1 B2 C2 (FP16); image C, 4 bytes per pixel = C0 C1 (FP16); latent as `l_coef`. Only padding bytes are left out: unpacked, byte-identical to `l_coef` (`l_ops_check.py`) |
 
 ## Launch order of one frame
 

@@ -218,7 +218,13 @@ WG_KERNEL_N(l_dec_project, kThreads)(const u8* z, u8* y, const u8* w, int tw, in
 // Grid as coef_decoder: ceil((fh / 2)(fw / 2) / 128); lane (t, h) of wave i handles token t' = 16 i + t = (r, c), pixels
 // (2 c, 2 r + h) and (2 c + 1, 2 r + h). w = blob dec0.coef (Model M's dec0 blob: S, T at byte 320). No motion,
 // previous latent, jitter or reset is read.
-WG_KERNEL_N(l_coef, kThreads)(const u8* y2, u32* A, u32* B, u32* C, u32* latent, const u8* w, LDecParams P) {
+// PACK12 (kernel l_coef_pack12): A, B and C without padding bytes, in Model M's dec0 "pack12" layout
+// (clean/kernels/decoder.hip WG_DEC_PACK12, read by the output stage's _p12 kernels): image A, 8 bytes per pixel =
+// A0 A1 A2 B0 | B1 B2 C2 (FP16); image C, 4 bytes per pixel = C0 C1 (FP16); B unused. The latent as l_coef. Only
+// padding bytes (zero in the base form) are left out: the values are the same.
+namespace {
+template <bool PACK12>
+WG_FN void l_coef_body(const u8* y2, u32* A, u32* B, u32* C, u32* latent, const u8* w, const LDecParams& P) {
   const u32 tid = wg_lane_id(), hh = (tid >> 4) & 1u;
   const int tw = P.fw >> 1, ntok = (P.fh >> 1) * tw;
   const int tok = item_of(tid);
@@ -235,10 +241,27 @@ WG_KERNEL_N(l_coef, kThreads)(const u8* y2, u32* A, u32* B, u32* C, u32* latent,
     l_values((const _Float16*)y2, P.fw, x, y, a);
     const LCodes o = l_pixel(a, S, T);
     const u32 i = (u32)(y * P.rw + x);
-    A[i] = o.A;
-    B[i] = o.B;
-    C[2 * i] = o.C0;
-    C[2 * i + 1] = o.C1;
+    if constexpr (PACK12) {
+      A[2 * i] = o.A | (o.B << 24);
+      A[2 * i + 1] = (o.B >> 8) | (o.C1 << 16);
+      C[i] = o.C0;
+      (void)B;
+    } else {
+      A[i] = o.A;
+      B[i] = o.B;
+      C[2 * i] = o.C0;
+      C[2 * i + 1] = o.C1;
+    }
     latent[i] = o.L;
   }
+}
+}  // namespace
+
+WG_KERNEL_N(l_coef, kThreads)(const u8* y2, u32* A, u32* B, u32* C, u32* latent, const u8* w, LDecParams P) {
+  l_coef_body<false>(y2, A, B, C, latent, w, P);
+}
+
+// Same arguments as l_coef; A is the 8-byte image A, C the 4-byte image C, B may be null.
+WG_KERNEL_N(l_coef_pack12, kThreads)(const u8* y2, u32* A, u32* B, u32* C, u32* latent, const u8* w, LDecParams P) {
+  l_coef_body<true>(y2, A, B, C, latent, w, P);
 }
