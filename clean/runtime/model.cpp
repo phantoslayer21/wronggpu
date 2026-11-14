@@ -650,6 +650,7 @@ void put_tile_vector(std::vector<uint8_t>* b, const float* vec, const Order& R, 
 }
 Order rows_identity(int n) { return wgrt::rows_identity(n); }
 Order rows_layout_l(int C, const DRow& drow) { return wgrt::rows_layout_l(C, drow); }
+Order rows_expand(int C, const DRow& drow) { return wgrt::rows_expand(C, drow); }
 Order kord_layout_l(int C) { return wgrt::kord_layout_l(C); }
 Order kord_drow(int n, const DRow& drow) { return wgrt::kord_drow(n, drow); }
 size_t align_up(size_t n) { return wgrt::align_up(n); }
