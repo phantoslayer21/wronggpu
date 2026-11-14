@@ -240,7 +240,11 @@ def run_gpu(out, stage, runs, perf_frames, name="e2e", leak=6, head=None, body="
     if os.path.exists(work):
         shutil.rmtree(work)
     os.makedirs(os.path.join(work, "in"))
-    job = [f"runtime {os.path.join(stage, 'wronggpu_rr_runtime.dll')}"]
+    # the runtime's test-run setting (0.6.1, rc6 e2e note): set-device waits for the opt-in variants' kernels too, so that
+    # scenario A's first frames run them instead of passing through while they compile (the bit-exact checks would fail);
+    # the wait limit is raised for a cold driver cache. Set before the runtime is loaded (the host's env line).
+    job = ["env WG_RR_COMPILE_WAIT_ALL 1", "env WG_RR_COMPILE_WAIT_MS 600000",
+           f"runtime {os.path.join(stage, 'wronggpu_rr_runtime.dll')}"]
     if head:                                   # WG_RR_HEAD for every instance of this run (e.g. fast)
         job.append(f"env WG_RR_HEAD {head}")
     if body:                                   # WG_RR_BODY (default Z: the exact verification mode, so that the body

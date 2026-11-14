@@ -17,6 +17,43 @@ class HipError(RuntimeError):
     pass
 
 
+# The HIP SDK every HIP / clang process of this project uses, and the environment cleanup applied before the HIP
+# runtime is loaded (and so inherited by every child process): every variable whose name contains HIP, LLVM, ROCM or
+# HSA is removed, except HIP_PLATFORM and HIP_PATH_72, and ROCM_PATH is set to the SDK. A stray inherited variable
+# can point the vendor runtime at an unrelated folder (an LLVM_PATH outside the SDK made hipModuleLoadData crash).
+# Per process only: the user's and the machine's environment are not changed.
+DEFAULT_ROCM = r"C:\Program Files\AMD\ROCm\7.2"
+HIP_ENV_KEEP = ("HIP_PLATFORM", "HIP_PATH_72")
+HIP_ENV_PARTS = ("HIP", "LLVM", "ROCM", "HSA")
+
+
+def hip_child_environment(env=None, rocm_dir=None):
+    """A copy of `env` (default os.environ) cleaned for HIP / clang processes, and the names removed (never values).
+    ROCM_PATH = rocm_dir, else DEFAULT_ROCM."""
+    src = dict(os.environ if env is None else env)
+    keep = {k.upper() for k in HIP_ENV_KEEP}
+    out, removed = {}, []
+    for k, v in src.items():
+        u = k.upper()
+        if u not in keep and any(part in u for part in HIP_ENV_PARTS):
+            removed.append(k)
+        else:
+            out[k] = v
+    out["ROCM_PATH"] = rocm_dir or DEFAULT_ROCM
+    return out, sorted(removed)
+
+
+def clean_process_environment(rocm_dir=None):
+    """Applies hip_child_environment to this process's os.environ (so the HIP runtime loaded afterwards and every child
+    process see the cleaned environment). Returns the names removed."""
+    cleaned, removed = hip_child_environment(os.environ, rocm_dir)
+    for k in list(os.environ):
+        if k not in cleaned:
+            del os.environ[k]
+    os.environ["ROCM_PATH"] = cleaned["ROCM_PATH"]
+    return removed
+
+
 def _check_environment(rocm_dir):
     """Warn about a stray LLVM_PATH: one pointing outside the HIP SDK made hipModuleLoadData crash for every code
     object on the spec team's machine (results/2026-10-05-swin-selftest.md)."""
@@ -54,6 +91,7 @@ def _find_library(rocm_dir):
 
 class Hip:
     def __init__(self, rocm_dir, device=0):
+        clean_process_environment(rocm_dir)
         _check_environment(rocm_dir)
         lib = self.lib = _find_library(rocm_dir)
         self._images = []

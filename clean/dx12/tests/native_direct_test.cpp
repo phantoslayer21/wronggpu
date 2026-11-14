@@ -384,6 +384,10 @@ int main(int argc,char** argv){
   int frames=argc>9?std::stoi(argv[9]):8,cycles=argc>10?std::stoi(argv[10]):2;
   double warm=argc>11?std::stod(argv[11]):3;int rounds=argc>12?std::stoi(argv[12]):3,samples=argc>13?std::stoi(argv[13]):600;
   double minimum_seconds=argc>14?std::stod(argv[14]):1;std::string pre_exposure=argc>15?argv[15]:"scale";int hdr=argc>16?std::stoi(argv[16]):0;
+  // argument 17: the model, M (default) or L (a build with WG_MODEL_L: <model>/L/model.wgcm, its map
+  // preset-L.v1.map.json in the build folder; Model L's file has no output-filter weights: the analytic filter)
+  const std::string model_id=argc>17?argv[17]:"M";
+  need(model_id=="M"||model_id=="L","model must be M or L");
   need(std::isfinite(minimum_seconds)&&minimum_seconds>=1,"minimum measurement window must be >=1 second");
   need((pre_exposure=="scale"||pre_exposure=="original")&&(hdr==0||hdr==1),"pre-exposure/HDR options");
   need(rw>0&&rh>0&&ow>0&&oh>0&&frames>0&&cycles>0,"positive test sizes/counts");
@@ -394,11 +398,12 @@ int main(int argc,char** argv){
   _putenv_s("WG_DX12_DEBUG",mode!="bench"&&g.iq?"1":"");
   modules("fresh",true);
   WgRtConfig cfg={};cfg.build_dir=build.c_str();cfg.model_dir=model.c_str();cfg.backend=3;cfg.max_rw=rw;cfg.max_rh=rh;
-  cfg.ow=ow;cfg.oh=oh;cfg.depth_inverted=1;cfg.auto_exposure=1;cfg.model_format=1;
-  std::string options="model=M;output_filter=original;pre_exposure="+pre_exposure;
+  cfg.ow=ow;cfg.oh=oh;cfg.depth_inverted=1;cfg.auto_exposure=1;cfg.model_format=model_id=="L"?0:1;
+  std::string options=model_id=="L"?"model=L;pre_exposure="+pre_exposure
+                                   :"model=M;output_filter=original;pre_exposure="+pre_exposure;
   cfg.runtime_options=options.c_str();cfg.hdr=hdr;
   const uint32_t flags=WG_CREATE_DEPTH_INVERTED|WG_CREATE_AUTO_EXPOSURE|(hdr?WG_CREATE_HDR:0);
-  std::printf("OPTIONS pre_exposure=%s hdr=%d\n",pre_exposure.c_str(),hdr);
+  std::printf("OPTIONS pre_exposure=%s hdr=%d model=%s\n",pre_exposure.c_str(),hdr,model_id.c_str());
   bool mutation=false;unsigned compared=0,combinations=0;
   for(int cycle=0;cycle<(mode=="bench"?1:cycles);++cycle){
     auto direct=wgi::NativeCandidate::create(g.d,g.q,cfg,flags,&e,true);need(!!direct,e);

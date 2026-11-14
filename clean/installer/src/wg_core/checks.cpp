@@ -28,6 +28,57 @@ WinInfo WindowsInfo() {
 }
 
 bool IsRdna4Name(const wstring& name) { return Contains(name, L"RX 90") || Contains(name, L"PRO R97") || Contains(name, L"PRO R96"); }
+// Under Wine, Wine's own DXGI can name an RDNA 4 card after an old Radeon ("ATI Radeon HD 5600 Series"); the PCI ids of
+// Linux's DRM devices (/sys/class/drm/cardN/device, reached through Z:) are the card's own. The RDNA 4 ids are the RR
+// runtime's list (clean/rr_f/runtime/src/rr_runtime.cpp rdna4_device_id).
+// sysfs reports 4096 bytes for files that hold a few (ReadAll's size check fails on them): read to the end of the file.
+static bool ReadSysfs(const wstring& path, string& out) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    char b[64];
+    DWORD got = 0;
+    out.clear();
+    while (out.size() < 256 && ReadFile(h, b, sizeof b, &got, nullptr) && got) out.append(b, got);
+    CloseHandle(h);
+    return !out.empty();
+}
+// Every DRM card the folder lists (card0, card1, ...; not the connectors such as card1-DP-1), in number order.
+static std::vector<std::pair<unsigned long, wstring>> DrmCards(const wstring& drmRoot) {
+    std::vector<std::pair<unsigned long, wstring>> cards;
+    WIN32_FIND_DATAW fd;
+    HANDLE f = FindFirstFileW((drmRoot + L"\\card*").c_str(), &fd);
+    if (f == INVALID_HANDLE_VALUE) return cards;
+    do {
+        const wstring n = fd.cFileName;
+        if (n.size() <= 4 || n.size() > 12 || n.find_first_not_of(L"0123456789", 4) != wstring::npos) continue;
+        cards.push_back({std::wcstoul(n.c_str() + 4, nullptr, 10), Join(drmRoot, n)});
+    } while (FindNextFileW(f, &fd));
+    FindClose(f);
+    std::sort(cards.begin(), cards.end());
+    return cards;
+}
+static bool HexId(const string& text, unsigned long& id) {
+    const char* s = text.c_str();
+    char* end = nullptr;
+    id = strtoul(s, &end, 16);
+    while (end && (*end == '\n' || *end == '\r' || *end == ' ')) ++end;
+    return end && end != s && *end == '\0';
+}
+wstring LinuxRdna4Name(const wstring& drmRoot) {
+    for (const auto& card : DrmCards(drmRoot)) {
+        string vendor, device;
+        unsigned long v = 0, d = 0;
+        if (!ReadSysfs(Join(card.second, L"device\\vendor"), vendor) || !ReadSysfs(Join(card.second, L"device\\device"), device) ||
+            !HexId(vendor, v) || !HexId(device, d))
+            continue;
+        if (v == 0x1002 && (d == 0x7550 || d == 0x7551 || d == 0x7590 || d == 0x7591)) {
+            wchar_t b[160];
+            swprintf(b, 160, L"AMD Radeon RDNA 4 (PCI 1002:%04lX, found in Linux's device list; not confirmed as the adapter the game uses)", d);
+            return b;
+        }
+    }
+    return L"";
+}
 GpuInfo DetectGpu() {
     GpuInfo best;
     HMODULE dxgi = LoadSystemDll(L"dxgi.dll");
@@ -56,12 +107,18 @@ GpuInfo DetectGpu() {
         if (!best.amd || (rdna4 && !best.rdna4)) { best.amd = true; best.rdna4 = rdna4; best.name = name; best.driver = driver; }
     }
     f->Release();
+    if (!best.rdna4 && UnderWine()) {
+        const wstring linuxName = LinuxRdna4Name();
+        // the driver version of the DXGI adapter is not this card's: left unknown rather than carried over
+        if (!linuxName.empty()) { best.amd = true; best.rdna4 = true; best.name = linuxName; best.driver.clear(); }
+    }
     return best;
 }
 
 // The AMD HIP runtime (amdhip64_7.dll) the clean runtime loads (spec 30 answer 7): from the system search path first
 // (System32, where the AMD Software: Adrenalin Edition driver installs it; then the PATH folders), then the newest
-// C:\Program Files\AMD\ROCm\<version>\bin (HIP SDK), then HIP_PATH. WRONGGPU_HIP_RUNTIME overrides (development).
+// C:\Program Files\AMD\ROCm\<version>\bin (HIP SDK), then HIP_PATH. WRONGGPU_HIP_RUNTIME overrides (development; read
+// only by a WRONGGPU_TESTING build).
 const wchar_t* const kHipDll = L"amdhip64_7.dll";
 const wchar_t* const kDriverPage = L"https://www.amd.com/en/support/download/drivers.html";
 const char* const kSupportedArch[] = {"gfx1201", "gfx1200"};  // RDNA 4: the RX 9070 family and the RX 9060 family
@@ -103,9 +160,11 @@ std::vector<wstring> HipCandidates() {
         }
         return c;
     }
-#endif
-    wstring env = EnvVar(L"WRONGGPU_HIP_RUNTIME");
+    // 0.6.1: the development override only in a WRONGGPU_TESTING build; a release build never reads it (a developer's
+    // mock HIP library set at install time was recorded in hip-runtime.txt)
+    const wstring env = EnvVar(L"WRONGGPU_HIP_RUNTIME");
     if (!env.empty()) c.push_back(env);
+#endif
     wchar_t sys[MAX_PATH];
     if (GetSystemDirectoryW(sys, MAX_PATH)) c.push_back(Join(sys, kHipDll));
     wstring path = EnvVar(L"PATH");
@@ -502,8 +561,10 @@ Checks RunChecks(Context& ctx, const GameTarget& t, SystemInfo& sys, const Model
     else if (model->ok()) set(L_MODEL, CK_OK, L"Model data: " + (model->reused ? wstring(L"already prepared on this PC")
                                                                              : BaseName(model->dll) + L" " + (model->version.empty() ? wstring() : model->version + L" ") +
                                                                                    L"from " + model->origin + L", converted on this PC"));
-    else set(L_MODEL, CK_FAIL, model->damaged ? model->error : L"No usable DLSS model file (nvngx_dlss.dll 310.5 or newer) - click \"Model file...\"",
-             model->damaged ? EXIT_DAMAGED : EXIT_NO_MODEL);
+    // model->code: an ignore-list case (convert_ignore.h) with its own words: a list that can't be read (10), every file found
+    // listed, the model data on this PC converted from a listed file (5)
+    else set(L_MODEL, CK_FAIL, model->damaged || model->code ? model->error : L"No usable DLSS model file (nvngx_dlss.dll 310.5 or newer) - click \"Model file...\"",
+             model->damaged ? EXIT_DAMAGED : model->code ? model->code : EXIT_NO_MODEL);
     if (!have) set(L_CONFLICT, CK_NA, L"Other upscaler mods and older installs");
     else if (const Finding* no = t.coexist.refusal(); no && no->tool != Tool::AntiCheat)  // the rules table: no override
         set(L_CONFLICT, CK_FAIL, no->what + L": " + no->message, no->code ? no->code : EXIT_REFUSED);
