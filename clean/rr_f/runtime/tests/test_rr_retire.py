@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: MIT
-"""CPU test of the RR runtime's retire list (clean/rr_f/runtime/src/rr_retire.h, issue #63): an object that a frame
-recorded into the game's command list may use (buffers, the shader-visible descriptor heap, the timestamp query heap)
-is released only when the frame marker proves that frame complete, never because a wait ran out; device drop releases
-the rest. rr_retire_test.cpp drives the list with fake objects that count Release and a fake marker value.
+"""CPU test of the RR runtime's per-list completion and retire list (clean/rr_f/runtime/src/rr_retire.h, issues #63
+and #82): an object that a command list recorded by the runtime may use (buffers, the shader-visible descriptor heap,
+the timestamp query heap) is released only when EVERY list that may use it has proved complete through its own marker
+slot, never because a wait ran out or a later list completed. Covered: out-of-order submission (A recorded first, B
+submitted and completed first: A's objects kept), a list that is never submitted, marker-slot reuse, and a device
+switch with work pending (the old device's objects kept until its lists complete or it is removed, with a bound).
+rr_retire_test.cpp drives it with fake objects that count Release and a fake marker buffer.
 
 The program is compiled with the first available C++17 compiler: $CXX, clang++ / g++ on PATH, MSVC cl on PATH (a
 developer prompt), then MSVC through vswhere and vcvars64.bat. Skipped when there is none.
