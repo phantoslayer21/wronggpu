@@ -124,6 +124,16 @@ def blob_digests():
 
 L_KERNELS = ("lev/input_encoder", "l_linear_32_32_relu", "l_linear_32_32_f16", "l_swin_block_c32_enc",
              "l_project_gather", "l_dec_project", "l_swin_block_c32_dec", "l_coef", "l_post_recon")
+# native D3D12, fusion lc (the default): the decoder block with l_coef_pack12 as its epilogue, in place of the pair
+FOLD = "l_swin_block_c32_dec_coef12_nc"
+FOLD_BASE = "l_swin_block_c32_dec_coef12"
+# the default fusions without lc: the pair (the fold's fallback route)
+NO_FOLD = {"WG_D3D12_FUSION": "pm,xe,mb,rv,xo,xd"}
+
+
+def latent_out(coef):
+    """The new latent a frame's coefficient store wrote (l_coef / l_coef_pack12, or the folded block)."""
+    return coef.args[10] if coef.kernel == FOLD else coef.args[4]
 
 
 def expected_args(t, f, digests):
@@ -155,6 +165,9 @@ def expected_args(t, f, digests):
         "l_dec_project": [n["dec1.out"], n["l.narrow"], w["dec0.project"], tw, th],      # dec1's output -> y
         "l_swin_block_c32_dec": [n["l.narrow"], "0", n["l.wide"], w["dec0_block"], str(fh), str(fw)] + do,  # -> y2
         "l_coef": [n["l.wide"], n["dec0.A"], n["dec0.B"], n["dec0.C"], n["dec0.latent"], w["dec0.coef"], None],
+        # the folded form: the block's arguments (no map out), then the pack12 store's images, latent, blob, rectangle
+        FOLD_BASE: [n["l.narrow"], "0", "0", w["dec0_block"], str(fh), str(fw)] + do +
+                   [n["dec0.A"], n["dec0.C"], n["dec0.latent"], w["dec0.coef"], str(info["rw"]), str(info["rh"])],
         # the reconstruction (Model M's post_recon arguments): colour, A, B, C, the previous history, this frame's
         # motion surfaces, the post blob, the new history, the reduced history, the display image, P, exposure pair
         "l_post_recon": [n["input.color"], n["dec0.A"], n["dec0.B"], n["dec0.C"], n["state.history_prev"],
@@ -185,7 +198,11 @@ def check_roles(t, f, digests, l_post=True):
             continue
         bad += ["%s argument %d: %s, expected %s" % (k, i, a, e) for i, (a, e) in enumerate(zip(ln.args, want))
                 if e is not None and a != e]
-    missing = [k for k in L_KERNELS if k not in seen and (l_post or k != "l_post_recon")]
+    fold = FOLD_BASE in seen
+    need = [k for k in L_KERNELS if not (fold and k in ("l_swin_block_c32_dec", "l_coef"))] + ([FOLD_BASE] if fold else [])
+    if fold and ({"l_swin_block_c32_dec", "l_coef"} & seen):
+        bad.append("the folded decoder block and the pair in one frame")
+    missing = [k for k in need if k not in seen and (l_post or k != "l_post_recon")]
     if bad or missing:
         raise AssertionError("; ".join(bad + ["not launched: " + k for k in missing]))
 
@@ -318,8 +335,13 @@ class Arguments(unittest.TestCase):
         _, enc = k["l_swin_block_c32_enc"]
         gi, gather = k["l_project_gather"]
         di, dproj = k["l_dec_project"]
-        _, dec = k["l_swin_block_c32_dec"]
-        _, coef = k["l_coef"]
+        fold = FOLD_BASE in k
+        if fold:  # one launch: the block with the coefficient store as its epilogue (no y2 map)
+            _, dec = k[FOLD_BASE]
+            coef = dec
+        else:
+            _, dec = k["l_swin_block_c32_dec"]
+            _, coef = k["l_coef"]
         q, x1, x2, x3, feat = lev.args[6], relu.args[1], f16.args[1], enc.args[2], gather.args[1]
         # the chain of maps (no launch reads what it writes)
         self.assertEqual(relu.args[0], q)
@@ -334,14 +356,20 @@ class Arguments(unittest.TestCase):
         self.assertEqual(dproj.args[0], dec1.args[2])  # the decoder reads dec1's output
         self.assertEqual(dec.args[0], y)
         self.assertEqual(dec.args[1], "0")
-        self.assertEqual(coef.args[0], y2)
+        if fold:
+            self.assertEqual(y2, "0")  # the map is not written
+        else:
+            self.assertEqual(coef.args[0], y2)
         for a, b in ((q, x1), (x1, x2), (x2, x3), (x3, feat), (dec1.args[2], y), (y, y2)):
             self.assertNotEqual(a, b)
         # every buffer holds its map (FORMATS.md "Maps")
         maps = ((q, 32 * npix), (x1, 32 * npix), (x2, 64 * npix), (x3, 32 * fh * fw), (feat, 64 * tw * th),
-                (y, 32 * fh * fw), (y2, 64 * fh * fw))
-        coefs = ((coef.args[1], 4 * rw * rh), (coef.args[2], 4 * rw * rh), (coef.args[3], 8 * rw * rh),
-                 (coef.args[4], 4 * rw * rh))  # A, B, C, the new latent: Model M's formats
+                (y, 32 * fh * fw)) + (() if fold else ((y2, 64 * fh * fw),))
+        if fold:  # pack12 image A (8 bytes a pixel), image C (4), the new latent
+            coefs = ((coef.args[8], 8 * rw * rh), (coef.args[9], 4 * rw * rh), (coef.args[10], 4 * rw * rh))
+        else:
+            coefs = ((coef.args[1], 4 * rw * rh), (coef.args[2], 4 * rw * rh), (coef.args[3], 8 * rw * rh),
+                     (coef.args[4], 4 * rw * rh))  # A, B, C, the new latent: Model M's formats
         for buf, need in maps + coefs:
             self.assertGreaterEqual(t.extent(buf), need, buf)
         # extents, offsets, parameters
@@ -352,10 +380,13 @@ class Arguments(unittest.TestCase):
         for blk, kind in ((enc, "first"), (dec, "second")):
             ox, oy = T.block_offset(T.TABLE, kind, info["parity"])
             self.assertEqual(blk.args[4:8], [str(fh), str(fw), str(ox), str(oy)])
-        e, d = lev.params(12), coef.params(6)
+        e = lev.params(12)
         self.assertEqual(e[:4], [rw, rh, fw, fh])
         self.assertEqual(e[5], info["reset"])
-        self.assertEqual(d, [rw, rh, fw, fh, info["reset"]])
+        if fold:
+            self.assertEqual(coef.args[12:14], [str(rw), str(rh)])
+        else:
+            self.assertEqual(coef.params(6), [rw, rh, fw, fh, info["reset"]])
         post = [ln for ln in ls if ln.kernel == "l_post_recon"]
         self.assertEqual(len(post), 1 if l_post else 0)  # (native D3D12: Model M's fused pack12 post for now)
         if l_post:
@@ -508,15 +539,22 @@ class D3D12(unittest.TestCase):
         info = f["info"]
         rw, rh = info["rw"], info["rh"]
         names = [ln.kernel for ln in f["launches"]]
-        self.assertIn("l_coef_pack12", names)
+        fold = FOLD in names
+        if fold:
+            self.assertNotIn("l_coef_pack12", names)
+            self.assertNotIn("l_swin_block_c32_dec_nc", names)
+            self.assertEqual(names[names.index(FOLD) - 1], "l_dec_project")
+        else:
+            self.assertIn("l_coef_pack12", names)
         self.assertNotIn("l_coef", names)
         self.assertTrue(all(not n.startswith(("d1p12/", "d0p12/")) and n != "input_encoder" for n in names), names)
         dec1 = [ln for ln in f["launches"] if ln.kernel.startswith("swin_block_c64_add")]
         self.assertEqual([ln.kernel for ln in dec1], ["swin_block_c64_add_ex_nc"])  # dec1's own block, not fused
         lev, coef = Arguments.check_frame(self, t, f, l_post=False)
-        self.assertGreaterEqual(t.extent(coef.args[1]), 8 * rw * rh)  # pack12 image A: 8 bytes per pixel
-        self.assertGreaterEqual(t.extent(coef.args[3]), 4 * rw * rh)  # pack12 image C: 4 bytes per pixel
-        i = names.index("l_coef_pack12")
+        a, c = (coef.args[8], coef.args[9]) if fold else (coef.args[1], coef.args[3])
+        self.assertGreaterEqual(t.extent(a), 8 * rw * rh)  # pack12 image A: 8 bytes per pixel
+        self.assertGreaterEqual(t.extent(c), 4 * rw * rh)  # pack12 image C: 4 bytes per pixel
+        i = names.index(FOLD if fold else "l_coef_pack12")
         self.assertTrue(names[i + 1].startswith("w64/post_tf") and "_p12" in names[i + 1], names[i + 1:])
         return lev, coef
 
@@ -529,24 +567,36 @@ class D3D12(unittest.TestCase):
         self.assertEqual(t.unknown(), [])
         self.assertEqual([f["info"]["reset"] for f in t.frames], [1, 0, 1, 0, 1, 1])
         self.assertEqual(len({f["info"]["parity"] for f in t.frames}), 2)
-        prev = None
-        for f in t.frames:
-            self.assertIsNone(f["error"])
-            lev, coef = self.check_d3d12_frame(t, f)
-            if prev:
-                self.assertEqual(lev.args[4], prev[1].args[4])  # the latent the last frame's store wrote
-                self.assertEqual(lev.args[5], prev[0].args[7])  # its near motion
-            prev = (lev, coef)
+        for env, ports, fold in ((None, full_ports(), True), (NO_FOLD, full_ports(), False),
+                                 (None, [kc for kc in full_ports() if kc[0] != FOLD], False)):
+            with self.subTest(fusion=env, fold_in_manifest=any(kc[0] == FOLD for kc in ports)):
+                # the fold (fusion lc, the default) and its fallback, the pair: without lc, or without the kernel
+                t = FT.Trace(self.l_run(ports, frames=6, rw=96, rh=64, flags=(sizes, "--reset=4"), env=env))
+                self.assertEqual(t.create, "create ok model L")
+                self.assertEqual(t.unknown(), [])
+                self.assertEqual([f["info"]["reset"] for f in t.frames], [1, 0, 1, 0, 1, 1])
+                self.assertEqual(len({f["info"]["parity"] for f in t.frames}), 2)
+                prev = None
+                for f in t.frames:
+                    self.assertIsNone(f["error"])
+                    self.assertEqual(FOLD in [ln.kernel for ln in f["launches"]], fold)
+                    lev, coef = self.check_d3d12_frame(t, f)
+                    if prev:
+                        self.assertEqual(lev.args[4], latent_out(prev[1]))  # the latent the last frame's store wrote
+                        self.assertEqual(lev.args[5], prev[0].args[7])  # its near motion
+                    prev = (lev, coef)
 
     def test_failed_launch_stops_the_frame(self):
-        t = FT.Trace(self.l_run(full_ports(), frames=3, flags=("--fail=l_coef_pack12@1",)))
-        ok0, bad, ok2 = t.frames
-        self.assertEqual(bad["failed"], "l_coef_pack12")
-        names = [ln.kernel for ln in bad["launches"]]
-        self.assertEqual(names, [ln.kernel for ln in ok0["launches"]][:len(names)])
-        self.assertTrue(names[-1].startswith("l_swin_block_c32_dec"))
-        self.assertIsNone(ok2["error"])
-        self.check_d3d12_frame(t, ok2)
+        for env, kernel, before in ((None, FOLD, "l_dec_project"), (NO_FOLD, "l_coef_pack12", "l_swin_block_c32_dec")):
+            with self.subTest(kernel=kernel):
+                t = FT.Trace(self.l_run(full_ports(), frames=3, flags=("--fail=%s@1" % kernel,), env=env))
+                ok0, bad, ok2 = t.frames
+                self.assertEqual(bad["failed"], kernel)
+                names = [ln.kernel for ln in bad["launches"]]
+                self.assertEqual(names, [ln.kernel for ln in ok0["launches"]][:len(names)])
+                self.assertTrue(names[-1].startswith(before))
+                self.assertIsNone(ok2["error"])
+                self.check_d3d12_frame(t, ok2)
 
     def test_model_m_unchanged(self):
         """Model M on backend 3 traces the same in the build with Model L as in the build without it."""
