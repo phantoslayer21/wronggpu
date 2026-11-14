@@ -105,7 +105,7 @@ add_library(wg_core STATIC
   src/wg_core/model.cpp src/wg_core/checks.cpp src/wg_core/install.cpp src/wg_core/logs.cpp
   src/wg_core/profile.cpp src/wg_core/logtail.cpp src/wg_core/launcher.cpp
   src/wg_core/fingerprint.cpp src/wg_core/optikeys.cpp src/wg_core/leftovers.cpp src/wg_core/rr.cpp src/wg_core/rrprep.cpp src/wg_core/gamerules.cpp
-  src/wg_core/rrconfig.cpp)
+  src/wg_core/rrconfig.cpp src/wg_core/convert_ignore.cpp)
 target_include_directories(wg_core PUBLIC src)
 target_compile_definitions(wg_core PUBLIC ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION})
 if(WRONGGPU_TESTING)
@@ -188,6 +188,11 @@ add_executable(coexist-core-tests tests/coexist_tests.cpp)
 target_link_libraries(coexist-core-tests PRIVATE wg_core)
 # real front-end log excerpts (trimmed, paths replaced) for the Last run parser (UI review r3 #2)
 target_compile_definitions(coexist-core-tests PRIVATE WG_TEST_LOGS="${CMAKE_CURRENT_SOURCE_DIR}/tests/logs")
+# The converter search's ignore lists (src/wg_core/convert_ignore.h): the list format, bad lines, path and hash matching
+# (case, slashes, '.' and '..', hard link, junction, symbolic link where the account may make one), the well-known lists,
+# and an empty list keeping every candidate set as it was (synthetic files in the temp folder).
+add_executable(convert-ignore-tests tests/convert_ignore_tests.cpp)
+target_link_libraries(convert-ignore-tests PRIVATE wg_core)
 enable_testing()
 add_test(NAME source-size COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_source_size.py)
 # The launcher's words never claim the same output as the original ("bit for bit", "identical", "(native)": rr-notes.md)
@@ -195,6 +200,7 @@ add_test(NAME wording COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/
 add_test(NAME wg-core COMMAND wg-core-tests)
 add_test(NAME launcher-core COMMAND launcher-core-tests)
 add_test(NAME coexist-core COMMAND coexist-core-tests)
+add_test(NAME convert-ignore COMMAND convert-ignore-tests)
 if(WRONGGPU_TESTING)
   add_test(NAME wizard-policy COMMAND wizard-policy-tests)
 endif()

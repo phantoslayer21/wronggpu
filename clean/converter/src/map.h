@@ -279,7 +279,7 @@ bool load_map(const std::string& file_bytes, Map& out, MapError& err);
 // The same, for a caller that knows which preset it loads the map for (`expected_preset`, e.g. "L"; "" : as above). A map
 // without the field "preset" then gets that preset, when it allows the map's version; a map with the field must name
 // the same preset. Anything else (an unknown name, a version the preset does not use, another name): damaged. This is
-// how a map written before maps named their preset (the delivered preset-L map has no field) is read as its preset.
+// how a map written before maps named their preset (the first delivered preset-L map had no field) is read as its preset.
 bool load_map(const std::string& file_bytes, Map& out, MapError& err, const std::string& expected_preset);
 
 // Hex helpers shared with the tests: optional 0x prefix, then 1..max_digits hex digits.

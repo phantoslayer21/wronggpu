@@ -89,6 +89,14 @@ struct Context {
     // The player's Documents folder (rrconfig.h): the elevated worker gets it from its job (it may run as another account);
     // empty: the Documents known folder of this process's user.
     wstring playerDocuments;
+    // The ignore lists of the converter's file search (convert_ignore.h): the launcher's own data folder (its well-known list
+    // when that is not %LOCALAPPDATA%\WrongGPU: a portable launcher's WrongGPU-data, a --data= folder), and this run's
+    // command line (--ignore-list=<file>, --ignore=<entry>), added to the well-known lists.
+    wstring ownDataDir;
+    std::vector<wstring> ignoreListFiles, ignoreEntries;
+    // ignoreListBytes[i]: the bytes of ignoreListFiles[i] when the command line read them already (once, with the bounded
+    // reader: convert_ignore.h ReadIgnoreListBytes); a file without them is read when the search loads the lists.
+    std::vector<string> ignoreListBytes;
     Context() = default;
     Context(const Context&) = delete;
     Context& operator=(const Context&) = delete;
