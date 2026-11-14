@@ -17,8 +17,10 @@
 // render-size change (53.9). The frame's work buffers are placed by their lifetimes (buffers that are never live at
 // the same pass share memory). The host bookkeeping of page 53 (par, fc, pj, CP, pending resets) is the proxy's.
 //
-// Completion: one runtime-wide marker (WriteBufferImmediate after each recorded frame) tells which frames the game's
-// queue has finished; per-frame upload / descriptor / timestamp slots and every deferred release wait for it.
+// Completion: every list the runtime records into (frame, pass-through, transient copy) ends with a write of its serial
+// into a marker slot of its own (rr_retire.h ListMarks); a list is complete when its own slot holds its serial, never
+// because a later list completed. Per-frame upload / descriptor / timestamp slots and every deferred release wait for
+// the lists that use them.
 // Log: wronggpu-rr.log next to this library (the proxy's directory).
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -38,6 +40,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <string>
@@ -52,6 +55,7 @@
 #include "rr_model.h"
 #include "rr_runtime_test.h"
 #include "rr_modes.h"
+#include "rr_retire.h"
 #include "../../proxy/include/wg_settings_reader.h"
 #include "../../../runtime/interop/descriptor_publish.h"
 
@@ -95,6 +99,11 @@ constexpr uint32_t kPoolTableBytes = 2050 * 4, kExp2TableBytes = 8192;
 // motion (4) and history (32) images, no linear / trace outputs (8)
 constexpr uint32_t kOutFastFlags = 1u | 2u | 4u | 8u | 32u;
 constexpr uint32_t kTimingWindow = 300;
+// marker buffer: word 0 = the serial of the last list that finished (diagnostics only, the removal log), words 2, 3 =
+// the GPU breadcrumbs; from word kMarkBase one completion slot per list in flight (rr_retire.h ListMarks)
+constexpr uint32_t kMarkBase = 64;
+constexpr uint32_t kMarkSlots = 1024;
+constexpr uint32_t kMarkerBytes = 4 * (kMarkBase + kMarkSlots);
 
 const char* const kPassNames[kTs - 1] = {"pre", "input", "body", "head", "output", "resolve", "store"};
 
@@ -142,6 +151,35 @@ void log_line(const std::string& s) {
   fprintf(f, "%02u:%02u:%02u.%03u runtime: %s\r\n", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, s.c_str());
   fclose(f);
 }
+
+// The worker thread of the pipeline compiles, with a 64 MB stack reservation (address space only; pages are committed
+// as they are used). Under Proton, vkd3d-proton translates each kernel on the thread that calls
+// CreateComputePipelineState, and the structurizer in current dxil-spirv (HansKristian-Work/dxil-spirv#366) recurses
+// about once per branch. With a std::thread (the process's default stack: 1 MB in rr_test_host, 2 MB in Cyberpunk 2077)
+// the opt-in kernels stage.IN0 and stage.D4-F overflowed the stack; the thread died without setting compile_failed, so
+// the opt-in variants never became ready.
+class CompileThread {
+ public:
+  bool start(std::function<void()> f) {
+    fn_ = std::move(f);
+    h_ = CreateThread(nullptr, 64u << 20, run, this, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
+    return h_ != nullptr;
+  }
+  bool joinable() const { return h_ != nullptr; }
+  void join() {
+    WaitForSingleObject(h_, INFINITE);
+    CloseHandle(h_);
+    h_ = nullptr;
+  }
+
+ private:
+  static DWORD WINAPI run(void* self) {
+    static_cast<CompileThread*>(self)->fn_();
+    return 0;
+  }
+  HANDLE h_ = nullptr;
+  std::function<void()> fn_;
+};
 
 // RDNA 4 boards (the rule of clean/runtime/rdna4.h on clean/rdna4-dx12, WrongGPU's own code)
 bool rdna4_adapter(uint32_t vendor, bool software, const std::string& d) {
@@ -378,8 +416,6 @@ const StageDef kStages[15] = {
     {"D1-F", K_D1F, 1, 64, 'f', 0},    {"D1-R", K_D1R, 1, 64, 'r', 0},   {"D0-F", K_D0F, 0, 32, 'f', 0}};
 
 // ---------------------------------------------------------------------------------------------------- runtime state
-struct Deferred { uint64_t serial; ID3D12Resource* res; };
-
 struct Runtime {
   std::recursive_mutex mu;
   bool init_done = false;
@@ -388,7 +424,7 @@ struct Runtime {
   // clean/rr-f-live2: the frame kernels' pipelines are made on a worker thread (a cold driver cache needs minutes
   // for them; set-device must not block the game that long). Evaluates fail (the proxy passes the frame through)
   // until kernels_ready. The worker never takes mu; drop_device cancels and joins it.
-  std::thread compile_thread;
+  CompileThread compile_thread;
   std::atomic<bool> kernels_ready{false}, compile_cancel{false};
   // clean/rr-f-flow: kernels_ready = the default frame's kernels (compiled first); all_ready = every kernel, the opt-in
   // variants' too (WG_RR_HEAD=exact/strict/debug, WG_RR_BODY=X/Z, WG_RR_PATHS=verified), compiled after them
@@ -424,13 +460,19 @@ struct Runtime {
   ID3D12Resource* ags_buf = nullptr;
   ID3D12Resource* marker = nullptr;
   volatile uint32_t* marker_map = nullptr;
-  uint64_t serial = 0;            // frames recorded into the game's lists (all instances)
+  uint64_t serial = 0;            // the last list serial handed out on this device (frames, pass-throughs, copies)
+  ListMarks marks{kMarkSlots};    // per-list completion on this device (rr_retire.h)
+  uint64_t gen = 0;               // device generation (set-device count), for transients and the parked old devices
   UINT inc = 0;
   uint64_t ts_freq = 0;
   std::string adapter_name;
   bool ready_logged = false;
-  std::vector<Deferred> deferred;
-  std::vector<ID3D12Resource*> transient;   // retain_transient copies alive
+  RetireList<IUnknown> deferred;            // objects kept until every list using them proved complete (rr_retire.h)
+  ParkedSet<IUnknown> parked;               // old devices' lists still in flight after a device switch (rr_retire.h)
+  // retain_transient copies alive: the copy, its device generation, and every list that may read it (the copy's own
+  // list, and each frame / pass-through that took it as an input)
+  struct Transient { ID3D12Resource* r; uint64_t gen; std::vector<uint64_t> users; };
+  std::vector<Transient> transient;
   std::atomic<int64_t> live_resources{0};
   std::atomic<int64_t> created_resources{0};
   int live_instances = 0;
@@ -493,39 +535,90 @@ void drop(ID3D12Resource*& r) {
     R().live_resources--;
   }
 }
-uint64_t marker_done() {
+// the completion slots of this device's lists (null before set-device)
+const volatile uint32_t* mark_words() { return R().marker_map ? R().marker_map + kMarkBase : nullptr; }
+// reads this device's completion slots
+void poll_marks() { R().marks.poll(mark_words()); }
+// starts a list on this device: its serial (0 when every completion slot is held by a list not yet proved complete;
+// nothing may be recorded then) and the GPU address its marker write goes to
+uint64_t begin_list(D3D12_GPU_VIRTUAL_ADDRESS* va) {
   Runtime& rt = R();
-  if (!rt.marker_map) return rt.serial;
-  const uint32_t low = *rt.marker_map;
-  uint64_t v = (rt.serial & ~0xffffffffull) | low;
-  if (v > rt.serial) v -= 0x100000000ull;
-  return v;
+  poll_marks();
+  uint32_t slot = 0;
+  const uint64_t s = rt.marks.begin(&slot);
+  if (!s) {
+    static bool logged = false;
+    if (!logged) {
+      logged = true;
+      log_line(fmt("all %u completion slots are held by command lists that have not completed (or were never submitted): "
+                   "nothing is recorded until one completes (logged once)", kMarkSlots));
+    }
+    return 0;
+  }
+  rt.serial = s;
+  *va = rt.marker->GetGPUVirtualAddress() + 4ull * (kMarkBase + slot);
+  return s;
 }
-// releases deferred resources whose frames have completed
+// the list's last command: its serial into its own completion slot (and into word 0 for the removal log)
+void end_list(ID3D12GraphicsCommandList2* l2, uint64_t serial, D3D12_GPU_VIRTUAL_ADDRESS va) {
+  const D3D12_WRITEBUFFERIMMEDIATE_PARAMETER p[2] = {{va, (UINT)(serial & 0xffffffffu)},
+                                                     {R().marker->GetGPUVirtualAddress(), (UINT)(serial & 0xffffffffu)}};
+  const D3D12_WRITEBUFFERIMMEDIATE_MODE mode[2] = {D3D12_WRITEBUFFERIMMEDIATE_MODE_MARKER_OUT,
+                                                   D3D12_WRITEBUFFERIMMEDIATE_MODE_MARKER_OUT};
+  l2->WriteBufferImmediate(2, p, mode);
+}
+// a transient copy that list `serial` reads (evaluate, pass-through): one more list its release waits for
+void note_transient_use(const void* res, uint64_t serial) {
+  for (Runtime::Transient& t : R().transient)
+    if (t.r == res && t.gen == R().gen) prune_done(t.users, R().marks), t.users.push_back(serial);
+}
+// an old device of an earlier device switch is removed (its parked state: the device reference goes last)
+bool parked_removed(Parked<IUnknown>& p) {
+  ID3D12Device* d = p.last.empty() ? nullptr : (ID3D12Device*)p.last.back();
+  return d && FAILED(d->GetDeviceRemovedReason());
+}
+// releases deferred objects whose lists have all proved complete; once the device is removed nothing of it runs any more
+// and everything left is released (issue #63: kept objects go at completion or device removal, never on a timeout).
+// The old devices of earlier device switches are pumped the same way.
 void pump() {
   Runtime& rt = R();
-  const uint64_t done = marker_done();
-  auto it = rt.deferred.begin();
-  while (it != rt.deferred.end()) {
-    if (it->serial <= done) {
-      drop(it->res);
-      it = rt.deferred.erase(it);
-    } else {
-      ++it;
-    }
+  poll_marks();
+  rt.live_resources -= rt.deferred.pump(rt.marks);
+  if (!rt.deferred.empty() && rt.dev && FAILED(rt.dev->GetDeviceRemovedReason())) {
+    const size_t n = rt.deferred.size();
+    rt.live_resources -= rt.deferred.release_all();
+    log_line(fmt("device removed: %zu kept object(s) released", n));
+  }
+  if (!rt.parked.empty()) {
+    std::vector<std::string> lines;
+    rt.live_resources -= rt.parked.pump(parked_removed, &lines);
+    for (const std::string& s : lines) log_line(s);
   }
 }
-void defer_release(ID3D12Resource*& r, uint64_t serial) {
-  if (!r) return;
-  if (serial <= marker_done()) drop(r);
-  else R().deferred.push_back({serial, r}), r = nullptr;
+void defer_release(ID3D12Resource*& r, const std::vector<uint64_t>& users) {
+  poll_marks();
+  R().live_resources -= R().deferred.retire(r, users, R().marks, true);
+  r = nullptr;
 }
-bool wait_serial(uint64_t serial, DWORD ms) {
-  for (DWORD i = 0; i < ms && marker_done() < serial; ++i) {
-    if (R().dev && FAILED(R().dev->GetDeviceRemovedReason())) return false;
+// waits (polling, at most ms) until list `serial` proved complete; false on a timeout or a removed device
+bool wait_list(uint64_t serial, DWORD ms) {
+  Runtime& rt = R();
+  for (DWORD i = 0;; ++i) {
+    poll_marks();
+    if (rt.marks.done(serial)) return true;
+    if (i >= ms || (rt.dev && FAILED(rt.dev->GetDeviceRemovedReason()))) return false;
     Sleep(1);
   }
-  return marker_done() >= serial;
+}
+// waits (polling, at most ms) until every list recorded on this device proved complete (test hooks only)
+bool wait_all_lists(DWORD ms) {
+  Runtime& rt = R();
+  for (DWORD i = 0;; ++i) {
+    poll_marks();
+    if (!rt.marks.pending()) return true;
+    if (i >= ms || (rt.dev && FAILED(rt.dev->GetDeviceRemovedReason()))) return false;
+    Sleep(1);
+  }
 }
 
 // our own queue: create-time work only
@@ -884,7 +977,11 @@ ID3D12PipelineState* make_pso(ID3D12Device* dev, ID3D12RootSignature* rs, const 
   pd.pRootSignature = rs;
   pd.CS = {b->data, b->size};
   ID3D12PipelineState* p = nullptr;
-  if (FAILED(dev->CreateComputePipelineState(&pd, IID_PPV_ARGS(&p)))) return nullptr;
+  const HRESULT hr = dev->CreateComputePipelineState(&pd, IID_PPV_ARGS(&p));
+  if (FAILED(hr)) {
+    log_line(fmt("pipeline state for %s (%u bytes) failed: hr 0x%08lx", b->name, (unsigned)b->size, (unsigned long)hr));
+    return nullptr;
+  }
   return p;
 }
 
@@ -1075,11 +1172,61 @@ void stop_compile() {
   rt.all_ready = false;
 }
 
+// Drops the device: set-device with another device (or a failed set-device), the end of prepare, test shutdown.
+// Issue #63 / #82: the game's lists recorded on this device that have not proved complete may still run (releasing our
+// device reference stops none of the game's queues). Then the device's deferred objects, the objects every such list
+// uses (pipelines, root signature, model and AGS buffers, pass-through heap and buffer) and the marker buffer they write
+// are parked with the device reference (rr_retire.h ParkedSet) until each list proved complete or the device is removed.
 void drop_device() {
   Runtime& rt = R();
   stop_compile();
-  for (auto& d : rt.deferred) drop(d.res);
-  rt.deferred.clear();
+  if (rt.rm_thread.joinable()) SetEvent(rt.rm_quit), rt.rm_thread.join();
+  release(rt.rm_fence);
+  if (rt.rm_ev) CloseHandle(rt.rm_ev), rt.rm_ev = nullptr;
+  if (rt.rm_quit) CloseHandle(rt.rm_quit), rt.rm_quit = nullptr;
+  pump();
+  const bool removed = rt.dev && FAILED(rt.dev->GetDeviceRemovedReason());
+  if (rt.marks.pending() && rt.marker && rt.marker_map && rt.dev && !removed) {
+    Parked<IUnknown> p;
+    p.id = rt.gen;
+    const std::vector<uint64_t> users = rt.marks.pending_serials();
+    p.marks = std::move(rt.marks);
+    p.deferred = std::move(rt.deferred);
+    // live transient copies of this device: the plugin may still release them (then a no-op); kept for their lists
+    for (size_t i = 0; i < rt.transient.size();) {
+      Runtime::Transient& t = rt.transient[i];
+      if (t.gen != rt.gen) { ++i; continue; }
+      rt.live_resources -= p.deferred.retire(t.r, t.users, p.marks, true);
+      rt.transient.erase(rt.transient.begin() + (ptrdiff_t)i);
+    }
+    auto keep = [&](IUnknown* o, bool counted) { if (o) rt.live_resources -= p.deferred.retire(o, users, p.marks, counted); };
+    keep(rt.pass_heap, false);
+    keep(rt.pass_dummy, true);
+    for (int k = 0; k < K_COUNT; ++k) keep(rt.pso[k], false);
+    keep(rt.rs, false);
+    keep(rt.model_buf, true);
+    keep(rt.ags_buf, true);
+    rt.pass_heap = nullptr, rt.pass_dummy = rt.model_buf = rt.ags_buf = nullptr, rt.rs = nullptr;
+    for (int k = 0; k < K_COUNT; ++k) rt.pso[k] = nullptr;
+    p.words = rt.marker_map + kMarkBase;
+    p.last = {rt.marker, rt.dev};   // the marker buffer the lists write (still mapped), then the device reference
+    p.last_counted = 1;
+    rt.marker = nullptr, rt.marker_map = nullptr, rt.dev = nullptr;
+    // beyond the cap of tracked old devices: the oldest one is released if its lists complete within a bounded wait
+    // (at most 2 s, under the runtime lock, only at this device switch) or its device is removed; else kept, logged
+    std::vector<std::string> lines;
+    rt.live_resources -= rt.parked.park(std::move(p), parked_removed, [](uint32_t ms) { Sleep(ms); },
+                                        ParkedSet<IUnknown>::kParkWaitMs, &lines);
+    for (const std::string& s : lines) log_line(s);
+    rt.marks = ListMarks(kMarkSlots);
+    rt.deferred = RetireList<IUnknown>();
+  } else {
+    if (rt.marks.pending() || !rt.deferred.empty())
+      log_line(fmt("device dropped%s: %zu kept object(s) released", removed ? " (removed)" : "", rt.deferred.size()));
+    rt.live_resources -= rt.deferred.release_all();
+    rt.marks = ListMarks(kMarkSlots);
+  }
+  rt.gen++;   // the next device's lists, serials and transient copies are a new generation
   release(rt.pass_heap);
   drop(rt.pass_dummy);
   for (uint64_t& s : rt.pass_serial) s = 0;
@@ -1087,10 +1234,6 @@ void drop_device() {
   release(rt.rs);
   drop(rt.model_buf);
   drop(rt.ags_buf);
-  if (rt.rm_thread.joinable()) SetEvent(rt.rm_quit), rt.rm_thread.join();
-  release(rt.rm_fence);
-  if (rt.rm_ev) CloseHandle(rt.rm_ev), rt.rm_ev = nullptr;
-  if (rt.rm_quit) CloseHandle(rt.rm_quit), rt.rm_quit = nullptr;
   if (rt.marker && rt.marker_map) rt.marker->Unmap(0, nullptr);  // only a buffer that was mapped (set_device's Map can fail)
   rt.marker_map = nullptr;
   drop(rt.marker);
@@ -1256,23 +1399,23 @@ uint32_t set_device_locked(ID3D12Device* given) {
   }
   if (FAILED(make_buffer(256, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
                          D3D12_RESOURCE_STATE_COMMON, &rt.ags_buf)) ||
-      FAILED(make_buffer(256, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST,
+      FAILED(make_buffer(kMarkerBytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST,
                          &rt.marker))) {
     drop_device();
     return WG_E_D3D_API;
   }
   {
     void* m = nullptr;
-    D3D12_RANGE r{0, 256};
+    D3D12_RANGE r{0, kMarkerBytes};
     // Issue #67: a failed Map leaves m null; the writes below would dereference it (the Model M runtime checks it too).
     if (FAILED(rt.marker->Map(0, &r, &m)) || !m) {
       drop_device();
       return WG_E_D3D_API;
     }
     rt.marker_map = (volatile uint32_t*)m;
-    *rt.marker_map = 0;
-    rt.marker_map[2] = rt.marker_map[3] = 0;
+    for (uint32_t w = 0; w < kMarkerBytes / 4; ++w) rt.marker_map[w] = 0;
     rt.serial = 0;
+    rt.marks = ListMarks(kMarkSlots);
   }
   {
     char cv[8] = {};
@@ -1338,7 +1481,7 @@ uint32_t set_device_locked(ID3D12Device* given) {
                      "(the default is used)", bad ? bad : "?"));
     }
     const unsigned start_vbits = rt.start_vbits;
-    rt.compile_thread = std::thread([dev, rs, blobs, start_vbits] {
+    const bool started = rt.compile_thread.start([dev, rs, blobs, start_vbits] {
       Runtime& r = R();
       const ULONGLONG t0 = GetTickCount64();
       // the helper (g_prep.on): its passes only, progress per kernel (the two made at set-device count as done)
@@ -1396,6 +1539,11 @@ uint32_t set_device_locked(ID3D12Device* given) {
       }
       }
     });
+    if (!started) {
+      log_line(fmt("set-device: the kernel compile thread could not start (error %lu)", (unsigned long)GetLastError()));
+      drop_device();
+      return WG_E_D3D_API;
+    }
     // a warm driver cache needs well under a second: wait a little so that warm starts run RR from the first frame
     char wv[16] = {};
     const DWORD wait_ms = GetEnvironmentVariableA("WG_RR_COMPILE_WAIT_MS", wv, sizeof wv) ? (DWORD)atoi(wv) : 3000u;
@@ -1525,9 +1673,10 @@ struct Instance {
   ID3D12Resource* qrb = nullptr;
   uint64_t* qmap = nullptr;
   uint64_t slot_serial[kSlots] = {};
-  bool slot_pending[kSlots] = {};
+  bool slot_pending[kSlots] = {};    // the slot's list has not proved complete (or its timings not harvested yet)
   uint64_t slot_frame[kSlots] = {};
   uint64_t last_serial = 0;
+  std::vector<uint64_t> lists;       // issue #82: the serials of this instance's lists not yet proved complete
   OutTarget out[2];                  // 0 colour, 1 separate output alpha
   uint64_t frames = 0, failed = 0;
   std::string tlog_sig;     // clean/release-060 crash-cp2077: the frame's image shapes at the last evaluate
@@ -1712,18 +1861,33 @@ void render_layout(Layout* L, uint32_t rw, uint32_t rh) {
   L->state_end = o;
 }
 
-void destroy_instance_resources(Instance* in, uint64_t serial) {
-  defer_release(in->arena, serial);
+// the instance's lists that have not proved complete: every object of the instance waits for all of them
+const std::vector<uint64_t>& instance_lists(Instance* in) {
+  poll_marks();
+  prune_done(in->lists, R().marks);
+  return in->lists;
+}
+
+// issue #63 / #82: every object the instance's recorded lists may use, the descriptor and query heaps included, is
+// released only when EACH of the instance's lists has proved complete (its own completion slot), or at device removal.
+// No wait here: a frame not yet submitted (destroy in the middle of the game's frame) keeps them instead of stalling the
+// game thread, however many later lists complete.
+void destroy_instance_resources(Instance* in) {
+  Runtime& rt = R();
   if (in->upload) in->upload->Unmap(0, nullptr), in->upload_map = nullptr;
-  defer_release(in->upload, serial);
   if (in->qrb) in->qrb->Unmap(0, nullptr), in->qmap = nullptr;
-  defer_release(in->qrb, serial);
-  for (OutTarget& o : in->out) defer_release(o.proxy, serial);
-  // descriptor and query heaps: no Release while frames are in flight (bounded wait, then release)
-  if (!wait_serial(serial, 2000)) log_line(fmt("instance %u: frames still in flight at destroy; heaps released after 2 s", in->id));
-  release(in->heap);
-  release(in->null_tmpl);
-  release(in->qh);
+  const std::vector<uint64_t> users = instance_lists(in);
+  if (!users.empty())
+    log_line(fmt("instance %u: %zu of its command lists (serials %llu .. %llu) not proved complete at destroy; its buffers "
+                 "and heaps are kept until each completes, or until device removal",
+                 in->id, users.size(), (unsigned long long)users.front(), (unsigned long long)users.back()));
+  IUnknown* bufs[] = {in->arena, in->upload, in->qrb, in->out[0].proxy, in->out[1].proxy};
+  IUnknown* heaps[] = {in->heap, in->qh};
+  rt.live_resources -= retire_instance(rt.deferred, bufs, 5, heaps, 2, users, rt.marks);
+  in->arena = in->upload = in->qrb = in->out[0].proxy = in->out[1].proxy = nullptr;
+  in->heap = nullptr;
+  in->qh = nullptr;
+  release(in->null_tmpl);   // CPU-only heap, a copy source at record time: never used by the GPU
 }
 
 bool new_arena(Instance* in, uint64_t bytes, std::string* err) {
@@ -2232,7 +2396,7 @@ uint32_t create_locked(const WgRrCreate* d, void** out) {
   }
   if (!ok) {
     log_line(fmt("create: failed (%s)", err.empty() ? "D3D12 objects" : err.c_str()));
-    destroy_instance_resources(in, 0);
+    destroy_instance_resources(in);   // no list recorded: released at once
     delete in;
     return WG_E_D3D_API;
   }
@@ -2296,9 +2460,9 @@ std::atomic<float> g_frame_gpu_ms{0.0f};
 
 // timestamps of every completed frame (never waits); one log line per 300 frames
 void harvest(Instance* in) {
-  const uint64_t done = marker_done();
+  poll_marks();
   for (uint32_t s = 0; s < kSlots; ++s) {
-    if (!in->slot_pending[s] || in->slot_serial[s] > done) continue;
+    if (!in->slot_pending[s] || !R().marks.done(in->slot_serial[s])) continue;
     in->slot_pending[s] = false;
     const uint64_t* t = in->qmap + s * kTq;
     const double f = 1000.0 / (double)R().ts_freq;
@@ -2335,11 +2499,13 @@ void harvest(Instance* in) {
 void destroy_locked(Instance* in) {
   Runtime& rt = R();
   if (!in) return;
-  if (wait_serial(in->last_serial, 2000)) harvest(in);
+  // the last frames' timings: harvest what has completed; no wait (rt.mu is held, and a frame not yet submitted would
+  // never complete during it; issue #63). Frames still in flight are left out of the last window.
+  harvest(in);
   log_timing(in);   // the last, partial window
   log_line(fmt("destroy instance %u after %llu frames (%llu failed)", in->id, (unsigned long long)in->frames,
                (unsigned long long)in->failed));
-  destroy_instance_resources(in, in->last_serial);
+  destroy_instance_resources(in);
   rt.live_instances--;
   delete in;
   pump();
@@ -2549,7 +2715,7 @@ uint32_t evaluate_locked(Instance* in, const WgRrFrame* f, WgRrFrameResult* res)
     OutTarget& t = in->out[k];
     if (!o.on || o.direct) continue;
     if (!t.proxy || t.proxy_fmt != o.uf || t.proxy_w != o.d.Width || t.proxy_h != o.d.Height) {
-      defer_release(t.proxy, in->last_serial);
+      defer_release(t.proxy, instance_lists(in));
       D3D12_HEAP_PROPERTIES hp = {};
       hp.Type = D3D12_HEAP_TYPE_DEFAULT;
       D3D12_RESOURCE_DESC rd = {};
@@ -2571,12 +2737,42 @@ uint32_t evaluate_locked(Instance* in, const WgRrFrame* f, WgRrFrameResult* res)
     }
   }
 
-  // ---- slot (upload block, descriptors, timestamps): wait for the frame that used it last
-  const uint64_t serial = rt.serial + 1;
-  const uint32_t slot = (uint32_t)(serial % kSlots);
-  if (!wait_serial(in->slot_serial[slot], 5000))
-    return fail(in, "the game's command lists with earlier frames did not finish within 5 s (slot reuse)", res, WG_E_D3D_API);
-  harvest(in);
+  // ---- slot (upload block, descriptors, timestamps): one whose last list proved complete (issue #82: its own completion
+  // slot; a later frame completing proves nothing about it). Wait at most 5 s for one.
+  auto free_slot = [&]() -> int {
+    harvest(in);   // polls the completion slots; a completed slot's timings are read before it is reused
+    for (uint32_t s = 0; s < kSlots; ++s)
+      if (!in->slot_pending[s]) return (int)s;
+    return -1;
+  };
+  int fslot = free_slot();
+  for (DWORD w = 0; fslot < 0 && w < 5000 && !FAILED(rt.dev->GetDeviceRemovedReason()); ++w) {
+    Sleep(1);
+    fslot = free_slot();
+  }
+  if (fslot < 0)
+    return fail(in, "the game's command lists with this instance's last frames did not complete within 5 s (slot reuse)",
+                res, WG_E_D3D_API);
+  const uint32_t slot = (uint32_t)fslot;
+  D3D12_GPU_VIRTUAL_ADDRESS mark_va = 0;
+  const uint64_t serial = begin_list(&mark_va);
+  if (!serial) return fail(in, "no completion slot free (command lists not completing or never submitted)", res, WG_E_D3D_API);
+  // from here every list this frame records into may use the instance's objects and the frame's transient inputs
+  in->lists.push_back(serial);
+  in->slot_serial[slot] = serial;
+  in->slot_pending[slot] = true;
+  in->slot_frame[slot] = in->frames;
+  for (int r = 0; r < WG_ROLE_COUNT; ++r)
+    if (attached(r)) note_transient_use(img[r].resource, serial);
+  // nothing recorded yet: a failure before the recording gives the serial and the slot back
+  auto unbegin = [&]() {
+    rt.marks.cancel(serial);
+    in->lists.erase(std::remove(in->lists.begin(), in->lists.end(), serial), in->lists.end());
+    in->slot_serial[slot] = 0;
+    in->slot_pending[slot] = false;
+    for (Runtime::Transient& t : rt.transient)
+      if (!t.users.empty() && t.users.back() == serial) t.users.pop_back();
+  };
 
   // ---- arena: a new one when the frame needs more or the fixed items move (the state is copied on the game's list)
   ID3D12Resource* old_arena = nullptr;
@@ -2589,6 +2785,7 @@ uint32_t evaluate_locked(Instance* in, const WgRrFrame* f, WgRrFrameResult* res)
     const uint64_t bytes = need <= in->arena_bytes ? in->arena_bytes : (th_new || oh_new) ? need : align256(need + need / 8);
     if (!new_arena(in, bytes, &err)) {
       in->arena = keep;
+      unbegin();
       return fail(in, err, res, WG_W_OUT_OF_VIDEO_MEMORY);
     }
     old_arena = keep;
@@ -2831,8 +3028,8 @@ uint32_t evaluate_locked(Instance* in, const WgRrFrame* f, WgRrFrameResult* res)
   std::vector<Bar> bars;
   auto want = [&](ID3D12Resource* r, uint32_t declared, D3D12_RESOURCE_STATES to) {
     if (!r) return;
-    for (ID3D12Resource* t : rt.transient)
-      if (t == r) return;   // our lifetime-0 copies stay in NON_PIXEL_SHADER_RESOURCE
+    for (const Runtime::Transient& t : rt.transient)
+      if (t.r == r) return;   // our lifetime-0 copies stay in NON_PIXEL_SHADER_RESOURCE
     if (declared == 0xffffffffu) return;
     if ((declared & (uint32_t)to) == (uint32_t)to) return;
     for (const Bar& b : bars)
@@ -2918,7 +3115,7 @@ uint32_t evaluate_locked(Instance* in, const WgRrFrame* f, WgRrFrameResult* res)
   // clean/rr-mp1-input I1: the input features / replay kernels read their 1 KB constant block through root SRV 6
   // (rr_input.hlsl RR_IN_KCB 1, scalar loads): rebound to this frame's block in the upload ring around those dispatches
   // (the arena block they also get as pK is a byte copy of it), back to the ring's start afterwards (rt.blkcopy's view).
-  // The slot is not rewritten before this frame completed (wait_serial(slot_serial[slot]) above).
+  // The slot is not rewritten before this frame's list proved complete (free_slot above).
   const D3D12_GPU_VIRTUAL_ADDRESS ring_slot = in->upload->GetGPUVirtualAddress() + (uint64_t)slot * kBlock;
   if (arena_keep && in->arena_mode != 8) dispatch(l, K_BLKCOPY, 4, {(uint32_t)blk, slot * kBlock});
   if (arena_keep) uav_barrier(l, A);
@@ -3409,11 +3606,7 @@ uint32_t evaluate_locked(Instance* in, const WgRrFrame* f, WgRrFrameResult* res)
   if (in->barbatch) bar_all(true);
   else for (auto it = bars.rbegin(); it != bars.rend(); ++it) transition_game(l, it->r, it->to, it->from);
   l->ResolveQueryData(in->qh, D3D12_QUERY_TYPE_TIMESTAMP, q0, kTq, in->qrb, (uint64_t)q0 * 8);
-  {
-    D3D12_WRITEBUFFERIMMEDIATE_PARAMETER p{rt.marker->GetGPUVirtualAddress(), (UINT)(serial & 0xffffffffu)};
-    D3D12_WRITEBUFFERIMMEDIATE_MODE mode = D3D12_WRITEBUFFERIMMEDIATE_MODE_MARKER_OUT;
-    list2->WriteBufferImmediate(1, &p, &mode);
-  }
+  end_list(list2, serial, mark_va);   // this list's own completion slot
   // ================================================================ bookkeeping
   if (g_test_used) {   // the buffer map of t_describe: only built once a test host fetched the test interface
     static const char* const kRoleName[kRoles] = {"C", "Z", "V", "SV", "Dd", "Ds", "N", "R", "Q", "B", "G1", "G2", "Hd"};
@@ -3445,16 +3638,12 @@ uint32_t evaluate_locked(Instance* in, const WgRrFrame* f, WgRrFrameResult* res)
     m += fmt("direct %d" "\n" "camera_usable %d" "\n", oi[0].direct ? 1 : 0, camera_usable ? 1 : 0);
     in->map_text = m;
   }
-  rt.serial = serial;
   in->last_serial = serial;
-  in->slot_serial[slot] = serial;
-  in->slot_pending[slot] = true;
-  in->slot_frame[slot] = in->frames;
   in->work_bytes = P.work;
   if (old_arena) {
     log_line(fmt("instance %u: arena %s, %llu MiB (render %ux%u)", in->id, (th_new || oh_new) ? "re-laid out" : "grown",
                  (unsigned long long)(in->arena_bytes >> 20), rw, rh));
-    defer_release(old_arena, serial);
+    defer_release(old_arena, instance_lists(in));   // this frame's list (it copies the state out of it) and the earlier ones
   }
   if (th_new || oh_new)
     log_line(fmt("instance %u frame %llu: %s created zero-filled (54b.6; this frame resets them)", in->id,
@@ -3507,8 +3696,13 @@ uint32_t retain_locked(void* cmd, void* resource, uint32_t format, uint32_t stat
   D3D12_HEAP_PROPERTIES hp = {};
   hp.Type = D3D12_HEAP_TYPE_DEFAULT;
   ID3D12Resource* c = nullptr;
-  if (FAILED(rt.dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                             IID_PPV_ARGS(&c)))) {
+  // bug hunt B / issue #82: the copy runs when the game's list does; the list gets a serial and completion slot of its
+  // own (written after the copy), and the copy's release waits for that list and every list that read the copy
+  D3D12_GPU_VIRTUAL_ADDRESS mark_va = 0;
+  const uint64_t serial = rt.marker ? begin_list(&mark_va) : 0;
+  if (!serial || FAILED(rt.dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                        nullptr, IID_PPV_ARGS(&c)))) {
+    if (serial) rt.marks.cancel(serial);   // nothing recorded
     release(l2);
     release(l);
     return WG_E_D3D_API;
@@ -3531,29 +3725,28 @@ uint32_t retain_locked(void* cmd, void* resource, uint32_t format, uint32_t stat
   }
   if (move) transition_game(l, src, D3D12_RESOURCE_STATE_COPY_SOURCE, from);
   transition(l, c, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-  // bug hunt B: the copy runs when the game's list does, and a copy alone never advanced rt.serial: a release before the
-  // next frame (the input re-tagged or untagged) freed it at once, before its CopyResource ran. The copy gets a serial of
-  // its own, written into the same list after it (the frames' marker), so release_transient's defer waits for that list.
-  if (rt.marker) {
-    const uint64_t serial = rt.serial + 1;
-    D3D12_WRITEBUFFERIMMEDIATE_PARAMETER p{rt.marker->GetGPUVirtualAddress(), (UINT)(serial & 0xffffffffu)};
-    D3D12_WRITEBUFFERIMMEDIATE_MODE mode = D3D12_WRITEBUFFERIMMEDIATE_MODE_MARKER_OUT;
-    l2->WriteBufferImmediate(1, &p, &mode);
-    rt.serial = serial;
-  }
+  end_list(l2, serial, mark_va);
   release(l2);
   release(l);
-  rt.transient.push_back(c);
+  rt.transient.push_back({c, rt.gen, {serial}});
   *out = c;
   return WG_OK;
 }
+// A copy of this device waits for its copy list and every list that read it. A copy of an earlier device is still here
+// only when that device was dropped with no list in flight (all proved complete) or removed (drop_device parks the
+// copies of a device with lists in flight), so it goes at once.
+void release_transient_copy(Runtime::Transient& t) {
+  if (t.gen == R().gen) defer_release(t.r, t.users);
+  else drop(t.r);
+}
 void release_transient_locked(void* copy) {
   Runtime& rt = R();
-  auto it = std::find(rt.transient.begin(), rt.transient.end(), (ID3D12Resource*)copy);
+  auto it = std::find_if(rt.transient.begin(), rt.transient.end(),
+                         [&](const Runtime::Transient& t) { return t.r == (ID3D12Resource*)copy; });
   if (it == rt.transient.end()) return;
-  ID3D12Resource* r = *it;
+  Runtime::Transient t = *it;
   rt.transient.erase(it);
-  defer_release(r, rt.serial);
+  release_transient_copy(t);
   // issue #8: create, evaluate and destroy run pump() too, but a game that tags its inputs every frame while no
   // instance exists (RR available, switched off) calls none of them, and the released copies were never freed.
   // pump() frees only resources whose frame marker the GPU has written (the same test as at evaluate), takes no lock
@@ -3837,13 +4030,28 @@ uint32_t a_passthrough(void*, const WgRrFrame* f0) {
     }
     init_heap(rt.pass_heap);
   }
-  const uint64_t serial = rt.serial + 1;
-  const uint32_t slot = (uint32_t)(serial % kSlots);
-  if (!wait_serial(rt.pass_serial[slot], 5000)) {
+  // a descriptor slot whose last pass-through list proved complete (issue #82: its own completion slot); at most 5 s
+  auto free_pass_slot = [&]() -> int {
+    poll_marks();
+    for (uint32_t s = 0; s < kSlots; ++s)
+      if (rt.marks.done(rt.pass_serial[s])) return (int)s;
+    return -1;
+  };
+  int pslot = free_pass_slot();
+  for (DWORD w = 0; pslot < 0 && w < 5000 && !FAILED(rt.dev->GetDeviceRemovedReason()); ++w) {
+    Sleep(1);
+    pslot = free_pass_slot();
+  }
+  D3D12_GPU_VIRTUAL_ADDRESS mark_va = 0;
+  const uint64_t serial = pslot < 0 ? 0 : begin_list(&mark_va);
+  if (!serial) {
     release(l2);
     release(l);
     return WG_E_D3D_API;
   }
+  const uint32_t slot = (uint32_t)pslot;
+  rt.pass_serial[slot] = serial;
+  note_transient_use(cr, serial);
   D3D12_CPU_DESCRIPTOR_HANDLE hc = rt.pass_heap->GetCPUDescriptorHandleForHeapStart();
   D3D12_GPU_DESCRIPTOR_HANDLE hg = rt.pass_heap->GetGPUDescriptorHandleForHeapStart();
   hc.ptr += (uint64_t)(kHeapFixed + 2 * slot) * rt.inc;
@@ -3865,8 +4073,8 @@ uint32_t a_passthrough(void*, const WgRrFrame* f0) {
   std::vector<Bar> bars;
   auto want = [&](ID3D12Resource* r, uint32_t declared, D3D12_RESOURCE_STATES to) {
     if (declared == 0xffffffffu || (declared & (uint32_t)to) == (uint32_t)to) return;
-    for (ID3D12Resource* t : rt.transient)
-      if (t == r) return;
+    for (const Runtime::Transient& t : rt.transient)
+      if (t.r == r) return;
     bars.push_back({r, (D3D12_RESOURCE_STATES)declared, to});
   };
   want(cr, c.state, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -3888,11 +4096,7 @@ uint32_t a_passthrough(void*, const WgRrFrame* f0) {
            {c.origin_x, c.origin_y, rw, rh, o.origin_x, o.origin_y, ow, oh, fb(sx), fb(sy)});
   uav_barrier(l, orr);
   for (auto it = bars.rbegin(); it != bars.rend(); ++it) transition_game(l, it->r, it->to, it->from);
-  D3D12_WRITEBUFFERIMMEDIATE_PARAMETER p{rt.marker->GetGPUVirtualAddress(), (UINT)(serial & 0xffffffffu)};
-  D3D12_WRITEBUFFERIMMEDIATE_MODE mode = D3D12_WRITEBUFFERIMMEDIATE_MODE_MARKER_OUT;
-  l2->WriteBufferImmediate(1, &p, &mode);
-  rt.serial = serial;
-  rt.pass_serial[slot] = serial;
+  end_list(l2, serial, mark_va);   // this list's own completion slot
   if (++rt.passes == 1) log_line(fmt("pass-through: first frame passed through (colour %ux%u -> output %ux%u)", rw, rh, ow, oh));
   release(l2);
   release(l);
@@ -3939,7 +4143,7 @@ uint32_t t_dump(void* inst, const wchar_t* path) {
   std::lock_guard<std::recursive_mutex> lock(rt.mu);
   Instance* in = (Instance*)inst;
   if (!in || !rt.dev) return WG_E_INVALID_PARAMETER;
-  if (!wait_serial(in->last_serial, 10000)) return WG_E_D3D_API;
+  if (!wait_list(in->last_serial, 10000)) return WG_E_D3D_API;
   ID3D12Resource* rb = nullptr;
   if (FAILED(make_buffer(in->arena_bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE,
                          D3D12_RESOURCE_STATE_COPY_DEST, &rb)))
@@ -3989,13 +4193,13 @@ void t_counters(int64_t out[4]) {
   pump();
   out[0] = rt.live_resources.load();
   out[1] = rt.live_instances;
-  out[2] = (int64_t)rt.deferred.size();
+  out[2] = (int64_t)(rt.deferred.size() + rt.parked.objects());
   out[3] = rt.created_resources.load();
 }
 uint32_t t_drain(uint32_t ms) {
   Runtime& rt = R();
   std::lock_guard<std::recursive_mutex> lock(rt.mu);
-  const bool ok = wait_serial(rt.serial, ms);
+  const bool ok = wait_all_lists(ms);
   pump();
   return ok ? WG_OK : WG_E_D3D_API;
 }
@@ -4003,10 +4207,10 @@ uint32_t t_shutdown() {
   Runtime& rt = R();
   std::lock_guard<std::recursive_mutex> lock(rt.mu);
   if (rt.live_instances) return WG_E_INVALID_STATE;
-  wait_serial(rt.serial, 5000);
-  for (ID3D12Resource*& t : rt.transient) drop(t);
+  wait_all_lists(5000);
+  for (Runtime::Transient& t : rt.transient) release_transient_copy(t);
   rt.transient.clear();
-  drop_device();
+  drop_device();   // anything still in flight is parked, not released
   return WG_OK;
 }
 WgRrRuntimeTestV1 g_test = {sizeof(WgRrRuntimeTestV1), t_dump, t_layout, t_counters, t_drain, t_shutdown, t_describe};

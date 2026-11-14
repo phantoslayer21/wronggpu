@@ -10,6 +10,9 @@ namespace wg {
 
 const wchar_t* const kAppName = L"WrongGPU";
 const wchar_t* const kStateDirName = L"wronggpu-setup";           // <install dir>\wronggpu-setup: record, backup, uninstaller
+// <install dir>\WrongGPU-originals\<time>\: the player's originals a restore could not put back because another file is at
+// their path now (record.h, the file-ownership rule). Never removed by the launcher; the searches below a game skip it.
+const wchar_t* const kKeptDirName = L"WrongGPU-originals";
 // The FidelityFX DLLs WrongGPU replaces (spec 20, 30). The game's file is kept next to WrongGPU's under the original
 // name, and WrongGPU's DLL forwards to it. The FFX API DLL is AMD's (version resource); the FSR 3.0 component DLLs are
 // built by the game's developer and are recognised by their exports (as the front end does).

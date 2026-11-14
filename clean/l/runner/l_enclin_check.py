@@ -12,7 +12,9 @@ D3D12 kernels (clean/dx12/build_dx12.py --only) and kernel_replay.exe.
 --run (GPU, one GPU slot): every case is an encoder block case of clean/l/runner/l_d3d12_check.py (its grids, fewer
 windows than a workgroup's 8 among them, both window offsets, the block blob) with an FP8 q halo map [H + 4][W + 4][32]
 in place of x2 and the two linear blobs (enc0.Win1, enc0.Win2) at clean/l/runner/l_linfuse_check.py's weight scales,
-special FP8 codes in q in every other case. On the same input bytes:
+special FP8 codes in q in every other case; q's bytes 20..31 zero (the map's format: 20 values, 12 zero bytes), and
+the fused kernel reads q's 20-byte form (lev/input_encoder_q20's layout: bytes 0..15 of every pixel, then bytes 16..19
+of every pixel). On the same input bytes:
 - the sequence on D3D12 (kernel_replay, two passes: l_linear_32_32_fused writes x2, then l_swin_block_c32_enc_nc reads
   that file);
 - the sequence on HIP (in this process: l_linear_32_32_relu, l_linear_32_32_f16, l_swin_block_c32_enc_nc);
@@ -55,7 +57,16 @@ def cases(rng):
         if ci % 2:
             pick = rng.random(q.size) < 0.1
             q[pick] = rng.choice(LF.SPECIAL, int(pick.sum()))
+        q = q.reshape(npix, 32)
+        q[:, 20:] = 0
         yield H, W, off, q.tobytes(), LF._blob(rng, s, b), LF._blob(rng, s, b), blob, nout
+
+
+def q20(q):
+    """The 20-byte form of a 32-byte q map: bytes 0..15 of every pixel, then bytes 16..19 of every pixel; 12 bytes of
+    slack after it (the last pixel's upper lanes load 16 bytes at its place in the second plane)."""
+    a = np.frombuffer(q, np.uint8).reshape(-1, 32)
+    return a[:, :16].tobytes() + a[:, 16:20].tobytes() + bytes(12)
 
 
 def hip_sequence(g, ops, c):
@@ -90,7 +101,7 @@ def hip_sequence(g, ops, c):
 def enclin_lines(name, c, prefix="", grid=None):
     H, W, off, _q, _w1, _w2, _blob, nout = c
     return [f"case {prefix}{name}_enclin", f"kernel {ENCLIN} {grid or -(-nwin_of(H, W, off) // 8)} 256",
-            f"arg buf {name}.q", "arg null", f"arg out {nout + SLACK} {prefix}{name}.fx {FOLD_SENTINEL}",
+            f"arg buf {name}.q20", "arg null", f"arg out {nout + SLACK} {prefix}{name}.fx {FOLD_SENTINEL}",
             f"arg buf {name}.w", f"arg u32 {H}", f"arg u32 {W}", f"arg u32 {off[0]}", f"arg u32 {off[1]}",
             f"arg buf {name}.w1", f"arg buf {name}.w2", ""]
 
@@ -109,7 +120,7 @@ def run(build, rocm, seeds):
             H, W, off, q, w1, w2, blob, nout = c
             npix = (H + 4) * (W + 4)
             all_cases[name] = (nout, hip_sequence(g, ops, c))
-            for ext, data in ((".q", q), (".w1", w1), (".w2", w2), (".w", blob)):
+            for ext, data in ((".q", q), (".q20", q20(q)), (".w1", w1), (".w2", w2), (".w", blob)):
                 write(os.path.join(cdir, name + ext), data)
             grid = -(-nwin_of(H, W, off) // 8)
             # pass 1: the D3D12 fused linears (x2) and the fused block

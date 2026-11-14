@@ -197,7 +197,7 @@ def kernel_decls(path):
 
 # Kernels of Model M's code objects that only Model L's frame launches (#89): dec1 as a standalone block (#139;
 # Model M runs dec1 fused with dec0).
-MODEL_L_ONLY = {"swin_block_c64_add_ex_nc"}
+MODEL_L_ONLY = {"swin_block_c64_add_ex_nc", "lev/input_encoder_q20", "lev/input_encoder_direct_q20"}
 
 
 def is_model_l(decl):

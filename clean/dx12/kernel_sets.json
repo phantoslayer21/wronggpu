@@ -275,6 +275,14 @@
    "l_enc_values.co"
   ],
   [
+   "lev/input_encoder_direct_q20",
+   "-"
+  ],
+  [
+   "lev/input_encoder_q20",
+   "-"
+  ],
+  [
    "swin_block_c64_add_ex_nc",
    "swin.co"
   ]
