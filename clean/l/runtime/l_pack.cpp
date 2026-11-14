@@ -36,10 +36,11 @@ int sum(const std::vector<int>& v) {
   return n;
 }
 
-Launch swin(const std::string& src, const std::string& offsets, const std::string& params) {
+Launch swin(const std::string& src, const std::string& dst, const std::string& offsets, const std::string& params,
+            const std::string& border, const std::string& in_format, const std::string& out_format) {
   Launch l;
-  l.kind = "swin", l.blob = params, l.src = src, l.dst = src, l.C = 32, l.heads = 2, l.mlp = 128;
-  l.offsets = offsets, l.params = params;
+  l.kind = "swin", l.blob = params, l.src = src, l.dst = dst, l.C = 32, l.heads = 2, l.mlp = 128;
+  l.offsets = offsets, l.params = params, l.border = border, l.in_format = in_format, l.out_format = out_format;
   return l;
 }
 
@@ -48,14 +49,17 @@ Launch swin(const std::string& src, const std::string& offsets, const std::strin
 const std::vector<Launch>& encoder_launches() {
   static const std::vector<Launch> v = [] {
     std::vector<Launch> l(5);
-    l[0].kind = "values", l[0].blob = "enc0.values", l[0].dst = "q", l[0].C = 32;
-    l[1].kind = "linear", l[1].blob = "enc0.Win1", l[1].src = "q", l[1].dst = "x";
+    l[0].kind = "values", l[0].blob = "enc0.values", l[0].dst = "q", l[0].C = 32, l[0].out_format = "fp8";
+    l[1].kind = "linear", l[1].blob = "enc0.Win1", l[1].src = "q", l[1].dst = "x1";
     l[1].C_in = 32, l[1].C_out = 32, l[1].w = "Win1", l[1].b = "bin1", l[1].acc = "f16", l[1].out_round = "relu_q8";
-    l[2].kind = "linear", l[2].blob = "enc0.Win2", l[2].src = "x", l[2].dst = "x";
+    l[1].in_format = "fp8", l[1].out_format = "fp8";
+    l[2].kind = "linear", l[2].blob = "enc0.Win2", l[2].src = "x1", l[2].dst = "x2";
     l[2].C_in = 32, l[2].C_out = 32, l[2].w = "Win2", l[2].b = "bin2", l[2].acc = "f16", l[2].out_round = "none";
-    l[3] = swin("x", "first", "enc0_block");
-    l[4].kind = "project", l[4].blob = "enc0.project", l[4].src = "x", l[4].groups = {32, 32, 32, 32};
-    l[4].w = "W", l[4].b = "b", l[4].clamp = 6.28125f;
+    l[2].in_format = "fp8", l[2].out_format = "fp16";
+    l[3] = swin("x2", "x3", "first", "enc0_block", "input", "fp16", "fp8");
+    l[4].kind = "project", l[4].blob = "enc0.project", l[4].src = "x3", l[4].dst = "enc0.features";
+    l[4].groups = {32, 32, 32, 32}, l[4].w = "W", l[4].b = "b", l[4].clamp = 6.28125f;
+    l[4].in_format = "fp8", l[4].out_format = "fp8";
     return l;
   }();
   return v;
@@ -64,11 +68,12 @@ const std::vector<Launch>& encoder_launches() {
 const std::vector<Launch>& decoder_launches() {
   static const std::vector<Launch> v = [] {
     std::vector<Launch> l(3);
-    l[0].kind = "dec_project", l[0].blob = "dec0.project", l[0].dst = "p", l[0].w = "W", l[0].b = "b";
-    l[0].groups = {32, 32};
-    l[1] = swin("p", "second", "dec0_block");
-    l[2].kind = "coef", l[2].blob = "dec0.coef", l[2].src = "p";
-    l[2].values = {0, 1, 6, 7, 8, 9, 10, 11, 12, 2, 3, 4, 5};  // table.L_DEC_VALUES
+    l[0].kind = "dec_project", l[0].blob = "dec0.project", l[0].src = "features", l[0].dst = "y";
+    l[0].w = "W", l[0].b = "b", l[0].groups = {32, 32}, l[0].in_format = "fp8", l[0].out_format = "fp8";
+    l[1] = swin("y", "y2", "second", "dec0_block", "coarse", "fp8", "fp16");
+    l[2].kind = "coef", l[2].blob = "dec0.coef", l[2].src = "y2", l[2].dst = "codes";
+    l[2].values = {0, 1, 6, 7, 8, 9, 10, 11, 12, 2, 3, 4, 5};  // table.L_DEC_VALUES (map perm "dec0_values" v1.1)
+    l[2].in_format = "fp16", l[2].dec_pixel = "l";
     return l;
   }();
   return v;

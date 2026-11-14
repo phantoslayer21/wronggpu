@@ -25,12 +25,12 @@ M_BLOCK_CONSTS = {"tau": _swin.TAU, "cap": _swin.CAP, "eps_num": 2.0 ** -13, "ge
                   "window": _swin.WIN, "head_dim": _swin.HEAD_DIM}
 
 # Model M's value positions (the map's perm "dec0_values", 17 values: A 0-2, B 3-5, C 6-8, latent gates 9-12,
-# candidates 13-16 in clean/reference/decoder.py order): value k is channel DEC0_VALUES[k]. Model L does not use it.
-DEC0_VALUES = (0, 1, 10, 11, 12, 13, 14, 15, 16, 2, 3, 4, 5, 6, 7, 8, 9)
+# candidates 13-16 in clean/reference/decoder.py order): value k is channel M_DEC0_VALUES[k]. Model L does not use it.
+M_DEC0_VALUES = (0, 1, 10, 11, 12, 13, 14, 15, 16, 2, 3, 4, 5, 6, 7, 8, 9)
 
 # Model L's value positions, 13 of the decoder block's 32 channels: value k is block channel L_DEC_VALUES[k], value
 # order A0 A1 A2, B0 B1 B2, C x y rho, latent candidates 0-3 (no gates). The other 19 channels feed no output but
-# stay in the block. The preset-L map v1 still carries Model M's perm; it is not used for L.
+# stay in the block. The preset-L map from v1.1 on carries this list as perm "dec0_values" (v1 carried Model M's).
 L_DEC_VALUES = (0, 1, 6, 7, 8, 9, 10, 11, 12, 2, 3, 4, 5)
 
 # ---- the table ------------------------------------------------------------------------------------------------------
@@ -50,15 +50,15 @@ TABLE = {
     # render position, the dither at the unmirrored one) or "coarse" (the token-grid mirror, sub-pixel kept).
     "enc_ops": (
         {"op": "quant", "mode": "dither", "src": "values", "dst": "q"},
-        {"op": "linear", "src": "q", "dst": "x", "w": "Win1", "b": "bin1", "n_in": 20, "n_out": 32,
+        {"op": "linear", "src": "q", "dst": "x1", "w": "Win1", "b": "bin1", "n_in": 20, "n_out": 32,
          "acc": "f16", "out_round": "relu_q8"},
-        {"op": "linear", "src": "x", "dst": "x", "w": "Win2", "b": "bin2", "n_in": 32, "n_out": 32,
+        {"op": "linear", "src": "x1", "dst": "x2", "w": "Win2", "b": "bin2", "n_in": 32, "n_out": 32,
          "acc": "f16", "out_round": "none"},
-        {"op": "swin", "src": "x", "dst": "x", "params": "enc0_block", **C32_BLOCK, "offsets": "first",
+        {"op": "swin", "src": "x2", "dst": "x3", "params": "enc0_block", **C32_BLOCK, "offsets": "first",
          "border": "input", "out_round": "q8"},
-        {"op": "space_to_depth", "src": "x", "dst": "z"},
-        {"op": "project", "src": "z", "w": "W", "b": "b", "groups": (32, 32, 32, 32), "n_out": 64,
-         "clamp": 6.28125},
+        {"op": "space_to_depth", "src": "x3", "dst": "z"},
+        {"op": "project", "src": "z", "dst": "enc0.features", "w": "W", "b": "b", "groups": (32, 32, 32, 32),
+         "n_out": 64, "clamp": 6.28125},
     ),
     # Coefficient decoder: ops on dec1's map ("features", [fh/2, fw/2, 64]). "dec_project": rows W [4, 32, 64] with
     # Model M's dec0 rounding (RN16 after each group of 32 input channels, then FP8), output [fh/2, fw/2, 4 x 32]
@@ -67,12 +67,12 @@ TABLE = {
     # (Model L's: A, B, C as Model M's, latent = tanh(candidate), no gate, no previous latent) or "m" (Model M's,
     # clean/reference/decoder.py, 17 values).
     "dec_ops": (
-        {"op": "dec_project", "src": "features", "dst": "y", "w": "W", "b": "b", "groups": (32, 32),
+        {"op": "dec_project", "src": "features", "dst": "yt", "w": "W", "b": "b", "groups": (32, 32),
          "out_round": "q8"},
-        {"op": "depth_to_space", "src": "y", "dst": "p"},
-        {"op": "swin", "src": "p", "dst": "p", "params": "dec0_block", **C32_BLOCK, "offsets": "second",
+        {"op": "depth_to_space", "src": "yt", "dst": "y"},
+        {"op": "swin", "src": "y", "dst": "y2", "params": "dec0_block", **C32_BLOCK, "offsets": "second",
          "border": "coarse", "out_round": "f16"},
-        {"op": "pick", "src": "p", "values": L_DEC_VALUES},
+        {"op": "pick", "src": "y2", "values": L_DEC_VALUES},
     ),
     "dec_pixel": "l",
     "post_variant": "unfolded",                                                                           # I8
@@ -86,7 +86,7 @@ TABLE = {
     "consts": {"default": dict(M_BLOCK_CONSTS)},
 }
 
-DEC_PIXEL_VALUES = {"l": len(L_DEC_VALUES), "m": len(DEC0_VALUES)}
+DEC_PIXEL_VALUES = {"l": len(L_DEC_VALUES), "m": len(M_DEC0_VALUES)}
 
 PROVISIONAL = {
     "I7": "recon: the 3/1 form and the exact rule",

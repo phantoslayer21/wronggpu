@@ -31,6 +31,10 @@ struct Launch {
   std::vector<int> groups;                // project, dec_project: input channel groups
   float clamp = 0.0f;                     // project: output clamp (0 = none)
   std::vector<int> values;                // coef: the value positions (table.L_DEC_VALUES)
+  // Map formats ("fp8" / "fp16", l_pack.map_format; empty where a launch has no such map), the swin border
+  // ("mirror"; "input": src is a halo map; "coarse": token-grid mirror) and the coefficient variant ("dec_pixel").
+  // src and dst are distinct map identities: no kernel works in place (clean/l/FORMATS.md).
+  std::string in_format, out_format, border, dec_pixel;
 };
 
 // The default table's launches, in order (mirrors of l_pack.encoder_launches(TABLE) / decoder_launches(TABLE); the

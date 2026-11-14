@@ -53,10 +53,11 @@ std::string join(const std::vector<int>& v) {
 void print(const char* where, const wgrt::l::Launch& l) {
   char clamp[32] = "";
   if (l.clamp != 0.0f) std::snprintf(clamp, sizeof clamp, "%.9g", l.clamp);
-  std::printf("%s|%s|%s|%s|%s|%d|%d|%s|%s|%s|%s|%d|%d|%d|%s|%s|%s|%s|%s\n", where, l.kind.c_str(), l.blob.c_str(),
-              l.src.c_str(), l.dst.c_str(), l.C_in, l.C_out, l.w.c_str(), l.b.c_str(), l.acc.c_str(),
-              l.out_round.c_str(), l.C, l.heads, l.mlp, l.offsets.c_str(), l.params.c_str(), join(l.groups).c_str(),
-              clamp, join(l.values).c_str());
+  std::printf("%s|%s|%s|%s|%s|%d|%d|%s|%s|%s|%s|%d|%d|%d|%s|%s|%s|%s|%s|%s|%s|%s|%s\n", where, l.kind.c_str(),
+              l.blob.c_str(), l.src.c_str(), l.dst.c_str(), l.C_in, l.C_out, l.w.c_str(), l.b.c_str(), l.acc.c_str(),
+              l.out_round.c_str(), l.C, l.heads, l.mlp, l.offsets.c_str(), l.params.c_str(), l.in_format.c_str(),
+              l.out_format.c_str(), l.border.c_str(), l.dec_pixel.c_str(), join(l.groups).c_str(), clamp,
+              join(l.values).c_str());
 }
 
 }  // namespace

@@ -28,7 +28,7 @@ M_ENC_OPS = (
 M_DEC_OPS = (
     {"op": "dec_project", "src": "features", "dst": "y", "w": "W", "b": "b", "groups": (32, 32)},
     {"op": "depth_to_space", "src": "y", "dst": "p"},
-    {"op": "pick", "src": "p", "values": T.DEC0_VALUES},
+    {"op": "pick", "src": "p", "values": T.M_DEC0_VALUES},
 )
 
 
@@ -70,7 +70,7 @@ def m_dec_as_l(p):
     Wm = np.asarray(p["W"], np.float32).reshape(4, 17, 64)
     bm = np.asarray(p["b"], np.float32).reshape(4, 17)
     for s in range(4):
-        for k, c in enumerate(T.DEC0_VALUES):
+        for k, c in enumerate(T.M_DEC0_VALUES):
             W[s, c] = Wm[s, k]
             b[s, c] = bm[s, k]
     return {"W": W, "b": b, "S": p["S"], "T": p["T"]}
@@ -165,7 +165,7 @@ class EncoderTest(unittest.TestCase):
         h = T.block_halo(T.TABLE, "first")
         self.assertEqual(h, 2)
         self.assertEqual(maps["q"].shape, (fh + 2 * h, fw + 2 * h, 20))         # per-pixel ops run on the halo
-        self.assertEqual(maps["x"].shape, (fh, fw, 32))
+        self.assertEqual(maps["x3"].shape, (fh, fw, 32))
         self.assertEqual(maps["z"].shape, (fh // 2, fw // 2, 128))
         self.assertTrue(_same(L.encode(x, params)["features"], out["features"]))
 
@@ -196,7 +196,7 @@ class EncoderTest(unittest.TestCase):
                                     for b in range(-2, fw + 2)]) for a in range(-2, fh + 2)])
             self.assertTrue(_same(m["q"], q))
             h = q8(_block_by_windows(chain, fh, fw, T.block_offset(T.TABLE, "first", parity), params["enc0_block"]))
-            np.testing.assert_array_equal(m["x"], h)
+            np.testing.assert_array_equal(m["x3"], h)
         self.assertFalse(is_fp8_exact(chain(3, 4)))
         z = np.zeros((fh // 2, fw // 2, 128))
         for r in range(fh // 2):
@@ -239,7 +239,7 @@ class EncoderTest(unittest.TestCase):
             (base[0], {"op": "frobnicate", "src": "q"}, base[-1]),
             tuple(base[:4]) + (base[5],),                                      # project on a pixel-level map
             tuple(base[:3]) + (dict(base[3], border="wrap"),) + tuple(base[4:]),
-            tuple(base[:3]) + ({"op": "space_to_depth", "src": "x", "dst": "z"},
+            tuple(base[:3]) + ({"op": "space_to_depth", "src": "x2", "dst": "z"},
                                dict(base[3], src="z", C=128, border="input")) + tuple(base[4:]),
         ]
         for ops in bad:
@@ -267,8 +267,8 @@ class DecoderTest(unittest.TestCase):
         out = L.decode(x, params, 1, keep=True)
         fw, fh = x["feature_size"]
         m = out["maps"]
-        self.assertEqual(m["y"].shape, (fh // 2, fw // 2, 128))
-        self.assertEqual(m["p"].shape, (fh, fw, 32))
+        self.assertEqual(m["yt"].shape, (fh // 2, fw // 2, 128))
+        self.assertEqual(m["y2"].shape, (fh, fw, 32))
         self.assertEqual(out["a"].shape, (18, 30, 13))
         y = L.dec_project(x["features"], params["dec0"]["W"], params["dec0"]["b"])
         hw = fw // 2
@@ -281,7 +281,7 @@ class DecoderTest(unittest.TestCase):
 
         self.assertTrue(_same(member(0, -1), member(0, 3)) and _same(member(1, fw), member(1, fw - 4)))
         p = L.f16(_block_by_windows(member, fh, fw, T.block_offset(T.TABLE, "second", 1), params["dec0_block"]))
-        np.testing.assert_array_equal(m["p"], p)                                 # FP16 block output, no FP8
+        np.testing.assert_array_equal(m["y2"], p)                                 # FP16 block output, no FP8
         self.assertFalse(is_fp8_exact(p))
         fine = L.f16(L.swin_block(L.depth_to_space(y), params["dec0_block"], T.block_offset(T.TABLE, "second", 1),
                                   2, T.M_BLOCK_CONSTS))
