@@ -136,9 +136,22 @@ delivered by the spec side; the code never guesses it (it raises, or takes the c
   `pool` 1, the 2 x 2 max-pool are the exact helpers of `fg_exact16.h`, in the epilogue. 1 / 2 / 4 output-channel tiles
   of 16 per wave; a workgroup is 8 waves over 16 x 16 pixels.
 - `fg_upscale_hwc_f16`: `fg_upscale_f16`'s arithmetic on NHWC tensors. The adds are `fg_add_f16`.
-- net1 is 27 launches: five encoder convolutions with the pool fused, the bottleneck's two, and per decoder level an
-  upscale, an add and two convolutions. HIP and D3D12 are byte-identical; against the CPU reference the output is a
-  report (net1's output is not gated; the gate is the generated frame against the oracle).
+- `fg_mpair_{b,d4,d3,d2,d1,d0}(x, a, wf1, b1, wf2, b2, y, C, H, W, hi, wi, rx, ry, act2)`: two chained 1 x 1
+  convolutions (chunks ascending), the first with leaky ReLU, kept in registers: the result fragment of output tile mt
+  (lane = pixel, 8 consecutive channels) is exactly the second convolution's input fragment of channel block mt. `_b`:
+  the input is the buffer x (the bottleneck, net1_06 + net1_07). `_d<k>`: the input is net1's upscale of the coarse
+  x [hi][wi][C] plus the skip a [H][W][C], computed per input fragment with the exact upscale and add arithmetic (ratio
+  bits rx / ry from the host); act2 0 for net1_17 (no activation). Pixels row-major, 16 (or 32) per wave; lanes past the
+  end compute the last pixel and do not store.
+- Leaky ReLU on the fast path: `fg_leaky_fast16` (`kernels/fg_fast16.h`): one single-precision product with the slope,
+  one float16 rounding, then the max of `fg_leaky16`; the same bits as `fg_leaky16` for all 65,536 inputs.
+- Paths (`runner/fg_net1_mma.py --paths`): `fused`, 11 launches (five encoder convolutions with the pool fused, the
+  bottleneck pair, five decoder pairs); `tierb`, 27 launches (every convolution, upscale and add on its own); `exact`,
+  #191's 32 launches. fused and tierb compute the same arithmetic and write byte-identical common buffers. HIP and D3D12
+  are byte-identical on every path; against the CPU reference the tier-B output is a report (net1's output is not
+  gated; the gate is the generated frame against the oracle), the exact path is bit-exact.
+- D3D12 rounds float16 with the driver channel's conversion (`wg_to_f16_ags`, the bits of HIP's `(_Float16)`), a whole
+  fragment at a time (clean/dx12/README.md "Driver exceptions").
 
 ## Configuration (`reference/config.py`)
 
