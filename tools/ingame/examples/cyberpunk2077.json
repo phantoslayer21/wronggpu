@@ -1,0 +1,22 @@
+{
+ "name": "Cyberpunk 2077",
+ "game_root": "<the game folder, e.g. ...\\steamapps\\common\\Cyberpunk 2077>",
+ "exe_dir": "bin\\x64",
+ "exe": "Cyberpunk2077.exe",
+ "launchers": ["REDprelauncher.exe", "REDlauncher.exe"],
+ "out": "<an empty output folder for this run>",
+ "launcher_package": "<the candidate's WrongGPU-<version>.exe (build.py --model-l)>",
+ "payload": "<the same build's payload folder>",
+ "model": {"name": "L", "file": "<the converted Model L model.wgcm>", "sha256": "<its SHA-256>"},
+ "aside": [],
+ "hash_only": [],
+ "settings": {
+  "file": "%LOCALAPPDATA%\\CD Projekt Red\\Cyberpunk 2077\\UserSettings.json",
+  "format": "cp2077",
+  "keys": {"ResolutionScaling": "DLSS", "DLSS": "Quality", "DLSS_D": "false", "RayTracedPathTracing": "false",
+           "FrameGeneration": "Off", "DLSSFrameGen": "false", "WindowMode": "BorderlessWindowed"}
+ },
+ "gpu_flag": "<the GPU-in-use flag file other GPU jobs on this PC respect>",
+ "flag_owner": "ingame-run",
+ "disk_free_gb": {"C:\\": 20}
+}
