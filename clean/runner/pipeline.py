@@ -197,6 +197,9 @@ class Pipeline:
         lib.wg_rt_info.argtypes = [vp, P(WgRtFrameInfo)]
         lib.wg_rt_buffer.argtypes = [vp, ctypes.c_char_p, P(ctypes.c_size_t), P(sz)]
         lib.wg_rt_download.argtypes = [vp, ctypes.c_size_t, vp, sz]
+        self._has_fill = hasattr(lib, "wg_rt_fill")   # diagnostics, not in older runtime libraries
+        if self._has_fill:
+            lib.wg_rt_fill.argtypes = [vp, ctypes.c_char_p, ctypes.c_int]
         lib.wg_rt_stage_blob.argtypes = [vp, ctypes.c_char_p, P(vp), P(sz)]
         lib.wg_rt_model_source.argtypes = [vp]
         lib.wg_rt_model_source.restype = ctypes.c_char_p
@@ -493,6 +496,16 @@ class Pipeline:
     def _submit(self, x):
         fr = self._upload(x)
         self._check(self.lib.wg_rt_frame(self.rt, ctypes.byref(fr)), "frame")
+
+    def fill(self, name, value):
+        """Diagnostics: the named buffer's allocation set to the byte value (wg_rt_fill; the frame checks' sentinels)."""
+        if not self._has_fill:
+            raise RuntimeError("this runtime library has no wg_rt_fill")
+        self._check(self.lib.wg_rt_fill(self.rt, name.encode(), int(value)), "fill " + name)
+
+    def raw(self, name):
+        """The named buffer's defined bytes as the runtime reports them (wg_rt_buffer), uint8."""
+        return self._get(name, np.uint8).copy()
 
     def _get(self, name, dtype):
         p, n = ctypes.c_size_t(), ctypes.c_size_t()
