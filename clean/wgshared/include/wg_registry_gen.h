@@ -13,7 +13,7 @@ extern "C" {
 #endif
 
 #define WG_REGISTRY_SCHEMA "wronggpu.registry.v1"
-#define WG_REGISTRY_HASH 0x9EC9B4F5u
+#define WG_REGISTRY_HASH 0x9F5E68A9u
 #define WG_API_LEVEL_PREFIX "3.1.0"
 
 /* ---- option slots (shared block index) ---- */
@@ -51,7 +51,8 @@ extern "C" {
 /* ---- choice values ---- */
 #define WG_SR_MODEL_M 0
 #define WG_SR_MODEL_K 1
-#define WG_SR_MODEL_COUNT 2
+#define WG_SR_MODEL_L 2
+#define WG_SR_MODEL_COUNT 3
 
 #define WG_RR_MODE_EXACT 0
 #define WG_RR_MODE_ACCURATE 1
@@ -79,12 +80,12 @@ typedef struct WgOptionDef {
   const char* doc;
 } WgOptionDef;
 
-static const char* const kWgSrModelNames[WG_SR_MODEL_COUNT] = {"M", "K"};
+static const char* const kWgSrModelNames[WG_SR_MODEL_COUNT] = {"M", "K", "L"};
 static const char* const kWgRrModeNames[WG_RR_MODE_COUNT] = {"exact", "accurate", "fast"};
 static const char* const kWgEntrySourceNames[WG_ENTRY_SOURCE_COUNT] = {"versions", "folders"};
 
 static const WgOptionDef kWgOptions[WG_OPT_COUNT] = {
-  {0, "sr_model", WG_KIND_CHOICE, WG_SR_MODEL_M, 0, 1, WG_READER_SR_FRONTEND | WG_READER_SR_RUNTIME, 0, WG_LATCH_SR_CREATE, 0, 0, "wronggpu", "WG_RUNTIME_MODEL", kWgSrModelNames, "super-resolution model"},
+  {0, "sr_model", WG_KIND_CHOICE, WG_SR_MODEL_M, 0, 2, WG_READER_SR_FRONTEND | WG_READER_SR_RUNTIME, 0, WG_LATCH_SR_CREATE, 0, 0, "wronggpu", "WG_RUNTIME_MODEL", kWgSrModelNames, "super-resolution model"},
   {1, "rr_mode", WG_KIND_CHOICE, WG_RR_MODE_ACCURATE, 0, 2, WG_READER_RR_PLUGIN | WG_READER_RR_RUNTIME, 1, WG_LATCH_NEXT_FRAME, 0, 0, "wronggpu", "WG_RR_MODE", kWgRrModeNames, "ray-reconstruction mode"},
   {2, "rr_enabled", WG_KIND_ONOFF, 1, 0, 1, WG_READER_RR_PLUGIN, 0, WG_LATCH_RR_CREATE, 1, 0, "wronggpu", "", 0, "WrongGPU RR on/off (60.9 key 0)"},
   {3, "rr_specular_motion_from_v", WG_KIND_ONOFF, 0, 0, 1, WG_READER_RR_PLUGIN, 1, WG_LATCH_NEXT_FRAME, 1, 1, "wronggpu", "", 0, "62.4 / 52.7.1 SV = V (opt-in)"},
@@ -118,10 +119,11 @@ static const WgTextOptionDef kWgTextOptions[WG_TEXT_OPT_COUNT] = {
 /* ---- version-list entries (what OptiScaler shows under the WrongGPU folder), in list order ---- */
 typedef struct WgEntryDef { uint64_t id; uint32_t slot; int32_t value; const char* label; const char* folder_label; } WgEntryDef;
 #define WG_ENTRY_ID_BASE 0x5747000000000000ull
-#define WG_ENTRY_COUNT 2
+#define WG_ENTRY_COUNT 3
 static const WgEntryDef kWgEntries[WG_ENTRY_COUNT] = {
   {0x5747000000000001ull, WG_OPT_SR_MODEL, WG_SR_MODEL_M, "WrongGPU Model M##" WG_API_LEVEL_PREFIX, "WrongGPU M"},
   {0x5747000000000002ull, WG_OPT_SR_MODEL, WG_SR_MODEL_K, "WrongGPU Model K##" WG_API_LEVEL_PREFIX, "WrongGPU K"},
+  {0x5747000000000003ull, WG_OPT_SR_MODEL, WG_SR_MODEL_L, "WrongGPU Model L##" WG_API_LEVEL_PREFIX, "WrongGPU L"},
 };
 
 /* ---- RR modes: kernel-variant words per group (the runtime maps words to its variant bits) ---- */
@@ -145,7 +147,7 @@ static const WgModeRow kWgModeRows[WG_RR_MODE_COUNT] = {
 
 /* ---- SR models ---- */
 typedef struct WgModelRow { const char* name; const char* runtime_option; } WgModelRow;
-static const WgModelRow kWgModelRows[WG_SR_MODEL_COUNT] = {{"M", "model=M"}, {"K", "model=K"}};
+static const WgModelRow kWgModelRows[WG_SR_MODEL_COUNT] = {{"M", "model=M"}, {"K", "model=K"}, {"L", "model=L"}};
 
 #ifdef __cplusplus
 }
