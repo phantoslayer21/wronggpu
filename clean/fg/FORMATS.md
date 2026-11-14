@@ -32,8 +32,10 @@ delivered by the spec side; the code never guesses it (it raises, or takes the c
 - `"channel_order": "storage"`: the weights are not yet in natural axes. The natural view comes with a later map
   revision (v1.1), with the same shapes and spans; whether net2's stored bias order is the natural channel order is
   confirmed then too (OPEN until it is).
-- A conversion of a real library will be checked by digests only (the converter compares every stage digest the map
-  gives); no value or byte of it is ever written into the repository or any public text.
+- A conversion of a real library is checked by digests only (the converter compares every stage digest the map
+  gives); no value or byte of it is ever written into the repository or any public text. `tools/real_check.py` runs
+  that check and keeps only the verdict and digests (`python -m clean.fg.tools.real_check --exe <converter> --dll
+  <library>`).
 
 ## CPU reference (`reference/ops.py`)
 
