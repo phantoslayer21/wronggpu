@@ -155,6 +155,10 @@ bool decode_tensor(const Map& map, const Tensor& t, const std::vector<std::uint8
         const Axis& ax = t.axes[a];
         contrib[a].resize(static_cast<std::size_t>(ax.length));
         for (std::int64_t i = 0; i < ax.length; ++i) {
+            if (!ax.offsets.empty()) {  // explicit offsets (map versions 1 and 4; range-checked by load_map)
+                contrib[a][static_cast<std::size_t>(i)] = ax.offsets[static_cast<std::size_t>(i)];
+                continue;
+            }
             std::int64_t pi = i;
             if (ax.perm >= 0) {
                 const std::vector<std::int64_t>& q = map.perms[static_cast<std::size_t>(ax.perm)].table;

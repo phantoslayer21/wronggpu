@@ -1,0 +1,4601 @@
+{
+ "format": "wronggpu-converter-map",
+ "version": 1,
+ "model": "frame generation 310.x: DL1Net (17 layers) and DL2Net (25 layers)",
+ "preset": "FG",
+ "channel_order": "storage",
+ "sources": {
+  "A01": {
+   "what": "DL1Net layer 1 blob (3x3 48->32): [weights | zero area | bias x16]",
+   "element": "f16le",
+   "length": 56320,
+   "locate": "block",
+   "fnv1a64": "0x50f2b733b13e131b",
+   "sha256": "44595b02307a6b934a124abe476cfd327440e2acba7f5ed69f73195ca743e3d9"
+  },
+  "A02": {
+   "what": "DL1Net layer 2 blob (32->64, 1x1 or 2x2 (open)): [weights | zero area | bias x16]",
+   "element": "f16le",
+   "length": 10240,
+   "locate": "block",
+   "fnv1a64": "0xc1e3d8b17c5b2161",
+   "sha256": "eb99328524fddc9f5f3fac12b8e3a4011e66a75e071cd07126a70c553458bc60"
+  },
+  "A03": {
+   "what": "DL1Net layer 3 blob (3x3 64->128): [weights | zero area | bias x16]",
+   "element": "f16le",
+   "length": 299008,
+   "locate": "block",
+   "fnv1a64": "0x7b0e0cd340497b6e",
+   "sha256": "4191924ff335d5018987f2526f933cb4cdbb9145411e3ce34f63c8206321be55"
+  },
+  "A04": {
+   "what": "DL1Net layer 4 blob (3x3 128->128): [weights | zero area | bias x16]",
+   "element": "f16le",
+   "length": 593920,
+   "locate": "block",
+   "fnv1a64": "0x530efb93a91e99dc",
+   "sha256": "c0c5648f9cb839e41d0e786c8034aa0bcc931b6ac84c58cfbde0502dc8a53404"
+  },
+  "A05": {
+   "what": "DL1Net layer 5 blob (3x3 128->256): [weights | zero area | bias x16]",
+   "element": "f16le",
+   "length": 1187840,
+   "locate": "block",
+   "fnv1a64": "0xba01003ed4876873",
+   "sha256": "fe2c3057f2e894219601d3d7200eabfa97d990e08ccb23b43d52dfcba2d2fb93"
+  },
+  "A06": {
+   "what": "DL1Net layer 6 blob (1x1 256->512): [weights | zero area | bias x16]",
+   "element": "f16le",
+   "length": 540672,
+   "locate": "block",
+   "fnv1a64": "0xfc3dd3d9806d6079",
+   "sha256": "e23316a86707c1d3d377aa0711df47d05976ad1a30f6428524d030dd17145de9"
+  },
+  "A07": {
+   "what": "DL1Net layer 7 blob (1x1 512->256): [weights | zero area | bias x16]",
+   "element": "f16le",
+   "length": 532480,
+   "locate": "block",
+   "fnv1a64": "0xeac58d293d99ea0b",
+   "sha256": "9f20d6589cc9269ad020233e68196d66eba0e8a76497374cf6d445385f94dbc4"
+  },
+  "A08": {
+   "what": "DL1Net layer 8 blob (1x1 256->256): [weights | zero area | bias x16]",
+   "element": "f16le",
+   "length": 270336,
+   "locate": "block",
+   "fnv1a64": "0xc1ec243398f0c021",
+   "sha256": "9e5da09b93650c74e89d5262aa8a9a6a3dcbd0d753dc8c9d9aed39731e39b2a0"
+  },
+  "A09": {
+   "what": "DL1Net layer 9 blob (1x1 256->128): [weights | zero area | bias x16]",
+   "element": "f16le",
+   "length": 135168,
+   "locate": "block",
+   "fnv1a64": "0xf9a918bce93cb4ee",
+   "sha256": "3969384493583e98dcf357d3046a10a5b836585261f3e584605bf11e23fb8d46"
+  },
+  "A10": {
+   "what": "DL1Net layer 10 blob (1x1 128->128): [weights | zero area | bias x16]",
+   "element": "f16le",
+   "length": 69632,
+   "locate": "block",
+   "fnv1a64": "0xf70bb67302b5d2e1",
+   "sha256": "a0c6690faee2838521c6ad0f9445425d639446c0ef1b7fed9b43d21e7a8ec650"
+  },
+  "A11": {
+   "what": "DL1Net layer 11 blob (1x1 128->128): [weights | zero area | bias x16]",
+   "element": "f16le",
+   "length": 69632,
+   "locate": "block",
+   "fnv1a64": "0x34476192d19efb4c",
+   "sha256": "3a13970b482f1f78ede1bfe531956c203f08f99077c81bda2d1e4d0f453cf9a0"
+  },
+  "A12": {
+   "what": "DL1Net layer 12 blob (1x1 128->128): [weights | zero area | bias x16]",
+   "element": "f16le",
+   "length": 69632,
+   "locate": "block",
+   "fnv1a64": "0x3b3b4bf767330041",
+   "sha256": "47361a699fa6514332dc560cf2416872256e61d1b36b1ca29df323a53ee2be77"
+  },
+  "A13": {
+   "what": "DL1Net layer 13 blob (1x1 128->64): [weights | zero area | bias x16]",
+   "element": "f16le",
+   "length": 34816,
+   "locate": "block",
+   "fnv1a64": "0x004424bd828bc647",
+   "sha256": "327bd9b02da4aaac8b251320f60b4aeccb0df7df84bba44d7f1f6a9fdf62c934"
+  },
+  "A14": {
+   "what": "DL1Net layer 14 blob (1x1 64->64): [weights | zero area | bias x16]",
+   "element": "f16le",
+   "length": 18432,
+   "locate": "block",
+   "fnv1a64": "0x3c90fa0850bcbfb6",
+   "sha256": "e24f67110bab401ab7f70a861f3f09d2cd3cd6abf8d1aa158ba3300efb64797e"
+  },
+  "A15": {
+   "what": "DL1Net layer 15 blob (1x1 64->32): [weights | zero area | bias x16]",
+   "element": "f16le",
+   "length": 9216,
+   "locate": "block",
+   "fnv1a64": "0x563d1d6a7590d9c4",
+   "sha256": "325d7dfac5620a89edc1d2315731414cf755c50506ea5758a8c3cf563649577c"
+  },
+  "A16": {
+   "what": "DL1Net layer 16 blob (1x1 32->32): [weights | zero area | bias x16]",
+   "element": "f16le",
+   "length": 5120,
+   "locate": "block",
+   "fnv1a64": "0xe89fbba563b347a3",
+   "sha256": "bb98eb15be7d255a15a46994589705560e0691e273e286a36a68fd679a1890a9"
+  },
+  "A17": {
+   "what": "DL1Net layer 17 blob (1x1 32->16): [weights | zero area | bias x16]",
+   "element": "f16le",
+   "length": 2560,
+   "locate": "block",
+   "fnv1a64": "0x7be24d46f0c881ad",
+   "sha256": "477c68ebace499e2e1ac331f214fae3e9fb4df815a9e7d8142a0f1fb414b340e"
+  },
+  "B01w": {
+   "what": "DL2Net layer 1 (sub-net A, 3x3 16->32) weights",
+   "element": "f16le",
+   "length": 9216,
+   "locate": "block",
+   "fnv1a64": "0x52a8e82748fd5ce1",
+   "sha256": "14058e1781a3e362cd9f0106cf5c3fcd985ede67f1391ff3dfc73bceeceeae38"
+  },
+  "B01b": {
+   "what": "DL2Net layer 1 (sub-net A, 3x3 16->32) bias",
+   "element": "f16le",
+   "length": 64,
+   "locate": "block",
+   "fnv1a64": "0x7852ac3ff8ac334d",
+   "sha256": "349bbe2fcd8fc31407bfe238f4889871f0d64dd593b4146b59eca837fcc9a77f"
+  },
+  "B02w": {
+   "what": "DL2Net layer 2 (sub-net A, 3x3 32->32) weights",
+   "element": "f16le",
+   "length": 18432,
+   "locate": "block",
+   "fnv1a64": "0x5258622f0abe9f87",
+   "sha256": "be4a2cdb5d93c3b3ee3ff5ee8663d27017488664ca8682313740ff99aec4b829"
+  },
+  "B02b": {
+   "what": "DL2Net layer 2 (sub-net A, 3x3 32->32) bias",
+   "element": "f16le",
+   "length": 64,
+   "locate": "block",
+   "fnv1a64": "0x173e9d6c74f7ecdf",
+   "sha256": "097bd45ed222a90e9311fd89bbb8bca8db92760ec932380d3c44e29eb3870b69"
+  },
+  "B03w": {
+   "what": "DL2Net layer 3 (sub-net A, 3x3 32->64) weights",
+   "element": "f16le",
+   "length": 36864,
+   "locate": "block",
+   "fnv1a64": "0xa2de7d855165c106",
+   "sha256": "c314eefc0c076af12dc246cbffbcf32fe78b50640b451567aa85832eff367092"
+  },
+  "B03b": {
+   "what": "DL2Net layer 3 (sub-net A, 3x3 32->64) bias",
+   "element": "f16le",
+   "length": 128,
+   "locate": "block",
+   "fnv1a64": "0x27a2220ee78fb273",
+   "sha256": "9718b129b9bf59ee1a683c6001880cfb910a5e95e9b2338e4fcfc742d7f83be7"
+  },
+  "B04w": {
+   "what": "DL2Net layer 4 (sub-net A, 3x3 64->64) weights",
+   "element": "f16le",
+   "length": 73728,
+   "locate": "block",
+   "fnv1a64": "0xae60566c46fc41c5",
+   "sha256": "819fa5692e109843574dd0608312014a32abc7e7499784066142a4d82c486985"
+  },
+  "B04b": {
+   "what": "DL2Net layer 4 (sub-net A, 3x3 64->64) bias",
+   "element": "f16le",
+   "length": 128,
+   "locate": "block",
+   "fnv1a64": "0x5606a6d88f567b5e",
+   "sha256": "ba63d29aecb3781452154a32c8e771471f49ff4cd1d7f56d06a1cd89081cd461"
+  },
+  "B05w": {
+   "what": "DL2Net layer 5 (sub-net A, 3x3 64->64) weights",
+   "element": "f16le",
+   "length": 73728,
+   "locate": "block",
+   "fnv1a64": "0xa20fb4935766e52b",
+   "sha256": "5f4ac25a208ceb920b34fae48b7cee7107cd3e8da565e0a689a2cab93fe7ce93"
+  },
+  "B05b": {
+   "what": "DL2Net layer 5 (sub-net A, 3x3 64->64) bias",
+   "element": "f16le",
+   "length": 128,
+   "locate": "block",
+   "fnv1a64": "0xd061c4339ff942b0",
+   "sha256": "a7548519b77593645b6d5c46777597c0eba48255cd9f079f77d166da4c406bb5"
+  },
+  "B06w": {
+   "what": "DL2Net layer 6 (sub-net A, 3x3 64->64) weights",
+   "element": "f16le",
+   "length": 73728,
+   "locate": "block",
+   "fnv1a64": "0xeb7c0ee19e7a808f",
+   "sha256": "42a3ff7432377294d3c1fbdbe3c9876d13b989afb3952dd8ce964c531eae47a3"
+  },
+  "B06b": {
+   "what": "DL2Net layer 6 (sub-net A, 3x3 64->64) bias",
+   "element": "f16le",
+   "length": 128,
+   "locate": "block",
+   "fnv1a64": "0x45e480d6fca14aa6",
+   "sha256": "f0dcd605c4a628cd940630048aeca237e2f563ec5219f265d93d382abef569ff"
+  },
+  "B07w": {
+   "what": "DL2Net layer 7 (sub-net A, 3x3 64->64) weights",
+   "element": "f16le",
+   "length": 73728,
+   "locate": "block",
+   "fnv1a64": "0x54e3e164d05959b7",
+   "sha256": "672b9d32f4510335489894e12379bdc53a82ba27474c4484f6a58e1a18657af3"
+  },
+  "B07b": {
+   "what": "DL2Net layer 7 (sub-net A, 3x3 64->64) bias",
+   "element": "f16le",
+   "length": 128,
+   "locate": "block",
+   "fnv1a64": "0x556af42050e87a9b",
+   "sha256": "591d8e9cb8e6c383b40636a814e714e676857deecfea6331792d84131edbf618"
+  },
+  "B08w": {
+   "what": "DL2Net layer 8 (sub-net A, 3x3 64->64) weights",
+   "element": "f16le",
+   "length": 73728,
+   "locate": "block",
+   "fnv1a64": "0x2f1a28e7ea3b289a",
+   "sha256": "54356c51efe3b2a4aa798275b73e1f16857d1976eaa99bfffe32c1d6f9905eae"
+  },
+  "B08b": {
+   "what": "DL2Net layer 8 (sub-net A, 3x3 64->64) bias",
+   "element": "f16le",
+   "length": 128,
+   "locate": "block",
+   "fnv1a64": "0xb2bd6bb3757a4104",
+   "sha256": "8f2b5996e111aa7d5d9711f0c58cea678de5974e3a733ae6a1a8bf1e0ec5840c"
+  },
+  "B09w": {
+   "what": "DL2Net layer 9 (sub-net A, 3x3 64->64) weights",
+   "element": "f16le",
+   "length": 73728,
+   "locate": "block",
+   "fnv1a64": "0x45449b96daefe789",
+   "sha256": "7323eede30ef99e54156437d5f0430c266c1bf076018ad942afd48e7a62eca47"
+  },
+  "B09b": {
+   "what": "DL2Net layer 9 (sub-net A, 3x3 64->64) bias",
+   "element": "f16le",
+   "length": 128,
+   "locate": "block",
+   "fnv1a64": "0xe3268ee63fc5d3b1",
+   "sha256": "7b48edd449f5442b4af26a7ac5d9e610aa0f087422347d7acfe6fa2d46b573d8"
+  },
+  "B10w": {
+   "what": "DL2Net layer 10 (sub-net A, 3x3 64->64) weights",
+   "element": "f16le",
+   "length": 73728,
+   "locate": "block",
+   "fnv1a64": "0xdcef45623331ab3c",
+   "sha256": "971c7195720f720d7ce59564d9ee85259adfd0f66b2f2c426ca7f43c9290877c"
+  },
+  "B10b": {
+   "what": "DL2Net layer 10 (sub-net A, 3x3 64->64) bias",
+   "element": "f16le",
+   "length": 128,
+   "locate": "block",
+   "fnv1a64": "0xba472d0978399720",
+   "sha256": "755ff7524a6855c81f50da913721a63f8fe39aa9f8106e577f14a0575a24633e"
+  },
+  "B11w": {
+   "what": "DL2Net layer 11 (sub-net A, 3x3 64->64) weights",
+   "element": "f16le",
+   "length": 73728,
+   "locate": "block",
+   "fnv1a64": "0x0fc26f20cee52989",
+   "sha256": "145a29061230186864b92a934c6dcafa00ddede91381002ce7086e42c13b9490"
+  },
+  "B11b": {
+   "what": "DL2Net layer 11 (sub-net A, 3x3 64->64) bias",
+   "element": "f16le",
+   "length": 128,
+   "locate": "block",
+   "fnv1a64": "0xf52886a47c526b24",
+   "sha256": "89e683bf9d2d108add777b4fb521d9d72940c66270cf96d1735943bf423bb93d"
+  },
+  "B12w": {
+   "what": "DL2Net layer 12 (sub-net A, 3x3 64->96) weights",
+   "element": "f16le",
+   "length": 110592,
+   "locate": "block",
+   "fnv1a64": "0x15d20873d3e3d66b",
+   "sha256": "6b59f16f1be43617ebf0c94ff29cf7c8b7a2f2c7b7bfb41df8f9ede585e70684"
+  },
+  "B12b": {
+   "what": "DL2Net layer 12 (sub-net A, 3x3 64->96) bias",
+   "element": "f16le",
+   "length": 192,
+   "locate": "block",
+   "fnv1a64": "0xae13b5e920c94835",
+   "sha256": "c3e301df2e15c48e0c2fb35fc636b944653c6f91071a101d71b256b740224d29"
+  },
+  "B13w": {
+   "what": "DL2Net layer 13 (sub-net A, 3x3 32->8) weights",
+   "element": "f16le",
+   "length": 4608,
+   "locate": "block",
+   "fnv1a64": "0xaef3aa6963a685e5",
+   "sha256": "4d477655f6ec78e0e6a0d3c41e0848e537091c0c311fb04d986ad8891823e4e8"
+  },
+  "B13b": {
+   "what": "DL2Net layer 13 (sub-net A, 3x3 32->8) bias",
+   "element": "f16le",
+   "length": 16,
+   "locate": "block",
+   "fnv1a64": "0x10e0ba1742e53624",
+   "sha256": "0a9a85630034bb3dc5442cd52381424c1e7b9c676014b764477341005cb2f998"
+  },
+  "B14w": {
+   "what": "DL2Net layer 14 (sub-net B, 3x3 18->16) weights",
+   "element": "f16le",
+   "length": 5184,
+   "locate": "block",
+   "fnv1a64": "0xf7fe061b766f3bc3",
+   "sha256": "255701f510034a1ec801207b0542c2d49919d131c35d1337a60ad16fdc9004e6"
+  },
+  "B14b": {
+   "what": "DL2Net layer 14 (sub-net B, 3x3 18->16) bias",
+   "element": "f16le",
+   "length": 32,
+   "locate": "block",
+   "fnv1a64": "0xf0dc2d8a70dcc0bc",
+   "sha256": "8ad9d15f85e8cea4e0a5b67792f39e170e75c7db010f727c7894e2c23be5d4c1"
+  },
+  "B15w": {
+   "what": "DL2Net layer 15 (sub-net B, 3x3 16->32) weights",
+   "element": "f16le",
+   "length": 9216,
+   "locate": "block",
+   "fnv1a64": "0x8a49c8e91597d73a",
+   "sha256": "33dfd20f3a6901ed847959663a234434ddc64d1a3a2b4d171bde63a7e21d4af9"
+  },
+  "B15b": {
+   "what": "DL2Net layer 15 (sub-net B, 3x3 16->32) bias",
+   "element": "f16le",
+   "length": 64,
+   "locate": "block",
+   "fnv1a64": "0x1119f57a8c8b0ca9",
+   "sha256": "f9a1b4cf11f4f4163d976260d8acf61a3a58e0db6ee7357bb502cb82b81f7889"
+  },
+  "B16w": {
+   "what": "DL2Net layer 16 (sub-net B, 3x3 32->32) weights",
+   "element": "f16le",
+   "length": 18432,
+   "locate": "block",
+   "fnv1a64": "0xf3c24329c3076c09",
+   "sha256": "bf39c57db6f20c38951cc91584a98543feb8f396c1529667d7541ce6d4732162"
+  },
+  "B16b": {
+   "what": "DL2Net layer 16 (sub-net B, 3x3 32->32) bias",
+   "element": "f16le",
+   "length": 64,
+   "locate": "block",
+   "fnv1a64": "0x8da8d9fe55547ce8",
+   "sha256": "87d1d98747c14b03644c43ef21aae52ad19a3058d0f5ce673d954bc3c9d3ebeb"
+  },
+  "B17w": {
+   "what": "DL2Net layer 17 (sub-net B, 3x3 32->32) weights",
+   "element": "f16le",
+   "length": 18432,
+   "locate": "block",
+   "fnv1a64": "0xa1714e83e52e2130",
+   "sha256": "1ee5ffe7c824fec11aade50a433dd5c7d18e3f13452c84154c920f9b42e81653"
+  },
+  "B17b": {
+   "what": "DL2Net layer 17 (sub-net B, 3x3 32->32) bias",
+   "element": "f16le",
+   "length": 64,
+   "locate": "block",
+   "fnv1a64": "0xf96d10e2ffc3aebf",
+   "sha256": "4cf2f999a3b60e58553c0fa0e32c134a2de378ee22d6d4d0a0140cb2e640b882"
+  },
+  "B18w": {
+   "what": "DL2Net layer 18 (sub-net B, 3x3 32->32) weights",
+   "element": "f16le",
+   "length": 18432,
+   "locate": "block",
+   "fnv1a64": "0xa2161dec4ee1d653",
+   "sha256": "a11cfbf3ae8b114b6e98f39fc59d11df69d9fc52741255130019cb7cd22f93b4"
+  },
+  "B18b": {
+   "what": "DL2Net layer 18 (sub-net B, 3x3 32->32) bias",
+   "element": "f16le",
+   "length": 64,
+   "locate": "block",
+   "fnv1a64": "0xac343c32fdd43bd7",
+   "sha256": "0898c1586b71e2ea5bbd4d9cbaad3e15f416743544446cc8d2157a4f23f628fa"
+  },
+  "B19w": {
+   "what": "DL2Net layer 19 (sub-net B, 3x3 32->32) weights",
+   "element": "f16le",
+   "length": 18432,
+   "locate": "block",
+   "fnv1a64": "0x996b7a5e50edfcf3",
+   "sha256": "21f1e5dcf02d33ad5eec044251148b5f851d264f86529a63633edb8a8ae2fe75"
+  },
+  "B19b": {
+   "what": "DL2Net layer 19 (sub-net B, 3x3 32->32) bias",
+   "element": "f16le",
+   "length": 64,
+   "locate": "block",
+   "fnv1a64": "0x10435db52ecbb37a",
+   "sha256": "ff53999e00052d0f16117a358f65efddb1d36814cc8820edc3b0f56fca630a07"
+  },
+  "B20w": {
+   "what": "DL2Net layer 20 (sub-net B, 3x3 32->32) weights",
+   "element": "f16le",
+   "length": 18432,
+   "locate": "block",
+   "fnv1a64": "0x7b0c2f0247127bd5",
+   "sha256": "87b22102aab453ff63e8f2245a9ee9d9adce55b1b489d43a6246ae7b6b9d23fd"
+  },
+  "B20b": {
+   "what": "DL2Net layer 20 (sub-net B, 3x3 32->32) bias",
+   "element": "f16le",
+   "length": 64,
+   "locate": "block",
+   "fnv1a64": "0xc39e587c6af7a450",
+   "sha256": "2d134dee471fda6e55f345531803da054d8edf9c6a0385a637843f5e39d0619f"
+  },
+  "B21w": {
+   "what": "DL2Net layer 21 (sub-net B, 3x3 32->32) weights",
+   "element": "f16le",
+   "length": 18432,
+   "locate": "block",
+   "fnv1a64": "0x92f865e7116c4ea7",
+   "sha256": "f07e7bd536bbc5bd4dbb7e4d87c9575073d4fb8b3c119a11dae7b1cfbdce8170"
+  },
+  "B21b": {
+   "what": "DL2Net layer 21 (sub-net B, 3x3 32->32) bias",
+   "element": "f16le",
+   "length": 64,
+   "locate": "block",
+   "fnv1a64": "0xd3a4c1d9b88e3da7",
+   "sha256": "07d8006bd5c7857575653d74815dc300ca71048a72f105165f0a2534b7fec2b0"
+  },
+  "B22w": {
+   "what": "DL2Net layer 22 (sub-net B, 3x3 32->32) weights",
+   "element": "f16le",
+   "length": 18432,
+   "locate": "block",
+   "fnv1a64": "0xaeb7c8e367324dfe",
+   "sha256": "d819d65c7f2582134c098b99b53105dd64c630554a072ef579a2d4bc0b51c713"
+  },
+  "B22b": {
+   "what": "DL2Net layer 22 (sub-net B, 3x3 32->32) bias",
+   "element": "f16le",
+   "length": 64,
+   "locate": "block",
+   "fnv1a64": "0xe921d0cc7c724c28",
+   "sha256": "715c6b649120b4d1449a0b8654d19101ab660ca3f490d8b827778c817cf9c30b"
+  },
+  "B23w": {
+   "what": "DL2Net layer 23 (sub-net B, 3x3 32->32) weights",
+   "element": "f16le",
+   "length": 18432,
+   "locate": "block",
+   "fnv1a64": "0x0c875553ac588ea0",
+   "sha256": "ab3a82644cdaca91b322abe6f835a63ef073005fceacf1cb8a1e66096c3bdac3"
+  },
+  "B23b": {
+   "what": "DL2Net layer 23 (sub-net B, 3x3 32->32) bias",
+   "element": "f16le",
+   "length": 64,
+   "locate": "block",
+   "fnv1a64": "0x937e0b2574f4a6fe",
+   "sha256": "a301af6f017ef2324d205769e43c4327fbc9e9aa20dce506b2663acc0adca06e"
+  },
+  "B24w": {
+   "what": "DL2Net layer 24 (sub-net B, 3x3 32->48) weights",
+   "element": "f16le",
+   "length": 27648,
+   "locate": "block",
+   "fnv1a64": "0x455345dd401c8c89",
+   "sha256": "4ab572a084310d9f79b7878aefd73a356900ea8428320b861c6de28c114977d6"
+  },
+  "B24b": {
+   "what": "DL2Net layer 24 (sub-net B, 3x3 32->48) bias",
+   "element": "f16le",
+   "length": 96,
+   "locate": "block",
+   "fnv1a64": "0x881599a1d288d537",
+   "sha256": "3ae35c7933b00a52114c7a75f0184bd480c5c814d2204271bd46da8f88772913"
+  },
+  "B25w": {
+   "what": "DL2Net layer 25 (sub-net B, 3x3 16->8) weights",
+   "element": "f16le",
+   "length": 2304,
+   "locate": "block",
+   "fnv1a64": "0x3ddf0f0c978ec95b",
+   "sha256": "1514d5a5c51a81d8436de6e8e538275895dafc2e072512dbdcbe640871ec48f0"
+  },
+  "B25b": {
+   "what": "DL2Net layer 25 (sub-net B, 3x3 16->8) bias",
+   "element": "f16le",
+   "length": 16,
+   "locate": "block",
+   "fnv1a64": "0xe999a3e5d5f930cc",
+   "sha256": "89f7b17382bc6f08bbbc9d416da1c4c5b72abaf0c4faf870966a2585f912b493"
+  }
+ },
+ "key": {
+  "label": "WrongGPU converter key v1",
+  "from": "A01"
+ },
+ "perms": {},
+ "stages": [
+  {
+   "stage": "dl1.l01",
+   "digest": "227ca9c577799dabcce1421ebaa043eb0129d6654b789bc1ef60cfb291f4043f",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      13824
+     ],
+     "dtype": "float32",
+     "src": "A01",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b",
+     "shape": [
+      32
+     ],
+     "dtype": "float32",
+     "src": "A01",
+     "op": {
+      "name": "f16"
+     },
+     "base": 27648,
+     "axes": [
+      {
+       "offsets": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        128,
+        129,
+        130,
+        131,
+        132,
+        133,
+        134,
+        135,
+        256,
+        257,
+        258,
+        259,
+        260,
+        261,
+        262,
+        263,
+        384,
+        385,
+        386,
+        387,
+        388,
+        389,
+        390,
+        391
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl1.l02",
+   "digest": "9c6c696569e67936e4f54efaaa8e56ae76d3c0c92b83fd8d219abd0884cac77d",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      2048
+     ],
+     "dtype": "float32",
+     "src": "A02",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "A02",
+     "op": {
+      "name": "f16"
+     },
+     "base": 4096,
+     "axes": [
+      {
+       "offsets": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        128,
+        129,
+        130,
+        131,
+        132,
+        133,
+        134,
+        135,
+        256,
+        257,
+        258,
+        259,
+        260,
+        261,
+        262,
+        263,
+        384,
+        385,
+        386,
+        387,
+        388,
+        389,
+        390,
+        391,
+        512,
+        513,
+        514,
+        515,
+        516,
+        517,
+        518,
+        519,
+        640,
+        641,
+        642,
+        643,
+        644,
+        645,
+        646,
+        647,
+        768,
+        769,
+        770,
+        771,
+        772,
+        773,
+        774,
+        775,
+        896,
+        897,
+        898,
+        899,
+        900,
+        901,
+        902,
+        903
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl1.l03",
+   "digest": "f766b092d260b1f4dff36df020a13522280e20c01df20015e9a8ebcd8483ad04",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      73728
+     ],
+     "dtype": "float32",
+     "src": "A03",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b",
+     "shape": [
+      128
+     ],
+     "dtype": "float32",
+     "src": "A03",
+     "op": {
+      "name": "f16"
+     },
+     "base": 147456,
+     "axes": [
+      {
+       "offsets": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        128,
+        129,
+        130,
+        131,
+        132,
+        133,
+        134,
+        135,
+        256,
+        257,
+        258,
+        259,
+        260,
+        261,
+        262,
+        263,
+        384,
+        385,
+        386,
+        387,
+        388,
+        389,
+        390,
+        391,
+        512,
+        513,
+        514,
+        515,
+        516,
+        517,
+        518,
+        519,
+        640,
+        641,
+        642,
+        643,
+        644,
+        645,
+        646,
+        647,
+        768,
+        769,
+        770,
+        771,
+        772,
+        773,
+        774,
+        775,
+        896,
+        897,
+        898,
+        899,
+        900,
+        901,
+        902,
+        903,
+        1024,
+        1025,
+        1026,
+        1027,
+        1028,
+        1029,
+        1030,
+        1031,
+        1152,
+        1153,
+        1154,
+        1155,
+        1156,
+        1157,
+        1158,
+        1159,
+        1280,
+        1281,
+        1282,
+        1283,
+        1284,
+        1285,
+        1286,
+        1287,
+        1408,
+        1409,
+        1410,
+        1411,
+        1412,
+        1413,
+        1414,
+        1415,
+        1536,
+        1537,
+        1538,
+        1539,
+        1540,
+        1541,
+        1542,
+        1543,
+        1664,
+        1665,
+        1666,
+        1667,
+        1668,
+        1669,
+        1670,
+        1671,
+        1792,
+        1793,
+        1794,
+        1795,
+        1796,
+        1797,
+        1798,
+        1799,
+        1920,
+        1921,
+        1922,
+        1923,
+        1924,
+        1925,
+        1926,
+        1927
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl1.l04",
+   "digest": "2bee3ab15cb9680bf4fa3d5aeede01426191c57019e2637ad11aa767434c6b00",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      147456
+     ],
+     "dtype": "float32",
+     "src": "A04",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b",
+     "shape": [
+      128
+     ],
+     "dtype": "float32",
+     "src": "A04",
+     "op": {
+      "name": "f16"
+     },
+     "base": 294912,
+     "axes": [
+      {
+       "offsets": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        128,
+        129,
+        130,
+        131,
+        132,
+        133,
+        134,
+        135,
+        256,
+        257,
+        258,
+        259,
+        260,
+        261,
+        262,
+        263,
+        384,
+        385,
+        386,
+        387,
+        388,
+        389,
+        390,
+        391,
+        512,
+        513,
+        514,
+        515,
+        516,
+        517,
+        518,
+        519,
+        640,
+        641,
+        642,
+        643,
+        644,
+        645,
+        646,
+        647,
+        768,
+        769,
+        770,
+        771,
+        772,
+        773,
+        774,
+        775,
+        896,
+        897,
+        898,
+        899,
+        900,
+        901,
+        902,
+        903,
+        1024,
+        1025,
+        1026,
+        1027,
+        1028,
+        1029,
+        1030,
+        1031,
+        1152,
+        1153,
+        1154,
+        1155,
+        1156,
+        1157,
+        1158,
+        1159,
+        1280,
+        1281,
+        1282,
+        1283,
+        1284,
+        1285,
+        1286,
+        1287,
+        1408,
+        1409,
+        1410,
+        1411,
+        1412,
+        1413,
+        1414,
+        1415,
+        1536,
+        1537,
+        1538,
+        1539,
+        1540,
+        1541,
+        1542,
+        1543,
+        1664,
+        1665,
+        1666,
+        1667,
+        1668,
+        1669,
+        1670,
+        1671,
+        1792,
+        1793,
+        1794,
+        1795,
+        1796,
+        1797,
+        1798,
+        1799,
+        1920,
+        1921,
+        1922,
+        1923,
+        1924,
+        1925,
+        1926,
+        1927
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl1.l05",
+   "digest": "d9b84dcb0499747041551f1168d651780ac48147fbc59ba067057ccf6b800ac8",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      294912
+     ],
+     "dtype": "float32",
+     "src": "A05",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b",
+     "shape": [
+      256
+     ],
+     "dtype": "float32",
+     "src": "A05",
+     "op": {
+      "name": "f16"
+     },
+     "base": 589824,
+     "axes": [
+      {
+       "offsets": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        128,
+        129,
+        130,
+        131,
+        132,
+        133,
+        134,
+        135,
+        256,
+        257,
+        258,
+        259,
+        260,
+        261,
+        262,
+        263,
+        384,
+        385,
+        386,
+        387,
+        388,
+        389,
+        390,
+        391,
+        512,
+        513,
+        514,
+        515,
+        516,
+        517,
+        518,
+        519,
+        640,
+        641,
+        642,
+        643,
+        644,
+        645,
+        646,
+        647,
+        768,
+        769,
+        770,
+        771,
+        772,
+        773,
+        774,
+        775,
+        896,
+        897,
+        898,
+        899,
+        900,
+        901,
+        902,
+        903,
+        1024,
+        1025,
+        1026,
+        1027,
+        1028,
+        1029,
+        1030,
+        1031,
+        1152,
+        1153,
+        1154,
+        1155,
+        1156,
+        1157,
+        1158,
+        1159,
+        1280,
+        1281,
+        1282,
+        1283,
+        1284,
+        1285,
+        1286,
+        1287,
+        1408,
+        1409,
+        1410,
+        1411,
+        1412,
+        1413,
+        1414,
+        1415,
+        1536,
+        1537,
+        1538,
+        1539,
+        1540,
+        1541,
+        1542,
+        1543,
+        1664,
+        1665,
+        1666,
+        1667,
+        1668,
+        1669,
+        1670,
+        1671,
+        1792,
+        1793,
+        1794,
+        1795,
+        1796,
+        1797,
+        1798,
+        1799,
+        1920,
+        1921,
+        1922,
+        1923,
+        1924,
+        1925,
+        1926,
+        1927,
+        2048,
+        2049,
+        2050,
+        2051,
+        2052,
+        2053,
+        2054,
+        2055,
+        2176,
+        2177,
+        2178,
+        2179,
+        2180,
+        2181,
+        2182,
+        2183,
+        2304,
+        2305,
+        2306,
+        2307,
+        2308,
+        2309,
+        2310,
+        2311,
+        2432,
+        2433,
+        2434,
+        2435,
+        2436,
+        2437,
+        2438,
+        2439,
+        2560,
+        2561,
+        2562,
+        2563,
+        2564,
+        2565,
+        2566,
+        2567,
+        2688,
+        2689,
+        2690,
+        2691,
+        2692,
+        2693,
+        2694,
+        2695,
+        2816,
+        2817,
+        2818,
+        2819,
+        2820,
+        2821,
+        2822,
+        2823,
+        2944,
+        2945,
+        2946,
+        2947,
+        2948,
+        2949,
+        2950,
+        2951,
+        3072,
+        3073,
+        3074,
+        3075,
+        3076,
+        3077,
+        3078,
+        3079,
+        3200,
+        3201,
+        3202,
+        3203,
+        3204,
+        3205,
+        3206,
+        3207,
+        3328,
+        3329,
+        3330,
+        3331,
+        3332,
+        3333,
+        3334,
+        3335,
+        3456,
+        3457,
+        3458,
+        3459,
+        3460,
+        3461,
+        3462,
+        3463,
+        3584,
+        3585,
+        3586,
+        3587,
+        3588,
+        3589,
+        3590,
+        3591,
+        3712,
+        3713,
+        3714,
+        3715,
+        3716,
+        3717,
+        3718,
+        3719,
+        3840,
+        3841,
+        3842,
+        3843,
+        3844,
+        3845,
+        3846,
+        3847,
+        3968,
+        3969,
+        3970,
+        3971,
+        3972,
+        3973,
+        3974,
+        3975
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl1.l06",
+   "digest": "99c31ac71f6d0ce2a1fca0eb251a2e9617902a6cb978e25dfc71ef80d13ea51e",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      131072
+     ],
+     "dtype": "float32",
+     "src": "A06",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b",
+     "shape": [
+      512
+     ],
+     "dtype": "float32",
+     "src": "A06",
+     "op": {
+      "name": "f16"
+     },
+     "base": 262144,
+     "axes": [
+      {
+       "offsets": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        128,
+        129,
+        130,
+        131,
+        132,
+        133,
+        134,
+        135,
+        256,
+        257,
+        258,
+        259,
+        260,
+        261,
+        262,
+        263,
+        384,
+        385,
+        386,
+        387,
+        388,
+        389,
+        390,
+        391,
+        512,
+        513,
+        514,
+        515,
+        516,
+        517,
+        518,
+        519,
+        640,
+        641,
+        642,
+        643,
+        644,
+        645,
+        646,
+        647,
+        768,
+        769,
+        770,
+        771,
+        772,
+        773,
+        774,
+        775,
+        896,
+        897,
+        898,
+        899,
+        900,
+        901,
+        902,
+        903,
+        1024,
+        1025,
+        1026,
+        1027,
+        1028,
+        1029,
+        1030,
+        1031,
+        1152,
+        1153,
+        1154,
+        1155,
+        1156,
+        1157,
+        1158,
+        1159,
+        1280,
+        1281,
+        1282,
+        1283,
+        1284,
+        1285,
+        1286,
+        1287,
+        1408,
+        1409,
+        1410,
+        1411,
+        1412,
+        1413,
+        1414,
+        1415,
+        1536,
+        1537,
+        1538,
+        1539,
+        1540,
+        1541,
+        1542,
+        1543,
+        1664,
+        1665,
+        1666,
+        1667,
+        1668,
+        1669,
+        1670,
+        1671,
+        1792,
+        1793,
+        1794,
+        1795,
+        1796,
+        1797,
+        1798,
+        1799,
+        1920,
+        1921,
+        1922,
+        1923,
+        1924,
+        1925,
+        1926,
+        1927,
+        2048,
+        2049,
+        2050,
+        2051,
+        2052,
+        2053,
+        2054,
+        2055,
+        2176,
+        2177,
+        2178,
+        2179,
+        2180,
+        2181,
+        2182,
+        2183,
+        2304,
+        2305,
+        2306,
+        2307,
+        2308,
+        2309,
+        2310,
+        2311,
+        2432,
+        2433,
+        2434,
+        2435,
+        2436,
+        2437,
+        2438,
+        2439,
+        2560,
+        2561,
+        2562,
+        2563,
+        2564,
+        2565,
+        2566,
+        2567,
+        2688,
+        2689,
+        2690,
+        2691,
+        2692,
+        2693,
+        2694,
+        2695,
+        2816,
+        2817,
+        2818,
+        2819,
+        2820,
+        2821,
+        2822,
+        2823,
+        2944,
+        2945,
+        2946,
+        2947,
+        2948,
+        2949,
+        2950,
+        2951,
+        3072,
+        3073,
+        3074,
+        3075,
+        3076,
+        3077,
+        3078,
+        3079,
+        3200,
+        3201,
+        3202,
+        3203,
+        3204,
+        3205,
+        3206,
+        3207,
+        3328,
+        3329,
+        3330,
+        3331,
+        3332,
+        3333,
+        3334,
+        3335,
+        3456,
+        3457,
+        3458,
+        3459,
+        3460,
+        3461,
+        3462,
+        3463,
+        3584,
+        3585,
+        3586,
+        3587,
+        3588,
+        3589,
+        3590,
+        3591,
+        3712,
+        3713,
+        3714,
+        3715,
+        3716,
+        3717,
+        3718,
+        3719,
+        3840,
+        3841,
+        3842,
+        3843,
+        3844,
+        3845,
+        3846,
+        3847,
+        3968,
+        3969,
+        3970,
+        3971,
+        3972,
+        3973,
+        3974,
+        3975,
+        4096,
+        4097,
+        4098,
+        4099,
+        4100,
+        4101,
+        4102,
+        4103,
+        4224,
+        4225,
+        4226,
+        4227,
+        4228,
+        4229,
+        4230,
+        4231,
+        4352,
+        4353,
+        4354,
+        4355,
+        4356,
+        4357,
+        4358,
+        4359,
+        4480,
+        4481,
+        4482,
+        4483,
+        4484,
+        4485,
+        4486,
+        4487,
+        4608,
+        4609,
+        4610,
+        4611,
+        4612,
+        4613,
+        4614,
+        4615,
+        4736,
+        4737,
+        4738,
+        4739,
+        4740,
+        4741,
+        4742,
+        4743,
+        4864,
+        4865,
+        4866,
+        4867,
+        4868,
+        4869,
+        4870,
+        4871,
+        4992,
+        4993,
+        4994,
+        4995,
+        4996,
+        4997,
+        4998,
+        4999,
+        5120,
+        5121,
+        5122,
+        5123,
+        5124,
+        5125,
+        5126,
+        5127,
+        5248,
+        5249,
+        5250,
+        5251,
+        5252,
+        5253,
+        5254,
+        5255,
+        5376,
+        5377,
+        5378,
+        5379,
+        5380,
+        5381,
+        5382,
+        5383,
+        5504,
+        5505,
+        5506,
+        5507,
+        5508,
+        5509,
+        5510,
+        5511,
+        5632,
+        5633,
+        5634,
+        5635,
+        5636,
+        5637,
+        5638,
+        5639,
+        5760,
+        5761,
+        5762,
+        5763,
+        5764,
+        5765,
+        5766,
+        5767,
+        5888,
+        5889,
+        5890,
+        5891,
+        5892,
+        5893,
+        5894,
+        5895,
+        6016,
+        6017,
+        6018,
+        6019,
+        6020,
+        6021,
+        6022,
+        6023,
+        6144,
+        6145,
+        6146,
+        6147,
+        6148,
+        6149,
+        6150,
+        6151,
+        6272,
+        6273,
+        6274,
+        6275,
+        6276,
+        6277,
+        6278,
+        6279,
+        6400,
+        6401,
+        6402,
+        6403,
+        6404,
+        6405,
+        6406,
+        6407,
+        6528,
+        6529,
+        6530,
+        6531,
+        6532,
+        6533,
+        6534,
+        6535,
+        6656,
+        6657,
+        6658,
+        6659,
+        6660,
+        6661,
+        6662,
+        6663,
+        6784,
+        6785,
+        6786,
+        6787,
+        6788,
+        6789,
+        6790,
+        6791,
+        6912,
+        6913,
+        6914,
+        6915,
+        6916,
+        6917,
+        6918,
+        6919,
+        7040,
+        7041,
+        7042,
+        7043,
+        7044,
+        7045,
+        7046,
+        7047,
+        7168,
+        7169,
+        7170,
+        7171,
+        7172,
+        7173,
+        7174,
+        7175,
+        7296,
+        7297,
+        7298,
+        7299,
+        7300,
+        7301,
+        7302,
+        7303,
+        7424,
+        7425,
+        7426,
+        7427,
+        7428,
+        7429,
+        7430,
+        7431,
+        7552,
+        7553,
+        7554,
+        7555,
+        7556,
+        7557,
+        7558,
+        7559,
+        7680,
+        7681,
+        7682,
+        7683,
+        7684,
+        7685,
+        7686,
+        7687,
+        7808,
+        7809,
+        7810,
+        7811,
+        7812,
+        7813,
+        7814,
+        7815,
+        7936,
+        7937,
+        7938,
+        7939,
+        7940,
+        7941,
+        7942,
+        7943,
+        8064,
+        8065,
+        8066,
+        8067,
+        8068,
+        8069,
+        8070,
+        8071
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl1.l07",
+   "digest": "0e3da7c7db8000a7bc6fa63c6752ab9caed5d4b2b059857906a30285ae6b9282",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      131072
+     ],
+     "dtype": "float32",
+     "src": "A07",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b",
+     "shape": [
+      256
+     ],
+     "dtype": "float32",
+     "src": "A07",
+     "op": {
+      "name": "f16"
+     },
+     "base": 262144,
+     "axes": [
+      {
+       "offsets": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        128,
+        129,
+        130,
+        131,
+        132,
+        133,
+        134,
+        135,
+        256,
+        257,
+        258,
+        259,
+        260,
+        261,
+        262,
+        263,
+        384,
+        385,
+        386,
+        387,
+        388,
+        389,
+        390,
+        391,
+        512,
+        513,
+        514,
+        515,
+        516,
+        517,
+        518,
+        519,
+        640,
+        641,
+        642,
+        643,
+        644,
+        645,
+        646,
+        647,
+        768,
+        769,
+        770,
+        771,
+        772,
+        773,
+        774,
+        775,
+        896,
+        897,
+        898,
+        899,
+        900,
+        901,
+        902,
+        903,
+        1024,
+        1025,
+        1026,
+        1027,
+        1028,
+        1029,
+        1030,
+        1031,
+        1152,
+        1153,
+        1154,
+        1155,
+        1156,
+        1157,
+        1158,
+        1159,
+        1280,
+        1281,
+        1282,
+        1283,
+        1284,
+        1285,
+        1286,
+        1287,
+        1408,
+        1409,
+        1410,
+        1411,
+        1412,
+        1413,
+        1414,
+        1415,
+        1536,
+        1537,
+        1538,
+        1539,
+        1540,
+        1541,
+        1542,
+        1543,
+        1664,
+        1665,
+        1666,
+        1667,
+        1668,
+        1669,
+        1670,
+        1671,
+        1792,
+        1793,
+        1794,
+        1795,
+        1796,
+        1797,
+        1798,
+        1799,
+        1920,
+        1921,
+        1922,
+        1923,
+        1924,
+        1925,
+        1926,
+        1927,
+        2048,
+        2049,
+        2050,
+        2051,
+        2052,
+        2053,
+        2054,
+        2055,
+        2176,
+        2177,
+        2178,
+        2179,
+        2180,
+        2181,
+        2182,
+        2183,
+        2304,
+        2305,
+        2306,
+        2307,
+        2308,
+        2309,
+        2310,
+        2311,
+        2432,
+        2433,
+        2434,
+        2435,
+        2436,
+        2437,
+        2438,
+        2439,
+        2560,
+        2561,
+        2562,
+        2563,
+        2564,
+        2565,
+        2566,
+        2567,
+        2688,
+        2689,
+        2690,
+        2691,
+        2692,
+        2693,
+        2694,
+        2695,
+        2816,
+        2817,
+        2818,
+        2819,
+        2820,
+        2821,
+        2822,
+        2823,
+        2944,
+        2945,
+        2946,
+        2947,
+        2948,
+        2949,
+        2950,
+        2951,
+        3072,
+        3073,
+        3074,
+        3075,
+        3076,
+        3077,
+        3078,
+        3079,
+        3200,
+        3201,
+        3202,
+        3203,
+        3204,
+        3205,
+        3206,
+        3207,
+        3328,
+        3329,
+        3330,
+        3331,
+        3332,
+        3333,
+        3334,
+        3335,
+        3456,
+        3457,
+        3458,
+        3459,
+        3460,
+        3461,
+        3462,
+        3463,
+        3584,
+        3585,
+        3586,
+        3587,
+        3588,
+        3589,
+        3590,
+        3591,
+        3712,
+        3713,
+        3714,
+        3715,
+        3716,
+        3717,
+        3718,
+        3719,
+        3840,
+        3841,
+        3842,
+        3843,
+        3844,
+        3845,
+        3846,
+        3847,
+        3968,
+        3969,
+        3970,
+        3971,
+        3972,
+        3973,
+        3974,
+        3975
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl1.l08",
+   "digest": "8a537b342e633b7ac793e2069c3eebbf087fc7264ad45c9a7290b3d9cc6e98dd",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      65536
+     ],
+     "dtype": "float32",
+     "src": "A08",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b",
+     "shape": [
+      256
+     ],
+     "dtype": "float32",
+     "src": "A08",
+     "op": {
+      "name": "f16"
+     },
+     "base": 131072,
+     "axes": [
+      {
+       "offsets": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        128,
+        129,
+        130,
+        131,
+        132,
+        133,
+        134,
+        135,
+        256,
+        257,
+        258,
+        259,
+        260,
+        261,
+        262,
+        263,
+        384,
+        385,
+        386,
+        387,
+        388,
+        389,
+        390,
+        391,
+        512,
+        513,
+        514,
+        515,
+        516,
+        517,
+        518,
+        519,
+        640,
+        641,
+        642,
+        643,
+        644,
+        645,
+        646,
+        647,
+        768,
+        769,
+        770,
+        771,
+        772,
+        773,
+        774,
+        775,
+        896,
+        897,
+        898,
+        899,
+        900,
+        901,
+        902,
+        903,
+        1024,
+        1025,
+        1026,
+        1027,
+        1028,
+        1029,
+        1030,
+        1031,
+        1152,
+        1153,
+        1154,
+        1155,
+        1156,
+        1157,
+        1158,
+        1159,
+        1280,
+        1281,
+        1282,
+        1283,
+        1284,
+        1285,
+        1286,
+        1287,
+        1408,
+        1409,
+        1410,
+        1411,
+        1412,
+        1413,
+        1414,
+        1415,
+        1536,
+        1537,
+        1538,
+        1539,
+        1540,
+        1541,
+        1542,
+        1543,
+        1664,
+        1665,
+        1666,
+        1667,
+        1668,
+        1669,
+        1670,
+        1671,
+        1792,
+        1793,
+        1794,
+        1795,
+        1796,
+        1797,
+        1798,
+        1799,
+        1920,
+        1921,
+        1922,
+        1923,
+        1924,
+        1925,
+        1926,
+        1927,
+        2048,
+        2049,
+        2050,
+        2051,
+        2052,
+        2053,
+        2054,
+        2055,
+        2176,
+        2177,
+        2178,
+        2179,
+        2180,
+        2181,
+        2182,
+        2183,
+        2304,
+        2305,
+        2306,
+        2307,
+        2308,
+        2309,
+        2310,
+        2311,
+        2432,
+        2433,
+        2434,
+        2435,
+        2436,
+        2437,
+        2438,
+        2439,
+        2560,
+        2561,
+        2562,
+        2563,
+        2564,
+        2565,
+        2566,
+        2567,
+        2688,
+        2689,
+        2690,
+        2691,
+        2692,
+        2693,
+        2694,
+        2695,
+        2816,
+        2817,
+        2818,
+        2819,
+        2820,
+        2821,
+        2822,
+        2823,
+        2944,
+        2945,
+        2946,
+        2947,
+        2948,
+        2949,
+        2950,
+        2951,
+        3072,
+        3073,
+        3074,
+        3075,
+        3076,
+        3077,
+        3078,
+        3079,
+        3200,
+        3201,
+        3202,
+        3203,
+        3204,
+        3205,
+        3206,
+        3207,
+        3328,
+        3329,
+        3330,
+        3331,
+        3332,
+        3333,
+        3334,
+        3335,
+        3456,
+        3457,
+        3458,
+        3459,
+        3460,
+        3461,
+        3462,
+        3463,
+        3584,
+        3585,
+        3586,
+        3587,
+        3588,
+        3589,
+        3590,
+        3591,
+        3712,
+        3713,
+        3714,
+        3715,
+        3716,
+        3717,
+        3718,
+        3719,
+        3840,
+        3841,
+        3842,
+        3843,
+        3844,
+        3845,
+        3846,
+        3847,
+        3968,
+        3969,
+        3970,
+        3971,
+        3972,
+        3973,
+        3974,
+        3975
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl1.l09",
+   "digest": "e95f330b36b57a86dccffdb382a7274ba9a95e78ef039fdb52dfb8548cf8a68e",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      32768
+     ],
+     "dtype": "float32",
+     "src": "A09",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b",
+     "shape": [
+      128
+     ],
+     "dtype": "float32",
+     "src": "A09",
+     "op": {
+      "name": "f16"
+     },
+     "base": 65536,
+     "axes": [
+      {
+       "offsets": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        128,
+        129,
+        130,
+        131,
+        132,
+        133,
+        134,
+        135,
+        256,
+        257,
+        258,
+        259,
+        260,
+        261,
+        262,
+        263,
+        384,
+        385,
+        386,
+        387,
+        388,
+        389,
+        390,
+        391,
+        512,
+        513,
+        514,
+        515,
+        516,
+        517,
+        518,
+        519,
+        640,
+        641,
+        642,
+        643,
+        644,
+        645,
+        646,
+        647,
+        768,
+        769,
+        770,
+        771,
+        772,
+        773,
+        774,
+        775,
+        896,
+        897,
+        898,
+        899,
+        900,
+        901,
+        902,
+        903,
+        1024,
+        1025,
+        1026,
+        1027,
+        1028,
+        1029,
+        1030,
+        1031,
+        1152,
+        1153,
+        1154,
+        1155,
+        1156,
+        1157,
+        1158,
+        1159,
+        1280,
+        1281,
+        1282,
+        1283,
+        1284,
+        1285,
+        1286,
+        1287,
+        1408,
+        1409,
+        1410,
+        1411,
+        1412,
+        1413,
+        1414,
+        1415,
+        1536,
+        1537,
+        1538,
+        1539,
+        1540,
+        1541,
+        1542,
+        1543,
+        1664,
+        1665,
+        1666,
+        1667,
+        1668,
+        1669,
+        1670,
+        1671,
+        1792,
+        1793,
+        1794,
+        1795,
+        1796,
+        1797,
+        1798,
+        1799,
+        1920,
+        1921,
+        1922,
+        1923,
+        1924,
+        1925,
+        1926,
+        1927
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl1.l10",
+   "digest": "3136497d03e63b575caf9d96741019eb45ab236685acf8d1ed9e5dc4b85bc684",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      16384
+     ],
+     "dtype": "float32",
+     "src": "A10",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b",
+     "shape": [
+      128
+     ],
+     "dtype": "float32",
+     "src": "A10",
+     "op": {
+      "name": "f16"
+     },
+     "base": 32768,
+     "axes": [
+      {
+       "offsets": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        128,
+        129,
+        130,
+        131,
+        132,
+        133,
+        134,
+        135,
+        256,
+        257,
+        258,
+        259,
+        260,
+        261,
+        262,
+        263,
+        384,
+        385,
+        386,
+        387,
+        388,
+        389,
+        390,
+        391,
+        512,
+        513,
+        514,
+        515,
+        516,
+        517,
+        518,
+        519,
+        640,
+        641,
+        642,
+        643,
+        644,
+        645,
+        646,
+        647,
+        768,
+        769,
+        770,
+        771,
+        772,
+        773,
+        774,
+        775,
+        896,
+        897,
+        898,
+        899,
+        900,
+        901,
+        902,
+        903,
+        1024,
+        1025,
+        1026,
+        1027,
+        1028,
+        1029,
+        1030,
+        1031,
+        1152,
+        1153,
+        1154,
+        1155,
+        1156,
+        1157,
+        1158,
+        1159,
+        1280,
+        1281,
+        1282,
+        1283,
+        1284,
+        1285,
+        1286,
+        1287,
+        1408,
+        1409,
+        1410,
+        1411,
+        1412,
+        1413,
+        1414,
+        1415,
+        1536,
+        1537,
+        1538,
+        1539,
+        1540,
+        1541,
+        1542,
+        1543,
+        1664,
+        1665,
+        1666,
+        1667,
+        1668,
+        1669,
+        1670,
+        1671,
+        1792,
+        1793,
+        1794,
+        1795,
+        1796,
+        1797,
+        1798,
+        1799,
+        1920,
+        1921,
+        1922,
+        1923,
+        1924,
+        1925,
+        1926,
+        1927
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl1.l11",
+   "digest": "e731d04eddeee4bfa3c1da910cf17edc817538a8b40d54c91bcabd6c0703ac7d",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      16384
+     ],
+     "dtype": "float32",
+     "src": "A11",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b",
+     "shape": [
+      128
+     ],
+     "dtype": "float32",
+     "src": "A11",
+     "op": {
+      "name": "f16"
+     },
+     "base": 32768,
+     "axes": [
+      {
+       "offsets": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        128,
+        129,
+        130,
+        131,
+        132,
+        133,
+        134,
+        135,
+        256,
+        257,
+        258,
+        259,
+        260,
+        261,
+        262,
+        263,
+        384,
+        385,
+        386,
+        387,
+        388,
+        389,
+        390,
+        391,
+        512,
+        513,
+        514,
+        515,
+        516,
+        517,
+        518,
+        519,
+        640,
+        641,
+        642,
+        643,
+        644,
+        645,
+        646,
+        647,
+        768,
+        769,
+        770,
+        771,
+        772,
+        773,
+        774,
+        775,
+        896,
+        897,
+        898,
+        899,
+        900,
+        901,
+        902,
+        903,
+        1024,
+        1025,
+        1026,
+        1027,
+        1028,
+        1029,
+        1030,
+        1031,
+        1152,
+        1153,
+        1154,
+        1155,
+        1156,
+        1157,
+        1158,
+        1159,
+        1280,
+        1281,
+        1282,
+        1283,
+        1284,
+        1285,
+        1286,
+        1287,
+        1408,
+        1409,
+        1410,
+        1411,
+        1412,
+        1413,
+        1414,
+        1415,
+        1536,
+        1537,
+        1538,
+        1539,
+        1540,
+        1541,
+        1542,
+        1543,
+        1664,
+        1665,
+        1666,
+        1667,
+        1668,
+        1669,
+        1670,
+        1671,
+        1792,
+        1793,
+        1794,
+        1795,
+        1796,
+        1797,
+        1798,
+        1799,
+        1920,
+        1921,
+        1922,
+        1923,
+        1924,
+        1925,
+        1926,
+        1927
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl1.l12",
+   "digest": "4c1701b8743d9710d803e71c84fd71d6e6f986acb2659bff786fff32a3cea54c",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      16384
+     ],
+     "dtype": "float32",
+     "src": "A12",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b",
+     "shape": [
+      128
+     ],
+     "dtype": "float32",
+     "src": "A12",
+     "op": {
+      "name": "f16"
+     },
+     "base": 32768,
+     "axes": [
+      {
+       "offsets": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        128,
+        129,
+        130,
+        131,
+        132,
+        133,
+        134,
+        135,
+        256,
+        257,
+        258,
+        259,
+        260,
+        261,
+        262,
+        263,
+        384,
+        385,
+        386,
+        387,
+        388,
+        389,
+        390,
+        391,
+        512,
+        513,
+        514,
+        515,
+        516,
+        517,
+        518,
+        519,
+        640,
+        641,
+        642,
+        643,
+        644,
+        645,
+        646,
+        647,
+        768,
+        769,
+        770,
+        771,
+        772,
+        773,
+        774,
+        775,
+        896,
+        897,
+        898,
+        899,
+        900,
+        901,
+        902,
+        903,
+        1024,
+        1025,
+        1026,
+        1027,
+        1028,
+        1029,
+        1030,
+        1031,
+        1152,
+        1153,
+        1154,
+        1155,
+        1156,
+        1157,
+        1158,
+        1159,
+        1280,
+        1281,
+        1282,
+        1283,
+        1284,
+        1285,
+        1286,
+        1287,
+        1408,
+        1409,
+        1410,
+        1411,
+        1412,
+        1413,
+        1414,
+        1415,
+        1536,
+        1537,
+        1538,
+        1539,
+        1540,
+        1541,
+        1542,
+        1543,
+        1664,
+        1665,
+        1666,
+        1667,
+        1668,
+        1669,
+        1670,
+        1671,
+        1792,
+        1793,
+        1794,
+        1795,
+        1796,
+        1797,
+        1798,
+        1799,
+        1920,
+        1921,
+        1922,
+        1923,
+        1924,
+        1925,
+        1926,
+        1927
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl1.l13",
+   "digest": "2601e2404933d0b976015adc1a37273980fe66bb6fb5b6f5118dc699550017aa",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      8192
+     ],
+     "dtype": "float32",
+     "src": "A13",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "A13",
+     "op": {
+      "name": "f16"
+     },
+     "base": 16384,
+     "axes": [
+      {
+       "offsets": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        128,
+        129,
+        130,
+        131,
+        132,
+        133,
+        134,
+        135,
+        256,
+        257,
+        258,
+        259,
+        260,
+        261,
+        262,
+        263,
+        384,
+        385,
+        386,
+        387,
+        388,
+        389,
+        390,
+        391,
+        512,
+        513,
+        514,
+        515,
+        516,
+        517,
+        518,
+        519,
+        640,
+        641,
+        642,
+        643,
+        644,
+        645,
+        646,
+        647,
+        768,
+        769,
+        770,
+        771,
+        772,
+        773,
+        774,
+        775,
+        896,
+        897,
+        898,
+        899,
+        900,
+        901,
+        902,
+        903
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl1.l14",
+   "digest": "07c365af348c83a108582e929d5a93ab50866170d4132c3fb6e14ecf54eaa79c",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      4096
+     ],
+     "dtype": "float32",
+     "src": "A14",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "A14",
+     "op": {
+      "name": "f16"
+     },
+     "base": 8192,
+     "axes": [
+      {
+       "offsets": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        128,
+        129,
+        130,
+        131,
+        132,
+        133,
+        134,
+        135,
+        256,
+        257,
+        258,
+        259,
+        260,
+        261,
+        262,
+        263,
+        384,
+        385,
+        386,
+        387,
+        388,
+        389,
+        390,
+        391,
+        512,
+        513,
+        514,
+        515,
+        516,
+        517,
+        518,
+        519,
+        640,
+        641,
+        642,
+        643,
+        644,
+        645,
+        646,
+        647,
+        768,
+        769,
+        770,
+        771,
+        772,
+        773,
+        774,
+        775,
+        896,
+        897,
+        898,
+        899,
+        900,
+        901,
+        902,
+        903
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl1.l15",
+   "digest": "ed7003b81858ad93be1ec1ba54c627581050124e2e307603c84cb5cc9383e858",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      2048
+     ],
+     "dtype": "float32",
+     "src": "A15",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b",
+     "shape": [
+      32
+     ],
+     "dtype": "float32",
+     "src": "A15",
+     "op": {
+      "name": "f16"
+     },
+     "base": 4096,
+     "axes": [
+      {
+       "offsets": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        128,
+        129,
+        130,
+        131,
+        132,
+        133,
+        134,
+        135,
+        256,
+        257,
+        258,
+        259,
+        260,
+        261,
+        262,
+        263,
+        384,
+        385,
+        386,
+        387,
+        388,
+        389,
+        390,
+        391
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl1.l16",
+   "digest": "e16eff6f1f0d70142cb6c7afbd204be8799085eadb978d20cfc55f44f3097d5d",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      1024
+     ],
+     "dtype": "float32",
+     "src": "A16",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b",
+     "shape": [
+      32
+     ],
+     "dtype": "float32",
+     "src": "A16",
+     "op": {
+      "name": "f16"
+     },
+     "base": 2048,
+     "axes": [
+      {
+       "offsets": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        128,
+        129,
+        130,
+        131,
+        132,
+        133,
+        134,
+        135,
+        256,
+        257,
+        258,
+        259,
+        260,
+        261,
+        262,
+        263,
+        384,
+        385,
+        386,
+        387,
+        388,
+        389,
+        390,
+        391
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl1.l17",
+   "digest": "222628c396d386e8bb6fd0eddc17ca43f6885c6884627315362d33c569738bef",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      512
+     ],
+     "dtype": "float32",
+     "src": "A17",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b",
+     "shape": [
+      16
+     ],
+     "dtype": "float32",
+     "src": "A17",
+     "op": {
+      "name": "f16"
+     },
+     "base": 1024,
+     "axes": [
+      {
+       "offsets": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        128,
+        129,
+        130,
+        131,
+        132,
+        133,
+        134,
+        135
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl2.l01",
+   "digest": "87da0623b0529ed06c72efc2b7c87f0dadf6a2aef17100139e298fbaf7dbb093",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      4608
+     ],
+     "dtype": "float32",
+     "src": "B01w",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b_storage",
+     "shape": [
+      32
+     ],
+     "dtype": "float32",
+     "src": "B01b",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl2.l02",
+   "digest": "d8f21628ae51b04523eb262dbf5ad038f879f698cb488e97a63a6d7a5e5835f6",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      9216
+     ],
+     "dtype": "float32",
+     "src": "B02w",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b_storage",
+     "shape": [
+      32
+     ],
+     "dtype": "float32",
+     "src": "B02b",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl2.l03",
+   "digest": "09985bdaa0949d83479812532cfa4be1c0961626cf595ce3ddd125eb41eba28e",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      18432
+     ],
+     "dtype": "float32",
+     "src": "B03w",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b_storage",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "B03b",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl2.l04",
+   "digest": "2d709975f0e6e2cd2acfe30fe3f835ca02a97d413a4d93ea31e4a22dda754651",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      36864
+     ],
+     "dtype": "float32",
+     "src": "B04w",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b_storage",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "B04b",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl2.l05",
+   "digest": "f1d710e1fe1ff6c72858bd7c5278e0fb9ab22ab902d789d9b51438c5677ba336",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      36864
+     ],
+     "dtype": "float32",
+     "src": "B05w",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b_storage",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "B05b",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl2.l06",
+   "digest": "67aebc37c612647e4dabbe602d14e7c587d476268b5e4e51fcd0f137134f7c5a",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      36864
+     ],
+     "dtype": "float32",
+     "src": "B06w",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b_storage",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "B06b",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl2.l07",
+   "digest": "55845bdd1b2b05be011ebf8c8bf2ef429803c48a894ab1be431ee35ff4343f7f",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      36864
+     ],
+     "dtype": "float32",
+     "src": "B07w",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b_storage",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "B07b",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl2.l08",
+   "digest": "d94fb884b0bc227f8bd2940bfa49bfe9f5c71545daf5d6503205f17d1bacba86",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      36864
+     ],
+     "dtype": "float32",
+     "src": "B08w",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b_storage",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "B08b",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl2.l09",
+   "digest": "b9363f6337c33b2d77c975a838d9a1f11a32be0171a9d74ff3f0679369d5f45c",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      36864
+     ],
+     "dtype": "float32",
+     "src": "B09w",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b_storage",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "B09b",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl2.l10",
+   "digest": "58186c682a039dc7b8c1b96e0c17c7ac68c80507eb650041258a9a5797da8f6c",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      36864
+     ],
+     "dtype": "float32",
+     "src": "B10w",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b_storage",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "B10b",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl2.l11",
+   "digest": "e1f162b3c41f24bdbac32eee96bc16ae742d1015e920bbf28b776916740fc9b1",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      36864
+     ],
+     "dtype": "float32",
+     "src": "B11w",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b_storage",
+     "shape": [
+      64
+     ],
+     "dtype": "float32",
+     "src": "B11b",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl2.l12",
+   "digest": "bbeaf1caacca4490774b21063b82224a33d993226a2b1c3cfaac0391a19e7518",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      55296
+     ],
+     "dtype": "float32",
+     "src": "B12w",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b_storage",
+     "shape": [
+      96
+     ],
+     "dtype": "float32",
+     "src": "B12b",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl2.l13",
+   "digest": "853c80dae991ec68fe8d1b4b353f2dd45699c4040a8b163f888ab289d3ba0c0f",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      2304
+     ],
+     "dtype": "float32",
+     "src": "B13w",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b_storage",
+     "shape": [
+      8
+     ],
+     "dtype": "float32",
+     "src": "B13b",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl2.l14",
+   "digest": "3af50f878cd718fc74232f8748ad2e01de32ca78e3a8d1a29ec907c3f3be5fc7",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      2592
+     ],
+     "dtype": "float32",
+     "src": "B14w",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b_storage",
+     "shape": [
+      16
+     ],
+     "dtype": "float32",
+     "src": "B14b",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl2.l15",
+   "digest": "aabc4f6d40f7862f04aa6e9c3df5cf418c18a50109b0e2bc967e17fa06077839",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      4608
+     ],
+     "dtype": "float32",
+     "src": "B15w",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b_storage",
+     "shape": [
+      32
+     ],
+     "dtype": "float32",
+     "src": "B15b",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl2.l16",
+   "digest": "71247b01d659365ed4055027b23d8fce45a2b9d28ea0c2127cbe859f5058174f",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      9216
+     ],
+     "dtype": "float32",
+     "src": "B16w",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b_storage",
+     "shape": [
+      32
+     ],
+     "dtype": "float32",
+     "src": "B16b",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl2.l17",
+   "digest": "aba92780dbb81ce8873eee797056a9f829f364d95254b7dbc1446fb5870b4866",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      9216
+     ],
+     "dtype": "float32",
+     "src": "B17w",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b_storage",
+     "shape": [
+      32
+     ],
+     "dtype": "float32",
+     "src": "B17b",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl2.l18",
+   "digest": "10dde96b92d3ae18452c0d1525a978478338111185c0e587e9fa9c8e1c2e15d5",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      9216
+     ],
+     "dtype": "float32",
+     "src": "B18w",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b_storage",
+     "shape": [
+      32
+     ],
+     "dtype": "float32",
+     "src": "B18b",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl2.l19",
+   "digest": "ea09b8b33e7ad3bdaaa782e688570418eca1db3e55e2e22b1403790bd3d7193b",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      9216
+     ],
+     "dtype": "float32",
+     "src": "B19w",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b_storage",
+     "shape": [
+      32
+     ],
+     "dtype": "float32",
+     "src": "B19b",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl2.l20",
+   "digest": "dd6ba9d71eca72d493fda68a50b58424c120124ceb963459ceaba3ceefd04c96",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      9216
+     ],
+     "dtype": "float32",
+     "src": "B20w",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b_storage",
+     "shape": [
+      32
+     ],
+     "dtype": "float32",
+     "src": "B20b",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl2.l21",
+   "digest": "cdfaa497903c22eba5bf8bce5be70aa3d1a2b08aa2fe44f4e55a5eb29338c912",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      9216
+     ],
+     "dtype": "float32",
+     "src": "B21w",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b_storage",
+     "shape": [
+      32
+     ],
+     "dtype": "float32",
+     "src": "B21b",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl2.l22",
+   "digest": "94fc412e0f0564cd241466a89ffbbd44ae58d26699c55a2035c5e63d566ff01f",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      9216
+     ],
+     "dtype": "float32",
+     "src": "B22w",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b_storage",
+     "shape": [
+      32
+     ],
+     "dtype": "float32",
+     "src": "B22b",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl2.l23",
+   "digest": "92163a4839cf0a227af5ab567b3a213e5f6404f9ac925ef07f66d73c79d2aa27",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      9216
+     ],
+     "dtype": "float32",
+     "src": "B23w",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b_storage",
+     "shape": [
+      32
+     ],
+     "dtype": "float32",
+     "src": "B23b",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl2.l24",
+   "digest": "d6540d449e7c28050415d3ed04b5b9f747907695a92f0138348b8ed2ad1e832a",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      13824
+     ],
+     "dtype": "float32",
+     "src": "B24w",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b_storage",
+     "shape": [
+      48
+     ],
+     "dtype": "float32",
+     "src": "B24b",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "stage": "dl2.l25",
+   "digest": "8d15ef21125af97fd32593dfcfdfa907b3091d8a64641baa84d5dbcd809866e5",
+   "tensors": [
+    {
+     "name": "W_storage",
+     "shape": [
+      1152
+     ],
+     "dtype": "float32",
+     "src": "B25w",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    },
+    {
+     "name": "b_storage",
+     "shape": [
+      8
+     ],
+     "dtype": "float32",
+     "src": "B25b",
+     "op": {
+      "name": "f16"
+     },
+     "base": 0,
+     "axes": [
+      {
+       "stride": 1
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

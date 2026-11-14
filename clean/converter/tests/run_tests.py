@@ -31,6 +31,7 @@ DEFAULT_MAP = os.path.normpath(os.path.join(HERE, "..", "..", "..", "data", "pre
 DEFAULT_KMAP = os.path.normpath(os.path.join(HERE, "..", "..", "..", "data", "preset-K.v1.map.json"))
 DEFAULT_LMAP = os.path.normpath(os.path.join(HERE, "..", "..", "..", "data", "preset-L.v1.map.json"))
 MSG_NO_PRESET_L = "This DLSS file has no preset-L model."  # the message's start (its minimum version: api.cpp)
+DEFAULT_FGMAP = os.path.normpath(os.path.join(HERE, "..", "..", "..", "data", "fg.v1.map.json"))
 DEFAULT_T5 = os.path.normpath(os.path.join(HERE, "..", "..", "..", "data", "k48-capped-softmax-test.json"))
 DEFAULT_T7 = os.path.normpath(os.path.join(HERE, "..", "..", "..", "data", "lz4-block-test.json"))
 DTYPE_CODE = {"float32": 0, "uint8": 1, "int32": 2}
@@ -406,15 +407,61 @@ def test_l_shaped(r, m_map_path):
 
 
 MSG_NO_PRESET_FG = "This DLSS Frame Generation file has no frame-generation model. Version 310.1 or newer is needed."
+# data/fg.v1.map.json as the spec side delivered it (v1, 2026-11-14): its bytes must not change without a new digest here
+FG_MAP_SHA256 = "6dbdc84945817affcbbd8e50bdc1ea6976636137e5c4edd64b5481cc0d51a940"
 
 
-def test_fg(r):
-    """Frame generation (#96): a version-1 map with "preset": "FG" (cases.fg_map: one block source per weight blob, no W,
-    D or K) on a synthetic library holding our own random blobs in the frame-generation layout (clean/fg/layout.py:
-    17 + 50 blobs, the real byte sizes) in a shuffled order at aligned, even and odd offsets, with a decoy. Every tensor
-    is checked against the reference; net1's zero area and bias copies 1..15 hold NaN, so reading them would fail."""
+def test_fg_real_map(r, fgmap):
+    """Frame generation (#96): the delivered map (data/fg.v1.map.json, the spec side's v1: map version 1, "preset": "FG",
+    channel_order "storage", 67 block sources A01..A17, B01w/B01b..B25w/B25b, 42 stages, bias reads by explicit offsets).
+    Its bytes are pinned by digest; its layout is the one of clean/fg/layout.py; it validates, and a file without the
+    blobs gives preset FG's message."""
+    with open(fgmap, "rb") as f:
+        raw = f.read()
+    r.check("FG map: file digest", hashlib.sha256(raw).hexdigest() == FG_MAP_SHA256, hashlib.sha256(raw).hexdigest())
+    m = json.loads(raw)
+    L = cases._fg_layout()
+    names = list(m["sources"])
+    r.check("FG map: version 1, preset FG, channel_order storage, key from A01, no perms",
+            (m["version"], m["preset"], m["channel_order"], m["key"]["from"], m["perms"]) == (1, "FG", "storage", "A01", {}))
+    r.check("FG map: 67 sources in upload order with the layout's lengths",
+            names == ["A%02d" % i for i in range(1, 18)] + ["B%02d%s" % (i, x) for i in range(1, 26) for x in "wb"] and
+            [m["sources"][n]["length"] for n in names] == [b.nbytes for b in L.blobs()])
+    stages = m["stages"]
+    r.check("FG map: 42 stages dl1.l01..l17, dl2.l01..l25",
+            [s["stage"] for s in stages] == ["dl1.l%02d" % i for i in range(1, 18)] + ["dl2.l%02d" % i for i in range(1, 26)])
+    ok1 = all([t["name"] for t in s["tensors"]] == ["W_storage", "b"] and
+              s["tensors"][0]["shape"] == [l.weight_elements] and s["tensors"][0]["base"] == 0 and
+              s["tensors"][1]["base"] == l.bias_offset and
+              s["tensors"][1]["axes"] == [{"offsets": [L.net1_bias_index(c) for c in range(l.out)]}]
+              for s, l in zip(stages[:17], L.NET1))
+    r.check("FG map: net1 stages read the weight span and copy 0 of each bias group, skipping the zero area", ok1)
+    ok2 = all([t["name"] for t in s["tensors"]] == ["W_storage", "b_storage"] and
+              [t["src"] for t in s["tensors"]] == ["B%02dw" % l.index, "B%02db" % l.index] and
+              s["tensors"][0]["shape"] == [l.weight_elements] and s["tensors"][1]["shape"] == [l.out]
+              for s, l in zip(stages[17:], L.NET2))
+    r.check("FG map: net2 stages read the whole weight and bias blobs", ok2)
+    fake = r.write("fg-real/random.dll", random_bytes_for_test(1 << 20))
+    code, so, se = r.run(fgmap, [fake], r.path("fg-real", "out", "x")[:-2])
+    r.check("FG map: validates; a file without the blobs -> exit 12, preset FG's message",
+            code == 12 and MSG_NO_PRESET_FG in so, "code %d, out %r %s" % (code, so, se[-300:]))
+    code, so, se = r.run(fgmap, [fake], r.path("fg-real", "out", "x")[:-2], extra=["--preset", "FG"])
+    r.check("FG map --preset FG: the same", code == 12 and MSG_NO_PRESET_FG in so, so)
+    small = r.write("fg-real/small.dll", b"\0" * 1000)
+    code, so, se = r.run(fgmap, [small], r.path("fg-real", "out", "x")[:-2])
+    r.check("FG map: a file smaller than the key's blob is not a model file", code == EXIT["not_model"], so)
+
+
+def test_fg(r, fgmap):
+    """Frame generation (#96): the delivered map's layout (cases.fg_map: every stage, tensor and offset as delivered)
+    on a synthetic library holding our own random blobs (clean/fg/layout.py: 17 + 50 blobs, the real byte sizes) in a
+    shuffled order at aligned, even and odd offsets, with a decoy. Every tensor is checked against the reference;
+    net1's zero area and bias copies 1..15 hold NaN, so reading them would fail. Also the map features it needs:
+    channel_order "storage" (preset FG only) and axes by explicit offsets."""
     t0 = time.time()
-    case = cases.fg_case()
+    with open(fgmap, "rb") as f:
+        delivered = json.load(f)
+    case = cases.fg_case(delivered)
     mp = r.write("fg/map.json", case.map)
     dll = r.write("fg/fake.dll", case.file)
     out = r.path("fg", "out", "x")[:-2]
@@ -433,8 +480,13 @@ def test_fg(r):
     del plain["preset"]
     pp = r.write("fg/map-no-field.json", plain)
     code, so, se = r.run(pp, [dll], r.path("fg", "out-fail", "x")[:-2])
-    r.check("FG map without its field and without --preset: preset M's sources missing -> converter data damaged",
-            code == EXIT["map_damaged"] and MSG["map_damaged"] in so and "missing source W" in se, so + se[-300:])
+    r.check("FG map without its field and without --preset: read as preset M, whose maps are natural -> damaged",
+            code == EXIT["map_damaged"] and MSG["map_damaged"] in so and "channel_order" in se, so + se[-300:])
+    natural = copy.deepcopy(plain)
+    natural["channel_order"] = "natural"
+    code, so, se = r.run(r.write("fg/map-no-field-natural.json", natural), [dll], r.path("fg", "out-fail", "x")[:-2])
+    r.check("...and as natural, preset M's sources W, D and K are missing -> damaged",
+            code == EXIT["map_damaged"] and "missing source W" in se, so + se[-300:])
     out2 = r.path("fg", "out-hint", "x")[:-2]
     code, so, se = r.run(pp, [dll], out2, extra=["--preset", "FG"])
     r.check("FG map without its field, --preset FG: converts", code == 0 and "preset FG" in se, so + se[-300:])
@@ -450,25 +502,60 @@ def test_fg(r):
 
     # missing blobs: the key's blob missing -> no frame-generation model (exit 12, FG's message); another blob missing ->
     # not supported yet (exit 13), the log names it
-    no_key = cases.fg_case(seed=41, drop=("net1_01",))
+    no_key = cases.fg_case(delivered, seed=41, drop=("A01",))
     code, so, se = r.run(mp, [r.write("fg/no-key.dll", no_key.file)], r.path("fg", "out-fail", "x")[:-2])
     r.check("FG: a file without the key's blob: exit 12 with FG's message", code == 12 and MSG_NO_PRESET_FG in so,
             "code %d, out %r" % (code, so))
-    one_less = cases.fg_case(seed=41, drop=("net2_25_b",))
+    one_less = cases.fg_case(delivered, seed=41, drop=("B25b",))
     code, so, se = r.run(mp, [r.write("fg/one-less.dll", one_less.file)], r.path("fg", "out-fail", "x")[:-2])
     r.check("FG: a file without one blob: exit 13, the log names it",
-            code == EXIT["unsupported"] and MSG["unsupported"] in so and "missing sources: net2_25_b" in se, so + se[-300:])
+            code == EXIT["unsupported"] and MSG["unsupported"] in so and "missing sources: B25b" in se, so + se[-300:])
     r.check("FG: after the failures the first output is unchanged", os.path.exists(os.path.join(out, "model.wgcm")))
 
     # a map that reads net1's zero area (or a bias copy other than 0) meets the test's NaN: exit 22. This shows the
     # success case above really skipped them.
-    for label, fn in (("zero area", lambda t: t.update(base=t["shape"][0] * t["shape"][1])),
+    for label, fn in (("zero area", lambda t: t.update(base=t["shape"][0])),
                       ("bias copy 1", lambda t: t.update(base=t["base"] + 8))):
         bad = copy.deepcopy(case.map)
         st = bad["stages"][0]
         fn(st["tensors"][0] if label == "zero area" else st["tensors"][1])
         code, so, se = r.run(r.write("fg/reads-%s.json" % label.replace(" ", "-"), bad), [dll], r.path("fg", "out-fail", "x")[:-2])
         r.check("FG map reading net1's %s: exit 22 (NaN)" % label, code == EXIT["bad_value"], so + se[-300:])
+
+    # axes by explicit offsets (map versions 1 and 4): malformed forms are damaged, offsets past the source do not fit
+    def bias_axis(fn):
+        bad = copy.deepcopy(case.map)
+        fn(bad["stages"][0]["tensors"][1]["axes"][0], bad["stages"][0]["tensors"][1])
+        return bad
+    for label, fn, want in (
+            ("offsets with a stride", lambda ax, t: ax.update(stride=1), "map_damaged"),
+            ("offsets with a perm", lambda ax, t: ax.update(perm="p"), "map_damaged"),
+            ("one offset too few", lambda ax, t: ax["offsets"].pop(), "map_damaged"),
+            ("an offset that is not an integer", lambda ax, t: ax["offsets"].__setitem__(3, 1.5), "map_damaged"),
+            ("offsets not a list", lambda ax, t: ax.update(offsets=7), "map_damaged"),
+            ("an offset past the blob", lambda ax, t: ax["offsets"].__setitem__(31, 100000), "map_misfit"),
+            ("a negative offset before the blob", lambda ax, t: ax["offsets"].__setitem__(0, -t["base"] - 1), "map_misfit")):
+        code, so, se = r.run(r.write("fg/axis-%s.json" % label.replace(" ", "-"), bias_axis(fn)), [dll],
+                             r.path("fg", "out-fail", "x")[:-2])
+        r.check("FG map, %s: %s" % (label, want), code == EXIT[want], "code %d %s" % (code, se[-200:]))
+    # a negative offset that stays inside the blob is allowed (as negative strides are in versions 1-4)
+    shifted = bias_axis(lambda ax, t: (t.update(base=t["base"] + 8), ax.update(offsets=[o - 8 for o in ax["offsets"]])))
+    sp = r.write("fg/axis-negative-inside.json", shifted)
+    code, so, se = r.run(sp, [dll], r.path("fg", "out-neg", "x")[:-2])
+    r.check("FG map, the bias base moved by +8 and every offset by -8: the same output", code == 0, so + se[-300:])
+    if code == 0:
+        cs = copy.deepcopy(case)
+        cs.map = json.loads(open(sp, "rb").read())
+        with open(sp, "rb") as f:
+            check_output(r, "FG negative offsets", cs, r.path("fg", "out-neg", "x")[:-2], f.read())
+    # channel_order "storage" belongs to preset FG: in preset M's mini map it is damaged; an unknown order is damaged
+    mini = cases.mini_case()
+    for order in ("storage", "stored"):
+        mm = copy.deepcopy(mini.map)
+        mm["channel_order"] = order
+        code, so, se = r.run(r.write("fg/mini-%s.json" % order, mm), [r.write("fg/mini.dll", mini.file)],
+                             r.path("fg", "out-fail", "x")[:-2])
+        r.check("channel_order %r in a preset-M map: damaged" % order, code == EXIT["map_damaged"], so)
 
 
 def mutate(m, fn):
@@ -1208,6 +1295,7 @@ def main():
     ap.add_argument("--map", default=DEFAULT_MAP, help="the shipped map (only its layout is used)")
     ap.add_argument("--kmap", default=DEFAULT_KMAP, help="the shipped preset-K map (only its layout is used)")
     ap.add_argument("--lmap", default=DEFAULT_LMAP, help="the shipped preset-L map (only its layout is used)")
+    ap.add_argument("--fgmap", default=DEFAULT_FGMAP, help="the delivered preset-FG map (its layout; its digest is pinned)")
     ap.add_argument("--t5", default=DEFAULT_T5, help="spec 48-T5 capped_softmax vectors")
     ap.add_argument("--t7", default=DEFAULT_T7, help="spec 08-T7 block decompression vectors")
     ap.add_argument("--quick", action="store_true", help="skip the large cases")
@@ -1219,7 +1307,11 @@ def main():
     t0 = time.time()
     test_errors(r)
     test_preset_l(r)
-    test_fg(r)
+    if os.path.exists(args.fgmap):
+        test_fg_real_map(r, args.fgmap)
+        test_fg(r, args.fgmap)
+    else:
+        r.check("the preset-FG map is in data/", False, args.fgmap)
     test_filter(r, args.t7)
     test_k_errors(r)
     if os.path.exists(args.map):
