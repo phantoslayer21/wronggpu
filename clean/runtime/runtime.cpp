@@ -125,7 +125,9 @@ std::string emu_lib_dir(const WgRtConfig& c) {
 // 10 faster; one 8-round run -11.5 us with every round faster). Re-measured in one process (runtime A/B, the same frames
 // alternating every 300 frames; inter-process noise was +-25 us): xd is +5.0 us at 1707x960 and +7.5 us at 1920x1080,
 // -2.25 us at 1280x720, so it now runs on frames of at most kXdMaxPixels render pixels only.
-const char* const kDefaultD3d12Fusion = "pm,xe,mb,rv,xo,xd";
+// lc, ll: Model L only (its decoder block with l_coef_pack12 as the epilogue, its two input linears in one kernel; see
+// fz_lc, fz_ll).
+const char* const kDefaultD3d12Fusion = "pm,xe,mb,rv,xo,xd,lc,ll";
 // xd only up to this many render pixels per frame (see fz_xd): it is faster at 1280x720 and slower at 1707x960 and above
 constexpr long long kXdMaxPixels = 1200000;
 
@@ -315,15 +317,26 @@ struct Runtime {
   //       xd runs only on frames of at most xd_max_pixels render pixels (WG_D3D12_XD_MAX_PIXELS, default kXdMaxPixels;
   //       0 = any size): measured in one process against the same frames without it (runtime A/B, WG_AB_FUSION,
   //       3 x 4 windows of 300 frames each): 1280x720 -2.25 us, 1707x960 +5.0 us, 1920x1080 +7.5 us per frame
+  //   lc  Model L: its decoder block with l_coef_pack12 as the epilogue (l_swin_block_c32_dec_coef12_nc, l_swin.hlsl
+  //       SW_OUT_COEF12; byte for byte the pair l_swin_block_c32_dec_nc -> l_coef_pack12): one launch less, and the
+  //       block's FP16 map (y2, 64 bytes a pixel) is neither stored nor read back. Pack12 frames only; without lc, or
+  //       with a manifest that lacks the kernel, the pair runs (the fallback route)
+  bool fz_lc = false, l_fold_built = false;
+  //   ll  Model L: its two input linears in one kernel (l_linear_32_32_fused, l_ops_linear.hlsl; byte for byte the pair
+  //       l_linear_32_32_relu -> l_linear_32_32_f16): one launch less, and x1 (32 bytes a pixel of the halo map) stays
+  //       in registers. The input encoder then writes q to l_narrow (x2 over q in l_wide would overwrite q that other
+  //       workgroups have not read yet). Without ll, or with a manifest that lacks the kernel, the pair runs
+  bool fz_ll = false, l_lin_built = false;
   long long xd_max_pixels = [] {
     const char* e = std::getenv("WG_D3D12_XD_MAX_PIXELS");
     return e && *e ? std::atoll(e) : kXdMaxPixels;
   }();
   // A/B diagnostics (WG_AB_*): the two fusion sets and the block length (0: off)
   struct FzSet {
-    bool pm = false, xe = false, mb = false, mb0 = false, rv = false, xo = false, xd = false;
+    bool pm = false, xe = false, mb = false, mb0 = false, rv = false, xo = false, xd = false, lc = false, ll = false;
     template <class R> void apply(R* r) const {
       r->fz_pm = pm, r->fz_xe = xe, r->fz_mb = mb, r->fz_mb0 = mb0, r->fz_rv = rv, r->fz_xo = xo, r->fz_xd = xd;
+      r->fz_lc = lc, r->fz_ll = ll;
     }
   };
   FzSet fz_set[2];
@@ -352,7 +365,10 @@ struct Runtime {
       else if (f == "rv") z->rv = true;
       else if (f == "xo") z->xo = true;
       else if (f == "xd") z->xd = true;
-      else if (!f.empty()) return fail("WG_D3D12_FUSION: unknown fusion \"" + f + "\" (pm, xe, mb, rv, xo, xd or none)");
+      else if (f == "lc") z->lc = true;
+      else if (f == "ll") z->ll = true;
+      else if (!f.empty())
+        return fail("WG_D3D12_FUSION: unknown fusion \"" + f + "\" (pm, xe, mb, rv, xo, xd, lc, ll or none)");
     }
     return true;
   }
@@ -520,6 +536,9 @@ struct Runtime {
     if (model_l && c.backend == 3) {
       const std::string missing = l_native_missing();
       if (!missing.empty()) return fail("Model L on native D3D12: not yet ported to D3D12: " + missing);
+      const std::vector<std::string> have = manifest_kernels();
+      l_fold_built = std::find(have.begin(), have.end(), "l_swin_block_c32_dec_coef12_nc") != have.end();
+      l_lin_built = std::find(have.begin(), have.end(), "l_linear_32_32_fused") != have.end();
     }
 #endif
     if (c.max_rw <= 0 || c.max_rh <= 0 || c.ow <= 0 || c.oh <= 0) return fail("invalid render or output size");
@@ -1362,7 +1381,7 @@ struct Runtime {
     kernels_text += std::string(" dec_rdiv=") + (dec_div.find('r') == std::string::npos ? "1" : "0");
     kernels_text += std::string(" dec_bdiv=") + (dec_div.find('b') == std::string::npos ? "1" : "0");
     kernels_text += std::string(" dec1_dec0=") + (dec1_dec0 ? "fused" : "separate");
-    if (fz_pm || fz_xe || fz_mb || fz_rv || fz_xo || fz_xd) kernels_text += " d3d12_fusion=" + fz_text;
+    if (fz_pm || fz_xe || fz_mb || fz_rv || fz_xo || fz_xd || fz_lc || fz_ll) kernels_text += " d3d12_fusion=" + fz_text;
     kernels_text += " swin_mid=" + (mid_variant.empty() ? std::string("none") : mid_variant);
     kernels_text += std::string(" post_pack=") + (p12 ? "p12" : "none");
     kernels_text += std::string(" pre_exposure=") + (pi_original ? "original" : "scale");
@@ -1375,6 +1394,8 @@ struct Runtime {
     if (native_direct_io) kernels_text += " native_io=direct_textures";
     // Model L: its encoder and decoder (enc0= / dec0= above name Model M's, not loaded for Model L)
     if (model_l) kernels_text += " model=L l_kernels=l_enc_values.co,l_ops.co,l_swin.co,l_post.co l_post=l_post_recon";
+    if (l_fold_built) kernels_text += std::string(" l_dec_fold=") + (fz_lc ? "on" : "off");  // (native D3D12 only)
+    if (l_lin_built) kernels_text += std::string(" l_lin_fused=") + (fz_ll ? "on" : "off");
     return kernels_text.c_str();
   }
 
@@ -1520,22 +1541,35 @@ struct Runtime {
   bool l_encoder(EncParams& p, DevPtr cnet, DevPtr din, DevPtr min_, int cur, int nxt, int fh, int fw, int f) {
     DevPtr wv = wdev["enc0.values"], w1 = wdev["enc0.Win1"], w2 = wdev["enc0.Win2"], wp = wdev["enc0.project"];
     int npix = (fh + 4) * (fw + 4), tw = fw / 2, th = fh / 2;
+    const bool fused = fz_ll && l_lin_built;  // (native D3D12 only: l_lin_built)
+    DevPtr& q = fused ? l_narrow : l_wide;  // q's map (fused: not under x2)
     return launch(native_direct_io ? "lev/input_encoder_direct" : "lev/input_encoder",
                   cdiv(((fh + 4) / 2) * ((fw + 4) / 2), 128), 256,
-                  {&cnet, &din, &min_, &reduced, &latent[cur], &mnear[cur], &l_wide, &mnear[nxt], &mfar, &mcenter,
+                  {&cnet, &din, &min_, &reduced, &latent[cur], &mnear[cur], &q, &mnear[nxt], &mfar, &mcenter,
                    &expo, &wv, &p}) &&
-           launch("l_linear_32_32_relu", cdiv(npix, 128), 256, {&l_wide, &l_narrow, &w1, &npix}) &&
-           launch("l_linear_32_32_f16", cdiv(npix, 128), 256, {&l_narrow, &l_wide, &w2, &npix}) &&
+           (fused ? launch("l_linear_32_32_fused", cdiv(npix, 128), 256, {&l_narrow, &l_wide, &w1, &w2, &npix})
+                  : launch("l_linear_32_32_relu", cdiv(npix, 128), 256, {&l_wide, &l_narrow, &w1, &npix}) &&
+                        launch("l_linear_32_32_f16", cdiv(npix, 128), 256, {&l_narrow, &l_wide, &w2, &npix})) &&
            l_block("enc", l_wide, l_x3, wdev["enc0_block"], l_nc[0], fh, fw, false, f) &&
            launch("l_project_gather", cdiv(tw * th, 128), 256, {&l_x3, &feat0, &wp, &tw, &th});
   }
 
   // Step 4 for Model L: the projection of dec1's output to 32 values per pixel (y), the decoder block (y2, FP16), and
   // Model L's per-pixel functions into A, B, C and the new latent (Model M's buffers and formats; no motion, previous
-  // latent, jitter or reset is read).
+  // latent, jitter or reset is read). Fusion lc (pack12 frames on native D3D12): the block with the per-pixel
+  // functions as its epilogue, y2 not stored.
   bool l_decoder(DecParams& p, int nxt, int fh, int fw, int f) {
     DevPtr wd = wdev["dec0.project"], wc = wdev["dec0.coef"];
     int tw = fw / 2, th = fh / 2;
+    if (fz_lc && l_fold_built && p12_frame && l_nc[1]) {
+      DevPtr none = 0, wb = wdev["dec0_block"];
+      int ox = 0, oy = 0, H = fh, W = fw, rw = p.rw, rh = p.rh;
+      l_offsets(true, f, &ox, &oy);
+      const int nwin = ((W + ox + 3) / 4) * ((H + oy + 3) / 4);
+      return launch("l_dec_project", cdiv(tw * th, 128), 256, {&out1, &l_narrow, &wd, &tw, &th}) &&
+             launch("l_swin_block_c32_dec_coef12_nc", cdiv(nwin, 8), 256,
+                    {&l_narrow, &none, &none, &wb, &H, &W, &ox, &oy, &A, &C, &latent[nxt], &wc, &rw, &rh});
+    }
     return launch("l_dec_project", cdiv(tw * th, 128), 256, {&out1, &l_narrow, &wd, &tw, &th}) &&
            l_block("dec", l_narrow, l_wide, wdev["dec0_block"], l_nc[1], fh, fw, true, f) &&
            launch(p12_frame ? "l_coef_pack12" : "l_coef", cdiv(tw * th, 128), 256,
@@ -1546,8 +1580,9 @@ struct Runtime {
   // its encoder (the direct form on the direct-resource route), linears, clamp-free blocks (the only D3D12 forms),
   // projections and pack12 coefficient store, and dec1's own block with its expand (Model M runs dec1 inside its fused
   // decoder there; Model L's decoder reads dec1's map). Model M's other kernels are its native frame's.
-  std::string l_native_missing() const {
-    std::string text, error, missing;
+  // The kernel names of <build_dir>/dx12/manifest.json (none if it is missing or unreadable).
+  std::vector<std::string> manifest_kernels() const {
+    std::string text, error;
     wgc::Json manifest;
     std::vector<std::string> have;
     if (read_text(build_dir + "/dx12/manifest.json", &text) && wgc::parse_json(text, manifest, error)) {
@@ -1558,6 +1593,12 @@ struct Runtime {
           if (name && name->is_string()) have.push_back(name->text);
         }
     }
+    return have;
+  }
+
+  std::string l_native_missing() const {
+    std::string missing;
+    const std::vector<std::string> have = manifest_kernels();
     const std::vector<std::string> need = {native_direct_io ? "lev/input_encoder_direct" : "lev/input_encoder",
                                            "l_linear_32_32_relu",     "l_linear_32_32_f16",
                                            "l_swin_block_c32_enc_nc", "l_project_gather",
