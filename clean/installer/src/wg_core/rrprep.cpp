@@ -122,6 +122,10 @@ wstring RrRuntimeSha(Context& ctx) {
 int RrPassesFor(const string& mode) { return mode.empty() || mode == "accurate" ? 1 : 2; }
 
 bool RrKernelsInGame(const wstring& exe) {
+    // Under Wine (Proton) a game's compiled kernels are kept by vkd3d-proton in the game folder (vkd3d-proton.cache, its
+    // working folder) and by Mesa in Steam's folder for the game, both under the game's own Proton: a helper in the
+    // launcher's prefix fills neither (measured 2026-11-13, Cyberpunk 2077 under GE-Proton 11-11).
+    if (UnderWine()) return true;
     const GameRule* r = GameRuleFor(exe);
     return r && r->rrKernelsInGame;
 }
@@ -140,7 +144,8 @@ const wchar_t* RrPrepStateName(RrPrepState s) {
 
 RrPrepState RrPrepStateOf(Context& ctx, const wstring& dataDir, const wstring& exe, int passes, wstring* why) {
     if (RrKernelsInGame(exe)) {
-        if (why) *why = L"the game prepares them at its first start (its graphics driver cache is its own)";
+        if (why) *why = UnderWine() ? L"the game prepares them at its first start (under Proton its shader caches are its own)"
+                                    : L"the game prepares them at its first start (its graphics driver cache is its own)";
         return RrPrepState::InGame;
     }
     const wstring name = BaseName(exe), driver = RrDriverVersion(), sha = RrRuntimeSha(ctx);
@@ -162,6 +167,12 @@ bool RrPrepared(Context& ctx, const wstring& dataDir, const wstring& exe, int pa
 int PrepareRr(Context& ctx, const wstring& dataDir, const wstring& exe, const wstring& runtimeDll, int passes,
               const std::function<bool(const RrPrepProgress&)>& progress, wstring* why) {
     if (RrKernelsInGame(exe)) {
+        if (UnderWine()) {
+            if (why) *why = L"the game prepares them at its first start (under Proton its shader caches are its own)";
+            LogLine(ctx, L"Ray Reconstruction: " + BaseName(exe) + L" prepares its kernels at its first start (under Proton the game's shader caches are vkd3d-proton's "
+                         L"file in the game folder and Steam's folder for the game, which the launcher's helper can't fill); nothing prepared ahead");
+            return 4;
+        }
         if (why) *why = L"the game prepares them at its first start (its graphics driver cache is its own)";
         LogLine(ctx, L"Ray Reconstruction: " + BaseName(exe) + L" prepares its kernels at its first start (the graphics driver keeps the game's shader cache under the game's own "
                      L"application name, which the launcher's helper can't reach); nothing prepared ahead");

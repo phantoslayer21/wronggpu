@@ -79,6 +79,10 @@ class Net2Layer:
     cin: int         # stored input channels
     cin_used: int    # input channels that carry data (layer 1 of A stores 16, uses 10)
     out: int
+    # The grid the layer runs on, as the divisor d of the network grid W2 x H2 (1: W2, 2: W2/2, 4: W2/4, 8: W2/8);
+    # None where it is not given (sub-net A's last layer: OPEN).
+    level: object = None
+    upscaled: bool = False   # its output is upscaled 2x (bilinear) to the next level up
 
     @property
     def weight_elements(self):
@@ -125,13 +129,14 @@ def _net1():
 
 
 def _net2():
-    rows = [("A", 16, 10, 32), ("A", 32, 32, 32), ("A", 32, 32, 64)]
-    rows += [("A", 64, 64, 64)] * 8                              # the eight-layer block
-    rows += [("A", 64, 64, 96), ("A", 32, 32, 8)]
-    rows += [("B", 18, 18, 16), ("B", 16, 16, 32)]
-    rows += [("B", 32, 32, 32)] * 8                              # the eight-layer block
-    rows += [("B", 32, 32, 48), ("B", 16, 16, 8)]
-    return tuple(Net2Layer(i + 1, s, c, cu, o) for i, (s, c, cu, o) in enumerate(rows))
+    # (sub-net, in stored, in used, out, level divisor, output upscaled)
+    rows = [("A", 16, 10, 32, 2, False), ("A", 32, 32, 32, 4, False), ("A", 32, 32, 64, 8, False)]
+    rows += [("A", 64, 64, 64, 8, False)] * 8                    # the eight-layer block
+    rows += [("A", 64, 64, 96, 8, True), ("A", 32, 32, 8, None, False)]
+    rows += [("B", 18, 18, 16, 2, False), ("B", 16, 16, 32, 4, False)]
+    rows += [("B", 32, 32, 32, 4, False)] * 8                    # the eight-layer block
+    rows += [("B", 32, 32, 48, 4, True), ("B", 16, 16, 8, 1, False)]
+    return tuple(Net2Layer(i + 1, s, c, cu, o, lv, up) for i, (s, c, cu, o, lv, up) in enumerate(rows))
 
 
 NET1 = _net1()
@@ -158,6 +163,21 @@ def net1_bias_index(channel):
     """Element of copy 0 of an output channel's bias, relative to the bias area."""
     g, j = divmod(channel, NET1_BIAS_GROUP)
     return g * NET1_BIAS_GROUP * NET1_BIAS_COPIES + j
+
+
+def net2_macs_per_pixel(subnet, *, used_inputs=True, open_level=None):
+    """Multiply-adds of one sub-net per pixel of the network grid W2: each layer's 9 * in * out at its own grid
+    (divided by d * d). used_inputs: count only the input channels that carry data. open_level: the divisor to assume
+    for a layer whose level is OPEN (required when the sub-net has one). Computed, not measured."""
+    total = 0
+    for l in NET2:
+        if l.subnet != subnet:
+            continue
+        d = l.level if l.level is not None else open_level
+        if d is None:
+            raise ValueError("%s: level OPEN; pass open_level" % l.name)
+        total += 9 * (l.cin_used if used_inputs else l.cin) * l.out / (d * d)
+    return total
 
 
 def totals():
