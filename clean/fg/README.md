@@ -12,6 +12,7 @@ front end or the launcher yet. Status, open items and formats: [FORMATS.md](FORM
 | `reference/ops.py` | NumPy CPU reference of the networks' building blocks: float16 convolution (3 x 3, 1 x 1) with bias and ReLU, 2x pooling, bilinear 2x upscale (align corners), element-wise combines, net1's input features and 2 x 2 fold; each open behaviour is a required argument or raises `OpenItem` |
 | `tests/test_fg_reference.py` | the building blocks against plain loop versions, on synthetic data |
 | `../converter` (preset FG) | the converter reads a version-1 map with `"preset": "FG"`: one block source per weight blob; see the converter's README, "Preset FG" |
+| `../../data/fg.v1.map.json` | the spec side's converter map v1 (weights as stored); `tests/test_fg_map.py` pins its digest and checks it against `layout.py` |
 | `reference/config.py` | the settled per-call configuration: the multi-frame intermediate time (one single-precision division), the index checks and flags, UI recomposition (FG preset A / B) with the profile values that force it |
 | `tests/test_fg_config.py` | the intermediate time against exactly rounded quotients, the index rules, every forcing profile value |
 

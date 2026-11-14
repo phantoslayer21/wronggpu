@@ -24,9 +24,14 @@ delivered by the spec side; the code never guesses it (it raises, or takes the c
 - Map version 1 with `"preset": "FG"` (converter README, "Preset FG"): one block source per blob, located by length
   and hashes, `f16` reads. net1's zero area is skipped by the tensor's base; its bias is read as copy 0 of each group of
   eight (`layout.net1_bias_index`).
-- The spec side's map file is **OPEN** (not delivered). Until it arrives the converter is tested with our own random
-  blobs and a stand-in map (`clean/converter/tests/cases.py`, `fg_map`), whose stage and tensor names and axis order are
-  placeholders.
+- The map is `data/fg.v1.map.json` (the spec side's v1; digest pinned in `tests/test_fg_map.py` and the converter's
+  tests): sources `A01`..`A17` (net1) and `B01w`/`B01b`..`B25w`/`B25b` (net2), stages `dl1.l01`..`dl1.l17` and
+  `dl2.l01`..`dl2.l25`, in upload order, exactly the blobs and spans of `layout.py`. Per stage: `W_storage` (the
+  weight span as stored, 1-D) and `b` (net1: copy 0 of each bias group, natural order) or `b_storage` (net2: the bias
+  blob as stored).
+- `"channel_order": "storage"`: the weights are not yet in natural axes. The natural view comes with a later map
+  revision (v1.1), with the same shapes and spans; whether net2's stored bias order is the natural channel order is
+  confirmed then too (OPEN until it is).
 - A conversion of a real library will be checked by digests only (the converter compares every stage digest the map
   gives); no value or byte of it is ever written into the repository or any public text.
 
@@ -60,7 +65,7 @@ delivered by the spec side; the code never guesses it (it raises, or takes the c
 
 ## OPEN (waiting for the spec side)
 
-1. The converter map file.
+1. The converter map's natural-order revision (v1.1). v1 is delivered (`data/fg.v1.map.json`, weights as stored).
 2. The in-blob axis order of the weights (tap, input channel, output channel, any tiling), for both networks.
 3. Which launch reads which blob (upload order is known; launch order is not).
 4. net1's blob 2: a 1 x 1 convolution or a 2 x 2 one.

@@ -141,6 +141,9 @@ struct Axis {
     std::int64_t stride = 0;
     int perm = -1;  // index into Map::perms, or -1
     std::int64_t limit = -1;  // map version 5 (57 section 5.3): elements with pi(i) >= limit are zero; -1 = none
+    // Map versions 1 and 4: an axis given by explicit element offsets (`offsets`, one per index i, in place of
+    // `stride` and `perm`): its contribution to the element index is offsets[i]. Empty: the stride form.
+    std::vector<std::int64_t> offsets;
 };
 
 // Map version 5: a second read of the same elements from another source and base (`also`).
@@ -245,6 +248,8 @@ struct Map {
     // load_map checks it is a known preset that allows the map's version.
     std::string preset_name;
     bool preset_named = false;  // the map has the field "preset" (else the name came from the version, or the caller)
+    // "natural", or "storage" (preset FG map v1: weight tensors are the stored spans, not yet natural axes).
+    std::string channel_order;
     std::vector<Source> sources;  // in file order
     std::vector<Array> arrays;    // what tensors index
     int key_source = -1;
