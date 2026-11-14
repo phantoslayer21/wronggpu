@@ -13,7 +13,10 @@ name is the name the runtime launches ("exposure_auto_diet", "bneck/swin_bneck6_
 the tag. co is the file name of the HIP code object whose build of the kernel this port reproduces ("swin.co",
 "post_w64__orig.co"): the device runs the port only while the runtime has exactly that code object loaded (untagged, or
 under the name's tag), so a different build variant of the same kernel name keeps running on HIP. co=- marks a
-D3D12-only kernel with no HIP counterpart (the device self-test's kernels): it always runs on D3D12. args lists the HIP kernel's arguments in order: p = pointer (a uint byte offset into the arena; 0 = null),
+D3D12-only kernel with no HIP counterpart (the device self-test's kernels): it always runs on D3D12. One name may have
+ports of several builds of its HIP kernel (for example w64/post_tf_f32_p12_diet_vsit of post_w64__orig.co and of
+post_w64.co): one manifest entry per (name, co), and the device runs the one whose code object is loaded. Every port but
+the first of a name sets file=<stem> (its DXIL is <stem>.dxil; default <tag>__<kernel>). args lists the HIP kernel's arguments in order: p = pointer (a uint byte offset into the arena; 0 = null),
 u = any 32-bit scalar, b<N> = a struct of N bytes passed by value (N / 4 uint constants).
 
 Arithmetic mode ("exact", README.md): DXC compiles with IEEE strictness (-Gis: no fast-math flags, so no contraction, no
@@ -158,6 +161,9 @@ def kernel_decls(path):
             d["gscale"] = int(kv.get("gscale", d["block"] // d["group"]))
             if d["gscale"] < 1 or d["gscale"] > d["block"] // d["group"]:
                 raise SystemExit(f"{path}: {name}: gscale {d['gscale']}")
+            d["file"] = kv.get("file", "")   # DXIL file stem of a second port of the same name (module doc)
+            if d["file"] and not re.fullmatch(r"[A-Za-z0-9_]+", d["file"]):
+                raise SystemExit(f"{path}: {name}: file={d['file']} (letters, digits and _ only)")
             d["rs"] = kv.get("rs", "buffer")
             if d["rs"] not in ("buffer", "tex", "direct"):
                 raise SystemExit(f"{path}: {name}: unsupported root-signature kind {d['rs']}")
@@ -261,8 +267,8 @@ def main(argv=None):
     old = {}
     if only and os.path.exists(man_path):  # partial build: keep the other kernels' entries
         with open(man_path) as f:
-            old = {k["name"]: k for k in json.load(f)["kernels"]}
-    kernels = dict(old)
+            old = {(k["name"], k.get("co", "")): k for k in json.load(f)["kernels"]}
+    kernels = dict(old)   # (name, co) -> manifest entry
     built = []
     # generated kernels (kernels/fused_*_gen.py: the fused forms of swin_block.hlsl / bneck.hlsl) are regenerated from
     # the live sources first, so that no build compiles a stale copy
@@ -277,10 +283,15 @@ def main(argv=None):
         for d in kernel_decls(src):
             if only and d["name"] not in only:
                 continue
-            if d["name"] in kernels and d["name"] not in old:
-                raise SystemExit(f"kernel {d['name']} declared twice")
-            kernels[d["name"]] = None  # placeholder: the declared-twice check sees it before any compile starts
-            jobs.append((src, d, os.path.join(dst, output_name(d["name"]))))
+            key = (d["name"], d["co"])
+            if key in kernels and key not in old:
+                raise SystemExit(f"kernel {d['name']} ({d['co']}) declared twice")
+            kernels[key] = None  # placeholder: the declared-twice check sees it before any compile starts
+            out = os.path.join(dst, d["file"] + ".dxil" if d["file"] else output_name(d["name"]))
+            if any(j[2] == out for j in jobs):
+                raise SystemExit(f"kernel {d['name']} ({d['co']}): DXIL file {os.path.basename(out)} already used "
+                                 "(a second port of a name needs file=<stem>)")
+            jobs.append((src, d, out))
 
     def build_one(job):
         src, d, out = job
@@ -308,7 +319,7 @@ def main(argv=None):
         futures = [pool.submit(build_one, j) for j in jobs]
         try:
             for (src, d, out), fut in zip(jobs, futures):
-                kernels[d["name"]] = fut.result()
+                kernels[(d["name"], d["co"])] = fut.result()
                 built.append((d["name"], out))
                 print(f"{d['name']:40s} -> {os.path.basename(out)}  block {d['block']} wave {d['wave']} "
                       f"args {d['args']}", flush=True)
@@ -316,8 +327,9 @@ def main(argv=None):
             for fut in futures:
                 fut.cancel()  # kernels not started yet; the running ones finish their current child process
             raise
-    if only and not (only <= set(kernels)):
-        raise SystemExit(f"not declared in clean/dx12/kernels: {sorted(only - set(kernels))}")
+    names = {n for n, _ in kernels}
+    if only and not (only <= names):
+        raise SystemExit(f"not declared in clean/dx12/kernels: {sorted(only - names)}")
     vgpr_check(built)
     with open(man_path, "w") as f:
         json.dump({"format": FORMAT, "dxc": os.path.basename(os.path.dirname(os.path.dirname(DXC_DIR))),

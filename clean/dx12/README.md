@@ -109,7 +109,10 @@ WG_KERNEL(exposure_auto_diet) { WG_SETUP(); ... }   // entry name = HIP kernel n
 * `co` (required) = file name of the HIP code object whose build of the kernel the port reproduces. The device uses
   the port only while the runtime has exactly that code object loaded (untagged, or under the name's tag); any other
   build variant of the same kernel name (`post_w64.co` / `post_w64__q5.co` under `w64`, a `swin.co` variant,
-  `dec1_dec0__pack12__div*.co` under `d1p12`, ...) runs on HIP, logged once.
+  `dec1_dec0__pack12__div*.co` under `d1p12`, ...) runs on HIP, logged once. One name may have ports of several
+  builds (one manifest entry per name and `co`, for example `w64/post_tf_f32_p12_diet_vsit` of `post_w64__orig.co`
+  and of `post_w64.co`): the device runs the port whose code object is loaded. Every port of a name but the first
+  sets `file=<stem>`, its DXIL file name (`<stem>.dxil`).
 * `args` = the HIP kernel's arguments in order: `p` pointer (DWORD: arena byte offset), `u` any 32-bit scalar,
   `b<N>` struct by value (N bytes = N/4 DWORDs, copied verbatim). At most 57 DWORDs. The `WG_ARGS_BEGIN` block must
   declare exactly these DWORDs in order, **32-bit scalars only** (no vectors / arrays / structs: cbuffer packing).

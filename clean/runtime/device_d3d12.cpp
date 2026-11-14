@@ -604,10 +604,19 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     tagged_cos_[tag] = co; return true;
   }
   void unordered_next() override { unordered_next_ = true; }
+  // The port of `name` that the loaded code objects select. One name can have ports of several builds of its HIP kernel
+  // (manifest entries with the same name and different "co", for example post_w64.co and post_w64__orig.co); without
+  // a selected one, the first port (variant_loaded then names what it requires).
+  NativeKernel* find_port(const std::string& name) {
+    auto range = kernels_.equal_range(name);
+    for (auto i = range.first; i != range.second; ++i)
+      if (variant_matches(i->second)) return &i->second;
+    return range.first == range.second ? nullptr : &range.first->second;
+  }
   bool launch(const std::string& name, unsigned grid, unsigned block, void** args) override {
-    auto i = kernels_.find(name);
-    if (i == kernels_.end()) return fail("native D3D12 unsupported kernel: " + name + "; no HIP fallback");
-    NativeKernel& k = i->second;
+    NativeKernel* port = find_port(name);
+    if (!port) return fail("native D3D12 unsupported kernel: " + name + "; no HIP fallback");
+    NativeKernel& k = *port;
     // Legacy tex ports have a different ABI and remain unsupported. A direct port needs this frame's typed
     // descriptors before variant/argument inspection, including for a caller with no argument array.
     const bool direct = k.rs == "direct";
@@ -1278,7 +1287,10 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
       }
       if (words != k.dwords) return fail("native D3D12 manifest: argument DWORD count mismatch for " + k.name);
       k.file = directory + filename; const std::string key = k.name;
-      if (!kernels_.emplace(key, std::move(k)).second) return fail("native D3D12 manifest: duplicate kernel " + key);
+      auto same = kernels_.equal_range(key);   // one port per (name, code object)
+      for (auto i = same.first; i != same.second; ++i)
+        if (i->second.co == k.co) return fail("native D3D12 manifest: duplicate kernel " + key + " (" + k.co + ")");
+      kernels_.emplace(key, std::move(k));
     }
     return true;
   }
@@ -1659,7 +1671,7 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
   std::map<uint64_t, uint64_t> free_;
   std::map<uint64_t, NativeAllocation> used_;
   std::map<uintptr_t, Host> hosts_;
-  std::map<std::string, NativeKernel> kernels_;
+  std::multimap<std::string, NativeKernel> kernels_;   // by name; several ports of one name differ in "co"
   std::set<std::string> untagged_cos_;
   std::map<std::string, std::string> tagged_cos_;
   std::vector<NativeEvent> events_;
