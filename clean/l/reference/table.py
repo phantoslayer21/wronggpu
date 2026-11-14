@@ -80,7 +80,9 @@ TABLE = {
     # The reconstruction (clean/l/reference/recon.py): Model M's (spec 06) with a "window" x "window" colour gather,
     # history candidates combined in linear colour ("history_combine"), and the plain linear colour as the fallback
     # of an invalid or reset sample ("fallback"); "gather": "half" = the colour gather in the model's precision
-    # (recon.gather_half). Model M: window 3, "encoded", "encoded_colour", "float64". The output stage
+    # (recon.gather_half); "blend": "float32" = steps 4 to 6 (history candidates, combination, blend) in float32
+    # with the fused forms, one rounding per operation, as the spec side's order states (recon.reconstruct). Model M:
+    # window 3, "encoded", "encoded_colour", "float64", "float64". The output stage
     # (D -> output filter) is Model M's unchanged. "post_variant" names Model L's kernel set (one function, both
     # tilings).
     "post_variant": "unfolded",
@@ -89,7 +91,7 @@ TABLE = {
     # ratio (single-precision division and comparison), else "3/2" (recon_variant). The ratio is D / render, not
     # output / render: 3.0 here is about output >= 2 x render.
     "recon": {"rule": "d_over_render_at_least", "ratio": 3.0, "variants": ("3/2", "3/1"), "window": 4,
-              "history_combine": "linear", "fallback": "linear_colour", "gather": "half"},
+              "history_combine": "linear", "fallback": "linear_colour", "gather": "half", "blend": "float32"},
     # Window offsets (ox, oy) of an L block for frame parity 0 and 1, in pixels; the blocks run on the padded grid F
     # and keep every grid position's output.
     "window_offsets": {"first": ((2, 2), (0, 2)), "second": ((0, 0), (2, 0))},
@@ -103,7 +105,7 @@ PROVISIONAL = {}
 
 # Model M's reconstruction in the same terms (clean/reference/post.py reconstruct): for reductions and tests.
 M_RECON = {"rule": "d_over_render_at_least", "ratio": 3.0, "variants": ("3/2", "3/1"), "window": 3,
-           "history_combine": "encoded", "fallback": "encoded_colour", "gather": "float64"}
+           "history_combine": "encoded", "fallback": "encoded_colour", "gather": "float64", "blend": "float64"}
 
 
 def recon_size(output_w, output_h):
