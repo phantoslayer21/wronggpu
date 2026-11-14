@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
-"""Model L (issue #89): the D3D12 ports of the l_ops.co kernels against their HIP kernels on the same synthetic inputs,
-byte for byte (clean/l/kernels/l_ops.hip; ports clean/dx12/kernels/l_ops_*.hlsl).
+"""Model L (issue #89): the D3D12 ports of the l_ops.co kernels, the halo input encoder and the reconstruction kernel
+against their HIP kernels on the same synthetic inputs, byte for byte (clean/l/kernels/l_ops.hip, l_post.hip; ports
+clean/dx12/kernels/l_ops_*.hlsl, l_post.hlsl).
 
     python clean/l/runner/l_d3d12_ops_check.py --build <dir> --rocm "C:\\Program Files\\AMD\\ROCm\\7.2" --prepare
     python clean/l/runner/l_d3d12_ops_check.py --build <dir> --rocm "C:\\Program Files\\AMD\\ROCm\\7.2" --run
@@ -12,7 +13,9 @@ byte for byte (clean/l/kernels/l_ops.hip; ports clean/dx12/kernels/l_ops_*.hlsl)
 D3D12 device in a child process, then compares every output buffer. The rules (as clean/l/runner/l_d3d12_check.py):
 - the RAW downloaded bytes of both back ends are compared (nothing is decoded and encoded again);
 - each output buffer starts filled with its back end's own non-zero sentinel (HIP 0xA5, D3D12 0x5A), so a byte that
-  either path, or both, leaves unwritten differs;
+  either path, or both, leaves unwritten differs; where a case marks bytes that no back end may write (the
+  reconstruction's display pitch padding and the slack after its buffers), each back end must have kept its own
+  sentinel there;
 - a negative control (one case again on D3D12 with half its workgroups) must be caught;
 - Model M's swin_block_c96_nc (swin.co, its port already proven) runs through the same engine as a control
   (--no-control skips it).
@@ -197,9 +200,81 @@ def dec1_ex_cases(kernel, rng):
     return cases
 
 
+# (rw, rh, dw, dh, reset, kind, expo) of the reconstruction: clean/l/runner/l_post_check.py's cases (Model M's ratios,
+# odd sizes, reset, extreme kernel shapes, the zero-weight known answer "offset_0.1" (spec part 3 Q1: total weight 0
+# everywhere) and the FP16 underflow known answer "offset_0.05" (Q3: total weight > 0, every FP16 weight 0)), plus
+# R = D (footprint over the LDS cap: the unstaged path), ratio 1.5, the exposures read from the expo pointer, and
+# non-finite / out-of-range inputs ("specials": NaN and infinite colours and history texels, motions far outside D).
+POST_CASES = [(24, 16, 54, 36, False, "random", False), (31, 17, 70, 38, False, "random", False),
+              (20, 12, 60, 36, False, "random", False), (33, 19, 99, 57, True, "random", False),
+              (17, 11, 38, 25, False, "extreme_c", False), (16, 12, 16, 12, False, "offset_0.1", False),
+              (16, 12, 16, 12, True, "offset_0.05", False), (40, 24, 40, 24, False, "random", False),
+              (42, 26, 63, 39, False, "random", True), (26, 18, 52, 36, False, "specials", False)]
+POST_SLACK = 64   # sentinel bytes after each output: neither back end may write them
+
+
+def _post_specials(rng, x):
+    c = np.array(x["color"], np.float32)
+    pick = rng.random(c.shape[:2])
+    c[pick < 0.04] = np.nan
+    c[(pick >= 0.04) & (pick < 0.08)] = np.inf
+    c[(pick >= 0.08) & (pick < 0.12)] = 60000.0
+    x["color"] = c
+    h = np.array(x["history"], np.float32)
+    pick = rng.random(h.shape[:2])
+    h[pick < 0.03] = np.nan
+    h[(pick >= 0.03) & (pick < 0.06)] = np.inf
+    h[(pick >= 0.06) & (pick < 0.09)] = -1.0
+    x["history"] = h.astype(np.float16)
+    for k in ("m_near", "m_far"):
+        m = np.array(x[k], np.float32)
+        far = rng.random(m.shape[:2]) < 0.2
+        m[far] = rng.choice([-1, 1], (int(far.sum()), 2)) * 200.0
+        x[k] = m.astype(np.float16)
+    return x
+
+
+def post_cases(kernel, rng):
+    """l_post_recon (l_post.co): color, A, B, C, hist_prev, m_near, m_center, m_far, w (post blob, w[0] = s) ->
+    full history [dh][dw] (RGBA16F), reduced codes [dh / 2][dw / 2], display (3 FP16 planes of pitch
+    display_pitch(dw)); WgPostParams (64 bytes) by value; expo (null, or the two exposures). Bytes no back end writes
+    (the display rows' pitch padding, the slack after each buffer) must keep each back end's own sentinel."""
+    from clean.l.runner import l_post_check as LPC
+    from clean.runner import post as RP
+    cases = []
+    for (rw, rh, dw, dh, reset, kind, expo) in POST_CASES:
+        x = LPC.make_case(rng, rw, rh, dw, dh, reset, "random" if kind == "specials" else kind)
+        if kind == "specials":
+            x = _post_specials(rng, x)
+        prm = RP.post_params(x)
+        data = RP.post_device_inputs(x)
+        if expo:   # the exposures come from the pointer; the by-value fields hold other values
+            ev = np.array([prm.e, 0.0 if rng.random() < 0.5 else prm.e_prev], np.float32)
+            prm.e, prm.e_prev = float(rng.uniform(0.5, 2.0)), float(rng.uniform(0.5, 2.0))
+        n_hist, n_red = dw * dh * 8, max(4, (dw // 2) * (dh // 2) * 4)
+        n_disp = RP.display_bytes(dw, dh)
+        pitch = RP.display_pitch(dw)
+        disp_def = np.zeros((3, dh, pitch, 2), bool)
+        disp_def[:, :, :dw, :] = True
+        red_def = np.zeros(n_red, bool)
+        red_def[:(dw // 2) * (dh // 2) * 4] = True
+        defined = [np.concatenate([np.ones(n_hist, bool), np.zeros(POST_SLACK, bool)]),
+                   np.concatenate([red_def, np.zeros(POST_SLACK, bool)]),
+                   np.concatenate([disp_def.reshape(-1), np.zeros(POST_SLACK, bool)])]
+        args = [("buf", data[k]) for k in ("color", "A", "B", "C", "hist_prev", "m_near", "m_center", "m_far")]
+        args += [("buf", RP.pack({"s": np.array(LPC.S)})), ("out", n_hist + POST_SLACK), ("out", n_red + POST_SLACK),
+                 ("out", n_disp + POST_SLACK), ("bytes", bytes(prm))]
+        args += [("buf", ev.tobytes())] if expo else [("null",)]
+        assert len(bytes(prm)) == 64
+        cases.append({"kernel": kernel, "co": "l_post.co", "grid": RP.recon_grid(dw, dh), "block": 256, "args": args,
+                      "defined": defined, "label": f"{rw}x{rh}->{dw}x{dh} {kind}" + (" expo" if expo else "")
+                      + (" reset" if reset else "")})
+    return cases
+
+
 KINDS = {"l_linear_32_32_relu": linear_cases, "l_linear_32_32_f16": linear_cases,
          "l_project_gather": project_cases, "l_dec_project": project_cases, "l_coef": coef_cases,
-         "l_coef_pack12": coef_cases, "lev/input_encoder": enc_cases,
+         "l_coef_pack12": coef_cases, "lev/input_encoder": enc_cases, "l_post_recon": post_cases,
          "swin_block_c64_add_ex_nc": dec1_ex_cases}
 CONTROL_KINDS = {"swin_block_c96_nc": control_cases}
 CO = "l_ops.co"
@@ -281,7 +356,8 @@ def run(build, rocm, seeds, kernels):
             rng = np.random.default_rng(seed)
             for ci, case in enumerate(kinds[kernel](kernel, rng)):
                 name = f"{kernel.replace('/', '_')}_s{si}_{ci}"   # lev/input_encoder: no folder in the file name
-                hip_out[name] = (kernel, hip_run(g, module(case.get("co", CO)), case))
+                hip_out[name] = (kernel, hip_run(g, module(case.get("co", CO)), case), case.get("defined"),
+                                 case.get("label"))
                 for oi, data in enumerate(hip_out[name][1]):   # kept next to the D3D12 outputs, for a look at a difference
                     with open(os.path.join(cdir, f"{name}.hip.o{oi}"), "wb") as fh:
                         fh.write(data)
@@ -301,28 +377,43 @@ def run(build, rocm, seeds, kernels):
     def read(path):
         return open(path, "rb").read() if os.path.exists(path) else b""
 
-    for name, (kernel, wants) in hip_out.items():
+    def compare(got, want, dmask):
+        """Raw bytes of one output: identical where a back end writes (dmask; None = every byte); where neither may
+        write, each keeps its own sentinel."""
+        a, b = np.frombuffer(got, np.uint8), np.frombuffer(want, np.uint8)
+        o = {"bytes": len(want), "hip_sentinel_bytes": int(np.sum(b == HIP_SENTINEL)),
+             "d3d12_sentinel_bytes": int(np.sum(a == D3D12_SENTINEL)) if a.size else -1}
+        if a.size != b.size:
+            return dict(o, identical=False, differ=-1)
+        m = np.ones(b.size, bool) if dmask is None else dmask
+        o["defined_bytes"] = int(m.sum())
+        o["differ"] = int(np.sum((a != b) & m))
+        o["unwritten_bad"] = int(np.sum(~m & ((b != HIP_SENTINEL) | (a != D3D12_SENTINEL))))
+        o["identical"] = o["differ"] == 0 and o["unwritten_bad"] == 0
+        return o
+
+    for name, (kernel, wants, defined, label) in hip_out.items():
         c = {"case": name, "kernel": kernel, "outputs": []}
+        if label:
+            c["label"] = label
         for oi, want in enumerate(wants):
             got = read(os.path.join(cdir, f"{name}.o{oi}"))
-            a, b = np.frombuffer(got, np.uint8), np.frombuffer(want, np.uint8)
-            c["outputs"].append({"bytes": len(want), "identical": got == want,
-                                 "differ": int(np.sum(a != b)) if a.size == b.size else -1,
-                                 "hip_sentinel_bytes": int(np.sum(b == HIP_SENTINEL)),
-                                 "d3d12_sentinel_bytes": int(np.sum(a == D3D12_SENTINEL)) if a.size else -1})
+            c["outputs"].append(compare(got, want, defined[oi] if defined else None))
         c["identical"] = all(o["identical"] for o in c["outputs"])
         res["cases"].append(c)
     caught = None
     if neg:
-        wants = hip_out[neg][1]
-        gots = [read(os.path.join(cdir, f"negative_{neg}.o{oi}")) for oi in range(len(wants))]
-        caught = all(len(gt) == len(w) for gt, w in zip(gots, wants)) and any(gt != w for gt, w in zip(gots, wants))
+        wants, defined = hip_out[neg][1], hip_out[neg][2]
+        outs = [compare(read(os.path.join(cdir, f"negative_{neg}.o{oi}")), w, defined[oi] if defined else None)
+                for oi, w in enumerate(wants)]
+        caught = all(o["differ"] >= 0 for o in outs) and any(not o["identical"] for o in outs)
         res["negative_control"] = {"case": neg, "half_grid": True, "caught": caught,
-                                   "differ": sum(int(np.sum(np.frombuffer(gt, np.uint8) != np.frombuffer(w, np.uint8)))
-                                                 for gt, w in zip(gots, wants) if len(gt) == len(w))}
+                                   "differ": sum(max(o["differ"], 0) for o in outs)}
     res["per_kernel"] = {k: {"cases": sum(c["kernel"] == k for c in res["cases"]),
                              "identical": sum(c["identical"] for c in res["cases"] if c["kernel"] == k),
-                             "bytes": sum(o["bytes"] for c in res["cases"] if c["kernel"] == k for o in c["outputs"])}
+                             "bytes": sum(o["bytes"] for c in res["cases"] if c["kernel"] == k for o in c["outputs"]),
+                             "differ": sum(max(o["differ"], 0) for c in res["cases"] if c["kernel"] == k
+                                           for o in c["outputs"])}
                          for k in kernels}
     res["pass"] = r.returncode == 0 and caught is True and all(v["cases"] > 0 and v["identical"] == v["cases"]
                                                                for v in res["per_kernel"].values())

@@ -19,6 +19,8 @@ mean absolute error at most 0.1 % of the reference RMS; reduced codes at most 1 
 Model M's thresholds (float32 kernel against a float64 oracle); they are to be tightened when a kernel-order model of
 the reconstruction exists. The oracle's colour gather runs in the model's precision (confirmed by the spec side), so
 the kernel and the oracle agree on which weights underflow: no pixel is excluded.
+Special colours (the encoder's random_inputs special values: NaN, 1e3 ... 1e6, small negatives, +inf): the same
+criteria; the ill-conditioned pixels (a large fallback colour cancelled in the blend) are also reported apart.
 Known answers (C = (65504, 65504, 0), D = R, every target offset from a texel centre by the jitter): offset 0.1, total
 weight 0 everywhere: history -1.4404296875, display 0, reduced code 0; offset 0.05, total weight > 0 but every FP16
 weight 0: the output is the candidate history (here the reset fallback: the linear colour times e).
@@ -46,12 +48,30 @@ SLACK = 64
 # (rw, rh, dw, dh, reset, kind)
 CASES = [(24, 16, 54, 36, False, "random"), (31, 17, 70, 38, False, "random"), (20, 12, 60, 36, False, "random"),
          (33, 19, 99, 57, True, "random"), (17, 11, 38, 25, False, "extreme_c"),
-         (16, 12, 16, 12, False, "offset_0.1"), (16, 12, 16, 12, True, "offset_0.05")]
+         (16, 12, 16, 12, False, "offset_0.1"), (16, 12, 16, 12, True, "offset_0.05"),
+         (24, 16, 54, 36, False, "special"), (31, 17, 70, 38, True, "special"), (33, 19, 99, 57, False, "special")]
+
+
+def special_colours(rng, color):
+    """The special colours of clean/reference/encoder.py random_inputs (special=True): NaN, 1e3 ... 1e6, small
+    negatives, +inf in red, each on 1/200 of the pixels."""
+    col = np.asarray(color, np.float32).copy()
+    n = col.shape[0] * col.shape[1]
+    flat = col.reshape(-1, 3)
+    idx = rng.choice(n, size=max(4, n // 50), replace=False)
+    flat[idx[0::4]] = np.nan
+    flat[idx[1::4]] = rng.uniform(1e3, 1e6, size=(len(idx[1::4]), 3))
+    flat[idx[2::4]] = -rng.uniform(0.0, 0.05, size=(len(idx[2::4]), 3))
+    flat[idx[3::4], 0] = np.inf
+    return col
 
 
 def make_case(rng, rw, rh, dw, dh, reset, kind):
     x = MP.random_inputs(rng, rw, rh, dw, dh, reset=reset)
     x["exposure"], x["exposure_prev"] = np.float32(rng.uniform(0.5, 2.0)), np.float32(rng.uniform(0.5, 2.0))
+    if kind == "special":
+        x["color"] = special_colours(rng, x["color"])
+        return x
     if kind != "random":
         x["C"] = np.broadcast_to(np.array([65504.0, 65504.0, 0.0], np.float32), np.shape(x["C"])).copy()
     if kind.startswith("offset_"):
@@ -131,6 +151,19 @@ def check_case(hip, mod, x, kind, s=S):
     ok = m["pass"] and got["alpha_zero"] and got["reduced_top_zero"] and got["slack_untouched"]
     W = ref["_lin"]["W"]
     m["weight_zero_pixels"] = int((W == 0).sum())
+    if kind == "special":
+        # Ill-conditioned pixels: H^ = Hl + (C - Hl) beta' cancels a large Hl (a large fallback colour), amplifying
+        # every rounding of Hl by |Hl| |1 - beta'| / |H^| (here >= 2^8). Reported apart; the criteria above cover all.
+        lin = ref["_lin"]
+        with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
+            amp = (np.abs(lin["H_lin"]) * np.abs(1.0 - lin["beta_h"][..., None])
+                   / np.maximum(np.abs(lin["H_hat"]), 1e-30)).max(-1)
+        ill = np.nan_to_num(amp, nan=0.0) >= 256.0
+        st = C32.f16_steps(np.where(np.isfinite(got["history"]), got["history"], 0), ref["history"])
+        m["ill_conditioned"] = {"pixels": int(ill.sum()), "max_steps": int(st[ill].max(initial=0)),
+                                "over_1": int((st[ill] > 1).sum())}
+        m["well_conditioned"] = {"max_steps": int(st[~ill].max(initial=0)), "over_1": int((st[~ill] > 1).sum()),
+                                 "values": int(st[~ill].size)}
     if kind == "offset_0.1":
         known = ((got["history"] == np.float32(-1.4404296875)).all() and (got["display"] == 0).all()
                  and (got["reduced_codes"] == 0).all() and m["weight_zero_pixels"] == W.size)
