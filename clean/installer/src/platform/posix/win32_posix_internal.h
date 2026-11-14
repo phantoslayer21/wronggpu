@@ -63,7 +63,8 @@ void FillFind(WIN32_FIND_DATAW& d, const struct stat& lst, const std::string& pa
 // sharing: does a delete, move or replace of the file with this identity clash with another open handle?
 bool ShareAllowsDelete(const struct stat& st);
 // a child process, reaped once however many handles name it
-struct ChildState { bool exited = false; int code = 0; int forcedCode = -1; int refs = 0; /* open process handles */ bool suspended = false; };
+struct ChildState { bool exited = false; int code = 0; int forcedCode = -1; int refs = 0; /* open process handles */ bool suspended = false;
+                  std::string image; /* the program a suspended start will exec, until it has */ };
 bool PollChild(int pid, ChildState& out);
 void KillChild(int pid, int code);
 

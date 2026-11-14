@@ -10,6 +10,7 @@
 #include <windows.h>
 
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -298,6 +299,112 @@ void Suspended() {
     CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
 }
 
+// ---- a process started suspended: failures at the call, no inherited files, its own image, no signal handlers --------------
+std::string PosixTmp() {
+    std::string dir(Tmp.begin() + 2, Tmp.end());
+    for (auto& c : dir) if (c == '\\') c = '/';
+    return dir;
+}
+std::string ExeOf(int pid) {
+    char link[4096];
+    const ssize_t n = readlink(("/proc/" + std::to_string(pid) + "/exe").c_str(), link, sizeof(link) - 1);
+    return n < 0 ? std::string() : std::string(link, (size_t)n);
+}
+// a copy of sleep with a name of its own, so that it is not the test's own image; the path as the kernel spells it
+std::string CopyOfSleep(const char* name) {
+    const std::string path = PosixTmp() + "/" + name;
+    std::error_code ec;
+    std::filesystem::copy_file("/bin/sleep", path, std::filesystem::copy_options::overwrite_existing, ec);
+    chmod(path.c_str(), 0755);
+    return std::filesystem::canonical(path, ec).string();
+}
+void EndProcess(PROCESS_INFORMATION& pi) {
+    TerminateProcess(pi.hProcess, 1);
+    WaitForSingleObject(pi.hProcess, 5000);
+    CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+}
+std::vector<wchar_t> Cmd(const std::wstring& s) { std::vector<wchar_t> v(s.begin(), s.end()); v.push_back(0); return v; }
+
+extern "C" void HangingHandler(int) { for (;;) pause(); }   // stands for a handler that waits for a lock another thread holds
+
+void SuspendedStart() {
+    STARTUPINFOW si{}; si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+
+    // early failures come back from the call, as they do without CREATE_SUSPENDED
+    auto bare = Cmd(L"no-such-program-in-any-path-folder 1");
+    check(!CreateProcessW(nullptr, bare.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED, nullptr, nullptr, &si, &pi) && GetLastError() == ERROR_FILE_NOT_FOUND,
+          "suspended: a program that is not in PATH: file not found");
+    check(!CreateProcessW(nullptr, bare.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi) && GetLastError() == ERROR_FILE_NOT_FOUND,
+          "not suspended: the same");
+    const std::string notElf = PosixTmp() + "/not-an-elf-file";
+    Put(In(L"not-an-elf-file"), "just some text, no program\n");
+    chmod(notElf.c_str(), 0755);
+    auto ne = Cmd(In(L"not-an-elf-file"));
+    check(!CreateProcessW(nullptr, ne.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi) && GetLastError() == ERROR_BAD_EXE_FORMAT,
+          "not suspended: a file that is no program: bad exe format");
+    check(!CreateProcessW(nullptr, ne.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED, nullptr, nullptr, &si, &pi) && GetLastError() == ERROR_BAD_EXE_FORMAT,
+          "suspended: the same");
+    const std::string plain = PosixTmp() + "/not-executable";
+    Put(In(L"not-executable"), "\x7f" "ELF");
+    chmod(plain.c_str(), 0644);
+    auto nx = Cmd(In(L"not-executable"));
+    check(!CreateProcessW(nullptr, nx.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi) && GetLastError() == ERROR_ACCESS_DENIED,
+          "not suspended: a file without the execute bit: access denied");
+    check(!CreateProcessW(nullptr, nx.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED, nullptr, nullptr, &si, &pi) && GetLastError() == ERROR_ACCESS_DENIED,
+          "suspended: the same");
+
+    // the stopped child holds none of the parent's close-on-exec files
+    int fds[2];
+    check(pipe2(fds, O_CLOEXEC) == 0, "a close-on-exec pipe");
+    auto sl = Cmd(L"sleep 30");
+    check(CreateProcessW(nullptr, sl.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED, nullptr, nullptr, &si, &pi), "start sleep suspended, a pipe open");
+    close(fds[1]);
+    struct pollfd pf = {fds[0], POLLIN, 0};
+    const int ready = poll(&pf, 1, 1000);
+    check(StateOf((int)pi.dwProcessId) == 'T', "the child is still stopped");
+    check(ready == 1 && (pf.revents & POLLHUP), "the reader sees the writer gone while the child is stopped (the child did not keep the write end)");
+    close(fds[0]);
+    EndProcess(pi);
+
+    // while stopped, the program is the target, not the parent
+    const std::string real = CopyOfSleep("suspended-target-with-a-long-name.exe");
+    auto tc = Cmd(L"\"" + In(L"suspended-target-with-a-long-name.exe") + L"\" 30");
+    check(CreateProcessW(nullptr, tc.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED, nullptr, nullptr, &si, &pi), "start a copy of sleep suspended");
+    wchar_t path[MAX_PATH * 2]; DWORD n = (DWORD)(sizeof(path) / sizeof(path[0]));
+    const bool got = QueryFullProcessImageNameW(pi.hProcess, 0, path, &n);
+    check(got && std::wstring(path) == WinOf(real), "stopped: the image path is the target's Z:\\ path");
+    std::wstring seen = L"<none>";
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    PROCESSENTRY32W pe{}; pe.dwSize = sizeof(pe);
+    for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) if (pe.th32ProcessID == pi.dwProcessId) seen = pe.szExeFile;
+    CloseHandle(snap);
+    check(seen == L"suspended-target-with-a-long-name.exe", "stopped: the snapshot name is the target's name");
+    ResumeThread(pi.hThread);
+    for (int i = 0; i < 300 && ExeOf((int)pi.dwProcessId) != real; ++i) Sleep(10);
+    n = (DWORD)(sizeof(path) / sizeof(path[0]));
+    check(ExeOf((int)pi.dwProcessId) == real && QueryFullProcessImageNameW(pi.hProcess, 0, path, &n) && std::wstring(path) == WinOf(real), "resumed: the same answer");
+    EndProcess(pi);
+
+    // a signal that a handler of the parent would catch does not run that handler in the stopped child
+    struct sigaction sa{}, old{};
+    sa.sa_handler = HangingHandler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGUSR1, &sa, &old);
+    check(CreateProcessW(nullptr, tc.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED, nullptr, nullptr, &si, &pi), "start it again with a handler installed");
+    kill((int)pi.dwProcessId, SIGUSR1);
+    ResumeThread(pi.hThread);
+    bool ended = false, execd = false;
+    for (int i = 0; i < 300 && !ended && !execd; ++i) {
+        ended = WaitForSingleObject(pi.hProcess, 0) == WAIT_OBJECT_0;
+        execd = ExeOf((int)pi.dwProcessId) == real;
+        if (!ended && !execd) Sleep(10);
+    }
+    check(ended || execd, "SIGUSR1 while stopped: the child ends or runs the target, it does not stay in the parent's image");
+    sigaction(SIGUSR1, &old, nullptr);
+    EndProcess(pi);
+}
+
 void CaseFolding() {
     check(Put(In(L"\u00C9.txt"), "e"), "create \xC3\x89.txt");
     check(GetFileAttributesW(In(L"\u00E9.txt").c_str()) != INVALID_FILE_ATTRIBUTES, "GetFileAttributesW finds it spelled with the lower-case letter");
@@ -411,6 +518,7 @@ int main() {
     Processes();
     ProcessImage();
     Suspended();
+    SuspendedStart();
     CaseFolding();
     RegistryWrites();
     FinishedChildren();

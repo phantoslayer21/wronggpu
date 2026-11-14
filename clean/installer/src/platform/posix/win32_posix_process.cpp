@@ -2,8 +2,9 @@
 // Linux: Windows process, pipe, job object, token and ShellExecute calls on POSIX (see win32_posix.h).
 //
 // A process is a child spawned with posix_spawn, reaped once however many handles name it, and forgotten once it is reaped and
-// no handle names it. CREATE_SUSPENDED forks instead: the child stops itself (SIGSTOP) before it execs, and ResumeThread sends
-// SIGCONT; a program that then fails to exec exits with 127, since CreateProcessW has returned by then. A job object here is a
+// no handle names it. CREATE_SUSPENDED forks instead: the program is found and checked first, so a missing or bad one fails the
+// call as it does without the flag; the child then drops the parent's signal handlers and close-on-exec files, stops itself
+// (SIGSTOP) before it execs, and ResumeThread sends SIGCONT. Until it has exec'd, its image is the one recorded for it. A job object here is a
 // list of process ids, killed one by one, so a child of a child is not in it. No window or priority class exists; those flags
 // are ignored.
 #include <dirent.h>
@@ -12,11 +13,15 @@
 #include <signal.h>
 #include <sys/ioctl.h>
 #include <spawn.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 
 #include <algorithm>
 #include <cerrno>
+#include <climits>
 #include <map>
+#include <pthread.h>
 
 #include "win32_posix_internal.h"
 
@@ -64,11 +69,12 @@ static void SweepChildren() {   // children nobody waits for are reaped here, on
         it = it->second.exited && it->second.refs == 0 ? g_children.erase(it) : std::next(it);
     }
 }
-static void AddChild(int pid, int handles, bool suspended) {
+static void AddChild(int pid, int handles, bool suspended, const std::string& image = std::string()) {
     std::lock_guard<std::mutex> g(g_childLock);
     ChildState c;
     c.refs = handles;
     c.suspended = suspended;
+    c.image = image;
     g_children[pid] = c;
 }
 
@@ -138,6 +144,98 @@ static std::vector<std::wstring> SplitCommandLine(const wchar_t* c) {
     return out;
 }
 
+// ---- the part of a suspended start that happens before fork --------------------------------------------------------------
+// Does the file start like a program the kernel runs: an ELF image or a #! script. Anything else is what execve calls ENOEXEC.
+static bool LooksRunnable(const std::string& path) {
+    const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return true;   // unreadable but executable (a setuid program): leave it to exec
+    char b[4];
+    const ssize_t n = read(fd, b, sizeof(b));
+    close(fd);
+    return n >= 2 && ((n == 4 && std::memcmp(b, "\x7f" "ELF", 4) == 0) || (b[0] == '#' && b[1] == '!'));
+}
+// One candidate for the program: 0 when it can be run, else the errno execve would give for it. `seen` is where the file is as
+// the child will see it (after chdir to `cwd`).
+static int CheckCandidate(const std::string& cand, const std::string& cwd, std::string& seen) {
+    seen = cand[0] == '/' || cwd.empty() ? cand : cwd + "/" + cand;
+    struct stat st;
+    if (stat(seen.c_str(), &st) != 0) return errno;
+    if (!S_ISREG(st.st_mode) || access(seen.c_str(), X_OK) != 0) return EACCES;
+    return LooksRunnable(seen) ? 0 : ENOEXEC;
+}
+// Finds the program the way posix_spawn(p) does and reports the error it would: `exec` is the name to hand to execve, `image` the
+// file's real path. Returns 0, or a Windows error code.
+static DWORD ResolveProgram(const std::string& exe, bool search, const std::string& cwd, std::string& exec, std::string& image) {
+    std::string seen;
+    int failure = 0;
+    std::vector<std::string> candidates;
+    if (!search) {
+        candidates.push_back(exe);
+    } else {
+        const char* pathEnv = std::getenv("PATH");
+        std::string path = pathEnv ? pathEnv : "/usr/local/bin:/usr/bin:/bin";
+        for (size_t from = 0;;) {
+            const size_t colon = path.find(':', from);
+            std::string dir = path.substr(from, colon == std::string::npos ? std::string::npos : colon - from);
+            candidates.push_back((dir.empty() ? std::string(".") : dir) + "/" + exe);
+            if (colon == std::string::npos) break;
+            from = colon + 1;
+        }
+    }
+    for (const std::string& cand : candidates) {
+        const int e = CheckCandidate(cand, cwd, seen);
+        if (e == 0) {
+            exec = cand;
+            char real[PATH_MAX];
+            image = realpath(seen.c_str(), real) ? real : seen;
+            return 0;
+        }
+        if (!search) return ErrorFromErrno(e, cand);
+        if (e != ENOENT && e != ENOTDIR && !failure) failure = e;
+    }
+    return failure ? ErrorFromErrno(failure, exe) : ERROR_FILE_NOT_FOUND;
+}
+
+// Between fork and exec in the child: only calls that are safe there. Every signal is blocked by now (the parent blocked them
+// before it forked), so no handler of the parent's can run; the handlers go, and so does every close-on-exec file the child
+// would hold until it execs.
+static void ResetSignals() {
+    for (int sig = 1; sig < NSIG; ++sig) {
+        struct sigaction sa;
+        if (sigaction(sig, nullptr, &sa) != 0 || sa.sa_handler == SIG_IGN) continue;   // an ignored signal stays ignored through exec
+        struct sigaction dfl;
+        std::memset(&dfl, 0, sizeof(dfl));
+        dfl.sa_handler = SIG_DFL;
+        sigaction(sig, &dfl, nullptr);
+    }
+}
+static void CloseCloexecFiles(int maxFd) {
+    struct Dirent64 { uint64_t ino; int64_t off; unsigned short len; unsigned char type; char name[1]; };
+    const int dirFd = open("/proc/self/fd", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dirFd >= 0) {
+        alignas(8) char buf[2048];
+        long got;
+        while ((got = syscall(SYS_getdents64, dirFd, buf, sizeof(buf))) > 0) {
+            for (long at = 0; at < got;) {
+                const Dirent64* d = reinterpret_cast<const Dirent64*>(buf + at);
+                at += d->len;
+                int fd = 0;
+                const char* c = d->name;
+                for (; *c >= '0' && *c <= '9'; ++c) fd = fd * 10 + (*c - '0');
+                if (*c || c == d->name || fd < 3 || fd == dirFd) continue;
+                const int fl = fcntl(fd, F_GETFD);
+                if (fl >= 0 && (fl & FD_CLOEXEC)) close(fd);
+            }
+        }
+        close(dirFd);
+        return;
+    }
+    for (int fd = 3; fd < maxFd; ++fd) {   // no /proc: every number the process may use
+        const int fl = fcntl(fd, F_GETFD);
+        if (fl >= 0 && (fl & FD_CLOEXEC)) close(fd);
+    }
+}
+
 BOOL CreateProcessW(LPCWSTR app, LPWSTR cmdline, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD flags, LPVOID env, LPCWSTR dir,
                     STARTUPINFOW* si, PROCESS_INFORMATION* pi) {
     std::vector<std::wstring> args = SplitCommandLine(cmdline ? cmdline : L"");
@@ -187,22 +285,36 @@ BOOL CreateProcessW(LPCWSTR app, LPWSTR cmdline, LPSECURITY_ATTRIBUTES, LPSECURI
     char** const childEnv = env ? envp.data() : environ;
     SweepChildren();
     pid_t pid = 0;
+    std::string image;   // a suspended start: the program the child will exec
     if (flags & CREATE_SUSPENDED) {
-        // fork, not posix_spawn: the child must stop before it runs a line of the program, and the parent waits to see that
+        // fork, not posix_spawn: the child must stop before it runs a line of the program, and the parent waits to see that.
+        // Everything the child needs is made here, so that it only has to call what is safe between fork and exec.
+        std::string execPath;
+        const DWORD found = ResolveProgram(exe, search, cwd, execPath, image);
+        if (found) return Fail(found);
+        struct rlimit rl;
+        const int maxFd = getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur < (1u << 20) ? (int)rl.rlim_cur : (1 << 20);
+        sigset_t all, before;
+        sigfillset(&all);
+        pthread_sigmask(SIG_SETMASK, &all, &before);   // the child starts with every signal blocked, so no handler runs in it
         pid = fork();
-        if (pid < 0) { SetErrorFromErrno(errno, exe); return FALSE; }
-        if (pid == 0) {   // only calls that are safe between fork and exec
+        const int forkErr = errno;
+        if (pid == 0) {
+            ResetSignals();
             for (int n = 0; n < 3; ++n) {
                 if (stdFd[n] == n) fcntl(n, F_SETFD, 0);
                 else if (stdFd[n] >= 0) dup2(stdFd[n], n);
                 else if (stdFd[n] == -1) { const int f = open("/dev/null", n == 0 ? O_RDONLY : O_WRONLY); if (f >= 0) { dup2(f, n); if (f != n) close(f); } }
             }
+            CloseCloexecFiles(maxFd);
             if (!cwd.empty() && chdir(cwd.c_str()) != 0) _exit(126);
-            kill(getpid(), SIGSTOP);
-            if (search) execvpe(exe.c_str(), argv.data(), childEnv);
-            else execve(exe.c_str(), argv.data(), childEnv);
+            raise(SIGSTOP);
+            sigprocmask(SIG_SETMASK, &before, nullptr);
+            execve(execPath.c_str(), argv.data(), childEnv);
             _exit(127);
         }
+        pthread_sigmask(SIG_SETMASK, &before, nullptr);
+        if (pid < 0) { SetErrorFromErrno(forkErr, exe); return FALSE; }
         int status = 0;
         pid_t w;
         while ((w = waitpid(pid, &status, WUNTRACED)) < 0 && errno == EINTR) {}
@@ -223,7 +335,7 @@ BOOL CreateProcessW(LPCWSTR app, LPWSTR cmdline, LPSECURITY_ATTRIBUTES, LPSECURI
             return FALSE;
         }
     }
-    AddChild(pid, 1, (flags & CREATE_SUSPENDED) != 0);
+    AddChild(pid, 1, (flags & CREATE_SUSPENDED) != 0, image);
     Handle* p = NewHandle(Kind::Process);
     p->pid = pid;
     Handle* t = NewHandle(Kind::Thread);
@@ -410,6 +522,18 @@ static std::string ImageOf(int pid) {
     const ssize_t n = readlink(("/proc/" + std::to_string(pid) + "/exe").c_str(), link, sizeof(link) - 1);
     return n < 0 ? std::string() : std::string(link, (size_t)n);
 }
+// The program of one of our own children that was started suspended and has not exec'd yet: until then /proc shows this process's
+// image, so the one recorded at the start stands in. False for any other process, and once the child runs its own image.
+static bool PendingImage(int pid, std::string& image) {
+    {
+        std::lock_guard<std::mutex> g(g_childLock);
+        auto it = g_children.find(pid);
+        if (it == g_children.end() || it->second.image.empty()) return false;
+        image = it->second.image;
+    }
+    const std::string now = ImageOf(pid);
+    return !now.empty() && now == ImageOf(getpid());
+}
 
 // Processes by name: the Windows name of a Wine process is in its command line; any other process has its own name.
 HANDLE CreateToolhelp32Snapshot(DWORD, DWORD) {
@@ -424,7 +548,8 @@ HANDLE CreateToolhelp32Snapshot(DWORD, DWORD) {
         const std::vector<std::string> cmd = CommandLine((int)pid);
         std::string name;
         std::string prog;
-        if (IsWineLoader(ImageOf((int)pid)) && WineProgram(cmd, prog)) name = BaseOf(prog);
+        if (PendingImage((int)pid, prog)) name = BaseOf(prog);
+        if (name.empty() && IsWineLoader(ImageOf((int)pid)) && WineProgram(cmd, prog)) name = BaseOf(prog);
         if (name.empty() && !cmd.empty()) name = BaseOf(cmd[0]);
         if (name.empty()) {   // a process with no command line (a kernel thread): the kernel's own name
             name = Slurp(base + "/comm");
@@ -470,7 +595,9 @@ BOOL QueryFullProcessImageNameW(HANDLE process, DWORD, LPWSTR out, LPDWORD size)
     if (image.empty()) { SetLastError(ERROR_ACCESS_DENIED); return FALSE; }
     std::wstring w;
     std::string prog;
-    if (IsWineLoader(image)) {
+    if (PendingImage(p->pid, prog)) {
+        w = WinPath(prog);
+    } else if (IsWineLoader(image)) {
         if (!WineProgram(CommandLine(p->pid), prog)) return Fail(ERROR_NOT_FOUND);
         const bool windows = prog.size() >= 2 && ((prog[1] == ':') || prog.compare(0, 2, "\\\\") == 0);
         if (windows) w = FromUtf8(prog);
