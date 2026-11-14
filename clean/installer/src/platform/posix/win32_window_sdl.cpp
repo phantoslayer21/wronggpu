@@ -457,6 +457,16 @@ void TranslateWindow(const SDL_Event& e) {
             SdlSizePx(w, pw, ph);
             w->dpiRect = RECT{o.x, o.y, o.x + pw, o.y + ph};  // handed over by pointer: the window's own, whatever else is queued
             const UINT dpi = DpiOf(w);
+            {
+                // one WM_DPICHANGED per window at a time: a scale change while the last one is still queued (a filtered peek
+                // left it there) updates it, so its DPI and the rect it points to always describe the same, latest scale
+                std::lock_guard<std::mutex> l(g_mu);
+                for (Queued& q : g_q)
+                    if (q.msg.hwnd == Hw(w) && q.msg.message == WM_DPICHANGED) {
+                        q.msg.wParam = MAKEWPARAM((WORD)dpi, (WORD)dpi);
+                        return;
+                    }
+            }
             Enqueue(Hw(w), WM_DPICHANGED, MAKEWPARAM((WORD)dpi, (WORD)dpi), (LPARAM)&w->dpiRect);
             break;
         }

@@ -165,6 +165,27 @@ static void TestDpi() {
 }
 
 // 2. Ctrl down, A down, A up, Ctrl up in one batch: the A key is handled with Ctrl down
+// 1b. a second scale change while the first WM_DPICHANGED is still queued (a filtered peek pumped SDL but left it there)
+// updates that message: one WM_DPICHANGED whose DPI and rect both describe the latest scale
+static void TestDpiQueuedTwice() {
+    HWND c = Top(300, 200);
+    Pump();
+    seen.clear();
+    MSG m{};
+    TestSetPixelDensity(2.f);
+    PushWin(SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED, c);
+    PeekMessageW(&m, nullptr, WM_PAINT, WM_PAINT, PM_NOREMOVE);  // pumps SDL; WM_DPICHANGED is outside the range and stays queued
+    TestSetPixelDensity(3.f);
+    PushWin(SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED, c);
+    PeekMessageW(&m, nullptr, WM_PAINT, WM_PAINT, PM_NOREMOVE);
+    Pump();
+    CHECK_EQ(seen[c].dpiCount, 1);
+    CHECK_EQ(seen[c].dpi, 288);
+    CHECK_EQ(seen[c].dpiRect.right - seen[c].dpiRect.left, 900);  // 300 units at 3x, matching the DPI it came with
+    TestSetPixelDensity(0.f);
+    DestroyWindow(c);
+}
+
 static void TestKeyBatch() {
     HWND w = Top(400, 300);
     HWND e = Edit(w, L"abc", 10, 10, 200, 30);
@@ -297,6 +318,7 @@ int main() {
     wc.cbSize = sizeof wc; wc.lpfnWndProc = TestProc; wc.lpszClassName = L"WgTest";
     RegisterClassExW(&wc);
     TestDpi();
+    TestDpiQueuedTwice();
     TestKeyBatch();
     TestCaret();
     TestCrossThreadPost();
