@@ -101,8 +101,43 @@ def project_cases(kernel, rng):
     return cases
 
 
+# (rw, rh, fw, fh) of the coefficient step: R inside the padded grid F (even). Odd rw / rh (a token's second column or
+# row outside R), F wider than R by whole tokens, and 5 x 3 / 7 x 5 (partly filled waves).
+COEF_FRAMES = [(24, 16, 24, 16), (67, 35, 68, 36), (7, 5, 8, 6), (100, 68, 100, 68), (5, 3, 6, 4), (13, 7, 20, 12)]
+
+
+def _coef_map(rng, n):
+    """FP16 decoder map [n][32]: mostly N(0, 3), with values beyond the clamp (+-20 on the two spread inputs), beyond
+    tanh's saturation (9.01) and inside its polynomial range (|t| < 0.6), so every path of l_coef runs."""
+    v = rng.normal(0, 3.0, (n, 32))
+    pick = rng.random((n, 32))
+    v = np.where(pick < 0.08, rng.uniform(20, 60, (n, 32)) * rng.choice([-1, 1], (n, 32)), v)
+    v = np.where((pick >= 0.08) & (pick < 0.2), rng.uniform(-0.6, 0.6, (n, 32)), v)
+    v = np.where((pick >= 0.2) & (pick < 0.25), rng.uniform(8, 10, (n, 32)) * rng.choice([-1, 1], (n, 32)), v)
+    return v.astype(np.float16).tobytes()
+
+
+def coef_cases(kernel, rng):
+    """l_coef: y2 [fh][fw][32] FP16 -> A, B, latent [rh][rw] (4 bytes each), C [rh][rw] (8 bytes); blob dec0.coef
+    (Model M's dec0 blob with W = 0, b = 0: S, T at byte 320); LDecParams (56 bytes) by value."""
+    from clean.runner import dec0
+    cases = []
+    for (rw, rh, fw, fh) in COEF_FRAMES:
+        npx = rw * rh
+        S, T = float(rng.uniform(0.5, 4.0)), float(rng.uniform(0.3, 3.0))
+        blob = dec0.pack({"W": np.zeros((68, 64), np.float32), "b": np.zeros(68, np.float32), "S": S, "T": T})
+        P = bytes(dec0.DecParams(rw=rw, rh=rh, fw=fw, fh=fh, reset=0, pad0=0, dw=2 * rw, dh=2 * rh, kx=0.5, ky=0.5,
+                                 jx=0.25, jy=-0.25, pjx=0.0, pjy=0.0))
+        assert len(P) == 56
+        ntok = (fh // 2) * (fw // 2)
+        cases.append({"kernel": kernel, "grid": -(-ntok // 128), "block": 256,
+                      "args": [("buf", _coef_map(rng, fw * fh)), ("out", npx * 4), ("out", npx * 4), ("out", npx * 8),
+                               ("out", npx * 4), ("buf", blob), ("bytes", P)]})
+    return cases
+
+
 KINDS = {"l_linear_32_32_relu": linear_cases, "l_linear_32_32_f16": linear_cases,
-         "l_project_gather": project_cases, "l_dec_project": project_cases}
+         "l_project_gather": project_cases, "l_dec_project": project_cases, "l_coef": coef_cases}
 CONTROL_KINDS = {"swin_block_c96_nc": control_cases}
 CO = "l_ops.co"
 
