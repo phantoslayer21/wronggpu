@@ -71,6 +71,7 @@ struct Signature {
 };
 const Signature kSignatures[] = {
     {"input_encoder", "ppppppppppppE"},     // Model M's encoder and Model L's values (q in place of the features)
+    {"input_encoder_q20", "ppppppppppppE"},  // Model L's values, q in its 20-byte form (native D3D12, fusion le)
     {"coef_decoder", "ppppppppD"},          // Model M's decoder (also its pack12 form)
     {"swin_block_*", "ppppiiii"},           // Model M's blocks: x, skip, out, w, H, W, ox, oy
     {"l_swin_block_c32_dec_coef12_nc", "ppppiiiippppii"},  // the decoder block with l_coef_pack12 folded in: then

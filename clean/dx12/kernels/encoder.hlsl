@@ -38,9 +38,21 @@
 // form). Not with motion at output resolution.
 // @wg-kernel lev/input_encoder co=l_enc_values.co entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 defines=WG_ENC_VALUES_OUT=1
 // @wg-kernel lev/input_encoder_direct co=l_enc_values.co entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 rs=direct defines=WG_DIRECT_TEXTURES=1,WG_ENC_VALUES_OUT=1
+// The q20 forms (D3D12 only; WG_ENC_Q20): the same values, each halo pixel's 20 value bytes without the 12 zero
+// bytes, in two planes: bytes 0..15 of every pixel ([fh + 4][fw + 4][16]), then bytes 16..19 of every pixel
+// ([fh + 4][fw + 4][4]): the map the encoder block with the linears as its prologue reads (l_swin_block_c32_enc_lin_nc,
+// runtime fusion le).
+// @wg-kernel lev/input_encoder_q20 co=- entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 defines=WG_ENC_VALUES_OUT=1,WG_ENC_Q20=1
+// @wg-kernel lev/input_encoder_direct_q20 co=- entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 rs=direct defines=WG_DIRECT_TEXTURES=1,WG_ENC_VALUES_OUT=1,WG_ENC_Q20=1
 #include "wg_platform.hlsli"
 #ifndef WG_ENC_VALUES_OUT
 #define WG_ENC_VALUES_OUT 0
+#endif
+#ifndef WG_ENC_Q20
+#define WG_ENC_Q20 0
+#endif
+#if WG_ENC_Q20 && !WG_ENC_VALUES_OUT
+#error "WG_ENC_Q20: Model L's value kernel only"
 #endif
 #if WG_ENC_VALUES_OUT && defined(WG_ENC_MO)
 #error "WG_ENC_VALUES_OUT: motion at render resolution only"
@@ -540,9 +552,15 @@ void encoder_main()
     if (tok < ntok) {
         const uint mw = (uint)(P_fw + 4);
         [unroll] for (uint dx3 = 0; dx3 < 2; ++dx3) {
+#if WG_ENC_Q20   // two planes: bytes 0..15, then bytes 16..19 of every pixel
+            const uint hp = (uint)(Y + 2) * mw + (uint)(X0 + (int)dx3 + 2);
+            wg_st128(features, hp * 16u, uint4(q[dx3][0], q[dx3][1], q[dx3][2], q[dx3][3]));
+            wg_st32(features, mw * (uint)(P_fh + 4) * 16u + hp * 4u, q[dx3][4]);
+#else
             const uint ho = ((uint)(Y + 2) * mw + (uint)(X0 + (int)dx3 + 2)) * 32u;
             wg_st128(features, ho, uint4(q[dx3][0], q[dx3][1], q[dx3][2], q[dx3][3]));
             wg_st128(features, ho + 16u, uint4(q[dx3][4], 0u, 0u, 0u));
+#endif
         }
     }
 #else

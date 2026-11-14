@@ -467,6 +467,17 @@ see "Context teardown and re-creation"). Other keys go to the network runtime's 
 `k_input=16|f32` (model K's input pass, below); the create flag `WG_CREATE_HDR` reaches it as
 `WgRtConfig.hdr`; timing log parts then named exposure, input, network, output).
 
+The D3D12 executor makes the network's allocations twice: once to measure the arena they need, in the default arena
+(`WG_D3D12_ARENA_MB`, 2560 MiB), then in an arena of exactly that size (executor_d3d12.cpp `prepare_device`). A network
+that does not fit the default arena is measured again in a 4095 MiB arena, the largest (logged `the network does not fit
+the default arena (...); measuring again in a 4095 MiB arena`, then `measured in the 4095 MiB arena: the network needs N
+MiB; the D3D12 executor runs it in an arena of that size` or `measuring again in a 4095 MiB arena failed (...)`); not
+when `WG_D3D12_ARENA_MB` is set. Model L at 3840x2160 native needs 2738 MiB and runs on the D3D12 executor this way
+(clean/l/records/issue182_create_destroy_record.json; issue #182). If the second measure fails too, the context goes to
+the HIP executor (`executor dx12 (default on RDNA 4) could not take this context (...); the HIP executor runs it`), and
+after it is destroyed the process keeps HIP's instance and the pooled imported arena until it ends, as "Context
+teardown and re-creation" describes (the same record's control: +1419 MiB after every destroy, constant).
+
 ### Shared resources (created at create on the game's device, imported into HIP)
 
 Two slots (used alternately by the frames whose network is enqueued). All ten buffers (twelve with `motion_hi`) live in ONE committed buffer,

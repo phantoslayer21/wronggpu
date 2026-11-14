@@ -195,6 +195,8 @@ def base(kernel):
     whose arguments it shares."""
     k = kernel.replace("_nc", "")
     post = ("l_post_recon_p12", "l_post_recon_ldr", "l_post_recon_p12_ldr")   # pack12 and LDR forms
+    if k.startswith("lev/input_encoder") and k.endswith("_q20"):   # the q20 forms (fusion le): the same arguments
+        return k[:-len("_q20")]
     return "l_coef" if k == "l_coef_pack12" else "l_post_recon" if k in post else k
 
 
@@ -638,7 +640,8 @@ class D3D12(unittest.TestCase):
                                           (NO_ENCLIN, full_ports(), True, True, False),
                                           (None, without(ENCLIN), True, True, False),
                                           (None, without(ENCLIN, LIN), True, False, False),
-                                          (None, without(LIN), True, False, True)):
+                                          (None, without(LIN), True, False, True),
+                                          (None, without("lev/input_encoder_q20"), True, True, False)):
             with self.subTest(fusion=env, fold_in_manifest=any(kc[0] == FOLD for kc in ports),
                               lin_in_manifest=any(kc[0] == LIN for kc in ports),
                               enclin_in_manifest=any(kc[0] == ENCLIN for kc in ports)):
@@ -735,6 +738,18 @@ class D3D12(unittest.TestCase):
                     if prev:
                         self.assertEqual(lev.args[4], latent_out(prev[1]))  # the latent the last frame's store wrote
                     prev = (lev, coef)
+
+    def test_color_early_option(self):
+        """Runtime option l_color_early=on (the direct-resource route's colour staging after the input encoder): reported
+        in the kernel line; on the buffer route (no staging) the frames launch exactly what they launch without it."""
+        args = dict(frames=3, build_files=FT.SHIPPING, rw=96, rh=64, flags=("--backend=3",), manifest=self.own_ports())
+        on = FT.Trace(run("model=L,l_color_early=on", **args))
+        off = FT.Trace(run("model=L", **args))
+        self.assertEqual(on.create, "create ok model L")
+        self.assertEqual(on.kernels.get("l_color_early"), "on")
+        self.assertIsNone(off.kernels.get("l_color_early"))
+        self.assertEqual([[(ln.kernel, ln.args) for ln in f["launches"]] for f in on.frames],
+                         [[(ln.kernel, ln.args) for ln in f["launches"]] for f in off.frames])
 
     def test_no_model_m_post_route(self):
         """Model L never runs Model M's post: every route traced (HDR and LDR colour; HIP and native D3D12; pack12 and
