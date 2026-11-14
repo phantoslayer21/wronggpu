@@ -246,11 +246,18 @@ bool PinnedFile::Delete(DWORD* err) {
     return ok;
 }
 bool PinnedFile::Overwrite(const wstring& src, const wstring& srcSha, DWORD* err) {
-    auto fail = [&](DWORD e) { if (err) *err = e; return false; };
-    if (h_ == INVALID_HANDLE_VALUE) return fail(ERROR_INVALID_HANDLE);
+    if (h_ == INVALID_HANDLE_VALUE) { if (err) *err = ERROR_INVALID_HANDLE; return false; }
     HANDLE s = CreateFileW(src.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (s == INVALID_HANDLE_VALUE) return fail(GetLastError());
+    if (s == INVALID_HANDLE_VALUE) { if (err) *err = GetLastError(); return false; }
     struct Closer { HANDLE h; ~Closer() { CloseHandle(h); } } closer{s};
+    return CopyFrom(s, srcSha, err);
+}
+bool PinnedFile::OverwriteFrom(PinnedFile& src, const wstring& srcSha, DWORD* err) {
+    if (h_ == INVALID_HANDLE_VALUE || src.h_ == INVALID_HANDLE_VALUE) { if (err) *err = ERROR_INVALID_HANDLE; return false; }
+    return CopyFrom(src.h_, srcSha, err);
+}
+bool PinnedFile::CopyFrom(HANDLE s, const wstring& srcSha, DWORD* err) {
+    auto fail = [&](DWORD e) { if (err) *err = e; return false; };
     if (!IEq(HashHandle(s), srcSha)) return fail(ERROR_FILE_CORRUPT);
     BY_HANDLE_FILE_INFORMATION si{};
     GetFileInformationByHandle(s, &si);
@@ -339,6 +346,12 @@ bool PinnedFile::SetReadOnly(bool on, DWORD* err) {
     if (!SetAttrsByHandle(h_, attrs)) { if (err) *err = GetLastError(); return false; }
     restoreAttrs_ = 0;  // set on purpose: Close leaves it so
     return true;
+}
+bool PinnedFile::Flush(DWORD* err) {
+    if (h_ == INVALID_HANDLE_VALUE) { if (err) *err = ERROR_INVALID_HANDLE; return false; }
+    if (FlushFileBuffers(h_)) return true;
+    if (err) *err = GetLastError();
+    return false;
 }
 bool WriteFileNew(const wstring& path, const void* data, size_t size, bool readOnly, DWORD* err) {
     PinnedFile f;

@@ -52,6 +52,9 @@ struct RrConfigFix {
     bool prevAbsent = true;       // the key was not in the section before
     string prev;                  // else its value before
     wstring folder;               // the topmost folder the fix created ("" none)
+    // SHA-256 of the player's Engine.ini kept in wronggpu-setup\rr-config (its own record line "rrconfig-backup", which an
+    // older launcher keeps as a line it does not know); "": a record written before the hash was recorded
+    wstring backupSha;
 };
 // A runtime line's folder for the game root (GameRoot of the record's exe folder) when it is above the install folder.
 inline const wchar_t* const kRuntimeGameRoot = L"<game-root>";
@@ -150,10 +153,16 @@ bool OptiIniWrittenByUs(const wstring& dir, const Record& m);
 bool OptiSetupIsOurs(const wstring& dir, const Record& m);
 // Test hook: called at the named steps of DoRestore ("restored", "kept", "record-removed"), of the rollback ("rollback-absent":
 // about to create the missing payload files; "rollback-held": every payload file held and checked) and of the Engine.ini restore ("rrconfig-held": Engine.ini held and read;
-// "rrconfig-absent": about to create it); a test stops the operation there (as a killed process would) or tries to change
+// "rrconfig-absent": about to create it; "rrconfig-replace": the corrected copy written, the handle closed, about to replace
+// it); a test stops the operation there (as a killed process would) or tries to change
 // the file. Test builds also stop the process at the step named by WRONGGPU_TEST_STOP_AT.
 void SetRestoreStepHook(std::function<void(const char*)> hook);
 void RestoreStep(const char* name);  // calls the hook (above)
+// Test seam: a write fault at a named step ("rollback-write": before each payload file Roll back writes; "rrconfig-write": the
+// new Engine.ini bytes; "rrconfig-readonly": Engine.ini's read-only attribute put back). When the hook returns true the step
+// fails as a failed write would (a roll back's file then holds a few torn bytes). No hook: never.
+void SetFaultHook(std::function<bool(const char*)> hook);
+bool TestFault(const char* name);
 // The hive the Apps & features entries go to (HKEY_CURRENT_USER unless set: the elevated worker of another account sets
 // the player's hive, HKEY_USERS\<sid>).
 HKEY UninstallHive();

@@ -106,6 +106,7 @@ bool LoadRecord(const wstring& path, Record& m) {
             else if (f[0] == L"regkey") m.regkey = f[1];
             else if (f[0] == L"model") m.model = f[1];
             else if (f[0] == L"model-m") m.modelM = f[1];
+            else if (!m.legacy && f[0] == L"rrconfig-backup") m.rrconfig.backupSha = f[1];
             else if (!m.legacy) m.extra.push_back(line);
         } else if (f.size() == 5 && (f[0] == L"copy" || f[0] == L"disable" || (!m.legacy && (f[0] == L"rename" || f[0] == L"dir")))) {
             Entry e; e.action = f[0]; e.existed = f[1] == L"1"; e.orig = f[2] == L"-" ? L"" : f[2]; e.inst = f[3] == L"-" ? L"" : f[3]; e.rel = f[4];
@@ -162,6 +163,7 @@ void SaveRecord(const wstring& path, const Record& m) {
         wstring flags = wstring(x.created ? L"c" : L"") + (x.sectionAdded ? L"s" : L"") + (x.wasReadOnly ? L"w" : L"") + (x.setReadOnly ? L"r" : L"") + (x.backup ? L"b" : L"");
         t += L"rrconfig\t" + field(x.path) + L"\t" + (flags.empty() ? L"-" : flags) + L"\t" + (x.prevAbsent ? wstring(L"absent") : L"=" + field(FromUtf8(x.prev))) +
              L"\t" + (x.folder.empty() ? wstring(L"-") : field(x.folder)) + L"\r\n";
+        if (x.backup && !x.backupSha.empty()) t += L"rrconfig-backup\t" + field(x.backupSha) + L"\r\n";
     }
     for (auto& r : m.runtime) t += L"runtime\t" + field(r.folder) + L"\t" + field(r.pattern) + L"\r\n";
     for (auto& x : m.extra) t += x + L"\r\n";
@@ -528,6 +530,9 @@ bool AnyPartly(const std::vector<wstring>& warnings) {
 
 static std::function<void(const char*)> g_restoreStepHook;
 void SetRestoreStepHook(std::function<void(const char*)> hook) { g_restoreStepHook = std::move(hook); }
+static std::function<bool(const char*)> g_faultHook;
+void SetFaultHook(std::function<bool(const char*)> hook) { g_faultHook = std::move(hook); }
+bool TestFault(const char* name) { return g_faultHook && g_faultHook(name); }
 void RestoreStep(const char* name) {
     if (g_restoreStepHook) g_restoreStepHook(name);
 #ifdef WRONGGPU_TESTING

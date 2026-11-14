@@ -96,6 +96,9 @@ public:
     // Sets or clears the read-only attribute through the handle (the other attributes stay); what Open cleared for a write is
     // then not put back on Close.
     bool SetReadOnly(bool on, DWORD* err = nullptr);
+    // The file was read-only when Open made it writable (the bit is put back on Close unless it was written or set on purpose).
+    bool WasReadOnly() const { return (restoreAttrs_ & FILE_ATTRIBUTE_READONLY) != 0; }
+    bool Flush(DWORD* err = nullptr);  // FlushFileBuffers through the handle, its result checked
     // Deletes the file through the handle (FileDispositionInfoEx with POSIX semantics, the read-only attribute ignored; the
     // older FileDispositionInfo where that is not supported) and closes it. The name is free when this returns true.
     bool Delete(DWORD* err = nullptr);
@@ -103,12 +106,16 @@ public:
     // touched otherwise); the attributes and times of src are put on the file. false: err holds why (ERROR_FILE_CORRUPT when
     // src is not srcSha). Not atomic against a stop: the record and the backup are kept until the restore is complete.
     bool Overwrite(const wstring& src, const wstring& srcSha, DWORD* err = nullptr);
+    // The same from a source this process already holds (Open(src, false)): hashed through its handle, which must give srcSha,
+    // and copied through it, so the bytes checked before the first write of a multi-file step are the bytes written.
+    bool OverwriteFrom(PinnedFile& src, const wstring& srcSha, DWORD* err = nullptr);
     // Replaces the bytes through the handle (forWrite) with `data`: the conditional write of a file that was hashed through this
     // same handle (a settings migration). The file's attributes stay.
     bool OverwriteBytes(const void* data, size_t size, DWORD* err = nullptr);
     void Close();  // a read-only bit that Open cleared for a write that did not happen is put back
 
 private:
+    bool CopyFrom(HANDLE src, const wstring& srcSha, DWORD* err);
     HANDLE h_ = INVALID_HANDLE_VALUE;
     DWORD restoreAttrs_ = 0;  // the attributes to put back on Close (a read-only file that Open made writable); 0: none
 };
