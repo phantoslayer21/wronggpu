@@ -136,8 +136,41 @@ def coef_cases(kernel, rng):
     return cases
 
 
+# (rw, rh, reset) of the halo encoder (clean/l/runner/l_enc_check.py's frames): padding to multiples of 32, odd sizes,
+# both reset states, and width 17 (padded 32), where halo columns 32 and 33 both mirror onto render column 0.
+ENC_FRAMES = [(40, 24, False), (37, 19, False), (64, 32, True), (90, 50, False), (17, 17, False), (17, 24, True)]
+
+
+def enc_cases(kernel, rng):
+    """lev/input_encoder (l_enc_values.co, HIP name input_encoder): a synthetic frame (clean/reference/encoder.py
+    random_inputs) -> the halo map q [fh + 4][fw + 4][32] and the motion surfaces m_near, m_far, m_center [rh][rw]
+    (FP16 x 2); blob enc0.values (l_pack.pack_values); WgEncParams (116 bytes) by value."""
+    from clean.l.reference import oracle as L
+    from clean.l.runner import l_pack as LP
+    from clean.reference import encoder as ME
+    from clean.runner import enc0 as E0
+    enc = L.random_params(rng)["enc0"]
+    cases = []
+    for (rw, rh, reset) in ENC_FRAMES:
+        x = ME.random_inputs(rng, rw=rw, rh=rh, reset=reset)
+        prm = E0.frame_params(x)
+        data = E0.device_inputs(x)
+        mw, mh = prm.fw + 4, prm.fh + 4
+        ntok = (mw // 2) * (mh // 2)
+        npx = prm.rw * prm.rh * 4
+        frame = [("buf", v if isinstance(v, bytes) else np.ascontiguousarray(v).tobytes())
+                 for v in (data[k] for k in ("color", "depth", "motion", "hist", "latent", "mhist"))]
+        expo = np.array([x["exposure"], x["exposure_prev"]], dtype=np.float32).tobytes()
+        cases.append({"kernel": kernel, "hip_kernel": "input_encoder", "co": "l_enc_values.co", "tag": "lev",
+                      "grid": -(-ntok // 128), "block": 256,
+                      "args": frame + [("out", mw * mh * 32), ("out", npx), ("out", npx), ("out", npx), ("buf", expo),
+                                       ("buf", LP.pack_values(enc)), ("bytes", bytes(prm))]})
+    return cases
+
+
 KINDS = {"l_linear_32_32_relu": linear_cases, "l_linear_32_32_f16": linear_cases,
-         "l_project_gather": project_cases, "l_dec_project": project_cases, "l_coef": coef_cases}
+         "l_project_gather": project_cases, "l_dec_project": project_cases, "l_coef": coef_cases,
+         "lev/input_encoder": enc_cases}
 CONTROL_KINDS = {"swin_block_c96_nc": control_cases}
 CO = "l_ops.co"
 
@@ -170,7 +203,7 @@ def hip_run(g, mod, case):
         elif a[0] == "bytes":
             args.append((ctypes.c_ubyte * len(a[1])).from_buffer_copy(a[1]))
     try:
-        h.launch(h.get_function(mod, case["kernel"]), case["grid"], case["block"], args)
+        h.launch(h.get_function(mod, case.get("hip_kernel", case["kernel"])), case["grid"], case["block"], args)
         h.sync()
         return [bytes(h.download(p, n)) for p, n in outs]
     finally:
@@ -179,7 +212,7 @@ def hip_run(g, mod, case):
 
 
 def replay_lines(name, case, cdir, grid=None, prefix=""):
-    lines = [f"case {prefix}{name}", f"module {case.get('co', CO)}",
+    lines = [f"case {prefix}{name}", f"module {case.get('co', CO)}" + (f" {case['tag']}" if case.get("tag") else ""),
              f"kernel {case['kernel']} {grid or case['grid']} {case['block']}"]
     oi = 0
     for i, a in enumerate(case["args"]):
@@ -217,7 +250,7 @@ def run(build, rocm, seeds, kernels):
         for si, seed in enumerate(seeds):
             rng = np.random.default_rng(seed)
             for ci, case in enumerate(kinds[kernel](kernel, rng)):
-                name = f"{kernel}_s{si}_{ci}"
+                name = f"{kernel.replace('/', '_')}_s{si}_{ci}"   # lev/input_encoder: no folder in the file name
                 hip_out[name] = (kernel, hip_run(g, module(case.get("co", CO)), case))
                 for oi, data in enumerate(hip_out[name][1]):   # kept next to the D3D12 outputs, for a look at a difference
                     with open(os.path.join(cdir, f"{name}.hip.o{oi}"), "wb") as fh:

@@ -21,22 +21,24 @@ def _vcvars64():
     return vcvars if r.returncode == 0 and r.stdout.strip() and os.path.exists(vcvars) else None
 
 
-def build(name, sources, defines=()):
-    """sources: paths relative to the repository root; defines: NAME or NAME=VALUE. Returns the program's path."""
+def build(name, sources, defines=(), include_dirs=()):
+    """sources: paths relative to the repository root (or absolute); defines: NAME or NAME=VALUE; include_dirs: extra
+    include folders (absolute). Returns the program's path."""
     tmp = tempfile.mkdtemp(prefix="wg_%s_" % name)
     exe = os.path.join(tmp, name + (".exe" if os.name == "nt" else ""))
     srcs = [os.path.join(ROOT, s) for s in sources]
     cxx = os.environ.get("CXX") or shutil.which("clang++") or shutil.which("g++")
     if cxx:
-        cmd = [cxx, "-std=c++17", "-O1"] + ["-D" + d for d in defines]
+        cmd = [cxx, "-std=c++17", "-O1"] + ["-D" + d for d in defines] + ["-I" + d for d in include_dirs]
         cmd += (["-D_CRT_SECURE_NO_WARNINGS"] if os.name == "nt" else []) + srcs + ["-o", exe]
         r = subprocess.run(cmd + ([] if os.name == "nt" else ["-ldl", "-pthread"]), capture_output=True, text=True)
     elif os.name == "nt" and (shutil.which("cl") or _vcvars64()):
         vcvars = None if shutil.which("cl") else _vcvars64()
         objdir = os.path.join(tmp, "obj")
         os.makedirs(objdir)
-        cl = ('cl /nologo /std:c++17 /O1 /EHsc /utf-8 /D_CRT_SECURE_NO_WARNINGS %s %s /Fo"%s\\\\" /Fe"%s"'
-              % (" ".join("/D" + d for d in defines), " ".join('"%s"' % s for s in srcs), objdir, exe))
+        cl = ('cl /nologo /std:c++17 /O1 /EHsc /utf-8 /D_CRT_SECURE_NO_WARNINGS %s %s %s /Fo"%s\\\\" /Fe"%s"'
+              % (" ".join("/D" + d for d in defines), " ".join('/I"%s"' % d for d in include_dirs),
+                 " ".join('"%s"' % s for s in srcs), objdir, exe))
         bat = os.path.join(tmp, "build.bat")
         with open(bat, "w") as f:
             f.write("@echo off\r\n" + ('call "%s" >nul || exit /b 1\r\n' % vcvars if vcvars else "") +
