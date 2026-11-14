@@ -165,7 +165,7 @@ class Launches(unittest.TestCase):
         want = [self.line("enc", ln) for ln in LP.encoder_launches()]
         want += [self.line("dec", ln) for ln in LP.decoder_launches()]
         self.assertEqual(dump("launches").splitlines(), want)
-        self.assertEqual(want[-1].split("|")[-1], ",".join(str(v) for v in T.DEC0_VALUES))
+        self.assertEqual(want[-1].split("|")[-1], ",".join(str(v) for v in T.L_DEC_VALUES))
 
 
 if __name__ == "__main__":

@@ -30,7 +30,7 @@ struct Launch {
   std::string offsets, params;            // swin: window-offset kind ("first", "second"), the block's stage
   std::vector<int> groups;                // project, dec_project: input channel groups
   float clamp = 0.0f;                     // project: output clamp (0 = none)
-  std::vector<int> values;                // coef: the value positions (table.DEC0_VALUES)
+  std::vector<int> values;                // coef: the value positions (table.L_DEC_VALUES)
 };
 
 // The default table's launches, in order (mirrors of l_pack.encoder_launches(TABLE) / decoder_launches(TABLE); the
