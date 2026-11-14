@@ -77,7 +77,67 @@ def control_cases(kernel, rng):
     return cases
 
 
-KINDS = {"l_linear_32_32_relu": linear_cases, "l_linear_32_32_f16": linear_cases}
+# (th, tw) token grids of the projections; the pixel maps are [2 th][2 tw]. 3 x 5 and 2 x 9: partly filled waves.
+TOKENS = [(8, 12), (18, 34), (4, 4), (34, 50), (3, 5), (2, 9)]
+
+
+def _project_blob(rng, rows, frags):
+    """Projection blob: bias tile vector (`rows` floats), then `frags` fragments of 256 FP8 bytes."""
+    return rng.normal(0, 0.5, rows).astype(np.float32).tobytes() + fp8_encode(q8(rng.normal(0, 0.2, frags * 256))).tobytes()
+
+
+def project_cases(kernel, rng):
+    """l_project_gather: x [2 th][2 tw][32] -> features [th][tw][64] (blob enc0.project: 64 bias rows, 4 x 8 fragments).
+    l_dec_project: z [th][tw][64] -> y [2 th][2 tw][32] (blob dec0.project: 128 bias rows, 8 x 4 fragments)."""
+    cases = []
+    for (th, tw) in TOKENS:
+        ntok = th * tw
+        npx = 4 * ntok
+        if kernel == "l_project_gather":
+            args = [("buf", _fp8_map(rng, npx * 32)), ("out", ntok * 64), ("buf", _project_blob(rng, 64, 32))]
+        else:
+            args = [("buf", _fp8_map(rng, ntok * 64)), ("out", npx * 32), ("buf", _project_blob(rng, 128, 32))]
+        cases.append({"kernel": kernel, "grid": -(-ntok // 128), "block": 256, "args": args + [("u32", tw), ("u32", th)]})
+    return cases
+
+
+# (rw, rh, fw, fh) of the coefficient step: R inside the padded grid F (even). Odd rw / rh (a token's second column or
+# row outside R), F wider than R by whole tokens, and 5 x 3 / 7 x 5 (partly filled waves).
+COEF_FRAMES = [(24, 16, 24, 16), (67, 35, 68, 36), (7, 5, 8, 6), (100, 68, 100, 68), (5, 3, 6, 4), (13, 7, 20, 12)]
+
+
+def _coef_map(rng, n):
+    """FP16 decoder map [n][32]: mostly N(0, 3), with values beyond the clamp (+-20 on the two spread inputs), beyond
+    tanh's saturation (9.01) and inside its polynomial range (|t| < 0.6), so every path of l_coef runs."""
+    v = rng.normal(0, 3.0, (n, 32))
+    pick = rng.random((n, 32))
+    v = np.where(pick < 0.08, rng.uniform(20, 60, (n, 32)) * rng.choice([-1, 1], (n, 32)), v)
+    v = np.where((pick >= 0.08) & (pick < 0.2), rng.uniform(-0.6, 0.6, (n, 32)), v)
+    v = np.where((pick >= 0.2) & (pick < 0.25), rng.uniform(8, 10, (n, 32)) * rng.choice([-1, 1], (n, 32)), v)
+    return v.astype(np.float16).tobytes()
+
+
+def coef_cases(kernel, rng):
+    """l_coef: y2 [fh][fw][32] FP16 -> A, B, latent [rh][rw] (4 bytes each), C [rh][rw] (8 bytes); blob dec0.coef
+    (Model M's dec0 blob with W = 0, b = 0: S, T at byte 320); LDecParams (56 bytes) by value."""
+    from clean.runner import dec0
+    cases = []
+    for (rw, rh, fw, fh) in COEF_FRAMES:
+        npx = rw * rh
+        S, T = float(rng.uniform(0.5, 4.0)), float(rng.uniform(0.3, 3.0))
+        blob = dec0.pack({"W": np.zeros((68, 64), np.float32), "b": np.zeros(68, np.float32), "S": S, "T": T})
+        P = bytes(dec0.DecParams(rw=rw, rh=rh, fw=fw, fh=fh, reset=0, pad0=0, dw=2 * rw, dh=2 * rh, kx=0.5, ky=0.5,
+                                 jx=0.25, jy=-0.25, pjx=0.0, pjy=0.0))
+        assert len(P) == 56
+        ntok = (fh // 2) * (fw // 2)
+        cases.append({"kernel": kernel, "grid": -(-ntok // 128), "block": 256,
+                      "args": [("buf", _coef_map(rng, fw * fh)), ("out", npx * 4), ("out", npx * 4), ("out", npx * 8),
+                               ("out", npx * 4), ("buf", blob), ("bytes", P)]})
+    return cases
+
+
+KINDS = {"l_linear_32_32_relu": linear_cases, "l_linear_32_32_f16": linear_cases,
+         "l_project_gather": project_cases, "l_dec_project": project_cases, "l_coef": coef_cases}
 CONTROL_KINDS = {"swin_block_c96_nc": control_cases}
 CO = "l_ops.co"
 
