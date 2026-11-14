@@ -52,7 +52,7 @@ const std::vector<Launch>& encoder_launches() {
     l[1].kind = "linear", l[1].blob = "enc0.Win1", l[1].src = "q", l[1].dst = "x";
     l[1].C_in = 32, l[1].C_out = 32, l[1].w = "Win1", l[1].b = "bin1", l[1].acc = "f16", l[1].out_round = "relu_q8";
     l[2].kind = "linear", l[2].blob = "enc0.Win2", l[2].src = "x", l[2].dst = "x";
-    l[2].C_in = 32, l[2].C_out = 32, l[2].w = "Win2", l[2].b = "bin2", l[2].acc = "f16", l[2].out_round = "q8";
+    l[2].C_in = 32, l[2].C_out = 32, l[2].w = "Win2", l[2].b = "bin2", l[2].acc = "f16", l[2].out_round = "none";
     l[3] = swin("x", "first", "enc0_block");
     l[4].kind = "project", l[4].blob = "enc0.project", l[4].src = "x", l[4].groups = {32, 32, 32, 32};
     l[4].w = "W", l[4].b = "b", l[4].clamp = 6.28125f;
@@ -68,7 +68,7 @@ const std::vector<Launch>& decoder_launches() {
     l[0].groups = {32, 32};
     l[1] = swin("p", "second", "dec0_block");
     l[2].kind = "coef", l[2].blob = "dec0.coef", l[2].src = "p";
-    l[2].values = {0, 1, 10, 11, 12, 13, 14, 15, 16, 2, 3, 4, 5, 6, 7, 8, 9};  // table.DEC0_VALUES
+    l[2].values = {0, 1, 6, 7, 8, 9, 10, 11, 12, 2, 3, 4, 5};  // table.L_DEC_VALUES
     return l;
   }();
   return v;
