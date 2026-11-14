@@ -139,4 +139,23 @@ FG_FN uint fg_leaky16(uint x) {
     return fg_key16(t) > fg_key16(x) ? t : x;
 }
 
+// 0 * x in IEEE arithmetic, as float16 bits: NaN for x inf or NaN, else a zero with x's sign
+FG_FN uint fg_zero_times16(uint x) {
+    if (fg_is_nan16(x) != 0u || fg_is_inf16(x) != 0u) return FG_NAN16;
+    return x & 0x8000u;
+}
+
+// One step of net1's max-pool, exactly the delivered formula m' = h((x > m) * x + (x <= m) * m) with IEEE products and
+// sum: the term that is not taken becomes 0 * value (NaN for an infinity), and a sum of two zeros is -0 only when both
+// are -0. Any NaN gives NaN (0x7E00).
+FG_FN uint fg_pool_step16(uint m, uint x) {
+    if (fg_is_nan16(m) != 0u || fg_is_nan16(x) != 0u) return FG_NAN16;
+    const uint gt = fg_key16(x) > fg_key16(m) ? 1u : 0u;      // x > m (+-0 equal; infinities ordered)
+    const uint v = gt != 0u ? x : m;                           // the term multiplied by 1
+    const uint z = gt != 0u ? fg_zero_times16(m) : fg_zero_times16(x);   // the term multiplied by 0
+    if (z == FG_NAN16) return FG_NAN16;                        // 0 * inf
+    if ((v & 0x7FFFu) == 0u) return ((v & z & 0x8000u) != 0u) ? 0x8000u : 0u;   // zero + zero
+    return v;                                                  // value + (+-0), an infinity included
+}
+
 #endif

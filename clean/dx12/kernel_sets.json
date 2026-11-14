@@ -255,6 +255,10 @@
    "l_swin.co"
   ],
   [
+   "l_swin_block_c32_enc_lin_nc",
+   "-"
+  ],
+  [
    "l_swin_block_c32_enc_nc",
    "l_swin.co"
   ],

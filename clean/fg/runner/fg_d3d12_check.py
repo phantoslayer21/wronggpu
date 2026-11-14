@@ -13,11 +13,15 @@ the native D3D12 device in a child process, then:
 - compares the RAW downloaded bytes of both back ends; each output buffer starts filled with its back end's own
   sentinel (HIP 0xA5, D3D12 0x5A) and has 64 slack bytes after it that neither may write, so an unwritten byte or a
   write past the end differs;
-- a negative control (the first case with 4 or more workgroups, again on D3D12 with half of them) must be caught;
+- a negative control per kernel (its first case with 4 or more workgroups, again on D3D12 with half of them) must be
+  caught;
 - compares the HIP output with the CPU reference, value for value (float16 bits; NaN equals NaN, the reference's NaN
   payload is not specified).
-Cases: every net1 layer shape (cin, cout, kernel size, chunk order, activation) on small grids of several sizes, and
-special values (NaN, +-inf, subnormals, +-65504, -0) in the inputs and weights. Output: counts only, no timing.
+Cases: fg_conv_f16: every net1 layer shape (cin, cout, kernel size, chunk order, activation) on small grids of several
+sizes, and special values (NaN, +-inf, subnormals, +-65504, -0) in the inputs and weights; fg_maxpool2_f16: random maps
+of several sizes (odd ones too) and every 2 x 2 window over ten special values; fg_upscale_f16: net1's level pairs,
+other sizes, an output extent of 1, equal sizes, special values; fg_add_f16: random pairs of several lengths and every
+pair of thirteen special values. Output: counts only, no timing. The whole network: fg_net1_gpu.py.
 """
 import argparse
 import ctypes
@@ -103,7 +107,96 @@ def _conv_case(kernel, x, w, b, k, order, act, label):
                                     b.astype(np.float64), chunks=order, act=act)}
 
 
-KINDS = {"fg_conv_f16": lambda kernel, rng: conv_cases(kernel, rng, specials=True)}
+POOL_SPECIALS = np.array([1.0, -2.0, np.inf, -np.inf, np.nan, 0.0, -0.0, 65504.0, -65504.0, 2.0 ** -24],
+                         dtype=np.float16)
+
+
+def pool_cases(kernel, rng):
+    """Random maps (odd sizes drop their last row / column), and every window of four taps over POOL_SPECIALS (10^4
+    windows side by side in one 2-row map)."""
+    cases = []
+    for C, H, W in ((3, 7, 9), (32, 8, 8), (64, 5, 5), (1, 2, 2), (16, 3, 17), (128, 4, 6)):
+        x = _f16(rng.uniform(-4, 4, (C, H, W)))
+        cases.append(_pool_case(kernel, x, f"{C}x{H}x{W}"))
+    v = POOL_SPECIALS
+    n = len(v)
+    idx = np.arange(n ** 4)
+    taps = [v[(idx // n ** p) % n] for p in range(4)]          # (0,0), (0,1), (1,0), (1,1) of each window
+    x = np.zeros((1, 2, 2 * n ** 4), np.float16)
+    x[0, 0, 0::2], x[0, 0, 1::2], x[0, 1, 0::2], x[0, 1, 1::2] = taps
+    cases.append(_pool_case(kernel, x, "every special window"))
+    return cases
+
+
+def _pool_case(kernel, x, label):
+    C, H, W = x.shape
+    n = C * (H // 2) * (W // 2)
+    return {"kernel": kernel, "grid": -(-n // 256), "block": 256, "label": label,
+            "args": [("buf", x.tobytes()), ("out", 2 * n + SLACK), ("u32", C), ("u32", H), ("u32", W)],
+            "defined": 2 * n, "cpu": lambda: N.maxpool2(x.astype(np.float64))}
+
+
+def _ratio_bits(n_in, n_out):
+    """The align-corners ratio (n_in - 1) / (n_out - 1) as single-precision bits (correctly rounded; 0 for n_out 1), as
+    net1.upscale_to computes it."""
+    r = np.float32(n_in - 1) / np.float32(n_out - 1) if n_out > 1 else np.float32(0)
+    return int(np.array([r], np.float32).view(np.uint32)[0])
+
+
+def upscale_cases(kernel, rng):
+    """net1's level pairs (the coarse level is the fine one halved with floor), other odd sizes, an output extent of 1,
+    equal sizes, and special values (NaN, +-inf, subnormals, +-65504, -0) in the input."""
+    cases = []
+    pairs = [((17, 33), (35, 67)), ((1, 2), (2, 4)), ((4, 8), (8, 16)), ((8, 16), (17, 33)), ((3, 4), (7, 9)),
+             ((1, 1), (2, 3)), ((5, 2), (11, 4)), ((2, 3), (2, 3)), ((1, 3), (1, 7)), ((1, 1), (1, 1))]
+    for (hi, wi), (ho, wo) in pairs:
+        for C in (1, 32):
+            x = _f16(rng.uniform(-3, 3, (C, hi, wi)))
+            cases.append(_upscale_case(kernel, x, ho, wo, f"{C}x{hi}x{wi} -> {ho}x{wo}"))
+    x = _f16(rng.uniform(-3, 3, (16, 9, 13)))
+    f = rng.random(x.shape) < 0.08
+    x[f] = rng.choice(SPECIALS, int(f.sum()))
+    cases.append(_upscale_case(kernel, x, 19, 27, "specials 9x13 -> 19x27"))
+    return cases
+
+
+def _upscale_case(kernel, x, ho, wo, label):
+    C, hi, wi = x.shape
+    n = C * ho * wo
+    return {"kernel": kernel, "grid": -(-n // 256), "block": 256, "label": label,
+            "args": [("buf", x.tobytes()), ("out", 2 * n + SLACK), ("u32", C), ("u32", hi), ("u32", wi), ("u32", ho),
+                     ("u32", wo), ("u32", _ratio_bits(wi, wo)), ("u32", _ratio_bits(hi, ho))],
+            "defined": 2 * n, "cpu": lambda: N.upscale_to(x.astype(np.float64), wo, ho)}
+
+
+ADD_SPECIALS = np.array([np.nan, np.inf, -np.inf, 65504.0, -65504.0, 2.0 ** -24, -2.0 ** -24, -0.0, 0.0, 1.0, -1.0,
+                         32768.0, 0.000999], dtype=np.float16)
+
+
+def add_cases(kernel, rng):
+    """Random pairs of several lengths, and every pair over ADD_SPECIALS (overflow, inf - inf, -0 + -0, subnormal
+    sums)."""
+    cases = []
+    for n in (1, 255, 256, 1000, 4096 * 3 + 7):
+        a = _f16(rng.uniform(-100, 100, n))
+        b = _f16(rng.uniform(-100, 100, n))
+        cases.append(_add_case(kernel, a, b, f"n {n}"))
+    v = ADD_SPECIALS
+    a = np.repeat(v, len(v)).astype(np.float16)
+    b = np.tile(v, len(v)).astype(np.float16)
+    cases.append(_add_case(kernel, a, b, "every special pair"))
+    return cases
+
+
+def _add_case(kernel, a, b, label):
+    n = a.size
+    return {"kernel": kernel, "grid": -(-n // 256), "block": 256, "label": label,
+            "args": [("buf", a.tobytes()), ("buf", b.tobytes()), ("out", 2 * n + SLACK), ("u32", n)],
+            "defined": 2 * n, "cpu": lambda: N.add16(a.astype(np.float64), b.astype(np.float64))}
+
+
+KINDS = {"fg_conv_f16": lambda kernel, rng: conv_cases(kernel, rng, specials=True),
+         "fg_maxpool2_f16": pool_cases, "fg_upscale_f16": upscale_cases, "fg_add_f16": add_cases}
 
 
 # ---- prepare --------------------------------------------------------------------------------------------------------
@@ -193,7 +286,7 @@ def run(build, rocm, seeds, kernels):
         mod = h.load_module(f.read())
     cdir = os.path.join(build, "replay-fg")
     os.makedirs(cdir, exist_ok=True)
-    lines, hip_out, neg = [], {}, None
+    lines, hip_out, negs = [], {}, {}     # negs: per kernel, its first case with 4 or more workgroups
     for kernel in kernels:
         for si, seed in enumerate(seeds):
             rng = np.random.default_rng(seed)
@@ -202,8 +295,8 @@ def run(build, rocm, seeds, kernels):
                 outs = hip_run(h, mod, case)
                 hip_out[name] = (kernel, case, outs)
                 lines += replay_lines(name, case, cdir)
-                if neg is None and case["grid"] >= 4:
-                    neg = name
+                if kernel not in negs and case["grid"] >= 4:
+                    negs[kernel] = name
                     lines += replay_lines(name, case, cdir, grid=case["grid"] // 2, prefix="negative_")
     with open(os.path.join(cdir, "cases.txt"), "w", newline="\n") as f:
         f.write("\n".join(lines))
@@ -227,15 +320,18 @@ def run(build, rocm, seeds, kernels):
         ok = ok and good
         res["cases"].append({"case": name, "kernel": kernel, "label": case["label"], "raw": raw, "cpu": cpu,
                              "ok": good})
-    if neg:
-        kernel, case, outs = hip_out[neg]
+    res["negative_controls"] = {}
+    for kernel in kernels:                # every kernel needs its own caught negative control
+        neg = negs.get(kernel)
+        if neg is None:
+            res["negative_controls"][kernel] = None
+            ok = False
+            continue
+        _, case, outs = hip_out[neg]
         nraw = compare_raw(read(os.path.join(cdir, f"negative_{neg}.o0")), outs[0], case["defined"])
         caught = nraw["differ"] != 0 or not nraw["slack_ok"]
-        res["negative_control"] = {"case": neg, "half_grid": True, "caught": caught, "differ": nraw["differ"]}
+        res["negative_controls"][kernel] = {"case": neg, "half_grid": True, "caught": caught, "differ": nraw["differ"]}
         ok = ok and caught
-    else:
-        res["negative_control"] = None
-        ok = False
     res["summary"] = {"cases": len(res["cases"]), "cases_ok": sum(c["ok"] for c in res["cases"]),
                       "values": sum(c["cpu"]["values"] for c in res["cases"]),
                       "nan_values": sum(c["cpu"]["nan"] for c in res["cases"]),
@@ -262,7 +358,7 @@ def main(argv=None):
         if a.json:
             with open(a.json, "w", encoding="utf-8", newline="\n") as f:
                 f.write(text + "\n")
-        print(json.dumps(res["summary"]), "negative control:", json.dumps(res["negative_control"]))
+        print(json.dumps(res["summary"]), "negative controls:", json.dumps(res["negative_controls"]))
         for c in res["cases"]:
             if not c["ok"]:
                 print("FAIL", c["case"], c["label"], json.dumps(c["raw"]), json.dumps(c["cpu"]))
