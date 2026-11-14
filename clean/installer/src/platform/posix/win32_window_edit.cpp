@@ -149,21 +149,23 @@ void EditInit(Win* w) {
     w->edit->lastInputMs = NowMs();
 }
 
+void EditSetText(Win* w, const std::wstring& text, bool notify) {
+    EditState& s = *w->edit;
+    if (notify) Snapshot(w);
+    w->text = text;
+    s.anchor = s.caret = 0;  // as a Win32 edit (and Wine's): setting the text leaves the caret at its start; the app selects
+                             // all itself where it wants that (EM_SETSEL 0, -1 on the search box)
+    s.scroll = 0;
+    Touch(w);
+    if (notify) Notify(w, EN_CHANGE);
+}
+
 LRESULT EditClassProc(Win* w, UINT m, WPARAM wp, LPARAM lp) {
     EditState& s = *w->edit;
     const HWND h = (HWND)w->id;
     switch (m) {
         case WM_GETDLGCODE: return DLGC_WANTCHARS | DLGC_HASSETSEL | DLGC_WANTARROWS;
-        case WM_SETTEXT: {
-            const std::wstring t = lp ? (const wchar_t*)lp : L"";
-            Snapshot(w);
-            w->text = t;
-            s.anchor = s.caret = 0;  // as Windows: the caret is at the start after the text is set
-            s.scroll = 0;
-            Touch(w);
-            Notify(w, EN_CHANGE);
-            return TRUE;
-        }
+        case WM_SETTEXT: EditSetText(w, lp ? (const wchar_t*)lp : L"", true); return TRUE;
         case WM_GETTEXT: {
             wchar_t* out = (wchar_t*)lp;
             if (!out || wp == 0) return 0;

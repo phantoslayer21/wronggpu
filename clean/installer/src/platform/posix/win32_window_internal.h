@@ -39,7 +39,8 @@ struct Win {
     int x = 0, y = 0, w = 0, h = 0;  // top-level: its place on the screen (pixels); a child: in its parent's client area
     SDL_Window* sdl = nullptr;
     unsigned sdlId = 0;
-    float density = 1;             // pixels per SDL window unit
+    float density = 1;             // pixels per SDL window unit (read again when the display scale or pixel size changes)
+    RECT dpiRect{};                // the suggested rect of the WM_DPICHANGED message queued for this window
     bool invalid = false;
     uint64_t lastPaintMs = 0;
     bool trackLeave = false, trackNcLeave = false;
@@ -58,10 +59,15 @@ POINT ClientOriginOnScreen(Win* w);   // the client area's top-left corner on th
 HWND TopOf(Win* w);
 extern HWND g_focus;               // the window with the keyboard (a text field or the window)
 void ShowTextInput(bool on, Win* w);
+#ifdef WRONGGPU_TESTING
+void TestSetPixelDensity(float d);   // the density every window reports from now on (0: SDL's own); the window units stay
+#endif
 
 // the "EDIT" class's procedure (win32_window_edit.cpp)
 LRESULT EditClassProc(Win* w, UINT m, WPARAM wp, LPARAM lp);
 void EditInit(Win* w);
+// the text replaced as a whole with the caret after it (WM_SETTEXT; notify: the undo step and EN_CHANGE of one made by a message)
+void EditSetText(Win* w, const std::wstring& text, bool notify);
 // measure: the painter's, for caret placement by the mouse
 float EditMeasure(const std::wstring& text, int fontPx, int upTo);
 std::wstring ClipGet();                  // the clipboard's text (win32_window_sdl.cpp)

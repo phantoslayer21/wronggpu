@@ -600,7 +600,14 @@ void Gfx::Glow(float cx, float cy, float rx, float ry, Col c) {
 }
 
 // ---- clips and layers ------------------------------------------------------------------------------------------------------
-// A clip is a cairo_save; the matrix is set again when it is popped (a SetOffset made inside it must outlive it, as on Windows).
+// A clip is a cairo_save; the matrix is kept as it is when it is popped (a SetOffset made inside it must outlive it, and an open
+// PushRotate must stay open, as on Windows, where a clip never touches the transform).
+static void PopLayerKeepMatrix(GfxCairo& g) {
+    cairo_matrix_t m;
+    cairo_get_matrix(g.cr, &m);
+    g.PopLayer();
+    cairo_set_matrix(g.cr, &m);
+}
 void Gfx::PushClip(const Rc& r) {
     if (!LIVE) return;
     cairo_save(im_->cr);
@@ -611,8 +618,7 @@ void Gfx::PushClip(const Rc& r) {
 }
 void Gfx::PopClip() {
     if (!LIVE) return;
-    im_->PopLayer();
-    ApplyMatrix(*im_, scale, ox_, oy_);
+    PopLayerKeepMatrix(*im_);
 }
 // rad < 0: only the top corners are rounded
 void Gfx::PushRoundClip(const Rc& r, float rad) {
@@ -625,8 +631,7 @@ void Gfx::PushRoundClip(const Rc& r, float rad) {
 }
 void Gfx::PopRoundClip() {
     if (!LIVE) return;
-    im_->PopLayer();
-    ApplyMatrix(*im_, scale, ox_, oy_);
+    PopLayerKeepMatrix(*im_);
 }
 // Everything drawn until PopFade goes to a group that is painted back at `opacity`
 void Gfx::PushFade(float opacity) {

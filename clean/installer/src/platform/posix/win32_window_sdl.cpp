@@ -12,12 +12,14 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bitset>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <map>
 #include <thread>
 #include <unordered_map>
@@ -38,7 +40,11 @@ std::mutex g_mu;
 std::unordered_map<uintptr_t, std::unique_ptr<Win>> g_wins;
 uintptr_t g_nextId = 1;
 std::map<std::wstring, WNDCLASSEXW> g_classes;  // by lower-case name
-std::deque<MSG> g_q;
+// The keys and buttons down as of an input message: GetKeyState reports these for the message being handled (Win32), not what SDL's
+// events later in the same batch made of the keyboard.
+struct KeySnap { std::bitset<256> down; uint8_t btn = 0; };
+struct Queued { MSG msg; bool hasSnap; KeySnap snap; };
+std::deque<Queued> g_q;
 std::condition_variable g_cv;
 bool g_quit = false;
 int g_quitCode = 0;
@@ -52,8 +58,13 @@ std::atomic<bool> g_wakePending{false};
 std::unordered_map<SDL_WindowID, uintptr_t> g_bySdl;
 HWND g_capture = nullptr, g_active = nullptr;
 POINT g_mouse{0, 0};            // the pointer on the screen (pixels), as the last event said
-bool g_down[256] = {};
+std::bitset<256> g_down;       // the keys down as the last SDL event pumped said (the UI thread's)
 uint8_t g_btn = 0;              // MK_LBUTTON | MK_RBUTTON | MK_MBUTTON held
+KeySnap g_cur;                  // the state of the input message taken off the queue last
+std::atomic<size_t> g_uiThread{0};  // the thread that runs the loop (a hash of its id; 0 until it first calls in)
+size_t ThisThread() { return std::hash<std::thread::id>()(std::this_thread::get_id()) | 1; }
+void NoteUiThread() { size_t none = 0; g_uiThread.compare_exchange_strong(none, ThisThread()); }
+bool OnUiThread() { return g_uiThread.load() == ThisThread(); }
 std::function<float(const std::wstring&, int, int)> g_measure;
 std::function<bool(const std::string&)>& Hook() { static std::function<bool(const std::string&)> f; return f; }  // a function-local static: set by another file's static initialiser
 std::unordered_map<unsigned, SDL_Cursor*> g_cursors;
@@ -87,12 +98,17 @@ void Wake() {
     }
 }
 
-void Enqueue(HWND h, UINT m, WPARAM wp, LPARAM lp) {
-    MSG msg{};
-    msg.hwnd = h; msg.message = m; msg.wParam = wp; msg.lParam = lp; msg.time = (DWORD)NowMs(); msg.pt = g_mouse;
+// input: made from an SDL event on the UI thread, so it carries the keys and buttons as that event left them; a post from another
+// thread has no pointer position (g_mouse is the UI thread's) and leaves the key state as it was
+void Enqueue(HWND h, UINT m, WPARAM wp, LPARAM lp, bool input = false) {
+    const bool ui = OnUiThread();
+    Queued q{};
+    q.msg.hwnd = h; q.msg.message = m; q.msg.wParam = wp; q.msg.lParam = lp; q.msg.time = (DWORD)NowMs();
+    q.msg.pt = ui ? g_mouse : POINT{0, 0};
+    if (input && ui) { q.hasSnap = true; q.snap.down = g_down; q.snap.btn = g_btn; }
     {
         std::lock_guard<std::mutex> l(g_mu);
-        g_q.push_back(msg);
+        g_q.push_back(q);
     }
     Wake();
 }
@@ -118,9 +134,27 @@ float DensityGuess(SDL_DisplayID d) {
     return 1.f;
 }
 
+#ifdef WRONGGPU_TESTING
+float g_testDensity = 0;  // a test's stand-in for a display scale change the offscreen driver cannot make (0: the real one)
+#endif
+float PixelDensityOf(SDL_Window* s) {
+#ifdef WRONGGPU_TESTING
+    if (g_testDensity > 0) return g_testDensity;
+#endif
+    return SDL_GetWindowPixelDensity(s);
+}
+
 void SdlSizePx(Win* w, int& pw, int& ph) {
     pw = ph = 0;
-    if (w->sdl) SDL_GetWindowSizeInPixels(w->sdl, &pw, &ph);
+    if (!w->sdl) return;
+#ifdef WRONGGPU_TESTING
+    if (g_testDensity > 0) {
+        SDL_GetWindowSize(w->sdl, &pw, &ph);
+        pw = (int)std::lround(pw * g_testDensity); ph = (int)std::lround(ph * g_testDensity);
+        return;
+    }
+#endif
+    SDL_GetWindowSizeInPixels(w->sdl, &pw, &ph);
 }
 
 POINT OriginOf(Win* w) {  // the client area's corner on the screen
@@ -143,10 +177,16 @@ void ClientSize(Win* w, int& cw, int& ch) {
     else { cw = w->w; ch = w->h; }
 }
 
+void RefreshDensity(Win* w) { if (w->sdl) w->density = std::max(0.5f, PixelDensityOf(w->sdl)); }
+
 UINT DpiOf(Win* w) {
     Win* t = TopWin(w);
     if (t && t->sdl) {
+#ifdef WRONGGPU_TESTING
+        const float s = g_testDensity > 0 ? g_testDensity : SDL_GetWindowDisplayScale(t->sdl);
+#else
         const float s = SDL_GetWindowDisplayScale(t->sdl);
+#endif
         if (s > 0.25f) return (UINT)std::lround(96 * s);
     }
     return 96;
@@ -314,16 +354,16 @@ void TranslateMouse(const SDL_Event& e) {
 
     if (e.type == SDL_EVENT_MOUSE_WHEEL) {
         const int delta = (int)std::lround(e.wheel.y * WHEEL_DELTA * (e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -1 : 1));
-        if (delta) Enqueue(Hw(target), WM_MOUSEWHEEL, MAKEWPARAM((WORD)KeyStates(), (WORD)(short)delta), scr);
+        if (delta) Enqueue(Hw(target), WM_MOUSEWHEEL, MAKEWPARAM((WORD)KeyStates(), (WORD)(short)delta), scr, true);
         return;
     }
     if (e.type == SDL_EVENT_MOUSE_MOTION) {
         // moving between the client area and the caption: the leave messages the app asked for with TrackMouseEvent
-        if (nc && top->trackLeave && !g_capture) { top->trackLeave = false; Enqueue(Hw(top), WM_MOUSELEAVE, 0, 0); }
-        if (!nc && top->trackNcLeave) { top->trackNcLeave = false; Enqueue(Hw(top), WM_NCMOUSELEAVE, 0, 0); }
-        Enqueue(Hw(target), WM_SETCURSOR, (WPARAM)Hw(target), MAKELPARAM((WORD)ht, WM_MOUSEMOVE));
-        if (nc) Enqueue(Hw(top), WM_NCMOUSEMOVE, (WPARAM)ht, scr);
-        else Enqueue(Hw(target), WM_MOUSEMOVE, KeyStates(), cli);
+        if (nc && top->trackLeave && !g_capture) { top->trackLeave = false; Enqueue(Hw(top), WM_MOUSELEAVE, 0, 0, true); }
+        if (!nc && top->trackNcLeave) { top->trackNcLeave = false; Enqueue(Hw(top), WM_NCMOUSELEAVE, 0, 0, true); }
+        Enqueue(Hw(target), WM_SETCURSOR, (WPARAM)Hw(target), MAKELPARAM((WORD)ht, WM_MOUSEMOVE), true);
+        if (nc) Enqueue(Hw(top), WM_NCMOUSEMOVE, (WPARAM)ht, scr, true);
+        else Enqueue(Hw(target), WM_MOUSEMOVE, KeyStates(), cli, true);
         return;
     }
     const bool down = e.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
@@ -333,19 +373,19 @@ void TranslateMouse(const SDL_Event& e) {
         if (down) g_btn |= MK_LBUTTON; else g_btn &= ~MK_LBUTTON;
         g_down[VK_LBUTTON] = down;
         if (nc) {
-            if (down) Enqueue(Hw(top), clicks >= 2 ? WM_NCLBUTTONDBLCLK : WM_NCLBUTTONDOWN, (WPARAM)ht, scr);
-            else Enqueue(Hw(top), WM_NCLBUTTONUP, (WPARAM)ht, scr);
+            if (down) Enqueue(Hw(top), clicks >= 2 ? WM_NCLBUTTONDBLCLK : WM_NCLBUTTONDOWN, (WPARAM)ht, scr, true);
+            else Enqueue(Hw(top), WM_NCLBUTTONUP, (WPARAM)ht, scr, true);
         } else {
-            Enqueue(Hw(target), down ? (clicks >= 2 ? WM_LBUTTONDBLCLK : WM_LBUTTONDOWN) : WM_LBUTTONUP, KeyStates(), cli);
+            Enqueue(Hw(target), down ? (clicks >= 2 ? WM_LBUTTONDBLCLK : WM_LBUTTONDOWN) : WM_LBUTTONUP, KeyStates(), cli, true);
         }
     } else if (b == SDL_BUTTON_RIGHT) {
         if (down) g_btn |= MK_RBUTTON; else g_btn &= ~MK_RBUTTON;
-        if (!nc) Enqueue(Hw(target), down ? WM_RBUTTONDOWN : WM_RBUTTONUP, KeyStates(), cli);
+        if (!nc) Enqueue(Hw(target), down ? WM_RBUTTONDOWN : WM_RBUTTONUP, KeyStates(), cli, true);
     } else if (b == SDL_BUTTON_MIDDLE) {
         if (down) g_btn |= MK_MBUTTON; else g_btn &= ~MK_MBUTTON;
-        if (!nc) Enqueue(Hw(target), down ? WM_MBUTTONDOWN : WM_MBUTTONUP, KeyStates(), cli);
+        if (!nc) Enqueue(Hw(target), down ? WM_MBUTTONDOWN : WM_MBUTTONUP, KeyStates(), cli, true);
     } else if (b == SDL_BUTTON_X1 || b == SDL_BUTTON_X2) {
-        if (!nc) Enqueue(Hw(target), down ? WM_XBUTTONDOWN : WM_XBUTTONUP, MAKEWPARAM((WORD)KeyStates(), (WORD)(b == SDL_BUTTON_X1 ? XBUTTON1 : XBUTTON2)), cli);
+        if (!nc) Enqueue(Hw(target), down ? WM_XBUTTONDOWN : WM_XBUTTONUP, MAKEWPARAM((WORD)KeyStates(), (WORD)(b == SDL_BUTTON_X1 ? XBUTTON1 : XBUTTON2)), cli, true);
     }
 }
 
@@ -369,7 +409,7 @@ void TranslateKey(const SDL_Event& e) {
     if (alt && (e.key.mod & SDL_KMOD_ALT)) lp |= 1 << 29;
     if (!down) lp |= (1 << 30) | ((LPARAM)1 << 31);
     const UINT m = down ? (alt ? WM_SYSKEYDOWN : WM_KEYDOWN) : (alt ? WM_SYSKEYUP : WM_KEYUP);
-    Enqueue(target, m, vk, lp);
+    Enqueue(target, m, vk, lp, true);
 }
 
 void TranslateText(const SDL_Event& e) {
@@ -381,7 +421,7 @@ void TranslateText(const SDL_Event& e) {
         int extra = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : c >= 0xC0 ? 1 : 0;
         c = extra == 3 ? c & 7 : extra == 2 ? c & 15 : extra == 1 ? c & 31 : c;
         while (extra-- > 0 && *s) c = (c << 6) | ((unsigned char)*s++ & 63);
-        Enqueue(target, WM_CHAR, (WPARAM)c, 1);
+        Enqueue(target, WM_CHAR, (WPARAM)c, 1, true);
     }
 }
 
@@ -395,7 +435,7 @@ void TranslateWindow(const SDL_Event& e) {
     if (!w) return;
     switch (e.type) {
         case SDL_EVENT_WINDOW_CLOSE_REQUESTED: Enqueue(Hw(w), WM_CLOSE, 0, 0); break;
-        case SDL_EVENT_WINDOW_RESIZED: case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED: StateSize(w, false); break;
+        case SDL_EVENT_WINDOW_RESIZED: case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED: RefreshDensity(w); StateSize(w, false); break;
         case SDL_EVENT_WINDOW_MOVED: {
             const POINT o = OriginOf(w);
             Enqueue(Hw(w), WM_MOVE, 0, MAKELPARAM((short)o.x, (short)o.y));
@@ -411,13 +451,13 @@ void TranslateWindow(const SDL_Event& e) {
             if (w->trackLeave && !g_capture) { w->trackLeave = false; Enqueue(Hw(w), WM_MOUSELEAVE, 0, 0); }
             break;
         case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED: case SDL_EVENT_WINDOW_DISPLAY_CHANGED: {
-            static RECT r;  // handed over by pointer: the message is handled before the next one is made
+            RefreshDensity(w);  // before the rect: SetWindowPos and the mouse turn units to pixels with it
             const POINT o = OriginOf(w);
             int pw = 0, ph = 0;
             SdlSizePx(w, pw, ph);
-            r = RECT{o.x, o.y, o.x + pw, o.y + ph};
+            w->dpiRect = RECT{o.x, o.y, o.x + pw, o.y + ph};  // handed over by pointer: the window's own, whatever else is queued
             const UINT dpi = DpiOf(w);
-            Enqueue(Hw(w), WM_DPICHANGED, MAKEWPARAM((WORD)dpi, (WORD)dpi), (LPARAM)&r);
+            Enqueue(Hw(w), WM_DPICHANGED, MAKEWPARAM((WORD)dpi, (WORD)dpi), (LPARAM)&w->dpiRect);
             break;
         }
         default: break;
@@ -606,23 +646,29 @@ bool ScriptPending() { return false; }
 // ---- timers and paints -----------------------------------------------------------------------------------------------------------
 constexpr uint64_t kPaintGapMs = 14;  // frames are at most ~70 a second (a swap chain's wait for the display has no counterpart here)
 
-bool TakeTimer(MSG* out, uint64_t now) {
+// the message filter of GetMessageW and PeekMessageW: a window (null: any) and a range (0, 0: any)
+bool Wanted(HWND fh, UINT lo, UINT hi, HWND h, UINT m) {
+    return (!fh || fh == h) && ((lo == 0 && hi == 0) || (m >= lo && m <= hi));
+}
+
+// remove: the timer moves on to its next period; a message only looked at (PM_NOREMOVE) stays due
+bool TakeTimer(MSG* out, uint64_t now, bool remove, HWND fh, UINT lo, UINT hi) {
     std::lock_guard<std::mutex> l(g_mu);
     for (auto& t : g_timers) {
-        if (t.due > now) continue;
-        t.due = now + t.interval;
+        if (t.due > now || !Wanted(fh, lo, hi, (HWND)t.hwnd, WM_TIMER)) continue;
+        if (remove) t.due = now + t.interval;
         out->hwnd = (HWND)t.hwnd; out->message = WM_TIMER; out->wParam = t.id; out->lParam = (LPARAM)t.proc; out->time = (DWORD)now; out->pt = g_mouse;
         return true;
     }
     return false;
 }
 
-bool TakePaint(MSG* out, uint64_t now) {
+bool TakePaint(MSG* out, uint64_t now, HWND fh, UINT lo, UINT hi) {
     std::lock_guard<std::mutex> l(g_mu);
     for (auto& e : g_wins) {
         Win* w = e.second.get();
         if (w->parent || w->messageOnly || !w->visible || !w->invalid || w->minimized) continue;
-        if (now < w->lastPaintMs + kPaintGapMs) continue;
+        if (now < w->lastPaintMs + kPaintGapMs || !Wanted(fh, lo, hi, Hw(w), WM_PAINT)) continue;
         out->hwnd = Hw(w); out->message = WM_PAINT; out->wParam = 0; out->lParam = 0; out->time = (DWORD)now; out->pt = g_mouse;
         return true;
     }
@@ -643,33 +689,40 @@ int64_t NextDueMs(uint64_t now) {
     return best;
 }
 
-// the next message, taking SDL's events, paints and timers in as Windows orders them: posted and input first, then WM_PAINT, then
-// WM_TIMER. block: wait for one (GetMessage) or return false (PeekMessage). remove: take it off the queue.
-bool NextMessage(MSG* out, bool block, bool remove) {
-    for (;;) {
-        {
-            std::lock_guard<std::mutex> l(g_mu);
-            if (!g_q.empty()) {
-                *out = g_q.front();
-                if (remove) g_q.pop_front();
-                return true;
-            }
+// the first queued message the filter wants; remove: taken off the queue, and the keys it carries become what GetKeyState reports
+bool TakeQueued(MSG* out, bool remove, HWND fh, UINT lo, UINT hi) {
+    std::lock_guard<std::mutex> l(g_mu);
+    for (auto it = g_q.begin(); it != g_q.end(); ++it) {
+        if (!Wanted(fh, lo, hi, it->msg.hwnd, it->msg.message)) continue;
+        *out = it->msg;
+        if (remove) {
+            if (it->hasSnap) g_cur = it->snap;
+            g_q.erase(it);
         }
+        return true;
+    }
+    return false;
+}
+
+// the next message, taking SDL's events, paints and timers in as Windows orders them: posted and input first, then WM_QUIT, then
+// WM_PAINT, then WM_TIMER. block: wait for one (GetMessage) or return false (PeekMessage). remove: take it off the queue. fh, lo, hi: the
+// window and message range wanted.
+bool NextMessage(MSG* out, bool block, bool remove, HWND fh = nullptr, UINT lo = 0, UINT hi = 0) {
+    NoteUiThread();
+    for (;;) {
+        if (TakeQueued(out, remove, fh, lo, hi)) return true;
         PumpSdl(0);
         if (RunScriptStep()) continue;
-        {
-            std::lock_guard<std::mutex> l(g_mu);
-            if (!g_q.empty()) continue;
-        }
+        if (TakeQueued(out, remove, fh, lo, hi)) return true;
         const uint64_t now = NowMs();
-        if (TakePaint(out, now)) return true;
-        if (TakeTimer(out, now)) return true;
-        if (g_quit) {
-            g_quit = false;
+        if (g_quit && !fh && Wanted(nullptr, lo, hi, nullptr, WM_QUIT)) {  // a thread message: for no window in particular
+            if (remove) g_quit = false;
             *out = MSG{};
             out->message = WM_QUIT; out->wParam = (WPARAM)g_quitCode;
             return true;
         }
+        if (TakePaint(out, now, fh, lo, hi)) return true;
+        if (TakeTimer(out, now, remove, fh, lo, hi)) return true;
         if (!block) return false;
         int64_t wait = NextDueMs(now);
         if (ScriptPending()) wait = wait < 0 ? 20 : std::min<int64_t>(wait, 20);  // a script step
@@ -723,6 +776,9 @@ float EditMeasure(const std::wstring& text, int fontPx, int upTo) {
     if (g_measure) return g_measure(text, fontPx, upTo);
     return (float)upTo * fontPx * 0.55f;
 }
+#ifdef WRONGGPU_TESTING
+void TestSetPixelDensity(float d) { g_testDensity = d; }
+#endif
 void SetScriptHook(std::function<bool(const std::string&)> f) { Hook() = std::move(f); }
 #ifdef WRONGGPU_TESTING
 void ScriptClick(float x, float y) { ScriptClickImpl(x, y); }
@@ -781,6 +837,7 @@ using namespace wgwin;
 // ================================================================================================================================
 ATOM RegisterClassExW(const WNDCLASSEXW* wc) {
     if (!wc || !wc->lpszClassName) return 0;
+    NoteUiThread();
     std::lock_guard<std::mutex> l(g_mu);
     g_classes[Lower(wc->lpszClassName)] = *wc;
     return (ATOM)(g_classes.size() + 0xC000);
@@ -816,15 +873,17 @@ void ApplyMinMax(Win* w) {
 }  // namespace
 
 HWND CreateWindowExW(DWORD exStyle, LPCWSTR cls, LPCWSTR title, DWORD style, int x, int y, int w, int h, HWND parent, HMENU menu, HINSTANCE, LPVOID) {
+    NoteUiThread();
     auto win = std::make_unique<Win>();
     const std::wstring lc = cls ? Lower(cls) : L"";
     win->cls = cls ? cls : L"";
-    win->text = title ? title : L"";
     win->style = style; win->exStyle = exStyle;
     if (lc == L"edit") {
         win->builtinEdit = true;
         EditInit(win.get());
+        EditSetText(win.get(), title ? title : L"", false);  // the title is the text, with the caret after it, as WM_SETTEXT leaves it
     } else {
+        win->text = title ? title : L"";
         std::lock_guard<std::mutex> l(g_mu);
         auto it = g_classes.find(lc);
         if (it == g_classes.end()) { SetLastError(1407); return nullptr; }  // ERROR_CANNOT_FIND_WND_CLASS
@@ -843,11 +902,11 @@ HWND CreateWindowExW(DWORD exStyle, LPCWSTR cls, LPCWSTR title, DWORD style, int
         if (!EnsureSdl()) { fprintf(stderr, "WrongGPU: cannot open a window: %s\n", SDL_GetError()); exit(3); }
         SDL_WindowFlags f = SDL_WINDOW_HIDDEN | SDL_WINDOW_BORDERLESS | SDL_WINDOW_HIGH_PIXEL_DENSITY;
         if (style & WS_THICKFRAME) f |= SDL_WINDOW_RESIZABLE;
-        const std::string t8 = wgposix::ToUtf8(win->text);
+        const std::string t8 = wgposix::ToUtf8(title ? title : L"");
         win->sdl = SDL_CreateWindow(t8.c_str(), std::max(1, w), std::max(1, h), f);
         if (!win->sdl) { fprintf(stderr, "WrongGPU: cannot open a window: %s\n", SDL_GetError()); exit(3); }
         win->sdlId = SDL_GetWindowID(win->sdl);
-        win->density = std::max(0.5f, SDL_GetWindowPixelDensity(win->sdl));
+        win->density = std::max(0.5f, PixelDensityOf(win->sdl));
         // the size asked for is in pixels: set again in SDL's window units now that the density is known
         SDL_SetWindowSize(win->sdl, std::max(1, (int)std::lround(w / win->density)), std::max(1, (int)std::lround(h / win->density)));
         if (x != CW_USEDEFAULT && y != CW_USEDEFAULT) SDL_SetWindowPosition(win->sdl, (int)std::lround(x / win->density), (int)std::lround(y / win->density));
@@ -890,7 +949,7 @@ BOOL DestroyWindow(HWND h) {
     {
         std::lock_guard<std::mutex> l(g_mu);
         g_timers.erase(std::remove_if(g_timers.begin(), g_timers.end(), [&](const Timer& t) { return t.hwnd == (uintptr_t)h; }), g_timers.end());
-        for (auto it = g_q.begin(); it != g_q.end();) it = it->hwnd == h ? g_q.erase(it) : it + 1;
+        for (auto it = g_q.begin(); it != g_q.end();) it = it->msg.hwnd == h ? g_q.erase(it) : it + 1;
         g_bySdl.erase(sid);
         g_wins.erase((uintptr_t)h);
     }
@@ -1176,13 +1235,13 @@ BOOL PostMessageW(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 }
 LRESULT SendMessageW(HWND h, UINT m, WPARAM wp, LPARAM lp) { return Send(h, m, wp, lp); }
 
-BOOL GetMessageW(MSG* m, HWND, UINT, UINT) {
-    NextMessage(m, true, true);
+BOOL GetMessageW(MSG* m, HWND h, UINT lo, UINT hi) {
+    NextMessage(m, true, true, h, lo, hi);
     return m->message != WM_QUIT;
 }
-BOOL PeekMessageW(MSG* m, HWND, UINT, UINT, UINT remove) { return NextMessage(m, false, (remove & PM_REMOVE) != 0); }
+BOOL PeekMessageW(MSG* m, HWND h, UINT lo, UINT hi, UINT remove) { return NextMessage(m, false, (remove & PM_REMOVE) != 0, h, lo, hi); }
 BOOL TranslateMessage(const MSG* m) {
-    if (m->message == WM_KEYDOWN && (m->wParam == VK_RETURN || m->wParam == VK_TAB || m->wParam == VK_ESCAPE) && !g_down[VK_MENU])
+    if (m->message == WM_KEYDOWN && (m->wParam == VK_RETURN || m->wParam == VK_TAB || m->wParam == VK_ESCAPE) && !g_cur.down[VK_MENU])
         Enqueue(m->hwnd, WM_CHAR, m->wParam == VK_RETURN ? 13 : m->wParam == VK_TAB ? 9 : 27, m->lParam);
     return TRUE;
 }
@@ -1259,6 +1318,7 @@ HWND GetFocus() { return g_focus && Find(g_focus) ? g_focus : nullptr; }
 HWND SetCapture(HWND h) {
     const HWND old = g_capture;
     g_capture = h;
+    if (old && old != h && Find(old)) Send(old, WM_CAPTURECHANGED, 0, (LPARAM)h);  // the window that lost it learns who has it
     return old;
 }
 BOOL ReleaseCapture() {
@@ -1268,9 +1328,9 @@ BOOL ReleaseCapture() {
     return TRUE;
 }
 HWND GetCapture() { return g_capture && Find(g_capture) ? g_capture : nullptr; }
-short GetKeyState(int vk) {
-    if (vk == VK_LBUTTON) return (g_btn & MK_LBUTTON) ? (short)0x8000 : 0;
-    return vk >= 0 && vk < 256 && g_down[vk] ? (short)0x8000 : 0;
+short GetKeyState(int vk) {  // as of the input message taken off the queue last, as Win32's is
+    if (vk == VK_LBUTTON) return (g_cur.btn & MK_LBUTTON) ? (short)0x8000 : 0;
+    return vk >= 0 && vk < 256 && g_cur.down[vk] ? (short)0x8000 : 0;
 }
 BOOL TrackMouseEvent(TRACKMOUSEEVENT* t) {
     Win* w = t ? Find(t->hwndTrack) : nullptr;

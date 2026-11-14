@@ -161,6 +161,25 @@ int main(int argc, char** argv) {
         CHECK(gx.Pixels(after, pw, ph) && Same(before, after));
     }
 
+    // a rotation stays open through a clip, a round clip and a fade that are popped inside it (the matrix is not rebuilt from identity)
+    for (int kind = 0; kind < 3; ++kind) {
+        CHECK(gx.BeginOffscreen(100, 100, 1));
+        gx.Clear(Hex(0xFFFFFF));
+        gx.PushRotate(50, 50, 90);  // clockwise: a bar to the right of the centre turns to below it
+        if (kind == 0) { gx.PushClip(Rc{0, 0, 100, 100}); gx.PopClip(); }
+        else if (kind == 1) { gx.PushRoundClip(Rc{0, 0, 100, 100}, 4); gx.PopRoundClip(); }
+        else { gx.PushFade(1.f); gx.PopFade(); }
+        gx.Fill(Rc{70, 45, 20, 10}, Hex(0x000000));
+        gx.PopRotate();
+        std::vector<uint8_t> rp;
+        UINT rw = 0, rh = 0;
+        CHECK(gx.Pixels(rp, rw, rh));
+        auto dark = [&](int x, int y) { return rp[((size_t)y * rw + x) * 4] < 64; };
+        CHECK(dark(50, 80));    // the bar at the bottom: the rotation survived the pop
+        CHECK(!dark(80, 50));   // and not where it would be unrotated
+        gx.EndFrame();
+    }
+
     // text and icons really leave ink: a blank page, then one glyph
     CHECK(gx.BeginOffscreen(60, 40, 2));
     gx.Clear(Hex(0xFFFFFF));

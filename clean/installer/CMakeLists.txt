@@ -299,6 +299,12 @@ if(NOT WIN32)
                --native-linux $<TARGET_FILE:WrongGPU> --work ${CMAKE_CURRENT_BINARY_DIR}/launcher-native-tests)
       set_tests_properties(launcher-native PROPERTIES TIMEOUT 1800)
     endif()
+    # the window layer's message handling with SDL events pushed by the test (display scale change, a batch of keys, text in an edit,
+    # WM_QUIT order, posts from a thread, capture, PeekMessageW's filters); SDL's offscreen driver, no window opens
+    add_executable(window-linux-tests tests/window_linux_tests.cpp)
+    target_link_libraries(window-linux-tests PRIVATE wg_window)
+    add_test(NAME window-linux COMMAND window-linux-tests)
+    set_tests_properties(window-linux PROPERTIES TIMEOUT 120 ENVIRONMENT "SDL_VIDEO_DRIVER=offscreen;SDL_AUDIODRIVER=dummy")
   endif()
   install(TARGETS WrongGPU RUNTIME DESTINATION bin)
   install(DIRECTORY assets/fonts DESTINATION share/wronggpu/assets)
