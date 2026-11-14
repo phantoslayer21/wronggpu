@@ -4,7 +4,8 @@
     python clean/l/runner/l_c32_check.py --build <dir> --rocm "C:\\Program Files\\AMD\\ROCm\\7.2" [--compile]
         [--with-swin-co] --json out.json
 
---compile builds <dir>/l_swin.co (and with --with-swin-co Model M's swin.co from clean/kernels/swin.hip) on the CPU.
+--compile builds <dir>/l_swin.co, l_ops.co and l_enc_values.co (clean/kernels/encoder.hip with WG_ENC_VALUES_OUT=1; and with --with-swin-co Model M's swin.co from clean/kernels/swin.hip)
+on the CPU.
 The GPU part runs in a GPU slot. Output: counts only, no timing.
 
 Checks:
@@ -14,6 +15,12 @@ Checks:
    differ at all.
 2. l_swin_block_c32_nc against l_swin_block_c32 where the weights' flags allow it: byte-identical.
 3. With swin.co: l_swin_block_c64 (this file's build of the template) against Model M's swin_block_c64: byte-identical.
+4. Model L's two blocks (clean/l/FORMATS.md) against the oracle with their borders: l_swin_block_c32_enc (FP16 halo
+   map in, FP8 out) and l_swin_block_c32_dec (FP8 in, FP16 out, token-grid mirror); their `_nc` forms byte-identical
+   to the clamped ones. The decoder block's FP16 output must pass the rule of 1. on its FP8-rounded values and the
+   FP16 criterion (f16_passes). With <dir>/l_ops.co, the coefficient codes are computed from the real block output:
+   l_coef against the oracle's functions on that same output (the strict bound of l_ops_check.py), and end to end
+   against the oracle block + functions (at least 99.5 % of each code kind and of the C values identical).
 """
 import argparse
 import ctypes
@@ -43,8 +50,11 @@ def compile_kernels(build, rocm, with_swin=False, clang=None):
     clean_process_environment(rocm)
     clang = clang or B.find_clang(rocm)
     kdir = os.path.join(ROOT, "clean", "kernels")
-    B.run(B.device_command(clang, rocm, os.path.join(ROOT, "clean", "l", "kernels", "l_swin.hip"),
-                           os.path.join(build, "l_swin.co")) + ["-I", kdir])
+    for name in ("l_swin", "l_ops"):
+        B.run(B.device_command(clang, rocm, os.path.join(ROOT, "clean", "l", "kernels", name + ".hip"),
+                               os.path.join(build, name + ".co")) + ["-I", kdir])
+    B.run(B.device_command(clang, rocm, os.path.join(kdir, "encoder.hip"), os.path.join(build, "l_enc_values.co"),
+                           defines={"WG_ENC_VALUES_OUT": 1}))
     if with_swin:
         B.run(B.device_command(clang, rocm, os.path.join(kdir, "swin.hip"), os.path.join(build, "swin.co")))
 
@@ -83,6 +93,24 @@ class Gpu:
                 with open(path, "rb") as f:
                     self.mods[co] = self.hip.load_module(f.read())
 
+    def raw_block(self, co, kernel, xb, out_bytes, blob, H, W, offset):
+        """Launch a block kernel on input bytes xb; returns the output buffer's bytes."""
+        h = self.hip
+        px, pw, po = h.malloc(len(xb)), h.malloc(len(blob)), h.malloc(out_bytes)
+        h.upload(px, xb)
+        h.upload(pw, blob)
+        h.memset(po, 0, out_bytes)
+        ox, oy = offset
+        nwin = -(-(W + ox) // 4) * -(-(H + oy) // 4)
+        args = [ctypes.c_void_p(px), ctypes.c_void_p(0), ctypes.c_void_p(po), ctypes.c_void_p(pw),
+                ctypes.c_int(H), ctypes.c_int(W), ctypes.c_int(ox), ctypes.c_int(oy)]
+        h.launch(h.get_function(self.mods[co], kernel), -(-nwin // 8), 256, args)
+        h.sync()
+        out = h.download(po, out_bytes)
+        for p in (px, pw, po):
+            h.free(p)
+        return out
+
     def block(self, co, kernel, x, blob, offset, C):
         """x: FP8-exact [H, W, C] -> kernel output [H, W, C] (float32 values)."""
         h = self.hip
@@ -104,19 +132,131 @@ class Gpu:
         return fp8_decode(out)
 
 
+CONSTS = dict(T.M_BLOCK_CONSTS, gelu="sigmoid")
+
+
+def make_case(rng, H, W):
+    """Synthetic block parameters, their blob and an FP8 input map [H, W, 32] (CPU only)."""
+    p = L.random_block_params(rng, 32, 2, 128)
+    return p, LP.pack_block(p, 32, 2, 128), q8(rng.normal(0, 1.5, (H, W, 32)))
+
+
+L_CASES = [(8, 12), (16, 8), (32, 64), (48, 32)]     # Model L's blocks: grid sides multiples of 4
+
+
+def f16_steps(a, b):
+    """Distance in FP16 units of last place (finite values)."""
+    def key(v):
+        i = np.asarray(v, np.float16).view(np.int16).astype(np.int64)
+        return np.where(i < 0, -(i & 0x7FFF), i)
+    return np.abs(key(a) - key(b))
+
+
+def f16_metrics(got, ref):
+    """FP16-output counterpart of metrics(): distances in FP16 ulps (finite reference values)."""
+    got = np.asarray(got, np.float64)
+    ref = np.asarray(ref, np.float64)
+    fin = np.isfinite(ref)
+    s = f16_steps(got[fin], ref[fin])
+    d = np.abs(got[fin] - ref[fin])
+    return {"f16_values": int(s.size), "f16_differ": int(np.sum(s > 0)), "f16_max_steps": int(s.max()) if s.size else 0,
+            "f16_frac_over_1": float(np.mean(s > 1)) if s.size else 0.0,
+            "f16_frac_exact": float(np.mean(s == 0)) if s.size else 1.0,
+            "f16_nonfinite": int(np.sum(~np.isfinite(got[fin]))) + int(np.sum(got[~fin] != ref[~fin])),
+            "f16_mean_abs_err": float(d.mean()) if d.size else 0.0,
+            "f16_ref_rms": float(np.sqrt(np.mean(ref[fin] ** 2))) if d.size else 0.0}
+
+
+def f16_passes(m, max_steps=None):
+    """FP16 criterion: Model M's per-stage rule with FP16 steps in place of FP8 steps (at most 2 % of values more than
+    one FP16 ulp off, mean absolute error at most 1 % of the reference RMS), at least 99 % of values exact, no
+    non-finite value where the reference is finite, and, where given, a bound on the largest distance (1 ulp for an
+    output that is one rounding of an accumulator, as the second linear)."""
+    return (m["f16_nonfinite"] == 0 and m["f16_frac_over_1"] <= 0.02 and m["f16_frac_exact"] >= 0.99
+            and m["f16_mean_abs_err"] <= 0.01 * m["f16_ref_rms"]
+            and (max_steps is None or m["f16_max_steps"] <= max_steps))
+
+
+class _OpsMod:
+    def __init__(self, hip, build):
+        self.hip = hip
+        with open(os.path.join(build, "l_ops.co"), "rb") as f:
+            self.mod = hip.load_module(f.read())
+
+
+def l_block_cases(g, rngs, ops=None):
+    """Model L's encoder block (FP16 halo map in, FP8 out, offsets "first") and decoder block (FP8 in, FP16 out,
+    token-grid mirror, offsets "second") against the oracle; the `_nc` forms against the clamped ones."""
+    res = {"enc": [], "dec": [], "nc_identical": []}
+    for rng in rngs:
+        for H, W in L_CASES:
+            for parity in (0, 1):
+                p, blob, _ = make_case(rng, H, W)
+                safe = bool(np.frombuffer(blob[:4], np.uint32)[0] & 1)
+                # encoder block
+                off = T.block_offset(T.TABLE, "first", parity)
+                h = T.block_halo(T.TABLE, "first")
+                x = L.f16(rng.normal(0, 1.5, (H + 2 * h, W + 2 * h, 32)))
+                xb = x.astype(np.float16).tobytes()
+                raw = g.raw_block("l_swin.co", "l_swin_block_c32_enc", xb, H * W * 32, blob, H, W, off)
+                got = fp8_decode(np.frombuffer(raw, np.uint8).reshape(H, W, 32))
+                ref = q8(L.swin_block(x, p, off, 2, CONSTS, "input", h))
+                m = metrics(got, ref)
+                m.update({"case": [H, W, list(off)], "pass": passes(m)})
+                res["enc"].append(m)
+                if safe:
+                    res["nc_identical"].append(
+                        g.raw_block("l_swin.co", "l_swin_block_c32_enc_nc", xb, H * W * 32, blob, H, W, off) == raw)
+                # decoder block
+                off = T.block_offset(T.TABLE, "second", parity)
+                x = q8(rng.normal(0, 1.5, (H, W, 32)))
+                xb = fp8_encode(x).tobytes()
+                raw = g.raw_block("l_swin.co", "l_swin_block_c32_dec", xb, H * W * 64, blob, H, W, off)
+                got = np.frombuffer(raw, np.float16).reshape(H, W, 32).astype(np.float64)
+                ref = L.f16(L.swin_block(x, p, off, 2, CONSTS, "coarse"))
+                m = metrics(q8(got), q8(ref))                 # Model M's per-stage rule on the FP8-rounded values
+                m.update(f16_metrics(got, ref))               # ... and the FP16 criterion on the FP16 values
+                m["case"] = [H, W, list(off)]
+                m["pass"] = passes(m) and f16_passes(m)
+                if ops is not None:                           # coefficient codes from the real block output
+                    from clean.l.runner import l_ops_check as OC
+                    dec = {"S": np.float32(rng.uniform(1.0, 4.0)), "T": np.float32(rng.uniform(0.2, 1.5))}
+                    # (1) l_coef on the GPU block output against the oracle's functions on that same output: the
+                    #     strict bound of l_ops_check (codes within 1, C within 4 FP16 ulp).
+                    m["coef_same_input"] = OC.coef_case(ops, rng, dec, H, W, H, W, y2=got, ref_y2=got)
+                    # (2) end to end: codes from the GPU block + l_coef against codes from the oracle block + oracle
+                    #     functions. The block's FP16 differences (bounded by f16_passes) pass through steep functions
+                    #     (the latent code is 127 tanh), so a code may move by more than 1 where the block differs; the
+                    #     bound: at least 99.5 % of each code kind and of the C values identical (as Model M's motion
+                    #     surfaces, clean/tests/test_encoder_emu.py).
+                    e2e = OC.coef_case(ops, rng, dec, H, W, H, W, y2=got, ref_y2=ref)
+                    e2e["pass"] = all(e2e[k]["differ"] <= 0.005 * e2e[k]["values"]
+                                      for k in ("codes_A", "codes_B", "codes_L", "C"))
+                    m["coef_end_to_end"] = e2e
+                    m["pass"] = m["pass"] and m["coef_same_input"]["pass"] and e2e["pass"]
+                res["dec"].append(m)
+                if safe:
+                    res["nc_identical"].append(
+                        g.raw_block("l_swin.co", "l_swin_block_c32_dec_nc", xb, H * W * 64, blob, H, W, off) == raw)
+    res["nc_cases"] = len(res["nc_identical"])
+    res["nc_identical"] = all(res["nc_identical"]) if res["nc_identical"] else None
+    for k in ("enc", "dec"):
+        res[k + "_total"] = {"cases": len(res[k]), "values": sum(m["values"] for m in res[k]),
+                             "differ": sum(m["differ"] for m in res[k]),
+                             "max_steps": max(m["max_steps"] for m in res[k])}
+    res["pass"] = all(m["pass"] for m in res["enc"] + res["dec"]) and res["nc_identical"] in (True, None)
+    return res
+
+
 def run(build, rocm, seeds=(89,)):
     g = Gpu(build, rocm)
     rngs = [np.random.default_rng(s) for s in seeds]
-    consts = dict(T.M_BLOCK_CONSTS, gelu="sigmoid")
     res = {"c32": [], "c32_nc_identical": None, "c64_template_identical": None}
     nc_same = []
     for rng, (H, W, off) in ((r, c) for r in rngs for c in CASES):
-        p = L.random_block_params(rng, 32, 2, 128, "blk.")
-        blob = LP.pack_block(p, "blk.", 32, 2, 128)
-        x = q8(rng.normal(0, 1.5, (H, W, 32)))
+        p, blob, x = make_case(rng, H, W)
         got = g.block("l_swin.co", "l_swin_block_c32", x, blob, off, 32)
-        bp = {k[4:]: v for k, v in p.items()}
-        ref = q8(L.swin_block(x, bp, off, 2, consts))
+        ref = q8(L.swin_block(x, p, off, 2, CONSTS))
         m = metrics(got, ref)
         m.update({"case": [H, W, list(off)], "pass": passes(m)})
         res["c32"].append(m)
@@ -140,8 +280,10 @@ def run(build, rocm, seeds=(89,)):
     res["c32_total"] = {"cases": len(res["c32"]), "values": sum(m["values"] for m in res["c32"]),
                         "differ": sum(m["differ"] for m in res["c32"]),
                         "max_steps": max(m["max_steps"] for m in res["c32"])}
+    ops = _OpsMod(g.hip, build) if os.path.exists(os.path.join(build, "l_ops.co")) else None
+    res["l_blocks"] = l_block_cases(g, [np.random.default_rng(1000 + s) for s in seeds], ops)
     res["pass"] = (all(m["pass"] for m in res["c32"]) and res["c32_nc_identical"] in (True, None)
-                   and res["c64_template_identical"] in (True, None))
+                   and res["c64_template_identical"] in (True, None) and res["l_blocks"]["pass"])
     return res
 
 
@@ -164,9 +306,12 @@ def main(argv=None):
     res = run(a.build, a.rocm, tuple(range(89, 89 + a.seeds)))
     with open(a.json, "w") as f:
         json.dump(res, f, indent=1)
-    for m in res["c32"]:
-        print(json.dumps(m))
-    print({k: v for k, v in res.items() if k != "c32"})
+    print({k: v for k, v in res.items() if k not in ("c32", "l_blocks")})
+    lb = res["l_blocks"]
+    print({k: lb[k] for k in ("enc_total", "dec_total", "nc_cases", "nc_identical", "pass")})
+    for m in lb["enc"] + lb["dec"]:
+        if not m["pass"]:
+            print("FAIL", json.dumps(m))
     return 0 if res["pass"] else 1
 
 

@@ -22,7 +22,7 @@ calls keep the driver's default (non-precise) lowering, above all mad() = one fu
 and rcp() (fdiv 1.0, x) is the hardware v_rcp_f32; it is reassembled (dxil_asm.cpp, DXC's IDxcAssembler) and signed by
 dxv. Any other float division ('/', which would be an IEEE division) or float remainder is refused: use wg_div.
 
-VGPR check: every Swin / bottleneck kernel built (a name with a swin_ part) is run through RGA (gfx1201) and its
+VGPR check: every Swin / bottleneck kernel built (a name with a swin_ or l_swin_ part) is run through RGA (gfx1201) and its
 USED_VGPRs compared with its bound in clean/dx12/vgpr_limits.json (the count that keeps its present workgroups per CU);
 over the bound, or no bound listed, fails the build. WG_DX12_VGPR_CHECK=0 skips it.
 """
@@ -201,7 +201,7 @@ VGPR_LIMITS = os.path.join(HERE, "vgpr_limits.json")
 
 
 def vgpr_checked(name):
-    return re.search(r"(^|/)swin_", name) is not None
+    return re.search(r"(^|/|l_)swin_", name) is not None   # l_swin_*: Model L's blocks (#89)
 
 
 def rga_vgprs(dxil):

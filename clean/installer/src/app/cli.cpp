@@ -21,7 +21,8 @@
 //   fingerprint <file> ...        what a DLL is (version resource, exports, text; never its name)
 //   collect <game> [--out=<zip>]  logs into a zip
 //   hipcheck                      the HIP runtime check alone
-//   model status | model convert [--model=<dll>]
+//   model status | model convert [--model=<dll>]   [--preset=M|L]: the model by name (its converter map and folder; K too in
+//                                 a build with Preset K)
 //   rr-data status | rr-data convert [--dll=<RR model file>]   the Ray Reconstruction data (shared by the RR games)
 //                                 both converts: --ignore=<path> | --ignore=<path> sha256=<hex> (both must match) |
 //                                 --ignore=sha256=<hex> (every identical copy), --ignore-list=<file> (repeatable; added
@@ -892,6 +893,13 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
     }
     if (verb == L"model") {
         const wstring sub = a.pos.empty() ? L"status" : a.pos[0];
+        // --preset=<name>: the model by its name (M, L; K in a build with Preset K). Its converter map, model folder and
+        // messages; without it, the launcher's model as before.
+        if (a.opt.count(L"preset") || a.has(L"preset")) {  // --preset=<name>; a bare --preset (no name) is refused
+            wstring why;
+            if (!SelectPreset(g.ctx, a.get(L"preset"), why)) { o.j.S("error", why); Print(why); return EXIT_USAGE; }
+        }
+        o.j.S("preset", wstring(1, SelectedPreset(g.ctx)));
         if (sub == L"convert") {
             if (!ConvertIgnoreArgs(a, o)) return o.code;
             OpLogBegin();
@@ -917,7 +925,10 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
         wstring why;
         wgc::ModelFileInfo info{};
         const bool valid = ExistingModelValid(g.ctx, &why, &info);
-        o.j.Key("model").Obj().S("file", ModelFile(g.ctx)).B("valid", valid).S("source", ReadModelSource(g.ctx)).S("why", why).End();
+        // map_sha256: the converter map of the selected model (embedded; the file it was built from has the same SHA-256)
+        const wstring mapSha = g.ctx.map.map ? FromUtf8(wgc::to_hex(g.ctx.map.map->file_sha256)) : wstring();
+        o.j.Key("model").Obj().S("file", ModelFile(g.ctx)).B("valid", valid).S("source", ReadModelSource(g.ctx)).S("why", why)
+            .S("map_sha256", mapSha).S("map_error", g.ctx.mapError).End();
         Print(wstring(L"model data: ") + (valid ? L"ready (" + ModelFile(g.ctx) + L")" : L"not ready" + (why.empty() ? wstring() : L" (" + why + L")")));
         return valid || sub == L"status" ? EXIT_OK : EXIT_NO_MODEL;
     }

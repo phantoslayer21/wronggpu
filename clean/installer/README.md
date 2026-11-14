@@ -346,7 +346,8 @@ ctest `source-size`.
   the window itself never runs elevated.
 - **Command line** (a verb as the first argument; `src/app/cli.cpp`): `scan`, `status [game]`, `install`, `repair`,
   `update`, `uninstall`, `rollback`, `adopt [game | --all]`, `set <game> key=value ...`, `set --global key=value`,
-  `get <game> [key]`, `get --global`, `collect <game> [--zip=<file>]`, `hipcheck`, `model status|convert`,
+  `get <game> [key]`, `get --global`, `collect <game> [--zip=<file>]`, `hipcheck`, `model status|convert [--preset=M|L]`
+  ("Model L by name" below),
   `rr-data status|convert [--dll=<RR model file>]` (both converts also take `--ignore=`, `--ignore-list=` and `--library=`:
   "Ignore lists" below),
   `self-install [--dir=] [--startmenu=<folder>|-]`, `self-uninstall [--keep-games]`, `play <game>`, `update-check`,
@@ -399,6 +400,19 @@ keep the games, which then get their own entries back); its data (`launcher.ini`
 `<exe folder>\WrongGPU-data`, and each game keeps its own Apps & features entry. The model data stays in
 `%LOCALAPPDATA%\WrongGPU\model` in both modes (the runtime reads it there). `managed-games.txt` in that folder lists
 the managed games, so an uninstaller keeps the model while another game uses it.
+
+**Model L by name** (#89; `src/wg_core/context.h` `SelectPreset`): `model status --preset=L` and
+`model convert --preset=L [--model=<nvngx_dlss.dll>]` use Model L's converter map and model folder. The launcher embeds the
+map (CMake `WRONGGPU_MAP_L`, default `data/preset-L.v1.map.json`, the spec side's revision v1.1; empty: a build without
+Model L) and loads it as preset L, so a map that names another preset is "converter data damaged". The model goes to
+`%LOCALAPPDATA%\WrongGPU\model\L\model.wgcm` with its own `model-source.txt`, the folder where the runtime looks for
+`model=L`. Model M's files are never touched by it. A file without Model L's data is refused: "Model L can't be prepared:
+no DLSS model file with Model L's data was found.", followed by the converter's reason for the file the player chose
+(exit 5). An unknown name, or Model L in a build without its map, is a bad command line (exit 10). The JSON result names
+the model (`preset`) and the converter map in use (`model.map_sha256`). Without `--preset` nothing changes. The window's
+model choice and the runtime settings for Model L are not part of this step. `tests/run_model_l_tests.py` checks it
+end to end: once with a build of the shipped map, and once with a build of a test map in its exact layout
+(`--write-test-map`).
 
 **Ignore lists** (`src/wg_core/convert_ignore.*`): WrongGPU converts only the vendor DLL files that came with the player's
 own games, never a copy that another program's installer placed in a game. Such an installer registers the files it placed
