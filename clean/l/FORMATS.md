@@ -74,7 +74,7 @@ workgroup, in raster order of their map.
 
 | Kernel | Status | Arguments | Grid | Does |
 |---|---|---|---|---|
-| `lev/input_encoder` | planned (rework of the old values-only variant) | as Model M's `input_encoder`, with `features` replaced by `q` | ceil(((fh + 4) / 2) ((fw + 4) / 2) / 128) (2 x 2 pixel groups of the halo map) | the 20 values and their dithered FP8 for every halo-map pixel, into `q`. The motion surfaces as Model M, only for pixels inside R. w = `enc0.values` |
+| `lev/input_encoder` | exists (GPU-checked) | as Model M's `input_encoder`, with `features` replaced by `q` | ceil(((fh + 4) / 2) ((fw + 4) / 2) / 128) (2 x 2 pixel groups of the halo map) | the 20 values and their dithered FP8 for every halo-map pixel, into `q`. The motion surfaces as Model M, only for pixels inside R. w = `enc0.values` |
 | `l_linear_32_32_relu` | exists (GPU-checked) | `x, y, w, npix` | ceil(npix / 128), npix = (fh + 4)(fw + 4) | y = q8(max(0, RN16(b + W x))), FP8 -> FP8. w = `enc0.Win1` |
 | `l_linear_32_32_f16` | exists (GPU-checked) | `x, y, w, npix` | as above | y = RN16(b + W x), FP8 -> **FP16**. w = `enc0.Win2` |
 | `l_swin_block_c32_enc[_nc]` | exists (GPU-checked) | `x, xadd (null), out, w, H, W, ox, oy` | ceil(nwin / 8), nwin = ceil((W + ox) / 4) ceil((H + oy) / 4) | the encoder block. x = `x2` (FP16 halo map; member at grid (gx, gy) read at map pixel (gy + 2, gx + 2)). out = `x3` (FP8, grid only). H = fh, W = fw. (ox, oy) = `window_offsets["first"]` for the frame parity. w = `enc0_block` |
@@ -107,5 +107,6 @@ The reconstruction (post) stage is still open.
 
 - `clean/l/runner/l_c32_check.py`: the C = 32 blocks (`l_swin_block_c32`, `_enc`, `_dec`) against the oracle.
 - `clean/l/runner/l_ops_check.py`: the linears, both projections and `l_coef` against the oracle steps.
+- `clean/l/runner/l_enc_check.py`: `lev/input_encoder` (halo map and motion surfaces) against the oracle.
 - `clean/l/runner/l_d3d12_check.py` (with its D3D12 port): each D3D12 port against its HIP kernel, byte for byte.
 - One check per new kernel follows with that kernel.

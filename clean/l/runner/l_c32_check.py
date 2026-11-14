@@ -4,7 +4,7 @@
     python clean/l/runner/l_c32_check.py --build <dir> --rocm "C:\\Program Files\\AMD\\ROCm\\7.2" [--compile]
         [--with-swin-co] --json out.json
 
---compile builds <dir>/l_swin.co and l_ops.co (and with --with-swin-co Model M's swin.co from clean/kernels/swin.hip)
+--compile builds <dir>/l_swin.co, l_ops.co and l_enc_values.co (clean/kernels/encoder.hip with WG_ENC_VALUES_OUT=1; and with --with-swin-co Model M's swin.co from clean/kernels/swin.hip)
 on the CPU.
 The GPU part runs in a GPU slot. Output: counts only, no timing.
 
@@ -50,6 +50,8 @@ def compile_kernels(build, rocm, with_swin=False, clang=None):
     for name in ("l_swin", "l_ops"):
         B.run(B.device_command(clang, rocm, os.path.join(ROOT, "clean", "l", "kernels", name + ".hip"),
                                os.path.join(build, name + ".co")) + ["-I", kdir])
+    B.run(B.device_command(clang, rocm, os.path.join(kdir, "encoder.hip"), os.path.join(build, "l_enc_values.co"),
+                           defines={"WG_ENC_VALUES_OUT": 1}))
     if with_swin:
         B.run(B.device_command(clang, rocm, os.path.join(kdir, "swin.hip"), os.path.join(build, "swin.co")))
 

@@ -83,6 +83,15 @@
 #ifndef WG_ENC_AB_STORE
 #define WG_ENC_AB_STORE 0  // no motion-surface stores
 #endif
+// Model L (clean/l/FORMATS.md, `lev/input_encoder`): no projection. The kernel runs on the padded grid plus a halo of
+// WG_ENC_HALO pixels per side and stores each pixel's 20 dithered FP8 values into the halo map `features`
+// [fh + 2 halo][fw + 2 halo][32] (bytes 20..31 zero). The values come from the mirrored render position, and the dither
+// from the unmirrored one (index |y| mod 16, |x| mod 16). Motion surfaces are written only for pixels inside R. Built
+// as its own code object; off by default: this file's kernel is unchanged.
+#ifndef WG_ENC_VALUES_OUT
+#define WG_ENC_VALUES_OUT 0
+#endif
+#define WG_ENC_HALO (WG_ENC_VALUES_OUT ? 2 : 0)
 
 // Per-frame constants, passed by value (all 4-byte fields; must match EncParams in clean/runner/enc0.py).
 struct WgEncParams {
@@ -390,12 +399,16 @@ WG_FN void encoder_main(const Frame& f, u8* __restrict__ features, u32* __restri
                         const u8* __restrict__ w, const WgEncParams& P, const MoT mo = MoT()) {
   const u32 tid = wg_lane_id();
   const u32 lane = tid & 31u, t = lane & 15u, hh = lane >> 4;
+#if WG_ENC_VALUES_OUT
+  const int Wt = (P.fw + 2 * WG_ENC_HALO) >> 1, ntok = ((P.fh + 2 * WG_ENC_HALO) >> 1) * Wt;
+#else
   const int Wt = P.fw >> 1, ntok = (P.fh >> 1) * Wt;
+#endif
   const int tok = (int)(wg_block_id() * (kEncThreads / WG_WAVE) + (tid >> 5)) * kTokensPerWave + (int)t;
   const int tk = tok < ntok ? tok : ntok - 1;
   const int r = tk / Wt, cc = tk - r * Wt;
 
-#if !WG_ENC_FRAG_GLOBAL
+#if !WG_ENC_FRAG_GLOBAL && !WG_ENC_VALUES_OUT
   // Stage the projection weights in LDS; the copy overlaps the per-pixel work, the barrier comes after it.
   WG_LDS __attribute__((aligned(16))) u8 lds[kFragBytes];
   for (int i = (int)tid; i < kFragBytes / 16; i += kEncThreads)
@@ -422,7 +435,7 @@ WG_FN void encoder_main(const Frame& f, u8* __restrict__ features, u32* __restri
   }
 
   const int rw = P.rw, rh = P.rh;
-  const int X0 = 2 * cc, Y = 2 * r + (int)hh;
+  const int X0 = 2 * cc - WG_ENC_HALO, Y = 2 * r + (int)hh - WG_ENC_HALO;
   const int y = reflect(Y, rh);
   const int x0 = reflect(X0, rw), x1 = reflect(X0 + 1, rw);
   const bool rev = x0 > x1;  // right padding: slot 0 is pixel B
@@ -465,8 +478,16 @@ WG_FN void encoder_main(const Frame& f, u8* __restrict__ features, u32* __restri
 #endif
   const float mcs[2][2] = {{rev ? mcab[2] : mcab[0], rev ? mcab[3] : mcab[1]},
                            {rev ? mcab[0] : mcab[2], rev ? mcab[1] : mcab[3]}};
+#if WG_ENC_VALUES_OUT
+  // Dither word per pixel at the unmirrored position: |y| mod 16, |x| mod 16 (X0 may be negative here).
+  const u8* trow = w + kOffDither + 256u * (u32)P.frame + (((u32)(Y < 0 ? -Y : Y) & 15u) << 4);
+  const u32 t2 = (u32)trow[(u32)(X0 < 0 ? -X0 : X0) & 15u] |
+                 ((u32)trow[(u32)(X0 + 1 < 0 ? -(X0 + 1) : X0 + 1) & 15u] << 8);
+  const bool store = tok < ntok && Y >= 0 && Y < rh && X0 >= 0;
+#else
   const u32 t2 = wg_ld16(w, (u32)kOffDither + 256u * (u32)P.frame + (((u32)Y & 15u) << 4) + ((u32)X0 & 15u));
   const bool store = tok < ntok && Y < rh;
+#endif
   const u32 so = (u32)(Y * rw + X0) * 4u;
 
   // Motions of both slots, and the motion surfaces of the real pixels: one 64-bit store per surface when both pixels
@@ -524,7 +545,7 @@ WG_FN void encoder_main(const Frame& f, u8* __restrict__ features, u32* __restri
     else
       pixel_values<kHistRaw>(f, P, U, (int)xs[dx], y, c, px);
     quantize(px.v, dx ? t2 >> 8 : t2 & 0xffu, q[dx]);
-#if !WG_ENC_AB_PROJ
+#if !WG_ENC_AB_PROJ && !WG_ENC_VALUES_OUT
     // Values 8..15 go to the partner lane (the other lane half of the same token).
     x8[dx][0] = wg_xor16_u(q[dx][2]);
     x8[dx][1] = wg_xor16_u(q[dx][3]);
@@ -534,7 +555,19 @@ WG_FN void encoder_main(const Frame& f, u8* __restrict__ features, u32* __restri
 #endif
   }
 
-#if WG_ENC_AB_PROJ
+#if WG_ENC_VALUES_OUT
+  // Pixel (X0 + dx, Y) of the halo map: 20 value bytes and 12 zero bytes.
+  if (tok < ntok) {
+    const u32 mw = (u32)(P.fw + 2 * WG_ENC_HALO);
+#pragma unroll
+    for (int dx = 0; dx < 2; ++dx) {
+      const u32 o = ((u32)(Y + WG_ENC_HALO) * mw + (u32)(X0 + dx + WG_ENC_HALO)) * 32u;
+      wg_st128(features, o, (v4u){q[dx][0], q[dx][1], q[dx][2], q[dx][3]});
+      wg_st128(features, o + 16u, (v4u){q[dx][4], 0u, 0u, 0u});
+    }
+  }
+  (void)x8;
+#elif WG_ENC_AB_PROJ
   if (tok < ntok) {
     v4u o0 = {q[0][0], q[0][1], q[0][2], q[0][3]}, o1 = {q[1][0], q[1][1], q[1][2], q[1][3] ^ q[0][4] ^ q[1][4]};
     wg_st128(features, (u32)tok * kFeat + hh * 32u, o0);
