@@ -270,15 +270,21 @@ def test_shipped_map_validates(r, shipped_map):
 
 
 def test_l_real_map(r, lmap):
-    """Model L (#89): the delivered preset-L map (data/preset-L.v1.map.json; map version 1, W, D, K; no "preset" field,
-    so it is loaded with --preset L). It validates; our own random file gives preset L's message (and, without
-    --preset, preset M's, as for any version-1 map); a mismatching --preset is refused; and its exact layout converts
-    our own random data at two placements, every tensor of every stage checked against the reference."""
+    """Model L (#89): the delivered preset-L map (data/preset-L.v1.map.json, the spec side's revision v1.1; map version 1,
+    W, D, K; "preset": "L"). It validates; our own random file gives preset L's message, with --preset L and without it
+    (the map names its preset); a mismatching --preset is refused; L's perm dec0_values is its own 13-entry table (L has
+    no latent gate; M's map keeps its 17); and its exact layout converts our own random data at two placements, every
+    tensor of every stage checked against the reference."""
     import random
     with open(lmap, "rb") as f:
         m = json.load(f)
-    r.check("preset-L map: version 1, sources W, D and K, no \"preset\" field",
-            m["version"] == 1 and sorted(m["sources"]) == ["D", "K", "W"] and "preset" not in m, (m["version"], sorted(m["sources"])))
+    r.check("preset-L map: version 1, sources W, D and K, \"preset\": \"L\"",
+            m["version"] == 1 and sorted(m["sources"]) == ["D", "K", "W"] and m.get("preset") == "L", (m["version"], sorted(m["sources"])))
+    dv = m["perms"].get("dec0_values", [])
+    r.check("preset-L map: perm dec0_values has 13 entries, a permutation of 0..12 (role i reads block channel dv[i])",
+            len(dv) == 13 and sorted(dv) == list(range(13)), dv)
+    with open(DEFAULT_MAP, "rb") as f:
+        r.check("...the preset-M map keeps its own 17-entry dec0_values", len(json.load(f)["perms"]["dec0_values"]) == 17)
     rng = random.Random(29)
     lw = m["sources"]["W"]["length"]
     out = r.path("l-real/out", "x")[:-2]
@@ -287,7 +293,12 @@ def test_l_real_map(r, lmap):
     r.check("preset-L map --preset L: valid, W absent -> exit 12, preset L's message", code == EXIT["no_preset_m"] and MSG_NO_PRESET_L in so, so + se[-400:])
     r.check("...the log names the preset", "preset L" in se, se[-400:])
     code, so, se = r.run(lmap, [big], out)
-    r.check("preset-L map without --preset: read as version 1 (preset M's message)", code == EXIT["no_preset_m"] and MSG["no_preset_m"] in so, so)
+    r.check("preset-L map without --preset: the map names preset L (its message)", code == EXIT["no_preset_m"] and MSG_NO_PRESET_L in so, so)
+    # the same map without its "preset" key (the delivered v1 had none): read as version 1, preset M's message
+    plain = copy.deepcopy(m)
+    del plain["preset"]
+    code, so, se = r.run(r.write("l-real/no-key.json", plain), [big], out)
+    r.check("the preset-L map without its key and without --preset: preset M's message (version 1)", code == EXIT["no_preset_m"] and MSG["no_preset_m"] in so, so)
     for asked in ("K", "F"):
         code, so, se = r.run(lmap, [big], out, extra=("--preset", asked))
         r.check("preset-L map --preset %s: converter data damaged" % asked, code == EXIT["map_damaged"] and MSG["map_damaged"] in so, so)
