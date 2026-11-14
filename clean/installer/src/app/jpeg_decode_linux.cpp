@@ -4,6 +4,8 @@
 
 #include <csetjmp>
 #include <cstdio>
+#include <cstdlib>
+#include <memory>
 
 #include <jpeglib.h>
 
@@ -38,8 +40,11 @@ bool DecodeJpegFile(const char* utf8Path, unsigned minW, int& w, int& h, std::ve
     cin.err = jpeg_std_error(&err.base);
     err.base.error_exit = OnError;
     err.base.emit_message = Silent;
-    std::vector<uint8_t> px;  // declared before setjmp: its destructor runs on both paths
-    bool ok = false;
+    // Changed between setjmp and a longjmp, so volatile (C 7.13.2.1), and plain malloc storage: nothing with a destructor
+    // lives across the jump, and nothing in the jump region can throw.
+    uint8_t* volatile px = nullptr;
+    volatile size_t size = 0;
+    volatile bool ok = false;
     if (!setjmp(err.jump)) {
         jpeg_create_decompress(&cin);
         jpeg_stdio_src(&cin, f);
@@ -54,20 +59,25 @@ bool DecodeJpegFile(const char* utf8Path, unsigned minW, int& w, int& h, std::ve
             cin.scale_denom = denom;
             jpeg_start_decompress(&cin);
             const size_t rowBytes = (size_t)cin.output_width * 4;
-            px.resize(rowBytes * cin.output_height);
-            while (cin.output_scanline < cin.output_height) {
-                JSAMPROW row = &px[(size_t)cin.output_scanline * rowBytes];
-                jpeg_read_scanlines(&cin, &row, 1);
+            size = rowBytes * cin.output_height;
+            px = static_cast<uint8_t*>(std::malloc(size));
+            if (px) {
+                while (cin.output_scanline < cin.output_height) {
+                    JSAMPROW row = px + (size_t)cin.output_scanline * rowBytes;
+                    jpeg_read_scanlines(&cin, &row, 1);
+                }
+                jpeg_finish_decompress(&cin);
+                w = (int)cin.output_width;
+                h = (int)cin.output_height;
+                ok = true;
             }
-            jpeg_finish_decompress(&cin);
-            w = (int)cin.output_width;
-            h = (int)cin.output_height;
-            ok = true;
         }
     }
     jpeg_destroy_decompress(&cin);
     std::fclose(f);
-    if (ok) bgra.swap(px);
+    // The copy may throw bad_alloc; the decoder and the file are already released, and the holder frees the pixels.
+    const std::unique_ptr<uint8_t, decltype(&std::free)> hold(px, &std::free);
+    if (ok) bgra.assign(hold.get(), hold.get() + size);
     return ok;
 }
 

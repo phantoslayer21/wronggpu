@@ -109,7 +109,7 @@ int main(int argc, char** argv) {
     // failures leave the outputs alone and do not crash
     w = h = 7; px.assign(3, 9);
     CHECK(!DecodeJpegFile((base + "missing.jpg").c_str(), 100, w, h, px) && w == 7 && px.size() == 3);
-    const std::string cut = base + "cut.jpg", junk = base + "junk.jpg";
+    const std::string cut = base + "cut.jpg", junk = base + "junk.jpg", late = base + "late.jpg";
     {
         FILE* in = std::fopen(plain.c_str(), "rb");
         std::vector<unsigned char> all(1 << 20);
@@ -120,14 +120,21 @@ int main(int argc, char** argv) {
         if (o) { std::fwrite(all.data(), 1, 300, o); std::fclose(o); }   // headers only, no picture
         o = std::fopen(junk.c_str(), "wb");
         if (o) { std::fputs("not a picture at all", o); std::fclose(o); }
+        // a whole picture, then a Huffman table marker with length 0 before the end: libjpeg fails in
+        // jpeg_finish_decompress, after the pixel buffer exists (the error path that has to free it)
+        o = std::fopen(late.c_str(), "wb");
+        const unsigned char bad[4] = {0xFF, 0xC4, 0x00, 0x00};
+        if (o && n > 2) { std::fwrite(all.data(), 1, n - 2, o); std::fwrite(bad, 1, 4, o); std::fwrite(all.data() + n - 2, 1, 2, o); }
+        if (o) std::fclose(o);
     }
+    CHECK(!DecodeJpegFile(late.c_str(), 100, w, h, px) && w == 7 && px.size() == 3);
     CHECK(LooksLikeJpeg(cut.c_str()));
     CHECK(!DecodeJpegFile(cut.c_str(), 100, w, h, px) || w > 0);   // libjpeg pads a truncated file grey: either answer is a clean one
     CHECK(!LooksLikeJpeg(junk.c_str()));
     CHECK(!DecodeJpegFile(junk.c_str(), 100, w, h, px));
     CHECK(!LooksLikeJpeg((base + "missing.jpg").c_str()));
 
-    for (const std::string* f : {&plain, &prog, &grey, &cut, &junk}) std::remove(f->c_str());
+    for (const std::string* f : {&plain, &prog, &grey, &cut, &junk, &late}) std::remove(f->c_str());
     std::printf(fails ? "jpeg-linux: %d failure(s)\n" : "jpeg-linux: all checks passed\n", fails);
     return fails ? 1 : 0;
 }
