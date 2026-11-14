@@ -48,6 +48,19 @@ class TestKernelSets(unittest.TestCase):
         self.assertFalse([k for k in extra if not (k[1].startswith("l_") or k[0].startswith("l_") or k[0] in B.MODEL_L_ONLY)])
 
 
+    def test_frame_gen_kernels_are_in_no_set(self):
+        """Frame generation's ports (#96, co=fg_*.co or named fg_*) are declared but enter neither set: only --only
+        builds them, so the Model M and Model L builds stay as they are."""
+        decls = []
+        for fn in sorted(os.listdir(B.KERNEL_DIR)):
+            if fn.endswith(".hlsl"):
+                decls += B.kernel_decls(os.path.join(B.KERNEL_DIR, fn))
+        fg = [(d["name"], d["co"]) for d in decls if B.is_frame_gen(d)]
+        self.assertTrue(fg, "no frame-generation kernel declared")
+        full = set(B.kernel_set(True))
+        self.assertFalse([k for k in fg if k in full])
+
+
 if __name__ == "__main__":
     if "--write" in sys.argv:
         with open(SETS, "w", newline="\n") as f:

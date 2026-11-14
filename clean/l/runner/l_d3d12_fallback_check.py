@@ -24,6 +24,8 @@ route's. The rules are clean/l/runner/l_d3d12_ops_check.py's: raw downloaded byt
 beforehand with its back end's own sentinel (HIP 0xA5, D3D12 0x5A) and followed by 64 slack bytes that no back end may
 write (the display's pitch padding too); a negative control (one case again with half its workgroups) must be caught;
 Model M's swin_block_c96_nc through the same engine as the control. Output: counts only, no timing.
+--ldr: the LDR route (LDR colour): steps 2 and 3 are l_post_recon_ldr and l_post_filter_ldr (both l_post.co; the
+exposures are not read: the exposure-pair frames pass it all the same).
 """
 import argparse
 import json
@@ -78,7 +80,7 @@ def coef_case(rng, rw, rh):
             "defined": [_defined(n) for n in sizes], "sizes": sizes}
 
 
-def post_case(rng, x, coef_out, coef_sizes, expo):
+def post_case(rng, x, coef_out, coef_sizes, expo, ldr=False):
     prm = RP.post_params(x)
     dw, dh = prm.dw, prm.dh
     data = RP.post_device_inputs(x)
@@ -99,19 +101,24 @@ def post_case(rng, x, coef_out, coef_sizes, expo):
     args += [("buf", RP.pack({"s": np.array(LPC.S)})), ("out", n_hist + SLACK), ("out", n_red + SLACK),
              ("out", n_disp + SLACK), ("bytes", bytes(prm))]
     args += [("buf", ev.tobytes())] if expo else [("null",)]
-    return {"kernel": "l_post_recon", "co": "l_post.co", "grid": RP.recon_grid(dw, dh), "block": 256, "args": args,
+    return {"kernel": "l_post_recon_ldr" if ldr else "l_post_recon", "co": "l_post.co", "grid": RP.recon_grid(dw, dh),
+            "block": 256, "args": args,
             "defined": [_defined(n_hist), np.concatenate([red_def, np.zeros(SLACK, bool)]),
                         np.concatenate([disp_def.reshape(-1), np.zeros(SLACK, bool)])],
             "n_disp": n_disp, "e": float(ev[0]) if expo else float(prm.e)}
 
 
-def filter_case(rng, display, dw, dh, ow, oh, e, expo):
+def filter_case(rng, display, dw, dh, ow, oh, e, expo, ldr=False):
     n_out = ow * oh * 12
     args = [("buf", display), ("out", n_out + SLACK), ("u32", dw), ("u32", dh), ("u32", ow), ("u32", oh),
             ("u32", _f32_bits(np.float32(0.01 / (e if e != 0.0 else 1.0))))]
     args += [("buf", np.array([e, 1.0, 0.0, 0.0, 0.0], np.float32).tobytes())] if expo else [("null",)]
+    grid = _cdiv(ow, 40) * _cdiv(_cdiv(oh, 2), 8)
+    if ldr:   # the LDR output stage: the same arguments, dec_scale and the exposure pair not read
+        return {"kernel": "l_post_filter_ldr", "co": "l_post.co", "grid": grid, "block": 64, "args": args,
+                "defined": [_defined(n_out)]}
     return {"kernel": "w64/post_filter_c1_s4", "co": "post_w64.co", "tag": "w64", "hip_kernel": "post_filter_c1_s4",
-            "grid": _cdiv(ow, 40) * _cdiv(_cdiv(oh, 2), 8), "block": 64, "args": args, "defined": [_defined(n_out)]}
+            "grid": grid, "block": 64, "args": args, "defined": [_defined(n_out)]}
 
 
 def compare(got, want, dmask):
@@ -126,7 +133,7 @@ def compare(got, want, dmask):
     return o
 
 
-def run(build, rocm, seeds):
+def run(build, rocm, seeds, ldr=False):
     g = C32.Gpu(build, rocm)
     mods = {}
 
@@ -136,7 +143,7 @@ def run(build, rocm, seeds):
                 mods[co] = g.hip.load_module(f.read())
         return mods[co]
 
-    cdir = os.path.join(build, "replay-fallback")
+    cdir = os.path.join(build, "replay-fallback-ldr" if ldr else "replay-fallback")
     os.makedirs(cdir, exist_ok=True)
     lines, todo, neg, frames = [], [], None, []
 
@@ -145,7 +152,7 @@ def run(build, rocm, seeds):
         want = OPS.hip_run(g, module(case["co"]), case)
         lines += OPS.replay_lines(name, case, cdir)
         todo.append((name, case, want, step, label))
-        if neg is None and step == "l_post_recon" and case["grid"] >= 4:
+        if neg is None and step.startswith("l_post_recon") and case["grid"] >= 4:
             neg = (name, case, want)
             lines += OPS.replay_lines(name, case, cdir, grid=case["grid"] // 2, prefix="negative_")
         return want
@@ -166,10 +173,10 @@ def run(build, rocm, seeds):
             x = LPC.make_case(rng, rw, rh, dw, dh, reset, "random" if kind == "specials" else kind)
             if kind == "specials":
                 x = OPS._post_specials(rng, x)
-            post = post_case(rng, x, coef_out, coef["sizes"], expo)
-            post_out = add(f"l_post_recon_{base}", post, "l_post_recon", label)
-            filt = filter_case(rng, post_out[2][:post["n_disp"]], dw, dh, ow, oh, post["e"], expo)
-            add(f"w64_post_filter_c1_s4_{base}", filt, "w64/post_filter_c1_s4", label)
+            post = post_case(rng, x, coef_out, coef["sizes"], expo, ldr)
+            post_out = add(f"{post['kernel']}_{base}", post, post["kernel"], label)
+            filt = filter_case(rng, post_out[2][:post["n_disp"]], dw, dh, ow, oh, post["e"], expo, ldr)
+            add(f"{filt['kernel'].replace('/', '_')}_{base}", filt, filt["kernel"], label)
         for ci, case in enumerate(OPS.control_cases("swin_block_c96_nc", rng)):
             add(f"control_swin_block_c96_nc_s{si}_{ci}", case, "control swin_block_c96_nc", "Model M control")
     with open(os.path.join(cdir, "cases.txt"), "w", newline="\n") as f:
@@ -216,11 +223,12 @@ def main(argv=None):
     ap.add_argument("--rocm", required=True)
     ap.add_argument("--run", action="store_true")
     ap.add_argument("--seeds", type=int, default=2)
+    ap.add_argument("--ldr", action="store_true", help="the LDR route: l_post_recon_ldr, l_post_filter_ldr")
     ap.add_argument("--json")
     a = ap.parse_args(argv)
     if not a.run:
         return 0
-    res = run(a.build, a.rocm, tuple(range(89, 89 + a.seeds)))
+    res = run(a.build, a.rocm, tuple(range(89, 89 + a.seeds)), ldr=a.ldr)
     if a.json:
         with open(a.json, "w") as f:
             json.dump(res, f, indent=1)

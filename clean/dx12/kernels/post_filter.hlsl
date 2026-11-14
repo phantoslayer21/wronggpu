@@ -20,8 +20,14 @@
 // framebuffer_half's bytes (+-65504 clamp, round to nearest even), alpha 1. The lane of channel 0 of each output pixel
 // gathers the other two channels from its lanes 3 g + 1, 3 g + 2 and stores the texel.
 //
+// l_post_filter_ldr (WG_FILTER_LDR = 1): l_post.hip's LDR output stage l_post_filter_ldr (spec preset L part 3 Q2), the
+// same filter with the filtered value written as it is (no clamp to [1e-4, 3], no decode, no exposure: dec_scale and
+// expo are not read); l_post_filter_direct_ldr: its direct form, stored as l_post_filter_direct stores.
+//
 // @wg-kernel w64/post_filter_c1_s4 co=post_w64.co entry=post_filter_c1_s4 block=64 wave=64 args=p,p,u,u,u,u,u,p
 // @wg-kernel l_post_filter_direct co=- entry=post_filter_c1_s4 block=64 wave=64 args=p,p,u,u,u,u,u,p rs=direct defines=WG_DIRECT_TEXTURES=1
+// @wg-kernel l_post_filter_ldr co=l_post.co entry=post_filter_c1_s4 block=64 wave=64 args=p,p,u,u,u,u,u,p defines=WG_FILTER_LDR=1
+// @wg-kernel l_post_filter_direct_ldr co=- entry=post_filter_c1_s4 block=64 wave=64 args=p,p,u,u,u,u,u,p rs=direct defines=WG_DIRECT_TEXTURES=1,WG_FILTER_LDR=1
 #include "wg_platform.hlsli"
 #if defined(WG_DIRECT_TEXTURES)
 #include "native_direct.hlsli"
@@ -123,11 +129,13 @@ WG_KERNEL(post_filter_c1_s4)
 {
     WG_SETUP();
     g_z = (uint)ow >> 31;
+#if !defined(WG_FILTER_LDR)
     float dec_scale = dec_scale_arg;
     if (expo != 0u) {
         const float e = wg_ldf(expo, 0u);
         dec_scale = (float)(0.01 / (double)(e == 0.0f ? 1.0f : e));
     }
+#endif
     const int lane = (int)wg_lane_id();
     const int wl = lane & 31;
     if (wl >= 3 * kGroups) return;
@@ -163,11 +171,19 @@ WG_KERNEL(post_filter_c1_s4)
             const uint o0 = (uint)(y * ow + 4 * m);
             [unroll] for (int i = 0; i < 4; ++i) {
                 const float r = dy == 0 ? lz5e(r0[i], r1[i], r2[i], r3[i], r4[i]) : lz5o(r2[i], r3[i], r4[i], r5[i], r6[i]);
+#if defined(WG_FILTER_LDR)
+                const float v = r;
+#else
                 const float qc = clampf(r, k1em4, 3.0f);
                 const float v = qc < kDecPolyMax ? dec_m1_poly(qc) : exp2(qc * kDecK) - 1.0f;
+#endif
 #if defined(WG_DIRECT_TEXTURES)
                 // channels 1, 2 of this pixel from the lanes after channel 0's (the same pixel, so the same loop exits)
+#if defined(WG_FILTER_LDR)
+                const float val = v;
+#else
                 const float val = opq(v) * dec_scale;
+#endif
                 const uint l0 = (uint)(lane - c);
                 const float v1 = WaveReadLaneAt(val, l0 + 1u), v2 = WaveReadLaneAt(val, l0 + 2u);
                 if (c == 0 && i < ncols) {
@@ -179,7 +195,11 @@ WG_KERNEL(post_filter_c1_s4)
                     native_direct_output[uint2((uint)(4 * m + i), (uint)y)] = float4(o, 1.0f);
                 }
 #else
+#if defined(WG_FILTER_LDR)
+                if (i < ncols) wg_stf(out_p, (o0 + (uint)i) * 12u + (uint)c * 4u, v);
+#else
                 if (i < ncols) wg_stf(out_p, (o0 + (uint)i) * 12u + (uint)c * 4u, opq(v) * dec_scale);
+#endif
 #endif
             }
         }

@@ -267,7 +267,15 @@ public:
         }
         std::string order;
         if (!need_string(root, "channel_order", "map", order)) return false;
-        if (order != "natural") return damaged("unknown channel_order \"" + order + "\"");
+        // "storage" (weights as stored, not yet reshaped to natural axes): preset FG's map v1 only. It names what the
+        // tensors hold; the converter reads them the same way.
+        if (order == "storage") {
+            if (m.preset_name != "FG" || version_ != 1)
+                return damaged("channel_order \"storage\" is only for preset FG (map version 1)");
+        } else if (order != "natural") {
+            return damaged("unknown channel_order \"" + order + "\"");
+        }
+        m.channel_order = order;
         if (version_ == 5) return load_v5(root, m);
         // Spec 57 section 5.1: a map of versions 1-4 that uses a version-5 feature is invalid.
         if (root.find("groups")) return damaged("map: \"groups\" is a version-5 feature");
@@ -681,8 +689,24 @@ public:
             if (!aj.is_object()) return damaged(where + ": axis must be an object");
             Axis ax;
             ax.length = t.shape[a];
-            if (!need_int(aj, "stride", where + ", axis " + std::to_string(a), ax.stride)) return false;
+            const std::string wa = where + ", axis " + std::to_string(a);
             if (aj.find("limit")) return damaged(where + ": an axis \"limit\" is a version-5 feature");
+            if (const Json* oj = aj.find("offsets")) {
+                // Explicit element offsets, one per index (map versions 1 and 4): no stride, no perm with them.
+                if (k_) return damaged(wa + ": \"offsets\" is not a feature of map versions 2 and 3");
+                if (aj.find("stride") || aj.find("perm")) return damaged(wa + ": \"offsets\" with \"stride\" or \"perm\"");
+                if (!oj->is_array() || oj->items.size() != static_cast<std::size_t>(ax.length))
+                    return damaged(wa + ": offsets must be a list with one entry per index of the axis");
+                for (const Json& v : oj->items) {
+                    std::int64_t o;
+                    if (!v.as_int64(o)) return damaged(wa + ": an offset is not an integer");
+                    if (o >= (std::int64_t(1) << 62) || o <= -(std::int64_t(1) << 62)) return out_of_range(wa + ": offset overflow");
+                    ax.offsets.push_back(o);
+                }
+                t.axes.push_back(ax);
+                continue;
+            }
+            if (!need_int(aj, "stride", wa, ax.stride)) return false;
             if (const Json* pj = aj.find("perm")) {
                 if (!pj->is_string()) return damaged(where + ": perm must be text");
                 for (std::size_t p = 0; p < m.perms.size(); ++p)
@@ -698,6 +722,12 @@ public:
         // the values stride * j, j = 0..n-1, and the extremes of e are reached.
         std::int64_t lo = t.base, hi = t.base;
         for (const Axis& ax : t.axes) {
+            if (!ax.offsets.empty()) {  // every combination of offsets occurs, so the extremes are min and max
+                const auto mm = std::minmax_element(ax.offsets.begin(), ax.offsets.end());
+                if (!checked_add(lo, *mm.first, lo) || !checked_add(hi, *mm.second, hi))
+                    return out_of_range(where + ": index overflow");
+                continue;
+            }
             std::int64_t span;
             if (!checked_mul(ax.stride, ax.length - 1, span)) return out_of_range(where + ": index overflow");
             std::int64_t& end = (span < 0) ? lo : hi;
@@ -1128,6 +1158,7 @@ public:
             if (!aj.is_object()) return damaged(wa + ": must be an object");
             Axis ax;
             ax.length = t.shape[a];
+            if (aj.find("offsets")) return damaged(wa + ": \"offsets\" is not a version-5 feature");
             if (!need_int(aj, "stride", wa, ax.stride)) return false;
             if (ax.stride < 0) return damaged(wa + ": negative strides are not a version-5 feature");
             if (aj.find("limit") && !need_nonneg(aj, "limit", wa, ax.limit)) return false;

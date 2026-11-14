@@ -9,7 +9,9 @@ only layout information and the digests the converter uses to verify the player'
 `preset-M.v1.map.json` (Model M, map version 4), `preset-F.v1.map.json` (Ray Reconstruction, version 5),
 `preset-K.v1.map.json` (Model K, version 3) and `preset-L.v1.map.json` (Model L, version 1; the spec side's revision
 v1.1, which names its preset and carries L's 13-entry `dec0_values`) tell the converter (`clean/converter`) how to read the network's parameters
-from the player's own DLSS file. Each map holds:
+from the player's own DLSS file. `fg.v1.map.json` (frame generation, map version 1, `"preset": "FG"`, the spec side's
+revision v1.1) does the same for the frame-generation library's two convolution networks: one block source per weight
+blob, the weights in natural order and the biases, both read with explicit axis offsets. Each map holds:
 
 - `format`, `version`, `channel_order`, and a `model` line naming the DLSS product and the first DLSS version the map
   reads (e.g. "DLSS super-resolution preset M (first shipped in DLSS 310.5)");

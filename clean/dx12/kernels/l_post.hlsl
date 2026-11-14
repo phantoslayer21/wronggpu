@@ -24,11 +24,22 @@
 // l_post_recon_p12 (LP_P12 = 1): the same kernel on the pack12 coefficients of l_coef_pack12: A = image A8 (8 bytes per
 // render pixel: codes A0 A1 A2 B0 | B1 B2, C2 FP16), C = image C4 (4 bytes per render pixel: C0, C1 FP16), B unused.
 //
+// LDR forms (LP_LDR = 1; l_post.hip's l_post_recon_ldr / l_post_recon_p12_ldr, spec preset L part 3 item 6, Q1, Q2):
+// identity transfer (the colour feature is the driver's FP16 conversion of the colour, a NaN kept; no decode of the
+// history candidates or of C), no exposure (not read: e = e_prev = 1), the full history the driver's FP16 conversion of
+// H^, the display image h(code RN32(1 / N)) of the 11 / 11 / 10-bit code floor(clamp(fused(O^ N + 1/2), 0, N)) (a NaN
+// gives 0), the reduced codes rint(clamp(mean, 0, 1) 1023).
+//
 // @wg-kernel l_post_recon co=l_post.co block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p
 // @wg-kernel l_post_recon_p12 co=l_post.co entry=l_post_recon_p12 block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1
+// @wg-kernel l_post_recon_ldr co=l_post.co entry=l_post_recon_ldr block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_LDR=1
+// @wg-kernel l_post_recon_p12_ldr co=l_post.co entry=l_post_recon_p12_ldr block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1,LP_LDR=1
 #include "wg_platform.hlsli"
 #ifndef LP_P12
 #define LP_P12 0
+#endif
+#ifndef LP_LDR
+#define LP_LDR 0
 #endif
 
 WG_ARGS_BEGIN
@@ -168,9 +179,15 @@ void load_texel_hw(int idx, out uint t[kTexDw])
     texel_inputs(idx, c, a, b, k);
     const float k0 = f16tof32(k.x), k1 = f16tof32(k.x >> 16), k2 = f16tof32(k.y);
     v8f cv;
+#if LP_LDR
+    cv.v[0] = opq(c.x);
+    cv.v[1] = opq(c.y);
+    cv.v[2] = opq(c.z);
+#else
     cv.v[0] = opq(enc_in(opq(g_e * c.x)));
     cv.v[1] = opq(enc_in(opq(g_e * c.y)));
     cv.v[2] = opq(enc_in(opq(g_e * c.z)));
+#endif
     cv.v[3] = mul_odd(k0, kShapeAB);
     cv.v[4] = mul_odd(k1, kShapeAB);
     cv.v[5] = mul_odd(k2, kShapeC);
@@ -291,7 +308,11 @@ void l_post_core(LGather g, int x, int y, int fx, int fy, float mx[3], float my[
             const bool valid = P_reset == 0 && qx >= 0.0f && qx <= (float)P_dw && qy >= 0.0f && qy <= (float)P_dh;
             if (valid) {
                 const float3 h = history_cr(qx, qy);
+#if LP_LDR
+                const float3 lq = h;
+#else
                 const float3 lq = float3(l_dec(h.x), l_dec(h.y), l_dec(h.z)) * g_rp;
+#endif
                 L[n][0] = lq.x;
                 L[n][1] = lq.y;
                 L[n][2] = lq.z;
@@ -305,9 +326,17 @@ void l_post_core(LGather g, int x, int y, int fx, int fy, float mx[3], float my[
     bool hl_inf = false;
     [unroll] for (int i = 0; i < 3; ++i) {
         const float comb = ncand == 2 ? mad(w1, L[0][i], w2 * L[1][i]) : w1 * L[0][i];
+#if LP_LDR
+        Hl[i] = opq(comb);
+#else
         Hl[i] = opq(comb) * g_e;
+#endif
         hl_inf = hl_inf || abs(Hl[i]) == asfloat(0x7f800000u);
+#if LP_LDR
+        Cl[i] = fbar[i];
+#else
         Cl[i] = l_dec(fbar[i]);
+#endif
     }
     const float alpha = clampf(opq(s * g.W) * fbar[6], 0.0f, 1.0f);
     const float bh2 = mad(alpha, 1.0f - fbar[7], fbar[7]);
@@ -354,7 +383,11 @@ void finish_pixel(LGather g, int x, int y, float px, float py, float s, out floa
 float lpx(int xx) { return mad(opq((float)xx + 0.5f), P_rx, P_jx); }   // fused(x + 1/2, rx, jx)
 float lpy(int yy) { return mad(P_ry, opq((float)yy + 0.5f), P_jy); }   // fused(ry, y + 1/2, jy)
 
-#if LP_P12
+#if LP_P12 && LP_LDR
+WG_KERNEL(l_post_recon_p12_ldr)
+#elif LP_LDR
+WG_KERNEL(l_post_recon_ldr)
+#elif LP_P12
 WG_KERNEL(l_post_recon_p12)
 #else
 WG_KERNEL(l_post_recon)
@@ -362,6 +395,11 @@ WG_KERNEL(l_post_recon)
 {
     WG_SETUP();
     g_z = wg_grid_ >> 31;
+#if LP_LDR
+    g_e = 1.0f;   // LDR: no exposure (the exposure pair is not read)
+    g_ep = 1.0f;
+    g_rp = 1.0f;
+#else
     g_e = P_e;
     g_ep = P_e_prev;
     if (expo != 0u) {
@@ -370,6 +408,7 @@ WG_KERNEL(l_post_recon)
         g_ep = e1 == 0.0f ? 1.0f : e1;
     }
     g_rp = wg_div(1.0f, g_ep);
+#endif
     const int lane = (int)wg_lane_id();
     const int tiles_x = (P_dw + kTileX - 1) / kTileX;
     const int tile = (int)wg_block_id();
@@ -466,17 +505,30 @@ WG_KERNEL(l_post_recon)
         finish_pixel(g, x, y0 + row, px, second ? py1 : py0, s, hh, oo);
         v8f cv;
         [unroll] for (int ci = 0; ci < 3; ++ci) {
+#if LP_LDR
+            // h(H^); the display code floor(clamp(fused(O^ N + 1/2), 0, N)), then h(code RN32(1 / N)) (one rounding or
+            // two give the same FP16 value for every code 0 ... N)
+            const float n = ci == 2 ? 1023.0f : 2047.0f;
+            const float k = asfloat(ci == 2 ? 0x3a802008u : 0x3a001002u);
+            cv.v[ci] = opq(hh[ci]);
+            cv.v[3 + ci] = opq(floor(clampf(mad(oo[ci], n, 0.5f), 0.0f, n)) * k);
+#else
             cv.v[ci] = mul_odd(kEncK, enc_log(hh[ci]));
             cv.v[3 + ci] = opq(clampf(enc_e(oo[ci]), 0.0f, kDisplayMax));
+#endif
         }
         cv.v[6] = 0.0f;
         cv.v[7] = 0.0f;
         const uint4 hc = wg_to_f16_ags(cv);
         const int y = y0 + row;
         if (active && (!second || has1)) {
+#if LP_LDR
+            const uint q0 = hc.x & 0xffffu, q1 = hc.x >> 16, q2 = hc.y & 0xffffu;
+#else
             const uint q0 = mul_zero(kEncK, enc_log(hh[0])) ? 0u : (hc.x & 0xffffu);
             const uint q1 = mul_zero(kEncK, enc_log(hh[1])) ? 0u : (hc.x >> 16);
             const uint q2 = mul_zero(kEncK, enc_log(hh[2])) ? 0u : (hc.y & 0xffffu);
+#endif
             wg_st64(hist_out, (uint)(y * P_dw + x) * 8u, uint2(q0 | (q1 << 16), q2));
             const int di = y * pitch + x;
             wg_st16(display, (uint)di * 2u, hc.y >> 16);
@@ -494,7 +546,11 @@ WG_KERNEL(l_post_recon)
         uint code = 0u;
         [unroll] for (int i = 0; i < 3; ++i) {
             const float m = opq((r[i] + o[i]) * 0.25f);
+#if LP_LDR
+            const float v = clampf(m, 0.0f, 1.0f);
+#else
             const float v = clampf(opq(enc_e(m)) * kInv245, 0.0f, 1.0f);
+#endif
             code |= wg_f2u(round(v * 1023.0f)) << (10 * i);
         }
         wg_st32(reduced, (uint)((y0 / 2) * (P_dw / 2) + x / 2) * 4u, code);

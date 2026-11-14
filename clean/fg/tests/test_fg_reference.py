@@ -165,20 +165,19 @@ class LayoutShapes(unittest.TestCase):
     def test_weight_shapes(self):
         self.assertEqual(ops.weight_shape(L.NET1[0]), (32, 3, 3, 48))
         self.assertEqual(ops.weight_shape(L.NET1[5]), (512, 1, 1, 256))
-        with self.assertRaises(ops.OpenItem):
-            ops.weight_shape(L.NET1[1])
+        self.assertEqual(ops.weight_shape(L.NET1[1]), (64, 1, 1, 32))     # blob 2: 1 x 1
+        self.assertEqual(ops.weight_shape(L.NET2[0]), (32, 3, 3, 10))     # 10 of 16 stored inputs carry data
         for l in L.NET2:
             s = ops.weight_shape(l)
-            self.assertEqual(s, (l.out, 3, 3, l.cin))
-            self.assertEqual(int(np.prod(s)), l.weight_elements)
+            self.assertEqual(s, (l.out, 3, 3, l.cin_used))
+            self.assertEqual(int(np.prod(s)) * l.cin // l.cin_used, l.weight_elements)
         for l in L.NET1:
-            if l.taps is not None:
-                self.assertEqual(int(np.prod(ops.weight_shape(l))), l.weight_elements)
+            self.assertEqual(int(np.prod(ops.weight_shape(l))), l.weight_elements)
 
     def test_every_layer_runs(self):
         """Each layer of both tables runs as one conv on a tiny grid with random weights (shapes fit)."""
         rng = np.random.default_rng(8)
-        for l in [l for l in L.NET1 if l.taps is not None] + list(L.NET2):
+        for l in list(L.NET1) + list(L.NET2):
             shape = ops.weight_shape(l)
             y = ops.conv2d(halves(rng, (shape[3], 2, 2)), halves(rng, shape, 0.05), halves(rng, (l.out,)),
                            pad="zero", relu_after=True)

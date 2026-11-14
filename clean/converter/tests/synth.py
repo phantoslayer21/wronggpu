@@ -574,6 +574,9 @@ def decode_tensor(m, t, arrays, cache):
         idx.reverse()
         e = t["base"]
         for a, i in enumerate(idx):
+            if "offsets" in axes[a]:  # explicit element offsets (map versions 1 and 4)
+                e += axes[a]["offsets"][i]
+                continue
             p = axes[a].get("perm")
             pi = perm_index(i, m["perms"][p]) if p is not None else i
             e += axes[a]["stride"] * pi
