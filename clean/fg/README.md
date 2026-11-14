@@ -11,8 +11,12 @@ front end or the launcher yet. Status, open items and formats: [FORMATS.md](FORM
 | `tests/test_fg_layout.py` | the table against the totals the spec side gives |
 | `reference/ops.py` | NumPy CPU reference of the networks' building blocks: float16 convolution (3 x 3, 1 x 1) with bias and ReLU, 2x pooling, bilinear 2x upscale (align corners), element-wise combines, net1's input features and 2 x 2 fold; each open behaviour is a required argument or raises `OpenItem` |
 | `tests/test_fg_reference.py` | the building blocks against plain loop versions, on synthetic data |
-| `reference/forward.py` | both networks' forward pass: each layer from its stage's natural parameters (from blobs or the converter's raw output), and a network run from a wiring the caller supplies (conv / pool / upscale / add / concat / slice steps); the wiring, the border rule and the fold order are required arguments |
+| `reference/forward.py` | both networks' forward pass: parameters (from blobs, the converter's raw output or its model file); `net1_forward` with net1's delivered wiring; net2 from a wiring the caller supplies (conv / pool / upscale / add / concat / slice steps), the wiring and the border rule required |
 | `tests/test_fg_forward.py` | every layer of both networks against a direct NumPy convolution on synthetic weights; each step kind; wiring checks; stand-in wirings against layers composed by hand; parameters from blobs and from raw files |
+| `reference/net1.py` | net1 complete: the fold, the 32 steps as data, float16 chunk accumulation from the bias in each layer's chunk order, zero border, leaky ReLU, max-pool, the align-corners upscale with float16 steps, float16 adds, the unfold |
+| `reference/fp16acc.py` | exact float16 chunk accumulation: RN16(acc + 16 products) with integer arithmetic |
+| `tests/test_fg_net1.py`, `tests/test_fg_fp16acc.py` | net1 end to end against a hand-composed version; one convolution per chunk order against exact rationals; the upscale against the scalar rule; pooling with inf / NaN; the accumulation against exact rationals |
+| `tools/net1_digest.py` | net1 on a converter model file with a fixed synthetic input; records digests of the output only |
 | `../converter` (preset FG) | the converter reads a version-1 map with `"preset": "FG"`: one block source per weight blob; see the converter's README, "Preset FG" |
 | `../../data/fg.v1.map.json` | the spec side's converter map, revision v1.1 (weights in natural order); `tests/test_fg_map.py` pins its digest and checks it against `layout.py` |
 | `reference/natural.py` | the natural weight order from the map itself: its offsets as gather indices (stored blob weights to natural), natural to canonical `[out, k, k, in]` |
