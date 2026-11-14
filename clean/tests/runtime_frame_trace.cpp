@@ -86,6 +86,10 @@ const Signature kSignatures[] = {
     {"l_coef_pack12", "ppppppD"},  // the same arguments (B unused)
     {"l_post_recon_p12", "ppppppppppppPp"},  // the same arguments (A, C: pack12 images; B unused)
     {"post_filter_c1_s4", "ppiiiiip"},  // display, out, dw, dh, ow, oh, dec_scale (its bits), exposure pair
+    {"l_post_recon_ldr", "ppppppppppppPp"},      // the LDR forms: the same arguments (the exposure pair not read)
+    {"l_post_recon_p12_ldr", "ppppppppppppPp"},
+    {"l_post_filter_ldr", "ppiiiiip"},           // post_filter_c1_s4's arguments (dec_scale, exposure pair not read)
+    {"l_post_filter_ldr_h", "ppiiiiipii"},       // plus pi (its bits) and the row pitch in bytes
 };
 
 const char* kinds_of(const std::string& kernel) {

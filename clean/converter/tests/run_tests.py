@@ -407,40 +407,46 @@ def test_l_shaped(r, m_map_path):
 
 
 MSG_NO_PRESET_FG = "This DLSS Frame Generation file has no frame-generation model. Version 310.1 or newer is needed."
-# data/fg.v1.map.json as the spec side delivered it (v1, 2026-11-14): its bytes must not change without a new digest here
-FG_MAP_SHA256 = "6dbdc84945817affcbbd8e50bdc1ea6976636137e5c4edd64b5481cc0d51a940"
+# data/fg.v1.map.json as the spec side delivered it (revision v1.1, natural order, 2026-11-14): its bytes must not change
+# without a new digest here
+FG_MAP_SHA256 = "b32d9195ab76e14f9c4e318bc55e5d8def83698e0a10d7581689fedf6e1c7ad5"
 
 
 def test_fg_real_map(r, fgmap):
-    """Frame generation (#96): the delivered map (data/fg.v1.map.json, the spec side's v1: map version 1, "preset": "FG",
-    channel_order "storage", 67 block sources A01..A17, B01w/B01b..B25w/B25b, 42 stages, bias reads by explicit offsets).
-    Its bytes are pinned by digest; its layout is the one of clean/fg/layout.py; it validates, and a file without the
-    blobs gives preset FG's message."""
+    """Frame generation (#96): the delivered map (data/fg.v1.map.json, the spec side's revision v1.1: map version 1,
+    "preset": "FG", channel_order "natural", 67 block sources A01..A17, B01w/B01b..B25w/B25b, 42 stages; every weight
+    tensor W in natural order [out, in, 3, 3] or [out, in] by explicit offsets; net1 biases by offsets, net2 biases by
+    stride). Its bytes are pinned by digest; its layout is the one of clean/fg/layout.py; it validates, and a file without
+    the blobs gives preset FG's message."""
     with open(fgmap, "rb") as f:
         raw = f.read()
     r.check("FG map: file digest", hashlib.sha256(raw).hexdigest() == FG_MAP_SHA256, hashlib.sha256(raw).hexdigest())
     m = json.loads(raw)
     L = cases._fg_layout()
     names = list(m["sources"])
-    r.check("FG map: version 1, preset FG, channel_order storage, key from A01, no perms",
-            (m["version"], m["preset"], m["channel_order"], m["key"]["from"], m["perms"]) == (1, "FG", "storage", "A01", {}))
+    r.check("FG map: version 1, preset FG, channel_order natural, key from A01, no perms",
+            (m["version"], m["preset"], m["channel_order"], m["key"]["from"], m["perms"]) == (1, "FG", "natural", "A01", {}))
     r.check("FG map: 67 sources in upload order with the layout's lengths",
             names == ["A%02d" % i for i in range(1, 18)] + ["B%02d%s" % (i, x) for i in range(1, 26) for x in "wb"] and
             [m["sources"][n]["length"] for n in names] == [b.nbytes for b in L.blobs()])
     stages = m["stages"]
     r.check("FG map: 42 stages dl1.l01..l17, dl2.l01..l25",
             [s["stage"] for s in stages] == ["dl1.l%02d" % i for i in range(1, 18)] + ["dl2.l%02d" % i for i in range(1, 26)])
-    ok1 = all([t["name"] for t in s["tensors"]] == ["W_storage", "b"] and
-              s["tensors"][0]["shape"] == [l.weight_elements] and s["tensors"][0]["base"] == 0 and
+    def offsets_only(t):
+        return all(set(a) == {"offsets"} for a in t["axes"])
+    ok1 = all([t["name"] for t in s["tensors"]] == ["W", "b"] and
+              s["tensors"][0]["shape"] == ([l.out, l.cin, 3, 3] if l.taps == 9 else [l.out, l.cin]) and
+              s["tensors"][0]["base"] == 0 and offsets_only(s["tensors"][0]) and
               s["tensors"][1]["base"] == l.bias_offset and
               s["tensors"][1]["axes"] == [{"offsets": [L.net1_bias_index(c) for c in range(l.out)]}]
               for s, l in zip(stages[:17], L.NET1))
-    r.check("FG map: net1 stages read the weight span and copy 0 of each bias group, skipping the zero area", ok1)
-    ok2 = all([t["name"] for t in s["tensors"]] == ["W_storage", "b_storage"] and
+    r.check("FG map: net1 stages read natural weights and copy 0 of each bias group, skipping the zero area", ok1)
+    ok2 = all([t["name"] for t in s["tensors"]] == ["W", "b"] and
               [t["src"] for t in s["tensors"]] == ["B%02dw" % l.index, "B%02db" % l.index] and
-              s["tensors"][0]["shape"] == [l.weight_elements] and s["tensors"][1]["shape"] == [l.out]
+              s["tensors"][0]["shape"] == [l.out, l.cin_used, 3, 3] and offsets_only(s["tensors"][0]) and
+              s["tensors"][1]["shape"] == [l.out] and s["tensors"][1]["axes"] == [{"stride": 1}]
               for s, l in zip(stages[17:], L.NET2))
-    r.check("FG map: net2 stages read the whole weight and bias blobs", ok2)
+    r.check("FG map: net2 stages read natural weights (layer 1: its 10 used inputs) and the whole bias blob", ok2)
     fake = r.write("fg-real/random.dll", random_bytes_for_test(1 << 20))
     code, so, se = r.run(fgmap, [fake], r.path("fg-real", "out", "x")[:-2])
     r.check("FG map: validates; a file without the blobs -> exit 12, preset FG's message",
@@ -480,13 +486,21 @@ def test_fg(r, fgmap):
     del plain["preset"]
     pp = r.write("fg/map-no-field.json", plain)
     code, so, se = r.run(pp, [dll], r.path("fg", "out-fail", "x")[:-2])
-    r.check("FG map without its field and without --preset: read as preset M, whose maps are natural -> damaged",
-            code == EXIT["map_damaged"] and MSG["map_damaged"] in so and "channel_order" in se, so + se[-300:])
-    natural = copy.deepcopy(plain)
-    natural["channel_order"] = "natural"
-    code, so, se = r.run(r.write("fg/map-no-field-natural.json", natural), [dll], r.path("fg", "out-fail", "x")[:-2])
-    r.check("...and as natural, preset M's sources W, D and K are missing -> damaged",
-            code == EXIT["map_damaged"] and "missing source W" in se, so + se[-300:])
+    r.check("FG map without its field and without --preset: read as preset M, W, D and K missing -> damaged",
+            code == EXIT["map_damaged"] and MSG["map_damaged"] in so and "missing source W" in se, so + se[-300:])
+    storage = copy.deepcopy(plain)
+    storage["channel_order"] = "storage"
+    code, so, se = r.run(r.write("fg/map-no-field-storage.json", storage), [dll], r.path("fg", "out-fail", "x")[:-2])
+    r.check("...and with channel_order storage, which only preset FG may use -> damaged",
+            code == EXIT["map_damaged"] and "channel_order" in se, so + se[-300:])
+    named_storage = copy.deepcopy(case.map)
+    named_storage["channel_order"] = "storage"     # the v1 form: names what the tensors hold, read the same way
+    nsp = r.write("fg/map-storage.json", named_storage)
+    out3 = r.path("fg", "out-storage", "x")[:-2]
+    code, so, se = r.run(nsp, [dll], out3)
+    r.check("FG map with channel_order storage (map v1's form): converts the same tensors", code == 0, so + se[-300:])
+    with open(nsp, "rb") as f:
+        check_output(r, "FG storage order", case, out3, f.read())
     out2 = r.path("fg", "out-hint", "x")[:-2]
     code, so, se = r.run(pp, [dll], out2, extra=["--preset", "FG"])
     r.check("FG map without its field, --preset FG: converts", code == 0 and "preset FG" in se, so + se[-300:])
@@ -514,7 +528,12 @@ def test_fg(r, fgmap):
 
     # a map that reads net1's zero area (or a bias copy other than 0) meets the test's NaN: exit 22. This shows the
     # success case above really skipped them.
-    for label, fn in (("zero area", lambda t: t.update(base=t["shape"][0])),
+    def zero_area_base(t):   # net1 blob: the zero area starts right after the out * K weights
+        n = 1
+        for d in t["shape"]:
+            n *= d
+        t.update(base=n)
+    for label, fn in (("zero area", zero_area_base),
                       ("bias copy 1", lambda t: t.update(base=t["base"] + 8))):
         bad = copy.deepcopy(case.map)
         st = bad["stages"][0]

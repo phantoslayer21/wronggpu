@@ -41,7 +41,8 @@
 //   network_bad            a runtime whose tables lack functions is refused, with the reason; AMD upscales
 //   network_cyberpunk_fail Cyberpunk's FSR 3.0 path: the runtime fails on frame 1, AMD's upscaler takes over
 // By hand, with the real runtime (not ctests): park_real (a game's dynamic resolution), switch_real (a player
-// switching upscalers in an upscaler mod's menu; GPU memory after every step; see RunSwitchReal).
+// switching upscalers in an upscaler mod's menu; GPU memory after every step; see RunSwitchReal), resize_real (a game
+// changing its output size: the upscalers kept until the context is destroyed, GPU memory per step; see RunResizeReal).
 // With MSVC, the D3D12 debug layer is on when installed (WG_TEST_D3D12_DEBUG=0 turns it off); its errors fail the test.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -1942,6 +1943,194 @@ void RunSwitchReal(Api& api, Gpu& gpu, int cycles, int frames, int settleMs) {
     }
 }
 
+// resize_real (run by hand, not a ctest; issue #58, PR #85; needs the real wronggpu_runtime.dll with its kernels and a
+// model in the test's folder): a context created for the largest output size whose frames then ask for other output
+// sizes, one new size per step. The front end creates the upscaler again for each size and keeps the replaced ones
+// until the context is destroyed (at most kMaxResizes of them). Per step: this process's video memory (DXGI
+// QueryVideoMemoryInfo, local segment, the process only) and the front end's own query of the current upscaler's GPU
+// memory (the runtime's allocation total). At the end the context is destroyed, and the memory is read again.
+// Environment: WG_TEST_RESIZE_W / _H (the context's maximum output size, default 3840 x 2160), WG_TEST_RESIZE_RATIO
+// (render size = output / ratio in percent: 150 = Quality, 100 = native; default 150), WG_TEST_RESIZE_STEPS (new output
+// sizes after the first, default 10), WG_TEST_RESIZE_CYCLES (contexts created, resized and destroyed one after the
+// other, default 1), WG_TEST_RESIZE_INFLIGHT (1: at every step the list for the previous size is recorded first and
+// submitted last, the list for the new size in between: the game's command lists that use the replaced upscaler),
+// WG_TEST_RESIZE_SETTLE_MS (wait before a memory reading, default 1500), WG_TEST_RUNTIME_OPTIONS (runtime_options).
+int EnvInt(const char* name, int fallback) {
+    char text[32] = "";
+    return GetEnvironmentVariableA(name, text, sizeof text) ? std::atoi(text) : fallback;
+}
+
+void RunResizeReal(Api& api, Gpu& gpu) {
+    const UINT W = UINT(EnvInt("WG_TEST_RESIZE_W", 3840)), H = UINT(EnvInt("WG_TEST_RESIZE_H", 2160));
+    const int ratio = EnvInt("WG_TEST_RESIZE_RATIO", 150), steps = EnvInt("WG_TEST_RESIZE_STEPS", 10);
+    const int cycles = EnvInt("WG_TEST_RESIZE_CYCLES", 1), settleMs = EnvInt("WG_TEST_RESIZE_SETTLE_MS", 1500);
+    const bool inflight = EnvInt("WG_TEST_RESIZE_INFLIGHT", 0) != 0;
+    const UINT RW = (W * 100 / UINT(ratio)) & ~1u, RH = (H * 100 / UINT(ratio)) & ~1u;
+    struct Size {
+        UINT w, h;
+    };
+    std::vector<Size> sizes;  // every size differs, all close to the maximum (the worst case for the kept upscalers)
+    for (int k = 0; k <= steps; ++k) sizes.push_back({W - 16u * UINT(k), H - 8u * UINT(k)});
+    std::printf("resize_real: context maximum output %ux%u, render %ux%u (ratio %d %%), %d new sizes, %d cycle(s), in-flight lists: %s\n", W,
+                H, RW, RH, ratio, steps, cycles, inflight ? "yes" : "no");
+    ProcessGpuMemory pm;
+    if (!pm.Init(gpu.device)) std::printf("resize_real: note: DXGI does not report the process's video memory\n");
+    {
+        DXGI_ADAPTER_DESC1 ad{};
+        IDXGIFactory4* f = nullptr;
+        IDXGIAdapter1* a = nullptr;
+        HMODULE dxgi = LoadLibraryW(L"dxgi.dll");
+        typedef HRESULT(WINAPI * PfnFactory)(REFIID, void**);
+        auto mk = dxgi ? reinterpret_cast<PfnFactory>(reinterpret_cast<void*>(GetProcAddress(dxgi, "CreateDXGIFactory1"))) : nullptr;
+        if (mk && SUCCEEDED(mk(__uuidof(IDXGIFactory4), reinterpret_cast<void**>(&f))) && f &&
+            SUCCEEDED(f->EnumAdapterByLuid(gpu.device->GetAdapterLuid(), __uuidof(IDXGIAdapter1), reinterpret_cast<void**>(&a))) && a &&
+            SUCCEEDED(a->GetDesc1(&ad)))
+            std::printf("resize_real: adapter %ls, dedicated video memory %.0f MiB\n", ad.Description, double(ad.DedicatedVideoMemory) / 1048576.0);
+    }
+    const std::vector<uint16_t> one(size_t(RW) * RH * 4, HalfOf(0.5f));
+    ID3D12Resource* color = gpu.Texture(DXGI_FORMAT_R16G16B16A16_FLOAT, RW, RH, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+    ID3D12Resource* depth = gpu.Texture(DXGI_FORMAT_R32_FLOAT, RW, RH, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+    ID3D12Resource* motion = gpu.Texture(DXGI_FORMAT_R16G16_FLOAT, RW, RH, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+    CHECK(color && depth && motion);
+    if (!color || !depth || !motion) return;
+    {
+        std::vector<float> z(size_t(RW) * RH);
+        for (UINT y = 0; y < RH; ++y)
+            for (UINT x = 0; x < RW; ++x) z[size_t(y) * RW + x] = 0.02f + 0.9f * float((x / 64 + y / 64) % 11) / 11.0f;
+        std::vector<uint16_t> px(size_t(RW) * RH * 4), mv(size_t(RW) * RH * 2, 0);
+        for (UINT y = 0; y < RH; ++y)
+            for (UINT x = 0; x < RW; ++x) {
+                uint16_t* p = &px[(size_t(y) * RW + x) * 4];
+                p[0] = HalfOf(((x / 16 + y / 16) & 1) ? 0.6f : 0.15f);
+                p[1] = HalfOf(0.1f + 0.8f * float(y % 193) / 193.0f);
+                p[2] = HalfOf(0.05f + 1.5f * float((x + y) % 61) / 61.0f);
+                p[3] = HalfOf(1.0f);
+            }
+        gpu.Begin();
+        gpu.Upload(color, px.data(), 8, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        gpu.Upload(depth, z.data(), 4, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        gpu.Upload(motion, mv.data(), 4, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        CHECK(gpu.SubmitAndWait());
+    }
+    std::vector<ID3D12Resource*> outs;  // the game's output texture of every size, made before any measurement
+    for (const Size& s : sizes) {
+        outs.push_back(gpu.Texture(DXGI_FORMAT_R16G16B16A16_FLOAT, s.w, s.h, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+        CHECK(outs.back());
+        if (!outs.back()) return;
+    }
+    auto create = [&]() {
+        ffxCreateBackendDX12Desc backend{};
+        backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12;
+        backend.device = gpu.device;
+        ffxCreateContextDescUpscale c{};
+        c.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
+        c.header.pNext = &backend.header;
+        c.flags = FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE | FFX_UPSCALE_ENABLE_DEPTH_INVERTED;
+        c.maxRenderSize = {RW, RH};
+        c.maxUpscaleSize = {W, H};
+        ffxContext ctx = nullptr;
+        CHECK(api.create(&ctx, &c.header, nullptr) == FFX_API_RETURN_OK && ctx);
+        return ctx;
+    };
+    static const float kJitter[4][2] = {{0.0f, -1.0f / 6}, {-0.25f, 1.0f / 6}, {0.25f, -7.0f / 18}, {-0.375f, -1.0f / 18}};
+    ffxContext ctx = nullptr;
+    int frameNo = 0;
+    auto record = [&](ID3D12CommandAllocator* alloc, ID3D12GraphicsCommandList* list, int k) {
+        alloc->Reset();
+        list->Reset(alloc, nullptr);
+        ffxDispatchDescUpscale d{};
+        d.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE;
+        d.commandList = list;
+        d.color = Resource(color, FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT, RW, RH, FFX_API_RESOURCE_STATE_COMPUTE_READ);
+        d.depth = Resource(depth, FFX_API_SURFACE_FORMAT_R32_FLOAT, RW, RH, FFX_API_RESOURCE_STATE_COMPUTE_READ);
+        d.motionVectors = Resource(motion, FFX_API_SURFACE_FORMAT_R16G16_FLOAT, RW, RH, FFX_API_RESOURCE_STATE_COMPUTE_READ);
+        d.output = Resource(outs[size_t(k)], FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT, sizes[size_t(k)].w, sizes[size_t(k)].h,
+                            FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
+        d.jitterOffset = {kJitter[frameNo & 3][0], kJitter[frameNo & 3][1]};
+        d.motionVectorScale = {float(RW), float(RH)};
+        d.renderSize = {RW, RH};
+        d.upscaleSize = {sizes[size_t(k)].w, sizes[size_t(k)].h};
+        d.preExposure = 1.0f;
+        d.frameTimeDelta = 16.7f;
+        d.cameraNear = 100000.0f;
+        d.cameraFar = 0.1f;
+        d.cameraFovAngleVertical = 1.0472f;
+        ++frameNo;
+        CHECK(api.dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
+    };
+    auto submit = [&](ID3D12GraphicsCommandList* list) {
+        CHECK(SUCCEEDED(list->Close()));
+        ID3D12CommandList* lists[] = {list};
+        gpu.queue->ExecuteCommandLists(1, lists);
+    };
+    auto frame = [&](int k) {
+        record(gpu.allocator, gpu.list, k);
+        submit(gpu.list);
+        CHECK(gpu.Wait());
+    };
+    auto removed = [&](const char* when) {
+        const HRESULT hr = gpu.device->GetDeviceRemovedReason();
+        if (hr != S_OK) std::printf("resize_real: DEVICE REMOVED %s: 0x%08lx\n", when, static_cast<unsigned long>(hr));
+        CHECK(hr == S_OK);
+    };
+    auto nonLocalMiB = [&]() {
+        DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+        if (!pm.adapter || FAILED(static_cast<IDXGIAdapter3*>(pm.adapter)->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &info))) return -1.0;
+        return double(info.CurrentUsage) / 1048576.0;
+    };
+    auto reported = [&]() {  // the front end's query: the runtime's allocation total of the current upscaler
+        ffxQueryDescUpscaleGetGPUMemoryUsage memory{};
+        FfxApiEffectMemoryUsage usage{};
+        memory.header.type = FFX_API_QUERY_DESC_TYPE_UPSCALE_GPU_MEMORY_USAGE;
+        memory.gpuMemoryUsageUpscaler = &usage;
+        return api.query(&ctx, &memory.header) == FFX_API_RETURN_OK ? double(usage.totalUsageInBytes) / 1048576.0 : -1.0;
+    };
+    auto settled = [&]() {
+        Sleep(DWORD(settleMs));
+        return pm.ProcessMiB();
+    };
+    const double base = settled();
+    std::printf("resize_real: before any context: process video memory %.0f MiB local, %.0f MiB non-local (textures made)\n", base, nonLocalMiB());
+    double firstEnd = 0;
+    for (int c = 0; c < cycles; ++c) {
+        ctx = create();
+        if (!ctx) return;
+        for (int f = 0; f < 3; ++f) frame(0);
+        removed("after the first frames");
+        const double first = settled();
+        std::printf("resize_real: cycle %d step  0 output %ux%u: process %.0f MiB (+%.0f over before), runtime reports %.0f MiB for this upscaler\n", c + 1,
+                    sizes[0].w, sizes[0].h, first, first - base, reported());
+        double previous = first, peak = first;
+        for (int k = 1; k <= steps; ++k) {
+            if (inflight) {  // the earlier list (previous size) recorded first, not yet submitted; the resize happens in the second
+                record(gpu.allocator, gpu.list, k - 1);
+                record(gpu.allocatorB, gpu.listB, k);
+                submit(gpu.listB);
+                submit(gpu.list);
+                CHECK(gpu.Wait());
+            } else {
+                frame(k);
+            }
+            frame(k);
+            frame(k);
+            removed("after a resize");
+            const double m = settled();
+            peak = std::max(peak, m);
+            std::printf("resize_real: cycle %d step %2d output %ux%u: process %.0f MiB (+%.0f over before, %+.0f over the previous step), runtime reports %.0f MiB\n",
+                        c + 1, k, sizes[size_t(k)].w, sizes[size_t(k)].h, m, m - base, m - previous, reported());
+            previous = m;
+        }
+        std::printf("resize_real: cycle %d peak process video memory %.0f MiB (+%.0f over before any context)\n", c + 1, peak, peak - base);
+        CHECK(api.destroy(&ctx, nullptr) == FFX_API_RETURN_OK && !ctx);
+        removed("after the destroy");
+        const double end = settled();
+        std::printf("resize_real: cycle %d context destroyed: process %.0f MiB (+%.0f over before any context; %+.0f over the end of cycle 1)\n", c + 1, end,
+                    end - base, end - (c ? firstEnd : end));
+        if (c == 0) firstEnd = end;
+    }
+    removed("at the end");
+}
+
 int main(int argc, char** argv) {
     const std::string mode = argc > 1 ? argv[1] : "upscale";
     if (mode == "switch_real") g_dllName = L"wronggpu_ffx_dx12.dll";
@@ -1967,9 +2156,10 @@ int main(int argc, char** argv) {
         SetEnvironmentVariableA("WG_FAKE_RUNTIME", fake);
         if (mode == "network_park") settings += "context_park_ms = 300\n";
     }
-    if (mode == "park_real") {
+    if (mode == "park_real" || mode == "resize_real") {
         char park[32] = "3000", options[2048] = "";
         GetEnvironmentVariableA("WG_TEST_PARK_MS", park, sizeof park);
+        if (mode == "resize_real") std::strcpy(park, "0");  // no parked upscaler: the memory is what the context holds
         GetEnvironmentVariableA("WG_TEST_RUNTIME_OPTIONS", options, sizeof options);
         settings = std::string("upscaler = network\ncontext_park_ms = ") + park + "\n";
         if (options[0]) settings += std::string("runtime_options = ") + options + "\n";
@@ -1986,7 +2176,7 @@ int main(int argc, char** argv) {
     if (mode.rfind("view_", 0) == 0) settings += "view = " + mode.substr(5) + "\n";
     // The checks below count per-frame trace lines (dispatches, submits, split releases) of every frame: log them all
     // (the release default logs only the first frames of a context).
-    if (mode != "park_real" && mode != "switch_real") settings += "log_dispatches = 1\n";
+    if (mode != "park_real" && mode != "switch_real" && mode != "resize_real") settings += "log_dispatches = 1\n";
     WriteFileText(ini, settings);
 
     Api api;
@@ -2021,6 +2211,7 @@ int main(int argc, char** argv) {
         else if (mode == "network_cyberpunk_fail") RunNetworkFsr3(gpu);
         else if (mode == "network_park") RunNetworkPark(api, gpu);
         else if (mode == "park_real") RunParkReal(api, gpu);
+        else if (mode == "resize_real") RunResizeReal(api, gpu);
         else if (mode == "switch_real")
             RunSwitchReal(api, gpu, argc > 2 ? std::atoi(argv[2]) : 6, argc > 3 ? std::atoi(argv[3]) : 20, argc > 4 ? std::atoi(argv[4]) : 3500);
         else if (mode.rfind("network_", 0) == 0) RunNetwork(api, gpu, mode);
@@ -2067,7 +2258,7 @@ int main(int argc, char** argv) {
     }
     const bool trace = mode.rfind("hooks_trace", 0) == 0;
     const bool toAmd = mode == "network_missing" || mode == "network_create_fail" || mode == "network_bad";  // no WrongGPU frame
-    const bool parks = mode == "network_park" || mode == "park_real" || mode == "switch_real";  // several contexts
+    const bool parks = mode == "network_park" || mode == "park_real" || mode == "switch_real" || mode == "resize_real";  // several contexts
     if (mode != "forward" && mode != "amd" && mode != "fsr30_log" && !trace && !toAmd && !parks) CHECK(Count(log, "WrongGPU frame: frame=0 ") == 1);
     if (mode == "network_park") {
         CHECK(Count(log, "fake runtime created") == 1);  // the second context took the first one's upscaler over
@@ -2091,6 +2282,20 @@ int main(int argc, char** argv) {
             if (at == std::string::npos) continue;
             const size_t a = log.rfind('\n', at), b = log.find('\n', at);
             std::printf("park_real: log: %s\n", log.substr(a + 1, b - a - 1).c_str());
+        }
+    }
+    if (mode == "resize_real") {
+        std::printf("resize_real: log: %zu upscalers created, %zu created again for a new output size, %zu old upscalers kept until the context is destroyed, "
+                    "%zu not created again after the limit, %zu errors\n",
+                    Count(log, "network runtime ready"), Count(log, "the upscaler is created again for it"), Count(log, "kept until the context is destroyed"),
+                    Count(log, "is not created again for this context"), Count(log, "ERROR"));
+        size_t at = 0;
+        int shown = 0;
+        while ((at = log.find("GPU memory ", at)) != std::string::npos && shown < 24) {
+            const size_t a = log.rfind('\n', at), b = log.find('\n', at);
+            std::printf("resize_real: log: %s\n", log.substr(a + 1, b - a - 1).c_str());
+            at = b == std::string::npos ? log.size() : b;
+            ++shown;
         }
     }
     if (mode == "switch_real") {

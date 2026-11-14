@@ -20,6 +20,7 @@ as its HIP kernel (`clean/dx12/compare.py` proves it per kernel on synthetic fra
 | `dxil_asm.cpp` | tool used by the build (assembles the rewritten DXIL listing) |
 | `compare.py` | HIP vs hybrid D3D12, every stage output / state buffer byte for byte |
 | `kernels/exposure.hlsl` | the reference port (`exposure_auto_diet`): copy its structure |
+| `kernels/fg_*.hlsl` | frame generation's ports (#96, `co=fg_*.co`): groundwork, built only when `--only` names them, never by a full build (`is_frame_gen`), so the Model M / Model L sets stay as they are; check: `clean/fg/runner/fg_d3d12_check.py` |
 
 ## Arithmetic mode (why build_dx12.py and nothing else)
 

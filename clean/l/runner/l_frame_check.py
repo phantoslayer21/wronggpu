@@ -49,10 +49,11 @@ Native D3D12 (runtime backend 3), after --run:
 
 <dir>/dx12 holds the D3D12 ports (python clean/dx12/build_dx12.py --out <dir>). The same frames run on D3D12 with the
 runtime's default kernels there (Model L: its encoder and decoder ports, the pack12 store l_coef_pack12, its own
-reconstruction l_post_recon_p12 and the analytic filter; with l_post=m Model M's pack12 post path instead; Model M:
-its native frame), and every stage output both backends write is compared with the HIP run's ("default"), byte for
-byte: the D3D12 ports reproduce their HIP kernels byte for byte, and Model M's pack12 post path the banded one bit for
-bit. (Where the D3D12 run's reconstruction is not the HIP run's, l_post=m for Model L, its post is checked on its own.) The pack12 images (A: A0 A1 A2 B0 | B1 B2 C2, C: C0 C1; clean/FORMATS.md) are
+reconstruction l_post_recon_p12[_ldr] and the output filter; Model M: its native frame), and every stage output both
+backends write is compared with the HIP run's ("default"), byte for byte: the D3D12 ports reproduce their HIP kernels
+byte for byte, and Model M's pack12 post path the banded one bit for bit. (A record of a Model L D3D12 run with Model
+M's post, from before the runtime dropped that route, is checked on its own.)
+The pack12 images (A: A0 A1 A2 B0 | B1 B2 C2, C: C0 C1; clean/FORMATS.md) are
 rearranged into the base layout's bytes and compared with the HIP run's A, B and C.
 
 Byte identity (every "byte for byte" above): the RAW defined bytes of every output (RAW_OUTPUTS, the sizes wg_rt_buffer
@@ -98,6 +99,16 @@ DEFAULT_L_MAP = os.path.join(ROOT, "data", "preset-L.v1.map.json")
 
 def model_dir(build):
     return os.path.join(build, "lframe_model")
+
+
+# --ldr: Model L with LDR colour (WgRtConfig.hdr = 0: l_post_recon_ldr / l_post_recon_p12_ldr and l_post_filter_ldr),
+# checked against the LDR reference (recon.reconstruct / output_filter with ldr=True); the records get an "_ldr" suffix.
+# Model M's runs are the same either way (Model M does not read the flag).
+LDR = False
+
+
+def rec_path(build, model, config):
+    return os.path.join(build, f"lframe_{model}_{config}{'_ldr' if LDR else ''}.pkl")
 
 
 def l_map(build):
@@ -329,7 +340,7 @@ def run_d3d12(build, special=True, stages=False):
     d = model_dir(build)
     setups = {"L": dict(map_path=l_map(build), check_packing=False, kernels={"options": "model=L"}),
               "M": dict(check_packing=True, kernels={})}
-    flags = {"L": {"depth_inverted": False, "auto_exposure": True, "hdr": True},  # as the HIP run's
+    flags = {"L": {"depth_inverted": False, "auto_exposure": True, "hdr": not LDR},  # as the HIP run's
              "M": {"depth_inverted": False, "auto_exposure": True}}
     for model, kw in setups.items():
         for config in ("d3d12_stages",) if stages else ("d3d12",):
@@ -342,10 +353,11 @@ def run_d3d12(build, special=True, stages=False):
                 out = p.frame(fr, debug=True)
                 frames.append({"inputs": fr, "out": out, "raw": raw_outputs(p)})
             rec = {"model": model, "config": config, "sentinel": SENTINELS[config], "kernels": p.kernels(),
+                   "ldr": LDR and model == "L",
                    "notes": p.notes(),
                    "model_source": p.model_source, "dw": p.dw, "dh": p.dh, "ow": p.ow, "oh": p.oh,
                    "taps": p.output_taps(), "frames": frames}
-            with open(os.path.join(build, f"lframe_{model}_{config}.pkl"), "wb") as f:
+            with open(rec_path(build, model, config), "wb") as f:
                 pickle.dump(rec, f)
             print(model, config, "frames", len(frames), "post", rec["kernels"].get("post"), "pack",
                   rec["kernels"].get("post_pack"), "bneck", rec["kernels"].get("swin_bneck"))
@@ -453,11 +465,11 @@ def compare_d3d12(build, json_path):
     for model in ("L", "M"):
         recs = {}
         for config in ("default", "d3d12"):
-            with open(os.path.join(build, f"lframe_{model}_{config}.pkl"), "rb") as f:
+            with open(rec_path(build, model, config), "rb") as f:
                 recs[config] = pickle.load(f)
         # the HIP run's reconstruction: Model M's (bit-identical to the D3D12 fused pack12 post) or Model L's own; the
         # D3D12 run's: for Model L its own (l_post_recon: the runtime's default where its route applies) or Model M's
-        # fused pack12 post (l_post=m: m_pack12)
+        # fused pack12 post (a record from before the runtime dropped that route for Model L: m_pack12)
         hip_post = recs["default"]["kernels"].get("l_post") or recs["default"]["kernels"].get("post_last")
         same_post = hip_post != "l_post_recon" or recs["d3d12"]["kernels"].get("l_post") == "l_post_recon"
         no_display = "post_tf" in str(recs["d3d12"]["kernels"].get("post_last", ""))
@@ -480,7 +492,7 @@ def compare_d3d12(build, json_path):
             # previous frame's reconstruction, so the two runs part after the first frame. The D3D12 frame is checked
             # on its own: every stage of the run with all outputs written against the reference on that run's inputs
             # (as --compare), and the default kernels against that run byte for byte.
-            with open(os.path.join(build, f"lframe_{model}_d3d12_stages.pkl"), "rb") as f:
+            with open(rec_path(build, model, "d3d12_stages"), "rb") as f:
                 st = fill_pack12(pickle.load(f))
             per_stage = compare_model(st, params[model], post_ref="M", bneck_unit=True)
             fused, unw = compare_d3d12_configs(st, recs["d3d12"])
@@ -527,10 +539,10 @@ def run(build, rocm, special=True):
     clean_process_environment(rocm)
     from clean.runner.pipeline import Pipeline
     d = model_dir(build)
-    # Model L: HDR colour (its reconstruction kernel l_post_recon is HDR; the runtime refuses Model L without it)
+    # Model L: HDR colour, or with --ldr LDR colour (l_post_recon_ldr)
     setups = {"L": dict(map_path=l_map(build), check_packing=False, kernels={"options": "model=L"}),
               "M": dict(check_packing=True, kernels={"pack": "none"})}
-    flags = {"L": {"depth_inverted": False, "auto_exposure": True, "hdr": True},
+    flags = {"L": {"depth_inverted": False, "auto_exposure": True, "hdr": not LDR},
              "M": {"depth_inverted": False, "auto_exposure": True}}
     for model, kw in setups.items():
         # "stages": the bottleneck as six block launches, so that b0 ... b4 are written (the default megakernel writes
@@ -546,10 +558,11 @@ def run(build, rocm, special=True):
                 out = p.frame(fr, debug=True)
                 frames.append({"inputs": fr, "out": out, "raw": raw_outputs(p)})
             rec = {"model": model, "config": config, "sentinel": SENTINELS[config], "kernels": p.kernels(),
+                   "ldr": LDR and model == "L",
                    "notes": p.notes(),
                    "model_source": p.model_source, "dw": p.dw, "dh": p.dh, "ow": p.ow, "oh": p.oh,
                    "taps": p.output_taps(), "frames": frames}
-            with open(os.path.join(build, f"lframe_{model}_{config}.pkl"), "wb") as f:
+            with open(rec_path(build, model, config), "wb") as f:
                 pickle.dump(rec, f)
             print(model, config, "frames", len(frames), "bneck", rec["kernels"].get("swin_bneck"), "post",
                   rec["kernels"].get("post"))
@@ -604,13 +617,20 @@ def same_values(got, ref):
 
 
 def post_fp16(got, ref, model="M"):
-    finite = np.isfinite(got)
-    s = _f16_steps(got, ref)
-    d = np.abs(np.where(finite, got, 0.0).astype(np.float64) - ref)
+    """A non-finite value counts as agreeing only where the reference holds the same one (both NaN, or the same
+    infinity: Model L's LDR form stores H^ as it is, so a NaN reaches the history on both sides); FP16 steps,
+    differences and the RMS are over the finite pairs. (With a finite reference, as in HDR, this is the plain rule.)"""
+    got, ref = np.asarray(got, np.float32), np.asarray(ref, np.float32)
+    fin_g, fin_r = np.isfinite(got), np.isfinite(ref)
+    both = fin_g & fin_r
+    same_nf = ~fin_g & ~fin_r & ((got == ref) | (np.isnan(got) & np.isnan(ref)))
+    s = _f16_steps(np.where(both, got, 0.0), np.where(both, ref, 0.0))
+    d = np.abs(np.where(both, got, 0.0).astype(np.float64) - np.where(both, ref, 0.0))
+    rms = np.sqrt(np.mean(np.square(ref[fin_r], dtype=np.float64))) if fin_r.any() else 0.0
     m = {"values": int(s.size), "differ": int(np.sum(s > 0)), "max_f16_steps": int(s.max()) if s.size else 0,
-         "nonfinite": int(np.sum(~finite)), "frac_over_1": float(np.mean(s > 1)), "over_1": int(np.sum(s > 1)),
-         "frac_diff": float(np.mean(s > 0)),
-         "mean_rel_rms": float(d.mean() / max(np.sqrt(np.mean(np.square(ref, dtype=np.float64))), 1e-30))}
+         "nonfinite": int(np.sum(~(both | same_nf))), "nonfinite_agreeing": int(np.sum(same_nf)),
+         "frac_over_1": float(np.mean(s > 1)), "over_1": int(np.sum(s > 1)), "frac_diff": float(np.mean(s > 0)),
+         "mean_rel_rms": float(d.mean() / max(rms, 1e-30))}
     m.update(_magnitudes(got, ref))
     if model == "L":
         # Model L's post acceptance (clean/l/runner/l_post_check.py, provisional): per frame at most 0.05 % more than
@@ -623,8 +643,8 @@ def post_fp16(got, ref, model="M"):
 
 
 def compare_model(rec, params, post_ref=None, bneck_unit=False):
-    """post_ref "M": the post against Model M's reference whatever the model (Model L's native D3D12 frame runs Model
-    M's fused pack12 post for now). bneck_unit: b0 ... b5 as one unit (a bottleneck megakernel writes only b5): the
+    """post_ref "M": the post against Model M's reference whatever the model (a record of a run with Model M's post).
+    bneck_unit: b0 ... b5 as one unit (a bottleneck megakernel writes only b5): the
     reference chained from the runtime's enc2.merged, b5 under the per-stage rule."""
     from clean.l.reference import oracle as L
     from clean.l.reference import table as T
@@ -720,7 +740,8 @@ def compare_model(rec, params, post_ref=None, bneck_unit=False):
               "jitter": fr["jitter"], "reset": eff_reset, "recon_size": D}
         s_post = float(np.asarray(params["post"]["s"]).reshape(-1)[0])
         l_recon = model == "L" and post_ref != "M"
-        ref = R.reconstruct(xp, s_post) if l_recon else Po.reconstruct(xp, s_post)
+        ldr = bool(rec.get("ldr", False)) and l_recon
+        ref = R.reconstruct(xp, s_post, ldr=ldr) if l_recon else Po.reconstruct(xp, s_post)
         m["post"] = {"history": post_fp16(out["post"]["history"], ref["history"], model)}
         if out["post"]["display"] is not None:
             m["post"]["display"] = post_fp16(out["post"]["display"], ref["display"], model)
@@ -732,11 +753,14 @@ def compare_model(rec, params, post_ref=None, bneck_unit=False):
             if rec["taps"] is not None:
                 fo = Po.output_filter_original(disp, e, (rec["ow"], rec["oh"]), rec["taps"])
             elif l_recon:
-                fo = R.output_filter(disp, e, (rec["ow"], rec["oh"]))
+                fo = R.output_filter(disp, e, (rec["ow"], rec["oh"]), ldr=ldr)
             else:
                 fo = Po.output_filter(disp, e, (rec["ow"], rec["oh"]))
             fo = (np.asarray(fo, np.float32) * pi).astype(np.float32)
-            close = np.isclose(out["out"], fo, rtol=1e-5, atol=2e-9)
+            # (LDR: plain colours, about 1 at most, so the float32 rounding of the filter's two 5-tap passes is an
+            # absolute error, about 2^-24 per operation: a result near 0 from cancelling taps is off by up to some
+            # 1e-8; atol 1e-6 pi bounds the ten operations with the weights' sum of magnitudes)
+            close = np.isclose(out["out"], fo, rtol=1e-5, atol=1e-6 * float(pi) if ldr else 2e-9)
             m["filter"] = {"values": int(close.size), "outside": int(np.sum(~close)), "pass": bool(close.all())}
 
         stage_pass = {s: (all(v["pass"] for v in m[s].values() if isinstance(v, dict) and "pass" in v)
@@ -792,7 +816,7 @@ def compare(build, json_path):
     for model in ("L", "M"):
         recs = {}
         for config in ("stages", "default"):
-            with open(os.path.join(build, f"lframe_{model}_{config}.pkl"), "rb") as f:
+            with open(rec_path(build, model, config), "rb") as f:
                 recs[config] = pickle.load(f)
         frames = compare_model(recs["stages"], params[model])
         # the default kernels against the six-launch bottleneck, raw defined bytes: b0 ... b4 are not written by the
@@ -853,7 +877,11 @@ def main(argv=None):
     ap.add_argument("--model", help="--prepare: a converter-written Model L model.wgcm in place of the synthetic model")
     ap.add_argument("--map", help="--prepare with --model: the map it was converted with (default: the shipped "
                                   "data/preset-L.v1.map.json)")
+    ap.add_argument("--ldr", action="store_true",
+                    help="--run / --compare / --compare-d3d12: Model L with LDR colour (records *_ldr.pkl)")
     a = ap.parse_args(argv)
+    global LDR
+    LDR = a.ldr
     if (a.model or a.map) and not a.prepare:
         ap.error("--model and --map go with --prepare")
     if a.map and not a.model:
