@@ -3,10 +3,10 @@
  "harness": "clean/fsr/tests/test_dll_d3d12.cpp resize_real (WG_TEST_RESIZE_STEPS=0, WG_TEST_RESIZE_CYCLES=5, settle 800 ms): DXGI QueryVideoMemoryInfo, local segment, this process only; the runtime-reported figure is the front end's FFX_API_QUERY_DESC_TYPE_UPSCALE_GPU_MEMORY_USAGE",
  "setup": {
   "gpu": "AMD Radeon RX 9070 XT (gfx1201), 16191 MiB dedicated",
-  "base": "main 6622148",
-  "runtime": "this branch, clean/runner/build.py --model-l --no-model-k, D3D12 kernels build_dx12.py --model-l (68 kernels)",
+  "base": "this branch merged with main (merge cabcd4c)",
+  "runtime": "this branch, clean/runner/build.py --model-l --no-model-k, D3D12 kernels build_dx12.py --model-l (69 kernels)",
   "front_end": "clean/fsr with WG_MODEL_L=ON, WG_MODEL_K=OFF (test_dll_d3d12 and its front-end copy)",
-  "runtime_dll_sha256": "276f805d776532f6b0fec5c3d819fb291b22d5fd4a9288aa972d280557b25292",
+  "runtime_dll_sha256": "9204b29fa4ba92111235a61473aa0b2f412195aa739a914c957b607c2296ddb0",
   "front_end_dll_sha256": "b89ceea05b3dd1de875f366266a0bf88bddc7bf3d307bc24f7b06b252529eb55",
   "models": "synthetic files from the repository's generators (Model M: synthetic_model.synthetic_tensors(3) with its Swin weights scaled so every stage takes the clamp-free kernels, as a real model's do; Model L: l_frame_check's synthetic model, seed 89); memory depends on the network's shapes, not on the values",
   "gpu_runs": "one at a time, each through tools/gpu_slot.py --cap-s 170"
