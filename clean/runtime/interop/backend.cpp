@@ -780,7 +780,8 @@ class Context {
     }
     if (model_k_) {
       say(WG_LOG_INFO, std::string("network model K (runtime option model=K), ") +
-                           ((flags_ & WG_CREATE_HDR) ? "HDR" : "LDR") + " colour; output alpha 1" +
+                           ((flags_ & WG_CREATE_HDR) ? "HDR" : "LDR") +
+                           " colour; output alpha: the colour input's alpha (1 for a colour format without one)" +
                            ((flags_ & WG_CREATE_MOTION_OUTPUT_RES)
                                 ? "; motion at output size is resampled to render pixels by the input pass "
                                   "(model K runs its render-resolution motion variant on it)"
@@ -952,7 +953,19 @@ class Context {
     } else if (!copied && model_k_ && k_input16_) {
       note_path(&input_path_, "input: conversion pass (model K compact pass needs FP16 color and motion)");
     }
-    if (!copied) conv_.record_inputs(list, f, flags_, in);
+    if (!copied) {
+      // model K (issue #26): the FP32 pass writes the raw motion texels and K gets motion_scale and the
+      // raw-unit offset RN(motion_offset / motion_scale) in WgRtFrame, so that it folds the scale into its motion factor
+      // as the reference and its buffer forms do (the pass's per-texel ms raw + mo with scale 1 rounded differently).
+      // A zero scale has no raw-unit offset: those frames keep the pass's conversion. Model M: unchanged.
+      const bool kraw = model_k_ && f.motion_scale[0] != 0.0f && f.motion_scale[1] != 0.0f;
+      if (kraw)
+        for (int k = 0; k < 2; ++k) {
+          job.frame.mv_scale[k] = f.motion_scale[k];
+          job.frame.mv_bias[k] = f.motion_offset[k] == 0.0f ? 0.0f : f.motion_offset[k] / f.motion_scale[k];
+        }
+      conv_.record_inputs(list, f, flags_, in, kraw);
+    }
     if (motion_hi_ && slot.motion_hi.resource) {  // the raw output-size motion for the network (or the capture)
       conv_.record_motion_hi(list, f, {slot.motion_hi.resource, slot.motion_hi.offset}, ow_, oh_);
       job.motion_hi = true;
@@ -1016,6 +1029,7 @@ class Context {
     std::string whyNot;
     const bool halfOut = output_copy_ && Converter::output_copy_ok(f, &whyNot);
     job.out_half_pitch = halfOut ? Converter::half_rgba_pitch(ow_) : 0;
+    job.out_rgba32f = model_k_ && !halfOut;  // model K's result for the output pass: RGBA f32 (the alpha with it)
     job.ow = (int)ow_;
     job.oh = (int)oh_;
     // 3. the network, enqueued now; GPU-side wait for ready >= v and signal done = v
@@ -1398,6 +1412,8 @@ class Context {
 #endif
       model_l = model == wgrt::ModelId::L;
     }
+    // model K: the output alpha follows the colour input's alpha (issue #26): the passes carry it; model M's 1
+    conv_.set_model_k(model_k_);
     {  // model K's input path: k_input=16 (default: the compact pass where exact) or f32 (the FP32 input pass)
       const std::string ki = option_value(o.runtime, "k_input");
       if (!ki.empty() && ki != "16" && ki != "f32") return *err = "unknown k_input " + ki + " (16 or f32)", false;
@@ -1576,7 +1592,7 @@ class Context {
     sizes[1] = std::max(R * 4, p4 * max_rh_);
     sizes[2] = std::max(R * 8, p8 * max_rh_);
     sizes[3] = 256;
-    sizes[4] = std::max(O * 12, po * oh_);
+    sizes[4] = std::max(O * (model_k_ ? 16 : 12), po * oh_);  // model K: RGBA f32 for the output pass (Job.out_rgba32f)
     // motion at output resolution: O texels of two FP16 and 8 spare bytes (kernels/wg_motion_hi.h); 0 = no buffer.
     // It comes last in a slot and takes no room when absent, so every other offset is what it was.
     sizes[5] = motion_hi_ ? O * 4 + 8 : 0;

@@ -15,6 +15,11 @@ namespace {
 constexpr UINT kSetSize = 8;    // t0..t3, u0..u3
 constexpr UINT kRingSets = 512; // descriptor sets before reuse (far more than frames in flight x 3)
 constexpr uint32_t kMotionOutputRes = 1, kExposureTexture = 2;
+// Model K (Converter::set_model_k; issue #26: its output alpha follows the colour input's alpha).
+// kOutputAlpha, output passes: the alpha comes with the result (output: the fourth f32 of each result pixel; outtex: the
+// result texture's alpha; fallback: the bilinear of the colour's alpha), else alpha 1 (model M).
+// kInputAlpha, input pass: the colour texel's alpha goes into the dense colour unmodified, else +0 (model M).
+constexpr uint32_t kOutputAlpha = 4, kInputAlpha = 8;
 constexpr UINT kOptimizationLevel3 = 1u << 15;  // D3DCOMPILE_OPTIMIZATION_LEVEL3 (d3dcompiler.h)
 
 // Written for WrongGPU from the definitions in spec 03 / spec 20 and clean/FORMATS.md.
@@ -77,7 +82,10 @@ void inputs(uint3 id : SV_DispatchThreadID) {
   if (id.x >= rw || id.y >= rh) return;
   int3 p = int3(rx + id.x, ry + id.y, 0);
   uint i = id.y * rw + id.x;
-  colorBuf[i] = float4(colorTex.Load(p).rgb, 0.0);
+  // flags & 8u (model K): the texel's alpha, unmodified, as the colour's fourth value (model K's output alpha follows
+  // it; a format without an alpha channel loads 1). Else +0 (model M).
+  float4 ct = colorTex.Load(p);
+  colorBuf[i] = float4(ct.rgb, (flags & 8u) ? ct.a : 0.0);
   depthBuf[i] = depthTex.Load(p);
   int3 mp = p;
   if (flags & 1u) {  // motion at output size: the texel under the render pixel's centre
@@ -92,13 +100,14 @@ void inputs(uint3 id : SV_DispatchThreadID) {
 #if defined(PASS_INPUTS16)
 // Model K's compact input pass (record_inputs16): colour into RGBA16F and the raw motion texel into RG16F elements
 // (both UAVs typed FP16; the game's colour and motion are FP16-representable, so the stores are exact), depth and
-// exposure as in inputs. The network side applies m = ms raw + mo when it reads the motion.
+// exposure as in inputs. The colour keeps the texel's alpha, unmodified (model K's output alpha follows it; R11G11B10
+// has none and loads 1). The network side applies m = ms raw + mo when it reads the motion.
 [numthreads(8, 8, 1)]
 void inputs16(uint3 id : SV_DispatchThreadID) {
   if (id.x >= rw || id.y >= rh) return;
   int3 p = int3(rx + id.x, ry + id.y, 0);
   uint i = id.y * rw + id.x;
-  colorBuf[i] = float4(colorTex.Load(p).rgb, 0.0);
+  colorBuf[i] = colorTex.Load(p);
   depthBuf[i] = depthTex.Load(p);
   int3 mp = p;
   if (flags & 1u) {  // motion at output size: the texel under the render pixel's centre
@@ -144,10 +153,15 @@ float3 to_srgb(float3 c) {
 [numthreads(8, 8, 1)]
 void output(uint3 id : SV_DispatchThreadID) {
   if (id.x >= ow || id.y >= oh) return;
-  uint i = 3 * (id.y * ow + id.x);
+  // flags & 4u (model K): the result holds 4 x f32 per pixel, the fourth being the output alpha (the colour input's
+  // alpha through model K's output stage), stored as it is. Else 3 x f32 and alpha 1 (model M).
+  bool ka = (flags & 4u) != 0;
+  uint i = (ka ? 4 : 3) * (id.y * ow + id.x);
   float3 c = float3(resultBuf[i], resultBuf[i + 1], resultBuf[i + 2]);
+  float a = 1.0;
+  [branch] if (ka) a = resultBuf[i + 3];
   if (srgb) c = to_srgb(c);
-  outTex[id.xy] = float4(c, 1.0);
+  outTex[id.xy] = float4(c, a);
 }
 #endif
 
@@ -157,9 +171,10 @@ void output(uint3 id : SV_DispatchThreadID) {
 [numthreads(8, 8, 1)]
 void outtex(uint3 id : SV_DispatchThreadID) {
   if (id.x >= ow || id.y >= oh) return;
-  float3 c = proxyTex.Load(int3(id.xy, 0)).rgb;
+  float4 t = proxyTex.Load(int3(id.xy, 0));
+  float3 c = t.rgb;
   if (srgb) c = to_srgb(c);
-  outTex[id.xy] = float4(c, 1.0);
+  outTex[id.xy] = float4(c, (flags & 4u) ? t.a : 1.0);  // model K: the result texture's alpha, as it is
 }
 #endif
 
@@ -172,11 +187,14 @@ void fallback(uint3 id : SV_DispatchThreadID) {
   float2 f = s - floor(s);
   int2 lo = int2(rx, ry), hi = int2(rx + rw - 1, ry + rh - 1);
   int2 p0 = clamp(int2(rx, ry) + a, lo, hi), p1 = clamp(int2(rx, ry) + a + 1, lo, hi);
-  float3 c00 = colorTex.Load(int3(p0.x, p0.y, 0)).rgb, c10 = colorTex.Load(int3(p1.x, p0.y, 0)).rgb;
-  float3 c01 = colorTex.Load(int3(p0.x, p1.y, 0)).rgb, c11 = colorTex.Load(int3(p1.x, p1.y, 0)).rgb;
-  float3 c = lerp(lerp(c00, c10, f.x), lerp(c01, c11, f.x), f.y);
+  float4 c00 = colorTex.Load(int3(p0.x, p0.y, 0)), c10 = colorTex.Load(int3(p1.x, p0.y, 0));
+  float4 c01 = colorTex.Load(int3(p0.x, p1.y, 0)), c11 = colorTex.Load(int3(p1.x, p1.y, 0));
+  float4 b = lerp(lerp(c00, c10, f.x), lerp(c01, c11, f.x), f.y);
+  float3 c = b.rgb;
   if (srgb) c = to_srgb(c);
-  outTex[id.xy] = float4(c, 1.0);
+  // model K (flags & 4u): the colour's alpha through the same bilinear (a frame without a network result follows the
+  // colour input's alpha too); else alpha 1 (model M)
+  outTex[id.xy] = float4(c, (flags & 4u) ? b.a : 1.0);
 }
 #endif
 )HLSL";
@@ -445,12 +463,12 @@ void Converter::record_inputs16(ID3D12GraphicsCommandList* list, const WgFrame& 
 }
 
 void Converter::record_inputs(ID3D12GraphicsCommandList* list, const WgFrame& f, uint32_t create_flags,
-                              const InputBuffers& b) {
-  record_inputs_pass(list, f, create_flags, b, false);
+                              const InputBuffers& b, bool raw_motion) {
+  record_inputs_pass(list, f, create_flags, b, false, raw_motion);
 }
 
 void Converter::record_inputs_pass(ID3D12GraphicsCommandList* list, const WgFrame& f, uint32_t create_flags,
-                                   const InputBuffers& b, bool compact) {
+                                   const InputBuffers& b, bool compact, bool raw_motion) {
   const UINT set = next_set();
   D3D12_CPU_DESCRIPTOR_HANDLE cpu = heap_->GetCPUDescriptorHandleForHeapStart();
   cpu.ptr += (SIZE_T)set * kSetSize * increment_;
@@ -497,13 +515,17 @@ void Converter::record_inputs_pass(ID3D12GraphicsCommandList* list, const WgFram
   c.ry = f.render_y;
   c.rw = f.render_width;
   c.rh = f.render_height;
-  c.msx = f.motion_scale[0];
-  c.msy = f.motion_scale[1];
-  c.mox = f.motion_offset[0];
-  c.moy = f.motion_offset[1];
+  // raw_motion (model K): scale 1, offset 0, so the pass's msx * m + mox writes the raw texel m (1 m exact; + 0 only
+  // turns -0 into +0, which K's own m + b turns into the same value); the caller passes motion_scale / offset in
+  // WgRtFrame (issue #26). Model M: the frame's motion_scale / offset, as before.
+  c.msx = raw_motion ? 1.0f : f.motion_scale[0];
+  c.msy = raw_motion ? 1.0f : f.motion_scale[1];
+  c.mox = raw_motion ? 0.0f : f.motion_offset[0];
+  c.moy = raw_motion ? 0.0f : f.motion_offset[1];
   c.mw = f.motion.width;
   c.mh = f.motion.height;
-  c.flags = ((create_flags & WG_CREATE_MOTION_OUTPUT_RES) ? kMotionOutputRes : 0) | (expoTex ? kExposureTexture : 0);
+  c.flags = ((create_flags & WG_CREATE_MOTION_OUTPUT_RES) ? kMotionOutputRes : 0) | (expoTex ? kExposureTexture : 0) |
+            (model_k_ ? kInputAlpha : 0);
 
   Barriers bar;
   const auto srvState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
@@ -535,7 +557,7 @@ void Converter::record_output(ID3D12GraphicsCommandList* list, const WgFrame& f,
     d.Format = DXGI_FORMAT_R32_FLOAT;
     d.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
     d.Buffer.FirstElement = range.offset / 4;
-    d.Buffer.NumElements = 3 * f.output_width * f.output_height;
+    d.Buffer.NumElements = (model_k_ ? 4 : 3) * f.output_width * f.output_height;  // model K: RGBA f32 (kOutputAlpha)
     device_->CreateUnorderedAccessView(result, nullptr, &d, u1);
   } else {
     D3D12_SHADER_RESOURCE_VIEW_DESC d = {};
@@ -558,6 +580,7 @@ void Converter::record_output(ID3D12GraphicsCommandList* list, const WgFrame& f,
   c.ow = f.output_width;
   c.oh = f.output_height;
   c.srgb = is_srgb(ofmt) ? 1 : 0;
+  c.flags = model_k_ ? kOutputAlpha : 0;
   Barriers bar;
   bar.need(out, f.output.state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   if (!result)
@@ -612,6 +635,7 @@ bool Converter::record_output_tex(ID3D12GraphicsCommandList* list, const WgFrame
   c.ow = f.output_width;
   c.oh = f.output_height;
   c.srgb = is_srgb(ofmt) ? 1 : 0;
+  c.flags = model_k_ ? kOutputAlpha : 0;
   Barriers bar;
   bar.need(out, f.output.state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   bar.need(proxy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);

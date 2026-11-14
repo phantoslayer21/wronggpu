@@ -7,6 +7,10 @@
 //  - output:   the network's result buffer (O, 3 x f32 RGB) into the game's output texture (alpha 1, sRGB encoded for
 //              sRGB formats);
 //  - fallback: a bilinear upscale of the game's color into the output texture, for frames without a network result.
+// Model K (set_model_k; issue #26): its output alpha is the colour input's alpha of the frame, so the input passes
+// keep the colour texel's alpha in the dense colour's fourth value (model M: +0), the output pass reads 4 x f32 per
+// result pixel and stores the fourth as the alpha, the output pass on a result texture stores that texture's alpha,
+// and the fallback stores the bilinear of the colour's alpha (model M: alpha 1 in all three).
 // HLSL compiled at run time with the Windows component d3dcompiler_47.dll (cs_5_0). The game's resource states are
 // transitioned as needed and restored to the states the front end reported.
 #pragma once
@@ -38,8 +42,11 @@ class Converter {
  public:
   ~Converter();
   bool init(ID3D12Device* device, std::string* err);
-  // Records the input conversion of frame f into list (barriers on the game's textures and back).
-  void record_inputs(ID3D12GraphicsCommandList* list, const WgFrame& f, uint32_t create_flags, const InputBuffers& b);
+  // Records the input conversion of frame f into list (barriers on the game's textures and back). raw_motion (model K,
+  // issue #26): the motion buffer gets the raw texels (the pass's scale 1, offset 0; the caller passes
+  // motion_scale / offset in WgRtFrame, and K folds the scale into its motion factor as the reference does).
+  void record_inputs(ID3D12GraphicsCommandList* list, const WgFrame& f, uint32_t create_flags, const InputBuffers& b,
+                     bool raw_motion = false);
   // Model K's compact input pass: dense rows of RGBA16F colour (rw * 8 bytes), R32F depth and the raw RG16F motion
   // texel (rw * 4 bytes; the network applies motion_scale / motion_offset), into the same buffers. Exact when
   // inputs16_ok: colour RGBA16F or R11G11B10, motion RG16F or RGBA16F (FP16-representable values).
@@ -60,8 +67,8 @@ class Converter {
   // render_height), UNORDERED_ACCESS) at the render pixel's texture coordinate. The game's motion texture must be in a
   // shader-resource state; no barriers are recorded. False (*err) if its shader fails to compile.
   bool record_motion_point(ID3D12GraphicsCommandList* list, const WgFrame& f, ID3D12Resource* dst, std::string* err);
-  // Records the output write: from the result buffer (R32_FLOAT elements, 3 per pixel) or, when result is null, the
-  // bilinear fallback from the game's color texture (result.resource null).
+  // Records the output write: from the result buffer (R32_FLOAT elements, 3 per pixel; model K: 4 per pixel, RGBA) or,
+  // when result is null, the bilinear fallback from the game's color texture (result.resource null).
   void record_output(ID3D12GraphicsCommandList* list, const WgFrame& f, const BufferRange& result);
   // The output pass from an RGBA32F texture holding the result (executor=dx12; the texture in UNORDERED_ACCESS before
   // and after): the operations of record_output's pass on the same FP32 values. False (*err) if its shader fails.
@@ -91,8 +98,16 @@ class Converter {
   // before it), e.g. from a rescue list.
   void record_spin(ID3D12GraphicsCommandList* list, const BufferRange& flag, uint32_t value, uint32_t polls);
   void record_flag_immediate(ID3D12GraphicsCommandList* list, const BufferRange& flag, uint32_t value);
+  // Model K (issue #26): the alpha is carried (see the file comment): the input passes keep the colour's alpha,
+  // record_output reads an RGBA f32 result (FrameIo.out_rgba32f), record_output_tex and the fallback store the result
+  // texture's / the colour's alpha. Off (model M, the default): colour alpha +0 in, alpha 1 out. Set by the backend
+  // once the model is known.
+  void set_model_k(bool on) { model_k_ = on; }
+  // Bytes per pixel of the result buffer record_output reads (dense f32 rows): 12, model K 16.
+  uint32_t result_pixel_bytes() const { return model_k_ ? 16u : 12u; }
 
  private:
+  bool model_k_ = false;
   struct Constants {
     uint32_t rx, ry, rw, rh;
     float msx, msy, mox, moy;
@@ -101,7 +116,7 @@ class Converter {
   };
   UINT next_set();
   void record_inputs_pass(ID3D12GraphicsCommandList* list, const WgFrame& f, uint32_t create_flags,
-                          const InputBuffers& b, bool compact);
+                          const InputBuffers& b, bool compact, bool raw_motion = false);
   void bind(ID3D12GraphicsCommandList* list, ID3D12PipelineState* pso, const Constants& c, UINT set);
 
   ID3D12Device* device_ = nullptr;
