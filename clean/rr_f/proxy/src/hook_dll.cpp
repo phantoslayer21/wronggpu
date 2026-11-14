@@ -36,8 +36,19 @@
 // compatible IDs of the real adapter report the same pair as DXGI. The exe's import slots of setupapi.dll are redirected
 // at InitializeASI; the decision is made at the game's first call (DXGI is not readable at InitializeASI; until it is,
 // the host's own spoof settings in OptiScaler.ini give the pair). wronggpu-rr.ini setupapi_identity=auto|off.
+//
+// RR guard: the coexistence guard (rr_guard.h, HOOK-MODE.md "Another Ray Reconstruction plugin"). Before
+// anything is patched, the plugin reads where the game's RR calls lead (the import slots it would patch, the first bytes
+// of the interface's RR exports, in host-route mode the host's continuation pointers); after its handlers are in place
+// it reads them again at OptiPluginInit and at the game's first call (decided once). WrongGPU RR switches itself off
+// only on evidence that is positive by contract: a second copy of WrongGPU RR, or the host's plugin API refusing our
+// registration (the NGX provider slot taken, our routes refused). A named foreign module on the path is inconclusive:
+// RR stays active and one line names the module and the place. wronggpu-rr.ini rr_other_plugin=yield makes such a
+// module switch WrongGPU RR off; take puts WrongGPU RR in front of it. rr_guard::decide holds the policy. Every read of
+// memory we do not own goes through rr_guard's safe reads.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <intrin.h>  // RR guard: _ReturnAddress (the module that calls InitializeASI is taken as the host)
 #include <psapi.h>
 #include <d3d12.h>  // NGX route: the device under a command list (a COM call only; no library)
 #include <dxgi1_4.h>  // clean/rr-sl-diag: the adapter of a LUID in the diagnostics (system dxgi.dll loaded at run time)
@@ -55,9 +66,11 @@
 
 #include <atomic>
 
+#include "log_append.h"
 #include "ngx_rr.h"
 #include "proxy_core.h"
 #include "rr_enabled.h"
+#include "rr_guard.h"
 #include "rr_panel.h"
 #include "settings.h"
 #include "setupapi_identity.h"
@@ -130,11 +143,29 @@ std::atomic<uint64_t> g_last_rr_frame_ms{0};
 std::atomic<const WgHostMenuApi*> g_host_api{nullptr};
 std::atomic<WgHostMenuPlugin*> g_host_api_plugin{nullptr};
 std::mutex g_host_restore_mutex;
+// RR guard (rr_guard.h): the guard's state for this process, the override, and the pass-through targets
+wgrr::guard::Decision g_guard;
+// g_mode, g_host_module, g_host_api_module and g_fwd are written on the host's callback thread (OptiPluginInit, the
+// host's hook callback) and read by the game's threads (the handlers, the late check): atomics, published with release
+std::atomic<int> g_mode{0};             // wronggpu-rr.ini rr_other_plugin (wgrr::guard::Mode)
+std::atomic<bool> g_hook_done{false};   // our handlers are installed: the late check may run
+// The host as far as the plugin can tell: the module that called InitializeASI and the module holding the host's API
+// table. Used to accept the host's own patches and for the log's wording only: a wrong guess can no longer switch RR
+// off (a named module is inconclusive unless rr_other_plugin=yield).
+std::atomic<HMODULE> g_host_module{nullptr};
+std::atomic<HMODULE> g_host_api_module{nullptr};  // (when another module than the caller of InitializeASI)
+std::atomic<bool> g_late_foreign_logged{false};   // the late check names a foreign module once per run
+// g_prev is written once by guard_at_load on the thread that then builds the core (do_hook): no other thread reads it
+// before the core exists (bind() runs inside the core's construction), so it stays a plain array
+void* g_prev[32] = {};                  // take: what the exe's import slots held before us (the other plugin), by role
+// where a passing handler sends the call (the genuine export or the host's next): an immutable snapshot, replaced whole
+std::atomic<const wgrr::OriginalApi*> g_fwd{nullptr};
+HANDLE g_marker = nullptr;              // the process-wide marker of the active WrongGPU RR copy (held for the run)
 #if WG_RR_PROBE
 wgrr::RrProbe* g_probe = nullptr;
 wgrr::ProbeLog* g_probe_log = nullptr;
 std::once_flag g_probe_log_once;
-FILE* g_probe_file = nullptr;
+std::wstring g_probe_path;  // wronggpu-rr-probe.log (0.6.1: one append call per line, log_append.h)
 #else
 wgrr::RrProxy* g_proxy = nullptr;
 // clean/rr-ngx: the NGX RR provider (plugin interface 4) and the runtime / switch both routes share
@@ -173,16 +204,21 @@ wgrr::ProbeLog* probe_log() {
   std::call_once(g_probe_log_once, [] {
     std::wstring path = data_dir() + L"wronggpu-rr-probe.log";
     std::wstring prev = data_dir() + L"wronggpu-rr-probe.prev.log";
-    MoveFileExW(path.c_str(), prev.c_str(), MOVEFILE_REPLACE_EXISTING);
-    g_probe_file = _wfopen(path.c_str(), L"wb");
+    {
+      const wgrr::LogLock shared(path, wgrr::kLogLockWaitMs);
+      MoveFileExW(path.c_str(), prev.c_str(), MOVEFILE_REPLACE_EXISTING);
+      // a new, empty log (as proxy_dll.cpp does), also when the old one could not be moved aside: never append to it
+      HANDLE fresh = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                 nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+      if (fresh != INVALID_HANDLE_VALUE) CloseHandle(fresh);
+    }
+    // RR guard, 0.6.1: a second WrongGPU RR copy appends its line to this file too: every line is one append
+    // call under the log's process-wide lock (log_append.h), so neither copy's line is torn or overwritten
+    g_probe_path = path;
     g_probe_log = new wgrr::ProbeLog([](const std::string& line) {
       std::lock_guard<std::mutex> lock(g_log_mutex);
-      if (!g_probe_file) return;
-      SYSTEMTIME t;
-      GetLocalTime(&t);
-      fprintf(g_probe_file, "%02u:%02u:%02u.%03u %s\r\n", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds,
-              line.c_str());
-      fflush(g_probe_file);
+      const wgrr::LogLock shared(g_probe_path, wgrr::kLogLockWaitMs);
+      wgrr::append_log_text(g_probe_path, wgrr::log_stamp() + line + "\r\n");  // each write reaches the file at once
     });
     g_probe_log->note(std::string("probe start: build Streamline 2.") + std::to_string(g_api_minor) +
                       " (hook mode), process " + std::to_string(GetCurrentProcessId()));
@@ -198,9 +234,10 @@ wchar_t g_log_path[MAX_PATH * 2] = {0};
 // clean/060-rr-plugin-hunt: wronggpu-rr.log is appended to across game starts; past this size it is moved to
 // wronggpu-rr.log.old (replacing an older one) and a new file starts, so it cannot grow without end.
 constexpr uint64_t kLogCapBytes = 8ull << 20;
-uint64_t g_log_bytes = UINT64_MAX;  // the file's size as this process knows it (UINT64_MAX: not read yet); g_log_mutex
+uint64_t g_log_rotate_blocked_below = 0;  // a rotation that failed (the file held open elsewhere): again 1 MiB later; g_log_mutex
 #endif
 
+// RR guard, 0.6.1: one line = one append call under the log's process-wide lock (log_append.h says why)
 void log_line(const std::string& s) {
 #if WG_RR_PROBE
   probe_log()->note(s);
@@ -208,27 +245,24 @@ void log_line(const std::string& s) {
   std::lock_guard<std::mutex> lock(g_log_mutex);
   std::wstring path = data_dir() + L"wronggpu-rr.log";
   if (!g_log_path[0] && path.size() < sizeof g_log_path / sizeof g_log_path[0]) wcscpy_s(g_log_path, path.c_str());
-  if (g_log_bytes == UINT64_MAX) {
-    WIN32_FILE_ATTRIBUTE_DATA a;
-    g_log_bytes = GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &a)
-                      ? ((uint64_t)a.nFileSizeHigh << 32) | a.nFileSizeLow : 0;
+  const wgrr::LogLock shared(path, wgrr::kLogLockWaitMs);
+  const std::string ts = wgrr::log_stamp();
+  std::string text;
+  // the size as the file has it now (another copy may have written): checked and rotated only while holding the lock
+  const uint64_t size = shared.owned() ? wgrr::log_file_size(path) : 0;
+  if (size >= kLogCapBytes && size >= g_log_rotate_blocked_below) {
+    if (MoveFileExW(path.c_str(), (path + L".old").c_str(), MOVEFILE_REPLACE_EXISTING)) {
+      char b[160];
+      snprintf(b, sizeof b, "log: wronggpu-rr.log reached %u MiB; the earlier lines are in wronggpu-rr.log.old\r\n",
+               (unsigned)(kLogCapBytes >> 20));
+      text = ts + b;
+      g_log_rotate_blocked_below = 0;
+    } else {
+      g_log_rotate_blocked_below = size + (1u << 20);
+    }
   }
-  bool rotated = false;
-  if (g_log_bytes >= kLogCapBytes) {
-    rotated = MoveFileExW(path.c_str(), (path + L".old").c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
-    g_log_bytes = rotated ? 0 : kLogCapBytes - (1u << 20);  // not movable now (held open elsewhere): again 1 MiB later
-  }
-  FILE* f = _wfopen(path.c_str(), L"ab");
-  if (!f) return;
-  SYSTEMTIME t;
-  GetLocalTime(&t);
-  int n = 0;
-  if (rotated)
-    n += fprintf(f, "%02u:%02u:%02u.%03u log: wronggpu-rr.log reached %u MiB; the earlier lines are in wronggpu-rr.log.old\r\n",
-                 t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, (unsigned)(kLogCapBytes >> 20));
-  n += fprintf(f, "%02u:%02u:%02u.%03u %s\r\n", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, s.c_str());
-  fclose(f);
-  if (n > 0) g_log_bytes += (uint64_t)n;
+  text += ts + s + "\r\n";
+  wgrr::append_log_text(path, text);
 #endif
 }
 
@@ -311,6 +345,11 @@ void bind(F& slot, int role) {
   const char* name = role_in_route(role) ? kWgRoleNames[role] : "";
   if (g_route_mode.load() && g_route_next[role]) {
     slot = reinterpret_cast<F>(g_route_next[role]);  // host route: continue through the host's chain
+    return;
+  }
+  if (g_guard.state() == wgrr::guard::State::kTaken && g_prev[role]) {  // RR guard, take: continue through the
+                                                                         // other module (it sees no RR work)
+    slot = reinterpret_cast<F>(g_prev[role]);
     return;
   }
   slot = name[0] ? reinterpret_cast<F>(GetProcAddress(g_interposer, name)) : nullptr;
@@ -686,12 +725,29 @@ bool ngx_route_holds_rr(uint32_t feature) {
 #endif
 }
 
+// RR guard: the late decision (below, with the IAT code), taken once at the first call after our handlers
+// are installed; a handler passes the call on unchanged (to g_fwd) while WrongGPU RR is not active.
+void guard_first_call();
+bool guard_pass() {
+  if (!g_guard.frozen() && g_hook_done.load(std::memory_order_acquire)) guard_first_call();
+  return !g_guard.active();
+}
+// publishes the pass-through targets (an immutable snapshot; a replaced one is leaked: a handful per run at most)
+void set_fwd(const wgrr::OriginalApi& o) { g_fwd.store(new wgrr::OriginalApi(o), std::memory_order_release); }
+#define WG_PASS(field, ...)                                                                  \
+  if (guard_pass()) {                                                                        \
+    const wgrr::OriginalApi* fwd_ = g_fwd.load(std::memory_order_acquire);                   \
+    return fwd_ && fwd_->field ? fwd_->field(__VA_ARGS__) : WG_E_MISSING_OR_INVALID_API;     \
+  }                                                                                          \
+  (void)0
+
 }  // namespace
 
 // ---------------------------------------------------------------- the handlers installed into the IAT
 extern "C" {
 
 WgResultCode wg_role_init(const WgPreferences* p, uint64_t v) {
+  WG_PASS(init, p, v);
   auto* t = entered(0);
   char buf[200];
   snprintf(buf, sizeof buf, "init entered: thread %lu preferences=0x%llx sdk_version=0x%016llx (hook mode)",
@@ -699,28 +755,65 @@ WgResultCode wg_role_init(const WgPreferences* p, uint64_t v) {
   log_line(buf);
   return t->init(p, v);
 }
-WgResultCode wg_role_shutdown(void) { return entered(1)->shutdown(); }
-WgResultCode wg_role_is_supported(uint32_t f, const WgAdapterInfo* a) { return entered(2)->is_supported(f, a); }
-WgResultCode wg_role_is_loaded(uint32_t f, bool* l) { return entered(3)->is_loaded(f, l); }
-WgResultCode wg_role_set_loaded(uint32_t f, bool l) { return entered(4)->set_loaded(f, l); }
-WgResultCode wg_role_requirements(uint32_t f, WgRequirements* r) { return entered(5)->requirements(f, r); }
-WgResultCode wg_role_version(uint32_t f, WgFeatureVersion* v) { return entered(6)->version(f, v); }
-WgResultCode wg_role_get_function(uint32_t f, const char* n, void** o) { return entered(7)->get_function(f, n, o); }
+WgResultCode wg_role_shutdown(void) {
+  WG_PASS(shutdown);
+  return entered(1)->shutdown();
+}
+WgResultCode wg_role_is_supported(uint32_t f, const WgAdapterInfo* a) {
+  WG_PASS(is_supported, f, a);
+  return entered(2)->is_supported(f, a);
+}
+WgResultCode wg_role_is_loaded(uint32_t f, bool* l) {
+  WG_PASS(is_loaded, f, l);
+  return entered(3)->is_loaded(f, l);
+}
+WgResultCode wg_role_set_loaded(uint32_t f, bool l) {
+  WG_PASS(set_loaded, f, l);
+  return entered(4)->set_loaded(f, l);
+}
+WgResultCode wg_role_requirements(uint32_t f, WgRequirements* r) {
+  WG_PASS(requirements, f, r);
+  return entered(5)->requirements(f, r);
+}
+WgResultCode wg_role_version(uint32_t f, WgFeatureVersion* v) {
+  WG_PASS(version, f, v);
+  return entered(6)->version(f, v);
+}
+WgResultCode wg_role_get_function(uint32_t f, const char* n, void** o) {
+  WG_PASS(get_function, f, n, o);
+  return entered(7)->get_function(f, n, o);
+}
 WgResultCode wg_role_allocate(void* c, uint32_t f, const WgViewport* v) {
+  WG_PASS(allocate, c, f, v);
   if (ngx_route_holds_rr(f)) return WG_E_INVALID_STATE;
   return entered(8)->allocate(c, f, v);
 }
-WgResultCode wg_role_free(uint32_t f, const WgViewport* v) { return entered(9)->free_resources(f, v); }
-WgResultCode wg_role_set_device(void* d) { return entered(10)->set_device(d); }
-WgResultCode wg_role_tag(const WgViewport* v, const WgTag* t, uint32_t n, void* c) { return entered(12)->tag(v, t, n, c); }
+WgResultCode wg_role_free(uint32_t f, const WgViewport* v) {
+  WG_PASS(free_resources, f, v);
+  return entered(9)->free_resources(f, v);
+}
+WgResultCode wg_role_set_device(void* d) {
+  WG_PASS(set_device, d);
+  return entered(10)->set_device(d);
+}
+WgResultCode wg_role_tag(const WgViewport* v, const WgTag* t, uint32_t n, void* c) {
+  WG_PASS(tag, v, t, n, c);
+  return entered(12)->tag(v, t, n, c);
+}
 WgResultCode wg_role_tag_for_frame(const WgFrameToken* k, const WgViewport* v, const WgTag* t, uint32_t n, void* c) {
+  WG_PASS(tag_for_frame, k, v, t, n, c);
   return entered(13)->tag_for_frame(k, v, t, n, c);
 }
 WgResultCode wg_role_constants(const WgConstants* c, const WgFrameToken* k, const WgViewport* v) {
+  WG_PASS(constants, c, k, v);
   return entered(14)->constants(c, k, v);
 }
-WgResultCode wg_role_new_frame_token(WgFrameToken** o, const uint32_t* i) { return entered(15)->new_frame_token(o, i); }
+WgResultCode wg_role_new_frame_token(WgFrameToken** o, const uint32_t* i) {
+  WG_PASS(new_frame_token, o, i);
+  return entered(15)->new_frame_token(o, i);
+}
 WgResultCode wg_role_evaluate(uint32_t f, const WgFrameToken* k, const WgHeader* const* in, uint32_t n, void* c) {
+  WG_PASS(evaluate, f, k, in, n, c);
   if (ngx_route_holds_rr(f)) return WG_E_INVALID_STATE;
   const WgResultCode rc = entered(16)->evaluate(f, k, in, n, c);
   if (rc == WG_OK && f == WG_FEAT_RAY_RECONSTRUCTION) {
@@ -732,9 +825,18 @@ WgResultCode wg_role_evaluate(uint32_t f, const WgFrameToken* k, const WgHeader*
   return rc;
 }
 #if WG_RR_PROBE
-WgResultCode wg_role_set_vulkan_info(const void* info) { return entered(11)->set_vulkan_info(info); }
-WgResultCode wg_role_upgrade_interface(void** iface) { return entered(17)->upgrade_interface(iface); }
-WgResultCode wg_role_native_interface(void* w, void** n) { return entered(18)->native_interface(w, n); }
+WgResultCode wg_role_set_vulkan_info(const void* info) {
+  WG_PASS(set_vulkan_info, info);
+  return entered(11)->set_vulkan_info(info);
+}
+WgResultCode wg_role_upgrade_interface(void** iface) {
+  WG_PASS(upgrade_interface, iface);
+  return entered(17)->upgrade_interface(iface);
+}
+WgResultCode wg_role_native_interface(void* w, void** n) {
+  WG_PASS(native_interface, w, n);
+  return entered(18)->native_interface(w, n);
+}
 #endif
 
 WgResultCode wg_rr_optimal_fn(const WgRrOptions* o, WgRrOptimal* s) { return entered("rr-optimal")->rr_optimal(o, s); }
@@ -742,7 +844,8 @@ WgResultCode wg_rr_state_fn(const WgViewport* v, WgRrState* s) { return entered(
 WgResultCode wg_rr_options_fn(const WgViewport* v, const WgRrOptions* o) { return entered("rr-options")->rr_options(v, o); }
 
 const WgRrSettingsContract* wg_get_settings_contract(void) {
-  diagnostics(WG_RR_CONTRACT_EXPORT);
+  // RR guard: a second copy keeps its hands off the log (the active copy writes it)
+  if (g_guard.state() != wgrr::guard::State::kOwnCopy) diagnostics(WG_RR_CONTRACT_EXPORT);
   ensure_settings();
   return wgrr::settings_contract();
 }
@@ -1043,6 +1146,282 @@ DWORD WINAPI slot_watch_thread(void*) {
   return 0;
 }
 
+// ---------------------------------------------------------------- RR guard: other modules on the RR path (rr_guard.h)
+// The roles whose exports' first bytes are read (S2): the ones that decide where RR goes. The init export is not among
+// them: the host patches it itself (HOOK-MODE.md).
+const int kWgDecisiveRoles[] = {2, 7, 8, 16};  // is-supported, get-function, allocate, evaluate
+
+double ms_since(const LARGE_INTEGER& t0) {
+  LARGE_INTEGER t1, f;
+  QueryPerformanceCounter(&t1);
+  QueryPerformanceFrequency(&f);
+  return f.QuadPart ? 1000.0 * (double)(t1.QuadPart - t0.QuadPart) / (double)f.QuadPart : 0.0;
+}
+std::string ms_text(double ms) {
+  char b[32];
+  snprintf(b, sizeof b, "%.3f ms", ms);
+  return b;
+}
+std::string leaf_text(HMODULE m) {
+  std::wstring w;
+  module_leaf(m, &w);
+  return ascii(narrow(w));
+}
+
+// The hooked role (gen_forwarding.ROLES index) of an import name in this run's route, or -1.
+int role_for_name(const char* name) {
+  for (unsigned i = 0; i < WG_BINDING_HOOK_ROLE_COUNT; ++i) {
+    const int role = kWgHookRoles[i];
+    if (role_in_route(role) && kWgRoleNames[role][0] && handler_for(role) && strcmp(kWgRoleNames[role], name) == 0)
+      return role;
+  }
+  return -1;
+}
+
+// The by-name entries of one import (or delay-load) name table that name a hooked role: f(role, import name, slot
+// address). The walk (wgrr::guard::thunks) checks every RVA and every byte of a name against the image's extent
+// (PeView) before an address is formed from it, and counts each entry against the scan's budget.
+template <typename F>
+void guard_thunks(const wgrr::guard::PeView& pe, wgrr::guard::Reader& r, wgrr::guard::Budget& b, uint32_t names_rva,
+                  uint32_t iat_rva, F f) {
+  wgrr::guard::thunks(pe, r, b, names_rva, iat_rva, [&](const char* nm, void** slot) {
+    const int role = role_for_name(nm);
+    if (role >= 0) f(role, nm, slot);
+  });
+}
+
+// Every import slot of `module` that names a hooked role from the DLL `leaf` (wgrr::guard::import_slots: descriptors
+// within the import directory's declared size): f(role, import name, slot address).
+template <typename F>
+void guard_import_slots(HMODULE module, const char* leaf, wgrr::guard::Reader& r, wgrr::guard::Budget& b, F f) {
+  wgrr::guard::import_slots(module, leaf, r, b, [&](const char* nm, void** slot) {
+    const int role = role_for_name(nm);
+    if (role >= 0) f(role, nm, slot);
+  });
+}
+
+// S0: the process-wide marker of the active WrongGPU RR copy. True: this copy is the first (it holds the marker). False:
+// another copy holds it; this copy stays off (one line).
+bool guard_claim_marker() {
+  wchar_t name[64];
+  swprintf(name, 64, L"Local\\WrongGPU.rr-active.v1.%lu", (unsigned long)GetCurrentProcessId());
+  HANDLE h = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, 4096, name);
+  if (!h) return true;  // cannot tell: the slot scan still sees a copy that patched
+  const bool existed = GetLastError() == ERROR_ALREADY_EXISTS;
+  wchar_t* view = static_cast<wchar_t*>(MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, 4096));
+  if (!existed) {
+    if (view) wcsncpy_s(view, 2047, own_path().c_str(), _TRUNCATE);
+    if (view) UnmapViewOfFile(view);
+    g_marker = h;
+    return true;
+  }
+  const std::wstring active = view ? std::wstring(view, wcsnlen(view, 2047)) : std::wstring(L"another copy");
+  if (view) UnmapViewOfFile(view);
+  CloseHandle(h);
+  g_guard.set(wgrr::guard::State::kOwnCopy);
+  const std::string line = wgrr::guard::line_own_copy(ascii(narrow(active)), ascii(narrow(own_path())));
+#if WG_RR_PROBE
+  // the active copy writes the probe log (opening it here would start it again): append the one line to it
+  {
+    const std::wstring probe_path = data_dir() + L"wronggpu-rr-probe.log";
+    const wgrr::LogLock shared(probe_path, wgrr::kLogLockWaitMs);  // the active copy's writes and this one, in one order
+    wgrr::append_log_text(probe_path, wgrr::log_stamp() + line + "\r\n");
+  }
+#else
+  log_line(line);
+#endif
+  return false;
+}
+
+void guard_read_override() {
+  ensure_settings();
+  std::string note;
+  g_mode.store((int)wgrr::guard::parse_mode(g_settings.text(wgrr::guard::kOverrideKey), &note));
+  if (!note.empty()) log_line("hook: " + note);
+}
+wgrr::guard::Mode guard_mode() { return static_cast<wgrr::guard::Mode>(g_mode.load()); }
+
+// The guard's view of the process: the module that called InitializeASI and the one holding the host's API table are
+// both taken as the host (a separate ASI loader may be the first, OptiScaler the second): their own patches are
+// accepted and not named. A wrong guess only changes the wording (a named module is inconclusive).
+wgrr::guard::Env guard_env(const void* iface) {
+  return wgrr::guard::process_env(g_self, iface, g_host_module.load(), g_host_api_module.load());
+}
+
+// One diagnostic line when a scan could not explain some addresses (never a finding: RR stays active)
+void guard_log_unclear(const char* when, const wgrr::guard::Verdict& v) {
+  if (v.unclear) log_line(wgrr::guard::line_inconclusive(when, v.unclear, v.unclear_detail));
+}
+
+// The result words of a check's summary line
+const char* guard_result(const wgrr::guard::Verdict& v) {
+  return v.kind == wgrr::guard::Verdict::kClean     ? "no other Ray Reconstruction plugin found"
+         : v.kind == wgrr::guard::Verdict::kOwnCopy ? "a second copy of WrongGPU RR found"
+                                                    : "another module on the RR path (inconclusive)";
+}
+
+// Applies decide() to a verdict and logs what it means: the own-copy line, or the one line naming a foreign module
+// (with the tail of the player's setting). Returns the new state (also stored).
+wgrr::guard::State guard_apply(const wgrr::guard::Verdict& v, wgrr::guard::Stage stage) {
+  namespace g = wgrr::guard;
+  const g::State before = g_guard.state();
+  const g::Mode mode = guard_mode();
+  const g::State after = g::decide(v.kind, mode, stage, before);
+  if (before != g::State::kActive && before != g::State::kTaken) return before;
+  if (v.kind == g::Verdict::kOwnCopy) {
+    log_line(g::line_own_copy(v.detail, ascii(narrow(own_path()))));
+  } else if (v.kind == g::Verdict::kForeign) {
+    const g::Tail tail = mode == g::Mode::kYield ? (stage == g::Stage::kLoad ? g::Tail::kYieldOff : g::Tail::kYieldPassing)
+                         : (mode == g::Mode::kTake && stage != g::Stage::kLate) ? g::Tail::kTakeInFront
+                                                                                : g::Tail::kStaysActive;
+    log_line(g::line_foreign(v.module, v.detail, tail));
+  }
+  g_guard.set(after);
+  return after;
+}
+
+// Where each RR export led at the load check (written by do_hook's thread before g_hook_done is published; read by the
+// late check after it): an export that still leads to the same place was reported (or accepted) at load already and
+// is not "taken after WrongGPU".
+struct ExportSeen {
+  bool set = false;
+  wgrr::guard::Owner owner = wgrr::guard::Owner::kUnknown;
+  const void* module = nullptr;
+};
+ExportSeen g_export_seen[32];
+
+// S2: the first bytes of the interface's RR-deciding exports (module = the interface). anon_ok: code outside every module
+// is accepted (host-route mode: the host's own trampolines). record: remember where each led (the load check);
+// unchanged_only: count an export that leads where it led at load as read, without classifying it again (late check).
+void guard_scan_exports(HMODULE module, const wgrr::guard::Env& env, bool anon_ok, wgrr::guard::Verdict* v,
+                        bool record = false, bool unchanged_only = false) {
+  const wgrr::guard::ModuleRef ref(module);  // the interface stays loaded while its exports are looked up
+  if (!ref.held()) return;
+  const std::string leaf = leaf_text(module);
+  for (int role : kWgDecisiveRoles) {
+    if (!role_in_route(role) || !kWgRoleNames[role][0]) continue;
+    const void* e = reinterpret_cast<const void*>(GetProcAddress(module, kWgRoleNames[role]));
+    if (!e) continue;
+    const wgrr::guard::Where w = wgrr::guard::classify(e, env, true);
+    ExportSeen& seen = g_export_seen[role];
+    if (record) seen = {true, w.owner, w.module_handle};
+    if (unchanged_only && seen.set && seen.owner == w.owner && seen.module == w.module_handle) {
+      ++v->reads;
+      continue;
+    }
+    v->add(w, std::string("the export ") + kWgRoleNames[role] + " of " + leaf, anon_ok, false);
+  }
+}
+
+// At load (do_hook, before the core is built and before anything is patched): S1 over every module's import slots of
+// the interface (and the exe's delay-load slots), S2 over the RR exports. True: go on (active, or take). False: off (a
+// second copy of WrongGPU RR, or rr_other_plugin=yield with a named module on the path).
+bool guard_at_load(const IMAGE_DELAYLOAD_DESCRIPTOR* delay) {
+  namespace g = wgrr::guard;
+  guard_read_override();
+  LARGE_INTEGER t0;
+  QueryPerformanceCounter(&t0);
+  const g::Env env = guard_env(g_interposer);
+  g::Reader r;
+  g::Verdict v;
+  g::Budget budget(g::kScanMaxEntries, g::kScanMaxMs);  // the whole load scan: over it, inconclusive (RR stays active)
+  std::wstring leaf_w;
+  module_leaf(g_interposer, &leaf_w);
+  const std::string leaf = narrow(leaf_w);
+  HMODULE exe = GetModuleHandleW(nullptr);
+  void* prev[32] = {};
+  HMODULE mods[1024];
+  DWORD need = 0;
+  if (K32EnumProcessModules(GetCurrentProcess(), mods, sizeof mods, &need)) {
+    const unsigned count = (unsigned)(need / sizeof(HMODULE)) < 1024 ? (unsigned)(need / sizeof(HMODULE)) : 1024;
+    for (unsigned i = 0; i < count && budget.step(); ++i) {
+      if (mods[i] == g_self || mods[i] == g_interposer) continue;
+      const g::ModuleRef ref(mods[i]);  // the module stays loaded while its tables are read (unloaded: skipped)
+      if (!ref.held()) continue;
+      guard_import_slots(mods[i], leaf.c_str(), r, budget, [&](int role, const char* nm, void** slot) {
+        void* val = nullptr;
+        const g::Where w = r.get(slot, &val) ? g::classify(val, env, false) : g::Where();
+        v.add(w, std::string("the import slot ") + nm + " of " + leaf_text(mods[i]), false, false);
+        if (mods[i] == exe && val && w.owner != g::Owner::kInterface) prev[role] = val;
+      });
+    }
+  }
+  g::PeView pe;
+  // the exe's delay-load slots: unbound ones hold the delay helper's thunk in the exe
+  if (delay && !budget.over() && pe.open(exe, r)) {
+    guard_thunks(pe, r, budget, delay->ImportNameTableRVA, delay->ImportAddressTableRVA,
+                 [&](int role, const char* nm, void** slot) {
+      void* val = nullptr;
+      const g::Where w = r.get(slot, &val) ? g::classify(val, env, false) : g::Where();
+      v.add(w, std::string("the delay-load slot ") + nm + " of " + leaf_text(exe), false, true);
+      if (val && w.owner != g::Owner::kInterface && w.owner != g::Owner::kExeThunk && w.owner != g::Owner::kHost)
+        prev[role] = val;
+    });
+  }
+  if (budget.over()) {  // fails open: nothing is decided from a partial scan (the process marker still found any copy)
+    log_line(g::line_over_budget(budget.entries(), ms_since(t0)));
+    return true;
+  }
+  guard_scan_exports(g_interposer, env, false, &v, true);
+  const double ms = ms_since(t0);
+  log_line("hook: coexistence check at load: " + std::string(guard_result(v)) + " (" + std::to_string(v.reads) +
+           " address(es) read in " + ms_text(ms) + ")");
+  guard_log_unclear("at load", v);
+  if (guard_mode() == g::Mode::kTake) memcpy(g_prev, prev, sizeof g_prev);  // used only when the state becomes kTaken
+  const g::State s = guard_apply(v, g::Stage::kLoad);
+  return s == g::State::kActive || s == g::State::kTaken;
+}
+
+// S4: after our handlers are installed. Our patched slots that no longer hold our handler lead somewhere else; while
+// active (not taken) the RR exports are read again too. Returns the state to keep; logs a finding (a foreign module once
+// per run) and, with log_clean, the clean result and its cost.
+wgrr::guard::State guard_late(const char* why, bool log_clean) {
+  namespace g = wgrr::guard;
+  const g::State s = g_guard.state();
+  if (s != g::State::kActive && s != g::State::kTaken) return s;
+  LARGE_INTEGER t0;
+  QueryPerformanceCounter(&t0);
+  const g::Env env = guard_env(g_interposer);
+  g::Verdict v;
+  {
+    std::lock_guard<std::mutex> lock(g_watch_mutex);
+    for (const SlotWatch& w : g_watch) {
+      if (!w.ours) continue;
+      void* val = nullptr;
+      if (g::safe_get(w.slot, &val) && val == w.ours) {
+        ++v.reads;
+        continue;
+      }
+      const size_t slash = w.module.find_last_of("\\/");  // the module's file name, as at load
+      v.add(val ? g::classify(val, env, false) : g::Where(), "the " + w.kind + " slot " + w.name + " of " +
+            (slash == std::string::npos ? w.module : w.module.substr(slash + 1)) + " (WrongGPU's hook)", false, false);
+    }
+  }
+  if (s == g::State::kActive && g_interposer && !g_route_mode.load())
+    guard_scan_exports(g_interposer, env, false, &v, false, true);  // what changed since the load check
+  const double ms = ms_since(t0);
+  const std::string cost = " (" + std::to_string(v.reads) + " address(es) read in " + ms_text(ms) + ")";
+  const std::string head = std::string("hook: coexistence re-check at ") + why + ": ";
+  // a foreign module that stays inconclusive (off, take) is named once per run: OptiPluginInit and the first call may
+  // both see it
+  const bool quiet_foreign = v.kind == g::Verdict::kForeign && guard_mode() != g::Mode::kYield &&
+                             g_late_foreign_logged.exchange(true);
+  if (v.kind == g::Verdict::kClean || quiet_foreign) {
+    if (log_clean)
+      log_line(head + (quiet_foreign ? "another module on the RR path, named above" : guard_result(v)) + cost);
+    guard_log_unclear((std::string("re-check at ") + why).c_str(), v);
+    return s;
+  }
+  log_line(head + (v.kind == g::Verdict::kOwnCopy ? "a second copy of WrongGPU RR" : "another module") +
+           " took the RR calls after WrongGPU" + cost);
+  guard_log_unclear((std::string("re-check at ") + why).c_str(), v);
+  return guard_apply(v, g::Stage::kLate);
+}
+
+void guard_first_call() {
+  g_guard.freeze_once([] { return guard_late("the game's first call", true); });
+}
+
 void do_hook() {
   diagnostics("InitializeASI");
   std::wstring interposer_w;
@@ -1081,6 +1460,11 @@ void do_hook() {
   }
   g_api_minor = v[1];
   log_line("hook: route Streamline 2." + std::to_string(g_api_minor) + " chosen for this game interface");
+
+  // RR guard: a second copy of WrongGPU RR (or rr_other_plugin=yield with a named module on the path) keeps WrongGPU RR
+  // off (nothing built or patched); a named module alone is only logged
+  if (!guard_at_load(delay)) return;
+  set_fwd(bind_original());  // where a passing handler sends a call (the late decision, guard_first_call)
 
   // Build the core now, so our handlers forward to the genuine exports (the IAT's pre-patch addresses).
   (void)target();
@@ -1138,6 +1522,7 @@ void do_hook() {
 #endif
                ) +
            ". Non-RR traffic reaches the game interface unchanged.");
+  g_hook_done.store(true, std::memory_order_release);  // RR guard: the late check may run from now on
 }
 
 // The host hooked a game interface module (plugin interface 3): check its version against this build's binding,
@@ -1160,6 +1545,24 @@ void on_host_hooked(void* module, uint32_t major, uint32_t minor, uint32_t patch
   }
   g_api_minor = minor;  // before the core is built (target() below)
   log_line("hook: route Streamline 2." + std::to_string(g_api_minor) + " chosen for this game interface");
+  // RR guard: the RR exports of the module the host hooked (its own trampolines are accepted), before our routes
+  namespace g = wgrr::guard;
+  if (!g_guard.active()) {
+    log_line("hook: no game-interface routes registered: WrongGPU RR stays off in this process (see the line above)");
+    return;
+  }
+  guard_read_override();
+  {
+    LARGE_INTEGER t0;
+    QueryPerformanceCounter(&t0);
+    g::Verdict v;
+    guard_scan_exports(static_cast<HMODULE>(module), guard_env(module), true, &v);
+    log_line(std::string("hook: coexistence check before the host routes: ") + guard_result(v) + " (" +
+             std::to_string(v.reads) + " address(es) read in " + ms_text(ms_since(t0)) + ")");
+    guard_log_unclear("before the host routes", v);
+    const g::State s = guard_apply(v, g::Stage::kLoad);  // nothing of ours is in place yet
+    if (s != g::State::kActive && s != g::State::kTaken) return;  // own copy, or yield: no routes
+  }
   std::vector<WgHostSlRoute> routes;
   for (unsigned i = 0; i < WG_BINDING_HOOK_ROLE_COUNT; ++i) {
     const int role = kWgHookRoles[i];
@@ -1170,12 +1573,36 @@ void on_host_hooked(void* module, uint32_t major, uint32_t minor, uint32_t patch
   g_interposer = static_cast<HMODULE>(module);
   g_route_mode.store(true);
   if (!api->register_streamline_routes(g_host_plugin, routes.data(), (uint32_t)routes.size())) {
+    // the host's API refused our registration: positive by contract, the game-interface route stays off (the NGX route
+    // is decided by the host's own answer there)
     g_route_mode.store(false);
-    log_line("hook: the host refused our game-interface routes; nothing was patched");
+    log_line("hook: the host refused our game-interface routes; nothing was patched: WrongGPU RR stays off on the "
+             "game-interface route");
     return;
   }
   unsigned installed = 0;
   for (const WgHostSlRoute& r : routes) installed += (*r.next != nullptr);
+  // RR guard: where each route continues (the host's next). Our routes are installed in front and cannot be taken back:
+  // a named module below them is inconclusive (RR stays WrongGPU's; the other calls continue through it); a copy of
+  // WrongGPU RR, or rr_other_plugin=yield with a named module, makes them pass every call on.
+  {
+    LARGE_INTEGER t0;
+    QueryPerformanceCounter(&t0);
+    const g::Env env = guard_env(module);
+    g::Verdict v;
+    for (const WgHostSlRoute& r : routes)
+      if (*r.next) v.add(g::classify(*r.next, env, false), std::string("the host's next function of ") + r.export_name,
+                         true, false);
+    log_line(std::string("hook: coexistence check of the host routes: ") + guard_result(v) + " (" +
+             std::to_string(v.reads) + " address(es) read in " + ms_text(ms_since(t0)) + ")");
+    guard_log_unclear("of the host routes", v);
+    set_fwd(bind_original());  // the host's next functions
+    if (guard_apply(v, g::Stage::kRoutes) == g::State::kPassThrough) {
+      g_hook_done.store(true, std::memory_order_release);
+      return;
+    }
+  }
+  g_hook_done.store(true, std::memory_order_release);
   (void)target();  // the core forwards to the host's next functions from now on
   log_line("hook: " + std::to_string(installed) + " of " + std::to_string(routes.size()) +
            " game-interface route(s) installed by the host; RR " +
@@ -1398,8 +1825,16 @@ void ngx_release_cpp(void* u, void* ctx) {
     ngx_fault("release (exception)");
   }
 }
+// RR guard: WrongGPU RR went off after the provider was registered (a copy of WrongGPU RR, or yield): creates are
+// refused (logged once)
+bool ngx_guard_refuses() {
+  if (g_guard.active()) return false;
+  static std::atomic<bool> logged{false};
+  if (!logged.exchange(true)) log_line("NGX: RR create refused: WrongGPU RR stays off in this process (see the line above)");
+  return true;
+}
 bool ngx_create_seh(void* u, void* dev, void* cl, const WgHostNgxParams* p, void** ctx) {
-  if (g_ngx_faulted.load()) return false;
+  if (g_ngx_faulted.load() || ngx_guard_refuses()) return false;
   __try {
     return ngx_create_cpp(u, dev, cl, p, ctx);
   } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -1467,6 +1902,11 @@ void register_ngx_provider(const WgHostMenuApi* api, WgHostMenuPlugin* plugin) {
     }
     return;
   }
+  if (!g_guard.active()) {  // RR guard: off in this process (a copy of WrongGPU RR, or rr_other_plugin=yield)
+    log_line("NGX: RR provider not registered: WrongGPU RR stays off in this process (see the line above)");
+    g_ngx_decided.store(true);
+    return;
+  }
   const wgrr::RrEnabled& enabled = rr_enabled();
   if (!enabled.on) {
     log_line("NGX: RR provider not registered: rr_enabled=0 (" + enabled.source + "); games that call NGX directly "
@@ -1515,8 +1955,9 @@ void register_ngx_provider(const WgHostMenuApi* api, WgHostMenuPlugin* plugin) {
              "): games that call NGX directly get WrongGPU RR" +
              (host_has ? "; the host restores the game's command-list state after each evaluate"
                        : "; the host has no command-list restore (plugin interface 5)"));
-  } else {
-    log_line("NGX: the host refused the RR provider registration (another provider is registered?)");
+  } else {  // RR guard: the host refused the provider (its API gives the same false for an occupied slot and for an
+            // incomplete structure, so nothing more is claimed); the NGX route stays off
+    log_line(wgrr::guard::line_ngx_refused());
   }
 }
 #endif
@@ -1525,7 +1966,14 @@ void register_ngx_provider(const WgHostMenuApi* api, WgHostMenuPlugin* plugin) {
 
 // OptiScaler's ASI entry (same convention WrongGPU.asi uses). All real work runs here, never under the loader lock.
 extern "C" __declspec(dllexport) void InitializeASI() {
-  std::call_once(g_init_once, [] {
+  // RR guard: the module that calls us is taken as the host (its own patches are accepted; wording only)
+  void* caller = _ReturnAddress();
+  std::call_once(g_init_once, [caller] {
+    HMODULE host = nullptr;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           static_cast<LPCWSTR>(caller), &host) && host != g_self)
+      g_host_module.store(host);
+    if (!guard_claim_marker()) return;  // a second copy of WrongGPU RR: nothing of this copy starts (one line)
 #if !WG_RR_PROBE
     // RR runs while the core accepted an evaluate within the last second
     wgrr::panel::start(
@@ -1548,6 +1996,21 @@ extern "C" __declspec(dllexport) void InitializeASI() {
 // OptiScaler's plugin interface (builds that have it call this right after InitializeASI): the WrongGPU tab, and for
 // games that load the game interface at run time, the host's game-interface routes (interface 3).
 extern "C" __declspec(dllexport) bool OptiPluginInit(const WgHostMenuApi* api, WgHostMenuPlugin* plugin) {
+  // RR guard: a second copy of WrongGPU RR registers nothing (no second tab, routes or provider)
+  if (g_guard.state() == wgrr::guard::State::kOwnCopy) return false;
+  // The module holding the host's table is taken as the host as well (a separate ASI loader may have called
+  // InitializeASI): later checks accept its own patches and do not name it. A guess, used for the wording only: a table
+  // on the heap or in a helper image gives no module or another one, and nothing depends on it.
+  if (api) {
+    HMODULE host = nullptr;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(api), &host) && host && host != g_self &&
+        host != g_host_module.load())
+      g_host_api_module.store(host);
+  }
+  // a plugin that took the RR calls after our InitializeASI (a non-freezing check; the game's first call decides last)
+  if (g_hook_done.load(std::memory_order_acquire))
+    g_guard.check([] { return guard_late("OptiPluginInit", false); });
   if (api && plugin) {  // kept before the routes: the host may call back (and the core may start) at once
     g_host_api_plugin.store(plugin);
     g_host_api.store(api);
@@ -1565,10 +2028,15 @@ extern "C" __declspec(dllexport) bool OptiPluginInit(const WgHostMenuApi* api, W
 
 #if !WG_RR_PROBE
 namespace {
-// clean/rr-sl-diag: the call summary at process exit (or unload). Other threads may be gone while holding the log's or the
-// proxy's lock, so neither is taken: the counters are atomic and the line is appended with WriteFile.
+// clean/rr-sl-diag: the call summary at process exit (or unload). This runs at DLL_PROCESS_DETACH, under the loader lock,
+// and other threads may be gone while holding the log's in-process mutex or the proxy's lock: neither is taken, the
+// counters are atomic, and the line is appended with one WriteFile. The log's process-wide named mutex is only tried
+// (no wait, see the end): a copy stuck holding it must never hold up the process exit.
 void exit_summary() {
   if (!g_log_path[0]) return;  // nothing was logged in this process
+  // a second copy of WrongGPU RR (it stays off) has no calls to summarise: the "never reached the plugin" line would
+  // mislead (the active copy writes its own summary)
+  if (g_guard.state() == wgrr::guard::State::kOwnCopy) return;
   std::string line = g_proxy ? g_proxy->diag_summary("process exit")
                              : std::string("diag: summary (process exit): the game interface's calls never reached the plugin");
   // clean/rr-sl-diag 2: the calls that reached each handler, the NGX route's calls, the slot checks done
@@ -1612,12 +2080,10 @@ void exit_summary() {
               "remove it for Ray Reconstruction\r\n";
     }
   }
-  HANDLE h = CreateFileW(g_log_path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-                         FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (h == INVALID_HANDLE_VALUE) return;
-  DWORD n = 0;
-  WriteFile(h, line.data(), (DWORD)line.size(), &n, nullptr);
-  CloseHandle(h);
+  // 0.6.1: the log's process-wide lock is tried with no wait (loader lock held here: waiting could deadlock or stall the
+  // exit); one append call either way (log_append.h), so the line is whole even when the lock was not ours
+  const wgrr::LogLock shared(g_log_path, 0);
+  wgrr::append_log_text(g_log_path, line, OPEN_EXISTING);
 }
 }  // namespace
 #endif
