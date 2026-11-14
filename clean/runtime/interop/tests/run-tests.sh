@@ -33,6 +33,9 @@ echo "== Wine tests"
 export WINEDEBUG=${WINEDEBUG:--all} WINEPREFIX=${WINEPREFIX:-$work/wineprefix}
 run=("$wine")
 if [ -z "${DISPLAY:-}" ] && command -v xvfb-run >/dev/null; then run=(xvfb-run -a "$wine"); fi
-(cd "$work" && "${run[@]}" test_interop_d3d12.exe wronggpu_runtime.dll "$@" 2>&1 | tr -d "\r" |
-  grep -v -E "X connection|XIO|requests \(") | tee "$work/result.txt"
-grep -q "ALL TESTS PASSED\|^SKIP" "$work/result.txt"
+# Both count: the test program's own exit status (a crash after the marker is a failure) and the marker.
+(cd "$work" && { "${run[@]}" test_interop_d3d12.exe wronggpu_runtime.dll "$@" 2>&1 | tr -d "\r" |
+  grep -v -E "X connection|XIO|requests \("; exit "${PIPESTATUS[0]}"; }) | tee "$work/result.txt"
+status=${PIPESTATUS[0]}
+if [ "$status" -ne 0 ]; then echo "== Wine test run failed (exit status $status)"; exit 1; fi
+grep -q "ALL TESTS PASSED\|^SKIP" "$work/result.txt" || { echo "== Wine test run printed no pass marker"; exit 1; }
