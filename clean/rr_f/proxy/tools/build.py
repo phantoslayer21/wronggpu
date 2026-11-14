@@ -3,6 +3,9 @@
 
     python clean/rr_f/proxy/tools/build.py [--out DIR] [--binding FILE [--probe] [--hook]] [--no-tests]
                                            [--proxy-name NAME|interposer] [--probe-name NAME|interposer]
+                                           [--release-version x.y.z]
+--release-version (0.6.1): the release script's one version for the hook plugin (its VERSIONINFO and the version its
+core reports) in place of the tables' release_version.
 
 Default: builds, per Streamline version, the file-replacement proxy (release + probe), and ONE hook-mode ASI plugin
 (release + probe, HOOK-MODE.md; release 0.6.0: built from the 2.14.1 table, it picks its route from the game
@@ -42,6 +45,7 @@ import gen_forwarding as gf  # noqa: E402
 
 VSDEVCMD = os.environ.get("VSDEVCMD", r"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat")
 DEFAULT_OUT = os.environ.get("WG_RR_PROXY_BUILD", os.path.join(os.environ.get("WG_BUILD_ROOT", os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))), "build")), "rr-f-proxy", "out"))
+RELEASE_VERSION = None  # 0.6.1: --release-version x.y.z (the release script's one version) for the hook plugin
 CORE = ["proxy_core.cpp", "settings.cpp", "formats.cpp", "optimal.cpp", "answers.cpp"]
 PROBE = ["probe.cpp", "probe_log.cpp", "probe_gpu_d3d12.cpp"]  # probe build only
 SHADERS = (("WG_PROBE_UPSCALE", "kProbeUpscaleCs", "probe_upscale_cs.h"),
@@ -224,7 +228,7 @@ def build_hook(binding, out, probe, name):
     """Build the hook-mode ASI plugin (src/hook_dll.cpp; HOOK-MODE.md): the proxy core, settings and (probe) the
     probe, with the transport that patches the game interface's import tables. No forwarding stubs."""
     gen = os.path.join(out, "gen")
-    n = gf.generate(binding, gen, probe, name, hook=True)
+    n = gf.generate(binding, gen, probe, name, hook=True, release_version=RELEASE_VERSION)
     obj = os.path.join(out, "obj")
     os.makedirs(obj, exist_ok=True)
     if probe:
@@ -410,8 +414,16 @@ def main():
     ap.add_argument("--no-tests", action="store_true")
     ap.add_argument("--proxy-name", help="file name of the built release proxy, or 'interposer'")
     ap.add_argument("--probe-name", help="file name of the built probe proxy, or 'interposer'")
+    ap.add_argument("--release-version", help="x.y.z: the release script's one version for the hook plugin (its VERSIONINFO "
+                                              "and the version its core reports) in place of the tables' release_version")
     a = ap.parse_args()
     a.out = os.path.abspath(a.out)  # the compiles run inside the output folder
+    global RELEASE_VERSION
+    if a.release_version:
+        parts = a.release_version.split(".")
+        if len(parts) != 3 or not all(p.isdigit() for p in parts):
+            raise SystemExit(f"--release-version must be x.y.z, got {a.release_version!r}")
+        RELEASE_VERSION = [int(p) for p in parts]
     os.makedirs(a.out, exist_ok=True)
     if a.binding:
         try:

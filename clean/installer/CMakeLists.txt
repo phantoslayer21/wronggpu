@@ -19,7 +19,7 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")  # no ru
 
 set(WRONGGPU_PAYLOAD_DIR "" CACHE PATH "Folder with WrongGPU's amd_fidelityfx_dx12.dll, the runtime and its kernels (one release build)")
 set(WRONGGPU_MAP "${CMAKE_CURRENT_SOURCE_DIR}/../../data/preset-M.v1.map.json" CACHE FILEPATH "Converter map (spec 08)")
-set(WRONGGPU_VERSION "0.6.0" CACHE STRING "Installer version")
+set(WRONGGPU_VERSION "0.6.1" CACHE STRING "Installer version")
 set(WRONGGPU_BUILD_ID "" CACHE STRING "The build's own name, e.g. 0.5.5-launcher-dev (empty: the version)")
 set(WRONGGPU_PAYLOAD_NAME "" CACHE STRING "The release build the payload folder holds, e.g. 0.5.5-ea (empty: the version)")
 set(WRONGGPU_MAP_K "${CMAKE_CURRENT_SOURCE_DIR}/../../data/preset-K.v1.map.json" CACHE FILEPATH "Preset K converter map")

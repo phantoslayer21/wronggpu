@@ -61,7 +61,7 @@
 #ifndef WG_RR_RUNTIME_VERSION0
 #define WG_RR_RUNTIME_VERSION0 0
 #define WG_RR_RUNTIME_VERSION1 6
-#define WG_RR_RUNTIME_VERSION2 0
+#define WG_RR_RUNTIME_VERSION2 1
 #endif
 
 namespace wgrr_rt {

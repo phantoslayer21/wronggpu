@@ -400,8 +400,8 @@ class NamesAndProbe(unittest.TestCase):
                              str(nr["own_ordinal"]))
 
     def test_hook_generation(self):
-        for b, minor, release_rc, iface_fv in ((self.b7, 7, "0.6.0.0", "2.7.1.0"),
-                                               (self.b14, 14, "0.6.0.0", "2.14.1.0")):
+        for b, minor, release_rc, iface_fv in ((self.b7, 7, "0.6.1.0", "2.7.1.0"),
+                                               (self.b14, 14, "0.6.1.0", "2.14.1.0")):
             for probe in (False, True):
                 with tempfile.TemporaryDirectory() as d:
                     nn = gf.generate_from(b, os.path.join(d, "out"), probe=probe, hook=True)
