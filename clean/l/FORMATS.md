@@ -84,6 +84,7 @@ workgroup, in raster order of their map.
 | `l_swin_block_c32_dec[_nc]` | exists (GPU-checked) | `x, xadd (null), out, w, H, W, ox, oy` | as the encoder block | the decoder block. x = `y` (FP8). A member outside the grid takes token-grid mirrored pixels with the sub-pixel kept. out = `y2` (**FP16**). (ox, oy) = `window_offsets["second"]`. w = `dec0_block` |
 | `l_coef` | exists (GPU-checked) | `y2, A, B, C, latent, w, params` | ceil((fh / 2)(fw / 2) / 128), lanes as Model M's `coef_decoder` | Model L's per-pixel functions on the 13 channels `table.L_DEC_VALUES` of `y2`: A, B, C in Model M's forms, latent = tanh(candidate). Writes the same buffers and formats as `coef_decoder`, pixels inside R only. **Reads no motion, previous latent, jitter or reset.** params = Model M's `WgDecParams` (only rw, rh, fw, fh are read). w = `dec0.coef` |
 | `l_coef_pack12` | exists (GPU-checked) | as `l_coef` (`B` unused, may be null) | as `l_coef` | `l_coef`'s values in Model M's dec0 "pack12" layout (`clean/kernels/decoder.hip` `WG_DEC_PACK12`, read by the output stage's `_p12` kernels): image A, 8 bytes per pixel = A0 A1 A2 B0 | B1 B2 C2 (FP16); image C, 4 bytes per pixel = C0 C1 (FP16); latent as `l_coef`. Only padding bytes are left out: unpacked, byte-identical to `l_coef` (`l_ops_check.py`) |
+| `l_swin_block_c32_dec_coef12_nc` | exists (GPU-checked), D3D12 only | the decoder block's, `out` unused (null), then `A, C, latent, w_coef, rw, rh` | as the decoder block | the decoder block with `l_coef_pack12` as its epilogue: the same bytes in `A`, `C` and `latent`, `y2` not written. w = `dec0_block`, w_coef = `dec0.coef`. The native D3D12 frame runs it in place of the two (fusion `lc`, on by default); without `lc` or without the kernel in the build, the two run |
 
 ## Launch order of one frame
 
@@ -156,4 +157,6 @@ the frame parity, as Model M's.
 - `clean/l/runner/l_ops_check.py`: the linears, both projections and `l_coef` against the oracle steps.
 - `clean/l/runner/l_enc_check.py`: `lev/input_encoder` (halo map and motion surfaces) against the oracle.
 - `clean/l/runner/l_d3d12_check.py` (with its D3D12 port): each D3D12 port against its HIP kernel, byte for byte.
+- `clean/l/runner/l_fold_check.py`: `l_swin_block_c32_dec_coef12_nc` against `l_swin_block_c32_dec_nc` ->
+  `l_coef_pack12` on D3D12 and on HIP, byte for byte.
 - One check per new kernel follows with that kernel.
