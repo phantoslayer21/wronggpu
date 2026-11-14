@@ -1138,8 +1138,11 @@ struct Runtime {
     if (enc0_co != "encoder.co" || exposure_co != "exposure.co" || dec0_co != "decoder.co" ||
         swin_co != "swin.co" || !stage_geo.empty())
       return fail("native direct resources require the original encoder, exposure, decoder and Swin code-object variants");
-    if (!output_original || output_quality5 || output_quality9 || !has_taps || post_pre != "w64/")
-      return fail("native direct resources require post_w64__orig.co with the original 42-DWORD output-filter arguments");
+    // the wave64 fused post: the "original" filter build with the model file's weights (post_w64__orig.co, 42 DWORDs),
+    // or the analytic filter build (post_w64.co, 22 DWORDs: no weights; a model file without them, as Model L's)
+    if (output_quality5 || output_quality9 || post_pre != "w64/" || (output_original && !has_taps))
+      return fail("native direct resources require the wave64 fused post: post_w64__orig.co with the model's "
+                  "output-filter weights, or the analytic post_w64.co");
     if (recon_output || !p12 || !post_band || post_fused || out_f16 || post_wave != 64 ||
         post_kernel != "post_recon2_r_band_p12" || filter_kernel != "post_filter_c1_s4_band" ||
         !post_tf || !post_diet || !tf_vdiet || !post_sel || !post_idx || !post_trim)

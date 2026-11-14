@@ -210,11 +210,20 @@ L_D3D12 = [("lev/input_encoder", "l_enc_values.co"), ("l_linear_32_32_relu", "l_
 
 
 def full_ports():
-    """The declared ports plus any of Model L's not declared yet, and Model M's wave64 post ports as the build with the
-    analytic output filter (post_w64.co; Model L's file has no output-filter weights, so it never takes the "original"
-    filter build post_w64__orig.co): a build where every port Model L needs has landed."""
-    have = [(k, "post_w64.co" if co == "post_w64__orig.co" else co) for k, co in declared_ports()]
+    """The declared ports plus any of Model L's not declared yet: a build where every port Model L needs has landed.
+    (Model M's wave64 post ports come in both filter builds, keyed by name and code object: Model L's file has no
+    output-filter weights, so it takes the analytic one, post_w64.co.)"""
+    have = declared_ports()
     return have + [kc for kc in L_D3D12 if kc[0] not in [k for k, _ in have]]
+
+
+class Ports(unittest.TestCase):
+    def test_analytic_post_declared(self):
+        """The analytic-filter build of Model M's fused pack12 post (the post Model L's native frame runs) is among the
+        declared ports."""
+        have = declared_ports()
+        for k in ("w64/post_tf_f32_p12_diet_vsit", "w64/post_tf4_dl_f32_p12_diet_vsit"):
+            self.assertIn((k, "post_w64.co"), have)
 
 
 def cdiv(a, b):
