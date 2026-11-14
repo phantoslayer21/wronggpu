@@ -22,17 +22,18 @@ bool model_from_options(const WgRtConfig& c, ModelId* model, std::string* err) {
   ModelId last = ModelId::M;
   std::string bad;
   if (!last_model_option(text, &last, &bad)) {
-    *err = "unknown model \"" + bad + "\" in the runtime options (known: M)";
+    *err = "unknown model \"" + bad + "\" in the runtime options (known: M" + (model_l_built() ? ", L)" : ")");
     return false;
   }
   if (last == ModelId::K) {
     *err = "Model K is not part of this build (runtime option model=K); remove the option to use Model M";
     return false;
   }
-  if (last == ModelId::L) {  // #89: recognised, not part of the runtime yet
+  if (last == ModelId::L && !model_l_built()) {  // #89: recognised; runs when its sources are compiled in
     *err = model_not_built_yet(ModelId::L);
     return false;
   }
+  *model = last;
   return true;
 }
 

@@ -5,8 +5,8 @@
 // surroundings, so the callers do not compare against one model by hand. Header only: every build that compiles
 // clean/k/runtime/model_k.cpp or clean/runtime/no_model_k.cpp gets it without a new source file.
 //
-// Model L has a row so that model=L is recognised and refused by name ("not part of this build yet") until its
-// network exists; the runtime never selects it today.
+// Model L has a row so that model=L is recognised. The runtime runs it when its sources are compiled in (define
+// WG_MODEL_L, model_l_built()); otherwise model=L is refused by name ("not part of this build yet").
 #pragma once
 
 #include <cstddef>
@@ -67,7 +67,16 @@ inline bool last_model_option(const std::string& text, ModelId* model, std::stri
   return true;
 }
 
-// The refusal of model=L until its network is part of the runtime (one place for both builds).
+// Model L is part of this runtime library: its sources (clean/l/runtime) compiled with the define WG_MODEL_L.
+inline bool model_l_built() {
+#ifdef WG_MODEL_L
+  return true;
+#else
+  return false;
+#endif
+}
+
+// The refusal of model=L when it is not part of the runtime library (one place for both builds).
 inline std::string model_not_built_yet(ModelId id) {
   return std::string("Model ") + model_info(id).name + " is not part of this build yet (runtime option model=" +
          model_info(id).name + "); remove the option to use Model M";
