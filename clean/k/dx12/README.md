@@ -30,7 +30,11 @@ and starts filled with its run's own sentinel (HIP `0xA5`, D3D12 `0x5A`); the de
 slack must keep its sentinel; special values are among the inputs; a negative control (the port given another input
 than HIP) must be caught; Model M's `scale_rgb` runs through the same replay as a control. Output: counts and verdicts.
 
-Families: `input` (the exact tiled input stage `kx/k_in_tiled` of `k_io_exact.co`: 16 flag sets of HDR, low-resolution
+Families: `output` (the output stage of `k_io.co`: `k_out_color` followed by `k_out_pixel_c` or `k_out_pixel`, the
+three game-output formats (RGBA32F, RGBA16F rows, RGB32F), colour alphas that are negative, above 1 or out of the FP16
+range, special values in the colour, depth, motion and head map; the stored colour taps and the filter-tap values of
+`k_out_color` are compared as well as the image and the histories; the raw bytes are identical in every case; the `_f`
+kernels of `k_fast` and `k_out_hidden` are not ported); `input` (the exact tiled input stage `kx/k_in_tiled` of `k_io_exact.co`: 16 flag sets of HDR, low-resolution
 motion, inverted depth and reset, odd and tiny base grids down to 1 x 1, the exposure scalars from a device buffer as the
 runtime passes them, infinity, huge values, zero and -0 in the colour, depth, motion and histories, NaN in a third of
 the cases; the raw bytes are identical in every case; the port needs the adapter's binary64 fma and division (manifest
