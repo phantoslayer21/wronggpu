@@ -29,9 +29,10 @@ to add. Add it in `src/platform/posix` (declare it in the stand-in header, imple
 add a check to `src/platform/posix/tests/posix_layer_tests.cpp`). Do not add `#ifdef` branches around shared code unless
 the feature is Windows' own (UI Automation, the DWM title bar, the old GDI+ wizard).
 
-The one source list in `CMakeLists.txt` serves both systems, so a new `src/app` or `src/wg_core` file is compiled on
-Linux without any Linux-specific edit. Two exceptions are named in the CMake files: the Windows-only targets stay
-under `if(WIN32)`, and the Linux target lists the few Linux-only files.
+One list in `CMakeLists.txt`, `WRONGGPU_APP_SOURCES`, holds the `src/app` files of both launchers, and `wg_core` has one list
+for both, so a new shared file is compiled on Linux without any Linux-specific edit. Two short lists name the exceptions:
+`WRONGGPU_APP_SOURCES_WINDOWS` (the GDI+ wizard, the Direct2D drawing) and `WRONGGPU_APP_SOURCES_LINUX` (the live-frame
+hook); a new shared file goes in the first list only. The Windows-only targets stay under `if(WIN32)`.
 
 Two mistakes get past a Windows-only build, so `tools/ci/check_portable.py` looks for them (it runs as the ctest tests
 `portable` and `portable-selftest`, and as a step of the Linux CI job):
@@ -60,7 +61,9 @@ screens to PNG and drives the live window with scripted input; `launcher-native`
 
 ## Build the AppImage
 
-One script, in the pinned Ubuntu 22.04 container so the AppImage runs on any Linux with glibc 2.35 or newer:
+One script, in the pinned Ubuntu 22.04 container so the AppImage runs on any desktop Linux with glibc 2.35 or newer, with
+the X11 client libraries (libX11, libxcb) that every desktop provides, and the other host libraries the script lists
+(`HOST_LIBS`: the glibc family, zlib and libuuid):
 
     clean/installer/build-appimage-container.sh --payload <release payload folder>     # podman or docker
     clean/installer/build-appimage-container.sh --test-payload                         # smoke build, never ship
@@ -68,9 +71,12 @@ One script, in the pinned Ubuntu 22.04 container so the AppImage runs on any Lin
 The payload folder is the one you give `WRONGGPU_PAYLOAD_DIR` on Windows; `--version` and `--out` are optional (version:
 `WRONGGPU_VERSION` in `CMakeLists.txt`; output: `build/appimage/out`). Without a container, run `build-appimage.sh`
 inside any Ubuntu 22.04 as root (`WG_ALLOW_OTHER_HOST=1` skips the host check for a local trial; the AppImage then
-may not run on older systems). Nothing in the script lists sources, screens or libraries: `cmake --install` decides what
-ships (see the `install()` lines at the end of `CMakeLists.txt`) and linuxdeploy copies in the libraries the binary
-needs. The last step fails the build if any file needs a glibc newer than 2.35 or the fonts are missing.
+may not run on older systems). The script lists no sources and no screens, only the host libraries it expects from the
+system (`HOST_LIBS`, with the reason for each): `cmake --install` decides what ships (see the `install()` lines at the end
+of `CMakeLists.txt`; a new asset folder needs an `install()` line there) and linuxdeploy copies in the libraries the
+binary needs. The X11 libraries are left to the system on purpose: a second copy would clash with the desktop's. The last
+step fails the build if any file needs a glibc or libstdc++ newer than Ubuntu 22.04's, a library that is neither in the
+AppDir nor in `HOST_LIBS`, or the fonts are missing.
 
 The CI job `.github/workflows/linux-appimage.yml` does the `--test-payload` build on pull requests.
 

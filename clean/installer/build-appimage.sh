@@ -9,8 +9,10 @@
 # on every system whose glibc is as old as the build system's or newer; building on a newer system raises that floor
 # silently, so the script refuses other hosts and step 9 fails on any file that needs a newer glibc.
 #
-# The script does not know the launcher's source files, screens or libraries: CMakeLists.txt's install() rules decide what
-# ships and linuxdeploy follows the binary's shared-library dependencies. New launcher code needs no edit here.
+# The script does not know the launcher's source files or screens: CMakeLists.txt's install() rules decide what ships and
+# linuxdeploy follows the binary's shared-library dependencies. The only libraries it names are the host libraries it
+# expects from the user's system (HOST_LIBS below); step 9 fails on any other dependency the AppDir does not carry.
+# New launcher code needs no edit here.
 set -euo pipefail
 
 # ---- 0. Pinned inputs ---------------------------------------------------------------------------------------------------
@@ -36,6 +38,26 @@ RUNTIME_URL="https://github.com/AppImage/type2-runtime/releases/download/${RUNTI
 RUNTIME_SHA256="2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d"
 
 MAX_GLIBC="2.35"   # Ubuntu 22.04; decided by the maintainer
+# The newest libstdc++ symbol versions Ubuntu 22.04's libstdc++6 (12.x) provides. The binary links libstdc++ statically, so
+# nothing in the AppDir should need either; step 9 reports anything that does.
+MAX_GLIBCXX="3.4.30"
+MAX_CXXABI="1.3.13"
+
+# The shared libraries the AppImage deliberately does not carry: it takes them from the user's system. Step 9 fails when a
+# file in the AppDir needs any other library that the AppDir lacks. Each entry is here for a reason:
+#  - the glibc family: a second copy cannot work, and MAX_GLIBC bounds what the AppImage asks of it. libdl, libpthread and
+#    librt are folded into libc since glibc 2.34, kept as empty stubs for programs linked before that;
+#  - libX11.so.6 and libxcb.so.1: the X11 client libraries. Cairo's X11 backend and SDL3 open the user's own, and linuxdeploy
+#    excludes them on purpose: a second copy clashes with the one the desktop's other programs load. Every graphical desktop
+#    has them, Wayland ones through XWayland;
+#  - libz.so.1 and libuuid.so.1: base libraries of every Debian, Ubuntu, Fedora and Arch install (zlib, util-linux), which
+#    Cairo, FreeType, GIO and libpng (zlib) and fontconfig (uuid) need. linuxdeploy's exclude list leaves them out too.
+# What the build adds beyond the glibc family was read from the AppDir's own NEEDED entries (readelf -d on every ELF file).
+HOST_LIBS=(
+  ld-linux-x86-64.so.2 libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1
+  libX11.so.6 libxcb.so.1
+  libz.so.1 libuuid.so.1
+)
 
 # From Ubuntu 22.04's archive, unpinned: apt versions follow Ubuntu's security updates, the container digest bounds the drift.
 APT_PACKAGES=(
@@ -132,7 +154,9 @@ if [ ! -f "$DEPS/.sdl-$SDL_VERSION" ]; then
   cmake -S "$DEPS/sdl-src" -B "$DEPS/sdl-build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$DEPS" \
         -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF -DSDL_X11_XSCRNSAVER=OFF \
         -DSDL_WAYLAND_LIBDECOR=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-  cmake --build "$DEPS/sdl-build" && cmake --install "$DEPS/sdl-build"
+  # one command per line: in "a && b", set -e ignores a failing a, and the stamp would then claim a build that never finished
+  cmake --build "$DEPS/sdl-build"
+  cmake --install "$DEPS/sdl-build"
   touch "$DEPS/.sdl-$SDL_VERSION"
 fi
 
@@ -174,17 +198,44 @@ ARCH=x86_64 "$APPIMAGETOOL" --runtime-file "$CACHE/runtime-$RUNTIME_TAG" "$APPDI
 (cd "$OUT" && sha256sum "$NAME.AppImage" > "$NAME.AppImage.sha256")
 
 # ---- 9. Checks on the AppDir --------------------------------------------------------------------------------------------
-# The ways an AppImage breaks far from the build machine: a file that needs a newer glibc than the user's, a drawing library
-# left out, and missing fonts (the text would fall back to whatever the user has, and the icons would be blank).
+# The ways an AppImage breaks far from the build machine: a file that needs a newer glibc (or libstdc++) than the user's, a
+# shared library that is neither in the AppDir nor one the system is expected to have (HOST_LIBS), a drawing library left
+# out, and missing fonts (the text would fall back to whatever the user has, and the icons would be blank).
 step "9. Checks"
 fail=0
+declare -A host_lib=() in_appdir=()
+for l in "${HOST_LIBS[@]}"; do host_lib[$l]=1; done
+# find -L: a symbolic link that leads nowhere does not count as carried
+while IFS= read -r -d '' f; do in_appdir[${f##*/}]=1; done < <(find -L "$APPDIR" -type f -name '*.so*' -print0)
+newest() {  # newest <symbol-version prefix> <dynamic symbols>: the highest version of that prefix, empty when none
+  { grep -o "$1_[0-9][0-9.]*" <<<"$2" || true; } | sed "s/^$1_//" | sort -V | tail -1
+}
+too_new() {  # too_new <version> <limit>: true when the version is above the limit
+  [ -n "$1" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" != "$2" ]
+}
 while IFS= read -r -d '' f; do
-  file -b "$f" | grep -q '^ELF' || continue
-  v="$(objdump -T "$f" 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -1 || true)"
-  if [ -n "$v" ] && [ "$(printf '%s\n%s\n' "$v" "$MAX_GLIBC" | sort -V | tail -1)" != "$MAX_GLIBC" ]; then
-    echo "FAIL: ${f#"$APPDIR"/} needs GLIBC_$v (limit $MAX_GLIBC)" >&2; fail=1
+  rel="${f#"$APPDIR"/}"
+  magic="$(file -b "$f")"
+  case "$magic" in ELF*) ;; *) continue ;; esac
+  # a failing readelf or objdump fails the step: it must never read as "nothing needed"
+  dyn="$(readelf -d "$f" 2>&1)" || { echo "FAIL: readelf -d failed on $rel: $dyn" >&2; fail=1; continue; }
+  syms=""
+  if ! grep -q 'There is no dynamic section' <<<"$dyn"; then
+    syms="$(objdump -T "$f" 2>&1)" || { echo "FAIL: objdump -T failed on $rel: $syms" >&2; fail=1; continue; }
   fi
-  echo "glibc ${v:-none}: ${f#"$APPDIR"/}"
+  v="$(newest GLIBC "$syms")"
+  if too_new "$v" "$MAX_GLIBC"; then echo "FAIL: $rel needs GLIBC_$v (limit $MAX_GLIBC)" >&2; fail=1; fi
+  cxx="$(newest GLIBCXX "$syms")"
+  if too_new "$cxx" "$MAX_GLIBCXX"; then echo "FAIL: $rel needs GLIBCXX_$cxx (Ubuntu 22.04 has up to $MAX_GLIBCXX)" >&2; fail=1; fi
+  abi="$(newest CXXABI "$syms")"
+  if too_new "$abi" "$MAX_CXXABI"; then echo "FAIL: $rel needs CXXABI_$abi (Ubuntu 22.04 has up to $MAX_CXXABI)" >&2; fail=1; fi
+  while IFS= read -r need; do
+    [ -n "$need" ] || continue
+    if [ -z "${host_lib[$need]:-}" ] && [ -z "${in_appdir[$need]:-}" ]; then
+      echo "FAIL: $rel needs $need, which is neither in the AppDir nor in HOST_LIBS" >&2; fail=1
+    fi
+  done < <(sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' <<<"$dyn")
+  echo "glibc ${v:-none}: $rel"
 done < <(find "$APPDIR" -type f -print0)
 for lib in libcairo.so.2 libpango-1.0.so.0 libpangocairo-1.0.so.0 libfontconfig.so.1 libfreetype.so.6 libharfbuzz.so.0 libfribidi.so.0 libexpat.so.1; do
   [ -e "$APPDIR/usr/lib/$lib" ] || { echo "FAIL: $lib is not in the AppDir" >&2; fail=1; }
@@ -193,7 +244,6 @@ for font in selawik/selawk.ttf fluent/FluentSystemIcons-Regular.ttf; do
   [ -s "$APPDIR/usr/share/wronggpu/assets/fonts/$font" ] || { echo "FAIL: font $font is not in the AppDir" >&2; fail=1; }
 done
 [ "$fail" = 0 ] || exit 1
-echo "glibc and fonts: ok (limit GLIBC_$MAX_GLIBC)"
-
+echo "glibc, libstdc++, dependencies and fonts: ok (limit GLIBC_$MAX_GLIBC; host libraries: ${HOST_LIBS[*]})"
 echo
 echo "built $OUT/$NAME.AppImage ($(du -h "$OUT/$NAME.AppImage" | cut -f1), $((SECONDS - START)) s)"

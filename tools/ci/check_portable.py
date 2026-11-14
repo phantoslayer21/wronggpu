@@ -5,7 +5,8 @@ The launcher's shared code (src/wg_core, src/app) is compiled on Windows and on 
 with src/platform/posix; two mistakes get past a Windows-only build and break Linux later. This script finds both by reading
 the source, without a compiler:
 
-  (a) a std::filesystem::path made straight from a wstring in src/wg_core or src/app. On Linux that spells a Windows path
+  (a) a std::filesystem::path made straight from a wstring in src/wg_core or src/app (constructed, copy-initialised, or a
+      `p = w;` assignment to a path of the same function). On Linux that spells a Windows path
       ("C:\\Games", backslashes) wrongly; wg::FsPath(wstring) (src/wg_core/util.h) converts it for the host.
   (b) a shared UI file (src/app/*.cpp and *.h, except WINDOWS_ONLY below) that uses Direct2D, DirectWrite, WIC, DWM or UI
       Automation outside an `#ifdef _WIN32` block. Those are Windows' own; the shared code reaches the screen through Gfx
@@ -124,6 +125,20 @@ def check_fs_path(rel, text):
             continue
         found.append("%s:%d: std::filesystem::path copy-initialised (%s); use wg::FsPath(wstring) from wg_core/util.h"
                      % (rel, line, " ".join(code[m.start():m.end()].split())[:80]))
+    # assignment: `fs::path p; ... p = w;` with w a wstring of the same function (a function ends at a `}` in column 0), or a
+    # wide literal. Only a plain wstring or wide literal on the right counts, so another path or a call never flags.
+    assign = re.compile(r"(?m)^[ \t]*(\w+)\s*=\s*(L\"[^;]*|\w+)\s*;")
+    start = 0
+    for body in re.split(r"(?m)^\}", code):
+        paths = set(re.findall(r"\b(?:%s)::path\s+(\w+)\s*[;=({]" % "|".join(re.escape(n) for n in names), body))
+        wides = set(re.findall(r"\b(?:std::)?wstring(?:_view)?\s*[&*]*\s*(\w+)", body)) | set(re.findall(r"\bwchar_t\s*\*?\s*(\w+)", body))
+        for m in assign.finditer(body):
+            rhs = m.group(2)
+            line = code.count("\n", 0, start + m.start()) + 1
+            if m.group(1) in paths and (rhs.startswith('L"') or rhs in wides) and line not in win:
+                found.append("%s:%d: std::filesystem::path assigned from a wide string (%s); use wg::FsPath(wstring) from wg_core/util.h"
+                             % (rel, line, " ".join(m.group(0).split())[:80]))
+        start += len(body) + 1
     return found
 
 
@@ -182,6 +197,13 @@ std::filesystem::path FsPath(const std::wstring& p);
 const char* s = "fs::path(x) DwmSetWindowAttribute";
 void F(const fs::path& a, const std::filesystem::path* b) { std::filesystem::path none; auto c = fs::path("narrow"); fs::path d; }
 void G(const std::wstring& w) { auto p = wg::FsPath(w); (void)p; std::filesystem::path q = wg::FsPath(w); fs::path r = "narrow"; }
+void H(const std::wstring& w, const fs::path& other) {
+    fs::path a;
+    a = wg::FsPath(w);
+    a = other;
+    std::wstring s2 = w;
+    s2 = w;
+}
 std::filesystem::path FsPath(const std::wstring& p);
 #ifndef _WIN32
 struct IWICImagingFactory { void Release() {} };  // the Linux branch's own stub of a name Windows has
@@ -196,6 +218,8 @@ PLANTED = {
     "(a) path from a wstring, through an alias": ("src/app/x.cpp", "namespace fs = std::filesystem;\nvoid F(const std::wstring& w) { fs::path p(w); }\n", check_fs_path),
     "(a) path from a wstring, in the Linux branch": ("src/app/x.cpp", "#ifdef _WIN32\n#else\nvoid F(const std::wstring& w) { std::filesystem::path p{w}; }\n#endif\n", check_fs_path),
     "(a) path copy-initialised from a wstring": ("src/wg_core/x.cpp", "void F(const std::wstring& w) { std::filesystem::path p = w; }\n", check_fs_path),
+    "(a) path assigned from a wstring": ("src/app/x.cpp", "void F(const std::wstring& w) {\n    std::filesystem::path p;\n    p = w;\n}\n", check_fs_path),
+    "(a) path assigned from a wide literal": ("src/wg_core/x.cpp", "namespace fs = std::filesystem;\nvoid F() {\n    fs::path p;\n    p = L\"C:\\\\Games\";\n}\n", check_fs_path),
     "(b) Direct2D outside #ifdef _WIN32": ("src/app/ui_x.cpp", "ID2D1Factory* g = nullptr;\n", check_windows_api),
     "(b) DWM call in the Linux branch": ("src/app/ui_x.cpp", "#ifndef _WIN32\nvoid F(HWND h) { DwmSetWindowAttribute(h, 13, 0, 0); }\n#endif\n", check_windows_api),
     "(b) UI Automation header": ("src/app/ui_x.cpp", "#include <uiautomation.h>\n", check_windows_api),

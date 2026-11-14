@@ -151,6 +151,16 @@ add_custom_command(
   DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/make_payload.py ${MANIFEST} ${WRONGGPU_MAP} ${PRESET_K_MAP_FILE} ${MAP_F_FILE} ${MAP_L_FILE} ${WRONGGPU_PAYLOAD_FILES} ${WRONGGPU_RR_FILES}
   COMMENT "Embedding the payload and the converter map")
 
+# The launcher's sources, for both targets: a new shared file goes in WRONGGPU_APP_SOURCES only, never in the two lists below it.
+set(WRONGGPU_APP_SOURCES src/app/main.cpp src/app/cli.cpp src/app/launcher_ui.cpp src/app/ui_art.cpp src/app/ui_widgets.cpp
+    src/app/ui_library.cpp src/app/ui_game.cpp src/app/ui_settings.cpp src/app/ui_uia.cpp src/app/ui_render.cpp src/app/ui_words.cpp
+    src/app/ui_dump.cpp src/app/ui_frame.cpp src/app/ui_play.cpp src/app/ui_rrprep.cpp src/app/ui_rrconfig.cpp src/app/ui_activate.cpp
+    src/app/ui_checks.cpp src/app/payload_embed.cpp)
+# Windows only: the GDI+ wizard and the Direct2D/DirectWrite drawing (Linux draws through ui_gfx_cairo.cpp, in wg_gfx_cairo).
+set(WRONGGPU_APP_SOURCES_WINDOWS src/app/wizard.cpp src/app/ui_gfx.cpp)
+# Linux only: the live-frame hook for the SDL window layer.
+set(WRONGGPU_APP_SOURCES_LINUX src/app/ui_live_hook_linux.cpp)
+
 # wg_core: the installer's engine, split into modules (src/wg_core; build/launcher-design.md section 2). No globals:
 # a wg::Context is passed in. The wizard (and later the launcher) is built on top of it.
 add_library(wg_core STATIC
@@ -210,8 +220,7 @@ file(GENERATE OUTPUT ${GEN}/restore.rc CONTENT "960 RCDATA \"${GEN}/restorer.bin
 set_source_files_properties(${GEN}/restore.rc PROPERTIES OBJECT_DEPENDS ${GEN}/restorer.bin)
 
 # WrongGPU.exe: the launcher (window, command line, elevated worker) with the installer's /switches as aliases.
-add_executable(WrongGPU WIN32 src/app/main.cpp src/app/wizard.cpp src/app/cli.cpp src/app/launcher_ui.cpp src/app/ui_gfx.cpp src/app/ui_art.cpp
-               src/app/ui_widgets.cpp src/app/ui_library.cpp src/app/ui_game.cpp src/app/ui_settings.cpp src/app/ui_uia.cpp src/app/ui_render.cpp src/app/ui_words.cpp src/app/ui_dump.cpp src/app/ui_frame.cpp src/app/ui_play.cpp src/app/ui_rrprep.cpp src/app/ui_rrconfig.cpp src/app/ui_activate.cpp src/app/ui_checks.cpp src/app/payload_embed.cpp
+add_executable(WrongGPU WIN32 ${WRONGGPU_APP_SOURCES} ${WRONGGPU_APP_SOURCES_WINDOWS}
                ${GEN}/resources.rc ${GEN}/restore.rc ${GEN}/restorer.bin ${GEN}/payload_table.h ${MANIFEST_SOURCE})
 add_dependencies(WrongGPU WrongGPU-Restore)
 endif()
@@ -280,11 +289,7 @@ if(NOT WIN32)
   add_test(NAME gfx-linux-smoke COMMAND gfx-linux-smoke ${CMAKE_CURRENT_BINARY_DIR}/gfx-smoke)
   # The launcher itself on Linux: the same window code as Windows (src/app, the Win32 calls answered by src/platform/posix), without
   # the old GDI+ wizard (wizard.cpp, wg_ui), the DWM title bar, tooltips and UI Automation, which Windows alone has.
-  add_executable(WrongGPU src/app/main.cpp src/app/cli.cpp src/app/launcher_ui.cpp src/app/ui_art.cpp src/app/ui_widgets.cpp
-                 src/app/ui_library.cpp src/app/ui_game.cpp src/app/ui_settings.cpp src/app/ui_uia.cpp src/app/ui_render.cpp
-                 src/app/ui_words.cpp src/app/ui_dump.cpp src/app/ui_frame.cpp src/app/ui_play.cpp src/app/ui_rrprep.cpp
-                 src/app/ui_rrconfig.cpp src/app/ui_activate.cpp src/app/ui_checks.cpp src/app/payload_embed.cpp
-                 src/app/ui_live_hook_linux.cpp ${GEN}/resources.S ${GEN}/payload_table.h)
+  add_executable(WrongGPU ${WRONGGPU_APP_SOURCES} ${WRONGGPU_APP_SOURCES_LINUX} ${GEN}/resources.S ${GEN}/payload_table.h)
   target_include_directories(WrongGPU PRIVATE ${GEN})
   # the assembler reads the payload through .incbin, which CMake's dependency scan does not see
   set_source_files_properties(${GEN}/resources.S PROPERTIES OBJECT_DEPENDS "${GEN}/payload_table.h;${WRONGGPU_PAYLOAD_FILES};${WRONGGPU_RR_FILES}")

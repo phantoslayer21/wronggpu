@@ -37,8 +37,11 @@ jobs:
       - uses: actions/checkout@v4.2.2
       - name: Container digest matches the build script
         run: |
-          image="$(grep -o 'ubuntu:22.04@sha256:[0-9a-f]*' .github/workflows/linux-appimage.yml | head -1)"
-          grep -qF "$image" clean/installer/build-appimage.sh
+          # the whole image reference, digest included, must match: a container line without a digest fails here
+          workflow="$(sed -n 's/^    container: *//p' .github/workflows/linux-appimage.yml)"
+          script="$(sed -n 's/^CONTAINER_IMAGE="\(.*\)"$/\1/p' clean/installer/build-appimage.sh)"
+          case "$workflow" in *@sha256:????????????????????????????????????????????????????????????????) ;; *) echo "workflow container has no sha256 digest: '$workflow'" >&2; exit 1 ;; esac
+          [ -n "$script" ] && [ "$workflow" = "$script" ] || { echo "workflow '$workflow' differs from build-appimage.sh '$script'" >&2; exit 1; }
       - name: Portability check
         run: python3 tools/ci/check_portable.py --root clean/installer
       - name: Build the AppImage (test payload)

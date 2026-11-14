@@ -1097,7 +1097,11 @@ OpResult RunOp(Context& ctx, const OpRequest& r, Ui& ui) {
                 if (r.dir.empty() || !LoadRecord(RecordPath(r.dir), m) || m.legacy) Fail(L"No WrongGPU installation record was found in " + r.dir + L".", EXIT_NOT_INSTALLED);
                 if (m.regkey.empty()) { m.regkey = RegKeyFor(r.dir); SaveRecord(RecordPath(r.dir), m); }
                 RegisterUninstall(ctx, m, StateDir(r.dir), GameDisplayName(m.exe));
+#ifdef _WIN32
                 res.message = L"WrongGPU stays in " + r.dir + L" with its own uninstaller";
+#else  // no uninstaller is written into a game folder on Linux: the launcher is what removes it
+                res.message = L"WrongGPU stays in " + r.dir + L"; open the WrongGPU launcher and use Uninstall on the game's page to remove it";
+#endif
                 break;
             }
             case Op::Rollback: Rollback(ctx, r.dir, ui, res); break;
