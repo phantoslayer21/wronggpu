@@ -12,6 +12,10 @@ delivered by the spec side; the code never guesses it (it raises, or takes the c
   - **net2**: two small encoder-decoders (sub-nets A and B) of 3 x 3 convolutions; 25 layers, a weight blob and a bias
     blob each.
 - Shapes and byte sizes per layer: [`layout.py`](layout.py) (checked by `tests/test_fg_layout.py`).
+- Splitting a blob into its parts: [`reference/blobs.py`](reference/blobs.py). net1: the weights in stored order, the
+  zero area checked to hold only +0 / -0, the bias as copy 0 of each group of eight with the other fifteen copies
+  checked to be bit-identical (`check=False` skips both checks). net2: weight and bias blob sizes checked. The weights
+  stay flat until the in-blob axis order (OPEN item 2) is delivered.
 
 ## Converter map
 

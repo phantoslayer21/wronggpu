@@ -6,6 +6,8 @@ front end or the launcher yet. Status, open items and formats: [FORMATS.md](FORM
 | Path | Content |
 |---|---|
 | `layout.py` | the weight layout of both networks as structure only: per layer its shape, and the byte size and inner layout of each blob, in the library's upload order; totals |
+| `reference/blobs.py` | splits blob bytes into flat float16 weights (stored order) and distinct biases: net1's zero area skipped and checked, copy 0 of each bias group taken and the other copies checked; net2's weight / bias pairs; `build_net1` for synthetic blobs |
+| `tests/test_fg_blobs.py` | round trips and every check, on synthetic blobs of every layer |
 | `tests/test_fg_layout.py` | the table against the totals the spec side gives |
 | `reference/ops.py` | NumPy CPU reference of the networks' building blocks: float16 convolution (3 x 3, 1 x 1) with bias and ReLU, 2x pooling, bilinear 2x upscale (align corners), element-wise combines, net1's input features and 2 x 2 fold; each open behaviour is a required argument or raises `OpenItem` |
 | `tests/test_fg_reference.py` | the building blocks against plain loop versions, on synthetic data |
