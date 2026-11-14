@@ -41,6 +41,17 @@ delivered by the spec side; the code never guesses it (it raises, or takes the c
   (`order`), the fold order inside a cell (`order`). What the cell padding holds is OPEN too (zeros here).
 - `net1_forward` and `net2_forward` raise `OpenItem`: the wiring of both networks is not delivered.
 
+## Configuration (`reference/config.py`)
+
+- No configuration value changes the networks or their weights.
+- Multi-frame: count N (1 by default, at most a cap), index i in 1..N. Intermediate time t = i / (N + 1) as one
+  single-precision division (`intermediate_time`, numpy float32). Flags: multi-frame active (N > 1), last index
+  (i equal to the maximum index).
+- UI recomposition: preset A (off) or B (on), set by the application; a profile value of 1 or 0xFFFFFE forces it off,
+  2 or 0xFFFFFF forces it on, any other value leaves it (`ui_recomposition`).
+- Required arguments where the behaviour is OPEN: the cap on N (`n_max`), the further mode that also accepts
+  i = N + 1 (`extra_index`), the maximum that "last index" compares with (`maximum`).
+
 ## OPEN (waiting for the spec side)
 
 1. The converter map file.
@@ -54,3 +65,5 @@ delivered by the spec side; the code never guesses it (it raises, or takes the c
 9. The float16 accumulation order of the matrix unit; the convolution border rule; which net2 layers end in ReLU;
    the pooling kind; net1's feature channel order, the fold order and what the cell padding holds; how the warp for
    the warp errors samples.
+10. The cap on the multi-frame count; the further mode that accepts index N + 1 and what it does; which maximum the
+    "last index" flag compares with; the private override that can turn UI recomposition off.
