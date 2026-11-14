@@ -16,8 +16,11 @@ Checks:
 2. l_swin_block_c32_nc against l_swin_block_c32 where the weights' flags allow it: byte-identical.
 3. With swin.co: l_swin_block_c64 (this file's build of the template) against Model M's swin_block_c64: byte-identical.
 4. Model L's two blocks (clean/l/FORMATS.md) against the oracle with their borders: l_swin_block_c32_enc (FP16 halo
-   map in, FP8 out) and l_swin_block_c32_dec (FP8 in, FP16 out, token-grid mirror; the rule of 1. on the FP8-rounded
-   values, plus FP16 differences reported); their `_nc` forms byte-identical to the clamped ones.
+   map in, FP8 out) and l_swin_block_c32_dec (FP8 in, FP16 out, token-grid mirror); their `_nc` forms byte-identical
+   to the clamped ones. The decoder block's FP16 output must pass the rule of 1. on its FP8-rounded values and the
+   FP16 criterion (f16_passes). With <dir>/l_ops.co, the coefficient codes are computed from the real block output:
+   l_coef against the oracle's functions on that same output (the strict bound of l_ops_check.py), and end to end
+   against the oracle block + functions (at least 99.5 % of each code kind and of the C values identical).
 """
 import argparse
 import ctypes
@@ -149,7 +152,39 @@ def f16_steps(a, b):
     return np.abs(key(a) - key(b))
 
 
-def l_block_cases(g, rngs):
+def f16_metrics(got, ref):
+    """FP16-output counterpart of metrics(): distances in FP16 ulps (finite reference values)."""
+    got = np.asarray(got, np.float64)
+    ref = np.asarray(ref, np.float64)
+    fin = np.isfinite(ref)
+    s = f16_steps(got[fin], ref[fin])
+    d = np.abs(got[fin] - ref[fin])
+    return {"f16_values": int(s.size), "f16_differ": int(np.sum(s > 0)), "f16_max_steps": int(s.max()) if s.size else 0,
+            "f16_frac_over_1": float(np.mean(s > 1)) if s.size else 0.0,
+            "f16_frac_exact": float(np.mean(s == 0)) if s.size else 1.0,
+            "f16_nonfinite": int(np.sum(~np.isfinite(got[fin]))) + int(np.sum(got[~fin] != ref[~fin])),
+            "f16_mean_abs_err": float(d.mean()) if d.size else 0.0,
+            "f16_ref_rms": float(np.sqrt(np.mean(ref[fin] ** 2))) if d.size else 0.0}
+
+
+def f16_passes(m, max_steps=None):
+    """FP16 criterion: Model M's per-stage rule with FP16 steps in place of FP8 steps (at most 2 % of values more than
+    one FP16 ulp off, mean absolute error at most 1 % of the reference RMS), at least 99 % of values exact, no
+    non-finite value where the reference is finite, and, where given, a bound on the largest distance (1 ulp for an
+    output that is one rounding of an accumulator, as the second linear)."""
+    return (m["f16_nonfinite"] == 0 and m["f16_frac_over_1"] <= 0.02 and m["f16_frac_exact"] >= 0.99
+            and m["f16_mean_abs_err"] <= 0.01 * m["f16_ref_rms"]
+            and (max_steps is None or m["f16_max_steps"] <= max_steps))
+
+
+class _OpsMod:
+    def __init__(self, hip, build):
+        self.hip = hip
+        with open(os.path.join(build, "l_ops.co"), "rb") as f:
+            self.mod = hip.load_module(f.read())
+
+
+def l_block_cases(g, rngs, ops=None):
     """Model L's encoder block (FP16 halo map in, FP8 out, offsets "first") and decoder block (FP8 in, FP16 out,
     token-grid mirror, offsets "second") against the oracle; the `_nc` forms against the clamped ones."""
     res = {"enc": [], "dec": [], "nc_identical": []}
@@ -180,9 +215,25 @@ def l_block_cases(g, rngs):
                 got = np.frombuffer(raw, np.float16).reshape(H, W, 32).astype(np.float64)
                 ref = L.f16(L.swin_block(x, p, off, 2, CONSTS, "coarse"))
                 m = metrics(q8(got), q8(ref))                 # Model M's per-stage rule on the FP8-rounded values
-                s = f16_steps(got, ref)
-                m.update({"case": [H, W, list(off)], "f16_differ": int(np.sum(s > 0)), "f16_max_steps": int(s.max())})
-                m["pass"] = passes(m) and bool(np.isfinite(got).all())
+                m.update(f16_metrics(got, ref))               # ... and the FP16 criterion on the FP16 values
+                m["case"] = [H, W, list(off)]
+                m["pass"] = passes(m) and f16_passes(m)
+                if ops is not None:                           # coefficient codes from the real block output
+                    from clean.l.runner import l_ops_check as OC
+                    dec = {"S": np.float32(rng.uniform(1.0, 4.0)), "T": np.float32(rng.uniform(0.2, 1.5))}
+                    # (1) l_coef on the GPU block output against the oracle's functions on that same output: the
+                    #     strict bound of l_ops_check (codes within 1, C within 4 FP16 ulp).
+                    m["coef_same_input"] = OC.coef_case(ops, rng, dec, H, W, H, W, y2=got, ref_y2=got)
+                    # (2) end to end: codes from the GPU block + l_coef against codes from the oracle block + oracle
+                    #     functions. The block's FP16 differences (bounded by f16_passes) pass through steep functions
+                    #     (the latent code is 127 tanh), so a code may move by more than 1 where the block differs; the
+                    #     bound: at least 99.5 % of each code kind and of the C values identical (as Model M's motion
+                    #     surfaces, clean/tests/test_encoder_emu.py).
+                    e2e = OC.coef_case(ops, rng, dec, H, W, H, W, y2=got, ref_y2=ref)
+                    e2e["pass"] = all(e2e[k]["differ"] <= 0.005 * e2e[k]["values"]
+                                      for k in ("codes_A", "codes_B", "codes_L", "C"))
+                    m["coef_end_to_end"] = e2e
+                    m["pass"] = m["pass"] and m["coef_same_input"]["pass"] and e2e["pass"]
                 res["dec"].append(m)
                 if safe:
                     res["nc_identical"].append(
@@ -229,7 +280,8 @@ def run(build, rocm, seeds=(89,)):
     res["c32_total"] = {"cases": len(res["c32"]), "values": sum(m["values"] for m in res["c32"]),
                         "differ": sum(m["differ"] for m in res["c32"]),
                         "max_steps": max(m["max_steps"] for m in res["c32"])}
-    res["l_blocks"] = l_block_cases(g, [np.random.default_rng(1000 + s) for s in seeds])
+    ops = _OpsMod(g.hip, build) if os.path.exists(os.path.join(build, "l_ops.co")) else None
+    res["l_blocks"] = l_block_cases(g, [np.random.default_rng(1000 + s) for s in seeds], ops)
     res["pass"] = (all(m["pass"] for m in res["c32"]) and res["c32_nc_identical"] in (True, None)
                    and res["c64_template_identical"] in (True, None) and res["l_blocks"]["pass"])
     return res

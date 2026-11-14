@@ -64,10 +64,13 @@ class Ops:
 COEF_CASES = [(32, 64, 30, 51), (16, 32, 16, 32), (64, 96, 61, 77)]   # (fh, fw, rh, rw)
 
 
-def coef_case(g, rng, dec, fh, fw, rh, rw):
-    """l_coef on a random FP16 map y2 [fh][fw][32] against oracle.coefficients_l: stored codes that differ."""
+def coef_case(g, rng, dec, fh, fw, rh, rw, y2=None, ref_y2=None):
+    """l_coef on an FP16 map y2 [fh][fw][32] (default: random) against oracle.coefficients_l of ref_y2 (default: y2):
+    stored codes that differ. g: an object with .hip and .mod (l_ops.co)."""
     from clean.runner.dec0 import DecParams
-    y2 = L.f16(rng.normal(0, 2.0, (fh, fw, 32)))
+    if y2 is None:
+        y2 = L.f16(rng.normal(0, 2.0, (fh, fw, 32)))
+    ref_y2 = y2 if ref_y2 is None else ref_y2
     h = g.hip
     yb = y2.astype(np.float16).tobytes()
     blob = LP.pack_coef(dec)
@@ -85,7 +88,7 @@ def coef_case(g, rng, dec, fh, fw, rh, rw):
     A, B, C, Lt = (h.download(p, npx * n) for p, n in zip(outs, (4, 4, 8, 4)))
     for p in [py, pw] + outs:
         h.free(p)
-    a = y2[:rh, :rw][..., list(L._table.L_DEC_VALUES)].astype(np.float32)
+    a = np.asarray(ref_y2)[:rh, :rw][..., list(L._table.L_DEC_VALUES)].astype(np.float32)
     ref = L.coefficients_l(a, dec["S"], dec["T"])
     got = {"codes_A": np.frombuffer(A, np.uint8).reshape(rh, rw, 4)[..., :3],
            "codes_B": np.frombuffer(B, np.uint8).reshape(rh, rw, 4)[..., :3],
@@ -100,6 +103,63 @@ def coef_case(g, rng, dec, fh, fw, rh, rw):
     # Codes within one step of the oracle and FP16 C within a few ulp (the oracle's exp / tanh are exact in float64).
     m["pass"] = all(m[k]["max"] <= 1 for k in ("codes_A", "codes_B", "codes_L")) and m["C"]["max_f16_steps"] <= 4
     return m
+
+
+def _fp16_ties(rng, n):
+    """Values exactly halfway between neighbouring FP16 numbers over the whole exponent range, both signs."""
+    e = rng.integers(-14, 16, n)
+    m = rng.integers(0, 1024, n)
+    v = (1.0 + (m + 0.5) / 1024.0) * np.exp2(e.astype(np.float64))
+    return np.where(rng.random(n) < 0.5, -v, v)
+
+
+def _fp8_ties_and_saturation():
+    """Midpoints between neighbouring positive FP8 E4M3 values, values above 448, negatives and zero."""
+    pos = np.unique(fp8_decode(np.arange(0, 127, dtype=np.uint8)))
+    mids = (pos[:-1] + pos[1:]) / 2.0
+    extra = np.array([448.0, 449.0, 464.0, 480.0, 1000.0, 65504.0, -0.25, -448.0, -1000.0, 0.0])
+    return np.concatenate([mids, extra])
+
+
+def boundary_cases(g, rng, enc):
+    """Rounding boundaries of the two input linears, driven through the bias with zero input (acc = b exactly): FP16
+    ties and overflow (l_linear_32_32_f16), FP8 ties and saturation after RN16 (l_linear_32_32_relu); then the FP16
+    linear on extreme inputs (+-448) with large weights. Output bits must equal the oracle's (one rounding each)."""
+    out = []
+    H, W = 4, 32
+    npix = H * W
+    zero = bytes(npix * 32)
+    W0 = np.zeros((32, 32))
+    for kernel, values, mode, nbytes in (
+            ("l_linear_32_32_f16", np.concatenate([_fp16_ties(rng, 256 - 3), [65520.0, 70000.0, -1.0e5]]), "none", 64),
+            ("l_linear_32_32_relu", _fp8_ties_and_saturation(), "relu_q8", 32)):
+        bad = 0
+        vals = np.concatenate([values, np.zeros((-len(values)) % 32)])
+        for k in range(0, len(vals), 32):
+            b = vals[k:k + 32].astype(np.float32)
+            raw = g.run(kernel, zero, npix * nbytes, LP.pack_linear(W0, b, 32, 32), [npix], npix)
+            ref = L.linear(np.zeros((32,)), W0, b.astype(np.float64), "f16", mode)
+            if mode == "none":
+                got = np.frombuffer(raw, np.float16).reshape(npix, 32)
+                want = np.broadcast_to(ref.astype(np.float16), got.shape)
+            else:
+                got = np.frombuffer(raw, np.uint8).reshape(npix, 32)
+                want = np.broadcast_to(fp8_encode(ref), got.shape)
+            bad += int(np.sum(got.view(np.uint8 if mode != "none" else np.uint16)
+                              != want.view(np.uint8 if mode != "none" else np.uint16)))
+        out.append({"case": kernel + " bias boundaries", "values": int(len(values)) * npix, "differ_bits": bad,
+                    "pass": bad == 0})
+    x = np.where(rng.random((H, W, 32)) < 0.5, -448.0, 448.0)
+    Wx = q8(rng.normal(0, 4.0, (32, 32)))
+    bx = L.f16(rng.normal(0, 100.0, 32))
+    raw = g.run("l_linear_32_32_f16", fp8_encode(x).tobytes(), npix * 64, LP.pack_linear(Wx, bx, 32, 32), [npix], npix)
+    got = np.frombuffer(raw, np.float16).reshape(H, W, 32).astype(np.float64)
+    ref = L.linear(x, Wx, bx, "f16", "none")
+    m = C32.f16_metrics(got, ref)
+    m.update({"case": "l_linear_32_32_f16 extreme inputs", "overflow_values": int(np.sum(~np.isfinite(ref)))})
+    m["pass"] = C32.f16_passes(m, max_steps=1)
+    out.append(m)
+    return out
 
 
 def _fp8_metrics(got, ref, case):
@@ -133,8 +193,8 @@ def run(build, rocm, seeds=(89,)):
             got = np.frombuffer(raw, np.float16).reshape(H, W, 32).astype(np.float64)
             ref = L.linear(x1, enc["Win2"], enc["bin2"], "f16", "none")
             m = _fp8_metrics(q8(got), q8(ref), [H, W])
-            s = C32.f16_steps(got, ref)
-            m.update({"f16_differ": int(np.sum(s > 0)), "f16_max_steps": int(s.max())})
+            m.update(C32.f16_metrics(got, ref))
+            m["pass"] = m["pass"] and C32.f16_passes(m, max_steps=1)      # one rounding of the accumulator
             res["f16"].append(m)
 
             x3 = q8(rng.normal(0, 1.5, (H, W, 32)))
@@ -149,6 +209,7 @@ def run(build, rocm, seeds=(89,)):
             got = fp8_decode(np.frombuffer(raw, np.uint8).reshape(H, W, 32))
             ref = L.depth_to_space(L.dec_project(z, dec["W"], dec["b"]))
             res["dec_project"].append(_fp8_metrics(got, ref, [H, W]))
+        res.setdefault("boundary", []).extend(boundary_cases(g, rng, enc))
         for case in COEF_CASES:
             res.setdefault("coef", []).append(coef_case(g, rng, dec, *case))
     res["coef_total"] = {k: {"values": sum(m[k]["values"] for m in res["coef"]),
@@ -159,7 +220,7 @@ def run(build, rocm, seeds=(89,)):
                              "differ": sum(m["differ"] for m in res[k]),
                              "max_steps": max(m["max_steps"] for m in res[k])}
     res["f16_total"]["f16_differ"] = sum(m["f16_differ"] for m in res["f16"])
-    res["pass"] = all(m["pass"] for k in ("relu", "f16", "project", "dec_project", "coef") for m in res[k])
+    res["pass"] = all(m["pass"] for k in ("relu", "f16", "project", "dec_project", "coef", "boundary") for m in res[k])
     return res
 
 
@@ -174,7 +235,7 @@ def main(argv=None):
     with open(a.json, "w") as f:
         json.dump(res, f, indent=1)
     print({k: v for k, v in res.items() if k.endswith("_total") or k == "pass"})
-    for k in ("relu", "f16", "project", "dec_project", "coef"):
+    for k in ("relu", "f16", "project", "dec_project", "coef", "boundary"):
         for m in res[k]:
             if not m["pass"]:
                 print("FAIL", k, json.dumps(m))

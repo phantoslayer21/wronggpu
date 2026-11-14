@@ -35,7 +35,8 @@ from clean.reference.fp8 import fp8_decode  # noqa: E402
 from clean.runner import enc0 as E0  # noqa: E402
 
 # (rw, rh): render sizes with padding to multiples of 32, odd sizes and both reset states
-CASES = [(40, 24, False), (37, 19, False), (64, 32, True), (90, 50, False)]
+CASES = [(40, 24, False), (37, 19, False), (64, 32, True), (90, 50, False),
+         (17, 17, False), (17, 24, True)]      # width 17 (padded 32): halo columns 32, 33 both mirror to column 0
 
 
 def run_frame(hip, mod, x, enc):
@@ -100,12 +101,15 @@ def run(build, rocm, seeds=(89,)):
                 # Model M's rule for these surfaces (clean/tests/test_encoder_emu.py): at most 1 FP16 ulp, 99.5 % exact
                 mok &= same_nonfinite and mdiff[name]["max_f16_steps"] <= 1 and float(np.mean(u == 0)) >= 0.995
             m["motion"] = mdiff
-            m["pass"] = C32.passes(m) and m["pad_bytes_nonzero"] == 0 and mok
+            # Model M's encoder criteria (clean/tests/test_encoder_emu.py): per frame the per-stage rule and at least
+            # 99 % of values exact; over all frames at most 0.01 % of values differ (checked below).
+            m["pass"] = (C32.passes(m) and m["frac_differ"] <= 0.01 and m["pad_bytes_nonzero"] == 0 and mok)
             res["frames"].append(m)
     res["total"] = {"frames": len(res["frames"]), "values": sum(m["values"] for m in res["frames"]),
                     "differ": sum(m["differ"] for m in res["frames"]),
                     "max_steps": max(m["max_steps"] for m in res["frames"])}
-    res["pass"] = all(m["pass"] for m in res["frames"])
+    res["total"]["frac_differ"] = res["total"]["differ"] / res["total"]["values"]
+    res["pass"] = all(m["pass"] for m in res["frames"]) and res["total"]["frac_differ"] <= 1e-4
     return res
 
 

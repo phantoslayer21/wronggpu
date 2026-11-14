@@ -469,7 +469,15 @@ WG_FN void encoder_main(const Frame& f, u8* __restrict__ features, u32* __restri
 
   // Per slot (sub-pixel dx of this lane): render column, near / far pixel indices, centre motion, colour, dither.
   const u32 xs[2] = {(u32)x0, (u32)x1};
-  const u32 ins[2] = {rev ? inB : inA, rev ? inA : inB}, ifs[2] = {rev ? ifB : ifA, rev ? ifA : ifB};
+#if WG_ENC_VALUES_OUT
+  // Halo positions far right of a small render size can mirror (and clamp) onto one render column: x0 == x1 (then 0).
+  // Both slots are that pixel: slot 1 takes slot 0's depth neighbourhood and centre motion (it keeps its own dither).
+  const bool same = x0 == x1;
+#else
+  constexpr bool same = false;
+#endif
+  const u32 ins[2] = {rev ? inB : inA, same ? inA : (rev ? inA : inB)};
+  const u32 ifs[2] = {rev ? ifB : ifA, same ? ifA : (rev ? ifA : ifB)};
 #if WG_ENC_MOTION_F16
   const v2u mh = wg_ld64(f.motion, (rc + (u32)xa) * 4u);
   const v4f mcab = {wg_h2f_lo(mh[0]), wg_h2f_hi(mh[0]), wg_h2f_lo(mh[1]), wg_h2f_hi(mh[1])};
@@ -477,7 +485,7 @@ WG_FN void encoder_main(const Frame& f, u8* __restrict__ features, u32* __restri
   const v4f mcab = __builtin_bit_cast(v4f, wg_ld128(f.motion, (rc + (u32)xa) * 8u));
 #endif
   const float mcs[2][2] = {{rev ? mcab[2] : mcab[0], rev ? mcab[3] : mcab[1]},
-                           {rev ? mcab[0] : mcab[2], rev ? mcab[1] : mcab[3]}};
+                           {same ? mcab[0] : (rev ? mcab[0] : mcab[2]), same ? mcab[1] : (rev ? mcab[1] : mcab[3])}};
 #if WG_ENC_VALUES_OUT
   // Dither word per pixel at the unmirrored position: |y| mod 16, |x| mod 16 (X0 may be negative here).
   const u8* trow = w + kOffDither + 256u * (u32)P.frame + (((u32)(Y < 0 ? -Y : Y) & 15u) << 4);
