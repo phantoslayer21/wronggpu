@@ -24,6 +24,23 @@ delivered by the spec side; the code never guesses it (it raises, or takes the c
 - A conversion of a real library will be checked by digests only (the converter compares every stage digest the map
   gives); no value or byte of it is ever written into the repository or any public text.
 
+## CPU reference (`reference/ops.py`)
+
+- Tensors are channel-first `x[c, y, x]`; weights use the module's own canonical order `w[out, ky, kx, in]`
+  (`weight_shape(layer)` for every layout layer). Converting a blob into that order waits for item 2 below.
+- Settled and implemented: float16 operands and outputs; convolution with bias, one float16 rounding of the output,
+  then ReLU; 2x pooling over 2 x 2 blocks; bilinear 2x upscale in the align-corners form (output sample i reads input
+  position i (n - 1) / (2n - 1)); element-wise add and channel concatenation; net1's features: luma with fixed RGB
+  weights, warp error as the mean absolute RGB difference clamped to [0, 1], a mask and its complement; the 2 x 2 fold
+  of ten features into a cell of 40 values padded to 48.
+- Arithmetic: float64 sums with a single float16 rounding per output (`acc="exact"`). The original sums in float16 in
+  its matrix unit's order (OPEN): `acc="f16"` raises `OpenItem`, and a later GPU comparison has to allow for that
+  difference until the order is known.
+- Required arguments where the behaviour is OPEN: the convolution border rule (`pad`: zero, replicate or mirror),
+  ReLU after a net2 layer (`relu_after`), the pooling kind (`kind`: max or avg), net1's feature channel order
+  (`order`), the fold order inside a cell (`order`). What the cell padding holds is OPEN too (zeros here).
+- `net1_forward` and `net2_forward` raise `OpenItem`: the wiring of both networks is not delivered.
+
 ## OPEN (waiting for the spec side)
 
 1. The converter map file.
@@ -34,3 +51,6 @@ delivered by the spec side; the code never guesses it (it raises, or takes the c
 6. What the UI-recomposition preset changes in the stage order.
 7. Launch order, the motion-field scatter, the pull pyramid and the UI handling (part 3).
 8. Whether the networks run once per real frame or once per generated frame.
+9. The float16 accumulation order of the matrix unit; the convolution border rule; which net2 layers end in ReLU;
+   the pooling kind; net1's feature channel order, the fold order and what the cell padding holds; how the warp for
+   the warp errors samples.
