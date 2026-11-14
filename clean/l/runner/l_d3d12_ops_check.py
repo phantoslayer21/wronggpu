@@ -376,6 +376,8 @@ KINDS = {"l_linear_32_32_relu": linear_cases, "l_linear_32_32_f16": linear_cases
          "l_post_filter_ldr": filter_ldr_cases, "lev/input_encoder_direct": enc_direct_cases,
          "swin_block_c64_add_ex_nc": dec1_ex_cases}
 CONTROL_KINDS = {"swin_block_c96_nc": control_cases}
+# kernels that get a negative control of their own (besides the run's first case)
+NEG_KERNELS = ("l_post_recon", "l_post_recon_p12", "l_post_recon_ldr", "l_post_recon_p12_ldr", "l_post_filter_ldr")
 CO = "l_ops.co"
 
 
@@ -460,7 +462,9 @@ def run(build, rocm, seeds, kernels, kinds=None):
     kinds = kinds or dict(KINDS, **CONTROL_KINDS)
     cdir = os.path.join(build, "replay-ops")
     os.makedirs(cdir, exist_ok=True)
-    lines, hip_out, neg = [], {}, None
+    # negative controls: the first case (with a grid of 4 or more) again with half its workgroups, for the first kernel
+    # and for every kernel of NEG_KERNELS (each LDR form its own)
+    lines, hip_out, neg, negs = [], {}, None, {}
     for kernel in kernels:
         for si, seed in enumerate(seeds):
             rng = np.random.default_rng(seed)
@@ -472,8 +476,9 @@ def run(build, rocm, seeds, kernels, kinds=None):
                     with open(os.path.join(cdir, f"{name}.hip.o{oi}"), "wb") as fh:
                         fh.write(data)
                 lines += replay_lines(name, case, cdir)
-                if neg is None and case["grid"] >= 4:
-                    neg = name
+                if case["grid"] >= 4 and (neg is None or (kernel in NEG_KERNELS and kernel not in negs)):
+                    neg = neg or name
+                    negs.setdefault(kernel, name)
                     lines += replay_lines(name, case, cdir, grid=case["grid"] // 2, prefix="negative_")
     with open(os.path.join(cdir, "cases.txt"), "w", newline="\n") as f:
         f.write("\n".join(lines))
@@ -511,14 +516,18 @@ def run(build, rocm, seeds, kernels, kinds=None):
             c["outputs"].append(compare(got, want, defined[oi] if defined else None))
         c["identical"] = all(o["identical"] for o in c["outputs"])
         res["cases"].append(c)
-    caught = None
-    if neg:
-        wants, defined = hip_out[neg][1], hip_out[neg][2]
-        outs = [compare(read(os.path.join(cdir, f"negative_{neg}.o{oi}")), w, defined[oi] if defined else None)
+    def negative(nm):
+        wants, defined = hip_out[nm][1], hip_out[nm][2]
+        outs = [compare(read(os.path.join(cdir, f"negative_{nm}.o{oi}")), w, defined[oi] if defined else None)
                 for oi, w in enumerate(wants)]
         caught = all(o["differ"] >= 0 for o in outs) and any(not o["identical"] for o in outs)
-        res["negative_control"] = {"case": neg, "half_grid": True, "caught": caught,
-                                   "differ": sum(max(o["differ"], 0) for o in outs)}
+        return {"case": nm, "half_grid": True, "caught": caught, "differ": sum(max(o["differ"], 0) for o in outs)}
+
+    caught = None
+    if neg:
+        res["negative_control"] = negative(neg)
+        res["negative_controls"] = {k: negative(nm) for k, nm in negs.items()}
+        caught = res["negative_control"]["caught"] and all(v["caught"] for v in res["negative_controls"].values())
     res["per_kernel"] = {k: {"cases": sum(c["kernel"] == k for c in res["cases"]),
                              "identical": sum(c["identical"] for c in res["cases"] if c["kernel"] == k),
                              "bytes": sum(o["bytes"] for c in res["cases"] if c["kernel"] == k for o in c["outputs"]),

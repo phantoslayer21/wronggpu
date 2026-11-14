@@ -711,6 +711,10 @@ struct Runtime {
       d1d0_p12_opt = false;
 #ifdef WG_MODEL_L
       l_ldr = !c.hdr;
+      if (l_ldr) {  // only the output stage the LDR kernels implement: any other filter selection is refused
+        const std::string why = l_ldr_filter_unfit(c);
+        if (!why.empty()) return fail("Model L, LDR colour: " + why);
+      }
       l_own_post = c.backend == 3;
       if (l_own_post && !l_own_post_setup(c)) return false;
 #endif
@@ -1643,6 +1647,25 @@ struct Runtime {
     for (const std::string& k : need)
       if (std::find(have.begin(), have.end(), k) == have.end()) missing += (missing.empty() ? "" : ", ") + k;
     return missing;
+  }
+
+  // Model L with LDR colour: its output stage is l_post_filter_ldr (the default filter's geometry, post_filter_c1_s4:
+  // 40 output columns and 4 row pairs a lane group, 3 x f32 RGB), on native D3D12 also its direct form, and for the
+  // HIP output copy (RGBA16F rows) l_post_filter_ldr_h on the same geometry. Any other filter selection (another
+  // filter kernel or geometry, an RGBA16F filter output, output_filter=quality5 / quality9 / original) has no LDR form
+  // and is refused at create, with the reason, on every backend and for the output copy too (never ignored, never run
+  // with another filter's grid or output format). "" = the selection is the one the LDR kernels implement.
+  std::string l_ldr_filter_unfit(const WgRtConfig& c) const {
+    const bool default_filter =
+        c.backend == 3 ? filter_kernel == "post_filter_c1_s4_band" || filter_kernel == kDefaultFilter
+                       : filter_kernel == kDefaultFilter;
+    if (default_filter && !out_f16 && !output_quality5 && !output_quality9 && output_filter_opt != "original")
+      return "";
+    return "its output stage is l_post_filter_ldr (the default filter's geometry, 40 columns x 4 row pairs, 3 x f32 "
+           "RGB; RGBA16F rows for the output copy); the selected filter (" + filter_kernel +
+           (out_f16 ? ", RGBA16F output" : "") +
+           (output_filter_opt.empty() ? std::string() : ", output_filter=" + output_filter_opt) +
+           ") has no LDR form";
   }
 
   // Model L on native D3D12 (after runtime_options): the unbanded pack12 route with Model L's reconstruction. p12 stays

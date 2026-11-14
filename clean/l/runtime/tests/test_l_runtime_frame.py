@@ -759,6 +759,46 @@ class D3D12(unittest.TestCase):
             return [re.sub(r"wg_lfb_\w+", "B", x) for x in run(options, frames=2, build_files=FT.SHIPPING)]
         self.assertEqual(hip("model=L;l_post=own"), hip("model=L"))
 
+    def test_ldr_filter_selection(self):
+        """LDR colour: the output stage is l_post_filter_ldr (the default filter's geometry, 3 x f32). Another filter
+        selection has no LDR form and is refused at create with the reason, on HIP (an alternate geometry, an RGBA16F
+        filter output, output_filter=quality9) and on native D3D12, never run with another filter's grid or format (the
+        output copy's l_post_filter_ldr_h is behind the same check). HDR keeps those selections. The default LDR frame
+        launches l_post_filter_ldr on the default filter's grid, from the display image into the output."""
+        def first(options="model=L", **kw):
+            return run(options, frames=1, build_files=FT.SHIPPING, **kw)[0]
+        why = ("ERR create: Model L, LDR colour: its output stage is l_post_filter_ldr (the default filter's geometry, "
+               "40 columns x 4 row pairs, 3 x f32 RGB; RGBA16F rows for the output copy); the selected filter (")
+        for env, opts, tail in (({"WG_FILTER_KERNEL": "post_filter"}, "model=L", "post_filter) has no LDR form"),
+                                ({"WG_FILTER_KERNEL": "post_filter_c1_s16"}, "model=L",
+                                 "post_filter_c1_s16) has no LDR form"),
+                                ({"WG_FILTER_KERNEL": "post_filter_c1_s4_o16"}, "model=L",
+                                 "post_filter_c1_s4_o16, RGBA16F output) has no LDR form"),
+                                ({}, "model=L;output_filter=quality5",
+                                 "post_filter_c1_s4, output_filter=quality5) has no LDR form")):
+            with self.subTest(env=env, options=opts):
+                self.assertEqual(first(opts, hdr=0, env=env), why + tail)
+                hdr_got = first(opts, hdr=1, env=env)   # HDR: Model M's output stage takes the filter kernels
+                if env:
+                    self.assertEqual(hdr_got, "create ok model L")
+                else:   # (the output_filter options need Model M's own post paths: refused for Model L before)
+                    self.assertTrue(hdr_got.startswith("ERR create: output_filter="), hdr_got)
+        self.assertTrue(first("model=L;output_filter=quality9", hdr=0).startswith("ERR create: "))   # refused before
+        got = first("model=L;output_filter=quality9", hdr=0, flags=("--backend=3",), manifest=self.own_ports())
+        self.assertTrue(got.startswith("ERR create: Model L"), got)
+        # the default: l_post_filter_ldr on the default filter's grid (O 120 x 72: 3 x 5 workgroups of 64 lanes)
+        for backend in ("hip", "d3d12"):
+            with self.subTest(default=backend):
+                kw = dict(flags=("--backend=3",), manifest=self.own_ports()) if backend == "d3d12" else {}
+                t = FT.Trace(run("model=L", frames=2, build_files=FT.SHIPPING, hdr=0, **kw))
+                self.assertEqual(t.create, "create ok model L")
+                for f in t.frames:
+                    flt = [ln for ln in f["launches"] if ln.kernel == "l_post_filter_ldr"]
+                    self.assertEqual(len(flt), 1)
+                    self.assertEqual((flt[0].grid, flt[0].block), (cdiv(120, 40) * cdiv(cdiv(72, 2), 8), 64))
+                    self.assertEqual(flt[0].args[:2], [f["names"]["post.display"], f["names"]["filter.out"]])
+                    self.assertEqual(flt[0].args[2:6], [str((3 * 120 + 1) // 2), str((3 * 72 + 1) // 2), "120", "72"])
+
 
 class Refusals(unittest.TestCase):
     def test_paths(self):

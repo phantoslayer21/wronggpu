@@ -399,6 +399,38 @@
    "caught": true,
    "differ": 8498
   },
+  "negative_controls_per_kernel": {
+   "l_post_recon": {
+    "case": "l_post_recon_s0_0",
+    "half_grid": true,
+    "caught": true,
+    "differ": 8498
+   },
+   "l_post_recon_p12": {
+    "case": "l_post_recon_p12_s0_0",
+    "half_grid": true,
+    "caught": true,
+    "differ": 8498
+   },
+   "l_post_recon_ldr": {
+    "case": "l_post_recon_ldr_s0_0",
+    "half_grid": true,
+    "caught": true,
+    "differ": 8509
+   },
+   "l_post_recon_p12_ldr": {
+    "case": "l_post_recon_p12_ldr_s0_0",
+    "half_grid": true,
+    "caught": true,
+    "differ": 8509
+   },
+   "l_post_filter_ldr": {
+    "case": "l_post_filter_ldr_s0_3",
+    "half_grid": true,
+    "caught": true,
+    "differ": 20461
+   }
+  },
   "p12_equals_base_on_hip": {
    "cases": 72,
    "identical": 72
@@ -506,6 +538,10 @@
    "l_post_filter_ldr",
    "scale_rgb"
   ]
+ },
+ "ldr_filter_selection": {
+  "rule": "Model L with LDR colour runs only the output stage its kernels implement (l_post_filter_ldr: the default filter's geometry, 3 x f32; l_post_filter_ldr_h for the output copy; the direct form on native D3D12); another filter kernel or geometry, an RGBA16F filter output or output_filter=quality5 / quality9 / original is refused at create with the reason (runtime.cpp l_ldr_filter_unfit), on every backend and for the output copy too",
+  "tests": "test_l_runtime_frame.D3D12.test_ldr_filter_selection: post_filter, post_filter_c1_s16, post_filter_c1_s4_o16 and output_filter=quality5 refused on HIP (HDR keeps the filter kernels), quality9 refused, native D3D12 refused; the default launches l_post_filter_ldr on the default grid"
  },
  "model_m_unchanged": {
   "m_dxils_rebuilt_identical": [
