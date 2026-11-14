@@ -122,54 +122,56 @@ std::string FontDir() {
 
 // Segoe Fluent Icons codepoint -> Fluent System Icons codepoint, by the glyph's meaning. Names are the font's own
 // (FluentSystemIcons-Regular.json from microsoft/fluentui-system-icons commit 67e6dec1ee956af3ab4c746a2b3bb6a2e5520a44, a
-// build input that is not vendored), the _20_regular glyph of each (they all exist at that size).
-struct IconPair { wchar_t segoe, fluent; const char* name; };
+// build input that is not vendored), the _20_regular glyph of each (they all exist at that size) and its _16 / _12 glyphs
+// (0: the font has none), which Icon uses for small sizes so the strokes land on whole pixels.
+constexpr float kIconScale = 1.35f;
+struct IconPair { wchar_t segoe, fluent, f16, f12; const char* name; };
 const IconPair kIcons[] = {
-    {ic::grid, 0xF462, "grid_20"},
-    {ic::gear, 0xF6A9, "settings_20"},
-    {ic::refresh, 0xF13D, "arrow_clockwise_20"},
-    {ic::add, 0xF109, "add_20"},
-    {ic::download, 0xF150, "arrow_download_20"},
-    {ic::search, 0xF68F, "search_20"},
-    {ic::back, 0xF2AA, "chevron_left_20"},
-    {ic::play, 0xF605, "play_20"},
-    {ic::more, 0xE824, "more_horizontal_20"},
-    {ic::warn, 0xF869, "warning_20"},
-    {ic::folder, 0xF418, "folder_20"},
-    {ic::cube, 0xF335, "cube_20"},
-    {ic::panel, 0xE8B0, "panel_left_20"},
-    {ic::monitor, 0xF359, "desktop_20"},
-    {ic::down, 0xF2A3, "chevron_down_20"},
-    {ic::check, 0xF294, "checkmark_20"},
-    {ic::close, 0xF369, "dismiss_20"},
-    {ic::info, 0xF4A3, "info_20"},
-    {ic::doc, 0xF378, "document_20"},
-    {ic::zip, 0xF435, "folder_zip_20"},
-    {ic::wrench, 0xEE86, "wrench_20"},
-    {ic::undo, 0xF199, "arrow_undo_20"},
-    {ic::trash, 0xF34C, "delete_20"},
-    {ic::broom, 0xF201, "broom_20"},
-    {ic::upload, 0xF1A4, "arrow_upload_20"},
-    {ic::link, 0xF4E4, "link_20"},
-    {ic::minus, 0xEBD0, "subtract_20"},
-    {ic::shield, 0xF6BE, "shield_20"},
-    {ic::question, 0xF63D, "question_circle_20"},
-    {ic::chip, 0xE4AC, "developer_board_20"},  // the font has no chip glyph
-    {ic::sync, 0xF190, "arrow_sync_20"},
-    {ic::key, 0xF4B6, "key_20"},
-    {ic::playLine, 0xF605, "play_20"},
-    {ic::up, 0xF2B6, "chevron_up_20"},
-    {ic::arrowUp, 0xF19B, "arrow_up_20"},
-    {ic::palette, 0xF2F5, "color_20"},
-    {ic::chevron, 0xF2B0, "chevron_right_20"},
-    {ic::external, 0xF582, "open_20"},
-    {ic::processor, 0xE4AC, "developer_board_20"},
-    {0xE921, 0xEBD0, "subtract_20"},         // caption: minimize (ui_widgets.cpp DrawCaption)
-    {0xE922, 0xEB75, "square_20"},           // maximize
-    {0xE8BB, 0xF369, "dismiss_20"},          // close
-    {0xE923, 0xEB96, "square_multiple_20"},  // restore
-    {0xE793, 0xE452, "dark_theme_20"},       // Settings > Appearance (ui_settings.cpp kGlyphAppearance)
-    {0xEB3C, 0xF67C, "ruler_20"},            // Settings > Exact mode (kGlyphExact)
+    {ic::grid, 0xF462, 0xE6C3, 0, "grid_20"},
+    {ic::gear, 0xF6A9, 0xF6A8, 0, "settings_20"},
+    {ic::refresh, 0xF13D, 0xE0AA, 0xE0A9, "arrow_clockwise_20"},
+    {ic::add, 0xF109, 0xF108, 0xF107, "add_20"},
+    {ic::download, 0xF150, 0xF14F, 0, "arrow_download_20"},
+    {ic::search, 0xF68F, 0xEA7C, 0xEA7B, "search_20"},
+    {ic::back, 0xF2AA, 0xF2A9, 0xF2A8, "chevron_left_20"},
+    {ic::play, 0xF605, 0xE990, 0xE98F, "play_20"},
+    {ic::more, 0xE824, 0, 0, "more_horizontal_20"},
+    {ic::warn, 0xF869, 0xF868, 0xEE3B, "warning_20"},
+    {ic::folder, 0xF418, 0xE643, 0, "folder_20"},
+    {ic::cube, 0xF335, 0xF334, 0xE42E, "cube_20"},
+    {ic::panel, 0xE8B0, 0xE8AF, 0, "panel_left_20"},
+    {ic::monitor, 0xF359, 0xF358, 0, "desktop_20"},
+    {ic::down, 0xF2A3, 0xF2A2, 0xF2A1, "chevron_down_20"},
+    {ic::check, 0xF294, 0xE305, 0xF293, "checkmark_20"},
+    {ic::close, 0xF369, 0xF368, 0xF367, "dismiss_20"},
+    {ic::info, 0xF4A3, 0xF4A2, 0xE736, "info_20"},
+    {ic::doc, 0xF378, 0xE4D7, 0, "document_20"},
+    {ic::zip, 0xF435, 0xF434, 0, "folder_zip_20"},
+    {ic::wrench, 0xEE86, 0xEE85, 0, "wrench_20"},
+    {ic::undo, 0xF199, 0xE126, 0, "arrow_undo_20"},
+    {ic::trash, 0xF34C, 0xE47B, 0xEEA5, "delete_20"},
+    {ic::broom, 0xF201, 0xF1FE, 0, "broom_20"},
+    {ic::upload, 0xF1A4, 0xE131, 0, "arrow_upload_20"},
+    {ic::link, 0xF4E4, 0xF4E3, 0xE770, "link_20"},
+    {ic::minus, 0xEBD0, 0xEBCF, 0xEBCE, "subtract_20"},
+    {ic::shield, 0xF6BE, 0xEAC3, 0xF21F, "shield_20"},
+    {ic::question, 0xF63D, 0xF63C, 0xE9ED, "question_circle_20"},
+    {ic::chip, 0xE4AC, 0xF0D9, 0, "developer_board_20"},  // the font has no chip glyph
+    {ic::sync, 0xF190, 0xE110, 0xF18F, "arrow_sync_20"},
+    {ic::key, 0xF4B6, 0xE740, 0, "key_20"},
+    {ic::playLine, 0xF605, 0xE990, 0xE98F, "play_20"},
+    {ic::up, 0xF2B6, 0xF2B5, 0xF2B4, "chevron_up_20"},
+    {ic::arrowUp, 0xF19B, 0xF1B4, 0xE12A, "arrow_up_20"},
+    {ic::palette, 0xF2F5, 0xE3BC, 0, "color_20"},
+    {ic::chevron, 0xF2B0, 0xF2AF, 0xF2AE, "chevron_right_20"},
+    {ic::external, 0xF582, 0xF581, 0xF02C5, "open_20"},
+    {ic::processor, 0xE4AC, 0xF0D9, 0, "developer_board_20"},
+    {0xE921, 0xEBD0, 0xEBCF, 0xEBCE, "subtract_20"},         // caption: minimize (ui_widgets.cpp DrawCaption)
+    {0xE922, 0xEB75, 0xEB74, 0xEB73, "square_20"},           // maximize
+    {0xE8BB, 0xF369, 0xF368, 0xF367, "dismiss_20"},          // close
+    {0xE923, 0xEB96, 0xEB95, 0, "square_multiple_20"},  // restore
+    {0xE793, 0xE452, 0, 0, "dark_theme_20"},       // Settings > Appearance (ui_settings.cpp kGlyphAppearance)
+    {0xEB3C, 0xF67C, 0xF67B, 0xF0C46, "ruler_20"},            // Settings > Exact mode (kGlyphExact)
 };
 }  // namespace
 
@@ -783,15 +785,23 @@ void Gfx::TextEnd(const wstring& t, float width, const TS& s, float& x, float& y
 
 // Warn once for a glyph the table has nothing for (a new icon constant that was not mapped)
 void Gfx::Icon(wchar_t glyph, float cx, float cy, float size, Col c) {
-    wchar_t mapped = 0;
-    for (const IconPair& p : kIcons) if (p.segoe == glyph) { mapped = p.fluent; break; }
-    if (!mapped) {
+    const IconPair* pair = nullptr;
+    for (const IconPair& p : kIcons) if (p.segoe == glyph) { pair = &p; break; }
+    if (!pair) {
         static std::set<wchar_t> warned;
         if (warned.insert(glyph).second) fprintf(stderr, "wronggpu: no Fluent System Icons glyph mapped for U+%04X; drawn as nothing\n", (unsigned)glyph);
         return;
     }
-    TS s; s.face = F_ICON; s.size = size; s.color = c; s.align = 1; s.valign = 1;
-    Text(wstring(1, mapped), Rc{cx - size, cy - size, size * 2, size * 2}, s);
+    // A Segoe glyph fills its em; a Fluent glyph carries padding in its grid (about 3/4 of the em is ink at 20) and its
+    // strokes are one grid unit wide. Small sizes take the _12 / _16 glyph drawn at its own grid size (a 1 px stroke);
+    // larger ones the _20 glyph scaled up to the Segoe glyph's ink size.
+    wchar_t mapped = pair->fluent;
+    float em = size * kIconScale;
+    if (size <= 11.5f && pair->f12) { mapped = pair->f12; em = size * 1.4f; }
+    else if (size <= 13.5f && pair->f16) { mapped = pair->f16; em = size * 1.3f; }
+    if (em < 18) { cx = std::floor(cx) + 0.5f; cy = std::floor(cy) + 0.5f; }  // a 1 px stroke centred on a pixel row, not between two
+    TS s; s.face = F_ICON; s.size = em; s.color = c; s.align = 1; s.valign = 1;
+    Text(wstring(1, mapped), Rc{cx - em, cy - em, em * 2, em * 2}, s);
 }
 
 // The lead's colour is an attribute set as the layout is drawn (a layout outlives its colour, as on Windows: the cache key
