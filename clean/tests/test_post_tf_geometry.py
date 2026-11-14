@@ -161,7 +161,9 @@ class TestTfGeometry(unittest.TestCase):
 
     def test_nw4_declarations_agree(self):
         """runtime.cpp's tf4_supported (cap, NW = 4 footprint), runner/post.py's TF4_DL_CAP and the four post_tf4_dl_*
-        kernels of dx12/kernels/post.hlsl (NW = 4, the same cap, 256 lanes) say the same."""
+        kernels of dx12/kernels/post.hlsl (NW = 4, the same cap, 256 lanes) say the same. A name may be declared once per
+        build it ports (the original filter's post_w64__orig.co, the analytic filter's post_w64.co): every declaration
+        line is checked."""
         import re
         clean = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         rt = open(os.path.join(clean, "runtime", "runtime.cpp"), encoding="utf-8").read()
@@ -169,7 +171,7 @@ class TestTfGeometry(unittest.TestCase):
         self.assertIn("((long long)(63.0 * rw / dw) + 4) * ((long long)(6.0 * rh / dh) + 5) <= kTf4Cap", rt)
         hlsl = open(os.path.join(clean, "dx12", "kernels", "post.hlsl"), encoding="utf-8").read()
         decl = re.findall(r"(?m)^// @wg-kernel (\S*post_tf4_dl\S*) .*$", hlsl)
-        self.assertEqual(sorted(decl), ["pmo/post_tf4_dl_f32_p12_mo", "pmo/post_tf4_dl_f32_p12_mo_direct",
+        self.assertEqual(sorted(set(decl)), ["pmo/post_tf4_dl_f32_p12_mo", "pmo/post_tf4_dl_f32_p12_mo_direct",
                                         "w64/post_tf4_dl_f32_p12_diet_vsit", "w64/post_tf4_dl_f32_p12_diet_vsit_direct"])
         for line in re.findall(r"(?m)^// @wg-kernel \S*post_tf4_dl\S* .*$", hlsl):
             self.assertIn(" block=256 ", line)

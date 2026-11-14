@@ -2,7 +2,10 @@
 """Builds the D3D12 ports of the HIP kernels (clean/dx12/kernels/*.hlsl) for the hybrid device backend (runtime backend 2,
 clean/runtime/device_dx12.cpp): <out>/dx12/<tag>__<kernel>.dxil (or <kernel>.dxil without a tag) + <out>/dx12/manifest.json.
 
-    python clean/dx12/build_dx12.py --out build/dx12-m/hip [--isa] [--only exposure_auto_diet,...] [-j N]
+    python clean/dx12/build_dx12.py --out build/dx12-m/hip [--isa] [--only exposure_auto_diet,...] [-j N] [--model-l]
+
+Model L's kernels (#89: those that reproduce one of Model L's code objects, co=l_*.co, direct-route kernels named l_*, and MODEL_L_ONLY) are built only with --model-l
+or when --only names them, so that a build without the option is Model M's kernel set unchanged.
 
 Every kernel source declares its kernels in header lines (clean/dx12/README.md):
 
@@ -13,7 +16,10 @@ name is the name the runtime launches ("exposure_auto_diet", "bneck/swin_bneck6_
 the tag. co is the file name of the HIP code object whose build of the kernel this port reproduces ("swin.co",
 "post_w64__orig.co"): the device runs the port only while the runtime has exactly that code object loaded (untagged, or
 under the name's tag), so a different build variant of the same kernel name keeps running on HIP. co=- marks a
-D3D12-only kernel with no HIP counterpart (the device self-test's kernels): it always runs on D3D12. args lists the HIP kernel's arguments in order: p = pointer (a uint byte offset into the arena; 0 = null),
+D3D12-only kernel with no HIP counterpart (the device self-test's kernels): it always runs on D3D12. One name may have
+ports of several builds of its HIP kernel (for example w64/post_tf_f32_p12_diet_vsit of post_w64__orig.co and of
+post_w64.co): one manifest entry per (name, co), and the device runs the one whose code object is loaded. Every port but
+the first of a name sets file=<stem> (its DXIL is <stem>.dxil; default <tag>__<kernel>). args lists the HIP kernel's arguments in order: p = pointer (a uint byte offset into the arena; 0 = null),
 u = any 32-bit scalar, b<N> = a struct of N bytes passed by value (N / 4 uint constants).
 
 Arithmetic mode ("exact", README.md): DXC compiles with IEEE strictness (-Gis: no fast-math flags, so no contraction, no
@@ -22,7 +28,7 @@ calls keep the driver's default (non-precise) lowering, above all mad() = one fu
 and rcp() (fdiv 1.0, x) is the hardware v_rcp_f32; it is reassembled (dxil_asm.cpp, DXC's IDxcAssembler) and signed by
 dxv. Any other float division ('/', which would be an IEEE division) or float remainder is refused: use wg_div.
 
-VGPR check: every Swin / bottleneck kernel built (a name with a swin_ part) is run through RGA (gfx1201) and its
+VGPR check: every Swin / bottleneck kernel built (a name with a swin_ or l_swin_ part) is run through RGA (gfx1201) and its
 USED_VGPRs compared with its bound in clean/dx12/vgpr_limits.json (the count that keeps its present workgroups per CU);
 over the bound, or no bound listed, fails the build. WG_DX12_VGPR_CHECK=0 skips it.
 """
@@ -158,12 +164,38 @@ def kernel_decls(path):
             d["gscale"] = int(kv.get("gscale", d["block"] // d["group"]))
             if d["gscale"] < 1 or d["gscale"] > d["block"] // d["group"]:
                 raise SystemExit(f"{path}: {name}: gscale {d['gscale']}")
+            d["file"] = kv.get("file", "")   # DXIL file stem of a second port of the same name (module doc)
+            if d["file"] and not re.fullmatch(r"[A-Za-z0-9_]+", d["file"]):
+                raise SystemExit(f"{path}: {name}: file={d['file']} (letters, digits and _ only)")
             d["rs"] = kv.get("rs", "buffer")
             if d["rs"] not in ("buffer", "tex", "direct"):
                 raise SystemExit(f"{path}: {name}: unsupported root-signature kind {d['rs']}")
             d["arg_dwords"] = arg_dwords(d["args"], f"{path}: {name}")
             decls.append(d)
     return decls
+
+
+# Kernels of Model M's code objects that only Model L's frame launches (#89): dec1 as a standalone block (#139;
+# Model M runs dec1 fused with dec0).
+MODEL_L_ONLY = {"swin_block_c64_add_ex_nc"}
+
+
+def is_model_l(decl):
+    """A port of one of Model L's code objects (#89: l_swin.co, l_ops.co, l_post.co, l_enc_values.co), a Model L kernel
+    of the direct route with no code object (co "-", named l_*), or a kernel only Model L launches (MODEL_L_ONLY)."""
+    return decl["co"].startswith("l_") or decl["name"].startswith("l_") or decl["name"] in MODEL_L_ONLY
+
+
+def kernel_set(model_l=False):
+    """(name, code object) of every kernel a full build compiles (no --only), sorted: Model M's set, plus Model L's
+    with model_l. From the sources' declarations alone (nothing is compiled)."""
+    keys = set()
+    for fn in sorted(os.listdir(KERNEL_DIR)) if os.path.isdir(KERNEL_DIR) else []:
+        if fn.endswith(".hlsl"):
+            for d in kernel_decls(os.path.join(KERNEL_DIR, fn)):
+                if model_l or not is_model_l(d):
+                    keys.add((d["name"], d["co"]))
+    return sorted(keys)
 
 
 def arg_dwords(args, where):
@@ -201,7 +233,7 @@ VGPR_LIMITS = os.path.join(HERE, "vgpr_limits.json")
 
 
 def vgpr_checked(name):
-    return re.search(r"(^|/)swin_", name) is not None
+    return re.search(r"(^|/|l_)swin_", name) is not None   # l_swin_*: Model L's blocks (#89)
 
 
 def rga_vgprs(dxil):
@@ -246,13 +278,23 @@ def vgpr_check(built):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out", required=True, help="build directory of the runtime (kernels go to <out>/dx12)")
+    ap.add_argument("--out", help="build directory of the runtime (kernels go to <out>/dx12); required unless --list")
     ap.add_argument("--only", help="comma list of kernel names to build (default: all declared)")
     ap.add_argument("--isa", action="store_true", help="also write the D3D12 ISA (RGA) to <out>/dx12/isa")
     ap.add_argument("--listing", action="store_true", help="also keep the rewritten DXIL listing (<name>.ll)")
     ap.add_argument("-j", "--jobs", type=int, default=int(os.environ.get("WG_DX12_JOBS", min(12, os.cpu_count() or 1))),
                     help="kernels compiled in parallel (default min(12, CPUs), env WG_DX12_JOBS; 1 = one at a time)")
+    ap.add_argument("--model-l", action="store_true",
+                    help="also build Model L's kernels (co=l_*.co; off by default: Model M's kernel set unchanged)")
+    ap.add_argument("--list", action="store_true",
+                    help="print the kernels a build with these options compiles (name and code object, JSON) and exit: "
+                         "the cheap check before a build (kernel_sets.json, tests/test_kernel_sets.py)")
     a = ap.parse_args(argv)
+    if a.list:
+        print(json.dumps([list(k) for k in kernel_set(a.model_l)], indent=1))
+        return 0
+    if not a.out:
+        ap.error("--out is required")
     dst = os.path.join(a.out, "dx12")
     os.makedirs(dst, exist_ok=True)
     asm = build_asm_tool(a.out)
@@ -261,8 +303,8 @@ def main(argv=None):
     old = {}
     if only and os.path.exists(man_path):  # partial build: keep the other kernels' entries
         with open(man_path) as f:
-            old = {k["name"]: k for k in json.load(f)["kernels"]}
-    kernels = dict(old)
+            old = {(k["name"], k.get("co", "")): k for k in json.load(f)["kernels"]}
+    kernels = dict(old)   # (name, co) -> manifest entry
     built = []
     # generated kernels (kernels/fused_*_gen.py: the fused forms of swin_block.hlsl / bneck.hlsl) are regenerated from
     # the live sources first, so that no build compiles a stale copy
@@ -277,10 +319,17 @@ def main(argv=None):
         for d in kernel_decls(src):
             if only and d["name"] not in only:
                 continue
-            if d["name"] in kernels and d["name"] not in old:
-                raise SystemExit(f"kernel {d['name']} declared twice")
-            kernels[d["name"]] = None  # placeholder: the declared-twice check sees it before any compile starts
-            jobs.append((src, d, os.path.join(dst, output_name(d["name"]))))
+            if not only and not a.model_l and is_model_l(d):
+                continue
+            key = (d["name"], d["co"])
+            if key in kernels and key not in old:
+                raise SystemExit(f"kernel {d['name']} ({d['co']}) declared twice")
+            kernels[key] = None  # placeholder: the declared-twice check sees it before any compile starts
+            out = os.path.join(dst, d["file"] + ".dxil" if d["file"] else output_name(d["name"]))
+            if any(j[2] == out for j in jobs):
+                raise SystemExit(f"kernel {d['name']} ({d['co']}): DXIL file {os.path.basename(out)} already used "
+                                 "(a second port of a name needs file=<stem>)")
+            jobs.append((src, d, out))
 
     def build_one(job):
         src, d, out = job
@@ -308,7 +357,7 @@ def main(argv=None):
         futures = [pool.submit(build_one, j) for j in jobs]
         try:
             for (src, d, out), fut in zip(jobs, futures):
-                kernels[d["name"]] = fut.result()
+                kernels[(d["name"], d["co"])] = fut.result()
                 built.append((d["name"], out))
                 print(f"{d['name']:40s} -> {os.path.basename(out)}  block {d['block']} wave {d['wave']} "
                       f"args {d['args']}", flush=True)
@@ -316,8 +365,9 @@ def main(argv=None):
             for fut in futures:
                 fut.cancel()  # kernels not started yet; the running ones finish their current child process
             raise
-    if only and not (only <= set(kernels)):
-        raise SystemExit(f"not declared in clean/dx12/kernels: {sorted(only - set(kernels))}")
+    names = {n for n, _ in kernels}
+    if only and not (only <= names):
+        raise SystemExit(f"not declared in clean/dx12/kernels: {sorted(only - names)}")
     vgpr_check(built)
     with open(man_path, "w") as f:
         json.dump({"format": FORMAT, "dxc": os.path.basename(os.path.dirname(os.path.dirname(DXC_DIR))),

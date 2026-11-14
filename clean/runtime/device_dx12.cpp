@@ -239,12 +239,12 @@ class Dx12Device : public Device {
 
   // ---- launches ----------------------------------------------------------------------------------------------------
   bool launch(const std::string& kernel, unsigned grid, unsigned block, void** args) override {
-    auto it = kernels_.find(kernel);
+    Kernel* port = find_port(kernel);
     uint32_t c[kRuntimeConstants + kMaxArgDwords];
-    if (it == kernels_.end() || !arena_ || !variant_loaded(it->second) || !pack_args(it->second, args, c + kRuntimeConstants)) {
+    if (!port || !arena_ || !variant_loaded(*port) || !pack_args(*port, args, c + kRuntimeConstants)) {
       return to_hip() && fwd(hip_->launch(kernel, grid, block, args));
     }
-    Kernel& k = it->second;
+    Kernel& k = *port;
     if (block != k.block)
       return fail("D3D12 kernel " + kernel + " is built for " + std::to_string(k.block) + " lanes, launched with " +
                   std::to_string(block));
@@ -272,8 +272,8 @@ class Dx12Device : public Device {
   }
   bool launch_timed(const std::string& kernel, unsigned grid, unsigned block, void** args, int start_event,
                     int stop_event) override {
-    auto it = kernels_.find(kernel);
-    if (it == kernels_.end() || !arena_ || !variant_loaded(it->second))
+    Kernel* port = find_port(kernel);
+    if (!port || !arena_ || !variant_loaded(*port))
       return to_hip() && fwd(hip_->launch_timed(kernel, grid, block, args, start_event, stop_event));
     return Device::launch_timed(kernel, grid, block, args, start_event, stop_event);
   }
@@ -297,6 +297,24 @@ class Dx12Device : public Device {
 
   static std::string base_name(const std::string& path) { return path.substr(path.find_last_of("/\\") + 1); }
   // Is the HIP code object this port reproduces the one the runtime loaded for the kernel's name?
+  // Whether the runtime's loaded code objects select port k (variant_loaded without its cache and note).
+  bool variant_selected(const Kernel& k) const {
+    if (k.co == "-") return true;
+    const size_t slash = k.name.find('/');
+    if (slash == std::string::npos) return !k.co.empty() && untagged_cos_.count(k.co);
+    auto t = tagged_cos_.find(k.name.substr(0, slash));
+    return !k.co.empty() && t != tagged_cos_.end() && t->second == k.co;
+  }
+  // The port of `kernel` that the loaded code objects select. One name can have ports of several builds of its HIP
+  // kernel (manifest entries with the same name and different "co"); without a selected one, the first port
+  // (variant_loaded then notes once that the kernel runs on HIP).
+  Kernel* find_port(const std::string& kernel) {
+    auto range = kernels_.equal_range(kernel);
+    for (auto i = range.first; i != range.second; ++i)
+      if (variant_selected(i->second)) return &i->second;
+    return range.first == range.second ? nullptr : &range.first->second;
+  }
+
   bool variant_loaded(Kernel& k) {
     if (k.co_gen != module_gen_) {
       k.co_gen = module_gen_;
@@ -732,7 +750,7 @@ class Dx12Device : public Device {
   DevPtr arena_hip_ = 0;
   uint64_t arena_bytes_ = 0, in_use_ = 0, fence_value_ = 0;
   std::map<uint64_t, uint64_t> free_, used_;  // offset -> bytes
-  std::map<std::string, Kernel> kernels_;
+  std::multimap<std::string, Kernel> kernels_;   // by name; several ports of one name differ in "co"
   std::set<std::string> untagged_cos_;               // file names of the code objects loaded without a tag
   std::map<std::string, std::string> tagged_cos_;    // tag -> file name of the code object loaded under it
   unsigned module_gen_ = 0;

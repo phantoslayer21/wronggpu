@@ -16,6 +16,10 @@ public:
             if (s.upscaler.find("Model K") != std::string::npos) label = "WrongGPU Model K";
             else
 #endif
+#if WRONGGPU_MODEL_L
+            if (s.upscaler.find("Model L") != std::string::npos) label = "WrongGPU Model L";
+            else
+#endif
             if (s.upscaler.find("Model M") != std::string::npos) label = "WrongGPU Model M";
             else label = "WrongGPU";
         } else if (s.state == UpscaleState::StandIn) label = "WrongGPU (stand-in)";
