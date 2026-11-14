@@ -2,10 +2,20 @@
 // WrongGPU launcher core: small helpers (strings, paths, files, SHA-256), moved unchanged from setup.cpp. Written for
 // this project.
 #pragma once
+#include <filesystem>
+
 #include "constants.h"
 #include "sha256.h"
 
 namespace wg {
+
+// A std::filesystem::path for a Windows-style path, for the converter, which takes host paths: on Linux "Z:\..." and '\' become
+// the host's spelling (win32_posix.cpp), on Windows it is the path as it is.
+#ifdef _WIN32
+inline std::filesystem::path FsPath(const wstring& p) { return std::filesystem::path(p); }
+#else
+std::filesystem::path FsPath(const wstring& p);
+#endif
 
 struct SetupError { wstring msg; int code = EXIT_FAILED; };
 // Read-only view of a whole file (large files are scanned without copying them).

@@ -26,7 +26,7 @@ namespace wgposix {
 
 // ---- children ----------------------------------------------------------------------------------------------------------
 static std::mutex g_childLock;
-static std::map<int, ChildState> g_children;
+static auto& g_children = *new std::map<int, ChildState>;  // never destroyed (see g_handles in win32_posix.cpp)
 
 static void Reap(int pid, ChildState& c) {
     if (c.exited) return;
@@ -74,7 +74,7 @@ static void AddChild(int pid, int handles, bool suspended) {
 
 // ---- jobs --------------------------------------------------------------------------------------------------------------
 static std::mutex g_jobLock;
-static std::vector<Handle*> g_jobs;
+static auto& g_jobs = *new std::vector<Handle*>;
 static void KillJobMembers(Handle* job, int code) {
     for (int pid : job->pids) KillChild(pid, code);
 }

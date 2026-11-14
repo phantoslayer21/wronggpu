@@ -143,6 +143,14 @@ uint32_t ReadPeLinkTime(const uint8_t* b, size_t n) {
 }
 uint32_t FileLinkTime(const wstring& path) {
     MappedFile f(path, 2ull << 30);
+#ifndef _WIN32
+    // the Linux launcher is an ELF file with no link time of its own: the file's own time stands in (it orders two copies alike)
+    if (f.size >= 4 && memcmp(f.data, "\x7f" "ELF", 4) == 0) {
+        WIN32_FILE_ATTRIBUTE_DATA d{};
+        if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &d)) return 0;
+        return (uint32_t)((((unsigned long long)d.ftLastWriteTime.dwHighDateTime << 32 | d.ftLastWriteTime.dwLowDateTime) - 116444736000000000ull) / 10000000ull);
+    }
+#endif
     return ReadPeLinkTime(f.data, f.size);
 }
 

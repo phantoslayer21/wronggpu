@@ -599,7 +599,7 @@ BOOL WinHttpCloseHandle(HINTERNET h);
 typedef HANDLE HRSRC;
 typedef HANDLE HGLOBAL;
 #define MAKEINTRESOURCEW(i) ((LPWSTR)(ULONG_PTR)(WORD)(i))
-HRSRC FindResourceW(HMODULE m, LPCWSTR name, LPCWSTR type);   // no resources: always fails
+HRSRC FindResourceW(HMODULE m, LPCWSTR name, LPCWSTR type);   // RCDATA from the generated table (resources.S); fails when the build has none
 HGLOBAL LoadResource(HMODULE m, HRSRC r);
 DWORD SizeofResource(HMODULE m, HRSRC r);
 LPVOID LockResource(HGLOBAL h);

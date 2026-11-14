@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Linux: Windows file, string, time, environment and shell calls on POSIX (see win32_posix.h). Registry and processes are in
 // win32_posix_registry.cpp and win32_posix_process.cpp.
+#include <filesystem>
 #include <dirent.h>
 #include <locale.h>
 #include <fcntl.h>
@@ -26,7 +27,9 @@ static thread_local DWORD g_lastError = 0;
 
 // ---- handle table ------------------------------------------------------------------------------------------------------
 static std::mutex g_handleLock;
-static std::unordered_set<Handle*> g_handles;
+// The tables here are never destroyed: the program's own globals (wg::app::App's Context cleans up in its destructor, which runs
+// during exit) still call into this layer, and a table already destroyed by then is a crash at exit.
+static auto& g_handles = *new std::unordered_set<Handle*>;
 Handle* NewHandle(Kind k) {
     Handle* h = new Handle(k);
     std::lock_guard<std::mutex> g(g_handleLock);
@@ -226,7 +229,7 @@ void FillFind(WIN32_FIND_DATAW& d, const struct stat& lst, const std::string& pa
 
 // ---- sharing (what Windows' share modes do between handles of this process) ------------------------------------------------
 static std::mutex g_shareLock;
-static std::vector<Handle*> g_shared;
+static auto& g_shared = *new std::vector<Handle*>;
 static bool Conflicts(dev_t dev, ino_t ino, bool wantR, bool wantW, bool wantD, DWORD share) {
     for (Handle* e : g_shared) {
         if (e->dev != dev || e->ino != ino) continue;
@@ -830,7 +833,7 @@ BOOL GetDiskFreeSpaceExW(LPCWSTR dir, ULARGE_INTEGER* available, ULARGE_INTEGER*
 
 // memory-mapped files
 static std::mutex g_viewLock;
-static std::map<const void*, size_t> g_views;
+static auto& g_views = *new std::map<const void*, size_t>;
 HANDLE CreateFileMappingW(HANDLE file, LPSECURITY_ATTRIBUTES, DWORD protect, DWORD sizeHigh, DWORD sizeLow, LPCWSTR) {
     Handle* f = Lookup(file, Kind::File);
     struct stat st;
@@ -1193,14 +1196,55 @@ HRESULT CoCreateInstance(REFCLSID, IUnknown*, DWORD, REFIID, LPVOID* out) {
 
 // ---- modules: no Windows DLL loads, so every GetProcAddress user takes its "not available" branch ------------------------
 HMODULE LoadLibraryExW(LPCWSTR, HANDLE, DWORD) { SetLastError(ERROR_MOD_NOT_FOUND); return nullptr; }
-HMODULE GetModuleHandleW(LPCWSTR) { SetLastError(ERROR_MOD_NOT_FOUND); return nullptr; }
-FARPROC GetProcAddress(HMODULE, LPCSTR) { SetLastError(ERROR_PROC_NOT_FOUND); return nullptr; }
+// ntdll's RtlGetVersion is the one export that answers: Proton prefixes report Windows 10, and the launcher's Windows check
+// would refuse every Linux install on "unknown" otherwise. A stand-in module handle names it.
+static char g_ntdll;
+static LONG WINAPI RtlGetVersionStandIn(OSVERSIONINFOW* v) {
+    if (!v || v->dwOSVersionInfoSize < sizeof(DWORD) * 5) return -1;
+    v->dwMajorVersion = 10; v->dwMinorVersion = 0; v->dwBuildNumber = 19045; v->dwPlatformId = 2;
+    return 0;
+}
+HMODULE GetModuleHandleW(LPCWSTR name) {
+    if (name && _wcsicmp(name, L"ntdll.dll") == 0) return &g_ntdll;
+    SetLastError(ERROR_MOD_NOT_FOUND);
+    return nullptr;
+}
+FARPROC GetProcAddress(HMODULE m, LPCSTR name) {
+    if (m == &g_ntdll && name && std::strcmp(name, "RtlGetVersion") == 0) return reinterpret_cast<FARPROC>(&RtlGetVersionStandIn);
+    SetLastError(ERROR_PROC_NOT_FOUND);
+    return nullptr;
+}
 
-// ---- resources: the Linux build embeds none --------------------------------------------------------------------------------
-HRSRC FindResourceW(HMODULE, LPCWSTR, LPCWSTR) { SetLastError(ERROR_RESOURCE_DATA_NOT_FOUND); return nullptr; }
-HGLOBAL LoadResource(HMODULE, HRSRC) { SetLastError(ERROR_INVALID_HANDLE); return nullptr; }
-DWORD SizeofResource(HMODULE, HRSRC) { SetLastError(ERROR_INVALID_HANDLE); return 0; }
-LPVOID LockResource(HGLOBAL) { return nullptr; }
+// wg::FsPath (wg_core/util.h): the converter takes host paths, the core holds Windows-style ones
+namespace wg {
+std::filesystem::path FsPath(const std::wstring& p) {
+    std::string host;
+    return ToPosix(p.c_str(), host) ? std::filesystem::path(host) : std::filesystem::path(ToUtf8(p));
+}
+}  // namespace wg
+
+// ---- resources: the table tools/make_payload.py writes into resources.S (RCDATA only; a build without it embeds none) ---------
+struct WgResource { unsigned id, type; const unsigned char* data; unsigned long long size; };
+extern "C" const WgResource wg_resource_table[] __attribute__((weak));  // weak: the unit-test programs link no payload
+
+HRSRC FindResourceW(HMODULE, LPCWSTR name, LPCWSTR type) {
+    // MAKEINTRESOURCE values are small integers; anything above 16 bits is a name, which no resource here has
+    const uintptr_t id = reinterpret_cast<uintptr_t>(name), ty = reinterpret_cast<uintptr_t>(type);
+    if (wg_resource_table && id <= 0xFFFF && ty <= 0xFFFF)
+        for (const WgResource* r = wg_resource_table; r->id; ++r)
+            if (r->id == id && r->type == ty) return const_cast<WgResource*>(r);
+    SetLastError(ERROR_RESOURCE_DATA_NOT_FOUND);
+    return nullptr;
+}
+HGLOBAL LoadResource(HMODULE, HRSRC r) {
+    if (!r) { SetLastError(ERROR_INVALID_HANDLE); return nullptr; }
+    return const_cast<unsigned char*>(static_cast<const WgResource*>(r)->data);
+}
+DWORD SizeofResource(HMODULE, HRSRC r) {
+    if (!r) { SetLastError(ERROR_INVALID_HANDLE); return 0; }
+    return static_cast<DWORD>(static_cast<const WgResource*>(r)->size);
+}
+LPVOID LockResource(HGLOBAL h) { return h; }
 
 // ---- WinHTTP -----------------------------------------------------------------------------------------------------------
 HINTERNET WinHttpOpen(LPCWSTR, DWORD, LPCWSTR, LPCWSTR, DWORD) { SetLastError(ERROR_NOT_SUPPORTED); return nullptr; }

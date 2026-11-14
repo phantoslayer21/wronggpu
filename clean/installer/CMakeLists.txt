@@ -14,6 +14,8 @@ cmake_minimum_required(VERSION 3.16)
 project(wronggpu_installer LANGUAGES CXX)
 if(WIN32)
   enable_language(RC)
+else()
+  enable_language(ASM)  # resources.S: the embedded payload (tools/make_payload.py)
 endif()
 # MinGW's _mingw.h (reached through <functional> in context.h before base.h) would otherwise fix Windows 7 as the target.
 if(MINGW)
@@ -70,9 +72,6 @@ else()
   set(DIRECT_ROUTE_PAYLOAD_ARGS --hosted-only)
   set(DIRECT_ROUTE_DEFINITION WRONGGPU_DIRECT_ROUTE=0)
 endif()
-if(NOT WRONGGPU_PAYLOAD_DIR)
-  message(FATAL_ERROR "Set WRONGGPU_PAYLOAD_DIR to the release payload folder (see README.md).")
-endif()
 
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../converter converter)
 
@@ -86,6 +85,21 @@ if(NOT SOURCE_SIZE_RESULT EQUAL 0)
   message(FATAL_ERROR "A source file is at or over 256 KB (tools/check_source_size.py): split it.")
 endif()
 option(WRONGGPU_TESTING "Isolate registry and enable mock-only HIP candidate selection (never ship)" OFF)
+if(NOT WRONGGPU_PAYLOAD_DIR AND WRONGGPU_TESTING AND NOT WIN32)
+  # a Linux test build makes the stand-in payload and test map the Windows test build is given by hand: the harness's own
+  # (tests/run_installer_tests.py --prepare-only), the model case tests/run_launcher_tests.py expects
+  set(MOCK_PAYLOAD_WORK ${CMAKE_CURRENT_BINARY_DIR}/mock-payload)
+  execute_process(COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_installer_tests.py --work ${MOCK_PAYLOAD_WORK} --prepare-only
+                  RESULT_VARIABLE MOCK_PAYLOAD_RESULT OUTPUT_QUIET)
+  if(NOT MOCK_PAYLOAD_RESULT EQUAL 0)
+    message(FATAL_ERROR "tests/run_installer_tests.py --prepare-only failed")
+  endif()
+  set(WRONGGPU_PAYLOAD_DIR ${MOCK_PAYLOAD_WORK}/prepared/payload)
+  set(WRONGGPU_MAP ${MOCK_PAYLOAD_WORK}/prepared/test-map.json)
+endif()
+if(NOT WRONGGPU_PAYLOAD_DIR)
+  message(FATAL_ERROR "Set WRONGGPU_PAYLOAD_DIR to the release payload folder (see README.md).")
+endif()
 set(RR_PAYLOAD_DIR "${WRONGGPU_RR_DIR}")
 if(NOT RR_PAYLOAD_DIR AND WRONGGPU_TESTING)
   set(RR_PAYLOAD_DIR ${CMAKE_CURRENT_BINARY_DIR}/mock-rr)
@@ -115,6 +129,27 @@ else()
   set(MAP_F_ARGS)
   set(MAP_F_FILE)
 endif()
+
+file(GLOB_RECURSE WRONGGPU_PAYLOAD_FILES CONFIGURE_DEPENDS "${WRONGGPU_PAYLOAD_DIR}/*")
+set(GEN ${CMAKE_CURRENT_BINARY_DIR}/gen)
+set(MANIFEST ${CMAKE_CURRENT_SOURCE_DIR}/src/setup.manifest)
+# The application manifest is embedded once: by the MSVC linker (CMake merges .manifest sources into the manifest the
+# linker generates), or through the resource script with MinGW, whose linker embeds none.
+if(MSVC)
+  set(MANIFEST_ARGS)
+  set(MANIFEST_SOURCE ${MANIFEST})
+else()
+  set(MANIFEST_ARGS --manifest ${MANIFEST})
+  set(MANIFEST_SOURCE)
+endif()
+add_custom_command(
+  OUTPUT ${GEN}/payload_table.h ${GEN}/resources.rc ${GEN}/resources.S ${GEN}/app.ico
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/make_payload.py
+          --payload ${WRONGGPU_PAYLOAD_DIR} --map ${WRONGGPU_MAP} ${PRESET_K_MAP_ARGS} --version ${WRONGGPU_VERSION}
+          --build-id=${WRONGGPU_BUILD_ID} --payload-name=${WRONGGPU_PAYLOAD_NAME}
+          ${DIRECT_ROUTE_PAYLOAD_ARGS} ${RR_PAYLOAD_ARGS} ${MAP_F_ARGS} ${MAP_L_ARGS} ${MANIFEST_ARGS} --out ${GEN}
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/make_payload.py ${MANIFEST} ${WRONGGPU_MAP} ${PRESET_K_MAP_FILE} ${MAP_F_FILE} ${MAP_L_FILE} ${WRONGGPU_PAYLOAD_FILES} ${WRONGGPU_RR_FILES}
+  COMMENT "Embedding the payload and the converter map")
 
 # wg_core: the installer's engine, split into modules (src/wg_core; build/launcher-design.md section 2). No globals:
 # a wg::Context is passed in. The wizard (and later the launcher) is built on top of it.
@@ -154,27 +189,6 @@ if(MSVC)
   target_compile_options(wg_ui PRIVATE /Zi)
   target_compile_definitions(wg_ui PRIVATE NDEBUG)
 endif()
-
-file(GLOB_RECURSE WRONGGPU_PAYLOAD_FILES CONFIGURE_DEPENDS "${WRONGGPU_PAYLOAD_DIR}/*")
-set(GEN ${CMAKE_CURRENT_BINARY_DIR}/gen)
-set(MANIFEST ${CMAKE_CURRENT_SOURCE_DIR}/src/setup.manifest)
-# The application manifest is embedded once: by the MSVC linker (CMake merges .manifest sources into the manifest the
-# linker generates), or through the resource script with MinGW, whose linker embeds none.
-if(MSVC)
-  set(MANIFEST_ARGS)
-  set(MANIFEST_SOURCE ${MANIFEST})
-else()
-  set(MANIFEST_ARGS --manifest ${MANIFEST})
-  set(MANIFEST_SOURCE)
-endif()
-add_custom_command(
-  OUTPUT ${GEN}/payload_table.h ${GEN}/resources.rc ${GEN}/app.ico
-  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/make_payload.py
-          --payload ${WRONGGPU_PAYLOAD_DIR} --map ${WRONGGPU_MAP} ${PRESET_K_MAP_ARGS} --version ${WRONGGPU_VERSION}
-          --build-id=${WRONGGPU_BUILD_ID} --payload-name=${WRONGGPU_PAYLOAD_NAME}
-          ${DIRECT_ROUTE_PAYLOAD_ARGS} ${RR_PAYLOAD_ARGS} ${MAP_F_ARGS} ${MAP_L_ARGS} ${MANIFEST_ARGS} --out ${GEN}
-  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/make_payload.py ${MANIFEST} ${WRONGGPU_MAP} ${PRESET_K_MAP_FILE} ${MAP_F_FILE} ${MAP_L_FILE} ${WRONGGPU_PAYLOAD_FILES} ${WRONGGPU_RR_FILES}
-  COMMENT "Embedding the payload and the converter map")
 
 # WrongGPU-Restore.exe: the per-game restorer (uninstall.exe in each game's wronggpu-setup folder): wg_core without the
 # payload, the converter data or the UI. WrongGPU.exe embeds it (resource 960) and writes it into every game it installs.
@@ -263,7 +277,10 @@ if(NOT WIN32)
                  src/app/ui_library.cpp src/app/ui_game.cpp src/app/ui_settings.cpp src/app/ui_uia.cpp src/app/ui_render.cpp
                  src/app/ui_words.cpp src/app/ui_dump.cpp src/app/ui_frame.cpp src/app/ui_play.cpp src/app/ui_rrprep.cpp
                  src/app/ui_rrconfig.cpp src/app/ui_activate.cpp src/app/ui_checks.cpp src/app/payload_embed.cpp
-                 src/app/ui_live_hook_linux.cpp)
+                 src/app/ui_live_hook_linux.cpp ${GEN}/resources.S ${GEN}/payload_table.h)
+  target_include_directories(WrongGPU PRIVATE ${GEN})
+  # the assembler reads the payload through .incbin, which CMake's dependency scan does not see
+  set_source_files_properties(${GEN}/resources.S PROPERTIES OBJECT_DEPENDS "${GEN}/payload_table.h;${WRONGGPU_PAYLOAD_FILES};${WRONGGPU_RR_FILES}")
   target_compile_definitions(WrongGPU PRIVATE ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION} UNICODE _UNICODE
                              WRONGGPU_VERSION_TEXT="${WRONGGPU_VERSION}" WRONGGPU_BUILD_ID_TEXT="${WRONGGPU_BUILD_ID}"
                              WRONGGPU_FONT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts")
@@ -275,6 +292,13 @@ if(NOT WIN32)
     add_test(NAME linux-ui COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_linux_ui_tests.py
              --exe $<TARGET_FILE:WrongGPU> --work ${CMAKE_CURRENT_BINARY_DIR}/linux-ui-tests)
     set_tests_properties(linux-ui PROPERTIES TIMEOUT 900)
+    if(MOCK_PAYLOAD_WORK)
+      # the launcher's verbs suite (tests/run_launcher_tests.py) against this binary: it needs the test map and stand-in payload
+      # the build embeds only when it made them itself; its checks that only mean something on Windows say so and are skipped
+      add_test(NAME launcher-native COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_launcher_tests.py
+               --native-linux $<TARGET_FILE:WrongGPU> --work ${CMAKE_CURRENT_BINARY_DIR}/launcher-native-tests)
+      set_tests_properties(launcher-native PROPERTIES TIMEOUT 1800)
+    endif()
   endif()
   install(TARGETS WrongGPU RUNTIME DESTINATION bin)
   install(DIRECTORY assets/fonts DESTINATION share/wronggpu/assets)

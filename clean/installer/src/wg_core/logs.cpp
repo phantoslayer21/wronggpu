@@ -331,7 +331,7 @@ Bundle CollectLogs(Context& ctx, const wstring& dirIn, const wstring& outZip, co
     string reportWhy;
     bool modelMatches = reportMapBytes && Sha256Bytes(reportMapBytes, reportMapSize) == MapSha256(ctx, reportK);
     if (modelMatches) modelMatches = wgc::load_map_bytes(string(static_cast<const char*>(reportMapBytes), reportMapSize), reportMap, {}).code == wgc::kOk;
-    if (modelMatches) modelMatches = wgc::verify_model_file(*reportMap.map, std::filesystem::path(reportModelFile), reportWhy);
+    if (modelMatches) modelMatches = wgc::verify_model_file(*reportMap.map, FsPath(reportModelFile), reportWhy);
     else reportWhy = "the embedded converter map is invalid";
     s += L"Model data: " + (modelMatches ? L"present and matching (" + reportModelFile + L")" : L"not usable (" + FromUtf8(reportWhy) + L")") + L"\r\n";
     }  // (WrongGPU.exe's lines above: unchanged, kept at their indentation so the diff shows it)
@@ -349,7 +349,7 @@ Bundle CollectLogs(Context& ctx, const wstring& dirIn, const wstring& outZip, co
             wgc::ModelFileInfo mInfo;
             wstring state;
             if (!IsFile(mFile)) state = L"no Model M file on this PC";
-            else if (!wgc::verify_model_file(*mMap.map, std::filesystem::path(mFile), mWhy, &mInfo)) state = L"the Model M file is not usable (" + FromUtf8(mWhy) + L")";
+            else if (!wgc::verify_model_file(*mMap.map, FsPath(mFile), mWhy, &mInfo)) state = L"the Model M file is not usable (" + FromUtf8(mWhy) + L")";
             else state = wstring(mInfo.absent_groups.empty() ? L"from the DLSS file (weights in the Model M file)" : L"WrongGPU's own (no weights in the Model M file)") +
                          (mInfo.same_map ? L"; file written with this installer's converter data" : L"; file written with other converter data");
             s += L"Model M output filter: " + state + L"\r\n";

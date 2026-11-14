@@ -358,7 +358,16 @@ void FinishedChildren() {
 
 void NotAvailable() {
     check(LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32) == nullptr && GetLastError() == ERROR_MOD_NOT_FOUND, "no Windows DLL loads");
-    check(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion") == nullptr, "and GetProcAddress of a missing module is null");
+    check(GetModuleHandleW(L"nothere.dll") == nullptr && GetProcAddress(GetModuleHandleW(L"nothere.dll"), "RtlGetVersion") == nullptr,
+          "and GetProcAddress of a missing module is null");
+    // the one module that answers: ntdll's RtlGetVersion says Windows 10 (what a Proton prefix reports), no other export exists
+    typedef LONG(WINAPI * RtlGetVersionFn)(OSVERSIONINFOW*);
+    RtlGetVersionFn rtl = reinterpret_cast<RtlGetVersionFn>(GetProcAddress(GetModuleHandleW(L"NTDLL.DLL"), "RtlGetVersion"));
+    OSVERSIONINFOW ver{}; ver.dwOSVersionInfoSize = sizeof(ver);
+    check(rtl && rtl(&ver) == 0 && ver.dwMajorVersion == 10 && ver.dwBuildNumber >= 10240, "ntdll's RtlGetVersion reports Windows 10");
+    check(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtCreateFile") == nullptr, "and ntdll has no other export");
+    check(FindResourceW(nullptr, MAKEINTRESOURCEW(900), MAKEINTRESOURCEW(10)) == nullptr && LockResource(LoadResource(nullptr, nullptr)) == nullptr &&
+          SizeofResource(nullptr, nullptr) == 0, "a program with no embedded resources finds none (this one links no payload table)");
     check(WinHttpOpen(L"x", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, nullptr, nullptr, 0) == nullptr, "WinHTTP does not open");
     IShellLinkW* sl = nullptr;
     check(FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW, (void**)&sl)) && !sl, "no shell link object");

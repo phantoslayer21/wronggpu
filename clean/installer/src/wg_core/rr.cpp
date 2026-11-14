@@ -240,7 +240,7 @@ bool RrDataValid(Context& ctx, wstring* why) {
     if (!LoadFMap(ctx)) { if (why) *why = ctx.fMapError; return false; }
     if (!IsFile(RrDataFile())) { if (why) *why = L"no converted Ray Reconstruction data on this PC"; return false; }
     string w;
-    const bool ok = wgc::verify_model_file(*ctx.fMap.map, std::filesystem::path(RrDataFile()), w);
+    const bool ok = wgc::verify_model_file(*ctx.fMap.map, FsPath(RrDataFile()), w);
     if (why) *why = FromUtf8(w);
     return ok;
 }
@@ -352,7 +352,7 @@ RrDataState FindRrData(Context& ctx, const GameTarget* t, const wstring& userDll
     wgc::SearchOptions opt;
     for (auto& c : cands) {
         auto conv = std::make_shared<wgc::Converted>();
-        const wgc::Result r = wgc::convert_file(*ctx.fMap.map, std::filesystem::path(c.first), opt, *conv,
+        const wgc::Result r = wgc::convert_file(*ctx.fMap.map, FsPath(c.first), opt, *conv,
                                                 [&ctx](const string& s) { LogLine(ctx, L"converter (RR): " + FromUtf8(s)); });
         if (r.code == wgc::kOk) {
             m.ok = true; m.dll = c.first; m.origin = c.second; m.version = FromUtf8(conv->version); m.converted = conv;
@@ -387,11 +387,11 @@ bool WriteRrData(Context& ctx, const RrDataState& m, wstring* why) {
     const wstring side = RrDataDir() + L".new";
     if (IsDir(side)) RemoveTree(side);
     EnsureDir(ModelBaseDir());
-    const wgc::Result r = wgc::write_converted(*ctx.fMap.map, *m.converted, std::filesystem::path(side), false,
+    const wgc::Result r = wgc::write_converted(*ctx.fMap.map, *m.converted, FsPath(side), false,
                                                [&ctx](const string& s) { LogLine(ctx, L"converter (RR): " + FromUtf8(s)); });
     const wstring sideFile = Join(side, FromUtf8(wgc::kModelFileName));
     string w;
-    if (r.code != wgc::kOk || !wgc::verify_model_file(*ctx.fMap.map, std::filesystem::path(sideFile), w)) {
+    if (r.code != wgc::kOk || !wgc::verify_model_file(*ctx.fMap.map, FsPath(sideFile), w)) {
         if (why) *why = r.code != wgc::kOk ? FromUtf8(r.message) : L"the converted Ray Reconstruction data failed its check (" + FromUtf8(w) + L")";
         // the converter names no cause: a full disk is the one the player can fix, so it is said when it is the case
         ULARGE_INTEGER freeBytes{};

@@ -9,6 +9,7 @@ real third-party file). Every install is undone and the folder compared byte for
 
     python run_launcher_tests.py --launcher <WrongGPU.exe> --work <dir> [--baseline <0.5.1 WrongGPU-Setup.exe>]
                                  [--hip <mock amdhip64_7.dll>] [--synth-f <folder of synth-common-v0.bin>]
+    python run_launcher_tests.py --native-linux <WrongGPU> --work <dir>    (the Linux binary; see native_linux.py)
 """
 import argparse
 import json
@@ -23,6 +24,7 @@ os.environ["WRONGGPU_TESTING"] = "1"
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import mockpe  # noqa: E402  (synthetic PE files with a version resource)
+import native_linux  # noqa: E402  (the Linux binary's environment, registry file and Windows-only skips)
 import run_installer_tests as suite  # noqa: E402  (mock content, snapshots, the synthetic model case)
 from run_installer_tests import read, sha, snapshot, diff, write  # noqa: E402
 
@@ -31,19 +33,23 @@ OPTI_INI = ("[Upscalers]\nDx12Upscaler=auto\n[Libraries]\nFfxDx12SRPath=auto\n[F
 
 
 class T:
-    def __init__(self, exe, work, model, hip):
-        self.exe, self.work, self.model = exe, work, model
-        self.passed, self.failures = 0, []
+    def __init__(self, exe, work, model, hip, native=False):
+        self.exe, self.work, self.model, self.native = exe, work, model, native
+        self.passed, self.failures, self.skipped = 0, [], []
         self.data = os.path.join(work, "data")
         self.log = os.path.join(work, "launcher-test.log")
         self.out = os.path.join(work, "out.json")
         self.env = dict(os.environ, LOCALAPPDATA=os.path.join(work, "localappdata"), ProgramData=os.path.join(work, "programdata"))
+        if native:
+            self.env = native_linux.environment(work, os.environ)
+            self.registry = native_linux.Registry(self.env["WRONGGPU_REGISTRY_FILE"])
         if hip:
             self.env["WRONGGPU_HIP_RUNTIME"] = hip
         for k in [k for k in self.env if k.upper().startswith("WG_") or k.upper() in ("HIP_PATH", "ROCM_PATH", "LLVM_PATH", "HIP_DEVICE_LIB_PATH")]:
             self.env.pop(k)
         os.makedirs(self.env["LOCALAPPDATA"], exist_ok=True)
-        self.uninstall = suite.uninstall_root(self.env["LOCALAPPDATA"])  # this run's Apps & features root (the build's own)
+        # this run's Apps & features root (the build's own)
+        self.uninstall = suite.uninstall_root(self.env["LOCALAPPDATA"])
         self.j = {}
 
     def check(self, name, cond, detail=""):
@@ -54,12 +60,27 @@ class T:
             self.failures.append(name + (": " + str(detail)[:1500] if detail else ""))
             print("  FAIL ", name, str(detail)[:1500])
 
+    def skip(self, feature, what):
+        """A check that only means something on Windows: on Linux it is not run, and the log says which and why."""
+        self.skipped.append(what)
+        native_linux.skip(what, native_linux.WINDOWS_ONLY[feature])
+
+    def reg_add(self, path, name, value):
+        if self.native:
+            return self.registry.add(path, name, value)
+        subprocess.run(["reg", "add", path, "/v", name, "/t", "REG_SZ", "/d", value, "/f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def reg_delete(self, path):
+        if self.native:
+            return self.registry.delete(path)
+        subprocess.run(["reg", "delete", path, "/f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     def run(self, *args, exe=None, data=True, timeout=600, cwd=None):
         """WrongGPU.exe <args> --data --log --out; the JSON result in self.j; returns the exit code. cwd: its current directory."""
         if os.path.exists(self.out):
             os.remove(self.out)
-        cmd = [exe or self.exe] + list(args) + ["--log=" + self.log, "--out=" + self.out] + (["--data=" + self.data] if data else [])
-        p = subprocess.run(cmd, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, cwd=cwd)
+        cmd = [native_linux.host(exe or self.exe)] + list(args) + ["--log=" + self.log, "--out=" + self.out] + (["--data=" + self.data] if data else [])
+        p = subprocess.run(cmd, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, cwd=native_linux.host(cwd))
         try:
             with open(self.out, encoding="utf-8") as f:
                 self.j = json.load(f)
@@ -68,7 +89,7 @@ class T:
         return p.returncode
 
     def raw(self, cmd, timeout=600):
-        return subprocess.run(cmd, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout).returncode
+        return subprocess.run([native_linux.host(cmd[0])] + list(cmd[1:]), env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout).returncode
 
     def logtail(self, n=1500):
         try:
@@ -78,6 +99,8 @@ class T:
 
     def reg_keys(self, root=None):
         root = root or self.uninstall
+        if self.native:
+            return self.registry.subkeys(root)
         p = subprocess.run(["reg", "query", root, "/s"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         keys, cur = {}, None
         for line in p.stdout.decode("utf-8", "replace").splitlines():
@@ -293,8 +316,11 @@ def test_install_settings_uninstall(t, opti):
     t.check("owned-files.json: valid JSON, every recorded file with its owner", owned.get("format") == "wronggpu-owned-files/1" and
             any(f["path"] == "wronggpu_runtime.dll" and f["owner"] == "wg" for f in owned.get("files", [])), owned)
     un = os.path.join(b, "wronggpu-setup", "uninstall.exe")
-    t.check("uninstall.exe is the small restorer, not the launcher", os.path.isfile(un) and os.path.getsize(un) < os.path.getsize(t.exe) // 4,
-            (os.path.getsize(un) if os.path.isfile(un) else None, os.path.getsize(t.exe)))
+    if t.native:
+        t.skip("restorer", "uninstall.exe is the small restorer, not the launcher")
+    else:
+        t.check("uninstall.exe is the small restorer, not the launcher", os.path.isfile(un) and os.path.getsize(un) < os.path.getsize(t.exe) // 4,
+                (os.path.getsize(un) if os.path.isfile(un) else None, os.path.getsize(t.exe)))
     t.check("profile.ini written", os.path.isfile(os.path.join(b, "wronggpu-setup", "profile.ini")))
     t.check("the game is on the managed list", b.lower() in managed_list(t), managed_list(t))
     t.check("launcher not installed: the game keeps its own Apps & features entry (uninstallable)", len(t.entries_for(b)) == 1, t.entries_for(b))
@@ -460,10 +486,15 @@ def test_install_settings_uninstall(t, opti):
             and not t.entries_for(b))
     # again, uninstalled by the restorer in the game folder
     rc = t.run("install", exe, "--opti=" + opti, "--noscan", "--force")
-    rc2 = t.raw([os.path.join(b, "wronggpu-setup", "uninstall.exe"), "/S", "/LOG=" + t.log])
-    wait_gone(os.path.join(b, "wronggpu-setup"))
-    after = snapshot(root)
-    t.check("the restorer (uninstall.exe /S): exit 0, byte for byte as before", rc == 0 and rc2 == 0 and after == before, (rc, rc2, diff(before, after)))
+    if t.native:  # no restorer exe on Linux: the launcher's own uninstall puts the folder back
+        t.skip("restorer", "the restorer (uninstall.exe /S): exit 0, byte for byte as before")
+        rc2 = t.run("uninstall", exe)
+        t.check("the same install, uninstalled by the launcher: exit 0, byte for byte as before", rc == 0 and rc2 == 0 and snapshot(root) == before, (rc, rc2, diff(before, snapshot(root))))
+    else:
+        rc2 = t.raw([os.path.join(b, "wronggpu-setup", "uninstall.exe"), "/S", "/LOG=" + t.log])
+        wait_gone(os.path.join(b, "wronggpu-setup"))
+        after = snapshot(root)
+        t.check("the restorer (uninstall.exe /S): exit 0, byte for byte as before", rc == 0 and rc2 == 0 and after == before, (rc, rc2, diff(before, after)))
     shutil.rmtree(root, ignore_errors=True)
 
 
@@ -597,10 +628,9 @@ def test_experimental_and_shared_model(t, opti):
     t.check("first uninstalled: the model stays (the other game is on the managed list)", rc == 0 and os.path.isfile(model) and snapshot(r1) == s1, diff(s1, snapshot(r1)))
     # a stale Apps & features entry (its game folder deleted by hand, so no record) is no game that still uses the data
     stale = t.uninstall + "\\WrongGPU-00000000"
-    subprocess.run(["reg", "add", stale, "/v", "InstallLocation", "/t", "REG_SZ", "/d", os.path.join(t.work, "games", "Deleted Game", "bin", "x64"), "/f"],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    t.reg_add(stale, "InstallLocation", os.path.join(t.work, "games", "Deleted Game", "bin", "x64"))
     rc = t.run("uninstall", e2)
-    subprocess.run(["reg", "delete", stale, "/f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    t.reg_delete(stale)
     t.check("last uninstalled (a stale entry of a deleted game left): byte for byte; the shared model data goes", rc == 0 and snapshot(r2) == s2 and not os.path.isfile(model),
             (rc, diff(s2, snapshot(r2))))
     shutil.rmtree(r1, ignore_errors=True)
@@ -916,7 +946,7 @@ def test_launcher_uninstall(t, opti):
         t.check("...while it is on the list, the last reachable game's own uninstall keeps the shared model data (the game byte for byte)",
                 had and rc2 == 0 and snapshot(root) == before and os.path.isdir(model_dir), (had, rc2, diff(before, snapshot(root)), t.logtail()))
         for k in own:
-            subprocess.run(["reg", "delete", t.uninstall + "\\" + k, "/f"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            t.reg_delete(t.uninstall + "\\" + k)
         wait_removed(t)
         shutil.rmtree(shared, ignore_errors=True)
     else:
@@ -994,8 +1024,11 @@ def test_rr(t, opti, synth_f):
     t.check("a game without RR: rr_uses false, no other RR fields", rc == 0 and t.j.get("game", {}).get("rr_uses") is False and "rr_installed" not in t.j.get("game", {}), t.j.get("game"))
     rc = t.run("install", exeN, "--opti=" + opti, "--noscan", "--force", "--experimental")
     rec = record_text(bN) if rc == 0 else ""
+    # NTFS folds case, so the payload's own wronggpu\ folder (the kernels) is also "WrongGPU": on a case-folding file system the
+    # RR settings folder can only be told apart by its exact name; the native run looks at the names it lists
+    no_rr_folder = "WrongGPU" not in os.listdir(bN) if t.native else not os.path.exists(os.path.join(bN, "WrongGPU"))
     t.check("a game without RR: installed without any RR file or record line", rc == 0 and "WrongGPU-RR.asi" not in rec and "wronggpu-rr.ini" not in rec and
-            not os.path.exists(os.path.join(bN, "wronggpu_rr_runtime.dll")) and not os.path.exists(os.path.join(bN, "WrongGPU")) and
+            not os.path.exists(os.path.join(bN, "wronggpu_rr_runtime.dll")) and no_rr_folder and
             not os.path.exists(os.path.join(bN, "wronggpu-rr.ini")) and
             not os.path.exists(os.path.join(bN, "plugins", "WrongGPU-RR.asi")), (rc, t.j.get("message"), rec[:800]))
     # a game that ships the RR model file (a stand-in WrongGPU cannot convert: the RR data is not ready yet)
@@ -1177,9 +1210,12 @@ def test_rr(t, opti, synth_f):
     gpu = rp.get("result") != 2  # 2: no RDNA 4 graphics card on this PC (nothing to prepare)
     t.check("rr-prepare: the helper prepared the default mode's kernels (result 0, ready, every kernel reported), or no RDNA 4 card",
             rc == 0 and (not gpu or (rp.get("result") == 0 and rp.get("ready") is True and rp.get("kernels", 0) >= 50)), rp)
-    t.check("rr-prepare: the helper copy is gone, nothing new in the game's folder (the runtime log went to the data folder)",
-            not os.listdir(os.path.join(prep_dir, "run")) and (read(glog) if os.path.exists(glog) else None) == glog_before and
-            (not gpu or os.path.isfile(os.path.join(prep_dir, "prepare.log"))), (os.listdir(prep_dir), os.listdir(b)))
+    if t.native:  # with no RDNA 4 card the helper never starts (rrprep.cpp), so there is no run\ folder to look in
+        t.skip("gpu", "rr-prepare: the helper copy is gone, nothing new in the game's folder")
+    else:
+        t.check("rr-prepare: the helper copy is gone, nothing new in the game's folder (the runtime log went to the data folder)",
+                not os.listdir(os.path.join(prep_dir, "run")) and (read(glog) if os.path.exists(glog) else None) == glog_before and
+                (not gpu or os.path.isfile(os.path.join(prep_dir, "prepare.log"))), (os.listdir(prep_dir), os.listdir(b)))
     if gpu:
         ptxt = read(os.path.join(prep_dir, "prepared.txt")).decode("utf-8", "replace")
         t.check("rr-prepare: prepared.txt keeps the game's program name, the driver's version, the runtime's SHA-256, the passes",
@@ -3064,7 +3100,9 @@ def test_data_root_junctions(parent):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--launcher", required=True)
+    ap.add_argument("--launcher")
+    ap.add_argument("--native-linux", metavar="WrongGPU", help="run against the Linux binary (instead of --launcher WrongGPU.exe): its own XDG "
+                    "folders, registry file and SDL offscreen driver under --work; the Windows-only checks are skipped with their reasons")
     ap.add_argument("--work", required=True)
     ap.add_argument("--baseline", help="the 0.5.1 installer (WRONGGPU_TESTING build, same test map) for the adoption cases")
     ap.add_argument("--hip", help="mock amdhip64_7.dll (WRONGGPU_HIP_RUNTIME)")
@@ -3072,16 +3110,20 @@ def main():
     ap.add_argument("--synth-f", default=os.environ.get("WGC_SYNTH_BINS", ""),
                     help="folder with the spec team's synthetic preset-F file synth-common-v0.bin (the test build's F map is synth-r0)")
     a = ap.parse_args()
+    if not (a.launcher or a.native_linux):
+        ap.error("--launcher or --native-linux is required")
+    if a.native_linux:
+        native_linux.setup(sys.modules[__name__], suite, HERE)
     work = os.path.abspath(a.work)
-    for d in ("games", "data", "localappdata", "programs", "startmenu"):
+    for d in ("games", "data", "localappdata", "programs", "startmenu", "native"):
         shutil.rmtree(os.path.join(work, d), ignore_errors=True)
     os.makedirs(work, exist_ok=True)
     model = suite.cases.f_mini_case(present=0)  # the synthetic source of the test map the launcher was built with
-    t = T(os.path.abspath(a.launcher), work, model, a.hip)
+    t = T(os.path.abspath(a.native_linux or a.launcher), work, model, a.hip, native=bool(a.native_linux))
     # registry entries of an earlier run (test root only)
     for k, v in t.reg_keys().items():
         if (k.startswith("WrongGPU-") and v.get("InstallLocation", "").lower().startswith(work.lower())) or (k == "WrongGPU" and work.lower() in v.get("InstallLocation", "").lower()):
-            subprocess.run(["reg", "delete", t.uninstall + "\\" + k, "/f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            t.reg_delete(t.uninstall + "\\" + k)
     opti = opti_package(t)
     t0 = time.time()
     test_basics(t)
@@ -3089,7 +3131,7 @@ def main():
         for name in a.only:
             fn = globals()["test_" + name]
             fn(t, opti) if name != "rr" else fn(t, opti, a.synth_f)
-        print("\n%d checks passed, %d failed (%.0f s)" % (t.passed, len(t.failures), time.time() - t0))
+        print("\n%d checks passed, %d failed, %d skipped (%.0f s)" % (t.passed, len(t.failures), len(t.skipped), time.time() - t0))
         for f in t.failures:
             print("  FAILED:", f)
         return 1 if t.failures else 0
@@ -3101,17 +3143,17 @@ def main():
     test_direct_rr(t, opti, a.synth_f)
     test_sm2_settings(t, opti)
     test_rr_config_fix(t, opti)
-    test_edition_download(t, opti)
+    t.skip("http", "[edition] the download of WrongGPU's edition of OptiScaler (the whole section)") if t.native else test_edition_download(t, opti)
     test_players_optiscaler(t, opti)
     test_experimental_and_shared_model(t, opti)
     test_orphan(t, opti)
     test_rc6_hunt(t, opti)
     __import__("launcher_ignore_cases").run(T, t, opti, game)
     test_adopt_and_self_install(t, opti, a.baseline)
-    test_launcher_uninstall(t, opti)
-    test_data_root_junctions(t)
+    t.skip("shortcut", "[launcher] self-install / self-uninstall (the whole section)") if t.native else test_launcher_uninstall(t, opti)
+    t.skip("junction", "[junctions] the data root behind NTFS junctions (the whole section)") if t.native else test_data_root_junctions(t)
     test_ui_dump(t, opti)
-    print("\n%d checks passed, %d failed (%.0f s)" % (t.passed, len(t.failures), time.time() - t0))
+    print("\n%d checks passed, %d failed, %d skipped (%.0f s)" % (t.passed, len(t.failures), len(t.skipped), time.time() - t0))
     for f in t.failures:
         print("  FAILED:", f)
     return 1 if t.failures else 0

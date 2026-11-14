@@ -170,10 +170,11 @@ std::string UserFile() {
     return XdgDataHome() + "/WrongGPU/registry.ini";
 #endif
 }
-Store& UserStore() { static Store s; static std::once_flag o; std::call_once(o, [] { s.file = UserFile(); }); return s; }
-Store& ReadOnlyStore() { static Store s; static std::once_flag o; std::call_once(o, [] { s.readOnly = true; }); return s; }
+// the stores and tables here are never destroyed (see g_handles in win32_posix.cpp)
+Store& UserStore() { static Store& s = *new Store; static std::once_flag o; std::call_once(o, [] { s.file = UserFile(); }); return s; }
+Store& ReadOnlyStore() { static Store& s = *new Store; static std::once_flag o; std::call_once(o, [] { s.readOnly = true; }); return s; }
 std::mutex g_hiveLock;
-std::map<std::string, std::unique_ptr<Store>> g_hives;
+auto& g_hives = *new std::map<std::string, std::unique_ptr<Store>>;
 
 }  // namespace
 
@@ -181,7 +182,7 @@ struct HKEY__ { Store* store; std::string path; REGSAM sam; bool loadedRoot; };
 
 namespace {
 std::mutex g_keyLock;
-std::unordered_set<HKEY> g_keys;
+auto& g_keys = *new std::unordered_set<HKEY>;
 
 HKEY NewKey(Store* s, const std::string& path, REGSAM sam, bool root = false) {
     HKEY k = new HKEY__{s, path, sam, root};
