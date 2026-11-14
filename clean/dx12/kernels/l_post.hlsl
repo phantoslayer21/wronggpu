@@ -65,6 +65,7 @@ groupshared uint sh_tex[kStageCap * kTexDw];
 
 static uint g_z;          // 0, opaque to the compiler (from the grid size)
 static float g_e, g_ep;   // exposures (0 replaced by 1)
+static float g_epy, g_eplo, g_ephi;   // the division window of e_prev (ep_window)
 float opq(float x) { return asfloat(asuint(x) ^ g_z); }
 half opqh(half x) { return asfloat16((uint16_t)(asuint16(x) ^ (uint16_t)g_z)); }
 half h_bits(uint b) { return asfloat16((uint16_t)b); }
@@ -99,38 +100,84 @@ float l_dec(float q)
     return isnan(q) ? q : opq(v) * k0p01;
 }
 
-float byte_f(uint v, uint i) { return (float)((v >> (8u * i)) & 0xffu); }
+// (_Float16)((float)k / 255.0f) for the code k = 0 ... 255 (an IEEE FP32 division, then round to nearest even: HIP's
+// v_div_* sequence and v_cvt_f16_f32): built per workgroup in LDS (code16_build), read by code16
+groupshared uint sh_code[256];
+uint code16(uint v, uint i) { return sh_code[(v >> (8u * i)) & 0xffu]; }
 
-// l_load_texel: the nine FP16 features and the FP16 kernel shape of render pixel idx, as six dwords of FP16 bits
-void load_texel(int idx, out uint t[kTexDw])
+// lane k of the workgroup (256 lanes) writes code k's FP16 bits: wg_div, then the driver's conversion (wave-uniform)
+void code16_build(int lane)
+{
+    v8f cv;
+    cv.v[0] = opq(wg_div((float)lane, 255.0f));
+    [unroll] for (int i = 1; i < 8; ++i) cv.v[i] = 0.0f;
+    sh_code[lane] = wg_to_f16_ags(cv).x & 0xffffu;
+}
+
+// a * b as the round-to-odd FP32 value whose FP16 rounding is (f16)(a b) in one rounding (wg_mul_f16 before its
+// conversion), and wg_mul_f16's +0 for an exact zero product (a NaN product keeps its conversion)
+float mul_odd(float a, float b)
+{
+    const float p = a * b;
+    return asfloat(wg_round_odd(p, mad(a, b, -p)));
+}
+bool mul_zero(float a, float b)
+{
+    return ((asuint(a) & 0x7fffffffu) == 0u || (asuint(b) & 0x7fffffffu) == 0u) && !isnan(a * b);
+}
+
+// render pixel idx's raw inputs: colour, codes a (A0 A1 A2), b (B0 B1 B2), kernel shape k (C0 | C1 << 16, C2)
+void texel_inputs(int idx, out float4 c, out uint a, out uint b, out uint2 k)
 {
     const uint ui = (uint)idx;
-    const float4 c = wg_ld4f(color, ui * 16u);
+    c = wg_ld4f(color, ui * 16u);
 #if LP_P12
     const uint2 d = wg_ld64(A, ui * 8u);
     const uint c01 = wg_ld32(C, ui * 4u);
-    const uint a = d.x & 0xffffffu, b = (d.x >> 24) | ((d.y & 0xffffu) << 8);
-    const uint2 k = uint2(c01, d.y >> 16);   // C0 | C1 << 16, C2 (l_coef's C dword 0 and the low half of dword 1)
+    a = d.x & 0xffffffu;
+    b = (d.x >> 24) | ((d.y & 0xffffu) << 8);
+    k = uint2(c01, d.y >> 16);   // C0 | C1 << 16, C2 (l_coef's C dword 0 and the low half of dword 1)
 #else
-    const uint b = wg_ld32(B, ui * 4u), a = wg_ld32(A, ui * 4u);
-    const uint2 k = wg_ld64(C, ui * 8u);
+    b = wg_ld32(B, ui * 4u);
+    a = wg_ld32(A, ui * 4u);
+    k = wg_ld64(C, ui * 8u);
 #endif
-    uint f[9];
-    f[0] = wg_f2h(enc_in(opq(g_e * c.x)));
-    f[1] = wg_f2h(enc_in(opq(g_e * c.y)));
-    f[2] = wg_f2h(enc_in(opq(g_e * c.z)));
-    [unroll] for (uint i = 0; i < 3; ++i) {
-        f[3 + i] = wg_f2h(wg_div(byte_f(b, i), 255.0f));
-        f[6 + i] = wg_f2h(wg_div(byte_f(a, i), 255.0f));
-    }
-    const uint kA = wg_mul_f16(f16tof32(k.x), kShapeAB), kB = wg_mul_f16(f16tof32(k.x >> 16), kShapeAB);
-    const uint kC = wg_mul_f16(f16tof32(k.y), kShapeC);
-    t[0] = f[0] | (f[1] << 16);
-    t[1] = f[2] | (f[3] << 16);
-    t[2] = f[4] | (f[5] << 16);
-    t[3] = f[6] | (f[7] << 16);
-    t[4] = f[8] | (kA << 16);
+}
+
+void pack_texel(uint f0, uint f1, uint f2, uint a, uint b, uint kA, uint kB, uint kC, out uint t[kTexDw])
+{
+    t[0] = f0 | (f1 << 16);
+    t[1] = f2 | (code16(b, 0u) << 16);
+    t[2] = code16(b, 1u) | (code16(b, 2u) << 16);
+    t[3] = code16(a, 0u) | (code16(a, 1u) << 16);
+    t[4] = code16(a, 2u) | (kA << 16);
     t[5] = kB | (kC << 16);
+}
+
+// l_load_texel: the nine FP16 features and the FP16 kernel shape of render pixel idx, as six dwords of FP16 bits. The six
+// roundings (E_in of the colour: wg_f2h; the kernel shape: wg_mul_f16) by the driver's conversion (v_cvt_f16_f32, the same
+// bits): wave-uniform control flow only. The values going in pass opq or are round-to-odd values (the driver must not
+// fold an FP32 operation into the conversion).
+void load_texel_hw(int idx, out uint t[kTexDw])
+{
+    float4 c;
+    uint a, b;
+    uint2 k;
+    texel_inputs(idx, c, a, b, k);
+    const float k0 = f16tof32(k.x), k1 = f16tof32(k.x >> 16), k2 = f16tof32(k.y);
+    v8f cv;
+    cv.v[0] = opq(enc_in(opq(g_e * c.x)));
+    cv.v[1] = opq(enc_in(opq(g_e * c.y)));
+    cv.v[2] = opq(enc_in(opq(g_e * c.z)));
+    cv.v[3] = mul_odd(k0, kShapeAB);
+    cv.v[4] = mul_odd(k1, kShapeAB);
+    cv.v[5] = mul_odd(k2, kShapeC);
+    cv.v[6] = 0.0f;
+    cv.v[7] = 0.0f;
+    const uint4 h = wg_to_f16_ags(cv);
+    const uint kA = mul_zero(k0, kShapeAB) ? 0u : (h.y >> 16), kB = mul_zero(k1, kShapeAB) ? 0u : (h.z & 0xffffu);
+    const uint kC = mul_zero(k2, kShapeC) ? 0u : (h.z >> 16);
+    pack_texel(h.x & 0xffffu, h.x >> 16, h.y & 0xffffu, a, b, kA, kB, kC, t);
 }
 
 struct LGather { float W; half F[9]; };
@@ -145,21 +192,55 @@ LGather gather_zero()
 }
 
 // One tap: eps = fma(h(u v), C, h(h(h(u u) A) + h(h(v v) B))), w = 2^eps (+0 below 2^-126), W += w,
-// F_k = fma(h(w), f_k, F_k). uu, vv, uv come in already rounded (and opaque).
-void gather_add(inout LGather g, uint t[kTexDw], half uu, half vv, half uv)
+// F_k = fma(h(w), f_k, F_k). uu, vv, uv come in already rounded (and opaque). tap_weight gives w; gather_acc adds the
+// tap with h(w) = hw (the FP16 rounding of w: wg_f2h, or the driver's conversion of eight taps' w at once).
+float tap_weight(uint t[kTexDw], half uu, half vv, half uv)
 {
     const half kA = h_bits(t[4] >> 16), kB = h_bits(t[5]), kC = h_bits(t[5] >> 16);
     const half ta = opqh(uu * kA), tb = opqh(vv * kB);
     const half s = tb + ta;
     const half eps = mad(uv, kC, s);
-    float w = exp2((float)opqh(eps));
-    w = w >= kMinNormal ? w : 0.0f;
+    const float w = exp2((float)opqh(eps));
+    return w >= kMinNormal ? w : 0.0f;
+}
+void gather_acc(inout LGather g, uint t[kTexDw], float w, uint hwb)
+{
     g.W = g.W + w;
-    const half hw = h_bits(wg_f2h(w));
+    const half hw = h_bits(hwb);
     [unroll] for (int k = 0; k < 9; ++k) {
         const uint d = t[k >> 1];
         g.F[k] = mad(hw, h_bits((k & 1) ? (d >> 16) : d), g.F[k]);
     }
+}
+
+// a / e_prev as wg_div (IEEE, round to nearest even) for the three channels. e_prev is one value per launch: with
+// y = RN(1 / e_prev) the lanes whose |a| lies in [lo, hi) take q0 = a y, rn = fma(e_prev, q0, -a), q = fma(-rn, y, q0),
+// which is the correctly rounded quotient there (clean/runtime/native_direct_pi.h: every intermediate normal, the
+// [1, 2) significand form checked for all significand pairs; the direct route's colour division,
+// native_direct.hlsli native_direct_color_div3); every other lane (NaN, infinity, zero, a quotient near the FP32 range
+// ends, an e_prev outside the window's domain: hi = 0) runs wg_div itself.
+void ep_window()
+{
+    const uint ub = asuint(g_ep);
+    const int eb = (int)((ub >> 23) & 255u), B = eb - 127;
+    const bool ok = (ub >> 31) == 0u && eb >= 1 && eb <= 252;
+    g_epy = wg_div(1.0f, g_ep);
+    g_eplo = asfloat((uint)(max(B - 125, -79) + 127) << 23);
+    g_ephi = !ok ? 0.0f : (B > 0 ? asfloat(0x7f800000u) : asfloat((uint)(B + 254) << 23));
+}
+float3 ep_div3(float3 a)
+{
+    const float3 q0 = a * g_epy;
+    const float3 rn = mad(g_ep, q0, -a);
+    float3 q = mad(-rn, g_epy, q0);
+    const float3 m = abs(a);
+    const bool3 fast = and(m < g_ephi, m >= g_eplo);
+    [branch] if (!all(fast)) {
+        q.x = fast.x ? q.x : wg_div(a.x, g_ep);
+        q.y = fast.y ? q.y : wg_div(a.y, g_ep);
+        q.z = fast.z ? q.z : wg_div(a.z, g_ep);
+    }
+    return q;
 }
 
 // ---- history: 12-tap Catmull-Rom of the previous full history (history_cr<false>, 8-byte RGBA16F texels) ------------
@@ -238,9 +319,10 @@ void l_post_core(LGather g, int x, int y, int fx, int fy, float mx[3], float my[
             const bool valid = P_reset == 0 && qx >= 0.0f && qx <= (float)P_dw && qy >= 0.0f && qy <= (float)P_dh;
             if (valid) {
                 const float3 h = history_cr(qx, qy);
-                L[n][0] = wg_div(l_dec(h.x), g_ep);
-                L[n][1] = wg_div(l_dec(h.y), g_ep);
-                L[n][2] = wg_div(l_dec(h.z), g_ep);
+                const float3 lq = ep_div3(float3(l_dec(h.x), l_dec(h.y), l_dec(h.z)));
+                L[n][0] = lq.x;
+                L[n][1] = lq.y;
+                L[n][2] = lq.z;
             } else {
                 const float4 c = wg_ld4f(color, (uint)(fy * P_rw + fx) * 16u);
                 L[n][0] = c.x; L[n][1] = c.y; L[n][2] = c.z;
@@ -271,8 +353,8 @@ void l_post_core(LGather g, int x, int y, int fx, int fy, float mx[3], float my[
     }
 }
 
-// l_finish_pixel: motions, steps 3 to 5, the full history and display stores (when store); returns H^ in hh
-void finish_pixel(LGather g, int x, int y, float px, float py, bool store, float s, out float hh[3])
+// l_finish_pixel without its stores: motions, steps 3 to 5; H^ in hh, O^ in oh (the kernel converts and stores them)
+void finish_pixel(LGather g, int x, int y, float px, float py, float s, out float hh[3], out float oh[3])
 {
     const int fx = clampi(floor_i(px), 0, P_rw - 1), fy = clampi(floor_i(py), 0, P_rh - 1);
     float mx[3], my[3];
@@ -294,17 +376,7 @@ void finish_pixel(LGather g, int x, int y, float px, float py, bool store, float
         mx[1] = topx * owy + botx * wy;
         my[1] = topy * owy + boty * wy;
     }
-    float oh[3];
     l_post_core(g, x, y, fx, fy, mx, my, s, hh, oh);
-    if (store) {
-        const uint h0 = wg_mul_f16(kEncK, enc_log(hh[0])), h1 = wg_mul_f16(kEncK, enc_log(hh[1]));
-        const uint h2 = wg_mul_f16(kEncK, enc_log(hh[2]));
-        wg_st64(hist_out, (uint)(y * P_dw + x) * 8u, uint2(h0 | (h1 << 16), h2));
-        const int pitch = (P_dw + 63) & ~63, plane = pitch * P_dh, di = y * pitch + x;
-        wg_st16(display, (uint)di * 2u, wg_f2h(clampf(enc_e(oh[0]), 0.0f, kDisplayMax)));
-        wg_st16(display, (uint)(plane + di) * 2u, wg_f2h(clampf(enc_e(oh[1]), 0.0f, kDisplayMax)));
-        wg_st16(display, (uint)(2 * plane + di) * 2u, wg_f2h(clampf(enc_e(oh[2]), 0.0f, kDisplayMax)));
-    }
 }
 
 float lpx(int xx) { return mad(opq((float)xx + 0.5f), P_rx, P_jx); }   // fused(x + 1/2, rx, jx)
@@ -325,6 +397,7 @@ WG_KERNEL(l_post_recon)
         g_e = e0 == 0.0f ? 1.0f : e0;
         g_ep = e1 == 0.0f ? 1.0f : e1;
     }
+    ep_window();
     const int lane = (int)wg_lane_id();
     const int tiles_x = (P_dw + kTileX - 1) / kTileX;
     const int tile = (int)wg_block_id();
@@ -332,6 +405,8 @@ WG_KERNEL(l_post_recon)
     const int k0 = (tile / tiles_x) * kTilePairs;
     const int npairs = (P_dh + 1) / 2;
     const float s = wg_ldf(w_p, 0u);
+    code16_build(lane);
+    GroupMemoryBarrierWithGroupSync();
 
     // render footprint of the tile: window columns ax - 1 ... ax + 2 of its first and last column, window rows of its
     // first and last row pair
@@ -340,13 +415,17 @@ WG_KERNEL(l_post_recon)
     const int r0 = floor_i(lpy(2 * k0) - 0.5f) - 1, r1 = floor_i(lpy(2 * kl) - 0.5f) + (kLWin - 2);
     const int ncol = c1 - c0 + 1, nrow = r1 - r0 + 1;
     const bool staged = ncol > 0 && nrow > 0 && ncol <= kStageCap && nrow <= kStageCap && ncol * nrow <= kStageCap;
-    if (staged) {
-        for (int i = lane; i < ncol * nrow; i += kThreads) {
-            const int r = i / ncol, c = i - r * ncol;
+    if (staged) {   // wave-uniform rounds (the driver's conversion in load_texel_hw); lanes past the end repeat the last
+        const int ntex = ncol * nrow;
+        [loop] for (int base = 0; base < ntex; base += kThreads) {
+            const int i = base + lane, ii = mini(i, ntex - 1);
+            const int r = ii / ncol, c = ii - r * ncol;
             const int idx = clampi(r0 + r, 0, P_rh - 1) * P_rw + clampi(c0 + c, 0, P_rw - 1);
             uint t[kTexDw];
-            load_texel(idx, t);
-            [unroll] for (int d = 0; d < kTexDw; ++d) sh_tex[i * kTexDw + d] = t[d];
+            load_texel_hw(idx, t);
+            if (i < ntex) {
+                [unroll] for (int d = 0; d < kTexDw; ++d) sh_tex[i * kTexDw + d] = t[d];
+            }
         }
     }
     GroupMemoryBarrierWithGroupSync();
@@ -360,10 +439,15 @@ WG_KERNEL(l_post_recon)
 
     // gather offsets: dx = h((ax + 1/2) - px), d_y = h((b_y + 1/2) - py(y)) minus 1 (FP16) when the row's own b_y differs
     // from the pair's b; u = h(dx + i), v = h(d_y + j); taps i = -1 ... 2 (outer), j = -1 ... 2 (inner)
-    const half dx = h_bits(wg_f2h(((float)ax + 0.5f) - px));
     const int b1 = floor_i(py1 - 0.5f);
-    const half dy0 = h_bits(wg_f2h(((float)b + 0.5f) - py0));
-    half dy1 = h_bits(wg_f2h(((float)b1 + 0.5f) - py1));
+    v8f ov;   // the three offsets in one conversion
+    ov.v[0] = opq(((float)ax + 0.5f) - px);
+    ov.v[1] = opq(((float)b + 0.5f) - py0);
+    ov.v[2] = opq(((float)b1 + 0.5f) - py1);
+    [unroll] for (int oi = 3; oi < 8; ++oi) ov.v[oi] = 0.0f;
+    const uint4 oh16 = wg_to_f16_ags(ov);
+    const half dx = h_bits(oh16.x), dy0 = h_bits(oh16.x >> 16);
+    half dy1 = h_bits(oh16.y);
     if (b1 != b) dy1 = dy1 - (half)1.0f;
     half v0[kLWin], v1[kLWin], vv0[kLWin], vv1[kLWin];
     [unroll] for (int jj = 0; jj < kLWin; ++jj) {
@@ -372,30 +456,66 @@ WG_KERNEL(l_post_recon)
         vv0[jj] = opqh(v0[jj] * v0[jj]);
         vv1[jj] = opqh(v1[jj] * v1[jj]);
     }
+    // taps column by column (i outer, j inner, each gather in that order as before); per column the eight weights (four
+    // rows, two pixels) are rounded to FP16 by one driver conversion
     LGather g0 = gather_zero(), g1 = gather_zero();
-    [unroll] for (int i = -1; i <= kLWin - 2; ++i) {
+    [loop] for (int i = -1; i <= kLWin - 2; ++i) {
         const half u = dx + (half)(float)i;
         const half uu = opqh(u * u);
+        uint t[kLWin][kTexDw];
+        v8f wv;
         [unroll] for (int j = -1; j <= kLWin - 2; ++j) {
-            uint t[kTexDw];
             if (staged) {
                 const int base = ((b + j - r0) * ncol + (ax + i - c0)) * kTexDw;
-                [unroll] for (int d = 0; d < kTexDw; ++d) t[d] = sh_tex[base + d];
+                [unroll] for (int d = 0; d < kTexDw; ++d) t[j + 1][d] = sh_tex[base + d];
             } else {
-                load_texel(clampi(b + j, 0, P_rh - 1) * P_rw + clampi(ax + i, 0, P_rw - 1), t);
+                load_texel_hw(clampi(b + j, 0, P_rh - 1) * P_rw + clampi(ax + i, 0, P_rw - 1), t[j + 1]);
             }
-            gather_add(g0, t, uu, vv0[j + 1], opqh(u * v0[j + 1]));
-            gather_add(g1, t, uu, vv1[j + 1], opqh(u * v1[j + 1]));
+            wv.v[2 * (j + 1)] = tap_weight(t[j + 1], uu, vv0[j + 1], opqh(u * v0[j + 1]));
+            wv.v[2 * (j + 1) + 1] = tap_weight(t[j + 1], uu, vv1[j + 1], opqh(u * v1[j + 1]));
+        }
+        const uint4 hw = wg_to_f16_ags(wv);
+        [unroll] for (int jj = 0; jj < kLWin; ++jj) {
+            const uint hp = jj == 0 ? hw.x : (jj == 1 ? hw.y : (jj == 2 ? hw.z : hw.w));
+            gather_acc(g0, t[jj], wv.v[2 * jj], hp & 0xffffu);
+            gather_acc(g1, t[jj], wv.v[2 * jj + 1], hp >> 16);
         }
     }
 
-    float h0[3], h1[3] = {0.0f, 0.0f, 0.0f};
-    finish_pixel(g0, x, y0, px, py0, active, s, h0);
-    if (has1) finish_pixel(g1, x, y0 + 1, px, py1, active, s, h1);
-
-    // reduced history: mean of H^ over the 2 x 2 block (x, x + 1) x (y0, y0 + 1); lane x + 1 is lane ^ 1 (same wave)
-    float r[3];
-    [unroll] for (int i = 0; i < 3; ++i) r[i] = h0[i] + h1[i];
+    // the two rows of the pair (wave-uniform: every lane runs both; a missing second row is not stored and adds +0 as
+    // before); the full history and display values of a row in one driver conversion
+    float r[3] = {0.0f, 0.0f, 0.0f};
+    const int pitch = (P_dw + 63) & ~63, plane = pitch * P_dh;
+    [loop] for (int row = 0; row < 2; ++row) {
+        const bool second = row == 1;
+        LGather g = g0;
+        if (second) g = g1;
+        float hh[3], oo[3];
+        finish_pixel(g, x, y0 + row, px, second ? py1 : py0, s, hh, oo);
+        v8f cv;
+        [unroll] for (int ci = 0; ci < 3; ++ci) {
+            cv.v[ci] = mul_odd(kEncK, enc_log(hh[ci]));
+            cv.v[3 + ci] = opq(clampf(enc_e(oo[ci]), 0.0f, kDisplayMax));
+        }
+        cv.v[6] = 0.0f;
+        cv.v[7] = 0.0f;
+        const uint4 hc = wg_to_f16_ags(cv);
+        const int y = y0 + row;
+        if (active && (!second || has1)) {
+            const uint q0 = mul_zero(kEncK, enc_log(hh[0])) ? 0u : (hc.x & 0xffffu);
+            const uint q1 = mul_zero(kEncK, enc_log(hh[1])) ? 0u : (hc.x >> 16);
+            const uint q2 = mul_zero(kEncK, enc_log(hh[2])) ? 0u : (hc.y & 0xffffu);
+            wg_st64(hist_out, (uint)(y * P_dw + x) * 8u, uint2(q0 | (q1 << 16), q2));
+            const int di = y * pitch + x;
+            wg_st16(display, (uint)di * 2u, hc.y >> 16);
+            wg_st16(display, (uint)(plane + di) * 2u, hc.z & 0xffffu);
+            wg_st16(display, (uint)(2 * plane + di) * 2u, hc.z >> 16);
+        }
+        // reduced history: mean of H^ over the 2 x 2 block (x, x + 1) x (y0, y0 + 1): r = h0 + h1 (h1 = 0 without a
+        // second row)
+        [unroll] for (int ri = 0; ri < 3; ++ri) r[ri] = second ? r[ri] + (has1 ? hh[ri] : 0.0f) : hh[ri];
+    }
+    // lane x + 1 is lane ^ 1 (same wave)
     float o[3];
     [unroll] for (int i = 0; i < 3; ++i) o[i] = wg_xor(r[i], 1u);
     if (active && has1 && (x & 1) == 0 && x + 1 < P_dw) {
