@@ -52,6 +52,7 @@
 #include "rr_model.h"
 #include "rr_runtime_test.h"
 #include "rr_modes.h"
+#include "rr_retire.h"
 #include "../../proxy/include/wg_settings_reader.h"
 #include "../../../runtime/interop/descriptor_publish.h"
 
@@ -378,8 +379,6 @@ const StageDef kStages[15] = {
     {"D1-F", K_D1F, 1, 64, 'f', 0},    {"D1-R", K_D1R, 1, 64, 'r', 0},   {"D0-F", K_D0F, 0, 32, 'f', 0}};
 
 // ---------------------------------------------------------------------------------------------------- runtime state
-struct Deferred { uint64_t serial; ID3D12Resource* res; };
-
 struct Runtime {
   std::recursive_mutex mu;
   bool init_done = false;
@@ -429,7 +428,7 @@ struct Runtime {
   uint64_t ts_freq = 0;
   std::string adapter_name;
   bool ready_logged = false;
-  std::vector<Deferred> deferred;
+  RetireList<IUnknown> deferred;            // objects kept until the frame marker proves their frames done (rr_retire.h)
   std::vector<ID3D12Resource*> transient;   // retain_transient copies alive
   std::atomic<int64_t> live_resources{0};
   std::atomic<int64_t> created_resources{0};
@@ -501,24 +500,20 @@ uint64_t marker_done() {
   if (v > rt.serial) v -= 0x100000000ull;
   return v;
 }
-// releases deferred resources whose frames have completed
+// releases deferred objects whose frames have completed; once the device is removed nothing of it runs any more and
+// everything left is released (issue #63: kept objects go at completion, device removal or device drop, never on a timeout)
 void pump() {
   Runtime& rt = R();
-  const uint64_t done = marker_done();
-  auto it = rt.deferred.begin();
-  while (it != rt.deferred.end()) {
-    if (it->serial <= done) {
-      drop(it->res);
-      it = rt.deferred.erase(it);
-    } else {
-      ++it;
-    }
+  rt.live_resources -= rt.deferred.pump(marker_done());
+  if (!rt.deferred.empty() && rt.dev && FAILED(rt.dev->GetDeviceRemovedReason())) {
+    const size_t n = rt.deferred.size();
+    rt.live_resources -= rt.deferred.release_all();
+    log_line(fmt("device removed: %zu kept object(s) released", n));
   }
 }
 void defer_release(ID3D12Resource*& r, uint64_t serial) {
-  if (!r) return;
-  if (serial <= marker_done()) drop(r);
-  else R().deferred.push_back({serial, r}), r = nullptr;
+  R().live_resources -= R().deferred.retire(r, serial, marker_done(), true);
+  r = nullptr;
 }
 bool wait_serial(uint64_t serial, DWORD ms) {
   for (DWORD i = 0; i < ms && marker_done() < serial; ++i) {
@@ -1078,8 +1073,7 @@ void stop_compile() {
 void drop_device() {
   Runtime& rt = R();
   stop_compile();
-  for (auto& d : rt.deferred) drop(d.res);
-  rt.deferred.clear();
+  rt.live_resources -= rt.deferred.release_all();
   release(rt.pass_heap);
   drop(rt.pass_dummy);
   for (uint64_t& s : rt.pass_serial) s = 0;
@@ -1712,18 +1706,24 @@ void render_layout(Layout* L, uint32_t rw, uint32_t rh) {
   L->state_end = o;
 }
 
+// issue #63: every object the instance's recorded frames may use, the descriptor and query heaps included, is released
+// only when the frame marker reaches the instance's last serial (pump), or at device removal / device drop. No wait here:
+// a frame not yet submitted (destroy in the middle of the game's frame) keeps them instead of stalling the game thread.
 void destroy_instance_resources(Instance* in, uint64_t serial) {
-  defer_release(in->arena, serial);
+  Runtime& rt = R();
   if (in->upload) in->upload->Unmap(0, nullptr), in->upload_map = nullptr;
-  defer_release(in->upload, serial);
   if (in->qrb) in->qrb->Unmap(0, nullptr), in->qmap = nullptr;
-  defer_release(in->qrb, serial);
-  for (OutTarget& o : in->out) defer_release(o.proxy, serial);
-  // descriptor and query heaps: no Release while frames are in flight (bounded wait, then release)
-  if (!wait_serial(serial, 2000)) log_line(fmt("instance %u: frames still in flight at destroy; heaps released after 2 s", in->id));
-  release(in->heap);
-  release(in->null_tmpl);
-  release(in->qh);
+  const uint64_t done = marker_done();
+  if (RetireList<IUnknown>::in_flight(serial, done))
+    log_line(fmt("instance %u: frame %llu still in flight at destroy (marker at %llu); its buffers and heaps are kept until "
+                 "it completes, or until device removal", in->id, (unsigned long long)serial, (unsigned long long)done));
+  IUnknown* bufs[] = {in->arena, in->upload, in->qrb, in->out[0].proxy, in->out[1].proxy};
+  IUnknown* heaps[] = {in->heap, in->qh};
+  rt.live_resources -= retire_instance(rt.deferred, bufs, 5, heaps, 2, serial, done);
+  in->arena = in->upload = in->qrb = in->out[0].proxy = in->out[1].proxy = nullptr;
+  in->heap = nullptr;
+  in->qh = nullptr;
+  release(in->null_tmpl);   // CPU-only heap, a copy source at record time: never used by the GPU
 }
 
 bool new_arena(Instance* in, uint64_t bytes, std::string* err) {
@@ -2335,7 +2335,9 @@ void harvest(Instance* in) {
 void destroy_locked(Instance* in) {
   Runtime& rt = R();
   if (!in) return;
-  if (wait_serial(in->last_serial, 2000)) harvest(in);
+  // the last frames' timings: harvest what has completed; no wait (rt.mu is held, and a frame not yet submitted would
+  // never complete during it; issue #63). Frames still in flight are left out of the last window.
+  harvest(in);
   log_timing(in);   // the last, partial window
   log_line(fmt("destroy instance %u after %llu frames (%llu failed)", in->id, (unsigned long long)in->frames,
                (unsigned long long)in->failed));
