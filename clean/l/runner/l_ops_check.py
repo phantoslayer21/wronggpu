@@ -15,6 +15,8 @@ reported too):
 - l_linear_32_32_f16: RN16(b + Win2 x), FP16;
 - l_project_gather: the 2 x 2 gather and the 128 -> 64 projection (running FP16 sum per group of 32, clamp, FP8);
 - l_dec_project: the 64 -> 4 x 32 projection scattered to the pixel map;
+- l_coef_pack12 (pack12 store form): its images, unpacked, byte-identical to l_coef's A, B, C and latent, with
+  sentinel-filled buffers (no byte past a buffer written, every pixel inside R written) and a negative control;
 - l_coef: Model L's per-pixel functions on an FP16 map against oracle.coefficients_l: stored codes of A, B and the
   latent within one step, C within 4 FP16 ulp (the oracle's exponential and tanh are exact; the kernel's use the
   hardware operations), with the counts that differ at all.
@@ -162,6 +164,79 @@ def boundary_cases(g, rng, enc):
     return out
 
 
+SENTINEL = 0xA5
+SLACK = 64
+
+
+def _launch_coef(g, kernel, yb, blob, sizes, P, grid, null_b=False):
+    """Run an l_coef form with output buffers of the given byte sizes (A, B, C, latent), each followed by SLACK bytes,
+    all filled with SENTINEL first. Returns the downloaded buffers including their slack."""
+    h = g.hip
+    py, pw = h.malloc(len(yb)), h.malloc(len(blob))
+    h.upload(py, yb)
+    h.upload(pw, blob)
+    outs = []
+    for n in sizes:
+        if n is None:
+            outs.append(None)
+            continue
+        p = h.malloc(n + SLACK)
+        h.memset(p, SENTINEL, n + SLACK)
+        outs.append(p)
+    args = [ctypes.c_void_p(py)] + [ctypes.c_void_p(p or 0) for p in outs] + [ctypes.c_void_p(pw), P]
+    h.launch(h.get_function(g.mod, kernel), grid, 256, args)
+    h.sync()
+    res = [None if p is None else np.frombuffer(h.download(p, n + SLACK), np.uint8) for p, n in zip(outs, sizes)]
+    for p in [py, pw] + [p for p in outs if p]:
+        h.free(p)
+    return res
+
+
+def unpack12(a8, c4):
+    """pack12 images (image A: 2 words per pixel, image C: 1 word) -> (A codes word, B codes word, C words [C0C1,
+    C2]) in the base form's layout (padding bytes 0)."""
+    w0, w1 = a8[0::2], a8[1::2]
+    A = w0 & 0xFFFFFF
+    B = (w0 >> 24) | ((w1 & 0xFFFF) << 8)
+    C = np.stack([c4, w1 >> 16], axis=-1).reshape(-1)
+    return A, B, C
+
+
+def coef_pack12_case(g, rng, dec, fh, fw, rh, rw):
+    """l_coef and l_coef_pack12 on the same FP16 map: the pack12 images, unpacked, must equal the base form's A, B,
+    C and latent byte for byte; no byte past any buffer may be written; every pixel inside R must be written (the base
+    form's padding bytes are 0, not the sentinel); and a one-bit change in the pack12 image must be caught (negative
+    control)."""
+    from clean.runner.dec0 import DecParams
+    y2 = L.f16(rng.normal(0, 2.0, (fh, fw, 32)))
+    yb = y2.astype(np.float16).tobytes()
+    blob = LP.pack_coef(dec)
+    npx = rh * rw
+    P = DecParams(rw=rw, rh=rh, fw=fw, fh=fh)
+    grid = -(-((fh // 2) * (fw // 2)) // 128)
+    base = _launch_coef(g, "l_coef", yb, blob, (4 * npx, 4 * npx, 8 * npx, 4 * npx), P, grid)
+    p12 = _launch_coef(g, "l_coef_pack12", yb, blob, (8 * npx, None, 4 * npx, 4 * npx), P, grid)
+    m = {"case": [fh, fw, rh, rw], "pixels": npx}
+    m["slack_untouched"] = all(bool((b[-SLACK:] == SENTINEL).all()) for b in base + [p for p in p12 if p is not None])
+    w = lambda b, n: b[:n].view(np.uint32)  # noqa: E731
+    bA, bB, bC, bL = w(base[0], 4 * npx), w(base[1], 4 * npx), w(base[2], 8 * npx), base[3][:4 * npx]
+    m["base_all_written"] = bool(((bA >> 24) == 0).all() and ((bB >> 24) == 0).all() and ((bC[1::2] >> 16) == 0).all())
+    a8, c4, pL = w(p12[0], 8 * npx), w(p12[2], 4 * npx), p12[3][:4 * npx]
+    uA, uB, uC = unpack12(a8, c4)
+    m["A_identical"] = bool(np.array_equal(uA, bA))
+    m["B_identical"] = bool(np.array_equal(uB, bB))
+    m["C_identical"] = bool(np.array_equal(uC, bC))
+    m["latent_identical"] = bool(np.array_equal(pL, bL))
+    bad = a8.copy()
+    k = int(rng.integers(0, npx))
+    bad[2 * k + 1] ^= np.uint32(1 << 20)                              # one bit of C2 of pixel k
+    nA, nB, nC = unpack12(bad, c4)
+    m["negative_control_caught"] = not np.array_equal(nC, bC)
+    m["pass"] = all(m[k_] for k_ in ("slack_untouched", "base_all_written", "A_identical", "B_identical", "C_identical",
+                                     "latent_identical", "negative_control_caught"))
+    return m
+
+
 def _fp8_metrics(got, ref, case):
     m = C32.metrics(got, ref)
     m.update({"case": case, "pass": C32.passes(m)})
@@ -212,6 +287,7 @@ def run(build, rocm, seeds=(89,)):
         res.setdefault("boundary", []).extend(boundary_cases(g, rng, enc))
         for case in COEF_CASES:
             res.setdefault("coef", []).append(coef_case(g, rng, dec, *case))
+            res.setdefault("coef_pack12", []).append(coef_pack12_case(g, rng, dec, *case))
     res["coef_total"] = {k: {"values": sum(m[k]["values"] for m in res["coef"]),
                              "differ": sum(m[k]["differ"] for m in res["coef"])}
                          for k in ("codes_A", "codes_B", "C", "codes_L")}
@@ -220,7 +296,11 @@ def run(build, rocm, seeds=(89,)):
                              "differ": sum(m["differ"] for m in res[k]),
                              "max_steps": max(m["max_steps"] for m in res[k])}
     res["f16_total"]["f16_differ"] = sum(m["f16_differ"] for m in res["f16"])
-    res["pass"] = all(m["pass"] for k in ("relu", "f16", "project", "dec_project", "coef", "boundary") for m in res[k])
+    kinds = ("relu", "f16", "project", "dec_project", "coef", "boundary", "coef_pack12")
+    p12 = res["coef_pack12"]
+    res["coef_pack12_total"] = {"cases": len(p12), "pixels": sum(m["pixels"] for m in p12),
+                                "all_pass": all(m["pass"] for m in p12)}
+    res["pass"] = all(m["pass"] for k in kinds for m in res[k])
     return res
 
 
@@ -235,7 +315,7 @@ def main(argv=None):
     with open(a.json, "w") as f:
         json.dump(res, f, indent=1)
     print({k: v for k, v in res.items() if k.endswith("_total") or k == "pass"})
-    for k in ("relu", "f16", "project", "dec_project", "coef", "boundary"):
+    for k in ("relu", "f16", "project", "dec_project", "coef", "boundary", "coef_pack12"):
         for m in res[k]:
             if not m["pass"]:
                 print("FAIL", k, json.dumps(m))
