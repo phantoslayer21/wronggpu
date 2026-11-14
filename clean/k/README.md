@@ -22,6 +22,7 @@ model selection, the build, the runtime's create check). Model M's behaviour is 
 | `runner/k_model.py` | reads the converter's `--raw` output (spec 48) with the preset-K map's names and shapes, and the window-offset table (`net/window_offsets`) |
 | `reference/fp.py` | exact FP32 / FP16 helpers (fma by round-to-odd, round half away, truncation to FP16) |
 | `reference/instage.py`, `outstage.py` | spec 42 input stage, spec 43 output stage and filter-shape table (NumPy) |
+| `reference/exposure.py` | which exposure value is which (E_cur the game's exposure or 1, E_aux the auto-exposure value, LDR all 1): the rule in front of the two stages |
 | `kernels/k_fp.h`, `k_io.hip` | the input / output stage kernels (`k_in_color`, `k_in_base`, `k_out_pixel`, `k_out_hidden`) |
 | `runner/k_io.py` | their launch arguments, host scalars, the exact 2^E table |
 | `runner/k_frame.py` | one whole frame: input stage → network → output stage, histories and frame index (`KFrame`), and the chained NumPy reference (`reference_frame`) |
