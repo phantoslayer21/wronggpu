@@ -207,12 +207,14 @@ def weight_shape(layer):
 # ---- the networks as a whole ----------------------------------------------------------------------------------------
 
 def net1_forward(*args, **kwargs):
-    """net1 end to end: OPEN (decoder levels and skip connections, blob 2's tap count, the upsampling, the grid size
-    and the launch order are not delivered)."""
+    """net1 end to end with the original's wiring: OPEN (decoder levels and skip connections, blob 2's tap count, the
+    upsampling, the grid size and the launch order are not delivered). clean/fg/reference/forward.py runs it from a
+    wiring the caller supplies."""
     raise OpenItem("net1 wiring: launch order, decoder levels, skip connections, blob 2 (1 x 1 or 2 x 2)")
 
 
 def net2_forward(*args, **kwargs):
-    """net2 end to end: OPEN (which layer reads which buffer, where the pooling, upscales and combines sit, which
-    layers end in ReLU, the grid size)."""
+    """net2 end to end with the original's wiring: OPEN (which layer reads which buffer, where the pooling, upscales
+    and combines sit, which layers end in ReLU, the grid size). clean/fg/reference/forward.py runs it from a wiring the
+    caller supplies."""
     raise OpenItem("net2 wiring: launch order, pooling / upscale / combine placement, ReLU per layer")
