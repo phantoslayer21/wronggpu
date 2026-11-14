@@ -32,10 +32,12 @@ jobs:
           python -m pip install --disable-pip-version-check reuse==5.0.2
           reuse lint
 
-  build-and-test:
-    name: CPU build and tests
+  # The CPU builds and tests run as parallel jobs; each builds what it needs (no build output is shared between jobs).
+  # "CPU build and tests" (the required check) passes only when all of them pass.
+  converter-shared:
+    name: "CPU: converter and shared settings"
     runs-on: windows-2022
-    timeout-minutes: 90
+    timeout-minutes: 60
     env:
       CMAKE_BUILD_PARALLEL_LEVEL: "4"
       PYTHONDONTWRITEBYTECODE: "1"
@@ -61,12 +63,48 @@ jobs:
           cmake -S clean/wgshared -B out/wgshared -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
           cmake --build out/wgshared
           ctest --test-dir out/wgshared --output-on-failure
+
+  frontend:
+    name: "CPU: FSR front end"
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: "4"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.3.0
+        with:
+          python-version: "3.12"
+      - name: Python packages
+        run: python -m pip install --disable-pip-version-check numpy ninja
+      - uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
       - name: FSR front end (CPU tests)
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           cmake -S clean/fsr -B out/frontend -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DWG_MODEL_K=OFF -DWG_BUILD_ID=ci -DWG_BUILD_ASI=ON
           cmake --build out/frontend
           ctest --test-dir out/frontend --output-on-failure -R "unit|hosted|diagnostic|support" -E "overlay|split|d3d12"
+
+  launcher:
+    name: "CPU: launcher"
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: "4"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.3.0
+        with:
+          python-version: "3.12"
+      - name: Python packages
+        run: python -m pip install --disable-pip-version-check numpy ninja
+      - uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
       - name: HIP runtime stand-in for the launcher tests
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
@@ -79,6 +117,24 @@ jobs:
           cmake -S clean/installer -B out/launcher-tests -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DWRONGGPU_PAYLOAD_DIR="$PWD/out/no-payload" -DWRONGGPU_TESTING=OFF -DWRONGGPU_PRESET_K=OFF -DWRONGGPU_DIRECT_ROUTE=OFF
           cmake --build out/launcher-tests --target wg-core-tests launcher-core-tests coexist-core-tests convert-ignore-tests
           ctest --test-dir out/launcher-tests --output-on-failure -R "^(wg-core|launcher-core|coexist-core|convert-ignore|source-size|wording)$"
+
+  rr-plugin:
+    name: "CPU: Ray Reconstruction plugin"
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: "4"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.3.0
+        with:
+          python-version: "3.12"
+      - name: Python packages
+        run: python -m pip install --disable-pip-version-check numpy ninja
+      - uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
       - name: Ray Reconstruction plugin (build and CPU tests)
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
@@ -86,5 +142,43 @@ jobs:
           python clean/rr_f/proxy/tools/build.py --out out/rr-proxy --no-tests
           python tools/ci/run_proxy_core_tests.py out/rr-proxy
           "WG_RR_PROXY_BUILD=$PWD\out\rr-proxy" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Python tests that need the plugin build (CPU)
+        run: python tools/ci/run_python_tests.py --group proxy
+
+  python:
+    name: "CPU: Python tests ${{ matrix.shard }}/3"
+    runs-on: windows-2022
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: "4"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.3.0
+        with:
+          python-version: "3.12"
+      - name: Python packages
+        run: python -m pip install --disable-pip-version-check numpy ninja
+      - uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
       - name: Python tests (CPU)
-        run: python tools/ci/run_python_tests.py --jobs 3
+        run: python tools/ci/run_python_tests.py --jobs 3 --shard ${{ matrix.shard }}/3
+
+  build-and-test:
+    name: CPU build and tests
+    if: ${{ always() }}
+    needs: [converter-shared, frontend, launcher, rr-plugin, python]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: All CPU jobs passed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS"
+          test "$(echo "$RESULTS" | jq -r '[.[].result] | all(. == "success")')" = true
