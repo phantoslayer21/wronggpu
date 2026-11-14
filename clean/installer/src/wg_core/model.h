@@ -43,6 +43,13 @@ struct ModelCandidate { wstring path, origin; };
 
 wstring ReadModelSource(Context& ctx);
 bool ExistingModelValid(Context& ctx, wstring* why = nullptr, wgc::ModelFileInfo* info = nullptr);
+// One model's file (L'M', L'L', ...) checked against that model's converter data, whatever model ctx has selected.
+bool ModelFileReady(Context& ctx, wchar_t preset, wstring* why = nullptr);
+// The player's lines for Model L chosen while its data on this PC is not ready (`why`: ModelFileReady's reason).
+inline wstring ModelLNotReady(const wstring& why) {
+    return L"Model L's data on this PC is not ready (" + why + L"). Convert it first: WrongGPU.exe model convert --preset=L "
+           L"(optionally --model=<the nvngx_dlss.dll of one of your games, version 310.5 or newer>).";
+}
 bool MapHasOptionalGroup(const wgc::Map& map);
 wstring FilterText(Context& ctx, bool present);
 std::vector<ModelCandidate> ModelCandidates(const GameTarget* t, const wstring& userDll, const std::vector<StoreGame>& libraries);
