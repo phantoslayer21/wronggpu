@@ -12,6 +12,12 @@ typedef unsigned short u16;
 #define FG_FBH32(v) (31u - (uint)__builtin_clz(v))
 #include "fg_exact16.h"
 
+// Single-precision steps are one IEEE operation each, as written (the upscale's positions): no contraction.
+#pragma clang fp contract(off)
+
+WG_FN uint fg_f2h(float f) { return (uint)__builtin_bit_cast(u16, (_Float16)f); }      // round to nearest even
+WG_FN float fg_h2f(uint h) { return (float)__builtin_bit_cast(_Float16, (u16)h); }     // exact
+
 // fg_conv_f16: one convolution of net1. Stride 1, zero border (k = 3) or none (k = 1), cross-correlation; the float16
 // accumulator starts at the bias and takes 16-term chunks (16 input channels of one tap), each summed exactly and added
 // with one float16 rounding, in the chunk order `order`: 0 ascending (1 x 1: channel blocks in order), 1 channel block
@@ -76,4 +82,46 @@ WG_KERNEL_N(fg_maxpool2_f16, 256)(const u16* __restrict__ x, u16* __restrict__ y
     m = fg_pool_step16(m, p[W]);
     m = fg_pool_step16(m, p[W + 1]);
     y[idx] = (u16)m;
+}
+
+// One axis of the align-corners rule: s = r * o (single precision), i0 = trunc(s), i1 = trunc(s + 1), both n_in - 1 when
+// i1 >= n_in; weights w1 = h(s - i0), w0 = h((i0 - s) + 1) as float16 values.
+struct FgTap { int i0, i1; float w0, w1; };
+WG_FN FgTap fg_axis(float r, int o, int n_in) {
+    FgTap t;
+    const float s = r * (float)o;
+    t.i0 = (int)s;
+    t.i1 = (int)(s + 1.0f);
+    if (t.i1 >= n_in) { t.i0 = n_in - 1; t.i1 = n_in - 1; }
+    t.w1 = fg_h2f(fg_f2h(s - (float)t.i0));
+    t.w0 = fg_h2f(fg_f2h(((float)t.i0 - s) + 1.0f));
+    return t;
+}
+
+// h(h(wa * a) + h(wb * b)): float16 products (exact in single precision, then rounded) and a float16 sum (single
+// precision then float16: the same as one rounding of the exact sum, 24 >= 2 * 11 + 2)
+WG_FN float fg_lerp16(float wa, float a, float wb, float b) {
+    return fg_h2f(fg_f2h(fg_h2f(fg_f2h(wa * a)) + fg_h2f(fg_f2h(wb * b))));
+}
+
+// fg_upscale_f16: net1's bilinear upscale, align corners, x [C][hi][wi] -> y [C][ho][wo] float16. rx, ry: the ratios
+// (wi - 1) / (wo - 1) and (hi - 1) / (ho - 1) as single-precision bits (0 for an extent of 1), computed by the caller:
+// top = h(h(wx0 P[y0][x0]) + h(wx1 P[y0][x1])), bottom the same on row y1, out = h(h(wy0 top) + h(wy1 bottom)).
+// NaN results are written as 0x7E00. Output element idx = (c * ho + oy) * wo + ox.
+WG_KERNEL_N(fg_upscale_f16, 256)(const u16* __restrict__ x, u16* __restrict__ y, int C, int hi, int wi, int ho, int wo,
+                                 uint rx_bits, uint ry_bits) {
+    const int idx = (int)(wg_block_id() * 256u + wg_lane_id());
+    if (idx >= C * ho * wo) return;
+    const int c = idx / (ho * wo);
+    const int rem = idx - c * (ho * wo);
+    const int oy = rem / wo;
+    const int ox = rem - oy * wo;
+    const FgTap tx = fg_axis(__builtin_bit_cast(float, rx_bits), ox, wi);
+    const FgTap ty = fg_axis(__builtin_bit_cast(float, ry_bits), oy, hi);
+    const u16* p = x + c * hi * wi;
+    const float top = fg_lerp16(tx.w0, fg_h2f(p[ty.i0 * wi + tx.i0]), tx.w1, fg_h2f(p[ty.i0 * wi + tx.i1]));
+    const float bot = fg_lerp16(tx.w0, fg_h2f(p[ty.i1 * wi + tx.i0]), tx.w1, fg_h2f(p[ty.i1 * wi + tx.i1]));
+    uint out = fg_f2h(fg_lerp16(ty.w0, top, ty.w1, bot));
+    if (fg_is_nan16(out) != 0u) out = FG_NAN16;
+    y[idx] = (u16)out;
 }

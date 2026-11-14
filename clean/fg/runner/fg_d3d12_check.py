@@ -19,7 +19,8 @@ the native D3D12 device in a child process, then:
   payload is not specified).
 Cases: fg_conv_f16: every net1 layer shape (cin, cout, kernel size, chunk order, activation) on small grids of several
 sizes, and special values (NaN, +-inf, subnormals, +-65504, -0) in the inputs and weights; fg_maxpool2_f16: random maps
-of several sizes (odd ones too) and every 2 x 2 window over ten special values. Output: counts only, no timing.
+of several sizes (odd ones too) and every 2 x 2 window over ten special values; fg_upscale_f16: net1's level pairs,
+other sizes, an output extent of 1, equal sizes, special values. Output: counts only, no timing.
 """
 import argparse
 import ctypes
@@ -134,8 +135,41 @@ def _pool_case(kernel, x, label):
             "defined": 2 * n, "cpu": lambda: N.maxpool2(x.astype(np.float64))}
 
 
+def _ratio_bits(n_in, n_out):
+    """The align-corners ratio (n_in - 1) / (n_out - 1) as single-precision bits (correctly rounded; 0 for n_out 1), as
+    net1.upscale_to computes it."""
+    r = np.float32(n_in - 1) / np.float32(n_out - 1) if n_out > 1 else np.float32(0)
+    return int(np.array([r], np.float32).view(np.uint32)[0])
+
+
+def upscale_cases(kernel, rng):
+    """net1's level pairs (the coarse level is the fine one halved with floor), other odd sizes, an output extent of 1,
+    equal sizes, and special values (NaN, +-inf, subnormals, +-65504, -0) in the input."""
+    cases = []
+    pairs = [((17, 33), (35, 67)), ((1, 2), (2, 4)), ((4, 8), (8, 16)), ((8, 16), (17, 33)), ((3, 4), (7, 9)),
+             ((1, 1), (2, 3)), ((5, 2), (11, 4)), ((2, 3), (2, 3)), ((1, 3), (1, 7)), ((1, 1), (1, 1))]
+    for (hi, wi), (ho, wo) in pairs:
+        for C in (1, 32):
+            x = _f16(rng.uniform(-3, 3, (C, hi, wi)))
+            cases.append(_upscale_case(kernel, x, ho, wo, f"{C}x{hi}x{wi} -> {ho}x{wo}"))
+    x = _f16(rng.uniform(-3, 3, (16, 9, 13)))
+    f = rng.random(x.shape) < 0.08
+    x[f] = rng.choice(SPECIALS, int(f.sum()))
+    cases.append(_upscale_case(kernel, x, 19, 27, "specials 9x13 -> 19x27"))
+    return cases
+
+
+def _upscale_case(kernel, x, ho, wo, label):
+    C, hi, wi = x.shape
+    n = C * ho * wo
+    return {"kernel": kernel, "grid": -(-n // 256), "block": 256, "label": label,
+            "args": [("buf", x.tobytes()), ("out", 2 * n + SLACK), ("u32", C), ("u32", hi), ("u32", wi), ("u32", ho),
+                     ("u32", wo), ("u32", _ratio_bits(wi, wo)), ("u32", _ratio_bits(hi, ho))],
+            "defined": 2 * n, "cpu": lambda: N.upscale_to(x.astype(np.float64), wo, ho)}
+
+
 KINDS = {"fg_conv_f16": lambda kernel, rng: conv_cases(kernel, rng, specials=True),
-         "fg_maxpool2_f16": pool_cases}
+         "fg_maxpool2_f16": pool_cases, "fg_upscale_f16": upscale_cases}
 
 
 # ---- prepare --------------------------------------------------------------------------------------------------------
