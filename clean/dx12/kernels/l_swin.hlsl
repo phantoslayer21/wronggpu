@@ -13,9 +13,14 @@
 //                            reads first the rows of x2 the linears wrote last, and its last-written rows of x3 are the
 //                            ones l_project_gather reads first (more cache hits at both hand-offs)
 //   l_swin_block_c32_dec_nc  the decoder block: FP8 map in with the token-grid mirror (SW_SRC 2), FP16 out (SW_OUT_F16)
+//   l_swin_block_c32_enc_lin_nc  D3D12 only: the encoder block with the two input linears as its prologue (SW_SRC 3;
+//                            byte for byte the pair l_linear_32_32_fused -> _enc_nc, which stays the fallback route):
+//                            the FP8 q halo map in, x2 neither written nor read. Arguments: _enc_nc's (x = q), then
+//                            enc0.Win1, enc0.Win2
 //
 // @wg-kernel l_swin_block_c32_nc co=l_swin.co block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=0,SW_ENTRY_OVERRIDE=l_swin_block_c32_nc
 // @wg-kernel l_swin_block_c32_enc_nc co=l_swin.co block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=3,SW_GELU_PAT=13333,SW_SRC=1,SW_ENTRY_OVERRIDE=l_swin_block_c32_enc_nc,WG_REV_ORDER=1
+// @wg-kernel l_swin_block_c32_enc_lin_nc co=- block=256 wave=32 args=p,p,p,p,u,u,u,u,p,p defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=3,SW_GELU_PAT=13333,SW_SRC=3,SW_ENTRY_OVERRIDE=l_swin_block_c32_enc_lin_nc,WG_REV_ORDER=1
 // @wg-kernel l_swin_block_c32_dec_nc co=l_swin.co block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=1,SW_SRC=2,SW_OUT_F16=1,SW_ENTRY_OVERRIDE=l_swin_block_c32_dec_nc
 //   l_swin_block_c32_dec_coef12_nc  D3D12 only: the decoder block with l_coef_pack12 as its epilogue (SW_OUT_COEF12;
 //                                   byte for byte the pair _dec_nc -> l_coef_pack12, which stays the fallback route);
