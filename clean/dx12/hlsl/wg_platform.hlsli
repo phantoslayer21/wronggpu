@@ -39,7 +39,12 @@ static uint wg_bid_;   // workgroup index in the grid (HIP blockIdx.x)
 
 #define WG_KERNEL(name) [numthreads(WG_BLOCK, 1, 1)] [WaveSize(WG_WAVE)] \
     void name(uint wg_sv_tid_ : SV_GroupThreadID, uint wg_sv_gid_ : SV_GroupID)
+#if WG_REV_ORDER   // a kernel declared with WG_REV_ORDER=1: workgroup g does the work of workgroup G - 1 - g (the same
+                  // bytes; the last-written part of its input, likelier still in the caches, first)
+#define WG_SETUP() (wg_tid_ = wg_sv_tid_, wg_bid_ = wg_grid_ - 1u - (wg_sv_gid_ + wg_group_base_))
+#else
 #define WG_SETUP() (wg_tid_ = wg_sv_tid_, wg_bid_ = wg_sv_gid_ + wg_group_base_)
+#endif
 
 uint wg_lane_id() { return wg_tid_; }           // HIP wg_lane_id(): the lane in the workgroup (0 .. WG_BLOCK - 1)
 uint wg_block_id() { return wg_bid_; }          // HIP wg_block_id(): grids above 65535 run as several dispatches

@@ -84,23 +84,47 @@ def control_cases(kernel, rng):
 TOKENS = [(8, 12), (18, 34), (4, 4), (34, 50), (3, 5), (2, 9)]
 
 
-def _project_blob(rng, rows, frags):
+def _project_blob(rng, rows, frags, scale=0.2, bias_scale=0.5):
     """Projection blob: bias tile vector (`rows` floats), then `frags` fragments of 256 FP8 bytes."""
-    return rng.normal(0, 0.5, rows).astype(np.float32).tobytes() + fp8_encode(q8(rng.normal(0, 0.2, frags * 256))).tobytes()
+    return (rng.normal(0, bias_scale, rows).astype(np.float32).tobytes() +
+            fp8_encode(q8(rng.normal(0, scale, frags * 256))).tobytes())
+
+
+# FP8 codes the network does not produce but the kernels' conversions must treat as HIP does: both NaN codes, +-448,
+# +-0, subnormals
+SPECIAL_FP8 = np.array([0x7f, 0xff, 0x7e, 0xfe, 0x00, 0x80, 0x01, 0x81, 0x07, 0x87], np.uint8)
+# (weight, bias) scales of the projection cases: normal; large (sums past 448 and past FP16's 65504: the clamps,
+# infinities); tiny (FP16 subnormal and zero results)
+PROJECT_SCALES = [(0.2, 0.5), (24.0, 400.0), (2e-3, 1e-4)]
+
+
+def _fp8_map_special(rng, n, special):
+    """_fp8_map, with special FP8 codes in a tenth of the bytes when `special`."""
+    q = np.frombuffer(_fp8_map(rng, n), np.uint8).copy()
+    if special:
+        pick = rng.random(q.size) < 0.1
+        q[pick] = rng.choice(SPECIAL_FP8, int(pick.sum()))
+    return q.tobytes()
 
 
 def project_cases(kernel, rng):
     """l_project_gather: x [2 th][2 tw][32] -> features [th][tw][64] (blob enc0.project: 64 bias rows, 4 x 8 fragments).
-    l_dec_project: z [th][tw][64] -> y [2 th][2 tw][32] (blob dec0.project: 128 bias rows, 8 x 4 fragments)."""
+    l_dec_project: z [th][tw][64] -> y [2 th][2 tw][32] (blob dec0.project: 128 bias rows, 8 x 4 fragments).
+    Every token grid at the three PROJECT_SCALES, every other case with special FP8 codes in the input."""
     cases = []
-    for (th, tw) in TOKENS:
+    for ti, (th, tw) in enumerate(TOKENS):
         ntok = th * tw
         npx = 4 * ntok
-        if kernel == "l_project_gather":
-            args = [("buf", _fp8_map(rng, npx * 32)), ("out", ntok * 64), ("buf", _project_blob(rng, 64, 32))]
-        else:
-            args = [("buf", _fp8_map(rng, ntok * 64)), ("out", npx * 32), ("buf", _project_blob(rng, 128, 32))]
-        cases.append({"kernel": kernel, "grid": -(-ntok // 128), "block": 256, "args": args + [("u32", tw), ("u32", th)]})
+        for si, (s, b) in enumerate(PROJECT_SCALES):
+            special = (ti + si) % 2 == 1
+            if kernel == "l_project_gather":
+                args = [("buf", _fp8_map_special(rng, npx * 32, special)), ("out", ntok * 64),
+                        ("buf", _project_blob(rng, 64, 32, s, b))]
+            else:
+                args = [("buf", _fp8_map_special(rng, ntok * 64, special)), ("out", npx * 32),
+                        ("buf", _project_blob(rng, 128, 32, s, b))]
+            cases.append({"kernel": kernel, "grid": -(-ntok // 128), "block": 256,
+                          "args": args + [("u32", tw), ("u32", th)]})
     return cases
 
 
@@ -209,7 +233,11 @@ POST_CASES = [(24, 16, 54, 36, False, "random", False), (31, 17, 70, 38, False, 
               (20, 12, 60, 36, False, "random", False), (33, 19, 99, 57, True, "random", False),
               (17, 11, 38, 25, False, "extreme_c", False), (16, 12, 16, 12, False, "offset_0.1", False),
               (16, 12, 16, 12, True, "offset_0.05", False), (40, 24, 40, 24, False, "random", False),
-              (42, 26, 63, 39, False, "random", True), (26, 18, 52, 36, False, "specials", False)]
+              (42, 26, 63, 39, False, "random", True), (26, 18, 52, 36, False, "specials", False),
+              (30, 18, 45, 27, False, "random", "extreme"), (22, 14, 50, 32, False, "specials", "extreme")]
+# expo "extreme": the exposure pair's e_prev far from 1 (the history divisions' quotients near the FP32 range ends,
+# FP32 denormal or infinite results) or not a positive normal number (NaN, negative, infinite)
+EXTREME_E_PREV = (1e-30, 3e-38, 1e30, 3e38, float("nan"), -1.5, float("inf"), 2.0 ** -126)
 POST_SLACK = 64   # sentinel bytes after each output: neither back end may write them
 
 
@@ -260,6 +288,8 @@ def post_cases(kernel, rng):
         data = RP.post_device_inputs(x)
         if expo:   # the exposures come from the pointer; the by-value fields hold other values
             ev = np.array([prm.e, 0.0 if rng.random() < 0.5 else prm.e_prev], np.float32)
+            if expo == "extreme":
+                ev[1] = EXTREME_E_PREV[int(rng.integers(len(EXTREME_E_PREV)))]
             prm.e, prm.e_prev = float(rng.uniform(0.5, 2.0)), float(rng.uniform(0.5, 2.0))
         n_hist, n_red = dw * dh * 8, max(4, (dw // 2) * (dh // 2) * 4)
         n_disp = RP.display_bytes(dw, dh)

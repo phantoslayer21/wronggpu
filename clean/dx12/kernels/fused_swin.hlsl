@@ -450,6 +450,16 @@ void load_frags_g(uint base, uint off, out uint2 f[KC])
 #if (SW_SRC != 0 || SW_OUT_F16) && (SW_ADD || SW_ECL > 0)
 #error "SW_SRC / SW_OUT_F16: plain blocks only"
 #endif
+#ifndef SW_OUT_COEF12
+#define SW_OUT_COEF12 0
+#endif
+#if SW_OUT_COEF12
+#if !SW_OUT_F16 || SW_C != 32
+#error "SW_OUT_COEF12: Model L's decoder block only (SW_OUT_F16, C = 32)"
+#endif
+#define COEF_PACK12 1
+#include "l_coef_px.hlsli"
+#endif
 #if SW_SRC == 1
 // LHaloF16Src: the lane's channels hh * C/2 + 8 k + j of the member at grid position (pr, pc) (inside the 2-pixel halo),
 // from the FP16 map [H + 4][W + 4][C]
@@ -513,8 +523,9 @@ int wg_low0(int p0, int n)
 }
 
 #define EKC (SW_ECL / 16)
-#if (4 * SW_C / 16) % 8 != 0
-#error "fused_expand: MT = 4 C / 16 must be a multiple of the 8 waves"
+#define FE_NW (THREADS / 32)   // waves per workgroup (8; 4 in swin_c64w2.hlsl's 128-lane form)
+#if (4 * SW_C / 16) % FE_NW != 0
+#error "fused_expand: MT = 4 C / 16 must be a multiple of the waves"
 #endif
 // HIP fused_expand<C, CL>: the 8 windows' expanded block input e = q8(We y + be) into LDS records
 // [window][low token][sub-pixel][C] at e_lds. tail = expand weights (bias [4C] f32, then the fragments, in global memory).
@@ -539,19 +550,19 @@ void fused_expand(uint tail, uint e_lds, int nwx, int nwin, uint tid, int blk, u
         }
     }
     uint be = tail + hh * 32u;
-    // MT = 24 = 3 x 8 waves: every wave runs exactly MT / 8 tiles, unrolled with all weight fragments and biases issued
-    // first (one exposed global latency instead of one per tile)
+    // MT = 24 = 3 x 8 waves: every wave runs exactly MT / FE_NW tiles, unrolled with all weight fragments and biases
+    // issued first (one exposed global latency instead of one per tile)
     const uint wv = (uint)wg_uniform((int)wave);
-    uint2 fa[MT / 8][EKC];
-    v8f ba[MT / 8];
+    uint2 fa[MT / FE_NW][EKC];
+    v8f ba[MT / FE_NW];
     const uint fwb = tail + WE + wv * (EKC * 256u) + (lane * 8u + sw_zero_bits());
-    [unroll] for (uint it = 0; it < MT / 8; ++it) {
-        const uint mt = wv + 8u * it;
-        [unroll] for (uint kc = 0; kc < EKC; ++kc) fa[it][kc] = wg_ld64(fwb, (8u * it * EKC + kc) * 256u);
+    [unroll] for (uint it = 0; it < MT / FE_NW; ++it) {
+        const uint mt = wv + FE_NW * it;
+        [unroll] for (uint kc = 0; kc < EKC; ++kc) fa[it][kc] = wg_ld64(fwb, (FE_NW * it * EKC + kc) * 256u);
         ba[it] = wg_load8f(be, mt * 64u);
     }
-    [unroll] for (uint it2 = 0; it2 < MT / 8; ++it2) {
-        const uint mt = wv + 8u * it2;
+    [unroll] for (uint it2 = 0; it2 < MT / FE_NW; ++it2) {
+        const uint mt = wv + FE_NW * it2;
         uint k = mt / G, g = mt - k * G;
         v8f acc0 = ba[it2], acc1 = ba[it2];
         [unroll] for (uint kc2 = 0; kc2 < EKC; ++kc2) {
@@ -1128,7 +1139,33 @@ WG_KERNEL(SW_ENTRY)
 #if SW_OUT_F16
     // Output RN16(x2) as FP16, real window members only (HIP LStoreF16Epi).
     uint4 o16[KC];
+#if SW_OUT_COEF12 && COEF_CVT_HW
+    // the driver's conversions (the same bits as wg_to_f16 / the software forms): every lane computes, the hh = 0 lanes
+    // of real pixels inside the render rectangle store (the conversions need wave-uniform control flow)
+    [unroll] for (uint kh = 0; kh < KC; ++kh) o16[kh] = wg_to_f16_ags(acc[kh]);
+    {
+        g_z = wg_grid_ >> 31;
+        const float S = wg_ldf(coefW, 320u), T = wg_ldf(coefW, 324u);
+        const LCoefVals cv = l_coef_vals_hw(o16[0], o16[1], S, T);
+        if (dst >= 0 && hh == 0u && pr < coefRh && pc < coefRw)
+            l_coef_store12(cv, (uint)wg_uniform((int)coefA), (uint)wg_uniform((int)coefC), (uint)wg_uniform((int)coefL),
+                           (uint)(pr * coefRw + pc));
+    }
+    return;
+#endif
     [unroll] for (uint kf = 0; kf < KC; ++kf) o16[kf] = wg_to_f16(acc[kf]);
+#if SW_OUT_COEF12
+    // l_coef_pack12 of the map: o16[0] / o16[1] of the hh = 0 lane are the pixel's channels 0..7 / 8..15 (the map's
+    // bytes dst * 64 + 0 .. 31, its lo / hi loads); Model L's 13 values are all among them
+    if (dst >= 0 && hh == 0u && pr < coefRh && pc < coefRw) {
+        g_z = wg_grid_ >> 31;
+        const float S = wg_ldf(coefW, 320u), T = wg_ldf(coefW, 324u);
+        const uint pA = (uint)wg_uniform((int)coefA), pC = (uint)wg_uniform((int)coefC),
+                   pL = (uint)wg_uniform((int)coefL);
+        l_coef_px(o16[0], o16[1], S, T, pA, 0u, pC, pL, (uint)(pr * coefRw + pc));
+    }
+    return;
+#endif
     if (dst >= 0) {
         const uint ob16 = ((uint)dst * SW_C + hh * HALF) * 2u;
         [unroll] for (uint kg = 0; kg < KC; ++kg) wg_st128(out_p, ob16 + 16u * kg, o16[kg]);
