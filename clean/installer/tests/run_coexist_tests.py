@@ -171,12 +171,13 @@ def test_loaders_and_tools(t, opti, full):
             ("Path=" + os.path.join(b, "wronggpu-plugins")).lower() in ini.lower(), (rc, t.j.get("message"), ini[-300:]))
     write(os.path.join(b, "wronggpu-plugins", "wronggpu-asi.log"), "[1] [WrongGPU.asi] WrongGPU.asi loaded\r\n")  # what the plugin writes next to itself
     rc = t.run("uninstall", exe)
-    t.check("ASI loader: uninstall byte for byte (the plugin's folder and its log gone)", rc == 0 and snapshot(root) == before, diff(before, snapshot(root)))
+    left = lt.kept_runtime(before, root, "bin/x64/wronggpu-plugins/wronggpu-asi.log")  # (the plugin's log is not in the record: it and its folder stay)
+    t.check("ASI loader: uninstall byte for byte except the plugin's log, which stays with its folder", rc == 0 and snapshot(root) == left, diff(left, snapshot(root)))
     rc = install(t, exe, opti)  # a package without [Plugins] Path: the plugin stays in plugins\, with a warning
     t.check("ASI loader, OptiScaler without a Path setting: installed with a warning (may load twice)",
             rc == 0 and any("a second time" in w for w in t.j.get("warnings", [])) and os.path.isfile(os.path.join(b, "plugins", "WrongGPU.asi")), (rc, t.j.get("warnings")))
     t.run("uninstall", exe)
-    t.check("...uninstall byte for byte", snapshot(root) == before, diff(before, snapshot(root)))
+    t.check("...uninstall byte for byte (but for that log)", snapshot(root) == left, diff(left, snapshot(root)))
     shutil.rmtree(root, ignore_errors=True)
 
     # CET (version.dll), RED4ext (winmm.dll), ReShade (dxgi.dll): OptiScaler takes wininet.dll

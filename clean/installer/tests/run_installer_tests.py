@@ -96,6 +96,46 @@ def without_kept(snap):
     return rest, sorted(kept)
 
 
+def kept_runtime(before, root, *rels):
+    """`before` plus the wronggpu-* files that a test wrote into the game folder to stand for what WrongGPU's own programs
+    write while the game runs (logs, the plugin's settings): the install record does not list them, so an uninstall never
+    deletes them (no file is deleted for its name) and they, with their folders, are all that differs from `before`.
+    rels: their paths below root; one that is not there now is left out (so a check fails if a test expects a file that
+    is gone). Each file is taken as it is on disk."""
+    snap = dict(before)
+    for rel in rels:
+        p = os.path.join(root, *rel.replace("\\", "/").split("/"))
+        if not os.path.isfile(p):
+            continue
+        snap[key(rel)] = sha(read(p))
+        parts = rel.replace("\\", "/").split("/")[:-1]
+        for i in range(1, len(parts) + 1):
+            snap.setdefault(key("/".join(parts[:i])) + "/", "dir")
+    return snap
+
+
+def unrecorded_wronggpu_files(root):
+    """The wronggpu-* files below root that no install record below it lists (what WrongGPU's own programs write while the
+    game runs, or what a test writes to stand for that): their paths below root, for kept_runtime. Taken right before an
+    uninstall, with each file's bytes, so a check also proves they were not changed or deleted."""
+    recorded = set()
+    for dirpath, dirnames, filenames in os.walk(root):
+        if os.path.basename(dirpath).lower() == "wronggpu-setup" and "install.record" in filenames:
+            game = os.path.dirname(dirpath)
+            for line in read(os.path.join(dirpath, "install.record")).decode("utf-8", "replace").splitlines():
+                f = line.split(chr(9))
+                if len(f) == 5 and f[0] in ("copy", "disable", "rename", "dir"):
+                    recorded.add(os.path.normcase(os.path.normpath(os.path.join(game, f[4]))))
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d.lower() not in ("wronggpu-setup", "wronggpu-originals")]
+        for fn in filenames:
+            p = os.path.join(dirpath, fn)
+            if fn.lower().startswith("wronggpu-") and os.path.normcase(os.path.normpath(p)) not in recorded:
+                found.append(os.path.relpath(p, root).replace("\\", "/"))
+    return sorted(found)
+
+
 def diff(a, b):
     out = []
     for k in sorted(set(a) | set(b)):
@@ -435,8 +475,14 @@ def run_all(t, payload_dir):
     t.check("uninstall leaves the player's changed wronggpu.ini as it is", os.path.isfile(os.path.join(b, "wronggpu.ini")) and read(os.path.join(b, "wronggpu.ini")) == b"[settings]")
     ini_key = key(os.path.relpath(os.path.join(b, "wronggpu.ini"), root))
     after = {k: v for k, v in snapshot(root).items() if k != ini_key}
-    t.check("folder restored byte for byte apart from that file (WrongGPU's logs in the install folder and the game root removed, state folder gone)",
-            after == before, diff(before, after))
+    # the logs the "game" wrote are not in the install record: nothing proves them WrongGPU's, so the uninstall leaves them all
+    ran = [os.path.relpath(os.path.join(b, n), root) for n in ("wronggpu-fsr.log", "wronggpu-fsr.ini", "wronggpu-runtime.log", "wronggpu-report.json", "wronggpu-crash-20261005-1.txt")]
+    ran.append(os.path.relpath(os.path.join(root, "wronggpu-root.log"), root))
+    expect = kept_runtime(before, root, *ran)
+    t.check("folder restored byte for byte apart from that file and the unrecorded wronggpu-* logs of the install folder and the game root, which stay (state folder gone)",
+            after == expect, diff(expect, after))
+    for rel in ran:
+        os.remove(os.path.join(root, rel))
     os.remove(os.path.join(b, "wronggpu.ini"))
     t.check("Apps & features entry removed", not t.keys_for(b))
     t.check("model data removed with the last game", not os.path.exists(os.path.join(t.appdata(), "model")))
@@ -616,10 +662,11 @@ def run_all(t, payload_dir):
     t.check("with /REMOVEOLD: installed", rc == 0, "exit %d; %s" % (rc, t.logtext()[-500:]))
     t.check("old install removed byte-exactly (files, record, log, registry entry)",
             read(os.path.join(b, "winmm.dll")) == b"a game file the old install replaced" and not os.path.exists(os.path.join(b, "dlss45-amd")) and
-            not os.path.exists(os.path.join(b, "version.dll")) and not os.path.exists(os.path.join(b, "dlss45-loader.log")) and
+            not os.path.exists(os.path.join(b, "version.dll")) and read(os.path.join(b, "dlss45-loader.log")) == b"old log" and
             "DLSS45AMD-0000ABCD" not in t.env.reg_keys())
     rc = t.uninstall(b)
-    t.check("uninstall leaves the original game (as before the old install)", rc == 0 and snapshot(root) == pristine, diff(pristine, snapshot(root)))
+    pristine = kept_runtime(pristine, root, os.path.relpath(os.path.join(b, "dlss45-loader.log"), root))  # (the older install's log: not in its record, stays)
+    t.check("uninstall leaves the original game (as before the old install; the older install's own log stays)", rc == 0 and snapshot(root) == pristine, diff(pristine, snapshot(root)))
     root, b = cyberpunk(t, "legacy-loose", model=GOOD)
     write(os.path.join(b, "version.dll"), b"manual old loader " + "dlss45-loader.log".encode("utf-16-le"))
     write(os.path.join(b, "dlss45-amd-runtime.dll"), b"old runtime")
@@ -765,7 +812,8 @@ def run_rest(t, payload_dir, GOOD):  # noqa: N803
     write(os.path.join(b, "wronggpu-frontend.log"), "a log")
     zpath = os.path.join(t.work, "before-uninstall.zip")
     rc = t.uninstall(b, "/OUT=" + zpath)
-    t.check("logs zipped, then uninstalled", rc == 0 and os.path.isfile(zpath) and "wronggpu-frontend.log" in zipfile.ZipFile(zpath).namelist() and snapshot(root) == before)
+    t.check("logs zipped, then uninstalled (the log, not in the record, stays)", rc == 0 and os.path.isfile(zpath) and "wronggpu-frontend.log" in zipfile.ZipFile(zpath).namelist() and
+            snapshot(root) == kept_runtime(before, root, os.path.relpath(os.path.join(b, "wronggpu-frontend.log"), root)))
 
 
 def test_hip_probe(t):
@@ -1200,14 +1248,13 @@ def test_upgrade_paths(t, payload_dir):
     t.check("setup over WrongGPU's own OptiScaler-hosted install: no /MOVEMODS needed, no warning about another mod",
             rc == 0 and "No other upscaler mod or older install found" in log and "needs your OK" not in log and "Other upscaler mods" not in log, tail(rc, log))
     rec = read(os.path.join(b, "wronggpu-setup", "install.record")).decode()
-    shared = run_time[:3]  # 0.6.1 rule: shared names are never deleted by name; WrongGPU's own wronggpu-* log goes
-    t.check("...nothing was moved aside as another mod's file; OptiScaler's shared logs stay as they are, WrongGPU's own log is gone",
-            "\ndisable\t" not in rec and all(os.path.isfile(os.path.join(b, n)) and read(os.path.join(b, n)) == b"written while the game ran" for n in shared) and
-            not os.path.exists(os.path.join(b, "wronggpu-fsr.log")), rec[:900])
+    shared = run_time  # 0.6.1 rule: no file is deleted by its name: OptiScaler's shared logs and WrongGPU's own wronggpu-* log (not in the record) stay
+    t.check("...nothing was moved aside as another mod's file; OptiScaler's shared logs and WrongGPU's own log stay as they are",
+            "\ndisable\t" not in rec and all(os.path.isfile(os.path.join(b, n)) and read(os.path.join(b, n)) == b"written while the game ran" for n in shared), rec[:900])
     rc = t.uninstall(b)
     left = {key(os.path.relpath(os.path.join(b, n), root)) for n in shared}
     rest = {k: v for k, v in snapshot(root).items() if k not in left}
-    t.check("...and uninstall restores the game byte for byte apart from OptiScaler's shared logs, which stay",
+    t.check("...and uninstall restores the game byte for byte apart from those logs, which stay",
             rc == 0 and rest == before and all(os.path.isfile(os.path.join(b, n)) for n in shared), tail(rc, t.logtext(), root, before))
     root, b, before = installed("foreign-opti-upgrade")
     foreign = {"OptiScaler.ini": b"[Upscalers]", "OptiScaler.log": b"log", "dxgi.dll": b"proxy of an OptiScaler build"}
@@ -1757,8 +1804,9 @@ def test_asi_plugin(t, payload_dir):
     write(os.path.join(b, "wronggpu-asi.log"), "[12:00:01.000 1] [WrongGPU.asi] hooked\r\n")
     write(os.path.join(b, "wronggpu-asi.ini"), "selection=amd\r\n")
     rc = t.uninstall(b)
-    t.check("...uninstall removes the plugin, its folder and its files, and restores the game byte for byte",
-            rc == 0 and snapshot(root) == before and not os.path.exists(os.path.join(b, "plugins")), diff(before, snapshot(root)))
+    left = kept_runtime(before, root, *[os.path.relpath(os.path.join(b, n), root) for n in ("wronggpu-asi.log", "wronggpu-asi.ini")])
+    t.check("...uninstall removes the plugin and its folder and restores the game byte for byte, apart from the plugin's own log and settings (not in the record: they stay)",
+            rc == 0 and snapshot(root) == left and not os.path.exists(os.path.join(b, "plugins")), diff(left, snapshot(root)))
 
     # 2. The player's OptiScaler.ini has [Plugins] with plugins off and its own path: the install loads WrongGPU's
     # plugin from OptiScaler's own folder; the player's files come back on uninstall.
@@ -2128,7 +2176,9 @@ def test_preset_k(t):
     t.check("Preset-switched full uninstall succeeds", rc == 0, t.logtext()[-900:])
     t.check("Game model source remains untouched", read(os.path.join(game, "nvngx_dlss.dll")) == t.model.file)
     if opti:
-        t.check("OptiScaler route: the uninstall removes the plugin's wronggpu-asi.ini", not os.path.exists(asi))
+        # (written after the install and not in the record: nothing proves it WrongGPU's, so the uninstall leaves it)
+        t.check("OptiScaler route: the uninstall leaves the plugin's wronggpu-asi.ini (not recorded), as the plugin last wrote it", read(asi) == b"selection=wronggpu\r\n" or
+                read(asi).endswith(b"selection=wronggpu\r\n"))
     t.clear_model()
     _, dualgame = cyberpunk(t, "dual-model-source", t.model.file + k.file)
     rc = t.run("/DIR=" + dualgame, "/PRESET=M", *t.route)

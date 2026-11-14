@@ -24,7 +24,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import mockpe  # noqa: E402  (synthetic PE files with a version resource)
 import run_installer_tests as suite  # noqa: E402  (mock content, snapshots, the synthetic model case)
-from run_installer_tests import read, sha, snapshot, diff, write  # noqa: E402
+from run_installer_tests import read, sha, snapshot, diff, write, kept_runtime, unrecorded_wronggpu_files  # noqa: E402
 
 OPTI_INI = ("[Upscalers]\nDx12Upscaler=auto\n[Libraries]\nFfxDx12SRPath=auto\n[FSR]\nFsr4Update=auto\nUpscalerIndex=auto\n"
             "[Menu]\nShortcutKey=auto\nShowFps=auto\n")
@@ -455,7 +455,12 @@ def test_install_settings_uninstall(t, opti):
     # uninstall through the launcher
     rc = t.run("uninstall", exe)
     after = snapshot(root)
-    t.check("uninstall: exit 0, the game folder byte for byte as before", rc == 0 and after == before, (rc, t.j.get("message"), diff(before, after)))
+    # (the two files the tests above wrote to stand for the game's runtime logs and the plugin's settings are not in the install
+    # record: left in place and listed, never deleted for their names)
+    left = kept_runtime(before, root, "bin/x64/wronggpu-asi.ini", "bin/x64/wronggpu-fsr.log")
+    t.check("uninstall: exit 0, the game folder as before except the unrecorded wronggpu-* files, which stay and are listed",
+            rc == 0 and after == left and any("wronggpu-fsr.log" in w and w.startswith("Left in place (not recorded by the install)") for w in t.j.get("warnings", [])),
+            (rc, t.j.get("message"), diff(left, after), t.j.get("warnings")))
     t.check("uninstall: off the managed list, its entry gone", b.lower() not in managed_list(t)
             and not t.entries_for(b))
     # again, uninstalled by the restorer in the game folder
@@ -463,7 +468,7 @@ def test_install_settings_uninstall(t, opti):
     rc2 = t.raw([os.path.join(b, "wronggpu-setup", "uninstall.exe"), "/S", "/LOG=" + t.log])
     wait_gone(os.path.join(b, "wronggpu-setup"))
     after = snapshot(root)
-    t.check("the restorer (uninstall.exe /S): exit 0, byte for byte as before", rc == 0 and rc2 == 0 and after == before, (rc, rc2, diff(before, after)))
+    t.check("the restorer (uninstall.exe /S): exit 0, as before except the unrecorded wronggpu-* files (left in place)", rc == 0 and rc2 == 0 and after == left, (rc, rc2, diff(left, after)))
     shutil.rmtree(root, ignore_errors=True)
 
 
@@ -543,7 +548,8 @@ def test_slot(t):
     os.rmdir(prevd)
     rc = t.run("uninstall", exe)
     after = snapshot(root)
-    t.check("uninstall: the folder byte for byte as before (the slot's log removed with the slot)", rc == 0 and after == before, (rc, diff(before, after)))
+    left = kept_runtime(before, root, "bin/x64/optiscaler/custom/wronggpu/ffx/wronggpu-fsr.log")
+    t.check("uninstall: the folder as before except the slot's log, which is not in the record and stays (with its folders)", rc == 0 and after == left, (rc, diff(left, after)))
     shutil.rmtree(root, ignore_errors=True)
     # an OptiScaler before 10 that has an OptiScaler\ folder too: the FidelityFX library route, not the custom slot
     old = os.path.join(t.work, "opti09-folder-package")
@@ -1231,12 +1237,18 @@ def test_rr(t, opti, synth_f):
     # the plugin rewrote both settings files while the game ran; uninstall still leaves the folder as it was
     write(files["ini"], read(files["ini"]) + b"rr_plugin_key=1\r\n")
     write(files["settings"], read(files["settings"]) + b"rr_last_seen=1\r\n")
+    # the install created both settings files and the plugin rewrote them: their bytes are no longer the recorded ones, so the
+    # uninstall leaves them as they are (with the wronggpu-* logs that are not in the record) and says so
+    left = kept_runtime(before, root, *[os.path.relpath(files[k], root) for k in ("ini", "settings")], *unrecorded_wronggpu_files(root))
     rc = t.run("uninstall", exe)
     after = snapshot(root)
-    t.check("uninstall: exit 0, the RR game's folder byte for byte as before (the rewritten RR settings files go too)", rc == 0 and after == before, (rc, t.j.get("message"), diff(before, after)))
+    t.check("uninstall: exit 0, the RR game's folder as before except the two RR settings files the plugin rewrote and the unrecorded logs, which stay as they are",
+            rc == 0 and after == left and any(w == "Left in place (changed since install): " + os.path.relpath(files["ini"], b) for w in t.j.get("warnings", [])),
+            (rc, t.j.get("message"), diff(left, after), t.j.get("warnings")))
     t.check("uninstall: the shared RR data stays for the other games", os.path.isfile(fdata) == data_on)
+    leftN = kept_runtime(beforeN, rootN, *unrecorded_wronggpu_files(rootN))
     rc = t.run("uninstall", exeN)
-    t.check("uninstall of the game without RR: byte for byte as before", rc == 0 and snapshot(rootN) == beforeN, (rc, diff(beforeN, snapshot(rootN))))
+    t.check("uninstall of the game without RR: byte for byte as before (the unrecorded wronggpu-* files stay)", rc == 0 and snapshot(rootN) == leftN, (rc, diff(leftN, snapshot(rootN))))
     shutil.rmtree(root, ignore_errors=True)
     shutil.rmtree(rootN, ignore_errors=True)
 
@@ -1452,10 +1464,11 @@ def test_re9(t, opti, synth_f):
             rc == 0 and mirrored is not None and afterO == beforeO, (rc, t.j.get("message"), diff(beforeO, afterO)))
     # uninstall: the game folder byte for byte as before, the mirror's earlier copy put back, REFramework kept
     write(os.path.join(root, "_storage_", "wronggpu-rr.log"), "written again by the game")
+    left = kept_runtime(before, root, *unrecorded_wronggpu_files(root))
     rc = t.run("uninstall", exe)
     after = snapshot(root)
-    t.check("uninstall: byte for byte as before (the mirror's other copy back, REFramework kept, the mirror's log gone)",
-            rc == 0 and after == before, (rc, t.j.get("message"), diff(before, after)))
+    t.check("uninstall: as before except the unrecorded wronggpu-* logs, which stay (the mirror's other copy back, REFramework kept)",
+            rc == 0 and after == left and "_storage_/wronggpu-rr.log" in after, (rc, t.j.get("message"), diff(left, after)))
     for r in (root, rootB, rootO):
         shutil.rmtree(r, ignore_errors=True)
     t.env.pop("WRONGGPU_TEST_EDITION_DLL", None)
@@ -1565,8 +1578,9 @@ def test_direct_rr(t, opti, synth_f):
         rc2, pg, nm = page()
         t.check("window (no RR data): with the edition the RR card shows Convert, not the unavailable line",
                 rc2 == 0 and "Convert the Ray Reconstruction data" in pg and not any("isn't available here" in k for k in pg), (rc2, nm, list(pg)[:50]))
+    left = kept_runtime(before, root, *unrecorded_wronggpu_files(root))
     rc = t.run("uninstall", exe)
-    t.check("uninstall: byte for byte as before (the RR library untouched)", rc == 0 and snapshot(root) == before, (rc, t.j.get("message"), diff(before, snapshot(root))))
+    t.check("uninstall: byte for byte as before except the unrecorded wronggpu-* files (the RR library untouched)", rc == 0 and snapshot(root) == left, (rc, t.j.get("message"), diff(left, snapshot(root))))
     shutil.rmtree(root, ignore_errors=True)
     # rc5 (gamerules.h rrNotOffered): LEGO Batman has the same Unreal plugin layout, but its menu has no RR option: no RR
     # here (no RR files, no RR card but one line), and an older install's RR files go with a repair
@@ -1610,8 +1624,9 @@ def test_direct_rr(t, opti, synth_f):
     t.check("window, LEGO Batman: the RR card is the one line, no switch, nothing to convert or prepare, no Engine.ini question",
             rc2 == 0 and nooffer in pg and "Use WrongGPU (Ray Reconstruction)" not in pg and "Convert the Ray Reconstruction data" not in pg and
             "Prepare Ray Reconstruction" not in pg and not any("Engine.ini" in k for k in pg), (rc2, list(pg)[:60]))
+    lleft = kept_runtime(lbefore, lroot, *unrecorded_wronggpu_files(lroot))
     rc = t.run("uninstall", lexe)
-    t.check("LEGO Batman uninstall: byte for byte as before", rc == 0 and snapshot(lroot) == lbefore, (rc, diff(lbefore, snapshot(lroot))))
+    t.check("LEGO Batman uninstall: byte for byte as before except the unrecorded wronggpu-* files", rc == 0 and snapshot(lroot) == lleft, (rc, diff(lleft, snapshot(lroot))))
     # an older install with the RR files (made here under another exe name, which the plugin layout makes an RR game; then the
     # exe and its record line renamed to LEGO Batman's): status says no RR, a repair takes the RR files out by the record
     lb, oexe = lego_game("Older-Win64-Shipping.exe")

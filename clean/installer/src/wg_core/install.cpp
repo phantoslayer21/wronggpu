@@ -50,6 +50,35 @@ static bool MigrateOurSettings(Context& ctx, const wstring& dir, Ui& ui, string&
     return ReadAll(p, carried) && IEq(Sha256Bytes(carried.data(), carried.size()), ours->inst);
 }
 
+#if !WRONGGPU_PRESET_K
+// A build without Preset K: the plugin's wronggpu-asi.ini of an earlier install may say "selection=wronggpu-k", an entry this
+// build does not have. The restore before the install leaves that file in place (it is not in the record: nothing proves it
+// WrongGPU's, and no file is deleted for its name), so the line is changed to the entry that exists (selection=wronggpu); every
+// other line stays as it is. Returns true when the file was changed.
+static bool MigrateAsiSelectionToM(const wstring& dir) {
+    const wstring p = Join(dir, L"wronggpu-asi.ini");
+    string text;
+    if (!ReadAll(p, text)) return false;
+    string out;
+    bool changed = false;
+    for (size_t a = 0; a < text.size();) {
+        size_t e = text.find('\n', a);
+        const size_t end = e == string::npos ? text.size() : e + 1;
+        string line = text.substr(a, end - a), t = line;
+        while (!t.empty() && (t.back() == '\n' || t.back() == '\r' || t.back() == ' ' || t.back() == '\t')) t.pop_back();
+        for (auto& c : t) c = (char)tolower((unsigned char)c);
+        if (t == "selection=wronggpu-k") {
+            line = string("selection=wronggpu") + (line.size() >= 2 && line[line.size() - 2] == '\r' ? "\r\n" : line.back() == '\n' ? "\n" : "");
+            changed = true;
+        }
+        out += line;
+        a = end;
+    }
+    if (changed) WriteFileAtomic(p, out.data(), out.size());
+    return changed;
+}
+#endif
+
 #if WRONGGPU_DIRECT_ROUTE
 void RemoveEarlierDirect(Context&, const GameTarget&, Ui&, std::vector<wstring>&) {}
 #else
@@ -448,6 +477,7 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
         ui.log(w);
     }
     selectedOptions = OnlyModelM(selectedOptions);
+    if (MigrateAsiSelectionToM(dir)) LogLine(ctx, L"wronggpu-asi.ini: the entry an earlier install had selected is Model M's now (the file's other lines are unchanged)");
 #endif
     selectedIni = IniSet(selectedIni, "fsr", "runtime_options", selectedOptions);
     // Under Wine the game runs in a prefix of its own (Proton), where this launcher's %LOCALAPPDATA% does not exist: the
