@@ -405,8 +405,9 @@ def test_hook(built, binding, out, logs, probe, n=None, gen=None):
 GUARD_MODES_RELEASE = (["clean"], ["first"], ["first", "--take"], ["inline"], ["inline", "--take"], ["relay"], ["execonly"],
                        ["wrapper"], ["wrapper", "--yield"], ["overlay"], ["forward"], ["helper"], ["hostsplit"],
                        ["heaptable"], ["helpertable"], ["anon"], ["noaccess"], ["guardpage"], ["exe"], ["hops"], ["late"],
-                       ["late", "--take"], ["late-replace"], ["provider"], ["owncopy"], ["route"], ["route-other"],
-                       ["route-other", "--take"], ["route-other", "--yield"], ["route-inline"], ["route-refused"])
+                       ["late", "--take"], ["late-replace"], ["provider"], ["provider-refused"], ["owncopy"], ["route"],
+                       ["route-other"], ["route-other", "--take"], ["route-other", "--yield"], ["route-inline"],
+                       ["route-refused"])
 GUARD_MODES_PROBE = (["clean"], ["first"], ["inline"], ["execonly"], ["wrapper"], ["wrapper", "--yield"], ["overlay"],
                      ["forward"], ["heaptable"], ["noaccess"], ["hops"], ["late"], ["owncopy"], ["route-other"],
                      ["route-refused"])

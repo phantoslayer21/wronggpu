@@ -1178,42 +1178,26 @@ int role_for_name(const char* name) {
   return -1;
 }
 
-// The by-name entries of one import (or delay-load) name table: f(role, import name, slot address) for each that names
-// a hooked role. Every RVA (the name table, the address table, each name) is checked against the image's size (PeView)
-// before an address is formed from it; an entry outside the image ends the walk (nothing found there).
+// The by-name entries of one import (or delay-load) name table that name a hooked role: f(role, import name, slot
+// address). The walk (wgrr::guard::thunks) checks every RVA and every byte of a name against the image's extent
+// (PeView) before an address is formed from it, and counts each entry against the scan's budget.
 template <typename F>
-void guard_thunks(const wgrr::guard::PeView& pe, wgrr::guard::Reader& r, uint32_t names_rva, uint32_t iat_rva, F f) {
-  for (unsigned i = 0; i < 4096; ++i) {
-    const uint64_t off = (uint64_t)i * sizeof(IMAGE_THUNK_DATA64);
-    const uint8_t* np = pe.at(names_rva + off, sizeof(IMAGE_THUNK_DATA64));
-    const uint8_t* sp = pe.at(iat_rva + off, sizeof(IMAGE_THUNK_DATA64));
-    IMAGE_THUNK_DATA64 t;
-    if (!np || !sp || !r.get(np, &t) || !t.u1.AddressOfData) return;
-    if (t.u1.Ordinal & IMAGE_ORDINAL_FLAG64) continue;
-    const uint8_t* by = pe.at(t.u1.AddressOfData, offsetof(IMAGE_IMPORT_BY_NAME, Name) + 1);
-    char nm[96];
-    if (!by || !r.str(by + offsetof(IMAGE_IMPORT_BY_NAME, Name), nm, sizeof nm)) continue;
+void guard_thunks(const wgrr::guard::PeView& pe, wgrr::guard::Reader& r, wgrr::guard::Budget& b, uint32_t names_rva,
+                  uint32_t iat_rva, F f) {
+  wgrr::guard::thunks(pe, r, b, names_rva, iat_rva, [&](const char* nm, void** slot) {
     const int role = role_for_name(nm);
-    if (role >= 0) f(role, nm, const_cast<void**>(reinterpret_cast<void* const*>(sp)));
-  }
+    if (role >= 0) f(role, nm, slot);
+  });
 }
 
-// Every import slot of `module` that names a hooked role from the DLL `leaf`, read through the guard's reader: f(role,
-// import name, slot address).
+// Every import slot of `module` that names a hooked role from the DLL `leaf` (wgrr::guard::import_slots: descriptors
+// within the import directory's declared size): f(role, import name, slot address).
 template <typename F>
-void guard_import_slots(HMODULE module, const char* leaf, wgrr::guard::Reader& r, F f) {
-  wgrr::guard::PeView pe;
-  uint32_t rva = 0, size = 0;
-  if (!pe.open(module, r) || !pe.dir(IMAGE_DIRECTORY_ENTRY_IMPORT, &rva, &size)) return;
-  for (unsigned k = 0; k < 4096; ++k) {
-    const uint8_t* dp = pe.at(rva + (uint64_t)k * sizeof(IMAGE_IMPORT_DESCRIPTOR), sizeof(IMAGE_IMPORT_DESCRIPTOR));
-    IMAGE_IMPORT_DESCRIPTOR e;
-    if (!dp || !r.get(dp, &e) || !e.Name) return;
-    const uint8_t* np = pe.at(e.Name, 1);
-    char dll[64];
-    if (!np || !r.str(np, dll, sizeof dll) || _stricmp(dll, leaf) != 0) continue;
-    guard_thunks(pe, r, e.OriginalFirstThunk ? e.OriginalFirstThunk : e.FirstThunk, e.FirstThunk, f);
-  }
+void guard_import_slots(HMODULE module, const char* leaf, wgrr::guard::Reader& r, wgrr::guard::Budget& b, F f) {
+  wgrr::guard::import_slots(module, leaf, r, b, [&](const char* nm, void** slot) {
+    const int role = role_for_name(nm);
+    if (role >= 0) f(role, nm, slot);
+  });
 }
 
 // S0: the process-wide marker of the active WrongGPU RR copy. True: this copy is the first (it holds the marker). False:
@@ -1311,6 +1295,8 @@ ExportSeen g_export_seen[32];
 // unchanged_only: count an export that leads where it led at load as read, without classifying it again (late check).
 void guard_scan_exports(HMODULE module, const wgrr::guard::Env& env, bool anon_ok, wgrr::guard::Verdict* v,
                         bool record = false, bool unchanged_only = false) {
+  const wgrr::guard::ModuleRef ref(module);  // the interface stays loaded while its exports are looked up
+  if (!ref.held()) return;
   const std::string leaf = leaf_text(module);
   for (int role : kWgDecisiveRoles) {
     if (!role_in_route(role) || !kWgRoleNames[role][0]) continue;
@@ -1338,6 +1324,7 @@ bool guard_at_load(const IMAGE_DELAYLOAD_DESCRIPTOR* delay) {
   const g::Env env = guard_env(g_interposer);
   g::Reader r;
   g::Verdict v;
+  g::Budget budget(g::kScanMaxEntries, g::kScanMaxMs);  // the whole load scan: over it, inconclusive (RR stays active)
   std::wstring leaf_w;
   module_leaf(g_interposer, &leaf_w);
   const std::string leaf = narrow(leaf_w);
@@ -1347,9 +1334,11 @@ bool guard_at_load(const IMAGE_DELAYLOAD_DESCRIPTOR* delay) {
   DWORD need = 0;
   if (K32EnumProcessModules(GetCurrentProcess(), mods, sizeof mods, &need)) {
     const unsigned count = (unsigned)(need / sizeof(HMODULE)) < 1024 ? (unsigned)(need / sizeof(HMODULE)) : 1024;
-    for (unsigned i = 0; i < count; ++i) {
+    for (unsigned i = 0; i < count && budget.step(); ++i) {
       if (mods[i] == g_self || mods[i] == g_interposer) continue;
-      guard_import_slots(mods[i], leaf.c_str(), r, [&](int role, const char* nm, void** slot) {
+      const g::ModuleRef ref(mods[i]);  // the module stays loaded while its tables are read (unloaded: skipped)
+      if (!ref.held()) continue;
+      guard_import_slots(mods[i], leaf.c_str(), r, budget, [&](int role, const char* nm, void** slot) {
         void* val = nullptr;
         const g::Where w = r.get(slot, &val) ? g::classify(val, env, false) : g::Where();
         v.add(w, std::string("the import slot ") + nm + " of " + leaf_text(mods[i]), false, false);
@@ -1358,14 +1347,20 @@ bool guard_at_load(const IMAGE_DELAYLOAD_DESCRIPTOR* delay) {
     }
   }
   g::PeView pe;
-  if (delay && pe.open(exe, r)) {  // the exe's delay-load slots: unbound ones hold the delay helper's thunk in the exe
-    guard_thunks(pe, r, delay->ImportNameTableRVA, delay->ImportAddressTableRVA, [&](int role, const char* nm, void** slot) {
+  // the exe's delay-load slots: unbound ones hold the delay helper's thunk in the exe
+  if (delay && !budget.over() && pe.open(exe, r)) {
+    guard_thunks(pe, r, budget, delay->ImportNameTableRVA, delay->ImportAddressTableRVA,
+                 [&](int role, const char* nm, void** slot) {
       void* val = nullptr;
       const g::Where w = r.get(slot, &val) ? g::classify(val, env, false) : g::Where();
       v.add(w, std::string("the delay-load slot ") + nm + " of " + leaf_text(exe), false, true);
       if (val && w.owner != g::Owner::kInterface && w.owner != g::Owner::kExeThunk && w.owner != g::Owner::kHost)
         prev[role] = val;
     });
+  }
+  if (budget.over()) {  // fails open: nothing is decided from a partial scan (the process marker still found any copy)
+    log_line(g::line_over_budget(budget.entries(), ms_since(t0)));
+    return true;
   }
   guard_scan_exports(g_interposer, env, false, &v, true);
   const double ms = ms_since(t0);
@@ -1960,8 +1955,9 @@ void register_ngx_provider(const WgHostMenuApi* api, WgHostMenuPlugin* plugin) {
              "): games that call NGX directly get WrongGPU RR" +
              (host_has ? "; the host restores the game's command-list state after each evaluate"
                        : "; the host has no command-list restore (plugin interface 5)"));
-  } else {  // RR guard: the host keeps one NGX RR provider; another one holds it (NGX route only)
-    log_line(wgrr::guard::line_ngx_other());
+  } else {  // RR guard: the host refused the provider (its API gives the same false for an occupied slot and for an
+            // incomplete structure, so nothing more is claimed); the NGX route stays off
+    log_line(wgrr::guard::line_ngx_refused());
   }
 }
 #endif

@@ -6,7 +6,9 @@
 // WrongGPU RR switches itself off automatically ONLY on evidence that is positive by contract:
 //   - a second copy of WrongGPU RR (the process-wide marker, or an address that ends in a module exporting
 //     kOwnRrExport);
-//   - the host's plugin API saying the RR provider slot is taken, or refusing our registration (hook_dll.cpp).
+//   - the host's plugin API refusing a registration (hook_dll.cpp): the route it refused stays off. The API does not
+//     say why (an occupied slot and an incomplete structure give the same false), so the log says only that it
+//     refused.
 // Nothing else. A named foreign module on the call path is INCONCLUSIVE: it may be another RR plugin, but it may as well
 // be a game's own wrapper DLL, an overlay, a security shim, a host helper in a third image or a forwarded export's
 // implementation DLL. WrongGPU RR stays active (as in 0.6.0) and one line names the module and the place
@@ -18,8 +20,11 @@
 //   - safe_read: every read of memory we do not own (VirtualQuery for committed, readable, non-guard pages, then a
 //     structured-exception-guarded copy); a failed read is "unknown", never a fault. The check and the copy are not
 //     atomic (HOOK-MODE.md says what that leaves);
-//   - PeView: a module's PE64 headers read through the reader, with e_lfanew, every data directory and every RVA the
-//     scan follows checked against SizeOfImage before any address is formed from them;
+//   - PeView: a module's PE64 headers read through the reader. The image's extent is the smaller of SizeOfImage and
+//     what is really mapped there (mapped_extent); e_lfanew, every data directory, every RVA the scan follows and
+//     every byte of a name are checked against that extent before an address is formed from them;
+//   - thunks / import_slots: the import walk of the load scan (descriptors only within the import directory's
+//     declared size), under a Budget (entries visited, elapsed time) that ends the scan as inconclusive when spent;
 //   - decode_jump: the jump forms a hook puts at the start of a function (jmp rel32 / rel8, jmp [rip+disp32],
 //     mov rax|r11, imm64 + jmp reg);
 //   - classify: who an address belongs to (our module, the game interface, the host, another copy of WrongGPU RR,
@@ -76,11 +81,20 @@ class Reader {
   uintptr_t lo_ = 0, hi_ = 0;
 };
 
-// A loaded module's PE64 headers as the scan may use them. open() reads the DOS and NT headers through the reader and
-// accepts them only when e_lfanew points inside the image (and the NT headers fit), the optional header is PE32+ and
-// SizeOfImage is plausible; dir() hands out a data directory only when its RVA and size lie inside SizeOfImage. at()
-// forms an address from an RVA only after checking [rva, rva + n) against SizeOfImage (integers first, no pointer
-// arithmetic on unchecked values). Anything that fails is "not readable": the caller treats it as nothing found.
+// The bytes from p to the end of the committed regions of the allocation p lies in (VirtualQuery, at most 4096
+// regions). 0: p is not in committed memory.
+size_t mapped_extent(const void* p);
+
+// A loaded module's PE64 headers as the scan may use them. open() first measures what is mapped at the module
+// (mapped_extent), reads the DOS header only inside that, checks e_lfanew as an integer against it before the NT
+// headers are read, and accepts them only when they fit inside both SizeOfImage and the mapping, the optional header
+// is PE32+ and SizeOfImage is plausible. The image's extent is then the smaller of SizeOfImage and the mapping (a
+// forged larger SizeOfImage does not widen it). dir() hands out a data directory only when its RVA and size lie inside
+// the extent.
+// at() forms an address from an RVA only after checking [rva, rva + n) against the extent (integers first, no pointer
+// arithmetic on unchecked values); str() reads a name byte by byte, each byte checked the same way, so a name without
+// its NUL before the end of the image is refused, never read past. Anything that fails is "not readable": the caller
+// treats it as nothing found.
 class PeView {
  public:
   bool open(const void* module, Reader& r);
@@ -88,7 +102,9 @@ class PeView {
   bool dir(unsigned index, uint32_t* rva, uint32_t* size) const;
   // base + rva when [rva, rva + n) lies inside the image, else null
   const uint8_t* at(uint64_t rva, uint64_t n) const;
-  uint32_t size_of_image() const { return size_; }
+  // the NUL-terminated string at rva, at most max - 1 characters, every byte inside the extent (false otherwise)
+  bool str(uint64_t rva, char* out, size_t max, Reader& r) const;
+  uint32_t size_of_image() const { return size_; }  // the extent: min(SizeOfImage, the mapping)
   const uint8_t* base() const { return base_; }
 
  private:
@@ -98,6 +114,40 @@ class PeView {
   uint32_t dir_rva_[16] = {};
   uint32_t dir_size_[16] = {};
 };
+
+// The work budget of one scan: entries visited (modules, import descriptors, name-table entries) and elapsed time.
+// step() counts one entry; false once either limit is passed (the time is looked at every 64 entries), and it stays
+// false. A scan over its budget is inconclusive: it decides nothing (RR stays active) and logs line_over_budget.
+class Budget {
+ public:
+  Budget(unsigned max_entries, unsigned max_ms);
+  bool step();
+  bool over() const { return over_; }
+  unsigned entries() const { return entries_; }
+  double elapsed_ms() const;
+
+ private:
+  unsigned max_entries_, entries_ = 0;
+  double max_ms_;
+  int64_t t0_ = 0, freq_ = 1;
+  bool over_ = false;
+};
+// The load scan's budget: far above a game's import tables (a few thousand entries, well under a millisecond), far
+// below a stall a player would notice.
+constexpr unsigned kScanMaxEntries = 200000;
+constexpr unsigned kScanMaxMs = 100;
+
+// The by-name entries of one import (or delay-load) name table at names_rva with its address table at iat_rva:
+// f(import name, slot address) for each, in order. It stops at the table's null entry, at an entry outside the image,
+// after 4096 entries, or when the budget is spent; ordinal entries and names that are unreadable or not terminated
+// inside the image are skipped.
+void thunks(const PeView& pe, Reader& r, Budget& b, uint32_t names_rva, uint32_t iat_rva,
+            const std::function<void(const char* name, void** slot)>& f);
+// Every by-name import slot of the image at `module` from the DLL named `leaf` (case-insensitive): the import
+// descriptors are read only within the import directory's declared size (and up to the null descriptor), each named
+// DLL's name table through thunks().
+void import_slots(const void* module, const char* leaf, Reader& r, Budget& b,
+                  const std::function<void(const char* name, void** slot)>& f);
 
 // A hook jump at `at` (code holds the first bytes read from there, n of them). On success *target is where it goes;
 // for jmp [rip+disp32] *cell is the pointer cell (read with safe_read; a failed read makes the decode fail).
@@ -131,7 +181,24 @@ struct Env {
   std::function<bool(const void* module, const char* name)> exports;  // the module exports `name`
   std::function<std::string(const void* module)> name_of;        // the module's file name (for the log)
 };
-// The real process: GetModuleHandleExW (from address, refcount unchanged), GetProcAddress, GetModuleFileNameW.
+// A reference to the module holding the address m (GetModuleHandleExW from address, refcount raised; released at the
+// end of the scope), so the module cannot unload while a module API (GetProcAddress, GetModuleFileNameW) runs on it.
+// held() false: no module holds m any more (unloaded meanwhile); the caller treats it as nothing found.
+class ModuleRef {
+ public:
+  explicit ModuleRef(const void* m);
+  ~ModuleRef();
+  ModuleRef(const ModuleRef&) = delete;
+  ModuleRef& operator=(const ModuleRef&) = delete;
+  bool held() const { return h_ != nullptr; }
+  void* handle() const { return h_; }
+
+ private:
+  void* h_ = nullptr;
+};
+
+// The real process: GetModuleHandleExW (from address, refcount unchanged) for module_of; GetProcAddress and
+// GetModuleFileNameW under a ModuleRef.
 Env process_env(const void* self, const void* iface, const void* host, const void* host_alt = nullptr);
 
 struct Where {
@@ -187,7 +254,7 @@ enum class Stage { kLoad, kRoutes, kLate };
 State decide(Verdict::Kind kind, Mode mode, Stage stage, State current);
 
 // The log lines (stable; HOOK-MODE.md documents them; the beginnings are what a reader such as the launcher's Last run
-// page can match: kForeignStem, the "stays off" stem of line_ngx_other, the own-copy stem).
+// page can match: kForeignStem, the refusal stem of line_ngx_refused, the own-copy stem).
 // A named foreign module on the RR path: "another module hooks the game's RR calls: <module> (<detail>); <tail>"
 enum class Tail {
   kStaysActive,   // rr_other_plugin=off (also take after our handlers are in place): RR stays WrongGPU's
@@ -197,10 +264,12 @@ enum class Tail {
 };
 std::string line_foreign(const std::string& module, const std::string& detail, Tail tail);
 std::string line_own_copy(const std::string& active, const std::string& self);
-std::string line_ngx_other();                                   // the host refused our NGX provider
+std::string line_ngx_refused();                                 // the host refused our NGX provider
 // The stay-on diagnostic (starts with "hook: "; never with a beginning above): the scan could not explain `n`
 // address(es), `first` is the first one. RR stays active.
 std::string line_inconclusive(const std::string& when, unsigned n, const std::string& first);
+// The load scan ran out of its budget (entries visited, elapsed time): inconclusive, WrongGPU RR stays active
+std::string line_over_budget(unsigned entries, double ms);
 
 class Decision {
  public:

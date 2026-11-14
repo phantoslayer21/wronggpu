@@ -5,7 +5,8 @@
 // (tests/fake_other_rr.cpp), and further copies of it under other file names; no third-party file is used.
 //   test_rr_guard_dll.exe <stage dir> <mode> [--take | --yield]
 // WrongGPU RR switches itself off only on evidence that is positive by contract: a second copy of WrongGPU RR, or the
-// host's plugin API refusing our registration. A named module on the call path is inconclusive: it is named in one
+// host's plugin API refusing our registration (the refused route stays off; the API does not say why, so the log
+// claims no other plugin). A named module on the call path is inconclusive: it is named in one
 // line and WrongGPU RR stays active; --yield (rr_other_plugin=yield) makes it switch WrongGPU RR off, --take
 // (rr_other_plugin=take) puts WrongGPU RR in front of it.
 // Modes (import build). Named module on the path, RR stays active (no second RR provider in the innocent ones):
@@ -34,7 +35,10 @@
 //                one decision, one line naming it, WrongGPU RR stays active behind it
 //   late-replace the stand-in replaced our hooks after InitializeASI: named at OptiPluginInit, stays active
 // Positive by contract, WrongGPU RR (or that route) switches off:
-//   provider     the stand-in holds the host's NGX RR provider: the NGX route stays off, the game-interface route stays
+//   provider     the stand-in holds the host's NGX RR provider: the host refuses ours, the NGX route stays off (the
+//                line says the host refused, not why), the game-interface route stays
+//   provider-refused the host refuses our NGX provider with no provider installed (an incomplete structure gives the
+//                same false): the same line, no other plugin claimed, the game-interface route stays
 //   owncopy      WrongGPU RR and four more copies under other file names: the others stay off and register nothing; the
 //                copies' InitializeASI / OptiPluginInit run from threads while 16 game threads make the first call (every
 //                copy writes the one log at once: no torn line); freeing an inactive copy writes no exit summary
@@ -167,6 +171,7 @@ WgHostMenuPlugin* const kOurs = reinterpret_cast<WgHostMenuPlugin*>(0x1000);
 WgHostMenuPlugin* const kTheirs = reinterpret_cast<WgHostMenuPlugin*>(0x2000);
 int route_regs[2] = {0, 0}, ngx_regs = 0;
 bool refuse_routes = false;  // route-refused: the host's API says no
+bool refuse_ngx = false;     // provider-refused: the host refuses the NGX provider though no provider holds the slot
 WgHostMenuPlugin* ngx_owner = nullptr;
 void (*callback)(void*, uint32_t, uint32_t, uint32_t, void*) = nullptr;
 void* callback_user = nullptr;
@@ -190,7 +195,7 @@ bool set_callback(WgHostMenuPlugin*, void (*cb)(void*, uint32_t, uint32_t, uint3
 }
 bool register_ngx(WgHostMenuPlugin* p, const WgHostNgxRr* prov) {
   ++ngx_regs;
-  if (ngx_owner || !prov || !prov->create) return false;
+  if (refuse_ngx || ngx_owner || !prov || !prov->create) return false;
   ngx_owner = p;
   return true;
 }
@@ -279,7 +284,7 @@ int main(int argc, char** argv) {
   const std::string exe_leaf = "test_rr_guard_dll.exe";
   const std::string iface_leaf = kWgInterposerFile;
   const std::string evaluate_name = kWgRoleNames[kEvaluate];
-  const std::string stem = "another Ray Reconstruction plugin is active; WrongGPU RR stays off (";
+  const std::string stem = "the host refused WrongGPU's NGX RR provider registration; the NGX route stays off (";
   const std::string fstem = "another module hooks the game's RR calls: ";
   const std::string tail_active = "; it is not known to be a Ray Reconstruction plugin: WrongGPU RR stays active "
                                   "(rr_other_plugin=yield in wronggpu-rr.ini keeps WrongGPU RR off in this case)";
@@ -381,6 +386,7 @@ int main(int argc, char** argv) {
     CHECK(or_set_slot(exe, kWgInterposerFile, evaluate_name.c_str(), p) == 1);
   }
   if (mode == "provider") CHECK(or_ngx(&api, host::kTheirs));
+  if (mode == "provider-refused") host::refuse_ngx = true;
 
   // ---- WrongGPU RR (the host loads it and runs its entry)
   load_asi(widen(kWgHookFile), &init, &plugin_init);
@@ -452,7 +458,7 @@ int main(int argc, char** argv) {
   }
 
   // ---- the game's calls
-  if (mode == "clean" || mode == "late" || mode == "provider") {
+  if (mode == "clean" || mode == "late" || mode == "provider" || mode == "provider-refused") {
     // 16 threads make the game's first interface call at once
     const int ok = at_once(16, [] { return slIsFeatureSupported(kOther, nullptr); }, kIfaceAnswer);
     CHECK_EQ(ok, 16);
@@ -588,12 +594,14 @@ int main(int argc, char** argv) {
     CHECK(count(read_lines(log_path), "NGX: RR provider registered with the host") == 1);
     CHECK(host::ngx_owner == host::kOurs);
 #endif
-  } else if (mode == "provider") {
+  } else if (mode == "provider" || mode == "provider-refused") {
 #if !WG_BINDING_PROBE
-    // the host's API says its RR provider slot is taken: the NGX route stays off (positive by contract)
-    CHECK(count_starting(L, stem + "NGX route only: the host refused WrongGPU's RR provider, another provider holds it; "
-                                   "the game-interface route is decided on its own)") == 1);
-    CHECK(host::ngx_owner == host::kTheirs && host::ngx_regs == 2);
+    // the host's API refuses our provider: the NGX route stays off (positive by contract). Its false does not say why
+    // (an occupied slot, an incomplete structure), so the line says only that the host refused
+    CHECK(count_starting(L, stem + "the game-interface route is decided on its own)") == 1);
+    CHECK(count(L, "another Ray Reconstruction plugin is active") == 0 && count(L, "another provider") == 0);
+    if (mode == "provider") CHECK(host::ngx_owner == host::kTheirs && host::ngx_regs == 2);
+    else CHECK(host::ngx_owner == nullptr && host::ngx_regs == 1);  // no provider anywhere
     CHECK(count(L, patched) == 1);  // the game-interface route stays ours
     CHECK(count(L, stem) == 1);
     CHECK(rr_ours);

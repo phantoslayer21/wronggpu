@@ -3,6 +3,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "rr_guard.h"
@@ -101,17 +103,37 @@ bool Reader::str(const void* p, char* out, size_t max) {
   return false;
 }
 
+size_t mapped_extent(const void* p) {
+  MEMORY_BASIC_INFORMATION m;
+  if (!p || !VirtualQuery(p, &m, sizeof m) || m.State != MEM_COMMIT) return 0;
+  const void* alloc = m.AllocationBase;
+  const uintptr_t a = reinterpret_cast<uintptr_t>(p);
+  uintptr_t end = reinterpret_cast<uintptr_t>(m.BaseAddress) + m.RegionSize;
+  for (unsigned i = 0; i < 4096 && end > a; ++i) {
+    if (!VirtualQuery(reinterpret_cast<const void*>(end), &m, sizeof m) || m.AllocationBase != alloc ||
+        m.State != MEM_COMMIT)
+      break;
+    const uintptr_t next = reinterpret_cast<uintptr_t>(m.BaseAddress) + m.RegionSize;
+    if (next <= end) break;
+    end = next;
+  }
+  return end > a ? (size_t)(end - a) : 0;
+}
+
 bool PeView::open(const void* module, Reader& r) {
   base_ = nullptr;
   size_ = 0;
   ndirs_ = 0;
   const uint8_t* base = static_cast<const uint8_t*>(module);
+  // what is really mapped at the module bounds every header read below (SizeOfImage is only a claim of the header)
+  const size_t mapped = mapped_extent(base);
   IMAGE_DOS_HEADER dos;
-  if (!base || !r.get(base, &dos) || dos.e_magic != IMAGE_DOS_SIGNATURE) return false;
-  // e_lfanew is a signed 32-bit offset: checked as an integer (positive, past the DOS header, not absurd) before the NT
-  // headers are read at all; against SizeOfImage once that is known
+  if (mapped < sizeof dos || !r.get(base, &dos) || dos.e_magic != IMAGE_DOS_SIGNATURE) return false;
+  // e_lfanew is a signed 32-bit offset: checked as an integer (positive, past the DOS header, not absurd, the NT
+  // headers inside the mapping) before the NT headers are read at all; against SizeOfImage once that is known
   const LONG lfanew = dos.e_lfanew;
   if (lfanew < (LONG)sizeof(IMAGE_DOS_HEADER) || lfanew > 0x100000) return false;
+  if ((uint64_t)lfanew + sizeof(IMAGE_NT_HEADERS64) > mapped) return false;
   IMAGE_NT_HEADERS64 nt;
   if (!r.get(base + lfanew, &nt) || nt.Signature != IMAGE_NT_SIGNATURE ||
       nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
@@ -120,7 +142,7 @@ bool PeView::open(const void* module, Reader& r) {
   if ((uint64_t)lfanew + sizeof(IMAGE_NT_HEADERS64) > size) return false;  // the headers lie inside the image
   if ((uintptr_t)base + size < (uintptr_t)base) return false;              // the image does not wrap the address space
   base_ = base;
-  size_ = size;
+  size_ = (uint64_t)size < (uint64_t)mapped ? size : (uint32_t)mapped;  // a larger SizeOfImage does not widen the image
   ndirs_ = nt.OptionalHeader.NumberOfRvaAndSizes < 16 ? nt.OptionalHeader.NumberOfRvaAndSizes : 16;
   for (uint32_t i = 0; i < ndirs_; ++i) {
     dir_rva_[i] = nt.OptionalHeader.DataDirectory[i].VirtualAddress;
@@ -140,6 +162,68 @@ bool PeView::dir(unsigned index, uint32_t* rva, uint32_t* size) const {
 const uint8_t* PeView::at(uint64_t rva, uint64_t n) const {
   if (!base_ || rva > size_ || n > (uint64_t)size_ - rva) return nullptr;
   return base_ + rva;
+}
+
+bool PeView::str(uint64_t rva, char* out, size_t max, Reader& r) const {
+  for (size_t i = 0; i < max; ++i) {
+    const uint8_t* p = at(rva + i, 1);  // every byte inside the extent: a name cut off by the image's end is refused
+    if (!p || !r.get(p, &out[i])) return false;
+    if (!out[i]) return true;
+  }
+  return false;
+}
+
+Budget::Budget(unsigned max_entries, unsigned max_ms) : max_entries_(max_entries), max_ms_((double)max_ms) {
+  LARGE_INTEGER f, t;
+  QueryPerformanceFrequency(&f);
+  QueryPerformanceCounter(&t);
+  freq_ = f.QuadPart > 0 ? f.QuadPart : 1;
+  t0_ = t.QuadPart;
+}
+
+double Budget::elapsed_ms() const {
+  LARGE_INTEGER t;
+  QueryPerformanceCounter(&t);
+  return (double)(t.QuadPart - t0_) * 1000.0 / (double)freq_;
+}
+
+bool Budget::step() {
+  if (over_) return false;
+  ++entries_;
+  if (entries_ > max_entries_ || ((entries_ & 63) == 0 && elapsed_ms() > max_ms_)) over_ = true;
+  return !over_;
+}
+
+void thunks(const PeView& pe, Reader& r, Budget& b, uint32_t names_rva, uint32_t iat_rva,
+            const std::function<void(const char* name, void** slot)>& f) {
+  for (unsigned i = 0; i < 4096 && b.step(); ++i) {
+    const uint64_t off = (uint64_t)i * sizeof(IMAGE_THUNK_DATA64);
+    const uint8_t* np = pe.at(names_rva + off, sizeof(IMAGE_THUNK_DATA64));
+    const uint8_t* sp = pe.at(iat_rva + off, sizeof(IMAGE_THUNK_DATA64));
+    IMAGE_THUNK_DATA64 t;
+    if (!np || !sp || !r.get(np, &t) || !t.u1.AddressOfData) return;
+    if (t.u1.Ordinal & IMAGE_ORDINAL_FLAG64) continue;
+    char nm[96];
+    if (!pe.str(t.u1.AddressOfData + offsetof(IMAGE_IMPORT_BY_NAME, Name), nm, sizeof nm, r)) continue;
+    f(nm, const_cast<void**>(reinterpret_cast<void* const*>(sp)));
+  }
+}
+
+void import_slots(const void* module, const char* leaf, Reader& r, Budget& b,
+                  const std::function<void(const char* name, void** slot)>& f) {
+  PeView pe;
+  uint32_t rva = 0, size = 0;
+  if (!pe.open(module, r) || !pe.dir(IMAGE_DIRECTORY_ENTRY_IMPORT, &rva, &size)) return;
+  // the descriptors the directory declares, no more (the null descriptor usually ends the walk earlier)
+  const uint32_t count = size / sizeof(IMAGE_IMPORT_DESCRIPTOR) < 4096 ? size / sizeof(IMAGE_IMPORT_DESCRIPTOR) : 4096;
+  for (uint32_t k = 0; k < count && b.step(); ++k) {
+    const uint8_t* dp = pe.at(rva + (uint64_t)k * sizeof(IMAGE_IMPORT_DESCRIPTOR), sizeof(IMAGE_IMPORT_DESCRIPTOR));
+    IMAGE_IMPORT_DESCRIPTOR e;
+    if (!dp || !r.get(dp, &e) || !e.Name) return;
+    char dll[64];
+    if (!pe.str(e.Name, dll, sizeof dll, r) || _stricmp(dll, leaf) != 0) continue;
+    thunks(pe, r, b, e.OriginalFirstThunk ? e.OriginalFirstThunk : e.FirstThunk, e.FirstThunk, f);
+  }
 }
 
 bool decode_jump(const uint8_t* c, size_t n, const uint8_t* at, const void** target, const void** cell) {
@@ -331,10 +415,11 @@ State decide(Verdict::Kind kind, Mode mode, Stage stage, State current) {
   return current;
 }
 
-// The beginnings a reader can match (HOOK-MODE.md documents them; keep them exactly): kForeignStem, kStem (the NGX
-// route's "stays off" line), kOwnCopyStem. None of them has the "hook: " prefix of the diagnostics.
+// The beginnings a reader can match (HOOK-MODE.md documents them; keep them exactly): kForeignStem, kRefusedStem (the
+// NGX route's refusal), kOwnCopyStem. None of them has the "hook: " prefix of the diagnostics.
 static const char kForeignStem[] = "another module hooks the game's RR calls: ";
-static const char kStem[] = "another Ray Reconstruction plugin is active; WrongGPU RR stays off (";
+static const char kRefusedStem[] =
+    "the host refused WrongGPU's NGX RR provider registration; the NGX route stays off (";
 static const char kOwnCopyStem[] = "a second copy of WrongGPU RR is loaded (";
 
 std::string line_foreign(const std::string& module, const std::string& detail, Tail tail) {
@@ -355,14 +440,21 @@ std::string line_foreign(const std::string& module, const std::string& detail, T
 std::string line_own_copy(const std::string& active, const std::string& self) {
   return std::string(kOwnCopyStem) + active + " is active); this copy (" + self + ") stays off";
 }
-std::string line_ngx_other() {
-  return std::string(kStem) +
-         "NGX route only: the host refused WrongGPU's RR provider, another provider holds it; the game-interface "
-         "route is decided on its own)";
+std::string line_ngx_refused() {
+  // the host API gives one false for an occupied slot and for an incomplete structure: only the refusal is known
+  return std::string(kRefusedStem) + "the game-interface route is decided on its own)";
 }
 std::string line_inconclusive(const std::string& when, unsigned n, const std::string& first) {
   return "hook: coexistence check " + when + ": inconclusive for " + std::to_string(n) + " address(es) (first: " + first +
          "); no other plugin was positively found, WrongGPU RR stays active";
+}
+
+std::string line_over_budget(unsigned entries, double ms) {
+  char t[32];
+  snprintf(t, sizeof t, "%.1f ms", ms);
+  return "hook: coexistence check at load: stopped after " + std::to_string(entries) + " entries (" + t +
+         "), over its budget of " + std::to_string(kScanMaxEntries) + " entries / " + std::to_string(kScanMaxMs) +
+         " ms; inconclusive, WrongGPU RR stays active";
 }
 
 void Decision::freeze_once(const std::function<State()>& decide) {
@@ -381,10 +473,20 @@ void Decision::check(const std::function<State()>& decide) {
 }
 
 // ---------------------------------------------------------------- the real process
+ModuleRef::ModuleRef(const void* m) {
+  HMODULE h = nullptr;
+  if (m && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, static_cast<LPCWSTR>(m), &h)) h_ = h;
+}
+ModuleRef::~ModuleRef() {
+  if (h_) FreeLibrary(static_cast<HMODULE>(h_));
+}
+
 namespace {
 std::string leaf_utf8(const void* m) {
+  const ModuleRef ref(m);  // the module stays loaded while its name is read
+  if (!ref.held()) return std::string();
   wchar_t buf[MAX_PATH * 2];
-  const DWORD n = GetModuleFileNameW(static_cast<HMODULE>(const_cast<void*>(m)), buf, MAX_PATH * 2);
+  const DWORD n = GetModuleFileNameW(static_cast<HMODULE>(ref.handle()), buf, MAX_PATH * 2);
   std::wstring p(buf, n);
   const size_t slash = p.find_last_of(L"\\/");
   if (slash != std::wstring::npos) p = p.substr(slash + 1);
@@ -410,7 +512,8 @@ Env process_env(const void* self, const void* iface, const void* host, const voi
     return m;
   };
   e.exports = [](const void* m, const char* name) {
-    return GetProcAddress(static_cast<HMODULE>(const_cast<void*>(m)), name) != nullptr;
+    const ModuleRef ref(m);  // the module stays loaded while its exports are looked up (unloaded: exports nothing)
+    return ref.held() && GetProcAddress(static_cast<HMODULE>(ref.handle()), name) != nullptr;
   };
   e.name_of = leaf_utf8;
   // the interface's own import address table (IMAGE_DIRECTORY_ENTRY_IAT), read through safe reads and checked against

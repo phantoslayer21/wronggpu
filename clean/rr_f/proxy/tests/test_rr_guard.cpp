@@ -5,7 +5,12 @@
 //     cached reader's structured-exception path (a page made unreadable after its region was cached); the cache keeps
 //     VirtualQuery calls few;
 //   - PeView: the real exe's headers; synthetic headers with a bad e_lfanew (negative, inside the DOS header, absurd, NT
-//     headers past SizeOfImage), directories past SizeOfImage or wrapping, too few directories, PE32, no signature;
+//     headers past SizeOfImage or past the mapping), directories past SizeOfImage or wrapping, too few directories,
+//     PE32, no signature; a SizeOfImage larger than the mapping (the extent is the mapping); mapped_extent;
+//   - the import walk (import_slots / thunks): a name whose RVA is the image's last byte with no NUL inside the image
+//     (skipped, never read past), names ending at the last byte, an import directory smaller than its descriptors
+//     (only the declared ones), another DLL's name; the budget by entries and by time (over: the walk stops, stays
+//     over);
 //   - decode_jump: every jump form, and a jmp [rip+disp32] whose cell is not readable;
 //   - classify: synthetic modules (ranges of one allocation) and anonymous relays: the interface's own code, a hook jump
 //     to another module, a jump inside the interface, the linker's import thunk, a relay chain to the host, exactly
@@ -452,6 +457,135 @@ int main() {
     nt->Signature = 0;
     PeView nosig;
     CHECK(!nosig.open(img, r));
+    // the image's extent is what is mapped, not what the header claims: SizeOfImage 0x10000 over 3 mapped pages
+    reset();
+    nt->OptionalHeader.SizeOfImage = 0x10000;
+    PeView big;
+    CHECK(big.open(img, r) && big.size_of_image() == 3 * kPage && big.at(3 * kPage - 1, 1) != nullptr &&
+          big.at(3 * kPage, 1) == nullptr);
+    // NT headers that would end past the mapping: refused before they are read (e_lfanew within the 1 MiB cap)
+    reset();
+    dos->e_lfanew = (LONG)(3 * kPage - 0x40);
+    PeView past;
+    CHECK(!past.open(img, r));
+    CHECK(mapped_extent(img) == 3 * kPage && mapped_extent(img + 0x123) == 3 * kPage - 0x123 &&
+          mapped_extent(nullptr) == 0);
+    VirtualFree(img, 0, MEM_RELEASE);
+  }
+
+  // ---------------------------------------------------------------- the import walk: bounded names, the declared
+  // directory size, the budget
+  {
+    // a synthetic image (SizeOfImage 0x2000) in 3 committed pages: the page after the image is readable, so a read past
+    // the image would not fault; only the bounds keep the walk inside
+    uint8_t* img = static_cast<uint8_t*>(VirtualAlloc(nullptr, 3 * kPage, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    CHECK(img != nullptr);
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(img);
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(img + 0x80);
+    auto* desc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(img + 0x1000);
+    auto thunk = [&](uint32_t rva) { return reinterpret_cast<uint64_t*>(img + rva); };
+    auto name = [&](uint32_t rva, const char* text) {  // IMAGE_IMPORT_BY_NAME: hint (2 bytes), then the name
+      memcpy(img + rva + 2, text, strlen(text) + 1);
+    };
+    auto build = [&](uint32_t dir_size) {
+      memset(img, 0, 3 * kPage);
+      dos->e_magic = IMAGE_DOS_SIGNATURE;
+      dos->e_lfanew = 0x80;
+      nt->Signature = IMAGE_NT_SIGNATURE;
+      nt->OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+      nt->OptionalHeader.SizeOfImage = 0x2000;
+      nt->OptionalHeader.NumberOfRvaAndSizes = 16;
+      nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT] = {0x1000, dir_size};
+      // two descriptors of iface.dll and the null one
+      desc[0].OriginalFirstThunk = 0x1100;
+      desc[0].FirstThunk = 0x1200;
+      desc[0].Name = 0x1300;
+      desc[1].OriginalFirstThunk = 0x1180;
+      desc[1].FirstThunk = 0x1280;
+      desc[1].Name = 0x1300;
+      memcpy(img + 0x1300, "iface.dll", 10);
+      // descriptor 0: fnA, fnB, a name whose RVA is the image's last bytes and has no NUL inside the image (the bytes
+      // after it, past the image, are readable and not NUL), fnD; descriptor 1: fnC
+      const uint32_t cut_off = 0x2000 - 3;  // hint at the image's last 3 bytes but one, its name at the last byte
+      uint64_t* names0 = thunk(desc[0].OriginalFirstThunk);
+      names0[0] = 0x1400;
+      names0[1] = 0x1420;
+      names0[2] = cut_off;
+      names0[3] = 0x1440;
+      thunk(desc[1].OriginalFirstThunk)[0] = 0x1460;
+      name(0x1400, "fnA");
+      name(0x1420, "fnB");
+      name(0x1440, "fnD");
+      name(0x1460, "fnC");
+      img[0x1FFF] = 'Z';  // the cut-off name's one byte inside the image
+      memset(img + 0x2000, 'Z', 64);
+    };
+    std::vector<std::string> got;
+    std::vector<void**> slots;
+    auto collect = [&](const char* nm, void** slot) {
+      got.push_back(nm);
+      slots.push_back(slot);
+    };
+    Reader r;
+    // the whole directory (three descriptors): every name, the cut-off one skipped (never read past the image)
+    build(3 * sizeof(IMAGE_IMPORT_DESCRIPTOR));
+    {
+      Budget b(kScanMaxEntries, kScanMaxMs);
+      import_slots(img, "IFACE.DLL", r, b, collect);
+      CHECK(got == std::vector<std::string>({"fnA", "fnB", "fnD", "fnC"}) && !b.over());
+      CHECK(slots.size() == 4 && slots[0] == reinterpret_cast<void**>(img + 0x1200) &&
+            slots[2] == reinterpret_cast<void**>(img + 0x1218) && slots[3] == reinterpret_cast<void**>(img + 0x1280));
+    }
+    // the same name bytes terminated inside the image are read
+    {
+      PeView pe;
+      char nm[8];
+      CHECK(pe.open(img, r) && !pe.str(0x1FFF, nm, sizeof nm, r));  // 'Z' at the last byte, no NUL before the end
+      img[0x1FFF] = 0;
+      CHECK(pe.str(0x1FFF, nm, sizeof nm, r) && nm[0] == 0);
+      memcpy(img + 0x1FFC, "abc", 4);  // "abc" ending with the image's last byte
+      CHECK(pe.str(0x1FFC, nm, sizeof nm, r) && strcmp(nm, "abc") == 0);
+      CHECK(!pe.str(0x1FFC, nm, 3, r));  // longer than the buffer
+    }
+    // an import directory smaller than its descriptors: only the declared one is read
+    build(sizeof(IMAGE_IMPORT_DESCRIPTOR));
+    got.clear(), slots.clear();
+    {
+      Budget b(kScanMaxEntries, kScanMaxMs);
+      import_slots(img, "iface.dll", r, b, collect);
+      CHECK(got == std::vector<std::string>({"fnA", "fnB", "fnD"}));
+    }
+    build(sizeof(IMAGE_IMPORT_DESCRIPTOR) - 1);  // less than one descriptor: none
+    got.clear(), slots.clear();
+    {
+      Budget b(kScanMaxEntries, kScanMaxMs);
+      import_slots(img, "iface.dll", r, b, collect);
+      CHECK(got.empty());
+    }
+    // another DLL's name: nothing
+    build(3 * sizeof(IMAGE_IMPORT_DESCRIPTOR));
+    got.clear(), slots.clear();
+    {
+      Budget b(kScanMaxEntries, kScanMaxMs);
+      import_slots(img, "other.dll", r, b, collect);
+      CHECK(got.empty() && b.entries() == 3);  // the two descriptors and the null one, no name table
+    }
+    // the budget: three entries (a descriptor, two name-table entries) and the walk stops, over its budget
+    got.clear(), slots.clear();
+    {
+      Budget b(3, kScanMaxMs);
+      import_slots(img, "iface.dll", r, b, collect);
+      CHECK(b.over() && got == std::vector<std::string>({"fnA", "fnB"}));
+      CHECK(!b.step() && b.over());  // stays over
+    }
+    // the time budget: looked at every 64 entries; with 0 ms and the clock moved on, over at the 64th
+    {
+      Budget b(kScanMaxEntries, 0);
+      Sleep(2);
+      unsigned n = 0;
+      while (b.step()) ++n;
+      CHECK(n == 63 && b.over() && b.entries() == 64 && b.elapsed_ms() > 0.0);
+    }
     VirtualFree(img, 0, MEM_RELEASE);
   }
 
@@ -483,15 +617,22 @@ int main() {
           fstem + "Other.dll (" + d + "); rr_other_plugin=yield: WrongGPU RR stays off (WrongGPU's handlers pass every "
                   "call on unchanged)");
     // only yield says "stays off"; nothing about a named module claims it is a Ray Reconstruction plugin
-    const std::string stem = "another Ray Reconstruction plugin is active; WrongGPU RR stays off";
     for (Tail t : {Tail::kStaysActive, Tail::kTakeInFront, Tail::kYieldOff, Tail::kYieldPassing}) {
       const std::string l = line_foreign("M", "D", t);
       CHECK(l.compare(0, fstem.size(), fstem) == 0 && l.find("plugin is active") == std::string::npos);
       CHECK((l.find("stays off") != std::string::npos) == (t == Tail::kYieldOff || t == Tail::kYieldPassing));
     }
     CHECK(line_own_copy("A", "B") == "a second copy of WrongGPU RR is loaded (A is active); this copy (B) stays off");
-    CHECK(line_ngx_other() == stem + " (NGX route only: the host refused WrongGPU's RR provider, another provider "
-                                     "holds it; the game-interface route is decided on its own)");
+    // the host's refusal says only that it refused (its API gives one false for an occupied slot and for an
+    // incomplete structure): no other plugin is claimed
+    CHECK(line_ngx_refused() ==
+          "the host refused WrongGPU's NGX RR provider registration; the NGX route stays off (the game-interface route "
+          "is decided on its own)");
+    CHECK(line_ngx_refused().find("plugin is active") == std::string::npos &&
+          line_ngx_refused().find("another provider") == std::string::npos);
+    CHECK(line_over_budget(200001, 3.25) ==
+          "hook: coexistence check at load: stopped after 200001 entries (3.2 ms), over its budget of 200000 entries / "
+          "100 ms; inconclusive, WrongGPU RR stays active");
     // the stay-on diagnostic: never one of the matched beginnings
     const std::string inc = line_inconclusive("at load", 2, "the import slot X of Game.exe could not be read");
     CHECK(inc == "hook: coexistence check at load: inconclusive for 2 address(es) (first: the import slot X of Game.exe "
