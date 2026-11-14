@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: MIT
 // Model L's model data in the runtime (#89): the stages and tensors of Model L in the converter's raw layout, and the
-// raw loader for them (clean/runtime/model.h load_raw_stages). Names are the logical names of the default structure
-// table (clean/l/reference/table.py: encoder_shapes, decoder_shapes); the ten Swin stages and post are Model M's.
+// raw loader for them (clean/runtime/model.h load_raw_stages). Stages, names and shapes are those of the preset-L map
+// (data/preset-L.v1.map.json), which the structure table (clean/l/reference/table.py param_shapes) groups the same way:
 //
-//   enc0: Model M's W, b, T, sigma1, sigma2 (W is the projection, 64 x 128) + the two linears Wa / ba, Wb / bb + the
-//         width-32 block "blk.*"
+//   enc0: W (the projection, 64 x 128), b, T, sigma1, sigma2, and the two input linears Win1 / bin1 (32 x 20),
+//         Win2 / bin2 (32 x 32)
+//   enc0_block: the encoder's width-32 Swin block
 //   enc1 ... dec1: Model M's stages (clean/runtime/model.cpp stage_specs)
-//   dec0: Model M's W, b, S, T + the width-32 block "blk.*"
+//   dec0_block: the decoder's width-32 Swin block
+//   dec0: W (4 x 32 x 64), b (4 x 32), S, T
 //   post: Model M's s
 #pragma once
 
@@ -18,11 +20,16 @@
 namespace wgrt {
 namespace l {
 
-// The stages in load order: enc0, enc1 ... dec1 (model_stages() order), dec0, post.
+// The stages in the map's order: enc0, enc0_block, enc1 ... dec1, dec0_block, dec0, post.
 StageSpecs stage_specs();
 
 // load_raw_stages with stage_specs(): <model_dir>[/raw]/<stage>/<name>.bin.
 bool load_raw_model(const std::string& model_dir, std::map<std::string, StageTensors>* out, std::string* err);
+
+// load_wgcm_stages with stage_specs(): the converter's model.wgcm, checked against the preset-L map at map_path
+// (whole-file hash, every stage's keyed digest, names, types, shapes, values; clean/runtime/model.h).
+bool load_wgcm_model(const std::string& path, const std::string& map_path, std::map<std::string, StageTensors>* out,
+                     std::string* err, bool* other_map = nullptr);
 
 }  // namespace l
 }  // namespace wgrt

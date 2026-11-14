@@ -121,15 +121,31 @@ class RoundTripTest(unittest.TestCase):
 
 
 class ModelTest(unittest.TestCase):
+    def test_gpu_check_cases_pack(self):
+        """The C = 32 GPU check's case builder (clean/l/runner/l_c32_check.py) runs on the current packer API."""
+        from clean.l.runner import l_c32_check as C32
+        p, blob, x = C32.make_case(np.random.default_rng(3), 9, 13)
+        self.assertEqual(blob, LP.pack_block(p, 32, 2, 128))
+        self.assertEqual(x.shape, (9, 13, 32))
+        self.assertTrue(np.isfinite(L.swin_block(x, p, (2, 2), 2, C32.CONSTS)).all())
+
     def test_launch_lists(self):
         ln = LP.encoder_launches()
         self.assertEqual([x["kind"] for x in ln], ["values", "linear", "linear", "swin", "project"])
         self.assertEqual((ln[1]["src"], ln[1]["C_in"], ln[1]["C_out"], ln[1]["out_round"]), ("q", 32, 32, "relu_q8"))
-        self.assertEqual((ln[2]["src"], ln[2]["C_in"]), ("x", 32))
+        self.assertEqual((ln[2]["src"], ln[2]["C_in"]), ("x1", 32))
         self.assertEqual(ln[3]["blob"], "enc0_block")
+        self.assertEqual([(x.get("in_format"), x.get("out_format")) for x in ln[1:4]],
+                         [("fp8", "fp8"), ("fp8", "fp16"), ("fp16", "fp8")])
+        self.assertEqual(ln[3]["border"], "input")
         dn = LP.decoder_launches()
         self.assertEqual([x["kind"] for x in dn], ["dec_project", "swin", "coef"])
-        self.assertEqual(dn[2]["values"], T.DEC0_VALUES)
+        self.assertEqual((dn[0]["out_format"], dn[1]["in_format"], dn[1]["out_format"], dn[1]["border"]),
+                         ("fp8", "fp8", "fp16", "coarse"))
+        self.assertEqual((dn[2]["values"], dn[2]["dec_pixel"], dn[2]["in_format"]), (T.L_DEC_VALUES, "l", "fp16"))
+        self.assertEqual(T.L_DEC_VALUES, (0, 1, 6, 7, 8, 9, 10, 11, 12, 2, 3, 4, 5))   # the exact sequence (map v1.1)
+        with self.assertRaises(ValueError):
+            LP.map_format(None, "none")
 
     def test_pack_model_l(self):
         rng = np.random.default_rng(8)
@@ -157,9 +173,10 @@ class ModelTest(unittest.TestCase):
         qpad = np.concatenate([m["q"], np.zeros(m["q"].shape[:-1] + (12,))], axis=-1)
         h1 = L.linear(qpad, W1, b1, "f16", "relu_q8")
         self.assertTrue(np.array_equal(h1, L.linear(m["q"], enc["Win1"], enc["bin1"], "f16", "relu_q8")))
-        h2 = L.linear(h1, W2, b2, "f16", "q8")
-        h3 = q8(L.swin_block(h2, params["enc0_block"], T.block_offset(T.TABLE, "first", 0), 2, T.M_BLOCK_CONSTS))
-        self.assertTrue(np.array_equal(h3, m["x"]))
+        h2 = L.linear(h1, W2, b2, "f16", "none")
+        h3 = q8(L.swin_block(h2, params["enc0_block"], T.block_offset(T.TABLE, "first", 0), 2, T.M_BLOCK_CONSTS,
+                             "input", T.block_halo(T.TABLE, "first")))
+        self.assertTrue(np.array_equal(h3, m["x3"]))
         Wp, bpj = LP.unpack_project(blobs["enc0.project"], 128, 64)
         feats = L.project_groups(L.space_to_depth(h3), Wp, bpj, (32, 32, 32, 32), 6.28125)
         self.assertEqual(feats.astype(np.float32).tobytes(), out["features"].tobytes())
@@ -167,7 +184,7 @@ class ModelTest(unittest.TestCase):
         dout = L.decode(xd, params, 0, keep=True)
         Wd, bd = LP.unpack_dec_project(blobs["dec0.project"])
         y = L.dec_project(xd["features"], Wd, bd)
-        self.assertTrue(np.array_equal(y, dout["maps"]["y"]))
+        self.assertTrue(np.array_equal(y, dout["maps"]["yt"]))
 
 
 if __name__ == "__main__":

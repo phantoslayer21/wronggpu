@@ -2,18 +2,18 @@
 """Model L weight packing (issue #89): the device blobs of Model L's own launches, from the structure table
 (clean/l/reference/table.py) and the parameters of the oracle ({stage: tensors}, clean/l/reference/oracle.py).
 
-Model L's encoder and decoder run as a chain of small FP8-map kernels, each with a blob in a format Model M already
-uses (clean/FORMATS.md). Maps are [tokens][C] FP8, channel fastest; pixel maps are on the padded grid F, token maps
-on F/2.
+Model L's encoder and decoder run as a chain of small map kernels, each with a blob in a format Model M already
+uses (clean/FORMATS.md). Maps are [tokens][C], channel fastest, FP8 or FP16 as each launch's in_format /
+out_format says (map_format); pixel maps are on the padded grid F, token maps on F/2.
 
 | Blob | Format | Kernel input -> output |
 |---|---|---|
 | `enc0.values` | Model M's enc0 blob (clean/runner/enc0.py pack) with W = 0 and b = 0 | frame -> the quantized values as a pixel map [F][32] (values 0..19, 12 zero bytes) |
-| `enc0.<w>` per linear | merge / expand section format: bias tile vector (rows R_L(C_out)), then fragments [mt < C_out/16][kc < C_in/16], rows R_L(C_out), K order K_L(C_in); inputs narrower than C_in (20 values) get zero weights | FP8 map [C_in] -> FP8 map [C_out] |
-| `enc0_block`, `dec0_block` | Model M's Swin block section (packing.pack_block) at the block's width, padded to 256 | FP8 map -> FP8 map |
+| `enc0.<w>` per linear | merge / expand section format: bias tile vector (rows R_L(C_out)), then fragments [mt < C_out/16][kc < C_in/16], rows R_L(C_out), K order K_L(C_in); inputs narrower than C_in (20 values) get zero weights | FP8 map [C_in] -> map [C_out]: FP8 (Win1, ReLU) or FP16 (Win2: the encoder block's input) |
+| `enc0_block`, `dec0_block` | Model M's Swin block section (packing.pack_block) at the block's width, padded to 256 | enc0_block: FP16 map -> FP8 map, window members outside the grid from the per-pixel chain (border "input"); dec0_block: FP8 map -> FP16 map, token-grid mirror (border "coarse") |
 | `enc0.project` | bias tile vector (rows R_L(64)), then fragments [mt][kb], rows R_L(64), K order: block 2i + s of group i holds channel 32 i + 16 h + 8 s + j (dec0's order, clean/runner/dec0.py kord_decoder, over every group) | the 2 x 2 pixels of each token (channel 32 p + i, p = dx + 2 dy) -> the 64 FP8 features enc1 reads |
 | `dec0.project` | expand section format: bias tile vector (rows R_E(32)), then fragments [mt < 8][kb < 4], rows R_E(32) (tile 2 s + g: sub-pixel s, channels 16 g ..), K order as `enc0.project` (two groups of 32) | dec1's map [F/2][64] -> pixel map [F][32] |
-| `dec0.coef` | Model M's dec0 blob (clean/runner/dec0.py pack) with W = 0 and b = 0: the scalars S, T and the code tables | the decoder block's pixel map -> A, B, C, latent |
+| `dec0.coef` | Model M's dec0 blob (clean/runner/dec0.py pack) with W = 0 and b = 0: the scalars S, T and the code tables | the decoder block's FP16 pixel map -> A, B, C, latent (dec_pixel "l": 13 values, latent = tanh(candidate), no previous latent) |
 
 The ten shared Swin stages use clean/runner/packing.py pack_stage unchanged.
 """
@@ -101,36 +101,58 @@ def pack_coef(tensors, d_row="gfx12"):
 
 # ---- launch lists ---------------------------------------------------------------------------------------------------
 
+def map_format(acc, out_round):
+    """Storage format of a kernel's output map: "fp8" (1 byte per channel) or "fp16" (2 bytes per channel)."""
+    if out_round in ("q8", "relu_q8"):
+        return "fp8"
+    if out_round == "f16" or (out_round in (None, "none") and acc == "f16"):
+        return "fp16"
+    raise ValueError(f"no map format for acc {acc!r} / out_round {out_round!r}")
+
+
+def _swin_launch(op, in_format, out_format):
+    return {"kind": "swin", "blob": op["params"], "src": op["src"], "dst": op["dst"], "C": op["C"],
+            "heads": op["heads"], "mlp": op["mlp"], "offsets": op["offsets"], "params": op["params"],
+            "border": op.get("border", "mirror"), "in_format": in_format, "out_format": out_format}
+
+
 def encoder_launches(t=_table.TABLE):
     """The encoder's kernels in order: [{"kind", "blob", ...}]. kinds: "values" (quant into a pixel map of 32
     channels), "linear", "swin", "project" (with the space_to_depth gather folded in)."""
     ops = list(t["enc_ops"])
     _table.encoder_plan(t)
     width = {"values": 20}
+    fmt = {}
     out = []
     for i, op in enumerate(ops):
         k = op["op"]
         if k == "quant":
             if op["mode"] != "dither" or i != 0:
                 raise ValueError("the encoder's value kernel quantizes the per-pixel values with the dither table")
-            out.append({"kind": "values", "blob": "enc0.values", "dst": op["dst"], "C": 32})
+            out.append({"kind": "values", "blob": "enc0.values", "dst": op["dst"], "C": 32, "out_format": "fp8"})
             width[op["dst"]] = 32
+            fmt[op["dst"]] = "fp8"
         elif k == "linear":
             c_in = width[op["src"]]
+            fo = map_format(op.get("acc"), op.get("out_round", "q8"))
             out.append({"kind": "linear", "blob": "enc0." + op["w"], "src": op["src"], "dst": op["dst"],
                         "C_in": c_in, "C_out": op["n_out"], "w": op["w"], "b": op["b"], "acc": op.get("acc"),
-                        "out_round": op.get("out_round", "q8")})
+                        "out_round": op.get("out_round", "q8"), "in_format": fmt[op["src"]], "out_format": fo})
             width[op["dst"]] = op["n_out"]
+            fmt[op["dst"]] = fo
         elif k == "swin":
-            out.append({"kind": "swin", "blob": op["params"], "src": op["src"], "dst": op["dst"], "C": op["C"],
-                        "heads": op["heads"], "mlp": op["mlp"], "offsets": op["offsets"], "params": op["params"]})
+            fo = map_format("f16", op.get("out_round", "q8"))
+            out.append(_swin_launch(op, fmt[op["src"]], fo))
+            fmt[op["dst"]] = fo
+            width[op["dst"]] = width[op["src"]]
         elif k == "space_to_depth":
             nxt = ops[i + 1] if i + 1 < len(ops) else None
             if not nxt or nxt["op"] != "project" or nxt["src"] != op["dst"]:
                 raise ValueError("space_to_depth must feed the project directly (one gather kernel)")
             width[op["dst"]] = 4 * width[op["src"]]
-            out.append({"kind": "project", "blob": "enc0.project", "src": op["src"], "groups": nxt["groups"],
-                        "w": nxt["w"], "b": nxt["b"], "clamp": nxt.get("clamp")})
+            out.append({"kind": "project", "blob": "enc0.project", "src": op["src"],
+                        "dst": nxt.get("dst", "enc0.features"), "groups": nxt["groups"], "w": nxt["w"], "b": nxt["b"],
+                        "clamp": nxt.get("clamp"), "in_format": fmt[op["src"]], "out_format": "fp8"})
         elif k == "project":
             continue                                   # folded into the gather above
         else:
@@ -143,6 +165,7 @@ def decoder_launches(t=_table.TABLE):
     coefficient functions)."""
     ops = list(t["dec_ops"])
     _table.decoder_plan(t)
+    fmt = {}
     out = []
     for i, op in enumerate(ops):
         k = op["op"]
@@ -150,15 +173,19 @@ def decoder_launches(t=_table.TABLE):
             nxt = ops[i + 1] if i + 1 < len(ops) else None
             if not nxt or nxt["op"] != "depth_to_space" or nxt["src"] != op["dst"]:
                 raise ValueError("dec_project must feed depth_to_space directly (one scatter kernel)")
-            out.append({"kind": "dec_project", "blob": "dec0.project", "w": op["w"], "b": op["b"],
-                        "groups": op["groups"], "dst": nxt["dst"]})
+            fmt[nxt["dst"]] = map_format("f16", op.get("out_round", "q8"))
+            out.append({"kind": "dec_project", "blob": "dec0.project", "src": op["src"], "dst": nxt["dst"],
+                        "w": op["w"], "b": op["b"], "groups": op["groups"], "in_format": "fp8",
+                        "out_format": fmt[nxt["dst"]]})
         elif k == "depth_to_space":
             continue
         elif k == "swin":
-            out.append({"kind": "swin", "blob": op["params"], "src": op["src"], "dst": op["dst"], "C": op["C"],
-                        "heads": op["heads"], "mlp": op["mlp"], "offsets": op["offsets"], "params": op["params"]})
+            fo = map_format("f16", op.get("out_round", "q8"))
+            out.append(_swin_launch(op, fmt[op["src"]], fo))
+            fmt[op["dst"]] = fo
         elif k == "pick":
-            out.append({"kind": "coef", "blob": "dec0.coef", "src": op["src"], "values": tuple(op["values"])})
+            out.append({"kind": "coef", "blob": "dec0.coef", "src": op["src"], "values": tuple(op["values"]),
+                        "dec_pixel": t["dec_pixel"], "in_format": fmt[op["src"]], "dst": "codes"})
         else:
             raise ValueError(f"no kernel for decoder op {k!r}")
     return out
