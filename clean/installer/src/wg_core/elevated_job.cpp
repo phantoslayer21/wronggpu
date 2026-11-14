@@ -9,7 +9,9 @@
 #include <mutex>
 #include <thread>
 
+#include "detect.h"  // GameRoot
 #include "package_snapshot.h"
+#include "secure_fs.h"
 
 namespace wg {
 
@@ -193,14 +195,17 @@ std::vector<OpResult> RunElevatedJobs(const std::vector<string>& jobTexts, const
     auto all = [&out](int code, const wstring& message) { for (auto& r : out) { r = OpResult(); r.code = code; r.message = message; } return out; };
     std::vector<wstring> files;
     const wstring stamp = NowStamp(true) + L"-" + RandomHex().substr(0, 8);
-    const wstring batch = Join(jobsDir, L"batch-" + stamp + L".txt");
-    auto cleanup = [&] { for (auto& f : files) DeleteFileW(f.c_str()); DeleteFileW(batch.c_str()); };
+    wstring batch;
+    auto cleanup = [&] { for (auto& f : files) DeleteFileW(f.c_str()); if (!batch.empty()) DeleteFileW(batch.c_str()); };
     string list;
     try {
         EnsureDir(jobsDir);
+        // the folder as the worker finds it (it opens the files without following a link and checks their final path)
+        const wstring dir = BoundPath(jobsDir);
+        batch = Join(dir, L"batch-" + stamp + L".txt");
         std::vector<std::pair<wstring, wstring>> listed;
         for (size_t i = 0; i < n; ++i) {
-            files.push_back(Join(jobsDir, L"job-" + stamp + L"-" + std::to_wstring(i + 1) + L".txt"));
+            files.push_back(Join(dir, L"job-" + stamp + L"-" + std::to_wstring(i + 1) + L".txt"));
             WriteFileAtomic(files[i], jobTexts[i].data(), jobTexts[i].size());
             listed.push_back({files[i], Sha256Bytes(jobTexts[i].data(), jobTexts[i].size())});
         }
@@ -264,10 +269,14 @@ private:
     std::mutex m_;
 };
 
-// A file read once into memory (a job or batch file: at most 1 MiB).
+// A file read once into memory (a job or batch file: at most 1 MiB), opened without following a link (secure_fs.h).
 bool ReadOnce(const wstring& path, string& bytes, wstring& why) {
     if (!IsAbsolutePath(path)) { why = L"not an absolute path: " + path; return false; }
-    Held h = Hold(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    FsGuard reader;  // no roots: reading only
+    ScopedFsGuard active(&reader);
+    Held h;
+    try { h = Hold(OpenForRead(path, FILE_SHARE_READ)); }
+    catch (const SetupError& e) { why = e.msg; return false; }
     if (!h) { why = L"cannot open " + path + L" (" + ErrText(GetLastError()) + L")"; return false; }
     LARGE_INTEGER size{};
     if (!GetFileSizeEx(h.get(), &size) || size.QuadPart > (1 << 20)) { why = path + L" is not a job file (size)"; return false; }
@@ -283,6 +292,30 @@ bool ReadOnce(const wstring& path, string& bytes, wstring& why) {
 
 bool SameHash(const wstring& a, const wstring& b) { return a.size() == 64 && IEq(a, b); }
 bool UsesPackage(Op op) { return op == Op::Install || op == Op::Update || op == Op::Repair; }
+
+// The folders a job may change (secure_fs.h): the worker's private folder, the player's local app data folder, the game's
+// folder (its root: GameRoot of the exe's folder or of the job's folder) and the player's Documents folder when it is there.
+// Each is opened and held by the job's guard before any job runs.
+bool GuardJob(const WorkerJob& w, const wstring& privateDir, FsGuard& g, wstring& why) {
+    std::vector<wstring> roots{privateDir, w.localAppData};
+    if (!w.r.exe.empty()) roots.push_back(GameRoot(Parent(w.r.exe)));
+    if (!w.r.dir.empty()) roots.push_back(GameRoot(w.r.dir));
+    if (!w.documents.empty()) {
+        FsGuard reader;
+        ScopedFsGuard active(&reader);
+        try { if (IsDir(w.documents)) roots.push_back(w.documents); }  // not there: nothing in it is changed
+        catch (const SetupError& e) { why = e.msg; return false; }
+    }
+    std::vector<wstring> added;
+    for (auto& r : roots) {
+        bool dup = false;
+        for (auto& a : added) dup = dup || IEq(NormalPath(a), NormalPath(r));
+        if (dup) continue;
+        if (!g.AddRoot(r, why)) return false;
+        added.push_back(r);
+    }
+    return true;
+}
 
 }  // namespace
 
@@ -310,7 +343,12 @@ WorkerRun RunWorker(const WorkerArgs& a, Context& ctx, const WorkerRunFn& run, c
             if (!dir.empty()) {
                 if (!ctx.opti.tempDir.empty() && StartsWithI(ctx.opti.tempDir, dir)) ctx.opti = OptiPackage();
                 if (!ctx.opti.dir.empty() && StartsWithI(ctx.opti.dir, dir)) ctx.opti = OptiPackage();
-                try { RemoveTree(dir); } catch (const SetupError&) {}
+                // removed below its parent's held handle (the jobs' guards, which hold the folder itself, are gone by now)
+                try {
+                    FsGuard g;
+                    wstring why;
+                    if (g.AddRoot(Parent(dir), why)) { ScopedFsGuard active(&g); RemoveTree(dir); }
+                } catch (const SetupError&) {}
             }
             ctx.workRoot = root;
             std::lock_guard<std::mutex> l(ctx.logMutex);
@@ -350,28 +388,43 @@ WorkerRun RunWorker(const WorkerArgs& a, Context& ctx, const WorkerRunFn& run, c
         if (!ParseJob(jt, w.r, w.localAppData, &why, &w.userSid, &w.perGameEntry, &w.documents)) return refuse(label + L": bad job file: " + why);
     }
 
-    // 2. the private folder for this run's temporary files, and the OptiScaler packages copied into it and checked
+    // 2. the private folder for this run's temporary files, and the OptiScaler packages copied into it and checked (the
+    //    package read and the copy written through a guard whose one root is the private folder: secure_fs.h)
     if (!MakePrivateFolder(privateParent, privateDir, why)) { privateDir.clear(); return refuse(why); }
     ctx.workRoot = privateDir;
-    std::map<wstring, wstring> copies;  // package path + digest -> its checked copy
-    for (size_t i = 0; i < jobs.size(); ++i) {
-        OpRequest& r = jobs[i].r;
-        if (!UsesPackage(r.op)) { r.optiPackage.clear(); r.optiDigest.clear(); continue; }
-        if (r.optiPackage.empty()) continue;
-        const wstring key = Lower(FullPath(r.optiPackage)) + L"|" + Lower(r.optiDigest);
-        auto it = copies.find(key);
-        if (it == copies.end()) {
-            const wstring into = Join(privateDir, L"package-" + std::to_wstring(copies.size() + 1));
-            wstring copy;
-            try { EnsureDir(into); } catch (const SetupError& e) { return refuse(e.msg); }
-            if (!SnapshotPackage(r.optiPackage, r.optiDigest, into, copy, why)) return refuse(L"job " + std::to_wstring(i + 1) + L": " + why);
-            LogLine(ctx, L"elevated worker: OptiScaler package " + r.optiPackage + L" checked (" + r.optiDigest.substr(0, 12) + L")");
-            it = copies.emplace(key, copy).first;
+    {
+        FsGuard snapshot;
+        if (!snapshot.AddRoot(privateDir, why)) return refuse(why);
+        ScopedFsGuard active(&snapshot);
+        std::map<wstring, wstring> copies;  // package path + digest -> its checked copy
+        for (size_t i = 0; i < jobs.size(); ++i) {
+            OpRequest& r = jobs[i].r;
+            if (!UsesPackage(r.op)) { r.optiPackage.clear(); r.optiDigest.clear(); continue; }
+            if (r.optiPackage.empty()) continue;
+            const wstring key = Lower(FullPath(r.optiPackage)) + L"|" + Lower(r.optiDigest);
+            auto it = copies.find(key);
+            if (it == copies.end()) {
+                const wstring into = Join(privateDir, L"package-" + std::to_wstring(copies.size() + 1));
+                wstring copy;
+                try { EnsureDir(into); } catch (const SetupError& e) { return refuse(e.msg); }
+                if (!SnapshotPackage(r.optiPackage, r.optiDigest, into, copy, why)) return refuse(L"job " + std::to_wstring(i + 1) + L": " + why);
+                LogLine(ctx, L"elevated worker: OptiScaler package " + r.optiPackage + L" checked (" + r.optiDigest.substr(0, 12) + L")");
+                it = copies.emplace(key, copy).first;
+            }
+            r.optiPackage = it->second;
         }
-        r.optiPackage = it->second;
     }
 
-    // 3. every job checked: run them in order
+    // 3. every job's folders opened and held without following a link, each where its path says (secure_fs.h): a job whose
+    //    folder fails this runs, like any job that fails a check, no job at all
+    std::vector<std::unique_ptr<FsGuard>> guards;
+    for (size_t i = 0; i < jobs.size(); ++i) {
+        guards.push_back(std::make_unique<FsGuard>());
+        if (!GuardJob(jobs[i], privateDir, *guards.back(), why))
+            return refuse(L"job " + std::to_wstring(i + 1) + L" (" + BaseName(listed[i].first) + L"): " + why);
+    }
+
+    // 4. every job checked: run them in order, each through its guard
     bool failed = false;
     out.last = OpResult();
     for (size_t i = 0; i < jobs.size(); ++i) {
@@ -380,12 +433,15 @@ WorkerRun RunWorker(const WorkerArgs& a, Context& ctx, const WorkerRunFn& run, c
             res.code = kOpNotRun;
             res.message = L"not run: an earlier game failed";
         } else {
-            res = run(jobs[i]);
+            ScopedFsGuard active(guards[i].get());
+            try { res = run(jobs[i]); }
+            catch (const SetupError& e) { res = OpResult(); res.code = e.code ? e.code : EXIT_FAILED; res.message = e.msg; }
             ++out.ran;
             if (res.code) { failed = true; out.last = res; }
         }
         reply.Send(kRecResult, (uint32_t)(i + 1), ResultText(res));
     }
+    guards.clear();
     reply.Send(kRecEnd, 0, "");
     return out;
 }

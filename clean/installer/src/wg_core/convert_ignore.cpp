@@ -5,6 +5,8 @@
 #include <atomic>
 #include <cstring>
 
+#include "secure_fs.h"
+
 namespace wg {
 
 bool FileIdent::operator==(const FileIdent& o) const {
@@ -197,7 +199,7 @@ bool ParseIgnoreText(const string& bytes, const wstring& source, IgnoreLists& in
 // The size is checked on the open handle before anything is read.
 bool ReadIgnoreListBytes(const wstring& file, string& out, wstring& why) {
     out.clear();
-    const DWORD attrs = GetFileAttributesW(file.c_str());
+    const DWORD attrs = GetAttrs(file);
     if (attrs == INVALID_FILE_ATTRIBUTES) {
         const DWORD err = GetLastError();
         why = err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND ? wstring(L"there is no such file") : ErrText(err);
@@ -209,7 +211,7 @@ bool ReadIgnoreListBytes(const wstring& file, string& out, wstring& why) {
     for (int i = 0; i < kIgnoreReadTries; ++i) {
         if (i) Sleep(kIgnoreReadWaitMs);
         // FILE_SHARE_READ only: while another program has it open for writing, this waits instead of reading half a list
-        h = CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        h = OpenForRead(file, FILE_SHARE_READ);
         if (h != INVALID_HANDLE_VALUE) break;
         err = GetLastError();
         if (err != ERROR_SHARING_VIOLATION && err != ERROR_LOCK_VIOLATION) break;
@@ -368,7 +370,7 @@ IgnoreLists LoadConvertIgnore(Context& ctx, const wchar_t* what, IgnoreReport* r
         LogLine(ctx, wstring(what) + L": the ignore list " + f + L" can't be read: " + why);
     };
     for (auto& f : WellKnownIgnoreLists(ctx.ownDataDir)) {
-        if (GetFileAttributesW(f.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        if (GetAttrs(f) == INVALID_FILE_ATTRIBUTES) {
             const DWORD err = GetLastError();
             if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) continue;  // not there: nothing to read
             why = ErrText(err);  // there, or may be, but not to be looked at (no permission, a bad name): fail closed
@@ -430,17 +432,30 @@ static wstring ErrShort(DWORD err) {
 }
 // The list to `to`, never over a file that is there: moved (a rename beside it), else copied (a link as the link). 0: done.
 static DWORD MoveOrCopyList(const wstring& from, const wstring& to, bool link) {
-    if (MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_WRITE_THROUGH)) return 0;
+    if (MovePath(from, to, 0)) return 0;
     const DWORD moveErr = GetLastError();
+    if (ActiveFsGuard()) return !Exists(to) && CopyPath(from, to) ? 0 : moveErr;  // the elevated worker (secure_fs.h; never a link)
     BOOL cancel = FALSE;
     if (CopyFileExW(from.c_str(), to.c_str(), nullptr, nullptr, &cancel, COPY_FILE_FAIL_IF_EXISTS | (link ? COPY_FILE_COPY_SYMLINK : 0))) return 0;
     return moveErr;
 }
 
+static ListKept PutBack(Context& ctx, const wstring& moved, const wstring& shared);
 ListKept PutIgnoreListBack(Context& ctx, const wstring& moved, const wstring& shared) {
+    try { return PutBack(ctx, moved, shared); }
+    catch (const SetupError& e) {  // the elevated worker's guard refused it (secure_fs.h): the list stays where it is
+        ListKept r;
+        r.leftIn = Join(moved, kIgnoreListName);
+        r.said = L"could not put your ignore-files.txt back into " + shared + L" (" + e.msg + L"); it is kept at " + r.leftIn + L". Move it back to " +
+                 Join(shared, kIgnoreListName) + L" yourself (WrongGPU reads only that one); everything else in that folder is removed.";
+        LogLine(ctx, L"cleanup: " + r.said);
+        return r;
+    }
+}
+static ListKept PutBack(Context& ctx, const wstring& moved, const wstring& shared) {
     ListKept r;
     const wstring from = Join(moved, kIgnoreListName), to = Join(shared, kIgnoreListName);
-    const DWORD a = GetFileAttributesW(from.c_str());
+    const DWORD a = GetAttrs(from);
     if (a == INVALID_FILE_ATTRIBUTES || (a & FILE_ATTRIBUTE_DIRECTORY)) return r;  // no list (a folder of that name is none)
     const bool link = (a & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
     if (const PutBackHookFn hook = g_putBackHook.load()) hook(shared);
@@ -449,7 +464,7 @@ ListKept PutIgnoreListBack(Context& ctx, const wstring& moved, const wstring& sh
         // the command-line suites: another program made the folder again with its own list, or a file is where it should be
         const wstring how = EnvVar(L"WRONGGPU_TEST_LIST_PUTBACK");
         if (how == L"exists") {
-            CreateDirectoryW(shared.c_str(), nullptr);
+            MakeDir(shared);
             const string other = "wronggpu-ignore-files 1\r\n# another program's new list (test)\r\n";
             WriteFileAtomic(to, other.data(), other.size());
         } else if (how == L"blocked") {
@@ -458,7 +473,7 @@ ListKept PutIgnoreListBack(Context& ctx, const wstring& moved, const wstring& sh
         }
     }
 #endif
-    CreateDirectoryW(shared.c_str(), nullptr);
+    if (!IsDir(shared)) MakeDir(shared);
     const DWORD err = MoveOrCopyList(from, to, link);
     if (!err) {
         r.said = wstring(kKeptIgnoreListText) + L": " + to;
@@ -470,9 +485,9 @@ ListKept PutIgnoreListBack(Context& ctx, const wstring& moved, const wstring& sh
     // under the first free ignore-files.txt.kept-<n>, never over it and never deleted.
     for (int n = 1; n <= 99; ++n) {
         const wstring keptAs = to + L".kept-" + std::to_wstring(n);
-        if (GetFileAttributesW(keptAs.c_str()) != INVALID_FILE_ATTRIBUTES) continue;
+        if (GetAttrs(keptAs) != INVALID_FILE_ATTRIBUTES) continue;
         if (MoveOrCopyList(from, keptAs, link)) break;  // the folder can't take it: not one name of this kind will do
-        const bool other = GetFileAttributesW(to.c_str()) != INVALID_FILE_ATTRIBUTES;
+        const bool other = GetAttrs(to) != INVALID_FILE_ATTRIBUTES;
         r.said = L"kept your ignore-files.txt as " + keptAs + L": " + (other ? L"another program made " + to + L" again meanwhile, so both are kept"
                                                                               : L"it could not go back to " + to + L" (" + ErrShort(err) + L")") +
                  L". WrongGPU reads only ignore-files.txt: copy the lines you still need from " + BaseName(keptAs) + L" into it, then delete " +

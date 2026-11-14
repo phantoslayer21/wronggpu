@@ -323,7 +323,18 @@ ctest `source-size`.
   is the job's. One job that fails a check: no job runs. The worker writes no log or result file; its log lines and
   each job's result come back over the pipe, the window takes them only from the worker it started and only in that
   run, and a game without a result there is shown as not reported (`src/wg_core/elevated_job.h`,
-  `src/wg_core/package_snapshot.h`).
+  `src/wg_core/package_snapshot.h`). The worker acts on files through held handles (`src/wg_core/secure_fs.h`): each
+  job's folders (the game's, the player's local app data and Documents folders, its own private folder) are opened
+  before any job runs, from the volume root one folder at a time without following a link, checked to be where the
+  job's path says (their final path), and held so that none of them can be renamed or replaced until the job ends.
+  Every file and folder below them is opened the same way relative to the held folder; a junction, a symbolic link or
+  any other reparse point that leads elsewhere, on any part of a path, is refused with the path named (reparse points
+  that only store a file differently, such as Windows' compression or OneDrive's files on demand, are opened as the
+  file itself). Files are written under a new name next to their target and renamed over it through the handle;
+  renames and deletes go through the file's handle; nothing outside the job's folders is written. The converter reads
+  private copies and writes into the private folder, from where its output is copied into place through the handles.
+  The window binds each path of a job to the path Windows reports for it before the prompt, so a game reached through
+  a link the player made is bound to the real folder.
 - **Command line** (a verb as the first argument; `src/app/cli.cpp`): `scan`, `status [game]`, `install`, `repair`,
   `update`, `uninstall`, `rollback`, `adopt [game | --all]`, `set <game> key=value ...`, `set --global key=value`,
   `get <game> [key]`, `get --global`, `collect <game> [--zip=<file>]`, `hipcheck`, `model status|convert [--preset=M|L]`

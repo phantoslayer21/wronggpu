@@ -9,9 +9,12 @@
 //   - runs nothing without the reply pipe;
 //   - reads the batch file and every job file once into memory, checks each SHA-256 against the command line and the batch
 //     and parses those same bytes;
-//   - checks every job before the first one runs: every path absolute, and the OptiScaler package of an install, update or
-//     repair copied into a new folder only administrators can write, the copy's digest the job's (package_snapshot.h); the
-//     install uses that copy. A batch with one job that fails these checks runs no job at all;
+//   - checks every job before the first one runs: every path absolute, the OptiScaler package of an install, update or
+//     repair copied into a new folder only administrators can write, the copy's digest the job's (package_snapshot.h; the
+//     install uses that copy), and the job's folders opened without following a link, where their paths say, and held
+//     (secure_fs.h). A batch with one job that fails these checks runs no job at all;
+//   - runs each job through its guard (secure_fs.h): every file operation through held handles, nothing outside the job's
+//     folders written;
 //   - writes no log or result file: its log lines and each job's result go back over the pipe, and the launcher writes the
 //     lines to its own log.
 // The launcher takes the reply only from the worker process it started (the pipe client's process id and start time) and

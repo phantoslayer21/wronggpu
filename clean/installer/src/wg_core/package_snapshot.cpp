@@ -10,6 +10,7 @@
 
 #include "checks.h"    // IsElevated
 #include "launcher.h"  // CurrentUserSid
+#include "secure_fs.h"
 #include "sha256.h"
 
 #pragma comment(lib, "bcrypt.lib")
@@ -36,30 +37,26 @@ bool SourceOf(const wstring& chosen, Source& s, wstring& why) {
     return false;
 }
 
-// The files of a folder and its subfolders, relative to it (links left out), sorted.
+// The files of a folder and its subfolders, relative to it (links left out: util.h ListEntries, the same on the launcher's
+// side and through the elevated worker's guard), sorted.
 bool ListPackage(const wstring& root, std::vector<wstring>& files, wstring& why) {
     std::vector<wstring> stack{L""};
     while (!stack.empty()) {
         const wstring rel = stack.back();
         stack.pop_back();
-        WIN32_FIND_DATAW fd;
-        const wstring pattern = Join(rel.empty() ? root : Join(root, rel), L"*");
-        HANDLE h = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
-        if (h == INVALID_HANDLE_VALUE) {
-            if (GetLastError() == ERROR_FILE_NOT_FOUND) continue;
-            why = L"cannot list " + pattern + L" (" + ErrText(GetLastError()) + L")";
+        std::vector<DirEntry> entries;
+        const wstring dir = rel.empty() ? root : Join(root, rel);
+        if (!ListEntries(dir, entries) && GetLastError() != ERROR_FILE_NOT_FOUND) {
+            why = L"cannot list " + dir + L" (" + ErrText(GetLastError()) + L")";
             return false;
         }
-        do {
-            const wstring n = fd.cFileName;
-            if (n == L"." || n == L"..") continue;
-            if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
-            const wstring r = rel.empty() ? n : Join(rel, n);
-            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) stack.push_back(r);
+        for (auto& en : entries) {
+            if (en.attrs & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+            const wstring r = rel.empty() ? en.name : Join(rel, en.name);
+            if (en.attrs & FILE_ATTRIBUTE_DIRECTORY) stack.push_back(r);
             else files.push_back(r);
-            if (files.size() > kMaxFiles) { FindClose(h); why = L"the OptiScaler package has more files than a package can have"; return false; }
-        } while (FindNextFileW(h, &fd));
-        FindClose(h);
+            if (files.size() > kMaxFiles) { why = L"the OptiScaler package has more files than a package can have"; return false; }
+        }
     }
     std::sort(files.begin(), files.end(), [](const wstring& a, const wstring& b) { return Lower(a) < Lower(b); });
     return true;
@@ -70,11 +67,11 @@ using Held = std::unique_ptr<void, HandleCloser>;
 
 // One file read once (no other writer while it is read): its SHA-256, and its bytes written to `copyTo` when given.
 bool HashFile(const wstring& path, const wstring& copyTo, unsigned long long& total, wstring& sha, wstring& why) {
-    Held in(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
+    Held in(OpenForRead(path, FILE_SHARE_READ));
     if (in.get() == INVALID_HANDLE_VALUE) { in.release(); why = L"cannot read " + path + L" (" + ErrText(GetLastError()) + L")"; return false; }
     Held out;
     if (!copyTo.empty()) {
-        out.reset(CreateFileW(copyTo.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
+        out.reset(CreateNewFile(copyTo));
         if (out.get() == INVALID_HANDLE_VALUE) { out.release(); why = L"cannot write " + copyTo + L" (" + ErrText(GetLastError()) + L")"; return false; }
     }
     wgc::Sha256 h;
@@ -167,14 +164,23 @@ bool MakePrivateFolder(const wstring& parentIn, wstring& path, wstring& why) {
         why = L"cannot make the folder's permissions (" + ErrText(GetLastError()) + L")";
         return false;
     }
-    SECURITY_ATTRIBUTES sa{sizeof(sa), sd, FALSE};
+    // made relative to the parent's held handle, the parent opened without following a link (secure_fs.h)
     bool ok = false;
-    for (int i = 0; i < 8 && !ok; ++i) {
-        path = Join(parent, L"WrongGPU-elevated-" + RandomHex());
-        ok = CreateDirectoryW(path.c_str(), &sa) != FALSE;
-        if (!ok && GetLastError() != ERROR_ALREADY_EXISTS) break;
+    DWORD e = 0;
+    FsGuard guard;
+    wstring refused;
+    if (!guard.AddRoot(parent, refused)) {
+        LocalFree(sd);
+        why = L"cannot make a private folder in " + parent + L": " + refused;
+        return false;
     }
-    if (!ok) why = L"cannot make a private folder in " + parent + L" (" + ErrText(GetLastError()) + L")";
+    for (int i = 0; i < 8 && !ok; ++i) {
+        path = Join(NormalPath(parent), L"WrongGPU-elevated-" + RandomHex());
+        try { ok = guard.CreateNewDir(path, sd, e); }
+        catch (const SetupError& x) { refused = x.msg; break; }
+        if (!ok && e != ERROR_ALREADY_EXISTS && e != ERROR_FILE_EXISTS) break;
+    }
+    if (!ok) why = L"cannot make a private folder in " + parent + L" (" + (refused.empty() ? ErrText(e) : refused) + L")";
     LocalFree(sd);
     return ok;
 }

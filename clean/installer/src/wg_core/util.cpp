@@ -3,7 +3,15 @@
 // this project.
 #include "util.h"
 
+#include "secure_fs.h"
+
 namespace wg {
+
+// The elevated worker's guard (secure_fs.h): while one is active, every helper below acts through it.
+#define WG_GUARD FsGuard* guard = ActiveFsGuard()
+// The guard's call `op` (which sets its error argument), as a Win32 call: false with the last error set. (The error is read
+// after the call: never as a second argument evaluated next to it.)
+template <class Op> static bool Done(Op op) { DWORD err = 0; const bool ok = op(err); if (!ok) SetLastError(err); return ok; }
 
 [[noreturn]] void Fail(const wstring& m, int code) { throw SetupError{m + L" [WG-SETUP-" + std::to_wstring(code) + L"]", code}; }
 
@@ -30,10 +38,66 @@ wstring ShortenMiddle(const wstring& s, size_t max) {
     if (ts != wstring::npos && ts - from <= tail / 2) tail = s.size() - ts;  // and "\Game\BattlEye"
     return s.substr(0, head) + L"\u2026" + s.substr(s.size() - tail);
 }
-bool Exists(const wstring& p) { return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES; }
-bool IsDir(const wstring& p) { DWORD a = GetFileAttributesW(p.c_str()); return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY); }
-bool IsFile(const wstring& p) { DWORD a = GetFileAttributesW(p.c_str()); return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY); }
+DWORD GetAttrs(const wstring& p) {
+    WG_GUARD;
+    if (!guard) return GetFileAttributesW(p.c_str());
+    DWORD e = 0;
+    const DWORD a = guard->Attributes(p, nullptr, e);
+    if (a == INVALID_FILE_ATTRIBUTES) SetLastError(e);
+    return a;
+}
+bool SetAttrs(const wstring& p, DWORD attrs) {
+    WG_GUARD;
+    if (!guard) return SetFileAttributesW(p.c_str(), attrs) != FALSE;
+    return Done([&](DWORD& e) { return guard->SetAttributes(p, attrs, e); });
+}
+bool DeletePath(const wstring& p) {
+    WG_GUARD;
+    if (!guard) return DeleteFileW(p.c_str()) != FALSE;
+    return Done([&](DWORD& e) { return guard->Unlink(p, e); });
+}
+bool RemoveDirPath(const wstring& p) {
+    WG_GUARD;
+    if (!guard) return RemoveDirectoryW(p.c_str()) != FALSE;
+    return Done([&](DWORD& e) { return guard->RemoveDir(p, e); });
+}
+bool MakeDir(const wstring& p) {
+    WG_GUARD;
+    if (!guard) return CreateDirectoryW(p.c_str(), nullptr) != FALSE;
+    return Done([&](DWORD& e) { return guard->CreateNewDir(p, nullptr, e); });
+}
+bool MovePath(const wstring& from, const wstring& to, DWORD flags) {
+    WG_GUARD;
+    if (!guard) return MoveFileExW(from.c_str(), to.c_str(), flags | MOVEFILE_WRITE_THROUGH) != FALSE;
+    return Done([&](DWORD& e) { return guard->Move(from, to, (flags & MOVEFILE_REPLACE_EXISTING) != 0, (flags & MOVEFILE_COPY_ALLOWED) != 0, e); });
+}
+bool CopyPath(const wstring& from, const wstring& to) {
+    WG_GUARD;
+    if (!guard) return CopyFileW(from.c_str(), to.c_str(), FALSE) != FALSE;
+    return Done([&](DWORD& e) { return guard->Copy(from, to, e); });
+}
+HANDLE OpenForRead(const wstring& path, DWORD share) {
+    WG_GUARD;
+    if (!guard) return CreateFileW(path.c_str(), GENERIC_READ, share, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    DWORD e = 0;
+    const HANDLE h = guard->OpenRead(path, share, e);
+    if (h == INVALID_HANDLE_VALUE) SetLastError(e);
+    return h;
+}
+HANDLE CreateNewFile(const wstring& p) {
+    WG_GUARD;
+    if (!guard) return CreateFileW(p.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    DWORD e = 0;
+    const HANDLE h = guard->CreateNew(p, e);
+    if (h == INVALID_HANDLE_VALUE) SetLastError(e);
+    return h;
+}
+bool Exists(const wstring& p) { return GetAttrs(p) != INVALID_FILE_ATTRIBUTES; }
+bool IsDir(const wstring& p) { DWORD a = GetAttrs(p); return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY); }
+bool IsFile(const wstring& p) { DWORD a = GetAttrs(p); return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY); }
 unsigned long long FileSize(const wstring& p) {
+    WG_GUARD;
+    if (guard) { DWORD e = 0; unsigned long long n = 0; return guard->Attributes(p, &n, e) == INVALID_FILE_ATTRIBUTES ? 0 : n; }
     WIN32_FILE_ATTRIBUTE_DATA d{};
     if (!GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &d)) return 0;
     return ((unsigned long long)d.nFileSizeHigh << 32) | d.nFileSizeLow;
@@ -68,7 +132,7 @@ wstring FromUtf8(const string& s) {
 bool ReadAll(const wstring& path, string& out) {
     // FILE_SHARE_DELETE: a read never stops another thread's move or delete of the file (the launcher's data check hashing
     // the model file while a conversion swaps it); the read goes on from the handle
-    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE h = OpenForRead(path, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
     if (h == INVALID_HANDLE_VALUE) return false;
     LARGE_INTEGER sz{};
     GetFileSizeEx(h, &sz);
@@ -106,6 +170,8 @@ bool FileContainsText(const wstring& path, const char* needle, unsigned long lon
     return ContainsText(f.data, f.size, needle);
 }
 void EnsureDir(const wstring& dir, std::vector<wstring>* created) {
+    WG_GUARD;
+    if (guard) { if (!dir.empty()) guard->EnsureDir(dir, created); return; }
     if (dir.empty() || IsDir(dir)) return;
     if (dir.size() <= 3 && dir.size() >= 2 && dir[1] == L':') return;
     EnsureDir(Parent(dir), created);
@@ -118,10 +184,12 @@ void EnsureDir(const wstring& dir, std::vector<wstring>* created) {
     if (created) created->push_back(dir);
 }
 void ForceDelete(const wstring& p) {
-    SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_NORMAL);
-    if (!DeleteFileW(p.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND) Fail(L"Cannot delete " + p + L": " + ErrText(GetLastError()));
+    SetAttrs(p, FILE_ATTRIBUTE_NORMAL);
+    if (!DeletePath(p) && GetLastError() != ERROR_FILE_NOT_FOUND) Fail(L"Cannot delete " + p + L": " + ErrText(GetLastError()));
 }
 void WriteFileAtomic(const wstring& path, const void* data, size_t size) {
+    WG_GUARD;
+    if (guard) { guard->WriteAtomic(path, data, size); return; }
     wstring tmp = path + kTmpSuffix;
     HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) Fail(L"Cannot write " + path + L": " + ErrText(GetLastError()));
@@ -145,10 +213,12 @@ void WriteFileAtomic(const wstring& path, const void* data, size_t size) {
 }
 void CopyChecked(const wstring& src, const wstring& dst) {
     EnsureDir(Parent(dst));
-    if (Exists(dst)) SetFileAttributesW(dst.c_str(), FILE_ATTRIBUTE_NORMAL);
-    if (!CopyFileW(src.c_str(), dst.c_str(), FALSE)) Fail(L"Cannot copy " + src + L" to " + dst + L": " + ErrText(GetLastError()));
+    if (Exists(dst)) SetAttrs(dst, FILE_ATTRIBUTE_NORMAL);
+    if (!CopyPath(src, dst)) Fail(L"Cannot copy " + src + L" to " + dst + L": " + ErrText(GetLastError()));
 }
 void RemoveTree(const wstring& dir, const wstring& keepFile) {
+    WG_GUARD;
+    if (guard) { guard->RemoveTree(dir, keepFile); return; }
     // Check the root too: enumerating dir\* would otherwise follow a root junction into its target.
     const DWORD attrs = GetFileAttributesW(dir.c_str());
     if (attrs == INVALID_FILE_ATTRIBUTES) return;
@@ -172,9 +242,58 @@ void RemoveTree(const wstring& dir, const wstring& keepFile) {
     }
     RemoveDirectoryW(dir.c_str());
 }
+// A name against a wildcard pattern (* and ?, case-insensitive; "*.*" is every name), as the guard's listings use it.
+static bool WildMatch(const wchar_t* p, const wchar_t* s) {
+    if (wcscmp(p, L"*.*") == 0) p = L"*";
+    const wchar_t *star = nullptr, *mark = nullptr;
+    while (*s) {
+        if (*p == L'*') { star = p++; mark = s; continue; }
+        if (*p == L'?' || towlower(*p) == towlower(*s)) { ++p; ++s; continue; }
+        if (!star) return false;
+        p = star + 1; s = ++mark;
+    }
+    while (*p == L'*') ++p;
+    return !*p;
+}
+// The entries of `dir` through the guard (empty when it is not there).
+static std::vector<FsGuard::Entry> GuardList(FsGuard* guard, const wstring& dir) {
+    std::vector<FsGuard::Entry> out;
+    DWORD e = 0;
+    guard->List(dir, out, e);
+    return out;
+}
+bool ListEntries(const wstring& dir, std::vector<DirEntry>& out) {
+    WG_GUARD;
+    if (guard) {
+        std::vector<FsGuard::Entry> es;
+        DWORD e = 0;
+        if (!guard->List(dir, es, e)) { SetLastError(e); return false; }
+        for (auto& en : es) out.push_back({en.name, en.attrs, en.size});
+        return true;
+    }
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileExW(Join(dir, L"*").c_str(), FindExInfoBasic, &fd, FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    do {
+        const wstring n = fd.cFileName;
+        if (n == L"." || n == L"..") continue;
+        DWORD attrs = fd.dwFileAttributes;
+        if ((attrs & FILE_ATTRIBUTE_REPARSE_POINT) && !ReparseTagIsLink(fd.dwReserved0)) attrs &= ~FILE_ATTRIBUTE_REPARSE_POINT;  // dwReserved0: the tag
+        out.push_back({n, attrs, ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow});
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return true;
+}
 // Files (not folders) in dir whose name matches the wildcard pattern.
 std::vector<wstring> ListFiles(const wstring& dir, const wchar_t* pattern) {
     std::vector<wstring> r;
+    WG_GUARD;
+    if (guard) {
+        for (auto& en : GuardList(guard, dir))
+            if (!(en.attrs & FILE_ATTRIBUTE_DIRECTORY) && WildMatch(pattern, en.name.c_str())) r.push_back(Join(dir, en.name));
+        std::sort(r.begin(), r.end(), [](const wstring& a, const wstring& b) { return Lower(a) < Lower(b); });
+        return r;
+    }
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW(Join(dir, pattern).c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return r;
@@ -185,6 +304,13 @@ std::vector<wstring> ListFiles(const wstring& dir, const wchar_t* pattern) {
 }
 std::vector<wstring> ListDirs(const wstring& dir) {
     std::vector<wstring> r;
+    WG_GUARD;
+    if (guard) {
+        for (auto& en : GuardList(guard, dir))
+            if ((en.attrs & FILE_ATTRIBUTE_DIRECTORY) && !(en.attrs & FILE_ATTRIBUTE_REPARSE_POINT)) r.push_back(Join(dir, en.name));
+        std::sort(r.begin(), r.end(), [](const wstring& a, const wstring& b) { return Lower(a) < Lower(b); });
+        return r;
+    }
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW(Join(dir, L"*").c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return r;
@@ -202,7 +328,21 @@ std::vector<wstring> FindFilesNamed(const wstring& root, const wchar_t* name, si
     std::vector<wstring> out;
     std::vector<std::pair<wstring, int>> stack{{root, 0}};
     size_t visited = 0;
-    while (!stack.empty() && visited < budget) {
+    WG_GUARD;
+    while (guard && !stack.empty() && visited < budget) {
+        // a search: a folder the guard refuses (a link on the way) is left out like a link below it
+        auto [dir, depth] = stack.back(); stack.pop_back();
+        std::vector<FsGuard::Entry> entries;
+        try { entries = GuardList(guard, dir); } catch (const SetupError&) { continue; }
+        for (auto& en : entries) {
+            ++visited;
+            if (en.attrs & FILE_ATTRIBUTE_DIRECTORY) {
+                if (depth < maxDepth && !(en.attrs & FILE_ATTRIBUTE_REPARSE_POINT) && !IEq(en.name, kStateDirName) && !IEq(en.name, kLegacyStateDir))
+                    stack.push_back({Join(dir, en.name), depth + 1});
+            } else if (IEq(en.name, name)) out.push_back(Join(dir, en.name));
+        }
+    }
+    while (!guard && !stack.empty() && visited < budget) {
         auto [dir, depth] = stack.back(); stack.pop_back();
         WIN32_FIND_DATAW fd;
         HANDLE h = FindFirstFileW(Join(dir, L"*").c_str(), &fd);

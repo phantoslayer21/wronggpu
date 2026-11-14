@@ -58,6 +58,7 @@
 #include "wg_core/rr.h"
 #include "wg_core/rrconfig.h"
 #include "wg_core/rrprep.h"
+#include "wg_core/secure_fs.h"
 
 namespace wg::app {
 
@@ -203,17 +204,21 @@ static bool StartElevated(const wstring& args, HWND owner, DWORD& code, ProcessI
 static std::vector<OpResult> RunElevatedBatch(const std::vector<OpRequest>& rs, HWND owner, bool stop) {
     std::vector<string> texts;
     for (OpRequest r : rs) {
-        // the paths as this process sees them, and the OptiScaler package's digest before the permission prompt
-        // (package_snapshot.h: the worker installs only a copy with this digest); other operations take no package
-        if (!r.modelDll.empty()) r.modelDll = FullPath(r.modelDll);
+        // the paths as this process reaches them (secure_fs.h BoundPath: links and short names resolved here, as the
+        // player chose them; the worker opens them without following any link and refuses one whose final path differs),
+        // and the OptiScaler package's digest before the permission prompt (package_snapshot.h: the worker installs only a
+        // copy with this digest); other operations take no package
+        r.exe = BoundPath(r.exe);
+        r.dir = BoundPath(r.dir);
+        r.modelDll = BoundPath(r.modelDll);
         if (r.op == Op::Install || r.op == Op::Update || r.op == Op::Repair) {
             if (!r.optiPackage.empty()) {
-                r.optiPackage = FullPath(r.optiPackage);
+                r.optiPackage = BoundPath(r.optiPackage);
                 wstring why;
                 if (!PackageDigest(r.optiPackage, r.optiDigest, why)) LogLine(g.ctx, L"elevated step: " + why);
             }
         } else r.optiPackage.clear();
-        texts.push_back(JobText(r, EnvVar(L"LOCALAPPDATA"), CurrentUserSid(), g.ctx.perGameEntry ? 1 : 0, PlayerDocumentsDir(g.ctx)));
+        texts.push_back(JobText(r, BoundPath(EnvVar(L"LOCALAPPDATA")), CurrentUserSid(), g.ctx.perGameEntry ? 1 : 0, BoundPath(PlayerDocumentsDir(g.ctx))));
     }
     const StartWorkerFn start = [owner](const wstring& args, DWORD& code, ProcessIdentity& worker) { return StartElevated(args, owner, code, worker); };
     return RunElevatedJobs(texts, Join(gl.paths.dataDir, L"jobs"), stop, start, [](const wstring& s) { LogLine(g.ctx, s); });
@@ -719,7 +724,7 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
         wa.batch = a.get(L"batch"); wa.sha256 = a.get(L"sha256"); wa.pipe = a.get(L"pipe");
         wstring privateParent;  // empty: the Windows folder's Temp (package_snapshot.h)
 #ifdef WRONGGPU_TESTING
-        privateParent = EnvVar(L"WRONGGPU_TEST_PRIVATE_DIR");  // tests: the worker's private folder in their work folder
+        privateParent = BoundPath(EnvVar(L"WRONGGPU_TEST_PRIVATE_DIR"));  // tests: the worker's private folder in their work folder
 #endif
         const WorkerRun run = RunWorker(wa, g.ctx, runJob, privateParent);
         if (run.refused) Print(run.last.message);

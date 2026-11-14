@@ -578,7 +578,7 @@ static void SavePrevious(Context& ctx, const wstring& dir, Record m, Ui& ui) {
     }
     WriteFileAtomic(Join(tmp, L"previous.txt"), list.data(), list.size());
     RemoveTree(prev);
-    if (!MoveFileExW(tmp.c_str(), prev.c_str(), MOVEFILE_WRITE_THROUGH)) Fail(L"Cannot keep the previous version: " + ErrText(GetLastError()));
+    if (!MovePath(tmp, prev, 0)) Fail(L"Cannot keep the previous version: " + ErrText(GetLastError()));
     ui.log(L"kept WrongGPU " + m.version + L" for Roll back (" + std::to_wstring(n) + L" files in wronggpu-setup\\previous)");
 }
 struct PrevFile { wstring sha, rel; };
@@ -654,7 +654,7 @@ static void Rollback(Context& ctx, const wstring& dir, Ui& ui, OpResult& res) {
     SaveRecord(RecordPath(dir), m);
     WriteOwnedFiles(dir, m);
     RemoveTree(prev);
-    if (!MoveFileExW(swap.c_str(), prev.c_str(), MOVEFILE_WRITE_THROUGH)) res.warnings.push_back(L"the newer version could not be kept for a later update: " + ErrText(GetLastError()));
+    if (!MovePath(swap, prev, 0)) res.warnings.push_back(L"the newer version could not be kept for a later update: " + ErrText(GetLastError()));
     res.message = L"Rolled back from " + newer + L" to " + version + L" (" + std::to_wstring(files.size()) + (files.size() == 1 ? L" file)" : L" files)");
 }
 

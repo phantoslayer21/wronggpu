@@ -4,6 +4,7 @@
 #include "model.h"
 #include <filesystem>
 #include "optiscaler.h"
+#include "secure_fs.h"
 
 namespace wg {
 
@@ -19,7 +20,8 @@ bool ExistingModelValid(Context& ctx, wstring* why, wgc::ModelFileInfo* info) {
     if (info) *info = wgc::ModelFileInfo();
     if (!LoadEmbeddedMap(ctx) || !IsFile(ModelFile(ctx))) { if (why) *why = L"no converted model on this PC"; return false; }
     string w;
-    const bool ok = wgc::verify_model_file(*ctx.map.map, std::filesystem::path(ModelFile(ctx)), w, info);
+    const ConverterFile in(ModelFile(ctx), ctx.workRoot);  // (the elevated worker: a checked private copy, secure_fs.h)
+    const bool ok = wgc::verify_model_file(*ctx.map.map, std::filesystem::path(in.path()), w, info);
     if (why) *why = FromUtf8(w);
     return ok;
 }
@@ -127,7 +129,8 @@ ModelState FindModel(Context& ctx, const GameTarget* t, const wstring& userDll, 
     ModelCandidate chosenCand, withoutCand;
     for (auto& cand : cands) {
         auto conv = std::make_shared<wgc::Converted>();
-        const wgc::Result r = wgc::convert_file(*ctx.map.map, std::filesystem::path(cand.path), opt, *conv,
+        const ConverterFile in(cand.path, ctx.workRoot);
+        const wgc::Result r = wgc::convert_file(*ctx.map.map, std::filesystem::path(in.path()), opt, *conv,
                                                 [&ctx](const string& s) { LogLine(ctx, L"converter: " + FromUtf8(s)); });
         if (r.code == wgc::kOk) {
             if (wgc::has_every_group(*ctx.map.map, *conv)) { chosen = conv; chosenCand = cand; break; }
@@ -236,32 +239,36 @@ bool ReplaceModel(Context& ctx, const ModelState& m, wstring& problem) {
     const bool needGroups = m.trust == ModelState::TRUSTED;
     const wstring side = Join(ModelDir(ctx), L"model-new"), sideFile = Join(side, FromUtf8(wgc::kModelFileName));
     const wstring previous = ModelFile(ctx) + L".previous";
-    auto cleanup = [&] { if (IsDir(side)) RemoveTree(side); DeleteFileW(previous.c_str()); };
+    auto cleanup = [&] { if (IsDir(side)) RemoveTree(side); DeletePath(previous); };
     cleanup();  // what an interrupted earlier run left behind
-    const wgc::Result r = wgc::write_converted(*ctx.map.map, *m.converted, std::filesystem::path(side), false,
+    // the elevated worker: written and checked in its private folder, then copied beside the file in use (secure_fs.h)
+    ConverterDir out(side, ctx.workRoot);
+    const wstring checkFile = Join(out.path(), FromUtf8(wgc::kModelFileName));
+    const wgc::Result r = wgc::write_converted(*ctx.map.map, *m.converted, std::filesystem::path(out.path()), false,
                                                [&ctx](const string& s) { LogLine(ctx, L"converter: " + FromUtf8(s)); });
     if (r.code != wgc::kOk) { problem = L"it could not be saved next to the model data in use"; cleanup(); return false; }
 #ifdef WRONGGPU_TESTING
     if (!EnvVar(L"WRONGGPU_TEST_DAMAGE_NEW_MODEL").empty()) {  // tests: the new file is damaged before its check
         string bytes;
-        if (ReadAll(sideFile, bytes) && bytes.size() > 200) { bytes[200] ^= 1; WriteFileAtomic(sideFile, bytes.data(), bytes.size()); }
+        if (ReadAll(checkFile, bytes) && bytes.size() > 200) { bytes[200] ^= 1; WriteFileAtomic(checkFile, bytes.data(), bytes.size()); }
     }
 #endif
     string w;
     wgc::ModelFileInfo info;
-    if (!wgc::verify_model_file(*ctx.map.map, std::filesystem::path(sideFile), w, &info) || (needGroups && !info.absent_groups.empty()) || !info.same_map) {
+    if (!wgc::verify_model_file(*ctx.map.map, std::filesystem::path(checkFile), w, &info) || (needGroups && !info.absent_groups.empty()) || !info.same_map) {
         problem = L"the new file failed its check" + (w.empty() ? wstring() : L" (" + FromUtf8(w) + L")");
         cleanup(); return false;
     }
+    out.Publish();
     LogLine(ctx, L"model: the new file " + sideFile + L" passed its check");
-    if (!CopyFileW(ModelFile(ctx).c_str(), previous.c_str(), FALSE)) { problem = L"the model data in use could not be copied first: " + ErrText(GetLastError()); cleanup(); return false; }
-    if (!MoveFileExW(sideFile.c_str(), ModelFile(ctx).c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+    if (!CopyPath(ModelFile(ctx), previous)) { problem = L"the model data in use could not be copied first: " + ErrText(GetLastError()); cleanup(); return false; }
+    if (!MovePath(sideFile, ModelFile(ctx), MOVEFILE_REPLACE_EXISTING)) {
         problem = L"the model data in use could not be replaced: " + ErrText(GetLastError());
         cleanup(); return false;
     }
     wstring why;
     if (!ExistingModelValid(ctx, &why, &info) || (needGroups && !info.absent_groups.empty())) {  // not expected: the same bytes passed a moment ago
-        const bool back = MoveFileExW(previous.c_str(), ModelFile(ctx).c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+        const bool back = MovePath(previous, ModelFile(ctx), MOVEFILE_REPLACE_EXISTING);
         problem = L"the new file failed its check after it was moved into place (" + why + L")" + (back ? L"; the earlier file was put back" : L"");
         cleanup(); return false;
     }
@@ -297,9 +304,11 @@ ModelResult WriteModel(Context& ctx, const ModelState& m, Ui& ui) {
             return res;
         }
     } else {
-        const wgc::Result r = wgc::write_converted(*ctx.map.map, *m.converted, std::filesystem::path(ModelDir(ctx)), false,
+        ConverterDir out(ModelDir(ctx), ctx.workRoot);  // (the elevated worker: its private folder, then copied: secure_fs.h)
+        const wgc::Result r = wgc::write_converted(*ctx.map.map, *m.converted, std::filesystem::path(out.path()), false,
                                                    [&ctx](const string& s) { LogLine(ctx, L"converter: " + FromUtf8(s)); });
         if (r.code != wgc::kOk) Fail(FromUtf8(r.message));
+        out.Publish();
         wstring why;
         if (!ExistingModelValid(ctx, &why)) Fail(L"The saved model data failed its check (" + why + L").");
     }

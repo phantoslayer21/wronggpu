@@ -27,6 +27,7 @@
 #include "wg_core/record.h"
 #include "wg_core/rr.h"
 #include "wg_core/rrconfig.h"
+#include "wg_core/secure_fs.h"
 #include "wg_core/settings.h"
 
 using namespace wg;
@@ -62,11 +63,165 @@ wstring ArgOf(const wstring& args, const wstring& key) {
     return args.substr(p, e == wstring::npos ? wstring::npos : e - p);
 }
 
+// ---- the elevated worker's file operations through held handles (secure_fs.h) ---------------------------------------------
+// A junction `link` -> `target` (an existing folder), made here (no privilege needed); false when the volume refuses one.
+bool MakeJunction(const wstring& link, const wstring& target) {
+    if (!CreateDirectoryW(link.c_str(), nullptr)) return false;
+    HANDLE h = CreateFileW(link.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (h == INVALID_HANDLE_VALUE) { RemoveDirectoryW(link.c_str()); return false; }
+    const wstring sub = L"\\??\\" + target, print = target;
+    const size_t names = (sub.size() + 1 + print.size() + 1) * sizeof(wchar_t), data = 8 + names;
+    std::vector<unsigned char> b(8 + data, 0);
+    auto put16 = [&](size_t at, size_t v) { b[at] = (unsigned char)(v & 0xff); b[at + 1] = (unsigned char)(v >> 8); };
+    const DWORD tag = IO_REPARSE_TAG_MOUNT_POINT;
+    memcpy(&b[0], &tag, 4);
+    put16(4, data);
+    put16(8, 0); put16(10, sub.size() * 2); put16(12, (sub.size() + 1) * 2); put16(14, print.size() * 2);
+    memcpy(&b[16], sub.c_str(), (sub.size() + 1) * 2);
+    memcpy(&b[16 + (sub.size() + 1) * 2], print.c_str(), (print.size() + 1) * 2);
+    DWORD got = 0;
+    const bool ok = DeviceIoControl(h, FSCTL_SET_REPARSE_POINT, b.data(), (DWORD)b.size(), nullptr, 0, &got, nullptr) != FALSE;
+    CloseHandle(h);
+    if (!ok) RemoveDirectoryW(link.c_str());
+    return ok;
+}
+// Whether `f` throws SetupError whose message has `says`.
+bool Refused(const std::function<void()>& f, const wchar_t* says) {
+    try { f(); } catch (const SetupError& e) { return e.msg.find(says) != wstring::npos; }
+    return false;
+}
+// A drive letter no volume uses here, mapped onto `folder` for this logon session (DefineDosDevice); empty when none is free.
+wstring MapDriveOnto(const wstring& folder) {
+    const DWORD used = GetLogicalDrives();
+    for (wchar_t c = L'Z'; c >= L'K'; --c) {
+        if (used & (1u << (c - L'A'))) continue;
+        const wstring d = wstring(1, c) + L":";
+        if (DefineDosDeviceW(0, d.c_str(), folder.c_str())) return d;
+    }
+    return L"";
+}
+// Looked at by path, past any guard (what really happened on disk).
+bool IsFileUnguarded(const wstring& p) { const DWORD a = GetFileAttributesW(p.c_str()); return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY); }
+string GetUnguarded(const wstring& p) { ScopedFsGuard none(nullptr); return Get(p); }
+const wchar_t* const kLink = L"is a link";
+const wchar_t* const kElsewhere = L"is not where its path says";
+const wchar_t* const kOutside = L"outside the folders this job may change";
+
+void GuardTests(const wstring& base) {
+    EnsureDir(base + L"-guard");
+    const wstring t = BoundPath(base + L"-guard");  // the folder's own path (CI's temp folder has a short name in it)
+    const wstring game = Join(t, L"a\\b\\game"), evil = Join(t, L"evil\\b\\game"), outside = Join(t, L"outside");
+    for (auto& d : {game, evil, outside}) EnsureDir(d);
+    Put(Join(game, L"game.exe"), "exe");
+    {   // the normal operations through the guard, inside its root
+        FsGuard g;
+        wstring why;
+        require(g.AddRoot(game, why), "guard: a folder without links is a root");
+        ScopedFsGuard active(&g);
+        std::vector<wstring> made;
+        EnsureDir(Join(game, L"sub\\deep"), &made);
+        Put(Join(game, L"sub\\deep\\x.txt"), "one");
+        Put(Join(game, L"sub\\deep\\x.txt"), "two");  // replaced
+        require(made.size() == 2 && Get(Join(game, L"sub\\deep\\x.txt")) == "two" && IsDir(Join(game, L"sub")) && IsFile(Join(game, L"game.exe")) &&
+                FileSize(Join(game, L"game.exe")) == 3, "guard: folders made, a file written and replaced, read back, its attributes and size");
+        CopyChecked(Join(game, L"sub\\deep\\x.txt"), Join(game, L"copy.txt"));
+        require(MovePath(Join(game, L"copy.txt"), Join(game, L"moved.txt"), 0) && Get(Join(game, L"moved.txt")) == "two" && !Exists(Join(game, L"copy.txt")),
+                "guard: copied and renamed through handles");
+        require(SetAttrs(Join(game, L"moved.txt"), FILE_ATTRIBUTE_READONLY) && (GetAttrs(Join(game, L"moved.txt")) & FILE_ATTRIBUTE_READONLY) &&
+                !DeletePath(Join(game, L"moved.txt")), "guard: attributes set; a read-only file is not deleted (as DeleteFileW)");
+        ForceDelete(Join(game, L"moved.txt"));
+        const std::vector<wstring> files = ListFiles(game, L"*.exe"), dirs = ListDirs(game);
+        require(!Exists(Join(game, L"moved.txt")) && files.size() == 1 && dirs.size() == 1, "guard: deleted; folder listings");
+        require(!RemoveDirPath(Join(game, L"sub")) && GetLastError() == ERROR_DIR_NOT_EMPTY && IsDir(Join(game, L"sub\\deep")),
+                "guard: a folder with files in it is not removed (ERROR_DIR_NOT_EMPTY, as RemoveDirectoryW)");
+        RemoveTree(Join(game, L"sub"));
+        require(!Exists(Join(game, L"sub")), "guard: a folder tree removed through handles");
+        require(Refused([&] { Put(Join(outside, L"x.txt"), "x"); }, kOutside) && !Exists(Join(outside, L"x.txt")),
+                "guard: nothing outside its roots is written (refused, with the path)");
+        require(Refused([&] { Put(L"relative.txt", "x"); }, L"not an absolute path"), "guard: a relative path is refused");
+        require(Refused([&] { RemoveTree(game); }, L"never removed"), "guard: a root itself is never removed");
+    }
+    {   // an ancestor of a held root cannot be swapped while the guard holds it; the files still go to the folder opened
+        FsGuard g;
+        wstring why;
+        require(g.AddRoot(game, why), "guard: root for the hold check");
+        ScopedFsGuard active(&g);
+        const bool swapped = MoveFileW(Join(t, L"a").c_str(), Join(t, L"a-moved").c_str()) != FALSE;
+        if (swapped) MoveFileW(Join(t, L"a-moved").c_str(), Join(t, L"a").c_str());
+        Put(Join(game, L"held.txt"), "held");
+        require(!swapped && Get(Join(game, L"held.txt")) == "held" && !Exists(Join(evil, L"held.txt")),
+                "guard: an ancestor of a held root can't be renamed while it is held (the swap fails); the write lands in the folder opened");
+    }
+    {   // a junction swapped into an ancestor after validation (the path string unchanged): refused, nothing written there
+        require(MoveFileW(Join(t, L"a").c_str(), Join(t, L"a-real").c_str()) != FALSE, "guard test: the real ancestor moved aside");
+        require(MakeJunction(Join(t, L"a"), Join(t, L"evil")), "guard test: a junction made where the ancestor was");
+        FsGuard g;
+        wstring why;
+        require(!g.AddRoot(game, why) && why.find(kLink) != wstring::npos && why.find(Join(t, L"a")) != wstring::npos,
+                "guard: a junction swapped into a root's ancestor after validation is refused (it names the link)");
+        FsGuard parent;
+        require(parent.AddRoot(t, why), "guard: the folder above is a root");
+        ScopedFsGuard active(&parent);
+        require(Refused([&] { Put(Join(game, L"z.txt"), "z"); }, kLink) && !IsFileUnguarded(Join(evil, L"z.txt")),
+                "guard: a junction swapped in below a held root is refused at the next write; nothing reaches its target");
+        require(Refused([&] { (void)Exists(Join(game, L"game.exe")); }, kLink), "guard: reading through it is refused too");
+        RemoveDirectoryW(Join(t, L"a").c_str());
+        MoveFileW(Join(t, L"a-real").c_str(), Join(t, L"a").c_str());
+    }
+    {   // a link at the leaf: a junction inside the root, used as a folder, a target, or removed
+        FsGuard g;
+        wstring why;
+        require(g.AddRoot(game, why), "guard: root for the leaf checks");
+        const wstring link = Join(game, L"link");
+        require(MakeJunction(link, outside), "guard test: a junction inside the root");
+        ScopedFsGuard active(&g);
+        require(Refused([&] { (void)IsDir(link); }, kLink), "guard: a link as the leaf is refused (a query)");
+        require(Refused([&] { Put(Join(link, L"f.txt"), "f"); }, kLink) && !IsFileUnguarded(Join(outside, L"f.txt")), "guard: a write through a leaf link is refused");
+        require(Refused([&] { RemoveTree(link); }, kLink) && Refused([&] { RemoveDirPath(link); }, kLink), "guard: a leaf link is not removed");
+        Put(Join(game, L"m.txt"), "m");
+        require(Refused([&] { MovePath(Join(game, L"m.txt"), link, MOVEFILE_REPLACE_EXISTING); }, kLink), "guard: a rename onto a link is refused");
+        require(ListDirs(game).size() == 0, "guard: a link is not listed as a folder");
+        EnsureDir(Join(game, L"tree"));
+        require(MakeJunction(Join(game, L"tree\\inner"), outside), "guard test: a junction inside a folder to remove");
+        { ScopedFsGuard none(nullptr); Put(Join(outside, L"keep.txt"), "keep"); }  // (outside the root: written by the test itself)
+        RemoveTree(Join(game, L"tree"));
+        require(IsFileUnguarded(Join(outside, L"keep.txt")), "guard: removing a folder never follows a link in it");
+        const wstring sym = Join(game, L"sym.txt");
+        if (CreateSymbolicLinkW(sym.c_str(), Join(outside, L"keep.txt").c_str(), SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
+            require(Refused([&] { Put(sym, "over"); }, kLink) && Refused([&] { string s; ReadAll(sym, s); }, kLink) &&
+                        GetUnguarded(Join(outside, L"keep.txt")) == "keep",
+                    "guard: a symbolic link to a file is neither written through nor read");
+        } else {
+            std::printf("launcher-core: symbolic link not made here (error %lu): that check is skipped\n", GetLastError());
+        }
+    }
+    {   // a final path other than the path named: the same folder under a drive letter mapped onto it
+        const wstring drive = MapDriveOnto(t);
+        if (!drive.empty()) {
+            FsGuard g;
+            wstring why;
+            const wstring viaDrive = drive + L"\\a\\b\\game";
+            require(!g.AddRoot(viaDrive, why) && why.find(kElsewhere) != wstring::npos && why.find(game) != wstring::npos,
+                    "guard: a root whose final path is another (a mapped drive letter) is refused, with both paths");
+            FsGuard reader;
+            ScopedFsGuard active(&reader);
+            require(Refused([&] { string s; ReadAll(viaDrive + L"\\game.exe", s); }, kElsewhere), "guard: a read whose final path is another is refused");
+            DefineDosDeviceW(DDD_REMOVE_DEFINITION | DDD_EXACT_MATCH_ON_REMOVE, drive.c_str(), t.c_str());
+        } else {
+            require(false, "guard test: no free drive letter for the final-path check");
+        }
+    }
+    RemoveTree(t);
+}
+
 void ElevatedJobTests(const wstring& base) {
-    const wstring root = base + L"-elevated", jobs = Join(root, L"jobs"), priv = Join(root, L"private"), pkg = Join(root, L"package");
+    RemoveTree(base + L"-elevated");
+    EnsureDir(base + L"-elevated");
+    // the folder's own path, as the launcher binds a job's paths (secure_fs.h BoundPath; CI's temp folder has a short name)
+    const wstring root = BoundPath(base + L"-elevated"), jobs = Join(root, L"jobs"), priv = Join(root, L"private"), pkg = Join(root, L"package");
     const wstring lad = Join(root, L"lad");
-    RemoveTree(root);
-    for (auto& d : {jobs, priv, Join(pkg, L"sub"), lad}) EnsureDir(d);
+    for (auto& d : {jobs, priv, Join(pkg, L"sub"), lad, Join(root, L"game1"), Join(root, L"game2")}) EnsureDir(d);
+    Put(Join(Join(root, L"game2"), L"g.exe"), "exe");
     Put(Join(pkg, L"OptiScaler.dll"), "dll bytes");
     Put(Join(pkg, L"OptiScaler.ini"), "[Libraries]\r\nFfxDx12SRPath=auto\r\n");
     Put(Join(Join(pkg, L"sub"), L"extra.txt"), "extra");
@@ -77,8 +232,10 @@ void ElevatedJobTests(const wstring& base) {
     int runs = 0;
     std::vector<WorkerJob> seen;
     std::vector<string> copied;  // the package copy's OptiScaler.ini, as the run saw it
+    std::function<void(const WorkerJob&)> during;  // what a job does in the worker (through its guard), null: nothing
     const WorkerRunFn run = [&](const WorkerJob& w) {
         ++runs; seen.push_back(w);
+        if (during) during(w);
         if (!w.r.optiPackage.empty()) copied.push_back(IsDir(w.r.optiPackage) ? Get(Join(w.r.optiPackage, L"OptiScaler.ini")) : Get(w.r.optiPackage));
         LogLine(ctx, L"job ran");
         OpResult r; r.message = L"ran"; return r;
@@ -98,7 +255,7 @@ void ElevatedJobTests(const wstring& base) {
     };
     std::vector<wstring> logged;
     const LogFn log = [&](const wstring& s) { logged.push_back(s); };
-    auto reset = [&] { runs = 0; seen.clear(); copied.clear(); logged.clear(); before = nullptr; reported = ProcessIdentity(); startIt = runWorker = true; };
+    auto reset = [&] { runs = 0; seen.clear(); copied.clear(); logged.clear(); before = nullptr; during = nullptr; reported = ProcessIdentity(); startIt = runWorker = true; };
     OpRequest ap; ap.op = Op::Apply; ap.dir = Join(root, L"game1");
     OpRequest in; in.op = Op::Install; in.exe = Join(Join(root, L"game2"), L"g.exe"); in.optiPackage = pkg;
     wstring why;
@@ -225,6 +382,56 @@ void ElevatedJobTests(const wstring& base) {
         }
         require(!ctx.logSink && ctx.workRoot.empty(), "elevated step: the worker leaves the log and the temporary folder as they were");
         DeleteFileW(Join(jobs, L"job-p-1.txt").c_str()); DeleteFileW(Join(jobs, L"batch-p.txt").c_str());
+    }
+    // ---- the job's folders held and opened without following links (secure_fs.h) ----
+    {   // a junction swapped into an ancestor of a job's game folder after the launcher wrote the job: no job runs
+        reset();
+        const wstring lib = Join(root, L"lib"), real = Join(root, L"lib-real"), evilLib = Join(root, L"evil-lib");
+        EnsureDir(Join(lib, L"g3"));
+        EnsureDir(Join(evilLib, L"g3"));
+        OpRequest a3 = ap; a3.dir = Join(lib, L"g3");
+        bool swapped = false;
+        before = [&](const wstring&) { swapped = MoveFileW(lib.c_str(), real.c_str()) && MakeJunction(lib, evilLib); };
+        const std::vector<OpResult> rs = RunElevatedJobs(texts({ap, a3}), jobs, false, start, log);
+        require(swapped && allRefused(rs, kLink) && rs[1].message.find(lib) != wstring::npos && Entries(Join(evilLib, L"g3")) == 0,
+                "elevated step: a junction swapped into a job folder's ancestor after the request is refused, naming it; no job runs");
+        RemoveDirectoryW(lib.c_str());
+        MoveFileW(real.c_str(), lib.c_str());
+    }
+    {   // a job folder that is itself a junction: no job runs
+        reset();
+        const wstring link = Join(root, L"game-link");
+        require(MakeJunction(link, Join(root, L"game1")), "elevated step test: a junction to a game folder");
+        OpRequest l = ap; l.dir = link;
+        require(allRefused(RunElevatedJobs(texts({l}), jobs, false, start, log), kLink), "elevated step: a job folder that is a link is refused; no job runs");
+        RemoveDirectoryW(link.c_str());
+    }
+    {   // a job folder whose final path is another (the same folder under a drive letter mapped onto the one above): no job runs
+        reset();
+        const wstring drive = MapDriveOnto(root);
+        require(!drive.empty(), "elevated step test: a free drive letter");
+        OpRequest viaDrive = ap; viaDrive.dir = drive + L"\\game1";
+        require(allRefused(RunElevatedJobs(texts({viaDrive}), jobs, false, start, log), kElsewhere),
+                "elevated step: a job folder whose final path is not its path is refused; no job runs");
+        DefineDosDeviceW(DDD_REMOVE_DEFINITION | DDD_EXACT_MATCH_ON_REMOVE, drive.c_str(), root.c_str());
+    }
+    {   // while a job runs: its folders are held (the game folder can't be renamed), it writes into them, nothing outside them
+        reset();
+        bool renamed = true, outsideRefused = false;
+        during = [&](const WorkerJob& w) {
+            renamed = MoveFileW(w.r.dir.c_str(), (w.r.dir + L"-moved").c_str()) != FALSE;
+            if (renamed) MoveFileW((w.r.dir + L"-moved").c_str(), w.r.dir.c_str());
+            Put(Join(w.r.dir, L"written.txt"), "w");
+            outsideRefused = Refused([&] { Put(Join(root, L"elsewhere.txt"), "x"); }, kOutside);
+        };
+        const std::vector<OpResult> rs = RunElevatedJobs(texts({ap}), jobs, false, start, log);
+        require(rs[0].code == 0 && !renamed && GetUnguarded(Join(ap.dir, L"written.txt")) == "w" && outsideRefused && !IsFileUnguarded(Join(root, L"elsewhere.txt")),
+                "elevated step: a running job's folder is held (not renamed), its writes land there, a write outside its folders is refused");
+        reset();
+        during = [&](const WorkerJob&) { Put(Join(root, L"elsewhere.txt"), "x"); };
+        const std::vector<OpResult> out = RunElevatedJobs(texts({ap}), jobs, false, start, log);
+        require(out[0].code == EXIT_REFUSED && out[0].message.find(kOutside) != wstring::npos && !IsFileUnguarded(Join(root, L"elsewhere.txt")),
+                "elevated step: a job that writes outside its folders fails with the refusal as its result");
     }
     {   // the package digest: the same for the same files, another when a file changes; a private folder is new every time
         wstring d1, d2, d3;
@@ -681,6 +888,7 @@ int main() {
             require(!ParseBatch("job=C:\\j\\job-1.txt\r\nresult=C:\\x.txt\r\n", bj, stop) && !ParseBatch("job=C:\\j\\job-1.txt\r\n", bj, stop) &&
                         !ParseBatch("job=C:\\j\\job-1.txt\r\nsha256=abc\r\n", bj, stop), "batch file: result=, a missing or short SHA-256: refused");
         }
+        GuardTests(TempFolder());
         ElevatedJobTests(TempFolder());
 
         // ---- update reply -----------------------------------------------------------------------------------------------

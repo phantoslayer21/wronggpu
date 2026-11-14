@@ -50,7 +50,7 @@ void RemoveEarlierDirect(Context& ctx, const GameTarget& target, Ui& ui, std::ve
         RemoveTree(StateDir(old));
         const wstring from = Join(old, L"wronggpu.ini"), to = Join(target.dir, L"wronggpu.ini");
         if (IsFile(from)) {
-            if (!IsFile(to) && MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH)) ui.log(L"wronggpu.ini (your settings) moved to " + target.dir);
+            if (!IsFile(to) && MovePath(from, to, MOVEFILE_COPY_ALLOWED)) ui.log(L"wronggpu.ini (your settings) moved to " + target.dir);
             else { ForceDelete(from); ui.log(L"wronggpu.ini of the earlier installation removed from " + old); }
         }
     }
@@ -130,7 +130,7 @@ CompareDll RecordCompareDll(Context& ctx, Ui& ui, const wstring& gameRoot) {
     }
     const CompareDll c = FindCompareDll(ctx, libraries);
     if (c.path.empty()) {
-        DeleteFileW(CompareRecordFile().c_str());
+        DeletePath(CompareRecordFile());
         ui.log(L"No AMD FSR 4 DLL was found in your other games.");
         return c;
     }
@@ -264,8 +264,10 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     struct EarlierGone {
         const wstring& dir; Ui& ui; bool armed = false;
         ~EarlierGone() {
-            if (!armed || IsFile(RecordPath(dir))) return;
-            RemoveStateKeepingSettings(dir);
+            try {  // (the elevated worker's guard can refuse a path: secure_fs.h; never thrown out of a destructor)
+                if (!armed || IsFile(RecordPath(dir))) return;
+                RemoveStateKeepingSettings(dir);
+            } catch (const SetupError&) { return; }
             ui.log(L"The earlier installation was removed and the game's original files are back; the new version was not installed (your settings were kept).");
         }
     } earlierGone{dir, ui};
@@ -609,7 +611,7 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
                 const wstring src = Join(dir, sl->name);
                 ui.step(++done, total, L"Keeping the game's " + wstring(sl->name) + L" as " + e.rel);
                 if (Exists(tp)) ForceDelete(tp);
-                if (!MoveFileExW(src.c_str(), tp.c_str(), MOVEFILE_WRITE_THROUGH)) Fail(L"Cannot rename " + src + L": " + ErrText(GetLastError()) + L". Is the game running?");
+                if (!MovePath(src, tp, 0)) Fail(L"Cannot rename " + src + L": " + ErrText(GetLastError()) + L". Is the game running?");
                 if (Sha256File(tp) != e.inst) Fail(L"Verification failed after renaming " + wstring(sl->name));
                 ui.log(L"renamed " + wstring(sl->name) + L" to " + e.rel);
             }
@@ -666,7 +668,7 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
         } catch (const SetupError& r) { ui.log(L"Rollback problem: " + r.msg); }
         throw;
     }
-    if (!ctx.logFile.empty() && IsFile(ctx.logFile)) CopyFileW(ctx.logFile.c_str(), Join(state, L"setup.log").c_str(), FALSE);
+    if (!ctx.logFile.empty() && IsFile(ctx.logFile)) CopyPath(ctx.logFile, Join(state, L"setup.log"));
     return warnings;
 }
 

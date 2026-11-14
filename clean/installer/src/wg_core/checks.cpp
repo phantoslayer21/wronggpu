@@ -5,6 +5,7 @@
 #include <tlhelp32.h>
 #include <dxgi.h>
 #include "optiscaler.h"
+#include "secure_fs.h"
 
 namespace wg {
 
@@ -338,6 +339,14 @@ bool IsElevated() {
 // 0 = writable, otherwise the Win32 error.
 DWORD WriteTest(const wstring& dir) {
     wstring p = Join(dir, L".wronggpu-write-test");
+    if (ActiveFsGuard()) {  // the elevated worker (secure_fs.h): a new file through the guard, then deleted
+        DeletePath(p);
+        HANDLE h = CreateNewFile(p);
+        if (h == INVALID_HANDLE_VALUE) return GetLastError();
+        CloseHandle(h);
+        DeletePath(p);
+        return 0;
+    }
     HANDLE h = CreateFileW(p.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
     if (h == INVALID_HANDLE_VALUE) return GetLastError();
     CloseHandle(h);

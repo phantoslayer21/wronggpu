@@ -38,7 +38,7 @@ wstring AppDataPath() {
 // %LOCALAPPDATA%\WrongGPU (created on first use).
 wstring AppDataDir() {
     const wstring dir = AppDataPath();
-    CreateDirectoryW(dir.c_str(), nullptr);
+    if (!IsDir(dir)) MakeDir(dir);
     return dir;
 }
 wstring DefaultLogPath() { return Join(AppDataDir(), L"setup.log"); }

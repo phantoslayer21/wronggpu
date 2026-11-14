@@ -180,7 +180,7 @@ wstring Target(const wstring& dir, const wstring& rel) {
         if (part == L"..") Fail(L"Invalid path in the install record: " + rel);
         if (!part.empty()) {
             cur = Join(cur, part);
-            DWORD a = GetFileAttributesW(cur.c_str());
+            DWORD a = GetAttrs(cur);
             if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_REPARSE_POINT)) Fail(L"Refusing to follow a link inside the game folder: " + cur);
         }
         i = j + 1;
@@ -248,7 +248,7 @@ bool DriveUnreachable(const wstring& dir) {
         if (a == wstring::npos) return false;
         root = (b == wstring::npos ? full : full.substr(0, b)) + L"\\";
     } else return false;
-    return GetFileAttributesW(root.c_str()) == INVALID_FILE_ATTRIBUTES;
+    return GetAttrs(root) == INVALID_FILE_ATTRIBUTES;
 }
 // A game on a drive that is not connected now (an unplugged USB drive, an offline share) still has WrongGPU and still uses
 // the shared data once the drive is back: it counts, though its record cannot be read
@@ -329,11 +329,11 @@ size_t RemoveRuntimeFiles(const wstring& dir, const wstring& exeDir, const Recor
     size_t removed = 0;
     for (auto& d : dirs) {
         for (auto& f : ListFiles(d, L"wronggpu-*"))
-            if (!recorded.count(Lower(FullPath(f))) && DeleteFileW(f.c_str())) ++removed;
-        if (settings && DeleteFileW(Join(d, L"wronggpu.ini").c_str())) ++removed;
+            if (!recorded.count(Lower(FullPath(f))) && DeletePath(f)) ++removed;
+        if (settings && DeletePath(Join(d, L"wronggpu.ini"))) ++removed;
         if (opti)  // logs written by the OptiScaler this installer set up
             for (auto pat : {L"OptiScaler.log", L"OptiScaler.previous*.log", L"fakenvapi.log"})
-                for (auto& f : ListFiles(d, pat)) if (!recorded.count(Lower(FullPath(f))) && DeleteFileW(f.c_str())) ++removed;
+                for (auto& f : ListFiles(d, pat)) if (!recorded.count(Lower(FullPath(f))) && DeletePath(f)) ++removed;
     }
     return removed;
 }
@@ -353,6 +353,8 @@ size_t RemoveRuntimeFiles(const wstring& dir, const wstring& exeDir, const Recor
 // %LOCALAPPDATA%\WrongGPU, removed with everything in it (empty: other games still use it).
 static std::atomic<CleanupMoveFn> g_cleanupMove{nullptr};  // test seam (record.h SetCleanupMoveForTest)
 void SetCleanupMoveForTest(CleanupMoveFn fn) { g_cleanupMove = fn; }
+// MoveFileExW's shape for the cleanup's move (util.h MovePath: through the elevated worker's guard while one is active).
+static BOOL WINAPI MoveThroughGuard(LPCWSTR from, LPCWSTR to, DWORD flags) { return MovePath(from, to, flags) ? TRUE : FALSE; }
 
 // Returns the line "kept ignore-files.txt ..." when the shared folder's ignore list was put back (convert_ignore.h), else "".
 wstring StartCleanup(Context& ctx, const wstring& state, const wstring& self, const wstring& appData) {
@@ -368,7 +370,7 @@ wstring StartCleanup(Context& ctx, const wstring& state, const wstring& self, co
         for (int k = 0; k < 64; ++k) {
             retired = appData + L".cleanup-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()) + L"-" +
                       std::to_wstring(sequence++);
-            if (GetFileAttributesW(retired.c_str()) == INVALID_FILE_ATTRIBUTES) break;
+            if (GetAttrs(retired) == INVALID_FILE_ATTRIBUTES) break;
         }
         // Nothing of WrongGPU's holds a file in the folder here (every write closes its handle, the log opens and closes
         // per line). Another program can, briefly (a scanner reading a file just written): a sharing violation (32) or an
@@ -377,7 +379,7 @@ wstring StartCleanup(Context& ctx, const wstring& state, const wstring& self, co
         bool moved = false;
         DWORD err = 0;
         const CleanupMoveFn seam = g_cleanupMove.load();
-        const CleanupMoveFn move = seam ? seam : &MoveFileExW;
+        const CleanupMoveFn move = seam ? seam : &MoveThroughGuard;
         for (int t = 0; t < kCleanupMoveTries; ++t) {
             if (move(appData.c_str(), retired.c_str(), MOVEFILE_WRITE_THROUGH)) { moved = true; break; }
             err = GetLastError();
@@ -496,15 +498,15 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
         if (skip.count(k)) { ui.log(L"kept " + e.rel); continue; }
         wstring t = Target(dir, e.rel), b = BackupPath(dir, e.rel);
         if (e.action == L"dir") {
-            if (IsDir(t) && RemoveDirectoryW(t.c_str())) ui.log(L"removed folder " + e.rel);
+            if (IsDir(t) && RemoveDirPath(t)) ui.log(L"removed folder " + e.rel);
         } else if (e.action == L"copy" || e.action == L"rename") {
             // WrongGPU's DLL is still under the game's name (no entry or no backup for it): the renamed file is the
             // game's only copy. It goes back under its name instead of being removed.
             const FfxSlot* sl = e.action == L"rename" ? slotOf(e) : nullptr;
             wstring info;
             if (sl && Exists(t) && (e.inst.empty() || Sha256File(t) == e.inst) && ClassifySlot(*sl, Join(dir, sl->name), nullptr, info) == FFX_OURS) {
-                SetFileAttributesW(Join(dir, sl->name).c_str(), FILE_ATTRIBUTE_NORMAL);
-                if (!MoveFileExW(t.c_str(), Join(dir, sl->name).c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+                SetAttrs(Join(dir, sl->name), FILE_ATTRIBUTE_NORMAL);
+                if (!MovePath(t, Join(dir, sl->name), MOVEFILE_REPLACE_EXISTING))
                     Fail(L"Cannot put " + wstring(sl->name) + L" back: " + ErrText(GetLastError()));
                 ui.log(L"restored " + wstring(sl->name) + L" from " + e.rel);
             }
@@ -545,7 +547,7 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
         if (size_t n = RemoveRuntimeFiles(dir, m.exe.empty() ? L"" : Parent(m.exe), m, !keepState))
             ui.log(L"removed " + std::to_wstring(n) + L" settings, log and report file(s) written by WrongGPU");
         for (size_t k = m.e.size(); k-- > 0;)  // a folder the install made that held only those files
-            if (m.e[k].action == L"dir" && !skip.count(k) && IsDir(Target(dir, m.e[k].rel)) && RemoveDirectoryW(Target(dir, m.e[k].rel).c_str()))
+            if (m.e[k].action == L"dir" && !skip.count(k) && IsDir(Target(dir, m.e[k].rel)) && RemoveDirPath(Target(dir, m.e[k].rel)))
                 ui.log(L"removed folder " + m.e[k].rel);
     }
     // the game's Engine.ini outside the game folder (rrconfig.h, rr_config_fix=on): its line taken out again
@@ -581,7 +583,7 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
         if (!kept.empty()) { ui.log(kept); warnings.push_back(kept); }
     };
     if (keepBackup) { warnings.push_back(L"The backup folder was kept: " + Join(state, L"backup")); if (!appData.empty()) cleanup(L"", L""); return warnings; }
-    if (keepState) { RemoveTree(Join(state, L"backup")); DeleteFileW(RecordPath(dir).c_str()); return warnings; }
+    if (keepState) { RemoveTree(Join(state, L"backup")); DeletePath(RecordPath(dir)); return warnings; }
     wstring self = SelfPath();
     if (IEq(Parent(self), state)) {
         RemoveTree(state, self);
@@ -605,9 +607,9 @@ bool StateHasSettings(const wstring& dir) {
 void RemoveStateKeepingSettings(const wstring& dir) {
     const wstring state = StateDir(dir);
     for (auto& f : ListFiles(state, L"*"))  // never throws (a destructor calls it)
-        if (!SettingsName(BaseName(f), false)) { SetFileAttributesW(f.c_str(), FILE_ATTRIBUTE_NORMAL); DeleteFileW(f.c_str()); }
+        if (!SettingsName(BaseName(f), false)) { SetAttrs(f, FILE_ATTRIBUTE_NORMAL); DeletePath(f); }
     for (auto& d : ListDirs(state)) if (!SettingsName(BaseName(d), true)) RemoveTree(d);
-    RemoveDirectoryW(state.c_str());  // only when empty
+    RemoveDirPath(state);  // only when empty
 }
 
 // Byte-exact removal of a WrongGPU 0.1.x/0.2.x ("DLSS 4.5 AMD") install from its own record and backup: the same
@@ -637,13 +639,13 @@ std::vector<wstring> LegacyRestore(Context& ctx, const wstring& dir, Ui& ui) {
             else if (Exists(t)) { ForceDelete(t); ui.log(L"older install: removed " + e.rel); }
         } else if (!Exists(t)) { CopyChecked(b, t); ui.log(L"older install: restored " + e.rel); }
     }
-    for (const wchar_t* d : {L"dlss45-model\\gpu-build", L"dlss45-model\\exposure-build", L"dlss45-model"}) RemoveDirectoryW(Join(dir, d).c_str());
+    for (const wchar_t* d : {L"dlss45-model\\gpu-build", L"dlss45-model\\exposure-build", L"dlss45-model"}) RemoveDirPath(Join(dir, d));
     std::set<wstring> recorded;
     for (auto& e : m.e) recorded.insert(Lower(FullPath(Target(dir, e.rel))));
     for (const wstring& d : {dir, GameRoot(dir)})
         for (auto pat : {L"dlss45-*.log", L"dlss45-*.log.old", L"dlss45-report.txt", L"dlss45-report.json", L"dlss45-dred.txt", L"dlss45-crash-*.txt",
                          L"dlss45-crash-*.dmp", L"dlss45-capture-*.bin", L"dlss45-capture-*.txt", L"dlss45-capture-*.jpg"})
-            for (auto& f : ListFiles(d, pat)) if (!recorded.count(Lower(FullPath(f)))) DeleteFileW(f.c_str());
+            for (auto& f : ListFiles(d, pat)) if (!recorded.count(Lower(FullPath(f)))) DeletePath(f);
     wstring key = m.regkey.empty() ? RegKeyFor(dir, kLegacyKeyPrefix) : m.regkey;
     RegDeleteKeyW(UninstallHive(), (UninstallRoot() + key).c_str());
     wstring legacy = UninstallRoot() + kLegacyKey;
