@@ -2334,6 +2334,14 @@ struct Runtime {
         {"input.depth", {depth, R * 4}},      {"input.motion", {motion, R * 8}},
     };
     for (int i = 0; i < 6; ++i) m["b" + std::to_string(i) + ".out"] = {bout[i], t8 * 128};
+#ifdef WG_MODEL_L
+    if (model_l) {  // Model L's maps (FORMATS.md "Maps"; the frame reuses them: q / x2 / y2, x1 / y, x3)
+      const size_t halo = (size_t)(fw + 4) * (fh + 4);
+      m["l.wide"] = {l_wide, halo * 64};
+      m["l.narrow"] = {l_narrow, halo * 32};
+      m["l.x3"] = {l_x3, (size_t)fw * fh * 32};
+    }
+#endif
     auto it = m.find(nm);
     if (it == m.end()) return fail("unknown buffer name " + nm);
     *p = it->second.p;

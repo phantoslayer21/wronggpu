@@ -26,6 +26,8 @@ Built with the host C++ compiler (clean/tests/host_cxx.py; skipped without one).
 Run (repository root):
     python -m unittest discover -s clean/l/runtime/tests -t clean/l/runtime/tests -p test_l_runtime_frame.py
 """
+import copy
+import hashlib
 import os
 import shutil
 import subprocess
@@ -97,6 +99,68 @@ def run(options="", frames=4, build_files=(), env=None, model=None, exe=None, fl
     if r.returncode != 0:
         raise AssertionError("runtime_frame_trace failed (exit %d)\n%s%s" % (r.returncode, r.stdout, r.stderr))
     return r.stdout.splitlines()
+
+
+def blob_digests():
+    """{blob name: SHA-256 hex} of Model L's blobs packed in Python (clean/l/runner/l_pack.py) from the test model's
+    parameters: the independent names of the weight buffers (the recorder logs what create uploads, with its hash)."""
+    blobs = LP.pack_model_l(L.random_params(np.random.default_rng(SEED)))
+    return {n: hashlib.sha256(b).hexdigest() for n, b in blobs.items()}
+
+
+L_KERNELS = ("lev/input_encoder", "l_linear_32_32_relu", "l_linear_32_32_f16", "l_swin_block_c32_enc",
+             "l_project_gather", "l_dec_project", "l_swin_block_c32_dec", "l_coef")
+
+
+def expected_args(t, f, digests):
+    """Every Model L launch's arguments from the buffers' names (the runtime's wg_rt_buffer names after the frame) and
+    the weight blobs' addresses (the upload holding each blob's bytes), independently of the launches themselves:
+    {kernel (without _nc): [argument]}, None where the parameters E / D stand (checked field by field elsewhere)."""
+    n = f["names"]
+    w = {}
+    for blob, digest in digests.items():
+        w[blob] = t.uploaded(digest)
+        if w[blob] is None:
+            raise AssertionError("no single upload holds blob %s" % blob)
+    info = f["info"]
+    fw, fh = cdiv(info["rw"], 32) * 32, cdiv(info["rh"], 32) * 32
+    npix, tw, th = str((fh + 4) * (fw + 4)), str(fw // 2), str(fh // 2)
+    eo = [str(v) for v in T.block_offset(T.TABLE, "first", info["parity"])]
+    do = [str(v) for v in T.block_offset(T.TABLE, "second", info["parity"])]
+    return {
+        # the input encoder's values: Model M's encoder inputs (the colour as the network reads it, here the game's,
+        # pre-exposure 1), the state it reads, q into the wide map, the motion surfaces, the exposure pair
+        "lev/input_encoder": [n["input.color"], n["input.depth"], n["input.motion"], n["post.reduced"],
+                              n["state.latent_prev"], n["state.motion_history"], n["l.wide"], n["enc0.m_near"],
+                              n["enc0.m_far"], n["enc0.m_center"], n["exposure.pair"], w["enc0.values"], None],
+        "l_linear_32_32_relu": [n["l.wide"], n["l.narrow"], w["enc0.Win1"], npix],  # q -> x1
+        "l_linear_32_32_f16": [n["l.narrow"], n["l.wide"], w["enc0.Win2"], npix],   # x1 -> x2
+        "l_swin_block_c32_enc": [n["l.wide"], "0", n["l.x3"], w["enc0_block"], str(fh), str(fw)] + eo,  # x2 -> x3
+        "l_project_gather": [n["l.x3"], n["enc0.features"], w["enc0.project"], tw, th],  # x3 -> enc1's input
+        "l_dec_project": [n["dec1.out"], n["l.narrow"], w["dec0.project"], tw, th],      # dec1's output -> y
+        "l_swin_block_c32_dec": [n["l.narrow"], "0", n["l.wide"], w["dec0_block"], str(fh), str(fw)] + do,  # -> y2
+        "l_coef": [n["l.wide"], n["dec0.A"], n["dec0.B"], n["dec0.C"], n["dec0.latent"], w["dec0.coef"], None],
+    }
+
+
+def check_roles(t, f, digests):
+    """Raises AssertionError naming every Model L launch argument that is not the expected buffer or blob."""
+    exp = expected_args(t, f, digests)
+    seen, bad = set(), []
+    for ln in f["launches"]:
+        k = ln.kernel.replace("_nc", "")
+        if k not in exp:
+            continue
+        seen.add(k)
+        want = exp[k]
+        if len(ln.args) != len(want):
+            bad.append("%s: %d arguments, expected %d" % (k, len(ln.args), len(want)))
+            continue
+        bad += ["%s argument %d: %s, expected %s" % (k, i, a, e) for i, (a, e) in enumerate(zip(ln.args, want))
+                if e is not None and a != e]
+    missing = [k for k in L_KERNELS if k not in seen]
+    if bad or missing:
+        raise AssertionError("; ".join(bad + ["not launched: " + k for k in missing]))
 
 
 def cdiv(a, b):
@@ -175,7 +239,7 @@ class Frame(unittest.TestCase):
 class Arguments(unittest.TestCase):
     """The recorder's view of every Model L launch (clean/l/FORMATS.md, "Maps" and "Kernels")."""
 
-    def check_frame(self, t, f):
+    def check_frame(self, t, f, roles=True):
         info, ls = f["info"], f["launches"]
         rw, rh = info["rw"], info["rh"]
         fw, fh = cdiv(rw, 32) * 32, cdiv(rh, 32) * 32
@@ -226,6 +290,8 @@ class Arguments(unittest.TestCase):
         self.assertEqual(e[5], info["reset"])
         self.assertEqual(d, [rw, rh, fw, fh, info["reset"]])
         self.assertTrue(lev.args[11].startswith("b"))  # the values blob: an allocation
+        if roles:  # every argument against the named buffers and blobs
+            check_roles(t, f, blob_digests())
         return lev, coef
 
     def test_sizes_reset_history(self):
@@ -265,6 +331,76 @@ class Arguments(unittest.TestCase):
         self.assertTrue(names[-1].startswith("l_swin_block_c32_dec"))  # stopped right before l_coef
         self.assertIsNone(ok2["error"])
         self.check_frame(t, ok2)
+
+
+class Roles(unittest.TestCase):
+    """Buffer identities: each Model L launch's weight blob, inputs and outputs are the named ones, and a mix-up of two
+    of them fails even where the map chain, sizes and argument kinds stay as they were."""
+
+    MIXUPS = (  # (kernel, argument, kernel, argument) swapped in a recorded frame
+        ("l_linear_32_32_relu", 2, "l_linear_32_32_f16", 2),        # enc0.Win1 <-> enc0.Win2
+        ("l_swin_block_c32_enc", 3, "l_swin_block_c32_dec", 3),     # enc0_block <-> dec0_block
+        ("l_project_gather", 2, "l_dec_project", 2),                # enc0.project <-> dec0.project
+        ("lev/input_encoder", 11, "l_coef", 5),                     # enc0.values <-> dec0.coef
+        ("l_coef", 1, "l_coef", 2),                                 # A <-> B
+        ("l_coef", 3, "l_coef", 4),                                 # C <-> the new latent
+        ("lev/input_encoder", 0, "lev/input_encoder", 1),           # colour <-> depth
+        ("lev/input_encoder", 4, "lev/input_encoder", 5),           # previous latent <-> motion history
+        ("lev/input_encoder", 7, "lev/input_encoder", 8),           # m_near <-> m_far
+        ("l_linear_32_32_relu", 0, "l_linear_32_32_relu", 1),       # q's map <-> x1's map
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls.trace = FT.Trace(run("model=L", frames=3, rw=96, rh=64, flags=("--sizes=96x64,80x48,80x48",)))
+
+    def test_every_argument_named(self):
+        t, digests = self.trace, blob_digests()
+        addrs = [t.uploaded(d) for d in digests.values()]
+        self.assertNotIn(None, addrs)
+        self.assertEqual(len(set(addrs)), len(addrs))  # eight distinct blobs, each in its own allocation
+        for f in t.frames:
+            self.assertEqual(len(f["names"]) >= 30, True, sorted(f["names"]))
+            check_roles(t, f, digests)
+
+    def test_mixups_fail(self):
+        digests = blob_digests()
+        for ka, ia, kb, ib in self.MIXUPS:
+            with self.subTest(mixup=(ka, ia, kb, ib)):
+                t = copy.deepcopy(self.trace)
+                f = t.frames[1]
+                ls = {ln.kernel.replace("_nc", ""): ln for ln in f["launches"]}
+                a, b = ls[ka], ls[kb]
+                a.args[ia], b.args[ib] = b.args[ib], a.args[ia]
+                with self.assertRaises(AssertionError):
+                    check_roles(t, f, digests)
+
+    def test_swapped_weights_in_the_runtime(self):
+        """The review's example in the runtime itself: enc0.Win1 and enc0.Win2 swapped in its source. The map chain,
+        sizes, grids and argument kinds stay as they were (the frame checks without the roles pass), and the role
+        check fails on exactly the two linears' weights."""
+        with open(os.path.join(host_cxx.ROOT, "clean", "runtime", "runtime.cpp"), encoding="utf-8") as fh:
+            src = fh.read()
+        right = 'w1 = wdev["enc0.Win1"], w2 = wdev["enc0.Win2"]'
+        self.assertEqual(src.count(right), 1)
+        tmp = tempfile.mkdtemp(prefix="wg_lmut_")
+        mutant = os.path.join(tmp, "runtime.cpp")
+        with open(mutant, "w", encoding="utf-8") as fh:
+            fh.write(src.replace(right, 'w1 = wdev["enc0.Win2"], w2 = wdev["enc0.Win1"]'))
+        sources = [mutant if s.replace("\\", "/").endswith("clean/runtime/runtime.cpp") else s
+                   for s in FT.SOURCES] + L_SOURCES
+        exe = host_cxx.build("runtime_frame_trace_lmut", sources, ["WG_NO_MODEL_K", "WG_MODEL_L"],
+                             include_dirs=[os.path.join(host_cxx.ROOT, "clean", "runtime")])
+        t = FT.Trace(run("model=L", frames=2, exe=exe))
+        digests = blob_digests()
+        for f in t.frames:
+            Arguments.check_frame(self, t, f, roles=False)
+            with self.assertRaises(AssertionError) as cm:
+                check_roles(t, f, digests)
+            msg = str(cm.exception)
+            self.assertIn("l_linear_32_32_relu argument 2", msg)
+            self.assertIn("l_linear_32_32_f16 argument 2", msg)
+            self.assertEqual(msg.count("argument"), 2, msg)
 
 
 class Refusals(unittest.TestCase):
