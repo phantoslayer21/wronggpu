@@ -93,6 +93,12 @@ KINDS = {"l_swin_block_c32_nc": ("l_swin.co", 32, _params_c32), "l_swin_block_c3
          "l_swin_block_c32_dec_nc": ("l_swin.co", 32, _params_c32), "swin_block_c96_nc": ("swin.co", 96, _params_c96)}
 
 
+# Special input values of the encoder block (FP16: NaN, +-infinity, +-65504, +-0, the smallest subnormal) and the decoder
+# block (FP8 codes: both NaN codes, +-448, +-0, subnormals)
+SPECIAL_F16 = np.array([np.nan, np.inf, -np.inf, 65504.0, -65504.0, 0.0, -0.0, 6e-8], np.float16)
+SPECIAL_FP8 = np.array([0x7f, 0xff, 0x7e, 0xfe, 0x00, 0x80, 0x01, 0x81, 0x07, 0x87], np.uint8)
+
+
 def _nc(blob):
     return bool(np.frombuffer(blob[:4], np.uint32)[0] & 1)
 
@@ -106,17 +112,28 @@ def block_cases(kernel, rng):
         kind = "first" if enc else "second"
         h = T.block_halo(T.TABLE, kind)
         assert not enc or h == 2, "the ports read a 2-pixel halo"
-        for (H, W) in L_BLOCK_GRIDS:
+        for gi, (H, W) in enumerate(L_BLOCK_GRIDS):
             for parity in (0, 1):
                 blob = gen(rng)
                 if not _nc(blob):
                     continue
                 off = T.block_offset(T.TABLE, kind, parity)
+                # every other case: large inputs (hidden values far past the GELU's range) with special values in a
+                # twentieth of them
+                special = (gi + parity) % 2 == 1
+                scale = 60.0 if special else 1.5
                 if enc:
-                    xb = rng.normal(0, 1.5, (H + 2 * h, W + 2 * h, 32)).astype(np.float16).tobytes()
-                    yield H, W, off, xb, H * W * 32, blob
+                    x = rng.normal(0, scale, (H + 2 * h, W + 2 * h, 32)).astype(np.float16)
+                    if special:
+                        pick = rng.random(x.shape) < 0.05
+                        x[pick] = rng.choice(SPECIAL_F16, int(pick.sum()))
+                    yield H, W, off, x.tobytes(), H * W * 32, blob
                 else:
-                    yield H, W, off, fp8_encode(q8(rng.normal(0, 1.5, (H, W, 32)))).tobytes(), H * W * 64, blob
+                    y = fp8_encode(q8(rng.normal(0, scale, (H, W, 32)))).astype(np.uint8)
+                    if special:
+                        pick = rng.random(y.shape) < 0.05
+                        y[pick] = rng.choice(SPECIAL_FP8, int(pick.sum()))
+                    yield H, W, off, y.tobytes(), H * W * 64, blob
         return
     C = KINDS[kernel][1]
     for (H, W, off) in CASES:

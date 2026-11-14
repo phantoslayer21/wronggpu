@@ -28,8 +28,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
 sys.path.insert(0, ROOT)
 
 SHAPES = {"1080p-quality": ((1280, 720), (1920, 1080)), "1440p-quality": ((1706, 960), (2560, 1440))}
-ENC = ("lev/input_encoder", "l_linear_32_32_relu", "l_linear_32_32_f16", "l_swin_block_c32_enc", "l_project_gather",
-       "input_encoder")
+ENC = ("lev/input_encoder", "l_linear_32_32_relu", "l_linear_32_32_f16", "l_linear_32_32_fused", "l_swin_block_c32_enc",
+       "l_project_gather", "input_encoder")
 DEC = ("l_dec_project", "l_swin_block_c32_dec", "l_coef", "coef_decoder", "_add_dec0")
 POST = ("post_", "scale_rgb", "f16lut")
 SWIN = ("swin_", "patch_merge", "expand_", "bneck/")

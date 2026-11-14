@@ -1138,6 +1138,20 @@ WG_KERNEL(SW_ENTRY)
 #if SW_OUT_F16
     // Output RN16(x2) as FP16, real window members only (HIP LStoreF16Epi).
     uint4 o16[KC];
+#if SW_OUT_COEF12 && COEF_CVT_HW
+    // the driver's conversions (the same bits as wg_to_f16 / the software forms): every lane computes, the hh = 0 lanes
+    // of real pixels inside the render rectangle store (the conversions need wave-uniform control flow)
+    [unroll] for (uint kh = 0; kh < KC; ++kh) o16[kh] = wg_to_f16_ags(acc[kh]);
+    {
+        g_z = wg_grid_ >> 31;
+        const float S = wg_ldf(coefW, 320u), T = wg_ldf(coefW, 324u);
+        const LCoefVals cv = l_coef_vals_hw(o16[0], o16[1], S, T);
+        if (dst >= 0 && hh == 0u && pr < coefRh && pc < coefRw)
+            l_coef_store12(cv, (uint)wg_uniform((int)coefA), (uint)wg_uniform((int)coefC), (uint)wg_uniform((int)coefL),
+                           (uint)(pr * coefRw + pc));
+    }
+    return;
+#endif
     [unroll] for (uint kf = 0; kf < KC; ++kf) o16[kf] = wg_to_f16(acc[kf]);
 #if SW_OUT_COEF12
     // l_coef_pack12 of the map: o16[0] / o16[1] of the hh = 0 lane are the pixel's channels 0..7 / 8..15 (the map's
