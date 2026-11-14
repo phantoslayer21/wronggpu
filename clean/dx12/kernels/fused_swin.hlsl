@@ -441,6 +441,37 @@ void load_frags_g(uint base, uint off, out uint2 f[KC])
     }
 }
 
+#ifndef SW_SRC
+#define SW_SRC 0
+#endif
+#ifndef SW_OUT_F16
+#define SW_OUT_F16 0
+#endif
+#if (SW_SRC != 0 || SW_OUT_F16) && (SW_ADD || SW_ECL > 0)
+#error "SW_SRC / SW_OUT_F16: plain blocks only"
+#endif
+#if SW_SRC == 1
+// LHaloF16Src: the lane's channels hh * C/2 + 8 k + j of the member at grid position (pr, pc) (inside the 2-pixel halo),
+// from the FP16 map [H + 4][W + 4][C]
+void sw_load_halo_f16(uint base, int pr, int pc, int W, uint hh, out v8f f[KC])
+{
+    const uint off = (uint)(((pr + 2) * (W + 4) + pc + 2) * SW_C) * 2u + hh * SW_C;
+    [unroll] for (uint k = 0; k < KC; ++k) {
+        const uint4 q = wg_ld128(base, off + 16u * k);
+        f[k].v[0] = wg_h2f_lo(q.x); f[k].v[1] = wg_h2f_hi(q.x); f[k].v[2] = wg_h2f_lo(q.y); f[k].v[3] = wg_h2f_hi(q.y);
+        f[k].v[4] = wg_h2f_lo(q.z); f[k].v[5] = wg_h2f_hi(q.z); f[k].v[6] = wg_h2f_lo(q.w); f[k].v[7] = wg_h2f_hi(q.w);
+    }
+}
+#elif SW_SRC == 2
+// LCoarseFp8Src: a member outside the grid takes the mirrored 2 x 2 group (mirror of the group index) and keeps its
+// sub-pixel; the byte offset of the lane's half of that pixel
+uint sw_coarse_src(int pr, int pc, int H, int W, uint hh)
+{
+    const int r = 2 * sw_mirror(pr >> 1, H >> 1) + (pr & 1), c = 2 * sw_mirror(pc >> 1, W >> 1) + (pc & 1);
+    return (uint)(r * W + c) * SW_C + hh * HALF;
+}
+#endif
+
 // sum of squares of a token's channels in this lane (k = 0 .. KC - 1, in order), the other half of the wave added
 float norm_r(v8f a[KC])
 {
@@ -677,6 +708,11 @@ WG_KERNEL(SW_ENTRY)
     const uint lpw = WaveReadLaneAt(lowp, wave_id);   // this wave's window (win: the same clamp)
     const int low = ((mr >> 1) - (int)(lpw & 0xffffu)) * 2 + ((mc >> 1) - (int)(lpw >> 16));
     const uint eslot = (tid >> 5) * 16u + (uint)low * 4u + (uint)(((mr & 1) << 1) | (mc & 1));
+#elif SW_SRC == 1
+    v8f xf[KC];
+    sw_load_halo_f16(x, pr, pc, W, hh, xf);
+#elif SW_SRC == 2
+    load_frags_g(x, sw_coarse_src(pr, pc, H, W, hh), xa);
 #elif SW_PM
     // enc1's patch merge of this lane's (mirrored) token: lane half hh holds the 2 x 64 bytes of input row 2 mr + hh
     // (TL | TR or BL | BR), 16 K groups, as patch_merge_c64
@@ -739,7 +775,11 @@ WG_KERNEL(SW_ENTRY)
     v8f acc[KC];
     {
         [unroll] for (uint k = 0; k < KC; ++k) {
+#if SW_SRC == 1
+            acc[k] = xf[k];
+#else
             acc[k] = sw_unpack_fp8(xa[k]);
+#endif
 #if SW_ADD
             acc[k] = sw_add8(acc[k], sw_unpack_fp8(xb[k]));
 #endif
@@ -1083,6 +1123,17 @@ WG_KERNEL(SW_ENTRY)
     }
 #if SW_REV_PHI
     [unroll] for (uint rk2 = 0; rk2 < KC; ++rk2) acc[rk2] = sw_unperm8(racc[rk2], 7u, 7u);
+#endif
+
+#if SW_OUT_F16
+    // Output RN16(x2) as FP16, real window members only (HIP LStoreF16Epi).
+    uint4 o16[KC];
+    [unroll] for (uint kf = 0; kf < KC; ++kf) o16[kf] = wg_to_f16(acc[kf]);
+    if (dst >= 0) {
+        const uint ob16 = ((uint)dst * SW_C + hh * HALF) * 2u;
+        [unroll] for (uint kg = 0; kg < KC; ++kg) wg_st128(out_p, ob16 + 16u * kg, o16[kg]);
+    }
+    return;   // the q8 output below stays the file's last block (fused_swin_gen.py's anchor); not compiled here
 #endif
 
     // Output q8(x2), real window members only.
