@@ -101,6 +101,10 @@ class Trace:
             else:
                 raise AssertionError("unexpected line: " + ln)
 
+    def unknown(self):
+        """Decoded arguments that are no allocation's address (a wrong entry in the recorder's table shows here)."""
+        return [(ln.kernel, a) for f in self.frames for ln in f["launches"] for a in ln.args if a.startswith("?")]
+
     def extent(self, addr):
         """Bytes from a decoded address b<k>+<offset> to the end of its allocation."""
         k, off = addr[1:].split("+")
@@ -156,7 +160,9 @@ class ModelM(unittest.TestCase):
 
     def test_shipping_build(self):
         """With the optional code objects of a full build: the pack12 decoder, dec1 fused with dec0, wave64 post."""
-        create, loads, frames, kernels = parse(run_trace(frames=2, build_files=SHIPPING))
+        t = Trace(run_trace(frames=2, build_files=SHIPPING))
+        self.assertEqual(t.unknown(), [])
+        create, loads, frames, kernels = t.create, t.loads, [[ln.kgb() for ln in f["launches"]] for f in t.frames],             t.kernels
         self.assertEqual(create, "create ok model M")
         for want in ("decoder__pack12.co as d0p12", "dec1_dec0__pack12.co as d1p12", "post_w64.co as w64"):
             self.assertIn(want, loads)
@@ -174,6 +180,7 @@ class ModelM(unittest.TestCase):
         holds the map it gets (allocation sizes from the recorder)."""
         for rw, rh in ((64, 64), (80, 48)):
             t = Trace(run_trace(rw=rw, rh=rh, ow=96, oh=96, frames=2))
+            self.assertEqual(t.unknown(), [])
             fw, fh = ceil32(rw), ceil32(rh)
             tokens = (fw // 2) * (fh // 2)
             for f in t.frames:

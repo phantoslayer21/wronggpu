@@ -71,6 +71,9 @@ const Signature kSignatures[] = {
 const char* kinds_of(const std::string& kernel) {
   const size_t slash = kernel.find('/');
   const std::string k = slash == std::string::npos ? kernel : kernel.substr(slash + 1);
+  // dec1's block fused with the decoder (swin_block_c64_add_dec0*): x, skip, w, H, W, ox, oy, then the decoder's
+  // arguments: not the blocks' common form
+  if (k.find("_add_dec0") != std::string::npos) return "pppiiii";
   for (const Signature& s : kSignatures) {
     const size_t n = std::strlen(s.name);
     if (s.name[n - 1] == '*' ? k.compare(0, n - 1, s.name, n - 1) == 0 : k == s.name) return s.kinds;
