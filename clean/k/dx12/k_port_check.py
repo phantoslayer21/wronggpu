@@ -18,7 +18,9 @@ bytes. The rules are the Model L checks' (clean/l/runner/l_fold_check.py):
   the half-grid control (the port again with half its workgroups) is used by the families whose grid has more than one
   workgroup;
 - Model M's scale_rgb (frame.co, its port already proven) runs through the same replay as a control.
-The families: expo = k_expo_scalars against k_io.co (HIP); warm = k_warm (D3D12 only, no HIP kernel: it is checked
+The families: narrow = the narrow network stages (k_block.co: k_stage_e2 .. k_stage2_d0_hidden; the stage runner's
+launch plans, clean/k/dx12/k_plan_bridge.py), on random stage weights and inputs with special values (NaN, infinity,
++-65504, zero, -0, subnormal) in every other case; expo = k_expo_scalars against k_io.co (HIP); warm = k_warm (D3D12 only, no HIP kernel: it is checked
 against its own definition, the dummy word is written exactly when the key equals a lane's loaded value).
 One known limit, shared with Model M's ports: D3D12 flushes FP32 denormals (inputs and results) to zero, HIP keeps them.
 k_expo_scalars only meets one with a pre-exposure above about 8.5e37 (kappa = RN(1 / pi) * E), so the inputs here keep
@@ -32,6 +34,7 @@ import os
 import struct
 import subprocess
 import sys
+import time
 
 import numpy as np
 
@@ -43,7 +46,10 @@ HIP_SENTINEL, D3D12_SENTINEL = 0xA5, 0x5A
 SLACK = 64
 CONTROL = "scale_rgb"   # Model M, frame.co
 # family -> (HIP code objects, D3D12 kernels)
-FAMILY_KERNELS = {"expo": (["k_io.co"], ["k_expo_scalars"]), "warm": ([], ["k_warm"])}
+NARROW_KERNELS = ["k_stage_e2", "k_stage_e0", "k_stage_e1", "k_stage_d2", "k_stage_d1", "k_stage2_e0", "k_stage2_e1",
+                  "k_stage2_d1", "k_stage2_d0_hp", "k_stage2_d0_hidden"]
+FAMILY_KERNELS = {"expo": (["k_io.co"], ["k_expo_scalars"]), "warm": ([], ["k_warm"]),
+                  "narrow": (["k_block.co"], NARROW_KERNELS)}
 CONTROL_CO = "frame.co"
 
 
@@ -281,11 +287,157 @@ def run_warm(build, rocm, seeds, cdir, hip):
     return items, lines
 
 
+# ---- family narrow: the narrow network stages (k_block.co) ---------------------------------------------------------
+
+# kernel -> (stage, stage-runner suffix, d0 form); the d0 kernels are the network's own forms (hidden history, compact
+# pixel head) with the hidden history pointer appended to the stage runner's launch
+NARROW = {"k_stage_e2": ("e2", "", None), "k_stage_e0": ("e0", "", None), "k_stage_e1": ("e1", "", None),
+          "k_stage_d2": ("d2", "", None), "k_stage_d1": ("d1", "", None), "k_stage2_e0": ("e0", "@w2", None),
+          "k_stage2_e1": ("e1", "@w2", None), "k_stage2_d1": ("d1", "@w2", None),
+          "k_stage2_d0_hp": ("d0", "@w2", "hp"), "k_stage2_d0_hidden": ("d0", "@w2", "hidden")}
+# block-level sizes (W, H) and window offsets (spec 44: even): grids with fewer than a workgroup's windows among them
+NARROW_SIZES = [(8, 8), (24, 16), (17, 13), (40, 24), (9, 33), (12, 20)]
+NARROW_OFFSETS = [(0, 0), (2, 2), (4, 0), (0, 6), (6, 4)]
+# special inputs: level 1 without NaN (infinity, +-65504, zero, -0, the smallest subnormal), level 2 with NaN as well
+F16_SPECIALS = [np.array([np.inf, -np.inf, 65504.0, -65504.0, 0.0, -0.0, 6e-8, 1e-4, -3e4], np.float32),
+                np.array([np.nan, np.inf, -np.inf, 65504.0, -65504.0, 0.0, -0.0, 6e-8, 1e-4, -3e4], np.float32)]
+
+
+def narrow_inputs(stage, size, rng, specials):
+    from clean.k.reference.layout import STAGE, cdiv
+    st = STAGE[stage]
+    W, H = size
+    if st["kind"] == "dec":
+        x = rng.standard_normal((cdiv(H, 2), cdiv(W, 2), st["C_prev"])).astype(np.float32)
+        skip = rng.standard_normal((H, W, st["C"])).astype(np.float32)
+    else:
+        x = rng.standard_normal((H, W, 16 if st.get("embed") else st["C"])).astype(np.float32)
+        skip = None
+    if specials:
+        for a in (x, skip):
+            if a is not None:
+                pick = rng.random(a.shape) < 0.01
+                a[pick] = rng.choice(F16_SPECIALS[specials - 1], int(pick.sum()))
+    return x, skip
+
+
+def itemsize(name):
+    return 4 if name == "out" else 2
+
+
+def run_narrow(build, rocm, seeds, cdir, hip, only=None):
+    from clean.k.reference.layout import STAGE
+    from clean.k.reference.network import random_stage_params
+    from clean.k.runner import k_launch as KL
+    from clean.k.runner import k_stages
+    from clean.k.dx12 import k_plan_bridge as PB
+    tokens = PB.manifest_args(build)
+    items, lines, neg = [], [], None
+    for si, seed in enumerate(seeds):
+        rng = np.random.default_rng(seed)
+        for kernel, (stage, suffix, d0) in NARROW.items():
+            if only and kernel not in only:
+                continue
+            st = STAGE[stage]
+            for ci in range(len(NARROW_SIZES)):
+                size, offset = NARROW_SIZES[ci], NARROW_OFFSETS[(ci + si) % len(NARROW_OFFSETS)]
+                special = ci % 3   # 0 none, 1 specials without NaN, 2 with NaN
+                name = f"nar_s{si}_{kernel}_{ci}"
+                blob = k_stages.pack(stage, random_stage_params(st, rng))
+                x, skip = narrow_inputs(stage, size, rng, special)
+                pdev = PB.PlanDev(hip.h)
+                plan = k_stages.prepare(pdev, stage + suffix, blob, x, offset, skip)
+                try:
+                    if d0:   # the network's d0 forms: k_block.hip's k_stage2_d0_hidden / _hp take the hidden history
+                        W, H = size
+                        hid = pdev.malloc(W * H * 8)
+                        plan["bufs"]["hidden"], plan["sizes"]["hidden"] = hid, W * H * 8
+                        k0, grid, block, args = plan["launches"][0]
+                        assert k0 == "k_stage2_d0", k0
+                        plan["launches"] = [(kernel, grid, block, args + [ctypes.c_void_p(hid)])]
+                        plan["outputs"] = [("hidden", (H, W, 4))] + (
+                            [("head", (2 * H, 2 * W, 4))] if d0 == "hp" else [("head", (H, W, 40))])
+                    outputs = [n for n, _ in plan["outputs"]]
+                    for n, p in plan["bufs"].items():
+                        if p in pdev.inputs:
+                            write(os.path.join(cdir, f"{name}.{n}.in"), bytes(hip.h.download(p, pdev.sizes[p])))
+                    for k, grid, block, a in plan["launches"]:
+                        co = KL.KERNEL_CODE_OBJECTS[k]
+                        hip.h.launch(hip.h.get_function(hip.mods[co], k), grid, block, a)
+                    hip.h.sync()
+                    sizes = {n: pdev.sizes[plan["bufs"][n]] for n in outputs}
+                    got = {n: bytes(hip.h.download(plan["bufs"][n], sizes[n] + SLACK)) for n in outputs}
+                    defined = {n: min(int(np.prod(sh)) * itemsize(n), sizes[n]) for n, sh in plan["outputs"]}
+                    lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k.split(":")[-1]], cdir, ["k_block.co"],
+                                            outputs)
+                    if neg is None and plan["launches"][0][1] >= 4:   # the dropped windows hold output pixels
+                        neg = name
+                        lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k.split(":")[-1]], cdir,
+                                                ["k_block.co"], outputs, prefix="negative_", grid_div=2)
+                    items.append({"case": name, "kernel": kernel, "stage": stage, "size": list(size),
+                                  "offset": list(offset), "specials": special, "outputs": outputs, "hip": got,
+                                  "defined": defined})
+                finally:
+                    for p in plan["bufs"].values():
+                        pdev.free(p)
+    return items, lines, neg
+
+
+def nan_equivalent_differ(got, want, defined, width=2):
+    """Differing bytes over the first `defined` bytes after ignoring the elements (2 bytes: FP16) that are NaN in both:
+    IEEE 754 does not define a NaN's sign or payload, and the two devices may generate or propagate a different one."""
+    dt = np.uint16 if width == 2 else np.uint32
+    a = np.frombuffer(got[:defined], dt)
+    b = np.frombuffer(want[:defined], dt)
+    exp, mant = (0x7C00, 0x03FF) if width == 2 else (0x7F800000, 0x007FFFFF)
+    nan = lambda v: ((v & exp) == exp) & ((v & mant) != 0)
+    return int(np.sum((a != b) & ~(nan(a) & nan(b)))), int(np.sum((a != b) & nan(a) & nan(b)))
+
+
+def check_narrow(state, read):
+    items, _, neg = state
+    out = []
+    for it in items:
+        per = {n: compare(read(f"{it['case']}.{n}.d3d12"), it["hip"][n], it["defined"][n], D3D12_SENTINEL, HIP_SENTINEL)
+               for n in it["outputs"]}
+        raw = all(v["identical"] for v in per.values())
+        nan_only = 0
+        if not raw and it["specials"] == 2:   # NaN inputs: a NaN's sign / payload is not defined (see nan_equivalent_differ)
+            for n, v in per.items():
+                if not v["identical"] and v["slack_bad"] == 0:
+                    d, same = nan_equivalent_differ(read(f"{it['case']}.{n}.d3d12"), it["hip"][n], it["defined"][n])
+                    v["differ_outside_nan"], v["nan_elements_differing_in_sign"] = d, same
+                    nan_only += same
+        ok_case = raw or all(v["identical"] or (v["slack_bad"] == 0 and v.get("differ_outside_nan", 1) == 0)
+                             for v in per.values())
+        out.append({"case": it["case"], "kernel": it["kernel"], "outputs": per, "raw_identical": raw,
+                    "identical": ok_case, "nan_sign_only_elements": nan_only})
+    caught, differ = None, 0
+    if neg:
+        it = next(i for i in items if i["case"] == neg)
+        per = [compare(read(f"negative_{neg}.{n}.d3d12"), it["hip"][n], it["defined"][n], D3D12_SENTINEL, HIP_SENTINEL)
+               for n in it["outputs"]]
+        caught = all(p["differ"] >= 0 for p in per) and any(not p["identical"] for p in per)
+        differ = sum(max(p["differ"], 0) for p in per)
+    kernels = sorted({o["kernel"] for o in out})
+    by_kernel = {k: [sum(o["identical"] for o in out if o["kernel"] == k), sum(1 for o in out if o["kernel"] == k)]
+                 for k in kernels}
+    ok = bool(out) and all(o["identical"] for o in out) and caught is True
+    return {"cases": len(out), "identical": sum(o["identical"] for o in out), "by_kernel": by_kernel,
+            "raw_byte_identical": sum(o["raw_identical"] for o in out),
+            "cases_differing_only_in_nan_sign": sum(1 for o in out if not o["raw_identical"] and o["identical"]),
+            "nan_elements_differing_in_sign": sum(o["nan_sign_only_elements"] for o in out),
+            "special_value_cases": [sum(1 for i in items if i["specials"] == 1), sum(1 for i in items if i["specials"] == 2)],
+            "negative_control": {"half_grid": True, "case": neg, "caught": caught, "differ": differ},
+            "failures": [o for o in out if not o["identical"]][:4]}, ok
+
+
 # ---- run -----------------------------------------------------------------------------------------------------------
 
 def run(build, rocm, families, seeds, json_out):
-    cdir = os.path.join(build, "replay-k")
-    os.makedirs(cdir, exist_ok=True)
+    # a new folder per run: an output of an earlier run must never stand in for one this run did not write
+    cdir = os.path.join(build, "replay-k-" + time.strftime("%Y%m%d-%H%M%S"))
+    os.makedirs(cdir)
     res = {"families": families, "seeds": seeds, "results": {}}
     cos = sorted({co for f in families for co in FAMILY_KERNELS[f][0]} | {CONTROL_CO})
     hip = Hip(build, rocm, cos)
@@ -297,6 +449,9 @@ def run(build, rocm, families, seeds, json_out):
     if "warm" in families:
         state["warm"] = run_warm(build, rocm, seeds, cdir, hip)
         lines += state["warm"][1]
+    if "narrow" in families:
+        state["narrow"] = run_narrow(build, rocm, seeds, cdir, hip)
+        lines += state["narrow"][1]
     # the control: Model M's scale_rgb, same replay, against HIP
     rng = np.random.default_rng(seeds[0])
     cn = 1000
@@ -349,6 +504,9 @@ def run(build, rocm, families, seeds, json_out):
                 fails.append(it["case"])
         res["results"]["warm"] = {"cases": len(state["warm"][0]), "as_defined": good, "failures": fails[:5]}
         ok = ok and good == len(state["warm"][0]) and good > 0
+    if "narrow" in state:
+        res["results"]["narrow"], good = check_narrow(state["narrow"], read)
+        ok = ok and good
     ctl_got = read("ctl.out")
     ctl = compare(ctl_got, h[0], 1000 * 4, D3D12_SENTINEL, HIP_SENTINEL)
     res["control"] = {"kernel": CONTROL, "identical": bool(ctl["identical"]), "differ": ctl["differ"],
