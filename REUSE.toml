@@ -62,6 +62,20 @@ precedence = "override"
 SPDX-FileCopyrightText = "2023 Advanced Micro Devices, Inc."
 SPDX-License-Identifier = "MIT"
 
+# Selawik 1.01 (Microsoft; SIL Open Font License 1.1): the launcher's text font on Linux (the OFL's text is beside the fonts)
+[[annotations]]
+path = "clean/installer/assets/fonts/selawik/**"
+precedence = "override"
+SPDX-FileCopyrightText = "2015 Microsoft Corporation"
+SPDX-License-Identifier = "OFL-1.1"
+
+# Fluent System Icons (Microsoft; MIT): the launcher's icon font on Linux
+[[annotations]]
+path = "clean/installer/assets/fonts/fluent/**"
+precedence = "override"
+SPDX-FileCopyrightText = "2020 Microsoft Corporation"
+SPDX-License-Identifier = "MIT"
+
 # WrongGPU's own notes about the vendored headers (written by the clean team, not AMD's)
 [[annotations]]
 path = ["clean/third_party/fidelityfx-sdk-1.1.4/README.md", "clean/third_party/fidelityfx-sdk-fsr3-v3.0.4/README.md"]

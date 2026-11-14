@@ -10,13 +10,19 @@
 //   ui_library.cpp  the Library page        ui_game.cpp  a game's page        ui_settings.cpp  Settings, first run
 //   ui_uia.cpp      UI Automation provider  launcher_ui.cpp  the window, input, operations, ui-dump / ui-render
 #pragma once
+#ifdef _WIN32
 #include "app/launcher_app.h"
+#else
+#include "wg_core/base.h"  // the window's app headers need GDI+ and the rest of the window layer, which the Linux build does not have yet
+#endif
 
+#ifdef _WIN32
 #include <d2d1_1.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <dwrite_1.h>
 #include <wincodec.h>
+#endif
 
 #include <functional>
 #include <memory>
@@ -124,6 +130,9 @@ struct TS {  // text style
     bool underline = false;
     bool trim = false;     // wrapped text: an ellipsis on the last line that fits the box
 };
+#ifndef _WIN32
+struct GfxCairo;  // the Linux drawing state (ui_gfx_cairo.cpp)
+#endif
 class Gfx {
 public:
     ~Gfx();
@@ -190,6 +199,7 @@ public:
     bool Backdrop(const Rc& r, float rad, float blur, float opacity = 1);
     void SetOffset(float dx, float dy);  // content scroll: everything drawn after this is moved
     float OffsetY() const { return oy_; }  // the vertical offset SetOffset set (the Library's scroll anchoring moves it)
+#ifdef _WIN32
     ID2D1RenderTarget* rt = nullptr;
     IDWriteFactory* dw = nullptr;
     IWICImagingFactory* wic = nullptr;
@@ -256,8 +266,61 @@ private:
     int clips_ = 0;  // axis-aligned clips open (PushClip)
     float ox_ = 0, oy_ = 0;
     void PushMask(const Rc& r, float rad, float opacity);  // a rounded mask layer at `opacity` (popped with PopRoundClip)
+#else
+    // Cairo and Pango (ui_gfx_cairo.cpp); the state lives behind one pointer so this header needs neither library
+    bool iconFont = true;
+
+private:
+    GfxCairo* im_ = nullptr;
+    float ox_ = 0, oy_ = 0;
+    void Trim();
+#endif
 };
 
+// Icons (Segoe Fluent Icons / Segoe MDL2 Assets code points)
+namespace ic {  // one per line
+const wchar_t grid = 0xF0E2;
+const wchar_t gear = 0xE713;
+const wchar_t refresh = 0xE72C;
+const wchar_t add = 0xE710;
+const wchar_t download = 0xE896;
+const wchar_t search = 0xE721;
+const wchar_t back = 0xE76B;
+const wchar_t play = 0xF5B0;
+const wchar_t more = 0xE712;
+const wchar_t warn = 0xE7BA;
+const wchar_t folder = 0xE8B7;
+const wchar_t cube = 0xE7B8;
+const wchar_t panel = 0xEA86;
+const wchar_t monitor = 0xE7F4;
+const wchar_t down = 0xE70D;
+const wchar_t check = 0xE73E;
+const wchar_t close = 0xE711;
+const wchar_t info = 0xE946;
+const wchar_t doc = 0xE8A5;
+const wchar_t zip = 0xF012;
+const wchar_t wrench = 0xE90F;
+const wchar_t undo = 0xE7A7;
+const wchar_t trash = 0xE74D;
+const wchar_t broom = 0xEA99;
+const wchar_t upload = 0xE898;
+const wchar_t link = 0xE71B;
+const wchar_t minus = 0xE738;
+const wchar_t shield = 0xEA18;
+const wchar_t question = 0xE897;
+const wchar_t chip = 0xE964;
+const wchar_t sync = 0xE895;
+const wchar_t key = 0xE8D7;
+const wchar_t playLine = 0xE768;
+const wchar_t up = 0xE70E;
+const wchar_t arrowUp = 0xE74A;  // an update ready (UpdateMark)
+const wchar_t palette = 0xE790;
+const wchar_t chevron = 0xE76C;
+const wchar_t external = 0xE8A7;
+const wchar_t processor = 0xE950;
+}
+
+#ifdef _WIN32  // the pages and the window: the Linux build has only the drawing above until its window layer exists
 // ---- art (ui_art.cpp) ----------------------------------------------------------------------------------------------------
 // hero: the wide library_hero.jpg at a tile's size and logo: the game's logo.png (alpha) at the banner's (the Library's tiles
 // and banner, the game page's banner); header: header.jpg (a tile without a hero: it has the title on it); cover: the
@@ -810,48 +873,6 @@ bool PageEntering();   // the page is making its entrance (the native text field
 bool PageUnderSheet();
 constexpr float kPageMs = 180, kMenuMs = 140, kDialogMs = 180, kToastMs = 220, kToastOutMs = 260, kFirstMs = 240;
 constexpr float kThumbHoldMs = 900, kThumbFadeMs = 300;  // the overlay scroll thumb: shown this long after the page last moved, then fades
-// Icons (Segoe Fluent Icons / Segoe MDL2 Assets code points)
-namespace ic {  // one per line
-const wchar_t grid = 0xF0E2;
-const wchar_t gear = 0xE713;
-const wchar_t refresh = 0xE72C;
-const wchar_t add = 0xE710;
-const wchar_t download = 0xE896;
-const wchar_t search = 0xE721;
-const wchar_t back = 0xE76B;
-const wchar_t play = 0xF5B0;
-const wchar_t more = 0xE712;
-const wchar_t warn = 0xE7BA;
-const wchar_t folder = 0xE8B7;
-const wchar_t cube = 0xE7B8;
-const wchar_t panel = 0xEA86;
-const wchar_t monitor = 0xE7F4;
-const wchar_t down = 0xE70D;
-const wchar_t check = 0xE73E;
-const wchar_t close = 0xE711;
-const wchar_t info = 0xE946;
-const wchar_t doc = 0xE8A5;
-const wchar_t zip = 0xF012;
-const wchar_t wrench = 0xE90F;
-const wchar_t undo = 0xE7A7;
-const wchar_t trash = 0xE74D;
-const wchar_t broom = 0xEA99;
-const wchar_t upload = 0xE898;
-const wchar_t link = 0xE71B;
-const wchar_t minus = 0xE738;
-const wchar_t shield = 0xEA18;
-const wchar_t question = 0xE897;
-const wchar_t chip = 0xE964;
-const wchar_t sync = 0xE895;
-const wchar_t key = 0xE8D7;
-const wchar_t playLine = 0xE768;
-const wchar_t up = 0xE70E;
-const wchar_t arrowUp = 0xE74A;  // an update ready (UpdateMark)
-const wchar_t palette = 0xE790;
-const wchar_t chevron = 0xE76C;
-const wchar_t external = 0xE8A7;
-const wchar_t processor = 0xE950;
-}
 
 // ---- pages (ui_library.cpp, ui_game.cpp, ui_settings.cpp) ---------------------------------------------------------------
 void PaintLibrary(Gfx& gx, const Rc& area);
@@ -948,4 +969,5 @@ wstring FieldInvalidWhy(int id);                // a text field's hit whose valu
 void UiaShutdown(HWND hwnd);
 bool UiaInvokeMessage(UINT msg, WPARAM wp, LPARAM lp);  // Invoke / Toggle / Scroll from UI Automation, run on the window's thread
 
+#endif  // _WIN32
 }  // namespace wg::app::lui
