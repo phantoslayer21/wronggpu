@@ -91,7 +91,7 @@ Sizes: `k_pack.stage_sections(st)["_size"]` = `model_k.cpp k_stage_blob_bytes`.
 | luma history L | `[2⌈H⌉₁₆][2⌈W⌉₁₆]` FP16 | `k_out_pixel` | next frame's `k_out_pixel` |
 | hidden history Hh | `[Bh][Bw][4]` FP16 | complete G2 frames: `k_stage2_d0_hidden` (FP32) or `k_stage2h_d0_hidden` ("fused16"); otherwise `k_out_hidden` | next frame's `k_in_base` or `k_in_tiled` |
 | game colour / motion / depth | RGBA float32 / 2 × float32 / float32, row pitch in the launch arguments, subrect bases | the front end | both stages |
-| game output | `KOutParams.omode`: 0 RGBA float32 `[H][opitch][4]` (alpha Ā); 1 RGBA16F rows of `opitch` texels (RGB rounded to nearest even, alpha 1: the interop's output copy); 2 dense RGB float32 `[H][opitch][3]` (the interop's output pass) | `k_out_pixel` | the front end |
+| game output | `KOutParams.omode`: 0 RGBA float32 `[H][opitch][4]` (alpha Ā; the interop's output pass for model K, `FrameIo.out_rgba32f`); 1 RGBA16F rows of `opitch` texels (RGB rounded to nearest even, alpha Ā as it is: the interop's output copy); 2 dense RGB float32 `[H][opitch][3]` (no alpha: the runtime's own test buffer). Ā: the colour input's alpha of the frame through the 4.3 bilinear (the stored tap's fourth value RN16(alpha), the four taps and FP16 weights of Y / Co / Cg, RN16(w₀a₀) then three FP16 fused multiply-adds); spatial only, no exposure, no clamp | `k_out_pixel` | the front end |
 | exposure scalars `xs` | float32 [4]: κ, ρ, λ, RN(1/κ) of spec 42 section 4 / spec 43 3.7 (`KFrameIn.xs`; null = the struct's κ, ρ, λ and `KOutUni.kinv`) | `k_expo_scalars` (runtime) | all I/O kernels |
 | filter table | `[2048][8]` FP16, the frame's set (spec 43 section 7), generated on the host per level | host | `k_out_pixel` |
 | 2^E table | `[65536]` FP16: h(2^E) for every binary16 bit pattern E | host (once) | `k_out_pixel` |
@@ -116,7 +116,7 @@ The per-frame runtime runs `KFrame`'s frame on its HIP stream (the interop's Fra
 | exposure | `exposure_auto_diet` (`exposure.co`, spec 07, HDR only, when the game asked for auto-exposure at creation or the front end asks this frame; `exposure_auto_diet_c16` on the RGBA16F copy), `k_expo_scalars` (`k_io.co`) | E_cur, E_prev, E_aux of spec 42 draft 3 section 4 (the game's value or texel as E_cur, else 1; the measured value as E_aux), then `xs` |
 | preparation | `k_out_color`, then `k_in_tiled` when supported; otherwise `k_in_color` plus `k_in_base`/`k_in_reset` | `KFrameIn.flags` = [HDR] from `WgRtConfig.hdr` (front end `WG_CREATE_HDR`), always [MVlo], [inv], reset |
 | network | the eleven `k_stage_*` / `k_stagew<NG>_*` launches of `k_net.py` variant "fused" | window offsets `k_stage_offsets(f, net/window_offsets)`; the G2 d0 also emits hidden history and, by default, the compact pixel head instead of the head map (`k_stage2_d0_hp`, `k_stage2h_d0_hp`) |
-| output stage | `k_out_pixel_c` (compact pixel head, default) or `k_out_pixel` (runtime option `k_head=full`) | game output omode 1 (FrameIo.out_half_pitch > 0) or 2 (interop dense RGB) |
+| output stage | `k_out_pixel_c` (compact pixel head, default) or `k_out_pixel` (runtime option `k_head=full`) | game output omode 1 (FrameIo.out_half_pitch > 0), 0 (FrameIo.out_rgba32f: dense RGBA f32, the interop's output pass) or 2 (dense RGB f32, tests); the direct forms write the output texture (alpha Ā in every form that has one) |
 
 `k_expo_scalars(st, src, measured, xs, KExpoArgs)` (one lane), spec 42 draft 3 section 4 (the host rule of
 `clean/k/reference/exposure.py`): [HDR] E_cur = `value` (`src_mode` 0: the front end's exposure value, 1 when the
@@ -143,8 +143,9 @@ frame, raw), `exposure.measured` (the last auto-exposure value), `k.scalars` (xs
 (network output, the 40-channel head map: only with the runtime option `k_head=full`; the default frame writes the
 compact pixel head instead, buffer `k.Np`, and asking for `k.N` fails with a message naming the option; `k.Np` in
 turn fails with `k_head=full`),
-`k.Hc`, `k.L`, `k.Hh` (the copies the next frame reads), `filter.out` (own output: dense RGB f32,
-not with external I/O), `input.color`, `input.depth`, `input.motion`. Timing marks (FrameIo.timing_base,
+`k.Hc`, `k.L`, `k.Hh` (the copies the next frame reads), `filter.out` (own output: dense RGB f32, or dense RGBA f32
+after a frame with `FrameIo.out_rgba32f`; not with external I/O), `input.color` (the fourth value is the colour's
+alpha: `wg_rt_upload_inputs_rgba`; 1 after the RGB upload `wg_rt_upload_inputs`), `input.depth`, `input.motion`. Timing marks (FrameIo.timing_base,
 `wg_rt_frame_io_timed`): exposure = first kernel → `k_out_color`; input = preparation → first neural stage;
 network = eleven stages (including Hh in FP32 d0) → `k_out_pixel`; output = reconstruction and any standalone
 hidden pass → the final empty timing marker. Full end-to-end comparisons retain all these intervals.
