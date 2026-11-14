@@ -14,10 +14,11 @@
 // next to model.wgcm (runtime option model_k_map=<file> overrides).
 //
 // Per frame (clean/k/FORMATS.md "Runtime frame"): [raw inputs: input_convert] -> exposure (spec 07 auto-exposure when
-// asked, exposure_auto_diet) -> k_expo_scalars (kappa, rho, lambda on the GPU from the exposure pair) -> input stage
-// (k_in_color, k_in_base) -> eleven stage kernels -> output stage (k_out_color, k_out_pixel, k_out_hidden) writing
-// the game output in the caller's format. Histories Hc, L, Hh double-buffered and zero at create; reset on the game's
-// flag, the first frame and a render-size change; frame index f = 0 on a reset frame, then + 1.
+// asked, exposure_auto_diet) -> k_expo_scalars (E_cur, E_prev, E_aux of spec 42 draft 3 section 4, then kappa, rho,
+// lambda on the GPU) -> input stage (exact by default: k_io_exact.co) -> eleven stage kernels -> output stage
+// (k_out_color, k_out_pixel, k_out_hidden) writing the game output in the caller's format. Histories Hc, L, Hh
+// double-buffered and zero at create; reset on the game's flag and the first frame only (not on a render-size
+// change); frame index f = 0 on a reset frame, then + 1.
 #pragma once
 
 #include <cstddef>
@@ -103,6 +104,9 @@ class KRuntime {
   // (k_io.hip FAST forms: hardware reciprocals instead of correctly rounded divisions, the luma history cubics as
   // packed FP16, the filter weight sum instead of the largest exponent; clean/k/tests/test_k_fast.py)
   bool fast_ = false;
+  // input-stage kernels from k_io_exact.co (tag "kx"): the default; off with k_fast_in=1 (or k_in_exact=0, k_fast=1)
+  bool in_exact_ = true;
+  bool expo_v051_ = false;  // runtime option k_expo_rule=v051 (A/B only): the 0.5.1 exposure rule
   int offsets_table_[8][2] = {};
   std::map<std::string, std::vector<uint8_t>> blobs_;
   std::map<std::string, DevPtr> wdev_, net_;  // stage blobs; network maps (X0, S0..S4, A, B, OUT)
@@ -110,6 +114,7 @@ class KRuntime {
   DevPtr Hc_[2] = {0, 0}, L_[2] = {0, 0}, Hh_[2] = {0, 0};
   DevPtr color_ = 0, depth_ = 0, motion_ = 0, out_ = 0, cpre_ = 0, cpre2_ = 0, ctap_ = 0, ctapT_ = 0;
   DevPtr exp2tab_ = 0, tables_ = 0, expo_ = 0, expo_partials_ = 0, expo_computed_ = 0, expo_sync_ = 0, xs_ = 0;
+  DevPtr kexpo_ = 0;  // k_expo_scalars state: E_cur, E_prev, E_aux of the last frame, E_cur kept for the next
   // frame state
   int frames_ = 0, parity_ = 0, fidx_ = 0, last_rw_ = 0, last_rh_ = 0, level_last_ = -1, omode_last_ = -1;
   float jprev_[2] = {0, 0};

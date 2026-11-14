@@ -1874,45 +1874,49 @@ WG_KERNEL_N(k_in_tiled_color_uniform_f, 256)(KInColorUniformParams P0) {
 
 // Host-side arguments of k_expo_scalars (must match KExpoArgs in clean/k/runtime/runtime_k.cpp and k_io.py).
 struct KExpoArgs {
-  float value;   // pair mode: this frame's exposure value (when use_src = 0)
-  int pair;      // 1: update the exposure pair first (as kernels/exposure.hip exposure_pair: e = src[0] or value,
-                 //    e_prev = e on the first frame, else the previous e); 0: the pair is already written
-                 //    (auto-exposure: exposure_auto_diet)
-  int use_src, first;
+  float value;   // E_cur when src_mode = 0: the exposure value the game passes
+  int src_mode;  // where E_cur comes from: 0 value, 1 src[0] (the game's exposure texel), 2 none (E_cur = 1)
+  int aux;       // 1: E_aux = measured[0] (spec 07 auto-exposure ran this frame); 0: E_aux = E_cur
+  int first;     // the first frame of the runtime (E_prev = E_cur)
   int hdr, reset;
-  float e1, e2;  // exposure factors of spec 42 section 4 (1 unless the game supplies an exposure scale)
+  float e1, e2;  // exposure factors of spec 42 section 4 (the game's exposure scale, else 1)
   float inv_pi;  // RN32(1 / pi), pi the pre-exposure (host)
 };
 static_assert(sizeof(KExpoArgs) == 36, "KExpoArgs");
 
-// Spec 42 section 4 / spec 43 section 3.7 from the exposure pair ex = [e, e_prev, last e] (the model M pair buffer of
-// the runtime, spec 07 / spec 10 section 3): E_cur = e, E_prev = e_prev (E_cur on a reset), E_aux = E_cur (the
-// runtime has one exposure value per frame: spec 07's result, the game's texel or value), each read as FP16 (nearest
-// even) with 0 -> 1; then exactly the FP32 operations of clean/k/runner/k_io.py scalars() and out_uniforms()
-// (kinv = RN(1/kappa); FP32 division is correctly rounded on the GPU). Writes xs = (kappa, rho, lambda, kinv), which
-// the stage kernels read through KFrameIn.xs. One lane.
+// Spec 42 draft 3 section 4 / spec 43 section 3.7. Which value is which (HDR): E_cur = the game's exposure texel or
+// value, 1 if the game passes none (the auto-exposure value never takes its place); E_aux = the auto-exposure value
+// when it runs, else E_cur; E_prev = the previous frame's E_cur, E_cur itself on the first frame and on a reset.
+// LDR: every value and factor 1. The state st = [E_cur, E_prev, E_aux, E_cur kept for the next frame] holds the raw
+// values; each is then read as FP16 (nearest even) with 0 -> 1, and the scalars are exactly the FP32 operations of
+// clean/k/runner/k_io.py scalars() and out_uniforms() (kinv = RN(1/kappa); FP32 division is correctly rounded on the
+// GPU). Writes xs = (kappa, rho, lambda, kinv), which the stage kernels read through KFrameIn.xs. One lane.
 WG_FN float kx_ev(float e) {
   const float h = (float)kh_round(e);
   return h == 0.0f ? 1.0f : h;
 }
-WG_KERNEL_N(k_expo_scalars, 32)(float* ex, const float* src, float* xs, KExpoArgs A) {
+WG_KERNEL_N(k_expo_scalars, 32)(float* st, const float* src, const float* measured, float* xs, KExpoArgs A) {
   if (wg_lane_id() != 0) return;
-  if (A.pair) {
-    const float e = A.use_src ? src[0] : A.value;
-    const float e_prev = A.first ? e : ex[2];
-    ex[0] = e;
-    ex[1] = e_prev;
-    ex[2] = e;
+  float Ecr = 1.0f, Epr = 1.0f, Ear = 1.0f;
+  if (A.hdr) {
+    Ecr = A.src_mode == 1 ? src[0] : A.src_mode == 0 ? A.value : 1.0f;
+    Ear = A.aux ? measured[0] : Ecr;
+    Epr = (A.first || A.reset) ? Ecr : st[3];
   }
-  const float Ec = kx_ev(ex[0]), Ep = kx_ev(A.reset ? ex[0] : ex[1]), Ea = Ec;
-  const float ce = A.e1 * Ec;
+  st[0] = Ecr;
+  st[1] = Epr;
+  st[2] = Ear;
+  st[3] = Ecr;
+  const float e1 = A.hdr ? A.e1 : 1.0f, e2 = A.hdr ? A.e2 : 1.0f;
+  const float Ec = kx_ev(Ecr), Ep = kx_ev(Epr), Ea = kx_ev(Ear);
+  const float ce = e1 * Ec;
   float kappa = 1.0f, rho = 1.0f;
   if (A.hdr) {
     kappa = A.inv_pi * ce;
     if (kappa == 0.0f) kappa = 1.0f;
-    rho = ce / (A.e1 * Ep);
+    rho = ce / (e1 * Ep);
   }
-  const float lam = (A.e2 * Ea) / ce;
+  const float lam = (e2 * Ea) / ce;
   xs[0] = kappa;
   xs[1] = rho;
   xs[2] = lam;

@@ -2,11 +2,15 @@
 """Model K, one whole frame on one device: input stage (spec 42) -> the eleven network stages (spec 41 / 44) ->
 output stage (spec 43), with the history images kept between frames (spec 42 / 43 inputs Hc, Hh, L, double-buffered)
 and the frame index of spec 44 (0 on every reset frame, then +1 per frame; it selects the window offsets of m, e4, d4
-from the converted model's table).
+from the converted model's table). A reset frame: the game's reset flag or the first frame; a render-size change keeps
+the history (spec 44; model M's spec 10 rule of a reset on a size change does not apply to K). E_prev: the previous
+frame's E_cur, E_cur on a reset frame (spec 42 draft 3 section 4).
 
     kf = KFrame(dev, func, output_size, max_render_size, params, flags)    # flags: hdr, mv_lowres, depth_inverted
     out = kf.frame(x)          # x: color, motion, depth, render_size, jitter, mv_scale, mv_offset, pre_exposure,
-                               #    reset, E_cur, E_aux (FP16 values), e1, e2 -> {"out": [H, W, 4] RGBA float32}
+                               #    reset, E_cur, E_aux (FP16 values), e1, e2 -> {"out": [H, W, 4] RGBA float32};
+                               #    or instead of E_cur, E_aux, e1, e2 the inputs of the exposure rule
+                               #    (clean/k/reference/exposure.py): game_exposure, measured, exposure_scale
     ms = kf.time_frame(x)      # {"input", "network", "output", "total"}: median GPU ms
 
 reference_frame(state, x, params, flags) runs the same frame with the NumPy references (state: the histories and the
@@ -17,6 +21,7 @@ import ctypes
 import numpy as np
 
 from clean.k.reference import instage, network, outstage
+from clean.k.reference.exposure import apply_rule
 from clean.k.reference.layout import base_size
 from clean.k.reference.outstage import ceil16
 from clean.k.runner import k_io
@@ -93,12 +98,12 @@ class KFrame:
         rw, rh = (int(v) for v in x["render_size"])
         if rw > self.max_rw or rh > self.max_rh:
             raise ValueError(f"render size {(rw, rh)} above the maximum {(self.max_rw, self.max_rh)}")
-        reset = bool(x.get("reset")) or self.first or self.last_render != (rw, rh)
-        d = dict(x)
+        reset = bool(x.get("reset")) or self.first
+        d = apply_rule(x, self.flags["hdr"])
         # E_prev: the previous frame's E_cur, unless the frame gives it (spec 49's test sequences); E_cur on a reset
         e_prev = x.get("E_prev") if x.get("E_prev") is not None else self.E_prev
         d.update(self.flags, output_size=(self.W, self.H), base=(self.Bw, self.Bh), reset=reset, s=self.s,
-                 E_prev=x["E_cur"] if reset or e_prev is None else e_prev)
+                 E_prev=d["E_cur"] if reset or e_prev is None else e_prev)
         return d
 
     def _launches(self, d, full_head=False):
@@ -272,16 +277,16 @@ def new_reference_state(output_size, base=None):
 def reference_frame(state, x, params, flags):
     """The NumPy references for one frame; state (new_reference_state) is updated like KFrame's."""
     rw, rh = (int(v) for v in x["render_size"])
-    reset = bool(x.get("reset")) or state["first"] or state["last_render"] != (rw, rh)
-    d = dict(x)
+    reset = bool(x.get("reset")) or state["first"]  # the game's flag or the first frame (not a render-size change)
+    d = apply_rule(x, bool(flags.get("hdr", False)))
     d.update({k: bool(flags.get(k, False)) for k in ("hdr", "mv_lowres", "depth_inverted")},
              output_size=state["output_size"], base=state["base"], reset=reset,
-             E_prev=x["E_cur"] if reset or (x.get("E_prev") is None and state["E_prev"] is None)
+             E_prev=d["E_cur"] if reset or (x.get("E_prev") is None and state["E_prev"] is None)
              else (x["E_prev"] if x.get("E_prev") is not None else state["E_prev"]))
     f = 0 if reset else state["f"]
     x0 = instage.input_stage(dict(d, Hc=state["Hc"], Hh=state["Hh"]))
     outs = network.run_network(x0, params, f)
     N = outs["d0"]["head"]
     o = outstage.output_stage(dict(d, N=N, L=state["L"], Hc=state["Hc"]))
-    state.update(Hc=o["Hc"], L=o["L"], Hh=o["Hh"], f=f + 1, first=False, E_prev=x["E_cur"], last_render=(rw, rh))
+    state.update(Hc=o["Hc"], L=o["L"], Hh=o["Hh"], f=f + 1, first=False, E_prev=d["E_cur"], last_render=(rw, rh))
     return {"out": o["out"], "x0": x0, "N": N, "f": f, "reset": reset}
