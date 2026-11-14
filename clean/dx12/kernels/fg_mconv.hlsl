@@ -2,8 +2,8 @@
 // D3D12 port of frame generation's matrix convolution (issue #96; tier B of the net1 fast path): fg_mconv<MT> of
 // fg_net1_mma.co (clean/fg/kernels/fg_net1_mma.hip), byte-identical to HIP: the same fragments and chunk order,
 // v_wmma_f32_16x16x16_f16 through the driver channel (wg_wmma_f16) with the float16 accumulator as C, its result rounded
-// to float16 after every chunk (wg_f2h = v_cvt_f16_f32, nearest even), the exact integer leaky ReLU and pool
-// (fg_exact16.h). Driver rules (clean/dx12/README.md): every load of a chunk before its first matrix call; branchless
+// to float16 after every chunk (wg_f2h = v_cvt_f16_f32, nearest even), the leaky ReLU of fg_fast16.h (fg_leaky16's
+// bits) and the exact pool (fg_exact16.h). Driver rules (clean/dx12/README.md): every load of a chunk before its first matrix call; branchless
 // selects; the chunk loop bound through an opaque zero (no forced unrolling); store pointers through wg_uniform().
 // Built only when --only names the kernels (fg_ kernels are in no model's set).
 //
@@ -16,6 +16,10 @@
 #define FG_I64 int64_t
 #define FG_FBH32(v) firstbithigh((uint)(v))
 #include "../../fg/kernels/fg_exact16.h"
+#define FG_F2H(f) wg_f2h(f)
+#define FG_H2F(h) wg_h2f(h)
+#define FG_SEL(c, a, b) select(c, a, b)
+#include "../../fg/kernels/fg_fast16.h"
 
 #ifndef FG_MT
 #define FG_MT 4
@@ -29,6 +33,27 @@ WG_ARGS_END
 uint fg_opq0() { return wg_grid_ >> 31; }      // an opaque zero (the grid size is below 2^31)
 
 uint4 fg_pack8(uint r[8]) { return uint4(r[0] | (r[1] << 16), r[2] | (r[3] << 16), r[4] | (r[5] << 16), r[6] | (r[7] << 16)); }
+uint fg_half(uint4 u, uint j)
+{
+    const uint d = select(j < 2u, u.x, select(j < 4u, u.y, select(j < 6u, u.z, u.w)));
+    return (d >> ((j & 1u) * 16u)) & 0xffffu;
+}
+// 8 packed float16 values -> the float32 accumulator fragment (exact)
+v8f fg_widen(uint4 hp)
+{
+    v8f r;
+    [unroll] for (uint v = 0; v < 8; ++v) r.v[v] = wg_h2f(fg_half(hp, v));
+    return r;
+}
+// One chunk (tier B): the matrix instruction, then the whole fragment rounded to float16 by the driver channel's
+// conversion (v_cvt_f16_f32, nearest even: HIP's (_Float16) of each element; the software wg_f2h costs ~20 instructions
+// per element on this driver, where a (half) cast rounds toward zero). hp keeps the packed float16 accumulator.
+void fg_chunk_b(uint4 av, uint4 bv, inout v8f c, inout uint4 hp)
+{
+    const v8f d = wg_wmma_f16(av, bv, c);
+    hp = wg_to_f16_ags(d);
+    c = fg_widen(hp);
+}
 
 WG_KERNEL(fg_mconv)
 {
@@ -44,13 +69,15 @@ WG_KERNEL(fg_mconv)
     const uint py = (uint)wg_uniform((int)y), pp = (uint)wg_uniform((int)p);
 
     v8f a32[FG_MT][2];
+    uint4 h16[FG_MT][2];                         // the same accumulator as packed float16
     [unroll] for (int mt = 0; mt < FG_MT; ++mt) {
         const int o0 = (mg * FG_MT + mt) * 16 + 8 * hh;
-        [unroll] for (uint v = 0; v < 8; ++v) {
-            const float bv = wg_h2f(wg_ld16(b, (uint)(o0 + (int)v) * 2u));
-            a32[mt][0].v[v] = bv;
-            a32[mt][1].v[v] = bv;
-        }
+        uint bb[8];
+        [unroll] for (uint v = 0; v < 8; ++v) bb[v] = wg_ld16(b, (uint)(o0 + (int)v) * 2u);
+        h16[mt][0] = fg_pack8(bb);
+        h16[mt][1] = h16[mt][0];
+        a32[mt][0] = fg_widen(h16[mt][0]);
+        a32[mt][1] = a32[mt][0];
     }
     const int nq_loop = nq + (int)fg_opq0();
     for (int q = 0; q < nq_loop; ++q) {
@@ -72,18 +99,15 @@ WG_KERNEL(fg_mconv)
         [unroll] for (int mt2 = 0; mt2 < FG_MT; ++mt2)
             fa[mt2] = wg_ld128(wf, (uint)((((mg * FG_MT + mt2) * nq + q) * 32 + (int)lane) * 16));
         [unroll] for (int mt3 = 0; mt3 < FG_MT; ++mt3)
-            [unroll] for (int nt2 = 0; nt2 < 2; ++nt2) {
-                const v8f d = wg_wmma_f16(fa[mt3], fb[nt2], a32[mt3][nt2]);
-                [unroll] for (uint v3 = 0; v3 < 8; ++v3) a32[mt3][nt2].v[v3] = wg_h2f(wg_f2h(d.v[v3]));
-            }
+            [unroll] for (int nt2 = 0; nt2 < 2; ++nt2) fg_chunk_b(fa[mt3], fb[nt2], a32[mt3][nt2], h16[mt3][nt2]);
     }
     [unroll] for (int mt4 = 0; mt4 < FG_MT; ++mt4) {
         const int o0 = (mg * FG_MT + mt4) * 16 + 8 * hh;
         uint r0[8], r1[8];
         [unroll] for (uint v4 = 0; v4 < 8; ++v4) {
-            const uint h0 = wg_f2h(a32[mt4][0].v[v4]), h1 = wg_f2h(a32[mt4][1].v[v4]);
-            r0[v4] = select(act == 1, fg_leaky16(h0), h0);
-            r1[v4] = select(act == 1, fg_leaky16(h1), h1);
+            const uint h0 = fg_half(h16[mt4][0], v4), h1 = fg_half(h16[mt4][1], v4);
+            r0[v4] = select(act == 1, fg_leaky_fast16(h0), h0);
+            r1[v4] = select(act == 1, fg_leaky_fast16(h1), h1);
         }
         if (px < W && py0 < H) wg_st128(py, (uint)((py0 * W + px) * cout + o0) * 2u, fg_pack8(r0));
         if (px < W && py0 + 1 < H) wg_st128(py, (uint)(((py0 + 1) * W + px) * cout + o0) * 2u, fg_pack8(r1));

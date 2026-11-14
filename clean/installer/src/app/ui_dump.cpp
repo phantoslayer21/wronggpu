@@ -83,7 +83,9 @@ wstring GameInfo(const GameEntry& e) {
     }
     if (!e.hasRecord && !e.proxyPlan.name.empty() && e.status != GameStatus::Refused && e.status != GameStatus::ForeignMod)
         t += L"OptiScaler would be installed as " + e.proxyPlan.name + L" (" + e.proxyPlan.reason + L")\r\n";
-    if (!e.leftovers.empty()) t += L"Leftover WrongGPU files (matched to WrongGPU " + e.leftovers[0].version + L" by their hashes): Clean up removes only these; Adopt makes them an install\r\n";
+    if (!e.leftovers.empty() && e.leftoversOtherSetup)  // 0.6.1
+        t += L"WrongGPU files (matched to WrongGPU " + e.leftovers[0].version + L" by their hashes) " + kLeftoversOtherSetup + L": left alone\r\n";
+    else if (!e.leftovers.empty()) t += L"Leftover WrongGPU files (matched to WrongGPU " + e.leftovers[0].version + L" by their hashes): Clean up removes only these; Adopt makes them an install\r\n";
     if (!v.fixture && !IsFile(e.exe)) t += L"The game's exe is gone (moved or uninstalled): Remove files deletes what WrongGPU left in the folder.\r\n";
     return t;
 }

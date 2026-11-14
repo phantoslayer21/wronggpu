@@ -157,6 +157,7 @@ class HipExecutor : public Executor {
     io.motion_channels = job.motion_channels;
     for (int k = 0; k < 2; ++k) io.ms[k] = job.ms[k], io.mo[k] = job.mo[k];
     io.out_half_pitch = job.out_half_pitch;
+    io.out_rgba32f = job.out_rgba32f;
     if (job.motion_hi && job.motion_hi_use && p[5]) {  // motion at output resolution: the raw texels (two FP16)
       io.motion_hi = p[5];
       io.motion_hi_pitch = job.motion_hi_pitch;
@@ -202,6 +203,7 @@ class HipExecutor : public Executor {
   // copied after the pass. A failed allocation or launch leaves the frame as the network wrote it.
   void sparkle_guard(const Job& job, const wgrt::FrameIo& io) {
     if (job.raw_inputs || !job.ow || !job.oh) return;  // dense f32 depth / motion only (not the input_copy path)
+    if (job.out_rgba32f) return;  // model K's RGBA f32 result: the guard kernel reads 3 x f32 or RGBA16F rows only
     wgrt::Device* d = wgrt::runtime_device(rt_);
     int ow = job.ow, oh = job.oh, rw = job.frame.rw, rh = job.frame.rh;
     const size_t pbytes = (size_t)ow * oh * 2, dbytes = (size_t)rw * rh * 4;

@@ -26,6 +26,11 @@ struct FrameIo {
   // The caller's output pass reads `out` as RGBA16F (8 bytes per pixel) instead of 3 x f32: needed for the post kernels
   // with FP16 output (post_fused*_o16); the runtime refuses those otherwise.
   bool out_rgba16f = false;
+  // Model K (issue #26): `out` is written as dense RGBA f32 [oh][ow][4] (16 bytes per pixel) instead of 3 x f32,
+  // the fourth value being the output alpha (the colour input's alpha of this frame through the output stage's
+  // current-colour bilinear), for a caller whose output pass carries it (the interop's output pass for model K).
+  // Not used with out_half_pitch > 0 (the RGBA16F rows hold the alpha themselves). Model M ignores it.
+  bool out_rgba32f = false;
   // Interop copy paths (options input_copy / output_copy). raw_inputs: color, depth and motion above are the game's
   // textures copied as they are into rows of the given pitches (bytes): color RGBA16F, depth R32F, motion with
   // motion_channels FP16 channels, raw values (m = ms * raw + mo, here); the runtime converts them into its own dense
@@ -75,6 +80,10 @@ Runtime* runtime_create(const WgRtConfig& cfg, std::unique_ptr<Device> dev, std:
 void runtime_destroy(Runtime* rt);
 // Enqueues one whole frame (does not wait). io may be null.
 bool runtime_frame(Runtime* rt, const WgRtFrame& frame, const FrameIo* io);
+// Test path (as wg_rt_upload_inputs_rgba): the colour as dense RGBA f32 [rh][rw][4]; model K keeps the fourth value
+// (the colour input's alpha), Model M ignores it.
+bool runtime_upload_inputs_rgba(Runtime* rt, int rw, int rh, const float* color_rgba, const float* depth,
+                                const float* motion);
 // Same mode and direct-frame checks used by runtime_frame, before any caller texture transitions or queue work.
 // Only runtime_error may change: no GPU calls and no frame/history/reset mutation. Buffer-mode frames are unchanged.
 bool runtime_direct_preflight(Runtime* rt, const WgRtFrame& frame, const FrameIo* io);

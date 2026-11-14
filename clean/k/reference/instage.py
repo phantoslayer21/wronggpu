@@ -56,7 +56,9 @@ def input_stage(x):
     """Spec 42 on one frame. x: dict with color [.., .., >=3], motion [.., .., 2], depth [.., ..] ([MVlo]),
     color_base / motion_base / depth_base (default 0), render_size (r_w, r_h), output_size (W, H), hdr, mv_lowres,
     depth_inverted, jitter, mv_scale, mv_offset, pre_exposure, reset, E_cur, E_prev, E_aux (FP16 values), e1, e2,
-    Hc [H16, W16, 4], Hh [Bh, Bw, 4] (FP16). Returns [Bh, Bw, 16] float16."""
+    Hc [H16, W16, 4], Hh [Bh, Bw, 4] (FP16). Returns [Bh, Bw, 16] float16. Which exposure value is which (spec 42
+    draft 3 section 4: E_cur the game's exposure or 1, E_aux the auto-exposure value, LDR all 1) is the host rule of
+    clean/k/reference/exposure.py; this stage takes the values as given."""
     from clean.k.reference.layout import base_size
     W, H = (int(v) for v in x["output_size"])
     rw, rh = (int(v) for v in x["render_size"])

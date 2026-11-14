@@ -25,9 +25,14 @@ enum { KIO_HDR = 1, KIO_MVLO = 2, KIO_INV = 4, KIO_RESET = 8, KIO_C16 = 16, KIO_
 // pitch mpitch texels) holding the game's raw values r, the motion is m = ms r + mo (FP32 multiply, then add: the
 // interop's conversion, clean/kernels/frame.hip input_convert). Both read the interop's input copies (or its compact
 // input pass) directly; the values equal those of the FP32 inputs the conversion would have written.
-// Game-output formats of k_out_pixel (KOutParams.omode): RGBA float32 [H][opitch] (the spec's output, tests); RGBA16F
-// rows of opitch texels with RGB rounded to nearest even and alpha 1 (the interop's output copy); dense RGB float32
-// [H][opitch] (the interop's output pass, which writes alpha 1 itself).
+// Game-output formats of k_out_pixel (KOutParams.omode): RGBA float32 [H][opitch] (the spec's output, tests, and the
+// interop's output pass for model K: FrameIo.out_rgba32f); RGBA16F rows of opitch texels with RGB rounded to nearest
+// even (the interop's output copy); dense RGB float32 [H][opitch] (the runtime's own test buffer: no fourth value).
+// Game output alpha (issue #26): the colour input's alpha of the current frame, spatial only: cbar[3], the fourth
+// channel of the 4.3 bilinear (the stored tap's A = RN16 of the colour texel's fourth value as the game supplies it, the
+// four taps and FP16 weights of Y / Co / Cg, RN16(w0 a0) then three FP16 fused multiply-adds). No history, nothing
+// from the network, no exposure, no clamp. RGBA16F rows store it as it is, RGBA float32 as its exact widening. The
+// D3D12 ports (k_out.hlsl) write the same.
 enum { KIO_OUT_RGBA32F = 0, KIO_OUT_RGBA16F = 1, KIO_OUT_RGB32F = 2 };
 
 // Frame inputs shared by both stages (must match KFrameIn in clean/k/runner/k_io.py).
@@ -79,7 +84,7 @@ struct KOutParams {
   h16* Hcout;
   h16* Hhout;          // [Bh][Bw][4]
   int opitch;
-  int omode;           // KIO_OUT_RGBA32F (default), KIO_OUT_RGBA16F (alpha 1), KIO_OUT_RGB32F (runtime interop)
+  int omode;           // KIO_OUT_RGBA32F (default), KIO_OUT_RGBA16F (both: alpha cbar[3]), KIO_OUT_RGB32F (no alpha)
   h16* ctap;           // k_out_color -> k_out_pixel: stored tap (Y, Co, Cg, A) of spec 43 4.2 per render pixel [rh][rw][4]
   h16* ctapT;          // the same: filter-tap value T of spec 43 5.3 per render pixel [rh][rw]
   KOutUni u;           // frame-uniform values (host)
@@ -153,12 +158,18 @@ WG_FN v4f kio_texel(const KFrameIn& F, int x, int y) {
 WG_FN v4f kio_color(const KFrameIn& F, int ix, int iy) {
   return kio_texel(F, kio_tap(ix, 0, F.cbx, F.rw), kio_tap(iy, 0, F.cby, F.rh));
 }
-// motion texel (x, y) of the texture (subrect base included by the caller): FP32 pairs, or KIO_M16's ms r + mo
+// motion texel (x, y) of the texture (subrect base included by the caller): FP32 pairs, or KIO_M16's raw FP16 value r
+// KIO_M16 (the interop's raw-buffer route: input copies or model K's compact input pass, ms / mo in KFrameIn rmsx ..,
+// WgRtFrame's scale 1): the raw FP16 value r, the scale folded into the motion factor and the offset RN(mo / ms) in raw
+// units, as for the direct forms (issue #26; before: ms r + mo per texel, then the factor of scale 1).
+// kio_m16_sp / kio_m16_mo: the factor with the scale folded in (the host's expression with s = sx ms) and the offset.
+WG_FN float kio_m16_sp(float s, float ms, float den) { return (s * ms) / den; }
+WG_FN float kio_m16_mo(float o, float mo, float ms) { return mo == 0.0f ? o : o + mo / ms; }
 WG_FN void kio_motion(const KFrameIn& F, int x, int y, float* mvx, float* mvy) {
   if (F.flags & KIO_M16) {
     const h16* r = kio_ptr((const h16*)F.motion, ((u32)y * F.mpitch + x) * (u32)F.mch);
-    *mvx = F.rmsx * (float)r[0] + F.rmox;
-    *mvy = F.rmsy * (float)r[1] + F.rmoy;
+    *mvx = (float)r[0];
+    *mvy = (float)r[1];
     return;
   }
   const float* m = kio_ptr(F.motion, ((u32)y * F.mpitch + x) * 2u);
@@ -421,8 +432,8 @@ WG_FN void ko_motion(const KFrameIn& F, int x, int y, float* mvx, float* mvy) {
   if (F.flags & KIO_M16) {
     const u32 i = F.mch == 2 ? t << 1 : (F.mch == 4 ? t << 2 : t * (u32)F.mch);
     const h16* r = kio_ptr((const h16*)F.motion, i);
-    *mvx = F.rmsx * (float)r[0] + F.rmox;
-    *mvy = F.rmsy * (float)r[1] + F.rmoy;
+    *mvx = (float)r[0];  // KIO_M16: the raw value (kio_m16_sp / kio_m16_mo apply ms / mo at the use)
+    *mvy = (float)r[1];
     return;
   }
   const float* m = kio_ptr(F.motion, t * 2u);
@@ -801,7 +812,14 @@ WG_FN void ko_pixel(KOutParams P0) {
   }
   spx = U.spx;  // [MVlo]: sx / rho_x, else sx
   spy = U.spy;
-  const float wx = kf_fma(spx, mvx + F.mox, px), wy = kf_fma(spy, mvy + F.moy, py);
+  float ofx = F.mox, ofy = F.moy;
+  if (F.flags & KIO_M16) {  // KIO_M16: the scale folded into the factor (out_uniforms' spx with s = sx ms), the offset
+    spx = mvlo ? kio_m16_sp(F.sx, F.rmsx, U.rhox) : F.sx * F.rmsx;
+    spy = mvlo ? kio_m16_sp(F.sy, F.rmsy, U.rhoy) : F.sy * F.rmsy;
+    ofx = kio_m16_mo(F.mox, F.rmox, F.rmsx);
+    ofy = kio_m16_mo(F.moy, F.rmoy, F.rmsy);
+  }
+  const float wx = kf_fma(spx, mvx + ofx, px), wy = kf_fma(spy, mvy + ofy, py);
 
   // 3.4 validity, 3.5 colour history
   bool valid = !(F.flags & KIO_RESET) && wx * invW >= 0.0f && wx * invW <= 1.0f && wy * invH >= 0.0f &&
@@ -1281,8 +1299,8 @@ WG_FN void ko_pixel(KOutParams P0) {
       Cgg = kinv * (Cgo * d);
     }
     const float R = (Yg + Cog) - Cgg, G = Cgg + kf_fma(Cog, 0.0f, Yg), B = (Yg - Cog) - Cgg;
-    if (P.omode == KIO_OUT_RGBA16F) {  // RGB rounded once to FP16 (nearest even), alpha 1
-      const v4h o = {kh_round(R), kh_round(G), kh_round(B), (h16)1.0f};
+    if (P.omode == KIO_OUT_RGBA16F) {  // RGB rounded once to FP16 (nearest even), alpha cbar[3] (an FP16 value) as it is
+      const v4h o = {kh_round(R), kh_round(G), kh_round(B), cbar[3]};
       *(v4h*)kio_ptr((h16*)P.out, ((u32)y * P.opitch + x) * 4u) = o;
     } else if (P.omode == KIO_OUT_RGB32F) {
       float* o = kio_ptr(P.out, ((u32)y * P.opitch + x) * 3u);
@@ -1436,7 +1454,15 @@ WG_FN KiFine ki_fine(const KInParams& P, const KiHost& k, int fx, int fy) {
     const int mx = (int)kf_R(kf_fma(px, k.mp_x, -0.5f)), my = (int)kf_R(kf_fma(py, k.mp_y, -0.5f));
     kio_motion(F, kio_tap(mx, 0, F.mbx, F.W), kio_tap(my, 0, F.mby, F.H), &mvx, &mvy);
   }
-  const float mx = k.sp_x * (mvx + F.mox), my = k.sp_y * (mvy + F.moy);
+  float spx = k.sp_x, spy = k.sp_y, ofx = F.mox, ofy = F.moy;
+  if (F.flags & KIO_M16) {  // KIO_M16: the scale folded into the factor (ki_host's sp_x with s = sx ms), the offset
+    const bool mvlo = (F.flags & KIO_MVLO) != 0;
+    spx = kio_m16_sp(F.sx, F.rmsx, (1.0f / (float)F.W) * (float)(mvlo ? F.rw : F.W));
+    spy = kio_m16_sp(F.sy, F.rmsy, (1.0f / (float)F.H) * (float)(mvlo ? F.rh : F.H));
+    ofx = kio_m16_mo(F.mox, F.rmox, F.rmsx);
+    ofy = kio_m16_mo(F.moy, F.rmoy, F.rmsy);
+  }
+  const float mx = spx * (mvx + ofx), my = spy * (mvy + ofy);
   const float wx = px + mx, wy = py + my;
   KiFine r;
   r.valid = wx * k.xi_x >= 0.0f && wx * k.xi_x <= 1.0f && wy * k.xi_y >= 0.0f && wy * k.xi_y <= 1.0f;
@@ -1874,45 +1900,49 @@ WG_KERNEL_N(k_in_tiled_color_uniform_f, 256)(KInColorUniformParams P0) {
 
 // Host-side arguments of k_expo_scalars (must match KExpoArgs in clean/k/runtime/runtime_k.cpp and k_io.py).
 struct KExpoArgs {
-  float value;   // pair mode: this frame's exposure value (when use_src = 0)
-  int pair;      // 1: update the exposure pair first (as kernels/exposure.hip exposure_pair: e = src[0] or value,
-                 //    e_prev = e on the first frame, else the previous e); 0: the pair is already written
-                 //    (auto-exposure: exposure_auto_diet)
-  int use_src, first;
+  float value;   // E_cur when src_mode = 0: the exposure value the game passes
+  int src_mode;  // where E_cur comes from: 0 value, 1 src[0] (the game's exposure texel), 2 none (E_cur = 1)
+  int aux;       // 1: E_aux = measured[0] (spec 07 auto-exposure ran this frame); 0: E_aux = E_cur
+  int first;     // the first frame of the runtime (E_prev = E_cur)
   int hdr, reset;
-  float e1, e2;  // exposure factors of spec 42 section 4 (1 unless the game supplies an exposure scale)
+  float e1, e2;  // exposure factors of spec 42 section 4 (the game's exposure scale, else 1)
   float inv_pi;  // RN32(1 / pi), pi the pre-exposure (host)
 };
 static_assert(sizeof(KExpoArgs) == 36, "KExpoArgs");
 
-// Spec 42 section 4 / spec 43 section 3.7 from the exposure pair ex = [e, e_prev, last e] (the model M pair buffer of
-// the runtime, spec 07 / spec 10 section 3): E_cur = e, E_prev = e_prev (E_cur on a reset), E_aux = E_cur (the
-// runtime has one exposure value per frame: spec 07's result, the game's texel or value), each read as FP16 (nearest
-// even) with 0 -> 1; then exactly the FP32 operations of clean/k/runner/k_io.py scalars() and out_uniforms()
-// (kinv = RN(1/kappa); FP32 division is correctly rounded on the GPU). Writes xs = (kappa, rho, lambda, kinv), which
-// the stage kernels read through KFrameIn.xs. One lane.
+// Spec 42 draft 3 section 4 / spec 43 section 3.7. Which value is which (HDR): E_cur = the game's exposure texel or
+// value, 1 if the game passes none (the auto-exposure value never takes its place); E_aux = the auto-exposure value
+// when it runs, else E_cur; E_prev = the previous frame's E_cur, E_cur itself on the first frame and on a reset.
+// LDR: every value and factor 1. The state st = [E_cur, E_prev, E_aux, E_cur kept for the next frame] holds the raw
+// values; each is then read as FP16 (nearest even) with 0 -> 1, and the scalars are exactly the FP32 operations of
+// clean/k/runner/k_io.py scalars() and out_uniforms() (kinv = RN(1/kappa); FP32 division is correctly rounded on the
+// GPU). Writes xs = (kappa, rho, lambda, kinv), which the stage kernels read through KFrameIn.xs. One lane.
 WG_FN float kx_ev(float e) {
   const float h = (float)kh_round(e);
   return h == 0.0f ? 1.0f : h;
 }
-WG_KERNEL_N(k_expo_scalars, 32)(float* ex, const float* src, float* xs, KExpoArgs A) {
+WG_KERNEL_N(k_expo_scalars, 32)(float* st, const float* src, const float* measured, float* xs, KExpoArgs A) {
   if (wg_lane_id() != 0) return;
-  if (A.pair) {
-    const float e = A.use_src ? src[0] : A.value;
-    const float e_prev = A.first ? e : ex[2];
-    ex[0] = e;
-    ex[1] = e_prev;
-    ex[2] = e;
+  float Ecr = 1.0f, Epr = 1.0f, Ear = 1.0f;
+  if (A.hdr) {
+    Ecr = A.src_mode == 1 ? src[0] : A.src_mode == 0 ? A.value : 1.0f;
+    Ear = A.aux ? measured[0] : Ecr;
+    Epr = (A.first || A.reset) ? Ecr : st[3];
   }
-  const float Ec = kx_ev(ex[0]), Ep = kx_ev(A.reset ? ex[0] : ex[1]), Ea = Ec;
-  const float ce = A.e1 * Ec;
+  st[0] = Ecr;
+  st[1] = Epr;
+  st[2] = Ear;
+  st[3] = Ecr;
+  const float e1 = A.hdr ? A.e1 : 1.0f, e2 = A.hdr ? A.e2 : 1.0f;
+  const float Ec = kx_ev(Ecr), Ep = kx_ev(Epr), Ea = kx_ev(Ear);
+  const float ce = e1 * Ec;
   float kappa = 1.0f, rho = 1.0f;
   if (A.hdr) {
     kappa = A.inv_pi * ce;
     if (kappa == 0.0f) kappa = 1.0f;
-    rho = ce / (A.e1 * Ep);
+    rho = ce / (e1 * Ep);
   }
-  const float lam = (A.e2 * Ea) / ce;
+  const float lam = (e2 * Ea) / ce;
   xs[0] = kappa;
   xs[1] = rho;
   xs[2] = lam;

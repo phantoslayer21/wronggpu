@@ -105,6 +105,11 @@ if CFG:
     S = CFG.get('settings') or {}
     os.makedirs(A, exist_ok=True)
     EXTRA = CFG.get('runtime_options_extra', '')  # e.g. "l_post=own"; run.py --extra replaces it for one phase
+    # The launcher's install / repair / update / uninstall / rollback checks run a short HIP probe on the GPU. With
+    # "gpu_slot": {"command": [<prefix that runs one command in a GPU slot>], "env": {...}} they run through that prefix
+    # (e.g. a slot tool with a hard cap); without it they run directly and the session log says so.
+    GPU_SLOT = CFG.get('gpu_slot') or {}
+GPU_VERBS = ('install', 'repair', 'update', 'uninstall', 'rollback')
 
 
 def opts_extra(r):
@@ -179,13 +184,22 @@ class Run:
         return r.returncode
 
     def wg(self, name, verb_args):
-        """The candidate launcher's command line (--out / --log into <a>)."""
+        """The candidate launcher's command line (--out / --log into <a>). The verbs whose checks run the launcher's HIP
+        probe (GPU_VERBS) go through the config's gpu_slot prefix when there is one."""
         cmd = [PKG_EXE] + verb_args + ['--out=' + os.path.join(self.a, name + '.json'),
                                        '--log=' + os.path.join(self.a, name + '.log')]
+        env = clean_env()
+        if verb_args[:1] and verb_args[0] in GPU_VERBS:
+            if GPU_SLOT.get('command'):
+                cmd = list(GPU_SLOT['command']) + cmd
+                env.update(GPU_SLOT.get('env') or {})
+            else:
+                self.log('note: no gpu_slot in the config: the launcher\'s %s runs its HIP probe outside a GPU slot'
+                         % verb_args[0])
         if self.dry:
             self.log('would run: ' + ' '.join('"%s"' % c if ' ' in c else c for c in cmd))
             return 0
-        r = subprocess.run(cmd, creationflags=NOWIN, env=clean_env())
+        r = subprocess.run(cmd, creationflags=NOWIN, env=env)
         self.log('launcher %s exit %d' % (' '.join(verb_args[:1]), r.returncode))
         return r.returncode
 

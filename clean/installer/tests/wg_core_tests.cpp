@@ -227,24 +227,13 @@ int main() {
             card(L"card17", "0x1002\n", "0x7550 \n");    // two RDNA 4 cards: the lower number first
             require(Contains(LinuxRdna4Name(drm), L"7550"), "LinuxRdna4Name: cards in number order");
         }
-        // under Wine an RDNA 4 card that Linux reports is found even when Wine's own DXGI names an old Radeon
+        // under Wine an RDNA 4 card that Linux reports is found even when Wine's own DXGI names an old Radeon. Which cards
+        // LinuxRdna4Name looks at is checked above on the made-up folder (card20 and card17 included); here DetectGpu must follow it.
         if (UnderWine()) {
-            auto sysfs = [](const wstring& p) {  // the C runtime reads to the end of file (sysfs reports 4096 bytes)
-                string s;
-                if (FILE* f = _wfopen(p.c_str(), L"rb")) { char b[64]; size_t n; while ((n = fread(b, 1, sizeof b, f)) > 0) s.append(b, n); fclose(f); }
-                return s;
-            };
-            bool linuxRdna4 = false;
-            for (int i = 0; i < 16 && !linuxRdna4; ++i) {
-                const wstring dev = L"Z:\\sys\\class\\drm\\card" + std::to_wstring(i) + L"\\device\\";
-                const unsigned long v = strtoul(sysfs(dev + L"vendor").c_str(), nullptr, 16), id = strtoul(sysfs(dev + L"device").c_str(), nullptr, 16);
-                linuxRdna4 = v == 0x1002 && (id == 0x7550 || id == 0x7551 || id == 0x7590 || id == 0x7591);
-            }
             const wstring fromLinux = LinuxRdna4Name();
             const GpuInfo gpu = DetectGpu();
-            std::wcout << L"under Wine: Linux reports RDNA 4: " << linuxRdna4 << L"; LinuxRdna4Name: \"" << fromLinux << L"\"; DetectGpu: " << gpu.name << L" (rdna4 " << gpu.rdna4 << L")\n";
-            require(fromLinux.empty() != linuxRdna4, "LinuxRdna4Name: the RDNA 4 card Linux reports, and only then");
-            if (linuxRdna4) require(gpu.amd && gpu.rdna4, "DetectGpu under Wine: the RDNA 4 card Linux reports");
+            std::wcout << L"under Wine: LinuxRdna4Name: \"" << fromLinux << L"\"; DetectGpu: " << gpu.name << L" (rdna4 " << gpu.rdna4 << L")\n";
+            if (!fromLinux.empty()) require(gpu.amd && gpu.rdna4, "DetectGpu under Wine: the RDNA 4 card Linux reports");
         }
 
         // a store's launch exe is a hint only: a launcher stub (REDprelauncher.exe) gives way to the exe discovery
@@ -321,6 +310,13 @@ int main() {
             if (UnderWine())
                 require(StartsWithI(deep, L"Z:\\") && deep.size() > deepTail.size() && deep.compare(deep.size() - deepTail.size(), deepTail.size(), deepTail) == 0,
                         "PathForGamePrefix under Wine: a Z: path for missing folders too");
+            // only the drive's root converts (Wine cannot make a Unix name for a DOS device name like CON, so the first folder fails too):
+            // the walk still reaches the root, so the path is converted
+            const wstring rootTail = L"\\con\\F\\model.wgcm", atRoot = PathForGamePrefix(L"C:" + rootTail);
+            if (UnderWine())
+                require(StartsWithI(atRoot, L"Z:\\") && atRoot.size() > rootTail.size() && atRoot.compare(atRoot.size() - rootTail.size(), rootTail.size(), rootTail) == 0 &&
+                            atRoot.find(L"\\\\") == wstring::npos,
+                        "PathForGamePrefix under Wine: a Z: path when only the drive's root exists");
             require(PathForGamePrefix(L"").empty(), "PathForGamePrefix of an empty path");
             // a drive the prefix doesn't map: no Z: path can be made, the path comes back as it is (the install then
             // reports it, install.cpp ModelPathForGame)

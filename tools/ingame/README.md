@@ -46,6 +46,11 @@ Everything after a lone `--` wraps each GPU run, for example a GPU-slot tool.
    options to every model choice (e.g. `l_post=own`); `--extra` on `prepare`, `use-m` or `use-l` replaces it for that
    choice (`--extra ''` for none), so two variants can run in one session.
 
+   Optional `gpu_slot`: `{"command": [...], "env": {...}}`, a command prefix that runs one command in a GPU slot on a
+   shared PC (for example a slot tool with a hard time cap, ending in its `--`). The launcher's install, repair, update,
+   uninstall and rollback checks run a short HIP probe on the GPU, so those verbs run through the prefix, with `env`
+   added. Without `gpu_slot` they run directly, and the session log says the probe ran outside a slot.
+
 2. Run the phases:
 
 ```
