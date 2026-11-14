@@ -61,19 +61,45 @@ K_RUNTIME_SOURCES = [s for s in RUNTIME_SOURCES if s.startswith(os.path.join("..
 K_EMBED_FILES = ["k_block.co", "k_block_wide.co", "k_io.co", os.path.basename(K_MAP_FILE)]
 NO_MODEL_K_SOURCE = "no_model_k.cpp"
 
+# Optional models of the runtime library (#89). Model M is always built. Each model below is in by default and can be
+# left out with --no-model-<name> (set_model(name, False)): its runtime sources and built-in files are dropped, its map
+# is not copied, its kernels are not built, and its stand-in source is compiled with its define instead (the stand-in
+# refuses model=<name> at create). Model K's row is the former --no-model-k code, unchanged; a model adds its row here.
+OPTIONAL_MODELS = {
+    "K": {"sources": K_RUNTIME_SOURCES, "embed": K_EMBED_FILES, "map": K_MAP_FILE, "define": "WG_NO_MODEL_K",
+          "stand_in": NO_MODEL_K_SOURCE, "build_device": k_build.build_device,
+          "help": "a runtime library without model K: its kernels and map are not built or built in, its runtime is "
+                  "not compiled, model=K fails at create (release builds that ship model M only)"},
+}
+MODELS_BUILT = {name: True for name in OPTIONAL_MODELS}
+
+
+def model_built(name):
+    """An optional model is part of this build (OPTIONAL_MODELS)."""
+    return MODELS_BUILT[name]
+
+
+def set_model(name, on):
+    """Optional model `name` in (default) or out of the runtime library; changes RUNTIME_SOURCES and EMBED_FILES in
+    place."""
+    global MODEL_K
+    m = OPTIONAL_MODELS[name]
+    if bool(on) == MODELS_BUILT[name]:
+        return
+    MODELS_BUILT[name] = bool(on)
+    if name == "K":
+        MODEL_K = bool(on)  # the name the scripts and tests used before the table
+    if on:
+        RUNTIME_SOURCES[:] = [s for s in RUNTIME_SOURCES if s != m["stand_in"]] + m["sources"]
+        EMBED_FILES[:] = EMBED_FILES + m["embed"]
+    else:
+        RUNTIME_SOURCES[:] = [s for s in RUNTIME_SOURCES if s not in m["sources"]] + [m["stand_in"]]
+        EMBED_FILES[:] = [n for n in EMBED_FILES if n not in m["embed"]]
+
 
 def set_model_k(on):
     """Model K in (default) or out of the runtime library; changes RUNTIME_SOURCES and EMBED_FILES in place."""
-    global MODEL_K
-    if bool(on) == MODEL_K:
-        return
-    MODEL_K = bool(on)
-    if MODEL_K:
-        RUNTIME_SOURCES[:] = [s for s in RUNTIME_SOURCES if s != NO_MODEL_K_SOURCE] + K_RUNTIME_SOURCES
-        EMBED_FILES[:] = EMBED_FILES + K_EMBED_FILES
-    else:
-        RUNTIME_SOURCES[:] = [s for s in RUNTIME_SOURCES if s not in K_RUNTIME_SOURCES] + [NO_MODEL_K_SOURCE]
-        EMBED_FILES[:] = [n for n in EMBED_FILES if n not in K_EMBED_FILES]
+    set_model("K", on)
 
 
 EMBED_KEY = 0x5747454D42454444   # the same in clean/runtime/embedded.cpp
@@ -231,8 +257,9 @@ def runtime_command(cxx, out, embedded=None):
     if embedded:  # the generated table of built-in files
         srcs.append(embedded)
         cmd += ["-DWG_EMBEDDED_TABLE"]
-    if not MODEL_K:
-        cmd += ["-DWG_NO_MODEL_K"]
+    for name, m in OPTIONAL_MODELS.items():
+        if not MODELS_BUILT[name]:
+            cmd += ["-D" + m["define"]]
     cmd += srcs
     if RR_OBJECTS and sys.platform == "win32":
         # release 0.6.0 (owner 2026-11-02: one runtime DLL, "just like before"): the RR runtime (clean/rr_f/runtime, built by
@@ -253,7 +280,7 @@ RR_OBJECTS = None  # --with-rr: the RR runtime's object files (clean/rr_f/runtim
 
 
 def build_runtime(cxx, out_dir, embed=True):
-    for m in (MAP_FILE, K_MAP_FILE) if MODEL_K else (MAP_FILE,):
+    for m in [MAP_FILE] + [o["map"] for name, o in OPTIONAL_MODELS.items() if MODELS_BUILT[name]]:
         shutil.copyfile(m, os.path.join(out_dir, os.path.basename(m)))
     embedded = write_embedded(out_dir) if embed else None
     run(runtime_command(cxx, os.path.join(out_dir, runtime_library_name()), embedded))
@@ -387,11 +414,11 @@ def main(argv=None):
     ap.add_argument("--with-rr", metavar="OBJ_DIR",
                     help="link the RR runtime's object files (clean/rr_f/runtime/tools/build.py <out>/obj) into the runtime "
                          "library: one wronggpu_runtime.dll with the Model M and the RR interfaces (release 0.6.0)")
-    ap.add_argument("--no-model-k", action="store_true",
-                    help="a runtime library without model K: its kernels and map are not built or built in, its "
-                         "runtime is not compiled, model=K fails at create (release builds that ship model M only)")
+    for name, m in OPTIONAL_MODELS.items():  # --no-model-k, ...
+        ap.add_argument("--no-model-" + name.lower(), action="store_true", help=m["help"])
     args = ap.parse_args(argv)
-    set_model_k(not args.no_model_k)
+    for name in OPTIONAL_MODELS:
+        set_model(name, not getattr(args, "no_model_" + name.lower()))
     global RR_OBJECTS
     RR_OBJECTS = args.with_rr
     if args.payload:
@@ -415,6 +442,11 @@ def main(argv=None):
             sub += (["--rocm", args.rocm] if args.rocm else []) + (["--clang", args.clang] if args.clang else [])
             sub += (["--no-device-libs"] if args.no_device_libs else []) + (["--soft-fp8"] if args.soft_fp8 else [])
             sub += ["--no-resource-gate"] if args.no_resource_gate else []
+            # as the ordinary branch's child: the defines of an experiment build (without them the child builds the
+            # kernels the experiment changes unchanged, and runs the resource gate that the parent skips for defines)
+            sub += ["--report"] if args.report else []
+            for d in args.define:
+                sub += ["--define", d]
             print(f"-- motion-at-output-resolution code objects for {arch}", flush=True)
             if subprocess.run(sub, env={**os.environ, "WG_GPU_ARCH": arch}).returncode != 0:
                 raise SystemExit(f"build for {arch} failed")
@@ -428,8 +460,9 @@ def main(argv=None):
             run(device_command(clang, args.rocm, os.path.join(KERNEL_DIR, src), out,
                                device_libs=not args.no_device_libs, report=args.report, soft_fp8=args.soft_fp8,
                                defines=dict(d.split('=', 1) for d in args.define)))
-        if MODEL_K:
-            k_build.build_device(clang, args.rocm, args.out, device_libs=not args.no_device_libs, report=args.report)
+        for name, m in OPTIONAL_MODELS.items():  # the optional models' kernels (model K: clean/k)
+            if MODELS_BUILT[name]:
+                m["build_device"](clang, args.rocm, args.out, device_libs=not args.no_device_libs, report=args.report)
         # the post kernels in wave64 as well (the runtime's default post code object; post.co for WG_POST_WAVE=32)
         # (always with the resource report: POST_W64_GATE; skipped for experiment builds with --define)
         run_post_w64(device_command(clang, args.rocm, os.path.join(KERNEL_DIR, "post.hip"),
@@ -526,7 +559,7 @@ def main(argv=None):
             sub = [sys.executable, os.path.abspath(__file__), "--out", os.path.join(args.out, arch), "--no-runtime"]
             sub += (["--rocm", args.rocm] if args.rocm else []) + (["--clang", args.clang] if args.clang else [])
             sub += (["--no-device-libs"] if args.no_device_libs else []) + (["--soft-fp8"] if args.soft_fp8 else [])
-            sub += ["--no-model-k"] if args.no_model_k else []
+            sub += ["--no-model-" + n.lower() for n in OPTIONAL_MODELS if getattr(args, "no_model_" + n.lower())]
             for d in args.define:
                 sub += ["--define", d]
             print(f"-- code objects for {arch}", flush=True)

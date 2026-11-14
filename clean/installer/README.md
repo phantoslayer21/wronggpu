@@ -186,7 +186,7 @@ With the defaults nothing of this section changes the installer.
   architecture from HIP's device properties and creates a context on a supported one: `gfx1201` (RX 9070 family);
   `gfx1200` (RX 9060 family) is reported as not supported yet (one line, `kSupportedArch`, when the owner decides).
   Search order: System32 (installed by the AMD Software: Adrenalin Edition driver), the PATH folders, the newest
-  `C:\Program Files\AMD\ROCm\<version>\bin`, `HIP_PATH`; `WRONGGPU_HIP_RUNTIME` overrides it (development). The child
+  `C:\Program Files\AMD\ROCm\<version>\bin`, `HIP_PATH`; `WRONGGPU_HIP_RUNTIME` overrides it in a `WRONGGPU_TESTING` build only (development; since 0.6.1). The child
   runs without `LLVM_PATH`. On failure the player is pointed to AMD's driver page
   (https://www.amd.com/en/support/download/drivers.html), the HIP SDK only as a second option. No SDK is needed.
 - **Model file (bring your own).** Candidates in this order: a file the player picks (`Model file...` / `/MODEL=`),
@@ -347,6 +347,8 @@ ctest `source-size`.
 - **Command line** (a verb as the first argument; `src/app/cli.cpp`): `scan`, `status [game]`, `install`, `repair`,
   `update`, `uninstall`, `rollback`, `adopt [game | --all]`, `set <game> key=value ...`, `set --global key=value`,
   `get <game> [key]`, `get --global`, `collect <game> [--zip=<file>]`, `hipcheck`, `model status|convert`,
+  `rr-data status|convert [--dll=<RR model file>]` (both converts also take `--ignore=`, `--ignore-list=` and `--library=`:
+  "Ignore lists" below),
   `self-install [--dir=] [--startmenu=<folder>|-]`, `self-uninstall [--keep-games]`, `play <game>`, `update-check`,
   `apply --job= --result=` (the elevated worker), `version`, `ui-dump --dump=<json> [--shots=<folder>]` (the window's
   pages painted offscreen, never shown: their widgets as JSON, PNGs, for tests), `ui-render --out-dir=<folder>
@@ -397,6 +399,124 @@ keep the games, which then get their own entries back); its data (`launcher.ini`
 `<exe folder>\WrongGPU-data`, and each game keeps its own Apps & features entry. The model data stays in
 `%LOCALAPPDATA%\WrongGPU\model` in both modes (the runtime reads it there). `managed-games.txt` in that folder lists
 the managed games, so an uninstaller keeps the model while another game uses it.
+
+**Ignore lists** (`src/wg_core/convert_ignore.*`): WrongGPU converts only the vendor DLL files that came with the player's
+own games, never a copy that another program's installer placed in a game. Such an installer registers the files it placed
+in a list the launcher always reads, and the player does nothing. Every search for a file to convert (the model and the Ray
+Reconstruction data; the window, the install, `model convert`, `rr-data convert`) reads the well-known lists:
+
+- `%LOCALAPPDATA%\WrongGPU\ignore-files.txt` (the one an installer writes to; it creates the folder if needed and adds its
+  lines, keeping the lines already there);
+- `ignore-files.txt` in the launcher's own data folder when that is another folder: `WrongGPU-data\ignore-files.txt` next to
+  a portable launcher, or the `--data=` folder.
+
+`model convert` and `rr-data convert` add `--ignore-list=<file>` (repeatable; read once, by the same bounded reader as the
+well-known lists, so a file of 16 MB or more is refused before it is read; a file that can't be read stops the command,
+exit 10, nothing converted) and `--ignore=<entry>` (repeatable; one line of the format below, `--ignore=<path>`,
+`--ignore=<path>  sha256=<hex>` or `--ignore=sha256=<hex>`; an entry that is not understood stops the command, exit 10). For
+both the `=` is required: a bare `--ignore` or `--ignore-list` is an error (exit 10) and never takes the next argument as
+its value. `--library=<folder>` searches that
+folder's sub-folders as games too (this run only; `--noscan` leaves out the store libraries). These options are read by
+those two verbs only (and, in a `WRONGGPU_TESTING` build, `rr-data prepare`); on any other verb they stop it with exit 10 and
+a message, so a file is never believed protected by an option that was ignored.
+
+**`--ignore=sha256=<hex>` matches every file with that SHA-256, wherever it is: every identical copy**, also the copy that
+came with one of the player's own games (another program's installer usually places an unmodified vendor DLL, byte for byte
+the one the games carry). Use it only to skip a file you know, for one run. An installer lists the file it placed by its path
+(and, if it wants, the path with its hash), never by the hash alone.
+
+The format (version 1, stable): a text file, UTF-8 (a BOM is fine) or UTF-16 LE with its BOM, CRLF or LF, one entry per line:
+
+```
+wronggpu-ignore-files 1
+# placed by Example Tool's installer
+C:\Games\Some Game\bin\x64\nvngx_dlssd.dll
+C:\Games\Other Game\bin\nvngx_dlssd.dll  sha256=<the file's SHA-256, 64 hex digits>
+```
+
+- `wronggpu-ignore-files 1`: the format version (optional, first line by convention). A newer version is read with these
+  rules, with one warning.
+- A line whose first non-blank character is `#` is a comment (only whole lines: `#` may be part of a path). Blank lines are fine.
+- A path: a full path with a drive letter or `\\server\share` (also written `\\?\C:\...` or `\\?\UNC\server\share\...`;
+  quotes around it allowed; no wildcards, no environment variables, no relative paths). It matches the candidate that is the
+  same file: the same fully resolved final path (case, `/` or `\`, `.` and `..`, symbolic links and junctions resolved), or
+  the same file identity on its volume (a hard link). A path that doesn't exist now is compared as written. The tests cover
+  a UNC entry through the PC's own administrative share (`\\localhost\<drive>$`), where it is reachable (otherwise they say
+  so and skip those checks): a UNC entry matches the file found by its local path and the other way round (same file
+  identity). Shares on other machines are not covered by a test.
+- A path followed by whitespace and `sha256=<hex>`: matches **only when both match**: the same file at that path **and** that
+  SHA-256. The entry names a file as it was placed; an identical copy under another path (the player's own game) is not
+  skipped, and neither is the same path later holding other bytes (a game update). The file is hashed only when an entry
+  with a hash applies to its path.
+- `sha256=<hex>` alone is **not** a list entry: it would skip every identical copy of a vendor DLL, the player's own too.
+  Such a line is skipped with a warning naming the list and the line (and what to write instead). Only the command line
+  takes one (`--ignore=sha256=<hex>`, above).
+- A line that is not understood (not a full path, a hash that is not 64 hex digits, a wildcard, a path that is a folder) is
+  skipped with a warning naming the list and the line; the rest of the list is used.
+
+A file on a list is skipped before its conversion is tried, also when it is the file chosen with `--model=` / `--dll=`
+or in the window (no exception); the next file of the search order is tried (for `rr-data convert
+--dll=`, which tries only the chosen file, nothing is converted: exit 5). The player is told why: "The file you chose (...)
+is not converted: it is on the ignore list <file>, line <n> (path ...)" or "... it is named by --ignore=<entry> ...", and to
+remove that line if it was listed by mistake (the result's `notes`, the install's warnings, the error when nothing else was
+found). Every skipped file is named with the reason (the list and its line, or the `--ignore=` argument, and the path or the
+hash) in the log (`model: skipped ...`, `RR data: skipped ...`), on the console and in the JSON result (`skipped`,
+`ignore_warnings`). When every file found is on a list, nothing is converted and the exit code is 5; the message itself names
+the first file skipped with its list and line (or `--ignore=` argument), says how many others were skipped and where the log
+is, and to remove that line if it names a file that came with one of the player's own games. A list another program wrote
+never switches the conversion off without the player being told which file did it.
+
+"An empty list, or none, changes nothing" means the **choice of file**: the candidates, their order and so the file that
+converts first are the same (`tests/convert_ignore_tests.cpp` runs the real candidate search with no list and with an
+empty list in each place one is read; `tests/run_convert_ignore_tests.py` converts with each). Every conversion now also
+records its source file's SHA-256 in `model-source.txt` (`sha256<TAB><hex>`, below), with a list or without one: one line
+more in that file; the converted data itself is unchanged.
+
+**A list that can't be read fails closed.** A well-known list that is there but can't be read (another program holds it
+open without sharing, no permission, a folder of that name, a name the system refuses) is tried 5 times, 200 ms apart, when
+the cause is a sharing violation (an installer may be writing it); still unreadable, nothing is converted or reused, the
+message names the file and the reason and says what to do (close the program that holds it, or fix the file or delete it),
+and the exit code is 10 (`model convert`, `rr-data convert`, and an install or
+repair, whose model check fails with it). So does a list that can't be decoded: only UTF-8 and UTF-16 LE with its BOM are
+read (UTF-16 big-endian, UTF-16 without a BOM and bytes that are not UTF-8 are not guessed at). A list that isn't there
+(file or folder not found) is simply not read. A candidate whose SHA-256 can't be computed (it can't be read) while a hash
+entry applies to it (`--ignore=sha256=`, or a path + hash entry for its path) is left out and named, never converted.
+
+**Conversions on this PC are checked before they are reused.** `model-source.txt` (the model data's, and the RR data's in
+`model\F`) records the source file's SHA-256 (`sha256<TAB><hex>`) besides its path. Wherever the launcher would reuse a
+conversion (install, repair, update, the wizard, `model convert`; for the RR data, the install's step), and only while some
+list has entries:
+- it was converted from a listed file: its recorded path is a list's path entry, or its recorded path **and** recorded
+  SHA-256 are a path + hash entry (both; the same rule as for a candidate), or its recorded SHA-256 is named by
+  `--ignore=sha256=`. Then it is not reused; the search runs and the first allowed file that converts replaces it (with or
+  without the output-filter weights). With none, it is not used: the model check fails (exit 5) with a message that says
+  why, and an RR game's install goes on with RR off and a warning. The file itself is not deleted (other installed games'
+  runtime reads it; nothing in the runtime changed). Data converted from a legitimate copy that has the same bytes as a
+  listed file, at another path, is reused.
+- The recorded source is compared **as it was recorded**: the recorded path's text (normalised: case, `/` or `\`, `.`, `..`)
+  with the entry's path, as written and as it resolves now, and the recorded SHA-256 with the entry's. The recorded path is
+  never opened again: if it was later replaced by a hard link or a symbolic link to a listed file, the data converted from
+  the file that was there then is still reused.
+- no SHA-256 is on record (converted by 0.6.0 or earlier): the path text alone decides (a path + hash entry naming the
+  recorded path lists it, since its bytes can't be checked); not listed, it is unknown: converted again when an allowed file
+  is found, else kept with a warning for the player.
+With no list entries, a conversion is reused exactly as before.
+
+**The uninstalls keep the list.** `remove-data` (and the window's Remove data), the launcher's uninstall (`self-uninstall`,
+Apps & features) and the last game's uninstall (also through a game's own restorer) remove `%LOCALAPPDATA%\WrongGPU` as
+before but put `ignore-files.txt` back in it, and say "kept ignore-files.txt (your/integrators' ignore list): <path>" (the
+console and `kept` in `remove-data`'s result; the uninstall's output and log; a game uninstall's result warnings; the
+window's toast). The launcher's own data folder's list (portable, `--data=`) was never removed and is now named the same way.
+Without a list, the folder goes as before. **A player's list is never deleted**: when another program made
+`ignore-files.txt` again between the folder's move and the put-back, the player's list is kept beside it as
+`ignore-files.txt.kept-<n>` (the first free n; WrongGPU reads only `ignore-files.txt`, so the result says to copy the lines
+still needed into it); when it can't be moved or copied out at all (a file where the folder should be), it stays in the
+moved-aside folder, everything else in that folder goes, nothing deletes that folder's tree, and the result names where it
+is. A list that is a link is moved as the link (what it points to is never touched). The tests drive each cleanup path
+(`StartCleanup`, `RemoveSharedData`, `SelfUninstall`) through both cases.
+
+A `WRONGGPU_TESTING` build has `rr-data prepare [--library=<folder>]`: the install's RR data step (reuse when the lists allow
+it, else convert) without a game, for the tests.
 
 **Update check**: off by default and no URL is built in (`launcher.ini` `update_check`, `update_url`; https only). When
 both are set, one GET at start (or "Check now") reads a release object (`tag_name`, `html_url`) or text lines
@@ -599,6 +719,34 @@ Windows (the Wine run was not repeated for them):
   `VerifyInstall`, the log-tail parser on synthetic logs, job and result files (relative paths refused), the update
   reply and the update check staying off without a URL, the game environment of Play, Play's way (Steam app id from an appmanifest fixture, the direct start
   otherwise; the starts stubbed), `launcher.ini`.
+- `tests/convert_ignore_tests.cpp` (ctest `convert-ignore`, every build): the ignore-list format (version line,
+  comments, a path, a path with its hash, quotes, UTF-8 with a BOM, UTF-16 LE, LF; a hash alone, a folder and a list that
+  can't be decoded refused), bad lines (each warned with its list and line, the rest read), matching (case, `/`, `.` and
+  `..`, a hard link, a junction both ways, a symbolic link both ways where the account may make one, else it says so and
+  skips those checks; UNC through `\\localhost\<drive>$` where reachable, else it says so), a path + hash entry matching
+  only when both match (two identical stand-ins in two folders, only one listed: the other is still tried; the same path with
+  other bytes is not skipped), `--ignore=sha256=` wherever the file is, a candidate that can't be hashed while a hash entry
+  applies (left out), the well-known list locations, the reason naming the list and line or the `--ignore=` argument, a list
+  held open without sharing (unreadable after about 0.8 s; read when let go during the retries), a folder of that name, a
+  list in UTF-16 big-endian and a name the system refuses (unreadable), the recorded-source check (path, path + hash,
+  hash), `StartCleanup` keeping the list, `PutIgnoreListBack` logging when it can't, and the real candidate search
+  (`AllowedModelCandidates`, which `FindModel` runs before it converts) with no list and with an empty list in each place
+  one is read, the same candidates in the same order, plus a list that does change it (so the test can fail).
+- `tests/run_convert_ignore_tests.py --launcher <WrongGPU.exe> --work <dir> [--synth-f <folder>]` (CPU only:
+  `model convert`, `rr-data convert`, `rr-data prepare`, `remove-data`, `self-install` / `self-uninstall` with
+  `--startmenu=-`, always `--noscan`; no game install, no window): the installer suite's "several DLLs" sets and library-only
+  sets converted with no list and with an empty list in each place one is read (the same winner, model file and
+  `model-source.txt`); each list used (`%LOCALAPPDATA%`, the data folder, `--ignore-list=`, `--ignore=`), every candidate
+  ignored (exit 5, nothing written, the message), `--ignore=sha256=`, a hash alone in a list (warned), a path + hash entry (two identical files, one listed: the other converts), a folder entry, bad lines, path spellings, a junction, a symbolic link,
+  a hard link, UNC (`\\localhost\<drive>$`, `\\?\UNC\`), the command line's own mistakes (exit 10: a bare `--ignore`, the options on other verbs), a chosen file on a list (the
+  list and line, or the argument, named); the reuse checks of the model and RR data (recorded SHA-256; listed by path, path + hash or
+  `--ignore=sha256=`, with and without an allowed file; a path + hash entry with another hash or path: reused; no SHA-256 on record with and without one; no list); a list held open (exit 10
+  after the retries, read when let go, also before a reuse; a folder of that name); `remove-data` and `self-uninstall`
+  keeping `ignore-files.txt` and saying so.
+- `tests/launcher_ignore_cases.py` (run by `run_launcher_tests.py` after its rc6 cases; installs, so it runs with that suite):
+  the ignore lists on the install path in a work folder of its own: a listed model source not reused by a repair (exit 5,
+  the list and line), converted again by a second game's install, a list held open (exit 10), and the last game's uninstall
+  keeping `ignore-files.txt` with the kept line in its result.
 - `tests/run_launcher_tests.py --launcher <WrongGPU.exe> --work <dir> [--baseline <0.5.1 WrongGPU-Setup.exe>]
   [--hip <mock>]`: the verbs against generated fixture games (names and synthetic bytes only) with a
   `WRONGGPU_TESTING` build of the suite's test map: scan statuses, refusals (anti-cheat, DLSS-NR) with nothing changed,

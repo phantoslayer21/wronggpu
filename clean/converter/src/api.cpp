@@ -23,6 +23,8 @@ const char* const kMsgNoPresetK = "This DLSS file has no preset-K model. Version
 // Spec 57 section 8.
 const char* const kMsgNoPresetF =
     "This DLSS file has no preset-F (Ray Reconstruction) model. Version 310.7 or newer is needed.";
+// Model L (#89). The minimum version is the first DLSS version confirmed to carry a preset-L model.
+const char* const kMsgNoPresetL = "This DLSS file has no preset-L model. Version 310.5 or newer is needed.";
 const char* const kMsgUnsupported = "This DLSS build is not supported yet (model data found, but other parts differ).";
 const char* const kMsgMapDamaged = "Installer error: the converter data is damaged. Please reinstall WrongGPU.";
 const char* const kMsgMapDoesNotFit =
@@ -197,17 +199,18 @@ Result convert_rest_v5(const Map& map, const std::vector<std::uint8_t>& data, co
 
 }  // namespace
 
-Result load_map_bytes(const std::string& bytes, LoadedMap& out, const LogSink& log) {
+Result load_map_bytes(const std::string& bytes, LoadedMap& out, const LogSink& log, const std::string& expected_preset) {
     out.map = std::make_unique<Map>();
     MapError me;
-    if (!load_map(bytes, *out.map, me)) {
+    if (!load_map(bytes, *out.map, me, expected_preset)) {
         emit(log, "map: " + me.detail);
         out.map.reset();
         const bool range = me.kind == MapErrorKind::IndexRange;
         return fail(range ? kMapDoesNotFit : kMapDamaged, range ? kMsgMapDoesNotFit : kMsgMapDamaged);
     }
     emit(log, "map sha256 " + to_hex(out.map->file_sha256) + ", " + std::to_string(out.map->stages.size()) +
-                  " stages, model: " + out.map->model);
+                  " stages, model: " + out.map->model +
+                  (expected_preset.empty() ? std::string() : ", preset " + out.map->preset_name));
     return Result{};
 }
 
@@ -233,7 +236,9 @@ Result convert_file(const Map& map, const fs::path& dll, const SearchOptions& op
     Found fw = locate_source(data.data(), data.size(), ks, nullptr, opt);
     if (!fw.found) {
         emit(log, "source " + ks.name + " not found (" + hex64(ks.fnv) + ")");
-        std::string msg = map.preset() == 'F' ? kMsgNoPresetF : map.preset() == 'K' ? kMsgNoPresetK : kMsgNoPresetM;
+        // the message of the map's preset, by name (map.h known_presets)
+        const PresetInfo* preset = map.preset_info();
+        std::string msg = preset ? preset->no_model_message : kMsgNoPresetM;
         if (!out.version.empty()) msg += " This file is version " + out.version + ".";
         return fail(kNoPresetM, msg);
     }

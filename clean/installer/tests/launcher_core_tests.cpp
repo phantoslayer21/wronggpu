@@ -15,6 +15,7 @@
 #include "wg_core/detect.h"
 #include "wg_core/gamerules.h"
 #include "wg_core/launcher.h"
+#include "wg_core/logs.h"
 #include "wg_core/logtail.h"
 #include "wg_core/optiedition.h"
 #include "wg_core/pe.h"
@@ -98,6 +99,35 @@ string MockDll(const std::vector<std::pair<wstring, wstring>>& strings, const st
 
 int main() {
     try {
+        // ---- 0.6.1: Collect logs in uninstall.exe (no converter data) never claims the map is invalid ----------------
+        {
+            const wstring cl = TempFolder() + L"-collect";
+            RemoveTree(cl);
+            EnsureDir(cl);
+            const wstring model = Join(cl, L"model.wgcm");
+            const wstring tail = L" bytes, not verified here (uninstall.exe has no converter data; use Collect logs in the WrongGPU launcher to verify)";
+            require(ModelDataUnverified(model) == L"missing", "uninstall.exe's Model data: missing");
+            const string bytes(1234, 'm');
+            WriteFileAtomic(model, bytes.data(), bytes.size());
+            require(ModelDataUnverified(model) == L"present, 1234" + tail, "uninstall.exe's Model data: present, its size, not verified here");
+            HANDLE lock = CreateFileW(model.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);  // no sharing: unreadable
+            const wstring locked = ModelDataUnverified(model);
+            if (lock != INVALID_HANDLE_VALUE) CloseHandle(lock);
+            require(lock != INVALID_HANDLE_VALUE && locked.rfind(L"present but unreadable (", 0) == 0 && locked.back() == L')' && locked.size() > 26,
+                    "uninstall.exe's Model data: present but unreadable (the reason)");
+            DeleteFileW(model.c_str());
+            EnsureDir(model);
+            require(ModelDataUnverified(model) == L"present but unreadable (a folder, not a file)", "uninstall.exe's Model data: a folder in its place");
+            // which process says what: uninstall.exe's table (as restore_main.cpp makes it) has no converter data; WrongGPU.exe's
+            // has (its lines are the 0.6.0 code, unchanged: the suite's collect comparison checks them byte for byte)
+            static const EmbeddedData restorer{nullptr, 0, 0, L"", 0, L"", 0, L"0.6.1"};
+            static const EmbeddedData launcherLike{nullptr, 0, 901, L"00", 902, L"00", 0, L"0.6.1", L"0.6.1", L"0.6.1"};
+            Context rc, lc;
+            rc.data = &restorer;
+            lc.data = &launcherLike;
+            require(!HasConverterData(rc, false) && !HasConverterData(rc, true) && HasConverterData(lc, false), "the converter data: uninstall.exe none, WrongGPU.exe its map");
+            RemoveTree(cl);
+        }
         // ---- validation -----------------------------------------------------------------------------------------
         string n; wstring why;
         const SettingDef* exec = FindSetting("executor");
@@ -320,14 +350,14 @@ int main() {
             Context mc; mc.logFile = Join(dir, L"moved.log");
             mc.data = &noPayload;  // an empty payload table (the scan and EntryFor read it)
             require(LoadRecord(RecordPath(newDir), r) && SaveRebasedRecord(mc, newDir, r) && r.movedFrom.empty(), "moved game: the rebased record is written");
-            Record saved;
+            Record savedRec;
             string rawRec, iniNow;
             ReadAll(RecordPath(newDir), rawRec);
-            require(rawRec.find("game\t" + ToUtf8(newDir) + "\r\n") != string::npos && LoadRecord(RecordPath(newDir), saved) && saved.movedFrom.empty(), "moved game: the saved record names the new folder");
+            require(rawRec.find("game\t" + ToUtf8(newDir) + "\r\n") != string::npos && LoadRecord(RecordPath(newDir), savedRec) && savedRec.movedFrom.empty(), "moved game: the saved record names the new folder");
             require(ReadAll(Join(newDir, L"OptiScaler.ini"), iniNow) && iniNow.find("FfxDx12SRPath = " + ToUtf8(newDir) + "\\wronggpu_ffx_dx12.dll\r\n") != string::npos &&
                         iniNow.find("Path=" + ToUtf8(newDir) + "\\plugins\r\n") != string::npos && iniNow.find("UpscalerIndex=0\r\n") != string::npos,
                     "moved game: OptiScaler.ini's paths into the old folder point into the new one");
-            require(saved.e[1].inst == Sha256Bytes(iniNow.data(), iniNow.size()), "moved game: the record's OptiScaler.ini hash follows the rewritten file");
+            require(savedRec.e[1].inst == Sha256Bytes(iniNow.data(), iniNow.size()), "moved game: the record's OptiScaler.ini hash follows the rewritten file");
             auto managed = [&](const wstring& f) { for (auto& l : ManagedGames()) if (IEq(FullPath(l), FullPath(f))) return true; return false; };
             require(managed(newDir) && !managed(oldDir), "moved game: the new folder is on the managed list in the old one's place");
             // Uninstall (and uninstall.exe) of a record that still names the old folder: no refusal, the new folder's files go
@@ -497,6 +527,24 @@ int main() {
                     require(restore(d, false) && !IsFile(Join(d, L"wronggpu-frame.log")) && IsFile(Join(d, L"OptiScaler.log")) && IsFile(Join(d, L"fakenvapi.log")) &&
                                 IsFile(Join(d, L"sub\\wronggpu-other.log")) && !IsFile(Join(d, L"wronggpu_runtime.dll")),
                             "ownership: wronggpu-* in a folder the record lists goes; OptiScaler.log and fakenvapi.log stay; a folder not listed is left alone");
+                }
+                // the game root above the install folder (bin\x64 under it): a named runtime line, resolved from the record's exe
+                {
+                    const wstring g = Join(dir, L"Ownership\\Game root"), bx = Join(g, L"bin\\x64");
+                    file(Join(bx, L"Game.exe"), "MZ");
+                    Record m; m.version = L"0.6.1"; m.game = bx; m.exe = Join(bx, L"Game.exe");
+                    SetRuntimeLines(m, bx, bx);
+                    require(std::any_of(m.runtime.begin(), m.runtime.end(), [](const Record::RuntimeLine& r) { return r.folder == kRuntimeGameRoot; }) &&
+                                std::any_of(m.runtime.begin(), m.runtime.end(), [](const Record::RuntimeLine& r) { return r.folder == L"."; }),
+                            "runtime lines: the install folder and the game root above it");
+                    SaveRecord(RecordPath(bx), m);
+                    Record back;
+                    require(LoadRecord(RecordPath(bx), back) && back.runtime.size() == m.runtime.size(), "runtime lines: the game-root line is read back");
+                    file(Join(g, L"wronggpu-root.log"), "a log WrongGPU's runtime wrote in the game's working folder");
+                    file(Join(g, L"OptiScaler.log"), "a log another program wrote");
+                    const size_t removed = RemoveRuntimeFiles(bx, back);
+                    require(removed == 1 && !IsFile(Join(g, L"wronggpu-root.log")) && IsFile(Join(g, L"OptiScaler.log")),
+                            "runtime lines: wronggpu-* in the game root goes; OptiScaler.log there stays");
                 }
                 // checked again right before the change: a file that changed after the check is left, its original kept
                 {
@@ -1139,15 +1187,15 @@ int main() {
             bool changed = false;
             const string added = RrConfigAddText(noLine, fx, &changed, true);
             size_t sections = 0;
-            for (size_t p = added.find("[SystemSettings]"); p != string::npos; p = added.find("[SystemSettings]", p + 1)) ++sections;
+            for (size_t at = added.find("[SystemSettings]"); at != string::npos; at = added.find("[SystemSettings]", at + 1)) ++sections;
             const string lineOnly = line.substr(line.find('\n') + 1);  // the line itself, with its CRLF
             require(changed && sections == 1 && !fx.sectionAdded && added.compare(0, 3, bom) == 0 &&
                         added == bom + "[SystemSettings]\r\nr.Other=1\r\n" + lineOnly + "\r\n[Core.Log]\r\nLogNet=Log\r\n",
                     "Engine.ini add with a BOM: the line under the existing [SystemSettings], no second section, the BOM kept (r4 #5)");
             require(RrConfigRemoveText(added, fx) == noLine, "Engine.ini revert with a BOM: byte for byte as before, the BOM kept (r4 #5)");
-            bool again = true;
+            bool againBom = true;
             RrConfigFix fx2;
-            require(RrConfigAddText(withLine, fx2, &again, true) == withLine && !again, "Engine.ini add with a BOM and the line there: nothing to change (r4 #5)");
+            require(RrConfigAddText(withLine, fx2, &againBom, true) == withLine && !againBom, "Engine.ini add with a BOM and the line there: nothing to change (r4 #5)");
             // ...a file with the BOM alone: the section added after it, and taken out again leaves the BOM alone (reverted as empty)
             RrConfigFix fx3;
             const string onlyBom = RrConfigAddText(bom, fx3, &changed, true);

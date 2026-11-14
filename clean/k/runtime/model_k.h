@@ -17,7 +17,9 @@ struct WgRtConfig;
 
 namespace wgrt {
 
-enum class ModelId { M, K };
+// The models of the runtime (clean/runtime/model_select.h: their table and the option parser). L: recognised and
+// refused until its network exists (#89).
+enum class ModelId { M, K, L };
 
 struct KStageInfo {
   const char* name;

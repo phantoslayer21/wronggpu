@@ -3,7 +3,9 @@
 // Written for this project.
 #include "record.h"
 
+#include <algorithm>
 #include <array>
+#include <atomic>
 
 #include "detect.h"
 #include "fingerprint.h"
@@ -352,6 +354,13 @@ void SetRuntimeLines(Record& m, const wstring& dir, const wstring& exeDir) {
     add(Join(ed, kMirrorDir));
     add(Join(dir, kOptiSlotDir));
     for (auto& e : m.e) if (e.action == L"dir") add(Join(dir, e.rel));
+    // The game root (GameRoot of the exe folder, the folder Collect logs reads as "game-root"): the game's working folder,
+    // where WrongGPU's programs write their wronggpu-* logs too. Above the install folder it is a named line, resolved at the
+    // restore from the record's exe the same way.
+    const wstring root = FullPath(GameRoot(FullPath(ed))), base = FullPath(dir);
+    if (IEq(root, base) || StartsWithI(root, base + L"\\")) add(root);
+    else if (std::none_of(m.runtime.begin(), m.runtime.end(), [](const auto& r) { return r.folder == kRuntimeGameRoot; }))
+        m.runtime.push_back({kRuntimeGameRoot, L"wronggpu-*"});
 }
 size_t RemoveRuntimeFiles(const wstring& dir, const Record& m) {
     std::set<wstring> recorded;
@@ -359,7 +368,8 @@ size_t RemoveRuntimeFiles(const wstring& dir, const Record& m) {
     size_t removed = 0;
     for (auto& r : m.runtime) {
         wstring d;
-        try { d = r.folder == L"." ? dir : Target(dir, r.folder); } catch (const SetupError&) { continue; }
+        if (r.folder == kRuntimeGameRoot) d = GameRoot(m.exe.empty() ? dir : Parent(m.exe));
+        else try { d = r.folder == L"." ? dir : Target(dir, r.folder); } catch (const SetupError&) { continue; }
         if (!IsDir(d)) continue;
         for (auto& f : ListFiles(d, r.pattern.c_str()))
             if (StartsWithI(BaseName(f), L"wronggpu-") && !recorded.count(Lower(FullPath(f))) && DeleteFileW(f.c_str())) ++removed;
@@ -380,17 +390,62 @@ size_t RemoveRuntimeFiles(const wstring& dir, const Record& m) {
 // programs it starts share one invisible console, so nothing appears on screen.
 // state / self: the wronggpu-setup folder and the running uninstaller in it (empty: not this case); appData:
 // %LOCALAPPDATA%\WrongGPU, removed with everything in it (empty: other games still use it).
-void StartCleanup(Context& ctx, const wstring& state, const wstring& self, const wstring& appData) {
+static std::atomic<CleanupMoveFn> g_cleanupMove{nullptr};  // test seam (record.h SetCleanupMoveForTest)
+void SetCleanupMoveForTest(CleanupMoveFn fn) { g_cleanupMove = fn; }
+
+// Returns the line "kept ignore-files.txt ..." when the shared folder's ignore list was put back (convert_ignore.h), else "".
+wstring StartCleanup(Context& ctx, const wstring& state, const wstring& self, const wstring& appData) {
     // Detach this generation now. Delayed cleanup must never recursively delete the shared pathname,
     // which a following install can already have recreated with its new model and runtime selection.
-    wstring retired;
+    wstring retired, kept;
     if (!appData.empty() && IsDir(appData)) {
-        retired = appData + L".cleanup-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
-        if (!MoveFileExW(appData.c_str(), retired.c_str(), MOVEFILE_WRITE_THROUGH)) {
-            LogLine(ctx, L"Shared data cleanup deferred: cannot detach " + appData + L"; it was left in place.");
+        // The name the folder is moved to is free and unique. It was <pid>-<GetTickCount64()> alone; that clock moves in
+        // ~16 ms steps, so a second cleanup of the same folder within one step (an install's restore, then the last game's
+        // uninstall) aimed at the previous cleanup's folder, which its cmd.exe deletes only seconds later: the move failed
+        // with ERROR_ALREADY_EXISTS and the folder was left in place.
+        static std::atomic<unsigned> sequence{0};
+        for (int k = 0; k < 64; ++k) {
+            retired = appData + L".cleanup-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()) + L"-" +
+                      std::to_wstring(sequence++);
+            if (GetFileAttributesW(retired.c_str()) == INVALID_FILE_ATTRIBUTES) break;
+        }
+        // Nothing of WrongGPU's holds a file in the folder here (every write closes its handle, the log opens and closes
+        // per line). Another program can, briefly (a scanner reading a file just written): a sharing violation (32) or an
+        // access denied (5, how a folder rename fails while a file in it is open elsewhere) is tried again, at most
+        // kCleanupMoveTries times, 50-400 ms apart, each wait logged with the error. Any other error is final.
+        bool moved = false;
+        DWORD err = 0;
+        const CleanupMoveFn seam = g_cleanupMove.load();
+        const CleanupMoveFn move = seam ? seam : &MoveFileExW;
+        for (int t = 0; t < kCleanupMoveTries; ++t) {
+            if (move(appData.c_str(), retired.c_str(), MOVEFILE_WRITE_THROUGH)) { moved = true; break; }
+            err = GetLastError();
+            if ((err != ERROR_SHARING_VIOLATION && err != ERROR_ACCESS_DENIED) || t == kCleanupMoveTries - 1) break;
+            const DWORD wait = kCleanupMoveFirstWaitMs << t;
+            LogLine(ctx, L"Shared data cleanup: " + appData + L" is in use by another program (error " + std::to_wstring(err) +
+                             (err == ERROR_SHARING_VIOLATION ? L", sharing violation" : L", access denied") + L"); trying again in " +
+                             std::to_wstring(wait) + L" ms (try " + std::to_wstring(t + 2) + L" of " + std::to_wstring(kCleanupMoveTries) + L")");
+            Sleep(wait);
+        }
+        if (!moved) {
+            wstring why = ErrText(err);
+            while (!why.empty() && (why.back() == L'\n' || why.back() == L'\r' || why.back() == L' ' || why.back() == L'.')) why.pop_back();
+            LogLine(ctx, L"Shared data cleanup deferred: cannot detach " + appData + L" (error " + std::to_wstring(err) + L": " + why +
+                             L"); it was left in place.");
             retired.clear();
-        } else if (StartsWithI(ctx.logFile, appData + L"\\")) {
-            ctx.logFile = retired + ctx.logFile.substr(appData.size());
+        } else {
+            if (StartsWithI(ctx.logFile, appData + L"\\")) ctx.logFile = retired + ctx.logFile.substr(appData.size());
+            // the ignore list stays (an integrator's installer registered its files there; convert_ignore.h): put back, kept
+            // beside another program's new one, or left in the moved folder; never deleted
+            const ListKept k = PutIgnoreListBack(ctx, retired, appData);
+            kept = k.said;
+            if (!k.leftIn.empty()) {
+                // it could not leave the moved folder: everything else in it goes now; the folder and the list stay, and the
+                // hidden cleanup below never deletes that folder's tree
+                RemoveTree(retired, k.leftIn);
+                LogLine(ctx, L"Shared data cleanup: " + retired + L" stays with the ignore list in it (what was held open in it stays too)");
+                retired.clear();
+            }
         }
     }
     wchar_t sys[MAX_PATH]; GetSystemDirectoryW(sys, MAX_PATH);
@@ -408,6 +463,7 @@ void StartCleanup(Context& ctx, const wstring& state, const wstring& self, const
     } else {
         LogLine(ctx, L"cleanup not started (error " + std::to_wstring(GetLastError()) + L"); remove " + state + L" by hand");
     }
+    return kept;
 }
 
 // ---- the file-ownership rule (record.h) -------------------------------------------------------------------------------
@@ -692,14 +748,19 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
     const wstring state = StateDir(dir);
     if (!DeleteFileW(RecordPath(dir).c_str()) && IsFile(RecordPath(dir))) Fail(L"Cannot remove " + RecordPath(dir) + L": " + ErrText(GetLastError()));
     RestoreStep("record-removed");
+    // the shared folder goes, its ignore-files.txt stays (StartCleanup): said in the result
+    auto cleanup = [&](const wstring& st, const wstring& sf) {
+        const wstring kept = StartCleanup(ctx, st, sf, appData);
+        if (!kept.empty()) { ui.log(kept); warnings.push_back(kept); }
+    };
     if (keepState) { RemoveTree(Join(state, L"backup")); return warnings; }
     const wstring self = SelfPath();
     if (IEq(Parent(self), state)) {
         RemoveTree(state, self);
-        StartCleanup(ctx, state, self, appData);
+        cleanup(state, self);
     } else {
         RemoveTree(state);
-        if (!appData.empty()) StartCleanup(ctx, L"", L"", appData);
+        if (!appData.empty()) cleanup(L"", L"");
     }
     return warnings;
 }

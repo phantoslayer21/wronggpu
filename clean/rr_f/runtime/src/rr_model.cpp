@@ -67,7 +67,7 @@ static bool load_own(const std::vector<uint8_t>& d, Model* out, std::string* err
   for (uint32_t i = 0; i < nb; ++i, o += 64) {
     std::string name((const char*)d.data() + o, strnlen((const char*)d.data() + o, 48));
     const uint64_t off = u64(o + 48), size = u64(o + 56);
-    if (off + size > isize) return *err = "model file damaged (blob " + name + ")", false;
+    if (off > isize || size > isize - off) return *err = "model file damaged (blob " + name + ")", false;
     out->blobs[name] = {off, size};
   }
   for (uint32_t i = 0; i < ns; ++i, o += 52) {
@@ -75,7 +75,8 @@ static bool load_own(const std::vector<uint8_t>& d, Model* out, std::string* err
     out->scalars[name] = u32(o + 48);
   }
   o = (o + 255) / 256 * 256;
-  if (o + isize + 32 != d.size() || isize % 256) return *err = "model file damaged (image size)", false;
+  // (d.size() >= 96 here; written so that neither sum can wrap, and so that `o` is inside the file before it is used)
+  if (o > d.size() - 32 || isize != d.size() - 32 - o || isize % 256) return *err = "model file damaged (image size)", false;
   out->image.assign(d.begin() + o, d.begin() + o + isize);
   out->kind = "wgrrmod1";
   return true;
@@ -192,14 +193,17 @@ bool read_wgcm(const std::vector<uint8_t>& d, std::vector<WgcmGroup>* groups, st
       if (tn.dtype > 6) return *err = "model.wgcm damaged: unknown dtype in " + grp.name + "/" + tn.name, false;
       if (!need(4ull * rank + 16)) return *err = "model.wgcm damaged: index entry of " + grp.name + "/" + tn.name, false;
       uint64_t count = 1;
+      bool count_ok = true;  // the element count never above the data's size (no wrap)
       for (uint32_t r = 0; r < rank; ++r) {
-        tn.shape.push_back(u32((size_t)pos + 4 * r));
-        count *= tn.shape.back();
+        const uint32_t dim = u32((size_t)pos + 4 * r);
+        tn.shape.push_back(dim);
+        if (dim && count > body / dim) count_ok = false;
+        else count *= dim;
       }
       pos += 4ull * rank;
       const uint64_t off = u64((size_t)pos), size = u64((size_t)pos + 8);
       pos += 16;
-      if (off % 64 || off < end || off + size > body || size != count * kDtypeSize[tn.dtype])
+      if (!count_ok || off % 64 || off < end || off > body || size > body - off || size != count * kDtypeSize[tn.dtype])
         return *err = "model.wgcm damaged: bad data range of " + grp.name + "/" + tn.name, false;
       if (grp.find(tn.name)) return *err = "model.wgcm damaged: duplicate tensor " + grp.name + "/" + tn.name, false;
       tn.data = d.data() + off;

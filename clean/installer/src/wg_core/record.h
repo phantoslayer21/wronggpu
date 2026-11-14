@@ -53,6 +53,8 @@ struct RrConfigFix {
     string prev;                  // else its value before
     wstring folder;               // the topmost folder the fix created ("" none)
 };
+// A runtime line's folder for the game root (GameRoot of the record's exe folder) when it is above the install folder.
+inline const wchar_t* const kRuntimeGameRoot = L"<game-root>";
 struct Record {
     wstring version, game, exe, status, regkey, model, modelM;
     std::vector<Entry> e;
@@ -65,7 +67,7 @@ struct Record {
     struct CoexistLine { wstring tool, fingerprint, decision; };
     std::vector<CoexistLine> coexist;
     RrConfigFix rrconfig;
-    struct RuntimeLine { wstring folder, pattern; };
+    struct RuntimeLine { wstring folder, pattern; };  // folder: relative to the install folder, or kRuntimeGameRoot
     std::vector<RuntimeLine> runtime;                 // the runtime lines (an older record has none: nothing removed by name)
     // rc6 L1 (in memory only): the record was read from RecordPath(dir) but named another folder (the game folder was moved:
     // Steam's "Move install folder", another drive letter): LoadRecord rebased game, exe and the journal's paths to dir, and
@@ -173,7 +175,21 @@ size_t RemoveRuntimeFiles(const wstring& dir, const Record& m);
 // The runtime lines for an install in `dir` with its game program in exeDir (folders inside dir only), from the record's
 // dir entries too: call after those are in m.
 void SetRuntimeLines(Record& m, const wstring& dir, const wstring& exeDir);
-void StartCleanup(Context& ctx, const wstring& state, const wstring& self, const wstring& appData);
+// The shared folder (appData) is moved aside, to a free name made unique with a process-wide sequence number, and deleted by a
+// hidden cmd.exe; its ignore-files.txt is put back first (convert_ignore.h PutIgnoreListBack). Returns PutIgnoreListBack's line
+// for the player ("kept ignore-files.txt ...", the list kept as ignore-files.txt.kept-<n>, or left in the moved folder) or "".
+// A list that could not leave the moved folder is never deleted: the rest of that folder goes at once, the folder stays with
+// the list, and the hidden cmd.exe does not delete it. The move: a sharing violation (32) or an access denied (5: a scanner holding a file in the
+// folder) is tried again, at most kCleanupMoveTries times (waits from kCleanupMoveFirstWaitMs doubling: 50, 100, 200, 400 ms),
+// each wait logged with the error; any other error, or the last try, leaves the folder in place ("Shared data cleanup deferred
+// ... (error N: ...)").
+constexpr int kCleanupMoveTries = 5;
+constexpr unsigned long kCleanupMoveFirstWaitMs = 50;
+// Test seam: the call StartCleanup moves the folder with (MoveFileExW when unset). The tests put in one that fails with
+// a chosen error for the first tries; nullptr puts MoveFileExW back.
+using CleanupMoveFn = BOOL (WINAPI*)(LPCWSTR from, LPCWSTR to, DWORD flags);
+void SetCleanupMoveForTest(CleanupMoveFn fn);
+wstring StartCleanup(Context& ctx, const wstring& state, const wstring& self, const wstring& appData);
 // The restore of an install, by the file-ownership rule above. Before anything changes it checks every recorded file
 // (refused, "Nothing was changed", when one cannot be read or replaced: another program holds it, or a backup is missing).
 // Then, per entry: WrongGPU's file goes (or the player's original from the backup takes its place); the original already

@@ -82,6 +82,20 @@ def snapshot(root):
     return snap
 
 
+def without_kept(snap):
+    """A snapshot without its WrongGPU-originals folders (0.6.1: a player's original that cannot go back is kept there, never
+    deleted), and the kept files as sorted (name, SHA-256) pairs."""
+    rest, kept = {}, []
+    for k, v in snap.items():
+        parts = [p for p in k.split("/") if p]
+        if "wronggpu-originals" in parts:
+            if v != "dir":
+                kept.append((parts[-1], v))
+        else:
+            rest[k] = v
+    return rest, sorted(kept)
+
+
 def diff(a, b):
     out = []
     for k in sorted(set(a) | set(b)):
@@ -398,8 +412,12 @@ def run_all(t, payload_dir):
         t.check("bundle: system info, logs, record, model source, events", all(n in names for n in (
             "system-info.txt", "windows-events.txt", "wronggpu-fsr.log", "wronggpu-fsr.ini", "wronggpu-runtime.log", "wronggpu-report.json",
             "crash/wronggpu-crash-20261005-1.txt", "install/install.record", "install/model-source.txt", "game-root/wronggpu-root.log")), str(names))
+        # 0.6.1: uninstall.exe has no converter data: it says the file is there and its size, never that the map is invalid
+        # (WrongGPU.exe's own /COLLECT verifies it: test_collect_logs, run by every build)
+        mbytes = os.path.getsize(t.model_file()) if os.path.isfile(t.model_file()) else -1
         t.check("system info: status, FSR DLL, model, GPU", "Game status: Validated" in info and "amd_fidelityfx_dx12.dll: WrongGPU" in info and "ffx_fsr3upscaler_x64.wronggpu-original.dll: the game's" in info and
-                "Model data: present and matching" in info and "GPU:" in info, info[:1500])
+                ("Model data: present, %d bytes, not verified here (uninstall.exe has no converter data; use Collect logs in the WrongGPU launcher to verify)" % mbytes) in info and
+                "GPU:" in info, info[:1500])
         t.check("structured diagnostics and support manifest included", "wronggpu-diagnostics.jsonl" in names and "support-manifest.json" in names, str(names))
         if "support-manifest.json" in names:
             support = json.loads(z.read("support-manifest.json"))
@@ -410,11 +428,16 @@ def run_all(t, payload_dir):
                     for a in support["artifacts"] if a["status"] == "included"))
     os.remove(os.path.join(b, "wronggpu-diagnostics.jsonl"))  # Keep the pre-existing uninstall fixture scope.
     t.check("collect changed nothing", os.path.isfile(os.path.join(b, "wronggpu-setup", "uninstall.exe")))
-    write(os.path.join(b, "wronggpu.ini"), "[settings]")  # the player's settings: removed by a full uninstall
+    # the player's own settings over WrongGPU's file: not WrongGPU's bytes any more, so the uninstall leaves them (0.6.1 rule)
+    write(os.path.join(b, "wronggpu.ini"), "[settings]")
     rc = t.uninstall(b)
     t.check("uninstall exit 0", rc == 0, "exit %d; %s" % (rc, t.logtext()[-500:]))
-    t.check("uninstall removes the player's wronggpu.ini", not os.path.exists(os.path.join(b, "wronggpu.ini")))
-    t.check("folder restored byte for byte (logs and settings removed, state folder gone)", snapshot(root) == before, diff(before, snapshot(root)))
+    t.check("uninstall leaves the player's changed wronggpu.ini as it is", os.path.isfile(os.path.join(b, "wronggpu.ini")) and read(os.path.join(b, "wronggpu.ini")) == b"[settings]")
+    ini_key = key(os.path.relpath(os.path.join(b, "wronggpu.ini"), root))
+    after = {k: v for k, v in snapshot(root).items() if k != ini_key}
+    t.check("folder restored byte for byte apart from that file (WrongGPU's logs in the install folder and the game root removed, state folder gone)",
+            after == before, diff(before, after))
+    os.remove(os.path.join(b, "wronggpu.ini"))
     t.check("Apps & features entry removed", not t.keys_for(b))
     t.check("model data removed with the last game", not os.path.exists(os.path.join(t.appdata(), "model")))
     app = t.appdata()
@@ -457,9 +480,21 @@ def run_all(t, payload_dir):
     # Update from an older WrongGPU: settings still at that version's own outdated defaults are brought up to date, the
     # player's own changes stay; a newer old version keeps everything.
     def fake_old_version(b, version, ini):
+        """The record of an older version that wrote `ini` as its wronggpu.ini: its version, and the hash it recorded for
+        the file it wrote (0.6.1 rule: only a file with WrongGPU's recorded bytes is WrongGPU's to bring up to date)."""
         rec = os.path.join(b, "wronggpu-setup", "install.record")
         text = read(rec).decode("utf-8")
-        write(rec, "\n".join(("version\t" + version) if l.startswith("version\t") else l for l in text.split("\n")).encode("utf-8"))
+        ini_sha = sha(ini.encode("utf-8"))
+
+        def line(l):
+            if l.startswith("version\t"):
+                return "version\t" + version
+            f = l.rstrip("\r").split("\t")
+            if len(f) == 5 and f[4].lower() == "wronggpu.ini":
+                f[3] = ini_sha.upper() if f[3].isupper() else ini_sha
+                return "\t".join(f) + ("\r" if l.endswith("\r") else "")
+            return l
+        write(rec, "\n".join(line(l) for l in text.split("\n")).encode("utf-8"))
         write(os.path.join(b, "wronggpu.ini"), ini.encode("utf-8"))
     root, b = cyberpunk(t, "update-030", model=GOOD)
     t.check("update test: first install", t.run("/DIR=" + root, "/FORCE") == 0)
@@ -614,7 +649,9 @@ def run_all(t, payload_dir):
     rc = t.uninstall(b)
     expect = dict(before)
     expect[key("bin/x64/amd_fidelityfx_dx12.dll")] = sha(AMD_V2)
-    t.check("uninstall keeps the game's new DLL, removes everything else", rc == 0 and snapshot(root) == expect, diff(expect, snapshot(root)))
+    rest, kept = without_kept(snapshot(root))
+    t.check("uninstall keeps the game's new DLL, removes everything else; the DLL from before WrongGPU is kept in WrongGPU-originals",
+            rc == 0 and rest == expect and kept == [("amd_fidelityfx_dx12.dll", sha(AMD_V1))], (diff(expect, rest), kept))
     t.check("the log explains it", "its new file was kept" in t.logtext())
     t.check("re-install over the updated game", t.run("/DIR=" + root, "/FORCE") == 0 and
             read(os.path.join(b, "amd_fidelityfx_dx12.wronggpu-original.dll")) == AMD_V2)
@@ -623,7 +660,12 @@ def run_all(t, payload_dir):
             read(os.path.join(b, "amd_fidelityfx_dx12.wronggpu-original.dll")) == AMD_V1)
     rc = t.uninstall(b)
     expect[key("bin/x64/amd_fidelityfx_dx12.dll")] = sha(AMD_V1)
-    t.check("and uninstall restores that state", rc == 0 and snapshot(root) == expect, diff(expect, snapshot(root)))
+    rest, kept = without_kept(snapshot(root))
+    # kept: the first generation (v1 from before the first install) and the second (v2: the restore before the install over
+    # the update could not put it back, because v1 was in its place by then); neither is overwritten
+    t.check("and uninstall restores that state; both earlier originals are kept in WrongGPU-originals",
+            rc == 0 and rest == expect and kept == sorted([("amd_fidelityfx_dx12.dll", sha(AMD_V1)), ("amd_fidelityfx_dx12.dll", sha(AMD_V2))]),
+            (diff(expect, rest), kept))
     root, b = cyberpunk(t, "update-fsr30", model=GOOD)
     before = snapshot(root)
     t.check("install (three DLLs)", t.run("/DIR=" + root, "/FORCE") == 0)
@@ -631,7 +673,9 @@ def run_all(t, payload_dir):
     rc = t.uninstall(b)
     expect = dict(before)
     expect[key("bin/x64/ffx_fsr3upscaler_x64.dll")] = sha(FSR3UP_V2)
-    t.check("game update of ffx_fsr3upscaler_x64.dll: the new file is kept, the other two restored", rc == 0 and snapshot(root) == expect, diff(expect, snapshot(root)))
+    rest, kept = without_kept(snapshot(root))
+    t.check("game update of ffx_fsr3upscaler_x64.dll: the new file is kept, the other two restored, the earlier one kept in WrongGPU-originals",
+            rc == 0 and rest == expect and kept == [("ffx_fsr3upscaler_x64.dll", sha(FSR3UP))], (diff(expect, rest), kept))
 
     print("\n[9] 30-T2: model file search and converter integration (synthetic model files)")
     t.clear_model()
@@ -1123,13 +1167,17 @@ def test_upgrade_paths(t, payload_dir):
         k32.CloseHandle.argtypes = [ctypes.c_void_p]
         root, b, before = installed("hotfix-upgrade-in-use", hand_placed=True)
         handle = k32.CreateFileW(os.path.join(b, SLOTS[0]), 0x80000000, 1, None, 3, 0, None)  # GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING
+        state = snapshot(root)
         try:
             rc, log = setup_again(root)
         finally:
             k32.CloseHandle(handle)
-        t.check("a file of the earlier install is in use (exit 1): no original of the game is lost, the record and the backup stay",
-                handle not in (None, ctypes.c_void_p(-1).value) and rc == 1 and all(same(os.path.join(b, n), d) or kept(b, {n: d}) for n, d in game.items()) and
-                os.path.isfile(os.path.join(b, "wronggpu-setup", "install.record")) and same(os.path.join(b, "wronggpu-setup", "backup", SLOTS[0]), AMD_V1), tail(rc, log))
+        # 0.6.1 rule: every recorded file is checked before anything changes; one that cannot be replaced stops the setup
+        # there (exit 2, "Nothing was changed"), so the earlier install, its record and its backup are exactly as they were
+        t.check("a file of the earlier install is in use: refused before anything changes (exit 2), the record and the backup stay",
+                handle not in (None, ctypes.c_void_p(-1).value) and rc == 2 and snapshot(root) == state and "Nothing was changed" in log and
+                os.path.isfile(os.path.join(b, "wronggpu-setup", "install.record")) and same(os.path.join(b, "wronggpu-setup", "backup", SLOTS[0]), AMD_V1),
+                tail(rc, log, root, state))
         rc, log = setup_again(root)
         t.check("...setup run again finishes the upgrade", rc == 0 and payload_installed(t, b, payload_dir) and kept(b, game), tail(rc, log))
         rc = t.uninstall(b) if rc == 0 else -1
@@ -1152,10 +1200,15 @@ def test_upgrade_paths(t, payload_dir):
     t.check("setup over WrongGPU's own OptiScaler-hosted install: no /MOVEMODS needed, no warning about another mod",
             rc == 0 and "No other upscaler mod or older install found" in log and "needs your OK" not in log and "Other upscaler mods" not in log, tail(rc, log))
     rec = read(os.path.join(b, "wronggpu-setup", "install.record")).decode()
-    t.check("...nothing was moved aside as another mod's file, and OptiScaler's logs of the earlier install are gone",
-            "\ndisable\t" not in rec and not any(os.path.exists(os.path.join(b, n)) for n in run_time), rec[:900])
+    shared = run_time[:3]  # 0.6.1 rule: shared names are never deleted by name; WrongGPU's own wronggpu-* log goes
+    t.check("...nothing was moved aside as another mod's file; OptiScaler's shared logs stay as they are, WrongGPU's own log is gone",
+            "\ndisable\t" not in rec and all(os.path.isfile(os.path.join(b, n)) and read(os.path.join(b, n)) == b"written while the game ran" for n in shared) and
+            not os.path.exists(os.path.join(b, "wronggpu-fsr.log")), rec[:900])
     rc = t.uninstall(b)
-    t.check("...and uninstall restores the game byte for byte", rc == 0 and snapshot(root) == before, tail(rc, t.logtext(), root, before))
+    left = {key(os.path.relpath(os.path.join(b, n), root)) for n in shared}
+    rest = {k: v for k, v in snapshot(root).items() if k not in left}
+    t.check("...and uninstall restores the game byte for byte apart from OptiScaler's shared logs, which stay",
+            rc == 0 and rest == before and all(os.path.isfile(os.path.join(b, n)) for n in shared), tail(rc, t.logtext(), root, before))
     root, b, before = installed("foreign-opti-upgrade")
     foreign = {"OptiScaler.ini": b"[Upscalers]", "OptiScaler.log": b"log", "dxgi.dll": b"proxy of an OptiScaler build"}
     for n, data in foreign.items():
@@ -1495,6 +1548,68 @@ def optiscaler_package(t, name):
     write(os.path.join(opti, "OptiScaler.ini"), "[Upscalers]\nDx12Upscaler=auto\n[Libraries]\nFfxDx12SRPath=auto\n"
                                                 "[FSR]\nFsr4Update=auto\nUpscalerIndex=auto\n[Menu]\nShortcutKey=auto\n")
     return opti
+
+
+def test_collect_logs(t):
+    """0.6.1, run by every build (with or without the direct route: the release builds have none, and the case above that
+    collects through uninstall.exe is one of the direct route's): Collect logs through the game's uninstall.exe, which has
+    no converter data, says what it can see of the model file (present with its size, missing, unreadable), never that the
+    map is invalid; its version line has no empty fields and its file list has WrongGPU's runtime (the install record's
+    files). WrongGPU.exe's own /COLLECT still verifies the file (present and matching)."""
+    print("\n[collect logs] uninstall.exe and WrongGPU.exe: the Model data line, in every build")
+    t.clear_model()
+    root, b = cyberpunk(t, "collect-restorer", model=t.model.file)
+    rc = t.run("/DIR=" + root, "/FORCE", "/NOSCAN", *t.route)
+    t.check("collect logs: installed", rc == 0, "exit %d; %s" % (rc, t.logtext()[-400:]))
+    un = os.path.join(b, "wronggpu-setup", "uninstall.exe")
+    model = t.model_file()
+    tail = " bytes, not verified here (uninstall.exe has no converter data; use Collect logs in the WrongGPU launcher to verify)\r\n"
+
+    def info_of(exe, name):
+        z = os.path.join(t.work, name)
+        if os.path.exists(z):
+            os.remove(z)
+        code = t.run("/COLLECT", "/DIR=" + b, "/OUT=" + z, exe=exe)
+        text = zipfile.ZipFile(z).read("system-info.txt").decode("utf-8", "replace") if os.path.isfile(z) else ""
+        return code, text
+
+    def model_line(text):
+        at = text.find("Model data: ")
+        return text[at:text.find("\r\n", at) + 2] if at >= 0 else ""
+
+    rc, info = info_of(un, "collect-un.zip")
+    size = os.path.getsize(model) if os.path.isfile(model) else -1
+    t.check("uninstall.exe /COLLECT: \"Model data: present, <size> bytes, not verified here (...)\", never \"the embedded converter map is invalid\"",
+            rc == 0 and model_line(info) == "Model data: present, %d%s" % (size, tail) and "converter map is invalid" not in info, (rc, model_line(info)))
+    t.check("uninstall.exe /COLLECT: no empty build/payload fields; the files list has WrongGPU's runtime",
+            "(build , payload )" not in info and "(uninstall.exe of this version; build and payload not known here)" in info and
+            "\r\n    wronggpu_runtime.dll  " in info, info[:900])
+    rc, info2 = info_of(None, "collect-launcher.zip")
+    t.check("WrongGPU.exe /COLLECT: the model is verified (present and matching), as before", rc == 0 and model_line(info2).startswith("Model data: present and matching ("),
+            (rc, model_line(info2)))
+    if t.env.native:  # the model file open elsewhere without sharing: unreadable
+        import ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateFileW.restype = ctypes.c_void_p
+        k32.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+        k32.CloseHandle.argtypes = [ctypes.c_void_p]
+        handle = k32.CreateFileW(model, 0x80000000, 0, None, 3, 0, None)  # GENERIC_READ, no sharing, OPEN_EXISTING
+        try:
+            rc, info = info_of(un, "collect-un-locked.zip")
+        finally:
+            k32.CloseHandle(handle)
+        t.check("uninstall.exe /COLLECT, the model file locked: \"Model data: present but unreadable (<reason>)\"",
+                rc == 0 and model_line(info).startswith("Model data: present but unreadable (") and model_line(info).endswith(")\r\n"), (rc, model_line(info)))
+    else:
+        print("  (skipped: the locked model file needs native Windows)")
+    saved = read(model)
+    os.remove(model)
+    rc, info = info_of(un, "collect-un-missing.zip")
+    t.check("uninstall.exe /COLLECT, no model file: \"Model data: missing\"", rc == 0 and model_line(info) == "Model data: missing\r\n", (rc, model_line(info)))
+    write(model, saved)
+    rc = t.uninstall(b)
+    t.check("collect logs: uninstalled", rc == 0, "exit %d" % rc)
+    t.clear_model()
 
 
 def test_amd_provider(t):
@@ -2116,6 +2231,7 @@ def main():
         test_game_exe(t)
         test_anticheat_scope(t)
         test_amd_provider(t)
+        test_collect_logs(t)  # (0.6.1: every build; the release builds have no direct route)
         test_asi_plugin(t, os.path.join(prep, "payload"))
         test_filter_group(t)
         if direct:

@@ -20,6 +20,7 @@
 #include <initializer_list>
 #include <set>
 
+#include "api.h"
 #include "json.h"
 #include "numeric.h"
 
@@ -248,6 +249,18 @@ public:
         m.version = version_ = static_cast<int>(version);
         k_ = version_ == 2 || version_ == 3;
         if (!need_string(root, "model", "map", m.model)) return false;
+        // The preset, by name: the optional field "preset", else the one this version always meant (the shipped maps).
+        if (const Json* pj = root.find("preset")) {
+            if (!pj->is_string()) return damaged("map: field \"preset\" must be text");
+            const PresetInfo* p = find_preset(pj->text);
+            if (!p) return damaged("map: unknown preset \"" + pj->text + "\"");
+            if (!p->allows(version_))
+                return damaged("map: preset " + pj->text + " does not use map version " + std::to_string(version_));
+            m.preset_name = p->name;
+            m.preset_named = true;
+        } else {
+            m.preset_name = preset_for_version(version_);
+        }
         std::string order;
         if (!need_string(root, "channel_order", "map", order)) return false;
         if (order != "natural") return damaged("unknown channel_order \"" + order + "\"");
@@ -1327,8 +1340,10 @@ public:
             for (const Axis& ax : t.axes) {
                 const std::int64_t n = ax.limit >= 0 ? std::min(ax.limit, ax.length) : ax.length;
                 if (n == 0) {
+                    // The tensor reads nothing, but the axes after this one are still checked: the map is validated
+                    // completely before any input is read (an empty axis adds no span).
                     any = false;
-                    break;
+                    continue;
                 }
                 std::int64_t span;
                 if (!checked_mul(ax.stride, n - 1, span) || !checked_add(hi, span, hi))
@@ -1357,6 +1372,53 @@ private:
 };
 
 }  // namespace
+
+const std::vector<PresetInfo>& known_presets() {
+    // the map versions each preset's maps use (bit v: version v), as they were before maps named their preset
+    static const std::vector<PresetInfo> presets = {
+        {"M", (1u << 1) | (1u << 4), kMsgNoPresetM},  // spec 08 (version 4 adds the source F)
+        {"K", (1u << 2) | (1u << 3), kMsgNoPresetK},  // spec 48
+        {"F", 1u << 5, kMsgNoPresetF},                // spec 57
+        // Model L (#89): the same record kinds as preset M's map (no new element format, op or source kind), so the
+        // same map versions; its parameters are a block of their own in the same library file, found by its own hashes
+        {"L", (1u << 1) | (1u << 4), kMsgNoPresetL},
+    };
+    return presets;
+}
+
+const PresetInfo* find_preset(const std::string& name) {
+    for (const PresetInfo& p : known_presets())
+        if (name == p.name) return &p;
+    return nullptr;
+}
+
+std::string preset_for_version(int version) {
+    for (const PresetInfo& p : known_presets())
+        if (p.allows(version)) return p.name;
+    return "";
+}
+
+bool load_map(const std::string& file_bytes, Map& out, MapError& err, const std::string& expected_preset) {
+    if (!load_map(file_bytes, out, err)) return false;
+    if (expected_preset.empty()) return true;
+    auto damaged = [&](const std::string& detail) {
+        err.kind = MapErrorKind::Damaged;
+        err.detail = detail;
+        out = Map();
+        return false;
+    };
+    const PresetInfo* p = find_preset(expected_preset);
+    if (!p) return damaged("map: preset \"" + expected_preset + "\" asked for is not known");
+    if (out.preset_named) {  // the map's own field decides; the caller's name must agree with it
+        if (out.preset_name != p->name)
+            return damaged("map: the map names preset " + out.preset_name + ", preset " + expected_preset + " was asked for");
+        return true;
+    }
+    if (!p->allows(out.version))
+        return damaged("map: preset " + expected_preset + " does not use map version " + std::to_string(out.version));
+    out.preset_name = p->name;
+    return true;
+}
 
 bool load_map(const std::string& file_bytes, Map& out, MapError& err) {
     out = Map();

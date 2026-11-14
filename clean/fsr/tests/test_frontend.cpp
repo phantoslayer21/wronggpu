@@ -138,6 +138,7 @@ static std::string g_createOptions;
 static std::vector<WgFrame> g_frames;
 static std::atomic<int> g_destroyed{0};
 static bool g_failCreate = false;
+static uint32_t g_failCreateOutputWidth = 0;  // FakeCreate fails while the output width is this (a size-bound failure, e.g. out of VRAM at 4K)
 static int g_failDispatchAt = -1;
 static int g_notReadyUntil = 0;  // FakeDispatch answers WG_ERROR_NOT_READY for frames below this count
 static int g_parameterErrorAt = -1;  // FakeDispatch answers WG_ERROR_PARAMETER for this frame (inputs it cannot take)
@@ -161,7 +162,7 @@ static WgResult FakeCreate(const WgCreateInfo* info, WgUpscaler** out) {
     while (!g_createGate) std::this_thread::sleep_for(std::chrono::milliseconds(1));
     if (g_aboutTo) info->log(info->log_user, WG_LOG_INFO, "about to start the HIP runtime (test)");
     info->log(info->log_user, WG_LOG_INFO, "fake upscaler created");
-    if (g_failCreate) return WG_ERROR_DEVICE;
+    if (g_failCreate || (g_failCreateOutputWidth && info->output_width == g_failCreateOutputWidth)) return WG_ERROR_DEVICE;
     *out = reinterpret_cast<WgUpscaler*>(new FakeUpscaler{1});
     ++g_created;
     return WG_OK;
@@ -337,6 +338,7 @@ static void Reset() {
     g_log.clear();
     g_destroyed = 0;
     g_failCreate = false;
+    g_failCreateOutputWidth = 0;
     g_failDispatchAt = -1;
     g_notReadyUntil = 0;
     g_parameterErrorAt = -1;
@@ -642,7 +644,7 @@ static void TestBrokenNotCalledAgain() {
     CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
     ffxDispatchDescUpscale d = MakeDispatch();
     for (int i = 0; i < 30; ++i) fe->Dispatch(&ctx, &d.header);
-    std::printf("broken: upscaler frames %zu, stand-in frames %zu, lines %d\n", g_frames.size(), g_standInFrames.size(),
+    std::printf("broken: upscaler frames %zu, stand-in frames %zu, lines %zu\n", g_frames.size(), g_standInFrames.size(),
                 CountLog("it is not called again"));
     CHECK(g_frames.size() == 2);                         // frame 0 taken, frame 1 failed, never called again
     CHECK(CountLog("it is not called again") == 4);      // 28 frames: lines at 1, 2, 3 and 10
@@ -676,7 +678,7 @@ static void TestForwarding() {
     // Bug hunt F2: frame generation configures every frame: the first 3 of the type are logged, later ones only when
     // they fail (and every call still reaches AMD)
     {
-        const int lines = CountLog(" ffxConfigure "), results = CountLog("(forwarded to AMD)");
+        const size_t lines = CountLog(" ffxConfigure "), results = CountLog("(forwarded to AMD)");
         const size_t calls = g_amd.size();
         for (int i = 0; i < 50; ++i) CHECK(fe->Configure(&fgctx, &cfg.header) == FFX_API_RETURN_OK);
         CHECK(g_amd.size() == calls + 50);
@@ -1185,6 +1187,71 @@ static void TestCompare() {
     for (size_t i = 0; i < g_timed.size(); ++i) CHECK(g_timed[i].first == kCommandList && g_timed[i].second == (i % 2 == 1));
     CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
     CHECK(g_amd.back().fn == "destroy" && g_amd.back().memCb == nullptr);
+}
+
+// Issue #59: the reactive-mask generation call of a WrongGPU context goes to AMD's context when one exists (frames of
+// the context that went to AMD with the game's own reactive resource need this frame's mask): in a comparison and
+// after a frame the stand-in could not take. Without an AMD context there is nothing to send it to (OK, nothing
+// recorded, as before). A failure of AMD's call is the call's result.
+static void TestReactiveMaskForwarded() {
+    auto maskCalls = [] {
+        size_t n = 0;
+        for (const AmdCall& c : g_amd) n += c.fn == "dispatch" && c.type == FFX_API_DISPATCH_DESC_TYPE_UPSCALE_GENERATEREACTIVEMASK;
+        return n;
+    };
+    ffxDispatchDescUpscaleGenerateReactiveMask mask{};
+    mask.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE_GENERATEREACTIVEMASK;
+
+    // Comparison.
+    Reset();
+    g_resources[kColor] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+    g_resources[kDepth] = {dxgi::R32_FLOAT, 2560, 1440};
+    g_resources[kMotion] = {dxgi::R16G16_FLOAT, 2560, 1440};
+    g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+    {
+        auto fe = MakeFrontEnd(Config{});
+        UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE, /*withOverride=*/true);
+        ffxContext ctx = nullptr;
+        CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK);
+        ffxDispatchDescUpscale d = MakeDispatch();
+        CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);  // WrongGPU
+        CHECK(fe->Dispatch(&ctx, &mask.header) == FFX_API_RETURN_OK && g_amd.empty());  // no AMD context yet
+        g_compare = true;
+        CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);  // AMD's context is made and dispatched
+        CHECK(g_amd.size() == 3 && maskCalls() == 0);
+        const size_t before = g_amd.size();
+        CHECK(fe->Dispatch(&ctx, &mask.header) == FFX_API_RETURN_OK);
+        CHECK(g_amd.size() == before + 1 && maskCalls() == 1 && g_amd.back().context == g_amd[0].context);
+        g_amdDispatchResult = FFX_API_RETURN_ERROR_RUNTIME_ERROR;
+        CHECK(fe->Dispatch(&ctx, &mask.header) == FFX_API_RETURN_ERROR_RUNTIME_ERROR && maskCalls() == 2);
+        g_amdDispatchResult = FFX_API_RETURN_OK;
+        g_compare = false;  // back to WrongGPU: AMD's context still exists, the call still reaches it (next frames may go to AMD)
+        CHECK(fe->Dispatch(&ctx, &mask.header) == FFX_API_RETURN_OK && maskCalls() == 3);
+        CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    }
+
+    // A frame the stand-in cannot take (no output): AMD's context is made from the saved create parameters.
+    Reset();
+    g_resources[kColor] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+    g_resources[kDepth] = {dxgi::R32_FLOAT, 2560, 1440};
+    g_resources[kMotion] = {dxgi::R16G16_FLOAT, 2560, 1440};
+    g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+    {
+        auto fe = MakeFrontEnd(Config{});
+        UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
+        ffxContext ctx = nullptr;
+        CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK);
+        ffxDispatchDescUpscale good = MakeDispatch();
+        CHECK(fe->Dispatch(&ctx, &good.header) == FFX_API_RETURN_OK);
+        CHECK(fe->Dispatch(&ctx, &mask.header) == FFX_API_RETURN_OK && g_amd.empty());  // no AMD context yet
+        ffxDispatchDescUpscale bad = MakeDispatch();
+        bad.output.resource = nullptr;
+        CHECK(fe->Dispatch(&ctx, &bad.header) == FFX_API_RETURN_OK);
+        CHECK(g_amd.size() == 2 && g_amd[0].fn == "create" && g_amd[1].fn == "dispatch" && maskCalls() == 0);
+        CHECK(fe->Dispatch(&ctx, &mask.header) == FFX_API_RETURN_OK);
+        CHECK(g_amd.size() == 3 && maskCalls() == 1 && g_amd.back().context == g_amd[0].context);
+        CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    }
 }
 
 // Interface version 2: a version 2 backend gets the services and the version 2 frame; a version 1 backend gets the
@@ -2725,6 +2792,49 @@ static void TestCustomSlotFailedCreate() {
     ResetHost();
 }
 
+// Issue #60: a create that fails for a reason bound to the size (out of VRAM at 4K) is remembered per size: a create
+// with the same sizes and flags is still stopped, a create at another size gets its own attempt and works.
+static void TestCustomSlotFailureKeyHasSize() {
+    Reset();
+    ResetHost();
+    g_originalAvailable = false;
+    g_compareApi = &g_hostApi;
+    g_failCreateOutputWidth = 3840;  // the runtime cannot create at 4K, and only there
+    g_activateOn = true;
+    Config config;
+    config.hosted = true;
+    config.customSlot = true;
+    auto fe = MakeFrontEnd(config);
+    auto create = [&](uint32_t renderW, uint32_t renderH, uint32_t outW, uint32_t outH, uint32_t flags, ffxContext* ctx) {
+        UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE | flags, true);
+        c.version.versionId = kWrongGpuProviderVersionId;
+        c.upscale.maxRenderSize = {renderW, renderH};
+        c.upscale.maxUpscaleSize = {outW, outH};
+        return fe->CreateContext(ctx, &c.upscale.header, nullptr);
+    };
+    ffxContext ctx = nullptr;
+    // 4K: fails, and is remembered.
+    CHECK(create(2560, 1440, 3840, 2160, 0, &ctx) == FFX_API_RETURN_ERROR_RUNTIME_ERROR && !ctx);
+    CHECK(g_createCalls == 1 && CountLog("this failure is remembered for the session") == 1);
+    // The same parameters again (a host that re-creates in a loop): no new attempt.
+    CHECK(create(2560, 1440, 3840, 2160, 0, &ctx) == FFX_API_RETURN_ERROR_RUNTIME_ERROR && !ctx);
+    CHECK(g_createCalls == 1);
+    // 2560x1440: a new attempt, which works, and the context is WrongGPU's own.
+    CHECK(create(1706, 960, 2560, 1440, 0, &ctx) == FFX_API_RETURN_OK && ctx);
+    CHECK(g_createCalls == 2 && fe->OwnContextCount() == 1 && g_created == 1);
+    CHECK(g_hostCreates == 0 && g_amd.empty());  // not AMD's context
+    CHECK(fe->DestroyContext(&ctx, nullptr) == FFX_API_RETURN_OK && !ctx && fe->OwnContextCount() == 0);
+    // A different maximum render size at the failing output size is another attempt too (it fails again here: the
+    // fake fails at that width), and it is remembered for its own key.
+    CHECK(create(1920, 1080, 3840, 2160, 0, &ctx) == FFX_API_RETURN_ERROR_RUNTIME_ERROR && !ctx);
+    CHECK(g_createCalls == 3);
+    CHECK(create(1920, 1080, 3840, 2160, 0, &ctx) == FFX_API_RETURN_ERROR_RUNTIME_ERROR && g_createCalls == 3);
+    // The create flags are part of the key as well.
+    CHECK(create(2560, 1440, 3840, 2160, FFX_UPSCALE_ENABLE_DEPTH_INVERTED, &ctx) == FFX_API_RETURN_ERROR_RUNTIME_ERROR && !ctx);
+    CHECK(g_createCalls == 4);
+    ResetHost();
+}
+
 // 0.6.0 follow-up (a tester's CONTROL Resonant): custom slot, the upscaler refusing the game's inputs for good
 // (WG_ERROR_INPUT: a colour texture with mips before the runtime took them) and the host making a new context after
 // every failed dispatch (393 in 3 minutes): one create, one dispatch, then the remembered failure makes every new
@@ -3045,6 +3155,7 @@ static void TestModelLookup() {
 
 int main() {
     TestCustomSlotFailedCreate();
+    TestCustomSlotFailureKeyHasSize();
     TestCustomSlotInputRefused();
     TestOutputResize();
     TestBrokenNotCalledAgain();
@@ -3110,6 +3221,7 @@ int main() {
     TestParkedContexts();
     TestHostedSwitchNotParked();
     TestCompare();
+    TestReactiveMaskForwarded();
     TestSlowCreate();
     TestInterfaceVersions();
     TestAmdMode();

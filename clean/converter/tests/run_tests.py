@@ -29,6 +29,8 @@ from synth import keyed_sha256, shipped_like_case  # noqa: E402
 
 DEFAULT_MAP = os.path.normpath(os.path.join(HERE, "..", "..", "..", "data", "preset-M.v1.map.json"))
 DEFAULT_KMAP = os.path.normpath(os.path.join(HERE, "..", "..", "..", "data", "preset-K.v1.map.json"))
+DEFAULT_LMAP = os.path.normpath(os.path.join(HERE, "..", "..", "..", "data", "preset-L.v1.map.json"))
+MSG_NO_PRESET_L = "This DLSS file has no preset-L model."  # the message's start (its minimum version: api.cpp)
 DEFAULT_T5 = os.path.normpath(os.path.join(HERE, "..", "..", "..", "data", "k48-capped-softmax-test.json"))
 DEFAULT_T7 = os.path.normpath(os.path.join(HERE, "..", "..", "..", "data", "lz4-block-test.json"))
 DTYPE_CODE = {"float32": 0, "uint8": 1, "int32": 2}
@@ -265,6 +267,142 @@ def test_shipped_map_validates(r, shipped_map):
     code, so, se = r.run(shipped_map, [big], out)
     r.check("real map: valid, W absent -> no preset-M", code == EXIT["no_preset_m"] and MSG["no_preset_m"] in so, so + se)
     r.check("real map: nothing written", not os.path.exists(os.path.join(out, "model.wgcm")))
+
+
+def test_l_real_map(r, lmap):
+    """Model L (#89): the delivered preset-L map (data/preset-L.v1.map.json, the spec side's revision v1.1; map version 1,
+    W, D, K; "preset": "L"). It validates; our own random file gives preset L's message, with --preset L and without it
+    (the map names its preset); a mismatching --preset is refused; L's perm dec0_values is its own 13-entry table (L has
+    no latent gate; M's map keeps its 17); and its exact layout converts our own random data at two placements, every
+    tensor of every stage checked against the reference."""
+    import random
+    with open(lmap, "rb") as f:
+        m = json.load(f)
+    r.check("preset-L map: version 1, sources W, D and K, \"preset\": \"L\"",
+            m["version"] == 1 and sorted(m["sources"]) == ["D", "K", "W"] and m.get("preset") == "L", (m["version"], sorted(m["sources"])))
+    dv = m["perms"].get("dec0_values", [])
+    r.check("preset-L map: perm dec0_values has 13 entries, a permutation of 0..12 (role i reads block channel dv[i])",
+            len(dv) == 13 and sorted(dv) == list(range(13)), dv)
+    with open(DEFAULT_MAP, "rb") as f:
+        r.check("...the preset-M map keeps its own 17-entry dec0_values", len(json.load(f)["perms"]["dec0_values"]) == 17)
+    rng = random.Random(29)
+    lw = m["sources"]["W"]["length"]
+    out = r.path("l-real/out", "x")[:-2]
+    big = r.write("l-real/nomodel.dll", rng.randbytes(lw + 100_000))
+    code, so, se = r.run(lmap, [big], out, extra=("--preset", "L"))
+    r.check("preset-L map --preset L: valid, W absent -> exit 12, preset L's message", code == EXIT["no_preset_m"] and MSG_NO_PRESET_L in so, so + se[-400:])
+    r.check("...the log names the preset", "preset L" in se, se[-400:])
+    code, so, se = r.run(lmap, [big], out)
+    r.check("preset-L map without --preset: the map names preset L (its message)", code == EXIT["no_preset_m"] and MSG_NO_PRESET_L in so, so)
+    # the same map without its "preset" key (the delivered v1 had none): read as version 1, preset M's message
+    plain = copy.deepcopy(m)
+    del plain["preset"]
+    code, so, se = r.run(r.write("l-real/no-key.json", plain), [big], out)
+    r.check("the preset-L map without its key and without --preset: preset M's message (version 1)", code == EXIT["no_preset_m"] and MSG["no_preset_m"] in so, so)
+    for asked in ("K", "F"):
+        code, so, se = r.run(lmap, [big], out, extra=("--preset", asked))
+        r.check("preset-L map --preset %s: converter data damaged" % asked, code == EXIT["map_damaged"] and MSG["map_damaged"] in so, so)
+    code, so, se = r.run(lmap, [big], out, extra=("--preset", "Q"))
+    r.check("--preset Q (unknown): usage error", code == EXIT["usage"] and "unknown preset" in so, so)
+    r.check("preset-L map: nothing written", not os.path.exists(os.path.join(out, "model.wgcm")))
+    for seed, w_off in ((21, 4096), (22, 4096 + 6)):
+        t0 = time.time()
+        case = shipped_like_case(lmap, seed=seed, w_offset=w_off)
+        label = "preset-L layout(seed %d, W at %d)" % (seed, w_off)
+        dll = r.write("l-real/%d/fake.dll" % seed, case.file)
+        mp = r.write("l-real/%d/map.json" % seed, case.map)
+        o = r.path("l-real/%d/out" % seed, "x")[:-2]
+        code, so, se = r.run(mp, [dll], o, extra=("--preset", "L"))
+        r.check(label + ": exit 0", code == 0 and SUCCESS in so, so + se[-600:])
+        with open(mp, "rb") as f:
+            check_output(r, label, case, o, f.read())
+        r.check(label + ": offsets", logged_offsets(se) == case.placements, "%s vs %s" % (logged_offsets(se), case.placements))
+        r.check(label + ": every stage digest matches", ("all %d stage digests match" % len(case.map["stages"])) in se, se[-400:])
+        print("%s: %.1f s" % (label, time.time() - t0))
+
+
+def test_preset_l(r):
+    """Model L (#89): a map that names preset L ("preset": "L", map version 1) next to a preset-M map, both reading one
+    synthetic library file in which L's parameter block lies directly before M's. Each map converts its own block, and
+    only it; a file without a preset's block fails with that preset's message (exit 12)."""
+    case_l, case_m, l_only, m_only = cases.preset_pair_case()
+    lp = r.write("preset-l/map-L.json", case_l.map)
+    mp = r.write("preset-l/map-M.json", case_m.map)
+    both = r.write("preset-l/both.dll", case_l.file)
+    lo = r.write("preset-l/l-only.dll", l_only)
+    mo = r.write("preset-l/m-only.dll", m_only)
+    for label, c, p in (("preset L", case_l, lp), ("preset M next to L", case_m, mp)):
+        out = r.path("preset-l", "out-" + c.name, "x")[:-2]
+        code, so, se = r.run(p, [both], out)
+        r.check(label + ": exit 0", code == 0 and SUCCESS in so, so + se[-600:])
+        with open(p, "rb") as f:
+            check_output(r, label, c, out, f.read())
+        r.check(label + ": W found where it was placed", ("source W at offset %d " % c.placements["W"]) in se, se[-800:])
+    r.check("preset L: its extra stage is in the L output only",
+            "inenc_extra" in case_l.expected and "inenc_extra" not in case_m.expected and
+            os.path.isdir(os.path.join(r.work, "preset-l", "out-pair-L", "raw", "inenc_extra")) and
+            not os.path.exists(os.path.join(r.work, "preset-l", "out-pair-M", "raw", "inenc_extra")))
+    msg_l = "This DLSS file has no preset-L model. Version 310.5 or newer is needed."
+    for label, p, f, want in (("preset-L map, a file with only preset M's block", lp, mo, msg_l),
+                              ("preset-M map, a file with only preset L's block", mp, lo, MSG["no_preset_m"])):
+        code, so, se = r.run(p, [f], r.path("preset-l", "out-fail", "x")[:-2])
+        r.check(label + ": exit 12 with that preset's message", code == EXIT["no_preset_m"] and want in so, "code %d, out %r" % (code, so))
+    # the preset name decides only the message: the same L map without its field reads as preset M, and converts the same
+    plain = copy.deepcopy(case_l.map)
+    del plain["preset"]
+    pp = r.write("preset-l/map-L-no-field.json", plain)
+    code, so, se = r.run(pp, [mo], r.path("preset-l", "out-fail2", "x")[:-2])
+    r.check("the L map without its \"preset\" field: read as preset M (its message)", code == 12 and MSG["no_preset_m"] in so, so)
+    out = r.path("preset-l", "out-no-field", "x")[:-2]
+    code, so, se = r.run(pp, [both], out)
+    r.check("...and it converts the same tensors", code == 0, so + se[-400:])
+    with open(pp, "rb") as f:
+        check_output(r, "L map without the field", case_l, out, f.read())
+    # a preset name that does not fit the map version, or is not known: converter data damaged, before any file is read
+    for bad in ("K", "F", "X", "l"):
+        m2 = copy.deepcopy(case_l.map)
+        m2["preset"] = bad
+        code, so, se = r.run(r.write("preset-l/bad-%s.json" % bad, m2), [both], r.path("preset-l", "out-bad", "x")[:-2])
+        r.check("\"preset\": %r in a version-1 map: converter data damaged" % bad, code == EXIT["map_damaged"] and MSG["map_damaged"] in so, so)
+
+
+def test_l_shaped(r, m_map_path):
+    """Model L (#89): an L-shaped map made from the shipped preset-M map's layout (cases.l_shaped_map: the encoder's
+    output linear 64 x 128, a stage with two linears and a C = 32 Swin block before enc0, a C = 32 Swin block before
+    dec0; "preset": "L"), filled with our own random data like the shipped-like cases. Every tensor of every stage is
+    checked against the reference, at two placements of the block; a file without the block gives preset L's message."""
+    with open(m_map_path, "rb") as f:
+        lmap = cases.l_shaped_map(json.load(f))
+    mp_in = r.write("l-shaped/layout.json", lmap)
+    names = [st["stage"] for st in lmap["stages"]]
+    r.check("L-shaped map: enc0_pre before enc0, dec0_pre before dec0, no filter group",
+            names.index("enc0_pre") + 1 == names.index("enc0") and names.index("dec0_pre") + 1 == names.index("dec0") and "filter" not in names, names)
+    for seed, w_off in ((7, 4096), (8, 4096 + 2)):
+        t0 = time.time()
+        case = shipped_like_case(mp_in, seed=seed, w_offset=w_off)
+        label = "L-shaped(seed %d, W at %d)" % (seed, w_off)
+        dll = r.write("l-shaped/%d/fake.dll" % seed, case.file)
+        mp = r.write("l-shaped/%d/map.json" % seed, case.map)
+        out = r.path("l-shaped/%d/out" % seed, "x")[:-2]
+        code, so, se = r.run(mp, [dll], out)
+        r.check(label + ": exit 0", code == 0 and SUCCESS in so, so + se[-600:])
+        with open(mp, "rb") as f:
+            check_output(r, label, case, out, f.read())
+        r.check(label + ": offsets", logged_offsets(se) == case.placements, "%s vs %s" % (logged_offsets(se), case.placements))
+        r.check(label + ": every stage digest matches", ("all %d stage digests match" % len(case.map["stages"])) in se, se[-400:])
+        enc0 = dict((t[0], t) for t in case.expected["enc0"])
+        r.check(label + ": the encoder's output linear is 64 x 128 (float32)", len(enc0["W"][1]) == 64 * 128 * 4)
+        r.check(label + ": the C = 32 blocks have their 11 records",
+                [t[0] for t in case.expected["dec0_pre"]] == ["gamma1", "gamma2", "Wqk", "Wv", "B", "Wp", "bp", "W1", "b1", "W2", "b2"] and
+                len(case.expected["enc0_pre"]) == 15)
+        print("%s: %.1f s" % (label, time.time() - t0))
+    # the same layout against a file without its block: preset L's message (exit 12)
+    case = shipped_like_case(mp_in, seed=9)
+    mp = r.write("l-shaped/9/map.json", case.map)
+    other = shipped_like_case(mp_in, seed=10)  # another random block of the same layout: not this map's
+    code, so, se = r.run(mp, [r.write("l-shaped/9/other.dll", other.file)], r.path("l-shaped/9/out", "x")[:-2])
+    r.check("L-shaped map, a file without its block: exit 12 with preset L's message",
+            code == EXIT["no_preset_m"] and "This DLSS file has no preset-L model." in so, "code %d, out %r" % (code, so))
 
 
 def mutate(m, fn):
@@ -1003,6 +1141,7 @@ def main():
     ap.add_argument("--work", default=os.path.join(HERE, "..", "build", "test-work"))
     ap.add_argument("--map", default=DEFAULT_MAP, help="the shipped map (only its layout is used)")
     ap.add_argument("--kmap", default=DEFAULT_KMAP, help="the shipped preset-K map (only its layout is used)")
+    ap.add_argument("--lmap", default=DEFAULT_LMAP, help="the shipped preset-L map (only its layout is used)")
     ap.add_argument("--t5", default=DEFAULT_T5, help="spec 48-T5 capped_softmax vectors")
     ap.add_argument("--t7", default=DEFAULT_T7, help="spec 08-T7 block decompression vectors")
     ap.add_argument("--quick", action="store_true", help="skip the large cases")
@@ -1013,12 +1152,14 @@ def main():
     r = Runner(os.path.abspath(args.exe), os.path.abspath(args.work))
     t0 = time.time()
     test_errors(r)
+    test_preset_l(r)
     test_filter(r, args.t7)
     test_k_errors(r)
     if os.path.exists(args.map):
         test_shipped_map_validates(r, args.map)
         if not args.quick:
             test_shipped_like(r, args.map)
+            test_l_shaped(r, args.map)
     else:
         print("note: shipped map not found at %s; skipping the layout tests" % args.map)
     if os.path.exists(args.kmap):
@@ -1027,6 +1168,10 @@ def main():
             test_k_shipped_like(r, args.kmap)
     else:
         print("note: preset-K map not found at %s; skipping its layout tests" % args.kmap)
+    if os.path.exists(args.lmap):
+        test_l_real_map(r, args.lmap)
+    else:
+        print("note: preset-L map not found at %s; skipping its layout tests" % args.lmap)
     if os.path.exists(args.t5):
         test_k_t5(r, args.t5)
         if not args.quick:

@@ -239,10 +239,10 @@ int RunLauncherUiDump(const wstring& outFile, const wstring& shotDir, bool noSca
             const std::vector<GameEntry> keepGames = v.games;
             GameEntry base = v.games[(size_t)gi];
             base.last.found = false;
-            auto made = [&](const wstring& name, GameStatus st, bool played) {
+            auto made = [&](const wstring& name, GameStatus st, bool ran) {
                 GameEntry e = base;
                 e.name = name; e.dir = Join(base.dir, name); e.exe = Join(e.dir, L"game.exe"); e.status = st;
-                e.last.found = played; e.last.when = played ? L"2026-10-31 20:00" : L"";
+                e.last.found = ran; e.last.when = ran ? L"2026-10-31 20:00" : L"";
                 return e;
             };
             auto focusName = [] { for (auto& h : v.hits) if (h.id == v.focus) return h.name; return wstring(); };

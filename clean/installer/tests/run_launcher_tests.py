@@ -3119,6 +3119,7 @@ def main():
     test_experimental_and_shared_model(t, opti)
     test_orphan(t, opti)
     test_rc6_hunt(t, opti)
+    __import__("launcher_ignore_cases").run(T, t, opti, game)
     test_adopt_and_self_install(t, opti, a.baseline)
     test_launcher_uninstall(t, opti)
     test_data_root_junctions(t)

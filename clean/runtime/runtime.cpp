@@ -20,6 +20,7 @@
 #include "embedded.h"
 #include "fpconv.h"
 #include "model.h"
+#include "model_select.h"
 #include "runtime_core.h"
 #include "wg_runtime.h"
 
@@ -483,9 +484,10 @@ struct Runtime {
     ModelId model_id = ModelId::M;  // runtime option model=K (clean/k/runtime/model_k.h); default model M
     if (std::string merr; !model_from_options(c, &model_id, &merr)) return fail(merr);
     if (c.backend < 0 || c.backend > 3) return fail("unknown runtime backend");
-    if (native_direct_io && (!external_io || c.backend != 3 || model_id != ModelId::M))
-      return fail("native direct resources require external_io, backend 3 and Model M");
-    if (c.backend == 3 && model_id != ModelId::M) return fail("native D3D12 supports Model M only");
+    const bool native_ok = model_info(model_id).native_d3d12;  // model_select.h (Model M only today)
+    if (native_direct_io && (!external_io || c.backend != 3 || !native_ok))
+      return fail("native direct resources require external_io, backend 3 and " + native_d3d12_models());
+    if (c.backend == 3 && !native_ok) return fail("native D3D12 supports " + native_d3d12_models() + " only");
     d3d12_native = c.backend == 3;
     if (c.backend == 3 && external && !native_direct_io)
       return fail("native D3D12 external I/O requires the private direct-resource route");
@@ -2237,9 +2239,9 @@ const char* const* runtime_timing_labels(Runtime* rt) {
 #endif
 }
 #ifdef WG_NO_MODEL_K
-const char* runtime_model(Runtime*) { return "M"; }
+const char* runtime_model(Runtime*) { return model_info(ModelId::M).name; }
 #else
-const char* runtime_model(Runtime* rt) { return rt->k ? "K" : "M"; }
+const char* runtime_model(Runtime* rt) { return model_info(rt->k ? ModelId::K : ModelId::M).name; }
 #endif
 void runtime_recon_size(Runtime* rt, int* dw, int* dh) {
   *dw = rt->dw;

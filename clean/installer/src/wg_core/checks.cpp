@@ -61,7 +61,8 @@ GpuInfo DetectGpu() {
 
 // The AMD HIP runtime (amdhip64_7.dll) the clean runtime loads (spec 30 answer 7): from the system search path first
 // (System32, where the AMD Software: Adrenalin Edition driver installs it; then the PATH folders), then the newest
-// C:\Program Files\AMD\ROCm\<version>\bin (HIP SDK), then HIP_PATH. WRONGGPU_HIP_RUNTIME overrides (development).
+// C:\Program Files\AMD\ROCm\<version>\bin (HIP SDK), then HIP_PATH. WRONGGPU_HIP_RUNTIME overrides (development; read
+// only by a WRONGGPU_TESTING build).
 const wchar_t* const kHipDll = L"amdhip64_7.dll";
 const wchar_t* const kDriverPage = L"https://www.amd.com/en/support/download/drivers.html";
 const char* const kSupportedArch[] = {"gfx1201", "gfx1200"};  // RDNA 4: the RX 9070 family and the RX 9060 family
@@ -103,9 +104,11 @@ std::vector<wstring> HipCandidates() {
         }
         return c;
     }
-#endif
-    wstring env = EnvVar(L"WRONGGPU_HIP_RUNTIME");
+    // 0.6.1: the development override only in a WRONGGPU_TESTING build; a release build never reads it (a developer's
+    // mock HIP library set at install time was recorded in hip-runtime.txt)
+    const wstring env = EnvVar(L"WRONGGPU_HIP_RUNTIME");
     if (!env.empty()) c.push_back(env);
+#endif
     wchar_t sys[MAX_PATH];
     if (GetSystemDirectoryW(sys, MAX_PATH)) c.push_back(Join(sys, kHipDll));
     wstring path = EnvVar(L"PATH");
@@ -502,8 +505,10 @@ Checks RunChecks(Context& ctx, const GameTarget& t, SystemInfo& sys, const Model
     else if (model->ok()) set(L_MODEL, CK_OK, L"Model data: " + (model->reused ? wstring(L"already prepared on this PC")
                                                                              : BaseName(model->dll) + L" " + (model->version.empty() ? wstring() : model->version + L" ") +
                                                                                    L"from " + model->origin + L", converted on this PC"));
-    else set(L_MODEL, CK_FAIL, model->damaged ? model->error : L"No usable DLSS model file (nvngx_dlss.dll 310.5 or newer) - click \"Model file...\"",
-             model->damaged ? EXIT_DAMAGED : EXIT_NO_MODEL);
+    // model->code: an ignore-list case (convert_ignore.h) with its own words: a list that can't be read (10), every file found
+    // listed, the model data on this PC converted from a listed file (5)
+    else set(L_MODEL, CK_FAIL, model->damaged || model->code ? model->error : L"No usable DLSS model file (nvngx_dlss.dll 310.5 or newer) - click \"Model file...\"",
+             model->damaged ? EXIT_DAMAGED : model->code ? model->code : EXIT_NO_MODEL);
     if (!have) set(L_CONFLICT, CK_NA, L"Other upscaler mods and older installs");
     else if (const Finding* no = t.coexist.refusal(); no && no->tool != Tool::AntiCheat)  // the rules table: no override
         set(L_CONFLICT, CK_FAIL, no->what + L": " + no->message, no->code ? no->code : EXIT_REFUSED);

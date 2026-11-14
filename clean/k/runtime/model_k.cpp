@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdlib>
 
+#include "../../runtime/model_select.h"
 #include "../../runtime/wg_runtime.h"
 
 namespace wgrt {
@@ -123,21 +124,14 @@ bool model_from_options(const WgRtConfig& c, ModelId* model, std::string* err) {
   const char* env = std::getenv("WG_RUNTIME_OPTIONS");
   const std::string text = std::string(c.runtime_options ? c.runtime_options : "") + ";" + (env ? env : "");
   *model = ModelId::M;
-  for (size_t a = 0; a <= text.size();) {
-    size_t b = text.find_first_of(";,", a);
-    if (b == std::string::npos) b = text.size();
-    const std::string kv = text.substr(a, b - a);
-    a = b + 1;
-    if (kv.compare(0, 6, "model=") != 0) continue;
-    const std::string v = kv.substr(6);
-    if (v == "M" || v == "m") {
-      *model = ModelId::M;
-    } else if (v == "K" || v == "k") {
-      *model = ModelId::K;
-    } else {
-      *err = "unknown model \"" + v + "\" in the runtime options (known: M, K)";
-      return false;
-    }
+  std::string bad;
+  if (!last_model_option(text, model, &bad)) {
+    *err = "unknown model \"" + bad + "\" in the runtime options (known: M, K)";
+    return false;
+  }
+  if (*model == ModelId::L) {  // #89: recognised, not part of the runtime yet
+    *err = model_not_built_yet(ModelId::L);
+    return false;
   }
   return true;
 }

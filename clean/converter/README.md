@@ -22,6 +22,34 @@ versions 1-4 that uses a version-5-only feature (`groups`, `field`, `encoding: n
 (spec 57 section 5.1); the op names `f16` and `exp` mean spec 08's operations in versions 1-4 and spec 57's in
 version 5.
 
+**The preset, by name.** A map may name its preset in the optional top-level field `"preset"` (text: `"M"`, `"K"` or
+`"F"`; the table `known_presets` in `src/map.cpp`). The name decides the player's "no preset-X model" message (exit 12);
+the version still decides the map's features. A map without the field gets the preset its version always meant
+(versions 1 and 4: M; 2 and 3: K; 5: F), so the shipped maps are read exactly as before. A preset name that is not known,
+not text, or whose preset does not use the map's version (for example `"preset": "K"` in a version-1 map) is "converter
+data damaged". This is how a further preset that reuses an existing map version is added: one row in that table.
+
+**Preset L** (Model L, issue #89) is such a row: `"preset": "L"` in a map of version 1 or 4. Its maps use the record
+kinds of preset M's (no new element format, op or source kind); its parameters are a block of their own in the same
+library file as preset M's, found by its own length and hashes like any source. Its map,
+`data/preset-L.v1.map.json` (the spec side's revision v1.1; map version 1; sources W, D and K), names its preset
+(`"preset": "L"`), so `wronggpu-convert --map data\preset-L.v1.map.json --dll <nvngx_dlss.dll> --out <dir>` reads it as
+preset L. A caller may still name the preset (`--preset L`; API `load_map_bytes(..., "L")`): a map without the field is
+then read as that preset when the preset uses the map's version; a map with the field must name the same preset;
+anything else is "converter data damaged", and an unknown `--preset` is a usage error (exit 1). Its perm
+`dec0_values` is L's own 13-entry table (role order A0, A1, A2, B0, B1, B2, Cx, Cy, Crho, latent candidate 0..3; role i
+reads decoder-block channel `dec0_values[i]`; L has no latent gate); no tensor reads it, so it is for the packer and
+runtime, and the converted tensors do not depend on it.
+`tests/run_tests.py` checks the real map (validation, the messages, `--preset` mismatches, the 13-entry table) and converts our own random
+data in its exact layout at two placements. It also covers preset L with a synthetic library file holding an L block
+directly before an M block, and maps for both: each converts its own block, and a file without a preset's block fails
+with that preset's message. It also converts an **L-shaped** map
+(`tests/cases.py` `l_shaped_map`): preset M's map layout with the input encoder's output linear 64 x 128, and two new
+stages of L's record kinds (two linears and a C = 32 Swin block before `enc0`, a C = 32 Swin block before `dec0`),
+filled with our own random data. Its stage names and placement are stand-ins; the real map defines its own. A map of
+versions 1-4 must still have the sources W, D and K: should preset L have no dither table or constants, that rule
+becomes per preset.
+
 ## Preset F (map version 5, spec 57)
 
     wronggpu-convert --map data\preset-F.v1.map.json --dll <nvngx_dlssd.dll> [--dll <other> ...] --out <dir> [--raw]
@@ -105,6 +133,7 @@ Preset K, for the spec team (48-T1, 48-T6):
 | 11 | file smaller than W (or above 4 GiB) | This is not a DLSS model file. |
 | 12 | M: W not found. K: T not found | This DLSS file has no preset-M model. Version 310.5 or newer is needed. / This DLSS file has no preset-K model. Version 310.1 or newer is needed. (+ "This file is version a.b.c.d." when the file has a version resource) |
 | 12 | F: W not found (spec 57 section 8) | This DLSS file has no preset-F (Ray Reconstruction) model. Version 310.7 or newer is needed. (+ the file version when there is one) |
+| 12 | L: W not found (a map with `"preset": "L"`) | This DLSS file has no preset-L model. Version 310.5 or newer is needed. (+ the file version when there is one) |
 | 13 | M: W found, D or K not found. K: T found, O not found (spec 48 draft 4 section 8). F: W found, another source (or every variant of IMG-IN) not found. The log names the missing source | This DLSS build is not supported yet (model data found, but other parts differ). |
 | 14 | F only (spec 57 section 8): a constant's sites disagree, a `const_f16x2` with unequal halves, a `const_f16lo` with a non-zero high half, a non-finite value where 57.6.1 or 57.6.2 forbids it, an RN16 overflow, the two reads of an `also` tensor differ, a `require` or check fails, the attention constants fail 57.6.4. The log names the tensor or check (never a value). Not an installer error: the next file is tried | This DLSS build is not supported yet (model data found, but other parts differ). |
 | 20 | map invalid: unreadable, bad JSON, bad format or version, unknown op / locate / element / encoding / dtype (or one its version does not define), missing field, unknown perm, perm not dividing its axis, `axes` length ≠ `shape` length, a segment that is not a positive multiple of 4 or runs past the end of T, K sources other than T (and O), `capped_softmax` without 8 × 8 last axes, a source F that is not a keyed optional `lz4-block` block source with variants, a field outside the decoded text, variants with different numbers of fields, a `digest` list whose length is not the number of variants (or a list for a group without variants), a group that mixes tensors from F and from other sources, … Also (spec 08 section 4.3): a variant of F matched its hashes, but the block does not decompress to `decoded_length`, does not match `decoded_sha256`, or a field is not eight hexadecimal digits | Installer error: the converter data is damaged. … |

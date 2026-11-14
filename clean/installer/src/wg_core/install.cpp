@@ -32,17 +32,22 @@ static wstring Retold(const wstring& was, const wstring& now) {
     const size_t the = at == wstring::npos ? wstring::npos : was.rfind(L" The ", at);
     return kPartlyRestored + now + (the == wstring::npos ? wstring() : was.substr(the));
 }
-static void MigrateOurSettings(Context& ctx, const wstring& dir, Ui& ui) {
+// Brings the earlier install's wronggpu.ini up to date when it is WrongGPU's, and returns its bytes then in `carried` (true):
+// the new install starts its wronggpu.ini from them. The restore before the new install deals with the file by the
+// ownership rule (WrongGPU's file goes, the player's original from before WrongGPU comes back and is backed up again by the
+// new install), so the player's choices that WrongGPU wrote into it are read here, before it.
+static bool MigrateOurSettings(Context& ctx, const wstring& dir, Ui& ui, string& carried) {
     Record m;
     const wstring p = Join(dir, L"wronggpu.ini");
-    if (!LoadRecord(RecordPath(dir), m) || m.legacy || !IsFile(p)) return;
+    if (!LoadRecord(RecordPath(dir), m) || m.legacy || !IsFile(p)) return false;
     const wstring before = Sha256File(p);
     Entry* ours = nullptr;
     for (auto& e : m.e) if (e.action == L"copy" && IEq(e.rel, L"wronggpu.ini") && IEq(e.inst, before)) ours = &e;
-    if (!ours) return;
+    if (!ours) return false;
     MigrateSettings(ctx, dir, m.version, ui);
     const wstring after = Sha256File(p);
     if (!after.empty() && !IEq(after, before)) { ours->inst = after; SaveRecord(RecordPath(dir), m); }
+    return ReadAll(p, carried) && IEq(Sha256Bytes(carried.data(), carried.size()), ours->inst);
 }
 
 #if WRONGGPU_DIRECT_ROUTE
@@ -63,7 +68,8 @@ void RemoveEarlierDirect(Context& ctx, const GameTarget& target, Ui& ui, std::ve
         Record r;
         if (!LoadRecord(RecordPath(old), r) || r.legacy || HostedRecord(r)) continue;
         ui.log(L"An earlier installation was found in " + old + L" - restoring the original files first.");
-        MigrateOurSettings(ctx, old, ui);
+        string carried;  // WrongGPU's wronggpu.ini there (the player's choices it wrote): carried to the exe folder below
+        const bool carry = MigrateOurSettings(ctx, old, ui, carried);
         try {
             for (auto& w : DoRestore(ctx, old, ui, false, true))
                 if (!EndsWithI(w, L": wronggpu.ini")) warnings.push_back(w);  // (the settings file is moved below)
@@ -75,7 +81,11 @@ void RemoveEarlierDirect(Context& ctx, const GameTarget& target, Ui& ui, std::ve
         // a wronggpu.ini the restore left there (changed since WrongGPU wrote it: the player's): moved to the exe folder when
         // nothing is there yet, else left where it is (never deleted by its name; the ownership rule, record.h)
         const wstring from = Join(old, L"wronggpu.ini"), to = Join(target.dir, L"wronggpu.ini");
-        if (IsFile(from)) {
+        if (carry && !IsFile(to)) {  // WrongGPU's own settings file went with the restore: its content goes on in the exe folder
+            WriteFileAtomic(to, carried.data(), carried.size());
+            ui.log(L"wronggpu.ini (your settings) carried over to " + target.dir);
+        }
+        if (IsFile(from) && !(carry && IEq(Sha256File(from), Sha256Bytes(carried.data(), carried.size())))) {
             if (!IsFile(to) && MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH)) ui.log(L"wronggpu.ini (your settings) moved to " + target.dir);
             else {
                 warnings.push_back(kPartlyRestored + wstring(L"Left in place (changed since install): ") + from + L" (the earlier installation's settings, edited since; " +
@@ -312,6 +322,7 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     if (rr) {
         ui.step(0, 1, L"Preparing the Ray Reconstruction data");
         const RrDataState rd = FindRrData(ctx, &target, L"", {});
+        for (auto& n : rd.notes) { ui.log(n); warnings.push_back(n); }  // the ignore lists' lines (an RR data kept unchecked)
         wstring why;
         rrData = rd.ok && WriteRrData(ctx, rd, &why);
         if (!rrData) {  // nothing fails silently: the operation's result says it too (the window's note after its success)
@@ -353,9 +364,11 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
         }
     } earlierGone{dir, ui};
     std::map<wstring, wstring> keptByRestore;  // recorded files the restore left in place (changed since the install), with its warning
+    string carriedIni;         // the earlier install's wronggpu.ini when it was WrongGPU's: the new one starts from it
+    bool haveCarried = false;
     if (IsFile(RecordPath(dir))) {
         ui.log(L"An earlier installation was found - restoring the original files first.");
-        MigrateOurSettings(ctx, dir, ui);
+        haveCarried = MigrateOurSettings(ctx, dir, ui, carriedIni);
         earlierGone.armed = true;
         try {
             for (auto& w : DoRestore(ctx, dir, ui, false, true, &keptByRestore)) warnings.push_back(w);
@@ -398,8 +411,11 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     std::vector<OptiFile> optiFiles;
     wstring proxy, proxyReason;
     CoexistReport co;
+    // the new wronggpu.ini starts from the earlier install's (its choices) when that was WrongGPU's; else from the file there now
+    // (the player's own, which the install backs up first)
     string selectedIni;
-    ReadAll(Join(dir, L"wronggpu.ini"), selectedIni);
+    if (haveCarried) selectedIni = carriedIni;
+    else ReadAll(Join(dir, L"wronggpu.ini"), selectedIni);
     string existingUpscaler, existingSection;
     if (!IniGetFrontEnd(selectedIni, "upscaler", &existingUpscaler, &existingSection))
         selectedIni = IniSet(selectedIni, "fsr", "upscaler", "network");
