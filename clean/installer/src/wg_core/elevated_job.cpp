@@ -294,17 +294,21 @@ bool SameHash(const wstring& a, const wstring& b) { return a.size() == 64 && IEq
 bool UsesPackage(Op op) { return op == Op::Install || op == Op::Update || op == Op::Repair; }
 
 // The folders a job may change (secure_fs.h): the worker's private folder, the player's local app data folder, the game's
-// folder (its root: GameRoot of the exe's folder or of the job's folder) and the player's Documents folder when it is there.
-// Each is opened and held by the job's guard before any job runs.
+// folder (its root: GameRoot of the exe's folder or of the job's folder) and the player's Documents folder. Each is opened
+// and held by the job's guard before any job runs; one that is not there is not a root (nothing in it is changed: the job
+// then fails when it runs, as it would have), one with a link on its way or elsewhere than its path says is refused.
 bool GuardJob(const WorkerJob& w, const wstring& privateDir, FsGuard& g, wstring& why) {
-    std::vector<wstring> roots{privateDir, w.localAppData};
-    if (!w.r.exe.empty()) roots.push_back(GameRoot(Parent(w.r.exe)));
-    if (!w.r.dir.empty()) roots.push_back(GameRoot(w.r.dir));
-    if (!w.documents.empty()) {
+    std::vector<wstring> roots{privateDir}, maybe{w.localAppData, w.documents};
+    if (!w.r.exe.empty()) maybe.push_back(GameRoot(Parent(w.r.exe)));
+    if (!w.r.dir.empty()) maybe.push_back(GameRoot(w.r.dir));
+    {
         FsGuard reader;
         ScopedFsGuard active(&reader);
-        try { if (IsDir(w.documents)) roots.push_back(w.documents); }  // not there: nothing in it is changed
-        catch (const SetupError& e) { why = e.msg; return false; }
+        for (auto& m : maybe) {
+            if (m.empty()) continue;
+            try { if (IsDir(m)) roots.push_back(m); }
+            catch (const SetupError& e) { why = e.msg; return false; }
+        }
     }
     std::vector<wstring> added;
     for (auto& r : roots) {

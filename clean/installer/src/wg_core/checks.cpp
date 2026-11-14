@@ -110,28 +110,36 @@ std::vector<wstring> HipCandidates() {
     const wstring env = EnvVar(L"WRONGGPU_HIP_RUNTIME");
     if (!env.empty()) c.push_back(env);
 #endif
+    // The elevated worker (its guard active, secure_fs.h) probes, as administrator, only the folders that only
+    // administrators can write (System32, Program Files): never a PATH or HIP_PATH folder, which the player may write.
+    const bool elevatedWorker = ActiveFsGuard() != nullptr;
     wchar_t sys[MAX_PATH];
     if (GetSystemDirectoryW(sys, MAX_PATH)) c.push_back(Join(sys, kHipDll));
-    wstring path = EnvVar(L"PATH");
-    if (path.empty()) {  // PATH can be longer than EnvVar's buffer
+    wstring path = elevatedWorker ? wstring() : EnvVar(L"PATH");
+    if (path.empty() && !elevatedWorker) {  // PATH can be longer than EnvVar's buffer
         DWORD n = GetEnvironmentVariableW(L"PATH", nullptr, 0);
         if (n) { path.resize(n); path.resize(GetEnvironmentVariableW(L"PATH", path.data(), n)); }
     }
-    for (size_t i = 0; i <= path.size();) {
+    for (size_t i = 0; i < path.size();) {
         size_t j = path.find(L';', i);
         if (j == wstring::npos) j = path.size();
         wstring d = path.substr(i, j - i);
         if (d.size() > 2 && d[1] == L':') c.push_back(Join(d, kHipDll));  // absolute folders only
         i = j + 1;
     }
-    auto dirs = ListDirs(L"C:\\Program Files\\AMD\\ROCm");
+    std::vector<wstring> dirs;
+    try { dirs = ListDirs(L"C:\\Program Files\\AMD\\ROCm"); } catch (const SetupError&) {}  // (a folder the worker's guard refuses)
     std::sort(dirs.begin(), dirs.end(), [](const wstring& a, const wstring& b) { return VersionLess(BaseName(b), BaseName(a)); });  // newest first
     for (auto& d : dirs) c.push_back(Join(d, wstring(L"bin\\") + kHipDll));
-    wstring hipPath = EnvVar(L"HIP_PATH");
+    wstring hipPath = elevatedWorker ? wstring() : EnvVar(L"HIP_PATH");
     if (!hipPath.empty()) c.push_back(Join(Join(hipPath, L"bin"), kHipDll));
     std::vector<wstring> out;
     std::set<wstring> seen;
-    for (auto& p : c) if (IsFile(p) && seen.insert(Lower(FullPath(p))).second) out.push_back(FullPath(p));
+    for (auto& p : c) {
+        bool file = false;
+        try { file = IsFile(p); } catch (const SetupError&) {}  // the worker's guard refused it (a link on the way): not a candidate
+        if (file && seen.insert(Lower(FullPath(p))).second) out.push_back(FullPath(p));
+    }
     return out;
 }
 // The architecture name ("gfx1201", ...) in a HIP device-properties structure. The structure's layout differs between
