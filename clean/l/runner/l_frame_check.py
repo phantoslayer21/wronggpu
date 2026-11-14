@@ -41,6 +41,21 @@ but against the float64 references with the kernels' GELU (sigmoid):
 Output: counts only, no timing. The summary gives per stage the values differing, the largest difference (FP8 steps,
 FP16 ulps or codes, as the stage's metric has it), the non-finite values on each side and the largest finite magnitude
 on each side (saturation shows as one side stopping where the other goes on).
+
+Native D3D12 (runtime backend 3), after --run:
+
+    python clean/l/runner/l_frame_check.py --build <dir> --run --backend d3d12   # GPU, inside a GPU slot
+    python clean/l/runner/l_frame_check.py --build <dir> --compare-d3d12 --json out.json
+
+<dir>/dx12 holds the D3D12 ports (python clean/dx12/build_dx12.py --out <dir>). The same frames run on D3D12 with the
+runtime's default kernels there (Model L: its encoder and decoder ports, the pack12 store l_coef_pack12, Model M's
+pack12 post path; Model M: its native frame), and every stage output both backends write is compared with the HIP
+run's ("default"), byte for byte: the D3D12 ports reproduce their HIP kernels byte for byte, and Model M's pack12 post
+path the banded one bit for bit. The pack12 images (A: A0 A1 A2 B0 | B1 B2 C2, C: C0 C1; clean/FORMATS.md) are
+unpacked and compared with the HIP run's A, B and C. Not compared: b0 ... b4 (the bottleneck megakernels write only
+b5), the display image (the fused pack12 post writes none), and on the first frame the previous frame's state. An
+output that is all zero on D3D12 and not on HIP is reported as not written there (the D3D12 fusions keep enc1's merged
+map, and Model M's dec2 / dec1 outputs, on chip), not as differing.
 """
 import argparse
 import copy
@@ -159,6 +174,207 @@ def frame_inputs(rng, rw, rh, reset, special=True):
             "jitter": x["jitter"], "exposure": 1.0, "pre_exposure": PRE_EXPOSURE, "reset": reset}
 
 
+def run_d3d12(build, special=True, stages=False):
+    """The frame sequence on native D3D12 (backend 3), also the raw pack12 images: "d3d12" with the default kernels,
+    "d3d12_stages" with the D3D12 fusions off (WG_D3D12_FUSION=none), so that every stage output is written except b0 ...
+    b4 (the bottleneck runs as its megakernel there: the plain C = 128 block has no D3D12 port). One configuration
+    per process: the runtime library reads WG_D3D12_FUSION from the environment when it is loaded."""
+    if stages:
+        os.environ["WG_D3D12_FUSION"] = "none"  # before the runtime library is loaded
+    from clean.runner.pipeline import Pipeline
+    d = model_dir(build)
+    setups = {"L": dict(map_path=l_map(build), check_packing=False, kernels={"options": "model=L"}),
+              "M": dict(check_packing=True, kernels={})}
+    flags = {"L": {"depth_inverted": False, "auto_exposure": True, "hdr": True},  # as the HIP run's
+             "M": {"depth_inverted": False, "auto_exposure": True}}
+    for model, kw in setups.items():
+        for config in ("d3d12_stages",) if stages else ("d3d12",):
+            p = Pipeline(build, "", d, MAX_RENDER, OUTPUT, flags[model], backend="d3d12", **kw)
+            rng = np.random.default_rng(SEED)
+            frames = []
+            for (rw, rh), reset in SEQUENCE:
+                fr = frame_inputs(rng, rw, rh, reset, special)
+                out = p.frame(fr, debug=True)
+                raw = {n: p._get(n, np.uint8).copy() for n in ("dec0.A", "dec0.C")}
+                frames.append({"inputs": fr, "out": out, "raw": raw})
+            rec = {"model": model, "config": config, "kernels": p.kernels(), "notes": p.notes(),
+                   "model_source": p.model_source, "dw": p.dw, "dh": p.dh, "ow": p.ow, "oh": p.oh,
+                   "taps": p.output_taps(), "frames": frames}
+            with open(os.path.join(build, f"lframe_{model}_{config}.pkl"), "wb") as f:
+                pickle.dump(rec, f)
+            print(model, config, "frames", len(frames), "post", rec["kernels"].get("post"), "pack",
+                  rec["kernels"].get("post_pack"), "bneck", rec["kernels"].get("swin_bneck"))
+            del p
+
+
+def unpack12(raw_a, raw_c, rw, rh):
+    """The pack12 images -> A, B codes [rh, rw, 3] (uint8) and C [rh, rw, 3] (FP16 as float32)."""
+    a = np.frombuffer(raw_a.tobytes()[:rw * rh * 8], np.uint8).reshape(rh, rw, 8)
+    c = np.frombuffer(raw_c.tobytes()[:rw * rh * 4], np.uint8).reshape(rh, rw, 4)
+    A = a[..., 0:3]
+    B = np.stack([a[..., 3], a[..., 4], a[..., 5]], -1)
+    C = np.stack([c[..., 0:2].copy().view(np.float16)[..., 0], c[..., 2:4].copy().view(np.float16)[..., 0],
+                  a[..., 6:8].copy().view(np.float16)[..., 0]], -1).astype(np.float32)
+    return A, B, C
+
+
+POST_OUTPUTS = ("post.history", "post.reduced", "state.history_prev", "out")
+
+
+def compare_backends(hip, dx, same_post=True):
+    """Per frame: {stage output: values differing (0 = byte-identical)} between the HIP and the D3D12 run. same_post
+    False (the backends run different reconstruction kernels): the post-dependent outputs are left out."""
+    res = []
+    for k, (fh_, fd_) in enumerate(zip(hip["frames"], dx["frames"])):
+        a, b = fh_["out"], fd_["out"]
+        rh, rw = fh_["inputs"]["color"].shape[:2]
+        m, compared, unwritten = {}, [], []
+
+        def walk(x, y, prefix=""):
+            for key in x:
+                name = prefix + key
+                if name in ("b0", "b1", "b2", "b3", "b4", "dec0.A", "dec0.B", "dec0.C", "post.display", "filter",
+                            "state.info") or (k == 0 and name in UNWRITTEN_ON_FIRST) or (
+                        not same_post and name in POST_OUTPUTS):
+                    continue
+                u, v = x[key], y.get(key)
+                if isinstance(u, dict):
+                    walk(u, v, name + ".")
+                elif isinstance(u, np.ndarray) and isinstance(v, np.ndarray):
+                    if u.shape != v.shape or u.dtype != v.dtype:
+                        m[name] = -1  # not comparable: counts as differing
+                    else:  # values whose bit patterns differ
+                        iv = np.dtype("u%d" % u.dtype.itemsize)
+                        n = int(np.sum(np.ascontiguousarray(u).view(iv) != np.ascontiguousarray(v).view(iv)))
+                        if n and not np.any(v) and np.any(u):  # all zero on D3D12 only: not written there
+                            unwritten.append(name)
+                        else:
+                            m[name] = n
+                    compared.append(name)
+                elif isinstance(u, (int, float)) and isinstance(v, (int, float)):
+                    m[name] = int(u != v)
+        walk(a, b)
+        A, B, C = unpack12(fd_["raw"]["dec0.A"], fd_["raw"]["dec0.C"], rw, rh)
+        dec = a["dec0"]
+        m["dec0.A"] = int(np.sum(A != np.rint(dec["A"] * 255.0).astype(np.uint8)))
+        m["dec0.B"] = int(np.sum(B != np.rint(dec["B"] * 255.0).astype(np.uint8)))
+        m["dec0.C"] = int(np.sum(~((C == dec["C"]) | (np.isnan(C) & np.isnan(dec["C"])))))
+        if same_post:
+            m["out"] = int(np.sum(a["out"].view(np.uint32) != b["out"].view(np.uint32)))
+        res.append({"frame": k, "render": [rw, rh], "differ": m, "unwritten_d3d12": unwritten,
+                    "identical": all(v == 0 for v in m.values())})
+    return res
+
+
+def fill_pack12(rec):
+    """A copy of a D3D12 record with dec0's A, B, C taken from the unpacked pack12 images (the debug view has none);
+    with the true-fusion post (one launch, reconstruction and filter) no display image, which that kernel does not
+    write."""
+    out = copy.deepcopy(rec)
+    tf = "post_tf" in str(rec["kernels"].get("post_last", ""))
+    for fd in out["frames"]:
+        if tf:
+            fd["out"]["post"]["display"] = None
+        rh, rw = fd["inputs"]["color"].shape[:2]
+        A, B, C = unpack12(fd["raw"]["dec0.A"], fd["raw"]["dec0.C"], rw, rh)
+        fd["out"]["dec0"].update(A=(A / 255.0).astype(np.float32), B=(B / 255.0).astype(np.float32), C=C)
+    return out
+
+
+def check_m_post(dx, params):
+    """Model L's D3D12 frame runs Model M's fused pack12 post: its history and reduced codes against Model M's post
+    reference (clean/reference/post.py) on the frame's own inputs (the unpacked pack12 coefficients), under
+    test_post_emu.py's acceptance as in --compare."""
+    from clean.reference import post as Po
+    s = float(np.asarray(params["post"]["s"]).reshape(-1)[0])
+    D = (dx["dw"], dx["dh"])
+    res, prev, prev_size = [], None, None
+    for k, fd in enumerate(dx["frames"]):
+        fr, out = fd["inputs"], fd["out"]
+        rh, rw = fr["color"].shape[:2]
+        reset = prev is None or bool(fr["reset"]) or prev_size != (rw, rh)
+        A, B, C = unpack12(fd["raw"]["dec0.A"], fd["raw"]["dec0.C"], rw, rh)
+        xp = {"color": (fr["color"] / np.float32(fr["pre_exposure"])).astype(np.float32),
+              "exposure": out["exposure"]["e"], "exposure_prev": out["exposure"]["e_prev"],
+              "A": (A / 255.0).astype(np.float32), "B": (B / 255.0).astype(np.float32), "C": C,
+              "history": out["state"]["history_prev"] if not reset else np.zeros((D[1], D[0], 3), np.float32),
+              "m_near": out["enc0"]["m_near"], "m_center": out["enc0"]["m_center"], "m_far": out["enc0"]["m_far"],
+              "jitter": fr["jitter"], "reset": reset, "recon_size": D}
+        ref = Po.reconstruct(xp, s)
+        h = post_fp16(out["post"]["history"], ref["history"])
+        dc = codes(out["post"]["reduced"], ref["reduced"], 1023.0)
+        dc["pass"] = dc["max_code_diff"] <= 1 and dc["differ"] <= 0.01 * dc["values"]
+        res.append({"frame": k, "history": h, "reduced": dc, "pass": h["pass"] and dc["pass"]})
+        prev, prev_size = out, (rw, rh)
+    return res
+
+
+def compare_d3d12(build, json_path):
+    with open(os.path.join(model_dir(build), "params.pkl"), "rb") as f:
+        params = pickle.load(f)
+    res = {}
+    for model in ("L", "M"):
+        recs = {}
+        for config in ("default", "d3d12"):
+            with open(os.path.join(build, f"lframe_{model}_{config}.pkl"), "rb") as f:
+                recs[config] = pickle.load(f)
+        # the HIP run's reconstruction: Model M's (bit-identical to the D3D12 fused pack12 post) or Model L's own
+        hip_post = recs["default"]["kernels"].get("l_post") or recs["default"]["kernels"].get("post_last")
+        same_post = hip_post != "l_post_recon"
+        frames = compare_backends(recs["default"], recs["d3d12"], same_post)
+        res[model] = {"kernels_d3d12": recs["d3d12"]["kernels"], "frames": frames,
+                      "unwritten_d3d12": sorted({n for f in frames for n in f["unwritten_d3d12"]}),
+                      "outputs_compared": sorted({n for f in frames for n in f["differ"]}),
+                      "identical_frames": sum(f["identical"] for f in frames),
+                      "differing": sorted({k for f in frames for k, v in f["differ"].items() if v}),
+                      "post_compared_with_hip": same_post}
+        if not same_post:
+            # Model L: HIP runs l_post_recon, D3D12 Model M's fused pack12 post, and each frame's encoder reads the
+            # previous frame's reconstruction, so the two runs part after the first frame. The D3D12 frame is checked
+            # on its own: every stage of the run with all outputs written against the reference on that run's inputs
+            # (as --compare), and the default kernels against that run byte for byte.
+            with open(os.path.join(build, f"lframe_{model}_d3d12_stages.pkl"), "rb") as f:
+                st = fill_pack12(pickle.load(f))
+            per_stage = compare_model(st, params[model], post_ref="M", bneck_unit=True)
+            fused = compare_backends(st, recs["d3d12"])
+            res[model]["d3d12_per_stage"] = {"frames": per_stage, "summary": summary(per_stage),
+                                             "passed": sum(m["pass"] for m in per_stage)}
+            res[model]["d3d12_default_vs_stages"] = {
+                "frames": fused, "identical_frames": sum(f["identical"] for f in fused),
+                "differing": sorted({k for f in fused for k, v in f["differ"].items() if v}),
+                "unwritten_default": sorted({n for f in fused for n in f["unwritten_d3d12"]})}
+            mp = check_m_post(recs["d3d12"], params[model])
+            res[model]["m_post_reference"] = {"frames": mp, "passed": sum(f["pass"] for f in mp)}
+    n_frames = {m: len(res[m]["frames"]) for m in ("L", "M")}
+
+    def model_pass(m):
+        r = res[m]
+        if r["post_compared_with_hip"]:
+            return r["identical_frames"] == n_frames[m]
+        return (r["d3d12_per_stage"]["passed"] == n_frames[m] and r["m_post_reference"]["passed"] == n_frames[m] and
+                r["d3d12_default_vs_stages"]["identical_frames"] == n_frames[m])
+    res["pass"] = all(model_pass(m) for m in ("L", "M"))
+    with open(json_path, "w") as f:
+        json.dump(res, f, indent=1, default=lambda o: o.item() if hasattr(o, "item") else str(o))
+    for model in ("L", "M"):
+        print(model, "D3D12 against HIP: frames byte-identical", res[model]["identical_frames"], "of",
+              len(res[model]["frames"]), "outputs compared", len(res[model]["outputs_compared"]), "differing",
+              res[model]["differing"], "not written on D3D12 (all zero; fused kernels)", res[model]["unwritten_d3d12"])
+        if "d3d12_per_stage" in res[model]:
+            r = res[model]
+            print("  (HIP runs l_post_recon, D3D12 Model M's fused pack12 post: the runs part after frame 0)")
+            print("  D3D12 per stage against the reference (fusions off; b0-b5 as one unit):",
+                  r["d3d12_per_stage"]["passed"],
+                  "of", len(r["frames"]), "frames pass;", "failing:",
+                  sorted({s for f in r["d3d12_per_stage"]["frames"] for s, ok in f["stage_pass"].items() if not ok}))
+            print("  D3D12 default kernels against that run: byte-identical", r["d3d12_default_vs_stages"][
+                "identical_frames"], "of", len(r["frames"]), "differing", r["d3d12_default_vs_stages"]["differing"],
+                "not written by the defaults", r["d3d12_default_vs_stages"]["unwritten_default"])
+            print("  its post against Model M's post reference (default kernels):", r["m_post_reference"]["passed"],
+                  "of", len(r["frames"]), "frames pass")
+    return 0 if res["pass"] else 1
+
+
 def run(build, rocm, special=True):
     from clean.runner.hip import clean_process_environment
     clean_process_environment(rocm)
@@ -257,7 +473,10 @@ def post_fp16(got, ref, model="M"):
     return m
 
 
-def compare_model(rec, params):
+def compare_model(rec, params, post_ref=None, bneck_unit=False):
+    """post_ref "M": the post against Model M's reference whatever the model (Model L's native D3D12 frame runs Model
+    M's fused pack12 post for now). bneck_unit: b0 ... b5 as one unit (a bottleneck megakernel writes only b5): the
+    reference chained from the runtime's enc2.merged, b5 under the per-stage rule."""
     from clean.l.reference import oracle as L
     from clean.l.reference import table as T
     from clean.reference import decoder as MD
@@ -323,6 +542,9 @@ def compare_model(rec, params):
             kind = S.STAGES[s]["kind"]
             skip = skips.get("enc2" if s == "dec2" else "enc1") if kind == "dec" else None
             ref = S.run_stage(s, params[s], x, off, skip, gelu="sigmoid")
+            if bneck_unit and s in ("b0", "b1", "b2", "b3", "b4"):
+                x = ref["out"]  # the reference's own chain (the runtime does not write b0 ... b4)
+                continue
             m[s] = {key: fp8_stage(out[s][key], ref[key]) for key in out[s]}
             if kind == "enc":
                 skips[s] = out[s]["skip"]
@@ -348,7 +570,8 @@ def compare_model(rec, params):
               "m_near": out["enc0"]["m_near"], "m_center": out["enc0"]["m_center"], "m_far": out["enc0"]["m_far"],
               "jitter": fr["jitter"], "reset": eff_reset, "recon_size": D}
         s_post = float(np.asarray(params["post"]["s"]).reshape(-1)[0])
-        ref = R.reconstruct(xp, s_post) if model == "L" else Po.reconstruct(xp, s_post)
+        l_recon = model == "L" and post_ref != "M"
+        ref = R.reconstruct(xp, s_post) if l_recon else Po.reconstruct(xp, s_post)
         m["post"] = {"history": post_fp16(out["post"]["history"], ref["history"], model)}
         if out["post"]["display"] is not None:
             m["post"]["display"] = post_fp16(out["post"]["display"], ref["display"], model)
@@ -359,7 +582,7 @@ def compare_model(rec, params):
             disp, e = out["post"]["display"], out["exposure"]["e"]
             if rec["taps"] is not None:
                 fo = Po.output_filter_original(disp, e, (rec["ow"], rec["oh"]), rec["taps"])
-            elif model == "L":
+            elif l_recon:
                 fo = R.output_filter(disp, e, (rec["ow"], rec["oh"]))
             else:
                 fo = Po.output_filter(disp, e, (rec["ow"], rec["oh"]))
@@ -369,7 +592,7 @@ def compare_model(rec, params):
 
         stage_pass = {s: (all(v["pass"] for v in m[s].values() if isinstance(v, dict) and "pass" in v)
                           if isinstance(m[s], dict) else True)
-                      for s in ["enc0"] + list(T.SHARED_STAGES) + ["post"]}
+                      for s in ["enc0"] + list(T.SHARED_STAGES) + ["post"] if s in m}
         stage_pass["dec0"] = m["dec0"]["pass"]
         stage_pass["state"] = m["state"]["pass"]
         if "filter" in m:
@@ -481,6 +704,10 @@ def main(argv=None):
     g.add_argument("--prepare", action="store_true")
     g.add_argument("--run", action="store_true")
     g.add_argument("--compare", action="store_true")
+    g.add_argument("--compare-d3d12", action="store_true")
+    ap.add_argument("--backend", choices=("hip", "d3d12", "d3d12-stages"), default="hip",
+                    help="--run: HIP (both bottleneck forms), native D3D12 with its default kernels, or native D3D12 "
+                         "with its fusions off (d3d12-stages; run both D3D12 forms before --compare-d3d12)")
     ap.add_argument("--json")
     ap.add_argument("--plain", action="store_true",
                     help="--run: frames without random_inputs' special values (NaN / huge / negative colours, NaN "
@@ -497,8 +724,13 @@ def main(argv=None):
         prepare(a.build, a.rocm, a.model, a.map)
         return 0
     if a.run:
-        run(a.build, a.rocm, special=not a.plain)
+        if a.backend.startswith("d3d12"):
+            run_d3d12(a.build, special=not a.plain, stages=a.backend == "d3d12-stages")
+        else:
+            run(a.build, a.rocm, special=not a.plain)
         return 0
+    if a.compare_d3d12:
+        return compare_d3d12(a.build, a.json or os.path.join(a.build, "lframe_d3d12.json"))
     return compare(a.build, a.json or os.path.join(a.build, "lframe_check.json"))
 
 

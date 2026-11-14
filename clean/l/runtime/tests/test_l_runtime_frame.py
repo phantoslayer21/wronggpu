@@ -27,8 +27,11 @@ Run (repository root):
     python -m unittest discover -s clean/l/runtime/tests -t clean/l/runtime/tests -p test_l_runtime_frame.py
 """
 import copy
+import glob
 import hashlib
+import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -84,12 +87,18 @@ def map_path():
     return os.path.join(model_dir(), "maps", "preset-L.v1.map.json")
 
 
-def run(options="", frames=4, build_files=(), env=None, model=None, exe=None, flags=(), rw=RW, rh=RH, hdr=1):
+def run(options="", frames=4, build_files=(), env=None, model=None, exe=None, flags=(), rw=RW, rh=RH, hdr=1,
+        manifest=None):
     """The trace program's output lines (WG_* removed from the environment, then env applied). hdr: WgRtConfig.hdr
-    (Model L's reconstruction kernel is HDR; Model M does not read the flag)."""
+    (Model L's reconstruction kernel is HDR; Model M does not read the flag). manifest: [(kernel, code object)] for
+    <build>/dx12/manifest.json (the D3D12 ports a build has; backend 3)."""
     build = tempfile.mkdtemp(prefix="wg_lfb_")
     for n in build_files:
         open(os.path.join(build, n), "wb").close()
+    if manifest is not None:
+        os.makedirs(os.path.join(build, "dx12"))
+        with open(os.path.join(build, "dx12", "manifest.json"), "w") as fh:
+            json.dump({"format": 1, "kernels": [{"name": k, "co": co} for k, co in manifest]}, fh)
     e = {k: v for k, v in os.environ.items() if not k.upper().startswith("WG_")}
     e.update(env or {})
     try:
@@ -154,12 +163,19 @@ def expected_args(t, f, digests):
     }
 
 
-def check_roles(t, f, digests):
+def base(kernel):
+    """A Model L launch's kernel without its clamp-free suffix; the pack12 coefficient store (native D3D12) as l_coef,
+    whose arguments it shares."""
+    k = kernel.replace("_nc", "")
+    return "l_coef" if k == "l_coef_pack12" else k
+
+
+def check_roles(t, f, digests, l_post=True):
     """Raises AssertionError naming every Model L launch argument that is not the expected buffer or blob."""
     exp = expected_args(t, f, digests)
     seen, bad = set(), []
     for ln in f["launches"]:
-        k = ln.kernel.replace("_nc", "")
+        k = base(ln.kernel)
         if k not in exp:
             continue
         seen.add(k)
@@ -169,9 +185,45 @@ def check_roles(t, f, digests):
             continue
         bad += ["%s argument %d: %s, expected %s" % (k, i, a, e) for i, (a, e) in enumerate(zip(ln.args, want))
                 if e is not None and a != e]
-    missing = [k for k in L_KERNELS if k not in seen]
+    missing = [k for k in L_KERNELS if k not in seen and (l_post or k != "l_post_recon")]
     if bad or missing:
         raise AssertionError("; ".join(bad + ["not launched: " + k for k in missing]))
+
+
+def declared_ports():
+    """[(kernel, code object)] of every D3D12 port declared in clean/dx12/kernels (the "@wg-kernel" lines that
+    clean/dx12/build_dx12.py builds into the manifest): what a full build's manifest names."""
+    out = []
+    for path in sorted(glob.glob(os.path.join(host_cxx.ROOT, "clean", "dx12", "kernels", "*.hlsl"))):
+        with open(path, encoding="utf-8") as fh:
+            for m in re.finditer(r"@wg-kernel\s+(\S+)\s+co=(\S+)", fh.read()):
+                if m.groups() not in out:
+                    out.append(m.groups())
+    return out
+
+
+# Model L's D3D12 kernels the runtime checks at create (runtime.cpp l_native_missing), with their code objects
+L_D3D12 = [("lev/input_encoder", "l_enc_values.co"), ("l_linear_32_32_relu", "l_ops.co"),
+           ("l_linear_32_32_f16", "l_ops.co"), ("l_swin_block_c32_enc_nc", "l_swin.co"), ("l_project_gather", "l_ops.co"),
+           ("swin_block_c64_add_ex_nc", "swin.co"), ("l_dec_project", "l_ops.co"), ("l_swin_block_c32_dec_nc", "l_swin.co"),
+           ("l_coef_pack12", "l_ops.co")]
+
+
+def full_ports():
+    """The declared ports plus any of Model L's not declared yet: a build where every port Model L needs has landed.
+    (Model M's wave64 post ports come in both filter builds, keyed by name and code object: Model L's file has no
+    output-filter weights, so it takes the analytic one, post_w64.co.)"""
+    have = declared_ports()
+    return have + [kc for kc in L_D3D12 if kc[0] not in [k for k, _ in have]]
+
+
+class Ports(unittest.TestCase):
+    def test_analytic_post_declared(self):
+        """The analytic-filter build of Model M's fused pack12 post (the post Model L's native frame runs) is among the
+        declared ports."""
+        have = declared_ports()
+        for k in ("w64/post_tf_f32_p12_diet_vsit", "w64/post_tf4_dl_f32_p12_diet_vsit"):
+            self.assertIn((k, "post_w64.co"), have)
 
 
 def cdiv(a, b):
@@ -254,12 +306,12 @@ class Frame(unittest.TestCase):
 class Arguments(unittest.TestCase):
     """The recorder's view of every Model L launch (clean/l/FORMATS.md, "Maps" and "Kernels")."""
 
-    def check_frame(self, t, f, roles=True):
+    def check_frame(self, t, f, roles=True, l_post=True):
         info, ls = f["info"], f["launches"]
         rw, rh = info["rw"], info["rh"]
         fw, fh = cdiv(rw, 32) * 32, cdiv(rh, 32) * 32
         npix, tw, th = (fh + 4) * (fw + 4), fw // 2, fh // 2
-        k = {ln.kernel.replace("_nc", ""): (i, ln) for i, ln in enumerate(ls)}
+        k = {base(ln.kernel): (i, ln) for i, ln in enumerate(ls)}
         _, lev = k["lev/input_encoder"]
         _, relu = k["l_linear_32_32_relu"]
         _, f16 = k["l_linear_32_32_f16"]
@@ -305,13 +357,14 @@ class Arguments(unittest.TestCase):
         self.assertEqual(e[5], info["reset"])
         self.assertEqual(d, [rw, rh, fw, fh, info["reset"]])
         post = [ln for ln in ls if ln.kernel == "l_post_recon"]
-        self.assertEqual(len(post), 1)
-        self.assertEqual(post[0].params(12), [rw, rh, (3 * 120 + 1) // 2, (3 * 72 + 1) // 2, info["reset"]])
-        self.assertEqual(post[0].grid, cdiv((3 * 120 + 1) // 2, 32) * cdiv(cdiv((3 * 72 + 1) // 2, 2), 8))
-        self.assertTrue(ls[ls.index(post[0]) + 1].kernel.endswith("post_filter_c1_s4"))  # Model M's filter next
+        self.assertEqual(len(post), 1 if l_post else 0)  # (native D3D12: Model M's fused pack12 post for now)
+        if l_post:
+            self.assertEqual(post[0].params(12), [rw, rh, (3 * 120 + 1) // 2, (3 * 72 + 1) // 2, info["reset"]])
+            self.assertEqual(post[0].grid, cdiv((3 * 120 + 1) // 2, 32) * cdiv(cdiv((3 * 72 + 1) // 2, 2), 8))
+            self.assertTrue(ls[ls.index(post[0]) + 1].kernel.endswith("post_filter_c1_s4"))  # Model M's filter next
         self.assertTrue(lev.args[11].startswith("b"))  # the values blob: an allocation
         if roles:  # every argument against the named buffers and blobs
-            check_roles(t, f, blob_digests())
+            check_roles(t, f, blob_digests(), l_post)
         return lev, coef
 
     def test_sizes_reset_history(self):
@@ -424,6 +477,89 @@ class Roles(unittest.TestCase):
             self.assertIn("l_linear_32_32_relu argument 2", msg)
             self.assertIn("l_linear_32_32_f16 argument 2", msg)
             self.assertEqual(msg.count("argument"), 2, msg)
+
+
+class D3D12(unittest.TestCase):
+    """Model L on native D3D12 (backend 3): Model M's native frame with Model L's encoder and decoder, the pack12
+    coefficient store for Model M's pack12 post path; each missing D3D12 port refused by name, never replaced."""
+
+    def l_run(self, ports, frames=3, flags=(), **kw):
+        return run("model=L", frames=frames, build_files=FT.SHIPPING, flags=("--backend=3",) + tuple(flags),
+                   manifest=ports, **kw)
+
+    def test_missing_ports_named(self):
+        have = [k for k, _ in declared_ports()]
+        missing = [k for k, _ in L_D3D12 if k not in have]
+        got = self.l_run(declared_ports(), frames=1)
+        if not missing:
+            self.assertEqual(got[0], "create ok model L")
+            return
+        self.assertEqual(got, ["ERR create: Model L on native D3D12: not yet ported to D3D12: " + ", ".join(missing)])
+
+    def test_each_port_named(self):
+        for k, _ in L_D3D12:
+            with self.subTest(port=k):
+                got = self.l_run([kc for kc in full_ports() if kc[0] != k], frames=1)
+                self.assertEqual(got, ["ERR create: Model L on native D3D12: not yet ported to D3D12: " + k])
+
+    def check_d3d12_frame(self, t, f):
+        """The #111 checks (map chain, extents, offsets, parameters, every argument's buffer or blob), then what the
+        native frame adds: the pack12 store's images, dec1's own block, Model M's pack12 post path after it."""
+        info = f["info"]
+        rw, rh = info["rw"], info["rh"]
+        names = [ln.kernel for ln in f["launches"]]
+        self.assertIn("l_coef_pack12", names)
+        self.assertNotIn("l_coef", names)
+        self.assertTrue(all(not n.startswith(("d1p12/", "d0p12/")) and n != "input_encoder" for n in names), names)
+        dec1 = [ln for ln in f["launches"] if ln.kernel.startswith("swin_block_c64_add")]
+        self.assertEqual([ln.kernel for ln in dec1], ["swin_block_c64_add_ex_nc"])  # dec1's own block, not fused
+        lev, coef = Arguments.check_frame(self, t, f, l_post=False)
+        self.assertGreaterEqual(t.extent(coef.args[1]), 8 * rw * rh)  # pack12 image A: 8 bytes per pixel
+        self.assertGreaterEqual(t.extent(coef.args[3]), 4 * rw * rh)  # pack12 image C: 4 bytes per pixel
+        i = names.index("l_coef_pack12")
+        self.assertTrue(names[i + 1].startswith("w64/post_tf") and "_p12" in names[i + 1], names[i + 1:])
+        return lev, coef
+
+    def test_frame(self):
+        """Sizes aligned, non-aligned and changing, a game reset; history handed from frame to frame."""
+        # upscaling sizes the pack12 post path takes (D = 180 x 108): aligned, non-aligned, a change of size
+        sizes = "--sizes=96x64,96x64,80x48,80x48,80x48,77x45"
+        t = FT.Trace(self.l_run(full_ports(), frames=6, rw=96, rh=64, flags=(sizes, "--reset=4")))
+        self.assertEqual(t.create, "create ok model L")
+        self.assertEqual(t.unknown(), [])
+        self.assertEqual([f["info"]["reset"] for f in t.frames], [1, 0, 1, 0, 1, 1])
+        self.assertEqual(len({f["info"]["parity"] for f in t.frames}), 2)
+        prev = None
+        for f in t.frames:
+            self.assertIsNone(f["error"])
+            lev, coef = self.check_d3d12_frame(t, f)
+            if prev:
+                self.assertEqual(lev.args[4], prev[1].args[4])  # the latent the last frame's store wrote
+                self.assertEqual(lev.args[5], prev[0].args[7])  # its near motion
+            prev = (lev, coef)
+
+    def test_failed_launch_stops_the_frame(self):
+        t = FT.Trace(self.l_run(full_ports(), frames=3, flags=("--fail=l_coef_pack12@1",)))
+        ok0, bad, ok2 = t.frames
+        self.assertEqual(bad["failed"], "l_coef_pack12")
+        names = [ln.kernel for ln in bad["launches"]]
+        self.assertEqual(names, [ln.kernel for ln in ok0["launches"]][:len(names)])
+        self.assertTrue(names[-1].startswith("l_swin_block_c32_dec"))
+        self.assertIsNone(ok2["error"])
+        self.check_d3d12_frame(t, ok2)
+
+    def test_model_m_unchanged(self):
+        """Model M on backend 3 traces the same in the build with Model L as in the build without it."""
+        a = run(frames=2, build_files=FT.SHIPPING, flags=("--backend=3",), manifest=full_ports())
+        b = run(frames=2, build_files=FT.SHIPPING, flags=("--backend=3",), manifest=full_ports(),
+                exe=FT.trace_exe())
+        self.assertEqual([re.sub(r"wg_lfb_\w+", "B", x) for x in a], [re.sub(r"wg_lfb_\w+", "B", x) for x in b])
+        self.assertTrue(a[0].startswith("create ok model M"), a[0])
+
+    def test_hip_unchanged(self):
+        """On HIP Model L keeps the base coefficient format (l_coef) and refuses pack12."""
+        self.assertTrue(run("model=L", build_files=FT.SHIPPING, env={"WG_POST_PACK": "p12"})[0].startswith(
+            "ERR create: Model L: post_pack=p12"))
 
 
 class Refusals(unittest.TestCase):
