@@ -30,6 +30,7 @@ import copy
 import hashlib
 import os
 import shutil
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -83,8 +84,9 @@ def map_path():
     return os.path.join(model_dir(), "maps", "preset-L.v1.map.json")
 
 
-def run(options="", frames=4, build_files=(), env=None, model=None, exe=None, flags=(), rw=RW, rh=RH):
-    """The trace program's output lines (WG_* removed from the environment, then env applied)."""
+def run(options="", frames=4, build_files=(), env=None, model=None, exe=None, flags=(), rw=RW, rh=RH, hdr=1):
+    """The trace program's output lines (WG_* removed from the environment, then env applied). hdr: WgRtConfig.hdr
+    (Model L's reconstruction kernel is HDR; Model M does not read the flag)."""
     build = tempfile.mkdtemp(prefix="wg_lfb_")
     for n in build_files:
         open(os.path.join(build, n), "wb").close()
@@ -92,7 +94,8 @@ def run(options="", frames=4, build_files=(), env=None, model=None, exe=None, fl
     e.update(env or {})
     try:
         r = subprocess.run([exe or trace_exe(), build, model or model_dir(), str(rw), str(rh), "120", "72", str(frames),
-                            options, "--format=0", "--map=" + map_path(), *flags], capture_output=True, text=True,
+                            options, "--format=0", "--map=" + map_path(), "--hdr=%d" % hdr, *flags],
+                           capture_output=True, text=True,
                            env=e, timeout=600)
     finally:
         shutil.rmtree(build, ignore_errors=True)
@@ -105,17 +108,20 @@ def blob_digests():
     """{blob name: SHA-256 hex} of Model L's blobs packed in Python (clean/l/runner/l_pack.py) from the test model's
     parameters: the independent names of the weight buffers (the recorder logs what create uploads, with its hash)."""
     blobs = LP.pack_model_l(L.random_params(np.random.default_rng(SEED)))
+    # the post blob: s as float32, zero padding to 16 bytes (Model M's layout; the test model's s, LL.raw_model)
+    blobs["post"] = struct.pack("<f", 1.25) + bytes(12)
     return {n: hashlib.sha256(b).hexdigest() for n, b in blobs.items()}
 
 
 L_KERNELS = ("lev/input_encoder", "l_linear_32_32_relu", "l_linear_32_32_f16", "l_swin_block_c32_enc",
-             "l_project_gather", "l_dec_project", "l_swin_block_c32_dec", "l_coef")
+             "l_project_gather", "l_dec_project", "l_swin_block_c32_dec", "l_coef", "l_post_recon")
 
 
 def expected_args(t, f, digests):
     """Every Model L launch's arguments from the buffers' names (the runtime's wg_rt_buffer names after the frame) and
     the weight blobs' addresses (the upload holding each blob's bytes), independently of the launches themselves:
-    {kernel (without _nc): [argument]}, None where the parameters E / D stand (checked field by field elsewhere)."""
+    {kernel (without _nc): [argument]}, None where the parameters E / D / P stand (checked field by field
+    elsewhere)."""
     n = f["names"]
     w = {}
     for blob, digest in digests.items():
@@ -140,6 +146,11 @@ def expected_args(t, f, digests):
         "l_dec_project": [n["dec1.out"], n["l.narrow"], w["dec0.project"], tw, th],      # dec1's output -> y
         "l_swin_block_c32_dec": [n["l.narrow"], "0", n["l.wide"], w["dec0_block"], str(fh), str(fw)] + do,  # -> y2
         "l_coef": [n["l.wide"], n["dec0.A"], n["dec0.B"], n["dec0.C"], n["dec0.latent"], w["dec0.coef"], None],
+        # the reconstruction (Model M's post_recon arguments): colour, A, B, C, the previous history, this frame's
+        # motion surfaces, the post blob, the new history, the reduced history, the display image, P, exposure pair
+        "l_post_recon": [n["input.color"], n["dec0.A"], n["dec0.B"], n["dec0.C"], n["state.history_prev"],
+                         n["enc0.m_near"], n["enc0.m_center"], n["enc0.m_far"], w["post"], n["post.history"],
+                         n["post.reduced"], n["post.display"], None, n["exposure.pair"]],
     }
 
 
@@ -173,8 +184,8 @@ def nc_flags():
 
 
 def expected_l(m_frame, parity, fh, fw):
-    """Model M's launches of one frame with Model L's steps 2 and 4 (clean/l/FORMATS.md, "Kernels" and "Launch order
-    of one frame"): kernel, grid, block."""
+    """Model M's launches of one frame (on the unbanded post_recon route) with Model L's steps 2, 4 and 5
+    (clean/l/FORMATS.md, "Kernels" and "Launch order of one frame"): kernel, grid, block."""
     nc = nc_flags()
     npix, tokens = (fh + 4) * (fw + 4), (fh // 2) * (fw // 2)
 
@@ -192,6 +203,8 @@ def expected_l(m_frame, parity, fh, fw):
         elif k == "coef_decoder":
             out += [("l_dec_project", cdiv(tokens, 128), 256), block("dec", "second", 1),
                     ("l_coef", cdiv(tokens, 128), 256)]
+        elif k.split("/")[-1] == "post_recon":  # Model L's reconstruction, same arguments and grid
+            out.append(("l_post_recon", g, b))
         else:
             out.append((k, g, b))
     return out
@@ -199,8 +212,9 @@ def expected_l(m_frame, parity, fh, fw):
 
 class Frame(unittest.TestCase):
     def check(self, build_files=(), m_env=None):
+        # Model M on the route Model L's reconstruction takes: the unbanded post_recon, then the unbanded filter
         fh, fw = cdiv(RH, 32) * 32, cdiv(RW, 32) * 32
-        cm, lm, fm, km = FT.parse(run(build_files=build_files, env=m_env))
+        cm, lm, fm, km = FT.parse(run(build_files=build_files, env=dict(m_env or {}, WG_POST_KERNEL="post_recon")))
         cl, ll, fl, kl = FT.parse(run("model=L", build_files=build_files))
         self.assertEqual(cm, "create ok model M")
         self.assertEqual(cl, "create ok model L")
@@ -209,8 +223,9 @@ class Frame(unittest.TestCase):
             names = [k for k, _, _ in m]
             self.assertIn("input_encoder", names)
             self.assertIn("coef_decoder", names)  # Model M's base decoder: the one Model L's l_coef stands in for
+            self.assertEqual(sum(k.split("/")[-1] == "post_recon" for k in names), 1)
             self.assertEqual(l_, expected_l(m, i & 1, fh, fw), "frame %d" % i)
-        l_mods = ["l_enc_values.co as lev", "l_ops.co", "l_swin.co"]
+        l_mods = ["l_enc_values.co as lev", "l_ops.co", "l_swin.co", "l_post.co"]
         self.assertEqual([x for x in ll if x not in l_mods], [x for x in lm if x not in (km["enc0"], km["dec0"])])
         for want in l_mods:
             self.assertIn(want, ll)
@@ -289,6 +304,11 @@ class Arguments(unittest.TestCase):
         self.assertEqual(e[:4], [rw, rh, fw, fh])
         self.assertEqual(e[5], info["reset"])
         self.assertEqual(d, [rw, rh, fw, fh, info["reset"]])
+        post = [ln for ln in ls if ln.kernel == "l_post_recon"]
+        self.assertEqual(len(post), 1)
+        self.assertEqual(post[0].params(12), [rw, rh, (3 * 120 + 1) // 2, (3 * 72 + 1) // 2, info["reset"]])
+        self.assertEqual(post[0].grid, cdiv((3 * 120 + 1) // 2, 32) * cdiv(cdiv((3 * 72 + 1) // 2, 2), 8))
+        self.assertTrue(ls[ls.index(post[0]) + 1].kernel.endswith("post_filter_c1_s4"))  # Model M's filter next
         self.assertTrue(lev.args[11].startswith("b"))  # the values blob: an allocation
         if roles:  # every argument against the named buffers and blobs
             check_roles(t, f, blob_digests())
@@ -348,6 +368,9 @@ class Roles(unittest.TestCase):
         ("lev/input_encoder", 4, "lev/input_encoder", 5),           # previous latent <-> motion history
         ("lev/input_encoder", 7, "lev/input_encoder", 8),           # m_near <-> m_far
         ("l_linear_32_32_relu", 0, "l_linear_32_32_relu", 1),       # q's map <-> x1's map
+        ("l_post_recon", 4, "l_post_recon", 9),                     # history read <-> history written
+        ("l_post_recon", 8, "l_coef", 5),                           # post blob <-> dec0.coef
+        ("l_post_recon", 1, "l_post_recon", 3),                     # A <-> C
     )
 
     @classmethod
@@ -358,7 +381,7 @@ class Roles(unittest.TestCase):
         t, digests = self.trace, blob_digests()
         addrs = [t.uploaded(d) for d in digests.values()]
         self.assertNotIn(None, addrs)
-        self.assertEqual(len(set(addrs)), len(addrs))  # eight distinct blobs, each in its own allocation
+        self.assertEqual(len(set(addrs)), len(addrs))  # nine distinct blobs, each in its own allocation
         for f in t.frames:
             self.assertEqual(len(f["names"]) >= 30, True, sorted(f["names"]))
             check_roles(t, f, digests)
@@ -413,6 +436,12 @@ class Refusals(unittest.TestCase):
                         .startswith("ERR create: Model L: motion_outres=original"))
         self.assertTrue(run("model=L", build_files=FT.SHIPPING, env={"WG_POST_PACK": "p12"})[0].startswith(
             "ERR create: Model L: post_pack=p12"))
+        # Model L's reconstruction is its own kernel: Model M's post kernels are not chosen for it
+        self.assertTrue(run("model=L", env={"WG_POST_KERNEL": "post_recon2_r"})[0].startswith(
+            "ERR create: Model L: its reconstruction is l_post_recon"))
+        # LDR colour: Model L's LDR reconstruction kernel is not written yet (refused, never Model M's post instead)
+        self.assertTrue(run("model=L", hdr=0)[0].startswith(
+            "ERR create: Model L: LDR colour (WgRtConfig.hdr = 0) needs Model L's LDR reconstruction kernel"))
 
     def test_model_data(self):
         d = tempfile.mkdtemp(prefix="wg_lf_")
