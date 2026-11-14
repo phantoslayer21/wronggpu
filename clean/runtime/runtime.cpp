@@ -16,10 +16,15 @@
 #ifndef WG_NO_MODEL_K  // build.py --no-model-k: a build without model K (model=K fails at create, no_model_k.cpp)
 #include "../k/runtime/runtime_k.h"
 #endif
+#ifdef WG_MODEL_L  // Model L (#89; model_select.h model_l_built): its model data and weight packer (clean/l/runtime)
+#include "../l/runtime/l_model.h"
+#include "../l/runtime/l_pack.h"
+#endif
 #include "device.h"
 #include "embedded.h"
 #include "fpconv.h"
 #include "model.h"
+#include "model_select.h"
 #include "runtime_core.h"
 #include "wg_runtime.h"
 
@@ -120,7 +125,9 @@ std::string emu_lib_dir(const WgRtConfig& c) {
 // 10 faster; one 8-round run -11.5 us with every round faster). Re-measured in one process (runtime A/B, the same frames
 // alternating every 300 frames; inter-process noise was +-25 us): xd is +5.0 us at 1707x960 and +7.5 us at 1920x1080,
 // -2.25 us at 1280x720, so it now runs on frames of at most kXdMaxPixels render pixels only.
-const char* const kDefaultD3d12Fusion = "pm,xe,mb,rv,xo,xd";
+// lc, ll: Model L only (its decoder block with l_coef_pack12 as the epilogue, its two input linears in one kernel; see
+// fz_lc, fz_ll).
+const char* const kDefaultD3d12Fusion = "pm,xe,mb,rv,xo,xd,lc,ll";
 // xd only up to this many render pixels per frame (see fz_xd): it is faster at 1280x720 and slower at 1707x960 and above
 constexpr long long kXdMaxPixels = 1200000;
 
@@ -230,6 +237,29 @@ struct Runtime {
 #ifndef WG_NO_MODEL_K
   std::unique_ptr<KRuntime> k;  // model K (runtime option model=K): the whole frame runs there (clean/k/runtime)
 #endif
+  // Model L (runtime option model=L, builds with WG_MODEL_L): Model M's frame with Model L's encoder in step 2 and its
+  // decoder in step 4 (clean/l/FORMATS.md); the ten Swin stages, exposure and post are Model M's.
+  bool model_l = false;
+  // runtime option l_post=own (native D3D12): Model L's own reconstruction l_post_recon_p12 (l_post.co's D3D12 port),
+  // then the unbanded analytic filter w64/post_filter_c1_s4, in place of Model M's fused pack12 post (l_post=m). On the
+  // direct-resource route the colour is staged into color_net (l_direct_color) and the filter writes the game's texture
+  // itself (l_post_filter_direct, dx12/kernels/post_filter.hlsl).
+  // Default (no l_post option): own wherever its route applies (HDR colour, the default pack12 post route, its D3D12
+  // ports present: l_own_post_fits), else m. Why: Model M's post is another algorithm (3 x 3 gather, encoded-domain
+  // history); against Model L's post oracle it fails every frame (about 76 % of the full history's FP16 values more
+  // than one ulp off), Model L's own post passes Model L's post acceptance on every frame (real weights:
+  // clean/l/runner/l_default_post_check.py). LDR keeps m: l_post_recon's LDR form is not written yet.
+  bool l_own_post = false;
+  int l_post_choice = 0;  // the l_post option: 0 not given (the default above), 1 m, 2 own
+#ifdef WG_MODEL_L
+  // The maps of clean/l/FORMATS.md in three buffers (no kernel works in place):
+  //   l_wide [fh + 4][fw + 4] x 64 bytes: q (FP8 halo, 32 bytes a pixel), then x2 (FP16 halo; q is dead after the
+  //          first linear), then the decoder's y2 (FP16, [fh][fw])
+  //   l_narrow [fh + 4][fw + 4] x 32 bytes: x1 (FP8 halo), then the decoder's y (FP8, [fh][fw])
+  //   l_x3 [fh][fw] x 32 bytes: the encoder block's output
+  DevPtr l_wide = 0, l_narrow = 0, l_x3 = 0;
+  bool l_nc[2] = {false, false};  // enc0_block, dec0_block: clamp-free block kernel (bit 0 of the blob's first word)
+#endif
   DRow drow;
   int block_threads[5] = {256, 256, 256, 256, 256}, gemm_threads = 256, nt = 2, wpw[3] = {1, 1, 1};  // = variants.DEFAULT_GEOMETRY
   int block_wpg[5] = {0, 0, 0, 0, 0};  // windows per workgroup per block kernel; 0 = threads / 32 * wpw
@@ -298,15 +328,26 @@ struct Runtime {
   //       xd runs only on frames of at most xd_max_pixels render pixels (WG_D3D12_XD_MAX_PIXELS, default kXdMaxPixels;
   //       0 = any size): measured in one process against the same frames without it (runtime A/B, WG_AB_FUSION,
   //       3 x 4 windows of 300 frames each): 1280x720 -2.25 us, 1707x960 +5.0 us, 1920x1080 +7.5 us per frame
+  //   lc  Model L: its decoder block with l_coef_pack12 as the epilogue (l_swin_block_c32_dec_coef12_nc, l_swin.hlsl
+  //       SW_OUT_COEF12; byte for byte the pair l_swin_block_c32_dec_nc -> l_coef_pack12): one launch less, and the
+  //       block's FP16 map (y2, 64 bytes a pixel) is neither stored nor read back. Pack12 frames only; without lc, or
+  //       with a manifest that lacks the kernel, the pair runs (the fallback route)
+  bool fz_lc = false, l_fold_built = false;
+  //   ll  Model L: its two input linears in one kernel (l_linear_32_32_fused, l_ops_linear.hlsl; byte for byte the pair
+  //       l_linear_32_32_relu -> l_linear_32_32_f16): one launch less, and x1 (32 bytes a pixel of the halo map) stays
+  //       in registers. The input encoder then writes q to l_narrow (x2 over q in l_wide would overwrite q that other
+  //       workgroups have not read yet). Without ll, or with a manifest that lacks the kernel, the pair runs
+  bool fz_ll = false, l_lin_built = false;
   long long xd_max_pixels = [] {
     const char* e = std::getenv("WG_D3D12_XD_MAX_PIXELS");
     return e && *e ? std::atoll(e) : kXdMaxPixels;
   }();
   // A/B diagnostics (WG_AB_*): the two fusion sets and the block length (0: off)
   struct FzSet {
-    bool pm = false, xe = false, mb = false, mb0 = false, rv = false, xo = false, xd = false;
+    bool pm = false, xe = false, mb = false, mb0 = false, rv = false, xo = false, xd = false, lc = false, ll = false;
     template <class R> void apply(R* r) const {
       r->fz_pm = pm, r->fz_xe = xe, r->fz_mb = mb, r->fz_mb0 = mb0, r->fz_rv = rv, r->fz_xo = xo, r->fz_xd = xd;
+      r->fz_lc = lc, r->fz_ll = ll;
     }
   };
   FzSet fz_set[2];
@@ -335,7 +376,10 @@ struct Runtime {
       else if (f == "rv") z->rv = true;
       else if (f == "xo") z->xo = true;
       else if (f == "xd") z->xd = true;
-      else if (!f.empty()) return fail("WG_D3D12_FUSION: unknown fusion \"" + f + "\" (pm, xe, mb, rv, xo, xd or none)");
+      else if (f == "lc") z->lc = true;
+      else if (f == "ll") z->ll = true;
+      else if (!f.empty())
+        return fail("WG_D3D12_FUSION: unknown fusion \"" + f + "\" (pm, xe, mb, rv, xo, xd, lc, ll or none)");
     }
     return true;
   }
@@ -429,6 +473,7 @@ struct Runtime {
   bool model_other_map = false;
   std::string model_source;
   std::vector<DevPtr> owned;
+  std::vector<size_t> owned_size;  // bytes of each allocation in owned (wg_rt_fill)
   uint64_t owned_bytes = 0;
   bool external_io = false;    // inputs and output always come from FrameIo (interop): no own buffers for them
   bool native_direct_io = false;  // typed resources bound by the private native caller; no dense I/O conversion buffers
@@ -463,6 +508,7 @@ struct Runtime {
   bool alloc(DevPtr* p, size_t bytes) {
     if (!dev->alloc(p, bytes)) return dfail();
     owned.push_back(*p);
+    owned_size.push_back(bytes);
     owned_bytes += bytes;
     return true;
   }
@@ -483,16 +529,30 @@ struct Runtime {
     ModelId model_id = ModelId::M;  // runtime option model=K (clean/k/runtime/model_k.h); default model M
     if (std::string merr; !model_from_options(c, &model_id, &merr)) return fail(merr);
     if (c.backend < 0 || c.backend > 3) return fail("unknown runtime backend");
-    if (native_direct_io && (!external_io || c.backend != 3 || model_id != ModelId::M))
-      return fail("native direct resources require external_io, backend 3 and Model M");
-    if (c.backend == 3 && model_id != ModelId::M) return fail("native D3D12 supports Model M only");
+    // model_select.h (Model M); Model L on native D3D12 in builds with it (its missing D3D12 ports are refused below)
+    const bool native_ok = model_info(model_id).native_d3d12 || (model_id == ModelId::L && model_l_built());
+    if (native_direct_io && (!external_io || c.backend != 3 || !native_ok))
+      return fail("native direct resources require external_io, backend 3 and " + native_d3d12_models());
+    if (c.backend == 3 && !native_ok) return fail("native D3D12 supports " + native_d3d12_models() + " only");
     d3d12_native = c.backend == 3;
     if (c.backend == 3 && external && !native_direct_io)
       return fail("native D3D12 external I/O requires the private direct-resource route");
 #ifndef WG_NO_MODEL_K
     if (model_id == ModelId::K) return create_k(c, std::move(given));
 #else
-    if (model_id != ModelId::M) return fail("Model K is not part of this build");  // (model_from_options says so first)
+    if (model_id == ModelId::K) return fail("Model K is not part of this build");  // (model_from_options says so first)
+#endif
+    model_l = model_id == ModelId::L;  // (model_from_options accepts it only in builds with WG_MODEL_L)
+    if (model_l && (c.backend == 1 || c.backend == 2))
+      return fail("Model L runs on the HIP backend (backend 0) and native D3D12 (backend 3) only");
+#ifdef WG_MODEL_L
+    if (model_l && c.backend == 3) {
+      const std::string missing = l_native_missing();
+      if (!missing.empty()) return fail("Model L on native D3D12: not yet ported to D3D12: " + missing);
+      const std::vector<std::string> have = manifest_kernels();
+      l_fold_built = std::find(have.begin(), have.end(), "l_swin_block_c32_dec_coef12_nc") != have.end();
+      l_lin_built = std::find(have.begin(), have.end(), "l_linear_32_32_fused") != have.end();
+    }
 #endif
     if (c.max_rw <= 0 || c.max_rh <= 0 || c.ow <= 0 || c.oh <= 0) return fail("invalid render or output size");
     // post_core's fallback colour read uses a 32-bit byte offset (mul24, kernels/post.hip): the render colour image
@@ -519,6 +579,24 @@ struct Runtime {
     if (c.wpw96) wpw[1] = c.wpw96;
     if (c.wpw128) wpw[2] = c.wpw128;
     if (!choose_kernels(c)) return false;
+    if (model_l && recon_output) return fail("Model L: recon=output (D = O) is Model M's experimental mode");
+    // Model L's reconstruction kernel l_post_recon is HDR; its LDR form (11/11/10-bit display codes) is not written yet.
+    // (Native D3D12 runs Model M's pack12 post for Model L, which takes both.)
+    if (model_l && !c.hdr && c.backend != 3)
+      return fail("Model L: LDR colour (WgRtConfig.hdr = 0) needs Model L's LDR reconstruction kernel, which is not "
+                  "written yet (l_post_recon is HDR)");
+    if (model_l && enc0_co != "encoder.co")
+      return fail("Model L: enc0 variants are Model M's encoder; Model L's runs from l_enc_values.co");
+    // Model L's coefficient kernel (l_coef) writes Model M's coef_decoder formats, not pack12: the _p12 post kernels
+    // are not for it (choose_kernels does not choose pack12 by default for Model L; asked for, it is refused here)
+    // On native D3D12 Model L stores its coefficients in pack12 (l_coef_pack12, lossless) for Model M's pack12 post
+    // path, the only post path ported there; on HIP it writes the base format (l_coef) for the post_recon path.
+    if (model_l && p12 && c.backend != 3)
+      return fail("Model L: post_pack=p12 (the pack12 decoder) is Model M's; Model L's l_coef writes the base "
+                  "coefficient format (pack12 is Model L's native D3D12 form only)");
+    if (model_l && !p12 && c.backend == 3)
+      return fail("Model L on native D3D12 needs the pack12 post path (post_pack=p12; Model M's decoder__pack12.co "
+                  "selects it)");
     bool any = false;
     for (int i = 0; i < 16; ++i) any |= c.d_row[i] != 0;
     drow = drow_gfx12();
@@ -533,12 +611,23 @@ struct Runtime {
     if (!c.model_dir) return fail("no model directory");
     const std::string wgcm = std::string(c.model_dir) + "/model.wgcm";
     bool use_wgcm = c.model_format == 2;
-    if (c.model_format == 0) {
+    if (c.model_format == 0 && !model_l) {
       std::FILE* fp = std::fopen(wgcm.c_str(), "rb");
       use_wgcm = fp != nullptr;
       if (fp) std::fclose(fp);
     }
-    if (use_wgcm) {
+    if (model_l) {
+#ifdef WG_MODEL_L
+      // Model L: the converter's model.wgcm in its folder under the model directory (model_select.h), checked against
+      // the preset-L map (whole-file hash, every stage's keyed digest, names, types, shapes, values). Raw tensors are
+      // refused: nothing in them shows that they are Model L's (a folder with Model M's shared stages would load).
+      if (c.model_format == 1)
+        return fail("Model L reads only the converter's model.wgcm (raw tensors cannot be verified as Model L's)");
+      const std::string dir = std::string(c.model_dir) + "/" + model_info(ModelId::L).model_subdir;
+      if (!l::load_wgcm_model(dir + "/model.wgcm", l_map_path(c), &model, &e, &model_other_map)) return fail(e);
+      use_wgcm = true;
+#endif
+    } else if (use_wgcm) {
       if (!c.map_path) return fail("model.wgcm needs the converter map (map_path)");
       if (!load_wgcm_model(wgcm, c.map_path, &model, &e, &model_other_map)) return fail(e);
     } else if (!load_raw_model(c.model_dir, &model, &e)) {
@@ -548,9 +637,24 @@ struct Runtime {
     if (c.swin_force_clamp) force_clamp = true;
     if (c.swin_fuse) fuse = true;
     for (const std::string& s : model_stages()) {
-      if (s == "post") continue;
+      if (s == "post" || (model_l && (s == "enc0" || s == "dec0"))) continue;  // Model L's: below
       if (!pack_stage_blob(s, model[s], drow, &blobs[s], &e)) return fail(e);
     }
+#ifdef WG_MODEL_L
+    if (model_l) {  // enc0.values, enc0.Win1, enc0.Win2, enc0_block, enc0.project, dec0.project, dec0_block, dec0.coef
+      std::map<std::string, std::vector<uint8_t>> lb;
+      if (!l::pack_model(model, drow, &lb, &e)) return fail(e);
+      for (auto& kv : lb) blobs[kv.first] = std::move(kv.second);
+      for (int i = 0; i < 2; ++i) {
+        uint32_t flags = 0;
+        std::memcpy(&flags, blobs[i ? "dec0_block" : "enc0_block"].data(), 4);
+        l_nc[i] = (flags & 1u) != 0;
+        if (!l_nc[i] && c.backend == 3)
+          return fail(std::string("Model L on native D3D12: ") + (i ? "dec0_block" : "enc0_block") +
+                      "'s weights need the clamped block, which is not ported to D3D12 (only the _nc forms are)");
+      }
+    }
+#endif
     // kernels/swin.hip: the first word of a Swin stage's packed weights says whether the clamp-free block kernel
     // (`<name>_nc`, identical results) may be used.
     for (const char* s : kSwinOrder) {
@@ -588,19 +692,38 @@ struct Runtime {
     }
     if (!dev) return fail(e);
     for (const std::string& co : {swin_co, enc0_co, dec0_co, exposure_co, std::string("post.co"),
-                                  std::string("frame.co")})
+                                  std::string("frame.co")}) {
+      if (model_l && (co == enc0_co || co == dec0_co)) continue;  // Model L's encoder and decoder: below
       if (!dev->load_module(build_dir + "/" + co))
         return fail(dev->err() + (co.find("__") != std::string::npos
                                       ? " (variant code objects: clean/runner/build.py --variants / --perf-variants)"
                                       : ""));
+    }
+    // Model L's code objects (clean/l/FORMATS.md): the encoder's values under the tag lev (lev/input_encoder, next to
+    // Model M's input_encoder), the linears / projection / channel copy and the width-32 block untagged
+    if (model_l && (!dev->load_module_tagged(build_dir + "/l_enc_values.co", "lev") ||
+                    !dev->load_module(build_dir + "/l_ops.co") || !dev->load_module(build_dir + "/l_swin.co") ||
+                    !dev->load_module(build_dir + "/l_post.co")))
+      return fail(dev->err() + " (Model L's code objects l_enc_values.co, l_ops.co, l_swin.co, l_post.co)");
 
     if (!stage_variants(c)) return false;
     if (!runtime_options(c)) return false;
+    if (model_l) {
+      // Model L reads dec1's output map (dec1.out) in its decoder front: not the paths that keep it on chip
+      if (motion_outres == 1) return fail("Model L: motion_outres=original needs Model M's encoder (encoder_mo.co)");
+      d1d0_p12_opt = false;
+#ifdef WG_MODEL_L
+      if (c.backend == 3 && l_post_choice == 0) l_own_post = l_own_post_fits(c);
+      if (l_own_post && c.backend == 3 && !l_own_post_setup(c)) return false;
+#endif
+    }
+    if (l_post_choice == 2 && !model_l) return fail("l_post=own is a Model L option (its own reconstruction)");
     if (!mid_setup(c)) return false;
     if (!bneck_setup(c)) return false;
     // D = O (fast mode, recon=output) runs without pack12, so dec1 + dec0 fused is the default there (bit-identical;
     // measured -0.027 ms per 1440p-Q frame); the D = 1.5 x path keeps pack12 and the separate kernels.
     if (choose(c.dec1_dec0, "WG_DEC1_DEC0", recon_output && !p12 ? "fused" : "separate") == "fused") {
+      if (model_l) return fail("Model L: WG_DEC1_DEC0=fused keeps dec1's map on chip; its decoder front reads it");
       if (stage_geo.count("dec1")) return fail("WG_DEC1_DEC0=fused together with a per-stage variant of dec1");
       if (block_threads[1] != 256 || wpw[0] != 1 || (block_wpg[1] > 0 && block_wpg[1] != 8))
         return fail("WG_DEC1_DEC0=fused needs dec1 at 256 lanes with one window per wave (the base geometry)");
@@ -754,6 +877,17 @@ struct Runtime {
   }
 #endif
 
+  // Model L's converter map: map_path itself when it names that map's file, else that file next to map_path (or in
+  // the build folder without one): the maps are shipped side by side next to the runtime library
+  // (clean/runner/build.py).
+  std::string l_map_path(const WgRtConfig& c) const {
+    const std::string file = model_info(ModelId::L).map_file;
+    const std::string given = c.map_path ? c.map_path : "";
+    const size_t slash = given.find_last_of("\\/");
+    if (!given.empty() && given.substr(slash == std::string::npos ? 0 : slash + 1) == file) return given;
+    return (slash == std::string::npos ? build_dir : given.substr(0, slash)) + "/" + file;
+  }
+
   // Native route selection uses manifest identities, never HIP .co file presence. The fused pack12 decoder supplies
   // the selected path's pack12 capability; its standalone decoder fallback is still rejected at launch if reached.
   bool module_available(const std::string& path) const {
@@ -789,6 +923,22 @@ struct Runtime {
       const bool filter_unbanded = fk != kDefaultFilter && fk.find("_band") == std::string::npos;
       if (!post_given && !filter_unbanded && !recon_output) post_kernel = kDefaultBandPost;
     }
+#ifdef WG_MODEL_L
+    // Model L reconstructs with its own kernel, l_post_recon (l_post.co; clean/l/FORMATS.md step 5), which takes Model
+    // M's post_recon arguments and buffers: the unbanded post_recon route (8-byte history, base coefficient format,
+    // no pack12), then Model M's output filter (unbanded). Model M's post kernels are not for Model L. On native D3D12
+    // Model L's frames run Model M's pack12 post path for now (l_coef_pack12 feeds it); frames that path does not take
+    // run l_post_recon there too (its D3D12 port, then the analytic filter).
+    if (model_l && c.backend != 3) {
+      if ((c.post_kernel && *c.post_kernel) || choose(nullptr, "WG_POST_KERNEL", "") != "")
+        return fail("Model L: its reconstruction is l_post_recon; a post kernel (post_kernel / WG_POST_KERNEL) "
+                    "chooses among Model M's");
+      if (choose(c.post_pack, "WG_POST_PACK", "none") == "p12")
+        return fail("Model L: post_pack=p12 (the pack12 decoder) is Model M's; Model L's l_coef writes the base "
+                    "coefficient format");
+      post_kernel = "post_recon";
+    }
+#endif
     // post_pack / WG_POST_PACK=p12: the _p12 form of the post kernel (post_recon2_r[_hp][_band] -> ..._p12). Default
     // p12 (measured in game with the banded path: -0.04 ms, exact) when nothing else is chosen for post / dec0, not
     // with recon=output or the fused dec1 + dec0, and only when the pack12 decoder is there (build.py builds it).
@@ -797,7 +947,8 @@ struct Runtime {
     {
       const bool post_given = (c.post_kernel && *c.post_kernel) || choose(nullptr, "WG_POST_KERNEL", "") != "";
       const bool dec0_given = (c.dec0_variant && *c.dec0_variant) || choose(nullptr, "WG_DEC0_VARIANT", "") != "";
-      p12_default = module_available(p12_path) && !post_given && !dec0_given && !recon_output &&
+      p12_default = (!model_l || c.backend == 3) && module_available(p12_path) && !post_given && !dec0_given &&
+                    !recon_output &&
                     choose(c.dec1_dec0, "WG_DEC1_DEC0", "separate") != "fused";
     }
     const std::string pack = choose(c.post_pack, "WG_POST_PACK", p12_default ? "p12" : "none");
@@ -960,6 +1111,11 @@ struct Runtime {
         if (v != "auto" && v != "force") return fail("post_tf4 must be auto or force");
         post_tf4_force = v == "force";
       }
+      if (k == "l_post") {
+        if (v != "m" && v != "own") return fail("l_post must be m or own (Model L on native D3D12)");
+        l_own_post = v == "own";
+        l_post_choice = l_own_post ? 2 : 1;
+      }
       if (k == "post_diet") post_diet = !(v == "0" || v == "off" || v == "false");
       if (k == "tf_vdiet") tf_vdiet = !(v == "0" || v == "off" || v == "false");
       if (k == "post_idx") post_idx = !(v == "0" || v == "off" || v == "false");
@@ -1024,13 +1180,20 @@ struct Runtime {
     if (enc0_co != "encoder.co" || exposure_co != "exposure.co" || dec0_co != "decoder.co" ||
         swin_co != "swin.co" || !stage_geo.empty())
       return fail("native direct resources require the original encoder, exposure, decoder and Swin code-object variants");
-    if (!output_original || output_quality5 || output_quality9 || !has_taps || post_pre != "w64/")
-      return fail("native direct resources require post_w64__orig.co with the original 42-DWORD output-filter arguments");
-    if (recon_output || !p12 || !post_band || post_fused || out_f16 || post_wave != 64 ||
-        post_kernel != "post_recon2_r_band_p12" || filter_kernel != "post_filter_c1_s4_band" ||
-        !post_tf || !post_diet || !tf_vdiet || !post_sel || !post_idx || !post_trim)
-      return fail("native direct resources support only post_tf_f32_p12_diet_vsit; alternate post/TF routes are unsupported");
-    if (!d1d0_p12 || !dec_div.empty() || dec1_dec0 || bneck_variant != "bmegahg" ||
+    // the wave64 fused post: the "original" filter build with the model file's weights (post_w64__orig.co, 42 DWORDs),
+    // or the analytic filter build (post_w64.co, 22 DWORDs: no weights; a model file without them, as Model L's)
+    if (output_quality5 || output_quality9 || post_pre != "w64/" || (output_original && !has_taps))
+      return fail("native direct resources require the wave64 fused post: post_w64__orig.co with the model's "
+                  "output-filter weights, or the analytic post_w64.co");
+    // (Model L with l_post=own: l_post_recon_p12 and the unbanded filter on the staged colour, l_own_post_setup)
+    const bool own = model_l && l_own_post && !recon_output && p12 && !post_band && !post_fused && !out_f16 &&
+                     post_wave == 64 && post_kernel == "post_recon2_r_p12" && filter_kernel == kDefaultFilter;
+    if (!own && (recon_output || !p12 || !post_band || post_fused || out_f16 || post_wave != 64 ||
+                 post_kernel != "post_recon2_r_band_p12" || filter_kernel != "post_filter_c1_s4_band" ||
+                 !post_tf || !post_diet || !tf_vdiet || !post_sel || !post_idx || !post_trim))
+      return fail("native direct resources support only post_tf_f32_p12_diet_vsit (Model L: or l_post=own); "
+                  "alternate post/TF routes are unsupported");
+    if ((!d1d0_p12 && !model_l) || !dec_div.empty() || dec1_dec0 || bneck_variant != "bmegahg" ||
         bneck_threads != 256 || bneck_groups != 128 || !mid_variant.empty() || swin_resident || force_clamp || fuse)
       return fail("native direct resources require default pack12 decoder, bmegahg bottleneck and nonresident unclamped Swin routes");
     if (gemm_threads != 256 || nt != 2 || wpw[0] != 1 || wpw[1] != 1 || wpw[2] != 1)
@@ -1069,7 +1232,8 @@ struct Runtime {
       return fail("native direct render size is outside the configured maximum");
     if (ceil32(fr.rw) > 2 * fr.rw - 1 || ceil32(fr.rh) > 2 * fr.rh - 1)
       return fail("native direct render size is too small for its padding (spec 03)");
-    if (!tf_supported(fr.rw, fr.rh, dw, dh, kTfCap) && !tf4_supported(fr.rw, fr.rh, dw, dh))
+    // (l_post=own: l_post_recon_p12, or l_coef + l_post_recon where the pack12 kernels do not fit; any geometry)
+    if (!l_own_post && !tf_supported(fr.rw, fr.rh, dw, dh, kTfCap) && !tf4_supported(fr.rw, fr.rh, dw, dh))
       return fail("native direct frame geometry is unsupported by post_tf_f32_p12_diet_vsit and post_tf4_dl_f32_p12_diet_vsit; "
                   "no fallback");
     return true;
@@ -1245,7 +1409,7 @@ struct Runtime {
     kernels_text += std::string(" dec_rdiv=") + (dec_div.find('r') == std::string::npos ? "1" : "0");
     kernels_text += std::string(" dec_bdiv=") + (dec_div.find('b') == std::string::npos ? "1" : "0");
     kernels_text += std::string(" dec1_dec0=") + (dec1_dec0 ? "fused" : "separate");
-    if (fz_pm || fz_xe || fz_mb || fz_rv || fz_xo || fz_xd) kernels_text += " d3d12_fusion=" + fz_text;
+    if (fz_pm || fz_xe || fz_mb || fz_rv || fz_xo || fz_xd || fz_lc || fz_ll) kernels_text += " d3d12_fusion=" + fz_text;
     kernels_text += " swin_mid=" + (mid_variant.empty() ? std::string("none") : mid_variant);
     kernels_text += std::string(" post_pack=") + (p12 ? "p12" : "none");
     kernels_text += std::string(" pre_exposure=") + (pi_original ? "original" : "scale");
@@ -1256,6 +1420,13 @@ struct Runtime {
     kernels_text += std::string(" output_taps=") + (has_taps ? "model" : "none");
     kernels_text += std::string(" model_map=") + (model_source == "raw" ? "none" : model_other_map ? "other" : "same");
     if (native_direct_io) kernels_text += " native_io=direct_textures";
+    // Model L: its encoder and decoder (enc0= / dec0= above name Model M's, not loaded for Model L)
+    // (l_post: Model L's own reconstruction, or on native D3D12 by default Model M's fused pack12 post)
+    if (model_l)
+      kernels_text += std::string(" model=L l_kernels=l_enc_values.co,l_ops.co,l_swin.co,l_post.co l_post=") +
+                      (d3d12_native && !l_own_post ? "m_pack12" : "l_post_recon");
+    if (l_fold_built) kernels_text += std::string(" l_dec_fold=") + (fz_lc ? "on" : "off");  // (native D3D12 only)
+    if (l_lin_built) kernels_text += std::string(" l_lin_fused=") + (fz_ll ? "on" : "off");
     return kernels_text.c_str();
   }
 
@@ -1266,8 +1437,11 @@ struct Runtime {
     const int ny = std::max(256, max_rh / 2);
     // External buffer I/O keeps depth/motion/color_net for raw-input conversion. Direct textures need none of the
     // five dense I/O buffers; their shader loads/stores use the caller's typed descriptors instead.
+    // (l_post=own on the direct route: the staged colour, l_direct_color; the filter writes the game's texture)
+    const bool own_direct = native_direct_io && l_own_post;
     bool ok = (external_io || (alloc(&color, R * 16) && alloc(&out, On * 12))) &&
               (native_direct_io || (alloc(&depth, R * 4) && alloc(&motion, R * 8) && alloc(&color_net, R * 16))) &&
+              (!own_direct || alloc(&color_net, R * 16)) &&
               alloc(&expo, 32) &&
               (!native_direct_io || (alloc(&f16lut, kF16LutBytes) && (dev->memset(f16lut, 0, 256) || dfail()))) &&
               alloc(&expo_partials, 4 * (size_t)cdiv(ny, 4)) && alloc(&expo_computed, 4) && alloc(&expo_sync, 4) &&
@@ -1284,6 +1458,12 @@ struct Runtime {
       ok = alloc(&xd_sync, 4 * nxd) && (dev->memset(xd_sync, 0, 4 * nxd) || dfail());
     }
     if (ok && uses_prep(post_kernel)) ok = alloc(&prep, R * 32);
+#ifdef WG_MODEL_L
+    if (ok && model_l) {
+      const size_t halo = (FH + 4) * (FW + 4);
+      ok = alloc(&l_wide, halo * 64) && alloc(&l_narrow, halo * 32) && alloc(&l_x3, FH * FW * 32);
+    }
+#endif
     return ok;
   }
 
@@ -1367,6 +1547,142 @@ struct Runtime {
     if (!dev->launch(k, (unsigned)grid, (unsigned)block, args.data())) return dfail();
     return true;
   }
+
+#ifdef WG_MODEL_L
+  // ---- Model L (clean/l/FORMATS.md: maps, blobs, kernels, launch order) ----
+  // Window offsets (ox, oy) of Model L's two width-32 blocks for frame parity f: the default table's window_offsets
+  // (clean/l/reference/table.py), "first" for the encoder's block, "second" for the decoder's.
+  static void l_offsets(bool decoder, int f, int* ox, int* oy) {
+    static const int kOff[2][2][2] = {{{2, 2}, {0, 2}}, {{0, 0}, {2, 0}}};
+    *ox = kOff[decoder][f & 1][0];
+    *oy = kOff[decoder][f & 1][1];
+  }
+
+  // One width-32 Swin block on the fh x fw grid (l_swin.co): "_enc" reads the FP16 halo map x2 and writes FP8, "_dec"
+  // reads FP8 and writes FP16.
+  bool l_block(const char* kind, DevPtr x, DevPtr out, DevPtr w, bool nc, int H, int W, bool decoder, int f) {
+    DevPtr none = 0;
+    int ox = 0, oy = 0;
+    l_offsets(decoder, f, &ox, &oy);
+    const int nwin = ((W + ox + 3) / 4) * ((H + oy + 3) / 4);
+    const std::string k = std::string("l_swin_block_c32_") + kind + (nc ? "_nc" : "");
+    return launch(k.c_str(), cdiv(nwin, 8), 256, {&x, &none, &out, &w, &H, &W, &ox, &oy});
+  }
+
+  // Step 2 for Model L: the 20 values and their dithered FP8 for every pixel of the halo map (Model M's input encoder
+  // arguments, q in place of the features; the motion surfaces as Model M), the two per-pixel linears, the encoder
+  // block, and the gather of each token's 2 x 2 pixels into the 64 features enc1 reads (feat0).
+  bool l_encoder(EncParams& p, DevPtr cnet, DevPtr din, DevPtr min_, int cur, int nxt, int fh, int fw, int f) {
+    DevPtr wv = wdev["enc0.values"], w1 = wdev["enc0.Win1"], w2 = wdev["enc0.Win2"], wp = wdev["enc0.project"];
+    int npix = (fh + 4) * (fw + 4), tw = fw / 2, th = fh / 2;
+    const bool fused = fz_ll && l_lin_built;  // (native D3D12 only: l_lin_built)
+    DevPtr& q = fused ? l_narrow : l_wide;  // q's map (fused: not under x2)
+    return launch(native_direct_io ? "lev/input_encoder_direct" : "lev/input_encoder",
+                  cdiv(((fh + 4) / 2) * ((fw + 4) / 2), 128), 256,
+                  {&cnet, &din, &min_, &reduced, &latent[cur], &mnear[cur], &q, &mnear[nxt], &mfar, &mcenter,
+                   &expo, &wv, &p}) &&
+           (fused ? launch("l_linear_32_32_fused", cdiv(npix, 128), 256, {&l_narrow, &l_wide, &w1, &w2, &npix})
+                  : launch("l_linear_32_32_relu", cdiv(npix, 128), 256, {&l_wide, &l_narrow, &w1, &npix}) &&
+                        launch("l_linear_32_32_f16", cdiv(npix, 128), 256, {&l_narrow, &l_wide, &w2, &npix})) &&
+           l_block("enc", l_wide, l_x3, wdev["enc0_block"], l_nc[0], fh, fw, false, f) &&
+           launch("l_project_gather", cdiv(tw * th, 128), 256, {&l_x3, &feat0, &wp, &tw, &th});
+  }
+
+  // Step 4 for Model L: the projection of dec1's output to 32 values per pixel (y), the decoder block (y2, FP16), and
+  // Model L's per-pixel functions into A, B, C and the new latent (Model M's buffers and formats; no motion, previous
+  // latent, jitter or reset is read). Fusion lc (pack12 frames on native D3D12): the block with the per-pixel
+  // functions as its epilogue, y2 not stored.
+  bool l_decoder(DecParams& p, int nxt, int fh, int fw, int f) {
+    DevPtr wd = wdev["dec0.project"], wc = wdev["dec0.coef"];
+    int tw = fw / 2, th = fh / 2;
+    if (fz_lc && l_fold_built && p12_frame && l_nc[1]) {
+      DevPtr none = 0, wb = wdev["dec0_block"];
+      int ox = 0, oy = 0, H = fh, W = fw, rw = p.rw, rh = p.rh;
+      l_offsets(true, f, &ox, &oy);
+      const int nwin = ((W + ox + 3) / 4) * ((H + oy + 3) / 4);
+      return launch("l_dec_project", cdiv(tw * th, 128), 256, {&out1, &l_narrow, &wd, &tw, &th}) &&
+             launch("l_swin_block_c32_dec_coef12_nc", cdiv(nwin, 8), 256,
+                    {&l_narrow, &none, &none, &wb, &H, &W, &ox, &oy, &A, &C, &latent[nxt], &wc, &rw, &rh});
+    }
+    return launch("l_dec_project", cdiv(tw * th, 128), 256, {&out1, &l_narrow, &wd, &tw, &th}) &&
+           l_block("dec", l_narrow, l_wide, wdev["dec0_block"], l_nc[1], fh, fw, true, f) &&
+           launch(p12_frame ? "l_coef_pack12" : "l_coef", cdiv(tw * th, 128), 256,
+                  {&l_wide, &A, &B, &C, &latent[nxt], &wc, &p});
+  }
+
+  // Model L's kernels on native D3D12 that <build_dir>/dx12/manifest.json lacks, comma-separated ("" = all there):
+  // its encoder (the direct form on the direct-resource route), linears, clamp-free blocks (the only D3D12 forms),
+  // projections and pack12 coefficient store, and dec1's own block with its expand (Model M runs dec1 inside its fused
+  // decoder there; Model L's decoder reads dec1's map). Model M's other kernels are its native frame's.
+  // The kernel names of <build_dir>/dx12/manifest.json (none if it is missing or unreadable).
+  std::vector<std::string> manifest_kernels() const {
+    std::string text, error;
+    wgc::Json manifest;
+    std::vector<std::string> have;
+    if (read_text(build_dir + "/dx12/manifest.json", &text) && wgc::parse_json(text, manifest, error)) {
+      const auto* kernels = manifest.find("kernels");
+      if (kernels && kernels->is_array())
+        for (const auto& k : kernels->items) {
+          const auto* name = k.find("name");
+          if (name && name->is_string()) have.push_back(name->text);
+        }
+    }
+    return have;
+  }
+
+  std::string l_native_missing() const {
+    return manifest_missing({native_direct_io ? "lev/input_encoder_direct" : "lev/input_encoder",
+                             "l_linear_32_32_relu",     "l_linear_32_32_f16",
+                             "l_swin_block_c32_enc_nc", "l_project_gather",
+                             "swin_block_c64_add_ex_nc", "l_dec_project",
+                             "l_swin_block_c32_dec_nc", "l_coef_pack12"});
+  }
+
+  // The kernels of `need` that <build_dir>/dx12/manifest.json lacks, comma-separated ("" = all there).
+  std::string manifest_missing(const std::vector<std::string>& need) const {
+    std::string missing;
+    const std::vector<std::string> have = manifest_kernels();
+    for (const std::string& k : need)
+      if (std::find(have.begin(), have.end(), k) == have.end()) missing += (missing.empty() ? "" : ", ") + k;
+    return missing;
+  }
+
+  // l_post=own on native D3D12 (after runtime_options): the unbanded pack12 route with Model L's reconstruction in
+  // place of Model M's fused post. p12 stays (l_coef_pack12 feeds l_post_recon_p12; frames the pack12 kernels do not
+  // take run l_coef and l_post_recon); post_recon_stage launches Model L's kernel, step 6 the unbanded default filter
+  // (w64/post_filter_c1_s4, the analytic build: Model L's file has no output-filter weights).
+  // The default's test: l_own_post_setup's conditions, without failing
+  bool l_own_post_fits(const WgRtConfig& c) {
+    if (!c.hdr || !p12 || post_kernel != "post_recon2_r_band_p12" || filter_kernel != "post_filter_c1_s4_band" || out_f16)
+      return false;
+    std::vector<std::string> need = {"l_post_recon_p12", "l_post_recon", "l_coef", "w64/post_filter_c1_s4"};
+    if (native_direct_io) {
+      need.push_back("l_direct_color");
+      need.push_back("l_post_filter_direct");
+    }
+    return manifest_missing(need).empty();
+  }
+  bool l_own_post_setup(const WgRtConfig& c) {
+    if (!c.hdr)
+      return fail("Model L: l_post=own needs HDR colour (WgRtConfig.hdr = 1): l_post_recon is HDR, its LDR form is "
+                  "not written yet");
+    if (!p12 || post_kernel != "post_recon2_r_band_p12" || filter_kernel != "post_filter_c1_s4_band" || out_f16)
+      return fail("Model L: l_post=own replaces the default pack12 post route (post " + post_kernel + ", filter " +
+                  filter_kernel + ")");
+    std::vector<std::string> need = {"l_post_recon_p12", "l_post_recon", "l_coef", "w64/post_filter_c1_s4"};
+    if (native_direct_io) {
+      need.push_back("l_direct_color");
+      need.push_back("l_post_filter_direct");
+    }
+    const std::string missing = manifest_missing(need);
+    if (!missing.empty()) return fail("Model L on native D3D12 (l_post=own): not yet ported to D3D12: " + missing);
+    post_kernel = "post_recon2_r_p12";  // unbanded pack12 route; the reconstruction itself is Model L's (post_recon_stage)
+    post_band = false;
+    filter_kernel = kDefaultFilter;
+    if (!filter_shape(filter_kernel, &filter_tile_x, &filter_s)) return fail("unknown output filter " + filter_kernel);
+    return true;
+  }
+#endif
 
   // The arguments of a kernel that runs the 5-tap output filter (post_filter*, post_tf*, post_fused*): with
   // output_filter=original (post_w64__orig.co, kernels/post.hip WG_LZ_KARGS) the five weights follow as u32 FP16 bit
@@ -1530,6 +1846,15 @@ struct Runtime {
     if (post_last != pk && hist_bytes != 8)
       return fail(pk + " (" + std::to_string(hist_bytes) +
                   "-byte history) cannot fall back to post_recon here");
+#ifdef WG_MODEL_L
+    if (model_l) {  // Model L: l_post_recon (l_post.co, untagged) with post_recon's arguments
+      // (native D3D12, l_post=own: l_post_recon_p12 on the frames whose coefficients l_coef_pack12 stored)
+      post_last = p12_frame ? "l_post_recon_p12" : "l_post_recon";
+      return launch(post_last.c_str(), grid, 256,
+                    {&cnet, &A, &B, &C, &hist[cur], &mnear[nxt], &mcenter, &mfar, &w, &hist[nxt], &reduced, &display,
+                     &p, &expo});
+    }
+#endif
     if (uses_prep(post_last)) {  // pre-pass (one record per render pixel), then post_recon5* / 6*
       if (!launch((post_pre + "post_prep").c_str(), cdiv((long long)rw * rh, 256), 256,
                   {&cnet, &A, &B, &C, &prep, &p, &expo}) ||
@@ -1764,7 +2089,11 @@ struct Runtime {
       p.irh = (float)(1.0 / rh);
       DevPtr w = wdev["enc0"];
       const int ntok = (fh / 2) * (fw / 2);
-      if (mo) {  // kernels/encoder_mo.hip: one motion texel per render pixel, no depth neighbourhood
+      if (model_l) {
+#ifdef WG_MODEL_L
+        if (!l_encoder(p, cnet, din, min_, cur, nxt, fh, fw, f)) return false;
+#endif
+      } else if (mo) {  // kernels/encoder_mo.hip: one motion texel per render pixel, no depth neighbourhood
         p.sx = mop.sx;
         p.sy = mop.sy;
         p.bx = mop.bx;
@@ -1889,7 +2218,11 @@ struct Runtime {
       p.pjy = jpy;
       DevPtr w = wdev["dec0"];
       p12_frame = p12 && recon2_supported(rw, rh, dw, dh);
-      if (p12_frame && fused_p12) {  // dec1's block with dec0 (pack12) as its epilogue
+      if (model_l) {  // (no pack12 for Model L: refused at create)
+#ifdef WG_MODEL_L
+        if (!l_decoder(p, nxt, fh, fw, f)) return false;
+#endif
+      } else if (p12_frame && fused_p12) {  // dec1's block with dec0 (pack12) as its epilogue
         DevPtr w1 = wdev["dec1"];
         int ox = off[9][0], oy = off[9][1], h2 = H2, w2 = W2;
         const int nwin = ((W2 + ox + 3) / 4) * ((H2 + oy + 3) / 4);
@@ -1988,6 +2321,15 @@ struct Runtime {
       }
     }
     if (!mark(3)) return false;
+    // l_post=own on the direct-resource route: Model L's reconstruction reads the colour from a buffer, so the game's
+    // texture is staged into color_net first, with the staged route's values (native_direct_normalized_color: the
+    // Converter's dense RGBA with alpha +0, divided by pi as color_divide when pi != 1)
+    const bool own_direct = native_direct_io && l_own_post;
+    if (own_direct) {
+      int npix = rw * rh;
+      if (!launch("l_direct_color", cdiv(npix, 256), 256, {&color_net, &npix})) return false;
+      cnet = color_net;
+    }
     // 5. output reconstruction (spec 06, kernels/post.hip): history copy f -> copy 1 - f, reduced history, display.
     //    The exposures come from the GPU pair (expo); the values in the parameters are only the host-side default.
     {
@@ -2141,12 +2483,14 @@ struct Runtime {
         if (post_band) filter_shape(fk, &tx, &fs);
         const int grid = cdiv(ow, tx) * cdiv(cdiv(oh, 2), 2 * fs);
         // (post_filter_quality9 is its own filter and never runs with output_filter=original)
-        if (!launch((post_pre + fk).c_str(), grid, 64,
-                    with_taps({&display, &outp, &a, &b, &c, &d, &dec_scale, &expo})))
+        // l_post=own on the direct route: the filter's direct form writes the game's output texture (times pi as
+        // scale_rgb, the Converter's typed store or the output-copy bytes); out_p is not written
+        const std::string fname = own_direct ? std::string("l_post_filter_direct") : post_pre + fk;
+        if (!launch(fname.c_str(), grid, 64, with_taps({&display, &outp, &a, &b, &c, &d, &dec_scale, &expo})))
           return false;
-        filter_last = fk;
+        filter_last = own_direct ? "l_post_filter_direct" : fk;
       }
-      if (hp <= 0 && pi != 1.0f) {  // spec 10 draft 2: the filter's result times pi
+      if (!own_direct && hp <= 0 && pi != 1.0f) {  // spec 10 draft 2: the filter's result times pi
         int n3 = 3 * ow * oh;
         float p_ = pi;
         if (!launch("scale_rgb", cdiv(n3, 256), 256, {&outp, &p_, &n3})) return false;
@@ -2171,6 +2515,28 @@ struct Runtime {
     if (k) return k->buffer(nm, p, bytes) || fail(k->err());
 #endif
     if (frames == 0) return fail("no frame has run yet");
+    return buffer_at(nm, p, bytes);
+  }
+
+  // Diagnostics (wg_rt_fill; the frame checks' sentinels): the allocation holding the named buffer set to `value`,
+  // from the buffer's start to the allocation's end. Also before the first frame (the names then resolve with
+  // parity 0); a buffer this configuration does not allocate (address 0) is left alone.
+  bool fill(const std::string& nm, int value) {
+#ifndef WG_NO_MODEL_K
+    if (k) return fail("wg_rt_fill: not for Model K");
+#endif
+    DevPtr p = 0;
+    size_t bytes = 0;
+    if (!buffer_at(nm, &p, &bytes)) return false;
+    if (p == 0) return true;
+    for (size_t i = 0; i < owned.size(); ++i)
+      if (p >= owned[i] && p < owned[i] + owned_size[i])
+        return dev->memset(p, value & 0xff, owned[i] + owned_size[i] - p) || dfail();
+    return fail("wg_rt_fill: " + nm + " is not a runtime allocation");
+  }
+
+  // buffer() without the first-frame check
+  bool buffer_at(const std::string& nm, DevPtr* p, size_t* bytes) {
     const int lf = info.parity, rw = info.rw, rh = info.rh, fw = ceil32(rw), fh = ceil32(rh);
     const size_t R = (size_t)rw * rh, t2 = (fw / 2) * (fh / 2), t4 = (fw / 4) * (fh / 4), t8 = (fw / 8) * (fh / 8);
     const size_t Dn = (size_t)dw * dh;
@@ -2195,6 +2561,14 @@ struct Runtime {
         {"input.depth", {depth, R * 4}},      {"input.motion", {motion, R * 8}},
     };
     for (int i = 0; i < 6; ++i) m["b" + std::to_string(i) + ".out"] = {bout[i], t8 * 128};
+#ifdef WG_MODEL_L
+    if (model_l) {  // Model L's maps (FORMATS.md "Maps"; the frame reuses them: q / x2 / y2, x1 / y, x3)
+      const size_t halo = (size_t)(fw + 4) * (fh + 4);
+      m["l.wide"] = {l_wide, halo * 64};
+      m["l.narrow"] = {l_narrow, halo * 32};
+      m["l.x3"] = {l_x3, (size_t)fw * fh * 32};
+    }
+#endif
     auto it = m.find(nm);
     if (it == m.end()) return fail("unknown buffer name " + nm);
     *p = it->second.p;
@@ -2237,9 +2611,11 @@ const char* const* runtime_timing_labels(Runtime* rt) {
 #endif
 }
 #ifdef WG_NO_MODEL_K
-const char* runtime_model(Runtime*) { return "M"; }
+const char* runtime_model(Runtime* rt) { return model_info(rt->model_l ? ModelId::L : ModelId::M).name; }
 #else
-const char* runtime_model(Runtime* rt) { return rt->k ? "K" : "M"; }
+const char* runtime_model(Runtime* rt) {
+  return model_info(rt->k ? ModelId::K : rt->model_l ? ModelId::L : ModelId::M).name;
+}
 #endif
 void runtime_recon_size(Runtime* rt, int* dw, int* dh) {
   *dw = rt->dw;
@@ -2375,6 +2751,9 @@ WG_RT_API int wg_rt_buffer(void* rt, const char* name, uintptr_t* ptr, size_t* b
   if (!((Runtime*)rt)->buffer(name, &p, bytes)) return 1;
   *ptr = (uintptr_t)p;
   return 0;
+}
+WG_RT_API int wg_rt_fill(void* rt, const char* name, int value) {
+  return ((Runtime*)rt)->fill(name, value) ? 0 : 1;
 }
 WG_RT_API int wg_rt_download(void* rt, uintptr_t ptr, void* dst, size_t bytes) {
   Runtime* r = (Runtime*)rt;

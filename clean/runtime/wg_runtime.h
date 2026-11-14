@@ -144,6 +144,9 @@ WG_RT_API int wg_rt_info(void* rt, WgRtFrameInfo* info);
 /* A named buffer of the last frame (names in clean/FORMATS.md): device address and size in bytes. */
 WG_RT_API int wg_rt_buffer(void* rt, const char* name, uintptr_t* ptr, size_t* bytes);
 WG_RT_API int wg_rt_download(void* rt, uintptr_t ptr, void* dst, size_t bytes);
+/* Diagnostics (the frame checks' sentinels): the allocation of a named buffer (as wg_rt_buffer; also before the first
+   frame) set to the byte value, from the buffer's start to the allocation's end. */
+WG_RT_API int wg_rt_fill(void* rt, const char* name, int value);
 /* The reconstruction size D in use (spec 01, or O with recon_output / WG_RECON_SIZE=output). */
 WG_RT_API int wg_rt_recon_size(void* rt, int* dw, int* dh);
 /* Where the model data came from: "model.wgcm" or "raw". */

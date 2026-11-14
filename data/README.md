@@ -6,8 +6,9 @@ only layout information and the digests the converter uses to verify the player'
 
 ## Converter maps
 
-`preset-M.v1.map.json` (Model M, map version 4), `preset-F.v1.map.json` (Ray Reconstruction, version 5) and
-`preset-K.v1.map.json` (Model K, version 3) tell the converter (`clean/converter`) how to read the network's parameters
+`preset-M.v1.map.json` (Model M, map version 4), `preset-F.v1.map.json` (Ray Reconstruction, version 5),
+`preset-K.v1.map.json` (Model K, version 3) and `preset-L.v1.map.json` (Model L, version 1; the spec side's revision
+v1.1, which names its preset and carries L's 13-entry `dec0_values`) tell the converter (`clean/converter`) how to read the network's parameters
 from the player's own DLSS file. Each map holds:
 
 - `format`, `version`, `channel_order`, and a `model` line naming the DLSS product and the first DLSS version the map

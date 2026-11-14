@@ -33,6 +33,17 @@ if(WG_MODEL_K)
 else()
   add_compile_definitions(WRONGGPU_MODEL_K=0)
 endif()
+# Model L in the front end (#89; src/model_l.h): its entry "WrongGPU Model L" in the hosted version list, its id,
+# sr_model=L / model=L passed to the runtime (which needs WG_MODEL_L too), the model lookup's <place>\L\model.wgcm, its
+# names in the overlay and the provider label. OFF (the default while Model L is not released): none of that; model=L
+# from wronggpu.ini or WG_RUNTIME_OPTIONS is refused with one log line and Model M runs. Set on wg_fsr_core (and so on
+# everything that links it), so that the tests below can also build a front end with Model L.
+option(WG_MODEL_L "Offer Model L (hosted list entry, model=L); OFF = no Model L" OFF)
+if(WG_MODEL_L)
+  set(WG_MODEL_L_VALUE 1)
+else()
+  set(WG_MODEL_L_VALUE 0)
+endif()
 
 enable_testing()
 # clean/wgshared: the registry, the shared settings block and wg_settings_io.h (with their own tests).
@@ -41,13 +52,14 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../wgshared ${CMAKE_BINARY_DIR}/wgs
 # folder, spec 65.6): not built unless asked for. Its header-only unit tests still run.
 option(WG_BUILD_ASI "Build the retired OptiScaler menu-patching plugin WrongGPU.asi" OFF)
 add_executable(test_provider_label tests/test_provider_label.cpp)
+target_compile_definitions(test_provider_label PRIVATE WRONGGPU_MODEL_L=${WG_MODEL_L_VALUE})
 if(MSVC)
   set_property(TARGET test_provider_label PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 add_test(NAME fsr_provider_label_unit COMMAND test_provider_label)
 
 # Front-end logic without Windows or D3D12 (routing, forwarding, parameter mapping, log text, settings).
-add_library(wg_fsr_core STATIC
+set(WG_FSR_CORE_SOURCES
   src/amd_compare.cpp
   src/amd_provider.cpp
   src/async_create.cpp
@@ -57,22 +69,26 @@ add_library(wg_fsr_core STATIC
   src/fsr30_hook.cpp
   src/fsr30_map.cpp
   src/param_map.cpp)
-target_include_directories(wg_fsr_core SYSTEM PUBLIC ${FFX_SDK_DIR})
-target_include_directories(wg_fsr_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(wg_fsr_core PUBLIC wg_shared_headers)
-set_target_properties(wg_fsr_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
-
-if(MSVC)
-  target_compile_options(wg_fsr_core PRIVATE /Zi)
-  target_compile_options(wg_fsr_core PUBLIC /W4 $<$<COMPILE_LANGUAGE:CXX>:/permissive-> /utf-8 /wd4100)
-  target_compile_definitions(wg_fsr_core PUBLIC _CRT_SECURE_NO_WARNINGS NOMINMAX)
-else()
-  target_compile_options(wg_fsr_core PUBLIC -Wall -Wextra)
-endif()
-if(MINGW)
-  # Struct-returning COM methods (GetDesc, GetCPUDescriptorHandleForHeapStart) need the MSVC calling convention.
-  target_compile_definitions(wg_fsr_core PUBLIC WIDL_EXPLICIT_AGGREGATE_RETURNS)
-endif()
+function(wg_fsr_core_library name model_l)
+  add_library(${name} STATIC ${WG_FSR_CORE_SOURCES})
+  target_include_directories(${name} SYSTEM PUBLIC ${FFX_SDK_DIR})
+  target_include_directories(${name} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_link_libraries(${name} PUBLIC wg_shared_headers)
+  target_compile_definitions(${name} PUBLIC WRONGGPU_MODEL_L=${model_l})
+  set_target_properties(${name} PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  if(MSVC)
+    target_compile_options(${name} PRIVATE /Zi)
+    target_compile_options(${name} PUBLIC /W4 $<$<COMPILE_LANGUAGE:CXX>:/permissive-> /utf-8 /wd4100)
+    target_compile_definitions(${name} PUBLIC _CRT_SECURE_NO_WARNINGS NOMINMAX)
+  else()
+    target_compile_options(${name} PUBLIC -Wall -Wextra)
+  endif()
+  if(MINGW)
+    # Struct-returning COM methods (GetDesc, GetCPUDescriptorHandleForHeapStart) need the MSVC calling convention.
+    target_compile_definitions(${name} PUBLIC WIDL_EXPLICIT_AGGREGATE_RETURNS)
+  endif()
+endfunction()
+wg_fsr_core_library(wg_fsr_core ${WG_MODEL_L_VALUE})
 
 # Host unit tests (any platform).
 add_executable(test_amd_provider tests/test_amd_provider.cpp)
@@ -84,6 +100,13 @@ add_test(NAME fsr_frontend_unit COMMAND test_frontend)
 add_executable(test_fsr30 tests/test_fsr30.cpp)
 target_link_libraries(test_fsr30 PRIVATE wg_fsr_core)
 add_test(NAME fsr30_hook_unit COMMAND test_fsr30)
+# A build without Model L (the default) also tests a front end with it: the same tests, Model L built in.
+if(NOT WG_MODEL_L)
+  wg_fsr_core_library(wg_fsr_core_model_l 1)
+  add_executable(test_frontend_model_l tests/test_frontend.cpp)
+  target_link_libraries(test_frontend_model_l PRIVATE wg_fsr_core_model_l)
+  add_test(NAME fsr_frontend_model_l_unit COMMAND test_frontend_model_l)
+endif()
 
 # WrongGPU OptiScaler ASI plugin: thunk logic (any OS) and the offline anchor scan of an OptiScaler binary
 # (any OS; skips when WRONGGPU_OPTISCALER_BIN is not set). Header-only resolver/thunk, no extra libraries.
@@ -107,9 +130,15 @@ if(WIN32)
   else()
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     set_property(TARGET wg_fsr_core test_frontend test_fsr30 PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    if(TARGET test_frontend_model_l)
+      set_property(TARGET wg_fsr_core_model_l test_frontend_model_l PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    endif()
   endif()
   if(MINGW)
     target_link_options(test_frontend PRIVATE ${WG_STATIC_RUNTIME})
+    if(TARGET test_frontend_model_l)
+      target_link_options(test_frontend_model_l PRIVATE ${WG_STATIC_RUNTIME})
+    endif()
     target_link_options(test_fsr30 PRIVATE ${WG_STATIC_RUNTIME})
     target_link_options(test_asi_thunk PRIVATE ${WG_STATIC_RUNTIME})
     target_link_options(test_asi_scan PRIVATE ${WG_STATIC_RUNTIME})
