@@ -195,6 +195,18 @@ Model K ships in the same `wronggpu_runtime.dll` as model M; nothing changes for
    Exposure (spec 42 draft 3 section 4): E_cur = the game's exposure texture or value, 1 if it passes none; the
    auto-exposure value (spec 07, run when the game asks for it at creation, HDR only) is E_aux and acts only through
    λ. `k_expo_rule=v051` (A/B only) restores the 0.5.1 rule (the measured value as E_cur and E_aux).
+   Direct3D 12 devices (`backend=2`, the hybrid device, and `backend=3`, the native device): the exact default path runs
+   on the D3D12 ports of `clean/k/dx12` (byte-identical to the HIP kernels, `clean/k/dx12/README.md`); a context whose
+   options leave that path (`network=fused16` / `fused8`, `k_fast=1`, `k_fast_in=1`, `k_in_exact=0`, `input_tiled=0`,
+   `k_diag`) is refused on the native device and runs on HIP. On the native device `create` first checks that
+   `dx12/manifest.json` has a port of every kernel the context can launch and refuses it, naming the missing kernels,
+   before the model is loaded. `k_in_uniforms=0` (diagnostic): the tiled input kernel that computes its frame values on the
+   GPU instead of taking the host's. Latency options of the D3D12 devices that change no value: `k_color_at=<stage>`
+   (`k_out_color` runs unordered right after that stage; default: before the input stage, HIP's order) and `k_warm=<stage>` /
+   `off` (backend 3: `k_warm`, a cache warm-up of the weight blobs of the stages after it, launched unordered after that
+   stage, default `e0`; `k_warm_to`, `k_warm_line`, `k_warm_groups`). The D3D12 executor of the interop (the game's own
+   device) takes model K only when the forms that read the game's textures are declared in the build; they are not yet,
+   so it refuses K at create and the HIP executor runs it.
 
 In game (Cyberpunk 2077 benchmark, 1440p Quality, RX 9070 XT; the project's measurements): model K
 GPU time about 1.8 ms per frame (`fused`; 1.72 ms with `fused16`), the game at ~120 fps against ~117 fps with model M

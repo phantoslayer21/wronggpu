@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // D3D12 ports of model K's output stage (spec 43): k_out_color, k_out_pixel_c (compact pixel head, the default)
 // and k_out_pixel (k_head=full). The forms that read the game's textures (_direct, WG_DIRECT_TEXTURES) are in this source
-// for the runtime's use but are not declared yet: they are declared and checked with the runtime wiring. WrongGPU's own code.
+// for the runtime's use but are not declared yet (see k_in.hlsl). WrongGPU's own code.
 // Basis: our HIP kernels in clean/k/kernels/k_io.hip (HIP build k_io.co, wave64, 128 lanes per workgroup), exact forms
 // only (FAST = false; the k_fast=1 "_f" kernels are not ported and keep running on HIP). Same names, same argument
 // struct (KOutParams, see hlsl/k_out.hlsli for the s-token and why each skipped field is dead), same launch geometry

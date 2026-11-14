@@ -669,6 +669,12 @@ class Context {
         dx12 = false;
         dx12_default_ = false;
         err.clear();
+        // model K on the HIP executor after all: its default mode (handover=staged with inline sync), as if the HIP
+        // executor had been chosen (the runtime options it adds are the runtime's defaults already)
+        if (model_k_ && !k_default_) {
+          o.executor = "hip";
+          k_default_ = model_k_default(o);
+        }
       } else {
         say(WG_LOG_INFO, std::string("executor dx12: the network runs on the game's D3D12 device, recorded into the "
                                      "game's command list; its kernels read the game's colour, depth and motion and "
@@ -1140,6 +1146,9 @@ class Context {
     if (refused && dx12_default_ && switch_to_hip(v, err)) return *moved = true, WG_OK;
     if (!refused) dx12_last_ = v;
     note_path(&input_path_, "input: read directly by the network's D3D12 kernels (executor dx12, no input pass)");
+    if ((flags_ & WG_CREATE_MOTION_OUTPUT_RES) && model_k_)
+      note_path(&motion_path_, "motion: output resolution, the texel under each render pixel's centre picked by the "
+                               "executor's D3D12 pass (as the input pass) and read by model K's D3D12 kernels");
     if ((flags_ & WG_CREATE_MOTION_OUTPUT_RES) && !model_k_)
       note_path(&motion_path_, motion_hi_use_
                                    ? (Converter::motion_fp16(f)
@@ -1474,6 +1483,10 @@ class Context {
     // render-size motion (point); without the create flag the runtime gets no such option and nothing changes
     if ((flags_ & WG_CREATE_MOTION_OUTPUT_RES) && !model_k_)
       n_rtopts_ += (n_rtopts_.empty() ? "" : ";") + std::string("motion_outres=") + o.motion_outres;
+    // model K on the D3D12 executor: the executor's D3D12 pass picks the motion texel under each render pixel's centre
+    // as the input pass does (executor_d3d12.cpp motion_outres=point); model K's runtime ignores the key
+    if ((flags_ & WG_CREATE_MOTION_OUTPUT_RES) && model_k_ && o.executor == "dx12")
+      n_rtopts_ += (n_rtopts_.empty() ? "" : ";") + std::string("motion_outres=point");
     // Pre-exposure: the runtime's default, pre_exposure=scale (color / pi into the network, result * pi). The rule of
     // spec 10 draft 4 (pre_exposure=original) stays an option: with auto-exposure and a pre-exposure far from 1 it
     // leaves the network input scaled by pi (Hogwarts Legacy, pi = 0.00077: twice the frame-to-frame change on

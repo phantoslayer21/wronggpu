@@ -3,18 +3,21 @@
 // tests/test_executor_select.cpp checks it on any host. WrongGPU's own code.
 //
 // Option `executor` (wronggpu.ini runtime_options, an [fsr] line, WG_RUNTIME_OPTIONS):
-//  - not named (or `auto`): Model M on an RDNA 4 adapter (../rdna4.h) runs on the D3D12 executor (executor_d3d12.cpp),
-//    everything else on the HIP executor, with one log line saying why (other GPU, model K, the sparkle guard or the
-//    frame capture, which run on HIP only). The D3D12 executor can still refuse the context at create (its
-//    driver-channel probe, the network's create, a context its kernels do not take): then the HIP executor runs it,
-//    again with one line (backend.cpp). A frame it does not take later (e.g. above the checked render size; native AA
+//  - not named (or `auto`): Model M and model K on an RDNA 4 adapter (../rdna4.h) run on the D3D12 executor
+//    (executor_d3d12.cpp), everything else on the HIP executor, with one log line saying why (other GPU, the sparkle
+//    guard or the frame capture, which run on HIP only). The D3D12 executor can still refuse the context at create
+//    (its driver-channel probe, the network's create, a context its kernels do not take): then the HIP executor runs
+//    it, again with one line (backend.cpp). Model K is taken only when every kernel the context can launch has a
+//    D3D12 port in the build's dx12/manifest.json and its options select the exact default path (KRuntime::create on
+//    backend 3 checks both before it loads the model; clean/k/runtime/runtime_k.h); else the refusal line names what
+//    is missing. A frame it does not take later (e.g. above the checked render size; native AA
 //    and every ratio between 1.0 and 1.5 run on it since Brief 15) goes back to the front end
 //    (AMD FSR, else its stand-in; hip_switch=off, the default since the owner's decision of 2026-11-04); with
 //    hip_switch=on the context moves to the HIP executor for good (backend.cpp switch_to_hip; one line).
 //  - `hip`: the HIP executor, always.
 //  - `dx12` (or `d3d12`): the D3D12 executor on any adapter (the device refuses unsupported ones and the HIP executor
-//    takes the context); model K, the sparkle guard and the frame capture keep the HIP executor (warnings, as before);
-//    frames it does not take get the bilinear fallback (no switch).
+//    takes the context; model K as above); the sparkle guard and the frame capture keep the HIP executor (warnings, as
+//    before); frames it does not take get the bilinear fallback (no switch).
 //  - `d3d12-test`: the offline test executor.
 #pragma once
 
@@ -27,7 +30,7 @@ namespace wgi {
 
 struct ExecutorRequest {
   std::string executor = "auto";  // the option's value ("auto" when not named)
-  bool model_k = false;           // the runtime options select model K
+  bool model_k = false;           // the runtime options select model K (D3D12 executor: ports checked at its create)
   bool adapter_known = false;     // the game device's adapter could be read (DXGI)
   uint32_t vendor_id = 0;
   bool software = false;          // DXGI_ADAPTER_FLAG_SOFTWARE
@@ -52,14 +55,12 @@ inline ExecutorChoice choose_executor(const ExecutorRequest& r) {
     return c;
   }
   if (e == "dx12" || e == "d3d12") {  // forced (the messages of the option before it had a default)
-    const char* why = r.model_k ? nullptr
-                      : r.sparkle_guard ? "the sparkle guard runs on HIP only"
-                      : r.capture       ? "the frame capture runs on HIP only"
-                                        : nullptr;
-    c.executor = r.model_k || why ? "hip" : "dx12";
+    const char* why = r.sparkle_guard ? "the sparkle guard runs on HIP only"
+                      : r.capture     ? "the frame capture runs on HIP only"
+                                      : nullptr;
+    c.executor = why ? "hip" : "dx12";
     c.warn = c.executor == "hip";
-    if (r.model_k) c.why = "executor=dx12: model K has no D3D12 port; the HIP executor runs it";
-    else if (why) c.why = std::string("executor=dx12 not available for this context: ") + why + "; the HIP executor runs it";
+    if (why) c.why = std::string("executor=dx12 not available for this context: ") + why + "; the HIP executor runs it";
     return c;
   }
   if (e != "auto" && !e.empty()) return c;  // unknown value
@@ -68,9 +69,7 @@ inline ExecutorChoice choose_executor(const ExecutorRequest& r) {
                                           : std::string("the adapter (not identified)");
   const char* why = nullptr;
   std::string text;
-  if (r.model_k) {
-    why = "model K has no D3D12 port";
-  } else if (!r.adapter_known || !wgrt::rdna4_adapter(r.vendor_id, r.software, r.adapter)) {
+  if (!r.adapter_known || !wgrt::rdna4_adapter(r.vendor_id, r.software, r.adapter)) {
     text = gpu + " is not an RDNA 4 Radeon RX 9070 / RX 9060, where the D3D12 executor runs";
     why = text.c_str();
   } else if (r.sparkle_guard) {

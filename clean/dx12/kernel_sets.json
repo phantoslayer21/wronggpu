@@ -383,6 +383,10 @@
   [
    "kx/k_in_tiled",
    "k_io_exact.co"
+  ],
+  [
+   "kx/k_in_tiled_uniform",
+   "k_io_exact.co"
   ]
  ]
 }

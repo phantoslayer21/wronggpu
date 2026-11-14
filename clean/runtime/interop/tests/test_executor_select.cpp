@@ -73,13 +73,27 @@ int main() {
     c = choose_executor(r);
     expect("default: unknown adapter -> hip", c.executor == "hip" && has(c.why, "not identified"));
   }
-  // default with what has no D3D12 port -> hip, one line with the reason
+  // default with model K on RDNA 4 -> dx12 by the default rule (the D3D12 executor's create checks K's ports and
+  // refuses the context when one is missing: dx12_refused_line, then the HIP executor); on other GPUs -> hip
   {
     ExecutorRequest r = gpu("AMD Radeon RX 9070 XT");
     r.model_k = true;
     ExecutorChoice c = choose_executor(r);
-    expect("default: model K -> hip", c.executor == "hip" && has(c.why, "model K"));
+    expect("default: model K on RDNA 4 -> dx12 (by default)", c.executor == "dx12" && c.by_default && c.why.empty());
+    r = gpu("AMD Radeon RX 7900 XTX");
+    r.model_k = true;
+    c = choose_executor(r);
+    expect("default: model K on RDNA 3 -> hip", c.executor == "hip" && has(c.why, "not an RDNA 4"));
     r = gpu("AMD Radeon RX 9070 XT");
+    r.model_k = true;
+    r.capture = true;
+    c = choose_executor(r);
+    expect("default: model K + frame capture -> hip", c.executor == "hip" && has(c.why, "frame capture"));
+  }
+  // default with what has no D3D12 port -> hip, one line with the reason
+  {
+    ExecutorRequest r = gpu("AMD Radeon RX 9070 XT");
+    ExecutorChoice c;
     r.sparkle_guard = true;
     c = choose_executor(r);
     expect("default: sparkle guard -> hip", c.executor == "hip" && has(c.why, "sparkle guard"));
@@ -110,8 +124,14 @@ int main() {
     r.executor = "dx12";
     r.model_k = true;
     c = choose_executor(r);
-    expect("executor=dx12 + model K -> hip with the earlier warning",
-           c.executor == "hip" && c.warn && c.why == "executor=dx12: model K has no D3D12 port; the HIP executor runs it");
+    expect("executor=dx12 + model K -> dx12 (forced; ports checked at the executor's create)",
+           c.executor == "dx12" && !c.by_default && c.why.empty());
+    {
+      const std::string e = "D3D12 runtime: model K: the D3D12 build has no port of k_out_color_direct";
+      expect("model K port missing (default): the refusal line names it",
+             has(wgi::dx12_refused_line(true, e), "no port of k_out_color_direct") &&
+                 has(wgi::dx12_refused_line(true, e), "the HIP executor runs it"));
+    }
     r.model_k = false;
     r.sparkle_guard = true;
     c = choose_executor(r);

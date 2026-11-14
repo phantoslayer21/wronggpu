@@ -19,10 +19,16 @@
 // intermediate goes through kf_opq (k_fp.hlsli). FP32 denormals are flushed here (HIP keeps them): none occur in the
 // port checks' frames (clean/k/dx12/k_port_check.py).
 //
-// Kernel declared here: kx/k_in_tiled (KInParams; computes KiHost on the GPU). The forms with KiHost in the arguments
-// (kx/k_in_tiled_uniform, K_UNIFORM) and the forms reading the game's textures (_direct, WG_DIRECT_TEXTURES) are in this
-// source for the runtime's use but are not declared yet: they are declared and checked with the runtime wiring.
+// Kernels (the names the runtime launches; runtime_k.cpp selects k_in_tiled_uniform when input_uniforms_safe accepts
+// the frame's FP32 values, else k_in_tiled, which computes the same KiHost on the GPU):
+//   kx/k_in_tiled_uniform   KInUniformParams (KInParams + KiHost)
+//   kx/k_in_tiled           KInParams
+//   The direct forms (rs=direct, for the native executor, model K's direct I/O: colour / depth / motion from the game's
+//   textures t0 / t1 / t2, k_frame.hlsli kio_texel / kio_motion / kio_depth; WG_DIRECT_TEXTURES) are in this source for
+//   the runtime's use but are not declared yet: until they are declared and checked the D3D12 executor refuses a model K
+//   context at create and the HIP executor runs it.
 // The KInParams pointers cpre / cpre2 are null in the tiled launches (runtime_k.cpp), as in HIP unused here.
+// @wg-kernel kx/k_in_tiled_uniform co=k_io_exact.co block=256 wave=64 args=s248:p4.b128.p5.b48 defines=K_UNIFORM=1
 // @wg-kernel kx/k_in_tiled co=k_io_exact.co block=256 wave=64 args=s200:p4.b128.p5
 #include "wg_platform.hlsli"
 #ifndef K_UNIFORM

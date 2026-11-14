@@ -131,7 +131,7 @@ class KRuntimeExt:
     """wg_rt_create_external with model=K and the slot buffers of the interop (FORMATS.md "Per-frame runtime")."""
 
     def __init__(self, build, model_dir, map_path, out_size, max_render, hdr, depth_inverted, auto_exposure,
-                 options=""):
+                 options="", backend=0):
         from clean.runner.build import runtime_library_name
         from clean.runner.pipeline import WgRtConfig, WgRtFrame
         self.WgRtFrame = WgRtFrame
@@ -140,6 +140,7 @@ class KRuntimeExt:
             os.add_dll_directory(os.path.join(rocm, "bin"))
         lib = self.lib = ctypes.CDLL(os.path.abspath(os.path.join(build, runtime_library_name())))
         lib.wg_rt_create_external.argtypes = [P(WgRtConfig), P(vp), ctypes.c_char_p, ctypes.c_int]
+        lib.wg_rt_create.argtypes = [P(WgRtConfig), P(vp), ctypes.c_char_p, ctypes.c_int]
         lib.wg_rt_destroy.argtypes = [vp]
         lib.wg_rt_error.argtypes = [vp]
         lib.wg_rt_error.restype = ctypes.c_char_p
@@ -160,12 +161,14 @@ class KRuntimeExt:
         opts = f"model=K;model_k_map={map_path}" + (";" + options if options else "")
         self._keep = [os.fsencode(build), os.fsencode(rocm), os.fsencode(model_dir), opts.encode()]
         cfg.build_dir, cfg.rocm_dir, cfg.model_dir, cfg.runtime_options = self._keep
-        cfg.backend = 0
+        cfg.backend = backend  # 0 HIP; 2 the hybrid D3D12 device; 3 the native D3D12 device (no HIP)
         cfg.max_rw, cfg.max_rh, cfg.ow, cfg.oh = self.max_rw, self.max_rh, self.W, self.H
         cfg.depth_inverted, cfg.hdr, cfg.auto_exposure = int(depth_inverted), int(hdr), int(auto_exposure)
         cfg.model_format = 2
         rt, err = ctypes.c_void_p(), ctypes.create_string_buffer(4096)
-        if lib.wg_rt_create_external(ctypes.byref(cfg), ctypes.byref(rt), err, len(err)) != 0:
+        # the native D3D12 device takes caller buffers (wg_rt_alloc, wg_rt_frame_io) from a runtime made with wg_rt_create
+        create = lib.wg_rt_create if backend == 3 else lib.wg_rt_create_external
+        if create(ctypes.byref(cfg), ctypes.byref(rt), err, len(err)) != 0:
             raise RuntimeError("runtime create failed: " + err.value.decode(errors="replace"))
         self.rt = rt
         R, O = self.max_rw * self.max_rh, self.W * self.H
