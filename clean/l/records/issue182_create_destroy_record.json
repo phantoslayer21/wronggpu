@@ -1,0 +1,208 @@
+{
+ "what": "Issue #182: process GPU memory after an upscaler is created and destroyed (5 cycles, no resize), Model L and Model M at 3840x2160 output, native and Quality, with the D3D12 executor's arena re-measure",
+ "harness": "clean/fsr/tests/test_dll_d3d12.cpp resize_real (WG_TEST_RESIZE_STEPS=0, WG_TEST_RESIZE_CYCLES=5, settle 800 ms): DXGI QueryVideoMemoryInfo, local segment, this process only; the runtime-reported figure is the front end's FFX_API_QUERY_DESC_TYPE_UPSCALE_GPU_MEMORY_USAGE",
+ "setup": {
+  "gpu": "AMD Radeon RX 9070 XT (gfx1201), 16191 MiB dedicated",
+  "base": "main 6622148",
+  "runtime": "this branch, clean/runner/build.py --model-l --no-model-k, D3D12 kernels build_dx12.py --model-l (68 kernels)",
+  "front_end": "clean/fsr with WG_MODEL_L=ON, WG_MODEL_K=OFF (test_dll_d3d12 and its front-end copy)",
+  "runtime_dll_sha256": "276f805d776532f6b0fec5c3d819fb291b22d5fd4a9288aa972d280557b25292",
+  "front_end_dll_sha256": "b89ceea05b3dd1de875f366266a0bf88bddc7bf3d307bc24f7b06b252529eb55",
+  "models": "synthetic files from the repository's generators (Model M: synthetic_model.synthetic_tensors(3) with its Swin weights scaled so every stage takes the clamp-free kernels, as a real model's do; Model L: l_frame_check's synthetic model, seed 89); memory depends on the network's shapes, not on the values",
+  "gpu_runs": "one at a time, each through tools/gpu_slot.py --cap-s 170"
+ },
+ "runs": [
+  {
+   "run": "l4k-native",
+   "model": "L",
+   "output": "3840x2160",
+   "mode": "native (render 3840x2160)",
+   "what": "fix",
+   "cycles": 5,
+   "process_local_mib_before_any_context": 204,
+   "process_growth_mib_per_cycle_peak": [
+    2742,
+    2742,
+    2742,
+    2742,
+    2742
+   ],
+   "runtime_reported_mib": [
+    2739
+   ],
+   "growth_mib_after_each_destroy": [
+    2,
+    2,
+    2,
+    2,
+    2
+   ],
+   "executor_per_cycle": [
+    "dx12",
+    "dx12",
+    "dx12",
+    "dx12",
+    "dx12"
+   ],
+   "remeasured_in_4095_mib_arena": 5,
+   "d3d12_arena_need_mib": [
+    2738
+   ],
+   "hip_fallback_lines": 0,
+   "pooled_arena_kept_lines": 0,
+   "test_passed": true
+  },
+  {
+   "run": "l4k-q",
+   "model": "L",
+   "output": "3840x2160",
+   "mode": "Quality (render 2560x1440)",
+   "what": "fix",
+   "cycles": 5,
+   "process_local_mib_before_any_context": 135,
+   "process_growth_mib_per_cycle_peak": [
+    1444,
+    1444,
+    1444,
+    1444,
+    1444
+   ],
+   "runtime_reported_mib": [
+    1441
+   ],
+   "growth_mib_after_each_destroy": [
+    2,
+    2,
+    2,
+    2,
+    2
+   ],
+   "executor_per_cycle": [
+    "dx12",
+    "dx12",
+    "dx12",
+    "dx12",
+    "dx12"
+   ],
+   "remeasured_in_4095_mib_arena": 0,
+   "d3d12_arena_need_mib": [],
+   "hip_fallback_lines": 0,
+   "pooled_arena_kept_lines": 0,
+   "test_passed": true
+  },
+  {
+   "run": "m4k-native",
+   "model": "M",
+   "output": "3840x2160",
+   "mode": "native (render 3840x2160)",
+   "what": "fix",
+   "cycles": 5,
+   "process_local_mib_before_any_context": 204,
+   "process_growth_mib_per_cycle_peak": [
+    1593,
+    1593,
+    1593,
+    1593,
+    1593
+   ],
+   "runtime_reported_mib": [
+    1590
+   ],
+   "growth_mib_after_each_destroy": [
+    2,
+    2,
+    2,
+    2,
+    2
+   ],
+   "executor_per_cycle": [
+    "dx12",
+    "dx12",
+    "dx12",
+    "dx12",
+    "dx12"
+   ],
+   "remeasured_in_4095_mib_arena": 0,
+   "d3d12_arena_need_mib": [],
+   "hip_fallback_lines": 0,
+   "pooled_arena_kept_lines": 0,
+   "test_passed": true
+  },
+  {
+   "run": "m4k-q",
+   "model": "M",
+   "output": "3840x2160",
+   "mode": "Quality (render 2560x1440)",
+   "what": "fix",
+   "cycles": 5,
+   "process_local_mib_before_any_context": 135,
+   "process_growth_mib_per_cycle_peak": [
+    936,
+    936,
+    936,
+    936,
+    936
+   ],
+   "runtime_reported_mib": [
+    933
+   ],
+   "growth_mib_after_each_destroy": [
+    2,
+    2,
+    2,
+    2,
+    2
+   ],
+   "executor_per_cycle": [
+    "dx12",
+    "dx12",
+    "dx12",
+    "dx12",
+    "dx12"
+   ],
+   "remeasured_in_4095_mib_arena": 0,
+   "d3d12_arena_need_mib": [],
+   "hip_fallback_lines": 0,
+   "pooled_arena_kept_lines": 0,
+   "test_passed": true
+  },
+  {
+   "run": "l4k-native-arena2560",
+   "model": "L",
+   "output": "3840x2160",
+   "mode": "native (render 3840x2160)",
+   "what": "control: same build, WG_D3D12_ARENA_MB=2560 (no re-measure: the behaviour before this change)",
+   "cycles": 5,
+   "process_local_mib_before_any_context": 204,
+   "process_growth_mib_per_cycle_peak": [
+    4230,
+    4230,
+    4230,
+    4230,
+    4230
+   ],
+   "runtime_reported_mib": [
+    3433
+   ],
+   "growth_mib_after_each_destroy": [
+    1419,
+    1419,
+    1419,
+    1419,
+    1419
+   ],
+   "executor_per_cycle": [
+    "hip",
+    "hip",
+    "hip",
+    "hip",
+    "hip"
+   ],
+   "remeasured_in_4095_mib_arena": 0,
+   "d3d12_arena_need_mib": [],
+   "hip_fallback_lines": 5,
+   "pooled_arena_kept_lines": 5,
+   "test_passed": true
+  }
+ ]
+}
