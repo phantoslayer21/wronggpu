@@ -1,0 +1,22 @@
+{
+ "name": "Resident Evil Requiem",
+ "game_root": "<the game folder, e.g. ...\\steamapps\\common\\RESIDENT EVIL requiem BIOHAZARD requiem>",
+ "exe_dir": ".",
+ "exe": "re9.exe",
+ "launchers": [],
+ "out": "<an empty output folder for this run>",
+ "launcher_package": "<the candidate's WrongGPU-<version>.exe (build.py --model-l)>",
+ "payload": "<the same build's payload folder>",
+ "model": {"name": "L", "file": "<the converted Model L model.wgcm>", "sha256": "<its SHA-256>"},
+ "aside": [],
+ "hash_only": ["dinput8.dll", "_storage_\\dinput8.dll"],
+ "settings": {
+  "file": "<the game folder>\\config.ini",
+  "format": "ini",
+  "keys": {"UpscalingAlgorithm": "DLSS", "UpscalingQuality_DLSS": "Quality", "RayTracingSetting": "High",
+           "FrameGeneration": "Off", "WindowMode": "Borderless"}
+ },
+ "gpu_flag": "<the GPU-in-use flag file other GPU jobs on this PC respect>",
+ "flag_owner": "ingame-run",
+ "disk_free_gb": {"C:\\": 20}
+}
