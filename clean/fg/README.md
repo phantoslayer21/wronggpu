@@ -13,6 +13,8 @@ front end or the launcher yet. Status, open items and formats: [FORMATS.md](FORM
 | `tests/test_fg_reference.py` | the building blocks against plain loop versions, on synthetic data |
 | `../converter` (preset FG) | the converter reads a version-1 map with `"preset": "FG"`: one block source per weight blob; see the converter's README, "Preset FG" |
 | `../../data/fg.v1.map.json` | the spec side's converter map v1 (weights as stored); `tests/test_fg_map.py` pins its digest and checks it against `layout.py` |
+| `tools/real_check.py` | runs the converter once on one given frame-generation library (execute-only) and records only the verdict, the map's digest, the file version and size, the matching stage digests and the converted file's digest; deletes the converted file. Offsets and bytes of the library are never recorded |
+| `tests/test_fg_real_check.py` | the tool on made-up converter output and a stand-in converter |
 | `reference/config.py` | the settled per-call configuration: the multi-frame intermediate time (one single-precision division), the index checks and flags, UI recomposition (FG preset A / B) with the profile values that force it |
 | `tests/test_fg_config.py` | the intermediate time against exactly rounded quotients, the index rules, every forcing profile value |
 
