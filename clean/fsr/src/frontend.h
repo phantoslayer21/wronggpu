@@ -107,6 +107,7 @@ constexpr uint32_t kBadFrameRun = 30;
 // value index + 1), which keep these two; test_frontend checks they equal kWgEntries[0] and [1].
 constexpr uint64_t kWrongGpuProviderVersionId = 0x5747000000000001ull;  // "WG", interface 1
 constexpr uint64_t kWrongGpuKProviderVersionId = 0x5747000000000002ull; // same interface, Model K
+constexpr uint64_t kWrongGpuLProviderVersionId = 0x5747000000000003ull; // same interface, Model L (#89)
 constexpr const char* kWrongGpuVersionName = "WrongGPU Model M";
 
 // Any of WrongGPU's own listed entries (config.h, OwnEntryOfId: SR models and RR modes from the registry).
@@ -131,6 +132,9 @@ inline bool IsWrongGpuProvider(uint64_t id) { return OwnEntryOfId(id) != nullptr
 constexpr const char* kWrongGpuListedNameM = "WrongGPU Model M##" WRONGGPU_LISTED_API_LEVEL;
 #if WRONGGPU_MODEL_K  // (model_k.h; without it the Model K id above is not WrongGPU's: an unknown override)
 constexpr const char* kWrongGpuListedNameK = "WrongGPU Model K##" WRONGGPU_LISTED_API_LEVEL;
+#endif
+#if WRONGGPU_MODEL_L  // (model_l.h; without it the Model L id above is not WrongGPU's: an unknown override)
+constexpr const char* kWrongGpuListedNameL = "WrongGPU Model L##" WRONGGPU_LISTED_API_LEVEL;
 #endif
 
 class FrontEnd {
@@ -208,7 +212,8 @@ private:
     bool ActivateSplit(UpscaleContext& u, const WgUpscalerBackend* backend, const std::string& tag);
     // The model folder for `u`'s options (Platform::modelPlaces): appends ";model_dir=<dir>" when the model is found
     // in a place before the runtime's own default; nothing when runtime_options / WG_RUNTIME_OPTIONS name model_dir.
-    void ApplyModelDir(UpscaleContext& u, const std::string& tag);
+    // The model lookup (model_dir for the runtime). Returns why the create is refused (Model L without its file), or "".
+    std::string ApplyModelDir(UpscaleContext& u, const std::string& tag);
     // Custom slot (Config::customSlot): a create of the same upscaler with the same options failed earlier in this
     // session. Key: backend name + options. Guarded by mutex_.
     std::string FailureKey(const WgUpscalerBackend* backend, const UpscaleContext& u) const;
