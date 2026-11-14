@@ -601,7 +601,8 @@ class Context {
       probe.runtime_options = o.runtime.c_str();
       wgrt::ModelId model = wgrt::ModelId::M;
       std::string merr;
-      q.model_k = wgrt::model_from_options(probe, &model, &merr) && model != wgrt::ModelId::M;
+      // model K only (Model L runs on the D3D12 executor in builds with it: runtime.cpp, native D3D12 backend 3)
+      q.model_k = wgrt::model_from_options(probe, &model, &merr) && model == wgrt::ModelId::K;
       q.adapter_known = adapter_info(device_, &q.adapter, &q.vendor_id, &q.software);
       q.sparkle_guard = o.sparkle_guard > 0.0f;
       q.capture = !o.capture_dir.empty();
@@ -1377,7 +1378,9 @@ class Context {
       if (base.empty()) return *err = "LOCALAPPDATA is not set; cannot find the model", false;
       model_dir_ = base + "\\WrongGPU\\model";
     }
-    // the network model: runtime option model=K (passed on to the runtime) selects model K, else model M
+    // the network model: runtime option model=K (passed on to the runtime) selects model K, model=L Model L (its
+    // converted file in <model_dir>\L, model_select.h), else model M
+    bool model_l = false;
     {
       WgRtConfig probe = WgRtConfig();
       probe.runtime_options = o.runtime.c_str();
@@ -1387,6 +1390,7 @@ class Context {
 #ifndef WG_NO_MODEL_K
       model_k_ = model == wgrt::ModelId::K;
 #endif
+      model_l = model == wgrt::ModelId::L;
     }
     {  // model K's input path: k_input=16 (default: the compact pass where exact) or f32 (the FP32 input pass)
       const std::string ki = option_value(o.runtime, "k_input");
@@ -1417,7 +1421,7 @@ class Context {
         return *err = "model K: the network's kernel files are missing in " + kernels_dir_ + " (reinstall WrongGPU)",
                false;
     } else if (format == 2) {
-      model_path_ = model_dir_ + "\\model.wgcm";
+      model_path_ = wgrt::model_wgcm_path(model_dir_, model_l ? wgrt::ModelId::L : wgrt::ModelId::M);
       if (!exists(model_path_))
         return *err = "no converted model at " + model_path_ + " (run the WrongGPU installer)", false;
       if (!wg_file_exists(map_)) return *err = "the converter map " + map_ + " is missing (reinstall WrongGPU)", false;
