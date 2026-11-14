@@ -174,6 +174,32 @@ def enc_cases(kernel, rng):
     return cases
 
 
+# (H, W) of dec1's map (even: the expand writes 2 x 2 pixels per low-resolution token), each with dec1's two window
+# offsets (0, 0) and (2, 0). 4 x 6 and 12 x 20: fewer windows than a workgroup's 8.
+DEC1_GRIDS = [(16, 24), (36, 68), (8, 8), (68, 100), (4, 6), (12, 20), (48, 64)]
+
+
+def dec1_ex_cases(kernel, rng):
+    """swin_block_c64_add_ex_nc (swin.co; Model M's kernel, launched by Model L's frame for dec1): x = the low-resolution
+    map [H / 2][W / 2][96] FP8, xadd = the skip map [H][W][64] FP8 -> out [H][W][64] FP8; w = dec1's stage blob (block,
+    then the expand section at the 256-byte aligned block size, clean/runner/packing.py pack_stage); aux null. Only
+    blobs with the _nc flag (the D3D12 port has only the _nc form)."""
+    from clean.reference import swin as MS
+    from clean.runner import packing as P
+    cases = []
+    for (H, W) in DEC1_GRIDS:
+        for (ox, oy) in ((0, 0), (2, 0)):
+            blob = P.pack_stage("dec1", MS.random_params("dec1", rng))
+            if not np.frombuffer(blob[:4], np.uint32)[0] & 1:
+                continue
+            nwin = -(-(W + ox) // 4) * -(-(H + oy) // 4)
+            cases.append({"kernel": kernel, "co": "swin.co", "grid": -(-nwin // 8), "block": 256,
+                          "args": [("buf", _fp8_map(rng, (H // 2) * (W // 2) * 96)), ("buf", _fp8_map(rng, H * W * 64)),
+                                   ("out", H * W * 64), ("buf", blob), ("u32", H), ("u32", W), ("u32", ox), ("u32", oy),
+                                   ("null",)]})
+    return cases
+
+
 # (rw, rh, dw, dh, reset, kind, expo) of the reconstruction: clean/l/runner/l_post_check.py's cases (Model M's ratios,
 # odd sizes, reset, extreme kernel shapes, the zero-weight known answer "offset_0.1" (spec part 3 Q1: total weight 0
 # everywhere) and the FP16 underflow known answer "offset_0.05" (Q3: total weight > 0, every FP16 weight 0)), plus
@@ -248,7 +274,8 @@ def post_cases(kernel, rng):
 
 KINDS = {"l_linear_32_32_relu": linear_cases, "l_linear_32_32_f16": linear_cases,
          "l_project_gather": project_cases, "l_dec_project": project_cases, "l_coef": coef_cases,
-         "l_coef_pack12": coef_cases, "lev/input_encoder": enc_cases, "l_post_recon": post_cases}
+         "l_coef_pack12": coef_cases, "lev/input_encoder": enc_cases, "l_post_recon": post_cases,
+         "swin_block_c64_add_ex_nc": dec1_ex_cases}
 CONTROL_KINDS = {"swin_block_c96_nc": control_cases}
 CO = "l_ops.co"
 
