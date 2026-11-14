@@ -238,6 +238,12 @@ Options parse_options(const char* text) {
     else if (key == "input_copy") o.input_copy = value == "1";
     else if (key == "output_copy") o.output_copy = value == "1";
     else if (key == "test_view") o.test_view = value == "depth" ? 1 : value == "motion" ? 2 : 0;
+#ifdef _WIN32
+    // diagnostics (a game started by its store launcher does not inherit our environment): launch_trace=<file> sets
+    // WG_LAUNCH_TRACE (device.cpp trace_launch, one line per kernel launch), launch_trace_max=<lines> caps it
+    else if (key == "launch_trace") _putenv_s("WG_LAUNCH_TRACE", value.c_str());
+    else if (key == "launch_trace_max") _putenv_s("WG_LAUNCH_TRACE_MAX", value.c_str());
+#endif
     else {
       o.unknown += (o.unknown.empty() ? "" : ", ") + key;
       o.runtime += (o.runtime.empty() ? "" : ";") + key + (eq == std::string::npos ? "" : "=" + value);
