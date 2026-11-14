@@ -33,6 +33,17 @@ set(WRONGGPU_MAP_K "${CMAKE_CURRENT_SOURCE_DIR}/../../data/preset-K.v1.map.json"
 # team's synthetic preset-F map, so its tests never need a real RR file.
 set(WRONGGPU_RR_DIR "" CACHE PATH "Folder with the RR plugin (plugins/WrongGPU-RR.asi) and the RR runtime (wronggpu_rr_runtime.dll)")
 set(WRONGGPU_MAP_F "" CACHE FILEPATH "RR converter map (preset F); empty: data/preset-F.v1.map.json (test builds: the synthetic rr-f-synth/synth-r0 map)")
+# Model L (#89): its converter map, embedded for "model convert --preset=L" (the model's folder: <model>\L). Default: the
+# shipped map (data/preset-L.v1.map.json, the spec side's revision v1.1). Tests of the conversion itself give a map of
+# its exact layout with their own digests (tests/run_model_l_tests.py --write-test-map); empty: a build without Model L.
+set(WRONGGPU_MAP_L "${CMAKE_CURRENT_SOURCE_DIR}/../../data/preset-L.v1.map.json" CACHE FILEPATH "Model L converter map (preset L); empty: none")
+if(WRONGGPU_MAP_L AND EXISTS "${WRONGGPU_MAP_L}")
+  set(MAP_L_ARGS --map-l ${WRONGGPU_MAP_L})
+  set(MAP_L_FILE ${WRONGGPU_MAP_L})
+else()
+  set(MAP_L_ARGS)
+  set(MAP_L_FILE)
+endif()
 option(WRONGGPU_PRESET_K "Preset K in the installer (second model choice, /PRESET=K, its converter map); OFF = Model M only" ON)
 if(WRONGGPU_PRESET_K)
   set(PRESET_K_MAP_ARGS --map-k ${WRONGGPU_MAP_K})
@@ -143,8 +154,8 @@ add_custom_command(
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/make_payload.py
           --payload ${WRONGGPU_PAYLOAD_DIR} --map ${WRONGGPU_MAP} ${PRESET_K_MAP_ARGS} --version ${WRONGGPU_VERSION}
           --build-id=${WRONGGPU_BUILD_ID} --payload-name=${WRONGGPU_PAYLOAD_NAME}
-          ${DIRECT_ROUTE_PAYLOAD_ARGS} ${RR_PAYLOAD_ARGS} ${MAP_F_ARGS} ${MANIFEST_ARGS} --out ${GEN}
-  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/make_payload.py ${MANIFEST} ${WRONGGPU_MAP} ${PRESET_K_MAP_FILE} ${MAP_F_FILE} ${WRONGGPU_PAYLOAD_FILES} ${WRONGGPU_RR_FILES}
+          ${DIRECT_ROUTE_PAYLOAD_ARGS} ${RR_PAYLOAD_ARGS} ${MAP_F_ARGS} ${MAP_L_ARGS} ${MANIFEST_ARGS} --out ${GEN}
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/make_payload.py ${MANIFEST} ${WRONGGPU_MAP} ${PRESET_K_MAP_FILE} ${MAP_F_FILE} ${MAP_L_FILE} ${WRONGGPU_PAYLOAD_FILES} ${WRONGGPU_RR_FILES}
   COMMENT "Embedding the payload and the converter map")
 
 # WrongGPU-Restore.exe: the per-game restorer (uninstall.exe in each game's wronggpu-setup folder): wg_core without the

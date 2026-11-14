@@ -2,6 +2,7 @@
 // WrongGPU launcher core: the Context, the log file, the model data folder and the embedded converter map. Written for
 // this project.
 #include "context.h"
+#include <cwctype>
 #include "payload.h"
 
 namespace wg {
@@ -47,12 +48,39 @@ wstring ModelBaseDir() { return Join(AppDataPath(), L"model"); }
 #if WRONGGPU_PRESET_K
 int MapResourceId(Context& ctx, bool k) { return k ? ctx.data->kMapId : ctx.data->mapId; }
 const wchar_t* MapSha256(Context& ctx, bool k) { return k ? ctx.data->kMapSha256 : ctx.data->mapSha256; }
-wstring ModelDir(Context& ctx) { return ctx.presetK ? Join(ModelBaseDir(), L"K") : ModelBaseDir(); }
+wstring ModelDir(Context& ctx) { return ctx.presetL ? Join(ModelBaseDir(), L"L") : ctx.presetK ? Join(ModelBaseDir(), L"K") : ModelBaseDir(); }
 #else
 int MapResourceId(Context& ctx, bool) { return ctx.data->mapId; }
 const wchar_t* MapSha256(Context& ctx, bool) { return ctx.data->mapSha256; }
-wstring ModelDir(Context&) { return ModelBaseDir(); }
+wstring ModelDir(Context& ctx) { return ctx.presetL ? Join(ModelBaseDir(), L"L") : ModelBaseDir(); }
 #endif
+wchar_t SelectedPreset(const Context& ctx) { return ctx.presetL ? L'L' : ctx.presetK ? L'K' : L'M'; }
+bool SelectPreset(Context& ctx, const wstring& name, wstring& error) {
+    const wchar_t c = name.size() == 1 ? static_cast<wchar_t>(towupper(name[0])) : L'\0';
+#if WRONGGPU_PRESET_K
+    const wstring known = L"M, L or K";
+    const bool isK = c == L'K';
+#else
+    const wstring known = L"M or L";
+    const bool isK = false;
+#endif
+    if (c != L'M' && c != L'L' && !isK) {
+        error = L"Unknown model \"" + name + L"\" (the models of this build: " + known + L").";
+        return false;
+    }
+    if (c == L'L' && (!ctx.data || !ctx.data->lMapId)) {
+        error = L"This build of WrongGPU has no converter data for Model L.";
+        return false;
+    }
+    if (c == SelectedPreset(ctx)) return true;
+    ctx.presetL = c == L'L';
+#if WRONGGPU_PRESET_K
+    ctx.presetK = c == L'K';
+#endif
+    ctx.map = wgc::LoadedMap();  // the other model's map is loaded on first use (LoadEmbeddedMap)
+    ctx.mapError.clear();
+    return true;
+}
 wstring ModelFile(Context& ctx) { return Join(ModelDir(ctx), FromUtf8(wgc::kModelFileName)); }
 wstring ModelSourceFile(Context& ctx) { return Join(ModelDir(ctx), L"model-source.txt"); }
 
@@ -62,11 +90,15 @@ bool LoadEmbeddedMap(Context& ctx) {
     static std::mutex loading;
     std::lock_guard<std::mutex> lock(loading);
     if (ctx.map.map) return true;
+    // Model L: its own map, loaded as preset L (the converter refuses a map that names another preset: "converter data
+    // damaged"). Models M and K: as before (the map's own preset).
+    const bool l = ctx.presetL;
+    if (l && !ctx.data->lMapId) { ctx.mapError = L"this build has no converter data for Model L"; return false; }
     DWORD sz = 0;
-    const void* d = ResourceData(MapResourceId(ctx, ctx.presetK), sz);
-    if (!d || Sha256Bytes(d, sz) != MapSha256(ctx, ctx.presetK)) { ctx.mapError = L"the converter data is missing or damaged"; return false; }
+    const void* d = ResourceData(l ? ctx.data->lMapId : MapResourceId(ctx, ctx.presetK), sz);
+    if (!d || Sha256Bytes(d, sz) != (l ? ctx.data->lMapSha256 : MapSha256(ctx, ctx.presetK))) { ctx.mapError = L"the converter data is missing or damaged"; return false; }
     const wgc::Result r = wgc::load_map_bytes(string(static_cast<const char*>(d), sz), ctx.map,
-                                               [&ctx](const string& s) { LogLine(ctx, L"converter: " + FromUtf8(s)); });
+                                               [&ctx](const string& s) { LogLine(ctx, L"converter: " + FromUtf8(s)); }, l ? "L" : "");
     if (r.code != wgc::kOk) { ctx.mapError = FromUtf8(r.message); return false; }
     return true;
 }

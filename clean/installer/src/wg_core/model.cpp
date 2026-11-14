@@ -207,6 +207,19 @@ ModelState FindModel(Context& ctx, const GameTarget* t, const wstring& userDll, 
         LogLine(ctx, L"model: every DLSS model file found is on an ignore list; nothing converted");
         return m;
     }
+    const wstring skippedText = skipped ? L" " + std::to_wstring(skipped) + L" file(s) on an ignore list were not tried. " + IgnoredExample(ctx, m.ignored) : wstring();
+    if (ctx.presetL) {  // Model L: said by name, with the converter's reason for the file the player chose
+        const wstring picked = userDll.empty() ? wstring() : FullPath(userDll);
+        wstring why;
+        for (auto& r : m.rejections)
+            if (!picked.empty() && r.size() > picked.size() + 2 && IEq(r.substr(0, picked.size() + 2), picked + L": ")) { why = r.substr(picked.size() + 2); break; }
+        m.error = L"Model L can't be prepared: no DLSS model file with Model L's data was found." +
+                  (why.empty() ? wstring() : L" The file you chose (" + picked + L"): " + why) +
+                  L" Model L is converted from the DLSS model file (nvngx_dlss.dll) of version 310.5 or newer. The file stays where it is: "
+                  L"only the model data is read, on this PC." + skippedText + (m.chosenSkipped.empty() ? wstring() : L" " + m.chosenSkipped);
+        LogLine(ctx, L"model: " + m.error);
+        return m;
+    }
     m.error = L"No DLSS model file that WrongGPU can use was found. WrongGPU needs the DLSS model file (nvngx_dlss.dll) of "
               L"version 310.5 or newer, which comes with many recent games and apps. Install or update such a game, or choose its "
               L"nvngx_dlss.dll yourself. The file stays where it is: only the model data is read, on this PC." +
