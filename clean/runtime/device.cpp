@@ -821,8 +821,15 @@ void trace_launch(const std::string& kernel, unsigned grid, unsigned block, cons
     return p && *p ? std::fopen(p, "a") : (FILE*)nullptr;
   }();
   static std::mutex mutex;
+  static const unsigned long long cap = [] {  // WG_LAUNCH_TRACE_MAX=<lines>: stop after that many (0 / unset: no cap)
+    const char* m = std::getenv("WG_LAUNCH_TRACE_MAX");
+    return m && *m ? std::strtoull(m, nullptr, 10) : 0ull;
+  }();
+  static unsigned long long lines = 0;
   if (!fp) return;
   std::lock_guard<std::mutex> lock(mutex);
+  if (cap && lines >= cap) return;
+  ++lines;
   if (where)
     std::fprintf(fp, "%s %u %u %s\n", kernel.c_str(), grid, block, where);
   else

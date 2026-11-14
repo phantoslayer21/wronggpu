@@ -58,8 +58,21 @@ struct FrontEnd::UpscaleContext {
     bool amdLast = false;         // the last frame was one of AMD's FSR for such a frame (AMD's history continues)
     bool broken = false;          // the upscaler failed for good: it is not parked
     uint64_t brokenFrames = 0;    // bug hunt F1: frames since the upscaler failed for good (it is not called again)
-    uint32_t resizes = 0;         // bug hunt H: upscalers created again for the frames' output size (kMaxResizes)
+    uint32_t resizes = 0;         // bug hunt H: upscalers created again for the frames' output size (Config::maxOutputResizes)
     bool resizeFailed = false;    // ... and such a create failed: no more attempts for this context
+    // Issue #58: upscalers and stand-ins a resize replaced. Command lists the game recorded before may still use them
+    // (the copy into the output after the split, or a whole list not yet submitted); the front end has no fence of its
+    // own, so they are destroyed only when the context is destroyed (its completion boundary, as for Fail's handoff),
+    // or at once while the device is lost. At most Config::maxOutputResizes upscalers (and their stand-ins) per context.
+    struct Replaced {
+        const WgUpscalerBackend* backend;
+        WgUpscaler* upscaler;
+    };
+    std::vector<Replaced> replaced;
+    void DestroyReplaced() {
+        for (const Replaced& r : replaced) r.backend->destroy(r.upscaler);
+        replaced.clear();
+    }
     std::mutex mutex;             // one call at a time per context
 
     // This object (parked with its upscaler, stand-in, create info and options: the upscaler holds pointers into it)
@@ -156,13 +169,16 @@ bool LogPoint(uint64_t n) {  // 1, 2, 3, 10, 100, 1000, ...
     return n == 1;
 }
 
-bool OwnModelK(const std::string& options) {
+// The options (and WG_RUNTIME_OPTIONS) run the registry model `id` ("K", "L"), when this build offers it.
+bool OwnModel(const std::string& options, const char* id) {
     const char* name = RuntimeProviderName(options, std::getenv("WG_RUNTIME_OPTIONS"));
-    const WgEntryDef* k = nullptr;
+    const WgEntryDef* e = nullptr;
     for (int m = 0; m < WG_SR_MODEL_COUNT; ++m)
-        if (std::strcmp(kWgModelRows[m].name, "K") == 0) k = SrEntryOfModel(m);
-    return k && std::strcmp(name, EntryProviderName(*k)) == 0;
+        if (std::strcmp(kWgModelRows[m].name, id) == 0) e = SrEntryOfModel(m);
+    return e && std::strcmp(name, EntryProviderName(*e)) == 0;
 }
+
+bool OwnModelK(const std::string& options) { return OwnModel(options, "K"); }
 
 // A frame whose sizes do not fit its textures (a resolution change of the game: the stated render size is the old one,
 // the textures are the new ones, or the reverse) made usable for the stand-in: the regions are cut to the textures.
@@ -242,14 +258,15 @@ ffxReturnCode_t CreateAmdWithoutPrivateVersion(const OriginalApi& api, ffxContex
 
 }  // namespace
 
-#if WRONGGPU_MODEL_K
-FrontEnd::FrontEnd(Platform platform, Config config) : platform_(std::move(platform)), config_(std::move(config)), providerName_(RuntimeProviderName(config_.runtimeOptions, std::getenv("WG_RUNTIME_OPTIONS"))) {}
-#else
 FrontEnd::FrontEnd(Platform platform, Config config) : platform_(std::move(platform)), config_(std::move(config)) {
+#if !WRONGGPU_MODEL_K
     if (const std::string note = IgnoreModelK(config_); !note.empty()) Log(note);  // (config.h; one log line)
+#endif
+#if !WRONGGPU_MODEL_L
+    if (const std::string note = IgnoreModelL(config_); !note.empty()) Log(note);  // (config.h; one log line)
+#endif
     providerName_ = RuntimeProviderName(config_.runtimeOptions, std::getenv("WG_RUNTIME_OPTIONS"));
 }
-#endif
 
 FrontEnd::~FrontEnd() {
     // Contexts the game never destroyed: the process is ending; GPU objects are left to the runtime.
@@ -665,7 +682,7 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
                 return FFX_API_RETURN_ERROR_RUNTIME_ERROR;
             }
         }
-        ApplyModelDir(*u, tag);
+        const std::string refusal = ApplyModelDir(*u, tag);
         info.options = u->options.c_str();
         info.log = &UpscalerLog;
         info.log_user = u;
@@ -675,7 +692,7 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
         // Custom slot: the same upscaler with the same options failed earlier in this session: no new attempt.
         std::string remembered;
         uint64_t repeats = 0;
-        if (config_.customSlot) {
+        if (config_.customSlot && refusal.empty()) {
             std::lock_guard lock(mutex_);
             auto it = failedCreates_.find(FailureKey(backend, *u));
             if (it != failedCreates_.end()) {
@@ -683,7 +700,17 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
                 repeats = ++it->second.repeats;
             }
         }
-        if (!remembered.empty()) {
+        if (!refusal.empty()) {
+            // Nothing is created (ApplyModelDir: Model L without its file): the held lines go out, then the reason.
+            if (t_held) {
+                std::vector<std::string> lines = std::move(t_held->lines);
+                t_held->lines.clear();
+                t_held = nullptr;
+                for (const std::string& l : lines) Log(l);
+            }
+            why = refusal;
+            u->failReason = refusal;
+        } else if (!remembered.empty()) {
             if (t_held) {  // only the summary below, now and then (LogPoint); between those, nothing
                 t_held->lines.clear();
                 t_held->drop = !LogPoint(repeats);
@@ -701,11 +728,12 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
             t_held = nullptr;
             for (const std::string& l : lines) Log(l);
         }
-        if (remembered.empty()) Log(tag + " WrongGPU upscaler \"" + backend->name + "\" create: " + DescribeCreateInfo(info));
+        const bool attempt = remembered.empty() && refusal.empty();
+        if (attempt) Log(tag + " WrongGPU upscaler \"" + backend->name + "\" create: " + DescribeCreateInfo(info));
         double parkedMs = 0;
-        UpscaleContext* warm = remembered.empty() ? TakeParked(backend, *u, tag, &parkedMs) : nullptr;
-        if (remembered.empty()) parkGuard.settled = true;
-        if (!remembered.empty()) {
+        UpscaleContext* warm = attempt ? TakeParked(backend, *u, tag, &parkedMs) : nullptr;
+        if (attempt) parkGuard.settled = true;
+        if (!attempt) {
             // (nothing created: `why` says so; the fallback below decides)
         } else if (warm) {
             // The parked context object stays the upscaler's (its log callback and options point into it): it becomes
@@ -954,10 +982,11 @@ ffxReturnCode_t FrontEnd::BrokenFrame(UpscaleContext& u, WgFrame& frame, const s
 // output size is fixed at create: every such frame was refused with WG_ERROR_PARAMETER). Within the context's
 // maxUpscaleSize the upscaler is created again for the frame's size, here on the game's thread (as a create without
 // AMD's FSR to upscale meanwhile); the outer FidelityFX context stays, the new upscaler starts without history. At most
-// kMaxResizes times per context (a game that changes the size every few frames gets the old behaviour after that), and
-// never again after a failed create (the old upscaler stays).
+// Config::maxOutputResizes times per context (a game that changes the size more often gets the old behaviour after that;
+// each kept replaced upscaler holds its GPU memory until the context is destroyed), and never again after a failed create
+// (the old upscaler stays).
 void FrontEnd::ResizeForFrame(UpscaleContext& u, WgFrame& frame, const std::string& tag) {
-    constexpr uint32_t kMaxResizes = 8;
+    const uint32_t kMaxResizes = config_.maxOutputResizes;
     if (!u.backend || !u.upscaler || u.pending || u.broken || u.resizeFailed) return;
     const uint32_t w = frame.output_width, h = frame.output_height;
     if ((w == u.createInfo.output_width && h == u.createInfo.output_height) || !w || !h) return;
@@ -967,7 +996,8 @@ void FrontEnd::ResizeForFrame(UpscaleContext& u, WgFrame& frame, const std::stri
     if (u.resizes >= kMaxResizes) {
         if (u.resizes++ == kMaxResizes)
             Log(tag + " note U" + std::to_string(u.id) + ": output size " + now + " again after " + std::to_string(kMaxResizes) +
-                " sizes; the upscaler is not created again for this context (frames of another size are refused)");
+                (kMaxResizes == 1 ? " size change" : " size changes") +
+                "; the upscaler is not created again for this context (frames of another size are refused)");
         return;
     }
     WgCreateInfo info = u.createInfo;
@@ -984,31 +1014,49 @@ void FrontEnd::ResizeForFrame(UpscaleContext& u, WgFrame& frame, const std::stri
             WgResultText(r) + "; frames of that size are refused (the stand-in or AMD's FSR takes them)");
         return;
     }
-    u.backend->destroy(u.upscaler);
+    // Issue #58: the old upscaler (and stand-in) may still be used by command lists the game recorded before this
+    // dispatch: kept until the context is destroyed, not destroyed here (that also took the old network's last frame of
+    // GPU time on the game's recording thread). Only a lost device runs nothing any more: then they go at once.
+    const bool lost = platform_.deviceLost && platform_.deviceLost(u.device);
+    const bool hadStandIn = u.fallback && u.fallbackBackend;
+    auto retire = [&](const WgUpscalerBackend* backend, WgUpscaler* upscaler) {
+        if (lost) backend->destroy(upscaler);
+        else u.replaced.push_back({backend, upscaler});
+    };
+    retire(u.backend, u.upscaler);
     u.upscaler = fresh;
     u.createInfo = info;
-    if (u.fallback && u.fallbackBackend) {  // the stand-in is made again for the new size when it is needed
-        u.fallbackBackend->destroy(u.fallback);
+    if (hadStandIn) {  // the stand-in is made again for the new size when it is needed
+        retire(u.fallbackBackend, u.fallback);
         u.fallback = nullptr;
     }
     ++u.resizes;
     frame.reset = 2;  // a new upscaler: no history
     u.resetNext = u.restartNext = false;
+    const std::string old = hadStandIn ? "the old upscaler and its stand-in are" : "the old upscaler is";
     Log(tag + " note U" + std::to_string(u.id) + ": output size " + now + " (the upscaler was created for " + was + ", the context's maximum is " +
         std::to_string(u.create.maxUpscaleSize.width) + "x" + std::to_string(u.create.maxUpscaleSize.height) +
-        "): the upscaler is created again for it; the context stays");
+        "): the upscaler is created again for it; the context stays; " +
+        (lost ? old + " destroyed now (the device is lost)"
+              : old + " kept until the context is destroyed (the game's command lists may still use them)"));
 }
 
 std::string FrontEnd::FailureKey(const WgUpscalerBackend* backend, const UpscaleContext& u) const {
-    return std::string(backend && backend->name ? backend->name : "?") + "|" + u.options;
+    // The sizes and the create flags are part of the key: a create that failed for a size (out of memory at 4K) must not
+    // stop a create at another size, while the same parameters again are still stopped.
+    return std::string(backend && backend->name ? backend->name : "?") + "|" + u.options + "|" + std::to_string(u.create.maxRenderSize.width) + "x" +
+           std::to_string(u.create.maxRenderSize.height) + "|" + std::to_string(u.create.maxUpscaleSize.width) + "x" +
+           std::to_string(u.create.maxUpscaleSize.height) + "|" + std::to_string(u.create.flags);
 }
 
-void FrontEnd::ApplyModelDir(UpscaleContext& u, const std::string& tag) {
+std::string FrontEnd::ApplyModelDir(UpscaleContext& u, const std::string& tag) {
     bool inOptions = false, inEnv = false;
     OptionValue(u.options, "model_dir", &inOptions);
     const char* env = std::getenv("WG_RUNTIME_OPTIONS");
     if (env) OptionValue(env, "model_dir", &inEnv);
     const bool k = OwnModelK(u.options);
+    const bool l = !k && OwnModel(u.options, "L");
+    std::string refusal;  // Model L chosen and no converted Model L anywhere: the create is refused (the caller)
     bool kDir = false;
     if (k) {
         bool a = false, b = false;
@@ -1021,23 +1069,29 @@ void FrontEnd::ApplyModelDir(UpscaleContext& u, const std::string& tag) {
         line = std::string("model: ") + (kDir ? "model_k_dir" : "model_dir") + " from " + (inEnv ? "WG_RUNTIME_OPTIONS" : "runtime_options") +
                " decides (the front end's model lookup is not used)";
     } else {
-        if (!platform_.modelPlaces) return;
-        const ModelChoice c = ChooseModelDir(platform_.modelPlaces(), k, platform_.fileExists);
+        if (!platform_.modelPlaces) return std::string();
+        const ModelChoice c = ChooseModelDir(platform_.modelPlaces(), k ? 'K' : l ? 'L' : 'M', platform_.fileExists);
         u.options += c.option;
-        const char* model = k ? "Model K" : "Model M";
+        const char* model = k ? "Model K" : l ? "Model L" : "Model M";
         if (!c.option.empty())
             line = std::string("model: ") + model + " from " + c.file + " (passed to the runtime as model_dir); looked at: " + c.searched;
         else if (c.index >= 0)
             line = std::string("model: ") + model + " is not in the game's folders; the runtime looks in its own default place; looked at: " + c.searched;
         else
             line = std::string("model: no converted ") + model + " found; looked at: " + c.searched;
+        // Model L has no fallback model file: without its own file the runtime cannot start it, so the create is
+        // refused here with the reason (and what writes the file), not left to fail inside the runtime.
+        if (l && c.index < 0)
+            refusal = "Model L is chosen but no converted Model L was found (" + c.searched +
+                      "); WrongGPU.exe model convert --preset=L writes it";
     }
     {
         std::lock_guard lock(mutex_);
-        if (modelLogged_.count(line)) return;
+        if (modelLogged_.count(line)) return refusal;
         modelLogged_[line] = true;
     }
     Log(tag + " " + line);
+    return refusal;
 }
 
 void FrontEnd::Fail(UpscaleContext& u, const std::string& why, uint64_t call, bool error) {
@@ -1118,6 +1172,7 @@ ffxReturnCode_t FrontEnd::DestroyContext(ffxContext* context, const ffxAllocatio
         bool switched = false;  // it could have been parked, but another upscaler context is in use
         {
             std::lock_guard lock(u->mutex);
+            u->DestroyReplaced();  // issue #58: the destroy is their completion boundary, parked or not
             pending = std::move(u->pending);
             // A working upscaler is parked for the next context with the same parameters (frontend.h), with its
             // stand-in; AMD's contexts always go now.
@@ -1292,6 +1347,19 @@ bool FrontEnd::ConfiguredModel(int32_t* model, std::string* described) {
     bool isDefault = true;
     std::string text;
     const int32_t value = platform_.menu.get(WG_OPT_SR_MODEL, &text, &isDefault);
+#if !WRONGGPU_MODEL_L
+    if (!isDefault && value == WG_SR_MODEL_L) {  // a model this build lacks: refused by name, once (Model M runs)
+        const std::string line = "note: " + text + " is refused: Model L is not part of this build of the front end "
+                                 "(CMake WG_MODEL_L); Model M is used";
+        bool first = false;
+        {
+            std::lock_guard lock(mutex_);
+            first = !modelLogged_.count(line);
+            modelLogged_[line] = true;
+        }
+        if (first) Log(line);
+    }
+#endif
     if (isDefault || !SrEntryOfModel(value)) return false;
     *model = value;
     if (described) *described = text;
@@ -1769,8 +1837,26 @@ ffxReturnCode_t FrontEnd::Dispatch(ffxContext* context, const ffxDispatchDescHea
                 return DispatchUpscale(*u, d, call);
             }
             if (desc->type == FFX_API_DISPATCH_DESC_TYPE_UPSCALE_GENERATEREACTIVEMASK) {
-                // The reactive mask only feeds AMD's upscaler; WrongGPU's does not read it.
-                if (log) Log(tag + " -> OK (WrongGPU: reactive mask not needed, nothing recorded)");
+                // The reactive mask only feeds AMD's upscaler; WrongGPU's does not read it. But some frames of this context
+                // still go to AMD's upscaler (frames WrongGPU cannot take, the player's comparison) with the game's own
+                // reactive resource, which then needs this frame's mask: with an AMD context at hand the call goes to it
+                // (the generation does not depend on which context runs it). Issue #59.
+                const bool comparing = !config_.customSlot && platform_.compareAmd && platform_.compareAmd();
+                const OriginalApi* api = nullptr;
+                ffxContext* target = nullptr;
+                const char* what = "";
+                if (comparing && u->comparison.context && u->comparison.api) {
+                    api = u->comparison.api, target = &u->comparison.context, what = "comparison";
+                } else if (u->amd && u->amdApi) {
+                    api = u->amdApi, target = &u->amd, what = "AMD";
+                }
+                if (api && target) {
+                    const ffxReturnCode_t rc = api->dispatch(target, desc);
+                    if (log || rc != FFX_API_RETURN_OK)
+                        Log(tag + " -> " + RcName(rc) + " (reactive mask forwarded to AMD's context, " + what + ")");
+                    return rc;
+                }
+                if (log) Log(tag + " -> OK (WrongGPU: reactive mask not needed, nothing recorded: no AMD context yet)");
                 return FFX_API_RETURN_OK;
             }
             Log(tag + " -> ERROR_UNKNOWN_DESCTYPE (WrongGPU)");

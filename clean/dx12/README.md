@@ -20,6 +20,8 @@ as its HIP kernel (`clean/dx12/compare.py` proves it per kernel on synthetic fra
 | `dxil_asm.cpp` | tool used by the build (assembles the rewritten DXIL listing) |
 | `compare.py` | HIP vs hybrid D3D12, every stage output / state buffer byte for byte |
 | `kernels/exposure.hlsl` | the reference port (`exposure_auto_diet`): copy its structure |
+| `kernels/fg_*.hlsl` | frame generation's ports (#96, `co=fg_*.co`): groundwork, built only when `--only` names them, never by a full build (`is_frame_gen`), so the Model M / Model L sets stay as they are; checks: `clean/fg/runner/fg_d3d12_check.py` (each kernel), `clean/fg/runner/fg_net1_gpu.py` (net1's 32 steps as a `kernel_replay` chain) |
+| `tests/kernel_replay.cpp` | replays launches from a case file on the native D3D12 device; `chain` blocks run several launches on buffers that persist between them (a whole network, optionally timed) |
 
 ## Arithmetic mode (why build_dx12.py and nothing else)
 
@@ -109,7 +111,10 @@ WG_KERNEL(exposure_auto_diet) { WG_SETUP(); ... }   // entry name = HIP kernel n
 * `co` (required) = file name of the HIP code object whose build of the kernel the port reproduces. The device uses
   the port only while the runtime has exactly that code object loaded (untagged, or under the name's tag); any other
   build variant of the same kernel name (`post_w64.co` / `post_w64__q5.co` under `w64`, a `swin.co` variant,
-  `dec1_dec0__pack12__div*.co` under `d1p12`, ...) runs on HIP, logged once.
+  `dec1_dec0__pack12__div*.co` under `d1p12`, ...) runs on HIP, logged once. One name may have ports of several
+  builds (one manifest entry per name and `co`, for example `w64/post_tf_f32_p12_diet_vsit` of `post_w64__orig.co`
+  and of `post_w64.co`): the device runs the port whose code object is loaded. Every port of a name but the first
+  sets `file=<stem>`, its DXIL file name (`<stem>.dxil`).
 * `args` = the HIP kernel's arguments in order: `p` pointer (DWORD: arena byte offset), `u` any 32-bit scalar,
   `b<N>` struct by value (N bytes = N/4 DWORDs, copied verbatim). At most 57 DWORDs. The `WG_ARGS_BEGIN` block must
   declare exactly these DWORDs in order, **32-bit scalars only** (no vectors / arrays / structs: cbuffer packing).

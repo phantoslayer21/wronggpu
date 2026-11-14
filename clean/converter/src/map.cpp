@@ -20,6 +20,7 @@
 #include <initializer_list>
 #include <set>
 
+#include "api.h"
 #include "json.h"
 #include "numeric.h"
 
@@ -165,7 +166,10 @@ bool json_number_exact_f32(const std::string& lit, float& out) {
 
 class Loader {
 public:
-    explicit Loader(MapError& err) : err_(err) {}
+    // `hint`: the preset the caller loads the map for ("" : none). A map without the field "preset" is read as that
+    // preset when the preset uses the map's version, so that its own required sources are checked (load_map below makes
+    // every other check of the caller's name).
+    Loader(MapError& err, const std::string& hint) : err_(err), hint_(hint) {}
 
     bool damaged(const std::string& what) {
         err_.kind = MapErrorKind::Damaged;
@@ -248,9 +252,30 @@ public:
         m.version = version_ = static_cast<int>(version);
         k_ = version_ == 2 || version_ == 3;
         if (!need_string(root, "model", "map", m.model)) return false;
+        // The preset, by name: the optional field "preset", else the one this version always meant (the shipped maps).
+        if (const Json* pj = root.find("preset")) {
+            if (!pj->is_string()) return damaged("map: field \"preset\" must be text");
+            const PresetInfo* p = find_preset(pj->text);
+            if (!p) return damaged("map: unknown preset \"" + pj->text + "\"");
+            if (!p->allows(version_))
+                return damaged("map: preset " + pj->text + " does not use map version " + std::to_string(version_));
+            m.preset_name = p->name;
+            m.preset_named = true;
+        } else {
+            const PresetInfo* h = hint_.empty() ? nullptr : find_preset(hint_);
+            m.preset_name = h && h->allows(version_) ? std::string(h->name) : preset_for_version(version_);
+        }
         std::string order;
         if (!need_string(root, "channel_order", "map", order)) return false;
-        if (order != "natural") return damaged("unknown channel_order \"" + order + "\"");
+        // "storage" (weights as stored, not yet reshaped to natural axes): preset FG's map v1 only. It names what the
+        // tensors hold; the converter reads them the same way.
+        if (order == "storage") {
+            if (m.preset_name != "FG" || version_ != 1)
+                return damaged("channel_order \"storage\" is only for preset FG (map version 1)");
+        } else if (order != "natural") {
+            return damaged("unknown channel_order \"" + order + "\"");
+        }
+        m.channel_order = order;
         if (version_ == 5) return load_v5(root, m);
         // Spec 57 section 5.1: a map of versions 1-4 that uses a version-5 feature is invalid.
         if (root.find("groups")) return damaged("map: \"groups\" is a version-5 feature");
@@ -261,9 +286,13 @@ public:
             if (!load_source(kv.first, kv.second, m)) return false;
         }
         if (!k_) {
-            for (const char* required : {"W", "D", "K"}) {
-                if (m.find_source(required) < 0) return damaged(std::string("sources: missing source ") + required);
+            // The sources the map's preset needs (map.h PresetInfo): W, D and K for presets M and L, none by name for FG.
+            const PresetInfo* p = find_preset(m.preset_name);
+            if (!p) return damaged("map: no preset");
+            for (const std::string& required : p->required_sources) {
+                if (m.find_source(required) < 0) return damaged("sources: missing source " + required);
             }
+            if (m.sources.empty()) return damaged("sources: the map has no source");
         } else if (!check_k_sources(m)) {
             return false;
         }
@@ -660,8 +689,24 @@ public:
             if (!aj.is_object()) return damaged(where + ": axis must be an object");
             Axis ax;
             ax.length = t.shape[a];
-            if (!need_int(aj, "stride", where + ", axis " + std::to_string(a), ax.stride)) return false;
+            const std::string wa = where + ", axis " + std::to_string(a);
             if (aj.find("limit")) return damaged(where + ": an axis \"limit\" is a version-5 feature");
+            if (const Json* oj = aj.find("offsets")) {
+                // Explicit element offsets, one per index (map versions 1 and 4): no stride, no perm with them.
+                if (k_) return damaged(wa + ": \"offsets\" is not a feature of map versions 2 and 3");
+                if (aj.find("stride") || aj.find("perm")) return damaged(wa + ": \"offsets\" with \"stride\" or \"perm\"");
+                if (!oj->is_array() || oj->items.size() != static_cast<std::size_t>(ax.length))
+                    return damaged(wa + ": offsets must be a list with one entry per index of the axis");
+                for (const Json& v : oj->items) {
+                    std::int64_t o;
+                    if (!v.as_int64(o)) return damaged(wa + ": an offset is not an integer");
+                    if (o >= (std::int64_t(1) << 62) || o <= -(std::int64_t(1) << 62)) return out_of_range(wa + ": offset overflow");
+                    ax.offsets.push_back(o);
+                }
+                t.axes.push_back(ax);
+                continue;
+            }
+            if (!need_int(aj, "stride", wa, ax.stride)) return false;
             if (const Json* pj = aj.find("perm")) {
                 if (!pj->is_string()) return damaged(where + ": perm must be text");
                 for (std::size_t p = 0; p < m.perms.size(); ++p)
@@ -677,6 +722,12 @@ public:
         // the values stride * j, j = 0..n-1, and the extremes of e are reached.
         std::int64_t lo = t.base, hi = t.base;
         for (const Axis& ax : t.axes) {
+            if (!ax.offsets.empty()) {  // every combination of offsets occurs, so the extremes are min and max
+                const auto mm = std::minmax_element(ax.offsets.begin(), ax.offsets.end());
+                if (!checked_add(lo, *mm.first, lo) || !checked_add(hi, *mm.second, hi))
+                    return out_of_range(where + ": index overflow");
+                continue;
+            }
             std::int64_t span;
             if (!checked_mul(ax.stride, ax.length - 1, span)) return out_of_range(where + ": index overflow");
             std::int64_t& end = (span < 0) ? lo : hi;
@@ -1107,6 +1158,7 @@ public:
             if (!aj.is_object()) return damaged(wa + ": must be an object");
             Axis ax;
             ax.length = t.shape[a];
+            if (aj.find("offsets")) return damaged(wa + ": \"offsets\" is not a version-5 feature");
             if (!need_int(aj, "stride", wa, ax.stride)) return false;
             if (ax.stride < 0) return damaged(wa + ": negative strides are not a version-5 feature");
             if (aj.find("limit") && !need_nonneg(aj, "limit", wa, ax.limit)) return false;
@@ -1327,8 +1379,10 @@ public:
             for (const Axis& ax : t.axes) {
                 const std::int64_t n = ax.limit >= 0 ? std::min(ax.limit, ax.length) : ax.length;
                 if (n == 0) {
+                    // The tensor reads nothing, but the axes after this one are still checked: the map is validated
+                    // completely before any input is read (an empty axis adds no span).
                     any = false;
-                    break;
+                    continue;
                 }
                 std::int64_t span;
                 if (!checked_mul(ax.stride, n - 1, span) || !checked_add(hi, span, hi))
@@ -1352,13 +1406,46 @@ public:
 
 private:
     MapError& err_;
+    std::string hint_;
     int version_ = 0;
     bool k_ = false;  // versions 2 and 3 (preset K, spec 48)
 };
 
 }  // namespace
 
-bool load_map(const std::string& file_bytes, Map& out, MapError& err) {
+const std::vector<PresetInfo>& known_presets() {
+    // the map versions each preset's maps use (bit v: version v), as they were before maps named their preset
+    static const std::vector<PresetInfo> presets = {
+        {"M", (1u << 1) | (1u << 4), kMsgNoPresetM, {"W", "D", "K"}},  // spec 08 (version 4 adds the source F)
+        {"K", (1u << 2) | (1u << 3), kMsgNoPresetK, {}},                // spec 48 (its own source rules: T, O)
+        {"F", 1u << 5, kMsgNoPresetF, {}},                              // spec 57 (its own source rules)
+        // Model L (#89): the same record kinds as preset M's map (no new element format, op or source kind), so the
+        // same map versions; its parameters are a block of their own in the same library file, found by its own hashes
+        {"L", (1u << 1) | (1u << 4), kMsgNoPresetL, {"W", "D", "K"}},
+        // Frame generation (#96): the weights of its two convolution networks, a fixed set of separate float16 blobs in
+        // the frame-generation library, each a block source located by its own length and hashes (no keyed source, no
+        // constants, no dither table). Map version 1 record kinds only; the map names its own sources. The source the key
+        // is made from is searched first: when it is missing, the file has no frame-generation model (exit 12).
+        {"FG", 1u << 1, kMsgNoPresetFG, {}},
+    };
+    return presets;
+}
+
+const PresetInfo* find_preset(const std::string& name) {
+    for (const PresetInfo& p : known_presets())
+        if (name == p.name) return &p;
+    return nullptr;
+}
+
+std::string preset_for_version(int version) {
+    for (const PresetInfo& p : known_presets())
+        if (p.allows(version)) return p.name;
+    return "";
+}
+
+namespace {
+
+bool load_map_hinted(const std::string& file_bytes, Map& out, MapError& err, const std::string& hint) {
     out = Map();
     err = MapError();
     out.file_sha256 = Sha256::hash(file_bytes.data(), file_bytes.size());
@@ -1369,8 +1456,34 @@ bool load_map(const std::string& file_bytes, Map& out, MapError& err) {
         err.detail = "not valid JSON: " + jerr;
         return false;
     }
-    Loader loader(err);
+    Loader loader(err, hint);
     return loader.load(root, out);
 }
+
+}  // namespace
+
+bool load_map(const std::string& file_bytes, Map& out, MapError& err, const std::string& expected_preset) {
+    if (!load_map_hinted(file_bytes, out, err, expected_preset)) return false;
+    if (expected_preset.empty()) return true;
+    auto damaged = [&](const std::string& detail) {
+        err.kind = MapErrorKind::Damaged;
+        err.detail = detail;
+        out = Map();
+        return false;
+    };
+    const PresetInfo* p = find_preset(expected_preset);
+    if (!p) return damaged("map: preset \"" + expected_preset + "\" asked for is not known");
+    if (out.preset_named) {  // the map's own field decides; the caller's name must agree with it
+        if (out.preset_name != p->name)
+            return damaged("map: the map names preset " + out.preset_name + ", preset " + expected_preset + " was asked for");
+        return true;
+    }
+    if (!p->allows(out.version))
+        return damaged("map: preset " + expected_preset + " does not use map version " + std::to_string(out.version));
+    out.preset_name = p->name;
+    return true;
+}
+
+bool load_map(const std::string& file_bytes, Map& out, MapError& err) { return load_map_hinted(file_bytes, out, err, ""); }
 
 }  // namespace wgc

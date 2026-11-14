@@ -138,6 +138,7 @@ static std::string g_createOptions;
 static std::vector<WgFrame> g_frames;
 static std::atomic<int> g_destroyed{0};
 static bool g_failCreate = false;
+static uint32_t g_failCreateOutputWidth = 0;  // FakeCreate fails while the output width is this (a size-bound failure, e.g. out of VRAM at 4K)
 static int g_failDispatchAt = -1;
 static int g_notReadyUntil = 0;  // FakeDispatch answers WG_ERROR_NOT_READY for frames below this count
 static int g_parameterErrorAt = -1;  // FakeDispatch answers WG_ERROR_PARAMETER for this frame (inputs it cannot take)
@@ -161,7 +162,7 @@ static WgResult FakeCreate(const WgCreateInfo* info, WgUpscaler** out) {
     while (!g_createGate) std::this_thread::sleep_for(std::chrono::milliseconds(1));
     if (g_aboutTo) info->log(info->log_user, WG_LOG_INFO, "about to start the HIP runtime (test)");
     info->log(info->log_user, WG_LOG_INFO, "fake upscaler created");
-    if (g_failCreate) return WG_ERROR_DEVICE;
+    if (g_failCreate || (g_failCreateOutputWidth && info->output_width == g_failCreateOutputWidth)) return WG_ERROR_DEVICE;
     *out = reinterpret_cast<WgUpscaler*>(new FakeUpscaler{1});
     ++g_created;
     return WG_OK;
@@ -337,6 +338,7 @@ static void Reset() {
     g_log.clear();
     g_destroyed = 0;
     g_failCreate = false;
+    g_failCreateOutputWidth = 0;
     g_failDispatchAt = -1;
     g_notReadyUntil = 0;
     g_parameterErrorAt = -1;
@@ -595,10 +597,13 @@ static void TestOwnUpscalerPath() {
 
 // Bug hunt H: a frame whose output size (upscaleSize) is smaller than the create's maxUpscaleSize: the upscaler is created
 // again for that size (the context stays), its first frame without history; the same size again creates nothing; a
-// size over the maximum is not; after 8 sizes no more creates.
+// size over the maximum is not; after Config::maxOutputResizes sizes no more creates (the tests raise it to 8; the
+// default, 1, is TestResizeCapDefault).
 static void TestOutputResize() {
     Reset();
-    auto fe = MakeFrontEnd(Config{});
+    Config eight;
+    eight.maxOutputResizes = 8;
+    auto fe = MakeFrontEnd(eight);
     UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
     ffxContext ctx = nullptr;
     CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
@@ -609,7 +614,7 @@ static void TestOutputResize() {
     d.upscaleSize = {1920, 1080};
     CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
     CHECK(g_createCalls == 2 && g_createInfo.output_width == 1920 && g_createInfo.output_height == 1080);
-    CHECK(g_destroyed == 1);  // the old upscaler
+    CHECK(g_destroyed == 0);  // issue #58: the old upscaler is kept (the game's lists may still use it)
     CHECK(g_frames.size() == 2 && g_frames[1].output_width == 1920 && g_frames[1].output_height == 1080 && g_frames[1].reset == 2);
     CHECK(CountLog("output size 1920x1080 (the upscaler was created for 2560x1440") == 1);
     CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
@@ -626,12 +631,107 @@ static void TestOutputResize() {
     }
     CHECK(g_createCalls == 1 + 8);
     CHECK(CountLog("the upscaler is not created again for this context") == 1);
+    CHECK(g_destroyed == 0);  // the 8 replaced upscalers are all kept until the context goes
     CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK && fe->OwnContextCount() == 0);
     CHECK(g_destroyed == 9);
 }
 
+// Issue #58: an upscaler (and its stand-in) replaced by an output resize may still be used by command lists the game
+// recorded before (the copy into the output after the split, or a whole list not yet submitted). The front end has no
+// fence of its own; its completion boundary is the context's destroy, so the replaced ones are destroyed only then, or
+// at once when the device is lost (nothing of it runs any more).
+static void TestResizeKeepsRetired() {
+    Reset();
+    Config eight;
+    eight.maxOutputResizes = 8;  // (the default of 1 allows only one kept upscaler: TestResizeCapDefault)
+    auto fe = MakeFrontEnd(eight);
+    UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
+    c.upscale.maxRenderSize = {2560, 1440};
+    ffxContext ctx = nullptr;
+    CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
+    ffxDispatchDescUpscale d = MakeDispatch();
+    CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
+    // a frame the upscaler cannot take: the stand-in is made and upscales it
+    ffxDispatchDescUpscale bad = MakeDispatch();
+    void* const smallColor = reinterpret_cast<void*>(uintptr_t(0xC058));
+    g_resources[smallColor] = {dxgi::R16G16B16A16_FLOAT, 1280, 720};
+    bad.color = Res(smallColor, FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT, 1280, 720, FFX_API_RESOURCE_STATE_COMPUTE_READ);
+    CHECK(fe->Dispatch(&ctx, &bad.header) == FFX_API_RETURN_OK && g_standInFrames.size() == 1);
+    d.upscaleSize = {1920, 1080};  // first resize: the old upscaler and the stand-in are kept, not destroyed
+    CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK && g_createCalls == 2);
+    CHECK(g_destroyed == 0 && g_standInDestroyed == 0);
+    CHECK(CountLog("the old upscaler and its stand-in are kept until the context is destroyed") == 1);
+    d.upscaleSize = {1600, 900};   // second resize: the first replaced upscaler is still kept
+    CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK && g_createCalls == 3);
+    CHECK(g_destroyed == 0 && g_standInDestroyed == 0);
+    CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK && fe->OwnContextCount() == 0);
+    CHECK(g_destroyed == 3 && g_standInDestroyed == 1);  // both replaced upscalers, the current one and the stand-in
+
+    // the device is lost: nothing of it runs any more, the replaced upscaler is destroyed at once
+    Reset();
+    g_useTimer = true;  // (the fake platform has deviceLost only with the timer)
+    Config noPark;
+    noPark.contextParkMs = 0;
+    fe = MakeFrontEnd(noPark);
+    ctx = nullptr;
+    CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
+    d.upscaleSize = {0, 0};
+    CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
+    g_deviceLost = true;
+    d.upscaleSize = {1920, 1080};
+    fe->Dispatch(&ctx, &d.header);
+    CHECK(g_createCalls == 2 && g_destroyed == 1);
+    g_deviceLost = false;
+    CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK && g_destroyed == 2);
+
+    // a parked context (destroyed with a working upscaler) destroys its replaced upscalers at the destroy
+    Reset();
+    Config parkCfg;
+    parkCfg.contextParkMs = 1;
+    g_useTimer = true;
+    fe = MakeFrontEnd(parkCfg);
+    ctx = nullptr;
+    CHECK(fe->CreateContext(&ctx, &c.upscale.header, nullptr) == FFX_API_RETURN_OK && ctx);
+    d.upscaleSize = {0, 0};
+    CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
+    d.upscaleSize = {1920, 1080};
+    CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK && g_destroyed == 0);
+    CHECK(fe->DestroyContext(&ctx, nullptr) == FFX_API_RETURN_OK && fe->HasParked());
+    CHECK(g_destroyed == 1);  // the replaced one; the current one is parked
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK(g_timerFn() == 0 && !fe->HasParked() && g_destroyed == 2);
+    g_useTimer = false;
+}
+
 // Bug hunt F1 (a): an upscaler that failed for good, without AMD's FSR to take the context over, is not called again:
 // the stand-in (or an error) for the later frames, logged at 1, 2, 3, 10... frames, not two ERROR lines per frame.
+// The default bound (Config::maxOutputResizes = 1, from the GPU memory measured for PR #85: one Model M upscaler is about
+// 0.9 GiB at 4K output): one output-size change creates an upscaler again and keeps the old one until the context is
+// destroyed; the next size change creates nothing (the kept one is not replaced, nothing else is destroyed), and the
+// log says so once.
+static void TestResizeCapDefault() {
+    Reset();
+    Config defaults;
+    CHECK(defaults.maxOutputResizes == 1);
+    auto fe = MakeFrontEnd(defaults);
+    UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
+    ffxContext ctx = nullptr;
+    CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
+    ffxDispatchDescUpscale d = MakeDispatch();
+    CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
+    d.upscaleSize = {1920, 1080};
+    CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK && g_createCalls == 2 && g_destroyed == 0);
+    d.upscaleSize = {1600, 900};  // the second size change: over the bound
+    fe->Dispatch(&ctx, &d.header);
+    d.upscaleSize = {1280, 720};
+    fe->Dispatch(&ctx, &d.header);
+    CHECK(g_createCalls == 2 && g_destroyed == 0);
+    CHECK(CountLog("the upscaler is not created again for this context") == 1);
+    CHECK(CountLog("again after 1 size change;") == 1);
+    CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK && fe->OwnContextCount() == 0);
+    CHECK(g_destroyed == 2);  // the kept one and the current one
+}
+
 static void TestBrokenNotCalledAgain() {
     Reset();
     g_originalAvailable = false;
@@ -1185,6 +1285,71 @@ static void TestCompare() {
     for (size_t i = 0; i < g_timed.size(); ++i) CHECK(g_timed[i].first == kCommandList && g_timed[i].second == (i % 2 == 1));
     CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
     CHECK(g_amd.back().fn == "destroy" && g_amd.back().memCb == nullptr);
+}
+
+// Issue #59: the reactive-mask generation call of a WrongGPU context goes to AMD's context when one exists (frames of
+// the context that went to AMD with the game's own reactive resource need this frame's mask): in a comparison and
+// after a frame the stand-in could not take. Without an AMD context there is nothing to send it to (OK, nothing
+// recorded, as before). A failure of AMD's call is the call's result.
+static void TestReactiveMaskForwarded() {
+    auto maskCalls = [] {
+        size_t n = 0;
+        for (const AmdCall& c : g_amd) n += c.fn == "dispatch" && c.type == FFX_API_DISPATCH_DESC_TYPE_UPSCALE_GENERATEREACTIVEMASK;
+        return n;
+    };
+    ffxDispatchDescUpscaleGenerateReactiveMask mask{};
+    mask.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE_GENERATEREACTIVEMASK;
+
+    // Comparison.
+    Reset();
+    g_resources[kColor] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+    g_resources[kDepth] = {dxgi::R32_FLOAT, 2560, 1440};
+    g_resources[kMotion] = {dxgi::R16G16_FLOAT, 2560, 1440};
+    g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+    {
+        auto fe = MakeFrontEnd(Config{});
+        UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE, /*withOverride=*/true);
+        ffxContext ctx = nullptr;
+        CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK);
+        ffxDispatchDescUpscale d = MakeDispatch();
+        CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);  // WrongGPU
+        CHECK(fe->Dispatch(&ctx, &mask.header) == FFX_API_RETURN_OK && g_amd.empty());  // no AMD context yet
+        g_compare = true;
+        CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);  // AMD's context is made and dispatched
+        CHECK(g_amd.size() == 3 && maskCalls() == 0);
+        const size_t before = g_amd.size();
+        CHECK(fe->Dispatch(&ctx, &mask.header) == FFX_API_RETURN_OK);
+        CHECK(g_amd.size() == before + 1 && maskCalls() == 1 && g_amd.back().context == g_amd[0].context);
+        g_amdDispatchResult = FFX_API_RETURN_ERROR_RUNTIME_ERROR;
+        CHECK(fe->Dispatch(&ctx, &mask.header) == FFX_API_RETURN_ERROR_RUNTIME_ERROR && maskCalls() == 2);
+        g_amdDispatchResult = FFX_API_RETURN_OK;
+        g_compare = false;  // back to WrongGPU: AMD's context still exists, the call still reaches it (next frames may go to AMD)
+        CHECK(fe->Dispatch(&ctx, &mask.header) == FFX_API_RETURN_OK && maskCalls() == 3);
+        CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    }
+
+    // A frame the stand-in cannot take (no output): AMD's context is made from the saved create parameters.
+    Reset();
+    g_resources[kColor] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+    g_resources[kDepth] = {dxgi::R32_FLOAT, 2560, 1440};
+    g_resources[kMotion] = {dxgi::R16G16_FLOAT, 2560, 1440};
+    g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+    {
+        auto fe = MakeFrontEnd(Config{});
+        UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
+        ffxContext ctx = nullptr;
+        CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK);
+        ffxDispatchDescUpscale good = MakeDispatch();
+        CHECK(fe->Dispatch(&ctx, &good.header) == FFX_API_RETURN_OK);
+        CHECK(fe->Dispatch(&ctx, &mask.header) == FFX_API_RETURN_OK && g_amd.empty());  // no AMD context yet
+        ffxDispatchDescUpscale bad = MakeDispatch();
+        bad.output.resource = nullptr;
+        CHECK(fe->Dispatch(&ctx, &bad.header) == FFX_API_RETURN_OK);
+        CHECK(g_amd.size() == 2 && g_amd[0].fn == "create" && g_amd[1].fn == "dispatch" && maskCalls() == 0);
+        CHECK(fe->Dispatch(&ctx, &mask.header) == FFX_API_RETURN_OK);
+        CHECK(g_amd.size() == 3 && maskCalls() == 1 && g_amd.back().context == g_amd[0].context);
+        CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    }
 }
 
 // Interface version 2: a version 2 backend gets the services and the version 2 frame; a version 1 backend gets the
@@ -1772,8 +1937,12 @@ static void TestHostedLookupReentry() {
 }
 
 static void TestRuntimeProviderName() {
-#if WRONGGPU_MODEL_K
+#if WRONGGPU_MODEL_K && WRONGGPU_MODEL_L
+    for (const char* model : {"M", "K", "L"}) {
+#elif WRONGGPU_MODEL_K
     for (const char* model : {"M", "K"}) {
+#elif WRONGGPU_MODEL_L  // (the configured model=K is dropped, TestWithoutModelK)
+    for (const char* model : {"M", "L"}) {
 #else  // (the configured model=K is dropped, TestWithoutModelK; the host's choice of Model M is all there is)
     for (const char* model : {"M"}) {
 #endif
@@ -1782,10 +1951,11 @@ static void TestRuntimeProviderName() {
         Config c;
         c.hosted = true;
         // Deliberately configure the opposite default: the in-game choice must win.
-        c.runtimeOptions = std::string("model=") + (model[0] == 'K' ? "M" : "K");
+        c.runtimeOptions = std::string("model=") + (model[0] == 'M' ? "K" : "M");
         auto f = MakeFrontEnd(c);
         UpscaleCreate create(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE, true);
-        create.version.versionId = model[0] == 'K' ? kWrongGpuKProviderVersionId : kWrongGpuProviderVersionId;
+        create.version.versionId = model[0] == 'K' ? kWrongGpuKProviderVersionId
+                                   : model[0] == 'L' ? kWrongGpuLProviderVersionId : kWrongGpuProviderVersionId;
         ffxContext ctx = nullptr;
         CHECK(f->CreateContext(&ctx, &create.upscale.header, kMemCb) == FFX_API_RETURN_OK);
         auto frame = MakeDispatch();
@@ -1825,10 +1995,14 @@ static void TestRuntimeProviderName() {
     query.versionIds = ids;
     query.versionNames = names;
     CHECK(frontend.Query(nullptr, &query.header) == FFX_API_RETURN_OK);
-    // Model M alone: the list holds only the SR models (RR modes have their own box since 10-31) and this build has no
-    // Model K (OwnEntry(1) is null here; the test read it and crashed in a build without Model K).
-    CHECK(count == 1 && ids[0] == kWrongGpuProviderVersionId && std::strcmp(names[0], kWrongGpuListedNameM) == 0);
-    CHECK(OwnEntryCount() == 1 && OwnEntry(1) == nullptr);
+    // Model M alone (and Model L after it when built in): the list holds only the SR models (RR modes have their own
+    // box since 10-31) and this build has no Model K (OwnEntry(n) is null past the end; the test read it and crashed in
+    // a build without Model K).
+    CHECK(count == 1 + WRONGGPU_MODEL_L && ids[0] == kWrongGpuProviderVersionId && std::strcmp(names[0], kWrongGpuListedNameM) == 0);
+#if WRONGGPU_MODEL_L
+    CHECK(ids[1] == kWrongGpuLProviderVersionId && std::strcmp(names[1], kWrongGpuListedNameL) == 0);
+#endif
+    CHECK(OwnEntryCount() == 1 + WRONGGPU_MODEL_L && OwnEntry(1 + WRONGGPU_MODEL_L) == nullptr);
 #else
     CHECK(std::strcmp(RuntimeProviderName("model=K;network=fused", nullptr), "WrongGPU Model K") == 0);
     CHECK(std::strcmp(RuntimeProviderName("model = k", nullptr), "WrongGPU Model K") == 0);
@@ -2132,7 +2306,7 @@ static void TestHostVersionHandling() {
     list.versionNames = names;
     CHECK(fe->Query(nullptr, &list.header) == FFX_API_RETURN_OK && count == kOwn + 2);
     CHECK(ids[0] == 0x5747000000000001ull && ids[kOwn] == g_versionIds[0] && ids[kOwn + 1] == g_versionIds[1]);
-    CHECK(kOwn == 1 || ids[1] == 0x5747000000000002ull);
+    CHECK(kOwn == 1 || ids[1] == (WRONGGPU_MODEL_K ? 0x5747000000000002ull : 0x5747000000000003ull));
     CHECK(std::strcmp(names[kOwn], "3.1.5") == 0 && std::strcmp(names[kOwn + 1], "2.3.4") == 0);
     for (int i = 0; i < kOwn; ++i) {
         HostVersion selected;
@@ -2147,8 +2321,11 @@ static void TestHostVersionHandling() {
     }
     CHECK(std::strcmp(names[0], "WrongGPU Model M##3.1.0") == 0);
     CHECK(WRONGGPU_MODEL_K == 0 || std::strcmp(names[1], "WrongGPU Model K##3.1.0") == 0);
+    CHECK(WRONGGPU_MODEL_L == 0 || std::strcmp(names[kOwn - 1], "WrongGPU Model L##3.1.0") == 0);
     // The selection still works by id, and a context's own provider name stays the label alone (the last SR model).
-    const uint64_t lastModel = WRONGGPU_MODEL_K ? kWrongGpuKProviderVersionId : kWrongGpuProviderVersionId;
+    const uint64_t lastModel = WRONGGPU_MODEL_L ? kWrongGpuLProviderVersionId
+                               : WRONGGPU_MODEL_K ? kWrongGpuKProviderVersionId : kWrongGpuProviderVersionId;
+    const char* const lastName = WRONGGPU_MODEL_L ? "WrongGPU Model L" : WRONGGPU_MODEL_K ? "WrongGPU Model K" : "WrongGPU Model M";
     UpscaleCreate own(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE, /*withOverride=*/true);
     own.version.versionId = lastModel;
     ffxContext ctx = nullptr;
@@ -2156,7 +2333,7 @@ static void TestHostVersionHandling() {
     ffxQueryGetProviderVersion provider{};
     provider.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
     CHECK(fe->Query(&ctx, &provider.header) == FFX_API_RETURN_OK && provider.versionId == lastModel && provider.versionName &&
-          std::strcmp(provider.versionName, WRONGGPU_MODEL_K ? "WrongGPU Model K" : "WrongGPU Model M") == 0);
+          std::strcmp(provider.versionName, lastName) == 0);
     CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
 
     g_hostedFrontEnd = nullptr;
@@ -2430,7 +2607,7 @@ static void TestRegistryEntries() {
     CHECK(kWgEntries[1].id == kWrongGpuKProviderVersionId && std::strcmp(kWgEntries[1].label, kWrongGpuListedNameK) == 0);
 #endif
     CHECK(WG_ENTRY_COUNT == WG_SR_MODEL_COUNT);  // no RR entries
-    CHECK(kOwn == WG_ENTRY_COUNT - (WRONGGPU_MODEL_K ? 0 : 1));
+    CHECK(kOwn == WG_ENTRY_COUNT - (WRONGGPU_MODEL_K ? 0 : 1) - (WRONGGPU_MODEL_L ? 0 : 1));
     CHECK(std::strcmp(EntryProviderName(kWgEntries[0]), "WrongGPU Model M") == 0);
     for (int i = 0; i < kOwn; ++i) {
         const WgEntryDef* e = OwnEntry(i);
@@ -2722,6 +2899,49 @@ static void TestCustomSlotFailedCreate() {
     CHECK(g_activateCalls == 1 && g_createCallsAtActivate == 1);
     CHECK(g_hostCreates == 0 && g_hostDispatches == 0);
     CHECK(fe2->DestroyContext(&feature, nullptr) == FFX_API_RETURN_OK && !feature && fe2->OwnContextCount() == 0);
+    ResetHost();
+}
+
+// Issue #60: a create that fails for a reason bound to the size (out of VRAM at 4K) is remembered per size: a create
+// with the same sizes and flags is still stopped, a create at another size gets its own attempt and works.
+static void TestCustomSlotFailureKeyHasSize() {
+    Reset();
+    ResetHost();
+    g_originalAvailable = false;
+    g_compareApi = &g_hostApi;
+    g_failCreateOutputWidth = 3840;  // the runtime cannot create at 4K, and only there
+    g_activateOn = true;
+    Config config;
+    config.hosted = true;
+    config.customSlot = true;
+    auto fe = MakeFrontEnd(config);
+    auto create = [&](uint32_t renderW, uint32_t renderH, uint32_t outW, uint32_t outH, uint32_t flags, ffxContext* ctx) {
+        UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE | flags, true);
+        c.version.versionId = kWrongGpuProviderVersionId;
+        c.upscale.maxRenderSize = {renderW, renderH};
+        c.upscale.maxUpscaleSize = {outW, outH};
+        return fe->CreateContext(ctx, &c.upscale.header, nullptr);
+    };
+    ffxContext ctx = nullptr;
+    // 4K: fails, and is remembered.
+    CHECK(create(2560, 1440, 3840, 2160, 0, &ctx) == FFX_API_RETURN_ERROR_RUNTIME_ERROR && !ctx);
+    CHECK(g_createCalls == 1 && CountLog("this failure is remembered for the session") == 1);
+    // The same parameters again (a host that re-creates in a loop): no new attempt.
+    CHECK(create(2560, 1440, 3840, 2160, 0, &ctx) == FFX_API_RETURN_ERROR_RUNTIME_ERROR && !ctx);
+    CHECK(g_createCalls == 1);
+    // 2560x1440: a new attempt, which works, and the context is WrongGPU's own.
+    CHECK(create(1706, 960, 2560, 1440, 0, &ctx) == FFX_API_RETURN_OK && ctx);
+    CHECK(g_createCalls == 2 && fe->OwnContextCount() == 1 && g_created == 1);
+    CHECK(g_hostCreates == 0 && g_amd.empty());  // not AMD's context
+    CHECK(fe->DestroyContext(&ctx, nullptr) == FFX_API_RETURN_OK && !ctx && fe->OwnContextCount() == 0);
+    // A different maximum render size at the failing output size is another attempt too (it fails again here: the
+    // fake fails at that width), and it is remembered for its own key.
+    CHECK(create(1920, 1080, 3840, 2160, 0, &ctx) == FFX_API_RETURN_ERROR_RUNTIME_ERROR && !ctx);
+    CHECK(g_createCalls == 3);
+    CHECK(create(1920, 1080, 3840, 2160, 0, &ctx) == FFX_API_RETURN_ERROR_RUNTIME_ERROR && g_createCalls == 3);
+    // The create flags are part of the key as well.
+    CHECK(create(2560, 1440, 3840, 2160, FFX_UPSCALE_ENABLE_DEPTH_INVERTED, &ctx) == FFX_API_RETURN_ERROR_RUNTIME_ERROR && !ctx);
+    CHECK(g_createCalls == 4);
     ResetHost();
 }
 
@@ -3043,15 +3263,175 @@ static void TestModelLookup() {
     CHECK(std::string(DefaultFsrSectionText()).find("model_dir =") != std::string::npos);
 }
 
+// Model L in the model lookup (model_l.h): <place>\L\model.wgcm, never Model M's or Model K's file; WithoutModel for L.
+// The same in every build.
+static void TestModelLookupL() {
+    const std::vector<ModelPlace> places = {{"G:\\game\\WrongGPU\\model", "the game's data folder", false}};
+    auto has = [](std::vector<std::string> files) {
+        return [files](const std::string& f) { return std::find(files.begin(), files.end(), f) != files.end(); };
+    };
+    ModelChoice m = ChooseModelDir(places, 'L', has({"G:\\game\\WrongGPU\\model\\L\\model.wgcm"}));
+    CHECK(m.index == 0 && m.option == ";model_dir=G:\\game\\WrongGPU\\model" && m.file == "G:\\game\\WrongGPU\\model\\L\\model.wgcm");
+    m = ChooseModelDir(places, 'L', has({"G:\\game\\WrongGPU\\model\\model.wgcm", "G:\\game\\WrongGPU\\model\\K\\model.wgcm"}));
+    CHECK(m.index == -1 && m.option.empty() && m.searched.find("L\\model.wgcm (the game's data folder: not there)") != std::string::npos);
+    CHECK(ChooseModelDir(places, 'M', has({"G:\\game\\WrongGPU\\model\\model.wgcm"})).index == 0);
+    CHECK(ChooseModelDir(places, 'K', has({"G:\\game\\WrongGPU\\model\\K\\model.wgcm"})).index == 0);
+    bool removed = false;
+    CHECK(WithoutModel("a=1;model=l;b=2", 'L', &removed) == "a=1;b=2" && removed);
+    CHECK(WithoutModel("model=K; model = L ", 'L', &removed) == "model=K" && removed);
+    CHECK(WithoutModel("model=LL;model=M", 'L', &removed) == "model=LL;model=M" && !removed);
+    CHECK(WithoutModelK("model=L;model=k", &removed) == "model=L" && removed);
+}
+
+#if WRONGGPU_MODEL_L
+// A build with Model L (CMake WG_MODEL_L=ON): model=L names Model L; the model lookup passes its folder when
+// <place>\L\model.wgcm is there; without it the create is refused with the reason (what writes the file), the runtime
+// is not asked, and AMD's upscaler takes over (fallback_to_amd, the default).
+static void TestModelL() {
+    CHECK(std::strcmp(RuntimeProviderName("model=L", nullptr), "WrongGPU Model L") == 0);
+    CHECK(std::strcmp(RuntimeProviderName("model=M", "model=l"), "WrongGPU Model L") == 0);
+    CHECK(std::strcmp(RuntimeProviderName("model=L", "model=M"), "WrongGPU Model M") == 0);
+    CHECK(ModelBuiltIn(WG_SR_MODEL_L) && SrEntryOfModel(WG_SR_MODEL_L) &&
+          SrEntryOfModel(WG_SR_MODEL_L)->id == kWrongGpuLProviderVersionId);
+    const std::vector<ModelPlace> places = {{"G:\\game\\WrongGPU\\model", "the game's data folder", false}};
+    auto create = [&](const std::vector<std::string>& files, size_t* amdAdded, int* runtimeCreates) {
+        Reset();
+        g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+        g_modelOn = true;
+        g_modelPlaces = places;
+        g_modelFiles = files;
+        Config c;
+        c.runtimeOptions = "model=L";
+        c.contextParkMs = 0;
+        auto f = MakeFrontEnd(c);
+        const size_t amd = g_amd.size();
+        const int creates = g_createCalls;
+        UpscaleCreate u(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
+        ffxContext ctx = nullptr;
+        CHECK(f->CreateContext(&ctx, &u.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
+        *amdAdded = g_amd.size() - amd;
+        *runtimeCreates = g_createCalls - creates;
+        CHECK(f->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    };
+    size_t amd = 0;
+    int creates = 0;
+    // only Model M's and Model K's files: refused, nothing created by the runtime
+    create({"G:\\game\\WrongGPU\\model\\model.wgcm", "G:\\game\\WrongGPU\\model\\K\\model.wgcm"}, &amd, &creates);
+    CHECK(creates == 0 && amd >= 1);
+    CHECK(CountLog("Model L is chosen but no converted Model L was found") >= 1);
+    CHECK(CountLog("WrongGPU.exe model convert --preset=L writes it") >= 1);
+    CHECK(CountLog("model: no converted Model L found") == 1);
+    // its file: passed to the runtime as model_dir with model=L
+    create({"G:\\game\\WrongGPU\\model\\L\\model.wgcm"}, &amd, &creates);
+    CHECK(creates == 1 && amd == 0);
+    CHECK(g_createOptions.find("model=L") != std::string::npos);
+    CHECK(g_createOptions.find(";model_dir=G:\\game\\WrongGPU\\model") != std::string::npos);
+    CHECK(CountLog("model: Model L from G:\\game\\WrongGPU\\model\\L\\model.wgcm (passed to the runtime as model_dir)") == 1);
+    CHECK(CountLog("Model L is chosen but") == 0);
+    // sr_model=L in the shared settings (wronggpu.ini [wronggpu]): Model L's runtime option, named Model L
+    Reset();
+    g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+    g_menuOn = true;
+    g_menuValues[WG_OPT_SR_MODEL] = WG_SR_MODEL_L;
+    {
+        auto f = MakeFrontEnd(Config());
+        UpscaleCreate u(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
+        ffxContext ctx = nullptr;
+        CHECK(f->CreateContext(&ctx, &u.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
+        CHECK(g_createOptions.find("model=L") != std::string::npos);
+        CHECK(CountLog("settings: sr_model=L (ini)") == 1);
+        ffxQueryGetProviderVersion q{};
+        q.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
+        CHECK(f->Query(&ctx, &q.header) == FFX_API_RETURN_OK && q.versionName && std::strcmp(q.versionName, "WrongGPU Model L") == 0);
+        CHECK(q.versionId == kWrongGpuLProviderVersionId);
+        CHECK(f->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    }
+}
+#else
+static void SetRuntimeOptionsEnv(const char* value) {
+#ifdef _WIN32
+    _putenv_s("WG_RUNTIME_OPTIONS", value);
+#else
+    if (*value) setenv("WG_RUNTIME_OPTIONS", value, 1);
+    else unsetenv("WG_RUNTIME_OPTIONS");
+#endif
+}
+
+// A build without Model L (the default): model=L from wronggpu.ini or the environment is refused with one log line
+// that says why, and Model M runs; the Model L id is not WrongGPU's.
+static void TestWithoutModelL() {
+    const char* const kNote = "is refused: Model L is not part of this build of the front end (CMake WG_MODEL_L); Model M is used";
+    CHECK(std::strcmp(RuntimeProviderName("model=L", nullptr), "WrongGPU") == 0);
+    CHECK(!ModelBuiltIn(WG_SR_MODEL_L) && SrEntryOfModel(WG_SR_MODEL_L) == nullptr);
+    CHECK(!IsWrongGpuProvider(kWrongGpuLProviderVersionId));
+    auto runs = [&](FrontEnd& f) {
+        ffxContext ctx = nullptr;
+        UpscaleCreate u(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
+        CHECK(f.CreateContext(&ctx, &u.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
+        const std::string options = g_createInfo.options ? g_createInfo.options : "";
+        CHECK(options.find("model=L") == std::string::npos && options.find("model=l") == std::string::npos);
+        ffxQueryGetProviderVersion q{};
+        q.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
+        CHECK(f.Query(&ctx, &q.header) == FFX_API_RETURN_OK && q.versionName && std::strcmp(q.versionName, "WrongGPU Model M") == 0);
+        CHECK(f.DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    };
+    const char* saved = std::getenv("WG_RUNTIME_OPTIONS");
+    const std::string savedValue = saved ? saved : "";
+    SetRuntimeOptionsEnv("");
+    {  // wronggpu.ini: runtime_options = ...;model=L
+        Reset();
+        g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+        std::string warnings;
+        Config c = ParseConfig("runtime_options = timing_log=1;model=L\n", &warnings);
+        CHECK(warnings.empty() && c.runtimeOptions == "timing_log=1;model=L");
+        auto f = MakeFrontEnd(c);
+        CHECK(CountLog(kNote) == 1 && CountLog("note: model=L (runtime_options in wronggpu.ini)") == 1);
+        runs(*f);
+        CHECK(CountLog(kNote) == 1);
+    }
+    {  // the environment: dropped from the process environment before the runtime library reads it
+        Reset();
+        g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+        SetRuntimeOptionsEnv("timing_log=1;model=L");
+        auto f = MakeFrontEnd(Config());
+        const char* now = std::getenv("WG_RUNTIME_OPTIONS");
+        CHECK(now && std::strcmp(now, "timing_log=1") == 0);
+        CHECK(CountLog(kNote) == 1 && CountLog("note: model=L (WG_RUNTIME_OPTIONS)") == 1);
+        runs(*f);
+    }
+    SetRuntimeOptionsEnv("");
+    {  // sr_model=L in the shared settings (wronggpu.ini [wronggpu]): refused by name once, Model M runs
+        Reset();
+        g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+        g_menuOn = true;
+        g_menuValues[WG_OPT_SR_MODEL] = WG_SR_MODEL_L;
+        auto f = MakeFrontEnd(Config());
+        runs(*f);
+        runs(*f);
+        CHECK(CountLog((std::string("note: sr_model=L (ini) ") + kNote).c_str()) == 1);
+    }
+    SetRuntimeOptionsEnv(savedValue.c_str());
+}
+#endif
+
 int main() {
     TestCustomSlotFailedCreate();
+    TestCustomSlotFailureKeyHasSize();
     TestCustomSlotInputRefused();
     TestOutputResize();
+    TestResizeKeepsRetired();
+    TestResizeCapDefault();
     TestBrokenNotCalledAgain();
     TestHostReentryStopped();
     TestCustomSlotDestroyPath();
     TestHooksAfterCreate();
     TestModelLookup();
+    TestModelLookupL();
+#if WRONGGPU_MODEL_L
+    TestModelL();
+#else
+    TestWithoutModelL();
+#endif
     TestRegistryEntries();
     TestUnsupportedFrames();
     TestSplitBlocked();
@@ -3110,6 +3490,7 @@ int main() {
     TestParkedContexts();
     TestHostedSwitchNotParked();
     TestCompare();
+    TestReactiveMaskForwarded();
     TestSlowCreate();
     TestInterfaceVersions();
     TestAmdMode();

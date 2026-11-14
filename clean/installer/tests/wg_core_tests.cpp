@@ -2,6 +2,7 @@
 // Unit tests of wg_core (the installer's / launcher's engine) that need no game, no payload and no GPU: strings and
 // paths, the install record, wronggpu.ini keys, the runtime options of a Model-M-only build, the Context's log file.
 // Written for this project. Run by ctest ("wg-core") in a WRONGGPU_TESTING build.
+#include <atomic>
 #include <cstdio>
 #include <iostream>
 #include <stdexcept>
@@ -11,6 +12,7 @@
 #include "wg_core/gamerules.h"
 #include "wg_core/model.h"
 #include "wg_core/record.h"
+#include "wg_core/rrprep.h"
 #include "wg_core/settings.h"
 
 using namespace wg;
@@ -28,6 +30,19 @@ wstring TempFolder() {
     RemoveTree(dir);
     EnsureDir(dir);
     return dir;
+}
+// StartCleanup's folder move for the retry cases (record.h SetCleanupMoveForTest): the first g_moveFailFirst calls fail
+// with g_moveError, later ones really move.
+std::atomic<int> g_moveCalls{0}, g_moveFailFirst{0};
+std::atomic<DWORD> g_moveError{0};
+BOOL WINAPI FakeMove(LPCWSTR from, LPCWSTR to, DWORD flags) {
+    if (++g_moveCalls <= g_moveFailFirst) { SetLastError(g_moveError); return FALSE; }
+    return MoveFileExW(from, to, flags);
+}
+size_t CountIn(const string& s, const string& part) {
+    size_t n = 0;
+    for (size_t at = 0; (at = s.find(part, at)) != string::npos; ++at) ++n;
+    return n;
 }
 }  // namespace
 
@@ -141,6 +156,21 @@ int main() {
             require(refused, "Target refuses a path outside the folder");
         }
 
+        // RR's kernels under Wine: the game prepares them at its first start (its shader caches are under its own Proton);
+        // no helper runs. On Windows a game without a rule is prepared by the launcher.
+        {
+            Context rctx;
+            rctx.logFile = Join(dir, L"rr-prep.log");
+            const wstring game = Join(dir, L"No Rule Game\\NoRuleGame.exe");
+            wstring why;
+            if (UnderWine()) {
+                require(RrKernelsInGame(game) && RrPrepStateOf(rctx, dir, game, 1, &why) == RrPrepState::InGame && Contains(why, L"Proton"),
+                        "RR kernels under Wine: prepared by the game at its first start");
+                require(PrepareRr(rctx, dir, game, Join(dir, L"no-runtime.dll"), 1, nullptr, &why) == 4, "PrepareRr under Wine: no helper run (4)");
+            } else {
+                require(!RrKernelsInGame(game), "RR kernels on Windows: a game without a rule is prepared by the launcher");
+            }
+        }
         // anti-cheat: the game's top folder and the markers it owns (a sibling game's or a library's markers do not count)
         {
             const wstring lib = Join(dir, L"OpenNR Library"), steam = Join(dir, L"SteamLib");
@@ -173,6 +203,48 @@ int main() {
             require(s.size() <= 30 && s.find(L'\u2026') != wstring::npos && s.rfind(L"K:\\Games\\", 0) == 0 && EndsWithI(s, L"\\BattlEye") &&
                         ShortenMiddle(L"K:\\G\\BattlEye", 30) == L"K:\\G\\BattlEye",
                     "ShortenMiddle keeps the drive and the marker");
+        }
+
+        // Linux's device list from a made-up folder (any host): every card in number order, connectors skipped, junk and
+        // missing files ignored, the reported name says the card was not confirmed as the game's adapter
+        {
+            const wstring drm = Join(dir, L"drm-fixture");
+            auto card = [&](const wstring& name, const char* vendor, const char* device) {
+                EnsureDir(Join(drm, name + L"\\device"));
+                if (vendor) WriteFileAtomic(Join(drm, name + L"\\device\\vendor"), vendor, strlen(vendor));
+                if (device) WriteFileAtomic(Join(drm, name + L"\\device\\device"), device, strlen(device));
+            };
+            card(L"card0", "0x1002\n", "0x15bf\n");      // an integrated Radeon, not RDNA 4
+            card(L"card1", "0x10de\n", "0x7550\n");      // another vendor with an RDNA 4 device id
+            card(L"card2", "zz\n", "0x7550\n");          // a vendor that is not a number
+            card(L"card3", "0x1002\n", nullptr);          // the device file missing
+            card(L"card4-DP-1", "0x1002\n", "0x7550\n"); // a connector, not a card
+            require(LinuxRdna4Name(drm).empty(), "LinuxRdna4Name: none among an iGPU, another vendor, junk, a missing file, a connector");
+            require(LinuxRdna4Name(Join(dir, L"no-such-drm")).empty(), "LinuxRdna4Name: a missing device list");
+            card(L"card20", "0x1002\n", "0x7590\n");     // past the first 16 cards
+            const wstring past16 = LinuxRdna4Name(drm);
+            require(Contains(past16, L"7590") && Contains(past16, L"not confirmed"), "LinuxRdna4Name: a card numbered 20, reported as not confirmed");
+            card(L"card17", "0x1002\n", "0x7550 \n");    // two RDNA 4 cards: the lower number first
+            require(Contains(LinuxRdna4Name(drm), L"7550"), "LinuxRdna4Name: cards in number order");
+        }
+        // under Wine an RDNA 4 card that Linux reports is found even when Wine's own DXGI names an old Radeon
+        if (UnderWine()) {
+            auto sysfs = [](const wstring& p) {  // the C runtime reads to the end of file (sysfs reports 4096 bytes)
+                string s;
+                if (FILE* f = _wfopen(p.c_str(), L"rb")) { char b[64]; size_t n; while ((n = fread(b, 1, sizeof b, f)) > 0) s.append(b, n); fclose(f); }
+                return s;
+            };
+            bool linuxRdna4 = false;
+            for (int i = 0; i < 16 && !linuxRdna4; ++i) {
+                const wstring dev = L"Z:\\sys\\class\\drm\\card" + std::to_wstring(i) + L"\\device\\";
+                const unsigned long v = strtoul(sysfs(dev + L"vendor").c_str(), nullptr, 16), id = strtoul(sysfs(dev + L"device").c_str(), nullptr, 16);
+                linuxRdna4 = v == 0x1002 && (id == 0x7550 || id == 0x7551 || id == 0x7590 || id == 0x7591);
+            }
+            const wstring fromLinux = LinuxRdna4Name();
+            const GpuInfo gpu = DetectGpu();
+            std::wcout << L"under Wine: Linux reports RDNA 4: " << linuxRdna4 << L"; LinuxRdna4Name: \"" << fromLinux << L"\"; DetectGpu: " << gpu.name << L" (rdna4 " << gpu.rdna4 << L")\n";
+            require(fromLinux.empty() != linuxRdna4, "LinuxRdna4Name: the RDNA 4 card Linux reports, and only then");
+            if (linuxRdna4) require(gpu.amd && gpu.rdna4, "DetectGpu under Wine: the RDNA 4 card Linux reports");
         }
 
         // a store's launch exe is a hint only: a launcher stub (REDprelauncher.exe) gives way to the exe discovery
@@ -234,6 +306,29 @@ int main() {
             require(ResolveGameExe(Join(q, L"Game\\QuarryNine.exe")) == Join(q, L"Game\\QuarryNine.exe"), "an exe without a game of its name below it stays");
         }
 
+        // paths for a game in another Wine prefix (Proton): the Z: name of the same file; unchanged outside Wine
+        {
+            const wstring f = Join(dir, L"prefix-path.txt");
+            WriteFileAtomic(f, "same file", 9);
+            const wstring g = PathForGamePrefix(f);
+            string back;
+            if (UnderWine())
+                require(StartsWithI(g, L"Z:\\") && ReadAll(g, back) && back == "same file", "PathForGamePrefix under Wine: a Z: path to the same file");
+            else
+                require(g == f, "PathForGamePrefix outside Wine: the path unchanged");
+            // two folders that do not exist yet (the RR data's F\ before its first conversion): still the Z: path, the tail kept
+            const wstring deepTail = L"\\no-such-dir\\F\\model.wgcm", deep = PathForGamePrefix(dir + deepTail);
+            if (UnderWine())
+                require(StartsWithI(deep, L"Z:\\") && deep.size() > deepTail.size() && deep.compare(deep.size() - deepTail.size(), deepTail.size(), deepTail) == 0,
+                        "PathForGamePrefix under Wine: a Z: path for missing folders too");
+            require(PathForGamePrefix(L"").empty(), "PathForGamePrefix of an empty path");
+            // a drive the prefix doesn't map: no Z: path can be made, the path comes back as it is (the install then
+            // reports it, install.cpp ModelPathForGame)
+            if (UnderWine()) {
+                const wstring unmapped = L"Q:\\wg-no-such-drive\\model";
+                require(PathForGamePrefix(unmapped) == unmapped, "PathForGamePrefix under Wine: an unmapped drive comes back unchanged");
+            }
+        }
         // the Context's log file
         Context ctx;
         ctx.logFile = Join(dir, L"setup.log");
@@ -241,6 +336,78 @@ int main() {
         LogLine(ctx, L"second \u00e9");
         string log;
         require(ReadAll(ctx.logFile, log) && log.find("] first\r\n") != string::npos && log.find("] second \xc3\xa9\r\n") != string::npos, "LogLine appends UTF-8 lines");
+
+        // StartCleanup: the shared folder moved aside to a name that is free, with bounded retries. Synthetic folder in the
+        // temp folder; the hidden cmd.exe it starts deletes each moved-aside folder a few seconds later.
+        {
+            const wstring cleanRoot = Join(dir, L"cleanup"), appData = Join(cleanRoot, L"WrongGPU");
+            const wstring modelFile = Join(appData, L"model\\model.wgcm");
+            auto makeShared = [&] { EnsureDir(Parent(modelFile)); const char d[] = "synthetic model data"; WriteFileAtomic(modelFile, d, sizeof d - 1); };
+            auto contains = [](const string& s, const string& part) { return s.find(part) != string::npos; };
+            // two cleanups of one folder back to back, 20 runs (CI has one runner: not more). Within one GetTickCount64 step
+            // (~16 ms) the second move used to aim at the first one's folder, which its cmd.exe deletes seconds later: error
+            // 183, the folder left in place.
+            {
+                Context sctx;
+                sctx.logFile = Join(cleanRoot, L"cleanup-stress.log");  // outside the folder that is moved
+                const int runs = 20;
+                int gone = 0;
+                for (int i = 0; i < runs; ++i) {
+                    makeShared();
+                    StartCleanup(sctx, L"", L"", appData);
+                    const bool first = !IsDir(appData);
+                    makeShared();
+                    StartCleanup(sctx, L"", L"", appData);
+                    if (first && !IsDir(appData)) ++gone;
+                }
+                string slog;
+                ReadAll(sctx.logFile, slog);
+                std::printf("wg-core: cleanup stress %d/%d (deferred %zu)\n", gone, runs, CountIn(slog, "cleanup deferred"));
+                require(gone == runs && !contains(slog, "cleanup deferred"), "two cleanups of one folder back to back: it goes both times, 20 of 20 runs");
+            }
+            // the bounded retry (error 32 sharing violation, error 5 access denied: a scanner's open file), through the test
+            // seam: fails for the first N tries, then moves; or fails every time and ends deferred; any other error is final
+            {
+                Context rctx;
+                rctx.logFile = Join(cleanRoot, L"cleanup-retry.log");
+                struct Case { DWORD error; int failFirst; bool gone; int calls; size_t retries; const char* what; };
+                const Case cases[] = {
+                    {ERROR_ACCESS_DENIED, 3, true, 4, 3, "error 5 for 3 tries, then the move: the folder goes after 3 logged retries"},
+                    {ERROR_ACCESS_DENIED, 1000, false, kCleanupMoveTries, kCleanupMoveTries - 1,
+                     "error 5 every time: 5 tries (4 logged retries), then deferred with the error named, the folder left in place"},
+                    {ERROR_SHARING_VIOLATION, 2, true, 3, 2, "error 32 for 2 tries, then the move: the folder goes"},
+                    {ERROR_ALREADY_EXISTS, 1, false, 1, 0, "error 183 once: no retry, deferred at once"}};
+                for (const Case& rc : cases) {
+                    DeleteFileW(rctx.logFile.c_str());
+                    makeShared();
+                    g_moveCalls = 0; g_moveFailFirst = rc.failFirst; g_moveError = rc.error;
+                    SetCleanupMoveForTest(&FakeMove);
+                    const ULONGLONG t0 = GetTickCount64();
+                    StartCleanup(rctx, L"", L"", appData);
+                    const ULONGLONG took = GetTickCount64() - t0;
+                    SetCleanupMoveForTest(nullptr);
+                    string rlog;
+                    ReadAll(rctx.logFile, rlog);
+                    const string code = "(error " + std::to_string(rc.error);
+                    const size_t retries = CountIn(rlog, code + (rc.error == ERROR_SHARING_VIOLATION ? ", sharing violation); trying again" : ", access denied); trying again"));
+                    const size_t deferred = CountIn(rlog, "cleanup deferred: cannot detach " + ToUtf8(appData) + " " + code + ":");
+                    std::printf("wg-core: cleanup retry, error %lu x %d: %d tries, %zu retries logged, deferred %zu, %llu ms\n", rc.error, rc.failFirst,
+                                g_moveCalls.load(), retries, deferred, (unsigned long long)took);
+                    require(IsDir(appData) == !rc.gone && g_moveCalls == rc.calls && retries == rc.retries && deferred == (rc.gone ? 0u : 1u) && took < 5000, rc.what);
+                }
+                if (IsDir(appData)) {  // the deferred cases left it: the real move now
+                    StartCleanup(rctx, L"", L"", appData);
+                    require(!IsDir(appData), "after the retry cases: the folder goes");
+                }
+            }
+            for (int i = 0; i < 600; ++i) {  // the hidden cleanups delete the moved-aside folders (ping -n 3 first)
+                bool left = false;
+                for (auto& d : ListDirs(cleanRoot)) left = left || d.find(L".cleanup-") != wstring::npos;
+                if (!left) break;
+                Sleep(100);
+            }
+        }
+
         RemoveTree(dir);
         require(!IsDir(dir), "RemoveTree");
     } catch (const std::exception& ex) {

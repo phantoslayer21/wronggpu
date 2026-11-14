@@ -115,7 +115,7 @@ def read_raw(model_dir):
 
 
 def write_wgcm(model_dir, tensors, key=None, other_filter_variants=1, filter_variant=None, map_file=None,
-               list_filter=True):
+               list_filter=True, order=None):
     """Write <model_dir>/model.wgcm (clean/converter/OUTPUT-FORMAT.md) from a tensor set, and a synthetic map file
     <model_dir>/synthetic.map.json that carries what the runtime reads from a map: the stage list with the keyed
     digests. Returns the map's path (Pipeline(map_path=...)). Test aid only: the real file comes from the converter.
@@ -125,9 +125,14 @@ def write_wgcm(model_dir, tensors, key=None, other_filter_variants=1, filter_var
     (default: last). The map always lists the group, also when the tensor set has none (as the shipped map does).
     map_file: no synthetic map is written; the file records that it was converted with this existing map (its
     digests will not match: for tests of how the runtime reads a given map).
-    list_filter=False: a map as before spec 08 draft 2 ("version 1"): thirteen stages, no entry for the group."""
+    list_filter=False: a map as before spec 08 draft 2 ("version 1"): thirteen stages, no entry for the group.
+    order: the stages of another model (e.g. Model L's map order) for the file and the map, in place of Model M's."""
     key = hashlib.sha256(b"WrongGPU synthetic model key").digest() if key is None else bytes(key)
-    order = stage_order(tensors)
+    stage_list = list(order) if order is not None else MAP_ORDER
+    if order is None:
+        order = stage_order(tensors)
+    else:
+        order = [s for s in stage_list if s in tensors] + ([FILTER_STAGE] if FILTER_STAGE in tensors else [])
     data, index, digests = bytearray(), bytearray(), {}
 
     def put_str(text):
@@ -160,7 +165,7 @@ def write_wgcm(model_dir, tensors, key=None, other_filter_variants=1, filter_var
             data += raw
             pos += len(raw)
     assert len(index) == isize
-    stages = [{"stage": s, "digest": digests[s].hex()} for s in MAP_ORDER]
+    stages = [{"stage": s, "digest": digests[s].hex()} for s in stage_list if s in digests]
     others = [hashlib.sha256(b"another variant %d" % i).hexdigest() for i in range(int(other_filter_variants))]
     own = [digests[FILTER_STAGE].hex()] if FILTER_STAGE in tensors else []
     at = len(others) if filter_variant is None else int(filter_variant)

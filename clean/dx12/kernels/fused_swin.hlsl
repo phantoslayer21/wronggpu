@@ -441,6 +441,71 @@ void load_frags_g(uint base, uint off, out uint2 f[KC])
     }
 }
 
+#ifndef SW_SRC
+#define SW_SRC 0
+#endif
+#ifndef SW_OUT_F16
+#define SW_OUT_F16 0
+#endif
+#if (SW_SRC != 0 || SW_OUT_F16) && (SW_ADD || SW_ECL > 0)
+#error "SW_SRC / SW_OUT_F16: plain blocks only"
+#endif
+#ifndef SW_OUT_COEF12
+#define SW_OUT_COEF12 0
+#endif
+#if SW_OUT_COEF12
+#if !SW_OUT_F16 || SW_C != 32
+#error "SW_OUT_COEF12: Model L's decoder block only (SW_OUT_F16, C = 32)"
+#endif
+#define COEF_PACK12 1
+#include "l_coef_px.hlsli"
+#endif
+#if SW_SRC == 1
+// LHaloF16Src: the lane's channels hh * C/2 + 8 k + j of the member at grid position (pr, pc) (inside the 2-pixel halo),
+// from the FP16 map [H + 4][W + 4][C]
+void sw_load_halo_f16(uint base, int pr, int pc, int W, uint hh, out v8f f[KC])
+{
+    const uint off = (uint)(((pr + 2) * (W + 4) + pc + 2) * SW_C) * 2u + hh * SW_C;
+    [unroll] for (uint k = 0; k < KC; ++k) {
+        const uint4 q = wg_ld128(base, off + 16u * k);
+        f[k].v[0] = wg_h2f_lo(q.x); f[k].v[1] = wg_h2f_hi(q.x); f[k].v[2] = wg_h2f_lo(q.y); f[k].v[3] = wg_h2f_hi(q.y);
+        f[k].v[4] = wg_h2f_lo(q.z); f[k].v[5] = wg_h2f_hi(q.z); f[k].v[6] = wg_h2f_lo(q.w); f[k].v[7] = wg_h2f_hi(q.w);
+    }
+}
+#elif SW_SRC == 3
+#if SW_C != 32
+#error "SW_SRC 3: Model L's encoder block (C = 32)"
+#endif
+#include "l_lin_px.hlsli"
+// LHaloLinSrc: the values of LHaloF16Src without the x2 map: the member at grid position (pr, pc) is pixel
+// (pr + 2) (W + 4) + pc + 2 of the FP8 q halo map, through l_linear_32_32_fused's arithmetic (lane (t, h) = that
+// kernel's lane of the pixel; every lane runs it, also for outside members: wave-uniform control flow)
+void sw_load_halo_lin(uint base, int pr, int pc, int W, uint lane, uint hh, out v8f f[KC])
+{
+    const uint pix = (uint)((pr + 2) * (W + 4) + pc + 2);
+    uint2 xq[2];
+    [unroll] for (uint kc = 0; kc < 2u; ++kc) xq[kc] = wg_ld64(base, pix * 32u + hh * 16u + 8u * kc);
+    v8f b1[2], b2[2];
+    uint2 f1[2][2], f2[2][2];
+    lin_blob(linW1, lane, hh, b1, f1);
+    lin_blob(linW2, lane, hh, b2, f2);
+    uint4 y[2];
+    lin_pair(xq, b1, f1, b2, f2, y);
+    [unroll] for (uint k = 0; k < KC; ++k) {
+        f[k].v[0] = wg_h2f_lo(y[k].x); f[k].v[1] = wg_h2f_hi(y[k].x); f[k].v[2] = wg_h2f_lo(y[k].y); f[k].v[3] = wg_h2f_hi(y[k].y);
+        f[k].v[4] = wg_h2f_lo(y[k].z); f[k].v[5] = wg_h2f_hi(y[k].z); f[k].v[6] = wg_h2f_lo(y[k].w); f[k].v[7] = wg_h2f_hi(y[k].w);
+    }
+}
+#elif SW_SRC == 2
+// LCoarseFp8Src: a member outside the grid takes the mirrored 2 x 2 group (mirror of the group index) and keeps its
+// sub-pixel; the byte offset of the lane's half of that pixel
+uint sw_coarse_src(int pr, int pc, int H, int W, uint hh)
+{
+    const int r = 2 * sw_mirror(pr >> 1, H >> 1) + (pr & 1), c = 2 * sw_mirror(pc >> 1, W >> 1) + (pc & 1);
+    return (uint)(r * W + c) * SW_C + hh * HALF;
+}
+#endif
+
 // sum of squares of a token's channels in this lane (k = 0 .. KC - 1, in order), the other half of the wave added
 float norm_r(v8f a[KC])
 {
@@ -449,6 +514,8 @@ float norm_r(v8f a[KC])
     ss = ss + wg_xor16(ss);
 #if SW_C == 64
     return wg_rsq((ss + asfloat(0x39000000u)) * asfloat(0x3c800000u));   // (ss + 2^-13) * (1 / 64)
+#elif SW_C == 32
+    return wg_rsq((ss + asfloat(0x39000000u)) * asfloat(0x3d000000u));   // (ss + 2^-13) * (1 / 32) (Model L, #89)
 #else
     return wg_rsq((ss + asfloat(0x39000000u)) * asfloat(0x3c2aaaabu));   // (ss + 2^-13) * (1 / 96)
 #endif
@@ -480,8 +547,9 @@ int wg_low0(int p0, int n)
 }
 
 #define EKC (SW_ECL / 16)
-#if (4 * SW_C / 16) % 8 != 0
-#error "fused_expand: MT = 4 C / 16 must be a multiple of the 8 waves"
+#define FE_NW (THREADS / 32)   // waves per workgroup (8; 4 in swin_c64w2.hlsl's 128-lane form)
+#if (4 * SW_C / 16) % FE_NW != 0
+#error "fused_expand: MT = 4 C / 16 must be a multiple of the waves"
 #endif
 // HIP fused_expand<C, CL>: the 8 windows' expanded block input e = q8(We y + be) into LDS records
 // [window][low token][sub-pixel][C] at e_lds. tail = expand weights (bias [4C] f32, then the fragments, in global memory).
@@ -506,19 +574,19 @@ void fused_expand(uint tail, uint e_lds, int nwx, int nwin, uint tid, int blk, u
         }
     }
     uint be = tail + hh * 32u;
-    // MT = 24 = 3 x 8 waves: every wave runs exactly MT / 8 tiles, unrolled with all weight fragments and biases issued
-    // first (one exposed global latency instead of one per tile)
+    // MT = 24 = 3 x 8 waves: every wave runs exactly MT / FE_NW tiles, unrolled with all weight fragments and biases
+    // issued first (one exposed global latency instead of one per tile)
     const uint wv = (uint)wg_uniform((int)wave);
-    uint2 fa[MT / 8][EKC];
-    v8f ba[MT / 8];
+    uint2 fa[MT / FE_NW][EKC];
+    v8f ba[MT / FE_NW];
     const uint fwb = tail + WE + wv * (EKC * 256u) + (lane * 8u + sw_zero_bits());
-    [unroll] for (uint it = 0; it < MT / 8; ++it) {
-        const uint mt = wv + 8u * it;
-        [unroll] for (uint kc = 0; kc < EKC; ++kc) fa[it][kc] = wg_ld64(fwb, (8u * it * EKC + kc) * 256u);
+    [unroll] for (uint it = 0; it < MT / FE_NW; ++it) {
+        const uint mt = wv + FE_NW * it;
+        [unroll] for (uint kc = 0; kc < EKC; ++kc) fa[it][kc] = wg_ld64(fwb, (FE_NW * it * EKC + kc) * 256u);
         ba[it] = wg_load8f(be, mt * 64u);
     }
-    [unroll] for (uint it2 = 0; it2 < MT / 8; ++it2) {
-        const uint mt = wv + 8u * it2;
+    [unroll] for (uint it2 = 0; it2 < MT / FE_NW; ++it2) {
+        const uint mt = wv + FE_NW * it2;
         uint k = mt / G, g = mt - k * G;
         v8f acc0 = ba[it2], acc1 = ba[it2];
         [unroll] for (uint kc2 = 0; kc2 < EKC; ++kc2) {
@@ -675,6 +743,14 @@ WG_KERNEL(SW_ENTRY)
     const uint lpw = WaveReadLaneAt(lowp, wave_id);   // this wave's window (win: the same clamp)
     const int low = ((mr >> 1) - (int)(lpw & 0xffffu)) * 2 + ((mc >> 1) - (int)(lpw >> 16));
     const uint eslot = (tid >> 5) * 16u + (uint)low * 4u + (uint)(((mr & 1) << 1) | (mc & 1));
+#elif SW_SRC == 1
+    v8f xf[KC];
+    sw_load_halo_f16(x, pr, pc, W, hh, xf);
+#elif SW_SRC == 3
+    v8f xf[KC];
+    sw_load_halo_lin(x, pr, pc, W, lane, hh, xf);
+#elif SW_SRC == 2
+    load_frags_g(x, sw_coarse_src(pr, pc, H, W, hh), xa);
 #elif SW_PM
     // enc1's patch merge of this lane's (mirrored) token: lane half hh holds the 2 x 64 bytes of input row 2 mr + hh
     // (TL | TR or BL | BR), 16 K groups, as patch_merge_c64
@@ -737,7 +813,11 @@ WG_KERNEL(SW_ENTRY)
     v8f acc[KC];
     {
         [unroll] for (uint k = 0; k < KC; ++k) {
+#if SW_SRC == 1 || SW_SRC == 3
+            acc[k] = xf[k];
+#else
             acc[k] = sw_unpack_fp8(xa[k]);
+#endif
 #if SW_ADD
             acc[k] = sw_add8(acc[k], sw_unpack_fp8(xb[k]));
 #endif
@@ -1081,6 +1161,43 @@ WG_KERNEL(SW_ENTRY)
     }
 #if SW_REV_PHI
     [unroll] for (uint rk2 = 0; rk2 < KC; ++rk2) acc[rk2] = sw_unperm8(racc[rk2], 7u, 7u);
+#endif
+
+#if SW_OUT_F16
+    // Output RN16(x2) as FP16, real window members only (HIP LStoreF16Epi).
+    uint4 o16[KC];
+#if SW_OUT_COEF12 && COEF_CVT_HW
+    // the driver's conversions (the same bits as wg_to_f16 / the software forms): every lane computes, the hh = 0 lanes
+    // of real pixels inside the render rectangle store (the conversions need wave-uniform control flow)
+    [unroll] for (uint kh = 0; kh < KC; ++kh) o16[kh] = wg_to_f16_ags(acc[kh]);
+    {
+        g_z = wg_grid_ >> 31;
+        const float S = wg_ldf(coefW, 320u), T = wg_ldf(coefW, 324u);
+        const LCoefVals cv = l_coef_vals_hw(o16[0], o16[1], S, T);
+        if (dst >= 0 && hh == 0u && pr < coefRh && pc < coefRw)
+            l_coef_store12(cv, (uint)wg_uniform((int)coefA), (uint)wg_uniform((int)coefC), (uint)wg_uniform((int)coefL),
+                           (uint)(pr * coefRw + pc));
+    }
+    return;
+#endif
+    [unroll] for (uint kf = 0; kf < KC; ++kf) o16[kf] = wg_to_f16(acc[kf]);
+#if SW_OUT_COEF12
+    // l_coef_pack12 of the map: o16[0] / o16[1] of the hh = 0 lane are the pixel's channels 0..7 / 8..15 (the map's
+    // bytes dst * 64 + 0 .. 31, its lo / hi loads); Model L's 13 values are all among them
+    if (dst >= 0 && hh == 0u && pr < coefRh && pc < coefRw) {
+        g_z = wg_grid_ >> 31;
+        const float S = wg_ldf(coefW, 320u), T = wg_ldf(coefW, 324u);
+        const uint pA = (uint)wg_uniform((int)coefA), pC = (uint)wg_uniform((int)coefC),
+                   pL = (uint)wg_uniform((int)coefL);
+        l_coef_px(o16[0], o16[1], S, T, pA, 0u, pC, pL, (uint)(pr * coefRw + pc));
+    }
+    return;
+#endif
+    if (dst >= 0) {
+        const uint ob16 = ((uint)dst * SW_C + hh * HALF) * 2u;
+        [unroll] for (uint kg = 0; kg < KC; ++kg) wg_st128(out_p, ob16 + 16u * kg, o16[kg]);
+    }
+    return;   // the q8 output below stays the file's last block (fused_swin_gen.py's anchor); not compiled here
 #endif
 
     // Output q8(x2), real window members only.

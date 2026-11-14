@@ -319,10 +319,15 @@ CoexistReport AssessCoexistence(Context& ctx, const wstring& exe, const wstring&
         }
     }
 
-    // DXVK / vkd3d-proton: native D3D12 is required
+    // DXVK / vkd3d-proton: native D3D12 is required on Windows. Under Wine (Proton on Linux) vkd3d-proton is the D3D12 a
+    // game runs on, and a copy of it next to the game (a newer build than the Proton's own) is how a player gets one.
     for (Tool t : {Tool::Dxvk, Tool::Vkd3d}) {
         const auto f = filesOf(t);
-        if (!f.empty())
+        if (!f.empty() && t == Tool::Vkd3d && UnderWine())
+            add(t, Decision::Inform, wstring(ToolName(t)) + L" as " + f[0], f, fpOf(t)->evidence,
+                L"Under Wine (Proton) vkd3d-proton is the game's Direct3D 12. Left alone; Model M needs a vkd3d-proton whose "
+                L"dxil-spirv has pull request #362 (AMD's matrix instructions as WrongGPU uses them).");
+        else if (!f.empty())
             add(t, Decision::Refuse, wstring(ToolName(t)) + L" as " + f[0], f, fpOf(t)->evidence,
                 L"WrongGPU needs Windows' own Direct3D 12; " + wstring(ToolName(t)) + L" translates the game's graphics to Vulkan. Not installed.", EXIT_REFUSED);
     }

@@ -59,6 +59,12 @@ on thin lines in reflections, blotches in Cyberpunk 2077 with path tracing); in 
 can very occasionally come out far too bright or dark at a scene change. Full details: the release notes
 ([clean/installer/RELEASE-NOTES.md](clean/installer/RELEASE-NOTES.md)).
 
+### Model L (in development)
+
+Model L is a larger model choice in development for 0.7.0, available from source. Preliminary numbers, Cyberpunk 2077
+at 1080p Quality on an RX 9070 XT: the network takes 2.25 ms with Model L and 1.17 ms with Model M. Speed work is
+ongoing and the numbers will change. Details, test setup and records: [clean/l/SPEED.md](clean/l/SPEED.md).
+
 ### Something broken?
 
 On the game's page in the launcher, click **Collect logs**. It makes a zip on your PC and uploads nothing; check it

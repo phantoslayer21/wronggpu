@@ -60,6 +60,9 @@ Hook::Hook(Platform platform, Config config, std::string tag)
 #if !WRONGGPU_MODEL_K  // (config.h: model=K is dropped with one log line, Model M runs)
     if (const std::string note = IgnoreModelK(config_); !note.empty()) Log(note);
 #endif
+#if !WRONGGPU_MODEL_L  // (config.h: model=L is refused with one log line, Model M runs)
+    if (const std::string note = IgnoreModelL(config_); !note.empty()) Log(note);
+#endif
 }
 
 Hook::~Hook() {  // contexts the game never destroyed: the process is ending

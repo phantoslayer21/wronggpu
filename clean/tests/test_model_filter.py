@@ -12,6 +12,7 @@ Run: python -m unittest discover -s clean/tests -t .
 import hashlib
 import os
 import shutil
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -266,6 +267,74 @@ class LoaderWgcm(unittest.TestCase):
         # the digest comparison of its first stage (not "converter map damaged")
         t = SM.synthetic_tensors(2, taps="random")
         self.assertRegex(self.case(t, map_file=DEFAULT_MAP), r"^ERR .*stage enc0 does not match the map's digest")
+
+
+class LoaderBounds(unittest.TestCase):
+    """Issue #66: bounds checks of clean/runtime/model.cpp against crafted files with a correct whole-file SHA-256 (the
+    hash is unkeyed): the index may not reach into the hash or past the file, a shape may not be zero, negative or wrap
+    the element count."""
+
+    @staticmethod
+    def crafted(dims, size, data=b""):
+        """A model.wgcm with one stage "enc0" holding one float32 tensor "t" of the given dimensions (as 32-bit words),
+        `size` bytes at a 64-aligned offset (`data` there), a zero stage digest, and a correct whole-file hash."""
+        name, stage = b"t", b"enc0"
+        entry = struct.pack("<H", len(name)) + name + struct.pack("<BB", 0, len(dims))
+        entry += b"".join(struct.pack("<I", d) for d in dims)
+        head = struct.pack("<H", len(stage)) + stage + bytes(32) + struct.pack("<I", 1)
+        index_len = len(head) + len(entry) + 16
+        off = (88 + index_len + 63) // 64 * 64
+        index = head + entry + struct.pack("<QQ", off, size)
+        data_part = bytes(off - 88 - len(index)) + data
+        body = b"WGCMODEL" + struct.pack("<II", 1, 1) + bytes(32) + bytes(32) + struct.pack("<Q", len(index)) + index
+        return rehash(body + data_part + bytes(32))
+
+    def run_file(self, data):
+        d = tempfile.mkdtemp(prefix="wg_mf_")
+        mp = SM.write_wgcm(d, SM.synthetic_tensors(1))
+        path = os.path.join(d, "crafted.wgcm")
+        with open(path, "wb") as f:
+            f.write(data)
+        return load("wgcm", path, mp)
+
+    def test_index_size_must_leave_room_for_header_and_hash(self):
+        d = tempfile.mkdtemp(prefix="wg_mf_")
+        mp = SM.write_wgcm(d, SM.synthetic_tensors(1))
+        path = os.path.join(d, "model.wgcm")
+        with open(path, "rb") as f:
+            data = f.read()
+        self.assertEqual(load("wgcm", path, mp), "OK none")            # control: the file as written loads
+        # isize = 40 bytes less than the file: the index would run into the hash, and past the end of the buffer
+        # (the reader's end was 88 + isize, up to 88 bytes behind the file)
+        cut = rehash(data[:80] + struct.pack("<Q", len(data) - 40) + data[88:])
+        path2 = os.path.join(d, "cut.wgcm")
+        with open(path2, "wb") as f:
+            f.write(cut)
+        self.assertRegex(load("wgcm", path2, mp), r"^ERR .*: bad header")
+        for isize in (len(data) - 32 - 88 + 1, len(data), 1 << 63, (1 << 64) - 8):
+            with self.subTest(isize=isize):
+                path3 = os.path.join(d, "cut3.wgcm")
+                with open(path3, "wb") as f:
+                    f.write(rehash(data[:80] + struct.pack("<Q", isize) + data[88:]))
+                self.assertRegex(load("wgcm", path3, mp), r"^ERR .*: bad header")
+
+    def test_control_crafted_file_is_read_up_to_the_stage_digest(self):
+        # a plain tensor (2 x 3 floats): accepted by the entry checks, then refused because the stage digest is zero
+        self.assertRegex(self.run_file(self.crafted([2, 3], 24, bytes(24))),
+                         r"^ERR .*stage enc0 does not match its stored digest")
+
+    def test_shape_with_a_wrapping_element_count(self):
+        # 2^30 * 2^30 * 4 elements of 4 bytes is 2^64 bytes, which wraps to the size 0 of the entry: the loader asked
+        # std::vector for 2^62 floats (std::length_error inside the game process)
+        self.assertRegex(self.run_file(self.crafted([1 << 30, 1 << 30, 4], 0)), r"^ERR .*bad tensor entry enc0/t")
+
+    def test_shape_with_negative_dimensions(self):
+        # (-1) * (-4) = 4 elements: the entry matched a 16-byte range with a nonsense shape
+        self.assertRegex(self.run_file(self.crafted([0xFFFFFFFF, 0xFFFFFFFC], 16, bytes(16))),
+                         r"^ERR .*bad tensor entry enc0/t")
+
+    def test_shape_with_a_zero_dimension(self):
+        self.assertRegex(self.run_file(self.crafted([0, 5], 0)), r"^ERR .*bad tensor entry enc0/t")
 
 
 if __name__ == "__main__":
