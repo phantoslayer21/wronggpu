@@ -104,6 +104,9 @@ delivered by the spec side; the code never guesses it (it raises, or takes the c
   zero border, float16 accumulator from the bias, 16-term chunks each summed exactly and rounded once, chunk order
   `order` (0 ascending, 1 channel block / kx / ky, 2 kx / channel block / ky), `act` 0 none or 1 leaky ReLU. cin is a
   multiple of 16.
+- `fg_maxpool2_f16(x, y, C, H, W)`: net1's max-pool exactly as `net1.maxpool2`: 2 x 2, stride 2, floor sizes, taps
+  (0, 0), (0, 1), (1, 0), (1, 1) through the delivered step m <- (x > m) x + (x <= m) m with IEEE products and sums
+  (0 * inf is NaN; a sum of zeros is -0 only when both are -0).
 - The arithmetic is integer code shared by both back ends (`kernels/fg_exact16.h`), the method of `fp16acc.py`; NaN
   results are written as 0x7E00. The D3D12 build compiles `fg_` kernels only when `--only` names them, so Model M's
   and Model L's kernel sets and DXILs do not change.
