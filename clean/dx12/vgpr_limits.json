@@ -4,6 +4,7 @@
   "l_swin_block_c32_enc_nc": 96,
   "l_swin_block_c32_dec_nc": 96,
  "swin_block_c64_nc": 192,
+ "swin_block_c64_add_ex_nc": 128,
  "swin_block_c96_nc": 192,
  "swin_block_c96_add_ex_nc": 192,
  "swin_block_c96_pm_nc": 192,
