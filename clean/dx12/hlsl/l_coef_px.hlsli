@@ -73,3 +73,70 @@ void l_coef_px(uint4 lo, uint4 hi, float S, float T, uint pA, uint pB, uint pC, 
 #endif
     wg_st32(pL, i * 4u, cL);
 }
+
+#if COEF_CVT_HW
+// The folded decoder block's form (l_swin_block_c32_dec_coef12_nc; l_coef / l_coef_pack12 keep l_coef_px above): the
+// same values, with the FP16 roundings by the driver's conversion (v_cvt_f16_f32; wg_platform.hlsli: the same bits as
+// the software wg_f2h): the five RN16 of sigma in one conversion, the three FP16 products as their round-to-odd FP32
+// values (wg_mul_f16's) in another. The driver conversions need wave-uniform control flow: every lane computes
+// l_coef_vals_hw, only the stores (l_coef_store12) are per lane. Needs COEF_PACK12.
+struct LCoefVals { uint cA, cB, c0, c1, cL; };
+
+// a * b as the round-to-odd FP32 value whose FP16 rounding is (f16)(a b) (wg_mul_f16 before its conversion)
+float coef_mul_odd(float a, float b)
+{
+    const float p = a * b;
+    return asfloat(wg_round_odd(p, mad(a, b, -p)));
+}
+// wg_mul_f16's +0 for an exact zero product (a NaN product keeps its conversion)
+bool coef_mul_zero(float a, float b)
+{
+    return ((asuint(a) & 0x7fffffffu) == 0u || (asuint(b) & 0x7fffffffu) == 0u) && !isnan(a * b);
+}
+
+LCoefVals l_coef_vals_hw(uint4 lo, uint4 hi, float S, float T)
+{
+    const float a0 = wg_h2f_lo(lo.x), a1 = wg_h2f_hi(lo.x), a2 = wg_h2f_lo(lo.w), a3 = wg_h2f_hi(lo.w);
+    const float a4 = wg_h2f_lo(hi.x), a5 = wg_h2f_hi(hi.x), a6 = wg_h2f_lo(hi.y), a7 = wg_h2f_hi(hi.y);
+    const float a8 = wg_h2f_lo(hi.z);
+    const float a9 = wg_h2f_lo(lo.y), a10 = wg_h2f_hi(lo.y), a11 = wg_h2f_lo(lo.z), a12 = wg_h2f_hi(lo.z);
+    LCoefVals o;
+    // RN16 of sigma(a0), sigma(a1), sigma(a2), sigma(clamp20(a6)), sigma(clamp20(a7)): one conversion
+    v8f sg;
+    sg.v[0] = l_sigma(a0); sg.v[1] = l_sigma(a1); sg.v[2] = l_sigma(a2);
+    sg.v[3] = l_sigma(clamp20(a6)); sg.v[4] = l_sigma(clamp20(a7));
+    sg.v[5] = 0.0f; sg.v[6] = 0.0f; sg.v[7] = 0.0f;
+    const uint4 hs = wg_to_f16_ags(sg);
+    // A: unorm codes of RN16(sigma(a0..a2))
+    o.cA = unorm8_code(wg_h2f_lo(hs.x)) | (unorm8_code(wg_h2f_hi(hs.x)) << 8) | (unorm8_code(wg_h2f_lo(hs.y)) << 16);
+    // B: softmax of a3..a5
+    const float m = max(max(a3, a4), a5);
+    const float e0 = wg_exp2((a3 - m) * bits(0x3FB8AA3Bu)), e1 = wg_exp2((a4 - m) * bits(0x3FB8AA3Bu)),
+                e2 = wg_exp2((a5 - m) * bits(0x3FB8AA3Bu));
+    const float rs = wg_rcp(e2 + (e0 + e1));
+    o.cB = unorm8_code(opq(e0 * rs)) | (unorm8_code(opq(e1 * rs)) << 8) | (unorm8_code(opq(e2 * rs)) << 16);
+    // C: spreads and correlation; the three FP16 products in one conversion
+    const float g0 = wg_h2f_hi(hs.y), g1 = wg_h2f_lo(hs.z);
+    const float sx = S * g0, sy = S * g1;
+    const float sxy = sx * sy;
+    const float rho = l_tanh(a8 * T);
+    v8f po;
+    po.v[0] = coef_mul_odd(sx, sx); po.v[1] = coef_mul_odd(sy, sy); po.v[2] = coef_mul_odd(sxy, rho);
+    po.v[3] = 0.0f; po.v[4] = 0.0f; po.v[5] = 0.0f; po.v[6] = 0.0f; po.v[7] = 0.0f;
+    const uint4 hp = wg_to_f16_ags(po);
+    const uint h0 = coef_mul_zero(sx, sx) ? 0u : (hp.x & 0xffffu), h1 = coef_mul_zero(sy, sy) ? 0u : (hp.x >> 16);
+    o.c0 = h0 | (h1 << 16);
+    o.c1 = coef_mul_zero(sxy, rho) ? 0u : (hp.y & 0xffffu);
+    // latent: snorm codes of tanh(a9..a12)
+    o.cL = snorm8_code(l_tanh(a9)) | (snorm8_code(l_tanh(a10)) << 8) | (snorm8_code(l_tanh(a11)) << 16) |
+           (snorm8_code(l_tanh(a12)) << 24);
+    return o;
+}
+
+void l_coef_store12(LCoefVals o, uint pA, uint pC, uint pL, uint i)
+{
+    wg_st64(pA, i * 8u, uint2(o.cA | (o.cB << 24), (o.cB >> 8) | (o.c1 << 16)));
+    wg_st32(pC, i * 4u, o.c0);
+    wg_st32(pL, i * 4u, o.cL);
+}
+#endif

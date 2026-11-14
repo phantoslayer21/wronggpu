@@ -73,6 +73,49 @@ OPTIONAL_MODELS = {
 }
 MODELS_BUILT = {name: True for name in OPTIONAL_MODELS}
 
+# Model L (#89) in the runtime library: OFF by default (--model-l turns it on), so that a build without the option is
+# Model M's build unchanged. On: Model L's runtime sources (clean/l/runtime) compiled with -DWG_MODEL_L
+# (model_select.h model_l_built), its code objects (clean/l/runner/l_c32_check.py compile_kernels: l_swin, l_ops,
+# l_post from clean/l/kernels, l_enc_values = encoder.hip with WG_ENC_VALUES_OUT=1) and its map built in. The D3D12
+# ports of Model L's kernels are built by clean/dx12/build_dx12.py --model-l.
+MODEL_L = False
+L_RUNTIME_SOURCES = [os.path.join("..", "l", "runtime", "l_model.cpp"), os.path.join("..", "l", "runtime", "l_pack.cpp")]
+L_MAP_FILE = os.path.join(os.path.dirname(os.path.dirname(HERE)), "data", "preset-L.v1.map.json")
+L_KERNEL_DIR = os.path.join(os.path.dirname(HERE), "l", "kernels")
+L_CODE_OBJECTS = ["l_swin.co", "l_ops.co", "l_post.co", "l_enc_values.co"]
+L_EMBED_FILES = L_CODE_OBJECTS + [os.path.basename(L_MAP_FILE)]
+
+
+def set_model_l(on):
+    """Model L in or out (default) of the runtime library; changes RUNTIME_SOURCES and EMBED_FILES in place."""
+    global MODEL_L
+    if bool(on) == MODEL_L:
+        return
+    MODEL_L = bool(on)
+    if on:
+        RUNTIME_SOURCES[:] = RUNTIME_SOURCES + L_RUNTIME_SOURCES
+        EMBED_FILES[:] = EMBED_FILES + L_EMBED_FILES
+    else:
+        RUNTIME_SOURCES[:] = [s for s in RUNTIME_SOURCES if s not in L_RUNTIME_SOURCES]
+        EMBED_FILES[:] = [n for n in EMBED_FILES if n not in L_EMBED_FILES]
+
+
+def build_device_l(clang, rocm, out_dir, device_libs=True, report=False, arch=None):
+    """Model L's code objects into out_dir (as clean/l/runner/l_c32_check.py compile_kernels builds them), for `arch`
+    (default ARCH)."""
+    global ARCH
+    saved = ARCH
+    ARCH = arch or ARCH
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        for name in ("l_swin", "l_ops", "l_post"):
+            run(device_command(clang, rocm, os.path.join(L_KERNEL_DIR, name + ".hip"), os.path.join(out_dir, name + ".co"),
+                               device_libs=device_libs, report=report, extra=["-I", KERNEL_DIR]))
+        run(device_command(clang, rocm, os.path.join(KERNEL_DIR, "encoder.hip"), os.path.join(out_dir, "l_enc_values.co"),
+                           device_libs=device_libs, report=report, defines={"WG_ENC_VALUES_OUT": 1}))
+    finally:
+        ARCH = saved
+
 
 def model_built(name):
     """An optional model is part of this build (OPTIONAL_MODELS)."""
@@ -260,6 +303,8 @@ def runtime_command(cxx, out, embedded=None):
     for name, m in OPTIONAL_MODELS.items():
         if not MODELS_BUILT[name]:
             cmd += ["-D" + m["define"]]
+    if MODEL_L:
+        cmd += ["-DWG_MODEL_L"]
     cmd += srcs
     if RR_OBJECTS and sys.platform == "win32":
         # release 0.6.0 (owner 2026-11-02: one runtime DLL, "just like before"): the RR runtime (clean/rr_f/runtime, built by
@@ -280,7 +325,8 @@ RR_OBJECTS = None  # --with-rr: the RR runtime's object files (clean/rr_f/runtim
 
 
 def build_runtime(cxx, out_dir, embed=True):
-    for m in [MAP_FILE] + [o["map"] for name, o in OPTIONAL_MODELS.items() if MODELS_BUILT[name]]:
+    for m in [MAP_FILE] + [o["map"] for name, o in OPTIONAL_MODELS.items() if MODELS_BUILT[name]] + \
+            ([L_MAP_FILE] if MODEL_L else []):
         shutil.copyfile(m, os.path.join(out_dir, os.path.basename(m)))
     embedded = write_embedded(out_dir) if embed else None
     run(runtime_command(cxx, os.path.join(out_dir, runtime_library_name()), embedded))
@@ -416,9 +462,14 @@ def main(argv=None):
                          "library: one wronggpu_runtime.dll with the Model M and the RR interfaces (release 0.6.0)")
     for name, m in OPTIONAL_MODELS.items():  # --no-model-k, ...
         ap.add_argument("--no-model-" + name.lower(), action="store_true", help=m["help"])
+    ap.add_argument("--model-l", action="store_true",
+                    help="Model L in the runtime library (#89; off by default): its runtime sources with WG_MODEL_L, its "
+                         "code objects and its map built in (with --runtime-only and --rocm its code objects are built "
+                         "first, for every target); its D3D12 kernels come from clean/dx12/build_dx12.py --model-l")
     args = ap.parse_args(argv)
     for name in OPTIONAL_MODELS:
         set_model(name, not getattr(args, "no_model_" + name.lower()))
+    set_model_l(args.model_l)
     global RR_OBJECTS
     RR_OBJECTS = args.with_rr
     if args.payload:
@@ -430,6 +481,12 @@ def main(argv=None):
     if any(a not in ("gfx1200", "gfx1201") for a in [ARCH] + EXTRA_ARCHS):
         raise SystemExit("supported release targets are gfx1200 and gfx1201 only")
     if args.runtime_only:
+        if MODEL_L and args.rocm:  # Model L's code objects next to the given ones (release builds reuse pinned ones)
+            clang = args.clang or find_clang(args.rocm)
+            build_device_l(clang, args.rocm, args.out, device_libs=not args.no_device_libs)
+            for arch in EXTRA_ARCHS:
+                build_device_l(clang, args.rocm, os.path.join(args.out, arch), device_libs=not args.no_device_libs,
+                               arch=arch)
         build_runtime(args.runtime_cxx or find_host_cxx(args.rocm), args.out, embed=not args.no_embed)
         return
     if args.motion_outres_only:
@@ -463,6 +520,8 @@ def main(argv=None):
         for name, m in OPTIONAL_MODELS.items():  # the optional models' kernels (model K: clean/k)
             if MODELS_BUILT[name]:
                 m["build_device"](clang, args.rocm, args.out, device_libs=not args.no_device_libs, report=args.report)
+        if MODEL_L:  # Model L's kernels (clean/l/kernels; off by default)
+            build_device_l(clang, args.rocm, args.out, device_libs=not args.no_device_libs, report=args.report)
         # the post kernels in wave64 as well (the runtime's default post code object; post.co for WG_POST_WAVE=32)
         # (always with the resource report: POST_W64_GATE; skipped for experiment builds with --define)
         run_post_w64(device_command(clang, args.rocm, os.path.join(KERNEL_DIR, "post.hip"),
@@ -560,6 +619,7 @@ def main(argv=None):
             sub += (["--rocm", args.rocm] if args.rocm else []) + (["--clang", args.clang] if args.clang else [])
             sub += (["--no-device-libs"] if args.no_device_libs else []) + (["--soft-fp8"] if args.soft_fp8 else [])
             sub += ["--no-model-" + n.lower() for n in OPTIONAL_MODELS if getattr(args, "no_model_" + n.lower())]
+            sub += ["--model-l"] if MODEL_L else []
             for d in args.define:
                 sub += ["--define", d]
             print(f"-- code objects for {arch}", flush=True)
