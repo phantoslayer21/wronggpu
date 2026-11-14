@@ -115,8 +115,8 @@ jobs:
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           cmake -S clean/installer -B out/launcher-tests -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DWRONGGPU_PAYLOAD_DIR="$PWD/out/no-payload" -DWRONGGPU_TESTING=OFF -DWRONGGPU_PRESET_K=OFF -DWRONGGPU_DIRECT_ROUTE=OFF
-          cmake --build out/launcher-tests --target wg-core-tests launcher-core-tests coexist-core-tests convert-ignore-tests
-          ctest --test-dir out/launcher-tests --output-on-failure -R "^(wg-core|launcher-core|coexist-core|convert-ignore|source-size|wording)$"
+          cmake --build out/launcher-tests --target wg-core-tests launcher-core-tests coexist-core-tests convert-ignore-tests model-choice-tests
+          ctest --test-dir out/launcher-tests --output-on-failure -R "^(wg-core|launcher-core|coexist-core|convert-ignore|model-choice|source-size|wording)$"
 
   rr-plugin:
     name: "CPU: Ray Reconstruction plugin"

@@ -203,23 +203,132 @@ def test_conversion(t, ref):
                 rc == 0 and r.m_files().get("model.wgcm") == m_before.get("model.wgcm") and m_before.get("model.wgcm"), (rc, r.j))
 
 
+def upscaler_index(text):
+    """OptiScaler.ini's UpscalerIndex WrongGPU manages: [WrongGPU] (OptiScaler 10's slot) when there, else [FSR]."""
+    sec, found = None, {}
+    for line in text.replace("\r", "").split("\n"):
+        s = line.strip()
+        if s.startswith("["):
+            sec = s.strip("[]").lower()
+        elif s.lower().startswith("upscalerindex") and "=" in s:
+            found[sec] = s.split("=", 1)[1].strip()
+    return found.get("wronggpu", found.get("fsr"))
+
+
+def recorded_hash(b, name):
+    """The hash the install record holds for a recorded file (its copy entry: action existed orig inst rel)."""
+    for line in read(os.path.join(b, "wronggpu-setup", "install.record")).decode("utf-8", "replace").replace("\r", "").split("\n"):
+        f = line.split("\t")
+        if len(f) == 5 and f[0] == "copy" and f[4].lower() == name.lower():
+            return f[3].lower()
+    return None
+
+
+def test_choice(t):
+    """The launcher's Model L choice (a build with WRONGGPU_MODEL_L on and the test map): set <game> model=L/M on an installed
+    game. L only with Model L's data on this PC; it writes wronggpu.ini's model item and OptiScaler's UpscalerIndex, the
+    record's hashes follow (the file-ownership rule); M puts both files back byte for byte; uninstall restores the game."""
+    print("\n[3] the model choice: set <game> model=L / model=M (a build with the choice on)")
+    import run_launcher_tests as rl  # (its game and OptiScaler fixtures: names and synthetic bytes only)
+    t.model = m_case()  # rl.game() writes t.model.file as the game's DLSS file (this hides T.model, the path helper)
+    root, b, exe = rl.game(t, "Choice Game", validated=True)
+    before = suite.snapshot(root)
+    opti = rl.opti_package(t)
+    rc = t.run("install", exe, "--opti=" + opti, "--force")
+    t.check("install: exit 0", rc == 0, (rc, t.j.get("message"), t.stdout[-400:]))
+    if rc != 0:
+        return
+    wini, oini = os.path.join(b, "wronggpu.ini"), os.path.join(b, "OptiScaler.ini")
+    m_w, m_o = read(wini), read(oini)
+    rc = t.run("get", exe, "model")
+    t.check("get model: m (Model M, the default)", rc == 0 and t.j.get("settings", {}).get("model", {}).get("profile") == "m", t.j.get("settings"))
+    t.check("profile.ini of the Model M game: no model line", b"model=" not in read(os.path.join(b, "wronggpu-setup", "profile.ini")))
+    rc = t.run("set", exe, "model=L")
+    t.check("set model=L without Model L's data: exit 5, refused by name, nothing changed",
+            rc == 5 and "Model L can't be chosen" in t.j.get("message", "") + t.j.get("error", "") and read(wini) == m_w and read(oini) == m_o,
+            (rc, t.j.get("message"), t.j.get("error")))
+    lsrc = os.path.join(t.work, "l-source", "nvngx_dlss.dll")
+    write(lsrc, l_case().file)
+    rc = t.run("model", "convert", "--preset=L", "--model=" + lsrc)
+    t.check("Model L's data converted (model convert --preset=L)", rc == 0, (rc, t.j))
+    rc = t.run("set", exe, "model=L")
+    w = read(wini).decode("utf-8", "replace")
+    t.check("set model=L: exit 0; wronggpu.ini's last model item is model=L", rc == 0 and suite_options_model(w) == "L", (rc, t.j.get("message"), w))
+    t.check("...OptiScaler's UpscalerIndex names Model L's entry (1: after Model M in a build without Preset K)",
+            upscaler_index(read(oini).decode("utf-8", "replace")) == "1", read(oini).decode("utf-8", "replace"))
+    t.check("...the record's hashes follow both files (the file-ownership rule: they are WrongGPU's writes)",
+            recorded_hash(b, "wronggpu.ini") == hashlib.sha256(read(wini)).hexdigest() and recorded_hash(b, "OptiScaler.ini") == hashlib.sha256(read(oini)).hexdigest(),
+            (recorded_hash(b, "wronggpu.ini"), recorded_hash(b, "OptiScaler.ini")))
+    t.check("...profile.ini says model=l", b"model=l\r\n" in read(os.path.join(b, "wronggpu-setup", "profile.ini")))
+    rc = t.run("set", exe, "model=M")
+    t.check("set model=M: wronggpu.ini and OptiScaler.ini back byte for byte as the install wrote them",
+            rc == 0 and read(wini) == m_w and read(oini) == m_o, (rc, read(wini)[-200:], read(oini)[-200:]))
+    t.check("...profile.ini has no model line again", b"model=" not in read(os.path.join(b, "wronggpu-setup", "profile.ini")))
+    # a game saved on L whose data goes away: a repair keeps the player's choice, the files say Model M with a warning
+    rc = t.run("set", exe, "model=L")
+    os.remove(os.path.join(t.lad, "WrongGPU", "model", "L", "model.wgcm"))  # (t.model is the case here, not the path helper)
+    rc = t.run("repair", exe, "--opti=" + opti, "--force")
+    msgs = " ".join(t.j.get("warnings", []) + t.j.get("notes", []))
+    t.check("repair of a game set to L without Model L's data: exit 0, the files say Model M, the player is told how to convert it",
+            rc == 0 and suite_options_model(read(wini).decode("utf-8", "replace")) == "M" and "Model L's data on this PC is not ready" in msgs and
+            "model convert --preset=L" in msgs, (rc, t.j.get("message"), msgs[:600]))
+    t.check("...the choice stays in profile.ini (model=l)", b"model=l\r\n" in read(os.path.join(b, "wronggpu-setup", "profile.ini")))
+    rc = t.run("uninstall", exe)
+    t.check("uninstall: the game folder byte for byte as before the install", rc == 0 and suite.snapshot(root) == before, (rc, suite.diff(before, suite.snapshot(root))))
+
+
+def test_no_choice(t):
+    """A build without the choice (the default): model=L refused by name; nothing changes."""
+    print("\n[4] a build without the model choice (the default)")
+    import run_launcher_tests as rl
+    t.model = m_case()
+    root, b, exe = rl.game(t, "No Choice Game", validated=True)
+    rc = t.run("install", exe, "--opti=" + rl.opti_package(t), "--force")
+    t.check("install: exit 0", rc == 0, (rc, t.j.get("message")))
+    if rc != 0:
+        return
+    w, o = read(os.path.join(b, "wronggpu.ini")), read(os.path.join(b, "OptiScaler.ini"))
+    rc = t.run("set", exe, "model=L")
+    t.check("set model=L: a bad command line (exit 10), Model L named, nothing changed",
+            rc == 10 and t.j.get("error", "").startswith("Model L isn't part of this build of WrongGPU") and
+            read(os.path.join(b, "wronggpu.ini")) == w and read(os.path.join(b, "OptiScaler.ini")) == o, (rc, t.j))
+    rc = t.run("get", exe)
+    t.check("get: no model setting listed", rc == 0 and "model" not in t.j.get("settings", {}), list(t.j.get("settings", {})))
+    t.run("uninstall", exe)
+
+
+def suite_options_model(text):
+    """The last model item of wronggpu.ini's runtime_options ("M", "L", ... or None)."""
+    model = None
+    for line in text.replace("\r", "").split("\n"):
+        s = line.strip()
+        if s.lower().startswith("runtime_options") and "=" in s:
+            for item in s.split("=", 1)[1].split(";"):
+                k, _, v = item.strip().partition("=")
+                if k.strip().lower() == "model":
+                    model = v.strip().split()[0] if v.strip() else ""
+    return model
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--write-test-map", help="write the test map (the shipped preset-L layout, our own digests) and stop")
     ap.add_argument("--launcher", help="WrongGPU.exe built with the shipped preset-L map")
     ap.add_argument("--launcher-synth", help="WrongGPU.exe built with --write-test-map's map (-DWRONGGPU_MAP_L=)")
     ap.add_argument("--reference-launcher", help="WrongGPU.exe of the base branch (same payload and test map)")
+    ap.add_argument("--launcher-choice", help="WrongGPU.exe built with -DWRONGGPU_MODEL_L=ON and the test map (the model choice)")
     ap.add_argument("--work", default=os.path.join(HERE, "..", "build-tests", "model-l"))
     a = ap.parse_args()
     if a.write_test_map:
         write(a.write_test_map, map_bytes(l_case()))
         print("test map: " + a.write_test_map)
         return 0
-    if not a.launcher and not a.launcher_synth:
-        ap.error("--launcher or --launcher-synth is needed")
+    if not a.launcher and not a.launcher_synth and not a.launcher_choice:
+        ap.error("--launcher, --launcher-synth or --launcher-choice is needed")
     work = os.path.abspath(a.work)
     passed, failures = 0, []
-    for exe, part, fn in ((a.launcher, "shipped", test_shipped_map), (a.launcher_synth, "synth", lambda t: test_conversion(t, a.reference_launcher))):
+    for exe, part, fn in ((a.launcher, "shipped", test_shipped_map), (a.launcher_synth, "synth", lambda t: test_conversion(t, a.reference_launcher)),
+                          (a.launcher_choice, "choice", test_choice), (a.launcher_synth, "no-choice", test_no_choice)):
         if not exe:
             print("\n(%s: no launcher given, skipped)" % part)
             continue

@@ -23,6 +23,17 @@ bool ExistingModelValid(Context& ctx, wstring* why, wgc::ModelFileInfo* info) {
     if (why) *why = FromUtf8(w);
     return ok;
 }
+// One model's file on this PC checked against that model's own converter data, whatever model ctx has selected (it is
+// selected again afterwards). False: `why` says what is missing or wrong.
+bool ModelFileReady(Context& ctx, wchar_t preset, wstring* why) {
+    const wchar_t was = SelectedPreset(ctx);
+    if (was == preset) return ExistingModelValid(ctx, why);
+    wstring err;
+    if (!SelectPreset(ctx, wstring(1, preset), err)) { if (why) *why = err; return false; }
+    const bool ok = ExistingModelValid(ctx, why);
+    SelectPreset(ctx, wstring(1, was), err);
+    return ok;
+}
 // True when a valid model file may lack a group of this map (preset M, map version 4: the output-filter weights).
 bool MapHasOptionalGroup(const wgc::Map& map) {
     for (auto& st : map.stages) if (st.optional()) return true;
@@ -210,11 +221,11 @@ ModelState FindModel(Context& ctx, const GameTarget* t, const wstring& userDll, 
     const wstring skippedText = skipped ? L" " + std::to_wstring(skipped) + L" file(s) on an ignore list were not tried. " + IgnoredExample(ctx, m.ignored) : wstring();
     if (ctx.presetL) {  // Model L: said by name, with the converter's reason for the file the player chose
         const wstring picked = userDll.empty() ? wstring() : FullPath(userDll);
-        wstring why;
+        wstring pickedWhy;
         for (auto& r : m.rejections)
-            if (!picked.empty() && r.size() > picked.size() + 2 && IEq(r.substr(0, picked.size() + 2), picked + L": ")) { why = r.substr(picked.size() + 2); break; }
+            if (!picked.empty() && r.size() > picked.size() + 2 && IEq(r.substr(0, picked.size() + 2), picked + L": ")) { pickedWhy = r.substr(picked.size() + 2); break; }
         m.error = L"Model L can't be prepared: no DLSS model file with Model L's data was found." +
-                  (why.empty() ? wstring() : L" The file you chose (" + picked + L"): " + why) +
+                  (pickedWhy.empty() ? wstring() : L" The file you chose (" + picked + L"): " + pickedWhy) +
                   L" Model L is converted from the DLSS model file (nvngx_dlss.dll) of version 310.5 or newer. The file stays where it is: "
                   L"only the model data is read, on this PC." + skippedText + (m.chosenSkipped.empty() ? wstring() : L" " + m.chosenSkipped);
         LogLine(ctx, L"model: " + m.error);

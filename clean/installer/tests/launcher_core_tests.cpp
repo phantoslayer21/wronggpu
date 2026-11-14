@@ -151,6 +151,22 @@ int main() {
             require(!SelectPreset(lc, L"K", err) && err.find(L"M or L") != wstring::npos, "K is not a model of a build without Preset K");
 #endif
         }
+#if !WRONGGPU_MODEL_L
+        // ---- a build without the Model L choice (the default): no model setting anywhere; model=L refused by name -----------
+        {
+            Profile mp = DefaultProfile();
+            wstring mwhy;
+            require(!FindSetting("model") && !SetSetting(mp, "model", "L", &mwhy) && mwhy == kNoModelChoice,
+                    "no Model L choice in this build: set model=L is refused by name");
+            const string lfile = "[fsr]\r\nruntime_options = timing_log=1;model=L\r\n";
+            string lout;
+            require(RenderWronggpuIni(mp, lfile, lout, &mwhy) && lout == lfile && ProfileText(mp).find("model=") == string::npos,
+                    "no Model L choice: a model item in wronggpu.ini is left as it is, profile.ini has no model line");
+            const string slotIni = "[WrongGPU]\r\nUpscalerIndex=1\r\n";
+            RenderOptiIni(mp, slotIni, lout);
+            require(lout == slotIni, "no Model L choice: OptiScaler's UpscalerIndex is left as it is");
+        }
+#endif
         // ---- validation -----------------------------------------------------------------------------------------
         string n; wstring why;
         const SettingDef* exec = FindSetting("executor");
