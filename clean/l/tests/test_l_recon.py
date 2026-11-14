@@ -151,6 +151,61 @@ class ReconTest(unittest.TestCase):
             self.assertTrue(_same(a[k], b[k]), k)
         self.assertFalse(_same(a["history"], R.reconstruct(x, 2.9796233)["history"]))
 
+    def test_zero_weight_known_answer(self):
+        """a, b = 65504, c = 0 everywhere: almost every D pixel has total gather weight 0. Confirmed results there:
+        HDR history h(E(NaN)) = -1.4404296875 per channel, display 0, reduced code 0; LDR history NaN, display 0,
+        reduced code 0 (also for any 2 x 2 block holding such a pixel)."""
+        rng = np.random.default_rng(9)
+        x = _inputs(rng, rw=17, rh=11)
+        x["C"] = np.broadcast_to(np.array([65504.0, 65504.0, 0.0], np.float32), np.shape(x["C"])).copy()
+        for ldr in (False, True):
+            out = R.reconstruct(x, 2.9796233, ldr=ldr)
+            zero = out["_lin"]["W"] == 0
+            self.assertGreater(zero.mean(), 0.5)
+            hist = out["history"][zero]
+            if ldr:
+                self.assertTrue(np.isnan(hist).all())
+                self.assertTrue((out["display_codes"][zero] == 0).all())
+            else:
+                self.assertTrue((hist == np.float32(-1.4404296875)).all())
+            self.assertTrue((out["display"][zero] == 0).all())
+            dh, dw = zero.shape
+            blk = zero[:dh // 2 * 2, :dw // 2 * 2].reshape(dh // 2, 2, dw // 2, 2).any(axis=(1, 3))
+            self.assertTrue(blk.any())
+            self.assertTrue((out["reduced"][blk] == 0).all())
+
+    def test_ldr_constant_image_end_to_end(self):
+        """LDR, constant colour 0.5 and history 0.5: O^ = 0.5, display codes R = G = floor(0.5 2047 + 1/2) = 1024,
+        B = floor(0.5 1023 + 1/2) = 512; the output stage unpacks code RN32(1/N) to FP16 and filters a constant image
+        to itself, with no decode and no exposure."""
+        rng = np.random.default_rng(10)
+        x = _inputs(rng, rw=20, rh=12)
+        x["color"] = np.full(np.shape(x["color"]), 0.5, np.float32)
+        x["history"] = np.full(np.shape(x["history"]), 0.5, np.float32)
+        dw, dh = x["recon_size"]
+        ow, oh = (2 * dw) // 3, (2 * dh) // 3
+        self.assertEqual(T.recon_size(ow, oh), (dw, dh))
+        want = np.array([np.float16(np.float32(1024 * np.float32(1 / 2047))),
+                         np.float16(np.float32(1024 * np.float32(1 / 2047))),
+                         np.float16(np.float32(512 * np.float32(1 / 1023)))], np.float32)
+        for expo in (1.0, 5.0):
+            out = R.reconstruct(dict(x, exposure=np.float32(expo)), 2.9796233, ldr=True)
+            np.testing.assert_allclose(out["_lin"]["O_hat"], 0.5, rtol=1e-12)
+            self.assertTrue((out["display_codes"] == np.array([1024, 1024, 512])).all())
+            img = R.output_filter(out["display"], np.float32(expo), (ow, oh), ldr=True)
+            self.assertEqual(img.shape, (oh, ow, 3))
+            self.assertTrue((img == want).all())
+        self.assertEqual(np.float32(1 / 2047).view(np.uint32), 0x3A001002)
+        self.assertEqual(np.float32(1 / 1023).view(np.uint32), 0x3A802008)
+
+    def test_history_of_another_size_needs_reset(self):
+        rng = np.random.default_rng(11)
+        x = _inputs(rng)
+        small = np.asarray(x["history"])[:-2, :-2]
+        with self.assertRaises(ValueError):
+            R.reconstruct(dict(x, history=small), 2.0)
+        R.reconstruct(dict(x, history=small, reset=True), 2.0)          # reset: the history is not read
+
     def test_oracle_entry_uses_the_post_scale(self):
         rng = np.random.default_rng(8)
         x = _inputs(rng)

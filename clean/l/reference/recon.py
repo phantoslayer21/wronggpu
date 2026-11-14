@@ -13,7 +13,17 @@ The learned scale s is the post stage's tensor "s". Everything else (positions, 
 
 Arithmetic is float64 with only the stored outputs rounded, as Model M's oracle: the reconstruction's half-precision
 and fused-rounding forms (e.g. the gather exponent) are a matter of the kernel-order model, not of this oracle.
-ldr=True gives the LDR form: identity transfer, no exposure (e = e_prev = 1), codes from the values directly.
+ldr=True gives the LDR form: identity transfer, no exposure (e = e_prev = 1), codes from the values directly; the
+display is the 11 / 11 / 10-bit codes of the plain colour (ldr_display_codes), which the output stage unpacks with
+code RN32(1/N) and filters without a decode or an exposure (output_filter). Both confirmed by the spec side.
+
+Zero total gather weight (every tap underflows) has no special path, as confirmed by the spec side for Model L and
+Model M: the normalized features are 0 / 0 = NaN, both scores NaN (candidate 1 kept, w1 = 1, w2 = 0), C = D(NaN) =
+NaN (the decode passes NaN through: dec), alpha = 0, and the NaN guard substitutes C, which is NaN. The stored history
+is then h(E(NaN)) = -1.4404296875 (HDR) or NaN (LDR), the display and the reduced code 0.
+
+The reconstruction kernel's summation order (taps, candidates) is not fixed yet; this oracle sums in float64 and is
+the tolerance reference, the kernel's order decides the kernel-order model.
 
 The reconstruction variant (3/2 or 3/1) only decides how a kernel tiles the work; both forms compute this function
 (table.recon_variant).
@@ -26,12 +36,54 @@ from clean.reference import post as _post
 from . import table as _table
 
 
+def dec(q):
+    """The decode D(.) with a NaN passed through. The clamp to [1e-4, 3] applies to numbers only (confirmed by the spec
+    side for Model L and Model M: a zero gather weight gives C = D(NaN) = NaN). clean/reference/post.py dec maps NaN to
+    D(1e-4) instead."""
+    q = np.asarray(q, np.float64)
+    with np.errstate(invalid="ignore", over="ignore"):
+        return np.where(np.isnan(q), np.nan, _post.dec(q))
+
+
 def _transfer(ldr):
     """(encode, decode, input encode) for HDR or LDR."""
     if ldr:
         ident = lambda v: np.asarray(v, np.float64)  # noqa: E731
         return ident, ident, ident
-    return _post.enc, _post.dec, _post.enc_in
+    return _post.enc, dec, _post.enc_in
+
+
+# LDR display codes (11 / 11 / 10 bits) and the output stage's unpack constants RN32(1/2047), RN32(1/1023).
+LDR_CODE_MAX = np.array([2047.0, 2047.0, 1023.0])
+LDR_UNPACK = np.array([np.float32(1.0 / 2047.0), np.float32(1.0 / 2047.0), np.float32(1.0 / 1023.0)], np.float64)
+
+
+def ldr_display_codes(O):
+    """LDR packed display codes of the plain display colour O^ [.., 3]: floor(clamp(O^ N + 1/2, 0, N)), N = 2047, 2047,
+    1023; NaN gives 0."""
+    with np.errstate(invalid="ignore", over="ignore"):
+        return np.floor(_post.clamp(np.asarray(O, np.float64) * LDR_CODE_MAX + 0.5, 0.0, LDR_CODE_MAX))
+
+
+def ldr_unpack(codes):
+    """The output stage's LDR unpack: code RN32(1/N), one single-precision product, rounded to FP16 (no decode)."""
+    v = (np.asarray(codes, np.float64) * LDR_UNPACK).astype(np.float32)
+    return v.astype(np.float16).astype(np.float32)
+
+
+def output_filter(display, exposure, output_size, ldr=False):
+    """Stage "filter" for Model L: Model M's output filter (clean/reference/post.py, the project's own taps) on the
+    reconstruction's "display". HDR: E-encoded display, decode and divide by the current exposure, as Model M. LDR:
+    display holds the unpacked codes (ldr_unpack), filtered as they are: no decode, no exposure read."""
+    if not ldr:
+        return _post.output_filter(display, exposure, output_size)
+    ow, oh = (int(v) for v in output_size)
+    img = np.asarray(display, np.float64)
+    dh, dw = img.shape[:2]
+    if (dw, dh) != _table.recon_size(ow, oh):
+        raise ValueError(f"display is {dw}x{dh}, expected D = {_table.recon_size(ow, oh)} for O = {ow}x{oh}")
+    h = _post.filter_pass(img.transpose(1, 0, 2), ow).transpose(1, 0, 2)
+    return _post.filter_pass(h, oh).astype(np.float32)
 
 
 def gather(feat, C, px, py, rw, rh, window):
@@ -74,6 +126,9 @@ def reconstruct(x, s, t=_table.TABLE, ldr=False):
     e, e_prev = (1.0, 1.0) if ldr else (_post.exposure_or_one(x["exposure"]), _post.exposure_or_one(x["exposure_prev"]))
     reset = bool(x["reset"])
     hist = np.asarray(x["history"], np.float64)
+    if not reset and hist.shape[:2] != (dh, dw):
+        raise ValueError(f"history is {hist.shape[1]}x{hist.shape[0]}, expected D = {dw}x{dh} (a size change needs "
+                         "reset)")
     s = float(np.asarray(s, np.float64).reshape(-1)[0])
 
     px, py = _post.target_positions(rw, rh, dw, dh, jx, jy)
@@ -146,16 +201,19 @@ def reconstruct(x, s, t=_table.TABLE, ldr=False):
         # 6. outputs (Model M's)
         hw, hh = dw // 2, dh // 2
         M = Hh[:2 * hh, :2 * hw].reshape(hh, 2, hw, 2, 3).sum(axis=(1, 3)) / 4.0
-        # Codes: HDR k = E(.) / 2.45; LDR k = the value itself. "display" keeps Model M's convention (code = display /
-        # 2.45), so LDR stores 2.45 clamp(O^, 0, 1).
+        # Reduced codes: HDR k = E(.) / 2.45, LDR k = the value. "display": HDR the E value clamped to [0, 2.45] (Model
+        # M's convention); LDR the unpacked 11/11/10-bit codes the output stage reads ("display_codes": the codes).
         if ldr:
             code = np.rint(_post.clamp(M, 0.0, 1.0) * 1023.0)
         else:
             code = np.rint(_post.clamp(enc(M) / _post.REDUCED_SCALE, 0.0, 1.0) * 1023.0)
         if ldr:
-            disp = _post.clamp(Oh, 0.0, 1.0) * _post.DISPLAY_MAX
+            codes = ldr_display_codes(Oh)
+            disp = ldr_unpack(codes)
         else:
+            codes = None
             disp = _post.clamp(enc(Oh), 0.0, _post.DISPLAY_MAX)
     return {"history": _post.f16(enc(Hh)), "reduced": (code / 1023.0).astype(np.float32),
             "display": _post.f16(disp),
-            "_lin": {"H_hat": Hh, "O_hat": Oh, "W": W, "first": first, "second": second, "w1": w1, "w2": w2}}
+            "_lin": {"H_hat": Hh, "O_hat": Oh, "W": W, "first": first, "second": second, "w1": w1, "w2": w2},
+            **({"display_codes": codes.astype(np.uint16)} if codes is not None else {})}
