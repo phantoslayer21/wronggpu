@@ -203,6 +203,10 @@
    "l_ops.co"
   ],
   [
+   "l_linear_32_32_fused",
+   "-"
+  ],
+  [
    "l_linear_32_32_relu",
    "l_ops.co"
   ],
@@ -217,6 +221,10 @@
   [
    "l_project_gather",
    "l_ops.co"
+  ],
+  [
+   "l_swin_block_c32_dec_coef12_nc",
+   "-"
   ],
   [
    "l_swin_block_c32_dec_nc",

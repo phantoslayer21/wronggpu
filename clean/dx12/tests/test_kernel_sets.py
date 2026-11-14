@@ -37,7 +37,7 @@ class TestKernelSets(unittest.TestCase):
 
     def test_model_m_has_no_model_l_kernel(self):
         m = B.kernel_set(False)
-        self.assertFalse([k for k in m if k[1].startswith("l_") or k[0] in B.MODEL_L_ONLY])
+        self.assertFalse([k for k in m if k[1].startswith("l_") or k[0].startswith("l_") or k[0] in B.MODEL_L_ONLY])
         self.assertTrue(m)
 
     def test_model_l_adds_only_model_l_kernels(self):
@@ -45,7 +45,7 @@ class TestKernelSets(unittest.TestCase):
         self.assertTrue(m <= full)
         extra = full - m
         self.assertTrue(extra)
-        self.assertFalse([k for k in extra if not (k[1].startswith("l_") or k[0] in B.MODEL_L_ONLY)])
+        self.assertFalse([k for k in extra if not (k[1].startswith("l_") or k[0].startswith("l_") or k[0] in B.MODEL_L_ONLY)])
 
 
 if __name__ == "__main__":

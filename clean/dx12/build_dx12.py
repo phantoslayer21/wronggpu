@@ -4,7 +4,7 @@ clean/runtime/device_dx12.cpp): <out>/dx12/<tag>__<kernel>.dxil (or <kernel>.dxi
 
     python clean/dx12/build_dx12.py --out build/dx12-m/hip [--isa] [--only exposure_auto_diet,...] [-j N] [--model-l]
 
-Model L's kernels (#89: those that reproduce one of Model L's code objects, co=l_*.co, and MODEL_L_ONLY) are built only with --model-l
+Model L's kernels (#89: those that reproduce one of Model L's code objects, co=l_*.co, direct-route kernels named l_*, and MODEL_L_ONLY) are built only with --model-l
 or when --only names them, so that a build without the option is Model M's kernel set unchanged.
 
 Every kernel source declares its kernels in header lines (clean/dx12/README.md):
@@ -181,9 +181,9 @@ MODEL_L_ONLY = {"swin_block_c64_add_ex_nc"}
 
 
 def is_model_l(decl):
-    """A port of one of Model L's code objects (#89: l_swin.co, l_ops.co, l_post.co, l_enc_values.co), or a kernel only
-    Model L launches (MODEL_L_ONLY)."""
-    return decl["co"].startswith("l_") or decl["name"] in MODEL_L_ONLY
+    """A port of one of Model L's code objects (#89: l_swin.co, l_ops.co, l_post.co, l_enc_values.co), a Model L kernel
+    of the direct route with no code object (co "-", named l_*), or a kernel only Model L launches (MODEL_L_ONLY)."""
+    return decl["co"].startswith("l_") or decl["name"].startswith("l_") or decl["name"] in MODEL_L_ONLY
 
 
 def kernel_set(model_l=False):
