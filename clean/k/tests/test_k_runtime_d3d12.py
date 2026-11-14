@@ -13,8 +13,8 @@ Sequences: a reset frame, steady frames with a pan, a game reset, a render-size 
 value, with the game's exposure texel, and with auto-exposure, and LDR; output rows RGBA16F and dense RGB.
 
 GPU only: WG_K_GPU_BUILD=<full build dir: clean/runner/build.py with the runtime library, and clean/dx12/build_dx12.py
---model-k (or --only the K kernels and exposure_auto_diet) into the same folder>, ROCM_PATH; run in one GPU slot, e.g.
-    python R:\\WrongGPU-clean\\tools\\gpu_slot.py --cap-s 170 --name <you> -- python -m unittest clean.k.tests.test_k_runtime_d3d12
+--model-k (or --only the K kernels and exposure_auto_diet) into the same folder>, ROCM_PATH; run each test under the
+machine's GPU lock.
 Run: python -m unittest clean.k.tests.test_k_runtime_d3d12
 """
 import os
