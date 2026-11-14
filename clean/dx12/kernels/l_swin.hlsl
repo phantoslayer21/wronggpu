@@ -7,6 +7,9 @@
 // 13333: sw_gelu_fetch8_bn; a further -7 .. -9 / -13 .. -15 us). The groupshared table (SW_GELU 2) and patterns with a
 // transcendental-chain tile (10333) take them to 108 .. 112 VGPRs, over their bound of 96. l_swin_block_c32_nc keeps
 // HIP's transcendental chain (SW_GELU 0).
+// Scheduling knobs of swin_block.hlsl (the same values, timed per kernel): _enc_lin_nc with the head loop in pairs
+// (SW_HEAD_PAIRS), the softmax's staged form (SW_SMAX_STAGED) and norm1's loads before the first barrier (SW_NORM1_EARLY);
+// _dec_coef12_nc with the staged softmax (SW_SMAX_ADDST, SW_SMAX_STAGED). Both stay within 96 VGPRs.
 //   l_swin_block_c32_nc      FP8 map in, FP8 out, mirror border (#117)
 //   l_swin_block_c32_enc_nc  the encoder block: FP16 halo map [H + 4][W + 4][32] in (SW_SRC 1), FP8 out
 //                            with its workgroups in reverse order (WG_REV_ORDER, wg_platform.hlsli; the same bytes): it
@@ -20,11 +23,11 @@
 //
 // @wg-kernel l_swin_block_c32_nc co=l_swin.co block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=0,SW_ENTRY_OVERRIDE=l_swin_block_c32_nc
 // @wg-kernel l_swin_block_c32_enc_nc co=l_swin.co block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=3,SW_GELU_PAT=13333,SW_SRC=1,SW_ENTRY_OVERRIDE=l_swin_block_c32_enc_nc,WG_REV_ORDER=1
-// @wg-kernel l_swin_block_c32_enc_lin_nc co=- block=256 wave=32 args=p,p,p,p,u,u,u,u,p,p defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=3,SW_GELU_PAT=13333,SW_SRC=3,SW_ENTRY_OVERRIDE=l_swin_block_c32_enc_lin_nc,WG_REV_ORDER=1
+// @wg-kernel l_swin_block_c32_enc_lin_nc co=- block=256 wave=32 args=p,p,p,p,u,u,u,u,p,p defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=3,SW_GELU_PAT=13333,SW_SRC=3,SW_ENTRY_OVERRIDE=l_swin_block_c32_enc_lin_nc,WG_REV_ORDER=1,SW_HEAD_PAIRS=1,SW_SMAX_STAGED=1,SW_NORM1_EARLY=1
 // @wg-kernel l_swin_block_c32_dec_nc co=l_swin.co block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=1,SW_SRC=2,SW_OUT_F16=1,SW_ENTRY_OVERRIDE=l_swin_block_c32_dec_nc
 //   l_swin_block_c32_dec_coef12_nc  D3D12 only: the decoder block with l_coef_pack12 as its epilogue (SW_OUT_COEF12;
 //                                   byte for byte the pair _dec_nc -> l_coef_pack12, which stays the fallback route);
 //                                   the FP16 map is not written. Arguments: _dec_nc's (out unused), then A, C, latent,
 //                                   dec0.coef, rw, rh
-// @wg-kernel l_swin_block_c32_dec_coef12_nc co=- block=256 wave=32 args=p,p,p,p,u,u,u,u,p,p,p,p,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=3,SW_GELU_PAT=13333,SW_SRC=2,SW_OUT_F16=1,SW_OUT_COEF12=1,COEF_CVT_HW=1,SW_ENTRY_OVERRIDE=l_swin_block_c32_dec_coef12_nc
+// @wg-kernel l_swin_block_c32_dec_coef12_nc co=- block=256 wave=32 args=p,p,p,p,u,u,u,u,p,p,p,p,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=3,SW_GELU_PAT=13333,SW_SRC=2,SW_OUT_F16=1,SW_OUT_COEF12=1,COEF_CVT_HW=1,SW_ENTRY_OVERRIDE=l_swin_block_c32_dec_coef12_nc,SW_SMAX_ADDST=1,SW_SMAX_STAGED=1
 #include "swin_block.hlsl"
