@@ -18,7 +18,7 @@ bytes. The rules are the Model L checks' (clean/l/runner/l_fold_check.py):
   the half-grid control (the port again with half its workgroups) is used by the families whose grid has more than one
   workgroup;
 - Model M's scale_rgb (frame.co, its port already proven) runs through the same replay as a control.
-The families: narrow = the narrow network stages (k_block.co: k_stage_e2 .. k_stage2_d0_hidden; the stage runner's
+The families: wide = the wide network stages (k_block_wide.co: k_stagew<NG>_e3 .. _d3), as narrow; narrow = the narrow network stages (k_block.co: k_stage_e2 .. k_stage2_d0_hidden; the stage runner's
 launch plans, clean/k/dx12/k_plan_bridge.py), on random stage weights and inputs with special values (NaN, infinity,
 +-65504, zero, -0, subnormal) in every other case; expo = k_expo_scalars against k_io.co (HIP); warm = k_warm (D3D12 only, no HIP kernel: it is checked
 against its own definition, the dummy word is written exactly when the key equals a lane's loaded value).
@@ -49,7 +49,9 @@ CONTROL = "scale_rgb"   # Model M, frame.co
 NARROW_KERNELS = ["k_stage_e2", "k_stage_e0", "k_stage_e1", "k_stage_d2", "k_stage_d1", "k_stage2_e0", "k_stage2_e1",
                   "k_stage2_d1", "k_stage2_d0_hp", "k_stage2_d0_hidden"]
 FAMILY_KERNELS = {"expo": (["k_io.co"], ["k_expo_scalars"]), "warm": ([], ["k_warm"]),
-                  "narrow": (["k_block.co"], NARROW_KERNELS)}
+                  "narrow": (["k_block.co"], NARROW_KERNELS),
+                  "wide": (["k_block_wide.co"], ["k_stagew2_e3", "k_stagew4_e4", "k_stagew2_e4", "k_stagew4_m",
+                                                 "k_stagew4_d4", "k_stagew2_d4", "k_stagew2_d3"])}
 CONTROL_CO = "frame.co"
 
 
@@ -321,11 +323,21 @@ def narrow_inputs(stage, size, rng, specials):
     return x, skip
 
 
+# the wide stage kernels (k_block_wide.co: k_stagew<NG>_<stage>, 128 NG lanes per window) the runtime launches:
+# kernel -> (stage, stage-runner suffix, None)
+WIDE = {"k_stagew2_e3": ("e3", "@wide2", None), "k_stagew4_e4": ("e4", "@wide4", None),
+        "k_stagew2_e4": ("e4", "@wide2", None), "k_stagew4_m": ("m", "@wide4", None),
+        "k_stagew4_d4": ("d4", "@wide4", None), "k_stagew2_d4": ("d4", "@wide2", None),
+        "k_stagew2_d3": ("d3", "@wide2", None)}
+# block-level grids (W, H) of the wide stages: fewer windows than a workgroup, ragged edges, more windows than the GPU runs at once
+WIDE_SIZES = [(8, 8), (16, 24), (13, 9), (24, 16), (33, 17), (12, 20)]
+
+
 def itemsize(name):
     return 4 if name == "out" else 2
 
 
-def run_narrow(build, rocm, seeds, cdir, hip, only=None):
+def run_stages(table, co_name, tag, build, rocm, seeds, cdir, hip, grid_list=None, only=None):
     from clean.k.reference.layout import STAGE
     from clean.k.reference.network import random_stage_params
     from clean.k.runner import k_launch as KL
@@ -335,14 +347,15 @@ def run_narrow(build, rocm, seeds, cdir, hip, only=None):
     items, lines, neg = [], [], None
     for si, seed in enumerate(seeds):
         rng = np.random.default_rng(seed)
-        for kernel, (stage, suffix, d0) in NARROW.items():
+        for kernel, (stage, suffix, d0) in table.items():
             if only and kernel not in only:
                 continue
             st = STAGE[stage]
-            for ci in range(len(NARROW_SIZES)):
-                size, offset = NARROW_SIZES[ci], NARROW_OFFSETS[(ci + si) % len(NARROW_OFFSETS)]
+            grids = grid_list or NARROW_SIZES
+            for ci in range(len(grids)):
+                size, offset = grids[ci], NARROW_OFFSETS[(ci + si) % len(NARROW_OFFSETS)]
                 special = ci % 3   # 0 none, 1 specials without NaN, 2 with NaN
-                name = f"nar_s{si}_{kernel}_{ci}"
+                name = f"{tag}_s{si}_{kernel}_{ci}"
                 blob = k_stages.pack(stage, random_stage_params(st, rng))
                 x, skip = narrow_inputs(stage, size, rng, special)
                 pdev = PB.PlanDev(hip.h)
@@ -368,12 +381,12 @@ def run_narrow(build, rocm, seeds, cdir, hip, only=None):
                     sizes = {n: pdev.sizes[plan["bufs"][n]] for n in outputs}
                     got = {n: bytes(hip.h.download(plan["bufs"][n], sizes[n] + SLACK)) for n in outputs}
                     defined = {n: min(int(np.prod(sh)) * itemsize(n), sizes[n]) for n, sh in plan["outputs"]}
-                    lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k.split(":")[-1]], cdir, ["k_block.co"],
+                    lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k.split(":")[-1]], cdir, [co_name],
                                             outputs)
                     if neg is None and plan["launches"][0][1] >= 4:   # the dropped windows hold output pixels
                         neg = name
                         lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k.split(":")[-1]], cdir,
-                                                ["k_block.co"], outputs, prefix="negative_", grid_div=2)
+                                                [co_name], outputs, prefix="negative_", grid_div=2)
                     items.append({"case": name, "kernel": kernel, "stage": stage, "size": list(size),
                                   "offset": list(offset), "specials": special, "outputs": outputs, "hip": got,
                                   "defined": defined})
@@ -450,8 +463,11 @@ def run(build, rocm, families, seeds, json_out):
         state["warm"] = run_warm(build, rocm, seeds, cdir, hip)
         lines += state["warm"][1]
     if "narrow" in families:
-        state["narrow"] = run_narrow(build, rocm, seeds, cdir, hip)
+        state["narrow"] = run_stages(NARROW, "k_block.co", "nar", build, rocm, seeds, cdir, hip)
         lines += state["narrow"][1]
+    if "wide" in families:
+        state["wide"] = run_stages(WIDE, "k_block_wide.co", "wid", build, rocm, seeds, cdir, hip, WIDE_SIZES)
+        lines += state["wide"][1]
     # the control: Model M's scale_rgb, same replay, against HIP
     rng = np.random.default_rng(seeds[0])
     cn = 1000
@@ -504,9 +520,10 @@ def run(build, rocm, families, seeds, json_out):
                 fails.append(it["case"])
         res["results"]["warm"] = {"cases": len(state["warm"][0]), "as_defined": good, "failures": fails[:5]}
         ok = ok and good == len(state["warm"][0]) and good > 0
-    if "narrow" in state:
-        res["results"]["narrow"], good = check_narrow(state["narrow"], read)
-        ok = ok and good
+    for fam in ("narrow", "wide"):
+        if fam in state:
+            res["results"][fam], good = check_narrow(state[fam], read)
+            ok = ok and good
     ctl_got = read("ctl.out")
     ctl = compare(ctl_got, h[0], 1000 * 4, D3D12_SENTINEL, HIP_SENTINEL)
     res["control"] = {"kernel": CONTROL, "identical": bool(ctl["identical"]), "differ": ctl["differ"],

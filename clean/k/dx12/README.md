@@ -34,7 +34,9 @@ Families: `narrow` (the narrow network stages of `k_block.co`: `k_stage_e2`, `k_
 `k_stage_d1`, `k_stage2_e0`, `k_stage2_e1`, `k_stage2_d1`, `k_stage2_d0_hp`, `k_stage2_d0_hidden`) on random stage weights
 and inputs, the stage runner's launch plans run on HIP and replayed on D3D12 (`k_plan_bridge.py`); the inputs of every
 third case carry special values (infinity, +-65504, zero, -0, subnormals) and of every third case NaN as well; the
-half-grid control launches a stage with half its workgroups. `expo` (`k_expo_scalars`) against `k_io.co`; `warm`
+half-grid control launches a stage with half its workgroups. `wide` (the wide stages of `k_block_wide.co`:
+`k_stagew2_e3`, `k_stagew4_e4`, `k_stagew2_e4`, `k_stagew4_m`, `k_stagew4_d4`, `k_stagew2_d4`, `k_stagew2_d3`: one window
+per 128 NG lanes) is checked the same way. `expo` (`k_expo_scalars`) against `k_io.co`; `warm`
 (`k_warm`, a cache warm-up with no HIP kernel: checked against its definition, through the struct argument path).
 
 NaN: IEEE 754 does not define the sign or payload of a NaN, and where a NaN is generated or propagated the two devices
