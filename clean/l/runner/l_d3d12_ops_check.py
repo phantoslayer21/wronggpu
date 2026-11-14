@@ -174,6 +174,32 @@ def enc_cases(kernel, rng):
     return cases
 
 
+# (H, W) of dec1's map (even: the expand writes 2 x 2 pixels per low-resolution token), each with dec1's two window
+# offsets (0, 0) and (2, 0). 4 x 6 and 12 x 20: fewer windows than a workgroup's 8.
+DEC1_GRIDS = [(16, 24), (36, 68), (8, 8), (68, 100), (4, 6), (12, 20), (48, 64)]
+
+
+def dec1_ex_cases(kernel, rng):
+    """swin_block_c64_add_ex_nc (swin.co; Model M's kernel, launched by Model L's frame for dec1): x = the low-resolution
+    map [H / 2][W / 2][96] FP8, xadd = the skip map [H][W][64] FP8 -> out [H][W][64] FP8; w = dec1's stage blob (block,
+    then the expand section at the 256-byte aligned block size, clean/runner/packing.py pack_stage); aux null. Only
+    blobs with the _nc flag (the D3D12 port has only the _nc form)."""
+    from clean.reference import swin as MS
+    from clean.runner import packing as P
+    cases = []
+    for (H, W) in DEC1_GRIDS:
+        for (ox, oy) in ((0, 0), (2, 0)):
+            blob = P.pack_stage("dec1", MS.random_params("dec1", rng))
+            if not np.frombuffer(blob[:4], np.uint32)[0] & 1:
+                continue
+            nwin = -(-(W + ox) // 4) * -(-(H + oy) // 4)
+            cases.append({"kernel": kernel, "co": "swin.co", "grid": -(-nwin // 8), "block": 256,
+                          "args": [("buf", _fp8_map(rng, (H // 2) * (W // 2) * 96)), ("buf", _fp8_map(rng, H * W * 64)),
+                                   ("out", H * W * 64), ("buf", blob), ("u32", H), ("u32", W), ("u32", ox), ("u32", oy),
+                                   ("null",)]})
+    return cases
+
+
 # (rw, rh, dw, dh, reset, kind, expo) of the reconstruction: clean/l/runner/l_post_check.py's cases (Model M's ratios,
 # odd sizes, reset, extreme kernel shapes, the zero-weight known answer "offset_0.1" (spec part 3 Q1: total weight 0
 # everywhere) and the FP16 underflow known answer "offset_0.05" (Q3: total weight > 0, every FP16 weight 0)), plus
@@ -246,9 +272,36 @@ def post_cases(kernel, rng):
     return cases
 
 
+# DXGI formats of the direct cases' textures: the exact FP32 values of the HIP kernel's buffers (color RGBA, depth,
+# motion RG); the output texture (written by no encoder) as the game's RGBA16F
+DXGI_R32G32B32A32_FLOAT, DXGI_R32G32_FLOAT, DXGI_R16G16B16A16_FLOAT, DXGI_R32_FLOAT = 2, 16, 10, 41
+
+
+def enc_direct_cases(kernel, rng):
+    """lev/input_encoder_direct (rs=direct): the frames of enc_cases, the same draws. HIP runs its twin, input_encoder of
+    l_enc_values.co, on the frame's buffers; the D3D12 port reads the same values from textures (kernel_replay `direct`
+    lines: color RGBA32F, depth R32F, motion RG32F; render rectangle at (0, 0), motion scale 1 and offset 0, color_pi
+    1), with the color argument a zeroed colour-table buffer (no table: native_direct.hlsli f16lut_in_valid) and the
+    depth and motion arguments null (not read). The same four outputs."""
+    cases = []
+    for case in enc_cases("lev/input_encoder", rng):
+        a = case["args"]
+        color, depth, motion = a[0][1], a[1][1], a[2][1]
+        prm = case["args"][-1][1]
+        rw, rh = (int(v) for v in np.frombuffer(prm[:8], np.int32))
+        d = dict(case, kernel=kernel)
+        d["replay_args"] = [("buf", bytes(64)), ("null",), ("null",)] + a[3:]
+        d["direct"] = [("color", DXGI_R32G32B32A32_FLOAT, rw, rh, color), ("depth", DXGI_R32_FLOAT, rw, rh, depth),
+                       ("motion", DXGI_R32G32_FLOAT, rw, rh, motion), ("output", DXGI_R16G16B16A16_FLOAT, rw, rh, None)]
+        d["direct_params"] = (0, 0, rw, rh)
+        cases.append(d)
+    return cases
+
+
 KINDS = {"l_linear_32_32_relu": linear_cases, "l_linear_32_32_f16": linear_cases,
          "l_project_gather": project_cases, "l_dec_project": project_cases, "l_coef": coef_cases,
-         "l_coef_pack12": coef_cases, "lev/input_encoder": enc_cases, "l_post_recon": post_cases}
+         "l_coef_pack12": coef_cases, "lev/input_encoder": enc_cases, "l_post_recon": post_cases,
+         "lev/input_encoder_direct": enc_direct_cases, "swin_block_c64_add_ex_nc": dec1_ex_cases}
 CONTROL_KINDS = {"swin_block_c96_nc": control_cases}
 CO = "l_ops.co"
 
@@ -293,8 +346,16 @@ def hip_run(g, mod, case):
 def replay_lines(name, case, cdir, grid=None, prefix=""):
     lines = [f"case {prefix}{name}", f"module {case.get('co', CO)}" + (f" {case['tag']}" if case.get("tag") else ""),
              f"kernel {case['kernel']} {grid or case['grid']} {case['block']}"]
+    for slot, fmt, w, h, data in case.get("direct", ()):
+        f = f"{name}.d_{slot}" if data is not None else "-"
+        if data is not None and not prefix:
+            with open(os.path.join(cdir, f), "wb") as fh:
+                fh.write(data)
+        lines.append(f"direct {slot} {fmt} {w} {h} {f}")
+    if case.get("direct_params"):
+        lines.append("direct_params " + " ".join(str(v) for v in case["direct_params"]))
     oi = 0
-    for i, a in enumerate(case["args"]):
+    for i, a in enumerate(case.get("replay_args", case["args"])):
         if a[0] in ("buf", "bytes"):
             f = f"{name}.a{i}"
             if not prefix:

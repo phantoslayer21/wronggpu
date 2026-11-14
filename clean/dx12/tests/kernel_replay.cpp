@@ -15,13 +15,16 @@
 //   arg null                                   null pointer
 //   arg u32 <value>                            32-bit scalar (decimal, may be negative)
 //   arg bytes <file>                           a struct passed by value (the file's bytes)
-//   direct <color file> <rw> <rh> <ow> <oh> <output file> <fill u32>
-//                                              a direct frame for an rs=direct port (bind_direct_frame): color = an
-//                                              RGBA32F texture rw x rh from the file (16 bytes per texel, rows packed),
-//                                              depth (R32F) and motion (R16G16F) textures of zeros, no exposure texture,
-//                                              color_pi 1, output = an RGBA32F UAV texture ow x oh whose every 32-bit
-//                                              word starts as <fill>; after the launch the output texture's texels are
-//                                              written to <output file> (16 bytes per texel, rows packed)
+//   direct <slot> <DXGI format> <w> <h> <file> a texture of a direct-resource kernel (rs=direct; native_direct.hlsli):
+//                                              slot color, depth, motion or output; <file> holds the w x h texels row
+//                                              by row (tightly packed), "-" for none (the output, written by no
+//                                              kernel replayed here). The case binds them as one direct frame
+//                                              (NativeD3D12Ext::bind_direct_frame) around its launch.
+//   direct_params <rx> <ry> <rw> <rh>          the frame's active render rectangle; motion scale 1, offset 0,
+//                                              color_pi 1, no exposure texture
+//   direct_out <file>                          after the launch, the output texture's texels are written to <file>,
+//                                              row by row (tightly packed); its initial texels come from the output
+//                                              slot's file (a sentinel fill, so that an unwritten texel shows)
 #include "../../runtime/device.h"
 #include "../../runtime/device_d3d12.h"
 
@@ -61,11 +64,11 @@ struct Arg {
   std::vector<uint8_t> blob;
 };
 
-struct Direct {
-  bool on = false;
-  std::string color_file, out_file;
-  unsigned rw = 0, rh = 0, ow = 0, oh = 0;
-  uint32_t fill = 0;
+struct DirectTex {
+  std::string slot, file;
+  unsigned format = 0, width = 0, height = 0;
+  ID3D12Resource* tex = nullptr;
+  ID3D12Resource* upload = nullptr;
 };
 
 struct Case {
@@ -73,165 +76,184 @@ struct Case {
   unsigned grid = 0, block = 0;
   std::vector<std::pair<std::string, std::string>> modules;
   std::vector<Arg> args;
-  Direct direct;
+  std::vector<DirectTex> direct;
+  NativeDirectParams dparams;
+  std::string direct_out;   // the output texture's readback file ("" = none)
 };
 
-// ---- direct frames (rs=direct ports): the textures, their upload and the output's readback -------------------------
-template <class T>
-struct Com {
-  T* p = nullptr;
-  ~Com() { if (p) p->Release(); }
-  T** pp() { return &p; }
-};
-
-struct DirectFrame {
-  Com<ID3D12Resource> color, depth, motion, output, upload, readback;
-  D3D12_PLACED_SUBRESOURCE_FOOTPRINT out_fp{};
-};
-
-bool make_texture(ID3D12Device* dev, DXGI_FORMAT format, unsigned w, unsigned h, bool uav, ID3D12Resource** out) {
-  D3D12_HEAP_PROPERTIES heap{};
-  heap.Type = D3D12_HEAP_TYPE_DEFAULT;
-  D3D12_RESOURCE_DESC desc{};
-  desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-  desc.Width = w;
-  desc.Height = h;
-  desc.DepthOrArraySize = 1;
-  desc.MipLevels = 1;
-  desc.Format = format;
-  desc.SampleDesc.Count = 1;
-  desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-  desc.Flags = uav ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE;
-  return SUCCEEDED(dev->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST,
-                                                nullptr, __uuidof(ID3D12Resource), (void**)out));
-}
-
-bool make_buffer(ID3D12Device* dev, D3D12_HEAP_TYPE type, uint64_t bytes, ID3D12Resource** out) {
-  D3D12_HEAP_PROPERTIES heap{};
-  heap.Type = type;
-  D3D12_RESOURCE_DESC desc{};
-  desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-  desc.Width = bytes;
-  desc.Height = 1;
-  desc.DepthOrArraySize = 1;
-  desc.MipLevels = 1;
-  desc.SampleDesc.Count = 1;
-  desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-  const D3D12_RESOURCE_STATES state =
-      type == D3D12_HEAP_TYPE_UPLOAD ? D3D12_RESOURCE_STATE_GENERIC_READ : D3D12_RESOURCE_STATE_COPY_DEST;
-  return SUCCEEDED(dev->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, state, nullptr,
-                                                __uuidof(ID3D12Resource), (void**)out));
-}
-
-void barrier(ID3D12GraphicsCommandList* l, ID3D12Resource* r, D3D12_RESOURCE_STATES a, D3D12_RESOURCE_STATES b) {
-  D3D12_RESOURCE_BARRIER x{};
-  x.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-  x.Transition.pResource = r;
-  x.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-  x.Transition.StateBefore = a;
-  x.Transition.StateAfter = b;
-  l->ResourceBarrier(1, &x);
-}
-
-// Creates the textures, uploads color / zeros / the output fill, binds the frame. The inputs end in
-// NON_PIXEL_SHADER_RESOURCE, the output in UNORDERED_ACCESS.
-bool direct_begin(NativeD3D12Ext* ext, const Direct& dr, const std::vector<uint8_t>& color, DirectFrame& f,
-                  std::string& err) {
+// The output texture (UNORDERED_ACCESS) copied to a readback buffer after the case's work, rows packed into `out`.
+bool read_direct_output(NativeD3D12Ext* ext, Case& c, std::vector<uint8_t>& out, std::string& err) {
+  DirectTex* t = nullptr;
+  for (auto& x : c.direct)
+    if (x.slot == "output") t = &x;
+  if (!t || !t->tex) return err = "no output texture", false;
   ID3D12Device* dev = nullptr;
   if (FAILED(ext->arena_resource()->GetDevice(__uuidof(ID3D12Device), (void**)&dev))) return err = "GetDevice", false;
-  Com<ID3D12Device> dev_ref;
-  dev_ref.p = dev;
-  if (color.size() != (size_t)dr.rw * dr.rh * 16) return err = "color file size", false;
-  if (!make_texture(dev, DXGI_FORMAT_R32G32B32A32_FLOAT, dr.rw, dr.rh, false, f.color.pp()) ||
-      !make_texture(dev, DXGI_FORMAT_R32_FLOAT, dr.rw, dr.rh, false, f.depth.pp()) ||
-      !make_texture(dev, DXGI_FORMAT_R16G16_FLOAT, dr.rw, dr.rh, false, f.motion.pp()) ||
-      !make_texture(dev, DXGI_FORMAT_R32G32B32A32_FLOAT, dr.ow, dr.oh, true, f.output.pp()))
-    return err = "texture creation", false;
-  // one upload buffer: the four textures' footprints one after another
-  ID3D12Resource* tex[4] = {f.color.p, f.depth.p, f.motion.p, f.output.p};
-  D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp[4];
-  UINT rows[4];
-  UINT64 row_bytes[4], total = 0;
-  for (int i = 0; i < 4; ++i) {
-    const D3D12_RESOURCE_DESC d = tex[i]->GetDesc();
-    UINT64 bytes = 0;
-    dev->GetCopyableFootprints(&d, 0, 1, total, &fp[i], &rows[i], &row_bytes[i], &bytes);
-    total = (fp[i].Offset + bytes + 511) & ~(UINT64)511;
-  }
-  f.out_fp = fp[3];
-  f.out_fp.Offset = 0;
-  if (!make_buffer(dev, D3D12_HEAP_TYPE_UPLOAD, total, f.upload.pp())) return err = "upload buffer", false;
+  const D3D12_RESOURCE_DESC rd = t->tex->GetDesc();
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = {};
+  UINT rows = 0;
+  UINT64 row_bytes = 0, total = 0;
+  dev->GetCopyableFootprints(&rd, 0, 1, 0, &fp, &rows, &row_bytes, &total);
+  D3D12_HEAP_PROPERTIES hp = {};
+  hp.Type = D3D12_HEAP_TYPE_READBACK;
+  D3D12_RESOURCE_DESC bd = {};
+  bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  bd.Width = total;
+  bd.Height = 1;
+  bd.DepthOrArraySize = 1;
+  bd.MipLevels = 1;
+  bd.SampleDesc.Count = 1;
+  bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  ID3D12Resource* rb = nullptr;
+  const bool made = SUCCEEDED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                           nullptr, __uuidof(ID3D12Resource), (void**)&rb));
+  dev->Release();
+  if (!made) return err = "readback buffer", false;
+  ID3D12Resource* tex = t->tex;
+  bool ok = ext->record_pass(D3D12_RESOURCE_STATE_UNORDERED_ACCESS, [&](ID3D12GraphicsCommandList* l, std::string&) {
+    D3D12_RESOURCE_BARRIER b = {};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource = tex;
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    b.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    l->ResourceBarrier(1, &b);
+    D3D12_TEXTURE_COPY_LOCATION dst = {}, src = {};
+    dst.pResource = rb;
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint = fp;
+    src.pResource = tex;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    l->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    return true;
+  }, &err) && ext->sync(&err);
   uint8_t* map = nullptr;
-  D3D12_RANGE none{0, 0};
-  if (FAILED(f.upload.p->Map(0, &none, (void**)&map))) return err = "Map(upload)", false;
-  std::memset(map, 0, (size_t)total);
-  for (UINT y = 0; y < rows[0]; ++y)
-    std::memcpy(map + fp[0].Offset + (size_t)y * fp[0].Footprint.RowPitch, color.data() + (size_t)y * dr.rw * 16,
-                (size_t)dr.rw * 16);
-  for (UINT y = 0; y < rows[3]; ++y) {
-    uint32_t* row = (uint32_t*)(map + fp[3].Offset + (size_t)y * fp[3].Footprint.RowPitch);
-    for (unsigned x = 0; x < dr.ow * 4; ++x) row[x] = dr.fill;
+  if (ok) ok = SUCCEEDED(rb->Map(0, nullptr, (void**)&map));
+  if (ok) {
+    out.resize((size_t)row_bytes * rows);
+    for (UINT r = 0; r < rows; ++r)
+      std::memcpy(out.data() + (size_t)r * row_bytes, map + fp.Offset + (size_t)r * fp.Footprint.RowPitch,
+                  (size_t)row_bytes);
+    D3D12_RANGE none = {0, 0};
+    rb->Unmap(0, &none);
+  } else if (err.empty()) {
+    err = "readback";
   }
-  f.upload.p->Unmap(0, nullptr);
-  const UINT64 readback_bytes = (UINT64)f.out_fp.Footprint.RowPitch * dr.oh;
-  if (!make_buffer(dev, D3D12_HEAP_TYPE_READBACK, readback_bytes, f.readback.pp())) return err = "readback buffer", false;
-  ID3D12Resource* up = f.upload.p;
-  if (!ext->record_pass(D3D12_RESOURCE_STATE_UNORDERED_ACCESS, [&](ID3D12GraphicsCommandList* l, std::string&) {
-        for (int i = 0; i < 4; ++i) {
-          D3D12_TEXTURE_COPY_LOCATION dst{}, src{};
-          dst.pResource = tex[i];
-          dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-          src.pResource = up;
-          src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-          src.PlacedFootprint = fp[i];
-          l->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-          barrier(l, tex[i], D3D12_RESOURCE_STATE_COPY_DEST,
-                  i == 3 ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        }
-        return true;
-      }, &err, "replay_direct_upload"))
-    return false;
-  NativeDirectFrame frame;
-  frame.color = f.color.p;
-  frame.depth = f.depth.p;
-  frame.motion = f.motion.p;
-  frame.output = f.output.p;
-  frame.color_format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-  frame.depth_format = DXGI_FORMAT_R32_FLOAT;
-  frame.motion_format = DXGI_FORMAT_R16G16_FLOAT;
-  frame.output_format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-  frame.params.rw = dr.rw;
-  frame.params.rh = dr.rh;
-  return ext->bind_direct_frame(frame, &err);
+  rb->Release();
+  return ok;
 }
 
-// Ends the frame and reads the output texture back (rows packed, 16 bytes per texel).
-bool direct_end(NativeD3D12Ext* ext, const Direct& dr, DirectFrame& f, std::vector<uint8_t>& out, std::string& err) {
-  if (!ext->end_direct_frame(&err)) return false;
-  ID3D12Resource* o = f.output.p;
-  ID3D12Resource* rb = f.readback.p;
-  const D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = f.out_fp;
-  if (!ext->record_pass(D3D12_RESOURCE_STATE_UNORDERED_ACCESS, [&](ID3D12GraphicsCommandList* l, std::string&) {
-        barrier(l, o, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        D3D12_TEXTURE_COPY_LOCATION dst{}, src{};
-        dst.pResource = rb;
-        dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        dst.PlacedFootprint = fp;
-        src.pResource = o;
-        src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        l->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-        return true;
-      }, &err, "replay_direct_readback"))
+void release_direct(Case& c) {
+  for (auto& t : c.direct) {
+    if (t.tex) t.tex->Release();
+    if (t.upload) t.upload->Release();
+    t.tex = t.upload = nullptr;
+  }
+}
+
+// The case's direct textures: created (default heap), filled from their files through an upload buffer in one recorded
+// pass, left in the states a direct dispatch needs (inputs NON_PIXEL_SHADER_RESOURCE, output UNORDERED_ACCESS), then
+// bound as the device's direct frame.
+bool bind_direct(NativeD3D12Ext* ext, Case& c, const std::string& base) {
+  ID3D12Device* dev = nullptr;
+  if (FAILED(ext->arena_resource()->GetDevice(__uuidof(ID3D12Device), (void**)&dev))) {
+    std::printf("%s: direct: no D3D12 device\n", c.name.c_str());
     return false;
-  if (!ext->sync(&err)) return false;
-  uint8_t* map = nullptr;
-  D3D12_RANGE all{0, (SIZE_T)fp.Footprint.RowPitch * dr.oh};
-  if (FAILED(rb->Map(0, &all, (void**)&map))) return err = "Map(readback)", false;
-  out.resize((size_t)dr.ow * dr.oh * 16);
-  for (unsigned y = 0; y < dr.oh; ++y)
-    std::memcpy(out.data() + (size_t)y * dr.ow * 16, map + (size_t)y * fp.Footprint.RowPitch, (size_t)dr.ow * 16);
-  D3D12_RANGE none{0, 0};
-  rb->Unmap(0, &none);
+  }
+  bool ok = true;
+  std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> fp(c.direct.size());
+  for (size_t i = 0; ok && i < c.direct.size(); ++i) {
+    DirectTex& t = c.direct[i];
+    const bool out = t.slot == "output";
+    D3D12_HEAP_PROPERTIES hp = {};
+    hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC rd = {};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    rd.Width = t.width;
+    rd.Height = t.height;
+    rd.DepthOrArraySize = 1;
+    rd.MipLevels = 1;
+    rd.Format = (DXGI_FORMAT)t.format;
+    rd.SampleDesc.Count = 1;
+    rd.Flags = out ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE;
+    ok = SUCCEEDED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                nullptr, __uuidof(ID3D12Resource), (void**)&t.tex));
+    if (!ok || t.file == "-") continue;
+    std::vector<uint8_t> data;
+    UINT64 row_bytes = 0, total = 0;
+    UINT rows = 0;
+    dev->GetCopyableFootprints(&rd, 0, 1, 0, &fp[i], &rows, &row_bytes, &total);
+    if (!read_file(base + "/" + t.file, &data) || data.size() != row_bytes * rows) {
+      std::printf("%s: direct %s: %s is not %llu bytes\n", c.name.c_str(), t.slot.c_str(), t.file.c_str(),
+                  (unsigned long long)(row_bytes * rows));
+      ok = false;
+      break;
+    }
+    D3D12_HEAP_PROPERTIES up = {};
+    up.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC bd = {};
+    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bd.Width = total;
+    bd.Height = 1;
+    bd.DepthOrArraySize = 1;
+    bd.MipLevels = 1;
+    bd.SampleDesc.Count = 1;
+    bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ok = SUCCEEDED(dev->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ,
+                                                nullptr, __uuidof(ID3D12Resource), (void**)&t.upload));
+    uint8_t* map = nullptr;
+    if (ok) ok = SUCCEEDED(t.upload->Map(0, nullptr, (void**)&map));
+    if (!ok) break;
+    for (UINT r = 0; r < rows; ++r)
+      std::memcpy(map + fp[i].Offset + (size_t)r * fp[i].Footprint.RowPitch, data.data() + (size_t)r * row_bytes,
+                  (size_t)row_bytes);
+    t.upload->Unmap(0, nullptr);
+  }
+  dev->Release();
+  if (!ok) {
+    std::printf("%s: direct: texture setup failed\n", c.name.c_str());
+    return false;
+  }
+  std::string err;
+  ok = ext->record_pass(D3D12_RESOURCE_STATE_UNORDERED_ACCESS, [&](ID3D12GraphicsCommandList* l, std::string&) {
+    for (size_t i = 0; i < c.direct.size(); ++i) {
+      DirectTex& t = c.direct[i];
+      if (t.upload) {
+        D3D12_TEXTURE_COPY_LOCATION dst = {}, src = {};
+        dst.pResource = t.tex;
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        src.pResource = t.upload;
+        src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint = fp[i];
+        l->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+      }
+      D3D12_RESOURCE_BARRIER b = {};
+      b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      b.Transition.pResource = t.tex;
+      b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+      b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+      b.Transition.StateAfter = t.slot == "output" ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+                                                   : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+      l->ResourceBarrier(1, &b);
+    }
+    return true;
+  }, &err);
+  if (!ok) {
+    std::printf("%s: direct: upload pass: %s\n", c.name.c_str(), err.c_str());
+    return false;
+  }
+  NativeDirectFrame f;
+  for (auto& t : c.direct) {
+    if (t.slot == "color") f.color = t.tex, f.color_format = (DXGI_FORMAT)t.format;
+    else if (t.slot == "depth") f.depth = t.tex, f.depth_format = (DXGI_FORMAT)t.format;
+    else if (t.slot == "motion") f.motion = t.tex, f.motion_format = (DXGI_FORMAT)t.format;
+    else if (t.slot == "output") f.output = t.tex, f.output_format = (DXGI_FORMAT)t.format;
+  }
+  f.params = c.dparams;
+  if (!ext->bind_direct_frame(f, &err)) {
+    std::printf("%s: direct: bind: %s\n", c.name.c_str(), err.c_str());
+    return false;
+  }
   return true;
 }
 
@@ -275,30 +297,33 @@ int run_case(Device* d, Case& c, const std::string& base) {
       argv.push_back(a.blob.data());
     }
   }
-  DirectFrame frame;
-  NativeD3D12Ext* ext = c.direct.on ? d3d12_ext(d) : nullptr;
-  if (c.direct.on) {
-    std::vector<uint8_t> color;
-    std::string e;
-    if (!ext) { std::printf("%s: direct: not a native D3D12 device\n", c.name.c_str()); return 1; }
-    if (!read_file(base + "/" + c.direct.color_file, &color) || !direct_begin(ext, c.direct, color, frame, e)) {
-      std::printf("%s: direct frame: %s\n", c.name.c_str(), e.c_str());
-      return 1;
-    }
+  NativeD3D12Ext* ext = c.direct.empty() ? nullptr : d3d12_ext(d);
+  if (!c.direct.empty() && (!ext || !bind_direct(ext, c, base))) {
+    release_direct(c);
+    return 1;
   }
   if (!d->launch(c.kernel, c.grid, c.block, argv.data())) {
     std::printf("%s: launch %s: %s\n", c.name.c_str(), c.kernel.c_str(), d->err().c_str());
     return 1;
   }
-  if (c.direct.on) {
-    std::vector<uint8_t> out;
-    std::string e;
-    if (!direct_end(ext, c.direct, frame, out, e) || !write_file(base + "/" + c.direct.out_file, out)) {
-      std::printf("%s: direct output: %s\n", c.name.c_str(), e.c_str());
+  if (ext) {
+    std::string err;
+    if (!ext->end_direct_frame(&err) || !ext->sync(&err)) {
+      std::printf("%s: direct: %s\n", c.name.c_str(), err.c_str());
+      release_direct(c);
       return 1;
+    }
+    if (!c.direct_out.empty()) {
+      std::vector<uint8_t> texels;
+      if (!read_direct_output(ext, c, texels, err) || !write_file(base + "/" + c.direct_out, texels)) {
+        std::printf("%s: direct output: %s\n", c.name.c_str(), err.c_str());
+        release_direct(c);
+        return 1;
+      }
     }
   }
   if (!d->sync()) { std::printf("%s: sync: %s\n", c.name.c_str(), d->err().c_str()); return 1; }
+  release_direct(c);
   for (auto& a : c.args) {
     if (a.kind != "out") continue;
     std::vector<uint8_t> data(a.bytes);
@@ -340,15 +365,17 @@ int main(int argc, char** argv) {
     } else if (w == "kernel") {
       s >> c.kernel >> c.grid >> c.block;
     } else if (w == "direct") {
-      Direct& dr = c.direct;
-      int64_t fill = 0;
-      if (!(s >> dr.color_file >> dr.rw >> dr.rh >> dr.ow >> dr.oh >> dr.out_file >> fill) || !dr.rw || !dr.rh ||
-          !dr.ow || !dr.oh) {
-        std::printf("bad direct line: %s\n", line.c_str());
+      DirectTex t;
+      s >> t.slot >> t.format >> t.width >> t.height >> t.file;
+      if (t.slot != "color" && t.slot != "depth" && t.slot != "motion" && t.slot != "output") {
+        std::printf("unknown direct slot %s\n", t.slot.c_str());
         return 2;
       }
-      dr.fill = (uint32_t)fill;
-      dr.on = true;
+      c.direct.push_back(t);
+    } else if (w == "direct_params") {
+      s >> c.dparams.rx >> c.dparams.ry >> c.dparams.rw >> c.dparams.rh;
+    } else if (w == "direct_out") {
+      s >> c.direct_out;
     } else if (w == "arg") {
       Arg a;
       s >> a.kind;

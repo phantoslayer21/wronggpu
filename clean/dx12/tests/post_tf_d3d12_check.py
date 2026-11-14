@@ -146,17 +146,21 @@ def direct_run(build, rocm, seeds):
                 name = f"{dk.replace('/', '_')}_s{si}_{ci}"
                 want = OPS.hip_run(g, mods[case["co"]], case)
                 rw, rh, ow, oh = (int(v) for v in case["label"].split()[0].replace("->", "x").split("x"))
-                color = case["args"][0][1]
-                with open(os.path.join(cdir, name + ".color"), "wb") as fh:
-                    fh.write(color)
-                direct = f"direct {name}.color {rw} {rh} {ow} {oh} {name}.tex {TEX_FILL}"
+                # kernel_replay direct lines: color RGBA32F (the colour buffer's values), depth and motion of zeros (not
+                # read by these kernels), the output RGBA32F filled with the sentinel word; render rectangle at (0, 0)
+                case = dict(case, direct=[
+                    ("color", OPS.DXGI_R32G32B32A32_FLOAT, rw, rh, case["args"][0][1]),
+                    ("depth", OPS.DXGI_R32_FLOAT, rw, rh, bytes(rw * rh * 4)),
+                    ("motion", OPS.DXGI_R32G32_FLOAT, rw, rh, bytes(rw * rh * 8)),
+                    ("output", OPS.DXGI_R32G32B32A32_FLOAT, ow, oh,
+                     np.full(ow * oh * 4, TEX_FILL, np.uint32).tobytes())], direct_params=(0, 0, rw, rh))
                 body = OPS.replay_lines(name, case, cdir)
-                lines += body[:-1] + [direct, ""]
+                lines += body[:-1] + [f"direct_out {name}.tex", ""]
                 todo.append((name, dk, case, want, ow, oh))
                 if neg is None and case["grid"] >= 4:
                     neg = (name, case, ow, oh)
                     nl = OPS.replay_lines(name, case, cdir, grid=case["grid"] // 2, prefix="negative_")
-                    lines += nl[:-1] + [f"direct {name}.color {rw} {rh} {ow} {oh} negative_{name}.tex {TEX_FILL}", ""]
+                    lines += nl[:-1] + [f"direct_out negative_{name}.tex", ""]
     with open(os.path.join(cdir, "cases.txt"), "w", newline="\n") as f:
         f.write("\n".join(lines))
     env = {k: v for k, v in os.environ.items()
