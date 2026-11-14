@@ -17,7 +17,7 @@
      "values_from": "models", "doc": "super-resolution model"},
     {"id": 1, "key": "rr_mode", "type": "choice", "values": ["exact", "accurate", "fast"], "default": "accurate",
      "readers": ["rr-plugin", "rr-runtime"], "live": true, "latch": "next-frame", "ini_section": "wronggpu", "env": "WG_RR_MODE",
-     "menu": {"list": "versions", "label": "WrongGPU RR {value}", "folder_label": "WrongGPU RR {value}"},
+     "menu": {"list": "panel", "label": "{value}"},
      "values_from": "modes", "doc": "ray-reconstruction mode"},
     {"id": 2, "key": "rr_enabled", "type": "onoff", "default": 1, "readers": ["rr-plugin"], "live": false, "latch": "rr-create",
      "ini_section": "wronggpu", "contract": true, "doc": "WrongGPU RR on/off (60.9 key 0)"},
@@ -35,12 +35,18 @@
      "latch": "start", "ini_section": "wronggpu", "doc": "hook a game-interface family whose layouts are not confirmed"},
     {"id": 9, "key": "entry_source", "type": "choice", "values": ["versions", "folders"], "default": "versions",
      "readers": ["sr-frontend"], "live": false, "latch": "start", "ini_section": "wronggpu",
-     "doc": "how the host offers the choices: one version list, or one folder per choice"}
+     "doc": "how the host offers the choices: one version list, or one folder per choice"},
+    {"id": 10, "key": "rr_exact_allowed", "type": "onoff", "default": 0, "readers": ["rr-plugin"], "live": false,
+     "latch": "start", "ini_section": "wronggpu",
+     "doc": "exact RR mode offered in the menu panel (turned on in the launcher; without it rr_mode=exact runs accurate)"},
+    {"id": 11, "key": "rr_hit_distance_filter", "type": "onoff", "default": 0, "readers": ["rr-plugin"], "live": true,
+     "latch": "next-frame", "ini_section": "wronggpu", "contract": true, "opt_in": true,
+     "doc": "52.7.2 deviation (opt-in): the specular hit distance is the median of its 1x4 pixel run (lone missed-ray outliers make reflection speckles in motion)"}
   ],
   "text_options": [
     {"key": "rr_model", "default": "", "readers": ["rr-plugin", "rr-runtime"], "env": "WG_RR_MODEL", "doc": "path of the RR model file"},
     {"key": "sr_runtime_dll", "default": "wronggpu_runtime.dll", "readers": ["sr-frontend"], "doc": "SR runtime library in the data folder"},
-    {"key": "rr_runtime_dll", "default": "wronggpu_rr_runtime.dll", "readers": ["rr-plugin"], "doc": "RR runtime library in the data folder"},
+    {"key": "rr_runtime_dll", "default": "wronggpu_runtime.dll", "readers": ["rr-plugin"], "doc": "RR runtime library (since 0.6.0 part of wronggpu_runtime.dll, Model M and RR in one DLL)"},
     {"key": "diag_env_1", "default": "", "readers": ["rr-plugin"], "doc": "WG_RR_<NAME>=<value> handed to the RR runtime (diagnostics)"},
     {"key": "diag_env_2", "default": "", "readers": ["rr-plugin"], "doc": ""},
     {"key": "diag_env_3", "default": "", "readers": ["rr-plugin"], "doc": ""},
@@ -59,7 +65,7 @@
   ],
   "modes": [
     {"id": "exact", "option": "rr_mode", "head": "exact", "input": "exact", "body": "exact", "output": "default", "resolve": "exact"},
-    {"id": "accurate", "option": "rr_mode", "head": "exact", "input": "exact", "body": "relaxed", "output": "default", "resolve": "exact"},
+    {"id": "accurate", "option": "rr_mode", "head": "relaxed", "input": "exact", "body": "relaxed", "output": "default", "resolve": "exact"},
     {"id": "fast", "option": "rr_mode", "head": "relaxed", "input": "lite", "body": "relaxed", "output": "fast", "resolve": "hw"}
   ],
   "gi_layouts": ["A10-2.7", "A10-2.14"],

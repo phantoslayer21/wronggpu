@@ -2,6 +2,9 @@
 // swin_block_c64_nc (enc1's Swin block) with TWO windows per wave in 128-lane workgroups (tracks lev3-swin, r3-c64w2).
 //
 // @wg-kernel swin_block_c64_nc co=swin.co block=256 group=128 gscale=1 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=64,SW_HEADS=2,SW_MLP=256,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_W2=1
+// Model L's dec1 block swin_block_c64_add_ex_nc (swin_c64ex.hlsl) runs this kernel too (SW_W2_NAME), with the block
+// input x + xadd (SW_ADD) and the fused expand (SW_ECL: swin_block.hlsl's fused_expand with the 4 waves; each wave then
+// reads its two windows' records).
 //
 // Launch-shape switch: the line above runs this file's kernel (SW_W2 1: 128-lane workgroups, gscale 1). The one-window-
 // per-wave kernel of swin_block.hlsl (256-lane workgroups, HIP's shape) is the same line without "group=128 gscale=1"
@@ -47,8 +50,11 @@
 #include "swin_block.hlsl"
 
 #if SW_W2
-#if SW_C != 64 || THREADS != 128 || SW_ADD || SW_ECL > 0 || (GROUP != 2 && GROUP != 1) || SW_GELU != 3 || SW_NORM2_EARLY || SW_HEAD_PAIRS
+#if SW_C != 64 || THREADS != 128 || (GROUP != 2 && GROUP != 1) || SW_GELU != 3 || SW_NORM2_EARLY || SW_HEAD_PAIRS || SW_SRC != 0 || SW_OUT_F16
 #error "swin_c64w2.hlsl: the c64 block, 128 lanes"
+#endif
+#ifndef SW_W2_NAME
+#define SW_W2_NAME swin_block_c64_nc
 #endif
 #define NWW 2   // windows per wave
 #ifndef SW_W2_MLP_STEP
@@ -74,7 +80,7 @@
 #define SW_W2_COMMIT SW_COMMIT_EARLY
 #endif
 
-WG_KERNEL(swin_block_c64_nc)
+WG_KERNEL(SW_W2_NAME)
 {
     WG_SETUP();
     const uint tid = wg_lane_id();
@@ -91,6 +97,15 @@ WG_KERNEL(swin_block_c64_nc)
     // Gather: token t of each window, mirrored at the borders.
     int dst[NWW];
     uint2 xa[NWW][KC];
+#if SW_ADD
+    uint2 xb[NWW][KC];
+#endif
+#if SW_ECL > 0
+    // the 8 windows' expanded input into the second staging buffer (swin_block.hlsl), read back after the barrier
+    const uint lowp = sw_win_low0(nwx, nwin, lane, (int)wg_block_id());
+    fused_expand(w + L_TAIL, MAXU, nwx, nwin, tid, (int)wg_block_id(), lowp);
+    uint eslot[NWW];
+#endif
     [unroll] for (uint i = 0; i < NWW; ++i) {
         const int win0 = (int)(wg_block_id() * (THREADS / 32 * NWW) + wave_id * NWW + i);
         const int win = win0 < nwin ? win0 : nwin - 1;
@@ -99,7 +114,17 @@ WG_KERNEL(swin_block_c64_nc)
         const bool real = win0 < nwin && pr >= 0 && pr < H && pc >= 0 && pc < W;
         dst[i] = real ? pr * W + pc : -1;
         const int mr = sw_mirror(pr, H), mc = sw_mirror(pc, W);
+#if SW_ECL > 0
+        const uint wb = wave_id * NWW + i;                // the window in the workgroup (win: the same clamp)
+        const uint lpw = WaveReadLaneAt(lowp, wb);
+        const int low = ((mr >> 1) - (int)(lpw & 0xffffu)) * 2 + ((mc >> 1) - (int)(lpw >> 16));
+        eslot[i] = wb * 16u + (uint)low * 4u + (uint)(((mr & 1) << 1) | (mc & 1));
+#else
         load_frags_g(x, (uint)(mr * W + mc) * SW_C + hh * HALF, xa[i]);
+#endif
+#if SW_ADD
+        load_frags_g(xadd, (uint)(mr * W + mc) * SW_C + hh * HALF, xb[i]);
+#endif
     }
     v8f ng[KC], nb[KC];
     {
@@ -108,13 +133,26 @@ WG_KERNEL(swin_block_c64_nc)
     }
     st_commit(stage, 0u, HEAD_BYTES / 16, tid);
     wg_barrier_lds();
+#if SW_ECL > 0
+    [unroll] for (uint ie = 0; ie < NWW; ++ie)
+        [unroll] for (uint je = 0; je < KC / 2; ++je) {
+            const uint4 v = sw_lds_ld128(MAXU + eslot[ie] * SW_C + hh * HALF + 16u * je);
+            xa[ie][2 * je] = v.xy; xa[ie][2 * je + 1] = v.zw;
+        }
+    wg_barrier_lds();   // read before the buffer they live in is refilled
+#endif
     uint buf = 0u;
 
     // Steps 1-2: a = q8(RMSNorm(x; gamma1)); the residual accumulator starts as x + bp.
     uint2 af[NWW][KC];
     v8f acc[NWW][KC];
     [unroll] for (uint i1 = 0; i1 < NWW; ++i1) {
-        [unroll] for (uint k = 0; k < KC; ++k) acc[i1][k] = sw_unpack_fp8(xa[i1][k]);
+        [unroll] for (uint k = 0; k < KC; ++k) {
+            acc[i1][k] = sw_unpack_fp8(xa[i1][k]);
+#if SW_ADD
+            acc[i1][k] = sw_add8(acc[i1][k], sw_unpack_fp8(xb[i1][k]));
+#endif
+        }
         const float r = norm_r(acc[i1]);
         [unroll] for (uint k2 = 0; k2 < KC; ++k2) {
             v8f d;

@@ -37,6 +37,13 @@ inline const ModelInfo& model_info(ModelId id) {
   return kModelTable[0];
 }
 
+// The converted model file of model `id` under the model directory: <model_dir><sep><model_subdir><sep>model.wgcm
+// (Model M: <model_dir><sep>model.wgcm; Model L: <model_dir><sep>L<sep>model.wgcm). Every executor's check uses it.
+inline std::string model_wgcm_path(const std::string& model_dir, ModelId id, char sep = '\\') {
+  const char* sub = model_info(id).model_subdir;
+  return model_dir + (*sub ? std::string(1, sep) + sub : std::string()) + sep + "model.wgcm";
+}
+
 // A model name in either case ("M", "m", "K", ...). False: no such model.
 inline bool model_from_name(const std::string& v, ModelId* id) {
   for (const ModelInfo& m : kModelTable) {

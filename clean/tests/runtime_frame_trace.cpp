@@ -7,10 +7,12 @@
 //
 // rw x rh is the maximum render size. Flags:
 //   --format=<n>      model_format (default 1: the converter's raw layout; 2: model.wgcm, with --map)
+//   --backend=<n>     WgRtConfig.backend (default 0; the recording device stands in for every backend)
 //   --map=<path>      the converter map (map_path)
 //   --sizes=WxH,...   the render size of frame 0, 1, ... (repeated; default: the maximum every frame)
 //   --reset=f,...     frames the game asks for a reset (WgRtFrame.reset = 1)
 //   --fail=<kernel>@<frame>  that kernel's launch fails in that frame (the device returns false)
+//   --hdr=<0|1>       WgRtConfig.hdr (default 0)
 //
 // Prints the create result and the allocations ("alloc b<k> <bytes>"), what create uploads ("upload b<k>+<offset>
 // <bytes> <SHA-256 of the bytes>": the weight blobs, so a test can tell which blob an address holds), the code objects
@@ -18,7 +20,8 @@
 // (wg_rt_info) and one line per
 // launch: "launch <kernel> <grid> <block>", followed for the kernels of the table below by " | " and the decoded
 // arguments: a device address as b<k>+<offset> (allocation k) or 0, an int as its value, the encoder and decoder
-// parameters as E{rw,rh,fw,fh,frame,reset} / D{rw,rh,fw,fh,reset}. A failed frame prints what was launched up to the
+// parameters as E{rw,rh,fw,fh,frame,reset} / D{rw,rh,fw,fh,reset}, the reconstruction's as P{rw,rh,dw,dh,reset}.
+// A failed frame prints what was launched up to the
 // failure and "ERR frame <f>: <message>"; the next frame runs. After each frame, "name <buffer> b<k>+<offset> <bytes>"
 // for every buffer name the runtime knows (wg_rt_buffer; kNames below), so the launches' addresses can be checked
 // against the buffers' names. "ERR <message>" at create. The code object files are not
@@ -49,6 +52,11 @@ struct EncParams {
   float f[19];
 };
 static_assert(sizeof(EncParams) == 116, "EncParams");
+struct PostParams {  // kernels/post.hip WgPostParams
+  int rw, rh, dw, dh, reset, pad0, pad1, pad2;
+  float f[8];
+};
+static_assert(sizeof(PostParams) == 64, "PostParams");
 struct DecParams {
   int rw, rh, fw, fh, reset, pad0;
   float f[8];
@@ -65,12 +73,19 @@ const Signature kSignatures[] = {
     {"input_encoder", "ppppppppppppE"},     // Model M's encoder and Model L's values (q in place of the features)
     {"coef_decoder", "ppppppppD"},          // Model M's decoder (also its pack12 form)
     {"swin_block_*", "ppppiiii"},           // Model M's blocks: x, skip, out, w, H, W, ox, oy
+    {"l_swin_block_c32_dec_coef12_nc", "ppppiiiippppii"},  // the decoder block with l_coef_pack12 folded in: then
+                                                           // A, C, latent, dec0.coef, rw, rh (native D3D12, fusion lc)
     {"l_swin_block_c32*", "ppppiiii"},      // Model L's blocks (clean/l/FORMATS.md)
     {"l_linear_32_32_relu", "pppi"},
     {"l_linear_32_32_f16", "pppi"},
+    {"l_linear_32_32_fused", "ppppi"},  // the two in one: q, x2, Win1, Win2, npix (native D3D12, fusion ll)
     {"l_project_gather", "pppii"},
     {"l_dec_project", "pppii"},
     {"l_coef", "ppppppD"},
+    {"l_post_recon", "ppppppppppppPp"},  // Model M's post_recon arguments (clean/l/FORMATS.md step 5)
+    {"l_coef_pack12", "ppppppD"},  // the same arguments (B unused)
+    {"l_post_recon_p12", "ppppppppppppPp"},  // the same arguments (A, C: pack12 images; B unused)
+    {"post_filter_c1_s4", "ppiiiiip"},  // display, out, dw, dh, ow, oh, dec_scale (its bits), exposure pair
 };
 
 const char* kinds_of(const std::string& kernel) {
@@ -176,6 +191,12 @@ class RecordingDevice : public Device {
                     std::to_string(e.fh) + "," + std::to_string(e.frame) + "," + std::to_string(e.reset) + "}";
             break;
           }
+          case 'P': {
+            const PostParams& q = *static_cast<const PostParams*>(args[i]);
+            line += "P{" + std::to_string(q.rw) + "," + std::to_string(q.rh) + "," + std::to_string(q.dw) + "," +
+                    std::to_string(q.dh) + "," + std::to_string(q.reset) + "}";
+            break;
+          }
           case 'D': {
             const DecParams& d = *static_cast<const DecParams*>(args[i]);
             line += "D{" + std::to_string(d.rw) + "," + std::to_string(d.rh) + "," + std::to_string(d.fw) + "," +
@@ -252,6 +273,8 @@ int main(int argc, char** argv) {
     const std::string s = argv[a];
     if (s.compare(0, 9, "--format=") == 0) {
       cfg.model_format = std::atoi(s.c_str() + 9);
+    } else if (s.compare(0, 10, "--backend=") == 0) {
+      cfg.backend = std::atoi(s.c_str() + 10);
     } else if (s.compare(0, 6, "--map=") == 0) {
       map_path = s.substr(6);
     } else if (s.compare(0, 8, "--sizes=") == 0) {
@@ -262,6 +285,8 @@ int main(int argc, char** argv) {
       }
     } else if (s.compare(0, 8, "--reset=") == 0) {
       for (const std::string& f : split(s.substr(8), ',')) resets.insert(std::atoi(f.c_str()));
+    } else if (s.compare(0, 6, "--hdr=") == 0) {
+      cfg.hdr = std::atoi(s.c_str() + 6);
     } else if (s.compare(0, 7, "--fail=") == 0) {
       fail = s.substr(7);
     } else if (s.compare(0, 2, "--") == 0) {

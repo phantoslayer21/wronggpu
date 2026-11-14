@@ -1839,8 +1839,12 @@ static void TestHostedLookupReentry() {
 }
 
 static void TestRuntimeProviderName() {
-#if WRONGGPU_MODEL_K
+#if WRONGGPU_MODEL_K && WRONGGPU_MODEL_L
+    for (const char* model : {"M", "K", "L"}) {
+#elif WRONGGPU_MODEL_K
     for (const char* model : {"M", "K"}) {
+#elif WRONGGPU_MODEL_L  // (the configured model=K is dropped, TestWithoutModelK)
+    for (const char* model : {"M", "L"}) {
 #else  // (the configured model=K is dropped, TestWithoutModelK; the host's choice of Model M is all there is)
     for (const char* model : {"M"}) {
 #endif
@@ -1849,10 +1853,11 @@ static void TestRuntimeProviderName() {
         Config c;
         c.hosted = true;
         // Deliberately configure the opposite default: the in-game choice must win.
-        c.runtimeOptions = std::string("model=") + (model[0] == 'K' ? "M" : "K");
+        c.runtimeOptions = std::string("model=") + (model[0] == 'M' ? "K" : "M");
         auto f = MakeFrontEnd(c);
         UpscaleCreate create(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE, true);
-        create.version.versionId = model[0] == 'K' ? kWrongGpuKProviderVersionId : kWrongGpuProviderVersionId;
+        create.version.versionId = model[0] == 'K' ? kWrongGpuKProviderVersionId
+                                   : model[0] == 'L' ? kWrongGpuLProviderVersionId : kWrongGpuProviderVersionId;
         ffxContext ctx = nullptr;
         CHECK(f->CreateContext(&ctx, &create.upscale.header, kMemCb) == FFX_API_RETURN_OK);
         auto frame = MakeDispatch();
@@ -1892,10 +1897,14 @@ static void TestRuntimeProviderName() {
     query.versionIds = ids;
     query.versionNames = names;
     CHECK(frontend.Query(nullptr, &query.header) == FFX_API_RETURN_OK);
-    // Model M alone: the list holds only the SR models (RR modes have their own box since 10-31) and this build has no
-    // Model K (OwnEntry(1) is null here; the test read it and crashed in a build without Model K).
-    CHECK(count == 1 && ids[0] == kWrongGpuProviderVersionId && std::strcmp(names[0], kWrongGpuListedNameM) == 0);
-    CHECK(OwnEntryCount() == 1 && OwnEntry(1) == nullptr);
+    // Model M alone (and Model L after it when built in): the list holds only the SR models (RR modes have their own
+    // box since 10-31) and this build has no Model K (OwnEntry(n) is null past the end; the test read it and crashed in
+    // a build without Model K).
+    CHECK(count == 1 + WRONGGPU_MODEL_L && ids[0] == kWrongGpuProviderVersionId && std::strcmp(names[0], kWrongGpuListedNameM) == 0);
+#if WRONGGPU_MODEL_L
+    CHECK(ids[1] == kWrongGpuLProviderVersionId && std::strcmp(names[1], kWrongGpuListedNameL) == 0);
+#endif
+    CHECK(OwnEntryCount() == 1 + WRONGGPU_MODEL_L && OwnEntry(1 + WRONGGPU_MODEL_L) == nullptr);
 #else
     CHECK(std::strcmp(RuntimeProviderName("model=K;network=fused", nullptr), "WrongGPU Model K") == 0);
     CHECK(std::strcmp(RuntimeProviderName("model = k", nullptr), "WrongGPU Model K") == 0);
@@ -2199,7 +2208,7 @@ static void TestHostVersionHandling() {
     list.versionNames = names;
     CHECK(fe->Query(nullptr, &list.header) == FFX_API_RETURN_OK && count == kOwn + 2);
     CHECK(ids[0] == 0x5747000000000001ull && ids[kOwn] == g_versionIds[0] && ids[kOwn + 1] == g_versionIds[1]);
-    CHECK(kOwn == 1 || ids[1] == 0x5747000000000002ull);
+    CHECK(kOwn == 1 || ids[1] == (WRONGGPU_MODEL_K ? 0x5747000000000002ull : 0x5747000000000003ull));
     CHECK(std::strcmp(names[kOwn], "3.1.5") == 0 && std::strcmp(names[kOwn + 1], "2.3.4") == 0);
     for (int i = 0; i < kOwn; ++i) {
         HostVersion selected;
@@ -2214,8 +2223,11 @@ static void TestHostVersionHandling() {
     }
     CHECK(std::strcmp(names[0], "WrongGPU Model M##3.1.0") == 0);
     CHECK(WRONGGPU_MODEL_K == 0 || std::strcmp(names[1], "WrongGPU Model K##3.1.0") == 0);
+    CHECK(WRONGGPU_MODEL_L == 0 || std::strcmp(names[kOwn - 1], "WrongGPU Model L##3.1.0") == 0);
     // The selection still works by id, and a context's own provider name stays the label alone (the last SR model).
-    const uint64_t lastModel = WRONGGPU_MODEL_K ? kWrongGpuKProviderVersionId : kWrongGpuProviderVersionId;
+    const uint64_t lastModel = WRONGGPU_MODEL_L ? kWrongGpuLProviderVersionId
+                               : WRONGGPU_MODEL_K ? kWrongGpuKProviderVersionId : kWrongGpuProviderVersionId;
+    const char* const lastName = WRONGGPU_MODEL_L ? "WrongGPU Model L" : WRONGGPU_MODEL_K ? "WrongGPU Model K" : "WrongGPU Model M";
     UpscaleCreate own(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE, /*withOverride=*/true);
     own.version.versionId = lastModel;
     ffxContext ctx = nullptr;
@@ -2223,7 +2235,7 @@ static void TestHostVersionHandling() {
     ffxQueryGetProviderVersion provider{};
     provider.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
     CHECK(fe->Query(&ctx, &provider.header) == FFX_API_RETURN_OK && provider.versionId == lastModel && provider.versionName &&
-          std::strcmp(provider.versionName, WRONGGPU_MODEL_K ? "WrongGPU Model K" : "WrongGPU Model M") == 0);
+          std::strcmp(provider.versionName, lastName) == 0);
     CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
 
     g_hostedFrontEnd = nullptr;
@@ -2497,7 +2509,7 @@ static void TestRegistryEntries() {
     CHECK(kWgEntries[1].id == kWrongGpuKProviderVersionId && std::strcmp(kWgEntries[1].label, kWrongGpuListedNameK) == 0);
 #endif
     CHECK(WG_ENTRY_COUNT == WG_SR_MODEL_COUNT);  // no RR entries
-    CHECK(kOwn == WG_ENTRY_COUNT - (WRONGGPU_MODEL_K ? 0 : 1));
+    CHECK(kOwn == WG_ENTRY_COUNT - (WRONGGPU_MODEL_K ? 0 : 1) - (WRONGGPU_MODEL_L ? 0 : 1));
     CHECK(std::strcmp(EntryProviderName(kWgEntries[0]), "WrongGPU Model M") == 0);
     for (int i = 0; i < kOwn; ++i) {
         const WgEntryDef* e = OwnEntry(i);
@@ -3153,6 +3165,157 @@ static void TestModelLookup() {
     CHECK(std::string(DefaultFsrSectionText()).find("model_dir =") != std::string::npos);
 }
 
+// Model L in the model lookup (model_l.h): <place>\L\model.wgcm, never Model M's or Model K's file; WithoutModel for L.
+// The same in every build.
+static void TestModelLookupL() {
+    const std::vector<ModelPlace> places = {{"G:\\game\\WrongGPU\\model", "the game's data folder", false}};
+    auto has = [](std::vector<std::string> files) {
+        return [files](const std::string& f) { return std::find(files.begin(), files.end(), f) != files.end(); };
+    };
+    ModelChoice m = ChooseModelDir(places, 'L', has({"G:\\game\\WrongGPU\\model\\L\\model.wgcm"}));
+    CHECK(m.index == 0 && m.option == ";model_dir=G:\\game\\WrongGPU\\model" && m.file == "G:\\game\\WrongGPU\\model\\L\\model.wgcm");
+    m = ChooseModelDir(places, 'L', has({"G:\\game\\WrongGPU\\model\\model.wgcm", "G:\\game\\WrongGPU\\model\\K\\model.wgcm"}));
+    CHECK(m.index == -1 && m.option.empty() && m.searched.find("L\\model.wgcm (the game's data folder: not there)") != std::string::npos);
+    CHECK(ChooseModelDir(places, 'M', has({"G:\\game\\WrongGPU\\model\\model.wgcm"})).index == 0);
+    CHECK(ChooseModelDir(places, 'K', has({"G:\\game\\WrongGPU\\model\\K\\model.wgcm"})).index == 0);
+    bool removed = false;
+    CHECK(WithoutModel("a=1;model=l;b=2", 'L', &removed) == "a=1;b=2" && removed);
+    CHECK(WithoutModel("model=K; model = L ", 'L', &removed) == "model=K" && removed);
+    CHECK(WithoutModel("model=LL;model=M", 'L', &removed) == "model=LL;model=M" && !removed);
+    CHECK(WithoutModelK("model=L;model=k", &removed) == "model=L" && removed);
+}
+
+#if WRONGGPU_MODEL_L
+// A build with Model L (CMake WG_MODEL_L=ON): model=L names Model L; the model lookup passes its folder when
+// <place>\L\model.wgcm is there; without it the create is refused with the reason (what writes the file), the runtime
+// is not asked, and AMD's upscaler takes over (fallback_to_amd, the default).
+static void TestModelL() {
+    CHECK(std::strcmp(RuntimeProviderName("model=L", nullptr), "WrongGPU Model L") == 0);
+    CHECK(std::strcmp(RuntimeProviderName("model=M", "model=l"), "WrongGPU Model L") == 0);
+    CHECK(std::strcmp(RuntimeProviderName("model=L", "model=M"), "WrongGPU Model M") == 0);
+    CHECK(ModelBuiltIn(WG_SR_MODEL_L) && SrEntryOfModel(WG_SR_MODEL_L) &&
+          SrEntryOfModel(WG_SR_MODEL_L)->id == kWrongGpuLProviderVersionId);
+    const std::vector<ModelPlace> places = {{"G:\\game\\WrongGPU\\model", "the game's data folder", false}};
+    auto create = [&](const std::vector<std::string>& files, size_t* amdAdded, int* runtimeCreates) {
+        Reset();
+        g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+        g_modelOn = true;
+        g_modelPlaces = places;
+        g_modelFiles = files;
+        Config c;
+        c.runtimeOptions = "model=L";
+        c.contextParkMs = 0;
+        auto f = MakeFrontEnd(c);
+        const size_t amd = g_amd.size();
+        const int creates = g_createCalls;
+        UpscaleCreate u(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
+        ffxContext ctx = nullptr;
+        CHECK(f->CreateContext(&ctx, &u.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
+        *amdAdded = g_amd.size() - amd;
+        *runtimeCreates = g_createCalls - creates;
+        CHECK(f->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    };
+    size_t amd = 0;
+    int creates = 0;
+    // only Model M's and Model K's files: refused, nothing created by the runtime
+    create({"G:\\game\\WrongGPU\\model\\model.wgcm", "G:\\game\\WrongGPU\\model\\K\\model.wgcm"}, &amd, &creates);
+    CHECK(creates == 0 && amd >= 1);
+    CHECK(CountLog("Model L is chosen but no converted Model L was found") >= 1);
+    CHECK(CountLog("WrongGPU.exe model convert --preset=L writes it") >= 1);
+    CHECK(CountLog("model: no converted Model L found") == 1);
+    // its file: passed to the runtime as model_dir with model=L
+    create({"G:\\game\\WrongGPU\\model\\L\\model.wgcm"}, &amd, &creates);
+    CHECK(creates == 1 && amd == 0);
+    CHECK(g_createOptions.find("model=L") != std::string::npos);
+    CHECK(g_createOptions.find(";model_dir=G:\\game\\WrongGPU\\model") != std::string::npos);
+    CHECK(CountLog("model: Model L from G:\\game\\WrongGPU\\model\\L\\model.wgcm (passed to the runtime as model_dir)") == 1);
+    CHECK(CountLog("Model L is chosen but") == 0);
+    // sr_model=L in the shared settings (wronggpu.ini [wronggpu]): Model L's runtime option, named Model L
+    Reset();
+    g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+    g_menuOn = true;
+    g_menuValues[WG_OPT_SR_MODEL] = WG_SR_MODEL_L;
+    {
+        auto f = MakeFrontEnd(Config());
+        UpscaleCreate u(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
+        ffxContext ctx = nullptr;
+        CHECK(f->CreateContext(&ctx, &u.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
+        CHECK(g_createOptions.find("model=L") != std::string::npos);
+        CHECK(CountLog("settings: sr_model=L (ini)") == 1);
+        ffxQueryGetProviderVersion q{};
+        q.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
+        CHECK(f->Query(&ctx, &q.header) == FFX_API_RETURN_OK && q.versionName && std::strcmp(q.versionName, "WrongGPU Model L") == 0);
+        CHECK(q.versionId == kWrongGpuLProviderVersionId);
+        CHECK(f->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    }
+}
+#else
+static void SetRuntimeOptionsEnv(const char* value) {
+#ifdef _WIN32
+    _putenv_s("WG_RUNTIME_OPTIONS", value);
+#else
+    if (*value) setenv("WG_RUNTIME_OPTIONS", value, 1);
+    else unsetenv("WG_RUNTIME_OPTIONS");
+#endif
+}
+
+// A build without Model L (the default): model=L from wronggpu.ini or the environment is refused with one log line
+// that says why, and Model M runs; the Model L id is not WrongGPU's.
+static void TestWithoutModelL() {
+    const char* const kNote = "is refused: Model L is not part of this build of the front end (CMake WG_MODEL_L); Model M is used";
+    CHECK(std::strcmp(RuntimeProviderName("model=L", nullptr), "WrongGPU") == 0);
+    CHECK(!ModelBuiltIn(WG_SR_MODEL_L) && SrEntryOfModel(WG_SR_MODEL_L) == nullptr);
+    CHECK(!IsWrongGpuProvider(kWrongGpuLProviderVersionId));
+    auto runs = [&](FrontEnd& f) {
+        ffxContext ctx = nullptr;
+        UpscaleCreate u(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
+        CHECK(f.CreateContext(&ctx, &u.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
+        const std::string options = g_createInfo.options ? g_createInfo.options : "";
+        CHECK(options.find("model=L") == std::string::npos && options.find("model=l") == std::string::npos);
+        ffxQueryGetProviderVersion q{};
+        q.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
+        CHECK(f.Query(&ctx, &q.header) == FFX_API_RETURN_OK && q.versionName && std::strcmp(q.versionName, "WrongGPU Model M") == 0);
+        CHECK(f.DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    };
+    const char* saved = std::getenv("WG_RUNTIME_OPTIONS");
+    const std::string savedValue = saved ? saved : "";
+    SetRuntimeOptionsEnv("");
+    {  // wronggpu.ini: runtime_options = ...;model=L
+        Reset();
+        g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+        std::string warnings;
+        Config c = ParseConfig("runtime_options = timing_log=1;model=L\n", &warnings);
+        CHECK(warnings.empty() && c.runtimeOptions == "timing_log=1;model=L");
+        auto f = MakeFrontEnd(c);
+        CHECK(CountLog(kNote) == 1 && CountLog("note: model=L (runtime_options in wronggpu.ini)") == 1);
+        runs(*f);
+        CHECK(CountLog(kNote) == 1);
+    }
+    {  // the environment: dropped from the process environment before the runtime library reads it
+        Reset();
+        g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+        SetRuntimeOptionsEnv("timing_log=1;model=L");
+        auto f = MakeFrontEnd(Config());
+        const char* now = std::getenv("WG_RUNTIME_OPTIONS");
+        CHECK(now && std::strcmp(now, "timing_log=1") == 0);
+        CHECK(CountLog(kNote) == 1 && CountLog("note: model=L (WG_RUNTIME_OPTIONS)") == 1);
+        runs(*f);
+    }
+    SetRuntimeOptionsEnv("");
+    {  // sr_model=L in the shared settings (wronggpu.ini [wronggpu]): refused by name once, Model M runs
+        Reset();
+        g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+        g_menuOn = true;
+        g_menuValues[WG_OPT_SR_MODEL] = WG_SR_MODEL_L;
+        auto f = MakeFrontEnd(Config());
+        runs(*f);
+        runs(*f);
+        CHECK(CountLog((std::string("note: sr_model=L (ini) ") + kNote).c_str()) == 1);
+    }
+    SetRuntimeOptionsEnv(savedValue.c_str());
+}
+#endif
+
 int main() {
     TestCustomSlotFailedCreate();
     TestCustomSlotFailureKeyHasSize();
@@ -3163,6 +3326,12 @@ int main() {
     TestCustomSlotDestroyPath();
     TestHooksAfterCreate();
     TestModelLookup();
+    TestModelLookupL();
+#if WRONGGPU_MODEL_L
+    TestModelL();
+#else
+    TestWithoutModelL();
+#endif
     TestRegistryEntries();
     TestUnsupportedFrames();
     TestSplitBlocked();

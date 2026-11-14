@@ -166,7 +166,10 @@ bool json_number_exact_f32(const std::string& lit, float& out) {
 
 class Loader {
 public:
-    explicit Loader(MapError& err) : err_(err) {}
+    // `hint`: the preset the caller loads the map for ("" : none). A map without the field "preset" is read as that
+    // preset when the preset uses the map's version, so that its own required sources are checked (load_map below makes
+    // every other check of the caller's name).
+    Loader(MapError& err, const std::string& hint) : err_(err), hint_(hint) {}
 
     bool damaged(const std::string& what) {
         err_.kind = MapErrorKind::Damaged;
@@ -259,7 +262,8 @@ public:
             m.preset_name = p->name;
             m.preset_named = true;
         } else {
-            m.preset_name = preset_for_version(version_);
+            const PresetInfo* h = hint_.empty() ? nullptr : find_preset(hint_);
+            m.preset_name = h && h->allows(version_) ? std::string(h->name) : preset_for_version(version_);
         }
         std::string order;
         if (!need_string(root, "channel_order", "map", order)) return false;
@@ -274,9 +278,13 @@ public:
             if (!load_source(kv.first, kv.second, m)) return false;
         }
         if (!k_) {
-            for (const char* required : {"W", "D", "K"}) {
-                if (m.find_source(required) < 0) return damaged(std::string("sources: missing source ") + required);
+            // The sources the map's preset needs (map.h PresetInfo): W, D and K for presets M and L, none by name for FG.
+            const PresetInfo* p = find_preset(m.preset_name);
+            if (!p) return damaged("map: no preset");
+            for (const std::string& required : p->required_sources) {
+                if (m.find_source(required) < 0) return damaged("sources: missing source " + required);
             }
+            if (m.sources.empty()) return damaged("sources: the map has no source");
         } else if (!check_k_sources(m)) {
             return false;
         }
@@ -1367,6 +1375,7 @@ public:
 
 private:
     MapError& err_;
+    std::string hint_;
     int version_ = 0;
     bool k_ = false;  // versions 2 and 3 (preset K, spec 48)
 };
@@ -1376,12 +1385,17 @@ private:
 const std::vector<PresetInfo>& known_presets() {
     // the map versions each preset's maps use (bit v: version v), as they were before maps named their preset
     static const std::vector<PresetInfo> presets = {
-        {"M", (1u << 1) | (1u << 4), kMsgNoPresetM},  // spec 08 (version 4 adds the source F)
-        {"K", (1u << 2) | (1u << 3), kMsgNoPresetK},  // spec 48
-        {"F", 1u << 5, kMsgNoPresetF},                // spec 57
+        {"M", (1u << 1) | (1u << 4), kMsgNoPresetM, {"W", "D", "K"}},  // spec 08 (version 4 adds the source F)
+        {"K", (1u << 2) | (1u << 3), kMsgNoPresetK, {}},                // spec 48 (its own source rules: T, O)
+        {"F", 1u << 5, kMsgNoPresetF, {}},                              // spec 57 (its own source rules)
         // Model L (#89): the same record kinds as preset M's map (no new element format, op or source kind), so the
         // same map versions; its parameters are a block of their own in the same library file, found by its own hashes
-        {"L", (1u << 1) | (1u << 4), kMsgNoPresetL},
+        {"L", (1u << 1) | (1u << 4), kMsgNoPresetL, {"W", "D", "K"}},
+        // Frame generation (#96): the weights of its two convolution networks, a fixed set of separate float16 blobs in
+        // the frame-generation library, each a block source located by its own length and hashes (no keyed source, no
+        // constants, no dither table). Map version 1 record kinds only; the map names its own sources. The source the key
+        // is made from is searched first: when it is missing, the file has no frame-generation model (exit 12).
+        {"FG", 1u << 1, kMsgNoPresetFG, {}},
     };
     return presets;
 }
@@ -1398,8 +1412,27 @@ std::string preset_for_version(int version) {
     return "";
 }
 
+namespace {
+
+bool load_map_hinted(const std::string& file_bytes, Map& out, MapError& err, const std::string& hint) {
+    out = Map();
+    err = MapError();
+    out.file_sha256 = Sha256::hash(file_bytes.data(), file_bytes.size());
+    Json root;
+    std::string jerr;
+    if (!parse_json(file_bytes, root, jerr)) {
+        err.kind = MapErrorKind::Damaged;
+        err.detail = "not valid JSON: " + jerr;
+        return false;
+    }
+    Loader loader(err, hint);
+    return loader.load(root, out);
+}
+
+}  // namespace
+
 bool load_map(const std::string& file_bytes, Map& out, MapError& err, const std::string& expected_preset) {
-    if (!load_map(file_bytes, out, err)) return false;
+    if (!load_map_hinted(file_bytes, out, err, expected_preset)) return false;
     if (expected_preset.empty()) return true;
     auto damaged = [&](const std::string& detail) {
         err.kind = MapErrorKind::Damaged;
@@ -1420,19 +1453,6 @@ bool load_map(const std::string& file_bytes, Map& out, MapError& err, const std:
     return true;
 }
 
-bool load_map(const std::string& file_bytes, Map& out, MapError& err) {
-    out = Map();
-    err = MapError();
-    out.file_sha256 = Sha256::hash(file_bytes.data(), file_bytes.size());
-    Json root;
-    std::string jerr;
-    if (!parse_json(file_bytes, root, jerr)) {
-        err.kind = MapErrorKind::Damaged;
-        err.detail = "not valid JSON: " + jerr;
-        return false;
-    }
-    Loader loader(err);
-    return loader.load(root, out);
-}
+bool load_map(const std::string& file_bytes, Map& out, MapError& err) { return load_map_hinted(file_bytes, out, err, ""); }
 
 }  // namespace wgc

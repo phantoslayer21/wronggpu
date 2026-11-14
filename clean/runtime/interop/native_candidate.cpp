@@ -262,7 +262,11 @@ bool NativeCandidate::dispatch(const WgFrame& f,ID3D12Fence* ready,uint64_t valu
   return true;
 }
 bool NativeCandidate::sync(std::string* e){return p_->sync(e);}
-const char* NativeCandidate::provider()const{return p_->direct_resources?
+const char* NativeCandidate::provider()const{
+  // the model the runtime runs (runtime_model: "M", or "L" with the runtime option model=L in builds with Model L)
+  if(p_->rt&&std::strcmp(wgrt::runtime_model(p_->rt),"L")==0)return p_->direct_resources?
+    "Model L native D3D12, supplied device/queue, direct textures":"Model L native D3D12, supplied device/queue, staged reference";
+  return p_->direct_resources?
   "Model M native D3D12, supplied device/queue, direct textures":"Model M native D3D12, supplied device/queue, staged reference";}
 const NativeFrameInventory& NativeCandidate::last_frame_inventory()const{return p_->inventory;}
 bool NativeCandidate::read_buffer(const char* name,std::vector<unsigned char>* bytes,std::string* e) {

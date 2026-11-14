@@ -58,7 +58,7 @@ def main():
         check("#define WG_RR_MODE_DUMMY 3" in h, "WG_RR_MODE_DUMMY = 3")
         check("#define WG_RR_MODE_COUNT 4" in h, "WG_RR_MODE_COUNT 4")
         check('kWgRrModeNames[WG_RR_MODE_COUNT] = {"exact", "accurate", "fast", "dummy"};' in h, "mode names")
-        check("#define WG_ENTRY_COUNT 2" in h, "still the two SR entries")
+        check("#define WG_ENTRY_COUNT 3" in h, "still the three SR entries")
         check("0x5747000000000104" not in h and "WrongGPU RR dummy" not in h, "no version-list entry for the new mode")
         rows = re.findall(r'^  \{"(\w+)",\s+(.*)\},$', h, re.M)
         words = {name: re.sub(r"\s+", " ", rest) for name, rest in rows}

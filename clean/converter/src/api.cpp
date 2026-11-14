@@ -25,6 +25,9 @@ const char* const kMsgNoPresetF =
     "This DLSS file has no preset-F (Ray Reconstruction) model. Version 310.7 or newer is needed.";
 // Model L (#89). The minimum version is the first DLSS version confirmed to carry a preset-L model.
 const char* const kMsgNoPresetL = "This DLSS file has no preset-L model. Version 310.5 or newer is needed.";
+// Frame generation (#96): the first frame-generation library version known to carry its two networks' weights.
+const char* const kMsgNoPresetFG =
+    "This DLSS Frame Generation file has no frame-generation model. Version 310.1 or newer is needed.";
 const char* const kMsgUnsupported = "This DLSS build is not supported yet (model data found, but other parts differ).";
 const char* const kMsgMapDamaged = "Installer error: the converter data is damaged. Please reinstall WrongGPU.";
 const char* const kMsgMapDoesNotFit =

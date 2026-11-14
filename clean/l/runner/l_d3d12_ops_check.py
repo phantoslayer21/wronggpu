@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
-"""Model L (issue #89): the D3D12 ports of the l_ops.co kernels against their HIP kernels on the same synthetic inputs,
-byte for byte (clean/l/kernels/l_ops.hip; ports clean/dx12/kernels/l_ops_*.hlsl).
+"""Model L (issue #89): the D3D12 ports of the l_ops.co kernels, the halo input encoder and the reconstruction kernel
+against their HIP kernels on the same synthetic inputs, byte for byte (clean/l/kernels/l_ops.hip, l_post.hip; ports
+clean/dx12/kernels/l_ops_*.hlsl, l_post.hlsl).
 
     python clean/l/runner/l_d3d12_ops_check.py --build <dir> --rocm "C:\\Program Files\\AMD\\ROCm\\7.2" --prepare
     python clean/l/runner/l_d3d12_ops_check.py --build <dir> --rocm "C:\\Program Files\\AMD\\ROCm\\7.2" --run
@@ -12,7 +13,9 @@ byte for byte (clean/l/kernels/l_ops.hip; ports clean/dx12/kernels/l_ops_*.hlsl)
 D3D12 device in a child process, then compares every output buffer. The rules (as clean/l/runner/l_d3d12_check.py):
 - the RAW downloaded bytes of both back ends are compared (nothing is decoded and encoded again);
 - each output buffer starts filled with its back end's own non-zero sentinel (HIP 0xA5, D3D12 0x5A), so a byte that
-  either path, or both, leaves unwritten differs;
+  either path, or both, leaves unwritten differs; where a case marks bytes that no back end may write (the
+  reconstruction's display pitch padding and the slack after its buffers), each back end must have kept its own
+  sentinel there;
 - a negative control (one case again on D3D12 with half its workgroups) must be caught;
 - Model M's swin_block_c96_nc (swin.co, its port already proven) runs through the same engine as a control
   (--no-control skips it).
@@ -81,23 +84,47 @@ def control_cases(kernel, rng):
 TOKENS = [(8, 12), (18, 34), (4, 4), (34, 50), (3, 5), (2, 9)]
 
 
-def _project_blob(rng, rows, frags):
+def _project_blob(rng, rows, frags, scale=0.2, bias_scale=0.5):
     """Projection blob: bias tile vector (`rows` floats), then `frags` fragments of 256 FP8 bytes."""
-    return rng.normal(0, 0.5, rows).astype(np.float32).tobytes() + fp8_encode(q8(rng.normal(0, 0.2, frags * 256))).tobytes()
+    return (rng.normal(0, bias_scale, rows).astype(np.float32).tobytes() +
+            fp8_encode(q8(rng.normal(0, scale, frags * 256))).tobytes())
+
+
+# FP8 codes the network does not produce but the kernels' conversions must treat as HIP does: both NaN codes, +-448,
+# +-0, subnormals
+SPECIAL_FP8 = np.array([0x7f, 0xff, 0x7e, 0xfe, 0x00, 0x80, 0x01, 0x81, 0x07, 0x87], np.uint8)
+# (weight, bias) scales of the projection cases: normal; large (sums past 448 and past FP16's 65504: the clamps,
+# infinities); tiny (FP16 subnormal and zero results)
+PROJECT_SCALES = [(0.2, 0.5), (24.0, 400.0), (2e-3, 1e-4)]
+
+
+def _fp8_map_special(rng, n, special):
+    """_fp8_map, with special FP8 codes in a tenth of the bytes when `special`."""
+    q = np.frombuffer(_fp8_map(rng, n), np.uint8).copy()
+    if special:
+        pick = rng.random(q.size) < 0.1
+        q[pick] = rng.choice(SPECIAL_FP8, int(pick.sum()))
+    return q.tobytes()
 
 
 def project_cases(kernel, rng):
     """l_project_gather: x [2 th][2 tw][32] -> features [th][tw][64] (blob enc0.project: 64 bias rows, 4 x 8 fragments).
-    l_dec_project: z [th][tw][64] -> y [2 th][2 tw][32] (blob dec0.project: 128 bias rows, 8 x 4 fragments)."""
+    l_dec_project: z [th][tw][64] -> y [2 th][2 tw][32] (blob dec0.project: 128 bias rows, 8 x 4 fragments).
+    Every token grid at the three PROJECT_SCALES, every other case with special FP8 codes in the input."""
     cases = []
-    for (th, tw) in TOKENS:
+    for ti, (th, tw) in enumerate(TOKENS):
         ntok = th * tw
         npx = 4 * ntok
-        if kernel == "l_project_gather":
-            args = [("buf", _fp8_map(rng, npx * 32)), ("out", ntok * 64), ("buf", _project_blob(rng, 64, 32))]
-        else:
-            args = [("buf", _fp8_map(rng, ntok * 64)), ("out", npx * 32), ("buf", _project_blob(rng, 128, 32))]
-        cases.append({"kernel": kernel, "grid": -(-ntok // 128), "block": 256, "args": args + [("u32", tw), ("u32", th)]})
+        for si, (s, b) in enumerate(PROJECT_SCALES):
+            special = (ti + si) % 2 == 1
+            if kernel == "l_project_gather":
+                args = [("buf", _fp8_map_special(rng, npx * 32, special)), ("out", ntok * 64),
+                        ("buf", _project_blob(rng, 64, 32, s, b))]
+            else:
+                args = [("buf", _fp8_map_special(rng, ntok * 64, special)), ("out", npx * 32),
+                        ("buf", _project_blob(rng, 128, 32, s, b))]
+            cases.append({"kernel": kernel, "grid": -(-ntok // 128), "block": 256,
+                          "args": args + [("u32", tw), ("u32", th)]})
     return cases
 
 
@@ -119,7 +146,8 @@ def _coef_map(rng, n):
 
 def coef_cases(kernel, rng):
     """l_coef: y2 [fh][fw][32] FP16 -> A, B, latent [rh][rw] (4 bytes each), C [rh][rw] (8 bytes); blob dec0.coef
-    (Model M's dec0 blob with W = 0, b = 0: S, T at byte 320); LDecParams (56 bytes) by value."""
+    (Model M's dec0 blob with W = 0, b = 0: S, T at byte 320); LDecParams (56 bytes) by value.
+    l_coef_pack12: the same inputs -> image A [rh][rw] (8 bytes), B null, image C [rh][rw] (4 bytes), latent."""
     from clean.runner import dec0
     cases = []
     for (rw, rh, fw, fh) in COEF_FRAMES:
@@ -131,8 +159,10 @@ def coef_cases(kernel, rng):
         assert len(P) == 56
         ntok = (fh // 2) * (fw // 2)
         cases.append({"kernel": kernel, "grid": -(-ntok // 128), "block": 256,
-                      "args": [("buf", _coef_map(rng, fw * fh)), ("out", npx * 4), ("out", npx * 4), ("out", npx * 8),
-                               ("out", npx * 4), ("buf", blob), ("bytes", P)]})
+                      "args": [("buf", _coef_map(rng, fw * fh))] +
+                              ([("out", npx * 8), ("null",), ("out", npx * 4)] if kernel == "l_coef_pack12" else
+                               [("out", npx * 4), ("out", npx * 4), ("out", npx * 8)]) +
+                              [("out", npx * 4), ("buf", blob), ("bytes", P)]})
     return cases
 
 
@@ -168,9 +198,154 @@ def enc_cases(kernel, rng):
     return cases
 
 
+# (H, W) of dec1's map (even: the expand writes 2 x 2 pixels per low-resolution token), each with dec1's two window
+# offsets (0, 0) and (2, 0). 4 x 6 and 12 x 20: fewer windows than a workgroup's 8.
+DEC1_GRIDS = [(16, 24), (36, 68), (8, 8), (68, 100), (4, 6), (12, 20), (48, 64)]
+
+
+def dec1_ex_cases(kernel, rng):
+    """swin_block_c64_add_ex_nc (swin.co; Model M's kernel, launched by Model L's frame for dec1): x = the low-resolution
+    map [H / 2][W / 2][96] FP8, xadd = the skip map [H][W][64] FP8 -> out [H][W][64] FP8; w = dec1's stage blob (block,
+    then the expand section at the 256-byte aligned block size, clean/runner/packing.py pack_stage); aux null. Only
+    blobs with the _nc flag (the D3D12 port has only the _nc form)."""
+    from clean.reference import swin as MS
+    from clean.runner import packing as P
+    cases = []
+    for (H, W) in DEC1_GRIDS:
+        for (ox, oy) in ((0, 0), (2, 0)):
+            blob = P.pack_stage("dec1", MS.random_params("dec1", rng))
+            if not np.frombuffer(blob[:4], np.uint32)[0] & 1:
+                continue
+            nwin = -(-(W + ox) // 4) * -(-(H + oy) // 4)
+            cases.append({"kernel": kernel, "co": "swin.co", "grid": -(-nwin // 8), "block": 256,
+                          "args": [("buf", _fp8_map(rng, (H // 2) * (W // 2) * 96)), ("buf", _fp8_map(rng, H * W * 64)),
+                                   ("out", H * W * 64), ("buf", blob), ("u32", H), ("u32", W), ("u32", ox), ("u32", oy),
+                                   ("null",)]})
+    return cases
+
+
+# (rw, rh, dw, dh, reset, kind, expo) of the reconstruction: clean/l/runner/l_post_check.py's cases (Model M's ratios,
+# odd sizes, reset, extreme kernel shapes, the zero-weight known answer "offset_0.1" (spec part 3 Q1: total weight 0
+# everywhere) and the FP16 underflow known answer "offset_0.05" (Q3: total weight > 0, every FP16 weight 0)), plus
+# R = D (footprint over the LDS cap: the unstaged path), ratio 1.5, the exposures read from the expo pointer, and
+# non-finite / out-of-range inputs ("specials": NaN and infinite colours and history texels, motions far outside D).
+POST_CASES = [(24, 16, 54, 36, False, "random", False), (31, 17, 70, 38, False, "random", False),
+              (20, 12, 60, 36, False, "random", False), (33, 19, 99, 57, True, "random", False),
+              (17, 11, 38, 25, False, "extreme_c", False), (16, 12, 16, 12, False, "offset_0.1", False),
+              (16, 12, 16, 12, True, "offset_0.05", False), (40, 24, 40, 24, False, "random", False),
+              (42, 26, 63, 39, False, "random", True), (26, 18, 52, 36, False, "specials", False),
+              (30, 18, 45, 27, False, "random", "extreme"), (22, 14, 50, 32, False, "specials", "extreme")]
+# expo "extreme": the exposure pair's e_prev far from 1 (the history divisions' quotients near the FP32 range ends,
+# FP32 denormal or infinite results) or not a positive normal number (NaN, negative, infinite)
+EXTREME_E_PREV = (1e-30, 3e-38, 1e30, 3e38, float("nan"), -1.5, float("inf"), 2.0 ** -126)
+POST_SLACK = 64   # sentinel bytes after each output: neither back end may write them
+
+
+def _post_specials(rng, x):
+    c = np.array(x["color"], np.float32)
+    pick = rng.random(c.shape[:2])
+    c[pick < 0.04] = np.nan
+    c[(pick >= 0.04) & (pick < 0.08)] = np.inf
+    c[(pick >= 0.08) & (pick < 0.12)] = 60000.0
+    x["color"] = c
+    h = np.array(x["history"], np.float32)
+    pick = rng.random(h.shape[:2])
+    h[pick < 0.03] = np.nan
+    h[(pick >= 0.03) & (pick < 0.06)] = np.inf
+    h[(pick >= 0.06) & (pick < 0.09)] = -1.0
+    x["history"] = h.astype(np.float16)
+    for k in ("m_near", "m_far"):
+        m = np.array(x[k], np.float32)
+        far = rng.random(m.shape[:2]) < 0.2
+        m[far] = rng.choice([-1, 1], (int(far.sum()), 2)) * 200.0
+        x[k] = m.astype(np.float16)
+    return x
+
+
+def _pack12(data):
+    """l_coef's images A, B (4 bytes per pixel, codes in bytes 0 ... 2) and C (4 x FP16) in l_coef_pack12's layout:
+    A8 = A0 A1 A2 B0 | B1 B2, C2 (8 bytes per pixel); C4 = C0, C1 (4 bytes per pixel); B unused (passed as null)."""
+    a = np.frombuffer(data["A"], np.uint32) & 0xFFFFFF
+    b = np.frombuffer(data["B"], np.uint32) & 0xFFFFFF
+    c = np.frombuffer(data["C"], np.uint16).reshape(-1, 4).astype(np.uint32)
+    a8 = np.stack([a | ((b & 0xFF) << 24), (b >> 8) | (c[:, 2] << 16)], -1).astype(np.uint32)
+    return {"A": a8.tobytes(), "B": b"", "C": (c[:, 0] | (c[:, 1] << 16)).astype(np.uint32).tobytes()}
+
+
+def post_cases(kernel, rng):
+    """l_post_recon (l_post.co): color, A, B, C, hist_prev, m_near, m_center, m_far, w (post blob, w[0] = s) ->
+    full history [dh][dw] (RGBA16F), reduced codes [dh / 2][dw / 2], display (3 FP16 planes of pitch
+    display_pitch(dw)); WgPostParams (64 bytes) by value; expo (null, or the two exposures). Bytes no back end writes
+    (the display rows' pitch padding, the slack after each buffer) must keep each back end's own sentinel."""
+    from clean.l.runner import l_post_check as LPC
+    from clean.runner import post as RP
+    cases = []
+    for (rw, rh, dw, dh, reset, kind, expo) in POST_CASES:
+        x = LPC.make_case(rng, rw, rh, dw, dh, reset, "random" if kind == "specials" else kind)
+        if kind == "specials":
+            x = _post_specials(rng, x)
+        prm = RP.post_params(x)
+        data = RP.post_device_inputs(x)
+        if expo:   # the exposures come from the pointer; the by-value fields hold other values
+            ev = np.array([prm.e, 0.0 if rng.random() < 0.5 else prm.e_prev], np.float32)
+            if expo == "extreme":
+                ev[1] = EXTREME_E_PREV[int(rng.integers(len(EXTREME_E_PREV)))]
+            prm.e, prm.e_prev = float(rng.uniform(0.5, 2.0)), float(rng.uniform(0.5, 2.0))
+        n_hist, n_red = dw * dh * 8, max(4, (dw // 2) * (dh // 2) * 4)
+        n_disp = RP.display_bytes(dw, dh)
+        pitch = RP.display_pitch(dw)
+        disp_def = np.zeros((3, dh, pitch, 2), bool)
+        disp_def[:, :, :dw, :] = True
+        red_def = np.zeros(n_red, bool)
+        red_def[:(dw // 2) * (dh // 2) * 4] = True
+        defined = [np.concatenate([np.ones(n_hist, bool), np.zeros(POST_SLACK, bool)]),
+                   np.concatenate([red_def, np.zeros(POST_SLACK, bool)]),
+                   np.concatenate([disp_def.reshape(-1), np.zeros(POST_SLACK, bool)])]
+        if kernel == "l_post_recon_p12":
+            data = dict(data, **_pack12(data))
+        args = [("null",) if data[k] == b"" else ("buf", data[k])
+                for k in ("color", "A", "B", "C", "hist_prev", "m_near", "m_center", "m_far")]
+        args += [("buf", RP.pack({"s": np.array(LPC.S)})), ("out", n_hist + POST_SLACK), ("out", n_red + POST_SLACK),
+                 ("out", n_disp + POST_SLACK), ("bytes", bytes(prm))]
+        args += [("buf", ev.tobytes())] if expo else [("null",)]
+        assert len(bytes(prm)) == 64
+        cases.append({"kernel": kernel, "co": "l_post.co", "grid": RP.recon_grid(dw, dh), "block": 256, "args": args,
+                      "defined": defined, "label": f"{rw}x{rh}->{dw}x{dh} {kind}" + (" expo" if expo else "")
+                      + (" reset" if reset else "")})
+    return cases
+
+
+# DXGI formats of the direct cases' textures: the exact FP32 values of the HIP kernel's buffers (color RGBA, depth,
+# motion RG); the output texture (written by no encoder) as the game's RGBA16F
+DXGI_R32G32B32A32_FLOAT, DXGI_R32G32_FLOAT, DXGI_R16G16B16A16_FLOAT, DXGI_R32_FLOAT = 2, 16, 10, 41
+
+
+def enc_direct_cases(kernel, rng):
+    """lev/input_encoder_direct (rs=direct): the frames of enc_cases, the same draws. HIP runs its twin, input_encoder of
+    l_enc_values.co, on the frame's buffers; the D3D12 port reads the same values from textures (kernel_replay `direct`
+    lines: color RGBA32F, depth R32F, motion RG32F; render rectangle at (0, 0), motion scale 1 and offset 0, color_pi
+    1), with the color argument a zeroed colour-table buffer (no table: native_direct.hlsli f16lut_in_valid) and the
+    depth and motion arguments null (not read). The same four outputs."""
+    cases = []
+    for case in enc_cases("lev/input_encoder", rng):
+        a = case["args"]
+        color, depth, motion = a[0][1], a[1][1], a[2][1]
+        prm = case["args"][-1][1]
+        rw, rh = (int(v) for v in np.frombuffer(prm[:8], np.int32))
+        d = dict(case, kernel=kernel)
+        d["replay_args"] = [("buf", bytes(64)), ("null",), ("null",)] + a[3:]
+        d["direct"] = [("color", DXGI_R32G32B32A32_FLOAT, rw, rh, color), ("depth", DXGI_R32_FLOAT, rw, rh, depth),
+                       ("motion", DXGI_R32G32_FLOAT, rw, rh, motion), ("output", DXGI_R16G16B16A16_FLOAT, rw, rh, None)]
+        d["direct_params"] = (0, 0, rw, rh)
+        cases.append(d)
+    return cases
+
+
 KINDS = {"l_linear_32_32_relu": linear_cases, "l_linear_32_32_f16": linear_cases,
          "l_project_gather": project_cases, "l_dec_project": project_cases, "l_coef": coef_cases,
-         "lev/input_encoder": enc_cases}
+         "l_coef_pack12": coef_cases, "lev/input_encoder": enc_cases, "l_post_recon": post_cases,
+         "l_post_recon_p12": post_cases, "lev/input_encoder_direct": enc_direct_cases,
+         "swin_block_c64_add_ex_nc": dec1_ex_cases}
 CONTROL_KINDS = {"swin_block_c96_nc": control_cases}
 CO = "l_ops.co"
 
@@ -203,7 +378,8 @@ def hip_run(g, mod, case):
         elif a[0] == "bytes":
             args.append((ctypes.c_ubyte * len(a[1])).from_buffer_copy(a[1]))
     try:
-        h.launch(h.get_function(mod, case.get("hip_kernel", case["kernel"])), case["grid"], case["block"], args)
+        h.launch(h.get_function(mod, case.get("hip_kernel", case["kernel"])), case["grid"],
+                 case.get("hip_block", case["block"]), args)
         h.sync()
         return [bytes(h.download(p, n)) for p, n in outs]
     finally:
@@ -214,8 +390,16 @@ def hip_run(g, mod, case):
 def replay_lines(name, case, cdir, grid=None, prefix=""):
     lines = [f"case {prefix}{name}", f"module {case.get('co', CO)}" + (f" {case['tag']}" if case.get("tag") else ""),
              f"kernel {case['kernel']} {grid or case['grid']} {case['block']}"]
+    for slot, fmt, w, h, data in case.get("direct", ()):
+        f = f"{name}.d_{slot}" if data is not None else "-"
+        if data is not None and not prefix:
+            with open(os.path.join(cdir, f), "wb") as fh:
+                fh.write(data)
+        lines.append(f"direct {slot} {fmt} {w} {h} {f}")
+    if case.get("direct_params"):
+        lines.append("direct_params " + " ".join(str(v) for v in case["direct_params"]))
     oi = 0
-    for i, a in enumerate(case["args"]):
+    for i, a in enumerate(case.get("replay_args", case["args"])):
         if a[0] in ("buf", "bytes"):
             f = f"{name}.a{i}"
             if not prefix:
@@ -232,7 +416,9 @@ def replay_lines(name, case, cdir, grid=None, prefix=""):
     return lines + [""]
 
 
-def run(build, rocm, seeds, kernels):
+def run(build, rocm, seeds, kernels, kinds=None):
+    """kinds: {kernel: case generator} (default this file's KINDS and CONTROL_KINDS). A case may name its HIP kernel
+    (hip_kernel) and HIP block size (hip_block) when the D3D12 port has none of its own."""
     g = C32.Gpu(build, rocm)
     mods = {}
 
@@ -242,7 +428,7 @@ def run(build, rocm, seeds, kernels):
                 mods[co] = g.hip.load_module(f.read())
         return mods[co]
 
-    kinds = dict(KINDS, **CONTROL_KINDS)
+    kinds = kinds or dict(KINDS, **CONTROL_KINDS)
     cdir = os.path.join(build, "replay-ops")
     os.makedirs(cdir, exist_ok=True)
     lines, hip_out, neg = [], {}, None
@@ -251,7 +437,8 @@ def run(build, rocm, seeds, kernels):
             rng = np.random.default_rng(seed)
             for ci, case in enumerate(kinds[kernel](kernel, rng)):
                 name = f"{kernel.replace('/', '_')}_s{si}_{ci}"   # lev/input_encoder: no folder in the file name
-                hip_out[name] = (kernel, hip_run(g, module(case.get("co", CO)), case))
+                hip_out[name] = (kernel, hip_run(g, module(case.get("co", CO)), case), case.get("defined"),
+                                 case.get("label"))
                 for oi, data in enumerate(hip_out[name][1]):   # kept next to the D3D12 outputs, for a look at a difference
                     with open(os.path.join(cdir, f"{name}.hip.o{oi}"), "wb") as fh:
                         fh.write(data)
@@ -271,31 +458,54 @@ def run(build, rocm, seeds, kernels):
     def read(path):
         return open(path, "rb").read() if os.path.exists(path) else b""
 
-    for name, (kernel, wants) in hip_out.items():
+    def compare(got, want, dmask):
+        """Raw bytes of one output: identical where a back end writes (dmask; None = every byte); where neither may
+        write, each keeps its own sentinel."""
+        a, b = np.frombuffer(got, np.uint8), np.frombuffer(want, np.uint8)
+        o = {"bytes": len(want), "hip_sentinel_bytes": int(np.sum(b == HIP_SENTINEL)),
+             "d3d12_sentinel_bytes": int(np.sum(a == D3D12_SENTINEL)) if a.size else -1}
+        if a.size != b.size:
+            return dict(o, identical=False, differ=-1)
+        m = np.ones(b.size, bool) if dmask is None else dmask
+        o["defined_bytes"] = int(m.sum())
+        o["differ"] = int(np.sum((a != b) & m))
+        o["unwritten_bad"] = int(np.sum(~m & ((b != HIP_SENTINEL) | (a != D3D12_SENTINEL))))
+        o["identical"] = o["differ"] == 0 and o["unwritten_bad"] == 0
+        return o
+
+    for name, (kernel, wants, defined, label) in hip_out.items():
         c = {"case": name, "kernel": kernel, "outputs": []}
+        if label:
+            c["label"] = label
         for oi, want in enumerate(wants):
             got = read(os.path.join(cdir, f"{name}.o{oi}"))
-            a, b = np.frombuffer(got, np.uint8), np.frombuffer(want, np.uint8)
-            c["outputs"].append({"bytes": len(want), "identical": got == want,
-                                 "differ": int(np.sum(a != b)) if a.size == b.size else -1,
-                                 "hip_sentinel_bytes": int(np.sum(b == HIP_SENTINEL)),
-                                 "d3d12_sentinel_bytes": int(np.sum(a == D3D12_SENTINEL)) if a.size else -1})
+            c["outputs"].append(compare(got, want, defined[oi] if defined else None))
         c["identical"] = all(o["identical"] for o in c["outputs"])
         res["cases"].append(c)
     caught = None
     if neg:
-        wants = hip_out[neg][1]
-        gots = [read(os.path.join(cdir, f"negative_{neg}.o{oi}")) for oi in range(len(wants))]
-        caught = all(len(gt) == len(w) for gt, w in zip(gots, wants)) and any(gt != w for gt, w in zip(gots, wants))
+        wants, defined = hip_out[neg][1], hip_out[neg][2]
+        outs = [compare(read(os.path.join(cdir, f"negative_{neg}.o{oi}")), w, defined[oi] if defined else None)
+                for oi, w in enumerate(wants)]
+        caught = all(o["differ"] >= 0 for o in outs) and any(not o["identical"] for o in outs)
         res["negative_control"] = {"case": neg, "half_grid": True, "caught": caught,
-                                   "differ": sum(int(np.sum(np.frombuffer(gt, np.uint8) != np.frombuffer(w, np.uint8)))
-                                                 for gt, w in zip(gots, wants) if len(gt) == len(w))}
+                                   "differ": sum(max(o["differ"], 0) for o in outs)}
     res["per_kernel"] = {k: {"cases": sum(c["kernel"] == k for c in res["cases"]),
                              "identical": sum(c["identical"] for c in res["cases"] if c["kernel"] == k),
-                             "bytes": sum(o["bytes"] for c in res["cases"] if c["kernel"] == k for o in c["outputs"])}
+                             "bytes": sum(o["bytes"] for c in res["cases"] if c["kernel"] == k for o in c["outputs"]),
+                             "differ": sum(max(o["differ"], 0) for c in res["cases"] if c["kernel"] == k
+                                           for o in c["outputs"])}
                          for k in kernels}
     res["pass"] = r.returncode == 0 and caught is True and all(v["cases"] > 0 and v["identical"] == v["cases"]
                                                                for v in res["per_kernel"].values())
+    if "l_post_recon" in kernels and "l_post_recon_p12" in kernels:
+        # The same cases (same seeds) on both coefficient forms: on HIP, the pack12 kernel's raw output bytes must be
+        # l_post_recon's.
+        pairs = [(n, n.replace("l_post_recon_", "l_post_recon_p12_", 1)) for n in hip_out
+                 if hip_out[n][0] == "l_post_recon"]
+        same = sum(hip_out[a][1] == hip_out[b][1] for a, b in pairs if b in hip_out)
+        res["p12_equals_base_on_hip"] = {"cases": len(pairs), "identical": same}
+        res["pass"] = res["pass"] and same == len(pairs) > 0
     return res
 
 

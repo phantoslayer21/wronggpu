@@ -184,6 +184,9 @@ def reconstruct(x, s, t=_table.TABLE, ldr=False):
     window = int(rc["window"])
     linear = rc["history_combine"] == "linear"
     lin_fallback = rc["fallback"] == "linear_colour"
+    f32 = rc.get("blend", "float64") == "float32"
+    r32 = _f32 if f32 else (lambda v: v)
+    fma = lambda a, b, c: np.asarray(_motion_hi.fma32(a, b, c), np.float64)  # noqa: E731 (float32, one rounding)
     enc, dec, enc_in = _transfer(ldr)
 
     color = np.asarray(x["color"], np.float64)
@@ -209,8 +212,11 @@ def reconstruct(x, s, t=_table.TABLE, ldr=False):
         W, fbar = gather(feat, x["C"], px, py, rw, rh, window)
     cbar, sig, gbar, bh, bo = fbar[..., 0:3], fbar[..., 3:6], fbar[..., 6], fbar[..., 7], fbar[..., 8]
 
-    # 3. motion candidates (Model M's rules)
-    fy, fx = _post.point_index(px, py, rw, rh)
+    # 3. motion candidates (Model M's rules), at render positions in float32: the gather's (the model's precision) or,
+    # with Model M's float64 gather, Model M's (post.target_positions_f32), as the kernels compute them
+    half = rc.get("gather", "float64") == "half"
+    mpx, mpy = (px, py) if half else _post.target_positions_f32(rw, rh, dw, dh, jx, jy)
+    fy, fx = _post.point_index(mpx, mpy, rw, rh)
     hi = bool(x.get("motion_output_res", False))
     nan_valid = bool(x.get("nan_position_valid", hi))
     first, second = _post.select_two(sig[..., 0], sig[..., 1], sig[..., 2])
@@ -236,7 +242,7 @@ def reconstruct(x, s, t=_table.TABLE, ldr=False):
         hs = _post.history_sample(hist, np.where(valid, qx, 0.5), np.where(valid, qy, 0.5)) if not reset else 0.0
         if linear:
             with np.errstate(invalid="ignore", over="ignore"):
-                hs = dec(hs) / e_prev
+                hs = r32(r32(dec(hs)) / e_prev)
         return np.where(valid[..., None], hs, fallback), nanq
 
     if hi:
@@ -246,26 +252,50 @@ def reconstruct(x, s, t=_table.TABLE, ldr=False):
         h1, nan_h = along(qx.astype(np.float64), qy.astype(np.float64))
         h2 = h1
     else:
-        m = [np.asarray(x["m_near"], np.float64)[fy, fx], _post.bilinear(x["m_center"], px, py),
-             np.asarray(x["m_far"], np.float64)[fy, fx]]
-        with np.errstate(invalid="ignore"):
-            al = [along(X + mk[..., 0], Y + mk[..., 1]) for mk in m]
+        # candidate positions in float32 as the kernel computes them (Model M's reference does the same since #142;
+        # spec: float32 unless stated): m_center's bilinear and q = X + m. The validity test 0 <= q <= D is a
+        # discontinuity: in float64 a real-weight frame had a position just past D that the kernel's float32
+        # arithmetic puts exactly on D (valid), and the two samples differ widely
+        F32 = np.float32
+        m = [np.asarray(x["m_near"], F32)[fy, fx], _post.bilinear_f32(x["m_center"], np.asarray(mpx, F32),
+                                                                      np.asarray(mpy, F32)),
+             np.asarray(x["m_far"], F32)[fy, fx]]
+        X32, Y32 = X.astype(F32), Y.astype(F32)
+        with np.errstate(invalid="ignore", over="ignore"):
+            al = [along((X32 + mk[..., 0]).astype(np.float64), (Y32 + mk[..., 1]).astype(np.float64)) for mk in m]
         Hk = np.stack([a[0] for a in al], axis=-1)
         nk = np.stack([a[1] for a in al], axis=-1)
         h1 = np.take_along_axis(Hk, first[..., None, None], -1)[..., 0]
         h2 = np.take_along_axis(Hk, second[..., None, None], -1)[..., 0]
         nan_h = sel(nk, first) | ((w2 != 0) & sel(nk, second))
     with np.errstate(invalid="ignore", over="ignore"):
-        H = np.where((w2 == 0)[..., None], w1[..., None] * h1, w1[..., None] * h1 + w2[..., None] * h2)
+        if f32:
+            # float32, one rounding per operation: Hl = f32(fused(w1 L1 + f32(w2 L2)) e) (w1 L1 alone when w2 = 0).
+            w1, w2 = r32(w1), r32(w2)
+            H = np.where((w2 == 0)[..., None], r32(w1[..., None] * h1),
+                         fma(w1[..., None], h1, r32(w2[..., None] * h2)))
+        else:
+            H = np.where((w2 == 0)[..., None], w1[..., None] * h1, w1[..., None] * h1 + w2[..., None] * h2)
 
         # 5. blend
-        C_lin = dec(cbar)
-        H_lin = H * e if linear else dec(H) / e_prev * e
-        alpha = _post.clamp(s * W * gbar, 0.0, 1.0)
-        bh2 = (alpha * (1.0 - bh) + bh)[..., None]
-        bo2 = (alpha * (1.0 - bo) + bo)[..., None]
-        Hh = H_lin + (C_lin - H_lin) * bh2
-        Oh = H_lin + (C_lin - H_lin) * bo2
+        if f32:
+            # alpha = sat(f32(f32(s W) g-bar)), beta' = fused(alpha f32(1 - beta-bar) + beta-bar),
+            # H^ = fused(f32(C - Hl) beta' + Hl), O^ likewise.
+            C_lin = r32(dec(cbar))
+            H_lin = r32(H * e)
+            alpha = _post.clamp(r32(r32(np.float32(s) * W) * gbar), 0.0, 1.0)
+            bh2 = fma(alpha, r32(1.0 - bh), bh)[..., None]
+            bo2 = fma(alpha, r32(1.0 - bo), bo)[..., None]
+            Hh = fma(r32(C_lin - H_lin), bh2, H_lin)
+            Oh = fma(r32(C_lin - H_lin), bo2, H_lin)
+        else:
+            C_lin = dec(cbar)
+            H_lin = H * e if linear else dec(H) / e_prev * e
+            alpha = _post.clamp(s * W * gbar, 0.0, 1.0)
+            bh2 = (alpha * (1.0 - bh) + bh)[..., None]
+            bo2 = (alpha * (1.0 - bo) + bo)[..., None]
+            Hh = H_lin + (C_lin - H_lin) * bh2
+            Oh = H_lin + (C_lin - H_lin) * bo2
         Hh = np.where((np.isnan(Hh.sum(-1)) | nan_h)[..., None], C_lin, Hh)
         Oh = np.where((np.isnan(Oh.sum(-1)) | nan_h)[..., None], C_lin, Oh)
 
@@ -286,5 +316,6 @@ def reconstruct(x, s, t=_table.TABLE, ldr=False):
             disp = _post.clamp(enc(Oh), 0.0, _post.DISPLAY_MAX)
     return {"history": _post.f16(enc(Hh)), "reduced": (code / 1023.0).astype(np.float32),
             "display": _post.f16(disp),
-            "_lin": {"H_hat": Hh, "O_hat": Oh, "W": W, "first": first, "second": second, "w1": w1, "w2": w2},
+            "_lin": {"H_hat": Hh, "O_hat": Oh, "W": W, "first": first, "second": second, "w1": w1, "w2": w2,
+                     "C_lin": C_lin, "H_lin": H_lin, "beta_h": bh2[..., 0], "beta_o": bo2[..., 0]},
             **({"display_codes": codes.astype(np.uint16)} if codes is not None else {})}

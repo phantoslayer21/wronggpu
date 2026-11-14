@@ -33,14 +33,17 @@
 // `features` [fh + 4][fw + 4][32]. The values come from the mirrored render position, the dither from the unmirrored
 // one (two byte loads at |Y| mod 16, |x| mod 16). When both halo columns of a lane mirror onto one render column
 // (x0 == x1), slot 1 takes slot 0's depth neighbourhood and centre motion and keeps its own dither. Motion surfaces only
-// for pixels inside R (0 <= Y < rh, 0 <= X0 < rw). Buffer form only.
+// for pixels inside R (0 <= Y < rh, 0 <= X0 < rw). Buffer form, and the direct form (the game's textures, as
+// input_encoder_direct: the same switch on the direct-texture loads; no HIP kernel of its own, the bytes of the buffer
+// form). Not with motion at output resolution.
 // @wg-kernel lev/input_encoder co=l_enc_values.co entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 defines=WG_ENC_VALUES_OUT=1
+// @wg-kernel lev/input_encoder_direct co=l_enc_values.co entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 rs=direct defines=WG_DIRECT_TEXTURES=1,WG_ENC_VALUES_OUT=1
 #include "wg_platform.hlsli"
 #ifndef WG_ENC_VALUES_OUT
 #define WG_ENC_VALUES_OUT 0
 #endif
-#if WG_ENC_VALUES_OUT && (defined(WG_DIRECT_TEXTURES) || defined(WG_ENC_MO))
-#error "WG_ENC_VALUES_OUT: buffer form at render resolution only"
+#if WG_ENC_VALUES_OUT && defined(WG_ENC_MO)
+#error "WG_ENC_VALUES_OUT: motion at render resolution only"
 #endif
 #if defined(WG_DIRECT_TEXTURES)
 #include "native_direct.hlsli"

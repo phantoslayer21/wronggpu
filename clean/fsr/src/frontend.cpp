@@ -156,13 +156,16 @@ bool LogPoint(uint64_t n) {  // 1, 2, 3, 10, 100, 1000, ...
     return n == 1;
 }
 
-bool OwnModelK(const std::string& options) {
+// The options (and WG_RUNTIME_OPTIONS) run the registry model `id` ("K", "L"), when this build offers it.
+bool OwnModel(const std::string& options, const char* id) {
     const char* name = RuntimeProviderName(options, std::getenv("WG_RUNTIME_OPTIONS"));
-    const WgEntryDef* k = nullptr;
+    const WgEntryDef* e = nullptr;
     for (int m = 0; m < WG_SR_MODEL_COUNT; ++m)
-        if (std::strcmp(kWgModelRows[m].name, "K") == 0) k = SrEntryOfModel(m);
-    return k && std::strcmp(name, EntryProviderName(*k)) == 0;
+        if (std::strcmp(kWgModelRows[m].name, id) == 0) e = SrEntryOfModel(m);
+    return e && std::strcmp(name, EntryProviderName(*e)) == 0;
 }
+
+bool OwnModelK(const std::string& options) { return OwnModel(options, "K"); }
 
 // A frame whose sizes do not fit its textures (a resolution change of the game: the stated render size is the old one,
 // the textures are the new ones, or the reverse) made usable for the stand-in: the regions are cut to the textures.
@@ -242,14 +245,15 @@ ffxReturnCode_t CreateAmdWithoutPrivateVersion(const OriginalApi& api, ffxContex
 
 }  // namespace
 
-#if WRONGGPU_MODEL_K
-FrontEnd::FrontEnd(Platform platform, Config config) : platform_(std::move(platform)), config_(std::move(config)), providerName_(RuntimeProviderName(config_.runtimeOptions, std::getenv("WG_RUNTIME_OPTIONS"))) {}
-#else
 FrontEnd::FrontEnd(Platform platform, Config config) : platform_(std::move(platform)), config_(std::move(config)) {
+#if !WRONGGPU_MODEL_K
     if (const std::string note = IgnoreModelK(config_); !note.empty()) Log(note);  // (config.h; one log line)
+#endif
+#if !WRONGGPU_MODEL_L
+    if (const std::string note = IgnoreModelL(config_); !note.empty()) Log(note);  // (config.h; one log line)
+#endif
     providerName_ = RuntimeProviderName(config_.runtimeOptions, std::getenv("WG_RUNTIME_OPTIONS"));
 }
-#endif
 
 FrontEnd::~FrontEnd() {
     // Contexts the game never destroyed: the process is ending; GPU objects are left to the runtime.
@@ -665,7 +669,7 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
                 return FFX_API_RETURN_ERROR_RUNTIME_ERROR;
             }
         }
-        ApplyModelDir(*u, tag);
+        const std::string refusal = ApplyModelDir(*u, tag);
         info.options = u->options.c_str();
         info.log = &UpscalerLog;
         info.log_user = u;
@@ -675,7 +679,7 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
         // Custom slot: the same upscaler with the same options failed earlier in this session: no new attempt.
         std::string remembered;
         uint64_t repeats = 0;
-        if (config_.customSlot) {
+        if (config_.customSlot && refusal.empty()) {
             std::lock_guard lock(mutex_);
             auto it = failedCreates_.find(FailureKey(backend, *u));
             if (it != failedCreates_.end()) {
@@ -683,7 +687,17 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
                 repeats = ++it->second.repeats;
             }
         }
-        if (!remembered.empty()) {
+        if (!refusal.empty()) {
+            // Nothing is created (ApplyModelDir: Model L without its file): the held lines go out, then the reason.
+            if (t_held) {
+                std::vector<std::string> lines = std::move(t_held->lines);
+                t_held->lines.clear();
+                t_held = nullptr;
+                for (const std::string& l : lines) Log(l);
+            }
+            why = refusal;
+            u->failReason = refusal;
+        } else if (!remembered.empty()) {
             if (t_held) {  // only the summary below, now and then (LogPoint); between those, nothing
                 t_held->lines.clear();
                 t_held->drop = !LogPoint(repeats);
@@ -701,11 +715,12 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
             t_held = nullptr;
             for (const std::string& l : lines) Log(l);
         }
-        if (remembered.empty()) Log(tag + " WrongGPU upscaler \"" + backend->name + "\" create: " + DescribeCreateInfo(info));
+        const bool attempt = remembered.empty() && refusal.empty();
+        if (attempt) Log(tag + " WrongGPU upscaler \"" + backend->name + "\" create: " + DescribeCreateInfo(info));
         double parkedMs = 0;
-        UpscaleContext* warm = remembered.empty() ? TakeParked(backend, *u, tag, &parkedMs) : nullptr;
-        if (remembered.empty()) parkGuard.settled = true;
-        if (!remembered.empty()) {
+        UpscaleContext* warm = attempt ? TakeParked(backend, *u, tag, &parkedMs) : nullptr;
+        if (attempt) parkGuard.settled = true;
+        if (!attempt) {
             // (nothing created: `why` says so; the fallback below decides)
         } else if (warm) {
             // The parked context object stays the upscaler's (its log callback and options point into it): it becomes
@@ -1007,12 +1022,14 @@ std::string FrontEnd::FailureKey(const WgUpscalerBackend* backend, const Upscale
            std::to_string(u.create.maxUpscaleSize.height) + "|" + std::to_string(u.create.flags);
 }
 
-void FrontEnd::ApplyModelDir(UpscaleContext& u, const std::string& tag) {
+std::string FrontEnd::ApplyModelDir(UpscaleContext& u, const std::string& tag) {
     bool inOptions = false, inEnv = false;
     OptionValue(u.options, "model_dir", &inOptions);
     const char* env = std::getenv("WG_RUNTIME_OPTIONS");
     if (env) OptionValue(env, "model_dir", &inEnv);
     const bool k = OwnModelK(u.options);
+    const bool l = !k && OwnModel(u.options, "L");
+    std::string refusal;  // Model L chosen and no converted Model L anywhere: the create is refused (the caller)
     bool kDir = false;
     if (k) {
         bool a = false, b = false;
@@ -1025,23 +1042,29 @@ void FrontEnd::ApplyModelDir(UpscaleContext& u, const std::string& tag) {
         line = std::string("model: ") + (kDir ? "model_k_dir" : "model_dir") + " from " + (inEnv ? "WG_RUNTIME_OPTIONS" : "runtime_options") +
                " decides (the front end's model lookup is not used)";
     } else {
-        if (!platform_.modelPlaces) return;
-        const ModelChoice c = ChooseModelDir(platform_.modelPlaces(), k, platform_.fileExists);
+        if (!platform_.modelPlaces) return std::string();
+        const ModelChoice c = ChooseModelDir(platform_.modelPlaces(), k ? 'K' : l ? 'L' : 'M', platform_.fileExists);
         u.options += c.option;
-        const char* model = k ? "Model K" : "Model M";
+        const char* model = k ? "Model K" : l ? "Model L" : "Model M";
         if (!c.option.empty())
             line = std::string("model: ") + model + " from " + c.file + " (passed to the runtime as model_dir); looked at: " + c.searched;
         else if (c.index >= 0)
             line = std::string("model: ") + model + " is not in the game's folders; the runtime looks in its own default place; looked at: " + c.searched;
         else
             line = std::string("model: no converted ") + model + " found; looked at: " + c.searched;
+        // Model L has no fallback model file: without its own file the runtime cannot start it, so the create is
+        // refused here with the reason (and what writes the file), not left to fail inside the runtime.
+        if (l && c.index < 0)
+            refusal = "Model L is chosen but no converted Model L was found (" + c.searched +
+                      "); WrongGPU.exe model convert --preset=L writes it";
     }
     {
         std::lock_guard lock(mutex_);
-        if (modelLogged_.count(line)) return;
+        if (modelLogged_.count(line)) return refusal;
         modelLogged_[line] = true;
     }
     Log(tag + " " + line);
+    return refusal;
 }
 
 void FrontEnd::Fail(UpscaleContext& u, const std::string& why, uint64_t call, bool error) {
@@ -1296,6 +1319,19 @@ bool FrontEnd::ConfiguredModel(int32_t* model, std::string* described) {
     bool isDefault = true;
     std::string text;
     const int32_t value = platform_.menu.get(WG_OPT_SR_MODEL, &text, &isDefault);
+#if !WRONGGPU_MODEL_L
+    if (!isDefault && value == WG_SR_MODEL_L) {  // a model this build lacks: refused by name, once (Model M runs)
+        const std::string line = "note: " + text + " is refused: Model L is not part of this build of the front end "
+                                 "(CMake WG_MODEL_L); Model M is used";
+        bool first = false;
+        {
+            std::lock_guard lock(mutex_);
+            first = !modelLogged_.count(line);
+            modelLogged_[line] = true;
+        }
+        if (first) Log(line);
+    }
+#endif
     if (isDefault || !SrEntryOfModel(value)) return false;
     *model = value;
     if (described) *described = text;

@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: MIT
-"""Model L's code objects against what the runtime launches (#89), without running them: l_enc_values.co, l_ops.co
-and l_swin.co are compiled (clean/l/runner/l_c32_check.py compile_kernels; HIP SDK clang, compile only), and each
-kernel the runtime frame launches (clean/runtime/runtime.cpp, clean/l/FORMATS.md) must be exported with the arguments
-the runtime passes: their number and sizes (a device address 8 bytes, an int 4, the encoder parameters WgEncParams
-116, the decoder parameters WgDecParams 56). The kernels' own metadata (the AMDGPU metadata note of each code object,
-amdhsa.kernels) is read here; nothing is loaded or executed. The argument kinds are the frame trace's table
+"""Model L's code objects against what the runtime launches (#89), without running them: l_enc_values.co, l_ops.co,
+l_swin.co and l_post.co are compiled (clean/l/runner/l_c32_check.py compile_kernels; HIP SDK clang, compile only),
+and each kernel the runtime frame launches (clean/runtime/runtime.cpp, clean/l/FORMATS.md) must be exported with the
+arguments the runtime passes: their number and sizes (a device address 8 bytes, an int 4, the encoder parameters
+WgEncParams 116, the decoder parameters WgDecParams 56, the reconstruction parameters WgPostParams 64). The kernels'
+own metadata (the AMDGPU metadata note of each code object, amdhsa.kernels) is read here; nothing is loaded or
+executed. The argument kinds are the frame trace's table
 (clean/tests/runtime_frame_trace.cpp), so the recorder that checks the runtime's arguments and the kernels agree.
 
 Skipped without the HIP SDK (ROCM_PATH or C:\\Program Files\\AMD\\ROCm\\7.2).
@@ -21,12 +22,13 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
-SIZES = {"p": 8, "i": 4, "E": 116, "D": 56}
+SIZES = {"p": 8, "i": 4, "E": 116, "D": 56, "P": 64}
 # the kernels the Model L frame launches, by code object (the lev tag of l_enc_values.co is the runtime's)
 LAUNCHED = {"l_enc_values.co": ["input_encoder"],
             "l_ops.co": ["l_linear_32_32_relu", "l_linear_32_32_f16", "l_project_gather", "l_dec_project", "l_coef"],
             "l_swin.co": ["l_swin_block_c32_enc", "l_swin_block_c32_enc_nc", "l_swin_block_c32_dec",
-                          "l_swin_block_c32_dec_nc"]}
+                          "l_swin_block_c32_dec_nc"],
+            "l_post.co": ["l_post_recon"]}
 _BUILD = None
 
 
@@ -55,7 +57,7 @@ def kinds_table():
     """{kernel name or prefix*: kinds} from the frame trace program's table."""
     with open(os.path.join(ROOT, "clean", "tests", "runtime_frame_trace.cpp"), encoding="utf-8") as f:
         text = f.read()
-    return dict(re.findall(r'\{"([A-Za-z0-9_*]+)", "([piED]+)"\}', text))
+    return dict(re.findall(r'\{"([A-Za-z0-9_*]+)", "([piEDP]+)"\}', text))
 
 
 def kinds_of(table, kernel):

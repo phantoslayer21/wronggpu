@@ -31,7 +31,7 @@ void log_line(const std::string& line) { std::cerr << "[wronggpu-convert] " << l
 
 void usage() {
     std::cout << "usage: wronggpu-convert --map <map.json> --dll <model dll> [--dll <other> ...]\n"
-                 "                        --out <dir> [--raw] [--threads N] [--preset M|K|F|L]\n"
+                 "                        --out <dir> [--raw] [--threads N] [--preset M|K|F|L|FG]\n"
                  "  --dll may be given several times; the files are tried in order: the first that converts\n"
                  "  completely is used (for a map with an optional group, such as preset M's output filter: the\n"
                  "  first that has the group, if any has it). The map names its preset (field \"preset\", or by its\n"
