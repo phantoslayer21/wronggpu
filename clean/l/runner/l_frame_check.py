@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: MIT
-"""Model L (issue #89): the runtime's Model L frame on HIP against the CPU reference, synthetic model and frames only.
-Model M's frame on the same harness is the control.
+"""Model L (issue #89): the runtime's Model L frame on HIP against the CPU reference, on synthetic frames, with a
+synthetic Model L or (--model) the converter's model.wgcm. Model M's frame on the same harness is the control.
 
     python clean/l/runner/l_frame_check.py --build <dir> --rocm <ROCm> --prepare     # CPU
+    python clean/l/runner/l_frame_check.py --build <dir> --rocm <ROCm> --prepare --model <model.wgcm> [--map <map>]
     python clean/l/runner/l_frame_check.py --build <dir> --rocm <ROCm> --run         # GPU, inside a GPU slot
     python clean/l/runner/l_frame_check.py --build <dir> --compare --json out.json   # CPU
 
 <dir> first holds Model M's code objects (python -m clean.runner.build --out <dir> --rocm <ROCm> --no-runtime
 --no-model-k). --prepare adds Model L's code objects (l_c32_check.compile_kernels), the runtime library with Model L
 (WG_MODEL_L; build.py has no Model L row yet) and the synthetic models: Model M in raw/, Model L as L/model.wgcm with
-its synthetic preset-L map (the runtime loads it through l::load_wgcm_model). --run runs the frame sequence SEQUENCE
+its synthetic preset-L map (the runtime loads it through l::load_wgcm_model). With --model, Model L is that file
+instead (WrongGPU.exe model convert --preset=L writes it), checked by the runtime against --map (default: the shipped
+data/preset-L.v1.map.json), and the reference gets the values the file holds; real weights, synthetic frames. The model
+file stays in <dir> and is never part of the repository. --run runs the frame sequence SEQUENCE
 through clean/runner/pipeline.py (backend HIP, every stage output read back) for Model L (runtime option model=L) and
 Model M (post_pack=none: the base coefficient format and post kernel Model L uses), and keeps the outputs in <dir>.
 Each model runs twice: with the bottleneck as six block launches (swin_bneck=none), the run the stages are checked on,
@@ -32,7 +36,9 @@ but against the float64 references with the kernels' GELU (sigmoid):
   acceptance of clean/l/runner/l_post_check.py), the reduced history codes within 1 and 99 % exact; the filter (when
   the post kernel writes a display image) as test_post_emu.py, against recon.output_filter / post.output_filter;
 - exposure: the runtime's value and the reference's, reported (not a pass condition).
-Output: counts only, no timing.
+Output: counts only, no timing. The summary gives per stage the values differing, the largest difference (FP8 steps,
+FP16 ulps or codes, as the stage's metric has it), the non-finite values on each side and the largest finite magnitude
+on each side (saturation shows as one side stopping where the other goes on).
 """
 import argparse
 import copy
@@ -58,6 +64,7 @@ SEQUENCE = [((96, 64), False), ((96, 64), False), ((96, 64), True), ((96, 64), F
             ((80, 48), False), ((80, 48), False), ((80, 48), False), ((77, 45), False), ((77, 45), True),
             ((77, 45), False)]
 PRE_EXPOSURE = 1.25
+DEFAULT_L_MAP = os.path.join(ROOT, "data", "preset-L.v1.map.json")
 
 
 def model_dir(build):
@@ -70,7 +77,13 @@ def l_map(build):
 
 # ---- --prepare (CPU) ------------------------------------------------------------------------------------------------
 
-def prepare(build, rocm):
+def _sha256(path):
+    import hashlib
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def prepare(build, rocm, model=None, map_path=None):
     from clean.l.reference import oracle as L
     from clean.l.runner import l_c32_check as C32
     from clean.runner import build as B
@@ -100,9 +113,22 @@ def prepare(build, rocm):
         shutil.rmtree(d)
     os.makedirs(os.path.join(d, "maps"))
     SM.write_raw(d, SM.synthetic_tensors(1))
-    raw_l = LL.raw_model(SEED)
-    synthetic_map = SM.write_wgcm(os.path.join(d, "L"), raw_l, order=list(LL.specs()), map_file=None)
-    shutil.copyfile(synthetic_map, l_map(build))
+    if model:
+        # a converter-written model.wgcm (WrongGPU.exe model convert --preset=L) and the map it was converted with:
+        # the runtime checks the file against that map; the reference gets the values the file holds
+        from clean.runner.pipeline import read_wgcm
+        os.makedirs(os.path.join(d, "L"))
+        shutil.copyfile(model, os.path.join(d, "L", "model.wgcm"))
+        shutil.copyfile(map_path or DEFAULT_L_MAP, l_map(build))
+        raw_l = read_wgcm(model)
+        source = {"kind": "converter", "model_sha256": _sha256(model), "map_sha256": _sha256(l_map(build))}
+    else:
+        raw_l = LL.raw_model(SEED)
+        synthetic_map = SM.write_wgcm(os.path.join(d, "L"), raw_l, order=list(LL.specs()), map_file=None)
+        shutil.copyfile(synthetic_map, l_map(build))
+        source = {"kind": "synthetic", "seed": SEED}
+    with open(os.path.join(d, "source.json"), "w") as f:
+        json.dump(source, f, indent=1)
     # the reference's parameters: the values the file holds, in the oracle's shapes and types
     p = L.random_params(np.random.default_rng(SEED))
     params_l = {}
@@ -172,8 +198,18 @@ def _f16_steps(a, b):
 def fp8_stage(got, ref):
     from clean.l.runner import l_c32_check as C32
     m = C32.metrics(got, ref)
+    m.update(_magnitudes(got, ref))
     m["pass"] = bool(C32.passes(m))
     return m
+
+
+def _magnitudes(got, ref):
+    """Largest magnitude of the finite values on each side and the reference's non-finite count: with real weights a
+    side that stops growing where the other goes on shows saturation, a non-finite reference an overflow in the model."""
+    g, r = np.asarray(got, np.float64), np.asarray(ref, np.float64)
+    fg, fr = np.isfinite(g), np.isfinite(r)
+    return {"ref_nonfinite": int(np.sum(~fr)), "got_absmax": float(np.abs(g[fg]).max()) if fg.any() else 0.0,
+            "ref_absmax": float(np.abs(r[fr]).max()) if fr.any() else 0.0}
 
 
 def motion_surface(got, ref):
@@ -205,6 +241,7 @@ def post_fp16(got, ref):
     m = {"values": int(s.size), "differ": int(np.sum(s > 0)), "max_f16_steps": int(s.max()) if s.size else 0,
          "nonfinite": int(np.sum(~finite)), "frac_over_1": float(np.mean(s > 1)), "frac_diff": float(np.mean(s > 0)),
          "mean_rel_rms": float(d.mean() / max(np.sqrt(np.mean(np.square(ref, dtype=np.float64))), 1e-30))}
+    m.update(_magnitudes(got, ref))
     m["pass"] = (m["nonfinite"] == 0 and m["frac_over_1"] <= 1e-4 and m["mean_rel_rms"] <= 1e-3
                  and m["frac_diff"] <= 0.01)
     return m
@@ -342,13 +379,20 @@ def summary(frames):
         for stage, part in m.items():
             if stage in ("frame", "render", "reset", "parity", "pass", "stage_pass", "exposure"):
                 continue
-            s = out.setdefault(stage, {"frames": 0, "passed": 0, "values": 0, "differ": 0})
+            s = out.setdefault(stage, {"frames": 0, "passed": 0, "values": 0, "differ": 0, "max_diff": 0,
+                                       "nonfinite": 0, "ref_nonfinite": 0, "got_absmax": 0.0, "ref_absmax": 0.0})
             s["frames"] += 1
             s["passed"] += int(m["stage_pass"].get(stage, True))
             for v in part.values() if isinstance(part, dict) else []:
                 if isinstance(v, dict):
                     s["values"] += v.get("values", 0)
                     s["differ"] += v.get("differ", v.get("outside", 0))
+                    # the largest difference: FP8 steps (per-stage rule), FP16 ulps or codes, as the metric has it
+                    s["max_diff"] = max([s["max_diff"]] + [int(x) for k, x in v.items() if k.startswith("max_")])
+                    s["nonfinite"] += v.get("nonfinite", 0)
+                    s["ref_nonfinite"] += v.get("ref_nonfinite", 0)
+                    s["got_absmax"] = max(s["got_absmax"], v.get("got_absmax", 0.0))
+                    s["ref_absmax"] = max(s["ref_absmax"], v.get("ref_absmax", 0.0))
             if stage == "filter":
                 s["values"] += part["values"]
                 s["differ"] += part["outside"]
@@ -399,6 +443,11 @@ def compare(build, json_path):
                                             "differing_outputs": sorted({k for d in same for k in d})},
                       "pass": all(m["pass"] for m in frames) and not any(same)}
     res["pass"] = res["L"]["pass"] and res["M"]["pass"]
+    src = os.path.join(model_dir(build), "source.json")
+    if os.path.exists(src):
+        with open(src) as f:
+            res["L"]["source"] = json.load(f)
+        print("Model L source:", json.dumps(res["L"]["source"]))
     with open(json_path, "w") as f:
         json.dump(res, f, indent=1, default=lambda o: o.item() if hasattr(o, "item") else str(o))
     for model in ("L", "M"):
@@ -422,9 +471,16 @@ def main(argv=None):
     ap.add_argument("--plain", action="store_true",
                     help="--run: frames without random_inputs' special values (NaN / huge / negative colours, NaN "
                          "depths, motion leaving the frame)")
+    ap.add_argument("--model", help="--prepare: a converter-written Model L model.wgcm in place of the synthetic model")
+    ap.add_argument("--map", help="--prepare with --model: the map it was converted with (default: the shipped "
+                                  "data/preset-L.v1.map.json)")
     a = ap.parse_args(argv)
+    if (a.model or a.map) and not a.prepare:
+        ap.error("--model and --map go with --prepare")
+    if a.map and not a.model:
+        ap.error("--map goes with --model")
     if a.prepare:
-        prepare(a.build, a.rocm)
+        prepare(a.build, a.rocm, a.model, a.map)
         return 0
     if a.run:
         run(a.build, a.rocm, special=not a.plain)
