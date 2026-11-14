@@ -11,6 +11,8 @@ front end or the launcher yet. Status, open items and formats: [FORMATS.md](FORM
 | `tests/test_fg_layout.py` | the table against the totals the spec side gives |
 | `reference/ops.py` | NumPy CPU reference of the networks' building blocks: float16 convolution (3 x 3, 1 x 1) with bias and ReLU, 2x pooling, bilinear 2x upscale (align corners), element-wise combines, net1's input features and 2 x 2 fold; each open behaviour is a required argument or raises `OpenItem` |
 | `tests/test_fg_reference.py` | the building blocks against plain loop versions, on synthetic data |
+| `reference/forward.py` | both networks' forward pass: each layer from its stage's parameters (from blobs or the converter's raw output), and a network run from a wiring the caller supplies (conv / pool / upscale / add / concat / slice steps); the wiring, the natural weight order, the border rule and net1's blob 2 are required arguments |
+| `tests/test_fg_forward.py` | every layer of both networks against a direct NumPy convolution on synthetic weights; each step kind; wiring checks; stand-in wirings against layers composed by hand; parameters from blobs and from raw files |
 | `../converter` (preset FG) | the converter reads a version-1 map with `"preset": "FG"`: one block source per weight blob; see the converter's README, "Preset FG" |
 | `reference/config.py` | the settled per-call configuration: the multi-frame intermediate time (one single-precision division), the index checks and flags, UI recomposition (FG preset A / B) with the profile values that force it |
 | `tests/test_fg_config.py` | the intermediate time against exactly rounded quotients, the index rules, every forcing profile value |

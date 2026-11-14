@@ -45,7 +45,21 @@ delivered by the spec side; the code never guesses it (it raises, or takes the c
 - Required arguments where the behaviour is OPEN: the convolution border rule (`pad`: zero, replicate or mirror),
   ReLU after a net2 layer (`relu_after`), the pooling kind (`kind`: max or avg), net1's feature channel order
   (`order`), the fold order inside a cell (`order`). What the cell padding holds is OPEN too (zeros here).
-- `net1_forward` and `net2_forward` raise `OpenItem`: the wiring of both networks is not delivered.
+- `ops.net1_forward` and `ops.net2_forward` raise `OpenItem`: the original's wiring is not delivered.
+
+## Forward pass (`reference/forward.py`)
+
+- Parameters per layer (layout names `net1_01`..`net2_25`): storage-order weights and the bias, from blobs
+  (`params_from_blobs`) or from the converter's `--raw` output of the preset-FG map (`params_from_raw`, stages
+  `dl1.lNN` / `dl2.lNN`; every value checked to be exact in float16).
+- `run_layer`: one convolution with `ops.conv2d`. `run_graph`: a network as a list of steps (`conv` with its layer and
+  ReLU flag, `pool` with its kind, `upscale`, `add`, `concat`, `slice`), checked before it runs (known steps, exact
+  fields, buffers written once before they are read, each layer used at most once). `net1_forward` adds the 2 x 2
+  fold before and the unfold (16 values per cell to 4 per pixel) after; `net2_forward` returns the named buffers.
+- Required arguments (OPEN): `wiring` (the steps); `weight_view` (storage to natural `[out, k, k, in]`: map v1 holds
+  the weights as stored, the natural view comes with v1.1; `view_by_axes` covers a plain axis reorder); `pad`; `blob2`
+  ("1x1" runs net1's blob 2 as a 1 x 1 convolution, "2x2" raises `OpenItem`); `fold_order`. The real wiring plugs in
+  as data; the layers do not change.
 
 ## Configuration (`reference/config.py`)
 
