@@ -227,9 +227,16 @@ uint sw_gelu_m(uint g)
     return (SW_GELU_PAT / (ix == 0u ? 1000u : ix == 1u ? 100u : ix == 2u ? 10u : 1u)) % 10u;
 }
 struct SwGeluPre { uint2 e[GROUP][8]; };
+#ifndef TT_GELU
+#define TT_GELU 0
+#endif
 SwGeluPre sw_gelu_pre(v8f h[GROUP])
 {
     SwGeluPre r;
+#if TT_GELU
+    [unroll] for (uint g0 = 0; g0 < GROUP; ++g0) [unroll] for (uint i0 = 0; i0 < 8; ++i0) r.e[g0][i0] = uint2(0, 0);
+    return r;
+#endif
     [unroll] for (uint g = 0; g < GROUP; ++g) {
         if (sw_gelu_m(g) == 1u) {
             const wg_gelu_lut_e a = wg_gelu_lut_fetch8(h[g]);
@@ -251,6 +258,27 @@ SwGeluPre sw_gelu_pre(v8f h[GROUP])
 }
 void sw_gelu_fin(v8f h[GROUP], SwGeluPre p, out uint2 q[GROUP])
 {
+#if TT_GELU == 3
+    [unroll] for (uint g0 = 0; g0 < GROUP; ++g0) {
+        const uint2 c = wg_pack_q8_nc_ags(h[g0]);   // the 8 codes
+        uint b[8];
+        [unroll] for (uint i0 = 0; i0 < 4; ++i0) {
+            b[i0] = wg_mem.Load(x + ((c.x >> (8u * i0)) & 255u) * 4u);
+            b[4 + i0] = wg_mem.Load(x + ((c.y >> (8u * i0)) & 255u) * 4u);
+        }
+        q[g0] = uint2((b[0] & 255u) | ((b[1] & 255u) << 8) | ((b[2] & 255u) << 16) | (b[3] << 24),
+                      (b[4] & 255u) | ((b[5] & 255u) << 8) | ((b[6] & 255u) << 16) | (b[7] << 24));
+    }
+    return;
+#elif TT_GELU == 4
+    [unroll] for (uint g0 = 0; g0 < GROUP; ++g0) {
+        const uint2 c = wg_pack_q8_nc_ags(h[g0]);
+        const uint b0 = wg_mem.Load(x + (c.x & 65535u) * 4u), b1 = wg_mem.Load(x + (c.x >> 16) * 4u);
+        const uint b2 = wg_mem.Load(x + (c.y & 65535u) * 4u), b3 = wg_mem.Load(x + (c.y >> 16) * 4u);
+        q[g0] = uint2((b0 & 65535u) | (b1 << 16), (b2 & 65535u) | (b3 << 16));
+    }
+    return;
+#endif
     [unroll] for (uint g = 0; g < GROUP; ++g) {
         v8f y;
         if (sw_gelu_m(g) != 0u) {
@@ -479,16 +507,33 @@ void sw_load_halo_f16(uint base, int pr, int pc, int W, uint hh, out v8f f[KC])
 #include "l_lin_px.hlsli"
 // LHaloLinSrc: the values of LHaloF16Src without the x2 map: the member at grid position (pr, pc) is pixel
 // (pr + 2) (W + 4) + pc + 2 of the FP8 q halo map, through l_linear_32_32_fused's arithmetic (lane (t, h) = that
-// kernel's lane of the pixel; every lane runs it, also for outside members: wave-uniform control flow)
+// kernel's lane of the pixel; every lane runs it, also for outside members: wave-uniform control flow). The map's
+// 20-byte form (two planes): lane half h = 0 loads bytes 0..15 from the first plane, h = 1 bytes 16..19 from the
+// second and takes zeros for 20..31 (the 32-byte form's zero bytes): the same fragments as from the 32-byte map.
 void sw_load_halo_lin(uint base, int pr, int pc, int W, uint lane, uint hh, out v8f f[KC])
 {
     const uint pix = (uint)((pr + 2) * (W + 4) + pc + 2);
     uint2 xq[2];
-    [unroll] for (uint kc = 0; kc < 2u; ++kc) xq[kc] = wg_ld64(base, pix * 32u + hh * 16u + 8u * kc);
+    const uint plane1 = (uint)((H + 4) * (W + 4)) * 16u;
+    const uint4 v = wg_ld128(base, hh != 0u ? plane1 + pix * 4u : pix * 16u);   // h = 1: .x = bytes 16..19
+    xq[0] = uint2(v.x, hh != 0u ? 0u : v.y);
+    xq[1] = hh != 0u ? uint2(0u, 0u) : v.zw;
     v8f b1[2], b2[2];
     uint2 f1[2][2], f2[2][2];
     lin_blob(linW1, lane, hh, b1, f1);
     lin_blob(linW2, lane, hh, b2, f2);
+#if defined(TT_LINF32) && TT_LINF32
+    {   // no FP16 rounding points: x1 = q8(relu(acc)), x2 = acc (FP32)
+        uint2 x1[2];
+        [unroll] for (uint m1 = 0; m1 < 2u; ++m1) {
+            v8f r = lin_acc(b1[m1], f1[m1], xq);
+            [unroll] for (uint j = 0; j < 8u; ++j) r.v[j] = wg_fmax(r.v[j], 0.0f);
+            x1[m1] = wg_pack_q8_ags(r);
+        }
+        [unroll] for (uint k8 = 0; k8 < KC; ++k8) f[k8] = lin_acc(b2[k8], f2[k8], x1);
+        return;
+    }
+#endif
     uint4 y[2];
     lin_pair(xq, b1, f1, b2, f2, y);
     [unroll] for (uint k = 0; k < KC; ++k) {

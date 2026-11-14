@@ -195,6 +195,8 @@ def base(kernel):
     whose arguments it shares."""
     k = kernel.replace("_nc", "")
     post = ("l_post_recon_p12", "l_post_recon_ldr", "l_post_recon_p12_ldr")   # pack12 and LDR forms
+    if k.startswith("lev/input_encoder") and k.endswith("_q20"):   # the q20 forms (fusion le): the same arguments
+        return k[:-len("_q20")]
     return "l_coef" if k == "l_coef_pack12" else "l_post_recon" if k in post else k
 
 
@@ -638,7 +640,8 @@ class D3D12(unittest.TestCase):
                                           (NO_ENCLIN, full_ports(), True, True, False),
                                           (None, without(ENCLIN), True, True, False),
                                           (None, without(ENCLIN, LIN), True, False, False),
-                                          (None, without(LIN), True, False, True)):
+                                          (None, without(LIN), True, False, True),
+                                          (None, without("lev/input_encoder_q20"), True, True, False)):
             with self.subTest(fusion=env, fold_in_manifest=any(kc[0] == FOLD for kc in ports),
                               lin_in_manifest=any(kc[0] == LIN for kc in ports),
                               enclin_in_manifest=any(kc[0] == ENCLIN for kc in ports)):

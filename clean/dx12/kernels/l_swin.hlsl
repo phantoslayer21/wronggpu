@@ -18,7 +18,8 @@
 //   l_swin_block_c32_dec_nc  the decoder block: FP8 map in with the token-grid mirror (SW_SRC 2), FP16 out (SW_OUT_F16)
 //   l_swin_block_c32_enc_lin_nc  D3D12 only: the encoder block with the two input linears as its prologue (SW_SRC 3;
 //                            byte for byte the pair l_linear_32_32_fused -> _enc_nc, which stays the fallback route):
-//                            the FP8 q halo map in, x2 neither written nor read. Arguments: _enc_nc's (x = q), then
+//                            the FP8 q halo map in its 20-byte form (lev/input_encoder_q20) in, x2 neither
+//                            written nor read. Arguments: _enc_nc's (x = q), then
 //                            enc0.Win1, enc0.Win2
 //
 // @wg-kernel l_swin_block_c32_nc co=l_swin.co block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=0,SW_ENTRY_OVERRIDE=l_swin_block_c32_nc
