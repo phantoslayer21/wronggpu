@@ -208,6 +208,16 @@ def _post_specials(rng, x):
     return x
 
 
+def _pack12(data):
+    """l_coef's images A, B (4 bytes per pixel, codes in bytes 0 ... 2) and C (4 x FP16) in l_coef_pack12's layout:
+    A8 = A0 A1 A2 B0 | B1 B2, C2 (8 bytes per pixel); C4 = C0, C1 (4 bytes per pixel); B unused (passed as null)."""
+    a = np.frombuffer(data["A"], np.uint32) & 0xFFFFFF
+    b = np.frombuffer(data["B"], np.uint32) & 0xFFFFFF
+    c = np.frombuffer(data["C"], np.uint16).reshape(-1, 4).astype(np.uint32)
+    a8 = np.stack([a | ((b & 0xFF) << 24), (b >> 8) | (c[:, 2] << 16)], -1).astype(np.uint32)
+    return {"A": a8.tobytes(), "B": b"", "C": (c[:, 0] | (c[:, 1] << 16)).astype(np.uint32).tobytes()}
+
+
 def post_cases(kernel, rng):
     """l_post_recon (l_post.co): color, A, B, C, hist_prev, m_near, m_center, m_far, w (post blob, w[0] = s) ->
     full history [dh][dw] (RGBA16F), reduced codes [dh / 2][dw / 2], display (3 FP16 planes of pitch
@@ -235,7 +245,10 @@ def post_cases(kernel, rng):
         defined = [np.concatenate([np.ones(n_hist, bool), np.zeros(POST_SLACK, bool)]),
                    np.concatenate([red_def, np.zeros(POST_SLACK, bool)]),
                    np.concatenate([disp_def.reshape(-1), np.zeros(POST_SLACK, bool)])]
-        args = [("buf", data[k]) for k in ("color", "A", "B", "C", "hist_prev", "m_near", "m_center", "m_far")]
+        if kernel == "l_post_recon_p12":
+            data = dict(data, **_pack12(data))
+        args = [("null",) if data[k] == b"" else ("buf", data[k])
+                for k in ("color", "A", "B", "C", "hist_prev", "m_near", "m_center", "m_far")]
         args += [("buf", RP.pack({"s": np.array(LPC.S)})), ("out", n_hist + POST_SLACK), ("out", n_red + POST_SLACK),
                  ("out", n_disp + POST_SLACK), ("bytes", bytes(prm))]
         args += [("buf", ev.tobytes())] if expo else [("null",)]
@@ -248,7 +261,8 @@ def post_cases(kernel, rng):
 
 KINDS = {"l_linear_32_32_relu": linear_cases, "l_linear_32_32_f16": linear_cases,
          "l_project_gather": project_cases, "l_dec_project": project_cases, "l_coef": coef_cases,
-         "l_coef_pack12": coef_cases, "lev/input_encoder": enc_cases, "l_post_recon": post_cases}
+         "l_coef_pack12": coef_cases, "lev/input_encoder": enc_cases, "l_post_recon": post_cases,
+         "l_post_recon_p12": post_cases}
 CONTROL_KINDS = {"swin_block_c96_nc": control_cases}
 CO = "l_ops.co"
 
@@ -390,6 +404,14 @@ def run(build, rocm, seeds, kernels):
                          for k in kernels}
     res["pass"] = r.returncode == 0 and caught is True and all(v["cases"] > 0 and v["identical"] == v["cases"]
                                                                for v in res["per_kernel"].values())
+    if "l_post_recon" in kernels and "l_post_recon_p12" in kernels:
+        # The same cases (same seeds) on both coefficient forms: on HIP, the pack12 kernel's raw output bytes must be
+        # l_post_recon's.
+        pairs = [(n, n.replace("l_post_recon_", "l_post_recon_p12_", 1)) for n in hip_out
+                 if hip_out[n][0] == "l_post_recon"]
+        same = sum(hip_out[a][1] == hip_out[b][1] for a, b in pairs if b in hip_out)
+        res["p12_equals_base_on_hip"] = {"cases": len(pairs), "identical": same}
+        res["pass"] = res["pass"] and same == len(pairs) > 0
     return res
 
 

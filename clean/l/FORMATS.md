@@ -61,7 +61,7 @@ No kernel works in place.
 |---|---|---|
 | `l_enc_values.co` (loaded under the tag `lev`) | `clean/kernels/encoder.hip` with `-DWG_ENC_VALUES_OUT=1` | `input_encoder` |
 | `l_ops.co` | `clean/l/kernels/l_ops.hip` | `l_linear_32_32_relu`, `l_linear_32_32_f16`, `l_project_gather`, `l_dec_project`, `l_coef`, `l_coef_pack12` |
-| `l_post.co` | `clean/l/kernels/l_post.hip` (includes Model M's `clean/kernels/post.hip` for its functions; Model M's kernels come along unused) | `l_post_recon` (HDR) |
+| `l_post.co` | `clean/l/kernels/l_post.hip` (includes Model M's `clean/kernels/post.hip` for its functions; Model M's kernels come along unused) | `l_post_recon`, `l_post_recon_p12` (HDR) |
 | `l_swin.co` | `clean/l/kernels/l_swin.hip` | `l_swin_block_c32[_nc]` (exists, #102: FP8 in / FP8 out, mirror border; block checks only), `l_swin_block_c32_enc[_nc]`, `l_swin_block_c32_dec[_nc]` |
 
 All are built with `clean/runner/build.py`'s `device_command`. The build's `-cuid` comes from the output file name,
@@ -136,6 +136,11 @@ the frame parity, as Model M's.
    - its candidate combination is one fused multiply-add w1 L1 + (w2 L2), then times e;
    - its blend is the fused form beta' = fused(alpha (1 - beta-bar) + beta-bar), H^ = fused((C - Hl) beta' + Hl);
    - the decode passes a NaN through.
+
+   `l_post_recon_p12` (`l_post.co`) is the same kernel on the pack12 coefficients of `l_coef_pack12`: `A` = image A8
+   (8 bytes per render pixel), `C` = image C4 (4 bytes per render pixel), `B` unused (may be null); the other arguments,
+   the grid and the outputs as `l_post_recon`, byte for byte (`clean/l/runner/l_d3d12_ops_check.py` checks it on HIP).
+   The D3D12 ports of both are `clean/dx12/kernels/l_post.hlsl`.
 
    The LDR kernel is planned, with the same arguments. Still open for the kernel-order model: the hardware exp2,
    reciprocal and divisions, and the Catmull-Rom weight forms, which the kernel takes from Model M's `post.hip`
