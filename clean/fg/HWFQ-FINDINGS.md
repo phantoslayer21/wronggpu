@@ -137,6 +137,30 @@ Build both from an x64 Native Tools prompt:
   - A process without administrator rights cannot read the panel's power state directly, and nothing was elevated or
     changed to find out.
 
+## 5. Experiment: AMD's frame generation swap chain with our stand-in frame (test only)
+
+`clean/fg/ffx_swapchain_test.cpp` measures whether AMD's public FSR SDK frame generation swap chain can present a frame
+that we supply, and how it paces it. Nothing from the SDK is in this repository, and nothing is shipped.
+- The test loads AMD's signed loader and frame generation DLLs from a folder outside the repository.
+- It creates the frame generation swap chain and the frame generation context.
+- It supplies our stand-in frame through the documented `frameGenerationCallback`. AMD's own interpolation is never
+  dispatched.
+- It reports:
+  - return codes and callback counts;
+  - the GPU memory the API and DXGI report for the idle context;
+  - on-screen intervals from the swap chain's frame statistics;
+  - observable signs of the pacing path: the runtime's own messages, process CPU time, and the busiest threads with
+    their priorities.
+
+Fetch the SDK files at the pinned commit (tag v2.4.0), outside the repository, then build against them:
+
+    python clean/fg/fetch_ffx_sdk.py <sdk folder>
+    cl /nologo /W4 /EHsc /std:c++17 /O2 ffx_swapchain_test.cpp /I<sdk folder>\Kits\FidelityFX\api\include /I<sdk folder>\Kits\FidelityFX\framegeneration\include d3d12.lib dxgi.lib dcomp.lib user32.lib
+    ffx_swapchain_test --sdk <sdk folder>\Kits\FidelityFX\signedbin --mode borderless --vsync 0
+
+The licence of the fetched files is in `<sdk folder>\Kits\FidelityFX\docs\license.md`. No results yet: they need a live
+monitor, like section 4.
+
 **Not tested:** on-screen frame-to-frame evenness (mean, standard deviation, p99, misses) for either route. It needs a
 live monitor (or a display emulator with an EDID). The same short runs will be repeated then, and their numbers added
 with their records.
