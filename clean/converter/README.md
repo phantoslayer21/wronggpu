@@ -32,12 +32,15 @@ data damaged". This is how a further preset that reuses an existing map version 
 **Preset L** (Model L, issue #89) is such a row: `"preset": "L"` in a map of version 1 or 4. Its maps use the record
 kinds of preset M's (no new element format, op or source kind); its parameters are a block of their own in the same
 library file as preset M's, found by its own length and hashes like any source. Its map,
-`data/preset-L.v1.map.json` (map version 1; sources W, D and K), has no `"preset"` field, so the caller names the
-preset: `wronggpu-convert --map data\preset-L.v1.map.json --preset L --dll <nvngx_dlss.dll> --out <dir>` (API:
-`load_map_bytes(..., "L")`). `--preset` reads a map without the field as that preset when the preset uses the map's
-version; a map with the field must name the same preset; anything else is "converter data damaged", and an unknown
-`--preset` is a usage error (exit 1). Without `--preset` the preset-L map reads as a version-1 map (preset M's message).
-`tests/run_tests.py` checks the real map (validation, the messages, `--preset` mismatches) and converts our own random
+`data/preset-L.v1.map.json` (the spec side's revision v1.1; map version 1; sources W, D and K), names its preset
+(`"preset": "L"`), so `wronggpu-convert --map data\preset-L.v1.map.json --dll <nvngx_dlss.dll> --out <dir>` reads it as
+preset L. A caller may still name the preset (`--preset L`; API `load_map_bytes(..., "L")`): a map without the field is
+then read as that preset when the preset uses the map's version; a map with the field must name the same preset;
+anything else is "converter data damaged", and an unknown `--preset` is a usage error (exit 1). Its perm
+`dec0_values` is L's own 13-entry table (role order A0, A1, A2, B0, B1, B2, Cx, Cy, Crho, latent candidate 0..3; role i
+reads decoder-block channel `dec0_values[i]`; L has no latent gate); no tensor reads it, so it is for the packer and
+runtime, and the converted tensors do not depend on it.
+`tests/run_tests.py` checks the real map (validation, the messages, `--preset` mismatches, the 13-entry table) and converts our own random
 data in its exact layout at two placements. It also covers preset L with a synthetic library file holding an L block
 directly before an M block, and maps for both: each converts its own block, and a file without a preset's block fails
 with that preset's message. It also converts an **L-shaped** map
