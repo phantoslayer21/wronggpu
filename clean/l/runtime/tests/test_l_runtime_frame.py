@@ -736,6 +736,18 @@ class D3D12(unittest.TestCase):
                         self.assertEqual(lev.args[4], latent_out(prev[1]))  # the latent the last frame's store wrote
                     prev = (lev, coef)
 
+    def test_color_early_option(self):
+        """Runtime option l_color_early=on (the direct-resource route's colour staging after the input encoder): reported
+        in the kernel line; on the buffer route (no staging) the frames launch exactly what they launch without it."""
+        args = dict(frames=3, build_files=FT.SHIPPING, rw=96, rh=64, flags=("--backend=3",), manifest=self.own_ports())
+        on = FT.Trace(run("model=L,l_color_early=on", **args))
+        off = FT.Trace(run("model=L", **args))
+        self.assertEqual(on.create, "create ok model L")
+        self.assertEqual(on.kernels.get("l_color_early"), "on")
+        self.assertIsNone(off.kernels.get("l_color_early"))
+        self.assertEqual([[(ln.kernel, ln.args) for ln in f["launches"]] for f in on.frames],
+                         [[(ln.kernel, ln.args) for ln in f["launches"]] for f in off.frames])
+
     def test_no_model_m_post_route(self):
         """Model L never runs Model M's post: every route traced (HDR and LDR colour; HIP and native D3D12; pack12 and
         fallback frames) launches Model L's reconstruction and no Model M post kernel; l_post=m is refused; where Model
