@@ -30,7 +30,8 @@ CONVERSION = ('native_staged_input_conversion','native_staged_output_conversion'
 POST='w64/post_tf_f32_p12_diet_vsit'
 
 
-# The neural launches with the native D3D12 fusions of runtime.cpp kDefaultD3d12Fusion (pm,xe,mb,rv,xo,xd): enc2's block
+# The neural launches with the native D3D12 fusions of runtime.cpp kDefaultD3d12Fusion (pm,xe,mb,rv,xo,xd; its lc is
+# Model L's): enc2's block
 # with enc1's merge in reverse order (pm, rv), the bottleneck with enc2's merge and the overlap counters (mb, xo), dec2's
 # block with dec1's expand (xe) launched as xd on frames of at most kXdMaxPixels render pixels (WG_D3D12_XD_MAX_PIXELS)
 # else xo, and the fused dec1 + dec0 in its xd form on those frames. Set by main from --shape (COMMON above: the

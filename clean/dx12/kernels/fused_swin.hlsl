@@ -450,6 +450,16 @@ void load_frags_g(uint base, uint off, out uint2 f[KC])
 #if (SW_SRC != 0 || SW_OUT_F16) && (SW_ADD || SW_ECL > 0)
 #error "SW_SRC / SW_OUT_F16: plain blocks only"
 #endif
+#ifndef SW_OUT_COEF12
+#define SW_OUT_COEF12 0
+#endif
+#if SW_OUT_COEF12
+#if !SW_OUT_F16 || SW_C != 32
+#error "SW_OUT_COEF12: Model L's decoder block only (SW_OUT_F16, C = 32)"
+#endif
+#define COEF_PACK12 1
+#include "l_coef_px.hlsli"
+#endif
 #if SW_SRC == 1
 // LHaloF16Src: the lane's channels hh * C/2 + 8 k + j of the member at grid position (pr, pc) (inside the 2-pixel halo),
 // from the FP16 map [H + 4][W + 4][C]
@@ -1129,6 +1139,18 @@ WG_KERNEL(SW_ENTRY)
     // Output RN16(x2) as FP16, real window members only (HIP LStoreF16Epi).
     uint4 o16[KC];
     [unroll] for (uint kf = 0; kf < KC; ++kf) o16[kf] = wg_to_f16(acc[kf]);
+#if SW_OUT_COEF12
+    // l_coef_pack12 of the map: o16[0] / o16[1] of the hh = 0 lane are the pixel's channels 0..7 / 8..15 (the map's
+    // bytes dst * 64 + 0 .. 31, its lo / hi loads); Model L's 13 values are all among them
+    if (dst >= 0 && hh == 0u && pr < coefRh && pc < coefRw) {
+        g_z = wg_grid_ >> 31;
+        const float S = wg_ldf(coefW, 320u), T = wg_ldf(coefW, 324u);
+        const uint pA = (uint)wg_uniform((int)coefA), pC = (uint)wg_uniform((int)coefC),
+                   pL = (uint)wg_uniform((int)coefL);
+        l_coef_px(o16[0], o16[1], S, T, pA, 0u, pC, pL, (uint)(pr * coefRw + pc));
+    }
+    return;
+#endif
     if (dst >= 0) {
         const uint ob16 = ((uint)dst * SW_C + hh * HALF) * 2u;
         [unroll] for (uint kg = 0; kg < KC; ++kg) wg_st128(out_p, ob16 + 16u * kg, o16[kg]);

@@ -12,4 +12,9 @@
 // @wg-kernel l_swin_block_c32_nc co=l_swin.co block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=0,SW_ENTRY_OVERRIDE=l_swin_block_c32_nc
 // @wg-kernel l_swin_block_c32_enc_nc co=l_swin.co block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=1,SW_SRC=1,SW_ENTRY_OVERRIDE=l_swin_block_c32_enc_nc
 // @wg-kernel l_swin_block_c32_dec_nc co=l_swin.co block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=1,SW_SRC=2,SW_OUT_F16=1,SW_ENTRY_OVERRIDE=l_swin_block_c32_dec_nc
+//   l_swin_block_c32_dec_coef12_nc  D3D12 only: the decoder block with l_coef_pack12 as its epilogue (SW_OUT_COEF12;
+//                                   byte for byte the pair _dec_nc -> l_coef_pack12, which stays the fallback route);
+//                                   the FP16 map is not written. Arguments: _dec_nc's (out unused), then A, C, latent,
+//                                   dec0.coef, rw, rh
+// @wg-kernel l_swin_block_c32_dec_coef12_nc co=- block=256 wave=32 args=p,p,p,p,u,u,u,u,p,p,p,p,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=1,SW_SRC=2,SW_OUT_F16=1,SW_OUT_COEF12=1,SW_ENTRY_OVERRIDE=l_swin_block_c32_dec_coef12_nc
 #include "swin_block.hlsl"
