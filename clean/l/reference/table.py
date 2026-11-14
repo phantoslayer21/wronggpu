@@ -3,7 +3,8 @@
 runtime and the tests.
 
 Every consumer interprets this table instead of hard-coding L's structure, so a provisional entry can be changed
-without touching code. Entries listed in PROVISIONAL are pending confirmation; each carries a short key (I5 ...).
+without touching code. Entries listed in PROVISIONAL are pending confirmation; each carries a short key (I7 ...).
+UNCONFIRMED lists behaviour the reference had to choose without a confirmation (edge cases).
 
 Parameters are grouped by the converter map's stages (data/preset-L.v1.map.json): "enc0", "enc0_block", the ten
 shared stages, "dec0_block", "dec0", "post". SHARED_STAGES run with Model M's code and stage table
@@ -23,9 +24,14 @@ SHARED_STAGES = ("enc1", "enc2", "b0", "b1", "b2", "b3", "b4", "b5", "dec2", "de
 M_BLOCK_CONSTS = {"tau": _swin.TAU, "cap": _swin.CAP, "eps_num": 2.0 ** -13, "gelu": "exact",
                   "window": _swin.WIN, "head_dim": _swin.HEAD_DIM}
 
-# The value positions of the coefficient decoder (the map's perm "dec0_values"): value k of a render pixel is
-# channel DEC0_VALUES[k] of its 32.
-DEC0_VALUES = (0, 1, 10, 11, 12, 13, 14, 15, 16, 2, 3, 4, 5, 6, 7, 8, 9)
+# Model M's value positions (the map's perm "dec0_values", 17 values: A 0-2, B 3-5, C 6-8, latent gates 9-12,
+# candidates 13-16 in clean/reference/decoder.py order): value k is channel M_DEC0_VALUES[k]. Model L does not use it.
+M_DEC0_VALUES = (0, 1, 10, 11, 12, 13, 14, 15, 16, 2, 3, 4, 5, 6, 7, 8, 9)
+
+# Model L's value positions, 13 of the decoder block's 32 channels: value k is block channel L_DEC_VALUES[k], value
+# order A0 A1 A2, B0 B1 B2, C x y rho, latent candidates 0-3 (no gates). The other 19 channels feed no output but
+# stay in the block. The preset-L map from v1.1 on carries this list as perm "dec0_values" (v1 carried Model M's).
+L_DEC_VALUES = (0, 1, 6, 7, 8, 9, 10, 11, 12, 2, 3, 4, 5)
 
 # ---- the table ------------------------------------------------------------------------------------------------------
 
@@ -37,52 +43,59 @@ TABLE = {
     # size: the pixel grid F, or the token grid F/2 after space_to_depth (2 x 2 pixels, sub-pixel p = dx + 2 dy,
     # channel = n p + i). Tensors are read from the stage named by "params" (default "enc0"). A linear's "acc" is the
     # rounding of bias + products before "out_round" ("relu_q8" = q8(max(0, .))). The last op is "project" (the 64 FP8
-    # features enc1 reads): running sum s = b, s = RN16(s + group) per channel group, clamp, FP8.
+    # features enc1 reads): running sum s = b, s = RN16(s + group) per channel group, clamp, FP8. out_round "none"
+    # after acc "f16" keeps the FP16 value (the block then starts from FP16, not FP8). A swin op's "border" names how
+    # window members outside the grid get their values: "mirror" (clean/reference/swin.py, about the map size),
+    # "input" (the per-pixel ops before the block are evaluated at those positions: the 20 values at the mirrored
+    # render position, the dither at the unmirrored one) or "coarse" (the token-grid mirror, sub-pixel kept).
     "enc_ops": (
-        {"op": "quant", "mode": "dither", "src": "values", "dst": "q"},                                   # I5
-        {"op": "linear", "src": "q", "dst": "x", "w": "Win1", "b": "bin1", "n_in": 20, "n_out": 32,
-         "acc": "f16", "out_round": "relu_q8"},                                                           # I11
-        {"op": "linear", "src": "x", "dst": "x", "w": "Win2", "b": "bin2", "n_in": 32, "n_out": 32,
-         "acc": "f16", "out_round": "q8"},                                                                # I11
-        {"op": "swin", "src": "x", "dst": "x", "params": "enc0_block", **C32_BLOCK, "offsets": "first",
-         "out_round": "q8"},                                                                              # I10, I6
-        {"op": "space_to_depth", "src": "x", "dst": "z"},
-        {"op": "project", "src": "z", "w": "W", "b": "b", "groups": (32, 32, 32, 32), "n_out": 64,
-         "clamp": 6.28125},                                                                               # I12
+        {"op": "quant", "mode": "dither", "src": "values", "dst": "q"},
+        {"op": "linear", "src": "q", "dst": "x1", "w": "Win1", "b": "bin1", "n_in": 20, "n_out": 32,
+         "acc": "f16", "out_round": "relu_q8"},
+        {"op": "linear", "src": "x1", "dst": "x2", "w": "Win2", "b": "bin2", "n_in": 32, "n_out": 32,
+         "acc": "f16", "out_round": "none"},
+        {"op": "swin", "src": "x2", "dst": "x3", "params": "enc0_block", **C32_BLOCK, "offsets": "first",
+         "border": "input", "out_round": "q8"},
+        {"op": "space_to_depth", "src": "x3", "dst": "z"},
+        {"op": "project", "src": "z", "dst": "enc0.features", "w": "W", "b": "b", "groups": (32, 32, 32, 32),
+         "n_out": 64, "clamp": 6.28125},
     ),
     # Coefficient decoder: ops on dec1's map ("features", [fh/2, fw/2, 64]). "dec_project": rows W [4, 32, 64] with
     # Model M's dec0 rounding (RN16 after each group of 32 input channels, then FP8), output [fh/2, fw/2, 4 x 32]
-    # (sub-pixel s = dx + 2 dy, channel 32 s + c); "depth_to_space" makes it a pixel map [fh, fw, 32]; "pick" takes
-    # the value positions of the coefficient functions, which then run as Model M's (clean/reference/decoder.py).
+    # (sub-pixel s = dx + 2 dy, channel 32 s + c); "depth_to_space" makes it a pixel map [fh, fw, 32]; the block's
+    # output stays FP16; "pick" takes the value positions of the per-pixel functions named by "dec_pixel": "l"
+    # (Model L's: A, B, C as Model M's, latent = tanh(candidate), no gate, no previous latent) or "m" (Model M's,
+    # clean/reference/decoder.py, 17 values).
     "dec_ops": (
-        {"op": "dec_project", "src": "features", "dst": "y", "w": "W", "b": "b", "groups": (32, 32),
-         "out_round": "q8"},                                                                              # I13
-        {"op": "depth_to_space", "src": "y", "dst": "p"},
-        {"op": "swin", "src": "p", "dst": "p", "params": "dec0_block", **C32_BLOCK, "offsets": "second",
-         "out_round": "q8"},                                                                              # I10, I14
-        {"op": "pick", "src": "p", "values": DEC0_VALUES},                                                # I14
+        {"op": "dec_project", "src": "features", "dst": "yt", "w": "W", "b": "b", "groups": (32, 32),
+         "out_round": "q8"},
+        {"op": "depth_to_space", "src": "yt", "dst": "y"},
+        {"op": "swin", "src": "y", "dst": "y2", "params": "dec0_block", **C32_BLOCK, "offsets": "second",
+         "border": "coarse", "out_round": "f16"},
+        {"op": "pick", "src": "y2", "values": L_DEC_VALUES},
     ),
-    "dec_pixel": "m",                                                                                     # I8
+    "dec_pixel": "l",
     "post_variant": "unfolded",                                                                           # I8
     # Reconstruction variants and the rule that picks one per frame from the render and output sizes ("rule" names
     # the comparison, "ratio" its factor). Only the 3/2 form (D = floor((3 O + 1) / 2)) exists in WrongGPU so far.
     "recon": {"rule": "both_axes_at_least", "ratio": 3, "variants": ("3/2", "3/1")},                    # I7
-    # Window offsets (ox, oy) of an L block for frame parity 0 and 1; the blocks run on the padded grid F.
-    "window_offsets": {"first": ((2, 2), (0, 2)), "second": ((0, 0), (2, 0))},                          # I10
+    # Window offsets (ox, oy) of an L block for frame parity 0 and 1, in pixels; the blocks run on the padded grid F
+    # and keep every grid position's output.
+    "window_offsets": {"first": ((2, 2), (0, 2)), "second": ((0, 0), (2, 0))},
     # Per-block constants; a block's own entry (key = its params stage) wins over "default".
-    "consts": {"default": dict(M_BLOCK_CONSTS)},                                                          # I6
+    "consts": {"default": dict(M_BLOCK_CONSTS)},
 }
 
+DEC_PIXEL_VALUES = {"l": len(L_DEC_VALUES), "m": len(M_DEC0_VALUES)}
+
 PROVISIONAL = {
-    "I5": "enc_ops quant mode (dither table or plain FP8 rounding)",
-    "I6": "consts of the width-32 blocks",
     "I7": "recon: the 3/1 form and the exact rule",
-    "I8": "dec_pixel (coefficient functions as Model M's), post_variant",
-    "I10": "window_offsets of the width-32 blocks, and their grid (F)",
-    "I11": "acc / out_round of the input linears",
-    "I12": "project clamp and group structure",
-    "I13": "dec_project rounding",
-    "I14": "pick value positions and the rounding of the decoder block's output",
+    "I8": "post_variant",
+}
+
+UNCONFIRMED = {
+    "U1": "encoder halo: a mirrored render position below 0 (only when fw + halo > 2 rw - 2, i.e. render sizes near "
+          "the padding) is clamped to 0",
 }
 
 
@@ -104,6 +117,14 @@ def block_consts(t, name):
 
 def block_offset(t, kind, parity):
     return tuple(t["window_offsets"][kind][int(parity) & 1])
+
+
+BORDERS = ("mirror", "input", "coarse")
+
+
+def block_halo(t, kind):
+    """Pixels beyond the grid that a block's windows reach (grid sides multiples of the window): the largest offset."""
+    return max(max(o) for o in t["window_offsets"][kind])
 
 
 # ---- parameter shapes -----------------------------------------------------------------------------------------------
@@ -177,6 +198,13 @@ def _plan(ops, maps, what, last):
         elif k == "swin":
             if src[1] != op["C"]:
                 raise ValueError(f"swin: input has {src[1]} channels, block width {op['C']}")
+            border = op.get("border", "mirror")
+            if border not in BORDERS:
+                raise ValueError(f"swin: unknown border {border!r}")
+            if border != "mirror" and src[0] != "pixel":
+                raise ValueError(f"swin: border {border!r} needs a pixel-level map")
+            if border == "input" and any(p[0] not in ("quant", "linear", "select", "concat") for p in plan):
+                raise ValueError("swin: border 'input' needs only per-pixel ops before the block")
             out = src
         elif k == "concat":
             parts = [maps[s] for s in op["srcs"]]
