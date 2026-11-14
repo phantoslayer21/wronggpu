@@ -32,8 +32,10 @@ but against the float64 references with the kernels' GELU (sigmoid):
 - dec0: Model L's decoder (oracle decode) or Model M's (clean/reference/decoder.py) on the runtime's dec1 output: the
   A, B and latent codes and the C values, each at least 99.5 % identical (l_c32_check's end-to-end bound);
 - post: Model L's reconstruction (l_post_recon) against clean/l/reference/recon.py reconstruct, Model M's against
-  clean/reference/post.py reconstruct: history and display under test_post_emu.py's FP16 acceptance (also the
-  acceptance of clean/l/runner/l_post_check.py), the reduced history codes within 1 and 99 % exact; the filter (when
+  clean/reference/post.py reconstruct: history and display under test_post_emu.py's FP16 acceptance for Model M, and
+  for Model L under Model L's post acceptance (clean/l/runner/l_post_check.py, provisional: values more than one ulp
+  off at most 0.01 % over the run and 0.05 % per frame, for the hardware-log2 reason given there), the reduced
+  history codes within 1 and 99 % exact; the filter (when
   the post kernel writes a display image) as test_post_emu.py, against recon.output_filter / post.output_filter;
 - exposure: the runtime's value and the reference's, reported (not a pass condition).
 Output: counts only, no timing. The summary gives per stage the values differing, the largest difference (FP8 steps,
@@ -53,6 +55,8 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
 sys.path.insert(0, ROOT)
+
+from clean.l.runner import l_post_check as LP  # noqa: E402 (Model L's post acceptance)
 
 L_SOURCES = [os.path.join("..", "l", "runtime", "l_model.cpp"), os.path.join("..", "l", "runtime", "l_pack.cpp")]
 SEED = 89
@@ -234,16 +238,22 @@ def same_values(got, ref):
             "max_f16_steps": int(_f16_steps(g[dif], r[dif]).max()) if dif.any() else 0}
 
 
-def post_fp16(got, ref):
+def post_fp16(got, ref, model="M"):
     finite = np.isfinite(got)
     s = _f16_steps(got, ref)
     d = np.abs(np.where(finite, got, 0.0).astype(np.float64) - ref)
     m = {"values": int(s.size), "differ": int(np.sum(s > 0)), "max_f16_steps": int(s.max()) if s.size else 0,
-         "nonfinite": int(np.sum(~finite)), "frac_over_1": float(np.mean(s > 1)), "frac_diff": float(np.mean(s > 0)),
+         "nonfinite": int(np.sum(~finite)), "frac_over_1": float(np.mean(s > 1)), "over_1": int(np.sum(s > 1)),
+         "frac_diff": float(np.mean(s > 0)),
          "mean_rel_rms": float(d.mean() / max(np.sqrt(np.mean(np.square(ref, dtype=np.float64))), 1e-30))}
     m.update(_magnitudes(got, ref))
-    m["pass"] = (m["nonfinite"] == 0 and m["frac_over_1"] <= 1e-4 and m["mean_rel_rms"] <= 1e-3
-                 and m["frac_diff"] <= 0.01)
+    if model == "L":
+        # Model L's post acceptance (clean/l/runner/l_post_check.py, provisional): per frame at most 0.05 % more than
+        # one ulp off; the run-level 0.01 % is checked in compare()
+        m["pass"] = LP.l_post_rule(m["values"], m["nonfinite"], m["over_1"], m["differ"], m["mean_rel_rms"])
+    else:
+        m["pass"] = (m["nonfinite"] == 0 and m["frac_over_1"] <= 1e-4 and m["mean_rel_rms"] <= 1e-3
+                     and m["frac_diff"] <= 0.01)
     return m
 
 
@@ -339,9 +349,9 @@ def compare_model(rec, params):
               "jitter": fr["jitter"], "reset": eff_reset, "recon_size": D}
         s_post = float(np.asarray(params["post"]["s"]).reshape(-1)[0])
         ref = R.reconstruct(xp, s_post) if model == "L" else Po.reconstruct(xp, s_post)
-        m["post"] = {"history": post_fp16(out["post"]["history"], ref["history"])}
+        m["post"] = {"history": post_fp16(out["post"]["history"], ref["history"], model)}
         if out["post"]["display"] is not None:
-            m["post"]["display"] = post_fp16(out["post"]["display"], ref["display"])
+            m["post"]["display"] = post_fp16(out["post"]["display"], ref["display"], model)
         dc = codes(out["post"]["reduced"], ref["reduced"], 1023.0)
         dc["pass"] = dc["max_code_diff"] <= 1 and dc["differ"] <= 0.01 * dc["values"]
         m["post"]["reduced"] = dc
@@ -442,6 +452,10 @@ def compare(build, json_path):
                       "default_identical": {"frames": len(same), "identical": sum(not d for d in same),
                                             "differing_outputs": sorted({k for d in same for k in d})},
                       "pass": all(m["pass"] for m in frames) and not any(same)}
+        if model == "L":  # Model L's run-level limit on post values more than one ulp off (provisional)
+            res[model]["post_run"] = {k: LP.l_post_run([m["post"][k] for m in frames if k in m["post"]])
+                                      for k in ("history", "display")}
+            res[model]["pass"] = res[model]["pass"] and all(r["pass"] for r in res[model]["post_run"].values())
     res["pass"] = res["L"]["pass"] and res["M"]["pass"]
     src = os.path.join(model_dir(build), "source.json")
     if os.path.exists(src):
