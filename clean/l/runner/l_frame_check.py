@@ -27,9 +27,10 @@ but against the float64 references with the kernels' GELU (sigmoid):
 - the ten Swin stages (clean/reference/swin.py run_stage), each output under the per-stage rule;
 - dec0: Model L's decoder (oracle decode) or Model M's (clean/reference/decoder.py) on the runtime's dec1 output: the
   A, B and latent codes and the C values, each at least 99.5 % identical (l_c32_check's end-to-end bound);
-- post (clean/reference/post.py reconstruct): history and display under test_post_emu.py's FP16 acceptance, the
-  reduced history codes within 1 and 99 % exact; the filter (when the post kernel writes a display image) as
-  test_post_emu.py;
+- post: Model L's reconstruction (l_post_recon) against clean/l/reference/recon.py reconstruct, Model M's against
+  clean/reference/post.py reconstruct: history and display under test_post_emu.py's FP16 acceptance (also the
+  acceptance of clean/l/runner/l_post_check.py), the reduced history codes within 1 and 99 % exact; the filter (when
+  the post kernel writes a display image) as test_post_emu.py, against recon.output_filter / post.output_filter;
 - exposure: the runtime's value and the reference's, reported (not a pass condition).
 Output: counts only, no timing.
 """
@@ -121,30 +122,33 @@ def prepare(build, rocm):
 
 # ---- --run (GPU) ----------------------------------------------------------------------------------------------------
 
-def frame_inputs(rng, rw, rh, reset):
+def frame_inputs(rng, rw, rh, reset, special=True):
     from clean.reference import encoder as En
-    x = En.random_inputs(rng, rw=rw, rh=rh, fw=-(-rw // 32) * 32, fh=-(-rh // 32) * 32)
+    x = En.random_inputs(rng, rw=rw, rh=rh, fw=-(-rw // 32) * 32, fh=-(-rh // 32) * 32, special=special)
     return {"color": x["color"], "depth": x["depth"], "motion": x["motion"], "mv_scale": x["mv_scale"],
             "jitter": x["jitter"], "exposure": 1.0, "pre_exposure": PRE_EXPOSURE, "reset": reset}
 
 
-def run(build, rocm):
+def run(build, rocm, special=True):
     from clean.runner.hip import clean_process_environment
     clean_process_environment(rocm)
     from clean.runner.pipeline import Pipeline
     d = model_dir(build)
+    # Model L: HDR colour (its reconstruction kernel l_post_recon is HDR; the runtime refuses Model L without it)
     setups = {"L": dict(map_path=l_map(build), check_packing=False, kernels={"options": "model=L"}),
               "M": dict(check_packing=True, kernels={"pack": "none"})}
+    flags = {"L": {"depth_inverted": False, "auto_exposure": True, "hdr": True},
+             "M": {"depth_inverted": False, "auto_exposure": True}}
     for model, kw in setups.items():
         # "stages": the bottleneck as six block launches, so that b0 ... b4 are written (the default megakernel writes
         # only b5's output); "default": the runtime's default kernels, which must give the same bytes
         for config in ("stages", "default"):
             k = dict(kw, kernels=dict(kw["kernels"], **({"bneck": "none"} if config == "stages" else {})))
-            p = Pipeline(build, rocm, d, MAX_RENDER, OUTPUT, {"depth_inverted": False, "auto_exposure": True}, **k)
+            p = Pipeline(build, rocm, d, MAX_RENDER, OUTPUT, flags[model], **k)
             rng = np.random.default_rng(SEED)
             frames = []
             for (rw, rh), reset in SEQUENCE:
-                fr = frame_inputs(rng, rw, rh, reset)
+                fr = frame_inputs(rng, rw, rh, reset, special)
                 out = p.frame(fr, debug=True)
                 frames.append({"inputs": fr, "out": out})
             rec = {"model": model, "config": config, "kernels": p.kernels(), "notes": p.notes(),
@@ -212,6 +216,7 @@ def compare_model(rec, params):
     from clean.reference import decoder as MD
     from clean.reference import encoder as ME
     from clean.reference import exposure as Ex
+    from clean.l.reference import recon as R
     from clean.reference import post as Po
     from clean.reference import swin as S
     model = rec["model"]
@@ -295,7 +300,8 @@ def compare_model(rec, params):
               "history": out["state"]["history_prev"] if not eff_reset else np.zeros((D[1], D[0], 3), np.float32),
               "m_near": out["enc0"]["m_near"], "m_center": out["enc0"]["m_center"], "m_far": out["enc0"]["m_far"],
               "jitter": fr["jitter"], "reset": eff_reset, "recon_size": D}
-        ref = Po.reconstruct(xp, float(np.asarray(params["post"]["s"]).reshape(-1)[0]))
+        s_post = float(np.asarray(params["post"]["s"]).reshape(-1)[0])
+        ref = R.reconstruct(xp, s_post) if model == "L" else Po.reconstruct(xp, s_post)
         m["post"] = {"history": post_fp16(out["post"]["history"], ref["history"])}
         if out["post"]["display"] is not None:
             m["post"]["display"] = post_fp16(out["post"]["display"], ref["display"])
@@ -306,6 +312,8 @@ def compare_model(rec, params):
             disp, e = out["post"]["display"], out["exposure"]["e"]
             if rec["taps"] is not None:
                 fo = Po.output_filter_original(disp, e, (rec["ow"], rec["oh"]), rec["taps"])
+            elif model == "L":
+                fo = R.output_filter(disp, e, (rec["ow"], rec["oh"]))
             else:
                 fo = Po.output_filter(disp, e, (rec["ow"], rec["oh"]))
             fo = (np.asarray(fo, np.float32) * pi).astype(np.float32)
@@ -411,12 +419,15 @@ def main(argv=None):
     g.add_argument("--run", action="store_true")
     g.add_argument("--compare", action="store_true")
     ap.add_argument("--json")
+    ap.add_argument("--plain", action="store_true",
+                    help="--run: frames without random_inputs' special values (NaN / huge / negative colours, NaN "
+                         "depths, motion leaving the frame)")
     a = ap.parse_args(argv)
     if a.prepare:
         prepare(a.build, a.rocm)
         return 0
     if a.run:
-        run(a.build, a.rocm)
+        run(a.build, a.rocm, special=not a.plain)
         return 0
     return compare(a.build, a.json or os.path.join(a.build, "lframe_check.json"))
 
