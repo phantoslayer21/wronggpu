@@ -343,7 +343,9 @@ struct Runtime {
   //       l_swin.hlsl SW_SRC 3; byte for byte the linears -> l_swin_block_c32_enc_nc): one launch less, and x2 (64 bytes
   //       a pixel of the halo map) is neither stored nor read back: the block reads q (32 bytes) from l_narrow. Over ll
   //       when both are on. Without le, or with a manifest that lacks the kernel, the linears and the block run
-  bool fz_le = false, l_le_built = false;
+  //       The block reads q in its 20-byte form, which the q20 input encoder writes (lev/input_encoder_q20 /
+  //       _direct_q20): le needs that kernel too
+  bool fz_le = false, l_le_built = false, l_q20_built = false, l_q20d_built = false;
   long long xd_max_pixels = [] {
     const char* e = std::getenv("WG_D3D12_XD_MAX_PIXELS");
     return e && *e ? std::atoll(e) : kXdMaxPixels;
@@ -561,6 +563,8 @@ struct Runtime {
       l_fold_built = std::find(have.begin(), have.end(), "l_swin_block_c32_dec_coef12_nc") != have.end();
       l_lin_built = std::find(have.begin(), have.end(), "l_linear_32_32_fused") != have.end();
       l_le_built = std::find(have.begin(), have.end(), "l_swin_block_c32_enc_lin_nc") != have.end();
+      l_q20_built = std::find(have.begin(), have.end(), "lev/input_encoder_q20") != have.end();
+      l_q20d_built = std::find(have.begin(), have.end(), "lev/input_encoder_direct_q20") != have.end();
     }
 #endif
     if (c.max_rw <= 0 || c.max_rh <= 0 || c.ow <= 0 || c.oh <= 0) return fail("invalid render or output size");
@@ -1587,14 +1591,15 @@ struct Runtime {
     DevPtr wv = wdev["enc0.values"], w1 = wdev["enc0.Win1"], w2 = wdev["enc0.Win2"], wp = wdev["enc0.project"];
     int npix = (fh + 4) * (fw + 4), tw = fw / 2, th = fh / 2;
     const bool fused = fz_ll && l_lin_built;  // (native D3D12 only: l_lin_built)
-    const bool in_block = fz_le && l_le_built && l_nc[0];  // fusion le: the linears in the block (its _nc form)
+    // fusion le: the linears in the block (its _nc form), q in the 20-byte form from the q20 input encoder
+    const bool in_block = fz_le && l_le_built && l_nc[0] && (native_direct_io ? l_q20d_built : l_q20_built);
     DevPtr& q = fused || in_block ? l_narrow : l_wide;  // q's map (fused / in the block: not under x2)
     if (in_block) {
       DevPtr none = 0, wb = wdev["enc0_block"];
       int ox = 0, oy = 0;
       l_offsets(false, f, &ox, &oy);
       const int nwin = ((fw + ox + 3) / 4) * ((fh + oy + 3) / 4);
-      return launch(native_direct_io ? "lev/input_encoder_direct" : "lev/input_encoder",
+      return launch(native_direct_io ? "lev/input_encoder_direct_q20" : "lev/input_encoder_q20",
                     cdiv(((fh + 4) / 2) * ((fw + 4) / 2), 128), 256,
                     {&cnet, &din, &min_, &reduced, &latent[cur], &mnear[cur], &q, &mnear[nxt], &mfar, &mcenter,
                      &expo, &wv, &p}) &&
