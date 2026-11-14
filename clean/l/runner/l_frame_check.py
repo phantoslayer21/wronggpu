@@ -52,10 +52,19 @@ runtime's default kernels there (Model L: its encoder and decoder ports, the pac
 pack12 post path; Model M: its native frame), and every stage output both backends write is compared with the HIP
 run's ("default"), byte for byte: the D3D12 ports reproduce their HIP kernels byte for byte, and Model M's pack12 post
 path the banded one bit for bit. The pack12 images (A: A0 A1 A2 B0 | B1 B2 C2, C: C0 C1; clean/FORMATS.md) are
-unpacked and compared with the HIP run's A, B and C. Not compared: b0 ... b4 (the bottleneck megakernels write only
-b5), the display image (the fused pack12 post writes none), and on the first frame the previous frame's state. An
-output that is all zero on D3D12 and not on HIP is reported as not written there (the D3D12 fusions keep enc1's merged
-map, and Model M's dec2 / dec1 outputs, on chip), not as differing.
+rearranged into the base layout's bytes and compared with the HIP run's A, B and C.
+
+Byte identity (every "byte for byte" above): the RAW defined bytes of every output (RAW_OUTPUTS, the sizes wg_rt_buffer
+reports for the frame), never decoded values. Before every frame each run fills the outputs with its own sentinel byte
+(SENTINELS: HIP stages 0xC3, HIP default 0xA5, D3D12 stages 0x3C, D3D12 default 0x5A; wg_rt_fill), except the buffers
+the next frame reads before it writes them (CARRIED: the reduced history and the exposure pair; and from the second
+frame on the history, latent and motion surface the last frame wrote). A byte one run leaves unwritten therefore
+differs, and a missing output fails. The outputs a configuration does not write by design (b0 ... b4 under the
+bottleneck megakernel, the maps the D3D12 fusions keep on chip, the display image of the fused post, the previous
+frame's state on the first frame) are listed per comparison with the reason (raw_compare `unwritten`), and there every
+byte must still hold that run's sentinel. Negative controls (record level): one history write and one reduced write
+dropped from a D3D12 run (the 4th FP16 of one history pixel, bits 30-31 of one reduced word: the bytes a decoded
+comparison does not see) must each be caught.
 """
 import argparse
 import copy
@@ -174,6 +183,140 @@ def frame_inputs(rng, rw, rh, reset, special=True):
             "jitter": x["jitter"], "exposure": 1.0, "pre_exposure": PRE_EXPOSURE, "reset": reset}
 
 
+# ---- raw outputs and sentinels (byte identity) -------------------------------------------------------------------------
+
+# every output compared byte for byte (the runtime's wg_rt_buffer names; Model L's scratch maps l.* are not outputs)
+RAW_OUTPUTS = (("exposure.pair", "enc0.features", "enc0.m_near", "enc0.m_far", "enc0.m_center", "enc1.skip",
+                "enc1.merged", "enc2.skip", "enc2.merged") + tuple("b%d.out" % i for i in range(6)) +
+               ("dec2.out", "dec1.out", "dec0.A", "dec0.B", "dec0.C", "dec0.latent", "post.history", "post.reduced",
+                "post.display", "filter.out", "state.latent_prev", "state.motion_history", "state.history_prev"))
+# read by the next frame before it writes them: never filled (the encoder reads the reduced history, the exposure step
+# the pair); and from the second frame on, the last frame's history, latent and motion surface (the next frame's
+# history_prev, latent_prev and motion_history)
+CARRIED = ("exposure.pair", "post.reduced")
+NEXT_READS = ("post.history", "dec0.latent", "enc0.m_near")
+SENTINELS = {"stages": 0xC3, "default": 0xA5, "d3d12_stages": 0x3C, "d3d12": 0x5A}
+BNECK_UNWRITTEN = ("b0.out", "b1.out", "b2.out", "b3.out", "b4.out")   # the megakernel writes only b5's output
+
+
+def fill_sentinels(p, value, first):
+    """Every output this frame writes set to the run's sentinel (before the frame)."""
+    for n in RAW_OUTPUTS:
+        if n in CARRIED or (not first and n in NEXT_READS):
+            continue
+        p.fill(n, value)
+
+
+def raw_outputs(p):
+    """{output: its defined bytes} after a frame. Pack12 frames (Model L on D3D12, Model M's native frame): image A
+    8 bytes and image C 4 bytes per render pixel, B unused (wg_rt_buffer reports the base layout's 8 bytes of C)."""
+    rw, rh = p.info()["render_size"]
+    pack12 = "pack12" in p.kernels()["dec0"]
+    out = {}
+    for n in RAW_OUTPUTS:
+        b = p.raw(n)
+        if pack12 and n == "dec0.B":
+            b = b[:0]
+        elif pack12 and n == "dec0.C":
+            b = b[:rw * rh * 4]
+        elif n == "post.display" and b.size:
+            # three FP16 planes of rows display_pitch(dw) values apart: the image's bytes (the row padding is written
+            # by no kernel)
+            from clean.runner import post as Po
+            b = b.reshape(3, p.dh, Po.display_pitch(p.dw) * 2)[:, :, :p.dw * 2].reshape(-1).copy()
+        out[n] = b
+    return out
+
+
+def pack12_to_base(raw, rw, rh):
+    """A record frame's raw outputs with dec0's pack12 images rearranged into the base layout's bytes (A, B: three
+    codes and a zero byte; C: C0 C1 C2 as FP16, then two zero bytes), as the HIP run's base-format outputs hold them."""
+    a = raw["dec0.A"][:rw * rh * 8].reshape(rh * rw, 8)
+    c = raw["dec0.C"][:rw * rh * 4].reshape(rh * rw, 4)
+    z = np.zeros((rh * rw, 1), np.uint8)
+    out = dict(raw)
+    out["dec0.A"] = np.concatenate([a[:, 0:3], z], 1).reshape(-1)
+    out["dec0.B"] = np.concatenate([a[:, 3:6], z], 1).reshape(-1)
+    out["dec0.C"] = np.concatenate([c, a[:, 6:8], z, z], 1).reshape(-1)
+    return out
+
+
+def raw_compare(ra, rb, sa, sb, unwritten=None, skip=(), convert_b=False):
+    """Per frame, every output of RAW_OUTPUTS: the raw defined bytes of record ra against rb (sentinels sa, sb).
+    unwritten(frame, name) -> None or the side(s) that do not write it by design ("a", "b", "both"): there every byte of
+    that side must still be its sentinel. skip: outputs not compared (the caller gives the reason). convert_b: rb's
+    pack12 images rearranged into the base layout first (pack12_to_base). An output missing on either side, of another
+    size, or with any differing byte fails the frame."""
+    res = []
+    for k, (fa, fb) in enumerate(zip(ra["frames"], rb["frames"])):
+        rh, rw = fa["inputs"]["color"].shape[:2]
+        xa, xb = fa.get("raw", {}), fb.get("raw", {})
+        if convert_b:
+            xb = pack12_to_base(xb, rw, rh)
+        d, notes = {}, {}
+        for n in RAW_OUTPUTS:
+            if n in skip:
+                continue
+            u, v = xa.get(n), xb.get(n)
+            side = unwritten(k, n) if unwritten else None
+            if side:
+                ok = (side not in ("a", "both") or (u is not None and bool(np.all(u == sa)))) and \
+                     (side not in ("b", "both") or (v is not None and bool(np.all(v == sb))))
+                d[n] = 0 if ok else "written, expected unwritten (%s)" % side
+                continue
+            if u is None or v is None:
+                d[n] = "missing"
+            elif u.size != v.size:
+                d[n] = "size %d vs %d" % (u.size, v.size)
+            else:
+                d[n] = int(np.sum(u != v))
+                both = int(np.sum((u == sa) & (v == sb)))
+                if both:
+                    notes[n] = {"neither_wrote_bytes": both}
+        res.append({"frame": k, "render": [rw, rh], "differ": d, "notes": notes,
+                    "identical": all(x == 0 for x in d.values())})
+    return res
+
+
+def raw_summary(frames):
+    return {"frames": len(frames), "identical_frames": sum(f["identical"] for f in frames),
+            "differing": sorted({n for f in frames for n, v in f["differ"].items() if v != 0}),
+            "outputs_compared": len({n for f in frames for n in f["differ"]})}
+
+
+def drop_write(rec, kind, frame):
+    """A copy of a run's record with ONE write dropped at `frame` (negative control): "history": the 4th FP16 of one
+    pixel of post.history back to the run's sentinel (what a dropped store leaves there); "reduced": bits 30-31 of one
+    word of post.reduced flipped (the reduced history is not sentinel-filled: a dropped store leaves the last frame's
+    word, here one differing only in the bits a decoded comparison drops); "reduced_frame": the whole post.reduced
+    write dropped (the last frame's words stay); "missing": post.history absent from the record."""
+    out = copy.deepcopy(rec)
+    raw = out["frames"][frame]["raw"]
+    if kind == "missing":
+        del raw["post.history"]
+    elif kind == "reduced_frame":
+        raw["post.reduced"] = rec["frames"][frame - 1]["raw"]["post.reduced"].copy()
+    elif kind == "history":
+        nb = int(rec["kernels"].get("history_bytes", 8))
+        h = raw["post.history"]
+        px = (h.size // nb) // 2 + 17
+        h[px * nb + nb - 2: px * nb + nb] = rec["sentinel"]
+    else:
+        r = raw["post.reduced"].view(np.uint32)
+        r[r.size // 2 + 5] ^= np.uint32(0xC0000000)
+    return out
+
+
+def negative_controls(ra, rb, sa, sb, unwritten, skip=(), convert_b=False, frame=5):
+    """The record-level negative controls on comparison (ra, rb): each must make the comparison fail."""
+    res = {}
+    for kind, name in (("history", "post.history"), ("reduced", "post.reduced"), ("reduced_frame", "post.reduced"),
+                       ("missing", "post.history")):
+        f = raw_compare(ra, drop_write(rb, kind, frame), sa, sb, unwritten, skip, convert_b)
+        res[kind] = {"frame": frame, "caught": not f[frame]["identical"], "differ": f[frame]["differ"].get(name)}
+    return res
+
+
 def run_d3d12(build, special=True, stages=False):
     """The frame sequence on native D3D12 (backend 3), also the raw pack12 images: "d3d12" with the default kernels,
     "d3d12_stages" with the D3D12 fusions off (WG_D3D12_FUSION=none), so that every stage output is written except b0 ...
@@ -192,12 +335,13 @@ def run_d3d12(build, special=True, stages=False):
             p = Pipeline(build, "", d, MAX_RENDER, OUTPUT, flags[model], backend="d3d12", **kw)
             rng = np.random.default_rng(SEED)
             frames = []
-            for (rw, rh), reset in SEQUENCE:
+            for i, ((rw, rh), reset) in enumerate(SEQUENCE):
                 fr = frame_inputs(rng, rw, rh, reset, special)
+                fill_sentinels(p, SENTINELS[config], i == 0)
                 out = p.frame(fr, debug=True)
-                raw = {n: p._get(n, np.uint8).copy() for n in ("dec0.A", "dec0.C")}
-                frames.append({"inputs": fr, "out": out, "raw": raw})
-            rec = {"model": model, "config": config, "kernels": p.kernels(), "notes": p.notes(),
+                frames.append({"inputs": fr, "out": out, "raw": raw_outputs(p)})
+            rec = {"model": model, "config": config, "sentinel": SENTINELS[config], "kernels": p.kernels(),
+                   "notes": p.notes(),
                    "model_source": p.model_source, "dw": p.dw, "dh": p.dh, "ow": p.ow, "oh": p.oh,
                    "taps": p.output_taps(), "frames": frames}
             with open(os.path.join(build, f"lframe_{model}_{config}.pkl"), "wb") as f:
@@ -222,48 +366,38 @@ POST_OUTPUTS = ("post.history", "post.reduced", "state.history_prev", "out")
 
 
 def compare_backends(hip, dx, same_post=True):
-    """Per frame: {stage output: values differing (0 = byte-identical)} between the HIP and the D3D12 run. same_post
-    False (the backends run different reconstruction kernels): the post-dependent outputs are left out."""
-    res = []
-    for k, (fh_, fd_) in enumerate(zip(hip["frames"], dx["frames"])):
-        a, b = fh_["out"], fd_["out"]
-        rh, rw = fh_["inputs"]["color"].shape[:2]
-        m, compared, unwritten = {}, [], []
+    """Per frame: the raw defined bytes of every output, HIP run against D3D12 run (raw_compare; the D3D12 pack12
+    images in the base layout). same_post False (the backends run different reconstruction kernels): the post outputs
+    are left out. Not written by design: b0 ... b4 on both (the bottleneck megakernels), on D3D12 the maps its fusions
+    keep on chip (enc1's merged map; Model M's dec2 / dec1 outputs, which its fused decoder reads on chip) and the display
+    image (the fused pack12 post writes none), on the first frame the previous frame's state on both."""
+    fused_onchip = ("enc1.merged",) + (("dec2.out", "dec1.out") if hip["model"] == "M" else ())
 
-        def walk(x, y, prefix=""):
-            for key in x:
-                name = prefix + key
-                if name in ("b0", "b1", "b2", "b3", "b4", "dec0.A", "dec0.B", "dec0.C", "post.display", "filter",
-                            "state.info") or (k == 0 and name in UNWRITTEN_ON_FIRST) or (
-                        not same_post and name in POST_OUTPUTS):
-                    continue
-                u, v = x[key], y.get(key)
-                if isinstance(u, dict):
-                    walk(u, v, name + ".")
-                elif isinstance(u, np.ndarray) and isinstance(v, np.ndarray):
-                    if u.shape != v.shape or u.dtype != v.dtype:
-                        m[name] = -1  # not comparable: counts as differing
-                    else:  # values whose bit patterns differ
-                        iv = np.dtype("u%d" % u.dtype.itemsize)
-                        n = int(np.sum(np.ascontiguousarray(u).view(iv) != np.ascontiguousarray(v).view(iv)))
-                        if n and not np.any(v) and np.any(u):  # all zero on D3D12 only: not written there
-                            unwritten.append(name)
-                        else:
-                            m[name] = n
-                    compared.append(name)
-                elif isinstance(u, (int, float)) and isinstance(v, (int, float)):
-                    m[name] = int(u != v)
-        walk(a, b)
-        A, B, C = unpack12(fd_["raw"]["dec0.A"], fd_["raw"]["dec0.C"], rw, rh)
-        dec = a["dec0"]
-        m["dec0.A"] = int(np.sum(A != np.rint(dec["A"] * 255.0).astype(np.uint8)))
-        m["dec0.B"] = int(np.sum(B != np.rint(dec["B"] * 255.0).astype(np.uint8)))
-        m["dec0.C"] = int(np.sum(~((C == dec["C"]) | (np.isnan(C) & np.isnan(dec["C"])))))
-        if same_post:
-            m["out"] = int(np.sum(a["out"].view(np.uint32) != b["out"].view(np.uint32)))
-        res.append({"frame": k, "render": [rw, rh], "differ": m, "unwritten_d3d12": unwritten,
-                    "identical": all(v == 0 for v in m.values())})
-    return res
+    def unwritten(k, n):
+        if n in BNECK_UNWRITTEN or (k == 0 and n in UNWRITTEN_ON_FIRST):
+            return "both"
+        if n in fused_onchip or n == "post.display":
+            return "b"
+        return None
+    skip = () if same_post else POST_OUTPUTS_RAW
+    return raw_compare(hip, dx, hip["sentinel"], dx["sentinel"], unwritten, skip, convert_b=True)
+
+
+def compare_d3d12_configs(st, df):
+    """D3D12 default kernels (df) against the run with the fusions off (st), raw defined bytes. Not written by design:
+    b0 ... b4 on both (the megakernel runs in both), the display image on both (the fused pack12 post), enc1's merged
+    map with the defaults (fusion pm keeps it on chip), on the first frame the previous frame's state on both."""
+    def unwritten(k, n):
+        if n in BNECK_UNWRITTEN or n == "post.display" or (k == 0 and n in UNWRITTEN_ON_FIRST):
+            return "both"
+        if n == "enc1.merged":
+            return "b"
+        return None
+    return raw_compare(st, df, st["sentinel"], df["sentinel"], unwritten), unwritten
+
+
+# the post outputs (left out where the two runs have different reconstruction kernels)
+POST_OUTPUTS_RAW = ("post.history", "post.reduced", "post.display", "filter.out", "state.history_prev")
 
 
 def fill_pack12(rec):
@@ -323,11 +457,17 @@ def compare_d3d12(build, json_path):
         same_post = hip_post != "l_post_recon"
         frames = compare_backends(recs["default"], recs["d3d12"], same_post)
         res[model] = {"kernels_d3d12": recs["d3d12"]["kernels"], "frames": frames,
-                      "unwritten_d3d12": sorted({n for f in frames for n in f["unwritten_d3d12"]}),
                       "outputs_compared": sorted({n for f in frames for n in f["differ"]}),
                       "identical_frames": sum(f["identical"] for f in frames),
-                      "differing": sorted({k for f in frames for k, v in f["differ"].items() if v}),
+                      "differing": sorted({k for f in frames for k, v in f["differ"].items() if v != 0}),
                       "post_compared_with_hip": same_post}
+        if same_post:  # the record-level negative controls on this comparison
+            dflt = recs["default"]
+            res[model]["negative_controls"] = negative_controls(
+                dflt, recs["d3d12"], dflt["sentinel"], recs["d3d12"]["sentinel"],
+                lambda k, n: ("both" if n in BNECK_UNWRITTEN or (k == 0 and n in UNWRITTEN_ON_FIRST) else
+                              "b" if n in ("enc1.merged", "dec2.out", "dec1.out", "post.display") else None),
+                convert_b=True)
         if not same_post:
             # Model L: HIP runs l_post_recon, D3D12 Model M's fused pack12 post, and each frame's encoder reads the
             # previous frame's reconstruction, so the two runs part after the first frame. The D3D12 frame is checked
@@ -336,30 +476,31 @@ def compare_d3d12(build, json_path):
             with open(os.path.join(build, f"lframe_{model}_d3d12_stages.pkl"), "rb") as f:
                 st = fill_pack12(pickle.load(f))
             per_stage = compare_model(st, params[model], post_ref="M", bneck_unit=True)
-            fused = compare_backends(st, recs["d3d12"])
+            fused, unw = compare_d3d12_configs(st, recs["d3d12"])
             res[model]["d3d12_per_stage"] = {"frames": per_stage, "summary": summary(per_stage),
                                              "passed": sum(m["pass"] for m in per_stage)}
-            res[model]["d3d12_default_vs_stages"] = {
-                "frames": fused, "identical_frames": sum(f["identical"] for f in fused),
-                "differing": sorted({k for f in fused for k, v in f["differ"].items() if v}),
-                "unwritten_default": sorted({n for f in fused for n in f["unwritten_d3d12"]})}
+            res[model]["d3d12_default_vs_stages"] = dict(raw_summary(fused), frames=fused)
+            res[model]["negative_controls"] = negative_controls(st, recs["d3d12"], st["sentinel"],
+                                                                recs["d3d12"]["sentinel"], unw)
             mp = check_m_post(recs["d3d12"], params[model])
             res[model]["m_post_reference"] = {"frames": mp, "passed": sum(f["pass"] for f in mp)}
     n_frames = {m: len(res[m]["frames"]) for m in ("L", "M")}
 
     def model_pass(m):
         r = res[m]
+        caught = all(v["caught"] for v in r["negative_controls"].values())
         if r["post_compared_with_hip"]:
-            return r["identical_frames"] == n_frames[m]
+            return r["identical_frames"] == n_frames[m] and caught
         return (r["d3d12_per_stage"]["passed"] == n_frames[m] and r["m_post_reference"]["passed"] == n_frames[m] and
-                r["d3d12_default_vs_stages"]["identical_frames"] == n_frames[m])
+                r["d3d12_default_vs_stages"]["identical_frames"] == n_frames[m] and caught)
     res["pass"] = all(model_pass(m) for m in ("L", "M"))
     with open(json_path, "w") as f:
         json.dump(res, f, indent=1, default=lambda o: o.item() if hasattr(o, "item") else str(o))
     for model in ("L", "M"):
-        print(model, "D3D12 against HIP: frames byte-identical", res[model]["identical_frames"], "of",
+        print(model, "D3D12 against HIP (raw bytes): frames identical", res[model]["identical_frames"], "of",
               len(res[model]["frames"]), "outputs compared", len(res[model]["outputs_compared"]), "differing",
-              res[model]["differing"], "not written on D3D12 (all zero; fused kernels)", res[model]["unwritten_d3d12"])
+              res[model]["differing"])
+        print("  negative controls (one dropped write):", json.dumps(res[model]["negative_controls"]))
         if "d3d12_per_stage" in res[model]:
             r = res[model]
             print("  (HIP runs l_post_recon, D3D12 Model M's fused pack12 post: the runs part after frame 0)")
@@ -367,9 +508,8 @@ def compare_d3d12(build, json_path):
                   r["d3d12_per_stage"]["passed"],
                   "of", len(r["frames"]), "frames pass;", "failing:",
                   sorted({s for f in r["d3d12_per_stage"]["frames"] for s, ok in f["stage_pass"].items() if not ok}))
-            print("  D3D12 default kernels against that run: byte-identical", r["d3d12_default_vs_stages"][
-                "identical_frames"], "of", len(r["frames"]), "differing", r["d3d12_default_vs_stages"]["differing"],
-                "not written by the defaults", r["d3d12_default_vs_stages"]["unwritten_default"])
+            print("  D3D12 default kernels against that run (raw bytes): identical", r["d3d12_default_vs_stages"][
+                "identical_frames"], "of", len(r["frames"]), "differing", r["d3d12_default_vs_stages"]["differing"])
             print("  its post against Model M's post reference (default kernels):", r["m_post_reference"]["passed"],
                   "of", len(r["frames"]), "frames pass")
     return 0 if res["pass"] else 1
@@ -393,11 +533,13 @@ def run(build, rocm, special=True):
             p = Pipeline(build, rocm, d, MAX_RENDER, OUTPUT, flags[model], **k)
             rng = np.random.default_rng(SEED)
             frames = []
-            for (rw, rh), reset in SEQUENCE:
+            for i, ((rw, rh), reset) in enumerate(SEQUENCE):
                 fr = frame_inputs(rng, rw, rh, reset, special)
+                fill_sentinels(p, SENTINELS[config], i == 0)
                 out = p.frame(fr, debug=True)
-                frames.append({"inputs": fr, "out": out})
-            rec = {"model": model, "config": config, "kernels": p.kernels(), "notes": p.notes(),
+                frames.append({"inputs": fr, "out": out, "raw": raw_outputs(p)})
+            rec = {"model": model, "config": config, "sentinel": SENTINELS[config], "kernels": p.kernels(),
+                   "notes": p.notes(),
                    "model_source": p.model_source, "dw": p.dw, "dh": p.dh, "ow": p.ow, "oh": p.oh,
                    "taps": p.output_taps(), "frames": frames}
             with open(os.path.join(build, f"lframe_{model}_{config}.pkl"), "wb") as f:
@@ -636,25 +778,6 @@ def summary(frames):
 UNWRITTEN_ON_FIRST = ("state.latent_prev", "state.motion_history", "state.history_prev")
 
 
-def default_identical(a, b, prefix=""):
-    """Outputs of the default kernels (b) that differ from the six-launch bottleneck's (a), byte for byte; b0 ... b4
-    are not compared (the megakernel does not write them)."""
-    bad = []
-    for k in a:
-        name = prefix + k
-        if name in ("b0", "b1", "b2", "b3", "b4"):
-            continue
-        x, y = a[k], b[k]
-        if isinstance(x, dict):
-            bad += default_identical(x, y, name + ".")
-        elif isinstance(x, np.ndarray):
-            if x.shape != y.shape or x.tobytes() != y.tobytes():
-                bad.append(name)
-        elif x != y:
-            bad.append(name)
-    return bad
-
-
 def compare(build, json_path):
     with open(os.path.join(model_dir(build), "params.pkl"), "rb") as f:
         params = pickle.load(f)
@@ -665,16 +788,22 @@ def compare(build, json_path):
             with open(os.path.join(build, f"lframe_{model}_{config}.pkl"), "rb") as f:
                 recs[config] = pickle.load(f)
         frames = compare_model(recs["stages"], params[model])
-        # on the first frame the previous frame's state buffers hold what no frame wrote (and a reset frame does not
-        # read them): not compared there
-        same = [[n for n in default_identical(a["out"], b["out"]) if not (i == 0 and n in UNWRITTEN_ON_FIRST)]
-                for i, (a, b) in enumerate(zip(recs["stages"]["frames"], recs["default"]["frames"]))]
+        # the default kernels against the six-launch bottleneck, raw defined bytes: b0 ... b4 are not written by the
+        # default megakernel; on the first frame the previous frame's state is written by neither (a reset frame does
+        # not read it)
+        def unwritten(k, n):
+            if n in BNECK_UNWRITTEN:
+                return "b"
+            return "both" if k == 0 and n in UNWRITTEN_ON_FIRST else None
+        st_, df_ = recs["stages"], recs["default"]
+        same = raw_compare(st_, df_, st_["sentinel"], df_["sentinel"], unwritten)
+        neg = negative_controls(st_, df_, st_["sentinel"], df_["sentinel"], unwritten)
         res[model] = {"kernels": recs["default"]["kernels"], "kernels_stages": recs["stages"]["kernels"],
                       "model_source": recs["default"]["model_source"], "notes": recs["default"]["notes"],
                       "frames": frames, "summary": summary(frames),
-                      "default_identical": {"frames": len(same), "identical": sum(not d for d in same),
-                                            "differing_outputs": sorted({k for d in same for k in d})},
-                      "pass": all(m["pass"] for m in frames) and not any(same)}
+                      "default_identical": dict(raw_summary(same), frames=same), "negative_controls": neg,
+                      "pass": (all(m["pass"] for m in frames) and all(f["identical"] for f in same) and
+                               all(v["caught"] for v in neg.values()))}
         if model == "L":  # Model L's run-level limit on post values more than one ulp off (provisional)
             res[model]["post_run"] = {k: LP.l_post_run([m["post"][k] for m in frames if k in m["post"]])
                                       for k in ("history", "display")}
@@ -689,7 +818,9 @@ def compare(build, json_path):
         json.dump(res, f, indent=1, default=lambda o: o.item() if hasattr(o, "item") else str(o))
     for model in ("L", "M"):
         print(model, "pass" if res[model]["pass"] else "FAIL", json.dumps(res[model]["summary"]))
-        print("  default kernels against the six-launch bottleneck:", json.dumps(res[model]["default_identical"]))
+        print("  default kernels against the six-launch bottleneck (raw bytes):",
+              json.dumps({k: v for k, v in res[model]["default_identical"].items() if k != "frames"}),
+              "negative controls:", json.dumps(res[model]["negative_controls"]))
         for m in res[model]["frames"]:
             if not m["pass"]:
                 print("  frame", m["frame"], "failing:", [s for s, ok in m["stage_pass"].items() if not ok])
