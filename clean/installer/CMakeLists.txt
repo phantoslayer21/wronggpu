@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
-# WrongGPU installer (spec 30). Windows only: MSVC or MinGW-w64.
+# WrongGPU installer (spec 30). Windows: MSVC or MinGW-w64. Linux: the core (wg_core) and its tests, on a POSIX
+# implementation of the Windows calls the core makes (src/platform/posix, README-linux.md).
 #   cmake -S . -B build -DWRONGGPU_PAYLOAD_DIR=<release payload folder> [-DWRONGGPU_MAP=<map.json>] [-DWRONGGPU_VERSION=x.y.z]
 #   cmake --build build --config Release
 # -DWRONGGPU_PRESET_K=OFF builds an installer for a release that ships Model M only: no Preset K choice or wording,
@@ -10,7 +11,14 @@
 # (exit 2), an earlier direct install is removed before the hosted one is made, the FSR 3.0 component DLLs of the
 # payload folder are not built in (src/setup_route.h).
 cmake_minimum_required(VERSION 3.16)
-project(wronggpu_installer LANGUAGES CXX RC)
+project(wronggpu_installer LANGUAGES CXX)
+if(WIN32)
+  enable_language(RC)
+endif()
+# MinGW's _mingw.h (reached through <functional> in context.h before base.h) would otherwise fix Windows 7 as the target.
+if(MINGW)
+  add_compile_definitions(_WIN32_WINNT=0x0A00 WINVER=0x0A00)
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -122,12 +130,22 @@ target_compile_definitions(wg_core PUBLIC ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_
 if(WRONGGPU_TESTING)
   target_compile_definitions(wg_core PUBLIC WRONGGPU_TESTING)
 endif()
-target_link_libraries(wg_core PUBLIC wgc_core advapi32 user32 shell32 ole32 uuid winhttp)
+if(WIN32)
+  target_link_libraries(wg_core PUBLIC wgc_core advapi32 user32 shell32 ole32 uuid winhttp)
+else()
+  # Linux: <windows.h> and the other Windows headers the core includes resolve to src/platform/posix, which implements
+  # the calls the core makes on POSIX. A Windows call it lacks fails the Linux build at that line.
+  target_include_directories(wg_core BEFORE PUBLIC src/platform/posix)
+  target_sources(wg_core PRIVATE src/platform/posix/win32_posix.cpp src/platform/posix/win32_posix_process.cpp
+                 src/platform/posix/win32_posix_registry.cpp)
+  target_link_libraries(wg_core PUBLIC wgc_core)
+endif()
 if(MSVC)
   target_compile_options(wg_core PRIVATE /Zi)
   target_compile_definitions(wg_core PRIVATE NDEBUG)
 endif()
 
+if(WIN32)
 # wg_ui: the widget kit (owner-drawn buttons, check boxes, progress bar, cards, palette, fonts) of the wizard and the
 # launcher (src/wg_ui). Windows' own GDI, GDI+, DWM and comctl32 only.
 add_library(wg_ui STATIC src/wg_ui/kit.cpp)
@@ -182,6 +200,7 @@ add_executable(WrongGPU WIN32 src/app/main.cpp src/app/wizard.cpp src/app/cli.cp
                src/app/ui_widgets.cpp src/app/ui_library.cpp src/app/ui_game.cpp src/app/ui_settings.cpp src/app/ui_uia.cpp src/app/ui_render.cpp src/app/ui_words.cpp src/app/ui_dump.cpp src/app/ui_frame.cpp src/app/ui_play.cpp src/app/ui_rrprep.cpp src/app/ui_rrconfig.cpp src/app/ui_activate.cpp src/app/ui_checks.cpp src/app/payload_embed.cpp
                ${GEN}/resources.rc ${GEN}/restore.rc ${GEN}/restorer.bin ${GEN}/payload_table.h ${MANIFEST_SOURCE})
 add_dependencies(WrongGPU WrongGPU-Restore)
+endif()
 if(WRONGGPU_TESTING)
   add_executable(wizard-policy-tests tests/wizard_policy_tests.cpp)
   target_compile_definitions(wizard-policy-tests PRIVATE ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION})
@@ -212,9 +231,16 @@ add_test(NAME wg-core COMMAND wg-core-tests)
 add_test(NAME launcher-core COMMAND launcher-core-tests)
 add_test(NAME coexist-core COMMAND coexist-core-tests)
 add_test(NAME convert-ignore COMMAND convert-ignore-tests)
+if(NOT WIN32)
+  # the Linux layer's own checks: sharing, processes and the registry file go further than the core's tests do
+  add_executable(posix-layer-tests src/platform/posix/tests/posix_layer_tests.cpp)
+  target_link_libraries(posix-layer-tests PRIVATE wg_core)
+  add_test(NAME posix-layer COMMAND posix-layer-tests)
+endif()
 if(WRONGGPU_TESTING)
   add_test(NAME wizard-policy COMMAND wizard-policy-tests)
 endif()
+if(WIN32)
 target_include_directories(WrongGPU PRIVATE ${GEN})
 target_compile_definitions(WrongGPU PRIVATE ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION})
 target_link_libraries(WrongGPU PRIVATE wg_ui wg_core wgc_core comctl32 shell32 ole32 oleaut32 uuid advapi32 user32 gdi32 gdiplus dwmapi uxtheme d2d1 d3d11 dxgi dwrite windowscodecs uiautomationcore)
@@ -225,4 +251,5 @@ if(MSVC)
   target_link_options(WrongGPU PRIVATE /INCREMENTAL:NO /MANIFESTUAC:NO /DEBUG:FULL)
 else()
   target_link_options(WrongGPU PRIVATE -municode -static)
+endif()
 endif()
