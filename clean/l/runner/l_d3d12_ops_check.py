@@ -233,7 +233,11 @@ POST_CASES = [(24, 16, 54, 36, False, "random", False), (31, 17, 70, 38, False, 
               (20, 12, 60, 36, False, "random", False), (33, 19, 99, 57, True, "random", False),
               (17, 11, 38, 25, False, "extreme_c", False), (16, 12, 16, 12, False, "offset_0.1", False),
               (16, 12, 16, 12, True, "offset_0.05", False), (40, 24, 40, 24, False, "random", False),
-              (42, 26, 63, 39, False, "random", True), (26, 18, 52, 36, False, "specials", False)]
+              (42, 26, 63, 39, False, "random", True), (26, 18, 52, 36, False, "specials", False),
+              (30, 18, 45, 27, False, "random", "extreme"), (22, 14, 50, 32, False, "specials", "extreme")]
+# expo "extreme": the exposure pair's e_prev far from 1 (the history divisions' quotients near the FP32 range ends,
+# FP32 denormal or infinite results) or not a positive normal number (NaN, negative, infinite)
+EXTREME_E_PREV = (1e-30, 3e-38, 1e30, 3e38, float("nan"), -1.5, float("inf"), 2.0 ** -126)
 POST_SLACK = 64   # sentinel bytes after each output: neither back end may write them
 
 
@@ -284,6 +288,8 @@ def post_cases(kernel, rng):
         data = RP.post_device_inputs(x)
         if expo:   # the exposures come from the pointer; the by-value fields hold other values
             ev = np.array([prm.e, 0.0 if rng.random() < 0.5 else prm.e_prev], np.float32)
+            if expo == "extreme":
+                ev[1] = EXTREME_E_PREV[int(rng.integers(len(EXTREME_E_PREV)))]
             prm.e, prm.e_prev = float(rng.uniform(0.5, 2.0)), float(rng.uniform(0.5, 2.0))
         n_hist, n_red = dw * dh * 8, max(4, (dw // 2) * (dh // 2) * 4)
         n_disp = RP.display_bytes(dw, dh)
