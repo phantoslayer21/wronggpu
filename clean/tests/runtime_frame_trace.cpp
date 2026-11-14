@@ -84,6 +84,8 @@ const Signature kSignatures[] = {
     {"l_coef", "ppppppD"},
     {"l_post_recon", "ppppppppppppPp"},  // Model M's post_recon arguments (clean/l/FORMATS.md step 5)
     {"l_coef_pack12", "ppppppD"},  // the same arguments (B unused)
+    {"l_post_recon_p12", "ppppppppppppPp"},  // the same arguments (A, C: pack12 images; B unused)
+    {"post_filter_c1_s4", "ppiiiiip"},  // display, out, dw, dh, ow, oh, dec_scale (its bits), exposure pair
 };
 
 const char* kinds_of(const std::string& kernel) {
