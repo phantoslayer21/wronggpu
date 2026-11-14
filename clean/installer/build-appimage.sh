@@ -241,7 +241,7 @@ done < <(find "$APPDIR" -type f -print0)
 for lib in libcairo.so.2 libpango-1.0.so.0 libpangocairo-1.0.so.0 libfontconfig.so.1 libfreetype.so.6 libharfbuzz.so.0 libfribidi.so.0 libexpat.so.1; do
   [ -e "$APPDIR/usr/lib/$lib" ] || { echo "FAIL: $lib is not in the AppDir" >&2; fail=1; }
 done
-for font in selawik/selawk.ttf fluent/FluentSystemIcons-Regular.ttf; do
+for font in selawik/selawk.ttf notosansmath/NotoSansMath-Regular.ttf fluent/FluentSystemIcons-Regular.ttf; do
   [ -s "$APPDIR/usr/share/wronggpu/assets/fonts/$font" ] || { echo "FAIL: font $font is not in the AppDir" >&2; fail=1; }
 done
 [ "$fail" = 0 ] || exit 1

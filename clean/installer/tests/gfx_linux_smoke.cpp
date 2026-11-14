@@ -7,9 +7,11 @@
 #include <sys/stat.h>
 
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
 
 namespace wg::app::lui {
@@ -96,6 +98,14 @@ int main(int argc, char** argv) {
     pal.artShade = Hex(0x000000);
     pal.text = Hex(0x111111);
 
+    // No system fonts: an empty fontconfig set, so only the vendored fonts exist (a bare machine, the AppImage's worst case)
+    const std::string conf = out + "/fonts.conf";
+    std::filesystem::remove_all(out + "/fc-cache");  // a stale cache would hide a font added or taken away
+    if (FILE* f = std::fopen(conf.c_str(), "w")) {
+        std::fprintf(f, "<?xml version=\"1.0\"?>\n<!DOCTYPE fontconfig SYSTEM \"fonts.dtd\">\n<fontconfig><cachedir>%s/fc-cache</cachedir></fontconfig>\n", out.c_str());
+        std::fclose(f);
+        setenv("FONTCONFIG_FILE", conf.c_str(), 1);
+    }
     Gfx gx;
     CHECK(gx.Init());
     CHECK(gx.iconFont);  // the vendored Fluent System Icons were found and registered
@@ -108,6 +118,10 @@ int main(int argc, char** argv) {
     CHECK(gx.TextW(L"Hello", t) > 0);
     CHECK(gx.TextW(L"Hello world", t) > gx.TextW(L"Hello", t));
     CHECK(gx.TextW(L"Hello", TS{}) > 0 && gx.TextW(L"W", t) > gx.TextW(L"i", t));
+    // The arrow the pages use ("0.4.5 \u2192 0.6.0") is a glyph of the vendored Noto Sans Math, not Pango's hex box for a missing
+    // one: a box is as wide as the box of any other code of four digits (U+FDD0 is a noncharacter no font has)
+    CHECK(std::fabs(gx.TextW(L"\u2192", t) - gx.TextW(L"\uFDD0", t)) > 1.f);
+    CHECK(gx.TextW(L"\u2192", t) > 0.5f * t.size && gx.TextW(L"\u2192", t) < 1.5f * t.size);
     TS big = t; big.size = 26;
     CHECK(gx.TextW(L"Hello", big) > 1.8f * gx.TextW(L"Hello", t));
     TS bold = t; bold.weight = 700;

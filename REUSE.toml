@@ -69,6 +69,13 @@ precedence = "override"
 SPDX-FileCopyrightText = "2015 Microsoft Corporation"
 SPDX-License-Identifier = "OFL-1.1"
 
+# Noto Sans Math v3.000 (The Noto Project Authors; SIL Open Font License 1.1): the launcher's fallback for symbols Selawik lacks
+[[annotations]]
+path = "clean/installer/assets/fonts/notosansmath/**"
+precedence = "override"
+SPDX-FileCopyrightText = "2022 The Noto Project Authors (https://github.com/notofonts/math)"
+SPDX-License-Identifier = "OFL-1.1"
+
 # Fluent System Icons (Microsoft; MIT): the launcher's icon font on Linux
 [[annotations]]
 path = "clean/installer/assets/fonts/fluent/**"

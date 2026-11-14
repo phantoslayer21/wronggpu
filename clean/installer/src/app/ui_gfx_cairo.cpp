@@ -6,8 +6,9 @@
 // a renderer and a texture would add a GPU context, its start-up cost and its driver problems for one copy of the same
 // pixels; the window surface works on X11, Wayland, in a VM and under SDL's offscreen driver alike. The window's text fields
 // are drawn on top of the page at the end of the frame (DrawEdits).
-// Fonts: Selawik (text, display) and Fluent System Icons (icons), vendored under assets/fonts and registered with fontconfig
-// in Init; the mono face is the system's "monospace". Written for this project.
+// Fonts: Selawik (text, display), Noto Sans Math (the symbols Selawik lacks: the arrow, the no-break and en spaces) and Fluent
+// System Icons (icons), vendored under assets/fonts and registered with fontconfig in Init; the mono face is the system's
+// "monospace". Written for this project.
 #include "app/ui_shell.h"
 #include "platform/posix/win32_posix_internal.h"
 
@@ -274,7 +275,8 @@ bool Gfx::Init() {
     cairo_font_options_destroy(fo);
     pango_cairo_context_set_resolution(g->ctx, 96);
     pango_context_set_round_glyph_positions(g->ctx, FALSE);
-    g->fam[F_TEXT] = g->fam[F_DISPLAY] = "Selawik,sans-serif";
+    // Noto Sans Math follows Selawik for the symbols it lacks (the arrow, the no-break and en spaces) before any system font
+    g->fam[F_TEXT] = g->fam[F_DISPLAY] = "Selawik,Noto Sans Math,sans-serif";
     g->fam[F_MONO] = "monospace";
     g->fam[F_ICON] = "FluentSystemIcons-Regular";
     iconFont = false;

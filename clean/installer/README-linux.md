@@ -19,7 +19,7 @@ Three layers carry the shared code onto Linux. None of them touch the Windows bu
   messages the window procedure already handles. The app draws its own title bar, so there is no libdecor.
 - **The Cairo `Gfx`** (`src/app/ui_gfx_cairo.cpp`). All screens draw through one class, `Gfx` (`ui_shell.h`). Windows
   implements it on Direct2D and DirectWrite (`ui_gfx.cpp`); Linux implements the same methods on Cairo, Pango and
-  fontconfig. Fonts are vendored in `assets/fonts` (Selawik for text, Fluent System Icons for icons) and found next to
+  fontconfig. Fonts are vendored in `assets/fonts` (Selawik for text, Noto Sans Math after it for the symbols Selawik lacks, such as the arrow, Fluent System Icons for icons) and found next to
   the program, so the look does not depend on the user's fonts.
 
 ## The rule

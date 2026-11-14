@@ -37,7 +37,19 @@ repository. The model weights are read on the player's own PC from that upscaler
     Used by:  the Linux launcher's Cairo/Pango drawing (clean/installer/src/app/ui_gfx_cairo.cpp) in place of
               Segoe UI Variable; registered with fontconfig at start-up, never renamed or sold on its own
 
-1.4 Fluent System Icons: icon font of the Linux launcher
+1.4 Noto Sans Math v3.000: symbol fallback font of the Linux launcher
+    Files:    clean/installer/assets/fonts/notosansmath/NotoSansMath-Regular.ttf (the release's unhinted TTF, whole and
+              unmodified, 657 KB, sha256 b127e84699212b6b2ef50aff58e0ebebeec04ffe6db1b9eb9e209c8c3d97b4aa); OFL.txt beside it
+    Source:   https://github.com/notofonts/math, release NotoSansMath-v3.000 (tag commit
+              480fb49a4a43189ad0f8f27415e76fd1317ecab9; NotoSansMath-v3.000.zip, sha256
+              ac351837b41f8a897f020b97fb0f075ad574c1e9669fb5839ada1f92fd748356)
+    Licence:  SIL Open Font License 1.1, Copyright 2022 The Noto Project Authors (https://github.com/notofonts/math), no
+              Reserved Font Name (clean/installer/assets/fonts/notosansmath/OFL.txt)
+    Used by:  the Linux launcher's Cairo/Pango drawing (clean/installer/src/app/ui_gfx_cairo.cpp), listed after Selawik so
+              it draws the symbols Selawik lacks (the arrow in "0.4.5 → 0.6.0", the no-break and en spaces); never
+              renamed or sold on its own
+
+1.5 Fluent System Icons: icon font of the Linux launcher
     Files:    clean/installer/assets/fonts/fluent/FluentSystemIcons-Regular.ttf, unmodified; LICENSE beside it
     Source:   https://github.com/microsoft/fluentui-system-icons,
               commit 67e6dec1ee956af3ab4c746a2b3bb6a2e5520a44
