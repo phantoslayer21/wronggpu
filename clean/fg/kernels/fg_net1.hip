@@ -84,6 +84,16 @@ WG_KERNEL_N(fg_maxpool2_f16, 256)(const u16* __restrict__ x, u16* __restrict__ y
     y[idx] = (u16)m;
 }
 
+// fg_add_f16: net1's skip add, y = h(a + b) per element (float16; single precision then float16 equals one rounding of
+// the exact sum). NaN results are written as 0x7E00. n elements.
+WG_KERNEL_N(fg_add_f16, 256)(const u16* __restrict__ a, const u16* __restrict__ b, u16* __restrict__ y, int n) {
+    const int idx = (int)(wg_block_id() * 256u + wg_lane_id());
+    if (idx >= n) return;
+    uint out = fg_f2h(fg_h2f(a[idx]) + fg_h2f(b[idx]));
+    if (fg_is_nan16(out) != 0u) out = FG_NAN16;
+    y[idx] = (u16)out;
+}
+
 // One axis of the align-corners rule: s = r * o (single precision), i0 = trunc(s), i1 = trunc(s + 1), both n_in - 1 when
 // i1 >= n_in; weights w1 = h(s - i0), w0 = h((i0 - s) + 1) as float16 values.
 struct FgTap { int i0, i1; float w0, w1; };
