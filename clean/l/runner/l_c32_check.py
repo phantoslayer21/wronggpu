@@ -50,7 +50,7 @@ def compile_kernels(build, rocm, with_swin=False, clang=None):
     clean_process_environment(rocm)
     clang = clang or B.find_clang(rocm)
     kdir = os.path.join(ROOT, "clean", "kernels")
-    for name in ("l_swin", "l_ops"):
+    for name in ("l_swin", "l_ops", "l_post"):
         B.run(B.device_command(clang, rocm, os.path.join(ROOT, "clean", "l", "kernels", name + ".hip"),
                                os.path.join(build, name + ".co")) + ["-I", kdir])
     B.run(B.device_command(clang, rocm, os.path.join(kdir, "encoder.hip"), os.path.join(build, "l_enc_values.co"),

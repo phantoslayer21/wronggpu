@@ -11,8 +11,11 @@ the structure table's "recon" entry (clean/l/reference/table.py):
 The learned scale s is the post stage's tensor "s". Everything else (positions, the score and candidate rules, the
 12-tap Catmull-Rom, the blend, the NaN guard, the stored outputs) is Model M's, by import.
 
-Arithmetic is float64 with only the stored outputs rounded, as Model M's oracle: the reconstruction's half-precision
-and fused-rounding forms (e.g. the gather exponent) are a matter of the kernel-order model, not of this oracle.
+The colour gather ("gather": "half", Model L) runs in the model's own precision as the spec side confirmed it (target
+positions, FP16 offsets and exponent with the fused cross term, float32 weights flushed to zero below 2^-126, FP16
+weights and half accumulators, float32 weight sum: gather_half). Everything after it is float64 with only the stored
+outputs rounded, as Model M's oracle; the remaining kernel-order details (the hardware exp2, reciprocal and
+divisions, the Catmull-Rom weight forms) are a matter of the kernel-order model.
 ldr=True gives the LDR form: identity transfer, no exposure (e = e_prev = 1), codes from the values directly; the
 display is the 11 / 11 / 10-bit codes of the plain colour (ldr_display_codes), which the output stage unpacks with
 code RN32(1/N) and filters without a decode or an exposure (output_filter). Both confirmed by the spec side.
@@ -22,8 +25,8 @@ Model M: the normalized features are 0 / 0 = NaN, both scores NaN (candidate 1 k
 NaN (the decode passes NaN through: dec), alpha = 0, and the NaN guard substitutes C, which is NaN. The stored history
 is then h(E(NaN)) = -1.4404296875 (HDR) or NaN (LDR), the display and the reduced code 0.
 
-The reconstruction kernel's summation order (taps, candidates) is not fixed yet; this oracle sums in float64 and is
-the tolerance reference, the kernel's order decides the kernel-order model.
+The gather's tap order is i (columns) outer, j (rows) inner; the other sums of this oracle are float64 (the tolerance
+reference).
 
 The reconstruction variant (3/2 or 3/1) only decides how a kernel tiles the work; both forms compute this function
 (table.recon_variant).
@@ -110,6 +113,70 @@ def gather(feat, C, px, py, rw, rh, window):
     return W, fbar
 
 
+def _h(v):
+    """Round to FP16 (from float64, one rounding)."""
+    with np.errstate(over="ignore", invalid="ignore"):
+        return np.asarray(v, np.float64).astype(np.float16).astype(np.float64)
+
+
+def _f32(v):
+    with np.errstate(over="ignore", invalid="ignore"):
+        return np.asarray(v, np.float64).astype(np.float32).astype(np.float64)
+
+
+def target_positions_f32(rw, rh, dw, dh, jx, jy):
+    """Render-space positions in the model's precision: rx = float32(rw) / float32(dw), px = fused(x + 1/2, rx, jx)
+    (one float32 rounding), py = fused(ry, y + 1/2, jy)."""
+    rx, ry = _f32(np.float32(rw) / np.float32(dw)), _f32(np.float32(rh) / np.float32(dh))
+    px = _f32((np.arange(dw) + 0.5) * rx + _f32(jx))
+    py = _f32((np.arange(dh) + 0.5) * ry + _f32(jy))
+    return px, py
+
+
+def gather_half(feat, C, px, py, rw, rh, window):
+    """Step 2 in the model's precision (spec side, confirmed for Model L and Model M):
+    - per render pixel: A = h(f32(a -0.721325)), B = h(f32(b -0.721325)), C = h(f32(c -1.44265)); the nine features
+      in FP16 (feat must already be FP16 values);
+    - offsets: dx = h(f32((ax + 1/2) - px)); d_y = h(f32((b_y + 1/2) - py)), minus 1 (half) when the row's own
+      b_y = floor(py - 1/2) is not the pair's b; u = h(dx + i), v = h(d_y + j);
+    - exponent: eps = fused_half(h(u v), C, h(h(h(u u) A) + h(h(v v) B))) (C1);
+    - w = 2^eps in float32, flushed to +0 below 2^-126; W = float32 sum of the unrounded w in tap order;
+    - F_k = fused_half(h(w), f_k, F_k), from +0; r = 1 / W, f-bar_k = float32(r F_k).
+    Tap order: i (columns) outer, j (rows) inner. Fused half multiply-adds are evaluated in float64 and rounded once
+    to FP16 (exact unless the addends' exponents differ by more than about 30, far outside these values)."""
+    ax, b = _post.kernel_window(px, py)
+    Cc = np.asarray(C, np.float64)
+    kA = _h(_f32(Cc[..., 0] * _f32(-0.721325)))
+    kB = _h(_f32(Cc[..., 1] * _f32(-0.721325)))
+    kC = _h(_f32(Cc[..., 2] * _f32(-1.44265)))
+    dh, dw = py.size, px.size
+    by = np.floor(py - 0.5).astype(np.int64)
+    dx = _h(_f32((ax + 0.5) - px))[None, :]
+    dyv = _h(_f32((by + 0.5) - py))
+    dyv = np.where(by != b, _h(dyv - 1.0), dyv)[:, None]
+    W = np.zeros((dh, dw))
+    F = np.zeros((dh, dw, feat.shape[2]))
+    offs = range(-1, window - 1)
+    with np.errstate(invalid="ignore", over="ignore", under="ignore"):
+        for i in offs:
+            sx = np.clip(ax + i, 0, rw - 1)
+            u = _h(dx + i)
+            for j in offs:
+                sy = np.clip(b + j, 0, rh - 1)
+                v = _h(dyv + j)
+                a_, b_, c_ = kA[sy][:, sx], kB[sy][:, sx], kC[sy][:, sx]
+                s_ = _h(_h(_h(u * u) * a_) + _h(_h(v * v) * b_))
+                eps = _h(_h(u * v) * c_ + s_)
+                w = _f32(np.exp2(eps))
+                w = np.where(w < 2.0 ** -126, 0.0, w)
+                W = _f32(W + w)
+                hw = _h(w)[..., None]
+                F = _h(hw * feat[sy][:, sx] + F)
+        r = _f32(1.0 / W)
+        fbar = _f32(r[..., None] * F)
+    return W, fbar
+
+
 def reconstruct(x, s, t=_table.TABLE, ldr=False):
     """Stage "post" for Model L. x: Model M's reconstruction input dict (clean/reference/post.py reconstruct); s: the
     post stage's learned scale. Returns Model M's output dict ("history", "reduced", "display", "_lin")."""
@@ -131,11 +198,15 @@ def reconstruct(x, s, t=_table.TABLE, ldr=False):
                          "reset)")
     s = float(np.asarray(s, np.float64).reshape(-1)[0])
 
-    px, py = _post.target_positions(rw, rh, dw, dh, jx, jy)
     with np.errstate(invalid="ignore", over="ignore"):
         ec = enc_in(e * color)
     feat = np.concatenate([ec, np.asarray(x["B"], np.float64), np.asarray(x["A"], np.float64)], axis=2)
-    W, fbar = gather(feat, x["C"], px, py, rw, rh, window)
+    if rc.get("gather", "float64") == "half":
+        px, py = target_positions_f32(rw, rh, dw, dh, jx, jy)
+        W, fbar = gather_half(_h(feat), x["C"], px, py, rw, rh, window)
+    else:
+        px, py = _post.target_positions(rw, rh, dw, dh, jx, jy)
+        W, fbar = gather(feat, x["C"], px, py, rw, rh, window)
     cbar, sig, gbar, bh, bo = fbar[..., 0:3], fbar[..., 3:6], fbar[..., 6], fbar[..., 7], fbar[..., 8]
 
     # 3. motion candidates (Model M's rules)
