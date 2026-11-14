@@ -1068,9 +1068,12 @@ UINT Layout(Renderer& r, Quad* quads, const View& v, bool panel, const Frames& f
     if (!panel) {  // badge
         const float padX = 12 * s, h = float(bold.height) + 10 * s, dot = 8 * s;
 #if WRONGGPU_MODEL_K
-        const std::wstring modelName = v.upscaler.find("Model K") != std::string::npos ? L"Model K" : L"Model M";
+        std::wstring modelName = v.upscaler.find("Model K") != std::string::npos ? L"Model K" : L"Model M";
 #else
-        const std::wstring modelName = L"Model M";
+        std::wstring modelName = L"Model M";
+#endif
+#if WRONGGPU_MODEL_L
+        if (v.upscaler.find("Model L") != std::string::npos) modelName = L"Model L";
 #endif
         std::wstring name = v.state == 1 ? (network ? modelName : L"active") : v.state == 2 ? L"stand-in"
                             : v.state == 3 ? amdName : v.state == 4 ? L"unavailable" : amdName.empty() ? L"off \u00B7 AMD FSR" : L"off \u00B7 " + amdName;
@@ -1116,6 +1119,9 @@ UINT Layout(Renderer& r, Quad* quads, const View& v, bool panel, const Frames& f
     if (v.state >= 0) {
         rows.push_back({L"Upscaler", v.state == 0 ? (amdName.empty() ? std::wstring(L"AMD FSR") : amdName) + L" (WrongGPU off)"
                                      : v.state == 4 ? L"Unavailable (frame failed)" : v.state == 3 ? amdName
+#if WRONGGPU_MODEL_L
+                                     : network && v.upscaler.find("Model L") != std::string::npos ? L"Model L \u00B7 neural network"
+#endif
 #if WRONGGPU_MODEL_K
                                      : network ? (v.upscaler.find("Model K") != std::string::npos ? L"Model K \u00B7 neural network" : L"Model M \u00B7 neural network")
 #else

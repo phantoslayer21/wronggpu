@@ -6,7 +6,8 @@
 - the committed outputs equal a fresh generation;
 - the generated header reproduces the initial i15 interface header (tests/data/wg_registry_gen.initial.h) exactly,
   except the header comment and WG_REGISTRY_HASH;
-- ids are append-only against the previous registry (tests/data/registry.prev.json), entry ids ...0001/...0002 kept;
+- ids are append-only against the previous registry (tests/data/registry.prev.json: release 0.6.0's), entry ids
+  ...0001/...0002 kept and Model L's ...0003 only appended after them;
 - every refusal rule fires (id gap, duplicate id, renumbering, removed / reordered values, changed entry label or API
   prefix, a first label without the API prefix, a 4.x prefix, an unknown variant word, overlapping families, an
   unknown layout, test rows into the committed folder);
@@ -91,7 +92,7 @@ def main():
           "every slot id and SR entry of the initial i15 header kept")
     check("0x5747000000000101ull" not in outs["header"], "no RR entry in the version list")
     for needle in ["#define WG_OPT_SR_MODEL 0", "#define WG_OPT_ENTRY_SOURCE 9", "#define WG_OPT_RR_EXACT_ALLOWED 10",
-                   "#define WG_OPT_RR_HIT_DISTANCE_FILTER 11", "#define WG_OPT_COUNT 12", "#define WG_ENTRY_COUNT 2",
+                   "#define WG_OPT_RR_HIT_DISTANCE_FILTER 11", "#define WG_OPT_COUNT 12", "#define WG_ENTRY_COUNT 3",
                    "#define WG_RR_MODE_EXACT 0", "#define WG_RR_MODE_ACCURATE 1", "#define WG_RR_MODE_FAST 2",
                    "static const uint32_t kWgContractSlots[WG_CONTRACT_COUNT] = {2, 3, 4, 5, 6, 11};",
                    '#define WG_API_LEVEL_PREFIX "3.1.0"',
@@ -107,11 +108,13 @@ def main():
 
     # 4. entries
     entries = gen.entries_of(merged)
-    # only the SR models: the RR modes are a box of their own in the RR plugin's menu tab (menu list "panel")
-    check([e["id"] for e in entries] == [0x5747000000000001, 0x5747000000000002], "entry ids")
+    # only the SR models: the RR modes are a box of their own in the RR plugin's menu tab (menu list "panel"); Model L
+    # (#89) appended after M and K (a front end offers it only when built with it: clean/fsr WG_MODEL_L)
+    check([e["id"] for e in entries] == [0x5747000000000001, 0x5747000000000002, 0x5747000000000003], "entry ids")
     check(entries[0]["label"] == "WrongGPU Model M##3.1.0" and entries[1]["label"] == "WrongGPU Model K##3.1.0",
-          "the two entries keep today's names")
-    check([e["folder_label"] for e in entries] == ["WrongGPU M", "WrongGPU K"], "folder labels")
+          "the two released entries keep their names")
+    check(entries[2]["label"] == "WrongGPU Model L##3.1.0", "Model L's entry")
+    check([e["folder_label"] for e in entries] == ["WrongGPU M", "WrongGPU K", "WrongGPU L"], "folder labels")
     check(merged["options"][1]["menu"]["list"] == "panel", "rr_mode is offered in the panel, not the version list")
 
     # 5. refusals
@@ -133,7 +136,12 @@ def main():
     check(refused(r, prev, expect="changed or moved"), "refuses entries that change place (models gone from the front)")
     r = copy.deepcopy(reg); r["options"][1]["menu"]["list"] = "sidebar"
     check(refused(r, expect="not one of versions, panel"), "refuses an unknown menu list")
-    check(not gen.append_only_errors(load(prev), reg), "the RR entries may leave the end of the list (models keep 0 and 1)")
+    check(not gen.append_only_errors(load(prev), reg), "Model L appended after the released entries (M and K keep 0 and 1)")
+    r = copy.deepcopy(reg); r["options"][0]["values"] = ["M", "L", "K"]; r["models"] = [r["models"][0], r["models"][2],
+                                                                                          r["models"][1]]
+    check(refused(r, prev, expect="changed or moved"), "refuses a new model put before a released one")
+    r = copy.deepcopy(reg); r["options"][0]["values"] = ["M", "K"]; r["models"] = r["models"][:2]
+    check(not gen.append_only_errors(load(prev), r), "the last entry may leave the end of the list")
     r = copy.deepcopy(reg); r["api_level_prefix"] = "v3"
     check(refused(r, expect="not an a.b.c version"), "refuses an API prefix that is not a version")
     r = copy.deepcopy(reg); r["api_level_prefix"] = "4.0.0"

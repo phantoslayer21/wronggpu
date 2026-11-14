@@ -20,6 +20,7 @@ bool ModelBuiltIn(int32_t srModel) {
     if (srModel < 0 || srModel >= WG_SR_MODEL_COUNT) return false;
     // Models with a build flag (registry models[].build_flag): the one place of the front end that knows them.
     if (std::strcmp(kWgModelRows[srModel].name, "K") == 0) return WRONGGPU_MODEL_K != 0;
+    if (std::strcmp(kWgModelRows[srModel].name, "L") == 0) return WRONGGPU_MODEL_L != 0;
     return true;
 }
 
@@ -181,7 +182,10 @@ const char* RuntimeProviderName(const std::string& runtimeOptions, const char* e
     return name;
 }
 
-std::string WithoutModelK(const std::string& options, bool* removed) {
+std::string WithoutModelK(const std::string& options, bool* removed) { return WithoutModel(options, 'K', removed); }
+
+std::string WithoutModel(const std::string& options, char model, bool* removed) {
+    const char upper = char(std::toupper((unsigned char)model)), lower = char(std::tolower((unsigned char)model));
     std::string kept;
     bool any = false;
     for (size_t a = 0; a < options.size();) {
@@ -190,7 +194,8 @@ std::string WithoutModelK(const std::string& options, bool* removed) {
         const std::string item = options.substr(a, b - a);
         const size_t equal = item.find('=');
         const std::string value = equal == std::string::npos ? "" : Trim(item.substr(equal + 1));
-        if (equal != std::string::npos && Trim(item.substr(0, equal)) == "model" && (value == "K" || value == "k")) {
+        if (equal != std::string::npos && Trim(item.substr(0, equal)) == "model" && value.size() == 1 &&
+            (value[0] == upper || value[0] == lower)) {
             any = true;
         } else {
             if (!kept.empty()) kept += options[a - 1];  // the separator in front of the item
@@ -202,13 +207,14 @@ std::string WithoutModelK(const std::string& options, bool* removed) {
     return any ? kept : options;
 }
 
-#if !WRONGGPU_MODEL_K
-std::string IgnoreModelK(Config& config) {
-    bool ini = false, env = false;
-    config.runtimeOptions = WithoutModelK(config.runtimeOptions, &ini);
+#if !WRONGGPU_MODEL_K || !WRONGGPU_MODEL_L
+// model=<letter> dropped from the ini's runtime options and from WG_RUNTIME_OPTIONS (also the process environment);
+// *ini / *env: where it was.
+static void DropModelOption(Config& config, char model, bool* ini, bool* env) {
+    config.runtimeOptions = WithoutModel(config.runtimeOptions, model, ini);
     if (const char* value = std::getenv("WG_RUNTIME_OPTIONS")) {
-        const std::string kept = WithoutModelK(value, &env);
-        if (env) {
+        const std::string kept = WithoutModel(value, model, env);
+        if (*env) {
 #ifdef _WIN32
             _putenv_s("WG_RUNTIME_OPTIONS", kept.c_str());  // also the process environment; empty: removed
 #else
@@ -217,6 +223,24 @@ std::string IgnoreModelK(Config& config) {
 #endif
         }
     }
+}
+#endif
+
+#if !WRONGGPU_MODEL_L
+std::string IgnoreModelL(Config& config) {
+    bool ini = false, env = false;
+    DropModelOption(config, 'L', &ini, &env);
+    if (!ini && !env) return std::string();
+    return std::string("note: model=L (") + (ini ? "runtime_options in wronggpu.ini" : "") + (ini && env ? " and " : "") +
+           (env ? "WG_RUNTIME_OPTIONS" : "") + ") is refused: Model L is not part of this build of the front end "
+           "(CMake WG_MODEL_L); Model M is used";
+}
+#endif
+
+#if !WRONGGPU_MODEL_K
+std::string IgnoreModelK(Config& config) {
+    bool ini = false, env = false;
+    DropModelOption(config, 'K', &ini, &env);
     if (!ini && !env) return std::string();
     return std::string("note: model=K (") + (ini ? "runtime_options in wronggpu.ini" : "") + (ini && env ? " and " : "") +
            (env ? "WG_RUNTIME_OPTIONS" : "") + ") is ignored: Model K is not part of this build; Model M is used";
@@ -394,8 +418,12 @@ std::string OptionValue(const std::string& options, const char* key, bool* found
 }
 
 ModelChoice ChooseModelDir(const std::vector<ModelPlace>& places, bool modelK, const std::function<bool(const std::string&)>& exists) {
+    return ChooseModelDir(places, modelK ? 'K' : 'M', exists);
+}
+
+ModelChoice ChooseModelDir(const std::vector<ModelPlace>& places, char model, const std::function<bool(const std::string&)>& exists) {
     ModelChoice c;
-    const char* leaf = modelK ? "\\K\\model.wgcm" : "\\model.wgcm";
+    const char* leaf = model == 'K' ? "\\K\\model.wgcm" : model == 'L' ? "\\L\\model.wgcm" : "\\model.wgcm";
     for (size_t i = 0; i < places.size(); ++i) {
         const ModelPlace& p = places[i];
         if (p.dir.empty()) continue;

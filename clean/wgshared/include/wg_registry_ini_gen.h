@@ -5,7 +5,7 @@
 #ifndef WG_REGISTRY_INI_GEN_H
 #define WG_REGISTRY_INI_GEN_H
 
-#define WG_REGISTRY_INI_HASH 0x9EC9B4F5u
+#define WG_REGISTRY_INI_HASH 0x9F5E68A9u
 static const char kWgDefaultIniText[] =
     "# WrongGPU settings: the one settings file of every WrongGPU DLL (<game exe folder>\\WrongGPU\\wronggpu.ini).\r\n"
     "# Delete this file to restore the defaults. The [wronggpu] section is generated from WrongGPU's registry\r\n"
@@ -13,8 +13,8 @@ static const char kWgDefaultIniText[] =
     "# menu is written back here, so the next start without OptiScaler keeps it. A process environment variable\r\n"
     "# named on a key's comment overrides the key for that process.\r\n"
     "[wronggpu]\r\n"
-    "# sr_model: super-resolution model. Values: M | K. Default: M. Read by: sr-frontend, sr-runtime; applied at the next\r\n"
-    "# SR create. Environment: WG_RUNTIME_MODEL.\r\n"
+    "# sr_model: super-resolution model. Values: M | K | L. Default: M. Read by: sr-frontend, sr-runtime; applied at the\r\n"
+    "# next SR create. Environment: WG_RUNTIME_MODEL.\r\n"
     "sr_model = M\r\n"
     "# rr_mode: ray-reconstruction mode. Values: exact | accurate | fast. Default: accurate. Read by: rr-plugin,\r\n"
     "# rr-runtime; applied at the next frame. Environment: WG_RR_MODE.\r\n"

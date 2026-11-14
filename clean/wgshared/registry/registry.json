@@ -11,7 +11,7 @@
     {"id": "rr", "label": "WrongGPU RR", "kind": "ray-reconstruction", "choice_option": "rr_mode"}
   ],
   "options": [
-    {"id": 0, "key": "sr_model", "type": "choice", "values": ["M", "K"], "default": "M",
+    {"id": 0, "key": "sr_model", "type": "choice", "values": ["M", "K", "L"], "default": "M",
      "readers": ["sr-frontend", "sr-runtime"], "live": false, "latch": "sr-create", "ini_section": "wronggpu", "env": "WG_RUNTIME_MODEL",
      "menu": {"list": "versions", "label": "WrongGPU Model {value}", "folder_label": "WrongGPU {value}"},
      "values_from": "models", "doc": "super-resolution model"},
@@ -54,7 +54,8 @@
   ],
   "models": [
     {"id": "M", "option": "sr_model", "runtime_option": "model=M", "kernels": "clean/kernels (Model M)"},
-    {"id": "K", "option": "sr_model", "runtime_option": "model=K", "kernels": "clean/k", "build_flag": "WRONGGPU_MODEL_K"}
+    {"id": "K", "option": "sr_model", "runtime_option": "model=K", "kernels": "clean/k", "build_flag": "WRONGGPU_MODEL_K"},
+    {"id": "L", "option": "sr_model", "runtime_option": "model=L", "kernels": "clean/l", "build_flag": "WRONGGPU_MODEL_L"}
   ],
   "variants": [
     {"group": "head", "words": ["exact", "relaxed"]},
