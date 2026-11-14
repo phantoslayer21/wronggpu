@@ -12,12 +12,16 @@
 //   --reset=f,...     frames the game asks for a reset (WgRtFrame.reset = 1)
 //   --fail=<kernel>@<frame>  that kernel's launch fails in that frame (the device returns false)
 //
-// Prints the create result and the allocations ("alloc b<k> <bytes>"), the code objects loaded ("load <file>[ as
-// <tag>]"), then per frame "frame <f> index <i> parity <p> reset <r> rw <w> rh <h>" (wg_rt_info) and one line per
+// Prints the create result and the allocations ("alloc b<k> <bytes>"), what create uploads ("upload b<k>+<offset>
+// <bytes> <SHA-256 of the bytes>": the weight blobs, so a test can tell which blob an address holds), the code objects
+// loaded ("load <file>[ as <tag>]"), then per frame "frame <f> index <i> parity <p> reset <r> rw <w> rh <h>"
+// (wg_rt_info) and one line per
 // launch: "launch <kernel> <grid> <block>", followed for the kernels of the table below by " | " and the decoded
 // arguments: a device address as b<k>+<offset> (allocation k) or 0, an int as its value, the encoder and decoder
 // parameters as E{rw,rh,fw,fh,frame,reset} / D{rw,rh,fw,fh,reset}. A failed frame prints what was launched up to the
-// failure and "ERR frame <f>: <message>"; the next frame runs. "ERR <message>" at create. The code object files are not
+// failure and "ERR frame <f>: <message>"; the next frame runs. After each frame, "name <buffer> b<k>+<offset> <bytes>"
+// for every buffer name the runtime knows (wg_rt_buffer; kNames below), so the launches' addresses can be checked
+// against the buffers' names. "ERR <message>" at create. The code object files are not
 // read: names in the build folder (empty files) select the runtime's optional paths as real code objects would. Inputs
 // are zeros (the recording device does not compute): the sequence and the arguments are what is checked.
 #include <cstdio>
@@ -29,6 +33,7 @@
 #include <string>
 #include <vector>
 
+#include "../converter/src/sha256.h"
 #include "../runtime/device.h"
 #include "../runtime/runtime_core.h"
 #include "../runtime/wg_runtime.h"
@@ -121,6 +126,9 @@ class RecordingDevice : public Device {
   bool upload(DevPtr dst, const void* src, size_t n) override {
     uint8_t* d = at(dst, n);
     if (d && n) std::memcpy(d, src, n);
+    if (frame < 0 && d)  // create: the weight blobs (and the runtime's tables)
+      log->push_back("upload " + addr(dst) + " " + std::to_string(n) + " " +
+                     wgc::to_hex(wgc::Sha256::hash(src, n)));
     return d != nullptr;
   }
   bool download(void* dst, DevPtr src, size_t n) override {
@@ -200,6 +208,15 @@ std::vector<std::string> split(const std::string& s, char sep) {
 }
 
 }  // namespace
+
+// The buffer names of wg_rt_buffer (clean/runtime/runtime.cpp Runtime::buffer, FORMATS.md "Per-frame runtime"); a
+// name the runtime does not know in a build or for a model is skipped.
+const char* const kNames[] = {
+    "exposure.pair", "input.color", "input.depth", "input.motion", "enc0.features", "enc0.m_near", "enc0.m_far",
+    "enc0.m_center", "enc1.skip", "enc1.merged", "enc2.skip", "enc2.merged", "b0.out", "b1.out", "b2.out", "b3.out",
+    "b4.out", "b5.out", "dec2.out", "dec1.out", "dec0.A", "dec0.B", "dec0.C", "dec0.latent", "post.history",
+    "post.reduced", "post.display", "filter.out", "state.latent_prev", "state.motion_history", "state.history_prev",
+    "l.wide", "l.narrow", "l.x3"};
 
 // The device backends are not linked (runtime_create gets the recording device); the runtime still names them.
 namespace wgrt {
@@ -291,6 +308,12 @@ int main(int argc, char** argv) {
     for (const std::string& l : log) std::printf("%s\n", l.c_str());
     log.clear();
     if (!ok) std::printf("ERR frame %d: %s\n", f, runtime_error(rt).c_str());
+    for (const char* nm : kNames) {
+      uintptr_t p = 0;
+      size_t bytes = 0;
+      if (wg_rt_buffer(rt, nm, &p, &bytes) == 0)
+        std::printf("name %s %s %zu\n", nm, rec->addr((DevPtr)p).c_str(), bytes);
+    }
   }
   std::printf("kernels %s\n", runtime_kernels(rt));
   runtime_destroy(rt);

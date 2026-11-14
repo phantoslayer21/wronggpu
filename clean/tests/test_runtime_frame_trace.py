@@ -75,21 +75,28 @@ def run_trace(rw=64, rh=64, ow=96, oh=96, frames=3, options="", build_files=(), 
 
 
 class Trace:
-    """A parsed run: create (the first line), allocs {k: bytes}, loads, frames [{"info": {...}, "launches": [Launch],
-    "failed": kernel or None, "error": message or None}], kernels {key: value}."""
+    """A parsed run: create (the first line), allocs {k: bytes}, uploads {address: (bytes, SHA-256 hex)} (create's),
+    loads, frames [{"info": {...}, "launches": [Launch], "failed": kernel or None, "error": message or None, "names":
+    {buffer name: address}}], kernels {key: value}."""
 
     def __init__(self, lines):
-        self.create, self.allocs, self.loads, self.frames, self.kernels = lines[0], {}, [], [], {}
+        self.create, self.allocs, self.uploads, self.loads, self.frames, self.kernels = lines[0], {}, {}, [], [], {}
         for ln in lines[1:]:
             if ln.startswith("alloc b"):
                 k, n = ln[7:].split(" ")
                 self.allocs[int(k)] = int(n)
+            elif ln.startswith("upload "):
+                addr, n, digest = ln[7:].split(" ")
+                self.uploads[addr] = (int(n), digest)
+            elif ln.startswith("name "):
+                nm, addr, _ = ln[5:].split(" ")
+                self.frames[-1]["names"][nm] = addr
             elif ln.startswith("load "):
                 self.loads.append(ln[5:])
             elif ln.startswith("frame "):
                 f = ln.split(" ")
                 info = {f[i]: int(f[i + 1]) for i in range(2, len(f) - 1, 2)}
-                self.frames.append({"info": info, "launches": [], "failed": None, "error": None})
+                self.frames.append({"info": info, "launches": [], "failed": None, "error": None, "names": {}})
             elif ln.startswith("launch "):
                 self.frames[-1]["launches"].append(Launch(ln[7:]))
             elif ln.startswith("failed "):
@@ -104,6 +111,11 @@ class Trace:
     def unknown(self):
         """Decoded arguments that are no allocation's address (a wrong entry in the recorder's table shows here)."""
         return [(ln.kernel, a) for f in self.frames for ln in f["launches"] for a in ln.args if a.startswith("?")]
+
+    def uploaded(self, digest):
+        """The address create uploaded these bytes to (SHA-256 hex), the whole allocation; None if none."""
+        hits = [a for a, (_, d) in self.uploads.items() if d == digest and a.endswith("+0")]
+        return hits[0] if len(hits) == 1 else None
 
     def extent(self, addr):
         """Bytes from a decoded address b<k>+<offset> to the end of its allocation."""
