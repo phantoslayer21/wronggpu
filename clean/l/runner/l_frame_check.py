@@ -53,7 +53,9 @@ pack12 post path; Model M: its native frame), and every stage output both backen
 run's ("default"), byte for byte: the D3D12 ports reproduce their HIP kernels byte for byte, and Model M's pack12 post
 path the banded one bit for bit. The pack12 images (A: A0 A1 A2 B0 | B1 B2 C2, C: C0 C1; clean/FORMATS.md) are
 unpacked and compared with the HIP run's A, B and C. Not compared: b0 ... b4 (the bottleneck megakernels write only
-b5), the display image (the fused pack12 post writes none), and on the first frame the previous frame's state.
+b5), the display image (the fused pack12 post writes none), and on the first frame the previous frame's state. An
+output that is all zero on D3D12 and not on HIP is reported as not written there (the D3D12 fusions keep enc1's merged
+map, and Model M's dec2 / dec1 outputs, on chip), not as differing.
 """
 import argparse
 import copy
@@ -219,7 +221,7 @@ def compare_backends(hip, dx, same_post=True):
     for k, (fh_, fd_) in enumerate(zip(hip["frames"], dx["frames"])):
         a, b = fh_["out"], fd_["out"]
         rh, rw = fh_["inputs"]["color"].shape[:2]
-        m, compared = {}, []
+        m, compared, unwritten = {}, [], []
 
         def walk(x, y, prefix=""):
             for key in x:
@@ -236,7 +238,11 @@ def compare_backends(hip, dx, same_post=True):
                         m[name] = -1  # not comparable: counts as differing
                     else:  # values whose bit patterns differ
                         iv = np.dtype("u%d" % u.dtype.itemsize)
-                        m[name] = int(np.sum(np.ascontiguousarray(u).view(iv) != np.ascontiguousarray(v).view(iv)))
+                        n = int(np.sum(np.ascontiguousarray(u).view(iv) != np.ascontiguousarray(v).view(iv)))
+                        if n and not np.any(v) and np.any(u):  # all zero on D3D12 only: not written there
+                            unwritten.append(name)
+                        else:
+                            m[name] = n
                     compared.append(name)
                 elif isinstance(u, (int, float)) and isinstance(v, (int, float)):
                     m[name] = int(u != v)
@@ -248,7 +254,7 @@ def compare_backends(hip, dx, same_post=True):
         m["dec0.C"] = int(np.sum(~((C == dec["C"]) | (np.isnan(C) & np.isnan(dec["C"])))))
         if same_post:
             m["out"] = int(np.sum(a["out"].view(np.uint32) != b["out"].view(np.uint32)))
-        res.append({"frame": k, "render": [rw, rh], "differ": m,
+        res.append({"frame": k, "render": [rw, rh], "differ": m, "unwritten_d3d12": unwritten,
                     "identical": all(v == 0 for v in m.values())})
     return res
 
@@ -294,6 +300,8 @@ def compare_d3d12(build, json_path):
             "l_post_recon" not in (recs["default"]["kernels"].get("post_last"), recs["default"]["kernels"].get("l_post"))
         frames = compare_backends(recs["default"], recs["d3d12"], same_post)
         res[model] = {"kernels_d3d12": recs["d3d12"]["kernels"], "frames": frames,
+                      "unwritten_d3d12": sorted({n for f in frames for n in f["unwritten_d3d12"]}),
+                      "outputs_compared": sorted({n for f in frames for n in f["differ"]}),
                       "identical_frames": sum(f["identical"] for f in frames),
                       "differing": sorted({k for f in frames for k, v in f["differ"].items() if v}),
                       "post_compared_with_hip": same_post}
@@ -307,7 +315,8 @@ def compare_d3d12(build, json_path):
         json.dump(res, f, indent=1, default=lambda o: o.item() if hasattr(o, "item") else str(o))
     for model in ("L", "M"):
         print(model, "D3D12 against HIP: frames byte-identical", res[model]["identical_frames"], "of",
-              len(res[model]["frames"]), "differing outputs", res[model]["differing"])
+              len(res[model]["frames"]), "outputs compared", len(res[model]["outputs_compared"]), "differing",
+              res[model]["differing"], "not written on D3D12 (all zero; fused kernels)", res[model]["unwritten_d3d12"])
         if "m_post_reference" in res[model]:
             print("  its post (Model M's fused pack12 post; HIP runs l_post_recon) against Model M's post reference:",
                   res[model]["m_post_reference"]["passed"], "of", len(res[model]["frames"]), "frames pass")
