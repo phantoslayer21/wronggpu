@@ -46,3 +46,12 @@ jobs:
         run: python3 tools/ci/check_portable.py --root clean/installer
       - name: Build the AppImage (test payload)
         run: bash clean/installer/build-appimage.sh --test-payload --out out
+      # The smoke build, so a reviewer can run it. It carries the test payload and never ships; it expires after 3 days.
+      # Pinned to the full commit SHA of the v4.6.2 tag, not the tag, which can be moved.
+      - name: Keep the AppImage for review
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: WrongGPU-appimage-testpayload
+          path: out/*.AppImage
+          if-no-files-found: error
+          retention-days: 3
