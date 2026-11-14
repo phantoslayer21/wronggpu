@@ -61,6 +61,7 @@ No kernel works in place.
 |---|---|---|
 | `l_enc_values.co` (loaded under the tag `lev`) | `clean/kernels/encoder.hip` with `-DWG_ENC_VALUES_OUT=1` | `input_encoder` |
 | `l_ops.co` | `clean/l/kernels/l_ops.hip` | `l_linear_32_32_relu`, `l_linear_32_32_f16`, `l_project_gather`, `l_dec_project`, `l_coef` |
+| `l_post.co` | `clean/l/kernels/l_post.hip` (includes Model M's `clean/kernels/post.hip` for its functions; Model M's kernels come along unused) | `l_post_recon` (HDR) |
 | `l_swin.co` | `clean/l/kernels/l_swin.hip` | `l_swin_block_c32[_nc]` (exists, #102: FP8 in / FP8 out, mirror border; block checks only), `l_swin_block_c32_enc[_nc]`, `l_swin_block_c32_dec[_nc]` |
 
 All are built with `clean/runner/build.py`'s `device_command`. The build's `-cuid` comes from the output file name,
@@ -117,10 +118,16 @@ the frame parity, as Model M's.
      and filters them with no decode and no exposure (`recon.output_filter`).
    - The output filter is Model M's (the project's own taps).
 
-   The reconstruction kernel is **planned**. Its arguments and buffers will be Model M's `post` kernels' (Model M's
-   `clean/FORMATS.md`). Its summation order (taps, candidates) is not fixed yet: the oracle sums the gather columns
-   first, while Model M's reference sums rows first. The kernel's order decides, and the kernel-order model follows
-   it.
+   The reconstruction kernel `l_post_recon` (`l_post.co`, HDR; exists, GPU-checked by
+   `clean/l/runner/l_post_check.py`):
+   - arguments, buffers, layouts and grid are Model M's `post_recon` (Model M's `clean/FORMATS.md`), with `w` = the
+     post blob (`w[0]` = Model L's s);
+   - its gather order is i (columns) outer, j (rows) inner, as the oracle;
+   - its candidate combination is one fused multiply-add w1 L1 + (w2 L2), then times e;
+   - the decode passes a NaN through.
+
+   The LDR kernel is planned, with the same arguments. The kernel-order model (the half-precision and fused-rounding
+   forms) is not fixed yet.
 
 ## Checks (GPU, synthetic data)
 
