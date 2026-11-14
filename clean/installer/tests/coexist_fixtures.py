@@ -16,6 +16,24 @@ def optiscaler(version=(0, 9, 5, 4)):
     return mockpe.make_dll({"ProductName": "OptiScaler", "FileDescription": "OptiScaler (synthetic test file)"}, version=version)
 
 
+def optiscaler_naming_wronggpu(product_first=True):
+    """0.6.1: an OptiScaler build of another setup whose version resource also names WrongGPU (an edition of it): the
+    words only, typed here; with product_first False WrongGPU is in its product name and OptiScaler in its description."""
+    if product_first:
+        return mockpe.make_dll({"ProductName": "OptiScaler", "FileDescription": "OptiScaler, WrongGPU edition (synthetic test file)"}, version=(10, 0, 0, 1))
+    return mockpe.make_dll({"ProductName": "WrongGPU edition", "FileDescription": "OptiScaler (synthetic test file)"}, version=(10, 0, 0, 1))
+
+
+def wronggpu_menu_plugin():
+    """WrongGPU's own menu plugin's words (clean/fsr/asi/version_asi.rc): a plugin for OptiScaler, not OptiScaler."""
+    return mockpe.make_dll({"CompanyName": "WrongGPU project", "ProductName": "WrongGPU",
+                            "FileDescription": "WrongGPU OptiScaler plugin (adds WrongGPU to OptiScaler's upscaler menu)", "OriginalFilename": "WrongGPU.asi"})
+
+
+def wronggpu_runtime_like():
+    return mockpe.make_dll({"CompanyName": "WrongGPU project", "ProductName": "WrongGPU", "FileDescription": "WrongGPU runtime (synthetic)"})
+
+
 def optiscaler_text():
     """No version resource: recognised by the text in it (as OptiScaler's builds carry their name)."""
     return mockpe.make_dll(None, extra=b"synthetic proxy; reads OptiScaler.ini")

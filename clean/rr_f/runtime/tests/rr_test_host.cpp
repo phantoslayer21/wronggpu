@@ -63,6 +63,16 @@
 #include "rr_runtime_test.h"
 #include "../../proxy/include/wg_settings_reader.h"
 
+// Progress on stderr (unbuffered, so a run stopped by a time cap keeps it): one line per job command and one per 100
+// perf frames, with the seconds since the host started. A run that hangs or is stopped names the step it was in.
+static double host_seconds() {
+  static LARGE_INTEGER fq = {}, t0 = {};
+  LARGE_INTEGER t;
+  if (!fq.QuadPart) QueryPerformanceFrequency(&fq), QueryPerformanceCounter(&t0);
+  QueryPerformanceCounter(&t);
+  return (double)(t.QuadPart - t0.QuadPart) / (double)fq.QuadPart;
+}
+
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
 
@@ -493,6 +503,7 @@ static void perf(Host& h, uint32_t Wo, uint32_t Ho, uint32_t rw, uint32_t rh, in
   static ID3D12CommandAllocator* al2[3] = {};
   if (!al2[0]) for (int k = 0; k < 3; ++k) CK(g_dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&al2[k])));
   for (int i = 0; i < frames; ++i) {
+    if (i && i % 100 == 0) fprintf(stderr, "  perf: %d of %d frames at %.1f s\n", i, frames, host_seconds());
     in.jitter[0] = u(rng) - 0.5f;
     in.jitter[1] = u(rng) - 0.5f;
     WgRrFrame f;
@@ -709,6 +720,9 @@ int main(int argc, char** argv) {
     fprintf(stderr, "usage: rr_test_host <job file>\n");
     return 1;
   }
+  setvbuf(stdout, nullptr, _IONBF, 0);   // nothing lost when a time cap stops the host
+  setvbuf(stderr, nullptr, _IONBF, 0);
+  host_seconds();
   std::ifstream jf(argv[1]);
   if (!jf) return 1;
   IDXGIFactory6* fac = nullptr;
@@ -766,10 +780,12 @@ int main(int argc, char** argv) {
   }
   Host h;
   std::string line;
+  int step = 0;
   while (std::getline(jf, line)) {
     std::istringstream s(line);
     std::string cmd;
     if (!(s >> cmd) || cmd[0] == '#') continue;
+    fprintf(stderr, "step %d %s at %.1f s\n", ++step, cmd.c_str(), host_seconds());
     if (cmd == "runtime") {
       std::string dll;
       s >> dll;

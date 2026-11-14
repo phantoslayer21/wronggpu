@@ -120,7 +120,25 @@ delivered by the spec side; the code never guesses it (it raises, or takes the c
   results are written as 0x7E00. The D3D12 build compiles `fg_` kernels only when `--only` names them, so Model M's
   and Model L's kernel sets and DXILs do not change.
 - `runner/fg_d3d12_check.py` proves each kernel on HIP against D3D12 (raw bytes) and against the CPU reference;
-  `runner/fg_net1_gpu.py` the whole network, every step output.
+  `runner/fg_net1_gpu.py` the whole network, every step output. These exact kernels stay as the validation mode.
+
+## Fast path, tier B (`kernels/fg_net1_mma.hip`, code object `fg_net1_mma.co`; D3D12 `fg_mconv.hlsl`, `fg_upscale_hwc.hlsl`)
+
+- Tensors NHWC float16 (element (y, x, c) at (y W + x) C + c), so 8 consecutive channels of a pixel are one 16-byte
+  fragment load or store. Weights as WMMA A fragments in chunk order: `[cout / 16][chunks][32 lanes][8]` float16, lane
+  l holding output channel 16 mt + l % 16 and input channels 16 cb + 8 (l / 16) + 0..7 of the chunk's tap
+  (`runner/fg_net1_mma.py` `swizzle`).
+- `fg_mconv{1,2,4}(x, wf, b, y, p, cin, cout, H, W, k, order, act, pool, tiles_x, tiles_y)`: the spec's chunk structure
+  on `v_wmma_f32_16x16x16_f16`: the accumulator starts at the bias; each chunk (16 input channels of one tap, in the
+  layer's chunk order) is one instruction with the float16 accumulator as C, and its result is rounded to float16
+  (nearest even) before the next chunk. Not bit-exact: the instruction's sum is not the exact one
+  (`records/wmma-probe-2026-11-14.json`). An exact-zero sum gives +0, the reference's convention. Leaky ReLU and, with
+  `pool` 1, the 2 x 2 max-pool are the exact helpers of `fg_exact16.h`, in the epilogue. 1 / 2 / 4 output-channel tiles
+  of 16 per wave; a workgroup is 8 waves over 16 x 16 pixels.
+- `fg_upscale_hwc_f16`: `fg_upscale_f16`'s arithmetic on NHWC tensors. The adds are `fg_add_f16`.
+- net1 is 27 launches: five encoder convolutions with the pool fused, the bottleneck's two, and per decoder level an
+  upscale, an add and two convolutions. HIP and D3D12 are byte-identical; against the CPU reference the output is a
+  report (net1's output is not gated; the gate is the generated frame against the oracle).
 
 ## Configuration (`reference/config.py`)
 

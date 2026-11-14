@@ -27,6 +27,7 @@ os.environ["WRONGGPU_TESTING"] = "1"
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import coexist_fixtures as fx  # noqa: E402
+import coexist_061_tests as c061  # noqa: E402
 import run_installer_tests as suite  # noqa: E402
 import run_launcher_tests as lt  # noqa: E402
 from run_installer_tests import diff, read, sha, snapshot, write  # noqa: E402
@@ -170,12 +171,13 @@ def test_loaders_and_tools(t, opti, full):
             ("Path=" + os.path.join(b, "wronggpu-plugins")).lower() in ini.lower(), (rc, t.j.get("message"), ini[-300:]))
     write(os.path.join(b, "wronggpu-plugins", "wronggpu-asi.log"), "[1] [WrongGPU.asi] WrongGPU.asi loaded\r\n")  # what the plugin writes next to itself
     rc = t.run("uninstall", exe)
-    t.check("ASI loader: uninstall byte for byte (the plugin's folder and its log gone)", rc == 0 and snapshot(root) == before, diff(before, snapshot(root)))
+    left = lt.kept_runtime(before, root, "bin/x64/wronggpu-plugins/wronggpu-asi.log")  # (the plugin's log is not in the record: it and its folder stay)
+    t.check("ASI loader: uninstall byte for byte except the plugin's log, which stays with its folder", rc == 0 and snapshot(root) == left, diff(left, snapshot(root)))
     rc = install(t, exe, opti)  # a package without [Plugins] Path: the plugin stays in plugins\, with a warning
     t.check("ASI loader, OptiScaler without a Path setting: installed with a warning (may load twice)",
             rc == 0 and any("a second time" in w for w in t.j.get("warnings", [])) and os.path.isfile(os.path.join(b, "plugins", "WrongGPU.asi")), (rc, t.j.get("warnings")))
     t.run("uninstall", exe)
-    t.check("...uninstall byte for byte", snapshot(root) == before, diff(before, snapshot(root)))
+    t.check("...uninstall byte for byte (but for that log)", snapshot(root) == left, diff(left, snapshot(root)))
     shutil.rmtree(root, ignore_errors=True)
 
     # CET (version.dll), RED4ext (winmm.dll), ReShade (dxgi.dll): OptiScaler takes wininet.dll
@@ -284,7 +286,10 @@ def test_own_optiscaler_not_players(t, opti):
     t.check("repair over it: no switch asked, OptiScaler.log is not moved as a player's file", rc == 0 and not any(l.endswith("\tOptiScaler.log\tmoved") for l in rec_lines(b)),
             (rc, t.j.get("message")))
     rc = t.run("uninstall", exe)
-    t.check("uninstall byte for byte (" + proxy + ", the log and the ini ours)", rc == 0 and snapshot(root) == before, diff(before, snapshot(root)))
+    # (0.6.1, the ownership rule: OptiScaler.log is a shared name, never deleted by it; it is the one file left)
+    want = c061.with_files(before, root, [os.path.relpath(os.path.join(b, "OptiScaler.log"), root)])
+    t.check("uninstall byte for byte (" + proxy + " and the ini ours); OptiScaler.log stays (never deleted by its name)",
+            rc == 0 and snapshot(root) == want and os.path.isfile(os.path.join(b, "OptiScaler.log")), diff(want, snapshot(root)))
     shutil.rmtree(root, ignore_errors=True)
 
 
@@ -629,6 +634,7 @@ def main():
     test_leftovers_and_orphans(t, opti)
     test_engine_direct_leftovers(t, opti)
     test_status_lists_findings(t, opti)
+    c061.run_all(t, opti, full)
     drop_entries(t, work)  # nothing of this run stays in the test registry (the launcher tests share it)
     print("\n%d checks passed, %d failed (%.0f s)" % (t.passed, len(t.failures), time.time() - t0))
     for f in t.failures:
