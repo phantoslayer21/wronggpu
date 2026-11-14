@@ -233,31 +233,52 @@ With the defaults nothing of this section changes the installer.
   wrote (`OptiScaler.log`) belong to that install: no `/MOVEMODS`, no warning. An OptiScaler that is not in the
   install record is another mod, as before.
 - **Uninstall.** Restores every original byte for byte (hash-verified), removes what WrongGPU added (by the rule below),
-  and the entry, and `%LOCALAPPDATA%\WrongGPU` (model and logs) when no other game uses it. The `wronggpu-*` logs and
+  and the entry, and WrongGPU's own files in `%LOCALAPPDATA%\WrongGPU` (model and logs) when no other game uses it. The `wronggpu-*` logs and
   reports that WrongGPU's own programs wrote while the game ran are not in the record, so nothing proves them WrongGPU's
   (a player's `wronggpu-notes.txt` carries the same prefix): they are never deleted. They stay in their folders, each is
   in the setup log, and the result lists them ("left in place").
-- **What the launcher removes or overwrites: the file-ownership rule** (0.6.1; every restore, uninstall, repair, update,
-  move out of a wrong folder and cleanup; `src/wg_core/record.h`). A file is deleted or overwritten only when its
-  current bytes are WrongGPU's: the hash the install record says WrongGPU last wrote there (every write of the launcher
-  to `wronggpu.ini`, `OptiScaler.ini` and the RR plugin's settings updates that hash), or a WrongGPU release's
-  (`known_releases.h`, size and SHA-256) or the embedded payload's. Nothing else proves it: not the file's name, not a
-  file next to it, not an ini key, not "it is a log", not "the install created that path". One exception, and only
-  this: the game's FSR DLL slots, where WrongGPU's DLL is recognised by its version resource (the game may update that
-  DLL; a newer WrongGPU build placed by hand counts as WrongGPU's). A file that is not in the record is never touched,
-  whatever its name (`wronggpu-*`, `OptiScaler.log`, `fakenvapi.log`, ...).
+- **What the launcher removes or overwrites: the file-ownership rule** (0.6.1; the restore, uninstall, repair, update, move
+  out of a wrong folder and the cleanups of WrongGPU's own folders; `src/wg_core/record.h`). In the restore paths, a file
+  is deleted or overwritten only when its current bytes are WrongGPU's: the hash the install record says WrongGPU last
+  wrote there (every write of the launcher to `wronggpu.ini`, `OptiScaler.ini` and the RR plugin's settings updates that
+  hash). Nothing else proves it: not the file's name, not a file next to it, not an ini key, not "it is a log", not "the
+  install created that path". A file that is not in the record is not touched, whatever its name (`wronggpu-*`,
+  `OptiScaler.log`, `fakenvapi.log`, ...).
+  - **Two policies, stated here on purpose.** Files in WrongGPU's FSR slot that identify as WrongGPU (the version
+    resource's `ProductName` is WrongGPU: the game may update that DLL, and a newer WrongGPU build placed by hand counts),
+    or that are byte-identical to a WrongGPU release (`known_releases.h`, size and SHA-256) or to the embedded payload, are
+    treated as WrongGPU's. This is a recognition by identity, not proof of ownership: a player's own build or copy with
+    that product name, or a copy of a release file, is treated the same way. Nothing else is treated as WrongGPU's by
+    its content.
   - Any other file at a recorded path (edited by hand, saved by OptiScaler's menu or by WrongGPU's own plugin, replaced
     by another setup or a game update, a settings file the install created and a program rewrote since) stays where it
     is, untouched, with a warning.
-  - **The replace race.** A file is checked and changed through one handle: it is opened once with read and delete
-    access and without sharing for writing, renaming or deleting, hashed through that handle, and then deleted
-    (`FileDispositionInfoEx`) or overwritten through it. The file that was hashed is the file that goes; a file that
-    another program swaps in after the plan was made is found by the hash and left. Where nothing was at a path when
-    the plan was made, the original is created only if the path is still free (a file that appeared is never overwritten).
-    Not covered, and said here: the folders above a file are resolved by name when it is opened (a program that can
-    rename a folder of the game's path between the plan and the open can make the open reach another file, which is then
-    compared with the plan's hash like any file); the game's FSR DLL, in the one step where WrongGPU's DLL is deleted
-    and the game's file takes its name, is held until deleted and the move that follows creates the name only if free.
+  - **Hard links.** A file that has another name (a hard link) is never written through, because the other name would change
+    too: when its original has to go back, the file stays, the original is kept in `WrongGPU-originals`, and the result
+    says so. A recorded hard-linked file with nothing to put back loses only the recorded name.
+  - **REFramework's mirror.** A mirror copy of a root DLL (`_storage_`) is deleted only when the record lists it. An
+    unrecorded copy, even byte for byte the file the install wrote, stays and the result says so.
+  - **WrongGPU's own folders.** The state folder (`wronggpu-setup`) and the shared data folder (`%LOCALAPPDATA%\WrongGPU`)
+    are cleaned the same way: only what WrongGPU wrote goes. In the state folder that is its fixed file names
+    (`install.record`, `owned-files.json`, `uninstall.exe`, `setup.log`, `profile.ini`), the backups the record lists and
+    the files the kept previous version lists in `previous.txt`; the player's Engine.ini copy (`rr-config`) goes only
+    through the Engine.ini revert. In the shared folder it is its fixed names, the model files (`model.wgcm`,
+    `model-source.txt`) and its cache, helper, job and log folders. Any other file stays, the folder stays with it, and
+    the result lists what was left. The same applies when an install is moved out of a wrong folder. A shared folder with
+    only WrongGPU's files (and the ignore list, which has its own put-back rule) is removed as before.
+  - **A settings file in a build without Preset K.** The plugin's `wronggpu-asi.ini` is rewritten (its `selection=wronggpu-k`
+    line changed) only when an earlier record lists it and its bytes still match. Otherwise it stays as it is and the
+    result tells the player how to change it.
+  - **The replace race, as far as it is closed.** In the restore, a file is checked and changed through one handle: it is
+    opened once with read and delete access and without sharing for writing, renaming or deleting, hashed through that
+    handle, and then deleted (`FileDispositionInfoEx`) or overwritten through it. The file that was hashed is the file
+    that goes; a file that another program swaps in after the plan was made is found by the hash and left. Where nothing was
+    at a path when the plan was made, the original is created only if the path is still free. Not covered, and said here:
+    the folders above a file are resolved by name when it is opened (a program that can rename a folder of the game's path
+    between the plan and the open can make the open reach another file, which is then compared with the plan's hash like
+    any file); the game's FSR DLL, in the one step where WrongGPU's DLL is deleted and the game's file takes its name,
+    is held until deleted and the move that follows creates the name only if free; the install, repair and update steps
+    that write into the game folder, the Engine.ini edit and the rollback are not covered by this (tracked separately).
   - When the original from before WrongGPU cannot go back because of such a file, it is kept in
     `<install folder>\WrongGPU-originals\<time>\` (a folder no operation removes), checked byte for byte; a second
     generation goes into a folder of its own, neither is overwritten. The result then says "partly" and names each file

@@ -118,11 +118,13 @@ bool SaveRebasedRecord(Context& ctx, const wstring& dir, Record& m);
 wstring Target(const wstring& dir, const wstring& rel);
 bool HostedRecord(const Record& m);
 // ---- the file-ownership rule (0.6.1; README "What the launcher removes") ----------------------------------------------
-// Every restore, uninstall, repair, update, move out of a wrong folder and cleanup deletes or overwrites a file only when
-// its current bytes are WrongGPU's: the hash the record says WrongGPU last wrote there, or a WrongGPU release's (size and
-// SHA-256). Not by its name, a neighbouring file, an ini key or because it is a log, and not because the install created the
-// path (a file the install created whose bytes changed since is preserved too). The one exception: the game's FSR DLL
-// slots, where WrongGPU's DLL is recognised by its version resource (ClassifySlot), because the game may update that DLL.
+// The restore, uninstall, repair, update, move out of a wrong folder and the cleanups of WrongGPU's own folders delete or
+// overwrite a file only when its current bytes are WrongGPU's: the hash the record says WrongGPU last wrote there. Not by its
+// name, a neighbouring file, an ini key or because it is a log, and not because the install created the path (a file the
+// install created whose bytes changed since is preserved too). EXPLICIT POLICY (README "file-ownership rule"): files in the
+// game's FSR slots that identify as WrongGPU (ClassifySlot: the version resource's ProductName, because the game may update
+// that DLL), and files byte-identical to a WrongGPU release or to the embedded payload (KnownReleaseFile), are treated as
+// WrongGPU's; that is recognition by identity, not proof of ownership, and nothing else is treated as WrongGPU's by content.
 // Anything else at a recorded path stays as it is; a player's original that cannot be put back because of it is kept in
 // <install dir>\WrongGPU-originals\<time>\ (KeptOriginal), and the result says "partly" (kPartlyRestored). A file that is
 // not in the record at all is never touched, whatever its name (UnrecordedRuntimeFiles: listed, kLeftUnrecorded).
@@ -197,7 +199,19 @@ constexpr unsigned long kCleanupMoveFirstWaitMs = 50;
 // a chosen error for the first tries; nullptr puts MoveFileExW back.
 using CleanupMoveFn = BOOL (WINAPI*)(LPCWSTR from, LPCWSTR to, DWORD flags);
 void SetCleanupMoveForTest(CleanupMoveFn fn);
-wstring StartCleanup(Context& ctx, const wstring& state, const wstring& self, const wstring& appData);
+// `left` (when given) receives the full paths of what stays in the shared folder because it is not WrongGPU's (below).
+wstring StartCleanup(Context& ctx, const wstring& state, const wstring& self, const wstring& appData, std::vector<wstring>* left = nullptr);
+// What the state folder (<dir>\wronggpu-setup) and the shared data folder (%LOCALAPPDATA%\WrongGPU) hold is deleted only when it is
+// WrongGPU's: the fixed names it gives its own files (install.record, owned-files.json, uninstall.exe, setup.log, profile.ini),
+// the backups the record lists, the previous version's files that previous.txt lists, and in the shared folder its model files
+// (model.wgcm, model-source.txt) and its cache, helper, job and log folders. Anything else stays, with the folder, and the result
+// lists it (kLeftUnrecorded); only a folder that holds nothing else is removed. A shared folder with only WrongGPU's files
+// (and the ignore list, put back by its own rule) is moved aside and removed as before.
+// RemoveStateFolder: the state folder of `dir` without a record in hand (relocation: the restore has removed the backup);
+// m: the record, when it is (its backups are named by it). keepFile: the running uninstaller. Returns what stays, below the folder.
+std::vector<wstring> RemoveStateFolder(const wstring& dir, const Record* m = nullptr, const wstring& keepFile = L"");
+// "Left in place (not recorded by the install): <where>: a, b, c and N more": the warning that lists what stays (the first five).
+wstring LeftText(const wstring& where, const std::vector<wstring>& rels);
 // The restore of an install, by the file-ownership rule above. Before anything changes it checks every recorded file
 // (refused, "Nothing was changed", when one cannot be read or replaced: another program holds it, or a backup is missing).
 // Then, per entry: WrongGPU's file goes (or the player's original from the backup takes its place); the original already

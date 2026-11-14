@@ -1019,7 +1019,9 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
         if (wrong.rrconfig.backup) ReadAll(RrConfigBackupPath(wrongDir), wrongFixBackup);
         ui.log(L"WrongGPU is next to " + BaseName(wrong.exe) + L", not the game's program: taking it out of " + wrongDir + L" first");
         for (auto& w : DoRestore(ctx, wrongDir, ui, false, true)) res.warnings.push_back(w);
-        RemoveTree(StateDir(wrongDir));
+        const std::vector<wstring> stay = RemoveStateFolder(wrongDir);  // what WrongGPU wrote; a file that is not its stays, with the folder, and is said
+        for (auto& f : stay) LogLine(ctx, L"kept " + Join(StateDir(wrongDir), f) + L" (not WrongGPU's, or in use)");
+        if (!stay.empty()) res.warnings.push_back(LeftText(L"wronggpu-setup of " + wrongDir, stay));
         RemoveManagedGame(wrongDir);
         if (!IsFile(ProfilePath(dir))) SaveProfile(ProfilePath(dir), carried);  // the game's settings go with it (kept through a failure)
         res.notes.push_back(L"WrongGPU was taken out of " + wrongDir + L" (next to " + BaseName(wrong.exe) + L", not the game's program); its settings went over to " + dir);

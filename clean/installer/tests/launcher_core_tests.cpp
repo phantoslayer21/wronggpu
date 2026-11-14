@@ -14,6 +14,7 @@
 #include "app/ui_palette.h"
 #include "wg_core/detect.h"
 #include "wg_core/gamerules.h"
+#include "wg_core/install.h"
 #include "wg_core/launcher.h"
 #include "wg_core/logs.h"
 #include "wg_core/logtail.h"
@@ -819,6 +820,155 @@ int main() {
                     require(CopyNew(src, dst, &err) && read(dst) == "short original", "CopyNew: copies where nothing is");
                     file(dst, "another file");
                     require(!CopyNew(src, dst, &err) && err == ERROR_FILE_EXISTS && read(dst) == "another file", "CopyNew: a file that is there is not overwritten (ERROR_FILE_EXISTS)");
+                    SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_NORMAL);
+                }
+                // ---- the state folder, the shared data folder, hard links, the mirror, read-only files, the settings migration -----
+                // (1) what WrongGPU's own folders hold: only what it wrote is deleted; a file a player saved there stays, with the folder
+                {
+                    auto said = [](const std::vector<wstring>& ws, const wchar_t* what) {
+                        for (auto& x : ws) if (x.rfind(kLeftUnrecorded, 0) == 0 && x.find(what) != wstring::npos) return true;
+                        return false;
+                    };
+                    const wstring d = ownGame(L"State foreign", {{L"wronggpu_runtime.dll", L"copy", "", W, W}, {L"wronggpu.ini", L"copy", A, W, W}});
+                    const wstring st = StateDir(d);
+                    file(Join(st, L"uninstall.exe"), "the restorer");
+                    file(Join(st, L"owned-files.json"), "{}");
+                    file(Join(st, L"setup.log"), "log");
+                    file(Join(st, L"profile.ini"), "[game]");
+                    file(Join(st, L"previous\\previous.txt"), "version=0.5.1\r\nfile=" + ToUtf8(H(P)) + "|wronggpu_runtime.dll\r\n");
+                    file(Join(st, L"previous\\wronggpu_runtime.dll"), P);
+                    file(Join(st, L"notes.txt"), "the player's notes, saved after the install");
+                    file(Join(st, L"backup\\not-ours.bin"), "a file in the backup folder that no record lists");
+                    file(Join(st, L"previous\\kept-by-the-player.dll"), "in the previous version's folder, not listed in previous.txt");
+                    file(Join(st, L"rr-config\\Engine.ini"), "the player's Engine.ini, kept by the fix");
+                    std::vector<wstring> w;
+                    require(restore(d, false, &w) && !IsFile(RecordPath(d)) && !IsFile(Join(d, L"wronggpu_runtime.dll")) && read(Join(d, L"wronggpu.ini")) == A,
+                            "state folder: an uninstall with foreign files in the state folder runs to its end (the game as before)");
+                    require(!IsFile(Join(st, L"uninstall.exe")) && !IsFile(Join(st, L"owned-files.json")) && !IsFile(Join(st, L"setup.log")) && !IsFile(Join(st, L"profile.ini")) &&
+                                !IsFile(Join(st, L"backup\\wronggpu.ini")) && !IsFile(Join(st, L"previous\\previous.txt")) && !IsFile(Join(st, L"previous\\wronggpu_runtime.dll")),
+                            "state folder: what WrongGPU wrote goes (its fixed names, the recorded backups, the previous version's listed files)");
+                    require(read(Join(st, L"notes.txt")) == "the player's notes, saved after the install" && IsFile(Join(st, L"backup\\not-ours.bin")) &&
+                                IsFile(Join(st, L"previous\\kept-by-the-player.dll")) && IsFile(Join(st, L"rr-config\\Engine.ini")) && IsDir(st),
+                            "state folder: a file saved there after the install, an unlisted file in backup\\ and previous\\, and the player's Engine.ini copy stay, and so does the folder");
+                    require(said(w, L"wronggpu-setup") && said(w, L"notes.txt") && !AnyPartly(w), "state folder: the result lists what was left");
+                    // the same without a record (relocation: the restore has removed the backup): RemoveStateFolder
+                    const wstring o = Join(dir, L"Ownership\\Relocated");
+                    file(Join(StateDir(o), L"uninstall.exe"), "the restorer");
+                    file(Join(StateDir(o), L"owned-files.json"), "{}");
+                    file(Join(StateDir(o), L"keep-me.txt"), "a player's file");
+                    const auto stay = RemoveStateFolder(o);
+                    require(stay.size() == 1 && IEq(stay[0], L"keep-me.txt") && IsFile(Join(StateDir(o), L"keep-me.txt")) && !IsFile(Join(StateDir(o), L"uninstall.exe")) && !IsFile(Join(StateDir(o), L"owned-files.json")),
+                            "state folder: relocation's removal deletes WrongGPU's files and returns what stays");
+                    DeleteFileW(Join(StateDir(o), L"keep-me.txt").c_str());
+                    require(RemoveStateFolder(o).empty() && !IsDir(StateDir(o)), "state folder: with nothing foreign in it the folder itself goes");
+                    // the shared data folder: a foreign file keeps the folder, WrongGPU's own files go (in place, nothing moved aside)
+                    const wstring ad = Join(dir, L"Ownership\\shared-data\\WrongGPU");
+                    file(Join(ad, L"model\\model.wgcm"), "model");
+                    file(Join(ad, L"model\\K\\model-source.txt"), "source");
+                    file(Join(ad, L"model\\readme-from-player.txt"), "a player's file in the model folder");
+                    file(Join(ad, L"launcher.ini"), "[launcher]");
+                    file(Join(ad, L"jobs\\job1.txt"), "job");
+                    file(Join(ad, L"photos.txt"), "a player's file");
+                    std::vector<wstring> staying;
+                    Context cc; cc.logFile = Join(dir, L"Ownership\\shared-cleanup.log");
+                    const wstring kept = StartCleanup(cc, L"", L"", ad, &staying);
+                    require(kept.empty() && IsFile(Join(ad, L"photos.txt")) && IsFile(Join(ad, L"model\\readme-from-player.txt")) && !IsFile(Join(ad, L"model\\model.wgcm")) &&
+                                !IsFile(Join(ad, L"model\\K\\model-source.txt")) && !IsFile(Join(ad, L"launcher.ini")) && !IsFile(Join(ad, L"jobs\\job1.txt")) && !IsDir(Join(ad, L"jobs")) && IsDir(ad) &&
+                                staying.size() == 2,
+                            "shared data: with foreign files in it the folder stays with them and only WrongGPU's files go (nothing detached, nothing recursive)");
+                    bool moved = false;
+                    for (auto& s : ListDirs(Parent(ad))) moved = moved || s.find(L".cleanup-") != wstring::npos;
+                    require(!moved, "shared data: no folder was moved aside for a hidden cleanup when something in it is not WrongGPU's");
+                }
+                // (2) the plugin's settings file is rewritten only when it is demonstrably WrongGPU's (recorded, bytes match)
+                {
+                    const wstring d = Join(dir, L"Ownership\\Asi selection"), p = Join(d, L"wronggpu-asi.ini");
+                    const string k = "; the plugin\r\nselection=wronggpu-k\r\nother=1\r\n", m = "; the plugin\r\nselection=wronggpu\r\nother=1\r\n";
+                    file(p, k);
+                    require(MigrateAsiSelection(d, L"") == AsiMigration::Left && read(p) == k, "asi selection: not recorded: left as it is");
+                    require(MigrateAsiSelection(d, H("other bytes")) == AsiMigration::Left && read(p) == k, "asi selection: recorded with other bytes (the player changed it): left as it is");
+                    require(MigrateAsiSelection(d, H(k)) == AsiMigration::Changed && read(p) == m, "asi selection: recorded and the bytes match: that one line is changed, the others stay");
+                    require(MigrateAsiSelection(d, H(m)) == AsiMigration::None && read(p) == m, "asi selection: nothing selects Preset K any more: nothing to change");
+                    DeleteFileW(p.c_str());
+                    require(MigrateAsiSelection(d, H(k)) == AsiMigration::None, "asi selection: no file: nothing to change");
+                    file(p, k);
+                    HANDLE other = CreateFileW(p.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);  // another program holds it
+                    const AsiMigration held = MigrateAsiSelection(d, H(k));
+                    if (other != INVALID_HANDLE_VALUE) CloseHandle(other);
+                    require(other != INVALID_HANDLE_VALUE && held == AsiMigration::Left && read(p) == k, "asi selection: held by another program: left as it is (the write is conditional on the held file)");
+                }
+                // (3) hard links: a file with another name is never written through; its original is kept
+                {
+                    const wstring d = ownGame(L"Hard link", {{L"wronggpu.ini", L"copy", A, W, W}, {L"wronggpu_runtime.dll", L"copy", "", W, W}});
+                    const wstring ini = Join(d, L"wronggpu.ini"), dll = Join(d, L"wronggpu_runtime.dll"), linkIni = Join(d, L"player-copy.ini"), linkDll = Join(d, L"player-copy.dll");
+                    const bool linked = CreateHardLinkW(linkIni.c_str(), ini.c_str(), nullptr) && CreateHardLinkW(linkDll.c_str(), dll.c_str(), nullptr);
+                    require(linked, "hard link: this folder allows hard links (NTFS)");
+                    PinnedFile pf;
+                    DWORD err = 0;
+                    require(!pf.Open(ini, true, &err) && err == ERROR_TOO_MANY_LINKS && read(ini) == W, "hard link: a file with two names is refused for writing (ERROR_TOO_MANY_LINKS)");
+                    require(pf.Open(ini, false, &err) && pf.Sha256() == H(W), "hard link: ...and opened for reading or deleting");
+                    pf.Close();
+                    std::vector<wstring> w;
+                    require(restore(d, false, &w) && read(ini) == W && read(linkIni) == W && keptOf(d, L"wronggpu.ini") == std::vector<string>{A} && partly(w, L"wronggpu.ini"),
+                            "hard link: the original is not written through the link (the file and its other name keep WrongGPU's bytes), the original is kept, the result says partly");
+                    bool said = false;
+                    for (auto& x : w) said = said || (x.find(L"hard link") != wstring::npos && x.find(L"wronggpu.ini") != wstring::npos);
+                    require(said, "hard link: the warning says why");
+                    require(!IsFile(dll) && read(linkDll) == W, "hard link: a recorded file with nothing to put back is unlinked (its name goes), the other name keeps the bytes");
+                }
+                // (4) the mirror: a copy goes only when the record lists it
+                {
+                    const wstring d = ownGame(L"Mirror unrecorded", {{L"wronggpu_runtime.dll", L"copy", "", W, W}});
+                    file(Join(d, L"_storage_\\wronggpu_runtime.dll"), W);  // REFramework's copy, byte for byte the installed file, not in the record
+                    std::vector<wstring> w;
+                    bool said = false;
+                    require(restore(d, false, &w) && !IsFile(Join(d, L"wronggpu_runtime.dll")) && read(Join(d, L"_storage_\\wronggpu_runtime.dll")) == W, "mirror: an unrecorded copy that matches the installed bytes is not deleted");
+                    for (auto& x : w) said = said || (x.rfind(kLeftUnrecorded, 0) == 0 && x.find(L"wronggpu_runtime.dll") != wstring::npos);
+                    require(said, "mirror: the result says it was left");
+                    const wstring r = ownGame(L"Mirror recorded", {{L"wronggpu_runtime.dll", L"copy", "", W, W}, {L"_storage_\\wronggpu_runtime.dll", L"copy", "", W, W}});
+                    require(restore(r, false) && !IsFile(Join(r, L"wronggpu_runtime.dll")) && !IsFile(Join(r, L"_storage_\\wronggpu_runtime.dll")), "mirror: a recorded copy goes with the install");
+                }
+                // (5) read-only files: the bit is changed only on a file that is written, and put back otherwise
+                {
+                    const wstring base = Join(dir, L"Pinned"), p = Join(base, L"ro.bin");
+                    DWORD err = 0;
+                    auto readOnly = [](const wstring& f) { return (GetFileAttributesW(f.c_str()) & FILE_ATTRIBUTE_READONLY) != 0; };
+                    file(p, W);
+                    SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_READONLY);
+                    {
+                        HANDLE other = CreateFileW(p.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                        PinnedFile f;
+                        const bool ok = f.Open(p, true, &err);
+                        if (other != INVALID_HANDLE_VALUE) CloseHandle(other);
+                        require(other != INVALID_HANDLE_VALUE && !ok && err == ERROR_SHARING_VIOLATION && readOnly(p),
+                                "read-only: a write open that fails (another program holds the file) leaves the read-only bit as it was");
+                    }
+                    {
+                        PinnedFile f;
+                        require(f.Open(p, true, &err) && !readOnly(p) && f.Sha256() == H(W), "read-only: opened for writing, the file is writable while held");
+                    }
+                    require(readOnly(p), "read-only: closed without writing, the read-only bit is back");
+                    {
+                        const wstring d = ownGame(L"Read-only changed", {{L"wronggpu.ini", L"copy", A, W, W}});
+                        const wstring f = Join(d, L"wronggpu.ini");
+                        SetRestoreStepHook([&](const char* s) { if (string(s) == "kept") { file(f, C); SetFileAttributesW(f.c_str(), FILE_ATTRIBUTE_READONLY); } });
+                        std::vector<wstring> w;
+                        const bool ok = restore(d, false, &w);
+                        const bool ro = readOnly(f);
+                        SetFileAttributesW(f.c_str(), FILE_ATTRIBUTE_NORMAL);
+                        SetRestoreStepHook(nullptr);
+                        require(ok && read(f) == C && ro && keptOf(d, L"wronggpu.ini") == std::vector<string>{A},
+                                "read-only: a changed read-only file the restore leaves keeps its read-only bit (and its bytes); the original is kept");
+                    }
+                    const wstring target = Join(base, L"ro-target.bin"), link = Join(base, L"ro-link.bin");
+                    file(target, W);
+                    SetFileAttributesW(target.c_str(), FILE_ATTRIBUTE_READONLY);
+                    if (CreateSymbolicLinkW(link.c_str(), target.c_str(), SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
+                        PinnedFile f;
+                        require(!f.Open(link, true, &err) && err == ERROR_NOT_SUPPORTED && readOnly(target), "read-only: a link is refused before any attribute is touched (the target stays read-only)");
+                        DeleteFileW(link.c_str());
+                    }
+                    SetFileAttributesW(target.c_str(), FILE_ATTRIBUTE_NORMAL);
                     SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_NORMAL);
                 }
             }

@@ -383,10 +383,12 @@ def test_install_settings_uninstall(t, opti):
     rc = t.run("update", exe, "--opti=" + opti, "--noscan", "--force")
     if no_k:
         asi_ini = os.path.join(b, "wronggpu-asi.ini")
-        t.check("update of a Preset K install (no Preset K in this build): starts on Model M, the log says so",
+        # (the plugin's settings file is not in the record: nothing proves it WrongGPU's, so it is not rewritten; the result says so)
+        t.check("update of a Preset K install (no Preset K in this build): starts on Model M, the log says so; the plugin's settings file is left as it is and the result says so",
                 rc == 0 and "now starts on Model M" in t.logtail(20000) and "model=M" in (options_line(ini(b)) or "") and
-                (not os.path.isfile(asi_ini) or "selection=wronggpu\r\n" in read(asi_ini).decode()),
-                (rc, options_line(ini(b)), t.logtail(1500)))
+                read(asi_ini) == b"; WrongGPU OptiScaler plugin\r\nselection=wronggpu-k\r\n" and
+                any(w.startswith("Left in place (the plugin's settings file selects an entry this version lacks)") for w in t.j.get("warnings", [])),
+                (rc, options_line(ini(b)), t.j.get("warnings"), t.logtail(1500)))
     prev_txt = os.path.join(b, "wronggpu-setup", "previous", "previous.txt")
     t.check("update: exit 0; the earlier version kept in previous\\", rc == 0 and os.path.isfile(prev_txt) and "version=0.5.1" in read(prev_txt).decode(), (rc, t.j.get("message"), t.logtail()))
     rec = record_text(b)

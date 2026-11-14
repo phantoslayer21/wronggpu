@@ -1165,8 +1165,11 @@ def test_upgrade_paths(t, payload_dir):
     rec_path = os.path.join(b, "wronggpu-setup", "install.record")
     write(rec_path, "\r\n".join(l for l in read(rec_path).decode().split("\r\n") if not (l.startswith("copy\t") and l.endswith("\t" + SLOTS[0]))))
     rc = t.uninstall(b)
-    t.check("a record without the entry for WrongGPU's amd_fidelityfx_dx12.dll: uninstall puts the game's DLL back from its renamed copy",
-            rc == 0 and snapshot(root) == before, tail(rc, t.logtext(), root, before))
+    # (the backup of that DLL is in wronggpu-setup\backup, but the damaged record no longer lists it: it is the player's original
+    # as of the install, and nothing names it WrongGPU's to delete, so it stays, with its folders, and the result lists it)
+    left = kept_runtime(before, root, "bin/x64/wronggpu-setup/backup/" + SLOTS[0])
+    t.check("a record without the entry for WrongGPU's amd_fidelityfx_dx12.dll: uninstall puts the game's DLL back from its renamed copy; the unlisted backup stays",
+            rc == 0 and snapshot(root) == left and "wronggpu-setup" in t.logtext() and "not WrongGPU's, or in use" in t.logtext(), tail(rc, t.logtext(), root, left))
 
     # Control: files that are not WrongGPU's keep the rule for game updates (the new file stays; 0.6.1: the old copy is kept
     # in WrongGPU-originals, never deleted).

@@ -5,6 +5,7 @@
 #include "checks.h"
 #include "detect.h"
 #include "model.h"
+#include "record.h"
 
 namespace wg {
 
@@ -29,4 +30,10 @@ CompareDll RecordCompareDll(Context& ctx, Ui& ui, const wstring& gameRoot);
 bool IsAmdFidelityFxName(const wstring& rel);
 wstring GameAmdFfxDll(Context& ctx, const wstring& dir, const wstring& exeDir);
 std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const ModelState& model, const Consent& consent, Ui& ui, const HipInfo& hip);
+// The plugin's settings file of an earlier install (wronggpu-asi.ini) in a build without Preset K: see install.cpp.
+enum class AsiMigration { None, Changed, Left };
+AsiMigration MigrateAsiSelection(const wstring& dir, const wstring& recordedSha);
+// The warning that says it (it begins with this; no "Preset K" in it, that name is only in the one message of this version).
+inline const wchar_t* const kAsiSelectionLeft = L"Left in place (the plugin's settings file selects an entry this version lacks): ";
+
 }  // namespace wg

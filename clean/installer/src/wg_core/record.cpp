@@ -391,15 +391,99 @@ std::vector<wstring> UnrecordedRuntimeFiles(const wstring& dir, const Record& m)
 // programs it starts share one invisible console, so nothing appears on screen.
 // state / self: the wronggpu-setup folder and the running uninstaller in it (empty: not this case); appData:
 // %LOCALAPPDATA%\WrongGPU, removed with everything in it (empty: other games still use it).
+// ---- what WrongGPU's own folders hold that is WrongGPU's (the state folder, the shared data folder) ---------------------
+// A folder of WrongGPU's own is not a licence to delete what is in it: a player can save a file there. Only what WrongGPU wrote
+// is deleted: the fixed names it gives its own files, the backups the record lists, the files the kept previous version
+// lists with their hashes, and (in the shared data folder) its cache, job and log folders and the model files by their names.
+// Everything else stays, the folder stays with it, and the result lists what was left.
+static wstring LowerRel(wstring r) {
+    for (auto& c : r) if (c == L'/') c = L'\\';
+    r = Lower(r);
+    const wstring tmp = Lower(kTmpSuffix);
+    if (r.size() > tmp.size() && r.compare(r.size() - tmp.size(), tmp.size(), tmp) == 0) r.resize(r.size() - tmp.size());  // (an atomic write's temporary)
+    return r;
+}
+static std::function<bool(const wstring&)> StateOwned(const wstring& dir, const Record* m) {
+    auto names = std::make_shared<std::set<wstring>>();
+    for (const wchar_t* n : {L"install.record", L"owned-files.json", L"uninstall.exe", L"setup.log", L"profile.ini"}) names->insert(n);
+    if (m) for (auto& e : m->e) if (e.action != L"dir") names->insert(LowerRel(L"backup\\" + e.rel));
+    string raw;
+    if (ReadAll(Join(Join(StateDir(dir), L"previous"), L"previous.txt"), raw)) {  // the kept version: "file=<sha>|<rel>" lines
+        names->insert(L"previous\\previous.txt");
+        for (size_t a = 0; a < raw.size();) {
+            size_t e = raw.find('\n', a);
+            if (e == string::npos) e = raw.size();
+            string line = raw.substr(a, e - a);
+            a = e + 1;
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+            const size_t bar = line.find('|');
+            if (line.rfind("file=", 0) == 0 && bar != string::npos) names->insert(LowerRel(L"previous\\" + FromUtf8(line.substr(bar + 1))));
+        }
+    }
+    return [names](const wstring& rel) { return names->count(LowerRel(rel)) > 0; };
+}
+std::vector<wstring> RemoveStateFolder(const wstring& dir, const Record* m, const wstring& keepFile) {
+    return RemoveOwned(StateDir(dir), StateOwned(dir, m), keepFile);
+}
+static bool ModelOwned(const wstring& rel) {  // below the model folder, at any depth
+    const wstring b = LowerRel(BaseName(rel));
+    return b == L"model.wgcm" || b == L"model-source.txt";
+}
+static bool SharedOwned(const wstring& rel) {  // below %LOCALAPPDATA%\WrongGPU
+    static const std::set<wstring> top = {L"setup.log", L"compare.txt", L"hip-runtime.txt", L"launcher.ini", L"launcher.log", L"library-list.txt",
+                                          L"managed-games.txt", L"portable-launchers.txt"};
+    const wstring r = LowerRel(rel);
+    if (top.count(r)) return true;
+    const size_t cut = r.find(L'\\');
+    if (cut == wstring::npos) return false;
+    const wstring head = r.substr(0, cut);
+    if (head == L"model") return ModelOwned(r);
+    return head == L"optiscaler" || head == L"rr-prepare" || head == L"jobs" || head == L"logs";  // its cache, helper, job and log folders
+}
+// Files in the shared data folder that are not WrongGPU's (the ignore list has a way of its own: StartCleanup puts it back).
+static std::vector<wstring> ForeignInSharedData(const wstring& root) {
+    std::vector<wstring> out;
+    std::vector<wstring> dirs{L""};
+    for (size_t i = 0; i < dirs.size(); ++i) {
+        const wstring d = dirs[i].empty() ? root : Join(root, dirs[i]);
+        for (auto& f : ListFiles(d, L"*")) {
+            const wstring rel = dirs[i].empty() ? BaseName(f) : dirs[i] + L"\\" + BaseName(f);
+            if (!IEq(rel, kIgnoreListName) && !SharedOwned(rel)) out.push_back(rel);
+        }
+        for (auto& sub : ListDirs(d)) dirs.push_back(dirs[i].empty() ? BaseName(sub) : dirs[i] + L"\\" + BaseName(sub));
+    }
+    return out;
+}
+// "<prefix><where>: a, b, c and N more" (the first five).
+wstring LeftText(const wstring& where, const std::vector<wstring>& rels) {
+    wstring names;
+    for (size_t i = 0; i < rels.size() && i < 5; ++i) names += (names.empty() ? L"" : L", ") + rels[i];
+    if (rels.size() > 5) names += L" and " + std::to_wstring(rels.size() - 5) + L" more";
+    return kLeftUnrecorded + where + L": " + names;
+}
+
 static std::atomic<CleanupMoveFn> g_cleanupMove{nullptr};  // test seam (record.h SetCleanupMoveForTest)
 void SetCleanupMoveForTest(CleanupMoveFn fn) { g_cleanupMove = fn; }
 
 // Returns the line "kept ignore-files.txt ..." when the shared folder's ignore list was put back (convert_ignore.h), else "".
-wstring StartCleanup(Context& ctx, const wstring& state, const wstring& self, const wstring& appData) {
+wstring StartCleanup(Context& ctx, const wstring& state, const wstring& self, const wstring& appData, std::vector<wstring>* left) {
+    // A shared data folder that holds something that is not WrongGPU's (a file a player saved there) is not detached and not
+    // deleted by the hidden cleanup: what is WrongGPU's goes now, in place, and the folder and the rest stay (the log of this
+    // run too: it is being written). Only a folder of which every file is WrongGPU's (or the ignore list, which has a way of
+    // its own below) is moved aside and removed with its contents.
+    bool onlyOurs = true;
+    if (!appData.empty() && IsDir(appData) && !ForeignInSharedData(appData).empty()) {
+        onlyOurs = false;
+        const std::vector<wstring> stay = RemoveOwned(appData, SharedOwned, ctx.logFile);
+        for (auto& f : stay) {
+            LogLine(ctx, L"Shared data cleanup: kept " + Join(appData, f) + L" (not WrongGPU's, or in use); the folder stays");
+            if (left) left->push_back(Join(appData, f));
+        }
+    }
     // Detach this generation now. Delayed cleanup must never recursively delete the shared pathname,
     // which a following install can already have recreated with its new model and runtime selection.
     wstring retired, kept;
-    if (!appData.empty() && IsDir(appData)) {
+    if (onlyOurs && !appData.empty() && IsDir(appData)) {
         // The name the folder is moved to is free and unique. It was <pid>-<GetTickCount64()> alone; that clock moves in
         // ~16 ms steps, so a second cleanup of the same folder within one step (an install's restore, then the last game's
         // uninstall) aimed at the previous cleanup's folder, which its cmd.exe deletes only seconds later: the move failed
@@ -552,10 +636,11 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
     enum class Do { Nothing, Remove, PutBack, Leave };
     struct Plan { Do what = Do::Nothing; wstring now, source; bool keep = false; };  // now: the hash the decision was made on
     std::vector<Plan> plan(m.e.size());
-    auto leaveWarning = [&](const Entry& e, const wstring& t, const wstring& keptAt) {
+    auto leaveWarning = [&](const Entry& e, const wstring& t, const wstring& keptAt, bool linked = false) {
         const Fingerprint fp = e.action == L"copy" && !IsSlotName(e.rel) ? IdentifyFile(t) : Fingerprint();
         wstring w;
-        if (e.action == L"copy" && IsSlotName(e.rel)) w = L"The game replaced " + e.rel + L" (probably an update); its new file was kept.";
+        if (linked) w = L"Left in place (the file has another name, a hard link; writing through it would change that name too): " + e.rel;
+        else if (e.action == L"copy" && IsSlotName(e.rel)) w = L"The game replaced " + e.rel + L" (probably an update); its new file was kept.";
         else if (e.action == L"disable") w = e.rel + L" exists again with different content; it was left as it is.";
         else if (fp.tool == Tool::OptiScaler) w = L"Left in place: " + e.rel + L" is now another setup's OptiScaler (not the file WrongGPU installed).";
         else w = L"Left in place (changed since install): " + e.rel;
@@ -696,9 +781,9 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
         // writing, renaming or deleting, hashed through that handle, and deleted or overwritten through it. A file that is not
         // what the plan saw (it changed after the check) is left as it is, its original kept, and said; one that appeared at
         // a path the plan found empty is never overwritten (CopyNew creates only where nothing is).
-        auto leaveChanged = [&] {
+        auto leaveChanged = [&](bool linked = false) {
             const wstring keptAt = p.what == Do::PutBack && (!failedInstall || Exists(p.source)) ? KeptOriginal(dir, e.rel, p.source, e.orig) : wstring();
-            warnings.push_back(leaveWarning(e, t, keptAt));
+            warnings.push_back(leaveWarning(e, t, keptAt, linked));
             if (keptWarnings) (*keptWarnings)[Lower(e.rel)] = warnings.back();
             LogLine(ctx, warnings.back());
         };
@@ -712,6 +797,7 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
         DWORD err = 0;
         const bool opened = held.Open(t, p.what == Do::PutBack, &err);
         if (!opened && err == ERROR_NOT_SUPPORTED) { leaveChanged(); continue; }  // a folder or a link there now: not WrongGPU's file
+        if (!opened && err == ERROR_TOO_MANY_LINKS) { leaveChanged(true); continue; }  // a hard link: never written through, the original is kept
         if (!opened && !isGone(err)) cannot(err);
         if (opened) {
             const wstring h = held.Sha256();
@@ -741,9 +827,12 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
         ui.log(L"restored " + e.rel);
     }
     RestoreStep("restored");
-    // REFramework's copies of the install's root DLLs that the install did not write itself (REFramework came, or made its
-    // mirror, after the install; an install from before this build): removed when byte for byte the file installed, so
-    // the game cannot go on loading WrongGPU's files from there. Anything else there stays (gamerules.h).
+    // REFramework's copies of the install's root DLLs (REFramework came, or made its mirror, after the install; an install
+    // from before this build): the recorded ones were restored above like any recorded file. A copy that is NOT in the record
+    // is never deleted, not even when it is byte for byte a file the install wrote (REFramework or the player made that copy,
+    // and nothing says they agree to its removal): it stays and is said, because the game can go on loading WrongGPU's file
+    // from there (gamerules.h).
+    std::vector<wstring> mirrorLeft;
     if (IEq(FullPath(dir), FullPath(m.exe.empty() ? dir : Parent(m.exe))) && IsDir(Join(dir, kMirrorDir))) {
         std::set<wstring> tracked;
         for (auto& e : m.e) if (IsMirrorRel(e.rel)) tracked.insert(Lower(e.rel));
@@ -751,12 +840,9 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
             const Entry& e = m.e[k];
             if (e.action != L"copy" || !MirroredRel(e.rel) || e.inst.empty() || plan[k].what == Do::Leave || tracked.count(Lower(MirrorRel(e.rel)))) continue;
             const wstring t = Target(dir, MirrorRel(e.rel));
-            DWORD derr = 0;
-            if (!IsFile(t)) continue;
-            const DeleteIf r = DeleteIfSha(t, {e.inst}, &derr);  // (hashed and deleted through one handle)
-            if (r == DeleteIf::Failed) Fail(L"Cannot delete " + t + L": " + ErrText(derr));
-            if (r == DeleteIf::Deleted) ui.log(L"removed " + MirrorRel(e.rel) + L" (REFramework's copy of WrongGPU's " + e.rel + L")");
+            if (IsFile(t)) mirrorLeft.push_back(MirrorRel(e.rel));
         }
+        for (auto& f : mirrorLeft) LogLine(ctx, L"kept " + f + L" (REFramework's copy of a WrongGPU file; the install did not record it, so it is not deleted)");
     }
     ui.step(++done, total, L"Cleaning up");
     if (!failedInstall) {
@@ -774,6 +860,7 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
             warnings.push_back(kLeftUnrecorded + names);
             ui.log(warnings.back());
         }
+        if (!mirrorLeft.empty() && !keepState) { warnings.push_back(LeftText(L"REFramework's copies", mirrorLeft)); ui.log(warnings.back()); }
         for (size_t k = m.e.size(); k-- > 0;)  // a folder the install made that held only those files
             if (m.e[k].action == L"dir" && IsDir(Target(dir, m.e[k].rel)) && RemoveDirectoryW(Target(dir, m.e[k].rel).c_str()))
                 ui.log(L"removed folder " + m.e[k].rel);
@@ -813,7 +900,12 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
         if (!other.empty()) LogLine(ctx, L"the shared model data stays: " + other + L" still uses it");
         else if (LauncherKeepsSharedData()) LogLine(ctx, L"the shared model data stays: the launcher uses it (its own uninstall removes it)");
         else {
-            if (IsDir(ModelDir(ctx))) { RemoveTree(ModelDir(ctx)); ui.log(L"removed the model data (no other game uses it)"); }
+            if (IsDir(ModelDir(ctx))) {
+                const std::vector<wstring> stay = RemoveOwned(ModelDir(ctx), ModelOwned);  // the model files by their names; anything else stays
+                ui.log(L"removed the model data (no other game uses it)");
+                for (auto& f : stay) LogLine(ctx, L"kept " + Join(ModelDir(ctx), f) + L" (not WrongGPU's model data, or in use)");
+                if (!stay.empty()) { warnings.push_back(LeftText(L"the model data folder", stay)); ui.log(warnings.back()); }
+            }
             const wstring base = EnvVar(L"LOCALAPPDATA");
             if (!base.empty()) appData = Join(base, L"WrongGPU");
         }
@@ -827,16 +919,29 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
     RestoreStep("record-removed");
     // the shared folder goes, its ignore-files.txt stays (StartCleanup): said in the result
     auto cleanup = [&](const wstring& st, const wstring& sf) {
-        const wstring kept = StartCleanup(ctx, st, sf, appData);
+        std::vector<wstring> stay;
+        const wstring kept = StartCleanup(ctx, st, sf, appData, &stay);
         if (!kept.empty()) { ui.log(kept); warnings.push_back(kept); }
+        if (!stay.empty()) { warnings.push_back(LeftText(L"the shared data folder", stay)); ui.log(warnings.back()); }
     };
-    if (keepState) { RemoveTree(Join(state, L"backup")); return warnings; }
+    // The state folder: what WrongGPU wrote goes (RemoveStateFolder); anything else in it, and the folder, stay and are said.
+    const auto stateOwned = StateOwned(dir, &m);
+    if (keepState) {
+        for (auto& f : RemoveOwned(Join(state, L"backup"), [&](const wstring& rel) { return stateOwned(L"backup\\" + rel); }))
+            LogLine(ctx, L"kept " + Join(Join(state, L"backup"), f) + L" (not a backup of a recorded file)");
+        return warnings;
+    }
     const wstring self = SelfPath();
+    std::vector<wstring> stay;
     if (IEq(Parent(self), state)) {
-        RemoveTree(state, self);
+        stay = RemoveOwned(state, stateOwned, self);
+        for (auto& f : stay) LogLine(ctx, L"kept " + Join(state, f) + L" (not WrongGPU's, or in use)");
+        if (!stay.empty()) { warnings.push_back(LeftText(L"wronggpu-setup", stay)); ui.log(warnings.back()); }
         cleanup(state, self);
     } else {
-        RemoveTree(state);
+        stay = RemoveOwned(state, stateOwned);
+        for (auto& f : stay) LogLine(ctx, L"kept " + Join(state, f) + L" (not WrongGPU's, or in use)");
+        if (!stay.empty()) { warnings.push_back(LeftText(L"wronggpu-setup", stay)); ui.log(warnings.back()); }
         if (!appData.empty()) cleanup(L"", L"");
     }
     return warnings;
@@ -888,7 +993,8 @@ std::vector<wstring> LegacyRestore(Context& ctx, const wstring& dir, Ui& ui) {
                 PinnedFile held;
                 const bool opened = held.Open(t, true, &err);
                 if (!opened && err != ERROR_FILE_NOT_FOUND && err != ERROR_PATH_NOT_FOUND) {
-                    warnings.push_back(L"Older install: left in place (changed since install): " + e.rel);
+                    warnings.push_back(err == ERROR_TOO_MANY_LINKS ? L"Older install: left in place (a hard link: not written through): " + e.rel
+                                                                    : L"Older install: left in place (changed since install): " + e.rel);
                     continue;
                 }
                 if (opened) {

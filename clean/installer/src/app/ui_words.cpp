@@ -197,8 +197,10 @@ wstring PlainWarning(const wstring& w) {
         return L"A file WrongGPU had replaced or moved aside couldn't go back, because another file is at its place now; that file was left as it is." +
                (at == wstring::npos ? wstring() : L" Your original is kept in " + w.substr(at + 12));
     }
+    if (w.rfind(kAsiSelectionLeft, 0) == 0) return L"The settings file of WrongGPU's OptiScaler plugin still selects an entry this version doesn't have, and WrongGPU can't tell it wrote that file, so it left it as it is. Delete wronggpu-asi.ini, or set its selection line to selection=wronggpu, to start on Model M.";
     if (w.rfind(kLeftUnrecorded, 0) == 0)  // named like WrongGPU's own files, but not in the install's record: never deleted by their names
-        return L"Some log or report files named like WrongGPU's were left in the game's folder: WrongGPU deletes only files it can prove are its own. Delete them yourself if you don't need them.";
+        return L"Some files were left where they are: WrongGPU deletes only files it can prove are its own (logs and reports with its name, copies it didn't record, other files in its folders). Delete them yourself if you don't need them.";
+    if (Has(w, L"another name, a hard link")) return L"A file that has another name (a hard link) was left as it is, because writing to it would change that other name too.";
     if (Has(w, L"The game replaced ")) return L"The game had replaced one of its files since WrongGPU was installed (probably a game update). Its newer file was kept.";
     if (Has(w, L"exists again with different content") || Has(w, L"The backup folder was kept"))
         return L"A game file the game changed was kept as it is. Its original stays in a backup folder in the game's folder.";

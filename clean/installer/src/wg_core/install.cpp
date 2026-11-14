@@ -50,15 +50,16 @@ static bool MigrateOurSettings(Context& ctx, const wstring& dir, Ui& ui, string&
     return ReadAll(p, carried) && IEq(Sha256Bytes(carried.data(), carried.size()), ours->inst);
 }
 
-#if !WRONGGPU_PRESET_K
 // A build without Preset K: the plugin's wronggpu-asi.ini of an earlier install may say "selection=wronggpu-k", an entry this
-// build does not have. The restore before the install leaves that file in place (it is not in the record: nothing proves it
-// WrongGPU's, and no file is deleted for its name), so the line is changed to the entry that exists (selection=wronggpu); every
-// other line stays as it is. Returns true when the file was changed.
-static bool MigrateAsiSelectionToM(const wstring& dir) {
+// build does not have. The file is rewritten (that one line changed to selection=wronggpu, every other line as it is) only when
+// it is demonstrably WrongGPU's own: `recordedSha`, the hash an earlier record gave it, is not empty and the bytes of the file
+// are those bytes. The bytes are hashed through the handle that then writes them (a conditional write: nothing can have
+// changed the file in between). Any other file stays as it is (Left): nothing proves it WrongGPU's, and the caller tells the
+// player. None: nothing to change.
+AsiMigration MigrateAsiSelection(const wstring& dir, const wstring& recordedSha) {
     const wstring p = Join(dir, L"wronggpu-asi.ini");
     string text;
-    if (!ReadAll(p, text)) return false;
+    if (!ReadAll(p, text)) return AsiMigration::None;
     string out;
     bool changed = false;
     for (size_t a = 0; a < text.size();) {
@@ -74,10 +75,12 @@ static bool MigrateAsiSelectionToM(const wstring& dir) {
         out += line;
         a = end;
     }
-    if (changed) WriteFileAtomic(p, out.data(), out.size());
-    return changed;
+    if (!changed) return AsiMigration::None;
+    if (recordedSha.empty() || !IEq(Sha256Bytes(text.data(), text.size()), recordedSha)) return AsiMigration::Left;
+    PinnedFile f;
+    if (!f.Open(p, true) || !IEq(f.Sha256(), recordedSha) || !f.OverwriteBytes(out.data(), out.size())) return AsiMigration::Left;
+    return AsiMigration::Changed;
 }
-#endif
 
 #if WRONGGPU_DIRECT_ROUTE
 void RemoveEarlierDirect(Context&, const GameTarget&, Ui&, std::vector<wstring>&) {}
@@ -106,7 +109,11 @@ void RemoveEarlierDirect(Context& ctx, const GameTarget& target, Ui& ui, std::ve
             ui.log(L"The earlier installation could not be removed; its record and backup were left as they are. Close anything that uses the game's files, then run setup again or uninstall it.");
             throw;
         }
-        RemoveTree(StateDir(old));  // (record and backup are gone; an original that could not go back is in WrongGPU-originals)
+        // (record and backup are gone; an original that could not go back is in WrongGPU-originals.) The state folder goes the way
+        // an uninstall's does: what WrongGPU wrote, nothing else; a file that is not its stays with the folder, and is said.
+        const std::vector<wstring> stay = RemoveStateFolder(old);
+        for (auto& f : stay) ui.log(L"kept " + Join(StateDir(old), f) + L" (not WrongGPU's, or in use)");
+        if (!stay.empty()) { warnings.push_back(LeftText(L"wronggpu-setup of the earlier installation", stay)); ui.log(warnings.back()); }
         // a wronggpu.ini the restore left there (changed since WrongGPU wrote it: the player's): moved to the exe folder when
         // nothing is there yet, else left where it is (never deleted by its name; the ownership rule, record.h)
         const wstring from = Join(old, L"wronggpu.ini"), to = Join(target.dir, L"wronggpu.ini");
@@ -477,7 +484,19 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
         ui.log(w);
     }
     selectedOptions = OnlyModelM(selectedOptions);
-    if (MigrateAsiSelectionToM(dir)) LogLine(ctx, L"wronggpu-asi.ini: the entry an earlier install had selected is Model M's now (the file's other lines are unchanged)");
+    {
+        wstring recordedSha;  // the hash the earlier install's record gave the plugin's settings file, when it listed one
+        if (target.installed) for (auto& e : target.record.e) if (e.action == L"copy" && IEq(e.rel, L"wronggpu-asi.ini")) recordedSha = e.inst;
+        const AsiMigration mig = MigrateAsiSelection(dir, recordedSha);
+        if (mig == AsiMigration::Changed) LogLine(ctx, L"wronggpu-asi.ini: the entry an earlier install had selected is Model M's now (the file's other lines are unchanged)");
+        else if (mig == AsiMigration::Left) {
+            const wstring w = wstring(kAsiSelectionLeft) + L"wronggpu-asi.ini selects an entry that this version does not have. WrongGPU did not write that file as far as it can tell, "
+                              L"so it was not changed. Delete it, or change its selection line to selection=wronggpu, to start on Model M.";
+            LogLine(ctx, w);
+            ui.log(w);
+            warnings.push_back(w);
+        }
+    }
 #endif
     selectedIni = IniSet(selectedIni, "fsr", "runtime_options", selectedOptions);
     // Under Wine the game runs in a prefix of its own (Proton), where this launcher's %LOCALAPPDATA% does not exist: the
