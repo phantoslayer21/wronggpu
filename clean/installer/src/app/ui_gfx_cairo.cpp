@@ -649,6 +649,7 @@ void Gfx::PopFade() { PopRoundClip(); }
 // ---- text ----------------------------------------------------------------------------------------------------------------------
 namespace {
 using CachedLayout = GfxCairo::CachedLayout;
+constexpr float kBoldTrack = -0.0075f;  // em
 
 // Wrapped text whose last line is a single word is wrapped again at the widest width that brings a second word down to it
 // without adding a line (the Windows version's Balance, line for line); returns how far the narrower layout moves.
@@ -710,7 +711,9 @@ static CachedLayout MakeLayout(GfxCairo& g, const wstring& t, float w, float h, 
         pango_layout_set_height(l, (int)(std::min(std::max(1.f, h), 1e6f) * PANGO_SCALE));  // the lines that fit the box
     }
     c.base = pango_attr_list_new();
-    if (s.spacing != 0) pango_attr_list_insert(c.base, pango_attr_letter_spacing_new((int)std::lround(s.spacing * PANGO_SCALE)));
+    // Selawik's semibold and bold run 1-3% wider than Segoe UI's, so those weights are tightened a little.
+    auto spacing = [&](int weight) { return (int)std::lround((s.spacing + (weight >= 600 ? kBoldTrack * s.size : 0)) * PANGO_SCALE); };
+    if (spacing(s.weight) != 0) pango_attr_list_insert(c.base, pango_attr_letter_spacing_new(spacing(s.weight)));
     // Windows lays text out on Segoe UI's line box (ascent 1.079 + descent 0.251 em: a line is 1.33 em, the baseline 1.079 em
     // down; a set line height puts the baseline at 0.8 of it); Selawik's is 0.990 + 0.210 em, so the lines are made 1.33 em
     // and the text shifted onto Segoe's baseline. The icon font has its own box and is left alone.
@@ -723,6 +726,11 @@ static CachedLayout MakeLayout(GfxCairo& g, const wstring& t, float w, float h, 
         PangoAttribute* wa = pango_attr_weight_new((PangoWeight)leadWeight);
         wa->start_index = 0; wa->end_index = (guint)c.leadBytes;
         pango_attr_list_insert(c.base, wa);
+        if (spacing(leadWeight) != spacing(s.weight)) {
+            PangoAttribute* sp = pango_attr_letter_spacing_new(spacing(leadWeight));
+            sp->start_index = 0; sp->end_index = (guint)c.leadBytes;
+            pango_attr_list_insert(c.base, sp);
+        }
     }
     pango_layout_set_attributes(l, c.base);
     c.l = l;
