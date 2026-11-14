@@ -541,6 +541,10 @@ struct Runtime {
     if (c.wpw128) wpw[2] = c.wpw128;
     if (!choose_kernels(c)) return false;
     if (model_l && recon_output) return fail("Model L: recon=output (D = O) is Model M's experimental mode");
+    // Model L's reconstruction kernel l_post_recon is HDR; its LDR form (11/11/10-bit display codes) is not written yet
+    if (model_l && !c.hdr)
+      return fail("Model L: LDR colour (WgRtConfig.hdr = 0) needs Model L's LDR reconstruction kernel, which is not "
+                  "written yet (l_post_recon is HDR)");
     if (model_l && enc0_co != "encoder.co")
       return fail("Model L: enc0 variants are Model M's encoder; Model L's runs from l_enc_values.co");
     // Model L's coefficient kernel (l_coef) writes Model M's coef_decoder formats, not pack12: the _p12 post kernels
@@ -649,8 +653,9 @@ struct Runtime {
     // Model L's code objects (clean/l/FORMATS.md): the encoder's values under the tag lev (lev/input_encoder, next to
     // Model M's input_encoder), the linears / projection / channel copy and the width-32 block untagged
     if (model_l && (!dev->load_module_tagged(build_dir + "/l_enc_values.co", "lev") ||
-                    !dev->load_module(build_dir + "/l_ops.co") || !dev->load_module(build_dir + "/l_swin.co")))
-      return fail(dev->err() + " (Model L's code objects l_enc_values.co, l_ops.co, l_swin.co)");
+                    !dev->load_module(build_dir + "/l_ops.co") || !dev->load_module(build_dir + "/l_swin.co") ||
+                    !dev->load_module(build_dir + "/l_post.co")))
+      return fail(dev->err() + " (Model L's code objects l_enc_values.co, l_ops.co, l_swin.co, l_post.co)");
 
     if (!stage_variants(c)) return false;
     if (!runtime_options(c)) return false;
@@ -864,6 +869,20 @@ struct Runtime {
       const bool filter_unbanded = fk != kDefaultFilter && fk.find("_band") == std::string::npos;
       if (!post_given && !filter_unbanded && !recon_output) post_kernel = kDefaultBandPost;
     }
+#ifdef WG_MODEL_L
+    // Model L reconstructs with its own kernel, l_post_recon (l_post.co; clean/l/FORMATS.md step 5), which takes Model
+    // M's post_recon arguments and buffers: the unbanded post_recon route (8-byte history, base coefficient format,
+    // no pack12), then Model M's output filter (unbanded). Model M's post kernels are not for Model L.
+    if (model_l) {
+      if ((c.post_kernel && *c.post_kernel) || choose(nullptr, "WG_POST_KERNEL", "") != "")
+        return fail("Model L: its reconstruction is l_post_recon; a post kernel (post_kernel / WG_POST_KERNEL) "
+                    "chooses among Model M's");
+      if (choose(c.post_pack, "WG_POST_PACK", "none") == "p12")
+        return fail("Model L: post_pack=p12 (the pack12 decoder) is Model M's; Model L's l_coef writes the base "
+                    "coefficient format");
+      post_kernel = "post_recon";
+    }
+#endif
     // post_pack / WG_POST_PACK=p12: the _p12 form of the post kernel (post_recon2_r[_hp][_band] -> ..._p12). Default
     // p12 (measured in game with the banded path: -0.04 ms, exact) when nothing else is chosen for post / dec0, not
     // with recon=output or the fused dec1 + dec0, and only when the pack12 decoder is there (build.py builds it).
@@ -1332,7 +1351,7 @@ struct Runtime {
     kernels_text += std::string(" model_map=") + (model_source == "raw" ? "none" : model_other_map ? "other" : "same");
     if (native_direct_io) kernels_text += " native_io=direct_textures";
     // Model L: its encoder and decoder (enc0= / dec0= above name Model M's, not loaded for Model L)
-    if (model_l) kernels_text += " model=L l_kernels=l_enc_values.co,l_ops.co,l_swin.co";
+    if (model_l) kernels_text += " model=L l_kernels=l_enc_values.co,l_ops.co,l_swin.co,l_post.co l_post=l_post_recon";
     return kernels_text.c_str();
   }
 
@@ -1661,6 +1680,14 @@ struct Runtime {
     if (post_last != pk && hist_bytes != 8)
       return fail(pk + " (" + std::to_string(hist_bytes) +
                   "-byte history) cannot fall back to post_recon here");
+#ifdef WG_MODEL_L
+    if (model_l) {  // Model L: l_post_recon (l_post.co, untagged) with post_recon's arguments
+      post_last = "l_post_recon";
+      return launch("l_post_recon", grid, 256,
+                    {&cnet, &A, &B, &C, &hist[cur], &mnear[nxt], &mcenter, &mfar, &w, &hist[nxt], &reduced, &display,
+                     &p, &expo});
+    }
+#endif
     if (uses_prep(post_last)) {  // pre-pass (one record per render pixel), then post_recon5* / 6*
       if (!launch((post_pre + "post_prep").c_str(), cdiv((long long)rw * rh, 256), 256,
                   {&cnet, &A, &B, &C, &prep, &p, &expo}) ||

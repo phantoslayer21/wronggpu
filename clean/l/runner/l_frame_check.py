@@ -31,9 +31,12 @@ but against the float64 references with the kernels' GELU (sigmoid):
 - the ten Swin stages (clean/reference/swin.py run_stage), each output under the per-stage rule;
 - dec0: Model L's decoder (oracle decode) or Model M's (clean/reference/decoder.py) on the runtime's dec1 output: the
   A, B and latent codes and the C values, each at least 99.5 % identical (l_c32_check's end-to-end bound);
-- post (clean/reference/post.py reconstruct): history and display under test_post_emu.py's FP16 acceptance, the
-  reduced history codes within 1 and 99 % exact; the filter (when the post kernel writes a display image) as
-  test_post_emu.py;
+- post: Model L's reconstruction (l_post_recon) against clean/l/reference/recon.py reconstruct, Model M's against
+  clean/reference/post.py reconstruct: history and display under test_post_emu.py's FP16 acceptance for Model M, and
+  for Model L under Model L's post acceptance (clean/l/runner/l_post_check.py, provisional: values more than one ulp
+  off at most 0.01 % over the run and 0.05 % per frame, for the hardware-log2 reason given there), the reduced
+  history codes within 1 and 99 % exact; the filter (when
+  the post kernel writes a display image) as test_post_emu.py, against recon.output_filter / post.output_filter;
 - exposure: the runtime's value and the reference's, reported (not a pass condition).
 Output: counts only, no timing. The summary gives per stage the values differing, the largest difference (FP8 steps,
 FP16 ulps or codes, as the stage's metric has it), the non-finite values on each side and the largest finite magnitude
@@ -52,6 +55,8 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
 sys.path.insert(0, ROOT)
+
+from clean.l.runner import l_post_check as LP  # noqa: E402 (Model L's post acceptance)
 
 L_SOURCES = [os.path.join("..", "l", "runtime", "l_model.cpp"), os.path.join("..", "l", "runtime", "l_pack.cpp")]
 SEED = 89
@@ -147,30 +152,33 @@ def prepare(build, rocm, model=None, map_path=None):
 
 # ---- --run (GPU) ----------------------------------------------------------------------------------------------------
 
-def frame_inputs(rng, rw, rh, reset):
+def frame_inputs(rng, rw, rh, reset, special=True):
     from clean.reference import encoder as En
-    x = En.random_inputs(rng, rw=rw, rh=rh, fw=-(-rw // 32) * 32, fh=-(-rh // 32) * 32)
+    x = En.random_inputs(rng, rw=rw, rh=rh, fw=-(-rw // 32) * 32, fh=-(-rh // 32) * 32, special=special)
     return {"color": x["color"], "depth": x["depth"], "motion": x["motion"], "mv_scale": x["mv_scale"],
             "jitter": x["jitter"], "exposure": 1.0, "pre_exposure": PRE_EXPOSURE, "reset": reset}
 
 
-def run(build, rocm):
+def run(build, rocm, special=True):
     from clean.runner.hip import clean_process_environment
     clean_process_environment(rocm)
     from clean.runner.pipeline import Pipeline
     d = model_dir(build)
+    # Model L: HDR colour (its reconstruction kernel l_post_recon is HDR; the runtime refuses Model L without it)
     setups = {"L": dict(map_path=l_map(build), check_packing=False, kernels={"options": "model=L"}),
               "M": dict(check_packing=True, kernels={"pack": "none"})}
+    flags = {"L": {"depth_inverted": False, "auto_exposure": True, "hdr": True},
+             "M": {"depth_inverted": False, "auto_exposure": True}}
     for model, kw in setups.items():
         # "stages": the bottleneck as six block launches, so that b0 ... b4 are written (the default megakernel writes
         # only b5's output); "default": the runtime's default kernels, which must give the same bytes
         for config in ("stages", "default"):
             k = dict(kw, kernels=dict(kw["kernels"], **({"bneck": "none"} if config == "stages" else {})))
-            p = Pipeline(build, rocm, d, MAX_RENDER, OUTPUT, {"depth_inverted": False, "auto_exposure": True}, **k)
+            p = Pipeline(build, rocm, d, MAX_RENDER, OUTPUT, flags[model], **k)
             rng = np.random.default_rng(SEED)
             frames = []
             for (rw, rh), reset in SEQUENCE:
-                fr = frame_inputs(rng, rw, rh, reset)
+                fr = frame_inputs(rng, rw, rh, reset, special)
                 out = p.frame(fr, debug=True)
                 frames.append({"inputs": fr, "out": out})
             rec = {"model": model, "config": config, "kernels": p.kernels(), "notes": p.notes(),
@@ -230,16 +238,22 @@ def same_values(got, ref):
             "max_f16_steps": int(_f16_steps(g[dif], r[dif]).max()) if dif.any() else 0}
 
 
-def post_fp16(got, ref):
+def post_fp16(got, ref, model="M"):
     finite = np.isfinite(got)
     s = _f16_steps(got, ref)
     d = np.abs(np.where(finite, got, 0.0).astype(np.float64) - ref)
     m = {"values": int(s.size), "differ": int(np.sum(s > 0)), "max_f16_steps": int(s.max()) if s.size else 0,
-         "nonfinite": int(np.sum(~finite)), "frac_over_1": float(np.mean(s > 1)), "frac_diff": float(np.mean(s > 0)),
+         "nonfinite": int(np.sum(~finite)), "frac_over_1": float(np.mean(s > 1)), "over_1": int(np.sum(s > 1)),
+         "frac_diff": float(np.mean(s > 0)),
          "mean_rel_rms": float(d.mean() / max(np.sqrt(np.mean(np.square(ref, dtype=np.float64))), 1e-30))}
     m.update(_magnitudes(got, ref))
-    m["pass"] = (m["nonfinite"] == 0 and m["frac_over_1"] <= 1e-4 and m["mean_rel_rms"] <= 1e-3
-                 and m["frac_diff"] <= 0.01)
+    if model == "L":
+        # Model L's post acceptance (clean/l/runner/l_post_check.py, provisional): per frame at most 0.05 % more than
+        # one ulp off; the run-level 0.01 % is checked in compare()
+        m["pass"] = LP.l_post_rule(m["values"], m["nonfinite"], m["over_1"], m["differ"], m["mean_rel_rms"])
+    else:
+        m["pass"] = (m["nonfinite"] == 0 and m["frac_over_1"] <= 1e-4 and m["mean_rel_rms"] <= 1e-3
+                     and m["frac_diff"] <= 0.01)
     return m
 
 
@@ -249,6 +263,7 @@ def compare_model(rec, params):
     from clean.reference import decoder as MD
     from clean.reference import encoder as ME
     from clean.reference import exposure as Ex
+    from clean.l.reference import recon as R
     from clean.reference import post as Po
     from clean.reference import swin as S
     model = rec["model"]
@@ -332,10 +347,11 @@ def compare_model(rec, params):
               "history": out["state"]["history_prev"] if not eff_reset else np.zeros((D[1], D[0], 3), np.float32),
               "m_near": out["enc0"]["m_near"], "m_center": out["enc0"]["m_center"], "m_far": out["enc0"]["m_far"],
               "jitter": fr["jitter"], "reset": eff_reset, "recon_size": D}
-        ref = Po.reconstruct(xp, float(np.asarray(params["post"]["s"]).reshape(-1)[0]))
-        m["post"] = {"history": post_fp16(out["post"]["history"], ref["history"])}
+        s_post = float(np.asarray(params["post"]["s"]).reshape(-1)[0])
+        ref = R.reconstruct(xp, s_post) if model == "L" else Po.reconstruct(xp, s_post)
+        m["post"] = {"history": post_fp16(out["post"]["history"], ref["history"], model)}
         if out["post"]["display"] is not None:
-            m["post"]["display"] = post_fp16(out["post"]["display"], ref["display"])
+            m["post"]["display"] = post_fp16(out["post"]["display"], ref["display"], model)
         dc = codes(out["post"]["reduced"], ref["reduced"], 1023.0)
         dc["pass"] = dc["max_code_diff"] <= 1 and dc["differ"] <= 0.01 * dc["values"]
         m["post"]["reduced"] = dc
@@ -343,6 +359,8 @@ def compare_model(rec, params):
             disp, e = out["post"]["display"], out["exposure"]["e"]
             if rec["taps"] is not None:
                 fo = Po.output_filter_original(disp, e, (rec["ow"], rec["oh"]), rec["taps"])
+            elif model == "L":
+                fo = R.output_filter(disp, e, (rec["ow"], rec["oh"]))
             else:
                 fo = Po.output_filter(disp, e, (rec["ow"], rec["oh"]))
             fo = (np.asarray(fo, np.float32) * pi).astype(np.float32)
@@ -434,6 +452,10 @@ def compare(build, json_path):
                       "default_identical": {"frames": len(same), "identical": sum(not d for d in same),
                                             "differing_outputs": sorted({k for d in same for k in d})},
                       "pass": all(m["pass"] for m in frames) and not any(same)}
+        if model == "L":  # Model L's run-level limit on post values more than one ulp off (provisional)
+            res[model]["post_run"] = {k: LP.l_post_run([m["post"][k] for m in frames if k in m["post"]])
+                                      for k in ("history", "display")}
+            res[model]["pass"] = res[model]["pass"] and all(r["pass"] for r in res[model]["post_run"].values())
     res["pass"] = res["L"]["pass"] and res["M"]["pass"]
     src = os.path.join(model_dir(build), "source.json")
     if os.path.exists(src):
@@ -460,6 +482,9 @@ def main(argv=None):
     g.add_argument("--run", action="store_true")
     g.add_argument("--compare", action="store_true")
     ap.add_argument("--json")
+    ap.add_argument("--plain", action="store_true",
+                    help="--run: frames without random_inputs' special values (NaN / huge / negative colours, NaN "
+                         "depths, motion leaving the frame)")
     ap.add_argument("--model", help="--prepare: a converter-written Model L model.wgcm in place of the synthetic model")
     ap.add_argument("--map", help="--prepare with --model: the map it was converted with (default: the shipped "
                                   "data/preset-L.v1.map.json)")
@@ -472,7 +497,7 @@ def main(argv=None):
         prepare(a.build, a.rocm, a.model, a.map)
         return 0
     if a.run:
-        run(a.build, a.rocm)
+        run(a.build, a.rocm, special=not a.plain)
         return 0
     return compare(a.build, a.json or os.path.join(a.build, "lframe_check.json"))
 
