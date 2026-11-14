@@ -34,6 +34,7 @@ import os
 import struct
 import subprocess
 import sys
+import time
 
 import numpy as np
 
@@ -434,8 +435,9 @@ def check_narrow(state, read):
 # ---- run -----------------------------------------------------------------------------------------------------------
 
 def run(build, rocm, families, seeds, json_out):
-    cdir = os.path.join(build, "replay-k")
-    os.makedirs(cdir, exist_ok=True)
+    # a new folder per run: an output of an earlier run must never stand in for one this run did not write
+    cdir = os.path.join(build, "replay-k-" + time.strftime("%Y%m%d-%H%M%S"))
+    os.makedirs(cdir)
     res = {"families": families, "seeds": seeds, "results": {}}
     cos = sorted({co for f in families for co in FAMILY_KERNELS[f][0]} | {CONTROL_CO})
     hip = Hip(build, rocm, cos)
