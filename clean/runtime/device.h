@@ -176,7 +176,9 @@ std::unique_ptr<Device> make_dx12_device(const std::string& rocm_dir, const std:
 // Uses <build_dir>/dx12/manifest.json and WG_D3D12_ARENA_MB (16..4095, default 2560).
 std::unique_ptr<Device> make_d3d12_device(const std::string& build_dir, std::string* err);
 
-// Diagnostics: WG_LAUNCH_TRACE=<file> appends one line per kernel launch ("kernel grid block [where]").
+// Diagnostics: WG_LAUNCH_TRACE=<file> appends one line per kernel launch ("kernel grid block [where]");
+// WG_LAUNCH_TRACE_MAX=<lines> stops it after that many lines. The interop's runtime options launch_trace=<file> and
+// launch_trace_max=<lines> set both (a game started by its store launcher does not inherit our environment).
 void trace_launch(const std::string& kernel, unsigned grid, unsigned block, const char* where = nullptr);
 
 }  // namespace wgrt
