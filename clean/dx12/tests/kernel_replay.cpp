@@ -20,8 +20,8 @@
 //                                              by row (tightly packed), "-" for none (the output, written by no
 //                                              kernel replayed here). The case binds them as one direct frame
 //                                              (NativeD3D12Ext::bind_direct_frame) around its launch.
-//   direct_params <rx> <ry> <rw> <rh>          the frame's active render rectangle; motion scale 1, offset 0,
-//                                              color_pi 1, no exposure texture
+//   direct_params <rx> <ry> <rw> <rh> [pi [rne16]]  the frame's active render rectangle; motion scale 1, offset 0,
+//                                              no exposure texture; color_pi (default 1) and output_rne16 (default 0)
 //   direct_out <file>                          after the launch, the output texture's texels are written to <file>,
 //                                              row by row (tightly packed); its initial texels come from the output
 //                                              slot's file (a sentinel fill, so that an unwritten texel shows)
@@ -374,6 +374,10 @@ int main(int argc, char** argv) {
       c.direct.push_back(t);
     } else if (w == "direct_params") {
       s >> c.dparams.rx >> c.dparams.ry >> c.dparams.rw >> c.dparams.rh;
+      float pi = 1.0f;
+      unsigned rne16 = 0;
+      if (s >> pi) c.dparams.color_pi = pi;   // optional: color_pi, then output_rne16
+      if (s >> rne16) c.dparams.output_rne16 = rne16;
     } else if (w == "direct_out") {
       s >> c.direct_out;
     } else if (w == "arg") {
