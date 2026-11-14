@@ -601,7 +601,8 @@ class Context {
       probe.runtime_options = o.runtime.c_str();
       wgrt::ModelId model = wgrt::ModelId::M;
       std::string merr;
-      q.model_k = wgrt::model_from_options(probe, &model, &merr) && model != wgrt::ModelId::M;
+      // model K only (Model L runs on the D3D12 executor in builds with it: runtime.cpp, native D3D12 backend 3)
+      q.model_k = wgrt::model_from_options(probe, &model, &merr) && model == wgrt::ModelId::K;
       q.adapter_known = adapter_info(device_, &q.adapter, &q.vendor_id, &q.software);
       q.sparkle_guard = o.sparkle_guard > 0.0f;
       q.capture = !o.capture_dir.empty();
