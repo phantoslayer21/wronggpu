@@ -250,6 +250,12 @@ struct Runtime {
   // post is another algorithm (3 x 3 gather, encoded-domain history): against Model L's post oracle it failed every
   // frame (clean/l/records/l_default_post_real_weights.json). l_own_post: native D3D12 with Model L (its pack12 route).
   bool l_own_post = false;
+  // Runtime option l_color_early=on (default off; Model L, native D3D12, direct-resource route): l_direct_color (the
+  // post's colour staging, which reads only the game's colour texture and pi) runs right after the input encoder, and
+  // the launch after it goes without a UAV barrier (Device::unordered_next), so the staging overlaps the encoder block
+  // instead of running alone before the post. The post's own barrier still orders its read of color_net. The same
+  // kernel on the same inputs: the same bytes. l_color_done: this frame's staging already ran.
+  bool l_color_early = false, l_color_done = false;
   bool l_ldr = false;     // Model L with LDR colour: the _ldr kernels
   bool l_post_own_given = false;  // the runtime option l_post=own (accepted: Model L's only route)
 #ifdef WG_MODEL_L
@@ -1130,6 +1136,7 @@ struct Runtime {
         if (v != "own") return fail("l_post must be own (Model L's reconstruction; there is no other)");
         l_post_own_given = true;
       }
+      if (k == "l_color_early") l_color_early = v == "1" || v == "on" || v == "true";
       if (k == "post_diet") post_diet = !(v == "0" || v == "off" || v == "false");
       if (k == "tf_vdiet") tf_vdiet = !(v == "0" || v == "off" || v == "false");
       if (k == "post_idx") post_idx = !(v == "0" || v == "off" || v == "false");
@@ -1441,6 +1448,7 @@ struct Runtime {
                       (l_ldr ? "l_post_recon_ldr" : "l_post_recon");
     if (l_fold_built) kernels_text += std::string(" l_dec_fold=") + (fz_lc ? "on" : "off");  // (native D3D12 only)
     if (l_lin_built) kernels_text += std::string(" l_lin_fused=") + (fz_ll ? "on" : "off");
+    if (model_l && l_color_early) kernels_text += " l_color_early=on";
     if (l_le_built) kernels_text += std::string(" l_enc_lin=") + (fz_le ? "on" : "off");
     return kernels_text.c_str();
   }
@@ -1588,6 +1596,15 @@ struct Runtime {
   // arguments, q in place of the features; the motion surfaces as Model M), the two per-pixel linears, the encoder
   // block, and the gather of each token's 2 x 2 pixels into the 64 features enc1 reads (feat0).
   bool l_encoder(EncParams& p, DevPtr cnet, DevPtr din, DevPtr min_, int cur, int nxt, int fh, int fw, int f) {
+    // l_color_early: the post's colour staging after the input encoder, the next launch unordered after it
+    auto color_early = [&]() {
+      if (!(native_direct_io && l_own_post && l_color_early)) return true;
+      int npix = p.rw * p.rh;
+      if (!launch("l_direct_color", cdiv(npix, 256), 256, {&color_net, &npix})) return false;
+      l_color_done = true;
+      dev->unordered_next();
+      return true;
+    };
     DevPtr wv = wdev["enc0.values"], w1 = wdev["enc0.Win1"], w2 = wdev["enc0.Win2"], wp = wdev["enc0.project"];
     int npix = (fh + 4) * (fw + 4), tw = fw / 2, th = fh / 2;
     const bool fused = fz_ll && l_lin_built;  // (native D3D12 only: l_lin_built)
@@ -1603,6 +1620,7 @@ struct Runtime {
                     cdiv(((fh + 4) / 2) * ((fw + 4) / 2), 128), 256,
                     {&cnet, &din, &min_, &reduced, &latent[cur], &mnear[cur], &q, &mnear[nxt], &mfar, &mcenter,
                      &expo, &wv, &p}) &&
+             color_early() &&
              launch("l_swin_block_c32_enc_lin_nc", cdiv(nwin, 8), 256,
                     {&l_narrow, &none, &l_x3, &wb, &fh, &fw, &ox, &oy, &w1, &w2}) &&
              launch("l_project_gather", cdiv(tw * th, 128), 256, {&l_x3, &feat0, &wp, &tw, &th});
@@ -1611,6 +1629,7 @@ struct Runtime {
                   cdiv(((fh + 4) / 2) * ((fw + 4) / 2), 128), 256,
                   {&cnet, &din, &min_, &reduced, &latent[cur], &mnear[cur], &q, &mnear[nxt], &mfar, &mcenter,
                    &expo, &wv, &p}) &&
+           color_early() &&
            (fused ? launch("l_linear_32_32_fused", cdiv(npix, 128), 256, {&l_narrow, &l_wide, &w1, &w2, &npix})
                   : launch("l_linear_32_32_relu", cdiv(npix, 128), 256, {&l_wide, &l_narrow, &w1, &npix}) &&
                         launch("l_linear_32_32_f16", cdiv(npix, 128), 256, {&l_narrow, &l_wide, &w2, &npix})) &&
@@ -2379,7 +2398,8 @@ struct Runtime {
     const bool own_direct = native_direct_io && l_own_post;
     if (own_direct) {
       int npix = rw * rh;
-      if (!launch("l_direct_color", cdiv(npix, 256), 256, {&color_net, &npix})) return false;
+      if (!l_color_done && !launch("l_direct_color", cdiv(npix, 256), 256, {&color_net, &npix})) return false;
+      l_color_done = false;   // (l_color_early: staged after this frame's input encoder)
       cnet = color_net;
     }
     // 5. output reconstruction (spec 06, kernels/post.hip): history copy f -> copy 1 - f, reduced history, display.
