@@ -695,6 +695,21 @@ int main() {
         for (auto& w : all.warnings) { xessWarn |= w.kind == L"xess-no-depth"; plug |= w.kind == L"plugin-not-hooked"; }
         require(all.found && xessWarn && plug && all.plugin == L"not-hooked", "ReadLastRun: XeSS without depth (OptiScaler.log), the plugin's log in its own folder");
 
+        // ---- vkd3d-proton next to the game: refused on Windows, a note under Wine (where it is the game's D3D12) ----------
+        {
+            const wstring vg = Join(dir, L"vkd3d game");
+            Put(Join(vg, L"Game.exe"), "synthetic game exe");
+            Put(Join(vg, L"d3d12.dll"), "MZ synthetic vkd3d-proton d3d12");
+            Context vctx;
+            const CoexistReport vr = AssessCoexistence(vctx, Join(vg, L"Game.exe"), L"", nullptr);
+            const Finding* vf = nullptr;
+            for (auto& f : vr.findings) if (f.tool == Tool::Vkd3d) vf = &f;
+            if (UnderWine())
+                require(vf && vf->decision == Decision::Inform && !vr.refusal(), "vkd3d-proton next to the game under Wine: a note, not refused");
+            else
+                require(vf && vf->decision == Decision::Refuse && vr.refusal() == vf, "vkd3d-proton next to the game on Windows: refused");
+        }
+
         RemoveTree(dir);
         std::printf("coexist-core: %d checks passed\n", checks);
         return 0;
