@@ -6,6 +6,10 @@
 #include <string>
 #include <vector>
 
+#ifdef WRONGGPU_MODEL_K_OVERRIDE  // test_asi_thunk_kl: Model K on, whatever the build's WG_MODEL_K says
+#undef WRONGGPU_MODEL_K
+#define WRONGGPU_MODEL_K 1
+#endif
 #include "../asi/asi_thunk.h"
 
 using namespace wgasi;
@@ -63,8 +67,13 @@ void TestDefaultIsWrongGpu() {
     CHECK(sel.calls.size() == kEntryCount + 1);
     CHECK(sel.calls[0].label == kEntries[0].label && sel.calls[0].selected);
     CHECK(sel.calls.back().label == "FSR 3.X" && !sel.calls.back().selected);
-#if WRONGGPU_MODEL_K
+#if WRONGGPU_MODEL_K && WRONGGPU_MODEL_L
+    CHECK(kEntryCount == 3 && sel.calls[0].label == "WrongGPU Model M" && sel.calls[1].label == "WrongGPU Model K" &&
+          sel.calls[2].label == "WrongGPU Model L");
+#elif WRONGGPU_MODEL_K
     CHECK(kEntryCount == 2 && sel.calls[0].label == "WrongGPU Model M" && sel.calls[1].label == "WrongGPU Model K");
+#elif WRONGGPU_MODEL_L
+    CHECK(kEntryCount == 2 && sel.calls[0].label == "WrongGPU Model M" && sel.calls[1].label == "WrongGPU Model L");
 #else
     CHECK(kEntryCount == 1 && sel.calls[0].label == "WrongGPU");
 #endif
@@ -150,6 +159,74 @@ void TestSelectionFile() {
     CHECK(ParseSelection(FormatSelection(kModelAmd)) == kModelAmd);
     CHECK(ParseSelection(FormatSelection(kModelM)) == kModelM);
     CHECK(FormatSelection(kModelM).find("selection=wronggpu\r\n") != std::string::npos);
+    CHECK(ParseSelection("selection=wronggpu-l") == (WRONGGPU_MODEL_L ? kModelL : kModelM));
+}
+
+// 0.6.5: the saved choice says whether the player chose it and when (chosen=), so the front end can weigh it against
+// the launcher's model choice (src/model_precedence.h).
+void TestSelectionExplicitAndTime() {
+    Selection s = ParseSelectionFile("");
+    CHECK(s.model == kModelM && !s.explicitChoice && s.chosenAt == 0);  // no file: the default entry
+    s = ParseSelectionFile("; c\r\nselection=wronggpu\r\n");             // what installers seed / 0.6.0 saved for M
+    CHECK(s.model == kModelM && !s.explicitChoice && s.chosenAt == 0);
+    s = ParseSelectionFile("selection=wronggpu\r\nchosen=1763150000\r\n");  // a click on Model M, with its time
+    CHECK(s.model == kModelM && s.explicitChoice && s.chosenAt == 1763150000ull);
+    s = ParseSelectionFile("chosen=77\r\nselection=amd\r\n");  // order does not matter
+    CHECK(s.model == kModelAmd && s.explicitChoice && s.chosenAt == 77);
+    s = ParseSelectionFile("selection=amd\r\n");  // an earlier version's AMD: explicit, no time
+    CHECK(s.model == kModelAmd && s.explicitChoice && s.chosenAt == 0);
+    s = ParseSelectionFile("selection=wronggpu\r\nchosen=soon\r\n");  // a bad time: not recorded
+    CHECK(s.model == kModelM && !s.explicitChoice && s.chosenAt == 0);
+    s = ParseSelectionFile("selection=garbage\r\nchosen=5\r\n");  // an unknown entry: the default, whatever the time
+    CHECK(s.model == kModelM && !s.explicitChoice && s.chosenAt == 0);
+    s = ParseSelectionFile("selection=wronggpu-k\r\n");
+    CHECK(WRONGGPU_MODEL_K ? (s.model == kModelK && s.explicitChoice) : (s.model == kModelM && !s.explicitChoice));
+    s = ParseSelectionFile("selection=wronggpu-l\r\nchosen=9\r\n");  // Model L; in a build without it, the default
+    CHECK(WRONGGPU_MODEL_L ? (s.model == kModelL && s.explicitChoice && s.chosenAt == 9) : (s.model == kModelM && !s.explicitChoice));
+    // round trip of every entry with and without a time
+    for (const Entry& e : kEntries) {
+        const Selection t = ParseSelectionFile(FormatSelection(e.model, 1234));
+        CHECK(t.model == e.model && t.explicitChoice && t.chosenAt == 1234);
+        const Selection u = ParseSelectionFile(FormatSelection(e.model));
+        CHECK(u.model == e.model && u.chosenAt == 0 && u.explicitChoice == (e.model != kModelM));
+    }
+    CHECK(FormatSelection(kModelL, 5).find("selection=wronggpu-l\r\nchosen=5\r\n") != std::string::npos);
+    CHECK(FormatSelection(kModelM).find("chosen=") == std::string::npos);
+}
+
+// A click records an explicit choice with its time and reports it; the menu marks the model the front end reported
+// (ShownModel) until the next click.
+void TestClickRecordsTimeAndShownModel() {
+    PluginState st;
+    FakeSelectable none;
+    bool clicked = true;
+    const int size = 0;
+    SelectableThunkLogic(none, "FSR 3.X", true, 0, &size, st, 100, &clicked);
+    CHECK(!clicked && !st.explicitChoice.load() && st.chosenAt.load() == 0);  // drawing alone records nothing
+    // the front end reports that another model runs (the launcher's choice won over the plugin's default)
+    st.shown.store(kEntries[kEntryCount - 1].model);
+    FakeSelectable marks;
+    SelectableThunkLogic(marks, "FSR 3.X", true, 0, &size, st);
+    for (size_t i = 0; i < kEntryCount; ++i) CHECK(marks.calls[i].selected == (i == kEntryCount - 1));
+    FakeBeginCombo bc;
+    BeginComboThunkLogic(bc, "", "FSR 3.X", 0, st);
+    CHECK(bc.preview == kEntries[kEntryCount - 1].label);
+    // the player clicks Model M: explicit, timed, and marked again
+    FakeSelectable click;
+    click.clickLabel = kEntries[0].label;
+    CHECK(SelectableThunkLogic(click, "FSR 3.X", true, 0, &size, st, 1763150000ull, &clicked));
+    CHECK(clicked && st.model.load() == kModelM && st.explicitChoice.load() && st.chosenAt.load() == 1763150000ull);
+    CHECK(st.shown.load() == kShowSaved && ShownModel(st) == kModelM);
+    // a click on the entry already saved is still an explicit choice with a new time
+    FakeSelectable again;
+    again.clickLabel = kEntries[0].label;
+    CHECK(SelectableThunkLogic(again, "FSR 3.X", true, 0, &size, st, 1763150500ull, &clicked) && clicked);
+    CHECK(st.chosenAt.load() == 1763150500ull);
+#if WRONGGPU_MODEL_L
+    FakeSelectable l;
+    l.clickLabel = "WrongGPU Model L";
+    CHECK(SelectableThunkLogic(l, "FSR 3.X", true, 0, &size, st, 1763151000ull, &clicked) && clicked && st.model.load() == kModelL);
+#endif
 }
 
 }  // namespace
@@ -163,6 +240,8 @@ int main() {
     TestClickAmd();
     TestPreviewRelabel();
     TestSelectionFile();
+    TestSelectionExplicitAndTime();
+    TestClickRecordsTimeAndShownModel();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

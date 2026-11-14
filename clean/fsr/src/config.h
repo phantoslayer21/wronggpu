@@ -79,6 +79,9 @@ struct Config {
     // Extra "key=value;key=value" text for the upscaler (the network runtime's own keys, e.g. timing_log=1;sync=pipelined),
     // appended to BackendOptions() after the front end's keys. Normalized: items trimmed, empty items dropped.
     std::string runtimeOptions;
+    // [fsr] model_chosen: when the launcher last changed the model item of runtime_options (seconds since 1970 UTC;
+    // 0 = not recorded). Weighed against the OptiScaler menu plugin's saved choice (model_precedence.h).
+    uint64_t modelChosenAt = 0;
 
     // In-game overlay (overlay.h): "on" (the full panel for 10 s after WrongGPU starts upscaling, then a one-line badge),
     // "badge" (the badge only), "off". overlayKey toggles it: insert, home, end, delete, pageup, pagedown, pause,

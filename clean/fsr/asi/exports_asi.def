@@ -4,3 +4,5 @@ EXPORTS
     InitializeASI
     WrongGpuAsiQuery
     WrongGpuAsiQueryStatusV1
+    WrongGpuAsiQueryChoiceV1
+    WrongGpuAsiShowModelV1

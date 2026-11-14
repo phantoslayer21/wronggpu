@@ -234,9 +234,11 @@ FrontEnd& Get() {
                     return CompareApi(dll);
                 };
             }
-            // If WrongGPU.asi has hooked OptiScaler's menu, it (not an FFX version override) chooses the model, and
-            // WrongGPU's own versions are left out of the FFX sub-box. Absent or not hooked: hosted mode as before.
-            p.asiPlugin = [](char* model) { return QueryAsiPlugin(model); };
+            // If WrongGPU.asi has hooked OptiScaler's menu, its saved entry weighed against the launcher's model choice
+            // (not an FFX version override) chooses the model (model_precedence.h). Absent or not hooked: hosted mode as
+            // before.
+            p.asiPlugin = [](wgfsr::PluginModelChoice* choice) { return QueryAsiPlugin(choice); };
+            p.asiShowModel = [](char model) { ShowAsiModel(model); };
         }
         p.menu = Menu();
         g_frontEnd = new FrontEnd(p, config);

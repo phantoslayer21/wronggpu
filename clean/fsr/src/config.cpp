@@ -345,6 +345,10 @@ Config ParseConfig(const std::string& text, std::string* warnings) {
             if (ok) c.splitTimeoutMs = static_cast<uint32_t>(f);
         } else if (key == "runtime_options") {
             c.runtimeOptions = NormalizeOptions(value);
+        } else if (key == "model_chosen") {
+            // Written by the launcher with the model item (model_precedence.h): seconds since 1970 UTC.
+            ok = !value.empty() && value.size() <= 19 && value.find_first_not_of("0123456789") == std::string::npos;
+            if (ok) c.modelChosenAt = std::strtoull(value.c_str(), nullptr, 10);
         } else if (key == "overlay") {
             ok = lv == "on" || lv == "badge" || lv == "off";
             if (ok) c.overlay = lv;

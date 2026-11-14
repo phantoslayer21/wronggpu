@@ -16,6 +16,7 @@
 #include "amd_compare.h"
 #include "async_create.h"
 #include "config.h"
+#include "model_precedence.h"
 #include "status.h"
 #include "ffx_headers.h"
 #include "param_map.h"
@@ -89,9 +90,12 @@ struct Platform {
     std::function<bool(void* device)> deviceLost;
     // OptiScaler ASI plugin bridge (clean/fsr/asi): when WrongGPU.asi is loaded and has hooked OptiScaler's menu,
     // WrongGPU is its own entry in the host's MAIN upscaler list, not a version in the FFX sub-box. Returns true when
-    // hooked (then the version query lists AMD only and this plugin, not an FFX override, chooses the model) and sets
-    // *model to 0 (AMD FSR), 'M' or 'K'. Null or returns false: no plugin / unknown host build; hosted mode as before.
-    std::function<bool(char* model)> asiPlugin;
+    // hooked (then the plugin's saved choice, weighed against the launcher's model choice by model_precedence.h, not an
+    // FFX override, chooses the model) and fills *choice: model 0 (AMD FSR), 'M', 'K' or 'L', whether the player chose
+    // it, and when. Null or returns false: no plugin / unknown host build; hosted mode as before.
+    std::function<bool(PluginModelChoice* choice)> asiPlugin;
+    // Tells the plugin which model the context runs (0 AMD, 'M', 'K', 'L'), so its menu marks that entry. May be empty.
+    std::function<void(char model)> asiShowModel;
     // Registry options and the menu's choices (shared settings block). Empty members: defaults, nothing written.
     MenuSettings menu;
 };
@@ -203,6 +207,8 @@ private:
     // The configured SR model (sr_model: block > environment > ini) for a context no entry chose; false: not set
     // anywhere (the model then comes from runtime_options / the runtime's default, as before the registry).
     bool ConfiguredModel(int32_t* model, std::string* described);
+    // The launcher's model choice in wronggpu.ini (model_precedence.h), weighed against the OptiScaler plugin's.
+    LauncherModelChoice LauncherChoice() const;
     // AMD's DLL behind a forwarded context (the one that created it), else AMD's original.
     const OriginalApi* ApiOf(void* context);
     // `u` runs on AMD while its upscaler's create runs (u.pending): takes the upscaler over when the create has finished.

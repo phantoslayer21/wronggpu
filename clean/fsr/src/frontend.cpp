@@ -2,6 +2,7 @@
 #include "frontend.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -565,28 +566,57 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
         }
     }
 
-    // OptiScaler ASI plugin (clean/fsr/asi): when it has hooked the host's MAIN upscaler list, its entry decides.
-    // "WrongGPU" -> WrongGPU, whatever the FFX sub-box names. "FSR 3.X(/4)" -> AMD: the version the FFX sub-box names
-    // when that is one of AMD's, else AMD's newest listed version (FSR 4 when the AMD provider has it).
-    char asiModel = 0;
-    const bool asiHooked = config_.hosted && platform_.asiPlugin && platform_.asiPlugin(&asiModel);
+    // OptiScaler ASI plugin (clean/fsr/asi): when it has hooked the host's MAIN upscaler list, the FFX sub-box no
+    // longer chooses: the plugin's saved entry and the launcher's model choice (wronggpu.ini runtime_options' model item
+    // with model_chosen) do, by model_precedence.h (the launcher's choice wins over the plugin's default entry; on a
+    // conflict the more recent explicit choice wins, with one log line). A WrongGPU model -> WrongGPU, whatever the FFX
+    // sub-box names. AMD ("FSR 3.X(/4)") -> AMD: the version the FFX sub-box names when that is one of AMD's, else AMD's
+    // newest listed version (FSR 4 when the AMD provider has it).
+    PluginModelChoice asiChoice;
+    const bool asiHooked = config_.hosted && platform_.asiPlugin && platform_.asiPlugin(&asiChoice);
     bool forceAmd = false;
     if (asiHooked) {
-        if (asiModel == 'M' || asiModel == 'K') {
-#if WRONGGPU_MODEL_K
-            const char model = asiModel;
-#else
-            const char model = 'M';  // a plugin built with Model K, with a front end without it: Model M
-#endif
-            u->selectedModel = model;
-            u->modelProviderId = model == 'K' ? kWrongGpuKProviderVersionId : kWrongGpuProviderVersionId;
-            u->modelProviderName = model == 'K' ? "WrongGPU Model K" : "WrongGPU Model M";
+        const ModelDecision decision = DecideModel(asiChoice, LauncherChoice());
+        if (decision.conflict) {
+            bool first = false;
+            {
+                std::lock_guard lock(mutex_);
+                first = !modelLogged_.count(decision.line);
+                modelLogged_[decision.line] = true;
+            }
+            if (first) Log(tag + " " + decision.line);
+        }
+        // "selected in the host's upscaler list" (the launcher's log reader looks for it): the plugin's menu marks the
+        // model that runs (asiShowModel), also when the launcher's choice decided.
+        const std::string by = decision.winner == ModelWinner::Launcher
+                                   ? std::string(" (the launcher's model choice: wronggpu.ini runtime_options model=") + decision.model + ")"
+                                   : std::string();
+        char model = decision.model;
+        if (model != kChoiceAmd) {
+            const int32_t m = ModelOfName(std::string(1, model));
+            const WgEntryDef* sr = m >= 0 ? SrEntryOfModel(m) : nullptr;
+            if (!sr) {  // a model this build of the front end lacks (CMake WG_MODEL_K / WG_MODEL_L): Model M, said once
+                const std::string line = "note: OptiScaler plugin: " + ChoiceName(model) + " is not part of this build of the front end; Model M is used";
+                bool first = false;
+                {
+                    std::lock_guard lock(mutex_);
+                    first = !modelLogged_.count(line);
+                    modelLogged_[line] = true;
+                }
+                if (first) Log(tag + " " + line);
+                model = 'M';
+                sr = SrEntryOfModel(ModelOfName("M"));
+            }
+            u->selectedModel = model;  // passed on as model=<letter> (CreateUpscale, below)
+            u->modelProviderId = sr ? sr->id : kWrongGpuProviderVersionId;
+            u->modelProviderName = sr ? EntryProviderName(*sr) : kWrongGpuVersionName;
             u->hasOverride = false;  // an AMD version in the FFX sub-box must not route this context to AMD
-            Log(tag + " OptiScaler plugin: " + u->modelProviderName + " selected in the host's upscaler list");
+            Log(tag + " OptiScaler plugin: " + u->modelProviderName + " selected in the host's upscaler list" + by);
         } else {
             forceAmd = true;
-            Log(tag + " OptiScaler plugin: AMD FSR selected in the host's upscaler list");
+            Log(tag + " OptiScaler plugin: AMD FSR selected in the host's upscaler list" + by);
         }
+        if (platform_.asiShowModel) platform_.asiShowModel(model);
     }
 
     // One folder per choice (registry option entry_source = folders): this DLL's folder IS the choice; the host's
@@ -1364,6 +1394,22 @@ bool FrontEnd::ConfiguredModel(int32_t* model, std::string* described) {
     *model = value;
     if (described) *described = text;
     return true;
+}
+
+LauncherModelChoice FrontEnd::LauncherChoice() const {
+    // The launcher's choice: the last model item of wronggpu.ini's runtime_options (the launcher writes model=<letter>
+    // there; a build without Model K / L has already dropped those items, IgnoreModelK / IgnoreModelL) and
+    // model_chosen, when the launcher last changed it. WG_RUNTIME_OPTIONS is a developer's override, not a choice: it
+    // is checked against the decided model further on (CreateUpscale).
+    LauncherModelChoice c;
+    bool found = false;
+    const std::string v = OptionValue(config_.runtimeOptions, "model", &found);
+    if (found && v.size() == 1) {
+        const char m = char(std::toupper(static_cast<unsigned char>(v[0])));
+        if (m == 'M' || m == 'K' || m == 'L') c.model = m;
+    }
+    c.chosenAt = config_.modelChosenAt;
+    return c;
 }
 
 void FrontEnd::ApplyEntry(const WgEntryDef& e, UpscaleContext& u, const std::string& tag, const char* source) {

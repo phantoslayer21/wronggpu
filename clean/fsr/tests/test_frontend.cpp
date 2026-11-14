@@ -233,10 +233,13 @@ static bool g_compare = false;                 // Platform::compareAmd
 static std::vector<UpscaleStatus> g_statuses;  // Platform::status
 static std::vector<std::pair<void*, bool>> g_timed;  // Platform::gpuTimer
 
-// Fake WrongGPU.asi bridge (clean/fsr/asi): g_asiHooked/g_asiModel stand in for the plugin's WrongGpuAsiQuery.
+// Fake WrongGPU.asi bridge (clean/fsr/asi): g_asiHooked/g_asiModel/... stand in for the plugin's WrongGpuAsiQueryChoiceV1.
 static bool g_asiPresent = false;  // the plugin bridge is wired at all
 static bool g_asiHooked = false;   // and it reports a successful hook
-static char g_asiModel = 0;        // 0 (AMD), 'M', 'K'
+static char g_asiModel = 0;        // 0 (AMD), 'M', 'K', 'L'
+static int g_asiExplicit = -1;     // -1: as an earlier plugin reports it (Model M = default entry, others explicit); 0/1
+static uint64_t g_asiChosenAt = 0; // when the player clicked it (0 = not recorded)
+static std::vector<char> g_asiShown;  // Platform::asiShowModel calls
 
 // Fake shared settings (Platform::menu, settings_bridge.h in the DLL): values set "somewhere" (block / env / ini),
 // the writes of the menu's choices, whether this module is the writer, the folder sidecar's entry.
@@ -277,8 +280,17 @@ static std::unique_ptr<FrontEnd> MakeFrontEnd(const Config& config) {
         p.menu.folderEntry = g_folderEntry;
     }
     p.original = []() -> const OriginalApi* { return g_originalAvailable ? g_originalApi : nullptr; };
-    if (g_asiPresent)
-        p.asiPlugin = [](char* model) { if (model) *model = g_asiModel; return g_asiHooked; };
+    if (g_asiPresent) {
+        p.asiPlugin = [](PluginModelChoice* c) {
+            if (c) {
+                c->model = g_asiModel;
+                c->explicitChoice = g_asiExplicit < 0 ? g_asiModel != 'M' : g_asiExplicit != 0;
+                c->chosenAt = g_asiChosenAt;
+            }
+            return g_asiHooked;
+        };
+        p.asiShowModel = [](char model) { g_asiShown.push_back(model); };
+    }
     p.compareApi = []() -> const OriginalApi* { return g_compareApi; };
     p.backend = [](const Config&, std::string&) -> const WgUpscalerBackend* { return g_useBackend; };
     p.services = [](const WgUpscalerBackend* b, void* device) -> const WgFrontEndServices* {
@@ -371,6 +383,9 @@ static void Reset() {
     g_asiPresent = false;
     g_asiHooked = false;
     g_asiModel = 0;
+    g_asiExplicit = -1;
+    g_asiChosenAt = 0;
+    g_asiShown.clear();
     g_createInfo = WgCreateInfo{};
     g_compare = false;
     g_statuses.clear();
@@ -2555,13 +2570,22 @@ static void TestAsiPluginNotHooked() {
 
 // The installer's Preset K with the plugin hooked (0.5.0): wronggpu.ini says runtime_options = model=K, OptiScaler.ini
 // UpscalerIndex=1, and the installer seeds the plugin's wronggpu-asi.ini with selection=wronggpu-k, so the plugin
-// reports 'K' and the context runs Model K. The plugin's entry decides over the ini: without that seed its default
-// entry (Model M) would run, and a later choice of Model M in OptiScaler's list runs Model M.
+// reports 'K' and the context runs Model K. Since 0.6.5 the plugin's default entry (Model M with no time) no longer
+// decides over the launcher's model=K (the 0.6.5 audit: the plugin's default hid the launcher's choice); a later choice
+// of Model M in OptiScaler's list (a click with its time) still runs Model M, with the conflict line.
 static void TestAsiPluginPresetK() {
 #if WRONGGPU_MODEL_K
     const bool present = g_asiPresent, hooked = g_asiHooked;
     const char saved = g_asiModel;
-    for (char plugin : {'K', 'M'}) {
+    struct Case {
+        char plugin;
+        int explicitChoice;
+        uint64_t at;
+        char runs;
+        bool conflict;
+    };
+    for (const Case& k : {Case{'K', -1, 0, 'K', false}, Case{'M', 1, 1000, 'M', true}, Case{'M', 0, 0, 'K', false}}) {
+        const char plugin = k.runs;  // the model expected to run
         Reset();
         g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
         std::string warnings;
@@ -2571,7 +2595,9 @@ static void TestAsiPluginPresetK() {
         c.upscaler = UpscalerChoice::Network;
         g_asiPresent = true;
         g_asiHooked = true;
-        g_asiModel = plugin;
+        g_asiModel = k.plugin;
+        g_asiExplicit = k.explicitChoice;
+        g_asiChosenAt = k.at;
         auto fe = MakeFrontEnd(c);
         UpscaleCreate create(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE, true);
         create.version.versionId = kWrongGpuKProviderVersionId;  // the FFX sub-box at UpscalerIndex=1
@@ -2588,12 +2614,188 @@ static void TestAsiPluginPresetK() {
         const std::string options = g_createInfo.options ? g_createInfo.options : "";
         CHECK(options.size() >= 7 && options.compare(options.size() - 7, 7, std::string("model=") + plugin) == 0);
         CHECK(CountLog((std::string("OptiScaler plugin: ") + expected + " selected").c_str()) == 1);
+        CHECK(CountLog("model choice conflict") == (k.conflict ? 1u : 0u));
+        CHECK(g_asiShown.size() == 1 && g_asiShown[0] == k.runs);
         CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
     }
     g_asiPresent = present;
     g_asiHooked = hooked;
     g_asiModel = saved;
 #endif
+}
+
+// 0.6.5 audit (the A8 blocker): with the plugin hooked, the launcher's model choice (wronggpu.ini runtime_options'
+// model item, with model_chosen) decides over the plugin's default entry; on a conflict between two explicit choices
+// the more recent one runs and one line names both (model_precedence.h). Every case goes through CreateUpscale with a
+// hosted create, and checks the provider the context reports, the runtime option passed on, and the log.
+struct AsiRun {
+    std::string provider;    // QUERY_GET_PROVIDER_VERSION's name, "" when the context went to AMD
+    std::string options;     // the runtime's create options ("" when nothing was created)
+    bool amd = false;        // AMD's FSR was asked to create a context
+    int runtimeCreates = 0;  // creates the runtime saw
+};
+static AsiRun RunAsi(const char* ini, char plugin, int explicitChoice, uint64_t at, std::vector<std::string> modelFiles = {},
+                     bool lookup = false) {
+    Reset();
+    g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+    std::string warnings;
+    Config c = ParseConfig(ini, &warnings);
+    CHECK(warnings.empty());
+    c.hosted = true;
+    c.upscaler = UpscalerChoice::Network;
+    c.contextParkMs = 0;
+    g_asiPresent = true;
+    g_asiHooked = true;
+    g_asiModel = plugin;
+    g_asiExplicit = explicitChoice;
+    g_asiChosenAt = at;
+    if (lookup) {
+        g_modelOn = true;
+        g_modelPlaces = {{"G:\\game\\WrongGPU\\model", "the game's data folder", false}};
+        g_modelFiles = modelFiles;
+    }
+    auto fe = MakeFrontEnd(c);
+    AsiRun r;
+    const size_t amd = g_amd.size();
+    const int creates = g_createCalls;
+    g_createOptions.clear();
+    UpscaleCreate create(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE, true);
+    create.version.versionId = kWrongGpuProviderVersionId;  // the FFX sub-box names Model M: it does not decide here
+    ffxContext ctx = nullptr;
+    CHECK(fe->CreateContext(&ctx, &create.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
+    r.amd = g_amd.size() > amd;
+    r.runtimeCreates = g_createCalls - creates;
+    r.options = g_createOptions;
+    if (fe->OwnContextCount() == 1 && !r.amd) {
+        ffxQueryGetProviderVersion q{};
+        q.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
+        if (fe->Query(&ctx, &q.header) == FFX_API_RETURN_OK && q.versionName) r.provider = q.versionName;
+    }
+    CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    return r;
+}
+
+static bool EndsWith(const std::string& s, const std::string& tail) {
+    return s.size() >= tail.size() && s.compare(s.size() - tail.size(), tail.size(), tail) == 0;
+}
+
+static void TestAsiLauncherPrecedence() {
+    const bool present = g_asiPresent, hooked = g_asiHooked;
+    const char saved = g_asiModel;
+    // The pure rule (model_precedence.h), independent of which models this build has.
+    {
+        PluginModelChoice pd;  // the plugin's default entry
+        LauncherModelChoice none, l{'L', 2000}, k{'K', 0}, m0{'M', 0}, m{'M', 3000};
+        CHECK(DecideModel(pd, none).model == 'M' && DecideModel(pd, none).winner == ModelWinner::Default);
+        CHECK(DecideModel(pd, m0).model == 'M' && DecideModel(pd, m0).winner == ModelWinner::Default);
+        CHECK(DecideModel(pd, l).model == 'L' && DecideModel(pd, l).winner == ModelWinner::Launcher && !DecideModel(pd, l).conflict);
+        CHECK(DecideModel(pd, k).model == 'K' && DecideModel(pd, k).winner == ModelWinner::Launcher);  // unstamped K: explicit
+        PluginModelChoice pk{'K', true, 1000}, pkNew{'K', true, 5000}, pkOld{'K', true, 0}, pa{kChoiceAmd, true, 1000};
+        ModelDecision d = DecideModel(pk, l);  // explicit K older than the launcher's L
+        CHECK(d.model == 'L' && d.winner == ModelWinner::Launcher && d.conflict);
+        CHECK(d.line.find("OptiScaler menu plugin chose Model K") != std::string::npos &&
+              d.line.find("the launcher chose Model L") != std::string::npos &&
+              d.line.find("the launcher's choice wins (the more recent explicit choice): Model L runs") != std::string::npos);
+        d = DecideModel(pkNew, l);  // explicit K newer than the launcher's L
+        CHECK(d.model == 'K' && d.winner == ModelWinner::Plugin && d.conflict &&
+              d.line.find("the plugin's choice wins (the more recent explicit choice): Model K runs") != std::string::npos);
+        d = DecideModel(pkOld, LauncherModelChoice{'L', 0});  // neither recorded a time: the in-game choice is kept
+        CHECK(d.model == 'K' && d.conflict && d.line.find("same time or none recorded") != std::string::npos);
+        d = DecideModel(pkOld, l);  // an earlier version's K (no time) against a timed launcher L: the launcher's
+        CHECK(d.model == 'L' && d.conflict);
+        d = DecideModel(pa, l);
+        CHECK(d.model == 'L' && d.conflict && d.line.find("chose AMD FSR") != std::string::npos);
+        d = DecideModel(pa, m);  // the launcher went back to Model M after the player chose AMD in the game
+        CHECK(d.model == 'M' && d.winner == ModelWinner::Launcher && d.conflict);
+        d = DecideModel(pk, LauncherModelChoice{'K', 9000});  // the same model: no conflict
+        CHECK(d.model == 'K' && !d.conflict && d.line.empty());
+        CHECK(DecideModel(pa, none).model == kChoiceAmd && DecideModel(pa, m0).model == kChoiceAmd);
+    }
+    // Config: model_chosen is read; a bad value is said and ignored.
+    {
+        std::string w;
+        CHECK(ParseConfig("[fsr]\nruntime_options = model=L\nmodel_chosen = 1763150000\n", &w).modelChosenAt == 1763150000ull && w.empty());
+        CHECK(ParseConfig("[fsr]\nmodel_chosen = soon\n", &w).modelChosenAt == 0 && w.find("bad value") != std::string::npos);
+    }
+    AsiRun r;
+#if WRONGGPU_MODEL_L
+    // (a) the plugin's default entry + the launcher's Model L -> Model L, no conflict line (the audit's case: before this
+    // fix Model M ran and read Model M's file).
+    r = RunAsi("[fsr]\nruntime_options = model=L\nmodel_chosen = 2000\n", 'M', 0, 0);
+    CHECK(r.provider == "WrongGPU Model L" && EndsWith(r.options, "model=L") && !r.amd);
+    CHECK(CountLog("OptiScaler plugin: WrongGPU Model L selected in the host's upscaler list (the launcher's model choice") == 1);
+    CHECK(CountLog("model choice conflict") == 0 && g_asiShown.size() == 1 && g_asiShown[0] == 'L');
+    // ... also with no time on the launcher's model=L (a hand-edited file): the plugin's default never decides over it
+    r = RunAsi("[fsr]\nruntime_options = model=L\n", 'M', -1, 0);
+    CHECK(r.provider == "WrongGPU Model L" && EndsWith(r.options, "model=L"));
+    // (c) an explicit plugin choice older than the launcher's Model L -> Model L, with the conflict line once
+    r = RunAsi("[fsr]\nruntime_options = model=L\nmodel_chosen = 2000\n", kChoiceAmd, 1, 1000);
+    CHECK(r.provider == "WrongGPU Model L" && EndsWith(r.options, "model=L") && !r.amd);
+    CHECK(CountLog("model choice conflict: OptiScaler menu plugin chose AMD FSR (wronggpu-asi.ini, chosen=1000), the launcher "
+                   "chose Model L (wronggpu.ini runtime_options, model_chosen 2000); the launcher's choice wins") == 1);
+    // (d) an explicit plugin choice newer than the launcher's -> the plugin's, with the conflict line
+    r = RunAsi("[fsr]\nruntime_options = model=L\nmodel_chosen = 2000\n", 'M', 1, 3000);
+    CHECK(r.provider == "WrongGPU Model M" && EndsWith(r.options, "model=M"));
+    CHECK(CountLog("model choice conflict") == 1 && CountLog("the plugin's choice wins (the more recent explicit choice): Model M runs") == 1);
+    r = RunAsi("[fsr]\nruntime_options = model=L\nmodel_chosen = 2000\n", kChoiceAmd, 1, 3000);  // ... AMD, newer
+    CHECK(r.amd && r.provider.empty() && r.runtimeCreates == 0 &&
+          CountLog("OptiScaler plugin: AMD FSR selected in the host's upscaler list") == 1);
+    CHECK(g_asiShown.size() == 1 && g_asiShown[0] == kChoiceAmd);
+    // the plugin's own Model L entry (explicit) with the launcher at its default
+    r = RunAsi("[fsr]\nruntime_options = model=M\n", 'L', 1, 500);
+    CHECK(r.provider == "WrongGPU Model L" && EndsWith(r.options, "model=L") && CountLog("model choice conflict") == 0);
+    // (e) Model L chosen (by the launcher, over the plugin's default) and Model L's file missing: the existing refusal --
+    // the create is refused with its reason, the runtime is not asked, AMD's FSR upscales (fallback_to_amd); no silent
+    // switch to Model M or its file.
+    r = RunAsi("[fsr]\nruntime_options = model=L\nmodel_chosen = 2000\n", 'M', 0, 0,
+               {"G:\\game\\WrongGPU\\model\\model.wgcm", "G:\\game\\WrongGPU\\model\\K\\model.wgcm"}, true);
+    CHECK(r.runtimeCreates == 0 && r.amd);
+    CHECK(CountLog("Model L is chosen but no converted Model L was found") >= 1 && CountLog("model: no converted Model L found") == 1);
+    r = RunAsi("[fsr]\nruntime_options = model=L\nmodel_chosen = 2000\n", 'M', 0, 0, {"G:\\game\\WrongGPU\\model\\L\\model.wgcm"}, true);
+    CHECK(r.runtimeCreates == 1 && !r.amd && r.provider == "WrongGPU Model L" &&
+          r.options.find(";model_dir=G:\\game\\WrongGPU\\model") != std::string::npos);
+#else
+    // A front end without Model L: the launcher's model=L is refused at start-up (IgnoreModelL, its own note), so no
+    // launcher choice is left: Model M. A plugin built with Model L whose saved entry is Model L, with this front end:
+    // Model M, said once.
+    r = RunAsi("[fsr]\nruntime_options = model=L\nmodel_chosen = 2000\n", 'M', 0, 0);
+    CHECK(r.provider == "WrongGPU Model M" && EndsWith(r.options, "model=M"));
+    CHECK(CountLog("is refused: Model L is not part of this build of the front end") == 1);
+    r = RunAsi("[fsr]\nruntime_options = model=M\n", 'L', 1, 500);
+    CHECK(r.provider == "WrongGPU Model M" && EndsWith(r.options, "model=M"));
+    CHECK(CountLog("note: OptiScaler plugin: Model L is not part of this build of the front end; Model M is used") == 1);
+#endif
+#if WRONGGPU_MODEL_K
+    // (b) the plugin unset (no file: its default entry) + the launcher's Model K -> Model K
+    r = RunAsi("[fsr]\nruntime_options = model=K\nmodel_chosen = 2000\n", 'M', 0, 0);
+    CHECK(r.provider == "WrongGPU Model K" && EndsWith(r.options, "model=K") && CountLog("model choice conflict") == 0);
+#if WRONGGPU_MODEL_L
+    // explicit K older than the launcher's L -> L; explicit K newer -> K (both with the conflict line)
+    r = RunAsi("[fsr]\nruntime_options = model=L\nmodel_chosen = 2000\n", 'K', 1, 1000);
+    CHECK(r.provider == "WrongGPU Model L" && EndsWith(r.options, "model=L") && CountLog("model choice conflict") == 1);
+    r = RunAsi("[fsr]\nruntime_options = model=L\nmodel_chosen = 2000\n", 'K', 1, 3000);
+    CHECK(r.provider == "WrongGPU Model K" && EndsWith(r.options, "model=K") && CountLog("model choice conflict") == 1);
+    // the launcher's K newer than the plugin's L
+    r = RunAsi("[fsr]\nruntime_options = model=K\nmodel_chosen = 4000\n", 'L', 1, 3000);
+    CHECK(r.provider == "WrongGPU Model K" && CountLog("the launcher's choice wins (the more recent explicit choice): Model K runs") == 1);
+#endif
+#else
+    // A front end without Model K: the launcher's model=K is dropped at start-up (IgnoreModelK, its own note): Model M.
+    // A saved Model K of the plugin: Model M, said once.
+    r = RunAsi("[fsr]\nruntime_options = model=K\nmodel_chosen = 2000\n", 'M', 0, 0);
+    CHECK(r.provider == "WrongGPU Model M" && EndsWith(r.options, "model=M"));
+    CHECK(CountLog("is ignored: Model K is not part of this build") == 1);
+    r = RunAsi("[fsr]\nruntime_options = model=M\n", 'K', 1, 500);
+    CHECK(r.provider == "WrongGPU Model M" && EndsWith(r.options, "model=M"));
+    CHECK(CountLog("note: OptiScaler plugin: Model K is not part of this build of the front end; Model M is used") == 1);
+#endif
+    // No model item at all and the plugin's default: Model M as before, no conflict, nothing extra in the log.
+    r = RunAsi("[fsr]\nruntime_options = timing_log=1\n", 'M', -1, 0);
+    CHECK(r.provider == "WrongGPU Model M" && EndsWith(r.options, "model=M") && CountLog("model choice conflict") == 0);
+    CHECK(CountLog("OptiScaler plugin: WrongGPU Model M selected in the host's upscaler list") == 1 && CountLog("launcher's model choice") == 0);
+    g_asiPresent = present;
+    g_asiHooked = hooked;
+    g_asiModel = saved;
 }
 
 // i15: WrongGPU's version-list entries come from the registry (clean/wgshared). i20 (owner 2026-10-31): only the SR
@@ -3443,6 +3645,7 @@ int main() {
     TestAsiPluginHooked();
     TestAsiPluginNotHooked();
     TestAsiPluginPresetK();
+    TestAsiLauncherPrecedence();
     {
         Config profile;
         const auto original = profile.BackendOptions();

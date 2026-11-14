@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 // WrongGPU.asi: an OptiScaler plugin (its own DLL, our own code only) that makes WrongGPU appear as its own entry
-// ("WrongGPU"; with Model K: "WrongGPU Model M", "WrongGPU Model K") in OptiScaler's MAIN DX12 upscaler dropdown,
-// leaving OptiScaler's "FSR 3.X(/4)" entry to mean AMD's upscaler again. WrongGPU is the default entry; the player's
-// choice is remembered in wronggpu-asi.ini next to the plugin.
+// ("WrongGPU"; with Model K and/or L: "WrongGPU Model M", "WrongGPU Model K", "WrongGPU Model L") in OptiScaler's MAIN
+// DX12 upscaler dropdown, leaving OptiScaler's "FSR 3.X(/4)" entry to mean AMD's upscaler again. WrongGPU is the default
+// entry; the player's choice (and when it was made) is remembered in wronggpu-asi.ini next to the plugin. The front end
+// weighs it against the launcher's model choice (src/model_precedence.h) and reports back the model it runs.
 //
 // How: OptiScaler calls our exported InitializeASI() after loading us (see its LoadAsiPlugins). The module that
 // called us is OptiScaler itself (its image holds the menu code), so we identify it by InitializeASI's return
@@ -68,21 +69,30 @@ bool PinOwnModule() noexcept {
 // The remembered choice: wronggpu-asi.ini in PluginDataDir() (asi_thunk.h, ParseSelection / FormatSelection).
 std::wstring SelectionPath() { return wgasi::PluginDataDir() + L"wronggpu-asi.ini"; }
 
-char LoadSelection() {
+wgasi::Selection LoadSelection() {
     std::string text;
     HANDLE h = CreateFileW(SelectionPath().c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h != INVALID_HANDLE_VALUE) {
-        char buf[512];
+        char buf[1024];
         DWORD got = 0;
         if (ReadFile(h, buf, sizeof buf, &got, nullptr)) text.assign(buf, got);
         CloseHandle(h);
     }
-    return wgasi::ParseSelection(text);
+    return wgasi::ParseSelectionFile(text);
 }
 
-void SaveSelection(char model) {
-    const std::string text = wgasi::FormatSelection(model);
+// Seconds since 1970-01-01 UTC (the launcher stamps its model choice on the same clock).
+uint64_t NowUnixSeconds() {
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    const uint64_t t = (uint64_t(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;  // 100 ns since 1601
+    const uint64_t epoch = 116444736000000000ull;                                // 1970-01-01 in that unit
+    return t > epoch ? (t - epoch) / 10000000ull : 0;
+}
+
+void SaveSelection(char model, uint64_t chosenAt) {
+    const std::string text = wgasi::FormatSelection(model, chosenAt);
     HANDLE h = CreateFileW(SelectionPath().c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return;
@@ -92,14 +102,16 @@ void SaveSelection(char model) {
 }
 
 extern "C" bool WgSelectableThunk(const char* label, bool selected, int flags, const void* size) {
-    const char before = g_state.model.load();
+    bool ours = false;
     const bool clicked = wgasi::SelectableThunkLogic(
         [](const char* l, bool s, int f, const void* z) { return g_realSelectable(l, s, f, z); },
-        label, selected, flags, size, g_state);
-    const char after = g_state.model.load();
-    if (after != before) {  // a click on another entry of the FSR 3.X group: remember it (rare; on the menu thread)
-        SaveSelection(after);
-        AsiLog::Get().Writef("selected: %s", after == wgasi::kModelAmd ? label : wgasi::LabelOf(after));
+        label, selected, flags, size, g_state, NowUnixSeconds(), &ours);
+    if (ours) {  // a click on an entry of the FSR 3.X group: the player's explicit choice, with its time (rare; menu thread)
+        const char after = g_state.model.load();
+        const uint64_t at = g_state.chosenAt.load();
+        SaveSelection(after, at);
+        AsiLog::Get().Writef("selected: %s (chosen=%llu)", after == wgasi::kModelAmd ? label : wgasi::LabelOf(after),
+                             static_cast<unsigned long long>(at));
     }
     return clicked;
 }
@@ -222,7 +234,16 @@ void Hook(const void* caller) {
     g_realBeginCombo = r.beginCombo ? reinterpret_cast<PfnBeginCombo>(const_cast<uint8_t*>(optiBase) + r.beginCombo) : nullptr;
 
     // Selection I/O and all allocations happen before any call site can enter our thunks.
-    g_state.model.store(LoadSelection());
+    {
+        const wgasi::Selection saved = LoadSelection();
+        g_state.model.store(saved.model);
+        g_state.explicitChoice.store(saved.explicitChoice);
+        g_state.chosenAt.store(saved.chosenAt);
+        log.Writef("saved choice: %s (%s, chosen=%llu)",
+                   saved.model == wgasi::kModelAmd ? "AMD (FSR 3.X)" : wgasi::LabelOf(saved.model),
+                   saved.explicitChoice ? "explicit" : "default entry: the launcher's model choice decides",
+                   static_cast<unsigned long long>(saved.chosenAt));
+    }
     uint8_t* stubs = AllocNear(optiBase + r.addDx12Lo);
     if (!stubs) {
         g_diagnostics.Outcome(WG_ASI_MENU_UNAVAILABLE, WG_ASI_REASON_STUB_ALLOCATION_FAILED);
@@ -290,10 +311,35 @@ extern "C" __declspec(dllexport) __declspec(noinline) void InitializeASI() {
     });
 }
 
+// The earlier query (ABI 1): an older front end knows 0, 'M' and 'K' only, so Model L reads as Model M there.
 extern "C" __declspec(dllexport) int WrongGpuAsiQuery(int* hooked, char* model) {
     if (hooked) *hooked = g_state.hooked.load() ? 1 : 0;
-    if (model) *model = g_state.model.load();
+    if (model) {
+        const char m = g_state.model.load();
+        *model = m == wgasi::kModelL ? wgasi::kModelM : m;
+    }
     return int(WRONGGPU_ASI_ABI);
+}
+
+extern "C" __declspec(dllexport) int WrongGpuAsiQueryChoiceV1(WrongGpuAsiChoiceV1* choice, uint32_t caller_size) {
+    if (!choice) return WG_ASI_STATUS_INVALID_ARGUMENT;
+    if (caller_size < sizeof(WrongGpuAsiChoiceV1) || choice->size < sizeof(WrongGpuAsiChoiceV1) || choice->size > caller_size)
+        return WG_ASI_STATUS_INVALID_SIZE;
+    if (choice->version != WRONGGPU_ASI_CHOICE_VERSION) return WG_ASI_STATUS_UNSUPPORTED_VERSION;
+    WrongGpuAsiChoiceV1 v{};
+    v.size = sizeof(v);
+    v.version = WRONGGPU_ASI_CHOICE_VERSION;
+    v.hooked = g_state.hooked.load() ? 1u : 0u;
+    v.model = static_cast<unsigned char>(g_state.model.load());
+    v.explicit_choice = g_state.explicitChoice.load() ? 1u : 0u;
+    v.chosen_at = g_state.chosenAt.load();
+    *choice = v;
+    return WG_ASI_STATUS_OK;
+}
+
+// The front end reports the model it runs (0 AMD, 'M', 'K', 'L'), so the menu marks that one; 1 = the saved choice.
+extern "C" __declspec(dllexport) void WrongGpuAsiShowModelV1(char model) {
+    if (model == wgasi::kShowSaved || model == wgasi::kModelAmd || wgasi::LabelOf(model)) g_state.shown.store(model);
 }
 
 extern "C" __declspec(dllexport) int WrongGpuAsiQueryStatusV1(WrongGpuAsiStatusV1* status, uint32_t caller_size) {

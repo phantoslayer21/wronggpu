@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <ctime>
 
 #include "record.h"
 #include "settings.h"
@@ -273,7 +274,7 @@ std::map<string, string> EffectiveSettings(const string& wronggpuIni, const stri
     return eff;
 }
 
-bool RenderWronggpuIni(const Profile& p, const string& in, string& out, wstring* why) {
+bool RenderWronggpuIni(const Profile& p, const string& in, string& out, wstring* why, uint64_t now) {
     for (auto& d : kSettings) {
         if (!ValidateSetting(d, p.get(d.key), nullptr, why)) return false;
     }
@@ -319,6 +320,15 @@ bool RenderWronggpuIni(const Profile& p, const string& in, string& out, wstring*
     const string joined = JoinOptions(items);
     // the line is rewritten only when its items change (a player's spacing and comment stay otherwise)
     if (hadOptions ? joined != JoinOptions(SplitOptions(options)) : !joined.empty()) text = IniSet(text, hadOptions ? section : "fsr", "runtime_options", joined);
+    // the model choice's time (profile.h): written when the model the front end runs changes, for any model letter
+    auto lastModel = [](const string& opts) {
+        string m;
+        for (auto& kv : SplitOptions(opts)) if (LowerA(kv.first) == "model") m = LowerA(TrimA(kv.second));
+        return m;
+    };
+    const string modelBefore = hadOptions ? lastModel(options) : string(), modelAfter = lastModel(joined);
+    if (modelAfter != modelBefore && !modelAfter.empty())
+        text = IniSet(text, hadOptions ? section : "fsr", "model_chosen", std::to_string(now ? now : uint64_t(std::time(nullptr))));
     out = text;
     return true;
 }

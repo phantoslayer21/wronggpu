@@ -21,6 +21,17 @@ What the front end does with the plugin's entry (`src/frontend.cpp`, `TestAsiPlu
 whatever the FFX box names; "FSR 3.X(/4)" runs AMD: the AMD version the FFX box names, else AMD's newest listed version.
 The FFX box's list is the same with and without the plugin (WrongGPU first).
 
+Which model runs (0.6.5, `src/model_precedence.h`, `TestAsiLauncherPrecedence`): the plugin's saved entry is weighed
+against the launcher's model choice, the last `model=` item of wronggpu.ini's `runtime_options`. Each side records when
+it was chosen: the plugin writes `chosen=<seconds since 1970 UTC>` into `wronggpu-asi.ini` on every click in the menu,
+and the launcher writes `model_chosen=<seconds>` into wronggpu.ini whenever it changes the model item. A choice is a
+*default* when nobody made it (no file, or Model M with no time on either side). The launcher's choice wins over the
+plugin's default; the plugin's explicit choice wins over the launcher's default; when both are explicit and differ, the
+more recent one wins (equal or missing times: the plugin's, the choice made in the game), and the front end logs one
+`model choice conflict:` line naming both and the winner. The front end tells the plugin which model runs
+(`WrongGpuAsiShowModelV1`), so the menu marks that entry. Model L's own entry ("WrongGPU Model L") is in the menu of a
+build with `WG_MODEL_L`; a model the front end was built without runs as Model M, with a note in the log.
+
 ## How it works
 
 1. OptiScaler loads the plugin and calls its exported `InitializeASI()`. `opti_module.h` finds OptiScaler's module
@@ -41,7 +52,8 @@ The FFX box's list is the same with and without the plugin (WrongGPU first).
    none of OptiScaler's data.
 4. WrongGPU's front end (`amd_fidelityfx_dx12.dll`) finds the plugin by module and asks it (`WrongGpuAsiQuery`,
    `asi_abi.h`) which model is selected. The FFX list always starts with WrongGPU entries followed by AMD entries;
-   when hooked, the front end creates Model M / Model K / AMD according to the plugin selection.
+   when hooked, the front end creates Model M / K / L or AMD from the plugin's selection weighed against the launcher's
+   model choice (`WrongGpuAsiQueryChoiceV1`; see "Which model runs" above).
 
 If a required anchor is missing or ambiguous, or a stub cannot be placed, nothing is patched and the plugin reports
 "not hooked". Call sites are prepared and revalidated before publication. A failed write rolls back sites whose

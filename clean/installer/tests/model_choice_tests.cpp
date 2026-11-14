@@ -22,10 +22,10 @@ Profile With(const char* model) {
     if (!SetSetting(p, "model", model, &why)) throw std::runtime_error("test setup: model");
     return p;
 }
-string Wini(const Profile& p, const string& in) {
+string Wini(const Profile& p, const string& in, uint64_t now = 0) {
     string out;
     wstring why;
-    if (!RenderWronggpuIni(p, in, out, &why)) throw std::runtime_error("test setup: render");
+    if (!RenderWronggpuIni(p, in, out, &why, now)) throw std::runtime_error("test setup: render");
     return out;
 }
 string Oini(const Profile& p, const string& in, std::vector<wstring>* notes = nullptr) {
@@ -70,6 +70,26 @@ int main() {
         require(EffectiveSettings(toL, "")["model"] == "l" && EffectiveSettings(fresh, "")["model"] == "m" && EffectiveSettings(withK, "")["model"] == "m",
                 "the file's model: L from its last model item, M otherwise");
         require(EffectiveSettings("[fsr]\r\nruntime_options = model=L;model=M\r\n", "")["model"] == "m", "the file's model: the last model item counts");
+
+        // ---- wronggpu.ini model_chosen: the time of the launcher's model choice (0.6.5; the front end weighs it against
+        // the OptiScaler menu plugin's saved choice, clean/fsr/src/model_precedence.h) --------------------------------------
+        require(Wini(DefaultProfile(), fresh, 1000) == fresh, "Model M on the installer's file: no model_chosen (nothing changed, byte for byte)");
+        const string toLt = Wini(With("l"), fresh, 1000);
+        require(toLt.find("model_chosen=1000\r\n") != string::npos && toLt.find("runtime_options=model=L") != string::npos,
+                "Model L chosen: model_chosen = the time of the change, next to runtime_options");
+        require(Wini(With("l"), toLt, 2000) == toLt, "Model L again: model_chosen stays (the model did not change)");
+        const string otherSetting = Wini([] { Profile q = With("l"); wstring w; SetSetting(q, "sparkle_guard", "on", &w); return q; }(), toLt, 3000);
+        require(otherSetting.find("model_chosen=1000\r\n") != string::npos && otherSetting.find("model_chosen=3000") == string::npos,
+                "another setting changed: model_chosen stays (only a model change is a model choice)");
+        const string backMt = Wini(DefaultProfile(), toLt, 4000);
+        require(backMt.find("model=M") != string::npos && backMt.find("model_chosen=4000\r\n") != string::npos && backMt.find("model_chosen=1000") == string::npos,
+                "back to Model M: model_chosen = the time of that change (replaced, one line)");
+        require(Wini(With("l"), "[fsr]\r\nruntime_options = model=K\r\n", 5000).find("model_chosen=5000") != string::npos,
+                "from another model's item (Model K) to Model L: stamped");
+        require(Wini(DefaultProfile(), withK, 6000) == withK, "Model K's item left as it is by Model M: no model_chosen");
+        require(Wini(With("l"), "[fsr]\r\nupscaler = network\r\n", 7000).find("model_chosen=7000") != string::npos,
+                "a file without runtime_options gets model=L and model_chosen");
+        require(Wini(With("l"), fresh).find("model_chosen=") != string::npos, "now = 0: the current time is written");
 
         // ---- OptiScaler.ini: the entry OptiScaler starts with -----------------------------------------------------------
         const string L = kModelLEntryIndex;
