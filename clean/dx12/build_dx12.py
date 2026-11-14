@@ -2,7 +2,10 @@
 """Builds the D3D12 ports of the HIP kernels (clean/dx12/kernels/*.hlsl) for the hybrid device backend (runtime backend 2,
 clean/runtime/device_dx12.cpp): <out>/dx12/<tag>__<kernel>.dxil (or <kernel>.dxil without a tag) + <out>/dx12/manifest.json.
 
-    python clean/dx12/build_dx12.py --out build/dx12-m/hip [--isa] [--only exposure_auto_diet,...] [-j N]
+    python clean/dx12/build_dx12.py --out build/dx12-m/hip [--isa] [--only exposure_auto_diet,...] [-j N] [--model-l]
+
+Model L's kernels (#89: those that reproduce one of Model L's code objects, co=l_*.co, and MODEL_L_ONLY) are built only with --model-l
+or when --only names them, so that a build without the option is Model M's kernel set unchanged.
 
 Every kernel source declares its kernels in header lines (clean/dx12/README.md):
 
@@ -172,6 +175,29 @@ def kernel_decls(path):
     return decls
 
 
+# Kernels of Model M's code objects that only Model L's frame launches (#89): dec1 as a standalone block (#139;
+# Model M runs dec1 fused with dec0).
+MODEL_L_ONLY = {"swin_block_c64_add_ex_nc"}
+
+
+def is_model_l(decl):
+    """A port of one of Model L's code objects (#89: l_swin.co, l_ops.co, l_post.co, l_enc_values.co), or a kernel only
+    Model L launches (MODEL_L_ONLY)."""
+    return decl["co"].startswith("l_") or decl["name"] in MODEL_L_ONLY
+
+
+def kernel_set(model_l=False):
+    """(name, code object) of every kernel a full build compiles (no --only), sorted: Model M's set, plus Model L's
+    with model_l. From the sources' declarations alone (nothing is compiled)."""
+    keys = set()
+    for fn in sorted(os.listdir(KERNEL_DIR)) if os.path.isdir(KERNEL_DIR) else []:
+        if fn.endswith(".hlsl"):
+            for d in kernel_decls(os.path.join(KERNEL_DIR, fn)):
+                if model_l or not is_model_l(d):
+                    keys.add((d["name"], d["co"]))
+    return sorted(keys)
+
+
 def arg_dwords(args, where):
     n = 0
     for a in args.split(","):
@@ -252,13 +278,23 @@ def vgpr_check(built):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out", required=True, help="build directory of the runtime (kernels go to <out>/dx12)")
+    ap.add_argument("--out", help="build directory of the runtime (kernels go to <out>/dx12); required unless --list")
     ap.add_argument("--only", help="comma list of kernel names to build (default: all declared)")
     ap.add_argument("--isa", action="store_true", help="also write the D3D12 ISA (RGA) to <out>/dx12/isa")
     ap.add_argument("--listing", action="store_true", help="also keep the rewritten DXIL listing (<name>.ll)")
     ap.add_argument("-j", "--jobs", type=int, default=int(os.environ.get("WG_DX12_JOBS", min(12, os.cpu_count() or 1))),
                     help="kernels compiled in parallel (default min(12, CPUs), env WG_DX12_JOBS; 1 = one at a time)")
+    ap.add_argument("--model-l", action="store_true",
+                    help="also build Model L's kernels (co=l_*.co; off by default: Model M's kernel set unchanged)")
+    ap.add_argument("--list", action="store_true",
+                    help="print the kernels a build with these options compiles (name and code object, JSON) and exit: "
+                         "the cheap check before a build (kernel_sets.json, tests/test_kernel_sets.py)")
     a = ap.parse_args(argv)
+    if a.list:
+        print(json.dumps([list(k) for k in kernel_set(a.model_l)], indent=1))
+        return 0
+    if not a.out:
+        ap.error("--out is required")
     dst = os.path.join(a.out, "dx12")
     os.makedirs(dst, exist_ok=True)
     asm = build_asm_tool(a.out)
@@ -282,6 +318,8 @@ def main(argv=None):
         src = os.path.join(KERNEL_DIR, fn)
         for d in kernel_decls(src):
             if only and d["name"] not in only:
+                continue
+            if not only and not a.model_l and is_model_l(d):
                 continue
             key = (d["name"], d["co"])
             if key in kernels and key not in old:
