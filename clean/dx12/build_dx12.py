@@ -7,6 +7,9 @@ clean/runtime/device_dx12.cpp): <out>/dx12/<tag>__<kernel>.dxil (or <kernel>.dxi
 Model L's kernels (#89: those that reproduce one of Model L's code objects, co=l_*.co, direct-route kernels named l_*, and MODEL_L_ONLY) are built only with --model-l
 or when --only names them, so that a build without the option is Model M's kernel set unchanged. Frame generation's
 kernels (#96: co=fg_*.co or named fg_*) are built only when --only names them, never by a full build.
+Model K's kernels (clean/k/dx12/kernels, co=k_*.co: #15) are built only with --model-k or when --only names them, so
+that a build without the option is the same kernel set as before. A kernel that takes a struct with pointers in it by
+value (a HIP kernel's parameter block) declares the argument as s<N>:<fields> (clean/runtime/struct_args.h).
 
 Every kernel source declares its kernels in header lines (clean/dx12/README.md):
 
@@ -48,6 +51,11 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 KERNEL_DIR = os.path.join(HERE, "kernels")
 HLSL_DIR = os.path.join(HERE, "hlsl")
+# Model K's ports (clean/k/dx12): their kernels are built only with --model-k (or when --only names them); their
+# sources may include both hlsl folders (clean/k/dx12/hlsl first).
+K_DX12_DIR = os.path.join(os.path.dirname(HERE), "k", "dx12")
+K_KERNEL_DIR = os.path.join(K_DX12_DIR, "kernels")
+K_HLSL_DIR = os.path.join(K_DX12_DIR, "hlsl")
 # Pinned tools (BUILDING.md): WG_TOOLCHAINS = a folder holding dxc-v1.10.2605.24\ and rga-2.15\ (default <repo>\toolchains);
 # WG_DXC_DIR / WG_RGA point at the tools directly.
 TOOLCHAINS = os.environ.get("WG_TOOLCHAINS", os.path.join(os.path.dirname(os.path.dirname(HERE)), "toolchains"))
@@ -108,8 +116,17 @@ def exact_listing(text, where, allow_fdiv=False):
     return text
 
 
-def compile_hlsl(src, entry, out_dxil, defines=None, includes=(), asm_tool=None, keep_listing=None, allow_fdiv=False):
-    """One entry point of an HLSL file in the exact arithmetic mode -> signed DXIL container at out_dxil."""
+# Binary64 operations of the D3D11.1 extended doubles (double fma = DXIL opcode 47, double division), which D3D12 reports
+# in D3D12_FEATURE_DATA_D3D12_OPTIONS.DoublePrecisionFloatShaderOps (no separate field): such a port is marked
+# "fp64": "ext" in the manifest, and the devices drop it when the adapter lacks the feature (the kernel then has no
+# port: HIP in the hybrid device, a refused context on the native one).
+_EXT_DOUBLES = re.compile(r"@dx\.op\.tertiary\.f64\(i32 47,|\bfdiv (fast )?(<\d+ x )?double\b")
+
+
+def compile_hlsl(src, entry, out_dxil, defines=None, includes=(), asm_tool=None, keep_listing=None, allow_fdiv=False,
+                 info=None):
+    """One entry point of an HLSL file in the exact arithmetic mode -> signed DXIL container at out_dxil. info (a dict),
+    if given, receives "ext_doubles": whether the kernel uses extended binary64 instructions."""
     dxc, dxv = os.path.join(DXC_DIR, "dxc.exe"), os.path.join(DXC_DIR, "dxv.exe")
     with tempfile.TemporaryDirectory(prefix="wgdx12_") as tmp:
         ll = os.path.join(tmp, "a.ll")
@@ -120,7 +137,9 @@ def compile_hlsl(src, entry, out_dxil, defines=None, includes=(), asm_tool=None,
             raise SystemExit(f"dxc failed for {src} ({entry}):\n{r.stdout}{r.stderr}")
         with open(ll, encoding="utf-8", errors="replace") as f:
             text = exact_listing(f.read(), f"{os.path.basename(src)}:{entry}", allow_fdiv)
-        ll2 = os.path.join(tmp, "b.ll")
+        if info is not None:
+            info["ext_doubles"] = bool(_EXT_DOUBLES.search(text))
+        ll2 =os.path.join(tmp, "b.ll")
         with open(ll2, "w", encoding="utf-8") as f:
             f.write(text)
         if keep_listing:
@@ -194,19 +213,56 @@ def is_frame_gen(decl):
     return decl["co"].startswith("fg_") or decl["name"].startswith("fg_")
 
 
-def kernel_set(model_l=False):
+def is_model_k(decl):
+    """A port of one of Model K's code objects (clean/k/kernels: k_block.co, k_block_wide.co, k_io.co, k_io_exact.co,
+    k_act.co ...) or a Model K kernel with no code object (co "-" or a helper, named k_*). All of them live in
+    clean/k/dx12/kernels: Model M's and Model L's sets never contain one."""
+    return decl["co"].startswith("k_") or decl["name"].startswith("k_") or decl["name"].startswith("kx/")
+
+
+def source_files(model_k=False, only_k=False):
+    """The .hlsl sources of a build, (path, is_k_source): clean/dx12/kernels, plus clean/k/dx12/kernels with model_k."""
+    out = []
+    if not only_k and os.path.isdir(KERNEL_DIR):
+        out += [(os.path.join(KERNEL_DIR, fn), False) for fn in sorted(os.listdir(KERNEL_DIR)) if fn.endswith(".hlsl")]
+    if (model_k or only_k) and os.path.isdir(K_KERNEL_DIR):
+        out += [(os.path.join(K_KERNEL_DIR, fn), True) for fn in sorted(os.listdir(K_KERNEL_DIR)) if fn.endswith(".hlsl")]
+    return out
+
+
+def kernel_set(model_l=False, model_k=False):
     """(name, code object) of every kernel a full build compiles (no --only), sorted: Model M's set, plus Model L's
-    with model_l. From the sources' declarations alone (nothing is compiled). Frame generation's kernels are never in
-    it (is_frame_gen)."""
+    with model_l, plus Model K's with model_k. From the sources' declarations alone (nothing is compiled). Frame
+    generation's kernels are never in it (is_frame_gen)."""
     keys = set()
-    for fn in sorted(os.listdir(KERNEL_DIR)) if os.path.isdir(KERNEL_DIR) else []:
-        if fn.endswith(".hlsl"):
-            for d in kernel_decls(os.path.join(KERNEL_DIR, fn)):
-                if is_frame_gen(d):
-                    continue
-                if model_l or not is_model_l(d):
+    for path, k_source in source_files(model_k):
+        for d in kernel_decls(path):
+            if is_frame_gen(d):
+                continue
+            if k_source or is_model_k(d):
+                if model_k:
                     keys.add((d["name"], d["co"]))
+            elif model_l or not is_model_l(d):
+                keys.add((d["name"], d["co"]))
     return sorted(keys)
+
+
+def struct_dwords(a, where):
+    """Root constants of a struct argument s<N>:<fields> (clean/runtime/struct_args.h): p<n> n pointers of 8 bytes, one
+    constant each (the arena offset); b<n> n bytes copied; x<n> n bytes skipped. The fields add up to N bytes."""
+    m = re.fullmatch(r"s(\d+):((?:[pbx]\d+)(?:\.[pbx]\d+)*)", a)
+    if not m:
+        raise SystemExit(f"{where}: struct argument {a!r} (s<N>:<p|b|x><n>.<...>)")
+    total, seen, n = int(m.group(1)), 0, 0
+    for f in m.group(2).split("."):
+        k, c = f[0], int(f[1:])
+        if c <= 0 or (k != "p" and c % 4):
+            raise SystemExit(f"{where}: struct field {f!r} in {a!r}")
+        seen += 8 * c if k == "p" else c
+        n += c if k == "p" else (c // 4 if k == "b" else 0)
+    if seen != total:
+        raise SystemExit(f"{where}: struct fields of {a!r} give {seen} bytes, not {total}")
+    return n
 
 
 def arg_dwords(args, where):
@@ -216,8 +272,10 @@ def arg_dwords(args, where):
             n += 1
         elif re.fullmatch(r"b\d+", a) and int(a[1:]) % 4 == 0 and int(a[1:]) > 0:
             n += int(a[1:]) // 4
+        elif a.startswith("s"):
+            n += struct_dwords(a, where)
         else:
-            raise SystemExit(f"{where}: argument kind {a!r} (p, u, b<N> with N a multiple of 4)")
+            raise SystemExit(f"{where}: argument kind {a!r} (p, u, b<N> with N a multiple of 4, s<N>:<fields>)")
     if n > MAX_ARG_DWORDS:
         raise SystemExit(f"{where}: {n} argument DWORDs, at most {MAX_ARG_DWORDS} fit the root signature")
     return n
@@ -297,12 +355,15 @@ def main(argv=None):
                     help="kernels compiled in parallel (default min(12, CPUs), env WG_DX12_JOBS; 1 = one at a time)")
     ap.add_argument("--model-l", action="store_true",
                     help="also build Model L's kernels (co=l_*.co; off by default: Model M's kernel set unchanged)")
+    ap.add_argument("--model-k", action="store_true",
+                    help="also build Model K's kernels (clean/k/dx12/kernels; off by default: Model M's and Model L's "
+                         "kernel sets unchanged)")
     ap.add_argument("--list", action="store_true",
                     help="print the kernels a build with these options compiles (name and code object, JSON) and exit: "
                          "the cheap check before a build (kernel_sets.json, tests/test_kernel_sets.py)")
     a = ap.parse_args(argv)
     if a.list:
-        print(json.dumps([list(k) for k in kernel_set(a.model_l)], indent=1))
+        print(json.dumps([list(k) for k in kernel_set(a.model_l, a.model_k)], indent=1))
         return 0
     if not a.out:
         ap.error("--out is required")
@@ -322,15 +383,20 @@ def main(argv=None):
     for fn in sorted(os.listdir(KERNEL_DIR)) if os.path.isdir(KERNEL_DIR) else []:
         if fn.startswith("fused_") and fn.endswith("_gen.py"):
             subprocess.run([sys.executable, os.path.join(KERNEL_DIR, fn)], check=True)
+    # Model K's FP constants and tables (clean/k/dx12/gen_k_fp_tables.py: computed from their series, not stored in the
+    # repository) into <out>/dx12/gen, the K ports' second include folder; only when a K kernel can be built
+    k_gen = os.path.join(dst, "gen")
+    if (a.model_k or only) and os.path.exists(os.path.join(K_DX12_DIR, "gen_k_fp_tables.py")):
+        subprocess.run([sys.executable, os.path.join(K_DX12_DIR, "gen_k_fp_tables.py"),
+                        os.path.join(k_gen, "k_fp_tables.hlsli")], check=True)
     jobs = []  # (source, declaration, output path) in declaration order (sorted file name, then line)
-    for fn in sorted(os.listdir(KERNEL_DIR)) if os.path.isdir(KERNEL_DIR) else []:
-        if not fn.endswith(".hlsl"):
-            continue
-        src = os.path.join(KERNEL_DIR, fn)
+    for src, k_source in source_files(a.model_k or bool(only)):
         for d in kernel_decls(src):
             if only and d["name"] not in only:
                 continue
-            if not only and not a.model_l and is_model_l(d):
+            if not only and (k_source or is_model_k(d)) and not a.model_k:
+                continue
+            if not only and not k_source and not is_model_k(d) and not a.model_l and is_model_l(d):
                 continue
             if not only and is_frame_gen(d):
                 continue
@@ -342,14 +408,16 @@ def main(argv=None):
             if any(j[2] == out for j in jobs):
                 raise SystemExit(f"kernel {d['name']} ({d['co']}): DXIL file {os.path.basename(out)} already used "
                                  "(a second port of a name needs file=<stem>)")
-            jobs.append((src, d, out))
+            jobs.append((src, d, out, k_source))
 
     def build_one(job):
-        src, d, out = job
+        src, d, out, k_source = job
         defs = {"WG_BLOCK": d["group"], "WG_WAVE": d["wave"], **d["defines"]}
         if d["group"] != d["block"]:
             defs["WG_LAUNCH_BLOCK"] = d["block"]
-        compile_hlsl(src, d["entry"], out, defs, asm_tool=asm, keep_listing=out[:-5] + ".ll" if a.listing else None)
+        info = {}
+        compile_hlsl(src, d["entry"], out, defs, includes=(K_HLSL_DIR, k_gen) if k_source and os.path.isdir(K_HLSL_DIR) else (), asm_tool=asm,
+                     keep_listing=out[:-5] + ".ll" if a.listing else None, info=info)
         with open(out, "rb") as f:
             sha = hashlib.sha256(f.read()).hexdigest()
         if a.isa:
@@ -360,6 +428,8 @@ def main(argv=None):
         if d["group"] != d["block"]:
             r["group"] = d["group"]
             r["gscale"] = d["gscale"]
+        if info.get("ext_doubles"):
+            r["fp64"] = "ext"
         return r
 
     # Every kernel is an independent chain of child processes (dxc -> dxil_asm -> dxv [-> rga]) with its own temporary
@@ -369,7 +439,7 @@ def main(argv=None):
     with concurrent.futures.ThreadPoolExecutor(max_workers=n_jobs) as pool:
         futures = [pool.submit(build_one, j) for j in jobs]
         try:
-            for (src, d, out), fut in zip(jobs, futures):
+            for (src, d, out, _k), fut in zip(jobs, futures):
                 kernels[(d["name"], d["co"])] = fut.result()
                 built.append((d["name"], out))
                 print(f"{d['name']:40s} -> {os.path.basename(out)}  block {d['block']} wave {d['wave']} "
@@ -380,7 +450,7 @@ def main(argv=None):
             raise
     names = {n for n, _ in kernels}
     if only and not (only <= names):
-        raise SystemExit(f"not declared in clean/dx12/kernels: {sorted(only - names)}")
+        raise SystemExit(f"not declared in clean/dx12/kernels or clean/k/dx12/kernels: {sorted(only - names)}")
     vgpr_check(built)
     with open(man_path, "w") as f:
         json.dump({"format": FORMAT, "dxc": os.path.basename(os.path.dirname(os.path.dirname(DXC_DIR))),

@@ -64,9 +64,9 @@ struct KInUniformParams { KInParams input; KiHost host; };
 struct KInColorUniformParams { KInColorParams input; KiHost host; };
 static_assert(sizeof(KInUniformParams) == 248 && sizeof(KInColorUniformParams) == 264, "input host arguments");
 static_assert(offsetof(KInUniformParams, host) == 200 && offsetof(KInColorUniformParams, host) == 216, "input host offsets");
-struct KExpoArgs {
+struct KExpoArgs {  // k_io.hip KExpoArgs
   float value;
-  int pair, use_src, first, hdr, reset;
+  int src_mode, aux, first, hdr, reset;
   float e1, e2, inv_pi;
 };
 static_assert(sizeof(KExpoArgs) == 36, "KExpoArgs");
@@ -264,7 +264,14 @@ int wide_ng(const std::string& s, bool f16, int nwin) {
 // own buffers first (hipMemcpyAsync, before the first mark); "input2+copyin" both), k_head (compact, the default: d0 writes
 // the compact pixel head for k_out_pixel_c; full: the 40-channel head map and k_out_pixel, same output bits, and the
 // buffer "k.N" for diagnostics), k_fast (0, the default: the exact stage kernels; 1: opt-in, not bit-exact, the "_f"
-// variants of the input and output stage kernels, see k_io.hip KIO_FAST).
+// variants of the input and output stage kernels, see k_io.hip KIO_FAST; it brings the fast input stage with it),
+// k_fast_in (0, the default: the input-stage kernels from k_io_exact.co (WGK_IN_EXACT, every operation correctly
+// rounded: bit for bit spec 42, as KFrame(exact_input=True)), with the output colour taps prepared by k_out_color as
+// KFrame's exact plan does; 1: opt-in speed mode, the input stage from k_io.co, whose log2 / 2^x / reciprocals are the
+// GPU's estimates (spec 42 section 9: within one FP16 step; not bit-exact)), k_in_exact (the older name: k_in_exact=1 is the default, k_in_exact=0 is k_fast_in=1; k_in_exact=1
+// is refused with k_fast=1 or k_fast_in=1), k_expo_rule (spec, the default: spec 42 draft 3 section 4, E_cur = the
+// game's exposure or 1, E_aux = the auto-exposure value; v051: opt-in, for A/B only, the 0.5.1 rule E_cur = E_aux =
+// the auto-exposure value when it runs).
 std::string option(const WgRtConfig& c, const std::string& key) {
   const char* env = std::getenv("WG_RUNTIME_OPTIONS");
   const std::string text = std::string(c.runtime_options ? c.runtime_options : "") + ";" + (env ? env : "");
@@ -363,6 +370,19 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   const std::string kfast = option(c, "k_fast");
   if (!kfast.empty() && kfast != "0" && kfast != "1") return fail("model K: k_fast must be 0 or 1");
   fast_ = kfast == "1";
+  const std::string kexact = option(c, "k_in_exact");
+  if (!kexact.empty() && kexact != "0" && kexact != "1") return fail("model K: k_in_exact must be 0 or 1");
+  const std::string kfastin = option(c, "k_fast_in");
+  if (!kfastin.empty() && kfastin != "0" && kfastin != "1") return fail("model K: k_fast_in must be 0 or 1");
+  if (kexact == "1" && kfastin == "1") return fail("model K: k_in_exact=1 and k_fast_in=1 exclude each other");
+  if (kexact == "1" && fast_) return fail("model K: k_in_exact=1 and k_fast=1 exclude each other");
+  // the exact input stage is the default (spec 09 / 49 accuracy); k_fast_in=1 (or k_in_exact=0, or k_fast=1, whose
+  // "_f" kernels include the fast input stage) selects the fast one
+  in_exact_ = !(fast_ || kfastin == "1" || kexact == "0");
+  const std::string krule = option(c, "k_expo_rule");
+  if (!krule.empty() && krule != "spec" && krule != "v051")
+    return fail("model K: unknown k_expo_rule " + krule + " (spec or v051)");
+  expo_v051_ = krule == "v051";
   map_path_ = option(c, "model_k_map");
   if (map_path_.empty()) {
     map_path_ = join(build_dir_, "preset-K.v1.map.json");  // next to the library, else built into it
@@ -394,6 +414,9 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   // exposure scalars (k_io.co), model M's exposure (spec 07) and frame helpers (timing_barrier)
   for (const char* co : {"k_block.co", "k_block_wide.co", "k_io.co", "exposure.co", "frame.co"})
     if (!dev_->load_module(join(build_dir_, co))) return fail("model K: " + dev_->err());
+  // k_in_exact=1: the same input kernels with exact arithmetic, addressed as "kx/<name>"
+  if (in_exact_ && !dev_->load_module_tagged(join(build_dir_, "k_io_exact.co"), "kx"))
+    return fail("model K: " + dev_->err());
 
   // buffers
   for (auto& kv : blobs_) {
@@ -426,9 +449,10 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
       // exp2tab: read only by the host emulator's k_out_pixel (the GPU uses v_exp_f16); a valid, zeroed buffer
       !alloc(&exp2tab_, 65536 * 2, true) || !alloc(&tables_, 8 * kTableBytes) ||
       !alloc(&expo_, 32, true) || !alloc(&expo_partials_, 4 * (size_t)cdiv(ny, 4)) || !alloc(&expo_computed_, 4, true) ||
-      !alloc(&expo_sync_, 4, true) || !alloc(&xs_, 16, true))
+      !alloc(&expo_sync_, 4, true) || !alloc(&xs_, 16, true) || !alloc(&kexpo_, 16, true))
     return false;
-  if (!external_io_ && !alloc(&out_, (size_t)W_ * H_ * 12, true)) return false;
+  // the own output buffer (tests): dense RGB f32, dense RGBA f32 (FrameIo.out_rgba32f) or RGBA16F rows that fit
+  if (!external_io_ && !alloc(&out_, (size_t)W_ * H_ * 16, true)) return false;
   // the filter-shape table (spec 43 section 7) of every level, computed once; a frame reads its level's set
   std::vector<uint16_t> tab((size_t)8 * kFilterEntries * kFilterValues);
   for (int l = 0; l < 8; ++l) k_filter_table(l, 1, tab.data() + (size_t)l * kFilterEntries * kFilterValues);
@@ -448,14 +472,18 @@ bool KRuntime::launch(const char* kernel, unsigned grid, unsigned block, void* a
   return dev_->launch(kernel, grid, block, args) || dfail();
 }
 
-bool KRuntime::upload_inputs(int rw, int rh, const float* rgb, const float* dep, const float* mot) {
+bool KRuntime::upload_inputs(int rw, int rh, const float* color, const float* dep, const float* mot, int channels) {
   if (rw <= 0 || rh <= 0 || rw > max_rw_ || rh > max_rh_) return fail("render size larger than the maximum");
   if (external_io_) return fail("inputs come from the interop (external_io)");
+  if (channels != 3 && channels != 4) return fail("model K: the colour has 3 or 4 values per pixel");
   if (!dev_->sync()) return dfail();
   const size_t n = (size_t)rw * rh;
-  std::vector<float> c(n * 4, 0.0f);
+  // the dense colour's fourth value is the colour input's alpha, unmodified (the output alpha follows it through the
+  // output stage's current-colour bilinear; issue #26); an RGB colour has none: 1, the value a texture fetch
+  // gives a missing alpha
+  std::vector<float> c(n * 4, 1.0f);
   for (size_t i = 0; i < n; ++i)
-    for (int k = 0; k < 3; ++k) c[4 * i + k] = rgb[3 * i + k];
+    for (int k = 0; k < channels; ++k) c[4 * i + k] = color[(size_t)channels * i + k];
   return (dev_->upload(color_, c.data(), n * 16) && dev_->upload(depth_, dep, n * 4) &&
           dev_->upload(motion_, mot, n * 8) && dev_->sync()) ||
          dfail();
@@ -565,7 +593,10 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
   }
   const int rw = fr.rw, rh = fr.rh;
   if (rw <= 0 || rh <= 0 || rw > max_rw_ || rh > max_rh_) return fail("render size larger than the maximum");
-  const bool reset = fr.reset || frames_ == 0 || rw != last_rw_ || rh != last_rh_;
+  // Model K resets on the game's flag and on the first frame only (spec 44: the reset restarts the frame index). A
+  // render-size change keeps the history: the histories are at output and base resolution, and the input and output
+  // stages reproject them with this frame's render size (model M's spec 10 rule does not apply to K).
+  const bool reset = fr.reset || frames_ == 0;
   const int f = reset ? 0 : fidx_;
   const int p = parity_, q = 1 - parity_;
   const int tb = io ? io->timing_base : -1;
@@ -614,12 +645,17 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
     min_ = motion_;
   }
 
-  // exposure (spec 10 section 5.1, spec 07) and the scalars of spec 42 section 4 on the GPU. Pre-exposure pi: 1 if
-  // missing, <= 0 or not finite (spec 10); model K does not divide the colour by pi, kappa = (1 / pi) e1 E does.
+  // exposure: spec 42 draft 3 section 4 (k_io.hip k_expo_scalars) on the GPU. Pre-exposure pi: 1 if missing, <= 0
+  // or not finite (spec 10); model K does not divide the colour by pi, kappa = (1 / pi) e1 E_cur does.
+  // The front end's exposure source (FrameIo.exposure_mode): 0 a value (1 when the game gives nothing), 1 the game's
+  // exposure texel, 2 "compute it" (no texture, auto-exposure requested). E_cur is the game's value or texel, 1 with
+  // mode 2. Auto-exposure (spec 07, HDR only) runs when the game asked for it at creation (WgRtConfig.auto_exposure)
+  // or the front end asks this frame (mode 2), also next to a game texture; its value is E_aux only.
   const float pi = (std::isfinite(fr.pre_exposure) && fr.pre_exposure > 0.0f) ? fr.pre_exposure : 1.0f;
   const int mode = io && io->exposure_mode >= 0 ? io->exposure_mode : (cfg_.auto_exposure ? 2 : 0);
+  const bool auto_run = hdr_ && (mode == 2 || cfg_.auto_exposure);
   int first = frames_ == 0 ? 1 : 0;
-  if (mode == 2) {
+  if (auto_run) {
     ExpParams ep = {};
     ep.rw = rw;
     ep.rh = rh;
@@ -638,17 +674,20 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
   }
   KExpoArgs xa = {};
   xa.value = fr.exposure;
-  xa.pair = mode != 2;
-  xa.use_src = mode == 1;
+  xa.src_mode = mode == 1 ? 1 : mode == 2 ? 2 : 0;
+  xa.aux = auto_run ? 1 : 0;
   xa.first = first;
   xa.hdr = hdr_;
   xa.reset = reset;
+  // e1 = e2 = the game's exposure scale (spec 42 section 4); the front-end interface carries none, so 1
   xa.e1 = 1.0f;
   xa.e2 = 1.0f;
   xa.inv_pi = 1.0f / pi;
   DevPtr src = mode == 1 && io ? io->expo_src : expo_computed_;
   if (mode == 1 && !src) return fail("exposure from the game's texture without a source buffer");
-  if (!launch("k_expo_scalars", 1, 32, &expo_, &src, &xs_, &xa)) return false;
+  // k_expo_rule=v051 (A/B only): the 0.5.1 rule, the auto-exposure value as E_cur (so also as E_aux and E_prev)
+  if (expo_v051_ && mode == 2 && auto_run) xa.src_mode = 1, xa.aux = 0, src = expo_computed_;
+  if (!launch("k_expo_scalars", 1, 32, &kexpo_, &src, &expo_computed_, &xs_, &xa)) return false;
 
   // the frame's inputs (k_io.py frame_in): dense render-size images, motion in render pixels ([MVlo]; the interop
   // converts output-resolution motion to render pixels in its input pass)
@@ -692,10 +731,14 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
   ip.x0 = net_["X0"];
   ip.cpre = cpre_;
   ip.cpre2 = cpre2_;
-  const char* input_kernel = reset ? "k_in_reset" : "k_in_base";
+  const char* input_kernel = in_exact_ ? (reset ? "kx/k_in_reset" : "kx/k_in_base") : (reset ? "k_in_reset" : "k_in_base");
   // k_fast=1: the "_f" variant of an input / output stage kernel (k_io.hip KIO_FAST), else the exact kernel itself
   std::string kname_buf;
   auto kname = [&](const char* n) -> const char* {
+    if (in_exact_ && std::strncmp(n, "k_in_", 5) == 0) {  // input-stage kernels from k_io_exact.co
+      kname_buf = std::string("kx/") + n;
+      return kname_buf.c_str();
+    }
     if (!fast_) return n;
     kname_buf = std::string(n) + "_f";
     return kname_buf.c_str();
@@ -703,7 +746,8 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
   const bool use_tiled = tiled_input_ && cfg_.backend == 0 && fin.s == 0.5f && W_ > 0 && W_ <= 16384 && H_ > 0 && H_ <= 16384 &&
       Bw_ > 0 && Bw_ <= 4096 && Bh_ > 0 && Bh_ <= 4096 && rw > 0 && rw <= .68 * W_ && rh > 0 && rh <= .68 * H_ &&
       std::isfinite(fin.jx) && std::isfinite(fin.jy) && std::fabs(fin.jx) <= .5f && std::fabs(fin.jy) <= .5f;
-  const bool use_tiled_color = use_tiled && !reset && 4LL * Bw_ >= W_ && 4LL * Bh_ >= H_;
+  // k_in_exact: the output colour taps by k_out_color (KFrame's exact plan), not by the tiled input kernel
+  const bool use_tiled_color = use_tiled && !in_exact_ && !reset && 4LL * Bw_ >= W_ && 4LL * Bh_ >= H_;
   KiHost input_host = {};
   const bool use_uniforms = use_tiled && input_uniforms_safe(fin, &input_host);
   auto input_stage = [&]() {
@@ -724,7 +768,8 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
       if (use_uniforms) ++input_uniform_launches_;
       ++tiled_launches_;
     } else {
-      if (!launch("k_in_color", cdiv((long long)rw * rh, kThreads), kThreads, &ip)) return false;
+      if (!launch(in_exact_ ? "kx/k_in_color" : "k_in_color", cdiv((long long)rw * rh, kThreads), kThreads, &ip))
+        return false;
       ++legacy_color_launches_;
       if (!launch(input_kernel, cdiv(4LL * Bw_ * Bh_, kThreads), kThreads, &ip)) return false;
       ++legacy_base_launches_;
@@ -749,8 +794,9 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
   // network (spec 41 / 44)
   if (!mark(2) || !network(f)) return false;
 
-  // output stage (spec 43) into the caller's output: RGBA16F rows (interop output copy), dense RGB f32 (interop
-  // output pass, FORMATS.md "Per-frame runtime"), or the own RGB f32 buffer (tests)
+  // output stage (spec 43) into the caller's output: RGBA16F rows (interop output copy), dense RGBA f32 (the interop's
+  // output pass for model K, FrameIo.out_rgba32f: the fourth value is the output alpha), dense RGB f32 (FORMATS.md
+  // "Per-frame runtime"; no alpha), or the own buffer (tests) in one of these layouts
   if (!mark(3)) return false;
   // interop option handover=staged: the output stage is next (FrameIo.out_signal)
   if (io && io->out_signal && !dev_->signal_fence(io->out_signal, io->out_signal_value)) return dfail();
@@ -770,10 +816,16 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
   const int hp = io ? io->out_half_pitch : 0;
   op.out = io && io->out ? io->out : out_;
   if (!op.out) return fail("frame without an output buffer (interop)");
+  // the own output buffer (no FrameIo output) holds RGBA16F rows only if they fit
+  if (hp > 0 && op.out == out_ && (size_t)hp * H_ > (size_t)W_ * H_ * 16)
+    return fail("model K: RGBA16F rows do not fit the own output buffer");
   if (hp > 0) {
     if (hp % 8) return fail("model K: output rows must be a multiple of 8 bytes");
     op.omode = OUT_RGBA16F;
     op.opitch = hp / 8;
+  } else if (io && io->out_rgba32f) {
+    op.omode = OUT_RGBA32F;
+    op.opitch = W_;
   } else {
     op.omode = OUT_RGB32F;
     op.opitch = W_;
@@ -816,7 +868,7 @@ const char* KRuntime::kernels() {
   kernels_text_ = std::string("model=K network=") + (f8_ ? "fused8" : f16_ ? "fused16" : "fused") +
                   (f8_ ? " fp8_stages=" + std::to_string(f8data_.size()) + (f8why_.empty() ? "" : " fp8_kept:" + f8why_)
                        : std::string()) +
-                  " input=k_io.co output=k_io.co exposure=k_expo_scalars" +
+                  (in_exact_ ? " input=k_io_exact.co" : " input=k_io.co") + " output=k_io.co exposure=k_expo_scalars" +
                   std::string(" input_tiled=") + (tiled_input_ ? "1" : "0") +
                   " input_actual=" + (tiled_last_ ? "tiled" : "legacy") +
                   " tiled_launches=" + std::to_string(tiled_launches_) +
@@ -826,12 +878,12 @@ const char* KRuntime::kernels() {
                   " tiled_color_launches=" + std::to_string(tiled_color_launches_) +
                   " legacy_color_launches=" + std::to_string(legacy_color_launches_) +
                   " legacy_base_launches=" + std::to_string(legacy_base_launches_) +
-                  (fast_ ? " k_fast=1" : "") +
+                  (fast_ ? " k_fast=1" : "") + (expo_v051_ ? " k_expo_rule=v051" : "") +
                   " hidden=fused_d0" + std::string(" head=") + (compact_head_ ? "compact" : "full") +
                   " base=" + std::to_string(Bw_) + "x" + std::to_string(Bh_) +
                   " hdr=" + (hdr_ ? "1" : "0") + " mv=render" +
                   " filter_level=" + std::to_string(level_last_) +
-                  " out=" + (omode_last_ == OUT_RGBA16F ? "rgba16f" : "f32") +
+                  " out=" + (omode_last_ == OUT_RGBA16F ? "rgba16f" : omode_last_ == OUT_RGBA32F ? "rgba32f" : "f32") +
                   std::string(compact_head_ ? " post=k_out_pixel_c filter=fused post_last=k_out_pixel_c filter_last=fused"
                                             : " post=k_out_pixel filter=fused post_last=k_out_pixel filter_last=fused") +
                   (diag_input2_ || diag_copyin_
@@ -850,10 +902,12 @@ bool KRuntime::buffer(const std::string& name, DevPtr* p, size_t* bytes) {
     size_t b;
   };
   std::map<std::string, E> m = {
-      {"exposure.pair", {expo_, 12}},       {"k.scalars", {xs_, 16}},
+      // exposure.pair: [E_cur, E_prev, E_aux] of the last frame (raw values, k_expo_scalars); exposure.measured: the
+      // last auto-exposure value (spec 07)
+      {"exposure.pair", {kexpo_, 12}},      {"k.scalars", {xs_, 16}}, {"exposure.measured", {expo_computed_, 4}},
       {"k.x0", {net_["X0"], net_bytes_["X0"]}}, {"k.N", {net_["OUT"], net_bytes_["OUT"]}},
       {"k.Hc", {Hc_[lp], P16 * 8}},         {"k.L", {L_[lp], P16 * 8}},
-      {"k.Hh", {Hh_[lp], (size_t)Bw_ * Bh_ * 8}}, {"filter.out", {out_, (size_t)W_ * H_ * 12}},
+      {"k.Hh", {Hh_[lp], (size_t)Bw_ * Bh_ * 8}}, {"filter.out", {out_, (size_t)W_ * H_ * (omode_last_ == OUT_RGBA32F ? 16 : 12)}},
       {"input.color", {color_, R * 16}},    {"input.depth", {depth_, R * 4}},
       {"input.motion", {motion_, R * 8}},
   };

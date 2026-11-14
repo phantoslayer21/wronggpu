@@ -52,13 +52,13 @@ EMBED_FILES = ["swin.co", "swin__bmegahg.co", "encoder.co", "decoder.co", "decod
                # motion vectors at output resolution (runtime option motion_outres=original; MOTION_OUTRES below)
                "encoder_mo.co", "post_mo_w64.co", "post_mo_w64__q5.co", "post_mo_w64__orig.co",
                # model K (runtime option model=K, clean/k/runtime/runtime_k.cpp): stage kernels, I/O stages, its map
-               "k_block.co", "k_block_wide.co", "k_io.co", os.path.basename(K_MAP_FILE)]
+               "k_block.co", "k_block_wide.co", "k_io.co", "k_io_exact.co", os.path.basename(K_MAP_FILE)]
 # Model K in the runtime library. --no-model-k (set_model_k(False)) builds a library without it: no clean/k/runtime
 # source, none of K_EMBED_FILES built in, -DWG_NO_MODEL_K (clean/runtime/no_model_k.cpp: model=K fails at create with
 # "Model K is not part of this build"). Model M is the same code and the same code objects either way.
 MODEL_K = True
 K_RUNTIME_SOURCES = [s for s in RUNTIME_SOURCES if s.startswith(os.path.join("..", "k", ""))]
-K_EMBED_FILES = ["k_block.co", "k_block_wide.co", "k_io.co", os.path.basename(K_MAP_FILE)]
+K_EMBED_FILES = ["k_block.co", "k_block_wide.co", "k_io.co", "k_io_exact.co", os.path.basename(K_MAP_FILE)]
 NO_MODEL_K_SOURCE = "no_model_k.cpp"
 
 # Optional models of the runtime library (#89). Model M is always built. Each model below is in by default and can be

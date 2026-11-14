@@ -510,6 +510,30 @@ Tested by `model-choice` (ctest: profile.cpp built with the choice on) and `test
 (a build with the choice on: refusal, both files, record hashes, back to M byte for byte, repair without the data,
 uninstall), and with it off by `launcher-core` and the same script's build without the choice.
 
+**The Model K choice** (CMake `WRONGGPU_MODEL_K`, default `OFF`; a development build for a front end built with
+`WG_MODEL_K=ON` and a runtime with Model K, never part of a release that players get; it needs `WRONGGPU_PRESET_K=ON`,
+whose converter map and model folder Model K's data uses, and configuring without it stops with an error). It is the Model
+L choice again for one more value: `model` is a setting with the values `m|k` (`m|k|l` together with `WRONGGPU_MODEL_L`),
+and with it off `model=K` is not a value (the setting's refusal names the allowed ones). `set <game> model=K`:
+- is accepted only while Model K's data on this PC (`model\K\model.wgcm`) passes its check against Model K's converter
+  data; otherwise "Model K can't be chosen. Model K's data on this PC is not ready (...). Convert it first: WrongGPU.exe
+  model convert --preset=K ..." (exit 5, nothing changed);
+- writes wronggpu.ini's `runtime_options`: every model item out, `model=K` last, and OptiScaler.ini's `UpscalerIndex`: 1,
+  Model K's entry right after Model M's (`[WrongGPU]` in OptiScaler 10's slot, else `[FSR]`), as the installer's Preset K
+  start has always written it. With the K choice built in, Model L's entry is 2 in every build (it follows Model K's).
+- `set <game> model=M` (the profile says M) puts Model K's item back to `model=M` and an index naming Model K's entry back to
+  0, as for Model L; the profile has a `model` line only for K and L. The profile is the truth in a build with the K
+  choice: an install that starts on Preset K (`/PRESET=K`) writes no profile, so the game's profile is imported from its
+  files (`model=K` becomes `model=k`), but a `profile.ini` saved by a build without the K choice has no model line and
+  says M, so the next settings apply puts the game's Model K item back to M. A game saved on K whose Model K data is gone
+  is not refused: its files say Model M with a warning, the profile keeps K.
+
+The network is Model K's exact one: the launcher does not offer, write or document any other mode of Model K (the
+runtime's `network` and `k_fast` options stay at their defaults; nothing here sets them). Tested by `model-choice-k` and
+`model-choice-k-only` (ctest: profile.cpp built with the K choice, with and without the L choice; they run in CI, which
+keeps the product builds K-less) and by `tests/run_model_k_tests.py` (a build with both choices: refusal, both files,
+record hashes, an L control, back to M byte for byte, repair without the data, uninstall).
+
 **Ignore lists** (`src/wg_core/convert_ignore.*`): WrongGPU converts only the vendor DLL files that came with the player's
 own games, never a copy that another program's installer placed in a game. Such an installer registers the files it placed
 in a list the launcher always reads, and the player does nothing. Every search for a file to convert (the model and the Ray

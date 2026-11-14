@@ -1490,6 +1490,19 @@ struct Runtime {
     return ok;
   }
 
+  // Test path with an RGBA colour: model K keeps the alpha (its output alpha follows it); Model M reads RGB only
+  bool upload_inputs_rgba(int rw, int rh, const float* rgba, const float* dep, const float* mot) {
+#ifndef WG_NO_MODEL_K
+    if (k) return k->upload_inputs(rw, rh, rgba, dep, mot, 4) || fail(k->err());
+#endif
+    if (rw <= 0 || rh <= 0 || rw > max_rw || rh > max_rh) return fail("render size larger than the maximum");
+    const size_t npix = (size_t)rw * rh;
+    std::vector<float> rgb(npix * 3);
+    for (size_t i = 0; i < npix; ++i)
+      for (int c = 0; c < 3; ++c) rgb[3 * i + c] = rgba[4 * i + c];
+    return upload_inputs(rw, rh, rgb.data(), dep, mot);
+  }
+
   bool upload_inputs(int rw, int rh, const float* rgb, const float* dep, const float* mot) {
 #ifndef WG_NO_MODEL_K
     if (k) return k->upload_inputs(rw, rh, rgb, dep, mot) || fail(k->err());
@@ -2672,6 +2685,10 @@ Runtime* runtime_create(const WgRtConfig& cfg, std::unique_ptr<Device> dev, std:
 }
 void runtime_destroy(Runtime* rt) { delete rt; }
 bool runtime_frame(Runtime* rt, const WgRtFrame& frame, const FrameIo* io) { return rt->frame(frame, io); }
+bool runtime_upload_inputs_rgba(Runtime* rt, int rw, int rh, const float* color_rgba, const float* depth,
+                                const float* motion) {
+  return rt->upload_inputs_rgba(rw, rh, color_rgba, depth, motion);
+}
 bool runtime_direct_preflight(Runtime* rt, const WgRtFrame& frame, const FrameIo* io) {
   return rt->direct_preflight(frame, io);
 }
@@ -2809,6 +2826,9 @@ WG_RT_API const char* wg_rt_error(void* rt) { return rt ? ((Runtime*)rt)->err.c_
 
 WG_RT_API int wg_rt_upload_inputs(void* rt, int rw, int rh, const float* c, const float* d, const float* m) {
   return ((Runtime*)rt)->upload_inputs(rw, rh, c, d, m) ? 0 : 1;
+}
+WG_RT_API int wg_rt_upload_inputs_rgba(void* rt, int rw, int rh, const float* c, const float* d, const float* m) {
+  return ((Runtime*)rt)->upload_inputs_rgba(rw, rh, c, d, m) ? 0 : 1;
 }
 WG_RT_API int wg_rt_upload_motion_hi(void* rt, int mw, int mh, int wide, const void* texels, const float* mv_scale,
                                      const float* b_mv) {
