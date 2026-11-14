@@ -301,7 +301,7 @@ def post_cases(kernel, rng):
         defined = [np.concatenate([np.ones(n_hist, bool), np.zeros(POST_SLACK, bool)]),
                    np.concatenate([red_def, np.zeros(POST_SLACK, bool)]),
                    np.concatenate([disp_def.reshape(-1), np.zeros(POST_SLACK, bool)])]
-        if kernel == "l_post_recon_p12":
+        if kernel.startswith("l_post_recon_p12"):   # l_post_recon_p12, l_post_recon_p12_ldr
             data = dict(data, **_pack12(data))
         args = [("null",) if data[k] == b"" else ("buf", data[k])
                 for k in ("color", "A", "B", "C", "hist_prev", "m_near", "m_center", "m_far")]
@@ -312,6 +312,34 @@ def post_cases(kernel, rng):
         cases.append({"kernel": kernel, "co": "l_post.co", "grid": RP.recon_grid(dw, dh), "block": 256, "args": args,
                       "defined": defined, "label": f"{rw}x{rh}->{dw}x{dh} {kind}" + (" expo" if expo else "")
                       + (" reset" if reset else "")})
+    return cases
+
+
+def _cdiv(a, b):
+    return -(-a // b)
+
+
+def filter_ldr_cases(kernel, rng):
+    """l_post_filter_ldr (l_post.co): display (3 FP16 planes of D, row pitch display_pitch(dw): the LDR display image,
+    unpacked 11 / 11 / 10-bit codes h(code RN32(1 / N))), out (O, 3 x f32), dw, dh, ow, oh, dec_scale, expo (neither
+    read; passed as 0 and null). D = recon_size(O) for odd and even O, small (every tap clamped) to wide; every output
+    byte defined."""
+    from clean.l.reference import recon as R
+    from clean.l.reference import table as T
+    from clean.runner import post as RP
+    cases = []
+    for (ow, oh) in ((40, 24), (37, 23), (8, 6), (81, 45), (128, 72)):
+        dw, dh = T.recon_size(ow, oh)
+        pitch = RP.display_pitch(dw)
+        codes = np.stack([rng.integers(0, int(n) + 1, (dh, dw)) for n in R.LDR_CODE_MAX], 0).astype(np.float64)
+        planes = np.zeros((3, dh, pitch), np.float16)
+        planes[:, :, :dw] = R.ldr_unpack(codes.transpose(1, 2, 0)).transpose(2, 0, 1).astype(np.float16)
+        n_out = 3 * ow * oh * 4
+        cases.append({"kernel": kernel, "co": "l_post.co", "grid": _cdiv(ow, 40) * _cdiv(_cdiv(oh, 2), 8), "block": 64,
+                      "args": [("buf", planes.tobytes()), ("out", n_out + POST_SLACK), ("u32", dw), ("u32", dh),
+                               ("u32", ow), ("u32", oh), ("u32", 0), ("null",)],
+                      "defined": [np.concatenate([np.ones(n_out, bool), np.zeros(POST_SLACK, bool)])],
+                      "label": f"D {dw}x{dh} -> O {ow}x{oh}"})
     return cases
 
 
@@ -344,9 +372,12 @@ def enc_direct_cases(kernel, rng):
 KINDS = {"l_linear_32_32_relu": linear_cases, "l_linear_32_32_f16": linear_cases,
          "l_project_gather": project_cases, "l_dec_project": project_cases, "l_coef": coef_cases,
          "l_coef_pack12": coef_cases, "lev/input_encoder": enc_cases, "l_post_recon": post_cases,
-         "l_post_recon_p12": post_cases, "lev/input_encoder_direct": enc_direct_cases,
+         "l_post_recon_p12": post_cases, "l_post_recon_ldr": post_cases, "l_post_recon_p12_ldr": post_cases,
+         "l_post_filter_ldr": filter_ldr_cases, "lev/input_encoder_direct": enc_direct_cases,
          "swin_block_c64_add_ex_nc": dec1_ex_cases}
 CONTROL_KINDS = {"swin_block_c96_nc": control_cases}
+# kernels that get a negative control of their own (besides the run's first case)
+NEG_KERNELS = ("l_post_recon", "l_post_recon_p12", "l_post_recon_ldr", "l_post_recon_p12_ldr", "l_post_filter_ldr")
 CO = "l_ops.co"
 
 
@@ -431,7 +462,9 @@ def run(build, rocm, seeds, kernels, kinds=None):
     kinds = kinds or dict(KINDS, **CONTROL_KINDS)
     cdir = os.path.join(build, "replay-ops")
     os.makedirs(cdir, exist_ok=True)
-    lines, hip_out, neg = [], {}, None
+    # negative controls: the first case (with a grid of 4 or more) again with half its workgroups, for the first kernel
+    # and for every kernel of NEG_KERNELS (each LDR form its own)
+    lines, hip_out, neg, negs = [], {}, None, {}
     for kernel in kernels:
         for si, seed in enumerate(seeds):
             rng = np.random.default_rng(seed)
@@ -443,8 +476,9 @@ def run(build, rocm, seeds, kernels, kinds=None):
                     with open(os.path.join(cdir, f"{name}.hip.o{oi}"), "wb") as fh:
                         fh.write(data)
                 lines += replay_lines(name, case, cdir)
-                if neg is None and case["grid"] >= 4:
-                    neg = name
+                if case["grid"] >= 4 and (neg is None or (kernel in NEG_KERNELS and kernel not in negs)):
+                    neg = neg or name
+                    negs.setdefault(kernel, name)
                     lines += replay_lines(name, case, cdir, grid=case["grid"] // 2, prefix="negative_")
     with open(os.path.join(cdir, "cases.txt"), "w", newline="\n") as f:
         f.write("\n".join(lines))
@@ -482,14 +516,18 @@ def run(build, rocm, seeds, kernels, kinds=None):
             c["outputs"].append(compare(got, want, defined[oi] if defined else None))
         c["identical"] = all(o["identical"] for o in c["outputs"])
         res["cases"].append(c)
-    caught = None
-    if neg:
-        wants, defined = hip_out[neg][1], hip_out[neg][2]
-        outs = [compare(read(os.path.join(cdir, f"negative_{neg}.o{oi}")), w, defined[oi] if defined else None)
+    def negative(nm):
+        wants, defined = hip_out[nm][1], hip_out[nm][2]
+        outs = [compare(read(os.path.join(cdir, f"negative_{nm}.o{oi}")), w, defined[oi] if defined else None)
                 for oi, w in enumerate(wants)]
         caught = all(o["differ"] >= 0 for o in outs) and any(not o["identical"] for o in outs)
-        res["negative_control"] = {"case": neg, "half_grid": True, "caught": caught,
-                                   "differ": sum(max(o["differ"], 0) for o in outs)}
+        return {"case": nm, "half_grid": True, "caught": caught, "differ": sum(max(o["differ"], 0) for o in outs)}
+
+    caught = None
+    if neg:
+        res["negative_control"] = negative(neg)
+        res["negative_controls"] = {k: negative(nm) for k, nm in negs.items()}
+        caught = res["negative_control"]["caught"] and all(v["caught"] for v in res["negative_controls"].values())
     res["per_kernel"] = {k: {"cases": sum(c["kernel"] == k for c in res["cases"]),
                              "identical": sum(c["identical"] for c in res["cases"] if c["kernel"] == k),
                              "bytes": sum(o["bytes"] for c in res["cases"] if c["kernel"] == k for o in c["outputs"]),
@@ -498,14 +536,16 @@ def run(build, rocm, seeds, kernels, kinds=None):
                          for k in kernels}
     res["pass"] = r.returncode == 0 and caught is True and all(v["cases"] > 0 and v["identical"] == v["cases"]
                                                                for v in res["per_kernel"].values())
-    if "l_post_recon" in kernels and "l_post_recon_p12" in kernels:
-        # The same cases (same seeds) on both coefficient forms: on HIP, the pack12 kernel's raw output bytes must be
-        # l_post_recon's.
-        pairs = [(n, n.replace("l_post_recon_", "l_post_recon_p12_", 1)) for n in hip_out
-                 if hip_out[n][0] == "l_post_recon"]
-        same = sum(hip_out[a][1] == hip_out[b][1] for a, b in pairs if b in hip_out)
-        res["p12_equals_base_on_hip"] = {"cases": len(pairs), "identical": same}
-        res["pass"] = res["pass"] and same == len(pairs) > 0
+    for sfx in ("", "_ldr"):
+        if "l_post_recon" + sfx in kernels and "l_post_recon_p12" + sfx in kernels:
+            # The same cases (same seeds) on both coefficient forms: on HIP, the pack12 kernel's raw output bytes must
+            # be l_post_recon's (HDR and LDR).
+            base = "l_post_recon" + sfx
+            pairs = [(n, n.replace(base + "_", "l_post_recon_p12" + sfx + "_", 1)) for n in hip_out
+                     if hip_out[n][0] == base]
+            same = sum(hip_out[a][1] == hip_out[b][1] for a, b in pairs if b in hip_out)
+            res["p12_equals_base_on_hip" + sfx] = {"cases": len(pairs), "identical": same}
+            res["pass"] = res["pass"] and same == len(pairs) > 0
     return res
 
 
