@@ -1,0 +1,241 @@
+{
+ "build": "build m6622 (main 6622148: DXILs build_dx12.py --model-l --isa, runtime l_frame_check.py --prepare)",
+ "tool": "clean/l/runner/l_d3d12_profile.py (+ tools/prof_shapes.py for 1440p-performance), synthetic models, one GPU slot per run, models interleaved per round",
+ "step_map": "enc0: L's input encoder, linears, encoder block, gather / M's input encoder; dec0: L's l_dec_project + decoder block / M's d1p12 (dec1's block with the decoder fused in); post: post, filter, scale_rgb, color_divide; other: exposure; Swin: the rest (L includes its own dec1 block)",
+ "shapes": {
+  "1080p-quality": {
+   "L": {
+    "runs": 5,
+    "frame_span_ms": 2.355500102043152,
+    "dispatch_sum_ms": 2.4150904000000004,
+    "steps_ms": {
+     "post": 0.7326168000000002,
+     "dec0": 0.3493232,
+     "swin": 0.7832288000000002,
+     "enc0": 0.544812,
+     "other": 0.0118168
+    },
+    "kernels_ms": {
+     "l_post_recon_p12": 0.5704191999999998,
+     "l_swin_block_c32_dec_coef12_nc": 0.2994696,
+     "bneck/swin_bneck6_mb_nc": 0.2707823999999999,
+     "l_swin_block_c32_enc_nc": 0.260164,
+     "swin_block_c64_add_ex_nc": 0.16222600000000004,
+     "swin_block_c64_nc": 0.14051560000000007,
+     "lev/input_encoder": 0.12849999999999998,
+     "swin_block_c96_pm_rev_nc": 0.10602559999999996,
+     "swin_block_c96_add_ex_nc": 0.10138440000000001,
+     "l_linear_32_32_fused": 0.09624959999999996,
+     "w64/post_filter_c1_s4": 0.07480920000000002,
+     "l_project_gather": 0.05802199999999998,
+     "color_divide": 0.050518000000000035,
+     "l_dec_project": 0.0498536,
+     "scale_rgb": 0.03887159999999998,
+     "exposure_auto_diet": 0.0118168
+    }
+   },
+   "M": {
+    "runs": 5,
+    "frame_span_ms": 1.318619966506958,
+    "dispatch_sum_ms": 1.3098656000000002,
+    "steps_ms": {
+     "post": 0.4237360000000001,
+     "swin": 0.5888576000000001,
+     "dec0": 0.16878560000000004,
+     "enc0": 0.11437079999999997,
+     "other": 0.0095884
+    },
+    "kernels_ms": {
+     "w64/post_tf_f32_p12_diet_vsit": 0.31762200000000007,
+     "bneck/swin_bneck6_mbo_nc": 0.2617948000000001,
+     "d1p12/swin_block_c64_add_dec0_xd_nc": 0.16878560000000004,
+     "swin_block_c64_nc": 0.13580479999999998,
+     "input_encoder": 0.11437079999999997,
+     "swin_block_c96_pm_rev_nc": 0.10344399999999992,
+     "swin_block_c96_add_xe_xd_nc": 0.08821520000000001,
+     "scale_rgb": 0.060462000000000016,
+     "color_divide": 0.04568160000000001,
+     "exposure_auto_diet": 0.0095884
+    }
+   },
+   "ratio_L_over_M": {
+    "frame_span": 1.7863373541073424,
+    "dispatch_sum": 1.8437696203335672,
+    "enc0": 4.763558530673914,
+    "swin": 1.3300818398200176,
+    "dec0": 2.069626792806969,
+    "post": 1.7289463250703268,
+    "other": 1.232405823703642
+   },
+   "to_1.35x": {
+    "L_target_span_ms": 1.7801369547843935,
+    "cut_span_ms": 0.5753631472587584,
+    "L_target_dispatch_sum_ms": 1.7683185600000004,
+    "cut_dispatch_sum_ms": 0.64677184,
+    "excess_over_M_per_step_ms": {
+     "enc0": 0.43044119999999997,
+     "swin": 0.19437120000000008,
+     "dec0": 0.18053759999999996,
+     "post": 0.30888080000000007,
+     "other": 0.0022284
+    }
+   }
+  },
+  "1440p-quality": {
+   "L": {
+    "runs": 5,
+    "frame_span_ms": 4.001999855041504,
+    "dispatch_sum_ms": 4.235222800000001,
+    "steps_ms": {
+     "post": 1.3704184000000001,
+     "dec0": 0.6378207999999999,
+     "enc0": 0.9908812,
+     "swin": 1.2158288,
+     "other": 0.019696800000000004
+    },
+    "kernels_ms": {
+     "l_post_recon_p12": 1.0227356000000003,
+     "l_swin_block_c32_dec_coef12_nc": 0.5461707999999998,
+     "l_swin_block_c32_enc_nc": 0.4614272000000001,
+     "bneck/swin_bneck6_mb_nc": 0.3490352000000001,
+     "swin_block_c64_add_ex_nc": 0.2806507999999999,
+     "swin_block_c64_nc": 0.24594479999999996,
+     "lev/input_encoder": 0.2164143999999999,
+     "l_linear_32_32_fused": 0.2049564000000001,
+     "swin_block_c96_pm_rev_nc": 0.17305680000000007,
+     "swin_block_c96_add_ex_nc": 0.16627320000000004,
+     "w64/post_filter_c1_s4": 0.15515400000000001,
+     "scale_rgb": 0.10865560000000006,
+     "l_project_gather": 0.10700680000000004,
+     "l_dec_project": 0.091508,
+     "color_divide": 0.0820428,
+     "exposure_auto_diet": 0.019696800000000004
+    }
+   },
+   "M": {
+    "runs": 5,
+    "frame_span_ms": 2.1740000247955322,
+    "dispatch_sum_ms": 2.2667464,
+    "steps_ms": {
+     "post": 0.7666704,
+     "swin": 0.9421784,
+     "dec0": 0.33534040000000015,
+     "enc0": 0.20228479999999993,
+     "other": 0.02008
+    },
+    "kernels_ms": {
+     "w64/post_tf_f32_p12_diet_vsit": 0.5576191999999999,
+     "bneck/swin_bneck6_mbo_nc": 0.3580767999999999,
+     "d1p12/swin_block_c64_add_dec0_nc": 0.33534040000000015,
+     "swin_block_c64_nc": 0.24248760000000005,
+     "input_encoder": 0.20228479999999993,
+     "swin_block_c96_pm_rev_nc": 0.17333400000000004,
+     "swin_block_c96_add_xe_xo_nc": 0.16785160000000005,
+     "scale_rgb": 0.12678079999999997,
+     "color_divide": 0.0822,
+     "exposure_auto_diet": 0.02008
+    }
+   },
+   "ratio_L_over_M": {
+    "frame_span": 1.840846278471362,
+    "dispatch_sum": 1.8684149228162445,
+    "enc0": 4.898446151169047,
+    "swin": 1.2904443574592668,
+    "dec0": 1.9020100172839287,
+    "post": 1.7874935565531163,
+    "other": 0.9809163346613547
+   },
+   "to_1.35x": {
+    "L_target_span_ms": 2.9349000334739688,
+    "cut_span_ms": 1.0670998215675351,
+    "L_target_dispatch_sum_ms": 3.0601076400000005,
+    "cut_dispatch_sum_ms": 1.1751151600000003,
+    "excess_over_M_per_step_ms": {
+     "enc0": 0.7885964000000001,
+     "swin": 0.27365039999999996,
+     "dec0": 0.3024803999999997,
+     "post": 0.6037480000000002,
+     "other": -0.00038319999999999674
+    }
+   }
+  },
+  "1440p-performance": {
+   "L": {
+    "runs": 5,
+    "frame_span_ms": 2.863460063934326,
+    "dispatch_sum_ms": 2.9911864,
+    "steps_ms": {
+     "post": 1.3005804,
+     "dec0": 0.3514520000000001,
+     "swin": 0.7824532000000001,
+     "enc0": 0.5507195999999999,
+     "other": 0.012614
+    },
+    "kernels_ms": {
+     "l_post_recon_p12": 0.9914600000000001,
+     "l_swin_block_c32_dec_coef12_nc": 0.3012328000000001,
+     "bneck/swin_bneck6_mb_nc": 0.2721080000000001,
+     "l_swin_block_c32_enc_nc": 0.2600432,
+     "swin_block_c64_add_ex_nc": 0.16183280000000003,
+     "w64/post_filter_c1_s4": 0.1556036,
+     "swin_block_c64_nc": 0.14026200000000003,
+     "lev/input_encoder": 0.12515880000000001,
+     "swin_block_c96_pm_rev_nc": 0.10637480000000002,
+     "scale_rgb": 0.10595800000000005,
+     "swin_block_c96_add_ex_nc": 0.10187559999999998,
+     "l_linear_32_32_fused": 0.09458919999999998,
+     "l_project_gather": 0.05878079999999998,
+     "l_dec_project": 0.050219200000000006,
+     "color_divide": 0.04580000000000001,
+     "exposure_auto_diet": 0.012614
+    }
+   },
+   "M": {
+    "runs": 5,
+    "frame_span_ms": 1.5891199707984924,
+    "dispatch_sum_ms": 1.5969776000000002,
+    "steps_ms": {
+     "post": 0.6967800000000003,
+     "swin": 0.5957908,
+     "dec0": 0.17068479999999994,
+     "enc0": 0.12154880000000001,
+     "other": 0.011975599999999994
+    },
+    "kernels_ms": {
+     "w64/post_tf_f32_p12_diet_vsit": 0.5273548000000002,
+     "bneck/swin_bneck6_mbo_nc": 0.2649836,
+     "d1p12/swin_block_c64_add_dec0_xd_nc": 0.17068479999999994,
+     "swin_block_c64_nc": 0.13720280000000004,
+     "scale_rgb": 0.12349480000000003,
+     "input_encoder": 0.12154880000000001,
+     "swin_block_c96_pm_rev_nc": 0.10453599999999999,
+     "swin_block_c96_add_xe_xd_nc": 0.08824720000000001,
+     "color_divide": 0.04598039999999999,
+     "exposure_auto_diet": 0.011975599999999994
+    }
+   },
+   "ratio_L_over_M": {
+    "frame_span": 1.8019155989182556,
+    "dispatch_sum": 1.8730296530145443,
+    "enc0": 4.530851806023588,
+    "swin": 1.3133019173844245,
+    "dec0": 2.059070286282084,
+    "post": 1.8665581675708252,
+    "other": 1.0533083937339263
+   },
+   "to_1.35x": {
+    "L_target_span_ms": 2.145311960577965,
+    "cut_span_ms": 0.718148103356361,
+    "L_target_dispatch_sum_ms": 2.1559197600000006,
+    "cut_dispatch_sum_ms": 0.8352666399999995,
+    "excess_over_M_per_step_ms": {
+     "enc0": 0.42917079999999985,
+     "swin": 0.18666240000000012,
+     "dec0": 0.18076720000000016,
+     "post": 0.6038003999999998,
+     "other": 0.000638400000000006
+    }
+   }
+  }
+ }
+}
