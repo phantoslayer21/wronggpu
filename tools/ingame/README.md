@@ -11,7 +11,7 @@ arguments (`offline_create.py`, `make_record.py`).
 
 ```
 python offline_create.py build  --work <dir>
-python offline_create.py create --work <dir> --runtime-dir <built runtime> --model <L model.wgcm> --model-sha <sha256> [-- <GPU slot wrapper>]
+python offline_create.py create --work <dir> --runtime-dir <built runtime> --model <L model.wgcm> --model-sha <sha256> [--extra l_post=own] [-- <GPU slot wrapper>]
 ```
 
 `create` runs the interop harness once:
@@ -42,7 +42,9 @@ Everything after a lone `--` wraps each GPU run, for example a GPU-slot tool.
    - `gpu_flag`: the GPU flag file;
    - `disk_free_gb`: minimum free space per drive.
 
-   `%VARIABLES%` are expanded. `exe_dir` is relative to `game_root`.
+   `%VARIABLES%` are expanded. `exe_dir` is relative to `game_root`. Optional `runtime_options_extra` adds runtime
+   options to every model choice (e.g. `l_post=own`); `--extra` on `prepare`, `use-m` or `use-l` replaces it for that
+   choice (`--extra ''` for none), so two variants can run in one session.
 
 2. Run the phases:
 
@@ -76,7 +78,8 @@ What each phase does:
 - **`collect`**:
   - copies our own logs. OptiScaler's log is never read;
   - writes `proof.json` with the model option, the model file and digest, Model L kernels, the executor, dispatch
-    counts, refusals and the launch-trace counts.
+    counts, refusals and the kernel counts of each launch trace (one trace per model choice,
+    `launch-trace-<time>.txt`).
 
   The verdict is PASS or NOT PROVEN.
 - **`restore`**:

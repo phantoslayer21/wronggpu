@@ -104,11 +104,17 @@ if CFG:
     DISK_FREE_GB = CFG.get('disk_free_gb', {})
     S = CFG.get('settings') or {}
     os.makedirs(A, exist_ok=True)
-    # the runtime's timing lines and the launch trace (one line per D3D12 kernel launch, capped; the runtime sets
-    # WG_LAUNCH_TRACE from the option, since a store launcher starts the game without our environment)
-    TRACE = os.path.join(A, 'launch-trace.txt')
-    OPTS_EXTRA = 'timing_log=1;timing_stages=1;launch_trace=%s;launch_trace_max=%d' % (
-        TRACE, int(CFG.get('launch_trace_max', 200000)))
+    EXTRA = CFG.get('runtime_options_extra', '')  # e.g. "l_post=own"; run.py --extra replaces it for one phase
+
+
+def opts_extra(r):
+    """The items this tool adds to runtime_options: the runtime's timing lines, a launch trace of its own for each model
+    choice (launch-trace-<time>.txt: one line per D3D12 kernel launch, capped; the runtime sets WG_LAUNCH_TRACE from
+    the option, since a store launcher starts the game without our environment) and EXTRA."""
+    trace = os.path.join(A, 'launch-trace-%s.txt' % datetime.datetime.now().strftime('%H%M%S'))
+    r.save(trace=trace, extra=EXTRA)
+    return 'timing_log=1;timing_stages=1;launch_trace=%s;launch_trace_max=%d%s' % (
+        trace, int(CFG.get('launch_trace_max', 200000)), ';' + EXTRA if EXTRA else '')
 
 
 def settings_cmd(verb):
@@ -287,7 +293,7 @@ def prepare(r):
     # 4. the model choice: runtime_options model=<model> (executor kept) and OptiScaler's UpscalerIndex
     if not r.dry and not os.path.isfile(os.path.join(X, 'wronggpu.ini')):
         raise SystemExit('no wronggpu.ini in %s after the update: restore next' % X)
-    set_options(r, MODEL_NAME, OPTS_EXTRA)
+    set_options(r, MODEL_NAME, opts_extra(r))
     # 5. the model file where the front end and the runtime look first (the game's WrongGPU\model\<model>)
     place_model(r)
     # 6. the game's graphics settings named in the config
@@ -309,8 +315,15 @@ def set_options(r, model='L', extra=''):
     if len(idx) != 1:
         raise SystemExit('wronggpu.ini: %d runtime_options lines' % len(idx))
     old = lines[idx[0]].split(b'=', 1)[1].decode()
-    items = [i for i in re.split(r'[;,]', old) if i.strip() and not re.match(r'\s*(model|timing_log|timing_stages)=', i)]
-    new = ';'.join(['model=' + model] + items + [e for e in extra.split(';') if e])
+    add = [e.strip() for e in extra.split(';') if e.strip()]
+    # replaced: the model, the items this tool adds (timing, launch trace), the items a previous --extra added (state)
+    # and any key that extra sets again
+    ours = {'model', 'timing_log', 'timing_stages', 'launch_trace', 'launch_trace_max'}
+    ours |= set(r.state.get('extra_keys', [])) | {e.split('=', 1)[0] for e in add}
+    items = [i for i in re.split(r'[;,]', old) if i.strip() and i.split('=', 1)[0].strip() not in ours]
+    new = ';'.join(['model=' + model] + items + add)
+    r.save(extra_keys=sorted({e.split('=', 1)[0] for e in add} - {'timing_log', 'timing_stages', 'launch_trace',
+                                                                   'launch_trace_max'}))
     r.log('wronggpu.ini runtime_options: %r -> %r' % (old, new))
     if not r.dry:
         lines[idx[0]] = b'runtime_options=' + new.encode()
@@ -333,7 +346,7 @@ def reinstall(r):
     for inst, pay in PAYLOAD_MAP.items():
         if not r.dry:
             r.need(sha(os.path.join(X, inst)) == sha(os.path.join(PAYLOAD, pay)), 'installed %s = payload %s' % (inst, pay))
-    set_options(r, MODEL_NAME, OPTS_EXTRA)
+    set_options(r, MODEL_NAME, opts_extra(r))
 
 
 def foreign_hashes(r, when):
@@ -522,17 +535,18 @@ def collect(r, logs=None):
     res['model_file'] = {'path': MODEL_DST, 'sha256': sha(MODEL_DST) if os.path.isfile(MODEL_DST) else None,
                            'expected': MODEL_SHA}
     res['shots'] = sorted(glob.glob(os.path.join(r.a, 'shots', '*.png')))
-    tr = os.path.join(d if logs else r.a, 'launch-trace.txt')
-    if os.path.isfile(tr):
+    res['launch_traces'] = []  # one per model choice (opts_extra), each summarised on its own
+    for tr in sorted(glob.glob(os.path.join(d if logs else r.a, 'launch-trace*.txt'))):
         counts = {}
         for l in open(tr, encoding='utf-8', errors='replace'):
             f = l.split()
             if f:
                 counts[f[0]] = counts.get(f[0], 0) + 1
         lk = {k: v for k, v in counts.items() if k.startswith(('l_', 'lev/')) or k == 'swin_block_c64_add_ex_nc'}
-        res['launch_trace'] = {'file': tr, 'lines': sum(counts.values()), 'kernels': len(counts), 'model_l_launches': lk,
-                               'all': dict(sorted(counts.items()))}
-        r.log('launch trace: %d lines, %d kernels; Model L kernels: %s' % (sum(counts.values()), len(counts), lk))
+        res['launch_traces'].append({'file': tr, 'lines': sum(counts.values()), 'kernels': len(counts),
+                                     'model_l_launches': lk, 'all': dict(sorted(counts.items()))})
+        r.log('launch trace %s: %d lines, %d kernels; Model L kernels: %s' % (os.path.basename(tr), sum(counts.values()),
+                                                                             len(counts), lk))
     if not logs:
         release_flag(r)  # the game has exited (checked above); normally game_hold.py has released it already
     out = os.path.join(r.a, 'proof.json')
@@ -594,7 +608,12 @@ def main():
     ap.add_argument('label', nargs='?', default='game')
     ap.add_argument('--dry-run', action='store_true')
     ap.add_argument('--logs', help='collect: logs already copied (proof extraction only)')
+    ap.add_argument('--extra', help='prepare / reinstall / use-m / use-l: more runtime options for this model choice '
+                                    "(replaces the config's runtime_options_extra), e.g. l_post=own; '' for none")
     a = ap.parse_args()
+    if a.extra is not None:
+        global EXTRA
+        EXTRA = a.extra
     if a.phase == 'all' and not a.dry_run:
         raise SystemExit('all is a dry run only (use --dry-run)')
     r = Run(a.dry_run or a.phase == 'preflight')
@@ -618,7 +637,7 @@ def main():
     if a.phase in ('use-m', 'use-l'):  # the comparison run in the same session and settings (the game must be closed)
         if GAME_EXE in tasks():
             raise SystemExit('the game is running')
-        set_options(r, 'M' if a.phase == 'use-m' else 'L', OPTS_EXTRA)
+        set_options(r, "M" if a.phase == "use-m" else "L", opts_extra(r))
     elif a.phase == 'shot':
         shot(r, a.label)
     elif a.phase == 'collect':

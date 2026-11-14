@@ -13,7 +13,8 @@ timing harness (test_interop_d3d12.exe hipbench) for Model L and Model M.
 
 --runtime-dir is a built runtime folder (wronggpu_runtime.dll and the kernels, build.py --model-l). Everything after
 a lone "--" is a command prefix that wraps each GPU run (e.g. a GPU-slot tool: `-- python gpu_slot.py --cap-s 170 --`);
-without it the harness runs directly. --tmp sets TMP / TEMP for the runs, --rocm-path ROCM_PATH.
+without it the harness runs directly. --extra adds runtime options to Model L's runs (e.g. l_post=own), --tmp sets
+TMP / TEMP for the runs, --rocm-path ROCM_PATH.
 
 The model data folder is under --work, not %LOCALAPPDATA%: inside a packaged (MSIX) app new files there are private
 to the package. Model M uses --m-model-dir (default %LOCALAPPDATA%\\WrongGPU\\model, read only)."""
@@ -95,7 +96,7 @@ def l_data():
 def options(model, data, stages):
     o = 'kernels_dir=%s;timing_log=1;timing_stages=%d;executor=dx12' % (A.runtime_dir, 1 if stages else 0)
     if model == 'L':
-        return 'model=L;model_dir=%s;' % data + o
+        return 'model=L;model_dir=%s;' % data + o + (';' + A.extra if A.extra else '')
     return 'model=M;model_dir=%s;' % A.m_model_dir + o
 
 
@@ -204,6 +205,7 @@ def main(argv):
                     help="Model M's data folder (timing; read only)")
     ap.add_argument('--rounds', type=int, default=3)
     ap.add_argument('--shapes', help='comma list of shape names (default: all six)')
+    ap.add_argument('--extra', help="more runtime options for Model L's runs, e.g. l_post=own")
     ap.add_argument('--tmp', help='TMP / TEMP for the runs')
     ap.add_argument('--rocm-path', help='ROCM_PATH for the runs')
     ap.add_argument('--vswhere', default=VSWHERE)
