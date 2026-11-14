@@ -6,10 +6,14 @@ same bits.
 
 - A synthetic model K (random FP16 parameters, clean/k/reference/network.py random_network_params) written as the
   converter's model.wgcm (clean/converter/OUTPUT-FORMAT.md) with a matching map, loaded and checked by the runtime.
-- Sequences with a reset, steady frames, a render-size change and a game reset; HDR and LDR, depth inverted or not,
-  the three exposure sources (value, the game's texel on the GPU, auto-exposure on the GPU), pre-exposure != 1, both
+- Sequences with a reset, steady frames, a render-size change (model K keeps the history) and a game reset; HDR and
+  LDR, depth inverted or not, the three exposure sources (value, the game's texel on the GPU, auto-exposure on the GPU)
+  and a texel with auto-exposure on, with the exposure rule of spec 42 draft 3 section 4 (clean/k/reference/exposure.py:
+  E_cur = the game's exposure or 1, E_aux = the auto-exposure value; KFrame is given the rule's inputs and the
+  runtime's measured value, and the runtime's [E_cur, E_prev, E_aux] are checked), pre-exposure != 1, both
   output layouts of the interop (dense RGB float32; RGBA16F rows with alpha 1) and the input-copy path (raw RGBA16F
   colour, R32F depth, FP16 motion converted on the GPU).
+- The input stage: exact (k_io_exact.co) by default, the fast one (k_io.co) with k_fast_in=1.
 - 1440p Quality (2560 x 1440 from 1706 x 960): the runtime's timing marks (as timing_log=1 in game) per part.
 
 GPU only: WG_K_GPU_BUILD=<full build dir (clean/runner/build.py, with the runtime library)>, ROCM_PATH=<HIP SDK>;
@@ -288,13 +292,17 @@ class TestKRuntimeGpu(unittest.TestCase):
         cls.wgcm, cls.map = write_k_model(cls.mdir, cls.params)
 
     def run_sequence(self, flags, frames, out_size=(200, 120), max_render=(150, 90), mode=0, half=False, raw=False,
-                     seed=0, network="fused", options=""):
+                     seed=0, network="fused", options="", exact_input=True, auto=None):
         """frames: [(rw, rh, reset, E, pre_exposure)]; every frame's runtime output against KFrame's (network: the
-        runtime option network= and KFrame's variant)."""
+        runtime option network= and KFrame's variant). E: the game's exposure (value, mode 0, or texel, mode 1; not
+        used with mode 2). auto: the create flag "auto-exposure" (default: mode == 2)."""
         rng = np.random.default_rng(seed)
+        auto = mode == 2 if auto is None else auto
         rt = KRuntimeExt(self.build, self.mdir, self.map, out_size, max_render, flags["hdr"], flags["depth_inverted"],
-                         mode == 2, ";".join(o for o in ("" if network == "fused" else f"network={network}", options) if o))
-        kf = KFrame(self.dev, self.fn, out_size, max_render, self.params, dict(flags, mv_lowres=True), network)
+                         auto, ";".join(o for o in ("" if network == "fused" else f"network={network}", options) if o))
+        E_last = None
+        kf = KFrame(self.dev, self.fn, out_size, max_render, self.params, dict(flags, mv_lowres=True), network,
+                    exact_input=exact_input)
         try:
             for i, (rw, rh, reset, E, pi) in enumerate(frames):
                 x = inputs(rng, rw, rh, flags["hdr"], reset)
@@ -316,10 +324,20 @@ class TestKRuntimeGpu(unittest.TestCase):
                     mrow[:, :mch * rw] = mraw.reshape(rh, mch * rw)
                     rawio = (crow, mrow, ms, mo, mch)
                 (got, alpha), _ = rt.frame(x, mode, half=half, raw=rawio)
-                if mode == 2:  # auto-exposure: the runtime's value (spec 07 on the GPU) is KFrame's E_cur
-                    x["E_cur"] = float(rt.buffer("exposure.pair", np.float32)[0])
-                x["E_aux"] = x["E_cur"]
-                want = kf.frame(x)
+                # spec 42 draft 3 section 4: KFrame gets the game's exposure (none with mode 2) and, when auto-exposure
+                # runs (HDR, the create flag or mode 2), the runtime's measured value (spec 07 on the GPU) as E_aux
+                runs = flags["hdr"] and (auto or mode == 2)
+                measured = float(rt.buffer("exposure.measured", np.float32)[0]) if runs else None
+                kx = {k: v for k, v in x.items() if k not in ("E_cur", "E_aux", "e1", "e2")}
+                kx.update(game_exposure=None if mode == 2 else x["E_cur"], measured=measured)
+                want = kf.frame(kx)
+                # the runtime's exposure state [E_cur, E_prev, E_aux] (raw values) follows the rule
+                ec = (1.0 if mode == 2 else x["E_cur"]) if flags["hdr"] else 1.0
+                ea = measured if runs else ec
+                ep = ec if (i == 0 or reset) else E_last
+                E_last = ec
+                pair = rt.buffer("exposure.pair", np.float32)[:3]
+                np.testing.assert_array_equal(pair, np.array([ec, ep, ea], np.float32), err_msg=f"exposure frame {i}")
                 ref = want["out"][..., :3]
                 info = (i, rw, rh, flags, mode, half, raw)
                 if half:
@@ -337,7 +355,8 @@ class TestKRuntimeGpu(unittest.TestCase):
                 info_k = dict(kv.split("=", 1) for kv in rt.lib.wg_rt_kernels(rt.rt).decode().split())
                 self.assertEqual(info_k["model"], "K")
                 self.assertEqual(info_k["network"], network)
-                self.assertEqual(want["reset"], i == 0 or reset or frames[i - 1][:2] != (rw, rh))
+                self.assertEqual(want["reset"], bool(i == 0 or reset))  # a render-size change keeps the history (K)
+                self.assertEqual(info_k["input"], "k_io_exact.co" if exact_input else "k_io.co")
         finally:
             kf.release()
             del rt
@@ -356,6 +375,45 @@ class TestKRuntimeGpu(unittest.TestCase):
     def test_hdr_auto_exposure(self):
         seq = [(w, h, r, E, 2.0) for (w, h, r, E, _) in self.SEQ]
         self.run_sequence({"hdr": True, "depth_inverted": True}, seq, mode=2, half=True, seed=2)
+
+    def test_hdr_texel_with_auto_exposure(self):
+        """The game's texel and auto-exposure on (create flag): E_cur = the texel, E_aux = the measured value."""
+        seq = [(w, h, r, E, 1.0 + 0.25 * i) for i, (w, h, r, E, _) in enumerate(self.SEQ)]
+        self.run_sequence({"hdr": True, "depth_inverted": True}, seq, mode=1, half=True, seed=7, auto=True)
+
+    def test_ldr_auto_flag(self):
+        """LDR: every exposure value 1, even with the auto-exposure flag (it does not run)."""
+        self.run_sequence({"hdr": False, "depth_inverted": True}, self.SEQ[:4], mode=2, seed=8)
+
+    def test_fast_input(self):
+        """k_fast_in=1 (opt-in): the fast input stage (k_io.co), bit for bit KFrame's default plan; the older name
+        k_in_exact=0 is the same; at a small size and at 1440p Ultra Performance (tiled input, tiled colour)."""
+        for opt in ("k_fast_in=1", "k_in_exact=0"):
+            self.run_sequence({"hdr": True, "depth_inverted": True}, self.SEQ[:5], mode=2, half=True, options=opt,
+                              exact_input=False, seed=9)
+        seq = [(853, 480, False, 1.0, 1.0), (853, 480, False, 1.0, 1.0), (853, 480, False, 1.0, 1.0)]
+        self.run_sequence({"hdr": True, "depth_inverted": True}, seq, out_size=(2560, 1440), max_render=(853, 480),
+                          mode=2, half=True, options="k_fast_in=1", exact_input=False, seed=10)
+
+    def test_expo_rule_v051(self):
+        """k_expo_rule=v051 (A/B only): the 0.5.1 rule, E_cur = E_aux = the auto-exposure value."""
+        rng = np.random.default_rng(12)
+        rt = KRuntimeExt(self.build, self.mdir, self.map, (200, 120), (150, 90), True, True, True, "k_expo_rule=v051")
+        kf = KFrame(self.dev, self.fn, (200, 120), (150, 90), self.params,
+                    {"hdr": True, "mv_lowres": True, "depth_inverted": True}, exact_input=True)
+        try:
+            for i in range(3):
+                x = inputs(rng, 150, 90, True, i == 0)
+                x["pre_exposure"] = 1.5
+                (got, _), _ = rt.frame(x, 2, half=True)
+                m = float(rt.buffer("exposure.measured", np.float32)[0])
+                self.assertEqual(float(rt.buffer("exposure.pair", np.float32)[0]), m)
+                want = kf.frame(dict(x, E_cur=m, E_aux=m))
+                np.testing.assert_array_equal(got.astype(np.float16).view(np.uint16),
+                                              want["out"][..., :3].astype(np.float16).view(np.uint16))
+        finally:
+            kf.release()
+            del rt
 
     def test_ldr(self):
         self.run_sequence({"hdr": False, "depth_inverted": False}, self.SEQ, mode=0, seed=3)
@@ -447,6 +505,27 @@ class TestKRuntimeGpu(unittest.TestCase):
         self.run_sequence({"hdr": True, "depth_inverted": True}, self.SEQ[:4], mode=2, half=True,
                           options="k_diag=input2+copyin")
 
+    def test_exact_input(self):
+        """The default input stage (k_in_exact=1 names it): k_io_exact.co, bit for bit KFrame(exact_input=True) (spec 42
+        exactly), at a small size (legacy input path: render > 0.68 output) and at 1440p Performance / Ultra
+        Performance render sizes (tiled input with host uniforms, separate output colour taps), with a render-size
+        change inside the 1440p sequence (history kept)."""
+        self.run_sequence({"hdr": True, "depth_inverted": True}, self.SEQ, mode=0, options="k_in_exact=1",
+                          exact_input=True)
+        for rw, rh in ((1280, 720), (853, 480)):
+            seq = [(rw, rh, False, 1.0, 1.0), (rw, rh, False, 1.25, 1.0), (rw, rh, False, 1.25, 1.0),
+                   (rw - 64, rh - 36, False, 1.25, 1.0)]
+            self.run_sequence({"hdr": True, "depth_inverted": True}, seq, out_size=(2560, 1440), max_render=(rw, rh),
+                              mode=2, half=True, exact_input=True, seed=rw)
+
+    def test_exact_input_with_fast_refused(self):
+        for opts, msg in (("k_in_exact=1;k_fast=1", "k_in_exact=1 and k_fast=1"),
+                          ("k_in_exact=1;k_fast_in=1", "k_in_exact=1 and k_fast_in=1"),
+                          ("k_fast_in=2", "k_fast_in must be 0 or 1"), ("k_expo_rule=x", "unknown k_expo_rule")):
+            with self.assertRaises(RuntimeError) as cm:
+                KRuntimeExt(self.build, self.mdir, self.map, (200, 120), (150, 90), True, True, False, opts)
+            self.assertIn(msg, str(cm.exception))
+
     def test_odd_output_size(self):
         seq = [(97, 61, False, 1.0, 1.0), (97, 61, False, 1.25, 1.0), (101, 64, False, 1.25, 1.0)]
         self.run_sequence({"hdr": True, "depth_inverted": True}, seq, out_size=(203, 117), max_render=(101, 64),
@@ -463,14 +542,15 @@ class TestKRuntimeGpu(unittest.TestCase):
         rt = KRuntimeExt(self.build, self.mdir, self.map, (W, H), (rw, rh), True, True, True,
                          "" if network == "fused" else f"network={network}")
         kf = KFrame(self.dev, self.fn, (W, H), (rw, rh), self.params, {"hdr": True, "mv_lowres": True,
-                                                                     "depth_inverted": True}, network)
+                                                                     "depth_inverted": True}, network,
+                    exact_input=True)
         try:
             x = inputs(rng, rw, rh, True, True)
             for i in range(2):
                 (got, _), _ = rt.frame(x, 2, half=True)
-                x["E_cur"] = float(rt.buffer("exposure.pair", np.float32)[0])
-                x["E_aux"] = x["E_cur"]
-                want = kf.frame(x)
+                kx = {k: v for k, v in x.items() if k not in ("E_cur", "E_aux", "e1", "e2")}
+                want = kf.frame(dict(kx, game_exposure=None,
+                                     measured=float(rt.buffer("exposure.measured", np.float32)[0])))
                 np.testing.assert_array_equal(got.astype(np.float16).view(np.uint16),
                                               want["out"][..., :3].astype(np.float16).view(np.uint16))
                 x["reset"] = False
