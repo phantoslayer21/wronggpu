@@ -212,8 +212,11 @@ def reconstruct(x, s, t=_table.TABLE, ldr=False):
         W, fbar = gather(feat, x["C"], px, py, rw, rh, window)
     cbar, sig, gbar, bh, bo = fbar[..., 0:3], fbar[..., 3:6], fbar[..., 6], fbar[..., 7], fbar[..., 8]
 
-    # 3. motion candidates (Model M's rules)
-    fy, fx = _post.point_index(px, py, rw, rh)
+    # 3. motion candidates (Model M's rules), at render positions in float32: the gather's (the model's precision) or,
+    # with Model M's float64 gather, Model M's (post.target_positions_f32), as the kernels compute them
+    half = rc.get("gather", "float64") == "half"
+    mpx, mpy = (px, py) if half else _post.target_positions_f32(rw, rh, dw, dh, jx, jy)
+    fy, fx = _post.point_index(mpx, mpy, rw, rh)
     hi = bool(x.get("motion_output_res", False))
     nan_valid = bool(x.get("nan_position_valid", hi))
     first, second = _post.select_two(sig[..., 0], sig[..., 1], sig[..., 2])
@@ -249,10 +252,17 @@ def reconstruct(x, s, t=_table.TABLE, ldr=False):
         h1, nan_h = along(qx.astype(np.float64), qy.astype(np.float64))
         h2 = h1
     else:
-        m = [np.asarray(x["m_near"], np.float64)[fy, fx], _post.bilinear(x["m_center"], px, py),
-             np.asarray(x["m_far"], np.float64)[fy, fx]]
-        with np.errstate(invalid="ignore"):
-            al = [along(X + mk[..., 0], Y + mk[..., 1]) for mk in m]
+        # candidate positions in float32 as the kernel computes them (Model M's reference does the same since #142;
+        # spec: float32 unless stated): m_center's bilinear and q = X + m. The validity test 0 <= q <= D is a
+        # discontinuity: in float64 a real-weight frame had a position just past D that the kernel's float32
+        # arithmetic puts exactly on D (valid), and the two samples differ widely
+        F32 = np.float32
+        m = [np.asarray(x["m_near"], F32)[fy, fx], _post.bilinear_f32(x["m_center"], np.asarray(mpx, F32),
+                                                                      np.asarray(mpy, F32)),
+             np.asarray(x["m_far"], F32)[fy, fx]]
+        X32, Y32 = X.astype(F32), Y.astype(F32)
+        with np.errstate(invalid="ignore", over="ignore"):
+            al = [along((X32 + mk[..., 0]).astype(np.float64), (Y32 + mk[..., 1]).astype(np.float64)) for mk in m]
         Hk = np.stack([a[0] for a in al], axis=-1)
         nk = np.stack([a[1] for a in al], axis=-1)
         h1 = np.take_along_axis(Hk, first[..., None, None], -1)[..., 0]
