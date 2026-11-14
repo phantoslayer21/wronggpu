@@ -30,7 +30,8 @@ void main32(uint lane : SV_GroupThreadID)
     store_frag(2, lane, wg_ags_convert(c, WG_AGS_T_F32_ACC, WG_AGS_T_F16_ACC));
     store_frag(3, lane, wg_ags_convert(c, WG_AGS_T_F32_ACC, WG_AGS_T_FP8_B));
     wg_frag h;
-    [unroll] for (uint i = 0; i < 8; ++i) h.v[i] = wg_ags_call(0x1cu, 0u, 1u, c.v[i], 0u);  // FloatConversion, F16 near
+    // FloatConversion, F16 near: opcode 0x1c with the arguments of f2h_hw in clean/rr_f/kernels/rr_fast.hlsli
+    [unroll] for (uint i = 0; i < 8; ++i) h.v[i] = wg_ags_call(0x1cu, 0u, 1u, c.v[i], 0u);
     store_frag(4, lane, h);
     store_frag(5, lane, wg_ags_convert(load_frag(5 * 1024, lane, 2), WG_AGS_T_FP8_B, WG_AGS_T_F32_ACC));
 }

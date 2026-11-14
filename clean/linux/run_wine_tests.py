@@ -120,6 +120,10 @@ def test_rr_leak(a, env, work):
         why = f"runtime set_device returned {sd.group(1)}" if sd and sd.group(1) != "0" else "no tagloop line"
         return "FAIL", (f"{why}; RR could not start (stock vkd3d-proton without dxil-spirv #362? use --vkd3d); "
                         f"see {out / 'host.log'} and {stage / 'wronggpu-rr.log'}")
+    # a stack that reports a constant CurrentUsage would let any leak pass: no change at all counts as a failure
+    vm = re.search(r"video memory (\d+) -> (\d+) bytes \([^,]*, peak ([+-][0-9.]+) MiB", m.group(0))
+    if vm and vm.group(1) == vm.group(2) and float(vm.group(3)) == 0.0:
+        return "FAIL", m.group(0) + " (video memory did not change at all: usage may not be reported)"
     return ("PASS" if rc == 0 and m.group(0).endswith(": ok") else "FAIL"), m.group(0)
 
 
@@ -317,6 +321,8 @@ def main(argv=None):
     if unknown:
         ap.error(f"unknown test(s): {', '.join(unknown)}")
     work = Path(a.work).resolve()
+    if " " in str(work):
+        ap.error("--work must not contain spaces (the RR test host's job file is split on spaces)")
     work.mkdir(parents=True, exist_ok=True)
     env = wine_env.prepare(a.proton, work / "prefix", a.vkd3d, log=log)
     results = {}

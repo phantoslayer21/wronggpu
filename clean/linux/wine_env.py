@@ -24,7 +24,9 @@ from pathlib import Path
 # Wine's builtin d3dcompiler_47 compiles through vkd3d-utils, which needs vkd3d and vkd3d-shader.
 _PROTON_FILES = (("d3d12.dll", "vkd3d-proton"), ("d3d12core.dll", "vkd3d-proton"), ("dxgi.dll", "dxvk"),
                  ("libvkd3d-utils-1.dll", "vkd3d"), ("libvkd3d-1.dll", "vkd3d"), ("libvkd3d-shader-1.dll", "vkd3d"))
-DLL_OVERRIDES = "d3d12,d3d12core,dxgi=n,b"
+# mscoree / mshtml off and winemenubuilder disabled: a new prefix's wineboot shows no Mono / Gecko dialog and
+# writes no menu entries under ~/.local/share
+DLL_OVERRIDES = "d3d12,d3d12core,dxgi=n,b;mscoree,mshtml=;winemenubuilder.exe=d"
 
 
 def _find(files_dir, name, folder):
