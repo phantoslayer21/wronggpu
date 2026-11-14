@@ -19,9 +19,15 @@
 //   value is clamp(E(o), 0, 2.45) rounded by v_cvt_f16_f32 (wg_f2h);
 // - D(h) / e_prev is an IEEE division (wg_div).
 // Model M's DXILs are untouched: this file only adds the kernel (bound to l_post.co).
+// l_post_recon_p12 (LP_P12 = 1): the same kernel on the pack12 coefficients of l_coef_pack12: A = image A8 (8 bytes per
+// render pixel: codes A0 A1 A2 B0 | B1 B2, C2 FP16), C = image C4 (4 bytes per render pixel: C0, C1 FP16), B unused.
 //
 // @wg-kernel l_post_recon co=l_post.co block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p
+// @wg-kernel l_post_recon_p12 co=l_post.co entry=l_post_recon_p12 block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1
 #include "wg_platform.hlsli"
+#ifndef LP_P12
+#define LP_P12 0
+#endif
 
 WG_ARGS_BEGIN
     uint color, A, B, C, hist_prev, m_near, m_center, m_far, w_p, hist_out, reduced, display;   // pointers
@@ -100,8 +106,15 @@ void load_texel(int idx, out uint t[kTexDw])
 {
     const uint ui = (uint)idx;
     const float4 c = wg_ld4f(color, ui * 16u);
+#if LP_P12
+    const uint2 d = wg_ld64(A, ui * 8u);
+    const uint c01 = wg_ld32(C, ui * 4u);
+    const uint a = d.x & 0xffffffu, b = (d.x >> 24) | ((d.y & 0xffffu) << 8);
+    const uint2 k = uint2(c01, d.y >> 16);   // C0 | C1 << 16, C2 (l_coef's C dword 0 and the low half of dword 1)
+#else
     const uint b = wg_ld32(B, ui * 4u), a = wg_ld32(A, ui * 4u);
     const uint2 k = wg_ld64(C, ui * 8u);
+#endif
     uint f[9];
     f[0] = wg_f2h(enc_in(opq(g_e * c.x)));
     f[1] = wg_f2h(enc_in(opq(g_e * c.y)));
@@ -297,7 +310,11 @@ void finish_pixel(LGather g, int x, int y, float px, float py, bool store, float
 float lpx(int xx) { return mad(opq((float)xx + 0.5f), P_rx, P_jx); }   // fused(x + 1/2, rx, jx)
 float lpy(int yy) { return mad(P_ry, opq((float)yy + 0.5f), P_jy); }   // fused(ry, y + 1/2, jy)
 
+#if LP_P12
+WG_KERNEL(l_post_recon_p12)
+#else
 WG_KERNEL(l_post_recon)
+#endif
 {
     WG_SETUP();
     g_z = wg_grid_ >> 31;

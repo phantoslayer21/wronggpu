@@ -11,6 +11,8 @@
 // 2^-126, FP16 weights into half accumulators, a float32 weight sum. The blend is item 3's fused form. The decode
 // passes a NaN through (a zero total gather weight gives C = D(NaN) = NaN; the NaN guard then substitutes it, as the
 // oracle). Arguments, layouts and grid are post_recon's; w[0] = Model L's post scale s.
+// l_post_recon_p12: the same kernel on the pack12 coefficients of l_coef_pack12 (A8 / C4 images, B unused), which the
+// D3D12 frame reads; the same texel values, so the same outputs byte for byte.
 #include "post.hip"
 
 namespace {
@@ -46,6 +48,35 @@ WG_FN LTexel l_load_texel(const v4f* color, const u32* A, const u32* B, const v4
   t.kB = (h16)((float)k[1] * -0.721325f);
   t.kC = (h16)((float)k[2] * -1.44265f);
   return t;
+}
+
+// l_load_texel on the pack12 coefficients (l_coef_pack12, clean/l/FORMATS.md): image A8, 8 bytes per render pixel =
+// codes A0 A1 A2 B0 | B1 B2, C2 (FP16); image C4, 4 bytes per render pixel = C0, C1 (FP16). The same values as
+// l_load_texel on l_coef's images (only padding bytes are left out), so the same texel.
+WG_FN LTexel l_load_texel12(const v4f* color, const u32* A8, const u32* C4, int idx, float e) {
+  LTexel t;
+  const v4f c = color[idx];
+  t.f[0] = (h16)enc_in(e * c[0]);
+  t.f[1] = (h16)enc_in(e * c[1]);
+  t.f[2] = (h16)enc_in(e * c[2]);
+  const u32 d0 = A8[2 * idx], d1 = A8[2 * idx + 1], c01 = C4[idx];
+  const u32 a = d0 & 0xffffffu, b = (d0 >> 24) | ((d1 & 0xffffu) << 8);
+#pragma unroll
+  for (int i = 0; i < 3; ++i) {
+    t.f[3 + i] = (h16)(byte_f(b, i) / 255.0f);
+    t.f[6 + i] = (h16)(byte_f(a, i) / 255.0f);
+  }
+  t.kA = (h16)((float)__builtin_bit_cast(_Float16, (unsigned short)(c01 & 0xffffu)) * -0.721325f);
+  t.kB = (h16)((float)__builtin_bit_cast(_Float16, (unsigned short)(c01 >> 16)) * -0.721325f);
+  t.kC = (h16)((float)__builtin_bit_cast(_Float16, (unsigned short)(d1 >> 16)) * -1.44265f);
+  return t;
+}
+
+// The texel of the kernel's coefficient form: l_coef's images (A, B, C) or pack12's (A8 in A, C4 in C, B unused).
+template <bool kP12>
+WG_FN LTexel l_texel(const v4f* color, const u32* A, const u32* B, const void* C, int idx, float e) {
+  if (kP12) return l_load_texel12(color, A, (const u32*)C, idx, e);
+  return l_load_texel(color, A, B, (const v4h*)C, idx, e);
 }
 
 // Gathered sums of one D pixel: W = float32 sum of the unrounded weights; F = the half accumulators.
@@ -186,14 +217,11 @@ WG_FN void l_finish_pixel(const LGather& g, int x, int y, float px, float py, bo
   }
 }
 
-}  // namespace
-
-// Stage "post" for Model L, HDR. Arguments, layouts and grid as post_recon (clean/kernels/post.hip): grid
-// ceil(dw / 32) * ceil(ceil(dh / 2) / 8) workgroups of 256 lanes; w = the post blob (w[0] = s).
-WG_KERNEL_N(l_post_recon, kPostThreads)(const v4f* color, const u32* A, const u32* B, const v4h* C,
-                                        const v4h* hist_prev, const u32* m_near, const u32* m_center,
-                                        const u32* m_far, const float* w, v4h* hist_out, u32* reduced,
-                                        _Float16* display, WgPostParams p, const float* expo) {
+// The kernel body; kP12 selects the coefficient form (l_texel).
+template <bool kP12>
+WG_FN void l_post_recon_body(const v4f* color, const u32* A, const u32* B, const void* C, const v4h* hist_prev,
+                             const u32* m_near, const u32* m_center, const u32* m_far, const float* w, v4h* hist_out,
+                             u32* reduced, _Float16* display, WgPostParams p, const float* expo) {
   if (expo) {
     p.e = expo[0] == 0.0f ? 1.0f : expo[0];
     p.e_prev = expo[1] == 0.0f ? 1.0f : expo[1];
@@ -224,7 +252,7 @@ WG_KERNEL_N(l_post_recon, kPostThreads)(const v4f* color, const u32* A, const u3
     for (int i = lane; i < ncol * nrow; i += kPostThreads) {
       const int r = i / ncol, c = i - r * ncol;
       const int idx = clampi(r0 + r, 0, p.rh - 1) * p.rw + clampi(c0 + c, 0, p.rw - 1);
-      sh_tex[i] = l_load_texel(color, A, B, C, idx, p.e);
+      sh_tex[i] = l_texel<kP12>(color, A, B, C, idx, p.e);
     }
   }
   wg_barrier();
@@ -259,7 +287,7 @@ WG_KERNEL_N(l_post_recon, kPostThreads)(const v4f* color, const u32* A, const u3
         t = sh_tex[(b + j - r0) * ncol + (ax + i - c0)];
       } else {
         const int idx = clampi(b + j, 0, p.rh - 1) * p.rw + clampi(ax + i, 0, p.rw - 1);
-        t = l_load_texel(color, A, B, C, idx, p.e);
+        t = l_texel<kP12>(color, A, B, C, idx, p.e);
       }
       l_gather_add(g0, t, u, v0);
       l_gather_add(g1, t, u, v1);
@@ -286,4 +314,25 @@ WG_KERNEL_N(l_post_recon, kPostThreads)(const v4f* color, const u32* A, const u3
     }
     reduced[(y0 / 2) * (p.dw / 2) + x / 2] = code;
   }
+}
+
+}  // namespace
+
+// Stage "post" for Model L, HDR. Arguments, layouts and grid as post_recon (clean/kernels/post.hip): grid
+// ceil(dw / 32) * ceil(ceil(dh / 2) / 8) workgroups of 256 lanes; w = the post blob (w[0] = s).
+WG_KERNEL_N(l_post_recon, kPostThreads)(const v4f* color, const u32* A, const u32* B, const v4h* C,
+                                        const v4h* hist_prev, const u32* m_near, const u32* m_center,
+                                        const u32* m_far, const float* w, v4h* hist_out, u32* reduced,
+                                        _Float16* display, WgPostParams p, const float* expo) {
+  l_post_recon_body<false>(color, A, B, C, hist_prev, m_near, m_center, m_far, w, hist_out, reduced, display, p, expo);
+}
+
+// l_post_recon on the pack12 coefficients of l_coef_pack12: A = image A8 (8 bytes per render pixel), C = image C4
+// (4 bytes per render pixel), B unused (may be null). Everything else as l_post_recon; the same outputs.
+WG_KERNEL_N(l_post_recon_p12, kPostThreads)(const v4f* color, const u32* A8, const u32* B, const u32* C4,
+                                            const v4h* hist_prev, const u32* m_near, const u32* m_center,
+                                            const u32* m_far, const float* w, v4h* hist_out, u32* reduced,
+                                            _Float16* display, WgPostParams p, const float* expo) {
+  l_post_recon_body<true>(color, A8, B, C4, hist_prev, m_near, m_center, m_far, w, hist_out, reduced, display, p,
+                          expo);
 }
