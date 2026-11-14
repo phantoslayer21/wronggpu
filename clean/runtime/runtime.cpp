@@ -462,6 +462,7 @@ struct Runtime {
   bool model_other_map = false;
   std::string model_source;
   std::vector<DevPtr> owned;
+  std::vector<size_t> owned_size;  // bytes of each allocation in owned (wg_rt_fill)
   uint64_t owned_bytes = 0;
   bool external_io = false;    // inputs and output always come from FrameIo (interop): no own buffers for them
   bool native_direct_io = false;  // typed resources bound by the private native caller; no dense I/O conversion buffers
@@ -496,6 +497,7 @@ struct Runtime {
   bool alloc(DevPtr* p, size_t bytes) {
     if (!dev->alloc(p, bytes)) return dfail();
     owned.push_back(*p);
+    owned_size.push_back(bytes);
     owned_bytes += bytes;
     return true;
   }
@@ -2429,6 +2431,28 @@ struct Runtime {
     if (k) return k->buffer(nm, p, bytes) || fail(k->err());
 #endif
     if (frames == 0) return fail("no frame has run yet");
+    return buffer_at(nm, p, bytes);
+  }
+
+  // Diagnostics (wg_rt_fill; the frame checks' sentinels): the allocation holding the named buffer set to `value`,
+  // from the buffer's start to the allocation's end. Also before the first frame (the names then resolve with
+  // parity 0); a buffer this configuration does not allocate (address 0) is left alone.
+  bool fill(const std::string& nm, int value) {
+#ifndef WG_NO_MODEL_K
+    if (k) return fail("wg_rt_fill: not for Model K");
+#endif
+    DevPtr p = 0;
+    size_t bytes = 0;
+    if (!buffer_at(nm, &p, &bytes)) return false;
+    if (p == 0) return true;
+    for (size_t i = 0; i < owned.size(); ++i)
+      if (p >= owned[i] && p < owned[i] + owned_size[i])
+        return dev->memset(p, value & 0xff, owned[i] + owned_size[i] - p) || dfail();
+    return fail("wg_rt_fill: " + nm + " is not a runtime allocation");
+  }
+
+  // buffer() without the first-frame check
+  bool buffer_at(const std::string& nm, DevPtr* p, size_t* bytes) {
     const int lf = info.parity, rw = info.rw, rh = info.rh, fw = ceil32(rw), fh = ceil32(rh);
     const size_t R = (size_t)rw * rh, t2 = (fw / 2) * (fh / 2), t4 = (fw / 4) * (fh / 4), t8 = (fw / 8) * (fh / 8);
     const size_t Dn = (size_t)dw * dh;
@@ -2643,6 +2667,9 @@ WG_RT_API int wg_rt_buffer(void* rt, const char* name, uintptr_t* ptr, size_t* b
   if (!((Runtime*)rt)->buffer(name, &p, bytes)) return 1;
   *ptr = (uintptr_t)p;
   return 0;
+}
+WG_RT_API int wg_rt_fill(void* rt, const char* name, int value) {
+  return ((Runtime*)rt)->fill(name, value) ? 0 : 1;
 }
 WG_RT_API int wg_rt_download(void* rt, uintptr_t ptr, void* dst, size_t bytes) {
   Runtime* r = (Runtime*)rt;
