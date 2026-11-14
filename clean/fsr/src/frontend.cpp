@@ -58,8 +58,21 @@ struct FrontEnd::UpscaleContext {
     bool amdLast = false;         // the last frame was one of AMD's FSR for such a frame (AMD's history continues)
     bool broken = false;          // the upscaler failed for good: it is not parked
     uint64_t brokenFrames = 0;    // bug hunt F1: frames since the upscaler failed for good (it is not called again)
-    uint32_t resizes = 0;         // bug hunt H: upscalers created again for the frames' output size (kMaxResizes)
+    uint32_t resizes = 0;         // bug hunt H: upscalers created again for the frames' output size (Config::maxOutputResizes)
     bool resizeFailed = false;    // ... and such a create failed: no more attempts for this context
+    // Issue #58: upscalers and stand-ins a resize replaced. Command lists the game recorded before may still use them
+    // (the copy into the output after the split, or a whole list not yet submitted); the front end has no fence of its
+    // own, so they are destroyed only when the context is destroyed (its completion boundary, as for Fail's handoff),
+    // or at once while the device is lost. At most Config::maxOutputResizes upscalers (and their stand-ins) per context.
+    struct Replaced {
+        const WgUpscalerBackend* backend;
+        WgUpscaler* upscaler;
+    };
+    std::vector<Replaced> replaced;
+    void DestroyReplaced() {
+        for (const Replaced& r : replaced) r.backend->destroy(r.upscaler);
+        replaced.clear();
+    }
     std::mutex mutex;             // one call at a time per context
 
     // This object (parked with its upscaler, stand-in, create info and options: the upscaler holds pointers into it)
@@ -969,10 +982,11 @@ ffxReturnCode_t FrontEnd::BrokenFrame(UpscaleContext& u, WgFrame& frame, const s
 // output size is fixed at create: every such frame was refused with WG_ERROR_PARAMETER). Within the context's
 // maxUpscaleSize the upscaler is created again for the frame's size, here on the game's thread (as a create without
 // AMD's FSR to upscale meanwhile); the outer FidelityFX context stays, the new upscaler starts without history. At most
-// kMaxResizes times per context (a game that changes the size every few frames gets the old behaviour after that), and
-// never again after a failed create (the old upscaler stays).
+// Config::maxOutputResizes times per context (a game that changes the size more often gets the old behaviour after that;
+// each kept replaced upscaler holds its GPU memory until the context is destroyed), and never again after a failed create
+// (the old upscaler stays).
 void FrontEnd::ResizeForFrame(UpscaleContext& u, WgFrame& frame, const std::string& tag) {
-    constexpr uint32_t kMaxResizes = 8;
+    const uint32_t kMaxResizes = config_.maxOutputResizes;
     if (!u.backend || !u.upscaler || u.pending || u.broken || u.resizeFailed) return;
     const uint32_t w = frame.output_width, h = frame.output_height;
     if ((w == u.createInfo.output_width && h == u.createInfo.output_height) || !w || !h) return;
@@ -982,7 +996,8 @@ void FrontEnd::ResizeForFrame(UpscaleContext& u, WgFrame& frame, const std::stri
     if (u.resizes >= kMaxResizes) {
         if (u.resizes++ == kMaxResizes)
             Log(tag + " note U" + std::to_string(u.id) + ": output size " + now + " again after " + std::to_string(kMaxResizes) +
-                " sizes; the upscaler is not created again for this context (frames of another size are refused)");
+                (kMaxResizes == 1 ? " size change" : " size changes") +
+                "; the upscaler is not created again for this context (frames of another size are refused)");
         return;
     }
     WgCreateInfo info = u.createInfo;
@@ -999,19 +1014,31 @@ void FrontEnd::ResizeForFrame(UpscaleContext& u, WgFrame& frame, const std::stri
             WgResultText(r) + "; frames of that size are refused (the stand-in or AMD's FSR takes them)");
         return;
     }
-    u.backend->destroy(u.upscaler);
+    // Issue #58: the old upscaler (and stand-in) may still be used by command lists the game recorded before this
+    // dispatch: kept until the context is destroyed, not destroyed here (that also took the old network's last frame of
+    // GPU time on the game's recording thread). Only a lost device runs nothing any more: then they go at once.
+    const bool lost = platform_.deviceLost && platform_.deviceLost(u.device);
+    const bool hadStandIn = u.fallback && u.fallbackBackend;
+    auto retire = [&](const WgUpscalerBackend* backend, WgUpscaler* upscaler) {
+        if (lost) backend->destroy(upscaler);
+        else u.replaced.push_back({backend, upscaler});
+    };
+    retire(u.backend, u.upscaler);
     u.upscaler = fresh;
     u.createInfo = info;
-    if (u.fallback && u.fallbackBackend) {  // the stand-in is made again for the new size when it is needed
-        u.fallbackBackend->destroy(u.fallback);
+    if (hadStandIn) {  // the stand-in is made again for the new size when it is needed
+        retire(u.fallbackBackend, u.fallback);
         u.fallback = nullptr;
     }
     ++u.resizes;
     frame.reset = 2;  // a new upscaler: no history
     u.resetNext = u.restartNext = false;
+    const std::string old = hadStandIn ? "the old upscaler and its stand-in are" : "the old upscaler is";
     Log(tag + " note U" + std::to_string(u.id) + ": output size " + now + " (the upscaler was created for " + was + ", the context's maximum is " +
         std::to_string(u.create.maxUpscaleSize.width) + "x" + std::to_string(u.create.maxUpscaleSize.height) +
-        "): the upscaler is created again for it; the context stays");
+        "): the upscaler is created again for it; the context stays; " +
+        (lost ? old + " destroyed now (the device is lost)"
+              : old + " kept until the context is destroyed (the game's command lists may still use them)"));
 }
 
 std::string FrontEnd::FailureKey(const WgUpscalerBackend* backend, const UpscaleContext& u) const {
@@ -1145,6 +1172,7 @@ ffxReturnCode_t FrontEnd::DestroyContext(ffxContext* context, const ffxAllocatio
         bool switched = false;  // it could have been parked, but another upscaler context is in use
         {
             std::lock_guard lock(u->mutex);
+            u->DestroyReplaced();  // issue #58: the destroy is their completion boundary, parked or not
             pending = std::move(u->pending);
             // A working upscaler is parked for the next context with the same parameters (frontend.h), with its
             // stand-in; AMD's contexts always go now.

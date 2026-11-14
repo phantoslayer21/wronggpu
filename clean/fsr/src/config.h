@@ -40,6 +40,11 @@ struct Config {
     // device, sizes, flags, options and model within that time takes it over instead of creating one (games that
     // re-create their upscaler at every step of a dynamic resolution). One parked upscaler at most; 0: never.
     uint32_t contextParkMs = 3000;
+    // Output-size changes (ResizeForFrame) per context. Each one creates an upscaler again and keeps the replaced one
+    // until the context is destroyed (issue #58), so this bounds the GPU memory that replaced upscalers hold: one
+    // Model M upscaler is about 0.9 GiB at 4K output (Quality), so 1 keeps that at or under about 1 GiB. Not a
+    // setting: no key in wronggpu.ini; tests set it.
+    uint32_t maxOutputResizes = 1;
 
     // Stand-in options, passed to the upscaler as "key=value;..." (see StandInOptions in standin_d3d12.cpp).
     std::string view = "upscale";     // upscale | warp | warpdiff | motion | depth | jitter
