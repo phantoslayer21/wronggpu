@@ -289,6 +289,66 @@ bool PinnedFile::OverwriteBytes(const void* data, size_t size, DWORD* err) {
     restoreAttrs_ = 0;
     return true;
 }
+bool PinnedFile::Create(const wstring& path, DWORD* err) {
+    Close();
+    // CREATE_NEW fails on anything at the name (a file, a folder, a link: FILE_FLAG_OPEN_REPARSE_POINT, never its target)
+    h_ = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE | FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ, nullptr, CREATE_NEW,
+                     FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (h_ == INVALID_HANDLE_VALUE) { if (err) *err = GetLastError(); return false; }
+    restoreAttrs_ = 0;
+    return true;
+}
+bool PinnedFile::ReadBytes(string& out) {
+    out.clear();
+    if (h_ == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER zero{};
+    if (!SetFilePointerEx(h_, zero, nullptr, FILE_BEGIN)) return false;
+    std::vector<char> buf(1u << 16);
+    for (;;) {
+        DWORD n = 0;
+        if (!ReadFile(h_, buf.data(), (DWORD)buf.size(), &n, nullptr)) return false;
+        if (n == 0) return true;
+        out.append(buf.data(), n);
+    }
+}
+bool PinnedFile::CopyOut(const wstring& dst, wstring* sha, DWORD* err) {
+    auto fail = [&](DWORD e) { if (err) *err = e; return false; };
+    if (h_ == INVALID_HANDLE_VALUE) return fail(ERROR_INVALID_HANDLE);
+    PinnedFile out;
+    if (!out.Create(dst, err)) return false;
+    LARGE_INTEGER zero{};
+    if (!SetFilePointerEx(h_, zero, nullptr, FILE_BEGIN)) { const DWORD e = GetLastError(); out.Delete(); return fail(e); }
+    wgc::Sha256 hash;
+    std::vector<char> buf(1u << 20);
+    for (;;) {
+        DWORD n = 0, w = 0;
+        if (!ReadFile(h_, buf.data(), (DWORD)buf.size(), &n, nullptr)) { const DWORD e = GetLastError(); out.Delete(); return fail(e); }
+        if (n == 0) break;
+        if (!WriteFile(out.h_, buf.data(), n, &w, nullptr) || w != n) { const DWORD e = GetLastError(); out.Delete(); return fail(e ? e : ERROR_WRITE_FAULT); }
+        hash.update(buf.data(), n);
+    }
+    FlushFileBuffers(out.h_);
+    if (sha) *sha = HexW(hash.finish());
+    return true;
+}
+bool PinnedFile::SetReadOnly(bool on, DWORD* err) {
+    if (h_ == INVALID_HANDLE_VALUE) { if (err) *err = ERROR_INVALID_HANDLE; return false; }
+    FILE_BASIC_INFO b{};
+    if (!GetFileInformationByHandleEx(h_, FileBasicInfo, &b, sizeof(b))) { if (err) *err = GetLastError(); return false; }
+    const DWORD attrs = on ? (b.FileAttributes | FILE_ATTRIBUTE_READONLY) : (b.FileAttributes & ~FILE_ATTRIBUTE_READONLY);
+    if (!SetAttrsByHandle(h_, attrs)) { if (err) *err = GetLastError(); return false; }
+    restoreAttrs_ = 0;  // set on purpose: Close leaves it so
+    return true;
+}
+bool WriteFileNew(const wstring& path, const void* data, size_t size, bool readOnly, DWORD* err) {
+    PinnedFile f;
+    if (!f.Create(path, err)) return false;
+    if (!f.OverwriteBytes(data, size, err) || (readOnly && !f.SetReadOnly(true, err))) {
+        f.Delete();  // (ours: created just now through this handle)
+        return false;
+    }
+    return true;
+}
 DeleteIf DeleteIfSha(const wstring& path, const std::vector<wstring>& shas, DWORD* err) {
     PinnedFile f;
     DWORD e = 0;

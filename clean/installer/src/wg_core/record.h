@@ -148,9 +148,12 @@ bool OptiIniWrittenByUs(const wstring& dir, const Record& m);
 // with its hash, or the ini is the one WrongGPU last wrote. Used only to decide what the scan reports and asks about (the
 // switch question) and which menu-saved values carry over; never to delete or overwrite a file.
 bool OptiSetupIsOurs(const wstring& dir, const Record& m);
-// Test hook: called at the named steps of DoRestore ("restored", "kept", "record-removed"); a test stops the restore there
-// (as a killed process would). Test builds also stop the process at the step named by WRONGGPU_TEST_STOP_AT.
+// Test hook: called at the named steps of DoRestore ("restored", "kept", "record-removed"), of the rollback ("rollback-absent":
+// about to create the missing payload files; "rollback-held": every payload file held and checked) and of the Engine.ini restore ("rrconfig-held": Engine.ini held and read;
+// "rrconfig-absent": about to create it); a test stops the operation there (as a killed process would) or tries to change
+// the file. Test builds also stop the process at the step named by WRONGGPU_TEST_STOP_AT.
 void SetRestoreStepHook(std::function<void(const char*)> hook);
+void RestoreStep(const char* name);  // calls the hook (above)
 // The hive the Apps & features entries go to (HKEY_CURRENT_USER unless set: the elevated worker of another account sets
 // the player's hive, HKEY_USERS\<sid>).
 HKEY UninstallHive();

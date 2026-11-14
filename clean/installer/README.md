@@ -282,7 +282,18 @@ With the defaults nothing of this section changes the installer.
     between the plan and the open can make the open reach another file, which is then compared with the plan's hash like
     any file); the game's FSR DLL, in the one step where WrongGPU's DLL is deleted and the game's file takes its name,
     is held until deleted and the move that follows creates the name only if free; the install, repair and update steps
-    that write into the game folder, the Engine.ini edit and the rollback are not covered by this (tracked separately).
+    that write into the game folder and the Engine.ini edit that adds the line are not covered by this (tracked separately).
+  - **Roll back** holds every payload file it changes through one handle (as above), compares its bytes with the hash the
+    record says WrongGPU installed, keeps the current files for a later update by copying them out through those handles,
+    and then overwrites through them. A payload file with other bytes (the player's or another program's), a hard-linked
+    one, a link, or a file that appears where a payload file was missing stops the roll back before anything changes, and
+    the result names it; the file stays as it is. A missing payload file is created only where nothing is.
+  - **The Engine.ini revert** (=off, uninstall) reads the player's `Engine.ini` through one handle and writes its
+    corrected bytes (or deletes the file WrongGPU created) through that same handle, so a replacement by another program can
+    land only before the read (that file is then the one corrected) or after the write. When the file is gone, the
+    player's copy is created only where nothing is: a file another program created meanwhile stays, the copy is kept in
+    `wronggpu-setup\rr-config`, and the result says where. A hard-linked or linked `Engine.ini` is not written; the result
+    says to take the line out by hand. The in-place write is not atomic against a stop or a power cut.
   - When the original from before WrongGPU cannot go back because of such a file, it is kept in
     `<install folder>\WrongGPU-originals\<time>\` (a folder no operation removes), checked byte for byte; a second
     generation goes into a folder of its own, neither is overwritten. The result then says "partly" and names each file
@@ -425,7 +436,8 @@ installed, replaces the game's own Apps & features entry with the launcher's.
 
 **Update and roll back**: an install over another version first keeps that version's payload files in
 `wronggpu-setup\previous` (`previous.txt`: version, hashes); Roll back swaps it in (and the newer files out, so a
-second roll back returns). One version is kept.
+second roll back returns). One version is kept. Roll back changes a payload file only while its bytes are the recorded
+ones (see "The replace race" above); otherwise it changes nothing and names the file.
 
 **The restorer** (`WrongGPU-Restore.exe`, `src/app/restore_main.cpp`): wg_core without the payload, the converter
 data or the UI, embedded in `WrongGPU.exe` (resource 960) and written into each game as

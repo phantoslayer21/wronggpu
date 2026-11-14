@@ -359,37 +359,76 @@ void RevertRrConfig(Context& ctx, const wstring& dir, Record& m, std::vector<wst
             if (backupBytes) backup = *backupBytes;
             else if (!ReadAll(RrConfigBackupPath(dir), backup)) Fail(L"the backup of " + file + L" is missing");
         }
-        if (IsFile(file)) {
+        // Engine.ini is read, compared and changed through ONE handle (PinnedFile, util.h: no write, rename or delete sharing):
+        // the bytes the edit is computed from are the bytes it writes over or deletes, and a replacement by another program can
+        // land only before the open (that file is then the one read and edited) or after the close, never in between. A missing
+        // file is created only where nothing is (CREATE_NEW): one another program made a moment ago is never replaced.
+        PinnedFile held;
+        DWORD err = 0;
+        bool kept = false;  // a file appeared where the player's copy was to go back: it stays, the copy is kept
+        if (held.Open(file, true, &err)) {
             string in;
-            if (!ReadAll(file, in)) Fail(L"Cannot read " + file);
+            if (!held.ReadBytes(in)) Fail(L"Cannot read " + file);
+            RestoreStep("rrconfig-held");  // held and read: the tests try to replace, delete or write it here (they cannot)
             string out = RrConfigRemoveText(in, fix);
             string bare = out;
             StripBom(bare);  // a file left with its byte order mark alone is empty too (r4 #5)
             const bool empty = bare.find_first_not_of(" \t\r\n") == string::npos;
-            SetReadOnly(file, false);
             if (fix.created && (in == RrConfigNewFile() || empty)) {
-                ForceDelete(file);
+                if (!held.Delete(&err)) Fail(L"Cannot delete " + file + L": " + ErrText(err));
                 LogLine(ctx, L"rr_config_fix off: " + file + L" deleted (WrongGPU created it)");
             } else {
                 if (!fix.created && empty && fix.backup) out = backup;  // nothing but our edit left: the player's file as it was
-                if (out != in) WriteFileAtomic(file, out.data(), out.size());
-                if (fix.wasReadOnly) SetReadOnly(file, true);
+                if (out != in && !held.OverwriteBytes(out.data(), out.size(), &err)) Fail(L"Cannot write " + file + L": " + ErrText(err));
+                held.SetReadOnly(fix.wasReadOnly);  // read-only as the player had it (not when only WrongGPU made it so)
+                held.Close();
                 LogLine(ctx, L"rr_config_fix off: " + file + L" put back");
             }
-        } else if (!fix.created && fix.backup) {  // gone since: the player's file from the backup
-            EnsureDir(Parent(file));
-            WriteFileAtomic(file, backup.data(), backup.size());
-            if (fix.wasReadOnly) SetReadOnly(file, true);
-            LogLine(ctx, L"rr_config_fix off: " + file + L" restored from the backup");
+        } else if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+            if (!fix.created && fix.backup) {  // gone since: the player's file from the backup, created only where nothing is
+                EnsureDir(Parent(file));
+                RestoreStep("rrconfig-absent");  // nothing is there: the tests create a file here (it must stay)
+                if (WriteFileNew(file, backup.data(), backup.size(), fix.wasReadOnly, &err)) {
+                    LogLine(ctx, L"rr_config_fix off: " + file + L" restored from the backup");
+                } else if (err == ERROR_FILE_EXISTS || err == ERROR_ALREADY_EXISTS) {
+                    kept = true;
+                    wstring keptAt = RrConfigBackupPath(dir);
+                    string onDisk;
+                    if (!ReadAll(keptAt, onDisk) || onDisk != backup) {  // (the caller held the bytes: they go next to it, never over a file)
+                        const wstring folder = Parent(keptAt), stamp = L"Engine.ini.kept-" + NowStamp(true);
+                        EnsureDir(folder);
+                        DWORD kerr = ERROR_FILE_EXISTS;
+                        for (int n = 1; n < 100 && (kerr == ERROR_FILE_EXISTS || kerr == ERROR_ALREADY_EXISTS); ++n) {  // never over another file
+                            keptAt = Join(folder, n == 1 ? stamp : stamp + L"-" + std::to_wstring(n));
+                            kerr = 0;
+                            if (WriteFileNew(keptAt, backup.data(), backup.size(), false, &kerr)) break;
+                        }
+                        if (kerr) Fail(L"Cannot keep the player's Engine.ini in " + keptAt + L": " + ErrText(kerr));
+                    }
+                    warnings.push_back(L"Left in place: " + file + L" appeared before WrongGPU could put your Engine.ini back, so the new file was kept as it is. "
+                                       L"Your Engine.ini from before WrongGPU is kept in " + keptAt);
+                    LogLine(ctx, L"rr_config_fix off: " + warnings.back());
+                } else {
+                    Fail(L"Cannot create " + file + L": " + ErrText(err));
+                }
+            }
+        } else if (err == ERROR_TOO_MANY_LINKS) {
+            Fail(file + L" has another name (a hard link), and writing through it would change that file too");
+        } else if (err == ERROR_NOT_SUPPORTED) {
+            Fail(file + L" is a link or a folder now, not a plain file");
+        } else {
+            Fail(L"Cannot open " + file + L": " + ErrText(err) + L" (another program may have it open)");
         }
         if (!fix.folder.empty())  // the folders the fix made, when nothing else is in them
             for (wstring d = Parent(file); d.size() >= fix.folder.size() && IsDir(d); d = Parent(d)) {
                 if (!RemoveDirectoryW(d.c_str())) break;
                 if (IEq(d, fix.folder)) break;
             }
-        notes.push_back(L"Engine.ini's Ray Reconstruction setting was taken out again (" + file + L")");
-        DeleteFileW(RrConfigBackupPath(dir).c_str());
-        RemoveDirectoryW(Parent(RrConfigBackupPath(dir)).c_str());
+        if (!kept) {
+            notes.push_back(L"Engine.ini's Ray Reconstruction setting was taken out again (" + file + L")");
+            DeleteFileW(RrConfigBackupPath(dir).c_str());
+            RemoveDirectoryW(Parent(RrConfigBackupPath(dir)).c_str());
+        }
     } catch (const SetupError& e) {
         warnings.push_back(L"Engine.ini could not be put back (" + e.msg + L"): take the line " + RrConfigLineW() + L" out of " + file + L" yourself" +
                            (fix.setReadOnly ? L" and clear its read-only attribute" : L""));

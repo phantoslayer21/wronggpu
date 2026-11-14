@@ -11,7 +11,9 @@
 #include <shobjidl.h>
 #include <winhttp.h>
 
+#include <algorithm>
 #include <ctime>
+#include <memory>
 
 #include "gamerules.h"
 #include "json_writer.h"
@@ -625,24 +627,92 @@ static void Rollback(Context& ctx, const wstring& dir, Ui& ui, OpResult& res) {
         Fail(L"WrongGPU " + version + L" used a different OptiScaler setup, so it can't be put back here. Nothing was changed. Uninstall and install that version instead.", EXIT_REFUSED);
     for (auto& f : files) if (Sha256File(Join(prev, f.rel)) != f.sha) Fail(L"The kept earlier version is damaged (" + f.rel + L"). Nothing was changed.", EXIT_FAILED);
     InferOwners(ctx, m);
-    // the current files become the new "previous" (Roll back twice = back to this version)
+    // The ownership rule (record.h): a payload file in the game folder is overwritten only while its bytes are the ones the record
+    // says WrongGPU installed there. Every file of the roll back is held first (PinnedFile, util.h: one handle, no write, rename
+    // or delete sharing), hashed through that handle and compared with the record; the files are then copied out and overwritten
+    // through the same handles, all held until the end. A file with other bytes (the player's, another program's), a link, a
+    // hard-linked file, or a file that appears where one was missing is never overwritten: the roll back stops before anything
+    // changes and names it (a roll back that skips one file would mix two versions).
+    struct Held { const PrevFile* f; wstring t; std::unique_ptr<PinnedFile> h; bool created; };
+    std::vector<Held> held;
+    bool committed = false;
+    struct Undo {  // a stop before the commit: the empty files created for missing ones go again (through their handles)
+        std::vector<Held>& held; const bool& committed;
+        ~Undo() { if (!committed) for (auto& x : held) if (x.created) x.h->Delete(); }
+    } undo{held, committed};
+    std::vector<wstring> notOurs, missing;
+    auto cannot = [&](const wstring& rel, DWORD err) {
+        if (err == ERROR_SHARING_VIOLATION || err == ERROR_ACCESS_DENIED || err == ERROR_LOCK_VIOLATION)
+            Fail(L"Cannot roll back " + rel + L": another program has it open. Close it and try again. Nothing was changed.", EXIT_REFUSED);
+        Fail(L"Cannot roll back " + rel + L": " + ErrText(err) + L" Nothing was changed.");
+    };
+    for (auto& f : files) {
+        const wstring t = Target(dir, f.rel);
+        const Entry* rec = nullptr;
+        for (auto& e : m.e) if (e.action == L"copy" && IEq(e.rel, f.rel)) { rec = &e; break; }
+        auto h = std::make_unique<PinnedFile>();
+        DWORD err = 0;
+        if (!h->Open(t, true, &err)) {
+            if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) missing.push_back(f.rel);
+            else if (err == ERROR_TOO_MANY_LINKS) notOurs.push_back(f.rel + L" (it has another name, a hard link)");
+            else if (err == ERROR_NOT_SUPPORTED) notOurs.push_back(f.rel + L" (a link or a folder now)");
+            else cannot(f.rel, err);
+            continue;
+        }
+        const wstring now = h->Sha256();
+        if (now.empty()) cannot(f.rel, ERROR_READ_FAULT);
+        if (!rec || rec->inst.empty() || !IEq(now, rec->inst)) { notOurs.push_back(f.rel); continue; }  // (h closes: left as it is)
+        held.push_back({&f, t, std::move(h), false});
+    }
+    // missing ones (the player deleted one): created only where nothing is, and held like the others
+    if (notOurs.empty() && !missing.empty()) RestoreStep("rollback-absent");  // the tests create a file here (it must stay)
+    if (notOurs.empty())
+        for (auto& f : files) {
+            if (std::find(missing.begin(), missing.end(), f.rel) == missing.end()) continue;
+            const wstring t = Target(dir, f.rel);
+            EnsureDir(Parent(t));
+            auto h = std::make_unique<PinnedFile>();
+            DWORD err = 0;
+            if (h->Create(t, &err)) { held.push_back({&f, t, std::move(h), true}); continue; }
+            if (err == ERROR_FILE_EXISTS || err == ERROR_ALREADY_EXISTS) notOurs.push_back(f.rel + L" (it appeared a moment ago)");
+            else cannot(f.rel, err);
+        }
+    if (!notOurs.empty()) {
+        wstring names;
+        for (auto& n : notOurs) names += (names.empty() ? L"" : L", ") + n;
+        for (auto& n : notOurs) res.warnings.push_back(L"Left in place (not the file WrongGPU installed): " + n);
+        Fail(L"Can't roll back: " + names + (notOurs.size() == 1 ? L" is" : L" are") +
+                 L" not the file WrongGPU " + m.version + L" installed (changed since, by you or another program). Nothing was changed. "
+                 L"Put WrongGPU's file back with Repair, or keep yours and stay on " + m.version + L".",
+             EXIT_REFUSED);
+    }
+    RestoreStep("rollback-held");  // every file held and checked: the tests try to change one here (they cannot)
+    // the current files become the new "previous" (Roll back twice = back to this version), copied through the held handles
     const wstring swap = prev + L".swap";
     RemoveTree(swap);
     EnsureDir(swap);
     string list = "; WrongGPU launcher: the version before the last roll back\r\nversion=" + ToUtf8(m.version) + "\r\n";
-    for (auto& f : files) {
-        const wstring t = Target(dir, f.rel);
-        if (!IsFile(t)) continue;
-        const wstring h = Sha256File(t);
-        CopyChecked(t, Join(swap, f.rel));
-        list += "file=" + ToUtf8(h) + "|" + ToUtf8(f.rel) + "\r\n";
+    for (auto& x : held) {
+        if (x.created) continue;
+        const wstring to = Join(swap, x.f->rel);
+        EnsureDir(Parent(to));
+        wstring h;
+        DWORD err = 0;
+        if (!x.h->CopyOut(to, &h, &err)) Fail(L"Cannot keep " + x.f->rel + L" for a later update: " + ErrText(err) + L" Nothing was changed.");
+        list += "file=" + ToUtf8(h) + "|" + ToUtf8(x.f->rel) + "\r\n";
     }
     WriteFileAtomic(Join(swap, L"previous.txt"), list.data(), list.size());
-    // the earlier files go in, then the record names their hashes
-    for (auto& f : files) {
-        const wstring t = Target(dir, f.rel);
-        CopyChecked(Join(prev, f.rel), t);
-        if (Sha256File(t) != f.sha) Fail(L"Verification failed after putting back " + f.rel);
+    // the earlier files go in through the held handles, then the record names their hashes
+    committed = true;
+    for (auto& x : held) {
+        const PrevFile& f = *x.f;
+        DWORD err = 0;
+        if (!x.h->Overwrite(Join(prev, f.rel), f.sha, &err)) Fail(L"Cannot put back " + f.rel + L": " + ErrText(err));
+        if (!IEq(x.h->Sha256(), f.sha)) Fail(L"Verification failed after putting back " + f.rel);
+    }
+    for (auto& x : held) x.h->Close();
+    for (auto& x : held) {
+        const PrevFile& f = *x.f;
         for (auto& e : m.e) if (e.action == L"copy" && IEq(e.rel, f.rel)) e.inst = f.sha;
         if (IEq(f.rel, L"wronggpu_runtime.dll")) m.runtimeSha = f.sha;
         else if (IsOptiFrontEnd(f.rel) || IEq(f.rel, L"amd_fidelityfx_dx12.dll")) m.frontEndSha = f.sha;

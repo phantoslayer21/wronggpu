@@ -528,7 +528,7 @@ bool AnyPartly(const std::vector<wstring>& warnings) {
 
 static std::function<void(const char*)> g_restoreStepHook;
 void SetRestoreStepHook(std::function<void(const char*)> hook) { g_restoreStepHook = std::move(hook); }
-static void RestoreStep(const char* name) {
+void RestoreStep(const char* name) {
     if (g_restoreStepHook) g_restoreStepHook(name);
 #ifdef WRONGGPU_TESTING
     if (EnvVar(L"WRONGGPU_TEST_STOP_AT") == FromUtf8(name)) ExitProcess(99);  // tests: the process stops here, as if killed
