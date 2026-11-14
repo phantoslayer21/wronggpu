@@ -53,7 +53,10 @@ def soft_cap(S, cap):
 
 
 def _block_tokens(xw, p, heads, k):
-    """One block on gathered windows xw [..., T, C] (T = window^2), constants k. Same step order as Model M's."""
+    """One block on gathered windows xw [..., T, C] (T = window^2), constants k. k["form"] "m" (default): Model M's
+    step order in float64 with Model M's roundings; "q7": the FP16 form of _block_tokens_q7."""
+    if k.get("form", "m") == "q7":
+        return _block_tokens_q7(xw, p, heads, k)
     C = xw.shape[-1]
     T = xw.shape[-2]
     lead = xw.shape[:-2]
@@ -71,6 +74,138 @@ def _block_tokens(xw, p, heads, k):
     m = q8(rmsnorm(x1, p["gamma2"], C, k["eps_num"]))
     h = q8(gelu(m @ p["W1"].T + p["b1"], k["gelu"]))
     return x1 + h @ p["W2"].T + p["b2"]
+
+
+# ---- the width-32 block in its FP16 form ("q7") ---------------------------------------------------------------------
+#
+# Every FP16 step rounds after each single operation (f16), FMA16 rounds once. An FP8 matrix op is one 32-term product
+# sum of FP8 operands started from an FP16 value and rounded once to FP16 (exact in float64: the terms are multiples
+# of 2^-24 below 2^23). Chunk chains of such ops run in ascending order. The attention product P V (FP16 operands,
+# 16 terms) is summed in float64 and rounded once (its accumulation precision does not move an FP16 result).
+
+def _h(bits):
+    """The FP16 constant with this bit pattern, as float64."""
+    return float(np.array([bits], np.uint16).view(np.float16)[0])
+
+
+Q7_SCORE_SCALE = _h(0x2466)
+Q7_SCORE_CLAMP = _h(0x3873)
+Q7_POLY_T = _h(0x3B6B)
+Q7_POLY_P = _h(0x3D80)
+Q7_NORM_EPS = 2.0 ** -13           # 32 x the per-channel epsilon (the norm sums squares, it does not average)
+Q7_GELU_A = _h(0x3698)
+Q7_GELU_B = _h(0x2D30)
+
+
+def _rsqrt32(v):
+    """The single-precision reciprocal square root of float32(v) (its last bit does not move the FP16 result)."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        s = np.asarray(v, np.float64).astype(np.float32)
+        return (np.float32(1.0) / np.sqrt(s)).astype(np.float64)
+
+
+def _rcp32(v):
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return (np.float32(1.0) / np.asarray(v, np.float64).astype(np.float32)).astype(np.float64)
+
+
+def gamma_q7(gamma):
+    """g' = RN16(float32(gamma) x sqrtf(32)), the norm's gain with the sqrt(32) of its sum of squares folded in."""
+    g = np.asarray(gamma, np.float64).astype(np.float32) * np.sqrt(np.float32(32.0))
+    return f16(g.astype(np.float32))
+
+
+def norm_q7(x, gp):
+    """RMS norm over the last axis (32 channels) of FP16 values x with gain gp (gamma_q7): FP16 squares, the even and
+    odd channels summed separately in a fixed tree, + 2^-13, RN16 of the single-precision reciprocal square root,
+    then x RN16(r gp)."""
+    x = np.asarray(x, np.float64)
+    if x.shape[-1] != 32:
+        raise ValueError("norm_q7: 32 channels")
+    with np.errstate(over="ignore", invalid="ignore"):
+        q = f16(x * x)
+
+        def lane(c0):   # one lane's partial sum: channels c0, c0 + 16, c0 + 8, c0 + 24
+            return f16(f16(q[..., c0] + q[..., c0 + 16]) + f16(q[..., c0 + 8] + q[..., c0 + 24]))
+
+        def half(odd):
+            e = [lane(2 * t + odd) for t in range(4)]
+            return f16(f16(e[0] + e[1]) + f16(e[2] + e[3]))
+
+        s = f16(f16(half(0) + half(1)) + Q7_NORM_EPS)
+        r = f16(_rsqrt32(s))
+        return f16(x * f16(r[..., None] * gp))
+
+
+def softmax_q7(s):
+    """Attention weights over the last axis (16 keys) from FP16 scores s: u = RN16(s c) clamped to +-c', the FP16
+    polynomial p = FMA16(u, FMA16(u, -u, t0), p0) in [1, 2), the weight e = the FP16 number with bits (mantissa bits
+    of p) << 5, the FP16 row sum in a fixed tree, w = RN16(rcp(sum)), P = RN16(e w). A NaN score takes the lower clamp
+    (min / max return the number)."""
+    s = np.asarray(s, np.float64)
+    if s.shape[-1] != 16:
+        raise ValueError("softmax_q7: 16 keys")
+    with np.errstate(over="ignore", invalid="ignore"):
+        u = np.fmin(np.fmax(f16(s * Q7_SCORE_SCALE), -Q7_SCORE_CLAMP), Q7_SCORE_CLAMP)
+        t = f16(u * -u + Q7_POLY_T)
+        p = f16(u * t + Q7_POLY_P)
+        pb = p.astype(np.float16).view(np.uint16)
+        e = (((pb & 0x03FF) << 5).astype(np.uint16)).view(np.float16).astype(np.float64)
+
+        def pair(lo):   # a_t = RN16(e_{lo+2t} + e_{lo+8+2t}), tree over t
+            a = [f16(e[..., lo + 2 * t] + e[..., lo + 8 + 2 * t]) for t in range(4)]
+            return f16(f16(a[0] + a[1]) + f16(a[2] + a[3]))
+
+        total = f16(pair(0) + pair(1))
+        w = f16(_rcp32(total))
+        return f16(e * w[..., None])
+
+
+def gelu_q7(h):
+    """y = clamp(h, -2, 2); g = RN16(h RN16(1/2 + RN16(y RN16(a - RN16(b |y|))))), every step its own rounding."""
+    h = np.asarray(h, np.float64)
+    with np.errstate(over="ignore", invalid="ignore"):
+        y = np.fmin(np.fmax(h, -2.0), 2.0)
+        return f16(h * f16(0.5 + f16(y * f16(Q7_GELU_A - f16(Q7_GELU_B * np.abs(y))))))
+
+
+def _mm8(start, a8, W8):
+    """One FP8 matrix op: RN16(start + a8 W8^T), a8 [..., 32], W8 [n, 32]."""
+    with np.errstate(over="ignore", invalid="ignore"):
+        return f16(start + a8 @ W8.T)
+
+
+def _block_tokens_q7(xw, p, heads, k):
+    """The width-32 block in its FP16 form on gathered windows xw [..., T, C] (FP16 values; T = 16, C = 32):
+    norm (norm_q7, gamma1) -> FP8 -> per head u = FP8(FP8 op Wqk), v = FP8 op Wv (FP16), scores = FP8 op u u started
+    from B, weights softmax_q7, o = RN16(P v) -> FP8; z = the Wp chain (head 0, then head 1) started from RN16(bp + x);
+    norm (gamma2) -> FP8; the MLP in 32-wide slices, ascending: h = FP8 op W1 slice started from b1's slice, gelu_q7,
+    FP8, added by W2's matching chunk onto the chain started from RN16(b2 + z). Returns the FP16 block output. The
+    matrices are rounded to FP8 here (no change for an FP8 file)."""
+    C = xw.shape[-1]
+    T = xw.shape[-2]
+    if C != 32 or T != 16 or k["head_dim"] != 32:
+        raise ValueError("_block_tokens_q7: the width-32 block (C 32, 4 x 4 windows, heads of 32)")
+    lead = xw.shape[:-2]
+    x = np.asarray(xw, np.float64)
+    W = {n: q8(p[n]) for n in ("Wqk", "Wv", "Wp", "W1", "W2")}
+    with np.errstate(over="ignore", invalid="ignore"):
+        a8 = q8(norm_q7(x, gamma_q7(p["gamma1"])))
+        u = q8(f16(np.einsum("hdc,...tc->...htd", W["Wqk"], a8)))
+        v = f16(np.einsum("hdc,...tc->...htd", W["Wv"], a8))
+        s = f16(p["B"] + np.einsum("...htd,...hsd->...hts", u, u))
+        o = f16(np.einsum("...hts,...hsd->...htd", softmax_q7(s), v))
+        o8 = q8(np.moveaxis(o, -3, -2).reshape(lead + (T, heads * 32)))
+        z = f16(p["bp"] + x)
+        for hd in range(heads):
+            z = _mm8(z, o8[..., 32 * hd:32 * hd + 32], W["Wp"][:, 32 * hd:32 * hd + 32])
+        m8 = q8(norm_q7(z, gamma_q7(p["gamma2"])))
+        acc = f16(p["b2"] + z)
+        for sl in range(W["W1"].shape[0] // 32):
+            r = slice(32 * sl, 32 * sl + 32)
+            hs = _mm8(p["b1"][r], m8, W["W1"][r])
+            acc = _mm8(acc, q8(gelu_q7(hs)), W["W2"][:, r])
+    return acc
 
 
 def window_grid(H, W, offset, win):

@@ -95,13 +95,20 @@ TABLE = {
     # Window offsets (ox, oy) of an L block for frame parity 0 and 1, in pixels; the blocks run on the padded grid F
     # and keep every grid position's output.
     "window_offsets": {"first": ((2, 2), (0, 2)), "second": ((0, 0), (2, 0))},
-    # Per-block constants; a block's own entry (key = its params stage) wins over "default".
-    "consts": {"default": dict(M_BLOCK_CONSTS)},
+    # Per-block constants; a block's own entry (key = its params stage) wins over "default". "form": "m" = Model M's
+    # block arithmetic (oracle._block_tokens), "q7" = the width-32 block's FP16 form (oracle._block_tokens_q7: FP16
+    # accumulators per 32-wide FP8 op, the polynomial-and-bit-shift attention weights, the FP16 GELU polynomial, the
+    # FP16 norm tree with sqrt(32) in the gain, residuals as accumulator starts). The decoder block takes "q7"; the
+    # encoder block keeps "m" until its form is confirmed (PROVISIONAL "E7").
+    "consts": {"default": dict(M_BLOCK_CONSTS, form="m"), "dec0_block": {"form": "q7"}},
 }
 
 DEC_PIXEL_VALUES = {"l": len(L_DEC_VALUES), "m": len(M_DEC0_VALUES)}
 
-PROVISIONAL = {}
+PROVISIONAL = {
+    "E7": "the encoder block's arithmetic: Model M's block form (consts form 'm') until the width-32 FP16 form is "
+          "confirmed for it too",
+}
 
 # Model M's reconstruction in the same terms (clean/reference/post.py reconstruct): for reductions and tests.
 M_RECON = {"rule": "d_over_render_at_least", "ratio": 3.0, "variants": ("3/2", "3/1"), "window": 3,

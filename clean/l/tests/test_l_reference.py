@@ -38,16 +38,16 @@ def _same(a, b):
     return a.shape == b.shape and a.dtype == b.dtype and a.tobytes() == b.tobytes()
 
 
-def _block_by_windows(value_at, H, W, off, p, heads=2):
+def _block_by_windows(value_at, H, W, off, p, heads=2, consts=T.M_BLOCK_CONSTS):
     """A block written window by window: value_at(y, x) gives any window member's input (inside or outside the
-    grid); outputs are kept on the H x W grid. Float64, not rounded."""
+    grid); outputs are kept on the H x W grid. Float64, not rounded (form "m"; the "q7" form returns FP16)."""
     p = {k: np.asarray(v, np.float64) for k, v in p.items()}
     ox, oy = off
     out = None
     for y0 in range(-oy, H, 4):
         for x0 in range(-ox, W, 4):
             pos = [(y, x) for y in range(y0, y0 + 4) for x in range(x0, x0 + 4)]
-            y = L._block_tokens(np.stack([value_at(a, b) for a, b in pos]), p, heads, T.M_BLOCK_CONSTS)
+            y = L._block_tokens(np.stack([value_at(a, b) for a, b in pos]), p, heads, consts)
             if out is None:
                 out = np.full((H, W, y.shape[-1]), np.nan)
             for i, (a, b) in enumerate(pos):
@@ -280,11 +280,14 @@ class DecoderTest(unittest.TestCase):
             return y[yy // 2, q, 32 * ((xx % 2) + 2 * (yy % 2)):][:32]
 
         self.assertTrue(_same(member(0, -1), member(0, 3)) and _same(member(1, fw), member(1, fw - 4)))
-        p = L.f16(_block_by_windows(member, fh, fw, T.block_offset(T.TABLE, "second", 1), params["dec0_block"]))
+        k = T.block_consts(T.TABLE, "dec0_block")                               # the FP16 form ("q7")
+        self.assertEqual(k["form"], "q7")
+        p = L.f16(_block_by_windows(member, fh, fw, T.block_offset(T.TABLE, "second", 1), params["dec0_block"],
+                                    consts=k))
         np.testing.assert_array_equal(m["y2"], p)                                 # FP16 block output, no FP8
         self.assertFalse(is_fp8_exact(p))
         fine = L.f16(L.swin_block(L.depth_to_space(y), params["dec0_block"], T.block_offset(T.TABLE, "second", 1),
-                                  2, T.M_BLOCK_CONSTS))
+                                  2, k))
         self.assertFalse(_same(fine, p))                                         # not a fine-pixel mirror
         self.assertTrue(_same(fine[:, 2:-2], p[:, 2:-2]))                        # ... only the edge windows differ
         a = p[:18, :30][..., [0, 1, 6, 7, 8, 9, 10, 11, 12, 2, 3, 4, 5]].astype(np.float32)
@@ -407,6 +410,92 @@ class TableTest(unittest.TestCase):
         self.assertEqual(T.TABLE["dec_pixel"], "l")
         with self.assertRaises(KeyError):
             T.table(nonsense=1)
+
+
+class Q7FormTest(unittest.TestCase):
+    """The width-32 block's FP16 form (oracle._block_tokens_q7) and its pieces: known answers."""
+
+    def test_attention_weights_known_answers(self):
+        P = L.softmax_q7(np.zeros(16))        # s = 0: p = 1.375, e = 0.125, sum 2, w = 0.5
+        np.testing.assert_array_equal(P, np.full(16, 0.0625))
+        big = L.softmax_q7(np.array([1e4] + [0.0] * 15))
+        clamp = L.softmax_q7(np.array([60.0] + [0.0] * 15))   # 60 c is past the clamp already
+        np.testing.assert_array_equal(big, clamp)
+        nan = L.softmax_q7(np.array([np.nan] + [0.0] * 15))   # min / max return the number: the lower clamp
+        low = L.softmax_q7(np.array([-1e4] + [0.0] * 15))
+        np.testing.assert_array_equal(nan, low)
+        self.assertTrue(np.all(L.softmax_q7(np.linspace(-80, 80, 16)) > 0))
+
+    def test_attention_weight_bits(self):
+        """bits(e) = (mantissa bits of p) << 5 for p in [1, 2): e grows with the score."""
+        s = np.linspace(-30, 30, 16)
+        u = np.fmin(np.fmax(L.f16(s * L.Q7_SCORE_SCALE), -L.Q7_SCORE_CLAMP), L.Q7_SCORE_CLAMP)
+        p = L.f16(u * L.f16(u * -u + L.Q7_POLY_T) + L.Q7_POLY_P)
+        self.assertTrue(np.all((p >= 1) & (p < 2)))
+        P = L.softmax_q7(s)
+        self.assertTrue(np.all(np.diff(P) > 0))
+
+    def test_gelu_known_answers(self):
+        h = np.array([2.0, 3.5, 100.0, -2.0, -3.0, 0.0, 1.0])
+        g = L.gelu_q7(h)
+        np.testing.assert_array_equal(g[:3], h[:3])                   # g = h from 2 on
+        np.testing.assert_array_equal(g[3:6], 0.0)                    # 0 from -2 down, and at 0
+        self.assertEqual(g[6], 0.8310546875)                          # 1 x (1/2 + 1 x (a - b))
+        self.assertTrue(np.isnan(L.gelu_q7(np.array([np.nan]))[0]))
+
+    def test_norm_known_answers(self):
+        self.assertEqual(float(L.gamma_q7(np.array([1.0]))[0]), 5.65625)    # RN16(float32(1) x sqrtf(32))
+        x = np.ones(32)
+        r = L.f16(np.float32(1) / np.sqrt(np.float32(32)))             # the sum is 32, + 2^-13 rounds back to 32
+        np.testing.assert_array_equal(L.norm_q7(x, L.gamma_q7(np.ones(32))), L.f16(r * 5.65625))
+        z = np.zeros(32)
+        np.testing.assert_array_equal(L.norm_q7(z, L.gamma_q7(np.ones(32))), z)   # 0 x r, r from the epsilon
+
+    def test_norm_sum_order(self):
+        """The even / odd lane tree: a value that the plain sequential FP16 sum loses survives the tree."""
+        x = np.zeros(32)
+        x[0], x[1] = 256.0, 256.0            # squares 65536 -> FP16 inf: both halves overflow
+        self.assertTrue(np.all(L.norm_q7(x, L.gamma_q7(np.ones(32)))[2:] == 0))
+        x = np.zeros(32)
+        x[0] = 64.0                          # 4096 in the even half
+        x[1:32:2] = 0.5                      # 16 x 0.25 = 4 in the odd half (each lane 1.0 exactly)
+        q_even, q_odd = 4096.0, 4.0
+        s = L.f16(L.f16(q_even + q_odd) + L.Q7_NORM_EPS)
+        r = L.f16(np.float32(1) / np.sqrt(np.float32(s)))
+        np.testing.assert_array_equal(L.norm_q7(x, L.gamma_q7(np.ones(32))), L.f16(x * L.f16(r * 5.65625)))
+
+    def test_zero_weights_pass_the_input(self):
+        """All weights and biases 0: z = RN16(0 + x), the MLP adds nothing, the block returns its FP16 input."""
+        rng = np.random.default_rng(3)
+        p = {k: np.zeros_like(v) for k, v in L.random_block_params(rng, 32, 2, 128).items()}
+        p["gamma1"] = p["gamma2"] = np.ones(32)
+        x = L.f16(rng.normal(0, 3, (5, 16, 32)))
+        k = T.block_consts(T.TABLE, "dec0_block")
+        np.testing.assert_array_equal(L._block_tokens(x, p, 2, k), x)
+
+    def test_residual_starts_and_chunk_order(self):
+        """The output is the W2 chain started from RN16(b2 + z), z the Wp chain started from RN16(bp + x): with only
+        bp and b2 set, the block adds them with those two roundings."""
+        rng = np.random.default_rng(4)
+        p = {k: np.zeros_like(v) for k, v in L.random_block_params(rng, 32, 2, 128).items()}
+        p["gamma1"] = p["gamma2"] = np.ones(32)
+        p["bp"] = L.f16(rng.normal(0, 1, 32))
+        p["b2"] = L.f16(rng.normal(0, 1, 32))
+        x = L.f16(rng.normal(0, 30, (3, 16, 32)))
+        got = L._block_tokens(x, p, 2, T.block_consts(T.TABLE, "dec0_block"))
+        np.testing.assert_array_equal(got, L.f16(p["b2"] + L.f16(p["bp"] + x)))
+
+    def test_decoder_uses_the_fp16_form_and_encoder_does_not_yet(self):
+        self.assertEqual(T.block_consts(T.TABLE, "dec0_block")["form"], "q7")
+        self.assertEqual(T.block_consts(T.TABLE, "enc0_block")["form"], "m")
+        self.assertIn("E7", T.PROVISIONAL)
+        rng = np.random.default_rng(5)
+        p = L.random_block_params(rng, 32, 2, 128)
+        x = q8(rng.normal(0, 2, (4, 16, 32)))
+        m = L._block_tokens(x, p, 2, T.M_BLOCK_CONSTS)
+        q = L._block_tokens(x, p, 2, T.block_consts(T.TABLE, "dec0_block"))
+        self.assertFalse(np.array_equal(L.f16(m), q))
+        self.assertTrue(np.array_equal(L.f16(q), q))                  # the FP16 form's output is FP16
 
 
 if __name__ == "__main__":

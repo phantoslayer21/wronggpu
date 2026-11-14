@@ -302,7 +302,7 @@ class ReconTest(unittest.TestCase):
         x = _inputs(rng)
         params = {"post": {"s": np.float32(2.9796233)}}
         self.assertTrue(_same(L.reconstruct(x, params)["display"], R.reconstruct(x, 2.9796233)["display"]))
-        self.assertEqual(T.PROVISIONAL, {})
+        self.assertEqual(set(T.PROVISIONAL), {"E7"})   # only the encoder block's form is pending
 
 
 if __name__ == "__main__":
