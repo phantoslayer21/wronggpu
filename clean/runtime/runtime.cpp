@@ -243,7 +243,7 @@ struct Runtime {
   // runtime option l_post=own (native D3D12): Model L's own reconstruction l_post_recon_p12 (l_post.co's D3D12 port),
   // then the unbanded analytic filter w64/post_filter_c1_s4, in place of Model M's fused pack12 post (l_post=m, the
   // default there for now). On the direct-resource route the colour is staged into color_net (l_direct_color) and the
-  // filter's FP32 output stored into the game's texture (l_direct_store; dx12/kernels/l_post_direct.hlsl).
+  // filter writes the game's texture itself (l_post_filter_direct, dx12/kernels/post_filter.hlsl).
   bool l_own_post = false;
 #ifdef WG_MODEL_L
   // The maps of clean/l/FORMATS.md in three buffers (no kernel works in place):
@@ -1427,11 +1427,11 @@ struct Runtime {
     const int ny = std::max(256, max_rh / 2);
     // External buffer I/O keeps depth/motion/color_net for raw-input conversion. Direct textures need none of the
     // five dense I/O buffers; their shader loads/stores use the caller's typed descriptors instead.
-    // (l_post=own on the direct route: the staged colour and the filter's FP32 output, l_direct_color / l_direct_store)
+    // (l_post=own on the direct route: the staged colour, l_direct_color; the filter writes the game's texture)
     const bool own_direct = native_direct_io && l_own_post;
     bool ok = (external_io || (alloc(&color, R * 16) && alloc(&out, On * 12))) &&
               (native_direct_io || (alloc(&depth, R * 4) && alloc(&motion, R * 8) && alloc(&color_net, R * 16))) &&
-              (!own_direct || (alloc(&color_net, R * 16) && alloc(&out, On * 12))) &&
+              (!own_direct || alloc(&color_net, R * 16)) &&
               alloc(&expo, 32) &&
               (!native_direct_io || (alloc(&f16lut, kF16LutBytes) && (dev->memset(f16lut, 0, 256) || dfail()))) &&
               alloc(&expo_partials, 4 * (size_t)cdiv(ny, 4)) && alloc(&expo_computed, 4) && alloc(&expo_sync, 4) &&
@@ -1651,7 +1651,7 @@ struct Runtime {
     std::vector<std::string> need = {"l_post_recon_p12", "l_post_recon", "l_coef", "w64/post_filter_c1_s4"};
     if (native_direct_io) {
       need.push_back("l_direct_color");
-      need.push_back("l_direct_store");
+      need.push_back("l_post_filter_direct");
     }
     const std::string missing = manifest_missing(need);
     if (!missing.empty()) return fail("Model L on native D3D12 (l_post=own): not yet ported to D3D12: " + missing);
@@ -2462,15 +2462,14 @@ struct Runtime {
         if (post_band) filter_shape(fk, &tx, &fs);
         const int grid = cdiv(ow, tx) * cdiv(cdiv(oh, 2), 2 * fs);
         // (post_filter_quality9 is its own filter and never runs with output_filter=original)
-        if (!launch((post_pre + fk).c_str(), grid, 64,
-                    with_taps({&display, &outp, &a, &b, &c, &d, &dec_scale, &expo})))
+        // l_post=own on the direct route: the filter's direct form writes the game's output texture (times pi as
+        // scale_rgb, the Converter's typed store or the output-copy bytes); out_p is not written
+        const std::string fname = own_direct ? std::string("l_post_filter_direct") : post_pre + fk;
+        if (!launch(fname.c_str(), grid, 64, with_taps({&display, &outp, &a, &b, &c, &d, &dec_scale, &expo})))
           return false;
-        filter_last = fk;
+        filter_last = own_direct ? "l_post_filter_direct" : fk;
       }
-      if (own_direct) {  // the game's output texture: times pi (as scale_rgb) and the Converter's typed store
-        int ow_i = ow, oh_i = oh;
-        if (!launch("l_direct_store", cdiv(ow * oh, 256), 256, {&outp, &ow_i, &oh_i})) return false;
-      } else if (hp <= 0 && pi != 1.0f) {  // spec 10 draft 2: the filter's result times pi
+      if (!own_direct && hp <= 0 && pi != 1.0f) {  // spec 10 draft 2: the filter's result times pi
         int n3 = 3 * ow * oh;
         float p_ = pi;
         if (!launch("scale_rgb", cdiv(n3, 256), 256, {&outp, &p_, &n3})) return false;
