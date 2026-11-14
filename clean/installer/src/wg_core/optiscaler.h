@@ -65,7 +65,8 @@ inline const GameNotice kGameNotices[] = {
 // Install record: the plugin is a "copy" entry and the plugins folder (when new) a "dir" entry; OptiScaler.ini is
 // installed as a whole file with a backup of the player's, so an uninstall removes the plugin and its folder and
 // puts the player's OptiScaler.ini back byte for byte. The plugin's own files (wronggpu-asi.log, wronggpu-asi.ini:
-// the entry last selected) are written into the OptiScaler folder, named wronggpu-*, and go with RemoveRuntimeFiles.
+// the entry last selected) are written into the OptiScaler folder, named wronggpu-*. The install does not record them, so an
+// uninstall leaves them in place and lists them (UnrecordedRuntimeFiles).
 // OptiScaler.ini keys for the plugin (entries of kOptiIni). Path=auto: OptiScaler's "plugins" folder next to itself.
 #define WRONGGPU_ASI_INI {"Plugins", "LoadAsiPlugins", "true"}, {"Plugins", "Path", "auto"},
 
@@ -78,8 +79,8 @@ inline bool OptiOnlyPayload(const std::wstring& rel) { return _wcsicmp(rel.c_str
 // folder, in the plugin's own format (FormatSelection, clean/fsr/asi/asi_thunk.h). With the plugin hooked, its entry
 // decides over wronggpu.ini's model=, so without this file a Preset K install would start on Model M (the plugin's
 // default). Preset K: "selection=wronggpu-k" (WrongGPU (Model K)); Model M: "selection=wronggpu". Written after the
-// install succeeded and not recorded: it is one of the plugin's own files (wronggpu-*), which an uninstall removes
-// (RemoveRuntimeFiles), as the restore of an earlier install removes that install's copy before this one is made.
+// install succeeded and not recorded: it is one of the plugin's own files (wronggpu-*), which an uninstall leaves in place
+// and lists (UnrecordedRuntimeFiles; nothing proves it WrongGPU's), and which this write replaces on an update.
 inline void SeedAsiSelection(Context& ctx, const std::wstring& dir, bool presetK) {
     const std::string text = std::string("; WrongGPU OptiScaler plugin: the entry last selected in OptiScaler's upscaler list\r\n"
                                          "; (wronggpu or amd). Deleting this file selects WrongGPU.\r\nselection=") +

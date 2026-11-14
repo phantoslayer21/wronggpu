@@ -2,6 +2,8 @@
 // WrongGPU launcher core: small helpers (strings, paths, files, SHA-256), moved unchanged from setup.cpp. Written for
 // this project.
 #pragma once
+#include <functional>
+
 #include "constants.h"
 #include "sha256.h"
 
@@ -55,6 +57,56 @@ void EnsureDir(const wstring& dir, std::vector<wstring>* created = nullptr);
 void ForceDelete(const wstring& p);
 void WriteFileAtomic(const wstring& path, const void* data, size_t size);
 void CopyChecked(const wstring& src, const wstring& dst);
+// Copies src to dst only when nothing is at dst (the creation itself fails when something is: ERROR_FILE_EXISTS, so a file
+// that appeared a moment ago is never overwritten). false: not copied, `err` holds why.
+bool CopyNew(const wstring& src, const wstring& dst, DWORD* err = nullptr);
+
+// A plain file held while it is checked and then deleted or overwritten (record.h, "the replace race"). It is opened once with
+// DELETE and read access (and write access when forWrite) and FILE_SHARE_READ only: while this object holds it, no other
+// program can write to it, rename it, replace it or delete it, so the bytes hashed through the handle are the bytes the delete
+// or the overwrite through the same handle acts on. Links and folders are refused, and so is a file with more than one name
+// (a hard link) when it is opened for writing (ERROR_TOO_MANY_LINKS): bytes written through one name change the others. A
+// read-only file opened for writing is made writable only after a probe has shown what it is, and is put back as it was when
+// it is not written. What it does not cover: the folders
+// above the file are resolved by name when it is opened (a program that can rename or replace one of them can make the open
+// reach another file; the open then hashes that file, and the hash is compared with the one the plan was made on).
+class PinnedFile {
+public:
+    PinnedFile() = default;
+    PinnedFile(const PinnedFile&) = delete;
+    PinnedFile& operator=(const PinnedFile&) = delete;
+    ~PinnedFile() { Close(); }
+    // false: nothing is held; err is ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND (nothing there), a sharing violation or access
+    // denied (another program holds it), or ERROR_NOT_SUPPORTED (a folder or a link, not a plain file).
+    bool Open(const wstring& path, bool forWrite, DWORD* err = nullptr);
+    bool IsOpen() const { return h_ != INVALID_HANDLE_VALUE; }
+    wstring Sha256();  // of the bytes through the handle (empty: cannot be read)
+    // Deletes the file through the handle (FileDispositionInfoEx with POSIX semantics, the read-only attribute ignored; the
+    // older FileDispositionInfo where that is not supported) and closes it. The name is free when this returns true.
+    bool Delete(DWORD* err = nullptr);
+    // Replaces the bytes through the handle (forWrite) with src's, which are hashed first and must be `srcSha` (nothing is
+    // touched otherwise); the attributes and times of src are put on the file. false: err holds why (ERROR_FILE_CORRUPT when
+    // src is not srcSha). Not atomic against a stop: the record and the backup are kept until the restore is complete.
+    bool Overwrite(const wstring& src, const wstring& srcSha, DWORD* err = nullptr);
+    // Replaces the bytes through the handle (forWrite) with `data`: the conditional write of a file that was hashed through this
+    // same handle (a settings migration). The file's attributes stay.
+    bool OverwriteBytes(const void* data, size_t size, DWORD* err = nullptr);
+    void Close();  // a read-only bit that Open cleared for a write that did not happen is put back
+
+private:
+    HANDLE h_ = INVALID_HANDLE_VALUE;
+    DWORD restoreAttrs_ = 0;  // the attributes to put back on Close (a read-only file that Open made writable); 0: none
+};
+enum class DeleteIf { Deleted, Gone, Changed, Failed };
+// Deletes path when its bytes are one of `shas` (pinned: hashed and deleted through one handle). Gone: nothing was there.
+// Changed: other bytes (or a link or folder): nothing was done. Failed: held by another program or not deletable (err).
+DeleteIf DeleteIfSha(const wstring& path, const std::vector<wstring>& shas, DWORD* err = nullptr);
+// Deletes below `root` only the files `ours` accepts (their path below root, backslashes, and the file held: it can hash it) and
+// the folders left empty by that (RemoveDirectoryW: a folder with anything in it stays). A file is deleted through the handle
+// it was checked through (PinnedFile); a link, a file
+// another program holds and every file that is not ours stay. keepFile (a full path, the running uninstaller) is skipped
+// without being listed. Returns what stays, as paths below root. root itself goes only when it is empty at the end.
+std::vector<wstring> RemoveOwned(const wstring& root, const std::function<bool(const wstring&, PinnedFile&)>& ours, const wstring& keepFile = L"");
 void RemoveTree(const wstring& dir, const wstring& keepFile = L"");
 std::vector<wstring> ListFiles(const wstring& dir, const wchar_t* pattern);
 std::vector<wstring> ListDirs(const wstring& dir);
