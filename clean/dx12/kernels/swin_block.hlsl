@@ -10,7 +10,10 @@
 //   SW_SRC                  gather source (HIP's SRC hook; plain blocks only): 0 the FP8 map at the mirrored member
 //                           (default); 1 Model L's encoder block, an FP16 halo map [H + 4][W + 4][C] read directly at
 //                           (pr + 2, pc + 2) (LHaloF16Src); 2 Model L's decoder block, the FP8 map with the token-grid
-//                           mirror, sub-pixel kept (LCoarseFp8Src)
+//                           mirror, sub-pixel kept (LCoarseFp8Src); 3 (D3D12 only) Model L's encoder block with
+//                           its two input linears as the prologue: the FP8 q halo map [H + 4][W + 4][32] at the same
+//                           position through the linears (hlsl/l_lin_px.hlsli), the FP16 values mode 1 reads from x2,
+//                           in registers (the x2 map is neither written nor read)
 //   SW_OUT_F16              1: the output is RN16(x2) as an FP16 map [H][W][C] (Model L's decoder block, LStoreF16Epi)
 //   SW_OUT_COEF12           1 (with SW_OUT_F16, C = 32): instead of the FP16 map, l_coef_pack12 of it as the epilogue:
 //                           the lane that holds a pixel's channels 0..15 (hh = 0) runs hlsl/l_coef_px.hlsli on those
@@ -36,6 +39,9 @@ WG_ARGS_BEGIN
 #if SW_OUT_COEF12
     uint coefA, coefC, coefL, coefW;   // pointers: l_coef_pack12's A, C, latent and coefficient blob (out_p unused)
     int coefRw, coefRh;                // the render rectangle
+#endif
+#if SW_SRC == 3
+    uint linW1, linW2;                 // pointers: enc0.Win1, enc0.Win2 (x = the FP8 q halo map)
 #endif
 WG_ARGS_END
 
@@ -432,6 +438,30 @@ void sw_load_halo_f16(uint base, int pr, int pc, int W, uint hh, out v8f f[KC])
         f[k].v[4] = wg_h2f_lo(q.z); f[k].v[5] = wg_h2f_hi(q.z); f[k].v[6] = wg_h2f_lo(q.w); f[k].v[7] = wg_h2f_hi(q.w);
     }
 }
+#elif SW_SRC == 3
+#if SW_C != 32
+#error "SW_SRC 3: Model L's encoder block (C = 32)"
+#endif
+#include "l_lin_px.hlsli"
+// LHaloLinSrc: the values of LHaloF16Src without the x2 map: the member at grid position (pr, pc) is pixel
+// (pr + 2) (W + 4) + pc + 2 of the FP8 q halo map, through l_linear_32_32_fused's arithmetic (lane (t, h) = that
+// kernel's lane of the pixel; every lane runs it, also for outside members: wave-uniform control flow)
+void sw_load_halo_lin(uint base, int pr, int pc, int W, uint lane, uint hh, out v8f f[KC])
+{
+    const uint pix = (uint)((pr + 2) * (W + 4) + pc + 2);
+    uint2 xq[2];
+    [unroll] for (uint kc = 0; kc < 2u; ++kc) xq[kc] = wg_ld64(base, pix * 32u + hh * 16u + 8u * kc);
+    v8f b1[2], b2[2];
+    uint2 f1[2][2], f2[2][2];
+    lin_blob(linW1, lane, hh, b1, f1);
+    lin_blob(linW2, lane, hh, b2, f2);
+    uint4 y[2];
+    lin_pair(xq, b1, f1, b2, f2, y);
+    [unroll] for (uint k = 0; k < KC; ++k) {
+        f[k].v[0] = wg_h2f_lo(y[k].x); f[k].v[1] = wg_h2f_hi(y[k].x); f[k].v[2] = wg_h2f_lo(y[k].y); f[k].v[3] = wg_h2f_hi(y[k].y);
+        f[k].v[4] = wg_h2f_lo(y[k].z); f[k].v[5] = wg_h2f_hi(y[k].z); f[k].v[6] = wg_h2f_lo(y[k].w); f[k].v[7] = wg_h2f_hi(y[k].w);
+    }
+}
 #elif SW_SRC == 2
 // LCoarseFp8Src: a member outside the grid takes the mirrored 2 x 2 group (mirror of the group index) and keeps its
 // sub-pixel; the byte offset of the lane's half of that pixel
@@ -596,6 +626,9 @@ WG_KERNEL(SW_ENTRY)
 #elif SW_SRC == 1
     v8f xf[KC];
     sw_load_halo_f16(x, pr, pc, W, hh, xf);
+#elif SW_SRC == 3
+    v8f xf[KC];
+    sw_load_halo_lin(x, pr, pc, W, lane, hh, xf);
 #elif SW_SRC == 2
     load_frags_g(x, sw_coarse_src(pr, pc, H, W, hh), xa);
 #else
@@ -627,7 +660,7 @@ WG_KERNEL(SW_ENTRY)
     v8f acc[KC];
     {
         [unroll] for (uint k = 0; k < KC; ++k) {
-#if SW_SRC == 1
+#if SW_SRC == 1 || SW_SRC == 3
             acc[k] = xf[k];
 #else
             acc[k] = sw_unpack_fp8(xa[k]);

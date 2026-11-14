@@ -129,9 +129,14 @@ FOLD = "l_swin_block_c32_dec_coef12_nc"
 FOLD_BASE = "l_swin_block_c32_dec_coef12"
 # native D3D12, fusion ll (the default): the two input linears in one kernel (x1 in registers; q in l.narrow)
 LIN = "l_linear_32_32_fused"
-# the default fusions without lc and ll: the pairs (the fallback routes)
+# native D3D12, fusion le (the default): the encoder block with the two input linears as its prologue (q in l.narrow,
+# x1 and x2 in registers)
+ENCLIN = "l_swin_block_c32_enc_lin_nc"
+ENCLIN_BASE = "l_swin_block_c32_enc_lin"
+# the default fusions without lc, ll and le: the pairs (the fallback routes); without le: the fused linears and the block
 NO_FOLD = {"WG_D3D12_FUSION": "pm,xe,mb,rv,xo,xd"}
 NO_LIN = {"WG_D3D12_FUSION": "pm,xe,mb,rv,xo,xd,lc"}
+NO_ENCLIN = {"WG_D3D12_FUSION": "pm,xe,mb,rv,xo,xd,lc,ll"}
 
 
 def latent_out(coef):
@@ -155,7 +160,8 @@ def expected_args(t, f, digests):
     npix, tw, th = str((fh + 4) * (fw + 4)), str(fw // 2), str(fh // 2)
     eo = [str(v) for v in T.block_offset(T.TABLE, "first", info["parity"])]
     do = [str(v) for v in T.block_offset(T.TABLE, "second", info["parity"])]
-    q = n["l.narrow"] if any(ln.kernel == LIN for ln in f["launches"]) else n["l.wide"]  # fused linears: q not under x2
+    # fused linears, or the linears in the block: q not under x2
+    q = n["l.narrow"] if any(ln.kernel in (LIN, ENCLIN) for ln in f["launches"]) else n["l.wide"]
     return {
         # the input encoder's values: Model M's encoder inputs (the colour as the network reads it, here the game's,
         # pre-exposure 1), the state it reads, q into the wide map, the motion surfaces, the exposure pair
@@ -166,6 +172,9 @@ def expected_args(t, f, digests):
         "l_linear_32_32_f16": [n["l.narrow"], n["l.wide"], w["enc0.Win2"], npix],   # x1 -> x2
         LIN: [n["l.narrow"], n["l.wide"], w["enc0.Win1"], w["enc0.Win2"], npix],      # q -> x2 (x1 in registers)
         "l_swin_block_c32_enc": [n["l.wide"], "0", n["l.x3"], w["enc0_block"], str(fh), str(fw)] + eo,  # x2 -> x3
+        # the block with the linears as its prologue: q -> x3, then the two linear blobs
+        ENCLIN_BASE: [n["l.narrow"], "0", n["l.x3"], w["enc0_block"], str(fh), str(fw)] + eo +
+                     [w["enc0.Win1"], w["enc0.Win2"]],
         "l_project_gather": [n["l.x3"], n["enc0.features"], w["enc0.project"], tw, th],  # x3 -> enc1's input
         "l_dec_project": [n["dec1.out"], n["l.narrow"], w["dec0.project"], tw, th],      # dec1's output -> y
         "l_swin_block_c32_dec": [n["l.narrow"], "0", n["l.wide"], w["dec0_block"], str(fh), str(fw)] + do,  # -> y2
@@ -211,10 +220,14 @@ def check_roles(t, f, digests, l_post=True):
             continue
         bad += ["%s argument %d: %s, expected %s" % (k, i, a, e) for i, (a, e) in enumerate(zip(ln.args, want))
                 if e is not None and a != e]
-    fold, lin = FOLD_BASE in seen, LIN in seen
+    fold, lin, el = FOLD_BASE in seen, LIN in seen, ENCLIN_BASE in seen
     pair_d, pair_l = ("l_swin_block_c32_dec", "l_coef"), ("l_linear_32_32_relu", "l_linear_32_32_f16")
-    need = [k for k in L_KERNELS if not (fold and k in pair_d) and not (lin and k in pair_l)] + \
-        ([FOLD_BASE] if fold else []) + ([LIN] if lin else [])
+    pair_e = pair_l + ("l_swin_block_c32_enc",)
+    need = [k for k in L_KERNELS if not (fold and k in pair_d) and not (lin and k in pair_l) and
+            not (el and k in pair_e)] + ([FOLD_BASE] if fold else []) + ([LIN] if lin else []) + \
+        ([ENCLIN_BASE] if el else [])
+    if el and (lin or set(pair_e) & seen):
+        bad.append("the encoder block with the linears and the linears or the plain block in one frame")
     if fold and (set(pair_d) & seen):
         bad.append("the folded decoder block and the pair in one frame")
     if lin and (set(pair_l) & seen):
@@ -347,11 +360,12 @@ class Arguments(unittest.TestCase):
         npix, tw, th = (fh + 4) * (fw + 4), fw // 2, fh // 2
         k = {base(ln.kernel): (i, ln) for i, ln in enumerate(ls)}
         _, lev = k["lev/input_encoder"]
+        el = k[ENCLIN_BASE][1] if ENCLIN_BASE in k else None   # the block with the linears (fusion le)
         lin = k[LIN][1] if LIN in k else None
-        if not lin:
+        if not lin and not el:
             _, relu = k["l_linear_32_32_relu"]
             _, f16 = k["l_linear_32_32_f16"]
-        _, enc = k["l_swin_block_c32_enc"]
+        enc = el if el else k["l_swin_block_c32_enc"][1]
         gi, gather = k["l_project_gather"]
         di, dproj = k["l_dec_project"]
         fold = FOLD_BASE in k
@@ -363,7 +377,10 @@ class Arguments(unittest.TestCase):
             _, coef = k["l_coef"]
         q, x3, feat = lev.args[6], enc.args[2], gather.args[1]
         # the chain of maps (no launch reads what it writes)
-        if lin:  # one launch, x1 in registers: no map
+        if el:  # one launch for the linears and the block: no x1 or x2 map
+            x1 = x2 = None
+            self.assertEqual(el.args[0], q)
+        elif lin:  # one launch, x1 in registers: no map
             x1, x2 = None, lin.args[1]
             self.assertEqual(lin.args[0], q)
             self.assertEqual(lin.args[4], str(npix))
@@ -373,7 +390,8 @@ class Arguments(unittest.TestCase):
             self.assertEqual(f16.args[0], x1)
             self.assertEqual(relu.args[3], str(npix))
             self.assertEqual(f16.args[3], str(npix))
-        self.assertEqual(enc.args[0], x2)
+        if not el:
+            self.assertEqual(enc.args[0], x2)
         self.assertEqual(enc.args[1], "0")  # xadd: none
         self.assertEqual(gather.args[0], x3)
         self.assertTrue(ls[gi + 1].kernel.startswith("swin_block_c64"))
@@ -387,14 +405,16 @@ class Arguments(unittest.TestCase):
             self.assertEqual(y2, "0")  # the map is not written
         else:
             self.assertEqual(coef.args[0], y2)
-        for a, b in ((q, x1), (x1, x2), (q, x2 if lin else None), (x2, x3), (x3, feat), (dec1.args[2], y), (y, y2)):
+        for a, b in ((q, x1), (x1, x2), (q, x2 if lin else None), (x2, x3), (q, x3), (x3, feat), (dec1.args[2], y),
+                     (y, y2)):
             if a is not None and b is not None:
                 self.assertNotEqual(a, b)
-        if not lin:
+        if not lin and not el:
             self.assertEqual(q, x2)  # the pair: x2 over q (q is dead once x1 is written)
         # every buffer holds its map (FORMATS.md "Maps")
-        maps = ((q, 32 * npix), (x2, 64 * npix), (x3, 32 * fh * fw), (feat, 64 * tw * th),
-                (y, 32 * fh * fw)) + (() if fold else ((y2, 64 * fh * fw),)) + (() if lin else ((x1, 32 * npix),))
+        maps = ((q, 32 * npix), (x3, 32 * fh * fw), (feat, 64 * tw * th), (y, 32 * fh * fw)) + \
+            (() if el else ((x2, 64 * npix),)) + (() if fold else ((y2, 64 * fh * fw),)) + \
+            (() if lin or el else ((x1, 32 * npix),))
         if fold:  # pack12 image A (8 bytes a pixel), image C (4), the new latent
             coefs = ((coef.args[8], 8 * rw * rh), (coef.args[9], 4 * rw * rh), (coef.args[10], 4 * rw * rh))
         else:
@@ -577,7 +597,12 @@ class D3D12(unittest.TestCase):
             self.assertEqual(names[names.index(FOLD) - 1], "l_dec_project")
         else:
             self.assertIn("l_coef_pack12", names)
-        if LIN in names:
+        if ENCLIN in names:
+            self.assertNotIn(LIN, names)
+            self.assertNotIn("l_linear_32_32_relu", names)
+            self.assertNotIn("l_swin_block_c32_enc_nc", names)
+            self.assertTrue(names[names.index(ENCLIN) - 1].startswith("lev/input_encoder"))
+        elif LIN in names:
             self.assertNotIn("l_linear_32_32_relu", names)
             self.assertNotIn("l_linear_32_32_f16", names)
             self.assertTrue(names[names.index(LIN) - 1].startswith("lev/input_encoder"))
@@ -605,14 +630,20 @@ class D3D12(unittest.TestCase):
         self.assertEqual(t.unknown(), [])
         self.assertEqual([f["info"]["reset"] for f in t.frames], [1, 0, 1, 0, 1, 1])
         self.assertEqual(len({f["info"]["parity"] for f in t.frames}), 2)
-        for env, ports, fold, lin in ((None, full_ports(), True, True), (NO_FOLD, full_ports(), False, False),
-                                      (None, [kc for kc in full_ports() if kc[0] != FOLD], False, True),
-                                      (NO_LIN, full_ports(), True, False),
-                                      (None, [kc for kc in full_ports() if kc[0] != LIN], True, False)):
+        without = lambda *ks: [kc for kc in full_ports() if kc[0] not in ks]  # noqa: E731
+        for env, ports, fold, lin, el in ((None, full_ports(), True, False, True),
+                                          (NO_FOLD, full_ports(), False, False, False),
+                                          (None, without(FOLD), False, False, True),
+                                          (NO_LIN, full_ports(), True, False, False),
+                                          (NO_ENCLIN, full_ports(), True, True, False),
+                                          (None, without(ENCLIN), True, True, False),
+                                          (None, without(ENCLIN, LIN), True, False, False),
+                                          (None, without(LIN), True, False, True)):
             with self.subTest(fusion=env, fold_in_manifest=any(kc[0] == FOLD for kc in ports),
-                              lin_in_manifest=any(kc[0] == LIN for kc in ports)):
-                # the fusions (lc, ll: the default) and their fallbacks, the pairs: without the fusion, or without the
-                # kernel
+                              lin_in_manifest=any(kc[0] == LIN for kc in ports),
+                              enclin_in_manifest=any(kc[0] == ENCLIN for kc in ports)):
+                # the fusions (lc, ll, le: the default; le over ll) and their fallbacks: without the fusion, or without
+                # the kernel
                 t = FT.Trace(self.l_run(ports, frames=6, rw=96, rh=64, flags=(sizes, "--reset=4"), env=env))
                 self.assertEqual(t.create, "create ok model L")
                 self.assertEqual(t.unknown(), [])
@@ -623,6 +654,7 @@ class D3D12(unittest.TestCase):
                     self.assertIsNone(f["error"])
                     self.assertEqual(FOLD in [ln.kernel for ln in f["launches"]], fold)
                     self.assertEqual(LIN in [ln.kernel for ln in f["launches"]], lin)
+                    self.assertEqual(ENCLIN in [ln.kernel for ln in f["launches"]], el)
                     lev, coef = self.check_d3d12_frame(t, f)
                     if prev:
                         self.assertEqual(lev.args[4], latent_out(prev[1]))  # the latent the last frame's store wrote
