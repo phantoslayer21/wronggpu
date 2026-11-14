@@ -121,6 +121,14 @@ class RoundTripTest(unittest.TestCase):
 
 
 class ModelTest(unittest.TestCase):
+    def test_gpu_check_cases_pack(self):
+        """The C = 32 GPU check's case builder (clean/l/runner/l_c32_check.py) runs on the current packer API."""
+        from clean.l.runner import l_c32_check as C32
+        p, blob, x = C32.make_case(np.random.default_rng(3), 9, 13)
+        self.assertEqual(blob, LP.pack_block(p, 32, 2, 128))
+        self.assertEqual(x.shape, (9, 13, 32))
+        self.assertTrue(np.isfinite(L.swin_block(x, p, (2, 2), 2, C32.CONSTS)).all())
+
     def test_launch_lists(self):
         ln = LP.encoder_launches()
         self.assertEqual([x["kind"] for x in ln], ["values", "linear", "linear", "swin", "project"])
