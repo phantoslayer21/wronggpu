@@ -285,7 +285,10 @@ def test_own_optiscaler_not_players(t, opti):
     t.check("repair over it: no switch asked, OptiScaler.log is not moved as a player's file", rc == 0 and not any(l.endswith("\tOptiScaler.log\tmoved") for l in rec_lines(b)),
             (rc, t.j.get("message")))
     rc = t.run("uninstall", exe)
-    t.check("uninstall byte for byte (" + proxy + ", the log and the ini ours)", rc == 0 and snapshot(root) == before, diff(before, snapshot(root)))
+    # (0.6.1, the ownership rule: OptiScaler.log is a shared name, never deleted by it; it is the one file left)
+    want = c061.with_files(before, root, [os.path.relpath(os.path.join(b, "OptiScaler.log"), root)])
+    t.check("uninstall byte for byte (" + proxy + " and the ini ours); OptiScaler.log stays (never deleted by its name)",
+            rc == 0 and snapshot(root) == want and os.path.isfile(os.path.join(b, "OptiScaler.log")), diff(want, snapshot(root)))
     shutil.rmtree(root, ignore_errors=True)
 
 

@@ -169,29 +169,34 @@ OTHER_SETUP_INI = ("[Upscalers]\r\nDx12Upscaler=xess\r\n[Libraries]\r\nFfxDx12SR
 
 
 def test_opti_ini_ownership(t, opti):
-    print("\n[0.6.1 coexist] OptiScaler.ini is WrongGPU's beside WrongGPU's OptiScaler (whatever its menu saved); another setup's with that setup's OptiScaler")
+    print("\n[0.6.1 coexist] OptiScaler.ini: the scan does not ask about it beside WrongGPU's OptiScaler; the uninstall removes it only as WrongGPU last wrote it")
     root, b, exe = lt.game(t, "Ini Owner Game", validated=True)
     before = snapshot(root)
     ini_path = os.path.join(b, "OptiScaler.ini")
     key = os.path.relpath(ini_path, root).replace("\\", "/").lower()
-    # OptiScaler's menu saves the ini (WrongGPU's keys kept): still WrongGPU's, removed by the uninstall
+    # OptiScaler's menu saved the ini (bytes WrongGPU did not write): left in place by the uninstall, said (the ownership rule)
     rc = t.run("install", exe, "--opti=" + opti, "--noscan", "--force")
-    write(ini_path, read(ini_path) + b"; saved by OptiScaler's menu\r\n")
+    saved = read(ini_path) + b"; saved by OptiScaler's menu\r\n"
+    write(ini_path, saved)
     rc2 = t.run("uninstall", exe)
-    t.check("menu-saved OptiScaler.ini (WrongGPU's keys kept): still WrongGPU's, removed with the uninstall", rc == 0 and rc2 == 0 and snapshot(root) == before,
-            diff(before, snapshot(root)))
+    warns = t.j.get("warnings", [])
+    t.check("menu-saved OptiScaler.ini: left in place byte for byte (not what WrongGPU last wrote), said; everything else as before WrongGPU",
+            rc == 0 and rc2 == 0 and read(ini_path) == saved and snapshot(root) == with_files(before, root, [key]) and
+            any("Left in place" in w and "OptiScaler.ini" in w for w in warns), (warns, diff(with_files(before, root, [key]), snapshot(root))))
+    os.remove(ini_path)
     # the player picked another upscaler in OptiScaler's menu (its keys point elsewhere now), WrongGPU's OptiScaler still in
-    # place: still WrongGPU's (never "another setup's"), removed by the uninstall
+    # place: the scan asks nothing about it (never "another setup's"); the uninstall leaves it as it is
     rc = t.run("install", exe, "--opti=" + opti, "--noscan", "--force")
     write(ini_path, OTHER_SETUP_INI)
     rc2 = t.run("status", exe)
     g = t.j.get("game", {})
-    t.check("status: an OptiScaler.ini the menu pointed elsewhere, beside WrongGPU's OptiScaler, is WrongGPU's (no question for it)", rc == 0 and rc2 == 0 and
+    t.check("status: an OptiScaler.ini the menu pointed elsewhere, beside WrongGPU's OptiScaler, is not asked about", rc == 0 and rc2 == 0 and
             not any(f.get("decision") == "ask-switch" for f in g.get("coexistence", [])), g.get("coexistence"))
     rc = t.run("uninstall", exe)
     warns = t.j.get("warnings", [])
-    t.check("uninstall: that ini goes with the rest, no \"another setup changed it\" warning", rc == 0 and snapshot(root) == before and
-            not any("OptiScaler.ini" in w for w in warns), (warns, diff(before, snapshot(root))))
+    t.check("uninstall: that ini is left in place byte for byte, said", rc == 0 and read(ini_path) == OTHER_SETUP_INI.encode() and
+            snapshot(root) == with_files(before, root, [key]) and any("Left in place" in w and "OptiScaler.ini" in w for w in warns), warns)
+    os.remove(ini_path)
     # another setup replaced WrongGPU's OptiScaler with its own, and its ini: asked first, backed up, left alone without the OK
     rc = t.run("install", exe, "--opti=" + opti, "--noscan", "--force")
     proxy = proxy_of(b)
@@ -228,7 +233,7 @@ def test_opti_ini_ownership(t, opti):
     rc2 = t.run("uninstall", exe)
     warns = t.j.get("warnings", [])
     t.check("uninstall: another setup's OptiScaler.ini (beside its OptiScaler) is left in place with a warning", rc == 0 and rc2 == 0 and
-            read(ini_path) == OTHER_SETUP_INI.encode() and any("OptiScaler.ini no longer points at WrongGPU's files" in w for w in warns), warns)
+            read(ini_path) == OTHER_SETUP_INI.encode() and any("Left in place" in w and "OptiScaler.ini" in w for w in warns), warns)
     shutil.rmtree(root, ignore_errors=True)
 
 
@@ -239,38 +244,50 @@ def test_players_ini_edited_in_menu(t, opti):
     root, b, exe = lt.game(t, "Menu Ini Game", validated=True, extra={"bin/x64/winmm.dll": theirs, "bin/x64/OptiScaler.ini": players_ini})
     before = snapshot(root)
     ini_path = os.path.join(b, "OptiScaler.ini")
-    # uninstall after the menu changed the upscaler (keys no longer WrongGPU's): the player's own ini comes back
+    players, menu = players_ini.encode(), OTHER_SETUP_INI.encode()
+    reset = lambda: (shutil.rmtree(os.path.join(b, "WrongGPU-originals"), ignore_errors=True), write(ini_path, players))
+    outside = lambda snap: {k: v for k, v in snap.items() if "wronggpu-originals" not in k and k != ini_path_key}
+    ini_path_key = os.path.relpath(ini_path, root).replace("\\", "/").lower()
+    # uninstall after the menu changed it: the menu's ini stays (not WrongGPU's bytes), the player's own is kept, their
+    # OptiScaler comes back; both inis survive byte for byte, and the result says partly
     rc = install(t, exe, opti, "--switch")
     rec = "\n".join(rec_lines(b))
-    write(ini_path, OTHER_SETUP_INI)
+    write(ini_path, menu)
     rc2 = t.run("uninstall", exe)
-    t.check("uninstall after the menu changed the player's switched-over OptiScaler.ini: their own ini and OptiScaler back byte for byte",
-            rc == 0 and "\tOptiScaler.ini" in rec and rc2 == 0 and snapshot(root) == before, (rc, rc2, t.j.get("message"), t.j.get("warnings"), diff(before, snapshot(root))))
-    # Repair after the same menu change: the player's own ini is kept in the new install's backup, and comes back on uninstall
+    t.check("uninstall after the menu changed the player's switched-over OptiScaler.ini: the menu's ini stays, their own is kept, their OptiScaler back; partly",
+            rc == 0 and "\tOptiScaler.ini" in rec and rc2 == 0 and read(ini_path) == menu and players in kept_originals(root).values() and
+            outside(snapshot(root)) == outside(before) and "partly" in (t.j.get("message") or ""),
+            (rc, rc2, t.j.get("message"), t.j.get("warnings"), diff(outside(before), outside(snapshot(root)))))
+    reset()
+    # Repair after the same menu change: the player's own ini is kept, the menu's goes into the new install's backup; the
+    # uninstall then puts the menu's back: both survive
     rc = install(t, exe, opti, "--switch")
-    write(ini_path, OTHER_SETUP_INI)
+    write(ini_path, menu)
     rc2 = repair(t, exe, opti)
     backup = os.path.join(b, "wronggpu-setup", "backup", "OptiScaler.ini")
-    t.check("repair after that menu change: done, the player's own ini in the new install's backup", rc == 0 and rc2 == 0 and
-            os.path.isfile(backup) and read(backup) == players_ini.encode(), (rc, rc2, t.j.get("message")))
+    t.check("repair after that menu change: done; the player's own ini kept, the menu's in the new install's backup", rc == 0 and rc2 == 0 and
+            players in kept_originals(root).values() and os.path.isfile(backup) and read(backup) == menu, (rc, rc2, t.j.get("message")))
     rc = t.run("uninstall", exe)
-    t.check("...uninstall: the player's own ini and OptiScaler back byte for byte", rc == 0 and snapshot(root) == before, diff(before, snapshot(root)))
-    # another setup replaced WrongGPU's OptiScaler and that ini since: the backup of the player's own ini is never deleted.
-    # Repair refuses before anything changes; the uninstall leaves the other setup's files and keeps the backup folder
+    t.check("...uninstall: the menu's ini back, the player's own still kept, their OptiScaler back", rc == 0 and read(ini_path) == menu and
+            players in kept_originals(root).values() and outside(snapshot(root)) == outside(before), diff(outside(before), outside(snapshot(root))))
+    reset()
+    # another setup replaced WrongGPU's OptiScaler and that ini since: nothing of the player's or of that setup is lost.
+    # Repair --switch: the earlier install's restore keeps the player's ini and leaves the other setup's files; the player's
+    # own OptiScaler comes back beside the other one, so the new install stops (two OptiScaler copies) with all of them there
     rc = install(t, exe, opti, "--switch")
     proxy = proxy_of(b)
     other = fx.optiscaler_naming_wronggpu()
     write(os.path.join(b, proxy), other)
-    write(ini_path, OTHER_SETUP_INI)
-    state = snapshot(root)
+    write(ini_path, menu)
     rc2 = repair(t, exe, opti, "--switch")
-    t.check("repair --switch with another setup's files over a backed-up original: refused (exit 2, \"Nothing was changed\"), nothing changed",
-            rc == 0 and rc2 == 2 and "Nothing was changed" in (t.j.get("message") or "") and snapshot(root) == state, (rc, rc2, t.j.get("message"), diff(state, snapshot(root))))
-    rc = t.run("uninstall", exe)
-    warns = t.j.get("warnings", [])
-    t.check("uninstall: the other setup's files stay, the player's own ini stays in the kept backup folder (said)", rc == 0 and read(ini_path) == OTHER_SETUP_INI.encode() and
-            read(os.path.join(b, proxy)) == other and os.path.isfile(backup) and read(backup) == players_ini.encode() and
-            any(w.startswith("The backup folder was kept") for w in warns), (rc, t.j.get("message"), warns))
+    t.check("repair --switch with another setup's files over a backed-up original: nothing lost (the other setup's OptiScaler and ini in place, the player's ini kept, "
+            "their OptiScaler back)", rc == 0 and read(os.path.join(b, proxy)) == other and read(ini_path) == menu and players in kept_originals(root).values() and
+            read(os.path.join(b, "winmm.dll")) == theirs, (rc, rc2, t.j.get("message"), t.j.get("warnings")))
+    if os.path.isfile(os.path.join(b, "wronggpu-setup", "install.record")):  # (when the repair went through, its uninstall)
+        t.run("uninstall", exe)
+    t.check("...and after it: the other setup's OptiScaler and ini, the player's ini and OptiScaler all still there",
+            read(os.path.join(b, proxy)) == other and read(ini_path) == menu and players in kept_originals(root).values() and read(os.path.join(b, "winmm.dll")) == theirs,
+            sorted(snapshot(root)))
     shutil.rmtree(root, ignore_errors=True)
 
 
@@ -351,17 +368,27 @@ def test_other_plugins(t, opti):
                 (rc, t.j.get("message"), t.j.get("warnings"), lines[:20]))
     rc = t.run("uninstall", exe)
     t.check("...uninstall: the other plugin back byte for byte", rc == 0 and snapshot(root) == before, diff(before, snapshot(root)))
-    # a different plugin under the moved name since: never moved without the OK; WrongGPU's RR goes out instead
+    # a different plugin under the moved name since: the earlier install's restore leaves it and keeps the moved original
+    # (WrongGPU-originals, the result says partly); without the OK it is never moved and WrongGPU's RR goes out; with
+    # --switch-plugins (an OK for the files there now) it goes aside, and the uninstall puts it back: both survive
     rc = install(t, exe, opti, "--switch-plugins")
     changed = fx.unknown("another plugin put under the moved name since (synthetic .asi)")
     write(os.path.join(b, "plugins", "OtherSetup.asi"), changed)
-    state = snapshot(root)
+    rc2 = repair(t, exe, opti)
+    lines = rec_lines(b)
+    t.check("repair with a different file under a moved plugin's name, no OK: done, that file untouched, the moved original kept (partly), WrongGPU's RR out",
+            rc == 0 and rc2 == 0 and read(os.path.join(b, "plugins", "OtherSetup.asi")) == changed and other in kept_originals(root).values() and
+            "partly" in (t.j.get("message") or "") and not os.path.isfile(os.path.join(b, "plugins", "WrongGPU-RR.asi")), (rc, rc2, t.j.get("message"), t.j.get("warnings")))
     rc2 = repair(t, exe, opti, "--switch-plugins")
-    t.check("repair with a different file under a moved plugin's name: refused before anything changes (its moved original's backup is kept)",
-            rc == 0 and rc2 == 2 and "Nothing was changed" in (t.j.get("message") or "") and snapshot(root) == state, (rc, rc2, t.j.get("message")))
-    os.remove(os.path.join(b, "plugins", "OtherSetup.asi"))
+    t.check("...repair --switch-plugins: that file moved aside on the OK (in the backup), WrongGPU's RR in, the original still kept",
+            rc2 == 0 and read(os.path.join(b, "wronggpu-setup", "backup", "plugins", "OtherSetup.asi")) == changed and other in kept_originals(root).values() and
+            os.path.isfile(os.path.join(b, "plugins", "WrongGPU-RR.asi")), (rc2, t.j.get("message"), t.j.get("warnings")))
     rc = t.run("uninstall", exe)
-    t.check("...uninstall after it was taken away again: the other plugin back byte for byte", rc == 0 and snapshot(root) == before, diff(before, snapshot(root)))
+    t.check("...uninstall: that file back byte for byte, the moved original still kept: both survive", rc == 0 and read(os.path.join(b, "plugins", "OtherSetup.asi")) == changed and
+            other in kept_originals(root).values(), (rc, t.j.get("message")))
+    shutil.rmtree(os.path.join(b, "WrongGPU-originals"), ignore_errors=True)
+    write(os.path.join(b, "plugins", "OtherSetup.asi"), other)
+    t.check("...(the game as before WrongGPU once the test puts the original back)", snapshot(root) == before, diff(before, snapshot(root)))
     # OptiScaler's own plugin folder counts too; a game without RR keeps every plugin beside WrongGPU's (inform only)
     write(os.path.join(b, "OptiScaler", "plugins", "Second.asi"), other)
     rc = t.run("coexist", exe)
@@ -513,31 +540,36 @@ def test_repair_after_switch(t, opti):
 # ---------------------------------------------------------------- backups that must be kept; the settings file
 
 def test_backups_kept(t, opti):
-    print("\n[0.6.1 coexist] Update, Repair and the move out of a wrong folder never discard a backup of the player's files")
+    print("\n[0.6.1 coexist] Update, Repair and the move out of a wrong folder never discard the player's files: an original that cannot go back is kept")
     theirs, log_a, log_b = fx.optiscaler(), b"the player's own OptiScaler.log (synthetic)\r\n", b"a log WrongGPU's OptiScaler wrote (synthetic)\r\n"
     root, b, exe = lt.game(t, "Kept Log Game", validated=True, extra={"bin/x64/winmm.dll": theirs, "bin/x64/OptiScaler.log": log_a})
     before = snapshot(root)
+    log = os.path.join(b, "OptiScaler.log")
     backup = os.path.join(b, "wronggpu-setup", "backup", "OptiScaler.log")
     rc = install(t, exe, opti, "--switch")
     t.check("install --switch: the player's OptiScaler.log moved aside with their OptiScaler (in the backup)", rc == 0 and os.path.isfile(backup) and read(backup) == log_a,
             (rc, t.j.get("message")))
-    # WrongGPU's OptiScaler writes its own OptiScaler.log while the game runs; Update and Repair keep the player's in the backup
+    # WrongGPU's OptiScaler writes its own OptiScaler.log while the game runs; Update and Repair leave that log where it is
+    # (a shared name: never deleted or moved by it) and keep the player's in WrongGPU-originals
     for verb in ("update", "repair"):
-        write(os.path.join(b, "OptiScaler.log"), log_b)
+        write(log, log_b)
         if verb == "update":
             older_record(b)
             rc = t.run("update", exe, "--opti=" + opti, "--noscan", "--force")
         else:
             rc = repair(t, exe, opti)
-        t.check(verb + " after WrongGPU's OptiScaler wrote its log: done, the player's OptiScaler.log still in the backup byte for byte",
-                rc == 0 and os.path.isfile(backup) and read(backup) == log_a, (rc, t.j.get("message"), t.j.get("warnings")))
-    write(os.path.join(b, "OptiScaler.log"), log_b)
+        kept = [v for v in kept_originals(root).values() if v == log_a]
+        t.check(verb + " after WrongGPU's OptiScaler wrote its log: done; that log in place, the player's OptiScaler.log kept once, byte for byte",
+                rc == 0 and read(log) == log_b and len(kept) == 1, (rc, t.j.get("message"), t.j.get("warnings")))
     rc = t.run("uninstall", exe)
-    t.check("...uninstall: the player's OptiScaler, and their OptiScaler.log, back byte for byte", rc == 0 and snapshot(root) == before, diff(before, snapshot(root)))
+    outside = lambda snap: {k: v for k, v in snap.items() if "wronggpu-originals" not in k and not k.endswith("/optiscaler.log")}
+    t.check("...uninstall: the player's OptiScaler back byte for byte; their OptiScaler.log kept, the later log in place: both survive",
+            rc == 0 and outside(snapshot(root)) == outside(before) and read(log) == log_b and log_a in kept_originals(root).values(),
+            (t.j.get("message"), diff(outside(before), outside(snapshot(root)))))
     shutil.rmtree(root, ignore_errors=True)
 
-    # the move out of a wrong folder (an install next to a launcher stub, moved to the game by Repair): when a different file
-    # is back where the install there moved the player's file aside, the move stops before anything changes
+    # the move out of a wrong folder (an install next to a launcher stub, moved to the game by Repair): a different file is
+    # where the install there moved the player's file aside: that file stays, the player's original is kept; nothing is lost
     root, b, exe = lt.game(t, "Kept Wrong Folder Game", validated=True, extra={"winmm.dll": theirs})
     stub, starter = os.path.join(root, "REDprelauncher.exe"), os.path.join(root, "Starter.exe")
     write(stub, "a launcher stub " * 50)
@@ -550,15 +582,14 @@ def test_backups_kept(t, opti):
         os.remove(starter)
         other = fx.optiscaler_naming_wronggpu()
         write(os.path.join(root, "winmm.dll"), other)  # the player put another OptiScaler there since
-        state = snapshot(root)
         rc2 = t.run("repair", root, "--opti=" + opti, "--noscan", "--force", "--switch")
-        t.check("repair that moves an install out of a wrong folder, with a different file where the player's was moved aside: refused, nothing changed, backup kept",
-                rc2 == 2 and "Nothing was changed" in (t.j.get("message") or "") and snapshot(root) == state and
-                read(os.path.join(root, "wronggpu-setup", "backup", "winmm.dll")) == theirs, (rc2, t.j.get("message"), diff(state, snapshot(root))))
-        os.remove(os.path.join(root, "winmm.dll"))
-        rc3 = t.run("uninstall", root)
-        t.check("...uninstall there once that file is away: the player's OptiScaler back byte for byte", rc3 == 0 and read(os.path.join(root, "winmm.dll")) == theirs,
-                (rc3, t.j.get("message")))
+        t.check("repair that moves an install out of a wrong folder, with a different file where the player's was moved aside: done; that file in place, "
+                "the player's OptiScaler kept (partly), no state left in the wrong folder",
+                rc2 == 0 and read(os.path.join(root, "winmm.dll")) == other and theirs in kept_originals(root).values() and "partly" in (t.j.get("message") or "") and
+                not os.path.isfile(rp), (rc2, t.j.get("message"), t.j.get("warnings")))
+        rc3 = t.run("uninstall", exe)
+        t.check("...uninstall at the game: that file and the player's kept OptiScaler both still there", rc3 == 0 and read(os.path.join(root, "winmm.dll")) == other and
+                theirs in kept_originals(root).values(), (rc3, t.j.get("message")))
     else:
         t.check("wrong-folder setup: an install in the game's root", False, (rc, t.j.get("message")))
     drop_test_entries(t, root)
@@ -572,40 +603,51 @@ def drop_test_entries(t, root):
 
 
 def test_settings_file(t, opti):
-    print("\n[0.6.1 coexist] wronggpu.ini (WrongGPU's settings) changed by the launcher or by hand: Repair keeps it; uninstall removes it and says so")
+    print("\n[0.6.1 coexist] wronggpu.ini: the launcher's own writes keep it WrongGPU's (the record follows them); a hand edit is never removed or lost")
     root, b, exe = lt.game(t, "Settings File Game", validated=True)
     before = snapshot(root)
     ini = os.path.join(b, "wronggpu.ini")
+    key = os.path.relpath(ini, root).replace("\\", "/").lower()
+    backup = os.path.join(b, "wronggpu-setup", "backup", "wronggpu.ini")
+    # the launcher's set writes it (the record's hash follows): still WrongGPU's, so a repair replaces it as its own
     rc = install(t, exe, opti)
     rc2 = t.run("set", exe, "output_filter=quality9")
-    write(ini, read(ini) + b"; edited by hand\r\n")
     rc3 = repair(t, exe, opti)
-    t.check("repair after the settings changed (launcher and by hand): done, the hand edit kept", rc == 0 and rc2 == 0 and rc3 == 0 and b"edited by hand" in read(ini),
-            (rc, rc2, rc3, t.j.get("message")))
-    lines = rec_lines(b)
-    existed = any(l.startswith("copy\t1\t") and l.endswith("\twronggpu.ini") for l in lines)
-    write(ini, read(ini) + b"; edited again\r\n")
+    t.check("repair after the launcher's set: done, nothing kept, not partly (the file was the one WrongGPU last wrote)", rc == 0 and rc2 == 0 and rc3 == 0 and
+            not kept_originals(root) and "partly" not in (t.j.get("message") or "") and not os.path.isfile(backup), (rc, rc2, rc3, t.j.get("message")))
+    # edited by hand (B): the repair's restore leaves it, the new install backs it up before it writes its own
+    write(ini, read(ini) + b"; edited by hand\r\n")
+    B = read(ini)
     rc = repair(t, exe, opti)
-    t.check("repair again (wronggpu.ini now over an earlier one, changed again): done, never refused", rc == 0 and b"edited again" in read(ini), (existed, rc, t.j.get("message")))
+    t.check("repair after a hand edit: done, the edited file in the new install's backup byte for byte", rc == 0 and read(backup) == B, (rc, t.j.get("message")))
+    # edited again (C), over that earlier one: B is kept in WrongGPU-originals, C goes into the new backup
+    write(ini, read(ini) + b"; edited again\r\n")
+    C = read(ini)
+    rc = repair(t, exe, opti)
+    t.check("repair again (over an earlier file, changed again): done, never refused; B kept, C in the backup", rc == 0 and B in kept_originals(root).values() and read(backup) == C,
+            (rc, t.j.get("message")))
+    # edited before the uninstall (D): D stays where it is, C is kept: B, C and D all survive, and the result says partly
     write(ini, read(ini) + b"; edited before the uninstall\r\n")
+    D = read(ini)
     rc = t.run("uninstall", exe)
     warns = t.j.get("warnings", [])
-    t.check("uninstall with a hand-edited wronggpu.ini: removed (the game as before WrongGPU); the result says removed, never \"left in place\"",
-            rc == 0 and snapshot(root) == before and any(w.startswith("wronggpu.ini had changed") and "removed with the rest" in w for w in warns) and
-            not any("Left in place" in w and "wronggpu.ini" in w for w in warns), (warns, diff(before, snapshot(root))))
+    outside = lambda snap: {k: v for k, v in snap.items() if "wronggpu-originals" not in k and k != key}
+    t.check("uninstall with a hand-edited wronggpu.ini: it stays byte for byte, every earlier one kept, the result says partly; everything else as before WrongGPU",
+            rc == 0 and read(ini) == D and B in kept_originals(root).values() and C in kept_originals(root).values() and "partly" in (t.j.get("message") or "") and
+            outside(snapshot(root)) == outside(before), (t.j.get("message"), warns, diff(outside(before), outside(snapshot(root)))))
     shutil.rmtree(root, ignore_errors=True)
 
 
 # ---------------------------------------------------------------- interrupted operations
 
-def _lock(path):
-    """Opens `path` with no sharing (as a running game holds its DLLs): (handle, close)."""
+def _lock(path, share=0):
+    """Opens `path` with this sharing (0: none; 1: read only, as a running game holds its DLLs): (handle, close)."""
     import ctypes
     from ctypes import wintypes
     k = ctypes.WinDLL("kernel32", use_last_error=True)
     k.CreateFileW.restype = wintypes.HANDLE
     k.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
-    h = k.CreateFileW(path, 0x80000000, 0, None, 3, 0x80, None)  # GENERIC_READ, no sharing, OPEN_EXISTING
+    h = k.CreateFileW(path, 0x80000000, share, None, 3, 0x80, None)  # GENERIC_READ, OPEN_EXISTING
     ok = h not in (None, wintypes.HANDLE(-1).value)
     return ok, (lambda: k.CloseHandle(h)) if ok else (lambda: None)
 
@@ -707,6 +749,152 @@ def test_interrupted(t, opti):
     shutil.rmtree(root, ignore_errors=True)
 
 
+# ---------------------------------------------------------------- the file-ownership rule, end to end
+
+OWN_A = b"the file that was there before WrongGPU (synthetic)\r\n"
+
+
+def found_anywhere(root, data):
+    """The paths (relative to root) of every file under root with exactly these bytes."""
+    hits = []
+    for dp, _, ns in os.walk(root):
+        for n in ns:
+            p = os.path.join(dp, n)
+            if read(p) == data:
+                hits.append(os.path.relpath(p, root).replace("\\", "/"))
+    return hits
+
+
+def kept_originals(root):
+    """Every file in a WrongGPU-originals folder under root: relative path -> bytes."""
+    out = {}
+    for dp, _, ns in os.walk(root):
+        if "WrongGPU-originals" not in dp.split(os.sep):
+            continue
+        for n in ns:
+            out[os.path.relpath(os.path.join(dp, n), root).replace("\\", "/")] = read(os.path.join(dp, n))
+    return out
+
+
+def test_ownership_matrix(t, opti):
+    print("\n[0.6.1 ownership] A there before WrongGPU, changed to B after the install: A and B both survive Repair, Update, Uninstall and the move out of a wrong folder")
+    kinds = [
+        ("wronggpu.ini", "wronggpu.ini", False, lambda cur: cur + b"; edited by hand (synthetic)\r\n"),
+        ("OptiScaler.ini, saved by OptiScaler's menu", "OptiScaler.ini", True, lambda cur: cur + b"; saved by OptiScaler's menu (synthetic)\r\n"),
+        ("OptiScaler.ini, replaced in full (the OptiScaler DLL untouched)", "OptiScaler.ini", True,
+         lambda cur: b"[Menu]\r\nShowFps=true\r\n; another file in full (synthetic)\r\n"),
+        ("OptiScaler.log", "OptiScaler.log", True, lambda cur: b"a log written after the install (synthetic)\r\n"),
+    ]
+    theirs = fx.optiscaler()
+    for k, (label, rel, switch, change) in enumerate(kinds):
+        for op in ("uninstall", "repair", "update", "move out of a wrong folder"):
+            wrong = op == "move out of a wrong folder"
+            name = "Own %d %s" % (k, op.split()[0])
+            if wrong:  # WrongGPU next to a launcher stub in the game's root; Repair moves it to the game's program
+                extra = {rel: OWN_A}
+                if switch:
+                    extra["winmm.dll"] = theirs
+                root, b, exe = lt.game(t, name, validated=True, extra=extra)
+                stub, starter = os.path.join(root, "REDprelauncher.exe"), os.path.join(root, "Starter.exe")
+                write(stub, "a launcher stub " * 50)
+                write(starter, "mock starter exe " * 200)
+                where, target = root, starter
+            else:
+                extra = {"bin/x64/" + rel: OWN_A}
+                if switch:
+                    extra["bin/x64/winmm.dll"] = theirs
+                root, b, exe = lt.game(t, name, validated=True, extra=extra)
+                where, target = b, exe
+            more = ["--switch"] if switch else []
+            rc = t.run("install", target, "--opti=" + opti, "--noscan", "--force", "--experimental", *more)
+            path = os.path.join(where, rel)
+            cur = read(path) if os.path.isfile(path) else b""
+            B = change(cur)
+            write(path, B)
+            if op == "uninstall":
+                rc2 = t.run("uninstall", exe)
+            elif op == "repair":
+                rc2 = repair(t, exe, opti)
+            elif op == "update":
+                older_record(b)
+                rc2 = t.run("update", exe, "--opti=" + opti, "--noscan", "--force")
+            else:
+                rp = os.path.join(root, "wronggpu-setup", "install.record")
+                write(rp, read(rp).decode("utf-8").replace("exe\t" + starter + "\r\n", "exe\t" + stub + "\r\n"))
+                os.remove(starter)
+                rc2 = t.run("repair", root, "--opti=" + opti, "--noscan", "--force", *more)
+            msg, warns = t.j.get("message") or "", t.j.get("warnings", [])
+            a_at, b_at = found_anywhere(root, OWN_A), found_anywhere(root, B)
+            t.check("%s, A then B, %s: done; A and B both survive byte for byte (A: %s; B: %s)" % (label, op, a_at, b_at),
+                    rc == 0 and rc2 == 0 and a_at and b_at, (rc, rc2, msg, warns))
+            kept = kept_originals(root)
+            t.check("%s, %s: A is kept in WrongGPU-originals, and the result says partly and where" % (label, op),
+                    any(v == OWN_A for v in kept.values()) and "partly" in msg and
+                    any(w.startswith("Partly restored: ") and "is kept in" in w for w in warns), (kept.keys(), msg, warns))
+            if op != "uninstall":  # ...and the uninstall after it: still both, and nothing of WrongGPU's state left
+                rc3 = t.run("uninstall", exe)
+                a_at, b_at = found_anywhere(root, OWN_A), found_anywhere(root, B)
+                t.check("%s, %s, then uninstall: A and B still both there (A: %s; B: %s), no wronggpu-setup left" % (label, op, a_at, b_at),
+                        rc3 == 0 and a_at and b_at and not os.path.isdir(os.path.join(b, "wronggpu-setup")), (rc3, t.j.get("message"), t.j.get("warnings")))
+            drop_test_entries(t, root)
+            shutil.rmtree(root, ignore_errors=True)
+
+
+def test_interrupted_restore(t, opti):
+    print("\n[0.6.1 ownership] a restore stopped part-way (the process ends at a named step) and a file held open: nothing is lost, a second run finishes")
+    root, b, exe = lt.game(t, "Stopped Restore Game", validated=True, extra={"bin/x64/wronggpu.ini": OWN_A})
+    before = snapshot(root)
+    ini = os.path.join(b, "wronggpu.ini")
+    # stopped after the record was removed, before the backup: every original is back; a second run has nothing to do
+    rc = install(t, exe, opti)
+    t.env["WRONGGPU_TEST_STOP_AT"] = "record-removed"
+    try:
+        rc2 = t.run("uninstall", exe)
+    finally:
+        t.env.pop("WRONGGPU_TEST_STOP_AT", None)
+    now = {k: v for k, v in snapshot(root).items() if "/wronggpu-setup" not in k}
+    want = {k: v for k, v in before.items() if "/wronggpu-setup" not in k}
+    rc3 = t.run("uninstall", exe)
+    t.check("uninstall stopped between the record's removal and the backup's: the game's files as before WrongGPU (A back), no record; a second run: not installed, nothing changed",
+            rc == 0 and rc2 == 99 and now == want and read(ini) == OWN_A and not os.path.isfile(os.path.join(b, "wronggpu-setup", "install.record")) and rc3 == 9 and
+            {k: v for k, v in snapshot(root).items() if "/wronggpu-setup" not in k} == want, (rc, rc2, rc3, diff(want, now)))
+    for f in [os.path.join(dp, n) for dp, _, ns in os.walk(os.path.join(b, "wronggpu-setup")) for n in ns]:
+        os.remove(f)  # (the backup folder without a record that the stop left)
+    shutil.rmtree(os.path.join(b, "wronggpu-setup"), ignore_errors=True)
+    # stopped after the files were restored, before the record's removal: a second run finishes; the game as before WrongGPU
+    rc = install(t, exe, opti)
+    write(ini, read(ini) + b"; edited by hand (synthetic)\r\n")
+    B = read(ini)
+    t.env["WRONGGPU_TEST_STOP_AT"] = "restored"
+    try:
+        rc2 = t.run("uninstall", exe)
+    finally:
+        t.env.pop("WRONGGPU_TEST_STOP_AT", None)
+    rec_there = os.path.isfile(os.path.join(b, "wronggpu-setup", "install.record"))
+    rc3 = t.run("uninstall", exe)
+    kept = [v for v in kept_originals(root).values() if v == OWN_A]
+    t.check("uninstall stopped after the restore, before the record's removal: the record is still there; a second run finishes, A kept once, B in place",
+            rc == 0 and rc2 == 99 and rec_there and rc3 == 0 and len(kept) == 1 and read(ini) == B and not os.path.isdir(os.path.join(b, "wronggpu-setup")),
+            (rc, rc2, rec_there, rc3, t.j.get("message"), len(kept)))
+    shutil.rmtree(os.path.join(b, "WrongGPU-originals"), ignore_errors=True)
+    write(ini, OWN_A)
+    # a WrongGPU file held open with read sharing only (as a running game holds its DLLs): refused before anything changes
+    rc = install(t, exe, opti)
+    state = snapshot(root)
+    ok, unlock = _lock(os.path.join(b, "wronggpu_runtime.dll"), share=1)
+    try:
+        rc2 = t.run("uninstall", exe)
+        m2 = t.j.get("message") or ""
+    finally:
+        unlock()
+    t.check("uninstall with a WrongGPU file another program holds (read sharing only): refused (exit 2, \"Nothing was changed\"), nothing changed",
+            rc == 0 and ok and rc2 == 2 and "Nothing was changed" in m2 and snapshot(root) == state, (rc, ok, rc2, m2, diff(state, snapshot(root))))
+    rc = t.run("uninstall", exe)
+    t.check("...once it is free: the uninstall runs, the game as before WrongGPU (A back)", rc == 0 and snapshot(root) == before, diff(before, snapshot(root)))
+    drop_test_entries(t, root)
+    shutil.rmtree(root, ignore_errors=True)
+
+
 def run_all(t, opti, full):
     test_optiscaler_named_wronggpu(t, opti)
     test_proxy_replaced(t, opti)
@@ -721,3 +909,5 @@ def run_all(t, opti, full):
     test_backups_kept(t, opti)
     test_settings_file(t, opti)
     test_interrupted(t, opti)
+    test_interrupted_restore(t, opti)
+    test_ownership_matrix(t, opti)

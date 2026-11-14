@@ -45,6 +45,12 @@ bool OwnEntry(const Record& m) {
 // A warning of the uninstall (DoRestore's) in plain words, as the launcher words it (app/ui_words.cpp PlainWarning); the
 // core's sentence (file names, the backup folder) stays in the log
 wstring PlainWarning(const wstring& w) {
+    // a player's original that could not go back (another file is at its place now): kept, and where (the ownership rule)
+    if (w.rfind(kPartlyRestored, 0) == 0) {
+        const size_t at = w.find(L" is kept in ");
+        return L"A file WrongGPU had replaced or moved aside couldn't go back, because another file is at its place now; that file was left as it is." +
+               (at == wstring::npos ? wstring() : L" Your original is kept in " + w.substr(at + 12));
+    }
     if (Has(w, L"The game replaced ")) return L"The game had replaced one of its files since WrongGPU was installed (probably a game update). Its newer file was kept.";
     if (Has(w, L"exists again with different content") || Has(w, L"The backup folder was kept"))
         return L"A game file the game changed was kept as it is. Its original stays in a backup folder in the game's folder.";
@@ -56,7 +62,8 @@ wstring PlainError(const SetupError& e) {
     if (e.code == EXIT_NOT_INSTALLED) return L"WrongGPU isn't installed in this game any more. Nothing was changed.";
     if (Has(e.msg, L"missing or damaged"))
         return L"A backup WrongGPU made of a game file is missing or damaged. Nothing was changed. Verify the game's files in its store, then uninstall again.";
-    if (Has(e.msg, L"being used by another process") || Has(e.msg, L"sharing violation") || Has(e.msg, L"locked a portion"))
+    if (Has(e.msg, L"being used by another process") || Has(e.msg, L"sharing violation") || Has(e.msg, L"locked a portion") || Has(e.msg, L"has it open") ||
+        Has(e.msg, L"may have it open"))
         return L"A game file is in use. Close the game and any program that has its files open, then uninstall again.";
     if (Has(e.msg, L"access is denied")) return L"Windows didn't allow a change in the game's folder. Close the game, then uninstall again.";
     if (Has(e.msg, L"not enough space") || Has(e.msg, L"disk is full")) return L"The drive is full. Free some space, then uninstall again.";
@@ -151,7 +158,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         LogLine(ctx, L"uninstall complete");
         if (!silent) {
             wstring t = gone ? L"WrongGPU's files are removed from " + name + L"'s old folder."
-                             : L"WrongGPU is uninstalled from " + name + L", and the game has its original files back.";
+                        : AnyPartly(warnings) ? L"WrongGPU is uninstalled from " + name + L", partly: not every original file could go back (below)."
+                                              : L"WrongGPU is uninstalled from " + name + L", and the game has its original files back.";
             std::vector<wstring> said;  // each in words once
             for (auto& w : warnings) {
                 const wstring p = PlainWarning(w);

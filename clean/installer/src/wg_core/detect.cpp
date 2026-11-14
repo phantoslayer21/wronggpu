@@ -488,14 +488,15 @@ GameTarget InspectGame(Context& ctx, const wstring& exe, const wstring& displayN
     if (t.installed) {  // the OptiScaler files of our own earlier install are not "another mod", nor is the log it wrote
         // 0.6.1: a DLL under a name the record copied counts as ours only with the record's hash; another setup's OptiScaler
         // that replaced WrongGPU's proxy is another mod (Repair and Update ask the switch question for it). Settings and
-        // logs go by name (OptiScaler's menu saves its ini), as the restore treats them.
+        // logs of our setup are not asked about (OptiScaler's menu saves its ini, its OptiScaler writes the log); this decides
+        // the question only: what a restore or install deletes or overwrites goes by bytes (record.h, the ownership rule).
         std::map<wstring, wstring> ours;  // lower-case name -> installed hash
         for (auto& e : t.record.e) if (e.action == L"copy") ours[Lower(e.rel)] = e.inst;
         if (HostedRecord(t.record)) ours[L"optiscaler.log"] = L"";
         auto isOurs = [&](const wstring& f) {
             const auto it = ours.find(Lower(f));
             if (it == ours.end()) return false;
-            if (IEq(f, L"OptiScaler.ini")) return OptiIniIsOurs(t.dir, t.record);  // (beside WrongGPU's OptiScaler, or pointing at WrongGPU's files)
+            if (IEq(f, L"OptiScaler.ini")) return OptiSetupIsOurs(t.dir, t.record);  // (what the scan asks about; the restore goes by bytes)
             if (EndsWithI(f, L".ini") || EndsWithI(f, L".log")) return true;
             return !it->second.empty() && IEq(Sha256File(Join(t.dir, f)), it->second);
         };

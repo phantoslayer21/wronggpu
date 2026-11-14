@@ -191,6 +191,12 @@ wstring PlainWarning(const wstring& w) {
         const wstring game = NameBetween(w, L"isn't offered in ", L", and the game", L"this game");
         return L"WrongGPU's Ray Reconstruction isn't available in " + game + L" with the OptiScaler you chose. It needs the WrongGPU edition of OptiScaler, which the launcher downloads when it can. The game keeps its own ray tracing.";
     }
+    // a player's original that could not go back (another file is at its place now): kept, and where (record.h, the ownership rule)
+    if (w.rfind(kPartlyRestored, 0) == 0) {
+        const size_t at = w.find(L" is kept in ");
+        return L"A file WrongGPU had replaced or moved aside couldn't go back, because another file is at its place now; that file was left as it is." +
+               (at == wstring::npos ? wstring() : L" Your original is kept in " + w.substr(at + 12));
+    }
     if (Has(w, L"The game replaced ")) return L"The game had replaced one of its files since WrongGPU was installed (probably a game update). Its newer file was kept.";
     if (Has(w, L"exists again with different content") || Has(w, L"The backup folder was kept"))
         return L"A game file the game changed was kept as it is. Its original stays in a backup folder in the game's folder.";

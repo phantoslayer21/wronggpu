@@ -688,7 +688,8 @@ def test_rc6_hunt(t, opti):
     t.run("uninstall", b)
     shutil.rmtree(root, ignore_errors=True)
 
-    # L5: OptiScaler.ini saved by OptiScaler's own menu is the install's: carried over by Update, removed by Uninstall
+    # L5: OptiScaler.ini saved by OptiScaler's own menu: its values carried over by Update; the file itself is not WrongGPU's
+    # bytes (0.6.1, the ownership rule), so Update backs it up and Uninstall leaves it, keeping the earlier one
     print("\n[rc6 hunt] OptiScaler.ini saved by OptiScaler's menu")
     root, b, exe = game(t, "Menu Save Game", validated=True)
     before = snapshot(root)
@@ -699,17 +700,23 @@ def test_rc6_hunt(t, opti):
     menu("0x2E")  # the menu saves its ini (its own value over the launcher's)
     rc3 = t.run("update", exe, "--opti=" + opti, "--noscan", "--force")
     rec = record_text(b)
-    t.check("L5: Update carries the menu's value over and records OptiScaler.ini as the install's (no backup of it)",
-            rc == 0 and rc2 == 0 and rc3 == 0 and "ShortcutKey=0x2E" in ini(b, "OptiScaler.ini") and "\ncopy\t0\t-\t" in rec and
-            re.search(r"\ncopy\t0\t-\t[0-9a-f]+\tOptiScaler\.ini\r\n", rec) and not os.path.isfile(os.path.join(b, "wronggpu-setup", "backup", "OptiScaler.ini")),
+    saved = read(os.path.join(b, "wronggpu-setup", "backup", "OptiScaler.ini")) if os.path.isfile(os.path.join(b, "wronggpu-setup", "backup", "OptiScaler.ini")) else b""
+    t.check("L5: Update carries the menu's value over; the menu-saved file is backed up (the uninstall puts it back), never lost",
+            rc == 0 and rc2 == 0 and rc3 == 0 and "ShortcutKey=0x2E" in ini(b, "OptiScaler.ini") and
+            re.search(r"\ncopy\t1\t[0-9a-f]+\t[0-9a-f]+\tOptiScaler\.ini\r\n", rec) and b"; saved by the menu" in saved,
             (rc, rc2, rc3, t.j.get("message"), ini(b, "OptiScaler.ini")[-300:]))
     menu("0x2F")
+    later = read(oini)
     rc = t.run("uninstall", b)
     after = snapshot(root)
-    t.check("L5: Uninstall removes the menu-saved OptiScaler.ini with the rest (the game byte for byte)", rc == 0 and after == before and not os.path.isfile(oini),
-            (rc, t.j.get("warnings"), diff(before, after)))
+    kept = [read(os.path.join(dp, n)) for dp, _, ns in os.walk(os.path.join(b, "WrongGPU-originals")) for n in ns]
+    outside = lambda snap: {k: v for k, v in snap.items() if "wronggpu-originals" not in k and not k.endswith("/optiscaler.ini")}
+    t.check("L5: Uninstall leaves the menu-saved OptiScaler.ini as it is and keeps the earlier one: both survive; everything else as before WrongGPU; partly",
+            rc == 0 and read(oini) == later and saved in kept and outside(after) == outside(before) and "partly" in (t.j.get("message") or ""),
+            (rc, t.j.get("message"), t.j.get("warnings"), diff(outside(before), outside(after))))
     rc = t.run("status", exe, "--noscan")
-    t.check("L5: after the uninstall the game is eligible (not \"your own OptiScaler\")", rc == 0 and t.j.get("game", {}).get("status") == "eligible", t.j.get("game"))
+    t.check("L5: after the uninstall the OptiScaler.ini left there is reported as the player's (WrongGPU no longer claims it)",
+            rc == 0 and t.j.get("game", {}).get("status") == "players-optiscaler", t.j.get("game"))
     shutil.rmtree(root, ignore_errors=True)
 
 
@@ -1948,10 +1955,16 @@ def test_rr_config_fix(t, opti):
                 re.search(r"(?m)^rrconfig\t" + re.escape(bl4_ini) + r"\tcr\tabsent\t-\r?$", record_text(b)) is not None and
                 ch and all(k.endswith("wronggpu-setup/install.record") for k in ch) and "pre_exposure=original" in (options_line(ini(b)) or ""),
                 (rx, du, ch, options_line(ini(b))))
+        edited = read(os.path.join(b, "wronggpu.ini"))  # (changed outside the launcher above: not WrongGPU's bytes any more)
         rc = t.run("uninstall", exe)
-        t.check("...uninstall takes that line out: Engine.ini gone, the game's settings folder stays, the game folder as before the install (r3 #1)",
-                rc == 0 and not os.path.exists(bl4_ini) and os.listdir(os.path.dirname(bl4_ini)) == ["GameUserSettings.ini"] and snapshot(root) == before,
-                (rc, msgs(), diff(before, snapshot(root))))
+        # (0.6.1, the ownership rule: the wronggpu.ini changed outside the launcher stays as it is, the only file left)
+        want = dict(before)
+        want[os.path.relpath(os.path.join(b, "wronggpu.ini"), root).replace("\\", "/").lower()] = sha(edited)
+        t.check("...uninstall takes that line out: Engine.ini gone, the game's settings folder stays, the game folder as before the install, the outside-edited "
+                "wronggpu.ini left as it is (r3 #1)",
+                rc == 0 and not os.path.exists(bl4_ini) and os.listdir(os.path.dirname(bl4_ini)) == ["GameUserSettings.ini"] and snapshot(root) == want,
+                (rc, msgs(), diff(want, snapshot(root))))
+        os.remove(os.path.join(b, "wronggpu.ini"))
         os.remove(rr_lib)  # r6 #5 / r7 #5: the game without the RR library now, so WrongGPU's RR files don't go in
         rc = t.run("install", exe, "--opti=" + opti, "--noscan", "--force", "--experimental")
         t.check("...installed again for the checks below (without WrongGPU's RR files)", rc == 0 and "WrongGPU-RR.asi" not in record_text(b), (rc, t.j.get("message")))

@@ -809,6 +809,8 @@ bool PrepareOp(const GameEntry& e, Op op, OpRequest& r, bool* failed, bool* gone
                           {{L"Switch", 1, false, false}, {L"Cancel", 0, true, false}}, 0) != 1)
                 return false;
             r.moveMods = true;
+            // the OK is for these files with these bytes (the install moves none that changed since)
+            for (auto& f : t.conflicts.modFiles) r.moveModsList.push_back({f, Sha256File(Join(t.dir, f))});
         }
         if (t.coexist.foreignPluginsBlockRr) {  // 0.6.1: other setups' plugins may hook RR too; keeping them leaves WrongGPU's RR out
             wstring list; for (auto& p : t.coexist.foreignPlugins) list += (list.empty() ? L"" : L", ") + p;
@@ -816,7 +818,8 @@ bool PrepareOp(const GameEntry& e, Op op, OpRequest& r, bool* failed, bool* gone
                                       L"Ray Reconstruction as WrongGPU's does, so WrongGPU's Ray Reconstruction goes in only if they are moved aside. They are backed "
                                       L"up and put back when you uninstall WrongGPU. If you keep them, WrongGPU installs without its Ray Reconstruction.",
                                       {{L"Move them aside", 1, false, false}, {L"Keep them", 0, true, false}}, 0) == 1;
-            if (r.movePlugins) r.movePluginsList = t.coexist.foreignPlugins;  // exactly the plugins the question listed
+            if (r.movePlugins)  // exactly the plugins the question listed, with the bytes they had then
+                for (auto& p : t.coexist.foreignPlugins) r.movePluginsList.push_back({p, Sha256File(Join(t.exeDir, p))});
         }
         if (t.conflicts.oldFound()) {
             if (!Confirm(L"Remove the older WrongGPU install first?\n\nAn older WrongGPU (DLSS 4.5 AMD) install is in this game. The game's original files are put back exactly as they were.", 0,

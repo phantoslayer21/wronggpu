@@ -93,8 +93,10 @@ struct PluginPlan {
     std::vector<wstring> blocking;   // relative to exeDir
     bool outside = false;            // a blocking plugin is outside the install folder
 };
-PluginPlan PlanPluginsAside(const wstring& exeDir, const wstring& dir, const std::vector<wstring>& plugins, const std::vector<wstring>& agreed,
-                            const std::map<wstring, wstring>& movedBefore);
+// `agreed`: (path relative to exeDir, the SHA-256 it had when the player agreed); a plugin counts as agreed only while its
+// bytes are still those.
+PluginPlan PlanPluginsAside(const wstring& exeDir, const wstring& dir, const std::vector<wstring>& plugins,
+                            const std::vector<std::pair<wstring, wstring>>& agreed, const std::map<wstring, wstring>& movedBefore);
 // 0.6.1: WrongGPU's RR plugin exports this marker (clean/rr_f/proxy/include/wg_rr_settings_contract.h,
 // WG_RR_CONTRACT_EXPORT). A plugin file that exports it is WrongGPU's own RR plugin whatever its name or hash (a copy another
 // package placed): never "another setup's plugin", never moved aside. Read from the file's PE export table, never by

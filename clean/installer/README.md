@@ -229,28 +229,37 @@ With the defaults nothing of this section changes the installer.
   setup, or its uninstaller, can be run again. The logs that the OptiScaler of WrongGPU's own earlier hosted install
   wrote (`OptiScaler.log`) belong to that install: no `/MOVEMODS`, no warning. An OptiScaler that is not in the
   install record is another mod, as before.
-- **Uninstall.** Restores every original byte for byte (hash-verified), removes everything added, including
-  `wronggpu-*` files WrongGPU wrote while the game ran and the player's `wronggpu.ini` (a re-install keeps it), removes
-  the entry, and `%LOCALAPPDATA%\WrongGPU` (model and logs) when no other game uses it. Nothing of WrongGPU is left. If a game update replaced one of the FSR DLLs, the game's new file is
-  kept and the old renamed copy is removed; the other DLLs are restored as usual.
-- **Files that changed since the install** (uninstall and update alike). A file that is WrongGPU's own all the same is
-  removed like the one the record names, and the game's original comes back: an FSR DLL with WrongGPU's version
-  resource (a newer build the player placed by hand), or another payload file whose hash is one of WrongGPU's releases
-  (`known_releases.h`) or of the embedded payload (0.6.1: never by a version resource, which another setup's build may
-  carry; not the settings file). Any other changed FSR DLL follows the rule for game updates above; any other changed
-  file is left in place with a warning (another setup's OptiScaler over the proxy is named as such). When such a file
-  replaced one that was there before WrongGPU (its original is in the backup), that backup is never deleted: an uninstall
-  keeps the backup folder and says so, an update or repair refuses before anything changes ("Nothing was changed"), as it
-  does when a file WrongGPU moved aside is back with other content (a log that WrongGPU's own OptiScaler wrote over the
-  player's moved-aside `OptiScaler.log` is the exception: it is removed and the player's comes back). A recorded file
-  that cannot be read (another program holds it open) stops the uninstall before anything changes. `wronggpu.ini`
-  changed since the install (the launcher's settings, or edited by hand) stays through an update or repair, and an
-  uninstall removes it, as it always does, and says so. OptiScaler.ini is the install's while the OptiScaler DLL
-  the record installed is still there with its hash (OptiScaler's menu saves the ini with whatever the player picks), or
-  while its keys still point at WrongGPU's files; an uninstall that leaves an OptiScaler.ini naming WrongGPU's files warns
-  that its setup may need them. The game's original of an FSR DLL is never removed while WrongGPU's DLL is under the
-  game's name: it comes back from the backup, or from its `*.wronggpu-original.dll` copy when the backup is missing or
-  damaged, checked against the hash in the record; when neither is there, the uninstall refuses ("Nothing was changed").
+- **Uninstall.** Restores every original byte for byte (hash-verified), removes what WrongGPU added (by the rule below),
+  including the `wronggpu-*` files WrongGPU's own programs wrote while the game ran in the folders the record lists, and
+  the entry, and `%LOCALAPPDATA%\WrongGPU` (model and logs) when no other game uses it.
+- **What the launcher removes or overwrites: the file-ownership rule** (0.6.1; every restore, uninstall, repair, update,
+  move out of a wrong folder and cleanup; `src/wg_core/record.h`). A file is deleted or overwritten only when its
+  current bytes are WrongGPU's: the hash the install record says WrongGPU last wrote there (every write of the launcher
+  to `wronggpu.ini`, `OptiScaler.ini` and the RR plugin's settings updates that hash), or a WrongGPU release's
+  (`known_releases.h`, size and SHA-256) or the embedded payload's. Nothing else proves it: not the file's name, not a
+  file next to it, not an ini key, not "it is a log". Two exceptions, and only these: the game's FSR DLL slots, where
+  WrongGPU's DLL is recognised by its version resource (the game may update that DLL; a newer WrongGPU build placed by
+  hand counts as WrongGPU's), and settings, log and text files with WrongGPU's own unique names (`wronggpu-*`, the RR
+  plugin's `WrongGPU\wronggpu.ini`) that the record lists as created by WrongGPU. Shared names such as `OptiScaler.log`
+  or `fakenvapi.log` are never deleted by their name.
+  - Any other file at a recorded path (edited by hand, saved by OptiScaler's menu, replaced by another setup or a game
+    update) stays where it is, untouched, with a warning.
+  - When the original from before WrongGPU cannot go back because of such a file, it is kept in
+    `<install folder>\WrongGPU-originals\<time>\` (a folder no operation removes), checked byte for byte; a second
+    generation goes into a folder of its own, neither is overwritten. The result then says "partly" and names each file
+    and where its original is.
+  - Before anything changes, every recorded file is checked: one that cannot be read or replaced (another program holds
+    it, such as the running game) or a missing or damaged backup stops the operation ("Nothing was changed"). Each file
+    is checked again right before it is changed. The record is removed before the backup, so a stop at any point leaves
+    either the record and backup for a second run, which finishes, or every original at its path or in
+    `WrongGPU-originals`.
+  - The game's original of an FSR DLL comes back from the backup, or from its `*.wronggpu-original.dll` copy when the
+    backup is missing or damaged, checked against the hash in the record; when neither is there, the uninstall refuses
+    ("Nothing was changed"). An uninstall that leaves an OptiScaler.ini naming WrongGPU's files warns that its setup may
+    need them.
+  - Moving another setup's files aside needs the player's OK for those exact bytes: the switch and plugin questions
+    record each listed file with its SHA-256, and a file that changed since the question is not moved
+    (`--switch` / `--switch-plugins`: the files as they are when the install starts).
 - **Collect logs** (button, `/COLLECT`, or "Modify" in Apps & features): one .zip with WrongGPU's logs and crash
   notes, the install record, setup log, model source, system information (Windows, GPU, driver, HIP runtime, FSR DLL
   state, model state, where the output filter comes from, file hashes) and recent Windows crash / GPU-reset events.

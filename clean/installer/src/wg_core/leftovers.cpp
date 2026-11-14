@@ -236,6 +236,7 @@ std::vector<wstring> AdoptLeftovers(Context& ctx, const wstring& exe, const wstr
         m.e.push_back(e);
     }
     // folders that already exist are not provably ours: no "dir" entries
+    SetRuntimeLines(m, dir, Parent(exe));  // the adopted install's own wronggpu-* files
     const wstring state = StateDir(dir);
     EnsureDir(state);
     SaveRecord(RecordPath(dir), m);

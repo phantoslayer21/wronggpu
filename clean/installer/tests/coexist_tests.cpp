@@ -786,12 +786,21 @@ int main() {
             Put(Join(exeDir, L"plugins\\A.asi"), a);
             Put(Join(exeDir, L"plugins\\B.asi"), b);
             const std::vector<wstring> both = {L"plugins\\A.asi", L"plugins\\B.asi"};
-            // the player agreed to the plugins the question listed: exactly those move, a plugin not listed keeps RR out
-            PluginPlan p = PlanPluginsAside(exeDir, exeDir, both, both, {});
+            const wstring ha = Sha256Bytes(a.data(), a.size()), hb = Sha256Bytes(b.data(), b.size());
+            const std::vector<std::pair<wstring, wstring>> agreedBoth = {{L"plugins\\A.asi", ha}, {L"plugins\\B.asi", hb}};
+            // the player agreed to the plugins the question listed (with their bytes then): exactly those move, a plugin not
+            // listed keeps RR out
+            PluginPlan p = PlanPluginsAside(exeDir, exeDir, both, agreedBoth, {});
             require(p.moveAside == both && p.blocking.empty() && !p.outside, "plugin plan: both listed and agreed: both moved aside, RR goes in");
-            p = PlanPluginsAside(exeDir, exeDir, both, {L"plugins\\A.asi"}, {});
+            p = PlanPluginsAside(exeDir, exeDir, both, {{L"plugins\\A.asi", ha}}, {});
             require(p.moveAside.size() == 1 && IEq(p.moveAside[0], L"plugins\\A.asi") && p.blocking.size() == 1 && IEq(p.blocking[0], L"plugins\\B.asi"),
                     "plugin plan: a plugin the question didn't list is never moved; it keeps RR out");
+            // consent is bound to bytes: a listed plugin that changed after the question is not moved (it keeps RR out)
+            p = PlanPluginsAside(exeDir, exeDir, both, {{L"plugins\\A.asi", ha}, {L"plugins\\B.asi", ha}}, {});
+            require(p.moveAside.size() == 1 && IEq(p.moveAside[0], L"plugins\\A.asi") && p.blocking.size() == 1 && IEq(p.blocking[0], L"plugins\\B.asi"),
+                    "plugin plan: a listed plugin whose bytes changed since the question is not moved; it keeps RR out");
+            p = PlanPluginsAside(exeDir, exeDir, both, {{L"plugins\\A.asi", L""}}, {});
+            require(p.moveAside.empty() && p.blocking == both, "plugin plan: a listed plugin without its hash is agreed to nothing");
             p = PlanPluginsAside(exeDir, exeDir, both, {}, {});
             require(p.moveAside.empty() && p.blocking == both, "plugin plan: no OK: nothing moved, RR out");
             // a Repair after "Move them aside": the plugins the earlier install moved aside are back from its backup; byte for
@@ -801,16 +810,16 @@ int main() {
             require(p.moveAside.size() == 1 && IEq(p.moveAside[0], L"plugins\\A.asi") && p.blocking.size() == 1 && IEq(p.blocking[0], L"plugins\\B.asi"),
                     "plugin plan: moved before with the OK: the same file goes aside again; another file under a moved name keeps RR out");
             // the install folder above the exe folder: the paths moved are the install folder's
-            p = PlanPluginsAside(exeDir, g, both, both, {});
+            p = PlanPluginsAside(exeDir, g, both, agreedBoth, {});
             require(p.moveAside.size() == 2 && IEq(p.moveAside[0], L"bin\\x64\\plugins\\A.asi") && p.blocking.empty(),
                     "plugin plan: install folder above the exe folder: moved by their paths in the install folder");
             const std::map<wstring, wstring> beforeSplit = {{L"bin\\x64\\plugins\\a.asi", Sha256Bytes(a.data(), a.size())}};
             p = PlanPluginsAside(exeDir, g, {L"plugins\\A.asi"}, {}, beforeSplit);
             require(p.moveAside.size() == 1 && IEq(p.moveAside[0], L"bin\\x64\\plugins\\A.asi"), "plugin plan: install folder above the exe folder: moved before, by that path");
             // the exe folder outside the install folder: nothing can be moved, so RR stays out (never RR beside them)
-            p = PlanPluginsAside(exeDir, Join(dir, L"elsewhere"), both, both, {});
+            p = PlanPluginsAside(exeDir, Join(dir, L"elsewhere"), both, agreedBoth, {});
             require(p.moveAside.empty() && p.blocking == both && p.outside, "plugin plan: exe folder outside the install folder: nothing moved, RR out");
-            p = PlanPluginsAside(exeDir, Join(g, L"bin\\x6"), both, both, {});  // (a folder whose name is a prefix of the exe folder's)
+            p = PlanPluginsAside(exeDir, Join(g, L"bin\\x6"), both, agreedBoth, {});  // (a folder whose name is a prefix of the exe folder's)
             require(p.moveAside.empty() && p.outside, "plugin plan: never by a bare name prefix");
             // the record of the install folder names WrongGPU's own plugin by its path there
             Record rec;

@@ -1028,7 +1028,7 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
     oldJournal.erase(std::remove_if(oldJournal.begin(), oldJournal.end(), [&](const IniKeyChange& c) { return OptInKey(target.exe, c); }), oldJournal.end());
     // rc6 L5: values OptiScaler's own menu saved over the launcher's (the journal's keys, JournalOutside) carry over to the new
     // OptiScaler.ini as the player's choices, as the OptiScaler tab's Keep would make them (locked keys stay WrongGPU's)
-    if (target.installed && HostedRecord(target.record) && OptiIniIsOurs(dir, target.record)) {  // (0.6.1: never another setup's values)
+    if (target.installed && HostedRecord(target.record) && OptiSetupIsOurs(dir, target.record)) {  // (0.6.1: never another setup's values)
         string current;
         if (ReadAll(Join(dir, L"OptiScaler.ini"), current))
             for (auto& o : JournalOutside(current, oldJournal, L"OptiScaler.ini")) {
@@ -1043,6 +1043,7 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
     string keepBackup = wrongDir.empty() ? string() : wrongFixBackup;
     if (keepFix.backup && wrongDir.empty()) ReadAll(RrConfigBackupPath(dir), keepBackup);
     Consent consent; consent.moveMods = r.moveMods; consent.removeOld = r.removeOld; consent.movePlugins = r.movePlugins; consent.plugins = r.movePluginsList;
+    consent.mods = r.moveModsList;
     try {
         for (auto& w : DoInstall(ctx, target, model, consent, ui, sys.hip)) res.warnings.push_back(w);
     } catch (const SetupError&) {
@@ -1083,6 +1084,15 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
     if (!wrongDir.empty()) res.message = L"WrongGPU " + ver + L" moved to the game's program in " + dir + L" (it was next to " + BaseName(wrong.exe) + L" in " + wrongDir + L")";
     else if (r.op == Op::Repair && !was.empty() && !IEq(was, ver)) res.message = L"WrongGPU repaired in " + dir + L" and updated from " + was + L" to " + ver;
     else res.message = L"WrongGPU " + ver + L" " + (r.op == Op::Install && !target.installed ? L"installed" : r.op == Op::Repair ? L"repaired" : L"updated") + L" in " + dir;
+    // the earlier install's restore could not put every original back (the ownership rule, record.h): said, with each one
+    if (AnyPartly(res.warnings)) res.message = PartlyText(res.message, res.warnings);
+}
+
+wstring PartlyText(const wstring& done, const std::vector<wstring>& warnings) {
+    size_t n = 0;
+    for (auto& w : warnings) if (w.rfind(kPartlyRestored, 0) == 0) ++n;
+    return done + L", partly: " + std::to_wstring(n) + L" file(s) could not be put back because another file is at their place now (each is "
+           L"listed with where its original is kept)";
 }
 
 OpResult RunOp(Context& ctx, const OpRequest& r, Ui& ui) {
@@ -1096,7 +1106,9 @@ OpResult RunOp(Context& ctx, const OpRequest& r, Ui& ui) {
                 if (!m.exe.empty() && GameRunning(m.exe)) Fail(BaseName(m.exe) + L" is running. Close it first.", EXIT_REFUSED);
                 for (auto& w : DoRestore(ctx, r.dir, ui, false, false)) res.warnings.push_back(w);
                 RemoveManagedGame(r.dir);
-                res.message = L"WrongGPU was uninstalled from " + r.dir + L"; its original files are back";
+                // the ownership rule (record.h): "back" only when every file was put back; else "partly", each one in the warnings
+                res.message = AnyPartly(res.warnings) ? PartlyText(L"WrongGPU was uninstalled from " + r.dir, res.warnings)
+                                                      : L"WrongGPU was uninstalled from " + r.dir + L"; its original files are back";
                 break;
             }
             case Op::Detach: {  // the launcher is uninstalled, the game keeps WrongGPU: its own Apps & features entry again
@@ -1165,7 +1177,11 @@ string JobText(const OpRequest& r, const wstring& localAppData, const wstring& l
         for (size_t i = 0; i < kSettingCount; ++i) t += string("profile.") + kSettings[i].key + "=" + r.profile.get(kSettings[i].key) + "\r\n";
     for (auto& e : r.optiEdits) t += "optikey." + e.first + "=" + e.second + "\r\n";
     if (r.movePlugins) t += "moveplugins=1\r\n";
-    for (size_t i = 0; i < r.movePluginsList.size(); ++i) t += "moveplugin." + std::to_string(i) + "=" + ToUtf8(r.movePluginsList[i]) + "\r\n";
+    // the files the player agreed to move, each with the SHA-256 it had then: "<path>|<sha256>"
+    for (size_t i = 0; i < r.movePluginsList.size(); ++i)
+        t += "moveplugin." + std::to_string(i) + "=" + ToUtf8(r.movePluginsList[i].first) + "|" + ToUtf8(r.movePluginsList[i].second) + "\r\n";
+    for (size_t i = 0; i < r.moveModsList.size(); ++i)
+        t += "movemod." + std::to_string(i) + "=" + ToUtf8(r.moveModsList[i].first) + "|" + ToUtf8(r.moveModsList[i].second) + "\r\n";
     if (r.otherSetupOk) t += "othersetupok=1\r\n";
     if (r.optiReset) t += "optireset=1\r\n";
     if (r.optiKeep) t += "optikeep=1\r\n";
@@ -1198,7 +1214,10 @@ bool ParseJob(const string& text, OpRequest& r, wstring& localAppData, wstring& 
         else if (k == "force") r.force = Truthy(kv.second);
         else if (k == "noscan") r.noScan = Truthy(kv.second);
         else if (k == "moveplugins") r.movePlugins = Truthy(kv.second);
-        else if (k.rfind("moveplugin.", 0) == 0) r.movePluginsList.push_back(v);
+        else if (k.rfind("moveplugin.", 0) == 0 || k.rfind("movemod.", 0) == 0) {  // "<path>|<sha256>" (no hash: agreed to nothing)
+            const size_t bar = v.rfind(L'|');
+            (k[4] == 'p' ? r.movePluginsList : r.moveModsList).push_back({bar == wstring::npos ? v : v.substr(0, bar), bar == wstring::npos ? wstring() : v.substr(bar + 1)});
+        }
         else if (k == "othersetupok") r.otherSetupOk = Truthy(kv.second);
         else if (k == "optireset") r.optiReset = Truthy(kv.second);
         else if (k == "optikeep") r.optiKeep = Truthy(kv.second);

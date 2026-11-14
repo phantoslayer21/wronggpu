@@ -224,14 +224,16 @@ static std::vector<wstring> UnrecordedPlugins(const wstring& exeDir, const Recor
 std::vector<wstring> ForeignPlugins(const wstring& exeDir, const Record* ours, const wstring& recordDir) {
     return UnrecordedPlugins(exeDir, ours, false, recordDir);
 }
-PluginPlan PlanPluginsAside(const wstring& exeDir, const wstring& dir, const std::vector<wstring>& plugins, const std::vector<wstring>& agreed,
-                            const std::map<wstring, wstring>& movedBefore) {
+PluginPlan PlanPluginsAside(const wstring& exeDir, const wstring& dir, const std::vector<wstring>& plugins,
+                            const std::vector<std::pair<wstring, wstring>>& agreed, const std::map<wstring, wstring>& movedBefore) {
     PluginPlan p;
     wstring prefix;
     const bool inside = RelativeTo(dir, exeDir, prefix);
     for (auto& f : plugins) {
         const wstring rel = prefix.empty() ? f : Join(prefix, f);
-        bool ok = std::any_of(agreed.begin(), agreed.end(), [&](const wstring& a) { return IEq(a, f); });
+        // agreed to with these bytes (the question showed this file as it was then; a file changed since was not shown)
+        const wstring now = Sha256File(Join(exeDir, f));
+        bool ok = !now.empty() && std::any_of(agreed.begin(), agreed.end(), [&](const std::pair<wstring, wstring>& a) { return IEq(a.first, f) && IEq(a.second, now); });
         if (!ok && inside) {
             const auto it = movedBefore.find(Lower(rel));
             ok = it != movedBefore.end() && IEq(Sha256File(Join(exeDir, f)), it->second);
@@ -262,7 +264,7 @@ CoexistReport AssessCoexistence(Context& ctx, const wstring& exe, const wstring&
     auto isOurs = [&](const wstring& rel) {
         if (!sameDir) return false;
         if (hostedOurs && IEq(rel, L"OptiScaler.log")) return true;
-        if (hostedOurs && IEq(rel, L"OptiScaler.ini")) return OptiIniIsOurs(dir, *ours);  // 0.6.1: beside WrongGPU's OptiScaler, or pointing at WrongGPU's files
+        if (hostedOurs && IEq(rel, L"OptiScaler.ini")) return OptiSetupIsOurs(dir, *ours);  // 0.6.1: the scan only (what it asks about); the restore goes by bytes
         auto it = ourHash.find(Lower(rel));
         if (it == ourHash.end()) return false;
         if (EndsWithI(rel, L".ini") || EndsWithI(rel, L".log")) return true;  // settings and logs of our install

@@ -6,6 +6,7 @@
 // it), the log-tail parser on synthetic logs, the job and result files, the update reply, the game environment, Ray
 // Reconstruction (its settings, the RR settings file round trip, which games use it, the RR log).
 // Written for this project. Run by ctest ("launcher-core").
+#include <algorithm>
 #include <cstdio>
 #include <iostream>
 #include <stdexcept>
@@ -31,6 +32,7 @@ void require(bool ok, const char* what) {
     if (!ok) throw std::runtime_error(what);
     ++checks;
 }
+void require(bool ok, const std::string& what) { require(ok, what.c_str()); }
 wstring TempFolder() {
     wchar_t tmp[MAX_PATH] = {};
     GetTempPathW(MAX_PATH, tmp);
@@ -385,105 +387,168 @@ int main() {
                             "game FSR DLL, no original anywhere, an update's restore: refused, nothing changed (record kept)");
                 }
             }
-            // ---- 0.6.1: a file left in place whose original is in the backup never loses that backup ----------------------
+            // ---- 0.6.1: the file-ownership rule (record.h): a restore deletes or overwrites only WrongGPU's bytes; anything else
+            // stays as it is, and a player's original that cannot go back is kept in WrongGPU-originals (both generations
+            // survive); a stop at any point loses nothing, and a second run finishes ------------------------------------------
             {
-                const string mine = "the player's own file from before WrongGPU (synthetic)", ours = "WrongGPU's file as installed (synthetic)",
-                             other = "another setup's file put here since (synthetic)", moved = "a plugin moved aside with the OK (synthetic)";
-                auto keptGame = [&](const wstring& name, bool disable) {
-                    const wstring d = Join(dir, L"Kept Backup\\" + name);
-                    file(Join(d, L"Game.exe"), "MZ");
-                    file(Join(d, disable ? L"plugins\\Other.asi" : L"other.dll"), other);
-                    file(BackupPath(d, disable ? L"plugins\\Other.asi" : L"other.dll"), disable ? moved : mine);
-                    Record m; m.version = L"0.6.0"; m.format = 2; m.game = d; m.exe = Join(d, L"Game.exe"); m.status = L"experimental"; m.model = L"m.wgcm";
-                    Entry e; e.action = disable ? L"disable" : L"copy"; e.rel = disable ? L"plugins\\Other.asi" : L"other.dll"; e.existed = true;
-                    e.orig = disable ? Sha256Bytes(moved.data(), moved.size()) : Sha256Bytes(mine.data(), mine.size());
-                    if (!disable) e.inst = Sha256Bytes(ours.data(), ours.size());
-                    e.owner = disable ? L"moved" : L"wg";
-                    m.e.push_back(e);
-                    SaveRecord(RecordPath(d), m);
-                    return d;
+                struct Killed {};
+                auto H = [](const string& s) { return Sha256Bytes(s.data(), s.size()); };
+                auto read = [](const wstring& p) { string s; if (!ReadAll(p, s)) return string("(missing)"); return s; };
+                auto keptOf = [&](const wstring& d, const wstring& rel) {  // every kept generation of rel, oldest name first
+                    std::vector<string> out;
+                    for (auto& g : ListDirs(Join(d, kKeptDirName))) if (IsFile(Join(g, rel))) out.push_back(read(Join(g, rel)));
+                    return out;
                 };
-                for (int disable = 0; disable < 2; ++disable) {
-                    const wstring rel = disable ? L"plugins\\Other.asi" : L"other.dll";
-                    const wstring u = keptGame(disable ? L"Update Moved" : L"Update Copy", disable == 1);
-                    bool threw = false;
-                    wstring msg;
-                    try { DoRestore(mc, u, quiet, false, true); } catch (const SetupError& ex) { threw = true; msg = ex.msg; }
-                    string now, kept;
-                    require(threw && msg.rfind(L"Nothing was changed", 0) == 0 && ReadAll(Join(u, rel), now) && now == other && IsFile(RecordPath(u)) &&
-                                ReadAll(BackupPath(u, rel), kept) && kept == (disable ? moved : mine),
-                            disable ? "kept backup: an update's restore with another file where one was moved aside: refused before anything changes"
-                                    : "kept backup: an update's restore with another file over a backed-up original: refused before anything changes");
-                    const wstring d = keptGame(disable ? L"Uninstall Moved" : L"Uninstall Copy", disable == 1);
-                    std::vector<wstring> w;
-                    threw = false;
-                    try { w = DoRestore(mc, d, quiet, false, false); } catch (const SetupError&) { threw = true; }
-                    bool said = false;
-                    for (auto& x : w) said = said || x.rfind(L"The backup folder was kept", 0) == 0;
-                    require(!threw && said && ReadAll(Join(d, rel), now) && now == other && ReadAll(BackupPath(d, rel), kept) && kept == (disable ? moved : mine),
-                            disable ? "kept backup: the uninstall leaves the other file and keeps the moved file's backup, and says so"
-                                    : "kept backup: the uninstall leaves the other file and keeps the original's backup, and says so");
-                }
-                // WrongGPU's settings file over an earlier one (an entry that existed), changed since (the launcher's settings, or
-                // edited by hand): an update keeps it for the new install, never refused; an uninstall removes it and says so
-                // (never "left in place"), and the backup folder goes as usual
-                auto settingsGame = [&](const wstring& name) {
-                    const wstring d = Join(dir, L"Settings Ini\\" + name);
-                    const string before = "[fsr]\r\nupscaler=network\r\n; an earlier one\r\n", installed = "[fsr]\r\nupscaler=network\r\n";
+                struct F { wstring rel, action; string orig, ours, now; };  // orig: there before WrongGPU ("" none); now: "" missing
+                auto ownGame = [&](const wstring& name, const std::vector<F>& fs) {
+                    const wstring d = Join(dir, L"Ownership\\" + name);
                     file(Join(d, L"Game.exe"), "MZ");
-                    file(Join(d, L"wronggpu.ini"), "[fsr]\r\nupscaler=network\r\noutput_filter=quality9\r\n");  // changed since the install
-                    file(BackupPath(d, L"wronggpu.ini"), before);
-                    Record m; m.version = L"0.6.0"; m.format = 2; m.game = d; m.exe = Join(d, L"Game.exe"); m.status = L"experimental"; m.model = L"m.wgcm";
-                    Entry e; e.action = L"copy"; e.rel = L"wronggpu.ini"; e.existed = true; e.orig = Sha256Bytes(before.data(), before.size());
-                    e.inst = Sha256Bytes(installed.data(), installed.size()); e.owner = L"wg";
-                    m.e.push_back(e);
-                    SaveRecord(RecordPath(d), m);
-                    return d;
-                };
-                {
-                    const wstring u = settingsGame(L"Update");
-                    std::vector<wstring> w;
-                    bool threw = false;
-                    try { w = DoRestore(mc, u, quiet, false, true); } catch (const SetupError&) { threw = true; }
-                    string now;
-                    bool leftInPlace = false;
-                    for (auto& x : w) leftInPlace = leftInPlace || x.find(L"wronggpu.ini") != wstring::npos;
-                    require(!threw && ReadAll(Join(u, L"wronggpu.ini"), now) && now.find("quality9") != string::npos && !leftInPlace && !IsFile(RecordPath(u)),
-                            "settings file: an update's restore keeps the changed wronggpu.ini for the new install, no refusal, no warning");
-                    const wstring d = settingsGame(L"Uninstall");
-                    w.clear();
-                    threw = false;
-                    try { w = DoRestore(mc, d, quiet, false, false); } catch (const SetupError&) { threw = true; }
-                    bool saidRemoved = false, saidKept = false;
-                    for (auto& x : w) {
-                        saidRemoved = saidRemoved || (x.rfind(L"wronggpu.ini had changed", 0) == 0 && x.find(L"removed with the rest") != wstring::npos);
-                        saidKept = saidKept || (x.find(L"Left in place") != wstring::npos && x.find(L"wronggpu.ini") != wstring::npos);
+                    Record m; m.version = L"0.6.1"; m.format = 2; m.game = d; m.exe = Join(d, L"Game.exe"); m.status = L"experimental"; m.model = L"m.wgcm";
+                    for (auto& f : fs) {
+                        if (!f.now.empty()) file(Join(d, f.rel), f.now);
+                        if (!f.orig.empty()) file(BackupPath(d, f.rel), f.orig);
+                        Entry e; e.action = f.action; e.rel = f.rel; e.existed = !f.orig.empty() && f.action == L"copy";
+                        e.orig = f.orig.empty() ? wstring() : H(f.orig);
+                        if (f.action == L"copy") e.inst = H(f.ours);
+                        e.owner = f.action == L"copy" ? L"wg" : L"moved";
+                        m.e.push_back(e);
                     }
-                    require(!threw && saidRemoved && !saidKept && !IsFile(Join(d, L"wronggpu.ini")) && !IsDir(StateDir(d)),
-                            "settings file: an uninstall removes the changed wronggpu.ini and says it was removed (never \"left in place\")");
+                    m.runtime.push_back({L".", L"wronggpu-*"});
+                    SaveRecord(RecordPath(d), m);
+                    return d;
+                };
+                std::string stopAt;
+                SetRestoreStepHook([&](const char* s) { if (stopAt == s) throw Killed{}; });
+                bool killed = false;
+                auto restore = [&](const wstring& d, bool keepState, std::vector<wstring>* w = nullptr, wstring* err = nullptr) {
+                    killed = false;
+                    try { const auto r = DoRestore(mc, d, quiet, false, keepState); if (w) *w = r; return true; }
+                    catch (const SetupError& e) { if (err) *err = e.msg; return false; }
+                    catch (const Killed&) { killed = true; return false; }
+                };
+                auto partly = [](const std::vector<wstring>& w, const wstring& rel) {
+                    for (auto& x : w) if (x.rfind(kPartlyRestored, 0) == 0 && x.find(rel) != wstring::npos && x.find(L"is kept in") != wstring::npos) return true;
+                    return false;
+                };
+                const string A = "the file that was there before WrongGPU (synthetic)\r\n", W = "what WrongGPU wrote (synthetic)\r\n",
+                             B = "the unchanged file changed since (synthetic)\r\n", C = "another setup's file put over it (synthetic)\r\n";
+                const string P = "the player's own OptiScaler DLL (synthetic)", O = "the OptiScaler DLL WrongGPU's setup placed (synthetic)";
+                for (int keep = 0; keep < 2; ++keep) {
+                    const wstring how = keep ? L" (repair/update)" : L" (uninstall)";
+                    const string howA = keep ? " (an update or repair's restore)" : " (an uninstall)";
+                    // wronggpu.ini: A there before, WrongGPU wrote W, edited by hand to B: B stays, A is kept; neither is lost
+                    {
+                        const wstring d = ownGame(L"Settings A-B" + how, {{L"wronggpu.ini", L"copy", A, W, B}});
+                        std::vector<wstring> w;
+                        require(restore(d, keep == 1, &w) && read(Join(d, L"wronggpu.ini")) == B && keptOf(d, L"wronggpu.ini") == std::vector<string>{A} &&
+                                    partly(w, L"wronggpu.ini") && AnyPartly(w) && !IsFile(RecordPath(d)),
+                                "ownership: wronggpu.ini A before, edited to B: B stays, A is kept in WrongGPU-originals, the result says partly" + howA);
+                        const wstring u = ownGame(L"Settings A-W" + how, {{L"wronggpu.ini", L"copy", A, W, W}});
+                        w.clear();
+                        require(restore(u, keep == 1, &w) && read(Join(u, L"wronggpu.ini")) == A && !IsDir(Join(u, kKeptDirName)) && !AnyPartly(w),
+                                "ownership: wronggpu.ini as WrongGPU last wrote it: the original A goes back, nothing kept, no partly" + howA);
+                        const wstring noneBefore = ownGame(L"Settings none-B" + how, {{L"wronggpu.ini", L"copy", "", W, B}});
+                        w.clear();
+                        require(restore(noneBefore, keep == 1, &w) && read(Join(noneBefore, L"wronggpu.ini")) == B && !AnyPartly(w),
+                                "ownership: wronggpu.ini edited by hand, none before: left in place (never removed by its name)" + howA);
+                    }
+                    // OptiScaler.ini: the player's A switched over, then saved in OptiScaler's menu (B), WrongGPU's OptiScaler DLL
+                    // untouched; and replaced in full by another file (C), the DLL untouched: the ini stays, A is kept, the
+                    // player's own OptiScaler DLL comes back
+                    for (const string& now : {B, C}) {
+                        const wstring d = ownGame(wstring(now == B ? L"Opti menu" : L"Opti replaced") + how,
+                                               {{L"winmm.dll", L"copy", P, O, O}, {L"OptiScaler.ini", L"copy", A, W, now}});
+                        std::vector<wstring> w;
+                        require(restore(d, keep == 1, &w) && read(Join(d, L"OptiScaler.ini")) == now && keptOf(d, L"OptiScaler.ini") == std::vector<string>{A} &&
+                                    read(Join(d, L"winmm.dll")) == P && partly(w, L"OptiScaler.ini"),
+                                string("ownership: OptiScaler.ini ") + (now == B ? "saved by OptiScaler's menu" : "replaced in full") +
+                                    " beside WrongGPU's untouched OptiScaler DLL: it stays, the player's A is kept, their DLL comes back" + howA);
+                    }
+                    // OptiScaler.log: the player's A moved aside, then another log B written there: B stays, A is kept
+                    {
+                        const wstring d = ownGame(L"Log A-B" + how, {{L"OptiScaler.ini", L"copy", "", W, W}, {L"OptiScaler.log", L"disable", A, "", B}});
+                        std::vector<wstring> w;
+                        require(restore(d, keep == 1, &w) && read(Join(d, L"OptiScaler.log")) == B && keptOf(d, L"OptiScaler.log") == std::vector<string>{A} &&
+                                    !IsFile(Join(d, L"OptiScaler.ini")) && partly(w, L"OptiScaler.log"),
+                                "ownership: OptiScaler.log A moved aside, another log B there now: B stays (never deleted by its name), A is kept" + howA);
+                        const wstring g2 = ownGame(L"Log A-gone" + how, {{L"OptiScaler.log", L"disable", A, "", ""}});
+                        require(restore(g2, keep == 1) && read(Join(g2, L"OptiScaler.log")) == A && !IsDir(Join(g2, kKeptDirName)),
+                                "ownership: OptiScaler.log A moved aside, nothing there now: A goes back" + howA);
+                    }
                 }
-                // a log the OptiScaler of WrongGPU's setup wrote over the player's moved-aside OptiScaler.log: an update's restore
-                // puts the player's back (never refused, never the backup lost)
+                // two generations: A kept by a first restore; the next install over B, changed to C: B is kept too, A stays
                 {
-                    const string players = "the player's own OptiScaler.log (synthetic)", wrote = "a log WrongGPU's OptiScaler wrote (synthetic)",
-                                 optiIni = "[Upscalers]\r\nDx12Upscaler=auto\r\n";
-                    const wstring d = Join(dir, L"Moved Log\\Update");
-                    file(Join(d, L"Game.exe"), "MZ");
-                    file(Join(d, L"OptiScaler.log"), wrote);
-                    file(BackupPath(d, L"OptiScaler.log"), players);
-                    file(Join(d, L"OptiScaler.ini"), optiIni);
-                    Record lr; lr.version = L"0.6.0"; lr.format = 2; lr.game = d; lr.exe = Join(d, L"Game.exe"); lr.status = L"experimental"; lr.model = L"m.wgcm";
-                    Entry optiEntry; optiEntry.action = L"copy"; optiEntry.rel = L"OptiScaler.ini"; optiEntry.inst = Sha256Bytes(optiIni.data(), optiIni.size()); optiEntry.owner = L"wg-optibundle";
-                    lr.e.push_back(optiEntry);
-                    Entry lg; lg.action = L"disable"; lg.rel = L"OptiScaler.log"; lg.existed = true; lg.orig = Sha256Bytes(players.data(), players.size()); lg.owner = L"moved";
-                    lr.e.push_back(lg);
-                    SaveRecord(RecordPath(d), lr);
-                    bool threw = false;
-                    try { DoRestore(mc, d, quiet, false, true); } catch (const SetupError&) { threw = true; }
-                    string now;
-                    require(!threw && ReadAll(Join(d, L"OptiScaler.log"), now) && now == players,
-                            "moved-aside OptiScaler.log: the log WrongGPU's OptiScaler wrote goes, the player's comes back (an update is not refused)");
+                    const wstring d = ownGame(L"Generations", {{L"wronggpu.ini", L"copy", A, W, B}});
+                    require(restore(d, true), "ownership: generations: the first restore");
+                    const wstring nextGen = ownGame(L"Generations", {{L"wronggpu.ini", L"copy", B, W, C}});
+                    std::vector<wstring> w;
+                    const auto kept = restore(nextGen, false, &w) ? keptOf(nextGen, L"wronggpu.ini") : std::vector<string>{};
+                    require(kept.size() == 2 && std::count(kept.begin(), kept.end(), A) == 1 && std::count(kept.begin(), kept.end(), B) == 1 &&
+                                read(Join(nextGen, L"wronggpu.ini")) == C,
+                            "ownership: two generations (A, then B) are both kept, neither overwritten; C stays");
                 }
+                // WrongGPU's own unique names that the record lists: removed by name; shared names never
+                {
+                    const wstring d = ownGame(L"Runtime names", {{L"wronggpu_runtime.dll", L"copy", "", W, W}});
+                    file(Join(d, L"wronggpu-frame.log"), "a log WrongGPU's runtime wrote");
+                    file(Join(d, L"OptiScaler.log"), "a log another program wrote");
+                    file(Join(d, L"fakenvapi.log"), "a log another program wrote");
+                    file(Join(d, L"sub\\wronggpu-other.log"), "in a folder the record does not list");
+                    require(restore(d, false) && !IsFile(Join(d, L"wronggpu-frame.log")) && IsFile(Join(d, L"OptiScaler.log")) && IsFile(Join(d, L"fakenvapi.log")) &&
+                                IsFile(Join(d, L"sub\\wronggpu-other.log")) && !IsFile(Join(d, L"wronggpu_runtime.dll")),
+                            "ownership: wronggpu-* in a folder the record lists goes; OptiScaler.log and fakenvapi.log stay; a folder not listed is left alone");
+                }
+                // checked again right before the change: a file that changed after the check is left, its original kept
+                {
+                    const wstring d = ownGame(L"Recheck", {{L"wronggpu.ini", L"copy", A, W, W}});
+                    SetRestoreStepHook([&](const char* s) { if (string(s) == "kept") file(Join(d, L"wronggpu.ini"), C); });
+                    std::vector<wstring> w;
+                    require(restore(d, false, &w) && read(Join(d, L"wronggpu.ini")) == C && keptOf(d, L"wronggpu.ini") == std::vector<string>{A} && partly(w, L"wronggpu.ini"),
+                            "ownership: a file changed between the check and the restore is left as it is; the original is kept");
+                    SetRestoreStepHook([&](const char* s) { if (stopAt == s) throw Killed{}; });
+                }
+                // interrupted: a stop after the record is gone (before the backup) loses nothing; a stop before it is finished by
+                // a second run; a stop right after the originals were kept keeps them once
+                for (int keep = 0; keep < 2; ++keep) {
+                    const wstring how = keep ? L" (repair/update)" : L" (uninstall)";
+                    const string howA = keep ? " (an update or repair's restore)" : " (an uninstall)";
+                    {
+                        const wstring d = ownGame(L"Killed after record" + how, {{L"wronggpu.ini", L"copy", A, W, B}, {L"other.dll", L"copy", P, O, O}});
+                        stopAt = "record-removed";
+                        const bool done = restore(d, keep == 1), stopped = killed;
+                        stopAt.clear();
+                        wstring err;
+                        const bool second = restore(d, keep == 1, nullptr, &err);
+                        require(!done && stopped && !IsFile(RecordPath(d)) && read(Join(d, L"other.dll")) == P && read(Join(d, L"wronggpu.ini")) == B &&
+                                    keptOf(d, L"wronggpu.ini") == std::vector<string>{A} && !second && err.find(L"No WrongGPU installation record") != wstring::npos,
+                                "interrupted between the record's removal and the backup's: every original is at its path or kept; a second run changes nothing" + howA);
+                    }
+                    {
+                        const wstring d = ownGame(L"Killed before record" + how, {{L"wronggpu.ini", L"copy", A, W, B}, {L"other.dll", L"copy", P, O, O}});
+                        stopAt = "restored";
+                        const bool done = restore(d, keep == 1);
+                        stopAt.clear();
+                        std::vector<wstring> w;
+                        require(!done && killed && IsFile(RecordPath(d)) && restore(d, keep == 1, &w) && read(Join(d, L"other.dll")) == P &&
+                                    read(Join(d, L"wronggpu.ini")) == B && keptOf(d, L"wronggpu.ini") == std::vector<string>{A} && !IsFile(RecordPath(d)),
+                                "interrupted after the restore, before the record's removal: a second run finishes; A is kept once, B stays" + howA);
+                    }
+                }
+                // a locked file (another program holds it with read sharing only, as a running game): refused before anything
+                // changes; once it is free, the restore runs
+                {
+                    const wstring d = ownGame(L"Locked", {{L"wronggpu.ini", L"copy", A, W, W}, {L"other.dll", L"copy", "", O, O}});
+                    HANDLE h = CreateFileW(Join(d, L"other.dll").c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                    wstring err;
+                    const bool done = restore(d, false, nullptr, &err);
+                    const bool unchanged = read(Join(d, L"wronggpu.ini")) == W && read(Join(d, L"other.dll")) == O && IsFile(RecordPath(d)) && read(BackupPath(d, L"wronggpu.ini")) == A;
+                    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+                    require(h != INVALID_HANDLE_VALUE && !done && err.find(L"Nothing was changed") != wstring::npos && unchanged,
+                            "interrupted: a file another program holds without delete sharing: refused before anything changes (record, backup, files as they were)");
+                    require(restore(d, false) && read(Join(d, L"wronggpu.ini")) == A && !IsFile(Join(d, L"other.dll")) && !IsDir(StateDir(d)),
+                            "interrupted: ...once it is free, the restore runs (the original back, WrongGPU's file gone)");
+                }
+                SetRestoreStepHook(nullptr);
             }
             // ---- 0.6.1: an update that now leaves RR out (the game no longer uses it, or another setup's
             // plugin keeps it out) first runs the earlier install's restore with keepState (DoInstall step 2): the earlier RR plugin
@@ -638,6 +703,18 @@ int main() {
             OpRequest o; o.op = Op::Apply; o.dir = job.dir; o.optiKeep = o.optiOnly = true;
             require(ParseJob(JobText(o, lad, L""), back, lad, lf, &why) && back.optiKeep && back.optiOnly && !back.hasProfile &&
                         ParseJob(jt, back, lad, lf, &why) && !back.optiOnly, "job file: an OptiScaler-only apply round trip (absent: the profile is applied too)");
+            // the files the player agreed to move aside travel with the hash each had when the question listed it
+            OpRequest sw = job; sw.moveMods = sw.movePlugins = true;
+            const wstring h1(64, L'1'), h2(64, L'2');
+            sw.moveModsList = {{L"winmm.dll", h1}};
+            sw.movePluginsList = {{L"plugins\\Other.asi", h2}};
+            require(ParseJob(JobText(sw, lad, L""), back, lad, lf, &why) && back.moveModsList.size() == 1 && back.moveModsList[0].first == L"winmm.dll" &&
+                        back.moveModsList[0].second == h1 && back.movePluginsList.size() == 1 && back.movePluginsList[0].first == L"plugins\\Other.asi" &&
+                        back.movePluginsList[0].second == h2,
+                    "job file: the agreed files round trip with their hashes (moved only while their bytes are those)");
+            require(ParseJob("op=install\r\nexe=C:\\g\\x.exe\r\nlocalappdata=C:\\x\r\nmovemods=1\r\nmovemod.0=winmm.dll\r\n", back, lad, lf, &why) &&
+                        back.moveModsList.size() == 1 && back.moveModsList[0].second.empty(),
+                    "job file: an agreed file without its hash is read with none (agreed to no bytes)");
         }
         require(!ParseJob("op=install\r\nexe=relative\\x.exe\r\nlocalappdata=C:\\x\r\n", back, lad, lf, &why), "a job with a relative path is refused");
         require(!ParseJob("op=format\r\nlocalappdata=C:\\x\r\n", back, lad, lf, &why) && !ParseJob("exe=C:\\x.exe\r\n", back, lad, lf, &why), "unknown or missing operation refused");
