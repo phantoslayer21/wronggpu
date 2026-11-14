@@ -207,7 +207,8 @@ def output_stage(x):
       N [Bh, Bw, 40] (FP16 values), color [.., .., >=3 (alpha: 4th channel, else 1)], motion [.., .., 2], depth [.., ..],
       color_base / motion_base / depth_base (x, y) (default 0), render_size (r_w, r_h), output_size (W, H),
       hdr, mv_lowres, depth_inverted (bool), jitter (2), mv_scale (2), mv_offset (2), reset (bool),
-      E_cur, E_prev (FP16 values), e1, pre_exposure, L [2 H16, 2 W16] (FP16), Hc [H16, W16, 4] (FP16),
+      E_cur, E_prev (FP16 values; which is which: clean/k/reference/exposure.py, spec 42 draft 3 section 4), e1,
+      pre_exposure, L [2 H16, 2 W16] (FP16), Hc [H16, W16, 4] (FP16),
       table [2048, 8] (FP16, the frame's set; default: filter_table(filter_level(...))).
     Returns {"out": [H, W, 4] float32 RGBA, "L": [2 H16, 2 W16] f16, "Hc": [H16, W16, 4] f16, "Hh": [Bh, Bw, 4] f16}."""
     W, H = (int(v) for v in x["output_size"])
