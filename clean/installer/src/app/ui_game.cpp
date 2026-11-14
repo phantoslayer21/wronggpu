@@ -1648,10 +1648,14 @@ static float RrSection(Gfx& gx, float x, float y, float w) {
         if (Rec() && on) {
             wstring why;
             const bool working = BusyHere() && v.busyVerb == L"Preparing Ray Reconstruction\u2026";
-            const GameRule* gr = GameRuleFor(e.exe);
             const wstring bg = working ? L"" : RrBackgroundWords(e.exe);  // 0.6.0 polish: prepared again after a driver update
-            if (gr && gr->rrKernelsInGame)  // the game prepares them at its own first start (gamerules.h: its driver cache is its own)
-                yy += DotRow(gx, x, yy, w, false, L"Prepared by the game at its first start (about a minute after a graphics driver update)", pal.greyDot, pal.text);
+            // the game prepares them at its own first start (gamerules.h: its driver cache is its own; under Wine every game,
+            // rrprep.h): no Prepare button, which would do nothing there
+            if (RrKernelsInGame(e.exe))
+                yy += DotRow(gx, x, yy, w, false,
+                             UnderWine() ? L"Prepared by the game at its first start (under Proton its shader caches are its own)"
+                                         : L"Prepared by the game at its first start (about a minute after a graphics driver update)",
+                             pal.greyDot, pal.text);
             else if (!bg.empty())
                 yy += NeedRow(gx, x, yy, w, false, bg, L"Not ready until it is done. Prepare does it now instead.",
                               pal.greyDot, pal.text, ID_G_RRPREP, L"Prepare", B_PLAIN, !Locked(), L"Prepare Ray Reconstruction", false);

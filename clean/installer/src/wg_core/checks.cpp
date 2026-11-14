@@ -28,6 +28,57 @@ WinInfo WindowsInfo() {
 }
 
 bool IsRdna4Name(const wstring& name) { return Contains(name, L"RX 90") || Contains(name, L"PRO R97") || Contains(name, L"PRO R96"); }
+// Under Wine, Wine's own DXGI can name an RDNA 4 card after an old Radeon ("ATI Radeon HD 5600 Series"); the PCI ids of
+// Linux's DRM devices (/sys/class/drm/cardN/device, reached through Z:) are the card's own. The RDNA 4 ids are the RR
+// runtime's list (clean/rr_f/runtime/src/rr_runtime.cpp rdna4_device_id).
+// sysfs reports 4096 bytes for files that hold a few (ReadAll's size check fails on them): read to the end of the file.
+static bool ReadSysfs(const wstring& path, string& out) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    char b[64];
+    DWORD got = 0;
+    out.clear();
+    while (out.size() < 256 && ReadFile(h, b, sizeof b, &got, nullptr) && got) out.append(b, got);
+    CloseHandle(h);
+    return !out.empty();
+}
+// Every DRM card the folder lists (card0, card1, ...; not the connectors such as card1-DP-1), in number order.
+static std::vector<std::pair<unsigned long, wstring>> DrmCards(const wstring& drmRoot) {
+    std::vector<std::pair<unsigned long, wstring>> cards;
+    WIN32_FIND_DATAW fd;
+    HANDLE f = FindFirstFileW((drmRoot + L"\\card*").c_str(), &fd);
+    if (f == INVALID_HANDLE_VALUE) return cards;
+    do {
+        const wstring n = fd.cFileName;
+        if (n.size() <= 4 || n.size() > 12 || n.find_first_not_of(L"0123456789", 4) != wstring::npos) continue;
+        cards.push_back({std::wcstoul(n.c_str() + 4, nullptr, 10), Join(drmRoot, n)});
+    } while (FindNextFileW(f, &fd));
+    FindClose(f);
+    std::sort(cards.begin(), cards.end());
+    return cards;
+}
+static bool HexId(const string& text, unsigned long& id) {
+    const char* s = text.c_str();
+    char* end = nullptr;
+    id = strtoul(s, &end, 16);
+    while (end && (*end == '\n' || *end == '\r' || *end == ' ')) ++end;
+    return end && end != s && *end == '\0';
+}
+wstring LinuxRdna4Name(const wstring& drmRoot) {
+    for (const auto& card : DrmCards(drmRoot)) {
+        string vendor, device;
+        unsigned long v = 0, d = 0;
+        if (!ReadSysfs(Join(card.second, L"device\\vendor"), vendor) || !ReadSysfs(Join(card.second, L"device\\device"), device) ||
+            !HexId(vendor, v) || !HexId(device, d))
+            continue;
+        if (v == 0x1002 && (d == 0x7550 || d == 0x7551 || d == 0x7590 || d == 0x7591)) {
+            wchar_t b[160];
+            swprintf(b, 160, L"AMD Radeon RDNA 4 (PCI 1002:%04lX, found in Linux's device list; not confirmed as the adapter the game uses)", d);
+            return b;
+        }
+    }
+    return L"";
+}
 GpuInfo DetectGpu() {
     GpuInfo best;
     HMODULE dxgi = LoadSystemDll(L"dxgi.dll");
@@ -56,6 +107,11 @@ GpuInfo DetectGpu() {
         if (!best.amd || (rdna4 && !best.rdna4)) { best.amd = true; best.rdna4 = rdna4; best.name = name; best.driver = driver; }
     }
     f->Release();
+    if (!best.rdna4 && UnderWine()) {
+        const wstring linuxName = LinuxRdna4Name();
+        // the driver version of the DXGI adapter is not this card's: left unknown rather than carried over
+        if (!linuxName.empty()) { best.amd = true; best.rdna4 = true; best.name = linuxName; best.driver.clear(); }
+    }
     return best;
 }
 

@@ -11,6 +11,12 @@
 # payload folder are not built in (src/setup_route.h).
 cmake_minimum_required(VERSION 3.16)
 project(wronggpu_installer LANGUAGES CXX RC)
+# MinGW's headers set _WIN32_WINNT to Windows 7 as soon as a standard header comes first (context.h includes
+# <functional> before base.h), which hides the Windows 8+ declarations the core uses (FILE_ID_INFO in convert_ignore.cpp):
+# the whole build gets base.h's Windows 10 instead. MSVC's headers leave it unset.
+if(MINGW)
+  add_compile_definitions(_WIN32_WINNT=0x0A00 WINVER=0x0A00)
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
