@@ -17,7 +17,12 @@
 // The three 32-bit stores at the same per-lane offset into different buffers (A, B, latent) are the shape the driver was
 // seen to merge (README "drop a store"): the pointers are read through wg_uniform().
 //
-// @wg-kernel l_coef co=l_ops.co block=256 wave=32 args=p,p,p,p,p,p,b56
+// COEF_PACK12 (kernel l_coef_pack12, HIP l_coef_body<true>): the same values in Model M's dec0 "pack12" layout, read by
+// the output stage's _p12 kernels: image A, 8 bytes per pixel = A0 A1 A2 B0 | B1 B2 C2 (FP16); image C, 4 bytes per
+// pixel = C0 C1 (FP16); B unused (may be null); the latent as l_coef.
+//
+// @wg-kernel l_coef co=l_ops.co block=256 wave=32 args=p,p,p,p,p,p,b56 defines=COEF_PACK12=0
+// @wg-kernel l_coef_pack12 co=l_ops.co block=256 wave=32 args=p,p,p,p,p,p,b56 defines=COEF_PACK12=1
 #include "wg_platform.hlsli"
 
 WG_ARGS_BEGIN
@@ -54,7 +59,11 @@ uint snorm8_code(float v) { return (uint)wg_f2i(wg_rint(wg_med3f(v, -1.0f, 1.0f)
 // the clamp of a spread input (an FP16 value) to +-20, NaN kept: HIP's v >= 20 ? 20 : (v <= -20 ? -20 : v)
 float clamp20(float v) { return select(v >= 20.0f, 20.0f, select(v <= -20.0f, -20.0f, v)); }
 
+#if COEF_PACK12
+WG_KERNEL(l_coef_pack12)
+#else
 WG_KERNEL(l_coef)
+#endif
 {
     WG_SETUP();
     g_z = wg_grid_ >> 31;
@@ -99,9 +108,14 @@ WG_KERNEL(l_coef)
         const uint cL = snorm8_code(l_tanh(a9)) | (snorm8_code(l_tanh(a10)) << 8) | (snorm8_code(l_tanh(a11)) << 16) |
                         (snorm8_code(l_tanh(a12)) << 24);
         const uint i = (uint)(y * P_rw + x);
+#if COEF_PACK12
+        wg_st64(pA, i * 8u, uint2(cA | (cB << 24), (cB >> 8) | (c1 << 16)));
+        wg_st32(pC, i * 4u, c0);
+#else
         wg_st32(pA, i * 4u, cA);
         wg_st32(pB, i * 4u, cB);
         wg_st64(pC, i * 8u, uint2(c0, c1));
+#endif
         wg_st32(pL, i * 4u, cL);
     }
 }
