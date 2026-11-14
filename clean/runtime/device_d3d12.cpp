@@ -4,6 +4,7 @@
 // No HIP object, imported memory, external semaphore or order_mark is used. Module paths select arithmetic variants
 // by identity only: the native device neither reads nor loads their HIP code objects.
 #include "device_d3d12.h"
+#include "struct_args.h"
 
 #if defined(_WIN32)
 #include "interop/d3d12_include.h"
@@ -66,13 +67,14 @@ constexpr unsigned kNativeSlots = 8, kMaxEvents = 65536;
 constexpr uint64_t kTransientSubmitBytes = 64ull << 20;
 constexpr unsigned kProfileQueries = 4096;
 
-struct NativeArg { char kind; unsigned bytes; };
+struct NativeArg { char kind; unsigned bytes; std::vector<StructField> fields = {}; };  // 's': struct_args.h
 struct NativeKernel {
   std::string name, file, co, rs = "buffer";
   unsigned block = 0, wave = 0, dwords = 0;
   // group: lanes per D3D12 workgroup when the port splits each launched workgroup of `block` lanes into block / group
   // workgroups (manifest "group", build_dx12.py group=; 0 = block). The launch keeps the HIP geometry (grid x block).
   unsigned group = 0, gscale = 1;  // gscale: D3D12 workgroups per launched workgroup (manifest "gscale", default block / group)
+  bool ext_doubles = false;  // manifest "fp64": "ext": binary64 fma / division (DoublePrecisionFloatShaderOps)
   std::vector<NativeArg> args;
   wgc::Digest digest{};
   NativeCom<ID3D12PipelineState> pso;
@@ -199,6 +201,18 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     if (borrowed_device || borrowed_queue) {
       if (!borrow_device(borrowed_device, borrowed_queue)) return false;
     } else if (!create_device()) return false;
+    // ports needing binary64 fma / division (model K's exact input stage) are dropped on an adapter without them: the
+    // kernel then has no port and a context that needs it is refused (no silent fallback). D3D12 folds the D3D11.1
+    // extended doubles (DFMA / DDIV / DRCP) into DoublePrecisionFloatShaderOps (d3d12.h has no separate field)
+    D3D12_FEATURE_DATA_D3D12_OPTIONS options{};
+    const bool ext_doubles = SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof options)) &&
+                             options.DoublePrecisionFloatShaderOps;
+    for (auto i = kernels_.begin(); i != kernels_.end();) {
+      if (i->second.ext_doubles && !ext_doubles) {
+        log(true, "native D3D12: " + i->first + " needs binary64 fma (DoublePrecisionFloatShaderOps), which this adapter lacks: no port");
+        i = kernels_.erase(i);
+      } else ++i;
+    }
     if (!create_objects()) return false;
     if (!profile_init()) return false;
     return reserve_events(64) && (!borrowed_ || driver_probe()) && gelu_lut_upload() && gelu_t5_upload();
@@ -1034,6 +1048,14 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
         DevPtr pointer = 0; std::memcpy(&pointer, args[n], sizeof pointer);
         if (pointer && !range(pointer, 1, "kernel pointer")) return false;
         constants[d++] = static_cast<uint32_t>(pointer);
+      } else if (a.kind == 's') {
+        const int w = pack_struct_arg(a.fields, args[n], constants + d, [&](uint64_t p, uint32_t* off) {
+          if (!range(p, 1, "kernel struct pointer")) return false;
+          *off = static_cast<uint32_t>(p);
+          return true;
+        });
+        if (w < 0) return false;
+        d += static_cast<unsigned>(w);
       } else {
         std::memcpy(constants + d, args[n], a.bytes); d += a.bytes / 4;
       }
@@ -1252,6 +1274,10 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
           k.gscale = (unsigned)sn;
         }
       }
+      if (const auto* fp = entry.find("fp64")) {
+        if (!fp->is_string() || fp->text != "ext") return fail("native D3D12 manifest: invalid fp64 for " + k.name);
+        k.ext_doubles = true;
+      }
       const auto* signature = entry.find("rs");
       if (signature) {
         if (!signature->is_string() || (signature->text != "buffer" && signature->text != "tex" && signature->text != "direct"))
@@ -1268,6 +1294,18 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
         const size_t end = arguments.find(',', start);
         const std::string token = arguments.substr(start, end == std::string::npos ? end : end - start);
         unsigned bytes = 4; char kind = token.empty() ? 0 : token[0];
+        if (kind == 's') {  // struct with pointers inside (struct_args.h)
+          NativeArg sa{'s', 0};
+          unsigned sw = 0;
+          if (!parse_struct_arg(token, &sa.bytes, &sw, &sa.fields))
+            return fail("native D3D12 manifest: bad struct argument for " + k.name);
+          words += sw; k.args.push_back(std::move(sa));
+          if (words > kNativeArgs) return fail("native D3D12 manifest: too many argument DWORDs");
+          if (end == std::string::npos) break;
+          start = end + 1;
+          if (start == arguments.size()) return fail("native D3D12 manifest: trailing argument comma");
+          continue;
+        }
         if (token != "p" && token != "u") {
           if (kind != 'b' || token.size() < 2) return fail("native D3D12 manifest: bad argument for " + k.name);
           uint64_t parsed = 0;

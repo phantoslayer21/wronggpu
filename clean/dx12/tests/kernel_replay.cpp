@@ -32,7 +32,11 @@
 //   module <code object name> [<tag>]          (zero or more)
 //   buf <id> <bytes> <file | -> [fill]         device buffer: the file's bytes (padded with fill when the file is
 //                                              shorter), or every byte set to fill (0..255, default 0) with "-"
-//   step <launch name> <grid> <block> <arg>... a launch; each arg is @<id> (a buffer's pointer) or a 32-bit decimal
+//   step <launch name> <grid> <block> <arg>... a launch; each arg is @<id> (a buffer's pointer), a 32-bit decimal
+//                                              value, B:<file> (a struct passed by value: the file's bytes) or
+//                                              S:<file>[:<offset>=@<id>[,<offset>=@<id>...]] (a struct with pointers
+//                                              inside, manifest argument kind s<N>:...: the file's bytes with the 8
+//                                              bytes at each byte offset replaced by that buffer's device pointer)
 //   save <id> <file>                           after the run, the buffer's bytes are written to <file>
 //   time <runs>                                after the run (and the saves), the steps run <runs> more times; the mean
 //                                              wall time per run (submission to completion, synchronised after each
@@ -404,13 +408,43 @@ int run_chain(Device* d, Chain& c, const std::string& base) {
   // the argument values of every step, resolved once
   std::vector<std::vector<DevPtr>> ptrs(c.steps.size());
   std::vector<std::vector<uint32_t>> vals(c.steps.size());
+  std::vector<std::vector<std::vector<uint8_t>>> blobs(c.steps.size());
   std::vector<std::vector<void*>> argv(c.steps.size());
   for (size_t i = 0; rc == 0 && i < c.steps.size(); ++i) {
     auto& s = c.steps[i];
     ptrs[i].reserve(s.args.size());
     vals[i].reserve(s.args.size());
+    blobs[i].reserve(s.args.size());
     for (auto& a : s.args) {
-      if (!a.empty() && a[0] == '@') {
+      if (a.size() > 2 && (a[0] == 'B' || a[0] == 'S') && a[1] == ':') {
+        // B:<file> / S:<file>[:<offset>=@<id>,...]
+        const size_t colon = a[0] == 'S' ? a.find(':', 2) : std::string::npos;
+        const std::string file = a.substr(2, colon == std::string::npos ? std::string::npos : colon - 2);
+        std::vector<uint8_t> blob;
+        if (!read_file(base + "/" + file, &blob)) {
+          std::printf("%s: step %zu: cannot read %s\n", c.name.c_str(), i, file.c_str());
+          rc = 1;
+          break;
+        }
+        bool ok = true;
+        for (size_t at = colon == std::string::npos ? std::string::npos : colon + 1; ok && at != std::string::npos;) {
+          const size_t comma = a.find(',', at);
+          const std::string item = a.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+          const size_t eq = item.find("=@");
+          ChainBuf* b = eq == std::string::npos ? nullptr : find(item.substr(eq + 2));
+          const size_t off = eq == std::string::npos ? 0 : (size_t)std::stoull(item.substr(0, eq));
+          if (!b || off + 8 > blob.size()) { ok = false; break; }
+          for (int k = 0; k < 8; ++k) blob[off + k] = (uint8_t)((uint64_t)b->ptr >> (8 * k));
+          at = comma == std::string::npos ? std::string::npos : comma + 1;
+        }
+        if (!ok) {
+          std::printf("%s: step %zu: bad struct argument %s\n", c.name.c_str(), i, a.c_str());
+          rc = 1;
+          break;
+        }
+        blobs[i].push_back(std::move(blob));
+        argv[i].push_back(blobs[i].back().data());
+      } else if (!a.empty() && a[0] == '@') {
         ChainBuf* b = find(a.substr(1));
         if (!b) { std::printf("%s: step %zu: unknown buffer %s\n", c.name.c_str(), i, a.c_str()); rc = 1; break; }
         ptrs[i].push_back(b->ptr);

@@ -278,5 +278,19 @@
    "swin_block_c64_add_ex_nc",
    "swin.co"
   ]
+ ],
+ "model_k": [
+  [
+   "k_expo_scalars",
+   "k_io.co"
+  ],
+  [
+   "k_expo_scalars_direct",
+   "k_io.co"
+  ],
+  [
+   "k_warm",
+   "k_block_wide.co"
+  ]
  ]
 }
