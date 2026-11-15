@@ -1434,6 +1434,13 @@ static void TestSplitRetryPendingStoresNoFailure() {
 // before the reference is retained, so a failure there leaks nothing; and the normal path retains once and gives it back once.
 // The order is observed without throwing: a release callable that records, each time it is copied (building the owner copies
 // it), whether the reference had already been retained at that moment.
+struct ThrowsOnCopy {  // a callable whose copy throws (a failed allocation while the owner is built, as bad_alloc from copying a large one)
+    ThrowsOnCopy() = default;
+    ThrowsOnCopy(ThrowsOnCopy&&) noexcept = default;
+    ThrowsOnCopy(const ThrowsOnCopy&) { throw std::bad_alloc(); }
+    void operator()(void*) const {}
+};
+
 struct RecordsRetainsWhenCopied {
     int* retains;
     int* copies;
@@ -1466,6 +1473,18 @@ static void TestDeviceHoldAllocationFailure() {
     }
     CHECK(copies >= 1);               // building the owner did copy the callable (the observation is real)
     CHECK(copiesAfterRetain == 0);    // and every copy happened before the retain: the owner is built first
+    // and a throwing copy reaches the caller as an exception (it must not terminate the process: it did when the owner's callable
+    // was a lambda capturing it, under MSVC's /Zc:lambda, which the CI builds have on), with nothing retained
+    retains = releases = 0;
+    std::function<void(void*)> failing = ThrowsOnCopy();
+    bool threw = false;
+    try {
+        ScopedRelease hold = AcquireHold(reinterpret_cast<void*>(0x1), retain, failing);
+    } catch (const std::bad_alloc&) {
+        threw = true;
+    }
+    CHECK(threw);                          // the failure reached the caller
+    CHECK(retains == 0 && releases == 0);  // and no reference was taken, so none is leaked
 }
 
 // R1: the create worker's device reference is owned (RAII): it is given back when the worker could not be started at all

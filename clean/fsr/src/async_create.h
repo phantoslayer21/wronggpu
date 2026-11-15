@@ -51,8 +51,19 @@ private:
 // Takes the create worker's hold on the game's device: the owner is built FIRST (its callable is the only allocation), the
 // reference is retained AFTER it, and the owner is returned by a noexcept move: nothing that can throw lies between the
 // retain and the owner, so a throwing allocation never leaks the reference (it throws before anything was retained).
+// The owner's callable is a named class, not a lambda that captures `release` by copy: with MSVC's /Zc:lambda (on whenever
+// /permissive- is, as in the CI builds) a lambda whose capture copy throws terminates the process instead of unwinding (a
+// defect in the closure's unwind state; reproduced with a callable whose copy throws, and std::bad_alloc from copying a large
+// callable is the same case), while the same copy inside a class constructor unwinds normally.
+struct DeviceRelease {
+    std::function<void(void*)> release;
+    void* device;
+    DeviceRelease(const std::function<void(void*)>& r, void* d) : release(r), device(d) {}
+    void operator()() const { release(device); }
+};
+
 inline ScopedRelease AcquireHold(void* device, const std::function<void(void*)>& retain, const std::function<void(void*)>& release) {
-    ScopedRelease hold([release, device] { release(device); });
+    ScopedRelease hold{std::function<void()>(DeviceRelease(release, device))};
     retain(device);
     return hold;
 }
