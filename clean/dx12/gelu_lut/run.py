@@ -32,7 +32,10 @@ CLEAN = os.path.dirname(DX12)
 sys.path.insert(0, DX12)
 import build_dx12  # noqa: E402
 
-ROCM = r"C:\Program Files\AMD\ROCm\7.2"   # the official HIP SDK (clean/runner/sdk.py), never ROCM_PATH
+sys.path.insert(0, os.path.dirname(CLEAN))
+from clean.runner import sdk  # noqa: E402  (the HIP SDK policy)
+
+ROCM = sdk.OFFICIAL_ROCM   # main: --rocm through sdk.resolve (an official SDK; another one only with --force-sdk)
 # Optional GPU lock (WG_GPU_LOCK: a script run as `python <lock> --timeout <s> -- <command>`, e.g. to keep
 # GPU jobs of several shells apart); unset: the command runs directly.
 GPU_LOCK = os.environ.get("WG_GPU_LOCK", "")
@@ -52,12 +55,20 @@ def hip_env():
 
 
 def run(cmd, **kw):
-    print(">", " ".join(cmd) if isinstance(cmd, list) else cmd, flush=True)
+    # a custom (forced) SDK appears by id only, in the command and in the tools' output
+    print(">", sdk.redact(" ".join(cmd) if isinstance(cmd, list) else cmd), flush=True)
     r = subprocess.run(cmd, capture_output=True, text=True, **kw)
-    print(r.stdout.strip())
+    print(sdk.redact(r.stdout.strip()))
     if r.stderr.strip():
-        print(r.stderr.strip())
+        print(sdk.redact(r.stderr.strip()))
     return r
+
+
+def hip_clang():
+    """The SDK's own clang, through the shared SDK policy check (banner once)."""
+    clang = sdk.compiler(ROCM, None)
+    sdk.check(ROCM, clang)
+    return clang
 
 
 def gpu(args, **kw):
@@ -66,7 +77,7 @@ def gpu(args, **kw):
 
 def build_tools(w):
     co = os.path.join(w, "oracle.co")
-    r = run([os.path.join(ROCM, "bin", "clang.exe"), "-x", "hip", "--offload-arch=gfx1201", "--offload-device-only", "-nogpuinc",
+    r = run([hip_clang(), "-x", "hip", "--offload-arch=gfx1201", "--offload-device-only", "-nogpuinc",
              "-O3", "--no-gpu-bundle-output", f"--rocm-path={ROCM}",
              f"--rocm-device-lib-path={os.path.join(ROCM, 'amdgcn', 'bitcode')}", "-I", os.path.join(CLEAN, "kernels"),
              os.path.join(HERE, "oracle.hip"), "-o", co], env=hip_env())
@@ -102,7 +113,10 @@ def main():
     ap.add_argument("--skip-oracle", action="store_true", help="reuse <work>/rle.bin")
     ap.add_argument("--table", help="compact design: this table (mk_headers.py output) instead of running gen.py")
     ap.add_argument("--define", action="append", default=[], help="NAME=VALUE for the verify shader (WG_GELU_LUT_ALT=1)")
+    sdk.add_arguments(ap)
     a = ap.parse_args()
+    global ROCM
+    ROCM = sdk.resolve(a.rocm, a.force_sdk)
     w = os.path.abspath(a.work)
     os.makedirs(w, exist_ok=True)
     proof = {}

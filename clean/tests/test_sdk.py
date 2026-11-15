@@ -379,6 +379,63 @@ class ForceCli(Env):
             self.assertIn("sdk.add_arguments(ap)", fh.read())
 
 
+class EmuOnly(Env):
+    """--emu-only (the host emulator, host compiler only) needs no HIP SDK; the device build still does."""
+
+    def capture(self, module):
+        cmds = []
+        return cmds, patch.object(module, "run", lambda cmd, *a, **k: cmds.append(list(cmd)))
+
+    def test_build_py_emu_only_without_sdk(self):
+        self.assertIsNone(sdk.default_rocm())                 # no official SDK anywhere
+        out = os.path.join(self.tmp.name, "out")
+        cmds, p = self.capture(build)
+        with p, patch.dict(os.environ, {}), contextlib.redirect_stdout(io.StringIO()):
+            build.main(["--out", out, "--emu-only", "--cxx", "g++"])
+            self.assertTrue(cmds)
+            self.assertTrue(all(c[0] == "g++" for c in cmds), [c[0] for c in cmds])
+            with self.assertRaises(SystemExit):               # the device build still needs one
+                build.main(["--out", out, "--no-runtime"])
+
+    def test_k_build_emu_only_without_sdk(self):
+        from clean.k.runner import k_build
+        from clean.runner import build as B
+        self.assertIsNone(sdk.default_rocm())
+        out = os.path.join(self.tmp.name, "out")
+        cmds, p = self.capture(B)
+        with p, contextlib.redirect_stdout(io.StringIO()):
+            k_build.main(["--out", out, "--emu-only", "--cxx", "g++"])
+            self.assertEqual([c[0] for c in cmds], ["g++"])
+            with self.assertRaises(SystemExit):
+                k_build.main(["--out", out])
+
+
+class DirectCompiles(unittest.TestCase):
+    def test_every_hip_compile_passes_the_policy(self):
+        """A tracked Python file that runs the HIP compiler itself (--offload-arch) takes the SDK and compiler from the
+        policy and calls sdk.check (build.py does it in device_command); none names the SDK's clang by a fixed path."""
+        r = subprocess.run(["git", "ls-files", "--", "clean", "tools"], cwd=ROOT, capture_output=True, text=True,
+                           check=True)
+        files = [f for f in r.stdout.split() if f.endswith(".py") and f != "clean/tests/test_sdk.py"]
+        self.assertGreater(len(files), 200)
+        direct, bad = [], []
+        for f in files:
+            with open(os.path.join(ROOT, f), encoding="utf-8") as fh:
+                s = fh.read()
+            if "--offload-arch" not in s:
+                continue
+            direct.append(f)
+            if f == "clean/runner/build.py":
+                ok = "sdk.check(" in s
+            else:
+                ok = "sdk.check(" in s and "sdk.compiler(" in s and "sdk.resolve(" in s
+            if not ok or re.search(r"""["']clang(\.exe)?["']\s*\)""", s) or "AMD\\ROCm\\7" in s:
+                bad.append(f)
+        self.assertIn("clean/runner/build.py", direct)
+        self.assertGreaterEqual(len(direct), 4)   # build.py and the three LUT oracle builders
+        self.assertEqual(bad, [])
+
+
 class Redaction(Env):
     """Custom (forced) paths in logs: every spelling, and build.py's post_w64 path (echo, stderr, report)."""
 

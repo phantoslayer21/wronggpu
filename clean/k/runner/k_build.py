@@ -73,10 +73,10 @@ def main(argv=None):
     ap.add_argument("--emu", action="store_true", help="also the host emulator library " + EMU_LIBRARY)
     ap.add_argument("--cxx", default=os.environ.get("CXX", "clang++"))
     a = ap.parse_args(argv)
-    a.rocm = sdk.resolve(a.rocm, a.force_sdk)
     os.makedirs(a.out, exist_ok=True)
-    if not a.emu_only:   # the SDK's own compiler; another one only with --force-sdk (device_command checks it again)
-        clang = sdk.compiler(a.rocm, a.clang, a.force_sdk)
+    if not a.emu_only:   # the HIP SDK only for the device build (--emu-only: the host compiler alone)
+        a.rocm = sdk.resolve(a.rocm, a.force_sdk)
+        clang = sdk.compiler(a.rocm, a.clang, a.force_sdk)   # another one only with --force-sdk
         build_device(clang, a.rocm, a.out, not a.no_device_libs, a.report, io_wave64=not a.io_wave32)
     if a.emu or a.emu_only:
         run(emu_command(a.cxx, os.path.join(a.out, EMU_LIBRARY)))

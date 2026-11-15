@@ -33,7 +33,10 @@ CLEAN = os.path.dirname(DX12)
 sys.path.insert(0, DX12)
 import build_dx12  # noqa: E402
 
-ROCM = r"C:\Program Files\AMD\ROCm\7.2"   # the official HIP SDK (clean/runner/sdk.py), never ROCM_PATH
+sys.path.insert(0, os.path.dirname(CLEAN))
+from clean.runner import sdk  # noqa: E402  (the HIP SDK policy)
+
+ROCM = sdk.OFFICIAL_ROCM   # main: --rocm through sdk.resolve (an official SDK; another one only with --force-sdk)
 # Optional GPU lock (WG_GPU_LOCK: a script run as `python <lock> --timeout <s> -- <command>`, e.g. to keep
 # GPU jobs of several shells apart); unset: the command runs directly.
 GPU_LOCK = os.environ.get("WG_GPU_LOCK", "")
@@ -54,9 +57,16 @@ def hip_env():
 
 def run(cmd, **kw):
     r = subprocess.run(cmd, capture_output=True, text=True, **kw)
-    if r.returncode not in (0, 5):
-        print(r.stdout[-2000:], r.stderr[-2000:])
+    if r.returncode not in (0, 5):   # a custom (forced) SDK appears by id only
+        print(sdk.redact(r.stdout[-2000:]), sdk.redact(r.stderr[-2000:]))
     return r
+
+
+def hip_clang():
+    """The SDK's own clang, through the shared SDK policy check (banner once)."""
+    clang = sdk.compiler(ROCM, None)
+    sdk.check(ROCM, clang)
+    return clang
 
 
 def gpu(args, **kw):
@@ -89,11 +99,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--work", required=True)
     ap.add_argument("--batch", type=int, default=150)
+    sdk.add_arguments(ap)
     a = ap.parse_args()
+    global ROCM
+    ROCM = sdk.resolve(a.rocm, a.force_sdk)
     w = os.path.abspath(a.work)
     os.makedirs(w, exist_ok=True)
     co = os.path.join(w, "oracle_in.co")
-    r = run([os.path.join(ROCM, "bin", "clang.exe"), "-x", "hip", "--offload-arch=gfx1201", "--offload-device-only",
+    r = run([hip_clang(), "-x", "hip", "--offload-arch=gfx1201", "--offload-device-only",
              "-nogpuinc", "-O3", "--no-gpu-bundle-output", f"--rocm-path={ROCM}",
              f"--rocm-device-lib-path={os.path.join(ROCM, 'amdgcn', 'bitcode')}", "-I", os.path.join(CLEAN, "kernels"),
              os.path.join(HERE, "oracle_in.hip"), "-o", co], env=hip_env())

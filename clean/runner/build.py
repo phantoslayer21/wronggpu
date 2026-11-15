@@ -498,9 +498,11 @@ def main(argv=None):
                          "first, for every target); its D3D12 kernels come from clean/dx12/build_dx12.py --model-l")
     args = ap.parse_args(argv)
     rocm_given = bool(args.rocm)   # release runtime builds reuse pinned Model L code objects unless --rocm is given
-    args.rocm = sdk.resolve(args.rocm, args.force_sdk)
-    if args.clang:   # the SDK's own compiler (a bare name means the SDK's file); another one only with --force-sdk
-        args.clang = sdk.compiler(args.rocm, args.clang, args.force_sdk)
+    # the HIP SDK only when something needs it: --emu-only builds the host emulator with the host compiler alone
+    if not args.emu_only or args.runtime_only or args.motion_outres_only:
+        args.rocm = sdk.resolve(args.rocm, args.force_sdk)
+        if args.clang:   # the SDK's own compiler (a bare name means the SDK's file); another one only with --force-sdk
+            args.clang = sdk.compiler(args.rocm, args.clang, args.force_sdk)
     for name in OPTIONAL_MODELS:
         set_model(name, not getattr(args, "no_model_" + name.lower()))
     set_model_l(args.model_l)
