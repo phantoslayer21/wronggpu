@@ -132,9 +132,14 @@ void TestStampedRecord() {
     CHECK(RecordChoice(f.record(), 'K', Source::Ffx, &after, &why) == Outcome::Written && after.seq == 2);
     CHECK(wgstate::ReadBytes(f.record().wstring(), &bytes) && wgstate::StampedByWrongGPU(bytes, "model-choice.ini", id));
     CHECK(ReadRecordFile(f.record(), &r, &why) == ReadResult::Ok && r.model == 'K' && r.seq == 2 && r.source == Source::Ffx);
-    // without an install id (no install record): written without a stamp, as before
+    // without an install id (no install record): nothing is stamped (the earlier stamp line is no longer valid and stays as a
+    // comment, as #224's updater keeps any line that is not a valid stamp); a new record without an id: no stamp line at all
     fs::remove(f.dir / kStateFolder / "install.record");
     CHECK(RecordChoice(f.record(), 'M', Source::Plugin, &after, &why) == Outcome::Written);
+    CHECK(wgstate::ReadBytes(f.record().wstring(), &bytes) && !wgstate::StampedByWrongGPU(bytes, "model-choice.ini", id));
+    CHECK(ReadRecordFile(f.record(), &r, &why) == ReadResult::Ok && r.model == 'M' && r.seq == 3);
+    fs::remove(f.record());
+    CHECK(RecordChoice(f.record(), 'K', Source::Launcher, &after, &why) == Outcome::Written && after.seq == 1);
     CHECK(wgstate::ReadBytes(f.record().wstring(), &bytes) && bytes.find(wgstate::kStampPrefix) == std::string::npos);
 }
 
@@ -177,21 +182,59 @@ void TestChoicesInTurn() {
     CHECK(TmpFiles(f) == 0);  // no temporary file is left behind by the writes
 }
 
+// #224's rule for the game's state files: a choice changes only the record's three key lines, in place. A record WrongGPU
+// wrote and nobody changed keeps WrongGPU's stamp; one the player edited (a comment added to a stamped record) or made
+// (no stamp) keeps every other byte (comments, blank lines, line ends) and stays UNSTAMPED, the player's, which the
+// launcher's uninstall keeps.
+void TestPlayerFiles() {
+    Folder f("player");
+    const std::string id = "00112233445566778899aabbccddeeff";
+    {
+        std::ofstream o(f.dir / kStateFolder / "install.record", std::ios::binary);
+        o << "WRONGGPU-RECORD 2\r\ninstall-id\t" << id << "\r\n";
+    }
+    Record after, r;
+    std::string why, bytes;
+    // WrongGPU's own record: re-stamped
+    CHECK(RecordChoice(f.record(), 'L', Source::Launcher, &after, &why) == Outcome::Written);
+    CHECK(wgstate::ReadBytes(f.record().wstring(), &bytes) && wgstate::StampedByWrongGPU(bytes, "model-choice.ini", id));
+    // edited: the player adds a comment line to the stamped record; the next choice keeps it, writes K, no stamp
+    WriteRaw(f.record(), "; my note: keep L for this game\r\n" + bytes);
+    CHECK(RecordChoice(f.record(), 'K', Source::Ffx, &after, &why) == Outcome::Written && after.seq == 2);
+    CHECK(wgstate::ReadBytes(f.record().wstring(), &bytes));
+    CHECK(bytes.rfind("; my note: keep L for this game\r\n", 0) == 0);
+    CHECK(bytes.find("model=K\r\nseq=2\r\nsource=ffx\r\n") != std::string::npos);
+    CHECK(!wgstate::StampedByWrongGPU(bytes, "model-choice.ini", id));
+    CHECK(ReadRecordFile(f.record(), &r, &why) == ReadResult::Ok && r.model == 'K' && r.seq == 2);
+    // and it stays the player's on the choice after that (still no stamp)
+    CHECK(RecordChoice(f.record(), 'M', Source::Plugin, &after, &why) == Outcome::Written && after.seq == 3);
+    CHECK(wgstate::ReadBytes(f.record().wstring(), &bytes) && !wgstate::StampedByWrongGPU(bytes, "model-choice.ini", id));
+    CHECK(bytes.rfind("; my note: keep L for this game\r\n", 0) == 0);
+    // player-made: LF line ends, a blank line, comments around the keys, keys in another order, no stamp
+    const std::string mine = "# mine\n\nsource=launcher\n; the model:\nmodel=L\nseq=40\n# end\n";
+    WriteRaw(f.record(), mine);
+    CHECK(RecordChoice(f.record(), 'K', Source::Ffx, &after, &why) == Outcome::Written && after.seq == 41);
+    CHECK(ReadRaw(f.record()) == "# mine\n\nsource=ffx\n; the model:\nmodel=K\nseq=41\n# end\n");
+    CHECK(wgstate::ReadBytes(f.record().wstring(), &bytes) && !wgstate::StampedByWrongGPU(bytes, "model-choice.ini", id));
+    CHECK(TmpFiles(f) == 0);
+}
+
 void TestCorruptAndEnd() {
     Folder f;
     Record r, after;
     std::string why;
-    // corrupt and overflowing records: Corrupt, never a partial choice; the next choice replaces them whole (seq 1)
+    // corrupt and overflowing records (and text WrongGPU cannot keep: a NUL): Corrupt, never a partial choice, and NEVER
+    // replaced: a choice is refused with what is wrong, the file keeps its bytes (the player's to fix or delete)
     for (const std::string& bad : {Valid("L", "18446744073709551616"), std::string("model=L\nseq=3\n"), std::string(4096, 'x'),
-                                   Valid() + "ffx=L\r\n"}) {
+                                   Valid() + "ffx=L\r\n", std::string("model=L\0\nseq=3\nsource=ffx\n", 26)}) {
         WriteRaw(f.record(), bad);
         CHECK(ReadRecordFile(f.record(), &r, &why) == ReadResult::Corrupt);
         why.clear();
-        CHECK(RecordChoice(f.record(), 'M', Source::Ffx, &after, &why) == Outcome::Written && after.seq == 1);
-        CHECK(why.find("corrupt") != std::string::npos);
-        r = Rec(f.record());
-        CHECK(r.model == 'M' && r.seq == 1 && r.source == Source::Ffx);
+        CHECK(RecordChoice(f.record(), 'M', Source::Ffx, &after, &why) == Outcome::Corrupt);
+        CHECK(!why.empty());
+        CHECK(ReadRaw(f.record()) == bad);
     }
+    CHECK(std::string(OutcomeWords(Outcome::Corrupt)).find("left as it is") != std::string::npos);
     // the end of the sequence numbers: refused loudly (SeqExhausted), the record unchanged, never wrapped to 0
     WriteRaw(f.record(), Valid("K", "18446744073709551615", "plugin"));
     const std::string before = ReadRaw(f.record());
@@ -517,6 +560,7 @@ int main(int argc, char** argv) {
     TestStrictFormat();
     TestChoicesInTurn();
     TestStampedRecord();
+    TestPlayerFiles();
     TestCorruptAndEnd();
     TestMigration();
 #ifdef _WIN32

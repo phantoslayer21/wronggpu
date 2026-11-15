@@ -3245,16 +3245,26 @@ static void TestAsiChoiceRecord() {
         CHECK(ReadRec(rec).model == b);
 #endif
         // (14) a corrupt record (seq overflow): said once, not used (a fresh session: wronggpu.ini's item, never the host's
-        // entry), not written over by a create; the next real choice replaces it
-        WriteRec(rec, "model=L\nseq=18446744073709551616\nsource=launcher\n");
+        // entry), not written over by a create; NOR by a choice: the selection is refused (-2) with one log line, the file
+        // keeps its bytes (the player's to fix or delete) and the model that runs stays (b)
+        const std::string corrupt = "model=L\nseq=18446744073709551616\nsource=launcher\n";
+        WriteRec(rec, corrupt);
         CHECK(HostedCreate(iniB.c_str(), 0, idOf('M'), false) == name(b));
         CHECK(CountLog("is corrupt (seq is not a number") == 1);
         wgchoice::ReadResult rr;
         ReadRec(rec, &rr);
         CHECK(rr == wgchoice::ReadResult::Corrupt);
-        CHECK(HostedCreate(iniB.c_str(), 'M', idOf('M'), true, [&](FrontEnd& fe) { rc = fe.HostSelected(idOf('M')); }) == name('M'));
+        CHECK(HostedCreate(iniB.c_str(), 'M', idOf('M'), true, [&](FrontEnd& fe) { rc = fe.HostSelected(idOf('M')); }) == name(b));
+        CHECK(rc == WG_HOST_SELECTED_REFUSED);
+        CHECK(CountLog("in OptiScaler's upscaler list: the record (wronggpu-setup\\model-choice.ini) is not a valid record") == 1);
+        {
+            std::ifstream i(rec, std::ios::binary);
+            CHECK(std::string(std::istreambuf_iterator<char>(i), {}) == corrupt);
+        }
+        WriteRec(rec, "model=M\nseq=1\nsource=ffx\n");  // the player fixes the file: the next choice is saved again
+        CHECK(HostedCreate(iniB.c_str(), 'M', idOf('M'), true, [&](FrontEnd& fe) { rc = fe.HostSelected(idOf(b)); }) == name(b));
         r = ReadRec(rec);
-        CHECK(rc == WG_HOST_SELECTED_RECORDED && r.model == 'M' && r.seq == 1 && r.source == wgchoice::Source::Ffx);
+        CHECK(rc == WG_HOST_SELECTED_RECORDED && r.model == b && r.seq == 2 && r.source == wgchoice::Source::Ffx);
         // (15) the end of the sequence numbers: the selection is refused loudly (-2), the record unchanged
         WriteRec(rec, std::string("model=") + b + "\nseq=18446744073709551615\nsource=plugin\n");
         CHECK(HostedCreate(iniM, 'M', idOf('M'), true, [&](FrontEnd& fe) { rc = fe.HostSelected(idOf('M')); }) == name(b));

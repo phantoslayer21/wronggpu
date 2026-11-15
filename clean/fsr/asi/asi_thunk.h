@@ -161,10 +161,36 @@ inline char ParseSelection(const std::string& text) {
     return kDefaultModel;
 }
 
+inline const char* SelectionValue(char model) {
+    return model == kModelAmd ? "amd" : model == kModelK ? "wronggpu-k" : model == kModelL ? "wronggpu-l" : "wronggpu";
+}
+
 inline std::string FormatSelection(char model) {
-    const char* v = model == kModelAmd ? "amd" : model == kModelK ? "wronggpu-k" : model == kModelL ? "wronggpu-l" : "wronggpu";
     return std::string("; WrongGPU OptiScaler plugin: the entry last selected in OptiScaler's upscaler list\r\n") +
-           "; (wronggpu, wronggpu-k, wronggpu-l or amd). Deleting this file selects WrongGPU.\r\nselection=" + v + "\r\n";
+           "; (wronggpu, wronggpu-k, wronggpu-l or amd). Deleting this file selects WrongGPU.\r\nselection=" + SelectionValue(model) + "\r\n";
+}
+
+// `text` with its selection set to `model`, every other byte kept: the line ParseSelection reads (the first one that is
+// "selection=..." once spaces are ignored) becomes "selection=<value>" and keeps its own line end; a file without one gets
+// the line at its end (with the file's first line end, CRLF when it has none; a last line without a line end gets one).
+inline std::string WithSelection(const std::string& text, char model) {
+    const std::string want = std::string("selection=") + SelectionValue(model);
+    size_t at = 0;
+    while (at < text.size()) {
+        size_t end = text.find('\n', at);
+        const size_t next = end == std::string::npos ? text.size() : end + 1;
+        if (end == std::string::npos) end = text.size();
+        size_t stop = end;
+        if (stop > at && text[stop - 1] == '\r') --stop;  // the line end ("\r\n" or "\n") stays
+        std::string line;
+        for (size_t i = at; i < stop; ++i)
+            if (!std::isspace(static_cast<unsigned char>(text[i]))) line += char(std::tolower(static_cast<unsigned char>(text[i])));
+        if (line.rfind("selection=", 0) == 0) return text.substr(0, at) + want + text.substr(stop);
+        at = next;
+    }
+    const size_t lf = text.find('\n');
+    const std::string eol = lf != std::string::npos && lf > 0 && text[lf - 1] == '\r' ? "\r\n" : lf != std::string::npos ? "\n" : "\r\n";
+    return text + (text.empty() || text.back() == '\n' ? "" : eol) + want + eol;
 }
 
 }  // namespace wgasi

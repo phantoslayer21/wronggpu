@@ -125,8 +125,10 @@ wgasi::Save RecordModelChoice(char model) {
     }
     AsiLog::Get().Write(std::string("ERROR: model choice record ") + wgasi::Utf8(path) + ": Model " + model + " not saved (" +
                         wgchoice::OutcomeWords(o) + (why.empty() ? "" : ": " + why) + "); nothing changed" +
-                        (o == wgchoice::Outcome::SeqExhausted ? ". Delete the record or apply the model in the launcher." : ", try again"));
-    return o == wgchoice::Outcome::SeqExhausted ? wgasi::Save::Refused : wgasi::Save::NotSaved;
+                        (o == wgchoice::Outcome::SeqExhausted ? ". Delete the record or apply the model in the launcher."
+                         : o == wgchoice::Outcome::Corrupt    ? ""  // (OutcomeWords says to fix or delete the file)
+                                                              : ", try again"));
+    return o == wgchoice::Outcome::SeqExhausted || o == wgchoice::Outcome::Corrupt ? wgasi::Save::Refused : wgasi::Save::NotSaved;
 }
 
 extern "C" bool WgSelectableThunk(const char* label, bool selected, int flags, const void* size) {

@@ -1110,6 +1110,9 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
                  L"). Try again.",
              EXIT_REFUSED);
     char forcedEntry = 0;  // the model whose entry OptiScaler.ini's UpscalerIndex is set to (after the record)
+    // What this apply has written so far, for a failure after some of it: the message then says exactly what was applied
+    // and what was not (no rollback: each piece is whole on its own).
+    std::vector<wstring> applied, notApplied;
     // wronggpu.ini is never rewritten here: it is the install's defaults and the player's file (the settings the launcher
     // changes go to the game's WrongGPU state folder, wronggpu-setup: the model choice record below, settings.ini)
     auto renderOpti = [&]() {
@@ -1140,6 +1143,7 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
         const wstring h = Sha256Bytes(out.data(), out.size());
         for (auto& e : m.e) if (e.action == L"copy" && IEq(e.rel, name) && e.inst != h) { e.inst = h; recordChanged = true; }
         notes.push_back(wstring(name) + L" written");
+        applied.push_back(L"OptiScaler's list (OptiScaler.ini)");
     };
     // #219: the front end's settings go into the game's state folder (wg_state.h), which the front end reads over wronggpu.ini:
     // wronggpu.ini holds the install's defaults, is the player's to edit, and is never rewritten after the install. (The model
@@ -1150,7 +1154,10 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
         if (!RenderWronggpuIni(q, "", unused, &why)) Fail(L"Settings not applied: " + why, EXIT_USAGE);  // (validates every setting)
         const int w = WriteStateKeys(ctx, dir, FrontEndStateKeys(q), &why);
         if (w < 0) Fail(L"Settings not applied: " + why, EXIT_REFUSED);
-        if (w > 0) notes.push_back(Join(wgstate::kStateFolder, wgstate::kSettingsFile) + L" written");
+        if (w > 0) {
+            notes.push_back(Join(wgstate::kStateFolder, wgstate::kSettingsFile) + L" written");
+            applied.push_back(L"the upscaler settings (" + Join(wgstate::kStateFolder, wgstate::kSettingsFile) + L")");
+        }
     }
     // The model choice record (clean/fsr/src/model_choice_record.h): the launcher's model choice, with the next seq, when the
     // player applied a model (Apply in the launcher, or `set <game> model=<m>`: always, also the same model again, so it
@@ -1175,7 +1182,9 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
 #endif
         const bool write = modelChosen || rr == wgchoice::ReadResult::Missing ||
                            (rr == wgchoice::ReadResult::Ok && cur.source == wgchoice::Source::Launcher && cur.model != model);
-        if (write && WriteLauncherModelChoice(ctx, dir, model, notes, warnings)) {
+        const bool recorded = write && WriteLauncherModelChoice(ctx, dir, model, notes, warnings);
+        if (write) (recorded ? applied : notApplied).push_back(wstring(L"the model choice (Model ") + wchar_t(model) + L")");
+        if (recorded) {
             forcedEntry = model;
 #ifdef WRONGGPU_TESTING
             // tests: the apply ends here, after the record and before OptiScaler.ini (a crash between the two)
@@ -1186,8 +1195,16 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
             const wstring asi = Join(dir, L"wronggpu-asi.ini");
             string text;
             if (ReadAll(asi, text) && wgasi::ParseSelection(text) == wgasi::kModelAmd) {
-                const string fresh = wgasi::FormatSelection(model);
+                // only the selection line changes (the player's comments and every other byte stay); ownership stays as
+                // recorded: a file whose bytes were WrongGPU's (the record's hash) stays WrongGPU's under its new hash, a
+                // file the player made or changed stays the player's (the record is not touched for it)
+                const string fresh = wgasi::WithSelection(text, model);
+                const wstring was = Sha256Bytes(text.data(), text.size());
                 WriteFileAtomic(asi, fresh.data(), fresh.size());
+                const wstring h = Sha256Bytes(fresh.data(), fresh.size());
+                for (auto& e : m.e)
+                    if (e.action == L"copy" && IEq(e.rel, L"wronggpu-asi.ini") && IEq(e.inst, was)) { e.inst = h; recordChanged = true; }
+                applied.push_back(L"OptiScaler's list back on WrongGPU (wronggpu-asi.ini)");
                 notes.push_back(L"wronggpu-asi.ini: WrongGPU selected again in OptiScaler's list (the launcher's model choice is newer than AMD's FSR there)");
             }
         }
@@ -1196,8 +1213,24 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
     if (RecordHasRr(m)) {  // Ray Reconstruction (rr.h): into the game's state folder (RR stays off while its data is not ready);
                            // WrongGPU\wronggpu.ini (the install's defaults, the player's to edit) is never rewritten
         wstring why;
-        const int w = WriteRrState(ctx, dir, p, RrDataValid(ctx), &why, hadBefore ? &prevMode : nullptr);
-        if (w < 0) Fail(L"Settings not applied: " + why, EXIT_REFUSED);
+        int w;
+#ifdef WRONGGPU_TESTING
+        // tests: the RR write fails after the upscaler settings (and the model choice) were written (a partial apply)
+        if (EnvVar(L"WRONGGPU_TEST_FAIL_RR_STATE") == L"1") { w = -1; why = L"the settings file could not be written (test)"; } else
+#endif
+        w = WriteRrState(ctx, dir, p, RrDataValid(ctx), &why, hadBefore ? &prevMode : nullptr);
+        if (w < 0) {
+            notApplied.push_back(L"the Ray Reconstruction settings (" + why + L")");
+            if (applied.empty()) Fail(L"Settings not applied: " + why, EXIT_REFUSED);
+            // the files this apply changed stay known as WrongGPU's (record hashes, owned files); the profile is not saved
+            if (recordChanged) SaveRecord(RecordPath(dir), m);
+            WriteOwnedFiles(dir, m);
+            wstring a, n;
+            for (auto& x : applied) a += (a.empty() ? L"" : L"; ") + x;
+            for (auto& x : notApplied) n += (n.empty() ? L"" : L"; ") + x;
+            LogLine(ctx, L"settings applied in part to " + dir + L": applied: " + a + L"; not applied: " + n);
+            Fail(L"Settings applied in part. Applied: " + a + L". Not applied: " + n + L". Apply again once that is fixed.", EXIT_REFUSED);
+        }
         if (w > 0) notes.push_back(Join(wgstate::kStateFolder, wgstate::kSettingsFile) + L" written (Ray Reconstruction)");
     }
     if (RrConfigGameFor(m.exe)) {  // Borderlands 4, Hogwarts Legacy: the game's Engine.ini follows rr_config_fix (rrconfig.h)

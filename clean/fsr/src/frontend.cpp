@@ -1576,6 +1576,11 @@ int32_t FrontEnd::HostSelected(uint64_t versionId) {
             ". Delete wronggpu-setup\\model-choice.ini or apply the model in the launcher.");
         return WG_HOST_SELECTED_REFUSED;
     }
+    if (o == wgchoice::Outcome::Corrupt) {  // never replaced: the model that runs stays
+        Log(tag + " ERROR: the player selected Model " + model + " in OptiScaler's upscaler list: " + wgchoice::OutcomeWords(o) +
+            (err.empty() ? "" : " (" + err + ")") + ". Nothing changes.");
+        return WG_HOST_SELECTED_REFUSED;
+    }
     Log(tag + " ERROR: the player selected Model " + model + " in OptiScaler's upscaler list, but it was not saved: " +
         wgchoice::OutcomeWords(o) + (err.empty() ? "" : " (" + err + ")") + ". Nothing changes; select it again.");
     return WG_HOST_SELECTED_NOT_SAVED;

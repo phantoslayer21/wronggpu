@@ -329,6 +329,22 @@ def test_choice(t):
             rc == 0 and r2c.get("model") == "L" and r2c.get("source") == "launcher" and int(r2c.get("seq", "0")) == newer + 1 and read(wini) == m_w,
             (rc, r2c))
     r2 = r2c
+    # the menu plugin's file as the player made it, with comments, on AMD (selection=amd): an explicit model choice changes
+    # only its selection line (every other byte stays) and does not claim it (its ownership stays as recorded)
+    asi = os.path.join(b, "wronggpu-asi.ini")
+    had_asi, asi_owner = os.path.exists(asi), recorded_hash(b, "wronggpu-asi.ini")
+    asi_was = read(asi) if had_asi else None
+    write(asi, b"# mine: AMD for screenshots\r\n Selection = AMD \r\n; keep this\n")
+    rc = t.run("set", exe, "model=L")
+    t.check("set model=L over the player's wronggpu-asi.ini on AMD: only its selection line changes (to Model L), the player's "
+            "comments and line ends stay, its ownership in the install record unchanged",
+            rc == 0 and read(asi) == b"# mine: AMD for screenshots\r\nselection=wronggpu-l\r\n; keep this\n" and
+            recorded_hash(b, "wronggpu-asi.ini") == asi_owner, (rc, read(asi), asi_owner, recorded_hash(b, "wronggpu-asi.ini")))
+    if had_asi:
+        write(asi, asi_was)  # (as the install left it)
+    else:
+        os.remove(asi)  # (the player's file: the uninstall below would rightly keep it)
+    r2 = choice_record(b)
     rc = t.run("set", exe, "model=M")
     t.check("set model=M: wronggpu.ini and OptiScaler.ini back byte for byte as the install wrote them",
             rc == 0 and read(wini) == m_w and read(oini) == m_o, (rc, read(wini)[-200:], read(oini)[-200:]))

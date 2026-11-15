@@ -23,7 +23,9 @@
 //   seq=<1..18446744073709551615>          (decimal digits only, overflow refused)
 //   source=<launcher|ffx|plugin>
 // each key exactly once, no other key, no spaces around '='; the last line is WrongGPU's stamp (a comment,
-// wg_state.h Stamped) when the install has an id. Writes: wgstate::WriteStamped (a temporary file in the same
+// wg_state.h Stamped) when the file is WrongGPU's and unedited and the install has an id. Writes: in place through
+// wgstate::UpdateStateFile (only the three keys' lines change; a corrupt record is never replaced; an edited or
+// player-made record stays the player's, unstamped; RecordChoiceUnlocked), a temporary file in the same
 // folder, written and flushed, then MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH), every step checked), tried up to 3
 // times. Readers take the lock too, so a reader never sees part of a record. A temporary file a crash left behind is
 // never read.
@@ -123,10 +125,13 @@ inline bool ParseRecord(const std::string& text, Record* out, std::string* why) 
     return true;
 }
 
+// The comment a new record starts with.
+constexpr const char* kRecordHeader =
+    "; WrongGPU: the model chosen last for this game, by the launcher, OptiScaler's upscaler list (ffx) or the\r\n"
+    "; WrongGPU menu plugin. The highest seq is the most recent choice. Written by WrongGPU; do not edit.\r\n";
+
 inline std::string FormatRecord(const Record& r) {
-    return std::string("; WrongGPU: the model chosen last for this game, by the launcher, OptiScaler's upscaler list (ffx) or the\r\n"
-                       "; WrongGPU menu plugin. The highest seq is the most recent choice. Written by WrongGPU; do not edit.\r\n") +
-           "model=" + r.model + "\r\nseq=" + std::to_string(r.seq) + "\r\nsource=" + SourceName(r.source) + "\r\n";
+    return std::string(kRecordHeader) + "model=" + r.model + "\r\nseq=" + std::to_string(r.seq) + "\r\nsource=" + SourceName(r.source) + "\r\n";
 }
 
 // ---- the lock -------------------------------------------------------------------------------------------------------
@@ -175,26 +180,9 @@ inline ReadResult ReadRecordFile(const std::filesystem::path& path, Record* out,
     return ParseRecord(text, out, why) ? ReadResult::Ok : ReadResult::Corrupt;
 }
 
-// The atomic replace of the record (wgstate::WriteStamped: WriteAtomic with WrongGPU's stamp line for this file and the
-// game's install id, so the launcher's uninstall knows the record as WrongGPU's; an install without an id: no stamp. A
-// temporary file in the same folder, flushed, then MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH), every step checked; the
-// temporary file deleted when a step fails), tried up to `attempts` times, 20 ms apart. false with *why. Call it under
-// the record's Lock. (The stamp is a comment line: ParseRecord skips it.)
-inline bool WriteRecordFile(const std::filesystem::path& path, const Record& r, std::string* why, int attempts = 3) {
-    const std::string text = FormatRecord(r);
-    wgstate::WriteResult w;
-    for (int i = 0; i < attempts; ++i) {
-        w = wgstate::WriteStamped(GameDirOf(path).wstring(), path.wstring(), text);
-        if (w.ok) return true;
-        if (i + 1 < attempts) Sleep(20);
-    }
-    if (why) *why = "cannot replace the record: " + w.words();
-    return false;
-}
-
 // ---- the operations, each one read-modify-write under the lock ------------------------------------------------------
 
-enum class Outcome { Written, NoLock, Unreadable, SeqExhausted, WriteFailed };
+enum class Outcome { Written, NoLock, Unreadable, SeqExhausted, WriteFailed, Corrupt };
 
 inline const char* OutcomeWords(Outcome o) {
     switch (o) {
@@ -203,33 +191,80 @@ inline const char* OutcomeWords(Outcome o) {
     case Outcome::Unreadable: return "the record cannot be read (not written over)";
     case Outcome::SeqExhausted: return "the record's sequence number is at its end (18446744073709551615): choice refused";
     case Outcome::WriteFailed: return "the record could not be written";
+    case Outcome::Corrupt:
+        return "the record (wronggpu-setup\\model-choice.ini) is not a valid record, so it is left as it is and the choice is "
+               "refused (fix the file or delete it)";
     }
     return "?";
 }
 
-// A choice of `model` by `source`: read the record and write seq + 1 (seq 1 without a record, or over a corrupt one,
-// which *why then names). *after: the record written; *before: the record it replaced (model 0 when there was none or it
-// was corrupt). Any failure leaves the record as it was and nothing is kept for later: the caller says "not saved". Call
-// it holding the game's state lock (RecordChoice takes it).
+// A choice of `model` by `source`: the record's model, seq + 1 (seq 1 without a record) and source, written IN PLACE through
+// wgstate::UpdateStateFile (#224's rule for the game's state files): the file is held from the read to the replace, only
+// the three keys' lines change, every other line (the player's comments, blank lines) and every line end stay, and the
+// stamp is put back only when the file was WrongGPU's and unedited (its valid stamp) or new; an edited or player-made
+// record stays unstamped, the player's, and an uninstall keeps it. A record that is not a valid record (corrupt, or text
+// WrongGPU cannot keep) is never replaced: Corrupt (*why says what is wrong), and the caller keeps the model that runs.
+// *after: the record written; *before: the record it replaced (model 0 when there was none). Any failure leaves the file
+// as it was and nothing is kept for later: the caller says "not saved". A failed write is tried up to 3 times. Call it
+// holding the game's state lock (RecordChoice takes it; the lock is recursive on one thread).
 inline Outcome RecordChoiceUnlocked(const std::filesystem::path& path, char model, Source source, Record* after, std::string* why,
                                     Record* before = nullptr) {
-    Record cur;
+    if (before) *before = Record{0, 0, Source::Launcher};
+    Outcome result = Outcome::Written;
+    Record next{model, 1, source};
     std::string err;
-    const ReadResult rr = ReadRecordFile(path, &cur, &err);
-    if (before) *before = rr == ReadResult::Ok ? cur : Record{0, 0, Source::Launcher};
-    if (rr == ReadResult::Unreadable) {
-        if (why) *why = err;
-        return Outcome::Unreadable;
+    wgstate::SetOutcome o;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        result = Outcome::Written;
+        err.clear();
+        o = wgstate::UpdateStateFile(
+            GameDirOf(path).wstring(), kRecordFile,
+            [&](const wgstate::Settings& now, std::vector<std::pair<std::string, std::string>>* changes) {
+                Record cur;
+                bool had = false;
+                if (now.present) {  // (the strict record rules on the file as read, its valid stamp already off)
+                    if (!ParseRecord(wgstate::RenderSettings(now), &cur, &err)) { result = Outcome::Corrupt; return; }
+                    had = true;
+                    if (before) *before = cur;
+                    if (cur.seq == UINT64_MAX) { result = Outcome::SeqExhausted; return; }
+                }
+                next = Record{model, had ? cur.seq + 1 : 1, source};
+                changes->push_back({"model", std::string(1, model)});
+                changes->push_back({"seq", std::to_string(next.seq)});
+                changes->push_back({"source", SourceName(source)});
+            },
+            1000, kRecordHeader);
+        const bool writeFailed = o.result == wgstate::SetResult::WriteFailed || (o.result == wgstate::SetResult::AccessDenied && o.write.error);
+        if (!writeFailed || result != Outcome::Written) break;
+        Sleep(20);
     }
-    if (rr == ReadResult::Corrupt && why) *why = "a corrupt record was replaced (" + err + ")";
-    if (rr == ReadResult::Ok && cur.seq == UINT64_MAX) return Outcome::SeqExhausted;
-    const Record next{model, rr == ReadResult::Ok ? cur.seq + 1 : 1, source};
-    if (!WriteRecordFile(path, next, &err)) {
-        if (why) *why = err;
+    switch (o.result) {
+    case wgstate::SetResult::Ok:
+        if (result != Outcome::Written) {
+            if (why && !err.empty()) *why = err;
+            return result;
+        }
+        if (after) *after = next;
+        return Outcome::Written;
+    case wgstate::SetResult::Unparseable:
+        if (why) *why = o.why;
+        return Outcome::Corrupt;
+    case wgstate::SetResult::Busy:
+    case wgstate::SetResult::LockDenied:
+        if (why) *why = o.words();
+        return Outcome::NoLock;
+    case wgstate::SetResult::AccessDenied:
+        if (why) *why = o.words();
+        return o.write.error ? Outcome::WriteFailed : Outcome::Unreadable;  // (denied at the replace: a write that failed)
+    case wgstate::SetResult::Unreadable:
+    case wgstate::SetResult::NoStateFolder:
+    case wgstate::SetResult::StateFolderUnknown:
+        if (why) *why = o.words();
+        return Outcome::Unreadable;
+    default:
+        if (why) *why = o.words();
         return Outcome::WriteFailed;
     }
-    if (after) *after = next;
-    return Outcome::Written;
 }
 
 inline Outcome RecordChoice(const std::filesystem::path& path, char model, Source source, Record* after, std::string* why,
@@ -260,8 +295,10 @@ inline LoadResult LoadOrMigrateRecord(const std::filesystem::path& path, Launche
     if (rr == ReadResult::Corrupt) return LoadResult::Corrupt;
     if (rr == ReadResult::Unreadable) return LoadResult::Unreadable;
     const char m = launcherModel();
-    const Record first{IsModel(m) ? m : 'M', 1, Source::Launcher};
-    if (!WriteRecordFile(path, first, why)) return LoadResult::Missing;
+    Record first;
+    const Outcome wo = RecordChoiceUnlocked(path, IsModel(m) ? m : 'M', Source::Launcher, &first, why);
+    if (wo == Outcome::Corrupt) return LoadResult::Corrupt;  // (a file that appeared meanwhile is the player's: left as it is)
+    if (wo != Outcome::Written) return LoadResult::Missing;
     *out = first;
     if (migrated) *migrated = true;
     return LoadResult::Ok;

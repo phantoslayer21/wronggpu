@@ -160,6 +160,16 @@ void TestSelectionFile() {
     CHECK(ParseSelection(FormatSelection(kModelM)) == kModelM);
     CHECK(FormatSelection(kModelM).find("selection=wronggpu\r\n") != std::string::npos);
     CHECK(ParseSelection("selection=wronggpu-l") == (WRONGGPU_MODEL_L ? kModelL : kModelM));
+    // WithSelection: only the selection line ParseSelection reads changes; every other byte stays (the player's comments,
+    // a later selection line ParseSelection never reads, line ends, a last line without one)
+    const std::string mine = "# my notes: AMD for screenshots\r\n\r\n Selection = AMD \r\n; keep\nselection=wronggpu-k\n# end";
+    CHECK(WithSelection(mine, kModelM) == "# my notes: AMD for screenshots\r\n\r\nselection=wronggpu\r\n; keep\nselection=wronggpu-k\n# end");
+    CHECK(ParseSelection(WithSelection(mine, kModelM)) == kModelM);
+    CHECK(WithSelection("selection=amd", kModelM) == "selection=wronggpu");                   // no line end: none added
+    CHECK(WithSelection("; only a comment\n", kModelM) == "; only a comment\nselection=wronggpu\n");  // none there: appended
+    CHECK(WithSelection("; no line end", kModelAmd) == "; no line end\r\nselection=amd\r\n");
+    CHECK(WithSelection("", kModelM) == "selection=wronggpu\r\n");
+    CHECK(WithSelection(FormatSelection(kModelAmd), kModelM) == FormatSelection(kModelM));    // WrongGPU's own file
 }
 
 // A click records the model and reports it; the menu marks the model the front end reported (ShownModel) until the

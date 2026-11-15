@@ -151,6 +151,48 @@ bool StartTimer(uint32_t ms, std::function<uint32_t()> fn) {
     return true;
 }
 
+// The callables Get() gives the front end that keep a string of the configuration. Named classes, not lambdas that
+// capture the string by copy: with MSVC's /Zc:lambda (on with /permissive-, as in CI) a lambda whose capture copy throws
+// (std::bad_alloc) terminates the process instead of unwinding; the same copy in a class constructor unwinds normally
+// (async_create.h DeviceRelease).
+//
+// Where the converted model is looked for (config.h ModelPlace): wronggpu.ini [fsr] model_dir, the game's data folder,
+// then the runtime's own default.
+struct ModelPlacesOf {
+    std::string modelDir;
+    explicit ModelPlacesOf(const std::string& d) : modelDir(d) {}
+    std::vector<ModelPlace> operator()() const {
+        std::vector<ModelPlace> places;
+        const std::wstring data = Place().dataDir;
+        if (!modelDir.empty()) {
+            std::wstring dir = Widen(modelDir);
+            const bool absolute = dir.size() > 1 && (dir[1] == L':' || (dir[0] == L'\\' && dir[1] == L'\\'));
+            if (!absolute) dir = data + L"\\" + dir;
+            places.push_back({Narrow(dir), "wronggpu.ini model_dir", false});
+        }
+        wchar_t exe[MAX_PATH] = {};
+        const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        std::wstring exeDir(exe, n);
+        exeDir = exeDir.substr(0, exeDir.find_last_of(L"\\/") == std::wstring::npos ? 0 : exeDir.find_last_of(L"\\/"));
+        const std::wstring gameData = exeDir + L"\\WrongGPU";
+        places.push_back({Narrow(gameData + L"\\model"), "the game's data folder", false});
+        if (_wcsicmp(data.c_str(), gameData.c_str()) != 0) places.push_back({Narrow(data + L"\\model"), "the data folder (WG_DATA_DIR)", false});
+        wchar_t local[MAX_PATH] = {};
+        const DWORD m = GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
+        if (m > 0 && m < MAX_PATH) places.push_back({Narrow(std::wstring(local, m) + L"\\WrongGPU\\model"), "%LOCALAPPDATA%", true});
+        return places;
+    }
+};
+// AMD's upscaler for fallbacks and the version list: the DLL next to this one, else the comparison DLL.
+struct OriginalOrCompare {
+    std::string dll;
+    explicit OriginalOrCompare(const std::string& d) : dll(d) {}
+    const OriginalApi* operator()() const {
+        if (const OriginalApi* o = LoadOriginal()) return o;
+        return CompareApi(dll);
+    }
+};
+
 FrontEnd& Get() {
     std::call_once(g_initOnce, [] {
         // Shared settings first (clean/wgshared): data folder, wronggpu.ini, the shared block (this DLL writes it when
@@ -202,27 +244,7 @@ FrontEnd& Get() {
         // Where the converted model is looked for (config.h ModelPlace): wronggpu.ini [fsr] model_dir, the game's data
         // folder, then the runtime's own default. Files a game reads must be in places the game's process sees: the
         // installer's %LOCALAPPDATA% copy can be private to another app's container.
-        p.modelPlaces = [modelDir = config.modelDir] {
-            std::vector<ModelPlace> places;
-            const std::wstring data = Place().dataDir;
-            if (!modelDir.empty()) {
-                std::wstring dir = Widen(modelDir);
-                const bool absolute = dir.size() > 1 && (dir[1] == L':' || (dir[0] == L'\\' && dir[1] == L'\\'));
-                if (!absolute) dir = data + L"\\" + dir;
-                places.push_back({Narrow(dir), "wronggpu.ini model_dir", false});
-            }
-            wchar_t exe[MAX_PATH] = {};
-            const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
-            std::wstring exeDir(exe, n);
-            exeDir = exeDir.substr(0, exeDir.find_last_of(L"\\/") == std::wstring::npos ? 0 : exeDir.find_last_of(L"\\/"));
-            const std::wstring gameData = exeDir + L"\\WrongGPU";
-            places.push_back({Narrow(gameData + L"\\model"), "the game's data folder", false});
-            if (_wcsicmp(data.c_str(), gameData.c_str()) != 0) places.push_back({Narrow(data + L"\\model"), "the data folder (WG_DATA_DIR)", false});
-            wchar_t local[MAX_PATH] = {};
-            const DWORD m = GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
-            if (m > 0 && m < MAX_PATH) places.push_back({Narrow(std::wstring(local, m) + L"\\WrongGPU\\model"), "%LOCALAPPDATA%", true});
-            return places;
-        };
+        p.modelPlaces = ModelPlacesOf(config.modelDir);
         p.fileExists = [](const std::string& path) {
             const DWORD a = GetFileAttributesW(Widen(path).c_str());
             return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
@@ -244,10 +266,7 @@ FrontEnd& Get() {
                 // host's way in and would route the call back to this DLL (config.h Config::customSlot).
                 p.original = []() -> const OriginalApi* { return LoadOriginal(); };
             } else {
-                p.original = [dll]() -> const OriginalApi* {
-                    if (const OriginalApi* o = LoadOriginal()) return o;
-                    return CompareApi(dll);
-                };
+                p.original = OriginalOrCompare(dll);
             }
             // If WrongGPU.asi has hooked OptiScaler's menu, its entry says WrongGPU or AMD, and the game's model choice
             // record (model_choice_record.h, next to wronggpu.ini) says which WrongGPU model. Absent or not hooked: hosted
