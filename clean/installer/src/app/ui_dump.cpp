@@ -111,6 +111,7 @@ using namespace win;
 // no network, no HIP probe or model conversion. Development and the launcher tests.
 int RunLauncherUiDump(const wstring& outFile, const wstring& shotDir, bool noScan, const wstring& apply) {
     g.noScan = noScan;
+    if (noScan) g.ctx.noLibraryScan = true;  // (the AMD FSR 4 search too)
     CreateLauncherWindow(false);
     RefreshModelNow();
     SetGpu(DetectGpu());

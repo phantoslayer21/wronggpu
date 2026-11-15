@@ -932,6 +932,14 @@ Windows (the Wine run was not repeated for them):
   not a HIP runtime; `LLVM_PATH` removed for the child (the mock fails when it sees it); the newest ROCm folder
   (7.10 before 7.2) tried first.
 
+**The tests never read the PC's own game libraries.** A `WRONGGPU_TESTING` build with `WRONGGPU_TEST_LIBRARIES` set takes its store
+libraries from that folder only (each sub-folder a game; set but empty: none) and reads nothing of the PC's stores (not
+Steam's library list, not its art cache: `detect.h` `TestLibraries`). Every test runner sets it to an empty folder of its work
+folder. `--noscan` (and `/NOSCAN`) keeps every library search away from the store libraries, the AMD FSR 4 search and the
+model search included. The launcher runners (`tests/launcher_isolation.py` `check_isolation`, used by the coexistence, Model L / K
+and convert-ignore runners too) stop the whole run, loudly, at the first log line of such a search that names a path
+outside the run's work folder.
+
 On Windows: `python tests\run_installer_tests.py --prepare-only` writes the mock payload and the synthetic map; build
 the installer from them with CMake (`-DWRONGGPU_PAYLOAD_DIR=... -DWRONGGPU_MAP=...`) and run
 `python tests\run_installer_tests.py --setup <WrongGPU-Setup.exe>`. Natively it points `LOCALAPPDATA` and

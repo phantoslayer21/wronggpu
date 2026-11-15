@@ -1363,6 +1363,10 @@ wstring PartlyText(const wstring& done, const std::vector<wstring>& warnings) {
 
 OpResult RunOp(Context& ctx, const OpRequest& r, Ui& ui) {
     OpResult res;
+    // an operation asked not to search the store libraries (the window's or a job's noscan): nothing of this process searches
+    // them from now on, the AMD FSR 4 search included (RecordCompareDll reads ctx.noLibraryScan); only ever turned on, so no
+    // other thread sees it go back
+    if (r.noScan) ctx.noLibraryScan = true;
     try {
         switch (r.op) {
             case Op::Install: case Op::Repair: case Op::Update: InstallOp(ctx, r, ui, res); break;

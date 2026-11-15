@@ -38,7 +38,12 @@ wstring UnrealShipping(const wstring& root);
 wstring SameNameGameExe(const wstring& exe);
 wstring FindGameExe(const wstring& root, const wstring& hint = L"");
 const KnownGame* Validated(const wstring& exe);
+// The store libraries' game folders (Steam, Epic, GOG). In a WRONGGPU_TESTING build with WRONGGPU_TEST_LIBRARIES set: the
+// sub-folders of that folder only (set but empty: none), and nothing of the PC's own stores is read (TestLibraries).
 std::vector<StoreGame> ScanLibraries();
+// A WRONGGPU_TESTING build run by the tests (WRONGGPU_TEST_LIBRARIES set, its folder in `folder`): the PC's own stores (their
+// libraries, Steam's art cache) are never read. Always false in other builds.
+bool TestLibraries(wstring* folder = nullptr);
 StoreGame EpicItemGame(const wstring& manifestText);  // one Epic manifest (.item): name, InstallLocation, LaunchExecutable hint
 // rc6 L7: the AppName of the Epic manifest (%ProgramData%\Epic\EpicGamesLauncher\Data\Manifests\*.item) whose InstallLocation
 // holds exe; empty: not an Epic install (or a name that can't go into an address). Play starts such a game through Epic.

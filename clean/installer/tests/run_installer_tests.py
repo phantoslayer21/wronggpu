@@ -161,6 +161,11 @@ class Env:
             # Native Windows: never touch the tester's own WrongGPU data, store registry keys or libraries.
             self.env = dict(os.environ, LOCALAPPDATA=os.path.join(work, "localappdata"), ProgramData=os.path.join(work, "programdata"))
             os.makedirs(self.env["LOCALAPPDATA"], exist_ok=True)
+        # a test build takes its store libraries from this folder only (empty: none) and never reads the PC's own stores
+        # (detect.h TestLibraries)
+        libs = os.path.join(work, "libraries")
+        os.makedirs(libs, exist_ok=True)
+        self.env["WRONGGPU_TEST_LIBRARIES"] = self.win(libs)
 
     def close(self):
         if not self.native:

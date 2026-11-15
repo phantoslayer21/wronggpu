@@ -63,6 +63,8 @@ class T:
         shutil.rmtree(self.lad, ignore_errors=True)
         os.makedirs(self.lad)
         self.env = dict(os.environ, LOCALAPPDATA=self.lad, ProgramData=os.path.join(work, "programdata"))
+        self.env["WRONGGPU_TEST_LIBRARIES"] = os.path.join(work, "libraries")  # the store libraries: none of the PC's (detect.h TestLibraries)
+        os.makedirs(self.env["WRONGGPU_TEST_LIBRARIES"], exist_ok=True)
         for k in [k for k in self.env if k.upper().startswith("WG_") or k.upper() in ("HIP_PATH", "ROCM_PATH", "LLVM_PATH", "HIP_DEVICE_LIB_PATH")]:
             self.env.pop(k)
         self.j, self.stdout = {}, ""
@@ -88,6 +90,7 @@ class T:
                 self.j = json.load(f)
         except (OSError, ValueError):
             self.j = {}
+        __import__("launcher_isolation").check_isolation(self.log, self.work, 0, args)  # never the PC's own game folders
         return p.returncode
 
     def model(self, *rel):

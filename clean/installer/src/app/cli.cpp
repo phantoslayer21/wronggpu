@@ -570,6 +570,7 @@ static void IgnoreJson(Output& o, const IgnoreReport& r) {
 int Verb(const wstring& verb, const Args& a, Output& o) {
     if (IgnoreArgsMisplaced(verb, a, o)) return o.code;
     const bool noScan = a.has(L"noscan");
+    if (noScan) g.ctx.noLibraryScan = true;  // every verb: the store libraries are not searched (the AMD FSR 4 search too)
     GlobalSettings& gs = gl.global;
     GlobalSettings scan = gs;  // --library=<folder>: scanned this time only, never saved
     for (auto& lib : a.libraries) scan.extraFolders.push_back(FullPath(lib));

@@ -203,7 +203,28 @@ wstring StoreExe(const wstring& root, const wstring& hint) {
 }
 
 // Every game folder of the Steam, Epic and GOG libraries on this PC. Read-only.
+bool TestLibraries(wstring* folder) {
+#ifdef WRONGGPU_TESTING
+    wchar_t buf[MAX_PATH * 2] = {};
+    SetLastError(ERROR_SUCCESS);
+    const DWORD n = GetEnvironmentVariableW(L"WRONGGPU_TEST_LIBRARIES", buf, (DWORD)(sizeof buf / sizeof buf[0]));
+    if (n == 0 && GetLastError() == ERROR_ENVVAR_NOT_FOUND) return false;
+    if (folder) *folder = n > 0 && n < sizeof buf / sizeof buf[0] ? wstring(buf) : wstring();
+    return true;
+#else
+    (void)folder;
+    return false;
+#endif
+}
+
 std::vector<StoreGame> ScanLibraries() {
+    wstring testFolder;
+    if (TestLibraries(&testFolder)) {  // test builds: the suite's libraries only, the PC's own stores are not read at all
+        std::vector<StoreGame> test;
+        if (!testFolder.empty() && IsDir(testFolder))
+            for (auto& d : ListDirs(testFolder)) test.push_back({BaseName(d), FullPath(d), L"", L"Test"});
+        return test;
+    }
     std::vector<StoreGame> roots;
     auto add = [&](const wstring& name, const wstring& root, const wstring& hint, const wchar_t* source) {
         if (name.empty() || root.empty() || !IsDir(root)) return;

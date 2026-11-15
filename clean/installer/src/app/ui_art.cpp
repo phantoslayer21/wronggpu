@@ -54,6 +54,7 @@ struct ArtState {
 } st;
 
 wstring LibraryCache() {
+    if (TestLibraries()) return wstring();  // the tests never read the PC's own Steam (detect.h)
     wstring steam = RegString(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", L"SteamPath");
     for (auto& c : steam) if (c == L'/') c = L'\\';
     return steam.empty() ? wstring() : Join(steam, L"appcache\\librarycache");

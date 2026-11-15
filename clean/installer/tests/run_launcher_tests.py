@@ -25,6 +25,7 @@ sys.path.insert(0, HERE)
 import mockpe  # noqa: E402  (synthetic PE files with a version resource)
 import run_installer_tests as suite  # noqa: E402  (mock content, snapshots, the synthetic model case)
 from run_installer_tests import read, sha, snapshot, diff, write, kept_runtime, unrecorded_wronggpu_files  # noqa: E402
+from launcher_isolation import check_isolation, test_isolation_guard  # noqa: E402  (no search of the PC's own game folders)
 
 OPTI_INI = ("[Upscalers]\nDx12Upscaler=auto\n[Libraries]\nFfxDx12SRPath=auto\n[FSR]\nFsr4Update=auto\nUpscalerIndex=auto\n"
             "[Menu]\nShortcutKey=auto\nShowFps=auto\n")
@@ -43,6 +44,10 @@ class T:
         for k in [k for k in self.env if k.upper().startswith("WG_") or k.upper() in ("HIP_PATH", "ROCM_PATH", "LLVM_PATH", "HIP_DEVICE_LIB_PATH")]:
             self.env.pop(k)
         os.makedirs(self.env["LOCALAPPDATA"], exist_ok=True)
+        # the store libraries the launcher sees: this folder's sub-folders only (empty: none); a test build never reads the PC's
+        # own stores with it set (detect.h TestLibraries), and isolation_guard() stops the run if anything does
+        self.env["WRONGGPU_TEST_LIBRARIES"] = os.path.join(work, "libraries")
+        os.makedirs(self.env["WRONGGPU_TEST_LIBRARIES"], exist_ok=True)
         self.uninstall = suite.uninstall_root(self.env["LOCALAPPDATA"])  # this run's Apps & features root (the build's own)
         self.j = {}
 
@@ -59,13 +64,18 @@ class T:
         if os.path.exists(self.out):
             os.remove(self.out)
         cmd = [exe or self.exe] + list(args) + ["--log=" + self.log, "--out=" + self.out] + (["--data=" + self.data] if data else [])
+        start = os.path.getsize(self.log) if os.path.isfile(self.log) else 0
         p = subprocess.run(cmd, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, cwd=cwd)
         try:
             with open(self.out, encoding="utf-8") as f:
                 self.j = json.load(f)
         except (OSError, ValueError):
             self.j = {}
+        self.isolation_guard(start, args)
         return p.returncode
+
+    def isolation_guard(self, start, args):
+        check_isolation(self.log, self.work, start, args)
 
     def raw(self, cmd, timeout=600):
         return subprocess.run(cmd, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout).returncode
@@ -3030,6 +3040,7 @@ def main():
     opti = opti_package(t)
     t0 = time.time()
     test_basics(t)
+    test_isolation_guard(t)  # (every run, also with --only: the guard is what keeps the PC's own game folders out)
     if a.only:  # development: only the tests named (after the basics)
         for name in a.only:
             fn = globals()["test_" + name]

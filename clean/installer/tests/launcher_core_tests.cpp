@@ -2165,6 +2165,50 @@ int main() {
             require(BuildTimeText(0) == L"unknown" && BuildTimeText(nov5).size() == 20 && BuildTimeText(nov5) == L"2026-11-05 23:06 UTC", "BuildTimeText: \"YYYY-MM-DD hh:mm UTC\"");
         }
 
+        // No search of the store libraries when asked (--noscan, the window's or a job's noscan): the AMD FSR 4 search included
+        {
+            const wstring nsDir = Join(dir, L"noscan");
+            EnsureDir(nsDir);
+            Context nctx;
+            nctx.logFile = Join(nsDir, L"noscan.log");
+            Ui nui;
+            nui.step = [](int, int, const wstring&) {};
+            nui.log = [](const wstring&) {};
+            OpRequest nr;
+            nr.op = Op::Uninstall;
+            nr.dir = Join(nsDir, L"no-such-game");  // fails at once (no record): only what RunOp does first matters here
+            nr.noScan = true;
+            const OpResult nres = RunOp(nctx, nr, nui);
+            require(nres.code != 0 && nctx.noLibraryScan, "an operation with noscan: ctx.noLibraryScan set (what the AMD FSR 4 search reads)");
+            const CompareDll none = RecordCompareDll(nctx, nui, L"");
+            string nlog;
+            ReadAll(nctx.logFile, nlog);
+            require(none.path.empty() && nlog.find("AMD FSR 4 search: libraries not searched") != string::npos && nlog.find("candidate") == string::npos,
+                    "noscan: the AMD FSR 4 search leaves the store libraries alone (said in the log), no candidate");
+            Context sctx;
+            OpRequest sr = nr;
+            sr.noScan = false;
+            RunOp(sctx, sr, nui);
+            require(!sctx.noLibraryScan, "an operation without noscan leaves ctx.noLibraryScan as it was");
+#ifdef WRONGGPU_TESTING
+            // test builds: WRONGGPU_TEST_LIBRARIES is the only library list (each sub-folder a game; empty: none)
+            const wstring libs = Join(nsDir, L"libraries");
+            EnsureDir(Join(libs, L"Game A"));
+            EnsureDir(Join(libs, L"Game B"));
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_LIBRARIES", libs.c_str());
+            const auto found = ScanLibraries();
+            require(found.size() == 2 && TestLibraries() && std::all_of(found.begin(), found.end(), [&](const StoreGame& s) {
+                        return s.root.rfind(FullPath(libs), 0) == 0 && s.source == L"Test"; }),
+                    "WRONGGPU_TEST_LIBRARIES: its sub-folders are the libraries' games, nothing else");
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_LIBRARIES", L"");
+            require(ScanLibraries().empty() && TestLibraries(), "WRONGGPU_TEST_LIBRARIES set but empty: no library at all");
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_LIBRARIES", nullptr);
+            require(!TestLibraries(), "WRONGGPU_TEST_LIBRARIES not set: the normal library search (TestLibraries false)");
+#else
+            require(!TestLibraries(), "a build without WRONGGPU_TESTING never takes a test library list");
+#endif
+        }
+
         RemoveTree(dir);
         std::printf("launcher-core: %d checks passed\n", checks);
         return 0;
