@@ -22,25 +22,34 @@
 //   the next taker gets it, and because writes are atomic (below) the files are whole: the old version or the new one. A
 //   temporary file such a holder left is never read as state (IsTempName) and goes with the uninstall.
 //
-// THE LOADED PROTOCOL (no check-then-act race between a game starting and the launcher changing the game's files):
-// - The game: every WrongGPU module that is loaded in the game registers BEFORE it reads or writes any state
-//   (LoadedRegistration): it takes the state lock (bounded wait, kRegisterWaitMs), opens its LoadedMarker
-//   (Global\WrongGPU-loaded-<volume serial>-<file index>, held OPEN for as long as the module is loaded, never owned) and
-//   releases the lock. When the lock is not had in time (a long uninstall, repair or update is running) or the marker cannot
-//   be made, ok() is false: the module logs it and runs with the defaults, reading and writing no state that session. It
-//   never blocks the game for longer than the bounded wait.
-// - The launcher: an uninstall, repair or update holds an OperationGuard for its WHOLE run: it takes the state lock, then
-//   asks QueryGameUse, and refuses unless the answer is NotRunning (Running and Unknown both refuse). The lock stays held
-//   until the operation ends, so no game can register in between. The guard is taken by the process that changes the
-//   files (the elevated worker when there is one), never by a parent waiting for it.
+// THE LOADED PROTOCOL (a game is never invisible to an operation that changes its files):
+// - The game: every WrongGPU module loaded in the game registers (LoadedRegistration) at its init, BEFORE it reads or writes
+//   any state, and keeps the registration for as long as it is loaded:
+//   1. its LOADED MARKER first, at once, with no wait: Global\WrongGPU-loaded-<volume serial>-<file index> (same identity as
+//      the state lock), a named object held OPEN, never owned. While the game runs the marker exists, whatever happens next;
+//   2. only then the state lock, with a bounded wait: had in time = no launcher operation is running, the module may use the
+//      state (each later use takes the lock again); not had in time (an uninstall, repair or update is running) = the module
+//      runs with the defaults and reads and writes no state this session (state_ok() false; why() says so for the log).
+//   The whole registration is bounded by kRegisterBudgetMs (about 2 s): the folder identity lookup (a file-system call that a
+//   network folder can stall) runs on a helper thread within that budget, the lock wait gets the rest; a lookup that does not
+//   finish in time gives no marker and no state (and the launcher, which needs the same lookup, refuses: Unknown). Register
+//   from the module's init (InitializeASI, the first call), NEVER from DllMain (the helper thread needs the loader lock).
+//   A marker that cannot be made (marker() false) is logged; the module then uses no state either.
+// - The launcher: an uninstall, repair or update holds an OperationGuard for its WHOLE run: it takes the state lock (a
+//   timeout is Busy, access denied is LockDenied), then queries the marker and refuses unless the answer is NotRunning
+//   (Running and Unknown both refuse). A game that starts DURING the operation still creates its marker at once (it then
+//   waits for the lock, and gives up on state): so the operation calls Recheck() before EACH destructive step (each file it
+//   deletes or replaces) and stops with "close the game first" when the marker appeared. The guard is taken by the process
+//   that changes the files (the elevated worker when there is one), never by a parent waiting for it.
 // The marker object exists exactly while some process has it open; the OS closes every handle of a process that ends, crashes
 // or is killed, so a dead game leaves no stale marker and no PID is ever compared.
 //
 // Writes are atomic (WriteAtomic): a new temporary file in the same folder (<name>.wgtmp-<pid>-<n>, created only where
 // nothing is), written in checked chunks, flushed and closed (both checked), then MoveFileExW(REPLACE_EXISTING |
-// WRITE_THROUGH) over the file. On a failure the temporary file is deleted when possible; a temporary file that could not be
-// deleted is reported (*tempLeft). A reader sees the old file or the new one, never part of one. State files are small:
-// more than kMaxStateBytes is refused.
+// WRITE_THROUGH) over the file. A reader sees the old file or the new one, never part of one. On a failure the temporary file
+// is deleted when possible; the result (WriteResult, and SetOutcome for SetSettings) carries the first failure AND every
+// secondary one: a close that failed after an earlier failure, a cleanup that failed (its error and the file left). words()
+// says all of them. State files are small: more than kMaxStateBytes is refused.
 // Paths: every helper turns its path into the \\?\ form (full path; \\?\UNC\ for a share), so a game deeper than MAX_PATH
 // works without the long-path setting.
 //
@@ -75,7 +84,8 @@ constexpr const wchar_t* kSettingsFile = L"settings.ini";
 constexpr const wchar_t* kModelChoiceFile = L"model-choice.ini";
 constexpr const wchar_t* kTempMark = L".wgtmp-";  // <file>.wgtmp-<pid>-<n>: a write in progress (or one a crash left)
 constexpr DWORD kDefaultWaitMs = 5000;            // the launcher's waits
-constexpr DWORD kRegisterWaitMs = 2000;           // the game's registration: never longer
+constexpr DWORD kRegisterBudgetMs = 2000;         // the game's whole registration (lookup + lock wait): never longer
+constexpr DWORD kRegisterWaitMs = kRegisterBudgetMs;  // (the name earlier code used)
 constexpr size_t kMaxStateBytes = 1u << 20;       // no state file is larger
 constexpr DWORD kChunk = 64u * 1024u;
 
@@ -139,12 +149,50 @@ inline bool LockNameFor(const std::wstring& gameDir, std::wstring* name, DWORD* 
     *name = buf;
     return true;
 }
+/// The names of a game folder's identity: Global\WrongGPU-state-<id> (the lock) and Global\WrongGPU-loaded-<id> (the marker).
+constexpr const wchar_t* kLoadedPrefix = L"Global\\WrongGPU-loaded-";
+inline std::wstring MarkerNameOf(const std::wstring& lockName) { return std::wstring(kLoadedPrefix) + lockName.substr(lockName.find(L"-state-") + 7); }
 // Another per-game name of the same identity: prefix + "<volume serial>-<file index>".
 inline bool NameFor(const wchar_t* prefix, const std::wstring& gameDir, std::wstring* name, DWORD* err) {
     std::wstring lock;
     if (!LockNameFor(gameDir, &lock, err)) return false;
     *name = std::wstring(prefix) + lock.substr(lock.find(L"-state-") + 7);
     return true;
+}
+// LockNameFor within budgetMs: the lookup (a file-system call a network folder can stall) runs on a helper thread; a lookup
+// that does not finish in time gives false with *err = WAIT_TIMEOUT (the thread finishes on its own and frees its data).
+// Never from DllMain. Never throws.
+namespace detail {
+struct LookupJob {
+    std::wstring dir, name;
+    DWORD err = 0;
+    bool ok = false;
+    volatile LONG refs = 2;
+};
+inline DWORD WINAPI LookupThread(void* p) {
+    LookupJob* j = static_cast<LookupJob*>(p);
+    try { j->ok = LockNameFor(j->dir, &j->name, &j->err); } catch (...) { j->ok = false; j->err = ERROR_OUTOFMEMORY; }
+    if (InterlockedDecrement(&j->refs) == 0) delete j;
+    return 0;
+}
+}  // namespace detail
+inline bool LockNameWithin(const std::wstring& gameDir, DWORD budgetMs, std::wstring* name, DWORD* err) {
+    detail::LookupJob* j = nullptr;
+    try { j = new detail::LookupJob; j->dir = gameDir; } catch (...) { delete j; if (err) *err = ERROR_OUTOFMEMORY; return false; }
+    HANDLE t = CreateThread(nullptr, 0, &detail::LookupThread, j, 0, nullptr);
+    if (!t) { if (err) *err = GetLastError(); delete j; return false; }
+    const DWORD w = WaitForSingleObject(t, budgetMs);
+    CloseHandle(t);
+    bool ok = false;
+    if (w == WAIT_OBJECT_0) {
+        ok = j->ok;
+        if (err) *err = j->err;
+        if (ok) { try { *name = j->name; } catch (...) { ok = false; if (err) *err = ERROR_OUTOFMEMORY; } }
+    } else if (err) {
+        *err = WAIT_TIMEOUT;
+    }
+    if (InterlockedDecrement(&j->refs) == 0) delete j;
+    return ok;
 }
 // A named mutex every integrity level may open (created, or opened when it exists); nullptr with GetLastError on failure.
 inline HANDLE CreateSharedMutex(const std::wstring& name) {
@@ -161,19 +209,17 @@ inline HANDLE CreateSharedMutex(const std::wstring& name) {
     return m;
 }
 
-// The game's state lock, held from construction (when held()) to destruction. Bounded wait: not held after waitMs.
+// The game's state lock, held from construction (when held()) to destruction. Bounded wait: not held after waitMs; why:
+// timedOut() (another holder), denied() (this process may not open the folder or the lock: ERROR_ACCESS_DENIED), else error().
 class StateLock {
 public:
+    struct ByName {};  // the lock of an already known name (LockNameFor), no file-system call
     explicit StateLock(const std::wstring& gameDir, DWORD waitMs = kDefaultWaitMs) {
         std::wstring name;
         if (!LockNameFor(gameDir, &name, &err_)) return;
-        mutex_ = CreateSharedMutex(name);
-        if (!mutex_) { err_ = GetLastError(); return; }
-        const DWORD w = WaitForSingleObject(mutex_, waitMs);
-        held_ = w == WAIT_OBJECT_0 || w == WAIT_ABANDONED;
-        abandoned_ = w == WAIT_ABANDONED;
-        if (!held_) err_ = w == WAIT_TIMEOUT ? WAIT_TIMEOUT : GetLastError();
+        Take(name, waitMs);
     }
+    StateLock(ByName, const std::wstring& lockName, DWORD waitMs) { Take(lockName, waitMs); }
     ~StateLock() {
         if (held_) ReleaseMutex(mutex_);
         if (mutex_) CloseHandle(mutex_);
@@ -183,25 +229,35 @@ public:
     bool held() const { return held_; }
     // the previous holder ended without releasing it: informational (re-read the state from disk, as every holder must)
     bool abandoned() const { return abandoned_; }
-    DWORD error() const { return err_; }  // why not held: WAIT_TIMEOUT, or the Win32 error
+    bool timedOut() const { return !held_ && err_ == WAIT_TIMEOUT; }
+    bool denied() const { return !held_ && err_ == ERROR_ACCESS_DENIED; }
+    DWORD error() const { return err_; }  // why not held: WAIT_TIMEOUT, ERROR_ACCESS_DENIED, or another Win32 error
 
 private:
+    void Take(const std::wstring& name, DWORD waitMs) {
+        mutex_ = CreateSharedMutex(name);
+        if (!mutex_) { err_ = GetLastError(); return; }
+        const DWORD w = WaitForSingleObject(mutex_, waitMs);
+        held_ = w == WAIT_OBJECT_0 || w == WAIT_ABANDONED;
+        abandoned_ = w == WAIT_ABANDONED;
+        if (!held_) err_ = w == WAIT_TIMEOUT ? WAIT_TIMEOUT : GetLastError();
+    }
     HANDLE mutex_ = nullptr;
     bool held_ = false, abandoned_ = false;
     DWORD err_ = 0;
 };
 
 // ---- the loaded protocol ------------------------------------------------------------------------------------------
-constexpr const wchar_t* kLoadedPrefix = L"Global\\WrongGPU-loaded-";
-// The marker alone (held open, never owned). Use it through LoadedRegistration, which takes the state lock around it.
+// The marker alone (held open, never owned). Games use it through LoadedRegistration.
 class LoadedMarker {
 public:
     explicit LoadedMarker(const std::wstring& gameDir) {
         std::wstring name;
         if (!NameFor(kLoadedPrefix, gameDir, &name, &err_)) return;
-        handle_ = CreateSharedMutex(name);
-        if (!handle_) err_ = GetLastError();
+        Open(name);
     }
+    struct ByName {};
+    LoadedMarker(ByName, const std::wstring& markerName) { Open(markerName); }
     ~LoadedMarker() { if (handle_) CloseHandle(handle_); }
     LoadedMarker(const LoadedMarker&) = delete;
     LoadedMarker& operator=(const LoadedMarker&) = delete;
@@ -209,6 +265,10 @@ public:
     DWORD error() const { return err_; }
 
 private:
+    void Open(const std::wstring& name) {
+        handle_ = CreateSharedMutex(name);
+        if (!handle_) err_ = GetLastError();
+    }
     HANDLE handle_ = nullptr;
     DWORD err_ = 0;
 };
@@ -218,9 +278,18 @@ inline const char* GameUseWords(GameUse u) {
     return u == GameUse::NotRunning ? "not running" : u == GameUse::Running ? "the game is running with WrongGPU loaded"
                                                                             : "WrongGPU could not tell whether the game is running";
 }
+// The marker of a known name: Running (it exists, also when it is not ours to open), NotRunning (it does not exist), Unknown.
+inline GameUse QueryMarker(const std::wstring& markerName, DWORD* err = nullptr) {
+    HANDLE h = OpenMutexW(SYNCHRONIZE, FALSE, markerName.c_str());
+    if (h) { CloseHandle(h); return GameUse::Running; }
+    const DWORD e = GetLastError();
+    if (err) *err = e;
+    if (e == ERROR_FILE_NOT_FOUND) return GameUse::NotRunning;
+    return e == ERROR_ACCESS_DENIED ? GameUse::Running : GameUse::Unknown;  // there but not ours to open: in use
+}
 // Whether a running process has WrongGPU loaded for the game folder gameDir. NotRunning ONLY when that is established: the
 // folder is gone (nothing can run from it), or its marker does not exist. Any error on the way is Unknown (*err). Never
-// creates the marker. Ask it under the state lock (OperationGuard does).
+// creates the marker.
 inline GameUse QueryGameUse(const std::wstring& gameDir, DWORD* err = nullptr) {
     std::wstring name;
     DWORD e = 0;
@@ -228,71 +297,106 @@ inline GameUse QueryGameUse(const std::wstring& gameDir, DWORD* err = nullptr) {
         if (err) *err = e;
         return e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND ? GameUse::NotRunning : GameUse::Unknown;
     }
-    HANDLE h = OpenMutexW(SYNCHRONIZE, FALSE, name.c_str());
-    if (h) { CloseHandle(h); return GameUse::Running; }
-    e = GetLastError();
-    if (err) *err = e;
-    if (e == ERROR_FILE_NOT_FOUND) return GameUse::NotRunning;
-    return e == ERROR_ACCESS_DENIED ? GameUse::Running : GameUse::Unknown;  // there but not ours to open: in use
+    return QueryMarker(name, err);
 }
 
-// The game's side: register under the state lock before any state is read. ok() false: run with the defaults and touch no
-// state this session (why() says what to log). Keep the object for as long as the module is loaded.
+// The game's side (see THE LOADED PROTOCOL above): the marker at once, then the state lock within the rest of the budget.
+// marker(): the game is visible to the launcher. state_ok(): the module may use the state (each use takes the lock again).
+// why(): for the log when either is false. Keep the object for as long as the module is loaded. Never throws; bounded by
+// budgetMs (at most kRegisterBudgetMs) in total; never from DllMain.
 class LoadedRegistration {
 public:
-    explicit LoadedRegistration(const std::wstring& gameDir, DWORD waitMs = kRegisterWaitMs) {
-        StateLock lock(gameDir, waitMs > kRegisterWaitMs ? kRegisterWaitMs : waitMs);
-        if (!lock.held()) {
-            err_ = lock.error();
-            why_ = err_ == WAIT_TIMEOUT ? "the game's state lock was not free in time (an uninstall, repair or update of WrongGPU is running)"
-                                        : "the game's state lock could not be taken";
+    explicit LoadedRegistration(const std::wstring& gameDir, DWORD budgetMs = kRegisterBudgetMs) {
+        if (budgetMs > kRegisterBudgetMs) budgetMs = kRegisterBudgetMs;
+        const ULONGLONG t0 = GetTickCount64();
+        std::wstring lockName;
+        if (!LockNameWithin(gameDir, budgetMs, &lockName, &err_)) {
+            why_ = err_ == WAIT_TIMEOUT ? "the game folder's identity could not be read in time (no marker, no state this session)"
+                                        : "the game folder's identity could not be read (no marker, no state this session)";
             return;
         }
-        marker_.reset(new LoadedMarker(gameDir));
-        if (!marker_->held()) {
-            err_ = marker_->error();
-            why_ = "the loaded marker could not be made";
+        try {
+            marker_.reset(new LoadedMarker(LoadedMarker::ByName{}, MarkerNameOf(lockName)));  // 1. visible at once, no wait
+        } catch (...) {
             marker_.reset();
         }
+        if (!marker_ || !marker_->held()) {
+            err_ = marker_ ? marker_->error() : ERROR_OUTOFMEMORY;
+            why_ = "the loaded marker could not be made (no state this session)";
+            marker_.reset();
+            return;
+        }
+        const ULONGLONG spent = GetTickCount64() - t0;
+        StateLock lock(StateLock::ByName{}, lockName, spent >= budgetMs ? 0 : static_cast<DWORD>(budgetMs - spent));  // 2. bounded
+        if (!lock.held()) {
+            err_ = lock.error();
+            why_ = lock.timedOut() ? "the game's state lock was not free in time (an uninstall, repair or update of WrongGPU is running): the defaults, no state this session"
+                                   : lock.denied() ? "the game's state lock may not be used (access denied): the defaults, no state this session"
+                                                   : "the game's state lock could not be taken: the defaults, no state this session";
+            return;
+        }
+        stateOk_ = true;
     }
-    bool ok() const { return marker_ != nullptr; }
-    const char* why() const { return why_; }  // "" when ok
+    bool marker() const { return marker_ != nullptr; }
+    bool state_ok() const { return stateOk_; }
+    bool ok() const { return stateOk_; }      // (state_ok)
+    const char* why() const { return why_; }  // "" when both are fine
     DWORD error() const { return err_; }
 
 private:
     std::unique_ptr<LoadedMarker> marker_;
+    bool stateOk_ = false;
     const char* why_ = "";
     DWORD err_ = 0;
 };
 
-// The launcher's side: hold for the whole uninstall, repair or update. Ok only when the lock is held and no game uses WrongGPU.
-enum class GuardResult { Ok, Busy, GameRunning, Unknown };
+// The launcher's side: hold for the whole uninstall, repair or update, and call Recheck() before each destructive step.
+// Ok only when the lock is held and no game uses WrongGPU. The lock: a timeout is Busy, access denied is LockDenied.
+enum class GuardResult { Ok, Busy, LockDenied, GameRunning, Unknown };
+inline const char* GuardWords(GuardResult r) {
+    switch (r) {
+        case GuardResult::Ok: return "";
+        case GuardResult::Busy: return "another WrongGPU program is changing this game's WrongGPU state right now; try again in a moment";
+        case GuardResult::LockDenied: return "WrongGPU may not use this game's state lock (access denied); run the launcher's repair as administrator";
+        case GuardResult::GameRunning: return "the game is running with WrongGPU loaded; close the game first";
+        case GuardResult::Unknown: return "WrongGPU could not tell whether the game is running; close the game and try again";
+    }
+    return "?";
+}
 class OperationGuard {
 public:
-    explicit OperationGuard(const std::wstring& gameDir, DWORD waitMs = kDefaultWaitMs) : lock_(gameDir, waitMs) {
-        if (!lock_.held()) {
-            err_ = lock_.error();
-            const PathState s = DirectoryState(gameDir);
-            result_ = s == PathState::Missing ? GuardResult::Ok : err_ == WAIT_TIMEOUT ? GuardResult::Busy : GuardResult::Unknown;  // (gone: nothing to guard)
+    explicit OperationGuard(const std::wstring& gameDir, DWORD waitMs = kDefaultWaitMs) {
+        std::wstring lockName;
+        if (!LockNameFor(gameDir, &lockName, &err_)) {
+            const bool gone = err_ == ERROR_FILE_NOT_FOUND || err_ == ERROR_PATH_NOT_FOUND;
+            result_ = gone ? GuardResult::Ok : GuardResult::Unknown;  // gone: nothing to guard; any other lookup error: Unknown
             return;
         }
-        const GameUse u = QueryGameUse(gameDir, &err_);
-        result_ = u == GameUse::NotRunning ? GuardResult::Ok : u == GameUse::Running ? GuardResult::GameRunning : GuardResult::Unknown;
+        markerName_ = MarkerNameOf(lockName);
+        lock_.reset(new StateLock(StateLock::ByName{}, lockName, waitMs));
+        if (!lock_->held()) {
+            err_ = lock_->error();
+            result_ = lock_->timedOut() ? GuardResult::Busy : lock_->denied() ? GuardResult::LockDenied : GuardResult::Unknown;
+            return;
+        }
+        Recheck();
     }
+    // Before each destructive step: the marker again (no file-system call). A game that started meanwhile turns the result to
+    // GameRunning (or Unknown); the caller stops there. Returns result().
+    GuardResult Recheck() {
+        if (!lock_ || !lock_->held()) return result_;
+        const GameUse u = QueryMarker(markerName_, &err_);
+        result_ = u == GameUse::NotRunning ? GuardResult::Ok : u == GameUse::Running ? GuardResult::GameRunning : GuardResult::Unknown;
+        return result_;
+    }
+    bool ok() const { return result_ == GuardResult::Ok; }
     GuardResult result() const { return result_; }
     DWORD error() const { return err_; }
-    const char* words() const {
-        switch (result_) {
-            case GuardResult::Ok: return "";
-            case GuardResult::Busy: return "another WrongGPU program is changing this game's WrongGPU state right now; try again in a moment";
-            case GuardResult::GameRunning: return "the game is running with WrongGPU loaded; close the game first";
-            case GuardResult::Unknown: return "WrongGPU could not tell whether the game is running; close the game and try again";
-        }
-        return "?";
-    }
+    const char* words() const { return GuardWords(result_); }
 
 private:
-    StateLock lock_;
+    std::unique_ptr<StateLock> lock_;
+    std::wstring markerName_;
     GuardResult result_ = GuardResult::Unknown;
     DWORD err_ = 0;
 };
@@ -324,55 +428,70 @@ inline bool ReadBytes(const std::wstring& path, std::string* out, bool* missing 
     return ok;
 }
 
-// The atomic replace described above. false: the file is as it was; *err the error of the step that failed
-// (ERROR_FILE_TOO_LARGE: over kMaxStateBytes; ERROR_WRITE_FAULT: a short write). *tempLeft: a temporary file that could not
-// be deleted after the failure ("" when none).
-inline bool WriteAtomic(const std::wstring& path, const std::string& bytes, DWORD* err = nullptr, std::wstring* tempLeft = nullptr) {
+/// The outcome of WriteAtomic: ok, or the first failure (error) AND every secondary failure: a close that failed after an
+// earlier failure (closeError), a cleanup that failed (cleanupError, with the file left in tempLeft). words() says all of them.
+struct WriteResult {
+    bool ok = false;
+    DWORD error = 0;         // the first failure (ERROR_FILE_TOO_LARGE: over kMaxStateBytes; ERROR_WRITE_FAULT: a short write)
+    DWORD closeError = 0;    // the temporary file's close failed (also after an earlier failure)
+    DWORD cleanupError = 0;  // the temporary file could not be deleted after the failure
+    std::wstring tempLeft;   // ... and is still there under this name
+    std::string words() const {
+        if (ok) return "written";
+        std::string w = "not written (error " + std::to_string(error) + ")";
+        if (closeError && closeError != error) w += "; closing the temporary file also failed (error " + std::to_string(closeError) + ")";
+        if (cleanupError) w += "; the temporary file could not be deleted (error " + std::to_string(cleanupError) + "), it is left next to the file";
+        return w;
+    }
+};
+
+// The atomic replace described above. On a failure the file is as it was.
+inline WriteResult WriteAtomic(const std::wstring& path, const std::string& bytes) {
     static volatile LONG counter = 0;
-    if (tempLeft) tempLeft->clear();
-    if (bytes.size() > kMaxStateBytes) { if (err) *err = ERROR_FILE_TOO_LARGE; return false; }
+    WriteResult r;
+    if (bytes.size() > kMaxStateBytes) { r.error = ERROR_FILE_TOO_LARGE; return r; }
     const std::wstring target = ExtendedPath(path);
-    DWORD e = 0;
     for (int attempt = 0; attempt < 16; ++attempt) {
         const std::wstring tmp = target + kTempMark + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(InterlockedIncrement(&counter));
         HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (h == INVALID_HANDLE_VALUE) {
-            e = GetLastError();
-            if (e == ERROR_FILE_EXISTS || e == ERROR_ALREADY_EXISTS) continue;
-            break;
+            r.error = GetLastError();
+            if (r.error == ERROR_FILE_EXISTS || r.error == ERROR_ALREADY_EXISTS) continue;
+            return r;
         }
         bool ok = true;
         for (size_t done = 0; ok && done < bytes.size();) {
             const DWORD want = static_cast<DWORD>(bytes.size() - done < kChunk ? bytes.size() - done : kChunk);
             DWORD put = 0;
-            if (Faulted("write")) { ok = false; e = ERROR_WRITE_FAULT; }
-            else if (!WriteFile(h, bytes.data() + done, want, &put, nullptr)) { ok = false; e = GetLastError(); }
-            else if (put != want) { ok = false; e = ERROR_WRITE_FAULT; }  // a short write: always this error
+            if (Faulted("write")) { ok = false; r.error = ERROR_WRITE_FAULT; }
+            else if (!WriteFile(h, bytes.data() + done, want, &put, nullptr)) { ok = false; r.error = GetLastError(); }
+            else if (put != want) { ok = false; r.error = ERROR_WRITE_FAULT; }  // a short write: always this error
             else done += put;
         }
         if (ok) {
-            if (Faulted("flush")) { ok = false; e = ERROR_WRITE_FAULT; }
-            else if (!FlushFileBuffers(h)) { ok = false; e = GetLastError(); }
+            if (Faulted("flush")) { ok = false; r.error = ERROR_WRITE_FAULT; }
+            else if (!FlushFileBuffers(h)) { ok = false; r.error = GetLastError(); }
         }
-        if (Faulted("close")) {
-            CloseHandle(h);  // (the handle is closed all the same; the step reports the failure)
-            if (ok) { ok = false; e = ERROR_WRITE_FAULT; }
-        } else if (!CloseHandle(h) && ok) {
-            ok = false;
-            e = GetLastError();
+        const bool faultClose = Faulted("close");
+        const BOOL closed = CloseHandle(h);  // (closed in every case; a failure is reported, also after an earlier one)
+        if (faultClose || !closed) {
+            r.closeError = faultClose ? ERROR_WRITE_FAULT : GetLastError();
+            if (ok) { ok = false; r.error = r.closeError; }
         }
         if (ok) {
-            if (Faulted("move")) { ok = false; e = ERROR_WRITE_FAULT; }
-            else if (!MoveFileExW(tmp.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) { ok = false; e = GetLastError(); }
+            if (Faulted("move")) { ok = false; r.error = ERROR_WRITE_FAULT; }
+            else if (!MoveFileExW(tmp.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) { ok = false; r.error = GetLastError(); }
         }
-        if (ok) return true;
-        if (Faulted("delete") || !DeleteFileW(tmp.c_str())) {
-            if (tempLeft) *tempLeft = tmp;  // deleted when possible; reported otherwise
+        if (ok) { r.ok = true; r.error = 0; return r; }
+        const bool faultDelete = Faulted("delete");
+        if (faultDelete || !DeleteFileW(tmp.c_str())) {  // deleted when possible; reported otherwise
+            r.cleanupError = faultDelete ? ERROR_WRITE_FAULT : GetLastError();
+            r.tempLeft = tmp;
         }
-        break;
+        return r;
     }
-    if (err) *err = e ? e : ERROR_FILE_EXISTS;
-    return false;
+    if (!r.error) r.error = ERROR_FILE_EXISTS;
+    return r;
 }
 
 // ---- settings.ini -------------------------------------------------------------------------------------------------
@@ -459,13 +578,14 @@ inline Settings ReadSettings(const std::wstring& gameDir) {
     return ParseSettings(text);
 }
 
-enum class SetResult { Ok, NoStateFolder, StateFolderUnknown, Busy, Unreadable, Invalid, AccessDenied, WriteFailed };
+enum class SetResult { Ok, NoStateFolder, StateFolderUnknown, Busy, LockDenied, Unreadable, Invalid, AccessDenied, WriteFailed };
 inline const char* SetResultWords(SetResult r) {
     switch (r) {
         case SetResult::Ok: return "saved";
         case SetResult::NoStateFolder: return "no WrongGPU state folder for this game (not installed by the launcher)";
         case SetResult::StateFolderUnknown: return "WrongGPU's state folder of this game could not be checked";
         case SetResult::Busy: return "another WrongGPU program kept the game's state lock";
+        case SetResult::LockDenied: return "WrongGPU may not use this game's state lock (access denied); run the launcher's repair as administrator";
         case SetResult::Unreadable: return "the settings file could not be read (left as it is)";
         case SetResult::Invalid: return "not a valid key or value";
         case SetResult::AccessDenied: return "WrongGPU can't write to the game folder; run the launcher's repair as administrator";
@@ -473,38 +593,52 @@ inline const char* SetResultWords(SetResult r) {
     }
     return "?";
 }
+// The outcome of SetSettings: the result, its Win32 error, and (a failed write) the write's secondary failures. words() says
+// everything a consumer must show, including a temporary file that could not be deleted.
+struct SetOutcome {
+    SetResult result = SetResult::Ok;
+    DWORD error = 0;
+    WriteResult write;  // the write's outcome when one was attempted (secondary close / cleanup failures)
+    bool ok() const { return result == SetResult::Ok; }
+    std::string words() const {
+        std::string w = SetResultWords(result);
+        if (result != SetResult::Ok && error && error != WAIT_TIMEOUT) w += " (error " + std::to_string(error) + ")";
+        if (write.closeError && write.closeError != write.error) w += "; closing the temporary file also failed (error " + std::to_string(write.closeError) + ")";
+        if (write.cleanupError) w += "; a temporary file could not be deleted (error " + std::to_string(write.cleanupError) + ") and is left in the state folder";
+        return w;
+    }
+};
 // The read-modify-write of settings.ini under the game's state lock: the file re-read from disk after the lock is taken, the
 // changes applied (a corrupt file starts empty; an unreadable one is never overwritten), written atomically. The state folder
-// is never created here. AccessDenied is its own result (the game folder is not writable for this process): consumers say
-// so and offer the launcher's elevated repair. *err: the Win32 error of a failure; *tempLeft as in WriteAtomic.
-inline SetResult SetSettings(const std::wstring& gameDir, const std::vector<std::pair<std::string, std::string>>& changes,
-                             DWORD waitMs = kDefaultWaitMs, DWORD* err = nullptr, std::wstring* tempLeft = nullptr) {
-    for (const auto& c : changes) if (!ValidKey(c.first) || !ValidValue(c.second)) return SetResult::Invalid;
+// is never created here. Distinct results for a consumer to show: AccessDenied (the game folder is not writable for this
+// process) and LockDenied (the lock may not be opened) both point to the launcher's elevated repair; Busy is contention.
+inline SetOutcome SetSettings(const std::wstring& gameDir, const std::vector<std::pair<std::string, std::string>>& changes, DWORD waitMs = kDefaultWaitMs) {
+    SetOutcome o;
+    auto fail = [&](SetResult r, DWORD e) { o.result = r; o.error = e; return o; };
+    for (const auto& c : changes) if (!ValidKey(c.first) || !ValidValue(c.second)) return fail(SetResult::Invalid, 0);
     DWORD e = 0;
     switch (DirectoryState(StateDirOf(gameDir), &e)) {
         case PathState::Present: break;
-        case PathState::Missing: return SetResult::NoStateFolder;
-        case PathState::Unknown: if (err) *err = e; return e == ERROR_ACCESS_DENIED ? SetResult::AccessDenied : SetResult::StateFolderUnknown;
+        case PathState::Missing: return fail(SetResult::NoStateFolder, 0);
+        case PathState::Unknown: return fail(e == ERROR_ACCESS_DENIED ? SetResult::AccessDenied : SetResult::StateFolderUnknown, e);
     }
     StateLock lock(gameDir, waitMs);
-    if (!lock.held()) { if (err) *err = lock.error(); return SetResult::Busy; }
+    if (!lock.held()) return fail(lock.timedOut() ? SetResult::Busy : lock.denied() ? SetResult::LockDenied : SetResult::StateFolderUnknown, lock.error());
     std::string text;
     bool missing = false;
     Settings s;
     if (ReadBytes(SettingsPathOf(gameDir), &text, &missing, &e)) s = ParseSettings(text);
-    else if (!missing) { if (err) *err = e; return e == ERROR_ACCESS_DENIED ? SetResult::AccessDenied : SetResult::Unreadable; }
+    else if (!missing) return fail(e == ERROR_ACCESS_DENIED ? SetResult::AccessDenied : SetResult::Unreadable, e);
     if (s.corrupt) s = Settings();
     bool changed = !s.present;
     for (const auto& c : changes) {
         const std::string* now = Get(s, c.first);
         if (!now || *now != c.second) { Set(s, c.first, c.second); changed = true; }
     }
-    if (!changed) return SetResult::Ok;
-    if (!WriteAtomic(SettingsPathOf(gameDir), RenderSettings(s), &e, tempLeft)) {
-        if (err) *err = e;
-        return e == ERROR_ACCESS_DENIED ? SetResult::AccessDenied : SetResult::WriteFailed;
-    }
-    return SetResult::Ok;
+    if (!changed) return o;
+    o.write = WriteAtomic(SettingsPathOf(gameDir), RenderSettings(s));
+    if (!o.write.ok) return fail(o.write.error == ERROR_ACCESS_DENIED ? SetResult::AccessDenied : SetResult::WriteFailed, o.write.error);
+    return o;
 }
 
 }  // namespace wgstate
