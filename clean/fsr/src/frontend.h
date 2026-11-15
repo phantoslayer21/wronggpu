@@ -177,8 +177,7 @@ private:
     // One frame WrongGPU's upscaler cannot take (kBadFrameRun): the stand-in upscales it (`frame` usable) or AMD's FSR
     // does, and the context stays WrongGPU's; `amdOnly`: never the stand-in (perceptual colour).
     ffxReturnCode_t BadFrame(UpscaleContext& u, const ffxDispatchDescUpscale& d, uint64_t call, uint64_t frameIndex,
-                             const std::string& problem, WgFrame* frame, bool amdOnly, WgResult result,
-                             WgFrame* lastResortFrame = nullptr);  // B8: the mapped frame for the last resort when `frame` is null
+                             const std::string& problem, WgFrame* frame, bool amdOnly, WgResult result);
     UpscaleContext* FindOwn(ffxContext* context);
     std::string Name(ffxContext* context);  // "U1(standin)", "amd:0x..." for logs
     void Log(const std::string& line);
@@ -220,15 +219,18 @@ private:
     std::string FailureKey(const WgUpscalerBackend* backend, const UpscaleContext& u) const;
     void ResizeForFrame(UpscaleContext& u, WgFrame& frame, const std::string& tag);  // bug hunt H
     ffxReturnCode_t BrokenFrame(UpscaleContext& u, WgFrame& frame, const std::string& tag, uint64_t frameIndex);  // bug hunt F1
-    // B8, the refused-frame contract: what a frame gets is explicit. Order: WrongGPU's upscaler, the stand-in, AMD's FSR, and
-    // last the backend's own bilinear upscale of the game's colour (WG_FRAME_BILINEAR: the Converter's fallback pass, format
-    // aware, the full output, no HIP), with one warning line per context; the game is answered an error only when even that
-    // cannot be recorded (the reason is logged), and in an OptiScaler custom slot, whose host upscales on an error.
-    // LastResortFrame: the last step (true: the frame has an output). AfterAmdFailure: AMD's dispatch failed for this frame
-    // (rc): the stand-in, then the last resort; else rc. NoteAmdFailure: AMD's failures are logged once per context, counted.
-    bool LastResortFrame(UpscaleContext& u, const std::string& tag, uint64_t frameIndex, WgFrame* frame, const std::string& what);
-    ffxReturnCode_t AfterAmdFailure(UpscaleContext& u, const std::string& tag, uint64_t frameIndex, WgFrame* frame, ffxReturnCode_t rc);
+    // B8, the refused-frame contract: what a frame gets is explicit. When AMD's FSR and the stand-in have both failed for a frame,
+    // the error goes back with ONE line naming both failures (per context, also after an earlier success or a takeover; the count
+    // is logged when the context is destroyed), never silently. A non-linear sRGB / PQ frame is AMD's alone: it never reaches the
+    // stand-in, on any path. NoteAmdFailure: AMD's failures, logged once per context, counted. NoteBothFailed: the one line.
+    // StandInFrame: the stand-in upscales `frame` (false: why not, in *why). AfterAmdFailure: AMD's dispatch failed for this frame
+    // (rc): the stand-in (unless `perceptual`, or in OptiScaler's custom slot, whose host upscales on an error), else rc.
     void NoteAmdFailure(UpscaleContext& u, const std::string& tag, uint64_t frameIndex, ffxReturnCode_t rc);
+    void NoteBothFailed(UpscaleContext& u, const std::string& tag, uint64_t frameIndex, const std::string& amdWhy,
+                        const std::string& standInWhy);
+    bool StandInFrame(UpscaleContext& u, WgFrame& frame, std::string* why);
+    ffxReturnCode_t AfterAmdFailure(UpscaleContext& u, const std::string& tag, uint64_t frameIndex, WgFrame* frame,
+                                    ffxReturnCode_t rc, bool perceptual, const std::string& noFrameWhy = std::string());
     void Fail(UpscaleContext& u, const std::string& why, uint64_t call, bool error = true);
     // Platform::status for one upscale dispatch of `u` (frame: the mapped frame when WrongGPU upscaled it, else null).
     // amdReason: why AMD's FSR upscaled this one frame of a context that stays WrongGPU's (state Amd).

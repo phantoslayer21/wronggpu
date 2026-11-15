@@ -58,11 +58,9 @@ struct FrontEnd::UpscaleContext {
     bool amdLast = false;         // the last frame was one of AMD's FSR for such a frame (AMD's history continues)
     bool broken = false;          // the upscaler failed for good: it is not parked
     uint64_t brokenFrames = 0;    // bug hunt F1: frames since the upscaler failed for good (it is not called again)
-    uint64_t lastResortFrames = 0;    // B8: frames of this context the backend's bilinear upscale wrote (nothing else could)
-    uint64_t lastResortFailures = 0;  // B8: frames for which even that could not be recorded
-    uint64_t amdFailures = 0;         // B8: AMD FSR dispatches of this context that failed (logged once, counted)
-    uint64_t mapFailures = 0;         // B8: frames of a context handed to AMD that could not be mapped for the fallback
-    uint64_t amdCreateTries = 0;      // B8: per-frame attempts to make AMD's context for a bad frame (made at 1, 2, 3, 10, 100 ...)
+    uint64_t amdFailures = 0;     // B8: AMD FSR dispatches of this context that failed (logged once, counted)
+    uint64_t bothFailed = 0;      // B8: frames that neither AMD's FSR nor the stand-in could upscale (logged once, counted)
+    uint64_t amdCreateTries = 0;  // B8: per-frame attempts to make AMD's context for a bad frame (made at the 1st, 2nd, 3rd, 10th ...)
     uint32_t resizes = 0;         // bug hunt H: upscalers created again for the frames' output size (Config::maxOutputResizes)
     bool resizeFailed = false;    // ... and such a create failed: no more attempts for this context
     // Issue #58: upscalers and stand-ins a resize replaced. Command lists the game recorded before may still use them
@@ -953,85 +951,66 @@ bool FrontEnd::ActivateSplit(UpscaleContext& u, const WgUpscalerBackend* backend
     return false;
 }
 
-// B8: AMD's failures are logged once per context (the first, with its reason) and counted; the count is logged when the
-// context is destroyed.
+// B8: AMD's failures are logged once per context (the first), counted; the counts are logged when the context is destroyed.
 void FrontEnd::NoteAmdFailure(UpscaleContext& u, const std::string& tag, uint64_t frameIndex, ffxReturnCode_t rc) {
     if (++u.amdFailures == 1)
-        Log(tag + " WARNING U" + std::to_string(u.id) + ": frame " + std::to_string(frameIndex) + ": AMD FSR dispatch failed (" +
-            RcName(rc) + "); this context's frames get the stand-in or the backend's bilinear upscale; its later AMD failures are counted, not logged");
+        Log(tag + " WARNING U" + std::to_string(u.id) + ": frame " + std::to_string(frameIndex) + ": AMD FSR dispatch failed (" + RcName(rc) +
+            "); its later failures in this context are counted, not logged");
 }
 
-// B8: the last step of the refused-frame contract. Nothing upscaled this frame (the upscaler refused it, the stand-in could
-// not be made or failed, AMD's FSR is missing or failed): the backend writes the output itself, its own bilinear upscale of
-// the game's colour (WG_FRAME_BILINEAR: format aware, the full output size, no HIP, the Converter pass the backend uses for
-// a frame whose network failed), and the game gets FFX_API_RETURN_OK with one warning line per context (the count at the
-// end). False when that cannot be done (the reason is logged for the first such frame, whatever came before: a failure after
-// earlier successes is reported too) and in OptiScaler's custom slot, whose host upscales a frame the upscaler fails.
-bool FrontEnd::LastResortFrame(UpscaleContext& u, const std::string& tag, uint64_t frameIndex, WgFrame* frame, const std::string& what) {
-    if (config_.customSlot) return false;
-    std::string why;
-    bool ok = false;
-    if (!frame) {
-        why = "the frame's inputs could not be mapped";
-    } else if (!u.backend || !u.upscaler) {
-        why = "WrongGPU's upscaler is not available for this context";
-    } else if (!(BackendFlags(u.backend) & WG_BACKEND_BILINEAR_FRAME)) {
-        why = "the upscaler cannot write a frame without the network";
-    } else {
-        WgFrame f = *frame;
-        if (!UsableForStandIn(f)) {
-            why = "the frame has no command list, colour texture or output texture";
-        } else {
-            f.flags = WG_FRAME_BILINEAR;
-            AdaptFrame(u.backend, f);
-            const WgResult r = u.backend->dispatch(u.upscaler, &f);
-            ok = r == WG_OK;
-            if (!ok) why = std::string("the backend's bilinear upscale answered ") + WgResultText(r);
+// B8: the one line when neither AMD's FSR nor the stand-in could upscale a frame: it names both failures; the error goes back to
+// the game for this frame and the later such frames of the context (counted, the count is logged at the context's end).
+void FrontEnd::NoteBothFailed(UpscaleContext& u, const std::string& tag, uint64_t frameIndex, const std::string& amdWhy,
+                              const std::string& standInWhy) {
+    if (++u.bothFailed == 1)
+        Log(tag + " ERROR U" + std::to_string(u.id) + ": frame " + std::to_string(frameIndex) + ": no upscaler could take this frame: AMD FSR " +
+            amdWhy + "; the stand-in " + standInWhy +
+            "; the error goes back to the game for this frame and the later such frames of this context (counted, logged once)");
+}
+
+// B8: the stand-in upscales `frame` (cut to its textures); false with the reason in *why.
+bool FrontEnd::StandInFrame(UpscaleContext& u, WgFrame& frame, std::string* why) {
+    if (!UsableForStandIn(frame)) {
+        *why = "cannot take this frame (no command list, colour texture or output texture)";
+        return false;
+    }
+    if (!u.fallbackBackend && platform_.standIn) u.fallbackBackend = platform_.standIn(config_);
+    if (!u.fallbackBackend || u.fallbackBackend == u.backend) {
+        *why = "is not available";
+        return false;
+    }
+    if (!u.fallback) {
+        WgCreateInfo info = u.createInfo;
+        AdaptCreateInfo(u.fallbackBackend, nullptr, info);
+        if (u.fallbackBackend->create(&info, &u.fallback) != WG_OK) {
+            u.fallback = nullptr;
+            *why = "could not be created";
+            return false;
         }
     }
-    if (ok) {
-        if (++u.lastResortFrames == 1)
-            Log(tag + " WARNING U" + std::to_string(u.id) + ": frame " + std::to_string(frameIndex) + ": " + what +
-                "; nothing upscaled it: the backend's bilinear upscale of the game's colour wrote the output (later such frames of this "
-                "context are counted, not logged)");
-        Report(u, UpscaleState::Failed, frame, "frame upscaled bilinearly by the backend, nothing else could: " + what);
-        return true;
+    AdaptFrame(u.fallbackBackend, frame);
+    const WgResult r = u.fallbackBackend->dispatch(u.fallback, &frame);
+    if (r != WG_OK) {
+        *why = std::string("dispatch failed (") + WgResultText(r) + ")";
+        return false;
     }
-    const uint64_t n = ++u.lastResortFailures;
-    if (n == 1 || ((n >= 10) && LogPoint(n)))
-        Log(tag + " ERROR U" + std::to_string(u.id) + ": frame " + std::to_string(frameIndex) + ": " + what +
-            "; nothing upscaled it and the backend's bilinear upscale is not possible (" + why + "), " + std::to_string(n) +
-            " such frame(s) in this context");
-    return false;
+    u.resetNext = true;
+    if (platform_.afterDispatch) platform_.afterDispatch(frame, true);
+    Report(u, UpscaleState::StandIn, &frame);
+    return true;
 }
 
-// B8: AMD's FSR was asked for this frame and its dispatch failed (rc). The stand-in is tried, then the last resort; if both
-// fail (or in a custom slot) AMD's own error goes back, as before.
-ffxReturnCode_t FrontEnd::AfterAmdFailure(UpscaleContext& u, const std::string& tag, uint64_t frameIndex, WgFrame* frame, ffxReturnCode_t rc) {
+// B8: AMD's FSR was asked for this frame and its dispatch failed (rc).
+ffxReturnCode_t FrontEnd::AfterAmdFailure(UpscaleContext& u, const std::string& tag, uint64_t frameIndex, WgFrame* frame, ffxReturnCode_t rc,
+                                          bool perceptual, const std::string& noFrameWhy) {
     NoteAmdFailure(u, tag, frameIndex, rc);
-    const std::string what = "AMD FSR failed (" + std::string(RcName(rc)) + ")";
-    if (frame && !config_.customSlot) {
-        WgFrame f = *frame;
-        if (UsableForStandIn(f)) {
-            if (!u.fallbackBackend && platform_.standIn) u.fallbackBackend = platform_.standIn(config_);
-            if (u.fallbackBackend && u.fallbackBackend != u.backend) {
-                if (!u.fallback) {
-                    WgCreateInfo info = u.createInfo;
-                    AdaptCreateInfo(u.fallbackBackend, nullptr, info);
-                    if (u.fallbackBackend->create(&info, &u.fallback) != WG_OK) u.fallback = nullptr;
-                }
-                AdaptFrame(u.fallbackBackend, f);
-                if (u.fallback && u.fallbackBackend->dispatch(u.fallback, &f) == WG_OK) {
-                    u.resetNext = true;
-                    if (platform_.afterDispatch) platform_.afterDispatch(f, true);
-                    Report(u, UpscaleState::StandIn, &f);
-                    return FFX_API_RETURN_OK;
-                }
-            }
-        }
-        u.resetNext = true;
-    }
-    if (LastResortFrame(u, tag, frameIndex, frame, what)) return FFX_API_RETURN_OK;
+    if (config_.customSlot) return rc;  // the host upscales on the error
+    std::string why;
+    if (perceptual) why = "is not used for non-linear (sRGB / PQ) input";
+    else if (!frame) why = noFrameWhy.empty() ? "has no mapped frame" : "has no mapped frame (" + noFrameWhy + ")";
+    else if (StandInFrame(u, *frame, &why)) return FFX_API_RETURN_OK;
+    NoteBothFailed(u, tag, frameIndex, "dispatch failed (" + std::string(RcName(rc)) + ")", why);
+    Report(u, UpscaleState::Failed, nullptr, "AMD FSR dispatch failed (" + std::string(RcName(rc)) + "); the stand-in " + why);
     return rc;
 }
 
@@ -1060,7 +1039,6 @@ ffxReturnCode_t FrontEnd::BrokenFrame(UpscaleContext& u, WgFrame& frame, const s
             }
         }
     }
-    if (LastResortFrame(u, tag, frameIndex, &frame, what)) return FFX_API_RETURN_OK;  // B8: never no output
     if (LogPoint(n)) Log(tag + " ERROR U" + std::to_string(u.id) + ": " + what + " -> ERROR_RUNTIME_ERROR");
     Report(u, UpscaleState::Failed, nullptr, u.failReason + "; AMD fallback is unavailable");
     return FFX_API_RETURN_ERROR_RUNTIME_ERROR;
@@ -1280,10 +1258,9 @@ ffxReturnCode_t FrontEnd::DestroyContext(ffxContext* context, const ffxAllocatio
                 if (park) u->amd = nullptr;
             }
         }
-        if (u->lastResortFrames || u->lastResortFailures || u->amdFailures || u->mapFailures)
-            Log(tag + " note U" + std::to_string(u->id) + ": fallback counts: the backend's bilinear upscale wrote " + std::to_string(u->lastResortFrames) +
-                " frame(s) as the last resort, " + std::to_string(u->lastResortFailures) + " frame(s) had no last resort, AMD FSR failed " +
-                std::to_string(u->amdFailures) + " time(s), " + std::to_string(u->mapFailures) + " frame(s) could not be mapped for the fallback");
+        if (u->bothFailed || u->amdFailures)
+            Log(tag + " note U" + std::to_string(u->id) + ": fallback counts: AMD FSR failed " + std::to_string(u->amdFailures) + " time(s), " +
+                std::to_string(u->bothFailed) + " frame(s) could be upscaled by neither AMD FSR nor the stand-in (the error went back to the game)");
         Log(tag + " -> " + RcName(rc) + " (U" + std::to_string(u->id) + " destroyed after " + std::to_string(u->dispatches) +
             " dispatches" + (pending && !pending->Done() ? "; its upscaler is still starting and is destroyed when it has" : "") +
             (park ? "; its upscaler is parked for " + std::to_string(config_.contextParkMs) +
@@ -1644,19 +1621,13 @@ ffxReturnCode_t FrontEnd::DispatchUpscale(UpscaleContext& u, const ffxDispatchDe
     const std::string tag = "#" + std::to_string(call);
     const uint64_t frameIndex = u.dispatches++;
     const bool log = ShouldLogDispatch(frameIndex);
-    WgFrame frame{};
+    WgFrame frame;
     std::string problem, notes;
     if (d.flags & (FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB | FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_PQ)) {
         // Perceptual input goes to AMD's FSR (spec 20, ANSWERS item 5): this frame, and the context for good when the
         // game keeps flagging it (kBadFrameRun).
-        // B8: the frame is mapped for the last resort (the stand-in is skipped for perceptual input, the backend's bilinear
-        // upscale is colour-space neutral), so that an unavailable or failing AMD FSR does not leave the frame without output
-        WgFrame resortFrame;
-        std::string resortProblem, resortNotes;
-        const bool resortMapped =
-            MapDispatch(d, u.create, config_, platform_.resourceInfo, u.map, frameIndex, resortFrame, resortProblem, resortNotes);
         return BadFrame(u, d, call, frameIndex, "non-linear (sRGB/PQ) colour flagged by the game: AMD FSR handles it", nullptr, true,
-                        WG_ERROR_UNSUPPORTED, resortMapped ? &resortFrame : nullptr);
+                        WG_ERROR_UNSUPPORTED);
     }
     const bool mapped = MapDispatch(d, u.create, config_, platform_.resourceInfo, u.map, frameIndex, frame, problem, notes);
     const bool resetAsked = frame.reset != 0;
@@ -1684,7 +1655,7 @@ ffxReturnCode_t FrontEnd::DispatchUpscale(UpscaleContext& u, const ffxDispatchDe
                         Report(u, UpscaleState::Amd, nullptr, "AMD FSR dispatch failed: " + std::string(RcName(rc)));
                         return rc;
                     }
-                    return AfterAmdFailure(u, tag, frameIndex, &frame, rc);  // B8: the stand-in, then the pass-through
+                    return AfterAmdFailure(u, tag, frameIndex, &frame, rc, false);  // B8
                 }
                 Log(tag + " note U" + std::to_string(u.id) + ": AMD FSR is not available for this context; the stand-in upscales its frames");
             }
@@ -1735,7 +1706,7 @@ ffxReturnCode_t FrontEnd::DispatchUpscale(UpscaleContext& u, const ffxDispatchDe
                     Report(u, UpscaleState::Amd, nullptr, "AMD FSR dispatch failed: " + std::string(RcName(rc)));
                     return rc;
                 }
-                return AfterAmdFailure(u, tag, frameIndex, &frame, rc);  // B8: the stand-in, then the pass-through
+                return AfterAmdFailure(u, tag, frameIndex, &frame, rc, false);  // B8
             }
             Log(tag + " note U" + std::to_string(u.id) + ": AMD FSR is not available for this context; the stand-in upscales the frames the upscaler does not take");
         }
@@ -1779,21 +1750,17 @@ ffxReturnCode_t FrontEnd::DispatchUpscale(UpscaleContext& u, const ffxDispatchDe
             Report(u, UpscaleState::Amd, nullptr, u.failReason + "; AMD FSR dispatch failed: " + RcName(rc));
             return rc;
         }
-        return AfterAmdFailure(u, tag, frameIndex, mapped ? &frame : nullptr, rc);  // B8
+        return AfterAmdFailure(u, tag, frameIndex, mapped ? &frame : nullptr, rc, false, mapped ? std::string() : problem);  // B8
     }
-    if (mapped && LastResortFrame(u, tag, frameIndex, &frame, "WrongGPU's upscaler failed (" + u.failReason + ") and AMD FSR is not available"))
-        return FFX_API_RETURN_OK;  // B8: never no output
     Report(u, UpscaleState::Failed, nullptr, u.failReason + "; AMD fallback is unavailable");
     Log(tag + " -> ERROR_RUNTIME_ERROR");
     return r == WG_ERROR_PARAMETER ? FFX_API_RETURN_ERROR_PARAMETER : FFX_API_RETURN_ERROR_RUNTIME_ERROR;
 }
 
 ffxReturnCode_t FrontEnd::BadFrame(UpscaleContext& u, const ffxDispatchDescUpscale& d, uint64_t call, uint64_t frameIndex,
-                                   const std::string& problem, WgFrame* frame, bool amdOnly, WgResult result,
-                                   WgFrame* lastResortFrame) {
+                                   const std::string& problem, WgFrame* frame, bool amdOnly, WgResult result) {
     const std::string tag = "#" + std::to_string(call);
     const std::string what = "frame " + std::to_string(frameIndex) + ": " + problem;
-    WgFrame* const resort = frame ? frame : lastResortFrame;  // B8: a frame the last resort can use
     const uint32_t run = ++u.badRun;
     if (!frame && d.commandList && platform_.noteDispatch) platform_.noteDispatch(d.commandList, nullptr);
     if (run == kBadFrameRun) {
@@ -1809,30 +1776,20 @@ ffxReturnCode_t FrontEnd::BadFrame(UpscaleContext& u, const ffxDispatchDescUpsca
                 Report(u, UpscaleState::Amd, nullptr, u.failReason + "; AMD FSR dispatch failed: " + RcName(rc));
                 return rc;
             }
-            return AfterAmdFailure(u, tag, frameIndex, frame, rc);  // B8
+            return AfterAmdFailure(u, tag, frameIndex, frame, rc, amdOnly);  // B8: a perceptual frame never reaches the stand-in
         }
     }
     u.resetNext = true;  // this frame goes past the upscaler: its next one starts without history
-    // 1. The stand-in, on the frame as it is or cut to its textures.
-    if (!amdOnly && frame && UsableForStandIn(*frame)) {
-        if (!u.fallbackBackend && platform_.standIn) u.fallbackBackend = platform_.standIn(config_);
-        if (u.fallbackBackend && u.fallbackBackend != u.backend) {
-            if (!u.fallback) {
-                WgCreateInfo info = u.createInfo;
-                AdaptCreateInfo(u.fallbackBackend, nullptr, info);
-                if (u.fallbackBackend->create(&info, &u.fallback) != WG_OK) u.fallback = nullptr;
-            }
-            AdaptFrame(u.fallbackBackend, *frame);
-            if (u.fallback && u.fallbackBackend->dispatch(u.fallback, frame) == WG_OK) {
-                if (run == 1)
-                    Log(tag + " note U" + std::to_string(u.id) + ": " + what + ": the stand-in upscales this frame (" +
-                        std::to_string(frame->render_width) + "x" + std::to_string(frame->render_height) + "); the context stays WrongGPU's (AMD FSR takes it over after " +
-                        std::to_string(kBadFrameRun) + " such frames in a row)");
-                u.amdLast = false;
-                if (platform_.afterDispatch) platform_.afterDispatch(*frame, true);
-                Report(u, UpscaleState::StandIn, frame);
-                return FFX_API_RETURN_OK;
-            }
+    // 1. The stand-in, on the frame as it is or cut to its textures (not for non-linear input: that is AMD's alone).
+    std::string standWhy = amdOnly ? "is not used for non-linear (sRGB / PQ) input" : "has no mapped frame";
+    if (!amdOnly && frame) {
+        if (StandInFrame(u, *frame, &standWhy)) {
+            if (run == 1)
+                Log(tag + " note U" + std::to_string(u.id) + ": " + what + ": the stand-in upscales this frame (" +
+                    std::to_string(frame->render_width) + "x" + std::to_string(frame->render_height) + "); the context stays WrongGPU's (AMD FSR takes it over after " +
+                    std::to_string(kBadFrameRun) + " such frames in a row)");
+            u.amdLast = false;
+            return FFX_API_RETURN_OK;
         }
     }
     // 2. AMD's FSR, for this frame only: the context made from the saved create parameters, kept for later ones.
@@ -1846,22 +1803,16 @@ ffxReturnCode_t FrontEnd::BadFrame(UpscaleContext& u, const ffxDispatchDescUpsca
         else if (run == 1)
             Log(tag + " note U" + std::to_string(u.id) + ": " + what + ": AMD FSR upscales this frame -> " + RcName(rc) +
                 "; the context stays WrongGPU's (AMD FSR takes it over after " + std::to_string(kBadFrameRun) + " such frames in a row)");
-        if (rc == FFX_API_RETURN_OK) {
-            Report(u, UpscaleState::Amd, nullptr, what + "; AMD FSR dispatch failed: " + RcName(rc), what);
-            return rc;
+        if (rc != FFX_API_RETURN_OK) {
+            u.amdLast = false;
+            NoteBothFailed(u, tag, frameIndex, "dispatch failed (" + std::string(RcName(rc)) + ")", standWhy);  // B8: the stand-in came first
         }
-        u.amdLast = false;
-        if (LastResortFrame(u, tag, frameIndex, resort, what + "; AMD FSR failed (" + RcName(rc) + ")"))
-            return FFX_API_RETURN_OK;  // B8: the stand-in was tried first (step 1), now the backend's bilinear upscale
-        Report(u, UpscaleState::Failed, nullptr, what + "; AMD FSR dispatch failed: " + RcName(rc), what);
+        Report(u, rc == FFX_API_RETURN_OK ? UpscaleState::Amd : UpscaleState::Failed, nullptr,
+               what + "; AMD FSR dispatch failed: " + RcName(rc), what);
         return rc;
     }
-    // 3. Nobody could upscale it: the backend's bilinear upscale of the game's colour (B8), else the frame fails, the context stays.
-    if (LastResortFrame(u, tag, frameIndex, resort, what)) return FFX_API_RETURN_OK;
-    if (run == 1 || ShouldLogDispatch(frameIndex))
-        Log(tag + (amdOnly ? " note U" : " ERROR U") + std::to_string(u.id) + ": " + what + ": no upscaler for this frame (" +
-            (config_.fallbackToAmd ? "AMD FSR is not available" : "fallback_to_amd = 0") + ") -> " +
-            (result == WG_ERROR_PARAMETER ? "ERROR_PARAMETER" : "ERROR_RUNTIME_ERROR"));
+    // 3. Nobody: the frame fails, the context stays. B8: one line naming both failures (AMD's FSR was never reached here).
+    NoteBothFailed(u, tag, frameIndex, config_.fallbackToAmd ? "is not available" : "is off (fallback_to_amd = 0)", standWhy);
     Report(u, UpscaleState::Failed, nullptr, what + "; AMD fallback is unavailable");
     return result == WG_ERROR_PARAMETER ? FFX_API_RETURN_ERROR_PARAMETER : FFX_API_RETURN_ERROR_RUNTIME_ERROR;
 }
@@ -1997,19 +1948,17 @@ ffxReturnCode_t FrontEnd::Dispatch(ffxContext* context, const ffxDispatchDescHea
         if (log || (rc != FFX_API_RETURN_OK && !takenOver)) Log(tag + " -> " + RcName(rc) + " (forwarded to AMD)");
         if (desc->type == FFX_API_DISPATCH_DESC_TYPE_UPSCALE) {
             if (rc != FFX_API_RETURN_OK && takenOver) {
-                // B8: a context WrongGPU handed to AMD's FSR whose AMD dispatch fails: the stand-in, then the backend's bilinear
-                // upscale (a context that was AMD's from the start is the game's own FSR and keeps AMD's answer). The failure is
-                // logged once per context (NoteAmdFailure), a frame that cannot be mapped for the fallback says why, once
+                // B8: a context WrongGPU handed to AMD's FSR whose AMD dispatch fails: the stand-in for an ordinary frame, never for
+                // a non-linear (sRGB / PQ) one; both failing is the one line naming both (a context that was AMD's from the start
+                // is the game's own FSR and keeps AMD's answer)
+                const auto& ud = *reinterpret_cast<const ffxDispatchDescUpscale*>(desc);
+                const bool perceptual = (ud.flags & (FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB | FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_PQ)) != 0;
+                const uint64_t frameIndex = u->dispatches - 1;
                 WgFrame frame{};
                 std::string problem, notes;
-                const uint64_t frameIndex = u->dispatches - 1;
-                if (MapDispatch(*reinterpret_cast<const ffxDispatchDescUpscale*>(desc), u->create, config_, platform_.resourceInfo,
-                                u->map, frameIndex, frame, problem, notes))
-                    return AfterAmdFailure(*u, tag, frameIndex, &frame, rc);
-                NoteAmdFailure(*u, tag, frameIndex, rc);
-                if (++u->mapFailures == 1)
-                    Log(tag + " ERROR U" + std::to_string(u->id) + ": frame " + std::to_string(frameIndex) +
-                        ": AMD FSR failed and the frame cannot be mapped for the fallback (" + problem + "); the error goes back to the game");
+                const bool mapped = !perceptual && MapDispatch(ud, u->create, config_, platform_.resourceInfo, u->map, frameIndex, frame,
+                                                               problem, notes);
+                return AfterAmdFailure(*u, tag, frameIndex, mapped ? &frame : nullptr, rc, perceptual, mapped ? std::string() : problem);
             }
             Report(*u, rc == FFX_API_RETURN_OK ? UpscaleState::Amd : UpscaleState::Failed, nullptr,
                    "AMD FSR dispatch failed: " + std::string(RcName(rc)));

@@ -244,7 +244,7 @@ bool Hook::RunStandIn(Context& c, const ffxDispatchDescUpscale& dispatch, const 
         }
         c.backend = backend;
     }
-    WgFrame frame{};
+    WgFrame frame;
     std::string problem, notes;
     const uint64_t index = c.frames;
     const bool mapped = MapDispatch(dispatch, c.create, config_, platform_.resourceInfo, c.map, index, frame, problem, notes);

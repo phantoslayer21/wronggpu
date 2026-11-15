@@ -146,16 +146,7 @@ typedef struct WgFrame {
                                         end's ExecuteCommandLists hook), or null; informational: the split needs no
                                         queue from the backend */
     uint32_t command_list_type;      /* D3D12_COMMAND_LIST_TYPE of command_list (0 = DIRECT, 2 = COMPUTE) */
-
-    /* version 2, after the first release: a front end that cannot know whether the backend reads this sets
-     * struct_size = sizeof(WgFrame) with flags = 0; a backend reads flags only when struct_size covers it. */
-    uint32_t flags;                  /* WG_FRAME_* */
 } WgFrame;
-
-/* WgFrame::flags. */
-#define WG_FRAME_BILINEAR (1u << 0) /* do not run the network: record the backend's own bilinear upscale of the color into
-                                       the output texture (the last resort of the front end for a frame that nothing else
-                                       could upscale). Only for a backend that sets WG_BACKEND_BILINEAR_FRAME. */
 
 /* Version 2: same-frame execution through an "ordered split" of the game's command list.
  *
@@ -208,7 +199,6 @@ typedef struct WgUpscaler WgUpscaler; /* opaque, owned by the implementation */
 /* Backend flags (version 2). */
 #define WG_BACKEND_NEEDS_SPLIT (1u << 0) /* the backend calls split_command_list: the front end installs its D3D12
                                             command-list hooks when the backend is loaded (d3d12_hooks = auto) */
-#define WG_BACKEND_BILINEAR_FRAME (1u << 1) /* the backend answers WG_FRAME_BILINEAR (see WgFrame::flags) */
 
 /* The implementation's entry points. */
 typedef struct WgUpscalerBackend {
