@@ -115,7 +115,12 @@ def _step(instr, state, loop_restore):
         return state
     dst = ops[0]
     if "saveexec" in mn:
-        if not (len(ops) > 1 and ops[1] == dst and dst in saved):  # `s_and_not1_saveexec S, S` reuses S: S keeps its first mask
+        if len(ops) > 1 and ops[1] == dst and dst in saved:  # `s_and_not1_saveexec S, S` reuses S: S keeps its first mask
+            pass
+        elif len(ops) > 1 and mn.startswith("s_and_not1_saveexec") and ops[1] in saved:
+            # the else side of an if / else: the join (`s_or exec, exec, D`) gives back the mask the if was entered with
+            saved = {**saved, dst: saved[ops[1]]}
+        else:
             saved = {**saved, dst: cur}
         if mn.startswith("s_or_saveexec"):
             return (cur, saved)

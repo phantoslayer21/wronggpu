@@ -44,6 +44,13 @@ class TestGateTable(unittest.TestCase):
         self.assertEqual(sorted(self.table["gates"]["bmegahg"]), ["swin_bneck6", "swin_bneck6_nc"])
         self.assertGreaterEqual(self.table["gates"]["bmegahg"]["swin_bneck6"]["waves"], 6)
 
+    def test_the_encoder_is_gated(self):
+        """E4: input_encoder (encoder.hip): its own build in the table, no spill by construction (a spilling kernel is not
+        recorded)."""
+        gates = self.table["gates"]
+        self.assertEqual(sorted(gates["enc0"]), ["input_encoder"])
+        self.assertEqual(G.SOURCE_BUILDS["enc0"][0], "encoder.hip")
+
     def test_recorded_numbers_are_plausible(self):
         """Registers fit the 256 of a wave and the waves are the 1 to 16 a SIMD holds (a sanity check on the file)."""
         for name, kernels in self.table["gates"].items():
@@ -132,7 +139,7 @@ class TestCompiler(unittest.TestCase):
         self.assertEqual(G.check(self.measured, self.table), [])
 
     def test_the_variants_are_the_family_variants(self):
-        self.assertEqual(G.builds(), ["base", *V.FAMILY_VARIANTS["gfx11"], *V.FAMILY_MEGA["gfx11"]])
+        self.assertEqual(G.builds(), ["base", *V.FAMILY_VARIANTS["gfx11"], *V.FAMILY_MEGA["gfx11"], *G.SOURCE_BUILDS])
 
 
 if __name__ == "__main__":

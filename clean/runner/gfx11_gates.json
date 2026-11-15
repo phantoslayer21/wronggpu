@@ -749,6 +749,13 @@
     "waves": 6,
     "lds": 32784
    }
+  },
+  "enc0": {
+   "input_encoder": {
+    "vgprs": 142,
+    "waves": 10,
+    "lds": 0
+   }
   }
  }
 }

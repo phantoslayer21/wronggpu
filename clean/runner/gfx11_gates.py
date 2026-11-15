@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MIT
 """Resource gates of the Model M Swin block kernels in the gfx11 (RDNA 3) builds: vector registers, spills and waves per SIMD
 of every kernel of gfx11_gates.json, in the default gfx11 build and in each variant of variants.FAMILY_VARIANTS["gfx11"], and the
-bottleneck megakernel of the persistent-kernel build (variants.FAMILY_MEGA["gfx11"], compiled from kernels/swin_v2.hip).
+bottleneck megakernel of the persistent-kernel build (variants.FAMILY_MEGA["gfx11"], compiled from kernels/swin_v2.hip), and
+the other Model M kernels (SOURCE_BUILDS: enc0).
 This table belongs to the gfx11 (HIP) builds; clean/dx12/vgpr_limits.json belongs to the Direct3D 12 ports.
 
 A gate says: the kernel spills nothing, uses at most `vgprs` registers and keeps at least `waves` waves per SIMD. The numbers
@@ -39,22 +40,33 @@ KERNELS += ["patch_merge_c64", "patch_merge_c96", "expand_c96", "expand_c128"]
 MEGA_KERNELS = ["swin_bneck6", "swin_bneck6_nc"]
 
 
+# The other Model M kernels of the gfx11 build (slice E4), each its own source and "build": name -> (source, gated kernels).
+SOURCE_BUILDS = {"enc0": ("encoder.hip", ["input_encoder"])}
+
+
 def builds():
-    return ["base", *V.FAMILY_VARIANTS["gfx11"], *V.FAMILY_MEGA["gfx11"]]
+    return ["base", *V.FAMILY_VARIANTS["gfx11"], *V.FAMILY_MEGA["gfx11"], *SOURCE_BUILDS]
 
 
 def kernels_of(name):
+    if name in SOURCE_BUILDS:
+        return SOURCE_BUILDS[name][1]
     return MEGA_KERNELS if name in V.FAMILY_MEGA["gfx11"] else KERNELS
 
 
 def compile_report(rocm, scratch, name):
-    """The resource report {kernel: {field: int}} of the build's source (swin.hip, swin_v2.hip) compiled for gfx1100, and the compiler's
-    version line. The code object goes to `scratch`."""
-    defines = {**B.FAMILY_DEFINES["gfx11"]["swin.hip"], **({} if name == "base" else V.all_builds()[name])}
+    """The resource report {kernel: {field: int}} of the build's source (swin.hip, swin_v2.hip, encoder.hip, ...) compiled for
+    gfx1100, and the compiler's version line. The code object goes to `scratch`."""
+    if name in SOURCE_BUILDS:
+        source = SOURCE_BUILDS[name][0]
+        defines = dict(B.FAMILY_DEFINES["gfx11"].get(source, {}))
+    else:
+        source = V.source(name)
+        defines = {**B.FAMILY_DEFINES["gfx11"]["swin.hip"], **({} if name == "base" else V.all_builds()[name])}
     clang = B.find_clang(rocm)
     saved, B.ARCH = B.ARCH, TARGET
     try:
-        cmd = B.device_command(clang, rocm, os.path.join(B.KERNEL_DIR, V.source(name)),
+        cmd = B.device_command(clang, rocm, os.path.join(B.KERNEL_DIR, source),
                                os.path.join(scratch, f"gates__{name}.co"), report=True, defines=defines)
     finally:
         B.ARCH = saved

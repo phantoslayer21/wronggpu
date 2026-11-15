@@ -107,6 +107,15 @@ class TestExecScanRules(unittest.TestCase):
         self.assertEqual(len(flagged("s_and_saveexec_b32 s1, vcc_lo", "s_cbranch_scc1 skip", "s_or_b32 exec_lo, exec_lo, s1",
                                      "skip:", WMMA, "s_endpgm")), 1)
 
+    def test_if_else_through_v_cmpx_and_the_else_saveexec_joins_back_to_the_mask_before_the_if(self):
+        """The shape the compiler gives `if (c) {...} else {...}` over a per-lane test: the join restores the mask the if was
+        entered with, not the one the else side saved."""
+        items = ["s_mov_b32 s1, exec_lo", "v_cmpx_ne_u32 exec_lo, 0, v20", "s_xor_b32 s1, exec_lo, s1", "s_cbranch_execz else",
+                 "v_add_f32 v0, v0, v1", "else:", "s_and_not1_saveexec_b32 s0, s1", "s_cbranch_execz join",
+                 "v_add_f32 v0, v0, v2", "join:", "s_or_b32 exec_lo, exec_lo, s0"]
+        self.assertEqual(flagged(*items, WMMA, PERM, "s_endpgm"), [])
+        self.assertEqual(len(flagged(*items[:6], "s_and_not1_saveexec_b32 s0, s1", WMMA, "s_endpgm")), 1)
+
     def test_the_origin_is_the_instruction_that_narrowed_the_mask(self):
         found, _ = E.scan_text(asm("v_add_f32 v0, v0, v1", "s_and_saveexec_b32 s1, vcc_lo", WMMA, "s_endpgm"))
         self.assertEqual([(a, o) for a, _m, o in found["k"]], [(8, 4)])
@@ -122,6 +131,7 @@ RUN_ON_THE_CARD = {
                          "swin_block_c64_nc", "swin_block_c64_add", "swin_block_c64_add_nc", "swin_block_c96",
                          "swin_block_c96_nc", "swin_block_c96_add", "swin_block_c96_add_nc", "swin_block_c128",
                          "swin_block_c128_nc", "swin_bneck6", "swin_bneck6_nc"),
+    "encoder.co": ("input_encoder",),
 }
 
 
