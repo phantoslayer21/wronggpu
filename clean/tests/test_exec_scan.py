@@ -167,6 +167,25 @@ RUN_ON_THE_CARD = {
 }
 
 
+# post.co: the reduced-history step of the reconstruction kernels takes the partner column from the other half of the wave
+# (`nb[c] = wg_xor16(hsum[c])`, three v_permlanex16 per kernel) and the compiler puts it inside the store's branch
+# `if (active && has1 && wl < 16 && x + 1 < dw)`. A KNOWN, EXPLAINED EXCEPTION, not a defect: the lanes that run it are 0-15 of
+# each half-wave pair and the partners it reads are lanes 16-31, which are off there, but v_permlanex16 reads the register of a
+# lane whose EXEC bit is off all the same (selftest probe_xchg16_div: a lane that takes part gets the value of lane l ^ 16 when
+# that lane does not; test_gpu_probes), and hsum was summed by every lane before the branch. The scan cannot
+# see this: it would need the reaching definitions of the source register. test_gpu_post runs every kernel below on the card
+# (partial tiles, odd D, one D row or column) bit for bit against post_recon, which has no exchange.
+POST_EXCHANGE_KERNELS = frozenset((
+    "post_fused", "post_fused3_fast_h4_o16", "post_fused3_fast_h6_o16", "post_fused3_h4_o16", "post_fused3_h6",
+    "post_fused3_h6_o16", "post_fused_h8", "post_fused_h8_o16", "post_fused_o16", "post_recon2", "post_recon2_ns",
+    "post_recon2_r", "post_recon2_r_band", "post_recon2_r_band_p12", "post_recon2_r_h6", "post_recon2_r_hp",
+    "post_recon2_r_hp_band", "post_recon2_r_hp_band_p12", "post_recon2_r_hp_p12", "post_recon2_r_ns", "post_recon2_r_out",
+    "post_recon2_r_out_diet", "post_recon2_r_p12", "post_recon3", "post_recon3_h", "post_recon4_bil", "post_recon4_crbil",
+    "post_recon4_f16", "post_recon4_f16x", "post_recon4_fast", "post_recon4_fastest", "post_recon4_skip16",
+    "post_recon4_skip4", "post_recon5", "post_recon5_bil", "post_recon6", "post_recon6_bil", "post_recon6_eb",
+    "post_recon6_eb_bil"))
+
+
 class TestExecScanBuild(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -187,6 +206,21 @@ class TestExecScanBuild(unittest.TestCase):
                 with self.subTest(code_object=co, kernel=k):
                     self.assertGreater(counts.get(k, 0), 0, "the kernel has no matrix instruction: is the name right?")
                     self.assertEqual([(hex(a), m, hex(o)) for a, m, o in found.get(k, [])][:3], [])
+
+    def test_post_co_has_only_the_known_reduced_history_exchange_under_a_lane_mask(self):
+        """The exception above, pinned: exactly these kernels, three v_permlanex16 each and no v_wmma. A new site, or a matrix
+        instruction in a post kernel, fails here."""
+        path = os.path.join(self.build, "post.co")
+        if not os.path.exists(path):
+            self.skipTest("no post.co")
+        found, counts = E.scan_object(path, self.objdump)
+        self.assertEqual(sorted(set(found) - POST_EXCHANGE_KERNELS), [])
+        self.assertEqual(sorted(POST_EXCHANGE_KERNELS - set(found)), [])
+        for name, items in found.items():
+            with self.subTest(kernel=name):
+                self.assertEqual([m for _a, m, _o in items], ["v_permlanex16_b32"] * 3)
+                self.assertEqual(counts[name], 3)
+        self.assertEqual({n for n, c in counts.items() if c and n not in found}, set())
 
     def test_the_scan_sees_the_deliberately_divergent_probe(self):
         path = os.path.join(self.build, "probe.co")
