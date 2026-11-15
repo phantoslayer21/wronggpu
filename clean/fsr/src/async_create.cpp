@@ -5,10 +5,12 @@
 
 namespace wgfsr {
 
-std::shared_ptr<PendingCreate> PendingCreate::Start(const WgUpscalerBackend* backend, const WgCreateInfo& info) {
+std::shared_ptr<PendingCreate> PendingCreate::Start(const WgUpscalerBackend* backend, const WgCreateInfo& info,
+                                                    std::function<void()> releaseWhenDone) {
     auto p = std::make_shared<PendingCreate>();
     p->backend_ = backend;
     p->info_ = info;
+    p->release_ = std::move(releaseWhenDone);
     p->start_ = std::chrono::steady_clock::now();
     std::thread([p] { p->Run(p); }).detach();
     return p;
@@ -29,6 +31,11 @@ void PendingCreate::Run(std::shared_ptr<PendingCreate> self) {
     }
     cv_.notify_all();
     if (cleanup) cleanup(r == WG_OK ? upscaler : nullptr);  // the context went away while the create ran
+    if (release_) {  // the last step: nothing of this worker touches the game's device after it
+        std::function<void()> release = std::move(release_);
+        release_ = nullptr;
+        release();
+    }
 }
 
 bool PendingCreate::Wait(uint32_t ms) {

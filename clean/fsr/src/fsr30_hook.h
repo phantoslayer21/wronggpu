@@ -73,6 +73,10 @@ struct Platform {
     std::function<uint64_t()> logBytes;
     ResourceInfoFn resourceInfo = nullptr;
     std::function<void*(void* commandList)> deviceFromCommandList;  // ID3D12Device* of an ID3D12GraphicsCommandList*
+    // The create worker's own COM reference on the game's device (async_create.h): AddRef before the worker starts, Release by
+    // the worker when its create is over (also after a timeout). Empty: no hold (tests without a COM device).
+    std::function<void(void* device)> retainDevice;
+    std::function<void(void* device)> releaseDevice;
     // ffx_fsr3 side: how many ffxFsr3UpscalerContextDispatch calls WrongGPU's upscaler DLL has seen on this thread
     // (empty or 0 when WrongGPU's upscaler DLL is not loaded).
     std::function<uint64_t()> upscalerSeenOnThread;

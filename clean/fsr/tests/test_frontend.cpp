@@ -158,11 +158,18 @@ static int g_timersStarted = 0;
 static std::atomic<bool> g_createGate{true};  // FakeCreate (on the front end's create thread) waits while false
 static std::atomic<int> g_createCalls{0};  // every FakeCreate call (made an upscaler or not)
 static bool g_failCreateUnsupported = false;  // FakeCreate answers WG_ERROR_UNSUPPORTED (a hard incompatibility, R1)
+static std::atomic<int> g_holdFromCall{0};    // FakeCreate waits for the gate from this call on (1-based); 0: every call
+static bool g_deviceHoldOn = false;           // the platform gives the create worker a hold on the device (retain / release)
+static bool g_deviceTrack = false;            // FakeCreate checks that the game's device is still alive when it runs
+static std::atomic<int> g_deviceRefs{0}, g_deviceRetains{0}, g_deviceReleases{0};
+static std::atomic<bool> g_deviceUsedAfterFree{false};
 static WgResult FakeCreate(const WgCreateInfo* info, WgUpscaler** out) {
     ++g_createCalls;
     g_createInfo = *info;
     g_createOptions = info->options;
-    while (!g_createGate) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    while (!g_createGate && (g_holdFromCall == 0 || g_createCalls >= g_holdFromCall))
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    if (g_deviceTrack && g_deviceRefs.load() <= 0) g_deviceUsedAfterFree = true;  // (the worker's QueryInterface on a freed device)
     if (g_aboutTo) info->log(info->log_user, WG_LOG_INFO, "about to start the HIP runtime (test)");
     info->log(info->log_user, WG_LOG_INFO, "fake upscaler created");
     if (g_failCreateUnsupported) return WG_ERROR_UNSUPPORTED;
@@ -282,6 +289,10 @@ static std::unique_ptr<FrontEnd> MakeFrontEnd(const Config& config) {
         p.menu.folderEntry = g_folderEntry;
     }
     p.original = []() -> const OriginalApi* { return g_originalAvailable ? g_originalApi : nullptr; };
+    if (g_deviceHoldOn) {
+        p.retainDevice = [](void*) { ++g_deviceRetains; ++g_deviceRefs; };
+        p.releaseDevice = [](void*) { ++g_deviceReleases; --g_deviceRefs; };
+    }
     if (g_asiPresent)
         p.asiPlugin = [](char* model) { if (model) *model = g_asiModel; return g_asiHooked; };
     p.compareApi = []() -> const OriginalApi* { return g_compareApi; };
@@ -343,6 +354,10 @@ static void Reset() {
     g_log.clear();
     g_destroyed = 0;
     g_failCreate = false;
+    g_holdFromCall = 0;
+    g_deviceHoldOn = g_deviceTrack = false;
+    g_deviceRefs = g_deviceRetains = g_deviceReleases = 0;
+    g_deviceUsedAfterFree = false;
     g_failCreateUnsupported = false;
     g_failCreateOutputWidth = 0;
     g_failDispatchAt = -1;
@@ -1253,6 +1268,124 @@ static void TestHardIncompatibilityHandover() {
     {  // the default bound is generous (a create takes seconds, not tens of seconds) and the key parses
         Config config;
         CHECK(config.createGiveUpMs == 30000);
+    }
+}
+
+// R1 (second Codex check of #225): the create worker owns a reference on the game's D3D12 device, taken on the game's thread
+// before the worker starts and given back by the worker when its create is over: a stalled worker that outlives the timeout,
+// the AMD context (or NO_PROVIDER) and the host's own device reference never touches a released device.
+static void TestCreateWorkerHoldsDevice() {
+    UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
+    for (const bool withAmd : {true, false}) {
+        Reset();
+        g_deviceHoldOn = g_deviceTrack = true;
+        g_deviceRefs = 1;  // the host's own reference
+        g_originalAvailable = withAmd;
+        Config config;
+        config.createWaitMs = 20;
+        config.createGiveUpMs = 40;
+        config.fallbackToAmd = withAmd;
+        auto fe = MakeFrontEnd(config);
+        ffxContext ctx = nullptr;
+        g_createGate = false;  // the create stalls past the timeout
+        const ffxReturnCode_t rc = fe->CreateContext(&ctx, &c.upscale.header, kMemCb);
+        CHECK(rc == (withAmd ? FFX_API_RETURN_OK : FFX_API_RETURN_NO_PROVIDER));
+        CHECK(g_deviceRetains == 1 && g_deviceReleases == 0 && g_deviceRefs == 2);  // the worker holds its own reference
+        --g_deviceRefs;  // the host releases its device (the stalled create is still running)
+        if (withAmd) CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+        g_createGate = true;  // the late worker runs its create now, with the host's reference gone
+        for (int i = 0; i < 600 && g_deviceReleases == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        CHECK(g_deviceReleases == 1 && g_deviceRefs == 0);
+        CHECK(!g_deviceUsedAfterFree);
+        g_originalAvailable = true;
+    }
+    {  // negative control: without the hold the same sequence IS caught (the harness sees a worker on a released device)
+        Reset();
+        g_deviceTrack = true;  // no platform hold
+        g_deviceRefs = 1;
+        Config config;
+        config.createWaitMs = 20;
+        auto fe = MakeFrontEnd(config);
+        ffxContext ctx = nullptr;
+        g_createGate = false;
+        CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK);
+        --g_deviceRefs;  // the host releases its device
+        CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+        g_createGate = true;
+        for (int i = 0; i < 600 && g_destroyed == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        CHECK(g_deviceUsedAfterFree);
+    }
+}
+
+// R1: the retry without the split service (the first create worked, the hooks could not be installed) goes through the same
+// bounded path as the first create: a stalled retry hands over after create_giveup_ms (no AMD to upscale meanwhile) or
+// create_wait_ms (with AMD), it does not hang the game's thread.
+static void TestSplitRetryIsBounded() {
+    UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
+    for (const bool fallback : {false, true}) {
+        Reset();
+        g_activateOn = true;
+        g_activateResult = false;  // the hooks cannot be installed: the create is made again without the service
+        g_holdFromCall = 2;        // the second create stalls
+        g_createGate = false;
+        g_deviceHoldOn = g_deviceTrack = true;
+        g_deviceRefs = 1;
+        Config config;
+        config.fallbackToAmd = fallback;
+        config.createWaitMs = 40;
+        config.createGiveUpMs = 40;
+        auto fe = MakeFrontEnd(config);
+        ffxContext ctx = nullptr;
+        const auto t0 = std::chrono::steady_clock::now();
+        CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK);
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+        CHECK(ms >= 30 && ms < 5000);  // the bound, not for ever
+        CHECK(ctx != nullptr && g_amd.size() == 1 && g_amd[0].fn == "create");  // AMD's FSR has the context
+        CHECK(g_createCalls == 2 && CountLog("created again without the command-list split service") == 1);
+        CHECK(CountLog("(without the split service)") == 1 && CountLog("goes to AMD FSR for now") == 1);
+        CHECK(g_deviceRetains == 2 && g_deviceReleases == 1);  // the first worker is done, the stalled one still holds
+        g_createGate = true;
+        CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+        for (int i = 0; i < 600 && g_deviceReleases < 2; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        CHECK(g_deviceReleases == 2 && g_deviceRefs == 1 && !g_deviceUsedAfterFree);
+    }
+}
+
+// R1: a remembered refusal keeps its classification (custom slot): a hard incompatibility hands over to the available provider
+// on the repeat exactly as on the first create (also with fallback_to_amd = 0), without a new attempt; a runtime failure
+// stays what it was.
+static void TestRememberedHardIncompatibility() {
+    UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
+    {  // WG_ERROR_UNSUPPORTED, custom slot, an AMD provider, fallback_to_amd = 0
+        Reset();
+        g_failCreateUnsupported = true;
+        Config config;
+        config.customSlot = true;
+        config.fallbackToAmd = false;
+        auto fe = MakeFrontEnd(config);
+        for (int i = 0; i < 3; ++i) {
+            ffxContext ctx = nullptr;
+            CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
+            size_t amdCreates = 0;
+            for (const auto& call : g_amd) amdCreates += call.fn == "create";
+            CHECK(amdCreates == size_t(i + 1));  // AMD's FSR, every time
+            CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+        }
+        CHECK(g_createCalls == 1);  // one real attempt: the repeats use the remembered classification
+        CHECK(CountLog("a hard incompatibility or a create that did not finish") >= 1);
+    }
+    {  // a runtime failure with fallback_to_amd = 0 is still an error on the repeat, with no new attempt
+        Reset();
+        g_failCreate = true;
+        Config config;
+        config.customSlot = true;
+        config.fallbackToAmd = false;
+        auto fe = MakeFrontEnd(config);
+        for (int i = 0; i < 3; ++i) {
+            ffxContext ctx = nullptr;
+            CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_ERROR_RUNTIME_ERROR && ctx == nullptr);
+        }
+        CHECK(g_createCalls == 1 && g_amd.empty());
     }
 }
 
@@ -3644,6 +3777,9 @@ int main() {
     TestReactiveMaskForwarded();
     TestSlowCreate();
     TestHardIncompatibilityHandover();
+    TestCreateWorkerHoldsDevice();
+    TestSplitRetryIsBounded();
+    TestRememberedHardIncompatibility();
     TestInterfaceVersions();
     TestAmdMode();
     TestNonLinearColour();

@@ -87,6 +87,11 @@ struct Platform {
     std::function<bool(uint32_t ms, std::function<uint32_t()> fn)> timer;
     // The D3D12 device was removed (device lost): nothing of it is parked or taken over. May be empty.
     std::function<bool(void* device)> deviceLost;
+    // The create worker's hold on the game's D3D12 device (async_create.h): retainDevice (AddRef) runs on the game's thread
+    // before the worker starts, releaseDevice (Release) on the worker when its create is over, also after a timeout.
+    // Empty: no hold is taken (tests without a COM device).
+    std::function<void(void* device)> retainDevice;
+    std::function<void(void* device)> releaseDevice;
     // OptiScaler ASI plugin bridge (clean/fsr/asi): when WrongGPU.asi is loaded and has hooked OptiScaler's menu,
     // WrongGPU is its own entry in the host's MAIN upscaler list, not a version in the FFX sub-box. Returns true when
     // hooked (then the version query lists AMD only and this plugin, not an FFX override, chooses the model) and sets
@@ -209,6 +214,7 @@ private:
     void CheckPending(UpscaleContext& u, uint64_t call);
     // After a successful create of `u`'s upscaler: installs the D3D12 hooks its split service needs
     // (Platform::activateServices). False: they could not be installed (nothing of them is left patched).
+    std::function<void()> HoldDevice(void* device);  // async_create.h: the create worker's hold on the game's device
     bool ActivateSplit(UpscaleContext& u, const WgUpscalerBackend* backend, const std::string& tag);
     // The model folder for `u`'s options (Platform::modelPlaces): appends ";model_dir=<dir>" when the model is found
     // in a place before the runtime's own default; nothing when runtime_options / WG_RUNTIME_OPTIONS name model_dir.
@@ -253,6 +259,7 @@ private:
     struct RememberedFailure {
         std::string reason;     // the first failure's reason (logged once in full)
         uint64_t repeats = 0;   // creates refused since, without a new attempt
+        bool hardIncompat = false;  // WG_ERROR_UNSUPPORTED (a hard incompatibility): a repeat hands over like the first create
     };
     std::map<std::string, RememberedFailure> failedCreates_;  // custom slot: FailureKey -> the failure (mutex_)
     // Custom slot, WG_ERROR_INPUT (0.6.0 follow-up, bug hunt A): remembered for the session only after kInputRefusedRun refusals

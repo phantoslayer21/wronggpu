@@ -20,8 +20,11 @@ namespace wgfsr {
 class PendingCreate {
 public:
     // Starts backend->create(info) on a new thread. `info` and what it points to (options, log user) must stay valid
-    // until the create finished, or until the cleanup given to Abandon ran.
-    static std::shared_ptr<PendingCreate> Start(const WgUpscalerBackend* backend, const WgCreateInfo& info);
+    // until the create finished, or until the cleanup given to Abandon ran. `releaseWhenDone`: runs on the worker thread as
+    // its last step, also after a timeout and after the context went away (the front end takes a COM reference on the
+    // game's D3D12 device before the worker starts and gives it back here, so a late worker never meets a released device).
+    static std::shared_ptr<PendingCreate> Start(const WgUpscalerBackend* backend, const WgCreateInfo& info,
+                                                std::function<void()> releaseWhenDone = {});
 
     // Waits up to `ms` milliseconds (UINT32_MAX: until it finishes); true when the create has finished.
     bool Wait(uint32_t ms);
@@ -49,6 +52,7 @@ private:
     WgResult result_ = WG_ERROR_DEVICE;
     WgUpscaler* upscaler_ = nullptr;
     std::function<void(WgUpscaler*)> cleanup_;  // set by Abandon while the create runs
+    std::function<void()> release_;             // the worker's last step (Start's releaseWhenDone)
     double reported_ = 0;                        // highest threshold PassedThreshold answered true for
     std::chrono::steady_clock::time_point start_, end_;
 };

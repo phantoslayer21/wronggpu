@@ -696,11 +696,13 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
         // Custom slot: the same upscaler with the same options failed earlier in this session: no new attempt.
         std::string remembered;
         uint64_t repeats = 0;
+        bool rememberedHard = false;  // the remembered failure was a hard incompatibility (R1): the repeat hands over too
         if (config_.customSlot && refusal.empty()) {
             std::lock_guard lock(mutex_);
             auto it = failedCreates_.find(FailureKey(backend, *u));
             if (it != failedCreates_.end()) {
                 remembered = it->second.reason;
+                rememberedHard = it->second.hardIncompat;
                 repeats = ++it->second.repeats;
             }
         }
@@ -723,6 +725,7 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
                   "); it is not created again until the game restarts";
             u->failReason = remembered;
             repeatedFailure = true;
+            hardIncompat = rememberedHard;
             if (LogPoint(repeats))
                 Log(tag + " custom slot: create " + std::to_string(repeats) + " since the failure: " + why);
         } else if (t_held) {
@@ -757,7 +760,7 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
             // fallback_to_amd = 0.
             const bool amdMeanwhile = config_.fallbackToAmd && (!config_.customSlot || UpscaleFallbackApi());
             u->creating = true;
-            auto pending = PendingCreate::Start(backend, u->createInfo);
+            auto pending = PendingCreate::Start(backend, u->createInfo, HoldDevice(u->createInfo.d3d12_device));
             if (pending->Wait(amdMeanwhile ? config_.createWaitMs : config_.createGiveUpMs)) {
                 u->creating = false;
                 if (u->failReason.empty()) u->failReason = u->createError;
@@ -774,17 +777,32 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
                         u->createInfo.services = nullptr;
                         Log(tag + " U" + std::to_string(u->id) + ": created again without the command-list split service");
                         u->creating = true;
-                        WgUpscaler* again = nullptr;
-                        const WgResult r2 = backend->create(&u->createInfo, &again);
-                        u->creating = false;
-                        if (r2 == WG_OK && again) {
-                            u->upscaler = again;
-                            u->backend = backend;
+                        // the same bounded path as the first create: a stalled retry hands over, it does not hang the game
+                        auto again2 = PendingCreate::Start(backend, u->createInfo, HoldDevice(u->createInfo.d3d12_device));
+                        if (again2->Wait(amdMeanwhile ? config_.createWaitMs : config_.createGiveUpMs)) {
+                            u->creating = false;
+                            const WgResult r2 = again2->Result();
+                            WgUpscaler* again = again2->Take();
+                            if (r2 == WG_OK && again) {
+                                u->upscaler = again;
+                                u->backend = backend;
+                            } else {
+                                if (again) backend->destroy(again);
+                                if (u->failReason.empty()) u->failReason = u->createError;
+                                why = std::string("upscaler \"") + backend->name + "\" create without the split service failed: " + WgResultText(r2);
+                                hardIncompat = hardIncompat || r2 == WG_ERROR_UNSUPPORTED;
+                            }
                         } else {
-                            if (again) backend->destroy(again);
-                            if (u->failReason.empty()) u->failReason = u->createError;
-                            why = std::string("upscaler \"") + backend->name + "\" create without the split service failed: " + WgResultText(r2);
-                            hardIncompat = hardIncompat || r2 == WG_ERROR_UNSUPPORTED;
+                            u->pending = again2;
+                            u->pendingBackend = backend;
+                            if (amdMeanwhile) {
+                                why = std::string("upscaler \"") + backend->name + "\" is still starting (without the split service) after " +
+                                      std::to_string(config_.createWaitMs) + " ms (create_wait_ms); it takes over when it has started";
+                            } else {
+                                hardIncompat = true;
+                                why = std::string("upscaler \"") + backend->name + "\" did not finish its create (without the split service) in " +
+                                      std::to_string(config_.createGiveUpMs) + " ms (create_giveup_ms): refused";
+                            }
                         }
                     }
                 } else {
@@ -796,7 +814,7 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
                     const std::string reason = u->createError.empty() ? why : why + ": " + u->createError;
                     {
                         std::lock_guard lock(mutex_);
-                        failedCreates_[FailureKey(backend, *u)] = RememberedFailure{reason, 0};
+                        failedCreates_[FailureKey(backend, *u)] = RememberedFailure{reason, 0, hardIncompat};
                     }
                     Log(tag + " custom slot: this failure is remembered for the session: a create of upscaler \"" + backend->name +
                         "\" with the same options fails at once from now on, without a new attempt (logged now and then)");
@@ -950,10 +968,21 @@ void FrontEnd::CheckPending(UpscaleContext& u, uint64_t call) {
             "; AMD FSR keeps upscaling");
         if (config_.customSlot) {
             std::lock_guard lock(mutex_);
-            failedCreates_[FailureKey(u.pendingBackend, u)] = RememberedFailure{u.failReason, 0};
+            failedCreates_[FailureKey(u.pendingBackend, u)] = RememberedFailure{u.failReason, 0, r == WG_ERROR_UNSUPPORTED};
         }
     }
     u.pending.reset();
+}
+
+// R1: the create worker's own COM reference on the game's D3D12 device, taken here (on the game's thread) before the worker
+// starts and released by the worker as its last step, so a worker that outlives a timeout, the AMD context and the host's
+// own device reference never touches a released device. The release is a copy of the platform's function: it does not
+// depend on this object.
+std::function<void()> FrontEnd::HoldDevice(void* device) {
+    if (!device || !platform_.retainDevice || !platform_.releaseDevice) return {};
+    platform_.retainDevice(device);
+    std::function<void(void*)> release = platform_.releaseDevice;
+    return [release, device] { release(device); };
 }
 
 bool FrontEnd::ActivateSplit(UpscaleContext& u, const WgUpscalerBackend* backend, const std::string& tag) {

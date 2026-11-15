@@ -62,6 +62,20 @@ def fail(msg):
     sys.exit("make_payload: " + msg)
 
 
+# R1: nothing in a game starts HIP, so a payload never carries a developer runtime (executor=hip / capture_dir work only in a
+# build made with WG_DEV_DIAGNOSTICS). Every runtime library the payload embeds must say "wg-build dev-diagnostics=0"; a
+# developer build or a library without the marker (older than R1) refuses the payload, failing closed, and so does any other
+# embedded file that carries a developer runtime. The same check runs on the final package (tools/release).
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tests"))
+import check_no_dev_diagnostics as devcheck  # noqa: E402
+
+
+def refuse_developer_runtime(rel, data):
+    ok, text, _ = devcheck.check_artifact(rel, data)
+    if not ok:
+        fail("%s: %s: a payload never carries the developer diagnostics (build the runtime without --dev-diagnostics)" % (rel, text))
+
+
 def payload_files(root, hosted_only=False):
     rows = []
     for dirpath, dirnames, filenames in os.walk(root):
@@ -84,6 +98,7 @@ def payload_files(root, hosted_only=False):
                 data = f.read()
             if optiscaler_file(rel, data):
                 fail("payload file %s is OptiScaler: WrongGPU never ships OptiScaler (the launcher downloads its edition)" % rel)
+            refuse_developer_runtime(rel, data)
             rows.append((rel, hashlib.sha256(data).hexdigest(), len(data), full))
     rows.sort(key=lambda r: r[0].lower())
     if not any(r[0].lower() == FRONT_END for r in rows):
@@ -111,6 +126,7 @@ def rr_files(root):
                 data = f.read()
             if optiscaler_file(rel, data):
                 fail("RR folder file %s is OptiScaler: WrongGPU never ships OptiScaler (the launcher downloads its edition)" % rel)
+            refuse_developer_runtime(rel, data)
             if os.path.basename(rel).lower() == RR_LEGACY_RUNTIME:
                 fail("%s: the RR runtime is part of wronggpu_runtime.dll (release 0.6.0: one runtime DLL); no RR runtime of its own" % rel)
             if rel.lower() not in RR_FILES and not RR_VARIANT.match(rel.lower()):

@@ -222,7 +222,13 @@ bool Hook::RunStandIn(Context& c, const ffxDispatchDescUpscale& dispatch, const 
         // On a worker thread: the game's thread waits create_wait_ms at most (async_create.h); AMD's FSR upscales the
         // frames until the create has finished.
         c.creating = true;
-        auto pending = PendingCreate::Start(backend, c.createInfo);
+        std::function<void()> hold;  // the create worker's own reference on the game's device (async_create.h)
+        if (device && platform_.retainDevice && platform_.releaseDevice) {
+            platform_.retainDevice(device);
+            std::function<void(void*)> release = platform_.releaseDevice;
+            hold = [release, device] { release(device); };
+        }
+        auto pending = PendingCreate::Start(backend, c.createInfo, hold);
         if (!pending->Wait(config_.createWaitMs)) {
             c.pending = pending;
             c.pendingBackend = backend;
