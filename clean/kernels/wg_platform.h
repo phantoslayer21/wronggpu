@@ -31,6 +31,13 @@ typedef u32 v4u __attribute__((ext_vector_type(4)));
 #ifndef WG_SOFT_FP8
 #define WG_SOFT_FP8 1
 #endif
+// The faster exact software conversion (below). -DWG_SLOW_Q8 selects the plain form again (timing comparisons).
+#ifndef WG_SLOW_Q8
+#define WG_FAST_Q8 1
+#endif
+#endif
+#if defined(WG_FAST_Q8) && (defined(__FAST_MATH__) || (defined(__FINITE_MATH_ONLY__) && __FINITE_MATH_ONLY__))
+#error "the gfx11 FP32 -> E4M3 conversion needs IEEE arithmetic (it adds and subtracts a constant, and tests for NaN): no -ffast-math or -ffinite-math-only"
 #endif
 
 #if defined(__AMDGCN__)
@@ -130,6 +137,83 @@ WG_FN float wg_fmin(float a, float b) { return __builtin_fminf(a, b); }
 // FP8 E4M3FN conversion in software (round to nearest even, saturating at +-448, NaN -> NaN).
 // Written from the format definition: bias 7, 3 mantissa bits, max finite 0x7E = 448, NaN 0x7F, no infinities.
 
+#if defined(WG_FAST_Q8)
+// gfx11: the same conversion (round to nearest even, saturating at +-448, NaN -> sign|0x7f, FP32 denormals -> a signed
+// zero) with fewer instructions than the plain form below (-DWG_SLOW_Q8), and the same rounding delivered as F16 bits for
+// the next F16 matrix operand. Checked against the definition over all 2^32 FP32 patterns (runner/q8_exhaustive.py).
+// With z = |x| clamped to [2^-6, 448] and C = 1.5 * 2^(E + 20), E the exponent of z, the FP32 sum |x| + C rounds |x| to a
+// multiple of 2^(E - 3) (ties to even: the mantissa of C is even) and the difference sum - C is exact; the floor 2^-6 gives
+// the E4M3 subnormal step 2^-9. The compiler must keep (|x| + C) - C (no reassociation: no fast-math, see above).
+// v_med3_f32 clamps, because fminf / fmaxf get a canonicalising v_max in front of them on gfx11.
+WG_FN float wg_q8m_clamp(float x, float lo, float hi) { return __builtin_amdgcn_fmed3f(x, lo, hi); }
+WG_FN u32 wg_q8m_bits(float f) { return __builtin_bit_cast(u32, f); }
+WG_FN float wg_q8m_flt(u32 u) { return __builtin_bit_cast(float, u); }
+
+// C = 1.5 * 2^(E + 20) for |x| (E clamped to [-6, 8]), as FP32 bits.
+WG_FN u32 wg_q8m_magic(float ax) {
+  return (wg_q8m_bits(wg_q8m_clamp(ax, 0.015625f, 448.0f)) & 0x7f800000u) + 0x0a400000u;
+}
+
+// E4M3 code bytes. The code comes straight from the rounded sum: bits(sum) - bits(C) is the index on the grid and
+// code = 8 (E + 6) + index = (bits(C) >> 20) - 1132 + index; min(., 0x7e) saturates (also +-inf). NANFIX: a NaN gives
+// sign|0x7f, else it gives sign|0x7e.
+template <bool NANFIX>
+WG_FN u32 wg_f32_to_e4m3_t(float f) {
+  const u32 b = wg_q8m_bits(f);
+  const float ax = __builtin_fabsf(f);
+  const u32 cb = wg_q8m_magic(ax);
+  u32 c = (wg_q8m_bits(ax + wg_q8m_flt(cb)) - cb) + (cb >> 20) - 1132u;
+  c = c < 0x7eu ? c : 0x7eu;
+  if (NANFIX) c = (f != f) ? 0x7fu : c;
+  return c | ((b >> 24) & 0x80u);
+}
+WG_FN u32 wg_f32_to_e4m3(float f) { return wg_f32_to_e4m3_t<true>(f); }
+
+template <bool NANFIX>
+WG_FN v2i wg_pack_q8_t(v8f d) {
+  u32 w[2];
+#pragma unroll
+  for (int h = 0; h < 2; ++h)
+    w[h] = wg_f32_to_e4m3_t<NANFIX>(d[4 * h]) | (wg_f32_to_e4m3_t<NANFIX>(d[4 * h + 1]) << 8) |
+           (wg_f32_to_e4m3_t<NANFIX>(d[4 * h + 2]) << 16) | (wg_f32_to_e4m3_t<NANFIX>(d[4 * h + 3]) << 24);
+  v2i r;
+  r[0] = (int)w[0];
+  r[1] = (int)w[1];
+  return r;
+}
+// Quantize 8 floats to FP8 and pack them into 8 bytes (element i -> byte i, little-endian).
+WG_FN v2i wg_pack_q8(v8f d) { return wg_pack_q8_t<true>(d); }
+// For values that stay inside the kernel: a NaN becomes +-448, as in the gfx12 form.
+WG_FN v2i wg_pack_q8_inner(v8f d) { return wg_pack_q8_t<false>(d); }
+// For inputs proven within +-464 and not NaN: the bytes of wg_pack_q8.
+WG_FN v2i wg_pack_q8_nc(v8f d) { return wg_pack_q8_t<false>(d); }
+
+// The E4M3-rounded value as F16 bits (every E4M3 value is exact in F16), the next operand of the F16 matrix instruction.
+// CL: saturate at +-448 (also infinity); NANFIX: a NaN gives an F16 NaN. v_cvt_pk_rtz_f16_f32 is exact here: the value has
+// at most 4 significant bits. The sign of a zero result is the input's.
+template <bool NANFIX, bool CL>
+WG_FN float wg_q8m_round(float f) {
+  const float ax = __builtin_fabsf(f);
+  const float c = wg_q8m_flt(wg_q8m_magic(ax));
+  float r = (ax + c) - c;
+  if (CL) r = wg_q8m_clamp(r, 0.0f, 448.0f);
+  u32 rb = wg_q8m_bits(r);
+  if (NANFIX) rb = (f != f) ? 0x7fc00000u : rb;
+  return wg_q8m_flt(rb | (wg_q8m_bits(f) & 0x80000000u));
+}
+template <bool NANFIX, bool CL>
+WG_FN v8h wg_q8_to_f16_t(v8f d) {
+  u32 w[4];
+#pragma unroll
+  for (int i = 0; i < 4; ++i)
+    w[i] = __builtin_bit_cast(u32, __builtin_amdgcn_cvt_pkrtz(wg_q8m_round<NANFIX, CL>(d[2 * i]),
+                                                              wg_q8m_round<NANFIX, CL>(d[2 * i + 1])));
+  return __builtin_bit_cast(v8h, w);
+}
+WG_FN v8h wg_q8_to_f16(v8f d) { return wg_q8_to_f16_t<true, true>(d); }         // a NaN gives an F16 NaN
+WG_FN v8h wg_q8_to_f16_inner(v8f d) { return wg_q8_to_f16_t<false, true>(d); }  // a NaN gives +-0
+WG_FN v8h wg_q8_to_f16_nc(v8f d) { return wg_q8_to_f16_t<false, false>(d); }    // |x| <= 464, not NaN
+#else
 WG_FN u32 wg_f32_to_e4m3(float f) {
   // Branch-free: every path is computed and the result picked with selects (no divergent control flow).
   const u32 b = __builtin_bit_cast(u32, f);
@@ -144,6 +228,7 @@ WG_FN u32 wg_f32_to_e4m3(float f) {
   code = a > 0x7f800000u ? 0x7fu : code;   // NaN
   return s | code;
 }
+#endif
 
 WG_FN float wg_e4m3_to_f32(u32 c) {
   const u32 em = c & 0x7fu;
@@ -226,6 +311,7 @@ WG_FN v8f wg_unpack_fp8(v2i p) {
 #else
 // Software conversions (host emulator, or -DWG_SOFT_FP8).
 
+#if !defined(WG_FAST_Q8)
 // Quantize 8 floats to FP8 and pack them into 8 bytes (element i -> byte i, little-endian).
 WG_FN v2i wg_pack_q8(v8f d) {
   u32 lo = wg_f32_to_e4m3(d[0]) | (wg_f32_to_e4m3(d[1]) << 8) | (wg_f32_to_e4m3(d[2]) << 16) |
@@ -240,6 +326,7 @@ WG_FN v2i wg_pack_q8(v8f d) {
 
 WG_FN v2i wg_pack_q8_inner(v8f d) { return wg_pack_q8(d); }
 WG_FN v2i wg_pack_q8_nc(v8f d) { return wg_pack_q8(d); }
+#endif
 
 WG_FN v8f wg_unpack_fp8(v2i p) {
   v8f r;

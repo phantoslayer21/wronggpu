@@ -69,6 +69,32 @@ WG_KERNEL(probe_fp8_pack)(const v8f* x, const v2i* codes, v2i* packed, v8f* unpa
   }
 }
 
+// Sweep of the gfx11 FP32 -> E4M3 conversions (runner/q8_exhaustive.py): lane g converts the 8 bit patterns base + 8 g ...
+// base + 8 g + 7. The outputs are, per lane: the code bytes of wg_f32_to_e4m3 (8 bytes), wg_pack_q8, wg_pack_q8_inner,
+// wg_pack_q8_nc (8 bytes each), and the F16 bits of wg_q8_to_f16, wg_q8_to_f16_inner, wg_q8_to_f16_nc (16 bytes each).
+#if defined(WG_GFX11) && defined(WG_FAST_Q8)
+WG_KERNEL_N(probe_q8_sweep, 256)(u32 base, v2i* scalar, v2i* pack, v2i* inner, v2i* nc, v4u* half, v4u* half_inner,
+                                  v4u* half_nc) {
+  const u32 g = wg_block_id() * 256 + wg_lane_id();
+  v8f d;
+  u32 code[8];
+  for (int j = 0; j < 8; ++j) {
+    d[j] = __builtin_bit_cast(float, base + 8 * g + j);
+    code[j] = wg_f32_to_e4m3(d[j]);
+  }
+  v2i s;
+  s[0] = (int)(code[0] | (code[1] << 8) | (code[2] << 16) | (code[3] << 24));
+  s[1] = (int)(code[4] | (code[5] << 8) | (code[6] << 16) | (code[7] << 24));
+  scalar[g] = s;
+  pack[g] = wg_pack_q8(d);
+  inner[g] = wg_pack_q8_inner(d);
+  nc[g] = wg_pack_q8_nc(d);
+  half[g] = __builtin_bit_cast(v4u, wg_q8_to_f16(d));
+  half_inner[g] = __builtin_bit_cast(v4u, wg_q8_to_f16_inner(d));
+  half_nc[g] = __builtin_bit_cast(v4u, wg_q8_to_f16_nc(d));
+}
+#endif
+
 // The GELU the kernels use, on n floats: y[i] = wg_gelu(x[i]).
 WG_KERNEL(probe_gelu)(const float* x, float* y, int n) {
   const u32 i = wg_block_id() * WG_BLOCK + wg_lane_id();

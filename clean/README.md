@@ -151,6 +151,13 @@ anything else is refused. A gfx11 build compiles only the kernels that need no m
 builds a chosen list for either family. Both write `target.json` next to the code objects, and `Runner` takes its default
 accumulator row table from it (`WG_D_ROW` and the `d_row` argument still win).
 
+On a gfx11 card (headless, one GPU job at a time): `python clean/runner/selftest.py --build <build> --rocm <ROCm>` (the
+half-wave exchange and the software FP8 conversions; the matrix and hardware-conversion probes are gfx12 only),
+`WG_GPU_TEST=1 WG_BUILD=<build> WG_ROCM=<ROCm> python -m unittest clean.tests.test_gpu_stages clean.tests.test_gpu_q8` (the
+stages without matrix instructions, and the conversions on a set of input chunks) and
+`python clean/runner/q8_exhaustive.py --build <build> --rocm <ROCm>` (the conversions over all 2^32 FP32 patterns, about two
+minutes).
+
 ## Spec team: stages post and filter (spec 06)
 
 ```

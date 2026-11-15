@@ -17,7 +17,7 @@ PRELUDE = '#include "wg_platform.h"\n'
 KERNEL = 'WG_KERNEL(k)(%s) { const u32 i = wg_lane_id(); %s }\n'
 
 
-def compile_source(arch, body, args="u32* out, v8f* d", asm=False):
+def compile_source(arch, body, args="u32* out, v8f* d", asm=False, flags=()):
     """(return code, stderr, assembly or "") of one kernel `k` made from `body`, built for `arch`."""
     try:
         clang = build.find_clang(ROCM)
@@ -28,7 +28,7 @@ def compile_source(arch, body, args="u32* out, v8f* d", asm=False):
         with open(src, "w") as f:
             f.write(PRELUDE + KERNEL % (args, body))
         with patch.object(build, "ARCH", arch):
-            cmd = build.device_command(clang, ROCM, src, out, extra=["-I", build.KERNEL_DIR] + (["-S"] if asm else []))
+            cmd = build.device_command(clang, ROCM, src, out, extra=["-I", build.KERNEL_DIR] + list(flags) + (["-S"] if asm else []))
         r = subprocess.run(cmd, capture_output=True, text=True)
         text = ""
         if asm and r.returncode == 0:
@@ -90,6 +90,52 @@ class Gfx11Platform(unittest.TestCase):
         """swin.hip keeps `if (WG_NORM_DOT4 && ...)` branches with the macro 0: the error is only for a surviving call."""
         rc, err, _ = compile_source("gfx1100", "if (0 && out[i] == 7u) d[i][0] = wg_dot4_fp8(1, 2, d[i][0]); out[i] = i;")
         self.assertEqual(rc, 0, err)
+
+
+class FastE4m3(unittest.TestCase):
+    """The gfx11 FP32 -> E4M3 conversion rounds with (|x| + C) - C and needs IEEE arithmetic (the exhaustive check of the
+    result is runner/q8_exhaustive.py, on a GPU)."""
+
+    BODY = "d[i][0] = (float)wg_f32_to_e4m3(d[i][0]); out[i] = (u32)__builtin_bit_cast(u32, wg_q8_to_f16(d[i]));"
+    UNSAFE = ("-ffast-math", "-ffinite-math-only", "-fno-honor-nans", "-fassociative-math", "-fno-signed-zeros",
+              "-funsafe-math-optimizations", "-Ofast", "-ffp-model=fast", "-freciprocal-math")
+
+    @classmethod
+    def setUpClass(cls):
+        rc, err, _ = compile_source("gfx1100", "out[i] = i;")
+        if rc != 0:
+            raise unittest.SkipTest("cannot compile for gfx1100: " + err[:200])
+
+    def test_the_repos_flags_are_ieee(self):
+        with patch.object(build, "ARCH", "gfx1100"):
+            cmd = build.device_command("clang", ROCM, "a.hip", "a.co", soft_fp8=True)
+        for flag in self.UNSAFE:
+            self.assertNotIn(flag, cmd)
+
+    def test_fast_math_is_refused(self):
+        for flag in ("-ffast-math", "-ffinite-math-only"):
+            rc, err, _ = compile_source("gfx1100", self.BODY, flags=[flag])
+            self.assertNotEqual(rc, 0, flag)
+            self.assertIn("needs IEEE arithmetic", err)
+        # gfx12 keeps its own conversion and does not mind
+        self.assertEqual(compile_source("gfx1201", "out[i] = wg_f32_to_e4m3(d[i][0]);", flags=["-ffast-math"])[0], 0)
+
+    def test_the_rounding_sum_survives_the_compiler(self):
+        """With reassociation allowed the add of the constant would be folded away and the conversion would not round."""
+        body = "const v4u r = __builtin_bit_cast(v4u, wg_q8_to_f16(d[i])); out[i] = r[0] ^ r[1] ^ r[2] ^ r[3];"
+        rc, err, text = compile_source("gfx1100", body, asm=True)
+        self.assertEqual(rc, 0, err)
+        self.assertGreaterEqual(text.count("v_add_f32"), 8)
+        rc, err, text = compile_source("gfx1100", body, asm=True, flags=["-fassociative-math", "-fno-signed-zeros"])
+        self.assertEqual(rc, 0, err)
+        self.assertLess(text.count("v_add_f32"), 8)   # what the guard above would catch: the sums are gone
+
+    def test_plain_form_is_still_there(self):
+        """-DWG_SLOW_Q8 selects the plain software conversion (the timing baseline); it has no F16 forms."""
+        rc, err, _ = compile_source("gfx1100", "out[i] = wg_f32_to_e4m3(d[i][0]);", flags=["-DWG_SLOW_Q8"])
+        self.assertEqual(rc, 0, err)
+        rc, err, _ = compile_source("gfx1100", self.BODY, flags=["-DWG_SLOW_Q8"])
+        self.assertNotEqual(rc, 0)
 
 
 if __name__ == "__main__":
