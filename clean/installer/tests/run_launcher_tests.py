@@ -25,6 +25,7 @@ sys.path.insert(0, HERE)
 import mockpe  # noqa: E402  (synthetic PE files with a version resource)
 import run_installer_tests as suite  # noqa: E402  (mock content, snapshots, the synthetic model case)
 from run_installer_tests import read, sha, snapshot, diff, write, kept_runtime, unrecorded_wronggpu_files  # noqa: E402
+import launcher_isolation as iso  # noqa: E402  (#243: no search of the PC's own game folders)
 
 OPTI_INI = ("[Upscalers]\nDx12Upscaler=auto\n[Libraries]\nFfxDx12SRPath=auto\n[FSR]\nFsr4Update=auto\nUpscalerIndex=auto\n"
             "[Menu]\nShortcutKey=auto\nShowFps=auto\n")
@@ -43,6 +44,9 @@ class T:
         for k in [k for k in self.env if k.upper().startswith("WG_") or k.upper() in ("HIP_PATH", "ROCM_PATH", "LLVM_PATH", "HIP_DEVICE_LIB_PATH")]:
             self.env.pop(k)
         os.makedirs(self.env["LOCALAPPDATA"], exist_ok=True)
+        # the store libraries: <work>\libraries only; every store access logged and checked after each call (launcher_isolation)
+        iso.test_env(self.env, work)
+        self.expect_scan = False  # set by a test whose next call must search the test libraries (the guard's sensitivity)
         self.uninstall = suite.uninstall_root(self.env["LOCALAPPDATA"])  # this run's Apps & features root (the build's own)
         self.j = {}
 
@@ -59,16 +63,24 @@ class T:
         if os.path.exists(self.out):
             os.remove(self.out)
         cmd = [exe or self.exe] + list(args) + ["--log=" + self.log, "--out=" + self.out] + (["--data=" + self.data] if data else [])
+        start, astart = os.path.getsize(self.log) if os.path.isfile(self.log) else 0, iso.access_size(self.work)
         p = subprocess.run(cmd, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, cwd=cwd)
         try:
             with open(self.out, encoding="utf-8") as f:
                 self.j = json.load(f)
         except (OSError, ValueError):
             self.j = {}
+        iso.check_isolation(self.log, self.work, start, args, astart, self.expect_scan)
         return p.returncode
 
-    def raw(self, cmd, timeout=600):
-        return subprocess.run(cmd, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout).returncode
+    def raw(self, cmd, timeout=600, guard=True):
+        """A program run as it is (no --log/--out added); its store accesses checked as for run() (guard=False only for the old
+        baseline installer, which predates the access log: --run-old-baseline)."""
+        start, astart = os.path.getsize(self.log) if os.path.isfile(self.log) else 0, iso.access_size(self.work)
+        rc = subprocess.run(cmd, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout).returncode
+        if guard:
+            iso.check_isolation(self.log, self.work, start, cmd[1:3], astart)
+        return rc
 
     def logtail(self, n=1500):
         try:
@@ -92,6 +104,13 @@ class T:
 
     def entries_for(self, folder):
         return {k: v for k, v in self.reg_keys().items() if v.get("InstallLocation", "").lower() == folder.lower()}
+
+
+RUN_OLD_BASELINE = False
+
+
+def test_isolation_verbs(t, opti):  # #243, in launcher_isolation.py
+    iso.run_verbs(t, opti, sys.modules[__name__])
 
 
 def wait_gone(path, seconds=20):
@@ -769,9 +788,13 @@ def test_adopt_and_self_install(t, opti, baseline):
     if not baseline or not os.path.isfile(baseline):
         print("  (no 0.5.1 installer given: skipped)")
         return
+    if not RUN_OLD_BASELINE:  # (#243) an old build ignores WRONGGPU_TEST_LIBRARIES: never here unless asked, in a sandbox
+        print("  skipped: the 0.5.1 installer predates the test isolation (it may read the PC's own libraries); --run-old-baseline "
+              "runs it, only in a fully redirected sandbox")
+        return
     root, b, exe = game(t, "Old Game", exe="Old.exe")
     before = snapshot(root)
-    rc = t.raw([baseline, "/S", "/LOG=" + t.log, "/NOSCAN", "/FORCE", "/EXPERIMENTAL", "/DIR=" + root, "/OPTISCALER=" + opti])
+    rc = t.raw([baseline, "/S", "/LOG=" + t.log, "/NOSCAN", "/FORCE", "/EXPERIMENTAL", "/DIR=" + root, "/OPTISCALER=" + opti], guard=False)
     # the 0.5.1 test build wrote its entry under the shared test root of its time; released builds all use the one Apps &
     # features root, so the entry moves to this run's root (where this build looks), as if both had written the same one
     old_root = r"HKCU\Software\WrongGPU-CandidateTests\Uninstall"
@@ -3037,9 +3060,11 @@ def test_data_root_junctions(parent):
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode == 0
     def invoke_without_log(exe, verb):
         out = os.path.join(work, verb + "-result.json")
+        astart = iso.access_size(t.work)
         proc = subprocess.Popen([exe, verb, "--out=" + out], env=t.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         proc.communicate(timeout=180)
         log = os.path.join(t.env.get("TEMP", ""), "WrongGPU-junction-%d.log" % proc.pid)
+        iso.check_isolation(log if os.path.isfile(log) else None, t.work, 0, (verb,), astart)  # (#243: every launcher call)
         text = read(log).decode("utf-8", "replace") if os.path.isfile(log) else ""
         if os.path.isfile(log): os.remove(log)
         return proc.returncode, text
@@ -3064,11 +3089,15 @@ def main():
     ap.add_argument("--work", required=True)
     ap.add_argument("--baseline", help="the 0.5.1 installer (WRONGGPU_TESTING build, same test map) for the adoption cases")
     ap.add_argument("--hip", help="mock amdhip64_7.dll (WRONGGPU_HIP_RUNTIME)")
+    ap.add_argument("--run-old-baseline", action="store_true", help="also run --baseline (it predates the test isolation: only in a fully redirected sandbox)")
     ap.add_argument("--only", nargs="*", default=[], help="development: only these tests (names without test_) after the basics")
     ap.add_argument("--synth-f", default=os.environ.get("WGC_SYNTH_BINS", ""),
                     help="folder with the spec team's synthetic preset-F file synth-common-v0.bin (the test build's F map is synth-r0)")
     a = ap.parse_args()
+    global RUN_OLD_BASELINE
+    RUN_OLD_BASELINE = a.run_old_baseline
     work = os.path.abspath(a.work)
+    iso.self_test(work)  # (#243) first: no launcher call with a broken guard
     for d in ("games", "data", "localappdata", "programs", "startmenu"):
         shutil.rmtree(os.path.join(work, d), ignore_errors=True)
     os.makedirs(work, exist_ok=True)
@@ -3089,6 +3118,7 @@ def main():
         for f in t.failures:
             print("  FAILED:", f)
         return 1 if t.failures else 0
+    test_isolation_verbs(t, opti)
     test_scan_and_refusals(t, opti)
     test_install_settings_uninstall(t, opti)
     test_slot(t)

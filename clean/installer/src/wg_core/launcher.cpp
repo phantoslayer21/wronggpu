@@ -1278,7 +1278,7 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
     if (const GameRule* rule = GameRuleFor(target.exe); rule && rule->needsReFramework && !target.installed && !DetectReFramework(target.exeDir).found)
         Fail(NeedsReFrameworkText(*rule), EXIT_REFUSED);
     SystemInfo sys; sys.win = WindowsInfo(); sys.gpu = DetectGpu();
-    const std::vector<StoreGame> libraries = r.noScan ? std::vector<StoreGame>{} : ScanLibraries();
+    const std::vector<StoreGame> libraries = ctx.noLibraryScan ? std::vector<StoreGame>{} : ScanLibraries();  // (this operation's no-scan: RunOp)
     const ModelState model = FindModel(ctx, &target, r.modelDll.empty() ? wstring() : FullPath(r.modelDll), libraries);
     if (model.ok()) LogLine(ctx, L"model source: " + (model.reused ? wstring(L"model data already on this PC") : model.dll + L" (" + model.origin + L")"));
     const Checks c = RunChecks(ctx, target, sys, &model, r.force);
@@ -1413,6 +1413,14 @@ wstring PartlyText(const wstring& done, const std::vector<wstring>& warnings) {
 
 OpResult RunOp(Context& ctx, const OpRequest& r, Ui& ui) {
     OpResult res;
+    // this operation's no-scan (#243): the process's (--noscan, /NOSCAN, the window's) or its own (a job's noscan), for every
+    // search it makes (the AMD FSR 4 search and the other model read ctx.noLibraryScan); put back when it ends, so a job's
+    // noscan never reaches the next job of a batch
+    struct NoScan {
+        Context& c;
+        NoScan(Context& ctx, bool own) : c(ctx) { c.noLibraryScan = c.noScanAlways || own; }
+        ~NoScan() { c.noLibraryScan = c.noScanAlways; }
+    } noScan(ctx, r.noScan);
     try {
         switch (r.op) {
             case Op::Install: case Op::Repair: case Op::Update: InstallOp(ctx, r, ui, res); break;
