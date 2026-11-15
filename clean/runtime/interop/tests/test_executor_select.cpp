@@ -242,12 +242,9 @@ int main() {
       for (bool by_default : {true, false}) {
         for (bool hip_switch : {false, true}) {
           const std::string tag = w.substr(0, 40) + (by_default ? " default" : " forced") + (hip_switch ? " switch=on" : " switch=off");
-          expect(("K refused frame 1 -> the front end's upscaler: " + tag).c_str(),
-                 wgi::refused_frame_action(true, by_default, hip_switch, 1) == RefusedAction::kNoSwitch);
-          expect(("K refused frame 2 -> the front end's upscaler: " + tag).c_str(),
-                 wgi::refused_frame_action(true, by_default, hip_switch, 2) == RefusedAction::kNoSwitch);
-          expect(("K refused frame 3 in a row -> the context ends: " + tag).c_str(),
-                 wgi::refused_frame_action(true, by_default, hip_switch, wgi::kKRefusalRun) == RefusedAction::kEndContext);
+          // no counter, no state: every refused K frame is answered the same way (WG_ERROR_UNSUPPORTED), whatever came before
+          expect(("K refused frame -> WG_ERROR_UNSUPPORTED, the front end's upscaler: " + tag).c_str(),
+                 wgi::refused_frame_action(true, by_default, hip_switch) == RefusedAction::kNoSwitch);
         }
       }
     }
@@ -255,18 +252,16 @@ int main() {
            !wgi::frame_refused("input refused: texture format") && !wgi::frame_refused("model K: kernel failed"));
     // the other models keep their rules
     expect("M default + hip_switch=on -> switch to HIP (the 0.6.0 option)",
-           wgi::refused_frame_action(false, true, true, 1) == RefusedAction::kSwitchToHip);
+           wgi::refused_frame_action(false, true, true) == RefusedAction::kSwitchToHip);
     expect("M default + hip_switch=off -> front end's upscaler",
-           wgi::refused_frame_action(false, true, false, 1) == RefusedAction::kNoSwitch);
-    expect("M executor=dx12 -> bilinear fallback", wgi::refused_frame_action(false, false, true, 1) == RefusedAction::kBilinear);
+           wgi::refused_frame_action(false, true, false) == RefusedAction::kNoSwitch);
+    expect("M executor=dx12 -> bilinear fallback", wgi::refused_frame_action(false, false, true) == RefusedAction::kBilinear);
     const std::string rl = wgi::k_refusal_line(7, "frame not taken (nothing recorded): no output texture");
     expect("the refusal line names the frame, the reason, the front end's upscaler and 'never to the HIP executor'",
            has(rl, "frame 7: model K") && has(rl, "no output texture") && has(rl, "AMD FSR, else its stand-in") &&
                has(rl, "never to the HIP executor") && rl.find('\n') == std::string::npos);
-    const std::string el = wgi::k_refusal_end_line(9, 3, "frame not taken (nothing recorded): no output texture");
-    expect("the end line: 3 in a row, the context ends, the game keeps its upscaler, one line",
-           has(el, "3 frames in a row") && has(el, "context ends") && has(el, "game keeps its own upscaler") &&
-               el.find('\n') == std::string::npos);
+    expect("K and M (hip_switch=off) take the same path: the same action",
+           wgi::refused_frame_action(true, true, true) == wgi::refused_frame_action(false, true, false));
   }
   // test executor and unknown values
   {

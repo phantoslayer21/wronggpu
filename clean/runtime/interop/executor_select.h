@@ -22,8 +22,8 @@
 //    before) except for model K; frames it does not take get the bilinear fallback (no switch).
 //  - Model K (REVIEW-215b, oversight 2026-11-14): never moved to HIP by the sparkle guard (HIP-only: it is turned off
 //    for K, one line, K runs on D3D12), never by hip_switch (ignored for K, one line if set), never by a refused frame
-//    (the frame goes to the front end's own upscaler, AMD FSR, else its stand-in; three in a row end the context with one
-//    line and the game keeps its own upscaler). The frame capture and executor=hip stay opt-in diagnostics with a loud
+//    (the frame goes to the front end's own upscaler, AMD FSR, else its stand-in, the same path as model M's refused
+//    frames; a create-level refusal ends the context with one line and the game keeps its own upscaler). The frame capture and executor=hip stay opt-in diagnostics with a loud
 //    line. Auto on an adapter that is not an RDNA 4 Radeon keeps its rule for every model, logged (owner question).
 //  - `d3d12-test`: the offline test executor.
 #pragma once
@@ -165,19 +165,17 @@ inline std::string k_hip_switch_note(const std::string& option) {
          ": a frame the D3D12 executor does not take goes to the front end's own upscaler, never to HIP";
 }
 
-// What a context does with a frame the D3D12 executor did not take (nothing of it recorded). `run`: refused frames in a
-// row, this one included.
-//  kNoSwitch      the frame is answered WG_ERROR_UNSUPPORTED, the context stays usable (the front end's own upscaler
-//                 takes the frame: AMD FSR, else its stand-in);
+// What a context does with a frame the D3D12 executor did not take (nothing of it recorded).
+//  kNoSwitch      the frame is answered WG_ERROR_UNSUPPORTED, the context stays usable: the front end takes it from there
+//                 (AMD's FSR when it exists, else its stand-in; the same path for every model);
 //  kSwitchToHip   the default executor with hip_switch=on moves the context to HIP (never for model K);
-//  kBilinear      executor=dx12 (forced): the frame gets the bilinear fallback (never for model K);
-//  kEndContext    model K: kKRefusalRun refused frames in a row end the context with one line (failed), the game keeps
-//                 its own upscaler.
-enum class RefusedAction { kNoSwitch, kSwitchToHip, kBilinear, kEndContext };
-inline constexpr int kKRefusalRun = 3;
+//  kBilinear      executor=dx12 (forced): the frame gets the bilinear fallback (never for model K).
+// Model K has no state of its own here: every refused K frame is answered WG_ERROR_UNSUPPORTED, exactly as model M's
+// refused frames are with hip_switch=off, and the front end does the rest (REVIEW-215c, oversight 2026-11-15).
+enum class RefusedAction { kNoSwitch, kSwitchToHip, kBilinear };
 
-inline RefusedAction refused_frame_action(bool model_k, bool by_default, bool hip_switch, int run) {
-  if (model_k) return run >= kKRefusalRun ? RefusedAction::kEndContext : RefusedAction::kNoSwitch;
+inline RefusedAction refused_frame_action(bool model_k, bool by_default, bool hip_switch) {
+  if (model_k) return RefusedAction::kNoSwitch;
   if (by_default) return hip_switch ? RefusedAction::kSwitchToHip : RefusedAction::kNoSwitch;
   return RefusedAction::kBilinear;
 }
@@ -188,13 +186,7 @@ inline bool frame_refused(const std::string& err) { return err.rfind("frame not 
 
 inline std::string k_refusal_line(uint64_t frame, const std::string& why) {
   return "frame " + std::to_string(frame) + ": model K: the D3D12 executor does not take this frame (" + why +
-         "); the frame goes to the front end's own upscaler (AMD FSR, else its stand-in), never to the HIP executor; " +
-         std::to_string(kKRefusalRun) + " in a row end the model K context";
-}
-
-inline std::string k_refusal_end_line(uint64_t frame, int run, const std::string& why) {
-  return "frame " + std::to_string(frame) + ": model K: the D3D12 executor did not take " + std::to_string(run) +
-         " frames in a row (" + why + "); the model K context ends and the game keeps its own upscaler";
+         "); the frame goes to the front end's own upscaler (AMD FSR, else its stand-in), never to the HIP executor";
 }
 
 // The one warning line of a context with hip_switch=off whose D3D12 executor does not take a frame.
