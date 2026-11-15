@@ -358,6 +358,9 @@ def main(argv=None):
     ap.add_argument("--model-k", action="store_true",
                     help="also build Model K's kernels (clean/k/dx12/kernels; off by default: Model M's and Model L's "
                          "kernel sets unchanged)")
+    ap.add_argument("--define", action="append", default=[], metavar="NAME=VALUE",
+                    help="an extra preprocessor define for every kernel built (test variants: negative-control mutants, "
+                         "test counters; never for a shipped build)")
     ap.add_argument("--list", action="store_true",
                     help="print the kernels a build with these options compiles (name and code object, JSON) and exit: "
                          "the cheap check before a build (kernel_sets.json, tests/test_kernel_sets.py)")
@@ -367,6 +370,11 @@ def main(argv=None):
         return 0
     if not a.out:
         ap.error("--out is required")
+    extra_defs = {}
+    for kv in a.define:
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]*=-?[0-9A-Za-z_]+", kv):
+            ap.error(f"--define {kv!r} (NAME=VALUE)")
+        extra_defs[kv.split("=", 1)[0]] = kv.split("=", 1)[1]
     dst = os.path.join(a.out, "dx12")
     os.makedirs(dst, exist_ok=True)
     asm = build_asm_tool(a.out)
@@ -412,7 +420,7 @@ def main(argv=None):
 
     def build_one(job):
         src, d, out, k_source = job
-        defs = {"WG_BLOCK": d["group"], "WG_WAVE": d["wave"], **d["defines"]}
+        defs = {"WG_BLOCK": d["group"], "WG_WAVE": d["wave"], **d["defines"], **extra_defs}
         if d["group"] != d["block"]:
             defs["WG_LAUNCH_BLOCK"] = d["block"]
         info = {}
