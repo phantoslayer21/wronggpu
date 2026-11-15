@@ -24,11 +24,8 @@ scene, your settings) and a screenshot. Every report helps us fix it.
 - **Choosing it.** For one game: `WrongGPU.exe set "<the game's .exe>" model=L` (`model=M` goes back). In OptiScaler's
   menu it is the upscaler **WrongGPU Model L**, next to **WrongGPU Model M**.
 - **Runs on Direct3D 12** inside the game's own command list, like Model M: no AMD HIP runtime needed.
-- **It costs more GPU time than Model M.** In Cyberpunk 2077 at 1080p Quality (1280x720 upscaled to 1920x1080) on a
-  Radeon RX 9070 XT, the network takes 2.25 ms per frame with Model L and 1.17 ms with Model M, measured in the same
-  session at the same spot
-  ([clean/l/SPEED.md](https://github.com/phantoslayer21/wronggpu/blob/main/clean/l/SPEED.md) has the record and the
-  per-step split). At higher output resolutions the difference grows.
+- **GPU time: pending.** Model L's and Model M's in-game times for this release's builds are measured before the
+  release; the figures and their records go here.
 
 ### Model K (new)
 - **Another model, off by default and still under test.** Model K is a different super-resolution network from
@@ -41,11 +38,8 @@ scene, your settings) and a screenshot. Every report helps us fix it.
   menu it is the upscaler **WrongGPU Model K**.
 - **Runs on Direct3D 12** inside the game's own command list, like Model M: no AMD HIP runtime needed. Tested in
   Cyberpunk 2077 at 1080p Quality.
-- **GPU time.** In Cyberpunk 2077 at 1080p Quality (1280x720 upscaled to 1920x1080) on a Radeon RX 9070 XT, Model K's
-  network takes 1.01 ms per frame, measured while walking through a street scene
-  ([clean/k/records/cp2077-model-k-timing-2026-11-15.json](https://github.com/phantoslayer21/wronggpu/blob/main/clean/k/records/cp2077-model-k-timing-2026-11-15.json)
-  has the record). That was a different session and scene from the Model L and Model M figures above, so it is not a
-  side-by-side comparison.
+- **GPU time: pending.** Model K's in-game time is measured before the release with the same method as Model L and
+  Model M; the figure and its record go here.
 - If you used Preset K with an older WrongGPU, the launcher no longer asks to switch that game to Model M when it
   updates it: the game stays on Model K.
 
