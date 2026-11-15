@@ -1793,8 +1793,9 @@ int debug_messages(Gpu& g, const char* when) {
 // default 1080,1440,2160), the declared maximum render size both as the game usually gives it (a little above the render
 // size) and equal to the output (as Cyberpunk declares it), HDR (RGBA16F output) and LDR (RGBA8 output). Each context must
 // log "network runtime ready: executor dx12" and none of "could not take this context", "does not take this frame",
-// "about to start the HIP runtime" or "the HIP executor"; its frame must be WG_OK. No `executor` key is given: the
-// default rule (D3D12 on an RX 9000 card) is what is tested. The options name the model (a synthetic model for K).
+// "about to start the HIP runtime", "network runtime ready: executor hip" or "the HIP executor runs"; its frame must be WG_OK. No `executor` key is given: the
+// default rule (D3D12 on an RX 9000 card) is what is tested. The options name the model (a synthetic model for K). With
+// hip_switch=on in the options (R1: ignored for every model) each context must log the one "hip_switch=on is ignored" line.
 bool case_matrix(Gpu& g, const char* dll, const std::string& options, const std::string& outputs) {
   struct Mode {
     const char* name;
@@ -1809,6 +1810,7 @@ bool case_matrix(Gpu& g, const char* dll, const std::string& options, const std:
     pos = end + 1;
   }
   int contexts = 0, refused = 0;
+  const bool switch_on = options.find("hip_switch=on") != std::string::npos;  // R1: ignored, one line, no HIP
   for (const UINT oh : heights) {
     const UINT ow = oh * 16 / 9;
     for (const Mode& m : modes) {
@@ -1838,20 +1840,31 @@ bool case_matrix(Gpu& g, const char* dll, const std::string& options, const std:
             WgFrame f = s.frame(g, 1);
             f.motion_scale[0] = f.motion_scale[1] = 1.0f;
             f.reset = 1;
-            c.run(s, f, &rr);
+            g.begin();
+            f.command_list = g.list;
+            rr = c.be.b->dispatch(c.u, &f);
+            D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = {};  // any output format: the bytes are not read here, the copy
+            UINT64 rowBytes = 0;                         // makes the game's next pass touch the output
+            UINT rows = 0;
+            ID3D12Resource* rb = record_readback_any(g, s.out, s.outState, &fp, &rowBytes, &rows);
+            c.fe.submit();
+            rb->Release();
           }
           bool ready = false, bad = false;
+          int ignored = 0;
           for (const auto& line : g_log) {
+            ignored += line.find("hip_switch=on is ignored") != std::string::npos;
             ready |= line.find("network runtime ready: executor dx12") != std::string::npos;
             const bool refusal = line.find("could not take this context") != std::string::npos;
             refused += refusal;
             bad |= refusal || line.find("does not take this frame") != std::string::npos ||
                    line.find("about to start the HIP runtime") != std::string::npos ||
-                   line.find("the HIP executor") != std::string::npos;
+                   line.find("network runtime ready: executor hip") != std::string::npos ||
+                   line.find("the HIP executor runs") != std::string::npos;
           }
-          const bool ok = r == WG_OK && rr == WG_OK && ready && !bad;
-          std::printf("  matrix %s: create %d, frame %d, ready dx12 %d, refusal or HIP line %d%s\n", label.c_str(), (int)r, (int)rr,
-                      (int)ready, (int)bad, ok ? "" : "  <-- FAIL");
+          const bool ok = r == WG_OK && rr == WG_OK && ready && !bad && ignored == (switch_on ? 1 : 0);
+          std::printf("  matrix %s: create %d, frame %d, ready dx12 %d, refusal or HIP line %d, hip_switch line %d%s\n",
+                      label.c_str(), (int)r, (int)rr, (int)ready, (int)bad, ignored, ok ? "" : "  <-- FAIL");
           CHECK(ok);
         }
       }

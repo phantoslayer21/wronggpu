@@ -23,6 +23,8 @@ def main():
     ap.add_argument("--build", required=True, help="directory with wronggpu_runtime.dll and the kernels")
     ap.add_argument("--out", required=True, help="folder for the synthetic model and the log")
     ap.add_argument("--outputs", default="1080,1440,2160", help="output heights, comma separated")
+    ap.add_argument("--hip-switch-on", action="store_true",
+                    help="add hip_switch=on (ignored for every model): one log line per context, still Direct3D 12")
     a = ap.parse_args()
     out = Path(a.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -30,7 +32,8 @@ def main():
     wgcm, mapfile = write_k_model(str(model), random_network_params(11))
     build = Path(a.build).resolve()
     opts = ";".join(("model=K", "network=fused", f"kernels_dir={build}", f"model_dir={model}",
-                     f"model_k_dir={Path(wgcm).parent}", f"model_k_map={mapfile}"))
+                     f"model_k_dir={Path(wgcm).parent}", f"model_k_map={mapfile}") +
+                    (("hip_switch=on",) if a.hip_switch_on else ()))
     env = os.environ.copy()
     env.pop("WG_RUNTIME_OPTIONS", None)
     proc = subprocess.run([str(Path(a.exe).resolve()), str(build / "wronggpu_runtime.dll"), "matrix", opts, a.outputs],
