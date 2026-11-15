@@ -13,12 +13,14 @@ Skipped unless WG_GPU_TEST=1. Needs a build for the card with swin.co:
 
 WG_VARIANT=<name> runs a variant of the build (build.py --variants).
 """
+import json
 import os
 import unittest
 
 import numpy as np
 
 from clean.reference import swin as S
+from clean.runner import variants as V
 from clean.tests import test_gpu_enc1 as T1
 from clean.tests import test_kernels_emu as TK
 from clean.tests import test_kernels_emu_gfx11 as TG
@@ -248,6 +250,40 @@ class TestResidentGpu(T1.Enc1Gpu, TK.EmuTest):
                     ms[label] = r.time(stage, r.pack_weights(stage, p), x, S.window_offset(stage, 0), skip, repeats=50)
                 print(f"{stage} {name} render ({H}x{W} tokens): plain {ms['plain']:.3f} ms, resident {ms['resident']:.3f} ms")
                 self.assertTrue(all(0.0 < v < 1000.0 for v in ms.values()))
+
+
+class TestVariantsGpu(T1.Enc1Gpu, TK.EmuTest):
+    """The gfx11 variants of the build (variants.FAMILY_VARIANTS, built with build.py --variants): the bytes of the default gfx11
+    build on the card, for every block shape. They differ in speed only (the emulator says the same, test_kernels_emu_gfx11);
+    the F16 operands are exact and the matrix instruction and its K order are the same, so the card's rounding is too."""
+
+    CASES = [("enc1", 20, 24, (2, 2)), ("b1", 12, 16, (0, 0)), ("enc2", 12, 16, (0, 2)), ("dec1", 16, 20, (2, 0)),
+             ("dec2", 12, 16, (2, 0)), ("dec1", 36, 32, (2, 0)), ("b0", 36, 32, (2, 2))]
+
+    def built_variants(self):
+        manifest = os.path.join(os.environ["WG_BUILD"], V.MANIFEST)
+        if not os.path.isfile(manifest):  # built without --variants
+            return []
+        with open(manifest) as f:
+            built = json.load(f)
+        return [n for n in V.FAMILY_VARIANTS["gfx11"] if n in built]
+
+    def test_variants_bit_identical_to_base_on_the_card(self):
+        names = self.built_variants()
+        if not names:
+            self.skipTest("the build has no gfx11 variants (build.py --variants)")
+        base = self.Runner(os.environ["WG_BUILD"], os.environ.get("WG_ROCM", ""))
+        for name in names:
+            variant = self.Runner(os.environ["WG_BUILD"], os.environ.get("WG_ROCM", ""), variant=name)
+            for i, (stage, H, W, offset) in enumerate(self.CASES):
+                with self.subTest(variant=name, stage=stage, H=H, W=W):
+                    rng = np.random.default_rng(300 + i)
+                    p = S.random_params(stage, rng)
+                    x, skip = S.random_inputs(stage, H, W, rng)
+                    want = base.run(stage, base.pack_weights(stage, p), x, offset, skip)
+                    got = variant.run(stage, base.pack_weights(stage, p), x, offset, skip)
+                    for k in want:
+                        np.testing.assert_array_equal(got[k], want[k])
 
 
 if __name__ == "__main__":

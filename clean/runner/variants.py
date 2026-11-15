@@ -91,9 +91,12 @@ VARIANTS = {
     # bytes only for the stores: the exact conversion of runner/q8_exhaustive.py, without the code bytes in between (not for
     # the attention output o: with that one the C = 64 kernels spill 75).
     "f16wq": {"WG_F16_W": 1, "WG_F16_A": 1, "WG_F16_Q": 1, "WG_MINW_C64": 7},
+    # The C = 128 block kernel with an occupancy floor of 7 waves per SIMD (default build: 250 registers, 5 waves; here 206, no
+    # spills; a floor of 8 gives 192 registers and no spills too, with the F16 operands of f16wk both spill). Nothing else changes.
+    "c128w7": {"WG_MINW_C128": 7},
 }
 # The variants of each GPU family's build of swin.hip (gfx11: the gfx11 matrix wrappers); `--variants` alone builds these.
-FAMILY_VARIANTS = {"gfx11": ("f16w", "f16wa", "f16wq")}
+FAMILY_VARIANTS = {"gfx11": ("f16w", "f16wa", "f16wq", "c128w7")}
 
 # Variants whose output differs from base (a different GELU than the default). The sweep reports their mismatches but
 # does not treat them as an error.
