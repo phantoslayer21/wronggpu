@@ -10,6 +10,7 @@
 #include <cstring>
 #include <string>
 
+#include "../../converter/src/json.h"
 #include "../../runtime/embedded.h"
 #include "../../runtime/fpconv.h"
 #include "../../runtime/runtime_core.h"
@@ -75,6 +76,13 @@ struct KBlkParams {
   int w, h, ox, oy, nwx, nwy, cw, ch;
 };
 static_assert(sizeof(KBlkParams) == 184, "KBlkParams");
+// k_warm (clean/k/dx12/kernels/k_warm.hlsl, D3D12 only): up to twelve byte ranges r[i] of n[i] bytes, one 4-byte load
+// per `line` bytes of each, the XOR of the loaded words stored to dummy only when it equals key (a word nobody reads)
+struct KWarmParams {
+  DevPtr r[12], dummy;
+  uint32_t n[12], line, key;
+};
+static_assert(sizeof(KWarmParams) == 160, "KWarmParams");
 struct ExpParams {  // clean/kernels/exposure.hip WgExpParams
   int rw, rh, nx, ny, nparts, pad0;
   float inv_pi, K, inv_n;
@@ -249,6 +257,11 @@ const FusedIo kFusedIo[11] = {
 // f16 (variant "fused16", WIDE_DEFAULT16): k_stagew4h_<name> for e4, m, d4; 0 = k_stageh_<name>.
 // FP32: e4 and d4 with NG = 4 when they have at most 24 windows (k_launch.py WIDE4_SMALL_MAX_WINDOWS; 1440p output: 24,
 // faster with 4; 4K output: 40, faster with 2).
+// Defaults of the D3D12 latency options k_color_at / k_warm (KRuntime::create).
+const char* const kColorAtDefault = "input";
+const char* const kWarmAtDefault = "e0";
+const char* const kWarmToDefault = "d0";
+
 int wide_ng(const std::string& s, bool f16, int nwin) {
   if (f16) return s == "e4" || s == "m" || s == "d4" ? 4 : 0;
   if (s == "m") return 4;
@@ -301,7 +314,8 @@ const char* KRuntime::timing_info() {
          "(exposure_auto_diet, or exposure_auto_diet_c16 with input_copy, if auto-exposure, else k_expo_scalars) -> [1] start "
          "of input/color preparation -> [2] start of the first neural kernel -> [3] start of k_out_pixel (k_out_pixel_c with the compact pixel head) -> [4] end of "
          "an empty kernel after the final output-stage kernel; exposure = [0]-[1] (input conversion, exposure, k_expo_scalars), input "
-         "= [1]-[2] (k_in_tiled_color[_uniform], or separate k_out_color followed by k_in_tiled[_uniform] or k_in_color plus k_in_base/k_in_reset), network = [2]-[3] (eleven stage kernels, including hidden-history output in d0), output = [3]-[4] ("
+         "= [1]-[2] (k_in_tiled_color[_uniform], or separate k_out_color followed by k_in_tiled[_uniform] or k_in_color plus k_in_base/k_in_reset), network = [2]-[3] (eleven stage kernels, including hidden-history output in d0; on the D3D12 devices also "
+         "k_out_color, launched unordered after the stage k_color_at names, and k_warm when k_warm is on), output = [3]-[4] ("
          "k_out_pixel writing the game output)";
 }
 
@@ -312,11 +326,14 @@ bool KRuntime::alloc(DevPtr* p, size_t bytes, bool zero) {
   return true;
 }
 
-bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool external_io) {
+bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool external_io, bool native_direct) {
   cfg_ = c;
   dev_ = dev;
   alloc_ = std::move(alloc_fn);
   external_io_ = external_io;
+  native_direct_ = native_direct;
+  if (native_direct_ && (!external_io_ || c.backend != 3))
+    return fail("model K: native direct resources need external I/O on the native D3D12 device (backend 3)");
   build_dir_ = c.build_dir ? c.build_dir : ".";
   W_ = c.ow;
   H_ = c.oh;
@@ -358,6 +375,12 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   const std::string tiled = option(c, "input_tiled");
   if (!tiled.empty() && tiled != "0" && tiled != "1") return fail("input_tiled must be 0 or 1");
   tiled_input_ = tiled != "0";
+  // k_in_uniforms (1, the default: the tiled input kernel takes the host's frame-uniform values, k_in_tiled_uniform,
+  // where input_uniforms_safe allows; 0: diagnostic, always k_in_tiled, which computes the same values on the GPU: the
+  // same output, used by the D3D12 port check of k_in_tiled)
+  const std::string kuni = option(c, "k_in_uniforms");
+  if (!kuni.empty() && kuni != "0" && kuni != "1") return fail("model K: k_in_uniforms must be 0 or 1");
+  input_uniforms_ = kuni != "0";
   const std::string diag = option(c, "k_diag");
   if (!diag.empty() && diag != "input2" && diag != "copyin" && diag != "input2+copyin" && diag != "copyin+input2")
     return fail("model K: unknown k_diag " + diag + " (input2, copyin, input2+copyin)");
@@ -383,6 +406,54 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   if (!krule.empty() && krule != "spec" && krule != "v051")
     return fail("model K: unknown k_expo_rule " + krule + " (spec or v051)");
   expo_v051_ = krule == "v051";
+  // Latency of the small-grid stages on the D3D12 devices (no kernel arithmetic and no data flow changes):
+  // k_color_at (D3D12 devices, backends 2 and 3; default kColorAtDefault): launch k_out_color unordered right after
+  // the named stage (dev_->unordered_next(): no UAV barrier between that stage and k_out_color; the stage after it
+  // waits for both), so it runs beside a latency-bound stage instead of alone before the input stage. Nothing the
+  // network reads is written by k_out_color (ctap, ctapT: read by k_out_pixel_c only) and nothing it reads is written
+  // by the network. "input": before the input stage (HIP's order; HIP and the host emulator always keep it).
+  // k_warm (backend 3 only; default kWarmAtDefault; "off"): a k_warm dispatch launched unordered right after the
+  // named stage ("input": after the input stage, before e0) reads every 128-byte line (k_warm_line) of the weight
+  // blobs of the stages after it up to k_warm_to (default kWarmToDefault) into the caches, so the stages do not wait
+  // for cold weights. k_warm_groups: its grid (default 64).
+  const std::string kcol = option(c, "k_color_at");
+  if (!kcol.empty() && kcol != "input" && !k_stage(kcol)) return fail("model K: k_color_at: unknown stage " + kcol);
+  const std::string cat = kcol.empty() ? std::string(kColorAtDefault) : kcol;
+  color_at_ = c.backend >= 2 && cat != "input" ? cat : std::string();
+  const std::string kwarm = option(c, "k_warm");
+  if (!kwarm.empty() && kwarm != "off" && kwarm != "input" &&
+      (!k_stage(kwarm) || kwarm == "d2" || kwarm == "d1" || kwarm == "d0"))
+    return fail("model K: k_warm: " + kwarm + " is not off, input or a stage before d2");
+  warm_to_ = option(c, "k_warm_to");
+  if (warm_to_.empty()) warm_to_ = kWarmToDefault;
+  if (!k_stage(warm_to_)) return fail("model K: k_warm_to: unknown stage " + warm_to_);
+  const std::string wat = kwarm.empty() ? std::string(kWarmAtDefault) : kwarm;
+  warm_at_ = c.backend == 3 && wat != "off" ? wat : std::string();
+  const std::string kwl = option(c, "k_warm_line"), kwg = option(c, "k_warm_groups");
+  if (!kwl.empty()) warm_line_ = (unsigned)std::atoi(kwl.c_str());
+  if (!kwg.empty()) warm_groups_ = (unsigned)std::atoi(kwg.c_str());
+  if (warm_line_ < 4 || warm_line_ > 4096 || (warm_line_ & (warm_line_ - 1)))
+    return fail("model K: k_warm_line must be a power of two in 4..4096");
+  if (warm_groups_ < 1 || warm_groups_ > 1024) return fail("model K: k_warm_groups must be 1..1024");
+  // k_fill=<0..255> (test use, changes no value a frame writes): every buffer a frame writes and both history copies are
+  // filled with this byte after allocation, before the first frame, so that a test with a different byte per backend
+  // sees a write a frame did not make (first-frame and reset-only writes included) as a difference
+  const std::string kfill = option(c, "k_fill");
+  if (!kfill.empty()) {
+    char* end = nullptr;
+    const long v = std::strtol(kfill.c_str(), &end, 10);
+    if (end == kfill.c_str() || *end || v < 0 || v > 255) return fail("model K: k_fill must be 0..255");
+    fill_ = (int)v;
+  }
+  // The native D3D12 device (backend 3: the D3D12 executor, or k_bench.py's own-buffer timing) runs the exact default
+  // path only, and only when every kernel this context can launch has a port in <build>/dx12/manifest.json; both are
+  // checked here, before the model is loaded, so a refused context costs nothing more (for model K the context ends and
+  // the game keeps its own upscaler: there is no HIP route in a game).
+  if (c.backend == 3) {
+    if (!options_ok_direct()) return false;
+    const std::string missing = d3d12_missing();
+    if (!missing.empty()) return fail("model K: the D3D12 build has no port of " + missing);
+  }
   map_path_ = option(c, "model_k_map");
   if (map_path_.empty()) {
     map_path_ = join(build_dir_, "preset-K.v1.map.json");  // next to the library, else built into it
@@ -417,7 +488,6 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   // k_in_exact=1: the same input kernels with exact arithmetic, addressed as "kx/<name>"
   if (in_exact_ && !dev_->load_module_tagged(join(build_dir_, "k_io_exact.co"), "kx"))
     return fail("model K: " + dev_->err());
-
   // buffers
   for (auto& kv : blobs_) {
     DevPtr p;
@@ -444,15 +514,30 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
         !alloc(&Hh_[p], (size_t)Bw_ * Bh_ * 4 * 2, true))
       return false;
   const int ny = std::max(256, max_rh_ / 2);
-  if (!alloc(&color_, R * 16) || !alloc(&depth_, R * 4) || !alloc(&motion_, R * 8) || !alloc(&cpre_, R * 16) ||
-      !alloc(&cpre2_, R * 8) || !alloc(&ctap_, R * 8) || !alloc(&ctapT_, R * 2) ||
+  // native_direct: no dense inputs (the kernels read the game's textures) and no legacy input-stage maps (cpre, cpre2:
+  // the tiled input stage, the only one with direct forms, reads neither)
+  if (!(native_direct_ || (alloc(&color_, R * 16) && alloc(&depth_, R * 4) && alloc(&motion_, R * 8) &&
+                           alloc(&cpre_, R * 16) && alloc(&cpre2_, R * 8))) ||
+      !alloc(&ctap_, R * 8) || !alloc(&ctapT_, R * 2) ||
       // exp2tab: read only by the host emulator's k_out_pixel (the GPU uses v_exp_f16); a valid, zeroed buffer
       !alloc(&exp2tab_, 65536 * 2, true) || !alloc(&tables_, 8 * kTableBytes) ||
       !alloc(&expo_, 32, true) || !alloc(&expo_partials_, 4 * (size_t)cdiv(ny, 4)) || !alloc(&expo_computed_, 4, true) ||
-      !alloc(&expo_sync_, 4, true) || !alloc(&xs_, 16, true) || !alloc(&kexpo_, 16, true))
+      !alloc(&expo_sync_, 4, true) || !alloc(&xs_, 16, true) || !alloc(&kexpo_, 16, true) ||
+      (!warm_at_.empty() && !alloc(&warm_dummy_, 16, true)))
     return false;
   // the own output buffer (tests): dense RGB f32, dense RGBA f32 (FrameIo.out_rgba32f) or RGBA16F rows that fit
   if (!external_io_ && !alloc(&out_, (size_t)W_ * H_ * 16, true)) return false;
+  if (fill_ >= 0) {  // k_fill (test hook): the sentinel in everything a frame writes, before the first frame
+    auto fillb = [&](DevPtr p, size_t bytes) { return !p || dev_->memset(p, fill_, std::max<size_t>(bytes, 256)); };
+    bool ok = true;
+    for (const auto& kv : net_) ok = ok && fillb(kv.second, net_bytes_[kv.first]);
+    for (int p = 0; p < 2; ++p)
+      ok = ok && fillb(Hc_[p], P16 * 4 * 2) && fillb(L_[p], 4 * P16 * 2) && fillb(Hh_[p], (size_t)Bw_ * Bh_ * 4 * 2);
+    ok = ok && fillb(ctap_, R * 8) && fillb(ctapT_, R * 2) && fillb(cpre_, R * 16) && fillb(cpre2_, R * 8) &&
+         fillb(xs_, 16) && fillb(kexpo_, 16) &&
+         fillb(color_, R * 16) && fillb(depth_, R * 4) && fillb(motion_, R * 8);  // the own input copies (unused with caller buffers)
+    if (!ok) return dfail();
+  }
   // the filter-shape table (spec 43 section 7) of every level, computed once; a frame reads its level's set
   std::vector<uint16_t> tab((size_t)8 * kFilterEntries * kFilterValues);
   for (int l = 0; l < 8; ++l) k_filter_table(l, 1, tab.data() + (size_t)l * kFilterEntries * kFilterValues);
@@ -491,7 +576,7 @@ bool KRuntime::upload_inputs(int rw, int rh, const float* color, const float* de
 
 // The eleven stages for frame index f (k_net.py KNet.stage_plan, variant "fused" or "fused16"; k_launch.py
 // stage_fused_launch).
-bool KRuntime::network(int f) {
+bool KRuntime::network(int f, const std::function<bool(const char*)>& after) {
   int off[11][2];
   k_stage_offsets(f, offsets_table_, off);
   const auto& table = k_stage_table();
@@ -573,12 +658,39 @@ bool KRuntime::network(int f) {
                                      : (f16_ ? "k_stage2h_d0_hidden" : "k_stage2_d0_hidden");
       if (!launch(k0, grid, kThreads, &p, &hidden)) return false;
     } else if (!launch(k.c_str(), grid, (unsigned)(kThreads * (ng ? ng : 1)), &p)) return false;
+    if (after && !after(st.name)) return false;
     if (i < 10) {
       info_.offsets[i][0] = ox;  // WgRtFrameInfo has ten rows: e0 ... d1 (d0's offset is (4, 4))
       info_.offsets[i][1] = oy;
     }
   }
   return true;
+}
+
+// k_warm (backend 3): unordered after stage `at` (or the input stage), the weight blobs of the stages after it up to
+// warm_to_ into the caches.
+bool KRuntime::warm(const char* at) {
+  KWarmParams w = {};
+  w.dummy = warm_dummy_;
+  w.line = warm_line_;
+  w.key = 0x9e3779b9u;
+  int n = 0;
+  bool past = std::strcmp(at, "input") == 0;  // "input": from e0 on
+  uint64_t lines = 0;
+  for (const KStageInfo& st : k_stage_table()) {
+    if (past && n < 12) {
+      const size_t bytes = blobs_[st.name].size() & ~(size_t)3;
+      w.r[n] = wdev_[st.name];
+      w.n[n++] = (uint32_t)bytes;
+      lines += (bytes + warm_line_ - 1) / warm_line_;
+    }
+    if (std::strcmp(st.name, at) == 0) past = true;
+    if (warm_to_ == st.name) break;
+  }
+  if (!n) return true;
+  const unsigned grid = (unsigned)std::min<uint64_t>(warm_groups_, (lines + 255) / 256);
+  dev_->unordered_next();
+  return launch("k_warm", grid, 256, &w);
 }
 
 bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
@@ -593,6 +705,7 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
   }
   const int rw = fr.rw, rh = fr.rh;
   if (rw <= 0 || rh <= 0 || rw > max_rw_ || rh > max_rh_) return fail("render size larger than the maximum");
+  if (native_direct_ && !direct_preflight(fr, io)) return false;
   // Model K resets on the game's flag and on the first frame only (spec 44: the reset restarts the frame index). A
   // render-size change keeps the history: the histories are at output and base resolution, and the input and output
   // stages reproject them with this frame's render size (model M's spec 10 rule does not apply to K).
@@ -619,14 +732,18 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
   info_.jitter_prev[1] = reset ? fr.jitter[1] : jprev_[1];
   if (!mark(0)) return false;
 
-  // inputs: the caller's dense buffers (FrameIo), the interop's raw copies converted here, or the own test buffers
+  // inputs: the caller's dense buffers (FrameIo), the interop's raw copies converted here, or the own test buffers;
+  // native_direct: none (the "_direct" kernels read the bound textures; their pointer arguments stay 0)
   DevPtr cin = io && io->color ? io->color : color_, din = io && io->depth ? io->depth : depth_;
   DevPtr min_ = io && io->motion ? io->motion : motion_;
+  if (native_direct_) cin = din = min_ = 0;
   // input_copy (io->raw_inputs): the interop's copies of the game's textures in pitched rows, read directly (KIO_C16:
   // RGBA16F colour, not divided by pi: K applies kappa; R32F depth; KIO_M16: FP16 motion of motion_channels channels
   // with m = ms r + mo applied on load, as input_convert would have written it)
   const bool raw = io && io->raw_inputs;
   int cpitch = rw, mpitch = rw, zpitch = rw, mch = 2;
+  if (raw && cfg_.backend >= 2)  // the interop's HIP input copies: the D3D12 devices read dense buffers or the game's textures
+    return fail("model K: input-copy frames (raw_inputs) run on the HIP backend only");
   if (raw) {
     mch = io->motion_channels;
     if ((mch != 2 && mch != 4) || io->color_pitch % 8 || io->depth_pitch % 4 || io->motion_pitch % (2 * mch))
@@ -635,7 +752,7 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
     zpitch = io->depth_pitch / 4;
     mpitch = io->motion_pitch / (2 * mch);
   }
-  if (!cin || !din || !min_) return fail("frame without input buffers (interop)");
+  if (!native_direct_ && (!cin || !din || !min_)) return fail("frame without input buffers (interop)");
   if (diag_copyin_ && !raw && cin != color_) {  // k_diag=copyin: the inputs from K's own allocations (dense, as FrameIo)
     const size_t n = (size_t)rw * rh;
     if (!dev_->copy(color_, cin, n * 16) || !dev_->copy(depth_, din, n * 4) || !dev_->copy(motion_, min_, n * 8))
@@ -668,8 +785,10 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
     ep.inv_n = (float)(1.0 / ((double)ep.nx * ep.ny));
     if (raw ? !launch("exposure_auto_diet_c16", (unsigned)ep.nparts, 256, &cin, &cpitch, &expo_partials_, &expo_sync_,
                       &expo_computed_, &expo_, &ep, &first)
-            : !launch("exposure_auto_diet", (unsigned)ep.nparts, 256, &cin, &expo_partials_, &expo_sync_,
-                      &expo_computed_, &expo_, &ep, &first))
+            // native_direct: model M's direct form (dx12/kernels/exposure.hlsl: the same sums on the colour texels,
+            // nd_raw_color_xy, which are the input pass's dense f32 colour; inv_pi as here)
+            : !launch(native_direct_ ? "exposure_auto_diet_direct" : "exposure_auto_diet", (unsigned)ep.nparts, 256,
+                      &cin, &expo_partials_, &expo_sync_, &expo_computed_, &expo_, &ep, &first))
       return false;
   }
   KExpoArgs xa = {};
@@ -684,10 +803,15 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
   xa.e2 = 1.0f;
   xa.inv_pi = 1.0f / pi;
   DevPtr src = mode == 1 && io ? io->expo_src : expo_computed_;
+  // native_direct, mode 1: k_expo_scalars_direct reads E_cur from the bound exposure texture (t3, the texel the input
+  // pass copies into expo_src) instead of *src; src is then a valid but unread pointer
+  const bool expo_tex = native_direct_ && mode == 1;
+  if (expo_tex) src = expo_computed_;
   if (mode == 1 && !src) return fail("exposure from the game's texture without a source buffer");
   // k_expo_rule=v051 (A/B only): the 0.5.1 rule, the auto-exposure value as E_cur (so also as E_aux and E_prev)
   if (expo_v051_ && mode == 2 && auto_run) xa.src_mode = 1, xa.aux = 0, src = expo_computed_;
-  if (!launch("k_expo_scalars", 1, 32, &kexpo_, &src, &expo_computed_, &xs_, &xa)) return false;
+  if (!launch(expo_tex ? "k_expo_scalars_direct" : "k_expo_scalars", 1, 32, &kexpo_, &src, &expo_computed_, &xs_, &xa))
+    return false;
 
   // the frame's inputs (k_io.py frame_in): dense render-size images, motion in render pixels ([MVlo]; the interop
   // converts output-resolution motion to render pixels in its input pass)
@@ -734,22 +858,26 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
   const char* input_kernel = in_exact_ ? (reset ? "kx/k_in_reset" : "kx/k_in_base") : (reset ? "k_in_reset" : "k_in_base");
   // k_fast=1: the "_f" variant of an input / output stage kernel (k_io.hip KIO_FAST), else the exact kernel itself
   std::string kname_buf;
+  // native_direct: the kernels that read the inputs or write the output (k_out_color, the tiled input kernels,
+  // k_out_pixel[_c]) run as their "_direct" forms (same arguments; t0..t3 / u3 / b1 instead of the dense pointers)
   auto kname = [&](const char* n) -> const char* {
+    const bool io_kernel = std::strncmp(n, "k_in_", 5) == 0 || std::strncmp(n, "k_out_", 6) == 0;
     if (in_exact_ && std::strncmp(n, "k_in_", 5) == 0) {  // input-stage kernels from k_io_exact.co
       kname_buf = std::string("kx/") + n;
-      return kname_buf.c_str();
+    } else if (fast_) {
+      kname_buf = std::string(n) + "_f";
+    } else {
+      kname_buf = n;
     }
-    if (!fast_) return n;
-    kname_buf = std::string(n) + "_f";
+    if (native_direct_ && io_kernel) kname_buf += "_direct";
     return kname_buf.c_str();
   };
-  const bool use_tiled = tiled_input_ && cfg_.backend == 0 && fin.s == 0.5f && W_ > 0 && W_ <= 16384 && H_ > 0 && H_ <= 16384 &&
-      Bw_ > 0 && Bw_ <= 4096 && Bh_ > 0 && Bh_ <= 4096 && rw > 0 && rw <= .68 * W_ && rh > 0 && rh <= .68 * H_ &&
-      std::isfinite(fin.jx) && std::isfinite(fin.jy) && std::fabs(fin.jx) <= .5f && std::fabs(fin.jy) <= .5f;
+  // backend 1 (the host emulator) has no tiled input kernels; HIP (0) and the D3D12 devices (2 hybrid, 3 native) do
+  const bool use_tiled = tiled_input_ && cfg_.backend != 1 && fin.s == 0.5f && tiled_guard(rw, rh, fin.jx, fin.jy);
   // k_in_exact: the output colour taps by k_out_color (KFrame's exact plan), not by the tiled input kernel
   const bool use_tiled_color = use_tiled && !in_exact_ && !reset && 4LL * Bw_ >= W_ && 4LL * Bh_ >= H_;
   KiHost input_host = {};
-  const bool use_uniforms = use_tiled && input_uniforms_safe(fin, &input_host);
+  const bool use_uniforms = use_tiled && !native_direct_ && input_uniforms_ && input_uniforms_safe(fin, &input_host);
   auto input_stage = [&]() {
     if (use_tiled) {
       KInParams local = ip;
@@ -768,10 +896,12 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
       if (use_uniforms) ++input_uniform_launches_;
       ++tiled_launches_;
     } else {
-      if (!launch(in_exact_ ? "kx/k_in_color" : "k_in_color", cdiv((long long)rw * rh, kThreads), kThreads, &ip))
-        return false;
+      const std::string color_name = std::string(in_exact_ ? "kx/k_in_color" : "k_in_color") + (native_direct_ ? "_direct" : "");
+      if (!launch(color_name.c_str(), cdiv((long long)rw * rh, kThreads), kThreads, &ip)) return false;
       ++legacy_color_launches_;
-      if (!launch(input_kernel, cdiv(4LL * Bw_ * Bh_, kThreads), kThreads, &ip)) return false;
+      // native_direct: k_in_color / k_in_base read the game's textures (their "_direct" forms); k_in_reset reads buffers only
+      const std::string base_name = native_direct_ && !reset ? std::string(input_kernel) + "_direct" : input_kernel;
+      if (!launch(base_name.c_str(), cdiv(4LL * Bw_ * Bh_, kThreads), kThreads, &ip)) return false;
       ++legacy_base_launches_;
     }
     return true;
@@ -785,14 +915,27 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
   color.ctap = ctap_;
   color.ctapT = ctapT_;
   if (!mark(1)) return false;
-  if (!use_tiled_color && !launch(kname("k_out_color"), cdiv((long long)rw * rh, kThreads), kThreads, &color)) return false;
+  // k_color_at (D3D12 devices): k_out_color runs inside network() instead, unordered after that stage
+  const bool color_late = !use_tiled_color && !color_at_.empty();
+  if (!use_tiled_color && !color_late &&
+      !launch(kname("k_out_color"), cdiv((long long)rw * rh, kThreads), kThreads, &color))
+    return false;
   if (!input_stage()) return false;
   tiled_last_ = use_tiled;
   tiled_color_last_ = use_tiled_color;
   input_uniforms_last_ = use_uniforms;
+  if (warm_at_ == "input" && !warm("input")) return false;  // k_warm=input: before the first stage
 
   // network (spec 41 / 44)
-  if (!mark(2) || !network(f)) return false;
+  auto after = [&](const char* s) -> bool {
+    if (warm_at_ == s && !warm(s)) return false;
+    if (color_late && color_at_ == s) {
+      dev_->unordered_next();
+      if (!launch(kname("k_out_color"), cdiv((long long)rw * rh, kThreads), kThreads, &color)) return false;
+    }
+    return true;
+  };
+  if (!mark(2) || !network(f, after)) return false;
 
   // output stage (spec 43) into the caller's output: RGBA16F rows (interop output copy), dense RGBA f32 (the interop's
   // output pass for model K, FrameIo.out_rgba32f: the fourth value is the output alpha), dense RGB f32 (FORMATS.md
@@ -815,8 +958,11 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
   op.ctapT = ctapT_;
   const int hp = io ? io->out_half_pitch : 0;
   op.out = io && io->out ? io->out : out_;
-  if (!op.out) return fail("frame without an output buffer (interop)");
-  // the own output buffer (no FrameIo output) holds RGBA16F rows only if they fit
+  // native_direct: k_out_pixel[_c]_direct writes the bound output texture (u3; omode below stays RGB f32: the
+  // RGBA16F output-copy bytes are chosen by the b1 flag output_rne16, as for model M's direct post kernel)
+  if (native_direct_) op.out = 0;
+  if (!op.out && !native_direct_) return fail("frame without an output buffer (interop)");
+  // the own output buffer (no FrameIo output) holds RGBA16F rows only if they fit (k_bench.py's backend 3 timing)
   if (hp > 0 && op.out == out_ && (size_t)hp * H_ > (size_t)W_ * H_ * 16)
     return fail("model K: RGBA16F rows do not fit the own output buffer");
   if (hp > 0) {
@@ -864,8 +1010,107 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
   return true;
 }
 
+bool KRuntime::tiled_guard(int rw, int rh, float jx, float jy) const {
+  return W_ > 0 && W_ <= 16384 && H_ > 0 && H_ <= 16384 && Bw_ > 0 && Bw_ <= 4096 && Bh_ > 0 && Bh_ <= 4096 &&
+         rw > 0 && rw <= .68 * W_ && rh > 0 && rh <= .68 * H_ && std::isfinite(jx) && std::isfinite(jy) &&
+         std::fabs(jx) <= .5f && std::fabs(jy) <= .5f;
+}
+
+// Backend 3 (native D3D12): only the exact default path has D3D12 ports (owner 2026-10-09: K exact to the original;
+// the relaxed variants stay on HIP). k_head=full and k_expo_rule=v051 keep exact kernels and are allowed.
+bool KRuntime::options_ok_direct() {
+  const char* why = f16_                           ? "network=fused16 / fused8"
+                    : fast_                        ? "k_fast=1"
+                    : !in_exact_                   ? "the fast input stage (k_fast_in=1 / k_in_exact=0)"
+                    : (diag_input2_ || diag_copyin_) ? "k_diag"
+                                                     : nullptr;
+  if (why)
+    return fail(std::string("model K on the native D3D12 device runs the exact default path only (") + why +
+                " runs on HIP)");
+  return true;
+}
+
+std::vector<std::string> KRuntime::d3d12_kernels() const {
+  const std::string d = native_direct_ ? "_direct" : "";
+  std::vector<std::string> v;
+  if (hdr_) v.push_back("exposure_auto_diet" + d);  // auto-exposure (HDR only): at create or per frame (mode 2)
+  v.push_back("k_expo_scalars");
+  if (native_direct_) v.push_back("k_expo_scalars_direct");  // exposure from the game's texture (mode 1)
+  v.push_back("k_out_color" + d);
+  if (!native_direct_) v.push_back("kx/k_in_tiled_uniform");  // (no direct form: the direct frame uses k_in_tiled_direct)
+  v.push_back("kx/k_in_tiled" + d);  // input_uniforms_safe refusing the host uniforms
+  // the legacy input kernels: a render size above 0.68 x the output (up to 1.0, native AA / DLAA), a jitter outside
+  // [-0.5, 0.5], or input_tiled=0 (k_in_reset reads buffers only: no direct form)
+  v.push_back("kx/k_in_color" + d);
+  v.push_back("kx/k_in_reset");
+  v.push_back("kx/k_in_base" + d);
+  // the eleven stages as network() names them; e4 / d4 take NG = 2 above 24 windows, which depends on the frame's
+  // window offset (even, 0..6): every form this output size can launch
+  for (const KStageInfo& st : k_stage_table()) {
+    int lw, lh;
+    k_level_size(Bw_, Bh_, st.level, &lw, &lh);
+    for (int o = 0; o <= 6; o += 2) {
+      const std::string n = st.name;
+      const int ng = wide_ng(n, false, k_window_count(lw, lh, o, o));
+      std::string k;
+      if (st.head) k = compact_head_ ? "k_stage2_d0_hp" : "k_stage2_d0_hidden";
+      else if (ng) k = "k_stagew" + std::to_string(ng) + "_" + n;
+      else k = (n == "e0" || n == "e1" || n == "d1" ? "k_stage2_" : "k_stage_") + n;
+      if (std::find(v.begin(), v.end(), k) == v.end()) v.push_back(k);
+    }
+  }
+  v.push_back((compact_head_ ? "k_out_pixel_c" : "k_out_pixel") + d);
+  if (!warm_at_.empty()) v.push_back("k_warm");  // k_warm (option k_warm, backend 3)
+  v.push_back("timing_barrier");  // the timing marks (timing_log=1)
+  return v;
+}
+
+std::string KRuntime::d3d12_missing() const {
+  const std::string path = join(build_dir_, "dx12/manifest.json");
+  std::vector<char> bytes;
+  wgc::Json m;
+  std::string jerr;
+  if (!wg_read_file(path, &bytes) || !wgc::parse_json(std::string(bytes.begin(), bytes.end()), m, jerr))
+    return "any kernel (" + path + " missing or unreadable)";
+  std::map<std::string, std::string> co;  // port name -> the code object it stands for
+  if (const auto* ks = m.find("kernels"); ks && ks->is_array())
+    for (const auto& k : ks->items) {
+      const auto* n = k.find("name");
+      const auto* c = k.find("co");
+      if (n && n->is_string() && c && c->is_string()) co[n->text] = c->text;
+    }
+  std::string missing;
+  for (const std::string& k : d3d12_kernels()) {
+    auto it = co.find(k);
+    // the code object the port stands for must be one this runtime loads (else the device refuses it at launch)
+    const bool tagged = k.rfind("kx/", 0) == 0;
+    const bool co_ok = it != co.end() &&
+                       (tagged ? it->second == "k_io_exact.co"
+                               : (it->second == "k_block.co" || it->second == "k_block_wide.co" ||
+                                  it->second == "k_io.co" || it->second == "exposure.co" || it->second == "frame.co"));
+    if (co_ok) continue;
+    missing += (missing.empty() ? "" : ", ") + k + (it == co.end() ? "" : " (port of " + it->second + ")");
+  }
+  return missing;
+}
+
+bool KRuntime::direct_preflight(const WgRtFrame& fr, const FrameIo* io) {
+  if (!native_direct_) return fail("model K: not a native direct runtime");
+  if (!io || !io->native_direct) return fail("model K: the native direct runtime needs FrameIo.native_direct");
+  if (io->raw_inputs || io->out_half_pitch || io->out_rgba16f || io->motion_hi || io->motion_hi_direct || io->out_signal)
+    return fail("model K direct frame: no input copies, output rows, output-resolution motion buffer or staged hand-over");
+  if (io->exposure_mode < -1 || io->exposure_mode > 2) return fail("model K direct frame: unsupported exposure mode");
+  if (fr.reset < 0 || fr.reset > 2) return fail("model K direct frame: reset must be 0, 1 or 2");
+  if (fr.rw <= 0 || fr.rh <= 0 || fr.rw > max_rw_ || fr.rh > max_rh_)
+    return fail("model K direct frame: render size outside the configured maximum");
+  if (!std::isfinite(fr.jitter[0]) || !std::isfinite(fr.jitter[1])) return fail("model K direct frame: non-finite jitter");
+  // every render size up to the maximum and every finite jitter run on D3D12: the tiled input stage where its guard
+  // holds, else the legacy input kernels (both have direct forms)
+  return true;
+}
+
 const char* KRuntime::kernels() {
-  kernels_text_ = std::string("model=K network=") + (f8_ ? "fused8" : f16_ ? "fused16" : "fused") +
+  kernels_text_ = std::string(native_direct_ ? "io=direct_textures " : "") + "model=K network=" + (f8_ ? "fused8" : f16_ ? "fused16" : "fused") +
                   (f8_ ? " fp8_stages=" + std::to_string(f8data_.size()) + (f8why_.empty() ? "" : " fp8_kept:" + f8why_)
                        : std::string()) +
                   (in_exact_ ? " input=k_io_exact.co" : " input=k_io.co") + " output=k_io.co exposure=k_expo_scalars" +
@@ -910,6 +1155,13 @@ bool KRuntime::buffer(const std::string& name, DevPtr* p, size_t* bytes) {
       {"k.Hh", {Hh_[lp], (size_t)Bw_ * Bh_ * 8}}, {"filter.out", {out_, (size_t)W_ * H_ * (omode_last_ == OUT_RGBA32F ? 16 : 12)}},
       {"input.color", {color_, R * 16}},    {"input.depth", {depth_, R * 4}},
       {"input.motion", {motion_, R * 8}},
+      // the network's intermediate maps after the frame (D3D12 port checks, clean/k/dx12/k_compare.py): the skip maps
+      // S0..S4 (every encoder stage's block output), the ping-pong maps A / B (their last writers' contents) and the
+      // output colour taps of k_out_color / the tiled colour kernel
+      {"k.S0", {net_["S0"], net_bytes_["S0"]}}, {"k.S1", {net_["S1"], net_bytes_["S1"]}},
+      {"k.S2", {net_["S2"], net_bytes_["S2"]}}, {"k.S3", {net_["S3"], net_bytes_["S3"]}},
+      {"k.S4", {net_["S4"], net_bytes_["S4"]}}, {"k.A", {net_["A"], net_bytes_["A"]}},
+      {"k.B", {net_["B"], net_bytes_["B"]}},   {"k.ctap", {ctap_, R * 8}}, {"k.ctapT", {ctapT_, R * 2}},
   };
   // the head map exists only with k_head=full; the default frame holds the compact pixel head in the same buffer
   if (name == "k.N" && compact_head_)

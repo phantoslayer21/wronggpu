@@ -616,10 +616,16 @@ class Context {
       if (ch.executor.empty()) return fail(WG_ERROR_PARAMETER, "unknown executor " + o.executor);
       if (!ch.why.empty()) say(ch.warn ? WG_LOG_WARN : WG_LOG_INFO, ch.why);
       o.executor = ch.executor;  // model K's default mode below applies with the HIP executor
+      if (ch.sparkle_off) o.sparkle_guard = 0.0f;  // model K: the guard is HIP only; K stays on D3D12
       dx12_default_ = ch.by_default && ch.executor == "dx12";
       const RefusedFramePolicy pol = refused_frame_policy(o.hip_switch);  // clean/fe-wrapped-list
       hip_switch_ = pol.switch_to_hip;
       if (!pol.note.empty()) say(WG_LOG_WARN, pol.note);
+      if (q.model_k) {  // model K never moves to HIP, whatever hip_switch says
+        hip_switch_ = false;
+        const std::string kn = k_hip_switch_note(o.hip_switch);
+        if (!kn.empty()) say(WG_LOG_INFO, kn);
+      }
     }
     k_default_ = model_k_default(o);
     const bool split = services_ && services_->struct_size >= sizeof(WgFrontEndServices) && services_->split_command_list;
@@ -662,6 +668,8 @@ class Context {
       no_slots_ = true;  // its kernels read the game's textures: no slot buffers (fences and a 128 KB flag arena only)
       if (!exec_->prepare(&err) || !exec_->prepare_device(device_, &err) ||
           !make_shared_objects(false, "arena", &err) || !exec_->init(device_, set_, &err)) {
+        // model K: no HIP route in a game; the one error line below is the whole report, the game keeps its own upscaler
+        if (model_k_) return fail(WG_ERROR_UNSUPPORTED, dx12_refused_line_k(dx12_default_, err));
         say(WG_LOG_WARN, dx12_refused_line(dx12_default_, err));
         exec_.reset();
         release_set();
@@ -1129,17 +1137,23 @@ class Context {
     phase(5);
     // a frame the executor did not take (nothing of it recorded, e.g. native AA): with the default executor the HIP
     // executor takes over the context; with executor=dx12 the frame gets the bilinear fallback below
-    const bool refused = !ok && err.rfind("frame not taken", 0) == 0;
-    if (refused && dx12_default_ && !hip_switch_) {  // clean/fe-wrapped-list: no move to HIP; nothing recorded
+    const bool refused = !ok && frame_refused(err);
+    // a refused frame (executor_select.h refused_frame_action): model K, and model M with hip_switch=off, answer
+    // WG_ERROR_UNSUPPORTED and the front end takes the frame (AMD FSR, else its stand-in); the context stays usable
+    const RefusedAction refused_action = refused_frame_action(model_k_, dx12_default_, hip_switch_);
+    if (refused && refused_action == RefusedAction::kNoSwitch) {  // clean/fe-wrapped-list: no move to HIP; nothing recorded
       if (!no_switch_said_) {
         no_switch_said_ = true;
-        say(WG_LOG_WARN, no_switch_line(v, err));
+        say(WG_LOG_WARN, model_k_ ? k_refusal_line(v, err) : no_switch_line(v, err));
       }
       return WG_ERROR_UNSUPPORTED;  // one frame's answer: the context stays usable (failed_ not set)
     }
-    if (refused && dx12_default_ && switch_to_hip(v, err)) return *moved = true, WG_OK;
+    if (refused && refused_action == RefusedAction::kSwitchToHip && switch_to_hip(v, err)) return *moved = true, WG_OK;
     if (!refused) dx12_last_ = v;
     note_path(&input_path_, "input: read directly by the network's D3D12 kernels (executor dx12, no input pass)");
+    if ((flags_ & WG_CREATE_MOTION_OUTPUT_RES) && model_k_)
+      note_path(&motion_path_, "motion: output resolution, the texel under each render pixel's centre picked by the "
+                               "executor's D3D12 pass (as the input pass) and read by model K's D3D12 kernels");
     if ((flags_ & WG_CREATE_MOTION_OUTPUT_RES) && !model_k_)
       note_path(&motion_path_, motion_hi_use_
                                    ? (Converter::motion_fp16(f)
@@ -1474,6 +1488,10 @@ class Context {
     // render-size motion (point); without the create flag the runtime gets no such option and nothing changes
     if ((flags_ & WG_CREATE_MOTION_OUTPUT_RES) && !model_k_)
       n_rtopts_ += (n_rtopts_.empty() ? "" : ";") + std::string("motion_outres=") + o.motion_outres;
+    // model K on the D3D12 executor: the executor's D3D12 pass picks the motion texel under each render pixel's centre
+    // as the input pass does (executor_d3d12.cpp motion_outres=point); model K's runtime ignores the key
+    if ((flags_ & WG_CREATE_MOTION_OUTPUT_RES) && model_k_ && o.executor == "dx12")
+      n_rtopts_ += (n_rtopts_.empty() ? "" : ";") + std::string("motion_outres=point");
     // Pre-exposure: the runtime's default, pre_exposure=scale (color / pi into the network, result * pi). The rule of
     // spec 10 draft 4 (pre_exposure=original) stays an option: with auto-exposure and a pre-exposure far from 1 it
     // leaves the network input scaled by pi (Hogwarts Legacy, pi = 0.00077: twice the frame-to-frame change on

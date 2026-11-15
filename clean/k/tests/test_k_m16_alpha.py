@@ -93,7 +93,8 @@ class TestKM16Motion(unittest.TestCase):
         if not all(os.path.exists(os.path.join(ROOT, "clean", "k", "dx12", "kernels", f)) for f in ("k_in.hlsl", "k_out.hlsl")):
             self.skipTest("the D3D12 input and output ports are not in this tree")
         o, oi = read("k", "dx12", "kernels", "k_out.hlsl"), read("k", "dx12", "hlsl", "k_out.hlsli")
-        fr, ki = read("k", "dx12", "hlsl", "k_frame.hlsli"), read("k", "dx12", "kernels", "k_in.hlsl")
+        fr = read("k", "dx12", "hlsl", "k_frame.hlsli")
+        ki = read("k", "dx12", "kernels", "k_in.hlsl") + read("k", "dx12", "hlsl", "k_in_common.hlsli")
         self.assertNotIn("f_rmsx * r0", oi)
         self.assertNotIn("F.rmsx * wg_h2f_lo(r)", fr)
         self.assertIn("mvx = wg_h2f(wg_ld16(f_motion, i * 2u));", oi)
