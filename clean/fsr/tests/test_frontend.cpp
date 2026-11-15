@@ -158,10 +158,11 @@ static std::function<uint32_t()> g_timerFn;
 static int g_timersStarted = 0;
 static std::atomic<bool> g_createGate{true};  // FakeCreate (on the front end's create thread) waits while false
 static std::atomic<int> g_createCalls{0};  // every FakeCreate call (made an upscaler or not)
-// Allocation failure injection (TestDeviceHoldAllocationFailure): while set, every `new` in the process throws std::bad_alloc.
-static std::atomic<bool> g_throwOnNew{false};
+// Allocation failure injection (TestDeviceHoldAllocationFailure): while set, every `new` on THIS thread throws std::bad_alloc
+// (thread-local: a worker thread still finishing an earlier test must not be hit by it).
+static thread_local bool g_throwOnNew = false;
 void* operator new(std::size_t n) {
-    if (g_throwOnNew.load()) throw std::bad_alloc();
+    if (g_throwOnNew) throw std::bad_alloc();
     if (void* p = std::malloc(n ? n : 1)) return p;
     throw std::bad_alloc();
 }
