@@ -56,11 +56,24 @@ inline const char* LabelOf(char model) {
 // Shared plugin state. `hooked` is read by the front end through the exported query; `model` is the player's choice
 // within OptiScaler's FSR 3.X entry (0: AMD). `shown` is the model the front end reported as running (kShowSaved until
 // it reports one): the menu marks that one, so the model the choice record decided is what the player sees checked.
+// `unsaved`: a model click the plugin could not write to the model choice record yet (0: none); its entry says so in
+// the menu, "(not saved yet, retrying)", or with `refused` "(not saved: the choice record is full)".
 struct PluginState {
     std::atomic<bool> hooked{false};
     std::atomic<char> model{kDefaultModel};
     std::atomic<char> shown{kShowSaved};
+    std::atomic<char> unsaved{0};
+    std::atomic<bool> refused{false};
 };
+
+constexpr const char* kUnsavedSuffix = " (not saved yet, retrying)";
+constexpr const char* kRefusedSuffix = " (not saved: the choice record is full, see the plugin's log)";
+
+// The label drawn for entry `e`: its name, with the not-saved note when its click is not in the record yet.
+inline std::string EntryLabel(const Entry& e, const PluginState& st) {
+    if (st.unsaved.load() != e.model) return e.label;
+    return std::string(e.label) + (st.refused.load() ? kRefusedSuffix : kUnsavedSuffix);
+}
 
 inline char ShownModel(const PluginState& st) {
     const char s = st.shown.load();
@@ -84,7 +97,7 @@ bool SelectableThunkLogic(SelFn&& sel, const char* label, bool selected, int fla
     const char model = ShownModel(st);
     char clicked = 1;  // 1: nothing clicked
     for (const Entry& e : kEntries)
-        if (sel(e.label, selected && model == e.model, flags, size) && clicked == 1) clicked = e.model;
+        if (sel(EntryLabel(e, st).c_str(), selected && model == e.model, flags, size) && clicked == 1) clicked = e.model;
     if (sel(label, selected && model == kModelAmd, flags, size) && clicked == 1) clicked = kModelAmd;
     if (clicked == 1) return false;
     st.model.store(clicked);

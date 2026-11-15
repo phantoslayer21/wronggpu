@@ -76,8 +76,8 @@ def test_choice(t):
     t.check("...profile.ini says model=k", b"model=k\r\n" in profile_text(b))
     k_w, k_o = read(wini), read(oini)
     r1 = choice_record(b)
-    t.check("...the model choice record: model=K, source=launcher, ffx=K (the entry it set)",
-            r1.get("model") == "K" and r1.get("source") == "launcher" and r1.get("ffx") == "K", r1)
+    t.check("...the model choice record: exactly model=K, seq, source=launcher",
+            r1.get("model") == "K" and r1.get("source") == "launcher" and sorted(r1) == ["model", "seq", "source"], r1)
     rc = t.run("set", exe, "model=K")
     r2 = choice_record(b)
     t.check("set model=K again: wronggpu.ini and OptiScaler.ini unchanged; the record's seq grows (the newest choice)",

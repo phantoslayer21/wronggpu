@@ -3,7 +3,7 @@
 // ("WrongGPU"; with Model K and/or L: "WrongGPU Model M", "WrongGPU Model K", "WrongGPU Model L") in OptiScaler's MAIN
 // DX12 upscaler dropdown, leaving OptiScaler's "FSR 3.X(/4)" entry to mean AMD's upscaler again. WrongGPU is the default
 // entry; WrongGPU or AMD is remembered in wronggpu-asi.ini next to the plugin, and a click on a model entry is written to
-// the game's model choice record (src/model_choice_record.h), which decides the model. The front end reports back the
+// the game's model choice record (src/model_choice_record.h, under its cross-process lock), which decides the model. The front end reports back the
 // model it runs.
 //
 // How: OptiScaler calls our exported InitializeASI() after loading us (see its LoadAsiPlugins). The module that
@@ -109,29 +109,72 @@ std::wstring RecordPath() {
     return g_recordPath.empty() ? wgchoice::RecordPathIn(wgasi::PluginDataDir()).wstring() : g_recordPath;
 }
 
-// A click on one of the plugin's model entries: the record gets this model with the next seq (source=plugin); the
-// entry OptiScaler's list names (ffx) stays what the record knew.
+// A click on one of the plugin's model entries: the record gets this model with the next seq (source=plugin), under the
+// record's cross-process lock (model_choice_record.h). A click that cannot be written now stays pending: the menu says
+// "not saved yet", the front end runs it this session (WrongGpuAsiPendingChoiceV1), and it is tried again (at each create
+// and at most once a second while the menu is drawn) until it is written or a newer choice replaces it. At the end of the
+// sequence numbers the click is refused, logged and said in the menu.
+std::mutex g_pendingMutex;  // g_pending, g_lastTry
+wgchoice::Pending g_pending;
+ULONGLONG g_lastTry = 0;
+
 void RecordModelChoice(char model) {
     const std::wstring path = RecordPath();
-    wgchoice::Record cur, next;
+    wgchoice::Record after;
+    wgchoice::Pending pending;
     std::string why;
-    const wgchoice::ReadResult rr = wgchoice::ReadRecordFile(path, &cur, &why);
-    if (rr == wgchoice::ReadResult::Unreadable) {
-        AsiLog::Get().Write("model choice record " + wgasi::Utf8(path) + " cannot be read (" + why + "); the click is not recorded");
+    std::lock_guard lock(g_pendingMutex);
+    const wgchoice::Outcome o = wgchoice::RecordChoice(path, model, wgchoice::Source::Plugin, &after, &why, &pending, 1000);
+    g_lastTry = GetTickCount64();
+    if (o == wgchoice::Outcome::Written) {
+        g_pending = wgchoice::Pending{};
+        g_state.unsaved.store(0);
+        g_state.refused.store(false);
+        AsiLog::Get().Writef("model choice record: Model %c (seq %llu, source=plugin)%s", model, static_cast<unsigned long long>(after.seq),
+                             why.empty() ? "" : ("; " + why).c_str());
         return;
     }
-    if (rr == wgchoice::ReadResult::Corrupt) AsiLog::Get().Write("model choice record " + wgasi::Utf8(path) + " is corrupt (" + why + "); replaced");
-    if (!wgchoice::NextRecord(rr == wgchoice::ReadResult::Ok ? &cur : nullptr, model, wgchoice::Source::Plugin, wgchoice::kUnknown, &next)) {
-        AsiLog::Get().Write("model choice record: seq cannot grow; the click is not recorded");
+    if (o == wgchoice::Outcome::SeqExhausted) {
+        g_pending = wgchoice::Pending{};
+        g_state.refused.store(true);
+        g_state.unsaved.store(model);
+        AsiLog::Get().Write(std::string("ERROR: model choice record ") + wgasi::Utf8(path) + ": " + wgchoice::OutcomeWords(o) +
+                            ". Delete it or apply the model in the launcher.");
         return;
     }
-    if (wgchoice::WriteRecordFile(path, next, &why))
-        AsiLog::Get().Writef("model choice record: Model %c (seq %llu, source=plugin)", model, static_cast<unsigned long long>(next.seq));
-    else
-        AsiLog::Get().Write("model choice record " + wgasi::Utf8(path) + " could not be written (" + why + ")");
+    g_pending = pending;
+    g_state.refused.store(false);
+    g_state.unsaved.store(model);
+    AsiLog::Get().Write(std::string("ERROR: model choice record ") + wgasi::Utf8(path) + ": Model " + model + " not written now (" +
+                        wgchoice::OutcomeWords(o) + (why.empty() ? "" : ": " + why) + "); it runs this session and is tried again");
+}
+
+// Tries a pending click again. throttle: at most once a second (the menu thread); never waits on the lock long there.
+void RetryPendingChoice(bool throttle) {
+    if (!g_state.unsaved.load() || g_state.refused.load()) return;
+    std::unique_lock lock(g_pendingMutex, std::try_to_lock);
+    if (!lock.owns_lock() || !g_pending.active()) return;
+    const ULONGLONG now = GetTickCount64();
+    if (throttle && now - g_lastTry < 1000) return;
+    g_lastTry = now;
+    const char model = g_pending.model;
+    wgchoice::Record after;
+    std::string why;
+    const wgchoice::Outcome o = wgchoice::RetryPending(RecordPath(), &g_pending, &after, &why, throttle ? 50 : 1000);
+    if (o == wgchoice::Outcome::Written) {
+        g_state.unsaved.store(0);
+        AsiLog::Get().Writef("model choice record: Model %c written now (seq %llu, source=plugin)", model, static_cast<unsigned long long>(after.seq));
+    } else if (o == wgchoice::Outcome::Superseded) {
+        g_state.unsaved.store(0);
+        AsiLog::Get().Writef("model choice record: Model %c (not written earlier) dropped: a newer choice was recorded meanwhile", model);
+    } else if (o == wgchoice::Outcome::SeqExhausted) {
+        g_state.refused.store(true);
+        AsiLog::Get().Write(std::string("ERROR: model choice record: Model ") + model + " refused: " + wgchoice::OutcomeWords(o));
+    }
 }
 
 extern "C" bool WgSelectableThunk(const char* label, bool selected, int flags, const void* size) {
+    if (wgasi::IsFsr3xLabel(label)) RetryPendingChoice(true);
     bool ours = false;
     const bool clicked = wgasi::SelectableThunkLogic(
         [](const char* l, bool s, int f, const void* z) { return g_realSelectable(l, s, f, z); },
@@ -333,6 +376,7 @@ extern "C" __declspec(dllexport) __declspec(noinline) void InitializeASI() {
 
 // The earlier query (ABI 1): an older front end knows 0, 'M' and 'K' only, so Model L reads as Model M there.
 extern "C" __declspec(dllexport) int WrongGpuAsiQuery(int* hooked, char* model) {
+    RetryPendingChoice(false);  // the front end asks at each create: a click not written yet is tried again first
     if (hooked) *hooked = g_state.hooked.load() ? 1 : 0;
     if (model) {
         const char m = g_state.model.load();
@@ -350,6 +394,11 @@ extern "C" __declspec(dllexport) void WrongGpuAsiSetChoiceRecordV1(const wchar_t
 // The front end reports the model it runs (0 AMD, 'M', 'K', 'L'), so the menu marks that one; 1 = the saved choice.
 extern "C" __declspec(dllexport) void WrongGpuAsiShowModelV1(char model) {
     if (model == wgasi::kShowSaved || model == wgasi::kModelAmd || wgasi::LabelOf(model)) g_state.shown.store(model);
+}
+
+// A model click not written to the record yet (0: none). The front end runs it this session.
+extern "C" __declspec(dllexport) char WrongGpuAsiPendingChoiceV1() {
+    return g_state.refused.load() ? 0 : g_state.unsaved.load();
 }
 
 extern "C" __declspec(dllexport) int WrongGpuAsiQueryStatusV1(WrongGpuAsiStatusV1* status, uint32_t caller_size) {

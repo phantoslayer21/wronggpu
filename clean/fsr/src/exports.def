@@ -6,3 +6,4 @@ EXPORTS
     ffxDestroyContext
     ffxDispatch
     ffxQuery
+    WrongGpuHostSelectedV1

@@ -2,38 +2,35 @@
 #pragma once
 // The model choice record (0.6.5): ONE small file per game, wronggpu-setup\model-choice.ini in the folder of the front
 // end's wronggpu.ini (the launcher's state folder: an uninstall removes it by that name, a reinstall keeps it with the
-// game's settings; without that folder there is no record), that every place which can choose WrongGPU's model writes,
-// and which decides the model:
-//  - the launcher, when it applies a model (`WrongGPU.exe set <game> model=<m>`, or a change of the model item);
-//  - the front end, when the WrongGPU entry picked in OptiScaler's upscaler list (the FFX box, or OptiScaler 10's WrongGPU
-//    box) is not the one the record knows (`ffx`): the player picked it there;
+// game's settings; without that folder there is no record). It decides which WrongGPU model runs. Three places write it,
+// each only for an EVENT, a choice the player made:
+//  - the launcher, when it applies a model (`WrongGPU.exe set <game> model=<m>`, or a change of the model item); it then
+//    sets OptiScaler's UpscalerIndex to that model's entry, for display only;
+//  - the front end, when OptiScaler tells it that the player selected one of WrongGPU's entries in its upscaler list
+//    during the session (the WrongGPU edition of OptiScaler calls WrongGpuHostSelectedV1 in the front-end DLL); the
+//    stored index OptiScaler passes at a create is never taken for a choice;
 //  - the WrongGPU menu plugin (clean/fsr/asi), when the player clicks one of its model entries.
-// "Most recent" is the highest sequence number: a writer reads the record and writes seq + 1. No clock is involved, so a
-// clock set back or forward changes nothing.
+// "Most recent" is the highest sequence number. Every read-modify-write (read, seq + 1, write) runs under ONE lock per
+// game shared by all processes (a named mutex, Local\WrongGPU-choice-<hash of the record's full path>), so no update is
+// lost and seq never goes back. No clock is involved.
 //
 // The file, strictly (anything else is CORRUPT: logged and treated as "no choice", never as a partial one):
 //   ; comment lines and blank lines
 //   model=<M|K|L>
 //   seq=<1..18446744073709551615>          (decimal digits only, overflow refused)
 //   source=<launcher|ffx|plugin>
-//   ffx=<M|K|L|->                          (the WrongGPU entry the writer knew OptiScaler's list to name; - = not known)
-// each key exactly once, no other key, no spaces around '='. Writes are atomic: a temporary file in the same folder,
-// flushed, then renamed over the record (on Windows through its handle with POSIX semantics, else MoveFileExW
-// REPLACE_EXISTING | WRITE_THROUGH); a reader sees the old
-// record or the new one, never part of one. A temporary file a crash left behind is never read.
+// each key exactly once, no other key, no spaces around '='. Writes: a temporary file in the same folder, written in full
+// and flushed (both checked), then MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH) over the record (checked). Readers take
+// the lock too, so a reader never sees part of a record. A temporary file a crash left behind is never read.
 //
-// Why `ffx`: OptiScaler's list keeps naming the entry it last selected. The launcher sets that entry with its model (and
-// writes ffx = the entry it set), the plugin keeps the record's ffx (it cannot move OptiScaler's list), so an unchanged
-// list never looks like a new choice; only a list entry the record does not know is the player's choice there. With no
-// record at all, the entry seen at the first create counts as a choice (the launcher writes the record whenever it sets a
-// model and the entry together, so a game without a record has had no model choice yet).
+// Upgrade: a game without a record gets one from the launcher's existing choice (wronggpu.ini's model item, else Model M):
+// seq 1, source=launcher (MigrateRecord). The model is never taken from OptiScaler's stored index.
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
-#include <vector>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -51,15 +48,13 @@ constexpr const wchar_t* kStateFolder = L"wronggpu-setup";  // the launcher's st
 constexpr const wchar_t* kRecordFile = L"model-choice.ini";
 // The record of the game whose wronggpu.ini is in `iniDir`.
 inline std::filesystem::path RecordPathIn(const std::filesystem::path& iniDir) { return iniDir / kStateFolder / kRecordFile; }
-constexpr char kUnknown = '-';
 
 enum class Source { Launcher, Ffx, Plugin };
 
 struct Record {
-    char model = 'M';        // 'M', 'K', 'L'
-    uint64_t seq = 0;        // >= 1 in a valid record
+    char model = 'M';  // 'M', 'K', 'L'
+    uint64_t seq = 0;  // >= 1 in a valid record
     Source source = Source::Launcher;
-    char ffx = kUnknown;     // 'M', 'K', 'L' or kUnknown
 };
 
 inline const char* SourceName(Source s) { return s == Source::Launcher ? "launcher" : s == Source::Ffx ? "ffx" : "plugin"; }
@@ -86,7 +81,7 @@ inline bool ParseSeq(const std::string& v, uint64_t* out) {
 // false (with *why) for anything but one valid record.
 inline bool ParseRecord(const std::string& text, Record* out, std::string* why) {
     Record r;
-    bool hasModel = false, hasSeq = false, hasSource = false, hasFfx = false;
+    bool hasModel = false, hasSeq = false, hasSource = false;
     auto fail = [&](const std::string& w) {
         if (why) *why = w;
         return false;
@@ -120,16 +115,11 @@ inline bool ParseRecord(const std::string& text, Record* out, std::string* why) 
             else if (v == "plugin") r.source = Source::Plugin;
             else return fail("source is not launcher, ffx or plugin");
             hasSource = true;
-        } else if (k == "ffx") {
-            if (hasFfx) return fail("ffx given twice");
-            if (v.size() != 1 || !(IsModel(v[0]) || v[0] == kUnknown)) return fail("ffx is not M, K, L or -");
-            r.ffx = v[0];
-            hasFfx = true;
         } else {
             return fail("unknown key \"" + k + "\"");
         }
     }
-    if (!hasModel || !hasSeq || !hasSource || !hasFfx) return fail("model, seq, source and ffx are all needed");
+    if (!hasModel || !hasSeq || !hasSource) return fail("model, seq and source are all needed");
     *out = r;
     return true;
 }
@@ -137,52 +127,76 @@ inline bool ParseRecord(const std::string& text, Record* out, std::string* why) 
 inline std::string FormatRecord(const Record& r) {
     return std::string("; WrongGPU: the model chosen last for this game, by the launcher, OptiScaler's upscaler list (ffx) or the\r\n"
                        "; WrongGPU menu plugin. The highest seq is the most recent choice. Written by WrongGPU; do not edit.\r\n") +
-           "model=" + r.model + "\r\nseq=" + std::to_string(r.seq) + "\r\nsource=" + SourceName(r.source) + "\r\nffx=" + r.ffx + "\r\n";
+           "model=" + r.model + "\r\nseq=" + std::to_string(r.seq) + "\r\nsource=" + SourceName(r.source) + "\r\n";
 }
 
-// The record after a new choice of `model` by `source`, given the current one (`cur`, or none). `ffx`: what that writer
-// knows OptiScaler's list names (kUnknown to keep the current record's). false when seq cannot grow (2^64 - 1 reached).
-inline bool NextRecord(const Record* cur, char model, Source source, char ffx, Record* out) {
-    if (cur && cur->seq == UINT64_MAX) return false;
-    out->model = model;
-    out->seq = cur ? cur->seq + 1 : 1;
-    out->source = source;
-    out->ffx = ffx != kUnknown ? ffx : cur ? cur->ffx : kUnknown;
-    return true;
+// ---- the lock -------------------------------------------------------------------------------------------------------
+
+// The lock's name for a record: Local\WrongGPU-choice-<FNV-1a 64 of the record's full path, lower case, '\' separators>.
+// The launcher, the front end and the plugin (different processes and modules) derive the same name from the same file.
+inline std::wstring LockName(const std::filesystem::path& record) {
+    std::wstring full = record.wstring();
+#ifdef _WIN32
+    wchar_t buf[1024];
+    const DWORD n = GetFullPathNameW(full.c_str(), 1024, buf, nullptr);
+    if (n > 0 && n < 1024) full.assign(buf, n);
+#endif
+    uint64_t h = 1469598103934665603ull;
+    for (wchar_t c : full) {
+        if (c == L'/') c = L'\\';
+        if (c >= L'A' && c <= L'Z') c = wchar_t(c - L'A' + L'a');
+        h ^= uint64_t(uint16_t(c));
+        h *= 1099511628211ull;
+    }
+    wchar_t hex[17];
+    for (int i = 15; i >= 0; --i, h >>= 4) hex[i] = L"0123456789abcdef"[h & 15];
+    hex[16] = 0;
+    return std::wstring(L"Local\\WrongGPU-choice-") + hex;
 }
 
-enum class FfxStep {
-    None,     // nothing to write: the list names the entry the record knows (or no WrongGPU entry)
-    Adopt,    // the record did not know the list's entry (ffx = -): written with it, not a new choice
-    Choice,   // the player picked another WrongGPU entry in OptiScaler's list (or the first create without a record)
+// Holds the record's lock for its lifetime. ok(): taken (within `timeoutMs`). An abandoned lock (a holder that died) is
+// taken over: the record on disk is whole either way (atomic replacement).
+class Lock {
+public:
+    explicit Lock(const std::filesystem::path& record, unsigned timeoutMs = 3000) {
+#ifdef _WIN32
+        handle_ = CreateMutexW(nullptr, FALSE, LockName(record).c_str());
+        if (!handle_) return;
+        const DWORD w = WaitForSingleObject(handle_, timeoutMs);
+        ok_ = w == WAIT_OBJECT_0 || w == WAIT_ABANDONED;
+#else
+        (void)record;
+        (void)timeoutMs;
+        ok_ = true;
+#endif
+    }
+    ~Lock() {
+#ifdef _WIN32
+        if (handle_) {
+            if (ok_) ReleaseMutex(handle_);
+            CloseHandle(handle_);
+        }
+#endif
+    }
+    bool ok() const { return ok_; }
+    Lock(const Lock&) = delete;
+    Lock& operator=(const Lock&) = delete;
+
+private:
+    bool ok_ = false;
+#ifdef _WIN32
+    HANDLE handle_ = nullptr;
+#endif
 };
 
-// What a create that sees OptiScaler's list naming `seen` ('M', 'K', 'L', or kUnknown for none / an AMD version) does
-// to the record `cur` (or none): *out is the record to write for Adopt and Choice.
-inline FfxStep FfxObservation(const Record* cur, char seen, Record* out) {
-    if (!IsModel(seen)) return FfxStep::None;
-    if (!cur) {
-        NextRecord(nullptr, seen, Source::Ffx, seen, out);
-        return FfxStep::Choice;
-    }
-    if (cur->ffx == seen) return FfxStep::None;
-    if (cur->ffx == kUnknown) {
-        *out = *cur;
-        out->ffx = seen;
-        return FfxStep::Adopt;
-    }
-    if (!NextRecord(cur, seen, Source::Ffx, seen, out)) return FfxStep::None;
-    return FfxStep::Choice;
-}
-
-// ---- files --------------------------------------------------------------------------------------------------------
+// ---- files ----------------------------------------------------------------------------------------------------------
 
 enum class ReadResult { Missing, Ok, Corrupt, Unreadable };
 
+// Reads the record (call it under the record's Lock).
 inline ReadResult ReadRecordFile(const std::filesystem::path& path, Record* out, std::string* why) {
     std::string text;
 #ifdef _WIN32
-    // FILE_SHARE_DELETE: a writer may replace the record while it is read (the reader keeps the old one)
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
@@ -223,8 +237,9 @@ inline ReadResult ReadRecordFile(const std::filesystem::path& path, Record* out,
     return ParseRecord(text, out, why) ? ReadResult::Ok : ReadResult::Corrupt;
 }
 
-// Atomic replace: a temporary file next to the record (its name ends in .tmp; never read), written in full, flushed, then
-// moved over the record. Up to `attempts` tries (a reader or scanner can hold the record for a moment). false with *why.
+// Atomic replace: a temporary file next to the record (its name ends in .tmp; never read), written in full and flushed
+// (both checked), then MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH) over the record (checked). Up to `attempts` tries,
+// 20 ms apart. false with *why. Call it under the record's Lock.
 inline bool WriteRecordFile(const std::filesystem::path& path, const Record& r, std::string* why, int attempts = 3) {
     const std::string text = FormatRecord(r);
     std::string last;
@@ -232,41 +247,32 @@ inline bool WriteRecordFile(const std::filesystem::path& path, const Record& r, 
 #ifdef _WIN32
         const std::wstring tmp = path.wstring() + L"." + std::to_wstring(GetCurrentProcessId()) + L"." +
                                  std::to_wstring(GetTickCount64()) + L"." + std::to_wstring(i) + L".tmp";
-        HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE | DELETE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (h == INVALID_HANDLE_VALUE) {
             last = "cannot create the temporary file (Windows error " + std::to_string(GetLastError()) + ")";
         } else {
             DWORD written = 0;
             const bool wrote = WriteFile(h, text.data(), DWORD(text.size()), &written, nullptr) && written == text.size();
             const bool flushed = wrote && FlushFileBuffers(h);
-            bool moved = false;
-            if (wrote && flushed) {
-                // Rename through the handle with POSIX semantics (Windows 10 1809+, NTFS): the record is replaced also while
-                // a reader holds it open (readers open it with FILE_SHARE_DELETE and keep the old one); then flushed.
-                const std::wstring target = path.wstring();
-                std::vector<unsigned char> buf(sizeof(FILE_RENAME_INFO) + target.size() * sizeof(wchar_t));
-                auto* info = reinterpret_cast<FILE_RENAME_INFO*>(buf.data());
-                const DWORD flags = 0x1 /* FILE_RENAME_FLAG_REPLACE_IF_EXISTS */ | 0x2 /* FILE_RENAME_FLAG_POSIX_SEMANTICS */;
-                std::memcpy(buf.data(), &flags, sizeof flags);  // the union { ReplaceIfExists; Flags } at offset 0
-                info->RootDirectory = nullptr;
-                info->FileNameLength = DWORD(target.size() * sizeof(wchar_t));
-                std::memcpy(info->FileName, target.c_str(), target.size() * sizeof(wchar_t));
-                moved = SetFileInformationByHandle(h, static_cast<FILE_INFO_BY_HANDLE_CLASS>(22) /* FileRenameInfoEx */, info,
-                                                   DWORD(buf.size())) != 0;
-                if (moved) FlushFileBuffers(h);
-            }
-            CloseHandle(h);
-            if (!wrote || !flushed) {
-                last = wrote ? "cannot flush the temporary file" : "cannot write the temporary file";
+            const DWORD flushError = flushed ? 0 : GetLastError();
+            const bool closed = CloseHandle(h) != 0;
+            if (!wrote) {
+                last = "cannot write the temporary file";
                 DeleteFileW(tmp.c_str());
-            } else if (moved || MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-                return true;  // (MoveFileExW: older Windows or file systems without the POSIX rename)
+            } else if (!flushed) {
+                last = "cannot flush the temporary file (Windows error " + std::to_string(flushError) + ")";
+                DeleteFileW(tmp.c_str());
+            } else if (!closed) {
+                last = "cannot close the temporary file";
+                DeleteFileW(tmp.c_str());
+            } else if (MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                return true;
             } else {
                 last = "cannot replace the record (Windows error " + std::to_string(GetLastError()) + ")";
                 DeleteFileW(tmp.c_str());
             }
         }
-        Sleep(20);
+        if (i + 1 < attempts) Sleep(20);
 #else
         const std::filesystem::path tmp = path.string() + "." + std::to_string(i) + ".tmp";
         {
@@ -289,6 +295,103 @@ inline bool WriteRecordFile(const std::filesystem::path& path, const Record& r, 
     }
     if (why) *why = last;
     return false;
+}
+
+// ---- the operations, each one read-modify-write under the lock ------------------------------------------------------
+
+enum class Outcome { Written, NoLock, Unreadable, SeqExhausted, WriteFailed, Superseded };
+
+inline const char* OutcomeWords(Outcome o) {
+    switch (o) {
+    case Outcome::Written: return "written";
+    case Outcome::Superseded: return "a newer choice was recorded meanwhile (this one is dropped)";
+    case Outcome::NoLock: return "the record's lock could not be taken";
+    case Outcome::Unreadable: return "the record cannot be read (not written over)";
+    case Outcome::SeqExhausted: return "the record's sequence number is at its end (18446744073709551615): choice refused";
+    case Outcome::WriteFailed: return "the record could not be written";
+    }
+    return "?";
+}
+
+// A choice that could not be written when it was made (NoLock, Unreadable, WriteFailed): kept by its writer, used for
+// the session and written later (RetryPending). base: the seq the record had when the choice was made (0: no record or a
+// corrupt one); baseKnown false: the record could not be read then.
+struct Pending {
+    char model = 0;  // 0: nothing pending
+    Source source = Source::Plugin;
+    bool baseKnown = false;
+    uint64_t baseSeq = 0;
+    bool active() const { return model != 0; }
+};
+
+// A choice of `model` by `source`: read the record and write seq + 1 (seq 1 without a record, or over a corrupt one,
+// which *why then names). `retry`: a pending choice being written later: dropped (Superseded) when the record moved past
+// its base meanwhile. *after: the record written. *pending (when given): filled on a failure that can be retried. Any
+// failure leaves the record as it was. Call it under the record's Lock (RecordChoice / RetryPending take it).
+inline Outcome RecordChoiceUnlocked(const std::filesystem::path& path, char model, Source source, Record* after, std::string* why,
+                                    Pending* pending = nullptr, const Pending* retry = nullptr) {
+    Record cur;
+    std::string err;
+    const ReadResult rr = ReadRecordFile(path, &cur, &err);
+    if (rr == ReadResult::Unreadable) {
+        if (why) *why = err;
+        if (pending) *pending = Pending{model, source, false, 0};
+        return Outcome::Unreadable;
+    }
+    const uint64_t seqNow = rr == ReadResult::Ok ? cur.seq : 0;
+    if (retry && retry->baseKnown && seqNow != retry->baseSeq) return Outcome::Superseded;
+    if (rr == ReadResult::Corrupt && why) *why = "a corrupt record was replaced (" + err + ")";
+    if (rr == ReadResult::Ok && cur.seq == UINT64_MAX) return Outcome::SeqExhausted;
+    const Record next{model, seqNow + 1, source};
+    if (!WriteRecordFile(path, next, &err)) {
+        if (why) *why = err;
+        if (pending) *pending = Pending{model, source, true, seqNow};
+        return Outcome::WriteFailed;
+    }
+    if (after) *after = next;
+    return Outcome::Written;
+}
+
+inline Outcome RecordChoice(const std::filesystem::path& path, char model, Source source, Record* after, std::string* why,
+                            Pending* pending = nullptr, unsigned lockMs = 3000) {
+    Lock lock(path, lockMs);
+    if (!lock.ok()) {
+        if (pending) *pending = Pending{model, source, false, 0};
+        return Outcome::NoLock;
+    }
+    return RecordChoiceUnlocked(path, model, source, after, why, pending);
+}
+
+// Writes a pending choice (see Pending). Written or Superseded: nothing is pending any more (*p cleared); SeqExhausted:
+// cleared too (refused for good); otherwise *p stays for a later try.
+inline Outcome RetryPending(const std::filesystem::path& path, Pending* p, Record* after, std::string* why, unsigned lockMs = 3000) {
+    if (!p->active()) return Outcome::Superseded;
+    Lock lock(path, lockMs);
+    if (!lock.ok()) return Outcome::NoLock;
+    const Pending retry = *p;
+    const Outcome o = RecordChoiceUnlocked(path, retry.model, retry.source, after, why, nullptr, &retry);
+    if (o == Outcome::Written || o == Outcome::Superseded || o == Outcome::SeqExhausted) *p = Pending{};
+    return o;
+}
+
+// The record as it is now, read under the lock. A game without one (an install from before 0.6.5) gets one from the
+// launcher's existing choice (`launcherModel`, 'M' / 'K' / 'L', or 0 for none: Model M), seq 1, source=launcher.
+// Returns Ok (also after the migration; *out set, *migrated true then), Corrupt or Unreadable (*why; nothing written), or
+// Missing when the lock or the migration's write failed (*why).
+inline ReadResult LoadOrMigrateRecord(const std::filesystem::path& path, char launcherModel, Record* out, bool* migrated, std::string* why) {
+    if (migrated) *migrated = false;
+    Lock lock(path);
+    if (!lock.ok()) {
+        if (why) *why = "the record's lock could not be taken";
+        return ReadResult::Unreadable;
+    }
+    const ReadResult rr = ReadRecordFile(path, out, why);
+    if (rr != ReadResult::Missing) return rr;
+    const Record first{IsModel(launcherModel) ? launcherModel : 'M', 1, Source::Launcher};
+    if (!WriteRecordFile(path, first, why)) return ReadResult::Missing;
+    *out = first;
+    if (migrated) *migrated = true;
+    return ReadResult::Ok;
 }
 
 }  // namespace wgchoice

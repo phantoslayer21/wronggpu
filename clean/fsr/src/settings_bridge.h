@@ -46,6 +46,9 @@ int32_t Setting(uint32_t slot, std::string* described = nullptr, bool* isDefault
 // The OptiScaler.ini [<folder>] UpscalerIndex poll (mtime at most once per second); applies a changed index as if it
 // had been chosen in the menu (writer only). True while there is something to poll (custom slot and writer).
 bool PollHostIni();
+// false: the poll leaves WrongGPU's SR model entries alone (a launcher install: the model choice record decides the
+// model, and the index the host's ini stores is no choice); RR mode entries are applied as before. Default true.
+void SetHostIniPollModels(bool apply);
 bool HostIniPollActive();
 
 // For tests and logs.

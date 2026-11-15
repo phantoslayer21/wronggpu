@@ -215,10 +215,9 @@ bool NeedsElevation(const wstring& dir);
 // gets the launcher's choice with the next seq even when the model is the same (clean/fsr/src/model_choice_record.h).
 void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vector<wstring>& notes, std::vector<wstring>* warnings = nullptr,
                   bool modelChosen = false);
-// The launcher's model choice into the game's model choice record (wronggpu-setup\model-choice.ini), with the next seq;
-// ffx: the WrongGPU entry OptiScaler.ini names now ('-' when not known).
-void WriteLauncherModelChoice(Context& ctx, const wstring& dir, char model, char ffx, std::vector<wstring>& notes,
-                              std::vector<wstring>* warnings);
+// The launcher's model choice into the game's model choice record (wronggpu-setup\model-choice.ini), with the next seq,
+// source=launcher. Call it holding the record's lock (wgchoice::Lock). false: not written (said in the notes and warnings).
+bool WriteLauncherModelChoice(Context& ctx, const wstring& dir, char model, std::vector<wstring>& notes, std::vector<wstring>* warnings);
 Profile GameProfile(const wstring& dir);  // profile.ini, else the profile its wronggpu.ini implies
 // The OptiScaler tab: reset / keep / edits of OpRequest written into the installed OptiScaler.ini with the inikey
 // journal in the record. Nothing to do: no change.

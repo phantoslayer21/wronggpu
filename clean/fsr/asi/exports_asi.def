@@ -6,3 +6,4 @@ EXPORTS
     WrongGpuAsiQueryStatusV1
     WrongGpuAsiSetChoiceRecordV1
     WrongGpuAsiShowModelV1
+    WrongGpuAsiPendingChoiceV1

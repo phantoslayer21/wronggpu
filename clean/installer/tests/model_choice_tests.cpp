@@ -70,14 +70,28 @@ int main() {
         require(EffectiveSettings(toL, "")["model"] == "l" && EffectiveSettings(fresh, "")["model"] == "m" && EffectiveSettings(withK, "")["model"] == "m",
                 "the file's model: L from its last model item, M otherwise");
         require(EffectiveSettings("[fsr]\r\nruntime_options = model=L;model=M\r\n", "")["model"] == "m", "the file's model: the last model item counts");
-        // ---- the model choice record's inputs (launcher.cpp ApplyProfile: the model the files run, the entry OptiScaler names)
+        // ---- the model choice record's input (launcher.cpp ApplyProfile: the model the files run)
         require(ModelOfWronggpuIni(toL) == 'L' && ModelOfWronggpuIni(fresh) == 'M' && ModelOfWronggpuIni("[fsr]\r\nupscaler = network\r\n") == 0 &&
                     ModelOfWronggpuIni("[fsr]\r\nruntime_options = model=L;model=m\r\n") == 'M' && ModelOfWronggpuIni("[fsr]\r\nruntime_options = model=Q\r\n") == 0,
                 "ModelOfWronggpuIni: the last model item, M / K / L, else none");
-        require(ModelEntryOfOptiIni("[WrongGPU]\r\nUpscalerIndex=" + string(kModelLEntryIndex) + "\r\n") == 'L' &&
-                    ModelEntryOfOptiIni("[FSR]\r\nUpscalerIndex=0\r\n") == 'M' && ModelEntryOfOptiIni("[FSR]\r\nUpscalerIndex=auto\r\n") == '-' &&
-                    ModelEntryOfOptiIni("[Menu]\r\nShowFps=auto\r\n") == '-',
-                "ModelEntryOfOptiIni: the WrongGPU entry UpscalerIndex names (L's index, 0 = M), '-' otherwise");
+        // ---- the launcher's model choice sets OptiScaler's entry ALWAYS (after the record; display only): from AMD's or any
+        // other value, and the key created when it is missing; [WrongGPU] of OptiScaler 10's slot, else [FSR]
+        {
+            string v;
+            const string amdSlot = "[WrongGPU]\r\nUpscalerIndex=4\r\n[FSR]\r\nUpscalerIndex=3\r\n";
+            const string toLSlot = SetOptiModelEntry(amdSlot, 'L');
+            require(IniHasKey(toLSlot, "WrongGPU", "UpscalerIndex", &v) && v == kModelLEntryIndex && IniHasKey(toLSlot, "FSR", "UpscalerIndex", &v) && v == "3",
+                    "SetOptiModelEntry: the slot's index from AMD's value to L's entry; [FSR] (AMD's own) untouched");
+            const string toM = SetOptiModelEntry("[FSR]\r\nUpscalerIndex=auto\r\n", 'M');
+            require(IniHasKey(toM, "FSR", "UpscalerIndex", &v) && v == "0", "SetOptiModelEntry: another value to Model M's entry (0)");
+            const string created = SetOptiModelEntry("[Menu]\r\nShowFps=auto\r\n", 'L');
+            require(IniHasKey(created, "FSR", "UpscalerIndex", &v) && v == kModelLEntryIndex && IniHasKey(created, "Menu", "ShowFps"),
+                    "SetOptiModelEntry: no key: created under [FSR], the rest kept");
+            const string createdSlot = SetOptiModelEntry("[WrongGPU]\r\nPath=custom\r\n[Menu]\r\nShowFps=auto\r\n", 'M');
+            require(IniHasKey(createdSlot, "WrongGPU", "UpscalerIndex", &v) && v == "0" && !IniHasKey(createdSlot, "FSR", "UpscalerIndex"),
+                    "SetOptiModelEntry: a [WrongGPU] section without the key: created there");
+            require(SetOptiModelEntry(toLSlot, 'L') == toLSlot, "SetOptiModelEntry: the same entry again changes nothing");
+        }
 
         // ---- OptiScaler.ini: the entry OptiScaler starts with -----------------------------------------------------------
         const string L = kModelLEntryIndex;

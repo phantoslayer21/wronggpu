@@ -6,6 +6,7 @@
 #define WG_SETTINGS_IO_IMPLEMENTATION
 #include "wg_settings_io.h"
 
+#include <atomic>
 #include <mutex>
 
 #include "settings_bridge.h"
@@ -180,6 +181,9 @@ wgfsr::MenuSettings Menu() {
     return m;
 }
 
+std::atomic<bool> g_pollModels{true};
+void SetHostIniPollModels(bool apply) { g_pollModels.store(apply); }
+
 bool HostIniPollActive() {
     State& s = S();
     return s.initialised && s.poll.configured() && s.block.is_writer();
@@ -196,6 +200,11 @@ bool PollHostIni() {
     if (!e) {
         L().WriteLine("settings: " + N(s.poll.path()) + " [" + s.poll.section() + "] UpscalerIndex=" + std::to_string(index) +
                       " is not one of WrongGPU's entries (one of AMD's versions); nothing to apply");
+        return true;
+    }
+    if (e->slot == WG_OPT_SR_MODEL && !g_pollModels.load()) {
+        L().WriteLine("settings: " + N(s.poll.path()) + " [" + s.poll.section() + "] UpscalerIndex=" + std::to_string(index) + " = " +
+                      wgfsr::EntryProviderName(*e) + ": not applied (a stored index is no model choice; the model choice record decides)");
         return true;
     }
     L().WriteLine("settings: " + N(s.poll.path()) + " [" + s.poll.section() + "] UpscalerIndex=" + std::to_string(index) + " = " +

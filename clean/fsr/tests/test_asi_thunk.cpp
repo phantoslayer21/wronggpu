@@ -197,6 +197,35 @@ void TestClickAndShownModel() {
 #endif
 }
 
+// A model click the plugin could not write to the model choice record yet: its entry says so in the menu ("not saved
+// yet, retrying"; "not saved: the choice record is full" when refused), the other entries are unchanged, and a click on
+// the labelled entry is still that model's click.
+void TestUnsavedLabel() {
+    PluginState st;
+    const int size = 0;
+    const Entry& last = kEntries[kEntryCount - 1];
+    st.unsaved.store(last.model);
+    FakeSelectable draw;
+    SelectableThunkLogic(draw, "FSR 3.X", true, 0, &size, st);
+    CHECK(draw.calls.size() == kEntryCount + 1);
+    for (size_t i = 0; i + 1 < kEntryCount; ++i) CHECK(draw.calls[i].label == kEntries[i].label);
+    CHECK(draw.calls[kEntryCount - 1].label == std::string(last.label) + kUnsavedSuffix);
+    CHECK(draw.calls[kEntryCount].label == "FSR 3.X");
+    st.refused.store(true);
+    FakeSelectable refused;
+    SelectableThunkLogic(refused, "FSR 3.X", true, 0, &size, st);
+    CHECK(refused.calls[kEntryCount - 1].label == std::string(last.label) + kRefusedSuffix);
+    st.refused.store(false);
+    FakeSelectable click;
+    click.clickLabel = std::string(last.label) + kUnsavedSuffix;
+    bool clicked = false;
+    CHECK(SelectableThunkLogic(click, "FSR 3.X", true, 0, &size, st, &clicked) && clicked && st.model.load() == last.model);
+    st.unsaved.store(0);
+    FakeSelectable plain;
+    SelectableThunkLogic(plain, "FSR 3.X", true, 0, &size, st);
+    CHECK(plain.calls[kEntryCount - 1].label == last.label);
+}
+
 }  // namespace
 
 int main() {
@@ -209,6 +238,7 @@ int main() {
     TestPreviewRelabel();
     TestSelectionFile();
     TestClickAndShownModel();
+    TestUnsavedLabel();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

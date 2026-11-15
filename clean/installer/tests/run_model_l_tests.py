@@ -215,6 +215,23 @@ def upscaler_index(text):
     return found.get("wronggpu", found.get("fsr"))
 
 
+def set_upscaler_index(text, value):
+    """OptiScaler.ini text with the UpscalerIndex WrongGPU manages ([WrongGPU] when there, else [FSR]) set to `value` (None: the
+    line removed): a player's change in the game. Other lines, and every line's own ending, stay."""
+    lines = text.splitlines(keepends=True)
+    target = "wronggpu" if any(s.strip().lower() == "[wronggpu]" for s in lines) else "fsr"
+    out, sec = [], None
+    for line in lines:
+        if line.strip().startswith("["):
+            sec = line.strip().strip("[]").lower()
+        if sec == target and line.strip().lower().startswith("upscalerindex") and "=" in line:
+            if value is None:
+                continue
+            line = "UpscalerIndex=" + value + line[len(line.rstrip("\r\n")):]
+        out.append(line)
+    return "".join(out)
+
+
 def recorded_hash(b, name):
     """The hash the install record holds for a recorded file (its copy entry: action existed orig inst rel)."""
     for line in read(os.path.join(b, "wronggpu-setup", "install.record")).decode("utf-8", "replace").replace("\r", "").split("\n"):
@@ -274,8 +291,8 @@ def test_choice(t):
             (recorded_hash(b, "wronggpu.ini"), recorded_hash(b, "OptiScaler.ini")))
     t.check("...profile.ini says model=l", b"model=l\r\n" in read(os.path.join(b, "wronggpu-setup", "profile.ini")))
     r1 = choice_record(b)
-    t.check("...the model choice record: model=L, source=launcher, ffx=L (the entry it set), a seq", r1.get("model") == "L" and
-            r1.get("source") == "launcher" and r1.get("ffx") == "L" and r1.get("seq", "").isdigit(), r1)
+    t.check("...the model choice record: exactly model=L, seq, source=launcher", r1.get("model") == "L" and
+            r1.get("source") == "launcher" and r1.get("seq", "").isdigit() and sorted(r1) == ["model", "seq", "source"], r1)
     rc = t.run("set", exe, "model=L")
     r2 = choice_record(b)
     t.check("set model=L again: the record's seq grows (the newest choice); wronggpu.ini and OptiScaler.ini unchanged",
@@ -285,8 +302,42 @@ def test_choice(t):
             rc == 0 and read(wini) == m_w and read(oini) == m_o, (rc, read(wini)[-200:], read(oini)[-200:]))
     t.check("...profile.ini has no model line again", b"model=" not in read(os.path.join(b, "wronggpu-setup", "profile.ini")))
     r3 = choice_record(b)
-    t.check("...the record: model=M, source=launcher, ffx=M, the next seq", r3.get("model") == "M" and r3.get("ffx") == "M" and
+    t.check("...the record: model=M, source=launcher, the next seq", r3.get("model") == "M" and r3.get("source") == "launcher" and
             int(r3.get("seq", "0")) == int(r2.get("seq", "0")) + 1, r3)
+    # the launcher's model choice ALWAYS sets OptiScaler's entry, after the record: from AMD's value (5), and the key created
+    # when it is missing
+    write(oini, set_upscaler_index(read(oini).decode("utf-8", "replace"), "5").encode("utf-8"))
+    rc = t.run("set", exe, "model=M")
+    r4 = choice_record(b)
+    t.check("set model=M over AMD's entry (5): OptiScaler's entry is Model M's again (0); the record's seq grows",
+            rc == 0 and upscaler_index(read(oini).decode("utf-8", "replace")) == "0" and r4.get("model") == "M" and
+            int(r4.get("seq", "0")) == int(r3.get("seq", "0")) + 1, (rc, r4, read(oini)[-300:]))
+    write(oini, set_upscaler_index(read(oini).decode("utf-8", "replace"), None).encode("utf-8"))
+    rc = t.run("set", exe, "model=L")
+    t.check("set model=L without an UpscalerIndex key: the key is created with Model L's entry (1)",
+            rc == 0 and upscaler_index(read(oini).decode("utf-8", "replace")) == "1" and choice_record(b).get("model") == "L",
+            (rc, read(oini)[-300:]))
+    # an apply interrupted between the record and OptiScaler.ini (a crash): the record has the choice, the entry is stale,
+    # which is harmless (the front end never takes the entry for a choice); the next apply sets the entry
+    write(oini, set_upscaler_index(read(oini).decode("utf-8", "replace"), "5").encode("utf-8"))
+    r5 = choice_record(b)
+    t.env["WRONGGPU_TEST_STOP_AFTER_CHOICE_RECORD"] = "1"
+    rc = t.run("set", exe, "model=L")
+    t.env.pop("WRONGGPU_TEST_STOP_AFTER_CHOICE_RECORD")
+    r6 = choice_record(b)
+    t.check("set model=L stopped after the record (exit 97): the record has L with the next seq, OptiScaler's entry is still 5",
+            rc == 97 and r6.get("model") == "L" and r6.get("source") == "launcher" and int(r6.get("seq", "0")) == int(r5.get("seq", "0")) + 1 and
+            upscaler_index(read(oini).decode("utf-8", "replace")) == "5", (rc, r5, r6))
+    rc = t.run("set", exe, "model=L")
+    t.check("...the next set model=L: OptiScaler's entry is Model L's (1) again, the record's seq grows",
+            rc == 0 and upscaler_index(read(oini).decode("utf-8", "replace")) == "1" and int(choice_record(b).get("seq", "0")) == int(r6.get("seq", "0")) + 1,
+            (rc, choice_record(b)))
+    rc = t.run("set", exe, "model=M")
+    t.check("...set model=M: wronggpu.ini back byte for byte as the install wrote it, OptiScaler's entry Model M's (0; the key the player"
+            " removed was created again, so OptiScaler.ini differs only in where that line is)",
+            rc == 0 and read(wini) == m_w and upscaler_index(read(oini).decode("utf-8", "replace")) == "0" and
+            sorted(read(oini).split(b"\r\n")) == sorted(m_o.split(b"\r\n")),
+            (rc, read(wini) == m_w, set(read(oini).split(b"\r\n")) ^ set(m_o.split(b"\r\n")), read(wini)[-200:]))
     # a game saved on L whose data goes away: a repair keeps the player's choice, the files say Model M with a warning
     rc = t.run("set", exe, "model=L")
     os.remove(os.path.join(t.lad, "WrongGPU", "model", "L", "model.wgcm"))  # (t.model is the case here, not the path helper)

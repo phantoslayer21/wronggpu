@@ -79,9 +79,12 @@ bool RenderWronggpuIni(const Profile& p, const string& in, string& out, wstring*
 bool RenderOptiIni(const Profile& p, const string& in, string& out, std::vector<wstring>* notes = nullptr);
 // The model a wronggpu.ini text runs: its last runtime_options model item, 'M', 'K' or 'L'; 0 without one.
 char ModelOfWronggpuIni(const string& text);
-// The WrongGPU model entry an OptiScaler.ini text's UpscalerIndex names ([WrongGPU] of OptiScaler 10's slot, else [FSR]):
-// 'M' (0), 'K' (kModelKEntryIndex, a build with Model K), 'L' (kModelLEntryIndex, a build with the L choice); '-' otherwise.
-char ModelEntryOfOptiIni(const string& text);
+// The OptiScaler.ini text with its UpscalerIndex set to `model`'s entry of WrongGPU's list: 0 Model M, kModelKEntryIndex
+// (a build with Model K or Preset K), kModelLEntryIndex (a build with the L choice); a model this build cannot choose: 0.
+// [WrongGPU] of OptiScaler 10's custom slot when the file has that key or section, else [FSR]; whatever value was there
+// (AMD's version, another one, none: the key is created). The launcher's model choice sets it after the record
+// (launcher.cpp ApplyProfile); it is for display only, the front end never takes it for a choice.
+string SetOptiModelEntry(const string& text, char model);
 // The profile a 0.5.x install implies: the effective values of its wronggpu.ini and OptiScaler.ini (defaults and the
 // stale defaults of earlier versions dropped; upscaler=standin counts as on). Only keys of the settings schema
 // (kSettings) are taken: developer and test keys (runtime_options items such as timing_log, capture_dir, model_dir,

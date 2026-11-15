@@ -38,4 +38,11 @@ void SetAsiChoiceRecord(const std::wstring& path) {
         set(path.c_str());
 }
 
+char QueryAsiPending() {
+    HMODULE m = GetModuleHandleW(WRONGGPU_ASI_MODULE);
+    if (!m) return 0;
+    auto pending = reinterpret_cast<PfnWrongGpuAsiPendingChoiceV1>(reinterpret_cast<void*>(GetProcAddress(m, WRONGGPU_ASI_PENDING_CHOICE)));
+    return pending ? pending() : 0;
+}
+
 }  // namespace wgwin

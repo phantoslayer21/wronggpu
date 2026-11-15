@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "../include/wronggpu_host_event.h"
 #include "ffx_headers.h"
 #include "frontend.h"
 #include "version.h"
@@ -239,6 +240,7 @@ FrontEnd& Get() {
             // mode as before.
             p.asiPlugin = [](char* model) { return QueryAsiPlugin(model); };
             p.asiShowModel = [](char model) { ShowAsiModel(model); };
+            p.asiPending = [] { return QueryAsiPending(); };
             {
                 const std::wstring& ini = Place().ini;
                 const size_t slash = ini.find_last_of(L"\\/");
@@ -248,6 +250,7 @@ FrontEnd& Get() {
                 if (std::filesystem::is_directory(record.parent_path(), ec)) {  // a launcher install: its state folder
                     p.choiceRecord = record;
                     SetAsiChoiceRecord(record.wstring());  // the plugin writes its menu's model clicks there too
+                    SetHostIniPollModels(false);           // the host's stored index is no model choice (the record decides)
                 } else {
                     L().Write("model choice: no launcher state folder next to wronggpu.ini: no model choice record (the model item decides)");
                 }
@@ -300,6 +303,18 @@ FFX_API_ENTRY ffxReturnCode_t ffxQuery(ffxContext* context, ffxQueryDescHeader* 
 
 FFX_API_ENTRY ffxReturnCode_t ffxDispatch(ffxContext* context, const ffxDispatchDescHeader* desc) {
     return Guard("ffxDispatch", [&] { return Get().Dispatch(context, desc); });
+}
+
+// The WrongGPU edition of OptiScaler: the player selected the listed version `versionId` in its upscaler list
+// (include/wronggpu_host_event.h). Not hosted or not initialised: WG_HOST_SELECTED_NOT_READY.
+__declspec(dllexport) int32_t WrongGpuHostSelectedV1(uint64_t versionId) {
+    int32_t rc = WG_HOST_SELECTED_NOT_READY;
+    Guard("WrongGpuHostSelectedV1", [&] {
+        FrontEnd& fe = Get();
+        if (fe.GetConfig().hosted) rc = fe.HostSelected(versionId);
+        return FFX_API_RETURN_OK;
+    });
+    return rc;
 }
 
 }  // extern "C"

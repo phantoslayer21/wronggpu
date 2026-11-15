@@ -23,18 +23,23 @@ The FFX box's list is the same with and without the plugin (WrongGPU first).
 
 Which model runs (0.6.5, `src/model_choice_record.h`, `TestAsiChoiceRecord`, `tests/test_model_choice_record.cpp`): the
 plugin's entry says WrongGPU or AMD; which WrongGPU model is the game's **model choice record**,
-`wronggpu-setup\model-choice.ini` next to wronggpu.ini (the launcher's state folder). It holds one record: `model=`,
-`seq=`, `source=` (launcher, ffx or plugin) and `ffx=` (the WrongGPU entry the writer knew OptiScaler's list to name).
-Three places write it, each with the record's seq + 1, so the highest seq is the most recent choice and no clock is
-involved: the launcher when it applies a model (it sets OptiScaler's entry with it and writes `ffx` = that entry), the
-front end when OptiScaler's FFX box names a WrongGPU entry the record does not know (the player picked it there; also at
-the first create when there is no record yet), and this plugin when the player clicks one of its model entries (it keeps
-the record's `ffx`, so the unchanged FFX box is never taken for a new choice). Writes are atomic (a temporary file in
-the same folder, flushed, renamed over the record); parsing is strict, and a corrupt record counts as no record. Without
-a record the launcher's Model K / L item decides, else the plugin's saved entry, else Model M. The front end logs the
-model and which choice decided, one line when the record and wronggpu.ini's model item disagree, and tells the plugin
-which model runs (`WrongGpuAsiShowModelV1`), so the menu marks that entry. Model L's own entry ("WrongGPU Model L") is in
-the menu of a build with `WG_MODEL_L`; a model the front end was built without runs as Model M, with a note in the log.
+`wronggpu-setup\model-choice.ini` next to wronggpu.ini (the launcher's state folder). It holds `model=`, `seq=` and
+`source=` (launcher, ffx or plugin). It is written only for a choice the player made, each time with the record's seq + 1,
+so the highest seq is the most recent choice and no clock is involved: by the launcher when it applies a model (the record
+first, then OptiScaler's `UpscalerIndex` set to that model's entry, for display); by the front end when the WrongGPU edition
+of OptiScaler reports that the player selected one of WrongGPU's entries in its list (`WrongGpuHostSelectedV1`,
+`include/wronggpu_host_event.h`); and by this plugin when the player clicks one of its model entries. The entry OptiScaler's
+ini stores is never taken for a choice. Every read and write takes one lock per game shared by all processes (a named
+mutex), so no choice is lost and seq never goes back. Writes go to a temporary file in the same folder, flushed, then
+`MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)`, every step checked; parsing is strict, and a corrupt record counts as no
+choice until the next choice replaces it. A game without a record (an install from before 0.6.5) gets one from
+wronggpu.ini's model item (else Model M). A click that cannot be written now runs for the session, its entry says "not
+saved yet, retrying" in the menu, and it is tried again (`WrongGpuAsiPendingChoiceV1` tells the front end); at the end of
+the sequence numbers it is refused and logged. Without a record (no launcher state folder) the launcher's Model K / L item
+decides, else the plugin's saved entry, else Model M. The front end logs the model and which choice decided, one line when
+the record and wronggpu.ini's model item disagree, and tells the plugin which model runs (`WrongGpuAsiShowModelV1`), so
+the menu marks that entry. Model L's own entry ("WrongGPU Model L") is in the menu of a build with `WG_MODEL_L`; a model
+the front end was built without runs as Model M, with a note in the log.
 
 ## How it works
 

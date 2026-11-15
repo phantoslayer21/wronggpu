@@ -351,17 +351,27 @@ char ModelOfWronggpuIni(const string& text) {
     return c == 'M' || c == 'K' || c == 'L' ? c : 0;
 }
 
-char ModelEntryOfOptiIni(const string& text) {
-    string cur;
-    if (!IniHasKey(text, "WrongGPU", "UpscalerIndex", &cur) && !IniHasKey(text, "FSR", "UpscalerIndex", &cur)) return '-';
-    cur = TrimA(cur);
+string SetOptiModelEntry(const string& text, char model) {
+    const char* index = "0";
 #if WRONGGPU_MODEL_L
-    if (cur == kModelLEntryIndex) return 'L';
+    if (model == 'L') index = kModelLEntryIndex;
 #endif
 #if WRONGGPU_MODEL_K || WRONGGPU_PRESET_K
-    if (cur == kModelKEntryIndex) return 'K';
+    if (model == 'K') index = kModelKEntryIndex;
 #endif
-    return cur == "0" ? 'M' : '-';
+    // OptiScaler 10's custom upscaler slot: [WrongGPU] (its key, else its section); else [FSR] (the FFX route)
+    bool slot = IniHasKey(text, "WrongGPU", "UpscalerIndex");
+    if (!slot && !IniHasKey(text, "FSR", "UpscalerIndex")) {
+        size_t at = 0;
+        while (!slot && at < text.size()) {
+            size_t end = text.find('\n', at);
+            if (end == string::npos) end = text.size();
+            const string line = LowerA(TrimA(text.substr(at, end - at)));
+            slot = line == "[wronggpu]";
+            at = end + 1;
+        }
+    }
+    return IniSet(text, slot ? "WrongGPU" : "FSR", "UpscalerIndex", index);
 }
 
 bool RenderOptiIni(const Profile& p, const string& in, string& out, std::vector<wstring>* notes) {

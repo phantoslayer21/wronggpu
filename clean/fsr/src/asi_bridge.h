@@ -16,4 +16,7 @@ void ShowAsiModel(char model);
 // Tells the plugin where the game's model choice record is (src/model_choice_record.h). Nothing without the plugin.
 void SetAsiChoiceRecord(const std::wstring& path);
 
+// The plugin's model click that it could not write to the record yet (it tries again), else 0 (also without the plugin).
+char QueryAsiPending();
+
 }  // namespace wgwin
