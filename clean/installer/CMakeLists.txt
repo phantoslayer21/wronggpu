@@ -177,12 +177,19 @@ else()
   set(MANIFEST_ARGS --manifest ${MANIFEST})
   set(MANIFEST_SOURCE)
 endif()
+# A WRONGGPU_TESTING build may embed the test suite's stand-in runtime (tests/run_installer_tests.py --prepare-only: the
+# marker and a build manifest that says stand_in); any other build refuses it at this step (make_payload.py --testing).
+if(WRONGGPU_TESTING)
+  set(TESTING_PAYLOAD_ARGS --testing)
+else()
+  set(TESTING_PAYLOAD_ARGS)
+endif()
 add_custom_command(
   OUTPUT ${GEN}/payload_table.h ${GEN}/resources.rc ${GEN}/app.ico
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/make_payload.py
           --payload ${WRONGGPU_PAYLOAD_DIR} --map ${WRONGGPU_MAP} ${PRESET_K_MAP_ARGS} --version ${WRONGGPU_VERSION}
           --build-id=${WRONGGPU_BUILD_ID} --payload-name=${WRONGGPU_PAYLOAD_NAME}
-          ${DIRECT_ROUTE_PAYLOAD_ARGS} ${RR_PAYLOAD_ARGS} ${MAP_F_ARGS} ${MAP_L_ARGS} ${MANIFEST_ARGS} --out ${GEN}
+          ${DIRECT_ROUTE_PAYLOAD_ARGS} ${RR_PAYLOAD_ARGS} ${MAP_F_ARGS} ${MAP_L_ARGS} ${MANIFEST_ARGS} ${TESTING_PAYLOAD_ARGS} --out ${GEN}
   DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/make_payload.py ${MANIFEST} ${WRONGGPU_MAP} ${PRESET_K_MAP_FILE} ${MAP_F_FILE} ${MAP_L_FILE} ${WRONGGPU_PAYLOAD_FILES} ${WRONGGPU_RR_FILES}
   COMMENT "Embedding the payload and the converter map")
 

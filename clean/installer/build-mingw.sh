@@ -4,6 +4,9 @@
 # with the restorer and the payload embedded. Usage:
 #   ./build-mingw.sh <payload dir> [map.json] [version] [out dir]
 # Default map: data/preset-M.v1.map.json; default out dir: build-mingw/.
+# A WRONGGPU_TESTING build (the Wine test runner's: tests/run_installer_tests.py builds it from the test suite's stand-in
+# payload, which only a testing build embeds: make_payload.py --testing). RELEASE=1 ./build-mingw.sh ... makes a release-type
+# build instead: no WRONGGPU_TESTING, and the payload step refuses the stand-in (it needs a real runtime with its manifest).
 set -e
 cd "$(dirname "$0")"
 PAYLOAD="${1:?payload folder}"
@@ -14,11 +17,12 @@ CXX="${CXX:-x86_64-w64-mingw32-g++}"
 WINDRES="${WINDRES:-x86_64-w64-mingw32-windres}"
 GEN="$OUT/gen"
 mkdir -p "$GEN"
-python3 tools/make_payload.py --payload "$PAYLOAD" --map "$MAP" --version "$VERSION" --manifest src/setup.manifest --out "$GEN"
+if [ "${RELEASE:-0}" = "1" ]; then TESTING_DEFINE=""; TESTING_PAYLOAD=""; else TESTING_DEFINE="-DWRONGGPU_TESTING"; TESTING_PAYLOAD="--testing"; fi
+python3 tools/make_payload.py --payload "$PAYLOAD" --map "$MAP" --version "$VERSION" --manifest src/setup.manifest $TESTING_PAYLOAD --out "$GEN"
 "$WINDRES" -O coff -i "$GEN/resources.rc" -o "$GEN/resources.o"
 CONV=../converter/src
 CONV_SRC="$CONV/sha256.cpp $CONV/json.cpp $CONV/numeric.cpp $CONV/map.cpp $CONV/locate.cpp $CONV/lz4block.cpp $CONV/convert.cpp $CONV/output.cpp $CONV/pe_version.cpp $CONV/api.cpp"
-FLAGS="-std=c++17 -O2 -Wall -Wextra -ffp-contract=off -municode -mwindows -static -I$GEN -I$CONV -Isrc"
+FLAGS="-std=c++17 -O2 -Wall -Wextra -ffp-contract=off -municode -mwindows -static -I$GEN -I$CONV -Isrc $TESTING_DEFINE"
 LIBS="-lcomctl32 -lshell32 -lole32 -luuid -ladvapi32 -luser32 -lgdi32 -lgdiplus -ldwmapi -luxtheme -lwinhttp"
 # the restorer: wg_core without payload or UI
 printf '1 ICON "app.ico"\n' > "$GEN/restore_app.rc"
