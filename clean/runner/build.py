@@ -358,7 +358,8 @@ def build_runtime(cxx, out_dir, embed=True):
     embedded = write_embedded(out_dir) if embed else None
     cmd = runtime_command(cxx, os.path.join(out_dir, runtime_library_name()), embedded)
     run(cmd)
-    write_build_manifest(out_dir, cmd, embedded is not None)
+    if os.path.isfile(os.path.join(out_dir, runtime_library_name())):  # (a build that failed raised in run)
+        write_build_manifest(out_dir, cmd, embedded is not None)
 
 
 def write_build_manifest(out_dir, cmd, embedded):

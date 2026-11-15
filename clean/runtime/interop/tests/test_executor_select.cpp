@@ -372,6 +372,42 @@ int main() {
              choose(r).executor == "dx12" && choose(r).ignored.empty() && choose(r).why.empty());
     }
 
+  // ---- HARD RULE (R1, oversight): a refused or unwanted D3D12 route never falls back silently to HIP or a reference path --------
+  // Whatever a release configuration is asked for (every executor word, the capture, the sparkle guard, every model, a board
+  // that is RDNA 4, one that is not and one that cannot be identified), the choice is the D3D12 executor, "fsr" (no context:
+  // the front end's upscaler takes the game, loudly) or the explicit offline test executor: never "hip". The refusal paths
+  // after the choice are the create refusal (no context, the front end's upscaler) and the refused frame (WG_ERROR_UNSUPPORTED):
+  // the source pins in test_executor_select.py check that neither of them builds an executor of its own.
+  {
+    const char* const words[] = {"", "auto", "dx12", "d3d12", "hip", "d3d12-test", "vulkan", "reference", "cpu", "bilinear"};
+    const std::vector<ExecutorRequest> boards = {board("AMD Radeon RX 9070 XT", 0x1002, 0x7550),
+                                                 board("AMD Radeon RX 7900 XTX", 0x1002, 0x744C), ExecutorRequest()};
+    int checked = 0, hip = 0, other = 0;
+    for (bool dev : {false, true})
+      for (const std::string w : words)
+        for (const ExecutorRequest& b : boards)
+          for (bool model_k : {false, true})
+            for (bool capture : {false, true})
+              for (bool sparkle : {false, true}) {
+                ExecutorRequest r = b;
+                r.executor = w;
+                r.model_k = model_k;
+                r.capture = capture;
+                r.sparkle_guard = sparkle;
+                const ExecutorChoice ch = choose_executor(r, dev);
+                ++checked;
+                const bool devOn = dev && wgi::kDevDiagnostics;  // only a developer build can be asked for HIP
+                if (ch.executor == "hip" && !devOn) ++hip;
+                if (!(ch.executor == "dx12" || ch.executor == "fsr" || ch.executor == "d3d12-test" || ch.executor.empty() ||
+                      (ch.executor == "hip" && devOn)))
+                  ++other;
+              }
+    expect(std::string("no release choice is HIP, whatever is asked (") + std::to_string(checked) + " requests)", hip == 0);
+    expect("every choice is the D3D12 executor, no context ('fsr'), the offline test executor, an unknown word (create fails) "
+           "or, in a developer build only, HIP",
+           other == 0);
+  }
+
   // ---- the D3D12 executor refuses the context at create: every model, the front end's upscaler, never HIP -------------
   {
     const std::string e = "D3D12 device: native D3D12 borrowed driver-channel probe mismatch at float 7";

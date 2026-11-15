@@ -156,6 +156,31 @@ class CreateOrder(unittest.TestCase):
         refused = self.at("if (refused) {")
         self.assertIn("return WG_ERROR_UNSUPPORTED;", self.b[refused:refused + 400])
 
+    def test_hard_rule_the_hip_route_exists_only_in_a_developer_build(self):
+        # R1 hard rule: a refused or unwanted D3D12 route never falls back to HIP or a reference path in a release build. The
+        # selector's only way to the HIP executor ('c.executor = "hip"') is inside a WG_DEV_DIAGNOSTICS block (a release
+        # library does not even contain it; the package gate scans for its texts), and the backend builds the HIP executor in
+        # one place, behind that choice.
+        sel = read("clean", "runtime", "interop", "executor_select.h").split("\n")
+        depth, at = 0, []
+        for line in sel:
+            t = line.strip()
+            if t.startswith("#ifdef WG_DEV_DIAGNOSTICS"):
+                depth += 1
+            elif t.startswith("#if") and depth:
+                depth += 1
+            elif t.startswith("#endif") and depth:
+                depth -= 1
+            if 'c.executor = "hip"' in line or 'if (e == "hip") {  // developer build only' in line:
+                at.append(depth)
+        self.assertEqual(len(at), 2)  # the executor=hip route (its test) and the capture route
+        self.assertTrue(all(d >= 1 for d in at), "a route to HIP outside WG_DEV_DIAGNOSTICS")
+        self.assertEqual(self.b.count("make_hip_executor("), 1)
+        # the create refusal and the refused frame build no executor of their own and fall back to nothing but the front end
+        refusal = self.at("dx12_refused_line(dx12_default_, err)")
+        self.assertNotIn("make_hip_executor", self.b[refusal - 300:refusal + 300])
+        self.assertNotIn("bilinear", read("clean", "runtime", "interop", "executor_select.h").lower().replace("no bilinear", ""))
+
     def test_sparkle_guard_is_off_and_hip_only_filters_fall_back_for_every_model(self):
         # R1-a / H4: the choice turns the guard off before anything is made, whatever the model
         off = self.at("if (ch.sparkle_off) o.sparkle_guard = 0.0f;")
