@@ -3037,7 +3037,7 @@ def main():
     if a.only:  # development: only the tests named (after the basics)
         for name in a.only:
             fn = globals()["test_" + name]
-            fn(t, opti) if name != "rr" else fn(t, opti, a.synth_f)
+            fn(*(t, opti, a.baseline if "baseline" in fn.__code__.co_varnames[:3] else a.synth_f)[:fn.__code__.co_argcount])
         print("\n%d checks passed, %d failed (%.0f s)" % (t.passed, len(t.failures), time.time() - t0))
         for f in t.failures:
             print("  FAILED:", f)

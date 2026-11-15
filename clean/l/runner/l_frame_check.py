@@ -356,7 +356,7 @@ def run_d3d12(build, special=True, stages=False):
                    "ldr": LDR and model == "L",
                    "notes": p.notes(),
                    "model_source": p.model_source, "dw": p.dw, "dh": p.dh, "ow": p.ow, "oh": p.oh,
-                   "taps": p.output_taps(), "frames": frames}
+                   "taps": p.output_taps(), "frames": frames, "identity": capture_identity(build)}
             with open(rec_path(build, model, config), "wb") as f:
                 pickle.dump(rec, f)
             print(model, config, "frames", len(frames), "post", rec["kernels"].get("post"), "pack",
@@ -513,8 +513,8 @@ def compare_d3d12(build, json_path):
         return (r["d3d12_per_stage"]["passed"] == n_frames[m] and r["m_post_reference"]["passed"] == n_frames[m] and
                 r["d3d12_default_vs_stages"]["identical_frames"] == n_frames[m] and caught)
     res["pass"] = all(model_pass(m) for m in ("L", "M"))
-    with open(json_path, "w") as f:
-        json.dump(res, f, indent=1, default=lambda o: o.item() if hasattr(o, "item") else str(o))
+    from clean.l.runner import l_record as LR
+    LR.write_l_record(res, json_path)
     for model in ("L", "M"):
         print(model, "D3D12 against HIP (raw bytes): frames identical", res[model]["identical_frames"], "of",
               len(res[model]["frames"]), "outputs compared", len(res[model]["outputs_compared"]), "differing",
@@ -561,12 +561,75 @@ def run(build, rocm, special=True):
                    "ldr": LDR and model == "L",
                    "notes": p.notes(),
                    "model_source": p.model_source, "dw": p.dw, "dh": p.dh, "ow": p.ow, "oh": p.oh,
-                   "taps": p.output_taps(), "frames": frames}
+                   "taps": p.output_taps(), "frames": frames, "identity": capture_identity(build)}
             with open(rec_path(build, model, config), "wb") as f:
                 pickle.dump(rec, f)
             print(model, config, "frames", len(frames), "bneck", rec["kernels"].get("swin_bneck"), "post",
                   rec["kernels"].get("post"))
             del p
+
+
+# ---- identity of a recorded run ------------------------------------------------------------------------------------
+
+def _sha256_file(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def identity_files(build):
+    """The files a recorded run's identity covers: {name: path} (the runtime library, the oracle's parameters and
+    the model's source description, both written by --prepare)."""
+    return {"runtime_library": os.path.join(build, "wronggpu_runtime.dll"),
+            "params_pkl": os.path.join(model_dir(build), "params.pkl"),
+            "source_json": os.path.join(model_dir(build), "source.json")}
+
+
+def capture_identity(build):
+    """At capture time (--run): the git commit of this checkout (git rev-parse HEAD, run here, not given by the
+    caller), whether its tracked files differ from that commit, and the SHA-256 of every identity file."""
+    import subprocess
+    def git(*a):
+        try:
+            r = subprocess.run(["git", "-C", ROOT] + list(a), capture_output=True, text=True,
+                               creationflags=0x08000000 if os.name == "nt" else 0)
+        except OSError as e:
+            raise RuntimeError(f"capture identity: git {a[0]} could not run ({e})")
+        if r.returncode != 0:
+            raise RuntimeError(f"capture identity: git {a[0]} failed ({r.returncode}): {r.stderr.strip()}")
+        return r.stdout.strip()
+    commit = git("rev-parse", "HEAD")
+    if not commit:
+        raise RuntimeError("capture identity: git rev-parse HEAD gave no commit")
+    ident = {"git_commit": commit,
+             "git_tracked_changes": bool(git("status", "--porcelain", "--untracked-files=no"))}
+    for name, path in identity_files(build).items():
+        ident[name + "_sha256"] = _sha256_file(path) if os.path.exists(path) else None
+    return ident
+
+
+def verify_identity(rec, build):
+    """Re-hash the identity files of `build` and compare them with the identity the recording captured. Returns
+    the verified identity; raises ValueError when the recording has none or anything differs."""
+    ident = rec.get("identity")
+    if not ident or not ident.get("git_commit"):
+        raise ValueError("the recording carries no capture-time identity (record it again with --run)")
+    if not isinstance(ident.get("git_tracked_changes"), bool):
+        raise ValueError("the recording's identity has no tracked-changes flag (git_tracked_changes)")
+    for name, path in identity_files(build).items():
+        now = _sha256_file(path) if os.path.exists(path) else None
+        if now is None or now != ident.get(name + "_sha256"):
+            raise ValueError(f"{name}: SHA-256 {now} differs from the recording's {ident.get(name + '_sha256')}")
+    return ident
+
+
+def check_l_record(res_l):
+    """A Model L frame comparison record names the FP8 matrix-op model its oracle used, in every frame too."""
+    from clean.l.runner import l_record as LR
+    return LR.check_l_record(res_l, frames_required=True)
 
 
 # ---- --compare (CPU) ------------------------------------------------------------------------------------------------
@@ -642,8 +705,9 @@ def post_fp16(got, ref, model="M"):
     return m
 
 
-def compare_model(rec, params, post_ref=None, bneck_unit=False):
-    """post_ref "M": the post against Model M's reference whatever the model (a record of a run with Model M's post).
+def compare_model(rec, params, post_ref=None, bneck_unit=False, table=None):
+    """table: Model L's structure table for the oracle (default: clean/l/reference/table.py TABLE with the kernels'
+    GELU for Model M's block form). post_ref "M": the post against Model M's reference whatever the model (a record of a run with Model M's post).
     bneck_unit: b0 ... b5 as one unit (a bottleneck megakernel writes only b5): the
     reference chained from the runtime's enc2.merged, b5 under the per-stage rule."""
     from clean.l.reference import oracle as L
@@ -655,8 +719,9 @@ def compare_model(rec, params, post_ref=None, bneck_unit=False):
     from clean.reference import post as Po
     from clean.reference import swin as S
     model = rec["model"]
-    table = copy.deepcopy(T.TABLE)
-    table["consts"]["default"]["gelu"] = "sigmoid"   # the kernels' GELU (clean/l/runner/l_c32_check.py CONSTS)
+    if table is None:
+        table = copy.deepcopy(T.TABLE)
+        table["consts"]["default"]["gelu"] = "sigmoid"   # the kernels' GELU (clean/l/runner/l_c32_check.py CONSTS)
     D = (rec["dw"], rec["dh"])
     res, prev, prev_jitter, n, f = [], None, None, 0, 0
     prev_size = None
@@ -669,6 +734,8 @@ def compare_model(rec, params, post_ref=None, bneck_unit=False):
         jp = tuple(float(v) for v in (fr["jitter"] if eff_reset else prev_jitter))
         info = out["state"]["info"]
         m = {"frame": k, "render": [rw, rh], "reset": eff_reset, "parity": f}
+        if model == "L":
+            m["fp8_op_model"] = table.get("mm8", "exact")   # the effective model, also when defaulted
         offsets_ok = all(tuple(info["offsets"][s]) == tuple(S.window_offset(s, f)) for s in T.SHARED_STAGES)
         m["state"] = {"n_parity_reset": (info["n"], info["parity"], bool(info["reset"])) == (n, f, eff_reset),
                       "jitter_prev": bool(np.array_equal(np.float32(info["jitter_prev"]), np.float32(jp))),
@@ -700,6 +767,7 @@ def compare_model(rec, params, post_ref=None, bneck_unit=False):
             x0["motion_history"] = np.zeros_like(x0["motion_history"])
             x0["reduced_history"] = np.zeros_like(reduced)
         ref = L.encode(x0, params, f, t=table) if model == "L" else ME.encode(x0, params["enc0"])
+        enc_skip = ref.get("skip") if model == "L" else None   # the encoder block output the decoder block reads
         m["enc0"] = {"features": fp8_stage(out["enc0"]["features"], ref["features"])}
         for s in ("m_near", "m_far", "m_center"):
             m["enc0"][s] = motion_surface(out["enc0"][s], ref[s])
@@ -725,7 +793,7 @@ def compare_model(rec, params, post_ref=None, bneck_unit=False):
         xd = {"features": out["dec1"]["out"], "motion": out["enc0"]["m_near"],
               "latent_prev": out["state"]["latent_prev"] if not eff_reset else np.zeros((rh, rw, 4), np.float32),
               "jitter": fr["jitter"], "jitter_prev": np.array(jp), "reset": eff_reset, "feature_size": (fw, fh),
-              "recon_size": D}
+              "recon_size": D, "skip": enc_skip}
         ref = L.decode(xd, params, f, t=table) if model == "L" else MD.decode(xd, params["dec0"])
         dec = out["dec0"]
         m["dec0"] = {"codes_A": codes(dec["A"], ref["A"], 255.0), "codes_B": codes(dec["B"], ref["B"], 255.0),
@@ -810,6 +878,7 @@ UNWRITTEN_ON_FIRST = ("state.latent_prev", "state.motion_history", "state.histor
 
 
 def compare(build, json_path):
+    from clean.l.reference import table as T
     with open(os.path.join(model_dir(build), "params.pkl"), "rb") as f:
         params = pickle.load(f)
     res = {}
@@ -836,6 +905,9 @@ def compare(build, json_path):
                       "pass": (all(m["pass"] for m in frames) and all(f["identical"] for f in same) and
                                all(v["caught"] for v in neg.values()))}
         if model == "L":  # Model L's run-level limit on post values more than one ulp off (provisional)
+            res[model]["fp8_op_model"] = T.TABLE.get("mm8", "exact")
+            res[model]["identity"] = recs["stages"].get("identity")
+            check_l_record(res[model])
             res[model]["post_run"] = {k: LP.l_post_run([m["post"][k] for m in frames if k in m["post"]])
                                       for k in ("history", "display")}
             res[model]["pass"] = res[model]["pass"] and all(r["pass"] for r in res[model]["post_run"].values())
@@ -845,8 +917,8 @@ def compare(build, json_path):
         with open(src) as f:
             res["L"]["source"] = json.load(f)
         print("Model L source:", json.dumps(res["L"]["source"]))
-    with open(json_path, "w") as f:
-        json.dump(res, f, indent=1, default=lambda o: o.item() if hasattr(o, "item") else str(o))
+    from clean.l.runner import l_record as LR
+    LR.write_l_record(res, json_path)
     for model in ("L", "M"):
         print(model, "pass" if res[model]["pass"] else "FAIL", json.dumps(res[model]["summary"]))
         print("  default kernels against the six-launch bottleneck (raw bytes):",

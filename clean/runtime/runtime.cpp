@@ -884,12 +884,18 @@ struct Runtime {
       dev = make_emu_device(c.emu_library ? c.emu_library : build_dir + "/wg_emu.so", &e);
     } else if (c.backend == 2) {
       dev = make_dx12_device(c.rocm_dir ? c.rocm_dir : "", build_dir, &e);
+    } else if (c.backend == 3) {
+#if defined(_WIN32)
+      dev = make_d3d12_device(build_dir, &e);
+#else
+      return fail("native D3D12 requires Windows");
+#endif
     } else {
       dev = make_hip_device(c.rocm_dir ? c.rocm_dir : "", &e);
     }
     if (!dev) return fail(e);
     k.reset(new KRuntime());
-    if (!k->create(c, dev.get(), [this](DevPtr* p, size_t n) { return alloc(p, n); }, external_io))
+    if (!k->create(c, dev.get(), [this](DevPtr* p, size_t n) { return alloc(p, n); }, external_io, native_direct_io))
       return fail(k->err());
     blobs = k->blobs();
     model_source = "model.wgcm";
@@ -1263,6 +1269,9 @@ struct Runtime {
   bool direct_preflight(const WgRtFrame& fr, const FrameIo* io) {
     if ((io && io->native_direct) != native_direct_io)
       return fail("FrameIo.native_direct does not match the runtime's I/O mode");
+#ifndef WG_NO_MODEL_K
+    if (k) return !native_direct_io || k->direct_preflight(fr, io) || fail(k->err());  // model K: its own rules
+#endif
     return !native_direct_io || validate_native_direct_frame(fr, io);
   }
 

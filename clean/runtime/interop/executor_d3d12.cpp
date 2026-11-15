@@ -21,6 +21,16 @@
 // motionhi pass does (FrameIo.motion_hi_direct; the texture's size and FP16-ness in b1 word 15); point = a D3D12 pass
 // (Converter::record_motion_point, the input pass's own texel choice) writes the texel under each render pixel's centre
 // into an RG32F texture of ours, which the network then reads as its render-size motion texture.
+// Model K (runtime option model=K; clean/k/runtime/runtime_k.h, native_direct): the same frame recording with K's
+// "_direct" kernels. The bytes reproduced are those the HIP executor feeds K in game: the input pass's dense f32
+// colour (the texel's rgb and, for the output stage's colour taps, its alpha (the output alpha follows it: issue #26),
+// NOT divided by the pre-exposure: K applies kappa = e1 E_cur / pi itself), f32 depth and f32 motion in render pixels,
+// the exposure texel; K's output stage writes the output texture with the bytes of the HIP path (RGBA16F rows + copy,
+// or the output pass's typed store). Motion at output resolution: the point route above (the backend names
+// motion_outres=point for model K: the input pass's own texel choice). The runtime refuses at create a K context whose
+// kernels lack a D3D12 port or whose options leave the exact default path, and per frame ("frame not taken") a render
+// size above 0.68 x the output or a jitter outside [-0.5, 0.5] (only the tiled input stage has direct forms). Timing
+// marks: exposure, input, network, output (KRuntime::kTimingLabels).
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -377,8 +387,17 @@ class D3d12Executor : public Executor {
     return true;
   }
   std::string timing_info() const override {
+    if (rt_ && std::string(wgrt::runtime_model(rt_)) == "K")
+      return "D3D12 timestamps in the game's command list (model K): [0] start of the first kernel (exposure_auto_diet "
+             "if auto-exposure, else k_expo_scalars) -> [1] start of k_out_color (input stage) -> [2] start of the "
+             "first network stage (e0) -> [3] start of k_out_pixel_c (output stage) -> [4] after the last kernel";
     return "D3D12 timestamps in the game's command list: [0] start of the network -> [1] start of the first Swin "
            "kernel -> [2] start of dec0 -> [3] start of post -> [4] after the last kernel";
+  }
+  std::vector<std::string> timing_labels() const override {
+    if (!rt_) return Executor::timing_labels();
+    const char* const* l = wgrt::runtime_timing_labels(rt_);  // model K: exposure, input, network, output
+    return {l[0], l[1], l[2], l[3]};
   }
   bool timing(uint64_t value, NetTiming* t) override {
     if (!timing_ || tagged_[value % kRing] != value) return false;

@@ -37,6 +37,7 @@ sys.path.insert(0, ROOT)
 from clean.l.reference import oracle as L  # noqa: E402
 from clean.l.reference import table as T  # noqa: E402
 from clean.l.runner import l_pack as LP  # noqa: E402
+from clean.l.runner import l_record as LR  # noqa: E402
 from clean.reference import swin as MS  # noqa: E402
 from clean.reference.fp8 import fp8_decode, fp8_encode, q8  # noqa: E402
 from clean.runner import packing as P  # noqa: E402
@@ -304,8 +305,7 @@ def main(argv=None):
         if a.compile_only:
             return 0
     res = run(a.build, a.rocm, tuple(range(89, 89 + a.seeds)))
-    with open(a.json, "w") as f:
-        json.dump(res, f, indent=1)
+    LR.write_l_record(res, a.json)
     print({k: v for k, v in res.items() if k not in ("c32", "l_blocks")})
     lb = res["l_blocks"]
     print({k: lb[k] for k in ("enc_total", "dec_total", "nc_cases", "nc_identical", "pass")})

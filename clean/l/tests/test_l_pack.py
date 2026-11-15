@@ -174,13 +174,15 @@ class ModelTest(unittest.TestCase):
         h1 = L.linear(qpad, W1, b1, "f16", "relu_q8")
         self.assertTrue(np.array_equal(h1, L.linear(m["q"], enc["Win1"], enc["bin1"], "f16", "relu_q8")))
         h2 = L.linear(h1, W2, b2, "f16", "none")
-        h3 = q8(L.swin_block(h2, params["enc0_block"], T.block_offset(T.TABLE, "first", 0), 2, T.M_BLOCK_CONSTS,
+        h3 = q8(L.swin_block(h2, params["enc0_block"], T.block_offset(T.TABLE, "first", 0), 2,
+                             T.block_consts(T.TABLE, "enc0_block"),
                              "input", T.block_halo(T.TABLE, "first")))
         self.assertTrue(np.array_equal(h3, m["x3"]))
         Wp, bpj = LP.unpack_project(blobs["enc0.project"], 128, 64)
         feats = L.project_groups(L.space_to_depth(h3), Wp, bpj, (32, 32, 32, 32), 6.28125)
         self.assertEqual(feats.astype(np.float32).tobytes(), out["features"].tobytes())
         xd = MD.random_inputs(rng, rw=36, rh=20)
+        xd["skip"] = out["skip"]                                   # the encoder block output (same frame size)
         dout = L.decode(xd, params, 0, keep=True)
         Wd, bd = LP.unpack_dec_project(blobs["dec0.project"])
         y = L.dec_project(xd["features"], Wd, bd)
