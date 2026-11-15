@@ -1240,17 +1240,13 @@ def test_rr(t, opti, synth_f):
     write(files["ini"], read(files["ini"]) + b"rr_plugin_key=1\r\n")
     write(files["settings"], read(files["settings"]) + b"rr_last_seen=1\r\n")
     # the install created both settings files and the plugin rewrote them: their bytes are no longer the recorded ones, so the
-    # uninstall leaves them as they are (with the wronggpu-* logs that are not in the record) and says so. The repair after the
-    # in-game switch backed up the settings file the plugin had rewritten then (README: the file-ownership rule): that
-    # generation cannot go back over the file the plugin rewrote since, so it is kept in WrongGPU-originals
+    # uninstall leaves them as they are (with the wronggpu-* logs that are not in the record) and says so
     left = kept_runtime(before, root, *[os.path.relpath(files[k], root) for k in ("ini", "settings")], *unrecorded_wronggpu_files(root))
     rc = t.run("uninstall", exe)
     after = snapshot(root)
-    kept = [k for k in after if k.startswith("bin/x64/wronggpu-originals/") and k.endswith("/wronggpu/wronggpu.ini")]
-    t.check("uninstall: exit 0, the RR game's folder as before except the two RR settings files the plugin rewrote and the unrecorded logs, which stay as they are, "
-            "and the in-game switch's settings file the repair backed up, kept in WrongGPU-originals",
-            rc == 0 and suite.without_kept(after)[0] == left and any(w == "Left in place (changed since install): " + os.path.relpath(files["ini"], b) for w in t.j.get("warnings", [])) and
-            len(kept) == 1 and len(suite.without_kept(after)[1]) == 1 and b"rr_mode = fast" in read(os.path.join(root, *kept[0].split("/"))), (rc, t.j.get("message"), diff(left, suite.without_kept(after)[0]), kept, t.j.get("warnings")))
+    t.check("uninstall: exit 0, the RR game's folder as before except the two RR settings files the plugin rewrote and the unrecorded logs, which stay as they are",
+            rc == 0 and after == left and any(w == "Left in place (changed since install): " + os.path.relpath(files["ini"], b) for w in t.j.get("warnings", [])),
+            (rc, t.j.get("message"), diff(left, after), t.j.get("warnings")))
     t.check("uninstall: the shared RR data stays for the other games", os.path.isfile(fdata) == data_on)
     leftN = kept_runtime(beforeN, rootN, *unrecorded_wronggpu_files(rootN))
     rc = t.run("uninstall", exeN)

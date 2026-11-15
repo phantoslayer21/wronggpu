@@ -6,8 +6,7 @@
 // own plugin), the RR runtime next to the game exe, wronggpu-rr.ini (rr_model: the RR data) and the plugin's settings
 // file WrongGPU\wronggpu.ini ([wronggpu] rr_enabled, rr_mode, rr_exact_allowed; the plugin saves rr_mode there when the
 // player switches it in OptiScaler's menu). Every one is an entry of the install record (staging, rollback, uninstall
-// byte for byte). A settings file the plugin rewrote no longer holds the bytes WrongGPU recorded, so an uninstall leaves it in
-// place with a warning (the file-ownership rule, record.h; README).
+// byte for byte); the two settings files go at uninstall even after the plugin rewrote them.
 // The RR data (preset F) is converted once per PC from the player's own RR model file with WrongGPU's converter, as the
 // model data is (model.h), into %LOCALAPPDATA%\WrongGPU\model\F\model.wgcm: shared by every game (a game whose own file is
 // too old uses it too). The file is never copied or changed, and never downloaded or shipped. Written for this project.
