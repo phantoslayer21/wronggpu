@@ -501,62 +501,139 @@ static wstring ScopeForm(const wstring& p) {
     wstring s = p;
     if (StartsWithI(s, L"\\\\?\\UNC\\")) s = L"\\\\" + s.substr(8);
     else if (StartsWithI(s, L"\\\\?\\") || StartsWithI(s, L"\\??\\")) s = s.substr(4);
-    return FullPath(s);
+    s = FullPath(s);
+    while (s.size() > 3 && s.back() == L'\\') s.pop_back();
+    return s;
 }
 
-// Test builds: one line per store access to WRONGGPU_TEST_ACCESS_LOG (UTF-8, appended, before the read), for the tests'
-// guard. Nothing in other builds.
-static void TestAccessLine(const wstring& line) {
 #ifdef WRONGGPU_TESTING
+// Test builds: the access log (WRONGGPU_TEST_ACCESS_LOG). A new log starts with "run <WRONGGPU_TEST_RUN_ID>" (the tests' guard
+// checks it is this run's); every line is appended before the read it records. false: not written (the read is refused).
+static bool TestAccessLine(const wstring& line) {
     const wstring log = EnvVar(L"WRONGGPU_TEST_ACCESS_LOG");
-    if (log.empty()) return;
-    const string text = ToUtf8(line + L"\r\n");
-    const HANDLE h = CreateFileW(log.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_ALWAYS,
-                                 FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return;
+    if (log.empty()) return false;
+    HANDLE h = CreateFileW(log.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, CREATE_NEW,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    string text;
+    if (h != INVALID_HANDLE_VALUE) {
+        text = ToUtf8(L"run " + EnvVar(L"WRONGGPU_TEST_RUN_ID") + L"\r\n");  // (this process made the log)
+    } else {
+        if (GetLastError() != ERROR_FILE_EXISTS) return false;
+        h = CreateFileW(log.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return false;
+    }
+    text += ToUtf8(line + L"\r\n");
     DWORD w = 0;
-    WriteFile(h, text.data(), (DWORD)text.size(), &w, nullptr);
+    const bool ok = WriteFile(h, text.data(), (DWORD)text.size(), &w, nullptr) && w == text.size();
     CloseHandle(h);
-#else
-    (void)line;
-#endif
+    return ok;
 }
+
+// The final form of a path that exists: the name Windows resolves it to (every junction and link above it followed), as
+// C:\... or \\server\...; empty when it cannot be opened.
+static wstring FinalForm(const wstring& p) {
+    const HANDLE h = CreateFileW(p.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                                 FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return L"";
+    wchar_t buf[MAX_PATH * 4] = {};
+    const DWORD n = GetFinalPathNameByHandleW(h, buf, (DWORD)(sizeof buf / sizeof buf[0]), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    CloseHandle(h);
+    return n > 0 && n < sizeof buf / sizeof buf[0] ? ScopeForm(buf) : L"";
+}
+// The long lexical form of a path that exists (8.3 names expanded), for comparing with its final form.
+static wstring LongForm(const wstring& p) {
+    wchar_t buf[MAX_PATH * 4] = {};
+    const DWORD n = GetLongPathNameW(p.c_str(), buf, (DWORD)(sizeof buf / sizeof buf[0]));
+    return n > 0 && n < sizeof buf / sizeof buf[0] ? ScopeForm(buf) : p;
+}
+// Test builds, the scope test on what a path really is (not only its spelling): the nearest part of it that exists must
+// resolve to its own long name (no junction or link above it), the path itself must not be a reparse point, and a file
+// must have no second name (a hard link inside could name an outside file's data). why: the refusal's reason.
+static bool RealPathOk(const wstring& lexical, const wchar_t** why) {
+    wstring probe = lexical;
+    while (!probe.empty() && GetFileAttributesW(probe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        const wstring up = Parent(probe);
+        if (up == probe || up.empty()) return true;  // nothing of it exists: nothing to read
+        probe = up;
+    }
+    if (probe.empty()) return true;
+    const wstring finalForm = FinalForm(probe);
+    if (finalForm.empty() || !IEq(finalForm, LongForm(probe))) { *why = L"resolves elsewhere (a junction or link)"; return false; }
+    if (IEq(probe, lexical)) {
+        const HANDLE h = CreateFileW(lexical.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                                     FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        if (h == INVALID_HANDLE_VALUE) { *why = L"cannot be checked"; return false; }
+        BY_HANDLE_FILE_INFORMATION fi{};
+        const bool got = GetFileInformationByHandle(h, &fi) != 0;
+        CloseHandle(h);
+        if (!got) { *why = L"cannot be checked"; return false; }
+        if (fi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) { *why = L"is a reparse point (a link or junction)"; return false; }
+        if (!(fi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && fi.nNumberOfLinks > 1) { *why = L"has another name (a hard link)"; return false; }
+    }
+    return true;
+}
+#endif
 
 bool LibraryAccess(const wstring& path) {
     ++g_libraryAccesses;
+#ifdef WRONGGPU_TESTING
     wstring folder;
     if (!TestLibraries(&folder)) {
-        TestAccessLine(L"library access: " + path);
+        TestAccessLine(L"library access: " + path);  // (a test build without the tests' list: logged where asked, never held back)
         return true;
     }
-    // the tests' scope: the folder that holds WRONGGPU_TEST_LIBRARIES (the test run's own folder); nothing else is read
-    wstring root = folder.empty() ? wstring() : Parent(ScopeForm(folder));
-    while (root.size() > 3 && root.back() == L'\\') root.pop_back();
+    // the tests' scope: the folder that holds WRONGGPU_TEST_LIBRARIES (the test run's own folder), as it really is; nothing
+    // else is read, and nothing is read whose access line could not be written (fail closed)
+    const wstring root = folder.empty() ? wstring() : Parent(ScopeForm(folder));
     const wstring p = ScopeForm(path);
-    const bool inside = !root.empty() && (IEq(p, root) || (p.size() > root.size() && StartsWithI(p, root) && (p[root.size()] == L'\\' || root.back() == L'\\')));
-    TestAccessLine((inside ? L"library access: " : L"library access refused: ") + path);
-    return inside;
+    const wchar_t* why = nullptr;
+    bool inside = !root.empty() && (IEq(p, root) || (p.size() > root.size() && StartsWithI(p, root) && (p[root.size()] == L'\\' || root.back() == L'\\')));
+    if (inside && GetFileAttributesW(root.c_str()) != INVALID_FILE_ATTRIBUTES && !IEq(FinalForm(root), LongForm(root))) { inside = false; why = L"the test folder resolves elsewhere"; }
+    if (inside && !RealPathOk(p, &why)) inside = false;
+    if (!inside) {
+        TestAccessLine(L"library access refused: " + path + (why ? wstring(L" (") + why + L")" : wstring()));
+        return false;
+    }
+    return TestAccessLine(L"library access: " + path);
+#else
+    (void)path;
+    return true;
+#endif
 }
 
 bool LibraryRegistryAccess(const wchar_t* what) {
     ++g_libraryAccesses;
+#ifdef WRONGGPU_TESTING
     if (!TestLibraries()) {
         TestAccessLine(wstring(L"library access: registry ") + what);
         return true;
     }
     TestAccessLine(wstring(L"library access refused: registry ") + what);
     return false;
+#else
+    (void)what;
+    return true;
+#endif
+}
+
+void TestAccessStart(const wchar_t* program) {
+#ifdef WRONGGPU_TESTING
+    if (TestLibraries()) TestAccessLine(L"process " + std::to_wstring(GetCurrentProcessId()) + L" " + program + L" start");
+#else
+    (void)program;
+#endif
 }
 
 size_t LibraryAccessCount() { return g_libraryAccesses; }
 
 std::vector<wstring> FindFilesNamed(const wstring& root, const wchar_t* name, size_t budget, int maxDepth) {
     std::vector<wstring> out;
-    if (!LibraryAccess(root)) return out;  // (a test build: never a folder outside the test run's own)
     std::vector<std::pair<wstring, int>> stack{{root, 0}};
     size_t visited = 0;
     while (!stack.empty() && visited < budget) {
         auto [dir, depth] = stack.back(); stack.pop_back();
+        if (!LibraryAccess(dir)) continue;  // every folder listed is asked first (a test build: never one outside its own)
         WIN32_FIND_DATAW fd;
         HANDLE h = FindFirstFileW(Join(dir, L"*").c_str(), &fd);
         if (h == INVALID_HANDLE_VALUE) continue;
@@ -567,7 +644,9 @@ std::vector<wstring> FindFilesNamed(const wstring& root, const wchar_t* name, si
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
                 if (depth < maxDepth && !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && !IEq(n, kStateDirName) && !IEq(n, kLegacyStateDir) && !IEq(n, kKeptDirName))
                     stack.push_back({Join(dir, n), depth + 1});
-            } else if (IEq(n, name)) out.push_back(Join(dir, n));
+            } else if (IEq(n, name) && LibraryAccess(Join(dir, n))) {
+                out.push_back(Join(dir, n));  // (each file found is asked too: what its caller opens next)
+            }
         } while (FindNextFileW(h, &fd));
         FindClose(h);
     }

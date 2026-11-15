@@ -3,27 +3,41 @@
 access (util.h LibraryAccess: "library access: <path>", "library access refused: <path>") to WRONGGPU_TEST_ACCESS_LOG
 before the read; check_isolation parses that log after every launcher or installer call and stops the whole run, loudly, on
 a read outside the run's work folder (also \\\\?\\ and UNC forms), a store registry read, a missing or unreadable access log,
-or no access at all where the call was expected to scan. self_test (no launcher) runs first in every runner's main and
+a log not of this run (its first line "run <WRONGGPU_TEST_RUN_ID>"), a call that logged nothing (every start of ours logs a
+"process" line), or no access at all where the call was expected to scan. The runners never create the log: the launcher
+does, and refuses a read whose line it cannot write. self_test (no launcher) runs first in every runner's main and
 aborts the run when the guard itself is broken. run_verbs: the launcher's verbs with and without --noscan against a
 non-empty test library. Written for this project."""
 import os
 import re
+import uuid
 
 from run_installer_tests import write
 
 ACCESS_LOG = "library-access.log"  # in the work folder (each runner sets WRONGGPU_TEST_ACCESS_LOG to it)
+_RUN_IDS = {}  # work folder -> this run's id (WRONGGPU_TEST_RUN_ID): the access log's first line must name it
 
 
 def test_env(env, work):
     """The environment every runner gives the launcher: its store libraries from <work>\\libraries only (empty: none), every
-    store access logged to <work>\\library-access.log (created empty here, so a missing log is a failure later)."""
+    store access logged to <work>\\library-access.log by the launcher itself (never created here: a log the launcher could not
+    write stays missing, and the guard stops the run), this run's id for its first line."""
     libs = os.path.join(work, "libraries")
     os.makedirs(libs, exist_ok=True)
     env["WRONGGPU_TEST_LIBRARIES"] = libs
     env["WRONGGPU_TEST_ACCESS_LOG"] = os.path.join(work, ACCESS_LOG)
-    if not os.path.exists(env["WRONGGPU_TEST_ACCESS_LOG"]):
-        write(env["WRONGGPU_TEST_ACCESS_LOG"], b"")
+    env["WRONGGPU_TEST_RUN_ID"] = new_run(work)
     return env
+
+
+def new_run(work):
+    """This run's id (the access log's first line must name it); an earlier run's log removed, never counted as this run's."""
+    p = os.path.join(work, ACCESS_LOG)
+    if os.path.exists(p):
+        os.remove(p)
+    rid = _RUN_IDS[os.path.normcase(os.path.abspath(work))] = uuid.uuid4().hex
+    return rid
+
 
 
 def access_size(work):
@@ -53,18 +67,26 @@ def _stop(args, what, line):
                      "WRONGGPU_TEST_LIBRARIES only (util.h LibraryAccess)." % (" ".join(str(a) for a in args[:2]), what, line.strip()))
 
 
-def check_isolation(log, work, start, args, access_start=0, expect_scan=False):
+def check_isolation(log, work, start, args, access_start=0, expect_scan=False, logged=True):
     """After a launcher or installer call: its new access-log lines (from byte access_start) and its new main-log lines
-    (from byte start; log None: none) must name nothing outside the work folder. expect_scan: the call was meant to search
-    the test libraries, so at least one access inside <work>\\libraries must be there (the guard's sensitivity)."""
+    (from byte start; log None: none) must name nothing outside the work folder. The access log must be there, written by
+    this run (its first line "run <this run's id>"), and (logged: a program of ours) have new lines from this call (every run
+    of ours writes its start line). expect_scan: the call was meant to search the test libraries, so at least one access
+    inside <work>\\libraries must be there (the guard's sensitivity)."""
     root = os.path.normcase(os.path.abspath(work))
     access = os.path.join(work, ACCESS_LOG)
     try:
         with open(access, "rb") as f:
+            first = f.readline().decode("utf-8", "replace").strip()
             f.seek(access_start)
             lines = f.read().decode("utf-8", "replace").splitlines()
     except OSError as e:
-        _stop(args, "left no readable store access log", "%s (%s)" % (access, e))
+        _stop(args, "left no readable store access log (the launcher writes it; a missing one means it could not)", "%s (%s)" % (access, e))
+    want = _RUN_IDS.get(root)
+    if want is None or first != "run " + want:
+        _stop(args, "left an access log that is not this run's", "first line %r, this run is %r" % (first, want))
+    if logged and not lines:
+        _stop(args, "logged nothing (a program of ours writes its start line every run: its access lines are missing)", access)
     scanned = False
     libs = os.path.normcase(os.path.join(root, "libraries"))
     for line in lines:
@@ -119,12 +141,26 @@ def self_test(work):
         ("a converter line outside stops the run", "", "converter: file: Q:\\NotTheTestFolder\\model-file.dll", False, True),
         ("a line that is no search passes", "", "model: reusing Q:\\NotTheTestFolder\\model.wgcm (no search)", False, False),
     ]
+    key = os.path.normcase(os.path.abspath(work))
+    saved = _RUN_IDS.get(key)
+    _RUN_IDS[key] = "self-test-run"
+    head = b"run self-test-run\r\nprocess 1 WrongGPU start\r\n"
+    cases += [("an access log of another run stops the run", None, "", False, True),
+              ("a call that logged nothing stops the run", "", "", False, True)]
     bad = []
     for name, aline, mline, expect, stops in cases:
-        write(access, (aline + "\r\n").encode("utf-8") if aline else b"")
+        if aline is None:  # another run's log
+            write(access, b"run another-run\r\nprocess 1 WrongGPU start\r\n")
+            start = 0
+        elif name.startswith("a call that logged nothing"):
+            write(access, head)
+            start = len(head)  # (nothing after this call's start)
+        else:
+            write(access, head + ((aline + "\r\n").encode("utf-8") if aline else b""))
+            start = 0
         write(log, ("[00:00:00] " + mline + "\r\n").encode("utf-8") if mline else b"")
         try:
-            check_isolation(log, work, 0, ("self-test",), 0, expect)
+            check_isolation(log, work, 0, ("self-test",), start, expect)
             stopped = False
         except SystemExit as e:
             stopped = "TEST ISOLATION FAILED" in str(e)
@@ -140,10 +176,13 @@ def self_test(work):
     print("  %s  guard: a missing store access log stops the run" % ("PASS " if missing else "FAIL "))
     if not missing:
         bad.append("missing access log")
-    for p in (log,):
+    for p in (log, access):
         if os.path.exists(p):
             os.remove(p)
-    write(access, b"")
+    if saved is None:
+        _RUN_IDS.pop(key, None)
+    else:
+        _RUN_IDS[key] = saved
     if bad:
         raise SystemExit("TEST ISOLATION SELF-TEST FAILED (%s): no launcher call is made with a broken guard." % "; ".join(bad))
 
@@ -173,13 +212,14 @@ def run_verbs(t, opti, m):
         rc = t.run(*args)
         t.check("%s --noscan: exit 0, nothing of the test libraries read (no access there)" % verb, rc == 0 and not touched(a0), (rc, touched(a0)[:3], t.j.get("message")))
     a0 = access_size(t.work)
+    l0 = os.path.getsize(t.log) if os.path.isfile(t.log) else 0
     t.expect_scan = True  # the guard's sensitivity: this call must log accesses in the test libraries
     rc = t.run("install", exe, *inst)
     t.expect_scan = False
     got = touched(a0)
     t.check("install without --noscan: the test libraries searched (accesses logged there; the AMD FSR 4 search and the model step)",
             rc == 0 and got and any("Library Game" in l for l in got), (rc, got[:3]))
-    logt = m.read(t.log).decode("utf-8", "replace") if os.path.isfile(t.log) else ""
+    logt = m.read(t.log)[l0:].decode("utf-8", "replace") if os.path.isfile(t.log) else ""  # (this call's lines only)
     t.check("...the AMD FSR 4 search saw the test library's file (not AMD's: not used); the PC's stores never (the guard)",
             "AMD FSR 4 search:" in logt and "Library Game" in logt, t.logtail(800))
     if "(Preset K)" in logt or "Preset K model caches are prepared" in logt:  # a Preset K build: the other model's search
@@ -187,6 +227,12 @@ def run_verbs(t, opti, m):
                 any(("converter: file:" in l or "model: " in l) and "Library Game" in l for l in logt.splitlines()), t.logtail(800))
     else:
         print("  skipped: the other model's search (this launcher is built without Preset K)")
+    for verb in ("repair", "update"):  # the guard's sensitivity for the other verbs that search
+        a0 = access_size(t.work)
+        t.expect_scan = True
+        rc = t.run(verb, exe, *inst)
+        t.expect_scan = False
+        t.check("%s without --noscan: the test libraries searched (accesses logged there)" % verb, rc == 0 and touched(a0), (rc, touched(a0)[:3], t.j.get("message")))
     dump = os.path.join(t.work, "ui-dump-isolation.json")
     for noscan in (True, False):
         a0 = access_size(t.work)

@@ -76,6 +76,7 @@ wstring PlainError(const SetupError& e) {
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+    TestAccessStart(L"restorer");  // (#243: a test build run by the tests leaves a line for every run)
     SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
     static const EmbeddedData data{nullptr, 0, 0, L"", 0, L"", 0, WRONGGPU_VERSION_STR};
     Context ctx;

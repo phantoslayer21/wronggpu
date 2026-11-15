@@ -68,10 +68,13 @@ wstring FindArt(const wstring& dir, const wchar_t* name) {
     auto consider = [&](const wstring& p) {
         WIN32_FILE_ATTRIBUTE_DATA a{};
         if (!GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &a) || (a.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) return;
+        if (!LibraryAccess(p)) return;  // (util.h: each art file is asked before it can be opened)
         if (best.empty() || CompareFileTime(&a.ftLastWriteTime, &bestTime) > 0) { best = p; bestTime = a.ftLastWriteTime; }
     };
+    if (!LibraryAccess(dir)) return best;  // (util.h: every folder listed is asked first)
     consider(Join(dir, name));
-    for (auto& sub : ListDirs(dir)) consider(Join(sub, name));
+    for (auto& sub : ListDirs(dir))
+        if (LibraryAccess(sub)) consider(Join(sub, name));
     return best;
 }
 

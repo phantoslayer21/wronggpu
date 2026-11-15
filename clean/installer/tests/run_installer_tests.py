@@ -167,9 +167,12 @@ class Env:
         os.makedirs(libs, exist_ok=True)
         self.env["WRONGGPU_TEST_LIBRARIES"] = self.win(libs)
         self.access = os.path.join(work, "library-access.log")  # every store access of the program, checked after each run (#243)
-        if not os.path.exists(self.access):
-            write(self.access, b"")
-        self.env["WRONGGPU_TEST_ACCESS_LOG"] = self.win(self.access)
+        self.env["WRONGGPU_TEST_ACCESS_LOG"] = self.win(self.access)  # (written by the program itself, never created here)
+        if self.native:
+            if os.environ.get("WRONGGPU_TESTING") != "1":
+                raise SystemExit("native Windows runs need an installer built with WRONGGPU_TESTING (and WRONGGPU_TESTING=1 set): "
+                                 "only a test build keeps to the test libraries and logs every store access (#243)")
+            self.env["WRONGGPU_TEST_RUN_ID"] = __import__("launcher_isolation").new_run(work)
 
     def close(self):
         if not self.native:

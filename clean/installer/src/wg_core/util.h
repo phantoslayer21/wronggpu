@@ -147,11 +147,18 @@ std::vector<wstring> FindFilesNamed(const wstring& root, const wchar_t* name, si
 // - LibraryAccess(path): true = may be read. In a WRONGGPU_TESTING build with WRONGGPU_TEST_LIBRARIES set, only paths below
 //   the folder that holds it (the test run's own folder; \\?\ and UNC forms compared as such); anything else is refused.
 // - LibraryRegistryAccess(what): a store's registry keys; refused in such a test build (the PC's own stores).
-// - Test builds append "library access: <path>" or "library access refused: <path>" to WRONGGPU_TEST_ACCESS_LOG before the
-//   read (the tests' guard parses it); nothing in other builds. LibraryAccessCount counts the questions (every build).
+// - Such a test build checks what a path really is: its final form (GetFinalPathNameByHandle) must be its own long name (no
+//   junction or link above it), it must not be a reparse point, a file must have no second name (hard link), and the test
+//   folder itself must resolve to itself; anything else is refused.
+// - Test builds append "library access: <path>" or "library access refused: <path> (<why>)" to WRONGGPU_TEST_ACCESS_LOG
+//   before the read (the tests' guard parses it). A new log starts with "run <WRONGGPU_TEST_RUN_ID>". With the tests' list
+//   set, a read whose line cannot be written is refused (fail closed). Nothing of this in other builds.
+// - TestAccessStart(program): a test build with the tests' list writes "process <pid> <program> start" (every program run
+//   leaves a line, so the guard can tell a run that logged nothing). LibraryAccessCount counts the questions (every build).
 // - TestLibraries(folder): such a test build (WRONGGPU_TEST_LIBRARIES set, its value in folder); false in other builds.
 bool LibraryAccess(const wstring& path);
 bool LibraryRegistryAccess(const wchar_t* what);
+void TestAccessStart(const wchar_t* program);
 size_t LibraryAccessCount();
 bool TestLibraries(wstring* folder = nullptr);
 wstring HexW(const wgc::Digest& d);

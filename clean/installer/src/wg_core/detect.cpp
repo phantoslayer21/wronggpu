@@ -76,9 +76,12 @@ bool LooksLikeHelperExe(const wstring& exe) {
 }
 // Unreal: <root>\Game.exe is a small bootstrapper; the real game is <root>\<Project>\Binaries\Win64\*-Shipping.exe.
 wstring UnrealShipping(const wstring& root) {
+    if (!LibraryAccess(root)) return L"";  // (util.h: every folder listed is asked first)
     for (auto& project : ListDirs(root))
-        for (const wchar_t* plat : {L"Binaries\\Win64", L"Binaries\\WinGDK"})
+        for (const wchar_t* plat : {L"Binaries\\Win64", L"Binaries\\WinGDK"}) {
+            if (!IsDir(Join(project, plat)) || !LibraryAccess(Join(project, plat))) continue;
             for (auto& exe : ListFiles(Join(project, plat), L"*-Shipping.exe")) if (!LooksLikeHelperExe(exe)) return exe;
+        }
     return L"";
 }
 // rc6: a starter in the game's root whose game has the same name below it: <root>\<Project>\Binaries\Win64 (or WinGDK)\
@@ -89,6 +92,7 @@ wstring SameNameGameExe(const wstring& exe) {
     const wstring root = Parent(exe), name = BaseName(exe);
     if (root.empty() || !IEq(GameRoot(root), root)) return L"";
     if (const wstring x = Join(root, L"bin\\x64\\" + name); IsFile(x)) return x;
+    if (!LibraryAccess(root)) return L"";
     for (auto& project : ListDirs(root))
         for (const wchar_t* plat : {L"Binaries\\Win64", L"Binaries\\WinGDK"})
             if (const wstring x = Join(Join(project, plat), name); IsFile(x)) return x;
@@ -117,6 +121,7 @@ wstring FindGameExe(const wstring& root, const wstring& hint) {
     size_t visited = 0;
     while (!stack.empty() && visited < 20000) {
         auto [dir, depth] = stack.back(); stack.pop_back();
+        if (!LibraryAccess(dir)) continue;  // (util.h: every folder listed is asked first)
         WIN32_FIND_DATAW fd;
         HANDLE h = FindFirstFileW(Join(dir, L"*").c_str(), &fd);
         if (h == INVALID_HANDLE_VALUE) continue;

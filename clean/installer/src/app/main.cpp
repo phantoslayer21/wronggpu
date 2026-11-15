@@ -139,7 +139,7 @@ int RunSilent() {
         };
         if (g.fsr4) {  // read-only: the AMD FSR 4 DLL an install would record for the comparison key
             const CompareDll fc = FindCompareDll(g.ctx, storeLibraries(L"FSR 4 for the comparison key"));
-            LogLine(g.ctx, fc.path.empty() ? wstring(L"FSR 4 for the comparison key: none found (Home compares with the game's own AMD FSR)")
+            if (!g.ctx.noLibraryScan) LogLine(g.ctx, fc.path.empty() ? wstring(L"FSR 4 for the comparison key: none found (Home compares with the game's own AMD FSR)")
                                     : L"FSR 4 for the comparison key: " + fc.path + L" (" + fc.version + L", " + fc.game + L")");
             return EXIT_OK;
         }
@@ -151,7 +151,7 @@ int RunSilent() {
                 for (int i = 0; i < L_COUNT; ++i) LogLine(g.ctx, wstring(c.st[i] == CK_OK ? L"    ok    " : c.st[i] == CK_WARN ? L"    warn  " : c.st[i] == CK_NA ? L"    n/a   " : L"    FAIL  ") + c.text[i]);
             }
             const CompareDll fc = FindCompareDll(g.ctx, storeLibraries(L"FSR 4 for the comparison key"));  // what an install would record (nothing written here)
-            LogLine(g.ctx, fc.path.empty() ? wstring(L"FSR 4 for the comparison key: none found (Home compares with the game's own AMD FSR)")
+            if (!g.ctx.noLibraryScan) LogLine(g.ctx, fc.path.empty() ? wstring(L"FSR 4 for the comparison key: none found (Home compares with the game's own AMD FSR)")
                                     : L"FSR 4 for the comparison key: " + fc.path + L" (" + fc.version + L", " + fc.game + L")");
             return EXIT_OK;
         }
@@ -208,6 +208,7 @@ using namespace wg;
 using namespace wg::app;
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
+    TestAccessStart(L"WrongGPU");  // (#243: a test build run by the tests leaves a line for every run)
     {   // release 0.6.0: the Ray Reconstruction helper (rrprep.h): this program copied under a game's program name, started by
         // the launcher with --rr-prepare <runtime> <passes>; nothing else of the launcher runs in it
         int hc = 0; LPWSTR* hv = CommandLineToArgvW(GetCommandLineW(), &hc);
