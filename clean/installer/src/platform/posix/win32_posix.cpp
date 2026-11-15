@@ -8,6 +8,7 @@
 #include <pwd.h>
 #include <sys/mman.h>
 #include <sys/statvfs.h>
+#include <sys/xattr.h>
 #include <sys/time.h>
 
 #include <algorithm>
@@ -190,8 +191,16 @@ DWORD ErrorFromErrno(int e, const std::string& path) {
 }
 void SetErrorFromErrno(int e, const std::string& path) { g_lastError = ErrorFromErrno(e, path); }
 
+// The hidden attribute has no mode bit; it is kept as a user attribute of the file (a file system without them just never shows it).
+static const char* const kHiddenXattr = "user.wronggpu.hidden";
+static bool IsHiddenPath(const std::string& path) { return lgetxattr(path.c_str(), kHiddenXattr, nullptr, 0) >= 0; }
+static void SetHiddenPath(const std::string& path, bool hidden) {
+    if (hidden) lsetxattr(path.c_str(), kHiddenXattr, "1", 1, 0);
+    else lremovexattr(path.c_str(), kHiddenXattr);
+}
 DWORD AttributesOf(const struct stat& lst, const std::string& path) {
     DWORD a = 0;
+    if (!S_ISLNK(lst.st_mode) && IsHiddenPath(path)) a |= FILE_ATTRIBUTE_HIDDEN;
     if (S_ISLNK(lst.st_mode)) {
         a |= FILE_ATTRIBUTE_REPARSE_POINT;
         struct stat t;
@@ -476,6 +485,7 @@ BOOL SetFileInformationByHandle(HANDLE hv, FILE_INFO_BY_HANDLE_CLASS cls, LPVOID
         bool times = false;
         if (b->LastAccessTime.QuadPart > 0) { ts[0] = TimespecOf(FILETIME{(DWORD)(b->LastAccessTime.QuadPart & 0xFFFFFFFFu), (DWORD)((uint64_t)b->LastAccessTime.QuadPart >> 32)}); times = true; }
         if (b->LastWriteTime.QuadPart > 0) { ts[1] = TimespecOf(FILETIME{(DWORD)(b->LastWriteTime.QuadPart & 0xFFFFFFFFu), (DWORD)((uint64_t)b->LastWriteTime.QuadPart >> 32)}); times = true; }
+        if (b->FileAttributes && !h->path.empty()) SetHiddenPath(h->path, b->FileAttributes & FILE_ATTRIBUTE_HIDDEN);
         if (b->FileAttributes && !S_ISDIR(st.st_mode)) {   // (as SetFileAttributesW: a folder has no read-only bit here)
             const mode_t m = ModeWithReadOnly(st.st_mode, b->FileAttributes & FILE_ATTRIBUTE_READONLY);
             if (m != (st.st_mode & 07777) && fchmod(h->fd, m) != 0) { SetErrorFromErrno(errno, h->path); return FALSE; }
@@ -552,6 +562,7 @@ BOOL SetFileAttributesW(LPCWSTR name, DWORD attrs) {
     struct stat st;
     if (!ToPosix(name, p)) return FALSE;
     if (stat(p.c_str(), &st) != 0) { SetErrorFromErrno(errno, p); return FALSE; }
+    SetHiddenPath(p, attrs & FILE_ATTRIBUTE_HIDDEN);
     if (S_ISDIR(st.st_mode)) return TRUE;   // a read-only folder on Windows still takes files; chmod would not mean that
     const mode_t m = ModeWithReadOnly(st.st_mode, attrs & FILE_ATTRIBUTE_READONLY);
     if (m != (st.st_mode & 07777) && chmod(p.c_str(), m) != 0) { SetErrorFromErrno(errno, p); return FALSE; }
@@ -602,6 +613,40 @@ BOOL MoveFileExW(LPCWSTR from, LPCWSTR to, DWORD flags) {
         if (fd >= 0) { fsync(fd); close(fd); }
         const size_t cut = b.find_last_of('/');
         const std::string dir = cut == std::string::npos ? "." : cut == 0 ? "/" : b.substr(0, cut);
+        const int dfd = open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (dfd >= 0) { fsync(dfd); close(dfd); }
+    }
+    return TRUE;
+}
+// The replacement takes the replaced file's name in one rename, and the replaced file (if a backup name is given) takes the backup name.
+// The failure codes say what is left: 1175, nothing moved; 1177, the replaced file is at the backup name and the replacement is
+// still under its own; 1176 (no backup name), the replaced file is gone and the replacement is still under its own.
+BOOL ReplaceFileW(LPCWSTR replaced, LPCWSTR replacement, LPCWSTR backup, DWORD flags, LPVOID exclude, LPVOID reserved) {
+    std::string a, b, bak;
+    struct stat sa, sb;
+    if (exclude || reserved) return Fail(ERROR_INVALID_PARAMETER);
+    if (!ToPosix(replaced, a) || !ToPosix(replacement, b)) return FALSE;
+    if (backup && !ToPosix(backup, bak)) return FALSE;
+    if (lstat(a.c_str(), &sa) != 0) { SetErrorFromErrno(errno, a); return FALSE; }
+    if (lstat(b.c_str(), &sb) != 0) { SetErrorFromErrno(errno, b); return FALSE; }
+    if (S_ISDIR(sa.st_mode) || S_ISDIR(sb.st_mode)) return Fail(ERROR_ACCESS_DENIED);
+    if (!S_ISLNK(sa.st_mode) && !(sa.st_mode & S_IWUSR)) return Fail(ERROR_ACCESS_DENIED);   // a read-only file is not replaced
+    if (!ShareAllowsDelete(sb)) return Fail(ERROR_SHARING_VIOLATION);
+    if (!ShareAllowsDelete(sa)) return Fail(ERROR_UNABLE_TO_REMOVE_REPLACED);
+    if (sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino) return Fail(ERROR_UNABLE_TO_REMOVE_REPLACED);
+    if (!S_ISLNK(sa.st_mode)) {   // the replaced file's attributes stay (as Windows keeps them)
+        chmod(b.c_str(), sa.st_mode & 07777);
+        SetHiddenPath(b, IsHiddenPath(a));
+    }
+    if (backup) {
+        if (rename(a.c_str(), bak.c_str()) != 0) return Fail(ERROR_UNABLE_TO_REMOVE_REPLACED);
+    } else if (unlink(a.c_str()) != 0) {
+        return Fail(ERROR_UNABLE_TO_REMOVE_REPLACED);
+    }
+    if (rename(b.c_str(), a.c_str()) != 0) return Fail(backup ? ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 : ERROR_UNABLE_TO_MOVE_REPLACEMENT);
+    if (flags & REPLACEFILE_WRITE_THROUGH) {
+        const size_t cut = a.find_last_of('/');
+        const std::string dir = cut == std::string::npos ? "." : cut == 0 ? "/" : a.substr(0, cut);
         const int dfd = open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
         if (dfd >= 0) { fsync(dfd); close(dfd); }
     }

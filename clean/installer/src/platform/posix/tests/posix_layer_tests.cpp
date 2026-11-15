@@ -705,6 +705,60 @@ void ProcessEnd() {
 }
 }  // namespace
 
+// ReplaceFileW: the replacement takes the name of the replaced file; documented failure codes (1175 to 1177 are the numbers Windows gives).
+void ReplaceFile() {
+    check(ERROR_UNABLE_TO_REMOVE_REPLACED == 1175 && ERROR_UNABLE_TO_MOVE_REPLACEMENT == 1176 && ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 == 1177, "the replace failure codes are 1175, 1176 and 1177");
+    Put(In(L"live.ini"), "old"); Put(In(L"fresh.ini"), "new");
+    check(ReplaceFileW(In(L"live.ini").c_str(), In(L"fresh.ini").c_str(), In(L"live.bak").c_str(), 0, nullptr, nullptr), "ReplaceFileW with a backup name");
+    check(Slurp(In(L"live.ini")) == "new" && Slurp(In(L"live.bak")) == "old" && GetFileAttributesW(In(L"fresh.ini").c_str()) == INVALID_FILE_ATTRIBUTES,
+          "the replacement is at the old name, the old file at the backup name, the replacement's own name is free");
+    Put(In(L"fresh2.ini"), "newer");
+    check(ReplaceFileW(In(L"live.ini").c_str(), In(L"fresh2.ini").c_str(), In(L"live.bak").c_str(), REPLACEFILE_WRITE_THROUGH, nullptr, nullptr) && Slurp(In(L"live.bak")) == "new" && Slurp(In(L"live.ini")) == "newer",
+          "an existing backup is overwritten");
+    Put(In(L"fresh3.ini"), "third");
+    check(ReplaceFileW(In(L"live.ini").c_str(), In(L"fresh3.ini").c_str(), nullptr, 0, nullptr, nullptr) && Slurp(In(L"live.ini")) == "third" && GetFileAttributesW(In(L"fresh3.ini").c_str()) == INVALID_FILE_ATTRIBUTES,
+          "ReplaceFileW without a backup name");
+
+    check(!ReplaceFileW(In(L"absent.ini").c_str(), In(L"live.bak").c_str(), nullptr, 0, nullptr, nullptr) && GetLastError() == ERROR_FILE_NOT_FOUND && Slurp(In(L"live.bak")) == "new" ,
+          "a replaced file that does not exist: file not found, the replacement stays");
+    check(!ReplaceFileW(In(L"live.ini").c_str(), In(L"absent.ini").c_str(), nullptr, 0, nullptr, nullptr) && GetLastError() == ERROR_FILE_NOT_FOUND && Slurp(In(L"live.ini")) == "third",
+          "a replacement that does not exist: file not found, the replaced file stays");
+    check(!ReplaceFileW(In(L"nope\\live.ini").c_str(), In(L"live.bak").c_str(), nullptr, 0, nullptr, nullptr) && GetLastError() == ERROR_PATH_NOT_FOUND, "a missing folder: path not found");
+    int dummy = 0;
+    check(!ReplaceFileW(In(L"live.ini").c_str(), In(L"live.bak").c_str(), nullptr, 0, &dummy, nullptr) && GetLastError() == ERROR_INVALID_PARAMETER, "the reserved arguments must be null");
+
+    SetFileAttributesW(In(L"live.ini").c_str(), FILE_ATTRIBUTE_READONLY);
+    check(!ReplaceFileW(In(L"live.ini").c_str(), In(L"live.bak").c_str(), nullptr, 0, nullptr, nullptr) && GetLastError() == ERROR_ACCESS_DENIED && Slurp(In(L"live.ini")) == "third" && Slurp(In(L"live.bak")) == "new",
+          "a read-only replaced file: access denied, nothing moved");
+    SetFileAttributesW(In(L"live.ini").c_str(), FILE_ATTRIBUTE_NORMAL);
+
+    HANDLE held = CreateFileW(In(L"live.ini").c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    check(!ReplaceFileW(In(L"live.ini").c_str(), In(L"live.bak").c_str(), In(L"live.old").c_str(), 0, nullptr, nullptr) && GetLastError() == ERROR_UNABLE_TO_REMOVE_REPLACED
+              && Slurp(In(L"live.ini")) == "third" && Slurp(In(L"live.bak")) == "new" && GetFileAttributesW(In(L"live.old").c_str()) == INVALID_FILE_ATTRIBUTES,
+          "a replaced file held without delete sharing: 1175, both files keep their names");
+    CloseHandle(held);
+
+    held = CreateFileW(In(L"live.bak").c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    check(!ReplaceFileW(In(L"live.ini").c_str(), In(L"live.bak").c_str(), nullptr, 0, nullptr, nullptr) && GetLastError() == ERROR_SHARING_VIOLATION && Slurp(In(L"live.ini")) == "third",
+          "a replacement held without delete sharing: sharing violation");
+    CloseHandle(held);
+
+    SetFileAttributesW(In(L"live.bak").c_str(), FILE_ATTRIBUTE_READONLY);
+    check(ReplaceFileW(In(L"live.ini").c_str(), In(L"live.bak").c_str(), nullptr, 0, nullptr, nullptr) && Slurp(In(L"live.ini")) == "new" && (GetFileAttributesW(In(L"live.ini").c_str()) & FILE_ATTRIBUTE_READONLY) == 0,
+          "the replaced file's attributes stay on the new file (a read-only replacement does not make it read-only)");
+
+    Put(In(L"h-live.ini"), "a"); Put(In(L"h-fresh.ini"), "b");
+    SetFileAttributesW(In(L"h-live.ini").c_str(), FILE_ATTRIBUTE_HIDDEN);
+    check((GetFileAttributesW(In(L"h-live.ini").c_str()) & FILE_ATTRIBUTE_HIDDEN) && ReplaceFileW(In(L"h-live.ini").c_str(), In(L"h-fresh.ini").c_str(), nullptr, 0, nullptr, nullptr)
+              && Slurp(In(L"h-live.ini")) == "b" && (GetFileAttributesW(In(L"h-live.ini").c_str()) & FILE_ATTRIBUTE_HIDDEN),
+          "the hidden attribute of the replaced file stays on the new file");
+    SetFileAttributesW(In(L"h-live.ini").c_str(), FILE_ATTRIBUTE_NORMAL);
+    check((GetFileAttributesW(In(L"h-live.ini").c_str()) & FILE_ATTRIBUTE_HIDDEN) == 0, "a normal attribute clears hidden");
+
+    check(CreateDirectoryW(In(L"rd").c_str(), nullptr) && !ReplaceFileW(In(L"live.ini").c_str(), In(L"rd").c_str(), nullptr, 0, nullptr, nullptr) && GetLastError() == ERROR_ACCESS_DENIED, "a folder cannot replace a file");
+    check(!ReplaceFileW(L"Z:\\no\\such\\a", L"Z:\\no\\such\\b", nullptr, 0, nullptr, nullptr) && GetLastError() == ERROR_PATH_NOT_FOUND, "Z:\\ paths are read as everywhere else");
+}
+
 int main() {
     // a registry file of this run's own, and a folder of its own, both under TMPDIR
     wchar_t t[MAX_PATH]{};
@@ -733,6 +787,7 @@ int main() {
     EndOfFile();
     PinnedPattern();
     LinksAndReparse();
+    ReplaceFile();
     ProcessEnd();
     std::remove(regFile.c_str());
     std::error_code ec;
