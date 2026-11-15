@@ -1795,7 +1795,8 @@ int debug_messages(Gpu& g, const char* when) {
 // log "network runtime ready: executor dx12" and none of "could not take this context", "does not take this frame",
 // "about to start the HIP runtime", "network runtime ready: executor hip" or "the HIP executor runs"; its frame must be WG_OK. No `executor` key is given: the
 // default rule (D3D12 on an RX 9000 card) is what is tested. The options name the model (a synthetic model for K). With
-// hip_switch=on in the options (R1: ignored for every model) each context must log the one "hip_switch=on is ignored" line.
+// hip_switch=on in the options (R1: ignored for every model) each context must log the one "hip_switch=on is ignored" line; with executor=hip and / or capture_dir=... in the options
+// (R1: diagnostic keys, ignored by a release build of the library) the one "ignored: diagnostic key, release build" line each.
 bool case_matrix(Gpu& g, const char* dll, const std::string& options, const std::string& outputs) {
   struct Mode {
     const char* name;
@@ -1811,6 +1812,10 @@ bool case_matrix(Gpu& g, const char* dll, const std::string& options, const std:
   }
   int contexts = 0, refused = 0;
   const bool switch_on = options.find("hip_switch=on") != std::string::npos;  // R1: ignored, one line, no HIP
+  // R1: executor=hip and capture_dir in a release build of the library: ignored, one line each, still D3D12 (the case then
+  // fails on a developer build, which runs them, as it should)
+  const bool hip_key = options.find("executor=hip") != std::string::npos;
+  const bool cap_key = options.find("capture_dir=") != std::string::npos;
   for (const UINT oh : heights) {
     const UINT ow = oh * 16 / 9;
     for (const Mode& m : modes) {
@@ -1851,9 +1856,11 @@ bool case_matrix(Gpu& g, const char* dll, const std::string& options, const std:
             rb->Release();
           }
           bool ready = false, bad = false;
-          int ignored = 0;
+          int ignored = 0, ignored_hip = 0, ignored_cap = 0;
           for (const auto& line : g_log) {
             ignored += line.find("hip_switch=on is ignored") != std::string::npos;
+            ignored_hip += line.find("executor=hip ignored: diagnostic key, release build") != std::string::npos;
+            ignored_cap += line.find("capture_dir ignored: diagnostic key, release build") != std::string::npos;
             ready |= line.find("network runtime ready: executor dx12") != std::string::npos;
             const bool refusal = line.find("could not take this context") != std::string::npos;
             refused += refusal;
@@ -1862,9 +1869,11 @@ bool case_matrix(Gpu& g, const char* dll, const std::string& options, const std:
                    line.find("network runtime ready: executor hip") != std::string::npos ||
                    line.find("the HIP executor runs") != std::string::npos;
           }
-          const bool ok = r == WG_OK && rr == WG_OK && ready && !bad && ignored == (switch_on ? 1 : 0);
-          std::printf("  matrix %s: create %d, frame %d, ready dx12 %d, refusal or HIP line %d, hip_switch line %d%s\n",
-                      label.c_str(), (int)r, (int)rr, (int)ready, (int)bad, ignored, ok ? "" : "  <-- FAIL");
+          const bool ok = r == WG_OK && rr == WG_OK && ready && !bad && ignored == (switch_on ? 1 : 0) &&
+                          ignored_hip == (hip_key ? 1 : 0) && ignored_cap == (cap_key ? 1 : 0);
+          std::printf("  matrix %s: create %d, frame %d, ready dx12 %d, refusal or HIP line %d, hip_switch line %d, ignored diagnostic keys %d%s\n",
+                      label.c_str(), (int)r, (int)rr, (int)ready, (int)bad, ignored, ignored_hip + ignored_cap,
+                      ok ? "" : "  <-- FAIL");
           CHECK(ok);
         }
       }

@@ -27,6 +27,9 @@ def main():
     ap.add_argument("--outputs", default="1080,1440,2160", help="output heights, comma separated")
     ap.add_argument("--model", choices=("K", "M", "L"), default="K")
     ap.add_argument("--model-dir", help="M, L: the folder with the converted model (M: model.wgcm; L: L\\model.wgcm)")
+    ap.add_argument("--diag-keys", action="store_true",
+                    help="add executor=hip and capture_dir=<out>/capture (diagnostic keys): a release build of the library must "
+                         "ignore both (one line each) and stay on Direct3D 12; the case fails on a developer build")
     ap.add_argument("--hip-switch-on", action="store_true",
                     help="add hip_switch=on (ignored for every model): one log line per context, still Direct3D 12")
     a = ap.parse_args()
@@ -42,7 +45,9 @@ def main():
         if not a.model_dir:
             ap.error("--model-dir is required for model M and L")
         base = (f"model={a.model}", f"kernels_dir={build}", f"model_dir={Path(a.model_dir).resolve()}")
-    opts = ";".join(base + (("hip_switch=on",) if a.hip_switch_on else ()))
+    extra = (("hip_switch=on",) if a.hip_switch_on else ()) + \
+            (("executor=hip", f"capture_dir={out / 'capture'}") if a.diag_keys else ())
+    opts = ";".join(base + extra)
     env = os.environ.copy()
     env.pop("WG_RUNTIME_OPTIONS", None)
     proc = subprocess.run([str(Path(a.exe).resolve()), str(build / "wronggpu_runtime.dll"), "matrix", opts, a.outputs],
