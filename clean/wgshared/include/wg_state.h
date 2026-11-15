@@ -16,6 +16,9 @@
 // carries a low integrity label, so an elevated launcher and the game (any integrity) share it. A holder that dies leaves
 // the mutex abandoned: the next waiter gets it (the files are replaced atomically, so they are whole either way).
 //
+// While a WrongGPU module is loaded in the game it keeps the game's LoadedMarker open (below); the launcher refuses an
+// uninstall, repair or update while IsGameUsingWrongGPU says so. The OS drops the marker when the process ends or crashes.
+//
 // Writes are atomic (WriteAtomic): a new temporary file in the same folder (<name>.wgtmp-<pid>-<n>, created only where
 // nothing is), flushed, then MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH) over the file; the temporary file is deleted when
 // any step fails. A reader sees the old file or the new one, never part of one. Temporary files never count as state.
@@ -86,23 +89,36 @@ inline bool LockNameFor(const std::wstring& gameDir, std::wstring* name, DWORD* 
     return true;
 }
 
+// Another per-game name of the same identity: prefix + "<volume serial>-<file index>".
+inline bool NameFor(const wchar_t* prefix, const std::wstring& gameDir, std::wstring* name, DWORD* err) {
+    std::wstring lock;
+    if (!LockNameFor(gameDir, &lock, err)) return false;
+    *name = std::wstring(prefix) + lock.substr(lock.find(L"-state-") + 7);
+    return true;
+}
+// A named mutex every integrity level may open (created, or opened when it exists); nullptr with GetLastError on failure.
+inline HANDLE CreateSharedMutex(const std::wstring& name) {
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, FALSE};
+    // everyone: SYNCHRONIZE | MUTEX_MODIFY_STATE; SYSTEM and administrators: all; low integrity label (no write-up block)
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(A;;0x00100001;;;WD)(A;;GA;;;SY)(A;;GA;;;BA)S:(ML;;NW;;;LW)", SDDL_REVISION_1, &sd, nullptr))
+        sa.lpSecurityDescriptor = sd;
+    HANDLE m = CreateMutexW(sa.lpSecurityDescriptor ? &sa : nullptr, FALSE, name.c_str());
+    if (!m && GetLastError() == ERROR_ACCESS_DENIED) m = OpenMutexW(SYNCHRONIZE | MUTEX_MODIFY_STATE, FALSE, name.c_str());
+    const DWORD e = GetLastError();
+    if (sd) LocalFree(sd);
+    SetLastError(e);
+    return m;
+}
+
 // The game's state lock, held from construction (when held()) to destruction. Bounded wait: not held after waitMs.
 class StateLock {
 public:
     explicit StateLock(const std::wstring& gameDir, DWORD waitMs = kDefaultWaitMs) {
         std::wstring name;
         if (!LockNameFor(gameDir, &name, &err_)) return;
-        PSECURITY_DESCRIPTOR sd = nullptr;
-        SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, FALSE};
-        // everyone: SYNCHRONIZE | MUTEX_MODIFY_STATE; SYSTEM and administrators: all; low integrity label (no write-up block)
-        if (ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(A;;0x00100001;;;WD)(A;;GA;;;SY)(A;;GA;;;BA)S:(ML;;NW;;;LW)",
-                                                                 SDDL_REVISION_1, &sd, nullptr))
-            sa.lpSecurityDescriptor = sd;
-        mutex_ = CreateMutexW(sa.lpSecurityDescriptor ? &sa : nullptr, FALSE, name.c_str());
-        if (!mutex_ && GetLastError() == ERROR_ACCESS_DENIED) mutex_ = OpenMutexW(SYNCHRONIZE | MUTEX_MODIFY_STATE, FALSE, name.c_str());
-        if (!mutex_) err_ = GetLastError();
-        if (sd) LocalFree(sd);
-        if (!mutex_) return;
+        mutex_ = CreateSharedMutex(name);
+        if (!mutex_) { err_ = GetLastError(); return; }
         const DWORD w = WaitForSingleObject(mutex_, waitMs);
         held_ = w == WAIT_OBJECT_0 || w == WAIT_ABANDONED;
         abandoned_ = w == WAIT_ABANDONED;
@@ -123,6 +139,42 @@ private:
     bool held_ = false, abandoned_ = false;
     DWORD err_ = 0;
 };
+
+// ---- the loaded marker ----------------------------------------------------------------------------------------------
+// A WrongGPU module loaded in the game (the front end, the menu plugin, the RR plugin) keeps a LoadedMarker for the game
+// folder for as long as it is loaded: a named mutex Local\WrongGPU-loaded-<volume serial>-<file index> (the same identity as
+// the state lock) that it holds OPEN but never owns. The object exists exactly while some process has a handle to it, and the
+// OS closes every handle of a process that ends, crashes or is killed: a dead game never leaves a stale marker. The launcher
+// refuses an uninstall, repair or update while IsGameUsingWrongGPU(gameDir) is true. Same security as the state lock (every
+// integrity level may open it).
+class LoadedMarker {
+public:
+    explicit LoadedMarker(const std::wstring& gameDir) {
+        std::wstring name;
+        if (!NameFor(L"Local\\WrongGPU-loaded-", gameDir, &name, &err_)) return;
+        handle_ = CreateSharedMutex(name);
+        if (!handle_) err_ = GetLastError();
+    }
+    ~LoadedMarker() { if (handle_) CloseHandle(handle_); }
+    LoadedMarker(const LoadedMarker&) = delete;
+    LoadedMarker& operator=(const LoadedMarker&) = delete;
+    bool held() const { return handle_ != nullptr; }
+    DWORD error() const { return err_; }
+
+private:
+    HANDLE handle_ = nullptr;
+    DWORD err_ = 0;
+};
+// A running process has WrongGPU loaded for the game folder gameDir (a LoadedMarker of it is open somewhere). Never creates the
+// marker. A folder that cannot be opened: false.
+inline bool IsGameUsingWrongGPU(const std::wstring& gameDir) {
+    std::wstring name;
+    DWORD err = 0;
+    if (!NameFor(L"Local\\WrongGPU-loaded-", gameDir, &name, &err)) return false;
+    HANDLE h = OpenMutexW(SYNCHRONIZE, FALSE, name.c_str());
+    if (h) { CloseHandle(h); return true; }
+    return GetLastError() == ERROR_ACCESS_DENIED;  // there, but not ours to open: still in use
+}
 
 // The whole file. false: missing (*missing = true) or unreadable (*missing = false; *err the Win32 error).
 inline bool ReadBytes(const std::wstring& path, std::string* out, bool* missing = nullptr, DWORD* err = nullptr) {
