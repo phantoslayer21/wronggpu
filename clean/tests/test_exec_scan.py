@@ -186,6 +186,27 @@ POST_EXCHANGE_KERNELS = frozenset((
     "post_recon6_eb_bil"))
 
 
+# swin.co and its variants: the fused merge and expand (the `_mg` / `_ex` block kernels and the two functions fused_merge<C, MCO>
+# they call; not swin_mid of swin__bmegahg.co, which is parked with its own result). A KNOWN, EXPLAINED EXCEPTION: every site
+# of these functions sits under ONE mask, made by the entry test of the loop over the output tiles, `for (mt = wave; mt < tiles;
+# mt += 8)` (fused_expand: tiles = 4 C / 16, fused_merge: tiles = MCO / 16). `wave` = tid >> 5 is a vector value to the compiler,
+# so it tests `tid < 32 * tiles` per lane (v_cmpx with an immediate that is a multiple of 32: 0x1ff, 0x2ff, 0xc0, 0x100 against
+# the thread index). A wave32 holds 32 consecutive thread indices from a multiple of 32, so every lane of a wave is on one side of
+# the bound: the mask is all or nothing, and an empty one skips the loop (s_cbranch_execz). The kernels are launched with 256
+# threads (8 waves). test_gpu_swin_fused runs them on the card with windows sticking out of the grid and a window count that
+# is not a multiple of 8, bit for bit against the separate kernels. Making `wave` scalar (wg_uniform) gets rid of the mask but
+# adds 10 to 25 spilled registers to the `_nc` kernels, so it is left as it is. The counts are pinned: a new site fails here.
+FUSED_GUARDED = {
+    "swin.co": {"swin_block_c64_add_ex": 216, "swin_block_c64_add_ex_nc": 216, "swin_block_c96_add_ex": 300,
+                "swin_block_c96_add_ex_nc": 300, "fused_merge<64, 96>": 32, "fused_merge<96, 128>": 32},
+    "swin__mgx.co": {"swin_block_c64_add_ex": 216, "swin_block_c64_add_ex_nc": 216, "swin_block_c96_add_ex": 300,
+                     "swin_block_c96_add_ex_nc": 300, "fused_merge<64, 96>": 32, "fused_merge<96, 128>": 32},
+    "swin__f16wm.co": {"swin_block_c64_add_ex": 240, "swin_block_c64_add_ex_nc": 240, "swin_block_c96_add_ex": 300,
+                       "swin_block_c96_add_ex_nc": 300, "fused_merge<64, 96>": 32, "fused_merge<96, 128>": 32},
+}
+MANGLED = {"fused_merge<64, 96>": "fused_mergeILi64ELi96E", "fused_merge<96, 128>": "fused_mergeILi96ELi128E"}
+
+
 class TestExecScanBuild(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -221,6 +242,33 @@ class TestExecScanBuild(unittest.TestCase):
                 self.assertEqual([m for _a, m, _o in items], ["v_permlanex16_b32"] * 3)
                 self.assertEqual(counts[name], 3)
         self.assertEqual({n for n, c in counts.items() if c and n not in found}, set())
+
+    def test_fused_merge_and_expand_hold_only_the_wave_aligned_loop_guard(self):
+        """The exception above, pinned: exactly these functions with exactly these counts, all under one mask whose origin is a
+        v_cmpx with an immediate that is a multiple of 32; swin_mid of swin__bmegahg.co is left out (parked)."""
+        for co, expected in FUSED_GUARDED.items():
+            path = os.path.join(self.build, co)
+            if not os.path.exists(path):
+                continue
+            text = E.disassemble(path, self.objdump)
+            found, _ = E.scan_text(text)
+            funcs = E.parse(text)
+            names = {k: next((n for n in found if (MANGLED.get(k, k) in n if k in MANGLED else n == k)), None)
+                     for k in expected}
+            with self.subTest(code_object=co, which="the flagged functions"):
+                self.assertEqual(sorted(n for n in names.values() if n), sorted(found))
+            for k, count in expected.items():
+                with self.subTest(code_object=co, kernel=k):
+                    self.assertIsNotNone(names[k], "not flagged any more: drop it from FUSED_GUARDED")
+                    items = found[names[k]]
+                    self.assertEqual(len(items), count)
+                    origins = {o for _a, _m, o in items}
+                    self.assertEqual(len(origins), 1)
+                    (_a, mn, ops, _dw), = [ins for ins in funcs[names[k]] if ins[0] in origins]
+                    self.assertTrue(mn.startswith("v_cmpx_"), mn)
+                    imm = [int(o, 16) for o in ops if o.startswith("0x")]
+                    self.assertEqual(len(imm), 1)
+                    self.assertEqual((imm[0] + 1) % 32 if mn.startswith("v_cmpx_lt") else imm[0] % 32, 0, (mn, ops))
 
     def test_the_scan_sees_the_deliberately_divergent_probe(self):
         path = os.path.join(self.build, "probe.co")
