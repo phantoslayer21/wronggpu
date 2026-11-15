@@ -288,9 +288,10 @@ def test_launcher(a, env, work):
                         f"-DWRONGGPU_MAP={prep / 'prepared' / 'test-map.json'}"], capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError("configuring clean/installer failed:\n" + (r.stdout + r.stderr)[-3000:])
-    r = subprocess.run(["cmake", "--build", str(build), "--target", *LAUNCHER_TESTS], capture_output=True, text=True)
+    # the WrongGPU program too (built, not run): the unit tests alone do not compile the window's code
+    r = subprocess.run(["cmake", "--build", str(build), "--target", *LAUNCHER_TESTS, "WrongGPU"], capture_output=True, text=True)
     if r.returncode != 0:
-        raise RuntimeError("building the launcher's unit tests failed:\n" + (r.stdout + r.stderr)[-3000:])
+        raise RuntimeError("building the launcher's unit tests and the WrongGPU program failed:\n" + (r.stdout + r.stderr)[-3000:])
     passed, failed = [], []
     for t in LAUNCHER_TESTS:
         rc, text = run_wine(env, [str(build / (t + ".exe"))], build, 600)
