@@ -620,7 +620,7 @@ BOOL MoveFileExW(LPCWSTR from, LPCWSTR to, DWORD flags) {
 }
 // The replacement takes the replaced file's name in one rename, and the replaced file (if a backup name is given) takes the backup name.
 // The failure codes say what is left: 1175, nothing moved; 1177, the replaced file is at the backup name and the replacement is
-// still under its own; 1176 (no backup name), the replaced file is gone and the replacement is still under its own.
+// still under its own. (Windows' 1176, the replaced file gone and the replacement not moved, cannot arise here.)
 BOOL ReplaceFileW(LPCWSTR replaced, LPCWSTR replacement, LPCWSTR backup, DWORD flags, LPVOID exclude, LPVOID reserved) {
     std::string a, b, bak;
     struct stat sa, sb;
@@ -638,12 +638,9 @@ BOOL ReplaceFileW(LPCWSTR replaced, LPCWSTR replacement, LPCWSTR backup, DWORD f
         chmod(b.c_str(), sa.st_mode & 07777);
         SetHiddenPath(b, IsHiddenPath(a));
     }
-    if (backup) {
-        if (rename(a.c_str(), bak.c_str()) != 0) return Fail(ERROR_UNABLE_TO_REMOVE_REPLACED);
-    } else if (unlink(a.c_str()) != 0) {
-        return Fail(ERROR_UNABLE_TO_REMOVE_REPLACED);
-    }
-    if (rename(b.c_str(), a.c_str()) != 0) return Fail(backup ? ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 : ERROR_UNABLE_TO_MOVE_REPLACEMENT);
+    // without a backup name one rename does it all (the name never goes missing); when it fails nothing has moved
+    if (backup && rename(a.c_str(), bak.c_str()) != 0) return Fail(ERROR_UNABLE_TO_REMOVE_REPLACED);
+    if (rename(b.c_str(), a.c_str()) != 0) return Fail(backup ? ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 : ERROR_UNABLE_TO_REMOVE_REPLACED);
     if (flags & REPLACEFILE_WRITE_THROUGH) {
         const size_t cut = a.find_last_of('/');
         const std::string dir = cut == std::string::npos ? "." : cut == 0 ? "/" : a.substr(0, cut);
