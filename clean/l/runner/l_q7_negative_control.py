@@ -8,14 +8,17 @@ kernel separate: lframe_L_stages.pkl) is checked twice in one process, frame by 
   reading the encoder block's output as its skip, which this check takes from the encoder oracle on the run's own
   inputs), with the FP8 matrix-op model --mm8.
 Kernels that compute Model M's block form pass the first and must fail the second; kernels in the FP16 form the other
-way round. Output: a JSON record with counts and digests only (SHA-256 of the recorded run file and of the frames'
-inputs and outputs, the model's and map's SHA-256 from l_frame_check's source.json, the runtime library's SHA-256), the
-command line (the build folder as <build>), the runtime commit as given, and the per-frame alignment checks
-(frame counter, parity, reset, window offsets, as compare_model checks them).
+way round. Identity: the recording carries what --run captured (l_frame_check.capture_identity: the checkout's git
+commit from git rev-parse HEAD, and the SHA-256 of the runtime library, params.pkl and source.json); this check re-hashes
+the files it loads and refuses when the recording has no identity or any hash differs (l_frame_check.verify_identity).
+Output: a JSON record with counts and digests only (the verified identity, the model's and map's SHA-256 from
+source.json, the SHA-256 of the recorded run file and of the frames' inputs and outputs), the command line (the build
+folder as <build>), the FP8 op model of each oracle, and the per-frame alignment checks (frame counter, parity, reset,
+window offsets, as compare_model checks them).
 
     python clean/l/runner/l_frame_check.py --build <dir> --prepare --model <model.wgcm>   # CPU
     python clean/l/runner/l_frame_check.py --build <dir> --run                            # GPU
-    python clean/l/runner/l_q7_negative_control.py --build <dir> --runtime-commit <sha> --json out.json   # CPU
+    python clean/l/runner/l_q7_negative_control.py --build <dir> --json out.json          # CPU
 """
 import argparse
 import copy
@@ -99,7 +102,6 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
     ap.add_argument("--config", default="stages", help="the recorded run (lframe_L_<config>.pkl)")
-    ap.add_argument("--runtime-commit", required=True, help="the commit the run's runtime was built from")
     ap.add_argument("--mm8", default="exact", choices=L.MM8_MODELS)
     ap.add_argument("--json", required=True)
     a = ap.parse_args(argv)
@@ -110,22 +112,27 @@ def main(argv=None):
         params = pickle.load(f)["L"]
     with open(os.path.join(F.model_dir(a.build), "source.json")) as f:
         source = json.load(f)
-    lib = os.path.join(a.build, "wronggpu_runtime.dll")
+    try:
+        ident = F.verify_identity(rec, a.build)   # the files this check loads are the ones the run used
+    except ValueError as e:
+        print("REFUSED:", e)
+        return 2
     cmd = [os.path.basename(sys.argv[0])] + [("<build>" if x == a.build else ("<out>" if x == a.json else x))
                                              for x in (argv if argv is not None else sys.argv[1:])]
     res = {"what": "negative control of Model L's oracle block form: one recorded run checked against the Model "
                    "M-form oracle and the FP16-form oracle in one process",
            "command": " ".join(["python", "clean/l/runner/" + cmd[0]] + cmd[1:]),
-           "runtime_commit": a.runtime_commit,
+           "runtime_commit": ident["git_commit"],
+           "identity_verified": ident,
            "recorded_run": {"file": os.path.basename(run_path), "sha256": _sha256_file(run_path),
                             "frames": len(rec["frames"]), "model": rec["model"], "kernels": rec["kernels"],
                             "frame_sha256": frame_digests(rec)},
-           "runtime_library_sha256": _sha256_file(lib) if os.path.exists(lib) else None,
            "model_source": source, "fp8_op_model": a.mm8, "dec0_rule": DEC0_RULE, "forms": {}}
     for name, table in (("model_m_form", model_m_form_table()), ("fp16_form", fp16_form_table(a.mm8))):
         frames = F.compare_model(rec, params, table=table)
         rows = dec0_rows(frames)
-        res["forms"][name] = {"dec0_frames_passed": sum(r["dec0_pass"] for r in rows),
+        res["forms"][name] = {"fp8_op_model": table["mm8"],
+                              "dec0_frames_passed": sum(r["dec0_pass"] for r in rows),
                               "enc0_frames_passed": sum(r["enc0_features_pass"] for r in rows),
                               "alignment_frames_ok": sum(bool(r["alignment"]["pass"]) for r in rows),
                               "frames": rows}

@@ -356,7 +356,7 @@ def run_d3d12(build, special=True, stages=False):
                    "ldr": LDR and model == "L",
                    "notes": p.notes(),
                    "model_source": p.model_source, "dw": p.dw, "dh": p.dh, "ow": p.ow, "oh": p.oh,
-                   "taps": p.output_taps(), "frames": frames}
+                   "taps": p.output_taps(), "frames": frames, "identity": capture_identity(build)}
             with open(rec_path(build, model, config), "wb") as f:
                 pickle.dump(rec, f)
             print(model, config, "frames", len(frames), "post", rec["kernels"].get("post"), "pack",
@@ -561,12 +561,70 @@ def run(build, rocm, special=True):
                    "ldr": LDR and model == "L",
                    "notes": p.notes(),
                    "model_source": p.model_source, "dw": p.dw, "dh": p.dh, "ow": p.ow, "oh": p.oh,
-                   "taps": p.output_taps(), "frames": frames}
+                   "taps": p.output_taps(), "frames": frames, "identity": capture_identity(build)}
             with open(rec_path(build, model, config), "wb") as f:
                 pickle.dump(rec, f)
             print(model, config, "frames", len(frames), "bneck", rec["kernels"].get("swin_bneck"), "post",
                   rec["kernels"].get("post"))
             del p
+
+
+# ---- identity of a recorded run ------------------------------------------------------------------------------------
+
+def _sha256_file(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def identity_files(build):
+    """The files a recorded run's identity covers: {name: path} (the runtime library, the oracle's parameters and
+    the model's source description, both written by --prepare)."""
+    return {"runtime_library": os.path.join(build, "wronggpu_runtime.dll"),
+            "params_pkl": os.path.join(model_dir(build), "params.pkl"),
+            "source_json": os.path.join(model_dir(build), "source.json")}
+
+
+def capture_identity(build):
+    """At capture time (--run): the git commit of this checkout (git rev-parse HEAD, run here, not given by the
+    caller), whether its tracked files differ from that commit, and the SHA-256 of every identity file."""
+    import subprocess
+    def git(*a):
+        r = subprocess.run(["git", "-C", ROOT] + list(a), capture_output=True, text=True, creationflags=0x08000000
+                           if os.name == "nt" else 0)
+        return r.stdout.strip() if r.returncode == 0 else None
+    ident = {"git_commit": git("rev-parse", "HEAD"),
+             "git_tracked_changes": bool(git("status", "--porcelain", "--untracked-files=no"))}
+    for name, path in identity_files(build).items():
+        ident[name + "_sha256"] = _sha256_file(path) if os.path.exists(path) else None
+    return ident
+
+
+def verify_identity(rec, build):
+    """Re-hash the identity files of `build` and compare them with the identity the recording captured. Returns
+    the verified identity; raises ValueError when the recording has none or anything differs."""
+    ident = rec.get("identity")
+    if not ident or not ident.get("git_commit"):
+        raise ValueError("the recording carries no capture-time identity (record it again with --run)")
+    for name, path in identity_files(build).items():
+        now = _sha256_file(path) if os.path.exists(path) else None
+        if now is None or now != ident.get(name + "_sha256"):
+            raise ValueError(f"{name}: SHA-256 {now} differs from the recording's {ident.get(name + '_sha256')}")
+    return ident
+
+
+def check_l_record(res_l):
+    """A Model L comparison record must name the FP8 matrix-op model its oracle used."""
+    from clean.l.reference import oracle as L
+    if res_l.get("fp8_op_model") not in L.MM8_MODELS:
+        raise ValueError("Model L comparison record without its FP8 op model (fp8_op_model)")
+    for m in res_l.get("frames", []):
+        if m.get("fp8_op_model") != res_l["fp8_op_model"]:
+            raise ValueError(f"frame {m.get('frame')}: FP8 op model missing or different")
+    return res_l
 
 
 # ---- --compare (CPU) ------------------------------------------------------------------------------------------------
@@ -671,6 +729,8 @@ def compare_model(rec, params, post_ref=None, bneck_unit=False, table=None):
         jp = tuple(float(v) for v in (fr["jitter"] if eff_reset else prev_jitter))
         info = out["state"]["info"]
         m = {"frame": k, "render": [rw, rh], "reset": eff_reset, "parity": f}
+        if model == "L":
+            m["fp8_op_model"] = table.get("mm8", "exact")   # the effective model, also when defaulted
         offsets_ok = all(tuple(info["offsets"][s]) == tuple(S.window_offset(s, f)) for s in T.SHARED_STAGES)
         m["state"] = {"n_parity_reset": (info["n"], info["parity"], bool(info["reset"])) == (n, f, eff_reset),
                       "jitter_prev": bool(np.array_equal(np.float32(info["jitter_prev"]), np.float32(jp))),
@@ -813,6 +873,7 @@ UNWRITTEN_ON_FIRST = ("state.latent_prev", "state.motion_history", "state.histor
 
 
 def compare(build, json_path):
+    from clean.l.reference import table as T
     with open(os.path.join(model_dir(build), "params.pkl"), "rb") as f:
         params = pickle.load(f)
     res = {}
@@ -839,6 +900,9 @@ def compare(build, json_path):
                       "pass": (all(m["pass"] for m in frames) and all(f["identical"] for f in same) and
                                all(v["caught"] for v in neg.values()))}
         if model == "L":  # Model L's run-level limit on post values more than one ulp off (provisional)
+            res[model]["fp8_op_model"] = T.TABLE.get("mm8", "exact")
+            res[model]["identity"] = recs["stages"].get("identity")
+            check_l_record(res[model])
             res[model]["post_run"] = {k: LP.l_post_run([m["post"][k] for m in frames if k in m["post"]])
                                       for k in ("history", "display")}
             res[model]["pass"] = res[model]["pass"] and all(r["pass"] for r in res[model]["post_run"].values())
