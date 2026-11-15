@@ -25,6 +25,31 @@ This guide applies to **WrongGPU 0.6.0** and its launcher. See [game compatibili
 4. For a matched visual comparison, switch to AMD FSR in **OptiScaler's menu** (Insert), then return to WrongGPU before recording WrongGPU results.
 5. Test resolution changes, quality switches, upscaler switches and fresh game starts separately. Note memory growth, errors and whether WrongGPU resumes.
 
+## Test Model L (WrongGPU 0.6.5 and later)
+
+Model L is a second, larger super-resolution model. It is off by default; you choose it per game. Test Model M first
+(above), then Model L in the same game, so the two can be compared.
+
+1. **Prepare Model L's data once.** It is converted on your PC from a DLSS file of version 310.5 or newer that
+   contains Model L's data, from any game or app:
+   `WrongGPU.exe model convert --preset=L` (add `--model=<path to nvngx_dlss.dll>` to pick the file yourself). If no
+   file on your PC has the data, it says so and nothing changes.
+2. **Choose Model L for the game**, either way:
+   - `WrongGPU.exe set "<the game's .exe>" model=L` while the game is closed (`model=M` goes back). The game then
+     starts with Model L.
+   - In the game, in **OptiScaler's menu** (Insert), choose **WrongGPU Model L** as the upscaler.
+3. **Check that Model L really runs.** The FPS overlay should show **DLSS → WrongGPU Model L**, and the game page's
+   **Last run** should say Model L after you quit. If it shows Model M, Model L did not start: say so in the report and
+   attach Collect logs (they say why).
+4. **Play the same scenes as with Model M**, in the same DLSS mode and output resolution. Look especially for
+   ghosting behind moving objects, smearing, flicker on thin lines and foliage, and how quickly detail returns after
+   a camera cut. Note anything that looks better or worse than Model M.
+5. **Measure Model L against Model M**, as in "Compare performance" below: Model M, then Model L, then Model M again,
+   same scene and settings. Model L costs noticeably more GPU time than Model M, so a lower frame rate is expected;
+   the release notes give measured times. Report both results.
+6. In the report, say which model each result is for, and whether the game's colour was HDR or SDR, if you know
+   (the game's HDR setting).
+
 ## Compare performance
 
 Use the same scene, output resolution, input upscaler, quality mode and graphics settings. Keep frame generation, dynamic resolution, V-sync and frame caps the same between runs, and say whether they are on. For a straightforward comparison, turn frame generation and dynamic resolution off.
@@ -38,7 +63,7 @@ Use [GitHub's game compatibility form](https://github.com/phantoslayer21/wronggp
 - Game name, store and version/build.
 - WrongGPU version, GPU and video memory, AMD driver and Windows version.
 - Output resolution, input upscaler, quality mode, graphics settings, and Ray Reconstruction on or off (and its mode).
-- What the FPS overlay and **Last run** showed.
+- What the FPS overlay and **Last run** showed, and which model (Model M or Model L) each result is for.
 - Reproduction steps, screenshots or clips, and matched FPS / 1% low results.
 - The ZIP from **Collect logs** on the game's page in the launcher.
 
