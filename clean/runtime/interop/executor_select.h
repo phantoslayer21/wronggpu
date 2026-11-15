@@ -63,7 +63,7 @@ inline std::string k_sparkle_off_line() {
 inline ExecutorChoice choose_executor(const ExecutorRequest& r) {
   ExecutorChoice c;
   const std::string& e = r.executor;
-  if (e == "d3d12-test") {
+  if (e == "d3d12-test" || e == "dx12-test") {  // the offline test executors (dx12-test: the D3D12 route, scripted)
     c.executor = e;
     return c;
   }

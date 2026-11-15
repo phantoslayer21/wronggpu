@@ -197,14 +197,21 @@ static const WgUpscalerBackend* g_useBackend = &g_backend;
 static std::vector<WgFrame> g_standInFrames;
 static WgCreateInfo g_standInCreate{};
 static int g_standInDestroyed = 0;
+static bool g_standInCreateFails = false;    // B8: the stand-in cannot be made
+static bool g_standInDispatchFails = false;  // B8: the stand-in's dispatch fails
+static bool g_passThroughOn = false;         // B8: Platform::passThrough exists
+static bool g_passThroughOk = true;          // ... and succeeds
+static std::vector<WgFrame> g_passFrames;    // the frames it was given
+static std::function<bool(const WgFrame&, std::string*)> g_passThroughReal;  // test_refusal_integration.cpp: the real copy
 static WgResult StandInCreate(const WgCreateInfo* info, WgUpscaler** out) {
     g_standInCreate = *info;
+    if (g_standInCreateFails) return WG_ERROR_DEVICE;
     *out = reinterpret_cast<WgUpscaler*>(new FakeUpscaler{2});
     return WG_OK;
 }
 static WgResult StandInDispatch(WgUpscaler*, const WgFrame* frame) {
     g_standInFrames.push_back(*frame);
-    return WG_OK;
+    return g_standInDispatchFails ? WG_ERROR_DEVICE : WG_OK;
 }
 static void StandInDestroy(WgUpscaler* u) {
     ++g_standInDestroyed;
@@ -306,6 +313,16 @@ static std::unique_ptr<FrontEnd> MakeFrontEnd(const Config& config) {
         if (frame) frame->command_list_type = 2;  // as the D3D12 side would fill it in
     };
     p.standIn = [](const Config&) -> const WgUpscalerBackend* { return &g_standIn; };
+    if (g_passThroughOn)
+        p.passThrough = [](const WgFrame& f, std::string* why) {
+            g_passFrames.push_back(f);
+            if (g_passThroughReal) return g_passThroughReal(f, why);
+            if (!g_passThroughOk) {
+                if (why) *why = "the fake pass-through refuses";
+                return false;
+            }
+            return true;
+        };
     p.splitBlocked = [](void*) -> const char* {
         ++g_splitBlockedAsked;
         return g_splitBlocked;
@@ -361,6 +378,11 @@ static void Reset() {
     g_createGate = true;
     g_useBackend = &g_backend;
     g_standInFrames.clear();
+    g_standInCreateFails = g_standInDispatchFails = false;
+    g_passThroughOn = false;
+    g_passThroughOk = true;
+    g_passFrames.clear();
+    g_passThroughReal = nullptr;
     g_standInCreate = WgCreateInfo{};
     g_standInDestroyed = 0;
     g_servicesAsked.clear();
@@ -1880,6 +1902,11 @@ static void TestFailedFrameProviderTruth() {
         if (failure == 2) g_amdDispatchResult = FFX_API_RETURN_ERROR_RUNTIME_ERROR;
         auto dispatch = MakeDispatch();
         if (failure == 3) dispatch.flags = FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB;
+        if (failure == 2) {
+            // B8: AMD's dispatch fails after the upscaler failed: the stand-in upscales the frame (it was an error before)
+            CHECK(fe->Dispatch(&ctx, &dispatch.header) == FFX_API_RETURN_OK);
+            CHECK(!g_statuses.empty() && g_statuses.back().state == UpscaleState::StandIn);
+        } else {
         CHECK(fe->Dispatch(&ctx, &dispatch.header) != FFX_API_RETURN_OK);
         CHECK(!g_statuses.empty());
         if (!g_statuses.empty()) {
@@ -1887,6 +1914,7 @@ static void TestFailedFrameProviderTruth() {
             CHECK(status.state != UpscaleState::Amd && status.state != UpscaleState::Network &&
                   status.state != UpscaleState::StandIn && status.state != UpscaleState::Compare);
             CHECK(!status.reason.empty());
+        }
         }
         CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
     }
@@ -2443,6 +2471,95 @@ static void TestRefusedFrames() {
         CHECK(CountLog("HIP") == 0);
         CHECK(CountLog("AMD FSR is not available for this context; the stand-in upscales the frames the upscaler does not take") == 1);
         CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    }
+}
+
+// B8 (REVIEW-215d P1): what a refused frame gets is explicit. The upscaler answers WG_ERROR_UNSUPPORTED for frames 1 .. 3; the
+// stand-in cannot be made, or fails, AMD's FSR is missing or fails: the game's own colour is passed through unscaled with
+// one warning line and the answer is OK, never an error for a frame whose textures can be copied. Every model (the contract is
+// shared); a custom slot keeps returning the error (its host upscales).
+static void TestRefusedFrameContract() {
+    const uint64_t models[] = {kWrongGpuProviderVersionId, kWrongGpuKProviderVersionId, kWrongGpuLProviderVersionId};
+    for (const uint64_t model : models) {
+        // setup: no AMD / AMD with this dispatch result; stand-in made and working / create fails / dispatch fails;
+        // pass-through absent / working / refusing; custom slot
+        struct Case {
+            const char* name;
+            bool amd;
+            ffxReturnCode_t amdResult;
+            bool standInCreateFails, standInDispatchFails, passThrough, passOk, customSlot;
+        };
+        const ffxReturnCode_t amdBad = FFX_API_RETURN_ERROR_RUNTIME_ERROR;
+        const Case cases[] = {
+            {"no AMD, stand-in create fails, pass-through ok", false, FFX_API_RETURN_OK, true, false, true, true, false},
+            {"no AMD, stand-in dispatch fails, pass-through ok", false, FFX_API_RETURN_OK, false, true, true, true, false},
+            {"no AMD, stand-in fails, pass-through refuses", false, FFX_API_RETURN_OK, true, false, true, false, false},
+            {"no AMD, stand-in fails, no pass-through", false, FFX_API_RETURN_OK, true, false, false, true, false},
+            {"AMD dispatch fails, stand-in ok", true, amdBad, false, false, true, true, false},
+            {"AMD dispatch fails, stand-in create fails, pass-through ok", true, amdBad, true, false, true, true, false},
+            {"AMD dispatch fails, stand-in dispatch fails, pass-through ok", true, amdBad, false, true, true, true, false},
+            {"AMD dispatch fails, stand-in fails, pass-through refuses", true, amdBad, true, false, true, false, false},
+            {"custom slot, no AMD, stand-in fails", false, FFX_API_RETURN_OK, true, false, true, true, true},
+        };
+        for (const Case& c : cases) {
+            Reset();
+            g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+            g_originalAvailable = c.amd;
+            g_amdDispatchResult = c.amdResult;
+            g_standInCreateFails = c.standInCreateFails;
+            g_standInDispatchFails = c.standInDispatchFails;
+            g_passThroughOn = c.passThrough;
+            g_passThroughOk = c.passOk;
+            Config config;
+            config.hosted = true;
+            config.customSlot = c.customSlot;
+            auto fe = MakeFrontEnd(config);
+            UpscaleCreate own(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE, /*withOverride=*/true);
+            own.version.versionId = model;
+            ffxContext ctx = nullptr;
+            CHECK(fe->CreateContext(&ctx, &own.upscale.header, kMemCb) == FFX_API_RETURN_OK && fe->OwnContextCount() == 1);
+            ffxDispatchDescUpscale d = MakeDispatch();
+            CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK && g_statuses.back().state == UpscaleState::Network);
+            g_unsupportedAt = {1, 2, 3};
+            std::vector<ffxReturnCode_t> rcs;
+            for (int i = 0; i < 3; ++i) rcs.push_back(fe->Dispatch(&ctx, &d.header));
+            const bool standInWorks = !c.standInCreateFails && !c.standInDispatchFails;
+            const bool passes = c.passThrough && c.passOk && !c.customSlot;
+            // the first refused frame goes to AMD when it exists (the context is AMD's from then on, and AMD's dispatch fails for
+            // every frame): each frame has the stand-in, else the pass-through, else AMD's own error
+            if (c.amd && c.amdResult != FFX_API_RETURN_OK) {
+                for (ffxReturnCode_t rc : rcs) CHECK(rc == (standInWorks || passes ? FFX_API_RETURN_OK : amdBad));
+                if (standInWorks) {
+                    CHECK(g_standInFrames.size() == 3 && g_passFrames.empty());
+                } else if (passes) {
+                    CHECK(g_passFrames.size() == 3 && CountLog("the game's own colour is passed through to the output unscaled") == 1);
+                } else {
+                    CHECK(g_passFrames.size() == (c.passThrough ? 3u : 0u));
+                    CHECK(CountLog("cannot be passed through") == 1);
+                }
+                CHECK(CountLog("HIP") == 0);
+            } else if (!c.amd) {
+                for (ffxReturnCode_t rc : rcs) CHECK(rc == (standInWorks || passes ? FFX_API_RETURN_OK : FFX_API_RETURN_ERROR_RUNTIME_ERROR));
+                if (!standInWorks) {
+                    CHECK(g_passFrames.size() == (c.passThrough && !c.customSlot ? 3u : 0u));
+                    if (passes) {
+                        CHECK(g_statuses.back().state == UpscaleState::Failed &&
+                              g_statuses.back().reason.find("passed through unscaled") != std::string::npos);
+                        CHECK(CountLog("the game's own colour is passed through to the output unscaled") == 1);  // one line, not one a frame
+                        for (const WgFrame& f : g_passFrames) CHECK(f.command_list && f.color.resource && f.output.resource);
+                    } else if (!c.customSlot) {
+                        CHECK(CountLog("cannot be passed through") == 1);
+                        CHECK(g_statuses.back().state == UpscaleState::Failed);
+                    } else {
+                        CHECK(g_passFrames.empty());  // a custom slot's host upscales on the error
+                    }
+                } else {
+                    CHECK(g_passFrames.empty() && g_standInFrames.size() == 3);
+                }
+                CHECK(CountLog("HIP") == 0);
+            }
+            CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+        }
     }
 }
 
@@ -3493,6 +3610,7 @@ int main() {
     TestRegistryEntries();
     TestUnsupportedFrames();
     TestRefusedFrames();
+    TestRefusedFrameContract();
     TestSplitBlocked();
     TestRuntimeProviderName();
     TestWithoutModelKItems();

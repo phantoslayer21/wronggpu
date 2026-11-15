@@ -70,6 +70,11 @@ struct Platform {
     std::function<void(uint64_t context, uint64_t frame, void* device)> diagnosticFailure;
     std::function<void(uint64_t context, uint64_t frame, WgResult)> diagnosticResult;
     std::function<const WgUpscalerBackend*(const Config&)> standIn;
+    // The last resort for a frame nothing could upscale (B8): records into frame.command_list a copy of the game's own colour
+    // into the output texture, unscaled (the active region, cut to both textures, at the output's origin). False with the
+    // reason in *why when it cannot (another format family, no list); the frame then has no output and the front end says so.
+    // May be empty (no pass-through on this platform).
+    std::function<bool(const WgFrame& frame, std::string* why)> passThrough;
     // Every upscale dispatch WrongGPU's upscaler recorded (WG_OK), with its frame (frame capture, capture.h); standIn:
     // the one-frame stand-in upscaled it. May be empty.
     std::function<void(const WgFrame& frame, bool standIn)> afterDispatch;
@@ -219,6 +224,13 @@ private:
     std::string FailureKey(const WgUpscalerBackend* backend, const UpscaleContext& u) const;
     void ResizeForFrame(UpscaleContext& u, WgFrame& frame, const std::string& tag);  // bug hunt H
     ffxReturnCode_t BrokenFrame(UpscaleContext& u, WgFrame& frame, const std::string& tag, uint64_t frameIndex);  // bug hunt F1
+    // B8, the refused-frame contract: what a frame gets is explicit. Order: WrongGPU's upscaler, the stand-in, AMD's FSR, and
+    // last the game's own colour passed through unscaled (Platform::passThrough) with one warning line; the game is never
+    // answered with an error for a frame whose textures could be copied (a custom slot excepted: its host upscales on an
+    // error). PassThroughFrame: the last step (true: the frame has an output). AfterAmdFailure: AMD's dispatch failed for this
+    // frame (rc): the stand-in, then the pass-through; else rc.
+    bool PassThroughFrame(UpscaleContext& u, const std::string& tag, uint64_t frameIndex, WgFrame* frame, const std::string& what);
+    ffxReturnCode_t AfterAmdFailure(UpscaleContext& u, const std::string& tag, uint64_t frameIndex, WgFrame* frame, ffxReturnCode_t rc);
     void Fail(UpscaleContext& u, const std::string& why, uint64_t call, bool error = true);
     // Platform::status for one upscale dispatch of `u` (frame: the mapped frame when WrongGPU upscaled it, else null).
     // amdReason: why AMD's FSR upscaled this one frame of a context that stays WrongGPU's (state Amd).

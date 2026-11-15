@@ -172,7 +172,7 @@ if(WIN32)
   endif()
 
   # Windows parts shared by the three DLLs: settings, loading AMD's originals, D3D12 queries, the stand-in.
-  add_library(wg_fsr_win STATIC src/win_util.cpp src/standin_d3d12.cpp src/d3d12_hooks.cpp src/statistics_query.cpp src/split_progress.cpp src/overlay.cpp src/asi_bridge.cpp
+  add_library(wg_fsr_win STATIC src/win_util.cpp src/standin_d3d12.cpp src/passthrough_d3d12.cpp src/d3d12_hooks.cpp src/statistics_query.cpp src/split_progress.cpp src/overlay.cpp src/asi_bridge.cpp
               src/settings_bridge.cpp)
   if(WG_SPLIT_PROGRESS_QA)
     target_compile_definitions(wg_fsr_win PRIVATE WRONGGPU_SPLIT_PROGRESS_QA=1)

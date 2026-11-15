@@ -58,6 +58,7 @@ struct FrontEnd::UpscaleContext {
     bool amdLast = false;         // the last frame was one of AMD's FSR for such a frame (AMD's history continues)
     bool broken = false;          // the upscaler failed for good: it is not parked
     uint64_t brokenFrames = 0;    // bug hunt F1: frames since the upscaler failed for good (it is not called again)
+    uint64_t passThroughFrames = 0;  // B8: frames of this context that were passed through unscaled (nothing could upscale them)
     uint32_t resizes = 0;         // bug hunt H: upscalers created again for the frames' output size (Config::maxOutputResizes)
     bool resizeFailed = false;    // ... and such a create failed: no more attempts for this context
     // Issue #58: upscalers and stand-ins a resize replaced. Command lists the game recorded before may still use them
@@ -948,6 +949,75 @@ bool FrontEnd::ActivateSplit(UpscaleContext& u, const WgUpscalerBackend* backend
     return false;
 }
 
+// B8: the last step of the refused-frame contract. Nothing upscaled this frame (the upscaler refused it, the stand-in could
+// not be made or failed, AMD's FSR is missing or failed): the game's own colour is copied into the output unscaled
+// (Platform::passThrough) and the game gets FFX_API_RETURN_OK with one warning line (LogPoint counts), instead of an error and
+// an output nobody wrote. False when that is impossible too (the reason is logged), or in OptiScaler's custom slot, whose
+// host upscales a frame the upscaler answers an error for.
+bool FrontEnd::PassThroughFrame(UpscaleContext& u, const std::string& tag, uint64_t frameIndex, WgFrame* frame, const std::string& what) {
+    if (config_.customSlot) return false;
+    std::string why;
+    bool ok = false;
+    uint32_t w = 0, h = 0;
+    if (!frame) {
+        why = "the frame's inputs could not be read";
+    } else if (!platform_.passThrough) {
+        why = "this platform has no pass-through";
+    } else {
+        WgFrame f = *frame;
+        if (!UsableForStandIn(f)) {
+            why = "the frame has no command list, colour texture or output texture";
+        } else {
+            w = f.render_width < f.output_width ? f.render_width : f.output_width;
+            h = f.render_height < f.output_height ? f.render_height : f.output_height;
+            ok = platform_.passThrough(f, &why);
+        }
+    }
+    const uint64_t n = ++u.passThroughFrames;
+    if (ok) {
+        if ((n == 1 || n >= 10) && LogPoint(n))  // one line, then at 10, 100, ...
+            Log(tag + " WARNING U" + std::to_string(u.id) + ": frame " + std::to_string(frameIndex) + ": " + what +
+                "; nothing upscaled it: the game's own colour is passed through to the output unscaled (" + std::to_string(w) + "x" +
+                std::to_string(h) + ", " + std::to_string(n) + " such frame(s) in this context)");
+        Report(u, UpscaleState::Failed, frame, "frame passed through unscaled: " + what);
+        return true;
+    }
+    if ((n == 1 || n >= 10) && LogPoint(n))  // one line, then at 10, 100, ...
+        Log(tag + " ERROR U" + std::to_string(u.id) + ": frame " + std::to_string(frameIndex) + ": " + what +
+            "; nothing upscaled it and it cannot be passed through (" + why + ")");
+    return false;
+}
+
+// B8: AMD's FSR was asked for this frame and its dispatch failed (rc). The stand-in is tried, then the pass-through; if both
+// fail (or in a custom slot) AMD's own error goes back, as before.
+ffxReturnCode_t FrontEnd::AfterAmdFailure(UpscaleContext& u, const std::string& tag, uint64_t frameIndex, WgFrame* frame, ffxReturnCode_t rc) {
+    const std::string what = "AMD FSR dispatch failed (" + std::string(RcName(rc)) + ")";
+    if (frame && !config_.customSlot) {
+        WgFrame f = *frame;
+        if (UsableForStandIn(f)) {
+            if (!u.fallbackBackend && platform_.standIn) u.fallbackBackend = platform_.standIn(config_);
+            if (u.fallbackBackend && u.fallbackBackend != u.backend) {
+                if (!u.fallback) {
+                    WgCreateInfo info = u.createInfo;
+                    AdaptCreateInfo(u.fallbackBackend, nullptr, info);
+                    if (u.fallbackBackend->create(&info, &u.fallback) != WG_OK) u.fallback = nullptr;
+                }
+                AdaptFrame(u.fallbackBackend, f);
+                if (u.fallback && u.fallbackBackend->dispatch(u.fallback, &f) == WG_OK) {
+                    Log(tag + " note U" + std::to_string(u.id) + ": frame " + std::to_string(frameIndex) + ": " + what + "; the stand-in upscales it");
+                    u.resetNext = true;
+                    if (platform_.afterDispatch) platform_.afterDispatch(f, true);
+                    Report(u, UpscaleState::StandIn, &f);
+                    return FFX_API_RETURN_OK;
+                }
+            }
+        }
+        u.resetNext = true;
+        if (PassThroughFrame(u, tag, frameIndex, frame, what)) return FFX_API_RETURN_OK;
+    }
+    return rc;
+}
+
 // Bug hunt F1 (a): the upscaler failed for good (u.broken) and AMD's FSR did not take the context over (none, or
 // fallback_to_amd = 0): it is not called again (each call would fail and log again, every frame). In OptiScaler's custom
 // slot the error goes back to the host, which makes a new context (Dispatch's run of failures decides when that stops);
@@ -973,6 +1043,7 @@ ffxReturnCode_t FrontEnd::BrokenFrame(UpscaleContext& u, WgFrame& frame, const s
             }
         }
     }
+    if (PassThroughFrame(u, tag, frameIndex, &frame, what)) return FFX_API_RETURN_OK;  // B8: never no output
     if (LogPoint(n)) Log(tag + " ERROR U" + std::to_string(u.id) + ": " + what + " -> ERROR_RUNTIME_ERROR");
     Report(u, UpscaleState::Failed, nullptr, u.failReason + "; AMD fallback is unavailable");
     return FFX_API_RETURN_ERROR_RUNTIME_ERROR;
@@ -1582,9 +1653,11 @@ ffxReturnCode_t FrontEnd::DispatchUpscale(UpscaleContext& u, const ffxDispatchDe
                 if (u.mode == UpscaleContext::Mode::Amd) {
                     const ffxReturnCode_t rc = u.amdApi->dispatch(&u.amd, &d.header);
                     Log(tag + " -> " + RcName(rc) + " (forwarded to AMD)");
-                    Report(u, rc == FFX_API_RETURN_OK ? UpscaleState::Amd : UpscaleState::Failed, nullptr,
-                           "AMD FSR dispatch failed: " + std::string(RcName(rc)));
-                    return rc;
+                    if (rc == FFX_API_RETURN_OK) {
+                        Report(u, UpscaleState::Amd, nullptr, "AMD FSR dispatch failed: " + std::string(RcName(rc)));
+                        return rc;
+                    }
+                    return AfterAmdFailure(u, tag, frameIndex, &frame, rc);  // B8: the stand-in, then the pass-through
                 }
                 Log(tag + " note U" + std::to_string(u.id) + ": AMD FSR is not available for this context; the stand-in upscales its frames");
             }
@@ -1631,9 +1704,11 @@ ffxReturnCode_t FrontEnd::DispatchUpscale(UpscaleContext& u, const ffxDispatchDe
                 amd.reset = true;  // AMD's history starts here
                 const ffxReturnCode_t rc = u.amdApi->dispatch(&u.amd, &amd.header);
                 Log(tag + " -> " + RcName(rc) + " (forwarded to AMD)");
-                Report(u, rc == FFX_API_RETURN_OK ? UpscaleState::Amd : UpscaleState::Failed, nullptr,
-                       "AMD FSR dispatch failed: " + std::string(RcName(rc)));
-                return rc;
+                if (rc == FFX_API_RETURN_OK) {
+                    Report(u, UpscaleState::Amd, nullptr, "AMD FSR dispatch failed: " + std::string(RcName(rc)));
+                    return rc;
+                }
+                return AfterAmdFailure(u, tag, frameIndex, &frame, rc);  // B8: the stand-in, then the pass-through
             }
             Log(tag + " note U" + std::to_string(u.id) + ": AMD FSR is not available for this context; the stand-in upscales the frames the upscaler does not take");
         }
@@ -1673,10 +1748,14 @@ ffxReturnCode_t FrontEnd::DispatchUpscale(UpscaleContext& u, const ffxDispatchDe
     if (u.mode == UpscaleContext::Mode::Amd) {
         const ffxReturnCode_t rc = u.amdApi->dispatch(&u.amd, &d.header);
         Log(tag + " -> " + RcName(rc) + " (forwarded to AMD after the failure)");
-        Report(u, rc == FFX_API_RETURN_OK ? UpscaleState::Amd : UpscaleState::Failed, nullptr,
-               u.failReason + "; AMD FSR dispatch failed: " + RcName(rc));
-        return rc;
+        if (rc == FFX_API_RETURN_OK) {
+            Report(u, UpscaleState::Amd, nullptr, u.failReason + "; AMD FSR dispatch failed: " + RcName(rc));
+            return rc;
+        }
+        return AfterAmdFailure(u, tag, frameIndex, mapped ? &frame : nullptr, rc);  // B8
     }
+    if (mapped && PassThroughFrame(u, tag, frameIndex, &frame, "WrongGPU's upscaler failed (" + u.failReason + ") and AMD FSR is not available"))
+        return FFX_API_RETURN_OK;  // B8: never no output
     Report(u, UpscaleState::Failed, nullptr, u.failReason + "; AMD fallback is unavailable");
     Log(tag + " -> ERROR_RUNTIME_ERROR");
     return r == WG_ERROR_PARAMETER ? FFX_API_RETURN_ERROR_PARAMETER : FFX_API_RETURN_ERROR_RUNTIME_ERROR;
@@ -1697,9 +1776,11 @@ ffxReturnCode_t FrontEnd::BadFrame(UpscaleContext& u, const ffxDispatchDescUpsca
             if (!u.amdLast) amd.reset = true;
             const ffxReturnCode_t rc = u.amdApi->dispatch(&u.amd, &amd.header);
             Log(tag + " -> " + RcName(rc) + " (forwarded to AMD)");
-            Report(u, rc == FFX_API_RETURN_OK ? UpscaleState::Amd : UpscaleState::Failed, nullptr,
-                   u.failReason + "; AMD FSR dispatch failed: " + RcName(rc));
-            return rc;
+            if (rc == FFX_API_RETURN_OK) {
+                Report(u, UpscaleState::Amd, nullptr, u.failReason + "; AMD FSR dispatch failed: " + RcName(rc));
+                return rc;
+            }
+            return AfterAmdFailure(u, tag, frameIndex, frame, rc);  // B8
         }
     }
     u.resetNext = true;  // this frame goes past the upscaler: its next one starts without history
@@ -1734,11 +1815,18 @@ ffxReturnCode_t FrontEnd::BadFrame(UpscaleContext& u, const ffxDispatchDescUpsca
         if (run == 1 || rc != FFX_API_RETURN_OK)
             Log(tag + " note U" + std::to_string(u.id) + ": " + what + ": AMD FSR upscales this frame -> " + RcName(rc) +
                 "; the context stays WrongGPU's (AMD FSR takes it over after " + std::to_string(kBadFrameRun) + " such frames in a row)");
-        Report(u, rc == FFX_API_RETURN_OK ? UpscaleState::Amd : UpscaleState::Failed, nullptr,
-               what + "; AMD FSR dispatch failed: " + RcName(rc), what);
+        if (rc == FFX_API_RETURN_OK) {
+            Report(u, UpscaleState::Amd, nullptr, what + "; AMD FSR dispatch failed: " + RcName(rc), what);
+            return rc;
+        }
+        u.amdLast = false;
+        if (PassThroughFrame(u, tag, frameIndex, frame, what + "; AMD FSR dispatch failed (" + RcName(rc) + ")"))
+            return FFX_API_RETURN_OK;  // B8: the stand-in was tried first (step 1), now the frame passes through
+        Report(u, UpscaleState::Failed, nullptr, what + "; AMD FSR dispatch failed: " + RcName(rc), what);
         return rc;
     }
-    // 3. Nobody: the frame fails, the context stays.
+    // 3. Nobody could upscale it: the game's own colour is passed through unscaled (B8), else the frame fails, the context stays.
+    if (PassThroughFrame(u, tag, frameIndex, frame, what)) return FFX_API_RETURN_OK;
     if (run == 1 || ShouldLogDispatch(frameIndex))
         Log(tag + (amdOnly ? " note U" : " ERROR U") + std::to_string(u.id) + ": " + what + ": no upscaler for this frame (" +
             (config_.fallbackToAmd ? "AMD FSR is not available" : "fallback_to_amd = 0") + ") -> " +
@@ -1875,9 +1963,20 @@ ffxReturnCode_t FrontEnd::Dispatch(ffxContext* context, const ffxDispatchDescHea
         ++u->dispatches;
         const ffxReturnCode_t rc = original->dispatch(&u->amd, desc);
         if (log || rc != FFX_API_RETURN_OK) Log(tag + " -> " + RcName(rc) + " (forwarded to AMD)");
-        if (desc->type == FFX_API_DISPATCH_DESC_TYPE_UPSCALE)
+        if (desc->type == FFX_API_DISPATCH_DESC_TYPE_UPSCALE) {
+            if (rc != FFX_API_RETURN_OK && u->upscaler) {
+                // B8: a context WrongGPU handed to AMD's FSR (its upscaler is kept, unused) whose AMD dispatch fails: the stand-in, then the
+                // pass-through (a context that was AMD's from the start is the game's own FSR and keeps AMD's answer)
+                WgFrame frame;
+                std::string problem, notes;
+                const uint64_t frameIndex = u->dispatches - 1;
+                if (MapDispatch(*reinterpret_cast<const ffxDispatchDescUpscale*>(desc), u->create, config_, platform_.resourceInfo,
+                                u->map, frameIndex, frame, problem, notes))
+                    return AfterAmdFailure(*u, tag, frameIndex, &frame, rc);
+            }
             Report(*u, rc == FFX_API_RETURN_OK ? UpscaleState::Amd : UpscaleState::Failed, nullptr,
                    "AMD FSR dispatch failed: " + std::string(RcName(rc)));
+        }
         return rc;
     }
     const ffxReturnCode_t rc = original->dispatch(context, desc);

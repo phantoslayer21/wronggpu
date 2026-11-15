@@ -14,6 +14,7 @@
 #include "d3d12_hooks.h"
 #include "overlay.h"
 #include "param_map.h"
+#include "passthrough_d3d12.h"
 
 namespace wgwin {
 
@@ -77,6 +78,15 @@ const wgfsr::OriginalApi* CompareApi(const std::string& path);
 // detail: why not, for the log.
 wgfsr::ProbeResult CheckProviderModule(HMODULE m, const std::wstring& requested, std::string& detail);
 
+// B8: the front end's Platform has a pass-through (the game's colour copied into the output, the last resort for a frame
+// nothing could upscale); another platform type (the FSR 3.0 hook's) has none and is left as it is.
+template <class PlatformT>
+auto SetPassThrough(PlatformT& p, int) -> decltype(p.passThrough = &wgfsr::CopyColorToOutput, void()) {
+    p.passThrough = &wgfsr::CopyColorToOutput;
+}
+template <class PlatformT>
+void SetPassThrough(PlatformT&, long) {}
+
 // Interface version 2 services of a front end's platform (FrontEnd or fsr30::Hook): the split service, the dispatch
 // notes for the submission trace, the one-frame stand-in, the overlay's status. Also passes this DLL's settings to
 // the D3D12 hooks and the overlay.
@@ -109,6 +119,7 @@ void AddSplitServices(PlatformT& p, const wgfsr::Config& config) {
     p.services = &SplitServices;
     p.noteDispatch = &NoteDispatch;
     p.standIn = &StandInForFallback;
+    SetPassThrough(p, 0);  // the last resort of the refused-frame contract (frontend.h), where the platform has it
 }
 
 bool D3D12ResourceInfo(void* resource, wgfsr::ResourceInfo* out);

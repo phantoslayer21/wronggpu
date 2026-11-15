@@ -231,6 +231,11 @@ std::unique_ptr<Executor> make_hip_executor(const WgRtConfig& cfg, const std::st
 // handles: behave like an executor that imports the shared objects (tests of the sharing paths).
 // keep (with handles): also like one whose arena import is kept for later contexts (tests of the arena pool).
 std::unique_ptr<Executor> make_test_executor(int view, bool handles, bool keep = false);
+// executor=dx12-test (tests of the backend's frame paths, no GPU work): an executor on the D3D12 route (records into the game's
+// list, no slots, no fences) that answers each frame as `script` says, one character per frame, the last repeated: 'o' the frame
+// is taken (nothing is recorded, the output counts as written), 'r' refused ("frame not taken (nothing recorded)", as the D3D12
+// executor refuses a render size or a missing output texture), 'f' a failure inside the network.
+std::unique_ptr<Executor> make_scripted_dx12_executor(const std::string& script);
 // executor=dx12: cfg as for the HIP executor (its backend field is ignored: the pure D3D12 device on the game's device).
 std::unique_ptr<Executor> make_d3d12_executor(const WgRtConfig& cfg);
 // The D3D12 executor's output route of its last frame (one phrase for the log), empty for other executors.
