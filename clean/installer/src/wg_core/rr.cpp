@@ -494,6 +494,39 @@ RrFileState ReadRrSettings(const wstring& dir) {
     return ParseRrSettings(text);
 }
 
+bool RrSettingsPluginEdit(const string& text, const wstring& inst) {
+    if (inst.empty() || text.size() < 2 || text.compare(text.size() - 2, 2, "\r\n") != 0) return false;
+    static const char* const kModes[] = {"exact", "accurate", "fast"};  // the plugin's names (kWgRrModeNames)
+    string sec;
+    size_t at = string::npos, len = 0;
+    for (size_t a = 0; a < text.size();) {
+        const size_t e = text.find('\n', a);  // (the text ends with CRLF: every line has its '\n')
+        if (e == 0 || text[e - 1] != '\r') return false;  // the plugin writes CRLF only
+        const string line = text.substr(a, e - 1 - a);
+        const string t = TrimA(line);
+        if (!t.empty() && t[0] == '[') sec = LowerA(t);
+        else if (sec == "[wronggpu]" && !t.empty() && t[0] != '#' && t[0] != ';') {
+            const size_t eq = t.find('=');
+            if (eq != string::npos && LowerA(TrimA(t.substr(0, eq))) == "rr_mode") {
+                if (at != string::npos) return false;  // the plugin leaves one rr_mode line
+                at = a;
+                len = line.size();
+            }
+        }
+        a = e + 1;
+    }
+    if (at == string::npos) return false;
+    const string now = text.substr(at, len);
+    bool plugin = false;
+    for (const char* m : kModes) plugin = plugin || now == string("rr_mode=") + m;
+    if (!plugin) return false;
+    for (const char* m : kModes) {
+        const string was = text.substr(0, at) + "rr_mode=" + m + text.substr(at + len);
+        if (IEq(Sha256Bytes(was.data(), was.size()), inst)) return true;
+    }
+    return false;
+}
+
 string RenderRrSettings(const Profile& p, bool dataReady, const string& in) {
     const string mode = p.get("rr_mode");
     const bool on = p.get("rr_enabled") != "off" && dataReady;

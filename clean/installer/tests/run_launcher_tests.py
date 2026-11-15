@@ -1134,9 +1134,9 @@ def test_rr(t, opti, synth_f):
     t.check("update from an older version (rc5): an existing rr_mode=accurate stays, in the profile and the file",
             rc == 0 and rcg == 0 and t.j.get("settings", {}).get("rr_mode", {}).get("profile") == "accurate" and rr_ini(b).get("rr_mode") == "accurate",
             (rc, t.j.get("settings", {}).get("rr_mode"), rr_ini(b), t.logtail(800)))
-    # the player switches it in the game (OptiScaler's menu): the plugin saves rr_mode and its own key; the next scan shows it,
+    # the player switches it in the game (OptiScaler's menu): the plugin saves rr_mode (rr_panel.cpp); the next scan shows it,
     # and an update or repair keeps it
-    write(files["settings"], read(files["settings"]).replace(b"rr_mode=accurate", b"rr_mode = fast\r\nrr_overlay=1"))
+    write(files["settings"], read(files["settings"]).replace(b"rr_mode=accurate", b"rr_mode=fast"))
     rc = t.run("status", exe)
     t.check("switched in the game: status shows rr_mode fast", rc == 0 and t.j.get("game", {}).get("rr_mode") == "fast", t.j.get("game"))
     rc = t.run("repair", exe, "--opti=" + opti, "--noscan", "--force", "--experimental")
@@ -1253,6 +1253,7 @@ def test_rr(t, opti, synth_f):
     t.check("uninstall of the game without RR: byte for byte as before (the unrecorded wronggpu-* files stay)", rc == 0 and snapshot(rootN) == leftN, (rc, diff(leftN, snapshot(rootN))))
     shutil.rmtree(root, ignore_errors=True)
     shutil.rmtree(rootN, ignore_errors=True)
+    __import__("launcher_rr_owner_cases").run(t, opti, game)
 
 
 RE9_IFACE = "wg_test_interface.dll"  # the game interface file the test build's RR folder names (make_mock_rr.py)

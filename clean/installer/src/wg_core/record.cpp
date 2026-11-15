@@ -556,6 +556,10 @@ Holds WhatIsThere(Context& ctx, const wstring& dir, const Entry& e, const wstrin
     if (!e.inst.empty() && IEq(h, e.inst)) return Holds::Ours;
     if (e.existed && !e.orig.empty() && IEq(h, e.orig)) return Holds::Original;
     const wstring t = Target(dir, e.rel);
+    if (IEq(e.rel, kRrSettings) && !e.inst.empty()) {  // #219: only WrongGPU's RR plugin saved its mode there since (rr.h)
+        string text;
+        if (ReadAll(t, text) && IEq(Sha256Bytes(text.data(), text.size()), h) && RrSettingsPluginEdit(text, e.inst)) return Holds::Ours;
+    }
     wstring info;
     if (const FfxSlot* sl = SlotOf(e)) return ClassifySlot(*sl, t, nullptr, info) == FFX_OURS ? Holds::Ours : Holds::Other;  // the slot exception
     if (!EndsWithI(e.rel, L".ini") && KnownReleaseFile(ctx, t)) return Holds::Ours;  // a WrongGPU release's file (size and SHA-256)
@@ -609,7 +613,8 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
     struct Plan { Do what = Do::Nothing; wstring now, source; bool keep = false; };  // now: the hash the decision was made on
     std::vector<Plan> plan(m.e.size());
     auto leaveWarning = [&](const Entry& e, const wstring& t, const wstring& keptAt, bool linked = false) {
-        const Fingerprint fp = e.action == L"copy" && !IsSlotName(e.rel) ? IdentifyFile(t) : Fingerprint();
+        // (not the RR settings files: the header WrongGPU writes in WrongGPU\wronggpu.ini names OptiScaler's menu)
+        const Fingerprint fp = e.action == L"copy" && !IsSlotName(e.rel) && !IsRrSettingsFile(e.rel) ? IdentifyFile(t) : Fingerprint();
         wstring w;
         if (linked) w = L"Left in place (the file has another name, a hard link; writing through it would change that name too): " + e.rel;
         else if (e.action == L"copy" && IsSlotName(e.rel)) w = L"The game replaced " + e.rel + L" (probably an update); its new file was kept.";

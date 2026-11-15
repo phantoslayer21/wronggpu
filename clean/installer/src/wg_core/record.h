@@ -127,7 +127,9 @@ bool HostedRecord(const Record& m);
 // install created whose bytes changed since is preserved too). EXPLICIT POLICY (README "file-ownership rule"): files in the
 // game's FSR slots that identify as WrongGPU (ClassifySlot: the version resource's ProductName, because the game may update
 // that DLL), and files byte-identical to a WrongGPU release or to the embedded payload (KnownReleaseFile), are treated as
-// WrongGPU's; that is recognition by identity, not proof of ownership, and nothing else is treated as WrongGPU's by content.
+// WrongGPU's; that is recognition by identity, not proof of ownership. The RR plugin's settings file whose only change is the
+// rr_mode line WrongGPU's RR plugin saves (rr.h RrSettingsPluginEdit, #219) is WrongGPU's too. Nothing else is treated as
+// WrongGPU's by content.
 // Anything else at a recorded path stays as it is; a player's original that cannot be put back because of it is kept in
 // <install dir>\WrongGPU-originals\<time>\ (KeptOriginal), and the result says "partly" (kPartlyRestored). A file that is
 // not in the record at all is never touched, whatever its name (UnrecordedRuntimeFiles: listed, kLeftUnrecorded).

@@ -1928,6 +1928,39 @@ int main() {
             require(FoldRrFromGame(rg, fold) && fold.get("rr_mode") == "accurate" && !FoldRrFromGame(rg, fold), "the game's rr_mode folds into the profile once");
             require(ReadRrSettings(rg).present && ReadRrSettings(Join(dir, L"nothing")).present == false, "ReadRrSettings: present only with the file");
 
+            // #219: the RR plugin's own rr_mode save keeps WrongGPU\wronggpu.ini WrongGPU's; a hand edit makes it the player's
+            {
+                const string ours = RenderRrSettings(acc, true, "");  // what the launcher wrote (rr_mode=accurate)
+                const wstring inst = Sha256Bytes(ours.data(), ours.size());
+                auto swap = [&](const string& from, const string& to) { string t = ours; t.replace(t.find(from), from.size(), to); return t; };
+                const string saved = swap("rr_mode=accurate", "rr_mode=fast");  // the plugin's save (rr_panel.cpp: one line, CRLF)
+                require(RrSettingsPluginEdit(saved, inst) && RrSettingsPluginEdit(swap("rr_mode=accurate", "rr_mode=exact"), inst),
+                        "the plugin's rr_mode save: still WrongGPU's file");
+                require(!RrSettingsPluginEdit(swap("rr_mode=accurate", "rr_mode = fast"), inst), "rr_mode with spaces around '=' (not the plugin's form): the player's");
+                require(!RrSettingsPluginEdit(swap("rr_mode=accurate", "rr_mode=turbo"), inst), "a mode the plugin never writes: the player's");
+                require(!RrSettingsPluginEdit(saved + "rr_overlay=1\r\n", inst) && !RrSettingsPluginEdit(swap("rr_mode=accurate", "rr_mode=fast\r\nmy_note=1"), inst),
+                        "another key added with the mode save: the player's");
+                require(!RrSettingsPluginEdit(swap("rr_enabled=1", "rr_enabled=0"), inst), "another key changed: the player's");
+                require(!RrSettingsPluginEdit(swap("rr_mode=accurate\r\n", "rr_mode=fast\n"), inst), "LF line ends (the plugin writes CRLF): the player's");
+                require(!RrSettingsPluginEdit(swap("rr_mode=accurate", "rr_mode=fast\r\nrr_mode=fast"), inst), "two rr_mode lines: the player's");
+                require(!RrSettingsPluginEdit(swap("rr_mode=accurate\r\n", ""), inst), "rr_mode removed: the player's");
+                require(!RrSettingsPluginEdit(saved, L"") && !RrSettingsPluginEdit(saved, Sha256Bytes("x", 1)), "no recorded hash, or another one: not WrongGPU's");
+                // the restore's decision (WhatIsThere) on the file in a folder
+                Context rctx;
+                const wstring og = Join(dir, L"rr-owner");
+                EnsureDir(Join(og, kRrDataDir));
+                Entry e;
+                e.action = L"copy"; e.rel = kRrSettings; e.inst = inst; e.owner = L"wg";
+                auto holds = [&](const string& text) { WriteFileAtomic(Join(og, kRrSettings), text.data(), text.size()); return WhatIsThere(rctx, og, e, Sha256Bytes(text.data(), text.size())); };
+                require(holds(ours) == Holds::Ours && holds(saved) == Holds::Ours, "WhatIsThere: the launcher's file and the plugin's mode save are WrongGPU's (removed at uninstall)");
+                require(holds(saved + "my_note=1\r\n") == Holds::Other && holds(swap("rr_mode=accurate", "rr_mode = fast")) == Holds::Other,
+                        "WhatIsThere: a hand-edited file is the player's (left in place)");
+                Entry other = e;
+                other.rel = L"wronggpu.ini";  // the upscaler's settings file: no such exception
+                WriteFileAtomic(Join(og, L"wronggpu.ini"), saved.data(), saved.size());
+                require(WhatIsThere(rctx, og, other, Sha256Bytes(saved.data(), saved.size())) == Holds::Other, "the exception is the RR plugin's settings file only");
+            }
+
             // which games: the RR files next to the exe, deeper in the game's folder, a game known to call it, none
             auto file = [](const wstring& p) { EnsureDir(Parent(p)); WriteFileAtomic(p, "x", 1); };
             const wstring a = Join(dir, L"rr-a"), b = Join(dir, L"rr-b"), c = Join(dir, L"rr-c"), d = Join(dir, L"rr-d");

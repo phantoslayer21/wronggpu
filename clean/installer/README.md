@@ -249,13 +249,18 @@ With the defaults nothing of this section changes the installer.
   hash). Nothing else proves it: not the file's name, not a file next to it, not an ini key, not "it is a log", not "the
   install created that path". A file that is not in the record is not touched, whatever its name (`wronggpu-*`,
   `OptiScaler.log`, `fakenvapi.log`, ...).
-  - **Two policies, stated here on purpose.** Files in WrongGPU's FSR slot that identify as WrongGPU (the version
+  - **Three policies, stated here on purpose.** Files in WrongGPU's FSR slot that identify as WrongGPU (the version
     resource's `ProductName` is WrongGPU: the game may update that DLL, and a newer WrongGPU build placed by hand counts),
     or that are byte-identical to a WrongGPU release (`known_releases.h`, size and SHA-256) or to the embedded payload, are
     treated as WrongGPU's. This is a recognition by identity, not proof of ownership: a player's own build or copy with
-    that product name, or a copy of a release file, is treated the same way. Nothing else is treated as WrongGPU's by
-    its content.
-  - Any other file at a recorded path (edited by hand, saved by OptiScaler's menu or by WrongGPU's own plugin, replaced
+    that product name, or a copy of a release file, is treated the same way. And the RR plugin's settings file
+    `WrongGPU\wronggpu.ini` whose only change since the launcher last wrote it is the `[wronggpu] rr_mode` line WrongGPU's
+    RR plugin saves when the player switches the mode in OptiScaler's menu (exactly `rr_mode=exact|accurate|fast`, CRLF
+    line ends: the recorded bytes with that line set back to one of the three modes) is still WrongGPU's, so an uninstall
+    removes it and a repair or update replaces it (#219; `rr.h` `RrSettingsPluginEdit`). Any other change to it (another
+    key or line, spaces around `=`) is the player's. Nothing else is treated as WrongGPU's by its content.
+  - Any other file at a recorded path (edited by hand, saved by OptiScaler's menu or by WrongGPU's own plugins beyond the
+    rr_mode save above, replaced
     by another setup or a game update, a settings file the install created and a program rewrote since) stays where it
     is, untouched, with a warning.
   - **Hard links.** A file that has another name (a hard link) is never written through, because the other name would change

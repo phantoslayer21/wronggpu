@@ -6,7 +6,7 @@
 // own plugin), the RR runtime next to the game exe, wronggpu-rr.ini (rr_model: the RR data) and the plugin's settings
 // file WrongGPU\wronggpu.ini ([wronggpu] rr_enabled, rr_mode, rr_exact_allowed; the plugin saves rr_mode there when the
 // player switches it in OptiScaler's menu). Every one is an entry of the install record (staging, rollback, uninstall
-// byte for byte); the two settings files go at uninstall even after the plugin rewrote them.
+// byte for byte); WrongGPU\wronggpu.ini goes at uninstall also after the plugin saved rr_mode there (RrSettingsPluginEdit).
 // The RR data (preset F) is converted once per PC from the player's own RR model file with WrongGPU's converter, as the
 // model data is (model.h), into %LOCALAPPDATA%\WrongGPU\model\F\model.wgcm: shared by every game (a game whose own file is
 // too old uses it too). The file is never copied or changed, and never downloaded or shipped. Written for this project.
@@ -132,6 +132,13 @@ string RrIniText(const wstring& dataFile);  // wronggpu-rr.ini as an install wri
 struct RrFileState { bool present = false, enabled = true; string mode; };
 RrFileState ParseRrSettings(const string& text);
 RrFileState ReadRrSettings(const wstring& dir);
+// WrongGPU's RR plugin saved the mode chosen in OptiScaler's menu (rr_panel.cpp) into WrongGPU\wronggpu.ini, and that is the
+// file's only change since the launcher last wrote it (`inst`, the record's hash). The plugin's save replaces the one
+// [wronggpu] rr_mode line with "rr_mode=<exact|accurate|fast>" and ends every line with CRLF, so the file with that line
+// set back to one of the three modes has the recorded bytes. Such a file stays WrongGPU's (#219: the restore, repair and
+// uninstall treat it as the file WrongGPU wrote). Any other change (another key or line, spaces around "=", other line
+// ends) is the player's, and the file stays theirs.
+bool RrSettingsPluginEdit(const string& text, const wstring& inst);
 // The mode the player chose in the game (OptiScaler's menu saves it into WrongGPU\wronggpu.ini) becomes the profile's:
 // the page shows it and an update keeps it. True when it changed `p`.
 bool FoldRrFromGame(const wstring& dir, Profile& p);
