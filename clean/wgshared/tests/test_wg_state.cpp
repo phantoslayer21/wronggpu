@@ -395,6 +395,15 @@ int wmain(int argc, wchar_t** argv) {
             const std::string r = ReadText(out);
             check(!m && le == ERROR_SHARING_VIOLATION && r.rfind("error ", 0) == 0, "while the guard holds a binary, LoadLibrary of it fails (here and in another process): a game cannot load WrongGPU mid-operation");
             DeleteFileW(out.c_str());
+            // the operation itself can still read a held binary (hash it, read its version) with an open that shares writes and deletes
+            {
+                HANDLE rd = CreateFileW(bin.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+                char head[2] = {0, 0};
+                DWORD got = 0;
+                const bool read = rd != INVALID_HANDLE_VALUE && ReadFile(rd, head, 2, &got, nullptr) && got == 2 && head[0] == 'M' && head[1] == 'Z';
+                if (rd != INVALID_HANDLE_VALUE) CloseHandle(rd);
+                check(read, "while the guard holds a binary, the operation can still read it (an open sharing writes and deletes)");
+            }
             // deletes go through the held handle; Release hands one file back at its own step
             check(g.DeleteHeld(bin2) == ERROR_SUCCESS && !Exists(bin2) && !g.Holds(bin2), "DeleteHeld: the binary deleted through the guard's own handle");
             check(g.DeleteHeld(bin2) == ERROR_NOT_FOUND, "DeleteHeld of a file the guard does not hold: ERROR_NOT_FOUND");

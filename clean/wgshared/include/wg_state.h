@@ -24,14 +24,16 @@
 //
 // THE OPERATION GUARD (a game that uses WrongGPU is never changed under it; Windows itself decides, nothing is registered):
 // - The game registers nothing. A WrongGPU binary the game has loaded (the front end, the menu plugin, the RR plugin, the
-//   runtime) is an image section of that process, and Windows refuses an exclusive open of it.
+//   runtime) is an image section of that process, and Windows refuses an open of it for writing its data.
 // - The launcher: an uninstall, repair or update holds an OperationGuard for its WHOLE run. It takes the state lock (a timeout
 //   is Busy, access denied is LockDenied), then opens EVERY WrongGPU binary of the install with DELETE | GENERIC_READ |
-//   FILE_WRITE_DATA and share mode 0 (a loaded image has no open handle, so share mode 0 alone does not see it; Windows refuses
-//   an open for writing its data; nothing is ever written through the handle; a read-only binary is therefore Unknown):
+//   FILE_WRITE_DATA, sharing reads only (a loaded image has no open handle, so share modes alone do not see it; Windows refuses
+//   the open for writing its data; nothing is ever written through the handle; a read-only binary is therefore Unknown):
 //   ERROR_SHARING_VIOLATION = a process has it loaded (GameRunning: refuse); any other open error = Unknown (refuse); a
-//   file that does not exist is skipped; all opened = nobody has WrongGPU loaded. The guard HOLDS those exclusive handles to
-//   the end, so a game that starts meanwhile cannot load WrongGPU (its LoadLibrary fails; OptiScaler carries on without it).
+//   file that does not exist is skipped; all opened = nobody has WrongGPU loaded. The guard HOLDS those handles to the end:
+//   a game that starts meanwhile cannot load WrongGPU (LoadLibrary does not share writes, so it fails against the guard's
+//   write access; OptiScaler carries on without it), while the operation itself can still read the files (hashes, version
+//   resources) with an open that shares writes and deletes.
 //   The operation deletes a held binary through the guard's own handle (DeleteHeld), or releases that one handle right at
 //   the step that replaces the file (Release). The guard is taken by the process that changes the files (the elevated worker
 //   when there is one), never by a parent waiting for it.
@@ -189,7 +191,7 @@ private:
 
 // ---- the operation guard -------------------------------------------------------------------------------------------
 // The launcher's side of an uninstall, repair or update (see THE OPERATION GUARD above). Ok only when the state lock is held
-// and every WrongGPU binary that exists is held exclusively. A timeout of the lock is Busy, access denied is LockDenied; a
+// and every WrongGPU binary that exists is held (write access, reads shared). A timeout of the lock is Busy, access denied is LockDenied; a
 // binary loaded in a process (ERROR_SHARING_VIOLATION) is GameRunning; any other open error is Unknown. Keep it for the
 // whole operation, on the thread that took it.
 enum class GuardResult { Ok, Busy, LockDenied, GameRunning, Unknown };
@@ -217,9 +219,9 @@ public:
         }
         for (const std::wstring& b : binaries) {
             const std::wstring p = ExtendedPath(b);
-            // FILE_WRITE_DATA is what a loaded image refuses (the image section holds no open handle, so share mode 0 alone
+            // FILE_WRITE_DATA is what a loaded image refuses (the image section holds no open handle, so share modes alone
             // would not conflict with it); nothing is ever written through this handle
-            HANDLE h = CreateFileW(p.c_str(), DELETE | GENERIC_READ | FILE_WRITE_DATA, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            HANDLE h = CreateFileW(p.c_str(), DELETE | GENERIC_READ | FILE_WRITE_DATA, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
             if (h == INVALID_HANDLE_VALUE) {
                 const DWORD e = GetLastError();
                 if (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND) continue;  // not there: nothing has it loaded
