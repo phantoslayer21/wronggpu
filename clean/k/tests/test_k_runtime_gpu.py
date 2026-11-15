@@ -173,10 +173,11 @@ class KRuntimeExt:
         self.rt = rt
         R, O = self.max_rw * self.max_rh, self.W * self.H
         self.half_pitch = pitch256(8 * self.W)
-        self.bufs = {k: self.alloc(n) for k, n in {
+        self.bufs_size = {
             "color": max(R * 16, pitch256(8 * self.max_rw) * self.max_rh), "depth": R * 4,
             "motion": max(R * 8, pitch256(8 * self.max_rw) * self.max_rh),
-            "out": max(O * 12, self.half_pitch * self.H), "expo": 256}.items()}
+            "out": max(O * 12, self.half_pitch * self.H), "expo": 256}
+        self.bufs = {k: self.alloc(n) for k, n in self.bufs_size.items()}
 
     def check(self, rc, what):
         if rc != 0:
@@ -196,10 +197,15 @@ class KRuntimeExt:
         self.check(self.lib.wg_rt_download(self.rt, ptr, a.ctypes.data, a.nbytes), "download")
         return a
 
-    def buffer(self, name, dtype):
+    def buffer_info(self, name):
+        """(device pointer, bytes) of a runtime buffer (wg_rt_buffer); raises RuntimeError when it does not exist."""
         p, n = up(), sz()
         self.check(self.lib.wg_rt_buffer(self.rt, name.encode(), ctypes.byref(p), ctypes.byref(n)), name)
-        return self.download(p.value, n.value // np.dtype(dtype).itemsize, dtype)
+        return p.value, n.value
+
+    def buffer(self, name, dtype):
+        p, n = self.buffer_info(name)
+        return self.download(p, n // np.dtype(dtype).itemsize, dtype)
 
     def time_parts(self, x, mode, half, frames=100, warmup=300):
         """The inputs already in the slot buffers (frame() ran on x before): `frames` steady frames back to back with
