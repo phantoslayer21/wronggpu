@@ -127,6 +127,17 @@ class CreateOrder(unittest.TestCase):
         sel = read("clean", "runtime", "interop", "executor_select.h")
         self.assertNotIn("kSwitchToHip", sel)
 
+    def test_sparkle_guard_is_off_and_hip_only_filters_fall_back_for_every_model(self):
+        # R1-a / H4: the choice turns the guard off before anything is made, whatever the model
+        off = self.at("if (ch.sparkle_off) o.sparkle_guard = 0.0f;")
+        self.assertGreater(off, self.at("choose_executor(q)"))
+        self.assertNotIn("model_k", self.b[self.at("choose_executor(q)"):off])
+        # H3: the HIP-only filters are dropped for a context on the D3D12 executor only, before the runtime reads them
+        drop = self.at("o.runtime = drop_hip_only_filter(o.runtime, &fnote);")
+        self.assertEqual(self.b.count("drop_hip_only_filter("), 1)
+        self.assertIn('if (ch.executor == "dx12")', self.b[drop - 200:drop])
+        self.assertLess(drop, self.at("n_rtopts_ = o.runtime;"))
+
     def test_rr_and_native_device_use_the_shared_id_rule(self):
         rr = read("clean", "rr_f", "runtime", "src", "rr_runtime.cpp")
         self.assertIn('#include "../../../runtime/rdna4_win.h"', rr)

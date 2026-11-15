@@ -609,8 +609,9 @@ std::vector<MenuItem> FilterMenu() {
     std::vector<MenuItem> items;
     const string cur = v.edit.get("output_filter");
     for (int i = 0; i < 5; ++i) {
-        MenuItem it{kFilterNames[i], M_FILTER0 + i, true, false, false, cur == kFilter[i]};
-        it.help = kFilterHelp[i];
+        const bool hipOnly = NeedsHipRuntime("output_filter", kFilter[i]);  // R1: greyed, with the words
+        MenuItem it{kFilterNames[i], M_FILTER0 + i, !hipOnly, false, false, cur == kFilter[i]};
+        it.help = hipOnly ? wstring(NotOnDx12Text()) : wstring(kFilterHelp[i]);
         items.push_back(it);
     }
     return items;
@@ -1351,23 +1352,30 @@ static float UpscalerSection(Gfx& gx, float x, float y, float w) {
             yy += ActRow(gx, x, yy, w, false, true, ID_G_ADVMORE, L"Advanced settings (4)", ic::down, true, R_LINK);
             return yy - top;
         }
-        const std::vector<wstring> ex{L"Auto", L"Direct3D\u00a012", L"HIP"};
-        const int exi = Index(kExec, v.edit.get("executor"));
-        yy += SRow(gx, x, yy, w, false, L"Runs on", L"Auto uses Direct3D\u00a012 on RX\u00a09000-series cards. HIP is the other way Model\u00a0M can run.", SegmentedW(gx, ex, segW), 36,
+        // R1: every model runs on Direct3D 12 in a game. HIP is a diagnostic set in wronggpu.ini (executor=hip), not a choice here;
+        // a profile that holds it says so in the row's sentence and shows no segment chosen
+        const std::vector<wstring> ex{L"Auto", L"Direct3D\u00a012"};
+        const bool hipSet = NeedsHipRuntime("executor", v.edit.get("executor"));
+        const int exi = hipSet ? -1 : Index(kExec, v.edit.get("executor"));
+        yy += SRow(gx, x, yy, w, false, L"Runs on",
+                   hipSet ? L"The profile asks for the HIP runtime, a diagnostic. Pick Auto or Direct3D\u00a012 to run the way the game is meant to."
+                          : L"Auto uses Direct3D\u00a012 on RX\u00a09000-series cards.",
+                   SegmentedW(gx, ex, segW), 36,
                    [&](const Rc& r) { Segmented(gx, ID_G_EXEC0, r.r(), r.y, ex, exi, sub, L"Runs on", 28, {}, true, segW); }, !sub);
         const int fi = Index(kFilter, v.edit.get("output_filter"));
         float fw = 170;  // .select min-width 170, wider when a name needs it
         for (auto* n : kFilterNames) fw = std::max(fw, std::ceil(gx.TextW(n, Ts(13, 600, pal.text)) + 12 + 30));
         // the sentence says what the chosen filter does (each choice's line is in its menu too)
-        yy += SRow(gx, x, yy, w, false, L"Output filter", kFilterHelp[fi], fw, 30,
+        yy += SRow(gx, x, yy, w, false, L"Output filter",
+                   NeedsHipRuntime("output_filter", v.edit.get("output_filter")) ? NotOnDx12Text() : kFilterHelp[fi], fw, 30,
                    [&](const Rc& r) { Select(gx, ID_G_FILTER, r, kFilterNames[fi], sub, L"Output filter"); }, !sub);
         const std::vector<wstring> pre{L"Scale", L"Original"};
         const int pi = Index(kPre, v.edit.get("pre_exposure"));
         yy += SRow(gx, x, yy, w, false, L"Pre-exposure", L"Scale keeps hair and fine detail steady. Original uses the game's brightness value as it is; in some games that makes hair and fine detail flicker.",
                    SegmentedW(gx, pre, segW), 36, [&](const Rc& r) { Segmented(gx, ID_G_PRE0, r.r(), r.y, pre, pi, sub, L"Pre-exposure", 28, {}, true, segW); }, !sub);
         const bool sp = v.edit.get("sparkle_guard") != "off";
-        yy += SRow(gx, x, yy, w, false, L"Sparkle guard", L"Calms single-pixel flashes on foliage. Uses HIP, even when Model M runs on Direct3D\u00a012.", kSwitchW, kSwitchH,
-                   [&](const Rc& r) { Switch(gx, ID_G_SPARKLE, r, sp, sub, L"Sparkle guard"); }, !sub, L"+0.11 ms");
+        yy += SRow(gx, x, yy, w, false, L"Sparkle guard", NotOnDx12Text(), kSwitchW, kSwitchH,
+                   [&](const Rc& r) { Switch(gx, ID_G_SPARKLE, r, sp, false, L"Sparkle guard"); }, true);  // R1: no D3D12 port yet: off
         if (!outsideAdv) yy += ActRow(gx, x, yy, w, false, true, ID_G_ADVMORE, L"Fewer settings", ic::up, true, R_LINK);
         return yy - top;
     });

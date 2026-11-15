@@ -125,7 +125,7 @@ void ActivateWidget(int id) {
             default: OpenGame(i); return;
         }
     }
-    if (id >= ID_G_EXEC0 && id < ID_G_EXEC0 + 3) { static const char* const x[] = {"auto", "dx12", "hip"}; SetSetting(v.edit, "executor", x[id - ID_G_EXEC0], nullptr); Invalidate(); return; }
+    if (id >= ID_G_EXEC0 && id < ID_G_EXEC0 + 2) { static const char* const x[] = {"auto", "dx12"};  // R1: no HIP choice SetSetting(v.edit, "executor", x[id - ID_G_EXEC0], nullptr); Invalidate(); return; }
     if (id >= ID_G_PRE0 && id < ID_G_PRE0 + 2) { static const char* const x[] = {"scale", "original"}; SetSetting(v.edit, "pre_exposure", x[id - ID_G_PRE0], nullptr); Invalidate(); return; }
     if (id >= ID_G_RRMODE0 && id < ID_G_RRMODE0 + 3) { static const char* const x[] = {"exact", "accurate", "fast"}; SetSetting(v.edit, "rr_mode", x[id - ID_G_RRMODE0], nullptr); Invalidate(); return; }
     if (id >= ID_G_FPS0 && id < ID_G_FPS0 + 3) { static const char* const x[] = {"keep", "on", "off"}; SetSetting(v.edit, "fps_overlay", x[id - ID_G_FPS0], nullptr); Invalidate(); return; }

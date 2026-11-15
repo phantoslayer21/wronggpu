@@ -378,6 +378,39 @@ int main() {
                has(rl, "never to the HIP executor") && rl.find('\n') == std::string::npos);
   }
 
+  // ---- H3 (R1): the HIP-only output filters give the default filter on the D3D12 runtime, never HIP --------------------
+  {
+    std::string note;
+    expect("no output_filter: nothing changes, no line",
+           wgi::drop_hip_only_filter("post_diet=0;k_input=16", &note) == "post_diet=0;k_input=16" && note.empty());
+    expect("default / original / analytic stay as they are",
+           wgi::drop_hip_only_filter("output_filter=default", &note) == "output_filter=default" &&
+               wgi::drop_hip_only_filter("a=1;output_filter=original;b=2", &note) == "a=1;output_filter=original;b=2" &&
+               wgi::drop_hip_only_filter("output_filter=analytic", &note) == "output_filter=analytic" && note.empty());
+    for (const char* q : {"quality5", "quality9"}) {
+      note.clear();
+      const std::string out = wgi::drop_hip_only_filter(std::string("a=1;output_filter=") + q + ";b=2", &note);
+      expect(std::string(q) + ": the item is dropped, the others stay, one line, no HIP",
+             out == "a=1;b=2" && has(note, std::string("output_filter=") + q + " is not available on the D3D12 runtime yet") &&
+                 has(note, "default output filter") && note.find('\n') == std::string::npos);
+    }
+    note.clear();
+    expect("spaces around the key and value are read as the runtime reads them",
+           wgi::drop_hip_only_filter("a=1; output_filter = quality9 ;b=2", &note) == "a=1;b=2" && !note.empty());
+    note.clear();
+    expect("the last output_filter wins: quality5 then analytic stays analytic",
+           wgi::drop_hip_only_filter("output_filter=quality5;output_filter=analytic", &note) ==
+               "output_filter=quality5;output_filter=analytic" && note.empty());
+    note.clear();
+    expect("the last output_filter wins: analytic then quality9 gives the default filter",
+           wgi::drop_hip_only_filter("output_filter=analytic;x=1;output_filter=quality9", &note) == "x=1" && !note.empty());
+    note.clear();
+    expect("only the option's name is read: a value that merely contains it is not touched",
+           wgi::drop_hip_only_filter("model_dir=C:\\output_filter=quality5", &note) == "model_dir=C:\\output_filter=quality5" &&
+               note.empty());
+    expect("an empty option string gives an empty one", wgi::drop_hip_only_filter("", nullptr).empty());
+  }
+
   // ---- R1 (oversight): hip_switch=on is ignored for models M, L and K alike ----------------------------------------
   // The selector sees a model only as "is it K"; M and L are the same request. For each of the three: on an RX 9000 board
   // the default stays the D3D12 executor with one line about the option, a refused frame never moves to HIP, and the

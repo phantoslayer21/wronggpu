@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #include "../rdna4.h"
 
@@ -158,6 +159,47 @@ enum class RefusedAction { kNoSwitch, kBilinear };
 inline RefusedAction refused_frame_action(bool model_k, bool by_default) {
   if (model_k) return RefusedAction::kNoSwitch;
   return by_default ? RefusedAction::kNoSwitch : RefusedAction::kBilinear;
+}
+
+// H3 (R1): the output filters Quality 5 and Quality 9 (runtime option output_filter=quality5 | quality9) exist on the HIP
+// executor only; the D3D12 executor refuses them at create. A context on the D3D12 executor never goes to HIP because of
+// them: the option is dropped, the default filter runs, and `*note` is the one log line. `options` is the network
+// runtime's "key=value;..." string; the last output_filter wins there, so a later quality value drops every output_filter
+// item (an earlier quality value followed by another filter is only a leftover and is dropped too). Nothing else changes.
+inline std::string drop_hip_only_filter(const std::string& options, std::string* note) {
+  struct Item {
+    std::string text, key, value;
+  };
+  auto trim = [](const std::string& t) {
+    const size_t a = t.find_first_not_of(" \t"), b = t.find_last_not_of(" \t");
+    return a == std::string::npos ? std::string() : t.substr(a, b - a + 1);
+  };
+  std::vector<Item> items;
+  size_t pos = 0;
+  while (pos <= options.size()) {
+    size_t end = options.find(';', pos);
+    if (end == std::string::npos) end = options.size();
+    Item it;
+    it.text = options.substr(pos, end - pos);
+    pos = end + 1;
+    const size_t eq = it.text.find('=');
+    it.key = trim(it.text.substr(0, eq));
+    it.value = eq == std::string::npos ? std::string() : trim(it.text.substr(eq + 1));
+    if (!it.key.empty()) items.push_back(it);
+  }
+  std::string last;
+  for (const Item& it : items)
+    if (it.key == "output_filter") last = it.value;
+  if (last != "quality5" && last != "quality9") return options;
+  std::string out;
+  for (const Item& it : items) {
+    if (it.key == "output_filter") continue;
+    out += (out.empty() ? "" : ";") + it.text;
+  }
+  if (note)
+    *note = "output_filter=" + last + " is not available on the D3D12 runtime yet; the default output filter is used "
+            "(the HIP executor is not started for it)";
+  return out;
 }
 
 // A frame the executor did not take (nothing recorded) carries this prefix in its error (executor_d3d12.cpp, convert.cpp:

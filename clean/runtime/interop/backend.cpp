@@ -621,6 +621,11 @@ class Context {
       dx12_default_ = ch.by_default && ch.executor == "dx12";
       // R1: no model moves to HIP in a game, whatever hip_switch says (the 0.6.0 option is ignored, with one line)
       if (!ch.hip_note.empty()) say(WG_LOG_INFO, ch.hip_note);
+      if (ch.executor == "dx12") {  // H3: the HIP-only output filters (Quality 5 / 9) give the default filter, never HIP
+        std::string fnote;
+        o.runtime = drop_hip_only_filter(o.runtime, &fnote);
+        if (!fnote.empty()) say(WG_LOG_WARN, fnote);
+      }
     }
     k_default_ = model_k_default(o);
     const bool split = services_ && services_->struct_size >= sizeof(WgFrontEndServices) && services_->split_command_list;
