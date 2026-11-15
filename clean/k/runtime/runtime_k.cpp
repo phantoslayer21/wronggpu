@@ -720,6 +720,8 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
   // with m = ms r + mo applied on load, as input_convert would have written it)
   const bool raw = io && io->raw_inputs;
   int cpitch = rw, mpitch = rw, zpitch = rw, mch = 2;
+  if (raw && cfg_.backend >= 2)  // the interop's HIP input copies: the D3D12 devices read dense buffers or the game's textures
+    return fail("model K: input-copy frames (raw_inputs) run on the HIP backend only");
   if (raw) {
     mch = io->motion_channels;
     if ((mch != 2 && mch != 4) || io->color_pitch % 8 || io->depth_pitch % 4 || io->motion_pitch % (2 * mch))
@@ -850,7 +852,6 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
   };
   // backend 1 (the host emulator) has no tiled input kernels; HIP (0) and the D3D12 devices (2 hybrid, 3 native) do
   const bool use_tiled = tiled_input_ && cfg_.backend != 1 && fin.s == 0.5f && tiled_guard(rw, rh, fin.jx, fin.jy);
-  if (native_direct_ && !use_tiled) return fail("model K: the direct frame needs the tiled input stage");
   // k_in_exact: the output colour taps by k_out_color (KFrame's exact plan), not by the tiled input kernel
   const bool use_tiled_color = use_tiled && !in_exact_ && !reset && 4LL * Bw_ >= W_ && 4LL * Bh_ >= H_;
   KiHost input_host = {};
@@ -873,10 +874,12 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
       if (use_uniforms) ++input_uniform_launches_;
       ++tiled_launches_;
     } else {
-      if (!launch(in_exact_ ? "kx/k_in_color" : "k_in_color", cdiv((long long)rw * rh, kThreads), kThreads, &ip))
-        return false;
+      const std::string color_name = std::string(in_exact_ ? "kx/k_in_color" : "k_in_color") + (native_direct_ ? "_direct" : "");
+      if (!launch(color_name.c_str(), cdiv((long long)rw * rh, kThreads), kThreads, &ip)) return false;
       ++legacy_color_launches_;
-      if (!launch(input_kernel, cdiv(4LL * Bw_ * Bh_, kThreads), kThreads, &ip)) return false;
+      // native_direct: k_in_color / k_in_base read the game's textures (their "_direct" forms); k_in_reset reads buffers only
+      const std::string base_name = native_direct_ && !reset ? std::string(input_kernel) + "_direct" : input_kernel;
+      if (!launch(base_name.c_str(), cdiv(4LL * Bw_ * Bh_, kThreads), kThreads, &ip)) return false;
       ++legacy_base_launches_;
     }
     return true;
@@ -997,7 +1000,6 @@ bool KRuntime::options_ok_direct() {
   const char* why = f16_                           ? "network=fused16 / fused8"
                     : fast_                        ? "k_fast=1"
                     : !in_exact_                   ? "the fast input stage (k_fast_in=1 / k_in_exact=0)"
-                    : !tiled_input_                ? "input_tiled=0"
                     : (diag_input2_ || diag_copyin_) ? "k_diag"
                                                      : nullptr;
   if (why)
@@ -1015,6 +1017,11 @@ std::vector<std::string> KRuntime::d3d12_kernels() const {
   v.push_back("k_out_color" + d);
   if (!native_direct_) v.push_back("kx/k_in_tiled_uniform");  // (no direct form: the direct frame uses k_in_tiled_direct)
   v.push_back("kx/k_in_tiled" + d);  // input_uniforms_safe refusing the host uniforms
+  // the legacy input kernels: a render size above 0.68 x the output (up to 1.0, native AA / DLAA), a jitter outside
+  // [-0.5, 0.5], or input_tiled=0 (k_in_reset reads buffers only: no direct form)
+  v.push_back("kx/k_in_color" + d);
+  v.push_back("kx/k_in_reset");
+  v.push_back("kx/k_in_base" + d);
   // the eleven stages as network() names them; e4 / d4 take NG = 2 above 24 windows, which depends on the frame's
   // window offset (even, 0..6): every form this output size can launch
   for (const KStageInfo& st : k_stage_table()) {
@@ -1074,10 +1081,9 @@ bool KRuntime::direct_preflight(const WgRtFrame& fr, const FrameIo* io) {
   if (fr.reset < 0 || fr.reset > 2) return fail("model K direct frame: reset must be 0, 1 or 2");
   if (fr.rw <= 0 || fr.rh <= 0 || fr.rw > max_rw_ || fr.rh > max_rh_)
     return fail("model K direct frame: render size outside the configured maximum");
-  if (!tiled_guard(fr.rw, fr.rh, fr.jitter[0], fr.jitter[1]))
-    return fail("model K direct frame: render size " + std::to_string(fr.rw) + "x" + std::to_string(fr.rh) +
-                " above 0.68 x the output " + std::to_string(W_) + "x" + std::to_string(H_) +
-                " or jitter outside [-0.5, 0.5]: only the tiled input stage has D3D12 direct forms");
+  if (!std::isfinite(fr.jitter[0]) || !std::isfinite(fr.jitter[1])) return fail("model K direct frame: non-finite jitter");
+  // every render size up to the maximum and every finite jitter run on D3D12: the tiled input stage where its guard
+  // holds, else the legacy input kernels (both have direct forms)
   return true;
 }
 

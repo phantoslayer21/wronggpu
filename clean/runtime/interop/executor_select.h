@@ -7,7 +7,8 @@
 //    (executor_d3d12.cpp), everything else on the HIP executor, with one log line saying why (other GPU, the sparkle
 //    guard or the frame capture, which run on HIP only). The D3D12 executor can still refuse the context at create
 //    (its driver-channel probe, the network's create, a context its kernels do not take): then the HIP executor runs
-//    it, again with one line (backend.cpp). Model K is taken only when every kernel the context can launch has a
+//    it, again with one line (backend.cpp; model K: no HIP route, the context is not created and the game keeps its own
+//    upscaler, dx12_refused_line_k). Model K is taken only when every kernel the context can launch has a
 //    D3D12 port in the build's dx12/manifest.json and its options select the exact default path (KRuntime::create on
 //    backend 3 checks both before it loads the model; clean/k/runtime/runtime_k.h); else the refusal line names what
 //    is missing. A frame it does not take later (e.g. above the checked render size; native AA
@@ -124,6 +125,14 @@ inline std::string no_switch_line(uint64_t frame, const std::string& why) {
 // After choose_executor gave dx12: the D3D12 executor did not take the context at create (`err`: the driver-channel
 // probe, the network's create on the D3D12 device, a context its kernels do not take). The HIP executor runs it; this
 // is the one warning line about it.
+// Model K has no HIP route in a game (owner 2026-11-14: models run on the D3D12 runtime, HIP is a test reference and an
+// opt-in diagnostic): the context is not created, the one line says why, and the game keeps its own upscaler.
+inline std::string dx12_refused_line_k(bool by_default, const std::string& err) {
+  return std::string("model K: ") + (by_default ? "executor dx12 (default on RDNA 4)" : "executor=dx12") +
+         " could not take this context (" + err + "); model K has no HIP route in a game (executor=hip selects it as a "
+         "diagnostic): the game keeps its own upscaler";
+}
+
 inline std::string dx12_refused_line(bool by_default, const std::string& err) {
   return std::string(by_default ? "executor dx12 (default on RDNA 4)" : "executor=dx12") +
          " could not take this context (" + err + "); the HIP executor runs it";

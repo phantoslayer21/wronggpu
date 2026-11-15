@@ -662,6 +662,8 @@ class Context {
       no_slots_ = true;  // its kernels read the game's textures: no slot buffers (fences and a 128 KB flag arena only)
       if (!exec_->prepare(&err) || !exec_->prepare_device(device_, &err) ||
           !make_shared_objects(false, "arena", &err) || !exec_->init(device_, set_, &err)) {
+        // model K: no HIP route in a game; the one error line below is the whole report, the game keeps its own upscaler
+        if (model_k_) return fail(WG_ERROR_UNSUPPORTED, dx12_refused_line_k(dx12_default_, err));
         say(WG_LOG_WARN, dx12_refused_line(dx12_default_, err));
         exec_.reset();
         release_set();
@@ -669,12 +671,6 @@ class Context {
         dx12 = false;
         dx12_default_ = false;
         err.clear();
-        // model K on the HIP executor after all: its default mode (handover=staged with inline sync), as if the HIP
-        // executor had been chosen (the runtime options it adds are the runtime's defaults already)
-        if (model_k_ && !k_default_) {
-          o.executor = "hip";
-          k_default_ = model_k_default(o);
-        }
       } else {
         say(WG_LOG_INFO, std::string("executor dx12: the network runs on the game's D3D12 device, recorded into the "
                                      "game's command list; its kernels read the game's colour, depth and motion and "

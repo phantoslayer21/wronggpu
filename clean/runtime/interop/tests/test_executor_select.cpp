@@ -129,8 +129,11 @@ int main() {
     {
       const std::string e = "D3D12 runtime: model K: the D3D12 build has no port of k_out_color_direct";
       expect("model K port missing (default): the refusal line names it",
-             has(wgi::dx12_refused_line(true, e), "no port of k_out_color_direct") &&
-                 has(wgi::dx12_refused_line(true, e), "the HIP executor runs it"));
+             has(wgi::dx12_refused_line_k(true, e), "no port of k_out_color_direct") &&
+                 has(wgi::dx12_refused_line_k(true, e), "model K has no HIP route") &&
+                 has(wgi::dx12_refused_line_k(true, e), "the game keeps its own upscaler") &&
+                 !has(wgi::dx12_refused_line_k(true, e), "the HIP executor runs it") &&
+                 wgi::dx12_refused_line_k(true, e).find('\n') == std::string::npos);
     }
     r.model_k = false;
     r.sparkle_guard = true;
