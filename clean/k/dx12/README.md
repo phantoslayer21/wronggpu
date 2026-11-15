@@ -44,8 +44,20 @@ and inputs, the stage runner's launch plans run on HIP and replayed on D3D12 (`k
 third case carry special values (infinity, +-65504, zero, -0, subnormals) and of every third case NaN as well; the
 half-grid control launches a stage with half its workgroups. `wide` (the wide stages of `k_block_wide.co`:
 `k_stagew2_e3`, `k_stagew4_e4`, `k_stagew2_e4`, `k_stagew4_m`, `k_stagew4_d4`, `k_stagew2_d4`, `k_stagew2_d3`: one window
-per 128 NG lanes) is checked the same way. Not ported: the NG = 4 forms of `e3` and `d3` (`k_stagew4_e3`, `k_stagew4_d3`), which the HIP build has but the runtime never launches (`e3` and `d3` always take NG = 2); a replay of `k_stagew4_d3` on D3D12 was reported to differ from the HIP capture, so the form is left out of the D3D12 set until it is checked and fixed. `expo` (`k_expo_scalars`) against `k_io.co`; `warm`
+per 128 NG lanes) is checked the same way. Not ported, because no context can reach them: the NG = 4 forms of `e3` and `d3` (`k_stagew4_e3`, `k_stagew4_d3`), which the HIP build has. `wide_ng` in `clean/k/runtime/runtime_k.cpp` gives `e3` and `d3` NG = 2 on the exact network whatever the window count, the sizes or the options (only `e4` and `d4` look at the window count), and the FP16 networks, which take other kernels, are refused on the native device; `clean/k/tests/test_k_wide_ng.py` pins the rule, the two places that build the kernel names and the declared kernel set. A replay of `k_stagew4_d3` on D3D12 was reported to differ from the HIP capture; if a change ever makes the form reachable, that test fails until the form is ported and checked. `expo` (`k_expo_scalars`) against `k_io.co`; `warm`
 (`k_warm`, a cache warm-up with no HIP kernel: checked against its definition, through the struct argument path).
+
+`legacy` (the legacy exact input kernels of `k_io_exact.co`, `kx/k_in_color`, `kx/k_in_reset`, `kx/k_in_base`, in
+`kernels/k_in_legacy.hlsl`; the runtime takes them where the tiled kernel does not apply: a render size above 0.68 x
+the output up to 1.0 (native AA, DLAA), a jitter outside [-0.5, 0.5], `input_tiled=0`): the same flag sets as `input`,
+every fourth case at render size = output size or with a jitter outside the guard; the inputs, the intermediates `cpre`
+and `cpre2` and the output `x0` are compared raw; the half-grid control launches `k_in_base` with half its workgroups).
+`direct` (the forms for the native executor, which read the game's colour, depth, motion and exposure textures and write
+the output texture: `kx/k_in_tiled_direct`, `kx/k_in_color_direct`, `kx/k_in_base_direct`, `k_out_color_direct`,
+`k_out_pixel_c_direct`, `k_out_pixel_direct`, `k_expo_scalars_direct`, `exposure_auto_diet_direct`): the check binds
+real textures (RGBA16F colour, R32F depth, RG16F motion, exposure, an RGBA16F output) through `kernel_replay`'s direct
+mode and compares the output texture and the buffers with the HIP kernels' run on the raw buffer route
+(`KIO_C16` / `KIO_M16`, with the motion scale and offset folded as the interop passes them).
 
 NaN: IEEE 754 does not define the sign or payload of a NaN, and where a NaN is generated or propagated the two devices
 can differ in it (the decoder stages, with NaN in the input). For the cases with NaN in the input the check compares the

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // D3D12 ports of model K's output stage (spec 43): k_out_color, k_out_pixel_c (compact pixel head, the default)
-// and k_out_pixel (k_head=full). The forms that read the game's textures (_direct, WG_DIRECT_TEXTURES) are in this source
-// for the runtime's use but are not declared yet (see k_in.hlsl). WrongGPU's own code.
+// and k_out_pixel (k_head=full). The forms that read the game's textures and write its output texture (_direct,
+// rs=direct, WG_DIRECT_TEXTURES) are declared beside them (see k_in.hlsl). WrongGPU's own code.
 // Basis: our HIP kernels in clean/k/kernels/k_io.hip (HIP build k_io.co, wave64, 128 lanes per workgroup), exact forms
 // only (FAST = false; the k_fast=1 "_f" kernels are not ported and keep running on HIP). Same names, same argument
 // struct (KOutParams, see hlsl/k_out.hlsli for the s-token and why each skipped field is dead), same launch geometry
@@ -44,6 +44,9 @@
 // @wg-kernel k_out_color co=k_io.co block=128 wave=64 args=s312:p4.b12.x24.b52.x12.b24.x4.p4.x8.p4.b8.p2.b56
 // @wg-kernel k_out_pixel_c co=k_io.co block=128 wave=64 args=s312:p4.b12.x24.b52.x12.b24.x4.p4.x8.p4.b8.p2.b56 defines=KO_COMPACT=1
 // @wg-kernel k_out_pixel co=k_io.co entry=k_out_pixel_c block=128 wave=64 args=s312:p4.b12.x24.b52.x12.b24.x4.p4.x8.p4.b8.p2.b56 defines=KO_COMPACT=0
+// @wg-kernel k_out_color_direct co=k_io.co entry=k_out_color block=128 wave=64 args=s312:p4.b12.x24.b52.x12.b24.x4.p4.x8.p4.b8.p2.b56 rs=direct defines=WG_DIRECT_TEXTURES=1
+// @wg-kernel k_out_pixel_c_direct co=k_io.co entry=k_out_pixel_c block=128 wave=64 args=s312:p4.b12.x24.b52.x12.b24.x4.p4.x8.p4.b8.p2.b56 rs=direct defines=KO_COMPACT=1,WG_DIRECT_TEXTURES=1
+// @wg-kernel k_out_pixel_direct co=k_io.co entry=k_out_pixel_c block=128 wave=64 args=s312:p4.b12.x24.b52.x12.b24.x4.p4.x8.p4.b8.p2.b56 rs=direct defines=KO_COMPACT=0,WG_DIRECT_TEXTURES=1
 #include "wg_platform.hlsli"
 #if defined(WG_DIRECT_TEXTURES)
 #include "native_direct.hlsli"
