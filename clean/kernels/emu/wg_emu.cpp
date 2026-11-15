@@ -5,6 +5,9 @@
 //   A (16x16, rows M): lane l holds row l % 16; B (16x16, columns N): lane l holds column l % 16;
 //   input element j of a lane (byte j for FP8, half j for FP16) holds K index kslot(l / 16, j);
 //   C/D (FP32): lane l holds column l % 16, element v holds row drow(l / 16, v).
+// With -DWG_EMU_GFX11 the kernels' matrix calls are the wrappers of wg_platform.h, and the instruction is the F16 one of
+// gfx11 (wmma16_f16): A and B hold 16 K values per lane in index order, and element v of D in lane l is row 2 v + l / 16.
+// kvariant and dvariant do not apply.
 // The kernels only depend on the row/column-per-lane part. kslot may be any permutation as long as A and B use the
 // same one, and drow is absorbed by the weight packing (runner/packing.py, D_ROW). The emulator can switch both to
 // other permutations (emu_set_layout) to check that independence.
@@ -34,8 +37,8 @@ struct Lane {
 };
 
 struct WaveBuf {
-  unsigned char a[WG_WAVE][16];
-  unsigned char b[WG_WAVE][16];
+  unsigned char a[WG_WAVE][32];
+  unsigned char b[WG_WAVE][32];
   float c[WG_WAVE][8];
   float x[WG_WAVE];
 };
@@ -117,6 +120,30 @@ v8f wmma(const void* a, const void* b, size_t bytes, v8f c) {
   return d;
 }
 
+// The gfx11 F16 matrix instruction (v_wmma_f32_16x16x16_f16, wave32), as measured on an RX 7900 XT (runner/selftest.py,
+// probe_wmma16): the output lanes 16h..16h+15 (rows 2 v + h) read A (row r from lane 16h + r) and B (column c from lane
+// 16h + c) of the lanes of their own half only. The documented layout repeats lanes 0-15 in lanes 16-31; the wrappers do.
+v8f wmma16(v16h a, v16h b, v8f c) {
+  u32 lane = g.cur->id % WG_WAVE;
+  WaveBuf& w = g.waves[g.cur->id / WG_WAVE];
+  std::memcpy(w.a[lane], &a, 32);
+  std::memcpy(w.b[lane], &b, 32);
+  yield();
+  v8f d;
+  int n = lane % 16, h = lane / 16;
+  double B[16];
+  for (int k = 0; k < 16; ++k) B[k] = f16_value(&w.b[16 * h + n][2 * k]);
+  for (int v = 0; v < 8; ++v) {
+    int m = 2 * v + h;
+    double s = 0.0;
+    for (int k = 0; k < 16; ++k) s += f16_value(&w.a[16 * h + m][2 * k]) * B[k];
+    d[v] = (float)((double)c[v] + s);
+  }
+  if (lane == 0) ++g.wmma_count;
+  yield();
+  return d;
+}
+
 void trampoline() {
   g.thunk(g.args);
   g.cur->done = true;
@@ -156,6 +183,7 @@ u32 block_id() { return g.block; }
 
 v8f wmma_fp8(v2i a, v2i b, v8f c) { return wmma<true>(&a, &b, 8, c); }
 v8f wmma_f16(v8h a, v8h b, v8f c) { return wmma<false>(&a, &b, 16, c); }
+v8f wmma16_f16(v16h a, v16h b, v8f c) { return wmma16(a, b, c); }
 
 float xor16(float v) {
   u32 lane = g.cur->id % WG_WAVE;

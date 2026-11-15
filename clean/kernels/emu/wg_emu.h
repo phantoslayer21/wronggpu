@@ -39,6 +39,7 @@ u32 lane_id();
 u32 block_id();
 v8f wmma_fp8(v2i a, v2i b, v8f c);
 v8f wmma_f16(v8h a, v8h b, v8f c);
+v8f wmma16_f16(v16h a, v16h b, v8f c);  // the gfx11 instruction (WG_EMU_GFX11)
 float xor16(float v);
 float xor_lanes(float v, u32 mask);  // value of lane (lane ^ mask)
 void barrier();
@@ -50,8 +51,13 @@ void barrier();
 
 WG_FN u32 wg_lane_id() { return wg_emu::lane_id(); }
 WG_FN u32 wg_block_id() { return wg_emu::block_id(); }
+#if defined(WG_EMU_GFX11)
+// gfx11 mode: the wrappers of wg_platform.h call the instruction model of the F16 matrix instruction of RDNA 3
+WG_FN v8f wg_wmma16_f16(v16h a, v16h b, v8f c) { return wg_emu::wmma16_f16(a, b, c); }
+#else
 WG_FN v8f wg_wmma_fp8(v2i a, v2i b, v8f c) { return wg_emu::wmma_fp8(a, b, c); }
 WG_FN v8f wg_wmma_f16(v8h a, v8h b, v8f c) { return wg_emu::wmma_f16(a, b, c); }
+#endif
 WG_FN float wg_xor16(float v) { return wg_emu::xor16(v); }
 WG_FN u32 wg_xchg16_u(u32 v) { return __builtin_bit_cast(u32, wg_emu::xor16(__builtin_bit_cast(float, v))); }
 WG_FN float wg_emu_xor(float v, u32 mask) { return wg_emu::xor_lanes(v, mask); }

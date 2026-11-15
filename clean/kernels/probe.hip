@@ -4,9 +4,8 @@
 // conversions versus the software ones in wg_platform.h, and the FP8 pack/unpack functions the kernels use).
 #include "wg_platform.h"
 
-// One WMMA per wave on raw per-lane registers: d[i] = WMMA(a[i], b[i], 0), i = global lane index. (Not on gfx11:
-// no FP8 matrix instruction, and the F16 operand layout of the wrapper is gfx12's.)
-#if !defined(WG_GFX11)
+// One WMMA per wave on raw per-lane registers: d[i] = WMMA(a[i], b[i], 0), i = global lane index. On gfx11 these are the
+// wrappers of wg_platform.h (the lane's 8 codes or halves, the other half's fetched, widened, one F16 matrix instruction).
 WG_KERNEL(probe_wmma_fp8)(const v2i* a, const v2i* b, v8f* d) {
   const u32 i = wg_block_id() * WG_BLOCK + wg_lane_id();
   v8f z = {};
@@ -17,6 +16,15 @@ WG_KERNEL(probe_wmma_f16)(const v8h* a, const v8h* b, v8f* d) {
   const u32 i = wg_block_id() * WG_BLOCK + wg_lane_id();
   v8f z = {};
   d[i] = wg_wmma_f16(a[i], b[i], z);
+}
+
+// The gfx11 F16 matrix instruction itself, on raw per-lane registers of 16 halves: d[i] = WMMA(a[i], b[i], 0). With a and
+// b of lanes 16-31 different from those of lanes 0-15 it shows which lanes the instruction reads.
+#if defined(WG_GFX11) || defined(WG_EMU_GFX11)
+WG_KERNEL(probe_wmma16)(const v16h* a, const v16h* b, v8f* d) {
+  const u32 i = wg_block_id() * WG_BLOCK + wg_lane_id();
+  v8f z = {};
+  d[i] = wg_wmma16_f16(a[i], b[i], z);
 }
 #endif
 
@@ -105,6 +113,9 @@ WG_KERNEL(probe_gelu)(const float* x, float* y, int n) {
 WG_EMU_REGISTER(probe_wmma_fp8)
 WG_EMU_REGISTER(probe_wmma_f16)
 WG_EMU_REGISTER(probe_xchg16)
+#if defined(WG_EMU_GFX11)
+WG_EMU_REGISTER(probe_wmma16)
+#endif
 WG_EMU_REGISTER(probe_fp8_sw)
 WG_EMU_REGISTER(probe_fp8_hw)
 WG_EMU_REGISTER(probe_fp8_pack)

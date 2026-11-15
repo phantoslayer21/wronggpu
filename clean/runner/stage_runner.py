@@ -76,6 +76,7 @@ KERNEL_CODE_OBJECTS.update(k_stages.KERNEL_CODE_OBJECTS)
 # Models: the ones with a reference stage table (clean/reference/swin.py MODEL_STAGES: "M") and model K (clean/k)
 MODELS = tuple(MODEL_STAGES) + ("K",)
 EMU_LIBRARY = "wg_emu.so"
+EMU_LIBRARY_GFX11 = "wg_emu__gfx11.so"  # build.py --emu-gfx11: the same kernels with the gfx11 matrix wrappers
 
 
 def _cdiv(a, b):
@@ -84,7 +85,7 @@ def _cdiv(a, b):
 
 class Runner:
     def __init__(self, build_dir: str, rocm_dir: str, backend: str = "hip", d_row=None, variant: str = "base",
-                 model: str = "M"):
+                 model: str = "M", arch: str = None):
         self.model = str(model).upper()
         if self.model not in MODELS:
             raise ValueError(f"unknown model {model!r}; known: {', '.join(MODELS)}")
@@ -92,7 +93,12 @@ class Runner:
         self.variant = variant
         self.backend = backend
         self._extra_modules = {}
-        self.d_row = d_row if d_row is not None else os.environ.get("WG_D_ROW") or family.build_family(build_dir)
+        if arch not in (None, "gfx11") or (arch and backend != "emu"):
+            raise ValueError(f"arch {arch!r}: only the emulator takes one, and only 'gfx11' (the build's target.json "
+                             "names the target of a GPU build)")
+        if arch and variant != "base":
+            raise ValueError("the gfx11 emulator library has no variants")
+        self.d_row = d_row if d_row is not None else os.environ.get("WG_D_ROW") or arch or family.build_family(build_dir)
         self.geo, code_object = V.DEFAULT_GEOMETRY, V.code_object(variant)
         manifest = os.path.join(build_dir, V.MANIFEST)
         if os.path.exists(manifest):
@@ -113,7 +119,8 @@ class Runner:
                     self.module = self.dev.load_module(f.read())
         elif backend == "emu":
             from clean.runner.emu import Emu
-            self.dev = Emu(os.path.join(build_dir, EMU_LIBRARY if variant == "base" else f"wg_emu__{variant}.so"))
+            self.dev = Emu(os.path.join(build_dir, EMU_LIBRARY_GFX11 if arch else
+                                        EMU_LIBRARY if variant == "base" else f"wg_emu__{variant}.so"))
             self.module = None
         else:
             raise ValueError(f"unknown backend {backend!r}")

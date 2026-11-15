@@ -16,8 +16,10 @@ typedef decltype(sizeof(0)) size_t;
 typedef float v8f __attribute__((ext_vector_type(8)));
 typedef float v4f __attribute__((ext_vector_type(4)));
 typedef _Float16 v8h __attribute__((ext_vector_type(8)));
+typedef _Float16 v16h __attribute__((ext_vector_type(16)));
 typedef int v2i __attribute__((ext_vector_type(2)));
 typedef _Float16 v2h __attribute__((ext_vector_type(2)));
+typedef _Float16 v4h __attribute__((ext_vector_type(4)));
 typedef u32 v4u __attribute__((ext_vector_type(4)));
 
 #define WG_WAVE 32    // gfx12 and gfx11 kernels run in wave32
@@ -62,12 +64,11 @@ WG_FN u32 wg_lane_id() { return __builtin_amdgcn_workitem_id_x(); }
 WG_FN u32 wg_block_id() { return __builtin_amdgcn_workgroup_id_x(); }
 
 #if defined(WG_GFX11)
-// gfx11 has no FP8 matrix instruction, and its F16 one has another operand layout than the gfx12 one: a call that
-// survives to code generation is an error (a wrapper for gfx11 is a separate step).
-__attribute__((device)) v8f wg_wmma_fp8(v2i a, v2i b, v8f c)
-    __attribute__((error("wg_wmma_fp8: no FP8 matrix instruction on gfx11 (RDNA 3)")));
-__attribute__((device)) v8f wg_wmma_f16(v8h a, v8h b, v8f c)
-    __attribute__((error("wg_wmma_f16: the gfx12 F16 matrix operand layout is not available on gfx11 (RDNA 3)")));
+// gfx11 has no FP8 matrix instruction, and its F16 one takes 16 K values per lane (both halves of the wave alike) where
+// the gfx12 one takes 8: wg_wmma_fp8 and wg_wmma_f16 are made from this instruction below (the code is shared with the
+// emulator). D = A x B + C, 16x16x16, FP16 inputs, FP32 accumulate (v_wmma_f32_16x16x16_f16): lane l holds row (A) or
+// column (B) l % 16 with K indices 0..15 in order; element v of D in lane l is row 2 v + l / 16, column l % 16.
+WG_FN v8f wg_wmma16_f16(v16h a, v16h b, v8f c) { return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c); }
 
 // The 32-bit value of the same variable in lane (lane ^ 16), i.e. the other half of the wave: one v_permlanex16_b32,
 // which reads the other 16-lane row of the same 32 lanes; selectors 0x76543210 / 0xfedcba98 take its lane i for lane i.
@@ -131,6 +132,68 @@ WG_FN float wg_fmin(float a, float b) { return __builtin_fminf(a, b); }
 
 #include "emu/wg_emu.h"
 
+#endif
+
+// ---------------------------------------------------------------------------------------------------------------
+// The matrix wrappers of gfx11 (and of its emulator build, -DWG_EMU_GFX11). Operands keep the gfx12 shape (a lane holds
+// 8 K values of its half of the wave), so kernels and weight packing stay as they are: the lane fetches the 8 values of
+// the other half (one half-wave exchange per dword), widens the 16 to F16 and calls the F16 matrix instruction. K slot
+// (h, j) is index 8 h + j: a lane of half 1 puts the fetched values first, so both halves hold the 16 values in the same
+// order. (The instruction reads the operands of the odd D rows from lanes 16-31 and those of the even rows from lanes
+// 0-15, so the sum would be the same without the select; its rounding is not: K order is part of the arithmetic.)
+#if defined(WG_GFX11) || defined(WG_EMU_GFX11)
+typedef u32 v8u __attribute__((ext_vector_type(8)));
+
+// Two E4M3 codes (bytes 0 and 1 of c) as F16 bits scaled by 2^-8: the 7 magnitude bits under the F16 exponent (bias 15,
+// E4M3 has bias 7) read as value / 2^8, and E4M3 subnormals become F16 subnormals of the same scale. The NaN code 0x7f
+// (magnitude bits all ones, 0x3f80) gets bit 14 as well, 0x7f80: an F16 NaN, which the multiply by 256 keeps. (A compare
+// and select per code costs enough registers to make the Swin block kernels spill; this form costs about 3.)
+WG_FN u32 wg_e4m3x2_scaled(u32 c) {
+  const u32 b0 = c & 0xffu, b1 = (c >> 8) & 0xffu;
+  const u32 m0 = b0 & 0x7fu, m1 = b1 & 0x7fu;
+  const u32 h0 = (m0 << 7) | ((b0 & 0x80u) << 8) | (((m0 + 1u) & 0x80u) << 7);
+  const u32 h1 = (m1 << 7) | ((b1 & 0x80u) << 8) | (((m1 + 1u) & 0x80u) << 7);
+  return h0 | (h1 << 16);
+}
+// 4 E4M3 codes (a dword) as 4 F16 values, exactly (all 256 codes are exact in F16): the multiply by 256 is exact.
+WG_FN v4h wg_widen_e4m3x4(u32 w) {
+  const v2h k = {(_Float16)256.0f, (_Float16)256.0f};
+  const v2h lo = __builtin_bit_cast(v2h, wg_e4m3x2_scaled(w)) * k;
+  const v2h hi = __builtin_bit_cast(v2h, wg_e4m3x2_scaled(w >> 16)) * k;
+  v4h r = {lo[0], lo[1], hi[0], hi[1]};
+  return r;
+}
+WG_FN bool wg_in_upper_half() { return (wg_lane_id() & 16u) != 0; }
+
+WG_FN v16h wg_k16_codes(v2i p) {
+  const u32 x0 = (u32)p[0], x1 = (u32)p[1];
+  const u32 y0 = wg_xchg16_u(x0), y1 = wg_xchg16_u(x1);
+  const bool hi = wg_in_upper_half();
+  const u32 f0 = hi ? y0 : x0, f1 = hi ? y1 : x1;  // indices 0..7
+  const u32 s0 = hi ? x0 : y0, s1 = hi ? x1 : y1;  // indices 8..15
+  const v4h a = wg_widen_e4m3x4(f0), b = wg_widen_e4m3x4(f1), c = wg_widen_e4m3x4(s0), d = wg_widen_e4m3x4(s1);
+  v16h r = {a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3], c[0], c[1], c[2], c[3], d[0], d[1], d[2], d[3]};
+  return r;
+}
+WG_FN v16h wg_k16_f16(v8h p) {
+  const v4u x = __builtin_bit_cast(v4u, p);
+  v4u y;
+#pragma unroll
+  for (int i = 0; i < 4; ++i) y[i] = wg_xchg16_u(x[i]);
+  const bool hi = wg_in_upper_half();
+  v8u r;
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    r[i] = hi ? y[i] : x[i];
+    r[4 + i] = hi ? x[i] : y[i];
+  }
+  return __builtin_bit_cast(v16h, r);
+}
+// D = A x B + C, 16x16x16, FP8 E4M3 inputs (8 codes per lane), FP32 accumulate. The accumulator rows come out as
+// 2 v + h (packing.py: d_row "gfx11").
+WG_FN v8f wg_wmma_fp8(v2i a, v2i b, v8f c) { return wg_wmma16_f16(wg_k16_codes(a), wg_k16_codes(b), c); }
+// The same for FP16 inputs (8 halves per lane).
+WG_FN v8f wg_wmma_f16(v8h a, v8h b, v8f c) { return wg_wmma16_f16(wg_k16_f16(a), wg_k16_f16(b), c); }
 #endif
 
 // ---------------------------------------------------------------------------------------------------------------

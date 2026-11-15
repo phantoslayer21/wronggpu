@@ -36,6 +36,10 @@ SOURCES = ["swin.hip", "probe.hip", "overlap.hip", "rates.hip", "mlpbench.hip", 
 # Default sources of the families that do not build the whole gfx12 set: kernels that compile for gfx11 unchanged
 # (the matrix kernels need the gfx12 builtins until they are ported); no Model K / L kernels, no post_w64 variants
 FAMILY_SOURCES = {"gfx11": ["post.hip", "exposure.hip", "frame.hip", "probe.hip"]}
+# -D macros of a family's code objects, by source. gfx11 swin.hip: the plain software FP32 -> E4M3 conversion
+# (wg_platform.h, -DWG_SLOW_Q8): with the faster one the C=128 block kernel spills 27 VGPRs and the others take 30 to 35
+# more (clang 20, --report); the faster form is for the speed slice, which budgets the registers
+FAMILY_DEFINES = {"gfx11": {"swin.hip": {"WG_SLOW_Q8": 1}}}
 RUNTIME_DIR = os.path.join(os.path.dirname(HERE), "runtime")
 RUNTIME_SOURCES = ["device.cpp", "embedded.cpp", "model.cpp", "runtime.cpp",
                    os.path.join("..", "converter", "src", "sha256.cpp"),   # shared with the converter (spec 08)
@@ -624,6 +628,9 @@ def main(argv=None):
                          "variants.json and perf_variants.json next to the runtime library)")
     ap.add_argument("--emu", action="store_true", help="also build the host emulator library (Linux)")
     ap.add_argument("--emu-only", action="store_true", help="only build the host emulator library")
+    ap.add_argument("--emu-gfx11", action="store_true",
+                    help="with --emu / --emu-only: also the emulator library of the gfx11 matrix wrappers "
+                         "(wg_emu__gfx11.so; Runner(..., backend='emu', arch='gfx11'))")
     ap.add_argument("--cxx", default=os.environ.get("CXX", "clang++"), help="host C++ compiler for --emu")
     ap.add_argument("--no-runtime", action="store_true", help="do not build the per-frame runtime library")
     ap.add_argument("--no-resource-gate", action="store_true",
@@ -713,7 +720,8 @@ def main(argv=None):
                 run(device_command(clang, args.rocm, os.path.join(KERNEL_DIR, src),
                                    os.path.join(args.out, os.path.splitext(src)[0] + ".co"),
                                    device_libs=not args.no_device_libs, report=args.report, soft_fp8=args.soft_fp8,
-                                   defines=dict(d.split('=', 1) for d in args.define)))
+                                   defines={**FAMILY_DEFINES.get(fam, {}).get(src, {}),
+                                            **dict(d.split('=', 1) for d in args.define)}))
             with open(os.path.join(args.out, F.TARGET_FILE), "w") as f:
                 json.dump({"arch": ARCH}, f)
             return
@@ -833,6 +841,8 @@ def main(argv=None):
                 raise SystemExit(f"build for {arch} failed ({r.returncode})")
     if args.emu or args.emu_only:
         run(emu_command(args.cxx, os.path.join(args.out, "wg_emu.so")))
+        if args.emu_gfx11:
+            run(emu_command(args.cxx, os.path.join(args.out, "wg_emu__gfx11.so"), {"WG_EMU_GFX11": 1}))
         if args.variants:  # emulator libraries of the requested variants (Runner(..., backend="emu", variant=name))
             names = [n for n in (V.VARIANTS if args.variants == "all" else args.variants.split(",")) if n != "base"]
             for name in names:

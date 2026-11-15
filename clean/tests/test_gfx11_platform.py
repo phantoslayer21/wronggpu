@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: MIT
 """The gfx11 (RDNA 3) branch of kernels/wg_platform.h, compiled for gfx1100 (no GPU needed; needs a ROCm clang, from
-WG_ROCM, else ROCM_PATH): the family macro, the half-wave exchange as one v_permlanex16_b32, and clear errors for what
-gfx11 does not have. The same sources must still compile for gfx1201 with the old ds_bpermute exchange.
+WG_ROCM, else ROCM_PATH): the family macro, the half-wave exchange as one v_permlanex16_b32, the matrix wrappers made
+of it and the F16 matrix instruction, clear errors for what gfx11 does not have, and the register gate of the Swin block
+kernels. The same sources must still compile for gfx1201 with the old ds_bpermute exchange and the FP8 matrix instruction.
 """
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -35,6 +37,22 @@ def compile_source(arch, body, args="u32* out, v8f* d", asm=False, flags=()):
             with open(out) as f:
                 text = f.read()
         return r.returncode, r.stderr, text
+
+
+def resource_report(stderr):
+    """{kernel: {item: value}} from the compiler's -Rpass-analysis=kernel-resource-usage remarks."""
+    report, name = {}, None
+    for line in stderr.splitlines():
+        m = re.search(r"remark:\s+(.*?) \[-Rpass", line)
+        if not m:
+            continue
+        key, _, value = m.group(1).partition(":")
+        if key == "Function Name":
+            name = value.strip()
+            report[name] = {}
+        elif name:
+            report[name][key.strip()] = value.strip()
+    return report
 
 
 class Gfx11Platform(unittest.TestCase):
@@ -69,10 +87,23 @@ class Gfx11Platform(unittest.TestCase):
         self.assertEqual(text.count("ds_bpermute_b32"), 2)
         self.assertNotIn("permlane", text)
 
+    def test_matrix_wrappers_are_the_f16_instruction_on_gfx11_and_unchanged_on_gfx12(self):
+        fp8 = "d[i] = wg_wmma_fp8(v2i{(int)out[i], (int)out[i + 1]}, v2i{(int)out[i + 2], (int)out[i + 3]}, d[i]);"
+        f16 = ("d[i] = wg_wmma_f16(__builtin_bit_cast(v8h, v4u{out[i], out[i + 1], out[i + 2], out[i + 3]}),"
+               " __builtin_bit_cast(v8h, v4u{out[i + 4], out[i + 5], out[i + 6], out[i + 7]}), d[i]);")
+        for name, body, dwords in (("wg_wmma_fp8", fp8, 2), ("wg_wmma_f16", f16, 4)):
+            with self.subTest(name=name):
+                rc, err, text = compile_source("gfx1100", body, asm=True)
+                self.assertEqual(rc, 0, err)
+                self.assertEqual(text.count("v_wmma_f32_16x16x16_f16"), 1)
+                self.assertEqual(text.count("v_permlanex16_b32"), 2 * dwords)   # a and b, one per dword of the lane
+                rc, err, text = compile_source("gfx1201", body, asm=True)
+                self.assertEqual(rc, 0, err)
+                self.assertEqual(text.count("v_wmma_f32_16x16x16_"), 1)
+                self.assertNotIn("permlane", text)
+
     def test_what_gfx11_lacks_is_a_clear_error(self):
-        cases = {"wg_wmma_fp8": ("d[i] = wg_wmma_fp8(v2i{1, 2}, v2i{3, 4}, d[i]);", "no FP8 matrix instruction"),
-                 "wg_wmma_f16": ("d[i] = wg_wmma_f16(v8h{}, v8h{}, d[i]);", "F16 matrix operand layout"),
-                 "wg_dot4_fp8": ("d[i][0] = wg_dot4_fp8(1, 2, d[i][0]);", "WG_NORM_DOT4"),
+        cases = {"wg_dot4_fp8": ("d[i][0] = wg_dot4_fp8(1, 2, d[i][0]);", "WG_NORM_DOT4"),
                  "wg_realtime": ("out[i] = (u32)wg_realtime();", "WG_PROFILE"),
                  "wg_cycles": ("out[i] = wg_cycles();", "WG_PROFILE"),
                  "wg_hwid": ("out[i] = wg_hwid();", "WG_PROFILE"),
@@ -90,6 +121,49 @@ class Gfx11Platform(unittest.TestCase):
         """swin.hip keeps `if (WG_NORM_DOT4 && ...)` branches with the macro 0: the error is only for a surviving call."""
         rc, err, _ = compile_source("gfx1100", "if (0 && out[i] == 7u) d[i][0] = wg_dot4_fp8(1, 2, d[i][0]); out[i] = i;")
         self.assertEqual(rc, 0, err)
+
+
+class SwinGfx11Registers(unittest.TestCase):
+    """The recorded gate of the naive FP16 route: the five Swin block kernels (and their clamp-free twins) keep their
+    registers, no spills, with the wrappers and the build's own flags (build.py --arch gfx1100 --report). Numbers of
+    clang 20: VGPRs 175 / 175 / 206 / 206 / 250 (c64, c64_add, c96, c96_add, c128), 8 / 8 / 7 / 7 / 5 waves per SIMD."""
+
+    KERNELS = ("swin_block_c64", "swin_block_c64_add", "swin_block_c96", "swin_block_c96_add", "swin_block_c128")
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            clang = build.find_clang(ROCM)
+        except SystemExit:
+            raise unittest.SkipTest("no ROCm clang")
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as tmp:
+            out = os.path.join(tmp, "swin.co")
+            with patch.object(build, "ARCH", "gfx1100"):
+                cmd = build.device_command(clang, ROCM, os.path.join(build.KERNEL_DIR, "swin.hip"), out, report=True,
+                                           defines=build.FAMILY_DEFINES["gfx11"]["swin.hip"])
+            r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise unittest.SkipTest("cannot compile swin.hip for gfx1100: " + r.stderr[:300])
+        cls.report = resource_report(r.stderr)
+
+    def test_no_spills_in_the_block_kernels(self):
+        for kernel in self.KERNELS + tuple(k + "_nc" for k in self.KERNELS):
+            with self.subTest(kernel=kernel):
+                r = self.report[kernel]
+                self.assertEqual(int(r["VGPRs Spill"]), 0, r)
+                self.assertEqual(int(r["ScratchSize [bytes/lane]"]), 0, r)
+                self.assertLessEqual(int(r["VGPRs"]), 256)
+
+    def test_the_faster_quantizer_is_what_spills(self):
+        """Why the gfx11 swin.hip build asks for -DWG_SLOW_Q8 (build.FAMILY_DEFINES): without it c128 spills."""
+        clang = build.find_clang(ROCM)
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as tmp:
+            with patch.object(build, "ARCH", "gfx1100"):
+                cmd = build.device_command(clang, ROCM, os.path.join(build.KERNEL_DIR, "swin.hip"),
+                                           os.path.join(tmp, "swin.co"), report=True)
+            r = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr[:300])
+        self.assertGreater(int(resource_report(r.stderr)["swin_block_c128"]["VGPRs Spill"]), 0)
 
 
 class FastE4m3(unittest.TestCase):
