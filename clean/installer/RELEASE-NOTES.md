@@ -47,14 +47,28 @@ scene, your settings) and a screenshot. Every report helps us fix it.
   matrix data differently, instead of passing them (#14).
 - **Collect logs from a game's uninstaller** (Apps & features, **Modify**) no longer reports valid model data as
   invalid: it says the data is not verified there and points to Collect logs in the launcher (#24).
+- **Uninstall, Update, Repair and the move out of a wrong folder never discard your files.** When a file can't go back
+  as it was, because you or another program changed it after the install, it stays where it is and WrongGPU's copy of
+  what was there before is kept in a `WrongGPU-originals` folder. The result says "partly restored" and where the copy
+  is. A `wronggpu.ini` you edited by hand stays after an uninstall (it used to be deleted while the message said it was
+  left in place) (#70, #73).
+- **The launcher works next to your own OptiScaler setup:** it recognises another OptiScaler install and its plugins,
+  asks before it moves anything aside, and moves only the files you agreed to, checked by their contents (#23).
+- **Ray Reconstruction: GPU memory is released safely when a game ends Ray Reconstruction.** The plugin now keeps an
+  instance's memory until the GPU has finished its last frame, instead of freeing it at once (#63).
+- **Ray Reconstruction stays off when another Ray Reconstruction plugin is already active.** It switches itself off
+  only when the other plugin is positively identified, and says so in `wronggpu-rr.log`. A different plugin it cannot
+  identify keeps WrongGPU's on; `rr_other_plugin = yield` in the plugin's settings keeps WrongGPU's off (#22).
+- **Ray Reconstruction under Proton:** the thread that prepares Ray Reconstruction's GPU code now has a large enough
+  stack for vkd3d-proton's shader translator, and a pipeline that fails to build is logged (#149).
 
 ### Also changed
 - The launcher reads the developer-only HIP runtime setting only in test builds, so a setting left on a PC can't
   change what a release installs (#25).
 
 ### Thanks
-Thanks to **j0nsh1n** for the reports and the analysis behind #7, #8 and #9, and for the Linux write-up in
-Discussion #10.
+Thanks to **j0nsh1n** for the reports and the analysis behind #7, #8 and #9, for the Linux write-up in
+Discussion #10, and for the Ray Reconstruction fix under Proton (#149, #196).
 
 ## Quick start
 
@@ -178,8 +192,8 @@ The exact launch option is on the release page.
 ## Requirements
 - Windows 10 or 11, a Radeon RX 9000-series graphics card (RX 9070 series; RX 9060 XT and RX 9060 supported, not yet
   tested), a recent AMD driver.
-- **No AMD HIP runtime needed:** Model M and Model L run on Direct3D 12. HIP is only used for the optional sparkle
-  guard.
+- **No AMD HIP runtime needed:** Model M and Model L run on Direct3D 12. HIP is only used by optional settings on
+  the game's page: the sparkle guard, the Quality 5 and Quality 9 output filters, and "Runs on: HIP".
 - An internet connection the first time, for the WrongGPU edition of OptiScaler, which the launcher downloads itself
   (offline you can choose an OptiScaler download yourself, in Settings).
 - For Model M and Model L, a DLSS file of version 310.5 or newer, and for Ray Reconstruction, a DLSS Ray
