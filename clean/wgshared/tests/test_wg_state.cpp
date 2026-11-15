@@ -10,8 +10,10 @@
 //  - a busy lock (bounded wait, nothing written), a holder that dies in the middle of a write (abandoned: the next holder
 //    re-reads the old whole file; the half-written temporary file is never read as state);
 //  - the loaded protocol: QueryGameUse NotRunning / Running / Unknown (lookup errors are Unknown, never NotRunning), a
-//    registered child, a killed child (no stale marker), the launcher's OperationGuard refusing on Running and Unknown, a
-//    registration that waits for a running operation and gets in only after it, and one that gives up in time.
+//    registered child, a killed child (no stale marker), the launcher's OperationGuard refusing on Running, Unknown and a
+//    lock it may not open (LockDenied); a game starting DURING an operation (its marker at once, the operation's Recheck
+//    stops it, the game gives up on state within its ~2 s budget and stays visible to later operations), and the
+//    registration budget bounding the whole registration.
 // Written for this project.
 #include <cstdio>
 #include <cstdlib>
@@ -111,7 +113,7 @@ static int Child(int argc, wchar_t** argv) {
             Settings w = s;
             Set(w, "counter", std::to_string(c + 1));
             Sleep(0);  // widen the window a lost update would need
-            if (!WriteAtomic(SettingsPathOf(game), RenderSettings(w))) return 4;
+            if (!WriteAtomic(SettingsPathOf(game), RenderSettings(w)).ok) return 4;
         }
         return 0;
     }
@@ -138,11 +140,13 @@ static int Child(int argc, wchar_t** argv) {
         WaitFile(argv[4]);  // the parent keeps a handle to the mutex now
         ExitProcess(0);
     }
-    if (mode == L"--child-register" && argc >= 5) {  // the game's registration (wait ms), then stays loaded until killed
+    if (mode == L"--child-register" && argc >= 5) {  // the game's registration (budget ms), then stays loaded until killed
         const ULONGLONG t0 = Now();
         LoadedRegistration reg(game, static_cast<DWORD>(_wtoi(argv[3])));
-        WriteText(argv[4], (reg.ok() ? "ok " : "no ") + std::to_string(Now() - t0) + " " + reg.why());
-        if (!reg.ok()) return 0;
+        // "marker=<0|1> state=<0|1> ms=<registration time> <why>"
+        WriteText(argv[4], "marker=" + std::to_string(reg.marker() ? 1 : 0) + " state=" + std::to_string(reg.state_ok() ? 1 : 0) +
+                               " ms=" + std::to_string(Now() - t0) + " " + reg.why());
+        if (!reg.marker()) return 0;
         Sleep(120000);
         return 0;
     }
@@ -175,57 +179,78 @@ int wmain(int argc, wchar_t** argv) {
     // ---- atomic writes
     const std::wstring state = StateDirOf(game);
     {
-        check(SetSettings(game, {{"rr_mode", "fast"}}) == SetResult::NoStateFolder && DirectoryState(state) == PathState::Missing,
+        check(SetSettings(game, {{"rr_mode", "fast"}}).result == SetResult::NoStateFolder && DirectoryState(state) == PathState::Missing,
               "no state folder: NoStateFolder, the folder is not created");
         CreateDirectoryW(state.c_str(), nullptr);
         const std::wstring f = SettingsPathOf(game);
-        check(SetSettings(game, {{"rr_mode", "fast"}}) == SetResult::Ok && *Get(ReadSettings(game), "rr_mode") == "fast", "SetSettings writes the file");
+        check(SetSettings(game, {{"rr_mode", "fast"}}).ok() && *Get(ReadSettings(game), "rr_mode") == "fast", "SetSettings writes the file");
         const std::string before = ReadText(f);
-        DWORD e = 0;
-        check(!WriteAtomic(f, std::string(kMaxStateBytes + 1, 'x'), &e) && e == ERROR_FILE_TOO_LARGE && ReadText(f) == before, "over kMaxStateBytes: refused, the file unchanged");
+        WriteResult w = WriteAtomic(f, std::string(kMaxStateBytes + 1, 'x'));
+        check(!w.ok && w.error == ERROR_FILE_TOO_LARGE && ReadText(f) == before, "over kMaxStateBytes: refused, the file unchanged");
         bool steps = true;
+        static const char* failAt = nullptr;
         for (const char* step : {"write", "flush", "close", "move"}) {
-            static const char* failAt = nullptr;
             failAt = step;
             TestFault() = [](const char* s) { return std::strcmp(s, failAt) == 0; };
-            std::wstring left;
-            e = 0;
-            const bool ok = WriteAtomic(f, "rr_mode=exact\r\n", &e, &left);
+            w = WriteAtomic(f, "rr_mode=exact\r\n");
             TestFault() = nullptr;
-            const bool good = !ok && e == ERROR_WRITE_FAULT && left.empty() && ReadText(f) == before && List(state).size() == 1;
-            if (!good) std::printf("  (failure at %s: ok %d, error %lu, left %d, files %zu)\n", step, ok, e, !left.empty(), List(state).size());
+            const bool good = !w.ok && w.error == ERROR_WRITE_FAULT && w.tempLeft.empty() && !w.cleanupError && ReadText(f) == before && List(state).size() == 1;
+            if (!good) std::printf("  (failure at %s: ok %d, error %lu, left %d, files %zu)\n", step, w.ok, w.error, !w.tempLeft.empty(), List(state).size());
             steps = steps && good;
         }
-        check(steps, "a failure at write / flush / close / move (after the temporary file exists): false, the file unchanged, no temporary file left");
-        TestFault() = [](const char* s) { return std::strcmp(s, "move") == 0 || std::strcmp(s, "delete") == 0; };
-        std::wstring left;
-        const bool ok = WriteAtomic(f, "rr_mode=exact\r\n", &e, &left);
+        check(steps, "a failure at write / flush / close / move (after the temporary file exists): not written, the file unchanged, no temporary file left");
+        // secondary failures are reported with the first one: a close that fails after a failed write; a cleanup that fails
+        TestFault() = [](const char* s) { return std::strcmp(s, "write") == 0 || std::strcmp(s, "close") == 0; };
+        w = WriteAtomic(f, "rr_mode=exact\r\n");
         TestFault() = nullptr;
-        check(!ok && !left.empty() && Exists(left) && IsTempName(left) && ReadText(f) == before, "a cleanup that fails: reported (tempLeft), the file unchanged");
-        if (!left.empty()) DeleteFileW(left.c_str());
-        check(!WriteAtomic(JoinPath(JoinPath(root, L"missing-folder"), L"x.ini"), "x", &e) && e != 0, "a write into a missing folder fails with its error");
+        check(!w.ok && w.error == ERROR_WRITE_FAULT && w.closeError == ERROR_WRITE_FAULT &&
+                  ReadText(f) == before && List(state).size() == 1,
+              "a close that fails after a failed write: closeError reported beside the first error");
+        TestFault() = [](const char* s) { return std::strcmp(s, "move") == 0 || std::strcmp(s, "delete") == 0; };
+        w = WriteAtomic(f, "rr_mode=exact\r\n");
+        TestFault() = nullptr;
+        check(!w.ok && w.cleanupError == ERROR_WRITE_FAULT && !w.tempLeft.empty() && Exists(w.tempLeft) && IsTempName(w.tempLeft) &&
+                  w.words().find("could not be deleted") != std::string::npos && ReadText(f) == before,
+              "a cleanup that fails: its error and the file left are reported (words say so), the file unchanged");
+        if (!w.tempLeft.empty()) DeleteFileW(w.tempLeft.c_str());
+        w = WriteAtomic(JoinPath(JoinPath(root, L"missing-folder"), L"x.ini"), "x");
+        check(!w.ok && w.error != 0, "a write into a missing folder fails with its error");
         // corrupt, unreadable
         WriteText(f, "rr_mode = fast\r\n");
         check(ReadSettings(game).corrupt && ReadSettings(game).kv.empty(), "a corrupt file reads as corrupt, no keys");
-        check(SetSettings(game, {{"rr_mode", "accurate"}}) == SetResult::Ok && ReadSettings(game).kv.size() == 1, "a corrupt file is replaced by the next write");
+        check(SetSettings(game, {{"rr_mode", "accurate"}}).ok() && ReadSettings(game).kv.size() == 1, "a corrupt file is replaced by the next write");
         const std::string b2 = ReadText(f);
         HANDLE h = CreateFileW(f.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        DWORD err = 0;
-        const SetResult r = SetSettings(game, {{"rr_mode", "exact"}}, kDefaultWaitMs, &err);
+        SetOutcome o = SetSettings(game, {{"rr_mode", "exact"}});
         CloseHandle(h);
-        check(r == SetResult::Unreadable && err != 0 && ReadText(f) == b2 && List(state).size() == 1, "an unreadable file: Unreadable, left as it was");
+        check(o.result == SetResult::Unreadable && o.error != 0 && ReadText(f) == b2 && List(state).size() == 1, "an unreadable file: Unreadable, left as it was");
         // a state folder this process may not write: AccessDenied (its own result, for the elevated repair)
         PSECURITY_DESCRIPTOR ro = nullptr, rw = nullptr;
         ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;OICI;0x1200a9;;;WD)", SDDL_REVISION_1, &ro, nullptr);  // read and list only
         ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;OICI;FA;;;WD)", SDDL_REVISION_1, &rw, nullptr);
         const bool locked = ro && SetFileSecurityW(state.c_str(), DACL_SECURITY_INFORMATION, ro);
-        err = 0;
-        const SetResult denied = SetSettings(game, {{"rr_mode", "exact"}}, kDefaultWaitMs, &err);
+        o = SetSettings(game, {{"rr_mode", "exact"}});
         if (rw) SetFileSecurityW(state.c_str(), DACL_SECURITY_INFORMATION, rw);  // the owner may always change the DACL back
         if (ro) LocalFree(ro);
         if (rw) LocalFree(rw);
-        check(locked && denied == SetResult::AccessDenied && err == ERROR_ACCESS_DENIED && ReadText(f) == b2, "a folder this process may not write: AccessDenied, nothing written");
-        check(std::string(SetResultWords(SetResult::AccessDenied)).find("administrator") != std::string::npos, "AccessDenied's words name the elevated repair");
+        check(locked && o.result == SetResult::AccessDenied && o.error == ERROR_ACCESS_DENIED && ReadText(f) == b2 && o.words().find("administrator") != std::string::npos,
+              "a folder this process may not write: AccessDenied (words name the elevated repair), nothing written");
+        // the state lock may not be opened (an object under its name that denies everyone): LockDenied, not contention
+        {
+            std::wstring lockName;
+            LockNameFor(game, &lockName);
+            PSECURITY_DESCRIPTOR denyAll = nullptr;
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(D;;GA;;;WD)", SDDL_REVISION_1, &denyAll, nullptr);
+            SECURITY_ATTRIBUTES sa{sizeof(sa), denyAll, FALSE};
+            HANDLE squat = CreateMutexW(&sa, FALSE, lockName.c_str());
+            o = SetSettings(game, {{"rr_mode", "exact"}}, 300);
+            OperationGuard g(game, 300);
+            check(squat && o.result == SetResult::LockDenied && o.error == ERROR_ACCESS_DENIED && ReadText(f) == b2 &&
+                      g.result() == GuardResult::LockDenied && std::string(g.words()).find("access denied") != std::string::npos,
+                  "a state lock this process may not open: LockDenied (SetSettings and the guard), not Busy; nothing written");
+            if (squat) CloseHandle(squat);
+            if (denyAll) LocalFree(denyAll);
+        }
         WriteText(f, "counter=0\r\n");
     }
 
@@ -276,7 +301,7 @@ int wmain(int argc, wchar_t** argv) {
         }
         std::wstring dn;
         CreateDirectoryW(ExtendedPath(StateDirOf(deep)).c_str(), nullptr);
-        check(LockNameFor(deep, &dn) && Narrow(dn) != names[0] && SetSettings(deep, {{"k", "v"}}) == SetResult::Ok && *Get(ReadSettings(deep), "k") == "v",
+        check(LockNameFor(deep, &dn) && Narrow(dn) != names[0] && SetSettings(deep, {{"k", "v"}}).ok() && *Get(ReadSettings(deep), "k") == "v",
               "a game folder deeper than MAX_PATH: lock name, write and read work");
         const std::wstring dout = JoinPath(root, L"name-deep");
         HANDLE k = Spawn(L"--child-lockname " + Q(deep) + L" " + Q(dout));
@@ -309,9 +334,8 @@ int wmain(int argc, wchar_t** argv) {
         HANDLE k = Spawn(L"--child-hold " + Q(game) + L" 3000 " + Q(ready));
         const bool up = k && WaitFile(ready);
         const std::string before = ReadText(SettingsPathOf(game));
-        DWORD err = 0;
-        const SetResult r = SetSettings(game, {{"rr_mode", "fast"}}, 200, &err);
-        check(up && r == SetResult::Busy && err == WAIT_TIMEOUT && ReadText(SettingsPathOf(game)) == before, "lock held elsewhere: Busy after the bounded wait, nothing written");
+        const SetOutcome r = SetSettings(game, {{"rr_mode", "fast"}}, 200);
+        check(up && r.result == SetResult::Busy && r.error == WAIT_TIMEOUT && ReadText(SettingsPathOf(game)) == before, "lock held elsewhere: Busy after the bounded wait, nothing written");
         if (k) WaitExit(k);
         DeleteFileW(ready.c_str());
     }
@@ -335,7 +359,7 @@ int wmain(int argc, wchar_t** argv) {
             std::wstring temp;
             for (auto& n : List(state)) if (IsTempName(n)) temp = n;
             check(!temp.empty(), "the half-written temporary file is there and named as a temporary file (never read as state)");
-            check(SetSettings(game, {{"counter", "8"}}) == SetResult::Ok && *Get(ReadSettings(game), "counter") == "8", "a write under the abandoned-then-taken lock works");
+            check(SetSettings(game, {{"counter", "8"}}).ok() && *Get(ReadSettings(game), "counter") == "8", "a write under the abandoned-then-taken lock works");
             if (!temp.empty()) DeleteFileW(JoinPath(state, temp).c_str());
         }
         if (keep) CloseHandle(keep);
@@ -350,7 +374,7 @@ int wmain(int argc, wchar_t** argv) {
         check(QueryGameUse(JoinPath(root, L"gone")) == GameUse::NotRunning, "a folder that does not exist: NotRunning (nothing can run from it)");
         {
             LoadedRegistration reg(game);
-            check(reg.ok() && QueryGameUse(aliases.back()) == GameUse::Running, "registered in this process: Running (asked through another alias)");
+            check(reg.marker() && reg.state_ok() && QueryGameUse(aliases.back()) == GameUse::Running, "registered in this process: Running (asked through another alias)");
         }
         check(QueryGameUse(game) == GameUse::NotRunning, "the registration ended: NotRunning");
         // a lookup error is Unknown, never NotRunning: an object of another type under the marker's name
@@ -398,7 +422,7 @@ int wmain(int argc, wchar_t** argv) {
         // a registered game in another process; then it crashes
         const std::wstring out = JoinPath(root, L"reg-1");
         HANDLE k = Spawn(L"--child-register " + Q(game) + L" 2000 " + Q(out));
-        const bool up = k && WaitFile(out) && ReadText(out).rfind("ok", 0) == 0;
+        const bool up = k && WaitFile(out) && ReadText(out).rfind("marker=1 state=1", 0) == 0;
         OperationGuard* g = new OperationGuard(game, 1000);
         check(up && QueryGameUse(game) == GameUse::Running && g->result() == GuardResult::GameRunning && std::string(g->words()).find("close the game") != std::string::npos,
               "a game registered in another process: Running, the guard refuses (GameRunning)");
@@ -413,39 +437,62 @@ int wmain(int argc, wchar_t** argv) {
         DeleteFileW(out.c_str());
     }
 
-    // ---- registration against a running operation: no slipping in between
+    // ---- a game that starts DURING an operation: its marker appears at once, the operation's Recheck sees it and stops; the
+    //      game gives up on state after its bounded registration (about 2 s) and stays visible to every later operation
     {
         const std::wstring out = JoinPath(root, L"reg-2");
-        ULONGLONG released = 0;
         HANDLE k = nullptr;
+        bool sawGame = false;
+        ULONGLONG seenAfter = 0;
         {
-            OperationGuard op(game, 1000);  // the launcher's operation starts (lock held, no game)
-            const bool ok = op.result() == GuardResult::Ok;
+            OperationGuard op(game, 1000);  // the launcher's operation starts (lock held, no game yet)
+            const bool ok = op.ok();
+            const ULONGLONG t0 = Now();
             k = Spawn(L"--child-register " + Q(game) + L" 2000 " + Q(out));  // the game starts during it
-            Sleep(800);
-            check(ok && !Exists(out) && QueryGameUse(game) == GameUse::NotRunning, "during the operation the starting game cannot register (it waits; nothing is loaded)");
-            released = Now();
-        }  // the operation ends: the lock is released
-        const bool got = k && WaitFile(out, 10000);
+            for (int i = 0; i < 150 && !sawGame; ++i) {  // the operation's steps: Recheck before each one
+                if (op.Recheck() == GuardResult::GameRunning) sawGame = true;
+                else Sleep(20);
+            }
+            seenAfter = Now() - t0;
+            check(ok && sawGame && !op.ok() && std::string(op.words()).find("close the game first") != std::string::npos,
+                  "a game starting mid-operation: its marker appears at once, the next Recheck says GameRunning (close the game first)");
+            // the operation keeps the lock (it stops cleanly): the game's registration runs out of budget on the lock, not on the marker
+            check(k && WaitFile(out, 10000), "the starting game finished its registration while the operation held the lock");
+        }  // the operation ends (stopped)
         const std::string r = ReadText(out);
-        check(got && r.rfind("ok", 0) == 0 && QueryGameUse(game) == GameUse::Running, "after the operation the game registers (it waited, bounded)");
-        check(released > 0 && std::strtoul(r.c_str() + 3, nullptr, 10) >= 500, "the registration came only after the operation released the lock");
+        const unsigned long ms = std::strtoul(r.c_str() + r.find("ms=") + 3, nullptr, 10);
+        check(r.rfind("marker=1 state=0", 0) == 0 && r.find("not free in time") != std::string::npos && ms >= 1500 && ms < 3000,
+              "that game: marker made, state given up after the bounded wait (about 2 s, never longer): defaults, no state this session");
+        check(seenAfter < 2000, "the marker was there before the game's lock wait ended (seen within its registration)");
+        {
+            OperationGuard later(game, 1000);
+            check(QueryGameUse(game) == GameUse::Running && later.result() == GuardResult::GameRunning,
+                  "after that operation the game is still visible: a later operation refuses too");
+        }
         if (k) { TerminateProcess(k, 9); WaitForSingleObject(k, 30000); CloseHandle(k); }
         DeleteFileW(out.c_str());
-        // a registration that cannot wait that long gives up in time and touches nothing
+        // a game whose registration starts while no operation runs gets marker and state at once
         const std::wstring out2 = JoinPath(root, L"reg-3");
-        HANDLE k2 = nullptr;
+        HANDLE k2 = Spawn(L"--child-register " + Q(game) + L" 2000 " + Q(out2));
+        const bool got2 = k2 && WaitFile(out2, 10000);
+        const std::string r2 = ReadText(out2);
+        check(got2 && r2.rfind("marker=1 state=1", 0) == 0 && std::strtoul(r2.c_str() + r2.find("ms=") + 3, nullptr, 10) < 1500,
+              "no operation running: marker and state at once, well inside the budget");
+        if (k2) { TerminateProcess(k2, 9); WaitForSingleObject(k2, 30000); CloseHandle(k2); }
+        DeleteFileW(out2.c_str());
+        // the budget bounds the whole registration: a budget of 300 ms while an operation runs ends within it
+        const std::wstring out3 = JoinPath(root, L"reg-4");
         {
             OperationGuard op(game, 1000);
-            k2 = Spawn(L"--child-register " + Q(game) + L" 300 " + Q(out2));
-            const bool got2 = k2 && WaitFile(out2, 10000);
-            const std::string r2 = ReadText(out2);
-            check(op.result() == GuardResult::Ok && got2 && r2.rfind("no", 0) == 0 && r2.find("not free in time") != std::string::npos &&
-                      std::strtoul(r2.c_str() + 3, nullptr, 10) < 1500 && QueryGameUse(game) == GameUse::NotRunning,
-                  "a registration while an operation runs gives up after its bounded wait: no marker, defaults, nothing blocked");
+            HANDLE k3 = Spawn(L"--child-register " + Q(game) + L" 300 " + Q(out3));
+            const bool got3 = k3 && WaitFile(out3, 10000);
+            const std::string r3 = ReadText(out3);
+            check(op.ok() && got3 && r3.rfind("marker=1 state=0", 0) == 0 && std::strtoul(r3.c_str() + r3.find("ms=") + 3, nullptr, 10) < 1000,
+                  "a 300 ms registration budget while an operation runs: done within it (marker, no state)");
+            if (k3) { TerminateProcess(k3, 9); WaitForSingleObject(k3, 30000); CloseHandle(k3); }
         }
-        if (k2) WaitExit(k2);
-        DeleteFileW(out2.c_str());
+        DeleteFileW(out3.c_str());
+        check(QueryGameUse(game) == GameUse::NotRunning, "every game ended: NotRunning");
     }
 
     // cleanup (own files only)
