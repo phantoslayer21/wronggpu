@@ -6,11 +6,12 @@
 // model runs, on every route; wronggpu.ini's model item is the install's default, which no WrongGPU program rewrites
 // after the install and which only seeds the record of a game that has none (the upgrade below). Three places write the
 // record, each only for an EVENT, a choice the player made:
-//  - the launcher, when it applies a model (`WrongGPU.exe set <game> model=<m>`, or a change of the model item); it then
-//    sets OptiScaler's UpscalerIndex to that model's entry, for display only;
+//  - the launcher, when the player applies a model (the launcher's Apply, or `WrongGPU.exe set <game> model=<m>`: always,
+//    also the same model again); it then sets OptiScaler's UpscalerIndex to that model's entry, for display only (and it
+//    seeds the record of a game without one from its profile);
 //  - the front end, when OptiScaler tells it that the player selected one of WrongGPU's entries in its upscaler list
-//    during the session (the WrongGPU edition of OptiScaler calls WrongGpuHostSelectedV1 in the front-end DLL); the
-//    stored index OptiScaler passes at a create is never taken for a choice;
+//    (the WrongGPU edition of OptiScaler calls WrongGpuHostSelectedV1 in the front-end DLL); the stored index OptiScaler
+//    passes at a create is never taken for a choice;
 //  - the WrongGPU menu plugin (clean/fsr/asi), when the player clicks one of its model entries.
 // "Most recent" is the highest sequence number. Every read-modify-write (read, seq + 1, write) runs under the game's
 // state lock (wgstate::StateLock, one named mutex per game folder, shared by every WrongGPU program and by settings.ini's
