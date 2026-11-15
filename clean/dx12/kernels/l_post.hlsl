@@ -31,8 +31,7 @@
 // gives 0), the reduced codes rint(clamp(mean, 0, 1) 1023).
 //
 // @wg-kernel l_post_recon co=l_post.co block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p
-// @wg-kernel l_post_recon_p12 co=l_post.co entry=l_post_recon_p12 block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1,LP_ENCFOLD=1 needs=fold isa=v_fma_mixlo_f16@3dddf184+v_fma_mixhi_f16@3dddf184==6,s_round_mode==0
-// @wg-kernel l_post_recon_p12 co=l_post.co entry=l_post_recon_p12 file=l_post_recon_p12__nofold block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1 needs=nofold
+// @wg-kernel l_post_recon_p12 co=l_post.co entry=l_post_recon_p12 block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1
 // @wg-kernel l_post_recon_ldr co=l_post.co entry=l_post_recon_ldr block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_LDR=1
 // @wg-kernel l_post_recon_p12_ldr co=l_post.co entry=l_post_recon_p12_ldr block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1,LP_LDR=1
 #include "wg_platform.hlsli"
@@ -50,7 +49,6 @@ WG_ARGS_BEGIN
     uint expo;
 WG_ARGS_END
 
-#include "l_post_encode.hlsli"   // kEncK and the history encode through the driver's conversion fold
 #define kThreads 256
 #define kTileX 32
 #define kTilePairs 8
@@ -58,6 +56,7 @@ WG_ARGS_END
 #define kLWin 4
 #define kTexDw 6   // staged texel: f0 f1 | f2 f3 | f4 f5 | f6 f7 | f8 kA | kB kC (FP16 bits)
 
+static const float kEncK = asfloat(0x3dddf184u);        // 0.36f * 0.30102999566398120f
 static const float kDecK = asfloat(0x4113a428u);        // 3.32192809488736235f / 0.36f
 static const float kDecLn = asfloat(0x40ccac9au);       // 2.30258509299404568f / 0.36f
 static const float kDecPolyMax = asfloat(0x3d60233du);  // 0.35f / kDecLn
@@ -84,13 +83,10 @@ float opq(float x) { return asfloat(asuint(x) ^ g_z); }
 half opqh(half x) { return asfloat16((uint16_t)(asuint16(x) ^ (uint16_t)g_z)); }
 float mul_nz(float a, float b) { return mad(a, b, asfloat(g_z | 0x80000000u)); }
 #ifndef LP_MUT
-#define LP_MUT 0   // 1..9: negative controls of the byte checks (never shipped)
+#define LP_MUT 0   // 1, 2, 4 ... 9: negative controls of the byte checks (never shipped)
 #endif
 #ifndef LP_DP
 #define LP_DP 1
-#endif
-#ifndef LP_ENCFOLD
-#define LP_ENCFOLD 0   // 1 (l_post_recon_p12's fold port): the history encode through the driver's conversion fold
 #endif
 #ifndef LP_FMANZ
 #define LP_FMANZ 1
@@ -593,14 +589,6 @@ WG_KERNEL(l_post_recon)
         if (second) g = g1;
         float hh[3], oo[3];
         finish_pixel(g, x, y0 + row, px, second ? py1 : py0, s, hh, oo);
-#if !LP_LDR && LP_ENCFOLD
-        float xe[3], de[3];
-        [unroll] for (int ce = 0; ce < 3; ++ce) {
-            xe[ce] = enc_log(hh[ce]);
-            de[ce] = opq(clampf(enc_e(oo[ce]), 0.0f, kDisplayMax));
-        }
-        const uint4 hc = lp_encode_fold(xe[0], xe[1], xe[2], de[0], de[1], de[2], g_z);
-#else
         v8f cv;
         [unroll] for (int ci = 0; ci < 3; ++ci) {
 #if LP_LDR
@@ -618,19 +606,14 @@ WG_KERNEL(l_post_recon)
         cv.v[6] = 0.0f;
         cv.v[7] = 0.0f;
         const uint4 hc = wg_to_f16_ags(cv);
-#endif
         const int y = y0 + row;
         if (and(active, or(!second, has1))) {
 #if LP_LDR
             const uint q0 = hc.x & 0xffffu, q1 = hc.x >> 16, q2 = hc.y & 0xffffu;
 #else
-#if LP_ENCFOLD
-            const uint q0 = hc.x & 0xffffu, q1 = hc.x >> 16, q2 = hc.y & 0xffffu;   // the fold's +0 addend gives +0
-#else
             const uint q0 = mul_zero(kEncK, enc_log(hh[0])) ? 0u : (hc.x & 0xffffu);
             const uint q1 = mul_zero(kEncK, enc_log(hh[1])) ? 0u : (hc.x >> 16);
             const uint q2 = mul_zero(kEncK, enc_log(hh[2])) ? 0u : (hc.y & 0xffffu);
-#endif
 #endif
             wg_st64(hist_out, (uint)(y * P_dw + x) * 8u, uint2(q0 | (q1 << 16), q2));
             const int di = y * pitch + x;

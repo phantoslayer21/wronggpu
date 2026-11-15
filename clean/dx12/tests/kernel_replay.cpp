@@ -591,7 +591,6 @@ int main(int argc, char** argv) {
   auto d = make_d3d12_device(argv[1], &err);
   if (!d) { std::printf("device: %s\n", err.c_str()); return 1; }
   std::printf("device: %s\n", d->name().c_str());
-  if (!d->note().empty()) std::printf("device note: %s\n", d->note().c_str());   // e.g. the conversion-fold guard
   std::ifstream f(argv[2]);
   if (!f) { std::printf("cannot read %s\n", argv[2]); return 2; }
   const std::string base = dir_of(argv[2]);

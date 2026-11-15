@@ -10,8 +10,7 @@ D3D12 against HIP byte for byte, HIP against the oracle, with a counter that pro
 first dword after the full history); <dir>/mut8 (counter + LP_MUT=8: the fast path's predicate always false) and
 <dir>/mut9 (LP_MUT=9: the predicate without its size guard, the bug of images narrower or shorter than 4).
 --run (GPU, one GPU slot). The kernels l_post_recon, l_post_recon_p12, l_post_recon_ldr and l_post_recon_p12_ldr (the
-history sample, history_cr, is shared by all four), and l_post_recon_p12 again with the no-fold port
-(WG_TEST_FOLD_PROBE_FAIL=1), on every size of SIZES (1 x 1 ... 97 x 35: below 4, odd, a tile's interior boundary in the
+history sample, history_cr, is shared by all four), on every size of SIZES (1 x 1 ... 97 x 35: below 4, odd, a tile's interior boundary in the
 middle of a wave) and every kind of KINDS, with a valid history (no reset):
 - random: Model M's random inputs (random motions around a random base);
 - center / left / right / top / bottom: every motion points at one history position: the centre, or just inside
@@ -21,6 +20,9 @@ middle of a wave) and every kind of KINDS, with a valid history (no reset):
 - split: even columns point inside, odd columns at an edge (every wave mixes both); split_half: in each 32-column
   tile the first 16 columns (half the width when narrower) inside, the rest at an edge (the boundary in the middle of
   a wave).
+Every replay leg (the shipped ports, hscount, mut8, mut9) starts from an emptied output folder and counts only when
+kernel_replay exits 0 and every case wrote every output at its full size; otherwise the leg is invalid and every check
+that uses it fails (a failed mutant run is never taken as caught).
 Checks:
 - raw bytes, D3D12 == HIP, every output (full history, reduced, display; the l_d3d12_ops_check rules: each back end's
   own sentinel, the pitch padding and 64 slack bytes untouched), and the full history per edge band (the two columns
@@ -180,11 +182,10 @@ def cases(kernel, rng):
 
 def prepare(build, rocm):
     C32.compile_kernels(build, rocm)
-    names = KERNELS + ["l_fold_probe", "native_fill"]
+    names = KERNELS + ["native_fill"]
     prepare_replay(build, rocm, names)
     from clean.runner.hip import hip_child_environment
     env, _ = hip_child_environment(rocm_dir=rocm)
-    env = dict(env, WG_DX12_ISA_CHECK="0")   # test variants: the ISA rules are the shipped ports' (checked above)
     for tag, defs in VARIANTS.items():
         cmd = [sys.executable, os.path.join(ROOT, "clean", "dx12", "build_dx12.py"), "--out", os.path.join(build, tag),
                "--only", ",".join(names), "-j", "1"]
@@ -205,12 +206,19 @@ def replay(build_dir, exe, cdir, lines, env_extra=None):
     env = {k: v for k, v in os.environ.items()
            if not any(s in k.upper() for s in ("HIP", "LLVM", "ROCM", "HSA")) or k.upper() in ("HIP_PLATFORM",)}
     env["WG_D3D12_ARENA_MB"] = "512"
-    env.pop("WG_TEST_FOLD_PROBE_FAIL", None)
     env.update(env_extra or {})
     r = subprocess.run([exe, build_dir, os.path.join(cdir, "cases.txt")], env=env, capture_output=True, text=True,
                        timeout=150, creationflags=0x08000000)
-    note = [ln for ln in r.stdout.splitlines() if ln.startswith("device note:")]
-    return {"exit": r.returncode, "note": note[0] if note else "", "tail": r.stdout[-400:] + r.stderr[-200:]}
+    return {"exit": r.returncode, "tail": r.stdout[-400:] + r.stderr[-200:]}
+
+
+def empty_dir(d):
+    """The leg's output folder, emptied of the files of an earlier run (files only, this folder only)."""
+    os.makedirs(d, exist_ok=True)
+    for f in os.listdir(d):
+        p = os.path.join(d, f)
+        if os.path.isfile(p):
+            os.remove(p)
 
 
 def compare_case(cdir, name, case, wants, counter=False):
@@ -218,11 +226,12 @@ def compare_case(cdir, name, case, wants, counter=False):
     dword after the full history holds the counter (excluded from the slack rule, returned)."""
     dw, dh = case["dw"], case["dh"]
     n_hist = dw * dh * 8
-    res = {"case": name, "label": case["label"], "outputs": []}
+    res = {"case": name, "label": case["label"], "outputs": [], "complete": True}
     count = None
     for oi, want in enumerate(wants):
         path = os.path.join(cdir, f"{name}.o{oi}")
         got = open(path, "rb").read() if os.path.exists(path) else b""
+        res["complete"] = res["complete"] and len(got) == len(want)
         dmask = case["defined"][oi].copy()
         if counter and oi == 0 and len(got) == len(want):
             count = int(np.frombuffer(got[n_hist:n_hist + 4], np.uint32)[0]) - 0x5A5A5A5A
@@ -268,13 +277,12 @@ def run(build, rocm, part="all"):
     res = {"sizes": SIZES, "kinds": KINDS, "part": part, "legs": {}}
     cdir_base = os.path.join(build, "replay-edge")
     for leg, bdir, env_extra, counter in () if part == "oracle" else (("d3d12", build, None, False),
-                                          ("d3d12_nofold", build, {"WG_TEST_FOLD_PROBE_FAIL": "1"}, False),
                                           ("hscount", os.path.join(build, "hscount"), None, True),
                                           ("mut8", os.path.join(build, "mut8"), None, True),
                                           ("mut9", os.path.join(build, "mut9"), None, False)):
         cdir = os.path.join(cdir_base, leg)
-        os.makedirs(cdir, exist_ok=True)
-        names = [n for n in allc if leg != "d3d12_nofold" or allc[n]["kernel"] == "l_post_recon_p12"]
+        empty_dir(cdir)
+        names = list(allc)
         lines = []
         for n in names:
             lines += OPS.replay_lines(n, allc[n], cdir)
@@ -283,7 +291,9 @@ def run(build, rocm, part="all"):
                 lines += OPS.replay_lines(n, allc[n], cdir, grid=allc[n]["grid"] // 2, prefix="negative_")
         r = replay(bdir, exe, cdir, lines, env_extra)
         out = [compare_case(cdir, n, allc[n], hip_out[n], counter) for n in names]
-        leg_res = {"replay_exit": r["exit"], "device_note": r["note"], "replay_tail": r["tail"], "cases": len(out),
+        complete = sum(c["complete"] for c in out)
+        leg_res = {"replay_exit": r["exit"], "complete_cases": complete, "valid": r["exit"] == 0 and complete == len(out),
+                   "replay_tail": r["tail"], "cases": len(out),
                    "identical": sum(c["identical"] for c in out),
                    "edges": {k: {"pixels": sum(c["outputs"][0].get("edges", {}).get(k, {}).get("pixels", 0) for c in out),
                                  "differ": sum(c["outputs"][0].get("edges", {}).get(k, {}).get("differ", 0) for c in out)}
@@ -305,7 +315,9 @@ def run(build, rocm, part="all"):
             wants = hip_out[neg]
             got = [open(os.path.join(cdir, f"negative_{neg}.o{oi}"), "rb").read()
                    if os.path.exists(os.path.join(cdir, f"negative_{neg}.o{oi}")) else b"" for oi in range(len(wants))]
-            leg_res["negative_control"] = {"case": neg, "half_grid": True, "caught": got != list(wants)}
+            full = all(len(gv) == len(wv) for gv, wv in zip(got, wants))
+            leg_res["negative_control"] = {"case": neg, "half_grid": True, "complete": full,
+                                           "caught": full and got != list(wants)}
         res["legs"][leg] = leg_res
     # the oracle: HIP's l_post_recon / l_post_recon_ldr against Model L's reconstruction on every case's inputs
     # (cases under 100 pixels: Model L's post acceptance over all of them together, where one value is not 1 %)
@@ -334,14 +346,12 @@ def run(build, rocm, part="all"):
     checks = {}
     if part != "oracle":
         checks.update({
-            "d3d12_identical": L["d3d12"]["identical"] == L["d3d12"]["cases"] and L["d3d12"]["replay_exit"] == 0,
-            "fold_port_selected": "passed: the fold ports run" in L["d3d12"]["device_note"],
-            "nofold_identical": L["d3d12_nofold"]["identical"] == L["d3d12_nofold"]["cases"],
-            "nofold_port_selected": "the no-fold ports run" in L["d3d12_nofold"]["device_note"],
-            "hscount_identical": L["hscount"]["identical"] == L["hscount"]["cases"],
-            "hscount_counter_ok": L["hscount"]["counter"]["expectation_failures"] == 0,
-            "mut8_caught": L["mut8"]["counter"]["expectation_failures"] > 0,
-            "mut9_caught": L["mut9"]["identical"] < L["mut9"]["cases"],
+            "legs_valid": all(v["valid"] for v in L.values()),
+            "d3d12_identical": L["d3d12"]["valid"] and L["d3d12"]["identical"] == L["d3d12"]["cases"],
+            "hscount_identical": L["hscount"]["valid"] and L["hscount"]["identical"] == L["hscount"]["cases"],
+            "hscount_counter_ok": L["hscount"]["valid"] and L["hscount"]["counter"]["expectation_failures"] == 0,
+            "mut8_caught": L["mut8"]["valid"] and L["mut8"]["counter"]["expectation_failures"] > 0,
+            "mut9_caught": L["mut9"]["valid"] and L["mut9"]["identical"] < L["mut9"]["cases"],
             "negative_control_caught": bool(L["d3d12"].get("negative_control", {}).get("caught"))})
     if part != "replay":
         checks["oracle_pass"] = (res["oracle"]["passed"] == res["oracle"]["cases"] and pooled["history"]["pass"] and
