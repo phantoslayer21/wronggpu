@@ -53,6 +53,7 @@ WG_FN u32 wg_block_id() { return wg_emu::block_id(); }
 WG_FN v8f wg_wmma_fp8(v2i a, v2i b, v8f c) { return wg_emu::wmma_fp8(a, b, c); }
 WG_FN v8f wg_wmma_f16(v8h a, v8h b, v8f c) { return wg_emu::wmma_f16(a, b, c); }
 WG_FN float wg_xor16(float v) { return wg_emu::xor16(v); }
+WG_FN u32 wg_xchg16_u(u32 v) { return __builtin_bit_cast(u32, wg_emu::xor16(__builtin_bit_cast(float, v))); }
 WG_FN float wg_emu_xor(float v, u32 mask) { return wg_emu::xor_lanes(v, mask); }
 WG_FN void wg_barrier() { wg_emu::barrier(); }
 WG_FN void wg_barrier_lds() { wg_emu::barrier(); }

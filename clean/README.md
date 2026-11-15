@@ -147,7 +147,7 @@ python clean/runner/build.py --arch gfx1100 --rocm <ROCm> --out build-gfx1100 --
 
 Targets are matched by exact name (`runner/family.py`): gfx1200 and gfx1201 are gfx12, gfx1100 and gfx1101 are gfx11,
 anything else is refused. A gfx11 build compiles only the kernels that need no matrix instructions (`FAMILY_SOURCES` in
-`build.py`: post, exposure, frame) and no runtime library, Model K or L kernels, variants or resource gate; `--sources`
+`build.py`: post, exposure, frame, probe) and no runtime library, Model K or L kernels, variants or resource gate; `--sources`
 builds a chosen list for either family. Both write `target.json` next to the code objects, and `Runner` takes its default
 accumulator row table from it (`WG_D_ROW` and the `d_row` argument still win).
 

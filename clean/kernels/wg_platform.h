@@ -20,8 +20,18 @@ typedef int v2i __attribute__((ext_vector_type(2)));
 typedef _Float16 v2h __attribute__((ext_vector_type(2)));
 typedef u32 v4u __attribute__((ext_vector_type(4)));
 
-#define WG_WAVE 32    // gfx12 kernels run in wave32
+#define WG_WAVE 32    // gfx12 and gfx11 kernels run in wave32
 #define WG_BLOCK 128  // default workgroup size (4 waves); the Swin block kernels use 256
+
+// gfx11 (RDNA 3): exact target names only. LLVM files gfx1170-1172 under gfx11, but they have the gfx12 matrix design.
+// There is no FP8 conversion or matrix instruction (software conversions), the F16 matrix instruction takes 16 K values
+// per lane with both halves of the wave alike, and the other half of the wave is read with v_permlanex16.
+#if defined(__gfx1100__) || defined(__gfx1101__)
+#define WG_GFX11 1
+#ifndef WG_SOFT_FP8
+#define WG_SOFT_FP8 1
+#endif
+#endif
 
 #if defined(__AMDGCN__)
 
@@ -44,6 +54,20 @@ typedef u32 v4u __attribute__((ext_vector_type(4)));
 WG_FN u32 wg_lane_id() { return __builtin_amdgcn_workitem_id_x(); }
 WG_FN u32 wg_block_id() { return __builtin_amdgcn_workgroup_id_x(); }
 
+#if defined(WG_GFX11)
+// gfx11 has no FP8 matrix instruction, and its F16 one has another operand layout than the gfx12 one: a call that
+// survives to code generation is an error (a wrapper for gfx11 is a separate step).
+__attribute__((device)) v8f wg_wmma_fp8(v2i a, v2i b, v8f c)
+    __attribute__((error("wg_wmma_fp8: no FP8 matrix instruction on gfx11 (RDNA 3)")));
+__attribute__((device)) v8f wg_wmma_f16(v8h a, v8h b, v8f c)
+    __attribute__((error("wg_wmma_f16: the gfx12 F16 matrix operand layout is not available on gfx11 (RDNA 3)")));
+
+// The 32-bit value of the same variable in lane (lane ^ 16), i.e. the other half of the wave: one v_permlanex16_b32,
+// which reads the other 16-lane row of the same 32 lanes; selectors 0x76543210 / 0xfedcba98 take its lane i for lane i.
+// fi: a lane of the other half that is not executing is read as well, as ds_bpermute does.
+WG_FN u32 wg_xchg16_u(u32 v) { return __builtin_amdgcn_permlanex16(v, v, 0x76543210u, 0xfedcba98u, true, false); }
+WG_FN float wg_xor16(float v) { return __builtin_bit_cast(float, wg_xchg16_u(__builtin_bit_cast(u32, v))); }
+#else
 // D = A x B + C, 16x16x16, FP8 E4M3 inputs, FP32 accumulate (v_wmma_f32_16x16x16_fp8_fp8).
 WG_FN v8f wg_wmma_fp8(v2i a, v2i b, v8f c) { return __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a, b, c); }
 // D = A x B + C, 16x16x16, FP16 inputs, FP32 accumulate (v_wmma_f32_16x16x16_f16).
@@ -54,6 +78,9 @@ WG_FN float wg_xor16(float v) {
   return __builtin_bit_cast(float, __builtin_amdgcn_ds_bpermute((int)((wg_lane_id() ^ 16u) << 2),
                                                                  __builtin_bit_cast(int, v)));
 }
+// The same for a 32-bit word.
+WG_FN u32 wg_xchg16_u(u32 v) { return (u32)__builtin_amdgcn_ds_bpermute((int)((wg_lane_id() ^ 16u) << 2), (int)v); }
+#endif
 
 // Workgroup barrier with LDS visibility (release before, acquire after).
 WG_FN void wg_barrier() {
@@ -252,7 +279,20 @@ WG_FN v8f wg_load8f(const float* p) {
 // The global 100 MHz realtime clock (one tick = 10 ns), the hardware id of the SIMD a wave runs on, a drain of all
 // outstanding loads / LDS operations / stores, and a use of a vector value in a scalar register (forces the producer,
 // e.g. a WMMA, to be complete). s_memtime and the shader-cycles register do not exist on gfx12 in this toolchain.
-#if defined(__AMDGCN__)
+#if defined(__AMDGCN__) && defined(WG_GFX11)
+// The counters of an instrumented (WG_PROFILE) build use gfx12 instructions (s_wait_kmcnt, hwreg 29, ...).
+#define WG_NO_GFX11_PROFILE(name) \
+  __attribute__((device)) name __attribute__((error("WG_PROFILE timing counters are gfx12 only (not gfx11 / RDNA 3)")))
+WG_NO_GFX11_PROFILE(u64 wg_realtime());
+WG_NO_GFX11_PROFILE(u32 wg_cycles());
+WG_NO_GFX11_PROFILE(u32 wg_hwid());
+WG_NO_GFX11_PROFILE(void wg_drain());
+WG_FN int wg_uniform(int v) { return __builtin_amdgcn_readfirstlane(v); }
+WG_FN void wg_sync_i(int v) {
+  const int s = __builtin_amdgcn_readfirstlane(v);
+  __asm__ volatile("" : : "s"(s) : "memory");
+}
+#elif defined(__AMDGCN__)
 WG_FN u64 wg_realtime() {
   u64 t;
   __asm__ volatile("s_sendmsg_rtn_b64 %0, sendmsg(MSG_RTN_GET_REALTIME)\n\ts_wait_kmcnt 0x0" : "=s"(t) : : "memory");
@@ -288,7 +328,10 @@ WG_FN void wg_sync(int v) { wg_sync_i(v); }
 WG_FN void wg_sync(v8f v) { wg_sync(v[0]); }
 
 // ---- FP8 dot product on the vector ALU (WG_NORM_DOT4): c + sum of 4 products of FP8 bytes, accumulated in FP32 ----
-#if defined(__AMDGCN__)
+#if defined(__AMDGCN__) && defined(WG_GFX11)
+__attribute__((device)) float wg_dot4_fp8(int a, int b, float c)
+    __attribute__((error("WG_NORM_DOT4 needs v_dot4_f32_fp8_fp8, which gfx11 (RDNA 3) does not have")));
+#elif defined(__AMDGCN__)
 WG_FN float wg_dot4_fp8(int a, int b, float c) {
   float r;
   __asm__("v_dot4_f32_fp8_fp8 %0, %1, %2, %3" : "=v"(r) : "v"(a), "v"(b), "v"(c));

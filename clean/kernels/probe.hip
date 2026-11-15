@@ -4,7 +4,9 @@
 // conversions versus the software ones in wg_platform.h, and the FP8 pack/unpack functions the kernels use).
 #include "wg_platform.h"
 
-// One WMMA per wave on raw per-lane registers: d[i] = WMMA(a[i], b[i], 0), i = global lane index.
+// One WMMA per wave on raw per-lane registers: d[i] = WMMA(a[i], b[i], 0), i = global lane index. (Not on gfx11:
+// no FP8 matrix instruction, and the F16 operand layout of the wrapper is gfx12's.)
+#if !defined(WG_GFX11)
 WG_KERNEL(probe_wmma_fp8)(const v2i* a, const v2i* b, v8f* d) {
   const u32 i = wg_block_id() * WG_BLOCK + wg_lane_id();
   v8f z = {};
@@ -16,6 +18,19 @@ WG_KERNEL(probe_wmma_f16)(const v8h* a, const v8h* b, v8f* d) {
   v8f z = {};
   d[i] = wg_wmma_f16(a[i], b[i], z);
 }
+#endif
+
+// The half-wave exchange: word[i] = wg_xchg16_u(x[i]), flt[i] = wg_xor16 of the same bits as a float. Both must give the
+// value x of lane (i ^ 16), i = global lane index (the workgroup size is a multiple of the wave size). Only where the
+// exchange is new (gfx11, the emulator): the gfx12 probe code object stays byte for byte what it was.
+#if defined(WG_GFX11) || defined(WG_EMU)
+WG_KERNEL(probe_xchg16)(const u32* x, u32* word, u32* flt) {
+  const u32 i = wg_block_id() * WG_BLOCK + wg_lane_id();
+  const u32 v = x[i];
+  word[i] = wg_xchg16_u(v);
+  flt[i] = __builtin_bit_cast(u32, wg_xor16(__builtin_bit_cast(float, v)));
+}
+#endif
 
 // Software FP8 conversions of wg_platform.h: enc[i] = code of x[i]; dec[c] = value of code c (c < 256).
 WG_KERNEL(probe_fp8_sw)(const float* x, u32* enc, float* dec, int n) {
@@ -24,11 +39,11 @@ WG_KERNEL(probe_fp8_sw)(const float* x, u32* enc, float* dec, int n) {
   if (i < 256u) dec[i] = wg_e4m3_to_f32(i);
 }
 
-// Hardware conversions (v_cvt_pk_fp8_f32, v_cvt_f32_fp8): enc[i] = raw hardware code of x[i];
+// Hardware conversions (v_cvt_pk_fp8_f32, v_cvt_f32_fp8; gfx12 only): enc[i] = raw hardware code of x[i];
 // enc_sat[i] = hardware code of x[i] clamped to [-448, 448] first; dec[c] = hardware value of code c.
 WG_KERNEL(probe_fp8_hw)(const float* x, u32* enc, u32* enc_sat, float* dec, int n) {
   const u32 i = wg_block_id() * WG_BLOCK + wg_lane_id();
-#if defined(__AMDGCN__)
+#if defined(__AMDGCN__) && !defined(WG_GFX11)
   if ((int)i < n) {
     const float v = x[i];
     enc[i] = (u32)__builtin_amdgcn_cvt_pk_fp8_f32(v, 0.0f, 0, false) & 0xffu;
@@ -37,7 +52,7 @@ WG_KERNEL(probe_fp8_hw)(const float* x, u32* enc, u32* enc_sat, float* dec, int 
   }
   if (i < 256u) dec[i] = __builtin_amdgcn_cvt_f32_fp8((int)i, 0);
 #else
-  if ((int)i < n) enc[i] = enc_sat[i] = 0xffffffffu;  // not available in the emulator
+  if ((int)i < n) enc[i] = enc_sat[i] = 0xffffffffu;  // not available in the emulator or on gfx11
   if (i < 256u) dec[i] = 0.0f;
 #endif
 }
@@ -63,6 +78,7 @@ WG_KERNEL(probe_gelu)(const float* x, float* y, int n) {
 #if defined(WG_EMU)
 WG_EMU_REGISTER(probe_wmma_fp8)
 WG_EMU_REGISTER(probe_wmma_f16)
+WG_EMU_REGISTER(probe_xchg16)
 WG_EMU_REGISTER(probe_fp8_sw)
 WG_EMU_REGISTER(probe_fp8_hw)
 WG_EMU_REGISTER(probe_fp8_pack)

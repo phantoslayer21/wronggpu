@@ -16,6 +16,10 @@ Prints a short report (numbers and pass/fail only). What it checks:
   3b. The kernels' GELU (default: fitted sigmoid form): equal to its own formula within 1e-4, within 1e-3 of the exact
       GELU, and no result more than one FP8 step away from the exact GELU after FP8 rounding.
   4. Informational: hardware FP8 conversions (v_cvt_pk_fp8_f32 / v_cvt_f32_fp8) against the reference.
+  4b. gfx11 builds and the emulator: the half-wave exchange (wg_xor16 and its 32-bit word form): lane l gets the value of
+      lane l ^ 16, bit for bit.
+  On a gfx11 build (target.json) the matrix probes (1, 2) and the hardware conversions (4) are skipped: the target has
+  no FP8 matrix or conversion instructions, and the conversions of item 3 are the software ones, as in every gfx11 kernel.
   5. If the second design was built (build.py --variants v2 or all: swin__v2.co), its conversion helpers
      (probe_v2_conv): packed FP8 decoding (v_cvt_pk_f32_fp8) in every byte position, the FP8 packing with full and
      upper-only clamp, its FP16 conversion (v_fma_mixlo/hi_f16, must equal round-to-nearest-even), and its GELU + q8
@@ -35,6 +39,7 @@ import ctypes  # noqa: E402
 import numpy as np  # noqa: E402
 
 from clean.reference.fp8 import DECODE, fp8_encode, q8  # noqa: E402
+from clean.runner import family  # noqa: E402
 from clean.runner.packing import D_ROW_LAYOUTS  # noqa: E402
 
 BLOCK = 128
@@ -164,7 +169,35 @@ def probe_wmma(dev, kind):
     return res
 
 
-def probe_fp8(dev, backend):
+def probe_xchg16(dev):
+    """wg_xchg16_u and wg_xor16: lane l gets the 32-bit value of lane l ^ 16 of its own wave, bit for bit. The table
+    comes from lane indices as values; random patterns (NaN payloads, signed zero) show that the float form keeps bits."""
+    n = 4 * BLOCK
+    rng = np.random.default_rng(3)
+    x = rng.integers(0, 2 ** 32, n, dtype=np.uint32)
+    x[::7] = 0x7FA00001   # signalling NaN
+    x[3::11] = 0xFFFFFFFF
+    x[5::13] = 0x80000000
+    idx = np.arange(n, dtype=np.uint32)
+
+    def exchange(values):
+        word, flt = dev.call("probe_xchg16", [values.tobytes()], [4 * n, 4 * n], threads=n)
+        return np.frombuffer(word, np.uint32), np.frombuffer(flt, np.uint32)
+
+    def partner(values):   # lane l of each wave reads lane l ^ 16
+        return values.reshape(-1, 2, 16)[:, ::-1, :].reshape(-1)
+
+    t_word, t_flt = exchange(idx)
+    word, flt = exchange(x)
+    res = {"lanes": n, "table_word": [int(v) for v in t_word[:32]], "table_float": [int(v) for v in t_flt[:32]],
+           "word_mismatches": int(np.sum(word != partner(x))), "float_mismatches": int(np.sum(flt != partner(x))),
+           "table_mismatches": int(np.sum(t_word != partner(idx))) + int(np.sum(t_flt != partner(idx))),
+           "lanes_that_kept_their_own_value": int(np.sum(t_word == idx))}
+    res["pass"] = bool(res["word_mismatches"] == 0 and res["float_mismatches"] == 0 and res["table_mismatches"] == 0)
+    return res
+
+
+def probe_fp8(dev, backend, hardware=True):
     edge = [0.0, -0.0, 448.0, 449.0, 463.9, 464.0, 465.0, 500.0, 1e6, np.inf, -np.inf, np.nan, 2.0 ** -9,
             2.0 ** -10, 3 * 2.0 ** -11, 2.0 ** -6, 2.0 ** -6 * 1.0625, 2.0 ** -7 * 1.5, 1.0625, 1.1875, 240.0, 256.0]
     mids = [(DECODE[i] + DECODE[i + 1]) / 2 for i in range(0x7E)]
@@ -181,7 +214,7 @@ def probe_fp8(dev, backend):
     sw_dec_mismatch = int(np.sum(~((dec == ref_dec) | (np.isnan(dec) & np.isnan(ref_dec)))))
     res = {"sw_encode_mismatches": sw_enc_mismatch, "sw_decode_mismatches": sw_dec_mismatch, "values": n,
            "pass": sw_enc_mismatch == 0 and sw_dec_mismatch == 0}
-    if backend == "hip":
+    if backend == "hip" and hardware:
         e, es, hd = dev.call("probe_fp8_hw", [xs.tobytes()], [4 * n, 4 * n, 4 * 256], scalars=[n],
                              threads=max(n, 256))
         e, es, hd = (np.frombuffer(e, np.uint32), np.frombuffer(es, np.uint32), np.frombuffer(hd, np.float32))
@@ -290,14 +323,20 @@ def probe_v2(dev):
 
 def selftest(build_dir, rocm_dir="", backend="hip"):
     dev = _Dev(backend, build_dir, rocm_dir)
-    report = {"device": dev.dev.device_name}
-    report["wmma_fp8"] = probe_wmma(dev, "fp8")
-    report["wmma_f16"] = probe_wmma(dev, "f16")
-    report["fp8_conversion"] = probe_fp8(dev, backend)
-    d8, d16 = report["wmma_fp8"]["d_row"], report["wmma_f16"]["d_row"]
-    report["d_row_consistent_fp8_f16"] = d8 is not None and d8 == d16
-    report["pass"] = bool(report["wmma_fp8"]["pass"] and report["wmma_f16"]["pass"] and
-                          report["fp8_conversion"]["pass"] and report["d_row_consistent_fp8_f16"])
+    gfx11 = backend == "hip" and family.build_family(build_dir) == "gfx11"   # no FP8 matrix or conversion instructions
+    report = {"device": dev.dev.device_name, "family": "gfx11" if gfx11 else "gfx12"}
+    report["fp8_conversion"] = probe_fp8(dev, backend, hardware=not gfx11)
+    report["pass"] = bool(report["fp8_conversion"]["pass"])
+    if gfx11 or backend == "emu":   # probe.hip has the exchange probe only there (the gfx12 code object is unchanged)
+        report["exchange"] = probe_xchg16(dev)
+        report["pass"] = bool(report["pass"] and report["exchange"]["pass"])
+    if not gfx11:
+        report["wmma_fp8"] = probe_wmma(dev, "fp8")
+        report["wmma_f16"] = probe_wmma(dev, "f16")
+        d8, d16 = report["wmma_fp8"]["d_row"], report["wmma_f16"]["d_row"]
+        report["d_row_consistent_fp8_f16"] = d8 is not None and d8 == d16
+        report["pass"] = bool(report["pass"] and report["wmma_fp8"]["pass"] and report["wmma_f16"]["pass"] and
+                              report["d_row_consistent_fp8_f16"])
     # Second design (kernels/swin_v2.hip), when it was built: its own conversion helpers.
     v2_file = "swin__v2.co" if backend == "hip" else "wg_emu__v2.so"
     if os.path.exists(os.path.join(build_dir, v2_file)):

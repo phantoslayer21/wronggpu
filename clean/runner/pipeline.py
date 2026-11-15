@@ -45,7 +45,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from clean.reference.fp8 import fp8_decode  # noqa: E402
-from clean.runner import dec0, enc0, post  # noqa: E402
+from clean.runner import dec0, enc0, family, post  # noqa: E402
 from clean.runner import variants as V  # noqa: E402
 from clean.runner.build import runtime_library_name  # noqa: E402
 from clean.runner.packing import pack_stage, resolve_d_row  # noqa: E402
@@ -222,7 +222,7 @@ class Pipeline:
             lib.wg_rt_upload_motion_hi.argtypes = [vp, ctypes.c_int, ctypes.c_int, ctypes.c_int, vp,
                                                    P(ctypes.c_float), P(ctypes.c_float)]
 
-        self.d_row = resolve_d_row(d_row if d_row is not None else os.environ.get("WG_D_ROW", "gfx12"))
+        self.d_row = resolve_d_row(d_row if d_row is not None else os.environ.get("WG_D_ROW") or family.build_family(build_dir))
         geo, code_object = V.DEFAULT_GEOMETRY, V.code_object(variant)
         manifest = os.path.join(build_dir, V.MANIFEST)
         if os.path.exists(manifest):

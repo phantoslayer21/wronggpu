@@ -35,7 +35,7 @@ SOURCES = ["swin.hip", "probe.hip", "overlap.hip", "rates.hip", "mlpbench.hip", 
            "post.hip", "frame.hip", "dec1_dec0.hip"]
 # Default sources of the families that do not build the whole gfx12 set: kernels that compile for gfx11 unchanged
 # (the matrix kernels need the gfx12 builtins until they are ported); no Model K / L kernels, no post_w64 variants
-FAMILY_SOURCES = {"gfx11": ["post.hip", "exposure.hip", "frame.hip"]}
+FAMILY_SOURCES = {"gfx11": ["post.hip", "exposure.hip", "frame.hip", "probe.hip"]}
 RUNTIME_DIR = os.path.join(os.path.dirname(HERE), "runtime")
 RUNTIME_SOURCES = ["device.cpp", "embedded.cpp", "model.cpp", "runtime.cpp",
                    os.path.join("..", "converter", "src", "sha256.cpp"),   # shared with the converter (spec 08)
