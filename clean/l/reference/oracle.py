@@ -53,7 +53,10 @@ def soft_cap(S, cap):
 
 
 def _block_tokens(xw, p, heads, k):
-    """One block on gathered windows xw [..., T, C] (T = window^2), constants k. Same step order as Model M's."""
+    """One block on gathered windows xw [..., T, C] (T = window^2), constants k. k["form"] "m" (default): Model M's
+    step order in float64 with Model M's roundings; "q7": the FP16 form of _block_tokens_q7."""
+    if k.get("form", "m") == "q7":
+        return _block_tokens_q7(xw, p, heads, k)
     C = xw.shape[-1]
     T = xw.shape[-2]
     lead = xw.shape[:-2]
@@ -71,6 +74,229 @@ def _block_tokens(xw, p, heads, k):
     m = q8(rmsnorm(x1, p["gamma2"], C, k["eps_num"]))
     h = q8(gelu(m @ p["W1"].T + p["b1"], k["gelu"]))
     return x1 + h @ p["W2"].T + p["b2"]
+
+
+# ---- the block in its FP16 form ("q7") ------------------------------------------------------------------------------
+#
+# Every FP16 step rounds after each single operation (f16), FMA16 rounds once. An FP8 matrix op takes up to 32 FP8 x FP8
+# products and an FP16 start value and gives an FP16 result; a longer sum is a chain of such ops over 32-wide chunks in
+# ascending order, each op's result the next one's start. What happens inside one op is not settled; two models
+# (MM8_MODELS, chosen by the table's "mm8" entry, named in every record):
+# - "exact" (the default): the exact sum of the products and the start value, rounded once to FP16 (exact in float64:
+#   the terms are multiples of 2^-24 below 2^23);
+# - "trunc13": two blocks of 16 products, the start value in block 1; in each block every term is truncated toward
+#   zero to 13 fractional bits below the largest term's exponent, the truncated terms summed exactly and rounded to
+#   FP16; block 1's result is block 2's start value.
+# The attention product P V (FP16 operands, 16 terms) is summed in float64 and rounded once (its accumulation precision
+# does not move an FP16 result).
+
+MM8_MODELS = ("exact", "trunc13")
+
+
+def _trunc13_block(start, prods):
+    """start [...], prods [..., k] (exact values): every term truncated toward zero to a multiple of 2^(E - 13), E the
+    largest term's exponent, then the exact sum rounded to FP16. Non-finite terms: the plain sum, rounded."""
+    terms = np.concatenate([np.asarray(start, np.float64)[..., None], prods], axis=-1)
+    a = np.abs(terms)
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        _, e = np.frexp(np.where(np.isfinite(a), a, 0.0))
+        e = np.where(a > 0, e - 1, np.iinfo(np.int32).min // 2)
+        emax = e.max(axis=-1, keepdims=True)
+        quantum = np.ldexp(1.0, np.maximum(emax - 13, -1074))
+        tt = np.trunc(terms / quantum) * quantum
+        out = f16(tt.sum(axis=-1))
+        bad = ~np.all(np.isfinite(terms), axis=-1)
+        if bad.any():
+            out = np.where(bad, f16(terms.sum(axis=-1)), out)
+    return out
+
+
+def _op8(start, a8, W8, model):
+    """One FP8 matrix op: start [..., n] (FP16), a8 [..., k] (k <= 32), W8 [n, k] -> FP16 [..., n]."""
+    start = np.broadcast_to(np.asarray(start, np.float64), a8.shape[:-1] + (W8.shape[0],))
+    with np.errstate(over="ignore", invalid="ignore"):
+        if model == "exact":
+            return f16(start + a8 @ W8.T)
+        if model != "trunc13":
+            raise ValueError(f"unknown FP8 op model {model!r}")
+        out = np.empty(start.shape)
+        for r0 in range(0, W8.shape[0], 8):          # rows in groups (the products of 8 rows at a time)
+            w = W8[r0:r0 + 8]
+            prods = a8[..., None, :] * w                   # [..., rows, k]
+            acc = start[..., r0:r0 + 8]
+            for b0 in (0, 16):
+                acc = _trunc13_block(acc, prods[..., b0:b0 + 16])
+            out[..., r0:r0 + 8] = acc
+        return out
+
+
+def mm8(start, a8, W8, model="exact"):
+    """The chain of FP8 matrix ops over the 32-wide chunks of K, ascending: a8 [..., K], W8 [n, K], start [..., n] or
+    [n] (FP16) -> FP16 [..., n]."""
+    a8 = np.asarray(a8, np.float64)
+    W8 = np.asarray(W8, np.float64)
+    acc = start
+    for c0 in range(0, W8.shape[1], 32):
+        acc = _op8(acc, a8[..., c0:c0 + 32], W8[:, c0:c0 + 32], model)
+    return acc
+
+def _h(bits):
+    """The FP16 constant with this bit pattern, as float64."""
+    return float(np.array([bits], np.uint16).view(np.float16)[0])
+
+
+Q7_SCORE_SCALE = _h(0x2466)
+Q7_SCORE_CLAMP = _h(0x3873)
+Q7_POLY_T = _h(0x3B6B)
+Q7_POLY_P = _h(0x3D80)
+Q7_NORM_EPS = 2.0 ** -13           # 32 x the per-channel epsilon (the norm sums squares, it does not average)
+Q7_GELU_A = _h(0x3698)
+Q7_GELU_B = _h(0x2D30)
+
+
+def _rsqrt32(v):
+    """The single-precision reciprocal square root of float32(v) (its last bit does not move the FP16 result)."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        s = np.asarray(v, np.float64).astype(np.float32)
+        return (np.float32(1.0) / np.sqrt(s)).astype(np.float64)
+
+
+def _rcp32(v):
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return (np.float32(1.0) / np.asarray(v, np.float64).astype(np.float32)).astype(np.float64)
+
+
+def gamma_q7(gamma, C=None):
+    """g' = RN16(float32(gamma) x sqrtf(C)), the norm's gain with the sqrt(C) of its sum of squares folded in (C = the
+    block width, default len(gamma))."""
+    gamma = np.asarray(gamma, np.float64)
+    C = gamma.shape[-1] if C is None else C
+    g = gamma.astype(np.float32) * np.sqrt(np.float32(C))
+    return f16(g.astype(np.float32))
+
+
+NORM_WIDTHS = (32, 64, 96, 128)
+
+
+def _group(ps):
+    """The fixed sum tree of 1 to 4 FP16 partial sums: p0; p0 + p1; (p0 + p1) + p2; (p0 + p1) + (p2 + p3)."""
+    if len(ps) == 1:
+        return ps[0]
+    if len(ps) == 2:
+        return f16(ps[0] + ps[1])
+    if len(ps) == 3:
+        return f16(f16(ps[0] + ps[1]) + ps[2])
+    return f16(f16(ps[0] + ps[1]) + f16(ps[2] + ps[3]))
+
+
+def norm_q7(x, gp):
+    """RMS norm over the last axis (C = 32, 64, 96 or 128 channels) of FP16 values x with gain gp (gamma_q7):
+    FP16 squares q; channel tiles of 8, lane t = 0 ... 3 holding channels 8 j + 2 t (even half) and 8 j + 2 t + 1 (odd
+    half) of every tile j; per lane and half the pairs (tile j, tile j + 2) of the even tiles (j = 0, 4, 8, 12) form the
+    left group and those of the odd tiles (j = 1, 5, 9, 13) the right one, each summed by _group, left + right; across
+    lanes ((0 + 1) + (2 + 3)) per half, even + odd, + 2^-13; r = RN16 of the single-precision reciprocal square root;
+    then x RN16(r gp). Every + is one FP16 rounding."""
+    x = np.asarray(x, np.float64)
+    C = x.shape[-1]
+    if C not in NORM_WIDTHS:
+        raise ValueError(f"norm_q7: {C} channels (32, 64, 96 or 128)")
+    tiles = C // 8
+    with np.errstate(over="ignore", invalid="ignore"):
+        q = f16(x * x)
+
+        def lane(t, odd):
+            Q = [q[..., 8 * j + 2 * t + odd] for j in range(tiles)]
+            left = _group([f16(Q[j] + Q[j + 2]) for j in range(0, tiles, 4)])
+            right = _group([f16(Q[j] + Q[j + 2]) for j in range(1, tiles, 4)])
+            return f16(left + right)
+
+        def half(odd):
+            e = [lane(t, odd) for t in range(4)]
+            return f16(f16(e[0] + e[1]) + f16(e[2] + e[3]))
+
+        s = f16(f16(half(0) + half(1)) + Q7_NORM_EPS)
+        r = f16(_rsqrt32(s))
+        return f16(x * f16(r[..., None] * gp))
+
+
+def softmax_q7(s):
+    """Attention weights over the last axis (16 keys) from FP16 scores s: u = RN16(s c) clamped to +-c', the FP16
+    polynomial p = FMA16(u, FMA16(u, -u, t0), p0) in [1, 2), the weight e = the FP16 number with bits (mantissa bits
+    of p) << 5, the FP16 row sum in a fixed tree, w = RN16(rcp(sum)), P = RN16(e w). A NaN score takes the lower clamp
+    (min / max return the number)."""
+    s = np.asarray(s, np.float64)
+    if s.shape[-1] != 16:
+        raise ValueError("softmax_q7: 16 keys")
+    with np.errstate(over="ignore", invalid="ignore"):
+        u = np.fmin(np.fmax(f16(s * Q7_SCORE_SCALE), -Q7_SCORE_CLAMP), Q7_SCORE_CLAMP)
+        t = f16(u * -u + Q7_POLY_T)
+        p = f16(u * t + Q7_POLY_P)
+        pb = p.astype(np.float16).view(np.uint16)
+        e = (((pb & 0x03FF) << 5).astype(np.uint16)).view(np.float16).astype(np.float64)
+
+        def pair(lo):   # a_t = RN16(e_{lo+2t} + e_{lo+8+2t}), tree over t
+            a = [f16(e[..., lo + 2 * t] + e[..., lo + 8 + 2 * t]) for t in range(4)]
+            return f16(f16(a[0] + a[1]) + f16(a[2] + a[3]))
+
+        total = f16(pair(0) + pair(1))
+        w = f16(_rcp32(total))
+        return f16(e * w[..., None])
+
+
+def gelu_q7(h):
+    """y = clamp(h, -2, 2); g = RN16(h RN16(1/2 + RN16(y RN16(a - RN16(b |y|))))), every step its own rounding."""
+    h = np.asarray(h, np.float64)
+    with np.errstate(over="ignore", invalid="ignore"):
+        y = np.fmin(np.fmax(h, -2.0), 2.0)
+        return f16(h * f16(0.5 + f16(y * f16(Q7_GELU_A - f16(Q7_GELU_B * np.abs(y))))))
+
+
+def _score_op(B, u, model):
+    """Scores s[..., h, i, j] = one FP8 op of u_i and u_j (32 terms) started from B[h, i, j]; u [..., h, T, 32]."""
+    B = np.asarray(B, np.float64)
+    with np.errstate(over="ignore", invalid="ignore"):
+        if model == "exact":
+            return f16(B + np.einsum("...htd,...hsd->...hts", u, u))
+        if model != "trunc13":
+            raise ValueError(f"unknown FP8 op model {model!r}")
+        prods = u[..., :, None, :] * u[..., None, :, :]           # [..., h, T, T, 32]
+        acc = np.broadcast_to(B, prods.shape[:-1])
+        for b0 in (0, 16):
+            acc = _trunc13_block(acc, prods[..., b0:b0 + 16])
+        return acc
+
+
+def _block_tokens_q7(xw, p, heads, k):
+    """The block in its FP16 form on gathered windows xw [..., T, C] (FP16 values; T = 16; C = 32, 64, 96 or 128;
+    heads of 32), FP8 ops by the model k["mm8"] (MM8_MODELS, default "exact"):
+    norm (norm_q7, gamma1) -> FP8 -> per head u = FP8(Wqk chain from 0), v = Wv chain from 0 (FP16), scores = one FP8 op
+    u u started from B, weights softmax_q7, o = RN16(P v) -> FP8; z = the Wp chain (one 32-wide chunk per head, head
+    order) started from RN16(bp + x); norm (gamma2) -> FP8; the MLP in 32-wide hidden slices, ascending: h = the W1
+    slice's chain started from b1's slice, gelu_q7, FP8, added by W2's matching chunk onto the chain started from
+    RN16(b2 + z). Returns the FP16 block output. The matrices are rounded to FP8 here (no change for an FP8 file)."""
+    C = xw.shape[-1]
+    T = xw.shape[-2]
+    if C not in NORM_WIDTHS or T != 16 or k["head_dim"] != 32:
+        raise ValueError("_block_tokens_q7: C 32, 64, 96 or 128, 4 x 4 windows, heads of 32")
+    model = k.get("mm8", "exact")
+    lead = xw.shape[:-2]
+    x = np.asarray(xw, np.float64)
+    W = {n: q8(p[n]) for n in ("Wqk", "Wv", "Wp", "W1", "W2")}
+    with np.errstate(over="ignore", invalid="ignore"):
+        a8 = q8(norm_q7(x, gamma_q7(p["gamma1"])))
+        u = np.stack([q8(mm8(0.0, a8, W["Wqk"][h], model)) for h in range(heads)], axis=-3)   # [..., h, T, 32]
+        v = np.stack([mm8(0.0, a8, W["Wv"][h], model) for h in range(heads)], axis=-3)
+        s = _score_op(p["B"], u, model)
+        o = f16(np.einsum("...hts,...hsd->...htd", softmax_q7(s), v))
+        o8 = q8(np.moveaxis(o, -3, -2).reshape(lead + (T, heads * 32)))
+        z = mm8(f16(p["bp"] + x), o8, W["Wp"], model)
+        m8 = q8(norm_q7(z, gamma_q7(p["gamma2"])))
+        acc = f16(p["b2"] + z)
+        for sl in range(W["W1"].shape[0] // 32):
+            r = slice(32 * sl, 32 * sl + 32)
+            hs = mm8(p["b1"][r], m8, W["W1"][r], model)
+            acc = mm8(acc, q8(gelu_q7(hs)), W["W2"][:, r], model)
+    return acc
 
 
 def window_grid(H, W, offset, win):
@@ -101,10 +327,12 @@ def border_index(border, n, halo=0):
     raise ValueError(f"unknown border {border!r}")
 
 
-def swin_block(x, p, offset, heads, consts, border="mirror", halo=0, max_tokens=1 << 16):
+def swin_block(x, p, offset, heads, consts, border="mirror", halo=0, max_tokens=1 << 16, skip=None):
     """One block on a whole map x [H, W, C] (border "input": [H + 2 halo, W + 2 halo, C], the grid in the middle);
-    window members outside the grid per border_index. Returns the block output on the grid [H, W, C] in float64, not
-    yet rounded."""
+    window members outside the grid per border_index. skip [H, W, C] (FP8 values): each member's input is
+    RN16(x member + skip member), the skip member taken with its own border, the mirror about the grid size (a
+    member outside the grid reads x by the block's border and skip by the mirror). Returns the block output on the
+    grid [H, W, C] in float64, not yet rounded (the FP16 form: FP16)."""
     x = np.asarray(x, dtype=np.float64)
     h = halo if border == "input" else 0
     H, W, C = x.shape[0] - 2 * h, x.shape[1] - 2 * h, x.shape[2]
@@ -113,12 +341,16 @@ def swin_block(x, p, offset, heads, consts, border="mirror", halo=0, max_tokens=
     rows, cols = window_grid(H, W, offset, win)
     out = np.full((H, W, C), np.nan)
     fr, fc = border_index(border, H, h), border_index(border, W, h)
+    if consts.get("mm8") == "trunc13":
+        max_tokens = min(max_tokens, 4096)
     rows_per_chunk = max(1, max_tokens // (win * win * cols.shape[0]))
     for l0 in range(0, rows.shape[0], rows_per_chunk):
         r = rows[l0:l0 + rows_per_chunk]
         rr = fr(r)[:, None, :, None]
         cc = fc(cols)[None, :, None, :]
         xw = x[rr, cc]
+        if skip is not None:
+            xw = f16(xw + skip[_swin.mirror(r, H)[:, None, :, None], _swin.mirror(cols, W)[None, :, None, :]])
         nl, nk = xw.shape[:2]
         x2 = _block_tokens(xw.reshape(nl, nk, win * win, C), p, heads, consts).reshape(nl, nk, win, win, C)
         rv = (r >= 0) & (r < H)
@@ -151,15 +383,16 @@ def depth_to_space(v):
     return out
 
 
-def project_groups(z, W, b, groups, clamp=_enc.FEATURE_CLAMP):
-    """Running sum s = b; for each channel group g: s = FP16(s + W[:, g] z[g]) (exact group sums); then clamp (None:
-    no clamp) and round to FP8. With groups (20, 20, 20, 20) this is clean/reference/encoder.py project."""
+def project_groups(z, W, b, groups, clamp=_enc.FEATURE_CLAMP, model="exact"):
+    """Running sum s = b; for each channel group g: s = FP16(s + W[:, g] z[g]) (one FP8 op per group of at most
+    32, by the FP8 op model); then clamp (None: no clamp) and round to FP8. With groups (20, 20, 20, 20) this is
+    clean/reference/encoder.py project."""
     W = np.asarray(W, dtype=np.float64)
     z = np.asarray(z, dtype=np.float64)
     s = np.broadcast_to(np.asarray(b, dtype=np.float64), z.shape[:-1] + (W.shape[0],))
     lo = 0
     for g in groups:
-        s = f16(s + z[..., lo:lo + g] @ W[:, lo:lo + g].T)
+        s = _op8(s, z[..., lo:lo + g], W[:, lo:lo + g], model)
         lo += g
     if clamp is not None:
         s = np.clip(s, -clamp, clamp)
@@ -172,19 +405,24 @@ def _out_round(y, mode):
     return _round(y, mode)
 
 
-def linear(x, W, b, acc=None, out_round="q8"):
-    """out_round(acc(W x + b)) with exact sums; acc "f16" rounds the sum to FP16 first."""
-    y = np.asarray(x, dtype=np.float64) @ np.asarray(W, dtype=np.float64).T + np.asarray(b, dtype=np.float64)
+def linear(x, W, b, acc=None, out_round="q8", model="exact"):
+    """out_round(acc(W x + b)); acc "f16": the FP8 op chain started from b (by the FP8 op model); acc None: exact
+    sums."""
     if acc == "f16":
-        y = f16(y)
-    elif acc not in (None, "none"):
+        y = mm8(np.asarray(b, dtype=np.float64), x, W, model)
+    elif acc in (None, "none"):
+        y = np.asarray(x, dtype=np.float64) @ np.asarray(W, dtype=np.float64).T + np.asarray(b, dtype=np.float64)
+    else:
         raise ValueError(f"unknown accumulation {acc!r}")
     return _out_round(y, out_round)
 
 
 def _run_ops(ops, maps, params, parity, t, default_stage, frame=None):
-    """Interprets an op list over named maps; returns the last op's output."""
+    """Interprets an op list over named maps; returns the last op's output. FP8 ops by the table's "mm8" model."""
     last = None
+    model = t.get("mm8", "exact")
+    if model not in MM8_MODELS:
+        raise ValueError(f"unknown FP8 op model {model!r}")
     for op in ops:
         k = op["op"]
         st = params[op.get("params", default_stage)]
@@ -205,12 +443,21 @@ def _run_ops(ops, maps, params, parity, t, default_stage, frame=None):
         elif k == "select":
             out = maps[op["src"]][..., op["lo"]:op["hi"]]
         elif k == "linear":
-            out = linear(maps[op["src"]], st[op["w"]], st[op["b"]], op.get("acc"), op.get("out_round", "q8"))
+            out = linear(maps[op["src"]], st[op["w"]], st[op["b"]], op.get("acc"), op.get("out_round", "q8"), model)
         elif k == "swin":
-            consts = _table.block_consts(t, op["params"])
+            consts = dict(_table.block_consts(t, op["params"]), mm8=model)
             off = _table.block_offset(t, op["offsets"], parity)
             border = op.get("border", "mirror")
-            y = swin_block(maps[op["src"]], st, off, op["heads"], consts, border, maps.get("_halo", 0))
+            skip = None
+            if op.get("skip"):
+                skip = maps.get(op["skip"])
+                if skip is None:
+                    raise ValueError(f"{default_stage}: the skip map {op['skip']!r} is needed (the encoder's block "
+                                     "output)")
+                skip = np.asarray(skip, dtype=np.float64)
+                if skip.shape != maps[op["src"]].shape:
+                    raise ValueError(f"swin skip: shapes {skip.shape} and {maps[op['src']].shape}")
+            y = swin_block(maps[op["src"]], st, off, op["heads"], consts, border, maps.get("_halo", 0), skip=skip)
             if border == "input":
                 maps["_halo"] = 0
             out = _round(y, op.get("out_round", "q8"))
@@ -222,9 +469,10 @@ def _run_ops(ops, maps, params, parity, t, default_stage, frame=None):
                 parts.append(np.zeros(parts[0].shape[:-1] + (pad - c,)))
             out = np.concatenate(parts, axis=-1)
         elif k == "project":
-            out = project_groups(maps[op["src"]], st[op["w"]], st[op["b"]], op["groups"], op.get("clamp"))
+            out = project_groups(maps[op["src"]], st[op["w"]], st[op["b"]], op["groups"], op.get("clamp"), model)
         elif k == "dec_project":
-            out = dec_project(maps[op["src"]], st[op["w"]], st[op["b"]], op["groups"], op.get("out_round", "q8"))
+            out = dec_project(maps[op["src"]], st[op["w"]], st[op["b"]], op["groups"], op.get("out_round", "q8"),
+                              model)
         elif k == "pick":
             out = np.asarray(maps[op["src"]])[..., list(op["values"])]
         else:
@@ -274,7 +522,9 @@ def encode(x, params, parity=None, t=_table.TABLE, keep=False):
     if maps.pop("_halo"):
         raise ValueError("encoder: the per-pixel halo was not consumed by a block")
     m_near, m_far, m_center = _enc.motion_surfaces(x)
-    res = {"features": feats.astype(np.float32),
+    skip = maps.get(t.get("skip_map"))
+    res = {"skip": None if skip is None else np.asarray(skip, np.float32),
+           "features": feats.astype(np.float32),
            "m_near": f16(m_near).astype(np.float32),
            "m_far": f16(m_far).astype(np.float32),
            "m_center": f16(m_center).astype(np.float32)}
@@ -285,15 +535,15 @@ def encode(x, params, parity=None, t=_table.TABLE, keep=False):
 
 # ---- decoder --------------------------------------------------------------------------------------------------------
 
-def dec_project(Z, W, b, groups=(32, 32), out_round="q8"):
+def dec_project(Z, W, b, groups=(32, 32), out_round="q8", model="exact"):
     """Z [h, w, 64], W [4, 32, 64], b [4, 32] -> [h, w, 128] (channel 32 s + c): Model M's dec0 projection arithmetic
-    (clean/reference/decoder.py project) over all 4 x 32 rows."""
+    (clean/reference/decoder.py project) over all 4 x 32 rows, one FP8 op per group (by the FP8 op model)."""
     Z = np.asarray(Z, dtype=np.float64)
     W = np.asarray(W, dtype=np.float64).reshape(128, -1)
     s = np.broadcast_to(np.asarray(b, dtype=np.float64).reshape(128), Z.shape[:-1] + (128,))
     lo = 0
     for g in groups:
-        s = f16(s + Z[..., lo:lo + g] @ W[:, lo:lo + g].T)
+        s = _op8(s, Z[..., lo:lo + g], W[:, lo:lo + g], model)
         lo += g
     return _round(s, out_round)
 
@@ -348,7 +598,8 @@ def decode(x, params, parity, t=_table.TABLE, keep=False):
     if len(t["dec_ops"][-1]["values"]) != _table.DEC_PIXEL_VALUES[kind]:
         raise ValueError(f"dec_pixel {kind!r} needs {_table.DEC_PIXEL_VALUES[kind]} picked values")
     rw, rh = _dec.check_inputs(x)[:2]
-    maps = {"features": np.asarray(x["features"], dtype=np.float64)}
+    maps = {"features": np.asarray(x["features"], dtype=np.float64),
+            "skip": None if x.get("skip") is None else np.asarray(x["skip"], dtype=np.float64)}
     a = _run_ops(t["dec_ops"], maps, params, parity, t, "dec0")
     dec = params["dec0"]
     if kind == "l":
@@ -396,6 +647,7 @@ def network(x_enc, x_dec, params, parity, t=_table.TABLE, keep=False):
         res[s] = o
     xd = dict(x_dec)
     xd["features"] = x
+    xd["skip"] = res["enc0"]["skip"]
     res["dec0"] = decode(xd, params, parity, t, keep)
     return res
 
