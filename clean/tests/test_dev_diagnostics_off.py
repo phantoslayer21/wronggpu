@@ -4,7 +4,9 @@
 No GPU, no compiler needed: the build script's runtime command, the CI and release files, and the library check are read.
 Run: python -m unittest clean.tests.test_dev_diagnostics_off
 """
+import hashlib
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -84,23 +86,57 @@ class DevDiagnosticsOff(unittest.TestCase):
 
 MARK0 = b"wg-build dev-diagnostics=0"
 MARK1 = b"wg-build dev-diagnostics=1"
+DEV_TEXT = b"diagnostic: executor=hip selects the HIP executor; it is not the in-game runtime"  # exists only in the diagnostics' code
 PACKAGER = os.path.join(ROOT, "clean", "installer", "tools", "make_payload.py")
 RELEASE_CHECK = os.path.join(ROOT, "tools", "release", "check_package_diagnostics.py")
 
 
-class PackagerRefusesDeveloperRuntime(unittest.TestCase):
-    """The payload packager and the release check look at the BYTES of the runtime that would ship."""
+def manifest_for(name, data, dev=False, **over):
+    m = {"format": 1, "file": name, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data), "dev_diagnostics": dev}
+    m.update(over)
+    return json.dumps(m).encode()
 
-    def _pack(self, files, extra_args=()):
-        """Runs make_payload.py on a payload folder holding `files` ({relative name: bytes}) next to a front end."""
+
+class BuildManifest(unittest.TestCase):
+    def test_build_py_writes_the_manifest_of_what_it_built(self):
+        b = load_build()
+        with tempfile.TemporaryDirectory() as d:
+            dll = os.path.join(d, b.runtime_library_name())
+            with open(dll, "wb") as f:
+                f.write(b"MZ library " + MARK0)
+            for dev in (False, True):
+                b.DEV_DIAGNOSTICS = dev
+                try:
+                    b.write_build_manifest(d, ["clang++", "-DWG_MODEL_L"] + (["-DWG_DEV_DIAGNOSTICS=1"] if dev else []), False)
+                finally:
+                    b.DEV_DIAGNOSTICS = False
+                with open(os.path.splitext(dll)[0] + ".build.json", encoding="utf-8") as f:
+                    m = json.load(f)
+                self.assertEqual(m["format"], 1)
+                self.assertEqual(m["file"], os.path.basename(dll))
+                self.assertEqual(m["sha256"], hashlib.sha256(open(dll, "rb").read()).hexdigest())
+                self.assertEqual(m["dev_diagnostics"], dev)
+                self.assertEqual("-DWG_DEV_DIAGNOSTICS=1" in m["defines"], dev)
+
+
+class PackagerRefusesDeveloperRuntime(unittest.TestCase):
+    """The payload packager and the release check look at the BYTES of the runtime that would ship, and at its build manifest."""
+
+    def _pack(self, files, manifests=None, extra_args=()):
+        """Runs make_payload.py on a payload folder holding `files` ({relative name: bytes}) next to a front end;
+        `manifests` ({library relative name: manifest bytes}) are written as <library>.build.json beside the library."""
         d = tempfile.mkdtemp(prefix="wg_pl_")
         payload = os.path.join(d, "payload")
         os.makedirs(payload)
-        for rel, data in {"amd_fidelityfx_dx12.dll": b"front end", **files}.items():
+        everything = {"amd_fidelityfx_dx12.dll": b"front end", **files}
+        for rel, data in everything.items():
             p = os.path.join(payload, *rel.split("/"))
             os.makedirs(os.path.dirname(p), exist_ok=True)
             with open(p, "wb") as f:
                 f.write(data)
+        for rel, mdata in (manifests or {}).items():
+            with open(os.path.splitext(os.path.join(payload, *rel.split("/")))[0] + ".build.json", "wb") as f:
+                f.write(mdata)
         with open(os.path.join(d, "map.json"), "wb") as f:
             f.write(b"{}")
         out = os.path.join(d, "out")
@@ -108,28 +144,74 @@ class PackagerRefusesDeveloperRuntime(unittest.TestCase):
                             "--out", out, *extra_args], capture_output=True, text=True)
         return r, out
 
-    def test_a_release_runtime_is_packaged(self):
-        r, out = self._pack({"wronggpu_runtime.dll": b"MZ" + b"x" * 64 + MARK0})
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertTrue(os.path.isfile(os.path.join(out, "payload_table.h")))
+    def _release(self, extra=b""):
+        return b"MZ" + b"x" * 64 + extra + MARK0
 
-    def test_a_developer_runtime_refuses_the_payload(self):
-        r, out = self._pack({"wronggpu_runtime.dll": b"MZ" + MARK1})
+    def test_a_release_runtime_with_its_manifest_is_packaged(self):
+        lib = self._release()
+        r, out = self._pack({"wronggpu_runtime.dll": lib}, {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", lib)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        table = open(os.path.join(out, "payload_table.h"), encoding="utf-8").read()
+        self.assertIn("wronggpu_runtime.dll", table)
+        self.assertNotIn("build.json", table, "the manifest is read for the gate and is not shipped")
+
+    def test_no_manifest_refuses_the_payload(self):
+        r, out = self._pack({"wronggpu_runtime.dll": self._release()})
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("dev-diagnostics=1", r.stderr + r.stdout)
+        self.assertIn("no build manifest", r.stderr + r.stdout)
         self.assertFalse(os.path.isfile(os.path.join(out, "payload_table.h")), "no payload table is written for a refused payload")
 
-    def test_a_runtime_without_the_marker_refuses_the_payload(self):  # fails closed: a build older than R1
-        r, _ = self._pack({"wronggpu_runtime.dll": b"MZ" + b"x" * 64})
+    def test_a_developer_build_is_refused(self):
+        lib = b"MZ" + MARK1
+        r, _ = self._pack({"wronggpu_runtime.dll": lib}, {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", lib, dev=True)})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("dev-diagnostics=1", r.stderr + r.stdout)
+
+    def test_a_diagnostics_build_with_a_forged_marker_is_refused(self):
+        # the marker says =0, but the library carries the diagnostics' code text (a developer build whose marker was patched)
+        forged = self._release(DEV_TEXT)
+        r, _ = self._pack({"wronggpu_runtime.dll": forged}, {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", forged)})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("forged marker", r.stderr + r.stdout)
+        # the honest manifest of that developer build says dev_diagnostics true: refused even if the text were absent
+        lib = self._release()
+        r, _ = self._pack({"wronggpu_runtime.dll": lib}, {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", lib, dev=True)})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("dev_diagnostics is not false", r.stderr + r.stdout)
+
+    def test_a_stripped_or_changed_library_is_refused(self):
+        lib = self._release()
+        stripped = b"MZ" + b"x" * 64  # the marker removed
+        r, _ = self._pack({"wronggpu_runtime.dll": stripped}, {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", stripped)})
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("no 'wg-build dev-diagnostics=' marker", r.stderr + r.stdout)
+        changed = lib + b" signed after the build"  # a good library changed after its manifest was written
+        r, _ = self._pack({"wronggpu_runtime.dll": changed}, {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", lib)})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("does not match its build manifest", r.stderr + r.stdout)
+        other = b"MZ another build " + MARK0  # the manifest of another library
+        r, _ = self._pack({"wronggpu_runtime.dll": lib}, {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", other)})
+        self.assertNotEqual(r.returncode, 0)
+        r, _ = self._pack({"wronggpu_runtime.dll": lib}, {"wronggpu_runtime.dll": b"not json"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("not readable JSON", r.stderr + r.stdout)
+        r, _ = self._pack({"wronggpu_runtime.dll": lib}, {"wronggpu_runtime.dll": manifest_for("another.dll", lib)})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("another file", r.stderr + r.stdout)
 
-    def test_every_runtime_library_is_checked_wherever_it_is(self):
-        r, _ = self._pack({"wronggpu_runtime.dll": MARK0, "sub/wronggpu_runtime_extra.dll": MARK1})
+    def test_every_runtime_library_and_every_file_is_checked(self):
+        good = self._release()
+        bad = b"MZ" + MARK1
+        r, _ = self._pack({"wronggpu_runtime.dll": good, "sub/wronggpu_runtime_extra.dll": bad},
+                          {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", good),
+                           "sub/wronggpu_runtime_extra.dll": manifest_for("wronggpu_runtime_extra.dll", bad)})
         self.assertNotEqual(r.returncode, 0, "a second library that is a developer build refuses the payload")
-        r, _ = self._pack({"wronggpu_runtime.dll": MARK0, "sub/other.dll": b"carries a developer runtime " + MARK1})
+        mf = {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", good)}
+        r, _ = self._pack({"wronggpu_runtime.dll": good, "sub/other.dll": b"carries a developer runtime " + MARK1}, mf)
         self.assertNotEqual(r.returncode, 0, "any other embedded file that says dev-diagnostics=1 refuses it too")
-        r, _ = self._pack({"wronggpu_runtime.dll": MARK0, "sub/other.dll": b"plain"})
+        r, _ = self._pack({"wronggpu_runtime.dll": good, "sub/other.dll": b"has " + DEV_TEXT}, mf)
+        self.assertNotEqual(r.returncode, 0, "or carries the diagnostics' code text")
+        r, _ = self._pack({"wronggpu_runtime.dll": good, "sub/other.dll": b"plain"}, mf)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_the_final_package_check(self):
@@ -140,6 +222,9 @@ class PackagerRefusesDeveloperRuntime(unittest.TestCase):
                 z.writestr("WrongGPU/readme.txt", b"text")
             with zipfile.ZipFile(bad_zip, "w") as z:
                 z.writestr("WrongGPU/wronggpu_runtime.dll", b"MZ" + MARK1)
+            forged_zip = os.path.join(d, "forged.zip")
+            with zipfile.ZipFile(forged_zip, "w") as z:
+                z.writestr("WrongGPU/wronggpu_runtime.dll", b"MZ" + DEV_TEXT + MARK0)
             empty_zip = os.path.join(d, "empty.zip")
             with zipfile.ZipFile(empty_zip, "w") as z:
                 z.writestr("readme.txt", b"no runtime in here")
@@ -154,6 +239,7 @@ class PackagerRefusesDeveloperRuntime(unittest.TestCase):
 
             self.assertEqual(run(good_zip), 0)
             self.assertEqual(run(bad_zip), 1, "a developer runtime inside the package zip fails")
+            self.assertEqual(run(forged_zip), 1, "a forged marker (developer code text present) fails")
             self.assertEqual(run(empty_zip), 1, "a package with no runtime found must not pass")
             self.assertEqual(run(exe_good), 0, "the launcher embeds the payload's runtime as it is: its marker is found")
             self.assertEqual(run(exe_bad), 1)

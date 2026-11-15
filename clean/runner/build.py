@@ -17,6 +17,7 @@ Each kernel source is compiled with the command given in spec 90, plus a fixed c
 """
 import argparse
 import json
+import hashlib
 import os
 import re
 import shutil
@@ -355,7 +356,34 @@ def build_runtime(cxx, out_dir, embed=True):
             ([L_MAP_FILE] if MODEL_L else []):
         shutil.copyfile(m, os.path.join(out_dir, os.path.basename(m)))
     embedded = write_embedded(out_dir) if embed else None
-    run(runtime_command(cxx, os.path.join(out_dir, runtime_library_name()), embedded))
+    cmd = runtime_command(cxx, os.path.join(out_dir, runtime_library_name()), embedded)
+    run(cmd)
+    write_build_manifest(out_dir, cmd, embedded is not None)
+
+
+def write_build_manifest(out_dir, cmd, embedded):
+    """<runtime library>.build.json next to the library: what this build is (R1). The payload packager accepts a runtime
+    library only when its SHA-256 matches a manifest that says dev_diagnostics = false (make_payload.py, failing closed);
+    any later change of the library (stripping, signing, a copy from another build) breaks the match."""
+    dll = os.path.join(out_dir, runtime_library_name())
+    with open(dll, "rb") as f:
+        data = f.read()
+    manifest = {
+        "format": 1,
+        "file": os.path.basename(dll),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "size": len(data),
+        "dev_diagnostics": bool(DEV_DIAGNOSTICS),
+        "model_l": bool(MODEL_L),
+        "models_left_out": sorted(n for n in OPTIONAL_MODELS if not MODELS_BUILT[n]),
+        "embedded_files": bool(embedded),
+        "defines": sorted(a for a in cmd if a.startswith("-D")),
+    }
+    path = os.path.splitext(dll)[0] + ".build.json"
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(manifest, f, indent=2, sort_keys=True)
+        f.write("\n")
+    print(f"build manifest: {path} (dev_diagnostics={str(manifest['dev_diagnostics']).lower()}, sha256 {manifest['sha256'][:16]}...)", flush=True)
 
 
 def run(cmd):

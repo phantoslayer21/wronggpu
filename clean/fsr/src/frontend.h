@@ -214,7 +214,7 @@ private:
     void CheckPending(UpscaleContext& u, uint64_t call);
     // After a successful create of `u`'s upscaler: installs the D3D12 hooks its split service needs
     // (Platform::activateServices). False: they could not be installed (nothing of them is left patched).
-    std::function<void()> HoldDevice(void* device);  // async_create.h: the create worker's hold on the game's device
+    ScopedRelease HoldDevice(void* device);  // async_create.h: the create worker's hold on the game's device (RAII)
     bool ActivateSplit(UpscaleContext& u, const WgUpscalerBackend* backend, const std::string& tag);
     // The model folder for `u`'s options (Platform::modelPlaces): appends ";model_dir=<dir>" when the model is found
     // in a place before the runtime's own default; nothing when runtime_options / WG_RUNTIME_OPTIONS name model_dir.

@@ -141,7 +141,10 @@ class CreateOrder(unittest.TestCase):
         # the selector returns "hip" only for a developer build; a release build ignores executor=hip and capture_dir
         self.assertIn("kDevDiagnostics", sel)
         self.assertIn("ignored: diagnostic key, release build", sel)
-        self.assertIn("bool dev = kDevDiagnostics", sel)
+        self.assertIn("bool devRequested = kDevDiagnostics", sel)
+        self.assertIn("const bool dev = kDevDiagnostics && devRequested;", sel)
+        # the developer texts exist only behind WG_DEV_DIAGNOSTICS (the package gate scans a release library for them)
+        self.assertEqual(sel.count("#ifdef WG_DEV_DIAGNOSTICS"), 3)
         # the backend logs the ignored keys and drops capture_dir in a release build, before anything is made
         drop = self.at("if (!kDevDiagnostics) o.capture_dir.clear();")
         self.assertIn("for (const std::string& line : ch.ignored) say(WG_LOG_WARN, line);", self.b[drop - 200:drop])

@@ -749,11 +749,13 @@ class Context {
                                 " (motion-compensated, disocclusion by depth; WrongGPU's own addition)"
                           : std::string("sparkle guard not available with this executor"));
     }
+#ifdef WG_DEV_DIAGNOSTICS  // developer build only (a release build has dropped capture_dir at create)
     if (!o.capture_dir.empty()) {
       exec_->set_capture(o.capture_dir, o.capture_frames > 0 ? o.capture_frames : 30);
       say(WG_LOG_INFO, "frame capture armed: create " + o.capture_dir + "\\capture.go to write the next " +
                            std::to_string(o.capture_frames) + " network frames there (diagnostics; stalls the GPU)");
     }
+#endif
     if (o.timing_log) {
       timing_.reset(new TimingLog());
       if (!timing_->init(device_, &err)) return fail(WG_ERROR_DEVICE, err);

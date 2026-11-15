@@ -5,14 +5,33 @@
 
 namespace wgfsr {
 
+namespace {
+PendingCreate::Launcher g_launcher = nullptr;
+}
+
+void PendingCreate::SetLauncherForTest(Launcher launcher) { g_launcher = launcher; }
+
 std::shared_ptr<PendingCreate> PendingCreate::Start(const WgUpscalerBackend* backend, const WgCreateInfo& info,
-                                                    std::function<void()> releaseWhenDone) {
-    auto p = std::make_shared<PendingCreate>();
+                                                    ScopedRelease hold) {
+    auto p = std::make_shared<PendingCreate>();  // (if this throws, `hold` is released as the argument goes away)
     p->backend_ = backend;
     p->info_ = info;
-    p->release_ = std::move(releaseWhenDone);
+    p->release_ = std::move(hold);
     p->start_ = std::chrono::steady_clock::now();
-    std::thread([p] { p->Run(p); }).detach();
+    try {
+        std::function<void()> work = [p] { p->Run(p); };
+        if (g_launcher) g_launcher(work);
+        else std::thread(work).detach();
+    } catch (...) {  // the worker could not be started: the create did not run and failed; the hold is given back now
+        {
+            std::lock_guard<std::mutex> lock(p->mutex_);
+            p->result_ = WG_ERROR_DEVICE;
+            p->end_ = std::chrono::steady_clock::now();
+            p->done_ = true;
+        }
+        p->cv_.notify_all();
+        p->release_.Release();
+    }
     return p;
 }
 
@@ -31,11 +50,7 @@ void PendingCreate::Run(std::shared_ptr<PendingCreate> self) {
     }
     cv_.notify_all();
     if (cleanup) cleanup(r == WG_OK ? upscaler : nullptr);  // the context went away while the create ran
-    if (release_) {  // the last step: nothing of this worker touches the game's device after it
-        std::function<void()> release = std::move(release_);
-        release_ = nullptr;
-        release();
-    }
+    release_.Release();  // the last step: nothing of this worker touches the game's device after it
 }
 
 bool PendingCreate::Wait(uint32_t ms) {

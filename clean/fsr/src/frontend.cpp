@@ -810,7 +810,7 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
                     u->upscaler = nullptr;
                     hardIncompat = r == WG_ERROR_UNSUPPORTED;
                 }
-                if (!u->backend && config_.customSlot) {
+                if (!u->backend && config_.customSlot && !u->pending) {  // (a retry still running is no failure yet)
                     const std::string reason = u->createError.empty() ? why : why + ": " + u->createError;
                     {
                         std::lock_guard lock(mutex_);
@@ -960,6 +960,10 @@ void FrontEnd::CheckPending(UpscaleContext& u, uint64_t call) {
         u.mode = UpscaleContext::Mode::Own;
         u.compared = true;  // the network starts with a reset frame; AMD keeps its history for comparisons
         u.failReason.clear();
+        if (config_.customSlot) {  // a late success clears any session failure stored for these options
+            std::lock_guard lock(mutex_);
+            failedCreates_.erase(FailureKey(u.pendingBackend, u));
+        }
         Log(tag + ": WrongGPU's upscaler \"" + u.backend->name + "\" started after " + seconds + "; it upscales from this frame on");
     } else {
         u.failReason = u.createError.empty() ? std::string("upscaler \"") + u.pendingBackend->name + "\" create failed: " + WgResultText(r)
@@ -978,11 +982,11 @@ void FrontEnd::CheckPending(UpscaleContext& u, uint64_t call) {
 // starts and released by the worker as its last step, so a worker that outlives a timeout, the AMD context and the host's
 // own device reference never touches a released device. The release is a copy of the platform's function: it does not
 // depend on this object.
-std::function<void()> FrontEnd::HoldDevice(void* device) {
+ScopedRelease FrontEnd::HoldDevice(void* device) {
     if (!device || !platform_.retainDevice || !platform_.releaseDevice) return {};
     platform_.retainDevice(device);
     std::function<void(void*)> release = platform_.releaseDevice;
-    return [release, device] { release(device); };
+    return ScopedRelease([release, device] { release(device); });
 }
 
 bool FrontEnd::ActivateSplit(UpscaleContext& u, const WgUpscalerBackend* backend, const std::string& tag) {

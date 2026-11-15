@@ -281,7 +281,10 @@ int main() {
 #endif
   for (bool model_k : {false, true})
     for (bool dev : {true, false}) {
-      const std::string tag = std::string(model_k ? " (model K)" : " (model M or L)") + (dev ? " [dev]" : " [release]");
+      // (a release build has no developer code at all: dev=true then behaves as a release build; the developer routes are
+      // asserted by the binary built with WG_DEV_DIAGNOSTICS, which test_executor_select.py also runs)
+      const bool devEff = dev && wgi::kDevDiagnostics;
+      const std::string tag = std::string(model_k ? " (model K)" : " (model M or L)") + (devEff ? " [dev]" : " [release]");
       auto choose = [&](const ExecutorRequest& q) { return choose_executor(q, dev); };
       auto only_ignored = [](const ExecutorChoice& c, const char* key) {
         return c.ignored.size() == 1 && has(c.ignored[0], key) && has(c.ignored[0], "ignored: diagnostic key, release build") &&
@@ -291,7 +294,7 @@ int main() {
       r.model_k = model_k;
       r.executor = "hip";
       ExecutorChoice c = choose(r);
-      if (dev)
+      if (devEff)
         expect("executor=hip: the HIP executor as a loud diagnostic" + tag,
                c.executor == "hip" && !c.by_default && c.warn && has(c.why, "diagnostic: executor=hip") &&
                    has(c.why, "not the in-game runtime") && c.ignored.empty());
@@ -302,7 +305,7 @@ int main() {
       r.model_k = model_k;
       r.executor = "hip";
       c = choose(r);
-      if (dev)
+      if (devEff)
         expect("executor=hip on another board: the same diagnostic" + tag,
                c.executor == "hip" && c.warn && has(c.why, "diagnostic: executor=hip"));
       else
@@ -312,24 +315,22 @@ int main() {
       r.model_k = model_k;
       r.capture = true;
       c = choose(r);
-      if (dev)
+      if (devEff)
         expect("auto + frame capture: HIP with the loud diagnostic line" + tag,
-               c.executor == "hip" && c.warn && c.why == wgi::capture_hip_line() && has(c.why, "diagnostic: frame capture") &&
-                   c.ignored.empty());
+               c.executor == "hip" && c.warn && has(c.why, "diagnostic: frame capture") && c.ignored.empty());
       else
         expect("auto + frame capture is IGNORED: the D3D12 executor, one line, no HIP" + tag,
                c.executor == "dx12" && c.by_default && c.why.empty() && only_ignored(c, "capture_dir"));
       r.executor = "dx12";
       c = choose(r);
-      if (dev)
-        expect("executor=dx12 + frame capture: the same diagnostic (HIP)" + tag,
-               c.executor == "hip" && c.why == wgi::capture_hip_line());
+      if (devEff)
+        expect("executor=dx12 + frame capture: the same diagnostic (HIP)" + tag, c.executor == "hip" && has(c.why, "diagnostic: frame capture"));
       else
         expect("executor=dx12 + capture_dir is ignored: the D3D12 executor, one line" + tag,
                c.executor == "dx12" && !c.by_default && only_ignored(c, "capture_dir"));
       r.executor = "hip";
       c = choose(r);
-      if (dev)
+      if (devEff)
         expect("executor=hip + capture (developer build): HIP" + tag, c.executor == "hip");
       else
         expect("executor=hip + capture_dir in a release build: both ignored, two lines, D3D12" + tag,
@@ -346,7 +347,7 @@ int main() {
       expect("executor=dx12 + sparkle guard: the same" + tag, c.executor == "dx12" && c.sparkle_off && !c.by_default);
       r.capture = true;
       c = choose(r);
-      if (dev)
+      if (devEff)
         expect("the sparkle guard with the capture (developer build): the capture's diagnostic wins" + tag, c.executor == "hip");
       else
         expect("the sparkle guard with capture_dir (release): D3D12, the guard off, the key ignored" + tag,

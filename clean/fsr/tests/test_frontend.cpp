@@ -14,6 +14,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <tuple>
 #include <vector>
@@ -1386,6 +1387,86 @@ static void TestRememberedHardIncompatibility() {
             CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_ERROR_RUNTIME_ERROR && ctx == nullptr);
         }
         CHECK(g_createCalls == 1 && g_amd.empty());
+    }
+}
+
+// R1: a retry without the split service that is still running is no failure yet: nothing is stored for the session while it
+// runs (a custom slot would then refuse every later create of these options), and when it succeeds late the context upscales
+// with WrongGPU and the next create uses WrongGPU too.
+static void TestSplitRetryPendingStoresNoFailure() {
+    Reset();
+    g_resources[kColor] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+    g_resources[kDepth] = {dxgi::R32_FLOAT, 2560, 1440};
+    g_resources[kMotion] = {dxgi::R16G16_FLOAT, 2560, 1440};
+    g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+    g_activateOn = true;
+    g_activateResult = false;  // the hooks cannot be installed: the create is made again without the service
+    g_holdFromCall = 2;        // the retry runs past the wait limit
+    g_createGate = false;
+    Config config;
+    config.customSlot = true;
+    config.createWaitMs = 20;
+    auto fe = MakeFrontEnd(config);
+    UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
+    ffxContext ctx = nullptr;
+    CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
+    CHECK(CountLog("is still starting (without the split service)") == 1 && CountLog("goes to AMD FSR for now") == 1);
+    CHECK(CountLog("this failure is remembered for the session") == 0);  // nothing is stored while the retry runs
+    g_createGate = true;  // the retry finishes late and succeeds
+    ffxDispatchDescUpscale d = MakeDispatch();
+    for (int i = 0; i < 400 && g_frames.empty(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
+    }
+    CHECK(!g_frames.empty() && CountLog("started after") == 1);  // WrongGPU took the context over
+    CHECK(CountLog("this failure is remembered for the session") == 0);
+    CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    const int callsBefore = g_createCalls;
+    const size_t framesBefore = g_frames.size();
+    ctx = nullptr;
+    CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);  // the next create: a real attempt
+    CHECK(g_createCalls > callsBefore && CountLog("failed earlier in this session") == 0);
+    CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK && g_frames.size() == framesBefore + 1);  // and WrongGPU upscales
+    CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+}
+
+// R1: the create worker's device reference is owned (RAII): it is given back when the worker could not be started at all
+// (the create then counts as failed, nothing throws into the game's thread) and exactly once whatever happens to the owner.
+static void FailingLauncher(std::function<void()>) { throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again)); }
+
+static void TestWorkerLaunchFailureGivesTheDeviceBack() {
+    UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
+    for (const bool fallback : {true, false}) {
+        Reset();
+        g_deviceHoldOn = g_deviceTrack = true;
+        g_deviceRefs = 1;  // the host's own reference
+        PendingCreate::SetLauncherForTest(&FailingLauncher);
+        Config config;
+        config.fallbackToAmd = fallback;
+        auto fe = MakeFrontEnd(config);
+        ffxContext ctx = nullptr;
+        const ffxReturnCode_t rc = fe->CreateContext(&ctx, &c.upscale.header, kMemCb);
+        PendingCreate::SetLauncherForTest(nullptr);
+        CHECK(rc == (fallback ? FFX_API_RETURN_OK : FFX_API_RETURN_ERROR_RUNTIME_ERROR));  // a failed create, no exception
+        CHECK(g_createCalls == 0 && CountLog("create failed") >= 1);                        // no worker ever ran
+        CHECK(g_deviceRetains == 1 && g_deviceReleases == 1 && g_deviceRefs == 1);          // the reference came back at once
+        if (fallback) CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    }
+    {  // the owner itself: released once, by Release() or by the destructor, never twice; a move transfers it
+        int released = 0;
+        {
+            ScopedRelease a([&released] { ++released; });
+            ScopedRelease b(std::move(a));
+            CHECK(!a && b);
+            ScopedRelease d;
+            d = std::move(b);
+            CHECK(!b && d && released == 0);
+        }
+        CHECK(released == 1);
+        ScopedRelease e([&released] { ++released; });
+        e.Release();
+        e.Release();
+        CHECK(released == 2 && !e);
     }
 }
 
@@ -3780,6 +3861,8 @@ int main() {
     TestCreateWorkerHoldsDevice();
     TestSplitRetryIsBounded();
     TestRememberedHardIncompatibility();
+    TestSplitRetryPendingStoresNoFailure();
+    TestWorkerLaunchFailureGivesTheDeviceBack();
     TestInterfaceVersions();
     TestAmdMode();
     TestNonLinearColour();

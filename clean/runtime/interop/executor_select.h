@@ -88,10 +88,13 @@ inline std::string sparkle_off_line() {
   return "the sparkle guard runs on HIP only and is turned off; the model runs on the D3D12 executor";
 }
 
-// The one line for the frame capture (an opt-in diagnostic that needs the HIP executor).
+// The one line for the frame capture (an opt-in diagnostic that needs the HIP executor). Developer builds only: the text is
+// not in a release build's library at all (the package gate looks for it: clean/tests/check_no_dev_diagnostics.py).
+#ifdef WG_DEV_DIAGNOSTICS
 inline std::string capture_hip_line() {
   return "diagnostic: frame capture forces the HIP executor (the model runs on the D3D12 executor without it)";
 }
+#endif
 
 // rdna4.h's identity of a request.
 inline wgrt::AdapterIdentity adapter_identity(const ExecutorRequest& r) {
@@ -108,8 +111,10 @@ inline wgrt::AdapterIdentity adapter_identity(const ExecutorRequest& r) {
 
 inline std::string hip_switch_note(const std::string& option);  // below
 
-// `dev`: the build's WG_DEV_DIAGNOSTICS (tests pass both values to check both configurations).
-inline ExecutorChoice choose_executor(const ExecutorRequest& r, bool dev = kDevDiagnostics) {
+// `dev`: whether the developer diagnostics are on. They can only be on in a build made with WG_DEV_DIAGNOSTICS (a release
+// build has no code or text for them whatever is passed), so the tests pass both values and the two build configurations.
+inline ExecutorChoice choose_executor(const ExecutorRequest& r, bool devRequested = kDevDiagnostics) {
+  const bool dev = kDevDiagnostics && devRequested;
   ExecutorChoice c;
   c.hip_note = hip_switch_note(r.hip_switch);  // the same for every model: the option is ignored
   std::string e = r.executor;
@@ -128,6 +133,7 @@ inline ExecutorChoice choose_executor(const ExecutorRequest& r, bool dev = kDevD
     c.executor = e;
     return c;
   }
+#ifdef WG_DEV_DIAGNOSTICS
   if (e == "hip") {  // developer build only: a diagnostic for every model, loud, never the default
     c.executor = e;
     c.warn = true;
@@ -135,6 +141,7 @@ inline ExecutorChoice choose_executor(const ExecutorRequest& r, bool dev = kDevD
             "executor=dx12 run on the D3D12 executor)";
     return c;
   }
+#endif
   const bool forced = e == "dx12" || e == "d3d12";
   if (!forced && e != "auto" && !e.empty()) return c;  // unknown value
   if (!forced) {
@@ -146,12 +153,14 @@ inline ExecutorChoice choose_executor(const ExecutorRequest& r, bool dev = kDevD
       return c;
     }
   }
+#ifdef WG_DEV_DIAGNOSTICS
   if (capture) {  // developer build only: an opt-in diagnostic, never on by default
     c.executor = "hip";
     c.warn = true;
     c.why = capture_hip_line();
     return c;
   }
+#endif
   c.executor = "dx12";  // the success line is logged once the D3D12 executor has taken the context
   if (r.sparkle_guard) {  // the guard is HIP only: it is off, the model stays on D3D12
     c.sparkle_off = true;

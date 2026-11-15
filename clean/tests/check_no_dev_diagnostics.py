@@ -7,6 +7,13 @@ wgBuildMarker). This checks libraries and packages for it:
 
     python clean/tests/check_no_dev_diagnostics.py <path> [...]
 
+The marker is a statement of the build; the gate does not rest on it alone. Two more layers: (1) a library built without
+WG_DEV_DIAGNOSTICS has no code or text for the diagnostics at all, so none of the texts that exist only in that code may be
+found in it (DEV_ONLY_STRINGS: a developer build whose marker was forged to =0 still carries them); (2) the payload packager
+also demands the library's BUILD MANIFEST (clean/runner/build.py writes <library>.build.json: the build's configuration and the
+SHA-256 of the library) and accepts a library only when its SHA-256 matches a manifest that says dev_diagnostics = false
+(check_runtime_with_manifest).
+
 A path is a runtime library (wronggpu_runtime*.dll), a folder (searched for libraries, zip files and executables), a zip
 file (every member), or an executable (the launcher embeds the payload's files as they are, so its bytes hold the marker).
 Exit status 0 only when every runtime library found says dev-diagnostics=0, no other file says =1, and each path gave
@@ -15,12 +22,26 @@ path with nothing to check fails. This is the gate of the payload packager (clea
 refuses the payload) and of the release script on the final package (tools/release/check_package_diagnostics.py); the same
 functions are used by clean/tests/test_dev_diagnostics_off.py in CI.
 """
+import hashlib
+import json
 import os
 import re
 import sys
 import zipfile
 
 MARKER = re.compile(rb"wg-build dev-diagnostics=([01])")
+
+# Texts that exist only in the developer diagnostics' code (clean/runtime/interop/executor_select.h, backend.cpp, all behind
+# WG_DEV_DIAGNOSTICS): a release build's library contains none of them.
+DEV_ONLY_STRINGS = (
+    b"diagnostic: executor=hip selects the HIP executor",
+    b"diagnostic: frame capture forces the HIP executor",
+    b"frame capture armed: create ",
+)
+
+
+def dev_only_strings_in(data):
+    return [t.decode("ascii") for t in DEV_ONLY_STRINGS if t in data]
 
 
 def is_runtime_name(name):
@@ -35,7 +56,36 @@ def check_bytes(data):
         return False, "no 'wg-build dev-diagnostics=' marker (a build older than R1, or not the runtime library)"
     if any(v == b"1" for v in found):
         return False, "built with WG_DEV_DIAGNOSTICS (dev-diagnostics=1)"
+    carried = dev_only_strings_in(data)
+    if carried:
+        return False, "says dev-diagnostics=0 but carries developer-diagnostic code (%r): a forged marker" % carried[0]
     return True, "dev-diagnostics=0"
+
+
+def check_runtime_with_manifest(name, data, manifest_bytes):
+    """(ok, text) for a runtime library the packager is about to embed: the marker and the negative scan (check_bytes) AND
+    the build manifest next to the library: present, format 1, for this file, SHA-256 equal to the library's, and
+    dev_diagnostics false. Fails closed on anything else (no manifest, unreadable, another library's, a library that was
+    changed after its build: stripped, signed, replaced)."""
+    ok, text = check_bytes(data)
+    if not ok:
+        return False, text
+    if manifest_bytes is None:
+        return False, "no build manifest (%s.build.json next to the library): build it with clean/runner/build.py" % os.path.splitext(os.path.basename(name))[0]
+    try:
+        m = json.loads(manifest_bytes.decode("utf-8"))
+        assert isinstance(m, dict)
+    except Exception:
+        return False, "the build manifest is not readable JSON"
+    if m.get("format") != 1:
+        return False, "the build manifest has an unknown format"
+    if str(m.get("file", "")).lower() != os.path.basename(name).lower():
+        return False, "the build manifest is for another file (%s)" % m.get("file")
+    if str(m.get("sha256", "")).lower() != hashlib.sha256(data).hexdigest():
+        return False, "the library does not match its build manifest (SHA-256): changed after its build, or another build's file"
+    if m.get("dev_diagnostics") is not False:
+        return False, "the build manifest says dev_diagnostics is not false"
+    return True, "dev-diagnostics=0, matches its build manifest"
 
 
 def check_artifact(name, data):
@@ -48,6 +98,9 @@ def check_artifact(name, data):
         return ok, text, ok
     if any(v == b"1" for v in found):
         return False, "carries a developer runtime (dev-diagnostics=1)", False
+    carried = dev_only_strings_in(data)
+    if carried:
+        return False, "carries developer-diagnostic code (%r)" % carried[0], False
     return True, "dev-diagnostics=0" if zero else "nothing to check", zero
 
 

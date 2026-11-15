@@ -70,10 +70,23 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import check_no_dev_diagnostics as devcheck  # noqa: E402
 
 
-def refuse_developer_runtime(rel, data):
-    ok, text, _ = devcheck.check_artifact(rel, data)
+def refuse_developer_runtime(rel, data, full=None):
+    """A runtime library is accepted only with its build manifest (clean/runner/build.py writes <library>.build.json next to
+    it): the SHA-256 of the library must match a manifest that says dev_diagnostics = false, as well as the marker and the
+    negative scan; anything else refuses the payload (failing closed). Other embedded files must not carry a developer
+    runtime."""
+    if devcheck.is_runtime_name(rel):
+        manifest = None
+        mpath = os.path.splitext(full)[0] + ".build.json" if full else None
+        if mpath and os.path.isfile(mpath):
+            with open(mpath, "rb") as f:
+                manifest = f.read()
+        ok, text = devcheck.check_runtime_with_manifest(rel, data, manifest)
+    else:
+        ok, text, _ = devcheck.check_artifact(rel, data)
     if not ok:
-        fail("%s: %s: a payload never carries the developer diagnostics (build the runtime without --dev-diagnostics)" % (rel, text))
+        fail("%s: %s: a payload never carries the developer diagnostics (build the runtime with clean/runner/build.py "
+             "without --dev-diagnostics and keep its .build.json next to it)" % (rel, text))
 
 
 def payload_files(root, hosted_only=False):
@@ -92,13 +105,15 @@ def payload_files(root, hosted_only=False):
                 continue
             if low[0] in RESERVED:
                 fail("payload file %s uses a name reserved for the installer" % rel)
+            if low[-1].endswith(".build.json"):  # a runtime library's build manifest (build.py): read for the gate, not shipped
+                continue
             if any(p in ("", ".", "..") or ":" in p for p in parts):
                 fail("bad payload path %s" % rel)
             with open(full, "rb") as f:
                 data = f.read()
             if optiscaler_file(rel, data):
                 fail("payload file %s is OptiScaler: WrongGPU never ships OptiScaler (the launcher downloads its edition)" % rel)
-            refuse_developer_runtime(rel, data)
+            refuse_developer_runtime(rel, data, full)
             rows.append((rel, hashlib.sha256(data).hexdigest(), len(data), full))
     rows.sort(key=lambda r: r[0].lower())
     if not any(r[0].lower() == FRONT_END for r in rows):

@@ -17,14 +17,51 @@
 
 namespace wgfsr {
 
+// Owns one thing to give back (the create worker's COM reference on the game's device, taken by the front end before the
+// worker starts): released exactly once, by Release() or, if nobody did, when the owner goes away. So the reference is
+// given back when the worker finishes, when the worker could not be started at all (Start), and when anything between taking
+// the reference and starting the worker throws. Move-only.
+class ScopedRelease {
+public:
+    ScopedRelease() = default;
+    explicit ScopedRelease(std::function<void()> release) : release_(std::move(release)) {}
+    ScopedRelease(ScopedRelease&& o) noexcept : release_(std::move(o.release_)) { o.release_ = nullptr; }
+    ScopedRelease& operator=(ScopedRelease&& o) noexcept {
+        if (this != &o) {
+            Release();
+            release_ = std::move(o.release_);
+            o.release_ = nullptr;
+        }
+        return *this;
+    }
+    ScopedRelease(const ScopedRelease&) = delete;
+    ScopedRelease& operator=(const ScopedRelease&) = delete;
+    ~ScopedRelease() { Release(); }
+    void Release() {
+        std::function<void()> f = std::move(release_);
+        release_ = nullptr;
+        if (f) f();
+    }
+    explicit operator bool() const { return static_cast<bool>(release_); }
+
+private:
+    std::function<void()> release_;
+};
+
 class PendingCreate {
 public:
     // Starts backend->create(info) on a new thread. `info` and what it points to (options, log user) must stay valid
-    // until the create finished, or until the cleanup given to Abandon ran. `releaseWhenDone`: runs on the worker thread as
-    // its last step, also after a timeout and after the context went away (the front end takes a COM reference on the
-    // game's D3D12 device before the worker starts and gives it back here, so a late worker never meets a released device).
+    // until the create finished, or until the cleanup given to Abandon ran. `hold`: released by the worker as its last step,
+    // also after a timeout and after the context went away; released at once when the worker cannot be started (the create
+    // then counts as failed: WG_ERROR_DEVICE, no exception reaches the game's thread) or when anything before it throws (the
+    // front end takes a COM reference on the game's D3D12 device before the worker starts and gives it back through this, so a
+    // late worker never meets a released device and a worker that never ran never leaks it).
     static std::shared_ptr<PendingCreate> Start(const WgUpscalerBackend* backend, const WgCreateInfo& info,
-                                                std::function<void()> releaseWhenDone = {});
+                                                ScopedRelease hold = {});
+    // Tests: how the worker thread is launched (default: a detached std::thread). A launcher that throws is a worker that
+    // could not be started. Null restores the default.
+    using Launcher = void (*)(std::function<void()> work);
+    static void SetLauncherForTest(Launcher launcher);
 
     // Waits up to `ms` milliseconds (UINT32_MAX: until it finishes); true when the create has finished.
     bool Wait(uint32_t ms);
@@ -52,7 +89,7 @@ private:
     WgResult result_ = WG_ERROR_DEVICE;
     WgUpscaler* upscaler_ = nullptr;
     std::function<void(WgUpscaler*)> cleanup_;  // set by Abandon while the create runs
-    std::function<void()> release_;             // the worker's last step (Start's releaseWhenDone)
+    ScopedRelease release_;                     // the worker's last step (Start's hold)
     double reported_ = 0;                        // highest threshold PassedThreshold answered true for
     std::chrono::steady_clock::time_point start_, end_;
 };
