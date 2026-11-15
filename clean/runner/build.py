@@ -26,12 +26,16 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
+from clean.runner import family as F  # noqa: E402
 from clean.runner import perf_variants as PV  # noqa: E402
 from clean.runner import variants as V  # noqa: E402
 from clean.k.runner import k_build  # noqa: E402  (model K kernels, clean/k)
 KERNEL_DIR = os.path.join(os.path.dirname(HERE), "kernels")
 SOURCES = ["swin.hip", "probe.hip", "overlap.hip", "rates.hip", "mlpbench.hip", "encoder.hip", "decoder.hip", "exposure.hip",
            "post.hip", "frame.hip", "dec1_dec0.hip"]
+# Default sources of the families that do not build the whole gfx12 set: kernels that compile for gfx11 unchanged
+# (the matrix kernels need the gfx12 builtins until they are ported); no Model K / L kernels, no post_w64 variants
+FAMILY_SOURCES = {"gfx11": ["post.hip", "exposure.hip", "frame.hip"]}
 RUNTIME_DIR = os.path.join(os.path.dirname(HERE), "runtime")
 RUNTIME_SOURCES = ["device.cpp", "embedded.cpp", "model.cpp", "runtime.cpp",
                    os.path.join("..", "converter", "src", "sha256.cpp"),   # shared with the converter (spec 08)
@@ -589,9 +593,15 @@ def run_post_w64(cmd, out_dir, gate=True, report_name=POST_W64_REPORT, gates=Non
 
 
 def main(argv=None):
+    global ARCH
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--rocm", default=os.environ.get("ROCM_PATH", ""), help="ROCm / HIP SDK directory")
     ap.add_argument("--out", required=True, help="output directory for the code objects")
+    ap.add_argument("--arch", help=f"GPU target (default {ARCH}, or the environment variable WG_GPU_ARCH); gfx1100 and "
+                                   "gfx1101 build code objects only (default sources: FAMILY_SOURCES)")
+    ap.add_argument("--sources", nargs="+", metavar="FILE",
+                    help="build only these kernel sources (names in clean/kernels, e.g. post.hip) as <name>.co and "
+                         "write target.json; no models, variants, runtime or emulator")
     ap.add_argument("--clang", help="clang executable (default: from --rocm, then PATH)")
     ap.add_argument("--no-device-libs", action="store_true", help="add -nogpulib instead of the ROCm device libs")
     ap.add_argument("--report", action="store_true", help="print VGPR/spill/occupancy per kernel")
@@ -653,9 +663,19 @@ def main(argv=None):
         args.perf_variants = True
 
     os.makedirs(args.out, exist_ok=True)
+    ARCH = args.arch or ARCH
     EXTRA_ARCHS[:] = [a for a in args.extra_archs.split(",") if a and a != ARCH]
-    if any(a not in ("gfx1200", "gfx1201") for a in [ARCH] + EXTRA_ARCHS):
-        raise SystemExit("supported release targets are gfx1200 and gfx1201 only")
+    try:
+        fam = F.family(ARCH)
+    except ValueError as e:
+        raise SystemExit(str(e))
+    if any(F.FAMILIES.get(a) != "gfx12" for a in EXTRA_ARCHS):
+        raise SystemExit("--extra-archs takes gfx12 targets only (gfx1200, gfx1201)")
+    if fam != "gfx12" and (args.runtime_only or args.motion_outres_only):
+        raise SystemExit(f"gfx11 targets build code objects only: {ARCH} has no runtime library or motion code objects")
+    for s_ in args.sources or []:
+        if not os.path.isfile(os.path.join(KERNEL_DIR, s_)):
+            raise SystemExit(f"--sources: {s_} is not a kernel source in {KERNEL_DIR}")
     if args.runtime_only:
         if MODEL_L and args.rocm:  # Model L's code objects next to the given ones (release builds reuse pinned ones)
             clang = args.clang or find_clang(args.rocm)
@@ -688,6 +708,15 @@ def main(argv=None):
         if not args.rocm and not args.no_device_libs:
             raise SystemExit("--rocm is required (or --no-device-libs for a compile check)")
         clang = args.clang or find_clang(args.rocm)
+        if args.sources or fam in FAMILY_SOURCES:  # a chosen or per-family list: these code objects only
+            for src in args.sources or FAMILY_SOURCES[fam]:
+                run(device_command(clang, args.rocm, os.path.join(KERNEL_DIR, src),
+                                   os.path.join(args.out, os.path.splitext(src)[0] + ".co"),
+                                   device_libs=not args.no_device_libs, report=args.report, soft_fp8=args.soft_fp8,
+                                   defines=dict(d.split('=', 1) for d in args.define)))
+            with open(os.path.join(args.out, F.TARGET_FILE), "w") as f:
+                json.dump({"arch": ARCH}, f)
+            return
         for src in SOURCES:
             out = os.path.join(args.out, os.path.splitext(src)[0] + ".co")
             run(device_command(clang, args.rocm, os.path.join(KERNEL_DIR, src), out,

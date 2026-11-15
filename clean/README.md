@@ -133,6 +133,24 @@ objects and the converter map into `build`; the FidelityFX front end loads it (c
 other than `gfx12`, set `WG_D_ROW` to the reported table (for example `set WG_D_ROW=[[0,2,4,...],[1,3,...]]`)
 before running.
 
+## Linux (code objects for gfx1100 and gfx1201, no runtime library)
+
+`--rocm` names an SDK in the layout of AMD's installer: `bin/clang`, the device library in `amdgcn/bitcode` and
+`libamdhip64.so` in `lib`. A distribution's ROCm that keeps these elsewhere is used through a folder of links in that
+layout.
+
+```
+python clean/runner/build.py --rocm <ROCm> --out build --no-runtime --no-model-k                 # gfx1201, all code objects
+python clean/runner/build.py --arch gfx1100 --rocm <ROCm> --out build-gfx1100                     # the gfx11 default sources
+python clean/runner/build.py --arch gfx1100 --rocm <ROCm> --out build-gfx1100 --sources post.hip frame.hip
+```
+
+Targets are matched by exact name (`runner/family.py`): gfx1200 and gfx1201 are gfx12, gfx1100 and gfx1101 are gfx11,
+anything else is refused. A gfx11 build compiles only the kernels that need no matrix instructions (`FAMILY_SOURCES` in
+`build.py`: post, exposure, frame) and no runtime library, Model K or L kernels, variants or resource gate; `--sources`
+builds a chosen list for either family. Both write `target.json` next to the code objects, and `Runner` takes its default
+accumulator row table from it (`WG_D_ROW` and the `d_row` argument still win).
+
 ## Spec team: stages post and filter (spec 06)
 
 ```

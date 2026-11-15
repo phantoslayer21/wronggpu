@@ -29,7 +29,7 @@ import numpy as np  # noqa: E402
 
 from clean.reference.fp8 import fp8_decode, fp8_encode  # noqa: E402
 from clean.reference.swin import MODEL_STAGES, STAGES, stage_table, window_offset  # noqa: E402,F401
-from clean.runner import dec0, dec1dec0, enc0, exposure, post  # noqa: E402
+from clean.runner import dec0, dec1dec0, enc0, exposure, family, post  # noqa: E402
 from clean.runner import perf_variants as PV  # noqa: E402
 from clean.runner import variants as V  # noqa: E402
 from clean.runner.packing import (MID_STAGES, pack_bneck, pack_mid, pack_stage, split_bneck, split_mid,  # noqa: E402
@@ -92,7 +92,7 @@ class Runner:
         self.variant = variant
         self.backend = backend
         self._extra_modules = {}
-        self.d_row = d_row if d_row is not None else os.environ.get("WG_D_ROW", "gfx12")
+        self.d_row = d_row if d_row is not None else os.environ.get("WG_D_ROW") or family.build_family(build_dir)
         self.geo, code_object = V.DEFAULT_GEOMETRY, V.code_object(variant)
         manifest = os.path.join(build_dir, V.MANIFEST)
         if os.path.exists(manifest):
