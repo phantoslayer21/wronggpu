@@ -133,18 +133,39 @@ class TestWrappers(Gfx11Case, unittest.TestCase):
         np.testing.assert_array_equal(got, self.exact(a.astype(np.float64), b.astype(np.float64)))
 
     def test_the_instruction_reads_each_half_for_its_own_rows(self):
-        """As measured on the card: with lanes 16-31 of A different from lanes 0-15, only the odd rows change."""
+        """As measured on the card: with lanes 16-31 of A (or of B) different from lanes 0-15, only the odd rows change."""
         rng = np.random.default_rng(13)
         a = (rng.integers(-8, 9, (8, 32, 16))).astype(np.float16)
         b = (rng.integers(-8, 9, (8, 32, 16))).astype(np.float16)
         a[:, 16:] = a[:, :16]
         b[:, 16:] = b[:, :16]
         base = self.call("probe_wmma16", f16_bits(a), f16_bits(b))
-        a2 = a.copy()
-        a2[:, 16:] = rng.integers(-8, 9, (8, 16, 16)).astype(np.float16)
-        got = self.call("probe_wmma16", f16_bits(a2), f16_bits(b))
-        np.testing.assert_array_equal(got[:, :16], base[:, :16])
-        self.assertTrue(np.any(got[:, 16:] != base[:, 16:]))
+        other = rng.integers(-8, 9, (8, 16, 16)).astype(np.float16)
+        for name, (x, y) in {"A": (np.concatenate([a[:, :16], other], 1), b),
+                             "B": (a, np.concatenate([b[:, :16], other], 1))}.items():
+            with self.subTest(operand=name):
+                got = self.call("probe_wmma16", f16_bits(x), f16_bits(y))
+                np.testing.assert_array_equal(got[:, :16], base[:, :16])
+                self.assertTrue(np.any(got[:, 16:] != base[:, 16:]))
+
+
+class TestSelftestGfx11(Gfx11Case, unittest.TestCase):
+    """runner/selftest.py in the gfx11 emulator mode: the probes that run on the card (test_gpu_probes), against the exact
+    model of the instruction."""
+
+    def test_probes_pass_and_report_the_gfx11_layout(self):
+        from clean.runner import selftest
+        report = selftest.selftest(build_dir(), "", "emu", "wg_emu__gfx11.so")
+        self.assertTrue(report["pass"], report)
+        self.assertEqual(report["family"], "gfx11")
+        for kind in ("wmma_fp8", "wmma_f16"):
+            self.assertEqual(report[kind]["d_row"], [[0, 2, 4, 6, 8, 10, 12, 14], [1, 3, 5, 7, 9, 11, 13, 15]])
+            self.assertEqual(report[kind]["d_row_name"], "gfx11")
+            self.assertEqual(report[kind]["one_times_one"], 1.0)
+            # no hardware error here: the one rounding of an exact sum to FP32 is at most 8 units of 2^(E - 24)
+            self.assertLessEqual(report[kind + "_arithmetic"]["max_units"], 8.0)
+        self.assertEqual(report["wmma16_lanes"]["output_half_reads_operand_halves"], {0: (0, 0), 1: (1, 1)})
+        self.assertTrue(report["wmma16_lanes"]["lanes_16_31_matter"])
 
 
 if __name__ == "__main__":

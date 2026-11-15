@@ -40,6 +40,31 @@ WG_KERNEL(probe_xchg16)(const u32* x, u32* word, u32* flt) {
 }
 #endif
 
+// The exchange in divergent code: only the lanes the condition selects execute wg_xchg16_u, the others keep 0xdeadbeef.
+// mode 0: lanes 0-15 of each wave (their partners are inactive); 1: odd lanes; 2: lanes 16-31; 3: every fourth lane;
+// 4: lanes whose value is even (a data-dependent condition). Where a lane executes it must get x of lane (i ^ 16).
+// (Not in the emulator: its exchange is collective, every lane of the wave takes part.)
+#if defined(WG_GFX11)
+WG_KERNEL(probe_xchg16_div)(const u32* x, u32* out, int mode) {
+  const u32 i = wg_block_id() * WG_BLOCK + wg_lane_id();
+  const u32 l = wg_lane_id() & 31u;
+  const u32 v = x[i];
+  u32 r = 0xdeadbeefu;
+  if (mode == 0) {
+    if (l < 16u) r = wg_xchg16_u(v);
+  } else if (mode == 1) {
+    if (l & 1u) r = wg_xchg16_u(v);
+  } else if (mode == 2) {
+    if (l >= 16u) r = wg_xchg16_u(v);
+  } else if (mode == 3) {
+    if ((l & 3u) == 0u) r = wg_xchg16_u(v);
+  } else {
+    if ((v & 1u) == 0u) r = wg_xchg16_u(v);
+  }
+  out[i] = r;
+}
+#endif
+
 // Software FP8 conversions of wg_platform.h: enc[i] = code of x[i]; dec[c] = value of code c (c < 256).
 WG_KERNEL(probe_fp8_sw)(const float* x, u32* enc, float* dec, int n) {
   const u32 i = wg_block_id() * WG_BLOCK + wg_lane_id();

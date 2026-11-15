@@ -18,8 +18,14 @@ Prints a short report (numbers and pass/fail only). What it checks:
   4. Informational: hardware FP8 conversions (v_cvt_pk_fp8_f32 / v_cvt_f32_fp8) against the reference.
   4b. gfx11 builds and the emulator: the half-wave exchange (wg_xor16 and its 32-bit word form): lane l gets the value of
       lane l ^ 16, bit for bit.
-  On a gfx11 build (target.json) the matrix probes (1, 2) and the hardware conversions (4) are skipped: the target has
-  no FP8 matrix or conversion instructions, and the conversions of item 3 are the software ones, as in every gfx11 kernel.
+  4c. gfx11 builds and the gfx11 emulator (wg_emu__gfx11.so, --emu-library): the exchange in divergent code (lanes that
+      do not take part, partners that are inactive); the F16 matrix instruction on raw registers (which lanes feed which
+      half of the result); random E4M3 and F16 operands through the wrappers against float64 sums (error in units of
+      2^(E-24), E the exponent of the largest product).
+  On a gfx11 build (target.json) the hardware conversions (4) are skipped: the target has no FP8 conversion instructions,
+  and the conversions of item 3 are the software ones, as in every gfx11 kernel. The matrix probes (1, 2) run through the
+  wrappers of wg_platform.h there (FP8 codes widened to F16, one F16 matrix instruction): the layout probes report
+  the accumulator rows 2v + h, name "gfx11".
   5. If the second design was built (build.py --variants v2 or all: swin__v2.co), its conversion helpers
      (probe_v2_conv): packed FP8 decoding (v_cvt_pk_f32_fp8) in every byte position, the FP8 packing with full and
      upper-only clamp, its FP16 conversion (v_fma_mixlo/hi_f16, must equal round-to-nearest-even), and its GELU + q8
@@ -197,6 +203,120 @@ def probe_xchg16(dev):
     return res
 
 
+def probe_xchg16_divergent(dev):
+    """wg_xchg16_u where only some lanes take part (probe_xchg16_div): a lane that takes part gets the value of lane l ^ 16
+    also when that lane does not (its register is read all the same: lanes 0-15 take part, lanes 16-31 do not, and the
+    reverse); the lanes that do not take part keep their marker."""
+    n = 4 * BLOCK
+    x = np.random.default_rng(4).integers(0, 2 ** 32, n, dtype=np.uint32)
+    lane = np.arange(n) % 32
+    partner = x.reshape(-1, 2, 16)[:, ::-1, :].reshape(-1)
+    takes_part = {0: lane < 16, 1: lane % 2 == 1, 2: lane >= 16, 3: lane % 4 == 0, 4: x % 2 == 0}
+    res = {"modes": {}}
+    for mode, takes in takes_part.items():
+        (out,) = dev.call("probe_xchg16_div", [x.tobytes()], [4 * n], scalars=[mode], threads=n)
+        out = np.frombuffer(out, np.uint32)
+        res["modes"][mode] = {"lanes_taking_part": int(takes.sum()), "wrong_values": int(np.sum(out[takes] != partner[takes])),
+                              "markers_overwritten": int(np.sum(out[~takes] != 0xDEADBEEF))}
+    res["pass"] = bool(all(m["wrong_values"] == 0 and m["markers_overwritten"] == 0 for m in res["modes"].values()))
+    return res
+
+
+def probe_wmma16_lanes(dev):
+    """The gfx11 F16 matrix instruction on raw registers (probe_wmma16): D(row 2v + h, column c) is in element v of lane
+    16h + c; which lanes of A (row r in lane r) and B (column c in lane c) feed which half of the result? Operands are small
+    integers, the products are exact (mixed-sign sums can still be a unit off in the last place: compared with 1e-4)."""
+    n = 64
+    rng = np.random.default_rng(5)
+
+    def ints(shape):
+        return rng.integers(-4, 5, shape).astype(np.float16)
+
+    def expect(a_lanes, b_lanes):
+        """[n, 32, 8] result for A rows from a_lanes [n, 16, 16 K] and B columns from b_lanes."""
+        d = np.einsum("nrk,nck->nrc", a_lanes.astype(np.float64), b_lanes.astype(np.float64))
+        return np.stack([d[:, 2 * v + l // 16, l % 16] for l in range(32) for v in range(8)], 1).reshape(n, 32, 8)
+
+    def run(a, b):
+        (d,) = dev.call("probe_wmma16", [a.tobytes(), b.tobytes()], [n * 32 * 32], threads=n * 32)
+        return np.frombuffer(d, np.float32).reshape(n, 32, 8)
+
+    def matches(got, want, half):
+        s = slice(16 * half, 16 * half + 16)
+        return bool(np.max(np.abs(got[:, s] - want[:, s])) < 1e-4)
+
+    a, b = ints((n, 32, 16)), ints((n, 32, 16))
+    a[:, 16:], b[:, 16:] = a[:, :16], b[:, :16]
+    res = {"replicated_operands_follow_the_layout": matches(run(a, b), expect(a[:, :16], b[:, :16]), 0) and
+                                                    matches(run(a, b), expect(a[:, :16], b[:, :16]), 1)}
+    a2, b2 = a.copy(), b.copy()
+    a2[:, 16:], b2[:, 16:] = ints((n, 16, 16)), ints((n, 16, 16))
+    got = run(a2, b2)
+    reads = {}   # output half -> (half of A, half of B) it takes its operands from, None if neither combination fits
+    for out_half in range(2):
+        reads[out_half] = next(((sa, sb) for sa in range(2) for sb in range(2)
+                                if matches(got, expect(a2[:, 16 * sa:16 * sa + 16], b2[:, 16 * sb:16 * sb + 16]), out_half)),
+                               None)
+    res["output_half_reads_operand_halves"] = reads   # {0: (0, 0), 1: (1, 1)}: each half of the result its own lanes
+    res["lanes_16_31_matter"] = bool(reads[1] is not None and reads[1] != (0, 0))
+    res["pass"] = bool(res["replicated_operands_follow_the_layout"] and None not in reads.values())
+    return res
+
+
+def probe_wmma_arithmetic(dev, kind, d_row, problems=32768, seed=7):
+    """Random operands through the wrapper (probe_wmma_fp8 / probe_wmma_f16) against exact float64 sums, whatever the
+    K slot order: D(r, c) = sum over h, j of A[16h + r][j] B[16h + c][j] (the slots of one lane pair are one K index).
+    Error in units of 2^(E - 24), E the exponent of the largest product of the sum. RDNA 3's F16 matrix instruction loses
+    about one such unit with mixed signs (analysis 6.3: on the P1b-like data 99.8 % of the outputs within 4 units, the
+    largest of 33.5 M uniform-random E4M3 outputs 23 units). E4M3 operands: uniform random codes without NaN; F16: normal
+    random values (11 significant bits). Limits, from the analysis' largest error and a first run on an RX 7900 XT (E4M3:
+    98.86 % within 4 units, 100 % within 16, largest 17.1; F16: 87.8 %, 99.96 %, 37.3; the same in a second seed): none
+    beyond 64 units; E4M3 at least 98 % within 4 units; F16 at least 99.9 % within 16. The exact model of the emulator
+    (one rounding to FP32) has 99.9999 % within 4 units and its largest is 8. `d_row` is the table of probe_wmma (row of D
+    at (h, v))."""
+    rng = np.random.default_rng(seed)
+    if kind == "fp8":
+        a = rng.integers(0, 256, (problems, 32, 8), dtype=np.uint8)
+        b = rng.integers(0, 256, (problems, 32, 8), dtype=np.uint8)
+        for arr in (a, b):
+            arr[(arr & 0x7F) == 0x7F] = FP8_ONE
+        av, bv = DECODE[a].astype(np.float64), DECODE[b].astype(np.float64)
+    else:
+        a = (rng.standard_normal((problems, 32, 8)) * 2.0).astype(np.float16)
+        b = (rng.standard_normal((problems, 32, 8)) * 2.0).astype(np.float16)
+        av, bv = a.astype(np.float64), b.astype(np.float64)
+        a, b = a.view(np.uint16), b.view(np.uint16)
+    d = _run_wmma(dev, kind, a, b)
+    where = {d_row[h][v]: (h, v) for h in range(2) for v in range(8)}     # row of D -> (lane half, element)
+    row_lane = 16 * np.array([where[r][0] for r in range(16)])[:, None] + np.arange(16)[None, :]   # [r, c] -> lane
+    row_elem = np.array([where[r][1] for r in range(16)])
+    units, zero_wrong, nonfinite, same_sign = [], 0, 0, []
+    chunk = 2048
+    for lo in range(0, problems, chunk):
+        sl = slice(lo, min(lo + chunk, problems))
+        x, y = av[sl].reshape(-1, 2, 16, 8), bv[sl].reshape(-1, 2, 16, 8)
+        prod = np.einsum("nhrj,nhcj->nrchj", x, y)                    # every product of every output
+        exact = prod.sum(axis=(3, 4))
+        top = np.abs(prod).max(axis=(3, 4))
+        got = d[sl][np.arange(x.shape[0])[:, None, None], row_lane[None], row_elem[None, :, None]].astype(np.float64)
+        nonfinite += int(np.sum(~np.isfinite(got)))
+        live = top > 0
+        zero_wrong += int(np.sum(~live & (got != 0)))
+        unit = np.ldexp(1.0, np.floor(np.log2(np.where(live, top, 1.0))).astype(int) - 24)
+        units.append((np.abs(got - exact) / unit)[live])
+        same_sign.append((np.all(prod >= 0, axis=(3, 4)) | np.all(prod <= 0, axis=(3, 4)))[live])
+    u, ss = np.concatenate(units), np.concatenate(same_sign)
+    res = {"kind": kind, "outputs": int(u.size), "exact_fraction": float(np.mean(u == 0)),
+           "within_1_unit_fraction": float(np.mean(u <= 1)), "within_4_units_fraction": float(np.mean(u <= 4)),
+           "within_16_units_fraction": float(np.mean(u <= 16)), "p99_9_units": float(np.quantile(u, 0.999)),
+           "max_units": float(u.max()), "mean_units": float(u.mean()),
+           "same_sign_outputs": int(ss.sum()), "same_sign_exact_fraction": float(np.mean(u[ss] == 0)) if ss.any() else None,
+           "nonfinite": nonfinite, "zero_sum_not_zero": zero_wrong}
+    res["pass"] = bool(nonfinite == 0 and zero_wrong == 0 and res["max_units"] <= 64 and
+                       (res["within_4_units_fraction"] >= 0.98 if kind == "fp8" else res["within_16_units_fraction"] >= 0.999))
+    return res
+
+
 def probe_fp8(dev, backend, hardware=True):
     edge = [0.0, -0.0, 448.0, 449.0, 463.9, 464.0, 465.0, 500.0, 1e6, np.inf, -np.inf, np.nan, 2.0 ** -9,
             2.0 ** -10, 3 * 2.0 ** -11, 2.0 ** -6, 2.0 ** -6 * 1.0625, 2.0 ** -7 * 1.5, 1.0625, 1.1875, 240.0, 256.0]
@@ -321,22 +441,32 @@ def probe_v2(dev):
     return res
 
 
-def selftest(build_dir, rocm_dir="", backend="hip"):
-    dev = _Dev(backend, build_dir, rocm_dir)
-    gfx11 = backend == "hip" and family.build_family(build_dir) == "gfx11"   # no FP8 matrix or conversion instructions
+def selftest(build_dir, rocm_dir="", backend="hip", emu_library="wg_emu.so"):
+    gfx11 = (backend == "hip" and family.build_family(build_dir) == "gfx11") or (backend == "emu" and emu_library == "wg_emu__gfx11.so")
+    dev = _Dev(backend, build_dir, rocm_dir, emu_library=emu_library)
+    # gfx11: no FP8 conversion instructions (the matrix wrappers widen to F16, wg_platform.h)
     report = {"device": dev.dev.device_name, "family": "gfx11" if gfx11 else "gfx12"}
     report["fp8_conversion"] = probe_fp8(dev, backend, hardware=not gfx11)
     report["pass"] = bool(report["fp8_conversion"]["pass"])
     if gfx11 or backend == "emu":   # probe.hip has the exchange probe only there (the gfx12 code object is unchanged)
         report["exchange"] = probe_xchg16(dev)
         report["pass"] = bool(report["pass"] and report["exchange"]["pass"])
-    if not gfx11:
-        report["wmma_fp8"] = probe_wmma(dev, "fp8")
-        report["wmma_f16"] = probe_wmma(dev, "f16")
-        d8, d16 = report["wmma_fp8"]["d_row"], report["wmma_f16"]["d_row"]
-        report["d_row_consistent_fp8_f16"] = d8 is not None and d8 == d16
-        report["pass"] = bool(report["pass"] and report["wmma_fp8"]["pass"] and report["wmma_f16"]["pass"] and
-                              report["d_row_consistent_fp8_f16"])
+    if gfx11 and backend == "hip":  # the emulator's exchange is collective: no divergent form
+        report["exchange_divergent"] = probe_xchg16_divergent(dev)
+        report["pass"] = bool(report["pass"] and report["exchange_divergent"]["pass"])
+    report["wmma_fp8"] = probe_wmma(dev, "fp8")
+    report["wmma_f16"] = probe_wmma(dev, "f16")
+    d8, d16 = report["wmma_fp8"]["d_row"], report["wmma_f16"]["d_row"]
+    report["d_row_consistent_fp8_f16"] = d8 is not None and d8 == d16
+    report["pass"] = bool(report["pass"] and report["wmma_fp8"]["pass"] and report["wmma_f16"]["pass"] and
+                          report["d_row_consistent_fp8_f16"])
+    if gfx11:
+        report["wmma16_lanes"] = probe_wmma16_lanes(dev)
+        report["pass"] = bool(report["pass"] and report["wmma16_lanes"]["pass"])
+        for kind, key in (("fp8", "wmma_fp8"), ("f16", "wmma_f16")):
+            if report[key]["d_row"] is not None:
+                report[key + "_arithmetic"] = probe_wmma_arithmetic(dev, kind, report[key]["d_row"])
+                report["pass"] = bool(report["pass"] and report[key + "_arithmetic"]["pass"])
     # Second design (kernels/swin_v2.hip), when it was built: its own conversion helpers.
     v2_file = "swin__v2.co" if backend == "hip" else "wg_emu__v2.so"
     if os.path.exists(os.path.join(build_dir, v2_file)):
@@ -352,8 +482,10 @@ def main(argv=None):
     ap.add_argument("--build", required=True)
     ap.add_argument("--rocm", default=os.environ.get("ROCM_PATH", ""))
     ap.add_argument("--backend", default="hip", choices=["hip", "emu"])
+    ap.add_argument("--emu-library", default="wg_emu.so", help="emulator library of the build folder (wg_emu__gfx11.so: "
+                                                               "the gfx11 mode)")
     args = ap.parse_args(argv)
-    report = selftest(args.build, args.rocm, args.backend)
+    report = selftest(args.build, args.rocm, args.backend, args.emu_library)
     print(json.dumps(report, indent=1))
     return 0 if report["pass"] else 1
 
