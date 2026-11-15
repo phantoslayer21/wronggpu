@@ -524,6 +524,11 @@ class Dx12Device : public Device {
     }
     std::set<std::string> seen;
     for (const wgc::Json& k : ks->items) {
+      // a port that needs the driver's conversion fold (manifest "needs": "fold") runs only on the native device after
+      // its start-up guard (device_d3d12.cpp fold_probe); this device has no guard and takes the exact "nofold" port
+      // (and never a guard's "control" port)
+      if (const wgc::Json* nd = k.find("needs"); nd && nd->is_string() && (nd->text == "fold" || nd->text == "control"))
+        continue;
       Kernel x;
       int64_t block = 0, wave = 0, dwords = 0;
       const wgc::Json *n = k.find("name"), *fl = k.find("file"), *ar = k.find("args"), *co = k.find("co");
