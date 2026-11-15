@@ -23,8 +23,9 @@ def child_commands(argv):
     with tempfile.TemporaryDirectory() as out, patch.object(build, "EXTRA_ARCHS", []), \
             patch.object(build, "build_motion_outres") as parent, patch.object(build.subprocess, "run", fake_run), \
             contextlib.redirect_stdout(io.StringIO()):
-        # (--rocm is given: the default would be the ROCM_PATH of the environment this runs in)
-        build.main(["--out", out, "--motion-outres-only", "--rocm", "dummy-rocm", "--no-device-libs", "--clang", "dummy-clang",
+        # (a dummy --rocm, accepted with --force-sdk: no compiler runs)
+        build.main(["--out", out, "--motion-outres-only", "--rocm", "dummy-rocm", "--force-sdk", "--no-device-libs",
+                    "--clang", "dummy-clang",
                     "--extra-archs", "gfx1200,gfx1201"] + argv)
         parent.assert_called_once()
     return started
@@ -55,7 +56,7 @@ class MotionOutresChild(unittest.TestCase):
 
     def test_the_options_that_were_forwarded_before_still_are(self):
         cmd = child_commands(["--soft-fp8", "--no-resource-gate", "--define", "X=1"])[0][0]
-        for flag in ("--no-device-libs", "--soft-fp8", "--no-resource-gate"):
+        for flag in ("--no-device-libs", "--soft-fp8", "--no-resource-gate", "--force-sdk"):
             self.assertIn(flag, cmd)
         self.assertEqual(values_of(cmd, "--clang"), ["dummy-clang"])
 

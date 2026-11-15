@@ -29,6 +29,8 @@ import ctypes  # noqa: E402
 
 import numpy as np  # noqa: E402
 
+from clean.runner.sdk import OFFICIAL_ROCM  # noqa: E402  (the official HIP SDK, never ROCM_PATH)
+
 BLOCK = 256
 WAVES_PER_BLOCK = BLOCK // 32
 WMMA_FLOP = 2 * 16 * 16 * 16          # one 16x16x16 WMMA
@@ -127,7 +129,7 @@ def format_report(r):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
-    ap.add_argument("--rocm", default=os.environ.get("ROCM_PATH", ""))
+    ap.add_argument("--rocm", default=OFFICIAL_ROCM)
     ap.add_argument("--json")
     ap.add_argument("--repeats", type=int, default=9)
     args = ap.parse_args(argv)

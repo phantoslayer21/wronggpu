@@ -33,7 +33,7 @@ these defaults:
 | `WG_TOOLCHAINS` | folder that holds `dxc-v1.10.2605.24\` (the DXC release zip, unpacked) and `rga-2.15\` (the RGA zip, unpacked) | `<repository>\toolchains` (ignored by git) |
 | `WG_DXC_DIR` | DXC's `bin\x64` folder (overrides `WG_TOOLCHAINS`) | `%WG_TOOLCHAINS%\dxc-v1.10.2605.24\bin\x64` |
 | `WG_RGA` | `rga.exe` (overrides `WG_TOOLCHAINS`) | `%WG_TOOLCHAINS%\rga-2.15\rga.exe` |
-| `ROCM_PATH` | HIP SDK folder. Scripts with a `--rocm` argument default to it (the argument wins); the others read it | `C:\Program Files\AMD\ROCm\7.2` |
+| `ROCM_PATH` | Not read by the build scripts: they use AMD's official HIP SDK folder `C:\Program Files\AMD\ROCm\7.2` (`clean/runner/sdk.py`); `--rocm` may name only that folder, another one needs `--force-sdk`. Every build prints the SDK, compiler and device-library folders it uses | - |
 | `VSDEVCMD` | Visual Studio's `VsDevCmd.bat` (the kernel scripts build two small helper tools); for another edition e.g. `C:\Program Files\Microsoft Visual Studio\18\Professional\Common7\Tools\VsDevCmd.bat` (or `...\18\Enterprise\...`) | `C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat` |
 | `CXX`, `WG_K_RT_CXX`, `WG_K_RT_BUILD`, `WG_CONVERTER_EXE` | Model K table tests (`clean\k\tests\test_k_runtime_tables`, `test_k_runtime_pack`): the compiler is `%CXX%`, else clang++ / g++ on PATH, else the HIP SDK's clang++, else MSVC (`WG_K_RT_CXX=msvc` picks MSVC first); their build folder; an already built converter. With no compiler found the tests skip themselves with that reason | temporary folder; converter built from source |
 | `WG_BUILD_ROOT` | default output root of the scripts that have one | `<repository>\build` (ignored by git) |
@@ -41,9 +41,10 @@ these defaults:
 | `WG_GPU_LOCK` | optional: a script run as `python <lock> --timeout <s> -- <command>` around GPU jobs | unset: GPU jobs run directly |
 | `WRONGGPU_HIP_RUNTIME` | the HIP runtime the launcher's probe loads (tests: the stand-in of step 5.1) | the system's |
 
-Set `ROCM_PATH` to the HIP SDK folder (the commands below also pass it as `--rocm`). Remove `HIP_PATH`, `LLVM_PATH`,
-`HIP_DEVICE_LIB_PATH` and `HIP_CLANG_PATH` from the build's environment unless you set them on purpose; the scripts give
-the HIP compiler the folder explicitly.
+The build scripts use AMD's official HIP SDK in `C:\Program Files\AMD\ROCm\7.2` and never take an SDK, a
+clang or a device-library folder from the environment (`ROCM_PATH`, `HIP_PATH`, `LLVM_PATH`, `HIP_DEVICE_LIB_PATH`,
+`HIP_CLANG_PATH`) or from `PATH`. Remove those variables from the build's environment anyway: the vendor runtime
+reads some of them. A build with another SDK needs `--rocm <folder> --force-sdk`, and its log names that folder.
 
 Open a "x64 Native Tools Command Prompt for VS 2026" (or call `vcvars64.bat`) for every step below, at the repository
 root. The commands write into `out\`; any folder outside the repository works the same.

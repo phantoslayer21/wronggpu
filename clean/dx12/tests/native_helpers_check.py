@@ -25,7 +25,7 @@ ROOT = CLEAN.parent
 sys.path.insert(0, str(DX12))
 import build_dx12  # noqa: E402
 
-ROCM = os.environ.get("ROCM_PATH", r"C:\Program Files\AMD\ROCm\7.2")
+ROCM = r"C:\Program Files\AMD\ROCm\7.2"   # the official HIP SDK (clean/runner/sdk.py), never ROCM_PATH
 GUARD = 16
 POISON = np.uint32(0xa5c31f7b)
 

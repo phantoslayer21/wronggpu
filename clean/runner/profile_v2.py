@@ -24,6 +24,7 @@ if _ROOT not in sys.path:
 
 import numpy as np  # noqa: E402
 
+from clean.runner.sdk import OFFICIAL_ROCM  # noqa: E402  (the official HIP SDK, never ROCM_PATH)
 from clean.reference.swin import random_inputs, random_params, window_offset  # noqa: E402
 from clean.runner.stage_runner import Runner  # noqa: E402
 from clean.runner.sweep import GAME_SIZES, stage_inputs, stage_offset, stage_params  # noqa: E402
@@ -130,7 +131,7 @@ def format_report(rep):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
-    ap.add_argument("--rocm", default=os.environ.get("ROCM_PATH", ""))
+    ap.add_argument("--rocm", default=OFFICIAL_ROCM)
     ap.add_argument("--backend", default="hip", choices=["hip", "emu"])
     ap.add_argument("--variant", default="v2prof")
     ap.add_argument("--stages", help="comma-separated (default: all of sweep.GAME_SIZES)")

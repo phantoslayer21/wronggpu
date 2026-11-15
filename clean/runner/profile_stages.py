@@ -36,6 +36,7 @@ if _ROOT not in sys.path:
 
 import numpy as np  # noqa: E402
 
+from clean.runner.sdk import OFFICIAL_ROCM  # noqa: E402  (the official HIP SDK, never ROCM_PATH)
 from clean.reference.swin import STAGES, random_inputs, random_params, window_offset  # noqa: E402
 from clean.runner import variants as V  # noqa: E402
 from clean.runner.packing import block_layout  # noqa: E402
@@ -145,7 +146,7 @@ def block_ms(times):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
-    ap.add_argument("--rocm", default=os.environ.get("ROCM_PATH", ""))
+    ap.add_argument("--rocm", default=OFFICIAL_ROCM)
     ap.add_argument("--backend", default="hip", choices=["hip", "emu"])
     ap.add_argument("--variant", default="prof")
     ap.add_argument("--stages", help="comma-separated (default: enc1, enc2, b0, dec2, dec1)")

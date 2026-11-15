@@ -22,6 +22,7 @@ if _ROOT not in sys.path:
 
 import numpy as np  # noqa: E402
 
+from clean.runner.sdk import OFFICIAL_ROCM  # noqa: E402  (the official HIP SDK, never ROCM_PATH)
 from clean.runner.gen_rates import MIX_K, OPS  # noqa: E402
 
 BLOCK = 256
@@ -102,7 +103,7 @@ def format_table(r):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
-    ap.add_argument("--rocm", default=os.environ.get("ROCM_PATH", ""))
+    ap.add_argument("--rocm", default=OFFICIAL_ROCM)
     ap.add_argument("--json")
     args = ap.parse_args(argv)
     r = run(args.build, args.rocm)

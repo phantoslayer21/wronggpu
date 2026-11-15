@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 
 import numpy as np  # noqa: E402
 
+from clean.runner.sdk import OFFICIAL_ROCM  # noqa: E402  (the official HIP SDK, never ROCM_PATH)
 from clean.runner.post_sizes import configs  # noqa: E402
 
 # odd sizes: dynamic-resolution steps, odd D, an output width that is not a multiple of 32 (copy path: post_filter_h)
@@ -50,7 +51,7 @@ def dump(python, repo, build, rocm, render, output, frames, paths, motion, seed,
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--rocm", default=os.environ.get("ROCM_PATH", ""))
+    ap.add_argument("--rocm", default=OFFICIAL_ROCM)
     ap.add_argument("--a-repo", required=True)
     ap.add_argument("--a-build", required=True)
     ap.add_argument("--b-repo", required=True)

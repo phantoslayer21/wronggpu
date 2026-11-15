@@ -39,6 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 
 import numpy as np  # noqa: E402
 
+from clean.runner.sdk import OFFICIAL_ROCM  # noqa: E402  (the official HIP SDK, never ROCM_PATH)
 from clean.runner import post as PS  # noqa: E402
 from clean.runner.post_bench import IN_GAME, big_inputs  # noqa: E402
 from clean.runner.stage_runner import Runner  # noqa: E402
@@ -215,7 +216,7 @@ def run(r, sizes, repeats=50, rounds=3, reference=True, report=None, flush_bytes
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
-    ap.add_argument("--rocm", default=os.environ.get("ROCM_PATH", ""))
+    ap.add_argument("--rocm", default=OFFICIAL_ROCM)
     ap.add_argument("--repeats", type=int, default=50)
     ap.add_argument("--rounds", type=int, default=3)
     ap.add_argument("--no-reference", action="store_true", help="only the traffic layouts, not the real kernels")

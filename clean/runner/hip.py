@@ -22,7 +22,7 @@ class HipError(RuntimeError):
 # HSA is removed, except HIP_PLATFORM and HIP_PATH_72, and ROCM_PATH is set to the SDK. A stray inherited variable
 # can point the vendor runtime at an unrelated folder (an LLVM_PATH outside the SDK made hipModuleLoadData crash).
 # Per process only: the user's and the machine's environment are not changed.
-DEFAULT_ROCM = r"C:\Program Files\AMD\ROCm\7.2"
+from clean.runner.sdk import OFFICIAL_ROCM as DEFAULT_ROCM  # noqa: E402  (the official HIP SDK)
 HIP_ENV_KEEP = ("HIP_PLATFORM", "HIP_PATH_72")
 HIP_ENV_PARTS = ("HIP", "LLVM", "ROCM", "HSA")
 
@@ -63,7 +63,7 @@ def _check_environment(rocm_dir):
     root = os.path.normcase(os.path.abspath(rocm_dir)) if rocm_dir else ""
     path = os.path.normcase(os.path.abspath(llvm))
     if not root or os.path.commonpath([root, path]) != root:
-        warnings.warn(f"LLVM_PATH is set to {llvm!r}, outside the HIP SDK ({rocm_dir!r}); an unrelated LLVM there "
+        warnings.warn(f"LLVM_PATH is set to a folder outside the HIP SDK ({rocm_dir!r}); an unrelated LLVM there "
                       "can crash hipModuleLoadData. Unset it if module loading fails.", RuntimeWarning, stacklevel=3)
 
 

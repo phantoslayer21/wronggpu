@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 
 import numpy as np  # noqa: E402
 
+from clean.runner.sdk import OFFICIAL_ROCM  # noqa: E402  (the official HIP SDK, never ROCM_PATH)
 from clean.reference import encoder as En  # noqa: E402
 from clean.runner.pipeline import Pipeline  # noqa: E402
 from clean.runner.synthetic_model import synthetic_tensors, write_raw  # noqa: E402
@@ -118,7 +119,7 @@ def frame_inputs(rng, rw, rh, reset, pi):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
-    ap.add_argument("--rocm", default=os.environ.get("ROCM_PATH", ""))
+    ap.add_argument("--rocm", default=OFFICIAL_ROCM)
     ap.add_argument("--model", required=True)
     ap.add_argument("--output", default="2560x1440")
     ap.add_argument("--frames", type=int, default=14)

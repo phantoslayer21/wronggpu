@@ -59,6 +59,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 
 import numpy as np  # noqa: E402
 
+from clean.runner.sdk import OFFICIAL_ROCM  # noqa: E402  (the official HIP SDK, never ROCM_PATH)
 from clean.runner import post as PS  # noqa: E402
 
 W64 = "post_w64.co"
@@ -629,7 +630,7 @@ def main(argv=None):
     for name in ("time", "dump"):
         p = sub.add_parser(name)
         p.add_argument("--build", required=True)
-        p.add_argument("--rocm", default=os.environ.get("ROCM_PATH", ""))
+        p.add_argument("--rocm", default=OFFICIAL_ROCM)
         p.add_argument("--code-object", default=W64, help="code object of the post kernels (default post_w64.co)")
         p.add_argument("--render", help="render size WxH (with --output: one configuration)")
         p.add_argument("--output", help="output size WxH")

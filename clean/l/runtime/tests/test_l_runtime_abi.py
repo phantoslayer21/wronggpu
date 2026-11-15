@@ -8,7 +8,7 @@ own metadata (the AMDGPU metadata note of each code object, amdhsa.kernels) is r
 executed. The argument kinds are the frame trace's table
 (clean/tests/runtime_frame_trace.cpp), so the recorder that checks the runtime's arguments and the kernels agree.
 
-Skipped without the HIP SDK (ROCM_PATH or C:\\Program Files\\AMD\\ROCm\\7.2).
+Skipped without the HIP SDK (C:\\Program Files\\AMD\\ROCm\\7.2).
 
 Run (repository root):
     python -m unittest discover -s clean/l/runtime/tests -t clean/l/runtime/tests -p test_l_runtime_abi.py
@@ -33,7 +33,7 @@ _BUILD = None
 
 
 def rocm():
-    for d in (os.environ.get("ROCM_PATH"), r"C:\Program Files\AMD\ROCm\7.2"):
+    for d in (r"C:\Program Files\AMD\ROCm\7.2",):
         if d and os.path.isdir(d):
             return d
     return None
@@ -44,7 +44,7 @@ def build():
     if _BUILD is None:
         r = rocm()
         if not r:
-            raise unittest.SkipTest("no HIP SDK (ROCM_PATH)")
+            raise unittest.SkipTest(r"no HIP SDK (C:\Program Files\AMD\ROCm\7.2)")
         sys.path.insert(0, ROOT)
         from clean.l.runner import l_c32_check as C32
         d = tempfile.mkdtemp(prefix="wg_labi_")

@@ -18,6 +18,7 @@ import unittest
 
 import numpy as np
 
+from clean.runner.sdk import OFFICIAL_ROCM  # noqa: E402  (the official HIP SDK, never ROCM_PATH)
 from clean.k.reference import linear as L
 from clean.k.reference import network as N
 from clean.k.reference.layout import STAGES, cdiv, window_partition
@@ -49,7 +50,7 @@ def runner():
     from clean.runner.stage_runner import Runner
     gpu = os.environ.get("WG_K_GPU_BUILD")
     if gpu:
-        return Runner(gpu, os.environ.get("ROCM_PATH", ""), backend="hip", model="K")
+        return Runner(gpu, OFFICIAL_ROCM, backend="hip", model="K")
     return Runner(build_dir(), "", backend="emu", model="K")
 
 
@@ -58,7 +59,7 @@ def device():
     from clean.k.runner.k_bench import KFuncs, open_device
     gpu = os.environ.get("WG_K_GPU_BUILD")
     backend, build = ("hip", gpu) if gpu else ("emu", build_dir())
-    dev = open_device(backend, build, os.environ.get("ROCM_PATH", ""))
+    dev = open_device(backend, build, OFFICIAL_ROCM)
     return dev, KFuncs(dev, build, backend)
 
 

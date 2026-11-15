@@ -29,6 +29,7 @@ if ROOT not in sys.path:
 
 import numpy as np  # noqa: E402
 
+from clean.runner.sdk import OFFICIAL_ROCM  # noqa: E402  (the official HIP SDK, never ROCM_PATH)
 from clean.k.reference import network as N  # noqa: E402
 from clean.k.reference.layout import (DEFAULT_S, FUSED_IO, STAGES, base_size, level_size, stage_offsets,  # noqa: E402
                                       threshold_windows, window_flags_to_map, window_grid)
@@ -291,7 +292,7 @@ def print_bench(r):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
-    ap.add_argument("--rocm", default=os.environ.get("ROCM_PATH", ""))
+    ap.add_argument("--rocm", default=OFFICIAL_ROCM)
     ap.add_argument("--backend", default="hip", choices=("hip", "emu"))
     ap.add_argument("--sizes", nargs="*", default=["1080p", "1440p", "4k"])
     ap.add_argument("--s", type=float, default=DEFAULT_S,
