@@ -15,9 +15,9 @@ scene, your settings) and a screenshot. Every report helps us fix it.
 ## What's new in 0.6.5 (since 0.6.0)
 
 ### Model L (new)
-- **A second model, off by default.** Model L is a larger super-resolution model than Model M: it has a
-  full-resolution encoder and decoder and its own reconstruction step. Model M stays the default for every game; Model
-  L is a choice you make per game.
+- **A second model, off by default and still under test.** Model L is a larger super-resolution model than Model M:
+  it has a full-resolution encoder and decoder and its own reconstruction step. Model M stays the default for every
+  game; Model L is a choice you make per game.
 - **Converted on your PC.** Like Model M, Model L's data is converted once on your PC from a DLSS model file
   (`nvngx_dlss.dll`) of version 310.5 or newer from any game or app you have installed; WrongGPU never downloads or
   ships it. Convert it once from a command prompt in WrongGPU's folder: `WrongGPU.exe model convert --preset=L`.
