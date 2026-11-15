@@ -271,15 +271,20 @@ OptiScaler folder ships `amd_fidelityfx_upscaler_dx12.dll`; OptiScaler.ini `[Lib
   AMD's FSR at once;
   without AMD's FSR the stand-in upscales such frames. This is one contract for every model (K refused frames take exactly
   model M's path), and what a frame gets is explicit (B8): WrongGPU's upscaler, then the stand-in, then AMD's FSR, and last,
-  when none of them could upscale it (the stand-in cannot be made or fails, AMD's FSR is missing or its dispatch fails), the
-  game's own colour is copied into the output unscaled (`passthrough_d3d12.cpp`: the active region, cut to both textures, at
-  the output's origin; the same format family is needed) with one warning line, and the game gets `FFX_API_RETURN_OK`, never
-  an error for a frame whose textures can be copied. When even that is impossible (no command list, another format family)
-  the error goes back with one line saying why, as before; in OptiScaler's custom slot the error always goes back (its host
-  upscales). `tests/test_frontend.cpp` covers each failure case for models M, K and L; `tests/test_refusal_integration.cpp`
-  drives refused frames through the real network backend (the runtime DLL's `Context`, with the scripted executor
-  `executor=dx12-test`) and the real front end on a D3D12 device (WARP is enough), with and without AMD's FSR, the stand-in
-  working and not, checks the copied pixels, and that no HIP runtime is ever loaded.
+  when none of them could upscale it (the stand-in cannot be made or fails, AMD's FSR is missing, cannot be created or its
+  dispatch fails), the backend's own bilinear upscale of the game's colour: the front end asks the upscaler for it with
+  `WG_FRAME_BILINEAR` (`WG_BACKEND_BILINEAR_FRAME` says a backend answers it), and the runtime records the Converter's
+  existing fallback pass (format aware, the full output size, no HIP). The game gets `FFX_API_RETURN_OK` and one warning
+  line per context; the counts are logged when the context is destroyed. When even that is impossible (no upscaler for the
+  context, the output texture unusable) the error goes back and the reason is logged for the first such frame, also after
+  earlier successes; in OptiScaler's custom slot the error always goes back (its host upscales). AMD's failures are logged
+  once per context and counted. A frame the game flags as non-linear (sRGB / PQ) is not a refused frame: it goes to AMD's FSR
+  and, when that is missing or fails, gets the same last resort. `tests/test_frontend.cpp` covers each failure case for
+  models M, K and L over a long run; `tests/test_refusal_integration.cpp` drives refused frames through the real network
+  backend (the runtime DLL's `Context`, with the scripted executor `executor=dx12-test`) and the real front end on a D3D12
+  device (WARP is enough), with and without AMD's FSR, the stand-in working and not, checks every pixel of the backend's
+  bilinear output for consecutive frames, and that no HIP executor was ever made (`wgDiagHipExecutorsMade`). It is not in the
+  CI (it needs a runtime DLL) and fails without one: a release gate runs it with the DLL of the build.
 - **Model location:** the front end looks for the converted model (`model.wgcm`, Model K in `K\`) in `[fsr] model_dir`
   of `wronggpu.ini` (relative: from the data folder), then `<game exe folder>\WrongGPU\model`, and passes the first
   folder that has it to the runtime as `model_dir=`; otherwise the runtime's own default (`%LOCALAPPDATA%\WrongGPU\model`,

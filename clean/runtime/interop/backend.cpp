@@ -44,6 +44,10 @@ struct WgUpscaler;
 
 namespace wgi {
 
+// HIP executors made by this process's contexts (wgDiagHipExecutorsMade): the integration test of the refused-frame contract
+// checks that none was made.
+std::atomic<uint32_t> g_hip_executors_made{0};
+
 namespace {
 
 // the converter maps and model K's folder, from the model table (clean/runtime/model_select.h)
@@ -653,6 +657,7 @@ class Context {
 #ifndef WG_NO_MODEL_K
       model_k_ = test_model_k;
 #endif
+      conv_.set_model_k(model_k_);
     } else if (o.executor == "hip" || o.executor == "dx12") {
       if (!configure_hip(o, &err)) return fail(WG_ERROR, err);
     } else {
@@ -697,6 +702,7 @@ class Context {
     }
     if (!dx12 && !exec_) {
       if (!split) return fail(WG_ERROR_UNSUPPORTED, "the front end offers no command-list split (interface version 2)");
+      ++g_hip_executors_made;
       exec_ = make_hip_executor(rt_cfg_, adapter_);
     }
     if (!dx12) {
@@ -869,7 +875,30 @@ class Context {
     return r;
   }
 
+  // B8 (WG_FRAME_BILINEAR): the front end's last resort for a frame that nothing else could upscale: no network, no executor, the
+  // existing bilinear output pass (Converter::record_output without a result: format aware, the full output size, its own
+  // barrier handling) from the game's colour into the output texture. It does not touch the context's state: a failed context
+  // can still write such a frame, and an answer other than WG_OK never fails the context.
+  WgResult dispatch_bilinear(const WgFrame& f) {
+    auto refuse = [&](WgResult r, const std::string& why) {
+      if (bilinear_refusals_++ == 0) say(WG_LOG_WARN, "bilinear last-resort frame refused: " + why);
+      return r;
+    };
+    if (!f.command_list || !f.color.resource || !f.color.format || !f.output.resource || !f.output.format)
+      return refuse(WG_ERROR_PARAMETER, "no command list, colour or output texture");
+    if (!f.render_width || !f.render_height || f.output_width != ow_ || f.output_height != oh_)
+      return refuse(WG_ERROR_PARAMETER, "the render region is empty or the output size differs from the context's");
+    const std::string skip = skip_reason(f);
+    if (!skip.empty()) return refuse(WG_ERROR_PARAMETER, skip);
+    const std::string out = output_refusal(f);
+    if (!out.empty()) return refuse(WG_ERROR_INPUT, out);
+    conv_.record_output(static_cast<ID3D12GraphicsCommandList*>(f.command_list), f, BufferRange());
+    note_path(&output_path_, "output: bilinear (the front end's last resort: nothing else upscaled this frame)");
+    return WG_OK;
+  }
+
   WgResult dispatch_impl(const WgFrame& f) {
+    if (f.struct_size >= sizeof(WgFrame) && (f.flags & WG_FRAME_BILINEAR)) return dispatch_bilinear(f);
     std::string why;
     if (!valid(f, &why)) return fail_frame(WG_ERROR_PARAMETER, why);
     if (failed_) return WG_ERROR;
@@ -1214,6 +1243,7 @@ class Context {
     if (!split_) {
       err = "the front end offers no command-list split (interface version 2)";
     } else {
+      ++g_hip_executors_made;
       hip = make_hip_executor(rt_cfg_, adapter_);
       hip->set_log_sink([this](bool warning, const std::string& m) {
         say(warning ? WG_LOG_WARN : WG_LOG_INFO, "destroy: " + m);
@@ -2159,6 +2189,7 @@ class Context {
   bool dx12_default_ = false;
   bool hip_switch_ = kHipSwitchDefault;  // refused_frame_policy (option hip_switch; clean/fe-wrapped-list)
   bool no_switch_said_ = false;          // the hip_switch=off line was logged
+  uint64_t bilinear_refusals_ = 0;       // WG_FRAME_BILINEAR requests this context could not record (logged once)
   bool split_ = false;
   std::string share_path_opt_ = "auto";
   bool input_copy_opt_ = false;
@@ -2221,9 +2252,13 @@ void wg_destroy(WgUpscaler* u) {
 uint64_t wg_memory(WgUpscaler* u) { return u ? u->ctx.gpu_memory() : 0; }
 
 const WgUpscalerBackend kBackend = {sizeof(WgUpscalerBackend), WG_UPSCALER_INTERFACE_VERSION, "WrongGPU network",
-                                    &wg_create,  &wg_dispatch, &wg_destroy, &wg_memory, WG_BACKEND_NEEDS_SPLIT};
+                                    &wg_create,  &wg_dispatch, &wg_destroy, &wg_memory, WG_BACKEND_NEEDS_SPLIT | WG_BACKEND_BILINEAR_FRAME};
 
 }  // namespace
+
+// A diagnostic for tests of the refused-frame contract: how many HIP executors this process's contexts have made (none in a
+// game: HIP is an explicit diagnostic only).
+extern "C" __declspec(dllexport) uint32_t wgDiagHipExecutorsMade() { return wgi::g_hip_executors_made.load(); }
 
 // Interface version 2 only: the backend needs the front end's command-list split.
 extern "C" __declspec(dllexport) const WgUpscalerBackend* wgGetUpscalerBackend(uint32_t interface_version) {

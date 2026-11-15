@@ -157,6 +157,8 @@ static std::function<uint32_t()> g_timerFn;
 static int g_timersStarted = 0;
 static std::atomic<bool> g_createGate{true};  // FakeCreate (on the front end's create thread) waits while false
 static std::atomic<int> g_createCalls{0};  // every FakeCreate call (made an upscaler or not)
+static bool g_bilinearFails = false;         // B8: the backend's bilinear last resort (WG_FRAME_BILINEAR) fails
+static std::vector<WgFrame> g_bilinearFrames;  // the frames it was asked for
 static WgResult FakeCreate(const WgCreateInfo* info, WgUpscaler** out) {
     ++g_createCalls;
     g_createInfo = *info;
@@ -170,6 +172,10 @@ static WgResult FakeCreate(const WgCreateInfo* info, WgUpscaler** out) {
     return WG_OK;
 }
 static WgResult FakeDispatch(WgUpscaler*, const WgFrame* frame) {
+    if (frame->struct_size >= sizeof(WgFrame) && (frame->flags & WG_FRAME_BILINEAR)) {  // B8: no network, the last resort
+        g_bilinearFrames.push_back(*frame);
+        return g_bilinearFails ? WG_ERROR_DEVICE : WG_OK;
+    }
     g_frames.push_back(*frame);
     if (int(g_frames.size()) - 1 == g_parameterErrorAt) return WG_ERROR_PARAMETER;
     if (g_unsupportedFrom >= 0 && int(g_frames.size()) - 1 >= g_unsupportedFrom) return WG_ERROR_UNSUPPORTED;
@@ -187,7 +193,10 @@ static void FakeDestroy(WgUpscaler* u) {
 }
 static uint64_t FakeMemory(WgUpscaler*) { return 12345; }
 static const WgUpscalerBackend g_backend{sizeof(WgUpscalerBackend), WG_UPSCALER_INTERFACE_VERSION, "fake upscaler",
-                                         FakeCreate, FakeDispatch, FakeDestroy, FakeMemory, WG_BACKEND_NEEDS_SPLIT};
+                                         FakeCreate, FakeDispatch, FakeDestroy, FakeMemory, WG_BACKEND_NEEDS_SPLIT | WG_BACKEND_BILINEAR_FRAME};
+// A backend that cannot write a frame without the network (no WG_BACKEND_BILINEAR_FRAME)
+static const WgUpscalerBackend g_backendNoBilinear{sizeof(WgUpscalerBackend), WG_UPSCALER_INTERFACE_VERSION, "fake upscaler (no bilinear)",
+                                                   FakeCreate, FakeDispatch, FakeDestroy, FakeMemory, WG_BACKEND_NEEDS_SPLIT};
 // The same backend as a version 1 DLL would return it (struct without backend_flags).
 static const WgUpscalerBackend g_backendV1{offsetof(WgUpscalerBackend, backend_flags), 1, "fake upscaler v1",
                                            FakeCreate, FakeDispatch, FakeDestroy, FakeMemory, 0xFFFFFFFFu};
@@ -199,10 +208,6 @@ static WgCreateInfo g_standInCreate{};
 static int g_standInDestroyed = 0;
 static bool g_standInCreateFails = false;    // B8: the stand-in cannot be made
 static bool g_standInDispatchFails = false;  // B8: the stand-in's dispatch fails
-static bool g_passThroughOn = false;         // B8: Platform::passThrough exists
-static bool g_passThroughOk = true;          // ... and succeeds
-static std::vector<WgFrame> g_passFrames;    // the frames it was given
-static std::function<bool(const WgFrame&, std::string*)> g_passThroughReal;  // test_refusal_integration.cpp: the real copy
 static WgResult StandInCreate(const WgCreateInfo* info, WgUpscaler** out) {
     g_standInCreate = *info;
     if (g_standInCreateFails) return WG_ERROR_DEVICE;
@@ -313,16 +318,6 @@ static std::unique_ptr<FrontEnd> MakeFrontEnd(const Config& config) {
         if (frame) frame->command_list_type = 2;  // as the D3D12 side would fill it in
     };
     p.standIn = [](const Config&) -> const WgUpscalerBackend* { return &g_standIn; };
-    if (g_passThroughOn)
-        p.passThrough = [](const WgFrame& f, std::string* why) {
-            g_passFrames.push_back(f);
-            if (g_passThroughReal) return g_passThroughReal(f, why);
-            if (!g_passThroughOk) {
-                if (why) *why = "the fake pass-through refuses";
-                return false;
-            }
-            return true;
-        };
     p.splitBlocked = [](void*) -> const char* {
         ++g_splitBlockedAsked;
         return g_splitBlocked;
@@ -379,10 +374,8 @@ static void Reset() {
     g_useBackend = &g_backend;
     g_standInFrames.clear();
     g_standInCreateFails = g_standInDispatchFails = false;
-    g_passThroughOn = false;
-    g_passThroughOk = true;
-    g_passFrames.clear();
-    g_passThroughReal = nullptr;
+    g_bilinearFails = false;
+    g_bilinearFrames.clear();
     g_standInCreate = WgCreateInfo{};
     g_standInDestroyed = 0;
     g_servicesAsked.clear();
@@ -1410,7 +1403,7 @@ static void TestInterfaceVersions() {
     CHECK(fe1->CreateContext(&ctx, &c.upscale.header, nullptr) == FFX_API_RETURN_OK);
     CHECK(g_createInfo.interface_version == 1 && g_createInfo.struct_size == offsetof(WgCreateInfo, services));
     CHECK(g_createInfo.services == nullptr && g_servicesAsked.size() == 1);
-    CHECK(BackendFlags(&g_backendV1) == 0 && BackendVersion(&g_backendV1) == 1 && BackendFlags(&g_backend) == WG_BACKEND_NEEDS_SPLIT);
+    CHECK(BackendFlags(&g_backendV1) == 0 && BackendVersion(&g_backendV1) == 1 && BackendFlags(&g_backend) == (WG_BACKEND_NEEDS_SPLIT | WG_BACKEND_BILINEAR_FRAME));
     d = MakeDispatch();
     CHECK(fe1->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
     CHECK(g_frames.size() == 1 && g_frames[0].struct_size == offsetof(WgFrame, command_queue));
@@ -1902,19 +1895,19 @@ static void TestFailedFrameProviderTruth() {
         if (failure == 2) g_amdDispatchResult = FFX_API_RETURN_ERROR_RUNTIME_ERROR;
         auto dispatch = MakeDispatch();
         if (failure == 3) dispatch.flags = FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB;
-        if (failure == 2) {
-            // B8: AMD's dispatch fails after the upscaler failed: the stand-in upscales the frame (it was an error before)
-            CHECK(fe->Dispatch(&ctx, &dispatch.header) == FFX_API_RETURN_OK);
-            CHECK(!g_statuses.empty() && g_statuses.back().state == UpscaleState::StandIn);
-        } else {
-        CHECK(fe->Dispatch(&ctx, &dispatch.header) != FFX_API_RETURN_OK);
+        // B8: nothing upscales the frame, as before, but the answer is explicit: AMD's dispatch failing after the upscaler failed
+        // is a stand-in frame (failure 2); without AMD (failures 0, 1: no AMD, AMD cannot be created; failure 3: a non-linear frame)
+        // the backend's bilinear upscale writes it and the status says so. All of them used to be errors.
+        CHECK(fe->Dispatch(&ctx, &dispatch.header) == FFX_API_RETURN_OK);
         CHECK(!g_statuses.empty());
         if (!g_statuses.empty()) {
             const auto& status = g_statuses.back();
-            CHECK(status.state != UpscaleState::Amd && status.state != UpscaleState::Network &&
-                  status.state != UpscaleState::StandIn && status.state != UpscaleState::Compare);
-            CHECK(!status.reason.empty());
-        }
+            if (failure == 2) {
+                CHECK(status.state == UpscaleState::StandIn);
+            } else {
+                CHECK(status.state == UpscaleState::Failed && status.reason.find("bilinearly") != std::string::npos);
+                CHECK(g_bilinearFrames.size() == 1);
+            }
         }
         CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
     }
@@ -2447,7 +2440,7 @@ static void TestRefusedFrames() {
         for (int i = 0; i < 8; ++i) CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);   // every frame has an upscaler
         CHECK(g_frames.size() == 2 && g_standInFrames.empty());   // frame 0 the network's, frame 1 refused: AMD from there on
         CHECK(!g_amd.empty() && g_amd.back().fn == "dispatch" && g_statuses.back().state == UpscaleState::Amd);
-        CHECK(CountLog("HIP") == 0);   // no HIP runtime on the way
+        CHECK(CountLog("about to start the HIP runtime") == 0);   // no HIP runtime on the way
         CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
 
         // without AMD's FSR: each refused frame goes to the stand-in (five in a row, then a taken frame, then two more
@@ -2468,48 +2461,54 @@ static void TestRefusedFrames() {
             CHECK(g_statuses.back().state == want[i]);
         }
         CHECK(g_frames.size() == want.size() && g_standInFrames.size() == 7 && g_amd.empty());
-        CHECK(CountLog("HIP") == 0);
+        CHECK(CountLog("about to start the HIP runtime") == 0);
         CHECK(CountLog("AMD FSR is not available for this context; the stand-in upscales the frames the upscaler does not take") == 1);
         CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
     }
 }
 
-// B8 (REVIEW-215d P1): what a refused frame gets is explicit. The upscaler answers WG_ERROR_UNSUPPORTED for frames 1 .. 3; the
-// stand-in cannot be made, or fails, AMD's FSR is missing or fails: the game's own colour is passed through unscaled with
-// one warning line and the answer is OK, never an error for a frame whose textures can be copied. Every model (the contract is
-// shared); a custom slot keeps returning the error (its host upscales).
+// B8 (REVIEW-215d P1, REVIEW-228): what a refused frame gets is explicit. The upscaler answers WG_ERROR_UNSUPPORTED for frames
+// 1 .. 3; the stand-in cannot be made, or fails, AMD's FSR is missing, cannot be created or fails: the backend's own bilinear
+// upscale of the game's colour (WG_FRAME_BILINEAR) writes the output with one warning line per context and the answer is OK,
+// never an error for a frame whose resources can be used. Every model (the contract is shared); a custom slot keeps getting
+// the error (its host upscales); when the last resort is impossible the error goes back with the reason logged, also after an
+// earlier success; AMD's failures are logged once per context, however long the run.
 static void TestRefusedFrameContract() {
     const uint64_t models[] = {kWrongGpuProviderVersionId, kWrongGpuKProviderVersionId, kWrongGpuLProviderVersionId};
     for (const uint64_t model : models) {
-        // setup: no AMD / AMD with this dispatch result; stand-in made and working / create fails / dispatch fails;
-        // pass-through absent / working / refusing; custom slot
         struct Case {
             const char* name;
             bool amd;
             ffxReturnCode_t amdResult;
-            bool standInCreateFails, standInDispatchFails, passThrough, passOk, customSlot;
+            ffxReturnCode_t amdCreate;
+            bool standInCreateFails, standInDispatchFails, bilinearFails, backendHasBilinear, customSlot;
         };
         const ffxReturnCode_t amdBad = FFX_API_RETURN_ERROR_RUNTIME_ERROR;
+        const ffxReturnCode_t ok = FFX_API_RETURN_OK;
         const Case cases[] = {
-            {"no AMD, stand-in create fails, pass-through ok", false, FFX_API_RETURN_OK, true, false, true, true, false},
-            {"no AMD, stand-in dispatch fails, pass-through ok", false, FFX_API_RETURN_OK, false, true, true, true, false},
-            {"no AMD, stand-in fails, pass-through refuses", false, FFX_API_RETURN_OK, true, false, true, false, false},
-            {"no AMD, stand-in fails, no pass-through", false, FFX_API_RETURN_OK, true, false, false, true, false},
-            {"AMD dispatch fails, stand-in ok", true, amdBad, false, false, true, true, false},
-            {"AMD dispatch fails, stand-in create fails, pass-through ok", true, amdBad, true, false, true, true, false},
-            {"AMD dispatch fails, stand-in dispatch fails, pass-through ok", true, amdBad, false, true, true, true, false},
-            {"AMD dispatch fails, stand-in fails, pass-through refuses", true, amdBad, true, false, true, false, false},
-            {"custom slot, no AMD, stand-in fails", false, FFX_API_RETURN_OK, true, false, true, true, true},
+            {"no AMD, stand-in create fails", false, ok, ok, true, false, false, true, false},
+            {"no AMD, stand-in dispatch fails", false, ok, ok, false, true, false, true, false},
+            {"no AMD, stand-in fails, bilinear fails", false, ok, ok, true, false, true, true, false},
+            {"no AMD, stand-in fails, the backend has no bilinear", false, ok, ok, true, false, false, false, false},
+            {"AMD create fails, stand-in ok", true, ok, FFX_API_RETURN_NO_PROVIDER, false, false, false, true, false},
+            {"AMD create fails, stand-in fails", true, ok, FFX_API_RETURN_NO_PROVIDER, true, false, false, true, false},
+            {"AMD dispatch fails, stand-in ok", true, amdBad, ok, false, false, false, true, false},
+            {"AMD dispatch fails, stand-in create fails", true, amdBad, ok, true, false, false, true, false},
+            {"AMD dispatch fails, stand-in dispatch fails", true, amdBad, ok, false, true, false, true, false},
+            {"AMD dispatch fails, stand-in fails, bilinear fails", true, amdBad, ok, true, false, true, true, false},
+            {"custom slot, no AMD, stand-in fails", false, ok, ok, true, false, false, true, true},
         };
         for (const Case& c : cases) {
+            const int failuresBefore = g_failures;
             Reset();
             g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
             g_originalAvailable = c.amd;
             g_amdDispatchResult = c.amdResult;
+            g_amdCreateResult = c.amdCreate;
             g_standInCreateFails = c.standInCreateFails;
             g_standInDispatchFails = c.standInDispatchFails;
-            g_passThroughOn = c.passThrough;
-            g_passThroughOk = c.passOk;
+            g_bilinearFails = c.bilinearFails;
+            g_useBackend = c.backendHasBilinear ? &g_backend : &g_backendNoBilinear;
             Config config;
             config.hosted = true;
             config.customSlot = c.customSlot;
@@ -2520,47 +2519,98 @@ static void TestRefusedFrameContract() {
             CHECK(fe->CreateContext(&ctx, &own.upscale.header, kMemCb) == FFX_API_RETURN_OK && fe->OwnContextCount() == 1);
             ffxDispatchDescUpscale d = MakeDispatch();
             CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK && g_statuses.back().state == UpscaleState::Network);
-            g_unsupportedAt = {1, 2, 3};
+            const int kFrames = 300;   // a long run: the logs must not grow with it
+            std::set<int> refused;
+            for (int i = 1; i <= kFrames; ++i) refused.insert(i);
+            g_unsupportedAt = refused;
             std::vector<ffxReturnCode_t> rcs;
-            for (int i = 0; i < 3; ++i) rcs.push_back(fe->Dispatch(&ctx, &d.header));
+            for (int i = 0; i < kFrames; ++i) rcs.push_back(fe->Dispatch(&ctx, &d.header));
             const bool standInWorks = !c.standInCreateFails && !c.standInDispatchFails;
-            const bool passes = c.passThrough && c.passOk && !c.customSlot;
-            // the first refused frame goes to AMD when it exists (the context is AMD's from then on, and AMD's dispatch fails for
-            // every frame): each frame has the stand-in, else the pass-through, else AMD's own error
-            if (c.amd && c.amdResult != FFX_API_RETURN_OK) {
-                for (ffxReturnCode_t rc : rcs) CHECK(rc == (standInWorks || passes ? FFX_API_RETURN_OK : amdBad));
-                if (standInWorks) {
-                    CHECK(g_standInFrames.size() == 3 && g_passFrames.empty());
-                } else if (passes) {
-                    CHECK(g_passFrames.size() == 3 && CountLog("the game's own colour is passed through to the output unscaled") == 1);
-                } else {
-                    CHECK(g_passFrames.size() == (c.passThrough ? 3u : 0u));
-                    CHECK(CountLog("cannot be passed through") == 1);
-                }
-                CHECK(CountLog("HIP") == 0);
-            } else if (!c.amd) {
-                for (ffxReturnCode_t rc : rcs) CHECK(rc == (standInWorks || passes ? FFX_API_RETURN_OK : FFX_API_RETURN_ERROR_RUNTIME_ERROR));
-                if (!standInWorks) {
-                    CHECK(g_passFrames.size() == (c.passThrough && !c.customSlot ? 3u : 0u));
-                    if (passes) {
-                        CHECK(g_statuses.back().state == UpscaleState::Failed &&
-                              g_statuses.back().reason.find("passed through unscaled") != std::string::npos);
-                        CHECK(CountLog("the game's own colour is passed through to the output unscaled") == 1);  // one line, not one a frame
-                        for (const WgFrame& f : g_passFrames) CHECK(f.command_list && f.color.resource && f.output.resource);
-                    } else if (!c.customSlot) {
-                        CHECK(CountLog("cannot be passed through") == 1);
-                        CHECK(g_statuses.back().state == UpscaleState::Failed);
-                    } else {
-                        CHECK(g_passFrames.empty());  // a custom slot's host upscales on the error
-                    }
-                } else {
-                    CHECK(g_passFrames.empty() && g_standInFrames.size() == 3);
-                }
-                CHECK(CountLog("HIP") == 0);
+            const bool lastResort = c.backendHasBilinear && !c.bilinearFails && !c.customSlot;
+            const bool amdFailing = c.amd && (c.amdResult != ok);
+            const bool answered = standInWorks || lastResort;   // every frame has an output
+            // with a working AMD (or none that fails) the first refused frame is AMD's / the stand-in's; the cases here are
+            // those where AMD is absent, cannot be created, or fails
+            for (ffxReturnCode_t rc : rcs) CHECK(rc == (answered ? FFX_API_RETURN_OK : (amdFailing ? amdBad : FFX_API_RETURN_ERROR_RUNTIME_ERROR)));
+            if (answered && standInWorks) {
+                CHECK(g_standInFrames.size() == (size_t)kFrames && g_bilinearFrames.empty());
+            } else if (answered) {
+                CHECK(g_bilinearFrames.size() == (size_t)kFrames);
+                CHECK(g_statuses.back().state == UpscaleState::Failed &&
+                      g_statuses.back().reason.find("bilinearly") != std::string::npos);
+                for (const WgFrame& f : g_bilinearFrames)
+                    CHECK((f.flags & WG_FRAME_BILINEAR) && f.command_list && f.color.resource && f.output.resource);
+                CHECK(CountLog("the backend's bilinear upscale of the game's colour wrote the output") == 1);  // one line, not one a frame
+            } else if (c.customSlot) {
+                CHECK(g_bilinearFrames.empty());  // a custom slot's host upscales on the error
+            } else {
+                CHECK(CountLog("the backend's bilinear upscale is not possible") >= 1);
+                CHECK(CountLog("the backend's bilinear upscale is not possible") <= 4);  // the first, then at 10, 100
+            }
+            // logs do not grow with the run: AMD's failure and the stand-in's notes at most once per context
+            CHECK(CountLog("AMD FSR dispatch failed (") <= 1);
+            CHECK(CountLog("about to start the HIP runtime") == 0);
+            CHECK(g_log.size() < 60);
+            if (g_failures != failuresBefore) {  // the log of a failed case
+                std::printf("case: %s (%zu log lines)\n", c.name, g_log.size());
+                for (size_t k = 0; k < g_log.size() && k < 70; ++k) std::printf("    log: %.220s\n", g_log[k].c_str());
             }
             CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+            if (!c.customSlot && !answered) CHECK(CountLog("fallback counts:") == 1);
         }
     }
+
+    // a failure after an earlier success is reported too: the stand-in cannot be made, the bilinear upscale writes frames 1-2, then
+    // a frame whose output texture is missing has no last resort: its reason is logged although an earlier frame succeeded
+    {
+        Reset();
+        g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+        g_originalAvailable = false;
+        g_standInCreateFails = true;
+        Config config;
+        config.hosted = true;
+        auto fe = MakeFrontEnd(config);
+        UpscaleCreate own(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE, /*withOverride=*/true);
+        own.version.versionId = kWrongGpuProviderVersionId;
+        ffxContext ctx = nullptr;
+        CHECK(fe->CreateContext(&ctx, &own.upscale.header, kMemCb) == FFX_API_RETURN_OK);
+        ffxDispatchDescUpscale d = MakeDispatch();
+        CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
+        g_unsupportedAt = {1, 2, 3};
+        CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK && fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
+        CHECK(g_bilinearFrames.size() == 2 && CountLog("the backend's bilinear upscale is not possible") == 0);
+        ffxDispatchDescUpscale bad = d;
+        bad.output.resource = nullptr;
+        CHECK(fe->Dispatch(&ctx, &bad.header) != FFX_API_RETURN_OK);
+        CHECK(CountLog("the backend's bilinear upscale is not possible") == 1);   // the first failure, with its reason, after two successes
+        CHECK(CountLog("the frame has no command list, colour texture or output texture") + CountLog("the frame's inputs could not be mapped") == 1);
+        CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    }
+
+    // a frame the game flags as non-linear (sRGB / PQ) is not a refused frame: it goes to AMD's FSR, and when AMD is missing or
+    // fails the mapped frame still has the backend's bilinear upscale (colour-space neutral) instead of an error
+    for (const bool amd : {false, true}) {
+        Reset();
+        g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+        g_originalAvailable = amd;
+        g_amdDispatchResult = amd ? FFX_API_RETURN_ERROR_RUNTIME_ERROR : FFX_API_RETURN_OK;
+        Config config;
+        config.hosted = true;
+        auto fe = MakeFrontEnd(config);
+        UpscaleCreate own(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE, /*withOverride=*/true);
+        own.version.versionId = kWrongGpuProviderVersionId;
+        ffxContext ctx = nullptr;
+        CHECK(fe->CreateContext(&ctx, &own.upscale.header, kMemCb) == FFX_API_RETURN_OK);
+        ffxDispatchDescUpscale d = MakeDispatch();
+        d.flags |= FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB;
+        for (int i = 0; i < 5; ++i) CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
+        CHECK(g_bilinearFrames.size() == 5 && g_standInFrames.empty());   // no stand-in for perceptual input
+        for (const WgFrame& f : g_bilinearFrames) CHECK(f.color.resource && f.output.resource && f.command_list);
+        CHECK(CountLog("the backend's bilinear upscale of the game's colour wrote the output") == 1);
+        CHECK(CountLog("AMD FSR dispatch failed (") <= 1 && CountLog("about to start the HIP runtime") == 0);
+        CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    }
+    g_useBackend = &g_backend;
 }
 
 static void TestSplitBlocked() {
