@@ -51,6 +51,15 @@ class FamilyBuilds(unittest.TestCase):
         self.assertEqual(recorded, "gfx1100")
         self.assertFalse([n for n in out if n.startswith(("k_", "post_w64", "swin"))])
 
+    def test_gfx1100_swin_takes_the_plain_conversion(self):
+        """swin.hip for gfx11 asks for -DWG_SLOW_Q8 (FAMILY_DEFINES: the faster conversion makes the block kernels spill)."""
+        calls, _, _ = self.build("--arch", "gfx1100", "--no-runtime")
+        by_name = {c[-1].rsplit(os.sep, 1)[-1]: c for c in calls}
+        self.assertIn("-DWG_SLOW_Q8=1", by_name["swin.co"])
+        self.assertFalse([n for n, c in by_name.items() if n != "swin.co" and any("WG_SLOW_Q8" in a for a in c)])
+        calls, _, _ = self.build("--arch", "gfx1100", "--no-runtime", "--sources", "swin.hip", "--define", "WG_GELU_MODE=1")
+        self.assertTrue({"-DWG_SLOW_Q8=1", "-DWG_GELU_MODE=1"} <= set(calls[0]))
+
     def test_chosen_sources(self):
         calls, _, recorded = self.build("--arch", "gfx1101", "--no-runtime", "--sources", "post.hip", "frame.hip")
         self.assertEqual([c[-1].rsplit(os.sep, 1)[-1] for c in calls], ["post.co", "frame.co"])
