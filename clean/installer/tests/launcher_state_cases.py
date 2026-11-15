@@ -3,10 +3,12 @@
 its place in the suite (this file keeps that suite below the 256 KB source limit, as launcher_edition_cases.py does).
 wronggpu.ini and WrongGPU\\wronggpu.ini hold the install's defaults and are the player's: no launcher operation rewrites them
 after the install. What the launcher and the in-game menu save goes into the state folder, which decides over them, which is
-always WrongGPU's (uninstall removes it, repair and update keep it), and which uninstall, repair and update only change while
-no other program has WrongGPU's files open. The in-game menu's save is written here the way the RR plugin writes it (one
-rr_mode line in settings.ini); the plugin's own save is tested with the real plugin in clean/rr_f/proxy/tests/test_hook_dll.cpp.
-Written for this project."""
+WrongGPU's by its bytes (WrongGPU's stamp: uninstall removes a stamped file, keeps an edited or unknown one), and which
+uninstall, repair and update only change while no other program has WrongGPU's files open. The in-game menu's save is written
+here the way the RR plugin writes it (wg_state.h SetSettings: the key set, the other lines kept, the stamp kept on a file that
+was WrongGPU's: menu_save); the plugin's own save is tested with the real plugin in clean/rr_f/proxy/tests/test_hook_dll.cpp.
+The install's seed files (wronggpu-asi.ini, WrongGPU\\wronggpu.ini) are created only where nothing is: a file that appears
+at either boundary (after the check, after the record: WRONGGPU_TEST_CREATE_AT) is the player's. Written for this project."""
 import os
 import shutil
 import subprocess
@@ -29,6 +31,75 @@ else:  # the game has it loaded (mapped as an image; nothing of it runs)
 print("held" if ok else "failed %d" % ctypes.get_last_error(), flush=True)
 sys.stdin.read()
 """
+
+
+STAMP = b"; wronggpu-written "
+
+
+def stamp_check(body):
+    """wg_state.h StampCheck: FNV-1a 64 of the bytes, 16 lower-case hex digits."""
+    h = 1469598103934665603
+    for c in body:
+        h = ((h ^ c) * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+    return b"%016x" % h
+
+
+def stamped_by_wronggpu(data):
+    t = data[:-1] if data.endswith(b"\n") else data
+    t = t[:-1] if t.endswith(b"\r") else t
+    start = t.rfind(b"\n") + 1
+    last = t[start:]
+    return last.startswith(STAMP) and len(last) == len(STAMP) + 16 and last[len(STAMP):] == stamp_check(data[:start])
+
+
+def menu_save(path, k, v):
+    """The in-game menu's save as wg_state.h SetSettings makes it: k=v set (its line rewritten, or added at the end), every
+    other line kept, the stamp kept only on a file that was WrongGPU's (or new)."""
+    data = read(path) if os.path.isfile(path) else None
+    ours = data is None or stamped_by_wronggpu(data)
+    lines = [l for l in (data or b"").decode("utf-8").replace("\r\n", "\n").split("\n") if l and not l.startswith(STAMP.decode())]
+    keys = [l.split("=", 1)[0].strip() if "=" in l and not l.lstrip().startswith((";", "#", "[")) else None for l in lines]
+    if k in keys:
+        lines[keys.index(k)] = k + "=" + v
+    else:
+        lines.append(k + "=" + v)
+    body = "".join(l + "\r\n" for l in lines).encode("utf-8")
+    write(path, body + STAMP + stamp_check(body) + b"\r\n" if ours else body)
+
+
+def seed_appears(t, m, name, rel, extra=None):
+    """A seed file that appears during the install (WRONGGPU_TEST_CREATE_AT: after its check, after the record is written): kept
+    byte for byte, not recorded, said; the uninstall keeps it and lists it."""
+    inst = ("--opti=" + t.opti, "--noscan", "--force", "--experimental")
+    made = b"; made by the player during the install (test)\r\n"  # (record.cpp RestoreStep writes these bytes)
+    for step in ("seed-planned", "seed-recorded"):
+        root, b, exe = m.game(t, "State Seed %s %s" % (name, step), extra=extra)
+        before = snapshot(root)
+        f = os.path.join(b, rel)
+        t.env["WRONGGPU_TEST_CREATE_AT"], t.env["WRONGGPU_TEST_CREATE_FILE"] = step, f
+        try:
+            rc = t.run("install", exe, *inst)
+        finally:
+            t.env.pop("WRONGGPU_TEST_CREATE_AT", None)
+            t.env.pop("WRONGGPU_TEST_CREATE_FILE", None)
+        t.check("%s appears during the install (%s): the install keeps it byte for byte, does not record it, and says so" % (rel, step),
+                rc == 0 and os.path.isfile(f) and read(f) == made and m.record_entry_sha(b, rel) is None and
+                any(w.startswith("Left in place (appeared during the install") and rel in w for w in t.j.get("warnings", [])),
+                (rc, read(f) if os.path.isfile(f) else None, m.record_entry_sha(b, rel), t.j.get("warnings"), t.logtail(800)))
+        left = kept_runtime(before, root, os.path.join("bin", "x64", rel), *unrecorded_wronggpu_files(root))
+        rc = t.run("uninstall", exe)
+        t.check("...and the uninstall keeps it (the player's) byte for byte; everything else as before",
+                rc == 0 and read(f) == made and snapshot(root) == left, (rc, diff(left, snapshot(root)), t.j.get("warnings")))
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def record_060(t, m, b):
+    """The install record as 0.6.0 wrote it for this install: version 0.6.0, no wronggpu-asi.ini entry (0.6.0 seeded the
+    file without recording it)."""
+    rp = os.path.join(b, "wronggpu-setup", "install.record")
+    lines = read(rp).decode("utf-8").split("\r\n")
+    lines = ["version\t0.6.0" if l.startswith("version\t") else l for l in lines if not l.endswith("\twronggpu-asi.ini")]
+    write(rp, "\r\n".join(lines).encode("utf-8"))
 
 
 def hold(path, how):
@@ -82,15 +153,34 @@ def asi_seed_cases(t, opti, m):
     t.check("...and the uninstall keeps it and lists it; everything else as before",
             rc == 0 and read(asi) == menu and snapshot(root) == left and any("wronggpu-asi.ini" in w and w.startswith("Left in place") for w in t.j.get("warnings", [])),
             (rc, diff(left, snapshot(root)), t.j.get("warnings")))
+    # an update over a 0.6.0 install: its record has no wronggpu-asi.ini entry; the file (0.6.0's seed, or the plugin's menu
+    # save since) is not WrongGPU's: the update keeps it byte for byte and does not record it, the uninstall keeps and lists it
+    for label, asi_bytes in (("0.6.0's seed bytes", seeded), ("changed by the plugin's menu", menu)):
+        rc = t.run("install", exe, *inst)
+        write(asi, asi_bytes)
+        record_060(t, m, b)
+        rc2 = t.run("update", exe, *inst)
+        t.check("update over a 0.6.0 record without the seed entry (wronggpu-asi.ini %s): kept byte for byte, not recorded" % label,
+                rc == 0 and rc2 == 0 and read(asi) == asi_bytes and m.record_entry_sha(b, "wronggpu-asi.ini") is None,
+                (rc, rc2, read(asi), m.record_entry_sha(b, "wronggpu-asi.ini"), t.j.get("message")))
+        left = kept_runtime(before, root, rel, *unrecorded_wronggpu_files(root))
+        rc = t.run("uninstall", exe)
+        t.check("...the uninstall keeps it and lists it; everything else as before",
+                rc == 0 and read(asi) == asi_bytes and snapshot(root) == left and any("wronggpu-asi.ini" in w for w in t.j.get("warnings", [])),
+                (rc, diff(left, snapshot(root)), t.j.get("warnings")))
+        os.remove(asi)
     shutil.rmtree(root, ignore_errors=True)  # (the later sections, the window's library among them, see only their own games)
+    seed_appears(t, m, "Asi", "wronggpu-asi.ini")
 
 
 def run(t, opti, m):
     """m: the suite's module (its helpers: game, ini, state_kv, state_set, rr_ini, record_entry_sha, RR_SETTINGS, STATE)."""
     print("\n[state] #219: the saved settings in the state folder, wronggpu.ini never rewritten, uninstall/repair/update refused while in use")
+    t.opti = opti
     asi_seed_cases(t, opti, m)
     rr_files = {"bin/x64/nvngx_dlssd.dll": b"MZ synthetic stand-in, not a usable RR model file " * 64,
                 "bin/x64/sl.dlss_d.dll": b"MZ synthetic stand-in"}  # the DLSS RR plugin stand-in
+    seed_appears(t, m, "RR", m.RR_SETTINGS, extra=rr_files)
     inst = ("--opti=" + opti, "--noscan", "--force", "--experimental")
     root, b, exe = m.game(t, "State Game", extra=rr_files)
     before = snapshot(root)

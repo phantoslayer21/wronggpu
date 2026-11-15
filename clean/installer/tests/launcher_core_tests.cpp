@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
 #include <iostream>
 #include <stdexcept>
 
@@ -1985,8 +1986,12 @@ int main() {
                 ReadAll(Join(sg, kRrSettings), after);
                 require(after == defaults, "a state write never touches WrongGPU\\wronggpu.ini");
                 require(WriteStateKeys(sctx, sg, {{"rr_mode", "fast"}}) == 0, "the same values again: nothing written (0)");
-                // upgrade from an older plugin's save (or the player's edit): LF and CRLF, the file's mode carried, the file kept
-                for (const char* edited : {"[wronggpu]\nrr_enabled=1\nrr_mode = exact\nrr_overlay=1\n", "[wronggpu]\r\nrr_mode=fast\r\n"}) {
+                // upgrade from an older plugin's save (or the player's edit): LF and CRLF, with and without a UTF-8 BOM (a 0.6.0
+                // file an editor saved), each with a mode other than the install's (accurate): the file's mode carried, the file kept
+                require(ParseRrSettings("\xEF\xBB\xBF[wronggpu]\r\nrr_mode=exact\r\n").mode == "exact" && ParseRrSettings("\xEF\xBB\xBF[wronggpu]\nrr_mode=fast\n").mode == "fast",
+                        "ParseRrSettings: a UTF-8 BOM before [wronggpu] (CRLF and LF): the section and its mode are read");
+                for (const char* edited : {"[wronggpu]\nrr_enabled=1\nrr_mode = exact\nrr_overlay=1\n", "[wronggpu]\r\nrr_mode=fast\r\n",
+                                           "\xEF\xBB\xBF[wronggpu]\nrr_mode=exact\n", "\xEF\xBB\xBF[wronggpu]\r\nrr_mode=fast\r\nrr_overlay=1\r\n"}) {
                     DeleteFileW(wgstate::SettingsPathOf(sg).c_str());
                     put(Join(sg, kRrSettings), edited);
                     const bool moved = MigrateRrState(sctx, sg);
@@ -1997,18 +2002,79 @@ int main() {
                     require(moved && wgstate::Get(st, "rr_mode") && *wgstate::Get(st, "rr_mode") == want && kept == edited &&
                                 (string(edited).find("rr_overlay") == string::npos || (wgstate::Get(st, "rr_overlay") && *wgstate::Get(st, "rr_overlay") == "1")),
                             "upgrade: a changed WrongGPU\\wronggpu.ini (" + string(string(edited).find("\r\n") == string::npos ? "LF" : "CRLF") +
-                                ") is the player's: kept as it is, its rr_mode (and rr_overlay) copied into the state folder");
+                                (edited[0] == '\xEF' ? ", BOM" : "") + ", rr_mode " + want + ") is the player's: kept as it is, its rr_mode (and rr_overlay) copied into the state folder");
                     require(!MigrateRrState(sctx, sg), "upgrade: once the state has rr_mode, nothing more is copied");
                 }
-                // the state files go with the state folder: settings.ini, model-choice.ini and their temporary files, by name
-                put(wgstate::SettingsPathOf(sg), "rr_mode=fast\r\n");
-                put(Join(StateDir(sg), L"model-choice.ini"), "model=M\r\n");
-                put(Join(StateDir(sg), L"settings.ini.wgtmp-1-2"), "rr_mo");
+                // the RR mode decided under the state lock (rr.h WriteRrState), forced interleavings: the launcher's view is older
+                // than the menu's save (the menu saved accurate after the launcher read fast)
+                {
+                    Profile stale = DefaultProfile();
+                    stale.v["rr_mode"] = "fast";
+                    const string fastPrev = "fast";
+                    DeleteFileW(wgstate::SettingsPathOf(sg).c_str());
+                    require(wgstate::SetSettings(sg, {{"rr_mode", "accurate"}}).ok(), "(interleaving: the menu saved accurate)");
+                    require(WriteRrState(sctx, sg, stale, true, nullptr, nullptr) >= 0 && ReadRrSettings(sg).mode == "accurate" &&
+                                *wgstate::Get(wgstate::ReadSettings(sg), "rr_exact_allowed") == "0",
+                            "an RR refresh with the launcher's older view (fast): the menu's newer accurate stays (a refresh never changes a saved mode)");
+                    require(WriteRrState(sctx, sg, stale, true, nullptr, &fastPrev) >= 0 && ReadRrSettings(sg).mode == "accurate",
+                            "an apply whose own mode did not change (fast before, fast now): the menu's newer accurate stays (an unchanged field is not written)");
+                    Profile chosen = DefaultProfile();
+                    chosen.v["rr_mode"] = "exact";
+                    require(WriteRrState(sctx, sg, chosen, true, nullptr, &fastPrev) == 1 && ReadRrSettings(sg).mode == "exact" &&
+                                *wgstate::Get(wgstate::ReadSettings(sg), "rr_exact_allowed") == "1",
+                            "an apply where the player changed the mode in the launcher (fast -> exact): written, rr_exact_allowed follows");
+                    DeleteFileW(wgstate::SettingsPathOf(sg).c_str());
+                    require(WriteRrState(sctx, sg, stale, true, nullptr, nullptr) == 1 && ReadRrSettings(sg).mode == "fast",
+                            "no mode saved yet: the launcher's mode is written");
+                    // the menu saves while the launcher's write waits for the lock: the decision is made from the menu's save
+                    require(wgstate::SetSettings(sg, {{"rr_mode", "fast"}}).ok(), "(interleaving 2: fast saved)");
+                    HANDLE held = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+                    std::thread menu([&] {
+                        wgstate::StateLock lock(sg, 2000);
+                        SetEvent(held);
+                        Sleep(300);
+                        wgstate::Settings now = wgstate::ReadSettings(sg);
+                        wgstate::Set(now, "rr_mode", "accurate");
+                        wgstate::WriteAtomic(wgstate::SettingsPathOf(sg), wgstate::Stamped(wgstate::RenderSettings(now)));
+                    });
+                    WaitForSingleObject(held, 5000);
+                    const int w = WriteRrState(sctx, sg, stale, true, nullptr, &fastPrev);  // the launcher read fast before the menu's save
+                    menu.join();
+                    CloseHandle(held);
+                    require(w >= 0 && ReadRrSettings(sg).mode == "accurate",
+                            "the menu saves accurate while the launcher's write waits for the state lock: the launcher decides under the lock and accurate stays");
+                }
+                // the state files go with the state folder only while their bytes are WrongGPU's (its stamp, wg_state.h): a file the
+                // player edited or made, an unknown one, a temporary file a crash cut short stay and are listed
+                DeleteFileW(wgstate::SettingsPathOf(sg).c_str());
+                require(wgstate::SetSettings(sg, {{"rr_mode", "fast"}}).ok(), "(settings.ini written by WrongGPU)");
+                put(Join(StateDir(sg), L"model-choice.ini"), wgstate::Stamped("model=M\r\n"));            // (as its writer makes it)
+                put(Join(StateDir(sg), L"settings.ini.wgtmp-1-2"), wgstate::Stamped("rr_mode=fast\r\n"));  // a complete write of WrongGPU's
+                put(Join(StateDir(sg), L"settings.ini.wgtmp-3-4"), "rr_mo");                                // a write a crash cut short
                 put(Join(StateDir(sg), L"player-note.txt"), "mine");
-                const auto stay = RemoveStateFolder(sg, &rm);
+                auto stay = RemoveStateFolder(sg, &rm);
                 require(!IsFile(wgstate::SettingsPathOf(sg)) && !IsFile(Join(StateDir(sg), L"model-choice.ini")) && !IsFile(Join(StateDir(sg), L"settings.ini.wgtmp-1-2")) &&
-                            IsFile(Join(StateDir(sg), L"player-note.txt")) && stay.size() == 1,
-                        "uninstall: the state files and their temporary files go by name; a player's file in the folder stays");
+                            IsFile(Join(StateDir(sg), L"settings.ini.wgtmp-3-4")) && IsFile(Join(StateDir(sg), L"player-note.txt")) && stay.size() == 2,
+                        "uninstall: settings.ini, model-choice.ini and a temporary file with WrongGPU's stamp go; a temporary file without it and the player's file stay (listed)");
+                DeleteFileW(Join(StateDir(sg), L"settings.ini.wgtmp-3-4").c_str());
+                DeleteFileW(Join(StateDir(sg), L"player-note.txt").c_str());
+                // negative controls, each alone: the file stays byte for byte and is listed
+                struct Control { const wchar_t* name; string bytes; const char* what; };
+                const string ours = wgstate::Stamped("rr_mode=fast\r\n");
+                for (const Control& c : {Control{L"settings.ini", ours + "player_key=1\r\n", "settings.ini WrongGPU wrote, the player added a key after it"},
+                                         Control{L"settings.ini", ours.substr(0, 8) + "accurate" + ours.substr(12), "settings.ini WrongGPU wrote, a value edited (the stamp no longer matches)"},
+                                         Control{L"settings.ini", "rr_mode=fast\r\n", "settings.ini the player made (no stamp)"},
+                                         Control{L"settings.ini", "rr_mode=fast\r\n; wronggpu-written 0123456789abcdef\r\n", "settings.ini with a stamp that does not match"},
+                                         Control{L"model-choice.ini", "model=L\r\n", "model-choice.ini without WrongGPU's stamp (unknown)"},
+                                         Control{L"settings.ini.wgtmp-9-9", "player_key=1\r\n", "a file named like a temporary file, not WrongGPU's"}}) {
+                    const wstring f = Join(StateDir(sg), c.name);
+                    put(f, c.bytes);
+                    stay = RemoveStateFolder(sg, &rm);
+                    string back;
+                    require(ReadAll(f, back) && back == c.bytes && stay.size() == 1, string("uninstall keeps ") + c.what + " byte for byte and lists it");
+                    DeleteFileW(f.c_str());
+                }
+
                 // the operation gate (wg_state.h OperationGuard): the record's binaries held, writes and deletes through it,
                 // refused while a binary is in use, one gate per folder and thread
                 const wstring gg = Join(dir, L"gate-game");

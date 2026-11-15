@@ -6,8 +6,9 @@
 //                     rr_mode): they take precedence over the install's defaults in wronggpu.ini, which no WrongGPU
 //                     program rewrites after the install (wronggpu.ini is the player's to edit);
 //   model-choice.ini  the model choice record (clean/fsr/src/model_choice_record.h).
-// The folder is always WrongGPU's: an uninstall removes these files, a repair or update keeps them. The launcher creates the
-// folder; nothing here creates it.
+// The folder is WrongGPU's; its files are WrongGPU's by their bytes (the stamp, below): an uninstall removes a state file
+// only while it carries WrongGPU's valid stamp (an edited or unknown file stays and is listed); a repair or update keeps
+// them. The launcher creates the folder; nothing here creates it.
 //
 // THE STATE LOCK (StateLock) is the gate for everything below: a named mutex per game folder,
 //   Global\WrongGPU-state-<volume serial, 8 hex>-<file index, 16 hex>
@@ -50,14 +51,15 @@
 // Paths: every helper turns its path into the \\?\ form (full path; \\?\UNC\ for a share), so a game deeper than MAX_PATH
 // works without the long-path setting.
 //
-// settings.ini, strictly (anything else is CORRUPT: readers treat the file as empty and say so; the next write replaces it):
-//   ; comment lines and blank lines
-//   key=value         key: [a-z0-9_], 1..64 chars; value: [A-Za-z0-9_.+-], 0..256 chars; each key at most once;
-//                     no sections, no spaces around '='; CRLF or LF line ends (a CR anywhere else, also a bare final CR,
-//                     is corrupt); ASCII only.
+// settings.ini (ParseSettings): key=value lines, key [a-z0-9_] 1..64 chars, value [A-Za-z0-9_.+-] 0..256 chars, spaces
+// around '=' allowed; a key's first line counts. Everything else is kept as it is and written back unchanged: a UTF-8 BOM,
+// comments (';' or '#', any UTF-8 text), blank lines, sections, unknown or other lines. CRLF or LF. CORRUPT is only text
+// WrongGPU cannot keep as it is (a NUL or other control character, a CR that is not part of CRLF, bytes that are not UTF-8):
+// readers treat it as empty and say so, and a save is REFUSED (Unparseable): the file is never replaced.
 // Written for this project; Windows API and the C++ standard library only.
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -479,11 +481,53 @@ inline WriteResult WriteAtomic(const std::wstring& path, const std::string& byte
     return r;
 }
 
+// ---- WrongGPU's stamp: which state files are WrongGPU's, by their bytes ----------------------------------------------
+// A state file WrongGPU created and nobody else changed ends with the stamp line "; wronggpu-written <check>", where <check>
+// is a 64-bit FNV-1a of every byte before that line (16 lower-case hex digits; it tells WrongGPU's own bytes from an edit,
+// it is no protection against a forgery). An uninstall deletes a state file, or a temporary file of one, only while its
+// bytes carry a valid stamp: an edited file (the check no longer matches), a file without the stamp (the player's, or one a
+// crash cut short) stays and is listed. A write keeps a file WrongGPU's only when it was (or nothing was there): a file the
+// player made or changed is written on WITHOUT a stamp and stays the player's. Readers see the stamp as a comment.
+constexpr const char* kStampPrefix = "; wronggpu-written ";
+inline std::string StampCheck(const std::string& body) {
+    uint64_t h = 1469598103934665603ull;  // FNV-1a 64
+    for (unsigned char c : body) { h ^= c; h *= 1099511628211ull; }
+    static const char* hex = "0123456789abcdef";
+    std::string s(16, '0');
+    for (int i = 15; i >= 0; --i) { s[static_cast<size_t>(i)] = hex[h & 15u]; h >>= 4; }
+    return s;
+}
+// body + its stamp line (body ends with a line end, or is empty).
+inline std::string Stamped(const std::string& body) { return body + kStampPrefix + StampCheck(body) + "\r\n"; }
+// bytes end with a valid stamp line ("\r\n" or "\n", or none, after it).
+inline bool StampedByWrongGPU(const std::string& bytes) {
+    std::string t = bytes;
+    if (!t.empty() && t.back() == '\n') t.pop_back();
+    if (!t.empty() && t.back() == '\r') t.pop_back();
+    const size_t nl = t.rfind('\n');
+    const size_t start = nl == std::string::npos ? 0 : nl + 1;
+    const std::string last = t.substr(start), prefix = kStampPrefix;
+    if (last.size() != prefix.size() + 16 || last.compare(0, prefix.size(), prefix) != 0) return false;
+    return last.substr(prefix.size()) == StampCheck(bytes.substr(0, start));
+}
+inline bool IsStampLine(const std::string& line) { return line.rfind(kStampPrefix, 0) == 0; }
+// A state file written atomically with WrongGPU's stamp (for a writer that makes its file whole, such as the model choice
+// record; it takes the state lock first).
+inline WriteResult WriteStamped(const std::wstring& path, const std::string& body) { return WriteAtomic(path, Stamped(body)); }
+
 // ---- settings.ini -------------------------------------------------------------------------------------------------
+// One line of the file as read: its text (without the line end) and, for a key=value line WrongGPU uses, the key.
+struct SettingsLine {
+    std::string text;
+    std::string key;  // empty: a comment, a blank line, a section, or a line kept as it is (not a usable key=value)
+};
 struct Settings {
-    std::vector<std::pair<std::string, std::string>> kv;  // in file order
+    std::vector<std::pair<std::string, std::string>> kv;  // the usable keys, in file order (a key's first line)
+    std::vector<SettingsLine> lines;                      // every line, kept for the write (comments, unknown lines)
+    bool bom = false;                                     // the file started with a UTF-8 BOM (kept)
+    std::string eol = "\r\n";                             // the file's line end (its first one), used for new lines
     bool present = false;                                 // the file was there and read
-    bool corrupt = false;                                 // it was there and not in the format above (kv empty)
+    bool corrupt = false;                                 // it was there and not text WrongGPU can keep (kv and lines empty)
     std::string why;                                      // what was wrong (corrupt), or why it could not be read
 };
 inline bool KeyChar(char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'; }
@@ -504,23 +548,67 @@ inline const std::string* Get(const Settings& s, const std::string& key) {
     for (const auto& p : s.kv) if (p.first == key) return &p.second;
     return nullptr;
 }
-// Sets key=value (added at the end when new). false: not a valid key or value (nothing changed).
+// Sets key=value: its line rewritten as "key=value" (a key not there: a new line at the end). false: not a valid key or value
+// (nothing changed).
 inline bool Set(Settings& s, const std::string& key, const std::string& value) {
     if (!ValidKey(key) || !ValidValue(value)) return false;
-    for (auto& p : s.kv) if (p.first == key) { p.second = value; return true; }
+    for (auto& p : s.kv)
+        if (p.first == key) {
+            p.second = value;
+            for (auto& l : s.lines) if (l.key == key) { l.text = key + "=" + value; break; }
+            return true;
+        }
     s.kv.emplace_back(key, value);
+    s.lines.push_back({key + "=" + value, key});
     return true;
 }
-// Parses settings.ini text strictly; a text not in the format gives corrupt = true and no keys.
-inline Settings ParseSettings(const std::string& text) {
+inline std::string TrimSpaces(const std::string& t) {
+    size_t a = 0, b = t.size();
+    while (a < b && (t[a] == ' ' || t[a] == '\t')) ++a;
+    while (b > a && (t[b - 1] == ' ' || t[b - 1] == '\t')) --b;
+    return t.substr(a, b - a);
+}
+// Well-formed UTF-8 (no overlong forms, no surrogates, at most U+10FFFF).
+inline bool Utf8Ok(const std::string& t) {
+    for (size_t i = 0; i < t.size();) {
+        const unsigned char c = static_cast<unsigned char>(t[i]);
+        size_t n = c < 0x80 ? 0 : (c & 0xE0) == 0xC0 ? 1 : (c & 0xF0) == 0xE0 ? 2 : (c & 0xF8) == 0xF0 ? 3 : 9;
+        if (n == 9 || i + n >= t.size() + (n ? 0 : 1)) return false;
+        uint32_t cp = n == 0 ? c : n == 1 ? (c & 0x1Fu) : n == 2 ? (c & 0x0Fu) : (c & 0x07u);
+        for (size_t k = 1; k <= n; ++k) {
+            const unsigned char d = static_cast<unsigned char>(t[i + k]);
+            if ((d & 0xC0) != 0x80) return false;
+            cp = (cp << 6) | (d & 0x3Fu);
+        }
+        if ((n == 1 && cp < 0x80) || (n == 2 && cp < 0x800) || (n == 3 && (cp < 0x10000 || cp > 0x10FFFF)) || (cp >= 0xD800 && cp <= 0xDFFF)) return false;
+        i += n + 1;
+    }
+    return true;
+}
+// Parses settings.ini text tolerantly and keeps every line for the write. A UTF-8 BOM, comments (';' or '#', any UTF-8 text),
+// blank lines, sections, spaces around '=' and lines WrongGPU does not use (an unknown key in another spelling, a value it
+// does not take, a key's second line) are kept as they are; key=value lines with a valid key and value are the usable keys
+// (a key's first line). CORRUPT (no keys, no lines; why says where): text WrongGPU cannot keep as it is: a NUL or other
+// control character (a tab is fine), a CR that is not part of CRLF, or bytes that are not UTF-8.
+inline Settings ParseSettings(const std::string& in) {
     Settings s;
     s.present = true;
+    std::string text = in;
+    if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF && static_cast<unsigned char>(text[1]) == 0xBB &&
+        static_cast<unsigned char>(text[2]) == 0xBF) {
+        s.bom = true;
+        text.erase(0, 3);
+    }
     auto corrupt = [&](int lineNo, const char* what) {
         s.kv.clear();
+        s.lines.clear();
         s.corrupt = true;
         s.why = "line " + std::to_string(lineNo) + ": " + what;
         return s;
     };
+    if (!Utf8Ok(text)) return corrupt(0, "not UTF-8 text");
+    const size_t firstLf = text.find('\n');
+    if (firstLf != std::string::npos) s.eol = firstLf > 0 && text[firstLf - 1] == '\r' ? "\r\n" : "\n";
     size_t a = 0;
     int lineNo = 0;
     while (a < text.size()) {
@@ -532,21 +620,29 @@ inline Settings ParseSettings(const std::string& text) {
         ++lineNo;
         if (lf && !line.empty() && line.back() == '\r') line.pop_back();  // CRLF; a CR anywhere else is not a line end
         for (char c : line)
-            if (static_cast<unsigned char>(c) >= 0x80 || (c < 0x20 && c != '\t')) return corrupt(lineNo, c == '\r' ? "a CR that is not part of CRLF" : "not plain text");
-        if (line.empty() || line[0] == ';') continue;
-        const size_t eq = line.find('=');
-        const std::string k = eq == std::string::npos ? line : line.substr(0, eq), v = eq == std::string::npos ? std::string() : line.substr(eq + 1);
-        if (eq == std::string::npos) return corrupt(lineNo, "no key=value");
-        if (!ValidKey(k)) return corrupt(lineNo, "not a valid key");
-        if (!ValidValue(v)) return corrupt(lineNo, "not a valid value");
-        if (Get(s, k)) return corrupt(lineNo, "the key appears twice");
-        s.kv.emplace_back(k, v);
+            if (static_cast<unsigned char>(c) < 0x20 && c != '\t') return corrupt(lineNo, c == '\r' ? "a CR that is not part of CRLF" : "a control character");
+        SettingsLine l{line, ""};
+        const std::string t = TrimSpaces(line);
+        const size_t eq = t.find('=');
+        if (!t.empty() && t[0] != ';' && t[0] != '#' && t[0] != '[' && eq != std::string::npos) {
+            const std::string k = TrimSpaces(t.substr(0, eq)), v = TrimSpaces(t.substr(eq + 1));
+            if (ValidKey(k) && ValidValue(v) && !Get(s, k)) { l.key = k; s.kv.emplace_back(k, v); }
+        }
+        if (!IsStampLine(t)) s.lines.push_back(std::move(l));  // (WrongGPU's stamp is not part of the content)
     }
     return s;
 }
+// The file's text: a new file (nothing read) starts with a comment saying what it is; a read one keeps its BOM, its lines
+// and its line end, the changed keys rewritten and new keys at the end. No stamp (SetSettings adds it when the file is
+// WrongGPU's).
 inline std::string RenderSettings(const Settings& s) {
-    std::string out = "; WrongGPU: settings chosen in the launcher or in a WrongGPU menu in the game (they take precedence over wronggpu.ini)\r\n";
-    for (const auto& p : s.kv) out += p.first + "=" + p.second + "\r\n";
+    std::string out = s.bom ? "\xEF\xBB\xBF" : "";
+    if (!s.present && s.lines.empty()) {
+        out += "; WrongGPU: settings chosen in the launcher or in a WrongGPU menu in the game (they take precedence over wronggpu.ini)\r\n";
+        for (const auto& p : s.kv) out += p.first + "=" + p.second + "\r\n";
+        return out;
+    }
+    for (const auto& l : s.lines) out += l.text + s.eol;
     return out;
 }
 // settings.ini of the game in gameDir, read now from disk. Missing: present = false, no keys. Unreadable or corrupt: no keys,
@@ -563,7 +659,7 @@ inline Settings ReadSettings(const std::wstring& gameDir) {
     return ParseSettings(text);
 }
 
-enum class SetResult { Ok, NoStateFolder, StateFolderUnknown, Busy, LockDenied, Unreadable, Invalid, AccessDenied, WriteFailed };
+enum class SetResult { Ok, NoStateFolder, StateFolderUnknown, Busy, LockDenied, Unreadable, Unparseable, Invalid, AccessDenied, WriteFailed };
 inline const char* SetResultWords(SetResult r) {
     switch (r) {
         case SetResult::Ok: return "saved";
@@ -572,35 +668,44 @@ inline const char* SetResultWords(SetResult r) {
         case SetResult::Busy: return "another WrongGPU program kept the game's state lock";
         case SetResult::LockDenied: return "WrongGPU may not use this game's state lock (access denied); run the launcher's repair as administrator";
         case SetResult::Unreadable: return "the settings file could not be read (left as it is)";
+        case SetResult::Unparseable: return "the settings file is not text WrongGPU can keep as it is, so nothing was saved (the file is left as it is)";
         case SetResult::Invalid: return "not a valid key or value";
         case SetResult::AccessDenied: return "WrongGPU can't write to the game folder; run the launcher's repair as administrator";
         case SetResult::WriteFailed: return "the settings file could not be written";
     }
     return "?";
 }
-// The outcome of SetSettings: the result, its Win32 error, and (a failed write) the write's secondary failures. words() says
-// everything a consumer must show, including a temporary file that could not be deleted.
+// The outcome of SetSettings / UpdateSettings: the result, its Win32 error, what was wrong with the file (Unparseable), whether
+// a write happened, and (a failed write) the write's secondary failures. words() says everything a consumer must show,
+// including a temporary file that could not be deleted.
 struct SetOutcome {
     SetResult result = SetResult::Ok;
     DWORD error = 0;
-    WriteResult write;  // the write's outcome when one was attempted (secondary close / cleanup failures)
+    std::string why;      // Unparseable: where (ParseSettings)
+    bool written = false; // Ok: a new file was written (false: nothing had changed)
+    WriteResult write;    // the write's outcome when one was attempted (secondary close / cleanup failures)
     bool ok() const { return result == SetResult::Ok; }
     std::string words() const {
         std::string w = SetResultWords(result);
+        if (!why.empty()) w += " (" + why + ")";
         if (result != SetResult::Ok && error && error != WAIT_TIMEOUT) w += " (error " + std::to_string(error) + ")";
         if (write.closeError && write.closeError != write.error) w += "; closing the temporary file also failed (error " + std::to_string(write.closeError) + ")";
         if (write.cleanupError) w += "; a temporary file could not be deleted (error " + std::to_string(write.cleanupError) + ") and is left in the state folder";
         return w;
     }
 };
-// The read-modify-write of settings.ini under the game's state lock: the file re-read from disk after the lock is taken, the
-// changes applied (a corrupt file starts empty; an unreadable one is never overwritten), written atomically. The state folder
-// is never created here. Distinct results for a consumer to show: AccessDenied (the game folder is not writable for this
-// process) and LockDenied (the lock may not be opened) both point to the launcher's elevated repair; Busy is contention.
-inline SetOutcome SetSettings(const std::wstring& gameDir, const std::vector<std::pair<std::string, std::string>>& changes, DWORD waitMs = kDefaultWaitMs) {
+// What to change, decided from the file as it is now (read under the state lock): the keys and values to set.
+using SettingsDecision = std::function<void(const Settings& now, std::vector<std::pair<std::string, std::string>>* changes)>;
+// The read-decide-write of settings.ini under the game's state lock: the file re-read from disk after the lock is taken,
+// decide() called with it (so a decision never rests on a read made before another program's write), the changes that differ
+// applied, written atomically (nothing differs: no write). The file is never replaced when it is unreadable (Unreadable) or
+// not text WrongGPU can keep (Unparseable: refused, the bytes stay); comments and lines WrongGPU does not use are kept. It
+// stays WrongGPU's (stamped) only when it was WrongGPU's or new. The state folder is never created here. Distinct results for
+// a consumer to show: AccessDenied (the game folder is not writable for this process) and LockDenied (the lock may not be
+// opened) both point to the launcher's elevated repair; Busy is contention.
+inline SetOutcome UpdateSettings(const std::wstring& gameDir, const SettingsDecision& decide, DWORD waitMs = kDefaultWaitMs) {
     SetOutcome o;
     auto fail = [&](SetResult r, DWORD e) { o.result = r; o.error = e; return o; };
-    for (const auto& c : changes) if (!ValidKey(c.first) || !ValidValue(c.second)) return fail(SetResult::Invalid, 0);
     DWORD e = 0;
     switch (DirectoryState(StateDirOf(gameDir), &e)) {
         case PathState::Present: break;
@@ -614,16 +719,28 @@ inline SetOutcome SetSettings(const std::wstring& gameDir, const std::vector<std
     Settings s;
     if (ReadBytes(SettingsPathOf(gameDir), &text, &missing, &e)) s = ParseSettings(text);
     else if (!missing) return fail(e == ERROR_ACCESS_DENIED ? SetResult::AccessDenied : SetResult::Unreadable, e);
-    if (s.corrupt) s = Settings();
-    bool changed = !s.present;
+    if (s.corrupt) { o.why = s.why; return fail(SetResult::Unparseable, 0); }
+    std::vector<std::pair<std::string, std::string>> changes;
+    decide(s, &changes);
+    for (const auto& c : changes) if (!ValidKey(c.first) || !ValidValue(c.second)) return fail(SetResult::Invalid, 0);
+    bool changed = false;
     for (const auto& c : changes) {
         const std::string* now = Get(s, c.first);
         if (!now || *now != c.second) { Set(s, c.first, c.second); changed = true; }
     }
     if (!changed) return o;
-    o.write = WriteAtomic(SettingsPathOf(gameDir), RenderSettings(s));
+    const bool ours = !s.present || StampedByWrongGPU(text);
+    const std::string body = RenderSettings(s);
+    o.write = WriteAtomic(SettingsPathOf(gameDir), ours ? Stamped(body) : body);
     if (!o.write.ok) return fail(o.write.error == ERROR_ACCESS_DENIED ? SetResult::AccessDenied : SetResult::WriteFailed, o.write.error);
+    o.written = true;
     return o;
+}
+// UpdateSettings with fixed changes (a key already at its value is not written again).
+inline SetOutcome SetSettings(const std::wstring& gameDir, const std::vector<std::pair<std::string, std::string>>& changes, DWORD waitMs = kDefaultWaitMs) {
+    for (const auto& c : changes)
+        if (!ValidKey(c.first) || !ValidValue(c.second)) { SetOutcome o; o.result = SetResult::Invalid; return o; }
+    return UpdateSettings(gameDir, [&](const Settings&, std::vector<std::pair<std::string, std::string>>* out) { *out = changes; }, waitMs);
 }
 
 }  // namespace wgstate

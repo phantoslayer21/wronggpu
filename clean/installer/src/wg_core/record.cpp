@@ -416,9 +416,9 @@ static std::function<bool(const wstring&, PinnedFile&)> StateOwned(const wstring
     auto names = std::make_shared<std::map<wstring, wstring>>();
     for (const wchar_t* n : {L"install.record", L"uninstall.exe", L"setup.log", L"profile.ini"}) (*names)[n] = L"";
     // #219: the game's state files (wg_state.h: settings chosen in the launcher or a WrongGPU menu in the game, the model choice
-    // record) are always WrongGPU's, by their fixed names; so are their atomic writes' temporary files (<name>.wgtmp-*)
-    (*names)[wgstate::kSettingsFile] = L"";
-    (*names)[wgstate::kModelChoiceFile] = L"";
+    // record) and their atomic writes' temporary files (<name>.wgtmp-*) are WrongGPU's by their BYTES only: while they carry
+    // WrongGPU's valid stamp (wg_state.h StampedByWrongGPU). An edited file, a file without the stamp (the player's own, or a
+    // temporary file a crash cut short) stays and is listed (below, in the returned test)
     if (m) {
         const string json = OwnedFilesJson(*m);
         (*names)[L"owned-files.json"] = Sha256Bytes(json.data(), json.size());
@@ -441,8 +441,11 @@ static std::function<bool(const wstring&, PinnedFile&)> StateOwned(const wstring
     return [names](const wstring& rel, PinnedFile& f) {
         const wstring low = LowerRel(rel);
         const size_t mark = low.find(wgstate::kTempMark);
-        if (mark != wstring::npos && low.find(L'\\') == wstring::npos &&
-            (low.substr(0, mark) == wgstate::kSettingsFile || low.substr(0, mark) == wgstate::kModelChoiceFile)) return true;
+        const wstring base = mark == wstring::npos ? low : low.substr(0, mark);
+        if (low.find(L'\\') == wstring::npos && (base == wgstate::kSettingsFile || base == wgstate::kModelChoiceFile)) {
+            string bytes;  // (read through the handle that holds the file until it is deleted)
+            return f.ReadBytes(bytes) && wgstate::StampedByWrongGPU(bytes);
+        }
         const auto it = names->find(low);
         return it != names->end() && (it->second.empty() || IEq(f.Sha256(), it->second));
     };
@@ -551,6 +554,18 @@ void RestoreStep(const char* name) {
     if (g_restoreStepHook) g_restoreStepHook(name);
 #ifdef WRONGGPU_TESTING
     if (EnvVar(L"WRONGGPU_TEST_STOP_AT") == FromUtf8(name)) ExitProcess(99);  // tests: the process stops here, as if killed
+    // tests: a file appears here (another program or the player creating it at this moment), where nothing is
+    if (EnvVar(L"WRONGGPU_TEST_CREATE_AT") == FromUtf8(name) && !EnvVar(L"WRONGGPU_TEST_CREATE_FILE").empty()) {
+        const wstring f = EnvVar(L"WRONGGPU_TEST_CREATE_FILE");
+        EnsureDir(Parent(f));
+        const HANDLE h = CreateFileW(f.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h != INVALID_HANDLE_VALUE) {
+            static const char kText[] = "; made by the player during the install (test)\r\n";
+            DWORD w = 0;
+            WriteFile(h, kText, sizeof kText - 1, &w, nullptr);
+            CloseHandle(h);
+        }
+    }
 #endif
 }
 

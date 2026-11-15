@@ -141,16 +141,17 @@ struct RrFileState { bool present = false, enabled = true; string mode; };
 RrFileState ParseRrSettings(const string& text);
 // The settings in effect: WrongGPU\wronggpu.ini's [wronggpu] keys, then the state folder's settings.ini over them.
 RrFileState ReadRrSettings(const wstring& dir);
-// The launcher's write of `keys` into the game's settings.ini (wg_state.h SetSettings, under the state lock). 1: written; 0: the
-// file had these values already; -1: refused (*why in words, logged: no state folder, the lock kept by another WrongGPU program,
-// the file unreadable or not written).
+// The launcher's write of `keys` into the game's settings.ini (wg_state.h SetSettings: compared and written under the state
+// lock). 1: written; 0: the file had these values already; -1: refused (*why in words, logged: no state folder, the lock kept
+// by another WrongGPU program, the file unreadable, not text WrongGPU can keep (never replaced), or not written).
 int WriteStateKeys(Context& ctx, const wstring& dir, const std::vector<std::pair<string, string>>& keys, wstring* why = nullptr);
 // The state keys a launcher write puts in settings.ini for the profile and the RR data's state.
 std::vector<std::pair<string, string>> RrStateKeys(const Profile& p, bool dataReady);
-// The launcher's RR settings into the state folder (under the game's state lock). 1: written; 0: nothing to write (not an
-// RR install, the same values); -1: refused (*why: no state folder, the lock kept by another WrongGPU program, the file
-// unreadable or not written).
-int WriteRrState(Context& ctx, const wstring& dir, const Profile& p, bool dataReady, wstring* why = nullptr);
+// The launcher's RR settings into the state folder, decided under the game's state lock from the file as it is then. The
+// mode is written only when the file has none or when the launcher's own choice changed (prevMode: the profile's mode before
+// this apply; null: a refresh, which never changes a saved mode), so a mode the game's menu saved meanwhile stays.
+// 1: written; 0: nothing to write (the same values); -1: refused (*why: as WriteStateKeys).
+int WriteRrState(Context& ctx, const wstring& dir, const Profile& p, bool dataReady, wstring* why = nullptr, const string* prevMode = nullptr);
 // Upgrade of an install whose WrongGPU\wronggpu.ini an older RR plugin (or the player) changed: while settings.ini has no
 // rr_mode, a WrongGPU\wronggpu.ini whose bytes differ from the record's hash is the player's (it stays, as every changed
 // file), and its rr_mode (and rr_overlay) are copied into settings.ini, so the game keeps running as before. A file with the

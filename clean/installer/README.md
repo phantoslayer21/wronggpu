@@ -270,10 +270,11 @@ With the defaults nothing of this section changes the installer.
     where a hash is known, its bytes are those. The backups the record lists go while they match the entry's hash; the
     previous version's files that `previous.txt` lists go while they match the hashes it states (a changed one stays and
     is listed); `owned-files.json` goes while it is byte for byte what WrongGPU makes of the record. The record,
-    `previous.txt`, `uninstall.exe`, `setup.log`, `profile.ini`, the saved settings `settings.ini` and `model-choice.ini`
-    (and their unfinished temporary files `<name>.wgtmp-*`) carry no recorded hash and go by their fixed names (the one
-    place the rule is by name). The state folder is always WrongGPU's: uninstall removes those files, repair and update
-    keep them. The player's Engine.ini copy (`rr-config`) goes only through the Engine.ini revert. Any other
+    `previous.txt`, `uninstall.exe`, `setup.log` and `profile.ini` carry no recorded hash and go by their fixed names.
+    The saved settings `settings.ini`, `model-choice.ini` and their temporary files (`<name>.wgtmp-*`) go only while
+    their bytes carry WrongGPU's stamp: a last line `; wronggpu-written <check>` whose check matches every byte before
+    it. WrongGPU stamps a state file it creates and keeps the stamp only while nobody else changes the file. A file the
+    player edited or made, or a temporary file a crash cut short, stays and is listed. Repair and update keep them. The player's Engine.ini copy (`rr-config`) goes only through the Engine.ini revert. Any other
     file stays, the folder stays with it, and the result lists what was left. The same applies when an install is moved
     out of a wrong folder. The shared folder `%LOCALAPPDATA%\WrongGPU` is not in a game's folder; see Uninstall.
   - **A settings file in a build without Preset K.** The plugin's `wronggpu-asi.ini` is rewritten (its `selection=wronggpu-k`

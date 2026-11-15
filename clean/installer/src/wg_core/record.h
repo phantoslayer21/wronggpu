@@ -153,11 +153,13 @@ bool OptiIniWrittenByUs(const wstring& dir, const Record& m);
 // with its hash, or the ini is the one WrongGPU last wrote. Used only to decide what the scan reports and asks about (the
 // switch question) and which menu-saved values carry over; never to delete or overwrite a file.
 bool OptiSetupIsOurs(const wstring& dir, const Record& m);
-// Test hook: called at the named steps of DoRestore ("restored", "kept", "record-removed"), of the rollback ("rollback-absent":
+// Test hook: called at the named steps of DoRestore ("restored", "kept", "record-removed"), of the install ("seed-planned": the
+// seed files checked absent, the record not yet made; "seed-recorded": the record written, the seeds not yet), of the rollback ("rollback-absent":
 // about to create the missing payload files; "rollback-held": every payload file held and checked) and of the Engine.ini restore ("rrconfig-held": Engine.ini held and read;
 // "rrconfig-absent": about to create it; "rrconfig-replace": the corrected copy written, the handle closed, about to replace
 // it); a test stops the operation there (as a killed process would) or tries to change
-// the file. Test builds also stop the process at the step named by WRONGGPU_TEST_STOP_AT.
+// the file. Test builds also stop the process at the step named by WRONGGPU_TEST_STOP_AT, and create the file
+// WRONGGPU_TEST_CREATE_FILE (where nothing is) at the step named by WRONGGPU_TEST_CREATE_AT.
 void SetRestoreStepHook(std::function<void(const char*)> hook);
 void RestoreStep(const char* name);  // calls the hook (above)
 // Test seam: a write fault at a named step ("rollback-write": before each payload file Roll back writes; "rrconfig-write": the
@@ -220,7 +222,8 @@ wstring StartCleanup(Context& ctx, const wstring& state, const wstring& self, co
 // when it is WrongGPU's and, where a hash is known, its bytes are those: the backups the record lists (the entry's hash), the
 // previous version's files that previous.txt lists with their hashes, owned-files.json (the bytes WrongGPU makes of the record).
 // The record, previous.txt, uninstall.exe, setup.log and profile.ini carry no recorded hash and go by their fixed names (stated
-// in the README). Anything else, or a listed file whose bytes changed, stays with the folder and the result lists it
+// in the README). settings.ini, model-choice.ini and their <name>.wgtmp-* files go only while they carry WrongGPU's valid
+// stamp (wg_state.h StampedByWrongGPU). Anything else, or a listed file whose bytes changed, stays with the folder and the result lists it
 // (kLeftUnrecorded); only a folder that holds nothing else is removed.
 // RemoveStateFolder: the state folder of `dir` (relocation: the restore has removed the backup); m: the record the install had
 // (the hashes of its backups and of owned-files.json come from it; without it those two are left). keepFile: the running uninstaller. Returns what stays, below the folder.

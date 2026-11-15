@@ -473,7 +473,9 @@ RrFileState ParseRrSettings(const string& text) {
     RrFileState s;
     s.present = true;
     string sec;
-    for (size_t a = 0; a < text.size();) {
+    // a UTF-8 BOM before the first line (a 0.6.0 file saved by an editor; the plugin's reader skips it too)
+    const size_t from = text.size() >= 3 && (unsigned char)text[0] == 0xEF && (unsigned char)text[1] == 0xBB && (unsigned char)text[2] == 0xBF ? 3 : 0;
+    for (size_t a = from; a < text.size();) {
         size_t e = text.find('\n', a);
         if (e == string::npos) e = text.size();
         const string t = TrimA(text.substr(a, e - a));
@@ -504,14 +506,9 @@ std::vector<std::pair<string, string>> RrStateKeys(const Profile& p, bool dataRe
     return {{"rr_enabled", p.get("rr_enabled") != "off" && dataReady ? "1" : "0"}, {"rr_mode", mode}, {"rr_exact_allowed", mode == "exact" ? "1" : "0"}};
 }
 
-// (the launcher's state writes, rr.h WriteStateKeys)
-int WriteStateKeys(Context& ctx, const wstring& dir, const std::vector<std::pair<string, string>>& keys, wstring* why) {
-    const wgstate::Settings now = wgstate::ReadSettings(dir);
-    bool same = now.present && !now.corrupt;
-    for (auto& k : keys) { const string* v = wgstate::Get(now, k.first); same = same && v && *v == k.second; }
-    if (same) return 0;
-    const wgstate::SetOutcome o = wgstate::SetSettings(dir, keys, wgstate::kDefaultWaitMs);
-    if (o.ok()) return 1;
+// (the launcher's state writes, rr.h WriteStateKeys): 1 written, 0 nothing differed, -1 not saved (in words)
+static int StateWriteResult(Context& ctx, const wstring& dir, const wgstate::SetOutcome& o, wstring* why) {
+    if (o.ok()) return o.written ? 1 : 0;
     // every failure in words, the access-denied ones with the elevated repair (wg_state.h SetOutcome::words)
     const wstring w = L"the game's WrongGPU settings (" + Join(Join(dir, wgstate::kStateFolder), wgstate::kSettingsFile) + L") were not saved: " +
                       FromUtf8(o.words());
@@ -519,9 +516,28 @@ int WriteStateKeys(Context& ctx, const wstring& dir, const std::vector<std::pair
     if (why) *why = w;
     return -1;
 }
+int WriteStateKeys(Context& ctx, const wstring& dir, const std::vector<std::pair<string, string>>& keys, wstring* why) {
+    // the comparison and the write both under the state lock (wg_state.h UpdateSettings): only keys that differ now are written
+    return StateWriteResult(ctx, dir, wgstate::SetSettings(dir, keys, wgstate::kDefaultWaitMs), why);
+}
 
-int WriteRrState(Context& ctx, const wstring& dir, const Profile& p, bool dataReady, wstring* why) {
-    return WriteStateKeys(ctx, dir, RrStateKeys(p, dataReady), why);
+int WriteRrState(Context& ctx, const wstring& dir, const Profile& p, bool dataReady, wstring* why, const string* prevMode) {
+    const string want = p.get("rr_mode").empty() ? string("fast") : p.get("rr_mode");
+    const string enabled = p.get("rr_enabled") != "off" && dataReady ? "1" : "0";
+    // decided under the state lock from the file as it is now (wg_state.h UpdateSettings), so a mode the game's menu saved
+    // after the launcher read the settings is never replaced by the launcher's older view: the mode is written only when the
+    // file has none, or when the launcher's own choice changed (prevMode: the profile's mode before this apply; none: a
+    // refresh, which never changes a saved mode). rr_exact_allowed follows the mode that stays.
+    const wgstate::SetOutcome o = wgstate::UpdateSettings(dir, [&](const wgstate::Settings& now, std::vector<std::pair<string, string>>* out) {
+        const string* cur = wgstate::Get(now, "rr_mode");
+        const bool curValid = cur && (*cur == "exact" || *cur == "accurate" || *cur == "fast");
+        const bool writeMode = !curValid || (prevMode && want != *prevMode);
+        const string mode = writeMode ? want : *cur;
+        out->push_back({"rr_enabled", enabled});
+        if (writeMode) out->push_back({"rr_mode", mode});
+        out->push_back({"rr_exact_allowed", mode == "exact" ? "1" : "0"});
+    }, wgstate::kDefaultWaitMs);
+    return StateWriteResult(ctx, dir, o, why);
 }
 
 bool MigrateRrState(Context& ctx, const wstring& dir) {
@@ -539,7 +555,8 @@ bool MigrateRrState(Context& ctx, const wstring& dir) {
     const RrFileState s = ParseRrSettings(text);
     if (!s.mode.empty()) keys.push_back({"rr_mode", s.mode});
     string sec;
-    for (size_t a = 0; a < text.size();) {  // rr_overlay too, when the file has one ([wronggpu], a plain value)
+    const size_t bom = text.size() >= 3 && (unsigned char)text[0] == 0xEF && (unsigned char)text[1] == 0xBB && (unsigned char)text[2] == 0xBF ? 3 : 0;
+    for (size_t a = bom; a < text.size();) {  // rr_overlay too, when the file has one ([wronggpu], a plain value; after a BOM)
         size_t n = text.find('\n', a);
         if (n == string::npos) n = text.size();
         const string t = TrimA(text.substr(a, n - a));
@@ -551,7 +568,11 @@ bool MigrateRrState(Context& ctx, const wstring& dir) {
     }
     if (keys.empty()) return false;
     wstring why;
-    if (WriteStateKeys(ctx, dir, keys, &why) < 0) return false;
+    // under the state lock: only while the state folder still has no mode (a save in between wins)
+    const wgstate::SetOutcome o = wgstate::UpdateSettings(dir, [&](const wgstate::Settings& now, std::vector<std::pair<string, string>>* out) {
+        if (!wgstate::Get(now, "rr_mode")) *out = keys;
+    }, wgstate::kDefaultWaitMs);
+    if (StateWriteResult(ctx, dir, o, &why) <= 0) return false;
     LogLine(ctx, wstring(kRrSettings) + L" was changed since the install (an older RR plugin or the player): it is the player's file now; its mode was "
                  L"copied into " + Join(wgstate::kStateFolder, wgstate::kSettingsFile));
     return true;

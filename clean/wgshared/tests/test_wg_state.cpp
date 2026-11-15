@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: MIT
 // Tests of wg_state.h (the per-game state folder, its lock, the operation guard and atomic writes) on real files and real
 // processes. The test runs itself as the child process (--child-...). Scratch files go to the TMP folder of the run.
-//  - the strict settings.ini format (a bare or embedded CR is corrupt);
+//  - the settings.ini format: tolerant (BOM, comments in any UTF-8, spaces around '=', sections, unknown lines: kept and
+//    written back), corrupt only for text that cannot be kept (a control character, a CR outside CRLF, not UTF-8);
+//  - WrongGPU's stamp: a new file is stamped, an edited or player-made file is written on without one;
+//  - the decision under the state lock (UpdateSettings): a write made while another thread holds the lock is what decide()
+//    sees (forced interleaving);
 //  - atomic writes: oversized input refused, a failure at every step after the temporary file exists (write, flush, close,
 //    move) leaves the target as it was and no temporary file, a cleanup that fails is reported;
-//  - SetSettings: no state folder, a folder this process may not write (AccessDenied, its own result), unreadable, corrupt;
+//  - SetSettings: no state folder, a folder this process may not write (AccessDenied, its own result), unreadable, a file it
+//    cannot keep (Unparseable: refused, the bytes stay), the player's keys and comments kept;
 //  - one lock name for several aliases of one folder (case, trailing backslash, 8.3 name, \\?\ form, a junction, a path longer
 //    than MAX_PATH), each computed in a SEPARATE process, and mutual exclusion across processes that use different aliases;
 //  - a busy lock (bounded wait, nothing written), a holder that dies in the middle of a write (abandoned: the next holder
@@ -21,6 +26,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "wg_state.h"
@@ -193,17 +199,38 @@ int wmain(int argc, wchar_t** argv) {
     const std::wstring game = JoinPath(root, L"Game");
     CreateDirectoryW(game.c_str(), nullptr);
 
-    // ---- the strict format
+    // ---- the format: tolerant, everything kept; corrupt only for text that cannot be kept
     {
         Settings s = ParseSettings("; comment\r\n\r\nrr_mode=fast\r\nrr_enabled=1\n");
         check(s.present && !s.corrupt && s.kv.size() == 2 && *Get(s, "rr_mode") == "fast" && *Get(s, "rr_enabled") == "1", "parse: comments, blank lines, CRLF and LF");
-        const char* bad[] = {"rr_mode = fast\r\n", "[wronggpu]\r\nrr_mode=fast\r\n", "RR_MODE=fast\r\n", "rr_mode=fast\r\nrr_mode=accurate\r\n",
-                             "rr_mode\r\n", "rr_mode=fa st\r\n", "=fast\r\n", "rr_mode=f\xc3\xa4st\r\n", "; \xc3\xa4\r\n",
-                             "rr_mode=fast\r", "rr_mode=fa\rst\r\n", "rr_mode=fast\r\r\n", "; a\rb\n"};
+        struct { const char* text; const char* key; const char* value; } kept[] = {
+            {"rr_mode = fast\r\n", "rr_mode", "fast"}, {"[wronggpu]\r\nrr_mode=fast\r\n", "rr_mode", "fast"},
+            {"RR_MODE=fast\r\n", nullptr, nullptr}, {"rr_mode=fast\r\nrr_mode=accurate\r\n", "rr_mode", "fast"},
+            {"rr_mode\r\n", nullptr, nullptr}, {"rr_mode=fa st\r\n", nullptr, nullptr}, {"=fast\r\n", nullptr, nullptr},
+            {"rr_mode=f\xc3\xa4st\r\n", nullptr, nullptr}, {"; \xc3\xa4 a note\r\nrr_mode=exact\r\n", "rr_mode", "exact"},
+            {"# hash comment\r\n\trr_mode =\taccurate \r\n", "rr_mode", "accurate"}, {"\xEF\xBB\xBFrr_mode=fast\r\n", "rr_mode", "fast"}};
         bool all = true;
-        for (const char* b : bad) { const Settings x = ParseSettings(b); all = all && x.corrupt && x.kv.empty() && !x.why.empty(); }
-        check(all, "parse: spaces, sections, upper case, a key twice, no '=', bad value, empty key, non-ASCII, a bare or embedded CR: corrupt");
+        for (const auto& k : kept) {
+            const Settings x = ParseSettings(k.text);
+            const bool good = !x.corrupt && (k.key ? (Get(x, k.key) && *Get(x, k.key) == k.value) : x.kv.empty()) && RenderSettings(x) == std::string(k.text);
+            if (!good) std::printf("  (kept case %s: corrupt %d, keys %zu, render %s)\n", k.text, x.corrupt, x.kv.size(), RenderSettings(x).c_str());
+            all = all && good;
+        }
+        check(all, "parse: spaces around '=', sections, upper case, a key twice (the first counts), no '=', a value WrongGPU does not take, "
+                   "non-ASCII comments and values, '#' comments, tabs, a BOM: read, and written back byte for byte");
+        const std::string nul("rr_mode=fast\r\nnote=a\0b\r\n", 24);
+        const char* bad[] = {"rr_mode=fast\r", "rr_mode=fa\rst\r\n", "rr_mode=fast\r\r\n", "; a\rb\n", "; \xff\xfe not UTF-8\r\n", "k=v\x01\r\n"};
+        bool allBad = ParseSettings(nul).corrupt;
+        for (const char* b : bad) { const Settings x = ParseSettings(b); allBad = allBad && x.corrupt && x.kv.empty() && x.lines.empty() && !x.why.empty(); }
+        check(allBad, "parse: a NUL or other control character, a bare or embedded CR, bytes that are not UTF-8: corrupt (nothing WrongGPU could keep)");
         check(!ParseSettings("rr_mode=fast").corrupt, "parse: a last line without a line end is fine");
+        Settings mixed = ParseSettings("\xEF\xBB\xBF; the player's note \xc3\xa4\nPlayer Key = 1\n[section]\nrr_mode = fast\nother_key=2\n");
+        check(Set(mixed, "rr_mode", "exact") && Set(mixed, "new_key", "3") &&
+                  RenderSettings(mixed) == "\xEF\xBB\xBF; the player's note \xc3\xa4\nPlayer Key = 1\n[section]\nrr_mode=exact\nother_key=2\nnew_key=3\n",
+              "a change keeps the BOM, the comments, the unknown lines and the line ends; the changed key rewritten in place, a new one at the end");
+        check(ParseSettings(Stamped("rr_mode=fast\r\n")).lines.size() == 1 && StampedByWrongGPU(Stamped("rr_mode=fast\r\n")) &&
+                  !StampedByWrongGPU(Stamped("rr_mode=fast\r\n") + "x=1\r\n") && !StampedByWrongGPU("rr_mode=fast\r\n; wronggpu-written 0123456789abcdef\r\n"),
+              "the stamp: read as a comment (not content), valid only right after the bytes it checks");
         Settings r;
         check(Set(r, "rr_mode", "fast") && Set(r, "rr_mode", "exact") && r.kv.size() == 1 && !Set(r, "Bad Key", "x") && !Set(r, "k", "a b"), "Set: replace, refuse bad key/value");
         const Settings back = ParseSettings(RenderSettings(r));
@@ -249,13 +276,37 @@ int wmain(int argc, wchar_t** argv) {
         if (!w.tempLeft.empty()) DeleteFileW(w.tempLeft.c_str());
         w = WriteAtomic(JoinPath(JoinPath(root, L"missing-folder"), L"x.ini"), "x");
         check(!w.ok && w.error != 0, "a write into a missing folder fails with its error");
-        // corrupt, unreadable
-        WriteText(f, "rr_mode = fast\r\n");
-        check(ReadSettings(game).corrupt && ReadSettings(game).kv.empty(), "a corrupt file reads as corrupt, no keys");
-        check(SetSettings(game, {{"rr_mode", "accurate"}}).ok() && ReadSettings(game).kv.size() == 1, "a corrupt file is replaced by the next write");
+        // the stamp: the file WrongGPU created is stamped and stays so while only WrongGPU writes it
+        check(StampedByWrongGPU(ReadText(f)), "a file SetSettings created carries WrongGPU's stamp");
+        check(SetSettings(game, {{"rr_enabled", "1"}}).ok() && StampedByWrongGPU(ReadText(f)), "...and keeps it through WrongGPU's next write");
+        // the player's edits: kept by every write, and the file is the player's from then on (no stamp)
+        WriteText(f, ReadText(f) + "player_key = 7\r\n; the player's note \xc3\xa4\r\n");
+        SetOutcome o = SetSettings(game, {{"rr_mode", "accurate"}});
+        std::string t = ReadText(f);
+        check(o.ok() && o.written && *Get(ReadSettings(game), "rr_mode") == "accurate" && t.find("player_key = 7\r\n") != std::string::npos &&
+                  t.find("; the player's note \xc3\xa4\r\n") != std::string::npos && !StampedByWrongGPU(t),
+              "a file the player edited: the menu's save keeps the player's key and note as they are and writes no stamp (the player's file now)");
+        WriteText(f, "\xEF\xBB\xBF# made by the player\r\nRR Mode = Fast\r\n");
+        o = SetSettings(game, {{"rr_mode", "fast"}});
+        t = ReadText(f);
+        check(o.ok() && t.rfind("\xEF\xBB\xBF# made by the player\r\nRR Mode = Fast\r\nrr_mode=fast\r\n", 0) == 0 && !StampedByWrongGPU(t),
+              "a file the player made (BOM, '#' comment, a key in other spelling): kept as it is, the key added, no stamp");
+        // text WrongGPU cannot keep as it is: the save is refused and the bytes stay
+        const std::string unkeepable = std::string("rr_mode=fast\r\nplayer_key=1\r\nnote=a\0b\r\n", 38);
+        WriteText(f, unkeepable);
+        check(ReadSettings(game).corrupt && ReadSettings(game).kv.empty(), "a file WrongGPU cannot keep reads as corrupt, no keys");
+        o = SetSettings(game, {{"rr_mode", "accurate"}});
+        check(o.result == SetResult::Unparseable && !o.written && ReadText(f) == unkeepable && o.words().find("nothing was saved") != std::string::npos &&
+                  List(state).size() == 1,
+              "...and a save is REFUSED (Unparseable, the reason in words), the bytes left as they are, no temporary file");
+        WriteText(f, "\xff\xfeplayer bytes\r\n");
+        o = SetSettings(game, {{"rr_mode", "accurate"}});
+        check(o.result == SetResult::Unparseable && ReadText(f) == "\xff\xfeplayer bytes\r\n", "bytes that are not UTF-8: refused, left as they are");
+        DeleteFileW(f.c_str());
+        check(SetSettings(game, {{"rr_mode", "accurate"}}).ok() && StampedByWrongGPU(ReadText(f)), "(a new file again: stamped)");
         const std::string b2 = ReadText(f);
         HANDLE h = CreateFileW(f.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        SetOutcome o = SetSettings(game, {{"rr_mode", "exact"}});
+        o = SetSettings(game, {{"rr_mode", "exact"}});
         CloseHandle(h);
         check(o.result == SetResult::Unreadable && o.error != 0 && ReadText(f) == b2 && List(state).size() == 1, "an unreadable file: Unreadable, left as it was");
         // a state folder this process may not write: AccessDenied (its own result, for the elevated repair)
@@ -372,6 +423,39 @@ int wmain(int argc, wchar_t** argv) {
         check(up && r.result == SetResult::Busy && r.error == WAIT_TIMEOUT && ReadText(SettingsPathOf(game)) == before, "lock held elsewhere: Busy after the bounded wait, nothing written");
         if (k) WaitExit(k);
         DeleteFileW(ready.c_str());
+    }
+
+    // ---- the decision under the lock (forced interleaving): another program saves while this one waits for the lock; the
+    // decision is made from what that program wrote, never from a read made before
+    {
+        CreateDirectoryW(state.c_str(), nullptr);
+        DeleteFileW(SettingsPathOf(game).c_str());
+        check(SetSettings(game, {{"rr_mode", "fast"}}).ok(), "(interleaving: the file starts with fast)");
+        const std::string staleRead = *Get(ReadSettings(game), "rr_mode");  // a decision would rest on this read: "fast"
+        HANDLE held = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        std::thread menu([&] {  // the game's menu: takes the lock, saves accurate a moment later, lets go
+            StateLock lock(game, 2000);
+            SetEvent(held);
+            Sleep(300);
+            Settings now = ReadSettings(game);
+            Set(now, "rr_mode", "accurate");
+            WriteAtomic(SettingsPathOf(game), Stamped(RenderSettings(now)));
+        });
+        WaitForSingleObject(held, 5000);
+        std::string seen;
+        const SetOutcome o = UpdateSettings(game, [&](const Settings& now, std::vector<std::pair<std::string, std::string>>* out) {
+            seen = Get(now, "rr_mode") ? *Get(now, "rr_mode") : "";
+            if (seen.empty()) out->push_back({"rr_mode", staleRead});  // only when there is none: a saved mode stays
+            out->push_back({"rr_exact_allowed", seen == "exact" ? "1" : "0"});
+        }, 5000);
+        menu.join();
+        CloseHandle(held);
+        check(staleRead == "fast" && o.ok() && seen == "accurate" && *Get(ReadSettings(game), "rr_mode") == "accurate" && StampedByWrongGPU(ReadText(SettingsPathOf(game))),
+              "UpdateSettings: decide() sees the mode another thread saved while this one waited for the lock (accurate), not the older read "
+              "(fast); the newer mode stays");
+        const std::string before = ReadText(SettingsPathOf(game));
+        const SetOutcome same = SetSettings(game, {{"rr_mode", "accurate"}, {"rr_exact_allowed", "0"}});
+        check(same.ok() && !same.written && ReadText(SettingsPathOf(game)) == before, "a change to the values already there: nothing written");
     }
 
     // ---- abandoned in the middle of a write: the next holder re-reads the old whole file

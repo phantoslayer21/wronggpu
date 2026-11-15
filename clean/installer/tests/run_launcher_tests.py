@@ -177,10 +177,8 @@ def state_kv(b):
 
 
 def state_set(b, k, v):
-    """An edit of the state outside the launcher (the in-game menu's save, or the player's)."""
-    kv = state_kv(b)
-    kv[k] = v
-    write(os.path.join(b, STATE), "".join(a + "=" + c + "\r\n" for a, c in kv.items()).encode())
+    """The in-game menu's save of the state, as wg_state.h SetSettings makes it (launcher_state_cases.menu_save)."""
+    __import__("launcher_state_cases").menu_save(os.path.join(b, STATE), k, v)
 
 
 def eff_ini(b):

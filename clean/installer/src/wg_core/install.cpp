@@ -12,6 +12,8 @@
 #include "rr.h"
 #include "settings.h"
 
+#include <algorithm>
+
 namespace wg {
 
 // The install routes (setup_route.h of the installer). Two routes. Hosted: the player's OptiScaler next to the game
@@ -458,7 +460,9 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
         return opti && IEq(f.rel, L"amd_fidelityfx_dx12.dll") ? wstring(slot ? kOptiSlotFrontEnd : kOptiFrontEnd) : opti && IEq(f.rel, kAsiPlugin) ? pluginRel : wstring(f.rel);
     };
     // OptiScaler's files (OptiScaler.dll as the proxy, OptiScaler.ini set up for WrongGPU from a temporary copy)
-    struct OptiFile { wstring rel, src; };
+    // seed: a file the install creates only where nothing is (the plugin's wronggpu-asi.ini, WrongGPU\wronggpu.ini): one that
+    // appears before it is written is the player's (kept as it is, not recorded); kept: so found, not written
+    struct OptiFile { wstring rel, src; bool seed = false, kept = false; };
     std::vector<OptiFile> optiFiles;
     wstring proxy, proxyReason;
     CoexistReport co;
@@ -524,7 +528,7 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
             const string asiText = AsiSelectionText(ctx.presetK);
             const wstring asiSrc = Join(OptiTempDir(ctx), L"wronggpu-asi.ini");
             WriteFileAtomic(asiSrc, asiText.data(), asiText.size());
-            optiFiles.push_back({L"wronggpu-asi.ini", asiSrc});
+            optiFiles.push_back({L"wronggpu-asi.ini", asiSrc, true});
             LogLine(ctx, wstring(L"OptiScaler plugin: starts on WrongGPU (Model ") + (ctx.presetK ? L"K" : L"M") + L") (wronggpu-asi.ini)");
         }
     }
@@ -697,7 +701,7 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
             const string sini = RenderRrSettings(DefaultProfile(), rrData, "");
             const wstring ssrc = Join(tmp, L"wronggpu.ini");
             WriteFileAtomic(ssrc, sini.data(), sini.size());
-            optiFiles.push_back({kRrSettings, ssrc});
+            optiFiles.push_back({kRrSettings, ssrc, true});
         }
         LogLine(ctx, L"Ray Reconstruction: " + Join(Parent(pluginRel), kRrPluginName) + L", " + kRrRuntime + L" (the RR runtime is part of it), " + kRrIni + L" (data " + RrDataFile() +
                          (rrData ? L")" : L", not converted yet: RR off)") + L", " + kRrSettings);
@@ -737,10 +741,18 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
         if (Exists(tp)) { e.existed = true; e.orig = Sha256File(tp); if (e.orig.empty()) Fail(L"Cannot read the existing file " + tp); }
         m.e.push_back(e);
     }
+    RestoreStep("seed-planned");  // (tests: a seed file appears here, after its check and before the record)
     for (auto& of : optiFiles) {
         Entry e; e.action = L"copy"; e.rel = of.rel; e.inst = Sha256File(of.src);
         if (e.inst.empty()) Fail(L"Cannot read OptiScaler's " + of.rel);
         wstring tp = Target(dir, e.rel);
+        if (of.seed && Exists(tp)) {  // appeared since the check: the player's; not recorded, never written
+            of.kept = true;
+            const wstring w = L"Left in place (appeared during the install, not WrongGPU's): " + of.rel;
+            LogLine(ctx, w);
+            warnings.push_back(w);
+            continue;
+        }
         if (Exists(tp)) { e.existed = true; e.orig = Sha256File(tp); if (e.orig.empty()) Fail(L"Cannot read the existing file " + tp); }
         m.e.push_back(e);
     }
@@ -841,6 +853,7 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
         }
         SaveRecord(rpath, m);  // written before any change so an interrupted install can still be undone
         recorded = true;
+        RestoreStep("seed-recorded");  // (tests: a seed file appears here, after the record and before it is written)
         for (auto& e : m.e) {
             const wstring tp = Target(dir, e.rel);
             if (e.action == L"dir") {
@@ -877,6 +890,24 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
             const bool ours = StartsWithI(BaseName(of.rel), L"wronggpu");  // the settings file and the Ray Reconstruction files
             ui.step(++done, total, (ours ? L"Installing " : L"Installing OptiScaler: ") + of.rel);
             const wstring tp = Target(dir, of.rel);
+            if (of.kept) continue;
+            if (of.seed) {  // created only where nothing is (CopyFileW fail-if-exists): a file that appeared is never replaced
+                EnsureDir(Parent(tp));
+                DWORD err = 0;
+                if (!CopyNew(of.src, tp, &err)) {
+                    if (err != ERROR_FILE_EXISTS && err != ERROR_ALREADY_EXISTS) Fail(L"Cannot create " + tp + L": " + ErrText(err));
+                    // the player's file (it appeared after the record was written): kept as it is, out of the record
+                    m.e.erase(std::remove_if(m.e.begin(), m.e.end(), [&](const Entry& x) { return x.action == L"copy" && IEq(x.rel, of.rel); }), m.e.end());
+                    SaveRecord(rpath, m);
+                    const wstring w = L"Left in place (appeared during the install, not WrongGPU's): " + of.rel;
+                    LogLine(ctx, w);
+                    warnings.push_back(w);
+                    continue;
+                }
+                if (Sha256File(tp) != Sha256File(of.src)) Fail(L"Verification failed after writing " + of.rel);
+                ui.log(L"installed " + of.rel);
+                continue;
+            }
             if (IsBinaryName(of.rel)) PutBinaryFrom(tp, of.src);  // #219 (record.h)
             else CopyChecked(of.src, tp);
             ui.log((ours ? L"installed " : L"installed OptiScaler's ") + of.rel);

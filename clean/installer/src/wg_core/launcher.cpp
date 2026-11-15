@@ -1047,6 +1047,9 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
     if (!LoadRecord(RecordPath(dir), m) || m.legacy) Fail(L"WrongGPU is not installed in " + dir + L".", EXIT_NOT_INSTALLED);
     InferOwners(ctx, m);
     bool recordChanged = m.format < 2;
+    Profile before;  // the launcher's choice as saved before this apply: RR's mode is written only when it changes (rr.h WriteRrState)
+    const bool hadBefore = LoadProfile(ProfilePath(dir), before);
+    const string prevMode = before.get("rr_mode").empty() ? string("fast") : before.get("rr_mode");
     MigrateRrState(ctx, dir);  // #219: an older plugin's or the player's edit of WrongGPU\wronggpu.ini: its mode into the state folder
     // Model L (or Model K, a build with its choice) saved while its data on this PC is not ready (removed since, or an install
     // of a game set to it before the data was converted): the game's files say Model M until it is; the profile keeps the
@@ -1098,7 +1101,7 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
     if (RecordHasRr(m)) {  // Ray Reconstruction (rr.h): into the game's state folder (RR stays off while its data is not ready);
                            // WrongGPU\wronggpu.ini (the install's defaults, the player's to edit) is never rewritten
         wstring why;
-        const int w = WriteRrState(ctx, dir, p, RrDataValid(ctx), &why);
+        const int w = WriteRrState(ctx, dir, p, RrDataValid(ctx), &why, hadBefore ? &prevMode : nullptr);
         if (w < 0) Fail(L"Settings not applied: " + why, EXIT_REFUSED);
         if (w > 0) notes.push_back(Join(wgstate::kStateFolder, wgstate::kSettingsFile) + L" written (Ray Reconstruction)");
     }
