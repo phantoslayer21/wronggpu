@@ -177,7 +177,7 @@ inline std::string hip_switch_note(const std::string& option) {
 // What a context does with a frame the D3D12 executor did not take (nothing of it recorded): the frame is answered
 // WG_ERROR_UNSUPPORTED, the context stays usable, and the front end takes it from there (AMD's FSR when it exists, else its
 // stand-in). The same for every model and for a forced executor=dx12: never an image made here (no bilinear substitute),
-// never a move to HIP (REVIEW-215c, oversight 2026-11-15; Codex review of #225).
+// never a move to HIP (REVIEW-215c, oversight 2026-11-15; review finding on #225).
 inline constexpr bool kRefusedFrameGoesToFrontEnd = true;
 
 // H3 (R1): the output filters Quality 5 and Quality 9 (runtime option output_filter=quality5 | quality9) exist on the HIP

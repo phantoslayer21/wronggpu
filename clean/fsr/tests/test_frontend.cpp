@@ -1205,7 +1205,7 @@ static void TestHostedSwitchNotParked() {
     CHECK(fe->DestroyContext(&a, kMemCb) == FFX_API_RETURN_OK);
 }
 
-// R1 (Codex review of #225): a create the runtime refuses as a HARD INCOMPATIBILITY (WG_ERROR_UNSUPPORTED: an adapter that is not
+// R1 (review finding on #225): a create the runtime refuses as a HARD INCOMPATIBILITY (WG_ERROR_UNSUPPORTED: an adapter that is not
 // an RDNA 4 card, a build without its D3D12 kernel set, a D3D12 executor that cannot take the context) always goes to the front
 // end's upscaler, whatever fallback_to_amd says; a runtime failure still obeys fallback_to_amd; with no AMD provider the answer
 // is the explicit NO_PROVIDER; and a create that does not finish within create_giveup_ms (nothing could upscale meanwhile) is
@@ -1271,7 +1271,7 @@ static void TestHardIncompatibilityHandover() {
     }
 }
 
-// R1 (second Codex check of #225): the create worker owns a reference on the game's D3D12 device, taken on the game's thread
+// R1 (second review of #225): the create worker owns a reference on the game's D3D12 device, taken on the game's thread
 // before the worker starts and given back by the worker when its create is over: a stalled worker that outlives the timeout,
 // the AMD context (or NO_PROVIDER) and the host's own device reference never touches a released device.
 static void TestCreateWorkerHoldsDevice() {
