@@ -89,6 +89,9 @@ checksum together, taken from the project's own release page. Use exact release 
 
 ## Known limits
 
+- **No upscaler yet:** with a released Proton, WrongGPU's upscaler does not start. vkd3d-proton's dxil-spirv cannot
+  translate the matrix kernels until dxil-spirv pull request 362 is in a Proton release. For now the native launcher
+  covers install and settings only; it does not make a game upscale.
 - **Art:** Cairo reads PNG and libjpeg-turbo reads JPEG (`src/app/jpeg_decode_linux.cpp`; Windows uses WIC), so Steam's
   art (hero, header, capsule) shows. Other formats give the page's plain plate, as for a game without art.
 - **No HTTP client:** WinHTTP is answered "not available", so the in-launcher downloads (OptiScaler's edition, the
@@ -99,3 +102,5 @@ checksum together, taken from the project's own release page. Use exact release 
   sysfs) and the Ray Reconstruction preparation (it must run in the game's Wine prefix).
 - **Not emulated:** NTFS junctions, `.lnk` shortcuts, Apps & features, UAC elevation, share-mode locks between processes.
   The launcher tests skip the checks that depend on them and print why.
+- **Hidden attribute:** kept as the user extended attribute `user.wronggpu.hidden`, so it shows only on a file system that
+  allows those. Read-only is the missing write bit, as before.
