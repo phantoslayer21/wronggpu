@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Tests of wg_state.h (the per-game state folder, its lock, the loaded protocol and atomic writes) on real files and real
+// Tests of wg_state.h (the per-game state folder, its lock, the operation guard and atomic writes) on real files and real
 // processes. The test runs itself as the child process (--child-...). Scratch files go to the TMP folder of the run.
 //  - the strict settings.ini format (a bare or embedded CR is corrupt);
 //  - atomic writes: oversized input refused, a failure at every step after the temporary file exists (write, flush, close,
@@ -9,11 +9,11 @@
 //    than MAX_PATH), each computed in a SEPARATE process, and mutual exclusion across processes that use different aliases;
 //  - a busy lock (bounded wait, nothing written), a holder that dies in the middle of a write (abandoned: the next holder
 //    re-reads the old whole file; the half-written temporary file is never read as state);
-//  - the loaded protocol: QueryGameUse NotRunning / Running / Unknown (lookup errors are Unknown, never NotRunning), a
-//    registered child, a killed child (no stale marker), the launcher's OperationGuard refusing on Running, Unknown and a
-//    lock it may not open (LockDenied); a game starting DURING an operation (its marker at once, the operation's Recheck
-//    stops it, the game gives up on state within its ~2 s budget and stays visible to later operations), and the
-//    registration budget bounding the whole registration.
+//  - the operation guard, with a real DLL (wg_state_test_dll) under WrongGPU's binary names: nothing loaded = Ok with every
+//    existing binary held exclusively; a held guard makes LoadLibrary of the file fail (here and in another process);
+//    deletes through the held handle; Release; a binary loaded in another process or in this one = GameRunning; that
+//    process killed = Ok again; a binary the guard may not open = Unknown; the lock busy = Busy; a lock it may not open =
+//    LockDenied.
 // Written for this project.
 #include <cstdio>
 #include <cstdlib>
@@ -97,7 +97,6 @@ static std::string Narrow(const std::wstring& w) {
     for (wchar_t c : w) s.push_back(c < 0x80 ? static_cast<char>(c) : '?');
     return s;
 }
-static ULONGLONG Now() { return GetTickCount64(); }
 
 // ---- child modes
 static int Child(int argc, wchar_t** argv) {
@@ -140,14 +139,17 @@ static int Child(int argc, wchar_t** argv) {
         WaitFile(argv[4]);  // the parent keeps a handle to the mutex now
         ExitProcess(0);
     }
-    if (mode == L"--child-register" && argc >= 5) {  // the game's registration (budget ms), then stays loaded until killed
-        const ULONGLONG t0 = Now();
-        LoadedRegistration reg(game, static_cast<DWORD>(_wtoi(argv[3])));
-        // "marker=<0|1> state=<0|1> ms=<registration time> <why>"
-        WriteText(argv[4], "marker=" + std::to_string(reg.marker() ? 1 : 0) + " state=" + std::to_string(reg.state_ok() ? 1 : 0) +
-                               " ms=" + std::to_string(Now() - t0) + " " + reg.why());
-        if (!reg.marker()) return 0;
+    if (mode == L"--child-load" && argc >= 4) {  // a "game" that loaded a WrongGPU binary (argv[2]), until it is killed
+        const HMODULE m = LoadLibraryW(game.c_str());
+        WriteText(argv[3], m ? "loaded" : "error " + std::to_string(GetLastError()));
+        if (!m) return 3;
         Sleep(120000);
+        return 0;
+    }
+    if (mode == L"--child-tryload" && argc >= 4) {  // tries to load argv[2] once: "ok" or "error <n>"
+        const HMODULE m = LoadLibraryW(game.c_str());
+        WriteText(argv[3], m ? std::string("ok") : "error " + std::to_string(GetLastError()));
+        if (m) FreeLibrary(m);
         return 0;
     }
     return 2;
@@ -244,7 +246,7 @@ int wmain(int argc, wchar_t** argv) {
             SECURITY_ATTRIBUTES sa{sizeof(sa), denyAll, FALSE};
             HANDLE squat = CreateMutexW(&sa, FALSE, lockName.c_str());
             o = SetSettings(game, {{"rr_mode", "exact"}}, 300);
-            OperationGuard g(game, 300);
+            OperationGuard g(game, {}, 300);
             check(squat && o.result == SetResult::LockDenied && o.error == ERROR_ACCESS_DENIED && ReadText(f) == b2 &&
                       g.result() == GuardResult::LockDenied && std::string(g.words()).find("access denied") != std::string::npos,
                   "a state lock this process may not open: LockDenied (SetSettings and the guard), not Busy; nothing written");
@@ -367,132 +369,93 @@ int wmain(int argc, wchar_t** argv) {
         DeleteFileW(go.c_str());
     }
 
-    // ---- the loaded protocol
+    // ---- the operation guard: Windows decides whether a WrongGPU binary is loaded (an exclusive open of a loaded image fails)
     {
-        DWORD err = 0;
-        check(QueryGameUse(game, &err) == GameUse::NotRunning && QueryGameUse(game) == GameUse::NotRunning, "no marker: NotRunning (and the query creates none)");
-        check(QueryGameUse(JoinPath(root, L"gone")) == GameUse::NotRunning, "a folder that does not exist: NotRunning (nothing can run from it)");
+        wchar_t me[MAX_PATH * 2];
+        const DWORD n = GetModuleFileNameW(nullptr, me, MAX_PATH * 2);
+        std::wstring exeDir(me, n);
+        exeDir = exeDir.substr(0, exeDir.find_last_of(L'\\'));
+        const std::wstring testDll = JoinPath(exeDir, L"wg_state_test_dll.dll");
+        const std::wstring plugins = JoinPath(game, L"plugins");
+        CreateDirectoryW(plugins.c_str(), nullptr);
+        const std::wstring bin = JoinPath(plugins, L"WrongGPU-RR.asi"), bin2 = JoinPath(game, L"wronggpu_runtime.dll");
+        const bool copied = CopyFileW(testDll.c_str(), bin.c_str(), FALSE) && CopyFileW(testDll.c_str(), bin2.c_str(), FALSE);
+        check(copied, "two real DLLs in the game folder (the test DLL under WrongGPU's binary names)");
+        const std::vector<std::wstring> bins{bin, bin2, JoinPath(game, L"wronggpu_ffx_dx12.dll") /* not there: skipped */};
         {
-            LoadedRegistration reg(game);
-            check(reg.marker() && reg.state_ok() && QueryGameUse(aliases.back()) == GameUse::Running, "registered in this process: Running (asked through another alias)");
+            OperationGuard g(game, bins, 1000);
+            check(g.ok() && g.Holds(bin) && g.Holds(bin2) && !g.Holds(bins[2]), "nothing loaded: Ok, every existing binary held exclusively, a missing one skipped");
+            // a held guard blocks a load of the file, in this process and in another one
+            const HMODULE m = LoadLibraryW(bin.c_str());
+            const DWORD le = m ? 0 : GetLastError();
+            if (m) FreeLibrary(m);
+            const std::wstring out = JoinPath(root, L"tryload");
+            HANDLE k = Spawn(L"--child-tryload " + Q(bin) + L" " + Q(out));
+            if (k) WaitExit(k);
+            const std::string r = ReadText(out);
+            check(!m && le == ERROR_SHARING_VIOLATION && r.rfind("error ", 0) == 0, "while the guard holds a binary, LoadLibrary of it fails (here and in another process): a game cannot load WrongGPU mid-operation");
+            DeleteFileW(out.c_str());
+            // deletes go through the held handle; Release hands one file back at its own step
+            check(g.DeleteHeld(bin2) == ERROR_SUCCESS && !Exists(bin2) && !g.Holds(bin2), "DeleteHeld: the binary deleted through the guard's own handle");
+            check(g.DeleteHeld(bin2) == ERROR_NOT_FOUND, "DeleteHeld of a file the guard does not hold: ERROR_NOT_FOUND");
+            check(g.Release(bin) && !g.Holds(bin), "Release: the guard closes its handle of that one file");
+            HANDLE h = CreateFileW(bin.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+            check(h != INVALID_HANDLE_VALUE, "after Release the operation can open (and replace) the file itself");
+            if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
         }
-        check(QueryGameUse(game) == GameUse::NotRunning, "the registration ended: NotRunning");
-        // a lookup error is Unknown, never NotRunning: an object of another type under the marker's name
+        CopyFileW(testDll.c_str(), bin2.c_str(), FALSE);
+        // a binary loaded in another process: GameRunning, nothing held; that process killed: Ok
+        const std::wstring ready = JoinPath(root, L"ready-load");
+        HANDLE k = Spawn(L"--child-load " + Q(bin) + L" " + Q(ready));
+        const bool up = k && WaitFile(ready) && ReadText(ready) == "loaded";
         {
-            std::wstring markerName;
-            NameFor(kLoadedPrefix, game, &markerName, nullptr);
-            HANDLE ev = CreateEventW(nullptr, TRUE, FALSE, markerName.c_str());
-            err = 0;
-            const GameUse u = QueryGameUse(game, &err);
-            OperationGuard g(game, 1000);
-            check(ev && u == GameUse::Unknown && err != 0 && g.result() == GuardResult::Unknown && std::string(g.words()).find("could not tell") != std::string::npos,
-                  "a marker lookup that fails: Unknown, and the launcher's guard refuses (Unknown)");
-            if (ev) CloseHandle(ev);
-        }
-        // a game folder this process cannot open: Unknown, the guard refuses
-        {
-            const std::wstring locked = JoinPath(root, L"Locked");
-            CreateDirectoryW(locked.c_str(), nullptr);
-            PSECURITY_DESCRIPTOR deny = nullptr, allow = nullptr, parentDeny = nullptr, parentAllow = nullptr;
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(D;;FA;;;WD)", SDDL_REVISION_1, &deny, nullptr);
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;OICI;FA;;;WD)", SDDL_REVISION_1, &allow, nullptr);
-            // the parent must not grant listing either (listing a folder lets its entries' attributes be read)
-            const std::wstring parent = JoinPath(root, L"LockedParent");
-            CreateDirectoryW(parent.c_str(), nullptr);
-            const std::wstring inner = JoinPath(parent, L"Game");
-            CreateDirectoryW(inner.c_str(), nullptr);
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(D;;0x1;;;WD)(A;;FA;;;WD)", SDDL_REVISION_1, &parentDeny, nullptr);
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;OICI;FA;;;WD)", SDDL_REVISION_1, &parentAllow, nullptr);
-            const bool set = deny && parentDeny && SetFileSecurityW(inner.c_str(), DACL_SECURITY_INFORMATION, deny) &&
-                             SetFileSecurityW(parent.c_str(), DACL_SECURITY_INFORMATION, parentDeny);
-            err = 0;
-            const GameUse u = QueryGameUse(inner, &err);
-            const GuardResult gr = OperationGuard(inner, 500).result();
-            if (allow) SetFileSecurityW(inner.c_str(), DACL_SECURITY_INFORMATION, allow);
-            if (parentAllow) SetFileSecurityW(parent.c_str(), DACL_SECURITY_INFORMATION, parentAllow);
-            for (PSECURITY_DESCRIPTOR p : {deny, allow, parentDeny, parentAllow}) if (p) LocalFree(p);
-            if (!(set && u == GameUse::Unknown && err == ERROR_ACCESS_DENIED && gr == GuardResult::Unknown))
-                std::printf("  (access-denied lookup: set %d, use %d, error %lu, guard %d)\n", set, static_cast<int>(u), err, static_cast<int>(gr));
-            check(set && u == GameUse::Unknown && err == ERROR_ACCESS_DENIED && gr == GuardResult::Unknown,
-                  "a game folder whose identity cannot be read (access denied): Unknown, the guard refuses");
-            RemoveDirectoryW(inner.c_str());
-            RemoveDirectoryW(parent.c_str());
-            RemoveDirectoryW(locked.c_str());
-        }
-        // a registered game in another process; then it crashes
-        const std::wstring out = JoinPath(root, L"reg-1");
-        HANDLE k = Spawn(L"--child-register " + Q(game) + L" 2000 " + Q(out));
-        const bool up = k && WaitFile(out) && ReadText(out).rfind("marker=1 state=1", 0) == 0;
-        OperationGuard* g = new OperationGuard(game, 1000);
-        check(up && QueryGameUse(game) == GameUse::Running && g->result() == GuardResult::GameRunning && std::string(g->words()).find("close the game") != std::string::npos,
-              "a game registered in another process: Running, the guard refuses (GameRunning)");
-        delete g;
-        if (k) {
-            TerminateProcess(k, 9);  // the game crashes
-            WaitForSingleObject(k, 30000);
-            CloseHandle(k);
-        }
-        check(up && QueryGameUse(game) == GameUse::NotRunning && OperationGuard(game, 1000).result() == GuardResult::Ok,
-              "the game died: no stale marker, NotRunning, the guard lets the operation run");
-        DeleteFileW(out.c_str());
-    }
-
-    // ---- a game that starts DURING an operation: its marker appears at once, the operation's Recheck sees it and stops; the
-    //      game gives up on state after its bounded registration (about 2 s) and stays visible to every later operation
-    {
-        const std::wstring out = JoinPath(root, L"reg-2");
-        HANDLE k = nullptr;
-        bool sawGame = false;
-        ULONGLONG seenAfter = 0;
-        {
-            OperationGuard op(game, 1000);  // the launcher's operation starts (lock held, no game yet)
-            const bool ok = op.ok();
-            const ULONGLONG t0 = Now();
-            k = Spawn(L"--child-register " + Q(game) + L" 2000 " + Q(out));  // the game starts during it
-            for (int i = 0; i < 150 && !sawGame; ++i) {  // the operation's steps: Recheck before each one
-                if (op.Recheck() == GuardResult::GameRunning) sawGame = true;
-                else Sleep(20);
-            }
-            seenAfter = Now() - t0;
-            check(ok && sawGame && !op.ok() && std::string(op.words()).find("close the game first") != std::string::npos,
-                  "a game starting mid-operation: its marker appears at once, the next Recheck says GameRunning (close the game first)");
-            // the operation keeps the lock (it stops cleanly): the game's registration runs out of budget on the lock, not on the marker
-            check(k && WaitFile(out, 10000), "the starting game finished its registration while the operation held the lock");
-        }  // the operation ends (stopped)
-        const std::string r = ReadText(out);
-        const unsigned long ms = std::strtoul(r.c_str() + r.find("ms=") + 3, nullptr, 10);
-        check(r.rfind("marker=1 state=0", 0) == 0 && r.find("not free in time") != std::string::npos && ms >= 1500 && ms < 3000,
-              "that game: marker made, state given up after the bounded wait (about 2 s, never longer): defaults, no state this session");
-        check(seenAfter < 2000, "the marker was there before the game's lock wait ended (seen within its registration)");
-        {
-            OperationGuard later(game, 1000);
-            check(QueryGameUse(game) == GameUse::Running && later.result() == GuardResult::GameRunning,
-                  "after that operation the game is still visible: a later operation refuses too");
+            OperationGuard g(game, bins, 1000);
+            check(up && g.result() == GuardResult::GameRunning && g.error() == ERROR_SHARING_VIOLATION && g.which() == bin && !g.Holds(bin2) &&
+                      std::string(g.words()).find("close the game first") != std::string::npos,
+                  "a binary loaded in another process: GameRunning (sharing violation, names the file), nothing held");
         }
         if (k) { TerminateProcess(k, 9); WaitForSingleObject(k, 30000); CloseHandle(k); }
-        DeleteFileW(out.c_str());
-        // a game whose registration starts while no operation runs gets marker and state at once
-        const std::wstring out2 = JoinPath(root, L"reg-3");
-        HANDLE k2 = Spawn(L"--child-register " + Q(game) + L" 2000 " + Q(out2));
-        const bool got2 = k2 && WaitFile(out2, 10000);
-        const std::string r2 = ReadText(out2);
-        check(got2 && r2.rfind("marker=1 state=1", 0) == 0 && std::strtoul(r2.c_str() + r2.find("ms=") + 3, nullptr, 10) < 1500,
-              "no operation running: marker and state at once, well inside the budget");
-        if (k2) { TerminateProcess(k2, 9); WaitForSingleObject(k2, 30000); CloseHandle(k2); }
-        DeleteFileW(out2.c_str());
-        // the budget bounds the whole registration: a budget of 300 ms while an operation runs ends within it
-        const std::wstring out3 = JoinPath(root, L"reg-4");
+        DeleteFileW(ready.c_str());
+        check(OperationGuard(game, bins, 1000).ok(), "that process ended (killed): Ok again, nothing stale");
+        // loaded in this process
         {
-            OperationGuard op(game, 1000);
-            HANDLE k3 = Spawn(L"--child-register " + Q(game) + L" 300 " + Q(out3));
-            const bool got3 = k3 && WaitFile(out3, 10000);
-            const std::string r3 = ReadText(out3);
-            check(op.ok() && got3 && r3.rfind("marker=1 state=0", 0) == 0 && std::strtoul(r3.c_str() + r3.find("ms=") + 3, nullptr, 10) < 1000,
-                  "a 300 ms registration budget while an operation runs: done within it (marker, no state)");
-            if (k3) { TerminateProcess(k3, 9); WaitForSingleObject(k3, 30000); CloseHandle(k3); }
+            const HMODULE m = LoadLibraryW(bin2.c_str());
+            OperationGuard g(game, bins, 1000);
+            check(m && g.result() == GuardResult::GameRunning && g.which() == bin2, "a binary loaded in this process: GameRunning");
+            if (m) FreeLibrary(m);
         }
-        DeleteFileW(out3.c_str());
-        check(QueryGameUse(game) == GameUse::NotRunning, "every game ended: NotRunning");
+        // a binary this process may not open: Unknown (refuse), never Ok
+        {
+            PSECURITY_DESCRIPTOR deny = nullptr, allow = nullptr;
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(D;;FA;;;WD)", SDDL_REVISION_1, &deny, nullptr);
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;FA;;;WD)", SDDL_REVISION_1, &allow, nullptr);
+            const bool set = deny && SetFileSecurityW(bin2.c_str(), DACL_SECURITY_INFORMATION, deny);
+            GuardResult gr;
+            DWORD ge;
+            {
+                OperationGuard g(game, bins, 1000);
+                gr = g.result();
+                ge = g.error();
+            }
+            if (allow) SetFileSecurityW(bin2.c_str(), DACL_SECURITY_INFORMATION, allow);  // the owner may always change the DACL back
+            for (PSECURITY_DESCRIPTOR p : {deny, allow}) if (p) LocalFree(p);
+            check(set && gr == GuardResult::Unknown && ge == ERROR_ACCESS_DENIED, "a binary the guard may not open (access denied): Unknown, the operation refuses");
+        }
+        // the state lock busy: Busy (the binaries are not even opened)
+        {
+            const std::wstring ready2 = JoinPath(root, L"ready-hold2");
+            HANDLE h2 = Spawn(L"--child-hold " + Q(game) + L" 2000 " + Q(ready2));
+            const bool up2 = h2 && WaitFile(ready2);
+            OperationGuard* g = new OperationGuard(game, bins, 200);
+            check(up2 && g->result() == GuardResult::Busy && !g->Holds(bin), "the state lock held elsewhere: Busy, no binary held");
+            delete g;
+            if (h2) WaitExit(h2);
+            DeleteFileW(ready2.c_str());
+        }
+        check(OperationGuard(JoinPath(root, L"gone"), {}, 1000).ok(), "a game folder that is gone: nothing to guard (Ok)");
+        DeleteFileW(bin.c_str());
+        DeleteFileW(bin2.c_str());
+        RemoveDirectoryW(plugins.c_str());
     }
 
     // cleanup (own files only)
