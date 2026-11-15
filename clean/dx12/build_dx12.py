@@ -191,12 +191,11 @@ def kernel_decls(path):
             if d["rs"] not in ("buffer", "tex", "direct"):
                 raise SystemExit(f"{path}: {name}: unsupported root-signature kind {d['rs']}")
             d["arg_dwords"] = arg_dwords(d["args"], f"{path}: {name}")
-            # needs=fold | nofold | control: a port the device runs only when its start-up guard of the driver's
-            # conversion fold passed (fold) or failed (nofold), or only inside that guard (control: the sensitivity
-            # control, never selected); the ports of one name and code object differ by this key
+            # needs=fold | nofold: a port the device runs only when its start-up guard of the driver's conversion fold
+            # passed (fold) or failed (nofold); the two ports of one name and code object differ by this key
             d["needs"] = kv.get("needs", "")
-            if d["needs"] not in ("", "fold", "nofold", "control"):
-                raise SystemExit(f"{path}: {name}: needs={d['needs']} (fold, nofold or control)")
+            if d["needs"] not in ("", "fold", "nofold"):
+                raise SystemExit(f"{path}: {name}: needs={d['needs']} (fold or nofold)")
             # isa=<rule>,<rule>: the port's RGA ISA must satisfy each rule, <op>[+<op>...]>=<n> or <op>==<n> (counts of
             # instruction mnemonics; <op>@<literal>: only its x * literal + 0 sites, parse_isa_rules), checked after the
             # build (isa_check; WG_DX12_ISA_CHECK=0 skips it)

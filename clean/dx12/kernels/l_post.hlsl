@@ -33,7 +33,6 @@
 // @wg-kernel l_post_recon co=l_post.co block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p
 // @wg-kernel l_post_recon_p12 co=l_post.co entry=l_post_recon_p12 block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1,LP_ENCFOLD=1 needs=fold isa=v_fma_mixlo_f16@3dddf184+v_fma_mixhi_f16@3dddf184==6,s_round_mode==0
 // @wg-kernel l_post_recon_p12 co=l_post.co entry=l_post_recon_p12 file=l_post_recon_p12__nofold block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1 needs=nofold
-// @wg-kernel l_post_recon_p12 co=l_post.co entry=l_post_recon_p12 file=l_post_recon_p12__control block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1,LP_ENCFOLD=1,LP_ENCCONTROL=1 needs=control isa=v_fma_mixlo_f16@3dddf184+v_fma_mixhi_f16@3dddf184==0
 // @wg-kernel l_post_recon_ldr co=l_post.co entry=l_post_recon_ldr block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_LDR=1
 // @wg-kernel l_post_recon_p12_ldr co=l_post.co entry=l_post_recon_p12_ldr block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1,LP_LDR=1
 #include "wg_platform.hlsli"
@@ -600,7 +599,17 @@ WG_KERNEL(l_post_recon)
             xe[ce] = enc_log(hh[ce]);
             de[ce] = opq(clampf(enc_e(oo[ce]), 0.0f, kDisplayMax));
         }
-        const uint4 hc = lp_encode_fold(xe[0], xe[1], xe[2], de[0], de[1], de[2], g_z);
+        const uint4 hc = lp_encode_fold(xe[0], xe[1], xe[2], de[0], de[1], de[2], g_z, row);
+        // the device's start-up guard (P_pad1 = its side buffer; 0 in every frame): this pixel's FP32 conversion inputs,
+        // so the guard checks each stored history code against the exact one-rounding encode of its own input
+        [branch] if (P_pad1 != 0) {
+            if (and(active, or(!second, has1))) {
+                const uint so = (uint)((y0 + row) * P_dw + x) * 12u;
+                wg_st32((uint)P_pad1, so, asuint(xe[0]));
+                wg_st32((uint)P_pad1, so + 4u, asuint(xe[1]));
+                wg_st32((uint)P_pad1, so + 8u, asuint(xe[2]));
+            }
+        }
 #else
         v8f cv;
         [unroll] for (int ci = 0; ci < 3; ++ci) {

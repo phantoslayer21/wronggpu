@@ -85,10 +85,7 @@ class FoldProbeTest(unittest.TestCase):
     def test_post_ports(self):
         decls = [d for d in B.kernel_decls(os.path.join(ROOT, "clean", "dx12", "kernels", "l_post.hlsl"))
                  if d["name"] == "l_post_recon_p12"]
-        self.assertEqual(sorted(d["needs"] for d in decls), ["control", "fold", "nofold"])
-        control = [d for d in decls if d["needs"] == "control"][0]
-        self.assertEqual(control["defines"].get("LP_ENCCONTROL"), "1")   # two roundings
-        self.assertTrue(control["isa"].endswith("==0"))                  # and the build checks: no fold site
+        self.assertEqual(sorted(d["needs"] for d in decls), ["fold", "nofold"])
         fold = [d for d in decls if d["needs"] == "fold"][0]
         self.assertEqual(fold["defines"].get("LP_ENCFOLD"), "1")
         self.assertIn("@3dddf184", fold["isa"])   # the fold's sites: kEncK as the literal, addend 0

@@ -11,36 +11,47 @@
 // literal with a 0 addend) and two start-up steps of the native device, both of which must pass: the probe
 // (l_fold_probe, clean/runtime/fold_probe.h: this expression on adversarial inputs) and the differential self-test of
 // the real post shader (its fold port against its no-fold port on the crafted frame of clean/runtime/fold_selftest.h,
-// raw bytes). Otherwise, or on any error, the device runs the no-fold port of the kernel.
+// raw bytes) with the check of the fold port's own values. Otherwise, or on any error, the device runs the no-fold
+// port of the kernel.
 #pragma once
 
 #ifndef LP_MUT
 #define LP_MUT 0
 #endif
-#ifndef LP_ENCCONTROL
-#define LP_ENCCONTROL 0   // 1: the device guard's sensitivity control port (needs=control): two roundings
+#ifndef LP_MUTSITE
+#define LP_MUTSITE 0   // 1 ... 6: negative control (never shipped): site LP_MUTSITE - 1 = 3 row + channel rounded twice
 #endif
 static const float kEncK = asfloat(0x3dddf184u);        // 0.36f * 0.30102999566398120f
 
-// the 8-value conversion of the history codes (x0 .. x2: the FP32 log2 arguments) and the three display values
-// d0 .. d2 (already rounded to FP32, passed as opaque values by the caller); z = an opaque zero (mutant 3 only)
-uint4 lp_encode_fold(float x0, float x1, float x2, float d0, float d1, float d2, uint z)
+// one history code's conversion input: mad(x, kEncK, 0), which the driver folds into the conversion (one rounding),
+// or (twice, a compile-time constant of the negative controls) the FP32 product made opaque first (two roundings)
+float lp_enc_in(float x, uint z, bool twice)
+{
+    return twice ? asfloat(asuint(kEncK * x) ^ z) : mad(x, kEncK, 0.0f);
+}
+
+uint4 lp_encode_conv(float x0, float x1, float x2, float d0, float d1, float d2, uint z, int twice_ch)
 {
     v8f cv;
-#if LP_MUT == 3 || LP_ENCCONTROL   // two roundings, the FP32 product made opaque before the conversion: the mutant
-                                   // (LP_MUT 3, never shipped) and the guard's control port (never selected to run)
-    cv.v[0] = asfloat(asuint(kEncK * x0) ^ z);
-    cv.v[1] = asfloat(asuint(kEncK * x1) ^ z);
-    cv.v[2] = asfloat(asuint(kEncK * x2) ^ z);
-#else
-    cv.v[0] = mad(x0, kEncK, 0.0f);
-    cv.v[1] = mad(x1, kEncK, 0.0f);
-    cv.v[2] = mad(x2, kEncK, 0.0f);
-#endif
+    cv.v[0] = lp_enc_in(x0, z, LP_MUT == 3 || twice_ch == 0);
+    cv.v[1] = lp_enc_in(x1, z, LP_MUT == 3 || twice_ch == 1);
+    cv.v[2] = lp_enc_in(x2, z, LP_MUT == 3 || twice_ch == 2);
     cv.v[3] = d0;
     cv.v[4] = d1;
     cv.v[5] = d2;
     cv.v[6] = 0.0f;
     cv.v[7] = 0.0f;
     return wg_to_f16_ags(cv);
+}
+
+// the 8-value conversion of the history codes (x0 .. x2: the FP32 log2 arguments) and the three display values
+// d0 .. d2 (already rounded to FP32, passed as opaque values by the caller); z = an opaque zero (the mutants only);
+// row: the row of the pair (wave-uniform; the single-site mutants only)
+uint4 lp_encode_fold(float x0, float x1, float x2, float d0, float d1, float d2, uint z, int row = 0)
+{
+#if LP_MUTSITE
+    [branch] if (row == (LP_MUTSITE - 1) / 3)
+        return lp_encode_conv(x0, x1, x2, d0, d1, d2, z, (LP_MUTSITE - 1) % 3);
+#endif
+    return lp_encode_conv(x0, x1, x2, d0, d1, d2, z, -1);
 }
