@@ -1,0 +1,137 @@
+{
+ "what": "Model K per-frame GPU time in game: Cyberpunk 2077, walking, 1080p Quality (1280x720 -> 1920x1080), D3D12",
+ "label": "correctness run timing, 1080p Quality (1280x720 -> 1920x1080), walking",
+ "game_and_scene": "Cyberpunk 2077, gameplay street scene, walking with a slow turn (scripted key input), same save as the Model L / Model M records",
+ "gpu": "AMD Radeon RX 9070 XT",
+ "build": "release candidate rc/065-k 32ab421 (main 994f304 + the 0.6.5 release branch)",
+ "model": "real Model K data converted on the PC by the launcher (model convert --preset=K); named here by its SHA-256 only: a2236326b39d315d0e8e4cc78d6ef82a5071df5ce6dcab53ad13f5b682f05758",
+ "executor": "D3D12 (executor dx12); HIP not loaded in the game process",
+ "timer": "the runtime's D3D12 timestamps in the game's command list (timing_log=1, timing_stages=1); each window = the mean over its 300 dispatches",
+ "local_interval": [
+  "02:06:19",
+  "02:06:39"
+ ],
+ "windows": 9,
+ "frames": 2700,
+ "sizes_logged": [
+  "1280x720 -> 1920x1080"
+ ],
+ "network_gpu_ms": {
+  "median_ms": 1.014,
+  "min_ms": 1.01,
+  "max_ms": 1.03
+ },
+ "frame_span_t3_t0_ms": {
+  "median_ms": 1.02,
+  "min_ms": 1.016,
+  "max_ms": 1.036
+ },
+ "parts_median_ms": {
+  "exposure": 0.009,
+  "input": 0.217,
+  "network": 0.434,
+  "output": 0.354
+ },
+ "note": "\"network_gpu\" is the time from the start of the network to the end of its last kernel (the same measure as \"Network total\" in clean/l/SPEED.md); \"frame_span\" is the frame's full D3D12 span. Different session and scene (walking) from the Model L / Model M records, so not a same-session comparison.",
+ "window_list": [
+  {
+   "end": "02:06:19",
+   "network_gpu": 1.03,
+   "max": 1.046,
+   "exposure": 0.009,
+   "input": 0.221,
+   "network": 0.443,
+   "output": 0.357,
+   "frames": 300,
+   "total_t3_t0": 1.036
+  },
+  {
+   "end": "02:06:21",
+   "network_gpu": 1.03,
+   "max": 1.074,
+   "exposure": 0.009,
+   "input": 0.221,
+   "network": 0.442,
+   "output": 0.358,
+   "frames": 300,
+   "total_t3_t0": 1.036
+  },
+  {
+   "end": "02:06:24",
+   "network_gpu": 1.023,
+   "max": 1.043,
+   "exposure": 0.009,
+   "input": 0.218,
+   "network": 0.439,
+   "output": 0.356,
+   "frames": 300,
+   "total_t3_t0": 1.029
+  },
+  {
+   "end": "02:06:26",
+   "network_gpu": 1.014,
+   "max": 1.031,
+   "exposure": 0.009,
+   "input": 0.218,
+   "network": 0.434,
+   "output": 0.354,
+   "frames": 300,
+   "total_t3_t0": 1.02
+  },
+  {
+   "end": "02:06:29",
+   "network_gpu": 1.014,
+   "max": 1.031,
+   "exposure": 0.009,
+   "input": 0.217,
+   "network": 0.434,
+   "output": 0.354,
+   "frames": 300,
+   "total_t3_t0": 1.02
+  },
+  {
+   "end": "02:06:31",
+   "network_gpu": 1.01,
+   "max": 1.027,
+   "exposure": 0.009,
+   "input": 0.216,
+   "network": 0.433,
+   "output": 0.353,
+   "frames": 300,
+   "total_t3_t0": 1.016
+  },
+  {
+   "end": "02:06:34",
+   "network_gpu": 1.011,
+   "max": 1.023,
+   "exposure": 0.008,
+   "input": 0.215,
+   "network": 0.434,
+   "output": 0.353,
+   "frames": 300,
+   "total_t3_t0": 1.016
+  },
+  {
+   "end": "02:06:36",
+   "network_gpu": 1.012,
+   "max": 1.043,
+   "exposure": 0.009,
+   "input": 0.216,
+   "network": 0.434,
+   "output": 0.354,
+   "frames": 300,
+   "total_t3_t0": 1.017
+  },
+  {
+   "end": "02:06:39",
+   "network_gpu": 1.015,
+   "max": 1.027,
+   "exposure": 0.008,
+   "input": 0.217,
+   "network": 0.435,
+   "output": 0.355,
+   "frames": 300,
+   "total_t3_t0": 1.02
+  }
+ ]
+}

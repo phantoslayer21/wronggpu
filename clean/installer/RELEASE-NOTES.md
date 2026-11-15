@@ -41,6 +41,11 @@ scene, your settings) and a screenshot. Every report helps us fix it.
   menu it is the upscaler **WrongGPU Model K**.
 - **Runs on Direct3D 12** inside the game's own command list, like Model M: no AMD HIP runtime needed. Tested in
   Cyberpunk 2077 at 1080p Quality.
+- **GPU time.** In Cyberpunk 2077 at 1080p Quality (1280x720 upscaled to 1920x1080) on a Radeon RX 9070 XT, Model K's
+  network takes 1.01 ms per frame, measured while walking through a street scene
+  ([clean/k/records/cp2077-model-k-timing-2026-11-15.json](https://github.com/phantoslayer21/wronggpu/blob/main/clean/k/records/cp2077-model-k-timing-2026-11-15.json)
+  has the record). That was a different session and scene from the Model L and Model M figures above, so it is not a
+  side-by-side comparison.
 - If you used Preset K with an older WrongGPU, the launcher no longer asks to switch that game to Model M when it
   updates it: the game stays on Model K.
 
