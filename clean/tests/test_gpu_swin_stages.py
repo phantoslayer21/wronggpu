@@ -20,6 +20,7 @@ import unittest
 import numpy as np
 
 from clean.reference import swin as S
+from clean.reference.fp8 import fp8_decode, fp8_encode, q8
 from clean.runner import variants as V
 from clean.tests import test_gpu_enc1 as T1
 from clean.tests import test_kernels_emu as TK
@@ -128,10 +129,63 @@ class StagesGpu:
                     self.assertTrue(0.0 < ms < 1000.0)
 
 
-class TestEnc2Gpu(StagesGpu, T1.Enc1Gpu, TK.EmuTest):
+class PartialTileGpu:
+    """The merge and expand kernels alone, with a token count that is not a multiple of 16 (PARTIAL: (stage, H, W); the
+    low-resolution tokens of a decoder stage are H/2 x W/2, the merged tokens of an encoder stage the same): one 16-token tile of
+    a wave is only partly valid. v_wmma needs every lane of the wave executing; a store under `if (token is valid)` let the
+    compiler move the matrix chain of the result into that branch, so it ran with only the valid lanes: NaN codes or wrong values
+    for valid tokens (and 75 to 112 spilled registers). The kernels clamp the token and store from every lane instead.
+    Both runners get the same inputs, so the one launch is one matrix product and a q8 pack: at most one code apart."""
+
+    PARTIAL = ()
+
+    @staticmethod
+    def one_kernel(r, stage, w, x, skip, offset, s_map):
+        """Output of the merge (encoder: input map s_map, as the block would leave it) or the expand (decoder) kernel alone."""
+        plan = r._prepare(stage, w, x, offset, skip)
+        try:
+            if s_map is not None:
+                r.dev.upload(plan["bufs"]["skip"], fp8_encode(s_map).tobytes())
+            name = "merged" if s_map is not None else "e"
+            launch = plan["launches"][-1 if s_map is not None else 0]
+            r.dev.memset(plan["bufs"][name], 0x01, plan["sizes"][name])   # a token the kernel does not write stays visible
+            r.dev.launch(r._func(launch[0]), launch[1], launch[2], launch[3])
+            r.dev.sync()
+            n = plan["sizes"][name]
+            return fp8_decode(np.frombuffer(r.dev.download(plan["bufs"][name], n), np.uint8))
+        finally:
+            r._release(plan)
+
+    def test_partly_valid_tiles_against_the_gfx11_emulator(self):
+        emu = self.Runner(TG.build_dir(), "", backend="emu", arch="gfx11")
+        for stage, H, W in self.PARTIAL:
+            with self.subTest(stage=stage, H=H, W=W):
+                rng = np.random.default_rng(110)
+                p = S.random_params(stage, rng)
+                x, skip = S.random_inputs(stage, H, W, rng)
+                s_map = q8(rng.standard_normal(x.shape)).astype(np.float32) if skip is None else None
+                offset = S.window_offset(stage, 0)
+                got = self.one_kernel(self.runner, stage, self.runner.pack_weights(stage, p), x, skip, offset, s_map)
+                want = self.one_kernel(emu, stage, emu.pack_weights(stage, p), x, skip, offset, s_map)
+                self.assertEqual(int(np.sum(~np.isfinite(got))), 0)
+                u = TK.ulp_distance(got, want)
+                print(f"{stage} {H}x{W}: {np.mean(u > 0) * 1e6:.0f} per million one-code flips, {int(np.sum(u > 1))} more than one "
+                      f"step (the kernel alone, card vs gfx11 emulator)")
+                self.assertLess(float(np.mean(u > 0)), 0.01)
+                self.assertEqual(int(np.sum(u > 1)), 0)
+
+
+class TestEnc1PartialTilesGpu(PartialTileGpu, T1.Enc1Gpu, TK.EmuTest):
+    """patch_merge_c64 (the enc1 block shapes are in test_gpu_enc1)."""
+
+    PARTIAL = [("enc1", 12, 20), ("enc1", 36, 28)]
+
+
+class TestEnc2Gpu(PartialTileGpu, StagesGpu, T1.Enc1Gpu, TK.EmuTest):
     """swin_block_c96 and patch_merge_c96."""
 
     CASES = cases_of("enc2", extra=[("enc2", 36, 32, (2, 2))])
+    PARTIAL = [("enc2", 12, 20), ("enc2", 20, 28)]
     TIMED = ("enc2",)
     SIZE_KEY = "enc2"
 
@@ -151,10 +205,11 @@ class TestBottleneckGpu(StagesGpu, T1.Enc1Gpu, TK.EmuTest):
         self.check_overall()
 
 
-class TestDec2Gpu(StagesGpu, T1.Enc1Gpu, TK.EmuTest):
+class TestDec2Gpu(PartialTileGpu, StagesGpu, T1.Enc1Gpu, TK.EmuTest):
     """expand_c128 and swin_block_c96_add."""
 
     CASES = cases_of("dec2", extra=[("dec2", 36, 32, (2, 0))])
+    PARTIAL = [("dec2", 12, 20), ("dec2", 20, 28)]
     TIMED = ("dec2",)
     SIZE_KEY = "dec2"
 
@@ -162,26 +217,17 @@ class TestDec2Gpu(StagesGpu, T1.Enc1Gpu, TK.EmuTest):
         self.check_overall()
 
 
-class TestDec1Gpu(StagesGpu, T1.Enc1Gpu, TK.EmuTest):
-    """expand_c96 and swin_block_c64_add. The case ("dec1", 12, 20, (2, 0)) of the emulator tests is not here: see
-    test_expand_c96_with_a_partly_valid_second_tile."""
+class TestDec1Gpu(PartialTileGpu, StagesGpu, T1.Enc1Gpu, TK.EmuTest):
+    """expand_c96 and swin_block_c64_add."""
 
-    CASES = [("dec1", 8, 8, (0, 0)), ("dec1", 16, 20, (2, 0)), ("dec1", 36, 32, (2, 0)), ("dec1", 36, 32, (0, 0))]
+    CASES = [("dec1", 8, 8, (0, 0)), ("dec1", 12, 20, (2, 0)), ("dec1", 16, 20, (2, 0)), ("dec1", 36, 32, (2, 0)),
+             ("dec1", 36, 32, (0, 0))]
+    PARTIAL = [("dec1", 12, 20), ("dec1", 12, 40), ("dec1", 20, 28), ("dec1", 24, 20), ("dec1", 28, 36)]
     TIMED = ("dec1",)
     SIZE_KEY = "dec1"
 
     def test_stricter_overall_bound_of_the_emulator_tests(self):
         self.check_overall()
-
-    @unittest.expectedFailure
-    def test_expand_c96_with_a_partly_valid_second_tile(self):
-        """Finding, not a block-kernel result: expand_c96 (107 spilled registers in the gfx11 builds, slice E2) writes NaN codes
-        for valid tokens when a wave's second 16-token tile is only partly valid (60, 84 or 120 low-resolution tokens; 36, 40,
-        100 and 288 are fine: no partial second tile). The emulator tests' case dec1 12x20 gives 5120 non-finite values here
-        and none in either emulator. Expected to fail until expand_c96 is fixed; an unexpected success says it is."""
-        stage, H, W, offset = "dec1", 12, 20, (2, 0)
-        got, (p, x, skip) = self.run_case(stage, H, W, offset, seed=110)
-        self.assertEqual(int(np.sum(~np.isfinite(got["out"]))), 0)
 
 
 class TestResidentGpu(T1.Enc1Gpu, TK.EmuTest):

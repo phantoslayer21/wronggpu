@@ -27,10 +27,11 @@ from clean.runner import variants as V  # noqa: E402
 TABLE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gfx11_gates.json")
 TARGET = "gfx1100"
 # The kernels the table gates: the block kernels (and their clamp-free `_nc` forms, which the runner launches for weights that
-# prove the packs in range) of every shape, the `_add` form and the weight-resident `_r` kernels. The merge, expand and fused
-# kernels are not gated: they spill in the gfx11 builds (slice E2).
+# prove the packs in range) of every shape, the `_add` form and the weight-resident `_r` kernels, and the patch merge and
+# expand kernels. The fused kernels (`_mg`, `_ex`) are not gated yet: some of them spill in the gfx11 builds (slice E2).
 KERNELS = [f"{k}{nc}" for k in ("swin_block_c64", "swin_block_c64_add", "swin_block_c64_r", "swin_block_c64_add_r",
                                 "swin_block_c96", "swin_block_c96_add", "swin_block_c128") for nc in ("", "_nc")]
+KERNELS += ["patch_merge_c64", "patch_merge_c96", "expand_c96", "expand_c128"]
 
 
 def builds():

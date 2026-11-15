@@ -1173,6 +1173,17 @@ WG_FN void copy_to_lds(u8* dst, const u8* src, int bytes, u32 tid) {
   wg_barrier_lds();
 }
 
+// gfx11 (device and emulator): the matrix chain of a token tile runs in every lane. v_wmma needs EXEC all ones, and the
+// compiler moves a result's whole chain into the branch that stores it: with `if (token < ntok)` around the store, a
+// partly valid tile ran its v_wmma with only the valid lanes (NaN codes or wrong values for valid tokens, and 75 to 112
+// spilled registers). So the stores of patch_merge and expand have no branch there: a lane past the last token repeats the
+// work of the last token and stores the same bytes to the same place. Other targets keep the stores they have.
+#if defined(WG_GFX11) || defined(WG_EMU_GFX11)
+#define WG_TILE_STORES_UNGUARDED 1
+#else
+#define WG_TILE_STORES_UNGUARDED 0
+#endif
+
 constexpr int kGemmThreads = WG_GEMM_THREADS;  // patch merge / expand workgroup: waves share the weights staged in LDS
 
 // Patch merge (spec 02): merged(i, j) = q8(Wm concat(TL, TR, BL, BR) + bm) from the q8 block output s [H][W][C].
@@ -1213,9 +1224,15 @@ WG_FN void patch_merge(const u8* __restrict__ s, u8* __restrict__ out, const u8*
       for (int i = 0; i < NT; ++i) acc[i] = wg_wmma_fp8(f, zf[i][g], acc[i]);
     }
 #pragma unroll
-    for (int i = 0; i < NT; ++i)
-      if (tok[i] < ntok)
-        *(v2i*)(out + (size_t)tok[i] * CO + hh * (CO / 2) + 8 * mt) = HYB ? hyb_merge_q8(acc[i]) : wg_pack_q8(acc[i]);
+    for (int i = 0; i < NT; ++i) {
+      const v2i q = HYB ? hyb_merge_q8(acc[i]) : wg_pack_q8(acc[i]);
+#if WG_TILE_STORES_UNGUARDED
+      const int d = tok[i] < ntok ? tok[i] : ntok - 1;
+      *(v2i*)(out + (size_t)d * CO + hh * (CO / 2) + 8 * mt) = q;
+#else
+      if (tok[i] < ntok) *(v2i*)(out + (size_t)tok[i] * CO + hh * (CO / 2) + 8 * mt) = q;
+#endif
+    }
   }
 }
 
@@ -1262,8 +1279,13 @@ WG_FN void expand(const u8* __restrict__ y, u8* __restrict__ e, const u8* __rest
     }
 #pragma unroll
     for (int i = 0; i < NT; ++i) {
+#if WG_TILE_STORES_UNGUARDED
+      const int d = tok[i] < ntok ? tok[i] : ntok - 1;
+#else
       if (tok[i] >= ntok) continue;
-      const int r = tok[i] / Wl, c = tok[i] - r * Wl;
+      const int d = tok[i];
+#endif
+      const int r = d / Wl, c = d - r * Wl;
       const size_t dst = (size_t)((2 * r + (k >> 1)) * (2 * Wl) + 2 * c + (k & 1)) * C + hh * (C / 2);
       store_frags<G>(e + dst, res[i]);
     }

@@ -72,6 +72,26 @@
     "vgprs": 250,
     "waves": 5,
     "lds": 32768
+   },
+   "patch_merge_c64": {
+    "vgprs": 185,
+    "waves": 8,
+    "lds": 24576
+   },
+   "patch_merge_c96": {
+    "vgprs": 251,
+    "waves": 4,
+    "lds": 49152
+   },
+   "expand_c96": {
+    "vgprs": 199,
+    "waves": 7,
+    "lds": 24576
+   },
+   "expand_c128": {
+    "vgprs": 248,
+    "waves": 4,
+    "lds": 49152
    }
   },
   "f16w": {
@@ -144,6 +164,26 @@
     "vgprs": 250,
     "waves": 5,
     "lds": 32768
+   },
+   "patch_merge_c64": {
+    "vgprs": 185,
+    "waves": 8,
+    "lds": 24576
+   },
+   "patch_merge_c96": {
+    "vgprs": 251,
+    "waves": 4,
+    "lds": 49152
+   },
+   "expand_c96": {
+    "vgprs": 199,
+    "waves": 7,
+    "lds": 24576
+   },
+   "expand_c128": {
+    "vgprs": 248,
+    "waves": 4,
+    "lds": 49152
    }
   },
   "f16wa": {
@@ -216,6 +256,26 @@
     "vgprs": 250,
     "waves": 5,
     "lds": 32768
+   },
+   "patch_merge_c64": {
+    "vgprs": 185,
+    "waves": 8,
+    "lds": 24576
+   },
+   "patch_merge_c96": {
+    "vgprs": 251,
+    "waves": 4,
+    "lds": 49152
+   },
+   "expand_c96": {
+    "vgprs": 199,
+    "waves": 7,
+    "lds": 24576
+   },
+   "expand_c128": {
+    "vgprs": 248,
+    "waves": 4,
+    "lds": 49152
    }
   },
   "f16wq": {
@@ -288,6 +348,26 @@
     "vgprs": 250,
     "waves": 5,
     "lds": 32768
+   },
+   "patch_merge_c64": {
+    "vgprs": 185,
+    "waves": 8,
+    "lds": 24576
+   },
+   "patch_merge_c96": {
+    "vgprs": 251,
+    "waves": 4,
+    "lds": 49152
+   },
+   "expand_c96": {
+    "vgprs": 199,
+    "waves": 7,
+    "lds": 24576
+   },
+   "expand_c128": {
+    "vgprs": 248,
+    "waves": 4,
+    "lds": 49152
    }
   },
   "c128w7": {
@@ -360,6 +440,26 @@
     "vgprs": 206,
     "waves": 7,
     "lds": 32768
+   },
+   "patch_merge_c64": {
+    "vgprs": 185,
+    "waves": 8,
+    "lds": 24576
+   },
+   "patch_merge_c96": {
+    "vgprs": 251,
+    "waves": 4,
+    "lds": 49152
+   },
+   "expand_c96": {
+    "vgprs": 199,
+    "waves": 7,
+    "lds": 24576
+   },
+   "expand_c128": {
+    "vgprs": 248,
+    "waves": 4,
+    "lds": 49152
    }
   },
   "f16wk": {
@@ -432,6 +532,26 @@
     "vgprs": 238,
     "waves": 6,
     "lds": 32768
+   },
+   "patch_merge_c64": {
+    "vgprs": 185,
+    "waves": 8,
+    "lds": 24576
+   },
+   "patch_merge_c96": {
+    "vgprs": 251,
+    "waves": 4,
+    "lds": 49152
+   },
+   "expand_c96": {
+    "vgprs": 199,
+    "waves": 7,
+    "lds": 24576
+   },
+   "expand_c128": {
+    "vgprs": 248,
+    "waves": 4,
+    "lds": 49152
    }
   },
   "f16wm": {
@@ -504,6 +624,26 @@
     "vgprs": 238,
     "waves": 6,
     "lds": 32768
+   },
+   "patch_merge_c64": {
+    "vgprs": 185,
+    "waves": 8,
+    "lds": 24576
+   },
+   "patch_merge_c96": {
+    "vgprs": 251,
+    "waves": 4,
+    "lds": 49152
+   },
+   "expand_c96": {
+    "vgprs": 199,
+    "waves": 7,
+    "lds": 24576
+   },
+   "expand_c128": {
+    "vgprs": 248,
+    "waves": 4,
+    "lds": 49152
    }
   }
  }
