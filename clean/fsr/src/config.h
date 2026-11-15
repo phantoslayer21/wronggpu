@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "model_k.h"
+#include "model_l.h"
 #include "wg_registry_gen.h"  // clean/wgshared: options, version-list entries, models (plain C, no Windows headers)
 
 namespace wgfsr {
@@ -39,6 +40,11 @@ struct Config {
     // device, sizes, flags, options and model within that time takes it over instead of creating one (games that
     // re-create their upscaler at every step of a dynamic resolution). One parked upscaler at most; 0: never.
     uint32_t contextParkMs = 3000;
+    // Output-size changes (ResizeForFrame) per context. Each one creates an upscaler again and keeps the replaced one
+    // until the context is destroyed (issue #58), so this bounds the GPU memory that replaced upscalers hold: one
+    // Model M upscaler is about 0.9 GiB at 4K output (Quality), so 1 keeps that at or under about 1 GiB. Not a
+    // setting: no key in wronggpu.ini; tests set it.
+    uint32_t maxOutputResizes = 1;
 
     // Stand-in options, passed to the upscaler as "key=value;..." (see StandInOptions in standin_d3d12.cpp).
     std::string view = "upscale";     // upscale | warp | warpdiff | motion | depth | jitter
@@ -131,6 +137,13 @@ std::string NormalizeOptions(const std::string& text);
 // The options (items separated by ';' or ',') without their model=K items; *removed: whether there was one. For
 // builds without Model K (model_k.h), which drop the item before the runtime reads it.
 std::string WithoutModelK(const std::string& options, bool* removed);
+// The same for any model letter (model=<letter>, either case): WithoutModelK is WithoutModel(options, 'K', removed).
+std::string WithoutModel(const std::string& options, char model, bool* removed);
+#if !WRONGGPU_MODEL_L
+// A build without Model L (model_l.h, CMake WG_MODEL_L=OFF): drops model=L from config.runtimeOptions and from
+// WG_RUNTIME_OPTIONS as IgnoreModelK does, so that Model M runs. Returns the one line for the log, or "".
+std::string IgnoreModelL(Config& config);
+#endif
 #if !WRONGGPU_MODEL_K
 // A build without Model K: drops model=K from config.runtimeOptions (wronggpu.ini) and from WG_RUNTIME_OPTIONS in the
 // process environment, so that Model M runs (the runtime library refuses the option, and it reads the environment as
@@ -159,6 +172,9 @@ struct ModelChoice {
 };
 // The first place (in order) whose model file exists; a runtime-default place ends the search without a probe.
 ModelChoice ChooseModelDir(const std::vector<ModelPlace>& places, bool modelK, const std::function<bool(const std::string&)>& exists);
+// The same for a model by its letter: M looks for <place>\model.wgcm, K and L for <place>\K\model.wgcm and
+// <place>\L\model.wgcm (the folders the launcher converts them into and the runtime reads under model_dir).
+ModelChoice ChooseModelDir(const std::vector<ModelPlace>& places, char model, const std::function<bool(const std::string&)>& exists);
 
 // Original process-specific synchronization default. Returns true when an option was added; explicit user
 // choices and other games/backends are preserved. No image/model settings are changed.

@@ -4,7 +4,8 @@
 // (clean/l/reference/recon.py, the oracle):
 //  1. a 4 x 4 colour gather: columns ax - 1 ... ax + 2 and rows b - 1 ... b + 2 (b from the even row of the pair);
 //  2. each history candidate decoded and divided by the previous exposure before the two are combined:
-//     H_lin = (w1 L1 + w2 L2) e, with L_i = D(H_i) / e_prev (L2 only when w2 > 0);
+//     H_lin = (w1 L1 + w2 L2) e, with L_i = D(H_i) r_prev, r_prev = 1 / e_prev (L2 only when w2 > 0; the spec's
+//     division by e_prev as a product with its reciprocal: free within the post tolerance, spec answer Q5);
 //  3. an invalid or reset sample falls back to the render pixel's linear colour (no exposure, no encode).
 // The colour gather runs in the model's own precision as confirmed by the spec side (oracle: recon.gather_half):
 // fused target positions, FP16 offsets and exponent with the fused cross term, float32 weights flushed to +0 below
@@ -13,6 +14,14 @@
 // oracle). Arguments, layouts and grid are post_recon's; w[0] = Model L's post scale s.
 // l_post_recon_p12: the same kernel on the pack12 coefficients of l_coef_pack12 (A8 / C4 images, B unused), which the
 // D3D12 frame reads; the same texel values, so the same outputs byte for byte.
+// LDR forms (l_post_recon_ldr, l_post_recon_p12_ldr; spec preset L part 3 item 6, Q1, Q2): the same function with the
+// identity transfer (E(v) = v, D(e) = e: the colour feature is h(colour), a NaN kept; no decode of the history
+// candidates or of C), no exposure (the exposure pair is not read: e = e_prev = 1), the full history h(H^), the display
+// image the output stage's unpacked 11 / 11 / 10-bit codes of O^ (code = floor(clamp(fused(O^ N + 1/2), 0, N)),
+// N = 2047, 2047, 1023, NaN -> 0; stored h(code RN32(1 / N))) and the reduced codes rint(clamp(mean, 0, 1) 1023).
+// l_post_filter_ldr / l_post_filter_ldr_h: the output stage for that display image (Q2): Model M's 5-tap filter
+// (post.hip filter_row_c1, lz5) with no clamp to [1e-4, 3], no decode and no exposure; 3 x f32, or RGBA16F rows with pi
+// folded in (framebuffer_half(v pi), alpha 1).
 #include "post.hip"
 
 namespace {
@@ -31,12 +40,20 @@ struct LTexel {
   h16 kA, kB, kC;
 };
 
+// The colour feature: h(E_in(e c)) (HDR) or h(c) (LDR: identity transfer, no exposure; a NaN is kept).
+template <bool kLdr>
+WG_FN h16 l_colour_feature(float c, float e) {
+  if (kLdr) return (h16)c;
+  return (h16)enc_in(e * c);
+}
+
+template <bool kLdr>
 WG_FN LTexel l_load_texel(const v4f* color, const u32* A, const u32* B, const v4h* C, int idx, float e) {
   LTexel t;
   const v4f c = color[idx];
-  t.f[0] = (h16)enc_in(e * c[0]);
-  t.f[1] = (h16)enc_in(e * c[1]);
-  t.f[2] = (h16)enc_in(e * c[2]);
+  t.f[0] = l_colour_feature<kLdr>(c[0], e);
+  t.f[1] = l_colour_feature<kLdr>(c[1], e);
+  t.f[2] = l_colour_feature<kLdr>(c[2], e);
   const u32 b = B[idx], a = A[idx];
 #pragma unroll
   for (int i = 0; i < 3; ++i) {
@@ -53,12 +70,13 @@ WG_FN LTexel l_load_texel(const v4f* color, const u32* A, const u32* B, const v4
 // l_load_texel on the pack12 coefficients (l_coef_pack12, clean/l/FORMATS.md): image A8, 8 bytes per render pixel =
 // codes A0 A1 A2 B0 | B1 B2, C2 (FP16); image C4, 4 bytes per render pixel = C0, C1 (FP16). The same values as
 // l_load_texel on l_coef's images (only padding bytes are left out), so the same texel.
+template <bool kLdr>
 WG_FN LTexel l_load_texel12(const v4f* color, const u32* A8, const u32* C4, int idx, float e) {
   LTexel t;
   const v4f c = color[idx];
-  t.f[0] = (h16)enc_in(e * c[0]);
-  t.f[1] = (h16)enc_in(e * c[1]);
-  t.f[2] = (h16)enc_in(e * c[2]);
+  t.f[0] = l_colour_feature<kLdr>(c[0], e);
+  t.f[1] = l_colour_feature<kLdr>(c[1], e);
+  t.f[2] = l_colour_feature<kLdr>(c[2], e);
   const u32 d0 = A8[2 * idx], d1 = A8[2 * idx + 1], c01 = C4[idx];
   const u32 a = d0 & 0xffffffu, b = (d0 >> 24) | ((d1 & 0xffffu) << 8);
 #pragma unroll
@@ -73,10 +91,10 @@ WG_FN LTexel l_load_texel12(const v4f* color, const u32* A8, const u32* C4, int 
 }
 
 // The texel of the kernel's coefficient form: l_coef's images (A, B, C) or pack12's (A8 in A, C4 in C, B unused).
-template <bool kP12>
+template <bool kP12, bool kLdr>
 WG_FN LTexel l_texel(const v4f* color, const u32* A, const u32* B, const void* C, int idx, float e) {
-  if (kP12) return l_load_texel12(color, A, (const u32*)C, idx, e);
-  return l_load_texel(color, A, B, (const v4h*)C, idx, e);
+  if (kP12) return l_load_texel12<kLdr>(color, A, (const u32*)C, idx, e);
+  return l_load_texel<kLdr>(color, A, B, (const v4h*)C, idx, e);
 }
 
 // Gathered sums of one D pixel: W = float32 sum of the unrounded weights; F = the half accumulators.
@@ -143,12 +161,15 @@ WG_FN LSel l_select(const LGather& g) {
 }
 
 // Steps 3-5 for one D pixel (Model L). Returns the linear new history H^ in hh and the linear display value O^ in oh.
+// LDR: no decode (the candidates and C are the values themselves) and no exposure.
+template <bool kLdr>
 WG_FN void l_post_core(const LGather& g, int x, int y, int fx, int fy, const float mx[3], const float my[3],
                        const WgPostParams& p, float s, const v4f* color, const void* hist_prev, float hh[3],
                        float oh[3]) {
   const LSel sl = l_select(g);
   const float X = (float)x + 0.5f, Y = (float)y + 0.5f;
   const int ncand = sl.w2 != 0.0f ? 2 : 1;
+  const float rp = kLdr ? 1.0f : 1.0f / p.e_prev;  // IEEE division
   float L[2][3];
   for (int n = 0; n < ncand; ++n) {
     const int k = n == 0 ? sl.first : sl.second;
@@ -158,7 +179,7 @@ WG_FN void l_post_core(const LGather& g, int x, int y, int fx, int fy, const flo
       float h[3];
       history_cr<false>(hist_prev, p.dw, p.dh, qx, qy, h);
 #pragma unroll
-      for (int i = 0; i < 3; ++i) L[n][i] = l_dec(h[i]) / p.e_prev;
+      for (int i = 0; i < 3; ++i) L[n][i] = kLdr ? h[i] : l_dec(h[i]) * rp;
     } else {
       const v4f c = color[fy * p.rw + fx];
 #pragma unroll
@@ -170,9 +191,9 @@ WG_FN void l_post_core(const LGather& g, int x, int y, int fx, int fy, const flo
 #pragma unroll
   for (int i = 0; i < 3; ++i) {
     const float comb = ncand == 2 ? __builtin_fmaf(sl.w1, L[0][i], sl.w2 * L[1][i]) : sl.w1 * L[0][i];
-    Hl[i] = comb * p.e;
+    Hl[i] = kLdr ? comb : comb * p.e;
     hl_inf |= __builtin_fabsf(Hl[i]) == __builtin_inff();
-    Cl[i] = l_dec(sl.fbar[i]);
+    Cl[i] = kLdr ? sl.fbar[i] : l_dec(sl.fbar[i]);
   }
   // 5. Blend: alpha = sat((s W) g-bar), beta' = fused(alpha (1 - beta-bar) + beta-bar), H^ = fused((C - Hl) beta' + Hl),
   // O^ likewise (item 3). sat(NaN) = 0 (zero total weight).
@@ -195,7 +216,18 @@ WG_FN void l_post_core(const LGather& g, int x, int y, int fx, int fy, const flo
   }
 }
 
+// LDR display value of channel i: the output stage's unpack of the 11 / 11 / 10-bit code of O^ (Q2): code =
+// floor(clamp(fused(o N + 1/2), 0, N)) (the clamp maps NaN to 0), then h(code RN32(1 / N)) (one float32 product, then
+// the FP16 rounding).
+WG_FN _Float16 l_ldr_display_value(float o, int i) {
+  const float n = i == 2 ? 1023.0f : 2047.0f;
+  const float k = __builtin_bit_cast(float, i == 2 ? 0x3a802008u : 0x3a001002u);  // RN32(1/1023), RN32(1/2047)
+  const float code = __builtin_floorf(clampf(__builtin_fmaf(o, n, 0.5f), 0.0f, n));
+  return (_Float16)(code * k);
+}
+
 // post_recon's finish_pixel with l_post_core.
+template <bool kLdr>
 WG_FN void l_finish_pixel(const LGather& g, int x, int y, float px, float py, bool store, const WgPostParams& p,
                           float s, const v4f* color, const v4h* hist_prev, const u32* m_near, const u32* m_center,
                           const u32* m_far, v4h* hist_out, _Float16* display, float hh[3]) {
@@ -207,7 +239,17 @@ WG_FN void l_finish_pixel(const LGather& g, int x, int y, float px, float py, bo
                   [&](int c, int r) { return m_center[clampi(r, 0, p.rh - 1) * p.rw + clampi(c, 0, p.rw - 1)]; },
                   mx[1], my[1]);
   float oh[3];
-  l_post_core(g, x, y, fx, fy, mx, my, p, s, color, hist_prev, hh, oh);
+  l_post_core<kLdr>(g, x, y, fx, fy, mx, my, p, s, color, hist_prev, hh, oh);
+  if (kLdr) {
+    if (store) hist_store<false>(hist_out, y * p.dw + x, hh[0], hh[1], hh[2]);
+    if (store) {
+      const int pitch = display_pitch(p.dw), plane = pitch * p.dh, di = y * pitch + x;
+      display[di] = l_ldr_display_value(oh[0], 0);
+      display[plane + di] = l_ldr_display_value(oh[1], 1);
+      display[2 * plane + di] = l_ldr_display_value(oh[2], 2);
+    }
+    return;
+  }
   if (store) hist_store<false>(hist_out, y * p.dw + x, enc_e(hh[0]), enc_e(hh[1]), enc_e(hh[2]));
   if (store) {
     const int pitch = display_pitch(p.dw), plane = pitch * p.dh, di = y * pitch + x;
@@ -217,12 +259,16 @@ WG_FN void l_finish_pixel(const LGather& g, int x, int y, float px, float py, bo
   }
 }
 
-// The kernel body; kP12 selects the coefficient form (l_texel).
-template <bool kP12>
+// The kernel body; kP12 selects the coefficient form (l_texel), kLdr the LDR form (no exposure read).
+template <bool kP12, bool kLdr>
 WG_FN void l_post_recon_body(const v4f* color, const u32* A, const u32* B, const void* C, const v4h* hist_prev,
                              const u32* m_near, const u32* m_center, const u32* m_far, const float* w, v4h* hist_out,
                              u32* reduced, _Float16* display, WgPostParams p, const float* expo) {
-  if (expo) {
+  if (kLdr) {
+    p.e = 1.0f;
+    p.e_prev = 1.0f;
+    p.ratio = 1.0f;
+  } else if (expo) {
     p.e = expo[0] == 0.0f ? 1.0f : expo[0];
     p.e_prev = expo[1] == 0.0f ? 1.0f : expo[1];
     p.ratio = (float)((double)p.e / (double)p.e_prev);
@@ -252,7 +298,7 @@ WG_FN void l_post_recon_body(const v4f* color, const u32* A, const u32* B, const
     for (int i = lane; i < ncol * nrow; i += kPostThreads) {
       const int r = i / ncol, c = i - r * ncol;
       const int idx = clampi(r0 + r, 0, p.rh - 1) * p.rw + clampi(c0 + c, 0, p.rw - 1);
-      sh_tex[i] = l_texel<kP12>(color, A, B, C, idx, p.e);
+      sh_tex[i] = l_texel<kP12, kLdr>(color, A, B, C, idx, p.e);
     }
   }
   wg_barrier();
@@ -287,7 +333,7 @@ WG_FN void l_post_recon_body(const v4f* color, const u32* A, const u32* B, const
         t = sh_tex[(b + j - r0) * ncol + (ax + i - c0)];
       } else {
         const int idx = clampi(b + j, 0, p.rh - 1) * p.rw + clampi(ax + i, 0, p.rw - 1);
-        t = l_texel<kP12>(color, A, B, C, idx, p.e);
+        t = l_texel<kP12, kLdr>(color, A, B, C, idx, p.e);
       }
       l_gather_add(g0, t, u, v0);
       l_gather_add(g1, t, u, v1);
@@ -295,9 +341,10 @@ WG_FN void l_post_recon_body(const v4f* color, const u32* A, const u32* B, const
   }
 
   float h0[3], h1[3] = {0.0f, 0.0f, 0.0f};
-  l_finish_pixel(g0, x, y0, px, py0, active, p, s, color, hist_prev, m_near, m_center, m_far, hist_out, display, h0);
+  l_finish_pixel<kLdr>(g0, x, y0, px, py0, active, p, s, color, hist_prev, m_near, m_center, m_far, hist_out, display,
+                       h0);
   if (has1)
-    l_finish_pixel(g1, x, y0 + 1, px, py1, active, p, s, color, hist_prev, m_near, m_center, m_far, hist_out,
+    l_finish_pixel<kLdr>(g1, x, y0 + 1, px, py1, active, p, s, color, hist_prev, m_near, m_center, m_far, hist_out,
                    display, h1);
 
   // Reduced history: mean of H^ over the 2 x 2 block (x, x + 1) x (y0, y0 + 1); lane x + 1 is lane ^ 1.
@@ -309,10 +356,67 @@ WG_FN void l_post_recon_body(const v4f* color, const u32* A, const u32* B, const
 #pragma unroll
     for (int i = 0; i < 3; ++i) {
       const float m = (sh_red[lane * 3 + i] + sh_red[(lane ^ 1) * 3 + i]) * 0.25f;
-      const float v = clampf(enc_e(m) * (1.0f / 2.45f), 0.0f, 1.0f);
+      const float v = kLdr ? clampf(m, 0.0f, 1.0f) : clampf(enc_e(m) * (1.0f / 2.45f), 0.0f, 1.0f);
       code |= (u32)wg_rint(v * 1023.0f) << (10 * i);
     }
     reduced[(y0 / 2) * (p.dw / 2) + x / 2] = code;
+  }
+}
+
+// The LDR output stage (Q2): filter_strip_c1<S> of post.hip (the same lanes, tiles, sliding window and 5-tap passes)
+// with the filtered value written as it is: no clamp to [1e-4, 3], no decode, no exposure. kH: RGBA16F rows of hpitch
+// bytes, framebuffer_half(v pi), the lane of channel 2 also writes alpha 1; else 3 x f32 (row-major RGB).
+template <int S, bool kH>
+WG_FN void l_filter_strip_ldr(const _Float16* display, void* out, int dw, int dh, int ow, int oh, float pi,
+                               int hpitch) {
+  const int lane = (int)wg_lane_id();
+  const int wl = lane & 31;
+  if (wl >= 3 * kFc1Groups) return;
+  const int g = wl / 3, c = wl - 3 * g;
+  const int tiles_x = (ow + 4 * kFc1Groups - 1) / (4 * kFc1Groups);
+  const int tile = (int)wg_block_id();
+  const int m = (tile % tiles_x) * kFc1Groups + g;
+  const int p0 = ((tile / tiles_x) * kFiltStrips + (lane >> 5)) * S;
+  if (4 * m >= ow || 2 * p0 >= oh) return;
+  const int pitch = display_pitch(dw), plane = pitch * dh;
+  const bool fast = m >= 1 && 6 * m + 7 <= dw - 1;
+  const int ncols = ow - 4 * m < 4 ? ow - 4 * m : 4;
+
+  float hr[7][4];
+  filter_row_c1(display, pitch, plane, dw, clampi(3 * p0 - 2, 0, dh - 1), m, fast, c, hr[6]);
+#pragma nounroll
+  for (int st = -1; st < S; ++st) {
+    const int p = p0 + st;
+    if (2 * p >= oh) break;
+#pragma unroll
+    for (int k = 0; k < 4; ++k)
+#pragma unroll
+      for (int i = 0; i < 4; ++i) hr[k][i] = hr[k + 3][i];
+#pragma unroll
+    for (int k = 4; k < 7; ++k)
+      filter_row_c1(display, pitch, plane, dw, clampi(3 * p - 2 + k, 0, dh - 1), m, fast, c, hr[k]);
+    if (st < 0) continue;
+#pragma unroll
+    for (int dy = 0; dy < 2; ++dy) {
+      const int y = 2 * p + dy;
+      if (y >= oh) break;
+      const u32 o0 = mul24((u32)y, (u32)ow) + (u32)(4 * m);
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        float t[5];
+#pragma unroll
+        for (int k = 0; k < 5; ++k) t[k] = hr[2 * dy + k][i];
+        const float v = dy == 0 ? lz5<true>(t) : lz5<false>(t);
+        if (i >= ncols) continue;
+        if (kH) {
+          _Float16* o = (_Float16*)((char*)out + (size_t)y * (u32)hpitch + (u32)(4 * m + i) * 8u);
+          o[c] = framebuffer_half(v * pi);
+          if (c == 2) o[3] = (_Float16)1.0f;
+        } else {
+          ((float*)((char*)out + (o0 + (u32)i) * 12u))[c] = v;
+        }
+      }
+    }
   }
 }
 
@@ -324,7 +428,8 @@ WG_KERNEL_N(l_post_recon, kPostThreads)(const v4f* color, const u32* A, const u3
                                         const v4h* hist_prev, const u32* m_near, const u32* m_center,
                                         const u32* m_far, const float* w, v4h* hist_out, u32* reduced,
                                         _Float16* display, WgPostParams p, const float* expo) {
-  l_post_recon_body<false>(color, A, B, C, hist_prev, m_near, m_center, m_far, w, hist_out, reduced, display, p, expo);
+  l_post_recon_body<false, false>(color, A, B, C, hist_prev, m_near, m_center, m_far, w, hist_out, reduced, display, p,
+                                  expo);
 }
 
 // l_post_recon on the pack12 coefficients of l_coef_pack12: A = image A8 (8 bytes per render pixel), C = image C4
@@ -333,6 +438,34 @@ WG_KERNEL_N(l_post_recon_p12, kPostThreads)(const v4f* color, const u32* A8, con
                                             const v4h* hist_prev, const u32* m_near, const u32* m_center,
                                             const u32* m_far, const float* w, v4h* hist_out, u32* reduced,
                                             _Float16* display, WgPostParams p, const float* expo) {
-  l_post_recon_body<true>(color, A8, B, C4, hist_prev, m_near, m_center, m_far, w, hist_out, reduced, display, p,
-                          expo);
+  l_post_recon_body<true, false>(color, A8, B, C4, hist_prev, m_near, m_center, m_far, w, hist_out, reduced, display,
+                                 p, expo);
+}
+
+// The LDR forms (the arguments of the HDR kernels; expo is not read).
+WG_KERNEL_N(l_post_recon_ldr, kPostThreads)(const v4f* color, const u32* A, const u32* B, const v4h* C,
+                                            const v4h* hist_prev, const u32* m_near, const u32* m_center,
+                                            const u32* m_far, const float* w, v4h* hist_out, u32* reduced,
+                                            _Float16* display, WgPostParams p, const float* expo) {
+  l_post_recon_body<false, true>(color, A, B, C, hist_prev, m_near, m_center, m_far, w, hist_out, reduced, display, p,
+                                 expo);
+}
+WG_KERNEL_N(l_post_recon_p12_ldr, kPostThreads)(const v4f* color, const u32* A8, const u32* B, const u32* C4,
+                                                const v4h* hist_prev, const u32* m_near, const u32* m_center,
+                                                const u32* m_far, const float* w, v4h* hist_out, u32* reduced,
+                                                _Float16* display, WgPostParams p, const float* expo) {
+  l_post_recon_body<true, true>(color, A8, B, C4, hist_prev, m_near, m_center, m_far, w, hist_out, reduced, display, p,
+                                expo);
+}
+
+// The LDR output stage. Arguments as post_filter_c1_s4 (dec_scale and expo are not read), grid ceil(ow / 40) *
+// ceil(ceil(oh / 2) / 8) workgroups of 64 lanes; _h as post_filter_h's arguments (pi folded in, RGBA16F rows of hpitch
+// bytes) on the same grid.
+WG_KERNEL_N(l_post_filter_ldr, kFiltThreads)(const _Float16* display, void* out, int dw, int dh, int ow, int oh,
+                                             float dec_scale, const float* expo) {
+  l_filter_strip_ldr<4, false>(display, out, dw, dh, ow, oh, 1.0f, 0);
+}
+WG_KERNEL_N(l_post_filter_ldr_h, kFiltThreads)(const _Float16* display, void* out, int dw, int dh, int ow, int oh,
+                                               float dec_scale, const float* expo, float pi, int hpitch) {
+  l_filter_strip_ldr<4, true>(display, out, dw, dh, ow, oh, pi, hpitch);
 }

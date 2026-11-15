@@ -94,6 +94,9 @@ struct Job {
   int color_pitch = 0, depth_pitch = 0, motion_pitch = 0, motion_channels = 4;
   float ms[2] = {1, 1}, mo[2] = {0, 0};
   int out_half_pitch = 0;
+  // Model K with out_half_pitch == 0: the result is dense RGBA f32 (16 bytes per pixel, the fourth value the output
+  // alpha; FrameIo.out_rgba32f) for the output pass, which stores it (Converter::set_model_k).
+  bool out_rgba32f = false;
   int ow = 0, oh = 0;  // output size (sparkle guard)
   // Motion at output resolution: the slot's motion_hi holds this frame's raw motion (mw x mh texels of two FP16, rows
   // of motion_hi_pitch bytes); mv_scale_hi converts it to pixels of that size, b_mv is added to it first.

@@ -150,6 +150,7 @@ python -m unittest discover -s clean\rr_f\head\tests -t .
 rem Folders with GPU modules (clean\k\tests, clean\rr_f\runtime\tests): one module at a time, leaving out the GPU
 rem modules listed below, e.g.
 python -m unittest clean.k.tests.test_k_reference clean.k.tests.test_k_runtime_tables clean.k.tests.test_k_runtime_pack
+python -m unittest clean.rr_f.runtime.tests.test_rr_retire
 rem Test folders without __init__.py (clean\dx12\tests, clean\fsr\tests, clean\rr_f\proxy\tests) run from their own
 rem folder, one file at a time where the folder has a GPU module:
 python -m unittest discover -s clean\dx12\tests -t clean\dx12\tests
@@ -200,3 +201,29 @@ These load a Direct3D 12 or HIP device: the front end's D3D12 tests (`ctest --te
 without `--no-tests`), `clean\runtime\interop\tests` (the D3D12 interop harness), `clean\dx12\tests`, the Ray
 Reconstruction end-to-end test (`clean\rr_f\runtime\tests\e2e.py`), the timing tools, and the GPU test modules listed
 in 6. Run them on an RX 9000-series card; `WG_GPU_LOCK` can serialise them when several shells share one GPU.
+
+## 8. A build with Model K (development; not part of any release)
+
+Model K is off in every build that players get: the release commands above pass `--no-model-k`, `-DWG_MODEL_K=OFF` and
+`-DWRONGGPU_PRESET_K=OFF`, and CI builds them the same way. To build all three parts with Model K, change those lines:
+
+```bat
+rem 3.3 runtime: leave out --no-model-k (Model K's code objects and map are then built in)
+python clean\runner\build.py --rocm "%ROCM_PATH%" --out out\runtime --extra-archs gfx1200 --with-rr out\rr-rt\obj
+
+rem 4.1 front end: Model K's entry in the hosted list and model=K (the option's default is ON; CI and releases say OFF)
+cmake -S clean\fsr -B out\frontend %CMAKE_FLAGS% -DWG_MODEL_K=ON -DWG_BUILD_ID=dev-k -DWG_BUILD_ASI=ON
+
+rem 5.2 launcher: Preset K (Model K's converter map) and the per-game model choice K (set <game> model=K)
+cmake -S clean\installer -B out\launcher %CMAKE_FLAGS% -DWRONGGPU_PAYLOAD_DIR=%CD%\out\payload -DWRONGGPU_RR_DIR=%CD%\out\rr ^
+      -DWRONGGPU_VERSION=0.6.0 -DWRONGGPU_BUILD_ID=dev-k -DWRONGGPU_PAYLOAD_NAME=0.6.0 -DWRONGGPU_TESTING=OFF ^
+      -DWRONGGPU_PRESET_K=ON -DWRONGGPU_MODEL_K=ON -DWRONGGPU_DIRECT_ROUTE=OFF
+```
+
+`-DWRONGGPU_MODEL_K=ON` needs `-DWRONGGPU_PRESET_K=ON` (configuring without it stops with an error) and the front end and
+runtime of the same build. Model K runs its exact network: nothing in these builds, the launcher or the front end offers or
+sets another mode of it. The CPU tests of section 6 cover the K-less builds; the front end's build also tests the other
+state of Model K (`fsr_frontend_model_k_unit` in a build with `-DWG_MODEL_K=OFF`, `fsr_frontend_no_model_k_unit` in one with
+it ON), and the launcher's `model-choice-k` and `model-choice-k-only` tests run the K choice whatever the build's option is.
+`clean\installer\tests\run_model_k_tests.py` (its header says how to prepare the payload, the test maps and a launcher with
+the choices on) runs the choice end to end on generated fixtures, with no game and no GPU.

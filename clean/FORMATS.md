@@ -467,6 +467,17 @@ see "Context teardown and re-creation"). Other keys go to the network runtime's 
 `k_input=16|f32` (model K's input pass, below); the create flag `WG_CREATE_HDR` reaches it as
 `WgRtConfig.hdr`; timing log parts then named exposure, input, network, output).
 
+The D3D12 executor makes the network's allocations twice: once to measure the arena they need, in the default arena
+(`WG_D3D12_ARENA_MB`, 2560 MiB), then in an arena of exactly that size (executor_d3d12.cpp `prepare_device`). A network
+that does not fit the default arena is measured again in a 4095 MiB arena, the largest (logged `the network does not fit
+the default arena (...); measuring again in a 4095 MiB arena`, then `measured in the 4095 MiB arena: the network needs N
+MiB; the D3D12 executor runs it in an arena of that size` or `measuring again in a 4095 MiB arena failed (...)`); not
+when `WG_D3D12_ARENA_MB` is set. Model L at 3840x2160 native needs 2738 MiB and runs on the D3D12 executor this way
+(clean/l/records/issue182_create_destroy_record.json; issue #182). If the second measure fails too, the context goes to
+the HIP executor (`executor dx12 (default on RDNA 4) could not take this context (...); the HIP executor runs it`), and
+after it is destroyed the process keeps HIP's instance and the pooled imported arena until it ends, as "Context
+teardown and re-creation" describes (the same record's control: +1419 MiB after every destroy, constant).
+
 ### Shared resources (created at create on the game's device, imported into HIP)
 
 Two slots (used alternately by the frames whose network is enqueued). All ten buffers (twelve with `motion_hi`) live in ONE committed buffer,
@@ -481,12 +492,12 @@ the runtime is a shared D3D12 object except the three fences.
 
 | Buffer | Size | Content |
 |---|---|---|
-| color | max R × 16 | `[rh][rw]` 4 × f32 (alpha 0), the game's color in the active region |
+| color | max R × 16 | `[rh][rw]` 4 × f32, the game's color in the active region; the fourth value +0 (model M), or for model K the texel's alpha, unmodified (1 for a format without an alpha channel): model K's output alpha follows it |
 | depth | max R × 4 | `[rh][rw]` f32, the game's depth as given |
 | motion | max R × 8 | `[rh][rw]` 2 × f32, m = motion_scale · raw + motion_offset (render pixels); with `WG_CREATE_MOTION_OUTPUT_RES` the texel ⌊(x + ½)·mw/rw⌋, ⌊(y + ½)·mh/rh⌋ (our point resampling: what the network reads with `motion_outres=point`; with `original` it reads `motion_hi`) |
 | motion_hi | O × 4 + 8, or none | only with `WG_CREATE_MOTION_OUTPUT_RES` (model M; with `motion_outres=point` only while a frame capture is armed): `[oh][ow]` 2 × FP16, the raw motion texels of the output-size region ("Motion vectors at output resolution"). It follows `out` in each slot; without it every offset is what it was |
 | expo | 256 bytes | f32 at offset 0: texel (0, 0) channel R of the exposure texture (exposure mode texture) |
-| out | O × 12 | `[oh][ow]` 3 × f32, the network's result (the runtime's `filter.out` format) |
+| out | O × 12 (model K: O × 16) | `[oh][ow]` 3 × f32, the network's result (the runtime's `filter.out` format); model K: `[oh][ow]` 4 × f32, the fourth value its output alpha (`FrameIo.out_rgba32f`), which the output pass stores |
 
 Fences (shared, `hipImportExternalSemaphore`, D3D12 fence): `ready` (the split request's done fence: the front end's
 queue signals v after the first part of the game's list, which ends with the input conversion), `done` (HIP signals v
@@ -513,7 +524,7 @@ whole texture; otherwise the frame uses the input pass (logged). The network's f
   0.309 → 0.251 ms, output 0.856 → 0.838 ms against the FP32 slot).
 - Model K's compact input pass (default for `model=K` when no copy is made; `k_input=f32`: the FP32 input pass):
   where the game's colour is RGBA16F or R11G11B10 and its motion RG16F or RGBA16F (FP16-representable values), the
-  pass `inputs16` writes dense RGBA16F colour (rw·8-byte rows, alpha 0), R32F depth and the raw RG16F motion texel
+  pass `inputs16` writes dense RGBA16F colour (rw·8-byte rows, the texel's alpha kept; 1 for R11G11B10), R32F depth and the raw RG16F motion texel
   (rw·4-byte rows; at output size the texel under the render pixel's centre, as the FP32 pass samples it) into the
   slot's buffers, and the network reads them as it reads the copies (motion_scale / motion_offset applied on load).
   Same output bits as the FP32 pass (`test_interop_d3d12 hipsame`, render- and output-size motion); logged as
@@ -557,7 +568,8 @@ pre-exposure and exposure, then signals `done = v`. Values only grow.
 3. Network enqueued (above). If it cannot be enqueued, the runtime's own compute queue waits for the previous `done`
    value and signals `done = v` (and `pipe = v`), so the game's queue cannot wait forever; the dispatch returns an error.
 4. Output pass into the re-opened list: `out` of slot v (inline) or of the previous network frame (pipelined; the
-   first frame: bilinear upscale of the color) → the output texture (alpha 1; sRGB formats encoded), output
+   first frame: bilinear upscale of the color) → the output texture (alpha 1; model K: the result's fourth value, in
+   the upscale the bilinear of the color's alpha; sRGB formats encoded), output
    transitioned to UNORDERED_ACCESS if needed and back (else a UAV barrier). Shaders: HLSL compiled at create with
    `d3dcompiler_47.dll` (cs_5_0); the result buffer is read through an R32_FLOAT typed UAV.
 

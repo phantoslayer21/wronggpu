@@ -40,7 +40,7 @@ def run(T, base, opti, game):
     from run_installer_tests import read, write
     work = os.path.join(base.work, "convert-ignore")
     shutil.rmtree(work, ignore_errors=True)
-    t = T(base.exe, work, base.model, base.env.get("WRONGGPU_HIP_RUNTIME"), native=base.native)
+    t = T(base.exe, work, base.model, base.env.get("WRONGGPU_HIP_RUNTIME"))
     t.check = base.check  # one count, one list of failures
     shared = os.path.join(t.env["LOCALAPPDATA"], "WrongGPU")
     lst = os.path.join(shared, "ignore-files.txt")

@@ -10,7 +10,10 @@ namespace wg {
 
 // wronggpu.ini [fsr] key, runtime_options item, OptiScaler.ini key, the RR plugin's WrongGPU\wronggpu.ini [wronggpu] key
 // (Ray Reconstruction games only, rr.h: RenderRrSettings writes them; wronggpu.ini and OptiScaler.ini never hold them)
-enum class Layer { Fe, Rt, Opti, Rr };
+// Model: the model the game starts with (WRONGGPU_MODEL_L / WRONGGPU_MODEL_K builds only): wronggpu.ini's runtime_options
+// model item and the OptiScaler entry OptiScaler starts with (UpscalerIndex); with M nothing is changed in either file
+// (except that Model K's or Model L's own item and entry go back to Model M's when the profile leaves them).
+enum class Layer { Fe, Rt, Opti, Rr, Model };
 enum class Tier { Basic, Advanced, Diagnostics };
 
 // One setting of the profile. Values are the profile's own words ("on", "off", ...); Render maps them to the file.
@@ -45,6 +48,19 @@ void SaveProfile(const wstring& path, const Profile& p);
 wstring ProfilePath(const wstring& installDir);
 // `set` and the UI: one key; false with *why for an unknown key or a bad value.
 bool SetSetting(Profile& p, const string& key, const string& value, wstring* why);
+// The refusal of the model setting in a build without the Model L choice (WRONGGPU_MODEL_L off).
+inline const wchar_t* const kNoModelChoice =
+    L"Model L isn't part of this build of WrongGPU: it comes with a release that runs Model L. The game stays on Model M.";
+// The index of Model L's entry in the list of upscalers WrongGPU's front end gives OptiScaler (its UpscalerIndex): after
+// Model M and, in a build with Preset K, Model K.
+#if WRONGGPU_PRESET_K || WRONGGPU_MODEL_K
+inline const char* const kModelLEntryIndex = "2";
+#else
+inline const char* const kModelLEntryIndex = "1";
+#endif
+// Model K's entry (a build with the Model K choice, WRONGGPU_MODEL_K): right after Model M's, as the installer's Preset K
+// start has always written it.
+inline const char* const kModelKEntryIndex = "1";
 
 // ---- wronggpu.ini --------------------------------------------------------------------------------------------
 // The runtime_options items in order (split at ';', trimmed, empty items dropped).

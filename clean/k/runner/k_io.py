@@ -56,7 +56,7 @@ class KInColorParams(ctypes.Structure):
 
 class KExpoArgs(ctypes.Structure):
     """Host arguments of k_expo_scalars (the per-frame runtime's GPU exposure scalars, clean/k/runtime/runtime_k.cpp)."""
-    _fields_ = [("value", ctypes.c_float)] + [(n, ctypes.c_int) for n in ("pair", "use_src", "first", "hdr", "reset")] + \
+    _fields_ = [("value", ctypes.c_float)] + [(n, ctypes.c_int) for n in ("src_mode", "aux", "first", "hdr", "reset")] + \
                [(n, ctypes.c_float) for n in ("e1", "e2", "inv_pi")]
 
 

@@ -7,7 +7,7 @@ encoder (step 2), the ten Swin stages, Model L's decoder (step 4), the reconstru
         [--frames 100] [--warm 3]
 
 <dir>: the build of clean/l/runner/l_frame_check.py --prepare (the synthetic models in <dir>/lframe_model) with the
-D3D12 ports (clean/dx12/build_dx12.py --out <dir>). One model per process: the runtime library reads WG_D3D12_PROFILE
+D3D12 ports (clean/dx12/build_dx12.py --model-l --out <dir>). One model per process: the runtime library reads WG_D3D12_PROFILE
 when it is loaded. Run it in a GPU slot with the GPU otherwise idle. Profiled timestamps perturb scheduling: the step
 sums are for attribution; the whole-frame span without profiling is measured too (wg_rt_frame_timed, a separate
 Pipeline in a second process would be cleaner; here it is the same process after the profiled phase, reported apart).
@@ -28,8 +28,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
 sys.path.insert(0, ROOT)
 
 SHAPES = {"1080p-quality": ((1280, 720), (1920, 1080)), "1440p-quality": ((1706, 960), (2560, 1440))}
-ENC = ("lev/input_encoder", "l_linear_32_32_relu", "l_linear_32_32_f16", "l_swin_block_c32_enc", "l_project_gather",
-       "input_encoder")
+ENC = ("lev/input_encoder", "l_linear_32_32_relu", "l_linear_32_32_f16", "l_linear_32_32_fused", "l_swin_block_c32_enc",
+       "l_project_gather", "input_encoder")
 DEC = ("l_dec_project", "l_swin_block_c32_dec", "l_coef", "coef_decoder", "_add_dec0")
 POST = ("post_", "scale_rgb", "f16lut")
 SWIN = ("swin_", "patch_merge", "expand_", "bneck/")

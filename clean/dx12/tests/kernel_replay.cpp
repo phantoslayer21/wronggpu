@@ -20,14 +20,32 @@
 //                                              by row (tightly packed), "-" for none (the output, written by no
 //                                              kernel replayed here). The case binds them as one direct frame
 //                                              (NativeD3D12Ext::bind_direct_frame) around its launch.
-//   direct_params <rx> <ry> <rw> <rh>          the frame's active render rectangle; motion scale 1, offset 0,
-//                                              color_pi 1, no exposure texture
+//   direct_params <rx> <ry> <rw> <rh> [pi [rne16]]  the frame's active render rectangle; motion scale 1, offset 0,
+//                                              no exposure texture; color_pi (default 1) and output_rne16 (default 0)
 //   direct_out <file>                          after the launch, the output texture's texels are written to <file>,
 //                                              row by row (tightly packed); its initial texels come from the output
 //                                              slot's file (a sentinel fill, so that an unwritten texel shows)
+//
+// A chain (frame generation, #96) runs several launches in order on buffers that persist between them, so that a whole
+// network runs on the device with no host round trip between its steps:
+//   chain <name>
+//   module <code object name> [<tag>]          (zero or more)
+//   buf <id> <bytes> <file | -> [fill]         device buffer: the file's bytes (padded with fill when the file is
+//                                              shorter), or every byte set to fill (0..255, default 0) with "-"
+//   step <launch name> <grid> <block> <arg>... a launch; each arg is @<id>[+<bytes>] (a buffer's pointer, optionally
+//                                              that many bytes into it), null (a null pointer), a 32-bit decimal
+//                                              value, B:<file> (a struct passed by value: the file's bytes) or
+//                                              S:<file>[:<offset>=@<id>[+<bytes>][,...]] (a struct with pointers
+//                                              inside, manifest argument kind s<N>:...: the file's bytes with the 8
+//                                              bytes at each byte offset replaced by that buffer's device pointer)
+//   save <id> <file>                           after the run, the buffer's bytes are written to <file>
+//   time <runs>                                after the run (and the saves), the steps run <runs> more times; the mean
+//                                              wall time per run (submission to completion, synchronised after each
+//                                              run) is printed as "chain <name>: time <ms> ms per run (<runs> runs)"
 #include "../../runtime/device.h"
 #include "../../runtime/device_d3d12.h"
 
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -337,6 +355,157 @@ int run_case(Device* d, Case& c, const std::string& base) {
   return 0;
 }
 
+struct ChainBuf {
+  std::string id, file;
+  size_t bytes = 0;
+  int fill = 0;
+  DevPtr ptr = 0;
+};
+
+struct ChainStep {
+  std::string kernel;
+  unsigned grid = 0, block = 0;
+  std::vector<std::string> args;   // "@id" or a decimal value
+};
+
+struct Chain {
+  std::string name;
+  std::vector<std::pair<std::string, std::string>> modules;
+  std::vector<ChainBuf> bufs;
+  std::vector<ChainStep> steps;
+  std::vector<std::pair<std::string, std::string>> saves;   // (id, file)
+  int time_runs = 0;
+};
+
+int run_chain(Device* d, Chain& c, const std::string& base) {
+  for (auto& m : c.modules) {
+    const bool ok = m.second.empty() ? d->load_module(m.first) : d->load_module_tagged(m.first, m.second);
+    if (!ok) { std::printf("%s: module %s: %s\n", c.name.c_str(), m.first.c_str(), d->err().c_str()); return 1; }
+  }
+  auto find = [&](const std::string& id) -> ChainBuf* {
+    for (auto& b : c.bufs)
+      if (b.id == id) return &b;
+    return nullptr;
+  };
+  // "<id>" or "<id>+<byte offset>": a buffer's device pointer, optionally that many bytes into it
+  auto resolve = [&](const std::string& ref, DevPtr* out) -> bool {
+    const size_t plus = ref.find('+');
+    ChainBuf* b = find(ref.substr(0, plus));
+    if (!b) return false;
+    *out = b->ptr + (plus == std::string::npos ? 0 : (DevPtr)std::stoull(ref.substr(plus + 1)));
+    return true;
+  };
+  int rc = 0;
+  for (auto& b : c.bufs) {
+    std::vector<uint8_t> data(b.bytes, (uint8_t)(b.fill & 0xff));
+    if (b.file != "-") {
+      std::vector<uint8_t> f;
+      if (!read_file(base + "/" + b.file, &f) || f.size() > b.bytes) {
+        std::printf("%s: buf %s: cannot read %s (or larger than %zu bytes)\n", c.name.c_str(), b.id.c_str(),
+                    b.file.c_str(), b.bytes);
+        rc = 1;
+        break;
+      }
+      std::memcpy(data.data(), f.data(), f.size());
+    }
+    if (!d->alloc(&b.ptr, b.bytes ? b.bytes : 4) || !d->upload(b.ptr, data.data(), data.size())) {
+      std::printf("%s: buf %s: %s\n", c.name.c_str(), b.id.c_str(), d->err().c_str());
+      rc = 1;
+      break;
+    }
+  }
+  // the argument values of every step, resolved once
+  std::vector<std::vector<DevPtr>> ptrs(c.steps.size());
+  std::vector<std::vector<uint32_t>> vals(c.steps.size());
+  std::vector<std::vector<std::vector<uint8_t>>> blobs(c.steps.size());
+  std::vector<std::vector<void*>> argv(c.steps.size());
+  for (size_t i = 0; rc == 0 && i < c.steps.size(); ++i) {
+    auto& s = c.steps[i];
+    ptrs[i].reserve(s.args.size());
+    vals[i].reserve(s.args.size());
+    blobs[i].reserve(s.args.size());
+    for (auto& a : s.args) {
+      if (a.size() > 2 && (a[0] == 'B' || a[0] == 'S') && a[1] == ':') {
+        // B:<file> / S:<file>[:<offset>=@<id>,...]
+        const size_t colon = a[0] == 'S' ? a.find(':', 2) : std::string::npos;
+        const std::string file = a.substr(2, colon == std::string::npos ? std::string::npos : colon - 2);
+        std::vector<uint8_t> blob;
+        if (!read_file(base + "/" + file, &blob)) {
+          std::printf("%s: step %zu: cannot read %s\n", c.name.c_str(), i, file.c_str());
+          rc = 1;
+          break;
+        }
+        bool ok = true;
+        for (size_t at = colon == std::string::npos ? std::string::npos : colon + 1; ok && at != std::string::npos;) {
+          const size_t comma = a.find(',', at);
+          const std::string item = a.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+          const size_t eq = item.find("=@");
+          DevPtr target = 0;
+          const size_t off = eq == std::string::npos ? 0 : (size_t)std::stoull(item.substr(0, eq));
+          if (eq == std::string::npos || off + 8 > blob.size() || !resolve(item.substr(eq + 2), &target)) {
+            ok = false;
+            break;
+          }
+          for (int k = 0; k < 8; ++k) blob[off + k] = (uint8_t)((uint64_t)target >> (8 * k));
+          at = comma == std::string::npos ? std::string::npos : comma + 1;
+        }
+        if (!ok) {
+          std::printf("%s: step %zu: bad struct argument %s\n", c.name.c_str(), i, a.c_str());
+          rc = 1;
+          break;
+        }
+        blobs[i].push_back(std::move(blob));
+        argv[i].push_back(blobs[i].back().data());
+      } else if (a == "null") {   // a null pointer
+        ptrs[i].push_back(0);
+        argv[i].push_back(&ptrs[i].back());
+      } else if (!a.empty() && a[0] == '@') {
+        DevPtr target = 0;
+        if (!resolve(a.substr(1), &target)) {
+          std::printf("%s: step %zu: unknown buffer %s\n", c.name.c_str(), i, a.c_str());
+          rc = 1;
+          break;
+        }
+        ptrs[i].push_back(target);
+        argv[i].push_back(&ptrs[i].back());
+      } else {
+        vals[i].push_back((uint32_t)std::stoll(a));
+        argv[i].push_back(&vals[i].back());
+      }
+    }
+  }
+  auto run_steps = [&]() -> bool {
+    for (size_t i = 0; i < c.steps.size(); ++i) {
+      if (!d->launch(c.steps[i].kernel, c.steps[i].grid, c.steps[i].block, argv[i].data())) {
+        std::printf("%s: step %zu launch %s: %s\n", c.name.c_str(), i, c.steps[i].kernel.c_str(), d->err().c_str());
+        return false;
+      }
+    }
+    if (!d->sync()) { std::printf("%s: sync: %s\n", c.name.c_str(), d->err().c_str()); return false; }
+    return true;
+  };
+  if (rc == 0 && !run_steps()) rc = 1;
+  for (size_t i = 0; rc == 0 && i < c.saves.size(); ++i) {
+    ChainBuf* b = find(c.saves[i].first);
+    std::vector<uint8_t> data(b ? b->bytes : 0);
+    if (!b || !d->download(data.data(), b->ptr, b->bytes) || !write_file(base + "/" + c.saves[i].second, data)) {
+      std::printf("%s: save %s: %s\n", c.name.c_str(), c.saves[i].first.c_str(), b ? d->err().c_str() : "unknown");
+      rc = 1;
+    }
+  }
+  if (rc == 0 && c.time_runs > 0) {
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int r = 0; rc == 0 && r < c.time_runs; ++r)
+      if (!run_steps()) rc = 1;
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (rc == 0) std::printf("chain %s: time %.3f ms per run (%d runs)\n", c.name.c_str(), ms / c.time_runs, c.time_runs);
+  }
+  for (auto& b : c.bufs)
+    if (b.ptr) d->free(b.ptr);
+  if (rc == 0) std::printf("%s: ok (chain of %zu steps)\n", c.name.c_str(), c.steps.size());
+  return rc;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -349,13 +518,45 @@ int main(int argc, char** argv) {
   if (!f) { std::printf("cannot read %s\n", argv[2]); return 2; }
   const std::string base = dir_of(argv[2]);
   std::vector<Case> cases;
+  std::vector<Chain> chains;
+  bool in_chain = false;   // the lines after "chain" belong to it until the next "case" or "chain"
   std::string line;
   while (std::getline(f, line)) {
     if (!line.empty() && line.back() == '\r') line.pop_back();
     std::istringstream s(line);
     std::string w;
     if (!(s >> w)) continue;
-    if (w == "case") { cases.emplace_back(); s >> cases.back().name; continue; }
+    if (w == "case") { cases.emplace_back(); s >> cases.back().name; in_chain = false; continue; }
+    if (w == "chain") { chains.emplace_back(); s >> chains.back().name; in_chain = true; continue; }
+    if (in_chain) {
+      Chain& ch = chains.back();
+      if (w == "module") {
+        std::string m, tag;
+        s >> m >> tag;
+        ch.modules.emplace_back(m, tag);
+      } else if (w == "buf") {
+        ChainBuf b;
+        s >> b.id >> b.bytes >> b.file;
+        if (!(s >> b.fill)) b.fill = 0;
+        ch.bufs.push_back(b);
+      } else if (w == "step") {
+        ChainStep st;
+        s >> st.kernel >> st.grid >> st.block;
+        std::string a;
+        while (s >> a) st.args.push_back(a);
+        ch.steps.push_back(st);
+      } else if (w == "save") {
+        std::string id, file;
+        s >> id >> file;
+        ch.saves.emplace_back(id, file);
+      } else if (w == "time") {
+        s >> ch.time_runs;
+      } else {
+        std::printf("unknown chain line: %s\n", line.c_str());
+        return 2;
+      }
+      continue;
+    }
     if (cases.empty()) { std::printf("line before the first case: %s\n", line.c_str()); return 2; }
     Case& c = cases.back();
     if (w == "module") {
@@ -374,6 +575,10 @@ int main(int argc, char** argv) {
       c.direct.push_back(t);
     } else if (w == "direct_params") {
       s >> c.dparams.rx >> c.dparams.ry >> c.dparams.rw >> c.dparams.rh;
+      float pi = 1.0f;
+      unsigned rne16 = 0;
+      if (s >> pi) c.dparams.color_pi = pi;   // optional: color_pi, then output_rne16
+      if (s >> rne16) c.dparams.output_rne16 = rne16;
     } else if (w == "direct_out") {
       s >> c.direct_out;
     } else if (w == "arg") {
@@ -394,7 +599,8 @@ int main(int argc, char** argv) {
   }
   int fails = 0;
   for (auto& c : cases) fails += run_case(d.get(), c, base);
+  for (auto& c : chains) fails += run_chain(d.get(), c, base);
   if (!d->sync()) { std::printf("final sync: %s\n", d->err().c_str()); return 1; }
-  std::printf("kernel_replay: %d of %zu cases failed\n", fails, cases.size());
+  std::printf("kernel_replay: %d of %zu cases failed\n", fails, cases.size() + chains.size());
   return fails ? 1 : 0;
 }

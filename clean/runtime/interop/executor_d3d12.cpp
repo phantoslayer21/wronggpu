@@ -23,6 +23,7 @@
 // into an RG32F texture of ours, which the network then reads as its render-size motion texture.
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <string>
@@ -38,6 +39,10 @@
 namespace wgi {
 
 namespace {
+
+// The largest native D3D12 arena (WG_D3D12_ARENA_MB's upper bound, 4095 MiB): the arena that measures a network
+// larger than the default one.
+constexpr uint64_t kMeasureMaxBytes = uint64_t(4095) << 20;
 
 template <class T>
 void release_ref(T*& p) {
@@ -94,15 +99,44 @@ class D3d12Executor : public Executor {
     const std::string build = cfg_.build_dir ? cfg_.build_dir : ".";
     // Pass 1 measures the arena the network needs (the default arena is large); pass 2 makes the same allocations in
     // an arena of exactly that size. The allocation sequence of runtime_create is deterministic.
+    // A network larger than the default arena (Model L at 4K native: about 3.4 GiB) is measured again in the largest
+    // arena (kMeasureMaxBytes, WG_D3D12_ARENA_MB's upper bound) unless WG_D3D12_ARENA_MB is set. Without this the
+    // context went to the HIP executor, whose process keeps HIP's instance and the pooled imported arena after the
+    // context is destroyed (clean/FORMATS.md "Context teardown and re-creation"; issue #182).
     uint64_t need = 0;
     {
+      const char* arena_env = std::getenv("WG_D3D12_ARENA_MB");
+      const bool may_grow = !arena_env || !*arena_env;
       std::string e;
-      std::unique_ptr<wgrt::Device> dev = wgrt::make_d3d12_device_on(device, queue_, build, &e);
-      if (!dev) return *err = "D3D12 device: " + e, false;
-      wgrt::Runtime* rt = wgrt::runtime_create(c, std::move(dev), &e, true, true);
-      if (!rt) return *err = "D3D12 runtime: " + e, false;
+      wgrt::Runtime* rt = nullptr;
+      bool grown = false;
+      const std::string max_mib = std::to_string(kMeasureMaxBytes >> 20);
+      for (uint64_t arena : {uint64_t(0), kMeasureMaxBytes}) {
+        e.clear();
+        std::unique_ptr<wgrt::Device> dev = wgrt::make_d3d12_device_on(device, queue_, build, &e, arena);
+        if (!dev) {
+          if (grown && log_)
+            log_(true, "measuring again in a " + max_mib + " MiB arena failed (" + e + ")");
+          return *err = "D3D12 device: " + e, false;
+        }
+        rt = wgrt::runtime_create(c, std::move(dev), &e, true, true);
+        if (rt || !may_grow || arena || e.find("native D3D12 arena exhausted") == std::string::npos) break;
+        grown = true;
+        if (log_)
+          log_(false, "the network does not fit the default arena (" + e + "); measuring again in a " +
+                          max_mib + " MiB arena");
+      }
+      if (!rt) {
+        if (grown && log_)
+          log_(true, "measuring again in a " + max_mib + " MiB arena failed (" + e + ")");
+        return *err = "D3D12 runtime: " + e, false;
+      }
       need = wgrt::d3d12_ext(wgrt::runtime_device(rt))->arena_high_water();
       wgrt::runtime_destroy(rt);
+      if (grown && log_)
+        log_(false, "measured in the " + max_mib + " MiB arena: the network needs " +
+                        std::to_string((need + (1u << 20) - 1) >> 20) + " MiB; the D3D12 executor runs it in an arena "
+                        "of that size");
     }
     std::string e;
     std::unique_ptr<wgrt::Device> dev = wgrt::make_d3d12_device_on(device, queue_, build, &e, need + (1u << 20));

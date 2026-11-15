@@ -11,6 +11,19 @@
 #ifndef WRONGGPU_DIRECT_ROUTE
 #define WRONGGPU_DIRECT_ROUTE 1
 #endif
+// The Model L choice in the launcher (CMake option WRONGGPU_MODEL_L, default OFF: on only in a release whose front end
+// and runtime run Model L). OFF: no model setting anywhere (profile, `set`, `get`, the window); `set <game> model=L` is
+// refused by name. Converting Model L's data (`model convert --preset=L`) does not depend on it.
+#ifndef WRONGGPU_MODEL_L
+#define WRONGGPU_MODEL_L 0
+#endif
+// The Model K choice in the launcher (CMake option WRONGGPU_MODEL_K, default OFF: a development build, for a front end and
+// runtime that run Model K; it needs WRONGGPU_PRESET_K, whose converter map and model folder Model K's data uses). It makes
+// `model` a setting too (values m|k, m|k|l with the Model L choice) and adds `set <game> model=K`. OFF: `model=K` is not a
+// value of the setting. Converting Model K's data (`model convert --preset=K`) does not depend on it.
+#ifndef WRONGGPU_MODEL_K
+#define WRONGGPU_MODEL_K 0
+#endif
 
 // UI policy only. Silent installations keep their existing explicit command-line contract.
 namespace wg_wizard {

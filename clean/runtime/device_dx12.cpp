@@ -21,6 +21,7 @@
 
 #include "device.h"
 #include "gelu_lut_table.h"
+#include "struct_args.h"
 #include "gelu_t5_table.h"
 
 #include "interop/d3d12_include.h"
@@ -87,8 +88,9 @@ constexpr uint64_t kOrderMark = 128;  // arena byte offset of the HIP ordering m
 constexpr int kAllocators = 8;
 
 struct Arg {
-  char kind;      // 'p' pointer, 'u' 32-bit scalar, 'b' bytes
-  unsigned size;  // bytes for 'b'
+  char kind;      // 'p' pointer, 'u' 32-bit scalar, 'b' bytes, 's' struct with pointers (struct_args.h)
+  unsigned size;  // bytes for 'b' and 's'
+  std::vector<StructField> fields = {};  // 's'
 };
 
 struct Kernel {
@@ -357,6 +359,20 @@ class Dx12Device : public Device {
         out[d++] = p ? (uint32_t)(p - arena_hip_) : 0u;
       } else if (a.kind == 'u') {
         std::memcpy(&out[d++], args[i], 4);
+      } else if (a.kind == 's') {
+        const uint64_t lo = arena_hip_ + kAlign, hi = arena_hip_ + arena_bytes_;
+        const int n = pack_struct_arg(a.fields, args[i], out + d, [&](uint64_t p, uint32_t* off) {
+          if (p < lo || p >= hi) return false;
+          *off = (uint32_t)(p - arena_hip_);
+          return true;
+        });
+        if (n < 0) {
+          if (!k.fallback_noted)
+            log(false, "D3D12: " + k.name + " has a struct pointer outside the arena; it runs on HIP"),
+                k.fallback_noted = true;
+          return false;
+        }
+        d += (unsigned)n;
       } else {
         std::memcpy(&out[d], args[i], a.size);
         d += a.size / 4;
@@ -471,6 +487,11 @@ class Dx12Device : public Device {
     if (FAILED(device_->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &sm, sizeof sm)) ||
         sm.HighestShaderModel < D3D_SHADER_MODEL_6_6)
       return fail("D3D12 backend: the driver does not support shader model 6.6");
+    // binary64 fma / division (manifest "fp64": "ext", e.g. model K's exact input stage): ports that need them are
+    // dropped by read_manifest when the adapter lacks them. D3D12 has no separate cap bit for the D3D11.1 extended
+    // doubles (DFMA / DDIV / DRCP): DoublePrecisionFloatShaderOps includes them (d3d12.h has no other field)
+    D3D12_FEATURE_DATA_D3D12_OPTIONS o = {};
+    ext_doubles_ = SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &o, sizeof o)) && o.DoublePrecisionFloatShaderOps;
     return true;
   }
 
@@ -540,6 +561,13 @@ class Dx12Device : public Device {
         } else if (s.size() > 1 && s[0] == 'b' && std::atoi(s.c_str() + 1) > 0 && std::atoi(s.c_str() + 1) % 4 == 0) {
           x.args.push_back({'b', (unsigned)std::atoi(s.c_str() + 1)});
           count += x.args.back().size / 4;
+        } else if (!s.empty() && s[0] == 's') {
+          Arg sa{'s', 0};
+          unsigned words = 0;
+          if (!parse_struct_arg(s, &sa.size, &words, &sa.fields))
+            return fail("D3D12 manifest: kernel " + x.name + ": struct argument '" + s + "'");
+          x.args.push_back(std::move(sa));
+          count += words;
         } else {
           return fail("D3D12 manifest: kernel " + x.name + ": argument kind '" + s + "'");
         }
@@ -547,6 +575,11 @@ class Dx12Device : public Device {
       if (count != x.dwords || count > kMaxArgDwords)
         return fail("D3D12 manifest: kernel " + x.name + ": argument DWORDs do not add up");
       seen.insert(x.name);
+      if (const wgc::Json* fp = k.find("fp64"); fp && fp->is_string() && fp->text == "ext" && !ext_doubles_) {
+        log(true, "D3D12: " + x.name + " needs binary64 fma / division (DoublePrecisionFloatShaderOps), which this "
+                  "adapter lacks: no port, it runs on HIP");
+        continue;
+      }
       if (all || want.count(x.name)) {
         std::string nm = x.name;
         kernels_.emplace(nm, std::move(x));
@@ -755,6 +788,7 @@ class Dx12Device : public Device {
   std::map<std::string, std::string> tagged_cos_;    // tag -> file name of the code object loaded under it
   unsigned module_gen_ = 0;
   std::string adapter_name_;
+  bool ext_doubles_ = false;  // binary64 incl. fma / division: DoublePrecisionFloatShaderOps (create_device)
   bool on_dx_ = false;         // the D3D12 queue owns the work since the last switch from HIP (a list is open)
   bool need_barrier_ = false;  // a D3D12 dispatch since that switch: the next one needs a UAV barrier first
   unsigned dispatches_ = 0;    // dispatches in the open list

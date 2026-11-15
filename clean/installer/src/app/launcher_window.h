@@ -87,8 +87,9 @@ void HandOverToInstalled(HANDLE& one, const wstring& installedExe, const wchar_t
 bool AnswerReplaceOffer(HANDLE& one, const wstring& installedExe, const wstring& have, const LauncherStartDecision& start);  // ui_words.cpp: "Update WrongGPU to X?"; true: Not now, this copy runs (rc5)
 void RemoveDataAsked();  // ui_words.cpp: a portable copy's Settings > Remove data... (RemoveSharedData)
 void StartHealth(bool gpu);  // the model data, the RR data and the graphics card read again (the status line, Settings)
-wstring LeftoversText(const wstring& name, const std::vector<Leftover>& files, bool clean);  // Clean up / Adopt's question
-std::vector<lui::DialogButton> LeftoversButtons(bool clean);
+// Clean up / Adopt's question; otherSetup (0.6.1): the files are used by another mod's setup (said, Cancel the default)
+wstring LeftoversText(const wstring& name, const std::vector<Leftover>& files, bool clean, bool otherSetup = false);
+std::vector<lui::DialogButton> LeftoversButtons(bool clean, bool otherSetup = false);
 // ui_dump.cpp ("WrongGPU.exe ui-dump") drives the window offscreen with these
 const float kDefaultW = 1180, kDefaultH = 724;           // the window's first size (DIPs)
 extern bool firstRunBusy, focusFirstStop;              // the first run's checks still running; the Library's first stop takes the focus next

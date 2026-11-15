@@ -29,6 +29,7 @@ typedef uint64_t ULONGLONG;
 typedef uint64_t DWORD64;
 typedef int BOOL;
 typedef uint8_t BYTE;
+typedef unsigned char BOOLEAN;
 typedef uint16_t WORD;
 typedef unsigned int UINT;
 typedef uint32_t UINT32;
@@ -67,6 +68,7 @@ typedef struct HKEY__* HKEY;
 typedef HKEY* PHKEY;
 
 #define WINAPI
+#define CDECL
 #define CALLBACK
 #define APIENTRY
 #define CONST const
@@ -109,6 +111,8 @@ typedef struct _OVERLAPPED OVERLAPPED;
 constexpr DWORD ERROR_SUCCESS = 0;
 constexpr DWORD ERROR_INVALID_FUNCTION = 1;
 constexpr DWORD ERROR_WRITE_PROTECT = 19;
+constexpr DWORD ERROR_BAD_LENGTH = 24;
+constexpr DWORD ERROR_READ_FAULT = 30;
 constexpr DWORD ERROR_WRITE_FAULT = 29;
 constexpr DWORD ERROR_GEN_FAILURE = 31;
 constexpr DWORD ERROR_BAD_EXE_FORMAT = 193;
@@ -144,6 +148,8 @@ constexpr DWORD ERROR_MORE_DATA = 234;
 constexpr DWORD ERROR_NO_MORE_ITEMS = 259;
 constexpr DWORD ERROR_DIRECTORY = 267;
 constexpr DWORD ERROR_CANCELLED = 1223;
+constexpr DWORD ERROR_TOO_MANY_LINKS = 1142;
+constexpr DWORD ERROR_FILE_CORRUPT = 1392;
 constexpr DWORD ERROR_PROC_NOT_FOUND = 127;
 constexpr DWORD ERROR_MOD_NOT_FOUND = 126;
 constexpr DWORD ERROR_NOT_FOUND = 1168;
@@ -244,7 +250,17 @@ constexpr DWORD FIND_FIRST_EX_LARGE_FETCH = 2;
 typedef enum _GET_FILEEX_INFO_LEVELS { GetFileExInfoStandard = 0 } GET_FILEEX_INFO_LEVELS;
 typedef enum _FINDEX_INFO_LEVELS { FindExInfoStandard = 0, FindExInfoBasic = 1 } FINDEX_INFO_LEVELS;
 typedef enum _FINDEX_SEARCH_OPS { FindExSearchNameMatch = 0 } FINDEX_SEARCH_OPS;
-typedef enum _FILE_INFO_BY_HANDLE_CLASS { FileIdInfo = 18 } FILE_INFO_BY_HANDLE_CLASS;
+typedef enum _FILE_INFO_BY_HANDLE_CLASS { FileBasicInfo = 0, FileDispositionInfo = 4, FileIdInfo = 18, FileDispositionInfoEx = 21 } FILE_INFO_BY_HANDLE_CLASS;
+typedef struct _FILE_BASIC_INFO {
+    LARGE_INTEGER CreationTime, LastAccessTime, LastWriteTime, ChangeTime;
+    DWORD FileAttributes;
+} FILE_BASIC_INFO;
+typedef struct _FILE_DISPOSITION_INFO { BOOLEAN DeleteFile; } FILE_DISPOSITION_INFO;
+typedef struct _FILE_DISPOSITION_INFO_EX { DWORD Flags; } FILE_DISPOSITION_INFO_EX;
+constexpr DWORD FILE_DISPOSITION_FLAG_DO_NOT_DELETE = 0x0;
+constexpr DWORD FILE_DISPOSITION_FLAG_DELETE = 0x1;
+constexpr DWORD FILE_DISPOSITION_FLAG_POSIX_SEMANTICS = 0x2;
+constexpr DWORD FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE = 0x10;
 typedef struct _WIN32_FILE_ATTRIBUTE_DATA {
     DWORD dwFileAttributes; FILETIME ftCreationTime, ftLastAccessTime, ftLastWriteTime; DWORD nFileSizeHigh, nFileSizeLow;
 } WIN32_FILE_ATTRIBUTE_DATA;
@@ -270,6 +286,8 @@ BOOL GetFileTime(HANDLE h, FILETIME* created, FILETIME* accessed, FILETIME* writ
 BOOL SetFileTime(HANDLE h, const FILETIME* created, const FILETIME* accessed, const FILETIME* written);
 BOOL GetFileInformationByHandle(HANDLE h, BY_HANDLE_FILE_INFORMATION* info);
 BOOL GetFileInformationByHandleEx(HANDLE h, FILE_INFO_BY_HANDLE_CLASS cls, LPVOID info, DWORD size);
+BOOL SetFileInformationByHandle(HANDLE h, FILE_INFO_BY_HANDLE_CLASS cls, LPVOID info, DWORD size);
+BOOL SetEndOfFile(HANDLE h);
 DWORD GetFinalPathNameByHandleW(HANDLE h, LPWSTR out, DWORD size, DWORD flags);
 DWORD GetFileAttributesW(LPCWSTR name);
 BOOL GetFileAttributesExW(LPCWSTR name, GET_FILEEX_INFO_LEVELS level, LPVOID data);
@@ -339,6 +357,9 @@ constexpr DWORD FORMAT_MESSAGE_IGNORE_INSERTS = 0x200;
 constexpr DWORD FORMAT_MESSAGE_FROM_SYSTEM = 0x1000;
 DWORD FormatMessageW(DWORD flags, LPCVOID src, DWORD id, DWORD lang, LPWSTR buf, DWORD size, void* args);
 HLOCAL LocalFree(HLOCAL p);
+HANDLE GetProcessHeap();
+BOOL HeapFree(HANDLE heap, DWORD flags, LPVOID p);
+[[noreturn]] void ExitProcess(UINT code);
 DWORD GetEnvironmentVariableW(LPCWSTR name, LPWSTR out, DWORD size);
 BOOL SetEnvironmentVariableW(LPCWSTR name, LPCWSTR value);
 LPWCH GetEnvironmentStringsW();

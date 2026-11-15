@@ -20,6 +20,8 @@ as its HIP kernel (`clean/dx12/compare.py` proves it per kernel on synthetic fra
 | `dxil_asm.cpp` | tool used by the build (assembles the rewritten DXIL listing) |
 | `compare.py` | HIP vs hybrid D3D12, every stage output / state buffer byte for byte |
 | `kernels/exposure.hlsl` | the reference port (`exposure_auto_diet`): copy its structure |
+| `kernels/fg_*.hlsl` | frame generation's ports (#96, `co=fg_*.co`): groundwork, built only when `--only` names them, never by a full build (`is_frame_gen`), so the Model M / Model L sets stay as they are; checks: `clean/fg/runner/fg_d3d12_check.py` (each kernel), `clean/fg/runner/fg_net1_gpu.py` (net1's 32 steps as a `kernel_replay` chain), `clean/fg/runner/fg_net1_mma.py` (net1's fast path on the matrix instructions, fused / unfused / exact) |
+| `tests/kernel_replay.cpp` | replays launches from a case file on the native D3D12 device; `chain` blocks run several launches on buffers that persist between them (a whole network, optionally timed) |
 
 ## Arithmetic mode (why build_dx12.py and nothing else)
 
@@ -69,6 +71,16 @@ The rules above hold per operation. Across operations the gfx1201 D3D12 shader c
   (`n + (wg_grid_ >> 31)`; `swin_common.hlsli` `sw_zero()`), and fold LDS offsets with `sw_zero_bits()`.
 * HLSL 2021 `?:`, `&&`, `||` short-circuit and become branches (one load in flight per branch): use `select()`,
   `and()`, `or()` in hot code.
+* **lanes past the end of the grid corrupted other lanes' matrix results** (frame generation's `fg_mpair`, 2026-11-14):
+  a per-lane `bool valid[]` with `pc = select(valid, p, 0)` for the pixel, then WMMAs, then `if (valid) store`. With part
+  of the last 16-pixel group past the end, the valid lanes got NaN in exactly the output rows whose A-fragment row sits in
+  an invalid lane; HIP was right. Remedy: no validity array; every lane computes a clamped pixel (`min(p, n - 1)`) and
+  only the store tests `p < n`. Check odd grid sizes in every matrix port.
+* **`wg_f2h` is software** (~20 instructions per value; a `(half)` cast rounds toward zero here). In a hot loop round
+  a whole fragment with the driver conversion, `wg_to_f16_ags` (v_cvt_f16_f32, HIP's `(_Float16)` bits), and widen back
+  with `wg_h2f`; for 8 values that are not a matrix result (an element-wise stage), XOR each with an opaque zero first
+  (`fg_f2h8` in `fg_mpair.hlsl`) so the producing multiply is not folded into the conversion (see above: a folded
+  product turns -0 into +0). Frame generation's net1 fast path went from 3.5x to 1.5x HIP's GPU time with this.
 
 The native helper regression additionally constructed tiny exact values that round to the smallest normal FP32
 number: `0x00800000 * 0x3f7fffff` and `0x00ffffff / 0x40000000`. The multiply flushes before rounding on this driver;

@@ -203,6 +203,11 @@ DWORD AttributesOf(const struct stat& lst, const std::string& path) {
     }
     return a ? a : FILE_ATTRIBUTE_NORMAL;
 }
+// The read-only attribute as a mode: no write bit at all, or the owner's back. SetFileAttributesW and SetFileInformationByHandle share it.
+static mode_t ModeWithReadOnly(mode_t mode, bool readOnly) {
+    const mode_t m = mode & 07777;
+    return readOnly ? (m & ~(mode_t)(S_IWUSR | S_IWGRP | S_IWOTH)) : (m | S_IWUSR);
+}
 FILETIME FileTimeOf(const struct timespec& t) {
     const uint64_t v = ((uint64_t)((int64_t)t.tv_sec + 11644473600LL)) * 10000000ull + (uint64_t)t.tv_nsec / 100;
     return FILETIME{(DWORD)(v & 0xFFFFFFFFu), (DWORD)(v >> 32)};
@@ -358,7 +363,10 @@ BOOL CloseHandle(HANDLE hv) {
                 g_shared.erase(std::remove(g_shared.begin(), g_shared.end(), h), g_shared.end());
             }
             if (h->fd >= 0) close(h->fd);
-            if (h->deleteOnClose) unlink(h->path.c_str());
+            if (h->deleteOnClose) {   // the file this handle opened, not whatever was put under its name since
+                struct stat now;
+                if (lstat(h->path.c_str(), &now) == 0 && now.st_dev == h->dev && now.st_ino == h->ino) unlink(h->path.c_str());
+            }
             break;
         case Kind::Pipe: case Kind::Map: case Kind::Mutex: if (h->fd >= 0 && !h->borrowed) close(h->fd); break;
         case Kind::Job: ReleaseJob(h); break;
@@ -432,14 +440,80 @@ BOOL GetFileInformationByHandleEx(HANDLE hv, FILE_INFO_BY_HANDLE_CLASS cls, LPVO
     Handle* h = Lookup(hv, Kind::File);
     struct stat st;
     if (!h) return FALSE;
-    if (cls != FileIdInfo) return Fail(ERROR_INVALID_PARAMETER);
-    if (size < sizeof(FILE_ID_INFO)) return Fail(ERROR_INSUFFICIENT_BUFFER);
+    if (cls != FileIdInfo && cls != FileBasicInfo) return Fail(ERROR_INVALID_PARAMETER);
+    if (size < (cls == FileIdInfo ? sizeof(FILE_ID_INFO) : sizeof(FILE_BASIC_INFO))) return Fail(ERROR_INSUFFICIENT_BUFFER);
     if (fstat(h->fd, &st) != 0) { SetErrorFromErrno(errno, h->path); return FALSE; }
+    if (cls == FileBasicInfo) {
+        FILE_BASIC_INFO* bi = static_cast<FILE_BASIC_INFO*>(info);
+        std::memset(bi, 0, sizeof(*bi));
+        struct stat lst;
+        bi->FileAttributes = lstat(h->path.c_str(), &lst) == 0 && lst.st_ino == st.st_ino ? AttributesOf(lst, h->path) : FILE_ATTRIBUTE_NORMAL;
+        const FILETIME c = FileTimeOf(st.st_ctim), a = FileTimeOf(st.st_atim), w = FileTimeOf(st.st_mtim);
+        bi->CreationTime.QuadPart = (LONGLONG)(((uint64_t)c.dwHighDateTime << 32) | c.dwLowDateTime);   // as GetFileTime: the status change time
+        bi->ChangeTime = bi->CreationTime;
+        bi->LastAccessTime.QuadPart = (LONGLONG)(((uint64_t)a.dwHighDateTime << 32) | a.dwLowDateTime);
+        bi->LastWriteTime.QuadPart = (LONGLONG)(((uint64_t)w.dwHighDateTime << 32) | w.dwLowDateTime);
+        return TRUE;
+    }
     FILE_ID_INFO* fi = static_cast<FILE_ID_INFO*>(info);
     std::memset(fi, 0, sizeof(*fi));
     fi->VolumeSerialNumber = (ULONGLONG)st.st_dev;
     const uint64_t ino = (uint64_t)st.st_ino;
     std::memcpy(fi->FileId.Identifier, &ino, sizeof(ino));
+    return TRUE;
+}
+// Attributes and times through a handle (a time of 0 and attributes of 0 stay as they are), and the two ways to delete through one.
+BOOL SetFileInformationByHandle(HANDLE hv, FILE_INFO_BY_HANDLE_CLASS cls, LPVOID info, DWORD size) {
+    Handle* h = Lookup(hv, Kind::File);
+    if (!h) return FALSE;
+    struct stat st;
+    if (fstat(h->fd, &st) != 0) { SetErrorFromErrno(errno, h->path); return FALSE; }
+    if (cls == FileBasicInfo) {
+        if (size < sizeof(FILE_BASIC_INFO)) return Fail(ERROR_BAD_LENGTH);
+        const FILE_BASIC_INFO* b = static_cast<const FILE_BASIC_INFO*>(info);
+        // Only the access and write times can be set here: the creation time has no place on this file system, and the change time is the kernel's.
+        struct timespec ts[2] = {{0, UTIME_OMIT}, {0, UTIME_OMIT}};
+        bool times = false;
+        if (b->LastAccessTime.QuadPart > 0) { ts[0] = TimespecOf(FILETIME{(DWORD)(b->LastAccessTime.QuadPart & 0xFFFFFFFFu), (DWORD)((uint64_t)b->LastAccessTime.QuadPart >> 32)}); times = true; }
+        if (b->LastWriteTime.QuadPart > 0) { ts[1] = TimespecOf(FILETIME{(DWORD)(b->LastWriteTime.QuadPart & 0xFFFFFFFFu), (DWORD)((uint64_t)b->LastWriteTime.QuadPart >> 32)}); times = true; }
+        if (b->FileAttributes && !S_ISDIR(st.st_mode)) {   // (as SetFileAttributesW: a folder has no read-only bit here)
+            const mode_t m = ModeWithReadOnly(st.st_mode, b->FileAttributes & FILE_ATTRIBUTE_READONLY);
+            if (m != (st.st_mode & 07777) && fchmod(h->fd, m) != 0) { SetErrorFromErrno(errno, h->path); return FALSE; }
+        }
+        if (times && futimens(h->fd, ts) != 0) { SetErrorFromErrno(errno, h->path); return FALSE; }
+        return TRUE;
+    }
+    if (cls != FileDispositionInfo && cls != FileDispositionInfoEx) return Fail(ERROR_INVALID_PARAMETER);
+    if (size < (cls == FileDispositionInfo ? sizeof(FILE_DISPOSITION_INFO) : sizeof(FILE_DISPOSITION_INFO_EX))) return Fail(ERROR_BAD_LENGTH);
+    bool del, posix = false, ignoreReadOnly = false;
+    if (cls == FileDispositionInfo) {
+        del = static_cast<const FILE_DISPOSITION_INFO*>(info)->DeleteFile != 0;
+    } else {
+        const DWORD f = static_cast<const FILE_DISPOSITION_INFO_EX*>(info)->Flags;
+        del = f & FILE_DISPOSITION_FLAG_DELETE;
+        posix = f & FILE_DISPOSITION_FLAG_POSIX_SEMANTICS;
+        ignoreReadOnly = f & FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE;
+    }
+    if (!del) { h->deleteOnClose = false; return TRUE; }   // "do not delete" takes back an earlier request
+    if (!h->del) return Fail(ERROR_ACCESS_DENIED);          // deleting needs DELETE access
+    if (S_ISDIR(st.st_mode)) return Fail(ERROR_NOT_SUPPORTED);   // (folders are removed by name here)
+    if (!ignoreReadOnly && !(st.st_mode & S_IWUSR)) return Fail(ERROR_ACCESS_DENIED);   // a read-only file is not deleted unless told to
+    if (!posix) { h->deleteOnClose = true; return TRUE; }   // classic: the name goes when the handle closes
+    struct stat now;
+    if (h->path.empty() || lstat(h->path.c_str(), &now) != 0 || now.st_dev != st.st_dev || now.st_ino != st.st_ino) return Fail(ERROR_FILE_NOT_FOUND);
+    if (unlink(h->path.c_str()) != 0) { SetErrorFromErrno(errno, h->path); return FALSE; }
+    h->deleteOnClose = false;
+    h->path.clear();   // the name is free; this handle no longer has one
+    return TRUE;
+}
+BOOL SetEndOfFile(HANDLE hv) {
+    Handle* h = Lookup(hv, Kind::File);
+    if (!h) return FALSE;
+    const int fl = fcntl(h->fd, F_GETFL);
+    if (fl < 0 || (fl & O_PATH) || (fl & O_ACCMODE) == O_RDONLY) return Fail(ERROR_ACCESS_DENIED);   // truncating needs write access
+    const off_t pos = lseek(h->fd, 0, SEEK_CUR);
+    if (pos < 0) { SetErrorFromErrno(errno, h->path); return FALSE; }
+    if (ftruncate(h->fd, pos) != 0) { SetErrorFromErrno(errno, h->path); return FALSE; }
     return TRUE;
 }
 DWORD GetFinalPathNameByHandleW(HANDLE hv, LPWSTR out, DWORD size, DWORD) {
@@ -479,8 +553,7 @@ BOOL SetFileAttributesW(LPCWSTR name, DWORD attrs) {
     if (!ToPosix(name, p)) return FALSE;
     if (stat(p.c_str(), &st) != 0) { SetErrorFromErrno(errno, p); return FALSE; }
     if (S_ISDIR(st.st_mode)) return TRUE;   // a read-only folder on Windows still takes files; chmod would not mean that
-    mode_t m = st.st_mode & 07777;
-    m = (attrs & FILE_ATTRIBUTE_READONLY) ? (m & ~(mode_t)(S_IWUSR | S_IWGRP | S_IWOTH)) : (m | S_IWUSR);
+    const mode_t m = ModeWithReadOnly(st.st_mode, attrs & FILE_ATTRIBUTE_READONLY);
     if (m != (st.st_mode & 07777) && chmod(p.c_str(), m) != 0) { SetErrorFromErrno(errno, p); return FALSE; }
     return TRUE;
 }
@@ -980,6 +1053,11 @@ DWORD FormatMessageW(DWORD flags, LPCVOID, DWORD id, DWORD, LPWSTR buf, DWORD si
     return (DWORD)n + 2;
 }
 HLOCAL LocalFree(HLOCAL p) { std::free(p); return nullptr; }
+// One heap here: the C one. What Windows code frees with HeapFree(GetProcessHeap(), ...) came from malloc.
+HANDLE GetProcessHeap() { static char heap; return &heap; }
+BOOL HeapFree(HANDLE, DWORD, LPVOID p) { std::free(p); return TRUE; }
+// Like a kill, not like exit(): no static destructors run while other threads still use the layer's tables.
+void ExitProcess(UINT code) { std::fflush(nullptr); _exit((int)code); }
 
 // ---- environment -------------------------------------------------------------------------------------------------------
 // Windows names ignore case; a name the environment lacks but Windows always has is filled in from the user's folders.

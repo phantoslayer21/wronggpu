@@ -141,14 +141,16 @@ class ReconTest(unittest.TestCase):
         e, ep = float(x["exposure"]), float(x["exposure_prev"])
         px, py = R.target_positions_f32(rw, rh, dw, dh, *np.asarray(x["jitter"], np.float64))
         fy, fx = MP.point_index(px, py, rw, rh)
-        X = np.arange(dw)[None, :] + 0.5
-        Y = np.arange(dh)[:, None] + 0.5
-        m = [np.asarray(x["m_near"], np.float64)[fy, fx], MP.bilinear(x["m_center"], px, py),
-             np.asarray(x["m_far"], np.float64)[fy, fx]]
+        # candidate positions in float32 as the kernel (m_center's bilinear, q = X + m)
+        X = (np.arange(dw)[None, :] + 0.5).astype(np.float32)
+        Y = (np.arange(dh)[:, None] + 0.5).astype(np.float32)
+        m = [np.asarray(x["m_near"], np.float32)[fy, fx],
+             MP.bilinear_f32(x["m_center"], np.asarray(px, np.float32), np.asarray(py, np.float32)),
+             np.asarray(x["m_far"], np.float32)[fy, fx]]
         cands = []
         hist = np.asarray(x["history"], np.float64)
         for mk in m:
-            qx, qy = X + mk[..., 0], Y + mk[..., 1]
+            qx, qy = (X + mk[..., 0]).astype(np.float64), (Y + mk[..., 1]).astype(np.float64)
             valid = (qx >= 0) & (qx <= dw) & (qy >= 0) & (qy <= dh)
             hs = R._f32(R._f32(MP.dec(MP.history_sample(hist, np.where(valid, qx, 0.5), np.where(valid, qy, 0.5))))
                         / ep)

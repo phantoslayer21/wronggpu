@@ -22,6 +22,7 @@ model selection, the build, the runtime's create check). Model M's behaviour is 
 | `runner/k_model.py` | reads the converter's `--raw` output (spec 48) with the preset-K map's names and shapes, and the window-offset table (`net/window_offsets`) |
 | `reference/fp.py` | exact FP32 / FP16 helpers (fma by round-to-odd, round half away, truncation to FP16) |
 | `reference/instage.py`, `outstage.py` | spec 42 input stage, spec 43 output stage and filter-shape table (NumPy) |
+| `reference/exposure.py` | which exposure value is which (E_cur the game's exposure or 1, E_aux the auto-exposure value, LDR all 1): the rule in front of the two stages |
 | `kernels/k_fp.h`, `k_io.hip` | the input / output stage kernels (`k_in_color`, `k_in_base`, `k_out_pixel`, `k_out_hidden`) |
 | `runner/k_io.py` | their launch arguments, host scalars, the exact 2^E table |
 | `runner/k_frame.py` | one whole frame: input stage → network → output stage, histories and frame index (`KFrame`), and the chained NumPy reference (`reference_frame`) |
@@ -88,7 +89,10 @@ one rounding instead of two, and 46 of 3.7 M colour-history pixels differed by 1
 ### Whole frame: `clean/k/runner/k_frame.py`
 
 `KFrame(dev, func, output_size, max_render_size, params, flags)` keeps the histories (double-buffered) and the frame
-index of spec 44 (0 on a reset: the game's flag, the first frame, or a render-size change). `frame(x)` returns the
+index of spec 44 (0 on a reset: the game's flag or the first frame; a render-size change keeps the history). The frame
+dict gives E_cur, E_aux, e1, e2, or the inputs of the exposure rule of spec 42 draft 3 section 4
+(`clean/k/reference/exposure.py`: `game_exposure` (None: the game passes none), `measured` (the auto-exposure value
+when it runs), `exposure_scale`), which the per-frame runtime applies on the GPU. `frame(x)` returns the
 image, and `time_frame(x)` the GPU ms of the input stage, network, output stage and total. `params` are the
 converter's tensors (`k_model.load_raw`) including `net/window_offsets`.
 
@@ -183,6 +187,14 @@ Model K ships in the same `wronggpu_runtime.dll` as model M; nothing changes for
    compact one), `input_copy=1` (copies instead of the input pass where the formats allow), `timing_log=1`,
    `k_diag=input2|copyin` (timing diagnostics only), `k_head=full` (the 40-channel head map between d0 and the
    output stage instead of the compact pixel head; needed to read the buffer `k.N`).
+   The input stage is exact by default: the input-stage kernels from `k_io_exact.co` (every operation correctly
+   rounded: bit for bit spec 42 and `KFrame(exact_input=True)`); the output colour taps then come from `k_out_color`.
+   `k_in_exact=1` names the default; `k_in_exact=0` is the same as `k_fast_in=1`, which selects `k_io.co`'s GPU log2 /
+   2^x / reciprocal estimates instead (not bit-exact, test use). `k_in_exact=1` is refused with `k_fast=1` or
+   `k_fast_in=1`.
+   Exposure (spec 42 draft 3 section 4): E_cur = the game's exposure texture or value, 1 if it passes none; the
+   auto-exposure value (spec 07, run when the game asks for it at creation, HDR only) is E_aux and acts only through
+   λ. `k_expo_rule=v051` (A/B only) restores the 0.5.1 rule (the measured value as E_cur and E_aux).
 
 In game (Cyberpunk 2077 benchmark, 1440p Quality, RX 9070 XT; the project's measurements): model K
 GPU time about 1.8 ms per frame (`fused`; 1.72 ms with `fused16`), the game at ~120 fps against ~117 fps with model M
@@ -471,7 +483,7 @@ The 1.3 ms objective remains unmet. See
 
 ## Reset-frame input path
 
-History resets (first frame, explicit reset, or render-size change) select `k_in_reset`
+History resets (first frame or the game's reset flag; not a render-size change) select `k_in_reset`
 after the unchanged colour prepass. Spec 42 sections 6.1, 6.5 and 7 require each
 slot's channels to be `(current, current, 0, 0)` on a reset. The kernel therefore
 reads only the current own-sample channel; it skips history, motion/depth, colour

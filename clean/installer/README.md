@@ -32,6 +32,14 @@ AMD's upscaler; on any other build the plugin changes nothing and WrongGPU stays
 `Dx12Upscaler=fsr31`, `FfxDx12SRPath` and `UpscalerIndex=0` stay as before. Uninstall removes the plugin, its folder
 when the install made it, and its files (`wronggpu-asi.log`, `wronggpu-asi.ini` in the OptiScaler folder), and puts the
 player's OptiScaler.ini back. Tests: `test_asi_plugin`.
+Other setups' plugins (0.6.1, `ForeignPlugins`): `.asi` files in `plugins\`, `OptiScaler\plugins\` or `wronggpu-plugins\` that
+the install record doesn't name with that hash. In a Ray Reconstruction game WrongGPU's RR stays out by default (they may
+hook RR too; the result says so); with the player's OK (the window's question, `--switch-plugins`) they are moved aside
+(backed up, put back on uninstall) and WrongGPU's RR goes in: exactly the plugins the question listed (`--switch-plugins`:
+those there at the time); one that is not listed keeps RR out. Repair and Update keep them aside on that OK (the earlier
+install's restore brings them back; byte for byte those go aside again), and RR stays out when the exe folder is outside
+the install folder (nothing to move them with). Elsewhere they stay beside WrongGPU's plugin.
+WrongGPU RR from another package at exactly `plugins\WrongGPU-RR.asi` is overwritten by the install's RR plugin (backed up by its copy entry, put back on uninstall); under any other name it stays.
 
 For 007 First Light (`007FirstLight.exe`) the installer also sets OptiScaler's `[Spoofing] DxgiFactoryWrapping=true`:
 with OptiScaler 0.9.5.4 the game does not start otherwise when WrongGPU is OptiScaler's FSR library (the list is
@@ -190,7 +198,10 @@ With the defaults nothing of this section changes the installer.
   conversion runs in memory during the checks and is written at install time to
   `%LOCALAPPDATA%\WrongGPU\model\model.wgcm` with `model-source.txt` (which file, its version, where it was found,
   `filter` = whether that file had the weights, and a `not-used` line for each file that converts too but was passed
-  over). The DLSS file is never copied or modified.
+  over). The DLSS file is never copied or modified. Under Wine (Linux), where Proton runs each game in a prefix of its
+  own, the game's settings name this folder and the Ray Reconstruction data file by their `Z:` paths, which relies on
+  `Z:` mapping the Linux root in the game's prefix (Wine's default). A path that can't be made a `Z:` path is written
+  as it is, logged, and reported in the install result.
 - **A model file that is already on the PC.** A `model.wgcm` whose stage digests match the embedded map is valid. It
   is reused without searching when it has the group `filter` and was written with the map this installer carries.
   A valid model M file without the group (written before the group existed, or from a DLSS file whose filter was
@@ -221,17 +232,73 @@ With the defaults nothing of this section changes the installer.
   setup, or its uninstaller, can be run again. The logs that the OptiScaler of WrongGPU's own earlier hosted install
   wrote (`OptiScaler.log`) belong to that install: no `/MOVEMODS`, no warning. An OptiScaler that is not in the
   install record is another mod, as before.
-- **Uninstall.** Restores every original byte for byte (hash-verified), removes everything added, including
-  `wronggpu-*` files WrongGPU wrote while the game ran and the player's `wronggpu.ini` (a re-install keeps it), removes
-  the entry, and `%LOCALAPPDATA%\WrongGPU` (model and logs) when no other game uses it. Nothing of WrongGPU is left. If a game update replaced one of the FSR DLLs, the game's new file is
-  kept and the old renamed copy is removed; the other DLLs are restored as usual.
-- **Files that changed since the install** (uninstall and update alike). A file that is WrongGPU's own all the same is
-  removed like the one the record names, and the game's original comes back: an FSR DLL with WrongGPU's version
-  resource (a newer build the player placed by hand), or another payload file named `wronggpu*`, such as
-  `wronggpu_runtime.dll` (not the settings file). Any other changed FSR DLL follows the rule for game updates above;
-  any other changed file is left in place. The game's original of an FSR DLL is never removed while WrongGPU's DLL is
-  under the game's name: it comes back from the backup, or from its `*.wronggpu-original.dll` copy when the backup
-  is missing or damaged, checked against the hash in the record.
+- **Uninstall.** Restores every original byte for byte (hash-verified) and removes what WrongGPU added in the game's folders
+  (by the rule below), and the entry. **WrongGPU's own folder `%LOCALAPPDATA%\WrongGPU` is deleted with everything in it** when
+  the last game that uses it is uninstalled (model, shared data, logs, jobs; the way an uninstaller removes its own application
+  folder; it is not a place for your files). The one thing kept is a shared ignore list (`ignore-files.txt`), which is put
+  back, never deleted. The launcher's uninstall question for the last game says so: "WrongGPU's own folder
+  %LOCALAPPDATA%\WrongGPU is deleted with everything in it." In the game's folders the `wronggpu-*` logs and reports that
+  WrongGPU's own programs wrote while the game ran are not in the record, so nothing proves them WrongGPU's (a player's
+  `wronggpu-notes.txt` carries the same prefix): they are not deleted. They stay in their folders, each is in the setup
+  log, and the result lists them ("left in place").
+- **What the launcher removes or overwrites: the file-ownership rule** (0.6.1; the restore, uninstall, repair, update, move
+  out of a wrong folder and the state-folder cleanup; `src/wg_core/record.h`). In the game's folders, a file
+  is deleted or overwritten only when its current bytes are WrongGPU's: the hash the install record says WrongGPU last
+  wrote there (every write of the launcher to `wronggpu.ini`, `OptiScaler.ini` and the RR plugin's settings updates that
+  hash). Nothing else proves it: not the file's name, not a file next to it, not an ini key, not "it is a log", not "the
+  install created that path". A file that is not in the record is not touched, whatever its name (`wronggpu-*`,
+  `OptiScaler.log`, `fakenvapi.log`, ...).
+  - **Two policies, stated here on purpose.** Files in WrongGPU's FSR slot that identify as WrongGPU (the version
+    resource's `ProductName` is WrongGPU: the game may update that DLL, and a newer WrongGPU build placed by hand counts),
+    or that are byte-identical to a WrongGPU release (`known_releases.h`, size and SHA-256) or to the embedded payload, are
+    treated as WrongGPU's. This is a recognition by identity, not proof of ownership: a player's own build or copy with
+    that product name, or a copy of a release file, is treated the same way. Nothing else is treated as WrongGPU's by
+    its content.
+  - Any other file at a recorded path (edited by hand, saved by OptiScaler's menu or by WrongGPU's own plugin, replaced
+    by another setup or a game update, a settings file the install created and a program rewrote since) stays where it
+    is, untouched, with a warning.
+  - **Hard links.** A file that has another name (a hard link) is never written through, because the other name would change
+    too: when its original has to go back, the file stays, the original is kept in `WrongGPU-originals`, and the result
+    says so. A recorded hard-linked file with nothing to put back loses only the recorded name.
+  - **REFramework's mirror.** A mirror copy of a root DLL (`_storage_`) is deleted only when the record lists it. An
+    unrecorded copy, even byte for byte the file the install wrote, stays and the result says so.
+  - **The state folder** (`wronggpu-setup`, in the game's folder) keeps the rule: a file goes only when it is WrongGPU's and,
+    where a hash is known, its bytes are those. The backups the record lists go while they match the entry's hash; the
+    previous version's files that `previous.txt` lists go while they match the hashes it states (a changed one stays and
+    is listed); `owned-files.json` goes while it is byte for byte what WrongGPU makes of the record. The record,
+    `previous.txt`, `uninstall.exe`, `setup.log` and `profile.ini` carry no recorded hash and go by their fixed names (the one
+    place the rule is by name). The player's Engine.ini copy (`rr-config`) goes only through the Engine.ini revert. Any other
+    file stays, the folder stays with it, and the result lists what was left. The same applies when an install is moved
+    out of a wrong folder. The shared folder `%LOCALAPPDATA%\WrongGPU` is not in a game's folder; see Uninstall.
+  - **A settings file in a build without Preset K.** The plugin's `wronggpu-asi.ini` is rewritten (its `selection=wronggpu-k`
+    line changed) only when an earlier record lists it and its bytes still match. Otherwise it stays as it is and the
+    result tells the player how to change it.
+  - **The replace race, as far as it is closed.** In the restore, a file is checked and changed through one handle: it is
+    opened once with read and delete access and without sharing for writing, renaming or deleting, hashed through that
+    handle, and then deleted (`FileDispositionInfoEx`) or overwritten through it. The file that was hashed is the file
+    that goes; a file that another program swaps in after the plan was made is found by the hash and left. Where nothing was
+    at a path when the plan was made, the original is created only if the path is still free. Not covered, and said here:
+    the folders above a file are resolved by name when it is opened (a program that can rename a folder of the game's path
+    between the plan and the open can make the open reach another file, which is then compared with the plan's hash like
+    any file); the game's FSR DLL, in the one step where WrongGPU's DLL is deleted and the game's file takes its name,
+    is held until deleted and the move that follows creates the name only if free; the install, repair and update steps
+    that write into the game folder, the Engine.ini edit and the rollback are not covered by this (tracked separately).
+  - When the original from before WrongGPU cannot go back because of such a file, it is kept in
+    `<install folder>\WrongGPU-originals\<time>\` (a folder no operation removes), checked byte for byte; a second
+    generation goes into a folder of its own, neither is overwritten. The result then says "partly" and names each file
+    and where its original is.
+  - Before anything changes, every recorded file is checked: one that cannot be read or replaced (another program holds
+    it, such as the running game) or a missing or damaged backup stops the operation ("Nothing was changed"). Each file
+    is checked again right before it is changed. The record is removed before the backup, so a stop at any point leaves
+    either the record and backup for a second run, which finishes, or every original at its path or in
+    `WrongGPU-originals`.
+  - The game's original of an FSR DLL comes back from the backup, or from its `*.wronggpu-original.dll` copy when the
+    backup is missing or damaged, checked against the hash in the record; when neither is there, the uninstall refuses
+    ("Nothing was changed"). An uninstall that leaves an OptiScaler.ini naming WrongGPU's files warns that its setup may
+    need them.
+  - Moving another setup's files aside needs the player's OK for those exact bytes: the switch and plugin questions
+    record each listed file with its SHA-256, and a file that changed since the question is not moved
+    (`--switch` / `--switch-plugins`: the files as they are when the install starts).
 - **Collect logs** (button, `/COLLECT`, or "Modify" in Apps & features): one .zip with WrongGPU's logs and crash
   notes, the install record, setup log, model source, system information (Windows, GPU, driver, HIP runtime, FSR DLL
   state, model state, where the output filter comes from, file hashes) and recent Windows crash / GPU-reset events.
@@ -385,6 +452,51 @@ the model (`preset`) and the converter map in use (`model.map_sha256`). Without 
 model choice and the runtime settings for Model L are not part of this step. `tests/run_model_l_tests.py` checks it
 end to end: once with a build of the shipped map, and once with a build of a test map in its exact layout
 (`--write-test-map`).
+
+**The model choice** (#89; CMake `WRONGGPU_MODEL_L`, default `OFF`, on only in a release whose front end and runtime run
+Model L; `src/wizard_policy.h`). With it off there is no model setting anywhere (profile, `get`, the window), and
+`set <game> model=L` is refused by name (exit 10). With it on, `set <game> model=L|M` (profile key `model`, values `m`, `l`):
+- **L** is accepted only while Model L's data on this PC (`model\L\model.wgcm`) passes its check against Model L's converter
+  data. Otherwise: "Model L can't be chosen. Model L's data on this PC is not ready (...). Convert it first: ..." (exit 5,
+  nothing changed). It writes wronggpu.ini's `runtime_options`: every model item out, `model=L` last (the last model item
+  wins). It also writes OptiScaler.ini's `UpscalerIndex`, so OptiScaler starts with Model L's entry: `[WrongGPU]` in
+  OptiScaler 10's slot, else `[FSR]`. The index is 1, or 2 in a build with Preset K (after Model M and Model K in the
+  front end's list). Both writes go through the settings apply, so the install record's hashes follow them, as for every
+  settings write.
+- **M** is the default and changes nothing. Model L's items become `model=M` again, and an `UpscalerIndex` naming Model
+  L's entry goes back to 0. Anything else (the installer's `model=M`, another entry the player chose in OptiScaler's
+  menu) stays as it is. profile.ini has a `model` line only for L.
+- A game saved on L whose Model L data is gone (removed, or not converted before an install, repair or update) is not
+  refused. Its files say Model M with a warning saying how to convert the data, and the profile keeps L.
+- The window has no model control yet. The choice is made with `set` (or a `profile.model=` line of an elevated job).
+
+Tested by `model-choice` (ctest: profile.cpp built with the choice on) and `tests/run_model_l_tests.py --launcher-choice`
+(a build with the choice on: refusal, both files, record hashes, back to M byte for byte, repair without the data,
+uninstall), and with it off by `launcher-core` and the same script's build without the choice.
+
+**The Model K choice** (CMake `WRONGGPU_MODEL_K`, default `OFF`; a development build for a front end built with
+`WG_MODEL_K=ON` and a runtime with Model K, never part of a release that players get; it needs `WRONGGPU_PRESET_K=ON`,
+whose converter map and model folder Model K's data uses, and configuring without it stops with an error). It is the Model
+L choice again for one more value: `model` is a setting with the values `m|k` (`m|k|l` together with `WRONGGPU_MODEL_L`),
+and with it off `model=K` is not a value (the setting's refusal names the allowed ones). `set <game> model=K`:
+- is accepted only while Model K's data on this PC (`model\K\model.wgcm`) passes its check against Model K's converter
+  data; otherwise "Model K can't be chosen. Model K's data on this PC is not ready (...). Convert it first: WrongGPU.exe
+  model convert --preset=K ..." (exit 5, nothing changed);
+- writes wronggpu.ini's `runtime_options`: every model item out, `model=K` last, and OptiScaler.ini's `UpscalerIndex`: 1,
+  Model K's entry right after Model M's (`[WrongGPU]` in OptiScaler 10's slot, else `[FSR]`), as the installer's Preset K
+  start has always written it. With the K choice built in, Model L's entry is 2 in every build (it follows Model K's).
+- `set <game> model=M` (the profile says M) puts Model K's item back to `model=M` and an index naming Model K's entry back to
+  0, as for Model L; the profile has a `model` line only for K and L. The profile is the truth in a build with the K
+  choice: an install that starts on Preset K (`/PRESET=K`) writes no profile, so the game's profile is imported from its
+  files (`model=K` becomes `model=k`), but a `profile.ini` saved by a build without the K choice has no model line and
+  says M, so the next settings apply puts the game's Model K item back to M. A game saved on K whose Model K data is gone
+  is not refused: its files say Model M with a warning, the profile keeps K.
+
+The network is Model K's exact one: the launcher does not offer, write or document any other mode of Model K (the
+runtime's `network` and `k_fast` options stay at their defaults; nothing here sets them). Tested by `model-choice-k` and
+`model-choice-k-only` (ctest: profile.cpp built with the K choice, with and without the L choice; they run in CI, which
+keeps the product builds K-less) and by `tests/run_model_k_tests.py` (a build with both choices: refusal, both files,
+record hashes, an L control, back to M byte for byte, repair without the data, uninstall).
 
 **Ignore lists** (`src/wg_core/convert_ignore.*`): WrongGPU converts only the vendor DLL files that came with the player's
 own games, never a copy that another program's installer placed in a game. Such an installer registers the files it placed

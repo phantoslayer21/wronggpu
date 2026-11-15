@@ -66,6 +66,13 @@ ARGS_OLD = """WG_ARGS_BEGIN
 #if SW_ECL > 0
     uint aux;                 // unused by the expand kernels (null)
 #endif
+#if SW_OUT_COEF12
+    uint coefA, coefC, coefL, coefW;   // pointers: l_coef_pack12's A, C, latent and coefficient blob (out_p unused)
+    int coefRw, coefRh;                // the render rectangle
+#endif
+#if SW_SRC == 3
+    uint linW1, linW2;                 // pointers: enc0.Win1, enc0.Win2 (x = the FP8 q halo map)
+#endif
 WG_ARGS_END"""
 ARGS_NEW = """#ifndef SW_PM
 #define SW_PM 0
@@ -352,7 +359,7 @@ def main():
     if "--check" in sys.argv:
         print("fused_swin.hlsl is STALE (run fused_swin_gen.py)")
         return 1
-    with open(DST, "w", encoding="utf-8") as f:
+    with open(DST, "w", encoding="utf-8", newline="\n") as f:   # LF on every OS (.gitattributes: no conversion)
         f.write(s)
     print("fused_swin.hlsl regenerated")
     return 0

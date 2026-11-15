@@ -124,6 +124,24 @@ def blob_digests():
 
 L_KERNELS = ("lev/input_encoder", "l_linear_32_32_relu", "l_linear_32_32_f16", "l_swin_block_c32_enc",
              "l_project_gather", "l_dec_project", "l_swin_block_c32_dec", "l_coef", "l_post_recon")
+# native D3D12, fusion lc (the default): the decoder block with l_coef_pack12 as its epilogue, in place of the pair
+FOLD = "l_swin_block_c32_dec_coef12_nc"
+FOLD_BASE = "l_swin_block_c32_dec_coef12"
+# native D3D12, fusion ll (the default): the two input linears in one kernel (x1 in registers; q in l.narrow)
+LIN = "l_linear_32_32_fused"
+# native D3D12, fusion le (the default): the encoder block with the two input linears as its prologue (q in l.narrow,
+# x1 and x2 in registers)
+ENCLIN = "l_swin_block_c32_enc_lin_nc"
+ENCLIN_BASE = "l_swin_block_c32_enc_lin"
+# the default fusions without lc, ll and le: the pairs (the fallback routes); without le: the fused linears and the block
+NO_FOLD = {"WG_D3D12_FUSION": "pm,xe,mb,rv,xo,xd"}
+NO_LIN = {"WG_D3D12_FUSION": "pm,xe,mb,rv,xo,xd,lc"}
+NO_ENCLIN = {"WG_D3D12_FUSION": "pm,xe,mb,rv,xo,xd,lc,ll"}
+
+
+def latent_out(coef):
+    """The new latent a frame's coefficient store wrote (l_coef / l_coef_pack12, or the folded block)."""
+    return coef.args[10] if coef.kernel == FOLD else coef.args[4]
 
 
 def expected_args(t, f, digests):
@@ -142,19 +160,28 @@ def expected_args(t, f, digests):
     npix, tw, th = str((fh + 4) * (fw + 4)), str(fw // 2), str(fh // 2)
     eo = [str(v) for v in T.block_offset(T.TABLE, "first", info["parity"])]
     do = [str(v) for v in T.block_offset(T.TABLE, "second", info["parity"])]
+    # fused linears, or the linears in the block: q not under x2
+    q = n["l.narrow"] if any(ln.kernel in (LIN, ENCLIN) for ln in f["launches"]) else n["l.wide"]
     return {
         # the input encoder's values: Model M's encoder inputs (the colour as the network reads it, here the game's,
         # pre-exposure 1), the state it reads, q into the wide map, the motion surfaces, the exposure pair
         "lev/input_encoder": [n["input.color"], n["input.depth"], n["input.motion"], n["post.reduced"],
-                              n["state.latent_prev"], n["state.motion_history"], n["l.wide"], n["enc0.m_near"],
+                              n["state.latent_prev"], n["state.motion_history"], q, n["enc0.m_near"],
                               n["enc0.m_far"], n["enc0.m_center"], n["exposure.pair"], w["enc0.values"], None],
         "l_linear_32_32_relu": [n["l.wide"], n["l.narrow"], w["enc0.Win1"], npix],  # q -> x1
         "l_linear_32_32_f16": [n["l.narrow"], n["l.wide"], w["enc0.Win2"], npix],   # x1 -> x2
+        LIN: [n["l.narrow"], n["l.wide"], w["enc0.Win1"], w["enc0.Win2"], npix],      # q -> x2 (x1 in registers)
         "l_swin_block_c32_enc": [n["l.wide"], "0", n["l.x3"], w["enc0_block"], str(fh), str(fw)] + eo,  # x2 -> x3
+        # the block with the linears as its prologue: q -> x3, then the two linear blobs
+        ENCLIN_BASE: [n["l.narrow"], "0", n["l.x3"], w["enc0_block"], str(fh), str(fw)] + eo +
+                     [w["enc0.Win1"], w["enc0.Win2"]],
         "l_project_gather": [n["l.x3"], n["enc0.features"], w["enc0.project"], tw, th],  # x3 -> enc1's input
         "l_dec_project": [n["dec1.out"], n["l.narrow"], w["dec0.project"], tw, th],      # dec1's output -> y
         "l_swin_block_c32_dec": [n["l.narrow"], "0", n["l.wide"], w["dec0_block"], str(fh), str(fw)] + do,  # -> y2
         "l_coef": [n["l.wide"], n["dec0.A"], n["dec0.B"], n["dec0.C"], n["dec0.latent"], w["dec0.coef"], None],
+        # the folded form: the block's arguments (no map out), then the pack12 store's images, latent, blob, rectangle
+        FOLD_BASE: [n["l.narrow"], "0", "0", w["dec0_block"], str(fh), str(fw)] + do +
+                   [n["dec0.A"], n["dec0.C"], n["dec0.latent"], w["dec0.coef"], str(info["rw"]), str(info["rh"])],
         # the reconstruction (Model M's post_recon arguments): colour, A, B, C, the previous history, this frame's
         # motion surfaces, the post blob, the new history, the reduced history, the display image, P, exposure pair
         "l_post_recon": [n["input.color"], n["dec0.A"], n["dec0.B"], n["dec0.C"], n["state.history_prev"],
@@ -167,7 +194,17 @@ def base(kernel):
     """A Model L launch's kernel without its clamp-free suffix; the pack12 coefficient store (native D3D12) as l_coef,
     whose arguments it shares."""
     k = kernel.replace("_nc", "")
-    return "l_coef" if k == "l_coef_pack12" else k
+    post = ("l_post_recon_p12", "l_post_recon_ldr", "l_post_recon_p12_ldr")   # pack12 and LDR forms
+    if k.startswith("lev/input_encoder") and k.endswith("_q20"):   # the q20 forms (fusion le): the same arguments
+        return k[:-len("_q20")]
+    return "l_coef" if k == "l_coef_pack12" else "l_post_recon" if k in post else k
+
+
+def model_m_post(names):
+    """The launches of Model M's post route among a frame's kernel names: its reconstruction kernels (post_recon*,
+    post_tf*, post_fused*, the pmo/ motion-at-output forms and the banded forms), which Model L never runs."""
+    return [n for n in names if n.split("/")[-1].startswith(("post_recon", "post_tf", "post_fused", "post_prep"))
+            or n.startswith("pmo/") or n.endswith("_band")]
 
 
 def check_roles(t, f, digests, l_post=True):
@@ -185,7 +222,19 @@ def check_roles(t, f, digests, l_post=True):
             continue
         bad += ["%s argument %d: %s, expected %s" % (k, i, a, e) for i, (a, e) in enumerate(zip(ln.args, want))
                 if e is not None and a != e]
-    missing = [k for k in L_KERNELS if k not in seen and (l_post or k != "l_post_recon")]
+    fold, lin, el = FOLD_BASE in seen, LIN in seen, ENCLIN_BASE in seen
+    pair_d, pair_l = ("l_swin_block_c32_dec", "l_coef"), ("l_linear_32_32_relu", "l_linear_32_32_f16")
+    pair_e = pair_l + ("l_swin_block_c32_enc",)
+    need = [k for k in L_KERNELS if not (fold and k in pair_d) and not (lin and k in pair_l) and
+            not (el and k in pair_e)] + ([FOLD_BASE] if fold else []) + ([LIN] if lin else []) + \
+        ([ENCLIN_BASE] if el else [])
+    if el and (lin or set(pair_e) & seen):
+        bad.append("the encoder block with the linears and the linears or the plain block in one frame")
+    if fold and (set(pair_d) & seen):
+        bad.append("the folded decoder block and the pair in one frame")
+    if lin and (set(pair_l) & seen):
+        bad.append("the fused linears and the pair in one frame")
+    missing = [k for k in need if k not in seen and (l_post or k != "l_post_recon")]
     if bad or missing:
         raise AssertionError("; ".join(bad + ["not launched: " + k for k in missing]))
 
@@ -313,18 +362,38 @@ class Arguments(unittest.TestCase):
         npix, tw, th = (fh + 4) * (fw + 4), fw // 2, fh // 2
         k = {base(ln.kernel): (i, ln) for i, ln in enumerate(ls)}
         _, lev = k["lev/input_encoder"]
-        _, relu = k["l_linear_32_32_relu"]
-        _, f16 = k["l_linear_32_32_f16"]
-        _, enc = k["l_swin_block_c32_enc"]
+        el = k[ENCLIN_BASE][1] if ENCLIN_BASE in k else None   # the block with the linears (fusion le)
+        lin = k[LIN][1] if LIN in k else None
+        if not lin and not el:
+            _, relu = k["l_linear_32_32_relu"]
+            _, f16 = k["l_linear_32_32_f16"]
+        enc = el if el else k["l_swin_block_c32_enc"][1]
         gi, gather = k["l_project_gather"]
         di, dproj = k["l_dec_project"]
-        _, dec = k["l_swin_block_c32_dec"]
-        _, coef = k["l_coef"]
-        q, x1, x2, x3, feat = lev.args[6], relu.args[1], f16.args[1], enc.args[2], gather.args[1]
+        fold = FOLD_BASE in k
+        if fold:  # one launch: the block with the coefficient store as its epilogue (no y2 map)
+            _, dec = k[FOLD_BASE]
+            coef = dec
+        else:
+            _, dec = k["l_swin_block_c32_dec"]
+            _, coef = k["l_coef"]
+        q, x3, feat = lev.args[6], enc.args[2], gather.args[1]
         # the chain of maps (no launch reads what it writes)
-        self.assertEqual(relu.args[0], q)
-        self.assertEqual(f16.args[0], x1)
-        self.assertEqual(enc.args[0], x2)
+        if el:  # one launch for the linears and the block: no x1 or x2 map
+            x1 = x2 = None
+            self.assertEqual(el.args[0], q)
+        elif lin:  # one launch, x1 in registers: no map
+            x1, x2 = None, lin.args[1]
+            self.assertEqual(lin.args[0], q)
+            self.assertEqual(lin.args[4], str(npix))
+        else:
+            x1, x2 = relu.args[1], f16.args[1]
+            self.assertEqual(relu.args[0], q)
+            self.assertEqual(f16.args[0], x1)
+            self.assertEqual(relu.args[3], str(npix))
+            self.assertEqual(f16.args[3], str(npix))
+        if not el:
+            self.assertEqual(enc.args[0], x2)
         self.assertEqual(enc.args[1], "0")  # xadd: none
         self.assertEqual(gather.args[0], x3)
         self.assertTrue(ls[gi + 1].kernel.startswith("swin_block_c64"))
@@ -334,34 +403,47 @@ class Arguments(unittest.TestCase):
         self.assertEqual(dproj.args[0], dec1.args[2])  # the decoder reads dec1's output
         self.assertEqual(dec.args[0], y)
         self.assertEqual(dec.args[1], "0")
-        self.assertEqual(coef.args[0], y2)
-        for a, b in ((q, x1), (x1, x2), (x2, x3), (x3, feat), (dec1.args[2], y), (y, y2)):
-            self.assertNotEqual(a, b)
+        if fold:
+            self.assertEqual(y2, "0")  # the map is not written
+        else:
+            self.assertEqual(coef.args[0], y2)
+        for a, b in ((q, x1), (x1, x2), (q, x2 if lin else None), (x2, x3), (q, x3), (x3, feat), (dec1.args[2], y),
+                     (y, y2)):
+            if a is not None and b is not None:
+                self.assertNotEqual(a, b)
+        if not lin and not el:
+            self.assertEqual(q, x2)  # the pair: x2 over q (q is dead once x1 is written)
         # every buffer holds its map (FORMATS.md "Maps")
-        maps = ((q, 32 * npix), (x1, 32 * npix), (x2, 64 * npix), (x3, 32 * fh * fw), (feat, 64 * tw * th),
-                (y, 32 * fh * fw), (y2, 64 * fh * fw))
-        coefs = ((coef.args[1], 4 * rw * rh), (coef.args[2], 4 * rw * rh), (coef.args[3], 8 * rw * rh),
-                 (coef.args[4], 4 * rw * rh))  # A, B, C, the new latent: Model M's formats
+        maps = ((q, 32 * npix), (x3, 32 * fh * fw), (feat, 64 * tw * th), (y, 32 * fh * fw)) + \
+            (() if el else ((x2, 64 * npix),)) + (() if fold else ((y2, 64 * fh * fw),)) + \
+            (() if lin or el else ((x1, 32 * npix),))
+        if fold:  # pack12 image A (8 bytes a pixel), image C (4), the new latent
+            coefs = ((coef.args[8], 8 * rw * rh), (coef.args[9], 4 * rw * rh), (coef.args[10], 4 * rw * rh))
+        else:
+            coefs = ((coef.args[1], 4 * rw * rh), (coef.args[2], 4 * rw * rh), (coef.args[3], 8 * rw * rh),
+                     (coef.args[4], 4 * rw * rh))  # A, B, C, the new latent: Model M's formats
         for buf, need in maps + coefs:
             self.assertGreaterEqual(t.extent(buf), need, buf)
         # extents, offsets, parameters
-        self.assertEqual(relu.args[3], str(npix))
-        self.assertEqual(f16.args[3], str(npix))
         self.assertEqual(gather.args[3:5], [str(tw), str(th)])
         self.assertEqual(dproj.args[3:5], [str(tw), str(th)])
         for blk, kind in ((enc, "first"), (dec, "second")):
             ox, oy = T.block_offset(T.TABLE, kind, info["parity"])
             self.assertEqual(blk.args[4:8], [str(fh), str(fw), str(ox), str(oy)])
-        e, d = lev.params(12), coef.params(6)
+        e = lev.params(12)
         self.assertEqual(e[:4], [rw, rh, fw, fh])
         self.assertEqual(e[5], info["reset"])
-        self.assertEqual(d, [rw, rh, fw, fh, info["reset"]])
-        post = [ln for ln in ls if ln.kernel == "l_post_recon"]
-        self.assertEqual(len(post), 1 if l_post else 0)  # (native D3D12: Model M's fused pack12 post for now)
+        if fold:
+            self.assertEqual(coef.args[12:14], [str(rw), str(rh)])
+        else:
+            self.assertEqual(coef.params(6), [rw, rh, fw, fh, info["reset"]])
+        post = [ln for ln in ls if base(ln.kernel) == "l_post_recon"]
+        self.assertEqual(len(post), 1 if l_post else 0)
         if l_post:
             self.assertEqual(post[0].params(12), [rw, rh, (3 * 120 + 1) // 2, (3 * 72 + 1) // 2, info["reset"]])
             self.assertEqual(post[0].grid, cdiv((3 * 120 + 1) // 2, 32) * cdiv(cdiv((3 * 72 + 1) // 2, 2), 8))
-            self.assertTrue(ls[ls.index(post[0]) + 1].kernel.endswith("post_filter_c1_s4"))  # Model M's filter next
+            nxt = ls[ls.index(post[0]) + 1].kernel   # the output filter next (LDR: Model L's LDR output stage)
+            self.assertTrue(nxt.endswith("post_filter_c1_s4") or nxt == "l_post_filter_ldr", nxt)
         self.assertTrue(lev.args[11].startswith("b"))  # the values blob: an allocation
         if roles:  # every argument against the named buffers and blobs
             check_roles(t, f, blob_digests(), l_post)
@@ -480,8 +562,9 @@ class Roles(unittest.TestCase):
 
 
 class D3D12(unittest.TestCase):
-    """Model L on native D3D12 (backend 3): Model M's native frame with Model L's encoder and decoder, the pack12
-    coefficient store for Model M's pack12 post path; each missing D3D12 port refused by name, never replaced."""
+    """Model L on native D3D12 (backend 3): Model M's native frame with Model L's encoder, decoder, pack12 coefficient
+    store and its own reconstruction (no Model M post route); each missing D3D12 port refused by name, never
+    replaced."""
 
     def l_run(self, ports, frames=3, flags=(), **kw):
         return run("model=L", frames=frames, build_files=FT.SHIPPING, flags=("--backend=3",) + tuple(flags),
@@ -503,21 +586,41 @@ class D3D12(unittest.TestCase):
                 self.assertEqual(got, ["ERR create: Model L on native D3D12: not yet ported to D3D12: " + k])
 
     def check_d3d12_frame(self, t, f):
-        """The #111 checks (map chain, extents, offsets, parameters, every argument's buffer or blob), then what the
-        native frame adds: the pack12 store's images, dec1's own block, Model M's pack12 post path after it."""
+        """The #111 checks (map chain, extents, offsets, parameters, every argument's buffer or blob, Model L's
+        reconstruction and the filter after it), then what the native frame adds: the pack12 store's images, dec1's own
+        block, l_post_recon_p12 right after the store, and no Model M post kernel."""
         info = f["info"]
         rw, rh = info["rw"], info["rh"]
         names = [ln.kernel for ln in f["launches"]]
-        self.assertIn("l_coef_pack12", names)
+        fold = FOLD in names
+        if fold:
+            self.assertNotIn("l_coef_pack12", names)
+            self.assertNotIn("l_swin_block_c32_dec_nc", names)
+            self.assertEqual(names[names.index(FOLD) - 1], "l_dec_project")
+        else:
+            self.assertIn("l_coef_pack12", names)
+        if ENCLIN in names:
+            self.assertNotIn(LIN, names)
+            self.assertNotIn("l_linear_32_32_relu", names)
+            self.assertNotIn("l_swin_block_c32_enc_nc", names)
+            self.assertTrue(names[names.index(ENCLIN) - 1].startswith("lev/input_encoder"))
+        elif LIN in names:
+            self.assertNotIn("l_linear_32_32_relu", names)
+            self.assertNotIn("l_linear_32_32_f16", names)
+            self.assertTrue(names[names.index(LIN) - 1].startswith("lev/input_encoder"))
+        else:
+            self.assertIn("l_linear_32_32_relu", names)
         self.assertNotIn("l_coef", names)
         self.assertTrue(all(not n.startswith(("d1p12/", "d0p12/")) and n != "input_encoder" for n in names), names)
         dec1 = [ln for ln in f["launches"] if ln.kernel.startswith("swin_block_c64_add")]
         self.assertEqual([ln.kernel for ln in dec1], ["swin_block_c64_add_ex_nc"])  # dec1's own block, not fused
-        lev, coef = Arguments.check_frame(self, t, f, l_post=False)
-        self.assertGreaterEqual(t.extent(coef.args[1]), 8 * rw * rh)  # pack12 image A: 8 bytes per pixel
-        self.assertGreaterEqual(t.extent(coef.args[3]), 4 * rw * rh)  # pack12 image C: 4 bytes per pixel
-        i = names.index("l_coef_pack12")
-        self.assertTrue(names[i + 1].startswith("w64/post_tf") and "_p12" in names[i + 1], names[i + 1:])
+        lev, coef = Arguments.check_frame(self, t, f)
+        a, c = (coef.args[8], coef.args[9]) if fold else (coef.args[1], coef.args[3])
+        self.assertGreaterEqual(t.extent(a), 8 * rw * rh)  # pack12 image A: 8 bytes per pixel
+        self.assertGreaterEqual(t.extent(c), 4 * rw * rh)  # pack12 image C: 4 bytes per pixel
+        i = names.index(FOLD if fold else "l_coef_pack12")
+        self.assertEqual(names[i + 1], "l_post_recon_p12", names[i + 1:])
+        self.assertEqual(model_m_post(names), [])
         return lev, coef
 
     def test_frame(self):
@@ -529,24 +632,49 @@ class D3D12(unittest.TestCase):
         self.assertEqual(t.unknown(), [])
         self.assertEqual([f["info"]["reset"] for f in t.frames], [1, 0, 1, 0, 1, 1])
         self.assertEqual(len({f["info"]["parity"] for f in t.frames}), 2)
-        prev = None
-        for f in t.frames:
-            self.assertIsNone(f["error"])
-            lev, coef = self.check_d3d12_frame(t, f)
-            if prev:
-                self.assertEqual(lev.args[4], prev[1].args[4])  # the latent the last frame's store wrote
-                self.assertEqual(lev.args[5], prev[0].args[7])  # its near motion
-            prev = (lev, coef)
+        without = lambda *ks: [kc for kc in full_ports() if kc[0] not in ks]  # noqa: E731
+        for env, ports, fold, lin, el in ((None, full_ports(), True, False, True),
+                                          (NO_FOLD, full_ports(), False, False, False),
+                                          (None, without(FOLD), False, False, True),
+                                          (NO_LIN, full_ports(), True, False, False),
+                                          (NO_ENCLIN, full_ports(), True, True, False),
+                                          (None, without(ENCLIN), True, True, False),
+                                          (None, without(ENCLIN, LIN), True, False, False),
+                                          (None, without(LIN), True, False, True),
+                                          (None, without("lev/input_encoder_q20"), True, True, False)):
+            with self.subTest(fusion=env, fold_in_manifest=any(kc[0] == FOLD for kc in ports),
+                              lin_in_manifest=any(kc[0] == LIN for kc in ports),
+                              enclin_in_manifest=any(kc[0] == ENCLIN for kc in ports)):
+                # the fusions (lc, ll, le: the default; le over ll) and their fallbacks: without the fusion, or without
+                # the kernel
+                t = FT.Trace(self.l_run(ports, frames=6, rw=96, rh=64, flags=(sizes, "--reset=4"), env=env))
+                self.assertEqual(t.create, "create ok model L")
+                self.assertEqual(t.unknown(), [])
+                self.assertEqual([f["info"]["reset"] for f in t.frames], [1, 0, 1, 0, 1, 1])
+                self.assertEqual(len({f["info"]["parity"] for f in t.frames}), 2)
+                prev = None
+                for f in t.frames:
+                    self.assertIsNone(f["error"])
+                    self.assertEqual(FOLD in [ln.kernel for ln in f["launches"]], fold)
+                    self.assertEqual(LIN in [ln.kernel for ln in f["launches"]], lin)
+                    self.assertEqual(ENCLIN in [ln.kernel for ln in f["launches"]], el)
+                    lev, coef = self.check_d3d12_frame(t, f)
+                    if prev:
+                        self.assertEqual(lev.args[4], latent_out(prev[1]))  # the latent the last frame's store wrote
+                        self.assertEqual(lev.args[5], prev[0].args[7])  # its near motion
+                    prev = (lev, coef)
 
     def test_failed_launch_stops_the_frame(self):
-        t = FT.Trace(self.l_run(full_ports(), frames=3, flags=("--fail=l_coef_pack12@1",)))
-        ok0, bad, ok2 = t.frames
-        self.assertEqual(bad["failed"], "l_coef_pack12")
-        names = [ln.kernel for ln in bad["launches"]]
-        self.assertEqual(names, [ln.kernel for ln in ok0["launches"]][:len(names)])
-        self.assertTrue(names[-1].startswith("l_swin_block_c32_dec"))
-        self.assertIsNone(ok2["error"])
-        self.check_d3d12_frame(t, ok2)
+        for env, kernel, before in ((None, FOLD, "l_dec_project"), (NO_FOLD, "l_coef_pack12", "l_swin_block_c32_dec")):
+            with self.subTest(kernel=kernel):
+                t = FT.Trace(self.l_run(full_ports(), frames=3, flags=("--fail=%s@1" % kernel,), env=env))
+                ok0, bad, ok2 = t.frames
+                self.assertEqual(bad["failed"], kernel)
+                names = [ln.kernel for ln in bad["launches"]]
+                self.assertEqual(names, [ln.kernel for ln in ok0["launches"]][:len(names)])
+                self.assertTrue(names[-1].startswith(before))
+                self.assertIsNone(ok2["error"])
+                self.check_d3d12_frame(t, ok2)
 
     def test_model_m_unchanged(self):
         """Model M on backend 3 traces the same in the build with Model L as in the build without it."""
@@ -560,6 +688,163 @@ class D3D12(unittest.TestCase):
         """On HIP Model L keeps the base coefficient format (l_coef) and refuses pack12."""
         self.assertTrue(run("model=L", build_files=FT.SHIPPING, env={"WG_POST_PACK": "p12"})[0].startswith(
             "ERR create: Model L: post_pack=p12"))
+
+    # Model L's reconstruction on native D3D12, HDR and LDR colour: its D3D12 ports, then the output filter
+    OWN = {1: [("l_post_recon_p12", "l_post.co"), ("l_post_recon", "l_post.co"), ("l_coef", "l_ops.co"),
+               ("w64/post_filter_c1_s4", "post_w64.co")],
+           0: [("l_post_recon_p12_ldr", "l_post.co"), ("l_post_recon_ldr", "l_post.co"), ("l_coef", "l_ops.co"),
+               ("l_post_filter_ldr", "l_post.co")]}
+
+    def own_ports(self):
+        have = full_ports()
+        return have + [kc for hdr in self.OWN for kc in self.OWN[hdr] if kc not in have]
+
+    def test_own_post(self):
+        """HDR and LDR colour: l_post_recon_p12[_ldr] on the frames l_coef_pack12 stores, with post_recon's arguments
+        (the #111 role checks), then the unbanded filter (HDR w64/post_filter_c1_s4 with the exposure pair; LDR
+        l_post_filter_ldr) from its display image into the output; no Model M post kernel. A frame the pack12 kernels
+        do not take (render 180 x 108 = D) runs l_coef and l_post_recon[_ldr] (the fallback route)."""
+        sizes = "--sizes=96x64,96x64,180x108,80x48,77x45,180x108"
+        for hdr in (1, 0):
+            sfx = "" if hdr else "_ldr"
+            with self.subTest(hdr=hdr):
+                t = FT.Trace(run("model=L", frames=6, build_files=FT.SHIPPING, rw=180, rh=108, hdr=hdr,
+                                 flags=("--backend=3", sizes, "--reset=4"), manifest=self.own_ports()))
+                self.assertEqual(t.create, "create ok model L")
+                self.assertEqual(t.unknown(), [])
+                self.assertEqual(t.kernels.get("l_post"), "l_post_recon" + sfx)
+                prev = None
+                for f in t.frames:
+                    self.assertIsNone(f["error"])
+                    info, ls = f["info"], f["launches"]
+                    names = [ln.kernel for ln in ls]
+                    p12 = (info["rw"], info["rh"]) != (180, 108)  # pack12 frames: the fold (fusion lc, the default)
+                    self.assertIn(FOLD if p12 else "l_coef", names)
+                    self.assertFalse({"l_coef_pack12", "l_coef" if p12 else FOLD} & set(names), names)
+                    self.assertEqual(model_m_post(names), [])
+                    post = [ln for ln in ls if ln.kernel == ("l_post_recon_p12" if p12 else "l_post_recon") + sfx]
+                    self.assertEqual(len(post), 1, names)
+                    lev, coef = Arguments.check_frame(self, t, f)  # every argument's role, the filter after the post
+                    flt = ls[ls.index(post[0]) + 1]
+                    self.assertEqual(flt.kernel, "w64/post_filter_c1_s4" if hdr else "l_post_filter_ldr")
+                    self.assertEqual((flt.grid, flt.block), (cdiv(120, 40) * cdiv(cdiv(72, 2), 8), 64))
+                    self.assertEqual(flt.args[:2], [f["names"]["post.display"], f["names"]["filter.out"]])
+                    self.assertEqual(flt.args[2:6], [str((3 * 120 + 1) // 2), str((3 * 72 + 1) // 2), "120", "72"])
+                    if hdr:
+                        self.assertEqual(flt.args[7], f["names"]["exposure.pair"])
+                    if p12:  # pack12 image A (the fold's argument 8) is what the reconstruction reads
+                        self.assertEqual(coef.args[8], post[0].args[1])
+                        self.assertGreaterEqual(t.extent(coef.args[8]), 8 * info["rw"] * info["rh"])
+                    if prev:
+                        self.assertEqual(lev.args[4], latent_out(prev[1]))  # the latent the last frame's store wrote
+                    prev = (lev, coef)
+
+    def test_color_early_option(self):
+        """Runtime option l_color_early=on (the direct-resource route's colour staging after the input encoder): reported
+        in the kernel line; on the buffer route (no staging) the frames launch exactly what they launch without it."""
+        args = dict(frames=3, build_files=FT.SHIPPING, rw=96, rh=64, flags=("--backend=3",), manifest=self.own_ports())
+        on = FT.Trace(run("model=L,l_color_early=on", **args))
+        off = FT.Trace(run("model=L", **args))
+        self.assertEqual(on.create, "create ok model L")
+        self.assertEqual(on.kernels.get("l_color_early"), "on")
+        self.assertIsNone(off.kernels.get("l_color_early"))
+        self.assertEqual([[(ln.kernel, ln.args) for ln in f["launches"]] for f in on.frames],
+                         [[(ln.kernel, ln.args) for ln in f["launches"]] for f in off.frames])
+
+    def test_no_model_m_post_route(self):
+        """Model L never runs Model M's post: every route traced (HDR and LDR colour; HIP and native D3D12; pack12 and
+        fallback frames) launches Model L's reconstruction and no Model M post kernel; l_post=m is refused; where Model
+        L's own route cannot run (a port missing, another post / filter route asked for) creation is refused with the
+        reason, never a different algorithm."""
+        def first(options, **kw):
+            return run(options, frames=1, build_files=FT.SHIPPING, **kw)[0]
+        d3d12 = dict(flags=("--backend=3",), manifest=self.own_ports())
+        # the runtime option: m refused, own a no-op, anything else refused
+        self.assertEqual(first("model=L;l_post=m", **d3d12), "ERR create: l_post=m: Model L has no Model M post route "
+                                                             "(its reconstruction is l_post_recon[_ldr] only)")
+        self.assertEqual(first("model=L;l_post=yes", **d3d12),
+                         "ERR create: l_post must be own (Model L's reconstruction; there is no other)")
+        self.assertEqual(first("l_post=own", **d3d12), "ERR create: l_post=own is a Model L option (its own "
+                                                        "reconstruction)")
+        # a missing port of Model L's route: refused by name (HDR and LDR), never another post
+        for hdr, kcs in self.OWN.items():
+            for k, _ in kcs:
+                with self.subTest(hdr=hdr, port=k):
+                    got = first("model=L", hdr=hdr, flags=("--backend=3",),
+                                manifest=[kc for kc in self.own_ports() if kc[0] != k])
+                    self.assertEqual(got, "ERR create: Model L on native D3D12 (%s): not yet ported to D3D12: %s; "
+                                          "Model L has no other reconstruction (no Model M post route)"
+                                     % ("HDR" if hdr else "LDR", k))
+        # another of Model M's filter routes asked for: refused (the RGBA16F filter output)
+        got = first("model=L", env={"WG_FILTER_KERNEL": "post_filter_c1_s4_o16"}, **d3d12)
+        self.assertTrue(got.startswith("ERR create: "), got)
+        self.assertNotIn("create ok", got)
+        # every route: Model L's reconstruction, no Model M post kernel (HIP: base coefficients and l_post_recon[_ldr];
+        # native D3D12: pack12 frames and the fallback frame)
+        sizes = "--sizes=96x64,180x108,80x48"
+        for hdr in (1, 0):
+            sfx = "" if hdr else "_ldr"
+            for backend in ("hip", "d3d12"):
+                with self.subTest(hdr=hdr, backend=backend):
+                    kw = dict(d3d12) if backend == "d3d12" else {}
+                    kw["flags"] = kw.get("flags", ()) + (sizes,)
+                    t = FT.Trace(run("model=L", frames=3, build_files=FT.SHIPPING, rw=180, rh=108, hdr=hdr, **kw))
+                    self.assertEqual(t.create, "create ok model L")
+                    self.assertEqual(t.kernels.get("l_post"), "l_post_recon" + sfx)
+                    for f in t.frames:
+                        self.assertIsNone(f["error"])
+                        names = [ln.kernel for ln in f["launches"]]
+                        self.assertEqual(model_m_post(names), [], names)
+                        own = [n for n in names if base(n) == "l_post_recon"]
+                        self.assertEqual(len(own), 1, names)
+                        self.assertTrue(own[0].endswith(sfx), own)
+                        if not hdr:  # LDR: Model L's LDR output stage, no exposure-decoding filter
+                            self.assertIn("l_post_filter_ldr", names)
+                            self.assertFalse([n for n in names if n.endswith("post_filter_c1_s4")], names)
+
+        def hip(options):
+            return [re.sub(r"wg_lfb_\w+", "B", x) for x in run(options, frames=2, build_files=FT.SHIPPING)]
+        self.assertEqual(hip("model=L;l_post=own"), hip("model=L"))
+
+    def test_ldr_filter_selection(self):
+        """LDR colour: the output stage is l_post_filter_ldr (the default filter's geometry, 3 x f32). Another filter
+        selection has no LDR form and is refused at create with the reason, on HIP (an alternate geometry, an RGBA16F
+        filter output, output_filter=quality9) and on native D3D12, never run with another filter's grid or format (the
+        output copy's l_post_filter_ldr_h is behind the same check). HDR keeps those selections. The default LDR frame
+        launches l_post_filter_ldr on the default filter's grid, from the display image into the output."""
+        def first(options="model=L", **kw):
+            return run(options, frames=1, build_files=FT.SHIPPING, **kw)[0]
+        why = ("ERR create: Model L, LDR colour: its output stage is l_post_filter_ldr (the default filter's geometry, "
+               "40 columns x 4 row pairs, 3 x f32 RGB; RGBA16F rows for the output copy); the selected filter (")
+        for env, opts, tail in (({"WG_FILTER_KERNEL": "post_filter"}, "model=L", "post_filter) has no LDR form"),
+                                ({"WG_FILTER_KERNEL": "post_filter_c1_s16"}, "model=L",
+                                 "post_filter_c1_s16) has no LDR form"),
+                                ({"WG_FILTER_KERNEL": "post_filter_c1_s4_o16"}, "model=L",
+                                 "post_filter_c1_s4_o16, RGBA16F output) has no LDR form"),
+                                ({}, "model=L;output_filter=quality5",
+                                 "post_filter_c1_s4, output_filter=quality5) has no LDR form")):
+            with self.subTest(env=env, options=opts):
+                self.assertEqual(first(opts, hdr=0, env=env), why + tail)
+                hdr_got = first(opts, hdr=1, env=env)   # HDR: Model M's output stage takes the filter kernels
+                if env:
+                    self.assertEqual(hdr_got, "create ok model L")
+                else:   # (the output_filter options need Model M's own post paths: refused for Model L before)
+                    self.assertTrue(hdr_got.startswith("ERR create: output_filter="), hdr_got)
+        self.assertTrue(first("model=L;output_filter=quality9", hdr=0).startswith("ERR create: "))   # refused before
+        got = first("model=L;output_filter=quality9", hdr=0, flags=("--backend=3",), manifest=self.own_ports())
+        self.assertTrue(got.startswith("ERR create: Model L"), got)
+        # the default: l_post_filter_ldr on the default filter's grid (O 120 x 72: 3 x 5 workgroups of 64 lanes)
+        for backend in ("hip", "d3d12"):
+            with self.subTest(default=backend):
+                kw = dict(flags=("--backend=3",), manifest=self.own_ports()) if backend == "d3d12" else {}
+                t = FT.Trace(run("model=L", frames=2, build_files=FT.SHIPPING, hdr=0, **kw))
+                self.assertEqual(t.create, "create ok model L")
+                for f in t.frames:
+                    flt = [ln for ln in f["launches"] if ln.kernel == "l_post_filter_ldr"]
+                    self.assertEqual(len(flt), 1)
+                    self.assertEqual((flt[0].grid, flt[0].block), (cdiv(120, 40) * cdiv(cdiv(72, 2), 8), 64))
+                    self.assertEqual(flt[0].args[:2], [f["names"]["post.display"], f["names"]["filter.out"]])
+                    self.assertEqual(flt[0].args[2:6], [str((3 * 120 + 1) // 2), str((3 * 72 + 1) // 2), "120", "72"])
 
 
 class Refusals(unittest.TestCase):
@@ -575,9 +860,8 @@ class Refusals(unittest.TestCase):
         # Model L's reconstruction is its own kernel: Model M's post kernels are not chosen for it
         self.assertTrue(run("model=L", env={"WG_POST_KERNEL": "post_recon2_r"})[0].startswith(
             "ERR create: Model L: its reconstruction is l_post_recon"))
-        # LDR colour: Model L's LDR reconstruction kernel is not written yet (refused, never Model M's post instead)
-        self.assertTrue(run("model=L", hdr=0)[0].startswith(
-            "ERR create: Model L: LDR colour (WgRtConfig.hdr = 0) needs Model L's LDR reconstruction kernel"))
+        # LDR colour: Model L's LDR reconstruction (test_no_model_m_post_route traces it)
+        self.assertEqual(run("model=L", hdr=0)[0], "create ok model L")
 
     def test_model_data(self):
         d = tempfile.mkdtemp(prefix="wg_lf_")

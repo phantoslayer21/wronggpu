@@ -84,23 +84,47 @@ def control_cases(kernel, rng):
 TOKENS = [(8, 12), (18, 34), (4, 4), (34, 50), (3, 5), (2, 9)]
 
 
-def _project_blob(rng, rows, frags):
+def _project_blob(rng, rows, frags, scale=0.2, bias_scale=0.5):
     """Projection blob: bias tile vector (`rows` floats), then `frags` fragments of 256 FP8 bytes."""
-    return rng.normal(0, 0.5, rows).astype(np.float32).tobytes() + fp8_encode(q8(rng.normal(0, 0.2, frags * 256))).tobytes()
+    return (rng.normal(0, bias_scale, rows).astype(np.float32).tobytes() +
+            fp8_encode(q8(rng.normal(0, scale, frags * 256))).tobytes())
+
+
+# FP8 codes the network does not produce but the kernels' conversions must treat as HIP does: both NaN codes, +-448,
+# +-0, subnormals
+SPECIAL_FP8 = np.array([0x7f, 0xff, 0x7e, 0xfe, 0x00, 0x80, 0x01, 0x81, 0x07, 0x87], np.uint8)
+# (weight, bias) scales of the projection cases: normal; large (sums past 448 and past FP16's 65504: the clamps,
+# infinities); tiny (FP16 subnormal and zero results)
+PROJECT_SCALES = [(0.2, 0.5), (24.0, 400.0), (2e-3, 1e-4)]
+
+
+def _fp8_map_special(rng, n, special):
+    """_fp8_map, with special FP8 codes in a tenth of the bytes when `special`."""
+    q = np.frombuffer(_fp8_map(rng, n), np.uint8).copy()
+    if special:
+        pick = rng.random(q.size) < 0.1
+        q[pick] = rng.choice(SPECIAL_FP8, int(pick.sum()))
+    return q.tobytes()
 
 
 def project_cases(kernel, rng):
     """l_project_gather: x [2 th][2 tw][32] -> features [th][tw][64] (blob enc0.project: 64 bias rows, 4 x 8 fragments).
-    l_dec_project: z [th][tw][64] -> y [2 th][2 tw][32] (blob dec0.project: 128 bias rows, 8 x 4 fragments)."""
+    l_dec_project: z [th][tw][64] -> y [2 th][2 tw][32] (blob dec0.project: 128 bias rows, 8 x 4 fragments).
+    Every token grid at the three PROJECT_SCALES, every other case with special FP8 codes in the input."""
     cases = []
-    for (th, tw) in TOKENS:
+    for ti, (th, tw) in enumerate(TOKENS):
         ntok = th * tw
         npx = 4 * ntok
-        if kernel == "l_project_gather":
-            args = [("buf", _fp8_map(rng, npx * 32)), ("out", ntok * 64), ("buf", _project_blob(rng, 64, 32))]
-        else:
-            args = [("buf", _fp8_map(rng, ntok * 64)), ("out", npx * 32), ("buf", _project_blob(rng, 128, 32))]
-        cases.append({"kernel": kernel, "grid": -(-ntok // 128), "block": 256, "args": args + [("u32", tw), ("u32", th)]})
+        for si, (s, b) in enumerate(PROJECT_SCALES):
+            special = (ti + si) % 2 == 1
+            if kernel == "l_project_gather":
+                args = [("buf", _fp8_map_special(rng, npx * 32, special)), ("out", ntok * 64),
+                        ("buf", _project_blob(rng, 64, 32, s, b))]
+            else:
+                args = [("buf", _fp8_map_special(rng, ntok * 64, special)), ("out", npx * 32),
+                        ("buf", _project_blob(rng, 128, 32, s, b))]
+            cases.append({"kernel": kernel, "grid": -(-ntok // 128), "block": 256,
+                          "args": args + [("u32", tw), ("u32", th)]})
     return cases
 
 
@@ -209,7 +233,11 @@ POST_CASES = [(24, 16, 54, 36, False, "random", False), (31, 17, 70, 38, False, 
               (20, 12, 60, 36, False, "random", False), (33, 19, 99, 57, True, "random", False),
               (17, 11, 38, 25, False, "extreme_c", False), (16, 12, 16, 12, False, "offset_0.1", False),
               (16, 12, 16, 12, True, "offset_0.05", False), (40, 24, 40, 24, False, "random", False),
-              (42, 26, 63, 39, False, "random", True), (26, 18, 52, 36, False, "specials", False)]
+              (42, 26, 63, 39, False, "random", True), (26, 18, 52, 36, False, "specials", False),
+              (30, 18, 45, 27, False, "random", "extreme"), (22, 14, 50, 32, False, "specials", "extreme")]
+# expo "extreme": the exposure pair's e_prev far from 1 (the history divisions' quotients near the FP32 range ends,
+# FP32 denormal or infinite results) or not a positive normal number (NaN, negative, infinite)
+EXTREME_E_PREV = (1e-30, 3e-38, 1e30, 3e38, float("nan"), -1.5, float("inf"), 2.0 ** -126)
 POST_SLACK = 64   # sentinel bytes after each output: neither back end may write them
 
 
@@ -260,6 +288,8 @@ def post_cases(kernel, rng):
         data = RP.post_device_inputs(x)
         if expo:   # the exposures come from the pointer; the by-value fields hold other values
             ev = np.array([prm.e, 0.0 if rng.random() < 0.5 else prm.e_prev], np.float32)
+            if expo == "extreme":
+                ev[1] = EXTREME_E_PREV[int(rng.integers(len(EXTREME_E_PREV)))]
             prm.e, prm.e_prev = float(rng.uniform(0.5, 2.0)), float(rng.uniform(0.5, 2.0))
         n_hist, n_red = dw * dh * 8, max(4, (dw // 2) * (dh // 2) * 4)
         n_disp = RP.display_bytes(dw, dh)
@@ -271,7 +301,7 @@ def post_cases(kernel, rng):
         defined = [np.concatenate([np.ones(n_hist, bool), np.zeros(POST_SLACK, bool)]),
                    np.concatenate([red_def, np.zeros(POST_SLACK, bool)]),
                    np.concatenate([disp_def.reshape(-1), np.zeros(POST_SLACK, bool)])]
-        if kernel == "l_post_recon_p12":
+        if kernel.startswith("l_post_recon_p12"):   # l_post_recon_p12, l_post_recon_p12_ldr
             data = dict(data, **_pack12(data))
         args = [("null",) if data[k] == b"" else ("buf", data[k])
                 for k in ("color", "A", "B", "C", "hist_prev", "m_near", "m_center", "m_far")]
@@ -282,6 +312,34 @@ def post_cases(kernel, rng):
         cases.append({"kernel": kernel, "co": "l_post.co", "grid": RP.recon_grid(dw, dh), "block": 256, "args": args,
                       "defined": defined, "label": f"{rw}x{rh}->{dw}x{dh} {kind}" + (" expo" if expo else "")
                       + (" reset" if reset else "")})
+    return cases
+
+
+def _cdiv(a, b):
+    return -(-a // b)
+
+
+def filter_ldr_cases(kernel, rng):
+    """l_post_filter_ldr (l_post.co): display (3 FP16 planes of D, row pitch display_pitch(dw): the LDR display image,
+    unpacked 11 / 11 / 10-bit codes h(code RN32(1 / N))), out (O, 3 x f32), dw, dh, ow, oh, dec_scale, expo (neither
+    read; passed as 0 and null). D = recon_size(O) for odd and even O, small (every tap clamped) to wide; every output
+    byte defined."""
+    from clean.l.reference import recon as R
+    from clean.l.reference import table as T
+    from clean.runner import post as RP
+    cases = []
+    for (ow, oh) in ((40, 24), (37, 23), (8, 6), (81, 45), (128, 72)):
+        dw, dh = T.recon_size(ow, oh)
+        pitch = RP.display_pitch(dw)
+        codes = np.stack([rng.integers(0, int(n) + 1, (dh, dw)) for n in R.LDR_CODE_MAX], 0).astype(np.float64)
+        planes = np.zeros((3, dh, pitch), np.float16)
+        planes[:, :, :dw] = R.ldr_unpack(codes.transpose(1, 2, 0)).transpose(2, 0, 1).astype(np.float16)
+        n_out = 3 * ow * oh * 4
+        cases.append({"kernel": kernel, "co": "l_post.co", "grid": _cdiv(ow, 40) * _cdiv(_cdiv(oh, 2), 8), "block": 64,
+                      "args": [("buf", planes.tobytes()), ("out", n_out + POST_SLACK), ("u32", dw), ("u32", dh),
+                               ("u32", ow), ("u32", oh), ("u32", 0), ("null",)],
+                      "defined": [np.concatenate([np.ones(n_out, bool), np.zeros(POST_SLACK, bool)])],
+                      "label": f"D {dw}x{dh} -> O {ow}x{oh}"})
     return cases
 
 
@@ -314,9 +372,12 @@ def enc_direct_cases(kernel, rng):
 KINDS = {"l_linear_32_32_relu": linear_cases, "l_linear_32_32_f16": linear_cases,
          "l_project_gather": project_cases, "l_dec_project": project_cases, "l_coef": coef_cases,
          "l_coef_pack12": coef_cases, "lev/input_encoder": enc_cases, "l_post_recon": post_cases,
-         "l_post_recon_p12": post_cases, "lev/input_encoder_direct": enc_direct_cases,
+         "l_post_recon_p12": post_cases, "l_post_recon_ldr": post_cases, "l_post_recon_p12_ldr": post_cases,
+         "l_post_filter_ldr": filter_ldr_cases, "lev/input_encoder_direct": enc_direct_cases,
          "swin_block_c64_add_ex_nc": dec1_ex_cases}
 CONTROL_KINDS = {"swin_block_c96_nc": control_cases}
+# kernels that get a negative control of their own (besides the run's first case)
+NEG_KERNELS = ("l_post_recon", "l_post_recon_p12", "l_post_recon_ldr", "l_post_recon_p12_ldr", "l_post_filter_ldr")
 CO = "l_ops.co"
 
 
@@ -401,7 +462,9 @@ def run(build, rocm, seeds, kernels, kinds=None):
     kinds = kinds or dict(KINDS, **CONTROL_KINDS)
     cdir = os.path.join(build, "replay-ops")
     os.makedirs(cdir, exist_ok=True)
-    lines, hip_out, neg = [], {}, None
+    # negative controls: the first case (with a grid of 4 or more) again with half its workgroups, for the first kernel
+    # and for every kernel of NEG_KERNELS (each LDR form its own)
+    lines, hip_out, neg, negs = [], {}, None, {}
     for kernel in kernels:
         for si, seed in enumerate(seeds):
             rng = np.random.default_rng(seed)
@@ -413,8 +476,9 @@ def run(build, rocm, seeds, kernels, kinds=None):
                     with open(os.path.join(cdir, f"{name}.hip.o{oi}"), "wb") as fh:
                         fh.write(data)
                 lines += replay_lines(name, case, cdir)
-                if neg is None and case["grid"] >= 4:
-                    neg = name
+                if case["grid"] >= 4 and (neg is None or (kernel in NEG_KERNELS and kernel not in negs)):
+                    neg = neg or name
+                    negs.setdefault(kernel, name)
                     lines += replay_lines(name, case, cdir, grid=case["grid"] // 2, prefix="negative_")
     with open(os.path.join(cdir, "cases.txt"), "w", newline="\n") as f:
         f.write("\n".join(lines))
@@ -452,14 +516,18 @@ def run(build, rocm, seeds, kernels, kinds=None):
             c["outputs"].append(compare(got, want, defined[oi] if defined else None))
         c["identical"] = all(o["identical"] for o in c["outputs"])
         res["cases"].append(c)
-    caught = None
-    if neg:
-        wants, defined = hip_out[neg][1], hip_out[neg][2]
-        outs = [compare(read(os.path.join(cdir, f"negative_{neg}.o{oi}")), w, defined[oi] if defined else None)
+    def negative(nm):
+        wants, defined = hip_out[nm][1], hip_out[nm][2]
+        outs = [compare(read(os.path.join(cdir, f"negative_{nm}.o{oi}")), w, defined[oi] if defined else None)
                 for oi, w in enumerate(wants)]
         caught = all(o["differ"] >= 0 for o in outs) and any(not o["identical"] for o in outs)
-        res["negative_control"] = {"case": neg, "half_grid": True, "caught": caught,
-                                   "differ": sum(max(o["differ"], 0) for o in outs)}
+        return {"case": nm, "half_grid": True, "caught": caught, "differ": sum(max(o["differ"], 0) for o in outs)}
+
+    caught = None
+    if neg:
+        res["negative_control"] = negative(neg)
+        res["negative_controls"] = {k: negative(nm) for k, nm in negs.items()}
+        caught = res["negative_control"]["caught"] and all(v["caught"] for v in res["negative_controls"].values())
     res["per_kernel"] = {k: {"cases": sum(c["kernel"] == k for c in res["cases"]),
                              "identical": sum(c["identical"] for c in res["cases"] if c["kernel"] == k),
                              "bytes": sum(o["bytes"] for c in res["cases"] if c["kernel"] == k for o in c["outputs"]),
@@ -468,14 +536,16 @@ def run(build, rocm, seeds, kernels, kinds=None):
                          for k in kernels}
     res["pass"] = r.returncode == 0 and caught is True and all(v["cases"] > 0 and v["identical"] == v["cases"]
                                                                for v in res["per_kernel"].values())
-    if "l_post_recon" in kernels and "l_post_recon_p12" in kernels:
-        # The same cases (same seeds) on both coefficient forms: on HIP, the pack12 kernel's raw output bytes must be
-        # l_post_recon's.
-        pairs = [(n, n.replace("l_post_recon_", "l_post_recon_p12_", 1)) for n in hip_out
-                 if hip_out[n][0] == "l_post_recon"]
-        same = sum(hip_out[a][1] == hip_out[b][1] for a, b in pairs if b in hip_out)
-        res["p12_equals_base_on_hip"] = {"cases": len(pairs), "identical": same}
-        res["pass"] = res["pass"] and same == len(pairs) > 0
+    for sfx in ("", "_ldr"):
+        if "l_post_recon" + sfx in kernels and "l_post_recon_p12" + sfx in kernels:
+            # The same cases (same seeds) on both coefficient forms: on HIP, the pack12 kernel's raw output bytes must
+            # be l_post_recon's (HDR and LDR).
+            base = "l_post_recon" + sfx
+            pairs = [(n, n.replace(base + "_", "l_post_recon_p12" + sfx + "_", 1)) for n in hip_out
+                     if hip_out[n][0] == base]
+            same = sum(hip_out[a][1] == hip_out[b][1] for a, b in pairs if b in hip_out)
+            res["p12_equals_base_on_hip" + sfx] = {"cases": len(pairs), "identical": same}
+            res["pass"] = res["pass"] and same == len(pairs) > 0
     return res
 
 

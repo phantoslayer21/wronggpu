@@ -17,7 +17,9 @@ if(WIN32)
 else()
   enable_language(ASM)  # resources.S: the embedded payload (tools/make_payload.py)
 endif()
-# MinGW's _mingw.h (reached through <functional> in context.h before base.h) would otherwise fix Windows 7 as the target.
+# MinGW's headers set _WIN32_WINNT to Windows 7 as soon as a standard header comes first (context.h includes
+# <functional> before base.h), which hides the Windows 8+ declarations the core uses (FILE_ID_INFO in convert_ignore.cpp):
+# the whole build gets base.h's Windows 10 instead. MSVC's headers leave it unset.
 if(MINGW)
   add_compile_definitions(_WIN32_WINNT=0x0A00 WINVER=0x0A00)
 endif()
@@ -63,6 +65,26 @@ else()
   set(PRESET_K_MAP_ARGS)
   set(PRESET_K_MAP_FILE)
   set(PRESET_K_DEFINITION WRONGGPU_PRESET_K=0)
+endif()
+# The Model L choice in the launcher (src/wizard_policy.h): ON only for a release whose front end and runtime run Model L.
+option(WRONGGPU_MODEL_L "The Model L choice in the launcher (model=L, the OptiScaler entry); OFF = no model setting" OFF)
+if(WRONGGPU_MODEL_L)
+  set(MODEL_L_DEFINITION WRONGGPU_MODEL_L=1)
+else()
+  set(MODEL_L_DEFINITION WRONGGPU_MODEL_L=0)
+endif()
+# The Model K choice in the launcher (src/wizard_policy.h): a development build for a front end with WG_MODEL_K and a runtime
+# with Model K, never for a release that players get (K is off by default). `model` becomes a setting with the value k
+# (m|k, m|k|l with WRONGGPU_MODEL_L) and `set <game> model=K` writes wronggpu.ini's model=K and OptiScaler's UpscalerIndex.
+# It needs Preset K's converter map and model folder (WRONGGPU_PRESET_K).
+option(WRONGGPU_MODEL_K "The Model K choice in the launcher (model=K, the OptiScaler entry; needs WRONGGPU_PRESET_K); OFF = no Model K choice" OFF)
+if(WRONGGPU_MODEL_K)
+  if(NOT WRONGGPU_PRESET_K)
+    message(FATAL_ERROR "WRONGGPU_MODEL_K needs WRONGGPU_PRESET_K=ON (Model K's converter map and model folder).")
+  endif()
+  set(MODEL_K_DEFINITION WRONGGPU_MODEL_K=1)
+else()
+  set(MODEL_K_DEFINITION WRONGGPU_MODEL_K=0)
 endif()
 option(WRONGGPU_DIRECT_ROUTE "The direct FSR route in the installer (the wizard's advanced choice, /DIRECTFSR, a silent install without /OPTISCALER=); OFF = OptiScaler is required" ON)
 if(WRONGGPU_DIRECT_ROUTE)
@@ -172,6 +194,8 @@ add_library(wg_core STATIC
   src/wg_core/rrconfig.cpp src/wg_core/convert_ignore.cpp)
 target_include_directories(wg_core PUBLIC src)
 target_compile_definitions(wg_core PUBLIC ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION})
+# (private: model-choice-tests compiles profile.cpp with the Model L choice on, against this library)
+target_compile_definitions(wg_core PRIVATE ${MODEL_L_DEFINITION} ${MODEL_K_DEFINITION})
 if(WRONGGPU_TESTING)
   target_compile_definitions(wg_core PUBLIC WRONGGPU_TESTING)
 endif()
@@ -226,7 +250,7 @@ add_dependencies(WrongGPU WrongGPU-Restore)
 endif()
 if(WRONGGPU_TESTING)
   add_executable(wizard-policy-tests tests/wizard_policy_tests.cpp)
-  target_compile_definitions(wizard-policy-tests PRIVATE ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION})
+  target_compile_definitions(wizard-policy-tests PRIVATE ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION} ${MODEL_L_DEFINITION} ${MODEL_K_DEFINITION})
 endif()
 # wg_core's unit tests (strings and paths, install record, wronggpu.ini keys, the log file; no game, payload or GPU).
 add_executable(wg-core-tests tests/wg_core_tests.cpp)
@@ -235,6 +259,7 @@ target_link_libraries(wg-core-tests PRIVATE wg_core)
 # job files, the update reply, the game environment; no game, payload or GPU).
 add_executable(launcher-core-tests tests/launcher_core_tests.cpp)
 target_link_libraries(launcher-core-tests PRIVATE wg_core)
+target_compile_definitions(launcher-core-tests PRIVATE ${MODEL_L_DEFINITION} ${MODEL_K_DEFINITION})
 # The coexistence tests (M2): fingerprints on synthetic bytes, the proxy picker, byte-exact OptiScaler.ini edits and the
 # inikey journal, the OptiScaler tab's key rules, the record's inikey and coexist lines, the log warnings.
 add_executable(coexist-core-tests tests/coexist_tests.cpp)
@@ -251,7 +276,24 @@ add_test(NAME source-size COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_D
 # The launcher's words never claim the same output as the original ("bit for bit", "identical", "(native)": rr-notes.md)
 add_test(NAME wording COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_wording.py)
 add_test(NAME wg-core COMMAND wg-core-tests)
+# The Model L choice (profile.cpp with WRONGGPU_MODEL_L on, whatever this build's switch): the model setting, wronggpu.ini's
+# model item and OptiScaler's UpscalerIndex. Its own copy of profile.cpp comes first; the rest is wg_core.
+add_executable(model-choice-tests tests/model_choice_tests.cpp src/wg_core/profile.cpp)
+target_compile_definitions(model-choice-tests PRIVATE WRONGGPU_MODEL_L=1)
+target_link_libraries(model-choice-tests PRIVATE wg_core)
+# The Model K choice (profile.cpp with WRONGGPU_MODEL_K on, whatever this build's switch, so that CI, which keeps Model K off,
+# runs it): with the Model L choice too (the setting m|k|l: K, and an L and an M control) and without (m|k). Each has its own
+# copy of profile.cpp.
+add_executable(model-choice-k-tests tests/model_choice_k_tests.cpp src/wg_core/profile.cpp)
+target_compile_definitions(model-choice-k-tests PRIVATE WRONGGPU_MODEL_K=1 WRONGGPU_MODEL_L=1)
+target_link_libraries(model-choice-k-tests PRIVATE wg_core)
+add_executable(model-choice-k-only-tests tests/model_choice_k_tests.cpp src/wg_core/profile.cpp)
+target_compile_definitions(model-choice-k-only-tests PRIVATE WRONGGPU_MODEL_K=1 WRONGGPU_MODEL_L=0)
+target_link_libraries(model-choice-k-only-tests PRIVATE wg_core)
 add_test(NAME launcher-core COMMAND launcher-core-tests)
+add_test(NAME model-choice COMMAND model-choice-tests)
+add_test(NAME model-choice-k COMMAND model-choice-k-tests)
+add_test(NAME model-choice-k-only COMMAND model-choice-k-only-tests)
 add_test(NAME coexist-core COMMAND coexist-core-tests)
 add_test(NAME convert-ignore COMMAND convert-ignore-tests)
 if(NOT WIN32)
@@ -312,12 +354,16 @@ if(NOT WIN32)
              --exe $<TARGET_FILE:WrongGPU> --jpeg-tool $<TARGET_FILE:jpeg-linux-tests>
              --work ${CMAKE_CURRENT_BINARY_DIR}/linux-ui-tests)
     set_tests_properties(linux-ui PROPERTIES TIMEOUT 900)
-    if(MOCK_PAYLOAD_WORK)
+    if(MOCK_PAYLOAD_WORK AND NOT WRONGGPU_PRESET_K)
       # the launcher's verbs suite (tests/run_launcher_tests.py) against this binary: it needs the test map and stand-in payload
       # the build embeds only when it made them itself; its checks that only mean something on Windows say so and are skipped
       add_test(NAME launcher-native COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_launcher_tests.py
                --native-linux $<TARGET_FILE:WrongGPU> --work ${CMAKE_CURRENT_BINARY_DIR}/launcher-native-tests)
       set_tests_properties(launcher-native PROPERTIES TIMEOUT 1800)
+    elseif(MOCK_PAYLOAD_WORK)
+      # the suite's checks are written for a Model M only build (CI's launcher build): with Preset K, every OptiScaler install
+      # leaves the plugin's wronggpu-asi.ini after an uninstall (install.cpp SeedAsiSelection), which they do not expect
+      message(STATUS "launcher-native: not added (the launcher suite needs -DWRONGGPU_PRESET_K=OFF)")
     endif()
     # the window layer's message handling with SDL events pushed by the test (display scale change, a batch of keys, text in an edit,
     # WM_QUIT order, posts from a thread, capture, PeekMessageW's filters); SDL's offscreen driver, no window opens
@@ -346,7 +392,7 @@ if(WRONGGPU_TESTING)
 endif()
 if(WIN32)
 target_include_directories(WrongGPU PRIVATE ${GEN})
-target_compile_definitions(WrongGPU PRIVATE ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION})
+target_compile_definitions(WrongGPU PRIVATE ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION} ${MODEL_L_DEFINITION} ${MODEL_K_DEFINITION})
 target_link_libraries(WrongGPU PRIVATE wg_ui wg_core wgc_core comctl32 shell32 ole32 oleaut32 uuid advapi32 user32 gdi32 gdiplus dwmapi uxtheme d2d1 d3d11 dxgi dwrite windowscodecs uiautomationcore)
 if(MSVC)
   target_compile_options(WrongGPU PRIVATE /Zi)

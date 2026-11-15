@@ -13,6 +13,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "win32_posix_internal.h"
@@ -500,6 +501,208 @@ void Folders() {
     SetEnvironmentVariableW(L"WGLAYERVAR", nullptr);
     check(GetEnvironmentVariableW(L"WgLayerVar", b, 16) == 0 && GetLastError() == ERROR_ENVVAR_NOT_FOUND, "a variable removed: not found");
 }
+// Attributes, times, deleting and truncating through a handle (what the core's PinnedFile does to the files it owns).
+ULONGLONG Q(const FILETIME& f) { return ((ULONGLONG)f.dwHighDateTime << 32) | f.dwLowDateTime; }
+ULONGLONG FileTimeOfUnix(long long sec) { return (ULONGLONG)(sec + 11644473600LL) * 10000000ull; }
+bool Exists(const std::wstring& p) { return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES; }
+HANDLE OpenFor(const std::wstring& p, DWORD access, DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE) {
+    return CreateFileW(p.c_str(), access, share, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+}
+BOOL SetDisposition(HANDLE h, DWORD flags) {
+    FILE_DISPOSITION_INFO_EX ex{flags};
+    return SetFileInformationByHandle(h, FileDispositionInfoEx, &ex, sizeof(ex));
+}
+
+void ErrorValues() {
+    static_assert(ERROR_TOO_MANY_LINKS == 1142 && ERROR_FILE_CORRUPT == 1392 && ERROR_READ_FAULT == 30, "the Win32 values");
+    static_assert(FileBasicInfo == 0 && FileDispositionInfo == 4 && FileDispositionInfoEx == 21, "the FILE_INFO_BY_HANDLE_CLASS values");
+    static_assert(sizeof(FILE_BASIC_INFO) == 40, "FILE_BASIC_INFO is four 8-byte times and the attributes, padded to 8");
+    check(true, "constants");
+}
+
+void BasicInfo() {
+    const std::wstring p = In(L"basic.txt");
+    Put(p, "x");
+    HANDLE h = OpenFor(p, GENERIC_READ | FILE_WRITE_ATTRIBUTES);
+    FILE_BASIC_INFO b{};
+    b.FileAttributes = FILE_ATTRIBUTE_READONLY;
+    check(h != INVALID_HANDLE_VALUE && SetFileInformationByHandle(h, FileBasicInfo, &b, sizeof(b)), "basic info: read-only set through a handle");
+    check((GetFileAttributesW(p.c_str()) & FILE_ATTRIBUTE_READONLY) != 0, "  and the name reports it");
+    FILE_BASIC_INFO got{};
+    check(GetFileInformationByHandleEx(h, FileBasicInfo, &got, sizeof(got)) && (got.FileAttributes & FILE_ATTRIBUTE_READONLY), "  and so does the handle");
+    b.FileAttributes = 0;   // 0: the attributes are left as they are
+    check(SetFileInformationByHandle(h, FileBasicInfo, &b, sizeof(b)) && (GetFileAttributesW(p.c_str()) & FILE_ATTRIBUTE_READONLY), "attributes of 0 change nothing");
+    b.FileAttributes = FILE_ATTRIBUTE_NORMAL;
+    check(SetFileInformationByHandle(h, FileBasicInfo, &b, sizeof(b)) && !(GetFileAttributesW(p.c_str()) & FILE_ATTRIBUTE_READONLY), "FILE_ATTRIBUTE_NORMAL clears read-only");
+    check(GetFileInformationByHandleEx(h, FileBasicInfo, &got, sizeof(got)) && !(got.FileAttributes & FILE_ATTRIBUTE_READONLY), "  the handle sees it clear");
+    // times: set, then 0 leaves them
+    std::memset(&b, 0, sizeof(b));
+    b.LastWriteTime.QuadPart = (LONGLONG)FileTimeOfUnix(1000000000);
+    b.LastAccessTime.QuadPart = (LONGLONG)FileTimeOfUnix(1000000500);
+    check(SetFileInformationByHandle(h, FileBasicInfo, &b, sizeof(b)), "basic info: times set");
+    FILETIME ca{}, ac{}, wr{};
+    check(GetFileTime(h, &ca, &ac, &wr) && Q(wr) == FileTimeOfUnix(1000000000) && Q(ac) == FileTimeOfUnix(1000000500), "  the write and access times are what was set");
+    check(GetFileInformationByHandleEx(h, FileBasicInfo, &got, sizeof(got)) && (ULONGLONG)got.LastWriteTime.QuadPart == FileTimeOfUnix(1000000000), "  and basic info reads the write time back");
+    std::memset(&b, 0, sizeof(b));
+    b.LastWriteTime.QuadPart = (LONGLONG)FileTimeOfUnix(1000001000);   // access time 0: unchanged
+    check(SetFileInformationByHandle(h, FileBasicInfo, &b, sizeof(b)) && GetFileTime(h, &ca, &ac, &wr) && Q(wr) == FileTimeOfUnix(1000001000) && Q(ac) == FileTimeOfUnix(1000000500),
+          "a time of 0 is left unchanged");
+    std::memset(&b, 0, sizeof(b));
+    check(SetFileInformationByHandle(h, FileBasicInfo, &b, sizeof(b)) && GetFileTime(h, &ca, &ac, &wr) && Q(wr) == FileTimeOfUnix(1000001000), "an all-zero basic info changes nothing");
+    check(!GetFileInformationByHandleEx(h, FileBasicInfo, &got, sizeof(got) - 8) && GetLastError() == ERROR_INSUFFICIENT_BUFFER, "basic info into a buffer that is too small");
+    CloseHandle(h);
+    check(!SetFileInformationByHandle(h, FileBasicInfo, &b, sizeof(b)) && GetLastError() == ERROR_INVALID_HANDLE, "a closed handle: invalid handle");
+}
+
+void Disposition() {
+    // classic: the name goes when the handle closes, not before
+    std::wstring p = In(L"classic.txt");
+    Put(p, "abc");
+    HANDLE h = OpenFor(p, GENERIC_READ | DELETE);
+    FILE_DISPOSITION_INFO d{TRUE};
+    check(h != INVALID_HANDLE_VALUE && SetFileInformationByHandle(h, FileDispositionInfo, &d, sizeof(d)), "classic disposition set");
+    check(Exists(p), "  the file is still there while the handle is open");
+    CloseHandle(h);
+    check(!Exists(p), "  and gone once it is closed");
+    Put(p, "abc");
+    h = OpenFor(p, GENERIC_READ | DELETE);
+    SetFileInformationByHandle(h, FileDispositionInfo, &d, sizeof(d));
+    d.DeleteFile = FALSE;
+    check(SetFileInformationByHandle(h, FileDispositionInfo, &d, sizeof(d)), "classic disposition taken back");
+    CloseHandle(h);
+    check(Exists(p), "  the file stays");
+    h = OpenFor(p, GENERIC_READ);
+    d.DeleteFile = TRUE;
+    check(!SetFileInformationByHandle(h, FileDispositionInfo, &d, sizeof(d)) && GetLastError() == ERROR_ACCESS_DENIED, "a handle without DELETE access cannot ask for delete");
+    CloseHandle(h);
+    SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_READONLY);
+    h = OpenFor(p, GENERIC_READ | DELETE);
+    check(!SetFileInformationByHandle(h, FileDispositionInfo, &d, sizeof(d)) && GetLastError() == ERROR_ACCESS_DENIED, "classic disposition on a read-only file: access denied");
+    CloseHandle(h);
+    check(Exists(p), "  and it stays");
+    SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_NORMAL);
+    DeleteFileW(p.c_str());
+
+    // POSIX semantics: the name is free at once, the open handle still reads
+    p = In(L"posix.txt");
+    Put(p, "abc");
+    h = OpenFor(p, GENERIC_READ | DELETE, FILE_SHARE_READ);
+    check(h != INVALID_HANDLE_VALUE && SetDisposition(h, FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS), "POSIX disposition set");
+    check(!Exists(p) && GetLastError() == ERROR_FILE_NOT_FOUND, "  the name is gone at once");
+    char buf[8]{}; DWORD got = 0;
+    check(ReadFile(h, buf, sizeof(buf), &got, nullptr) && got == 3 && std::string(buf, got) == "abc", "  the handle still reads the file");
+    check(Put(p, "new"), "  the name can be used again");
+    CloseHandle(h);
+    check(Slurp(p) == "new", "  and closing the old handle leaves the new file alone");
+    DeleteFileW(p.c_str());
+
+    // IGNORE_READONLY_ATTRIBUTE
+    p = In(L"posixro.txt");
+    Put(p, "abc");
+    SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_READONLY);
+    h = OpenFor(p, GENERIC_READ | DELETE);
+    check(!SetDisposition(h, FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS) && GetLastError() == ERROR_ACCESS_DENIED && Exists(p),
+          "POSIX disposition on a read-only file: access denied, file kept");
+    check(SetDisposition(h, FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE) && !Exists(p),
+          "  with IGNORE_READONLY_ATTRIBUTE the read-only file is deleted");
+    CloseHandle(h);
+
+    // Ex without POSIX semantics is the classic delete; without the DELETE flag it takes a request back
+    p = In(L"exclassic.txt");
+    Put(p, "abc");
+    h = OpenFor(p, GENERIC_READ | DELETE);
+    check(SetDisposition(h, FILE_DISPOSITION_FLAG_DELETE) && Exists(p), "Ex disposition without POSIX semantics: the file waits for the close");
+    check(SetDisposition(h, FILE_DISPOSITION_FLAG_DO_NOT_DELETE), "  flags 0 take the request back");
+    CloseHandle(h);
+    check(Exists(p), "  the file stays");
+    DeleteFileW(p.c_str());
+}
+
+void EndOfFile() {
+    const std::wstring p = In(L"eof.txt");
+    Put(p, "0123456789");
+    HANDLE h = OpenFor(p, GENERIC_READ | GENERIC_WRITE);
+    LARGE_INTEGER pos{}, size{};
+    pos.QuadPart = 4;
+    check(h != INVALID_HANDLE_VALUE && SetFilePointerEx(h, pos, nullptr, FILE_BEGIN) && SetEndOfFile(h) && GetFileSizeEx(h, &size) && size.QuadPart == 4, "SetEndOfFile at 4 cuts the file to 4 bytes");
+    check(Slurp(p) == "0123", "  and keeps the first four");
+    pos.QuadPart = 10;
+    check(SetFilePointerEx(h, pos, nullptr, FILE_BEGIN) && SetEndOfFile(h) && GetFileSizeEx(h, &size) && size.QuadPart == 10, "SetEndOfFile at 10 extends the file to 10 bytes");
+    check(Slurp(p) == std::string("0123\0\0\0\0\0\0", 10), "  and the new bytes are zero");
+    CloseHandle(h);
+    h = OpenFor(p, GENERIC_READ);
+    check(!SetEndOfFile(h) && GetLastError() == ERROR_ACCESS_DENIED, "SetEndOfFile on a handle opened for reading: access denied");
+    CloseHandle(h);
+    check(!SetEndOfFile(h) && GetLastError() == ERROR_INVALID_HANDLE, "SetEndOfFile on a closed handle: invalid handle");
+}
+
+void PinnedPattern() {
+    // What PinnedFile::Open does: a probe with attribute access only and every sharing mode, then the real handle with
+    // read, delete and attribute access and FILE_SHARE_READ only, while the probe is still open.
+    for (const bool readOnly : {false, true}) {
+        const std::wstring p = In(L"pin.txt");
+        Put(p, "pinned");
+        if (readOnly) SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_READONLY);
+        HANDLE probe = CreateFileW(p.c_str(), FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                                   FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        check(probe != INVALID_HANDLE_VALUE, "pinning: the probe opens, even on a read-only file");
+        BY_HANDLE_FILE_INFORMATION pi{}, bi{};
+        check(GetFileInformationByHandle(probe, &pi) && ((pi.dwFileAttributes & FILE_ATTRIBUTE_READONLY) != 0) == readOnly, "  the probe sees the read-only bit as it is");
+        FILE_BASIC_INFO b{};
+        b.FileAttributes = FILE_ATTRIBUTE_NORMAL;
+        check(SetFileInformationByHandle(probe, FileBasicInfo, &b, sizeof(b)), "  the probe clears it (attribute access is enough)");
+        HANDLE real = CreateFileW(p.c_str(), GENERIC_READ | DELETE | FILE_WRITE_ATTRIBUTES | GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                  FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        check(real != INVALID_HANDLE_VALUE, "  the real handle opens while the probe is open (attribute access takes no part in sharing)");
+        check(real != INVALID_HANDLE_VALUE && GetFileInformationByHandle(real, &bi) && bi.dwVolumeSerialNumber == pi.dwVolumeSerialNumber && bi.nFileIndexHigh == pi.nFileIndexHigh &&
+                  bi.nFileIndexLow == pi.nFileIndexLow && (pi.nFileIndexHigh | pi.nFileIndexLow) != 0,
+              "  both handles name the same file (volume serial and index)");
+        check(CreateFileW(p.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr) == INVALID_HANDLE_VALUE && GetLastError() == ERROR_SHARING_VIOLATION,
+              "  but a writer is still kept out by FILE_SHARE_READ only");
+        check(CreateFileW(p.c_str(), FILE_READ_ATTRIBUTES, 0, nullptr, OPEN_EXISTING, 0, nullptr) != INVALID_HANDLE_VALUE, "  and an attribute-only open takes no part in sharing either");
+        if (real != INVALID_HANDLE_VALUE) {
+            check(SetDisposition(real, FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE) && !Exists(p), "  and it can delete the file");
+            CloseHandle(real);
+        }
+        CloseHandle(probe);
+    }
+}
+
+void LinksAndReparse() {
+    const std::wstring a = In(L"nl-a.txt"), l = In(L"nl-b.txt"), s = In(L"nl-sym.txt");
+    Put(a, "linked");
+    BY_HANDLE_FILE_INFORMATION bi{};
+    HANDLE h = OpenFor(a, FILE_READ_ATTRIBUTES);
+    check(h != INVALID_HANDLE_VALUE && GetFileInformationByHandle(h, &bi) && bi.nNumberOfLinks == 1, "a file with one name reports 1 link");
+    CloseHandle(h);
+    check(CreateHardLinkW(l.c_str(), a.c_str(), nullptr), "a hard link");
+    h = OpenFor(a, FILE_READ_ATTRIBUTES);
+    check(h != INVALID_HANDLE_VALUE && GetFileInformationByHandle(h, &bi) && bi.nNumberOfLinks == 2, "a hard-linked file reports 2 links");
+    CloseHandle(h);
+    h = OpenFor(l, FILE_READ_ATTRIBUTES);
+    check(h != INVALID_HANDLE_VALUE && GetFileInformationByHandle(h, &bi) && bi.nNumberOfLinks == 2, "  by either name");
+    CloseHandle(h);
+    check(CreateSymbolicLinkW(s.c_str(), a.c_str(), 0), "a symbolic link to a file");
+    h = CreateFileW(s.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    check(h != INVALID_HANDLE_VALUE && GetFileInformationByHandle(h, &bi) && (bi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT), "FILE_FLAG_OPEN_REPARSE_POINT: a symbolic link reports the reparse attribute");
+    FILE_BASIC_INFO fb{};
+    check(h != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(h, FileBasicInfo, &fb, sizeof(fb)) && (fb.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT), "  in basic info too");
+    CloseHandle(h);
+    h = OpenFor(s, FILE_READ_ATTRIBUTES);
+    check(h != INVALID_HANDLE_VALUE && GetFileInformationByHandle(h, &bi) && !(bi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && bi.nNumberOfLinks == 2,
+          "without the flag the link is followed: the target's attributes, no reparse point");
+    CloseHandle(h);
+    DeleteFileW(s.c_str()); DeleteFileW(l.c_str()); DeleteFileW(a.c_str());
+}
+
+void ProcessEnd() {
+    void* p = std::malloc(16);
+    check(GetProcessHeap() != nullptr && HeapFree(GetProcessHeap(), 0, p), "HeapFree frees what the process heap hands out");
+    const pid_t pid = fork();
+    if (pid == 0) ExitProcess(7);
+    int status = 0;
+    check(pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 7, "ExitProcess(7) ends the process with exit code 7");
+}
 }  // namespace
 
 int main() {
@@ -524,6 +727,13 @@ int main() {
     FinishedChildren();
     NotAvailable();
     Folders();
+    ErrorValues();
+    BasicInfo();
+    Disposition();
+    EndOfFile();
+    PinnedPattern();
+    LinksAndReparse();
+    ProcessEnd();
     std::remove(regFile.c_str());
     std::error_code ec;
     std::string posixTmp(Tmp.begin(), Tmp.end());

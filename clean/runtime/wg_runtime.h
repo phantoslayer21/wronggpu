@@ -127,6 +127,11 @@ WG_RT_API const char* wg_rt_error(void* rt);
 /* Test path: copy this frame's inputs (dense [rh][rw] arrays: RGB float32, depth float32, motion float32 x 2). */
 WG_RT_API int wg_rt_upload_inputs(void* rt, int rw, int rh, const float* color_rgb, const float* depth,
                                   const float* motion);
+/* The same with the colour as dense RGBA float32 [rh][rw][4]. Model K: the fourth value is the colour input's alpha,
+ * which its output alpha follows (wg_rt_upload_inputs gives model K alpha 1, the value of a colour without an alpha
+ * channel). Model M ignores the fourth value. */
+WG_RT_API int wg_rt_upload_inputs_rgba(void* rt, int rw, int rh, const float* color_rgba, const float* depth,
+                                       const float* motion);
 /* Test path for motion vectors at output resolution (spec 03 draft 4 "Motion at output resolution", spec 06 section
  * 3; the runtime must have been created with the runtime option motion_outres=original): the motion of the region
  * M = mw x mh (the output size) as dense rows, a texel being two FP16 (wide = 0) or two f32 (wide = 1). Every later
@@ -144,6 +149,9 @@ WG_RT_API int wg_rt_info(void* rt, WgRtFrameInfo* info);
 /* A named buffer of the last frame (names in clean/FORMATS.md): device address and size in bytes. */
 WG_RT_API int wg_rt_buffer(void* rt, const char* name, uintptr_t* ptr, size_t* bytes);
 WG_RT_API int wg_rt_download(void* rt, uintptr_t ptr, void* dst, size_t bytes);
+/* Diagnostics (the frame checks' sentinels): the allocation of a named buffer (as wg_rt_buffer; also before the first
+   frame) set to the byte value, from the buffer's start to the allocation's end. */
+WG_RT_API int wg_rt_fill(void* rt, const char* name, int value);
 /* The reconstruction size D in use (spec 01, or O with recon_output / WG_RECON_SIZE=output). */
 WG_RT_API int wg_rt_recon_size(void* rt, int* dw, int* dh);
 /* Where the model data came from: "model.wgcm" or "raw". */

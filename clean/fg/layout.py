@@ -15,10 +15,10 @@ zero area.
 Network 2 ("net2"): two small encoder-decoders (sub-nets A and B), 25 layers, all 3 x 3, each a weight blob of
 9 * in * out float16 followed by a bias blob of out float16 (50 blobs).
 
-The blob order below is the order the library uploads them, which is also their data order. OPEN (not delivered yet;
-see FORMATS.md): the in-blob axis order of the weights (tap, input and output channel, any tiling), which launch reads
-which blob, whether net1's blob 2 is a 1 x 1 or a 2 x 2 convolution, the grid sizes of both networks relative to the
-output, and the converter map itself. Nothing here guesses them.
+The blob order below is the order the library uploads them, which is also their data order. The order of the weights
+inside each blob is given by the converter map (data/fg.v1.map.json, revision v1.1: natural order by explicit offsets;
+clean/fg/reference/natural.py). net1's blob 2 is a 1 x 1 convolution. OPEN (not delivered yet; see FORMATS.md): which
+launch reads which blob and the grid sizes of both networks relative to the output. Nothing here guesses them.
 """
 from dataclasses import dataclass
 
@@ -32,12 +32,12 @@ class Net1Layer:
     index: int       # 1-based, upload order
     out: int         # output channels (= distinct bias values)
     k: int           # taps * input channels
-    taps: object     # 9 (3 x 3), 1 (1 x 1), or None where the reading is OPEN
+    taps: int        # 9 (3 x 3) or 1 (1 x 1)
 
     @property
     def cin(self):
-        """Input channels, or None while the tap count is OPEN."""
-        return None if self.taps is None else self.k // self.taps
+        """Input channels."""
+        return self.k // self.taps
 
     @property
     def weight_elements(self):
@@ -79,6 +79,10 @@ class Net2Layer:
     cin: int         # stored input channels
     cin_used: int    # input channels that carry data (layer 1 of A stores 16, uses 10)
     out: int
+    # The grid the layer runs on, as the divisor d of the network grid W2 x H2 (1: W2, 2: W2/2, 4: W2/4, 8: W2/8);
+    # None where it is not given (sub-net A's last layer: OPEN).
+    level: object = None
+    upscaled: bool = False   # its output is upscaled 2x (bilinear) to the next level up
 
     @property
     def weight_elements(self):
@@ -104,7 +108,7 @@ class Net2Layer:
 def _net1():
     rows = [  # (out, K, taps)
         (32, 432, 9),     # 3 x 3, 48 -> 32 (level 0)
-        (64, 32, None),   # 32 -> 64: 1 x 1, or 2 x 2 over 8 channels (OPEN)
+        (64, 32, 1),      # 32 -> 64, 1 x 1 (map v1.1)
         (128, 576, 9),
         (128, 1152, 9),
         (256, 1152, 9),
@@ -125,13 +129,14 @@ def _net1():
 
 
 def _net2():
-    rows = [("A", 16, 10, 32), ("A", 32, 32, 32), ("A", 32, 32, 64)]
-    rows += [("A", 64, 64, 64)] * 8                              # the eight-layer block
-    rows += [("A", 64, 64, 96), ("A", 32, 32, 8)]
-    rows += [("B", 18, 18, 16), ("B", 16, 16, 32)]
-    rows += [("B", 32, 32, 32)] * 8                              # the eight-layer block
-    rows += [("B", 32, 32, 48), ("B", 16, 16, 8)]
-    return tuple(Net2Layer(i + 1, s, c, cu, o) for i, (s, c, cu, o) in enumerate(rows))
+    # (sub-net, in stored, in used, out, level divisor, output upscaled)
+    rows = [("A", 16, 10, 32, 2, False), ("A", 32, 32, 32, 4, False), ("A", 32, 32, 64, 8, False)]
+    rows += [("A", 64, 64, 64, 8, False)] * 8                    # the eight-layer block
+    rows += [("A", 64, 64, 96, 8, True), ("A", 32, 32, 8, None, False)]
+    rows += [("B", 18, 18, 16, 2, False), ("B", 16, 16, 32, 4, False)]
+    rows += [("B", 32, 32, 32, 4, False)] * 8                    # the eight-layer block
+    rows += [("B", 32, 32, 48, 4, True), ("B", 16, 16, 8, 1, False)]
+    return tuple(Net2Layer(i + 1, s, c, cu, o, lv, up) for i, (s, c, cu, o, lv, up) in enumerate(rows))
 
 
 NET1 = _net1()
@@ -158,6 +163,21 @@ def net1_bias_index(channel):
     """Element of copy 0 of an output channel's bias, relative to the bias area."""
     g, j = divmod(channel, NET1_BIAS_GROUP)
     return g * NET1_BIAS_GROUP * NET1_BIAS_COPIES + j
+
+
+def net2_macs_per_pixel(subnet, *, used_inputs=True, open_level=None):
+    """Multiply-adds of one sub-net per pixel of the network grid W2: each layer's 9 * in * out at its own grid
+    (divided by d * d). used_inputs: count only the input channels that carry data. open_level: the divisor to assume
+    for a layer whose level is OPEN (required when the sub-net has one). Computed, not measured."""
+    total = 0
+    for l in NET2:
+        if l.subnet != subnet:
+            continue
+        d = l.level if l.level is not None else open_level
+        if d is None:
+            raise ValueError("%s: level OPEN; pass open_level" % l.name)
+        total += 9 * (l.cin_used if used_inputs else l.cin) * l.out / (d * d)
+    return total
 
 
 def totals():

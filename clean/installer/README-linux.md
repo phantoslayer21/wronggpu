@@ -49,7 +49,7 @@ You need CMake 3.16+, Ninja, GCC 11+, Python 3, the development files of Cairo, 
 (static; most distributions do not ship it yet: `build-appimage.sh` builds it, and `-DCMAKE_PREFIX_PATH=<its install>`
 points CMake at one).
 
-    cmake -S clean/installer -B out/linux -G Ninja -DCMAKE_BUILD_TYPE=Release -DWRONGGPU_TESTING=ON -DCMAKE_PREFIX_PATH=<SDL3 install>
+    cmake -S clean/installer -B out/linux -G Ninja -DCMAKE_BUILD_TYPE=Release -DWRONGGPU_TESTING=ON -DWRONGGPU_PRESET_K=OFF -DCMAKE_PREFIX_PATH=<SDL3 install>
     cmake --build out/linux
     ctest --test-dir out/linux --output-on-failure
 
@@ -57,7 +57,9 @@ A `WRONGGPU_TESTING` build without `WRONGGPU_PAYLOAD_DIR` makes its own stand-in
 open a window: they run SDL on its `offscreen` driver and give the program a home, XDG folders and registry file of its
 own. Run it yourself the same way (`SDL_VIDEO_DRIVER=offscreen`) unless you want the real window. `linux-ui` renders the
 screens to PNG and drives the live window with scripted input; `launcher-native` runs the launcher's verbs suite
-(`tests/run_launcher_tests.py --native-linux`) against the binary.
+(`tests/run_launcher_tests.py --native-linux`) against the binary; like CI's launcher build it needs
+`-DWRONGGPU_PRESET_K=OFF`, and its two checks that fail on main's own launcher too (#219) are skipped while they fail
+(`tests/native_linux.py` `KNOWN_ON_MAIN`).
 
 ## Build the AppImage
 

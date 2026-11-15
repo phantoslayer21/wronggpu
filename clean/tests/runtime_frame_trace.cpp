@@ -71,16 +71,28 @@ struct Signature {
 };
 const Signature kSignatures[] = {
     {"input_encoder", "ppppppppppppE"},     // Model M's encoder and Model L's values (q in place of the features)
+    {"input_encoder_q20", "ppppppppppppE"},  // Model L's values, q in its 20-byte form (native D3D12, fusion le)
     {"coef_decoder", "ppppppppD"},          // Model M's decoder (also its pack12 form)
     {"swin_block_*", "ppppiiii"},           // Model M's blocks: x, skip, out, w, H, W, ox, oy
+    {"l_swin_block_c32_dec_coef12_nc", "ppppiiiippppii"},  // the decoder block with l_coef_pack12 folded in: then
+                                                           // A, C, latent, dec0.coef, rw, rh (native D3D12, fusion lc)
+    {"l_swin_block_c32_enc_lin_nc", "ppppiiiipp"},  // the encoder block with the linears as its prologue (fusion
+                                                    // le): x = q, then enc0.Win1, enc0.Win2
     {"l_swin_block_c32*", "ppppiiii"},      // Model L's blocks (clean/l/FORMATS.md)
     {"l_linear_32_32_relu", "pppi"},
     {"l_linear_32_32_f16", "pppi"},
+    {"l_linear_32_32_fused", "ppppi"},  // the two in one: q, x2, Win1, Win2, npix (native D3D12, fusion ll)
     {"l_project_gather", "pppii"},
     {"l_dec_project", "pppii"},
     {"l_coef", "ppppppD"},
     {"l_post_recon", "ppppppppppppPp"},  // Model M's post_recon arguments (clean/l/FORMATS.md step 5)
     {"l_coef_pack12", "ppppppD"},  // the same arguments (B unused)
+    {"l_post_recon_p12", "ppppppppppppPp"},  // the same arguments (A, C: pack12 images; B unused)
+    {"post_filter_c1_s4", "ppiiiiip"},  // display, out, dw, dh, ow, oh, dec_scale (its bits), exposure pair
+    {"l_post_recon_ldr", "ppppppppppppPp"},      // the LDR forms: the same arguments (the exposure pair not read)
+    {"l_post_recon_p12_ldr", "ppppppppppppPp"},
+    {"l_post_filter_ldr", "ppiiiiip"},           // post_filter_c1_s4's arguments (dec_scale, exposure pair not read)
+    {"l_post_filter_ldr_h", "ppiiiiipii"},       // plus pi (its bits) and the row pitch in bytes
 };
 
 const char* kinds_of(const std::string& kernel) {
