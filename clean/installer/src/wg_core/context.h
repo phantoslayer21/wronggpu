@@ -3,6 +3,7 @@
 // g_presetK, g_map, g_opti, g_noLibraryScan and the embedded payload table), the Ui callbacks of a long operation, the
 // log file and the model data folder. Written for this project.
 #pragma once
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -84,7 +85,11 @@ struct Context {
     wgc::LoadedMap fMap;
     wstring fMapError;
     OptiPackage opti;                    // the player's OptiScaler package (/OPTISCALER=, the wizard's choice)
-    bool noLibraryScan = false;          // /NOSCAN: the store libraries are not searched
+    // No search of the store libraries (#243). noScanAlways: this process was asked (--noscan, /NOSCAN, the window's); set once
+    // at start. noLibraryScan: what the searches read now (the AMD FSR 4 search, the other model); RunOp sets it per operation
+    // (noScanAlways or the operation's own noscan) and puts it back after, so a job's noscan never reaches the next job.
+    bool noScanAlways = false;
+    std::atomic<bool> noLibraryScan{false};
     // The launcher (build/launcher-design.md): one Apps & features entry for all games instead of one per game; the
     // HIP runtime is optional (D3D12 is the default executor on RX 9000; a missing HIP runtime is a warning); the
     // uninstaller written into each game is the small restorer the launcher embeds (WrongGPU-Restore.exe).

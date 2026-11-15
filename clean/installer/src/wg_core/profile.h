@@ -31,6 +31,19 @@ extern const SettingDef kSettings[];
 extern const size_t kSettingCount;
 const SettingDef* FindSetting(const string& key);
 
+// R1: every model runs on the Direct3D 12 runtime in a game; HIP is an explicit diagnostic (executor=hip in wronggpu.ini)
+// and the frame capture only. These choices exist on the HIP runtime only, so the launcher does not offer them on an RX
+// 9000-series card (it shows NotOnDx12Text() instead): executor=hip, the output filters Quality 5 and Quality 9, and the
+// sparkle guard. A profile or an ini that already holds one still starts the game: the runtime uses the default output
+// filter or turns the sparkle guard off, with one log line, and never starts HIP for it.
+bool NeedsHipRuntime(const string& key, const string& value);
+// executor=hip is not a game setting (R1: nothing in a game starts HIP; the diagnostic exists in developer builds only). A
+// profile.ini or a wronggpu.ini that holds it loses it when it is read (LoadProfile, ImportProfile; the next Apply writes
+// wronggpu.ini without it), and this sentence says so: install, repair and update log it.
+inline const wchar_t* const kRetiredHipNote =
+    L"executor=hip removed: HIP is a developer diagnostic, not a game setting; every model runs on Direct3D 12";
+const wchar_t* NotOnDx12Text();
+
 // Checks and normalises one value ("d3d12" -> "dx12", "0" -> "off", "0.50" -> "0.5"); false with *why when it is not
 // allowed.
 bool ValidateSetting(const SettingDef& d, const string& value, string* normal, wstring* why);

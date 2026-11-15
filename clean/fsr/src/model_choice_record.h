@@ -22,7 +22,8 @@
 //   model=<M|K|L>
 //   seq=<1..18446744073709551615>          (decimal digits only, overflow refused)
 //   source=<launcher|ffx|plugin>
-// each key exactly once, no other key, no spaces around '='. Writes: wgstate::WriteAtomic (a temporary file in the same
+// each key exactly once, no other key, no spaces around '='; the last line is WrongGPU's stamp (a comment,
+// wg_state.h Stamped) when the install has an id. Writes: wgstate::WriteStamped (a temporary file in the same
 // folder, written and flushed, then MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH), every step checked), tried up to 3
 // times. Readers take the lock too, so a reader never sees part of a record. A temporary file a crash left behind is
 // never read.
@@ -174,14 +175,16 @@ inline ReadResult ReadRecordFile(const std::filesystem::path& path, Record* out,
     return ParseRecord(text, out, why) ? ReadResult::Ok : ReadResult::Corrupt;
 }
 
-// The atomic replace of the record (wgstate::WriteAtomic: a temporary file in the same folder, flushed, then
-// MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH), every step checked; the temporary file deleted when a step fails), tried
-// up to `attempts` times, 20 ms apart. false with *why. Call it under the record's Lock.
+// The atomic replace of the record (wgstate::WriteStamped: WriteAtomic with WrongGPU's stamp line for this file and the
+// game's install id, so the launcher's uninstall knows the record as WrongGPU's; an install without an id: no stamp. A
+// temporary file in the same folder, flushed, then MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH), every step checked; the
+// temporary file deleted when a step fails), tried up to `attempts` times, 20 ms apart. false with *why. Call it under
+// the record's Lock. (The stamp is a comment line: ParseRecord skips it.)
 inline bool WriteRecordFile(const std::filesystem::path& path, const Record& r, std::string* why, int attempts = 3) {
     const std::string text = FormatRecord(r);
     wgstate::WriteResult w;
     for (int i = 0; i < attempts; ++i) {
-        w = wgstate::WriteAtomic(path.wstring(), text);
+        w = wgstate::WriteStamped(GameDirOf(path).wstring(), path.wstring(), text);
         if (w.ok) return true;
         if (i + 1 < attempts) Sleep(20);
     }

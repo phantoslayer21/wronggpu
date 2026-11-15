@@ -64,9 +64,10 @@ inline const GameNotice kGameNotices[] = {
 //
 // Install record: the plugin is a "copy" entry and the plugins folder (when new) a "dir" entry; OptiScaler.ini is
 // installed as a whole file with a backup of the player's, so an uninstall removes the plugin and its folder and
-// puts the player's OptiScaler.ini back byte for byte. The plugin's own files (wronggpu-asi.log, wronggpu-asi.ini:
-// the entry last selected) are written into the OptiScaler folder, named wronggpu-*. The install does not record them, so an
-// uninstall leaves them in place and lists them (UnrecordedRuntimeFiles).
+// puts the player's OptiScaler.ini back byte for byte. The plugin's own log (wronggpu-asi.log) is written into the
+// OptiScaler folder; the install does not record it, so an uninstall leaves it in place and lists it
+// (UnrecordedRuntimeFiles). Its settings file (wronggpu-asi.ini, the entry last selected) is one of the install's recorded
+// files in a Preset K build (AsiSelectionText below).
 // OptiScaler.ini keys for the plugin (entries of kOptiIni). Path=auto: OptiScaler's "plugins" folder next to itself.
 #define WRONGGPU_ASI_INI {"Plugins", "LoadAsiPlugins", "true"}, {"Plugins", "Path", "auto"},
 
@@ -78,16 +79,14 @@ inline bool OptiOnlyPayload(const std::wstring& rel) { return _wcsicmp(rel.c_str
 // The entry the plugin starts on (0.5.0, an installer with Preset K): the plugin's wronggpu-asi.ini in the OptiScaler
 // folder, in the plugin's own format (FormatSelection, clean/fsr/asi/asi_thunk.h). With the plugin hooked, its entry
 // decides over wronggpu.ini's model=, so without this file a Preset K install would start on Model M (the plugin's
-// default). Preset K: "selection=wronggpu-k" (WrongGPU (Model K)); Model M: "selection=wronggpu". Written after the
-// install succeeded and not recorded: it is one of the plugin's own files (wronggpu-*), which an uninstall leaves in place
-// and lists (UnrecordedRuntimeFiles; nothing proves it WrongGPU's), and which this write replaces on an update.
-inline void SeedAsiSelection(Context& ctx, const std::wstring& dir, bool presetK) {
-    const std::string text = std::string("; WrongGPU OptiScaler plugin: the entry last selected in OptiScaler's upscaler list\r\n"
-                                         "; (wronggpu or amd). Deleting this file selects WrongGPU.\r\nselection=") +
-                             (presetK ? "wronggpu-k" : "wronggpu") + "\r\n";
-    const std::wstring path = Join(dir, L"wronggpu-asi.ini");
-    WriteFileAtomic(path, text.data(), text.size());
-    LogLine(ctx, std::wstring(L"OptiScaler plugin: starts on WrongGPU (Model ") + (presetK ? L"K" : L"M") + L") (" + path + L")");
+// default). Preset K: "selection=wronggpu-k" (WrongGPU (Model K)); Model M: "selection=wronggpu". #219: installed as one of
+// the install's files (recorded with its hash, a file already there backed up), so an uninstall removes it while it is
+// unchanged and keeps it, listed, once the plugin's menu or the player changed it; an update keeps such a changed file's
+// bytes (install.cpp).
+inline std::string AsiSelectionText(bool presetK) {
+    return std::string("; WrongGPU OptiScaler plugin: the entry last selected in OptiScaler's upscaler list\r\n"
+                       "; (wronggpu or amd). Deleting this file selects WrongGPU.\r\nselection=") +
+           (presetK ? "wronggpu-k" : "wronggpu") + "\r\n";
 }
 // OptiScaler.ini for WrongGPU; FfxDx12SRPath (empty here) gets the full path of kOptiFrontEnd at install time.
 inline const OptiKey kOptiIni[] = {

@@ -113,11 +113,11 @@ def test_choice(t):
             "model convert --preset=K" in msgs, (rc, t.j.get("message"), msgs[:600], choice_record(b)))
     t.check("...the choice stays in profile.ini (model=k)", b"model=k\r\n" in profile_text(b))
     rc = t.run("uninstall", exe)
-    # A build with Preset K seeds the plugin's own settings file wronggpu-asi.ini on every OptiScaler install; an uninstall leaves
-    # it in place and lists it (optiscaler.h SeedAsiSelection), as it did before the K choice. Nothing else may differ.
+    # A build with Preset K seeds the plugin's own settings file wronggpu-asi.ini on every OptiScaler install; since #224 the
+    # install records it as WrongGPU's, and an uninstall removes it while nobody changed it (install.cpp). Nothing may differ.
     left = suite.diff(before, suite.snapshot(root))
-    t.check("uninstall: the game folder byte for byte as before the install, except the plugin's own wronggpu-asi.ini",
-            rc == 0 and left.startswith("bin/x64/wronggpu-asi.ini: absent -> ") and ";" not in left, (rc, left))
+    t.check("uninstall: the game folder byte for byte as before the install (the seeded wronggpu-asi.ini removed with it)",
+            rc == 0 and left == "", (rc, left))
 
 
 def main():
@@ -136,6 +136,7 @@ def main():
     d = os.path.join(os.path.abspath(a.work), "choice")
     shutil.rmtree(d, ignore_errors=True)
     os.makedirs(d)
+    __import__("launcher_isolation").self_test(d)  # (#243) first: no launcher call with a broken guard
     t = ml.T(os.path.abspath(a.launcher), d)
     t.model_path = t.model  # (test_choice replaces t.model with the Model M case, as the Model L script does)
     test_choice(t)

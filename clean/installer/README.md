@@ -29,9 +29,11 @@ payload file built with the front end) for every game and sets OptiScaler.ini `[
 `Path=auto` (the section is added when the player's ini has none). On the OptiScaler builds the plugin recognises,
 "WrongGPU" is then an entry of OptiScaler's main upscaler list and its default, and OptiScaler's FSR 3.X/4 entry is
 AMD's upscaler; on any other build the plugin changes nothing and WrongGPU stays the first entry of the FFX box.
-`Dx12Upscaler=fsr31`, `FfxDx12SRPath` and `UpscalerIndex=0` stay as before. Uninstall removes the plugin, its folder
-when the install made it, and its files (`wronggpu-asi.log`, `wronggpu-asi.ini` in the OptiScaler folder), and puts the
-player's OptiScaler.ini back. Tests: `test_asi_plugin`.
+`Dx12Upscaler=fsr31`, `FfxDx12SRPath` and `UpscalerIndex=0` stay as before. Uninstall removes the plugin and its folder
+when the install made it, and puts the player's OptiScaler.ini back. The plugin's starting entry `wronggpu-asi.ini` (a
+Preset K build writes it) is one of the install's recorded files (#219): an uninstall removes it while it is unchanged
+and keeps it, listed, once the plugin's menu or the player changed it (an update keeps such a file as it is). The
+plugin's log `wronggpu-asi.log` is not recorded and stays, listed. Tests: `test_asi_plugin`.
 Other setups' plugins (0.6.1, `ForeignPlugins`): `.asi` files in `plugins\`, `OptiScaler\plugins\` or `wronggpu-plugins\` that
 the install record doesn't name with that hash. In a Ray Reconstruction game WrongGPU's RR stays out by default (they may
 hook RR too; the result says so); with the player's OK (the window's question, `--switch-plugins`) they are moved aside
@@ -245,8 +247,9 @@ With the defaults nothing of this section changes the installer.
 - **What the launcher removes or overwrites: the file-ownership rule** (0.6.1; the restore, uninstall, repair, update, move
   out of a wrong folder and the state-folder cleanup; `src/wg_core/record.h`). In the game's folders, a file
   is deleted or overwritten only when its current bytes are WrongGPU's: the hash the install record says WrongGPU last
-  wrote there (every write of the launcher to `wronggpu.ini`, `OptiScaler.ini` and the RR plugin's settings updates that
-  hash). Nothing else proves it: not the file's name, not a file next to it, not an ini key, not "it is a log", not "the
+  wrote there (every write of the launcher to `OptiScaler.ini` updates that hash; `wronggpu.ini` and the RR plugin's
+  `WrongGPU\wronggpu.ini` are written once, by the install, and never rewritten after it: see the saved settings below).
+  Nothing else proves it: not the file's name, not a file next to it, not an ini key, not "it is a log", not "the
   install created that path". A file that is not in the record is not touched, whatever its name (`wronggpu-*`,
   `OptiScaler.log`, `fakenvapi.log`, ...).
   - **Two policies, stated here on purpose.** Files in WrongGPU's FSR slot that identify as WrongGPU (the version
@@ -267,8 +270,15 @@ With the defaults nothing of this section changes the installer.
     where a hash is known, its bytes are those. The backups the record lists go while they match the entry's hash; the
     previous version's files that `previous.txt` lists go while they match the hashes it states (a changed one stays and
     is listed); `owned-files.json` goes while it is byte for byte what WrongGPU makes of the record. The record,
-    `previous.txt`, `uninstall.exe`, `setup.log` and `profile.ini` carry no recorded hash and go by their fixed names (the one
-    place the rule is by name). The player's Engine.ini copy (`rr-config`) goes only through the Engine.ini revert. Any other
+    `previous.txt`, `uninstall.exe`, `setup.log` and `profile.ini` carry no recorded hash and go by their fixed names.
+    The saved settings `settings.ini` and `model-choice.ini` go only while their bytes carry WrongGPU's stamp: a last
+    line `; wronggpu-written <check>` whose check covers every byte before it, the file's own name and this install's id
+    (the record's `install-id`, kept by repair and update). WrongGPU stamps a state file it creates and keeps the stamp
+    only while nobody else changes the file. A file the player edited or made, a copy under another name (a temporary
+    file among them) or from another install stays and is listed. Repair and update keep them. A save never overwrites
+    a change made meanwhile: the file is held from the read to the move, and a change in the last moment refuses the save.
+    A failed install, repair or update takes back only what that run made (written down before each create); everything
+    else in the state folder stays and is listed. The player's Engine.ini copy (`rr-config`) goes only through the Engine.ini revert. Any other
     file stays, the folder stays with it, and the result lists what was left. The same applies when an install is moved
     out of a wrong folder. The shared folder `%LOCALAPPDATA%\WrongGPU` is not in a game's folder; see Uninstall.
   - **A settings file in a build without Preset K.** The plugin's `wronggpu-asi.ini` is rewritten (its `selection=wronggpu-k`
@@ -284,6 +294,23 @@ With the defaults nothing of this section changes the installer.
     any file); the game's FSR DLL, in the one step where WrongGPU's DLL is deleted and the game's file takes its name,
     is held until deleted and the move that follows creates the name only if free; the install, repair and update steps
     that write into the game folder and the Engine.ini edit that adds the line are not covered by this (tracked separately).
+  - **The saved settings** (#219; `clean/wgshared/include/wg_state.h`). Settings you change in the launcher or the in-game
+    menu are saved in `wronggpu-setup\settings.ini` and take precedence over `wronggpu.ini` (the FSR front end reads the
+    upscaler and its runtime option keys from there, the RR plugin `rr_*`). `wronggpu.ini` and `WrongGPU\wronggpu.ini`
+    keep the install's defaults and are the player's to edit; no launcher operation and no plugin rewrites them after the
+    install, so a save in the game never makes them look edited, and an uninstall after a save leaves nothing behind.
+    Every write of `settings.ini` takes the game's state lock (one named mutex per game folder, shared by the launcher,
+    the front end and the plugins) and replaces the file whole (`WriteAtomic`); a write that cannot take the lock or
+    cannot be made is reported, never silent (the launcher stops with "Settings not applied: ...", the RR menu logs
+    "not saved: ..."). An install from before #219 whose `WrongGPU\wronggpu.ini` differs from the record (an older
+    plugin's save or the player's edit) is the player's: its `rr_mode` and `rr_overlay` are copied into `settings.ini`
+    once and the file is kept.
+  - **Uninstall, repair and update refuse while WrongGPU is in use.** For the whole operation the launcher holds the
+    record's WrongGPU binaries (`.dll`, `.asi`) open for writing and deleting (`OperationGuard`); a binary the game has
+    loaded, or another program has open without sharing writes (antivirus, a backup tool), cannot be opened that way, so
+    the operation stops before anything changes: "Nothing was changed: WrongGPU's files are in use by the game or another
+    program (for example antivirus). Close the game and try again (<file>)." A binary the operation replaces or creates
+    is renamed in complete and held at once; the old one is deleted through its handle.
   - **Roll back** holds every payload file it changes through one handle (as above), compares its bytes with the hash the
     record says WrongGPU installed, keeps the current files for a later update by copying them out through those handles
     into a new swap folder, and then overwrites through them. The earlier files are held and hashed too, all of them before
@@ -449,12 +476,13 @@ Basic tier: `wronggpu` (on | off: `[fsr] upscaler = network | amd`), `executor` 
 original), `sparkle_guard` (off | on | a rate in (0, 1)), `fps_overlay` (keep | on | off: OptiScaler's
 `[Menu] ShowFps`, written only when that key exists in the game's OptiScaler.ini). On the game page Use WrongGPU is in view; Runs on, Output filter, Pre-exposure and Sparkle guard are under
 "Advanced settings (4)", shown when one of them is off its default, unsaved or changed outside the launcher (`AdvancedWanted`). Every value is checked before
-anything is written. `wronggpu.ini` gets only what differs from the defaults: the managed runtime items are removed
-from `runtime_options` (and from lines of their own, which the front end appends) and the non-default ones appended
-in a fixed order, one line without spaces; other items, comments, unknown keys and sections stay. A value in the
-files that differs from both its default and the profile is an outside edit (Keep / Revert). After every install,
-update and repair the profile is written into the files again; the record learns the new hashes of `wronggpu.ini`
-and `OptiScaler.ini`, so an uninstall can still prove they are WrongGPU's.
+anything is written. The front end's settings go into `wronggpu-setup\settings.ini` (#219): `upscaler` and every
+managed runtime key, defaults too, so they decide over `wronggpu.ini`, which keeps the install's defaults and is not
+rewritten (the front end puts the state's keys over the file's `runtime_options`, last value wins). The Model L/K
+choice is not one of these keys (`model-choice.ini`). A value in the effective settings that differs from both its
+default and the profile is an outside edit (Keep / Revert). After every install, update and repair the profile is
+written again (`settings.ini`, `OptiScaler.ini`); the record learns the new hash of `OptiScaler.ini`, so an uninstall
+can still prove it is WrongGPU's.
 
 **Record v2** (`WRONGGPU-RECORD 2`, `src/wg_core/record.*`): the v1 lines plus `payload`, `proxy` and one `owner` line
 per action (`wg`, `wg-optibundle`, `adopted`, `moved`); action lines keep their five fields, so a 0.5.x uninstaller
@@ -931,6 +959,39 @@ Windows (the Wine run was not repeated for them):
 - The HIP check against mock runtimes: gfx1201 accepted, gfx1200 "not supported yet", gfx1100 refused, missing or
   not a HIP runtime; `LLVM_PATH` removed for the child (the mock fails when it sees it); the newest ROCm folder
   (7.10 before 7.2) tried first.
+
+**The tests never read the PC's own game libraries** (#243). Every read of a store's metadata goes through one place
+(`util.h` `LibraryAccess` / `LibraryRegistryAccess`). That covers Steam's library list and app manifests (also Play's Steam
+app id and the display name), Epic's manifests (also Play's Epic app name), the GOG registry, Steam's art cache, and every
+walk of a library game's folder (`FindFilesNamed`).
+- A `WRONGGPU_TESTING` build with `WRONGGPU_TEST_LIBRARIES` set takes its store libraries from that folder only (each
+  sub-folder a game; set but empty: none). It reads nothing outside the folder that holds it, the test run's own folder, and
+  no store registry key. The check is on the real path too: a path whose resolved form differs (a junction or link on the
+  way), a reparse point, a file with a second name (a hard link) and a test folder that itself resolves elsewhere are
+  refused.
+- Such a build logs "library access: <path>" (or "... refused: <path> (<why>)") to `WRONGGPU_TEST_ACCESS_LOG` before every
+  read: each walked folder and each file it opens. A read whose line cannot be written is refused (fail closed). A new log
+  starts with "run <WRONGGPU_TEST_RUN_ID>", and every start of the launcher or the restorer writes a "process" line.
+  Release builds read none of these variables.
+- `--noscan` (CLI, every verb; `apply --noscan` for the job too), `/NOSCAN` and the window's no-scan keep every library search
+  away from the store libraries, the AMD FSR 4 search and the other-model search included. An operation's own noscan (a
+  job's) holds for that operation only, never for the next job of a batch.
+- `/S /NOSCAN /FSR4` and `/S /NOSCAN /LIST` search no library; the report says "libraries not searched (/NOSCAN)".
+
+Every runner (launcher, coexistence, Model L / K, convert-ignore, installer) sets these variables to its work folder and a
+new run id; it never creates the access log itself (native installer runs need a `WRONGGPU_TESTING` build). Each
+runs the guard's self-test (`tests/launcher_isolation.py` `self_test`) before any program call, and stops the run if the
+guard is broken. Every launcher and installer call, raw ones and elevated jobs included, is checked by `check_isolation`.
+The run stops, loudly, on:
+- a read outside the work folder (also its `\\?\` and UNC forms);
+- a store registry read;
+- a missing or unreadable access log, one that does not start with this run's id, or a call that added no line to it;
+- no access at all where a call was meant to scan (the guard's sensitivity);
+- a search line of the main log that names a path outside the work folder.
+
+The `[isolation-verbs]` section runs install, repair, update, uninstall, the window's refresh, a batch (a noscan job, then a
+normal one) and `/FSR4` / `/LIST`, with and without no-scan, against a non-empty test library. The 0.5.1 baseline installer
+predates all this and runs only with `--run-old-baseline`, in a fully redirected sandbox.
 
 On Windows: `python tests\run_installer_tests.py --prepare-only` writes the mock payload and the synthetic map; build
 the installer from them with CMake (`-DWRONGGPU_PAYLOAD_DIR=... -DWRONGGPU_MAP=...`) and run

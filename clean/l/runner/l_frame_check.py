@@ -92,7 +92,11 @@ OUTPUT = (120, 72)
 # and on the first frame; both parities on every size
 SEQUENCE = [((96, 64), False), ((96, 64), False), ((96, 64), True), ((96, 64), False), ((96, 64), False),
             ((80, 48), False), ((80, 48), False), ((80, 48), False), ((77, 45), False), ((77, 45), True),
-            ((77, 45), False)]
+            ((77, 45), False), ((77, 45), False), ((77, 45), False)]
+# frames whose colour alternates dark and bright blocks of 8 columns (the dark ones scaled by 2^-10; blocks, not single
+# columns, so that the 4 x 4 filters keep both levels), so that one wave of the post kernels holds lanes on both sides
+# of a per-lane branch (e.g. l_dec's polynomial / exponential split); same size as the frame before (no reset)
+MIXED_FRAMES = (11, 12)
 PRE_EXPOSURE = 1.25
 DEFAULT_L_MAP = os.path.join(ROOT, "data", "preset-L.v1.map.json")
 
@@ -188,9 +192,14 @@ def prepare(build, rocm, model=None, map_path=None):
 
 # ---- --run (GPU) ----------------------------------------------------------------------------------------------------
 
-def frame_inputs(rng, rw, rh, reset, special=True):
+def frame_inputs(rng, rw, rh, reset, special=True, index=None):
     from clean.reference import encoder as En
     x = En.random_inputs(rng, rw=rw, rh=rh, fw=-(-rw // 32) * 32, fh=-(-rh // 32) * 32, special=special)
+    if index in MIXED_FRAMES:   # dark blocks of 8 columns (exact power-of-two scaling of the colour channels)
+        c = np.array(x["color"], copy=True)
+        dark = (np.arange(c.shape[1]) // 8) % 2 == 1
+        c[:, dark, :3] = c[:, dark, :3] * c.dtype.type(2.0 ** -10)
+        x["color"] = c
     return {"color": x["color"], "depth": x["depth"], "motion": x["motion"], "mv_scale": x["mv_scale"],
             "jitter": x["jitter"], "exposure": 1.0, "pre_exposure": PRE_EXPOSURE, "reset": reset}
 
@@ -348,7 +357,7 @@ def run_d3d12(build, special=True, stages=False):
             rng = np.random.default_rng(SEED)
             frames = []
             for i, ((rw, rh), reset) in enumerate(SEQUENCE):
-                fr = frame_inputs(rng, rw, rh, reset, special)
+                fr = frame_inputs(rng, rw, rh, reset, special, index=i)
                 fill_sentinels(p, SENTINELS[config], i == 0)
                 out = p.frame(fr, debug=True)
                 frames.append({"inputs": fr, "out": out, "raw": raw_outputs(p)})
@@ -553,7 +562,7 @@ def run(build, rocm, special=True):
             rng = np.random.default_rng(SEED)
             frames = []
             for i, ((rw, rh), reset) in enumerate(SEQUENCE):
-                fr = frame_inputs(rng, rw, rh, reset, special)
+                fr = frame_inputs(rng, rw, rh, reset, special, index=i)
                 fill_sentinels(p, SENTINELS[config], i == 0)
                 out = p.frame(fr, debug=True)
                 frames.append({"inputs": fr, "out": out, "raw": raw_outputs(p)})

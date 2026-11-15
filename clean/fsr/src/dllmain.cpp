@@ -54,6 +54,18 @@ HMODULE g_self = nullptr;
 std::once_flag g_initOnce;
 FrontEnd* g_frontEnd = nullptr;
 bool g_hosted = false;  // loaded under another name by an upscaler mod (OptiScaler) as its FidelityFX upscaler
+// wronggpu.ini as it is on disk now (FrontEnd::Platform::readWronggpuIni). A named class, not a lambda that captures the
+// path by copy: with MSVC's /Zc:lambda (on with /permissive-, as in CI) a lambda whose capture copy throws terminates the
+// process instead of unwinding; the same copy in a class constructor unwinds normally (async_create.h DeviceRelease).
+struct WronggpuIniReader {
+    std::wstring path;
+    explicit WronggpuIniReader(const std::wstring& p) : path(p) {}
+    std::string operator()() const {
+        std::string text;
+        wgstate::ReadBytes(path, &text);
+        return text;
+    }
+};
 
 std::once_flag g_originalOnce;
 OriginalApi g_original;
@@ -177,6 +189,8 @@ FrontEnd& Get() {
         p.logBytes = [] { return L().Bytes(); };
         p.resourceInfo = &D3D12ResourceInfo;
         p.timer = &StartTimer;
+        p.retainDevice = &RetainDevice;
+        p.releaseDevice = &ReleaseDevice;
         p.deviceLost = [](void* device) {
             return device && static_cast<ID3D12Device*>(device)->GetDeviceRemovedReason() != S_OK;
         };
@@ -251,11 +265,7 @@ FrontEnd& Get() {
             const std::filesystem::path record =
                 wgchoice::RecordPathIn(slash == std::wstring::npos ? std::wstring(L".") : ini.substr(0, slash));
             p.choiceRecord = record;
-            p.readWronggpuIni = [ini] {  // the upgrade migration reads wronggpu.ini's model item under the state lock
-                std::string text;
-                wgstate::ReadBytes(ini, &text);
-                return text;
-            };
+            p.readWronggpuIni = WronggpuIniReader(ini);  // the upgrade migration reads wronggpu.ini's model item under the state lock
             if (g_hosted) {
                 SetAsiChoiceRecord(record.wstring());
                 SetHostIniPollModels(false);  // the host's stored index is no model choice (the record decides)

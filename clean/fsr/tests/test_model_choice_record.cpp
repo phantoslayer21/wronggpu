@@ -108,6 +108,36 @@ int TmpFiles(const Folder& f) {
     return n;
 }
 
+// An install with an id (the install record's install-id line, #224): every write of the record carries WrongGPU's stamp
+// for model-choice.ini and that id (wg_state.h WriteStamped), so the launcher's uninstall knows the record as WrongGPU's;
+// the stamp is a comment line the parser skips. Another install's id, or the file under another name: not stamped for it.
+void TestStampedRecord() {
+    Folder f("stamp");
+    const std::string id = "0123456789abcdef0123456789abcdef";
+    {
+        std::ofstream o(f.dir / kStateFolder / "install.record", std::ios::binary);
+        o << "WRONGGPU-RECORD 2\r\ninstall-id\t" << id << "\r\n";
+    }
+    Record after;
+    std::string why;
+    CHECK(RecordChoice(f.record(), 'L', Source::Launcher, &after, &why) == Outcome::Written);
+    std::string bytes;
+    CHECK(wgstate::ReadBytes(f.record().wstring(), &bytes));
+    CHECK(wgstate::StampedByWrongGPU(bytes, "model-choice.ini", id));
+    CHECK(!wgstate::StampedByWrongGPU(bytes, "model-choice.ini", "fedcba9876543210fedcba9876543210"));
+    CHECK(!wgstate::StampedByWrongGPU(bytes, "settings.ini", id));
+    Record r;
+    CHECK(ReadRecordFile(f.record(), &r, &why) == ReadResult::Ok && r.model == 'L' && r.seq == 1);
+    // the next choice: still stamped, the seq grows (the stamp line is not read as part of the record)
+    CHECK(RecordChoice(f.record(), 'K', Source::Ffx, &after, &why) == Outcome::Written && after.seq == 2);
+    CHECK(wgstate::ReadBytes(f.record().wstring(), &bytes) && wgstate::StampedByWrongGPU(bytes, "model-choice.ini", id));
+    CHECK(ReadRecordFile(f.record(), &r, &why) == ReadResult::Ok && r.model == 'K' && r.seq == 2 && r.source == Source::Ffx);
+    // without an install id (no install record): written without a stamp, as before
+    fs::remove(f.dir / kStateFolder / "install.record");
+    CHECK(RecordChoice(f.record(), 'M', Source::Plugin, &after, &why) == Outcome::Written);
+    CHECK(wgstate::ReadBytes(f.record().wstring(), &bytes) && bytes.find(wgstate::kStampPrefix) == std::string::npos);
+}
+
 void TestChoicesInTurn() {
     Folder f;
     Record r, after;
@@ -486,6 +516,7 @@ int main(int argc, char** argv) {
 #endif
     TestStrictFormat();
     TestChoicesInTurn();
+    TestStampedRecord();
     TestCorruptAndEnd();
     TestMigration();
 #ifdef _WIN32

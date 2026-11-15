@@ -18,6 +18,7 @@
 #include <string>
 
 #include "../../runtime/device_d3d12.h"
+#include "../../runtime/rdna4_win.h"
 #include "../../runtime/rdna4.h"
 
 int main(int argc, char** argv) {
@@ -45,7 +46,7 @@ int main(int argc, char** argv) {
     DXGI_ADAPTER_DESC1 desc{};
     char n[256] = {};
     if (SUCCEEDED(a->GetDesc1(&desc))) WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, n, sizeof n - 1, nullptr, nullptr);
-    if (wgrt::rdna4_adapter(desc.VendorId, (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0, n)) {
+    if (wgrt::rdna4_identity(wgrt::read_adapter_identity(desc.AdapterLuid))) {  // the driver's ids (rdna4_win.h)
       adapter = a;
       name = n;
       break;

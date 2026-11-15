@@ -20,6 +20,9 @@
 //     WG_CREATE_MOTION_OUTPUT_RES), WG_TEST_MOTIONFMT=rg16f|rg32f, WG_TEST_PI (pre-exposure).
 //   test_interop_d3d12.exe <runtime> asyncsim "<options>" <serial|ideal|pipe|inline|game|net> [frames] [pre] [post] [iters]
 //     A simulated game frame on the DIRECT queue and the network (executor=dx12) in its list or on a COMPUTE queue.
+//   test_interop_d3d12.exe <runtime> matrix "<options naming the model>" [output heights, default 1080,1440,2160]
+//     R1 / H2: every usual upscaler-mode ratio x output size x declared maximum x HDR / LDR gets a default-executor context and a
+//     frame: each must be taken by the D3D12 executor (no create refusal, no HIP line); see case_matrix.
 //   test_interop_d3d12.exe <runtime> hipswitch "<Model M options>" "<Model K options>"
 //     Creates, dispatches, destroys M -> K -> M in one process and verifies the HIP DLL stays loaded between them.
 //   test_interop_d3d12.exe <runtime> hipleak "<options A>" ["<options B>" | -] [cycles] [frames] [MiB per cycle] [hold] [thread]
@@ -1783,6 +1786,104 @@ int debug_messages(Gpu& g, const char* when) {
   return errors;
 }
 
+// "matrix" "<options>" [outputs]: R1 / H2. No supported context may reach the create refusal (the D3D12 executor refusing a
+// context: one warning line, no context, the front end's own upscaler keeps the game). Every launcher-reachable shape of a
+// default-executor context is created on this device and given a frame: the usual upscaler-mode render ratios (DLAA 1.0, Quality
+// 0.667, Balanced 0.58, Performance 0.5, Ultra Performance 0.333) of each output size (`outputs`: a comma list of heights,
+// default 1080,1440,2160), the declared maximum render size both as the game usually gives it (a little above the render
+// size) and equal to the output (as Cyberpunk declares it), HDR (RGBA16F output) and LDR (RGBA8 output). Each context must
+// log "network runtime ready: executor dx12" and none of "could not take this context", "does not take this frame",
+// "about to start the HIP runtime", "network runtime ready: executor hip" or "the HIP executor runs"; its frame must be WG_OK. No `executor` key is given: the
+// default rule (D3D12 on an RX 9000 card) is what is tested. The options name the model (a synthetic model for K). With
+// hip_switch=on in the options (R1: ignored for every model) each context must log the one "hip_switch=on is ignored" line; with executor=hip and / or capture_dir=... in the options
+// (R1: diagnostic keys, ignored by a release build of the library) the one "ignored: diagnostic key, release build" line each.
+bool case_matrix(Gpu& g, const char* dll, const std::string& options, const std::string& outputs) {
+  struct Mode {
+    const char* name;
+    double ratio;
+  };
+  const Mode modes[] = {{"DLAA", 1.0}, {"Quality", 0.667}, {"Balanced", 0.58}, {"Performance", 0.5}, {"UltraPerformance", 0.333}};
+  std::vector<UINT> heights;
+  for (size_t pos = 0; pos <= outputs.size();) {
+    size_t end = outputs.find(',', pos);
+    if (end == std::string::npos) end = outputs.size();
+    if (end > pos) heights.push_back((UINT)std::atoi(outputs.substr(pos, end - pos).c_str()));
+    pos = end + 1;
+  }
+  int contexts = 0, refused = 0;
+  const bool switch_on = options.find("hip_switch=on") != std::string::npos;  // R1: ignored, one line, no HIP
+  // R1: executor=hip and capture_dir in a release build of the library: ignored, one line each, still D3D12 (the case then
+  // fails on a developer build, which runs them, as it should)
+  const bool hip_key = options.find("executor=hip") != std::string::npos;
+  const bool cap_key = options.find("capture_dir=") != std::string::npos;
+  for (const UINT oh : heights) {
+    const UINT ow = oh * 16 / 9;
+    for (const Mode& m : modes) {
+      for (const bool hdr : {true, false}) {
+        Scene s;
+        s.ow = ow, s.oh = oh;
+        s.rw = (UINT)(ow * m.ratio + 0.5), s.rh = (UINT)(oh * m.ratio + 0.5);
+        s.tw = s.mw = s.rw, s.th = s.mh = s.rh, s.rx = s.ry = 0;
+        if (!hdr) s.outRes = s.outFmt = DXGI_FORMAT_R8G8B8A8_UNORM;
+        s.make(g);
+        for (const bool declared_output : {false, true}) {
+          const UINT mw = declared_output ? ow : s.rw + 8, mh = declared_output ? oh : s.rh + 8;
+          _putenv_s("WG_TEST_MAX_RENDER_WIDTH", std::to_string(mw).c_str());
+          _putenv_s("WG_TEST_MAX_RENDER_HEIGHT", std::to_string(mh).c_str());
+          g_log.clear();
+          Ctx c;
+          c.g = &g;
+          if (!c.be.load(dll)) return false;
+          const std::string label = std::string(m.name) + " " + std::to_string(s.rw) + "x" + std::to_string(s.rh) + " -> " +
+                                    std::to_string(ow) + "x" + std::to_string(oh) + (hdr ? " HDR" : " LDR") +
+                                    (declared_output ? " max=output" : " max=render+8");
+          const WgResult r = c.create(s, (hdr ? WG_CREATE_HDR : 0u) | WG_CREATE_DEPTH_INVERTED, options.c_str());
+          ++contexts;
+          WgResult rr = WG_ERROR;
+          if (r == WG_OK) {
+            s.set_color(g, 1);
+            WgFrame f = s.frame(g, 1);
+            f.motion_scale[0] = f.motion_scale[1] = 1.0f;
+            f.reset = 1;
+            g.begin();
+            f.command_list = g.list;
+            rr = c.be.b->dispatch(c.u, &f);
+            D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = {};  // any output format: the bytes are not read here, the copy
+            UINT64 rowBytes = 0;                         // makes the game's next pass touch the output
+            UINT rows = 0;
+            ID3D12Resource* rb = record_readback_any(g, s.out, s.outState, &fp, &rowBytes, &rows);
+            c.fe.submit();
+            rb->Release();
+          }
+          bool ready = false, bad = false;
+          int ignored = 0, ignored_hip = 0, ignored_cap = 0;
+          for (const auto& line : g_log) {
+            ignored += line.find("hip_switch=on is ignored") != std::string::npos;
+            ignored_hip += line.find("executor=hip ignored: diagnostic key, release build") != std::string::npos;
+            ignored_cap += line.find("capture_dir ignored: diagnostic key, release build") != std::string::npos;
+            ready |= line.find("network runtime ready: executor dx12") != std::string::npos;
+            const bool refusal = line.find("could not take this context") != std::string::npos;
+            refused += refusal;
+            bad |= refusal || line.find("does not take this frame") != std::string::npos ||
+                   line.find("about to start the HIP runtime") != std::string::npos ||
+                   line.find("network runtime ready: executor hip") != std::string::npos ||
+                   line.find("the HIP executor runs") != std::string::npos;
+          }
+          const bool ok = r == WG_OK && rr == WG_OK && ready && !bad && ignored == (switch_on ? 1 : 0) &&
+                          ignored_hip == (hip_key ? 1 : 0) && ignored_cap == (cap_key ? 1 : 0);
+          std::printf("  matrix %s: create %d, frame %d, ready dx12 %d, refusal or HIP line %d, hip_switch line %d, ignored diagnostic keys %d%s\n",
+                      label.c_str(), (int)r, (int)rr, (int)ready, (int)bad, ignored, ignored_hip + ignored_cap,
+                      ok ? "" : "  <-- FAIL");
+          CHECK(ok);
+        }
+      }
+    }
+  }
+  std::printf("  matrix: %d contexts, %d create refusals\n", contexts, refused);
+  CHECK(refused == 0 && contexts > 0);
+  return refused == 0 && !g_fail;
+}
+
 bool case_dx12_same(Gpu& g, const char* dll, const std::string& common, int frames, bool outsrv) {
   Scene s;
   s.tw = 1707, s.th = 960, s.rx = 0, s.ry = 0, s.rw = 1707, s.rh = 960, s.ow = 2560, s.oh = 1440, s.mw = 1707,
@@ -1846,6 +1947,21 @@ bool case_dx12_same(Gpu& g, const char* dll, const std::string& common, int fram
                 w ? " (through a device wrapper)" : "");
     if (w) w->Release();  // the context holds its own references
     CHECK(debug_messages(g, mode ? "dx12 create" : "hip create") == 0);
+    // WG_TEST_EXPECT=refused (R1): the D3D12 executor cannot take this context and create answers WG_ERROR_UNSUPPORTED with
+    // one line, no HIP executor and no context: the front end's upscaler keeps the game
+    {
+      const char* ex0 = std::getenv("WG_TEST_EXPECT");
+      if (mode == 1 && ex0 && std::string(ex0) == "refused") {
+        bool line = false, hip_started = false;
+        for (const auto& m : g_log) {
+          line |= m.find("could not take this context") != std::string::npos && m.find("no HIP route") != std::string::npos;
+          hip_started |= m.find("about to start the HIP runtime") != std::string::npos;
+        }
+        std::printf("  second context: create %d, refusal line %d, HIP started %d\n", (int)r, (int)line, (int)hip_started);
+        CHECK(r == WG_ERROR_UNSUPPORTED && line && !hip_started);
+        return true;
+      }
+    }
     CHECK(r == WG_OK);
     if (r != WG_OK) return false;
     for (int t = 1; t <= frames; ++t) {
@@ -1879,24 +1995,24 @@ bool case_dx12_same(Gpu& g, const char* dll, const std::string& common, int fram
       CHECK(rr == WG_OK);
       CHECK(debug_messages(g, mode ? "dx12 frame" : "hip frame") == 0);
     }
-    // WG_TEST_EXPECT (second context): dx12 (default: the D3D12 executor ran every frame and wrote the output), switch
-    // (the default executor met a frame it does not take and the HIP executor took over the context; since the owner's
-    // decision of 2026-11-04 only with hip_switch=on in the options), hip (the HIP executor from create on, after the
-    // D3D12 executor refused the context)
+    // WG_TEST_EXPECT (second context): dx12 (default: the D3D12 executor ran every frame and wrote the output),
+    // ignored (hip_switch=on in the options is ignored with one line: the context stays on the D3D12 executor, no HIP),
+    // refused (create answered WG_ERROR_UNSUPPORTED, above)
     const char* ex = std::getenv("WG_TEST_EXPECT");
     const std::string expect = ex ? ex : "dx12";
     if (mode == 1 && expect != "dx12") {
-      bool ready_dx12 = false, ready_hip = false, switched = false, refused = false;
+      bool ready_dx12 = false, ready_hip = false, switched = false, refused = false, ignored = false;
       for (const auto& m : g_log) {
         ready_dx12 |= m.find("network runtime ready: executor dx12") != std::string::npos;
         ready_hip |= m.find("network runtime ready: executor hip") != std::string::npos;
         switched |= m.find("the HIP executor runs this context from now on") != std::string::npos;
         refused |= m.find("executor dx12 (default on RDNA 4) could not take this context") != std::string::npos;
+        ignored |= m.find("hip_switch=on is ignored") != std::string::npos;
       }
-      std::printf("  second context: ready dx12 %d, ready hip %d, switched to HIP %d, refused at create %d\n",
-                  (int)ready_dx12, (int)ready_hip, (int)switched, (int)refused);
-      if (expect == "switch") CHECK(ready_dx12 && switched && !refused);
-      else CHECK(ready_hip && refused && !switched);
+      std::printf("  second context: ready dx12 %d, ready hip %d, switched to HIP %d, hip_switch ignored %d, refused at create %d\n",
+                  (int)ready_dx12, (int)ready_hip, (int)switched, (int)ignored, (int)refused);
+      CHECK(expect == "ignored");  // (any other value is a typo: "refused" returned above)
+      CHECK(ready_dx12 && ignored && !switched && !refused && !ready_hip);
     }
     if (mode == 1 && expect == "dx12") {
       bool ran = false, direct_in = false, wrote = false;
@@ -2478,6 +2594,11 @@ int main(int argc, char** argv) {
   if (only == "dx12same") {
     const bool outsrv = argc > 5 && std::string(argv[5]) == "outsrv";
     const bool ok = case_dx12_same(g, dll, argc > 3 ? argv[3] : "", argc > 4 ? std::atoi(argv[4]) : 8, outsrv);
+    std::puts(ok && !g_fail ? "PASS" : "FAIL");
+    return ok && !g_fail ? 0 : 1;
+  }
+  if (only == "matrix") {
+    const bool ok = case_matrix(g, dll, argc > 3 ? argv[3] : "", argc > 4 ? argv[4] : "1080,1440,2160");
     std::puts(ok && !g_fail ? "PASS" : "FAIL");
     return ok && !g_fail ? 0 : 1;
   }

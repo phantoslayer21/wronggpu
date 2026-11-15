@@ -366,6 +366,10 @@ int main(int argc, char** argv) {
                                      : legacy_mode  ? "[wronggpu]\r\nrr_enabled = 1\r\n"
                                                     : "[wronggpu]\r\nrr_mode = accurate\r\n");
   SetEnvironmentVariableW(L"WG_DATA_DIR", data.c_str());
+  // #219: the game's state folder of this run (the menu saves rr_mode there, never into WrongGPU\wronggpu.ini)
+  CreateDirectoryW((data + L"wronggpu-setup").c_str(), nullptr);
+  DeleteFileW((data + L"wronggpu-setup\\settings.ini").c_str());  // (an earlier run's save: each run starts from the defaults)
+  SetEnvironmentVariableW(L"WG_STATE_GAME_DIR", data.c_str());
   SetEnvironmentVariableW(L"WG_RR_MODE", nullptr);  // the checks below see what the plugin hands over, nothing inherited
   HANDLE block_squatter = nullptr;  // --fast-noblock: the block's name is taken, so no module can create the block
   if (fast_noblock) {
@@ -763,17 +767,18 @@ int main(int argc, char** argv) {
       CHECK(menu::combo_count == 2 && menu::items[0] == "Accurate" && menu::items[1] == "Fast");
       CHECK_EQ(menu::combo_index, 0);  // accurate (exact_denied: exact shows as the accurate that runs)
     }
-    // the player picks Fast: shared settings + wronggpu.ini, and the box shows it at once
+    // the player picks Fast: shared settings + the game's state folder (#219), and the box shows it at once
+    const std::string iniBefore = file_text(data + L"wronggpu.ini");
     menu::pick = exact ? 2 : 1;
     menu::draw(nullptr);
-    const std::string ini = file_text(data + L"wronggpu.ini");
-    CHECK(ini.find("rr_mode=fast") != std::string::npos);
-    CHECK(ini.find("rr_mode = exact") == std::string::npos && ini.find("rr_mode = accurate") == std::string::npos);
+    const std::string state = file_text(data + L"wronggpu-setup\\settings.ini");
+    CHECK(state.find("rr_mode=fast\r\n") != std::string::npos);
+    CHECK(file_text(data + L"wronggpu.ini") == iniBefore);  // the install's defaults (the player's file) never rewritten
     menu::reset();
     menu::draw(nullptr);
     CHECK_EQ(menu::combo_index, exact ? 2 : 1);
     std::vector<std::string> L = read_lines(log_path);
-    CHECK(count(L, "menu: rr_mode=fast chosen in OptiScaler's menu (from the next frame, saved to wronggpu.ini)") == 1);
+    CHECK(count(L, "menu: rr_mode=fast chosen in OptiScaler's menu (from the next frame, saved to wronggpu-setup\\settings.ini)") == 1);
   }
   // upgrade-interface is not hooked by the release build: the call reaches the stand-in directly (unchanged slot).
   void* iface2 = nullptr;

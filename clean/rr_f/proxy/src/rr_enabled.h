@@ -6,10 +6,11 @@
 // creates RR, so a later change applies at the next game start, as the launcher writes it while the game is closed).
 //
 // Where it is read, first hit wins:
-//   1. <data dir>\wronggpu.ini, [wronggpu] rr_enabled (the file the launcher writes; data dir = WG_DATA_DIR or
-//      <exe dir>\WrongGPU\);
-//   2. the plugin's own wronggpu-rr.ini next to the game exe: rr_enabled, or the older 60.9 key wronggpu_rr;
-//   3. on.
+//   1. the game's state folder, <game folder>\wronggpu-setup\settings.ini, rr_enabled (where the launcher writes it since
+//      0.6.5, #219);
+//   2. <data dir>\wronggpu.ini, [wronggpu] rr_enabled (the install's defaults; data dir = WG_DATA_DIR or <exe dir>\WrongGPU\);
+//   3. the plugin's own wronggpu-rr.ini next to the game exe: rr_enabled, or the older 60.9 key wronggpu_rr;
+//   4. on.
 // Values as the registry parses them: 0 / 1, off / on, false / true, no / yes. An unreadable value is ignored (the next
 // source applies).
 #pragma once
@@ -30,6 +31,15 @@ inline RrEnabled read_rr_enabled(const std::wstring& data_dir_ini, const std::ws
   const WgOptionDef& o = kWgOptions[WG_OPT_RR_ENABLED];
   std::vector<wgss::IniEntry> ini;
   int32_t v = 1;
+  // #219: the launcher's switch as it stands now is in the game's state folder (wronggpu-setup\settings.ini), over the
+  // install's defaults below (wg_settings_reader.h)
+  ini.clear();
+  wgss::add_state_settings(&ini);
+  if (wgss::ini_value(ini, o, &v)) {
+    r.on = v != 0;
+    r.source = wgss::utf8(wgstate::SettingsPathOf(wgss::state_game_dir()));
+    return r;
+  }
   if (wgss::read_ini(data_dir_ini, &ini) && wgss::ini_value(ini, o, &v)) {
     r.on = v != 0;
     r.source = wgss::utf8(data_dir_ini);

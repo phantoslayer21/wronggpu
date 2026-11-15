@@ -57,12 +57,13 @@ set ROCM_PATH=C:\Program Files\AMD\ROCm\7.2
 rem 3.1 Ray Reconstruction kernels (DXIL), its tables, wronggpu_rr_runtime.dll objects and the D3D12 test host
 python -m clean.rr_f.runtime.tools.build --out out\rr-rt
 
-rem 3.2 Model M's Direct3D 12 kernels (DXIL + out\runtime\dx12\manifest.json), with the RGA register check
-python clean\dx12\build_dx12.py --out out\runtime
+rem 3.2 the Direct3D 12 kernels of Model M, Model L and Model K (DXIL + out\runtime\dx12\manifest.json), with the RGA
+rem     register check
+python clean\dx12\build_dx12.py --out out\runtime --model-l --model-k
 
-rem 3.3 Model M's HIP code objects (gfx1201 and gfx1200) and the one runtime library wronggpu_runtime.dll
-rem     (Model M + Ray Reconstruction linked in; no Model K)
-python clean\runner\build.py --rocm "%ROCM_PATH%" --out out\runtime --extra-archs gfx1200 --no-model-k --with-rr out\rr-rt\obj
+rem 3.3 the HIP code objects (gfx1201 and gfx1200) and the one runtime library wronggpu_runtime.dll
+rem     (Model M, Model L, Model K and Ray Reconstruction linked in; Model K is in unless --no-model-k)
+python clean\runner\build.py --rocm "%ROCM_PATH%" --out out\runtime --extra-archs gfx1200 --model-l --with-rr out\rr-rt\obj
 ```
 
 3.2 takes the longest (two of its kernels take several minutes each in DXC). Lower `WG_DX12_JOBS` / `WG_RR_JOBS` on a
@@ -73,8 +74,9 @@ busy PC.
 ```bat
 set CMAKE_FLAGS=-G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
 
-rem 4.1 FSR front end: amd_fidelityfx_dx12.dll (and WrongGPU.asi for OptiScaler before 0.10)
-cmake -S clean\fsr -B out\frontend %CMAKE_FLAGS% -DWG_MODEL_K=OFF -DWG_BUILD_ID=0.6.0 -DWG_BUILD_ASI=ON
+rem 4.1 FSR front end: amd_fidelityfx_dx12.dll (and WrongGPU.asi for OptiScaler before 0.10), with the Model L and
+rem     Model K entries (WG_MODEL_L defaults to OFF, WG_MODEL_K to ON: both are set here)
+cmake -S clean\fsr -B out\frontend %CMAKE_FLAGS% -DWG_MODEL_K=ON -DWG_MODEL_L=ON -DWG_BUILD_ID=0.6.0 -DWG_BUILD_ASI=ON
 cmake --build out\frontend
 
 rem 4.2 Ray Reconstruction plugin: out\rr-proxy\hook\WrongGPU-RR.asi (--no-tests: see 7 for its tests)
@@ -127,11 +129,12 @@ set WRONGGPU_HIP_RUNTIME=%CD%\out\mockhip\amdhip64_7.dll
 ```bat
 cmake -S clean\installer -B out\launcher %CMAKE_FLAGS% -DWRONGGPU_PAYLOAD_DIR=%CD%\out\payload -DWRONGGPU_RR_DIR=%CD%\out\rr ^
       -DWRONGGPU_VERSION=0.6.0 -DWRONGGPU_BUILD_ID=0.6.0 -DWRONGGPU_PAYLOAD_NAME=0.6.0 -DWRONGGPU_TESTING=OFF ^
-      -DWRONGGPU_PRESET_K=OFF -DWRONGGPU_DIRECT_ROUTE=OFF
+      -DWRONGGPU_PRESET_K=ON -DWRONGGPU_MODEL_K=ON -DWRONGGPU_MODEL_L=ON -DWRONGGPU_DIRECT_ROUTE=OFF
 cmake --build out\launcher
 ```
 
-`out\launcher\WrongGPU.exe` is the launcher. The converter maps it embeds come from `data\` (`WRONGGPU_MAP`,
+`out\launcher\WrongGPU.exe` is the launcher, with the per-game choices Model L and
+Model K (`WRONGGPU_MODEL_L` and `WRONGGPU_MODEL_K` default to OFF, so the release sets them). The converter maps it embeds come from `data\` (`WRONGGPU_MAP`,
 `WRONGGPU_MAP_F`, `WRONGGPU_MAP_K` override them).
 
 ## 6. Tests (CPU)
@@ -202,28 +205,35 @@ without `--no-tests`), `clean\runtime\interop\tests` (the D3D12 interop harness)
 Reconstruction end-to-end test (`clean\rr_f\runtime\tests\e2e.py`), the timing tools, and the GPU test modules listed
 in 6. Run them on an RX 9000-series card; `WG_GPU_LOCK` can serialise them when several shells share one GPU.
 
-## 8. A build with Model K (development; not part of any release)
+## 8. Model L and Model K in the build
 
-Model K is off in every build that players get: the release commands above pass `--no-model-k`, `-DWG_MODEL_K=OFF` and
-`-DWRONGGPU_PRESET_K=OFF`, and CI builds them the same way. To build all three parts with Model K, change those lines:
+Since 0.6.5, the builds that players get include Model L and Model K next to Model M: Model M stays the default for
+every game, and Model L and Model K are choices per game (`set <game> model=L` / `model=K`, or the WrongGPU Model L / K
+entry in OptiScaler's menu). The release commands above build all three parts with them: 3.2 `--model-l --model-k`,
+3.3 `--model-l` (Model K is in the runtime unless `--no-model-k`), 4.1 `-DWG_MODEL_K=ON -DWG_MODEL_L=ON`, 5.2
+`-DWRONGGPU_PRESET_K=ON -DWRONGGPU_MODEL_K=ON -DWRONGGPU_MODEL_L=ON`. The three parts must agree: a launcher with a
+choice its front end or runtime lacks offers a model that cannot run.
+
+A Model M-only build (for comparisons; not a release) changes those lines to:
 
 ```bat
-rem 3.3 runtime: leave out --no-model-k (Model K's code objects and map are then built in)
-python clean\runner\build.py --rocm "%ROCM_PATH%" --out out\runtime --extra-archs gfx1200 --with-rr out\rr-rt\obj
+rem 3.2 / 3.3: no Model L or Model K kernels or code objects
+python clean\dx12\build_dx12.py --out out\runtime
+python clean\runner\build.py --rocm "%ROCM_PATH%" --out out\runtime --extra-archs gfx1200 --no-model-k --with-rr out\rr-rt\obj
 
-rem 4.1 front end: Model K's entry in the hosted list and model=K (the option's default is ON; CI and releases say OFF)
-cmake -S clean\fsr -B out\frontend %CMAKE_FLAGS% -DWG_MODEL_K=ON -DWG_BUILD_ID=dev-k -DWG_BUILD_ASI=ON
+rem 4.1 front end: no Model L or Model K entry
+cmake -S clean\fsr -B out\frontend %CMAKE_FLAGS% -DWG_MODEL_K=OFF -DWG_MODEL_L=OFF -DWG_BUILD_ID=dev-m -DWG_BUILD_ASI=ON
 
-rem 5.2 launcher: Preset K (Model K's converter map) and the per-game model choice K (set <game> model=K)
+rem 5.2 launcher: Model M only
 cmake -S clean\installer -B out\launcher %CMAKE_FLAGS% -DWRONGGPU_PAYLOAD_DIR=%CD%\out\payload -DWRONGGPU_RR_DIR=%CD%\out\rr ^
-      -DWRONGGPU_VERSION=0.6.0 -DWRONGGPU_BUILD_ID=dev-k -DWRONGGPU_PAYLOAD_NAME=0.6.0 -DWRONGGPU_TESTING=OFF ^
-      -DWRONGGPU_PRESET_K=ON -DWRONGGPU_MODEL_K=ON -DWRONGGPU_DIRECT_ROUTE=OFF
+      -DWRONGGPU_VERSION=0.6.0 -DWRONGGPU_BUILD_ID=dev-m -DWRONGGPU_PAYLOAD_NAME=0.6.0 -DWRONGGPU_TESTING=OFF ^
+      -DWRONGGPU_PRESET_K=OFF -DWRONGGPU_DIRECT_ROUTE=OFF
 ```
 
 `-DWRONGGPU_MODEL_K=ON` needs `-DWRONGGPU_PRESET_K=ON` (configuring without it stops with an error) and the front end and
 runtime of the same build. Model K runs its exact network: nothing in these builds, the launcher or the front end offers or
-sets another mode of it. The CPU tests of section 6 cover the K-less builds; the front end's build also tests the other
-state of Model K (`fsr_frontend_model_k_unit` in a build with `-DWG_MODEL_K=OFF`, `fsr_frontend_no_model_k_unit` in one with
-it ON), and the launcher's `model-choice-k` and `model-choice-k-only` tests run the K choice whatever the build's option is.
+sets another mode of it. CI's CPU test jobs configure the launcher and front end with Model K off; the front end's build
+also tests the other state of Model K (`fsr_frontend_model_k_unit` in a build with `-DWG_MODEL_K=OFF`,
+`fsr_frontend_no_model_k_unit` in one with it ON), and the launcher's `model-choice-k` and `model-choice-k-only` tests run the K choice whatever the build's option is.
 `clean\installer\tests\run_model_k_tests.py` (its header says how to prepare the payload, the test maps and a launcher with
 the choices on) runs the choice end to end on generated fixtures, with no game and no GPU.

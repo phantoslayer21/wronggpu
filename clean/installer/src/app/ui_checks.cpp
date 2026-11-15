@@ -41,8 +41,8 @@ void FirstRunChecks(HWND hwnd, const GlobalSettings& gs, const wstring& dll, boo
     // release 0.6.0 (owner 2026-11-02): the RX 9060 series is supported but not yet tested on hardware; RR takes about twice
     // the RX 9070 XT's time there (an estimate), and its 8 GB cards are untested
     const bool rx9060 = gpu.rdna4 && gpu.name.find(L"9060") != wstring::npos;
-    m->lines.push_back({gpu.rdna4 ? 0 : 2, L"Graphics card: " + (gpu.name.empty() ? wstring(L"Not found") : gpu.name) +
-                                               (!gpu.rdna4 ? L". WrongGPU needs a Radeon\u00a0RX\u00a09000-series card."
+    m->lines.push_back({gpu.rdna4 ? 0 : 2, L"Graphics card detected: " + (gpu.name.empty() ? wstring(L"none") : gpu.name) +
+                                               (!gpu.rdna4 ? L". WrongGPU's models need an RX\u00a09000-series GPU; games use AMD FSR."
                                                 : rx9060   ? L". Supported, not yet tested on this card. Ray Reconstruction takes about twice as long as on an RX\u00a09070\u00a0XT."
                                                            : L"")});
     // short words behind the sheet's Show details (how Model M runs is the game page's Runs on); without the card, only
@@ -108,7 +108,7 @@ void FirstRunChecks(HWND hwnd, const GlobalSettings& gs, const wstring& dll, boo
             std::vector<wstring> pn;
             if (!IsFile(ProfilePath(e.dir))) {
                 string wini, oini;
-                ReadAll(Join(e.dir, L"wronggpu.ini"), wini);
+                wini = EffectiveWronggpuIni(e.dir);  // (#219: the state folder over the file)
                 ReadAll(Join(e.dir, L"OptiScaler.ini"), oini);
                 ImportProfile(wini, oini, &pn);
             }

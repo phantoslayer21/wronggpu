@@ -38,6 +38,9 @@ wstring UnrealShipping(const wstring& root);
 wstring SameNameGameExe(const wstring& exe);
 wstring FindGameExe(const wstring& root, const wstring& hint = L"");
 const KnownGame* Validated(const wstring& exe);
+// The store libraries' game folders (Steam, Epic, GOG), every read through the store access (util.h LibraryAccess). In a
+// WRONGGPU_TESTING build with WRONGGPU_TEST_LIBRARIES set: the sub-folders of that folder only (set but empty: none), and
+// nothing of the PC's own stores is read (util.h TestLibraries).
 std::vector<StoreGame> ScanLibraries();
 StoreGame EpicItemGame(const wstring& manifestText);  // one Epic manifest (.item): name, InstallLocation, LaunchExecutable hint
 // rc6 L7: the AppName of the Epic manifest (%ProgramData%\Epic\EpicGamesLauncher\Data\Manifests\*.item) whose InstallLocation

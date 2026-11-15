@@ -325,7 +325,7 @@ PageData ReadPageData(const GameEntry& e, const Profile& defaults) {
     d.saved = e.hasRecord ? GameProfile(e.dir) : defaults;
     d.opti = ReadOpti(e);
     string wini, oini;
-    ReadAll(Join(e.dir, L"wronggpu.ini"), wini);
+    wini = EffectiveWronggpuIni(e.dir);  // (#219: the state folder over the file)
     ReadAll(Join(e.dir, L"OptiScaler.ini"), oini);
     d.outside = e.hasRecord ? OutsideEdits(d.saved, wini, oini) : std::vector<OutsideEdit>{};
     if (const RrConfigGame* rg = e.hasRecord ? RrConfigGameFor(e.exe) : nullptr) {
@@ -1098,7 +1098,7 @@ void SetGpu(const GpuInfo& gpu) {
     wstring n = gpu.name;
     for (const wchar_t* p : {L"AMD Radeon ", L"AMD "}) if (n.rfind(p, 0) == 0) { n = n.substr(wcslen(p)); break; }
     v.gpuName = n;
-    v.executorLine = n.empty() ? L"No graphics card found" : n + (gpu.rdna4 ? L" \u00b7 Direct3D 12" : gpu.amd ? L" \u00b7 HIP" : L" \u00b7 Not supported");
+    v.executorLine = GpuToolbarLine(n, gpu);
 }
 void SetHealth(bool model, const GpuInfo& gpu) { v.modelReady = model; SetGpu(gpu); }
 // The model data's state for the toolbar and Settings (any thread): ready or why not, the DLSS file it came from, the HIP

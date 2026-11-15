@@ -570,6 +570,7 @@ static void IgnoreJson(Output& o, const IgnoreReport& r) {
 int Verb(const wstring& verb, const Args& a, Output& o) {
     if (IgnoreArgsMisplaced(verb, a, o)) return o.code;
     const bool noScan = a.has(L"noscan");
+    if (noScan) { g.ctx.noScanAlways = true; g.ctx.noLibraryScan = true; }  // every verb: no store library search (the AMD FSR 4 search too)
     GlobalSettings& gs = gl.global;
     GlobalSettings scan = gs;  // --library=<folder>: scanned this time only, never saved
     for (auto& lib : a.libraries) scan.extraFolders.push_back(FullPath(lib));
@@ -758,6 +759,7 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
                 g.ctx.perGameEntry = perEntry >= 0 ? perEntry == 1 : !LauncherInstalled();
                 Ui ui; ui.step = [](int, int, const wstring&) {}; ui.log = [](const wstring& s) { LogLine(g.ctx, s); };
                 LogLine(g.ctx, wstring(L"elevated worker: ") + OpName(r.op) + L" " + (r.dir.empty() ? r.exe : r.dir) + (IsElevated() ? L" (elevated)" : L" (not elevated)"));
+                r.noScan = r.noScan || g.ctx.noScanAlways;  // apply --noscan: the job's own searches too (#243)
                 res = RunOp(g.ctx, r, ui);
             }
             if (!result.empty()) { const string rt = ResultText(res); try { WriteFileAtomic(result, rt.data(), rt.size()); } catch (const SetupError&) {} }
@@ -854,7 +856,7 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
             if (res.code) return res.code;
         }
         string wini, oini;
-        ReadAll(Join(dir, L"wronggpu.ini"), wini);
+        wini = EffectiveWronggpuIni(dir);  // (#219: the state folder over the file)
         ReadAll(Join(dir, L"OptiScaler.ini"), oini);
         auto eff = EffectiveSettings(wini, oini);
         if (const RrFileState rs = ReadRrSettings(dir); rs.present) {  // Ray Reconstruction: the RR plugin's settings file
