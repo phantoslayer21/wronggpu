@@ -737,6 +737,18 @@
     "waves": 4,
     "lds": 49152
    }
+  },
+  "bmegahg": {
+   "swin_bneck6": {
+    "vgprs": 239,
+    "waves": 6,
+    "lds": 32784
+   },
+   "swin_bneck6_nc": {
+    "vgprs": 239,
+    "waves": 6,
+    "lds": 32784
+   }
   }
  }
 }

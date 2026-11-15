@@ -113,6 +113,10 @@ VARIANTS = {
 }
 # The variants of each GPU family's build of swin.hip (gfx11: the gfx11 matrix wrappers); `--variants` alone builds these.
 FAMILY_VARIANTS = {"gfx11": ("f16w", "f16wa", "f16wq", "c128w7", "f16wk", "f16wm", "mgx")}
+# The persistent-kernel build of the family (kernels/swin_v2.hip with swin.hip's arithmetic: swin_bneck6, swin_mid; the
+# runtime's default for b0..b5). Built with the family's default code objects; not part of FAMILY_VARIANTS (it is another
+# source, not a way to make the operands), and Runner(..., arch="gfx11", variant=<name>) takes it too.
+FAMILY_MEGA = {"gfx11": ("bmegahg",)}
 
 # Variants whose output differs from base (a different GELU than the default). The sweep reports their mismatches but
 # does not treat them as an error.
@@ -275,6 +279,22 @@ def geometry(defs, src="swin.hip"):
 
 def variant_geometry(name):
     return geometry(all_builds()[name], source(name))
+
+
+# Workgroups of the persistent kernels (swin_bneck6, swin_mid) that fit a card of the family at once (any grid is correct;
+# the geometry above counts the 64 CUs of the RX 9070 XT). gfx11, RX 7900 XT (42 WGPs): swin_bneck6 takes 239 registers (6 waves per
+# SIMD, 3 groups of 8 waves per WGP): 126 groups; swin_mid 256 (5 waves, 2 groups): 84. Measured at 1706x960: bneck 12.0 / 6.2 / 4.5 ms
+# with 42 / 84 / 126 groups and 4.5 ms beyond; mid 18.3 / 10.2 / 10.1 ms with 42 / 84 / 126 groups and 10.1 ms beyond.
+FAMILY_MEGA_GROUPS = {"gfx11": {"mega": 126, "mid": 84}}
+
+
+def family_geometry(fam, name):
+    """variant_geometry of a build of a GPU family: the persistent kernels' default grids are the family's."""
+    geo = variant_geometry(name)
+    for key, groups in FAMILY_MEGA_GROUPS.get(fam, {}).items():
+        if key in geo:
+            geo[key] = {**geo[key], "groups": groups}
+    return geo
 
 
 def is_exact(name):

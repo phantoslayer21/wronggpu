@@ -722,22 +722,23 @@ def main(argv=None):
                                    device_libs=not args.no_device_libs, report=args.report, soft_fp8=args.soft_fp8,
                                    defines={**FAMILY_DEFINES.get(fam, {}).get(src, {}),
                                             **dict(d.split('=', 1) for d in args.define)}))
-            if args.variants and fam in V.FAMILY_VARIANTS:  # swin.hip variants of the family (variants.py)
-                names = [n for n in (V.FAMILY_VARIANTS[fam] if args.variants == "all" else args.variants.split(","))
-                         if n != "base"]
+            mega = [] if args.sources or fam not in V.FAMILY_MEGA else list(V.FAMILY_MEGA[fam])  # swin_v2.hip builds
+            if (args.variants or mega) and fam in V.FAMILY_VARIANTS:  # swin.hip variants of the family (variants.py)
+                names = [n for n in (V.FAMILY_VARIANTS[fam] if args.variants == "all" else (args.variants or "").split(","))
+                         if n and n != "base" and n not in mega]
                 manifest = {"base": {"file": V.code_object("base"), "defines": {}, "geometry": V.variant_geometry("base"),
                                      "ablation": False, "source": "swin.hip", "profile": False}}
-                for name in names:
-                    if name not in V.FAMILY_VARIANTS[fam]:
+                for name in names + mega:
+                    if name not in V.FAMILY_VARIANTS[fam] + V.FAMILY_MEGA.get(fam, ()):
                         raise SystemExit(f"{name!r} is not a {fam} variant; known: {', '.join(V.FAMILY_VARIANTS[fam])}")
-                    run(device_command(clang, args.rocm, os.path.join(KERNEL_DIR, "swin.hip"),
+                    run(device_command(clang, args.rocm, os.path.join(KERNEL_DIR, V.source(name)),
                                        os.path.join(args.out, V.code_object(name)), device_libs=not args.no_device_libs,
                                        report=args.report, soft_fp8=args.soft_fp8,
                                        defines={**FAMILY_DEFINES[fam]["swin.hip"], **V.all_builds()[name],
                                                 **dict(d.split('=', 1) for d in args.define)}))
                     manifest[name] = {"file": V.code_object(name), "defines": V.all_builds()[name],
-                                      "geometry": V.variant_geometry(name), "ablation": False, "source": "swin.hip",
-                                      "profile": False}
+                                      "geometry": V.family_geometry(fam, name), "ablation": False,
+                                      "source": V.source(name), "profile": False}
                 with open(os.path.join(args.out, V.MANIFEST), "w") as f:
                     json.dump(manifest, f, indent=1)
             with open(os.path.join(args.out, F.TARGET_FILE), "w") as f:
@@ -862,7 +863,7 @@ def main(argv=None):
         if args.emu_gfx11:
             run(emu_command(args.cxx, os.path.join(args.out, "wg_emu__gfx11.so"), {"WG_EMU_GFX11": 1}))
         if args.variants:  # emulator libraries of the requested variants (Runner(..., backend="emu", variant=name))
-            names = [n for n in (V.FAMILY_VARIANTS["gfx11"] if args.emu_gfx11 and args.variants == "all" else
+            names = [n for n in (V.FAMILY_VARIANTS["gfx11"] + V.FAMILY_MEGA["gfx11"] if args.emu_gfx11 and args.variants == "all" else
                                  V.VARIANTS if args.variants == "all" else args.variants.split(",")) if n != "base"]
             for name in names:
                 if args.emu_gfx11:  # the gfx11 matrix wrappers (Runner(..., arch="gfx11", variant=name))

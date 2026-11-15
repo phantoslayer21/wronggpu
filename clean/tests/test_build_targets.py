@@ -46,17 +46,33 @@ class FamilyBuilds(unittest.TestCase):
 
     def test_gfx1100_default_sources(self):
         calls, out, recorded = self.build("--arch", "gfx1100", "--no-runtime")
-        self.assertEqual(sorted(c[-1].rsplit(os.sep, 1)[-1] for c in calls), sorted(s[:-4] + ".co" for s in build.FAMILY_SOURCES["gfx11"]))
+        self.assertEqual(sorted(c[-1].rsplit(os.sep, 1)[-1] for c in calls),
+                         sorted([s[:-4] + ".co" for s in build.FAMILY_SOURCES["gfx11"]] + ["swin__bmegahg.co"]))
         self.assertTrue(all("--offload-arch=gfx1100" in c for c in calls))
         self.assertEqual(recorded, "gfx1100")
         self.assertFalse([n for n in out if n.startswith(("k_", "post_w64", "swin"))])
+
+    def test_gfx1100_builds_the_persistent_kernels_from_swin_v2(self):
+        """swin__bmegahg.co (swin_bneck6, swin_mid; the runtime's default for b0..b5 on gfx12) is swin_v2.hip with the
+        persistent-kernel macros on top of the family's, and variants.json names it with the grids of the family's card."""
+        from clean.runner import variants as V
+        calls, out, _ = self.build("--arch", "gfx1100", "--no-runtime")
+        by_name = {c[-1].rsplit(os.sep, 1)[-1]: c for c in calls}
+        c = by_name["swin__bmegahg.co"]
+        self.assertEqual(c[-3].rsplit(os.sep, 1)[-1], "swin_v2.hip")
+        self.assertTrue({"-DWG_SLOW_Q8=1", "-DWG_V2_BASEMATH=1"} <= set(c))
+        self.assertIn("variants.json", out)
+        self.assertEqual(V.family_geometry("gfx11", "bmegahg")["mega"]["groups"], V.FAMILY_MEGA_GROUPS["gfx11"]["mega"])
+        calls, _, _ = self.build("--arch", "gfx1100", "--no-runtime", "--sources", "swin.hip")  # a chosen list: only that
+        self.assertEqual([c[-1].rsplit(os.sep, 1)[-1] for c in calls], ["swin.co"])
 
     def test_gfx1100_swin_takes_the_plain_conversion(self):
         """swin.hip for gfx11 asks for -DWG_SLOW_Q8 (FAMILY_DEFINES: the faster conversion makes the block kernels spill)."""
         calls, _, _ = self.build("--arch", "gfx1100", "--no-runtime")
         by_name = {c[-1].rsplit(os.sep, 1)[-1]: c for c in calls}
         self.assertIn("-DWG_SLOW_Q8=1", by_name["swin.co"])
-        self.assertFalse([n for n, c in by_name.items() if n != "swin.co" and any("WG_SLOW_Q8" in a for a in c)])
+        self.assertFalse([n for n, c in by_name.items() if n not in ("swin.co", "swin__bmegahg.co")
+                          and any("WG_SLOW_Q8" in a for a in c)])
         calls, _, _ = self.build("--arch", "gfx1100", "--no-runtime", "--sources", "swin.hip", "--define", "WG_GELU_MODE=1")
         self.assertTrue({"-DWG_SLOW_Q8=1", "-DWG_GELU_MODE=1"} <= set(calls[0]))
 
@@ -72,7 +88,7 @@ class FamilyBuilds(unittest.TestCase):
         self.assertIn("variants.json", out)
         calls, _, _ = self.build("--arch", "gfx1100", "--no-runtime", "--variants")  # all of the family
         self.assertEqual(sorted(c[-1].rsplit(os.sep, 1)[-1] for c in calls if "swin" in c[-1].rsplit(os.sep, 1)[-1]),
-                         sorted(["swin.co"] + [V.code_object(n) for n in V.FAMILY_VARIANTS["gfx11"]]))
+                         sorted(["swin.co"] + [V.code_object(n) for n in V.FAMILY_VARIANTS["gfx11"] + V.FAMILY_MEGA["gfx11"]]))
         with self.assertRaisesRegex(SystemExit, "not a gfx11 variant"):
             self.build("--arch", "gfx1100", "--no-runtime", "--variants", "t128")
 

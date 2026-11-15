@@ -57,8 +57,42 @@ def v2_build_dir():
     return _DIR
 
 
-def runner(variant, d_row=None):
+_DIR11 = None
+
+
+def gfx11_build_dir():
+    """The gfx11 emulator libraries of the default build and of the persistent-kernel build (swin_v2.hip with the gfx11 matrix
+    wrappers: -DWG_EMU_GFX11), the file names Runner(..., arch="gfx11", variant=name) loads."""
+    global _DIR11
+    if _DIR11 is None:
+        if not sys.platform.startswith("linux"):
+            raise unittest.SkipTest("the lane emulator needs Linux (ucontext)")
+        cxx = os.environ.get("CXX") or shutil.which("clang++") or shutil.which("g++")
+        if not cxx:
+            raise unittest.SkipTest("no host C++ compiler")
+        d = tempfile.mkdtemp(prefix="wg_emu_v2_gfx11_")
+        jobs = [("wg_emu__gfx11.so", {"WG_EMU_GFX11": 1}, "swin.hip")]
+        jobs += [(f"wg_emu__gfx11__{n}.so", {**V.all_builds()[n], "WG_EMU_GFX11": 1}, V.source(n))
+                 for n in V.FAMILY_MEGA["gfx11"]]
+
+        def one(job):
+            lib, defines, src = job
+            return lib, subprocess.run(build.emu_command(cxx, os.path.join(d, lib), defines, src), capture_output=True,
+                                       text=True)
+
+        with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
+            for lib, r in ex.map(one, jobs):
+                if r.returncode != 0:
+                    raise RuntimeError(f"emulator build of {lib} failed:\n" + r.stderr)
+        _DIR11 = d
+    return _DIR11
+
+
+def runner(variant, d_row=None, arch=None):
+    """Runner of the gfx12 emulator library (arch None), or of the gfx11 one (arch "gfx11": the wrappers of wg_platform.h)."""
     from clean.runner.stage_runner import Runner
+    if arch:
+        return Runner(gfx11_build_dir(), "", backend="emu", arch=arch, variant=variant, d_row=d_row)
     return Runner(v2_build_dir(), "", backend="emu", variant=variant, d_row=d_row)
 
 
@@ -209,17 +243,26 @@ def flags_cleared(w):
     return bytes([w[0] & 0xFE]) + bytes(w[1:])
 
 
-def bneck_case(H, W, seed):
+def bneck_case(H, W, seed, arch=None):
     rng = np.random.default_rng(seed)
     params = [S.random_params(f"b{k}", rng) for k in range(6)]
     x, _ = S.random_inputs("b0", H, W, rng)
-    base = runner("base")
+    base = runner("base", arch=arch)
     return base, params, [base.pack_weights(f"b{k}", params[k]) for k in range(6)], x
 
 
 class TestBmega(unittest.TestCase):
     """bmega builds: swin_v2.hip with WG_V2_BASEMATH, which must give exactly the bytes of the base build (swin.hip) in
-    every kernel, and the bottleneck megakernel swin_bneck6 (six blocks in one launch)."""
+    every kernel, and the bottleneck megakernel swin_bneck6 (six blocks in one launch). ARCH "gfx11": the same checks in the
+    gfx11 emulator (TestBmegaGfx11), whose only persistent-kernel build is bmegahg."""
+
+    ARCH = None
+    MEGA = tuple(V.V2_MEGA)               # the persistent-kernel builds checked
+    REFS = tuple(set(V.MEGA_REFERENCE.values()))   # the swin.hip builds they are checked against
+    STAGES_BUILD = "bmega"                # a build whose single-stage kernels are compared with the base build
+
+    def rn(self, name, d_row=None):
+        return runner(name, d_row=d_row, arch=self.ARCH)
 
     def test_bneck_stage(self):
         """Stage "bneck" of the runner: pack_weights("bneck", ...) and run("bneck", ..., b0's offset) launch the
@@ -227,7 +270,7 @@ class TestBmega(unittest.TestCase):
         rng = np.random.default_rng(630)
         params = {f"b{k}": S.random_params(f"b{k}", rng) for k in range(6)}
         x, _ = S.random_inputs("b0", 8, 12, rng)
-        base, r = runner("base"), runner("bmegahg")
+        base, r = self.rn("base"), self.rn("bmegahg")
         w = base.pack_weights("bneck", params)
         self.assertEqual(len(w), 6 * len(base.pack_weights("b0", params["b0"])))
         for parity in (0, 1):
@@ -241,7 +284,7 @@ class TestBmega(unittest.TestCase):
                 self.assertTrue(same(r.run("bneck", w, x, off)["out"], base.run("bneck", w, x, off)["out"]))
 
     def test_stage_kernels_bit_identical_to_base(self):
-        base, r = runner("base"), runner("bmega")
+        base, r = self.rn("base"), self.rn(self.STAGES_BUILD)
         cases = [("enc1", 20, 24, (2, 2)), ("enc2", 12, 16, (0, 2)), ("b0", 12, 16, (2, 2)), ("b1", 12, 8, (0, 0)),
                  ("dec2", 12, 16, (2, 0)), ("dec1", 20, 24, (0, 0))]
         for i, (stage, H, W, offset) in enumerate(cases):
@@ -257,26 +300,26 @@ class TestBmega(unittest.TestCase):
         """Both parities, several grid sizes (fewer workgroups than items, and more), clamp-free and clamping kernels;
         the sync words are back to zero after every launch (checked by the runner). Each build against six launches
         of its swin.hip reference build (base; vec16 for bmegahg16)."""
-        _, _, ws, x = bneck_case(12, 16, 600)
+        _, _, ws, x = bneck_case(12, 16, 600, arch=self.ARCH)
         for parity in (0, 1):
-            want = {ref: runner(ref).run_bneck(ws, x, parity, mega=False) for ref in set(V.MEGA_REFERENCE.values())}
-            for name in V.V2_MEGA:
-                r = runner(name)
+            want = {ref: self.rn(ref).run_bneck(ws, x, parity, mega=False) for ref in self.REFS}
+            for name in self.MEGA:
+                r = self.rn(name)
                 for g in ((1, 3, 40) if name == "bmegahg" else (2,)):
                     with self.subTest(variant=name, parity=parity, groups=g):
                         got = r.run_bneck(ws, x, parity, mega=True, groups=g)
                         self.assertTrue(same(got, want[V.MEGA_REFERENCE[name]]))
-        base = runner("base")
+        base = self.rn("base")
         wc = [flags_cleared(w) for w in ws]
         with self.subTest(kernels="clamp"):
-            self.assertTrue(same(runner("bmegahg").run_bneck(wc, x, 0, mega=True, groups=3),
+            self.assertTrue(same(self.rn("bmegahg").run_bneck(wc, x, 0, mega=True, groups=3),
                                  base.run_bneck(wc, x, 0, mega=False)))
 
     def test_megakernel_matches_reference(self):
         """Against the NumPy reference with the kernels' GELU (gelusig) run block by block: within spec 09 (on these
         synthetic cases even identical, as for the base kernels)."""
-        _, params, ws, x = bneck_case(8, 12, 610)
-        got = runner("bmegahg").run_bneck(ws, x, 1, mega=True)
+        _, params, ws, x = bneck_case(8, 12, 610, arch=self.ARCH)
+        got = self.rn("bmegahg").run_bneck(ws, x, 1, mega=True)
         y = x
         for k in range(6):
             y = S.run_stage(f"b{k}", params[k], y, S.window_offset(f"b{k}", 1), gelu="sigmoid")["out"]
@@ -288,48 +331,75 @@ class TestBmega(unittest.TestCase):
     def test_small_maps(self):
         """One or two window rows (every item depends on every row of the previous block), non-square."""
         for H, W in ((4, 20), (8, 4)):
-            base, _, ws, x = bneck_case(H, W, 620 + H)
+            base, _, ws, x = bneck_case(H, W, 620 + H, arch=self.ARCH)
             for parity in (0, 1):
                 with self.subTest(H=H, W=W, parity=parity):
-                    self.assertTrue(same(runner("bmegahg").run_bneck(ws, x, parity, mega=True, groups=2),
+                    self.assertTrue(same(self.rn("bmegahg").run_bneck(ws, x, parity, mega=True, groups=2),
                                          base.run_bneck(ws, x, parity, mega=False)))
 
 
-def mid_case(H, W, seed):
+class TestBmegaGfx11(TestBmega):
+    """The bottleneck megakernel in the gfx11 emulator (the matrix wrappers of wg_platform.h, the gfx11 accumulator rows of the
+    packed weights): bit-identical to six launches of the default gfx11 build, on the same cases as the gfx12 emulator."""
+
+    ARCH = "gfx11"
+    MEGA = V.FAMILY_MEGA["gfx11"]
+    REFS = ("base",)
+    STAGES_BUILD = "bmegahg"
+
+    def test_the_gfx11_row_table_is_in_use(self):
+        """Sanity of the comparison: the same weights packed for the gfx12 accumulator rows give another result."""
+        _, params, ws, x = bneck_case(8, 12, 640, arch="gfx11")
+        other = runner("base", arch="gfx11", d_row="gfx12")
+        wrong = [other.pack_weights(f"b{k}", params[k]) for k in range(6)]
+        r = self.rn("bmegahg")
+        a, b = r.run_bneck(ws, x, 0, mega=True, groups=2), r.run_bneck(wrong, x, 0, mega=True, groups=2)
+        self.assertGreater(float(np.mean(a != b)), 0.2)
+
+
+def mid_case(H, W, seed, arch=None):
     from clean.runner.packing import MID_STAGES
     rng = np.random.default_rng(seed)
     params = {st: S.random_params(st, rng) for st in MID_STAGES}
     x, _ = S.random_inputs("enc2", H, W, rng)
-    return params, runner("base").pack_weights("mid", params), x
+    return params, runner("base", arch=arch).pack_weights("mid", params), x
 
 
 class TestMid(unittest.TestCase):
-    """Persistent kernel swin_mid (stage "mid" = enc2 with its merge, b0..b5, dec2 with its expand)."""
+    """Persistent kernel swin_mid (stage "mid" = enc2 with its merge, b0..b5, dec2 with its expand). ARCH "gfx11": the same
+    checks in the gfx11 emulator (TestMidGfx11)."""
+
+    ARCH = None
+
+    def rn(self, name, d_row=None):
+        return runner(name, d_row=d_row, arch=self.ARCH)
 
     def test_mid_bit_identical_to_ten_base_launches(self):
         """Both parities, 1 to 40 workgroups, against the ten launches of the base build (and bmegahg16 against
         vec16); the sync words are back to zero after every launch (checked by the runner)."""
-        _, w, x = mid_case(16, 24, 700)
+        _, w, x = mid_case(16, 24, 700, arch=self.ARCH)
         for parity in (0, 1):
-            want = runner("base").run_mid(w, x, parity, mega=False)
+            want = self.rn("base").run_mid(w, x, parity, mega=False)
             for g in (1, 3, 40):
                 with self.subTest(parity=parity, groups=g):
-                    self.assertTrue(same(runner("bmegahg").run_mid(w, x, parity, groups=g), want))
+                    self.assertTrue(same(self.rn("bmegahg").run_mid(w, x, parity, groups=g), want))
         with self.subTest(variant="bmegahg16"):
-            self.assertTrue(same(runner("bmegahg16").run_mid(w, x, 1, groups=3),
-                                 runner("vec16").run_mid(w, x, 1, mega=False)))
+            if self.ARCH:
+                self.skipTest("the vec16 build is a gfx12 build")
+            self.assertTrue(same(self.rn("bmegahg16").run_mid(w, x, 1, groups=3),
+                                 self.rn("vec16").run_mid(w, x, 1, mega=False)))
 
     def test_mid_clamping_kernels(self):
         from clean.runner.packing import split_mid
-        _, w, x = mid_case(16, 24, 710)
+        _, w, x = mid_case(16, 24, 710, arch=self.ARCH)
         wc = b"".join(flags_cleared(b) for b in split_mid(w))
-        self.assertTrue(same(runner("bmegahg").run_mid(wc, x, 0, groups=3), runner("base").run_mid(wc, x, 0, mega=False)))
+        self.assertTrue(same(self.rn("bmegahg").run_mid(wc, x, 0, groups=3), self.rn("base").run_mid(wc, x, 0, mega=False)))
 
     def test_mid_stage_matches_stage_chain(self):
         """run("mid") in a bmega* build launches swin_mid_nc, and gives the result of running enc2, b0..b5 and dec2
         one stage after another (enc2's merged output and skip connection feeding the next stages)."""
-        params, w, x = mid_case(16, 24, 720)
-        base, r = runner("base"), runner("bmegahg")
+        params, w, x = mid_case(16, 24, 720, arch=self.ARCH)
+        base, r = self.rn("base"), self.rn("bmegahg")
         off = S.window_offset("enc2", 1)
         plan = r._prepare("mid", w, x, off, None)
         try:
@@ -345,8 +415,14 @@ class TestMid(unittest.TestCase):
 
     def test_mid_larger_map(self):
         """Several items per window row, rows of different phases depending on each other across resolutions."""
-        _, w, x = mid_case(40, 56, 730)
-        self.assertTrue(same(runner("bmegahg").run_mid(w, x, 0, groups=7), runner("base").run_mid(w, x, 0, mega=False)))
+        _, w, x = mid_case(40, 56, 730, arch=self.ARCH)
+        self.assertTrue(same(self.rn("bmegahg").run_mid(w, x, 0, groups=7), self.rn("base").run_mid(w, x, 0, mega=False)))
+
+
+class TestMidGfx11(TestMid):
+    """swin_mid in the gfx11 emulator: bit-identical to the ten launches of the default gfx11 build."""
+
+    ARCH = "gfx11"
 
 
 class TestGeluTable(unittest.TestCase):

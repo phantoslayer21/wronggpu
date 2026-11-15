@@ -46,6 +46,13 @@ class TestRunnerGfx11(Gfx11Case, unittest.TestCase):
     def test_runner_takes_the_gfx11_row_table(self):
         self.assertEqual(self.runner.d_row, "gfx11")
 
+    def test_a_gfx11_runner_takes_the_persistent_build_and_no_other_gfx12_build(self):
+        """variant "bmegahg" (swin_v2.hip with the gfx11 wrappers) is a gfx11 build; the other persistent-kernel builds are
+        gfx12 builds and are refused before any library is loaded."""
+        for name in ("bmega", "bmegahg16", "v2"):
+            with self.subTest(variant=name), self.assertRaisesRegex(ValueError, "not a gfx11 variant"):
+                self.Runner(build_dir(), "", backend="emu", arch="gfx11", variant=name)
+
     def test_only_the_emulator_takes_an_arch(self):
         with self.assertRaises(ValueError):
             self.Runner(build_dir(), "", backend="hip", arch="gfx11")

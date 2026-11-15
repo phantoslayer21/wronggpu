@@ -2,8 +2,8 @@
 """The resource gates of the gfx11 Swin block kernels (runner/gfx11_gates.py, gfx11_gates.json): no spills, no more registers
 and no fewer waves per SIMD than recorded, for every gated kernel in the default gfx11 build and in each gfx11 variant.
 
-The first group runs everywhere (the check on made-up numbers). The second compiles clean/kernels/swin.hip for gfx1100 once
-per build and needs the compiler: set WG_ROCM to a ROCm folder (no GPU is used).
+The first group runs everywhere (the check on made-up numbers). The second compiles clean/kernels/swin.hip (swin_v2.hip for the
+persistent-kernel build) for gfx1100 once per build and needs the compiler: set WG_ROCM to a ROCm folder (no GPU is used).
 
     WG_ROCM=<ROCm> TMPDIR=<scratch> python -m unittest clean.tests.test_gfx11_gates
 """
@@ -30,7 +30,7 @@ class TestGateTable(unittest.TestCase):
     def test_table_has_every_build_and_kernel(self):
         self.assertEqual(sorted(self.table["gates"]), sorted(G.builds()))
         for name, kernels in self.table["gates"].items():
-            self.assertEqual(sorted(kernels), sorted(G.KERNELS), name)
+            self.assertEqual(sorted(kernels), sorted(G.kernels_of(name)), name)
 
     def test_every_kernel_has_a_position_in_the_table_of_its_shape(self):
         """The shapes of E1: c96, c128, the `_add` form and the resident kernels."""
@@ -38,6 +38,11 @@ class TestGateTable(unittest.TestCase):
         for want in ("swin_block_c96", "swin_block_c128", "swin_block_c64_add", "swin_block_c96_add", "swin_block_c64_r",
                      "swin_block_c64_add_r"):
             self.assertIn(want, names)
+
+    def test_the_persistent_build_gates_the_bottleneck_megakernel(self):
+        """swin_bneck6 of the persistent-kernel build (swin_v2.hip): no spill, 6 waves per SIMD. swin_mid is not gated yet."""
+        self.assertEqual(sorted(self.table["gates"]["bmegahg"]), ["swin_bneck6", "swin_bneck6_nc"])
+        self.assertGreaterEqual(self.table["gates"]["bmegahg"]["swin_bneck6"]["waves"], 6)
 
     def test_recorded_numbers_are_plausible(self):
         """Registers fit the 256 of a wave and the waves are the 1 to 16 a SIMD holds (a sanity check on the file)."""
@@ -127,7 +132,7 @@ class TestCompiler(unittest.TestCase):
         self.assertEqual(G.check(self.measured, self.table), [])
 
     def test_the_variants_are_the_family_variants(self):
-        self.assertEqual(G.builds(), ["base", *V.FAMILY_VARIANTS["gfx11"]])
+        self.assertEqual(G.builds(), ["base", *V.FAMILY_VARIANTS["gfx11"], *V.FAMILY_MEGA["gfx11"]])
 
 
 if __name__ == "__main__":

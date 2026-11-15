@@ -100,9 +100,9 @@ class Runner:
         self.geo, code_object = V.DEFAULT_GEOMETRY, V.code_object(variant)
         manifest = os.path.join(build_dir, V.MANIFEST)
         if arch and variant != "base":  # the gfx11 variants (build.py --emu-gfx11 --variants) keep the base geometry
-            if variant not in V.FAMILY_VARIANTS[arch]:
+            if variant not in V.FAMILY_VARIANTS[arch] + V.FAMILY_MEGA[arch]:
                 raise ValueError(f"variant {variant!r} is not a {arch} variant ({', '.join(V.FAMILY_VARIANTS[arch])})")
-            self.geo = V.variant_geometry(variant)
+            self.geo = V.family_geometry(arch, variant)
         elif os.path.exists(manifest):
             with open(manifest) as f:
                 entry = json.load(f).get(variant)
