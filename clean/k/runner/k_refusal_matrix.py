@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: MIT
-"""R1 / H2: no supported Model K context reaches the D3D12 create refusal. Run under the shared GPU lock.
+"""R1 / H2: no supported context reaches the D3D12 create refusal. Run under the shared GPU lock.
 
-Runs test_interop_d3d12.exe's `matrix` case against a runtime build with a synthetic Model K (generated here from random
-parameters; an installed model is never read): every usual upscaler-mode render ratio x output size x declared maximum x HDR / LDR
-gets a default-executor context and one frame, and each must be taken by the D3D12 executor with no create refusal and no
-HIP line. The same case takes the options of another model (Model M, L) when its files are given by the caller.
+Runs test_interop_d3d12.exe's `matrix` case against a runtime build: every usual upscaler-mode render ratio x output size x
+declared maximum x HDR / LDR gets a default-executor context and one frame, and each must be taken by the D3D12 executor
+with no create refusal and no HIP line. Model K runs with a synthetic model (generated here from random parameters; an
+installed model is never read). Model M and Model L run with converted model files the caller names (--model-dir: the
+folder with model.wgcm for M, the folder with L\\model.wgcm for L); the files are only read.
 
-    python -m clean.k.runner.k_refusal_matrix --exe test_interop_d3d12.exe --build <build dir> [--outputs 1080,1440,2160]
+    python -m clean.k.runner.k_refusal_matrix --exe test_interop_d3d12.exe --build <build dir> --out <folder> [--outputs 1080,1440,2160]
+    python -m clean.k.runner.k_refusal_matrix ... --model M --model-dir <folder>   (or --model L)
 """
 import argparse
 import os
@@ -23,17 +25,24 @@ def main():
     ap.add_argument("--build", required=True, help="directory with wronggpu_runtime.dll and the kernels")
     ap.add_argument("--out", required=True, help="folder for the synthetic model and the log")
     ap.add_argument("--outputs", default="1080,1440,2160", help="output heights, comma separated")
+    ap.add_argument("--model", choices=("K", "M", "L"), default="K")
+    ap.add_argument("--model-dir", help="M, L: the folder with the converted model (M: model.wgcm; L: L\\model.wgcm)")
     ap.add_argument("--hip-switch-on", action="store_true",
                     help="add hip_switch=on (ignored for every model): one log line per context, still Direct3D 12")
     a = ap.parse_args()
     out = Path(a.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    model = out / "synthetic"
-    wgcm, mapfile = write_k_model(str(model), random_network_params(11))
     build = Path(a.build).resolve()
-    opts = ";".join(("model=K", "network=fused", f"kernels_dir={build}", f"model_dir={model}",
-                     f"model_k_dir={Path(wgcm).parent}", f"model_k_map={mapfile}") +
-                    (("hip_switch=on",) if a.hip_switch_on else ()))
+    if a.model == "K":
+        model = out / "synthetic"
+        wgcm, mapfile = write_k_model(str(model), random_network_params(11))
+        base = ("model=K", "network=fused", f"kernels_dir={build}", f"model_dir={model}",
+                f"model_k_dir={Path(wgcm).parent}", f"model_k_map={mapfile}")
+    else:
+        if not a.model_dir:
+            ap.error("--model-dir is required for model M and L")
+        base = (f"model={a.model}", f"kernels_dir={build}", f"model_dir={Path(a.model_dir).resolve()}")
+    opts = ";".join(base + (("hip_switch=on",) if a.hip_switch_on else ()))
     env = os.environ.copy()
     env.pop("WG_RUNTIME_OPTIONS", None)
     proc = subprocess.run([str(Path(a.exe).resolve()), str(build / "wronggpu_runtime.dll"), "matrix", opts, a.outputs],
