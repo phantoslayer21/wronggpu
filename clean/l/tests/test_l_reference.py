@@ -195,7 +195,8 @@ class EncoderTest(unittest.TestCase):
                                                   Tn[abs(a) % 16, abs(b) % 16])
                                     for b in range(-2, fw + 2)]) for a in range(-2, fh + 2)])
             self.assertTrue(_same(m["q"], q))
-            h = q8(_block_by_windows(chain, fh, fw, T.block_offset(T.TABLE, "first", parity), params["enc0_block"]))
+            h = q8(_block_by_windows(chain, fh, fw, T.block_offset(T.TABLE, "first", parity), params["enc0_block"],
+                                     consts=T.block_consts(T.TABLE, "enc0_block")))
             np.testing.assert_array_equal(m["x3"], h)
         self.assertFalse(is_fp8_exact(chain(3, 4)))
         z = np.zeros((fh // 2, fw // 2, 128))
@@ -264,8 +265,9 @@ class DecoderTest(unittest.TestCase):
         rng = np.random.default_rng(10)
         x = MD.random_inputs(rng, rw=30, rh=18)
         params = L.random_params(rng)
-        out = L.decode(x, params, 1, keep=True)
         fw, fh = x["feature_size"]
+        x["skip"] = q8(rng.normal(0, 2, (fh, fw, 32)))                     # the encoder block's output (FP8)
+        out = L.decode(x, params, 1, keep=True)
         m = out["maps"]
         self.assertEqual(m["yt"].shape, (fh // 2, fw // 2, 128))
         self.assertEqual(m["y2"].shape, (fh, fw, 32))
@@ -273,13 +275,18 @@ class DecoderTest(unittest.TestCase):
         y = L.dec_project(x["features"], params["dec0"]["W"], params["dec0"]["b"])
         hw = fw // 2
 
-        def member(yy, xx):                     # coarse mirror of the token, sub-pixel kept (rows stay inside)
+        def proj(yy, xx):                       # coarse mirror of the token, sub-pixel kept (rows stay inside)
             q = xx // 2
             if not 0 <= q < hw:
                 q = min(abs(q), fw - abs(q) - 2)
             return y[yy // 2, q, 32 * ((xx % 2) + 2 * (yy % 2)):][:32]
 
-        self.assertTrue(_same(member(0, -1), member(0, 3)) and _same(member(1, fw), member(1, fw - 4)))
+        def member(yy, xx):                     # + the skip at the fine mirror of the position
+            fx = abs(xx) if abs(xx) < fw else 2 * fw - 2 - abs(xx)
+            return L.f16(proj(yy, xx) + x["skip"][yy, fx])
+
+        self.assertTrue(_same(proj(0, -1), proj(0, 3)) and _same(proj(1, fw), proj(1, fw - 4)))
+        self.assertFalse(_same(member(0, -1), L.f16(proj(0, 3) + x["skip"][0, 3])))   # the skip: fine 1, not 3
         k = T.block_consts(T.TABLE, "dec0_block")                               # the FP16 form ("q7")
         self.assertEqual(k["form"], "q7")
         p = L.f16(_block_by_windows(member, fh, fw, T.block_offset(T.TABLE, "second", 1), params["dec0_block"],
@@ -287,7 +294,7 @@ class DecoderTest(unittest.TestCase):
         np.testing.assert_array_equal(m["y2"], p)                                 # FP16 block output, no FP8
         self.assertFalse(is_fp8_exact(p))
         fine = L.f16(L.swin_block(L.depth_to_space(y), params["dec0_block"], T.block_offset(T.TABLE, "second", 1),
-                                  2, k))
+                                  2, k, skip=x["skip"]))
         self.assertFalse(_same(fine, p))                                         # not a fine-pixel mirror
         self.assertTrue(_same(fine[:, 2:-2], p[:, 2:-2]))                        # ... only the edge windows differ
         a = p[:18, :30][..., [0, 1, 6, 7, 8, 9, 10, 11, 12, 2, 3, 4, 5]].astype(np.float32)
@@ -444,7 +451,7 @@ class Q7FormTest(unittest.TestCase):
         self.assertTrue(np.isnan(L.gelu_q7(np.array([np.nan]))[0]))
 
     def test_norm_known_answers(self):
-        self.assertEqual(float(L.gamma_q7(np.array([1.0]))[0]), 5.65625)    # RN16(float32(1) x sqrtf(32))
+        self.assertEqual(float(L.gamma_q7(np.array([1.0]), 32)[0]), 5.65625)  # RN16(float32(1) x sqrtf(32))
         x = np.ones(32)
         r = L.f16(np.float32(1) / np.sqrt(np.float32(32)))             # the sum is 32, + 2^-13 rounds back to 32
         np.testing.assert_array_equal(L.norm_q7(x, L.gamma_q7(np.ones(32))), L.f16(r * 5.65625))
@@ -485,10 +492,10 @@ class Q7FormTest(unittest.TestCase):
         got = L._block_tokens(x, p, 2, T.block_consts(T.TABLE, "dec0_block"))
         np.testing.assert_array_equal(got, L.f16(p["b2"] + L.f16(p["bp"] + x)))
 
-    def test_decoder_uses_the_fp16_form_and_encoder_does_not_yet(self):
+    def test_both_blocks_use_the_fp16_form(self):
         self.assertEqual(T.block_consts(T.TABLE, "dec0_block")["form"], "q7")
-        self.assertEqual(T.block_consts(T.TABLE, "enc0_block")["form"], "m")
-        self.assertIn("E7", T.PROVISIONAL)
+        self.assertEqual(T.block_consts(T.TABLE, "enc0_block")["form"], "q7")
+        self.assertEqual(T.TABLE["mm8"], "exact")
         rng = np.random.default_rng(5)
         p = L.random_block_params(rng, 32, 2, 128)
         x = q8(rng.normal(0, 2, (4, 16, 32)))

@@ -642,8 +642,9 @@ def post_fp16(got, ref, model="M"):
     return m
 
 
-def compare_model(rec, params, post_ref=None, bneck_unit=False):
-    """post_ref "M": the post against Model M's reference whatever the model (a record of a run with Model M's post).
+def compare_model(rec, params, post_ref=None, bneck_unit=False, table=None):
+    """table: Model L's structure table for the oracle (default: clean/l/reference/table.py TABLE with the kernels'
+    GELU for Model M's block form). post_ref "M": the post against Model M's reference whatever the model (a record of a run with Model M's post).
     bneck_unit: b0 ... b5 as one unit (a bottleneck megakernel writes only b5): the
     reference chained from the runtime's enc2.merged, b5 under the per-stage rule."""
     from clean.l.reference import oracle as L
@@ -655,8 +656,9 @@ def compare_model(rec, params, post_ref=None, bneck_unit=False):
     from clean.reference import post as Po
     from clean.reference import swin as S
     model = rec["model"]
-    table = copy.deepcopy(T.TABLE)
-    table["consts"]["default"]["gelu"] = "sigmoid"   # the kernels' GELU (clean/l/runner/l_c32_check.py CONSTS)
+    if table is None:
+        table = copy.deepcopy(T.TABLE)
+        table["consts"]["default"]["gelu"] = "sigmoid"   # the kernels' GELU (clean/l/runner/l_c32_check.py CONSTS)
     D = (rec["dw"], rec["dh"])
     res, prev, prev_jitter, n, f = [], None, None, 0, 0
     prev_size = None
@@ -700,6 +702,7 @@ def compare_model(rec, params, post_ref=None, bneck_unit=False):
             x0["motion_history"] = np.zeros_like(x0["motion_history"])
             x0["reduced_history"] = np.zeros_like(reduced)
         ref = L.encode(x0, params, f, t=table) if model == "L" else ME.encode(x0, params["enc0"])
+        enc_skip = ref.get("skip") if model == "L" else None   # the encoder block output the decoder block reads
         m["enc0"] = {"features": fp8_stage(out["enc0"]["features"], ref["features"])}
         for s in ("m_near", "m_far", "m_center"):
             m["enc0"][s] = motion_surface(out["enc0"][s], ref[s])
@@ -725,7 +728,7 @@ def compare_model(rec, params, post_ref=None, bneck_unit=False):
         xd = {"features": out["dec1"]["out"], "motion": out["enc0"]["m_near"],
               "latent_prev": out["state"]["latent_prev"] if not eff_reset else np.zeros((rh, rw, 4), np.float32),
               "jitter": fr["jitter"], "jitter_prev": np.array(jp), "reset": eff_reset, "feature_size": (fw, fh),
-              "recon_size": D}
+              "recon_size": D, "skip": enc_skip}
         ref = L.decode(xd, params, f, t=table) if model == "L" else MD.decode(xd, params["dec0"])
         dec = out["dec0"]
         m["dec0"] = {"codes_A": codes(dec["A"], ref["A"], 255.0), "codes_B": codes(dec["B"], ref["B"], 255.0),
