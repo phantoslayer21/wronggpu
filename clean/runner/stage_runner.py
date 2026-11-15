@@ -96,12 +96,14 @@ class Runner:
         if arch not in (None, "gfx11") or (arch and backend != "emu"):
             raise ValueError(f"arch {arch!r}: only the emulator takes one, and only 'gfx11' (the build's target.json "
                              "names the target of a GPU build)")
-        if arch and variant != "base":
-            raise ValueError("the gfx11 emulator library has no variants")
         self.d_row = d_row if d_row is not None else os.environ.get("WG_D_ROW") or arch or family.build_family(build_dir)
         self.geo, code_object = V.DEFAULT_GEOMETRY, V.code_object(variant)
         manifest = os.path.join(build_dir, V.MANIFEST)
-        if os.path.exists(manifest):
+        if arch and variant != "base":  # the gfx11 variants (build.py --emu-gfx11 --variants) keep the base geometry
+            if variant not in V.FAMILY_VARIANTS[arch]:
+                raise ValueError(f"variant {variant!r} is not a {arch} variant ({', '.join(V.FAMILY_VARIANTS[arch])})")
+            self.geo = V.variant_geometry(variant)
+        elif os.path.exists(manifest):
             with open(manifest) as f:
                 entry = json.load(f).get(variant)
             if entry is None:
@@ -119,7 +121,8 @@ class Runner:
                     self.module = self.dev.load_module(f.read())
         elif backend == "emu":
             from clean.runner.emu import Emu
-            self.dev = Emu(os.path.join(build_dir, EMU_LIBRARY_GFX11 if arch else
+            self.dev = Emu(os.path.join(build_dir, (EMU_LIBRARY_GFX11 if variant == "base" else
+                                                    f"wg_emu__gfx11__{variant}.so") if arch else
                                         EMU_LIBRARY if variant == "base" else f"wg_emu__{variant}.so"))
             self.module = None
         else:

@@ -194,6 +194,16 @@ WG_FN v16h wg_k16_f16(v8h p) {
 WG_FN v8f wg_wmma_fp8(v2i a, v2i b, v8f c) { return wg_wmma16_f16(wg_k16_codes(a), wg_k16_codes(b), c); }
 // The same for FP16 inputs (8 halves per lane).
 WG_FN v8f wg_wmma_f16(v8h a, v8h b, v8f c) { return wg_wmma16_f16(wg_k16_f16(a), wg_k16_f16(b), c); }
+// One operand already holds its 16 F16 values in K order (swin.hip WG_F16_W: the weights, widened once per workgroup);
+// the other is made as above.
+WG_FN v8f wg_wmma_fp8(v16h a, v2i b, v8f c) { return wg_wmma16_f16(a, wg_k16_codes(b), c); }
+WG_FN v8f wg_wmma_fp8(v2i a, v16h b, v8f c) { return wg_wmma16_f16(wg_k16_codes(a), b, c); }
+// 8 E4M3 codes (one lane's fragment) as 8 F16 values: the half of a K group that one lane of a half-wave contributes.
+WG_FN v8h wg_widen_e4m3x8(v2i p) {
+  const v4h a = wg_widen_e4m3x4((u32)p[0]), b = wg_widen_e4m3x4((u32)p[1]);
+  v8h r = {a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]};
+  return r;
+}
 #endif
 
 // ---------------------------------------------------------------------------------------------------------------

@@ -60,6 +60,22 @@ class FamilyBuilds(unittest.TestCase):
         calls, _, _ = self.build("--arch", "gfx1100", "--no-runtime", "--sources", "swin.hip", "--define", "WG_GELU_MODE=1")
         self.assertTrue({"-DWG_SLOW_Q8=1", "-DWG_GELU_MODE=1"} <= set(calls[0]))
 
+    def test_gfx1100_variants(self):
+        """--variants builds swin__<name>.co next to the default code objects, with the variant's macros on top of the
+        family's, and writes variants.json (what Runner(..., variant=name) reads); only gfx11 variants are accepted."""
+        from clean.runner import variants as V
+        calls, out, _ = self.build("--arch", "gfx1100", "--no-runtime", "--variants", "f16w")
+        by_name = {c[-1].rsplit(os.sep, 1)[-1]: c for c in calls}
+        self.assertIn("swin__f16w.co", by_name)
+        self.assertTrue({"-DWG_SLOW_Q8=1", "-DWG_F16_W=1"} <= set(by_name["swin__f16w.co"]))
+        self.assertNotIn("-DWG_F16_W=1", by_name["swin.co"])
+        self.assertIn("variants.json", out)
+        calls, _, _ = self.build("--arch", "gfx1100", "--no-runtime", "--variants")  # all of the family
+        self.assertEqual(sorted(c[-1].rsplit(os.sep, 1)[-1] for c in calls if "swin" in c[-1].rsplit(os.sep, 1)[-1]),
+                         sorted(["swin.co"] + [V.code_object(n) for n in V.FAMILY_VARIANTS["gfx11"]]))
+        with self.assertRaisesRegex(SystemExit, "not a gfx11 variant"):
+            self.build("--arch", "gfx1100", "--no-runtime", "--variants", "t128")
+
     def test_chosen_sources(self):
         calls, _, recorded = self.build("--arch", "gfx1101", "--no-runtime", "--sources", "post.hip", "frame.hip")
         self.assertEqual([c[-1].rsplit(os.sep, 1)[-1] for c in calls], ["post.co", "frame.co"])

@@ -7,6 +7,8 @@ Skipped unless WG_GPU_TEST=1. Needs a build for the card with swin.co:
 
     python clean/runner/build.py --arch gfx1100 --rocm <ROCm> --out <build> --no-runtime
     WG_GPU_TEST=1 WG_BUILD=<build> WG_ROCM=<ROCm> python -m unittest clean.tests.test_gpu_enc1
+
+WG_VARIANT=<name> runs a variant of the build (build.py --variants).
 """
 import os
 import unittest
@@ -83,7 +85,7 @@ class TestEnc1Gpu(Enc1Gpu, TK.EmuTest):
     def test_the_row_table_matters(self):
         """Sanity of the comparison: weights packed for the gfx12 accumulator rows give another result on this build."""
         a, _ = self.run_case("enc1", 8, 12, (2, 2), seed=9)
-        wrong = self.Runner(os.environ["WG_BUILD"], os.environ.get("WG_ROCM", ""), d_row="gfx12")
+        wrong = self.Runner(os.environ["WG_BUILD"], os.environ.get("WG_ROCM", ""), variant=self.variant, d_row="gfx12")
         b, _ = self.run_case("enc1", 8, 12, (2, 2), seed=9, runner=wrong)
         self.assertGreater(float(np.mean(a["skip"] != b["skip"])), 0.2)
 

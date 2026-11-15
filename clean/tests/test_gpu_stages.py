@@ -30,7 +30,8 @@ class GpuCase:
         if not build:
             raise unittest.SkipTest("set WG_BUILD to a build folder made for the GPU")
         from clean.runner.stage_runner import Runner
-        cls.runner = Runner(build, os.environ.get("WG_ROCM", ""))
+        cls.variant = os.environ.get("WG_VARIANT", "base")  # a variant of the build (build.py --variants), e.g. f16w
+        cls.runner = Runner(build, os.environ.get("WG_ROCM", ""), variant=cls.variant)
 
     def setUp(self):
         pass

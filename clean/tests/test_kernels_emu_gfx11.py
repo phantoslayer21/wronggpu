@@ -66,6 +66,30 @@ class TestEnc1Gfx11(Gfx11Case, TK.TestStagesEmu):
         self.assertGreater(float(np.mean(a["skip"] != b["skip"])), 0.2)
 
 
+class TestVariantsGfx11(Gfx11Case, unittest.TestCase):
+    """The gfx11 build variants (variants.FAMILY_VARIANTS: faster ways to make the F16 operands) give exactly the bytes of
+    the default gfx11 build, for every block kernel and the merge / expand kernels."""
+
+    def test_variants_bit_identical_to_base(self):
+        from clean.runner import variants as V
+        for name in V.FAMILY_VARIANTS["gfx11"]:
+            d = tempfile.mkdtemp(prefix="wg_emu_gfx11v_")
+            r = TK.subprocess.run(build.emu_command(TK.host_cxx(), os.path.join(d, f"wg_emu__gfx11__{name}.so"),
+                                                    {**V.VARIANTS[name], "WG_EMU_GFX11": 1}),
+                                  capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            variant = self.Runner(d, "", backend="emu", arch="gfx11", variant=name)
+            for i, (stage, H, W, offset) in enumerate(TK.TestVariantsEmu.CASES):
+                with self.subTest(variant=name, stage=stage):
+                    rng = np.random.default_rng(300 + i)
+                    p = S.random_params(stage, rng)
+                    x, skip = S.random_inputs(stage, H, W, rng)
+                    want = self.runner.run(stage, self.runner.pack_weights(stage, p), x, offset, skip)
+                    got = variant.run(stage, self.runner.pack_weights(stage, p), x, offset, skip)
+                    for k in want:
+                        np.testing.assert_array_equal(got[k], want[k])
+
+
 def f16_bits(x):
     return np.asarray(x, np.float16).view(np.uint16)
 
