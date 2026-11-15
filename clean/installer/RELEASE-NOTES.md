@@ -2,8 +2,8 @@
 
 Download **WrongGPU-0.6.5.zip** from the release page and extract it, then run **WrongGPU-0.6.5.exe** (see Quick start).
 
-WrongGPU 0.6.5 adds **Model L**, a second super-resolution model you can choose per game, and brings the fixes planned
-for 0.6.1 (0.6.1 was not released; everything in it is in 0.6.5). Model M stays the default. If you use 0.6.0, update
+WrongGPU 0.6.5 adds **Model L** and **Model K**, two more super-resolution models you can choose per game, and brings
+the fixes planned for 0.6.1 (0.6.1 was not released; everything in it is in 0.6.5). Model M stays the default. If you use 0.6.0, update
 your games with the launcher (each game's page offers **Update**).
 
 **Still a work in progress.** WrongGPU is still being worked on, and 0.6.5 is a pre-release. In some games or scenes
@@ -15,7 +15,7 @@ scene, your settings) and a screenshot. Every report helps us fix it.
 ## What's new in 0.6.5 (since 0.6.0)
 
 ### Model L (new)
-- **A second model, off by default and still under test.** Model L is a larger super-resolution model than Model M:
+- **A new model, off by default and still under test.** Model L is a larger super-resolution model than Model M:
   it has a full-resolution encoder and decoder and its own reconstruction step. Model M stays the default for every
   game; Model L is a choice you make per game.
 - **Converted on your PC.** Like Model M, Model L's data is converted once on your PC from a DLSS model file
@@ -29,6 +29,20 @@ scene, your settings) and a screenshot. Every report helps us fix it.
   session at the same spot
   ([clean/l/SPEED.md](https://github.com/phantoslayer21/wronggpu/blob/main/clean/l/SPEED.md) has the record and the
   per-step split). At higher output resolutions the difference grows.
+
+### Model K (new)
+- **Another model, off by default and still under test.** Model K is a different super-resolution network from
+  Model M, with its own implementation in WrongGPU. Model M stays the default for every game; Model K is a choice you
+  make per game.
+- **Converted on your PC.** Like the other models, Model K's data is converted once on your PC from a DLSS model file
+  (`nvngx_dlss.dll`) of one of your games; WrongGPU never downloads or ships it. From a command prompt in WrongGPU's
+  folder: `WrongGPU.exe model convert --preset=K`.
+- **Choosing it.** For one game: `WrongGPU.exe set "<the game's .exe>" model=K` (`model=M` goes back). In OptiScaler's
+  menu it is the upscaler **WrongGPU Model K**.
+- **Runs on Direct3D 12** inside the game's own command list, like Model M: no AMD HIP runtime needed. Tested in
+  Cyberpunk 2077 at 1080p Quality.
+- If you used Preset K with an older WrongGPU, the launcher no longer asks to switch that game to Model M when it
+  updates it: the game stays on Model K.
 
 ### Fixed
 - **Ray Reconstruction: video memory no longer grows while Ray Reconstruction is available but switched off.** In
@@ -128,9 +142,6 @@ For players coming from 0.4.5, in short (the 0.6.0 release page has the full lis
   loading a save, or during flashes of lightning). It lasts one frame; we're investigating it (#17).
 - Hogwarts Legacy: since the game's November 2026 update, Ray Reconstruction isn't available with WrongGPU yet. Model M
   works. We're investigating it (#16).
-- Preset K is not part of 0.6.5; it returns in a later version (#15). If a game still starts on Preset K from an older
-  WrongGPU, the launcher asks before it updates the game: **Switch to Model M** updates it and moves it to Model M (its
-  other settings stay); **Not now** leaves the game as it is.
 - Model L: tested for super resolution in Cyberpunk 2077 and RESIDENT EVIL requiem, both of which hand the upscaler
   HDR colour. Model L's path for games that hand the upscaler SDR colour is tested offline only: every game we tried
   sends HDR colour. Ray Reconstruction always uses its own network; Model L is a super-resolution choice only.
@@ -192,7 +203,7 @@ The exact launch option is on the release page.
 ## Requirements
 - Windows 10 or 11, a Radeon RX 9000-series graphics card (RX 9070 series; RX 9060 XT and RX 9060 supported, not yet
   tested), a recent AMD driver.
-- **No AMD HIP runtime needed:** Model M and Model L run on Direct3D 12. `executor=hip` and frame capture are
+- **No AMD HIP runtime needed:** Model M, Model L and Model K run on Direct3D 12. `executor=hip` and frame capture are
   debugging options that use HIP; both are off by default.
 - An internet connection the first time, for the WrongGPU edition of OptiScaler, which the launcher downloads itself
   (offline you can choose an OptiScaler download yourself, in Settings).
