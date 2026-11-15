@@ -106,8 +106,11 @@ class Runner:
         if backend == "hip":
             from clean.runner.hip import Hip
             self.dev = Hip(rocm_dir)
-            with open(os.path.join(build_dir, code_object), "rb") as f:
-                self.module = self.dev.load_module(f.read())
+            swin = os.path.join(build_dir, code_object)
+            self.module = None  # a build without the Swin kernels (gfx11 so far) runs the stages of other code objects
+            if os.path.exists(swin) or family.build_family(build_dir) == "gfx12":
+                with open(swin, "rb") as f:
+                    self.module = self.dev.load_module(f.read())
         elif backend == "emu":
             from clean.runner.emu import Emu
             self.dev = Emu(os.path.join(build_dir, EMU_LIBRARY if variant == "base" else f"wg_emu__{variant}.so"))
@@ -422,6 +425,8 @@ class Runner:
     def _module(self, code_object):
         """code_object None: the Swin code object of the selected variant (self.module)."""
         if code_object is None or self.backend != "hip":
+            if self.module is None and self.backend == "hip":
+                raise FileNotFoundError(f"the Swin code object of this build ({self.build_dir}) does not exist")
             return self.module
         if code_object not in self._extra_modules:
             with open(os.path.join(self.build_dir, code_object), "rb") as f:
