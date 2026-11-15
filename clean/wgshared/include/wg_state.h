@@ -24,17 +24,22 @@
 //
 // THE OPERATION GUARD (a game that uses WrongGPU is never changed under it; Windows itself decides, nothing is registered):
 // - The game registers nothing. A WrongGPU binary the game has loaded (the front end, the menu plugin, the RR plugin, the
-//   runtime) is an image section of that process, and Windows refuses an exclusive open of it.
+//   runtime) is an image section of that process, and Windows refuses an open of it for writing its data.
 // - The launcher: an uninstall, repair or update holds an OperationGuard for its WHOLE run. It takes the state lock (a timeout
 //   is Busy, access denied is LockDenied), then opens EVERY WrongGPU binary of the install with DELETE | GENERIC_READ |
-//   FILE_WRITE_DATA and share mode 0 (a loaded image has no open handle, so share mode 0 alone does not see it; Windows refuses
-//   an open for writing its data; nothing is ever written through the handle; a read-only binary is therefore Unknown):
+//   FILE_WRITE_DATA, sharing reads only (a loaded image has no open handle, so share modes alone do not see it; Windows refuses
+//   the open for writing its data; nothing is ever written through the handle; a read-only binary is therefore Unknown):
 //   ERROR_SHARING_VIOLATION = a process has it loaded (GameRunning: refuse); any other open error = Unknown (refuse); a
-//   file that does not exist is skipped; all opened = nobody has WrongGPU loaded. The guard HOLDS those exclusive handles to
-//   the end, so a game that starts meanwhile cannot load WrongGPU (its LoadLibrary fails; OptiScaler carries on without it).
-//   The operation deletes a held binary through the guard's own handle (DeleteHeld), or releases that one handle right at
-//   the step that replaces the file (Release). The guard is taken by the process that changes the files (the elevated worker
-//   when there is one), never by a parent waiting for it.
+//   file that does not exist is skipped; all opened = nobody has WrongGPU loaded. The guard HOLDS those handles to the end:
+//   a game that starts meanwhile cannot load WrongGPU (LoadLibrary does not share writes, so it fails against the guard's
+//   write access; OptiScaler carries on without it), while the operation itself can still read the files (hashes, version
+//   resources) with an open that shares writes and deletes.
+//   The operation deletes a held binary through the guard's own handle (DeleteHeld). It replaces one (or creates a new one)
+//   with PutHeld, never releasing it: the held old file is renamed away through its handle, the complete new file is renamed
+//   into place and held at once, the old one is deleted through its handle; a process can at most load the complete new file.
+//   A sharing violation is not always the game: the words say "in use by the game or another program (for example
+//   antivirus)". The guard is taken by the process that changes the files (the elevated worker when there is one), never by
+//   a parent waiting for it.
 //
 // Writes are atomic (WriteAtomic): a new temporary file in the same folder (<name>.wgtmp-<pid>-<n>, created only where
 // nothing is), written in checked chunks, flushed and closed (both checked), then MoveFileExW(REPLACE_EXISTING |
@@ -52,6 +57,7 @@
 //                     is corrupt); ASCII only.
 // Written for this project; Windows API and the C++ standard library only.
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <utility>
@@ -189,7 +195,7 @@ private:
 
 // ---- the operation guard -------------------------------------------------------------------------------------------
 // The launcher's side of an uninstall, repair or update (see THE OPERATION GUARD above). Ok only when the state lock is held
-// and every WrongGPU binary that exists is held exclusively. A timeout of the lock is Busy, access denied is LockDenied; a
+// and every WrongGPU binary that exists is held (write access, reads shared). A timeout of the lock is Busy, access denied is LockDenied; a
 // binary loaded in a process (ERROR_SHARING_VIOLATION) is GameRunning; any other open error is Unknown. Keep it for the
 // whole operation, on the thread that took it.
 enum class GuardResult { Ok, Busy, LockDenied, GameRunning, Unknown };
@@ -198,7 +204,7 @@ inline const char* GuardWords(GuardResult r) {
         case GuardResult::Ok: return "";
         case GuardResult::Busy: return "another WrongGPU program is changing this game's WrongGPU state right now; try again in a moment";
         case GuardResult::LockDenied: return "WrongGPU may not use this game's state lock (access denied); run the launcher's repair as administrator";
-        case GuardResult::GameRunning: return "the game is running with WrongGPU loaded; close the game first";
+        case GuardResult::GameRunning: return "WrongGPU's files are in use by the game or another program (for example antivirus). Close the game and try again";
         case GuardResult::Unknown: return "WrongGPU could not tell whether the game is using its files; close the game and try again";
     }
     return "?";
@@ -217,9 +223,9 @@ public:
         }
         for (const std::wstring& b : binaries) {
             const std::wstring p = ExtendedPath(b);
-            // FILE_WRITE_DATA is what a loaded image refuses (the image section holds no open handle, so share mode 0 alone
+            // FILE_WRITE_DATA is what a loaded image refuses (the image section holds no open handle, so share modes alone
             // would not conflict with it); nothing is ever written through this handle
-            HANDLE h = CreateFileW(p.c_str(), DELETE | GENERIC_READ | FILE_WRITE_DATA, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            HANDLE h = CreateFileW(p.c_str(), DELETE | GENERIC_READ | FILE_WRITE_DATA, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
             if (h == INVALID_HANDLE_VALUE) {
                 const DWORD e = GetLastError();
                 if (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND) continue;  // not there: nothing has it loaded
@@ -243,33 +249,125 @@ public:
     const char* words() const { return GuardWords(result_); }
     // Whether the guard holds `path` (a binary it was given).
     bool Holds(const std::wstring& path) const { return Find(path) >= 0; }
-    // Closes the guard's handle of `path` right before the operation replaces that file itself (the file is then open to
-    // others again: do it at the step, never earlier). True when it was held.
-    bool Release(const std::wstring& path) {
+    // Puts the complete new bytes at `path` with no window in which a process can load a partial file or the guard holds
+    // nothing: (1) the held old binary, if any, is renamed away through its own handle to <name>.wronggpu-old (the next free
+    // <name>.wronggpu-old-<n> when that name is taken; nothing is deleted by name); (2) the new bytes are written to a temporary
+    // file in the same folder, flushed, closed and renamed into place (only where nothing is); (3) the new file is opened and
+    // held like the others at once; (4) the old file is deleted through its held handle. A process can at most load the complete
+    // new file in the moment between (2) and (3): then the result is ERROR_SHARING_VIOLATION, the new file stays, and the guard's
+    // result turns to GameRunning (the operation stops). Files the operation creates (no old binary) take steps 2 and 3.
+    // ERROR_SUCCESS, or the error of the step that failed: before (2) completes nothing changed (the old file is renamed back);
+    // *oldLeft names an old file that could not be deleted after a successful replace (it stays, under its .wronggpu-old name).
+    DWORD PutHeld(const std::wstring& path, const void* data, size_t size, std::wstring* oldLeft = nullptr) {
+        if (oldLeft) oldLeft->clear();
+        const std::wstring target = ExtendedPath(path);
         const int i = Find(path);
-        if (i < 0) return false;
-        CloseHandle(held_[i].h);
-        held_.erase(held_.begin() + i);
-        return true;
+        HANDLE old = i >= 0 ? held_[i].h : INVALID_HANDLE_VALUE;
+        std::wstring oldName;
+        if (old != INVALID_HANDLE_VALUE) {
+            const std::wstring folder = target.substr(0, target.find_last_of(L'\\') + 1), base = target.substr(target.find_last_of(L'\\') + 1);
+            DWORD e = ERROR_FILE_EXISTS;
+            for (int n = 0; n < 1000 && (e == ERROR_FILE_EXISTS || e == ERROR_ALREADY_EXISTS); ++n) {
+                oldName = base + L".wronggpu-old" + (n ? L"-" + std::to_wstring(n) : std::wstring());
+                e = RenameHandle(old, folder + oldName, false);
+            }
+            if (e) return e;  // nothing changed
+            held_.erase(held_.begin() + i);
+        }
+        auto renameBack = [&]() { if (old != INVALID_HANDLE_VALUE) { RenameHandle(old, target, false); held_.push_back({target, old}); } };
+        DWORD e = PutComplete(target, data, size);
+        if (e) { renameBack(); return e; }  // the old file back under its name, still held
+        HANDLE h = CreateFileW(target.c_str(), DELETE | GENERIC_READ | FILE_WRITE_DATA, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        DWORD heldErr = 0;
+        if (h == INVALID_HANDLE_VALUE) {
+            heldErr = GetLastError();
+            which_ = path;
+            err_ = heldErr;
+            result_ = heldErr == ERROR_SHARING_VIOLATION ? GuardResult::GameRunning : GuardResult::Unknown;
+        } else {
+            held_.push_back({target, h});
+        }
+        if (old != INVALID_HANDLE_VALUE) {
+            if (DeleteThrough(old)) {
+                CloseHandle(old);
+            } else {
+                if (oldLeft) *oldLeft = target.substr(0, target.find_last_of(L'\\') + 1) + oldName;
+                CloseHandle(old);
+            }
+        }
+        return heldErr;
+    }
+    // The same from a file (`source`, read whole; for payload files the launcher has on disk).
+    DWORD PutHeldFrom(const std::wstring& path, const std::wstring& source, std::wstring* oldLeft = nullptr) {
+        std::string bytes;
+        HANDLE s = CreateFileW(ExtendedPath(source).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (s == INVALID_HANDLE_VALUE) return GetLastError();
+        char buf[64 * 1024];
+        DWORD got = 0;
+        DWORD e = 0;
+        for (;;) {
+            if (!ReadFile(s, buf, sizeof buf, &got, nullptr)) { e = GetLastError(); break; }
+            if (!got) break;
+            try { bytes.append(buf, got); } catch (...) { e = ERROR_OUTOFMEMORY; break; }
+        }
+        CloseHandle(s);
+        if (e) return e;
+        return PutHeld(path, bytes.data(), bytes.size(), oldLeft);
     }
     // Deletes `path` through the guard's own handle (no window in which another process can open or load it), then closes the
     // handle. ERROR_SUCCESS, ERROR_NOT_FOUND (not held), or the error of the delete (the handle is kept then).
     DWORD DeleteHeld(const std::wstring& path) {
         const int i = Find(path);
         if (i < 0) return ERROR_NOT_FOUND;
-        struct DispositionEx { DWORD Flags; } ex{0x1u | 0x2u};  // FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
-        BOOL done = SetFileInformationByHandle(held_[i].h, static_cast<FILE_INFO_BY_HANDLE_CLASS>(21) /* FileDispositionInfoEx */, &ex, sizeof ex);
-        if (!done) {  // (a file system without the POSIX form: the classic delete-on-close)
-            FILE_DISPOSITION_INFO classic{TRUE};
-            done = SetFileInformationByHandle(held_[i].h, FileDispositionInfo, &classic, sizeof classic);
-        }
-        if (!done) return GetLastError();
+        if (!DeleteThrough(held_[i].h)) return GetLastError();
         CloseHandle(held_[i].h);
         held_.erase(held_.begin() + i);
         return ERROR_SUCCESS;
     }
 
 private:
+    // Marks the file of `h` for deletion (POSIX delete: the name goes at once; the classic delete-on-close as the fallback).
+    static bool DeleteThrough(HANDLE h) {
+        struct DispositionEx { DWORD Flags; } ex{0x1u | 0x2u};  // FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
+        if (SetFileInformationByHandle(h, static_cast<FILE_INFO_BY_HANDLE_CLASS>(21) /* FileDispositionInfoEx */, &ex, sizeof ex)) return true;
+        FILE_DISPOSITION_INFO classic{TRUE};
+        return SetFileInformationByHandle(h, FileDispositionInfo, &classic, sizeof classic) != 0;
+    }
+    // Renames the file of `h` (held with DELETE access) to `newPath` (the \\?\ form, the same folder). 0 or the error. The name
+    // goes to the file system in its NT form (\??\...): a plain name would be taken against the current folder.
+    static DWORD RenameHandle(HANDLE h, const std::wstring& newPath, bool replace) {
+        const std::wstring newName = newPath.rfind(L"\\\\?\\", 0) == 0 ? L"\\??\\" + newPath.substr(4) : newPath;
+        const size_t bytes = sizeof(FILE_RENAME_INFO) + newName.size() * sizeof(wchar_t);
+        std::vector<unsigned char> buf(bytes, 0);
+        FILE_RENAME_INFO* info = reinterpret_cast<FILE_RENAME_INFO*>(buf.data());
+        info->ReplaceIfExists = replace ? TRUE : FALSE;
+        info->RootDirectory = nullptr;
+        info->FileNameLength = static_cast<DWORD>(newName.size() * sizeof(wchar_t));
+        memcpy(info->FileName, newName.c_str(), newName.size() * sizeof(wchar_t));
+        return SetFileInformationByHandle(h, FileRenameInfo, info, static_cast<DWORD>(bytes)) ? 0 : GetLastError();
+    }
+    // The complete bytes at `target` (a new temporary file in its folder, written in checked chunks, flushed, closed, then
+    // renamed into place only where nothing is). 0 or the error; the temporary file is deleted on a failure.
+    static DWORD PutComplete(const std::wstring& target, const void* data, size_t size) {
+        static volatile LONG counter = 0;
+        const std::wstring tmp = target + kTempMark + std::to_wstring(GetCurrentProcessId()) + L"-g" + std::to_wstring(InterlockedIncrement(&counter));
+        HANDLE t = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (t == INVALID_HANDLE_VALUE) return GetLastError();
+        DWORD e = 0;
+        const char* p = static_cast<const char*>(data);
+        for (size_t done = 0; !e && done < size;) {
+            const DWORD want = static_cast<DWORD>(size - done < kChunk ? size - done : kChunk);
+            DWORD put = 0;
+            if (!WriteFile(t, p + done, want, &put, nullptr)) e = GetLastError();
+            else if (put != want) e = ERROR_WRITE_FAULT;
+            else done += put;
+        }
+        if (!e && !FlushFileBuffers(t)) e = GetLastError();
+        if (!CloseHandle(t) && !e) e = GetLastError();
+        if (!e && !MoveFileExW(tmp.c_str(), target.c_str(), MOVEFILE_WRITE_THROUGH)) e = GetLastError();
+        if (e) DeleteFileW(tmp.c_str());
+        return e;
+    }
     struct Held { std::wstring path; HANDLE h; };
     int Find(const std::wstring& path) const {
         const std::wstring p = ExtendedPath(path);

@@ -11,7 +11,9 @@
 //    re-reads the old whole file; the half-written temporary file is never read as state);
 //  - the operation guard, with a real DLL (wg_state_test_dll) under WrongGPU's binary names: nothing loaded = Ok with every
 //    existing binary held exclusively; a held guard makes LoadLibrary of the file fail (here and in another process);
-//    deletes through the held handle; Release; a binary loaded in another process or in this one = GameRunning; that
+//    deletes through the held handle; PutHeld of a new file and replaces of a held one while another process keeps loading
+//    it (complete old or new binary, or a refusal; never partial; no leftovers); a binary loaded in another process or in
+//    this one = GameRunning; that
 //    process killed = Ok again; a binary the guard may not open = Unknown; the lock busy = Busy; a lock it may not open =
 //    LockDenied.
 // Written for this project.
@@ -144,6 +146,36 @@ static int Child(int argc, wchar_t** argv) {
         WriteText(argv[3], m ? "loaded" : "error " + std::to_string(GetLastError()));
         if (!m) return 3;
         Sleep(120000);
+        return 0;
+    }
+    if (mode == L"--child-loadloop" && argc >= 6) {  // once <go> exists: loads argv[2] again and again for <ms>, then a summary
+        WaitFile(argv[4]);
+        const ULONGLONG end = GetTickCount64() + static_cast<ULONGLONG>(_wtoi(argv[5]));
+        int loads = 0, refused = 0;
+        bool v219 = false, v220 = false, vOther = false;
+        std::string other;
+        while (GetTickCount64() < end) {
+            const HMODULE m = LoadLibraryW(game.c_str());
+            if (m) {
+                ++loads;
+                typedef int (*Fn)();
+                const Fn f = reinterpret_cast<Fn>(GetProcAddress(m, "WgStateTestDll"));
+                const int v = f ? f() : 0;
+                if (v == 219) v219 = true;
+                else if (v == 220) v220 = true;
+                else vOther = true;  // loaded but not a complete binary of either version
+                FreeLibrary(m);
+            } else {
+                const DWORD e = GetLastError();
+                // refusals: the guard holds the file (sharing violation), or the name is between the rename-away and the rename-in
+                if (e == ERROR_SHARING_VIOLATION || e == ERROR_MOD_NOT_FOUND || e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND || e == ERROR_ACCESS_DENIED) ++refused;
+                else if (other.find(std::to_string(e)) == std::string::npos) other += (other.empty() ? "" : ",") + std::to_string(e);  // e.g. a bad image: partial
+            }
+        }
+        std::string values = std::string(v219 ? "219" : "") + (v220 ? (v219 ? ",220" : "220") : "");
+        if (vOther) values += values.empty() ? "partial" : ",partial";
+        WriteText(argv[3], "loads=" + std::to_string(loads) + " values=" + (values.empty() ? "none" : values) + " refused=" + std::to_string(refused) +
+                               " other=" + (other.empty() ? "-" : other));
         return 0;
     }
     if (mode == L"--child-tryload" && argc >= 4) {  // tries to load argv[2] once: "ok" or "error <n>"
@@ -375,7 +407,7 @@ int wmain(int argc, wchar_t** argv) {
         const DWORD n = GetModuleFileNameW(nullptr, me, MAX_PATH * 2);
         std::wstring exeDir(me, n);
         exeDir = exeDir.substr(0, exeDir.find_last_of(L'\\'));
-        const std::wstring testDll = JoinPath(exeDir, L"wg_state_test_dll.dll");
+        const std::wstring testDll = JoinPath(exeDir, L"wg_state_test_dll.dll"), testDll2 = JoinPath(exeDir, L"wg_state_test_dll2.dll");
         const std::wstring plugins = JoinPath(game, L"plugins");
         CreateDirectoryW(plugins.c_str(), nullptr);
         const std::wstring bin = JoinPath(plugins, L"WrongGPU-RR.asi"), bin2 = JoinPath(game, L"wronggpu_runtime.dll");
@@ -395,15 +427,70 @@ int wmain(int argc, wchar_t** argv) {
             const std::string r = ReadText(out);
             check(!m && le == ERROR_SHARING_VIOLATION && r.rfind("error ", 0) == 0, "while the guard holds a binary, LoadLibrary of it fails (here and in another process): a game cannot load WrongGPU mid-operation");
             DeleteFileW(out.c_str());
-            // deletes go through the held handle; Release hands one file back at its own step
+            // the operation itself can still read a held binary (hash it, read its version) with an open that shares writes and deletes
+            {
+                HANDLE rd = CreateFileW(bin.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+                char head[2] = {0, 0};
+                DWORD got = 0;
+                const bool read = rd != INVALID_HANDLE_VALUE && ReadFile(rd, head, 2, &got, nullptr) && got == 2 && head[0] == 'M' && head[1] == 'Z';
+                if (rd != INVALID_HANDLE_VALUE) CloseHandle(rd);
+                check(read, "while the guard holds a binary, the operation can still read it (an open sharing writes and deletes)");
+            }
+            // deletes go through the held handle
             check(g.DeleteHeld(bin2) == ERROR_SUCCESS && !Exists(bin2) && !g.Holds(bin2), "DeleteHeld: the binary deleted through the guard's own handle");
             check(g.DeleteHeld(bin2) == ERROR_NOT_FOUND, "DeleteHeld of a file the guard does not hold: ERROR_NOT_FOUND");
-            check(g.Release(bin) && !g.Holds(bin), "Release: the guard closes its handle of that one file");
-            HANDLE h = CreateFileW(bin.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
-            check(h != INVALID_HANDLE_VALUE, "after Release the operation can open (and replace) the file itself");
-            if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+            // a file the operation creates: renamed in complete, then held
+            const std::string newBytes = ReadText(testDll2);
+            check(g.PutHeld(bin2, newBytes.data(), newBytes.size()) == ERROR_SUCCESS && g.Holds(bin2) && ReadText(bin2) == newBytes,
+                  "PutHeld of a new file: the complete file renamed into place and held at once");
         }
         CopyFileW(testDll.c_str(), bin2.c_str(), FALSE);
+        // ---- a replace while another process keeps trying to load the file: it gets the old or the new COMPLETE binary, or a
+        //      refusal, never a partial one; no .wronggpu-old and no temporary file stays
+        {
+            const std::string newBytes = ReadText(testDll2);
+            const std::wstring out = JoinPath(root, L"loadloop"), go = JoinPath(root, L"go-loadloop");
+            // the old file loaded once before the guard (the loop's first load), then the loop runs against the guard
+            OperationGuard g(game, bins, 1000);
+            const bool held = g.ok() && g.Holds(bin);
+            HANDLE k = Spawn(L"--child-loadloop " + Q(bin) + L" " + Q(out) + L" " + Q(go) + L" 3000");
+            Sleep(500);  // the loop is running (refused while the old file is held)
+            WriteText(go, "go");
+            std::wstring oldLeft;
+            DWORD e = ERROR_SUCCESS;
+            for (int i = 0; i < 20 && e == ERROR_SUCCESS; ++i) {  // replace back and forth: 220, 219, 220, ...
+                const std::string& bytes = (i % 2 == 0) ? newBytes : ReadText(testDll);
+                const std::string copy = bytes;
+                e = g.PutHeld(bin, copy.data(), copy.size(), &oldLeft);
+                Sleep(25);
+            }
+            const DWORD replaced = e;
+            if (k) WaitExit(k, 60000);
+            const std::string r = ReadText(out);  // "loads=<n> values=<v...> refused=<n> other=<codes or ->"
+            bool onlyComplete = r.find("other=-") != std::string::npos;
+            for (const char* bad : {"values=0", "partial"}) onlyComplete = onlyComplete && r.find(bad) == std::string::npos;
+            std::printf("  (load loop during replaces: %s; last PutHeld %lu)\n", r.c_str(), replaced);
+            check(held && (replaced == ERROR_SUCCESS || replaced == ERROR_SHARING_VIOLATION) && !r.empty() && onlyComplete,
+                  "replaces while another process keeps loading the file: every load got a complete old or new binary, or a refusal; never a partial file");
+            bool leftovers = false;
+            for (auto& name : List(plugins)) leftovers = leftovers || name.find(L".wronggpu-old") != std::wstring::npos || IsTempName(name);
+            check(oldLeft.empty() && !leftovers, "after the replaces: no .wronggpu-old and no temporary file left (the old files were deleted through their handles)");
+            DeleteFileW(out.c_str());
+            DeleteFileW(go.c_str());
+        }
+        // a .wronggpu-old name already taken (a file of an earlier crash): the next free name is used, the earlier file stays
+        {
+            const std::wstring taken = bin + L".wronggpu-old";
+            WriteText(taken, "an earlier file");
+            const std::string newBytes = ReadText(testDll2);
+            OperationGuard g(game, bins, 1000);
+            std::wstring oldLeft;
+            const DWORD e = g.PutHeld(bin, newBytes.data(), newBytes.size(), &oldLeft);
+            check(g.ok() && e == ERROR_SUCCESS && ReadText(bin) == newBytes && ReadText(taken) == "an earlier file" && !Exists(bin + L".wronggpu-old-1") && oldLeft.empty(),
+                  "a taken .wronggpu-old name: the next free name used and cleaned up, the earlier file untouched (nothing deleted by name)");
+            DeleteFileW(taken.c_str());
+        }
+        CopyFileW(testDll.c_str(), bin.c_str(), FALSE);
         // a binary loaded in another process: GameRunning, nothing held; that process killed: Ok
         const std::wstring ready = JoinPath(root, L"ready-load");
         HANDLE k = Spawn(L"--child-load " + Q(bin) + L" " + Q(ready));
@@ -411,7 +498,7 @@ int wmain(int argc, wchar_t** argv) {
         {
             OperationGuard g(game, bins, 1000);
             check(up && g.result() == GuardResult::GameRunning && g.error() == ERROR_SHARING_VIOLATION && g.which() == bin && !g.Holds(bin2) &&
-                      std::string(g.words()).find("close the game first") != std::string::npos,
+                      std::string(g.words()).find("in use by the game or another program") != std::string::npos,
                   "a binary loaded in another process: GameRunning (sharing violation, names the file), nothing held");
         }
         if (k) { TerminateProcess(k, 9); WaitForSingleObject(k, 30000); CloseHandle(k); }
