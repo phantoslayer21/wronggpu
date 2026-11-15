@@ -2165,45 +2165,103 @@ int main() {
             require(BuildTimeText(0) == L"unknown" && BuildTimeText(nov5).size() == 20 && BuildTimeText(nov5) == L"2026-11-05 23:06 UTC", "BuildTimeText: \"YYYY-MM-DD hh:mm UTC\"");
         }
 
-        // No search of the store libraries when asked (--noscan, the window's or a job's noscan): the AMD FSR 4 search included
+        // #243: the store access (util.h LibraryAccess) and the no-scan of each operation
         {
             const wstring nsDir = Join(dir, L"noscan");
             EnsureDir(nsDir);
-            Context nctx;
-            nctx.logFile = Join(nsDir, L"noscan.log");
             Ui nui;
             nui.step = [](int, int, const wstring&) {};
             nui.log = [](const wstring&) {};
-            OpRequest nr;
-            nr.op = Op::Uninstall;
-            nr.dir = Join(nsDir, L"no-such-game");  // fails at once (no record): only what RunOp does first matters here
-            nr.noScan = true;
-            const OpResult nres = RunOp(nctx, nr, nui);
-            require(nres.code != 0 && nctx.noLibraryScan, "an operation with noscan: ctx.noLibraryScan set (what the AMD FSR 4 search reads)");
-            const CompareDll none = RecordCompareDll(nctx, nui, L"");
-            string nlog;
-            ReadAll(nctx.logFile, nlog);
-            require(none.path.empty() && nlog.find("AMD FSR 4 search: libraries not searched") != string::npos && nlog.find("candidate") == string::npos,
-                    "noscan: the AMD FSR 4 search leaves the store libraries alone (said in the log), no candidate");
-            Context sctx;
-            OpRequest sr = nr;
-            sr.noScan = false;
-            RunOp(sctx, sr, nui);
-            require(!sctx.noLibraryScan, "an operation without noscan leaves ctx.noLibraryScan as it was");
+            auto failingOp = [&](bool noScan) {  // an operation that fails at once (no record): only what RunOp does around it matters
+                OpRequest r;
+                r.op = Op::Uninstall;
+                r.dir = Join(nsDir, L"no-such-game");
+                r.noScan = noScan;
+                return r;
+            };
+            // the no-scan is per operation: a job's noscan holds for that job only, the process's for all
+            Context pc;
+            pc.logFile = Join(nsDir, L"per-op.log");
+            require(RunOp(pc, failingOp(true), nui).code != 0 && !pc.noLibraryScan, "a noscan operation: the flag goes back when it ends (never sticks into the next job)");
+            RunOp(pc, failingOp(false), nui);
+            require(!pc.noLibraryScan, "an operation without noscan: no search is held back");
+            Context ac;
+            ac.noScanAlways = true;
+            ac.noLibraryScan = true;
+            RunOp(ac, failingOp(false), nui);
+            require(ac.noLibraryScan, "--noscan for the process: every operation, also one whose own noscan is off, searches nothing");
+            pc.noLibraryScan = true;  // (as RunOp sets it for a noscan operation)
+            const CompareDll none = RecordCompareDll(pc, nui, L"");
+            string plog;
+            ReadAll(pc.logFile, plog);
+            require(none.path.empty() && plog.find("AMD FSR 4 search: libraries not searched") != string::npos && plog.find("candidate") == string::npos,
+                    "noscan: the AMD FSR 4 search leaves the store libraries alone (said in the log)");
+            pc.noLibraryScan = false;
 #ifdef WRONGGPU_TESTING
-            // test builds: WRONGGPU_TEST_LIBRARIES is the only library list (each sub-folder a game; empty: none)
-            const wstring libs = Join(nsDir, L"libraries");
-            EnsureDir(Join(libs, L"Game A"));
-            EnsureDir(Join(libs, L"Game B"));
+            // test builds: WRONGGPU_TEST_LIBRARIES (a NON-EMPTY test library here) is the only library list; every store read is
+            // asked of LibraryAccess first and logged to WRONGGPU_TEST_ACCESS_LOG; nothing outside the test folder is read
+            const wstring libs = Join(nsDir, L"libraries"), access = Join(nsDir, L"access.log");
+            auto put = [](const wstring& p, const string& t) { EnsureDir(Parent(p)); WriteFileAtomic(p, t.data(), t.size()); };
+            put(Join(libs, L"Library Game\\amd_fidelityfx_upscaler_dx12.dll"), "MZ not AMD's DLL");
             SetEnvironmentVariableW(L"WRONGGPU_TEST_LIBRARIES", libs.c_str());
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_ACCESS_LOG", access.c_str());
+            auto accessLog = [&] { string t; ReadAll(access, t); DeleteFileW(access.c_str()); return t; };
+            const string outsideRoot = "Q:\\NotTheTestFolder";
             const auto found = ScanLibraries();
-            require(found.size() == 2 && TestLibraries() && std::all_of(found.begin(), found.end(), [&](const StoreGame& s) {
-                        return s.root.rfind(FullPath(libs), 0) == 0 && s.source == L"Test"; }),
-                    "WRONGGPU_TEST_LIBRARIES: its sub-folders are the libraries' games, nothing else");
+            string al = accessLog();
+            require(found.size() == 1 && found[0].source == L"Test" && TestLibraries() && al.find("library access: " + ToUtf8(libs)) != string::npos &&
+                        al.find("registry") == string::npos,
+                    "ScanLibraries: the test library's games only, logged; no store registry read");
+            require(!LibraryRegistryAccess(L"GOG.com Games") && accessLog().find("library access refused: registry GOG.com Games") != string::npos,
+                    "GOG (and Steam's registry, the art cache's Steam path): a store's registry key is refused in a test build, logged");
+            // Steam: an app manifest inside the test folder is read; one of the PC's is not
+            put(Join(libs, L"steamapps\\appmanifest_123.acf"), "\"AppState\"\r\n{\r\n\t\"appid\"\t\t\"123\"\r\n\t\"name\"\t\t\"Test Game\"\r\n\t\"installdir\"\t\t\"G\"\r\n}\r\n");
+            put(Join(libs, L"steamapps\\common\\G\\Game.exe"), "MZ");
+            require(SteamAppId(Join(libs, L"steamapps\\common\\G\\Game.exe")) == L"123" && GameDisplayName(Join(libs, L"steamapps\\common\\G\\Game.exe")) == L"Test Game" &&
+                        accessLog().find("library access: " + ToUtf8(Join(libs, L"steamapps"))) != string::npos,
+                    "Steam (SteamAppId, GameDisplayName): an app manifest in the test folder is read, logged");
+            require(SteamAppId(FromUtf8(outsideRoot) + L"\\steamapps\\common\\G\\Game.exe").empty() &&
+                        accessLog().find("library access refused: " + outsideRoot + "\\steamapps") != string::npos,
+                    "Steam: an app manifest folder outside the test folder is refused, logged, not read");
+            // Epic: the manifests of a ProgramData in the test folder are read; the PC's are not
+            wchar_t pdWas[MAX_PATH] = {};
+            GetEnvironmentVariableW(L"ProgramData", pdWas, MAX_PATH);
+            const wstring pd = Join(nsDir, L"programdata");
+            {
+                string loc;  // (JSON: the path's backslashes escaped, as Epic writes them)
+                for (char c : ToUtf8(Join(libs, L"E"))) { loc += c; if (c == '\\') loc += '\\'; }
+                put(Join(pd, L"Epic\\EpicGamesLauncher\\Data\\Manifests\\t.item"), "{\"InstallLocation\": \"" + loc + "\", \"AppName\": \"TestApp\"}");
+            }
+            SetEnvironmentVariableW(L"ProgramData", pd.c_str());
+            const wstring epic = EpicAppName(Join(libs, L"E\\Game.exe"));
+            const string eal = accessLog();
+            SetEnvironmentVariableW(L"ProgramData", FromUtf8(outsideRoot).c_str());
+            const wstring epicOut = EpicAppName(Join(libs, L"E\\Game.exe"));
+            const string eal2 = accessLog();
+            SetEnvironmentVariableW(L"ProgramData", pdWas[0] ? pdWas : nullptr);
+            require(epic == L"TestApp" && eal.find("library access: " + ToUtf8(pd)) != string::npos, "Epic (EpicAppName): the manifests of a ProgramData in the test folder are read, logged");
+            require(epicOut.empty() && eal2.find("library access refused: " + outsideRoot) != string::npos, "Epic: the manifests outside the test folder are refused, logged, not read");
+            // the walk of a library game's folder (FindFilesNamed): inside yes, outside no; \\?\ and UNC forms as such
+            require(FindFilesNamed(Join(libs, L"Library Game"), L"amd_fidelityfx_upscaler_dx12.dll").size() == 1 &&
+                        FindFilesNamed(FromUtf8(outsideRoot), L"amd_fidelityfx_upscaler_dx12.dll").empty() && !LibraryAccess(L"\\\\server\\share\\games") &&
+                        !LibraryAccess(L"\\\\?\\UNC\\server\\share\\games") && LibraryAccess(L"\\\\?\\" + Join(libs, L"Library Game")),
+                    "FindFilesNamed and LibraryAccess: inside the test folder walked (also as \\\\?\\), outside and UNC refused");
+            const string wal = accessLog();
+            require(wal.find("library access refused: " + outsideRoot) != string::npos && wal.find("library access refused: \\\\server\\share\\games") != string::npos,
+                    "the refused walks are logged");
+            // a normal operation after a noscan one finds its compare DLL in the test library (the search runs again)
+            RunOp(pc, failingOp(true), nui);
+            DeleteFileW(pc.logFile.c_str());
+            RecordCompareDll(pc, nui, L"");
+            ReadAll(pc.logFile, plog);
+            require(plog.find("AMD FSR 4 search: " + ToUtf8(Join(libs, L"Library Game\\amd_fidelityfx_upscaler_dx12.dll"))) != string::npos &&
+                        accessLog().find("library access: " + ToUtf8(Join(libs, L"Library Game"))) != string::npos,
+                    "after a noscan job, a normal one's AMD FSR 4 search finds the test library's DLL (here: not AMD's, so not used)");
             SetEnvironmentVariableW(L"WRONGGPU_TEST_LIBRARIES", L"");
             require(ScanLibraries().empty() && TestLibraries(), "WRONGGPU_TEST_LIBRARIES set but empty: no library at all");
             SetEnvironmentVariableW(L"WRONGGPU_TEST_LIBRARIES", nullptr);
-            require(!TestLibraries(), "WRONGGPU_TEST_LIBRARIES not set: the normal library search (TestLibraries false)");
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_ACCESS_LOG", nullptr);
+            require(!TestLibraries(), "WRONGGPU_TEST_LIBRARIES not set: TestLibraries false (the normal search, never run here)");
 #else
             require(!TestLibraries(), "a build without WRONGGPU_TESTING never takes a test library list");
 #endif

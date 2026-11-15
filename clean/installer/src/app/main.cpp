@@ -131,20 +131,26 @@ int RunSilent() {
             LogLine(g.ctx, L"HIP check: " + (h.ok ? L"OK - " + h.device + L" (" + h.arch + L") with " + h.dll : h.text));
             return h.ok ? EXIT_OK : EXIT_REFUSED;
         }
+        // /NOSCAN with /FSR4 or /LIST (#243): no store library is searched; the report says so
+        auto storeLibraries = [](const wchar_t* what) {
+            if (!g.ctx.noLibraryScan) return ScanLibraries();
+            LogLine(g.ctx, wstring(what) + L": libraries not searched (/NOSCAN)");
+            return std::vector<StoreGame>{};
+        };
         if (g.fsr4) {  // read-only: the AMD FSR 4 DLL an install would record for the comparison key
-            const CompareDll fc = FindCompareDll(g.ctx, ScanLibraries());
+            const CompareDll fc = FindCompareDll(g.ctx, storeLibraries(L"FSR 4 for the comparison key"));
             LogLine(g.ctx, fc.path.empty() ? wstring(L"FSR 4 for the comparison key: none found (Home compares with the game's own AMD FSR)")
                                     : L"FSR 4 for the comparison key: " + fc.path + L" (" + fc.version + L", " + fc.game + L")");
             return EXIT_OK;
         }
         if (g.list) {  // read-only: what the wizard would show, with the checks for each game
-            for (auto& f : DetectGames(ScanLibraries())) {
+            for (auto& f : DetectGames(storeLibraries(L"games"))) {
                 GameTarget t = InspectGame(g.ctx, f.exe, f.name);
                 Checks c = RunChecks(g.ctx, t, g.sys, nullptr, g.force);
                 LogLine(g.ctx, L"game " + f.name + L" [" + f.source + L"] " + (f.validated ? L"VALIDATED" : L"experimental") + L" -> " + f.exe + L" | install folder " + t.dir);
                 for (int i = 0; i < L_COUNT; ++i) LogLine(g.ctx, wstring(c.st[i] == CK_OK ? L"    ok    " : c.st[i] == CK_WARN ? L"    warn  " : c.st[i] == CK_NA ? L"    n/a   " : L"    FAIL  ") + c.text[i]);
             }
-            const CompareDll fc = FindCompareDll(g.ctx, ScanLibraries());  // what an install would record (nothing written here)
+            const CompareDll fc = FindCompareDll(g.ctx, storeLibraries(L"FSR 4 for the comparison key"));  // what an install would record (nothing written here)
             LogLine(g.ctx, fc.path.empty() ? wstring(L"FSR 4 for the comparison key: none found (Home compares with the game's own AMD FSR)")
                                     : L"FSR 4 for the comparison key: " + fc.path + L" (" + fc.version + L", " + fc.game + L")");
             return EXIT_OK;
@@ -243,7 +249,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         else if (la == L"/preset=m") {}
 #endif
         else if (kDirectRoute && la == L"/directfsr") g.route = wg_wizard::Route::DirectFsr;
-        else if (la == L"/noscan") g.noScan = g.ctx.noLibraryScan = true;
+        else if (la == L"/noscan") { g.noScan = g.ctx.noScanAlways = true; g.ctx.noLibraryScan = true; }
         else if (la == L"/force") g.force = true;
         else if (la == L"/experimental") g.experimentalOk = true;
         else if (la == L"/movemods") g.moveMods = true;

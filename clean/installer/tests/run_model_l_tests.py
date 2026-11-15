@@ -63,8 +63,7 @@ class T:
         shutil.rmtree(self.lad, ignore_errors=True)
         os.makedirs(self.lad)
         self.env = dict(os.environ, LOCALAPPDATA=self.lad, ProgramData=os.path.join(work, "programdata"))
-        self.env["WRONGGPU_TEST_LIBRARIES"] = os.path.join(work, "libraries")  # the store libraries: none of the PC's (detect.h TestLibraries)
-        os.makedirs(self.env["WRONGGPU_TEST_LIBRARIES"], exist_ok=True)
+        __import__("launcher_isolation").test_env(self.env, work)  # (#243) the store libraries: none of the PC's; every access logged
         for k in [k for k in self.env if k.upper().startswith("WG_") or k.upper() in ("HIP_PATH", "ROCM_PATH", "LLVM_PATH", "HIP_DEVICE_LIB_PATH")]:
             self.env.pop(k)
         self.j, self.stdout = {}, ""
@@ -83,6 +82,7 @@ class T:
             if os.path.exists(p):
                 os.remove(p)
         cmd = [self.exe] + list(args) + ["--noscan", "--log=" + self.log, "--out=" + self.out, "--data=" + os.path.join(self.work, "data")]
+        astart = __import__("launcher_isolation").access_size(self.work)
         p = subprocess.run(cmd, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600)
         self.stdout = p.stdout.decode("utf-8", "replace")
         try:
@@ -90,7 +90,7 @@ class T:
                 self.j = json.load(f)
         except (OSError, ValueError):
             self.j = {}
-        __import__("launcher_isolation").check_isolation(self.log, self.work, 0, args)  # never the PC's own game folders
+        __import__("launcher_isolation").check_isolation(self.log, self.work, 0, args, astart)  # (#243) never the PC's own game folders
         return p.returncode
 
     def model(self, *rel):
@@ -329,6 +329,8 @@ def main():
     if not a.launcher and not a.launcher_synth and not a.launcher_choice:
         ap.error("--launcher, --launcher-synth or --launcher-choice is needed")
     work = os.path.abspath(a.work)
+    os.makedirs(work, exist_ok=True)
+    __import__("launcher_isolation").self_test(work)  # (#243) first: no launcher call with a broken guard
     passed, failures = 0, []
     for exe, part, fn in ((a.launcher, "shipped", test_shipped_map), (a.launcher_synth, "synth", lambda t: test_conversion(t, a.reference_launcher)),
                           (a.launcher_choice, "choice", test_choice), (a.launcher_synth, "no-choice", test_no_choice)):

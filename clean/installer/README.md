@@ -932,13 +932,33 @@ Windows (the Wine run was not repeated for them):
   not a HIP runtime; `LLVM_PATH` removed for the child (the mock fails when it sees it); the newest ROCm folder
   (7.10 before 7.2) tried first.
 
-**The tests never read the PC's own game libraries.** A `WRONGGPU_TESTING` build with `WRONGGPU_TEST_LIBRARIES` set takes its store
-libraries from that folder only (each sub-folder a game; set but empty: none) and reads nothing of the PC's stores (not
-Steam's library list, not its art cache: `detect.h` `TestLibraries`). Every test runner sets it to an empty folder of its work
-folder. `--noscan` (and `/NOSCAN`) keeps every library search away from the store libraries, the AMD FSR 4 search and the
-model search included. The launcher runners (`tests/launcher_isolation.py` `check_isolation`, used by the coexistence, Model L / K
-and convert-ignore runners too) stop the whole run, loudly, at the first log line of such a search that names a path
-outside the run's work folder.
+**The tests never read the PC's own game libraries** (#243). Every read of a store's metadata goes through one place
+(`util.h` `LibraryAccess` / `LibraryRegistryAccess`). That covers Steam's library list and app manifests (also Play's Steam
+app id and the display name), Epic's manifests (also Play's Epic app name), the GOG registry, Steam's art cache, and every
+walk of a library game's folder (`FindFilesNamed`).
+- A `WRONGGPU_TESTING` build with `WRONGGPU_TEST_LIBRARIES` set takes its store libraries from that folder only (each
+  sub-folder a game; set but empty: none). It reads nothing outside the folder that holds it, the test run's own folder, and
+  no store registry key.
+- Such a build logs "library access: <path>" (or "... refused: <path>") to `WRONGGPU_TEST_ACCESS_LOG` before every read.
+  Release builds read neither variable.
+- `--noscan` (CLI, every verb; `apply --noscan` for the job too), `/NOSCAN` and the window's no-scan keep every library search
+  away from the store libraries, the AMD FSR 4 search and the other-model search included. An operation's own noscan (a
+  job's) holds for that operation only, never for the next job of a batch.
+- `/S /NOSCAN /FSR4` and `/S /NOSCAN /LIST` search no library; the report says "libraries not searched (/NOSCAN)".
+
+Every runner (launcher, coexistence, Model L / K, convert-ignore, installer) sets both variables to its work folder. Each
+runs the guard's self-test (`tests/launcher_isolation.py` `self_test`) before any program call, and stops the run if the
+guard is broken. Every launcher and installer call, raw ones and elevated jobs included, is checked by `check_isolation`.
+The run stops, loudly, on:
+- a read outside the work folder (also its `\\?\` and UNC forms);
+- a store registry read;
+- a missing or unreadable access log;
+- no access at all where a call was meant to scan (the guard's sensitivity);
+- a search line of the main log that names a path outside the work folder.
+
+The `[isolation-verbs]` section runs install, repair, update, uninstall, the window's refresh, a batch (a noscan job, then a
+normal one) and `/FSR4` / `/LIST`, with and without no-scan, against a non-empty test library. The 0.5.1 baseline installer
+predates all this and runs only with `--run-old-baseline`, in a fully redirected sandbox.
 
 On Windows: `python tests\run_installer_tests.py --prepare-only` writes the mock payload and the synthetic map; build
 the installer from them with CMake (`-DWRONGGPU_PAYLOAD_DIR=... -DWRONGGPU_MAP=...`) and run

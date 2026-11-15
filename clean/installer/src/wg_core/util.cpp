@@ -3,6 +3,8 @@
 // this project.
 #include "util.h"
 
+#include <atomic>
+
 namespace wg {
 
 [[noreturn]] void Fail(const wstring& m, int code) { throw SetupError{m + L" [WG-SETUP-" + std::to_wstring(code) + L"]", code}; }
@@ -477,8 +479,80 @@ std::vector<wstring> ListDirs(const wstring& dir) {
     return r;
 }
 // Every file named `name` below root (depth-limited, budgeted, no links), sorted by path.
+// ---- store access (#243): the one way to the store libraries' metadata and folders --------------------------------------
+static std::atomic<size_t> g_libraryAccesses{0};
+
+bool TestLibraries(wstring* folder) {
+#ifdef WRONGGPU_TESTING
+    wchar_t buf[MAX_PATH * 2] = {};
+    SetLastError(ERROR_SUCCESS);
+    const DWORD n = GetEnvironmentVariableW(L"WRONGGPU_TEST_LIBRARIES", buf, (DWORD)(sizeof buf / sizeof buf[0]));
+    if (n == 0 && GetLastError() == ERROR_ENVVAR_NOT_FOUND) return false;
+    if (folder) *folder = n > 0 && n < sizeof buf / sizeof buf[0] ? wstring(buf) : wstring();
+    return true;
+#else
+    (void)folder;
+    return false;
+#endif
+}
+
+// A path as one form for the scope test: \\?\C:\x and \??\C:\x as C:\x, \\?\UNC\srv\share as \\srv\share, then full.
+static wstring ScopeForm(const wstring& p) {
+    wstring s = p;
+    if (StartsWithI(s, L"\\\\?\\UNC\\")) s = L"\\\\" + s.substr(8);
+    else if (StartsWithI(s, L"\\\\?\\") || StartsWithI(s, L"\\??\\")) s = s.substr(4);
+    return FullPath(s);
+}
+
+// Test builds: one line per store access to WRONGGPU_TEST_ACCESS_LOG (UTF-8, appended, before the read), for the tests'
+// guard. Nothing in other builds.
+static void TestAccessLine(const wstring& line) {
+#ifdef WRONGGPU_TESTING
+    const wstring log = EnvVar(L"WRONGGPU_TEST_ACCESS_LOG");
+    if (log.empty()) return;
+    const string text = ToUtf8(line + L"\r\n");
+    const HANDLE h = CreateFileW(log.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_ALWAYS,
+                                 FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    DWORD w = 0;
+    WriteFile(h, text.data(), (DWORD)text.size(), &w, nullptr);
+    CloseHandle(h);
+#else
+    (void)line;
+#endif
+}
+
+bool LibraryAccess(const wstring& path) {
+    ++g_libraryAccesses;
+    wstring folder;
+    if (!TestLibraries(&folder)) {
+        TestAccessLine(L"library access: " + path);
+        return true;
+    }
+    // the tests' scope: the folder that holds WRONGGPU_TEST_LIBRARIES (the test run's own folder); nothing else is read
+    wstring root = folder.empty() ? wstring() : Parent(ScopeForm(folder));
+    while (root.size() > 3 && root.back() == L'\\') root.pop_back();
+    const wstring p = ScopeForm(path);
+    const bool inside = !root.empty() && (IEq(p, root) || (p.size() > root.size() && StartsWithI(p, root) && (p[root.size()] == L'\\' || root.back() == L'\\')));
+    TestAccessLine((inside ? L"library access: " : L"library access refused: ") + path);
+    return inside;
+}
+
+bool LibraryRegistryAccess(const wchar_t* what) {
+    ++g_libraryAccesses;
+    if (!TestLibraries()) {
+        TestAccessLine(wstring(L"library access: registry ") + what);
+        return true;
+    }
+    TestAccessLine(wstring(L"library access refused: registry ") + what);
+    return false;
+}
+
+size_t LibraryAccessCount() { return g_libraryAccesses; }
+
 std::vector<wstring> FindFilesNamed(const wstring& root, const wchar_t* name, size_t budget, int maxDepth) {
     std::vector<wstring> out;
+    if (!LibraryAccess(root)) return out;  // (a test build: never a folder outside the test run's own)
     std::vector<std::pair<wstring, int>> stack{{root, 0}};
     size_t visited = 0;
     while (!stack.empty() && visited < budget) {

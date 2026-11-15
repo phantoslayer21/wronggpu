@@ -174,9 +174,11 @@ wstring EpicAppName(const wstring& exe) {
     const wstring pd = EnvVar(L"ProgramData");
     if (pd.empty() || exe.empty()) return L"";
     const wstring full = FullPath(exe);
-    for (auto& item : ListFiles(Join(pd, L"Epic\\EpicGamesLauncher\\Data\\Manifests"), L"*.item")) {
+    const wstring manifests = Join(pd, L"Epic\\EpicGamesLauncher\\Data\\Manifests");
+    if (!LibraryAccess(manifests)) return L"";  // (util.h: the store access; a test build never reads the PC's own)
+    for (auto& item : ListFiles(manifests, L"*.item")) {
         string raw;
-        if (!ReadAll(item, raw)) continue;
+        if (!LibraryAccess(item) || !ReadAll(item, raw)) continue;
         const wstring t = FromUtf8(raw);
         wstring loc = EpicField(t, L"InstallLocation");
         for (auto& c : loc) if (c == L'/') c = L'\\';
@@ -203,25 +205,11 @@ wstring StoreExe(const wstring& root, const wstring& hint) {
 }
 
 // Every game folder of the Steam, Epic and GOG libraries on this PC. Read-only.
-bool TestLibraries(wstring* folder) {
-#ifdef WRONGGPU_TESTING
-    wchar_t buf[MAX_PATH * 2] = {};
-    SetLastError(ERROR_SUCCESS);
-    const DWORD n = GetEnvironmentVariableW(L"WRONGGPU_TEST_LIBRARIES", buf, (DWORD)(sizeof buf / sizeof buf[0]));
-    if (n == 0 && GetLastError() == ERROR_ENVVAR_NOT_FOUND) return false;
-    if (folder) *folder = n > 0 && n < sizeof buf / sizeof buf[0] ? wstring(buf) : wstring();
-    return true;
-#else
-    (void)folder;
-    return false;
-#endif
-}
-
 std::vector<StoreGame> ScanLibraries() {
     wstring testFolder;
     if (TestLibraries(&testFolder)) {  // test builds: the suite's libraries only, the PC's own stores are not read at all
         std::vector<StoreGame> test;
-        if (!testFolder.empty() && IsDir(testFolder))
+        if (!testFolder.empty() && LibraryAccess(testFolder) && IsDir(testFolder))
             for (auto& d : ListDirs(testFolder)) test.push_back({BaseName(d), FullPath(d), L"", L"Test"});
         return test;
     }
@@ -232,12 +220,13 @@ std::vector<StoreGame> ScanLibraries() {
         roots.push_back({name, FullPath(root), hint, source});
     };
     // Steam: every library in libraryfolders.vdf, every app manifest in it.
-    wstring steam = RegString(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", L"SteamPath");
+    wstring steam = LibraryRegistryAccess(L"Steam SteamPath") ? RegString(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", L"SteamPath") : wstring();
     if (!steam.empty()) {
         for (auto& c : steam) if (c == L'/') c = L'\\';
         std::vector<wstring> libs{steam};
         string raw;
-        if (ReadAll(Join(steam, L"steamapps\\libraryfolders.vdf"), raw)) {
+        const wstring vdf = Join(steam, L"steamapps\\libraryfolders.vdf");
+        if (LibraryAccess(vdf) && ReadAll(vdf, raw)) {
             wstring t = FromUtf8(raw); size_t pos = 0;
             while (pos < t.size()) {
                 size_t nl = t.find(L'\n', pos); wstring line = t.substr(pos, nl == wstring::npos ? wstring::npos : nl - pos); pos = nl == wstring::npos ? t.size() : nl + 1;
@@ -249,9 +238,10 @@ std::vector<StoreGame> ScanLibraries() {
             }
         }
         for (auto& lib : libs) {
+            if (!LibraryAccess(Join(lib, L"steamapps"))) continue;
             for (auto& acf : ListFiles(Join(lib, L"steamapps"), L"appmanifest_*.acf")) {
                 string a;
-                if (!ReadAll(acf, a)) continue;
+                if (!LibraryAccess(acf) || !ReadAll(acf, a)) continue;
                 wstring t = FromUtf8(a), dir = KeyValue(t, L"installdir");
                 // benchmarks that ship upscaler test files but are not games (3DMark and its demo)
                 static const wchar_t* const kNotGames[] = {L"223850", L"231350"};
@@ -264,17 +254,18 @@ std::vector<StoreGame> ScanLibraries() {
     }
     // Epic Games Store.
     wstring pd = EnvVar(L"ProgramData");
-    if (!pd.empty()) {
+    if (!pd.empty() && LibraryAccess(Join(pd, L"Epic\\EpicGamesLauncher\\Data\\Manifests"))) {
         for (auto& item : ListFiles(Join(pd, L"Epic\\EpicGamesLauncher\\Data\\Manifests"), L"*.item")) {
             string raw;
-            if (!ReadAll(item, raw)) continue;
+            if (!LibraryAccess(item) || !ReadAll(item, raw)) continue;
             const StoreGame e = EpicItemGame(FromUtf8(raw));
             add(e.name, e.root, e.hint, L"Epic");
         }
     }
     // GOG Galaxy and GOG offline installers.
     HKEY gog;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\GOG.com\\Games", 0, KEY_READ | KEY_WOW64_32KEY, &gog) == ERROR_SUCCESS) {
+    if (LibraryRegistryAccess(L"GOG.com Games") &&
+        RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\GOG.com\\Games", 0, KEY_READ | KEY_WOW64_32KEY, &gog) == ERROR_SUCCESS) {
         wchar_t sub[256];
         for (DWORD i = 0;; ++i) {
             DWORD n = (DWORD)std::size(sub);
@@ -292,6 +283,7 @@ std::vector<StoreGame> ScanLibraries() {
 std::vector<Found> DetectGames(const std::vector<StoreGame>& roots) {
     std::vector<Found> found;
     for (auto& r : roots) {
+        if (!LibraryAccess(r.root)) continue;
         bool fsr = false;
         for (auto& sl : kSlots) fsr = fsr || !FindFilesNamed(r.root, sl.name, 30000, 8).empty();
         // games with DLSS or XeSS only: installable with the player's OptiScaler
@@ -410,10 +402,10 @@ std::vector<SlotState> InspectSlots(Context& ctx, const wstring& dir, const Reco
 // Display name: the Steam app name when the game lives in a Steam library, else the exe name without Unreal suffixes.
 wstring GameDisplayName(const wstring& exe) {
     const wstring root = GameRoot(Parent(exe)), common = Parent(root), steamapps = Parent(common);
-    if (IEq(BaseName(common), L"common") && IEq(BaseName(steamapps), L"steamapps")) {
+    if (IEq(BaseName(common), L"common") && IEq(BaseName(steamapps), L"steamapps") && LibraryAccess(steamapps)) {
         for (auto& acf : ListFiles(steamapps, L"appmanifest_*.acf")) {
             string a;
-            if (!ReadAll(acf, a)) continue;
+            if (!LibraryAccess(acf) || !ReadAll(acf, a)) continue;
             wstring t = FromUtf8(a);
             if (IEq(KeyValue(t, L"installdir"), BaseName(root))) { wstring n = KeyValue(t, L"name"); if (!n.empty()) return n; }
         }
@@ -434,9 +426,10 @@ wstring SteamAppId(const wstring& exe) {
     while (!root.empty() && !(IEq(BaseName(Parent(root)), L"common") && IEq(BaseName(Parent(Parent(root))), L"steamapps"))) root = Parent(root);
     if (root.empty() || BaseName(root).empty()) return L"";
     const wstring steamapps = Parent(Parent(root));
+    if (!LibraryAccess(steamapps)) return L"";
     for (auto& acf : ListFiles(steamapps, L"appmanifest_*.acf")) {
         string a;
-        if (!ReadAll(acf, a)) continue;
+        if (!LibraryAccess(acf) || !ReadAll(acf, a)) continue;
         const wstring t = FromUtf8(a);
         if (!IEq(KeyValue(t, L"installdir"), BaseName(root))) continue;
         wstring id = KeyValue(t, L"appid");

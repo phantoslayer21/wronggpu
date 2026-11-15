@@ -54,10 +54,11 @@ struct ArtState {
 } st;
 
 wstring LibraryCache() {
-    if (TestLibraries()) return wstring();  // the tests never read the PC's own Steam (detect.h)
-    wstring steam = RegString(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", L"SteamPath");
+    // (util.h: the store access; a test build never reads the PC's own Steam)
+    wstring steam = LibraryRegistryAccess(L"Steam SteamPath (art cache)") ? RegString(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", L"SteamPath") : wstring();
     for (auto& c : steam) if (c == L'/') c = L'\\';
-    return steam.empty() ? wstring() : Join(steam, L"appcache\\librarycache");
+    const wstring cache = steam.empty() ? wstring() : Join(steam, L"appcache\\librarycache");
+    return cache.empty() || !LibraryAccess(cache) ? wstring() : cache;
 }
 
 // <cache>\<appid>\<name>, or one folder deeper (Steam keeps hashed sub-folders); the newest when there are several.

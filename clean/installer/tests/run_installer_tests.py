@@ -166,6 +166,10 @@ class Env:
         libs = os.path.join(work, "libraries")
         os.makedirs(libs, exist_ok=True)
         self.env["WRONGGPU_TEST_LIBRARIES"] = self.win(libs)
+        self.access = os.path.join(work, "library-access.log")  # every store access of the program, checked after each run (#243)
+        if not os.path.exists(self.access):
+            write(self.access, b"")
+        self.env["WRONGGPU_TEST_ACCESS_LOG"] = self.win(self.access)
 
     def close(self):
         if not self.native:
@@ -177,7 +181,10 @@ class Env:
     def run(self, args, timeout=300, extra_env=None):
         cmd = list(args) if self.native else [self.wine] + list(args)
         env = dict(self.env, **(extra_env or {}))
+        astart = os.path.getsize(self.access) if os.path.isfile(self.access) else 0
         p = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+        if self.native:  # (#243) never the PC's own game folders (under Wine the prefix is the program's own world)
+            __import__("launcher_isolation").check_isolation(None, self.work, 0, list(args)[:2], astart)
         return p.returncode
 
     def localappdata(self):
@@ -2236,6 +2243,9 @@ def main():
                                            "installs that the installer under test is then run over")
     a = ap.parse_args()
     work = os.path.abspath(a.work)
+    os.makedirs(work, exist_ok=True)
+    if os.name == "nt":
+        __import__("launcher_isolation").self_test(work)  # (#243) first: no installer run with a broken guard
     # The synthetic source and its map: version 4 with the optional source F (spec 08 draft 2), variant 1 in the file.
     model = cases.f_mini_case(present=0)
     prep = os.path.join(work, "prepared")
