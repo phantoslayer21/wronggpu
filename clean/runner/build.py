@@ -348,9 +348,22 @@ def build_runtime(cxx, out_dir, embed=True):
     run(runtime_command(cxx, os.path.join(out_dir, runtime_library_name()), embedded))
 
 
+def echo(cmd):
+    """Print a command line; a custom (forced) SDK or compiler appears by id only."""
+    print(sdk.redact(" ".join(f'"{c}"' if " " in c else c for c in cmd)), flush=True)
+
+
+def run_captured(cmd):
+    """Run a compiler with its output captured (so diagnostics naming a custom SDK can be redacted)."""
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+
 def run(cmd):
-    print(sdk.redact(" ".join(f'"{c}"' if " " in c else c for c in cmd)), flush=True)   # custom SDK paths by id only
-    r = subprocess.run(cmd)
+    echo(cmd)
+    r = run_captured(cmd)
+    sys.stdout.write(sdk.redact(r.stdout or ""))
+    sys.stderr.write(sdk.redact(r.stderr or ""))
+    sys.stdout.flush()
     if r.returncode != 0:
         raise SystemExit(f"build failed ({r.returncode})")
 
@@ -413,12 +426,13 @@ def resource_report(text):
 
 def run_post_w64(cmd, out_dir, gate=True, report_name=POST_W64_REPORT, gates=None):
     """Build post_w64.co with the resource report (written to POST_W64_REPORT) and check POST_W64_GATE (or `gates`)."""
-    print(" ".join(f'"{c}"' if " " in c else c for c in cmd), flush=True)
-    r = subprocess.run(cmd, stderr=subprocess.PIPE, text=True)
+    echo(cmd)
+    r = run_captured(cmd)
+    sys.stdout.write(sdk.redact(r.stdout or ""))
     with open(os.path.join(out_dir, report_name), "w") as f:
-        f.write(r.stderr)
+        f.write(sdk.redact(r.stderr or ""))
     if r.returncode != 0:
-        sys.stderr.write(r.stderr)
+        sys.stderr.write(sdk.redact(r.stderr or ""))
         raise SystemExit(f"build failed ({r.returncode})")
     rep = resource_report(r.stderr)
     bad = []

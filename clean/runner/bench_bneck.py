@@ -108,7 +108,9 @@ def format_report(rep):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True, help="output directory of build.py")
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
     ap.add_argument("--rocm", default=OFFICIAL_ROCM)
+    sdk.add_force_argument(ap)
     ap.add_argument("--backend", default="hip", choices=["hip", "emu"])
     ap.add_argument("--variants", help="comma-separated bmega* builds (default: every one built)")
     ap.add_argument("--groups", help="comma-separated workgroup counts for the megakernel (default: the variant's)")
@@ -118,6 +120,7 @@ def main(argv=None):
     ap.add_argument("--repeats", type=int, default=50)
     ap.add_argument("--json", help="also write the report as JSON")
     args = ap.parse_args(argv)
+    sdk.apply(args)   # --rocm: an official SDK, or a custom one with --force-sdk
     size = tuple(int(v) for v in args.size.lower().split("x")) if args.size else None
     groups = [int(g) for g in args.groups.split(",")] if args.groups else None
     reps = []

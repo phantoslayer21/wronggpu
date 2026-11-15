@@ -129,10 +129,13 @@ def format_report(r):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
     ap.add_argument("--rocm", default=OFFICIAL_ROCM)
+    sdk.add_force_argument(ap)
     ap.add_argument("--json")
     ap.add_argument("--repeats", type=int, default=9)
     args = ap.parse_args(argv)
+    sdk.apply(args)   # --rocm: an official SDK, or a custom one with --force-sdk
     r = run(args.build, args.rocm, repeats=args.repeats)
     print(format_report(r))
     if args.json:

@@ -131,12 +131,15 @@ def format_report(rep):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
     ap.add_argument("--rocm", default=OFFICIAL_ROCM)
+    sdk.add_force_argument(ap)
     ap.add_argument("--backend", default="hip", choices=["hip", "emu"])
     ap.add_argument("--variant", default="v2prof")
     ap.add_argument("--stages", help="comma-separated (default: all of sweep.GAME_SIZES)")
     ap.add_argument("--json")
     args = ap.parse_args(argv)
+    sdk.apply(args)   # --rocm: an official SDK, or a custom one with --force-sdk
     rep = profile(args.build, args.rocm, args.backend, args.variant,
                   args.stages.split(",") if args.stages else None)
     print(format_report(rep))

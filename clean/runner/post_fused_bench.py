@@ -92,7 +92,9 @@ def check_small(r, code_objects, report):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
     ap.add_argument("--rocm", default=OFFICIAL_ROCM)
+    sdk.add_force_argument(ap)
     ap.add_argument("--clang", help="clang for building post_w64.co (default: from --rocm)")
     ap.add_argument("--repeats", type=int, default=50)
     ap.add_argument("--json", help="also write the results to this file")
@@ -101,6 +103,7 @@ def main(argv=None):
     ap.add_argument("--no-w64", action="store_true", help="wave32 code object only")
     ap.add_argument("--backend", default="hip", help="hip (GPU) or emu (host emulator, checks only)")
     args = ap.parse_args(argv)
+    sdk.apply(args)   # --rocm: an official SDK, or a custom one with --force-sdk
     code_objects = [PS.CODE_OBJECT]
     if not args.no_w64 and args.backend == "hip":
         if not os.path.exists(os.path.join(args.build, PS.CODE_OBJECT_W64)):

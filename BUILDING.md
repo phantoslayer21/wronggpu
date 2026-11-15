@@ -42,12 +42,15 @@ these defaults:
 | `WRONGGPU_HIP_RUNTIME` | the HIP runtime the launcher's probe loads (tests: the stand-in of step 5.1) | the system's |
 
 The build scripts use the newest official AMD HIP SDK 7.x install (`C:\Program Files\AMD\ROCm\<version>`; on
-other systems `/opt/rocm-<version>` or `/opt/rocm`), its own clang and device libraries, and load the HIP runtime
-library from it by full path. They never take an SDK, a compiler or a library from the environment (`ROCM_PATH`,
+other systems `/opt/rocm-<version>` or `/opt/rocm`, which counts with the version it points to, or as a standalone
+install with its own), its own clang and device libraries, and the Python tools load the HIP runtime library from it by
+full path. They never take an SDK, a compiler or a library from the environment (`ROCM_PATH`,
 `HIP_PATH`, `LLVM_PATH`, `HIP_DEVICE_LIB_PATH`, `HIP_CLANG_PATH`) or from `PATH`; every HIP compile checks this at
 one place (`device_command`). Remove those variables from the build's environment anyway: the vendor runtime reads
 some of them. Another SDK or compiler needs `--rocm <folder>` / `--clang <path>` with `--force-sdk` (build.py,
-k_build.py); every build log names the SDK, compiler and device-library folders, a custom one only by an id.
+k_build.py and every script with `--rocm`); every build log names the SDK, compiler and device-library folders, a custom
+one only by an id, also in compiler output. The native runtime's and the installer's own HIP runtime lookup are not
+part of this rule yet (planned for 0.6.6).
 
 Open a "x64 Native Tools Command Prompt for VS 2026" (or call `vcvars64.bat`) for every step below, at the repository
 root. The commands write into `out\`; any folder outside the repository works the same.

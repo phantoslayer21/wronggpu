@@ -364,12 +364,15 @@ def run(build, rocm, part="all"):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
     ap.add_argument("--rocm", required=True)
+    sdk.add_force_argument(ap)
     ap.add_argument("--prepare", action="store_true")
     ap.add_argument("--run", action="store_true")
     ap.add_argument("--part", choices=("all", "replay", "oracle"), default="all")
     ap.add_argument("--json")
     a = ap.parse_args(argv)
+    sdk.apply(a)   # --rocm: an official SDK, or a custom one with --force-sdk
     if a.prepare:
         prepare(a.build, a.rocm)
     if a.run:

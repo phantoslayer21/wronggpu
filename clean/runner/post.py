@@ -639,13 +639,12 @@ def build_wave64(build_dir, rocm_dir="", clang=None):
     """Build post_w64.co: the same kernels in wave64 mode (on RDNA 4 a wave64 FP32 FMA/MUL/ADD issues in one pass,
     in wave32 only through VOPD pairs). Same compiler command as build.py plus -mwavefrontsize64."""
     import os
-    import subprocess
     from clean.runner import build as B
     clang = clang or B.find_clang(rocm_dir)
     out = os.path.join(build_dir, CODE_OBJECT_W64)
     cmd = B.device_command(clang, rocm_dir, os.path.join(B.KERNEL_DIR, "post.hip"), out,
                            device_libs=bool(rocm_dir), extra=["-mwavefrontsize64"])
-    subprocess.run(cmd, check=True)
+    B.run(cmd)   # echo and compiler output with a custom (forced) SDK by id only
     return out
 
 

@@ -157,7 +157,9 @@ def format_report(report):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
     ap.add_argument("--rocm", default=OFFICIAL_ROCM)
+    sdk.add_force_argument(ap)
     ap.add_argument("--backend", default="hip", choices=["hip", "emu"])
     ap.add_argument("--stages", help="comma-separated (default: all)")
     ap.add_argument("--variants", default="all", help="comma-separated names, or 'all' (everything in variants.json, "
@@ -166,6 +168,7 @@ def main(argv=None):
     ap.add_argument("--json", help="also write the full report as JSON")
     ap.add_argument("--scaling", action="store_true", help="instead: time the base build at several map sizes (see scaling())")
     args = ap.parse_args(argv)
+    sdk.apply(args)   # --rocm: an official SDK, or a custom one with --force-sdk
     if args.scaling:
         rows = scaling(args.build, args.rocm, args.backend, args.stages.split(",") if args.stages else None,
                        repeats=args.repeats)

@@ -117,10 +117,13 @@ def run(build, rocm, seeds=(89,)):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
     ap.add_argument("--rocm", required=True)
+    sdk.add_force_argument(ap)
     ap.add_argument("--seeds", type=int, default=1, help="run the case list with this many seeds (89, 90, ...)")
     ap.add_argument("--json", required=True)
     a = ap.parse_args(argv)
+    sdk.apply(a)   # --rocm: an official SDK, or a custom one with --force-sdk
     res = run(a.build, a.rocm, tuple(range(89, 89 + a.seeds)))
     LR.write_l_record(res, a.json)
     print({"total": res["total"], "pass": res["pass"]})

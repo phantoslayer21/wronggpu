@@ -342,13 +342,16 @@ def run(build, rocm, seeds, kernels):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--build", required=True)
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
     ap.add_argument("--rocm", required=True)
+    sdk.add_force_argument(ap)
     ap.add_argument("--prepare", action="store_true")
     ap.add_argument("--run", action="store_true")
     ap.add_argument("--seeds", type=int, default=2)
     ap.add_argument("--kernels", default=",".join(KINDS))
     ap.add_argument("--json", default=None)
     a = ap.parse_args(argv)
+    sdk.apply(a)   # --rocm: an official SDK, or a custom one with --force-sdk
     kernels = a.kernels.split(",")
     if a.prepare:
         prepare(a.build, a.rocm, kernels)

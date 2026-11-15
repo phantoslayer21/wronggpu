@@ -19,6 +19,9 @@ import statistics
 import subprocess
 import sys
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))   # the repository, for clean.runner
+from clean.runner import sdk  # noqa: E402  (the HIP SDK policy: --rocm, --force-sdk)
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 
@@ -252,7 +255,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--build', required=True, help='frozen complete HIP/native payload build')
     p.add_argument('--out', required=True, help='private build and evidence directory')
-    p.add_argument('--rocm', default=r'C:\Program Files\AMD\ROCm\7.2')
+    p.add_argument('--rocm', default='')
+    sdk.add_force_argument(p)
     p.add_argument('--prepare', action='store_true', help='CPU-only compile/input/model generation')
     p.add_argument('--rebuild', action='store_true', help='with --prepare, recompile while preserving verified original inputs/model')
     p.add_argument('--run', action='store_true', help='GPU work: use shared lock + activity wrapper')
@@ -268,6 +272,7 @@ def main():
     p.add_argument('--run-tag', default='paired-r0')
     p.add_argument('--clock-co', default=os.environ.get('WG_CLOCK_CO', ''), help='original synthetic cycle/realtime probe')
     a = p.parse_args()
+    sdk.apply(a)   # --rocm: an official SDK, or a custom one with --force-sdk
     if not a.prepare and not a.run:
         p.error('choose --prepare and/or --run')
     if not (math.isfinite(a.warm) and a.warm >= 3 and math.isfinite(a.minimum_window_seconds) and

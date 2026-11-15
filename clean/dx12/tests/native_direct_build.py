@@ -12,15 +12,21 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))   # the repository, for clean.runner
+from clean.runner import sdk  # noqa: E402  (the HIP SDK policy: --rocm, --force-sdk)
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--out', required=True)
-    p.add_argument('--rocm', default=r'C:\Program Files\AMD\ROCm\7.2')
+    p.add_argument('--rocm', default='')
+    sdk.add_force_argument(p)
     p.add_argument('--model-l', action='store_true',
                    help='also Model L (WG_MODEL_L, clean/l/runtime): the test then runs it with its last argument L')
     a = p.parse_args()
+    sdk.apply(a)   # --rocm: an official SDK, or a custom one with --force-sdk
     clean = Path(__file__).resolve().parents[2]
     rt = clean / 'runtime'
     out = Path(a.out).resolve()

@@ -292,7 +292,9 @@ def print_bench(r):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
     ap.add_argument("--rocm", default=OFFICIAL_ROCM)
+    sdk.add_force_argument(ap)
     ap.add_argument("--backend", default="hip", choices=("hip", "emu"))
     ap.add_argument("--sizes", nargs="*", default=["1080p", "1440p", "4k"])
     ap.add_argument("--s", type=float, default=DEFAULT_S,
@@ -325,6 +327,7 @@ def main(argv=None):
     ap.add_argument("--all-flags", action="store_true")
     ap.add_argument("--json", help="write all results here")
     a = ap.parse_args(argv)
+    sdk.apply(a)   # --rocm: an official SDK, or a custom one with --force-sdk
     dev = open_device(a.backend, a.build, a.rocm)
     funcs = KFuncs(dev, a.build, a.backend)
     params = None

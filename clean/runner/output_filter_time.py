@@ -67,7 +67,9 @@ def post_stage_ms(copy, x, repeats):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
     ap.add_argument("--rocm", required=True)
+    sdk.add_force_argument(ap)
     ap.add_argument("--model", required=True)
     ap.add_argument("--configs", nargs="+", default=["output_filter=analytic", "output_filter=original"])
     ap.add_argument("--render", default="1706x960")
@@ -80,6 +82,7 @@ def main():
     ap.add_argument("--other-map", default=DEFAULT_MAP)
     ap.add_argument("--other-configs", nargs="+", default=["output_filter=default"])
     a = ap.parse_args()
+    sdk.apply(a)   # --rocm: an official SDK, or a custom one with --force-sdk
     R, O = (tuple(int(v) for v in s.split("x")) for s in (a.render, a.output))
     if os.path.exists(os.path.join(a.model, "model.wgcm")):
         raise ValueError("--model is the work directory of a synthetic model, not a converted model")

@@ -16,7 +16,6 @@ import argparse
 import json
 import os
 import re
-import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -24,7 +23,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 
 import numpy as np  # noqa: E402
 
-from clean.runner.sdk import OFFICIAL_ROCM  # noqa: E402  (the official HIP SDK, never ROCM_PATH)
+from clean.runner import sdk  # noqa: E402  (the HIP SDK policy, never ROCM_PATH)
+from clean.runner.sdk import OFFICIAL_ROCM  # noqa: E402
 from clean.runner import build as B  # noqa: E402
 from clean.runner import post as PS  # noqa: E402
 from clean.runner.post_bench import big_inputs  # noqa: E402
@@ -69,9 +69,10 @@ def build_all(build_dir, rocm, clang, names):
         out = os.path.join(build_dir, code_object(name))
         cmd = B.device_command(clang, rocm, os.path.join(B.KERNEL_DIR, "post.hip"), out, device_libs=bool(rocm),
                                report=True, defines={d: 1 for d in ABLATIONS[name]})
-        r = subprocess.run(cmd, capture_output=True, text=True)
-        if r.returncode != 0:
-            raise SystemExit(f"build of {name} failed:\n{r.stderr}")
+        B.echo(cmd)
+        r = B.run_captured(cmd)
+        if r.returncode != 0:   # a custom (forced) SDK appears by id only
+            raise SystemExit(f"build of {name} failed:\n{sdk.redact(r.stderr or '')}")
         info, cur = {}, None
         for line in r.stderr.splitlines():
             m = re.search(r"Function Name: (\w+)", line)
@@ -105,6 +106,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
     ap.add_argument("--rocm", default=OFFICIAL_ROCM)
+    sdk.add_force_argument(ap)
     ap.add_argument("--clang", help="clang (default: from --rocm)")
     ap.add_argument("--repeats", type=int, default=50)
     ap.add_argument("--rounds", type=int, default=1)
@@ -114,6 +116,7 @@ def main(argv=None):
     ap.add_argument("--json", help="also write the results to this file")
     ap.add_argument("--build-only", action="store_true", help="build and print the compiler resource report only")
     args = ap.parse_args(argv)
+    sdk.apply(args)   # --rocm: an official SDK, or a custom one with --force-sdk
     names = args.only.split(",") if args.only else list(ABLATIONS)
     if "base" not in names:
         names = ["base"] + names

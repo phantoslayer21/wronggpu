@@ -545,7 +545,9 @@ def main(argv=None):
     for name in ("dump", "stage", "replay"):
         p = sub.add_parser(name)
         p.add_argument("--build", required=True)
-        p.add_argument("--rocm", default=r"C:\Program Files\AMD\ROCm\7.2")
+        from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
+        p.add_argument("--rocm", default="")
+        sdk.add_force_argument(p)
         p.add_argument("--model", required=True)
         p.add_argument("--out", required=True)
         if name in ("dump", "replay"):
@@ -580,6 +582,7 @@ def main(argv=None):
     i.add_argument("--stage", required=True)
     i.add_argument("--out", required=True)
     a = ap.parse_args(argv)
+    sdk.apply(a)   # --rocm: an official SDK, or a custom one with --force-sdk
     if a.cmd == "inputs":
         spec = stage_inputs_from_dump(a.dump, a.frame, a.stage)
         rel = os.path.relpath(os.path.abspath(a.dump), os.path.dirname(os.path.abspath(a.out)))

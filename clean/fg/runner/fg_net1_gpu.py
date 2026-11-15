@@ -453,13 +453,16 @@ def timing(build, rocm, reps=5):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--build", required=True)
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
     ap.add_argument("--rocm", required=True)
+    sdk.add_force_argument(ap)
     ap.add_argument("--prepare", action="store_true")
     ap.add_argument("--run", action="store_true")
     ap.add_argument("--timing", action="store_true")
     ap.add_argument("--model", default=None, help="a converter output file of the preset-FG map (execute-only)")
     ap.add_argument("--json", default=None)
     a = ap.parse_args(argv)
+    sdk.apply(a)   # --rocm: an official SDK, or a custom one with --force-sdk
     if a.prepare:
         K.prepare(a.build, a.rocm, KERNELS)
     res = None

@@ -8,9 +8,13 @@
   lie inside the SDK);
 - anything else needs a deliberate override (--force-sdk), which approves exactly that SDK folder or compiler for this
   process (approve);
-- the HIP runtime library is loaded from the selected SDK only (runtime_library), never by a bare name the loader would
-  search for;
-- logs name official folders as they are and custom ones only as "custom SDK (forced, id <hash>)" (label, redact).
+- on other systems /opt/rocm counts with the version of the /opt/rocm-<version> it points to, a standalone /opt/rocm
+  with its own version (.info/version; without one it ranks after every versioned install);
+- the Python HIP runtime library is loaded from the selected SDK only (runtime_library), never by a bare name the loader
+  would search for (the native runtime and the installer have their own lookup, not covered here yet);
+- every CLI with --rocm offers --force-sdk (add_force_argument) and resolves --rocm right after parsing (apply);
+- logs name official folders as they are and custom ones only as "custom (forced, id <hash>)" (label, redact: every
+  spelling of the path, also in compiler output).
 
 device_command / find_clang (clean/runner/build.py) and the HIP runtime loader (clean/runner/hip.py) call check():
 every entry point that compiles HIP code or loads the HIP runtime passes it, whichever script started it."""
@@ -26,6 +30,7 @@ FALLBACK = os.path.join(WINDOWS_ROOT, "7.2") if sys.platform == "win32" else "/o
 _VERSION = re.compile(r"^(\d+)\.(\d+)(?:\.(\d+))?$")
 
 _approved = set()   # normalized folders / compilers approved with --force-sdk in this process
+_spellings = {}     # approved normalized path -> the ways a log may write it (redact)
 _bannered = set()
 
 
@@ -55,15 +60,38 @@ def official_installs(windows_root=None, linux_root=None, windows=None):
         names = [(n[len("rocm-"):], os.path.join(root, n)) for n in (os.listdir(root) if os.path.isdir(root) else [])
                  if n.startswith("rocm-")]
     for ver, path in names:
-        m = _VERSION.match(ver)
-        if m and int(m.group(1)) == SUPPORTED_MAJOR and _valid_sdk(path):
-            out.append((tuple(int(g or 0) for g in m.groups()), path))
-    out.sort(reverse=True)
-    if not windows:   # /opt/rocm: official when it is (or links to) one of them
+        v = _parse_version(ver)
+        if v and v[0] == SUPPORTED_MAJOR and _valid_sdk(path):
+            out.append((v, path))
+    if not windows:
+        # /opt/rocm: with the version of the install it points to; a standalone one (no versioned sibling it resolves
+        # to) with its own version (.info/version), and without one ranked after every versioned install
         link = os.path.join(root, "rocm")
-        if os.path.isdir(link) and any(_norm(link) == _norm(p) for _, p in out):
-            out.insert(0, (out[0][0], link))
+        if _valid_sdk(link):
+            target = [v for v, p in out if _norm(p) == _norm(link)]
+            v = target[0] if target else _install_version(link)
+            if v is None:
+                out.append(((-1,), link))
+            elif v[0] == SUPPORTED_MAJOR:
+                out.append((v, link))
+    # newest first; at the same version /opt/rocm before the folder it points to
+    out.sort(key=lambda e: (e[0], os.path.basename(e[1]) == "rocm"), reverse=True)
     return out
+
+
+def _parse_version(text):
+    m = _VERSION.match(text)
+    return tuple(int(g or 0) for g in m.groups()) if m else None
+
+
+def _install_version(path):
+    """The version a standalone install states in .info/version (e.g. "7.2.0-43"), or None."""
+    try:
+        with open(os.path.join(path, ".info", "version"), encoding="utf-8", errors="replace") as f:
+            m = re.match(r"\s*(\d+\.\d+(?:\.\d+)?)", f.read())
+    except OSError:
+        return None
+    return _parse_version(m.group(1)) if m else None
 
 
 def default_rocm():
@@ -93,8 +121,53 @@ def label(path):
 
 
 def approve(path):
-    """--force-sdk: accept this exact SDK folder or compiler in this process."""
-    _approved.add(_norm(path))
+    """--force-sdk: accept this exact SDK folder or compiler in this process (and redact every spelling of it)."""
+    n = _norm(path)
+    _approved.add(n)
+    _spellings.setdefault(n, set()).update(_spellings_of(path) | {n})
+
+
+def _short_name(path):
+    """The Windows 8.3 short spelling of an existing path, or None."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(32768)
+        n = ctypes.windll.kernel32.GetShortPathNameW(str(path), buf, len(buf))
+        return buf.value if 0 < n < len(buf) else None
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
+def _spellings_of(path):
+    """The ways a log may write `path`: as given, absolute, normalized, resolved, relative to the working folder, the
+    8.3 short form, and under the home folder with the ~ shorthand (separators and case are matched freely; variables
+    like the home variable are expanded by the shell before a tool sees them)."""
+    absp = os.path.abspath(path)
+    out = {path, absp, os.path.normpath(path), os.path.realpath(absp), _short_name(absp)}
+    try:
+        out.add(os.path.relpath(absp))
+    except ValueError:   # another drive
+        pass
+    out |= {os.path.join(".", p) for p in list(out) if p and not os.path.isabs(p) and not p.startswith(".")}
+    home = os.path.expanduser("~")
+    for p in list(out):
+        if p and home and home != "~" and _inside(p, home) and _norm(p) != _norm(home):
+            rest = os.path.relpath(os.path.abspath(p), home)
+            out.add(os.path.join("~", rest))
+    return {p.rstrip("\\/") for p in out if p and p.rstrip("\\/") not in ("", ".", "..")}
+
+
+def _spelling_pattern(spelling):
+    """A spelling as a pattern: any run of either separator between its parts; not inside a longer name."""
+    parts = [re.escape(x) for x in re.split(r"[\\/]+", spelling)]
+    body = r"[\\/]+".join(parts)
+    if os.path.isabs(spelling) or re.match(r"^(~|%|\$|[A-Za-z]:)", spelling):
+        lead = ""   # distinctive by itself (also right after -I, -L, = ...)
+    else:          # a relative spelling: a whole path, or right after -I / -L / -B
+        lead = r"(?:(?<![\w.\-\\/:])|(?<=-I)|(?<=-L)|(?<=-B))"
+    return lead + body + r"(?![\w.\-])"
 
 
 def _inside(path, root):
@@ -118,7 +191,7 @@ def resolve(rocm=None, force=False):
         return rocm
     if force:
         approve(rocm)
-        return rocm
+        return os.path.abspath(rocm)   # commands name it absolutely (redact also knows the spelling given)
     raise SystemExit(f"--rocm names a folder that is not an official HIP SDK {SUPPORTED_MAJOR}.x install (id "
                      f"{path_id(rocm)}); pass --force-sdk to build with it anyway")
 
@@ -154,7 +227,7 @@ def compiler(rocm, name_or_path=None, force=False, default="clang"):
         return name_or_path
     if force:
         approve(name_or_path)
-        return name_or_path
+        return os.path.abspath(name_or_path)
     raise SystemExit(f"compiler {label(name_or_path)} is not inside the HIP SDK {label(rocm)}; pass --force-sdk to "
                      "use it anyway")
 
@@ -211,9 +284,36 @@ def banner(rocm, clang=None, cxx=None, device_libs=True):
 
 
 def redact(text):
-    """text with every approved custom folder or compiler replaced by its label (both slash forms)."""
-    for p in sorted(_approved, key=len, reverse=True):
-        lab = f"custom (forced, id {hashlib.sha256(p.encode('utf-8')).hexdigest()[:10]})"
-        for form in {p, p.replace("\\", "/"), p.replace("/", "\\")}:
-            text = re.sub(re.escape(form), lab, text, flags=re.IGNORECASE)
+    """text with every spelling of an approved custom folder or compiler (absolute, relative, resolved, short, under the
+    home folder; either separator, any case) replaced by its label; longest spellings first."""
+    if not text:
+        return text
+    pairs = []
+    for n in _approved:
+        lab = f"custom (forced, id {hashlib.sha256(n.encode('utf-8')).hexdigest()[:10]})"
+        pairs += [(sp, lab) for sp in _spellings.get(n, {n})]
+    for sp, lab in sorted(pairs, key=lambda e: len(e[0]), reverse=True):
+        text = re.sub(_spelling_pattern(sp), lambda m, lab=lab: lab, text, flags=re.IGNORECASE)
     return text
+
+
+def add_force_argument(ap):
+    """--force-sdk for a CLI that already has --rocm; after parse_args call apply()."""
+    ap.add_argument("--force-sdk", action="store_true",
+                    help="accept a --rocm (or --clang) outside the official HIP SDK installs")
+
+
+def apply(args):
+    """After parse_args: args.rocm resolved (empty = the newest official install; another folder only with
+    --force-sdk, then approved), args.clang (when the CLI has one) canonicalised to the SDK's compiler the same way."""
+    force = bool(getattr(args, "force_sdk", False))
+    if hasattr(args, "rocm"):
+        args.rocm = resolve(args.rocm, force)
+        if getattr(args, "clang", None):
+            args.clang = compiler(args.rocm, args.clang, force)
+    return args
+
+
+def forward(args):
+    """The --force-sdk flag for a child process that gets this process's --rocm."""
+    return ["--force-sdk"] if getattr(args, "force_sdk", False) else []

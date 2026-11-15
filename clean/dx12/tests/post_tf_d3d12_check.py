@@ -490,7 +490,9 @@ def store_run(build, rocm, seeds, ldr=False):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
     ap.add_argument("--rocm", required=True)
+    sdk.add_force_argument(ap)
     ap.add_argument("--run", action="store_true")
     ap.add_argument("--seeds", type=int, default=2)
     ap.add_argument("--kernels", default=",".join(KINDS))
@@ -499,6 +501,7 @@ def main(argv=None):
     ap.add_argument("--ldr", action="store_true", help="with --store: Model L's LDR direct filter (LDR_STORE_FRAMES)")
     ap.add_argument("--json")
     a = ap.parse_args(argv)
+    sdk.apply(a)   # --rocm: an official SDK, or a custom one with --force-sdk
     if not a.run:
         return 0
     kernels = [k for k in a.kernels.split(",") if k]

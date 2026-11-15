@@ -126,11 +126,13 @@ def build(a, out, fields):
         copy_runtime(Path(a.native_build), native, False)
         src = target / "post_instrumented.hip"
         src.write_text(hip_text)
-        cmd = HB.device_command(str(Path(a.rocm) / "bin" / "clang.exe"), a.rocm, str(src),
+        cmd = HB.device_command(HB.find_clang(a.rocm), a.rocm, str(src),
                                 str(hip / "post_w64__orig.co"), defines={"WG_LZ_PROFILE": 2, "WG_DBG_K": field},
                                 extra=["-mwavefrontsize64", "-I", str(CLEAN / "kernels")])
-        subprocess.run(cmd, cwd=out, check=True, stdout=subprocess.DEVNULL)
-        report["commands"].append(cmd)
+        r = subprocess.run(cmd, cwd=out, capture_output=True, text=True, errors="replace")
+        if r.returncode:   # a custom (forced) SDK appears by id only, here and in the record
+            raise SystemExit(f"instrumented post build failed ({r.returncode}): " + HB.sdk.redact(r.stderr))
+        report["commands"].append([HB.sdk.redact(c) for c in cmd])
         # Some builds retain a second platform-named code object; keep the private pair coherent.
         alias = hip / "gfx1201.post_w64__orig.co"
         if alias.exists():
@@ -186,7 +188,9 @@ def main(argv=None):
     ap.add_argument("--native-build")
     ap.add_argument("--out", required=True)
     ap.add_argument("--models")
-    ap.add_argument("--rocm", default=r"C:\Program Files\AMD\ROCm\7.2")
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
+    ap.add_argument("--rocm", default="")
+    sdk.add_force_argument(ap)
     ap.add_argument("--fields", default=",".join(map(str, range(15))))
     ap.add_argument("--frames", type=int, default=4)
     group = ap.add_mutually_exclusive_group()
@@ -195,6 +199,7 @@ def main(argv=None):
     ap.add_argument("--worker-output", help=argparse.SUPPRESS)
     ap.add_argument("--backend", choices=("hip", "d3d12"), default="d3d12", help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
+    sdk.apply(a)   # --rocm: an official SDK, or a custom one with --force-sdk
     for key in ("HIP_PATH", "ROCM_PATH", "LLVM_PATH", "HIP_DEVICE_LIB_PATH", "HIP_CLANG_PATH"):
         os.environ.pop(key, None)
     if a.worker_output:
@@ -232,7 +237,7 @@ def main(argv=None):
             env = os.environ.copy()
             env["WG_LAUNCH_TRACE"] = str(trace)
             cmd = [sys.executable, str(Path(__file__).resolve()), "--build", str(target / label), "--out", str(out),
-                   "--models", str(model), "--rocm", a.rocm, "--frames", str(a.frames),
+                   "--models", str(model), "--rocm", a.rocm, *sdk.forward(a), "--frames", str(a.frames),
                    "--backend", "hip" if label == "hip" else "d3d12", "--worker-output", str(target / (label + ".npz"))]
             result = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True, timeout=900)
             (target / (label + ".log")).write_text(result.stdout + result.stderr)

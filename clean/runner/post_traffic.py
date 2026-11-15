@@ -216,13 +216,16 @@ def run(r, sizes, repeats=50, rounds=3, reference=True, report=None, flush_bytes
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
     ap.add_argument("--rocm", default=OFFICIAL_ROCM)
+    sdk.add_force_argument(ap)
     ap.add_argument("--repeats", type=int, default=50)
     ap.add_argument("--rounds", type=int, default=3)
     ap.add_argument("--no-reference", action="store_true", help="only the traffic layouts, not the real kernels")
     ap.add_argument("--no-w64", action="store_true", help="skip the wave64 (post_w64.co) reference timings")
     ap.add_argument("--json", help="also write the results to this file")
     args = ap.parse_args(argv)
+    sdk.apply(args)   # --rocm: an official SDK, or a custom one with --force-sdk
     r = Runner(args.build, args.rocm)
     w64 = not args.no_w64 and not args.no_reference
     if w64:   # always rebuilt: an older post_w64.co may lack kernels of this post.hip

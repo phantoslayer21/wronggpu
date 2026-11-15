@@ -41,8 +41,9 @@ def hashes(d):
     return out
 
 
-def build(tree, out, rocm, env):
-    r = subprocess.run([sys.executable, "-B", os.path.join("clean", "runner", "build.py"), "--rocm", rocm, "--out", out,
+def build(tree, out, rocm, env, forward=()):
+    r = subprocess.run([sys.executable, "-B", os.path.join("clean", "runner", "build.py"), "--rocm", rocm, *forward,
+                        "--out", out,
                         "--no-runtime", "--variants"], cwd=tree, env=env, capture_output=True, text=True,
                        creationflags=NO_WINDOW)
     if r.returncode:
@@ -56,9 +57,12 @@ def main(argv=None):
     g.add_argument("--base", help="git ref of the base (checked out as a worktree under --work)")
     g.add_argument("--base-tree", help="an existing checkout of the base")
     ap.add_argument("--work", required=True, help="folder for the base worktree and both build outputs")
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
     ap.add_argument("--rocm", default=DEFAULT_ROCM)
+    sdk.add_force_argument(ap)
     ap.add_argument("--json")
     a = ap.parse_args(argv)
+    sdk.apply(a)   # --rocm: an official SDK, or a custom one with --force-sdk
     os.makedirs(a.work, exist_ok=True)
     base_tree = a.base_tree
     if a.base:
@@ -73,8 +77,8 @@ def main(argv=None):
     env["TMP"] = env["TEMP"] = os.path.join(a.work, "tmp")
     os.makedirs(env["TMP"], exist_ok=True)
     outs = {"base": os.path.join(a.work, "base"), "head": os.path.join(a.work, "head")}
-    build(base_tree, outs["base"], a.rocm, env)
-    build(ROOT, outs["head"], a.rocm, env)
+    build(base_tree, outs["base"], a.rocm, env, sdk.forward(a))   # a base without --force-sdk refuses it
+    build(ROOT, outs["head"], a.rocm, env, sdk.forward(a))
     hb, hh = hashes(outs["base"]), hashes(outs["head"])
     differ = sorted(k for k in set(hb) | set(hh) if hb.get(k) != hh.get(k))
     res = {"base": a.base or base_tree, "base_objects": len(hb), "head_objects": len(hh), "differ": differ}

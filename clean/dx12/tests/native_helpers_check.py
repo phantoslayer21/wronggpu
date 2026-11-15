@@ -250,7 +250,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True, type=Path, help="verified HIP reference build containing frame.co")
     ap.add_argument("--out", required=True, type=Path, help="private owned output directory")
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
     ap.add_argument("--rocm", default=ROCM)
+    sdk.add_force_argument(ap)
     ap.add_argument("--n", default=65539, type=int)
     ap.add_argument("--seed", default=281, type=int)
     phase = ap.add_mutually_exclusive_group()
@@ -258,6 +260,7 @@ def main():
     phase.add_argument("--run-only", action="store_true", help="run existing compiled artifacts; no builds inside GPU lock")
     ap.add_argument("--verify-mutation", action="store_true", help="also run an intentionally corrupted HLSL candidate")
     args = ap.parse_args()
+    sdk.apply(args)   # --rocm: an official SDK, or a custom one with --force-sdk
     if not 1 <= args.n < (1 << 24):
         ap.error("--n must be in [1, 2^24)")
     args.out = args.out.resolve()

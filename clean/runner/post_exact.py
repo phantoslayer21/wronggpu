@@ -36,8 +36,12 @@ ODD = [("odd-1", (1333, 751), (2560, 1440)), ("odd-2", (997, 563), (1913, 1077))
        ("odd-4", (1200, 700), (1000, 600))]   # R > 2/3 D: recon2_supported false, the post_recon fallback
 
 
+FORWARD = []   # --force-sdk for the children when this process got it (main)
+
+
 def dump(python, repo, build, rocm, render, output, frames, paths, motion, seed, out, save=None, extra=()):
     cmd = [python, os.path.join(repo, "clean", "runner", "post_sizes.py"), "dump", "--build", build, "--rocm", rocm,
+           *FORWARD,
            "--render", render, "--output", output, "--frames", str(frames), "--paths", paths, "--motion", motion,
            "--seed", str(seed), "--out", out] + list(extra)
     if save:
@@ -51,7 +55,9 @@ def dump(python, repo, build, rocm, render, output, frames, paths, motion, seed,
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
     ap.add_argument("--rocm", default=OFFICIAL_ROCM)
+    sdk.add_force_argument(ap)
     ap.add_argument("--a-repo", required=True)
     ap.add_argument("--a-build", required=True)
     ap.add_argument("--b-repo", required=True)
@@ -66,6 +72,8 @@ def main(argv=None):
     ap.add_argument("--work", help="folder for the dumps (default: a temporary folder)")
     ap.add_argument("--json", help="write the comparison summary here")
     args = ap.parse_args(argv)
+    sdk.apply(args)   # --rocm: an official SDK, or a custom one with --force-sdk
+    FORWARD[:] = sdk.forward(args)
     python = sys.executable
     if args.render or args.output:
         cfgs = [("custom", tuple(map(int, args.render.split("x"))), tuple(map(int, args.output.split("x"))))]

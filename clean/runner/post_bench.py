@@ -90,13 +90,16 @@ def check_small(r, report):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
     ap.add_argument("--rocm", default=OFFICIAL_ROCM)
+    sdk.add_force_argument(ap)
     ap.add_argument("--repeats", type=int, default=50)
     ap.add_argument("--json", help="also write the results to this file")
     ap.add_argument("--no-check", action="store_true", help="timing only")
     ap.add_argument("--no-timing", action="store_true", help="checks only")
     ap.add_argument("--backend", default="hip", help="hip (GPU) or emu (host emulator, checks only)")
     args = ap.parse_args(argv)
+    sdk.apply(args)   # --rocm: an official SDK, or a custom one with --force-sdk
     r = Runner(args.build, args.rocm, backend=args.backend)
     report = {"device": getattr(r.dev, "device_name", "?"), "timing_ms": {}, "checks": []}
     if not args.no_check:

@@ -119,13 +119,16 @@ def frame_inputs(rng, rw, rh, reset, pi):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
     ap.add_argument("--rocm", default=OFFICIAL_ROCM)
+    sdk.add_force_argument(ap)
     ap.add_argument("--model", required=True)
     ap.add_argument("--output", default="2560x1440")
     ap.add_argument("--frames", type=int, default=14)
     ap.add_argument("--seed", type=int, default=5)
     ap.add_argument("--paths", default="copy,own")
     a = ap.parse_args()
+    sdk.apply(a)   # --rocm: an official SDK, or a custom one with --force-sdk
     if not os.path.isdir(os.path.join(a.model, "raw")):
         write_raw(a.model, synthetic_tensors(1))
     ow, oh = (int(v) for v in a.output.lower().split("x"))

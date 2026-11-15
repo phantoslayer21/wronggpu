@@ -14,6 +14,9 @@ from pathlib import Path
 import subprocess
 import sys
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))   # the repository, for clean.runner
+from clean.runner import sdk  # noqa: E402  (the HIP SDK policy: --rocm, --force-sdk)
+
 
 COMMON = ('swin_block_c64_nc', 'patch_merge_c64', 'swin_block_c96_nc', 'patch_merge_c96',
           'bneck/swin_bneck6_nc', 'swin_block_c96_add_ex_nc', 'expand_c96',
@@ -193,7 +196,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--prepare', action='store_true')
     p.add_argument('--out', required=True, help='New private directory; never overwrites evidence')
-    p.add_argument('--rocm', default=r'C:\Program Files\AMD\ROCm\7.2')
+    p.add_argument('--rocm', default='')
+    sdk.add_force_argument(p)
     p.add_argument('--exe')
     p.add_argument('--build')
     p.add_argument('--model')
@@ -202,6 +206,7 @@ def main():
     p.add_argument('--frames', type=int, default=8)
     p.add_argument('--output-format', choices=('half', 'float'), default='half')
     a = p.parse_args()
+    sdk.apply(a)   # --rocm: an official SDK, or a custom one with --force-sdk
     if a.frames < 6 or min(a.shape) < 1:
         p.error('positive shapes and at least six frames required')
     return build(a) if a.prepare else run(a)

@@ -51,7 +51,9 @@ def synthetic_frame(rw, rh, seed=1):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
     ap.add_argument("--rocm", default="")
+    sdk.add_force_argument(ap)
     ap.add_argument("--model", required=True, help="model folder (model.wgcm or raw/)")
     ap.add_argument("--configs", nargs="+", default=["base"])
     ap.add_argument("--frame", help="npz with one frame's inputs (else synthetic)")
@@ -64,6 +66,7 @@ def main(argv=None):
     ap.add_argument("--backend", default="hip", help="hip, or emu (host emulator, for checks only)")
     ap.add_argument("--json")
     a = ap.parse_args(argv)
+    sdk.apply(a)   # --rocm: an official SDK, or a custom one with --force-sdk
 
     rw, rh = (int(v) for v in a.render.lower().split("x"))
     ow, oh = (int(v) for v in a.output.lower().split("x"))

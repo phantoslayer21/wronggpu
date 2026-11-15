@@ -23,10 +23,13 @@ import build_dx12 as B  # noqa: E402
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--rocm", default=r"C:\Program Files\AMD\ROCm\7.2", help="host clang++ compiler only")
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
+    ap.add_argument("--rocm", default="", help="host clang++ compiler only")
+    sdk.add_force_argument(ap)
     ap.add_argument("--build-only", action="store_true")
     ap.add_argument("--run-only", action="store_true")
     a = ap.parse_args(argv)
+    sdk.apply(a)   # --rocm: an official SDK, or a custom one with --force-sdk
     if a.build_only and a.run_only:
         ap.error("choose at most one of --build-only and --run-only")
     out = Path(a.out).resolve()
