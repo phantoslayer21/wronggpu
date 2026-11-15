@@ -403,19 +403,20 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     // 2. An older WrongGPU install with a record, then an earlier install of this version: back to the original files.
     if (!target.conflicts.legacyRecordDir.empty()) for (auto& w : LegacyRestore(ctx, target.conflicts.legacyRecordDir, ui)) warnings.push_back(w);
     RemoveEarlierDirect(ctx, target, ui, warnings);
-    // Once the earlier installation is removed, a failure leaves the game's original files and no install: what is
-    // left of its state folder (the uninstaller, which has no record any more) goes too. rc6 L4: never the player's settings
-    // there (profile.ini, previous\ for Roll back, rr-config\): an update or repair that fails keeps them for the next try,
-    // as does a failed install where they were before it (a profile the launcher saved first).
+    // Once the earlier installation is removed, a failure leaves the game's original files and no install. The state folder
+    // then loses only what THIS run made (the run journal: written down before each create); everything else there (the
+    // player's settings, profile.ini, previous\ for Roll back, rr-config\, a file the player keeps there, what an earlier
+    // uninstall kept and listed) stays and is listed. Never a removal of the whole folder.
     const bool keepSettings = StateHasSettings(dir) || IsFile(RecordPath(dir));
+    RunJournal journal;
     struct EarlierGone {
-        const wstring& dir; Ui& ui; bool armed = false;
+        Context& ctx; const wstring& dir; Ui& ui; RunJournal& journal; bool armed = false;
         ~EarlierGone() {
             if (!armed || IsFile(RecordPath(dir))) return;
-            RemoveStateKeepingSettings(dir);
+            if (!journal.done) RollbackCreated(ctx, StateDir(dir), journal);
             ui.log(L"The earlier installation was removed and the game's original files are back; the new version was not installed (your settings were kept).");
         }
-    } earlierGone{dir, ui};
+    } earlierGone{ctx, dir, ui, journal};
     std::map<wstring, wstring> keptByRestore;  // recorded files the restore left in place (changed since the install), with its warning
     string carriedIni;         // the earlier install's wronggpu.ini when it was WrongGPU's: the new one starts from it
     bool haveCarried = false;
@@ -715,6 +716,9 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     // the earlier install moved aside or replaced with the player's OK (its disable entries, its copies over a file that
     // was there): those go aside again below on that OK.)
     Record m; m.version = ctx.data->version; m.game = dir; m.exe = target.exe;
+    // this install's id: the earlier install's (a repair or update keeps it, so WrongGPU's stamped state files stay its own), a
+    // new one otherwise
+    m.installId = target.installed && !target.record.installId.empty() ? target.record.installId : NewInstallId();
     m.status = target.validated ? L"validated" : L"experimental"; m.regkey = ctx.perGameEntry ? RegKeyFor(dir) : L""; m.model = ModelFile(ctx); m.modelM = modelM.outcome;
     LogLine(ctx, L"target " + target.exe + L" | install folder " + dir + L" | status " + m.status);
     // Folders the payload needs that do not exist yet (shallow first).
@@ -840,17 +844,20 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     ui.step(done, total, L"Backing up existing files");
 
     const wstring state = StateDir(dir), rpath = RecordPath(dir);
+    JournalCreate(journal, state, true);
     EnsureDir(state);
     bool recorded = false;
     try {
         for (auto& e : m.e) {
             if (!e.existed) continue;
             wstring b = BackupPath(dir, e.rel);
+            JournalCreate(journal, b, false);
             CopyChecked(Target(dir, e.rel), b);
             if (Sha256File(b) != e.orig) Fail(L"Backup verification failed for " + e.rel);
             ui.step(++done, total, L"Backed up " + e.rel);
             ui.log(L"backup " + e.rel);
         }
+        JournalCreate(journal, rpath, false);
         SaveRecord(rpath, m);  // written before any change so an interrupted install can still be undone
         recorded = true;
         RestoreStep("seed-recorded");  // (tests: a seed file appears here, after the record and before it is written)
@@ -925,13 +932,17 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
         // The uninstaller: the small restorer (WrongGPU-Restore.exe) the launcher embeds, else a copy of this program.
         if (ctx.restorer && ctx.restorerSize) {
             const wstring un = Join(state, L"uninstall.exe");
+            JournalCreate(journal, un, false);
             WriteFileAtomic(un, ctx.restorer, ctx.restorerSize);
             if (Sha256File(un) != Sha256Bytes(ctx.restorer, ctx.restorerSize)) Fail(L"Verification failed after writing the uninstaller");
         } else {
+            JournalCreate(journal, Join(state, L"uninstall.exe"), false);
             CopyChecked(SelfPath(), Join(state, L"uninstall.exe"));
         }
         if (ctx.perGameEntry) RegisterUninstall(ctx, m, state, target.name);
+        JournalCreate(journal, Join(state, L"owned-files.json"), false);
         WriteOwnedFiles(dir, m);
+        RestoreStep("installed");  // (tests: a failure after everything was written: the rollback takes back what this run made)
         ui.log(L"WrongGPU installed in " + dir + L" (" + m.status + L"); model data: " + ModelFile(ctx));
         ui.step(total, total, L"Done");
     } catch (const SetupError& ex) {
@@ -939,8 +950,8 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
         try {
             // (rc6 L4: the settings that were there before this install stay: the failed install's record and backup go only)
             if (recorded) DoRestore(ctx, dir, ui, true, keepSettings);
-            else if (!keepSettings) RemoveTree(state);
-            if (keepSettings && !IsFile(rpath)) RemoveStateKeepingSettings(dir);  // (a backup DoRestore had to keep stays with its record)
+            // then what this run made and DoRestore left (the journal); anything else in the state folder stays and is listed
+            if (!IsFile(rpath)) RollbackCreated(ctx, state, journal);  // (a backup DoRestore had to keep stays with its record)
             ui.log(L"Rollback complete; the game folder is back to its previous state.");
         } catch (const SetupError& r) { ui.log(L"Rollback problem: " + r.msg); }
         throw;

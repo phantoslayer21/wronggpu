@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cwchar>
+#include <random>
 #ifdef WRONGGPU_TESTING
 #include <restartmanager.h>
 #pragma comment(lib, "rstrtmgr.lib")
@@ -112,6 +114,7 @@ bool LoadRecord(const wstring& path, Record& m) {
             else if (f[0] == L"regkey") m.regkey = f[1];
             else if (f[0] == L"model") m.model = f[1];
             else if (f[0] == L"model-m") m.modelM = f[1];
+            else if (!m.legacy && f[0] == L"install-id") m.installId = f[1];
             else if (!m.legacy && f[0] == L"rrconfig-backup") m.rrconfig.backupSha = f[1];
             else if (!m.legacy) m.extra.push_back(line);
         } else if (f.size() == 5 && (f[0] == L"copy" || f[0] == L"disable" || (!m.legacy && (f[0] == L"rename" || f[0] == L"dir")))) {
@@ -155,6 +158,7 @@ void SaveRecord(const wstring& path, const Record& m) {
     wstring t = L"WRONGGPU-RECORD 2\r\nversion\t" + m.version + L"\r\ngame\t" + m.game + L"\r\nexe\t" + m.exe + L"\r\nstatus\t" + m.status +
                 L"\r\nregkey\t" + m.regkey + L"\r\nmodel\t" + m.model + L"\r\n";
     if (!m.modelM.empty()) t += L"model-m\t" + m.modelM + L"\r\n";
+    if (!m.installId.empty()) t += L"install-id\t" + m.installId + L"\r\n";
     auto dash = [](const wstring& s) { return s.empty() ? wstring(L"-") : s; };
     if (!m.payloadVersion.empty())
         t += L"payload\t" + m.payloadVersion + L"\t" + dash(m.runtimeSha) + L"\t" + dash(m.frontEndSha) + L"\t" + dash(m.pluginSha) +
@@ -416,9 +420,10 @@ static std::function<bool(const wstring&, PinnedFile&)> StateOwned(const wstring
     auto names = std::make_shared<std::map<wstring, wstring>>();
     for (const wchar_t* n : {L"install.record", L"uninstall.exe", L"setup.log", L"profile.ini"}) (*names)[n] = L"";
     // #219: the game's state files (wg_state.h: settings chosen in the launcher or a WrongGPU menu in the game, the model choice
-    // record) and their atomic writes' temporary files (<name>.wgtmp-*) are WrongGPU's by their BYTES only: while they carry
-    // WrongGPU's valid stamp (wg_state.h StampedByWrongGPU). An edited file, a file without the stamp (the player's own, or a
-    // temporary file a crash cut short) stays and is listed (below, in the returned test)
+    // record) are WrongGPU's only while they carry WrongGPU's stamp valid for THEIR OWN NAME and THIS INSTALL's id (the record's
+    // install-id; wg_state.h StampedByWrongGPU). An edited file, a copy under another name (a temporary file among them) or
+    // from another install, a file without the stamp: not WrongGPU's, it stays and is listed (below, in the returned test)
+    const string installId = m ? ToUtf8(m->installId) : string();
     if (m) {
         const string json = OwnedFilesJson(*m);
         (*names)[L"owned-files.json"] = Sha256Bytes(json.data(), json.size());
@@ -438,13 +443,11 @@ static std::function<bool(const wstring&, PinnedFile&)> StateOwned(const wstring
                 (*names)[LowerRel(L"previous\\" + FromUtf8(line.substr(bar + 1)))] = Lower(FromUtf8(line.substr(5, bar - 5)));
         }
     }
-    return [names](const wstring& rel, PinnedFile& f) {
+    return [names, installId](const wstring& rel, PinnedFile& f) {
         const wstring low = LowerRel(rel);
-        const size_t mark = low.find(wgstate::kTempMark);
-        const wstring base = mark == wstring::npos ? low : low.substr(0, mark);
-        if (low.find(L'\\') == wstring::npos && (base == wgstate::kSettingsFile || base == wgstate::kModelChoiceFile)) {
+        if (low == wgstate::kSettingsFile || low == wgstate::kModelChoiceFile) {
             string bytes;  // (read through the handle that holds the file until it is deleted)
-            return f.ReadBytes(bytes) && wgstate::StampedByWrongGPU(bytes);
+            return f.ReadBytes(bytes) && wgstate::StampedByWrongGPU(bytes, ToUtf8(low), installId);
         }
         const auto it = names->find(low);
         return it != names->end() && (it->second.empty() || IEq(f.Sha256(), it->second));
@@ -554,6 +557,8 @@ void RestoreStep(const char* name) {
     if (g_restoreStepHook) g_restoreStepHook(name);
 #ifdef WRONGGPU_TESTING
     if (EnvVar(L"WRONGGPU_TEST_STOP_AT") == FromUtf8(name)) ExitProcess(99);  // tests: the process stops here, as if killed
+    // tests: the operation fails here (as a failed write would), so its rollback runs
+    if (EnvVar(L"WRONGGPU_TEST_FAIL_AT") == FromUtf8(name)) Fail(L"Test failure at " + FromUtf8(name) + L" (WRONGGPU_TEST_FAIL_AT)");
     // tests: a file appears here (another program or the player creating it at this moment), where nothing is
     if (EnvVar(L"WRONGGPU_TEST_CREATE_AT") == FromUtf8(name) && !EnvVar(L"WRONGGPU_TEST_CREATE_FILE").empty()) {
         const wstring f = EnvVar(L"WRONGGPU_TEST_CREATE_FILE");
@@ -1088,12 +1093,37 @@ bool StateHasSettings(const wstring& dir) {
     for (auto& d : ListDirs(state)) if (SettingsName(BaseName(d), true)) return true;
     return false;
 }
-void RemoveStateKeepingSettings(const wstring& dir) {
-    const wstring state = StateDir(dir);
-    for (auto& f : ListFiles(state, L"*"))  // never throws (a destructor calls it)
-        if (!SettingsName(BaseName(f), false)) { SetFileAttributesW(f.c_str(), FILE_ATTRIBUTE_NORMAL); DeleteFileW(f.c_str()); }
-    for (auto& d : ListDirs(state)) if (!SettingsName(BaseName(d), true)) RemoveTree(d);
-    RemoveDirectoryW(state.c_str());  // only when empty
+wstring NewInstallId() {
+    std::random_device rd;  // (the CRT's system random source)
+    wchar_t buf[33] = {};
+    for (int i = 0; i < 4; ++i) swprintf(buf + i * 8, 9, L"%08x", static_cast<unsigned>(rd()));
+    return buf;
+}
+void JournalCreate(RunJournal& j, const wstring& path, bool folder) {
+    if (Exists(path)) return;  // there before this run: never this run's
+    const wstring up = Parent(path);
+    if (!up.empty() && up != path && !Exists(up)) JournalCreate(j, up, true);
+    j.created.push_back({path, folder});
+}
+std::vector<wstring> RollbackCreated(Context& ctx, const wstring& state, RunJournal& j) {
+    std::vector<wstring> left;
+    try {
+        for (auto it = j.created.rbegin(); it != j.created.rend(); ++it) {
+            if (it->second) RemoveDirectoryW(it->first.c_str());  // (only when empty: anything else in it stays)
+            else if (IsFile(it->first)) { SetFileAttributesW(it->first.c_str(), FILE_ATTRIBUTE_NORMAL); DeleteFileW(it->first.c_str()); }
+        }
+        j.created.clear();
+        j.done = true;
+        std::vector<wstring> stack{state};
+        while (!stack.empty()) {
+            const wstring d = stack.back();
+            stack.pop_back();
+            for (auto& f : ListFiles(d, L"*")) left.push_back(f.substr(state.size() + 1));
+            for (auto& s : ListDirs(d)) stack.push_back(s);
+        }
+        for (auto& f : left) LogLine(ctx, L"kept " + Join(state, f) + L" (not made by this run: the rollback takes back only what it made)");
+    } catch (...) {}
+    return left;
 }
 
 // Byte-exact removal of a WrongGPU 0.1.x/0.2.x ("DLSS 4.5 AMD") install from its own record and backup: the same

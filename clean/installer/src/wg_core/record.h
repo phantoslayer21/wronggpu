@@ -62,6 +62,7 @@ struct RrConfigFix {
 inline const wchar_t* const kRuntimeGameRoot = L"<game-root>";
 struct Record {
     wstring version, game, exe, status, regkey, model, modelM;
+    wstring installId;  // this install's id (32 hex digits; kept by repair and update): WrongGPU's stamp on its state files names it
     std::vector<Entry> e;
     bool legacy = false;
     int format = 1;                                   // 1: 0.5.x setup, 2: the launcher
@@ -273,7 +274,13 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
 // it: profile.ini (the game's settings), previous\ (the version Roll back goes to) and rr-config\ (the Engine.ini fix's backup);
 // since 0.6.5 also the state files settings.ini and model-choice.ini (wg_state.h).
 bool StateHasSettings(const wstring& dir);
-// The state folder emptied of everything else (the record, the backup, the uninstaller, logs); removed when nothing is left.
-void RemoveStateKeepingSettings(const wstring& dir);
+// A new install id (32 lower-case hex digits, from the system's random source).
+wstring NewInstallId();
+// What an install run creates, written down BEFORE each create (a file or a folder that was not there), so a failed run takes
+// back only what it made: RollbackCreated deletes those files (newest first) and removes those folders when empty. Everything
+// else stays: it is logged and returned (paths relative to `state`). Never throws (a destructor calls it).
+struct RunJournal { std::vector<std::pair<wstring, bool>> created; bool done = false; };  // (path, is a folder); done: rolled back
+void JournalCreate(RunJournal& j, const wstring& path, bool folder);    // only when nothing is at path; parents first
+std::vector<wstring> RollbackCreated(Context& ctx, const wstring& state, RunJournal& j);
 std::vector<wstring> LegacyRestore(Context& ctx, const wstring& dir, Ui& ui);
 }  // namespace wg

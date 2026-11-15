@@ -1591,25 +1591,62 @@ int main() {
             require(cpEntries == 1, "the scan lists the game once: the wrong-place install's entry, not the game a second time");
             RemoveTree(cp); RemoveManagedGame(cp);
 
-            // ---- rc6 L4: what a failed install or update leaves in the state folder: the player's settings only ----------------
+            // ---- a failed install or update takes back only what THIS run made (the run journal, written before each create);
+            // everything else in the state folder stays and is listed: never a removal of the whole folder ----------------------
             const wstring fs = Join(dir, L"failed-state");
             require(!StateHasSettings(fs), "L4: no state folder, no settings");
-            file(Join(StateDir(fs), L"uninstall.exe"), "MZ");
-            file(Join(StateDir(fs), L"owned-files.json"), "{}");
-            file(Join(StateDir(fs), L"backup\\x.dll"), "x");
-            require(!StateHasSettings(fs), "L4: an uninstaller and a backup are no settings");
-            RemoveStateKeepingSettings(fs);
-            require(!IsDir(StateDir(fs)), "L4: without settings the state folder goes");
-            file(Join(StateDir(fs), L"uninstall.exe"), "MZ");
-            file(ProfilePath(fs), "[profile]\r\n");
-            file(Join(StateDir(fs), L"previous\\previous.txt"), "version=0.5.9\r\n");
-            file(Join(StateDir(fs), L"rr-config\\Engine.ini"), "[x]\r\n");
-            file(Join(StateDir(fs), L"backup\\x.dll"), "x");
-            require(StateHasSettings(fs), "L4: profile.ini, previous\\ and rr-config\\ are settings");
-            RemoveStateKeepingSettings(fs);
-            require(IsFile(ProfilePath(fs)) && IsFile(Join(StateDir(fs), L"previous\\previous.txt")) && IsFile(Join(StateDir(fs), L"rr-config\\Engine.ini")) &&
-                        !IsFile(Join(StateDir(fs), L"uninstall.exe")) && !IsDir(Join(StateDir(fs), L"backup")),
-                    "L4: the settings stay, the rest goes");
+            {
+                RunJournal j;
+                JournalCreate(j, Join(StateDir(fs), L"backup\\x.dll"), false);  // (the state folder and backup\ first: not there yet)
+                file(Join(StateDir(fs), L"backup\\x.dll"), "x");
+                JournalCreate(j, Join(StateDir(fs), L"uninstall.exe"), false);
+                file(Join(StateDir(fs), L"uninstall.exe"), "MZ");
+                const auto left = RollbackCreated(mc, StateDir(fs), j);
+                require(j.created.size() == 0 && left.empty() && !IsDir(StateDir(fs)), "rollback: a state folder this run made, with only what it made: all of it goes");
+            }
+            {
+                // there before the run: the player's settings, files an earlier uninstall kept and listed, a folder of the player's,
+                // an earlier uninstaller (not this run's)
+                const std::vector<std::pair<wstring, string>> before = {
+                    {ProfilePath(fs), "[profile]\r\n"}, {Join(StateDir(fs), L"previous\\previous.txt"), "version=0.5.9\r\n"},
+                    {Join(StateDir(fs), L"rr-config\\Engine.ini"), "[x]\r\n"}, {Join(StateDir(fs), L"settings.ini.wgtmp-player"), "player_key=1\r\n"},
+                    {Join(StateDir(fs), L"notes\\mine.txt"), "the player's"}, {Join(StateDir(fs), L"uninstall.exe"), "MZ earlier"}};
+                for (auto& f : before) file(f.first, f.second);
+                RunJournal j;
+                JournalCreate(j, StateDir(fs), true);                            // (there: not written down)
+                JournalCreate(j, Join(StateDir(fs), L"backup\\y.dll"), false);  // backup\ and the file: this run's
+                file(Join(StateDir(fs), L"backup\\y.dll"), "y");
+                JournalCreate(j, Join(StateDir(fs), L"owned-files.json"), false);
+                file(Join(StateDir(fs), L"owned-files.json"), "{}");
+                JournalCreate(j, Join(StateDir(fs), L"uninstall.exe"), false);   // (there: an overwrite later is not a create)
+                const auto left = RollbackCreated(mc, StateDir(fs), j);
+                bool same = true;
+                for (auto& f : before) { string b; same = same && ReadAll(f.first, b) && b == f.second; }
+                require(same && left.size() == before.size() && !IsDir(Join(StateDir(fs), L"backup")) && !IsFile(Join(StateDir(fs), L"owned-files.json")),
+                        "rollback: only what this run made goes (backup\\y.dll, backup\\, owned-files.json); the player's settings, a kept temporary file, "
+                        "the player's folder and the earlier uninstaller stay byte for byte and are listed");
+                RemoveTree(StateDir(fs));
+            }
+            {
+                // the tests' failure and file hooks exist in WRONGGPU_TESTING builds only: in a release build the variables
+                // change nothing (CI runs this test in its release-flag builds)
+                const wstring made = Join(dir, L"hook-made.txt");
+                SetEnvironmentVariableW(L"WRONGGPU_TEST_FAIL_AT", L"hook-fail");
+                SetEnvironmentVariableW(L"WRONGGPU_TEST_CREATE_AT", L"hook-make");
+                SetEnvironmentVariableW(L"WRONGGPU_TEST_CREATE_FILE", made.c_str());
+                bool threw = false;
+                RestoreStep("hook-make");  // (each hook at its own step: the failure would stop the step before the file)
+                try { RestoreStep("hook-fail"); } catch (const SetupError&) { threw = true; }
+                SetEnvironmentVariableW(L"WRONGGPU_TEST_FAIL_AT", nullptr);
+                SetEnvironmentVariableW(L"WRONGGPU_TEST_CREATE_AT", nullptr);
+                SetEnvironmentVariableW(L"WRONGGPU_TEST_CREATE_FILE", nullptr);
+#ifdef WRONGGPU_TESTING
+                require(threw && IsFile(made), "testing build: WRONGGPU_TEST_FAIL_AT fails the operation at its step, WRONGGPU_TEST_CREATE_AT makes the file (the tests' hooks)");
+#else
+                require(!threw && !IsFile(made), "release build: WRONGGPU_TEST_FAIL_AT and WRONGGPU_TEST_CREATE_AT change nothing (the hooks are compiled out)");
+#endif
+                DeleteFileW(made.c_str());
+            }
             SetEnvironmentVariableW(L"LOCALAPPDATA", oldLad.c_str());
         }
 
@@ -1969,6 +2006,8 @@ int main() {
                 put(Join(sg, kRrSettings), defaults);
                 Record rm;
                 rm.version = L"0.6.5"; rm.game = sg; rm.exe = Join(sg, L"Game.exe"); rm.format = 2;
+                rm.installId = L"0123456789abcdef0123456789abcdef";  // (the state files' stamps name it)
+                const string sid = ToUtf8(rm.installId);
                 auto entry = [](const wstring& rel, const wstring& inst) { Entry e; e.action = L"copy"; e.rel = rel; e.inst = inst; e.owner = L"wg"; return e; };
                 rm.e.push_back(entry(L"plugins\\WrongGPU-RR.asi", L"aa"));
                 rm.e.push_back(entry(kRrSettings, Sha256Bytes(defaults.data(), defaults.size())));
@@ -2035,7 +2074,7 @@ int main() {
                         Sleep(300);
                         wgstate::Settings now = wgstate::ReadSettings(sg);
                         wgstate::Set(now, "rr_mode", "accurate");
-                        wgstate::WriteAtomic(wgstate::SettingsPathOf(sg), wgstate::Stamped(wgstate::RenderSettings(now)));
+                        wgstate::WriteAtomic(wgstate::SettingsPathOf(sg), wgstate::Stamped(wgstate::RenderSettings(now), "settings.ini", sid));
                     });
                     WaitForSingleObject(held, 5000);
                     const int w = WriteRrState(sctx, sg, stale, true, nullptr, &fastPrev);  // the launcher read fast before the menu's save
@@ -2044,29 +2083,35 @@ int main() {
                     require(w >= 0 && ReadRrSettings(sg).mode == "accurate",
                             "the menu saves accurate while the launcher's write waits for the state lock: the launcher decides under the lock and accurate stays");
                 }
-                // the state files go with the state folder only while their bytes are WrongGPU's (its stamp, wg_state.h): a file the
-                // player edited or made, an unknown one, a temporary file a crash cut short stay and are listed
+                // the state files go with the state folder only while their stamp is valid for their own name and this install
+                // (wg_state.h): a file the player edited or made, an unknown one, a copy under another name (temporary files among
+                // them) or from another install stay and are listed
                 DeleteFileW(wgstate::SettingsPathOf(sg).c_str());
-                require(wgstate::SetSettings(sg, {{"rr_mode", "fast"}}).ok(), "(settings.ini written by WrongGPU)");
-                put(Join(StateDir(sg), L"model-choice.ini"), wgstate::Stamped("model=M\r\n"));            // (as its writer makes it)
-                put(Join(StateDir(sg), L"settings.ini.wgtmp-1-2"), wgstate::Stamped("rr_mode=fast\r\n"));  // a complete write of WrongGPU's
-                put(Join(StateDir(sg), L"settings.ini.wgtmp-3-4"), "rr_mo");                                // a write a crash cut short
+                require(wgstate::SetSettings(sg, {{"rr_mode", "fast"}}).ok() && wgstate::StampedByWrongGPU([&] { string b; ReadAll(wgstate::SettingsPathOf(sg), b); return b; }(), "settings.ini", sid),
+                        "(settings.ini written by WrongGPU: stamped for its name and this install's id from the record)");
+                put(Join(StateDir(sg), L"model-choice.ini"), wgstate::Stamped("model=M\r\n", "model-choice.ini", sid));  // (as its writer makes it)
+                put(Join(StateDir(sg), L"settings.ini.wgtmp-1-2"), wgstate::Stamped("rr_mode=fast\r\n", "settings.ini", sid));  // a complete write a crash left
                 put(Join(StateDir(sg), L"player-note.txt"), "mine");
                 auto stay = RemoveStateFolder(sg, &rm);
-                require(!IsFile(wgstate::SettingsPathOf(sg)) && !IsFile(Join(StateDir(sg), L"model-choice.ini")) && !IsFile(Join(StateDir(sg), L"settings.ini.wgtmp-1-2")) &&
-                            IsFile(Join(StateDir(sg), L"settings.ini.wgtmp-3-4")) && IsFile(Join(StateDir(sg), L"player-note.txt")) && stay.size() == 2,
-                        "uninstall: settings.ini, model-choice.ini and a temporary file with WrongGPU's stamp go; a temporary file without it and the player's file stay (listed)");
-                DeleteFileW(Join(StateDir(sg), L"settings.ini.wgtmp-3-4").c_str());
+                require(!IsFile(wgstate::SettingsPathOf(sg)) && !IsFile(Join(StateDir(sg), L"model-choice.ini")) &&
+                            IsFile(Join(StateDir(sg), L"settings.ini.wgtmp-1-2")) && IsFile(Join(StateDir(sg), L"player-note.txt")) && stay.size() == 2,
+                        "uninstall: settings.ini and model-choice.ini with their valid stamps go; a temporary file (another name) and the player's file stay (listed)");
+                DeleteFileW(Join(StateDir(sg), L"settings.ini.wgtmp-1-2").c_str());
                 DeleteFileW(Join(StateDir(sg), L"player-note.txt").c_str());
                 // negative controls, each alone: the file stays byte for byte and is listed
                 struct Control { const wchar_t* name; string bytes; const char* what; };
-                const string ours = wgstate::Stamped("rr_mode=fast\r\n");
+                const string ours = wgstate::Stamped("rr_mode=fast\r\n", "settings.ini", sid);
                 for (const Control& c : {Control{L"settings.ini", ours + "player_key=1\r\n", "settings.ini WrongGPU wrote, the player added a key after it"},
                                          Control{L"settings.ini", ours.substr(0, 8) + "accurate" + ours.substr(12), "settings.ini WrongGPU wrote, a value edited (the stamp no longer matches)"},
                                          Control{L"settings.ini", "rr_mode=fast\r\n", "settings.ini the player made (no stamp)"},
                                          Control{L"settings.ini", "rr_mode=fast\r\n; wronggpu-written 0123456789abcdef\r\n", "settings.ini with a stamp that does not match"},
                                          Control{L"model-choice.ini", "model=L\r\n", "model-choice.ini without WrongGPU's stamp (unknown)"},
-                                         Control{L"settings.ini.wgtmp-9-9", "player_key=1\r\n", "a file named like a temporary file, not WrongGPU's"}}) {
+                                         Control{L"settings.ini.wgtmp-9-9", "player_key=1\r\n", "a file named like a temporary file, not WrongGPU's"},
+                                         Control{L"settings.ini.wgtmp-backup", ours, "a copy of WrongGPU's settings.ini under another name (its stamp names settings.ini)"},
+                                         Control{L"settings-copy.ini", ours, "a copy of WrongGPU's settings.ini as settings-copy.ini"},
+                                         Control{L"model-choice.ini", wgstate::Stamped("model=M\r\n", "settings.ini", sid), "settings.ini's bytes copied to model-choice.ini"},
+                                         Control{L"settings.ini", wgstate::Stamped("rr_mode=fast\r\n", "settings.ini", "fedcba9876543210fedcba9876543210"),
+                                                 "a settings.ini copied from another install (its stamp names that install)"}}) {
                     const wstring f = Join(StateDir(sg), c.name);
                     put(f, c.bytes);
                     stay = RemoveStateFolder(sg, &rm);

@@ -33,6 +33,10 @@
 
 using namespace wgstate;
 
+static const char* kId = "abcdef0123456789abcdef0123456789";  // the install id the test's record names
+static std::wstring g_hookFile;                                // the settings file the interleaving hooks act on
+static DWORD g_editorWriteError = 0, g_editorMoveError = 0;
+
 static int g_fail = 0, g_pass = 0;
 static void check(bool ok, const char* what) {
     if (ok) ++g_pass;
@@ -63,7 +67,9 @@ static std::vector<std::wstring> List(const std::wstring& dir) {
     WIN32_FIND_DATAW f;
     HANDLE h = FindFirstFileW(JoinPath(ExtendedPath(dir), L"*").c_str(), &f);
     if (h == INVALID_HANDLE_VALUE) return out;
-    do { if (wcscmp(f.cFileName, L".") && wcscmp(f.cFileName, L"..")) out.push_back(f.cFileName); } while (FindNextFileW(h, &f));
+    do {  // (the record with the install id is not counted: the tests count settings.ini and temporary files)
+        if (wcscmp(f.cFileName, L".") && wcscmp(f.cFileName, L"..") && _wcsicmp(f.cFileName, L"install.record")) out.push_back(f.cFileName);
+    } while (FindNextFileW(h, &f));
     FindClose(h);
     return out;
 }
@@ -228,9 +234,20 @@ int wmain(int argc, wchar_t** argv) {
         check(Set(mixed, "rr_mode", "exact") && Set(mixed, "new_key", "3") &&
                   RenderSettings(mixed) == "\xEF\xBB\xBF; the player's note \xc3\xa4\nPlayer Key = 1\n[section]\nrr_mode=exact\nother_key=2\nnew_key=3\n",
               "a change keeps the BOM, the comments, the unknown lines and the line ends; the changed key rewritten in place, a new one at the end");
-        check(ParseSettings(Stamped("rr_mode=fast\r\n")).lines.size() == 1 && StampedByWrongGPU(Stamped("rr_mode=fast\r\n")) &&
-                  !StampedByWrongGPU(Stamped("rr_mode=fast\r\n") + "x=1\r\n") && !StampedByWrongGPU("rr_mode=fast\r\n; wronggpu-written 0123456789abcdef\r\n"),
-              "the stamp: read as a comment (not content), valid only right after the bytes it checks");
+        const std::string st = Stamped("rr_mode=fast\r\n", "settings.ini", kId);
+        check(ParseSettings(st).kv.size() == 1 && StampedByWrongGPU(st, "settings.ini", kId) && StampedByWrongGPU(st, "SETTINGS.INI", kId) &&
+                  !StampedByWrongGPU(st + "x=1\r\n", "settings.ini", kId) && !StampedByWrongGPU("rr_mode=fast\r\n; wronggpu-written 0123456789abcdef\r\n", "settings.ini", kId),
+              "the stamp: a comment to readers, valid only right after the bytes it checks");
+        check(!StampedByWrongGPU(st, "settings.ini.wgtmp-backup", kId) && !StampedByWrongGPU(st, "model-choice.ini", kId) &&
+                  !StampedByWrongGPU(st, "settings.ini", "fedcba9876543210fedcba9876543210") && !StampedByWrongGPU(st, "settings.ini", ""),
+              "the stamp names the file and the install: a copy under another name, from another install, or an install without an id does not match");
+        // every line keeps its own line end; nothing is added at the end of a file that had none; a stamp-like comment stays
+        Settings ends = ParseSettings("a=1\r\nb=2\nc=3");
+        check(Set(ends, "rr_mode", "fast") && RenderSettings(ends) == "a=1\r\nb=2\nc=3\r\nrr_mode=fast",
+              "mixed line ends kept line by line; a new key after a last line without a line end: that line gets one, the new one none");
+        Settings noEnd = ParseSettings("; wronggpu-written reminder\nrr_mode=fast");
+        check(Set(noEnd, "rr_mode", "exact") && RenderSettings(noEnd) == "; wronggpu-written reminder\nrr_mode=exact",
+              "a player's comment that starts like the stamp stays; a changed key in a file without a final line end gets none");
         Settings r;
         check(Set(r, "rr_mode", "fast") && Set(r, "rr_mode", "exact") && r.kv.size() == 1 && !Set(r, "Bad Key", "x") && !Set(r, "k", "a b"), "Set: replace, refuse bad key/value");
         const Settings back = ParseSettings(RenderSettings(r));
@@ -243,6 +260,8 @@ int wmain(int argc, wchar_t** argv) {
         check(SetSettings(game, {{"rr_mode", "fast"}}).result == SetResult::NoStateFolder && DirectoryState(state) == PathState::Missing,
               "no state folder: NoStateFolder, the folder is not created");
         CreateDirectoryW(state.c_str(), nullptr);
+        WriteText(JoinPath(state, L"install.record"), std::string("WRONGGPU-RECORD 2\r\nversion\t0.6.5\r\ninstall-id\t") + kId + "\r\n");
+        check(InstallIdOf(game) == kId, "InstallIdOf: the record's install-id line");
         const std::wstring f = SettingsPathOf(game);
         check(SetSettings(game, {{"rr_mode", "fast"}}).ok() && *Get(ReadSettings(game), "rr_mode") == "fast", "SetSettings writes the file");
         const std::string before = ReadText(f);
@@ -277,19 +296,19 @@ int wmain(int argc, wchar_t** argv) {
         w = WriteAtomic(JoinPath(JoinPath(root, L"missing-folder"), L"x.ini"), "x");
         check(!w.ok && w.error != 0, "a write into a missing folder fails with its error");
         // the stamp: the file WrongGPU created is stamped and stays so while only WrongGPU writes it
-        check(StampedByWrongGPU(ReadText(f)), "a file SetSettings created carries WrongGPU's stamp");
-        check(SetSettings(game, {{"rr_enabled", "1"}}).ok() && StampedByWrongGPU(ReadText(f)), "...and keeps it through WrongGPU's next write");
+        check(StampedByWrongGPU(ReadText(f), "settings.ini", kId), "a file SetSettings created carries WrongGPU's stamp");
+        check(SetSettings(game, {{"rr_enabled", "1"}}).ok() && StampedByWrongGPU(ReadText(f), "settings.ini", kId), "...and keeps it through WrongGPU's next write");
         // the player's edits: kept by every write, and the file is the player's from then on (no stamp)
-        WriteText(f, ReadText(f) + "player_key = 7\r\n; the player's note \xc3\xa4\r\n");
+        WriteText(f, ReadText(f) + "player_key = 7\r\n; the player's note \xc3\xa4\r\n; wronggpu-written a player's line\r\n");
         SetOutcome o = SetSettings(game, {{"rr_mode", "accurate"}});
         std::string t = ReadText(f);
         check(o.ok() && o.written && *Get(ReadSettings(game), "rr_mode") == "accurate" && t.find("player_key = 7\r\n") != std::string::npos &&
-                  t.find("; the player's note \xc3\xa4\r\n") != std::string::npos && !StampedByWrongGPU(t),
+                  t.find("; the player's note \xc3\xa4\r\n; wronggpu-written a player's line\r\n") != std::string::npos && !StampedByWrongGPU(t, "settings.ini", kId),
               "a file the player edited: the menu's save keeps the player's key and note as they are and writes no stamp (the player's file now)");
         WriteText(f, "\xEF\xBB\xBF# made by the player\r\nRR Mode = Fast\r\n");
         o = SetSettings(game, {{"rr_mode", "fast"}});
         t = ReadText(f);
-        check(o.ok() && t.rfind("\xEF\xBB\xBF# made by the player\r\nRR Mode = Fast\r\nrr_mode=fast\r\n", 0) == 0 && !StampedByWrongGPU(t),
+        check(o.ok() && t.rfind("\xEF\xBB\xBF# made by the player\r\nRR Mode = Fast\r\nrr_mode=fast\r\n", 0) == 0 && !StampedByWrongGPU(t, "settings.ini", kId),
               "a file the player made (BOM, '#' comment, a key in other spelling): kept as it is, the key added, no stamp");
         // text WrongGPU cannot keep as it is: the save is refused and the bytes stay
         const std::string unkeepable = std::string("rr_mode=fast\r\nplayer_key=1\r\nnote=a\0b\r\n", 38);
@@ -303,7 +322,7 @@ int wmain(int argc, wchar_t** argv) {
         o = SetSettings(game, {{"rr_mode", "accurate"}});
         check(o.result == SetResult::Unparseable && ReadText(f) == "\xff\xfeplayer bytes\r\n", "bytes that are not UTF-8: refused, left as they are");
         DeleteFileW(f.c_str());
-        check(SetSettings(game, {{"rr_mode", "accurate"}}).ok() && StampedByWrongGPU(ReadText(f)), "(a new file again: stamped)");
+        check(SetSettings(game, {{"rr_mode", "accurate"}}).ok() && StampedByWrongGPU(ReadText(f), "settings.ini", kId), "(a new file again: stamped)");
         const std::string b2 = ReadText(f);
         HANDLE h = CreateFileW(f.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         o = SetSettings(game, {{"rr_mode", "exact"}});
@@ -439,7 +458,7 @@ int wmain(int argc, wchar_t** argv) {
             Sleep(300);
             Settings now = ReadSettings(game);
             Set(now, "rr_mode", "accurate");
-            WriteAtomic(SettingsPathOf(game), Stamped(RenderSettings(now)));
+            WriteAtomic(SettingsPathOf(game), Stamped(RenderSettings(now), "settings.ini", kId));
         });
         WaitForSingleObject(held, 5000);
         std::string seen;
@@ -450,12 +469,61 @@ int wmain(int argc, wchar_t** argv) {
         }, 5000);
         menu.join();
         CloseHandle(held);
-        check(staleRead == "fast" && o.ok() && seen == "accurate" && *Get(ReadSettings(game), "rr_mode") == "accurate" && StampedByWrongGPU(ReadText(SettingsPathOf(game))),
+        check(staleRead == "fast" && o.ok() && seen == "accurate" && *Get(ReadSettings(game), "rr_mode") == "accurate" && StampedByWrongGPU(ReadText(SettingsPathOf(game)), "settings.ini", kId),
               "UpdateSettings: decide() sees the mode another thread saved while this one waited for the lock (accurate), not the older read "
               "(fast); the newer mode stays");
         const std::string before = ReadText(SettingsPathOf(game));
         const SetOutcome same = SetSettings(game, {{"rr_mode", "accurate"}, {"rr_exact_allowed", "0"}});
         check(same.ok() && !same.written && ReadText(SettingsPathOf(game)) == before, "a change to the values already there: nothing written");
+    }
+
+    // ---- a player's editor saving while WrongGPU saves (the state lock does not stop it): the file is held from the read to just
+    // before the move (an editor's save meanwhile fails: Windows refuses it), and a change or a new file in the last moment
+    // refuses WrongGPU's save; the player's bytes always stay
+    {
+        const std::wstring f = SettingsPathOf(game);
+        g_hookFile = f;
+        // 1. held: an editor writing the file, or replacing it with its own copy, is refused; WrongGPU's save goes through
+        WriteText(f, "rr_mode=fast\r\n");
+        TestFault() = [](const char* step) {
+            if (std::strcmp(step, "replace-held") == 0) {
+                HANDLE h = CreateFileW(ExtendedPath(g_hookFile).c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                                       FILE_ATTRIBUTE_NORMAL, nullptr);
+                g_editorWriteError = h == INVALID_HANDLE_VALUE ? GetLastError() : 0;
+                if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+                const std::wstring copy = g_hookFile + L".editor";
+                WriteText(copy, "rr_mode=exact\r\n; the editor's copy\r\n");
+                g_editorMoveError = MoveFileExW(ExtendedPath(copy).c_str(), ExtendedPath(g_hookFile).c_str(), MOVEFILE_REPLACE_EXISTING) ? 0 : GetLastError();
+                DeleteFileW(ExtendedPath(copy).c_str());
+            }
+            return false;
+        };
+        SetOutcome o = SetSettings(game, {{"rr_mode", "accurate"}});
+        TestFault() = nullptr;
+        check(g_editorWriteError == ERROR_SHARING_VIOLATION && g_editorMoveError != 0 && o.ok() && o.written && *Get(ReadSettings(game), "rr_mode") == "accurate",
+              "while WrongGPU holds the file, an editor's write and an editor's replace are refused by Windows (its bytes never land); WrongGPU's save completes");
+        // 2. the last moment (the file let go, before the move): another program changes the file: WrongGPU's save is refused
+        WriteText(f, "rr_mode=fast\r\n");
+        TestFault() = [](const char* step) {
+            if (std::strcmp(step, "replace-check") == 0) { Sleep(20); WriteText(g_hookFile, "rr_mode=exact\r\n; the player's save\r\n"); }
+            return false;
+        };
+        o = SetSettings(game, {{"rr_mode", "accurate"}});
+        TestFault() = nullptr;
+        check(o.result == SetResult::Changed && !o.written && ReadText(f) == "rr_mode=exact\r\n; the player's save\r\n" && List(state).size() == 1 &&
+                  o.words().find("nothing was saved") != std::string::npos,
+              "a change in the last moment before the move: WrongGPU's save is refused (Changed, in words), the player's bytes stay, no temporary file");
+        // 3. the file was not there: another program makes it before the move: refused, its bytes stay
+        DeleteFileW(f.c_str());
+        TestFault() = [](const char* step) {
+            if (std::strcmp(step, "replace-held") == 0) WriteText(g_hookFile, "player_made=1\r\n");
+            return false;
+        };
+        o = SetSettings(game, {{"rr_mode", "accurate"}});
+        TestFault() = nullptr;
+        check(o.result == SetResult::Changed && ReadText(f) == "player_made=1\r\n" && List(state).size() == 1,
+              "a file made by another program while WrongGPU saved a new one: refused (Changed), the other program's file stays, no temporary file");
+        DeleteFileW(f.c_str());
     }
 
     // ---- abandoned in the middle of a write: the next holder re-reads the old whole file

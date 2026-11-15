@@ -36,35 +36,54 @@ sys.stdin.read()
 STAMP = b"; wronggpu-written "
 
 
-def stamp_check(body):
-    """wg_state.h StampCheck: FNV-1a 64 of the bytes, 16 lower-case hex digits."""
+def stamp_check(body, name, install_id):
+    """wg_state.h StampCheck: FNV-1a 64 of the bytes, then of "\\n<name, lower case>\\n<install id>"; 16 lower-case hex digits."""
     h = 1469598103934665603
-    for c in body:
+    for c in body + b"\n" + name.lower().encode() + b"\n" + install_id:
         h = ((h ^ c) * 1099511628211) & 0xFFFFFFFFFFFFFFFF
     return b"%016x" % h
 
 
-def stamped_by_wronggpu(data):
+def install_id(state_dir):
+    """The record's install-id (wg_state.h InstallIdOf); b"" when none."""
+    rp = os.path.join(state_dir, "install.record")
+    for line in (read(rp).split(b"\r\n") if os.path.isfile(rp) else []):
+        if line.startswith(b"install-id\t"):
+            return line[len(b"install-id\t"):]
+    return b""
+
+
+def stamped_by_wronggpu(data, name, iid):
+    if not iid:
+        return False
     t = data[:-1] if data.endswith(b"\n") else data
     t = t[:-1] if t.endswith(b"\r") else t
     start = t.rfind(b"\n") + 1
     last = t[start:]
-    return last.startswith(STAMP) and len(last) == len(STAMP) + 16 and last[len(STAMP):] == stamp_check(data[:start])
+    return last.startswith(STAMP) and len(last) == len(STAMP) + 16 and last[len(STAMP):] == stamp_check(data[:start], name, iid)
 
 
 def menu_save(path, k, v):
     """The in-game menu's save as wg_state.h SetSettings makes it: k=v set (its line rewritten, or added at the end), every
-    other line kept, the stamp kept only on a file that was WrongGPU's (or new)."""
+    other line kept with its own line end, only the valid stamp taken off, put back only on a file that was WrongGPU's (or new)
+    of an install with an id."""
+    name, iid = os.path.basename(path), install_id(os.path.dirname(path))
     data = read(path) if os.path.isfile(path) else None
-    ours = data is None or stamped_by_wronggpu(data)
-    lines = [l for l in (data or b"").decode("utf-8").replace("\r\n", "\n").split("\n") if l and not l.startswith(STAMP.decode())]
+    ours = bool(iid) and (data is None or stamped_by_wronggpu(data, name, iid))
+    text = (data or b"").decode("utf-8")
+    if data is not None and stamped_by_wronggpu(data, name, iid):
+        text = text[:text.rstrip("\r\n").rfind("\n") + 1]  # (the valid stamp line off)
+    lines = text.splitlines(keepends=True)
     keys = [l.split("=", 1)[0].strip() if "=" in l and not l.lstrip().startswith((";", "#", "[")) else None for l in lines]
     if k in keys:
-        lines[keys.index(k)] = k + "=" + v
+        i = keys.index(k)
+        lines[i] = k + "=" + v + lines[i][len(lines[i].rstrip("\r\n")):]
     else:
-        lines.append(k + "=" + v)
-    body = "".join(l + "\r\n" for l in lines).encode("utf-8")
-    write(path, body + STAMP + stamp_check(body) + b"\r\n" if ours else body)
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\r\n"
+        lines.append(k + "=" + v + "\r\n")
+    body = "".join(lines).encode("utf-8")
+    write(path, body + STAMP + stamp_check(body, name, iid) + b"\r\n" if ours else body)
 
 
 def seed_appears(t, m, name, rel, extra=None):
@@ -94,12 +113,57 @@ def seed_appears(t, m, name, rel, extra=None):
 
 
 def record_060(t, m, b):
-    """The install record as 0.6.0 wrote it for this install: version 0.6.0, no wronggpu-asi.ini entry (0.6.0 seeded the
-    file without recording it)."""
+    """The install record as 0.6.0 wrote it for this install, built from this install's record in 0.6.0's format: the
+    WrongGPU 0.6.0 source (commit f3aa109, clean/installer/src/wg_core/record.cpp SaveRecord, line 141) writes no install-id
+    line, and 0.6.0 seeded wronggpu-asi.ini without recording it (clean/installer/src/wg_core/optiscaler.h, lines 77-87): so
+    version 0.6.0, no install-id, no wronggpu-asi.ini entry; and 0.6.0 had no state files (settings.ini goes)."""
     rp = os.path.join(b, "wronggpu-setup", "install.record")
     lines = read(rp).decode("utf-8").split("\r\n")
-    lines = ["version\t0.6.0" if l.startswith("version\t") else l for l in lines if not l.endswith("\twronggpu-asi.ini")]
+    lines = ["version\t0.6.0" if l.startswith("version\t") else l for l in lines
+             if not l.endswith("\twronggpu-asi.ini") and not l.startswith("install-id\t")]
     write(rp, "\r\n".join(lines).encode("utf-8"))
+    for f in ("settings.ini", "model-choice.ini"):
+        if os.path.isfile(os.path.join(b, "wronggpu-setup", f)):
+            os.remove(os.path.join(b, "wronggpu-setup", f))
+
+
+def failed_runs(t, m):
+    """A repair or install that fails takes back only what it made (the run journal): the player's files in the state folder
+    (a note, a folder, a kept temporary file, a copy of the settings file) stay byte for byte, whichever way the run fails."""
+    inst = ("--opti=" + t.opti, "--noscan", "--force", "--experimental")
+    root, b, exe = m.game(t, "State Failed Runs")
+    st = os.path.join(b, "wronggpu-setup")
+    rc = t.run("install", exe, *inst)
+    mine = {"notes.txt": b"the player's notes", os.path.join("mine", "x.txt"): b"a folder of the player's",
+            "settings.ini.wgtmp-player": b"player_key=1\r\n"}
+    for rel, data in mine.items():
+        write(os.path.join(st, rel), data)
+    if os.path.isfile(os.path.join(st, "settings.ini")):
+        mine["settings-copy.ini"] = read(os.path.join(st, "settings.ini"))  # (a copy of WrongGPU's file: the player's)
+        write(os.path.join(st, "settings-copy.ini"), mine["settings-copy.ini"])
+
+    def same():
+        return all(os.path.isfile(os.path.join(st, r)) and read(os.path.join(st, r)) == d for r, d in mine.items())
+    for how, step in (("a repair that fails after everything was written", "installed"),
+                      ("a repair that fails before its record (the earlier install already removed)", "seed-planned")):
+        t.env["WRONGGPU_TEST_FAIL_AT"] = step
+        try:
+            rc2 = t.run("repair", exe, *inst)
+        finally:
+            t.env.pop("WRONGGPU_TEST_FAIL_AT", None)
+        t.check("%s: refused, the player's files in the state folder stay byte for byte" % how,
+                rc == 0 and rc2 != 0 and same(), (rc, rc2, [r for r, d in mine.items() if not os.path.isfile(os.path.join(st, r))], t.logtail(1200)))
+        rc = t.run("install", exe, *inst)  # (installed again for the next case)
+    rc = t.run("uninstall", exe)
+    t.check("...the uninstall keeps them too (listed)", rc == 0 and same(), (rc, t.j.get("warnings")))
+    t.env["WRONGGPU_TEST_FAIL_AT"] = "seed-planned"
+    try:
+        rc2 = t.run("install", exe, *inst)  # a new install into the state folder those files are in
+    finally:
+        t.env.pop("WRONGGPU_TEST_FAIL_AT", None)
+    t.check("an install that fails where an earlier uninstall kept the player's files: they stay byte for byte (never a removal of the folder)",
+            rc2 != 0 and same() and not os.path.isfile(os.path.join(st, "install.record")), (rc2, os.listdir(st) if os.path.isdir(st) else None))
+    shutil.rmtree(root, ignore_errors=True)
 
 
 def hold(path, how):
@@ -163,10 +227,13 @@ def asi_seed_cases(t, opti, m):
         t.check("update over a 0.6.0 record without the seed entry (wronggpu-asi.ini %s): kept byte for byte, not recorded" % label,
                 rc == 0 and rc2 == 0 and read(asi) == asi_bytes and m.record_entry_sha(b, "wronggpu-asi.ini") is None,
                 (rc, rc2, read(asi), m.record_entry_sha(b, "wronggpu-asi.ini"), t.j.get("message")))
+        rc3 = t.run("status", exe)
+        said = str(t.j.get("game", {})) + str(t.j.get("warnings", []))
+        t.check("...a status (what the launcher shows at every start) does not list it", rc3 == 0 and "wronggpu-asi.ini" not in said, said[-600:])
         left = kept_runtime(before, root, rel, *unrecorded_wronggpu_files(root))
         rc = t.run("uninstall", exe)
-        t.check("...the uninstall keeps it and lists it; everything else as before",
-                rc == 0 and read(asi) == asi_bytes and snapshot(root) == left and any("wronggpu-asi.ini" in w for w in t.j.get("warnings", [])),
+        t.check("...the uninstall keeps it and lists it once; everything else as before",
+                rc == 0 and read(asi) == asi_bytes and snapshot(root) == left and sum("wronggpu-asi.ini" in w for w in t.j.get("warnings", [])) == 1,
                 (rc, diff(left, snapshot(root)), t.j.get("warnings")))
         os.remove(asi)
     shutil.rmtree(root, ignore_errors=True)  # (the later sections, the window's library among them, see only their own games)
@@ -181,6 +248,7 @@ def run(t, opti, m):
     rr_files = {"bin/x64/nvngx_dlssd.dll": b"MZ synthetic stand-in, not a usable RR model file " * 64,
                 "bin/x64/sl.dlss_d.dll": b"MZ synthetic stand-in"}  # the DLSS RR plugin stand-in
     seed_appears(t, m, "RR", m.RR_SETTINGS, extra=rr_files)
+    failed_runs(t, m)
     inst = ("--opti=" + opti, "--noscan", "--force", "--experimental")
     root, b, exe = m.game(t, "State Game", extra=rr_files)
     before = snapshot(root)
