@@ -179,12 +179,13 @@ inline ReadResult ReadRecordFile(const std::filesystem::path& path, Record* out,
 // up to `attempts` times, 20 ms apart. false with *why. Call it under the record's Lock.
 inline bool WriteRecordFile(const std::filesystem::path& path, const Record& r, std::string* why, int attempts = 3) {
     const std::string text = FormatRecord(r);
-    DWORD err = 0;
+    wgstate::WriteResult w;
     for (int i = 0; i < attempts; ++i) {
-        if (wgstate::WriteAtomic(path.wstring(), text, &err)) return true;
+        w = wgstate::WriteAtomic(path.wstring(), text);
+        if (w.ok) return true;
         if (i + 1 < attempts) Sleep(20);
     }
-    if (why) *why = "cannot replace the record (Windows error " + std::to_string(err) + ")";
+    if (why) *why = "cannot replace the record: " + w.words();
     return false;
 }
 
