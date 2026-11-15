@@ -6,6 +6,10 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#ifdef WRONGGPU_TESTING
+#include <restartmanager.h>
+#pragma comment(lib, "rstrtmgr.lib")
+#endif
 
 #include "detect.h"
 #include "fingerprint.h"
@@ -18,6 +22,7 @@
 #include "rr.h"
 #include "rrconfig.h"
 #include "settings.h"
+#include "../../../wgshared/include/wg_state.h"  // the game's state files (settings.ini, model-choice.ini) and the state lock
 
 namespace wg {
 
@@ -65,6 +70,7 @@ static void RebaseRecord(Record& m, const wstring& dir) {
 bool LoadRecord(const wstring& path, Record& m) {
     string raw;
     if (!ReadAll(path, raw)) return false;
+    m = Record();  // the file's record alone (#219: a second load into the same Record listed every entry again)
     wstring text = FromUtf8(raw);
     size_t pos = 0; bool header = false;
     std::vector<std::array<wstring, 3>> owners;
@@ -409,6 +415,10 @@ static wstring LowerRel(wstring r) {
 static std::function<bool(const wstring&, PinnedFile&)> StateOwned(const wstring& dir, const Record* m) {
     auto names = std::make_shared<std::map<wstring, wstring>>();
     for (const wchar_t* n : {L"install.record", L"uninstall.exe", L"setup.log", L"profile.ini"}) (*names)[n] = L"";
+    // #219: the game's state files (wg_state.h: settings chosen in the launcher or a WrongGPU menu in the game, the model choice
+    // record) are always WrongGPU's, by their fixed names; so are their atomic writes' temporary files (<name>.wgtmp-*)
+    (*names)[wgstate::kSettingsFile] = L"";
+    (*names)[wgstate::kModelChoiceFile] = L"";
     if (m) {
         const string json = OwnedFilesJson(*m);
         (*names)[L"owned-files.json"] = Sha256Bytes(json.data(), json.size());
@@ -429,7 +439,11 @@ static std::function<bool(const wstring&, PinnedFile&)> StateOwned(const wstring
         }
     }
     return [names](const wstring& rel, PinnedFile& f) {
-        const auto it = names->find(LowerRel(rel));
+        const wstring low = LowerRel(rel);
+        const size_t mark = low.find(wgstate::kTempMark);
+        if (mark != wstring::npos && low.find(L'\\') == wstring::npos &&
+            (low.substr(0, mark) == wgstate::kSettingsFile || low.substr(0, mark) == wgstate::kModelChoiceFile)) return true;
+        const auto it = names->find(low);
         return it != names->end() && (it->second.empty() || IEq(f.Sha256(), it->second));
     };
 }
@@ -556,10 +570,6 @@ Holds WhatIsThere(Context& ctx, const wstring& dir, const Entry& e, const wstrin
     if (!e.inst.empty() && IEq(h, e.inst)) return Holds::Ours;
     if (e.existed && !e.orig.empty() && IEq(h, e.orig)) return Holds::Original;
     const wstring t = Target(dir, e.rel);
-    if (IEq(e.rel, kRrSettings) && !e.inst.empty()) {  // #219: only WrongGPU's RR plugin saved its mode there since (rr.h)
-        string text;
-        if (ReadAll(t, text) && IEq(Sha256Bytes(text.data(), text.size()), h) && RrSettingsPluginEdit(text, e.inst)) return Holds::Ours;
-    }
     wstring info;
     if (const FfxSlot* sl = SlotOf(e)) return ClassifySlot(*sl, t, nullptr, info) == FFX_OURS ? Holds::Ours : Holds::Other;  // the slot exception
     if (!EndsWithI(e.rel, L".ini") && KnownReleaseFile(ctx, t)) return Holds::Ours;  // a WrongGPU release's file (size and SHA-256)
@@ -601,10 +611,116 @@ static bool Replaceable(const wstring& path) {
     return true;
 }
 
+// A WrongGPU binary: what a game loads (DLLs and the OptiScaler plugins).
+bool IsBinaryName(const wstring& rel) { return EndsWithI(rel, L".dll") || EndsWithI(rel, L".asi"); }
+
+// The binaries of an install the operation guard holds: every copy entry of WrongGPU's (owner wg / wg-optibundle) that is a
+// binary, at its path in the game folder (whatever is there now: a file the guard cannot open refuses the operation).
+static std::vector<wstring> GuardedBinaries(const wstring& dir, const Record& m) {
+    std::vector<wstring> r;
+    for (auto& e : m.e)
+        if (e.action == L"copy" && (e.owner == L"wg" || e.owner == L"wg-optibundle" || e.owner.empty()) && IsBinaryName(e.rel)) {
+            const wstring p = Target(dir, e.rel);
+            bool seen = false;  // each file once: a second open of a held file would refuse the operation against its own hold
+            for (auto& q : r) seen = seen || IEq(FullPath(q), FullPath(p));
+            if (!seen) r.push_back(p);
+        }
+    return r;
+}
+
+static thread_local OperationGate* t_gate = nullptr;  // the innermost gate of this thread
+OperationGate::OperationGate(const wstring& d, const std::vector<wstring>& binaries) : dir(d), guard(d, binaries), prev(t_gate) { t_gate = this; }
+OperationGate::~OperationGate() { t_gate = prev; }
+
+#ifdef WRONGGPU_TESTING
+// Test builds: which processes have a file open (Restart Manager), for the log when the gate refuses.
+static wstring HoldersOf(const wstring& path) {
+    DWORD session = 0;
+    WCHAR key[CCH_RM_SESSION_KEY + 1] = {};
+    if (RmStartSession(&session, 0, key) != ERROR_SUCCESS) return L"?";
+    LPCWSTR files[] = {path.c_str()};
+    wstring out;
+    if (RmRegisterResources(session, 1, files, 0, nullptr, 0, nullptr) == ERROR_SUCCESS) {
+        UINT needed = 0, n = 16;
+        RM_PROCESS_INFO info[16];
+        DWORD reasons = 0;
+        if (RmGetList(session, &needed, &n, info, &reasons) == ERROR_SUCCESS)
+            for (UINT i = 0; i < n; ++i)
+                out += L" pid " + std::to_wstring(info[i].Process.dwProcessId) + (info[i].Process.dwProcessId == GetCurrentProcessId() ? L" (this process)" : L"") +
+                       L" " + info[i].strAppName + L";";
+    }
+    RmEndSession(session);
+    return out.empty() ? L" none listed" : out;
+}
+#endif
+
+std::unique_ptr<OperationGate> GuardOperation(const wstring& dir, const Record* m, bool holdBinaries) {
+    if (t_gate && IEq(FullPath(t_gate->dir), FullPath(dir))) return nullptr;  // this thread's operation holds the gate already
+    Record loaded;
+    if (!m && LoadRecord(RecordPath(dir), loaded) && !loaded.legacy) m = &loaded;
+    auto gate = std::make_unique<OperationGate>(dir, m && holdBinaries ? GuardedBinaries(dir, *m) : std::vector<wstring>{});
+    if (!gate->guard.ok()) {
+        wstring which = gate->guard.which().empty() ? wstring() : L" (" + BaseName(gate->guard.which()) + L")";
+#ifdef WRONGGPU_TESTING
+        if (!gate->guard.which().empty()) which += L" [test build, holders:" + HoldersOf(gate->guard.which()) + L"]";
+#endif
+        Fail(L"Nothing was changed: " + FromUtf8(gate->guard.words()) + which + L".", EXIT_REFUSED);
+    }
+    return gate;
+}
+
+bool GateHolds(const wstring& path) { return t_gate && t_gate->guard.Holds(path); }
+
+// A binary written (or replaced) by the operation: through the gate (PutHeld: renamed in complete, then held) when this thread
+// holds one, else plainly. Throws on failure; a load in the gap (sharing violation) stops the operation.
+static void FailPut(const wstring& path, DWORD e) {
+    if (e == ERROR_SHARING_VIOLATION)
+        Fail(L"Stopped: " + FromUtf8(wgstate::GuardWords(wgstate::GuardResult::GameRunning)) + L" (" + BaseName(path) +
+             L"). What was done so far stays recorded; run it again once the game is closed.", EXIT_REFUSED);
+    Fail(L"Cannot write " + path + L": " + ErrText(e));
+}
+// A file at the path that the gate does not hold (one the install decided to replace that the record did not list, such as
+// an earlier copy in REFramework's mirror): opened as the gate opens its binaries (a program that has it loaded, or open
+// without sharing writes, stops the operation) and deleted through that handle, so the new file can be renamed in and held.
+static DWORD FreeUnheld(const wstring& path) {
+    if (GateHolds(path) || !Exists(path)) return ERROR_SUCCESS;
+    const HANDLE h = CreateFileW(wgstate::ExtendedPath(path).c_str(), DELETE | GENERIC_READ | FILE_WRITE_DATA, FILE_SHARE_READ, nullptr,
+                                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return GetLastError();
+    FILE_DISPOSITION_INFO_EX d{};
+    d.Flags = FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS;
+    const DWORD e = SetFileInformationByHandle(h, FileDispositionInfoEx, &d, sizeof d) ? ERROR_SUCCESS : GetLastError();
+    CloseHandle(h);
+    return e;
+}
+void PutBinary(const wstring& path, const void* data, size_t size) {
+    if (!t_gate) { WriteFileAtomic(path, data, size); return; }
+    EnsureDir(Parent(path));
+    if (const DWORD fe = FreeUnheld(path)) FailPut(path, fe);
+    std::wstring oldLeft;
+    const DWORD e = t_gate->guard.PutHeld(path, data, size, &oldLeft);
+    if (e == ERROR_SUCCESS && !oldLeft.empty()) t_gate->oldLeft.push_back(oldLeft);
+    if (e == ERROR_SUCCESS) return;
+    FailPut(path, e);
+}
+void PutBinaryFrom(const wstring& path, const wstring& source) {
+    if (!t_gate) { CopyChecked(source, path); return; }
+    EnsureDir(Parent(path));
+    if (const DWORD fe = FreeUnheld(path)) FailPut(path, fe);
+    std::wstring oldLeft;
+    const DWORD e = t_gate->guard.PutHeldFrom(path, source, &oldLeft);
+    if (e == ERROR_SUCCESS && !oldLeft.empty()) t_gate->oldLeft.push_back(oldLeft);
+    if (e == ERROR_SUCCESS) return;
+    FailPut(path, e);
+}
+DWORD DeleteHeldBinary(const wstring& path) { return t_gate ? t_gate->guard.DeleteHeld(path) : ERROR_NOT_FOUND; }
 std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool failedInstall, bool keepState, std::map<wstring, wstring>* keptWarnings) {
     Record m;
     if (!LoadRecord(RecordPath(dir), m) || m.legacy) Fail(L"No WrongGPU installation record was found in " + dir + L".", EXIT_NOT_INSTALLED);
     if (!IEq(m.game, dir)) Fail(L"The installation record belongs to a different folder: " + m.game);
+    // #219: never while a running program has WrongGPU loaded (wg_state.h, the loaded protocol: the state lock is held for the
+    // whole restore, so no game registers in between; a failed install's own restore runs under its install's guard)
+    const auto gate = failedInstall ? nullptr : GuardOperation(dir, &m);
     std::vector<wstring> warnings;
     int total = (int)m.e.size() + 2, done = 0;
 
@@ -613,8 +729,9 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
     struct Plan { Do what = Do::Nothing; wstring now, source; bool keep = false; };  // now: the hash the decision was made on
     std::vector<Plan> plan(m.e.size());
     auto leaveWarning = [&](const Entry& e, const wstring& t, const wstring& keptAt, bool linked = false) {
-        // (not the RR settings files: the header WrongGPU writes in WrongGPU\wronggpu.ini names OptiScaler's menu)
-        const Fingerprint fp = e.action == L"copy" && !IsSlotName(e.rel) && !IsRrSettingsFile(e.rel) ? IdentifyFile(t) : Fingerprint();
+        // (not WrongGPU's settings files: the headers WrongGPU writes in WrongGPU\wronggpu.ini and wronggpu-asi.ini name OptiScaler)
+        const bool settingsFile = IsRrSettingsFile(e.rel) || IEq(BaseName(e.rel), L"wronggpu-asi.ini");
+        const Fingerprint fp = e.action == L"copy" && !IsSlotName(e.rel) && !settingsFile ? IdentifyFile(t) : Fingerprint();
         wstring w;
         if (linked) w = L"Left in place (the file has another name, a hard link; writing through it would change that name too): " + e.rel;
         else if (e.action == L"copy" && IsSlotName(e.rel)) w = L"The game replaced " + e.rel + L" (probably an update); its new file was kept.";
@@ -661,7 +778,7 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
                 case Holds::Original: p.what = Do::Nothing; break;
                 case Holds::Other: p.what = Do::Leave; p.keep = hasOriginal; break;
             }
-            if ((p.what == Do::Remove || p.what == Do::PutBack) && Exists(t) && !Replaceable(t))
+            if ((p.what == Do::Remove || p.what == Do::PutBack) && Exists(t) && !GateHolds(t) && !Replaceable(t))  // (a held binary: the gate changes it)
                 Fail(L"Cannot change " + e.rel + L": another program has it open (the game?). Close it and try again. Nothing was changed.", EXIT_REFUSED);
         }
     } else {
@@ -720,7 +837,15 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
                 // below keeps the game's file). A name that is empty (a stop between the two steps, or the DLL removed) gets it.
                 PinnedFile held;
                 DWORD err = 0;
-                if (held.Open(slot, false, &err)) {
+                if (GateHolds(slot)) {  // #219: WrongGPU's DLL in the slot is held by the operation's gate: deleted through it
+                    if (ClassifySlot(*sl, slot, nullptr, info) == FFX_OURS) {
+                        const DWORD de = DeleteHeldBinary(slot);
+                        if (de != ERROR_SUCCESS) Fail(L"Cannot put " + wstring(sl->name) + L" back: " + ErrText(de));
+                        if (MoveFileExW(t.c_str(), slot.c_str(), MOVEFILE_WRITE_THROUGH)) ui.log(L"restored " + wstring(sl->name) + L" from " + e.rel);
+                        else if (GetLastError() != ERROR_ALREADY_EXISTS && GetLastError() != ERROR_FILE_EXISTS)
+                            Fail(L"Cannot put " + wstring(sl->name) + L" back: " + ErrText(GetLastError()));
+                    }
+                } else if (held.Open(slot, false, &err)) {
                     if (ClassifySlot(*sl, slot, nullptr, info) == FFX_OURS) {
                         RestoreStep("locked");
                         if (!held.Delete(&err)) Fail(L"Cannot put " + wstring(sl->name) + L" back: " + ErrText(err));
@@ -770,6 +895,27 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
                 Fail(L"Cannot change " + e.rel + L": another program has it open (the game?). Close it and try again.", EXIT_REFUSED);
             Fail(L"Cannot change " + e.rel + L": " + ErrText(err));
         };
+        if (GateHolds(t)) {  // #219: a binary the operation's gate holds (nothing could change it since the plan hashed it)
+            RestoreStep("locked");  // (held and checked: the tests try to change it here, and cannot)
+            if (p.what == Do::Remove) {
+                const DWORD de = DeleteHeldBinary(t);
+                if (de != ERROR_SUCCESS) Fail(L"Cannot delete " + t + L": " + ErrText(de));
+                ui.log(L"removed " + e.rel);
+            } else {  // PutBack: WrongGPU's file deleted through its handle, then the original copied in, only if the name is free;
+                      // the original is the game's or the player's file, so the gate does not hold it (a later step of the same
+                      // operation, such as the install of a repair, may rename it); a failed copy leaves the backup for another run
+                if (failedInstall && !Exists(p.source)) continue;
+                const DWORD de = DeleteHeldBinary(t);
+                if (de != ERROR_SUCCESS) Fail(L"Cannot delete " + t + L": " + ErrText(de));
+                if (!CopyFileW(p.source.c_str(), t.c_str(), TRUE)) {
+                    const DWORD ce = GetLastError();
+                    Fail(L"Cannot put back " + t + L": " + ErrText(ce) + L" Its original is kept in " + p.source + L"; run the uninstall again.");
+                }
+                if (!failedInstall && !IEq(Sha256File(t), e.orig)) Fail(L"Restore verification failed for " + e.rel);
+                ui.log(L"restored " + e.rel);
+            }
+            continue;
+        }
         PinnedFile held;
         DWORD err = 0;
         const bool opened = held.Open(t, p.what == Do::PutBack, &err);
@@ -918,7 +1064,8 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
 }
 
 static bool SettingsName(const wstring& name, bool folder) {
-    return folder ? IEq(name, L"previous") || IEq(name, L"rr-config") : IEq(name, L"profile.ini");
+    return folder ? IEq(name, L"previous") || IEq(name, L"rr-config")
+                  : IEq(name, L"profile.ini") || IEq(name, wgstate::kSettingsFile) || IEq(name, wgstate::kModelChoiceFile);  // (#219: the state files)
 }
 bool StateHasSettings(const wstring& dir) {
     const wstring state = StateDir(dir);

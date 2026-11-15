@@ -475,8 +475,14 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     string selectedOptions, selectedSection;
     IniGetFrontEnd(selectedIni, "runtime_options", &selectedOptions, &selectedSection);
 #if WRONGGPU_PRESET_K
-    selectedOptions += selectedOptions.empty() ? "" : ";";
-    selectedOptions += ctx.presetK ? "model=K" : "model=M";
+    {  // #219: the earlier model items out first, so a repair or update writes the same wronggpu.ini again (the launcher no
+       // longer rewrites it after the install)
+        std::vector<std::pair<string, string>> kept;
+        for (auto& kv : SplitOptions(selectedOptions))
+            if (_stricmp(kv.first.c_str(), "model") != 0) kept.push_back(kv);
+        kept.push_back({"model", ctx.presetK ? "K" : "M"});
+        selectedOptions = JoinOptions(kept);
+    }
 #else
     if (target.presetK) {  // the launcher asked first (PresetKText); the command line says it in the log
         const wstring w = L"Preset K isn't in this version of WrongGPU: " + target.name + L" now starts on Model M.";
@@ -508,6 +514,21 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     const wstring selectedIniSrc = Join(OptiTempDir(ctx), L"WrongGPU.selected.ini");
     WriteFileAtomic(selectedIniSrc, selectedIni.data(), selectedIni.size());
     optiFiles.push_back({L"wronggpu.ini", selectedIniSrc});
+#if WRONGGPU_PRESET_K
+    if (opti && !slot) {  // the menu plugin's starting entry (optiscaler.h AsiSelectionText), one of the install's recorded files
+        // (#219: a wronggpu-asi.ini still there after the restore is not WrongGPU's, the plugin's menu or the player changed it:
+        // left as it is and not recorded, so an uninstall keeps it and lists it)
+        if (Exists(Join(dir, L"wronggpu-asi.ini"))) {
+            LogLine(ctx, L"OptiScaler plugin: wronggpu-asi.ini kept as it is (its entry last selected; not WrongGPU's file)");
+        } else {
+            const string asiText = AsiSelectionText(ctx.presetK);
+            const wstring asiSrc = Join(OptiTempDir(ctx), L"wronggpu-asi.ini");
+            WriteFileAtomic(asiSrc, asiText.data(), asiText.size());
+            optiFiles.push_back({L"wronggpu-asi.ini", asiSrc});
+            LogLine(ctx, wstring(L"OptiScaler plugin: starts on WrongGPU (Model ") + (ctx.presetK ? L"K" : L"M") + L") (wronggpu-asi.ini)");
+        }
+    }
+#endif
     // Where the game's Ray Reconstruction needs the host to restore the game's command-list state (plugin interface 5,
     // gamerules.h), OptiScaler must be WrongGPU's edition of OptiScaler (optiedition.h: the launcher downloads it; never
     // shipped with WrongGPU). With another OptiScaler (the player's own download, used when the edition couldn't be
@@ -666,12 +687,18 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
         const wstring rsrc = Join(tmp, kRrIni);
         WriteFileAtomic(rsrc, rini.data(), rini.size());
         optiFiles.push_back({kRrIni, rsrc});
-        Profile rp = DefaultProfile();
-        if (!LoadProfile(ProfilePath(dir), rp)) rp = DefaultProfile();
-        const string sini = RenderRrSettings(rp, rrData, "");
-        const wstring ssrc = Join(tmp, L"wronggpu.ini");
-        WriteFileAtomic(ssrc, sini.data(), sini.size());
-        optiFiles.push_back({kRrSettings, ssrc});
+        // #219: WrongGPU\wronggpu.ini holds the install's defaults (the player's choices are in the state folder, which decides
+        // over it), so a repair or update writes the same file again. One still there after the restore is not WrongGPU's
+        // (the player's edit, an older plugin's save: its mode was copied into the state folder, MigrateRrState): left as it is
+        // and not recorded, so an uninstall keeps it and lists it
+        if (Exists(Join(dir, kRrSettings))) {
+            LogLine(ctx, wstring(kRrSettings) + L" kept as it is (not WrongGPU's file; the saved settings decide over it)");
+        } else {
+            const string sini = RenderRrSettings(DefaultProfile(), rrData, "");
+            const wstring ssrc = Join(tmp, L"wronggpu.ini");
+            WriteFileAtomic(ssrc, sini.data(), sini.size());
+            optiFiles.push_back({kRrSettings, ssrc});
+        }
         LogLine(ctx, L"Ray Reconstruction: " + Join(Parent(pluginRel), kRrPluginName) + L", " + kRrRuntime + L" (the RR runtime is part of it), " + kRrIni + L" (data " + RrDataFile() +
                          (rrData ? L")" : L", not converted yet: RR off)") + L", " + kRrSettings);
     }
@@ -841,7 +868,8 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
             ui.step(++done, total, L"Installing " + rel);
             DWORD sz = 0; const void* d = PayloadData(f, sz);
             const wstring tp = Target(dir, rel);
-            WriteFileAtomic(tp, d, sz);
+            if (IsBinaryName(rel)) PutBinary(tp, d, sz);  // #219: renamed in complete, held by the operation's gate (record.h)
+            else WriteFileAtomic(tp, d, sz);
             if (Sha256File(tp) != f.sha256) Fail(L"Verification failed after writing " + rel);
             ui.log(L"installed " + rel);
         }
@@ -849,12 +877,14 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
             const bool ours = StartsWithI(BaseName(of.rel), L"wronggpu");  // the settings file and the Ray Reconstruction files
             ui.step(++done, total, (ours ? L"Installing " : L"Installing OptiScaler: ") + of.rel);
             const wstring tp = Target(dir, of.rel);
-            CopyChecked(of.src, tp);
+            if (IsBinaryName(of.rel)) PutBinaryFrom(tp, of.src);  // #219 (record.h)
+            else CopyChecked(of.src, tp);
             ui.log((ours ? L"installed " : L"installed OptiScaler's ") + of.rel);
         }
         for (auto& mr : mirrors) {
             ui.step(++done, total, L"Installing " + mr.second);
-            CopyChecked(Target(dir, mr.first), Target(dir, mr.second));
+            if (IsBinaryName(mr.second)) PutBinaryFrom(Target(dir, mr.second), Target(dir, mr.first));  // #219 (record.h)
+            else CopyChecked(Target(dir, mr.first), Target(dir, mr.second));
             ui.log(L"installed " + mr.second + L" (REFramework's copy of " + mr.first + L")");
         }
         if (opti) ui.log(L"OptiScaler " + ctx.opti.version + L" is set up for WrongGPU (OptiScaler.dll as " + proxy +
@@ -871,9 +901,6 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
         }
         if (ctx.perGameEntry) RegisterUninstall(ctx, m, state, target.name);
         WriteOwnedFiles(dir, m);
-#if WRONGGPU_PRESET_K
-        if (opti && !slot) SeedAsiSelection(ctx, dir, ctx.presetK);
-#endif
         ui.log(L"WrongGPU installed in " + dir + L" (" + m.status + L"); model data: " + ModelFile(ctx));
         ui.step(total, total, L"Done");
     } catch (const SetupError& ex) {

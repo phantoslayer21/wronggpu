@@ -4,9 +4,10 @@
 // RR model file), or is one of the few games known to call it directly. For those games a WrongGPU install also places
 // the RR files of this build: WrongGPU's RR plugin (an .asi OptiScaler loads from its plugins folder, beside WrongGPU's
 // own plugin), the RR runtime next to the game exe, wronggpu-rr.ini (rr_model: the RR data) and the plugin's settings
-// file WrongGPU\wronggpu.ini ([wronggpu] rr_enabled, rr_mode, rr_exact_allowed; the plugin saves rr_mode there when the
-// player switches it in OptiScaler's menu). Every one is an entry of the install record (staging, rollback, uninstall
-// byte for byte); WrongGPU\wronggpu.ini goes at uninstall also after the plugin saved rr_mode there (RrSettingsPluginEdit).
+// file WrongGPU\wronggpu.ini ([wronggpu] rr_enabled, rr_mode, rr_exact_allowed: the install's defaults; the plugin saves
+// the rr_mode the player switches to in OptiScaler's menu in the state folder). Every one is an entry of the install record (staging, rollback, uninstall
+// byte for byte). Since 0.6.5 (#219) neither the launcher nor the plugin rewrites WrongGPU\wronggpu.ini after the install:
+// later changes go into the state folder's settings.ini (see "settings" below), which an uninstall removes with the folder.
 // The RR data (preset F) is converted once per PC from the player's own RR model file with WrongGPU's converter, as the
 // model data is (model.h), into %LOCALAPPDATA%\WrongGPU\model\F\model.wgcm: shared by every game (a game whose own file is
 // too old uses it too). The file is never copied or changed, and never downloaded or shipped. Written for this project.
@@ -124,27 +125,43 @@ bool ConvertRrData(Context& ctx, const wstring& dll, const std::vector<StoreGame
 wstring RunningRrGame();
 
 // ---- settings ------------------------------------------------------------------------------------------------------
-// WrongGPU\wronggpu.ini from the profile (rr_enabled, rr_mode; rr_exact_allowed = 1 only while the mode is exact: the
-// plugin runs Exact only with it). RR stays off (rr_enabled=0) while the RR data is not ready, whatever the profile says;
-// other lines and keys (the plugin's) stay as they are.
+// #219 (0.6.5): WrongGPU\wronggpu.ini holds the install's defaults and is the player's to edit: no WrongGPU program
+// rewrites it after the install (the install record's hash decides who owns it, as for every file: an edit makes it the
+// player's). What the launcher or the RR plugin's menu in the game changes afterwards goes into the game's state folder,
+// <install dir>\wronggpu-setup\settings.ini (clean/wgshared/include/wg_state.h: the state lock and atomic writes shared
+// with the plugin and the model choice record), whose keys take precedence over wronggpu.ini's [wronggpu] keys.
+// The RR keys there: rr_enabled (1/0), rr_mode (exact/accurate/fast), rr_exact_allowed (1/0).
+//
+// WrongGPU\wronggpu.ini as an install writes it from the profile (rr_enabled, rr_mode; rr_exact_allowed = 1 only while the
+// mode is exact: the plugin runs Exact only with it). RR stays off (rr_enabled=0) while the RR data is not ready, whatever
+// the profile says; other lines and keys of `in` stay as they are.
 string RenderRrSettings(const Profile& p, bool dataReady, const string& in);
 string RrIniText(const wstring& dataFile);  // wronggpu-rr.ini as an install writes it
 struct RrFileState { bool present = false, enabled = true; string mode; };
 RrFileState ParseRrSettings(const string& text);
+// The settings in effect: WrongGPU\wronggpu.ini's [wronggpu] keys, then the state folder's settings.ini over them.
 RrFileState ReadRrSettings(const wstring& dir);
-// WrongGPU's RR plugin saved the mode chosen in OptiScaler's menu (rr_panel.cpp) into WrongGPU\wronggpu.ini, and that is the
-// file's only change since the launcher last wrote it (`inst`, the record's hash). The plugin's save replaces the one
-// [wronggpu] rr_mode line with "rr_mode=<exact|accurate|fast>" and ends every line with CRLF, so the file with that line
-// set back to one of the three modes has the recorded bytes. Such a file stays WrongGPU's (#219: the restore, repair and
-// uninstall treat it as the file WrongGPU wrote). Any other change (another key or line, spaces around "=", other line
-// ends) is the player's, and the file stays theirs.
-bool RrSettingsPluginEdit(const string& text, const wstring& inst);
-// The mode the player chose in the game (OptiScaler's menu saves it into WrongGPU\wronggpu.ini) becomes the profile's:
+// The launcher's write of `keys` into the game's settings.ini (wg_state.h SetSettings, under the state lock). 1: written; 0: the
+// file had these values already; -1: refused (*why in words, logged: no state folder, the lock kept by another WrongGPU program,
+// the file unreadable or not written).
+int WriteStateKeys(Context& ctx, const wstring& dir, const std::vector<std::pair<string, string>>& keys, wstring* why = nullptr);
+// The state keys a launcher write puts in settings.ini for the profile and the RR data's state.
+std::vector<std::pair<string, string>> RrStateKeys(const Profile& p, bool dataReady);
+// The launcher's RR settings into the state folder (under the game's state lock). 1: written; 0: nothing to write (not an
+// RR install, the same values); -1: refused (*why: no state folder, the lock kept by another WrongGPU program, the file
+// unreadable or not written).
+int WriteRrState(Context& ctx, const wstring& dir, const Profile& p, bool dataReady, wstring* why = nullptr);
+// Upgrade of an install whose WrongGPU\wronggpu.ini an older RR plugin (or the player) changed: while settings.ini has no
+// rr_mode, a WrongGPU\wronggpu.ini whose bytes differ from the record's hash is the player's (it stays, as every changed
+// file), and its rr_mode (and rr_overlay) are copied into settings.ini, so the game keeps running as before. A file with the
+// record's bytes, or none: nothing. True when it wrote settings.ini.
+bool MigrateRrState(Context& ctx, const wstring& dir);
+// The mode the player chose in the game (OptiScaler's menu saves it into the state folder) becomes the profile's:
 // the page shows it and an update keeps it. True when it changed `p`.
 bool FoldRrFromGame(const wstring& dir, Profile& p);
-// WrongGPU\wronggpu.ini of an installed RR game written again for the RR data's state (after a conversion: RR turns on
-// where the profile wants it; `dataReady`: RrDataValid, read once by the caller). The record's hash follows. 1: written;
-// 0: nothing to write (not an RR install, the same text); -1: the folder refused it (*why).
+// The state folder's RR settings of an installed RR game written again for the RR data's state (after a conversion: RR
+// turns on where the profile wants it; `dataReady`: RrDataValid, read once by the caller). 1: written; 0: nothing to write
+// (not an RR install, the same values); -1: refused (*why).
 int RefreshRrSettings(Context& ctx, const wstring& dir, bool dataReady, wstring* why = nullptr);
 // Every managed RR game's settings file (but `except`'s, which its own operation writes) brought to the RR data's state:
 // after the data was converted, the games installed before it get RR. Returns the ones that could not be written.

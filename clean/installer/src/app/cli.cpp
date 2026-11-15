@@ -845,7 +845,7 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
             if (res.code) return res.code;
         }
         string wini, oini;
-        ReadAll(Join(dir, L"wronggpu.ini"), wini);
+        wini = EffectiveWronggpuIni(dir);  // (#219: the state folder over the file)
         ReadAll(Join(dir, L"OptiScaler.ini"), oini);
         auto eff = EffectiveSettings(wini, oini);
         if (const RrFileState rs = ReadRrSettings(dir); rs.present) {  // Ray Reconstruction: the RR plugin's settings file

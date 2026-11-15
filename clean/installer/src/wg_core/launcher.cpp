@@ -24,6 +24,7 @@
 #include "pe.h"
 #include "rr.h"
 #include "rrconfig.h"
+#include "../../../wgshared/include/wg_state.h"  // the game's state folder (settings.ini), its lock, atomic writes
 
 #ifdef _MSC_VER
 #pragma comment(lib, "winhttp.lib")
@@ -371,7 +372,7 @@ GameEntry EntryFor(Context& ctx, const wstring& exeIn, const wstring& name, cons
             if (fix == "on" || fix == "ask") try { g.rrConfigProtected = NeedsElevation(g.dir); } catch (...) {}
         }
         string wini, oini;
-        ReadAll(Join(g.dir, L"wronggpu.ini"), wini);
+        wini = EffectiveWronggpuIni(g.dir);  // (#219: the state folder over the file)
         ReadAll(Join(g.dir, L"OptiScaler.ini"), oini);
         const bool off = EffectiveSettings(wini, oini)["wronggpu"] == "off";
         g.wgOff = off;  // kept with a Running status too (the window's Model M data rule)
@@ -708,6 +709,7 @@ static void Rollback(Context& ctx, const wstring& dir, Ui& ui, OpResult& res) {
     Record m;
     if (!LoadRecord(RecordPath(dir), m) || m.legacy) Fail(L"No WrongGPU installation record was found in " + dir + L".", EXIT_NOT_INSTALLED);
     if (!m.exe.empty() && GameRunning(m.exe)) Fail(BaseName(m.exe) + L" is running. Close it first.", EXIT_REFUSED);
+    const auto gate = GuardOperation(dir, &m, false);  // #219: the state lock for the whole roll back; its files are held below (record.h)
     wstring version, txtSha;
     std::vector<PrevFile> files;
     if (!ReadPrevious(dir, version, files, &txtSha) || files.empty()) Fail(L"There is no earlier version to roll back to in " + dir + L".", EXIT_NOT_INSTALLED);
@@ -988,11 +990,51 @@ static bool OptInKey(const wstring& exe, const IniKeyChange& c) {
     return false;
 }
 
+std::vector<std::pair<string, string>> FrontEndStateKeys(const Profile& p) {
+    std::vector<std::pair<string, string>> r{{"upscaler", p.get("wronggpu") == "off" ? "amd" : "network"}};
+    for (size_t i = 0; i < kSettingCount; ++i)
+        if (kSettings[i].layer == Layer::Rt) r.push_back({kSettings[i].key, p.get(kSettings[i].key)});  // explicit, defaults too
+    return r;
+}
+
+string WithFrontEndState(const string& wronggpuIni, const std::vector<std::pair<string, string>>& state) {
+    string t = wronggpuIni;
+    std::vector<std::pair<string, string>> items;  // the runtime option keys of the state, in its order
+    for (auto& kv : state) {
+        if (kv.first == "upscaler") {
+            string cur, sec;
+            t = IniGetFrontEnd(t, "upscaler", &cur, &sec) ? IniSet(t, sec, "upscaler", kv.second) : IniSet(t, "fsr", "upscaler", kv.second);
+        } else if (kv.first.rfind("rr_", 0) != 0 && kv.first != "model") {
+            items.push_back(kv);
+        }
+    }
+    if (items.empty()) return t;
+    string options, section;
+    const bool had = IniGetFrontEnd(t, "runtime_options", &options, &section);
+    std::vector<std::pair<string, string>> kept;
+    for (auto& kv : SplitOptions(options)) {
+        string k = LowerA(kv.first);
+        if (k == "backend") k = "executor";
+        bool overridden = false;
+        for (auto& s : items) overridden = overridden || s.first == k;
+        if (!overridden) kept.push_back(kv);
+    }
+    for (auto& s : items) { t = IniRemoveFrontEnd(t, s.first); kept.push_back(s); }
+    return IniSet(t, had ? section : "fsr", "runtime_options", JoinOptions(kept));
+}
+
+string EffectiveWronggpuIni(const wstring& dir) {
+    string text;
+    ReadAll(Join(dir, L"wronggpu.ini"), text);
+    const wgstate::Settings s = wgstate::ReadSettings(dir);
+    return s.kv.empty() ? text : WithFrontEndState(text, s.kv);
+}
+
 Profile GameProfile(const wstring& dir) {
     Profile p;
     if (!LoadProfile(ProfilePath(dir), p)) {
         string wini, oini;
-        ReadAll(Join(dir, L"wronggpu.ini"), wini);
+        wini = EffectiveWronggpuIni(dir);  // (#219: the state folder over the file)
         ReadAll(Join(dir, L"OptiScaler.ini"), oini);
         p = ImportProfile(wini, oini);
     }
@@ -1005,6 +1047,7 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
     if (!LoadRecord(RecordPath(dir), m) || m.legacy) Fail(L"WrongGPU is not installed in " + dir + L".", EXIT_NOT_INSTALLED);
     InferOwners(ctx, m);
     bool recordChanged = m.format < 2;
+    MigrateRrState(ctx, dir);  // #219: an older plugin's or the player's edit of WrongGPU\wronggpu.ini: its mode into the state folder
     // Model L (or Model K, a build with its choice) saved while its data on this PC is not ready (removed since, or an install
     // of a game set to it before the data was converted): the game's files say Model M until it is; the profile keeps the
     // player's choice
@@ -1040,20 +1083,24 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
         for (auto& e : m.e) if (e.action == L"copy" && IEq(e.rel, name) && e.inst != h) { e.inst = h; recordChanged = true; }
         notes.push_back(wstring(name) + L" written");
     };
-    renderFile(L"wronggpu.ini", false);
+    // #219: the front end's settings go into the game's state folder (wg_state.h), which the front end reads over wronggpu.ini:
+    // wronggpu.ini holds the install's defaults, is the player's to edit, and is never rewritten after the install. (The model
+    // choice is not among these keys: it is the model choice record's, model-choice.ini.)
+    {
+        string unused;
+        wstring why;
+        if (!RenderWronggpuIni(q, "", unused, &why)) Fail(L"Settings not applied: " + why, EXIT_USAGE);  // (validates every setting)
+        const int w = WriteStateKeys(ctx, dir, FrontEndStateKeys(q), &why);
+        if (w < 0) Fail(L"Settings not applied: " + why, EXIT_REFUSED);
+        if (w > 0) notes.push_back(Join(wgstate::kStateFolder, wgstate::kSettingsFile) + L" written");
+    }
     if (HostedRecord(m)) renderFile(L"OptiScaler.ini", true);
-    if (RecordHasRr(m)) {  // Ray Reconstruction (rr.h): the RR plugin's settings file (RR stays off while its data is not ready)
-        const wstring path = Join(dir, kRrSettings);
-        string in;
-        ReadAll(path, in);
-        const string out = RenderRrSettings(p, RrDataValid(ctx), in);
-        if (out != in) {
-            EnsureDir(Parent(path));
-            WriteFileAtomic(path, out.data(), out.size());
-            const wstring h = Sha256Bytes(out.data(), out.size());
-            for (auto& e : m.e) if (e.action == L"copy" && IEq(e.rel, kRrSettings) && e.inst != h) { e.inst = h; recordChanged = true; }
-            notes.push_back(wstring(kRrSettings) + L" written");
-        }
+    if (RecordHasRr(m)) {  // Ray Reconstruction (rr.h): into the game's state folder (RR stays off while its data is not ready);
+                           // WrongGPU\wronggpu.ini (the install's defaults, the player's to edit) is never rewritten
+        wstring why;
+        const int w = WriteRrState(ctx, dir, p, RrDataValid(ctx), &why);
+        if (w < 0) Fail(L"Settings not applied: " + why, EXIT_REFUSED);
+        if (w > 0) notes.push_back(Join(wgstate::kStateFolder, wgstate::kSettingsFile) + L" written (Ray Reconstruction)");
     }
     if (RrConfigGameFor(m.exe)) {  // Borderlands 4, Hogwarts Legacy: the game's Engine.ini follows rr_config_fix (rrconfig.h)
         std::vector<wstring> w;
@@ -1171,7 +1218,7 @@ std::vector<wstring> AdoptInstall(Context& ctx, const wstring& dir, bool* repair
     }
     if (!IsFile(ProfilePath(dir))) {
         string wini, oini;
-        ReadAll(Join(dir, L"wronggpu.ini"), wini);
+        wini = EffectiveWronggpuIni(dir);  // (#219: the state folder over the file)
         ReadAll(Join(dir, L"OptiScaler.ini"), oini);
         std::vector<wstring> pn;
         const Profile p = ImportProfile(wini, oini, &pn);
@@ -1221,6 +1268,8 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
     GameTarget target = InspectGame(ctx, gameExe);
     const wstring dir = target.dir;
     LogLine(ctx, wstring(L"launcher ") + OpName(r.op) + L": " + target.exe + L" (" + (target.validated ? L"validated" : L"experimental") + L"), install folder " + dir);
+    // #219: a repair or update (an install over a recorded one) holds the game's state lock from here to its end (record.h)
+    const auto gate = IsFile(RecordPath(dir)) ? GuardOperation(dir, target.installed ? &target.record : nullptr) : nullptr;
     // the rules table (design section 5): DLSS-NR on AMD, DXVK / vkd3d-proton, two OptiScaler copies, not D3D12, anti-cheat
     if (const Finding* no = target.coexist.refusal())
         Fail(no->tool == Tool::AntiCheat ? AntiCheatMessage(no->evidence) : no->what + L": " + no->message, no->code ? no->code : EXIT_REFUSED);
@@ -1284,10 +1333,11 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
     bool haveProfile = LoadProfile(ProfilePath(dir), profile);
     if (!haveProfile) {
         string wini, oini;
-        if (ReadAll(Join(dir, L"wronggpu.ini"), wini)) { ReadAll(Join(dir, L"OptiScaler.ini"), oini); profile = ImportProfile(wini, oini); haveProfile = true; }
+        if (IsFile(Join(dir, L"wronggpu.ini"))) { wini = EffectiveWronggpuIni(dir); ReadAll(Join(dir, L"OptiScaler.ini"), oini); profile = ImportProfile(wini, oini); haveProfile = true; }
     }
     if (!haveProfile) profile = r.hasProfile ? r.profile : DefaultProfile();
-    FoldRrFromGame(dir, profile);  // a Ray Reconstruction mode chosen in the game stays (the install below rewrites its file)
+    MigrateRrState(ctx, dir);      // #219: an older plugin's or the player's edit of WrongGPU\wronggpu.ini: its mode into the state folder
+    FoldRrFromGame(dir, profile);  // a Ray Reconstruction mode chosen in the game stays (the state folder keeps it through the install)
     if (target.installed && !target.record.version.empty() && ctx.data && !IEq(target.record.version, ctx.data->version)) SavePrevious(ctx, dir, target.record, ui);
     std::vector<IniKeyChange> oldJournal = target.installed ? target.record.inikeys : !wrongDir.empty() ? wrong.inikeys : std::vector<IniKeyChange>{};
     // a game's opt-in keys follow its setting (ApplyProfile), not the old file

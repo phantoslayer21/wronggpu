@@ -212,6 +212,20 @@ bool NeedsElevation(const wstring& dir);
 // warnings: what could not be done that the player should hear (rr_config_fix: the game's Engine.ini, rrconfig.h).
 void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vector<wstring>& notes, std::vector<wstring>* warnings = nullptr);
 Profile GameProfile(const wstring& dir);  // profile.ini, else the profile its wronggpu.ini implies
+// #219 (0.6.5): the launcher never rewrites the game's wronggpu.ini after the install (the install's defaults, the player's to
+// edit). The front end's settings it manages go into the game's state folder, wronggpu-setup\settings.ini (wg_state.h), which
+// the front end reads over wronggpu.ini: upscaler (network / amd, from the profile's wronggpu on / off) and every runtime key
+// of the schema (executor, output_filter, pre_exposure, sparkle_guard), written explicitly, defaults too. Not the model: the
+// model choice is the model choice record's (model-choice.ini).
+std::vector<std::pair<string, string>> FrontEndStateKeys(const Profile& p);
+// wronggpu.ini's text as the front end sees it with the state's keys over it: upscaler set in its section (else [fsr]); the
+// runtime keys out of runtime_options and off their own lines, then appended to runtime_options (the RR keys rr_* and a model
+// key are not the front end's and stay out).
+string WithFrontEndState(const string& wronggpuIni, const std::vector<std::pair<string, string>>& state);
+// The game's wronggpu.ini as in effect: the file with the state folder's settings over it (WithFrontEndState). Every reader
+// of the launcher's settings (get, status, the game page, the import of a profile) reads this, so a key the state holds
+// shadows the file's.
+string EffectiveWronggpuIni(const wstring& dir);
 // The OptiScaler tab: reset / keep / edits of OpRequest written into the installed OptiScaler.ini with the inikey
 // journal in the record. Nothing to do: no change.
 void ApplyOptiTab(Context& ctx, const wstring& dir, const OpRequest& r, std::vector<wstring>& notes);

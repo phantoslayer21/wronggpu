@@ -686,12 +686,18 @@ int main() {
                 // overwritten.
                 {
                     auto said = [](const std::vector<wstring>& ws, const wstring& what) { for (auto& x : ws) if (x == what) return true; return false; };
-                    {  // 1. a recorded file to delete, swapped for another program's bytes before it is held
+                    {  // 1. a recorded binary to delete: #219, the operation's gate holds it from before the plan (wg_state.h
+                       // OperationGuard), so another program cannot swap it between the check and the delete; it goes as checked
                         const wstring d = ownGame(L"Swap remove", {{L"wronggpu_runtime.dll", L"copy", "", W, W}});
-                        SetRestoreStepHook([&](const char* s) { if (string(s) == "kept") file(Join(d, L"wronggpu_runtime.dll"), C); });
+                        bool swapped = false, tried = false;
+                        SetRestoreStepHook([&](const char* s) {
+                            if (string(s) != "kept") return;
+                            tried = true;
+                            try { file(Join(d, L"wronggpu_runtime.dll"), C); swapped = true; } catch (const SetupError&) {}
+                        });
                         std::vector<wstring> w;
-                        require(restore(d, false, &w) && read(Join(d, L"wronggpu_runtime.dll")) == C && said(w, L"Left in place (changed since install): wronggpu_runtime.dll"),
-                                "swap: a recorded file swapped for other bytes between the check and the delete is not deleted, and the result says so");
+                        require(restore(d, false, &w) && tried && !swapped && !IsFile(Join(d, L"wronggpu_runtime.dll")) && !said(w, L"Left in place (changed since install): wronggpu_runtime.dll"),
+                                "swap: a recorded binary is held by the operation's gate; a swap between the check and the delete fails, and the checked file goes");
                     }
                     {  // 2. the same before an original goes back over a file WrongGPU installed
                         const wstring d = ownGame(L"Swap put back", {{L"wronggpu.ini", L"copy", A, W, W}});
@@ -1928,37 +1934,135 @@ int main() {
             require(FoldRrFromGame(rg, fold) && fold.get("rr_mode") == "accurate" && !FoldRrFromGame(rg, fold), "the game's rr_mode folds into the profile once");
             require(ReadRrSettings(rg).present && ReadRrSettings(Join(dir, L"nothing")).present == false, "ReadRrSettings: present only with the file");
 
-            // #219: the RR plugin's own rr_mode save keeps WrongGPU\wronggpu.ini WrongGPU's; a hand edit makes it the player's
+            // #219: the launcher's settings go into the game's state folder (wg_state.h), read over the install's defaults
             {
-                const string ours = RenderRrSettings(acc, true, "");  // what the launcher wrote (rr_mode=accurate)
-                const wstring inst = Sha256Bytes(ours.data(), ours.size());
-                auto swap = [&](const string& from, const string& to) { string t = ours; t.replace(t.find(from), from.size(), to); return t; };
-                const string saved = swap("rr_mode=accurate", "rr_mode=fast");  // the plugin's save (rr_panel.cpp: one line, CRLF)
-                require(RrSettingsPluginEdit(saved, inst) && RrSettingsPluginEdit(swap("rr_mode=accurate", "rr_mode=exact"), inst),
-                        "the plugin's rr_mode save: still WrongGPU's file");
-                require(!RrSettingsPluginEdit(swap("rr_mode=accurate", "rr_mode = fast"), inst), "rr_mode with spaces around '=' (not the plugin's form): the player's");
-                require(!RrSettingsPluginEdit(swap("rr_mode=accurate", "rr_mode=turbo"), inst), "a mode the plugin never writes: the player's");
-                require(!RrSettingsPluginEdit(saved + "rr_overlay=1\r\n", inst) && !RrSettingsPluginEdit(swap("rr_mode=accurate", "rr_mode=fast\r\nmy_note=1"), inst),
-                        "another key added with the mode save: the player's");
-                require(!RrSettingsPluginEdit(swap("rr_enabled=1", "rr_enabled=0"), inst), "another key changed: the player's");
-                require(!RrSettingsPluginEdit(swap("rr_mode=accurate\r\n", "rr_mode=fast\n"), inst), "LF line ends (the plugin writes CRLF): the player's");
-                require(!RrSettingsPluginEdit(swap("rr_mode=accurate", "rr_mode=fast\r\nrr_mode=fast"), inst), "two rr_mode lines: the player's");
-                require(!RrSettingsPluginEdit(swap("rr_mode=accurate\r\n", ""), inst), "rr_mode removed: the player's");
-                require(!RrSettingsPluginEdit(saved, L"") && !RrSettingsPluginEdit(saved, Sha256Bytes("x", 1)), "no recorded hash, or another one: not WrongGPU's");
-                // the restore's decision (WhatIsThere) on the file in a folder
-                Context rctx;
-                const wstring og = Join(dir, L"rr-owner");
-                EnsureDir(Join(og, kRrDataDir));
-                Entry e;
-                e.action = L"copy"; e.rel = kRrSettings; e.inst = inst; e.owner = L"wg";
-                auto holds = [&](const string& text) { WriteFileAtomic(Join(og, kRrSettings), text.data(), text.size()); return WhatIsThere(rctx, og, e, Sha256Bytes(text.data(), text.size())); };
-                require(holds(ours) == Holds::Ours && holds(saved) == Holds::Ours, "WhatIsThere: the launcher's file and the plugin's mode save are WrongGPU's (removed at uninstall)");
-                require(holds(saved + "my_note=1\r\n") == Holds::Other && holds(swap("rr_mode=accurate", "rr_mode = fast")) == Holds::Other,
-                        "WhatIsThere: a hand-edited file is the player's (left in place)");
-                Entry other = e;
-                other.rel = L"wronggpu.ini";  // the upscaler's settings file: no such exception
-                WriteFileAtomic(Join(og, L"wronggpu.ini"), saved.data(), saved.size());
-                require(WhatIsThere(rctx, og, other, Sha256Bytes(saved.data(), saved.size())) == Holds::Other, "the exception is the RR plugin's settings file only");
+                auto put = [](const wstring& p, const string& t) { EnsureDir(Parent(p)); WriteFileAtomic(p, t.data(), t.size()); };
+                Context sctx;
+                // the keys the launcher writes
+                const auto rk = RrStateKeys(acc, true);
+                require(rk.size() == 3 && rk[0].second == "1" && rk[1] == std::make_pair(string("rr_mode"), string("accurate")) && rk[2].second == "0",
+                        "RrStateKeys: rr_enabled=1, rr_mode, rr_exact_allowed=0 (Accurate, data ready)");
+                require(RrStateKeys(acc, false)[0].second == "0", "RrStateKeys: no RR data: rr_enabled=0");
+                Profile fe = DefaultProfile();
+                const auto fk = FrontEndStateKeys(fe);
+                require(!fk.empty() && fk[0] == std::make_pair(string("upscaler"), string("network")) &&
+                            std::all_of(fk.begin(), fk.end(), [](const std::pair<string, string>& kv) { return kv.first != "model" && kv.first.rfind("rr_", 0) != 0; }) &&
+                            std::any_of(fk.begin(), fk.end(), [](const std::pair<string, string>& kv) { return kv.first == "executor"; }),
+                        "FrontEndStateKeys: upscaler first, every runtime key of the schema explicitly, never model or rr_*");
+                SetSetting(fe, "wronggpu", "off", nullptr);
+                require(FrontEndStateKeys(fe)[0].second == "amd", "FrontEndStateKeys: WrongGPU off = upscaler=amd");
+                // the effective wronggpu.ini: the state's keys over the file's
+                const string fileIni = "[fsr]\r\nupscaler = network\r\nruntime_options = executor=hip;sync=pipelined;model=L\r\n";
+                const string eff = WithFrontEndState(fileIni, {{"upscaler", "amd"}, {"executor", "dx12"}, {"rr_mode", "fast"}, {"model", "K"}});
+                string v, sec;
+                require(IniGetFrontEnd(eff, "upscaler", &v, &sec) && v == "amd", "WithFrontEndState: the state's upscaler over the file's");
+                require(IniGetFrontEnd(eff, "runtime_options", &v, &sec) && v.find("executor=dx12") != string::npos && v.find("executor=hip") == string::npos &&
+                            v.find("sync=pipelined") != string::npos && v.find("model=L") != string::npos && v.find("model=K") == string::npos && v.find("rr_mode") == string::npos,
+                        "WithFrontEndState: a runtime key replaced, the others kept; rr_* and model of the state left out");
+                require(WithFrontEndState(fileIni, {}) == fileIni, "WithFrontEndState: no state keys: the file as it is");
+                // a game folder with an RR install record: the effective RR settings, the upgrade path, never a write of wronggpu.ini
+                const wstring sg = Join(dir, L"state-game");
+                EnsureDir(StateDir(sg));
+                const string defaults = RenderRrSettings(acc, true, "");  // what the install wrote (rr_mode=accurate)
+                put(Join(sg, kRrSettings), defaults);
+                Record rm;
+                rm.version = L"0.6.5"; rm.game = sg; rm.exe = Join(sg, L"Game.exe"); rm.format = 2;
+                auto entry = [](const wstring& rel, const wstring& inst) { Entry e; e.action = L"copy"; e.rel = rel; e.inst = inst; e.owner = L"wg"; return e; };
+                rm.e.push_back(entry(L"plugins\\WrongGPU-RR.asi", L"aa"));
+                rm.e.push_back(entry(kRrSettings, Sha256Bytes(defaults.data(), defaults.size())));
+                SaveRecord(RecordPath(sg), rm);
+                {
+                    Record twice;
+                    require(LoadRecord(RecordPath(sg), twice) && LoadRecord(RecordPath(sg), twice) && twice.e.size() == rm.e.size(),
+                            "LoadRecord into a Record loaded before: the file's entries once (no entry listed twice)");
+                }
+                require(ReadRrSettings(sg).mode == "accurate", "ReadRrSettings: the install's defaults without state");
+                require(!MigrateRrState(sctx, sg) && !IsFile(wgstate::SettingsPathOf(sg)), "upgrade: wronggpu.ini with the record's bytes: nothing copied, no state written");
+                require(WriteStateKeys(sctx, sg, {{"rr_mode", "fast"}}) == 1 && ReadRrSettings(sg).mode == "fast" && !ParseRrSettings(defaults).mode.empty(),
+                        "the state's rr_mode decides over wronggpu.ini's");
+                string after;
+                ReadAll(Join(sg, kRrSettings), after);
+                require(after == defaults, "a state write never touches WrongGPU\\wronggpu.ini");
+                require(WriteStateKeys(sctx, sg, {{"rr_mode", "fast"}}) == 0, "the same values again: nothing written (0)");
+                // upgrade from an older plugin's save (or the player's edit): LF and CRLF, the file's mode carried, the file kept
+                for (const char* edited : {"[wronggpu]\nrr_enabled=1\nrr_mode = exact\nrr_overlay=1\n", "[wronggpu]\r\nrr_mode=fast\r\n"}) {
+                    DeleteFileW(wgstate::SettingsPathOf(sg).c_str());
+                    put(Join(sg, kRrSettings), edited);
+                    const bool moved = MigrateRrState(sctx, sg);
+                    const wgstate::Settings st = wgstate::ReadSettings(sg);
+                    string kept;
+                    ReadAll(Join(sg, kRrSettings), kept);
+                    const string want = ParseRrSettings(edited).mode;
+                    require(moved && wgstate::Get(st, "rr_mode") && *wgstate::Get(st, "rr_mode") == want && kept == edited &&
+                                (string(edited).find("rr_overlay") == string::npos || (wgstate::Get(st, "rr_overlay") && *wgstate::Get(st, "rr_overlay") == "1")),
+                            "upgrade: a changed WrongGPU\\wronggpu.ini (" + string(string(edited).find("\r\n") == string::npos ? "LF" : "CRLF") +
+                                ") is the player's: kept as it is, its rr_mode (and rr_overlay) copied into the state folder");
+                    require(!MigrateRrState(sctx, sg), "upgrade: once the state has rr_mode, nothing more is copied");
+                }
+                // the state files go with the state folder: settings.ini, model-choice.ini and their temporary files, by name
+                put(wgstate::SettingsPathOf(sg), "rr_mode=fast\r\n");
+                put(Join(StateDir(sg), L"model-choice.ini"), "model=M\r\n");
+                put(Join(StateDir(sg), L"settings.ini.wgtmp-1-2"), "rr_mo");
+                put(Join(StateDir(sg), L"player-note.txt"), "mine");
+                const auto stay = RemoveStateFolder(sg, &rm);
+                require(!IsFile(wgstate::SettingsPathOf(sg)) && !IsFile(Join(StateDir(sg), L"model-choice.ini")) && !IsFile(Join(StateDir(sg), L"settings.ini.wgtmp-1-2")) &&
+                            IsFile(Join(StateDir(sg), L"player-note.txt")) && stay.size() == 1,
+                        "uninstall: the state files and their temporary files go by name; a player's file in the folder stays");
+                // the operation gate (wg_state.h OperationGuard): the record's binaries held, writes and deletes through it,
+                // refused while a binary is in use, one gate per folder and thread
+                const wstring gg = Join(dir, L"gate-game");
+                EnsureDir(StateDir(gg));
+                const wstring bin = Join(gg, L"wronggpu_runtime.dll");
+                put(bin, "MZ old");
+                Record gm;
+                gm.version = L"0.6.5"; gm.game = gg; gm.exe = Join(gg, L"Game.exe"); gm.format = 2;
+                gm.e.push_back(entry(L"wronggpu_runtime.dll", Sha256Bytes("MZ old", 6)));
+                gm.e.push_back(entry(L"wronggpu.ini", L"bb"));  // not a binary: never held
+                SaveRecord(RecordPath(gg), gm);
+                {
+                    auto gate = GuardOperation(gg, &gm);
+                    require(gate && GateHolds(bin) && !GateHolds(Join(gg, L"wronggpu.ini")), "gate: the record's binaries held, an ini not");
+                    require(GuardOperation(gg, &gm) == nullptr, "gate: a nested gate for the same folder on the same thread is the outer one");
+                    string r;
+                    require(ReadAll(bin, r) && r == "MZ old", "gate: a held binary can still be read by the operation");
+                    PutBinary(bin, "MZ new", 6);
+                    require(ReadAll(bin, r) && r == "MZ new" && GateHolds(bin), "gate: PutBinary replaces the held binary (renamed in complete) and holds the new one");
+                    bool blocked = false;
+                    try { put(bin, "MZ someone else"); } catch (const SetupError&) { blocked = true; }
+                    require(blocked && ReadAll(bin, r) && r == "MZ new", "gate: another writer cannot replace a held binary");
+                    require(DeleteHeldBinary(bin) == ERROR_SUCCESS && !IsFile(bin), "gate: DeleteHeldBinary deletes through the held handle");
+                    PutBinary(Join(gg, L"plugins\\WrongGPU.asi"), "MZ plugin", 9);
+                    require(GateHolds(Join(gg, L"plugins\\WrongGPU.asi")), "gate: a binary the operation creates is renamed in and held");
+                    // a file there that the gate does not hold (an earlier mirror copy the record did not list): replaced and held,
+                    // unless another program has it open without sharing writes (then the operation stops, the file as it was)
+                    const wstring mirror = Join(gg, L"_storage_\\dxgi.dll");
+                    put(mirror, "MZ earlier copy");
+                    PutBinary(mirror, "MZ this copy", 12);
+                    require(ReadAll(mirror, r) && r == "MZ this copy" && GateHolds(mirror), "gate: an unheld file at the path is replaced and the new one held");
+                    const wstring other = Join(gg, L"_storage_\\wronggpu-amd-compare.dll");
+                    put(other, "MZ in use");
+                    HANDLE busy = CreateFileW(other.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+                    string stopped;
+                    try { PutBinary(other, "MZ new", 6); } catch (const SetupError& ex) { stopped = ToUtf8(ex.msg); }
+                    if (busy != INVALID_HANDLE_VALUE) CloseHandle(busy);
+                    require(stopped.find("Stopped") != string::npos && ReadAll(other, r) && r == "MZ in use" && !GateHolds(other),
+                            "gate: an unheld file another program has open: the operation stops, the file as it was");
+                }
+                put(bin, "MZ old");
+                DeleteFileW(Join(gg, L"plugins\\WrongGPU.asi").c_str());
+                {
+                    HANDLE inUse = CreateFileW(bin.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);  // another program, no write sharing
+                    string msg;
+                    try { auto gate = GuardOperation(gg, &gm); } catch (const SetupError& ex) { msg = ToUtf8(ex.msg); }
+                    if (inUse != INVALID_HANDLE_VALUE) CloseHandle(inUse);
+                    require(msg.find("Nothing was changed") != string::npos && msg.find("in use by the game or another program") != string::npos &&
+                                msg.find("wronggpu_runtime.dll") != string::npos,
+                            "gate: a binary in use by another program: refused, nothing changed, the file named");
+                }
+                {
+                    auto gate = GuardOperation(gg, &gm);
+                    require(gate != nullptr, "gate: once the file is free again, the operation runs");
+                }
             }
 
             // which games: the RR files next to the exe, deeper in the game's folder, a game known to call it, none

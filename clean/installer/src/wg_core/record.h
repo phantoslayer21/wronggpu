@@ -2,8 +2,10 @@
 // WrongGPU launcher core: the install record (v1), the "Apps & features" entry and the restore / uninstall engine.
 // Written for this project.
 #pragma once
+#include <memory>
 #include "context.h"
 #include "optikeys.h"
+#include "../../../wgshared/include/wg_state.h"  // the game's state folder, its lock and the loaded protocol (#219)
 
 namespace wg {
 
@@ -127,9 +129,7 @@ bool HostedRecord(const Record& m);
 // install created whose bytes changed since is preserved too). EXPLICIT POLICY (README "file-ownership rule"): files in the
 // game's FSR slots that identify as WrongGPU (ClassifySlot: the version resource's ProductName, because the game may update
 // that DLL), and files byte-identical to a WrongGPU release or to the embedded payload (KnownReleaseFile), are treated as
-// WrongGPU's; that is recognition by identity, not proof of ownership. The RR plugin's settings file whose only change is the
-// rr_mode line WrongGPU's RR plugin saves (rr.h RrSettingsPluginEdit, #219) is WrongGPU's too. Nothing else is treated as
-// WrongGPU's by content.
+// WrongGPU's; that is recognition by identity, not proof of ownership, and nothing else is treated as WrongGPU's by content.
 // Anything else at a recorded path stays as it is; a player's original that cannot be put back because of it is kept in
 // <install dir>\WrongGPU-originals\<time>\ (KeptOriginal), and the result says "partly" (kPartlyRestored). A file that is
 // not in the record at all is never touched, whatever its name (UnrecordedRuntimeFiles: listed, kLeftUnrecorded).
@@ -236,10 +236,39 @@ wstring LeftText(const wstring& where, const std::vector<wstring>& rels);
 // path or in the kept folder. keepState (update, repair, a move): the state folder stays (record and backup cleared).
 // keptWarnings: the warning of each recorded file left in place, by its path (the update path replaces the warning of a
 // file it then moves aside with the player's OK).
+// #219: the gate of an uninstall, repair, update, roll back or move of the install in `dir` (wg_state.h OperationGuard): the
+// game's state lock, then every WrongGPU binary of the install (the record's copy entries of WrongGPU's that are .dll / .asi)
+// held with write access, so Windows itself says whether a process has one loaded, and no game can load one while the
+// operation runs. Keep the returned gate for the whole operation, on the thread that took it; a nested GuardOperation for the
+// same folder on the same thread returns nullptr (the outer gate covers it). Refuses (EXIT_REFUSED, "Nothing was changed:
+// ...", naming the file) while a binary is in use by the game or another program, while that cannot be told, and while
+// another WrongGPU program holds the lock or it may not be opened. Inside it, the operation writes binaries with PutBinary /
+// PutBinaryFrom (renamed in complete and held at once; a load in that moment stops the operation) and deletes held ones with
+// DeleteHeldBinary; GateHolds tells which files the gate holds (their reads still work; their writes go through the gate).
+// The state files (settings.ini, model-choice.ini) are written inside the same hold (the state lock is recursive per thread).
+struct OperationGate {
+    OperationGate(const wstring& dir, const std::vector<wstring>& binaries);
+    ~OperationGate();
+    OperationGate(const OperationGate&) = delete;
+    OperationGate& operator=(const OperationGate&) = delete;
+    wstring dir;
+    wgstate::OperationGuard guard;
+    OperationGate* prev;
+    std::vector<wstring> oldLeft;  // old binaries a replace could not delete (each stays under its .wronggpu-old name)
+};
+// holdBinaries false: the state lock only, for an operation that holds every file it changes itself with write access (Roll
+// back, PinnedFile: a loaded file refuses that open, and a held file cannot be loaded), the same guarantee.
+std::unique_ptr<OperationGate> GuardOperation(const wstring& dir, const Record* m, bool holdBinaries = true);
+bool IsBinaryName(const wstring& rel);  // .dll / .asi: what a game loads
+bool GateHolds(const wstring& path);
+void PutBinary(const wstring& path, const void* data, size_t size);
+void PutBinaryFrom(const wstring& path, const wstring& source);
+DWORD DeleteHeldBinary(const wstring& path);  // ERROR_SUCCESS, ERROR_NOT_FOUND (not held), or the delete's error
 std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool failedInstall, bool keepState,
                                std::map<wstring, wstring>* keptWarnings = nullptr);
 // rc6 L4: the player's things in the state folder that a failed install or update never removes when they were there before
-// it: profile.ini (the game's settings), previous\ (the version Roll back goes to) and rr-config\ (the Engine.ini fix's backup).
+// it: profile.ini (the game's settings), previous\ (the version Roll back goes to) and rr-config\ (the Engine.ini fix's backup);
+// since 0.6.5 also the state files settings.ini and model-choice.ini (wg_state.h).
 bool StateHasSettings(const wstring& dir);
 // The state folder emptied of everything else (the record, the backup, the uninstaller, logs); removed when nothing is left.
 void RemoveStateKeepingSettings(const wstring& dir);

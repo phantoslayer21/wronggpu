@@ -12,6 +12,7 @@
 #include "payload.h"
 #include "pe.h"
 #include "settings.h"
+#include "../../../wgshared/include/wg_state.h"  // the game's state folder: settings.ini, the state lock, atomic writes
 
 namespace wg {
 
@@ -490,41 +491,70 @@ RrFileState ParseRrSettings(const string& text) {
 }
 RrFileState ReadRrSettings(const wstring& dir) {
     string text;
-    if (!ReadAll(Join(dir, kRrSettings), text)) return RrFileState();
-    return ParseRrSettings(text);
+    RrFileState s;
+    if (ReadAll(Join(dir, kRrSettings), text)) s = ParseRrSettings(text);
+    const wgstate::Settings st = wgstate::ReadSettings(dir);  // the state folder's keys over the install's defaults
+    if (const string* v = wgstate::Get(st, "rr_enabled")) { s.present = true; s.enabled = !(*v == "0" || *v == "off" || *v == "false"); }
+    if (const string* v = wgstate::Get(st, "rr_mode"); v && (*v == "exact" || *v == "accurate" || *v == "fast")) { s.present = true; s.mode = *v; }
+    return s;
 }
 
-bool RrSettingsPluginEdit(const string& text, const wstring& inst) {
-    if (inst.empty() || text.size() < 2 || text.compare(text.size() - 2, 2, "\r\n") != 0) return false;
-    static const char* const kModes[] = {"exact", "accurate", "fast"};  // the plugin's names (kWgRrModeNames)
+std::vector<std::pair<string, string>> RrStateKeys(const Profile& p, bool dataReady) {
+    const string mode = p.get("rr_mode").empty() ? string("fast") : p.get("rr_mode");
+    return {{"rr_enabled", p.get("rr_enabled") != "off" && dataReady ? "1" : "0"}, {"rr_mode", mode}, {"rr_exact_allowed", mode == "exact" ? "1" : "0"}};
+}
+
+// (the launcher's state writes, rr.h WriteStateKeys)
+int WriteStateKeys(Context& ctx, const wstring& dir, const std::vector<std::pair<string, string>>& keys, wstring* why) {
+    const wgstate::Settings now = wgstate::ReadSettings(dir);
+    bool same = now.present && !now.corrupt;
+    for (auto& k : keys) { const string* v = wgstate::Get(now, k.first); same = same && v && *v == k.second; }
+    if (same) return 0;
+    const wgstate::SetOutcome o = wgstate::SetSettings(dir, keys, wgstate::kDefaultWaitMs);
+    if (o.ok()) return 1;
+    // every failure in words, the access-denied ones with the elevated repair (wg_state.h SetOutcome::words)
+    const wstring w = L"the game's WrongGPU settings (" + Join(Join(dir, wgstate::kStateFolder), wgstate::kSettingsFile) + L") were not saved: " +
+                      FromUtf8(o.words());
+    LogLine(ctx, w);
+    if (why) *why = w;
+    return -1;
+}
+
+int WriteRrState(Context& ctx, const wstring& dir, const Profile& p, bool dataReady, wstring* why) {
+    return WriteStateKeys(ctx, dir, RrStateKeys(p, dataReady), why);
+}
+
+bool MigrateRrState(Context& ctx, const wstring& dir) {
+    Record m;
+    if (!LoadRecord(RecordPath(dir), m) || m.legacy || !RecordHasRr(m)) return false;
+    if (wgstate::Get(wgstate::ReadSettings(dir), "rr_mode")) return false;  // the state folder has the mode already
+    const Entry* e = nullptr;
+    for (auto& x : m.e) if (x.action == L"copy" && IEq(x.rel, kRrSettings)) e = &x;
+    string text;
+    if (!e || e->inst.empty() || !ReadAll(Join(dir, kRrSettings), text)) return false;
+    if (IEq(Sha256Bytes(text.data(), text.size()), e->inst)) return false;  // WrongGPU's own file, unchanged: nothing to carry
+    // changed since the launcher last wrote it (an older RR plugin's save, or the player's edit): the player's file from now on;
+    // its mode carries over into the state folder so nothing changes in the game
+    std::vector<std::pair<string, string>> keys;
+    const RrFileState s = ParseRrSettings(text);
+    if (!s.mode.empty()) keys.push_back({"rr_mode", s.mode});
     string sec;
-    size_t at = string::npos, len = 0;
-    for (size_t a = 0; a < text.size();) {
-        const size_t e = text.find('\n', a);  // (the text ends with CRLF: every line has its '\n')
-        if (e == 0 || text[e - 1] != '\r') return false;  // the plugin writes CRLF only
-        const string line = text.substr(a, e - 1 - a);
-        const string t = TrimA(line);
-        if (!t.empty() && t[0] == '[') sec = LowerA(t);
-        else if (sec == "[wronggpu]" && !t.empty() && t[0] != '#' && t[0] != ';') {
-            const size_t eq = t.find('=');
-            if (eq != string::npos && LowerA(TrimA(t.substr(0, eq))) == "rr_mode") {
-                if (at != string::npos) return false;  // the plugin leaves one rr_mode line
-                at = a;
-                len = line.size();
-            }
-        }
-        a = e + 1;
+    for (size_t a = 0; a < text.size();) {  // rr_overlay too, when the file has one ([wronggpu], a plain value)
+        size_t n = text.find('\n', a);
+        if (n == string::npos) n = text.size();
+        const string t = TrimA(text.substr(a, n - a));
+        a = n + 1;
+        if (!t.empty() && t[0] == '[') { sec = LowerA(t); continue; }
+        const size_t eq = t.find('=');
+        if (sec == "[wronggpu]" && eq != string::npos && LowerA(TrimA(t.substr(0, eq))) == "rr_overlay" && wgstate::ValidValue(TrimA(t.substr(eq + 1))))
+            keys.push_back({"rr_overlay", TrimA(t.substr(eq + 1))});
     }
-    if (at == string::npos) return false;
-    const string now = text.substr(at, len);
-    bool plugin = false;
-    for (const char* m : kModes) plugin = plugin || now == string("rr_mode=") + m;
-    if (!plugin) return false;
-    for (const char* m : kModes) {
-        const string was = text.substr(0, at) + "rr_mode=" + m + text.substr(at + len);
-        if (IEq(Sha256Bytes(was.data(), was.size()), inst)) return true;
-    }
-    return false;
+    if (keys.empty()) return false;
+    wstring why;
+    if (WriteStateKeys(ctx, dir, keys, &why) < 0) return false;
+    LogLine(ctx, wstring(kRrSettings) + L" was changed since the install (an older RR plugin or the player): it is the player's file now; its mode was "
+                 L"copied into " + Join(wgstate::kStateFolder, wgstate::kSettingsFile));
+    return true;
 }
 
 string RenderRrSettings(const Profile& p, bool dataReady, const string& in) {
@@ -553,24 +583,12 @@ bool FoldRrFromGame(const wstring& dir, Profile& p) {
 int RefreshRrSettings(Context& ctx, const wstring& dir, bool dataReady, wstring* why) {
     Record m;
     if (!LoadRecord(RecordPath(dir), m) || m.legacy || !RecordHasRr(m)) return 0;
+    MigrateRrState(ctx, dir);
     Profile p = GameProfile(dir);
-    string in;
-    ReadAll(Join(dir, kRrSettings), in);
-    const string out = RenderRrSettings(p, dataReady, in);
-    if (out == in) return 0;
-    try {  // the file and the record that follows it (a protected folder refuses both: the caller elevates)
-        WriteFileAtomic(Join(dir, kRrSettings), out.data(), out.size());
-        const wstring h = Sha256Bytes(out.data(), out.size());
-        for (auto& e : m.e) if (e.action == L"copy" && IEq(e.rel, kRrSettings)) e.inst = h;
-        SaveRecord(RecordPath(dir), m);
-        WriteOwnedFiles(dir, m);
-    } catch (const SetupError& e) {
-        LogLine(ctx, L"RR settings of " + dir + L" not written: " + e.msg);
-        if (why) *why = e.msg;
-        return -1;
-    }
-    LogLine(ctx, L"RR settings of " + dir + L" written for the Ray Reconstruction data's state");
-    return 1;
+    FoldRrFromGame(dir, p);  // (the mode last chosen in the game stays)
+    const int r = WriteRrState(ctx, dir, p, dataReady, why);  // the state folder only: WrongGPU\wronggpu.ini is never rewritten
+    if (r > 0) LogLine(ctx, L"RR settings of " + dir + L" written for the Ray Reconstruction data's state");
+    return r;
 }
 
 std::vector<RrSettingsFailure> RefreshAllRrSettings(Context& ctx, const wstring& except) {
