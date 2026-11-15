@@ -61,7 +61,7 @@ def run(build, special=True, stages=False):
     rng = np.random.default_rng(F.SEED)
     frames = []
     for i, ((rw, rh), reset) in enumerate(F.SEQUENCE):
-        fr = F.frame_inputs(rng, rw, rh, reset, special)
+        fr = F.frame_inputs(rng, rw, rh, reset, special, index=i)
         F.fill_sentinels(p, SENTINELS[config], i == 0)
         out = p.frame(fr, debug=True)
         frames.append({"inputs": fr, "out": out, "raw": F.raw_outputs(p), "post_last": p.kernels().get("post_last")})

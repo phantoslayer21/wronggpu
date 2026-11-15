@@ -2,8 +2,10 @@
 
 **Model M upscaling and Ray Reconstruction on AMD Radeon RX 9000 graphics cards.**
 
-WrongGPU runs the neural networks behind DLSS super resolution (Model M) and DLSS Ray Reconstruction on Radeon RX
-9000-series cards. Its launcher sets up each of your games and gets the WrongGPU edition of OptiScaler for them. From
+WrongGPU runs its own implementation of the neural networks behind DLSS super resolution (Model M) and DLSS Ray
+Reconstruction on Radeon RX 9000-series cards. The networks' weights come from your own DLSS files; the arithmetic is
+WrongGPU's, so the output is close to DLSS's but not identical to it. Its launcher sets up each of your games and gets
+the WrongGPU edition of OptiScaler for them. From
 this source onward, WrongGPU's source code and its official builds are under the MIT licence (see [Licence](#licence)).
 
 **Download:** the [Releases page](https://github.com/phantoslayer21/wronggpu/releases) (latest: 0.6.0, a pre-release).
@@ -59,11 +61,12 @@ on thin lines in reflections, blotches in Cyberpunk 2077 with path tracing); in 
 can very occasionally come out far too bright or dark at a scene change. Full details: the release notes
 ([clean/installer/RELEASE-NOTES.md](clean/installer/RELEASE-NOTES.md)).
 
-### Model L (in development)
+### Model L (under test)
 
-Model L is a larger model choice in development for 0.7.0, available from source. Preliminary numbers, Cyberpunk 2077
-at 1080p Quality on an RX 9070 XT: the network takes 2.25 ms with Model L and 1.17 ms with Model M. Speed work is
-ongoing and the numbers will change. Details, test setup and records: [clean/l/SPEED.md](clean/l/SPEED.md).
+Model L is a larger model choice planned for 0.6.5, off by default and still under test; until then it is available
+from source. Preliminary numbers, Cyberpunk 2077 at 1080p Quality on an RX 9070 XT: the network takes 2.25 ms with
+Model L and 1.17 ms with Model M. Speed work is ongoing and the numbers will change. Details, test setup and records:
+[clean/l/SPEED.md](clean/l/SPEED.md).
 
 ### Something broken?
 
