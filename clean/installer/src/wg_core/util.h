@@ -99,6 +99,9 @@ public:
     // The file was read-only when Open made it writable (the bit is put back on Close unless it was written or set on purpose).
     bool WasReadOnly() const { return (restoreAttrs_ & FILE_ATTRIBUTE_READONLY) != 0; }
     bool Flush(DWORD* err = nullptr);  // FlushFileBuffers through the handle, its result checked
+    // The held file's identity (volume serial number and file index): two names with the same identity are one file, a file
+    // with the same bytes but another identity is another file. false: nothing held, or it cannot be read.
+    bool Id(DWORD* volume, ULONGLONG* index) const;
     // Deletes the file through the handle (FileDispositionInfoEx with POSIX semantics, the read-only attribute ignored; the
     // older FileDispositionInfo where that is not supported) and closes it. The name is free when this returns true.
     bool Delete(DWORD* err = nullptr);

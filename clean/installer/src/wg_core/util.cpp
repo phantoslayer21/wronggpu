@@ -353,6 +353,13 @@ bool PinnedFile::SetReadOnly(bool on, DWORD* err) {
     restoreAttrs_ = 0;  // set on purpose: Close leaves it so
     return true;
 }
+bool PinnedFile::Id(DWORD* volume, ULONGLONG* index) const {
+    BY_HANDLE_FILE_INFORMATION i{};
+    if (h_ == INVALID_HANDLE_VALUE || !GetFileInformationByHandle(h_, &i)) return false;
+    *volume = i.dwVolumeSerialNumber;
+    *index = (static_cast<ULONGLONG>(i.nFileIndexHigh) << 32) | i.nFileIndexLow;
+    return true;
+}
 bool PinnedFile::Flush(DWORD* err) {
     if (h_ == INVALID_HANDLE_VALUE) { if (err) *err = ERROR_INVALID_HANDLE; return false; }
     if (FlushFileBuffers(h_)) return true;

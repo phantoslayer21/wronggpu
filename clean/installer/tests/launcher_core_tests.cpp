@@ -1120,17 +1120,20 @@ int main() {
                         clear(ini);
                         clear(bak);
                     }
-                    {  // 4: another program changes Engine.ini between the close and the replace: its version is put back, said
+                    {  // 4: another program changes Engine.ini between the close and the replace: its version is kept beside it (never written back), said
                         Record m = fixFor(false);
                         file(ini, edited);
                         SetRestoreStepHook([&](const char* s) { if (string(s) == "rrconfig-replace") file(ini, Y); });
                         std::vector<wstring> notes, w;
                         RevertRrConfig(mc, d, m, notes, w);
                         SetRestoreStepHook(nullptr);
-                        require(read(ini) == Y && leftovers() == 0 && w.size() == 1 && w[0].find(L"changed while WrongGPU") != wstring::npos && read(bak) == own,
-                                "Engine.ini (#209 review): a change by another program in the moment before the replace is not lost: that version is put back, the result "
-                                "says so, the backup stays");
+                        const wstring theirs = ini + L".wronggpu-their-change";
+                        require(read(ini) == own && read(theirs) == Y && leftovers() == 1 && w.size() == 1 && w[0].find(L"changed while WrongGPU") != wstring::npos &&
+                                    w[0].find(theirs) != wstring::npos && w[0].find(bak) != wstring::npos && read(bak) == own,
+                                "Engine.ini (#209 review): a change by another program in the moment before the replace is not lost: it is kept beside the corrected "
+                                "file (never written into it), the result names both, the backup stays");
                         clear(ini);
+                        clear(theirs);
                         clear(bak);
                     }
                     {  // 4: the file WrongGPU created, changed since: it stays without WrongGPU's line (deleted only while it is WrongGPU's bytes)
@@ -1195,7 +1198,7 @@ int main() {
                         std::vector<wstring> notes, w;
                         RevertRrConfig(mc, d, m, notes, w);
                         SetRestoreStepHook(nullptr);
-                        require(read(ini) == F && read(old) == edited && read(bak) == own && w.size() == 1 && w[0].find(L"not the corrected copy") != wstring::npos &&
+                        require(read(ini) == F && read(old) == edited && read(bak) == own && w.size() == 1 && w[0].find(L"not the corrected file WrongGPU put there") != wstring::npos &&
                                     w[0].find(old) != wstring::npos && !IsFile(copy) && notes.empty(),
                                 "Engine.ini (REVIEW-209b a): a corrected copy swapped before the replace is caught after it (the live file held and hashed): left as "
                                 "it is, the file it replaced kept beside it, the backup kept, the result says so");
@@ -1213,7 +1216,7 @@ int main() {
                         std::vector<wstring> notes, w;
                         RevertRrConfig(mc, d, m, notes, w);
                         SetRestoreStepHook(nullptr);
-                        require(read(ini) == Z && read(old) == Y && read(bak) == own && w.size() == 1 && w[0].find(L"not the corrected copy") != wstring::npos,
+                        require(read(ini) == Z && read(old) == Y && read(bak) == own && w.size() == 1 && w[0].find(L"not the corrected file WrongGPU put there") != wstring::npos,
                                 "Engine.ini (REVIEW-209b b): a second change after the replace is never overwritten by the recovery; the first change is kept beside "
                                 "it, the backup kept, the result says so");
                         clear(ini);
@@ -1249,6 +1252,53 @@ int main() {
                                     roFails ? "Engine.ini (REVIEW-209b d): a failed replace whose read-only restore fails says so in the warning; the file and the backup stay"
                                             : "Engine.ini (REVIEW-209b d): a failed replace puts the read-only bit back; the file and the backup stay");
                             clear(ini);
+                            clear(bak);
+                        }
+                    }
+                    // ---- #209 re-check 2 (REVIEW-209c) -----------------------------------------------------------------------
+                    {  // b: a change before the replace, then a DISTINCT file with IDENTICAL bytes swapped in after it: never written, left as it is
+                        Record m = fixFor(false);
+                        file(ini, edited);
+                        unsigned long long swappedId = 0;
+                        SetRestoreStepHook([&](const char* s) {
+                            if (string(s) == "rrconfig-replace") file(ini, Y);
+                            if (string(s) == "rrconfig-replaced") { file(ini, own); swappedId = fileId(ini); }  // own: the corrected bytes, another file
+                        });
+                        std::vector<wstring> notes, w;
+                        RevertRrConfig(mc, d, m, notes, w);
+                        SetRestoreStepHook(nullptr);
+                        require(swappedId != 0 && fileId(ini) == swappedId && read(ini) == own && read(old) == Y && read(bak) == own && w.size() == 1 &&
+                                    w[0].find(L"not the corrected file WrongGPU put there") != wstring::npos && w[0].find(old) != wstring::npos &&
+                                    w[0].find(L"read-only") == wstring::npos && notes.empty(),
+                                "Engine.ini (REVIEW-209c b): a distinct file with the corrected bytes swapped in after the replace is not taken for WrongGPU's (its "
+                                "identity differs): left untouched, the earlier change kept beside it, the backup kept, the result says so");
+                        clear(ini);
+                        clear(old);
+                        clear(bak);
+                    }
+                    {  // P2: the verification paths never touch another program's read-only file, and a read-only restore failure there is said
+                        for (int roFails = 0; roFails < 2; ++roFails) {
+                            Record m = fixFor(false);
+                            file(ini, edited);
+                            SetRestoreStepHook([&](const char* s) {
+                                if (string(s) != "rrconfig-replaced") return;
+                                file(ini, Z);
+                                SetFileAttributesW(ini.c_str(), FILE_ATTRIBUTE_READONLY);
+                            });
+                            fault = roFails ? "rrconfig-verify-readonly" : "";
+                            std::vector<wstring> notes, w;
+                            RevertRrConfig(mc, d, m, notes, w);
+                            fault.clear();
+                            SetRestoreStepHook(nullptr);
+                            const bool saidRo = w.size() == 1 && w[0].find(L"read-only attribute could not be put back") != wstring::npos;
+                            require(read(ini) == Z && readOnly(ini) && read(old) == edited && read(bak) == own && w.size() == 1 &&
+                                        w[0].find(L"not the corrected file WrongGPU put there") != wstring::npos && (roFails ? saidRo : !saidRo),
+                                    roFails ? "Engine.ini (REVIEW-209c P2): on the verification's mismatch path a read-only restore failure is said in the warning; the "
+                                              "file and both backups stay"
+                                            : "Engine.ini (REVIEW-209c P2): the verification opens another program's read-only file without changing its attribute; "
+                                              "the file and both backups stay");
+                            clear(ini);
+                            clear(old);
                             clear(bak);
                         }
                     }
