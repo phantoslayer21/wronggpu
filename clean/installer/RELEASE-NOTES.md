@@ -192,8 +192,9 @@ The exact launch option is on the release page.
 ## Requirements
 - Windows 10 or 11, a Radeon RX 9000-series graphics card (RX 9070 series; RX 9060 XT and RX 9060 supported, not yet
   tested), a recent AMD driver.
-- **No AMD HIP runtime needed:** Model M and Model L run on Direct3D 12. HIP is only used by optional settings on
-  the game's page: the sparkle guard, the Quality 5 and Quality 9 output filters, and "Runs on: HIP".
+<!-- pending R1 (all models on Direct3D 12 in game): the optional settings that still use HIP are being decided; this
+paragraph changes with that decision and is not final -->
+- **No AMD HIP runtime needed:** Model M and Model L run on Direct3D 12.
 - An internet connection the first time, for the WrongGPU edition of OptiScaler, which the launcher downloads itself
   (offline you can choose an OptiScaler download yourself, in Settings).
 - For Model M and Model L, a DLSS file of version 310.5 or newer, and for Ray Reconstruction, a DLSS Ray
