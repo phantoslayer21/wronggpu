@@ -22,6 +22,7 @@ of the instruction that made the mask partial.
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -212,8 +213,20 @@ def scan_text(text):
     return out, counts
 
 
+def find_objdump():
+    """llvm-objdump of the first of WG_ROCM, ROCM_PATH, /usr/lib64/rocm, /opt/rocm that has one (a link folder made for
+    build.py has the compiler but not the LLVM tools), else the one on PATH, else None."""
+    for root in (os.environ.get("WG_ROCM"), os.environ.get("ROCM_PATH"), "/usr/lib64/rocm", "/opt/rocm"):
+        path = os.path.join(root, "llvm", "bin", "llvm-objdump") if root else None
+        if path and os.path.exists(path):
+            return path
+    return shutil.which("llvm-objdump")
+
+
 def disassemble(co, objdump=None, mcpu="gfx1100"):
-    objdump = objdump or os.path.join(os.environ.get("ROCM_PATH", "/usr/lib64/rocm"), "llvm", "bin", "llvm-objdump")
+    objdump = objdump or find_objdump()
+    if not objdump:
+        raise FileNotFoundError("no llvm-objdump (pass --objdump, or set WG_ROCM / ROCM_PATH to a ROCm with llvm/bin)")
     return subprocess.run([objdump, "-d", f"--mcpu={mcpu}", co], check=True, capture_output=True, text=True).stdout
 
 

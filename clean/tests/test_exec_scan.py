@@ -11,6 +11,7 @@ must have no matrix or exchange instruction under a lane mask. Skipped without a
     WG_BUILD=<build> WG_ROCM=<ROCm> python -m unittest clean.tests.test_exec_scan
 """
 import os
+import tempfile
 import unittest
 
 from clean.runner import exec_scan as E
@@ -121,6 +122,35 @@ class TestExecScanRules(unittest.TestCase):
         self.assertEqual([(a, o) for a, _m, o in found["k"]], [(8, 4)])
 
 
+class TestFindObjdump(unittest.TestCase):
+    """A ROCm link folder made for build.py (ROCM_PATH in the test runs) has the compiler but no llvm/bin/llvm-objdump: the lookup
+    goes on to the next candidate instead of giving up (the build tests of this file used to skip for that reason)."""
+
+    def tool(self, root):
+        path = os.path.join(root, "llvm", "bin", "llvm-objdump")
+        os.makedirs(os.path.dirname(path))
+        open(path, "w").close()
+        return path
+
+    def find(self, **env):
+        keep = {k: os.environ.pop(k, None) for k in ("WG_ROCM", "ROCM_PATH")}
+        os.environ.update(env)
+        try:
+            return E.find_objdump()
+        finally:
+            for k in keep:
+                os.environ.pop(k, None)
+            os.environ.update({k: v for k, v in keep.items() if v is not None})
+
+    def test_first_candidate_with_the_tool_wins(self):
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b, tempfile.TemporaryDirectory() as empty:
+            ta, tb = self.tool(a), self.tool(b)
+            self.assertEqual(self.find(WG_ROCM=a, ROCM_PATH=b), ta)
+            self.assertEqual(self.find(WG_ROCM=empty, ROCM_PATH=b), tb)
+            self.assertEqual(self.find(ROCM_PATH=b), tb)
+            self.assertEqual(self.find(WG_ROCM=empty, ROCM_PATH=empty) not in (ta, tb), True)
+
+
 # the kernels the runner launches on the card (stage_runner.py BLOCK_KERNELS and the others), by code object
 RUN_ON_THE_CARD = {
     "swin.co": ("swin_block_c64", "swin_block_c64_nc", "swin_block_c64_add", "swin_block_c64_add_nc", "swin_block_c64_r",
@@ -143,12 +173,8 @@ class TestExecScanBuild(unittest.TestCase):
         cls.build = os.environ.get("WG_BUILD")
         if not cls.build or family.build_family(cls.build) != "gfx11":
             raise unittest.SkipTest("no gfx11 build in WG_BUILD")
-        rocm = os.environ.get("WG_ROCM", "")
-        cls.objdump = os.path.join(rocm, "llvm", "bin", "llvm-objdump")
-        if not os.path.exists(cls.objdump):
-            cls.objdump = None  # the pass's default: ROCM_PATH, else /usr/lib64/rocm
-        if not os.path.exists(cls.objdump or os.path.join(os.environ.get("ROCM_PATH", "/usr/lib64/rocm"), "llvm", "bin",
-                                                          "llvm-objdump")):
+        cls.objdump = E.find_objdump()
+        if not cls.objdump:
             raise unittest.SkipTest("no llvm-objdump")
 
     def test_no_matrix_or_exchange_instruction_under_a_lane_mask_in_the_kernels_the_card_runs(self):
