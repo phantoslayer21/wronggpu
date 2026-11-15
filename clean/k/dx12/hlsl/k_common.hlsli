@@ -196,10 +196,17 @@ uint4 wgk_act8n(uint4 x)
 // ---- softmax weights (HIP wgk_softmax_weights<false>: FP32 weights, the network's default) ---------------------------
 // gg: one query's 4 fragments of 8 keys (lane = query, the clamped polynomial g of spec 41 applied). w = 2^g in FP32
 // (v_exp_f32), the sum over 64 keys = 32 per lane in fragment / element order plus one lane exchange, inv = v_rcp_f32,
-// A = f16(w inv) rounded ONCE from the exact product (HIP: v_fma_mixlo_f16 / v_fma_mixhi_f16 w * inv + 0). Here: the
-// product's FP32 rounding p and its exact residual e = fma(w, inv, -p) give the round-to-odd FP32 value (13 bits more
-// than FP16: rounding it to FP16 is the single rounding of the exact product), then the driver's RNE conversion.
-// w >= 2^-14.43 and inv > 0 are finite and normal, so no zero / sign / FTZ case arises.
+// A = f16(w inv) rounded ONCE from the exact product (HIP: v_fma_mixlo_f16 / v_fma_mixhi_f16 w * inv + 0).
+// KB_SMX 2 (default, mix form): the product's FP32 rounding p and its exact residual e = fma(w, inv, -p) (w inv = p + e
+// exactly) are added into the driver's RNE matrix conversion; the gfx1201 D3D12 compiler folds that addition into
+// v_fma_mixlo_f16 / v_fma_mixhi_f16 p, 1.0, e, whose one rounding of the exact p + e is RN16(w inv), HIP's bits (3 VALU per
+// weight instead of 8, no VCC round trips). The fold is a driver choice: build_dx12.py's ISA check fails the build when
+// a port built with this form lacks it (clean/dx12/isa_checks.json), and the native D3D12 device runs a probe of the
+// same form at start-up (k_mix_probe) and takes the KB_SMX 1 ports when it fails. Without the fold, the FP32 sum p + e
+// would be p and the conversion a second rounding (off by one FP16 ulp where p is an FP16 midpoint).
+// KB_SMX 1 (fallback ports, file suffix __rodd): p and e give the round-to-odd FP32 value (13 bits more than FP16:
+// rounding it to FP16 is the single rounding of the exact product), then the driver's RNE conversion.
+// w >= 2^-14.43 and inv > 0 are finite and normal, so no zero / sign / FTZ case arises (e is exact and normal or 0).
 // Round to odd for a positive normal FP32 product p = RNE(x) with exact residual e = x - p (wg_math.hlsli
 // wg_round_odd, specialised: no zero / infinity / sign cases): truncation of x is p, or p - 1 ulp when e < 0; the
 // inexact bit e != 0 makes it odd. Gives the same bits as wg_round_odd for every p > 0 finite.
@@ -208,7 +215,10 @@ uint wgk_round_odd_pos(float p, float e)
     return (asuint(p) - (e < 0.0f ? 1u : 0u)) | (e != 0.0f ? 1u : 0u);
 }
 #ifndef KB_SMX
-#define KB_SMX 1
+#define KB_SMX 2
+#endif
+#ifndef KB_SMX_MUT
+#define KB_SMX_MUT 0      // 1: negative control of the port check (never shipped)
 #endif
 void wgk_softmax_weights(uint4 gg[4], out uint4 pa[4])
 {
@@ -234,7 +244,11 @@ void wgk_softmax_weights(uint4 gg[4], out uint4 pa[4])
         [unroll] for (uint j = 0; j < 8u; ++j) {
             const float p = w[s2][j] * inv;
             const float e = mad(w[s2][j], inv, -p);
-#if KB_SMX
+#if KB_SMX >= 2 && KB_SMX_MUT
+            ro.v[j] = p;       // negative control only (KB_SMX_MUT 1): the residual dropped, a second rounding
+#elif KB_SMX >= 2
+            ro.v[j] = p + e;   // folded into the conversion: v_fma_mix*_f16 p, 1.0, e
+#elif KB_SMX
             ro.v[j] = asfloat(wgk_round_odd_pos(p, e));
 #else
             ro.v[j] = asfloat(wg_round_odd(p, e));
