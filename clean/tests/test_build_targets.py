@@ -115,12 +115,76 @@ class FamilyBuilds(unittest.TestCase):
             with self.subTest(arch=arch), self.assertRaisesRegex(SystemExit, "unsupported GPU target"):
                 self.build("--arch", arch, "--no-runtime")
 
-    def test_gfx11_is_not_a_runtime_or_extra_target(self):
-        for args, message in ((["--arch", "gfx1100", "--runtime-only"], "gfx11 targets build code objects only"),
-                              (["--arch", "gfx1100", "--motion-outres-only"], "gfx11 targets build code objects only"),
+    def test_gfx11_is_not_a_motion_or_extra_target(self):
+        for args, message in ((["--arch", "gfx1100", "--motion-outres-only"], "no motion-at-output-resolution code objects"),
                               (["--extra-archs", "gfx1100", "--no-runtime"], "--extra-archs takes gfx12 targets only")):
             with self.subTest(args=args), self.assertRaisesRegex(SystemExit, message):
                 self.build(*args)
+
+
+class Gfx11Runtime(unittest.TestCase):
+    """A gfx11 build also makes the runtime library, with nothing built in: the runtime loads <arch>.<name> from the folder
+    (clean/runtime/device.cpp). The compiler is replaced by a function that writes each output as a file with its own name."""
+
+    def main(self, *args, arch="gfx1100", prepare=None):
+        calls = []
+
+        def fake_run(cmd):
+            calls.append(cmd)
+            out = cmd[cmd.index("-o") + 1]
+            with open(out, "wb") as f:
+                f.write(os.path.basename(out).encode())
+
+        with tempfile.TemporaryDirectory() as d, patch.object(build, "ARCH", arch), patch.object(build, "run", fake_run), \
+                patch.object(build, "find_clang", lambda r: "clang"), patch.object(build, "find_host_cxx", lambda r: "c++"):
+            out = os.path.join(d, "out")
+            if prepare:
+                os.makedirs(out)
+                prepare(out)
+            with patch.object(build, "write_embedded", return_value=None) as embedded:
+                build.main(["--rocm", d, "--out", out, "--arch", arch, *args])
+            files = {n: Path(out, n).read_bytes() for n in os.listdir(out)}
+        runtime = [c for c in calls if "-shared" in c]
+        return runtime, files, embedded.call_count
+
+    def test_the_default_build_makes_the_runtime_and_the_arch_copies(self):
+        for arch in ("gfx1100", "gfx1101"):
+            with self.subTest(arch=arch):
+                runtime, files, embedded = self.main("--variants", "f16wm", arch=arch)
+                self.assertEqual(len(runtime), 1)
+                self.assertNotIn("-DWG_EMBEDDED_TABLE", runtime[0])
+                self.assertEqual(embedded, 0)
+                self.assertIn(build.runtime_library_name(), files)
+                self.assertIn("preset-M.v1.map.json", files)
+                objects = [n for n in files if n.endswith(".co") and not n.startswith("gfx")]
+                self.assertIn("swin__f16wm.co", objects)
+                self.assertEqual(len(objects), len(build.FAMILY_SOURCES["gfx11"]) + 2)  # the sources, swin__f16wm, swin__bmegahg
+                for n in objects:
+                    self.assertEqual(files[f"{arch}.{n}"], files[n])
+                self.assertEqual([n for n in files if n.startswith("gfx")], [f"{arch}.{n}" for n in sorted(objects)])
+
+    def test_no_runtime_and_chosen_sources_make_neither_runtime_nor_copies(self):
+        for args in (["--no-runtime"], ["--sources", "post.hip"]):
+            with self.subTest(args=args):
+                runtime, files, _ = self.main(*args)
+                self.assertEqual(runtime, [])
+                self.assertFalse([n for n in files if n.startswith("gfx") or n == build.runtime_library_name()])
+
+    def test_runtime_only_links_the_existing_code_objects_and_embeds_nothing(self):
+        def prepare(out):
+            for n in ("swin.co", "post.co"):
+                with open(os.path.join(out, n), "wb") as f:
+                    f.write(n.encode())
+        runtime, files, embedded = self.main("--runtime-only", prepare=prepare)
+        self.assertEqual(len(runtime), 1)
+        self.assertEqual(embedded, 0)
+        self.assertEqual(files["gfx1100.swin.co"], b"swin.co")
+        self.assertEqual(sorted(n for n in files if n.endswith(".co")), ["gfx1100.post.co", "gfx1100.swin.co", "post.co", "swin.co"])
+
+    def test_gfx12_runtime_only_still_embeds(self):
+        runtime, _, embedded = self.main("--runtime-only", arch="gfx1201")
+        self.assertEqual(len(runtime), 1)
+        self.assertEqual(embedded, 1)
 
 if __name__ == "__main__":
     unittest.main()

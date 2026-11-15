@@ -513,6 +513,15 @@ def write_build_manifest(out_dir, cmd, embedded, dx12=None):
     print(f"build manifest: {path} (dev_diagnostics={str(manifest['dev_diagnostics']).lower()}, sha256 {manifest['sha256'][:16]}...)", flush=True)
 
 
+def link_arch_objects(out_dir):
+    """<ARCH>.<name> next to every code object of out_dir: the runtime loads the code objects of the target it found
+    (clean/runtime/device.cpp: <arch>.<name>, never the unqualified file). A gfx12 build makes these copies as it embeds
+    the files (write_embedded)."""
+    for n in sorted(os.listdir(out_dir)):
+        if n.endswith(".co") and not n.startswith("gfx"):
+            shutil.copyfile(os.path.join(out_dir, n), os.path.join(out_dir, f"{ARCH}.{n}"))
+
+
 def run(cmd):
     print(" ".join(f'"{c}"' if " " in c else c for c in cmd), flush=True)
     r = subprocess.run(cmd)
@@ -604,7 +613,7 @@ def main(argv=None):
     ap.add_argument("--rocm", default=os.environ.get("ROCM_PATH", ""), help="ROCm / HIP SDK directory")
     ap.add_argument("--out", required=True, help="output directory for the code objects")
     ap.add_argument("--arch", help=f"GPU target (default {ARCH}, or the environment variable WG_GPU_ARCH); gfx1100 and "
-                                   "gfx1101 build code objects only (default sources: FAMILY_SOURCES)")
+                                   "gfx1101 build the default sources of FAMILY_SOURCES and a runtime library that reads them from the folder (no embedded table)")
     ap.add_argument("--sources", nargs="+", metavar="FILE",
                     help="build only these kernel sources (names in clean/kernels, e.g. post.hip) as <name>.co and "
                          "write target.json; no models, variants, runtime or emulator")
@@ -680,8 +689,8 @@ def main(argv=None):
         raise SystemExit(str(e))
     if any(F.FAMILIES.get(a) != "gfx12" for a in EXTRA_ARCHS):
         raise SystemExit("--extra-archs takes gfx12 targets only (gfx1200, gfx1201)")
-    if fam != "gfx12" and (args.runtime_only or args.motion_outres_only):
-        raise SystemExit(f"gfx11 targets build code objects only: {ARCH} has no runtime library or motion code objects")
+    if fam != "gfx12" and args.motion_outres_only:
+        raise SystemExit(f"{ARCH} has no motion-at-output-resolution code objects (gfx11 builds the default sources)")
     for s_ in args.sources or []:
         if not os.path.isfile(os.path.join(KERNEL_DIR, s_)):
             raise SystemExit(f"--sources: {s_} is not a kernel source in {KERNEL_DIR}")
@@ -692,7 +701,9 @@ def main(argv=None):
             for arch in EXTRA_ARCHS:
                 build_device_l(clang, args.rocm, os.path.join(args.out, arch), device_libs=not args.no_device_libs,
                                arch=arch)
-        build_runtime(args.runtime_cxx or find_host_cxx(args.rocm), args.out, embed=not args.no_embed)
+        if fam == "gfx11":  # no embedded table: the runtime reads <arch>.<name> from the folder
+            link_arch_objects(args.out)
+        build_runtime(args.runtime_cxx or find_host_cxx(args.rocm), args.out, embed=not args.no_embed and fam == "gfx12")
         return
     if args.motion_outres_only:
         if not args.rocm and not args.no_device_libs:
@@ -745,6 +756,9 @@ def main(argv=None):
                     json.dump(manifest, f, indent=1)
             with open(os.path.join(args.out, F.TARGET_FILE), "w") as f:
                 json.dump({"arch": ARCH}, f)
+            if not args.no_runtime and not args.sources:  # the runtime library next to the code objects it loads
+                link_arch_objects(args.out)
+                build_runtime(args.runtime_cxx or find_host_cxx(args.rocm), args.out, embed=False)
             return
         for src in SOURCES:
             out = os.path.join(args.out, os.path.splitext(src)[0] + ".co")
