@@ -58,7 +58,7 @@ open a window: they run SDL on its `offscreen` driver and give the program a hom
 own. Run it yourself the same way (`SDL_VIDEO_DRIVER=offscreen`) unless you want the real window. `linux-ui` renders the
 screens to PNG and drives the live window with scripted input; `launcher-native` runs the launcher's verbs suite
 (`tests/run_launcher_tests.py --native-linux`) against the binary; like CI's launcher build it needs
-`-DWRONGGPU_PRESET_K=OFF`, and its two checks that fail on main's own launcher too (#219) are skipped while they fail
+`-DWRONGGPU_PRESET_K=OFF`, and its one check that fails on main's own launcher too (#219) is skipped while it fails
 (`tests/native_linux.py` `KNOWN_ON_MAIN`).
 
 ## Build the AppImage

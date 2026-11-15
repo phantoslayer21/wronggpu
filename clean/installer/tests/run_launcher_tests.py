@@ -1470,8 +1470,10 @@ def test_re9(t, opti, synth_f):
     rc = t.run("uninstall", exeO)
     afterO = snapshot(rootO)
     mirrored = afterO.pop("_storage_/steam_api64.dll", None)
-    t.check("uninstall after the update: everything of WrongGPU's gone from the folder and the mirror; the player's mirrored file stays",
-            rc == 0 and mirrored is not None and afterO == beforeO, (rc, t.j.get("message"), diff(beforeO, afterO)))
+    # the mirror's earlier copy was not in the record (dropped above): the repair took it for the player's and backed it up
+    # (README: the file-ownership rule; an unrecorded mirror copy is not WrongGPU's even with the root DLL's bytes), so it comes back
+    t.check("uninstall after the update: everything of WrongGPU's gone from the folder and the mirror; the player's mirrored file and the unrecorded earlier mirror copy stay",
+            rc == 0 and mirrored is not None and afterO == dict(beforeO, **{"_storage_/dxgi.dll": sha(old)}), (rc, t.j.get("message"), diff(beforeO, afterO)))
     # uninstall: the game folder byte for byte as before, the mirror's earlier copy put back, REFramework kept
     write(os.path.join(root, "_storage_", "wronggpu-rr.log"), "written again by the game")
     left = kept_runtime(before, root, *unrecorded_wronggpu_files(root))
@@ -2592,6 +2594,10 @@ def test_rr_config_fix(t, opti):
                 shutil.rmtree(d, ignore_errors=True)
 
 
+def test_edition_download(t, opti):  # in launcher_edition_cases.py (this file stays below the 256 KB source limit)
+    __import__("launcher_edition_cases").run(t, opti, game, edition_package, OPTI_INI)
+
+
 def test_ui_dump(t, opti):
     print("\n[window] built hidden: pages, controls and names (nothing shown, nothing changed)")
     root, b, exe = game(t, "Ui Game", validated=True)
@@ -3053,7 +3059,7 @@ def main():
     test_direct_rr(t, opti, a.synth_f)
     test_sm2_settings(t, opti)
     test_rr_config_fix(t, opti)
-    t.skip("http", "[edition] the whole section") if t.native else __import__("launcher_edition_cases").run(t, opti, game, edition_package, OPTI_INI)
+    t.skip("http", "[edition] the whole section") if t.native else test_edition_download(t, opti)
     test_players_optiscaler(t, opti)
     test_experimental_and_shared_model(t, opti)
     test_orphan(t, opti)

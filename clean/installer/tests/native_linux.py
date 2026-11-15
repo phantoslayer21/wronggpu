@@ -29,8 +29,6 @@ WINDOWS_ONLY = {
 KNOWN_ON_MAIN = {
     "uninstall: exit 0, the RR game's folder as before except the two RR settings files":
         "fails on main too: a repair after an in-game edit records WrongGPU\\wronggpu.ini as the player's (issue #219)",
-    "uninstall after the update: everything of WrongGPU's gone from the folder and the mirror":
-        "fails on main too: _storage_\\dxgi.dll stays after an update and uninstall (issue #219)",
 }
 
 
