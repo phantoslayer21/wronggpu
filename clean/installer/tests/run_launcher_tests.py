@@ -23,6 +23,7 @@ os.environ["WRONGGPU_TESTING"] = "1"
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import mockpe  # noqa: E402  (synthetic PE files with a version resource)
+import launcher_build_facts as facts  # noqa: E402  (what the launcher under test was built with)
 import run_installer_tests as suite  # noqa: E402  (mock content, snapshots, the synthetic model case)
 from run_installer_tests import read, sha, snapshot, diff, write, kept_runtime, unrecorded_wronggpu_files  # noqa: E402
 import launcher_isolation as iso  # noqa: E402  (#243: no search of the PC's own game folders)
@@ -342,7 +343,7 @@ def test_install_settings_uninstall(t, opti):
     t.check("owned-files.json: valid JSON, every recorded file with its owner", owned.get("format") == "wronggpu-owned-files/1" and
             any(f["path"] == "wronggpu_runtime.dll" and f["owner"] == "wg" for f in owned.get("files", [])), owned)
     un = os.path.join(b, "wronggpu-setup", "uninstall.exe")
-    t.check("uninstall.exe is the small restorer, not the launcher", os.path.isfile(un) and os.path.getsize(un) < os.path.getsize(t.exe) // 4,
+    t.check("uninstall.exe is the restorer (the build's WrongGPU-Restore.exe), not the launcher", facts.restorer_ok(un, t.exe),
             (os.path.getsize(un) if os.path.isfile(un) else None, os.path.getsize(t.exe)))
     t.check("profile.ini written", os.path.isfile(os.path.join(b, "wronggpu-setup", "profile.ini")))
     t.check("the game is on the managed list", b.lower() in managed_list(t), managed_list(t))
@@ -421,9 +422,10 @@ def test_install_settings_uninstall(t, opti):
         write(rec_path, rec_same)
         rc = t.run("status", exe)
         t.check("the record back as installed: installed again", rc == 0 and t.j.get("game", {}).get("status") == "installed", t.j.get("game", {}).get("status"))
-    # update from an older version, then roll back and forward
+    # update from an older version (below this build's own), then roll back and forward
     lines = read(rec_path).decode("utf-8").split("\r\n")
-    lines = ["version\t0.5.1" if l.startswith("version\t") else l for l in lines]
+    old = facts.older_version(next((l[8:] for l in lines if l.startswith("version\t")), ""))
+    lines = ["version\t" + old if l.startswith("version\t") else l for l in lines]
     write(rec_path, "\r\n".join(lines))
     rc = t.run("status", exe)
     t.check("an older record: update available", rc == 0 and t.j.get("game", {}).get("status") == "update-available", t.j.get("game", {}).get("status"))
@@ -443,17 +445,17 @@ def test_install_settings_uninstall(t, opti):
                 any(w.startswith("Left in place (the plugin's settings file selects an entry this version lacks)") for w in t.j.get("warnings", [])),
                 (rc, options_line(eff_ini(b)), t.j.get("warnings"), t.logtail(1500)))
     prev_txt = os.path.join(b, "wronggpu-setup", "previous", "previous.txt")
-    t.check("update: exit 0; the earlier version kept in previous\\", rc == 0 and os.path.isfile(prev_txt) and "version=0.5.1" in read(prev_txt).decode(), (rc, t.j.get("message"), t.logtail()))
+    t.check("update: exit 0; the earlier version kept in previous\\", rc == 0 and os.path.isfile(prev_txt) and "version=" + old in read(prev_txt).decode(), (rc, t.j.get("message"), t.logtail()))
     rec = record_text(b)
     t.check("update: the settings survive (profile re-applied)", "output_filter=quality9" in (options_line(eff_ini(b)) or "") and "ShowFps=true" in ini(b, "OptiScaler.ini"),
             (options_line(eff_ini(b)), ini(b, "OptiScaler.ini")))
-    t.check("update: record at this version", "\nversion\t0.5.1" not in rec, rec[:300])
+    t.check("update: record at this version", "\nversion\t" + old not in rec, rec[:300])
     rc = t.run("rollback", exe)
     rec = record_text(b)
-    t.check("roll back: exit 0, record says 0.5.1, the newer version kept for later", rc == 0 and "\nversion\t0.5.1\r\n" in rec and
-            "version=" in read(prev_txt).decode() and "version=0.5.1" not in read(prev_txt).decode(), (rc, t.j.get("message")))
+    t.check("roll back: exit 0, record says the older version, the newer one kept for later", rc == 0 and "\nversion\t%s\r\n" % old in rec and
+            "version=" in read(prev_txt).decode() and "version=" + old not in read(prev_txt).decode(), (rc, t.j.get("message")))
     rc = t.run("rollback", exe)
-    t.check("roll back again: back to the newer version", rc == 0 and "\nversion\t0.5.1\r\n" not in record_text(b), t.j.get("message"))
+    t.check("roll back again: back to the newer version", rc == 0 and "\nversion\t%s\r\n" % old not in record_text(b), t.j.get("message"))
     rc = t.run("repair", exe, "--opti=" + opti, "--noscan", "--force")
     t.check("repair: exit 0, settings kept", rc == 0 and "output_filter=quality9" in (options_line(eff_ini(b)) or ""), (rc, t.j.get("message")))
     # a missing settings file is one problem, said once (the record lists wronggpu.ini as a file of the install too)
@@ -464,10 +466,10 @@ def test_install_settings_uninstall(t, opti):
             g.get("problems") == ["wronggpu.ini is missing"], g.get("problems"))
     # Repair on an older WrongGPU puts this release's files back: an update too, and its message says so
     lines = read(rec_path).decode("utf-8").split("\r\n")
-    write(rec_path, "\r\n".join("version\t0.5.1" if l.startswith("version\t") else l for l in lines))
+    write(rec_path, "\r\n".join("version\t" + old if l.startswith("version\t") else l for l in lines))
     rc = t.run("repair", exe, "--opti=" + opti, "--noscan", "--force")
-    t.check("repair of an older version: wronggpu.ini back with the settings, the message says it updated from 0.5.1",
-            rc == 0 and "output_filter=quality9" in (options_line(eff_ini(b)) or "") and "updated from 0.5.1 to" in t.j.get("message", ""), (rc, t.j.get("message")))
+    t.check("repair of an older version: wronggpu.ini back with the settings, the message says it updated from the older version",
+            rc == 0 and "output_filter=quality9" in (options_line(eff_ini(b)) or "") and "updated from %s to" % old in t.j.get("message", ""), (rc, t.j.get("message")))
     # the elevated worker's job (run here without elevation: the same code path)
     job = os.path.join(t.work, "job.txt")
     result = os.path.join(t.work, "result.txt")
@@ -1068,7 +1070,7 @@ def test_rr(t, opti, synth_f):
     rc = t.run("install", exeN, "--opti=" + opti, "--noscan", "--force", "--experimental")
     rec = record_text(bN) if rc == 0 else ""
     t.check("a game without RR: installed without any RR file or record line", rc == 0 and "WrongGPU-RR.asi" not in rec and "wronggpu-rr.ini" not in rec and
-            not os.path.exists(os.path.join(bN, "wronggpu_rr_runtime.dll")) and not os.path.exists(os.path.join(bN, "WrongGPU")) and
+            not os.path.exists(os.path.join(bN, "wronggpu_rr_runtime.dll")) and not facts.has_exact_name(bN, "WrongGPU") and
             not os.path.exists(os.path.join(bN, "wronggpu-rr.ini")) and
             not os.path.exists(os.path.join(bN, "plugins", "WrongGPU-RR.asi")), (rc, t.j.get("message"), rec[:800]))
     # a game that ships the RR model file (a stand-in WrongGPU cannot convert: the RR data is not ready yet)
@@ -1234,69 +1236,7 @@ def test_rr(t, opti, synth_f):
     st = [c["text"] for c in d.get("settings", {}).get("controls", [])]
     t.check("window: Settings has the Ray Reconstruction data row and the Exact mode switch (off)",
             any(x.startswith("Ray Reconstruction data") for x in st) and any(c["text"] == "Exact mode" and c.get("checked") is False for c in d.get("settings", {}).get("controls", [])), st)
-    # release 0.6.0 (owner: RR's kernels pre-compiled inside the launcher, rrprep.h): rr-prepare runs the launcher as a helper
-    # under the game's program name, which loads the installed wronggpu_runtime.dll (the real runtime of this payload, RR
-    # built in) and creates RR's pipelines on the GPU; the driver keeps them per program name, so the game finds them ready
-    prep_dir = os.path.join(t.data, "rr-prepare")  # the launcher data folder (the suite runs with --data)
-    rc = t.run("rr-prepare", exe, "--check")
-    t.check("rr-prepare --check before: not prepared yet", rc == 0 and t.j.get("rr_prepare", {}).get("ready") is False and
-            "not prepared yet" in t.j.get("rr_prepare", {}).get("not_ready_why", ""), t.j)
-    # release 0.6.0 polish: the window's start prepares again only games prepared before (never prepared: Play's job)
-    rc = t.run("rr-recheck", exe)
-    rq = t.j.get("rr_recheck", {})
-    t.check("rr-recheck before any prepare: not stale (state not-prepared), the start leaves it to Play",
-            rc == 0 and rq.get("stale") is False and rq.get("state_before") == "not-prepared", t.j)
-    glog = os.path.join(b, "wronggpu-rr.log")  # the RR log an earlier case wrote (Last run): prepare must not touch it
-    glog_before = read(glog) if os.path.exists(glog) else None
-    rc = t.run("rr-prepare", exe, "--passes=1")
-    rp = t.j.get("rr_prepare", {})
-    gpu = rp.get("result") != 2  # 2: no RDNA 4 graphics card on this PC (nothing to prepare)
-    t.check("rr-prepare: the helper prepared the default mode's kernels (result 0, ready, every kernel reported), or no RDNA 4 card",
-            rc == 0 and (not gpu or (rp.get("result") == 0 and rp.get("ready") is True and rp.get("kernels", 0) >= 50)), rp)
-    t.check("rr-prepare: the helper copy is gone, nothing new in the game's folder (the runtime log went to the data folder)",
-            not os.listdir(os.path.join(prep_dir, "run")) and (read(glog) if os.path.exists(glog) else None) == glog_before and
-            (not gpu or os.path.isfile(os.path.join(prep_dir, "prepare.log"))), (os.listdir(prep_dir), os.listdir(b)))
-    if gpu:
-        ptxt = read(os.path.join(prep_dir, "prepared.txt")).decode("utf-8", "replace")
-        t.check("rr-prepare: prepared.txt keeps the game's program name, the driver's version, the runtime's SHA-256, the passes",
-                ptxt.lower().startswith(os.path.basename(exe).lower() + "\t" + rp.get("driver", "?").lower() + "\t") and ptxt.rstrip().endswith("\t1"), ptxt)
-        plog = read(os.path.join(prep_dir, "prepare.log")).decode("utf-8", "replace")
-        t.check("rr-prepare: the runtime ran as the game's program name (the driver's cache key)",
-                ("as " + os.path.join(prep_dir, "run", os.path.basename(exe))).lower() in plog.lower() and "prepare: done" in plog, plog[-1500:])
-        rc = t.run("rr-prepare", exe, "--passes=1")
-        rp2 = t.j.get("rr_prepare", {})
-        t.check("rr-prepare again: the driver had every kernel (quick: under 15 s, was %s ms)" % rp.get("ms"),
-                rc == 0 and rp2.get("result") == 0 and rp2.get("ms", 99999) < 15000, rp2)
-        rc = t.run("rr-prepare", exe, "--check", "--passes=2")
-        t.check("rr-prepare --check for the other modes (pass 2): not prepared (default mode only)", rc == 0 and t.j.get("rr_prepare", {}).get("ready") is False, t.j)
-        write(os.path.join(prep_dir, "prepared.txt"), ptxt.replace("\t" + rp.get("driver", "?") + "\t", "\t1.2.3.4\t", 1).encode("utf-8"))
-        rc = t.run("rr-prepare", exe, "--check")
-        t.check("rr-prepare --check after a driver change: not prepared, the reason in words", rc == 0 and t.j.get("rr_prepare", {}).get("ready") is False and
-                "driver changed" in t.j.get("rr_prepare", {}).get("not_ready_why", ""), t.j)
-        # release 0.6.0 polish (owner 2026-11-02): the launcher's start prepares again after a driver / WrongGPU update
-        rc = t.run("rr-recheck", exe)
-        rq = t.j.get("rr_recheck", {})
-        t.check("rr-recheck after a driver change: stale (driver-changed), the reason names the old driver, nothing run without --run",
-                rc == 0 and rq.get("stale") is True and rq.get("state_before") == "driver-changed" and "1.2.3.4" in rq.get("why", "") and rq.get("result") == -1, t.j)
-        rc = t.run("rr-recheck", exe, "--run")
-        rq = t.j.get("rr_recheck", {})
-        p2 = read(os.path.join(prep_dir, "prepared.txt")).decode("utf-8", "replace")
-        t.check("rr-recheck --run: prepared again (result 0), ready, prepared.txt names this driver again",
-                rc == 0 and rq.get("result") == 0 and rq.get("state") == "ready" and
-                p2.lower().startswith(os.path.basename(exe).lower() + "\t" + rp.get("driver", "?").lower() + "\t"), (t.j, p2))
-        cols = p2.splitlines()[0].split("\t")
-        if len(cols) >= 4:
-            cols[2] = "0" * 64  # another WrongGPU runtime (an update): its SHA-256 differs
-            write(os.path.join(prep_dir, "prepared.txt"), ("\t".join(cols) + "\r\n").encode("utf-8"))
-        rc = t.run("rr-recheck", exe)
-        rq = t.j.get("rr_recheck", {})
-        t.check("rr-recheck after a WrongGPU runtime change: stale (runtime-changed)",
-                rc == 0 and rq.get("stale") is True and rq.get("state_before") == "runtime-changed", t.j)
-        write(os.path.join(prep_dir, "prepared.txt"), p2.encode("utf-8"))
-        rc = t.run("rr-recheck", exe)
-        rq = t.j.get("rr_recheck", {})
-        t.check("rr-recheck with the same driver and runtime: not stale (ready), nothing run",
-                rc == 0 and rq.get("stale") is False and rq.get("state_before") == "ready" and rq.get("result") == -1, t.j)
+    __import__("launcher_rr_prepare_cases").run(t, exe, b)  # rr-prepare and rr-recheck (launcher_rr_prepare_cases.py)
     # the player edited both RR settings files by hand; the state folder holds the saved settings (#219)
     write(files["ini"], read(files["ini"]) + b"rr_plugin_key=1\r\n")
     write(files["settings"], read(files["settings"]) + b"rr_last_seen=1\r\n")
@@ -2659,8 +2599,11 @@ def test_state(t, opti):  # #219, in launcher_state_cases.py
     __import__("launcher_state_cases").run(t, opti, sys.modules[__name__])
 
 
+NO_DIRECT = None  # --no-direct-launcher
+
+
 def test_edition_download(t, opti):  # in launcher_edition_cases.py (this file stays below the 256 KB source limit)
-    __import__("launcher_edition_cases").run(t, opti, game, edition_package, OPTI_INI)
+    __import__("launcher_edition_cases").run(t, opti, game, edition_package, OPTI_INI, NO_DIRECT)
 
 
 def test_ui_dump(t, opti):
@@ -3089,12 +3032,15 @@ def main():
     ap.add_argument("--baseline", help="the 0.5.1 installer (WRONGGPU_TESTING build, same test map) for the adoption cases")
     ap.add_argument("--hip", help="mock amdhip64_7.dll (WRONGGPU_HIP_RUNTIME)")
     ap.add_argument("--run-old-baseline", action="store_true", help="also run --baseline (it predates the test isolation: only in a fully redirected sandbox)")
+    ap.add_argument("--no-direct-launcher", help="a testing launcher built with -DWRONGGPU_DIRECT_ROUTE=OFF (as releases) for the edition "
+                    "refusals, when --launcher has the direct route")
     ap.add_argument("--only", nargs="*", default=[], help="development: only these tests (names without test_) after the basics")
     ap.add_argument("--synth-f", default=os.environ.get("WGC_SYNTH_BINS", ""),
                     help="folder with the spec team's synthetic preset-F file synth-common-v0.bin (the test build's F map is synth-r0)")
     a = ap.parse_args()
-    global RUN_OLD_BASELINE
+    global RUN_OLD_BASELINE, NO_DIRECT
     RUN_OLD_BASELINE = a.run_old_baseline
+    NO_DIRECT = os.path.abspath(a.no_direct_launcher) if a.no_direct_launcher else None
     work = os.path.abspath(a.work)
     iso.self_test(work)  # (#243) first: no launcher call with a broken guard
     for d in ("games", "data", "localappdata", "programs", "startmenu"):

@@ -5,14 +5,37 @@ run()'s arguments are the suite's own helpers it used as module names. Written f
 import os
 import shutil
 
-from run_installer_tests import read, sha, snapshot, diff, write
+from run_installer_tests import read, sha, snapshot, diff, write, has_direct_route
 
 
-def run(t, opti, game, edition_package, OPTI_INI):
+def run(t, opti, game, edition_package, OPTI_INI, no_direct=None):
     """WrongGPU's edition of OptiScaler, downloaded by the launcher (optiedition.h): pinned size + SHA-256, a mismatch refused,
     the cache reused, offline falls back to the player's own download. A local test server (127.0.0.1) stands in for the
-    release page; the test build never downloads without WRONGGPU_TEST_EDITION."""
+    release page; the test build never downloads without WRONGGPU_TEST_EDITION. The refusals (no OptiScaler at all: exit 2)
+    need a launcher without the direct route (-DWRONGGPU_DIRECT_ROUTE=OFF, as releases), which then has no other way to
+    repair: no_direct (--no-direct-launcher) runs the section with such a build when the suite's launcher has the route."""
     print("\n[edition] the launcher downloads WrongGPU's edition of OptiScaler: pinned hash, mismatch refused, cache, offline fallback")
+    saved = t.exe
+    if no_direct and has_direct_route(t.exe):
+        if has_direct_route(no_direct):
+            raise SystemExit("--no-direct-launcher %s has the direct route: build it with -DWRONGGPU_DIRECT_ROUTE=OFF" % no_direct)
+        t.exe = no_direct
+        print("  (this section runs with the launcher without the direct route: %s)" % no_direct)
+    refuses = not has_direct_route(t.exe)
+
+    def refusal(name, ok, detail):
+        if refuses:
+            t.check(name, ok, detail)
+        else:
+            print("  skipped: %s (needs a launcher built with -DWRONGGPU_DIRECT_ROUTE=OFF, as releases: this one has the direct "
+                  "route and repairs without OptiScaler; give one with --no-direct-launcher)" % name)
+    try:
+        _section(t, opti, game, edition_package, OPTI_INI, refusal)
+    finally:
+        t.exe = saved
+
+
+def _section(t, opti, game, edition_package, OPTI_INI, refusal):
     import http.server
     import threading
     import zipfile
@@ -69,7 +92,7 @@ def run(t, opti, game, edition_package, OPTI_INI):
         t.env["WRONGGPU_TEST_EDITION"] = pin("http://127.0.0.1:%d/edition.zip" % port, "0" * 64)
         rc = t.run("repair", exe, "--noscan", "--force")
         log = read(t.log).decode("utf-8", "replace")
-        t.check("hash mismatch: refused with the plain words, nothing cached, no OptiScaler without the player's own download (exit 2)",
+        refusal("hash mismatch: refused with the plain words, nothing cached, no OptiScaler without the player's own download (exit 2)",
                 rc == 2 and "download refused" in log and not os.path.exists(cache) and not os.path.exists(cache + ".part"), (rc, t.j.get("message"), t.logtail()))
         rc = t.run("set", "--global", "optiscaler=" + opti)
         rc = t.run("repair", exe, "--noscan", "--force")
@@ -84,11 +107,11 @@ def run(t, opti, game, edition_package, OPTI_INI):
                 (rc, t.j.get("message"), t.logtail()))
         t.run("set", "--global", "optiscaler=")
         rc = t.run("repair", exe, "--noscan", "--force")
-        t.check("offline without the player's own download: refused (exit 2), said in words", rc == 2 and "OptiScaler" in t.j.get("message", ""), (rc, t.j.get("message")))
+        refusal("offline without the player's own download: refused (exit 2), said in words", rc == 2 and "OptiScaler" in t.j.get("message", ""), (rc, t.j.get("message")))
         # only https:// outside 127.0.0.1 (a test build allows the local test server only)
         t.env["WRONGGPU_TEST_EDITION"] = pin("http://example.invalid/edition.zip")
         rc = t.run("repair", exe, "--noscan", "--force")
-        t.check("plain http:// to another host is never used", rc == 2 and "only https://" in read(t.log).decode("utf-8", "replace"), (rc, t.logtail()))
+        refusal("plain http:// to another host is never used", rc == 2 and "only https://" in read(t.log).decode("utf-8", "replace"), (rc, t.logtail()))
         t.env["WRONGGPU_TEST_EDITION"] = pin("http://127.0.0.1:%d/edition.zip" % port)
         rc = t.run("uninstall", exe)
         t.check("uninstall: the game folder back byte for byte",

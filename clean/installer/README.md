@@ -920,7 +920,7 @@ Windows (the Wine run was not repeated for them):
   the list and line), converted again by a second game's install, a list held open (exit 10), and the last game's uninstall
   keeping `ignore-files.txt` with the kept line in its result.
 - `tests/run_launcher_tests.py --launcher <WrongGPU.exe> --work <dir> [--baseline <0.5.1 WrongGPU-Setup.exe>]
-  [--hip <mock>]`: the verbs against generated fixture games (names and synthetic bytes only) with a
+  [--hip <mock>] [--no-direct-launcher <WrongGPU.exe>]`: the verbs against generated fixture games (names and synthetic bytes only) with a
   `WRONGGPU_TESTING` build of the suite's test map: scan statuses, refusals (anti-cheat, DLSS-NR) with nothing changed,
   install (record v2, owned-files.json, the restorer as uninstall.exe, the managed list), set/get with validation,
   OptiScaler's FPS key, an outside edit and its revert, the last run from a synthetic log, update with `previous\`,
@@ -929,6 +929,10 @@ Windows (the Wine run was not repeated for them):
   the experimental confirmation, the model kept while another managed game uses it, adoption of a real 0.5.1
   install (v1 record, settings imported, restorer, entries), self-install / self-uninstall with one Apps & features
   entry, portable paths, the update check off, and the window built hidden (`ui-dump`: pages, names, visibility).
+  Checks that depend on how the launcher was built follow the build under test (`launcher_build_facts.py`). The edition
+  section's refusals need a launcher without the direct route (`-DWRONGGPU_DIRECT_ROUTE=OFF`, as releases):
+  `--no-direct-launcher` gives one, otherwise they are skipped with that reason. rr-prepare's GPU checks are skipped, with
+  the reason, when the installed runtime is the suite's own stand-in.
   Its `[direct-rr]` part: a game that ships the RR library without the game interface's RR plugin (the Unreal Engine
   plugin layout of Hogwarts Legacy, LEGO Batman, Borderlands 4) creates Ray Reconstruction itself (`rr.h`
   `RrUse::direct`; status `rr_direct`). WrongGPU's RR runs there only through WrongGPU's edition of OptiScaler (plugin
