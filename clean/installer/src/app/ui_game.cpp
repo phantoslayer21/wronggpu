@@ -465,7 +465,7 @@ FindingWords WordsOf(const Finding& f) {
             if (f.what == L"WrongGPU RR (from another package)") w.sub = L"It stays. WrongGPU never moves its own Ray Reconstruction plugin aside.";
             break;
         case Tool::Cet: case Tool::Red4ext: case Tool::Ue4ss: w.sub = L"It stays. WrongGPU doesn't touch it."; break;
-        case Tool::HipRuntime: w.name = L"Another HIP tool"; w.sub = L"Keep Runs on at Auto or Direct3D 12 so the two don't clash."; break;
+        case Tool::HipRuntime: w.name = L"Another HIP tool"; w.sub = L"It stays. WrongGPU runs on Direct3D\u00a012 in a game, not on HIP, so the two don't clash."; break;
         case Tool::NrOnAmd: w.name = L"Another upscaler mod"; w.sub = L"WrongGPU doesn't install next to it and doesn't touch it."; break;
         case Tool::VendorDll:
             if (f.what.rfind(L"A loose ", 0) == 0) { w.name = L"Another tool's file"; w.sub = L"WrongGPU leaves it alone and never writes over it."; }
@@ -1218,7 +1218,7 @@ void OpenGameLog(const GameEntry& e) { OpenLater(e, true); }
 // The segmented controls of the page's lists share one segment width (the widest label any of them has), so their left
 // edges line up down a list. Runs on is the one exception: it names its choice the way the rest of the page does
 // ("Direct3D 12": its own sentence, Last run, the header's line), so its segments take that name's width.
-float PageSegW(Gfx& gx) { return SegmentW(gx, {L"Default", L"Auto", L"On", L"Off", L"HIP", L"Scale", L"Original"}); }
+float PageSegW(Gfx& gx) { return SegmentW(gx, {L"Default", L"Auto", L"On", L"Off", L"Scale", L"Original"}); }
 
 // "Turn it on in the game" (UI review #1): after an install, until the first run where Model M worked, what the player does
 // in the game for WrongGPU to run: choose the upscaler there (DLSS on OptiScaler's route, FSR on the direct one; TAA or
@@ -2099,7 +2099,7 @@ static float FolderSection(Gfx& gx, float x, float y, float w) {
             if (notOffered && f.decision == Decision::Refuse && fw.name.size() > 2 && staysOut.find(fw.name) != wstring::npos) continue;
             KvOpt fo;
             fo.sub = notOffered && f.decision == Decision::Refuse ? wstring() : fw.sub;  // the reason is the section above's
-            // a warning about how WrongGPU and the tool would meet (a HIP tool's "Keep Runs on at Auto..."): moot in a game
+            // a warning about how WrongGPU and the tool would meet (a HIP tool's): moot in a game
             // WrongGPU stays out of, where the page has no setting it could name
             const bool moot = notOffered && f.decision == Decision::Warn;
             if (moot) fo.sub = L"Nothing to do: WrongGPU stays out of this game.";
