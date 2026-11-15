@@ -4,7 +4,6 @@
 Only the calls the runner needs: device memory, module loading, kernel launch, events.
 """
 import ctypes
-import glob
 import os
 import sys
 import warnings
@@ -22,6 +21,7 @@ class HipError(RuntimeError):
 # HSA is removed, except HIP_PLATFORM and HIP_PATH_72, and ROCM_PATH is set to the SDK. A stray inherited variable
 # can point the vendor runtime at an unrelated folder (an LLVM_PATH outside the SDK made hipModuleLoadData crash).
 # Per process only: the user's and the machine's environment are not changed.
+from clean.runner import sdk  # noqa: E402
 from clean.runner.sdk import OFFICIAL_ROCM as DEFAULT_ROCM  # noqa: E402  (the official HIP SDK)
 HIP_ENV_KEEP = ("HIP_PLATFORM", "HIP_PATH_72")
 HIP_ENV_PARTS = ("HIP", "LLVM", "ROCM", "HSA")
@@ -68,29 +68,29 @@ def _check_environment(rocm_dir):
 
 
 def _find_library(rocm_dir):
-    if sys.platform == "win32":
-        bindir = os.path.join(rocm_dir, "bin")
-        if os.path.isdir(bindir) and hasattr(os, "add_dll_directory"):
-            os.add_dll_directory(bindir)
-        names = ["amdhip64_7.dll", "amdhip64_6.dll", "amdhip64.dll"]
-        candidates = [os.path.join(bindir, n) for n in names] + names
-    else:
-        candidates = [os.path.join(rocm_dir, "lib", "libamdhip64.so")]
-        candidates += sorted(glob.glob(os.path.join(rocm_dir, "lib", "libamdhip64.so.*")))
-        candidates += ["libamdhip64.so"]
-    errors = []
-    for c in candidates:
-        if os.path.isabs(c) and not os.path.exists(c):
-            continue
-        try:
-            return ctypes.CDLL(c)
-        except OSError as e:
-            errors.append(f"{c}: {e}")
-    raise HipError("cannot load the HIP runtime library; tried:\n  " + "\n  ".join(errors or candidates))
+    """The HIP runtime of the checked SDK (clean/runner/sdk.py runtime_library), loaded by its full path; never a bare
+    name searched by the loader. Fails closed."""
+    try:
+        path = sdk.runtime_library(rocm_dir)
+    except SystemExit as e:
+        raise HipError(str(e)) from None
+    bindir = os.path.dirname(path)
+    if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
+        os.add_dll_directory(bindir)
+    try:
+        return ctypes.CDLL(path)
+    except OSError as e:
+        raise HipError(f"cannot load the HIP runtime of the HIP SDK {sdk.label(rocm_dir)}: {e}") from None
 
 
 class Hip:
-    def __init__(self, rocm_dir, device=0):
+    def __init__(self, rocm_dir=None, device=0):
+        # rocm_dir: an official HIP SDK install (default the newest), or one approved with --force-sdk (sdk.approve)
+        rocm_dir = rocm_dir or sdk.resolve()
+        try:
+            sdk.check_rocm(rocm_dir)
+        except SystemExit as e:
+            raise HipError(str(e)) from None
         clean_process_environment(rocm_dir)
         _check_environment(rocm_dir)
         lib = self.lib = _find_library(rocm_dir)

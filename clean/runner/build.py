@@ -154,21 +154,17 @@ EXTRA_ARCHS = []
 
 
 def find_clang(rocm=None):
-    """The HIP SDK's clang (rocm: the SDK folder, default the official one; clean/runner/sdk.py). Never from PATH or an
-    environment variable: a clang elsewhere needs --clang."""
-    rocm = rocm or sdk.OFFICIAL_ROCM
-    exe = "clang.exe" if sys.platform == "win32" else "clang"
-    for sub in ("bin", os.path.join("lib", "llvm", "bin"), os.path.join("llvm", "bin")):
-        p = os.path.join(rocm, sub, exe)
-        if os.path.exists(p):
-            return p
-    raise SystemExit(f"clang not found in the HIP SDK {rocm}; pass --clang")
+    """The HIP SDK's clang (rocm: the SDK folder, default the newest official install; clean/runner/sdk.py checks it).
+    Never from PATH or an environment variable."""
+    return sdk.compiler(rocm or sdk.resolve(), None)
 
 
 def device_command(clang, rocm, src, out, device_libs=True, report=False, extra=(), soft_fp8=False, defines=None):
     # a fixed compilation-unit id from the output file's name, so the __hip_cuid_... symbol of a code object is the same
     # in every build folder (without -cuid, clang derives the id itself)
     cuid = "wg_" + re.sub(r"[^A-Za-z0-9_]", "_", os.path.splitext(os.path.basename(out))[0])
+    # the SDK policy's boundary (clean/runner/sdk.py): every HIP compile of every entry point passes here
+    sdk.check(rocm or sdk.resolve(), clang)
     cmd = [clang, "-x", "hip", f"--offload-arch={ARCH}", "--cuda-device-only", "-nogpuinc", "-O3",
            "--no-gpu-bundle-output", f"-cuid={cuid}"]
     if device_libs:
@@ -204,12 +200,7 @@ def find_host_cxx(rocm=None):
     systems: clang++ or g++ from PATH."""
     exe = "clang++.exe" if sys.platform == "win32" else "clang++"
     if sys.platform == "win32":
-        rocm = rocm or sdk.OFFICIAL_ROCM
-        for sub in ("bin", os.path.join("lib", "llvm", "bin"), os.path.join("llvm", "bin")):
-            p = os.path.join(rocm, sub, exe)
-            if os.path.exists(p):
-                return p
-        raise SystemExit(f"clang++ not found in the HIP SDK {rocm}; pass --runtime-cxx")
+        return sdk.compiler(rocm or sdk.resolve(), None, default="clang++")
     p = shutil.which(exe) or shutil.which("g++")
     if p:
         return p
@@ -358,7 +349,7 @@ def build_runtime(cxx, out_dir, embed=True):
 
 
 def run(cmd):
-    print(" ".join(f'"{c}"' if " " in c else c for c in cmd), flush=True)
+    print(sdk.redact(" ".join(f'"{c}"' if " " in c else c for c in cmd)), flush=True)   # custom SDK paths by id only
     r = subprocess.run(cmd)
     if r.returncode != 0:
         raise SystemExit(f"build failed ({r.returncode})")
@@ -494,6 +485,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
     rocm_given = bool(args.rocm)   # release runtime builds reuse pinned Model L code objects unless --rocm is given
     args.rocm = sdk.resolve(args.rocm, args.force_sdk)
+    if args.clang:   # the SDK's own compiler (a bare name means the SDK's file); another one only with --force-sdk
+        args.clang = sdk.compiler(args.rocm, args.clang, args.force_sdk)
     for name in OPTIONAL_MODELS:
         set_model(name, not getattr(args, "no_model_" + name.lower()))
     set_model_l(args.model_l)
@@ -510,7 +503,6 @@ def main(argv=None):
     if args.runtime_only:
         if MODEL_L and rocm_given:  # Model L's code objects next to the given ones (release builds reuse pinned ones)
             clang = args.clang or find_clang(args.rocm)
-            print(sdk.banner(args.rocm, clang=clang, device_libs=not args.no_device_libs), flush=True)
             build_device_l(clang, args.rocm, args.out, device_libs=not args.no_device_libs)
             for arch in EXTRA_ARCHS:
                 build_device_l(clang, args.rocm, os.path.join(args.out, arch), device_libs=not args.no_device_libs,
@@ -522,9 +514,7 @@ def main(argv=None):
     if args.motion_outres_only:
         if not args.rocm and not args.no_device_libs:
             raise SystemExit("--rocm is required (or --no-device-libs for a compile check)")
-        clang = args.clang or find_clang(args.rocm)
-        print(sdk.banner(args.rocm, clang=clang, device_libs=not args.no_device_libs), flush=True)
-        build_motion_outres(clang, args)
+        build_motion_outres(args.clang or find_clang(args.rocm), args)
         for arch in EXTRA_ARCHS:
             sub = [sys.executable, os.path.abspath(__file__), "--out", os.path.join(args.out, arch),
                    "--motion-outres-only"]
@@ -545,7 +535,6 @@ def main(argv=None):
         if not args.rocm and not args.no_device_libs:
             raise SystemExit("--rocm is required (or --no-device-libs for a compile check)")
         clang = args.clang or find_clang(args.rocm)
-        print(sdk.banner(args.rocm, clang=clang, device_libs=not args.no_device_libs), flush=True)
         for src in SOURCES:
             out = os.path.join(args.out, os.path.splitext(src)[0] + ".co")
             run(device_command(clang, args.rocm, os.path.join(KERNEL_DIR, src), out,

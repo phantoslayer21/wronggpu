@@ -75,9 +75,8 @@ def main(argv=None):
     a = ap.parse_args(argv)
     a.rocm = sdk.resolve(a.rocm, a.force_sdk)
     os.makedirs(a.out, exist_ok=True)
-    if not a.emu_only:
-        clang = a.clang or find_clang(a.rocm)
-        print(sdk.banner(a.rocm, clang=clang, device_libs=not a.no_device_libs), flush=True)
+    if not a.emu_only:   # the SDK's own compiler; another one only with --force-sdk (device_command checks it again)
+        clang = sdk.compiler(a.rocm, a.clang, a.force_sdk)
         build_device(clang, a.rocm, a.out, not a.no_device_libs, a.report, io_wave64=not a.io_wave32)
     if a.emu or a.emu_only:
         run(emu_command(a.cxx, os.path.join(a.out, EMU_LIBRARY)))
