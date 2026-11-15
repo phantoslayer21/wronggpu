@@ -325,7 +325,7 @@ PageData ReadPageData(const GameEntry& e, const Profile& defaults) {
     d.saved = e.hasRecord ? GameProfile(e.dir) : defaults;
     d.opti = ReadOpti(e);
     string wini, oini;
-    ReadAll(Join(e.dir, L"wronggpu.ini"), wini);
+    wini = EffectiveWronggpuIni(e.dir);  // (#219: the state folder over the file)
     ReadAll(Join(e.dir, L"OptiScaler.ini"), oini);
     d.outside = e.hasRecord ? OutsideEdits(d.saved, wini, oini) : std::vector<OutsideEdit>{};
     if (const RrConfigGame* rg = e.hasRecord ? RrConfigGameFor(e.exe) : nullptr) {

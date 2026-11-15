@@ -108,7 +108,7 @@ void FirstRunChecks(HWND hwnd, const GlobalSettings& gs, const wstring& dll, boo
             std::vector<wstring> pn;
             if (!IsFile(ProfilePath(e.dir))) {
                 string wini, oini;
-                ReadAll(Join(e.dir, L"wronggpu.ini"), wini);
+                wini = EffectiveWronggpuIni(e.dir);  // (#219: the state folder over the file)
                 ReadAll(Join(e.dir, L"OptiScaler.ini"), oini);
                 ImportProfile(wini, oini, &pn);
             }

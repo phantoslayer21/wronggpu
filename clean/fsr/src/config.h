@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "model_k.h"
@@ -128,6 +129,14 @@ struct Config {
 // bad values are reported through `warnings` (one per line) and otherwise ignored. A line whose key is a runtime option
 // (runtime_keys.h, e.g. "network = fused") is appended to runtime_options as "network=fused", with a warning.
 Config ParseConfig(const std::string& text, std::string* warnings);
+
+// #219 (0.6.5): the settings chosen in the WrongGPU launcher are in the game's state folder, <folder of wronggpu.ini>\
+// wronggpu-setup\settings.ini (clean/wgshared/include/wg_state.h), and take precedence over wronggpu.ini (the install's
+// defaults, the player's to edit; the launcher never rewrites it). Applied over a parsed Config: `upscaler` (network, amd,
+// standin) and every runtime option key (runtime_keys.h) as an item appended to runtime_options (the runtime takes a key's
+// last value). The RR plugin's keys (rr_*) and `model` (the model choice record's) are not the front end's and are skipped;
+// any other key is reported in *notes and ignored. *notes gets one line per applied key.
+void ApplyStateSettings(Config& c, const std::vector<std::pair<std::string, std::string>>& kv, std::string* notes);
 
 // Windows virtual-key code of an overlay_key value ("insert", "f9", "0x2d", ...); 0 when not recognised.
 int OverlayKeyCode(const std::string& name);

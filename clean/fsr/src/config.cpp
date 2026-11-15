@@ -398,6 +398,30 @@ std::string Config::BackendOptions() const {
     return extra.empty() ? std::string(buffer) : std::string(buffer) + ";" + extra;
 }
 
+void ApplyStateSettings(Config& c, const std::vector<std::pair<std::string, std::string>>& kv, std::string* notes) {
+    auto note = [&](const std::string& s) { if (notes) *notes += s + "\n"; };
+    std::string items;
+    for (const auto& p : kv) {
+        const std::string& key = p.first;
+        const std::string lv = Lower(p.second);
+        if (key == "upscaler") {
+            if (lv == "network") c.upscaler = UpscalerChoice::Network;
+            else if (lv == "amd") c.upscaler = UpscalerChoice::Amd;
+            else if (lv == "standin" || lv == "stand-in") c.upscaler = UpscalerChoice::StandIn;
+            else { note("settings.ini: bad value \"" + p.second + "\" for upscaler (wronggpu.ini's kept)"); continue; }
+            note("settings.ini: upscaler = " + lv + " (over wronggpu.ini)");
+        } else if (key.rfind("rr_", 0) == 0 || key == "model") {
+            continue;  // the RR plugin's keys and the model choice record's: not the front end's
+        } else if (IsRuntimeOptionKey(key)) {
+            items += (items.empty() ? "" : ";") + key + "=" + p.second;
+            note("settings.ini: " + key + " = " + p.second + " (over wronggpu.ini)");
+        } else {
+            note("settings.ini: unknown key \"" + key + "\" (ignored)");
+        }
+    }
+    if (!items.empty()) c.runtimeOptions = NormalizeOptions(c.runtimeOptions + ";" + items);
+}
+
 std::string OptionValue(const std::string& options, const char* key, bool* found) {
     std::string value;
     bool any = false;

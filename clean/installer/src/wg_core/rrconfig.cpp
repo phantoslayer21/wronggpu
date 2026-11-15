@@ -322,7 +322,19 @@ bool ApplyRrConfig(Context& ctx, const wstring& dir, Record& m, std::vector<wstr
         if (had && !fix.present) {  // the player's file as it was, kept in the game's wronggpu-setup folder
             const wstring b = RrConfigBackupPath(dir);
             EnsureDir(Parent(b));
-            WriteFileAtomic(b, in.data(), in.size());
+            // created only where nothing is: a copy an earlier uninstall kept there (not this fix's) is never overwritten; the
+            // setting is not added then, and the result says why
+            PinnedFile pf;
+            DWORD err = 0;
+            if (!pf.Create(b, &err)) {
+                if (err != ERROR_FILE_EXISTS && err != ERROR_ALREADY_EXISTS) Fail(L"Cannot keep a copy of " + file + L": " + ErrText(err));
+                warnings.push_back(L"Ray Reconstruction setting not added for " + wstring(g->name) + L": " + b +
+                                   L" is there and is not a copy this fix made (left as it is). Move it away, then Apply again.");
+                LogLine(ctx, L"rr_config_fix: " + b + L" is there (not this fix's): nothing written");
+                return moved;
+            }
+            if (!pf.OverwriteBytes(in.data(), in.size(), &err)) { pf.Delete(); Fail(L"Cannot keep a copy of " + file + L": " + ErrText(err)); }
+            pf.Close();
             next.backup = true;
             next.backupSha = Sha256Bytes(in.data(), in.size());  // (the revert deletes the backup only while it is these bytes)
         }

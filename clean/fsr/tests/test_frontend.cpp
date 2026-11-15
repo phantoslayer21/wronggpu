@@ -3472,6 +3472,29 @@ static void TestWithoutModelL() {
 }
 #endif
 
+// #219: the launcher's settings in the game's state folder (settings.ini) over wronggpu.ini (config.h ApplyStateSettings)
+static void TestStateSettings() {
+    std::string w;
+    Config c = ParseConfig("upscaler = amd\nruntime_options = executor=hip;sync=pipelined;output_filter=analytic\n", &w);
+    std::string notes;
+    ApplyStateSettings(c, {{"upscaler", "network"}, {"executor", "dx12"}, {"output_filter", "default"}, {"sparkle_guard", "off"},
+                           {"rr_mode", "fast"}, {"model", "L"}, {"no_such_key", "1"}},
+                       &notes);
+    CHECK(c.upscaler == UpscalerChoice::Network);  // the state's upscaler decides
+    // the runtime takes a key's last value: the state's items come after wronggpu.ini's
+    CHECK(c.runtimeOptions == "executor=hip;sync=pipelined;output_filter=analytic;executor=dx12;output_filter=default;sparkle_guard=off");
+    CHECK(OptionValue(c.runtimeOptions, "sync", nullptr) == "pipelined");  // a key the state does not hold stays as the file has it
+    CHECK(c.runtimeOptions.find("rr_mode") == std::string::npos && c.runtimeOptions.find("model=") == std::string::npos);  // not the front end's
+    CHECK(notes.find("unknown key \"no_such_key\"") != std::string::npos && notes.find("upscaler = network") != std::string::npos);
+    Config d = ParseConfig("upscaler = network\n", &w);
+    notes.clear();
+    ApplyStateSettings(d, {{"upscaler", "turbo"}}, &notes);
+    CHECK(d.upscaler == UpscalerChoice::Network && notes.find("bad value") != std::string::npos);  // a bad value: the file's kept
+    Config e = ParseConfig("upscaler = amd\n", &w);
+    ApplyStateSettings(e, {}, nullptr);
+    CHECK(e.upscaler == UpscalerChoice::Amd && e.runtimeOptions.empty());  // no state: wronggpu.ini as it is
+}
+
 int main() {
     TestCustomSlotFailedCreate();
     TestCustomSlotFailureKeyHasSize();
@@ -3559,6 +3582,7 @@ int main() {
     TestLogThinning();
     TestHosted();
     TestHostVersionHandling();
+    TestStateSettings();
     if (const char* dump = std::getenv("WG_TEST_DUMP_LOG")) {
         (void)dump;
         for (const auto& line : g_log) std::printf("%s\n", line.c_str());

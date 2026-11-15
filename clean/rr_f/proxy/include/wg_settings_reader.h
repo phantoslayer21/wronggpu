@@ -30,6 +30,7 @@
 
 #include "../../../wgshared/include/wg_registry_gen.h"
 #include "../../../wgshared/include/wg_shared_settings.h"
+#include "../../../wgshared/include/wg_state.h"  // #219: the game's state folder (settings.ini), its lock, the loaded protocol
 
 namespace wgss {
 
@@ -146,6 +147,29 @@ inline const std::string* ini_find(const std::vector<IniEntry>& ini, const char*
   for (const IniEntry& e : ini)
     if (e.key == k && (s.empty() || e.section == s || e.section.empty())) v = &e.value;
   return v;
+}
+
+// ------------------------------------------------------------------------------------------------ the game's state (#219)
+// Settings chosen after the install (the launcher, this plugin's menu) live in the game's state folder,
+// <game folder>\wronggpu-setup\settings.ini (wg_state.h), and take precedence over WrongGPU\wronggpu.ini, the install's
+// defaults, which this plugin never writes. Game folder: WG_STATE_GAME_DIR when set (tests), else the exe's folder.
+inline std::wstring state_game_dir() {
+  wchar_t buf[MAX_PATH * 2];
+  const DWORD n = GetEnvironmentVariableW(L"WG_STATE_GAME_DIR", buf, (DWORD)(sizeof buf / sizeof buf[0]));
+  if (n > 0 && n < sizeof buf / sizeof buf[0]) return std::wstring(buf, n);
+  return exe_dir();
+}
+// The state folder's settings appended to `ini` as [wronggpu] entries (the last value of a key wins: they decide).
+inline void add_state_settings(std::vector<IniEntry>* ini) {
+  const wgstate::Settings s = wgstate::ReadSettings(state_game_dir());  // (whole files only: written atomically)
+  for (const auto& kv : s.kv) ini->push_back({"wronggpu", kv.first, kv.second});
+}
+// WrongGPU\wronggpu.ini, then the state folder's settings over it. False when neither has anything.
+inline bool read_rr_settings(std::vector<IniEntry>* out) {
+  const bool have = read_ini(data_dir() + L"wronggpu.ini", out);
+  const size_t n = out->size();
+  add_state_settings(out);
+  return have || out->size() != n;
 }
 
 // ------------------------------------------------------------------------------------------------ registry helpers
@@ -429,7 +453,7 @@ class Block {
     bool have = false;
     if (!seed_test) {
       const std::wstring main = data_dir() + L"wronggpu.ini";
-      have = read_ini(main, &ini);
+      have = read_rr_settings(&ini);  // (#219: with the state folder's settings over it)
       used = main;
       if (!have && !legacy_ini.empty() && read_ini(legacy_ini, &ini)) {
         have = true;
