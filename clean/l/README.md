@@ -1,7 +1,11 @@
 # Model L (issue #89)
 
-Work in progress for a new model choice, milestone 0.7.0. Nothing here is used by the runtime, the front end or the
-launcher yet.
+A new model choice, planned for 0.6.5: off by default and still under test. The runtime, the front end and the
+launcher use Model L when a game is set to it (`model=L`).
+
+Status of the numerical checks: the C = 32 block kernels and the oracle below follow Model M's block form, and both are
+being reworked to the block form of the specification. Until that is done, no check here is a result against the
+specification: none of them shows that Model L matches the original model.
 
 | Path | Content |
 |---|---|
