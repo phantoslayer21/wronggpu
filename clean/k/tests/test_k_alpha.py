@@ -307,7 +307,8 @@ class TestAlphaSources(unittest.TestCase):
         self.assertIn("d.Buffer.NumElements = (model_k_ ? 4 : 3) * f.output_width * f.output_height;", c)
         self.assertIn("void set_model_k(bool on) { model_k_ = on; }", ch)
         self.assertIn("bool model_k_ = false;", ch)   # model M (and every other Converter user): as before
-        self.assertEqual(b.count("conv_.set_model_k("), 1)
+        # configure_hip (every real executor), and the scripted executor=dx12-test branch of create (tests of the backend)
+        self.assertEqual(b.count("conv_.set_model_k("), 2)
         self.assertIn("conv_.set_model_k(model_k_);", b)
         self.assertIn("job.out_rgba32f = model_k_ && !halfOut;", b)
         self.assertIn("sizes[4] = std::max(O * (model_k_ ? 16 : 12), po * oh_);", b)
