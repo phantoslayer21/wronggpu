@@ -36,6 +36,11 @@ const SettingDef* FindSetting(const string& key);
 // sparkle guard. A profile or an ini that already holds one still starts the game: the runtime uses the default output
 // filter or turns the sparkle guard off, with one log line, and never starts HIP for it.
 bool NeedsHipRuntime(const string& key, const string& value);
+// executor=hip is not a game setting (R1: nothing in a game starts HIP; the diagnostic exists in developer builds only). A
+// profile.ini or a wronggpu.ini that holds it loses it when it is read (LoadProfile, ImportProfile; the next Apply writes
+// wronggpu.ini without it), and this sentence says so: install, repair and update log it.
+inline const wchar_t* const kRetiredHipNote =
+    L"executor=hip removed: HIP is a developer diagnostic, not a game setting; every model runs on Direct3D 12";
 const wchar_t* NotOnDx12Text();
 
 // Checks and normalises one value ("d3d12" -> "dx12", "0" -> "off", "0.50" -> "0.5"); false with *why when it is not

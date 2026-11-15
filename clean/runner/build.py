@@ -79,6 +79,9 @@ MODELS_BUILT = {name: True for name in OPTIONAL_MODELS}
 # l_post from clean/l/kernels, l_enc_values = encoder.hip with WG_ENC_VALUES_OUT=1) and its map built in. The D3D12
 # ports of Model L's kernels are built by clean/dx12/build_dx12.py --model-l.
 MODEL_L = False
+# R1: a developer build only (--dev-diagnostics): executor=hip and the frame capture work in the runtime library. Never a
+# release build or a package: the library says which it is (wgBuildMarker), clean/tests/check_no_dev_diagnostics.py checks.
+DEV_DIAGNOSTICS = False
 L_RUNTIME_SOURCES = [os.path.join("..", "l", "runtime", "l_model.cpp"), os.path.join("..", "l", "runtime", "l_pack.cpp")]
 L_MAP_FILE = os.path.join(os.path.dirname(os.path.dirname(HERE)), "data", "preset-L.v1.map.json")
 L_KERNEL_DIR = os.path.join(os.path.dirname(HERE), "l", "kernels")
@@ -326,6 +329,8 @@ def runtime_command(cxx, out, embedded=None):
             cmd += ["-D" + m["define"]]
     if MODEL_L:
         cmd += ["-DWG_MODEL_L"]
+    if DEV_DIAGNOSTICS:
+        cmd += ["-DWG_DEV_DIAGNOSTICS=1"]
     cmd += srcs
     if RR_OBJECTS and sys.platform == "win32":
         # release 0.6.0 (owner 2026-11-02: one runtime DLL, "just like before"): the RR runtime (clean/rr_f/runtime, built by
@@ -487,7 +492,12 @@ def main(argv=None):
                     help="Model L in the runtime library (#89; off by default): its runtime sources with WG_MODEL_L, its "
                          "code objects and its map built in (with --runtime-only and --rocm its code objects are built "
                          "first, for every target); its D3D12 kernels come from clean/dx12/build_dx12.py --model-l")
+    ap.add_argument("--dev-diagnostics", action="store_true",
+                    help="developer build: executor=hip and the frame capture work in the runtime library (WG_DEV_DIAGNOSTICS; "
+                         "off in every release build and package, R1)")
     args = ap.parse_args(argv)
+    global DEV_DIAGNOSTICS
+    DEV_DIAGNOSTICS = args.dev_diagnostics
     for name in OPTIONAL_MODELS:
         set_model(name, not getattr(args, "no_model_" + name.lower()))
     set_model_l(args.model_l)

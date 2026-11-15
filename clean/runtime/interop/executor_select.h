@@ -3,27 +3,26 @@
 // tests/test_executor_select.cpp checks it on any host. WrongGPU's own code.
 //
 // Option `executor` (wronggpu.ini runtime_options, an [fsr] line, WG_RUNTIME_OPTIONS). R1 (owner 2026-11-14, oversight
-// 2026-11-15): in a game every model (M, L, K) runs on the D3D12 executor; HIP is a test reference and, with an explicit
-// option, a diagnostic. So:
+// 2026-11-15): in a game every model (M, L, K) runs on the D3D12 executor and NOTHING in a game starts HIP. So:
 //  - not named (or `auto`): the D3D12 executor (executor_d3d12.cpp) on an RDNA 4 adapter (../rdna4.h: the PCI vendor and
 //    device id from the kernel-mode driver, never a description a layer in the game can rewrite, failing closed). On any
 //    other adapter, or one whose ids cannot be read, the context is not created: one warning line (the sentence of
 //    wgrt::needs_rx9000_sentence with the adapter's description and ids) and the front end's own upscaler (AMD FSR, else
-//    its stand-in) takes the game; no HIP attempt, no kernel load. When the D3D12 executor refuses the context at create
-//    (its driver-channel probe, device preparation, the network's create, a context its kernels do not take; model K:
+//    its stand-in) takes the game, whatever fallback_to_amd says (a hard incompatibility, not a runtime failure); no HIP
+//    attempt, no kernel load. When the D3D12 executor refuses the context at create (its driver-channel probe, device
+//    preparation, the network's create, a context its kernels do not take; a build without its D3D12 kernel set; model K:
 //    every kernel must have a port in the build's dx12/manifest.json and its options select the exact default path), the
 //    context is not created either: one error line and the front end's upscaler; never the HIP executor. The sparkle guard
 //    (HIP only) is turned off for every model with one line; the model stays on D3D12.
-//  - `hip`: the HIP executor, always: a diagnostic, not the in-game runtime; one warning line says so.
-//  - the frame capture (option capture_dir), which runs on HIP only, selects the HIP executor with a loud diagnostic line,
-//    never by default.
 //  - `dx12` (or `d3d12`): the D3D12 executor on any adapter (the device refuses unsupported ones, and the context is not
-//    created); frames it does not take get the bilinear fallback (no switch).
-//  - A frame the D3D12 executor does not take later (e.g. above the checked render size; native AA and every ratio
-//    between 1.0 and 1.5 run on it since Brief 15) is answered WG_ERROR_UNSUPPORTED and goes back to the front end (AMD
-//    FSR, else its stand-in); no model moves to HIP in a game (R1). The 0.6.0 option hip_switch=on, which moved a model M
-//    or L context to the HIP executor, is ignored for every model (one line if set). Every model's refused frame takes
-//    the same front-end path.
+//    created).
+//  - A frame the D3D12 executor does not take later (e.g. above the checked render size) is answered WG_ERROR_UNSUPPORTED
+//    for every model and every executor choice and goes back to the front end (AMD FSR, else its stand-in): never a
+//    substitute image made here, never a move to HIP. The 0.6.0 option hip_switch=on is ignored for every model (one line).
+//  - `executor=hip` (the HIP executor, a test reference) and the frame capture (option capture_dir, HIP only) are developer
+//    diagnostics: IGNORED in a release build, with one warning line ("ignored: diagnostic key, release build"); the context
+//    stays on D3D12. They work only in a build made with WG_DEV_DIAGNOSTICS (clean/runner/build.py --dev-diagnostics),
+//    which no release build and no package is: tests/check_no_dev_diagnostics.py checks the built library for the marker.
 //  - `d3d12-test`: the offline test executor.
 #pragma once
 
@@ -35,6 +34,13 @@
 #include "../rdna4.h"
 
 namespace wgi {
+
+// A developer build (WG_DEV_DIAGNOSTICS): executor=hip and the frame capture work. Never in a release build.
+#ifdef WG_DEV_DIAGNOSTICS
+inline constexpr bool kDevDiagnostics = true;
+#else
+inline constexpr bool kDevDiagnostics = false;
+#endif
 
 struct ExecutorRequest {
   std::string executor = "auto";  // the option's value ("auto" when not named)
@@ -60,7 +66,15 @@ struct ExecutorChoice {
   bool sparkle_off = false; // the sparkle guard (HIP only) is turned off, whatever the model; the context stays on D3D12
   std::string why;          // the one log line about the choice; empty: nothing to log here
   std::string hip_note;     // the one line when the option hip_switch asks for a move to HIP (ignored, any model)
+  std::vector<std::string> ignored;  // release build: one warning line per diagnostic key that was ignored (executor=hip,
+                                     // capture_dir); the context stays on D3D12 (the backend also drops capture_dir)
 };
+
+// A diagnostic key of a developer build asked for in a release build.
+inline std::string ignored_key_line(const std::string& key) {
+  return key + " ignored: diagnostic key, release build; the context runs on the D3D12 executor (a game never starts the "
+               "HIP runtime)";
+}
 
 // The one line when "auto" meets an adapter that is not an RDNA 4 Radeon RX 9000-series card or cannot be identified (the
 // launcher shows the same sentence): no HIP attempt, no kernel load, the front end's own upscaler takes the game. The
@@ -94,15 +108,27 @@ inline wgrt::AdapterIdentity adapter_identity(const ExecutorRequest& r) {
 
 inline std::string hip_switch_note(const std::string& option);  // below
 
-inline ExecutorChoice choose_executor(const ExecutorRequest& r) {
+// `dev`: the build's WG_DEV_DIAGNOSTICS (tests pass both values to check both configurations).
+inline ExecutorChoice choose_executor(const ExecutorRequest& r, bool dev = kDevDiagnostics) {
   ExecutorChoice c;
   c.hip_note = hip_switch_note(r.hip_switch);  // the same for every model: the option is ignored
-  const std::string& e = r.executor;
+  std::string e = r.executor;
+  bool capture = r.capture;
+  if (!dev) {  // R1: a release build never starts HIP, whatever the game's files say
+    if (e == "hip") {
+      c.ignored.push_back(ignored_key_line("executor=hip"));
+      e = "auto";
+    }
+    if (capture) {
+      c.ignored.push_back(ignored_key_line("capture_dir"));
+      capture = false;
+    }
+  }
   if (e == "d3d12-test") {
     c.executor = e;
     return c;
   }
-  if (e == "hip") {  // a diagnostic for every model: loud, never the default
+  if (e == "hip") {  // developer build only: a diagnostic for every model, loud, never the default
     c.executor = e;
     c.warn = true;
     c.why = "diagnostic: executor=hip selects the HIP executor; it is not the in-game runtime (the default and "
@@ -120,7 +146,7 @@ inline ExecutorChoice choose_executor(const ExecutorRequest& r) {
       return c;
     }
   }
-  if (r.capture) {  // an opt-in diagnostic, never on by default
+  if (capture) {  // developer build only: an opt-in diagnostic, never on by default
     c.executor = "hip";
     c.warn = true;
     c.why = capture_hip_line();
@@ -148,18 +174,11 @@ inline std::string hip_switch_note(const std::string& option) {
          "(executor=hip is the explicit diagnostic)";
 }
 
-// What a context does with a frame the D3D12 executor did not take (nothing of it recorded).
-//  kNoSwitch      the frame is answered WG_ERROR_UNSUPPORTED, the context stays usable: the front end takes it from there
-//                 (AMD's FSR when it exists, else its stand-in; the same path for every model);
-//  kBilinear      executor=dx12 (forced): the frame gets the bilinear fallback (never for model K).
-// Model K has no state of its own here: every refused K frame is answered WG_ERROR_UNSUPPORTED, exactly as model M's
-// refused frames are, and the front end does the rest (REVIEW-215c, oversight 2026-11-15).
-enum class RefusedAction { kNoSwitch, kBilinear };
-
-inline RefusedAction refused_frame_action(bool model_k, bool by_default) {
-  if (model_k) return RefusedAction::kNoSwitch;
-  return by_default ? RefusedAction::kNoSwitch : RefusedAction::kBilinear;
-}
+// What a context does with a frame the D3D12 executor did not take (nothing of it recorded): the frame is answered
+// WG_ERROR_UNSUPPORTED, the context stays usable, and the front end takes it from there (AMD's FSR when it exists, else its
+// stand-in). The same for every model and for a forced executor=dx12: never an image made here (no bilinear substitute),
+// never a move to HIP (REVIEW-215c, oversight 2026-11-15; Codex review of #225).
+inline constexpr bool kRefusedFrameGoesToFrontEnd = true;
 
 // H3 (R1): the output filters Quality 5 and Quality 9 (runtime option output_filter=quality5 | quality9) exist on the HIP
 // executor only; the D3D12 executor refuses them at create. A context on the D3D12 executor never goes to HIP because of

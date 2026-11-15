@@ -157,6 +157,7 @@ static std::function<uint32_t()> g_timerFn;
 static int g_timersStarted = 0;
 static std::atomic<bool> g_createGate{true};  // FakeCreate (on the front end's create thread) waits while false
 static std::atomic<int> g_createCalls{0};  // every FakeCreate call (made an upscaler or not)
+static bool g_failCreateUnsupported = false;  // FakeCreate answers WG_ERROR_UNSUPPORTED (a hard incompatibility, R1)
 static WgResult FakeCreate(const WgCreateInfo* info, WgUpscaler** out) {
     ++g_createCalls;
     g_createInfo = *info;
@@ -164,6 +165,7 @@ static WgResult FakeCreate(const WgCreateInfo* info, WgUpscaler** out) {
     while (!g_createGate) std::this_thread::sleep_for(std::chrono::milliseconds(1));
     if (g_aboutTo) info->log(info->log_user, WG_LOG_INFO, "about to start the HIP runtime (test)");
     info->log(info->log_user, WG_LOG_INFO, "fake upscaler created");
+    if (g_failCreateUnsupported) return WG_ERROR_UNSUPPORTED;
     if (g_failCreate || (g_failCreateOutputWidth && info->output_width == g_failCreateOutputWidth)) return WG_ERROR_DEVICE;
     *out = reinterpret_cast<WgUpscaler*>(new FakeUpscaler{1});
     ++g_created;
@@ -341,6 +343,7 @@ static void Reset() {
     g_log.clear();
     g_destroyed = 0;
     g_failCreate = false;
+    g_failCreateUnsupported = false;
     g_failCreateOutputWidth = 0;
     g_failDispatchAt = -1;
     g_notReadyUntil = 0;
@@ -1185,6 +1188,72 @@ static void TestHostedSwitchNotParked() {
     CHECK(fe->DestroyContext(&b, kMemCb) == FFX_API_RETURN_OK && g_destroyed == 2 && fe->HasParked() && g_timersStarted == 1);
     CHECK(fe->CreateContext(&a, &own.upscale.header, kMemCb) == FFX_API_RETURN_OK && g_created == 3 && !fe->HasParked());
     CHECK(fe->DestroyContext(&a, kMemCb) == FFX_API_RETURN_OK);
+}
+
+// R1 (Codex review of #225): a create the runtime refuses as a HARD INCOMPATIBILITY (WG_ERROR_UNSUPPORTED: an adapter that is not
+// an RDNA 4 card, a build without its D3D12 kernel set, a D3D12 executor that cannot take the context) always goes to the front
+// end's upscaler, whatever fallback_to_amd says; a runtime failure still obeys fallback_to_amd; with no AMD provider the answer
+// is the explicit NO_PROVIDER; and a create that does not finish within create_giveup_ms (nothing could upscale meanwhile) is
+// refused and goes to AMD's FSR too: the game's thread does not wait for ever.
+static void TestHardIncompatibilityHandover() {
+    UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
+    for (const bool fallback : {true, false}) {  // unsupported: AMD's FSR with and without fallback_to_amd
+        Reset();
+        g_failCreateUnsupported = true;
+        Config config;
+        config.fallbackToAmd = fallback;
+        auto fe = MakeFrontEnd(config);
+        ffxContext ctx = nullptr;
+        CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK);
+        CHECK(ctx != nullptr && g_amd.size() == 1 && g_amd[0].fn == "create" && CountLog("goes to AMD FSR") == 1);
+        CHECK((CountLog("fallback_to_amd = 0 does not apply") == 1) == !fallback);
+        CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    }
+    {  // a runtime failure (not UNSUPPORTED) still obeys fallback_to_amd = 0
+        Reset();
+        g_failCreate = true;
+        Config config;
+        config.fallbackToAmd = false;
+        auto fe = MakeFrontEnd(config);
+        ffxContext ctx = nullptr;
+        CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_ERROR_RUNTIME_ERROR);
+        CHECK(ctx == nullptr && g_amd.empty());
+    }
+    for (const bool fallback : {true, false}) {  // unsupported and no AMD provider: explicit, never a silent success
+        Reset();
+        g_failCreateUnsupported = true;
+        g_originalAvailable = false;
+        Config config;
+        config.fallbackToAmd = fallback;
+        auto fe = MakeFrontEnd(config);
+        ffxContext ctx = nullptr;
+        CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_NO_PROVIDER);
+        CHECK(ctx == nullptr && g_amd.empty() && CountLog("-> NO_PROVIDER") == 1);
+        g_originalAvailable = true;
+    }
+    for (const bool fallback : {false}) {  // a create that never finishes: bounded, refused, handed over (fallback_to_amd = 0)
+        Reset();
+        Config config;
+        config.fallbackToAmd = fallback;
+        config.createGiveUpMs = 60;
+        auto fe = MakeFrontEnd(config);
+        ffxContext ctx = nullptr;
+        g_createGate = false;
+        const auto t0 = std::chrono::steady_clock::now();
+        CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK);
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+        CHECK(ms >= 50 && ms < 5000);  // waited for the bound, not for ever
+        CHECK(ctx != nullptr && g_amd.size() == 1 && g_amd[0].fn == "create");
+        CHECK(CountLog("did not finish its create in 60 ms (create_giveup_ms): refused") == 1 && CountLog("goes to AMD FSR for now") == 1);
+        g_createGate = true;  // the late create finishes; the context is destroyed cleanly
+        CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+        for (int i = 0; i < 400 && g_destroyed == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        CHECK(g_destroyed == 1);
+    }
+    {  // the default bound is generous (a create takes seconds, not tens of seconds) and the key parses
+        Config config;
+        CHECK(config.createGiveUpMs == 30000);
+    }
 }
 
 // The upscaler's create takes longer than create_wait_ms (Borderlands 4: HIP's start blocked while the game's thread
@@ -2393,7 +2462,7 @@ static void TestUnsupportedFrames() {
 }
 
 // REVIEW-215c: a refused frame of model K takes the same front-end path as model M's. The backend's answer comes from the
-// real policy (wgi::refused_frame_action, executor_select.h: a refused K frame, and a refused M frame,
+// real policy (wgi::kRefusedFrameGoesToFrontEnd, executor_select.h: a refused K frame, and a refused M frame,
 // are answered WG_ERROR_UNSUPPORTED, never a switch to HIP and never a bilinear fallback), the fake upscaler answers
 // that for the refused frames, and the front end must give every frame an upscaler: AMD's FSR when it exists (it takes
 // the context over at the first refusal, as for model M), else the stand-in for each refused frame (any number in a row,
@@ -2401,7 +2470,7 @@ static void TestUnsupportedFrames() {
 static void TestRefusedFrames() {
     for (const bool model_k : {true, false}) {   // model K, and model M as the control
         const bool unsupported =
-            wgi::refused_frame_action(model_k, /*by_default=*/true) == wgi::RefusedAction::kNoSwitch;
+            wgi::kRefusedFrameGoesToFrontEnd;
         CHECK(unsupported);   // the backend's answer for a refused frame is WG_ERROR_UNSUPPORTED
         const std::set<int> pattern = unsupported ? std::set<int>{1, 2, 3, 5, 6} : std::set<int>{};
         // with AMD's FSR: the first refused frame hands the context to it; no later frame is lost
@@ -3574,6 +3643,7 @@ int main() {
     TestCompare();
     TestReactiveMaskForwarded();
     TestSlowCreate();
+    TestHardIncompatibilityHandover();
     TestInterfaceVersions();
     TestAmdMode();
     TestNonLinearColour();

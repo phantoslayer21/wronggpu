@@ -613,6 +613,9 @@ class Context {
       const ExecutorChoice ch = choose_executor(q);
       if (ch.executor.empty()) return fail(WG_ERROR_PARAMETER, "unknown executor " + o.executor);
       if (!ch.why.empty()) say(ch.warn ? WG_LOG_WARN : WG_LOG_INFO, ch.why);
+      // R1: a release build ignores the diagnostic keys (executor=hip, capture_dir): one line each, the context stays on D3D12
+      for (const std::string& line : ch.ignored) say(WG_LOG_WARN, line);
+      if (!kDevDiagnostics) o.capture_dir.clear();  // (the capture runs on HIP only; no capture buffers are made either)
       // an adapter that is not an RDNA 4 Radeon RX 9000-series card (or not identified): no executor, no kernel load,
       // no HIP attempt; the one line above is the whole report and the front end's own upscaler takes the game
       if (ch.executor == "fsr") return WG_ERROR_UNSUPPORTED;
@@ -1116,13 +1119,11 @@ class Context {
     phase(4);
     const bool ok = exec_->record(job, list, &wrote, &err);
     phase(5);
-    // a frame the executor did not take (nothing of it recorded, e.g. native AA): with the default executor the frame
-    // is answered WG_ERROR_UNSUPPORTED (no HIP, any model); with executor=dx12 it gets the bilinear fallback below
+    // a frame the executor did not take (nothing of it recorded, e.g. native AA): every model and every executor choice
+    // (also a forced executor=dx12) answers WG_ERROR_UNSUPPORTED and the front end takes the frame (AMD FSR, else its
+    // stand-in); never a substitute image made here, never a move to HIP (executor_select.h kRefusedFrameGoesToFrontEnd)
     const bool refused = !ok && frame_refused(err);
-    // a refused frame (executor_select.h refused_frame_action): every model on the default executor answers
-    // WG_ERROR_UNSUPPORTED and the front end takes the frame (AMD FSR, else its stand-in); the context stays usable
-    const RefusedAction refused_action = refused_frame_action(model_k_, dx12_default_);
-    if (refused && refused_action == RefusedAction::kNoSwitch) {  // clean/fe-wrapped-list: no move to HIP; nothing recorded
+    if (refused) {  // nothing recorded; the context stays usable
       if (!no_switch_said_) {
         no_switch_said_ = true;
         say(WG_LOG_WARN, model_k_ ? k_refusal_line(v, err) : no_switch_line(v, err));
@@ -2129,4 +2130,15 @@ const WgUpscalerBackend kBackend = {sizeof(WgUpscalerBackend), WG_UPSCALER_INTER
 // Interface version 2 only: the backend needs the front end's command-list split.
 extern "C" __declspec(dllexport) const WgUpscalerBackend* wgGetUpscalerBackend(uint32_t interface_version) {
   return interface_version == WG_UPSCALER_INTERFACE_VERSION ? &kBackend : nullptr;
+}
+
+// Which kind of build this library is (R1): "wg-build dev-diagnostics=0" in every release build and package,
+// "wg-build dev-diagnostics=1" only in a developer build (WG_DEV_DIAGNOSTICS: executor=hip and the frame capture work).
+// clean/tests/check_no_dev_diagnostics.py looks for this text in a built library.
+extern "C" __declspec(dllexport) const char* wgBuildMarker() {
+#ifdef WG_DEV_DIAGNOSTICS
+  return "wg-build dev-diagnostics=1";
+#else
+  return "wg-build dev-diagnostics=0";
+#endif
 }

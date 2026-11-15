@@ -55,7 +55,7 @@ namespace {
 TS Ts(float size, int weight, Col c, FontFace f = F_TEXT) { TS s; s.size = size; s.weight = weight; s.color = c; s.face = f; return s; }
 TS Wrap(float size, Col c, float lineH) { TS s; s.size = size; s.color = c; s.wrap = true; s.lineH = lineH; return s; }
 
-const char* const kExec[] = {"auto", "dx12", "hip"};
+const char* const kExec[] = {"auto", "dx12"};
 const char* const kFilter[] = {"default", "original", "analytic", "quality5", "quality9"};
 // one name per choice wherever it shows (the row, its menu, the outside-change note), and what it does in a line: the
 // menu item's second line and help text, and the row's sentence for the chosen one
@@ -1352,14 +1352,10 @@ static float UpscalerSection(Gfx& gx, float x, float y, float w) {
             yy += ActRow(gx, x, yy, w, false, true, ID_G_ADVMORE, L"Advanced settings (4)", ic::down, true, R_LINK);
             return yy - top;
         }
-        // R1: every model runs on Direct3D 12 in a game. HIP is a diagnostic set in wronggpu.ini (executor=hip), not a choice here;
-        // a profile that holds it says so in the row's sentence and shows no segment chosen
+        // R1: every model runs on Direct3D 12 in a game; HIP is not a game setting (a profile that held it lost it when it was read)
         const std::vector<wstring> ex{L"Auto", L"Direct3D\u00a012"};
-        const bool hipSet = NeedsHipRuntime("executor", v.edit.get("executor"));
-        const int exi = hipSet ? -1 : Index(kExec, v.edit.get("executor"));
-        yy += SRow(gx, x, yy, w, false, L"Runs on",
-                   hipSet ? L"The profile asks for the HIP runtime, a diagnostic. Pick Auto or Direct3D\u00a012 to run the way the game is meant to."
-                          : L"Auto uses Direct3D\u00a012 on RX\u00a09000-series cards.",
+        const int exi = Index(kExec, v.edit.get("executor"));
+        yy += SRow(gx, x, yy, w, false, L"Runs on", L"Auto uses Direct3D\u00a012 on RX\u00a09000-series cards.",
                    SegmentedW(gx, ex, segW), 36,
                    [&](const Rc& r) { Segmented(gx, ID_G_EXEC0, r.r(), r.y, ex, exi, sub, L"Runs on", 28, {}, true, segW); }, !sub);
         const int fi = Index(kFilter, v.edit.get("output_filter"));

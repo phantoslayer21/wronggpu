@@ -657,6 +657,10 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
     }
 
     std::string why;
+    // R1: a create the runtime refuses as a HARD INCOMPATIBILITY (WG_ERROR_UNSUPPORTED: an adapter that is not an RDNA 4
+    // card, a build without its D3D12 kernel set, a D3D12 executor that cannot take the context) or that does not finish in
+    // time always goes to the front end's upscaler, whatever fallback_to_amd says: that option governs runtime failures only.
+    bool hardIncompat = false;
     bool repeatedFailure = false;  // custom slot: a failure remembered for the session, not tried again
     if (forceAmd) {
         why = "OptiScaler plugin: AMD FSR selected";
@@ -748,13 +752,13 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
                 ms + " ms ago): nothing is created, the first frame starts without history");
         } else {
             // On a worker thread: the game's thread waits create_wait_ms at most (async_create.h). Without the fallback to
-            // AMD there is nothing else to upscale with, so it waits until the create finishes.
+            // AMD there is nothing else to upscale with, so it waits for the create, but not for ever: create_giveup_ms.
             // Custom slot without an AMD DLL of its own there is nothing to upscale with meanwhile: it waits as with
             // fallback_to_amd = 0.
             const bool amdMeanwhile = config_.fallbackToAmd && (!config_.customSlot || UpscaleFallbackApi());
             u->creating = true;
             auto pending = PendingCreate::Start(backend, u->createInfo);
-            if (pending->Wait(amdMeanwhile ? config_.createWaitMs : UINT32_MAX)) {
+            if (pending->Wait(amdMeanwhile ? config_.createWaitMs : config_.createGiveUpMs)) {
                 u->creating = false;
                 if (u->failReason.empty()) u->failReason = u->createError;
                 const WgResult r = pending->Result();
@@ -780,11 +784,13 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
                             if (again) backend->destroy(again);
                             if (u->failReason.empty()) u->failReason = u->createError;
                             why = std::string("upscaler \"") + backend->name + "\" create without the split service failed: " + WgResultText(r2);
+                            hardIncompat = hardIncompat || r2 == WG_ERROR_UNSUPPORTED;
                         }
                     }
                 } else {
                     why = std::string("upscaler \"") + backend->name + "\" create failed: " + WgResultText(r);
                     u->upscaler = nullptr;
+                    hardIncompat = r == WG_ERROR_UNSUPPORTED;
                 }
                 if (!u->backend && config_.customSlot) {
                     const std::string reason = u->createError.empty() ? why : why + ": " + u->createError;
@@ -798,8 +804,16 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
             } else {
                 u->pending = pending;
                 u->pendingBackend = backend;
-                why = std::string("upscaler \"") + backend->name + "\" is still starting after " + std::to_string(config_.createWaitMs) +
-                      " ms (create_wait_ms); it takes over when it has started";
+                if (amdMeanwhile) {
+                    why = std::string("upscaler \"") + backend->name + "\" is still starting after " + std::to_string(config_.createWaitMs) +
+                          " ms (create_wait_ms); it takes over when it has started";
+                } else {
+                    // nothing could upscale meanwhile and the create did not finish: refused (create_giveup_ms), the context goes
+                    // to the front end's upscaler; the late result takes over if it comes (as for a bounded create)
+                    hardIncompat = true;
+                    why = std::string("upscaler \"") + backend->name + "\" did not finish its create in " +
+                          std::to_string(config_.createGiveUpMs) + " ms (create_giveup_ms): refused";
+                }
             }
         }
     } else if (why.empty()) {
@@ -816,7 +830,7 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
             delete u;
             return FFX_API_RETURN_ERROR_RUNTIME_ERROR;
         }
-        if (config_.upscaler != UpscalerChoice::Amd && !config_.fallbackToAmd) {
+        if (config_.upscaler != UpscalerChoice::Amd && !config_.fallbackToAmd && !hardIncompat) {
             Log(tag + " -> ERROR_RUNTIME_ERROR: " + why + " (fallback_to_amd = 0)");
             delete u;
             return FFX_API_RETURN_ERROR_RUNTIME_ERROR;
@@ -837,7 +851,8 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
             }
             return FFX_API_RETURN_NO_PROVIDER;
         }
-        Log(tag + " upscaler context goes to AMD FSR" + (u->pending ? " for now" : "") + ": " + why);
+        Log(tag + " upscaler context goes to AMD FSR" + (u->pending ? " for now" : "") + ": " + why +
+            (hardIncompat && !config_.fallbackToAmd ? " (a hard incompatibility or a create that did not finish: fallback_to_amd = 0 does not apply)" : ""));
         if (!u->pending && (u->failReason.empty() || config_.upscaler == UpscalerChoice::Amd)) u->failReason = why;
         const ffxReturnCode_t rc = config_.hosted ? CreateAmdWithoutPrivateVersion(*original, &u->amd, desc, memCb)
                                                : original->createContext(&u->amd, desc, memCb);

@@ -271,59 +271,105 @@ int main() {
     }());
   }
 
-  // ---- diagnostics and the sparkle guard (every model) --------------------------------------------------------------
-  for (bool model_k : {false, true}) {
-    const char* tag = model_k ? " (model K)" : " (model M or L)";
-    ExecutorRequest r = board("AMD Radeon RX 9070 XT", 0x1002, 0x7550);
-    r.model_k = model_k;
-    r.executor = "hip";
-    ExecutorChoice c = choose_executor(r);
-    expect(std::string("executor=hip: the HIP executor as a loud diagnostic") + tag,
-           c.executor == "hip" && !c.by_default && c.warn && has(c.why, "diagnostic: executor=hip") &&
-               has(c.why, "not the in-game runtime"));
-    r = board("AMD Radeon RX 7900 XTX", 0x1002, 0x744C);
-    r.model_k = model_k;
-    r.executor = "hip";
-    c = choose_executor(r);
-    expect(std::string("executor=hip on another board: the same diagnostic") + tag,
-           c.executor == "hip" && c.warn && has(c.why, "diagnostic: executor=hip"));
-    r = board("AMD Radeon RX 9070 XT", 0x1002, 0x7550);
-    r.model_k = model_k;
-    r.capture = true;
-    c = choose_executor(r);
-    expect(std::string("auto + frame capture: HIP with the loud diagnostic line") + tag,
-           c.executor == "hip" && c.warn && c.why == wgi::capture_hip_line() && has(c.why, "diagnostic: frame capture"));
-    r.executor = "dx12";
-    expect(std::string("executor=dx12 + frame capture: the same diagnostic") + tag,
-           choose_executor(r).executor == "hip" && choose_executor(r).why == wgi::capture_hip_line());
-    r = board("AMD Radeon RX 9070 XT", 0x1002, 0x7550);
-    r.model_k = model_k;
-    r.sparkle_guard = true;
-    c = choose_executor(r);
-    expect(std::string("auto + sparkle guard: still the D3D12 executor, the guard turned off, one line") + tag,
-           c.executor == "dx12" && c.by_default && c.sparkle_off && c.warn && c.why == wgi::sparkle_off_line() &&
-               has(c.why, "turned off") && has(c.why, "D3D12"));
-    r.executor = "dx12";
-    c = choose_executor(r);
-    expect(std::string("executor=dx12 + sparkle guard: the same") + tag, c.executor == "dx12" && c.sparkle_off && !c.by_default);
-    r.capture = true;
-    expect(std::string("the sparkle guard with the capture: the capture's diagnostic wins") + tag,
-           choose_executor(r).executor == "hip");
-    r = board("AMD Radeon RX 7900 XTX", 0x1002, 0x744C);
-    r.model_k = model_k;
-    r.executor = "dx12";
-    c = choose_executor(r);
-    expect(std::string("executor=dx12 on another board: dx12 (the device refuses it at create)") + tag,
-           c.executor == "dx12" && !c.by_default && c.why.empty());
-    r = board("AMD Radeon RX 9070 XT", 0x1002, 0x7550);
-    r.model_k = model_k;
-    r.executor = "d3d12";
-    expect(std::string("executor=d3d12 = dx12") + tag, choose_executor(r).executor == "dx12");
-    r.executor = "d3d12-test";
-    expect(std::string("executor=d3d12-test") + tag, choose_executor(r).executor == "d3d12-test");
-    r.executor = "vulkan";
-    expect(std::string("unknown executor -> empty (create fails)") + tag, choose_executor(r).executor.empty());
-  }
+  // ---- diagnostics and the sparkle guard (every model, both configurations) ------------------------------------------
+  // `dev` = a developer build (WG_DEV_DIAGNOSTICS: executor=hip and the frame capture work, as loud diagnostics); a release
+  // build IGNORES both with one line each and the context stays on D3D12 (R1: nothing in a game starts HIP).
+#ifdef WG_DEV_DIAGNOSTICS
+  expect("this test binary is a developer build: kDevDiagnostics is on", wgi::kDevDiagnostics);
+#else
+  expect("this test binary is a release build: kDevDiagnostics is off", !wgi::kDevDiagnostics);
+#endif
+  for (bool model_k : {false, true})
+    for (bool dev : {true, false}) {
+      const std::string tag = std::string(model_k ? " (model K)" : " (model M or L)") + (dev ? " [dev]" : " [release]");
+      auto choose = [&](const ExecutorRequest& q) { return choose_executor(q, dev); };
+      auto only_ignored = [](const ExecutorChoice& c, const char* key) {
+        return c.ignored.size() == 1 && has(c.ignored[0], key) && has(c.ignored[0], "ignored: diagnostic key, release build") &&
+               c.ignored[0].find('\n') == std::string::npos;
+      };
+      ExecutorRequest r = board("AMD Radeon RX 9070 XT", 0x1002, 0x7550);
+      r.model_k = model_k;
+      r.executor = "hip";
+      ExecutorChoice c = choose(r);
+      if (dev)
+        expect("executor=hip: the HIP executor as a loud diagnostic" + tag,
+               c.executor == "hip" && !c.by_default && c.warn && has(c.why, "diagnostic: executor=hip") &&
+                   has(c.why, "not the in-game runtime") && c.ignored.empty());
+      else
+        expect("executor=hip is IGNORED: the D3D12 executor by default, one line, no HIP" + tag,
+               c.executor == "dx12" && c.by_default && c.why.empty() && only_ignored(c, "executor=hip"));
+      r = board("AMD Radeon RX 7900 XTX", 0x1002, 0x744C);
+      r.model_k = model_k;
+      r.executor = "hip";
+      c = choose(r);
+      if (dev)
+        expect("executor=hip on another board: the same diagnostic" + tag,
+               c.executor == "hip" && c.warn && has(c.why, "diagnostic: executor=hip"));
+      else
+        expect("executor=hip on another board is ignored: no executor, the front end's upscaler (the card sentence)" + tag,
+               c.executor == "fsr" && c.warn && c.why.rfind(sentence, 0) == 0 && only_ignored(c, "executor=hip"));
+      r = board("AMD Radeon RX 9070 XT", 0x1002, 0x7550);
+      r.model_k = model_k;
+      r.capture = true;
+      c = choose(r);
+      if (dev)
+        expect("auto + frame capture: HIP with the loud diagnostic line" + tag,
+               c.executor == "hip" && c.warn && c.why == wgi::capture_hip_line() && has(c.why, "diagnostic: frame capture") &&
+                   c.ignored.empty());
+      else
+        expect("auto + frame capture is IGNORED: the D3D12 executor, one line, no HIP" + tag,
+               c.executor == "dx12" && c.by_default && c.why.empty() && only_ignored(c, "capture_dir"));
+      r.executor = "dx12";
+      c = choose(r);
+      if (dev)
+        expect("executor=dx12 + frame capture: the same diagnostic (HIP)" + tag,
+               c.executor == "hip" && c.why == wgi::capture_hip_line());
+      else
+        expect("executor=dx12 + capture_dir is ignored: the D3D12 executor, one line" + tag,
+               c.executor == "dx12" && !c.by_default && only_ignored(c, "capture_dir"));
+      r.executor = "hip";
+      c = choose(r);
+      if (dev)
+        expect("executor=hip + capture (developer build): HIP" + tag, c.executor == "hip");
+      else
+        expect("executor=hip + capture_dir in a release build: both ignored, two lines, D3D12" + tag,
+               c.executor == "dx12" && c.ignored.size() == 2 && has(c.ignored[0], "executor=hip") && has(c.ignored[1], "capture_dir"));
+      r = board("AMD Radeon RX 9070 XT", 0x1002, 0x7550);
+      r.model_k = model_k;
+      r.sparkle_guard = true;
+      c = choose(r);
+      expect("auto + sparkle guard: the D3D12 executor, the guard turned off, one line (both configurations)" + tag,
+             c.executor == "dx12" && c.by_default && c.sparkle_off && c.warn && c.why == wgi::sparkle_off_line() &&
+                 has(c.why, "turned off") && has(c.why, "D3D12") && c.ignored.empty());
+      r.executor = "dx12";
+      c = choose(r);
+      expect("executor=dx12 + sparkle guard: the same" + tag, c.executor == "dx12" && c.sparkle_off && !c.by_default);
+      r.capture = true;
+      c = choose(r);
+      if (dev)
+        expect("the sparkle guard with the capture (developer build): the capture's diagnostic wins" + tag, c.executor == "hip");
+      else
+        expect("the sparkle guard with capture_dir (release): D3D12, the guard off, the key ignored" + tag,
+               c.executor == "dx12" && c.sparkle_off && only_ignored(c, "capture_dir"));
+      r = board("AMD Radeon RX 7900 XTX", 0x1002, 0x744C);
+      r.model_k = model_k;
+      r.executor = "dx12";
+      c = choose(r);
+      expect("executor=dx12 on another board: dx12 (the device refuses it at create)" + tag,
+             c.executor == "dx12" && !c.by_default && c.why.empty() && c.ignored.empty());
+      r = board("AMD Radeon RX 9070 XT", 0x1002, 0x7550);
+      r.model_k = model_k;
+      r.executor = "d3d12";
+      expect("executor=d3d12 = dx12" + tag, choose(r).executor == "dx12");
+      r.executor = "d3d12-test";
+      expect("executor=d3d12-test" + tag, choose(r).executor == "d3d12-test");
+      r.executor = "vulkan";
+      expect("unknown executor -> empty (create fails)" + tag, choose(r).executor.empty());
+      r = board("AMD Radeon RX 9070 XT", 0x1002, 0x7550);
+      r.model_k = model_k;
+      expect("a plain RDNA 4 auto context has nothing ignored and nothing to log" + tag,
+             choose(r).executor == "dx12" && choose(r).ignored.empty() && choose(r).why.empty());
+    }
 
   // ---- the D3D12 executor refuses the context at create: every model, the front end's upscaler, never HIP -------------
   {
@@ -340,7 +386,6 @@ int main() {
 
   // ---- clean/fe-wrapped-list: hip_switch, and a frame the D3D12 executor does not take -----------------------------
   {
-    using wgi::RefusedAction;
     expect("hip_switch not set, off, 0 or false -> no line", wgi::hip_switch_note("").empty() &&
                                                                  wgi::hip_switch_note("off").empty() &&
                                                                  wgi::hip_switch_note("0").empty() &&
@@ -361,17 +406,13 @@ int main() {
     for (const char* why : refusals) {
       const std::string w = why;
       expect("refused frame recognised: " + w, wgi::frame_refused(w));
-      for (bool by_default : {true, false})
-        expect("K refused frame -> WG_ERROR_UNSUPPORTED, the front end's upscaler: " + w.substr(0, 40) +
-                   (by_default ? " default" : " forced"),
-               wgi::refused_frame_action(true, by_default) == RefusedAction::kNoSwitch);
+      expect("a refused frame (every model, default and forced executor) goes back to the front end: " + w.substr(0, 40),
+             wgi::kRefusedFrameGoesToFrontEnd);
     }
     expect("a frame that is not a refusal is not a 'frame not taken'",
            !wgi::frame_refused("input refused: texture format") && !wgi::frame_refused("model K: kernel failed"));
-    expect("M default -> front end's upscaler (no move to HIP)", wgi::refused_frame_action(false, true) == RefusedAction::kNoSwitch);
-    expect("M executor=dx12 -> bilinear fallback", wgi::refused_frame_action(false, false) == RefusedAction::kBilinear);
-    expect("K and M take the same path: the same action",
-           wgi::refused_frame_action(true, true) == wgi::refused_frame_action(false, true));
+    expect("no bilinear or other substitute exists in the selector any more (a forced executor=dx12 included)",
+           wgi::kRefusedFrameGoesToFrontEnd);
     const std::string rl = wgi::k_refusal_line(7, "frame not taken (nothing recorded): no output texture");
     expect("the refusal line names the frame, the reason, the front end's upscaler and 'never to the HIP executor'",
            has(rl, "frame 7: model K") && has(rl, "no output texture") && has(rl, "AMD FSR, else its stand-in") &&
@@ -435,8 +476,7 @@ int main() {
         expect(tag + ": the choice is the one without the option",
                c.executor == p.executor && c.by_default == p.by_default && c.why == p.why && c.warn == p.warn &&
                    c.sparkle_off == p.sparkle_off && p.hip_note.empty());
-        expect(tag + ": a refused frame goes to the front end, not to HIP",
-               wgi::refused_frame_action(m.k, c.by_default) == wgi::RefusedAction::kNoSwitch);
+        expect(tag + ": a refused frame goes to the front end, not to HIP", wgi::kRefusedFrameGoesToFrontEnd);
       }
       for (const char* value : {"off", "0", "false", ""}) {
         wgi::ExecutorRequest r = board("AMD Radeon RX 9070 XT", 0x1002, 0x7550);

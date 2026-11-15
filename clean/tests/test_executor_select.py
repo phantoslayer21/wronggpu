@@ -42,18 +42,18 @@ def _vcvars64():
     return vcvars if r.returncode == 0 and r.stdout.strip() and os.path.exists(vcvars) else None
 
 
-def _build(exe):
+def _build(exe, defines=()):
     cxx = os.environ.get("CXX") or shutil.which("clang++") or shutil.which("g++")
     if cxx:
-        cmd = [cxx, "-std=c++17", "-O1", os.path.join(ROOT, TEST), "-o", exe]
+        cmd = [cxx, "-std=c++17", "-O1"] + ["-D" + d for d in defines] + [os.path.join(ROOT, TEST), "-o", exe]
         return subprocess.run(cmd, capture_output=True, text=True)
     vcvars = None if shutil.which("cl") else _vcvars64()
     if os.name != "nt" or not (shutil.which("cl") or vcvars):
         raise unittest.SkipTest("no host C++ compiler (CXX, clang++, g++ or MSVC cl)")
     objdir = os.path.join(os.path.dirname(exe), "obj")
     os.makedirs(objdir, exist_ok=True)
-    cl = 'cl /nologo /std:c++17 /O1 /EHsc /utf-8 /D_CRT_SECURE_NO_WARNINGS "%s" /Fo"%s\\\\" /Fe"%s"' % (
-        os.path.join(ROOT, TEST), objdir, exe)
+    cl = 'cl /nologo /std:c++17 /O1 /EHsc /utf-8 /D_CRT_SECURE_NO_WARNINGS %s "%s" /Fo"%s\\\\" /Fe"%s"' % (
+        " ".join("/D" + d for d in defines), os.path.join(ROOT, TEST), objdir, exe)
     bat = exe + ".bat"
     with open(bat, "w") as f:
         f.write("@echo off\r\n")
@@ -64,15 +64,24 @@ def _build(exe):
 
 
 class ExecutorSelect(unittest.TestCase):
-    def test_cpp_cases(self):
+    def _run(self, defines, expect_line):
         tmp = tempfile.mkdtemp(prefix="wg_es_")
         exe = os.path.join(tmp, "test_executor_select" + (".exe" if os.name == "nt" else ""))
-        r = _build(exe)
+        r = _build(exe, defines)
         self.assertEqual(r.returncode, 0, "build failed:\n" + r.stdout + r.stderr)
         r = subprocess.run([exe], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, "\n".join(l for l in r.stdout.splitlines() if l.startswith("FAIL")) + r.stderr)
         self.assertIn("ALL TESTS PASSED", r.stdout)
+        self.assertIn(expect_line, r.stdout)
         self.assertGreater(r.stdout.count("pass "), 100)
+
+    def test_cpp_cases_release_build(self):
+        # the shipped configuration (no WG_DEV_DIAGNOSTICS); both configurations of the selector are checked in the binary
+        self._run((), "this test binary is a release build: kDevDiagnostics is off")
+
+    def test_cpp_cases_developer_build(self):
+        # the same cases with the developer define on: the build's own default is then the developer one
+        self._run(("WG_DEV_DIAGNOSTICS=1",), "this test binary is a developer build: kDevDiagnostics is on")
 
 
 class CreateOrder(unittest.TestCase):
@@ -126,6 +135,23 @@ class CreateOrder(unittest.TestCase):
         self.assertNotIn("hip_switch_", self.b)
         sel = read("clean", "runtime", "interop", "executor_select.h")
         self.assertNotIn("kSwitchToHip", sel)
+
+    def test_release_ignores_hip_and_capture_and_never_makes_a_substitute_image(self):
+        sel = read("clean", "runtime", "interop", "executor_select.h")
+        # the selector returns "hip" only for a developer build; a release build ignores executor=hip and capture_dir
+        self.assertIn("kDevDiagnostics", sel)
+        self.assertIn("ignored: diagnostic key, release build", sel)
+        self.assertIn("bool dev = kDevDiagnostics", sel)
+        # the backend logs the ignored keys and drops capture_dir in a release build, before anything is made
+        drop = self.at("if (!kDevDiagnostics) o.capture_dir.clear();")
+        self.assertIn("for (const std::string& line : ch.ignored) say(WG_LOG_WARN, line);", self.b[drop - 200:drop])
+        self.assertGreater(drop, self.at("choose_executor(q)"))
+        self.assertLess(drop, self.at("make_hip_executor("))
+        # a refused frame (every model, forced dx12 too) is answered WG_ERROR_UNSUPPORTED: no policy function, no bilinear branch
+        self.assertNotIn("refused_frame_action", self.b + sel)
+        self.assertNotIn("kBilinear", self.b + sel)
+        refused = self.at("if (refused) {")
+        self.assertIn("return WG_ERROR_UNSUPPORTED;", self.b[refused:refused + 400])
 
     def test_sparkle_guard_is_off_and_hip_only_filters_fall_back_for_every_model(self):
         # R1-a / H4: the choice turns the guard off before anything is made, whatever the model
