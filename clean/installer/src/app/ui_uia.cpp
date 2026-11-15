@@ -33,6 +33,19 @@
 #include <oleacc.h>
 #include <uiautomation.h>
 
+#if defined(__MINGW32__) && defined(__CRT_UUID_DECL)
+// llvm-mingw's oleacc.h has the IIDs (IID_IAccPropServices, CLSID_AccPropServices) but no __uuidof for the two types:
+// the Windows SDK's values
+__CRT_UUID_DECL(IAccPropServices, 0x6e26e776, 0x04f0, 0x495d, 0x80, 0xe4, 0x33, 0x30, 0x35, 0x2e, 0x31, 0x69)
+__CRT_UUID_DECL(CAccPropServices, 0xb5f8350b, 0x0548, 0x48b1, 0xa6, 0xee, 0x88, 0xbd, 0x00, 0xb4, 0xa5, 0xe7)
+#endif
+
+#if defined(__MINGW32__) && !defined(UIA_ScrollPatternNoScroll)
+// llvm-mingw's uiautomationclient.h lacks it: the Windows SDK's value, a double (a percent of -1: nothing to scroll). MinGW
+// only: the Windows SDK declares it as a const double, which a macro must not replace.
+#define UIA_ScrollPatternNoScroll (-1.0)
+#endif
+
 #ifdef _MSC_VER
 #pragma comment(lib, "uiautomationcore.lib")
 #endif
