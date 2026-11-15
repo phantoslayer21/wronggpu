@@ -26,6 +26,8 @@ jobs:
           python-version: "3.12"
       - name: Line endings
         run: python tools/ci/check_line_endings.py
+      - name: Vendored model entry order (OptiScaler WrongGPU edition)
+        run: python tools/ci/check_vendored_model_entries.py
       - name: Licence (REUSE)
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
