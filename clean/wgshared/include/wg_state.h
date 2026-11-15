@@ -22,27 +22,19 @@
 //   the next taker gets it, and because writes are atomic (below) the files are whole: the old version or the new one. A
 //   temporary file such a holder left is never read as state (IsTempName) and goes with the uninstall.
 //
-// THE LOADED PROTOCOL (a game is never invisible to an operation that changes its files):
-// - The game: every WrongGPU module loaded in the game registers (LoadedRegistration) at its init, BEFORE it reads or writes
-//   any state, and keeps the registration for as long as it is loaded:
-//   1. its LOADED MARKER first, at once, with no wait: Global\WrongGPU-loaded-<volume serial>-<file index> (same identity as
-//      the state lock), a named object held OPEN, never owned. While the game runs the marker exists, whatever happens next;
-//   2. only then the state lock, with a bounded wait: had in time = no launcher operation is running, the module may use the
-//      state (each later use takes the lock again); not had in time (an uninstall, repair or update is running) = the module
-//      runs with the defaults and reads and writes no state this session (state_ok() false; why() says so for the log).
-//   The whole registration is bounded by kRegisterBudgetMs (about 2 s): the folder identity lookup (a file-system call that a
-//   network folder can stall) runs on a helper thread within that budget, the lock wait gets the rest; a lookup that does not
-//   finish in time gives no marker and no state (and the launcher, which needs the same lookup, refuses: Unknown). Register
-//   from the module's init (InitializeASI, the first call), NEVER from DllMain (the helper thread needs the loader lock).
-//   A marker that cannot be made (marker() false) is logged; the module then uses no state either.
-// - The launcher: an uninstall, repair or update holds an OperationGuard for its WHOLE run: it takes the state lock (a
-//   timeout is Busy, access denied is LockDenied), then queries the marker and refuses unless the answer is NotRunning
-//   (Running and Unknown both refuse). A game that starts DURING the operation still creates its marker at once (it then
-//   waits for the lock, and gives up on state): so the operation calls Recheck() before EACH destructive step (each file it
-//   deletes or replaces) and stops with "close the game first" when the marker appeared. The guard is taken by the process
-//   that changes the files (the elevated worker when there is one), never by a parent waiting for it.
-// The marker object exists exactly while some process has it open; the OS closes every handle of a process that ends, crashes
-// or is killed, so a dead game leaves no stale marker and no PID is ever compared.
+// THE OPERATION GUARD (a game that uses WrongGPU is never changed under it; Windows itself decides, nothing is registered):
+// - The game registers nothing. A WrongGPU binary the game has loaded (the front end, the menu plugin, the RR plugin, the
+//   runtime) is an image section of that process, and Windows refuses an exclusive open of it.
+// - The launcher: an uninstall, repair or update holds an OperationGuard for its WHOLE run. It takes the state lock (a timeout
+//   is Busy, access denied is LockDenied), then opens EVERY WrongGPU binary of the install with DELETE | GENERIC_READ |
+//   FILE_WRITE_DATA and share mode 0 (a loaded image has no open handle, so share mode 0 alone does not see it; Windows refuses
+//   an open for writing its data; nothing is ever written through the handle; a read-only binary is therefore Unknown):
+//   ERROR_SHARING_VIOLATION = a process has it loaded (GameRunning: refuse); any other open error = Unknown (refuse); a
+//   file that does not exist is skipped; all opened = nobody has WrongGPU loaded. The guard HOLDS those exclusive handles to
+//   the end, so a game that starts meanwhile cannot load WrongGPU (its LoadLibrary fails; OptiScaler carries on without it).
+//   The operation deletes a held binary through the guard's own handle (DeleteHeld), or releases that one handle right at
+//   the step that replaces the file (Release). The guard is taken by the process that changes the files (the elevated worker
+//   when there is one), never by a parent waiting for it.
 //
 // Writes are atomic (WriteAtomic): a new temporary file in the same folder (<name>.wgtmp-<pid>-<n>, created only where
 // nothing is), written in checked chunks, flushed and closed (both checked), then MoveFileExW(REPLACE_EXISTING |
@@ -84,8 +76,6 @@ constexpr const wchar_t* kSettingsFile = L"settings.ini";
 constexpr const wchar_t* kModelChoiceFile = L"model-choice.ini";
 constexpr const wchar_t* kTempMark = L".wgtmp-";  // <file>.wgtmp-<pid>-<n>: a write in progress (or one a crash left)
 constexpr DWORD kDefaultWaitMs = 5000;            // the launcher's waits
-constexpr DWORD kRegisterBudgetMs = 2000;         // the game's whole registration (lookup + lock wait): never longer
-constexpr DWORD kRegisterWaitMs = kRegisterBudgetMs;  // (the name earlier code used)
 constexpr size_t kMaxStateBytes = 1u << 20;       // no state file is larger
 constexpr DWORD kChunk = 64u * 1024u;
 
@@ -149,52 +139,7 @@ inline bool LockNameFor(const std::wstring& gameDir, std::wstring* name, DWORD* 
     *name = buf;
     return true;
 }
-/// The names of a game folder's identity: Global\WrongGPU-state-<id> (the lock) and Global\WrongGPU-loaded-<id> (the marker).
-constexpr const wchar_t* kLoadedPrefix = L"Global\\WrongGPU-loaded-";
-inline std::wstring MarkerNameOf(const std::wstring& lockName) { return std::wstring(kLoadedPrefix) + lockName.substr(lockName.find(L"-state-") + 7); }
-// Another per-game name of the same identity: prefix + "<volume serial>-<file index>".
-inline bool NameFor(const wchar_t* prefix, const std::wstring& gameDir, std::wstring* name, DWORD* err) {
-    std::wstring lock;
-    if (!LockNameFor(gameDir, &lock, err)) return false;
-    *name = std::wstring(prefix) + lock.substr(lock.find(L"-state-") + 7);
-    return true;
-}
-// LockNameFor within budgetMs: the lookup (a file-system call a network folder can stall) runs on a helper thread; a lookup
-// that does not finish in time gives false with *err = WAIT_TIMEOUT (the thread finishes on its own and frees its data).
-// Never from DllMain. Never throws.
-namespace detail {
-struct LookupJob {
-    std::wstring dir, name;
-    DWORD err = 0;
-    bool ok = false;
-    volatile LONG refs = 2;
-};
-inline DWORD WINAPI LookupThread(void* p) {
-    LookupJob* j = static_cast<LookupJob*>(p);
-    try { j->ok = LockNameFor(j->dir, &j->name, &j->err); } catch (...) { j->ok = false; j->err = ERROR_OUTOFMEMORY; }
-    if (InterlockedDecrement(&j->refs) == 0) delete j;
-    return 0;
-}
-}  // namespace detail
-inline bool LockNameWithin(const std::wstring& gameDir, DWORD budgetMs, std::wstring* name, DWORD* err) {
-    detail::LookupJob* j = nullptr;
-    try { j = new detail::LookupJob; j->dir = gameDir; } catch (...) { delete j; if (err) *err = ERROR_OUTOFMEMORY; return false; }
-    HANDLE t = CreateThread(nullptr, 0, &detail::LookupThread, j, 0, nullptr);
-    if (!t) { if (err) *err = GetLastError(); delete j; return false; }
-    const DWORD w = WaitForSingleObject(t, budgetMs);
-    CloseHandle(t);
-    bool ok = false;
-    if (w == WAIT_OBJECT_0) {
-        ok = j->ok;
-        if (err) *err = j->err;
-        if (ok) { try { *name = j->name; } catch (...) { ok = false; if (err) *err = ERROR_OUTOFMEMORY; } }
-    } else if (err) {
-        *err = WAIT_TIMEOUT;
-    }
-    if (InterlockedDecrement(&j->refs) == 0) delete j;
-    return ok;
-}
-// A named mutex every integrity level may open (created, or opened when it exists); nullptr with GetLastError on failure.
+/// A named mutex every integrity level may open (created, or opened when it exists); nullptr with GetLastError on failure.
 inline HANDLE CreateSharedMutex(const std::wstring& name) {
     PSECURITY_DESCRIPTOR sd = nullptr;
     SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, FALSE};
@@ -213,13 +158,16 @@ inline HANDLE CreateSharedMutex(const std::wstring& name) {
 // timedOut() (another holder), denied() (this process may not open the folder or the lock: ERROR_ACCESS_DENIED), else error().
 class StateLock {
 public:
-    struct ByName {};  // the lock of an already known name (LockNameFor), no file-system call
     explicit StateLock(const std::wstring& gameDir, DWORD waitMs = kDefaultWaitMs) {
         std::wstring name;
         if (!LockNameFor(gameDir, &name, &err_)) return;
-        Take(name, waitMs);
+        mutex_ = CreateSharedMutex(name);
+        if (!mutex_) { err_ = GetLastError(); return; }
+        const DWORD w = WaitForSingleObject(mutex_, waitMs);
+        held_ = w == WAIT_OBJECT_0 || w == WAIT_ABANDONED;
+        abandoned_ = w == WAIT_ABANDONED;
+        if (!held_) err_ = w == WAIT_TIMEOUT ? WAIT_TIMEOUT : GetLastError();
     }
-    StateLock(ByName, const std::wstring& lockName, DWORD waitMs) { Take(lockName, waitMs); }
     ~StateLock() {
         if (held_) ReleaseMutex(mutex_);
         if (mutex_) CloseHandle(mutex_);
@@ -234,124 +182,16 @@ public:
     DWORD error() const { return err_; }  // why not held: WAIT_TIMEOUT, ERROR_ACCESS_DENIED, or another Win32 error
 
 private:
-    void Take(const std::wstring& name, DWORD waitMs) {
-        mutex_ = CreateSharedMutex(name);
-        if (!mutex_) { err_ = GetLastError(); return; }
-        const DWORD w = WaitForSingleObject(mutex_, waitMs);
-        held_ = w == WAIT_OBJECT_0 || w == WAIT_ABANDONED;
-        abandoned_ = w == WAIT_ABANDONED;
-        if (!held_) err_ = w == WAIT_TIMEOUT ? WAIT_TIMEOUT : GetLastError();
-    }
     HANDLE mutex_ = nullptr;
     bool held_ = false, abandoned_ = false;
     DWORD err_ = 0;
 };
 
-// ---- the loaded protocol ------------------------------------------------------------------------------------------
-// The marker alone (held open, never owned). Games use it through LoadedRegistration.
-class LoadedMarker {
-public:
-    explicit LoadedMarker(const std::wstring& gameDir) {
-        std::wstring name;
-        if (!NameFor(kLoadedPrefix, gameDir, &name, &err_)) return;
-        Open(name);
-    }
-    struct ByName {};
-    LoadedMarker(ByName, const std::wstring& markerName) { Open(markerName); }
-    ~LoadedMarker() { if (handle_) CloseHandle(handle_); }
-    LoadedMarker(const LoadedMarker&) = delete;
-    LoadedMarker& operator=(const LoadedMarker&) = delete;
-    bool held() const { return handle_ != nullptr; }
-    DWORD error() const { return err_; }
-
-private:
-    void Open(const std::wstring& name) {
-        handle_ = CreateSharedMutex(name);
-        if (!handle_) err_ = GetLastError();
-    }
-    HANDLE handle_ = nullptr;
-    DWORD err_ = 0;
-};
-
-enum class GameUse { NotRunning, Running, Unknown };
-inline const char* GameUseWords(GameUse u) {
-    return u == GameUse::NotRunning ? "not running" : u == GameUse::Running ? "the game is running with WrongGPU loaded"
-                                                                            : "WrongGPU could not tell whether the game is running";
-}
-// The marker of a known name: Running (it exists, also when it is not ours to open), NotRunning (it does not exist), Unknown.
-inline GameUse QueryMarker(const std::wstring& markerName, DWORD* err = nullptr) {
-    HANDLE h = OpenMutexW(SYNCHRONIZE, FALSE, markerName.c_str());
-    if (h) { CloseHandle(h); return GameUse::Running; }
-    const DWORD e = GetLastError();
-    if (err) *err = e;
-    if (e == ERROR_FILE_NOT_FOUND) return GameUse::NotRunning;
-    return e == ERROR_ACCESS_DENIED ? GameUse::Running : GameUse::Unknown;  // there but not ours to open: in use
-}
-// Whether a running process has WrongGPU loaded for the game folder gameDir. NotRunning ONLY when that is established: the
-// folder is gone (nothing can run from it), or its marker does not exist. Any error on the way is Unknown (*err). Never
-// creates the marker.
-inline GameUse QueryGameUse(const std::wstring& gameDir, DWORD* err = nullptr) {
-    std::wstring name;
-    DWORD e = 0;
-    if (!NameFor(kLoadedPrefix, gameDir, &name, &e)) {
-        if (err) *err = e;
-        return e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND ? GameUse::NotRunning : GameUse::Unknown;
-    }
-    return QueryMarker(name, err);
-}
-
-// The game's side (see THE LOADED PROTOCOL above): the marker at once, then the state lock within the rest of the budget.
-// marker(): the game is visible to the launcher. state_ok(): the module may use the state (each use takes the lock again).
-// why(): for the log when either is false. Keep the object for as long as the module is loaded. Never throws; bounded by
-// budgetMs (at most kRegisterBudgetMs) in total; never from DllMain.
-class LoadedRegistration {
-public:
-    explicit LoadedRegistration(const std::wstring& gameDir, DWORD budgetMs = kRegisterBudgetMs) {
-        if (budgetMs > kRegisterBudgetMs) budgetMs = kRegisterBudgetMs;
-        const ULONGLONG t0 = GetTickCount64();
-        std::wstring lockName;
-        if (!LockNameWithin(gameDir, budgetMs, &lockName, &err_)) {
-            why_ = err_ == WAIT_TIMEOUT ? "the game folder's identity could not be read in time (no marker, no state this session)"
-                                        : "the game folder's identity could not be read (no marker, no state this session)";
-            return;
-        }
-        try {
-            marker_.reset(new LoadedMarker(LoadedMarker::ByName{}, MarkerNameOf(lockName)));  // 1. visible at once, no wait
-        } catch (...) {
-            marker_.reset();
-        }
-        if (!marker_ || !marker_->held()) {
-            err_ = marker_ ? marker_->error() : ERROR_OUTOFMEMORY;
-            why_ = "the loaded marker could not be made (no state this session)";
-            marker_.reset();
-            return;
-        }
-        const ULONGLONG spent = GetTickCount64() - t0;
-        StateLock lock(StateLock::ByName{}, lockName, spent >= budgetMs ? 0 : static_cast<DWORD>(budgetMs - spent));  // 2. bounded
-        if (!lock.held()) {
-            err_ = lock.error();
-            why_ = lock.timedOut() ? "the game's state lock was not free in time (an uninstall, repair or update of WrongGPU is running): the defaults, no state this session"
-                                   : lock.denied() ? "the game's state lock may not be used (access denied): the defaults, no state this session"
-                                                   : "the game's state lock could not be taken: the defaults, no state this session";
-            return;
-        }
-        stateOk_ = true;
-    }
-    bool marker() const { return marker_ != nullptr; }
-    bool state_ok() const { return stateOk_; }
-    bool ok() const { return stateOk_; }      // (state_ok)
-    const char* why() const { return why_; }  // "" when both are fine
-    DWORD error() const { return err_; }
-
-private:
-    std::unique_ptr<LoadedMarker> marker_;
-    bool stateOk_ = false;
-    const char* why_ = "";
-    DWORD err_ = 0;
-};
-
-// The launcher's side: hold for the whole uninstall, repair or update, and call Recheck() before each destructive step.
-// Ok only when the lock is held and no game uses WrongGPU. The lock: a timeout is Busy, access denied is LockDenied.
+// ---- the operation guard -------------------------------------------------------------------------------------------
+// The launcher's side of an uninstall, repair or update (see THE OPERATION GUARD above). Ok only when the state lock is held
+// and every WrongGPU binary that exists is held exclusively. A timeout of the lock is Busy, access denied is LockDenied; a
+// binary loaded in a process (ERROR_SHARING_VIOLATION) is GameRunning; any other open error is Unknown. Keep it for the
+// whole operation, on the thread that took it.
 enum class GuardResult { Ok, Busy, LockDenied, GameRunning, Unknown };
 inline const char* GuardWords(GuardResult r) {
     switch (r) {
@@ -359,44 +199,91 @@ inline const char* GuardWords(GuardResult r) {
         case GuardResult::Busy: return "another WrongGPU program is changing this game's WrongGPU state right now; try again in a moment";
         case GuardResult::LockDenied: return "WrongGPU may not use this game's state lock (access denied); run the launcher's repair as administrator";
         case GuardResult::GameRunning: return "the game is running with WrongGPU loaded; close the game first";
-        case GuardResult::Unknown: return "WrongGPU could not tell whether the game is running; close the game and try again";
+        case GuardResult::Unknown: return "WrongGPU could not tell whether the game is using its files; close the game and try again";
     }
     return "?";
 }
 class OperationGuard {
 public:
-    explicit OperationGuard(const std::wstring& gameDir, DWORD waitMs = kDefaultWaitMs) {
-        std::wstring lockName;
-        if (!LockNameFor(gameDir, &lockName, &err_)) {
-            const bool gone = err_ == ERROR_FILE_NOT_FOUND || err_ == ERROR_PATH_NOT_FOUND;
-            result_ = gone ? GuardResult::Ok : GuardResult::Unknown;  // gone: nothing to guard; any other lookup error: Unknown
-            return;
-        }
-        markerName_ = MarkerNameOf(lockName);
-        lock_.reset(new StateLock(StateLock::ByName{}, lockName, waitMs));
+    // binaries: every WrongGPU binary of the install (the front end, the menu and RR plugins, the runtime), full paths; one that
+    // does not exist is skipped (nothing can have it loaded).
+    OperationGuard(const std::wstring& gameDir, const std::vector<std::wstring>& binaries, DWORD waitMs = kDefaultWaitMs) {
+        lock_.reset(new StateLock(gameDir, waitMs));
         if (!lock_->held()) {
             err_ = lock_->error();
-            result_ = lock_->timedOut() ? GuardResult::Busy : lock_->denied() ? GuardResult::LockDenied : GuardResult::Unknown;
+            const bool gone = err_ == ERROR_FILE_NOT_FOUND || err_ == ERROR_PATH_NOT_FOUND;  // the game folder is gone: nothing to guard
+            result_ = gone ? GuardResult::Ok : lock_->timedOut() ? GuardResult::Busy : lock_->denied() ? GuardResult::LockDenied : GuardResult::Unknown;
             return;
         }
-        Recheck();
+        for (const std::wstring& b : binaries) {
+            const std::wstring p = ExtendedPath(b);
+            // FILE_WRITE_DATA is what a loaded image refuses (the image section holds no open handle, so share mode 0 alone
+            // would not conflict with it); nothing is ever written through this handle
+            HANDLE h = CreateFileW(p.c_str(), DELETE | GENERIC_READ | FILE_WRITE_DATA, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (h == INVALID_HANDLE_VALUE) {
+                const DWORD e = GetLastError();
+                if (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND) continue;  // not there: nothing has it loaded
+                err_ = e;
+                which_ = b;
+                result_ = e == ERROR_SHARING_VIOLATION ? GuardResult::GameRunning : GuardResult::Unknown;
+                CloseAll();
+                return;
+            }
+            held_.push_back({p, h});
+        }
+        result_ = GuardResult::Ok;
     }
-    // Before each destructive step: the marker again (no file-system call). A game that started meanwhile turns the result to
-    // GameRunning (or Unknown); the caller stops there. Returns result().
-    GuardResult Recheck() {
-        if (!lock_ || !lock_->held()) return result_;
-        const GameUse u = QueryMarker(markerName_, &err_);
-        result_ = u == GameUse::NotRunning ? GuardResult::Ok : u == GameUse::Running ? GuardResult::GameRunning : GuardResult::Unknown;
-        return result_;
-    }
+    ~OperationGuard() { CloseAll(); }
+    OperationGuard(const OperationGuard&) = delete;
+    OperationGuard& operator=(const OperationGuard&) = delete;
     bool ok() const { return result_ == GuardResult::Ok; }
     GuardResult result() const { return result_; }
     DWORD error() const { return err_; }
+    const std::wstring& which() const { return which_; }  // the binary that decided GameRunning / Unknown
     const char* words() const { return GuardWords(result_); }
+    // Whether the guard holds `path` (a binary it was given).
+    bool Holds(const std::wstring& path) const { return Find(path) >= 0; }
+    // Closes the guard's handle of `path` right before the operation replaces that file itself (the file is then open to
+    // others again: do it at the step, never earlier). True when it was held.
+    bool Release(const std::wstring& path) {
+        const int i = Find(path);
+        if (i < 0) return false;
+        CloseHandle(held_[i].h);
+        held_.erase(held_.begin() + i);
+        return true;
+    }
+    // Deletes `path` through the guard's own handle (no window in which another process can open or load it), then closes the
+    // handle. ERROR_SUCCESS, ERROR_NOT_FOUND (not held), or the error of the delete (the handle is kept then).
+    DWORD DeleteHeld(const std::wstring& path) {
+        const int i = Find(path);
+        if (i < 0) return ERROR_NOT_FOUND;
+        struct DispositionEx { DWORD Flags; } ex{0x1u | 0x2u};  // FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
+        BOOL done = SetFileInformationByHandle(held_[i].h, static_cast<FILE_INFO_BY_HANDLE_CLASS>(21) /* FileDispositionInfoEx */, &ex, sizeof ex);
+        if (!done) {  // (a file system without the POSIX form: the classic delete-on-close)
+            FILE_DISPOSITION_INFO classic{TRUE};
+            done = SetFileInformationByHandle(held_[i].h, FileDispositionInfo, &classic, sizeof classic);
+        }
+        if (!done) return GetLastError();
+        CloseHandle(held_[i].h);
+        held_.erase(held_.begin() + i);
+        return ERROR_SUCCESS;
+    }
 
 private:
+    struct Held { std::wstring path; HANDLE h; };
+    int Find(const std::wstring& path) const {
+        const std::wstring p = ExtendedPath(path);
+        for (size_t i = 0; i < held_.size(); ++i)
+            if (CompareStringOrdinal(held_[i].path.c_str(), -1, p.c_str(), -1, TRUE) == CSTR_EQUAL) return static_cast<int>(i);
+        return -1;
+    }
+    void CloseAll() {
+        for (auto& x : held_) CloseHandle(x.h);
+        held_.clear();
+    }
     std::unique_ptr<StateLock> lock_;
-    std::wstring markerName_;
+    std::vector<Held> held_;
+    std::wstring which_;
     GuardResult result_ = GuardResult::Unknown;
     DWORD err_ = 0;
 };

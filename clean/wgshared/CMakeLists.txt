@@ -56,6 +56,10 @@ if(WIN32)
     target_compile_options(test_wg_state PRIVATE -Wall -Wextra -municode)
     target_link_options(test_wg_state PRIVATE -static -municode)
   endif()
+  # a real DLL the test loads (a WrongGPU binary a game has loaded), next to the test
+  add_library(wg_state_test_dll SHARED ${CMAKE_CURRENT_LIST_DIR}/tests/test_wg_state_dll.cpp)
+  set_target_properties(wg_state_test_dll PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" PREFIX "")
+  add_dependencies(test_wg_state wg_state_test_dll)
   add_test(NAME wgshared_state COMMAND test_wg_state)
 endif()
 
