@@ -2,7 +2,7 @@
 """R1 / H2: no supported Model K context reaches the D3D12 create refusal. Run under the shared GPU lock.
 
 Runs test_interop_d3d12.exe's `matrix` case against a runtime build with a synthetic Model K (generated here from random
-parameters; an installed model is never read): every DLSS-style render ratio x output size x declared maximum x HDR / LDR
+parameters; an installed model is never read): every usual upscaler-mode render ratio x output size x declared maximum x HDR / LDR
 gets a default-executor context and one frame, and each must be taken by the D3D12 executor with no create refusal and no
 HIP line. The same case takes the options of another model (Model M, L) when its files are given by the caller.
 

@@ -21,7 +21,7 @@
 //   test_interop_d3d12.exe <runtime> asyncsim "<options>" <serial|ideal|pipe|inline|game|net> [frames] [pre] [post] [iters]
 //     A simulated game frame on the DIRECT queue and the network (executor=dx12) in its list or on a COMPUTE queue.
 //   test_interop_d3d12.exe <runtime> matrix "<options naming the model>" [output heights, default 1080,1440,2160]
-//     R1 / H2: every DLSS-style ratio x output size x declared maximum x HDR / LDR gets a default-executor context and a
+//     R1 / H2: every usual upscaler-mode ratio x output size x declared maximum x HDR / LDR gets a default-executor context and a
 //     frame: each must be taken by the D3D12 executor (no create refusal, no HIP line); see case_matrix.
 //   test_interop_d3d12.exe <runtime> hipswitch "<Model M options>" "<Model K options>"
 //     Creates, dispatches, destroys M -> K -> M in one process and verifies the HIP DLL stays loaded between them.
@@ -1788,7 +1788,7 @@ int debug_messages(Gpu& g, const char* when) {
 
 // "matrix" "<options>" [outputs]: R1 / H2. No supported context may reach the create refusal (the D3D12 executor refusing a
 // context: one warning line, no context, the front end's own upscaler keeps the game). Every launcher-reachable shape of a
-// default-executor context is created on this device and given a frame: the DLSS-style render ratios (DLAA 1.0, Quality
+// default-executor context is created on this device and given a frame: the usual upscaler-mode render ratios (DLAA 1.0, Quality
 // 0.667, Balanced 0.58, Performance 0.5, Ultra Performance 0.333) of each output size (`outputs`: a comma list of heights,
 // default 1080,1440,2160), the declared maximum render size both as the game usually gives it (a little above the render
 // size) and equal to the output (as Cyberpunk declares it), HDR (RGBA16F output) and LDR (RGBA8 output). Each context must
