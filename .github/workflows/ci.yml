@@ -163,6 +163,17 @@ jobs:
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           python -m unittest clean.tests.test_dev_diagnostics_off -v
+      - name: Package gate on the real runtime library (R1)
+        # The runtime library is built from this tree (clean/runner/build.py --runtime-only --no-embed: the C++ runtime without
+        # the GPU code objects) in the release configuration the package gets, and as a developer build; the gate's functions
+        # then check THOSE libraries: the release one passes the real packager (marker, no developer-diagnostic code text,
+        # build manifest with its SHA-256); the developer one, the same with a forged marker, a stripped and a changed
+        # library are refused.
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $clang = (Get-Command clang++ -ErrorAction SilentlyContinue).Source
+          if (-not $clang) { $clang = "C:\Program Files\LLVM\bin\clang++.exe" }
+          python tools/ci/check_release_runtime.py --out out/runtime-gate --cxx $clang
 
   rr-plugin:
     name: "CPU: Ray Reconstruction plugin"
