@@ -32,11 +32,14 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--a-build", required=True)
     ap.add_argument("--b-build", required=True)
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
     ap.add_argument("--rocm", required=True)
+    sdk.add_force_argument(ap)
     ap.add_argument("--models", required=True, help="work directory for the synthetic models")
     ap.add_argument("--frames", type=int, default=24)
     ap.add_argument("--json")
     args = ap.parse_args(argv)
+    sdk.apply(args)   # --rocm: an official SDK, or a custom one with --force-sdk
     root = Path(args.models)
     if (root / "model.wgcm").exists():
         raise ValueError("refusing to write synthetic parameters into a converted-model directory")

@@ -291,7 +291,9 @@ def run(build, rocm, seeds=(89,)):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
     ap.add_argument("--rocm", required=True)
+    sdk.add_force_argument(ap)
     ap.add_argument("--clang")
     ap.add_argument("--compile", action="store_true")
     ap.add_argument("--compile-only", action="store_true")
@@ -299,6 +301,7 @@ def main(argv=None):
     ap.add_argument("--seeds", type=int, default=1, help="run the case list with this many seeds (89, 90, ...)")
     ap.add_argument("--json", required=True)
     a = ap.parse_args(argv)
+    sdk.apply(a)   # --rocm: an official SDK, or a custom one with --force-sdk
     os.makedirs(a.build, exist_ok=True)
     if a.compile or a.compile_only:
         compile_kernels(a.build, a.rocm, a.with_swin_co, a.clang)

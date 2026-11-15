@@ -9,6 +9,7 @@ import unittest
 
 import numpy as np
 
+from clean.runner.sdk import OFFICIAL_ROCM  # noqa: E402  (the official HIP SDK, never ROCM_PATH)
 from clean.k.runner import k_io
 from clean.k.reference.instage import input_stage
 from clean.k.tests.test_k_io_emu import frame, same_bits
@@ -74,7 +75,7 @@ class TestTiledInputGpu(unittest.TestCase):
         if not build:
             raise unittest.SkipTest("GPU only: set WG_K_GPU_BUILD and use shared GPU lock")
         from clean.runner.stage_runner import Runner
-        cls.runner = Runner(build, os.environ.get("ROCM_PATH", ""), backend="hip", model="K")
+        cls.runner = Runner(build, OFFICIAL_ROCM, backend="hip", model="K")
 
     def run_input(self, x, exact, tiled, device_scalars=False):
         stage = "input@exact" if exact else "input"

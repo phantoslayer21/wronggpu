@@ -93,12 +93,15 @@ def main(argv=None):
     ap.add_argument("--build", required=True, help="HIP reference code objects")
     ap.add_argument("--native-build", required=True)
     ap.add_argument("--out", required=True, help="fresh private work directory, reused only with --run-only")
-    ap.add_argument("--rocm", default=r"C:\Program Files\AMD\ROCm\7.2")
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
+    ap.add_argument("--rocm", default="")
+    sdk.add_force_argument(ap)
     ap.add_argument("--seeds", type=int, default=16)
     group = ap.add_mutually_exclusive_group()
     group.add_argument("--build-only", action="store_true")
     group.add_argument("--run-only", action="store_true")
     a = ap.parse_args(argv)
+    sdk.apply(a)   # --rocm: an official SDK, or a custom one with --force-sdk
     if a.seeds < 1:
         ap.error("--seeds must be positive")
     out = Path(a.out).resolve()

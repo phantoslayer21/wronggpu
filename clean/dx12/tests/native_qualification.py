@@ -234,13 +234,16 @@ def main(argv=None):
     ap.add_argument("--native-build", help="standalone native bundle; --build remains the HIP reference")
     ap.add_argument("--models", required=True)
     ap.add_argument("--out", required=True, help="new evidence directory (never overwritten)")
-    ap.add_argument("--rocm", default=r"C:\Program Files\AMD\ROCm\7.2")
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
+    ap.add_argument("--rocm", default="")
+    sdk.add_force_argument(ap)
     ap.add_argument("--frames", type=int, default=8)
     ap.add_argument("--include-4k", action="store_true", help="also qualify 1920x1080 -> 3840x2160 Performance geometry")
     ap.add_argument("--probe-unused-capacity", action="store_true", help="also poison C capacity during the differential check")
     ap.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--skip-compare", action="store_true", help="diagnostic only: native process gate without differential run")
     a = ap.parse_args(argv)
+    sdk.apply(a)   # --rocm: an official SDK, or a custom one with --force-sdk
     native_build = a.native_build or a.build
     if a.frames < 4:
         ap.error("at least four frames are needed to exercise the second reset")
@@ -269,7 +272,7 @@ def main(argv=None):
     if not a.skip_compare:
         cmd = [sys.executable, str(DX12 / "compare.py"), "--build", a.build, "--models", str(models),
                "--candidate-build", native_build,
-               "--rocm", a.rocm, "--backend", "d3d12", "--kernels", "all", "--frames", str(a.frames),
+               "--rocm", a.rocm, *sdk.forward(a), "--backend", "d3d12", "--kernels", "all", "--frames", str(a.frames),
                "--json", str(out / "compare.json"), "--trace", str(out / "compare-launches.txt")]
         if a.include_4k:
             cmd.append("--include-4k")

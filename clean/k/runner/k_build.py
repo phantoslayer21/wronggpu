@@ -62,7 +62,8 @@ def emu_command(cxx, out):
 def main(argv=None):
     from clean.runner.build import find_clang, run
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--rocm", default=os.environ.get("ROCM_PATH", ""))
+    from clean.runner import sdk
+    sdk.add_arguments(ap)
     ap.add_argument("--out", required=True)
     ap.add_argument("--clang")
     ap.add_argument("--no-device-libs", action="store_true")
@@ -73,10 +74,10 @@ def main(argv=None):
     ap.add_argument("--cxx", default=os.environ.get("CXX", "clang++"))
     a = ap.parse_args(argv)
     os.makedirs(a.out, exist_ok=True)
-    if not a.emu_only:
-        if not a.rocm and not a.no_device_libs:
-            raise SystemExit("--rocm is required (or --no-device-libs for a compile check)")
-        build_device(a.clang or find_clang(a.rocm), a.rocm, a.out, not a.no_device_libs, a.report, io_wave64=not a.io_wave32)
+    if not a.emu_only:   # the HIP SDK only for the device build (--emu-only: the host compiler alone)
+        a.rocm = sdk.resolve(a.rocm, a.force_sdk)
+        clang = sdk.compiler(a.rocm, a.clang, a.force_sdk)   # another one only with --force-sdk
+        build_device(clang, a.rocm, a.out, not a.no_device_libs, a.report, io_wave64=not a.io_wave32)
     if a.emu or a.emu_only:
         run(emu_command(a.cxx, os.path.join(a.out, EMU_LIBRARY)))
 

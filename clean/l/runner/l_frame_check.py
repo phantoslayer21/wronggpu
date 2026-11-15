@@ -942,7 +942,9 @@ def compare(build, json_path):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
-    ap.add_argument("--rocm", default=r"C:\Program Files\AMD\ROCm\7.2")
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
+    ap.add_argument("--rocm", default="")
+    sdk.add_force_argument(ap)
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--prepare", action="store_true")
     g.add_argument("--run", action="store_true")
@@ -961,6 +963,7 @@ def main(argv=None):
     ap.add_argument("--ldr", action="store_true",
                     help="--run / --compare / --compare-d3d12: Model L with LDR colour (records *_ldr.pkl)")
     a = ap.parse_args(argv)
+    sdk.apply(a)   # --rocm: an official SDK, or a custom one with --force-sdk
     global LDR
     LDR = a.ldr
     if (a.model or a.map) and not a.prepare:

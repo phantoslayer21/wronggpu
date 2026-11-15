@@ -17,6 +17,7 @@ import numpy as np
 from clean.reference import post as ref
 from clean.runner import post as ps
 from clean.runner.stage_runner import Runner
+from clean.runner import sdk  # noqa: E402  (the HIP SDK policy: --rocm, --force-sdk)
 
 
 def tf_plan(dev, ow, oh, brightness, exposure, pi, half):
@@ -65,8 +66,10 @@ def main():
     ap.add_argument('--build', required=True)
     ap.add_argument('--baseline')
     ap.add_argument('--rocm', required=True)
+    sdk.add_force_argument(ap)
     ap.add_argument('--json', required=True)
     a = ap.parse_args()
+    sdk.apply(a)   # --rocm: an official SDK, or a custom one with --force-sdk
     for key in ('LLVM_PATH', 'ROCM_PATH', 'HIP_PATH', 'HIP_DEVICE_LIB_PATH'):
         os.environ.pop(key, None)
     runners = {'candidate': Runner(a.build, a.rocm, backend='hip')}

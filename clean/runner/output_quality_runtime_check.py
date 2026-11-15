@@ -43,11 +43,14 @@ def compare_tree(a, b, prefix=""):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--build", required=True)
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
     ap.add_argument("--rocm", required=True)
+    sdk.add_force_argument(ap)
     ap.add_argument("--model", required=True, help="directory exclusively owned by this synthetic test")
     ap.add_argument("--json", required=True)
     ap.add_argument("--profile", choices=("quality9", "quality5"), default="quality9")
     args = ap.parse_args()
+    sdk.apply(args)   # --rocm: an official SDK, or a custom one with --force-sdk
     model = Path(args.model)
     if (model / "model.wgcm").exists():
         raise ValueError("Refusing to write synthetic parameters into a converted-model directory")

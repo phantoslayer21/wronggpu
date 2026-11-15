@@ -108,11 +108,14 @@ def run(build, rocm, rounds=5, frames=100, sizes=((1920, 1080), (2560, 1440))):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--build", required=True)
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
     ap.add_argument("--rocm", default="")
+    sdk.add_force_argument(ap)
     ap.add_argument("--json", required=True)
     ap.add_argument("--rounds", type=int, default=5)
     ap.add_argument("--frames", type=int, default=100)
     a = ap.parse_args()
+    sdk.apply(a)   # --rocm: an official SDK, or a custom one with --force-sdk
     if a.rounds < 1 or a.frames < 20:
         ap.error("rounds >= 1 and frames >= 20 required")
     result = run(a.build, a.rocm, a.rounds, a.frames)

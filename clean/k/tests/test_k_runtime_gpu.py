@@ -30,6 +30,7 @@ import unittest
 
 import numpy as np
 
+from clean.runner.sdk import OFFICIAL_ROCM  # noqa: E402  (the official HIP SDK, never ROCM_PATH)
 from clean.k.reference.layout import STAGE_NAMES
 from clean.k.reference.network import random_network_params
 from clean.k.reference.params import normalize
@@ -135,7 +136,7 @@ class KRuntimeExt:
         from clean.runner.build import runtime_library_name
         from clean.runner.pipeline import WgRtConfig, WgRtFrame
         self.WgRtFrame = WgRtFrame
-        rocm = os.environ.get("ROCM_PATH", "")
+        rocm = OFFICIAL_ROCM
         if sys.platform == "win32" and rocm and hasattr(os, "add_dll_directory"):
             os.add_dll_directory(os.path.join(rocm, "bin"))
         lib = self.lib = ctypes.CDLL(os.path.abspath(os.path.join(build, runtime_library_name())))
@@ -601,7 +602,7 @@ class TestKRuntimeGpu(unittest.TestCase):
         lib = ctypes.CDLL(os.path.abspath(os.path.join(self.build, runtime_library_name())))
         lib.wg_rt_create_external.argtypes = [P(WgRtConfig), P(vp), ctypes.c_char_p, ctypes.c_int]
         cfg = WgRtConfig()
-        keep = [os.fsencode(self.build), os.fsencode(os.environ.get("ROCM_PATH", "")),
+        keep = [os.fsencode(self.build), os.fsencode(OFFICIAL_ROCM),
                 os.fsencode(os.path.join(self.mdir, "nothing")), b"model=K"]
         cfg.build_dir, cfg.rocm_dir, cfg.model_dir, cfg.runtime_options = keep
         cfg.max_rw, cfg.max_rh, cfg.ow, cfg.oh = 64, 64, 128, 128

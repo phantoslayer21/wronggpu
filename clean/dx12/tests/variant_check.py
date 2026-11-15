@@ -28,9 +28,12 @@ PORT = "w64/post_tf_f32_p12_diet_vsit"
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
-    ap.add_argument("--rocm", default=r"C:\Program Files\AMD\ROCm\7.2")
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
+    ap.add_argument("--rocm", default="")
+    sdk.add_force_argument(ap)
     ap.add_argument("--models", default=os.path.join(os.environ.get("WG_BUILD_ROOT", os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "build")), "dx12-m", "work", "compare_models"))
     a = ap.parse_args(argv)
+    sdk.apply(a)   # --rocm: an official SDK, or a custom one with --force-sdk
     for k in ("HIP_PATH", "ROCM_PATH", "LLVM_PATH", "HIP_DEVICE_LIB_PATH", "HIP_CLANG_PATH"):
         os.environ.pop(k, None)
     if (Path(a.models) / "model.wgcm").exists():

@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 
 import numpy as np  # noqa: E402
 
+from clean.runner.sdk import OFFICIAL_ROCM  # noqa: E402  (the official HIP SDK, never ROCM_PATH)
 from clean.reference import decoder as Dc  # noqa: E402
 from clean.reference import encoder as E  # noqa: E402
 from clean.reference import exposure as X  # noqa: E402
@@ -176,7 +177,9 @@ def bench_fusion(r, report, repeats, check=True, built=("fused",)):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
-    ap.add_argument("--rocm", default=os.environ.get("ROCM_PATH", ""))
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
+    ap.add_argument("--rocm", default=OFFICIAL_ROCM)
+    sdk.add_force_argument(ap)
     ap.add_argument("--repeats", type=int, default=100)
     ap.add_argument("--stages", default="enc0,dec0,exposure,dec1dec0",
                     help="comma-separated: enc0, dec0, exposure, dec1dec0 (dec1 + dec0 separate vs fused)")
@@ -186,6 +189,7 @@ def main(argv=None):
     ap.add_argument("--no-timing", action="store_true", help="checks only")
     ap.add_argument("--backend", default="hip", help="hip (GPU) or emu (host emulator: checks of 'base' only)")
     args = ap.parse_args(argv)
+    sdk.apply(args)   # --rocm: an official SDK, or a custom one with --force-sdk
     r = Runner(args.build, args.rocm, backend=args.backend)
     report = {"device": getattr(r.dev, "device_name", "?"), "timing_ms": {}, "differ_from_base": {}, "checks": {}}
     built = {}

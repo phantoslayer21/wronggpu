@@ -603,7 +603,9 @@ def main(argv=None):
     for name in ("probe", "post", "enc", "time", "frame-time"):
         p = sub.add_parser(name)
         p.add_argument("--build", required=True)
+        from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
         p.add_argument("--rocm", default="")
+        sdk.add_force_argument(p)
         p.add_argument("--seed", type=int, default=1)
         p.add_argument("--json")
         p.add_argument("--frames", type=int, default=5 if name == "post" else 3)
@@ -613,6 +615,7 @@ def main(argv=None):
         p.add_argument("--rounds", type=int, default=5)
         p.add_argument("--repeats", type=int, default=20)
     args = ap.parse_args(argv)
+    sdk.apply(args)   # --rocm: an official SDK, or a custom one with --force-sdk
     return {"probe": cmd_probe, "post": cmd_post, "enc": cmd_enc, "time": cmd_time,
             "frame-time": cmd_frame_time}[args.cmd](args)
 

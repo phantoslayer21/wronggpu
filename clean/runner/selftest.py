@@ -34,6 +34,7 @@ import ctypes  # noqa: E402
 
 import numpy as np  # noqa: E402
 
+from clean.runner.sdk import OFFICIAL_ROCM  # noqa: E402  (the official HIP SDK, never ROCM_PATH)
 from clean.reference.fp8 import DECODE, fp8_encode, q8  # noqa: E402
 from clean.runner.packing import D_ROW_LAYOUTS  # noqa: E402
 
@@ -311,9 +312,12 @@ def selftest(build_dir, rocm_dir="", backend="hip"):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
-    ap.add_argument("--rocm", default=os.environ.get("ROCM_PATH", ""))
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
+    ap.add_argument("--rocm", default=OFFICIAL_ROCM)
+    sdk.add_force_argument(ap)
     ap.add_argument("--backend", default="hip", choices=["hip", "emu"])
     args = ap.parse_args(argv)
+    sdk.apply(args)   # --rocm: an official SDK, or a custom one with --force-sdk
     report = selftest(args.build, args.rocm, args.backend)
     print(json.dumps(report, indent=1))
     return 0 if report["pass"] else 1

@@ -15,15 +15,18 @@ CLEAN = os.path.dirname(DX12)
 sys.path.insert(0, DX12)
 import build_dx12  # noqa: E402
 
-ROCM = os.environ.get("ROCM_PATH", r"C:\Program Files\AMD\ROCm\7.2")
+ROCM = r"C:\Program Files\AMD\ROCm\7.2"   # the official HIP SDK (clean/runner/sdk.py), never ROCM_PATH
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
     ap.add_argument("--rocm", default=ROCM)
+    sdk.add_force_argument(ap)
     ap.add_argument("--build-only", action="store_true", help="build without reserving or using the GPU")
     a = ap.parse_args()
+    sdk.apply(a)   # --rocm: an official SDK, or a custom one with --force-sdk
     dst = os.path.join(a.out, "dx12")
     os.makedirs(dst, exist_ok=True)
     asm = build_dx12.build_asm_tool(a.out)

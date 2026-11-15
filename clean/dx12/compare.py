@@ -339,7 +339,9 @@ def main(argv=None):
     ap.add_argument("--candidate-build", help="optional separate native/hybrid build; --build remains the HIP oracle")
     ap.add_argument("--kernels", required=True, help="WG_DX12_KERNELS for the hybrid run (names as launched, or all)")
     ap.add_argument("--backend", choices=("dx12", "d3d12"), default="dx12", help="candidate device; HIP stays the oracle")
-    ap.add_argument("--rocm", default=r"C:\Program Files\AMD\ROCm\7.2")
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
+    ap.add_argument("--rocm", default="")
+    sdk.add_force_argument(ap)
     ap.add_argument("--models", default=DEFAULT_MODELS, help="work dir for the synthetic model")
     ap.add_argument("--frames", type=int, default=4)
     ap.add_argument("--quick", action="store_true", help="only the small odd-size case")
@@ -350,6 +352,7 @@ def main(argv=None):
     ap.add_argument("--json")
     ap.add_argument("--trace", help="new trace path; defaults to a unique directory inside the build")
     a = ap.parse_args(argv)
+    sdk.apply(a)   # --rocm: an official SDK, or a custom one with --force-sdk
     if a.frames < 1:
         ap.error("--frames must be positive")
     if a.probe_unused_capacity and a.frames < 2:

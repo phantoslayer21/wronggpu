@@ -164,7 +164,9 @@ def main(argv=None):
     ap.add_argument("--native-build", help="optional separate native bundle")
     ap.add_argument("--shape", choices=("1440p", "4k-performance"), default="1440p")
     ap.add_argument("--frame-only", action="store_true", help="kernel experiment: preuploaded whole frames only; omit host transfer phases")
-    ap.add_argument("--rocm", default=r"C:\Program Files\AMD\ROCm\7.2")
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
+    ap.add_argument("--rocm", default="")
+    sdk.add_force_argument(ap)
     ap.add_argument("--models", default=DEFAULT_MODELS)
     ap.add_argument("--configs", default="hip,all")
     ap.add_argument("--rounds", type=int, default=2)
@@ -173,6 +175,7 @@ def main(argv=None):
     ap.add_argument("--json")
     ap.add_argument("--child", help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
+    sdk.apply(a)   # --rocm: an official SDK, or a custom one with --force-sdk
     if a.warm < 3 or a.repeats < 1 or a.rounds < 1:
         ap.error("at least 3 seconds of warm-up and positive repeats/rounds are required")
     for k in ("HIP_PATH", "ROCM_PATH", "LLVM_PATH", "HIP_DEVICE_LIB_PATH", "HIP_CLANG_PATH"):
@@ -184,7 +187,8 @@ def main(argv=None):
     failures = []
     for r in range(a.rounds):
         for c in configs:
-            cmd = [sys.executable, os.path.abspath(__file__), "--build", a.build, "--rocm", a.rocm, "--models", a.models,
+            cmd = [sys.executable, os.path.abspath(__file__), "--build", a.build, "--rocm", a.rocm, *sdk.forward(a),
+                   "--models", a.models,
                    "--repeats", str(a.repeats), "--warm", str(a.warm), "--child", c]
             cmd += ["--shape", a.shape]
             if a.native_build:

@@ -13,6 +13,7 @@ import struct
 import subprocess
 import unittest
 
+from clean.runner.sdk import OFFICIAL_ROCM  # noqa: E402  (the official HIP SDK, never ROCM_PATH)
 from clean.runner.build import device_command, find_clang
 from clean.runner.hip import Hip
 
@@ -24,14 +25,14 @@ class TestOutputArithmetic(unittest.TestCase):
         if not build:
             raise unittest.SkipTest("GPU only: set WG_K_GPU_BUILD and use shared GPU lock")
         root = Path(__file__).resolve().parents[3]
-        sdk = os.environ.get("WG_K_TEST_ROCM") or os.environ.get("ROCM_PATH") or r"C:\Program Files\AMD\ROCm\7.2"
+        sdk = OFFICIAL_ROCM
         obj = Path(build).resolve() / "k_output_arithmetic_probe.co"
         cmd = device_command(find_clang(sdk), sdk, str(Path(__file__).with_name("k_output_arithmetic_probe.hip")),
                              str(obj), extra=["-I", str(root/"clean/kernels"), "-mwavefrontsize64"])
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode:
             raise RuntimeError(proc.stdout + proc.stderr)
-        cls.dev = Hip(os.environ.get("ROCM_PATH", ""))
+        cls.dev = Hip(OFFICIAL_ROCM)
         mod = cls.dev.load_module(obj.read_bytes())
         cls.fn = {name: cls.dev.get_function(mod, "k_probe_"+name)
                   for name in ("native_rcp", "candidate_rcp", "native_axis", "candidate_axis", "candidate_bounded", "compare")}

@@ -59,6 +59,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 
 import numpy as np  # noqa: E402
 
+from clean.runner.sdk import OFFICIAL_ROCM  # noqa: E402  (the official HIP SDK, never ROCM_PATH)
 from clean.runner import post as PS  # noqa: E402
 
 W64 = "post_w64.co"
@@ -629,7 +630,9 @@ def main(argv=None):
     for name in ("time", "dump"):
         p = sub.add_parser(name)
         p.add_argument("--build", required=True)
-        p.add_argument("--rocm", default=os.environ.get("ROCM_PATH", ""))
+        from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
+        p.add_argument("--rocm", default=OFFICIAL_ROCM)
+        sdk.add_force_argument(p)
         p.add_argument("--code-object", default=W64, help="code object of the post kernels (default post_w64.co)")
         p.add_argument("--render", help="render size WxH (with --output: one configuration)")
         p.add_argument("--output", help="output size WxH")
@@ -649,6 +652,7 @@ def main(argv=None):
     d.add_argument("--save", help="also save the canonical outputs (.npy) into this folder")
     d.add_argument("--verbose", action="store_true")
     args = ap.parse_args(argv)
+    sdk.apply(args)   # --rocm: an official SDK, or a custom one with --force-sdk
     if args.cmd == "dump" and not (args.render and args.output):
         ap.error("dump needs --render and --output")
     (cmd_time if args.cmd == "time" else cmd_dump)(args)

@@ -68,10 +68,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--build", required=True)
     ap.add_argument("--baseline", required=True)
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
     ap.add_argument("--rocm", required=True)
+    sdk.add_force_argument(ap)
     ap.add_argument("--json", required=True)
     ap.add_argument("--timing", action="store_true")
     args = ap.parse_args()
+    sdk.apply(args)   # --rocm: an official SDK, or a custom one with --force-sdk
     candidate_root, baseline_root = Path(args.build).resolve(), Path(args.baseline).resolve()
     if candidate_root == baseline_root:
         raise ValueError("Candidate and baseline build directories must be distinct")

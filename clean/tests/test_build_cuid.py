@@ -1,8 +1,13 @@
 # SPDX-License-Identifier: MIT
-"""The HIP device compile command carries a fixed compilation-unit id; nothing is executed, the paths are dummies."""
+"""The HIP device compile command carries a fixed compilation-unit id; nothing is executed, the paths are dummies
+(approved for each test as with --force-sdk, so the SDK policy boundary in device_command lets them through)."""
+import contextlib
+import io
 import os
 import unittest
-from clean.runner import build
+from unittest.mock import patch
+
+from clean.runner import build, sdk
 
 CLANG = "dummy-clang"
 ROCM = os.path.join("dummy-rocm", "7.2")
@@ -14,6 +19,21 @@ def cuid_flags(cmd):
 
 
 class DeviceCommandCuid(unittest.TestCase):
+    def setUp(self):
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(patch.object(sdk, "_approved", set()))
+        stack.enter_context(patch.object(sdk, "_spellings", {}))
+        stack.enter_context(patch.object(sdk, "_bannered", set()))
+        stack.enter_context(contextlib.redirect_stdout(io.StringIO()))   # the policy banner
+        sdk.approve(ROCM)
+        sdk.approve(CLANG)
+
+    def test_unapproved_dummies_are_refused(self):
+        """Without the approval the boundary refuses the dummy SDK (the reason for setUp)."""
+        with patch.object(sdk, "_approved", set()), self.assertRaises(SystemExit):
+            build.device_command(CLANG, ROCM, SRC, "swin.co")
+
     def test_cuid_flag_is_in_the_command(self):
         cmd = build.device_command(CLANG, ROCM, SRC, os.path.join("out", "post_w64.co"))
         self.assertEqual(cuid_flags(cmd), ["-cuid=wg_post_w64"])

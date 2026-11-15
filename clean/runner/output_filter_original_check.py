@@ -450,13 +450,16 @@ def large_check(args, model, taps, frames=3):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", required=True)
+    from clean.runner import sdk  # the HIP SDK policy: --rocm, --force-sdk
     ap.add_argument("--rocm", required=True)
+    sdk.add_force_argument(ap)
     ap.add_argument("--models", required=True, help="work directory for the synthetic models of this test")
     ap.add_argument("--json", required=True)
     ap.add_argument("--baseline-build", help="a runtime build from before this change (test 5)")
     ap.add_argument("--frames", type=int, default=24)
     ap.add_argument("--large", action="store_true", help="also 1706x960 -> 2560x1440 (test 6)")
     args = ap.parse_args()
+    sdk.apply(args)   # --rocm: an official SDK, or a custom one with --force-sdk
     root = Path(args.models)
     if (root / "model.wgcm").exists():
         raise ValueError("refusing to write synthetic parameters into a converted-model directory")

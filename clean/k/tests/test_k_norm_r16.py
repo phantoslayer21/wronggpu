@@ -12,6 +12,7 @@ import unittest
 
 import numpy as np
 
+from clean.runner.sdk import OFFICIAL_ROCM  # noqa: E402  (the official HIP SDK, never ROCM_PATH)
 from clean.runner.build import device_command, find_clang
 from clean.runner.hip import Hip
 
@@ -22,7 +23,7 @@ class TestNormR16(unittest.TestCase):
         if not build:
             self.skipTest("GPU only: set WG_K_GPU_BUILD and use shared GPU lock")
         root = Path(__file__).resolve().parents[3]
-        sdk = os.environ.get("WG_K_TEST_ROCM") or os.environ.get("ROCM_PATH") or r"C:\Program Files\AMD\ROCm\7.2"
+        sdk = OFFICIAL_ROCM
         obj = Path(build).resolve() / "k_norm_r16_probe.co"
         cmd = device_command(find_clang(sdk), sdk,
                              str(Path(__file__).with_name("k_norm_r16_probe.hip")), str(obj),
@@ -30,7 +31,7 @@ class TestNormR16(unittest.TestCase):
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode:
             raise RuntimeError(result.stdout + result.stderr)
-        dev = Hip(os.environ.get("ROCM_PATH", ""))
+        dev = Hip(OFFICIAL_ROCM)
         mod = dev.load_module(obj.read_bytes())
         original = dev.get_function(mod, "k_norm_r16_original")
         for name in ("k_norm_r16_candidate", "k_norm_r16_candidate_select"):

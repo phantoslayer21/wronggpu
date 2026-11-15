@@ -26,6 +26,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 from clean.runner import perf_variants as PV  # noqa: E402
+from clean.runner import sdk  # noqa: E402
 from clean.runner import variants as V  # noqa: E402
 from clean.k.runner import k_build  # noqa: E402  (model K kernels, clean/k)
 KERNEL_DIR = os.path.join(os.path.dirname(HERE), "kernels")
@@ -152,23 +153,18 @@ ARCH = os.environ.get("WG_GPU_ARCH", "gfx1201")  # primary target: gfx1201 (RX 9
 EXTRA_ARCHS = []
 
 
-def find_clang(rocm):
-    exe = "clang.exe" if sys.platform == "win32" else "clang"
-    if rocm:
-        for sub in ("bin", os.path.join("lib", "llvm", "bin"), os.path.join("llvm", "bin")):
-            p = os.path.join(rocm, sub, exe)
-            if os.path.exists(p):
-                return p
-    p = shutil.which(exe)
-    if p:
-        return p
-    raise SystemExit("clang not found; pass --clang")
+def find_clang(rocm=None):
+    """The HIP SDK's clang (rocm: the SDK folder, default the newest official install; clean/runner/sdk.py checks it).
+    Never from PATH or an environment variable."""
+    return sdk.compiler(rocm or sdk.resolve(), None)
 
 
 def device_command(clang, rocm, src, out, device_libs=True, report=False, extra=(), soft_fp8=False, defines=None):
     # a fixed compilation-unit id from the output file's name, so the __hip_cuid_... symbol of a code object is the same
     # in every build folder (without -cuid, clang derives the id itself)
     cuid = "wg_" + re.sub(r"[^A-Za-z0-9_]", "_", os.path.splitext(os.path.basename(out))[0])
+    # the SDK policy's boundary (clean/runner/sdk.py): every HIP compile of every entry point passes here
+    sdk.check(rocm or sdk.resolve(), clang)
     cmd = [clang, "-x", "hip", f"--offload-arch={ARCH}", "--cuda-device-only", "-nogpuinc", "-O3",
            "--no-gpu-bundle-output", f"-cuid={cuid}"]
     if device_libs:
@@ -199,13 +195,12 @@ def runtime_library_name():
     return "wronggpu_runtime.dll" if sys.platform == "win32" else "libwg_runtime.so"
 
 
-def find_host_cxx(rocm):
+def find_host_cxx(rocm=None):
+    """Windows: the HIP SDK's clang++ (rocm: the SDK folder, default the official one), never one from PATH; other
+    systems: clang++ or g++ from PATH."""
     exe = "clang++.exe" if sys.platform == "win32" else "clang++"
-    if sys.platform == "win32" and rocm:
-        for sub in ("bin", os.path.join("lib", "llvm", "bin"), os.path.join("llvm", "bin")):
-            p = os.path.join(rocm, sub, exe)
-            if os.path.exists(p):
-                return p
+    if sys.platform == "win32":
+        return sdk.compiler(rocm or sdk.resolve(), None, default="clang++")
     p = shutil.which(exe) or shutil.which("g++")
     if p:
         return p
@@ -353,9 +348,22 @@ def build_runtime(cxx, out_dir, embed=True):
     run(runtime_command(cxx, os.path.join(out_dir, runtime_library_name()), embedded))
 
 
+def echo(cmd):
+    """Print a command line; a custom (forced) SDK or compiler appears by id only."""
+    print(sdk.redact(" ".join(f'"{c}"' if " " in c else c for c in cmd)), flush=True)
+
+
+def run_captured(cmd):
+    """Run a compiler with its output captured (so diagnostics naming a custom SDK can be redacted)."""
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+
 def run(cmd):
-    print(" ".join(f'"{c}"' if " " in c else c for c in cmd), flush=True)
-    r = subprocess.run(cmd)
+    echo(cmd)
+    r = run_captured(cmd)
+    sys.stdout.write(sdk.redact(r.stdout or ""))
+    sys.stderr.write(sdk.redact(r.stderr or ""))
+    sys.stdout.flush()
     if r.returncode != 0:
         raise SystemExit(f"build failed ({r.returncode})")
 
@@ -418,12 +426,13 @@ def resource_report(text):
 
 def run_post_w64(cmd, out_dir, gate=True, report_name=POST_W64_REPORT, gates=None):
     """Build post_w64.co with the resource report (written to POST_W64_REPORT) and check POST_W64_GATE (or `gates`)."""
-    print(" ".join(f'"{c}"' if " " in c else c for c in cmd), flush=True)
-    r = subprocess.run(cmd, stderr=subprocess.PIPE, text=True)
+    echo(cmd)
+    r = run_captured(cmd)
+    sys.stdout.write(sdk.redact(r.stdout or ""))
     with open(os.path.join(out_dir, report_name), "w") as f:
-        f.write(r.stderr)
+        f.write(sdk.redact(r.stderr or ""))
     if r.returncode != 0:
-        sys.stderr.write(r.stderr)
+        sys.stderr.write(sdk.redact(r.stderr or ""))
         raise SystemExit(f"build failed ({r.returncode})")
     rep = resource_report(r.stderr)
     bad = []
@@ -440,7 +449,7 @@ def run_post_w64(cmd, out_dir, gate=True, report_name=POST_W64_REPORT, gates=Non
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--rocm", default=os.environ.get("ROCM_PATH", ""), help="ROCm / HIP SDK directory")
+    sdk.add_arguments(ap)
     ap.add_argument("--out", required=True, help="output directory for the code objects")
     ap.add_argument("--clang", help="clang executable (default: from --rocm, then PATH)")
     ap.add_argument("--no-device-libs", action="store_true", help="add -nogpulib instead of the ROCm device libs")
@@ -488,6 +497,12 @@ def main(argv=None):
                          "code objects and its map built in (with --runtime-only and --rocm its code objects are built "
                          "first, for every target); its D3D12 kernels come from clean/dx12/build_dx12.py --model-l")
     args = ap.parse_args(argv)
+    rocm_given = bool(args.rocm)   # release runtime builds reuse pinned Model L code objects unless --rocm is given
+    # the HIP SDK only when something needs it: --emu-only builds the host emulator with the host compiler alone
+    if not args.emu_only or args.runtime_only or args.motion_outres_only:
+        args.rocm = sdk.resolve(args.rocm, args.force_sdk)
+        if args.clang:   # the SDK's own compiler (a bare name means the SDK's file); another one only with --force-sdk
+            args.clang = sdk.compiler(args.rocm, args.clang, args.force_sdk)
     for name in OPTIONAL_MODELS:
         set_model(name, not getattr(args, "no_model_" + name.lower()))
     set_model_l(args.model_l)
@@ -502,13 +517,15 @@ def main(argv=None):
     if any(a not in ("gfx1200", "gfx1201") for a in [ARCH] + EXTRA_ARCHS):
         raise SystemExit("supported release targets are gfx1200 and gfx1201 only")
     if args.runtime_only:
-        if MODEL_L and args.rocm:  # Model L's code objects next to the given ones (release builds reuse pinned ones)
+        if MODEL_L and rocm_given:  # Model L's code objects next to the given ones (release builds reuse pinned ones)
             clang = args.clang or find_clang(args.rocm)
             build_device_l(clang, args.rocm, args.out, device_libs=not args.no_device_libs)
             for arch in EXTRA_ARCHS:
                 build_device_l(clang, args.rocm, os.path.join(args.out, arch), device_libs=not args.no_device_libs,
                                arch=arch)
-        build_runtime(args.runtime_cxx or find_host_cxx(args.rocm), args.out, embed=not args.no_embed)
+        cxx = args.runtime_cxx or find_host_cxx(args.rocm)
+        print(sdk.banner(args.rocm, cxx=cxx, device_libs=False), flush=True)
+        build_runtime(cxx, args.out, embed=not args.no_embed)
         return
     if args.motion_outres_only:
         if not args.rocm and not args.no_device_libs:
@@ -517,7 +534,8 @@ def main(argv=None):
         for arch in EXTRA_ARCHS:
             sub = [sys.executable, os.path.abspath(__file__), "--out", os.path.join(args.out, arch),
                    "--motion-outres-only"]
-            sub += (["--rocm", args.rocm] if args.rocm else []) + (["--clang", args.clang] if args.clang else [])
+            sub += ["--rocm", args.rocm] + (["--force-sdk"] if args.force_sdk else [])
+            sub += ["--clang", args.clang] if args.clang else []
             sub += (["--no-device-libs"] if args.no_device_libs else []) + (["--soft-fp8"] if args.soft_fp8 else [])
             sub += ["--no-resource-gate"] if args.no_resource_gate else []
             # as the ordinary branch's child: the defines of an experiment build (without them the child builds the
@@ -637,7 +655,8 @@ def main(argv=None):
     if EXTRA_ARCHS and not args.emu_only:  # the same default code objects for the further targets
         for arch in EXTRA_ARCHS:
             sub = [sys.executable, os.path.abspath(__file__), "--out", os.path.join(args.out, arch), "--no-runtime"]
-            sub += (["--rocm", args.rocm] if args.rocm else []) + (["--clang", args.clang] if args.clang else [])
+            sub += ["--rocm", args.rocm] + (["--force-sdk"] if args.force_sdk else [])
+            sub += ["--clang", args.clang] if args.clang else []
             sub += (["--no-device-libs"] if args.no_device_libs else []) + (["--soft-fp8"] if args.soft_fp8 else [])
             sub += ["--no-model-" + n.lower() for n in OPTIONAL_MODELS if getattr(args, "no_model_" + n.lower())]
             sub += ["--model-l"] if MODEL_L else []
@@ -661,7 +680,9 @@ def main(argv=None):
                                    "profile": V.is_profile(n), "source": V.source(n)} for n in ["base"] + names},
                               f, indent=1)
     if not args.emu_only and not args.no_runtime:
-        build_runtime(args.runtime_cxx or find_host_cxx(args.rocm), args.out, embed=not args.no_embed)
+        cxx = args.runtime_cxx or find_host_cxx(args.rocm)
+        print(sdk.banner(args.rocm, cxx=cxx, device_libs=False), flush=True)
+        build_runtime(cxx, args.out, embed=not args.no_embed)
 
 
 if __name__ == "__main__":
