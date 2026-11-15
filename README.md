@@ -2,8 +2,10 @@
 
 **Model M upscaling and Ray Reconstruction on AMD Radeon RX 9000 graphics cards.**
 
-WrongGPU runs the neural networks behind DLSS super resolution (Model M) and DLSS Ray Reconstruction on Radeon RX
-9000-series cards. Its launcher sets up each of your games and gets the WrongGPU edition of OptiScaler for them. From
+WrongGPU runs its own implementation of the neural networks behind DLSS super resolution (Model M) and DLSS Ray
+Reconstruction on Radeon RX 9000-series cards. The networks' weights come from your own DLSS files; the arithmetic is
+WrongGPU's, so the output is close to DLSS's but not identical to it. Its launcher sets up each of your games and gets
+the WrongGPU edition of OptiScaler for them. From
 this source onward, WrongGPU's source code and its official builds are under the MIT licence (see [Licence](#licence)).
 
 **Download:** the [Releases page](https://github.com/phantoslayer21/wronggpu/releases) (latest: 0.6.0, a pre-release).
