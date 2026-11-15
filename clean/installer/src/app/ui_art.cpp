@@ -25,6 +25,11 @@
 #include "app/jpeg_decode_linux.h"
 #endif
 
+#if defined(_WIN32) && defined(__MINGW32__)
+// llvm-mingw's wincodec.h stops at Fant; the Windows SDK's value of HighQualityCubic (Windows 10 1809 and later)
+#define WICBitmapInterpolationModeHighQualityCubic ((WICBitmapInterpolationMode)4)
+#endif
+
 namespace wg::app::lui {
 
 namespace {

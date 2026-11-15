@@ -7,6 +7,12 @@
 
 #include <d2d1effects.h>
 
+#ifdef __MINGW32__
+// llvm-mingw's d2d1effects.h has the property but not the D2D1_GAUSSIANBLUR_OPTIMIZATION values: the Windows SDK's
+// (SPEED 0, BALANCED 1, QUALITY 2)
+#define D2D1_GAUSSIANBLUR_OPTIMIZATION_QUALITY ((UINT32)2)
+#endif
+
 #ifdef _MSC_VER
 #pragma comment(lib, "dxguid.lib")
 #pragma comment(lib, "d2d1.lib")

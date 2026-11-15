@@ -26,7 +26,7 @@ struct ModelInfo {
 
 constexpr ModelInfo kModelTable[] = {
     {ModelId::M, "M", "preset-M.v1.map.json", "", true},
-    {ModelId::K, "K", "preset-K.v1.map.json", "K", false},
+    {ModelId::K, "K", "preset-K.v1.map.json", "K", true},
     {ModelId::L, "L", "preset-L.v1.map.json", "L", false},
 };
 constexpr size_t kModelCount = sizeof kModelTable / sizeof kModelTable[0];
