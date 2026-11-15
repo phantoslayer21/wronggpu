@@ -17,13 +17,18 @@ int main(int argc, char** argv) {
     };
     write("gfx1200.encoder.co", "gfx1200");
     write("gfx1201.encoder.co", "gfx1201");
+    write("gfx1100.encoder.co", "gfx1100");
+    write("gfx1101.encoder.co", "gfx1101");
     write("encoder.co", "wrong architecture: must never load this unqualified file");
     int checks = 0;
-    for (const char* arch : {"gfx1200", "gfx1201"}) {
+    // The supported targets are the exact names of clean/runner/family.py: gfx12 and gfx11 parts, each with its own code objects.
+    for (const char* arch : {"gfx1200", "gfx1201", "gfx1100", "gfx1101"}) {
         SetEnvironmentVariableA("WG_MOCK_ARCH", arch);
         std::string error;
         auto dev = wgrt::make_hip_device(root, &error, "WrongGPU synthetic device");
         if (!dev || !dev->load_module(root + "/encoder.co")) return 3;
+        ++checks;
+        if (dev->arch() != arch) return 8;
         ++checks;
         if (dev->load_module(root + "/missing.co")) return 4;
         ++checks;
@@ -33,7 +38,8 @@ int main(int argc, char** argv) {
         if (wgrt::make_hip_device(root, &error, "a different adapter")) return 6;
         ++checks;
     }
-    for (const char* arch : {"gfx1100", "gfx1299", "unknown"}) {
+    // No prefix match: gfx1102 / gfx1103 / gfx115x are untested gfx11 parts, gfx1170-1172 are gfx11 names with the gfx12 matrix design
+    for (const char* arch : {"gfx1102", "gfx1103", "gfx1151", "gfx1170", "gfx1299", "gfx11", "unknown"}) {
         SetEnvironmentVariableA("WG_MOCK_ARCH", arch);
         std::string error;
         if (wgrt::make_hip_device(root, &error)) return 7;
