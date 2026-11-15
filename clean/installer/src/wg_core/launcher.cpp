@@ -11,7 +11,10 @@
 #include <shobjidl.h>
 #include <winhttp.h>
 
+#include <algorithm>
 #include <ctime>
+#include <functional>
+#include <memory>
 
 #include "gamerules.h"
 #include "json_writer.h"
@@ -582,8 +585,13 @@ static void SavePrevious(Context& ctx, const wstring& dir, Record m, Ui& ui) {
     if (!MoveFileExW(tmp.c_str(), prev.c_str(), MOVEFILE_WRITE_THROUGH)) Fail(L"Cannot keep the previous version: " + ErrText(GetLastError()));
     ui.log(L"kept WrongGPU " + m.version + L" for Roll back (" + std::to_wstring(n) + L" files in wronggpu-setup\\previous)");
 }
-struct PrevFile { wstring sha, rel; };
-static bool ReadPrevious(const wstring& dir, wstring& version, std::vector<PrevFile>& files);
+// previous.txt (previous\ and a roll back's swap folder): "version=<v>" and one line per payload file of that version:
+// "file=<sha>|<rel>" for a file kept there, or "file=absent:<sha>|<rel>" for a payload file that was missing from the game
+// folder when the version was set aside (<sha>: what the record named for it then, "" none). Roll back takes the file out
+// again then, only while its bytes are the ones WrongGPU put there. An older launcher reads "absent:..." as a hash no kept file
+// has and refuses ("damaged"): it never puts back a mix of two versions.
+struct PrevFile { wstring sha, rel; bool absent = false; };
+static bool ReadPrevious(const wstring& dir, wstring& version, std::vector<PrevFile>& files, wstring* txtSha = nullptr);
 // The kept files must be files of the current install (same names): after the OptiScaler 10 route change the front end
 // moved to OptiScaler's custom slot and the menu plugin is gone, so an earlier version's files can't go back in place.
 static bool PreviousMatchesRecord(const std::vector<PrevFile>& files, const Record& m) {
@@ -601,61 +609,303 @@ bool PreviousFits(const wstring& dir, const Record& m, wstring* version) {
     if (version) *version = v;
     return true;
 }
-static bool ReadPrevious(const wstring& dir, wstring& version, std::vector<PrevFile>& files) {
-    string raw;
-    if (!ReadAll(Join(PreviousDir(dir), L"previous.txt"), raw)) return false;
+static void ParsePrevious(const string& raw, wstring& version, std::vector<PrevFile>& files) {
     for (auto& kv : KeyValues(raw)) {
         if (kv.first == "version") version = FromUtf8(kv.second);
         else if (kv.first == "file") {
             const size_t bar = kv.second.find('|');
-            if (bar != string::npos) files.push_back({FromUtf8(kv.second.substr(0, bar)), FromUtf8(kv.second.substr(bar + 1))});
+            if (bar == string::npos) continue;
+            PrevFile f{FromUtf8(kv.second.substr(0, bar)), FromUtf8(kv.second.substr(bar + 1))};
+            if (f.sha.rfind(L"absent", 0) == 0) { f.absent = true; f.sha = f.sha.size() > 7 && f.sha[6] == L':' ? f.sha.substr(7) : wstring(); }
+            files.push_back(f);
         }
     }
+}
+static bool ReadPrevious(const wstring& dir, wstring& version, std::vector<PrevFile>& files, wstring* txtSha) {
+    string raw;
+    if (!ReadAll(Join(PreviousDir(dir), L"previous.txt"), raw)) return false;
+    if (txtSha) *txtSha = Sha256Bytes(raw.data(), raw.size());
+    ParsePrevious(raw, version, files);
     return true;
+}
+// Every file and link below root (paths below it; a link is listed, never entered).
+static void ListBelow(const wstring& root, const wstring& rel, std::vector<wstring>& out) {
+    std::vector<std::pair<wstring, DWORD>> items;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(Join(rel.empty() ? root : Join(root, rel), L"*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        const wstring n = fd.cFileName;
+        if (n != L"." && n != L"..") items.push_back({n, fd.dwFileAttributes});
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    for (auto& it : items) {
+        const wstring r = rel.empty() ? it.first : rel + L"\\" + it.first;
+        if ((it.second & FILE_ATTRIBUTE_DIRECTORY) && !(it.second & FILE_ATTRIBUTE_REPARSE_POINT)) ListBelow(root, r, out);
+        else out.push_back(r);
+    }
+}
+// A kept version's folder (previous, a roll back's swap folder) is removed file by file: only the files its list names, and
+// only while their bytes are the hash the list states (DeleteIfSha: hashed and deleted through one held handle; never through
+// a link on the way), then the folders that left empty, then root when it is empty. Anything else stays where it is.
+// Returns what stays (paths below root).
+using KeptList = std::vector<std::pair<wstring, wstring>>;  // (path below the folder, SHA-256)
+static std::vector<wstring> RemoveListed(const wstring& root, const KeptList& list) {
+    std::vector<wstring> stay;
+    const DWORD a = GetFileAttributesW(root.c_str());
+    if (a == INVALID_FILE_ATTRIBUTES) return stay;
+    if ((a & FILE_ATTRIBUTE_REPARSE_POINT) || !(a & FILE_ATTRIBUTE_DIRECTORY)) { stay.push_back(BaseName(root) + L" (a link or a file, not a folder)"); return stay; }
+    auto plainRel = [](const wstring& rel) {
+        if (rel.empty() || rel.find(L':') != wstring::npos) return false;
+        wstring part;
+        for (wchar_t c : rel + L"\\") {
+            if (c != L'\\' && c != L'/') { part += c; continue; }
+            if (part.empty() || part == L"." || part == L"..") return false;
+            part.clear();
+        }
+        return true;
+    };
+    auto plainFolder = [](const wstring& d) { const DWORD da = GetFileAttributesW(d.c_str()); return da != INVALID_FILE_ATTRIBUTES && (da & FILE_ATTRIBUTE_DIRECTORY) && !(da & FILE_ATTRIBUTE_REPARSE_POINT); };
+    for (auto& [rel, sha] : list) {
+        if (!plainRel(rel) || sha.empty()) continue;
+        const wstring p = Join(root, rel);
+        bool noLink = true;
+        for (wstring d = Parent(p); d.size() > root.size(); d = Parent(d)) noLink = noLink && plainFolder(d);
+        if (noLink) DeleteIfSha(p, {sha});
+    }
+    for (auto& [rel, sha] : list) {  // the folders left empty (one with anything in it stays; a link is never removed)
+        if (!plainRel(rel)) continue;
+        for (wstring d = Parent(Join(root, rel)); d.size() > root.size(); d = Parent(d))
+            if (plainFolder(d)) RemoveDirectoryW(d.c_str());
+    }
+    if (RemoveDirectoryW(root.c_str()) || !IsDir(root)) return stay;
+    ListBelow(root, L"", stay);
+    if (stay.empty()) stay.push_back(BaseName(root) + L" (in use)");
+    return stay;
+}
+static KeptList KeptListOf(const std::vector<PrevFile>& files, const wstring& txtSha) {
+    KeptList l;
+    for (auto& f : files) if (!f.absent) l.push_back({f.rel, f.sha});
+    l.push_back({L"previous.txt", txtSha});  // the list itself last, only while its bytes are the ones read
+    return l;
+}
+// Swap folders an earlier roll back left (stopped before the end): removed by their own lists, as above (keep: the folder in use).
+static void RemoveStaleSwaps(Context& ctx, const wstring& dir, const wstring& keep, std::vector<wstring>& warnings) {
+    for (auto& d : ListDirs(StateDir(dir))) {
+        if (!StartsWithI(BaseName(d), L"previous.swap") || IEq(d, keep)) continue;
+        string raw;
+        wstring v;
+        std::vector<PrevFile> fs;
+        const bool listed = ReadAll(Join(d, L"previous.txt"), raw);
+        if (listed) ParsePrevious(raw, v, fs);
+        const auto stay = RemoveListed(d, KeptListOf(fs, listed ? Sha256Bytes(raw.data(), raw.size()) : wstring()));
+        if (stay.empty()) continue;
+        warnings.push_back(LeftText(L"wronggpu-setup\\" + BaseName(d), stay));
+        LogLine(ctx, L"rollback: " + warnings.back());
+    }
 }
 static void Rollback(Context& ctx, const wstring& dir, Ui& ui, OpResult& res) {
     Record m;
     if (!LoadRecord(RecordPath(dir), m) || m.legacy) Fail(L"No WrongGPU installation record was found in " + dir + L".", EXIT_NOT_INSTALLED);
     if (!m.exe.empty() && GameRunning(m.exe)) Fail(BaseName(m.exe) + L" is running. Close it first.", EXIT_REFUSED);
-    wstring version;
+    wstring version, txtSha;
     std::vector<PrevFile> files;
-    if (!ReadPrevious(dir, version, files) || files.empty()) Fail(L"There is no earlier version to roll back to in " + dir + L".", EXIT_NOT_INSTALLED);
+    if (!ReadPrevious(dir, version, files, &txtSha) || files.empty()) Fail(L"There is no earlier version to roll back to in " + dir + L".", EXIT_NOT_INSTALLED);
     const wstring prev = PreviousDir(dir);
     if (!PreviousMatchesRecord(files, m))
         Fail(L"WrongGPU " + version + L" used a different OptiScaler setup, so it can't be put back here. Nothing was changed. Uninstall and install that version instead.", EXIT_REFUSED);
-    for (auto& f : files) if (Sha256File(Join(prev, f.rel)) != f.sha) Fail(L"The kept earlier version is damaged (" + f.rel + L"). Nothing was changed.", EXIT_FAILED);
+    // Staged: every earlier file is held (PinnedFile: one handle, no write, rename or delete sharing) and hashed through it before
+    // anything in the game folder changes; the writes copy through these same handles. A damaged one: nothing changes.
+    std::vector<std::unique_ptr<PinnedFile>> src(files.size());
+    for (size_t i = 0; i < files.size(); ++i) {
+        if (files[i].absent) continue;
+        src[i] = std::make_unique<PinnedFile>();
+        if (!src[i]->Open(Join(prev, files[i].rel), false) || !IEq(src[i]->Sha256(), files[i].sha))
+            Fail(L"The kept earlier version is damaged (" + files[i].rel + L"). Nothing was changed.", EXIT_FAILED);
+    }
     InferOwners(ctx, m);
-    // the current files become the new "previous" (Roll back twice = back to this version)
-    const wstring swap = prev + L".swap";
-    RemoveTree(swap);
-    EnsureDir(swap);
+    // The ownership rule (record.h): a payload file in the game folder is overwritten or removed only while its bytes are the ones
+    // the record says WrongGPU installed there. Every file of the roll back is held first (one handle, as above), hashed through
+    // that handle and compared with the record; the files are then copied out and overwritten (or, where the earlier version had
+    // none, deleted) through the same handles, all held until the record names the earlier version. A file with other bytes (the
+    // player's, another program's), a link, a hard-linked file, or a file that appears where one was missing is never touched:
+    // the roll back stops before anything changes and names it (a roll back that skips one file would mix two versions). A write
+    // that fails part way puts every file already changed back from its copy, through its handle; the record stays as it was.
+    enum class Kind { Replace, Create, Remove, Stay };  // Stay: absent in both versions, nothing to do in the game folder
+    struct Held { const PrevFile* f; PinnedFile* src; wstring t; std::unique_ptr<PinnedFile> h; Kind kind; wstring swapSha; bool touched = false; };
+    std::vector<Held> held;
+    auto recOf = [&](const wstring& rel) -> Entry* { for (auto& e : m.e) if (e.action == L"copy" && IEq(e.rel, rel)) return &e; return nullptr; };
+    std::vector<wstring> notOurs, missing;
+    auto cannot = [&](const wstring& rel, DWORD err) {
+        if (err == ERROR_SHARING_VIOLATION || err == ERROR_ACCESS_DENIED || err == ERROR_LOCK_VIOLATION)
+            Fail(L"Cannot roll back " + rel + L": another program has it open. Close it and try again. Nothing was changed.", EXIT_REFUSED);
+        Fail(L"Cannot roll back " + rel + L": " + ErrText(err) + L" Nothing was changed.");
+    };
+    wstring staging;    // the new folder the current files are copied into (previous\ once the roll back is complete)
+    KeptList staged;    // what is in it: (path below it, SHA-256)
+    bool done = false, undone = false;
+    // Puts back what the roll back changed so far: a changed file from its copy in the staging folder (hash-checked, through the
+    // handle held since the check), a file it created deleted through its handle, a file it deleted created again only where
+    // nothing is. Returns what could not be put back.
+    auto undo = [&]() {
+        std::vector<wstring> notBack;
+        for (auto& x : held) {
+            if (x.kind == Kind::Create) {
+                if (x.h && x.h->IsOpen() && !x.h->Delete()) notBack.push_back(x.f->rel);
+                continue;
+            }
+            if (!x.touched) continue;
+            const wstring copy = Join(staging, x.f->rel);
+            bool back = false;
+            if (x.kind == Kind::Replace) back = x.h->Overwrite(copy, x.swapSha) && IEq(x.h->Sha256(), x.swapSha);
+            else if (x.kind == Kind::Remove) {
+                PinnedFile c;
+                back = c.Create(x.t) && c.Overwrite(copy, x.swapSha);
+                if (!back && c.IsOpen()) c.Delete();
+            }
+            if (back) x.touched = false;
+            else notBack.push_back(x.f->rel);
+        }
+        return notBack;
+    };
+    auto abandon = [&]() {  // undo, and the staging folder goes when everything is back (it holds the only copy otherwise)
+        undone = true;
+        const std::vector<wstring> notBack = undo();
+        if (notBack.empty() && !staging.empty()) RemoveListed(staging, staged);
+        return notBack;
+    };
+    struct Guard { std::function<void()> f; ~Guard() { f(); } } guard{[&] { if (!done && !undone) abandon(); }};  // a stop by an error
+    for (size_t i = 0; i < files.size(); ++i) {
+        const PrevFile& f = files[i];
+        const wstring t = Target(dir, f.rel);
+        const Entry* rec = recOf(f.rel);
+        auto h = std::make_unique<PinnedFile>();
+        DWORD err = 0;
+        if (!h->Open(t, true, &err)) {
+            if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+                if (f.absent) held.push_back({&f, nullptr, t, nullptr, Kind::Stay});
+                else missing.push_back(f.rel);
+            } else if (err == ERROR_TOO_MANY_LINKS) notOurs.push_back(f.rel + L" (it has another name, a hard link)");
+            else if (err == ERROR_NOT_SUPPORTED) notOurs.push_back(f.rel + L" (a link or a folder now)");
+            else cannot(f.rel, err);
+            continue;
+        }
+        const wstring now = h->Sha256();
+        if (now.empty()) cannot(f.rel, ERROR_READ_FAULT);
+        if (!rec || rec->inst.empty() || !IEq(now, rec->inst)) {  // (h closes: left as it is)
+            notOurs.push_back(f.absent ? f.rel + L" (WrongGPU " + version + L" had no such file, and this is not the one WrongGPU put back)" : f.rel);
+            continue;
+        }
+        held.push_back({&f, src[i].get(), t, std::move(h), f.absent ? Kind::Remove : Kind::Replace});
+    }
+    // missing ones (the player deleted one): created only where nothing is, and held like the others
+    if (notOurs.empty() && !missing.empty()) RestoreStep("rollback-absent");  // the tests create a file here (it must stay)
+    if (notOurs.empty())
+        for (size_t i = 0; i < files.size(); ++i) {
+            const PrevFile& f = files[i];
+            if (f.absent || std::find(missing.begin(), missing.end(), f.rel) == missing.end()) continue;
+            const wstring t = Target(dir, f.rel);
+            EnsureDir(Parent(t));
+            auto h = std::make_unique<PinnedFile>();
+            DWORD err = 0;
+            if (h->Create(t, &err)) { held.push_back({&f, src[i].get(), t, std::move(h), Kind::Create}); continue; }
+            if (err == ERROR_FILE_EXISTS || err == ERROR_ALREADY_EXISTS) notOurs.push_back(f.rel + L" (it appeared a moment ago)");
+            else cannot(f.rel, err);
+        }
+    if (!notOurs.empty()) {
+        wstring names;
+        for (auto& n : notOurs) names += (names.empty() ? L"" : L", ") + n;
+        for (auto& n : notOurs) res.warnings.push_back(L"Left in place (not the file WrongGPU installed): " + n);
+        Fail(L"Can't roll back: " + names + (notOurs.size() == 1 ? L" is" : L" are") +
+                 L" not the file WrongGPU " + m.version + L" installed (changed since, by you or another program). Nothing was changed. "
+                 L"Put WrongGPU's file back with Repair, or keep yours and stay on " + m.version + L".",
+             EXIT_REFUSED);
+    }
+    RestoreStep("rollback-held");  // every file held and checked: the tests try to change one here (they cannot)
+    // the current files become the new "previous" (Roll back twice = back to this version), copied through the held handles into
+    // a new folder (an earlier roll back's swap folder is never cleared here: it goes, by its list, once this one is complete)
+    for (int n = 1; n < 100 && staging.empty(); ++n) {
+        const wstring s = prev + (n == 1 ? wstring(L".swap") : L".swap-" + std::to_wstring(n));
+        if (CreateDirectoryW(s.c_str(), nullptr)) { staging = s; break; }
+        const DWORD e = GetLastError();
+        if (e != ERROR_ALREADY_EXISTS) Fail(L"Cannot create " + s + L": " + ErrText(e) + L" Nothing was changed.");
+    }
+    if (staging.empty()) Fail(L"Cannot keep WrongGPU " + m.version + L" for a later update: wronggpu-setup holds too many previous.swap folders. Nothing was changed.");
     string list = "; WrongGPU launcher: the version before the last roll back\r\nversion=" + ToUtf8(m.version) + "\r\n";
-    for (auto& f : files) {
-        const wstring t = Target(dir, f.rel);
-        if (!IsFile(t)) continue;
-        const wstring h = Sha256File(t);
-        CopyChecked(t, Join(swap, f.rel));
-        list += "file=" + ToUtf8(h) + "|" + ToUtf8(f.rel) + "\r\n";
+    for (auto& x : held) {
+        if (x.kind == Kind::Create || x.kind == Kind::Stay) {  // missing now: recorded as absent, so a second roll back takes it out again
+            const Entry* rec = recOf(x.f->rel);
+            list += "file=absent:" + ToUtf8(rec ? rec->inst : wstring()) + "|" + ToUtf8(x.f->rel) + "\r\n";
+            continue;
+        }
+        const wstring to = Join(staging, x.f->rel);
+        EnsureDir(Parent(to));
+        DWORD err = 0;
+        if (!x.h->CopyOut(to, &x.swapSha, &err)) Fail(L"Cannot keep " + x.f->rel + L" for a later update: " + ErrText(err) + L" Nothing was changed.");
+        staged.push_back({x.f->rel, x.swapSha});
+        list += "file=" + ToUtf8(x.swapSha) + "|" + ToUtf8(x.f->rel) + "\r\n";
     }
-    WriteFileAtomic(Join(swap, L"previous.txt"), list.data(), list.size());
-    // the earlier files go in, then the record names their hashes
-    for (auto& f : files) {
-        const wstring t = Target(dir, f.rel);
-        CopyChecked(Join(prev, f.rel), t);
-        if (Sha256File(t) != f.sha) Fail(L"Verification failed after putting back " + f.rel);
-        for (auto& e : m.e) if (e.action == L"copy" && IEq(e.rel, f.rel)) e.inst = f.sha;
-        if (IEq(f.rel, L"wronggpu_runtime.dll")) m.runtimeSha = f.sha;
-        else if (IsOptiFrontEnd(f.rel) || IEq(f.rel, L"amd_fidelityfx_dx12.dll")) m.frontEndSha = f.sha;
-        else if (IEq(f.rel, kAsiPlugin)) m.pluginSha = f.sha;
-        else if (IsRrPlugin(f.rel)) m.rrPluginSha = f.sha;  // the payload line's RR plugin build (rc6)
-        ui.log(L"rolled back " + f.rel);
+    WriteFileAtomic(Join(staging, L"previous.txt"), list.data(), list.size());
+    staged.push_back({L"previous.txt", Sha256Bytes(list.data(), list.size())});
+    // the earlier files go in through the held handles (the files the earlier version had none of go last, deleted through theirs)
+    wstring failed;
+    DWORD ferr = 0;
+    for (auto& x : held) {
+        if (x.kind != Kind::Replace && x.kind != Kind::Create) continue;
+        x.touched = true;  // from here its bytes may differ: put back on a failure
+        if (TestFault("rollback-write")) { x.h->OverwriteBytes("torn", 4); ferr = ERROR_WRITE_FAULT; failed = x.f->rel; break; }
+        if (!x.h->OverwriteFrom(*x.src, x.f->sha, &ferr)) { failed = x.f->rel; break; }
+        if (!IEq(x.h->Sha256(), x.f->sha)) { ferr = ERROR_FILE_CORRUPT; failed = x.f->rel; break; }
     }
+    if (failed.empty())
+        for (auto& x : held) {
+            if (x.kind != Kind::Remove) continue;
+            if (!x.h->Delete(&ferr)) { failed = x.f->rel; break; }  // (not deleted: unchanged)
+            x.touched = true;
+        }
+    auto undoneText = [&](const std::vector<wstring>& notBack) {
+        if (notBack.empty()) return L" The roll back was undone: the files are WrongGPU " + m.version + L"'s again, and nothing else was changed.";
+        wstring names;
+        for (auto& n : notBack) names += (names.empty() ? L"" : L", ") + n;
+        return L" Undoing the roll back failed for " + names + L"; WrongGPU " + m.version + L"'s files are kept in " + staging + L". Repair puts WrongGPU's files back.";
+    };
+    if (!failed.empty()) Fail(L"Cannot put back " + failed + L": " + ErrText(ferr) + undoneText(abandon()));
+    // only now, with every earlier file in, the record names the earlier version (a failure to save it undoes the roll back)
     const wstring newer = m.version;
+    for (auto& x : held) {
+        const PrevFile& f = *x.f;
+        if (!f.sha.empty()) {  // (an absent file's: the hash the record named then; none: the entry keeps its own)
+            if (Entry* e = recOf(f.rel)) e->inst = f.sha;
+            if (IEq(f.rel, L"wronggpu_runtime.dll")) m.runtimeSha = f.sha;
+            else if (IsOptiFrontEnd(f.rel) || IEq(f.rel, L"amd_fidelityfx_dx12.dll")) m.frontEndSha = f.sha;
+            else if (IEq(f.rel, kAsiPlugin)) m.pluginSha = f.sha;
+            else if (IsRrPlugin(f.rel)) m.rrPluginSha = f.sha;  // the payload line's RR plugin build (rc6)
+        }
+        if (x.kind == Kind::Remove) ui.log(L"removed " + f.rel + L" (WrongGPU " + version + L" had none)");
+        else if (x.kind != Kind::Stay) ui.log(L"rolled back " + f.rel);
+    }
     m.version = version; m.payloadVersion = version;
-    SaveRecord(RecordPath(dir), m);
+    try {
+        SaveRecord(RecordPath(dir), m);
+    } catch (const SetupError& e) {
+        Fail(L"Cannot save the installation record (" + e.msg + L")." + undoneText(abandon()));
+    }
+    done = true;
+    for (auto& x : held) if (x.h) x.h->Close();
+    src.clear();  // (the earlier files are released: they are removed below)
     WriteOwnedFiles(dir, m);
-    RemoveTree(prev);
-    if (!MoveFileExW(swap.c_str(), prev.c_str(), MOVEFILE_WRITE_THROUGH)) res.warnings.push_back(L"the newer version could not be kept for a later update: " + ErrText(GetLastError()));
+    // Only now, with the earlier files in and the record naming them, the kept folder goes: file by file, only what its list
+    // names with the stated bytes; anything else stays and is said. The staging folder then takes its place.
+    const std::vector<wstring> stay = RemoveListed(prev, KeptListOf(files, txtSha));
+    if (!stay.empty()) {
+        res.warnings.push_back(LeftText(L"wronggpu-setup\\previous", stay));
+        LogLine(ctx, L"rollback: " + res.warnings.back());
+        RemoveListed(staging, staged);
+        res.warnings.push_back(L"WrongGPU " + newer + L" could not be kept for a later update: wronggpu-setup\\previous still holds the files above.");
+    } else if (!MoveFileExW(staging.c_str(), prev.c_str(), MOVEFILE_WRITE_THROUGH)) {
+        res.warnings.push_back(L"the newer version could not be kept for a later update: " + ErrText(GetLastError()));
+    }
+    RemoveStaleSwaps(ctx, dir, staging, res.warnings);
     res.message = L"Rolled back from " + newer + L" to " + version + L" (" + std::to_wstring(files.size()) + (files.size() == 1 ? L" file)" : L" files)");
 }
 

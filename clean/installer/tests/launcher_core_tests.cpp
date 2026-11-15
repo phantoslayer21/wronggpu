@@ -775,6 +775,535 @@ int main() {
                     require(restore(d, false) && read(Join(d, L"wronggpu.ini")) == A && !IsFile(Join(d, L"other.dll")) && !IsDir(StateDir(d)),
                             "interrupted: ...once it is free, the restore runs (the original back, WrongGPU's file gone)");
                 }
+                // ---- #184: Roll back puts the earlier payload only over files whose bytes are the ones the record says WrongGPU
+                // installed, each held (one handle) from the check to the write; anything else stops it before any change ----------
+                {
+                    const string N = "the newer runtime WrongGPU installed (synthetic)", E = "the earlier runtime kept for Roll back (synthetic)",
+                                 N2 = "the newer front end WrongGPU installed (synthetic)", E2 = "the earlier front end kept for Roll back (synthetic)",
+                                 X = "the player's own build put over it (synthetic)";
+                    const wstring rt = L"wronggpu_runtime.dll", fe = L"wronggpu_ffx_dx12.dll";
+                    auto rbGame = [&](const wstring& name) {
+                        const wstring d = ownGame(L"Rollback " + name, {{rt, L"copy", "", N, N}, {fe, L"copy", "", N2, N2}});
+                        const wstring pv = Join(StateDir(d), L"previous");
+                        file(Join(pv, rt), E);
+                        file(Join(pv, fe), E2);
+                        file(Join(pv, L"previous.txt"), "version=0.6.0\r\nfile=" + ToUtf8(H(E)) + "|" + ToUtf8(rt) + "\r\nfile=" + ToUtf8(H(E2)) + "|" + ToUtf8(fe) + "\r\n");
+                        return d;
+                    };
+                    auto rollback = [&](const wstring& d) { OpRequest q; q.op = Op::Rollback; q.dir = d; return RunOp(mc, q, quiet); };
+                    auto inst = [&](const wstring& d, const wstring& rel) {
+                        Record r;
+                        if (!LoadRecord(RecordPath(d), r)) return wstring(L"(no record)");
+                        for (auto& e : r.e) if (e.action == L"copy" && IEq(e.rel, rel)) return Lower(e.inst);
+                        return wstring(L"(no entry)");
+                    };
+                    auto prevTxt = [&](const wstring& d) { return read(Join(StateDir(d), L"previous\\previous.txt")); };
+                    auto untouched = [&](const wstring& d, const string& runtimeNow) {  // nothing of the roll back happened
+                        return read(Join(d, rt)) == runtimeNow && read(Join(d, fe)) == N2 && inst(d, rt) == Lower(H(N)) && inst(d, fe) == Lower(H(N2)) &&
+                               prevTxt(d).find("version=0.6.0") != string::npos && read(Join(StateDir(d), L"previous\\" + rt)) == E && !IsDir(Join(StateDir(d), L"previous.swap"));
+                    };
+                    SetRestoreStepHook(nullptr);
+                    {  // the ordinary case: both files are WrongGPU's
+                        const wstring d = rbGame(L"ours");
+                        const OpResult r = rollback(d);
+                        require(r.code == EXIT_OK && read(Join(d, rt)) == E && read(Join(d, fe)) == E2 && inst(d, rt) == Lower(H(E)) && inst(d, fe) == Lower(H(E2)) &&
+                                    prevTxt(d).find("version=0.6.1") != string::npos && read(Join(StateDir(d), L"previous\\" + rt)) == N && read(Join(StateDir(d), L"previous\\" + fe)) == N2,
+                                "rollback (#184): files that are WrongGPU's get the earlier version; the newer one is kept for a later update, the record names the earlier hashes");
+                    }
+                    {  // a payload file the player replaced since the update: kept as it is, nothing else changes, the result names it
+                        const wstring d = rbGame(L"player changed");
+                        file(Join(d, rt), X);
+                        const OpResult r = rollback(d);
+                        bool listed = false;
+                        for (auto& w : r.warnings) listed = listed || w.find(rt) != wstring::npos;
+                        require(r.code == EXIT_REFUSED && r.message.find(rt) != wstring::npos && r.message.find(L"Nothing was changed") != wstring::npos && listed &&
+                                    untouched(d, X),
+                                "rollback (#184): a payload file the player changed is not overwritten (kept as it is); nothing else changes; the result names it");
+                    }
+                    {  // a hard-linked payload file: never written through
+                        const wstring d = rbGame(L"hard link");
+                        const wstring link = Join(d, L"players-link.dll");
+                        const bool made = CreateHardLinkW(link.c_str(), Join(d, rt).c_str(), nullptr) != 0;
+                        const OpResult r = rollback(d);
+                        require(made && r.code == EXIT_REFUSED && r.message.find(L"hard link") != wstring::npos && untouched(d, N) && read(link) == N,
+                                "rollback (#184): a payload file with another name (a hard link) is not written through; both names keep their bytes");
+                        DeleteFileW(link.c_str());
+                    }
+                    {  // a swap between the check and the write: the files are held from the check on, every way to change one fails
+                        const wstring d = rbGame(L"held");
+                        const wstring p = Join(d, rt), other = Join(d, L"another-program.tmp");
+                        file(other, X);
+                        int attacks = 0, calls = 0;
+                        SetRestoreStepHook([&](const char* s) {
+                            if (string(s) != "rollback-held") return;
+                            ++calls;
+                            const DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+                            if (DeleteFileW(p.c_str())) ++attacks;
+                            if (MoveFileExW(p.c_str(), (p + L".moved").c_str(), 0)) ++attacks;
+                            if (MoveFileExW(other.c_str(), p.c_str(), MOVEFILE_REPLACE_EXISTING)) ++attacks;
+                            for (DWORD access : {(DWORD)GENERIC_WRITE, (DWORD)DELETE}) {
+                                HANDLE h = CreateFileW(p.c_str(), access, share, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                                if (h != INVALID_HANDLE_VALUE) { ++attacks; CloseHandle(h); }
+                            }
+                        });
+                        const OpResult r = rollback(d);
+                        SetRestoreStepHook(nullptr);
+                        require(r.code == EXIT_OK && calls == 1 && attacks == 0 && read(other) == X && read(p) == E && read(Join(StateDir(d), L"previous\\" + rt)) == N,
+                                "rollback (#184): between the check and the write, deleting, renaming, replacing and writing a held file all fail; the roll back acts on the checked file");
+                    }
+                    {  // a missing payload file is created only where nothing is
+                        const wstring d = rbGame(L"missing");
+                        DeleteFileW(Join(d, rt).c_str());
+                        const OpResult r = rollback(d);
+                        require(r.code == EXIT_OK && read(Join(d, rt)) == E && read(Join(d, fe)) == E2 && inst(d, rt) == Lower(H(E)),
+                                "rollback (#184): a payload file the player deleted is created again with the earlier bytes");
+                        const wstring u = rbGame(L"missing then made");
+                        DeleteFileW(Join(u, rt).c_str());
+                        SetRestoreStepHook([&](const char* s) { if (string(s) == "rollback-absent") file(Join(u, rt), X); });
+                        const OpResult r2 = rollback(u);
+                        SetRestoreStepHook(nullptr);
+                        require(r2.code == EXIT_REFUSED && r2.message.find(L"appeared") != wstring::npos && untouched(u, X),
+                                "rollback (#184): a file another program creates where a payload file was missing is not replaced; nothing else changes");
+                    }
+                    // ---- #209 review: the kept folders go file by file, by their lists, after the writes; a write that fails part way
+                    // is undone through the held handles; a payload file missing at a roll back is recorded as absent ---------------
+                    auto prevFile = [&](const wstring& d, const wstring& rel) { return read(Join(StateDir(d), L"previous\\" + rel)); };
+                    auto said = [](const OpResult& r, const wchar_t* what) {
+                        bool found = r.message.find(what) != wstring::npos;
+                        for (auto& w : r.warnings) found = found || w.find(what) != wstring::npos;
+                        return found;
+                    };
+                    auto version = [&](const wstring& d) { Record r; return LoadRecord(RecordPath(d), r) ? r.version : wstring(L"(no record)"); };
+                    int faultAt = 0, writes = 0;
+                    SetFaultHook([&](const char* s) { return string(s) == "rollback-write" && ++writes == faultAt; });
+                    {  // 1: a file in previous\ its list does not name stays and is said (and then the newer version can't take its place)
+                        const wstring d = rbGame(L"foreign in previous");
+                        const wstring foreign = Join(StateDir(d), L"previous\\players-notes.txt");
+                        file(foreign, X);
+                        const OpResult r = rollback(d);
+                        require(r.code == EXIT_OK && read(Join(d, rt)) == E && read(Join(d, fe)) == E2 && read(foreign) == X && said(r, L"players-notes.txt") &&
+                                    !IsFile(Join(StateDir(d), L"previous\\" + rt)) && !IsFile(Join(StateDir(d), L"previous\\" + fe)) &&
+                                    !IsFile(Join(StateDir(d), L"previous\\previous.txt")) && !IsDir(Join(StateDir(d), L"previous.swap")) && inst(d, rt) == Lower(H(E)),
+                                "rollback (#209 review): previous\\ goes only by its list (each file while its bytes are the stated hash); a file it does not name stays and is said");
+                    }
+                    {  // 1: ...a listed file whose bytes differ stays too (previous.txt names the bytes it must have)
+                        const wstring d = rbGame(L"previous swap stale");
+                        const wstring stale = Join(StateDir(d), L"previous.swap");  // an earlier roll back stopped before its end
+                        file(Join(stale, rt), N);
+                        file(Join(stale, fe), X);  // listed with N2's hash, other bytes now
+                        file(Join(stale, L"previous.txt"), "version=0.6.1\r\nfile=" + ToUtf8(H(N)) + "|" + ToUtf8(rt) + "\r\nfile=" + ToUtf8(H(N2)) + "|" + ToUtf8(fe) + "\r\n");
+                        const OpResult r = rollback(d);
+                        require(r.code == EXIT_OK && read(Join(d, rt)) == E && prevFile(d, rt) == N && prevFile(d, fe) == N2 && prevTxt(d).find("version=0.6.1") != string::npos &&
+                                    !IsFile(Join(stale, rt)) && read(Join(stale, fe)) == X && !IsFile(Join(stale, L"previous.txt")) && said(r, L"previous.swap") &&
+                                    !IsDir(Join(StateDir(d), L"previous.swap-2")),
+                                "rollback (#209 review): an earlier swap folder is never cleared before the writes; afterwards it goes by its list, a listed file with other bytes "
+                                "stays and is said; the new swap folder becomes previous\\");
+                    }
+                    {  // 2: every earlier file is staged (held and hashed) before the first write; a damaged one changes nothing
+                        const wstring d = rbGame(L"source damaged");
+                        file(Join(StateDir(d), L"previous\\" + fe), X);
+                        const OpResult r = rollback(d);
+                        require(r.code == EXIT_FAILED && said(r, L"damaged") && read(Join(d, rt)) == N && read(Join(d, fe)) == N2 && inst(d, rt) == Lower(H(N)),
+                                "rollback (#209 review): an earlier file with other bytes than its list states stops the roll back before the first write");
+                        const wstring u = rbGame(L"source held");
+                        const wstring s = Join(StateDir(u), L"previous\\" + fe);
+                        int changed = 0;
+                        SetRestoreStepHook([&](const char* st) {
+                            if (string(st) != "rollback-held") return;
+                            HANDLE h = CreateFileW(s.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                            if (h != INVALID_HANDLE_VALUE) { ++changed; CloseHandle(h); }
+                            if (DeleteFileW(s.c_str())) ++changed;
+                        });
+                        const OpResult r2 = rollback(u);
+                        SetRestoreStepHook(nullptr);
+                        require(r2.code == EXIT_OK && changed == 0 && read(Join(u, fe)) == E2,
+                                "rollback (#209 review): the earlier files are held from their check to the write (writing or deleting one meanwhile fails)");
+                    }
+                    {  // 2: a write fault on the second file: the first and the torn second go back from their copies; record and previous\ as they were
+                        const wstring d = rbGame(L"write fault");
+                        const string recBefore = read(RecordPath(d)), txtBefore = prevTxt(d);
+                        writes = 0; faultAt = 2;
+                        const OpResult r = rollback(d);
+                        faultAt = 0;
+                        require(r.code == EXIT_FAILED && writes == 2 && said(r, L"undone") && read(Join(d, rt)) == N && read(Join(d, fe)) == N2 &&
+                                    read(RecordPath(d)) == recBefore && prevTxt(d) == txtBefore && prevFile(d, rt) == E && prevFile(d, fe) == E2 &&
+                                    !IsDir(Join(StateDir(d), L"previous.swap")),
+                                "rollback (#209 review): a write that fails on the second file puts the first and the torn second back from their copies through their held "
+                                "handles; the record and previous\\ stay as they were");
+                        const wstring u = rbGame(L"write fault created");  // the missing file is created last: the fault hits it
+                        DeleteFileW(Join(u, rt).c_str());
+                        const string recU = read(RecordPath(u));
+                        writes = 0; faultAt = 2;
+                        const OpResult r2 = rollback(u);
+                        faultAt = 0;
+                        require(r2.code == EXIT_FAILED && writes == 2 && !IsFile(Join(u, rt)) && read(Join(u, fe)) == N2 && read(RecordPath(u)) == recU && prevFile(u, fe) == E2,
+                                "rollback (#209 review): ...a file the roll back created goes again (through its handle), the file already written comes back from its copy");
+                    }
+                    {  // 3: missing at the roll back -> "absent" in the new previous.txt; the second roll back takes the recreated file out again
+                        const wstring d = rbGame(L"absent twice");
+                        DeleteFileW(Join(d, rt).c_str());
+                        const OpResult r1 = rollback(d);
+                        const wstring txt = Lower(FromUtf8(prevTxt(d)));
+                        const OpResult r2 = rollback(d);
+                        require(r1.code == EXIT_OK && txt.find(Lower(L"file=absent:" + H(N) + L"|" + rt)) != wstring::npos && r2.code == EXIT_OK &&
+                                    !IsFile(Join(d, rt)) && read(Join(d, fe)) == N2 && inst(d, rt) == Lower(H(N)) && inst(d, fe) == Lower(H(N2)) && version(d) == L"0.6.1" &&
+                                    prevFile(d, rt) == E && prevFile(d, fe) == E2,
+                                "rollback (#209 review): a payload file missing at the roll back is recorded as absent; the second roll back takes the recreated file out "
+                                "(its bytes the recorded ones) and the record names the newer version again");
+                        const OpResult r3 = rollback(d);
+                        require(r3.code == EXIT_OK && read(Join(d, rt)) == E && read(Join(d, fe)) == E2 && version(d) == L"0.6.0",
+                                "rollback (#209 review): ...and a third roll back creates it again");
+                        const wstring u = rbGame(L"absent then changed");
+                        DeleteFileW(Join(u, rt).c_str());
+                        const OpResult u1 = rollback(u);
+                        file(Join(u, rt), X);  // the player put their own file there since
+                        const OpResult u2 = rollback(u);
+                        require(u1.code == EXIT_OK && u2.code == EXIT_REFUSED && said(u2, L"had no such file") && said(u2, L"Nothing was changed") &&
+                                    read(Join(u, rt)) == X && read(Join(u, fe)) == E2 && version(u) == L"0.6.0",
+                                "rollback (#209 review): ...a file there with other bytes stops the second roll back with a clear message; nothing changes");
+                    }
+                    SetFaultHook(nullptr);
+                }
+                // ---- #186: the Engine.ini restore reads, compares and writes or deletes through one handle; a missing file is
+                // created only where nothing is (CREATE_NEW) ---------------------------------------------------------------------
+                {
+                    const wstring d = Join(dir, L"RrConfig"), ini = Join(d, L"Config\\Windows\\Engine.ini");
+                    const string own = "[Core.Log]\r\nLogNet=Log\r\n", edited = own + "\r\n" + RrConfigNewFile();
+                    const string Y = "[Core.Log]\r\nLogNet=Verbose\r\n; another program's Engine.ini (synthetic)\r\n";
+                    EnsureDir(StateDir(d));
+                    auto fixFor = [&](bool created) {
+                        Record m;
+                        m.rrconfig.present = true; m.rrconfig.path = ini; m.rrconfig.created = created; m.rrconfig.prevAbsent = true;
+                        m.rrconfig.sectionAdded = !created; m.rrconfig.backup = !created;
+                        if (!created) file(RrConfigBackupPath(d), own);
+                        return m;
+                    };
+                    auto readOnly = [](const wstring& p) { const DWORD a = GetFileAttributesW(p.c_str()); return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_READONLY); };
+                    auto clear = [&](const wstring& p) { SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_NORMAL); DeleteFileW(p.c_str()); };
+                    auto attack = [&](const wstring& other, int& attacks, int& calls) {
+                        return [&, other](const char* s) {
+                            if (string(s) != "rrconfig-held") return;
+                            ++calls;
+                            const DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+                            if (DeleteFileW(ini.c_str())) ++attacks;
+                            if (MoveFileExW(ini.c_str(), (ini + L".moved").c_str(), 0)) ++attacks;
+                            if (MoveFileExW(other.c_str(), ini.c_str(), MOVEFILE_REPLACE_EXISTING)) ++attacks;
+                            for (DWORD access : {(DWORD)GENERIC_WRITE, (DWORD)DELETE}) {
+                                HANDLE h = CreateFileW(ini.c_str(), access, share, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                                if (h != INVALID_HANDLE_VALUE) { ++attacks; CloseHandle(h); }
+                            }
+                        };
+                    };
+                    const wstring other = Join(d, L"another-program.tmp");
+                    {  // the player's Engine.ini (read-only, with our line): a replacement tried after the read fails; the line goes, read-only stays
+                        Record m = fixFor(false);
+                        m.rrconfig.wasReadOnly = true;
+                        file(ini, edited);
+                        SetFileAttributesW(ini.c_str(), FILE_ATTRIBUTE_READONLY);
+                        file(other, Y);
+                        int attacks = 0, calls = 0;
+                        SetRestoreStepHook(attack(other, attacks, calls));
+                        std::vector<wstring> notes, w;
+                        RevertRrConfig(mc, d, m, notes, w);
+                        SetRestoreStepHook(nullptr);
+                        require(calls == 1 && attacks == 0 && read(other) == Y && read(ini) == own && readOnly(ini) && w.empty() && !m.rrconfig.present &&
+                                    !IsFile(RrConfigBackupPath(d)),
+                                "Engine.ini (#186): held from the read to the write, a replacement, delete or write by another program fails (its bytes stay its own); "
+                                "the player's file gets its line out, read-only as before");
+                        clear(ini);
+                    }
+                    {  // the file WrongGPU created: deleted through the handle it was read through; a replacement tried meanwhile fails
+                        Record m = fixFor(true);
+                        file(ini, RrConfigNewFile());
+                        file(other, Y);
+                        int attacks = 0, calls = 0;
+                        SetRestoreStepHook(attack(other, attacks, calls));
+                        std::vector<wstring> notes, w;
+                        RevertRrConfig(mc, d, m, notes, w);
+                        SetRestoreStepHook(nullptr);
+                        require(calls == 1 && attacks == 0 && read(other) == Y && !IsFile(ini) && w.empty(),
+                                "Engine.ini (#186): the file WrongGPU created is deleted through the handle it was read through; a replacement tried meanwhile fails");
+                    }
+                    {  // replaced before the open (another program's Engine.ini now, without our line): that file is the one read, and it stays
+                        Record m = fixFor(true);
+                        file(ini, Y);
+                        std::vector<wstring> notes, w;
+                        RevertRrConfig(mc, d, m, notes, w);
+                        require(read(ini) == Y && w.empty(), "Engine.ini (#186): a file replaced by another program before the restore is the one read: it stays byte for byte");
+                        clear(ini);
+                    }
+                    {  // gone, and another program creates one just before the player's copy goes back: not replaced, the copy is kept, said
+                        Record m = fixFor(false);
+                        SetRestoreStepHook([&](const char* s) { if (string(s) == "rrconfig-absent") file(ini, Y); });
+                        std::vector<wstring> notes, w;
+                        RevertRrConfig(mc, d, m, notes, w);
+                        SetRestoreStepHook(nullptr);
+                        require(read(ini) == Y && w.size() == 1 && w[0].rfind(L"Left in place: ", 0) == 0 && w[0].find(RrConfigBackupPath(d)) != wstring::npos &&
+                                    read(RrConfigBackupPath(d)) == own,
+                                "Engine.ini (#186): a file created by another program before the absent-file restore is not replaced; the player's copy is kept and said");
+                        clear(ini);
+                        clear(RrConfigBackupPath(d));
+                        // ...the same when the caller holds the copy (a relocation): it is kept next to the backup path, never over a file
+                        Record m2 = fixFor(false);
+                        clear(RrConfigBackupPath(d));
+                        SetRestoreStepHook([&](const char* s) { if (string(s) == "rrconfig-absent") file(ini, Y); });
+                        notes.clear(); w.clear();
+                        RevertRrConfig(mc, d, m2, notes, w, &own);
+                        SetRestoreStepHook(nullptr);
+                        bool keptCopy = false;
+                        for (auto& f : ListFiles(Parent(RrConfigBackupPath(d)), L"Engine.ini.kept-*")) keptCopy = keptCopy || read(f) == own;
+                        require(read(ini) == Y && w.size() == 1 && w[0].find(L"Engine.ini.kept-") != wstring::npos && keptCopy,
+                                "Engine.ini (#186): ...with the copy in memory, it is kept in a new file beside the backup path");
+                        clear(ini);
+                    }
+                    {  // gone, nothing in the way: the player's copy is created again, read-only as the player had it
+                        Record m = fixFor(false);
+                        m.rrconfig.wasReadOnly = true;
+                        std::vector<wstring> notes, w;
+                        RevertRrConfig(mc, d, m, notes, w);
+                        require(read(ini) == own && readOnly(ini) && w.empty() && !IsFile(RrConfigBackupPath(d)),
+                                "Engine.ini (#186): gone since, nothing in the way: the player's copy is created again (read-only as before) and the backup goes");
+                        clear(ini);
+                    }
+                    {  // a hard-linked Engine.ini is not written through: it stays, the warning says to take the line out by hand
+                        Record m = fixFor(false);
+                        file(ini, edited);
+                        const wstring link = Join(d, L"players-link.ini");
+                        const bool made = CreateHardLinkW(link.c_str(), ini.c_str(), nullptr) != 0;
+                        std::vector<wstring> notes, w;
+                        RevertRrConfig(mc, d, m, notes, w);
+                        require(made && read(ini) == edited && read(link) == edited && w.size() == 1 && w[0].find(L"hard link") != wstring::npos,
+                                "Engine.ini (#186): a hard-linked Engine.ini is not written through; it stays and the warning says so");
+                        clear(link);
+                        clear(ini);
+                    }
+                    // ---- #209 review: Engine.ini policy (only WrongGPU's line goes, also from a file changed elsewhere) and crash
+                    // safety (a corrected copy replaces it); the backup goes only while it is the recorded copy; read-only checked ------
+                    string fault;
+                    SetFaultHook([&](const char* s) { return (";" + fault + ";").find(";" + string(s) + ";") != string::npos; });  // (';'-separated names)
+                    const wstring bak = RrConfigBackupPath(d);
+                    auto leftovers = [&] { return ListFiles(Parent(ini), L"Engine.ini.wronggpu-*").size(); };
+                    auto fileId = [](const wstring& p) {
+                        HANDLE h = CreateFileW(p.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+                        if (h == INVALID_HANDLE_VALUE) return 0ull;
+                        BY_HANDLE_FILE_INFORMATION i{};
+                        GetFileInformationByHandle(h, &i);
+                        CloseHandle(h);
+                        return ((unsigned long long)i.nFileIndexHigh << 32) | i.nFileIndexLow;
+                    };
+                    auto hidden = [](const wstring& p) { const DWORD a = GetFileAttributesW(p.c_str()); return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_HIDDEN); };
+                    const string theirs = "[Core.Log]\r\nLogNet=Verbose\r\n";  // the player changed another section since the fix
+                    {  // 4: policy: from a file the player changed elsewhere only WrongGPU's line goes; by replacement (a new file), attributes kept
+                        Record m = fixFor(false);
+                        m.rrconfig.backupSha = H(own);
+                        file(ini, theirs + "\r\n" + RrConfigNewFile());
+                        SetFileAttributesW(ini.c_str(), FILE_ATTRIBUTE_HIDDEN);
+                        const auto idBefore = fileId(ini);
+                        std::vector<wstring> notes, w;
+                        RevertRrConfig(mc, d, m, notes, w);
+                        require(read(ini) == theirs && hidden(ini) && idBefore != 0 && fileId(ini) != idBefore && w.empty() && leftovers() == 0 && !IsFile(bak) &&
+                                    !m.rrconfig.present,
+                                "Engine.ini (#209 review): from a file the player changed elsewhere only WrongGPU's line goes (policy); a corrected copy replaces the file "
+                                "(its attributes kept, nothing left beside it); the backup with the recorded hash goes");
+                        clear(ini);
+                    }
+                    {  // 4: a write that stops part way leaves Engine.ini byte for byte as it was
+                        Record m = fixFor(false);
+                        file(ini, edited);
+                        fault = "rrconfig-write";
+                        std::vector<wstring> notes, w;
+                        RevertRrConfig(mc, d, m, notes, w);
+                        fault.clear();
+                        require(read(ini) == edited && leftovers() == 0 && w.size() == 1 && w[0].find(L"yourself") != wstring::npos && read(bak) == own,
+                                "Engine.ini (#209 review): a write fault part way leaves Engine.ini byte for byte as it was (the new bytes go to a new file first, which "
+                                "goes again); the result says to take the line out by hand; the backup stays");
+                        clear(ini);
+                        clear(bak);
+                    }
+                    {  // 4: another program changes Engine.ini between the close and the replace: its version is kept beside it (never written back), said
+                        Record m = fixFor(false);
+                        file(ini, edited);
+                        SetRestoreStepHook([&](const char* s) { if (string(s) == "rrconfig-replace") file(ini, Y); });
+                        std::vector<wstring> notes, w;
+                        RevertRrConfig(mc, d, m, notes, w);
+                        SetRestoreStepHook(nullptr);
+                        const wstring theirs = ini + L".wronggpu-their-change";
+                        require(read(ini) == own && read(theirs) == Y && leftovers() == 1 && w.size() == 1 && w[0].find(L"changed while WrongGPU") != wstring::npos &&
+                                    w[0].find(theirs) != wstring::npos && w[0].find(bak) != wstring::npos && read(bak) == own,
+                                "Engine.ini (#209 review): a change by another program in the moment before the replace is not lost: it is kept beside the corrected "
+                                "file (never written into it), the result names both, the backup stays");
+                        clear(ini);
+                        clear(theirs);
+                        clear(bak);
+                    }
+                    {  // 4: the file WrongGPU created, changed since: it stays without WrongGPU's line (deleted only while it is WrongGPU's bytes)
+                        for (const string& extra : {string("r.PlayersOwnSetting=1\r\n"), string("\r\n")}) {
+                            Record m = fixFor(true);
+                            const string grown = RrConfigNewFile() + extra, want = RrConfigRemoveText(grown, m.rrconfig);
+                            file(ini, grown);
+                            std::vector<wstring> notes, w;
+                            RevertRrConfig(mc, d, m, notes, w);
+                            require(want != grown && IsFile(ini) && read(ini) == want && want.find(ToUtf8(RrConfigLineW())) == string::npos && w.empty(),
+                                    "Engine.ini (#209 review): a file WrongGPU created and something changed since stays, without WrongGPU's line");
+                            clear(ini);
+                        }
+                    }
+                    {  // 5: the backup goes only while it is the copy WrongGPU made (the recorded hash); changed: kept and said
+                        Record m = fixFor(false);
+                        m.rrconfig.backupSha = H(own);
+                        const string other = "a changed backup (synthetic)\r\n";
+                        file(bak, other);
+                        file(ini, edited);
+                        std::vector<wstring> notes, w;
+                        RevertRrConfig(mc, d, m, notes, w);
+                        require(read(ini) == own && read(bak) == other && w.size() == 1 && w[0].find(bak) != wstring::npos && w[0].find(L"changed since") != wstring::npos,
+                                "Engine.ini (#209 review): a backup with other bytes than the recorded hash is not deleted; it stays and the result names it");
+                        clear(ini);
+                        clear(bak);
+                        const wstring g = ownGame(L"Record backup hash", {});
+                        Record r;
+                        LoadRecord(RecordPath(g), r);
+                        r.rrconfig = fixFor(false).rrconfig;
+                        r.rrconfig.backupSha = H(own);
+                        SaveRecord(RecordPath(g), r);
+                        Record back;
+                        require(LoadRecord(RecordPath(g), back) && back.rrconfig.present && back.rrconfig.backup && IEq(back.rrconfig.backupSha, H(own)) &&
+                                    read(RecordPath(g)).find("\nrrconfig-backup\t") != string::npos && back.extra.empty(),
+                                "record (#209 review): the backup's hash is kept in a line of its own (rrconfig-backup) and read back");
+                        clear(bak);
+                    }
+                    {  // 6: the read-only attribute not put back: said, and the backup stays
+                        Record m = fixFor(false);
+                        m.rrconfig.wasReadOnly = true;
+                        file(ini, edited);
+                        SetFileAttributesW(ini.c_str(), FILE_ATTRIBUTE_READONLY);
+                        fault = "rrconfig-readonly";
+                        std::vector<wstring> notes, w;
+                        RevertRrConfig(mc, d, m, notes, w);
+                        fault.clear();
+                        require(read(ini) == own && w.size() == 1 && w[0].find(L"read-only") != wstring::npos && read(bak) == own,
+                                "Engine.ini (#209 review): a read-only attribute that cannot be put back is said, and the backup stays");
+                        clear(ini);
+                        clear(bak);
+                    }
+                    // ---- #209 re-check (REVIEW-209b) -------------------------------------------------------------------------
+                    const wstring copy = ini + L".wronggpu-new", old = ini + L".wronggpu-old";
+                    const string F = "[SystemSettings]\r\n; bytes another program put in place of the corrected copy (synthetic)\r\n",
+                                 Z = "[Core.Log]\r\nLogNet=Warning\r\n; a second change, made after the replace (synthetic)\r\n";
+                    {  // a: the corrected copy swapped after it was verified and closed: the live file is not trusted, left as it is, said
+                        Record m = fixFor(false);
+                        m.rrconfig.backupSha = H(own);
+                        file(ini, edited);
+                        SetRestoreStepHook([&](const char* s) { if (string(s) == "rrconfig-replace") file(copy, F); });
+                        std::vector<wstring> notes, w;
+                        RevertRrConfig(mc, d, m, notes, w);
+                        SetRestoreStepHook(nullptr);
+                        require(read(ini) == F && read(old) == edited && read(bak) == own && w.size() == 1 && w[0].find(L"not the corrected file WrongGPU put there") != wstring::npos &&
+                                    w[0].find(old) != wstring::npos && !IsFile(copy) && notes.empty(),
+                                "Engine.ini (REVIEW-209b a): a corrected copy swapped before the replace is caught after it (the live file held and hashed): left as "
+                                "it is, the file it replaced kept beside it, the backup kept, the result says so");
+                        clear(ini);
+                        clear(old);
+                        clear(bak);
+                    }
+                    {  // b: a change before the replace and a second one after it: the second is never overwritten; the first kept beside it
+                        Record m = fixFor(false);
+                        file(ini, edited);
+                        SetRestoreStepHook([&](const char* s) {
+                            if (string(s) == "rrconfig-replace") file(ini, Y);
+                            if (string(s) == "rrconfig-replaced") file(ini, Z);
+                        });
+                        std::vector<wstring> notes, w;
+                        RevertRrConfig(mc, d, m, notes, w);
+                        SetRestoreStepHook(nullptr);
+                        require(read(ini) == Z && read(old) == Y && read(bak) == own && w.size() == 1 && w[0].find(L"not the corrected file WrongGPU put there") != wstring::npos,
+                                "Engine.ini (REVIEW-209b b): a second change after the replace is never overwritten by the recovery; the first change is kept beside "
+                                "it, the backup kept, the result says so");
+                        clear(ini);
+                        clear(old);
+                        clear(bak);
+                    }
+                    {  // c: the player deleted their own settings and kept only WrongGPU's: the revert leaves an empty file, never the old backup
+                        Record m = fixFor(false);
+                        m.rrconfig.backupSha = H(own);
+                        file(ini, RrConfigNewFile());
+                        const string want = RrConfigRemoveText(RrConfigNewFile(), m.rrconfig);
+                        std::vector<wstring> notes, w;
+                        RevertRrConfig(mc, d, m, notes, w);
+                        require(want.find_first_not_of(" \t\r\n") == string::npos && IsFile(ini) && read(ini) == want && w.empty() && leftovers() == 0,
+                                "Engine.ini (REVIEW-209b c): taking out WrongGPU's line from a file the player emptied of their own settings leaves it empty; the "
+                                "backup from before the fix is not put back");
+                        clear(ini);
+                        clear(bak);
+                    }
+                    {  // d: the replace fails: the read-only bit goes back, and a failure to put it back is said
+                        for (int roFails = 0; roFails < 2; ++roFails) {
+                            Record m = fixFor(false);
+                            m.rrconfig.wasReadOnly = true;
+                            file(ini, edited);
+                            SetFileAttributesW(ini.c_str(), FILE_ATTRIBUTE_READONLY);
+                            fault = roFails ? "rrconfig-replacefile;rrconfig-readonly" : "rrconfig-replacefile";
+                            std::vector<wstring> notes, w;
+                            RevertRrConfig(mc, d, m, notes, w);
+                            fault.clear();
+                            const bool saidRo = w.size() == 1 && w[0].find(L"read-only attribute could not be set again") != wstring::npos;
+                            require(read(ini) == edited && read(bak) == own && leftovers() == 0 && w.size() == 1 && w[0].find(L"Cannot replace") != wstring::npos &&
+                                        (roFails ? saidRo && !readOnly(ini) : !saidRo && readOnly(ini)),
+                                    roFails ? "Engine.ini (REVIEW-209b d): a failed replace whose read-only restore fails says so in the warning; the file and the backup stay"
+                                            : "Engine.ini (REVIEW-209b d): a failed replace puts the read-only bit back; the file and the backup stay");
+                            clear(ini);
+                            clear(bak);
+                        }
+                    }
+                    // ---- #209 re-check 2 (REVIEW-209c) -----------------------------------------------------------------------
+                    {  // b: a change before the replace, then a DISTINCT file with IDENTICAL bytes swapped in after it: never written, left as it is
+                        Record m = fixFor(false);
+                        file(ini, edited);
+                        unsigned long long swappedId = 0;
+                        SetRestoreStepHook([&](const char* s) {
+                            if (string(s) == "rrconfig-replace") file(ini, Y);
+                            if (string(s) == "rrconfig-replaced") { file(ini, own); swappedId = fileId(ini); }  // own: the corrected bytes, another file
+                        });
+                        std::vector<wstring> notes, w;
+                        RevertRrConfig(mc, d, m, notes, w);
+                        SetRestoreStepHook(nullptr);
+                        require(swappedId != 0 && fileId(ini) == swappedId && read(ini) == own && read(old) == Y && read(bak) == own && w.size() == 1 &&
+                                    w[0].find(L"not the corrected file WrongGPU put there") != wstring::npos && w[0].find(old) != wstring::npos &&
+                                    w[0].find(L"read-only") == wstring::npos && notes.empty(),
+                                "Engine.ini (REVIEW-209c b): a distinct file with the corrected bytes swapped in after the replace is not taken for WrongGPU's (its "
+                                "identity differs): left untouched, the earlier change kept beside it, the backup kept, the result says so");
+                        clear(ini);
+                        clear(old);
+                        clear(bak);
+                    }
+                    {  // P2: the verification paths never touch another program's read-only file, and a read-only restore failure there is said
+                        for (int roFails = 0; roFails < 2; ++roFails) {
+                            Record m = fixFor(false);
+                            file(ini, edited);
+                            SetRestoreStepHook([&](const char* s) {
+                                if (string(s) != "rrconfig-replaced") return;
+                                file(ini, Z);
+                                SetFileAttributesW(ini.c_str(), FILE_ATTRIBUTE_READONLY);
+                            });
+                            fault = roFails ? "rrconfig-verify-readonly" : "";
+                            std::vector<wstring> notes, w;
+                            RevertRrConfig(mc, d, m, notes, w);
+                            fault.clear();
+                            SetRestoreStepHook(nullptr);
+                            const bool saidRo = w.size() == 1 && w[0].find(L"read-only attribute could not be put back") != wstring::npos;
+                            require(read(ini) == Z && readOnly(ini) && read(old) == edited && read(bak) == own && w.size() == 1 &&
+                                        w[0].find(L"not the corrected file WrongGPU put there") != wstring::npos && (roFails ? saidRo : !saidRo),
+                                    roFails ? "Engine.ini (REVIEW-209c P2): on the verification's mismatch path a read-only restore failure is said in the warning; the "
+                                              "file and both backups stay"
+                                            : "Engine.ini (REVIEW-209c P2): the verification opens another program's read-only file without changing its attribute; "
+                                              "the file and both backups stay");
+                            clear(ini);
+                            clear(old);
+                            clear(bak);
+                        }
+                    }
+                    SetFaultHook(nullptr);
+                }
                 SetRestoreStepHook(nullptr);
                 // ---- PinnedFile, DeleteIfSha and CopyNew (util.h): the handle-based primitives under the restore ----------------
                 {
