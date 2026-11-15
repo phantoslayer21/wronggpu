@@ -21,6 +21,7 @@
 #include "rdna4.h"
 #include "wmma_probe.h"
 #include "fold_probe.h"
+#include "fold_selftest.h"
 
 #include <algorithm>
 #include <array>
@@ -643,6 +644,11 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     if (direct && !direct_bound_) return fail("native D3D12 direct kernel requires a bound direct frame: " + name);
     // Check the variant BEFORE touching args: a 37-DWORD post variant cannot satisfy a 42-DWORD port.
     if (!variant_loaded(k)) return false;
+    return dispatch(k, name, grid, block, args);
+  }
+  // One launch of the port k (launch() after its port selection; the fold self-test runs both ports of a kernel).
+  bool dispatch(NativeKernel& k, const std::string& name, unsigned grid, unsigned block, void** args) {
+    const bool direct = k.rs == "direct";
     if (block != k.block) return fail("native D3D12 kernel " + name + ": block must be " + std::to_string(k.block));
     if (!grid || grid > 0x7fffffffu) return fail("native D3D12 kernel " + name + ": grid must be 1..2147483647");
     const uint64_t groups = (uint64_t)grid * k.gscale;   // D3D12 workgroups
@@ -1423,18 +1429,31 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     if (!ok) err_ = error;
     return ok;
   }
-  // Start-up probe of the driver's conversion fold (fold_probe.h, kernel l_fold_probe): only when a port needs it.
-  // Passed: the "fold" ports run; failed (or no probe kernel): the "nofold" ports. Logged once per process. A failing
-  // probe is not an error: the device keeps going on the exact no-fold ports.
+  // Start-up guard of the driver's conversion fold: only when a port needs it. Two steps, both must pass, else (or on
+  // any error) the "nofold" ports run (fail closed):
+  //  1. probe: l_fold_probe (fold_probe.h) on adversarial inputs of the shared encode expression, against expected
+  //     bytes from exact rationals;
+  //  2. differential self-test (fold_selftest): the REAL post shader, its fold port and its no-fold port (exact by
+  //     construction), on one crafted frame (fold_selftest.h); the raw output bytes must be equal. This tests the
+  //     driver's lowering of the shader that will run, at its six encode sites.
+  // Logged once per process (note()). A failing guard is not an error: the device keeps going on the no-fold ports.
   bool fold_probe() {
     bool wanted = false;
-    for (const auto& kv : kernels_) wanted = wanted || kv.second.needs == "fold";
+    std::string uncovered;
+    for (const auto& kv : kernels_) {
+      if (kv.second.needs != "fold") continue;
+      wanted = true;
+      if (kv.first != "l_post_recon_p12") uncovered = kv.first;   // a fold port with no self-test of its own
+    }
     fold_ok_ = false;
     if (!wanted) return true;
     std::string note;
+    const std::string before = err_;
     auto probe = kernels_.find("l_fold_probe");
-    if (probe == kernels_.end() || probe->second.co != "-" || probe->second.block != 32 || probe->second.dwords != 1 ||
-        probe->second.args.size() != 1 || probe->second.args[0].kind != 'p') {
+    if (!uncovered.empty()) {
+      note = "no self-test for " + uncovered;
+    } else if (probe == kernels_.end() || probe->second.co != "-" || probe->second.block != 32 ||
+               probe->second.dwords != 1 || probe->second.args.size() != 1 || probe->second.args[0].kind != 'p') {
       note = "no l_fold_probe kernel";
     } else {
       DevPtr buf = 0;
@@ -1442,7 +1461,6 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
       fold_probe::fill(bytes);
       uint32_t out[96] = {};
       void* args[] = {&buf};
-      const std::string before = err_;
       bool ok = alloc(&buf, fold_probe::kBytes) && upload(buf, bytes, sizeof bytes) && launch("l_fold_probe", 1, 32, args) &&
                 download(out, buf + fold_probe::kOutOffset, sizeof out);
       if (buf) free(buf);
@@ -1450,13 +1468,83 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
       if (ok && fail_test && fail_test[0] == '1') out[0] ^= 1u;
       const int bad = ok ? fold_probe::first_mismatch(out) : -1;
       if (!ok) note = "probe run failed (" + err_ + ")";
-      else if (bad >= 0) note = "mismatch at half " + std::to_string(bad);
-      else fold_ok_ = true;
-      err_ = before;
+      else if (bad >= 0) note = "probe mismatch at half " + std::to_string(bad);
+      else fold_ok_ = fold_selftest(&note);
     }
+    err_ = before;
     // one line per device: in note(), which the runtime logs once when the network runtime is ready
-    fold_note_ = std::string("conversion-fold probe ") +
+    fold_note_ = std::string("conversion-fold probe and self-test ") +
                  (fold_ok_ ? "passed: the fold ports run" : "failed (" + note + "): the no-fold ports run");
+    return true;
+  }
+  // The differential self-test of l_post_recon_p12 (fold_probe step 2). The frame (fold_selftest.h; render size =
+  // output size, jitter 0, reset, exposure 1, post scale 0, codes and kernel shape 0) makes each full-history value the
+  // render colour, so the history codes are the encode of crafted values (FP32-product ties on both sides, zero and
+  // FP16-subnormal products, the floor). Each port's outputs start filled with its own sentinel; every defined byte of
+  // the full history, the reduced history and the display image must be equal. True only when both ports ran.
+  bool fold_selftest(std::string* note) {
+    NativeKernel *fold = nullptr, *nofold = nullptr;
+    auto range = kernels_.equal_range("l_post_recon_p12");
+    for (auto i = range.first; i != range.second; ++i) {
+      if (i->second.needs == "fold") fold = &i->second;
+      if (i->second.needs == "nofold") nofold = &i->second;
+    }
+    auto abi = [](const NativeKernel* k) {
+      if (!k || k->block != 256 || k->rs != "buffer" || k->args.size() != 14) return false;
+      for (int n = 0; n < 12; ++n) if (k->args[n].kind != 'p') return false;
+      return k->args[12].kind == 'b' && k->args[12].bytes == 64 && k->args[13].kind == 'p';
+    };
+    if (!abi(fold) || !abi(nofold)) { *note = "self-test: the fold / no-fold ports of l_post_recon_p12 are missing"; return false; }
+    constexpr int W = ::fold_selftest::kW, H = ::fold_selftest::kH, N = W * H;
+    constexpr int pitch = (W + 63) & ~63;
+    constexpr size_t hist = size_t(N) * 8, reduced = size_t(W / 2) * (H / 2) * 4, display = size_t(3) * pitch * H * 2;
+    constexpr size_t outs = hist + reduced + display;
+    // layout: colour | A8 | C4 | previous history | motions x 3 | post blob | outputs (fold) | outputs (no-fold)
+    const size_t o_col = 0, o_a = o_col + size_t(N) * 16, o_c = o_a + size_t(N) * 8, o_hp = o_c + size_t(N) * 4,
+                 o_m = o_hp + hist, o_w = o_m + size_t(N) * 12, o_out = o_w + 256, total = o_out + 2 * outs;
+    std::vector<uint8_t> host(total, 0);
+    for (int i = 0; i < N; ++i) std::memcpy(&host[o_col + size_t(i) * 16], &::fold_selftest::kColour[3 * i], 12);
+    std::memset(&host[o_out], 0xA5, outs);
+    std::memset(&host[o_out + outs], 0x5A, outs);
+    struct { int32_t rw, rh, dw, dh, reset, pad0, pad1, pad2; float rx, ry, jx, jy, e, e_prev, ratio, pad3; } prm =
+        {W, H, W, H, 1, 0, 0, 0, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 0.0f};
+    static_assert(sizeof prm == 64, "WgPostParams");
+    DevPtr buf = 0;
+    std::vector<uint8_t> got(2 * outs);
+    bool ok = alloc(&buf, total) && upload(buf, host.data(), total);
+    for (int port = 0; ok && port < 2; ++port) {
+      DevPtr p[12], none = 0;
+      const DevPtr out = buf + o_out + port * outs;
+      const DevPtr in[9] = {buf + o_col, buf + o_a, buf + o_a, buf + o_c, buf + o_hp, buf + o_m, buf + o_m + N * 4,
+                            buf + o_m + N * 8, buf + o_w};
+      for (int n = 0; n < 9; ++n) p[n] = in[n];
+      p[9] = out; p[10] = out + hist; p[11] = out + hist + reduced;
+      void* args[14];
+      for (int n = 0; n < 12; ++n) args[n] = &p[n];
+      args[12] = &prm; args[13] = &none;
+      const unsigned grid = unsigned((W + 31) / 32) * unsigned(((H + 1) / 2 + 7) / 8);
+      ok = dispatch(port == 0 ? *fold : *nofold, "l_post_recon_p12", grid, 256, args);
+    }
+    ok = ok && download(got.data(), buf + o_out, 2 * outs);
+    const std::string error = err_;
+    if (buf) free(buf);
+    if (!ok) { *note = "self-test run failed (" + error + ")"; return false; }
+    if (const char* dump = std::getenv("WG_TEST_FOLD_SELFTEST_DUMP")) {   // tests: both ports' outputs, raw
+      if (FILE* f = std::fopen(dump, "wb")) { std::fwrite(got.data(), 1, got.size(), f); std::fclose(f); }
+    }
+    size_t differ = 0, hist_differ = 0;
+    for (size_t i = 0; i < outs; ++i) {
+      if (i >= hist + reduced) {   // display: only the pixels of each pitch row are defined
+        const size_t px = ((i - hist - reduced) / 2) % pitch;
+        if (px >= size_t(W)) continue;
+      }
+      if (got[i] != got[outs + i]) { ++differ; if (i < hist) ++hist_differ; }
+    }
+    if (differ) {
+      *note = "self-test: the fold port differs from the no-fold port in " + std::to_string(differ) + " bytes (" +
+              std::to_string(hist_differ) + " of the full history)";
+      return false;
+    }
     return true;
   }
   bool create_device() {

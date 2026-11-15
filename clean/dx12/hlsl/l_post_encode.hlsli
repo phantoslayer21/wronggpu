@@ -7,8 +7,11 @@
 // product). Written as mad(x, kEncK, 0) feeding the driver's round-to-nearest-even matrix conversion, which the gfx1201
 // D3D12 compiler folds into exactly that instruction (v_fma_mixlo_f16 / v_fma_mixhi_f16, as Model M's post). Without
 // the fold the FP32 product would be rounded twice (a value whose FP32 product lands on an FP16 midpoint moves by one
-// FP16 ulp). Guards: build_dx12.py's ISA check on the kernel (isa= in its declaration) and the device's start-up probe
-// (l_fold_probe, clean/runtime/fold_probe.h): when the probe fails, the device runs the no-fold port of the kernel.
+// FP16 ulp). Guards: build_dx12.py's ISA check on the kernel (isa= in its declaration: the six sites, kEncK as the
+// literal with a 0 addend) and two start-up steps of the native device, both of which must pass: the probe
+// (l_fold_probe, clean/runtime/fold_probe.h: this expression on adversarial inputs) and the differential self-test of
+// the real post shader (its fold port against its no-fold port on the crafted frame of clean/runtime/fold_selftest.h,
+// raw bytes). Otherwise, or on any error, the device runs the no-fold port of the kernel.
 #pragma once
 
 #ifndef LP_MUT

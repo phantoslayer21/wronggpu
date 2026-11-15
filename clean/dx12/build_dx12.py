@@ -197,7 +197,8 @@ def kernel_decls(path):
             if d["needs"] not in ("", "fold", "nofold"):
                 raise SystemExit(f"{path}: {name}: needs={d['needs']} (fold or nofold)")
             # isa=<rule>,<rule>: the port's RGA ISA must satisfy each rule, <op>[+<op>...]>=<n> or <op>==<n> (counts of
-            # instruction mnemonics), checked after the build (isa_check; WG_DX12_ISA_CHECK=0 skips it)
+            # instruction mnemonics; <op>@<literal>: only its x * literal + 0 sites, parse_isa_rules), checked after the
+            # build (isa_check; WG_DX12_ISA_CHECK=0 skips it)
             d["isa"] = kv.get("isa", "")
             if d["isa"]:
                 parse_isa_rules(d["isa"], f"{path}: {name}")
@@ -309,14 +310,34 @@ def rga_isa(dxil, isa_dir, stem):
 
 
 def parse_isa_rules(text, where):
-    """isa=<rule>,...: [(mnemonics, op, n)] with op '>=' or '=='."""
+    """isa=<rule>,...: [(terms, op, n)] with op '>=' or '=='; a term is (mnemonic, literal or None): <op> counts every
+    instruction of that mnemonic, <op>@<8 hex digits> only those whose literal dword is that value, whose last source
+    operand is 0 and that carry no op_sel modifier (an FP32 x * literal + 0: the sites of a conversion fold)."""
     rules = []
     for r in text.split(","):
-        m = re.fullmatch(r"([a-z0-9_+]+)(>=|==)(\d+)", r)
+        m = re.fullmatch(r"([a-z0-9_]+(?:@[0-9a-f]{8})?(?:\+[a-z0-9_]+(?:@[0-9a-f]{8})?)*)(>=|==)(\d+)", r)
         if not m:
-            raise SystemExit(f"{where}: isa rule {r!r} (<op>[+<op>]>=<n> or <op>==<n>)")
-        rules.append((m.group(1).split("+"), m.group(2), int(m.group(3))))
+            raise SystemExit(f"{where}: isa rule {r!r} (<op>[@<literal>][+<op>[@<literal>]]>=<n> or ...==<n>)")
+        terms = [(t.split("@")[0], t.split("@")[1] if "@" in t else None) for t in m.group(1).split("+")]
+        rules.append((terms, m.group(2), int(m.group(3))))
     return rules
+
+
+def isa_count(lines, mnemonic, literal):
+    """Instructions of `mnemonic` in RGA ISA lines (with literal: only the x * literal + 0 sites, parse_isa_rules)."""
+    c = 0
+    for line in lines:
+        code, _, comment = line.partition("//")
+        f = code.split()
+        if not f or f[0] != mnemonic:
+            continue
+        if literal is not None:
+            words = comment.split(":")[-1].split()
+            srcs = [o.strip() for o in " ".join(f[1:]).split(",")]
+            if not words or words[-1].lower() != literal or srcs[-1] != "0" or "op_sel" in code:
+                continue
+        c += 1
+    return c
 
 
 def isa_check(built_isa):
@@ -335,14 +356,14 @@ def isa_check(built_isa):
             if not os.path.exists(path):
                 bad.append(f"{name}: RGA gave no ISA")
                 continue
-            ops = [l.split("//")[0].split() for l in open(path, encoding="utf-8", errors="replace")]
-            ops = [o[0] for o in ops if o]
-        for mn, op, n in parse_isa_rules(text, name):
-            c = sum(ops.count(x) for x in mn)
+            lines = open(path, encoding="utf-8", errors="replace").read().splitlines()
+        for terms, op, n in parse_isa_rules(text, name):
+            c = sum(isa_count(lines, mn, lit) for mn, lit in terms)
             ok = c >= n if op == ">=" else c == n
-            print(f"ISA {name:40s} {'+'.join(mn)} = {c} (rule {op} {n}) {'ok' if ok else 'FAILED'}", flush=True)
+            label = "+".join(mn + (f"@{lit}" if lit else "") for mn, lit in terms)
+            print(f"ISA {name:40s} {label} = {c} (rule {op} {n}) {'ok' if ok else 'FAILED'}", flush=True)
             if not ok:
-                bad.append(f"{name} ({os.path.basename(dxil)}): {'+'.join(mn)} = {c}, rule {op} {n}")
+                bad.append(f"{name} ({os.path.basename(dxil)}): {label} = {c}, rule {op} {n}")
     if bad:
         raise SystemExit("ISA check failed:\n  " + "\n  ".join(bad))
 
@@ -407,6 +428,9 @@ def main(argv=None):
     ap.add_argument("--model-k", action="store_true",
                     help="also build Model K's kernels (clean/k/dx12/kernels; off by default: Model M's and Model L's "
                          "kernel sets unchanged)")
+    ap.add_argument("--define", action="append", default=[], metavar="NAME=VALUE",
+                    help="an extra preprocessor define for every kernel built (test variants: negative-control mutants, "
+                         "test counters; never for a shipped build)")
     ap.add_argument("--list", action="store_true",
                     help="print the kernels a build with these options compiles (name and code object, JSON) and exit: "
                          "the cheap check before a build (kernel_sets.json, tests/test_kernel_sets.py)")
@@ -416,6 +440,11 @@ def main(argv=None):
         return 0
     if not a.out:
         ap.error("--out is required")
+    extra_defs = {}
+    for kv in a.define:
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]*=-?[0-9A-Za-z_]+", kv):
+            ap.error(f"--define {kv!r} (NAME=VALUE)")
+        extra_defs[kv.split("=", 1)[0]] = kv.split("=", 1)[1]
     dst = os.path.join(a.out, "dx12")
     os.makedirs(dst, exist_ok=True)
     asm = build_asm_tool(a.out)
@@ -464,7 +493,7 @@ def main(argv=None):
 
     def build_one(job):
         src, d, out, k_source = job
-        defs = {"WG_BLOCK": d["group"], "WG_WAVE": d["wave"], **d["defines"]}
+        defs = {"WG_BLOCK": d["group"], "WG_WAVE": d["wave"], **d["defines"], **extra_defs}
         if d["group"] != d["block"]:
             defs["WG_LAUNCH_BLOCK"] = d["block"]
         info = {}

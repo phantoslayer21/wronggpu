@@ -31,7 +31,7 @@
 // gives 0), the reduced codes rint(clamp(mean, 0, 1) 1023).
 //
 // @wg-kernel l_post_recon co=l_post.co block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p
-// @wg-kernel l_post_recon_p12 co=l_post.co entry=l_post_recon_p12 block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1,LP_ENCFOLD=1 needs=fold isa=v_fma_mixlo_f16+v_fma_mixhi_f16>=6,s_round_mode==0
+// @wg-kernel l_post_recon_p12 co=l_post.co entry=l_post_recon_p12 block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1,LP_ENCFOLD=1 needs=fold isa=v_fma_mixlo_f16@3dddf184+v_fma_mixhi_f16@3dddf184==6,s_round_mode==0
 // @wg-kernel l_post_recon_p12 co=l_post.co entry=l_post_recon_p12 file=l_post_recon_p12__nofold block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1 needs=nofold
 // @wg-kernel l_post_recon_ldr co=l_post.co entry=l_post_recon_ldr block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_LDR=1
 // @wg-kernel l_post_recon_p12_ldr co=l_post.co entry=l_post_recon_p12_ldr block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1,LP_LDR=1
@@ -84,7 +84,7 @@ float opq(float x) { return asfloat(asuint(x) ^ g_z); }
 half opqh(half x) { return asfloat16((uint16_t)(asuint16(x) ^ (uint16_t)g_z)); }
 float mul_nz(float a, float b) { return mad(a, b, asfloat(g_z | 0x80000000u)); }
 #ifndef LP_MUT
-#define LP_MUT 0   // 1..7: negative controls of the byte checks (never shipped)
+#define LP_MUT 0   // 1..9: negative controls of the byte checks (never shipped)
 #endif
 #ifndef LP_DP
 #define LP_DP 1
@@ -94,6 +94,9 @@ float mul_nz(float a, float b) { return mad(a, b, asfloat(g_z | 0x80000000u)); }
 #endif
 #ifndef LP_FMANZ
 #define LP_FMANZ 1
+#endif
+#ifndef LP_HSCOUNT
+#define LP_HSCOUNT 0   // 1: test builds only (clean/l/runner/l_post_edge_check.py): the history fast path's wave counter
 #endif
 // h(a b) as its own rounding that the driver cannot fuse into a following FP16 add: fma(a, b, -0) with an opaque -0
 // (RN16(a b + -0) = RN16(a b) for every non-NaN pair, zeros included); LP_FMANZ 0: the product through the xor guard
@@ -291,10 +294,22 @@ float3 history_cr(float qx, float qy)
     const float4 wx = cr_weights(tx - fx0), wy = cr_weights(ty - fy0);
     const int ix = (int)fx0, iy = (int)fy0;
     const uint pitch = (uint)P_dw * 8u;
-    // interior fast path (Model M's history_cr_span): every active lane's 4 x 4 footprint inside the image, so the
-    // clamps are the identity; six 16-byte span loads from one base instead of twelve 8-byte loads, the same texels
-    // in the same sums (same mad order)
-    [branch] if (WaveActiveAllTrue(and((uint)(ix - 1) <= (uint)(P_dw - 4), (uint)(iy - 1) <= (uint)(P_dh - 4)))) {
+    // interior fast path (Model M's history_cr_span): every lane's 4 x 4 footprint inside the image, so the clamps are
+    // the identity; six 16-byte span loads from one base instead of twelve 8-byte loads, the same texels in the same
+    // sums (same mad order). Footprint inside: 1 <= ix <= P_dw - 3 and 1 <= iy <= P_dh - 3, the unsigned tests valid only
+    // for an image of at least 4 x 4 (below, P_d* - 4 would wrap to a huge bound): smaller images take the clamped path.
+#if LP_MUT == 8   // mutant 8: the predicate always false (the fast path never taken; same bytes, found by the counter)
+    const bool interior = false;
+#elif LP_MUT == 9   // mutant 9: without the size guard (the span reads past a history narrower or shorter than 4)
+    const bool interior = and((uint)(ix - 1) <= (uint)(P_dw - 4), (uint)(iy - 1) <= (uint)(P_dh - 4));
+#else
+    const bool interior = and(and(P_dw >= 4, P_dh >= 4),
+                              and((uint)(ix - 1) <= (uint)(P_dw - 4), (uint)(iy - 1) <= (uint)(P_dh - 4)));
+#endif
+    [branch] if (WaveActiveAllTrue(interior)) {
+#if LP_HSCOUNT   // test builds only: count the waves taking the fast path, in the first dword after the full history
+        if (WaveIsFirstLane()) wg_atomic_add(hist_out, (uint)(P_dw * P_dh) * 8u, 1u);
+#endif
         const uint b0 = hist_prev + (uint)(ix - 1) * 8u + (uint)(iy - 1) * pitch;
         const uint b1 = b0 + pitch, b2 = b0 + 2u * pitch, b3 = b0 + 3u * pitch;
         const uint4 a0 = wg_mem.Load4(b0 + 8u), a10 = wg_mem.Load4(b1), a11 = wg_mem.Load4(b1 + 16u);
