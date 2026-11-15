@@ -95,6 +95,13 @@ static int Child(int argc, wchar_t** argv) {
         }
         return 0;
     }
+    if (mode == L"--child-loaded" && argc >= 4) {  // a "game" with WrongGPU loaded: the marker open until it is killed
+        LoadedMarker marker(game);
+        if (!marker.held()) return 3;
+        WriteText(argv[3], "ready");
+        Sleep(120000);
+        return 0;
+    }
     if (mode == L"--child-hold" && argc >= 5) {
         StateLock lock(game, 30000);
         if (!lock.held()) return 3;
@@ -226,6 +233,32 @@ int wmain(int argc, wchar_t** argv) {
         if (keep) CloseHandle(keep);
         StateLock again(game, 5000);
         check(again.held() && !again.abandoned(), "after that: the lock is taken normally");
+    }
+
+    // ---- the loaded marker: in this process, in another one, and a dead owner (killed) leaves none
+    {
+        const std::wstring g2 = JoinPath(root, L"Other");
+        check(!IsGameUsingWrongGPU(game) && !IsGameUsingWrongGPU(game), "no marker: not in use (and the check creates none)");
+        {
+            LoadedMarker m(game);
+            std::wstring upper = game;
+            for (auto& ch : upper) ch = static_cast<wchar_t>(towupper(ch));
+            check(m.held() && IsGameUsingWrongGPU(game) && IsGameUsingWrongGPU(upper + L"\\") && !IsGameUsingWrongGPU(g2),
+                  "a marker in this process: in use (any spelling of the folder), another folder not");
+        }
+        check(!IsGameUsingWrongGPU(game), "the marker closed: not in use");
+        check(!IsGameUsingWrongGPU(JoinPath(root, L"nope")), "a missing folder: not in use");
+        const std::wstring ready = JoinPath(root, L"ready-loaded");
+        HANDLE k = Spawn(L"--child-loaded \"" + game + L"\" \"" + ready + L"\"");
+        const bool up = k && WaitFile(ready);
+        check(up && IsGameUsingWrongGPU(game), "another process with the marker open: in use");
+        if (k) {
+            TerminateProcess(k, 9);  // the game crashes (no cleanup of its own)
+            WaitForSingleObject(k, 30000);
+            CloseHandle(k);
+        }
+        check(up && !IsGameUsingWrongGPU(game), "the owning process died: no stale marker, not in use");
+        DeleteFileW(ready.c_str());
     }
 
     // cleanup (own files only)
