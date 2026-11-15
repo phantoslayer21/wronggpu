@@ -53,9 +53,25 @@ class KRuntime {
   using AllocFn = std::function<bool(DevPtr*, size_t)>;  // device memory owned (and freed) by the caller
 
   // After the caller made the device. external_io: inputs and output always come from FrameIo (no own output).
-  bool create(const WgRtConfig& cfg, Device* dev, AllocFn alloc, bool external_io);
+  // native_direct (backend 3, external_io; the D3D12 executor, interop/executor_d3d12.cpp): the game's colour, depth,
+  // motion and exposure textures and its output texture are bound by the caller (NativeD3D12Ext::bind_direct_frame):
+  // the kernels that read inputs or write the output run as their "_direct" D3D12 forms (see direct_names), no dense
+  // input buffers are allocated, and only the exact default path is taken (network=fused, exact input, tiled input).
+  // On backend 3 create first checks that <build>/dx12/manifest.json has a port of every kernel the context can
+  // launch (d3d12_missing): a context with a missing port is refused before the model is loaded, so the D3D12
+  // executor refuses it and the HIP executor runs it (executor_select.h).
+  bool create(const WgRtConfig& cfg, Device* dev, AllocFn alloc, bool external_io, bool native_direct = false);
   // Enqueues one frame (does not wait).
   bool frame(const WgRtFrame& fr, const FrameIo* io);
+  // native_direct: whether frame() would take this frame (nothing enqueued); false with err() saying why. The D3D12
+  // executor calls it before it records anything ("frame not taken": the HIP executor then runs the context). A frame
+  // whose render size is above 0.68 x the output (DLAA-like; no tiled input stage) or whose jitter is outside
+  // [-0.5, 0.5] is not taken: the legacy input kernels have no direct forms.
+  bool direct_preflight(const WgRtFrame& fr, const FrameIo* io);
+  // Kernel names (as launched) a context of this configuration can launch on backend 3, and those of them the
+  // manifest has no port of (comma list; empty: every kernel is ported). Valid after create's option parsing.
+  std::vector<std::string> d3d12_kernels() const;
+  std::string d3d12_missing() const;
   // Test path (wg_rt_upload_inputs / wg_rt_upload_inputs_rgba): dense colour float32 of `channels` values per pixel (3:
   // RGB, the alpha is 1 as for a colour without an alpha channel; 4: RGBA, the alpha as given), depth, motion (render
   // pixels) into the own input buffers. The output alpha follows the colour's alpha (issue #26).
@@ -80,12 +96,19 @@ class KRuntime {
   bool launch(const char* kernel, unsigned grid, unsigned block, void* arg0, void* arg1 = nullptr,
               void* arg2 = nullptr, void* arg3 = nullptr, void* arg4 = nullptr, void* arg5 = nullptr,
               void* arg6 = nullptr, void* arg7 = nullptr);
-  bool network(int f);
+  // after(stage name): called after each stage's launch (k_color_at / k_warm launches)
+  bool network(int f, const std::function<bool(const char*)>& after = nullptr);
+  bool warm(const char* at);
+  // the tiled input stage's guard (frame and direct_preflight): sizes, the 0.68 ratio, finite jitter in [-0.5, 0.5]
+  bool tiled_guard(int rw, int rh, float jx, float jy) const;
+  bool options_ok_direct();
+  int fill_ = -1;  // option k_fill (test hook): the byte every frame-written buffer and the histories start with
 
   WgRtConfig cfg_ = {};
   Device* dev_ = nullptr;
   AllocFn alloc_;
   bool external_io_ = false;
+  bool native_direct_ = false;  // create's native_direct: the "_direct" kernels on the caller's bound textures
   std::string err_, build_dir_, model_path_, map_path_, kernels_text_;
   int W_ = 0, H_ = 0, W16_ = 0, H16_ = 0, Bw_ = 0, Bh_ = 0, max_rw_ = 0, max_rh_ = 0;
   bool hdr_ = false, depth_inverted_ = false, f16_ = false;  // f16_: runtime option network=fused16 (or fused8)
@@ -98,6 +121,7 @@ class KRuntime {
   bool tiled_input_ = false, tiled_last_ = false, tiled_color_last_ = false, input_uniforms_last_ = false;
   uint64_t tiled_launches_ = 0, tiled_color_launches_ = 0, input_uniform_launches_ = 0;
   uint64_t legacy_color_launches_ = 0, legacy_base_launches_ = 0;
+  bool input_uniforms_ = true;  // runtime option k_in_uniforms (0: always k_in_tiled, a port-check diagnostic)
   bool diag_input2_ = false, diag_copyin_ = false;  // runtime option k_diag (timing diagnostics)
   // d0 hands the head to k_out_pixel_c as the compact pixel head (k_stage2*_d0_hp; default). Runtime option
   // k_head=full: the 40-channel head map and k_out_pixel as before (same output bits; buffer "k.N" needs it)
@@ -121,6 +145,11 @@ class KRuntime {
   int frames_ = 0, parity_ = 0, fidx_ = 0, last_rw_ = 0, last_rh_ = 0, level_last_ = -1, omode_last_ = -1;
   float jprev_[2] = {0, 0};
   int pending_mark_ = -1;
+  // D3D12 latency options (create: k_color_at, k_warm, k_warm_line, k_warm_groups): the stage after which k_out_color
+  // runs unordered (empty: before the input stage, HIP's order), the stage after which k_warm runs (empty: off)
+  std::string color_at_, warm_at_, warm_to_;
+  unsigned warm_line_ = 128, warm_groups_ = 64;
+  DevPtr warm_dummy_ = 0;
   WgRtFrameInfo info_ = {};
 };
 

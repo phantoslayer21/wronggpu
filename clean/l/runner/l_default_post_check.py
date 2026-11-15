@@ -38,6 +38,7 @@ sys.path.insert(0, ROOT)
 
 from clean.l.runner import l_frame_check as F  # noqa: E402
 from clean.l.runner import l_post_check as LP  # noqa: E402
+from clean.l.runner import l_record as LR  # noqa: E402
 
 CONFIGS = {"own_stages": ("own", True, 0x3C)}   # (A, "m_default", ran with l_post=m: no longer a runtime route)
 
@@ -53,7 +54,7 @@ def run_one(build, config):
     rng = np.random.default_rng(F.SEED)
     frames = []
     for i, ((rw, rh), reset) in enumerate(F.SEQUENCE):
-        fr = F.frame_inputs(rng, rw, rh, reset, True)
+        fr = F.frame_inputs(rng, rw, rh, reset, True, index=i)
         F.fill_sentinels(p, sentinel, i == 0)
         out = p.frame(fr, debug=True)
         frames.append({"inputs": fr, "out": out, "raw": F.raw_outputs(p), "post_last": p.kernels().get("post_last")})
@@ -116,8 +117,7 @@ def compare(build, json_path):
         res["A_m_post"] = post_frames(md, params)
         keys.insert(0, "A_m_post")
     res["B_own_post"] = post_frames(own, params)
-    with open(json_path, "w") as f:
-        json.dump(res, f, indent=1, default=lambda x: x.item() if hasattr(x, "item") else str(x))
+    LR.write_l_record(res, json_path)
     print("model source:", json.dumps(res["model_source"]))
     for key in keys:
         r = res[key]

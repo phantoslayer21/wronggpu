@@ -18,7 +18,11 @@ bytes. The rules are the Model L checks' (clean/l/runner/l_fold_check.py):
   the half-grid control (the port again with half its workgroups) is used by the families whose grid has more than one
   workgroup;
 - Model M's scale_rgb (frame.co, its port already proven) runs through the same replay as a control.
-The families: narrow = the narrow network stages (k_block.co: k_stage_e2 .. k_stage2_d0_hidden; the stage runner's
+The families: output = the output stage (k_io.co: k_out_color with k_out_pixel_c or k_out_pixel) on the same frame
+flags, the three game-output formats (RGBA32F, RGBA16F rows, RGB32F), colour alphas that are negative, above 1 or out of the
+FP16 range, special values in the colour, depth, motion and head; input = the exact tiled input stage (k_io_exact.co, kx/k_in_tiled) on frames of every flag combination (HDR,
+low-resolution motion, inverted depth, reset), odd and tiny base grids, exposure scalars from a device buffer, special values
+in the colour, depth, motion and histories (the same three levels as the stage families); wide = the wide network stages (k_block_wide.co: k_stagew<NG>_e3 .. _d3), as narrow; narrow = the narrow network stages (k_block.co: k_stage_e2 .. k_stage2_d0_hidden; the stage runner's
 launch plans, clean/k/dx12/k_plan_bridge.py), on random stage weights and inputs with special values (NaN, infinity,
 +-65504, zero, -0, subnormal) in every other case; expo = k_expo_scalars against k_io.co (HIP); warm = k_warm (D3D12 only, no HIP kernel: it is checked
 against its own definition, the dummy word is written exactly when the key equals a lane's loaded value).
@@ -49,7 +53,16 @@ CONTROL = "scale_rgb"   # Model M, frame.co
 NARROW_KERNELS = ["k_stage_e2", "k_stage_e0", "k_stage_e1", "k_stage_d2", "k_stage_d1", "k_stage2_e0", "k_stage2_e1",
                   "k_stage2_d1", "k_stage2_d0_hp", "k_stage2_d0_hidden"]
 FAMILY_KERNELS = {"expo": (["k_io.co"], ["k_expo_scalars"]), "warm": ([], ["k_warm"]),
-                  "narrow": (["k_block.co"], NARROW_KERNELS)}
+                  "narrow": (["k_block.co"], NARROW_KERNELS),
+                  "input": (["k_io_exact.co"], ["kx/k_in_tiled"]),
+                  "legacy": (["k_io_exact.co"], ["kx/k_in_color", "kx/k_in_reset", "kx/k_in_base"]),
+                  "output": (["k_io.co"], ["k_out_color", "k_out_pixel_c", "k_out_pixel"]),
+                  "direct": (["k_io.co", "k_io_exact.co"], ["kx/k_in_tiled_direct", "k_out_color_direct",
+                                                           "k_out_pixel_c_direct", "k_out_pixel_direct",
+                                                           "k_expo_scalars_direct"]),
+                  "directleg": (["k_io_exact.co"], ["kx/k_in_color_direct", "kx/k_in_reset", "kx/k_in_base_direct"]),
+                  "wide": (["k_block_wide.co"], ["k_stagew2_e3", "k_stagew4_e4", "k_stagew2_e4", "k_stagew4_m",
+                                                 "k_stagew4_d4", "k_stagew2_d4", "k_stagew2_d3"])}
 CONTROL_CO = "frame.co"
 
 
@@ -223,12 +236,13 @@ def run_expo(build, rocm, seeds, cdir, hip):
     return items, lines, {"case": "expo_ctl", "hip": outs}
 
 
-def chain_lines(name, prefix, grid, sizes, kernel, co):
+def chain_lines(name, prefix, grid, sizes, kernel, co, extra=()):
     p = prefix + name
     return [f"chain {p}", f"module {co}",
             f"buf st {sizes['st']} {name}.st {D3D12_SENTINEL}", f"buf src {sizes['src']} {name}.src {D3D12_SENTINEL}",
             f"buf meas {sizes['measured']} {name}.meas {D3D12_SENTINEL}", f"buf xs {sizes['xs']} - {D3D12_SENTINEL}",
-            f"step {kernel} {grid} 32 @st @src @meas @xs B:{name}.args", f"save st {p}.out_st", f"save xs {p}.out_xs", ""]
+            *extra, f"step {kernel} {grid} 32 @st @src @meas @xs B:{name}.args", f"save st {p}.out_st",
+            f"save xs {p}.out_xs", ""]
 
 
 # ---- family warm: k_warm ------------------------------------------------------------------------------------------
@@ -321,11 +335,21 @@ def narrow_inputs(stage, size, rng, specials):
     return x, skip
 
 
+# the wide stage kernels (k_block_wide.co: k_stagew<NG>_<stage>, 128 NG lanes per window) the runtime launches:
+# kernel -> (stage, stage-runner suffix, None)
+WIDE = {"k_stagew2_e3": ("e3", "@wide2", None), "k_stagew4_e4": ("e4", "@wide4", None),
+        "k_stagew2_e4": ("e4", "@wide2", None), "k_stagew4_m": ("m", "@wide4", None),
+        "k_stagew4_d4": ("d4", "@wide4", None), "k_stagew2_d4": ("d4", "@wide2", None),
+        "k_stagew2_d3": ("d3", "@wide2", None)}
+# block-level grids (W, H) of the wide stages: fewer windows than a workgroup, ragged edges, more windows than the GPU runs at once
+WIDE_SIZES = [(8, 8), (16, 24), (13, 9), (24, 16), (33, 17), (12, 20)]
+
+
 def itemsize(name):
     return 4 if name == "out" else 2
 
 
-def run_narrow(build, rocm, seeds, cdir, hip, only=None):
+def run_stages(table, co_name, tag, build, rocm, seeds, cdir, hip, grid_list=None, only=None):
     from clean.k.reference.layout import STAGE
     from clean.k.reference.network import random_stage_params
     from clean.k.runner import k_launch as KL
@@ -335,14 +359,15 @@ def run_narrow(build, rocm, seeds, cdir, hip, only=None):
     items, lines, neg = [], [], None
     for si, seed in enumerate(seeds):
         rng = np.random.default_rng(seed)
-        for kernel, (stage, suffix, d0) in NARROW.items():
+        for kernel, (stage, suffix, d0) in table.items():
             if only and kernel not in only:
                 continue
             st = STAGE[stage]
-            for ci in range(len(NARROW_SIZES)):
-                size, offset = NARROW_SIZES[ci], NARROW_OFFSETS[(ci + si) % len(NARROW_OFFSETS)]
+            grids = grid_list or NARROW_SIZES
+            for ci in range(len(grids)):
+                size, offset = grids[ci], NARROW_OFFSETS[(ci + si) % len(NARROW_OFFSETS)]
                 special = ci % 3   # 0 none, 1 specials without NaN, 2 with NaN
-                name = f"nar_s{si}_{kernel}_{ci}"
+                name = f"{tag}_s{si}_{kernel}_{ci}"
                 blob = k_stages.pack(stage, random_stage_params(st, rng))
                 x, skip = narrow_inputs(stage, size, rng, special)
                 pdev = PB.PlanDev(hip.h)
@@ -368,12 +393,12 @@ def run_narrow(build, rocm, seeds, cdir, hip, only=None):
                     sizes = {n: pdev.sizes[plan["bufs"][n]] for n in outputs}
                     got = {n: bytes(hip.h.download(plan["bufs"][n], sizes[n] + SLACK)) for n in outputs}
                     defined = {n: min(int(np.prod(sh)) * itemsize(n), sizes[n]) for n, sh in plan["outputs"]}
-                    lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k.split(":")[-1]], cdir, ["k_block.co"],
+                    lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k], cdir, [co_name],
                                             outputs)
                     if neg is None and plan["launches"][0][1] >= 4:   # the dropped windows hold output pixels
                         neg = name
-                        lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k.split(":")[-1]], cdir,
-                                                ["k_block.co"], outputs, prefix="negative_", grid_div=2)
+                        lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k], cdir,
+                                                [co_name], outputs, prefix="negative_", grid_div=2)
                     items.append({"case": name, "kernel": kernel, "stage": stage, "size": list(size),
                                   "offset": list(offset), "specials": special, "outputs": outputs, "hip": got,
                                   "defined": defined})
@@ -384,28 +409,35 @@ def run_narrow(build, rocm, seeds, cdir, hip, only=None):
 
 
 def nan_equivalent_differ(got, want, defined, width=2):
-    """Differing bytes over the first `defined` bytes after ignoring the elements (2 bytes: FP16) that are NaN in both:
-    IEEE 754 does not define a NaN's sign or payload, and the two devices may generate or propagate a different one."""
+    """(differing elements outside the accepted exception, elements that differ only in the NaN sign) over the first
+    `defined` bytes. The only accepted exception is the sign of a NaN (IEEE 754 does not define it for a NaN a stage
+    generates or propagates): an element is a sign-only difference when both are NaN and the two differ in the sign bit
+    alone, so the exponent, the quiet bit and the payload are equal. Any other difference, a NaN with another payload
+    included, is outside."""
     dt = np.uint16 if width == 2 else np.uint32
     a = np.frombuffer(got[:defined], dt)
     b = np.frombuffer(want[:defined], dt)
     exp, mant = (0x7C00, 0x03FF) if width == 2 else (0x7F800000, 0x007FFFFF)
+    sign = dt(0x8000 if width == 2 else 0x80000000)
     nan = lambda v: ((v & exp) == exp) & ((v & mant) != 0)
-    return int(np.sum((a != b) & ~(nan(a) & nan(b)))), int(np.sum((a != b) & nan(a) & nan(b)))
+    sign_only = (a != b) & nan(a) & nan(b) & ((a ^ b) == sign)
+    return int(np.sum((a != b) & ~sign_only)), int(np.sum(sign_only))
 
 
 def check_narrow(state, read):
     items, _, neg = state
     out = []
     for it in items:
-        per = {n: compare(read(f"{it['case']}.{n}.d3d12"), it["hip"][n], it["defined"][n], D3D12_SENTINEL, HIP_SENTINEL)
+        fn = lambda n: it["case"] + ("." + n + ".d3d12" if "d3d12_files" not in it else it["d3d12_files"][n])
+        per = {n: compare(read(fn(n)), it["hip"][n], it["defined"][n], D3D12_SENTINEL, HIP_SENTINEL)
                for n in it["outputs"]}
         raw = all(v["identical"] for v in per.values())
         nan_only = 0
         if not raw and it["specials"] == 2:   # NaN inputs: a NaN's sign / payload is not defined (see nan_equivalent_differ)
             for n, v in per.items():
                 if not v["identical"] and v["slack_bad"] == 0:
-                    d, same = nan_equivalent_differ(read(f"{it['case']}.{n}.d3d12"), it["hip"][n], it["defined"][n])
+                    d, same = nan_equivalent_differ(read(fn(n)), it["hip"][n], it["defined"][n],
+                                                    it.get("widths", {}).get(n, 2))
                     v["differ_outside_nan"], v["nan_elements_differing_in_sign"] = d, same
                     nan_only += same
         ok_case = raw or all(v["identical"] or (v["slack_bad"] == 0 and v.get("differ_outside_nan", 1) == 0)
@@ -432,6 +464,434 @@ def check_narrow(state, read):
             "failures": [o for o in out if not o["identical"]][:4]}, ok
 
 
+# ---- family input: the exact tiled input stage (k_io_exact.co) -----------------------------------------------------
+
+INPUT_BASES = [(1, 1), (7, 9), (8, 8), (9, 7), (33, 17)]
+INPUT_FLAG_SETS = [(h, m, i, r) for h in (True, False) for m in (True, False) for i in (True, False)
+                   for r in (False, True)]
+
+
+def input_specials(x, rng, level):
+    """level 1: infinity, huge, zero and -0 values in the colour, depth and motion, and non-finite history; level 2: NaN
+    as well (in the colour, depth, motion and histories)."""
+    pool = [np.inf, -np.inf, 3.0e38, -3.0e38, 0.0, -0.0, 65504.0, -65504.0, 1e-30]
+    if level == 2:
+        pool += [np.nan]
+    pool = np.array(pool, np.float32)
+    for k in ("color", "depth", "motion"):
+        a = x[k]
+        pick = rng.random(a.shape) < 0.004
+        a[pick] = rng.choice(pool, int(pick.sum()))
+    for k in ("Hc", "Hh"):
+        a = x[k]
+        pick = rng.random(a.shape) < 0.01
+        a[pick] = rng.choice(pool.astype(np.float32), int(pick.sum())).astype(np.float16)
+
+
+def run_input(build, rocm, seeds, cdir, hip):
+    from clean.k.dx12 import k_plan_bridge as PB
+    from clean.k.runner import k_io, k_stages
+    from clean.k.tests.test_k_io_emu import frame
+    tokens = PB.manifest_args(build)
+    items, lines, neg = [], [], None
+    for si, seed in enumerate(seeds):
+        rng = np.random.default_rng(seed + 500)
+        for ci, (hdr, mvlo, inv, reset) in enumerate(INPUT_FLAG_SETS):
+            base = INPUT_BASES[(ci + si) % len(INPUT_BASES)]
+            special = (ci // 2) % 3   # 0 none, 1 specials without NaN, 2 with NaN
+            name = f"inp_s{si}_{ci}"
+            x = frame(rng, hdr, mvlo, inv, reset=reset, base=base)
+            x["base"] = base
+            x.update(E_cur=1.5, E_prev=1.0, E_aux=0.75, pre_exposure=2.0)
+            if special:
+                input_specials(x, rng, special)
+            pdev = PB.PlanDev(hip.h)
+            plan = k_stages.prepare(pdev, "input@exact", b"", x, None, None)
+            try:
+                prm = plan["launches"][-1][3][0]
+                # the exposure scalars come from a device buffer, as in the runtime (the host values are wrong on purpose)
+                xs = np.array([prm.f.kappa, prm.f.rho, prm.f.lam, np.float32(1.0) / np.float32(prm.f.kappa)], np.float32)
+                ptr = pdev.malloc(xs.nbytes)
+                pdev.upload(ptr, xs.tobytes())
+                plan["bufs"]["xs"], plan["sizes"]["xs"] = ptr, xs.nbytes
+                prm.f.xs = ptr
+                prm.f.kappa, prm.f.rho, prm.f.lam = -17.0, 7.0, 9.0
+                bufs = {n: getattr(prm, n) for n in ("Hc", "Hh", "x0", "cpre", "cpre2")}
+                plan["launches"] = k_io.input_launches(prm.f, bufs, exact=True, tiled=True)
+                if len(plan["launches"]) != 1:
+                    continue   # unsupported geometry: the runtime falls back to HIP's untiled pair
+                if reset:   # a reset frame reads no history, motion or depth
+                    act = plan["launches"][0][3][0]
+                    act.Hc = act.Hh = None
+                    act.f.motion = act.f.depth = None
+                outputs = [n for n, _ in plan["outputs"]]
+                for n, p in plan["bufs"].items():
+                    if p in pdev.inputs:
+                        write(os.path.join(cdir, f"{name}.{n}.in"), bytes(hip.h.download(p, pdev.sizes[p])))
+                for k, grid, block, a in plan["launches"]:
+                    co, kernel = k.split(":")
+                    hip.h.launch(hip.h.get_function(hip.mods[co], kernel), grid, block, a)
+                hip.h.sync()
+                sizes = {n: pdev.sizes[plan["bufs"][n]] for n in outputs}
+                got = {n: bytes(hip.h.download(plan["bufs"][n], sizes[n] + SLACK)) for n in outputs}
+                defined = {n: min(int(np.prod(sh)) * 2, sizes[n]) for n, sh in plan["outputs"]}
+                kw = dict(modules=["k_io_exact.co kx"], outputs=outputs, d3d12_name=lambda k: "kx/" + k.split(":")[-1])
+                lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k], cdir, **kw)
+                if neg is None and plan["launches"][0][1] >= 4 and not reset:
+                    neg = name
+                    lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k], cdir, prefix="negative_", grid_div=2,
+                                            **kw)
+                items.append({"case": name, "kernel": "kx/k_in_tiled", "stage": "input", "size": list(base),
+                              "offset": [0, 0], "specials": special, "outputs": outputs, "hip": got, "defined": defined})
+            finally:
+                for p in plan["bufs"].values():
+                    pdev.free(p)
+    return items, lines, neg
+
+
+# ---- family output: the output stage (k_io.co) ---------------------------------------------------------------------
+
+OUT_BYTES = {0: 16, 1: 8, 2: 12}   # bytes per pixel of KOutParams.omode 0 RGBA32F, 1 RGBA16F rows, 2 RGB32F
+
+
+def run_output(build, rocm, seeds, cdir, hip):
+    from clean.k.dx12 import k_plan_bridge as PB
+    from clean.k.runner import k_io, k_stages
+    from clean.k.tests.test_k_io_emu import frame
+    tokens = PB.manifest_args(build)
+    items, lines, neg = [], [], None
+    for si, seed in enumerate(seeds):
+        rng = np.random.default_rng(seed + 900)
+        for ci, (hdr, mvlo, inv, reset) in enumerate(INPUT_FLAG_SETS):
+            base = INPUT_BASES[(ci + si) % len(INPUT_BASES)]
+            special = (ci // 2) % 3
+            omode, compact = (ci + si) % 3, (ci // 3 + si) % 2 == 0
+            name = f"out_s{si}_{ci}"
+            x = frame(rng, hdr, mvlo, inv, reset=reset, base=base)
+            x["base"] = base
+            # the colour input's alpha: negative, above 1 and out of the FP16 range values among them
+            x["color"][..., 3] = rng.uniform(-1.0, 2.0, x["color"].shape[:2]).astype(np.float32)
+            x["color"][rng.random(x["color"].shape[:2]) < 0.01, 3] = 7e4
+            if special:
+                input_specials(x, rng, special)
+                x["N"][rng.random(x["N"].shape) < 0.002] = np.array(np.inf if special == 1 else np.nan, np.float16)
+            pdev = PB.PlanDev(hip.h)
+            plan = k_stages.prepare(pdev, "output@compact" if compact else "output", b"", x, None, None)
+            try:
+                launches = [ln for ln in plan["launches"] if ln[0] != "k_out_hidden"]
+                prm = launches[0][3][0]
+                xs = np.array([prm.f.kappa, prm.f.rho, prm.f.lam, np.float32(1.0) / np.float32(prm.f.kappa)], np.float32)
+                ptr = pdev.malloc(xs.nbytes)
+                pdev.upload(ptr, xs.tobytes())
+                plan["bufs"]["xs"], plan["sizes"]["xs"] = ptr, xs.nbytes
+                prm.f.xs = ptr
+                prm.f.kappa, prm.f.rho, prm.f.lam = -17.0, 7.0, 9.0
+                prm.omode, prm.opitch = omode, prm.f.W
+                plan["launches"] = launches
+                W, H = prm.f.W, prm.f.H
+                plan["outputs"] = [(n, sh) for n, sh in plan["outputs"] if n != "Hhout"]   # k_out_hidden is not ported
+                # k_out_color's own results too: the stored colour tap (4 FP16) and the filter-tap value (FP16) per pixel
+                plan["outputs"] += [("ctap", (prm.f.rh, prm.f.rw, 4)), ("ctapT", (prm.f.rh, prm.f.rw))]
+                outputs = [n for n, _ in plan["outputs"]]
+                for n, p in plan["bufs"].items():
+                    if p in pdev.inputs:
+                        write(os.path.join(cdir, f"{name}.{n}.in"), bytes(hip.h.download(p, pdev.sizes[p])))
+                for k, grid, block, a in plan["launches"]:
+                    hip.h.launch(hip.h.get_function(hip.mods["k_io.co"], k), grid, block, a)
+                hip.h.sync()
+                sizes = {n: pdev.sizes[plan["bufs"][n]] for n in outputs}
+                got = {n: bytes(hip.h.download(plan["bufs"][n], sizes[n] + SLACK)) for n in outputs}
+                defined = {n: min(int(np.prod(sh)) * 2, sizes[n]) for n, sh in plan["outputs"]}
+                defined["out"] = W * H * OUT_BYTES[omode]
+                kw = dict(modules=["k_io.co"], outputs=outputs)
+                lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k], cdir, **kw)
+                if neg is None and plan["launches"][1][1] >= 4 and not reset:
+                    neg = name
+                    lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k], cdir, prefix="negative_", grid_div=2,
+                                            **kw)
+                items.append({"case": name, "kernel": "k_out_pixel_c" if compact else "k_out_pixel", "stage": "output",
+                              "size": list(base), "offset": [0, 0], "specials": special, "outputs": outputs,
+                              "hip": got, "defined": defined, "widths": {"out": 2 if omode == 1 else 4}})
+            finally:
+                for p in plan["bufs"].values():
+                    pdev.free(p)
+    return items, lines, neg
+
+
+# ---- family direct: the forms that read the game's textures (rs=direct; native executor) ---------------------------
+# The reference is HIP's raw-buffer route (KIO_C16 colour rows, KIO_M16 raw motion with ms / mo folded, R32F depth): the
+# bytes the HIP executor feeds model K for 16-bit float game textures. D3D12 reads the same texels as textures.
+
+DXGI_RGBA16F, DXGI_RGBA32F, DXGI_R32F, DXGI_RG16F = 10, 2, 41, 34
+KIO_C16, KIO_M16 = 16, 32
+
+
+def direct_inputs(x, rng):
+    """The frame's textures as arrays: colour RGBA16F, depth R32F, motion RG16F (render size, or the output's with
+    full-size motion); ms, mo of the motion texture."""
+    c = x["color"].astype(np.float16)
+    m = x["motion"].astype(np.float16)
+    ms = np.array([0.5, 2.0], np.float32) if rng.random() < 0.5 else np.array([1.0, 1.0], np.float32)
+    mo = np.array([0.25, -0.5], np.float32) if ms[0] != 1.0 else np.array([0.0, 0.0], np.float32)
+    return c, np.ascontiguousarray(x["depth"], np.float32), m, ms, mo
+
+
+def direct_lines(name, c, m, ms, mo, rne16, out_fmt=None, out_wh=(0, 0)):
+    """kernel_replay direct lines of a frame: textures from files, the frame params, the output texture."""
+    rh, rw = c.shape[:2]
+    mh, mw = m.shape[:2]
+    lines = [f"direct color {DXGI_RGBA16F} {rw} {rh} {name}.color.tex", f"direct depth {DXGI_R32F} {rw} {rh} {name}.depth.tex",
+             f"direct motion {DXGI_RG16F} {mw} {mh} {name}.motion.tex",
+             f"direct_params 0 0 {rw} {rh} 1.0 {rne16} ms={float(ms[0])!r},{float(ms[1])!r} "
+             f"mo={float(mo[0])!r},{float(mo[1])!r}"]
+    if out_fmt:
+        lines += [f"direct output {out_fmt} {out_wh[0]} {out_wh[1]} {name}.outinit.tex", f"direct_out {name}.out.d3d12"]
+    else:   # a direct frame binds all four textures: the input stage's frame gets an output it never writes
+        lines += [f"direct output {DXGI_RGBA16F} {rw} {rh} -"]
+    return lines
+
+
+def run_direct(build, rocm, seeds, cdir, hip, stages=("input", "output"), tag="dir", with_expo=True):
+    """stages: "input" (kx/k_in_tiled_direct), "legacy" (kx/k_in_color_direct + kx/k_in_base_direct, and kx/k_in_reset, the
+    buffer form that a direct frame runs on a reset frame), "output" (k_out_color_direct + k_out_pixel_c_direct, or
+    k_out_pixel_direct with the head map)."""
+    from clean.k.dx12 import k_plan_bridge as PB
+    from clean.k.runner import k_io, k_stages
+    from clean.k.runner.k_io import KExpoArgs
+    from clean.k.tests.test_k_io_emu import frame
+    tokens = PB.manifest_args(build)
+    items, lines, neg = [], [], None
+    for si, seed in enumerate(seeds):
+        rng = np.random.default_rng(seed + 1300 + (400 if stages == ("legacy",) else 0))
+        for ci, (hdr, mvlo, inv, reset) in enumerate(INPUT_FLAG_SETS):
+            base = INPUT_BASES[(ci + si) % len(INPUT_BASES)]
+            special = (ci // 2) % 3
+            for stage in stages:
+                if stage == "output" and reset and ci % 4:   # a reset frame's output stage on a few cases only
+                    continue
+                name = f"{tag}_{stage[:3]}_s{si}_{ci}"
+                compact = (ci // 3 + si) % 2 == 0   # output stage: the compact pixel head, else the head map (k_head=full)
+                x = frame(rng, hdr, mvlo, inv, reset=reset, base=base)
+                x["base"] = base
+                x.update(E_cur=1.5, E_prev=1.0, E_aux=0.75, pre_exposure=2.0)
+                if stage == "legacy":   # every fourth case: render size = output size (DLAA 1.0), or a jitter outside [-0.5, 0.5]
+                    legacy_frame(x, rng, ci % 4 == 1, ci % 4 == 2)
+                x["color"][..., 3] = rng.uniform(-1.0, 2.0, x["color"].shape[:2]).astype(np.float32)
+                if special:
+                    input_specials(x, rng, special)
+                    if stage == "output":
+                        x["N"][rng.random(x["N"].shape) < 0.002] = np.array(np.inf if special == 1 else np.nan, np.float16)
+                c16, d32, m16, ms, mo = direct_inputs(x, rng)
+                x["color"] = c16.astype(np.float32)   # the reference sees the same texel values
+                pdev = PB.PlanDev(hip.h)
+                plan = k_stages.prepare(pdev, "input@exact" if stage in ("input", "legacy") else
+                                        ("output@compact" if compact else "output"), b"", x, None, None)
+                try:
+                    launches = [ln for ln in plan["launches"] if ln[0] != "k_out_hidden"]
+                    prm = launches[0][3][0]
+                    f = prm.f
+                    xs = np.array([f.kappa, f.rho, f.lam, np.float32(1.0) / np.float32(f.kappa)], np.float32)
+                    ptr = pdev.malloc(xs.nbytes)
+                    pdev.upload(ptr, xs.tobytes())
+                    plan["bufs"]["xs"], plan["sizes"]["xs"] = ptr, xs.nbytes
+                    fs = [f]
+                    if stage == "legacy":   # k_in_color and k_in_base / k_in_reset each carry their own parameter block
+                        names = [ln[0].split(":")[-1] for ln in launches]
+                        assert names == ["k_in_color", "k_in_reset" if reset else "k_in_base"], names
+                        fs = [ln[3][0].f for ln in launches]
+                    for ff in fs:
+                        ff.xs = ptr
+                        ff.kappa, ff.rho, ff.lam = -17.0, 7.0, 9.0
+                    # the raw-buffer route: RGBA16F colour rows, raw RG16F motion with ms / mo, R32F depth
+                    rh, rw = c16.shape[:2]
+                    mh, mw = m16.shape[:2]
+                    cb, mbuf = pdev.malloc(c16.nbytes), pdev.malloc(m16.nbytes)
+                    pdev.upload(cb, c16.tobytes())
+                    pdev.upload(mbuf, m16.tobytes())
+                    plan["bufs"]["color16"], plan["sizes"]["color16"] = cb, c16.nbytes
+                    plan["bufs"]["motion16"], plan["sizes"]["motion16"] = mbuf, m16.nbytes
+                    for ff in fs:
+                        ff.color, ff.motion = cb, mbuf
+                        ff.cpitch, ff.mpitch, ff.mch = rw, mw, 2
+                        ff.flags |= KIO_C16 | KIO_M16
+                        ff.rmsx, ff.rmsy, ff.rmox, ff.rmoy = (float(v) for v in (*ms, *mo))
+                    omode = 0
+                    if stage == "legacy":
+                        n_px = f.rw * f.rh
+                        plan["outputs"] = list(plan["outputs"]) + [("cpre", (n_px, 4)), ("cpre2", (n_px, 2))]
+                        modules, hipco = ["k_io_exact.co kx"], "k_io_exact.co"
+                        d3name = lambda k: "kx/" + k.split(":")[-1] + ("" if k.endswith("k_in_reset") else "_direct")
+                        out_fmt, rne16 = None, 0
+                    elif stage == "input":
+                        bufs = {n: getattr(prm, n) for n in ("Hc", "Hh", "x0", "cpre", "cpre2")}
+                        plan["launches"] = k_io.input_launches(f, bufs, exact=True, tiled=True)
+                        if len(plan["launches"]) != 1:
+                            continue
+                        if reset:
+                            act = plan["launches"][0][3][0]
+                            act.Hc = act.Hh = None
+                            act.f.motion = act.f.depth = None
+                        modules, hipco = ["k_io_exact.co kx"], "k_io_exact.co"
+                        d3name = lambda k: "kx/" + k.split(":")[-1] + "_direct"
+                        out_fmt, rne16 = None, 0
+                    else:
+                        omode = (ci + si) % 2   # 0 RGBA32F, 1 RGBA16F rows
+                        prm.omode, prm.opitch = omode, f.W
+                        plan["launches"] = launches
+                        plan["outputs"] = [(n, sh) for n, sh in plan["outputs"] if n != "Hhout"]
+                        plan["outputs"] += [("ctap", (f.rh, f.rw, 4)), ("ctapT", (f.rh, f.rw))]
+                        modules, hipco = ["k_io.co"], "k_io.co"
+                        d3name = lambda k: k + "_direct"
+                        out_fmt, rne16 = (DXGI_RGBA16F if omode else DXGI_RGBA32F), (1 if omode else 0)
+                    outputs = [n for n, _ in plan["outputs"]]
+                    for n, p in plan["bufs"].items():
+                        if p in pdev.inputs:
+                            write(os.path.join(cdir, f"{name}.{n}.in"), bytes(hip.h.download(p, pdev.sizes[p])))
+                    write(os.path.join(cdir, f"{name}.color.tex"), c16.tobytes())
+                    write(os.path.join(cdir, f"{name}.depth.tex"), d32.tobytes())
+                    write(os.path.join(cdir, f"{name}.motion.tex"), m16.tobytes())
+                    for k, grid, block, a in plan["launches"]:
+                        co, kernel = (k.split(":") if ":" in k else (hipco, k))
+                        hip.h.launch(hip.h.get_function(hip.mods[co], kernel), grid, block, a)
+                    hip.h.sync()
+                    sizes = {n: pdev.sizes[plan["bufs"][n]] for n in outputs}
+                    got = {n: bytes(hip.h.download(plan["bufs"][n], sizes[n] + SLACK)) for n in outputs}
+                    defined = {n: min(int(np.prod(sh)) * 2, sizes[n]) for n, sh in plan["outputs"]}
+                    widths, saves, out_wh = {}, outputs, (0, 0)
+                    if stage == "legacy":
+                        defined.update({"x0": min(f.Bw * f.Bh * 32, sizes["x0"]), "cpre": n_px * 16, "cpre2": n_px * 8})
+                        widths = {"cpre": 4, "cpre2": 4}
+                    if stage == "output":
+                        out_wh = (f.W, f.H)
+                        bpp = 8 if omode else 16
+                        defined["out"] = f.W * f.H * bpp
+                        got["out"] = got["out"][:defined["out"]]   # the texture holds the image only
+                        widths["out"] = 2 if omode else 4
+                        write(os.path.join(cdir, f"{name}.outinit.tex"), bytes([D3D12_SENTINEL]) * defined["out"])
+                        saves = [n for n in outputs if n != "out"]   # the image comes back through direct_out
+                    extra = direct_lines(name, c16, m16, ms, mo, rne16, out_fmt, out_wh)
+                    lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k], cdir, modules=modules, outputs=saves,
+                                            d3d12_name=d3name, extra=extra)
+                    if neg is None and plan["launches"][-1][1] >= 4 and not reset:
+                        neg = name
+                        extra_neg = [l.replace(f"direct_out {name}.out.d3d12", f"direct_out negative_{name}.out.d3d12")
+                                     for l in extra]
+                        lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k], cdir, modules=modules,
+                                                outputs=saves, d3d12_name=d3name, extra=extra_neg, prefix="negative_",
+                                                grid_div=2)
+                    kernel = {"input": "kx/k_in_tiled_direct",
+                              "legacy": "kx/k_in_reset" if reset else "kx/k_in_base_direct",
+                              "output": "k_out_pixel_c_direct" if compact else "k_out_pixel_direct"}[stage]
+                    items.append({"case": name, "kernel": kernel, "stage": stage, "size": list(base), "offset": [0, 0],
+                                  "specials": special, "outputs": outputs, "hip": got, "defined": defined,
+                                  "widths": widths})
+                finally:
+                    for p in plan["bufs"].values():
+                        pdev.free(p)
+    # the exposure texel: k_expo_scalars_direct reads E_cur from the game's exposure texture (src_mode 1)
+    sizes = expo_sizes()
+    for si, seed in enumerate(seeds if with_expo else []):
+        rng = np.random.default_rng(seed + 1700)
+        for ci, (a, st, src, meas) in enumerate([c for c in expo_cases(rng) if c[0]["src_mode"] == 1 and c[0]["hdr"]]):
+            name = f"dir_exp_s{si}_{ci}"
+            outs = hip.run("k_io.co", "k_expo_scalars", 1, 32,
+                           [("buf", 0), ("buf", 1), ("buf", 2), ("buf", 3), KExpoArgs(**a)],
+                           [(st, sizes["st"]), (src, sizes["src"]), (meas, sizes["measured"]), (None, sizes["xs"])])
+            write(os.path.join(cdir, name + ".st"), st)
+            write(os.path.join(cdir, name + ".src"), src)
+            write(os.path.join(cdir, name + ".meas"), meas)
+            write(os.path.join(cdir, name + ".args"), expo_struct(a))
+            write(os.path.join(cdir, name + ".expo.tex"), src[:4])
+            lines += chain_lines(name, "", 1, sizes, "k_expo_scalars_direct", "k_io.co",
+                                 extra=[f"direct exposure {DXGI_R32F} 1 1 {name}.expo.tex",
+                                        f"direct color {DXGI_RGBA16F} 1 1 -", f"direct depth {DXGI_R32F} 1 1 -",
+                                        f"direct motion {DXGI_RG16F} 1 1 -", f"direct output {DXGI_RGBA16F} 1 1 -",
+                                        "direct_params 0 0 1 1 1.0 0 expo=1"])
+            items.append({"case": name, "kernel": "k_expo_scalars_direct", "stage": "expo", "size": [1, 1],
+                          "offset": [0, 0], "specials": 0, "outputs": ["st", "xs"], "hip": {"st": outs[0], "xs": outs[3]},
+                          "defined": {"st": 16, "xs": 16}, "widths": {}, "d3d12_files": {"st": ".out_st", "xs": ".out_xs"}})
+    return items, lines, neg
+
+
+# ---- family legacy: the legacy exact input kernels k_in_color + k_in_reset / k_in_base (k_io_exact.co) -----------------
+# The runtime takes them where the tiled kernel does not apply: render size above 0.68 x the output (up to 1.0, DLAA),
+# a jitter outside [-0.5, 0.5]. Inputs, intermediates (cpre, cpre2) and the output x0 are compared raw.
+
+def legacy_frame(x, rng, ratio_one, wide_jitter):
+    """x with the render size the output's (DLAA) and/or a jitter outside [-0.5, 0.5]."""
+    from clean.k.tests.test_k_io_emu import W, H
+    if ratio_one:
+        x["render_size"] = (W, H)
+        x["color"] = (rng.random((H, W, 4)) * (4 if x["hdr"] else 1)).astype(np.float32)
+        x["depth"] = rng.random((H, W)).astype(np.float32)
+        x["motion"] = (rng.standard_normal((H, W, 2)) * 0.8).astype(np.float32)
+    if wide_jitter:
+        x["jitter"] = (0.75, -0.8)
+    return x
+
+
+def run_legacy(build, rocm, seeds, cdir, hip):
+    from clean.k.dx12 import k_plan_bridge as PB
+    from clean.k.runner import k_io, k_stages
+    from clean.k.tests.test_k_io_emu import frame
+    tokens = PB.manifest_args(build)
+    items, lines, neg = [], [], None
+    for si, seed in enumerate(seeds):
+        rng = np.random.default_rng(seed + 2100)
+        for ci, (hdr, mvlo, inv, reset) in enumerate(INPUT_FLAG_SETS):
+            base = INPUT_BASES[(ci + si) % len(INPUT_BASES)]
+            special = (ci // 2) % 3
+            ratio_one, wide_jitter = ci % 4 == 1, ci % 4 == 2   # every fourth case: ratio 1.0, jitter outside the guard
+            name = f"leg_s{si}_{ci}"
+            x = frame(rng, hdr, mvlo, inv, reset=reset, base=base)
+            x["base"] = base
+            x.update(E_cur=1.5, E_prev=1.0, E_aux=0.75, pre_exposure=2.0)
+            legacy_frame(x, rng, ratio_one, wide_jitter)
+            if special:
+                input_specials(x, rng, special)
+            pdev = PB.PlanDev(hip.h)
+            plan = k_stages.prepare(pdev, "input@exact", b"", x, None, None)   # k_in_color + k_in_base / k_in_reset
+            try:
+                prm = plan["launches"][-1][3][0]
+                f = prm.f
+                xs = np.array([f.kappa, f.rho, f.lam, np.float32(1.0) / np.float32(f.kappa)], np.float32)
+                ptr = pdev.malloc(xs.nbytes)
+                pdev.upload(ptr, xs.tobytes())
+                plan["bufs"]["xs"], plan["sizes"]["xs"] = ptr, xs.nbytes
+                f.xs = ptr
+                f.kappa, f.rho, f.lam = -17.0, 7.0, 9.0
+                names = [ln[0].split(":")[-1] for ln in plan["launches"]]
+                assert names == ["k_in_color", "k_in_reset" if reset else "k_in_base"], names
+                n_px = f.rw * f.rh
+                plan["outputs"] = list(plan["outputs"]) + [("cpre", (n_px, 4)), ("cpre2", (n_px, 2))]
+                outputs = [n for n, _ in plan["outputs"]]
+                for n, p in plan["bufs"].items():
+                    if p in pdev.inputs:
+                        write(os.path.join(cdir, f"{name}.{n}.in"), bytes(hip.h.download(p, pdev.sizes[p])))
+                for k, grid, block, a in plan["launches"]:
+                    co, kernel = k.split(":")
+                    hip.h.launch(hip.h.get_function(hip.mods[co], kernel), grid, block, a)
+                hip.h.sync()
+                sizes = {n: pdev.sizes[plan["bufs"][n]] for n in outputs}
+                got = {n: bytes(hip.h.download(plan["bufs"][n], sizes[n] + SLACK)) for n in outputs}
+                defined = {"x0": min(f.Bw * f.Bh * 32, sizes["x0"]), "cpre": n_px * 16, "cpre2": n_px * 8}
+                widths = {"cpre": 4, "cpre2": 4}
+                kw = dict(modules=["k_io_exact.co kx"], outputs=outputs, d3d12_name=lambda k: "kx/" + k.split(":")[-1])
+                lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k], cdir, **kw)
+                if neg is None and plan["launches"][0][1] >= 4 and not reset:
+                    neg = name
+                    lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k], cdir, prefix="negative_", grid_div=2,
+                                            **kw)
+                items.append({"case": name, "kernel": "kx/k_in_base" if not reset else "kx/k_in_reset",
+                              "stage": "input", "size": list(base), "offset": [0, 0], "specials": special,
+                              "outputs": outputs, "hip": got, "defined": defined, "widths": widths,
+                              "ratio_one": ratio_one, "wide_jitter": wide_jitter})
+            finally:
+                for p in plan["bufs"].values():
+                    pdev.free(p)
+    return items, lines, neg
+
+
 # ---- run -----------------------------------------------------------------------------------------------------------
 
 def run(build, rocm, families, seeds, json_out):
@@ -450,8 +910,26 @@ def run(build, rocm, families, seeds, json_out):
         state["warm"] = run_warm(build, rocm, seeds, cdir, hip)
         lines += state["warm"][1]
     if "narrow" in families:
-        state["narrow"] = run_narrow(build, rocm, seeds, cdir, hip)
+        state["narrow"] = run_stages(NARROW, "k_block.co", "nar", build, rocm, seeds, cdir, hip)
         lines += state["narrow"][1]
+    if "legacy" in families:
+        state["legacy"] = run_legacy(build, rocm, seeds, cdir, hip)
+        lines += state["legacy"][1]
+    if "input" in families:
+        state["input"] = run_input(build, rocm, seeds, cdir, hip)
+        lines += state["input"][1]
+    if "direct" in families:
+        state["direct"] = run_direct(build, rocm, seeds, cdir, hip)
+        lines += state["direct"][1]
+    if "directleg" in families:
+        state["directleg"] = run_direct(build, rocm, seeds, cdir, hip, stages=("legacy",), tag="dirl", with_expo=False)
+        lines += state["directleg"][1]
+    if "output" in families:
+        state["output"] = run_output(build, rocm, seeds, cdir, hip)
+        lines += state["output"][1]
+    if "wide" in families:
+        state["wide"] = run_stages(WIDE, "k_block_wide.co", "wid", build, rocm, seeds, cdir, hip, WIDE_SIZES)
+        lines += state["wide"][1]
     # the control: Model M's scale_rgb, same replay, against HIP
     rng = np.random.default_rng(seeds[0])
     cn = 1000
@@ -504,9 +982,10 @@ def run(build, rocm, families, seeds, json_out):
                 fails.append(it["case"])
         res["results"]["warm"] = {"cases": len(state["warm"][0]), "as_defined": good, "failures": fails[:5]}
         ok = ok and good == len(state["warm"][0]) and good > 0
-    if "narrow" in state:
-        res["results"]["narrow"], good = check_narrow(state["narrow"], read)
-        ok = ok and good
+    for fam in ("narrow", "wide", "input", "legacy", "output", "direct", "directleg"):
+        if fam in state:
+            res["results"][fam], good = check_narrow(state[fam], read)
+            ok = ok and good
     ctl_got = read("ctl.out")
     ctl = compare(ctl_got, h[0], 1000 * 4, D3D12_SENTINEL, HIP_SENTINEL)
     res["control"] = {"kernel": CONTROL, "identical": bool(ctl["identical"]), "differ": ctl["differ"],

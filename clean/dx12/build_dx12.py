@@ -358,6 +358,9 @@ def main(argv=None):
     ap.add_argument("--model-k", action="store_true",
                     help="also build Model K's kernels (clean/k/dx12/kernels; off by default: Model M's and Model L's "
                          "kernel sets unchanged)")
+    ap.add_argument("--define", action="append", default=[], metavar="NAME=VALUE",
+                    help="an extra preprocessor define for every kernel built (test variants: negative-control mutants, "
+                         "test counters; never for a shipped build)")
     ap.add_argument("--list", action="store_true",
                     help="print the kernels a build with these options compiles (name and code object, JSON) and exit: "
                          "the cheap check before a build (kernel_sets.json, tests/test_kernel_sets.py)")
@@ -367,6 +370,11 @@ def main(argv=None):
         return 0
     if not a.out:
         ap.error("--out is required")
+    extra_defs = {}
+    for kv in a.define:
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]*=-?[0-9A-Za-z_]+", kv):
+            ap.error(f"--define {kv!r} (NAME=VALUE)")
+        extra_defs[kv.split("=", 1)[0]] = kv.split("=", 1)[1]
     dst = os.path.join(a.out, "dx12")
     os.makedirs(dst, exist_ok=True)
     asm = build_asm_tool(a.out)
@@ -383,6 +391,12 @@ def main(argv=None):
     for fn in sorted(os.listdir(KERNEL_DIR)) if os.path.isdir(KERNEL_DIR) else []:
         if fn.startswith("fused_") and fn.endswith("_gen.py"):
             subprocess.run([sys.executable, os.path.join(KERNEL_DIR, fn)], check=True)
+    # Model K's FP constants and tables (clean/k/dx12/gen_k_fp_tables.py: computed from their series, not stored in the
+    # repository) into <out>/dx12/gen, the K ports' second include folder; only when a K kernel can be built
+    k_gen = os.path.join(dst, "gen")
+    if (a.model_k or only) and os.path.exists(os.path.join(K_DX12_DIR, "gen_k_fp_tables.py")):
+        subprocess.run([sys.executable, os.path.join(K_DX12_DIR, "gen_k_fp_tables.py"),
+                        os.path.join(k_gen, "k_fp_tables.hlsli")], check=True)
     jobs = []  # (source, declaration, output path) in declaration order (sorted file name, then line)
     for src, k_source in source_files(a.model_k or bool(only)):
         for d in kernel_decls(src):
@@ -406,11 +420,11 @@ def main(argv=None):
 
     def build_one(job):
         src, d, out, k_source = job
-        defs = {"WG_BLOCK": d["group"], "WG_WAVE": d["wave"], **d["defines"]}
+        defs = {"WG_BLOCK": d["group"], "WG_WAVE": d["wave"], **d["defines"], **extra_defs}
         if d["group"] != d["block"]:
             defs["WG_LAUNCH_BLOCK"] = d["block"]
         info = {}
-        compile_hlsl(src, d["entry"], out, defs, includes=(K_HLSL_DIR,) if k_source and os.path.isdir(K_HLSL_DIR) else (), asm_tool=asm,
+        compile_hlsl(src, d["entry"], out, defs, includes=(K_HLSL_DIR, k_gen) if k_source and os.path.isdir(K_HLSL_DIR) else (), asm_tool=asm,
                      keep_listing=out[:-5] + ".ll" if a.listing else None, info=info)
         with open(out, "rb") as f:
             sha = hashlib.sha256(f.read()).hexdigest()

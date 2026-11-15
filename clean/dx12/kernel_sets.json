@@ -297,6 +297,30 @@
    "k_io.co"
   ],
   [
+   "k_out_color",
+   "k_io.co"
+  ],
+  [
+   "k_out_color_direct",
+   "k_io.co"
+  ],
+  [
+   "k_out_pixel",
+   "k_io.co"
+  ],
+  [
+   "k_out_pixel_c",
+   "k_io.co"
+  ],
+  [
+   "k_out_pixel_c_direct",
+   "k_io.co"
+  ],
+  [
+   "k_out_pixel_direct",
+   "k_io.co"
+  ],
+  [
    "k_stage2_d0_hidden",
    "k_block.co"
   ],
@@ -337,8 +361,68 @@
    "k_block.co"
   ],
   [
+   "k_stagew2_d3",
+   "k_block_wide.co"
+  ],
+  [
+   "k_stagew2_d4",
+   "k_block_wide.co"
+  ],
+  [
+   "k_stagew2_e3",
+   "k_block_wide.co"
+  ],
+  [
+   "k_stagew2_e4",
+   "k_block_wide.co"
+  ],
+  [
+   "k_stagew4_d4",
+   "k_block_wide.co"
+  ],
+  [
+   "k_stagew4_e4",
+   "k_block_wide.co"
+  ],
+  [
+   "k_stagew4_m",
+   "k_block_wide.co"
+  ],
+  [
    "k_warm",
    "k_block_wide.co"
+  ],
+  [
+   "kx/k_in_base",
+   "k_io_exact.co"
+  ],
+  [
+   "kx/k_in_base_direct",
+   "k_io_exact.co"
+  ],
+  [
+   "kx/k_in_color",
+   "k_io_exact.co"
+  ],
+  [
+   "kx/k_in_color_direct",
+   "k_io_exact.co"
+  ],
+  [
+   "kx/k_in_reset",
+   "k_io_exact.co"
+  ],
+  [
+   "kx/k_in_tiled",
+   "k_io_exact.co"
+  ],
+  [
+   "kx/k_in_tiled_direct",
+   "k_io_exact.co"
+  ],
+  [
+   "kx/k_in_tiled_uniform",
+   "k_io_exact.co"
   ]
  ]
 }

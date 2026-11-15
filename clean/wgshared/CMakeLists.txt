@@ -45,6 +45,25 @@ if(WIN32)
     target_link_options(test_cross_reader PRIVATE -static)
   endif()
   add_test(NAME wgshared_cross_reader COMMAND test_cross_reader)
+
+  # The per-game state folder (wg_state.h): strict settings.ini, atomic writes, the state lock across real processes.
+  add_executable(test_wg_state ${CMAKE_CURRENT_LIST_DIR}/tests/test_wg_state.cpp)
+  target_link_libraries(test_wg_state PRIVATE wg_shared_headers advapi32)
+  set_target_properties(test_wg_state PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  if(MSVC)
+    target_compile_options(test_wg_state PRIVATE /W4 /WX /permissive- /utf-8)
+  else()
+    target_compile_options(test_wg_state PRIVATE -Wall -Wextra -municode)
+    target_link_options(test_wg_state PRIVATE -static -municode)
+  endif()
+  # a real DLL the test loads (a WrongGPU binary a game has loaded), next to the test
+  add_library(wg_state_test_dll SHARED ${CMAKE_CURRENT_LIST_DIR}/tests/test_wg_state_dll.cpp)
+  set_target_properties(wg_state_test_dll PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" PREFIX "")
+  add_library(wg_state_test_dll2 SHARED ${CMAKE_CURRENT_LIST_DIR}/tests/test_wg_state_dll.cpp)  # the "new" binary of a replace
+  target_compile_definitions(wg_state_test_dll2 PRIVATE WG_TEST_DLL_VALUE=220)
+  set_target_properties(wg_state_test_dll2 PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" PREFIX "")
+  add_dependencies(test_wg_state wg_state_test_dll wg_state_test_dll2)
+  add_test(NAME wgshared_state COMMAND test_wg_state)
 endif()
 
 find_package(Python3 COMPONENTS Interpreter QUIET)

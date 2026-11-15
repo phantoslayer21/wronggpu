@@ -44,6 +44,7 @@ sys.path.insert(0, ROOT)
 
 from clean.l.runner import l_frame_check as F  # noqa: E402
 from clean.l.runner import l_post_check as LP  # noqa: E402
+from clean.l.runner import l_record as LR  # noqa: E402
 
 OPTIONS = "model=L;l_post=own"
 SENTINELS = {"d3d12_own": 0x5A, "d3d12_own_stages": 0x3C}
@@ -60,7 +61,7 @@ def run(build, special=True, stages=False):
     rng = np.random.default_rng(F.SEED)
     frames = []
     for i, ((rw, rh), reset) in enumerate(F.SEQUENCE):
-        fr = F.frame_inputs(rng, rw, rh, reset, special)
+        fr = F.frame_inputs(rng, rw, rh, reset, special, index=i)
         F.fill_sentinels(p, SENTINELS[config], i == 0)
         out = p.frame(fr, debug=True)
         frames.append({"inputs": fr, "out": out, "raw": F.raw_outputs(p), "post_last": p.kernels().get("post_last")})
@@ -136,8 +137,7 @@ def compare(build, json_path):
                    all(r["pass"] for r in post_run.values()) and
                    res["d3d12_default_vs_stages"]["identical_frames"] == n and caught and
                    own["kernels"].get("l_post") == "l_post_recon")
-    with open(json_path, "w") as f:
-        json.dump(res, f, indent=1, default=lambda x: x.item() if hasattr(x, "item") else str(x))
+    LR.write_l_record(res, json_path)
     print("L d3d12 l_post=own:", "pass" if res["pass"] else "FAIL", "frames", n)
     print("  against the HIP run (raw bytes): identical", res["vs_hip"]["identical_frames"], "of", n,
           "outputs compared", res["vs_hip"]["outputs_compared"], "differing", res["vs_hip"]["differing"])

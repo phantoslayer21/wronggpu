@@ -1,0 +1,772 @@
+{
+ "what": "negative control of Model L's oracle block form: one recorded run checked against the Model M-form oracle and the FP16-form oracle in one process",
+ "command": "python clean/l/runner/l_q7_negative_control.py --build <build> --mm8 exact --json <out>",
+ "runtime_commit": "4ef40d2223bc6be232d67793025daaaf73bc1a0a",
+ "identity_verified": {
+  "git_commit": "4ef40d2223bc6be232d67793025daaaf73bc1a0a",
+  "git_tracked_changes": false,
+  "runtime_library_sha256": "594fbff57ae3f4020393e71c473e6340abd21ce979711199d811e1da2c14192c",
+  "params_pkl_sha256": "26874860dec760e466379f76450228a7b6d00c3018fa07180c212bba59f661f9",
+  "source_json_sha256": "5056738fd1287935bd924949c7a9697bf3c7c6fafe01fc6c1b6f559a2cbb8ecd"
+ },
+ "recorded_run": {
+  "file": "lframe_L_stages.pkl",
+  "sha256": "a3d098bc39397b8131dc2d95a3ebd190353fc44306f4dc52cebe218d13125099",
+  "frames": 11,
+  "model": "L",
+  "kernels": {
+   "swin": "swin.co",
+   "enc0": "encoder.co",
+   "dec0": "decoder.co",
+   "exposure": "base",
+   "post": "post_recon",
+   "filter": "post_filter_c1_s4",
+   "post_last": "l_post_recon",
+   "filter_last": "post_filter_c1_s4",
+   "history_bytes": "8",
+   "history_format": "h8",
+   "post_bands": "0",
+   "post_tf": "68",
+   "out": "f32",
+   "post_wave": "64",
+   "motion_outres": "off",
+   "motion_last": "render",
+   "recon": "spec",
+   "graph": "0",
+   "stream_priority": "default",
+   "swin_nc": "enc1,enc2,b0,b1,b2,b3,b4,b5,dec2,dec1",
+   "swin_stages": "none",
+   "swin_fused": "dec2,dec1",
+   "swin_bneck": "none",
+   "swin_resident": "0",
+   "d1d0_p12": "0",
+   "dec_rdiv": "1",
+   "dec_bdiv": "1",
+   "dec1_dec0": "separate",
+   "swin_mid": "none",
+   "post_pack": "none",
+   "pre_exposure": "scale",
+   "output_filter": "analytic",
+   "output_taps": "none",
+   "model_map": "same",
+   "model": "L",
+   "l_kernels": "l_enc_values.co,l_ops.co,l_swin.co,l_post.co",
+   "l_post": "l_post_recon"
+  },
+  "frame_sha256": {
+   "inputs": "bb13c82b0da0a5f306aae21a02507c5e2458a0e0f91b7989a48f65872c990dd0",
+   "outputs_raw": "843c86d99a05bf6e9e07b408efd2609b7a1ae81633988c3e03bdadda88a67359"
+  }
+ },
+ "model_source": {
+  "kind": "converter",
+  "model_sha256": "d3c040191ec7ab0164efc03ee76413277e7fb54e6e6d2b168f2c0202aa1ad806",
+  "map_sha256": "58e6d0e7cd6926817cfea28a0b4a65c056e9bfa5ca62aa05b968b62590c9e857"
+ },
+ "fp8_op_model": "exact",
+ "dec0_rule": "A, B and latent codes and C values each at most 0.5 % differing (l_frame_check dec0)",
+ "forms": {
+  "model_m_form": {
+   "fp8_op_model": "exact",
+   "dec0_frames_passed": 11,
+   "enc0_frames_passed": 11,
+   "alignment_frames_ok": 11,
+   "frames": [
+    {
+     "frame": 0,
+     "render": [
+      96,
+      64
+     ],
+     "parity": 0,
+     "reset": true,
+     "alignment": {
+      "n_parity_reset": true,
+      "jitter_prev": true,
+      "offsets": true,
+      "pass": true
+     },
+     "enc0_features_pass": true,
+     "dec0_pass": true,
+     "dec0_differ": {
+      "codes_A": 0,
+      "codes_B": 0,
+      "codes_L": 0,
+      "C": 2
+     },
+     "dec0_values": {
+      "codes_A": 18432,
+      "codes_B": 18432,
+      "codes_L": 24576,
+      "C": 18432
+     }
+    },
+    {
+     "frame": 1,
+     "render": [
+      96,
+      64
+     ],
+     "parity": 1,
+     "reset": false,
+     "alignment": {
+      "n_parity_reset": true,
+      "jitter_prev": true,
+      "offsets": true,
+      "latent_handed_over": true,
+      "motion_history_handed_over": true,
+      "history_handed_over": true,
+      "pass": true
+     },
+     "enc0_features_pass": true,
+     "dec0_pass": true,
+     "dec0_differ": {
+      "codes_A": 2,
+      "codes_B": 2,
+      "codes_L": 2,
+      "C": 2
+     },
+     "dec0_values": {
+      "codes_A": 18432,
+      "codes_B": 18432,
+      "codes_L": 24576,
+      "C": 18432
+     }
+    },
+    {
+     "frame": 2,
+     "render": [
+      96,
+      64
+     ],
+     "parity": 0,
+     "reset": true,
+     "alignment": {
+      "n_parity_reset": true,
+      "jitter_prev": true,
+      "offsets": true,
+      "latent_handed_over": true,
+      "motion_history_handed_over": true,
+      "history_handed_over": true,
+      "pass": true
+     },
+     "enc0_features_pass": true,
+     "dec0_pass": true,
+     "dec0_differ": {
+      "codes_A": 0,
+      "codes_B": 0,
+      "codes_L": 0,
+      "C": 4
+     },
+     "dec0_values": {
+      "codes_A": 18432,
+      "codes_B": 18432,
+      "codes_L": 24576,
+      "C": 18432
+     }
+    },
+    {
+     "frame": 3,
+     "render": [
+      96,
+      64
+     ],
+     "parity": 1,
+     "reset": false,
+     "alignment": {
+      "n_parity_reset": true,
+      "jitter_prev": true,
+      "offsets": true,
+      "latent_handed_over": true,
+      "motion_history_handed_over": true,
+      "history_handed_over": true,
+      "pass": true
+     },
+     "enc0_features_pass": true,
+     "dec0_pass": true,
+     "dec0_differ": {
+      "codes_A": 0,
+      "codes_B": 1,
+      "codes_L": 4,
+      "C": 4
+     },
+     "dec0_values": {
+      "codes_A": 18432,
+      "codes_B": 18432,
+      "codes_L": 24576,
+      "C": 18432
+     }
+    },
+    {
+     "frame": 4,
+     "render": [
+      96,
+      64
+     ],
+     "parity": 0,
+     "reset": false,
+     "alignment": {
+      "n_parity_reset": true,
+      "jitter_prev": true,
+      "offsets": true,
+      "latent_handed_over": true,
+      "motion_history_handed_over": true,
+      "history_handed_over": true,
+      "pass": true
+     },
+     "enc0_features_pass": true,
+     "dec0_pass": true,
+     "dec0_differ": {
+      "codes_A": 0,
+      "codes_B": 0,
+      "codes_L": 0,
+      "C": 0
+     },
+     "dec0_values": {
+      "codes_A": 18432,
+      "codes_B": 18432,
+      "codes_L": 24576,
+      "C": 18432
+     }
+    },
+    {
+     "frame": 5,
+     "render": [
+      80,
+      48
+     ],
+     "parity": 1,
+     "reset": true,
+     "alignment": {
+      "n_parity_reset": true,
+      "jitter_prev": true,
+      "offsets": true,
+      "pass": true
+     },
+     "enc0_features_pass": true,
+     "dec0_pass": true,
+     "dec0_differ": {
+      "codes_A": 1,
+      "codes_B": 2,
+      "codes_L": 4,
+      "C": 3
+     },
+     "dec0_values": {
+      "codes_A": 11520,
+      "codes_B": 11520,
+      "codes_L": 15360,
+      "C": 11520
+     }
+    },
+    {
+     "frame": 6,
+     "render": [
+      80,
+      48
+     ],
+     "parity": 0,
+     "reset": false,
+     "alignment": {
+      "n_parity_reset": true,
+      "jitter_prev": true,
+      "offsets": true,
+      "latent_handed_over": true,
+      "motion_history_handed_over": true,
+      "history_handed_over": true,
+      "pass": true
+     },
+     "enc0_features_pass": true,
+     "dec0_pass": true,
+     "dec0_differ": {
+      "codes_A": 0,
+      "codes_B": 0,
+      "codes_L": 0,
+      "C": 0
+     },
+     "dec0_values": {
+      "codes_A": 11520,
+      "codes_B": 11520,
+      "codes_L": 15360,
+      "C": 11520
+     }
+    },
+    {
+     "frame": 7,
+     "render": [
+      80,
+      48
+     ],
+     "parity": 1,
+     "reset": false,
+     "alignment": {
+      "n_parity_reset": true,
+      "jitter_prev": true,
+      "offsets": true,
+      "latent_handed_over": true,
+      "motion_history_handed_over": true,
+      "history_handed_over": true,
+      "pass": true
+     },
+     "enc0_features_pass": true,
+     "dec0_pass": true,
+     "dec0_differ": {
+      "codes_A": 0,
+      "codes_B": 0,
+      "codes_L": 0,
+      "C": 4
+     },
+     "dec0_values": {
+      "codes_A": 11520,
+      "codes_B": 11520,
+      "codes_L": 15360,
+      "C": 11520
+     }
+    },
+    {
+     "frame": 8,
+     "render": [
+      77,
+      45
+     ],
+     "parity": 0,
+     "reset": true,
+     "alignment": {
+      "n_parity_reset": true,
+      "jitter_prev": true,
+      "offsets": true,
+      "pass": true
+     },
+     "enc0_features_pass": true,
+     "dec0_pass": true,
+     "dec0_differ": {
+      "codes_A": 3,
+      "codes_B": 3,
+      "codes_L": 2,
+      "C": 6
+     },
+     "dec0_values": {
+      "codes_A": 10395,
+      "codes_B": 10395,
+      "codes_L": 13860,
+      "C": 10395
+     }
+    },
+    {
+     "frame": 9,
+     "render": [
+      77,
+      45
+     ],
+     "parity": 1,
+     "reset": true,
+     "alignment": {
+      "n_parity_reset": true,
+      "jitter_prev": true,
+      "offsets": true,
+      "latent_handed_over": true,
+      "motion_history_handed_over": true,
+      "history_handed_over": true,
+      "pass": true
+     },
+     "enc0_features_pass": true,
+     "dec0_pass": true,
+     "dec0_differ": {
+      "codes_A": 0,
+      "codes_B": 0,
+      "codes_L": 0,
+      "C": 1
+     },
+     "dec0_values": {
+      "codes_A": 10395,
+      "codes_B": 10395,
+      "codes_L": 13860,
+      "C": 10395
+     }
+    },
+    {
+     "frame": 10,
+     "render": [
+      77,
+      45
+     ],
+     "parity": 0,
+     "reset": false,
+     "alignment": {
+      "n_parity_reset": true,
+      "jitter_prev": true,
+      "offsets": true,
+      "latent_handed_over": true,
+      "motion_history_handed_over": true,
+      "history_handed_over": true,
+      "pass": true
+     },
+     "enc0_features_pass": true,
+     "dec0_pass": true,
+     "dec0_differ": {
+      "codes_A": 0,
+      "codes_B": 0,
+      "codes_L": 0,
+      "C": 2
+     },
+     "dec0_values": {
+      "codes_A": 10395,
+      "codes_B": 10395,
+      "codes_L": 13860,
+      "C": 10395
+     }
+    }
+   ]
+  },
+  "fp16_form": {
+   "fp8_op_model": "exact",
+   "dec0_frames_passed": 0,
+   "enc0_frames_passed": 0,
+   "alignment_frames_ok": 11,
+   "frames": [
+    {
+     "frame": 0,
+     "render": [
+      96,
+      64
+     ],
+     "parity": 0,
+     "reset": true,
+     "alignment": {
+      "n_parity_reset": true,
+      "jitter_prev": true,
+      "offsets": true,
+      "pass": true
+     },
+     "enc0_features_pass": false,
+     "dec0_pass": false,
+     "dec0_differ": {
+      "codes_A": 17903,
+      "codes_B": 17565,
+      "codes_L": 24384,
+      "C": 18390
+     },
+     "dec0_values": {
+      "codes_A": 18432,
+      "codes_B": 18432,
+      "codes_L": 24576,
+      "C": 18432
+     }
+    },
+    {
+     "frame": 1,
+     "render": [
+      96,
+      64
+     ],
+     "parity": 1,
+     "reset": false,
+     "alignment": {
+      "n_parity_reset": true,
+      "jitter_prev": true,
+      "offsets": true,
+      "latent_handed_over": true,
+      "motion_history_handed_over": true,
+      "history_handed_over": true,
+      "pass": true
+     },
+     "enc0_features_pass": false,
+     "dec0_pass": false,
+     "dec0_differ": {
+      "codes_A": 18009,
+      "codes_B": 13910,
+      "codes_L": 24252,
+      "C": 18405
+     },
+     "dec0_values": {
+      "codes_A": 18432,
+      "codes_B": 18432,
+      "codes_L": 24576,
+      "C": 18432
+     }
+    },
+    {
+     "frame": 2,
+     "render": [
+      96,
+      64
+     ],
+     "parity": 0,
+     "reset": true,
+     "alignment": {
+      "n_parity_reset": true,
+      "jitter_prev": true,
+      "offsets": true,
+      "latent_handed_over": true,
+      "motion_history_handed_over": true,
+      "history_handed_over": true,
+      "pass": true
+     },
+     "enc0_features_pass": false,
+     "dec0_pass": false,
+     "dec0_differ": {
+      "codes_A": 17903,
+      "codes_B": 17761,
+      "codes_L": 24386,
+      "C": 18381
+     },
+     "dec0_values": {
+      "codes_A": 18432,
+      "codes_B": 18432,
+      "codes_L": 24576,
+      "C": 18432
+     }
+    },
+    {
+     "frame": 3,
+     "render": [
+      96,
+      64
+     ],
+     "parity": 1,
+     "reset": false,
+     "alignment": {
+      "n_parity_reset": true,
+      "jitter_prev": true,
+      "offsets": true,
+      "latent_handed_over": true,
+      "motion_history_handed_over": true,
+      "history_handed_over": true,
+      "pass": true
+     },
+     "enc0_features_pass": false,
+     "dec0_pass": false,
+     "dec0_differ": {
+      "codes_A": 18089,
+      "codes_B": 13930,
+      "codes_L": 24238,
+      "C": 18408
+     },
+     "dec0_values": {
+      "codes_A": 18432,
+      "codes_B": 18432,
+      "codes_L": 24576,
+      "C": 18432
+     }
+    },
+    {
+     "frame": 4,
+     "render": [
+      96,
+      64
+     ],
+     "parity": 0,
+     "reset": false,
+     "alignment": {
+      "n_parity_reset": true,
+      "jitter_prev": true,
+      "offsets": true,
+      "latent_handed_over": true,
+      "motion_history_handed_over": true,
+      "history_handed_over": true,
+      "pass": true
+     },
+     "enc0_features_pass": false,
+     "dec0_pass": false,
+     "dec0_differ": {
+      "codes_A": 18021,
+      "codes_B": 13961,
+      "codes_L": 24316,
+      "C": 18394
+     },
+     "dec0_values": {
+      "codes_A": 18432,
+      "codes_B": 18432,
+      "codes_L": 24576,
+      "C": 18432
+     }
+    },
+    {
+     "frame": 5,
+     "render": [
+      80,
+      48
+     ],
+     "parity": 1,
+     "reset": true,
+     "alignment": {
+      "n_parity_reset": true,
+      "jitter_prev": true,
+      "offsets": true,
+      "pass": true
+     },
+     "enc0_features_pass": false,
+     "dec0_pass": false,
+     "dec0_differ": {
+      "codes_A": 11172,
+      "codes_B": 10986,
+      "codes_L": 15249,
+      "C": 11490
+     },
+     "dec0_values": {
+      "codes_A": 11520,
+      "codes_B": 11520,
+      "codes_L": 15360,
+      "C": 11520
+     }
+    },
+    {
+     "frame": 6,
+     "render": [
+      80,
+      48
+     ],
+     "parity": 0,
+     "reset": false,
+     "alignment": {
+      "n_parity_reset": true,
+      "jitter_prev": true,
+      "offsets": true,
+      "latent_handed_over": true,
+      "motion_history_handed_over": true,
+      "history_handed_over": true,
+      "pass": true
+     },
+     "enc0_features_pass": false,
+     "dec0_pass": false,
+     "dec0_differ": {
+      "codes_A": 11309,
+      "codes_B": 8586,
+      "codes_L": 15191,
+      "C": 11500
+     },
+     "dec0_values": {
+      "codes_A": 11520,
+      "codes_B": 11520,
+      "codes_L": 15360,
+      "C": 11520
+     }
+    },
+    {
+     "frame": 7,
+     "render": [
+      80,
+      48
+     ],
+     "parity": 1,
+     "reset": false,
+     "alignment": {
+      "n_parity_reset": true,
+      "jitter_prev": true,
+      "offsets": true,
+      "latent_handed_over": true,
+      "motion_history_handed_over": true,
+      "history_handed_over": true,
+      "pass": true
+     },
+     "enc0_features_pass": false,
+     "dec0_pass": false,
+     "dec0_differ": {
+      "codes_A": 11252,
+      "codes_B": 9083,
+      "codes_L": 15201,
+      "C": 11498
+     },
+     "dec0_values": {
+      "codes_A": 11520,
+      "codes_B": 11520,
+      "codes_L": 15360,
+      "C": 11520
+     }
+    },
+    {
+     "frame": 8,
+     "render": [
+      77,
+      45
+     ],
+     "parity": 0,
+     "reset": true,
+     "alignment": {
+      "n_parity_reset": true,
+      "jitter_prev": true,
+      "offsets": true,
+      "pass": true
+     },
+     "enc0_features_pass": false,
+     "dec0_pass": false,
+     "dec0_differ": {
+      "codes_A": 10129,
+      "codes_B": 9957,
+      "codes_L": 13751,
+      "C": 10367
+     },
+     "dec0_values": {
+      "codes_A": 10395,
+      "codes_B": 10395,
+      "codes_L": 13860,
+      "C": 10395
+     }
+    },
+    {
+     "frame": 9,
+     "render": [
+      77,
+      45
+     ],
+     "parity": 1,
+     "reset": true,
+     "alignment": {
+      "n_parity_reset": true,
+      "jitter_prev": true,
+      "offsets": true,
+      "latent_handed_over": true,
+      "motion_history_handed_over": true,
+      "history_handed_over": true,
+      "pass": true
+     },
+     "enc0_features_pass": false,
+     "dec0_pass": false,
+     "dec0_differ": {
+      "codes_A": 10078,
+      "codes_B": 9930,
+      "codes_L": 13753,
+      "C": 10368
+     },
+     "dec0_values": {
+      "codes_A": 10395,
+      "codes_B": 10395,
+      "codes_L": 13860,
+      "C": 10395
+     }
+    },
+    {
+     "frame": 10,
+     "render": [
+      77,
+      45
+     ],
+     "parity": 0,
+     "reset": false,
+     "alignment": {
+      "n_parity_reset": true,
+      "jitter_prev": true,
+      "offsets": true,
+      "latent_handed_over": true,
+      "motion_history_handed_over": true,
+      "history_handed_over": true,
+      "pass": true
+     },
+     "enc0_features_pass": false,
+     "dec0_pass": false,
+     "dec0_differ": {
+      "codes_A": 10177,
+      "codes_B": 7343,
+      "codes_L": 13697,
+      "C": 10377
+     },
+     "dec0_values": {
+      "codes_A": 10395,
+      "codes_B": 10395,
+      "codes_L": 13860,
+      "C": 10395
+     }
+    }
+   ]
+  }
+ }
+}
