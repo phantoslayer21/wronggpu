@@ -133,6 +133,7 @@ jobs:
           Get-Content out/mock-release.log | Select-Object -Last 15
           if (-not $refused) { throw "a release build embedded the test suite's stand-in runtime" }
           if (-not (Select-String -Path out/mock-release.log -SimpleMatch "test suite's stand-in runtime" -Quiet)) { throw "the release build failed for another reason" }
+          $global:LASTEXITCODE = 0  # the refused build above was the expected result; the step's exit code is the last native one
 
   release-models:
     # The front end and launcher with the release's model flags (BUILDING.md 4.1 and 5.2: Model L and Model K on), so a
