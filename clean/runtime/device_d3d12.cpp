@@ -19,6 +19,7 @@
 #include "native_direct_pi.h"
 #include "embedded.h"
 #include "rdna4.h"
+#include "rdna4_win.h"
 #include "wmma_probe.h"
 
 #include <algorithm>
@@ -1347,7 +1348,7 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     supplied_queue->AddRef(); queue_.p = supplied_queue;
     adapter_luid_ = device_->GetAdapterLuid();
 
-    dxgi_dll_ = LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    dxgi_dll_ = wgrt::load_system_dll(L"dxgi.dll");  // the system's own (not a proxy of the game folder, rdna4_win.h)
     d3d12_dll_ = LoadLibraryExW(L"d3d12.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!dxgi_dll_ || !d3d12_dll_) return fail("native D3D12: system DXGI/D3D12 unavailable");
     using MakeFactory = HRESULT(WINAPI*)(REFIID, void**);
@@ -1364,7 +1365,11 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     char name[256] = {};
     WideCharToMultiByte(CP_UTF8, 0, details.Description, -1, name, sizeof name - 1, nullptr, nullptr);
     adapter_name_ = name;
-    if (!rdna4_adapter(details.VendorId, (details.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0, adapter_name_))
+    // the adapter's identity from the system's DXGI and the kernel-mode driver, never from a description a layer in the
+    // game process rewrote (rdna4_win.h): a real RX 9000 keeps WrongGPU whatever name it is shown under
+    const wgrt::AdapterIdentity identity = wgrt::read_adapter_identity(adapter_luid_);
+    if (identity.dxgi_known) adapter_name_ = identity.description;
+    if (!wgrt::rdna4_identity(identity))
       return fail("native D3D12 borrowed device requires the supported Radeon RX 9070/9060 adapter");
     D3D12_FEATURE_DATA_SHADER_MODEL sm{D3D_SHADER_MODEL_6_6};
     if (!check(device_->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &sm, sizeof sm), "CheckFeatureSupport(shader model)") ||
@@ -1408,7 +1413,7 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     return ok;
   }
   bool create_device() {
-    dxgi_dll_ = LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    dxgi_dll_ = wgrt::load_system_dll(L"dxgi.dll");  // the system's own (not a proxy of the game folder, rdna4_win.h)
     d3d12_dll_ = LoadLibraryExW(L"d3d12.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!dxgi_dll_ || !d3d12_dll_) return fail("native D3D12: system DXGI/D3D12 unavailable");
     using MakeFactory = HRESULT(WINAPI*)(REFIID, void**);
@@ -1437,7 +1442,7 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
       char name[256] = {};
       WideCharToMultiByte(CP_UTF8, 0, description.Description, -1, name, sizeof name - 1, nullptr, nullptr);
       // The driver-channel WMMA ports are qualified only for the project's RDNA4 target. Do not select an AMD iGPU.
-      if (rdna4_adapter(description.VendorId, (description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0, name)) {
+      if (wgrt::rdna4_identity(wgrt::read_adapter_identity(description.AdapterLuid))) {
         selected = std::move(adapter); adapter_name_ = name; adapter_luid_ = description.AdapterLuid; break;
       }
     }

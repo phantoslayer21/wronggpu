@@ -28,6 +28,12 @@ struct SystemInfo { WinInfo win; GpuInfo gpu; HipInfo hip; };
 
 WinInfo WindowsInfo();
 bool IsRdna4Name(const wstring& name);
+// The sentence the runtime logs when it hands a game to AMD FSR on a GPU that is not an RX 9000-series card, or on one it
+// cannot identify (clean/runtime/interop/executor_select.h needs_rx9000_line); the launcher says the same.
+wstring NeedsRx9000Sentence();
+// The toolbar's words after the GPU's name: how WrongGPU runs on it. Direct3D 12 on an RDNA 4 card; on any other card (or
+// none) the sentence above. The old "HIP" and "Not supported" words are gone: no model runs on HIP in a game.
+wstring GpuRuntimeLine(const GpuInfo& gpu);
 // Under Wine: the name DetectGpu gives an RDNA 4 card from Linux's PCI ids when Wine's DXGI names it otherwise; empty
 // when Linux reports no RDNA 4 card (or outside Wine, where Z:\sys does not exist). drmRoot: the folder holding card0,
 // card1, ... (Linux's /sys/class/drm; tests point it at a made-up folder). Every card is looked at, in number order.

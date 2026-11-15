@@ -59,19 +59,60 @@ int main() {
     r.executor = "";
     expect("executor= (empty): as not named", choose_executor(r).executor == "dx12");
   }
-  // default on other GPUs -> hip, one information line naming the adapter
+  // R1 (oversight 2026-11-15): auto on an adapter that is not an RDNA 4 Radeon RX 9000-series card goes straight to the
+  // front end's own upscaler (AMD FSR, else its stand-in), for every model, with one warning line: no executor, no HIP
+  // attempt, no kernel load
   {
+    const char* const sentence = "WrongGPU's models need an RX 9000-series GPU; using AMD FSR";
     ExecutorChoice c = choose_executor(gpu("AMD Radeon RX 7900 XTX"));
-    expect("default: RDNA 3 -> hip", c.executor == "hip" && c.by_default && !c.warn);
-    expect("default: RDNA 3 line names the adapter and the reason",
-           has(c.why, "executor hip (default)") && has(c.why, "RX 7900 XTX") && has(c.why, "not an RDNA 4"));
+    expect("auto: RDNA 3 -> the front end's upscaler (fsr), not hip", c.executor == "fsr" && c.by_default && c.warn);
+    expect("auto: RDNA 3 line is the sentence and names the adapter",
+           c.why.rfind(sentence, 0) == 0 && has(c.why, "RX 7900 XTX") && c.why.find('\n') == std::string::npos);
+    c = choose_executor(gpu("AMD Radeon RX 6800"));
+    expect("auto: RDNA 2 -> fsr", c.executor == "fsr" && has(c.why, sentence));
+    c = choose_executor(gpu("Other Vendor Graphics 4070", 0x10DE));
+    expect("auto: another vendor -> fsr", c.executor == "fsr" && has(c.why, sentence));
+    c = choose_executor(gpu("AMD Radeon(TM) Graphics"));
+    expect("auto: an integrated Radeon -> fsr", c.executor == "fsr" && has(c.why, sentence));
     c = choose_executor(gpu("Microsoft Basic Render Driver", 0x1414, true));
-    expect("default: WARP -> hip", c.executor == "hip" && !c.why.empty());
+    expect("auto: WARP -> fsr", c.executor == "fsr" && has(c.why, sentence));
     c = choose_executor(gpu("AMD Radeon RX 9070 XT", 0x1002, true));
-    expect("default: software adapter named RX 9070 -> hip", c.executor == "hip");
+    expect("auto: software adapter named RX 9070 -> fsr", c.executor == "fsr");
     ExecutorRequest r;  // adapter not identified (DXGI failed)
     c = choose_executor(r);
-    expect("default: unknown adapter -> hip", c.executor == "hip" && has(c.why, "not identified"));
+    expect("auto: unidentified adapter -> fsr with the same sentence",
+           c.executor == "fsr" && c.warn && c.why.rfind(sentence, 0) == 0 && has(c.why, "adapter not identified"));
+    r.model_k = true;
+    c = choose_executor(r);
+    expect("auto: unidentified adapter + model K -> fsr", c.executor == "fsr" && has(c.why, sentence));
+    r = gpu("AMD Radeon RX 7900 XTX");
+    r.sparkle_guard = true;
+    r.capture = true;
+    c = choose_executor(r);
+    expect("auto: RDNA 3 with the sparkle guard or the capture -> fsr too (the kernels are RX 9000-only)",
+           c.executor == "fsr");
+    r = gpu("AMD Radeon RX 7900 XTX");
+    r.executor = "";
+    expect("executor= (empty) on RDNA 3: as auto", choose_executor(r).executor == "fsr");
+    expect("the line helper: sentence first, then the adapter",
+           wgi::needs_rx9000_line(true, "AMD Radeon RX 7900 XTX") ==
+               "WrongGPU's models need an RX 9000-series GPU; using AMD FSR (adapter AMD Radeon RX 7900 XTX)");
+    expect("the line helper: unidentified",
+           wgi::needs_rx9000_line(false, "") ==
+               "WrongGPU's models need an RX 9000-series GPU; using AMD FSR (adapter not identified)");
+  }
+  // RDNA 4: auto is unchanged for every model (the selector cannot see L: M and L share the not-K request)
+  {
+    for (const char* name : {"AMD Radeon RX 9070 XT", "AMD Radeon RX 9070", "AMD Radeon RX 9070 GRE", "AMD Radeon RX 9060 XT"}) {
+      ExecutorRequest r = gpu(name);
+      ExecutorChoice c = choose_executor(r);
+      expect((std::string("RDNA 4 auto, model M or L -> dx12: ") + name).c_str(),
+             c.executor == "dx12" && c.by_default && c.why.empty() && !c.warn);
+      r.model_k = true;
+      c = choose_executor(r);
+      expect((std::string("RDNA 4 auto, model K -> dx12: ") + name).c_str(),
+             c.executor == "dx12" && c.by_default && c.why.empty() && !c.warn);
+    }
   }
   // default with model K on RDNA 4 -> dx12 by the default rule (the D3D12 executor's create checks K's ports and
   // refuses the context when one is missing: dx12_refused_line, then the HIP executor); on other GPUs -> hip
@@ -83,7 +124,7 @@ int main() {
     r = gpu("AMD Radeon RX 7900 XTX");
     r.model_k = true;
     c = choose_executor(r);
-    expect("default: model K on RDNA 3 -> hip", c.executor == "hip" && has(c.why, "not an RDNA 4"));
+    expect("default: model K on RDNA 3 -> the front end's upscaler", c.executor == "fsr" && has(c.why, "RX 9000-series"));
     r = gpu("AMD Radeon RX 9070 XT");
     r.model_k = true;
     r.capture = true;
@@ -96,11 +137,13 @@ int main() {
     ExecutorChoice c;
     r.sparkle_guard = true;
     c = choose_executor(r);
-    expect("default: sparkle guard -> hip", c.executor == "hip" && has(c.why, "sparkle guard"));
+    expect("default: sparkle guard -> hip, with a warning (model M, L: an opt-in HIP feature)",
+           c.executor == "hip" && c.warn && has(c.why, "sparkle guard") && has(c.why, "diagnostic"));
     r = gpu("AMD Radeon RX 9070 XT");
     r.capture = true;
     c = choose_executor(r);
-    expect("default: frame capture -> hip", c.executor == "hip" && has(c.why, "frame capture"));
+    expect("default: frame capture -> hip, with a warning (an opt-in diagnostic)",
+           c.executor == "hip" && c.warn && has(c.why, "frame capture") && has(c.why, "diagnostic"));
   }
   // forced: executor=hip on RDNA 4 -> hip, nothing logged, no switch rule
   {
@@ -113,6 +156,14 @@ int main() {
     c = choose_executor(r);
     expect("executor=hip + model K -> hip, the same diagnostic line (never a game route)",
            c.executor == "hip" && !c.by_default && c.warn && has(c.why, "not the in-game runtime"));
+  }
+  // explicit executor=hip stays a loud diagnostic on any adapter (the front end's HIP attempt is the user's own request)
+  {
+    ExecutorRequest r = gpu("AMD Radeon RX 7900 XTX");
+    r.executor = "hip";
+    ExecutorChoice c = choose_executor(r);
+    expect("executor=hip on RDNA 3 -> hip, the loud diagnostic line",
+           c.executor == "hip" && !c.by_default && c.warn && has(c.why, "diagnostic: executor=hip"));
   }
   // forced: executor=dx12 (or d3d12) -> dx12 on any adapter (the device refuses unsupported ones), not by default
   {
@@ -215,12 +266,13 @@ int main() {
     r = gpu("AMD Radeon RX 7900 XTX");
     r.model_k = true;
     c = choose_executor(r);
-    expect("K auto on a non-RDNA 4 adapter: today's rule, logged (owner question)",
-           c.executor == "hip" && has(c.why, "not an RDNA 4"));
+    expect("K auto on a non-RDNA 4 adapter: the front end's upscaler, one line",
+           c.executor == "fsr" && has(c.why, "RX 9000-series GPU; using AMD FSR"));
     r = wgi::ExecutorRequest();
     r.model_k = true;
     c = choose_executor(r);
-    expect("K auto on an unidentified adapter: today's rule, logged", c.executor == "hip" && has(c.why, "not identified"));
+    expect("K auto on an unidentified adapter: the front end's upscaler, one line",
+           c.executor == "fsr" && has(c.why, "not identified"));
 
     // hip_switch: ignored for K, one line when it is set
     expect("K: no line when hip_switch is not set", wgi::k_hip_switch_note("").empty());
@@ -262,6 +314,71 @@ int main() {
                has(rl, "never to the HIP executor") && rl.find('\n') == std::string::npos);
     expect("K and M (hip_switch=off) take the same path: the same action",
            wgi::refused_frame_action(true, true, true) == wgi::refused_frame_action(false, true, false));
+  }
+  // R1 (oversight 2026-11-15): the GPU's identity comes from the system's DXGI and the kernel-mode driver's ids, never from
+  // a description a layer in the game (OptiScaler's GPU spoofing) presents. A real RX 9000 keeps WrongGPU whatever name it
+  // is shown under; another board, or no identity at all, goes to the front end's upscaler with the one line.
+  {
+    const char* const sentence = "WrongGPU's models need an RX 9000-series GPU; using AMD FSR";
+    for (uint32_t id : {0x7550u, 0x7551u, 0x7590u, 0x7591u})
+      expect("RDNA 4 device id", wgrt::rdna4_device_id(id));
+    for (uint32_t id : {0x744Cu, 0x73BFu, 0x7480u, 0x164Eu, 0x13C0u, 0u})
+      expect("not an RDNA 4 device id", !wgrt::rdna4_device_id(id));
+    auto spoof = [](const char* shown, uint32_t shown_vendor, uint32_t kvendor, uint32_t kdevice) {
+      ExecutorRequest r = gpu(shown, shown_vendor);
+      r.kmt_known = true;
+      r.kmt_vendor = kvendor;
+      r.kmt_device = kdevice;
+      return r;
+    };
+    // a SPOOFED name on a real RX 9000 id: still the D3D12 executor, WrongGPU active, nothing to log (every model)
+    ExecutorRequest r = spoof("Other Vendor Graphics 4090", 0x10DE, 0x1002, 0x7550);
+    ExecutorChoice c = choose_executor(r);
+    expect("spoofed other-vendor name on a real RX 9070 id -> dx12", c.executor == "dx12" && c.by_default && c.why.empty());
+    r.model_k = true;
+    expect("the same, model K -> dx12", choose_executor(r).executor == "dx12");
+    r = spoof("AMD Radeon RX 7900 XTX", 0x1002, 0x1002, 0x7590);
+    expect("spoofed RDNA 3 name on a real RX 9060 id -> dx12", choose_executor(r).executor == "dx12");
+    r = spoof("Microsoft Basic Render Driver", 0x1414, 0x1002, 0x7551);
+    r.software = true;
+    expect("a software-looking description on a real RDNA 4 id -> dx12 (the driver's id decides)", choose_executor(r).executor == "dx12");
+    // the driver's ids name the board; the description reported by the system's DXGI agrees
+    r = spoof("AMD Radeon RX 9070 XT", 0x1002, 0x1002, 0x7550);
+    expect("real RX 9070 XT: dx12", choose_executor(r).executor == "dx12");
+    // a real non-RDNA-4 id: the front end's upscaler with the one line
+    r = spoof("AMD Radeon RX 7900 XTX", 0x1002, 0x1002, 0x744C);
+    c = choose_executor(r);
+    expect("real RDNA 3 id -> fsr with the line", c.executor == "fsr" && c.warn && c.why.rfind(sentence, 0) == 0);
+    r = spoof("Other Vendor Graphics 4070", 0x10DE, 0x10DE, 0x2786);
+    expect("real other-vendor id -> fsr", choose_executor(r).executor == "fsr");
+    // an unidentified adapter: no description, no driver ids
+    c = choose_executor(ExecutorRequest());
+    expect("nothing known -> fsr with the line and 'not identified'",
+           c.executor == "fsr" && c.why.rfind(sentence, 0) == 0 && has(c.why, "adapter not identified"));
+    // only the driver's ids known (the system DXGI could not be read)
+    r = ExecutorRequest();
+    r.kmt_known = true;
+    r.kmt_vendor = 0x1002;
+    r.kmt_device = 0x744C;
+    c = choose_executor(r);
+    expect("only a real RDNA 3 id known -> fsr, the line names the ids", c.executor == "fsr" && has(c.why, "PCI 1002:744C"));
+    r.kmt_device = 0x7550;
+    expect("only a real RX 9070 id known -> dx12", choose_executor(r).executor == "dx12");
+    // the pure rule
+    wgrt::AdapterIdentity id;
+    expect("identity: nothing known -> not RDNA 4", !wgrt::rdna4_identity(id));
+    id.dxgi_known = true;
+    id.dxgi_vendor = 0x1002;
+    id.description = "AMD Radeon RX 9060 XT";
+    expect("identity: the system DXGI's description alone (no driver ids) -> RDNA 4", wgrt::rdna4_identity(id));
+    id.software = true;
+    expect("identity: a software adapter is not RDNA 4", !wgrt::rdna4_identity(id));
+    // forced executors are not affected by the identity (a forced dx12 on a real RX 9000 under a spoof stays dx12)
+    r = spoof("Other Vendor Graphics 4090", 0x10DE, 0x1002, 0x7550);
+    r.executor = "dx12";
+    expect("executor=dx12 under a spoof on a real RX 9000 -> dx12", choose_executor(r).executor == "dx12" && !choose_executor(r).by_default);
+    r.executor = "hip";
+    expect("executor=hip under a spoof -> the loud diagnostic", choose_executor(r).executor == "hip" && choose_executor(r).warn);
   }
   // test executor and unknown values
   {

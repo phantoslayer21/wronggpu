@@ -40,6 +40,8 @@
 
 #include <dxgi1_4.h>
 
+#include "../rdna4_win.h"
+
 struct WgUpscaler;
 
 namespace wgi {
@@ -119,31 +121,19 @@ std::string local_appdata() {
   return n > 0 && n < 32768 ? utf8(buf) : std::string();
 }
 
-// The device's adapter as DXGI reports it (description, vendor, software flag); false when it cannot be read.
-bool adapter_info(ID3D12Device* device, std::string* name, uint32_t* vendor_id = nullptr, bool* software = nullptr) {
-  typedef HRESULT(WINAPI * PfnCreateFactory)(REFIID, void**);
-  HMODULE dxgi = LoadLibraryW(L"dxgi.dll");
-  auto create =
-      dxgi ? reinterpret_cast<PfnCreateFactory>(reinterpret_cast<void*>(GetProcAddress(dxgi, "CreateDXGIFactory1")))
-           : nullptr;
-  bool ok = false;
+// The device's adapter as the SYSTEM's DXGI and the kernel-mode driver report it (rdna4_win.h): never the description the
+// game's own dxgi.dll presents, which OptiScaler's GPU spoofing can rewrite. False when neither source could read it.
+bool adapter_info(ID3D12Device* device, std::string* name, uint32_t* vendor_id = nullptr, bool* software = nullptr,
+                  wgrt::AdapterIdentity* identity = nullptr) {
   name->clear();
-  IDXGIFactory4* f = nullptr;
-  if (create && SUCCEEDED(create(__uuidof(IDXGIFactory4), (void**)&f)) && f) {
-    IDXGIAdapter1* a = nullptr;
-    if (SUCCEEDED(f->EnumAdapterByLuid(device->GetAdapterLuid(), __uuidof(IDXGIAdapter1), (void**)&a)) && a) {
-      DXGI_ADAPTER_DESC1 d = {};
-      if (SUCCEEDED(a->GetDesc1(&d))) {
-        ok = true;
-        *name = utf8(d.Description);
-        if (vendor_id) *vendor_id = d.VendorId;
-        if (software) *software = (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
-      }
-      a->Release();
-    }
-    f->Release();
+  const wgrt::AdapterIdentity id = wgrt::read_adapter_identity(device->GetAdapterLuid());
+  if (identity) *identity = id;
+  if (id.dxgi_known) {
+    *name = id.description;
+    if (vendor_id) *vendor_id = id.dxgi_vendor;
+    if (software) *software = id.software;
   }
-  return ok;
+  return id.dxgi_known || id.kmt_known;
 }
 
 std::string adapter_description(ID3D12Device* device) {
@@ -157,7 +147,7 @@ std::string adapter_description(ID3D12Device* device) {
 struct Options {
   std::string sync = "inline";      // inline | pipelined
   std::string hip_switch;           // on | off (executor_select.h refused_frame_policy); empty: the default
-  std::string executor = "auto";    // auto (not named: dx12 for model M on RDNA 4, else hip; executor_select.h) | hip |
+  std::string executor = "auto";    // auto (not named: dx12 for every model on RDNA 4, else no executor: the front end's upscaler; executor_select.h) | hip |
                                     // dx12 (the network on the game's D3D12 device, no HIP) | d3d12-test (tests)
   std::string model_dir;            // default %LOCALAPPDATA%\WrongGPU\model (installer contract, spec 30)
   std::string kernels_dir;          // default: the folder of this DLL
@@ -600,7 +590,7 @@ class Context {
       say(WG_LOG_WARN, "WG_RUNTIME_OPTIONS is longer than 4095 characters and is ignored");
     }
     Options o = parse_options(text.c_str());
-    {  // the executor (executor_select.h): the option, else the default (dx12 for model M on RDNA 4); one log line why
+    {  // the executor (executor_select.h): the option, else the default (dx12 for models M, L, K on RDNA 4, the front end's upscaler on any other adapter); one log line why
       ExecutorRequest q;
       q.executor = o.executor;
       WgRtConfig probe = WgRtConfig();
@@ -609,12 +599,22 @@ class Context {
       std::string merr;
       // model K only (Model L runs on the D3D12 executor in builds with it: runtime.cpp, native D3D12 backend 3)
       q.model_k = wgrt::model_from_options(probe, &model, &merr) && model == wgrt::ModelId::K;
-      q.adapter_known = adapter_info(device_, &q.adapter, &q.vendor_id, &q.software);
+      {
+        wgrt::AdapterIdentity ident;
+        adapter_info(device_, &q.adapter, &q.vendor_id, &q.software, &ident);
+        q.adapter_known = ident.dxgi_known;
+        q.kmt_known = ident.kmt_known;
+        q.kmt_vendor = ident.kmt_vendor;
+        q.kmt_device = ident.kmt_device;
+      }
       q.sparkle_guard = o.sparkle_guard > 0.0f;
       q.capture = !o.capture_dir.empty();
       const ExecutorChoice ch = choose_executor(q);
       if (ch.executor.empty()) return fail(WG_ERROR_PARAMETER, "unknown executor " + o.executor);
       if (!ch.why.empty()) say(ch.warn ? WG_LOG_WARN : WG_LOG_INFO, ch.why);
+      // an adapter that is not an RDNA 4 Radeon RX 9000-series card (or not identified): no executor, no kernel load,
+      // no HIP attempt; the one line above is the whole report and the front end's own upscaler takes the game
+      if (ch.executor == "fsr") return WG_ERROR_UNSUPPORTED;
       o.executor = ch.executor;  // model K's default mode below applies with the HIP executor
       if (ch.sparkle_off) o.sparkle_guard = 0.0f;  // model K: the guard is HIP only; K stays on D3D12
       dx12_default_ = ch.by_default && ch.executor == "dx12";

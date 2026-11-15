@@ -205,6 +205,22 @@ int main() {
                     "ShortenMiddle keeps the drive and the marker");
         }
 
+        // R1: the launcher's GPU line is the runtime's sentence on every card that is not RDNA 4 (clean/runtime/interop/tests/
+        // test_executor_select.cpp checks the runtime's side of the same sentence)
+        {
+            require(NeedsRx9000Sentence() == L"WrongGPU's models need an RX 9000-series GPU; using AMD FSR", "NeedsRx9000Sentence: the runtime's sentence");
+            GpuInfo rdna4;
+            rdna4.amd = rdna4.rdna4 = true;
+            require(GpuRuntimeLine(rdna4) == L" \u00b7 Direct3D 12", "GpuRuntimeLine: RDNA 4 runs on Direct3D 12");
+            GpuInfo rdna3;
+            rdna3.amd = true;
+            require(GpuRuntimeLine(rdna3).find(NeedsRx9000Sentence()) != wstring::npos && !Contains(GpuRuntimeLine(rdna3), L"HIP"),
+                    "GpuRuntimeLine: another AMD card gets the sentence, no HIP");
+            GpuInfo other;
+            require(GpuRuntimeLine(other).find(NeedsRx9000Sentence()) != wstring::npos && !Contains(GpuRuntimeLine(other), L"Not supported"),
+                    "GpuRuntimeLine: another vendor, or no card, gets the sentence");
+        }
+
         // Linux's device list from a made-up folder (any host): every card in number order, connectors skipped, junk and
         // missing files ignored, the reported name says the card was not confirmed as the game's adapter
         {

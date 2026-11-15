@@ -3,9 +3,12 @@
 // tests/test_executor_select.cpp checks it on any host. WrongGPU's own code.
 //
 // Option `executor` (wronggpu.ini runtime_options, an [fsr] line, WG_RUNTIME_OPTIONS):
-//  - not named (or `auto`): Model M and model K on an RDNA 4 adapter (../rdna4.h) run on the D3D12 executor
-//    (executor_d3d12.cpp), everything else on the HIP executor, with one log line saying why (other GPU, the sparkle
-//    guard or the frame capture, which run on HIP only). The D3D12 executor can still refuse the context at create
+//  - not named (or `auto`): every model (M, L, K) on an RDNA 4 adapter (../rdna4.h) runs on the D3D12 executor
+//    (executor_d3d12.cpp). On an adapter that is not an RDNA 4 Radeon RX 9000-series card, or one that cannot be
+//    identified, the context is not created: the front end's own upscaler (AMD FSR, else its stand-in) takes the
+//    game, with one warning line (R1, oversight 2026-11-15: the networks' kernels are RX 9000-only, a HIP attempt
+//    only fails at kernel load). The sparkle guard (M, L) and the frame capture, which run on HIP only, select the HIP
+//    executor with a warning line. The D3D12 executor can still refuse the context at create
 //    (its driver-channel probe, the network's create, a context its kernels do not take): then the HIP executor runs
 //    it, again with one line (backend.cpp; model K: no HIP route, the context is not created and the game keeps its own
 //    upscaler, dx12_refused_line_k). Model K is taken only when every kernel the context can launch has a
@@ -23,12 +26,13 @@
 //  - Model K (REVIEW-215b, oversight 2026-11-14): never moved to HIP by the sparkle guard (HIP-only: it is turned off
 //    for K, one line, K runs on D3D12), never by hip_switch (ignored for K, one line if set), never by a refused frame
 //    (the frame goes to the front end's own upscaler, AMD FSR, else its stand-in, the same path as model M's refused
-//    frames; a create-level refusal ends the context with one line and the game keeps its own upscaler). The frame capture and executor=hip stay opt-in diagnostics with a loud
-//    line. Auto on an adapter that is not an RDNA 4 Radeon keeps its rule for every model, logged (owner question).
+//    frames; a create-level refusal ends the context with one line and the game keeps its own upscaler). The frame
+//    capture and executor=hip stay opt-in diagnostics with a loud line.
 //  - `d3d12-test`: the offline test executor.
 #pragma once
 
 #include <cstdint>
+#include <cstdio>
 #include <string>
 
 #include "../rdna4.h"
@@ -38,16 +42,20 @@ namespace wgi {
 struct ExecutorRequest {
   std::string executor = "auto";  // the option's value ("auto" when not named)
   bool model_k = false;           // the runtime options select model K (D3D12 executor: ports checked at its create)
-  bool adapter_known = false;     // the game device's adapter could be read (DXGI)
+  // The game device's adapter, from sources a layer in the game cannot rewrite (rdna4_win.h read_adapter_identity):
+  bool adapter_known = false;     // the SYSTEM's DXGI described the adapter (never the game's dxgi.dll)
   uint32_t vendor_id = 0;
   bool software = false;          // DXGI_ADAPTER_FLAG_SOFTWARE
-  std::string adapter;            // DXGI description
+  std::string adapter;            // that DXGI description
+  bool kmt_known = false;         // the kernel-mode driver's PCI ids were read (they decide first)
+  uint32_t kmt_vendor = 0, kmt_device = 0;
   bool sparkle_guard = false;     // option sparkle_guard on
   bool capture = false;           // option capture_dir set
 };
 
 struct ExecutorChoice {
-  std::string executor;     // hip | dx12 | d3d12-test; empty: unknown option value (create fails)
+  std::string executor;     // hip | dx12 | d3d12-test | fsr (no executor: create ends, the front end's own upscaler
+                            // takes the game); empty: unknown option value (create fails)
   bool by_default = false;  // chosen by the default rule (option not named): frames the D3D12 executor does not take
                             // move the context to the HIP executor
   bool warn = false;        // log `why` as a warning (else information)
@@ -55,9 +63,30 @@ struct ExecutorChoice {
   std::string why;          // the one log line about the choice; empty: nothing to log here
 };
 
+// The one line when "auto" meets an adapter that is not an RDNA 4 Radeon RX 9000-series card or is not identified (the
+// launcher shows the same sentence): no HIP attempt, no kernel load, the front end's own upscaler takes the game.
+inline std::string needs_rx9000_line(bool adapter_known, const std::string& adapter) {
+  return "WrongGPU's models need an RX 9000-series GPU; using AMD FSR (" +
+         (adapter_known ? "adapter " + (adapter.empty() ? std::string("(no name)") : adapter) : std::string("adapter not identified")) +
+         ")";
+}
+
 // The one line when model K meets the sparkle guard: the guard is HIP-only, so it is off for K.
 inline std::string k_sparkle_off_line() {
   return "model K: the sparkle guard runs on HIP only and is turned off for model K; model K runs on the D3D12 executor";
+}
+
+// rdna4.h's identity rule on a request.
+inline wgrt::AdapterIdentity adapter_identity(const ExecutorRequest& r) {
+  wgrt::AdapterIdentity id;
+  id.dxgi_known = r.adapter_known;
+  id.dxgi_vendor = r.vendor_id;
+  id.software = r.software;
+  id.description = r.adapter;
+  id.kmt_known = r.kmt_known;
+  id.kmt_vendor = r.kmt_vendor;
+  id.kmt_device = r.kmt_device;
+  return id;
 }
 
 inline ExecutorChoice choose_executor(const ExecutorRequest& r) {
@@ -98,13 +127,14 @@ inline ExecutorChoice choose_executor(const ExecutorRequest& r) {
   }
   if (e != "auto" && !e.empty()) return c;  // unknown value
   c.by_default = true;
-  const std::string gpu = r.adapter_known ? "the adapter " + (r.adapter.empty() ? std::string("(no name)") : r.adapter)
-                                          : std::string("the adapter (not identified)");
   const char* why = nullptr;
-  std::string text;
-  if (!r.adapter_known || !wgrt::rdna4_adapter(r.vendor_id, r.software, r.adapter)) {
-    text = gpu + " is not an RDNA 4 Radeon RX 9070 / RX 9060, where the D3D12 executor runs";
-    why = text.c_str();
+  if (!wgrt::rdna4_identity(adapter_identity(r))) {
+    c.executor = "fsr";  // every model: the kernels are RX 9000-only; the front end's own upscaler takes the game
+    c.warn = true;
+    char ids[32] = "";
+    if (!r.adapter_known && r.kmt_known) std::snprintf(ids, sizeof ids, "PCI %04X:%04X", (unsigned)r.kmt_vendor, (unsigned)r.kmt_device);
+    c.why = needs_rx9000_line(r.adapter_known || r.kmt_known, r.adapter_known ? r.adapter : std::string(ids));
+    return c;
   } else if (r.model_k && r.capture) {   // an opt-in diagnostic, never on by default
     c.executor = "hip";
     c.warn = true;
@@ -121,9 +151,11 @@ inline ExecutorChoice choose_executor(const ExecutorRequest& r) {
   } else if (r.capture) {
     why = "the frame capture runs on HIP only";
   }
-  if (why) {
+  if (why) {  // models M, L: the sparkle guard and the frame capture are HIP only (opt-in): a warning, never silent
     c.executor = "hip";
-    c.why = std::string("executor hip (default): ") + why + " (executor=dx12 / executor=hip in the options force a choice)";
+    c.warn = true;
+    c.why = std::string("diagnostic: executor hip (default): ") + why +
+            " (executor=dx12 / executor=hip in the options force a choice)";
     return c;
   }
   c.executor = "dx12";  // the success line is logged once the D3D12 executor has taken the context

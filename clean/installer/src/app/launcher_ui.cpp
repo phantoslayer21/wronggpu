@@ -1098,7 +1098,7 @@ void SetGpu(const GpuInfo& gpu) {
     wstring n = gpu.name;
     for (const wchar_t* p : {L"AMD Radeon ", L"AMD "}) if (n.rfind(p, 0) == 0) { n = n.substr(wcslen(p)); break; }
     v.gpuName = n;
-    v.executorLine = n.empty() ? L"No graphics card found" : n + (gpu.rdna4 ? L" \u00b7 Direct3D 12" : gpu.amd ? L" \u00b7 HIP" : L" \u00b7 Not supported");
+    v.executorLine = n.empty() ? L"No graphics card found" : n + GpuRuntimeLine(gpu);
 }
 void SetHealth(bool model, const GpuInfo& gpu) { v.modelReady = model; SetGpu(gpu); }
 // The model data's state for the toolbar and Settings (any thread): ready or why not, the DLSS file it came from, the HIP
