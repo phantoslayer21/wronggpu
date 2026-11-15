@@ -187,6 +187,31 @@ int main() {
         require(!SetSetting(p, "nosuchkey", "1", &why) && !SetSetting(p, "pre_exposure", "bright", &why), "unknown keys and bad values are refused by set");
         require(SetSetting(p, "Executor", " HIP ", &why) && p.get("executor") == "hip", "set trims and lowers");
 
+        // ---- R1: the choices that exist on the HIP runtime only are not offered on an RX 9000 card ----------------
+        require(NeedsHipRuntime("executor", "hip") && NeedsHipRuntime("executor", " HIP "), "executor=hip needs the HIP runtime");
+        require(!NeedsHipRuntime("executor", "auto") && !NeedsHipRuntime("executor", "dx12"), "auto and dx12 run on Direct3D 12");
+        require(NeedsHipRuntime("output_filter", "quality5") && NeedsHipRuntime("output_filter", "quality9"), "Quality 5 / 9 need the HIP runtime");
+        require(!NeedsHipRuntime("output_filter", "default") && !NeedsHipRuntime("output_filter", "original") && !NeedsHipRuntime("output_filter", "analytic"),
+                "the other output filters run on Direct3D 12");
+        require(NeedsHipRuntime("sparkle_guard", "on") && NeedsHipRuntime("sparkle_guard", "0.25") && !NeedsHipRuntime("sparkle_guard", "off") && !NeedsHipRuntime("sparkle_guard", "0"),
+                "the sparkle guard needs the HIP runtime, off does not");
+        require(!NeedsHipRuntime("pre_exposure", "original") && !NeedsHipRuntime("wronggpu", "off") && !NeedsHipRuntime("nosuchkey", "hip"), "no other key is HIP-only");
+        require(wstring(NotOnDx12Text()) == L"Not available on the DX12 runtime yet", "the words the launcher shows");
+        for (const char* key : {"executor", "output_filter", "sparkle_guard"}) {
+            const SettingDef* d = FindSetting(key);
+            const wstring help = d ? d->help : L"";
+            require(d && help.find(L"Uses HIP") == wstring::npos && help.find(L"Needs the HIP runtime") == wstring::npos && help.find(L"HIP is used anyway") == wstring::npos,
+                    "the help text of a HIP-only setting no longer promises HIP");
+        }
+        require(wstring(FindSetting("output_filter")->help).find(L"not available on the DX12 runtime yet") != wstring::npos &&
+                    wstring(FindSetting("sparkle_guard")->help).find(L"Not available on the DX12 runtime yet") != wstring::npos,
+                "the help texts say the same words");
+        // a profile or ini that already holds one still renders (the runtime falls back with one log line; no HIP)
+        {
+            Profile q = DefaultProfile();
+            require(SetSetting(q, "output_filter", "quality9", nullptr) && q.get("output_filter") == "quality9", "an existing quality9 profile is still valid");
+        }
+
         // ---- rendering wronggpu.ini ---------------------------------------------------------------------------
         const string front = "# WrongGPU settings\r\n[fsr]\r\n# who upscales\r\nupscaler = network\r\nruntime_dll = wronggpu_runtime.dll\r\n"
                              "runtime_options = model=M ; the model\r\nfoo_unknown = 7\r\n[overlay]\r\nexecutor = keep-me\r\n";

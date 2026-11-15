@@ -20,6 +20,9 @@
 //     WG_CREATE_MOTION_OUTPUT_RES), WG_TEST_MOTIONFMT=rg16f|rg32f, WG_TEST_PI (pre-exposure).
 //   test_interop_d3d12.exe <runtime> asyncsim "<options>" <serial|ideal|pipe|inline|game|net> [frames] [pre] [post] [iters]
 //     A simulated game frame on the DIRECT queue and the network (executor=dx12) in its list or on a COMPUTE queue.
+//   test_interop_d3d12.exe <runtime> matrix "<options naming the model>" [output heights, default 1080,1440,2160]
+//     R1 / H2: every DLSS-style ratio x output size x declared maximum x HDR / LDR gets a default-executor context and a
+//     frame: each must be taken by the D3D12 executor (no create refusal, no HIP line); see case_matrix.
 //   test_interop_d3d12.exe <runtime> hipswitch "<Model M options>" "<Model K options>"
 //     Creates, dispatches, destroys M -> K -> M in one process and verifies the HIP DLL stays loaded between them.
 //   test_interop_d3d12.exe <runtime> hipleak "<options A>" ["<options B>" | -] [cycles] [frames] [MiB per cycle] [hold] [thread]
@@ -1783,6 +1786,82 @@ int debug_messages(Gpu& g, const char* when) {
   return errors;
 }
 
+// "matrix" "<options>" [outputs]: R1 / H2. No supported context may reach the create refusal (the D3D12 executor refusing a
+// context: one warning line, no context, the front end's own upscaler keeps the game). Every launcher-reachable shape of a
+// default-executor context is created on this device and given a frame: the DLSS-style render ratios (DLAA 1.0, Quality
+// 0.667, Balanced 0.58, Performance 0.5, Ultra Performance 0.333) of each output size (`outputs`: a comma list of heights,
+// default 1080,1440,2160), the declared maximum render size both as the game usually gives it (a little above the render
+// size) and equal to the output (as Cyberpunk declares it), HDR (RGBA16F output) and LDR (RGBA8 output). Each context must
+// log "network runtime ready: executor dx12" and none of "could not take this context", "does not take this frame",
+// "about to start the HIP runtime" or "the HIP executor"; its frame must be WG_OK. No `executor` key is given: the
+// default rule (D3D12 on an RX 9000 card) is what is tested. The options name the model (a synthetic model for K).
+bool case_matrix(Gpu& g, const char* dll, const std::string& options, const std::string& outputs) {
+  struct Mode {
+    const char* name;
+    double ratio;
+  };
+  const Mode modes[] = {{"DLAA", 1.0}, {"Quality", 0.667}, {"Balanced", 0.58}, {"Performance", 0.5}, {"UltraPerformance", 0.333}};
+  std::vector<UINT> heights;
+  for (size_t pos = 0; pos <= outputs.size();) {
+    size_t end = outputs.find(',', pos);
+    if (end == std::string::npos) end = outputs.size();
+    if (end > pos) heights.push_back((UINT)std::atoi(outputs.substr(pos, end - pos).c_str()));
+    pos = end + 1;
+  }
+  int contexts = 0, refused = 0;
+  for (const UINT oh : heights) {
+    const UINT ow = oh * 16 / 9;
+    for (const Mode& m : modes) {
+      for (const bool hdr : {true, false}) {
+        Scene s;
+        s.ow = ow, s.oh = oh;
+        s.rw = (UINT)(ow * m.ratio + 0.5), s.rh = (UINT)(oh * m.ratio + 0.5);
+        s.tw = s.mw = s.rw, s.th = s.mh = s.rh, s.rx = s.ry = 0;
+        if (!hdr) s.outRes = s.outFmt = DXGI_FORMAT_R8G8B8A8_UNORM;
+        s.make(g);
+        for (const bool declared_output : {false, true}) {
+          const UINT mw = declared_output ? ow : s.rw + 8, mh = declared_output ? oh : s.rh + 8;
+          _putenv_s("WG_TEST_MAX_RENDER_WIDTH", std::to_string(mw).c_str());
+          _putenv_s("WG_TEST_MAX_RENDER_HEIGHT", std::to_string(mh).c_str());
+          g_log.clear();
+          Ctx c;
+          c.g = &g;
+          if (!c.be.load(dll)) return false;
+          const std::string label = std::string(m.name) + " " + std::to_string(s.rw) + "x" + std::to_string(s.rh) + " -> " +
+                                    std::to_string(ow) + "x" + std::to_string(oh) + (hdr ? " HDR" : " LDR") +
+                                    (declared_output ? " max=output" : " max=render+8");
+          const WgResult r = c.create(s, (hdr ? WG_CREATE_HDR : 0u) | WG_CREATE_DEPTH_INVERTED, options.c_str());
+          ++contexts;
+          WgResult rr = WG_ERROR;
+          if (r == WG_OK) {
+            s.set_color(g, 1);
+            WgFrame f = s.frame(g, 1);
+            f.motion_scale[0] = f.motion_scale[1] = 1.0f;
+            f.reset = 1;
+            c.run(s, f, &rr);
+          }
+          bool ready = false, bad = false;
+          for (const auto& line : g_log) {
+            ready |= line.find("network runtime ready: executor dx12") != std::string::npos;
+            const bool refusal = line.find("could not take this context") != std::string::npos;
+            refused += refusal;
+            bad |= refusal || line.find("does not take this frame") != std::string::npos ||
+                   line.find("about to start the HIP runtime") != std::string::npos ||
+                   line.find("the HIP executor") != std::string::npos;
+          }
+          const bool ok = r == WG_OK && rr == WG_OK && ready && !bad;
+          std::printf("  matrix %s: create %d, frame %d, ready dx12 %d, refusal or HIP line %d%s\n", label.c_str(), (int)r, (int)rr,
+                      (int)ready, (int)bad, ok ? "" : "  <-- FAIL");
+          CHECK(ok);
+        }
+      }
+    }
+  }
+  std::printf("  matrix: %d contexts, %d create refusals\n", contexts, refused);
+  CHECK(refused == 0 && contexts > 0);
+  return refused == 0 && !g_fail;
+}
+
 bool case_dx12_same(Gpu& g, const char* dll, const std::string& common, int frames, bool outsrv) {
   Scene s;
   s.tw = 1707, s.th = 960, s.rx = 0, s.ry = 0, s.rw = 1707, s.rh = 960, s.ow = 2560, s.oh = 1440, s.mw = 1707,
@@ -2493,6 +2572,11 @@ int main(int argc, char** argv) {
   if (only == "dx12same") {
     const bool outsrv = argc > 5 && std::string(argv[5]) == "outsrv";
     const bool ok = case_dx12_same(g, dll, argc > 3 ? argv[3] : "", argc > 4 ? std::atoi(argv[4]) : 8, outsrv);
+    std::puts(ok && !g_fail ? "PASS" : "FAIL");
+    return ok && !g_fail ? 0 : 1;
+  }
+  if (only == "matrix") {
+    const bool ok = case_matrix(g, dll, argc > 3 ? argv[3] : "", argc > 4 ? argv[4] : "1080,1440,2160");
     std::puts(ok && !g_fail ? "PASS" : "FAIL");
     return ok && !g_fail ? 0 : 1;
   }
