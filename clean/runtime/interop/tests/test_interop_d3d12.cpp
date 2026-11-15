@@ -1894,23 +1894,24 @@ bool case_dx12_same(Gpu& g, const char* dll, const std::string& common, int fram
       CHECK(rr == WG_OK);
       CHECK(debug_messages(g, mode ? "dx12 frame" : "hip frame") == 0);
     }
-    // WG_TEST_EXPECT (second context): dx12 (default: the D3D12 executor ran every frame and wrote the output), switch
-    // (the default executor met a frame it does not take and the HIP executor took over the context; since the owner's
-    // decision of 2026-11-04 only with hip_switch=on in the options), refused (create answered WG_ERROR_UNSUPPORTED, above)
+    // WG_TEST_EXPECT (second context): dx12 (default: the D3D12 executor ran every frame and wrote the output),
+    // ignored (hip_switch=on in the options is ignored with one line: the context stays on the D3D12 executor, no HIP),
+    // refused (create answered WG_ERROR_UNSUPPORTED, above)
     const char* ex = std::getenv("WG_TEST_EXPECT");
     const std::string expect = ex ? ex : "dx12";
     if (mode == 1 && expect != "dx12") {
-      bool ready_dx12 = false, ready_hip = false, switched = false, refused = false;
+      bool ready_dx12 = false, ready_hip = false, switched = false, refused = false, ignored = false;
       for (const auto& m : g_log) {
         ready_dx12 |= m.find("network runtime ready: executor dx12") != std::string::npos;
         ready_hip |= m.find("network runtime ready: executor hip") != std::string::npos;
         switched |= m.find("the HIP executor runs this context from now on") != std::string::npos;
         refused |= m.find("executor dx12 (default on RDNA 4) could not take this context") != std::string::npos;
+        ignored |= m.find("hip_switch=on is ignored") != std::string::npos;
       }
-      std::printf("  second context: ready dx12 %d, ready hip %d, switched to HIP %d, refused at create %d\n",
-                  (int)ready_dx12, (int)ready_hip, (int)switched, (int)refused);
-      CHECK(expect == "switch");  // (any other value is a typo: "refused" returned above)
-      CHECK(ready_dx12 && switched && !refused && !ready_hip);
+      std::printf("  second context: ready dx12 %d, ready hip %d, switched to HIP %d, hip_switch ignored %d, refused at create %d\n",
+                  (int)ready_dx12, (int)ready_hip, (int)switched, (int)ignored, (int)refused);
+      CHECK(expect == "ignored");  // (any other value is a typo: "refused" returned above)
+      CHECK(ready_dx12 && ignored && !switched && !refused && !ready_hip);
     }
     if (mode == 1 && expect == "dx12") {
       bool ran = false, direct_in = false, wrote = false;

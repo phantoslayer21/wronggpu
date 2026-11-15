@@ -23,6 +23,7 @@ void expect(const char* name, bool ok) {
 void expect(const std::string& name, bool ok) { expect(name.c_str(), ok); }
 
 bool has(const std::string& s, const char* part) { return s.find(part) != std::string::npos; }
+bool has(const std::string& s, const std::string& part) { return s.find(part) != std::string::npos; }
 
 // A request for an adapter as the lookup found it (what backend.cpp builds from wgrt::lookup_adapter)
 wgi::ExecutorRequest request_for(const wgrt::AdapterIdentity& id) {
@@ -339,23 +340,19 @@ int main() {
 
   // ---- clean/fe-wrapped-list: hip_switch, and a frame the D3D12 executor does not take -----------------------------
   {
-    using wgi::refused_frame_policy;
     using wgi::RefusedAction;
-    expect("hip_switch not named -> the default: off (owner 2026-11-04)",
-           !wgi::kHipSwitchDefault && !refused_frame_policy("").switch_to_hip && refused_frame_policy("").note.empty());
-    expect("hip_switch=on -> switch", refused_frame_policy("on").switch_to_hip && refused_frame_policy("1").switch_to_hip);
-    expect("hip_switch=off -> no switch", !refused_frame_policy("off").switch_to_hip && !refused_frame_policy("0").switch_to_hip &&
-                                              refused_frame_policy("off").note.empty());
-    const wgi::RefusedFramePolicy odd = refused_frame_policy("maybe");
-    expect("hip_switch=maybe -> the default with a note",
-           odd.switch_to_hip == wgi::kHipSwitchDefault && has(odd.note, "hip_switch=maybe not recognised"));
+    expect("hip_switch not set, off, 0 or false -> no line", wgi::hip_switch_note("").empty() &&
+                                                                 wgi::hip_switch_note("off").empty() &&
+                                                                 wgi::hip_switch_note("0").empty() &&
+                                                                 wgi::hip_switch_note("false").empty());
+    for (const char* v : {"on", "1", "true", "maybe"})
+      expect(std::string("hip_switch=") + v + " is ignored with one line, no HIP",
+             has(wgi::hip_switch_note(v), std::string("hip_switch=") + v + " is ignored") &&
+                 has(wgi::hip_switch_note(v), "never to HIP") && wgi::hip_switch_note(v).find('\n') == std::string::npos);
     const std::string l = wgi::no_switch_line(2, "frame not taken (nothing recorded): native direct frame geometry");
-    expect("the hip_switch=off line names the frame, the reason, no HIP and the front end's fallback",
+    expect("the refused-frame line names the frame, the reason, no HIP and the front end's fallback",
            has(l, "frame 2: executor dx12 (default on RDNA 4) does not take this frame") && has(l, "native direct frame") &&
                has(l, "does not move to the HIP executor") && has(l, "AMD FSR, else its stand-in"));
-    expect("K: no line when hip_switch is not set", wgi::k_hip_switch_note("").empty());
-    expect("K: hip_switch=on is ignored with one line",
-           has(wgi::k_hip_switch_note("on"), "model K ignores hip_switch=on") && has(wgi::k_hip_switch_note("on"), "never to HIP"));
     const char* const refusals[] = {
         "frame not taken (nothing recorded): no output texture",
         "frame not taken (nothing recorded): model K direct frame: render size outside the configured maximum",
@@ -365,23 +362,57 @@ int main() {
       const std::string w = why;
       expect("refused frame recognised: " + w, wgi::frame_refused(w));
       for (bool by_default : {true, false})
-        for (bool hip_switch : {false, true})
-          expect("K refused frame -> WG_ERROR_UNSUPPORTED, the front end's upscaler: " + w.substr(0, 40) +
-                     (by_default ? " default" : " forced") + (hip_switch ? " switch=on" : " switch=off"),
-                 wgi::refused_frame_action(true, by_default, hip_switch) == RefusedAction::kNoSwitch);
+        expect("K refused frame -> WG_ERROR_UNSUPPORTED, the front end's upscaler: " + w.substr(0, 40) +
+                   (by_default ? " default" : " forced"),
+               wgi::refused_frame_action(true, by_default) == RefusedAction::kNoSwitch);
     }
     expect("a frame that is not a refusal is not a 'frame not taken'",
            !wgi::frame_refused("input refused: texture format") && !wgi::frame_refused("model K: kernel failed"));
-    expect("M default + hip_switch=on -> switch to HIP (the explicit 0.6.0 option)",
-           wgi::refused_frame_action(false, true, true) == RefusedAction::kSwitchToHip);
-    expect("M default + hip_switch=off -> front end's upscaler", wgi::refused_frame_action(false, true, false) == RefusedAction::kNoSwitch);
-    expect("M executor=dx12 -> bilinear fallback", wgi::refused_frame_action(false, false, true) == RefusedAction::kBilinear);
-    expect("K and M (hip_switch=off) take the same path: the same action",
-           wgi::refused_frame_action(true, true, true) == wgi::refused_frame_action(false, true, false));
+    expect("M default -> front end's upscaler (no move to HIP)", wgi::refused_frame_action(false, true) == RefusedAction::kNoSwitch);
+    expect("M executor=dx12 -> bilinear fallback", wgi::refused_frame_action(false, false) == RefusedAction::kBilinear);
+    expect("K and M take the same path: the same action",
+           wgi::refused_frame_action(true, true) == wgi::refused_frame_action(false, true));
     const std::string rl = wgi::k_refusal_line(7, "frame not taken (nothing recorded): no output texture");
     expect("the refusal line names the frame, the reason, the front end's upscaler and 'never to the HIP executor'",
            has(rl, "frame 7: model K") && has(rl, "no output texture") && has(rl, "AMD FSR, else its stand-in") &&
                has(rl, "never to the HIP executor") && rl.find('\n') == std::string::npos);
+  }
+
+  // ---- R1 (oversight): hip_switch=on is ignored for models M, L and K alike ----------------------------------------
+  // The selector sees a model only as "is it K"; M and L are the same request. For each of the three: on an RX 9000 board
+  // the default stays the D3D12 executor with one line about the option, a refused frame never moves to HIP, and the
+  // option changes nothing about the choice (the same executor, default flag and log text with and without it).
+  {
+    struct Model {
+      const char* name;
+      bool k;
+    };
+    for (const Model m : {Model{"M", false}, Model{"L", false}, Model{"K", true}}) {
+      for (const char* value : {"on", "1", "true"}) {
+        wgi::ExecutorRequest r = board("AMD Radeon RX 9070 XT", 0x1002, 0x7550);
+        r.model_k = m.k;
+        wgi::ExecutorRequest plain = r;
+        r.hip_switch = value;
+        const wgi::ExecutorChoice c = choose_executor(r);
+        const wgi::ExecutorChoice p = choose_executor(plain);
+        const std::string tag = std::string("model ") + m.name + " hip_switch=" + value;
+        expect(tag + ": stays on the D3D12 executor by default", c.executor == "dx12" && c.by_default);
+        expect(tag + ": one line, no HIP", has(c.hip_note, (std::string("hip_switch=") + value + " is ignored").c_str()) &&
+                                              has(c.hip_note, "never to HIP") && c.hip_note.find('\n') == std::string::npos);
+        expect(tag + ": the choice is the one without the option",
+               c.executor == p.executor && c.by_default == p.by_default && c.why == p.why && c.warn == p.warn &&
+                   c.sparkle_off == p.sparkle_off && p.hip_note.empty());
+        expect(tag + ": a refused frame goes to the front end, not to HIP",
+               wgi::refused_frame_action(m.k, c.by_default) == wgi::RefusedAction::kNoSwitch);
+      }
+      for (const char* value : {"off", "0", "false", ""}) {
+        wgi::ExecutorRequest r = board("AMD Radeon RX 9070 XT", 0x1002, 0x7550);
+        r.model_k = m.k;
+        r.hip_switch = value;
+        expect(std::string("model ") + m.name + " hip_switch=" + value + ": nothing to say",
+               choose_executor(r).hip_note.empty());
+      }
+    }
   }
 
   std::printf(failures ? "%d FAILED\n" : "ALL TESTS PASSED\n", failures);

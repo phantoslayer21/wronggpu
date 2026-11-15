@@ -146,7 +146,7 @@ std::string adapter_description(ID3D12Device* device) {
 
 struct Options {
   std::string sync = "inline";      // inline | pipelined
-  std::string hip_switch;           // on | off (executor_select.h refused_frame_policy); empty: the default
+  std::string hip_switch;           // ignored by every model (executor_select.h: one line when set)
   std::string executor = "auto";    // auto (not named: dx12 for every model on RDNA 4, else no executor: the front end's upscaler; executor_select.h) | hip |
                                     // dx12 (the network on the game's D3D12 device, no HIP) | d3d12-test (tests)
   std::string model_dir;            // default %LOCALAPPDATA%\WrongGPU\model (installer contract, spec 30)
@@ -609,6 +609,7 @@ class Context {
       }
       q.sparkle_guard = o.sparkle_guard > 0.0f;
       q.capture = !o.capture_dir.empty();
+      q.hip_switch = o.hip_switch;
       const ExecutorChoice ch = choose_executor(q);
       if (ch.executor.empty()) return fail(WG_ERROR_PARAMETER, "unknown executor " + o.executor);
       if (!ch.why.empty()) say(ch.warn ? WG_LOG_WARN : WG_LOG_INFO, ch.why);
@@ -618,20 +619,11 @@ class Context {
       o.executor = ch.executor;  // model K's default mode below applies with the HIP executor
       if (ch.sparkle_off) o.sparkle_guard = 0.0f;  // model K: the guard is HIP only; K stays on D3D12
       dx12_default_ = ch.by_default && ch.executor == "dx12";
-      const RefusedFramePolicy pol = refused_frame_policy(o.hip_switch);  // clean/fe-wrapped-list
-      hip_switch_ = pol.switch_to_hip;
-      if (!pol.note.empty()) say(WG_LOG_WARN, pol.note);
-      if (q.model_k) {  // model K never moves to HIP, whatever hip_switch says
-        hip_switch_ = false;
-        const std::string kn = k_hip_switch_note(o.hip_switch);
-        if (!kn.empty()) say(WG_LOG_INFO, kn);
-      }
+      // R1: no model moves to HIP in a game, whatever hip_switch says (the 0.6.0 option is ignored, with one line)
+      if (!ch.hip_note.empty()) say(WG_LOG_INFO, ch.hip_note);
     }
     k_default_ = model_k_default(o);
     const bool split = services_ && services_->struct_size >= sizeof(WgFrontEndServices) && services_->split_command_list;
-    split_ = split;
-    share_path_opt_ = o.share_path;
-    input_copy_opt_ = o.input_copy;
     if (!split && o.executor != "dx12")
       return fail(WG_ERROR_UNSUPPORTED, "the front end offers no command-list split (interface version 2)");
     if (!o.unknown.empty()) say(WG_LOG_INFO, "options passed on to the network runtime: " + o.unknown);
@@ -884,14 +876,7 @@ class Context {
       }
     }
     const uint64_t v = ++value_;
-    // the D3D12 executor after a switch to HIP (switch_to_hip): released once the game's lists with its frames are done
-    if (retired_ && retired_->completed() >= retired_last_) retired_.reset();
-    if (exec_->records_into_list()) {
-      bool moved = false;
-      const WgResult r = dispatch_record(f, list, v, &moved);
-      if (!moved) return r;
-      // moved: the HIP executor runs this frame (below) and every later one
-    }
+    if (exec_->records_into_list()) return dispatch_record(f, list, v);
     // Slots alternate with every network frame enqueued (not with v: a frame without the network must not make two
     // consecutive network frames share a slot). The slot written now was last used two network frames ago, and the
     // game's queue has waited for that frame (inline) or a later one (pipelined) before this frame's first part.
@@ -1096,10 +1081,7 @@ class Context {
 
   // executor=dx12: the network and its output, recorded into the game's list L (no split). The network's kernels read
   // the game's textures and write its output texture themselves: no input pass, no output pass (executor_d3d12.cpp).
-  // *moved: the executor did not take the frame and the context now runs on the HIP executor (switch_to_hip); nothing
-  // of the frame's own work is recorded yet (the caller records it on the HIP path).
-  WgResult dispatch_record(const WgFrame& f, ID3D12GraphicsCommandList* list, uint64_t v, bool* moved) {
-    *moved = false;
+  WgResult dispatch_record(const WgFrame& f, ID3D12GraphicsCommandList* list, uint64_t v) {
     Job job;
     job.slot = 0;
     job.value = v;
@@ -1129,12 +1111,12 @@ class Context {
     phase(4);
     const bool ok = exec_->record(job, list, &wrote, &err);
     phase(5);
-    // a frame the executor did not take (nothing of it recorded, e.g. native AA): with the default executor the HIP
-    // executor takes over the context; with executor=dx12 the frame gets the bilinear fallback below
+    // a frame the executor did not take (nothing of it recorded, e.g. native AA): with the default executor the frame
+    // is answered WG_ERROR_UNSUPPORTED (no HIP, any model); with executor=dx12 it gets the bilinear fallback below
     const bool refused = !ok && frame_refused(err);
-    // a refused frame (executor_select.h refused_frame_action): model K, and model M with hip_switch=off, answer
+    // a refused frame (executor_select.h refused_frame_action): every model on the default executor answers
     // WG_ERROR_UNSUPPORTED and the front end takes the frame (AMD FSR, else its stand-in); the context stays usable
-    const RefusedAction refused_action = refused_frame_action(model_k_, dx12_default_, hip_switch_);
+    const RefusedAction refused_action = refused_frame_action(model_k_, dx12_default_);
     if (refused && refused_action == RefusedAction::kNoSwitch) {  // clean/fe-wrapped-list: no move to HIP; nothing recorded
       if (!no_switch_said_) {
         no_switch_said_ = true;
@@ -1142,8 +1124,6 @@ class Context {
       }
       return WG_ERROR_UNSUPPORTED;  // one frame's answer: the context stays usable (failed_ not set)
     }
-    if (refused && refused_action == RefusedAction::kSwitchToHip && switch_to_hip(v, err)) return *moved = true, WG_OK;
-    if (!refused) dx12_last_ = v;
     note_path(&input_path_, "input: read directly by the network's D3D12 kernels (executor dx12, no input pass)");
     if ((flags_ & WG_CREATE_MOTION_OUTPUT_RES) && model_k_)
       note_path(&motion_path_, "motion: output resolution, the texel under each render pixel's centre picked by the "
@@ -1184,66 +1164,6 @@ class Context {
     const bool input = !ok && !refused && err.find("input refused: ") != std::string::npos;
     if (!ok) return fail_frame(refused ? WG_ERROR_PARAMETER : input ? WG_ERROR_INPUT : WG_ERROR, err);
     return WG_OK;
-  }
-
-  // The default executor on RDNA 4 (dx12_default_) met a frame its kernels do not take (nothing of it recorded, e.g.
-  // native AA, a render size above the one checked at create): the HIP executor runs this frame and every later one
-  // of the context, starting over (reset), as if it had been chosen at create (shared buffers, split, fences; the
-  // options input_copy and share_path apply). The D3D12 executor stays alive until the game's lists holding its
-  // frames have finished (retired_). One log line; tried once (on failure: the bilinear fallback for such frames).
-  bool switch_to_hip(uint64_t v, const std::string& why) {
-    dx12_default_ = false;
-    std::string err;
-    std::unique_ptr<Executor> hip;
-    if (!split_) {
-      err = "the front end offers no command-list split (interface version 2)";
-    } else {
-      hip = make_hip_executor(rt_cfg_, adapter_);
-      hip->set_log_sink([this](bool warning, const std::string& m) {
-        say(warning ? WG_LOG_WARN : WG_LOG_INFO, "destroy: " + m);
-      });
-      say(WG_LOG_INFO, "about to start the HIP runtime (frame " + std::to_string(v) + ": the context moves to the HIP executor)");
-      if (!hip->prepare(&err)) hip.reset();
-    }
-    if (hip) {
-      std::unique_ptr<Executor> d3d = std::move(exec_);
-      release_set();  // the D3D12 context's fences and flag range (no frame of it uses them)
-      no_slots_ = false;
-      exec_ = std::move(hip);
-      bool shared = make_shared_objects(exec_->needs_handles(), share_path_opt_, &err);
-      if (shared) say(WG_LOG_INFO, "about to import the shared buffers and fences into HIP (" + share_path_ + ")");
-      if (!shared || !exec_->init(device_, set_, &err)) {
-        exec_.reset();
-        release_set();
-        no_slots_ = true;
-        exec_ = std::move(d3d);
-      } else {
-        close_handles();
-        retired_ = std::move(d3d);
-        retired_last_ = dx12_last_;
-        if (!retired_last_ || retired_->completed() >= retired_last_) retired_.reset();
-      }
-    }
-    if (exec_->records_into_list()) {
-      say(WG_LOG_WARN, "frame " + std::to_string(v) + ": executor dx12 (default on RDNA 4) does not take this frame (" +
-                           why + ") and the HIP executor could not take over (" + err +
-                           "); frames it does not take get the bilinear fallback");
-      return false;
-    }
-    input_copy_ = input_copy_opt_;
-    next_slot_ = 0;
-    last_run_ = last_submitted_ = 0;
-    force_reset_ = true;  // the HIP network starts over with this frame
-    if (timing_) {
-      const bool net = exec_->enable_timing();
-      timing_->set_info(net ? exec_->timing_info() : std::string());
-      timing_->set_labels(exec_->timing_labels());
-    }
-    say(WG_LOG_WARN, "frame " + std::to_string(v) + ": executor dx12 (default on RDNA 4) does not take this frame (" +
-                         why + "); the HIP executor runs this context from now on (shared buffers and fences: " +
-                         share_path_ + ", GPU memory " + std::to_string(gpu_memory() >> 20) +
-                         " MiB; executor=dx12 keeps the D3D12 executor with the bilinear fallback for such frames)");
-    return true;
   }
 
   uint64_t gpu_memory() const {
@@ -1981,7 +1901,6 @@ class Context {
         say(WG_LOG_WARN, "destroy: the network's last frame did not finish within 5 s");
     }
     if (exec_) exec_->drain();
-    retired_.reset();  // (drains the game's lists that hold its frames, bounded)
     if (rescue_ && device_ && ev) {
       ID3D12Fence* f = nullptr;
       if (SUCCEEDED(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), (void**)&f))) {
@@ -2138,17 +2057,10 @@ class Context {
 #endif
   bool k_default_ = false;  // model K's default mode was applied (model_k_default)
   // executor choice (executor_select.h): dx12_default_ = the D3D12 executor runs the context by the default rule (not
-  // the option), so a frame it does not take moves the context to the HIP executor (switch_to_hip); what that switch
-  // needs from create: the split service and the options share_path / input_copy
+  // the option); a frame it does not take is answered WG_ERROR_UNSUPPORTED (no HIP in a game), with executor=dx12
+  // forced it gets the bilinear fallback
   bool dx12_default_ = false;
-  bool hip_switch_ = kHipSwitchDefault;  // refused_frame_policy (option hip_switch; clean/fe-wrapped-list)
-  bool no_switch_said_ = false;          // the hip_switch=off line was logged
-  bool split_ = false;
-  std::string share_path_opt_ = "auto";
-  bool input_copy_opt_ = false;
-  uint64_t dx12_last_ = 0;              // last frame the D3D12 executor recorded something of
-  std::unique_ptr<Executor> retired_;   // the D3D12 executor after switch_to_hip, until its frames have finished
-  uint64_t retired_last_ = 0;
+  bool no_switch_said_ = false;          // the refused-frame line was logged
   bool k_input16_ = true;  // model K: compact input pass (runtime option k_input=f32: the FP32 pass)
   std::string n_kernels_, n_model_, n_map_, n_rocm_, n_swin_, n_rtopts_;
   WgRtConfig rt_cfg_ = {};

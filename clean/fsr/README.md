@@ -266,10 +266,10 @@ OptiScaler folder ships `amd_fidelityfx_upscaler_dx12.dll`; OptiScaler.ini `[Lib
   otherwise it is refused with one line and the context gets AMD's FSR (else the stand-in). WrongGPU's queue is never
   made on another device (`test_wrapped_list` case F). The front end writes its log to disk right after an upscaler's
   `about to ...` line (HIP start-up, the shared-memory import) and before the first split's submission.
-- **Frames the upscaler does not take:** `WG_ERROR_UNSUPPORTED` from the upscaler's dispatch (the network runtime with
-  `hip_switch=off`, its default since 2026-11-04: frames above the render size checked at create) hands the context to
-  AMD's FSR at once;
-  without AMD's FSR the stand-in upscales such frames.
+- **Frames the upscaler does not take:** `WG_ERROR_UNSUPPORTED` from the upscaler's dispatch (the network runtime's
+  D3D12 executor: frames above the render size checked at create) hands the context to AMD's FSR at once; without
+  AMD's FSR the stand-in upscales such frames. No model moves to the HIP executor in a game; the old option
+  `hip_switch=on` is ignored with one log line.
 - **Model location:** the front end looks for the converted model (`model.wgcm`, Model K in `K\`) in `[fsr] model_dir`
   of `wronggpu.ini` (relative: from the data folder), then `<game exe folder>\WrongGPU\model`, and passes the first
   folder that has it to the runtime as `model_dir=`; otherwise the runtime's own default (`%LOCALAPPDATA%\WrongGPU\model`,

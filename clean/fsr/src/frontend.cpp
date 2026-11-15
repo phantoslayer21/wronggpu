@@ -1619,7 +1619,7 @@ ffxReturnCode_t FrontEnd::DispatchUpscale(UpscaleContext& u, const ffxDispatchDe
         problem = std::string("upscaler \"") + u.backend->name + "\" dispatch failed: " + WgResultText(r);
         if (platform_.diagnosticFailure) platform_.diagnosticFailure(u.id, frameIndex, u.device);
         // clean/fe-wrapped-list: WG_ERROR_UNSUPPORTED from the upscaler itself: it does not take this context's frames
-        // (the network runtime with hip_switch=off when its D3D12 executor refuses a frame, e.g. native resolution).
+        // (the network runtime when its D3D12 executor refuses a frame, e.g. native resolution).
         // AMD's FSR takes the context over now; without it the stand-in upscales such frames (below) and the context
         // stays the upscaler's. Said once per context.
         if (r == WG_ERROR_UNSUPPORTED && !u.unsupportedSaid) {

@@ -2349,7 +2349,7 @@ static void TestHostVersionHandling() {
 // backend that needs the split goes to AMD's FSR with one line in the log; without AMD the backend keeps being asked
 // (its split answers WG_ERROR_NOT_READY and the stand-in draws); a backend that needs no split is not affected.
 // clean/fe-wrapped-list: frames the upscaler does not take (WG_ERROR_UNSUPPORTED, the network runtime with
-// hip_switch=off at native resolution): AMD's FSR takes the context over at once; without it the stand-in upscales
+// no HIP switch, at native resolution): AMD's FSR takes the context over at once; without it the stand-in upscales
 // those frames and the context stays WrongGPU's. And an upscaler's "about to ..." line flushes the log.
 static void TestUnsupportedFrames() {
     Reset();
@@ -2393,7 +2393,7 @@ static void TestUnsupportedFrames() {
 }
 
 // REVIEW-215c: a refused frame of model K takes the same front-end path as model M's. The backend's answer comes from the
-// real policy (wgi::refused_frame_action, executor_select.h: a refused K frame, and a refused M frame with hip_switch=off,
+// real policy (wgi::refused_frame_action, executor_select.h: a refused K frame, and a refused M frame,
 // are answered WG_ERROR_UNSUPPORTED, never a switch to HIP and never a bilinear fallback), the fake upscaler answers
 // that for the refused frames, and the front end must give every frame an upscaler: AMD's FSR when it exists (it takes
 // the context over at the first refusal, as for model M), else the stand-in for each refused frame (any number in a row,
@@ -2401,7 +2401,7 @@ static void TestUnsupportedFrames() {
 static void TestRefusedFrames() {
     for (const bool model_k : {true, false}) {   // model K, and model M as the control
         const bool unsupported =
-            wgi::refused_frame_action(model_k, /*by_default=*/true, /*hip_switch=*/false) == wgi::RefusedAction::kNoSwitch;
+            wgi::refused_frame_action(model_k, /*by_default=*/true) == wgi::RefusedAction::kNoSwitch;
         CHECK(unsupported);   // the backend's answer for a refused frame is WG_ERROR_UNSUPPORTED
         const std::set<int> pattern = unsupported ? std::set<int>{1, 2, 3, 5, 6} : std::set<int>{};
         // with AMD's FSR: the first refused frame hands the context to it; no later frame is lost

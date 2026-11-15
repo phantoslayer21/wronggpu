@@ -100,17 +100,32 @@ class CreateOrder(unittest.TestCase):
         self.assertIn("return fail(WG_ERROR_UNSUPPORTED, dx12_refused_line(dx12_default_, err));", self.b)
         self.assertNotIn("dx12_refused_line_k", self.b)
         self.assertNotIn("the HIP executor runs it", read("clean", "runtime", "interop", "executor_select.h"))
-        # the HIP executor is made in two places only: at create for the explicit diagnostics (executor=hip, the frame
-        # capture), and in switch_to_hip, which only an explicit hip_switch=on reaches (never model K)
-        self.assertEqual(self.b.count("make_hip_executor("), 2)
+        # the HIP executor is made in one place, at create, for the explicit diagnostics (executor=hip, the frame capture); there is
+        # no switch to it mid-session (no switch_to_hip, no hip_switch policy: the option is ignored with one line)
+        self.assertNotIn("switch_to_hip", self.b)
+        self.assertNotIn("refused_frame_policy", self.b)
+        self.assertEqual(self.b.count("make_hip_executor("), 1)
         branch = self.at("if (!dx12 && !exec_) {")
         first = self.at("make_hip_executor(")
         self.assertLess(branch, first)
-        self.assertGreater(self.at("make_hip_executor(", first + 1), self.at("bool switch_to_hip("))
         refusal = self.at("dx12_refused_line(dx12_default_, err)")
         self.assertLess(refusal, branch)
         # the refusal returns: nothing between it and the HIP branch resets the D3D12 executor to fall through
         self.assertNotIn("exec_.reset();", self.b[refusal:branch])
+
+    def test_hip_switch_is_ignored_once_for_every_model(self):
+        # the option reaches the selector, its one line is logged once at create, and nothing in the create path is
+        # conditional on the model (M, L and K are treated alike); no code reads the option to move a context to HIP
+        self.assertEqual(self.b.count("q.hip_switch = o.hip_switch;"), 1)
+        self.assertEqual(self.b.count("say(WG_LOG_INFO, ch.hip_note)"), 1)
+        note = self.at("say(WG_LOG_INFO, ch.hip_note)")
+        window = self.b[max(0, note - 200):note + 60]
+        self.assertNotIn("model_k", window)
+        self.assertNotIn("model_k", self.b[self.at("q.hip_switch = o.hip_switch;"):note])
+        self.assertEqual(self.b.count("o.hip_switch"), 1 + 1)  # parse_options' assignment and the request
+        self.assertNotIn("hip_switch_", self.b)
+        sel = read("clean", "runtime", "interop", "executor_select.h")
+        self.assertNotIn("kSwitchToHip", sel)
 
     def test_rr_and_native_device_use_the_shared_id_rule(self):
         rr = read("clean", "rr_f", "runtime", "src", "rr_runtime.cpp")
