@@ -45,6 +45,18 @@ if(WIN32)
     target_link_options(test_cross_reader PRIVATE -static)
   endif()
   add_test(NAME wgshared_cross_reader COMMAND test_cross_reader)
+
+  # The per-game state folder (wg_state.h): strict settings.ini, atomic writes, the state lock across real processes.
+  add_executable(test_wg_state ${CMAKE_CURRENT_LIST_DIR}/tests/test_wg_state.cpp)
+  target_link_libraries(test_wg_state PRIVATE wg_shared_headers advapi32)
+  set_target_properties(test_wg_state PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  if(MSVC)
+    target_compile_options(test_wg_state PRIVATE /W4 /WX /permissive- /utf-8)
+  else()
+    target_compile_options(test_wg_state PRIVATE -Wall -Wextra -municode)
+    target_link_options(test_wg_state PRIVATE -static -municode)
+  endif()
+  add_test(NAME wgshared_state COMMAND test_wg_state)
 endif()
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
