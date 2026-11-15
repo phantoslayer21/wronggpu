@@ -409,14 +409,19 @@ def run_stages(table, co_name, tag, build, rocm, seeds, cdir, hip, grid_list=Non
 
 
 def nan_equivalent_differ(got, want, defined, width=2):
-    """Differing bytes over the first `defined` bytes after ignoring the elements (2 bytes: FP16) that are NaN in both:
-    IEEE 754 does not define a NaN's sign or payload, and the two devices may generate or propagate a different one."""
+    """(differing elements outside the accepted exception, elements that differ only in the NaN sign) over the first
+    `defined` bytes. The only accepted exception is the sign of a NaN (IEEE 754 does not define it for a NaN a stage
+    generates or propagates): an element is a sign-only difference when both are NaN and the two differ in the sign bit
+    alone, so the exponent, the quiet bit and the payload are equal. Any other difference, a NaN with another payload
+    included, is outside."""
     dt = np.uint16 if width == 2 else np.uint32
     a = np.frombuffer(got[:defined], dt)
     b = np.frombuffer(want[:defined], dt)
     exp, mant = (0x7C00, 0x03FF) if width == 2 else (0x7F800000, 0x007FFFFF)
+    sign = dt(0x8000 if width == 2 else 0x80000000)
     nan = lambda v: ((v & exp) == exp) & ((v & mant) != 0)
-    return int(np.sum((a != b) & ~(nan(a) & nan(b)))), int(np.sum((a != b) & nan(a) & nan(b)))
+    sign_only = (a != b) & nan(a) & nan(b) & ((a ^ b) == sign)
+    return int(np.sum((a != b) & ~sign_only)), int(np.sum(sign_only))
 
 
 def check_narrow(state, read):

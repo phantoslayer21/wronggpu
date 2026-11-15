@@ -616,10 +616,16 @@ class Context {
       if (ch.executor.empty()) return fail(WG_ERROR_PARAMETER, "unknown executor " + o.executor);
       if (!ch.why.empty()) say(ch.warn ? WG_LOG_WARN : WG_LOG_INFO, ch.why);
       o.executor = ch.executor;  // model K's default mode below applies with the HIP executor
+      if (ch.sparkle_off) o.sparkle_guard = 0.0f;  // model K: the guard is HIP only; K stays on D3D12
       dx12_default_ = ch.by_default && ch.executor == "dx12";
       const RefusedFramePolicy pol = refused_frame_policy(o.hip_switch);  // clean/fe-wrapped-list
       hip_switch_ = pol.switch_to_hip;
       if (!pol.note.empty()) say(WG_LOG_WARN, pol.note);
+      if (q.model_k) {  // model K never moves to HIP, whatever hip_switch says
+        hip_switch_ = false;
+        const std::string kn = k_hip_switch_note(o.hip_switch);
+        if (!kn.empty()) say(WG_LOG_INFO, kn);
+      }
     }
     k_default_ = model_k_default(o);
     const bool split = services_ && services_->struct_size >= sizeof(WgFrontEndServices) && services_->split_command_list;
@@ -1131,7 +1137,17 @@ class Context {
     phase(5);
     // a frame the executor did not take (nothing of it recorded, e.g. native AA): with the default executor the HIP
     // executor takes over the context; with executor=dx12 the frame gets the bilinear fallback below
-    const bool refused = !ok && err.rfind("frame not taken", 0) == 0;
+    const bool refused = !ok && frame_refused(err);
+    if (ok) k_refused_run_ = 0;
+    if (refused && model_k_) {
+      // model K: the frame goes to the front end's own upscaler (WG_ERROR_UNSUPPORTED), never to HIP and never to the
+      // bilinear fallback, by default and with executor=dx12 alike; refused frames in a row end the context
+      ++k_refused_run_;
+      if (refused_frame_action(true, dx12_default_, hip_switch_, k_refused_run_) == RefusedAction::kEndContext)
+        return fail_frame(WG_ERROR, k_refusal_end_line(v, k_refused_run_, err));
+      if (k_refused_run_ == 1) say(WG_LOG_WARN, k_refusal_line(v, err));
+      return WG_ERROR_UNSUPPORTED;
+    }
     if (refused && dx12_default_ && !hip_switch_) {  // clean/fe-wrapped-list: no move to HIP; nothing recorded
       if (!no_switch_said_) {
         no_switch_said_ = true;
@@ -2140,6 +2156,7 @@ class Context {
   bool dx12_default_ = false;
   bool hip_switch_ = kHipSwitchDefault;  // refused_frame_policy (option hip_switch; clean/fe-wrapped-list)
   bool no_switch_said_ = false;          // the hip_switch=off line was logged
+  int k_refused_run_ = 0;                // model K: frames in a row the D3D12 executor did not take (executor_select.h)
   bool split_ = false;
   std::string share_path_opt_ = "auto";
   bool input_copy_opt_ = false;

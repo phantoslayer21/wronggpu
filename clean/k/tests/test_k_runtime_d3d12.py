@@ -9,6 +9,8 @@ the RGBA16F rows, or the dense RGB float32) and the K buffers must be identical,
   and B, the output colour taps ctap / ctapT, the head map or compact pixel head, exposure.pair, k.scalars) are filled
   with a sentinel before every frame: 0xA5 on HIP, 0x5A on D3D12. A write that one side did not make leaves its
   sentinel and fails the comparison; the output region and every intermediate must be written in full (a word neither side wrote fails);
+- the first frame too: option k_fill (a test hook of the runtime) fills every buffer a frame writes and both history
+  copies with the backend's sentinel after allocation, so first-frame and reset-only writes are proven;
 - the exposure buffers and the histories k.Hc / k.L / k.Hh (the state a frame carries to the next) are compared raw;
 - a buffer that does not exist fails the test (no skipping);
 - negative controls: a dropped write in the real output (its first word set back to the D3D12 sentinel) must be caught.
@@ -95,8 +97,11 @@ class TestKRuntimeD3D12(unittest.TestCase):
     def sequence(self, backend, hdr, mode, half, frames, options="", seed=0, out=OUT, max_render=MAX_RENDER):
         """The frames [(rw, rh, reset, E, pi[, jitter])] through HIP and `backend`; raises on the first difference."""
         auto = mode == 2
-        hip = self.make(0, hdr, auto, options, out, max_render)
-        dx = self.make(backend, hdr, auto, options, out, max_render)
+        # k_fill: every buffer a frame writes and both history copies start with the backend's own sentinel (HIP 0xA5,
+        # D3D12 0x5A), so the first frame's and a reset frame's writes are proven too, not only the later frames'
+        sep = ";" if options else ""
+        hip = self.make(0, hdr, auto, f"{options}{sep}k_fill={HIP_SENTINEL}", out, max_render)
+        dx = self.make(backend, hdr, auto, f"{options}{sep}k_fill={D3D12_SENTINEL}", out, max_render)
         head = "k.N" if "k_head=full" in options else "k.Np"
         pos = os.path.getsize(TRACE) if os.path.exists(TRACE) else 0
         on_dx, on_hip = {}, {}
@@ -107,7 +112,8 @@ class TestKRuntimeD3D12(unittest.TestCase):
                 x["pre_exposure"], x["E_cur"] = pi, float(np.float32(E))
                 if i == 2:
                     x["mv_scale"], x["mv_offset"] = (0.75, 1.25), (0.125, -0.25)
-                # sentinels: the output buffer, and (once a frame has run and the buffers exist) the intermediates
+                # sentinels before each frame: the output buffer, and from the second frame on the intermediates again
+                # (the first frame's come from k_fill at create)
                 for rt, byte in ((hip, HIP_SENTINEL), (dx, D3D12_SENTINEL)):
                     poke(rt, rt.bufs["out"], rt.bufs_size["out"], byte)
                     if i:
@@ -232,6 +238,25 @@ class TestKRuntimeD3D12(unittest.TestCase):
 
     def test_native_input_not_tiled(self):
         self.sequence(3, True, 0, True, self.FRAMES, "input_tiled=0")
+
+    def test_fill_hook_reaches_both_backends(self):
+        """k_fill: the runtime's own input copy of the depth (never written when the caller passes its buffers) keeps
+        the backend's sentinel through a frame: HIP 0xA5 and D3D12 0x5A, so the first-frame check is not vacuous."""
+        for backend in (2, 3):
+            with self.subTest(backend=backend):
+                hip = self.make(0, True, False, f"k_fill={HIP_SENTINEL}", OUT, MAX_RENDER)
+                dx = self.make(backend, True, False, f"k_fill={D3D12_SENTINEL}", OUT, MAX_RENDER)
+                try:
+                    x = inputs(np.random.default_rng(3), 130, 78, True, True)
+                    x["pre_exposure"], x["E_cur"] = 1.0, 1.0
+                    hip.frame(x, 0, half=True)
+                    dx.frame(x, 0, half=True)
+                    want, got = hip.buffer("input.depth", np.uint8), dx.buffer("input.depth", np.uint8)
+                    self.assertTrue((want == HIP_SENTINEL).all() and (got == D3D12_SENTINEL).all())
+                    with self.assertRaises(AssertionError):   # and the comparison tells the two apart
+                        compare_raw("control", want, got)
+                finally:
+                    del hip, dx
 
     # refusals: one line, naming the cause; the game keeps its own upscaler (no HIP route behind the device's back)
     def test_native_refuses_approximation_options(self):

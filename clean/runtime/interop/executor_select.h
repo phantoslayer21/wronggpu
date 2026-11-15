@@ -15,10 +15,16 @@
 //    and every ratio between 1.0 and 1.5 run on it since Brief 15) goes back to the front end
 //    (AMD FSR, else its stand-in; hip_switch=off, the default since the owner's decision of 2026-11-04); with
 //    hip_switch=on the context moves to the HIP executor for good (backend.cpp switch_to_hip; one line).
-//  - `hip`: the HIP executor, always.
+//  - `hip`: the HIP executor, always: a diagnostic, not the in-game runtime (owner 2026-11-14: every model runs on the
+//    D3D12 runtime in a game); one warning line says so.
 //  - `dx12` (or `d3d12`): the D3D12 executor on any adapter (the device refuses unsupported ones and the HIP executor
 //    takes the context; model K as above); the sparkle guard and the frame capture keep the HIP executor (warnings, as
-//    before); frames it does not take get the bilinear fallback (no switch).
+//    before) except for model K; frames it does not take get the bilinear fallback (no switch).
+//  - Model K (REVIEW-215b, oversight 2026-11-14): never moved to HIP by the sparkle guard (HIP-only: it is turned off
+//    for K, one line, K runs on D3D12), never by hip_switch (ignored for K, one line if set), never by a refused frame
+//    (the frame goes to the front end's own upscaler, AMD FSR, else its stand-in; three in a row end the context with one
+//    line and the game keeps its own upscaler). The frame capture and executor=hip stay opt-in diagnostics with a loud
+//    line. Auto on an adapter that is not an RDNA 4 Radeon keeps its rule for every model, logged (owner question).
 //  - `d3d12-test`: the offline test executor.
 #pragma once
 
@@ -45,17 +51,43 @@ struct ExecutorChoice {
   bool by_default = false;  // chosen by the default rule (option not named): frames the D3D12 executor does not take
                             // move the context to the HIP executor
   bool warn = false;        // log `why` as a warning (else information)
+  bool sparkle_off = false; // model K: the sparkle guard (HIP only) is turned off; the context stays on D3D12
   std::string why;          // the one log line about the choice; empty: nothing to log here
 };
+
+// The one line when model K meets the sparkle guard: the guard is HIP-only, so it is off for K.
+inline std::string k_sparkle_off_line() {
+  return "model K: the sparkle guard runs on HIP only and is turned off for model K; model K runs on the D3D12 executor";
+}
 
 inline ExecutorChoice choose_executor(const ExecutorRequest& r) {
   ExecutorChoice c;
   const std::string& e = r.executor;
-  if (e == "hip" || e == "d3d12-test") {
+  if (e == "d3d12-test") {
     c.executor = e;
     return c;
   }
+  if (e == "hip") {  // a diagnostic for every model: loud, never the default
+    c.executor = e;
+    c.warn = true;
+    c.why = "diagnostic: executor=hip selects the HIP executor; it is not the in-game runtime (the default and "
+            "executor=dx12 run on the D3D12 executor)";
+    return c;
+  }
   if (e == "dx12" || e == "d3d12") {  // forced (the messages of the option before it had a default)
+    if (r.model_k && r.capture) {
+      c.executor = "hip";
+      c.warn = true;
+      c.why = "diagnostic: frame capture forces the HIP executor (model K runs on the D3D12 executor without it)";
+      return c;
+    }
+    if (r.model_k && r.sparkle_guard) {
+      c.executor = "dx12";
+      c.sparkle_off = true;
+      c.warn = true;
+      c.why = k_sparkle_off_line();
+      return c;
+    }
     const char* why = r.sparkle_guard ? "the sparkle guard runs on HIP only"
                       : r.capture     ? "the frame capture runs on HIP only"
                                       : nullptr;
@@ -73,6 +105,17 @@ inline ExecutorChoice choose_executor(const ExecutorRequest& r) {
   if (!r.adapter_known || !wgrt::rdna4_adapter(r.vendor_id, r.software, r.adapter)) {
     text = gpu + " is not an RDNA 4 Radeon RX 9070 / RX 9060, where the D3D12 executor runs";
     why = text.c_str();
+  } else if (r.model_k && r.capture) {   // an opt-in diagnostic, never on by default
+    c.executor = "hip";
+    c.warn = true;
+    c.why = "diagnostic: frame capture forces the HIP executor (model K runs on the D3D12 executor without it)";
+    return c;
+  } else if (r.model_k && r.sparkle_guard) {   // the guard never moves model K to HIP: it is turned off
+    c.executor = "dx12";
+    c.sparkle_off = true;
+    c.warn = true;
+    c.why = k_sparkle_off_line();
+    return c;
   } else if (r.sparkle_guard) {
     why = "the sparkle guard runs on HIP only";
   } else if (r.capture) {
@@ -113,6 +156,45 @@ inline RefusedFramePolicy refused_frame_policy(const std::string& option) {
     p.note = "hip_switch=" + option + " not recognised (on or off); using " + (kHipSwitchDefault ? "on" : "off");
   }
   return p;
+}
+
+// Model K ignores hip_switch (it never runs on HIP in a game): the option's line, empty when the option is not set.
+inline std::string k_hip_switch_note(const std::string& option) {
+  if (option.empty()) return "";
+  return "model K ignores hip_switch=" + option +
+         ": a frame the D3D12 executor does not take goes to the front end's own upscaler, never to HIP";
+}
+
+// What a context does with a frame the D3D12 executor did not take (nothing of it recorded). `run`: refused frames in a
+// row, this one included.
+//  kNoSwitch      the frame is answered WG_ERROR_UNSUPPORTED, the context stays usable (the front end's own upscaler
+//                 takes the frame: AMD FSR, else its stand-in);
+//  kSwitchToHip   the default executor with hip_switch=on moves the context to HIP (never for model K);
+//  kBilinear      executor=dx12 (forced): the frame gets the bilinear fallback (never for model K);
+//  kEndContext    model K: kKRefusalRun refused frames in a row end the context with one line (failed), the game keeps
+//                 its own upscaler.
+enum class RefusedAction { kNoSwitch, kSwitchToHip, kBilinear, kEndContext };
+inline constexpr int kKRefusalRun = 3;
+
+inline RefusedAction refused_frame_action(bool model_k, bool by_default, bool hip_switch, int run) {
+  if (model_k) return run >= kKRefusalRun ? RefusedAction::kEndContext : RefusedAction::kNoSwitch;
+  if (by_default) return hip_switch ? RefusedAction::kSwitchToHip : RefusedAction::kNoSwitch;
+  return RefusedAction::kBilinear;
+}
+
+// A frame the executor did not take (nothing recorded) carries this prefix in its error (executor_d3d12.cpp, convert.cpp:
+// no output texture, a render size outside the configured maximum, an output texture without unordered access, ...).
+inline bool frame_refused(const std::string& err) { return err.rfind("frame not taken", 0) == 0; }
+
+inline std::string k_refusal_line(uint64_t frame, const std::string& why) {
+  return "frame " + std::to_string(frame) + ": model K: the D3D12 executor does not take this frame (" + why +
+         "); the frame goes to the front end's own upscaler (AMD FSR, else its stand-in), never to the HIP executor; " +
+         std::to_string(kKRefusalRun) + " in a row end the model K context";
+}
+
+inline std::string k_refusal_end_line(uint64_t frame, int run, const std::string& why) {
+  return "frame " + std::to_string(frame) + ": model K: the D3D12 executor did not take " + std::to_string(run) +
+         " frames in a row (" + why + "); the model K context ends and the game keeps its own upscaler";
 }
 
 // The one warning line of a context with hip_switch=off whose D3D12 executor does not take a frame.

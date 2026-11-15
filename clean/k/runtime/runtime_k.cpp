@@ -435,9 +435,20 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   if (warm_line_ < 4 || warm_line_ > 4096 || (warm_line_ & (warm_line_ - 1)))
     return fail("model K: k_warm_line must be a power of two in 4..4096");
   if (warm_groups_ < 1 || warm_groups_ > 1024) return fail("model K: k_warm_groups must be 1..1024");
+  // k_fill=<0..255> (test use, changes no value a frame writes): every buffer a frame writes and both history copies are
+  // filled with this byte after allocation, before the first frame, so that a test with a different byte per backend
+  // sees a write a frame did not make (first-frame and reset-only writes included) as a difference
+  const std::string kfill = option(c, "k_fill");
+  if (!kfill.empty()) {
+    char* end = nullptr;
+    const long v = std::strtol(kfill.c_str(), &end, 10);
+    if (end == kfill.c_str() || *end || v < 0 || v > 255) return fail("model K: k_fill must be 0..255");
+    fill_ = (int)v;
+  }
   // The native D3D12 device (backend 3: the D3D12 executor, or k_bench.py's own-buffer timing) runs the exact default
   // path only, and only when every kernel this context can launch has a port in <build>/dx12/manifest.json; both are
-  // checked here, before the model is loaded, so a refused context costs nothing more (the HIP executor then runs it).
+  // checked here, before the model is loaded, so a refused context costs nothing more (for model K the context ends and
+  // the game keeps its own upscaler: there is no HIP route in a game).
   if (c.backend == 3) {
     if (!options_ok_direct()) return false;
     const std::string missing = d3d12_missing();
@@ -516,6 +527,17 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
     return false;
   // the own output buffer (tests): dense RGB f32, dense RGBA f32 (FrameIo.out_rgba32f) or RGBA16F rows that fit
   if (!external_io_ && !alloc(&out_, (size_t)W_ * H_ * 16, true)) return false;
+  if (fill_ >= 0) {  // k_fill (test hook): the sentinel in everything a frame writes, before the first frame
+    auto fillb = [&](DevPtr p, size_t bytes) { return !p || dev_->memset(p, fill_, std::max<size_t>(bytes, 256)); };
+    bool ok = true;
+    for (const auto& kv : net_) ok = ok && fillb(kv.second, net_bytes_[kv.first]);
+    for (int p = 0; p < 2; ++p)
+      ok = ok && fillb(Hc_[p], P16 * 4 * 2) && fillb(L_[p], 4 * P16 * 2) && fillb(Hh_[p], (size_t)Bw_ * Bh_ * 4 * 2);
+    ok = ok && fillb(ctap_, R * 8) && fillb(ctapT_, R * 2) && fillb(cpre_, R * 16) && fillb(cpre2_, R * 8) &&
+         fillb(xs_, 16) && fillb(kexpo_, 16) &&
+         fillb(color_, R * 16) && fillb(depth_, R * 4) && fillb(motion_, R * 8);  // the own input copies (unused with caller buffers)
+    if (!ok) return dfail();
+  }
   // the filter-shape table (spec 43 section 7) of every level, computed once; a frame reads its level's set
   std::vector<uint16_t> tab((size_t)8 * kFilterEntries * kFilterValues);
   for (int l = 0; l < 8; ++l) k_filter_table(l, 1, tab.data() + (size_t)l * kFilterEntries * kFilterValues);

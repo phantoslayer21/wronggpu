@@ -59,10 +59,12 @@ real textures (RGBA16F colour, R32F depth, RG16F motion, exposure, an RGBA16F ou
 mode and compares the output texture and the buffers with the HIP kernels' run on the raw buffer route
 (`KIO_C16` / `KIO_M16`, with the motion scale and offset folded as the interop passes them).
 
-NaN: IEEE 754 does not define the sign or payload of a NaN, and where a NaN is generated or propagated the two devices
-can differ in it (the decoder stages, with NaN in the input). For the cases with NaN in the input the check compares the
-raw bytes and, where they differ, reports the elements that are NaN on both sides separately; every other byte must be
-identical. Without NaN in the input the raw bytes are identical.
+NaN: IEEE 754 does not define the sign of a NaN that a stage generates or propagates, and where the input holds NaN the
+two devices can differ in it (the decoder stages). For the cases with NaN in the input the check compares the raw bytes
+and, where they differ, accepts only the elements that are NaN on both sides and differ in the sign bit alone (the
+exponent, the quiet bit and the payload equal), counted separately; every other differing byte, a NaN with another
+payload included, fails the case (`clean/k/tests/test_k_port_check_nan.py`). Without NaN in the input the raw bytes are
+identical.
 
 Known limit, shared with Model M's ports: D3D12 flushes FP32 denormals (inputs and results) to zero and HIP keeps them.
 `k_expo_scalars` only meets one with a pre-exposure above about 8.5e37, so the check's inputs keep clear of them.

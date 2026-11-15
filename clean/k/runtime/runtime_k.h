@@ -102,6 +102,7 @@ class KRuntime {
   // the tiled input stage's guard (frame and direct_preflight): sizes, the 0.68 ratio, finite jitter in [-0.5, 0.5]
   bool tiled_guard(int rw, int rh, float jx, float jy) const;
   bool options_ok_direct();
+  int fill_ = -1;  // option k_fill (test hook): the byte every frame-written buffer and the histories start with
 
   WgRtConfig cfg_ = {};
   Device* dev_ = nullptr;
