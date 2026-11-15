@@ -98,11 +98,27 @@
 #ifndef WG_F16_Q
 #define WG_F16_Q 0
 #endif
-#if (WG_F16_W || WG_F16_A || WG_F16_Q) && !(defined(WG_GFX11) || defined(WG_EMU_GFX11))
-#error "WG_F16_W, WG_F16_A and WG_F16_Q are for the gfx11 matrix wrappers (wg_platform.h)"
+// The wider kernels on gfx11 (variant f16wk; the knobs name the smallest C they apply to, 0 = none): WG_F16_AWIDE makes the
+// activation operands F16 operands (WG_F16_A) also in the kernels with C >= N, WG_F16_QWIDE makes them straight from the FP32
+// values there too (WG_F16_Q), WG_SCHED_FRAGS lets the machine scheduler move no instruction across a fragment step in the
+// kernels with C >= N (it otherwise issues the LDS reads of a whole loop up front, 8 registers a fragment, and spills).
+#ifndef WG_F16_AWIDE
+#define WG_F16_AWIDE 0
+#endif
+#ifndef WG_F16_QWIDE
+#define WG_F16_QWIDE 0
+#endif
+#ifndef WG_SCHED_FRAGS
+#define WG_SCHED_FRAGS 0
+#endif
+#if (WG_F16_W || WG_F16_A || WG_F16_Q || WG_F16_AWIDE || WG_F16_QWIDE || WG_SCHED_FRAGS) && !(defined(WG_GFX11) || defined(WG_EMU_GFX11))
+#error "WG_F16_*, WG_SCHED_FRAGS are for the gfx11 matrix wrappers (wg_platform.h)"
 #endif
 #if WG_F16_Q && !WG_F16_A
 #error "WG_F16_Q makes the F16 operands that WG_F16_A keeps: set both"
+#endif
+#if (WG_F16_AWIDE && !WG_F16_A) || (WG_F16_QWIDE && !WG_F16_Q)
+#error "WG_F16_AWIDE and WG_F16_QWIDE widen WG_F16_A and WG_F16_Q: set those too"
 #endif
 #ifndef WG_GEMM_THREADS
 #define WG_GEMM_THREADS 256
@@ -591,13 +607,16 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
   static_assert(!HYB || (MCO == 0 && ECL == 0 && !RESIDENT && !WG_AV8 && !WG_SMAX16), "HYB: plain block path only");
   constexpr int UB = W16 ? 2 * MAXU : MAXU;  // bytes of a weight unit buffer in LDS
 #if WG_F16_A
-  constexpr bool A16 = C < 96;  // activations as F16 operands (pack_act); not the wider kernels: C = 96 spills 30 registers
+  // activations as F16 operands (pack_act): the C = 64 kernels; C = 96 would spill 12 registers, C = 128 none (WG_SCHED_FRAGS)
+  constexpr bool A16 = C < 96 || (WG_F16_AWIDE != 0 && C >= WG_F16_AWIDE);
   static_assert(!WG_AV8 && WG_GELU_MODE < 3, "WG_F16_A: no FP8 A.V, no packed-FP16 GELU");
 #else
   constexpr bool A16 = false;
 #endif
   typedef typename ActOp<A16>::type AO;
   static_assert(!HYB || (!W16 && !A16), "HYB: FP8 weight and activation operands only (no gfx11 F16 operand variants)");
+  constexpr bool FQ = WG_F16_Q != 0 && (C < 96 || (WG_F16_QWIDE != 0 && C >= WG_F16_QWIDE));  // operands straight from FP32
+  constexpr bool SF = WG_SCHED_FRAGS != 0 && C >= WG_SCHED_FRAGS;  // no scheduler motion across a fragment step
   // RESIDENT (kernels *_r): the block's whole weight stream (every head and MLP unit) stays in LDS for the whole
   // launch; each wave runs windows wave_id, wave_id + total waves, ... with no staging and no barrier after the first
   // copy. Same arithmetic per window as the staged kernel (bit-identical).
@@ -745,7 +764,7 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
 #endif
 #pragma unroll
       for (int k = 0; k < KC; ++k) {
-        af[i][k] = pack_act<SAFE, A16>(acc[i][k] * r * wg_load8f(g1 + 8 * k));
+        af[i][k] = pack_act<SAFE, A16, FQ>(acc[i][k] * r * wg_load8f(g1 + 8 * k));
         acc[i][k] += WG_BIAS8(bp + k * 16);
       }
     }
@@ -789,11 +808,12 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
           accv[i] = wg_wmma_fp8(af[i][kc], fv, accv[i]);
 #endif
         }
+        if constexpr (SF) WG_SCHED_FENCE();
       }
 #pragma unroll
       for (int i = 0; i < WPW; ++i) {
         if constexpr (HYB) uf[i][mt] = hyb_q8_of_chain(accq[i]);
-        else uf[i][mt] = pack_act<SAFE, A16>(accq[i]);
+        else uf[i][mt] = pack_act<SAFE, A16, FQ>(accq[i]);
 #if WG_AV8
         vt[i][mt] = pack_in<SAFE>(accv[i]);
 #else
@@ -913,6 +933,7 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
           acc[i][mt] = wg_wmma_fp8(f, of[i][dt], acc[i][mt]);
 #endif
         }
+        if constexpr (SF) WG_SCHED_FENCE();
       }
     }
     WG_PHASE(4, acc[0][KC - 1]);
@@ -954,7 +975,7 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
 #endif
 #pragma unroll
       for (int k = 0; k < KC; ++k) {
-        mf[i][k] = pack_act<SAFE, A16>(acc[i][k] * r * wg_load8f(g2 + 8 * k));
+        mf[i][k] = pack_act<SAFE, A16, FQ>(acc[i][k] * r * wg_load8f(g2 + 8 * k));
         acc[i][k] += WG_BIAS8(b2 + k * 16);
       }
     }
@@ -1011,6 +1032,7 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
 #pragma unroll
           for (int i = 0; i < WPW; ++i) hacc[g][i] = wg_wmma_fp8(f, mf[i][kc], hacc[g][i]);
         }
+        if constexpr (SF) WG_SCHED_FENCE();
       }
 #endif
       WG_PHASE(7, hacc[GROUP - 1][0]);
@@ -1046,7 +1068,7 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
           r[1] = __builtin_bit_cast(int, (ge[4] + ge[5]) + (ge[6] + ge[7]));
           hf[g][i] = r;
 #else
-          hf[g][i] = pack_act<SAFE, A16>(ge);
+          hf[g][i] = pack_act<SAFE, A16, FQ>(ge);
 #endif
         }
       WG_PHASE(8, hf[GROUP - 1][0][0]);
@@ -1079,6 +1101,7 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
 #pragma unroll
           for (int i = 0; i < WPW; ++i) acc[i][mt] = wg_wmma_fp8(f, hf[g][i], acc[i][mt]);
         }
+        if constexpr (SF) WG_SCHED_FENCE();
       }
 #endif
       WG_PHASE(9, acc[0][KC - 1]);
