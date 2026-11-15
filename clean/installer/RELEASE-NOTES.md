@@ -24,8 +24,8 @@ scene, your settings) and a screenshot. Every report helps us fix it.
 - **Choosing it.** For one game: `WrongGPU.exe set "<the game's .exe>" model=L` (`model=M` goes back). In OptiScaler's
   menu it is the upscaler **WrongGPU Model L**, next to **WrongGPU Model M**.
 - **Runs on Direct3D 12** inside the game's own command list, like Model M: no AMD HIP runtime needed.
-- **GPU time: pending.** Model L's and Model M's in-game times for this release's builds are measured before the
-  release; the figures and their records go here.
+- **GPU time: pending.** Model L's in-game time for this release's form is not measured yet; it is added before the
+  release.
 
 ### Model K (new)
 - **Another model, off by default and still under test.** Model K is a different super-resolution network from
@@ -38,8 +38,11 @@ scene, your settings) and a screenshot. Every report helps us fix it.
   menu it is the upscaler **WrongGPU Model K**.
 - **Runs on Direct3D 12** inside the game's own command list, like Model M: no AMD HIP runtime needed. Tested in
   Cyberpunk 2077 at 1080p Quality.
-- **GPU time: pending.** Model K's in-game time is measured before the release with the same method as Model L and
-  Model M; the figure and its record go here.
+- **GPU time.** In Cyberpunk 2077 at 1080p Quality (1280x720 upscaled to 1920x1080) on a Radeon RX 9070 XT, standing
+  still at the same spot, measured one right after the other: the model's GPU time per frame (all of its kernels) is
+  1.03 ms with Model K and 1.17 ms with Model M
+  ([clean/k/records/cp2077-model-k-timing-2026-11-15.json](https://github.com/phantoslayer21/wronggpu/blob/main/clean/k/records/cp2077-model-k-timing-2026-11-15.json)
+  has the record).
 - If you used Preset K with an older WrongGPU, the launcher no longer asks to switch that game to Model M when it
   updates it: the game stays on Model K.
 
@@ -160,7 +163,7 @@ For players coming from 0.4.5, in short (the 0.6.0 release page has the full lis
 Tested on a Radeon RX 9070 XT. "Ray Reconstruction" means WrongGPU's Ray Reconstruction ran in the game; Model M means
 super resolution only. [COMPATIBILITY.md](https://github.com/phantoslayer21/wronggpu/blob/main/COMPATIBILITY.md) says
 which WrongGPU version each result comes from.
-- **Cyberpunk 2077**: Ray Reconstruction, Model M and Model L.
+- **Cyberpunk 2077**: Ray Reconstruction, Model M, Model L and Model K.
 - **RESIDENT EVIL requiem** (experimental): Model M and Model L, and Ray Reconstruction when the game's **Ray
   Tracing** setting is **Path Tracing** and its upscaler is **DLSS**. Needs your own REFramework (see Known issues).
 - **Borderlands 4**: Ray Reconstruction (the game creates it itself; this needs the WrongGPU edition of OptiScaler).
