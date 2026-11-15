@@ -113,8 +113,14 @@ std::wstring RecordPath() {
 // game's state lock (model_choice_record.h; waited for 1 second at most, on the menu thread). A click that cannot be
 // written is NOT kept: nothing changes, the menu says "not saved, try again" (SelectableThunkLogic) and the log says why.
 // At the end of the sequence numbers the click is refused, logged and said in the menu.
+std::atomic<bool> g_stateOk{false};  // registered as loaded in the game (InitializeASI): the record may be written
+
 wgasi::Save RecordModelChoice(char model) {
     const std::wstring path = RecordPath();
+    if (!g_stateOk.load()) {
+        AsiLog::Get().Write(std::string("ERROR: model choice record: Model ") + model + " not saved: WrongGPU's state is not used this session");
+        return wgasi::Save::NotSaved;
+    }
     wgchoice::Record after;
     std::string why;
     const wgchoice::Outcome o = wgchoice::RecordChoice(path, model, wgchoice::Source::Plugin, &after, &why, nullptr, 1000);
@@ -323,10 +329,13 @@ extern "C" __declspec(dllexport) __declspec(noinline) void InitializeASI() {
     std::call_once(g_initOnce, [caller] {
         g_diagnostics.Begin();
         AsiLog::Get().Write("InitializeASI");
-        // While the plugin is loaded in the game it keeps WrongGPU's loaded marker of the game folder open (wg_state.h):
-        // the launcher refuses an uninstall, repair or update meanwhile. Never released: the OS drops it with the process.
-        static wgstate::LoadedMarker* marker = new wgstate::LoadedMarker(wgasi::PluginDataDir());
-        if (!marker->held()) AsiLog::Get().Writef("the loaded marker could not be created (error %lu)", marker->error());
+        // Before it reads or writes any state, the plugin registers as loaded in the game (wg_state.h's loaded protocol;
+        // its marker kept open while loaded, so the launcher refuses an uninstall, repair or update meanwhile; never
+        // released: the OS drops it with the process). Not registered in time: no record writes this session.
+        static wgstate::LoadedRegistration* registration = new wgstate::LoadedRegistration(wgasi::PluginDataDir());
+        g_stateOk.store(registration->ok());
+        if (!registration->ok())
+            AsiLog::Get().Writef("WrongGPU's state is not used this session: %s (error %lu)", registration->why(), registration->error());
         Hook(caller);
         g_diagnostics.Complete();
     });

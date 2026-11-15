@@ -1444,6 +1444,12 @@ char FrontEnd::ChooseModel(char plugin, char entry, const std::string& tag, std:
         *why = launcher ? std::string("no model choice record; wronggpu.ini model=") + launcher : std::string("no model choice record; the default");
         return 'M';
     }
+    if (!platform_.stateUnavailable.empty()) {
+        const char ini = LauncherModel();
+        *why = "WrongGPU's state is not used this session (" + platform_.stateUnavailable + ")" +
+               (ini ? std::string("; wronggpu.ini model=") + ini : std::string("; the default"));
+        return ini ? ini : 'M';
+    }
     std::lock_guard lock(choiceMutex_);
     // the record cannot be used now: the last record this session read or wrote, else wronggpu.ini's model item, else M
     // (never the host's stored entry)
@@ -1504,6 +1510,11 @@ int32_t FrontEnd::HostSelected(uint64_t versionId) {
         Log(tag + " the player selected Model " + model + " in OptiScaler's upscaler list; no model choice record (no launcher "
                   "state folder): the host's entry decides");
         return WG_HOST_SELECTED_NOTHING_CHANGED;
+    }
+    if (!platform_.stateUnavailable.empty()) {
+        Log(tag + " ERROR: the player selected Model " + model + " in OptiScaler's upscaler list, but WrongGPU's state is not used this "
+                  "session (" + platform_.stateUnavailable + "): not saved");
+        return WG_HOST_SELECTED_NOT_SAVED;
     }
     std::lock_guard lock(choiceMutex_);
     wgchoice::Record after, before;

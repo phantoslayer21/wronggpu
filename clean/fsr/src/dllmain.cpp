@@ -251,10 +251,15 @@ FrontEnd& Get() {
                 wgchoice::RecordPathIn(slash == std::wstring::npos ? std::wstring(L".") : ini.substr(0, slash));
             std::error_code ec;
             if (std::filesystem::is_directory(record.parent_path(), ec)) {  // a launcher install: its state folder
-                // While this DLL is loaded the game keeps WrongGPU's loaded marker open (wg_state.h): the launcher refuses
-                // an uninstall, repair or update meanwhile. Never released: the OS drops it with the process.
-                static wgstate::LoadedMarker* marker = new wgstate::LoadedMarker(wgchoice::GameDirOf(record).wstring());
-                if (!marker->held()) L().Write("model choice: the loaded marker could not be created (error %lu)", marker->error());
+                // Before it reads any state, the front end registers as loaded in the game (wg_state.h's loaded protocol:
+                // under the state lock, its loaded marker kept open while the DLL is loaded, so the launcher refuses an
+                // uninstall, repair or update meanwhile; never released: the OS drops it with the process). Not registered
+                // in time (an uninstall, repair or update is running): no state this session, the defaults run.
+                static wgstate::LoadedRegistration* registration = new wgstate::LoadedRegistration(wgchoice::GameDirOf(record).wstring());
+                if (!registration->ok()) {
+                    L().Write("model choice: WrongGPU's state is not used this session: %s (error %lu)", registration->why(), registration->error());
+                    p.stateUnavailable = registration->why();
+                }
                 p.choiceRecord = record;
                 p.readWronggpuIni = [ini] {  // the upgrade migration reads wronggpu.ini's model item under the state lock
                     std::string text;
