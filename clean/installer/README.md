@@ -820,7 +820,9 @@ player guide), `/UNINSTALL` (with `/OUT=<zip>`: collect logs first), `/COLLECT [
   build time (`tools/make_payload.py` embeds the payload and the map, writes the resource script and draws the icon).
   The application manifest is a CMake source under MSVC (the linker embeds it once, `/MANIFESTUAC:NO`); MinGW gets it
   through the resource script.
-- Linux, MinGW-w64: `./build-mingw.sh <payload folder> [map] [version] [out dir]`, or CMake with a MinGW toolchain file.
+- Linux, MinGW-w64: `./build-mingw.sh <payload folder> [map] [version] [out dir]` makes a `WRONGGPU_TESTING` build (the Wine
+  test runner's, from the test suite's stand-in payload); `RELEASE=1 ./build-mingw.sh ...` makes a release-type build, which
+  needs a real payload (the stand-in is refused), as does CMake with a MinGW toolchain file without `-DWRONGGPU_TESTING=ON`.
 
 ## Tests
 
@@ -994,8 +996,11 @@ normal one) and `/FSR4` / `/LIST`, with and without no-scan, against a non-empty
 predates all this and runs only with `--run-old-baseline`, in a fully redirected sandbox.
 
 On Windows: `python tests\run_installer_tests.py --prepare-only` writes the mock payload and the synthetic map; build
-the installer from them with CMake (`-DWRONGGPU_PAYLOAD_DIR=... -DWRONGGPU_MAP=...`) and run
-`python tests\run_installer_tests.py --setup <WrongGPU-Setup.exe>`. Natively it points `LOCALAPPDATA` and
+the installer from them with CMake (`-DWRONGGPU_TESTING=ON -DWRONGGPU_PAYLOAD_DIR=... -DWRONGGPU_MAP=...`) and run
+`python tests\run_installer_tests.py --setup <WrongGPU-Setup.exe>`. The mock payload's runtime is a stand-in: it carries the
+release marker and a build manifest that says `stand_in`, so only a `WRONGGPU_TESTING` build embeds it (`make_payload.py
+--testing`); a release build refuses it at the payload step, as it refuses any runtime without a release build's manifest.
+CI builds the testing launcher from it and checks that a release build refuses it. Natively it points `LOCALAPPDATA` and
 `ProgramData` at its work folder, always passes `/NOSCAN`, touches only "Apps & features" entries that point into its
 work folder, and skips the Steam/GOG library tests (they need registry keys of their own; run them under Wine) and
 the ROCm search-order test (it would write to `C:\Program Files`). The HIP mocks are built with MinGW `gcc` or, from
