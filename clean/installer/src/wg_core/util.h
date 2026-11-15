@@ -60,6 +60,10 @@ void CopyChecked(const wstring& src, const wstring& dst);
 // Copies src to dst only when nothing is at dst (the creation itself fails when something is: ERROR_FILE_EXISTS, so a file
 // that appeared a moment ago is never overwritten). false: not copied, `err` holds why.
 bool CopyNew(const wstring& src, const wstring& dst, DWORD* err = nullptr);
+// Writes `data` into a new file at path, created only where nothing is (CREATE_NEW: ERROR_FILE_EXISTS when anything is there,
+// so a file another program made a moment ago is never replaced); readOnly: the new file is made read-only. Not atomic for a
+// reader: the file exists, partly written, while it is written (a write that fails removes it again through its handle).
+bool WriteFileNew(const wstring& path, const void* data, size_t size, bool readOnly, DWORD* err = nullptr);
 
 // A plain file held while it is checked and then deleted or overwritten (record.h, "the replace race"). It is opened once with
 // DELETE and read access (and write access when forWrite) and FILE_SHARE_READ only: while this object holds it, no other
@@ -79,8 +83,25 @@ public:
     // false: nothing is held; err is ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND (nothing there), a sharing violation or access
     // denied (another program holds it), or ERROR_NOT_SUPPORTED (a folder or a link, not a plain file).
     bool Open(const wstring& path, bool forWrite, DWORD* err = nullptr);
+    // Creates path only where nothing is (CREATE_NEW: ERROR_FILE_EXISTS when a file, folder or link is there, so a file that
+    // appeared a moment ago is never replaced) and holds the new, empty file as Open(path, true) holds one. The caller fills
+    // it (Overwrite, OverwriteBytes) or, when it gives up, removes it again through the handle (Delete).
+    bool Create(const wstring& path, DWORD* err = nullptr);
     bool IsOpen() const { return h_ != INVALID_HANDLE_VALUE; }
     wstring Sha256();  // of the bytes through the handle (empty: cannot be read)
+    bool ReadBytes(string& out);  // all of the bytes through the handle (false: cannot be read)
+    // Copies the bytes through the handle into a new file dst (created only where nothing is, as Create); *sha: the SHA-256 of
+    // the bytes copied. false: err holds why (a partly written dst is removed).
+    bool CopyOut(const wstring& dst, wstring* sha, DWORD* err = nullptr);
+    // Sets or clears the read-only attribute through the handle (the other attributes stay); what Open cleared for a write is
+    // then not put back on Close.
+    bool SetReadOnly(bool on, DWORD* err = nullptr);
+    // The file was read-only when Open made it writable (the bit is put back on Close unless it was written or set on purpose).
+    bool WasReadOnly() const { return (restoreAttrs_ & FILE_ATTRIBUTE_READONLY) != 0; }
+    bool Flush(DWORD* err = nullptr);  // FlushFileBuffers through the handle, its result checked
+    // The held file's identity (volume serial number and file index): two names with the same identity are one file, a file
+    // with the same bytes but another identity is another file. false: nothing held, or it cannot be read.
+    bool Id(DWORD* volume, ULONGLONG* index) const;
     // Deletes the file through the handle (FileDispositionInfoEx with POSIX semantics, the read-only attribute ignored; the
     // older FileDispositionInfo where that is not supported) and closes it. The name is free when this returns true.
     bool Delete(DWORD* err = nullptr);
@@ -88,14 +109,23 @@ public:
     // touched otherwise); the attributes and times of src are put on the file. false: err holds why (ERROR_FILE_CORRUPT when
     // src is not srcSha). Not atomic against a stop: the record and the backup are kept until the restore is complete.
     bool Overwrite(const wstring& src, const wstring& srcSha, DWORD* err = nullptr);
+    // The same from a source this process already holds (Open(src, false)): hashed through its handle, which must give srcSha,
+    // and copied through it, so the bytes checked before the first write of a multi-file step are the bytes written.
+    bool OverwriteFrom(PinnedFile& src, const wstring& srcSha, DWORD* err = nullptr);
     // Replaces the bytes through the handle (forWrite) with `data`: the conditional write of a file that was hashed through this
     // same handle (a settings migration). The file's attributes stay.
     bool OverwriteBytes(const void* data, size_t size, DWORD* err = nullptr);
-    void Close();  // a read-only bit that Open cleared for a write that did not happen is put back
+    // A read-only bit that Open cleared for a write that did not happen is put back. false: that failed (the file stays
+    // writable; ReadOnlyLost then says so too).
+    bool Close();
+    // A read-only bit this object cleared could not be put back (by a failed Open or by Close): the file is writable now.
+    bool ReadOnlyLost() const { return readOnlyLost_; }
 
 private:
+    bool CopyFrom(HANDLE src, const wstring& srcSha, DWORD* err);
     HANDLE h_ = INVALID_HANDLE_VALUE;
-    DWORD restoreAttrs_ = 0;  // the attributes to put back on Close (a read-only file that Open made writable); 0: none
+    DWORD restoreAttrs_ = 0;
+    bool readOnlyLost_ = false;  // the attributes to put back on Close (a read-only file that Open made writable); 0: none
 };
 enum class DeleteIf { Deleted, Gone, Changed, Failed };
 // Deletes path when its bytes are one of `shas` (pinned: hashed and deleted through one handle). Gone: nothing was there.
