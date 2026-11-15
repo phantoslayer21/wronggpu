@@ -92,8 +92,9 @@ where it is missing (under an existing `[SystemSettings]`, else that section at 
 the line's value), Borderlands 4's file is made read-only, and the record gets an `rrconfig` line. A repair keeps the
 record line and the backup and applies it again. `off` and the uninstall (`RevertRrConfig`, also from DoRestore, so the
 per-game uninstaller does it too) take the line out again (or put the key's value back), remove the section if the fix
-added it and it is empty, clear read-only unless the file had it before, delete a file the fix created when nothing
-else is in it (and the folders it made), and restore the backup when the file is gone. The elevated worker gets the
+added it and it is empty, clear read-only unless the file had it before, delete a file the fix created while it is
+byte for byte the file WrongGPU wrote (and the folders it made), and restore the backup when the file is gone. Only
+WrongGPU's own line goes, also from a file changed elsewhere since (policy: see "The Engine.ini revert" below). The elevated worker gets the
 player's Documents folder in its job (`documents=`), as it gets `localappdata=`. Test builds take the Documents folder
 only from `WRONGGPU_TEST_DOCUMENTS` and LocalAppData only from a test root (never the PC's own folders; without them
 the fix refuses). Tests: `test_rr_config_fix`.
@@ -282,7 +283,46 @@ With the defaults nothing of this section changes the installer.
     between the plan and the open can make the open reach another file, which is then compared with the plan's hash like
     any file); the game's FSR DLL, in the one step where WrongGPU's DLL is deleted and the game's file takes its name,
     is held until deleted and the move that follows creates the name only if free; the install, repair and update steps
-    that write into the game folder, the Engine.ini edit and the rollback are not covered by this (tracked separately).
+    that write into the game folder and the Engine.ini edit that adds the line are not covered by this (tracked separately).
+  - **Roll back** holds every payload file it changes through one handle (as above), compares its bytes with the hash the
+    record says WrongGPU installed, keeps the current files for a later update by copying them out through those handles
+    into a new swap folder, and then overwrites through them. The earlier files are held and hashed too, all of them before
+    the first write, and copied through those handles. A payload file with other bytes (the player's or another program's),
+    a hard-linked one, a link, or a file that appears where a payload file was missing stops the roll back before anything
+    changes, and the result names it; the file stays as it is. A missing payload file is created only where nothing is,
+    and the new `previous.txt` records it as absent (`file=absent:<hash>|<name>`), so a second roll back takes it out again,
+    only while its bytes are the ones WrongGPU put there (other bytes stop that roll back, and the result says why). A write
+    that fails part way puts every file already changed back from its copy, through its handle, and the record is not
+    changed; the record names the earlier version only once every file is in. Only then does the kept folder
+    (`wronggpu-setup\previous`, and a swap folder an earlier roll back left) go, file by file: a file its `previous.txt`
+    names is deleted only while its bytes are the stated hash (`previous.txt` itself only while it is the list that was
+    read), through one handle, and a folder only when it is empty. Anything else stays where it is and the result names it.
+  - **The Engine.ini revert** (=off, uninstall) reads the player's `Engine.ini` through one handle. **Policy**: WrongGPU
+    takes out only its own line (and the `[SystemSettings]` section it added, when that is empty), also from an `Engine.ini`
+    the player or the game has changed elsewhere since: everything else in the file stays as it is. Refusing such a file
+    would leave WrongGPU's Ray Reconstruction setting in the game for good. A file WrongGPU created is deleted (through
+    that handle) only while its bytes are exactly the ones WrongGPU wrote; one changed since stays, without the line.
+    The corrected bytes never go over the file in place: they are written into a new file in the same folder, flushed and
+    read back; the held file is read again and must still hold the bytes the correction was computed from; then
+    `ReplaceFileW` puts the new file at the name and keeps the original's attributes, ACL and creation time. A stop or a
+    power cut leaves the old file or the new one, whole. The window that remains: the handles on the file and on the copy
+    are closed just before the replace (the replace needs both unshared), so neither is trusted after it. The live file is
+    then held (opened without write access, so its attributes are not touched) and must be the copy itself (the same volume
+    and file index, taken while the copy was held; equal bytes in another file are not enough) with the corrected bytes.
+    When it is not (the copy was swapped or changed before the replace, or `Engine.ini` was changed or replaced after it),
+    it is left as it is and never written, the file it replaced stays beside it as `Engine.ini.wronggpu-old`, and the result
+    says so (also when a read-only attribute could not be put back). When it is, the replaced file is checked against the
+    bytes WrongGPU read: a version another program wrote in that moment is never written into the live file; it is kept
+    beside it as `Engine.ini.wronggpu-their-change`, the backups stay, and the result names both files. A stop right after the replace can leave
+    the old bytes next to it as `Engine.ini.wronggpu-old`. A failed replace puts the read-only attribute back, and the
+    result says when that fails. When taking out WrongGPU's line leaves nothing (the player deleted their own settings
+    since), the file stays, empty: the backup from before the fix is never put back over it. When the file is gone, the player's copy is created only where
+    nothing is: a file another program created meanwhile stays, the copy is kept in `wronggpu-setup\rr-config`, and the
+    result says where. A hard-linked or linked `Engine.ini` is not written; the result says to take the line out by hand.
+    The read-only attribute goes back as the player had it; when that fails, the result says so and the backup stays. The
+    backup in `wronggpu-setup\rr-config` is deleted only while its bytes are the hash recorded when it was made (the record
+    line `rrconfig-backup`; a record from before that line: the bytes this revert read), through one handle; otherwise it
+    stays and the result names it.
   - When the original from before WrongGPU cannot go back because of such a file, it is kept in
     `<install folder>\WrongGPU-originals\<time>\` (a folder no operation removes), checked byte for byte; a second
     generation goes into a folder of its own, neither is overwritten. The result then says "partly" and names each file
@@ -425,7 +465,10 @@ installed, replaces the game's own Apps & features entry with the launcher's.
 
 **Update and roll back**: an install over another version first keeps that version's payload files in
 `wronggpu-setup\previous` (`previous.txt`: version, hashes); Roll back swaps it in (and the newer files out, so a
-second roll back returns). One version is kept.
+second roll back returns, a payload file that was missing included: it is listed as absent). One version is kept. Roll
+back changes a payload file only while its bytes are the recorded ones (see "The replace race" above); otherwise it
+changes nothing and names the file. A write that fails part way is undone; `previous` is removed by its list only after
+every file is in.
 
 **The restorer** (`WrongGPU-Restore.exe`, `src/app/restore_main.cpp`): wg_core without the payload, the converter
 data or the UI, embedded in `WrongGPU.exe` (resource 960) and written into each game as
