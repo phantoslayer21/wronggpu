@@ -513,8 +513,8 @@ def compare_d3d12(build, json_path):
         return (r["d3d12_per_stage"]["passed"] == n_frames[m] and r["m_post_reference"]["passed"] == n_frames[m] and
                 r["d3d12_default_vs_stages"]["identical_frames"] == n_frames[m] and caught)
     res["pass"] = all(model_pass(m) for m in ("L", "M"))
-    with open(json_path, "w") as f:
-        json.dump(res, f, indent=1, default=lambda o: o.item() if hasattr(o, "item") else str(o))
+    from clean.l.runner import l_record as LR
+    LR.write_l_record(res, json_path)
     for model in ("L", "M"):
         print(model, "D3D12 against HIP (raw bytes): frames identical", res[model]["identical_frames"], "of",
               len(res[model]["frames"]), "outputs compared", len(res[model]["outputs_compared"]), "differing",
@@ -593,10 +593,18 @@ def capture_identity(build):
     caller), whether its tracked files differ from that commit, and the SHA-256 of every identity file."""
     import subprocess
     def git(*a):
-        r = subprocess.run(["git", "-C", ROOT] + list(a), capture_output=True, text=True, creationflags=0x08000000
-                           if os.name == "nt" else 0)
-        return r.stdout.strip() if r.returncode == 0 else None
-    ident = {"git_commit": git("rev-parse", "HEAD"),
+        try:
+            r = subprocess.run(["git", "-C", ROOT] + list(a), capture_output=True, text=True,
+                               creationflags=0x08000000 if os.name == "nt" else 0)
+        except OSError as e:
+            raise RuntimeError(f"capture identity: git {a[0]} could not run ({e})")
+        if r.returncode != 0:
+            raise RuntimeError(f"capture identity: git {a[0]} failed ({r.returncode}): {r.stderr.strip()}")
+        return r.stdout.strip()
+    commit = git("rev-parse", "HEAD")
+    if not commit:
+        raise RuntimeError("capture identity: git rev-parse HEAD gave no commit")
+    ident = {"git_commit": commit,
              "git_tracked_changes": bool(git("status", "--porcelain", "--untracked-files=no"))}
     for name, path in identity_files(build).items():
         ident[name + "_sha256"] = _sha256_file(path) if os.path.exists(path) else None
@@ -609,6 +617,8 @@ def verify_identity(rec, build):
     ident = rec.get("identity")
     if not ident or not ident.get("git_commit"):
         raise ValueError("the recording carries no capture-time identity (record it again with --run)")
+    if not isinstance(ident.get("git_tracked_changes"), bool):
+        raise ValueError("the recording's identity has no tracked-changes flag (git_tracked_changes)")
     for name, path in identity_files(build).items():
         now = _sha256_file(path) if os.path.exists(path) else None
         if now is None or now != ident.get(name + "_sha256"):
@@ -617,14 +627,9 @@ def verify_identity(rec, build):
 
 
 def check_l_record(res_l):
-    """A Model L comparison record must name the FP8 matrix-op model its oracle used."""
-    from clean.l.reference import oracle as L
-    if res_l.get("fp8_op_model") not in L.MM8_MODELS:
-        raise ValueError("Model L comparison record without its FP8 op model (fp8_op_model)")
-    for m in res_l.get("frames", []):
-        if m.get("fp8_op_model") != res_l["fp8_op_model"]:
-            raise ValueError(f"frame {m.get('frame')}: FP8 op model missing or different")
-    return res_l
+    """A Model L frame comparison record names the FP8 matrix-op model its oracle used, in every frame too."""
+    from clean.l.runner import l_record as LR
+    return LR.check_l_record(res_l, frames_required=True)
 
 
 # ---- --compare (CPU) ------------------------------------------------------------------------------------------------
@@ -912,8 +917,8 @@ def compare(build, json_path):
         with open(src) as f:
             res["L"]["source"] = json.load(f)
         print("Model L source:", json.dumps(res["L"]["source"]))
-    with open(json_path, "w") as f:
-        json.dump(res, f, indent=1, default=lambda o: o.item() if hasattr(o, "item") else str(o))
+    from clean.l.runner import l_record as LR
+    LR.write_l_record(res, json_path)
     for model in ("L", "M"):
         print(model, "pass" if res[model]["pass"] else "FAIL", json.dumps(res[model]["summary"]))
         print("  default kernels against the six-launch bottleneck (raw bytes):",

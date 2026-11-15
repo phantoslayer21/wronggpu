@@ -139,9 +139,8 @@ def main(argv=None):
         print(name, "dec0 frames passed", res["forms"][name]["dec0_frames_passed"], "of", len(rows),
               "| enc0", res["forms"][name]["enc0_frames_passed"], "| alignment ok",
               res["forms"][name]["alignment_frames_ok"], flush=True)
-    with open(a.json, "w", newline="\n") as f:
-        json.dump(res, f, indent=1, default=lambda x: x.item() if hasattr(x, "item") else str(x))
-        f.write("\n")
+    from clean.l.runner import l_record as LR
+    LR.write_l_record(res, a.json, table=fp16_form_table(a.mm8))
     return 0
 
 

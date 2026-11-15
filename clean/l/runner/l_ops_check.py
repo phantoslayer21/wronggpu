@@ -36,6 +36,7 @@ sys.path.insert(0, ROOT)
 from clean.l.reference import oracle as L  # noqa: E402
 from clean.l.runner import l_c32_check as C32  # noqa: E402
 from clean.l.runner import l_pack as LP  # noqa: E402
+from clean.l.runner import l_record as LR  # noqa: E402
 from clean.reference.fp8 import fp8_decode, fp8_encode, q8  # noqa: E402
 
 CASES = [(16, 24), (32, 64), (8, 8), (64, 96)]      # pixel maps (rows, cols), even sides
@@ -312,8 +313,7 @@ def main(argv=None):
     ap.add_argument("--json", required=True)
     a = ap.parse_args(argv)
     res = run(a.build, a.rocm, tuple(range(89, 89 + a.seeds)))
-    with open(a.json, "w") as f:
-        json.dump(res, f, indent=1)
+    LR.write_l_record(res, a.json)
     print({k: v for k, v in res.items() if k.endswith("_total") or k == "pass"})
     for k in ("relu", "f16", "project", "dec_project", "coef", "boundary", "coef_pack12"):
         for m in res[k]:
