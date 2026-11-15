@@ -21,8 +21,11 @@
 #include "rdna4.h"
 #include "rdna4_win.h"
 #include "wmma_probe.h"
+#include "fold_probe.h"
+#include "fold_selftest.h"
 
 #include <algorithm>
+#include <cmath>
 #include <array>
 #include <cerrno>
 #include <chrono>
@@ -76,6 +79,9 @@ struct NativeKernel {
   // workgroups (manifest "group", build_dx12.py group=; 0 = block). The launch keeps the HIP geometry (grid x block).
   unsigned group = 0, gscale = 1;  // gscale: D3D12 workgroups per launched workgroup (manifest "gscale", default block / group)
   bool ext_doubles = false;  // manifest "fp64": "ext": binary64 fma / division (DoublePrecisionFloatShaderOps)
+  // manifest "needs": "fold" (run only when the start-up probe of the driver's conversion fold passed) or "nofold"
+  // (only when it failed): two ports of one kernel and code object whose exactness depends on that fold
+  std::string needs;
   std::vector<NativeArg> args;
   wgc::Digest digest{};
   NativeCom<ID3D12PipelineState> pso;
@@ -216,7 +222,7 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     }
     if (!create_objects()) return false;
     if (!profile_init()) return false;
-    return reserve_events(64) && (!borrowed_ || driver_probe()) && gelu_lut_upload() && gelu_t5_upload();
+    return reserve_events(64) && (!borrowed_ || driver_probe()) && fold_probe() && gelu_lut_upload() && gelu_t5_upload();
   }
 
   // The MLP kernels' exact GELU + FP8 table (hlsl/wg_gelu_lut.hlsli) at its fixed arena offset, reserved in
@@ -455,7 +461,8 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
   std::string note() const override {
     return "native D3D12: arena " + std::to_string(arena_bytes_ >> 20) +
            " MiB; no HIP runtime or fallback; timestamp frequency " + std::to_string(timestamp_frequency_) + " Hz" +
-           (borrowed_ ? "; borrowed device/queue; exact FP16/FP8 driver-channel probe passed" : "");
+           (borrowed_ ? "; borrowed device/queue; exact FP16/FP8 driver-channel probe passed" : "") +
+           (fold_note_.empty() ? "" : "; " + fold_note_);
   }
   bool adapter_luid(uint8_t out[8]) const override {
     if (!out) return false;
@@ -639,6 +646,11 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     if (direct && !direct_bound_) return fail("native D3D12 direct kernel requires a bound direct frame: " + name);
     // Check the variant BEFORE touching args: a 37-DWORD post variant cannot satisfy a 42-DWORD port.
     if (!variant_loaded(k)) return false;
+    return dispatch(k, name, grid, block, args);
+  }
+  // One launch of the port k (launch() after its port selection; the fold self-test runs both ports of a kernel).
+  bool dispatch(NativeKernel& k, const std::string& name, unsigned grid, unsigned block, void** args) {
+    const bool direct = k.rs == "direct";
     if (block != k.block) return fail("native D3D12 kernel " + name + ": block must be " + std::to_string(k.block));
     if (!grid || grid > 0x7fffffffu) return fail("native D3D12 kernel " + name + ": grid must be 1..2147483647");
     const uint64_t groups = (uint64_t)grid * k.gscale;   // D3D12 workgroups
@@ -999,7 +1011,9 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     return native_filename(co) && co.size() > 3 && co.substr(co.size() - 3) == ".co";
   }
   // variant_loaded without an error: whether the runtime's loaded code objects select this port.
+  bool needs_met(const NativeKernel& k) const { return k.needs.empty() || (k.needs == "fold") == fold_ok_; }
   bool variant_matches(const NativeKernel& k) const {
+    if (!needs_met(k)) return false;
     if (k.co == "-") return true;
     const size_t slash = k.name.find('/');
     if (slash == std::string::npos) return untagged_cos_.count(k.co) != 0;
@@ -1029,6 +1043,9 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
   }
   ID3D12GraphicsCommandList* cl() const { return external_ ? ext_list_ : list_.get(); }
   bool variant_loaded(const NativeKernel& k) {
+    if (!needs_met(k))
+      return fail("native D3D12 " + k.name + ": the port for the conversion-fold probe's result (" +
+                  std::string(fold_ok_ ? "fold" : "nofold") + ") is missing");
     if (k.co == "-") return true;
     const size_t slash = k.name.find('/');
     if (slash == std::string::npos) {
@@ -1085,7 +1102,11 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     if (completed >= value) return true;
     if (!check(fence_->SetEventOnCompletion(value, event_), "SetEventOnCompletion")) return false;
     ProfileCpu cpu(this, "fence_wait_block");
-    const DWORD result = WaitForSingleObject(event_, INFINITE);
+    const DWORD result = WaitForSingleObject(event_, wait_ms_);
+    if (result == WAIT_TIMEOUT) {   // only while wait_ms_ is bounded (the start-up fold guard)
+      stalled_ = true;
+      return fail("native D3D12: queue wait timed out after " + std::to_string(wait_ms_) + " ms");
+    }
     if (result != WAIT_OBJECT_0) return fail("native D3D12: queue wait failed (Win32 " + std::to_string(GetLastError()) + ")");
     completed = fence_->GetCompletedValue();
     return completed != UINT64_MAX && completed >= value ? true : fail("native D3D12: queue wait ended without completion");
@@ -1279,6 +1300,11 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
         if (!fp->is_string() || fp->text != "ext") return fail("native D3D12 manifest: invalid fp64 for " + k.name);
         k.ext_doubles = true;
       }
+      if (const auto* nd = entry.find("needs")) {
+        if (!nd->is_string() || (nd->text != "fold" && nd->text != "nofold"))
+          return fail("native D3D12 manifest: invalid needs for " + k.name);
+        k.needs = nd->text;
+      }
       const auto* signature = entry.find("rs");
       if (signature) {
         if (!signature->is_string() || (signature->text != "buffer" && signature->text != "tex" && signature->text != "direct"))
@@ -1326,9 +1352,10 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
       }
       if (words != k.dwords) return fail("native D3D12 manifest: argument DWORD count mismatch for " + k.name);
       k.file = directory + filename; const std::string key = k.name;
-      auto same = kernels_.equal_range(key);   // one port per (name, code object)
+      auto same = kernels_.equal_range(key);   // one port per (name, code object, needs)
       for (auto i = same.first; i != same.second; ++i)
-        if (i->second.co == k.co) return fail("native D3D12 manifest: duplicate kernel " + key + " (" + k.co + ")");
+        if (i->second.co == k.co && i->second.needs == k.needs)
+          return fail("native D3D12 manifest: duplicate kernel " + key + " (" + k.co + ")");
       kernels_.emplace(key, std::move(k));
     }
     return true;
@@ -1411,6 +1438,203 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     free(output);
     if (!ok) err_ = error;
     return ok;
+  }
+  // Start-up guard of the driver's conversion fold: only when a port needs it. All steps must pass, else (or on any
+  // error) the "nofold" ports run (fail closed):
+  //  1. probe: l_fold_probe (fold_probe.h) on adversarial inputs of the shared encode expression, against expected
+  //     bytes from exact rationals;
+  //  2. self-test of the REAL post shader (fold_selftest) on one crafted frame (fold_selftest.h): the fold port, with
+  //     its side output on, and the no-fold port (exact by construction). The fold port's raw output bytes must equal
+  //     the no-fold port's, and, from the fold port's OWN values in the same PSO (its stored FP32 conversion inputs xe
+  //     and its stored history codes), at each of the six encode sites (row of the pair x channel): at least
+  //     kGuardMinTies inputs are FP32-product ties a second rounding gets wrong, and every stored code is the exact
+  //     one-rounding RN16(xe kEncK) computed here.
+  // Every queue wait of the guard is bounded (kGuardWaitMs). A timeout means a queue that did not complete: device
+  // creation fails (its allocations are kept, never freed under a running queue). Logged once per process (note()).
+  static constexpr DWORD kGuardWaitMs = 10000;
+  static constexpr int kGuardMinTies = 8;
+  bool fold_probe() {
+    bool wanted = false;
+    std::string uncovered;
+    for (const auto& kv : kernels_) {
+      if (kv.second.needs != "fold") continue;
+      wanted = true;
+      if (kv.first != "l_post_recon_p12") uncovered = kv.first;   // a fold port with no self-test of its own
+    }
+    fold_ok_ = false;
+    if (!wanted) return true;
+    std::string note;
+    const std::string before = err_;
+    wait_ms_ = kGuardWaitMs;
+    auto probe = kernels_.find("l_fold_probe");
+    if (!uncovered.empty()) {
+      note = "no self-test for " + uncovered;
+    } else if (probe == kernels_.end() || probe->second.co != "-" || probe->second.block != 32 ||
+               probe->second.dwords != 1 || probe->second.args.size() != 1 || probe->second.args[0].kind != 'p') {
+      note = "no l_fold_probe kernel";
+    } else {
+      DevPtr buf = 0;
+      uint8_t bytes[fold_probe::kBytes];
+      fold_probe::fill(bytes);
+      uint32_t out[96] = {};
+      void* args[] = {&buf};
+      bool ok = alloc(&buf, fold_probe::kBytes) && upload(buf, bytes, sizeof bytes) && launch("l_fold_probe", 1, 32, args) &&
+                download(out, buf + fold_probe::kOutOffset, sizeof out);
+      if (buf && !stalled_) free(buf);   // after a timeout the queue may still use it: kept
+      const char* fail_test = std::getenv("WG_TEST_FOLD_PROBE_FAIL");   // tests of the fallback
+      if (ok && fail_test && fail_test[0] == '1') out[0] ^= 1u;
+      const int bad = ok ? fold_probe::first_mismatch(out) : -1;
+      if (!ok) note = "probe run failed (" + err_ + ")";
+      else if (bad >= 0) note = "probe mismatch at half " + std::to_string(bad);
+      else if (!stalled_) fold_ok_ = fold_selftest(&note);
+    }
+    if (stalled_) {   // the queue did not complete within the bound: no fallback can run on it
+      fold_ok_ = false;
+      return fail("native D3D12: the start-up fold guard's GPU work did not complete within " +
+                  std::to_string(kGuardWaitMs) + " ms (" + note + ")");
+    }
+    wait_ms_ = INFINITE;
+    err_ = before;
+    // one line per device: in note(), which the runtime logs once when the network runtime is ready
+    fold_note_ = std::string("conversion-fold probe and self-test ") +
+                 (fold_ok_ ? "passed (" + sens_note_ + "): the fold ports run" : "failed (" + note + "): the no-fold ports run");
+    return true;
+  }
+  // RN16 of the value v (exact: the product of two FP32 values fits a double), nearest even, FP16 subnormals kept,
+  // overflow to infinity; *tie: v lies exactly halfway between two FP16 values.
+  static uint16_t guard_rn16(double v, bool* tie = nullptr) {
+    if (tie) *tie = false;
+    const uint16_t sign = std::signbit(v) ? 0x8000u : 0u;
+    const double a = std::fabs(v);
+    if (a == 0.0) return sign;
+    if (a >= 65520.0) return sign | 0x7c00u;
+    int ex = 0;
+    std::frexp(a, &ex);                    // a = m 2^ex, m in [0.5, 1): exponent ex - 1
+    const int e = std::max(ex - 1, -14);
+    const double q = std::ldexp(a, 10 - e);   // in FP16 ulps (exact)
+    double n = std::floor(q);
+    const double r = q - n;
+    if (tie) *tie = r == 0.5;
+    if (r > 0.5 || (r == 0.5 && std::fmod(n, 2.0) == 1.0)) n += 1.0;
+    int ee = e;
+    if (n >= 2048.0) { n /= 2.0; ++ee; }
+    if (ee > 15) return sign | 0x7c00u;
+    const uint32_t ni = static_cast<uint32_t>(n);
+    if (ni < 1024u) return static_cast<uint16_t>(sign | ni);
+    return static_cast<uint16_t>(sign | ((ee + 15) << 10) | (ni - 1024u));
+  }
+  // The self-test of l_post_recon_p12 (fold_probe step 2). The frame (fold_selftest.h; render size = output size,
+  // jitter 0, reset, exposure 1, post scale 0, codes and kernel shape 0) makes each full-history value the render
+  // colour, so the history codes are the encode of crafted values: per site FP32-product ties at predicted-log2 offsets
+  // -8 ... 8 ulp, zero and FP16-subnormal products, the floor. The fold port runs with its side output on (the params'
+  // pad1 = the side buffer: each pixel's three FP32 conversion inputs xe); each port's outputs start filled with its own
+  // sentinel. True only when both ports ran, their defined bytes are equal, and the fold port's own values pass the
+  // per-site checks (fold_probe's comment).
+  bool fold_selftest(std::string* note) {
+    NativeKernel *fold = nullptr, *nofold = nullptr;
+    auto range = kernels_.equal_range("l_post_recon_p12");
+    for (auto i = range.first; i != range.second; ++i) {
+      if (i->second.needs == "fold") fold = &i->second;
+      if (i->second.needs == "nofold") nofold = &i->second;
+    }
+    auto abi = [](const NativeKernel* k) {
+      if (!k || k->block != 256 || k->rs != "buffer" || k->args.size() != 14) return false;
+      for (int n = 0; n < 12; ++n) if (k->args[n].kind != 'p') return false;
+      return k->args[12].kind == 'b' && k->args[12].bytes == 64 && k->args[13].kind == 'p';
+    };
+    if (!abi(fold) || !abi(nofold)) { *note = "self-test: the fold / no-fold ports of l_post_recon_p12 are missing"; return false; }
+    constexpr int W = ::fold_selftest::kW, H = ::fold_selftest::kH, N = W * H;
+    constexpr int pitch = (W + 63) & ~63;
+    constexpr size_t hist = size_t(N) * 8, reduced = size_t(W / 2) * (H / 2) * 4, display = size_t(3) * pitch * H * 2;
+    constexpr size_t outs = hist + reduced + display, side = size_t(N) * 12;
+    const uint8_t sentinel[2] = {0xA5, 0x5A};
+    // layout: colour | A8 | C4 | previous history | motions x 3 | post blob | outputs (fold, no-fold) | side (fold)
+    const size_t o_col = 0, o_a = o_col + size_t(N) * 16, o_c = o_a + size_t(N) * 8, o_hp = o_c + size_t(N) * 4,
+                 o_m = o_hp + hist, o_w = o_m + size_t(N) * 12, o_out = o_w + 256, o_side = o_out + 2 * outs,
+                 total = o_side + side;
+    std::vector<uint8_t> host(total, 0);
+    for (int i = 0; i < N; ++i) std::memcpy(&host[o_col + size_t(i) * 16], &::fold_selftest::kColour[3 * i], 12);
+    for (int port = 0; port < 2; ++port) std::memset(&host[o_out + port * outs], sentinel[port], outs);
+    std::memset(&host[o_side], 0xFF, side);   // a NaN pattern: a value the kernel did not store fails the checks
+    struct { int32_t rw, rh, dw, dh, reset, pad0, pad1, pad2; float rx, ry, jx, jy, e, e_prev, ratio, pad3; } prm =
+        {W, H, W, H, 1, 0, 0, 0, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 0.0f};
+    static_assert(sizeof prm == 64, "WgPostParams");
+    DevPtr buf = 0;
+    std::vector<uint8_t> got(2 * outs + side);
+    bool ok = alloc(&buf, total) && upload(buf, host.data(), total);
+    NativeKernel* ports[2] = {fold, nofold};
+    for (int port = 0; ok && port < 2; ++port) {
+      DevPtr p[12], none = 0;
+      const DevPtr out = buf + o_out + port * outs;
+      const DevPtr in[9] = {buf + o_col, buf + o_a, buf + o_a, buf + o_c, buf + o_hp, buf + o_m, buf + o_m + N * 4,
+                            buf + o_m + N * 8, buf + o_w};
+      for (int n = 0; n < 9; ++n) p[n] = in[n];
+      p[9] = out; p[10] = out + hist; p[11] = out + hist + reduced;
+      void* args[14];
+      for (int n = 0; n < 12; ++n) args[n] = &p[n];
+      prm.pad1 = port == 0 ? static_cast<int32_t>(static_cast<uint32_t>(buf + o_side)) : 0;   // the fold port's side output
+      args[12] = &prm; args[13] = &none;
+      const unsigned grid = unsigned((W + 31) / 32) * unsigned(((H + 1) / 2 + 7) / 8);
+      ok = dispatch(*ports[port], "l_post_recon_p12", grid, 256, args);
+    }
+    ok = ok && download(got.data(), buf + o_out, 2 * outs + side);
+    const std::string error = err_;
+    if (buf && !stalled_) free(buf);   // after a timeout the queue may still use it: kept
+    if (!ok) { *note = "self-test run failed (" + error + ")"; return false; }
+    if (const char* dump = std::getenv("WG_TEST_FOLD_SELFTEST_DUMP")) {   // tests: both ports' outputs and the side output
+      if (FILE* f = std::fopen(dump, "wb")) { std::fwrite(got.data(), 1, got.size(), f); std::fclose(f); }
+    }
+    const uint8_t* fo = got.data();
+    const uint8_t* nf = got.data() + outs;
+    const uint8_t* sd = got.data() + 2 * outs;
+    size_t differ = 0, hist_differ = 0;
+    for (size_t i = 0; i < outs; ++i) {
+      if (i >= hist + reduced) {   // display: only the pixels of each pitch row are defined
+        const size_t px = ((i - hist - reduced) / 2) % pitch;
+        if (px >= size_t(W)) continue;
+      }
+      if (fo[i] != nf[i]) { ++differ; if (i < hist) ++hist_differ; }
+    }
+    if (differ) {
+      *note = "self-test: the fold port differs from the no-fold port in " + std::to_string(differ) + " bytes (" +
+              std::to_string(hist_differ) + " of the full history)";
+      return false;
+    }
+    // the fold port's own values: per site, detecting ties among its inputs and every stored code exact
+    const float k = [] { const uint32_t b = 0x3dddf184u; float f; std::memcpy(&f, &b, 4); return f; }();
+    int ties[6] = {0, 0, 0, 0, 0, 0}, wrong[6] = {0, 0, 0, 0, 0, 0};
+    for (int y = 0; y < H; ++y) {
+      for (int x = 0; x < W; ++x) {
+        for (int c = 0; c < 3; ++c) {
+          const int s = 3 * (y & 1) + c;
+          float xe;
+          std::memcpy(&xe, sd + size_t(12) * (size_t(y) * W + x) + 4 * c, 4);
+          uint16_t q;
+          std::memcpy(&q, fo + size_t(8) * (size_t(y) * W + x) + 2 * c, 2);
+          if (!std::isfinite(xe)) { ++wrong[s]; continue; }   // not stored, or not a value the encode takes
+          const double pe = double(xe) * double(k);           // exact
+          const float p32 = static_cast<float>(pe);           // RN32 of the exact product
+          bool tie = false;
+          const uint16_t once = guard_rn16(pe), twice = guard_rn16(double(p32), &tie);
+          if (tie && pe != double(p32) && once != twice) ++ties[s];
+          if (q != once) ++wrong[s];
+        }
+      }
+    }
+    int least = ties[0], bad = 0;
+    std::string per;
+    for (int s = 0; s < 6; ++s) {
+      least = std::min(least, ties[s]);
+      bad += wrong[s];
+      per += (s ? "/" : "") + std::to_string(ties[s]) + (wrong[s] ? "!" + std::to_string(wrong[s]) : "");
+    }
+    if (bad || least < kGuardMinTies) {
+      *note = "own-value check: detecting ties per site " + per + " (each must be at least " +
+              std::to_string(kGuardMinTies) + "; !n: codes that are not the one-rounding encode of their input)";
+      return false;
+    }
+    sens_note_ = "detecting ties per site " + per + ", every code the one-rounding encode";
+    return true;
   }
   bool create_device() {
     dxgi_dll_ = wgrt::load_system_dll(L"dxgi.dll");  // the system's own (not a proxy of the game folder, rdna4_win.h)
@@ -1700,6 +1924,11 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
   std::string profile_session_, profile_failure_;
   bool profile_enabled_ = false;
   bool borrowed_ = false, native_binding_dirty_ = false, inside_pass_ = false;
+  bool fold_ok_ = false;   // fold_probe's result
+  DWORD wait_ms_ = INFINITE;   // queue wait bound: kGuardWaitMs during the start-up fold guard, else none
+  bool stalled_ = false;       // a bounded wait timed out: the queue never completed (device creation fails)
+  std::string sens_note_;  // fold_selftest's sensitivity count (in the passed note)
+  std::string fold_note_;  // fold_probe's result as a note() clause (empty: no port needs the fold)
   bool direct_bound_ = false, direct_root_bound_ = false;
   D3D12_COMMAND_LIST_TYPE queue_type_ = D3D12_COMMAND_LIST_TYPE_COMPUTE;
   uint64_t debug_cursor_ = 0, debug_denied_ = 0;

@@ -191,6 +191,17 @@ def kernel_decls(path):
             if d["rs"] not in ("buffer", "tex", "direct"):
                 raise SystemExit(f"{path}: {name}: unsupported root-signature kind {d['rs']}")
             d["arg_dwords"] = arg_dwords(d["args"], f"{path}: {name}")
+            # needs=fold | nofold: a port the device runs only when its start-up guard of the driver's conversion fold
+            # passed (fold) or failed (nofold); the two ports of one name and code object differ by this key
+            d["needs"] = kv.get("needs", "")
+            if d["needs"] not in ("", "fold", "nofold"):
+                raise SystemExit(f"{path}: {name}: needs={d['needs']} (fold or nofold)")
+            # isa=<rule>,<rule>: the port's RGA ISA must satisfy each rule, <op>[+<op>...]>=<n> or <op>==<n> (counts of
+            # instruction mnemonics; <op>@<literal>: only its x * literal + 0 sites, parse_isa_rules), checked after the
+            # build (isa_check; WG_DX12_ISA_CHECK=0 skips it)
+            d["isa"] = kv.get("isa", "")
+            if d["isa"]:
+                parse_isa_rules(d["isa"], f"{path}: {name}")
             decls.append(d)
     return decls
 
@@ -298,6 +309,65 @@ def rga_isa(dxil, isa_dir, stem):
                 shutil.copyfile(os.path.join(tmp, f), os.path.join(isa_dir, f"{stem}.{kind}"))
 
 
+def parse_isa_rules(text, where):
+    """isa=<rule>,...: [(terms, op, n)] with op '>=' or '=='; a term is (mnemonic, literal or None): <op> counts every
+    instruction of that mnemonic, <op>@<8 hex digits> only those whose literal dword is that value, whose last source
+    operand is 0 and that carry no op_sel modifier (an FP32 x * literal + 0: the sites of a conversion fold)."""
+    rules = []
+    for r in text.split(","):
+        m = re.fullmatch(r"([a-z0-9_]+(?:@[0-9a-f]{8})?(?:\+[a-z0-9_]+(?:@[0-9a-f]{8})?)*)(>=|==)(\d+)", r)
+        if not m:
+            raise SystemExit(f"{where}: isa rule {r!r} (<op>[@<literal>][+<op>[@<literal>]]>=<n> or ...==<n>)")
+        terms = [(t.split("@")[0], t.split("@")[1] if "@" in t else None) for t in m.group(1).split("+")]
+        rules.append((terms, m.group(2), int(m.group(3))))
+    return rules
+
+
+def isa_count(lines, mnemonic, literal):
+    """Instructions of `mnemonic` in RGA ISA lines (with literal: only the x * literal + 0 sites, parse_isa_rules)."""
+    c = 0
+    for line in lines:
+        code, _, comment = line.partition("//")
+        f = code.split()
+        if not f or f[0] != mnemonic:
+            continue
+        if literal is not None:
+            words = comment.split(":")[-1].split()
+            srcs = [o.strip() for o in " ".join(f[1:]).split(",")]
+            if not words or words[-1].lower() != literal or srcs[-1] != "0" or "op_sel" in code:
+                continue
+        c += 1
+    return c
+
+
+def isa_check(built_isa):
+    """built_isa: [(kernel name, dxil path, rules text)] of this build's ports with isa=. Each port's RGA ISA must
+    satisfy its rules (e.g. a driver fold the port's exactness depends on: a v_fma_mixlo_f16 count). Fails the build
+    otherwise; WG_DX12_ISA_CHECK=0 skips it (no RGA)."""
+    if not built_isa or os.environ.get("WG_DX12_ISA_CHECK", "1") == "0":
+        return
+    if not os.path.exists(RGA) and not RGA.endswith(".cmd"):
+        raise SystemExit(f"ISA check: RGA not found at {RGA} (WG_RGA, or WG_DX12_ISA_CHECK=0 to skip)")
+    bad = []
+    for name, dxil, text in built_isa:
+        with tempfile.TemporaryDirectory(prefix="wgisa_") as tmp:
+            rga_isa(dxil, tmp, "k")
+            path = os.path.join(tmp, "k.isa.txt")
+            if not os.path.exists(path):
+                bad.append(f"{name}: RGA gave no ISA")
+                continue
+            lines = open(path, encoding="utf-8", errors="replace").read().splitlines()
+        for terms, op, n in parse_isa_rules(text, name):
+            c = sum(isa_count(lines, mn, lit) for mn, lit in terms)
+            ok = c >= n if op == ">=" else c == n
+            label = "+".join(mn + (f"@{lit}" if lit else "") for mn, lit in terms)
+            print(f"ISA {name:40s} {label} = {c} (rule {op} {n}) {'ok' if ok else 'FAILED'}", flush=True)
+            if not ok:
+                bad.append(f"{name} ({os.path.basename(dxil)}): {label} = {c}, rule {op} {n}")
+    if bad:
+        raise SystemExit("ISA check failed:\n  " + "\n  ".join(bad))
+
+
 VGPR_LIMITS = os.path.join(HERE, "vgpr_limits.json")
 
 
@@ -383,9 +453,12 @@ def main(argv=None):
     old = {}
     if only and os.path.exists(man_path):  # partial build: keep the other kernels' entries
         with open(man_path) as f:
-            old = {(k["name"], k.get("co", "")): k for k in json.load(f)["kernels"]}
-    kernels = dict(old)   # (name, co) -> manifest entry
+            # every port of a rebuilt name is replaced (a name may gain or lose ports, e.g. needs=fold / nofold)
+            old = {(k["name"], k.get("co", ""), k.get("needs", "")): k for k in json.load(f)["kernels"]
+                   if k["name"] not in only}
+    kernels = dict(old)   # (name, co, needs) -> manifest entry
     built = []
+    built_isa = []   # (name, dxil, isa rules) of the ports with isa=
     # generated kernels (kernels/fused_*_gen.py: the fused forms of swin_block.hlsl / bneck.hlsl) are regenerated from
     # the live sources first, so that no build compiles a stale copy
     for fn in sorted(os.listdir(KERNEL_DIR)) if os.path.isdir(KERNEL_DIR) else []:
@@ -408,7 +481,7 @@ def main(argv=None):
                 continue
             if not only and is_frame_gen(d):
                 continue
-            key = (d["name"], d["co"])
+            key = (d["name"], d["co"], d["needs"])
             if key in kernels and key not in old:
                 raise SystemExit(f"kernel {d['name']} ({d['co']}) declared twice")
             kernels[key] = None  # placeholder: the declared-twice check sees it before any compile starts
@@ -433,6 +506,8 @@ def main(argv=None):
         r = {"name": d["name"], "file": os.path.basename(out), "co": d["co"], "entry": d["entry"],
              "block": d["block"], "wave": d["wave"], "args": d["args"], "arg_dwords": d["arg_dwords"],
              "source": d["source"], "sha256": sha, "rs": d["rs"]}
+        if d["needs"]:
+            r["needs"] = d["needs"]
         if d["group"] != d["block"]:
             r["group"] = d["group"]
             r["gscale"] = d["gscale"]
@@ -448,18 +523,21 @@ def main(argv=None):
         futures = [pool.submit(build_one, j) for j in jobs]
         try:
             for (src, d, out, _k), fut in zip(jobs, futures):
-                kernels[(d["name"], d["co"])] = fut.result()
+                kernels[(d["name"], d["co"], d["needs"])] = fut.result()
                 built.append((d["name"], out))
+                if d["isa"]:
+                    built_isa.append((d["name"], out, d["isa"]))
                 print(f"{d['name']:40s} -> {os.path.basename(out)}  block {d['block']} wave {d['wave']} "
                       f"args {d['args']}", flush=True)
         except BaseException:
             for fut in futures:
                 fut.cancel()  # kernels not started yet; the running ones finish their current child process
             raise
-    names = {n for n, _ in kernels}
+    names = {k[0] for k in kernels}
     if only and not (only <= names):
         raise SystemExit(f"not declared in clean/dx12/kernels or clean/k/dx12/kernels: {sorted(only - names)}")
     vgpr_check(built)
+    isa_check(built_isa)
     with open(man_path, "w") as f:
         json.dump({"format": FORMAT, "dxc": os.path.basename(os.path.dirname(os.path.dirname(DXC_DIR))),
                    "kernels": [kernels[k] for k in sorted(kernels)]}, f, indent=1)
