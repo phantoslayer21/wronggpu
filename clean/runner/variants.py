@@ -18,7 +18,7 @@ SWIN_KERNELS = {  # block kernel -> (threads macro, windows-per-wave macro)
 DEFAULTS = {"WG_WPW_C64": 1, "WG_WPW_C96": 1, "WG_WPW_C128": 1, "WG_GEMM_THREADS": 256, "WG_NT": 2,
             "WG_THREADS_C64": 256, "WG_THREADS_C64ADD": 256, "WG_THREADS_C96": 256, "WG_THREADS_C96ADD": 256,
             "WG_THREADS_C128": 256, "WG_MINW_C64": 1, "WG_MINW_C96": 5, "WG_MINW_C128": 1, "WG_MLP_GROUP": 2, "WG_FORCE_CLAMP": 0, "WG_FUSE": 0, "WG_NORM_DOT4": 0, "WG_PROFILE": 0, "WG_AV8": 0, "WG_SMAX16": 0, "WG_GELU_MODE": 2, "WG_GELU_MIX": 1, "WG_MLP_PF": 0, "WG_UNIT_BYTES": 16384, "WG_SAT_MINMAX": 1, "WG_NUMV_C96": 0, "WG_F16_W": 0, "WG_F16_A": 0, "WG_F16_Q": 0,
-            "WG_F16_AWIDE": 0, "WG_F16_QWIDE": 0, "WG_SCHED_FRAGS": 0}
+            "WG_F16_AWIDE": 0, "WG_F16_QWIDE": 0, "WG_F16_M": 0, "WG_SCHED_FRAGS": 0}
 
 
 def all_threads(n):
@@ -101,9 +101,14 @@ VARIANTS = {
     # fences spill. The C = 64 and C = 96 kernels are f16wq's.
     "f16wk": {"WG_F16_W": 1, "WG_F16_A": 1, "WG_F16_Q": 1, "WG_MINW_C64": 7, "WG_F16_AWIDE": 128, "WG_F16_QWIDE": 128,
               "WG_SCHED_FRAGS": 128},
+    # And the C = 96 kernels' MLP operands (the norm output and the hidden values, the larger half of their matrix work) made
+    # the same way from codes, with the barriers there too: 252 registers, 5 waves, no spill. The C = 96 attention keeps codes
+    # (F16 operands there spill 12), and the operands are not made straight from FP32 (that spills 133).
+    "f16wm": {"WG_F16_W": 1, "WG_F16_A": 1, "WG_F16_Q": 1, "WG_MINW_C64": 7, "WG_F16_AWIDE": 128, "WG_F16_QWIDE": 128,
+              "WG_F16_M": 1, "WG_SCHED_FRAGS": 96},
 }
 # The variants of each GPU family's build of swin.hip (gfx11: the gfx11 matrix wrappers); `--variants` alone builds these.
-FAMILY_VARIANTS = {"gfx11": ("f16w", "f16wa", "f16wq", "c128w7", "f16wk")}
+FAMILY_VARIANTS = {"gfx11": ("f16w", "f16wa", "f16wq", "c128w7", "f16wk", "f16wm")}
 
 # Variants whose output differs from base (a different GELU than the default). The sweep reports their mismatches but
 # does not treat them as an error.

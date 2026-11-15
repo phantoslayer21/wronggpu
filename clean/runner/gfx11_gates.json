@@ -433,6 +433,78 @@
     "waves": 6,
     "lds": 32768
    }
+  },
+  "f16wm": {
+   "swin_block_c64": {
+    "vgprs": 212,
+    "waves": 7,
+    "lds": 32768
+   },
+   "swin_block_c64_nc": {
+    "vgprs": 212,
+    "waves": 7,
+    "lds": 32768
+   },
+   "swin_block_c64_add": {
+    "vgprs": 212,
+    "waves": 7,
+    "lds": 32768
+   },
+   "swin_block_c64_add_nc": {
+    "vgprs": 212,
+    "waves": 7,
+    "lds": 32768
+   },
+   "swin_block_c64_r": {
+    "vgprs": 184,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_r_nc": {
+    "vgprs": 144,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_add_r": {
+    "vgprs": 167,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_add_r_nc": {
+    "vgprs": 166,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c96": {
+    "vgprs": 252,
+    "waves": 5,
+    "lds": 36864
+   },
+   "swin_block_c96_nc": {
+    "vgprs": 252,
+    "waves": 5,
+    "lds": 36864
+   },
+   "swin_block_c96_add": {
+    "vgprs": 252,
+    "waves": 5,
+    "lds": 36864
+   },
+   "swin_block_c96_add_nc": {
+    "vgprs": 252,
+    "waves": 5,
+    "lds": 36864
+   },
+   "swin_block_c128": {
+    "vgprs": 238,
+    "waves": 6,
+    "lds": 32768
+   },
+   "swin_block_c128_nc": {
+    "vgprs": 238,
+    "waves": 6,
+    "lds": 32768
+   }
   }
  }
 }

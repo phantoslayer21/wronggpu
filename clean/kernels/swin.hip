@@ -98,24 +98,29 @@
 #ifndef WG_F16_Q
 #define WG_F16_Q 0
 #endif
-// The wider kernels on gfx11 (variant f16wk; the knobs name the smallest C they apply to, 0 = none): WG_F16_AWIDE makes the
+// The wider kernels on gfx11 (variants f16wk, f16wm; the knobs name the smallest C they apply to, 0 = none): WG_F16_AWIDE makes the
 // activation operands F16 operands (WG_F16_A) also in the kernels with C >= N, WG_F16_QWIDE makes them straight from the FP32
 // values there too (WG_F16_Q), WG_SCHED_FRAGS lets the machine scheduler move no instruction across a fragment step in the
-// kernels with C >= N (it otherwise issues the LDS reads of a whole loop up front, 8 registers a fragment, and spills).
+// kernels with C >= N (it otherwise issues the LDS reads of a whole loop up front, 8 registers a fragment: slower, and it spills
+// where the registers are short). WG_F16_M makes the operands of the MLP alone (the norm output and the hidden values) F16
+// operands in the kernels with C >= 96 that WG_F16_A leaves on codes (C = 96).
 #ifndef WG_F16_AWIDE
 #define WG_F16_AWIDE 0
 #endif
 #ifndef WG_F16_QWIDE
 #define WG_F16_QWIDE 0
 #endif
+#ifndef WG_F16_M
+#define WG_F16_M 0
+#endif
 #ifndef WG_SCHED_FRAGS
 #define WG_SCHED_FRAGS 0
 #endif
-#if (WG_F16_W || WG_F16_A || WG_F16_Q || WG_F16_AWIDE || WG_F16_QWIDE || WG_SCHED_FRAGS) && !(defined(WG_GFX11) || defined(WG_EMU_GFX11))
+#if (WG_F16_W || WG_F16_A || WG_F16_Q || WG_F16_AWIDE || WG_F16_QWIDE || WG_F16_M || WG_SCHED_FRAGS) && !(defined(WG_GFX11) || defined(WG_EMU_GFX11))
 #error "WG_F16_*, WG_SCHED_FRAGS are for the gfx11 matrix wrappers (wg_platform.h)"
 #endif
-#if WG_F16_Q && !WG_F16_A
-#error "WG_F16_Q makes the F16 operands that WG_F16_A keeps: set both"
+#if WG_F16_Q && !(WG_F16_A || WG_F16_M)
+#error "WG_F16_Q makes the F16 operands that WG_F16_A or WG_F16_M keep: set one of them"
 #endif
 #if (WG_F16_AWIDE && !WG_F16_A) || (WG_F16_QWIDE && !WG_F16_Q)
 #error "WG_F16_AWIDE and WG_F16_QWIDE widen WG_F16_A and WG_F16_Q: set those too"
@@ -424,7 +429,7 @@ template <bool A16>
 struct ActOp {
   typedef v2i type;
 };
-#if WG_F16_A
+#if WG_F16_A || WG_F16_M
 template <>
 struct ActOp<true> {
   typedef v16h type;
@@ -433,7 +438,7 @@ struct ActOp<true> {
 // F16: the operand made from the FP32 values directly (WG_F16_Q), not through the code bytes.
 template <bool SAFE, bool A16, bool F16 = WG_F16_Q != 0>
 WG_FN typename ActOp<A16>::type pack_act(v8f d) {
-#if WG_F16_A
+#if WG_F16_A || WG_F16_M
   if constexpr (A16) {
 #if WG_F16_Q
     if constexpr (F16) return wg_k16_f16(SAFE ? wg_q8_to_f16_nc(d) : wg_q8_to_f16_inner(d));
@@ -447,7 +452,7 @@ WG_FN typename ActOp<A16>::type pack_act(v8f d) {
 // The F16 operand the matrix instruction takes for 8 F16 values per lane (the softmax probabilities).
 template <bool A16>
 WG_FN auto act_f16(v8h p) {
-#if WG_F16_A
+#if WG_F16_A || WG_F16_M
   if constexpr (A16) return wg_k16_f16(p);
   else
 #endif
@@ -614,7 +619,15 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
   constexpr bool A16 = false;
 #endif
   typedef typename ActOp<A16>::type AO;
-  static_assert(!HYB || (!W16 && !A16), "HYB: FP8 weight and activation operands only (no gfx11 F16 operand variants)");
+#if WG_F16_M
+  // the MLP's operands (norm2 output mf, hidden values hf) as F16 operands where the activations are codes (C = 96, 128)
+  constexpr bool M16 = !A16 && C >= 96 && MCO == 0 && ECL == 0 && !RESIDENT && !EPI::kFused;
+  static_assert(!M16 || (!WG_AV8 && WG_GELU_MODE < 3), "WG_F16_M: no FP8 A.V, no packed-FP16 GELU");
+#else
+  constexpr bool M16 = false;
+#endif
+  typedef typename ActOp<A16 || M16>::type MO;
+  static_assert(!HYB || (!W16 && !A16 && !M16), "HYB: FP8 weight and activation operands only (no gfx11 F16 operand variants)");
   constexpr bool FQ = WG_F16_Q != 0 && (C < 96 || (WG_F16_QWIDE != 0 && C >= WG_F16_QWIDE));  // operands straight from FP32
   constexpr bool SF = WG_SCHED_FRAGS != 0 && C >= WG_SCHED_FRAGS;  // no scheduler motion across a fragment step
   // RESIDENT (kernels *_r): the block's whole weight stream (every head and MLP unit) stays in LDS for the whole
@@ -946,7 +959,7 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
   }
 
   // Step 8: m = q8(RMSNorm(x1; gamma2)). Then add b2 to the residual accumulator.
-  AO mf[WPW][KC];
+  MO mf[WPW][KC];
   {
     const float* g2 = (const float*)(w + L::G2) + hh * HALF;
     const float* b2 = (const float*)(w + L::B2) + hh * 8;
@@ -975,7 +988,7 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
 #endif
 #pragma unroll
       for (int k = 0; k < KC; ++k) {
-        mf[i][k] = pack_act<SAFE, A16, FQ>(acc[i][k] * r * wg_load8f(g2 + 8 * k));
+        mf[i][k] = pack_act<SAFE, A16 || M16, FQ>(acc[i][k] * r * wg_load8f(g2 + 8 * k));
         acc[i][k] += WG_BIAS8(b2 + k * 16);
       }
     }
@@ -1046,7 +1059,7 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
       WG_SCHED_FENCE();  // ... and no instruction at all (machine scheduler): the loads stay ahead of the GELU
 #endif
       // GELU + q8.
-      AO hf[GROUP][WPW];
+      MO hf[GROUP][WPW];
 #pragma unroll
       for (int g = 0; g < GROUP; ++g)
 #pragma unroll
@@ -1068,7 +1081,7 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
           r[1] = __builtin_bit_cast(int, (ge[4] + ge[5]) + (ge[6] + ge[7]));
           hf[g][i] = r;
 #else
-          hf[g][i] = pack_act<SAFE, A16, FQ>(ge);
+          hf[g][i] = pack_act<SAFE, A16 || M16, FQ>(ge);
 #endif
         }
       WG_PHASE(8, hf[GROUP - 1][0][0]);
