@@ -155,6 +155,25 @@ class PackagerRefusesDeveloperRuntime(unittest.TestCase):
         self.assertIn("wronggpu_runtime.dll", table)
         self.assertNotIn("build.json", table, "the manifest is read for the gate and is not shipped")
 
+    def test_the_test_suites_stand_in_only_in_a_testing_build(self):
+        lib = self._release()
+        stand_in = {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", lib, stand_in=True)}
+        r, out = self._pack({"wronggpu_runtime.dll": lib}, stand_in)
+        self.assertNotEqual(r.returncode, 0, "a release build (no --testing) never embeds the test stand-in")
+        self.assertIn("stand-in runtime", r.stderr + r.stdout)
+        self.assertFalse(os.path.isfile(os.path.join(out, "payload_table.h")))
+        r, out = self._pack({"wronggpu_runtime.dll": lib}, stand_in, extra_args=("--testing",))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("wronggpu_runtime.dll", open(os.path.join(out, "payload_table.h"), encoding="utf-8").read())
+        # --testing changes nothing else: a stand-in still needs the marker and its own bytes' manifest
+        r, _ = self._pack({"wronggpu_runtime.dll": b"MZ no marker"}, {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", b"MZ no marker", stand_in=True)},
+                          extra_args=("--testing",))
+        self.assertNotEqual(r.returncode, 0)
+        r, _ = self._pack({"wronggpu_runtime.dll": lib + b"changed"}, stand_in, extra_args=("--testing",))
+        self.assertNotEqual(r.returncode, 0)
+        r, _ = self._pack({"wronggpu_runtime.dll": lib}, extra_args=("--testing",))
+        self.assertNotEqual(r.returncode, 0, "a testing build still needs a manifest")
+
     def test_no_manifest_refuses_the_payload(self):
         r, out = self._pack({"wronggpu_runtime.dll": self._release()})
         self.assertNotEqual(r.returncode, 0)

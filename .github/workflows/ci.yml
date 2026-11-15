@@ -117,6 +117,23 @@ jobs:
           cmake -S clean/installer -B out/launcher-tests -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DWRONGGPU_PAYLOAD_DIR="$PWD/out/no-payload" -DWRONGGPU_TESTING=OFF -DWRONGGPU_PRESET_K=OFF -DWRONGGPU_DIRECT_ROUTE=OFF
           cmake --build out/launcher-tests --target wg-core-tests launcher-core-tests coexist-core-tests convert-ignore-tests model-choice-tests model-choice-k-tests model-choice-k-only-tests
           ctest --test-dir out/launcher-tests --output-on-failure -R "^(wg-core|launcher-core|coexist-core|convert-ignore|model-choice|model-choice-k|model-choice-k-only|source-size|wording)$"
+      - name: Test launcher from the test suite's stand-in payload (and a release build refusing it)
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python clean/installer/tests/run_installer_tests.py --work out/mock --prepare-only
+          $common = @("-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_POLICY_DEFAULT_CMP0091=NEW", "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
+                      "-DWRONGGPU_PAYLOAD_DIR=$PWD/out/mock/prepared/payload", "-DWRONGGPU_MAP=$PWD/out/mock/prepared/test-map.json", "-DWRONGGPU_VERSION=0.3.0-test")
+          cmake -S clean/installer -B out/launcher-mock @common -DWRONGGPU_TESTING=ON
+          cmake --build out/launcher-mock --target WrongGPU
+          # the negative control: a release build (WRONGGPU_TESTING=OFF) with the same stand-in refuses it at the payload step
+          cmake -S clean/installer -B out/launcher-mock-release @common -DWRONGGPU_TESTING=OFF
+          $PSNativeCommandUseErrorActionPreference = $false
+          cmake --build out/launcher-mock-release --target gen/payload_table.h *> out/mock-release.log
+          $refused = $LASTEXITCODE -ne 0
+          Get-Content out/mock-release.log | Select-Object -Last 15
+          if (-not $refused) { throw "a release build embedded the test suite's stand-in runtime" }
+          if (-not (Select-String -Path out/mock-release.log -SimpleMatch "test suite's stand-in runtime" -Quiet)) { throw "the release build failed for another reason" }
+          $global:LASTEXITCODE = 0  # the refused build above was the expected result; the step's exit code is the last native one
 
   release-models:
     # The front end and launcher with the release's model flags (BUILDING.md 4.1 and 5.2: Model L and Model K on), so a
