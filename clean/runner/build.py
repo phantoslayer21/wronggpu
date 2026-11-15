@@ -35,11 +35,13 @@ SOURCES = ["swin.hip", "probe.hip", "overlap.hip", "rates.hip", "mlpbench.hip", 
            "post.hip", "frame.hip", "dec1_dec0.hip"]
 # Default sources of the families that do not build the whole gfx12 set: the kernels that are ported (gfx11: swin.hip
 # through the wrappers of wg_platform.h) or compile unchanged; no Model K / L kernels, no post_w64 variants
-FAMILY_SOURCES = {"gfx11": ["post.hip", "exposure.hip", "frame.hip", "probe.hip", "swin.hip", "encoder.hip", "decoder.hip"]}
+FAMILY_SOURCES = {"gfx11": ["post.hip", "exposure.hip", "frame.hip", "probe.hip", "swin.hip", "encoder.hip", "decoder.hip",
+                            "dec1_dec0.hip"]}
 # -D macros of a family's code objects, by source. gfx11 swin.hip: the plain software FP32 -> E4M3 conversion
 # (wg_platform.h, -DWG_SLOW_Q8): with the faster one the C=128 block kernel spills 27 VGPRs and the others take 30 to 35
 # more (clang 20, --report); the faster form is for the speed slice, which budgets the registers
-FAMILY_DEFINES = {"gfx11": {"swin.hip": {"WG_SLOW_Q8": 1}}}
+# dec1_dec0.hip includes the same block and takes the same define (178 VGPRs against 214 with the faster conversion)
+FAMILY_DEFINES = {"gfx11": {"swin.hip": {"WG_SLOW_Q8": 1}, "dec1_dec0.hip": {"WG_SLOW_Q8": 1}}}
 RUNTIME_DIR = os.path.join(os.path.dirname(HERE), "runtime")
 RUNTIME_SOURCES = ["device.cpp", "embedded.cpp", "model.cpp", "runtime.cpp",
                    os.path.join("..", "converter", "src", "sha256.cpp"),   # shared with the converter (spec 08)

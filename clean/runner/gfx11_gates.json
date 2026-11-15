@@ -763,6 +763,18 @@
     "waves": 12,
     "lds": 10240
    }
+  },
+  "dec1dec0": {
+   "swin_block_c64_add_dec0": {
+    "vgprs": 178,
+    "waves": 8,
+    "lds": 32768
+   },
+   "swin_block_c64_add_dec0_nc": {
+    "vgprs": 178,
+    "waves": 8,
+    "lds": 32768
+   }
   }
  }
 }

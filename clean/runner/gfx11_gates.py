@@ -2,7 +2,7 @@
 """Resource gates of the Model M Swin block kernels in the gfx11 (RDNA 3) builds: vector registers, spills and waves per SIMD
 of every kernel of gfx11_gates.json, in the default gfx11 build and in each variant of variants.FAMILY_VARIANTS["gfx11"], and the
 bottleneck megakernel of the persistent-kernel build (variants.FAMILY_MEGA["gfx11"], compiled from kernels/swin_v2.hip), and
-the other Model M kernels (SOURCE_BUILDS: enc0, dec0).
+the encoder, decoder and fused dec1 + dec0 kernels (SOURCE_BUILDS: enc0, dec0, dec1dec0).
 This table belongs to the gfx11 (HIP) builds; clean/dx12/vgpr_limits.json belongs to the Direct3D 12 ports.
 
 A gate says: the kernel spills nothing, uses at most `vgprs` registers and keeps at least `waves` waves per SIMD. The numbers
@@ -41,8 +41,10 @@ MEGA_KERNELS = ["swin_bneck6", "swin_bneck6_nc"]
 
 
 # The other Model M kernels of the gfx11 build (slice E4), each its own source and "build": name -> (source, gated kernels).
+# dec1_dec0.hip is the fused dec1 + dec0 (swin.hip's block with dec0's epilogue).
 SOURCE_BUILDS = {"enc0": ("encoder.hip", ["input_encoder"]),
-                 "dec0": ("decoder.hip", ["coef_decoder"])}
+                 "dec0": ("decoder.hip", ["coef_decoder"]),
+                 "dec1dec0": ("dec1_dec0.hip", ["swin_block_c64_add_dec0", "swin_block_c64_add_dec0_nc"])}
 
 
 def builds():

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
-"""Model M stages enc0 (kernels/encoder.hip) and dec0 (kernels/decoder.hip) on a gfx11 (RDNA 3) GPU: the FP16 route, with the
-matrix wrappers of kernels/wg_platform.h. The cases are those of the emulator tests (test_encoder_emu, test_decoder_emu),
-against the same float64 / NumPy references.
+"""Model M stages enc0 (kernels/encoder.hip), dec0 (kernels/decoder.hip) and the fused dec1 + dec0 (kernels/dec1_dec0.hip) on a
+gfx11 (RDNA 3) GPU: the FP16 route, with the matrix wrappers of kernels/wg_platform.h. The cases are those of the emulator
+tests (test_encoder_emu, test_decoder_emu, test_dec1_dec0_emu), against the same float64 / NumPy references.
 
 Acceptance (provisional, the maintainer's open decision; the same as test_gpu_enc1 and test_gpu_swin_stages): spec 09 per case
 and output (no non-finite value, at most 2 % of the values more than one step off, mean absolute error at most 1 % of the
@@ -15,7 +15,7 @@ only partly valid. v_wmma and v_permlanex16 need every lane executing; an encode
 compiler move the whole projection into that branch (test_exec_scan finds it in the instruction stream; on the card the valid
 tokens of a partly valid tile got NaN or wrong values).
 
-Skipped unless WG_GPU_TEST=1. Needs a build for the card with encoder.co and decoder.co (the default build):
+Skipped unless WG_GPU_TEST=1. Needs a build for the card with encoder.co, decoder.co and dec1_dec0.co (the default build):
 
     python clean/runner/build.py --arch gfx1100 --rocm <ROCm> --out <build> --no-runtime
     WG_GPU_TEST=1 WG_BUILD=<build> WG_ROCM=<ROCm> python -m unittest clean.tests.test_gpu_e4
@@ -28,7 +28,9 @@ import numpy as np
 from clean.reference import decoder as Dc
 from clean.reference import encoder as E
 from clean.reference import fp8
+from clean.reference import swin as S
 from clean.runner import family
+from clean.tests import test_dec1_dec0_emu as TD1
 from clean.tests import test_decoder_emu as TD
 from clean.tests import test_encoder_emu as TE
 from clean.tests import test_kernels_emu as TK
@@ -41,7 +43,7 @@ RUNS = 3
 
 
 class E4Gpu(GpuCase):
-    CODE_OBJECTS = ("encoder.co", "decoder.co")
+    CODE_OBJECTS = ("encoder.co", "decoder.co", "dec1_dec0.co")
 
     @classmethod
     def setUpClass(cls):
@@ -256,6 +258,55 @@ class TestDecoderGpu(E4Gpu, TD.TestDecoderEmu):
             print(f"dec0 {name} render: median of 50 launches {' '.join(f'{v:.3f}' for v in t)} ({np.median(t):.3f}) ms on "
                   f"{r.dev.device_name}")
             self.assertTrue(all(0.0 < v < 1000.0 for v in t))
+
+
+class TestDec1Dec0Gpu(E4Gpu, TD1.TestDec1Dec0Emu):
+    """The fused dec1 + dec0 on the card: the same bytes as the two stages one after the other (the fused kernel's contract),
+    and against the reference: dec0's reference fed the card's own dec1 output."""
+
+    def test_fused_equals_separate(self):
+        super().test_fused_equals_separate()
+
+    def test_against_the_reference_fed_the_card_s_own_dec1_output(self):
+        r = self.runner
+        totals = [0, 0]
+        for i, (R, F, offset, reset) in enumerate(TD1.CASES):
+            x, t = TD1.make(i, R, F, offset, reset)
+            with self.subTest(case=i, R=R, offset=offset, reset=reset):
+                got = r.run("dec1dec0", r.pack_weights("dec1dec0", t), x, None)
+                z = r.run("dec1", r.pack_weights("dec1", t["dec1"]), x["y"], x["offset"], x["skip"])["out"]
+                zref = S.run_stage("dec1", t["dec1"], x["y"], x["offset"], x["skip"], gelu="sigmoid")["out"]
+                judge(self, f"dec1 case {i} out", z, zref, TK.ulp_distance(z, zref))
+                xd = dict({k: v for k, v in x.items() if k not in ("y", "skip", "offset")}, features=z)
+                ref = Dc.decode(xd, t["dec0"])
+                self.assertEqual(set(got), {"A", "B", "C", "latent"})
+                for k, (g, rf, steps) in dec0_steps(got, ref).items():
+                    n, d = judge(self, f"dec1dec0 case {i} {R} {k}", g, rf, steps)
+                    totals[0] += n
+                    totals[1] += d
+        print(f"dec1dec0 all cases: {totals[1] / totals[0] * 100:.4f} % of the dec0 values differ from the reference "
+              f"({totals[0]} values)")
+
+    def test_stage_time(self):
+        """Median of 50 launches, three runs: the fused kernel against dec1 then dec0 as two launches."""
+        r = self.runner
+        for name, (rw, rh) in TIMED_SIZES.items():
+            rng = np.random.default_rng(5)
+            fw, fh = -(-rw // 32) * 32, -(-rh // 32) * 32
+            H, W = fh // 2, fw // 2
+            p1, p0 = S.random_params("dec1", rng), Dc.random_params(rng)
+            y, skip = S.random_inputs("dec1", H, W, rng)
+            xd = Dc.random_inputs(rng, rw=rw, rh=rh, fw=fw, fh=fh)
+            x = {k: v for k, v in xd.items() if k != "features"}
+            x.update(y=y, skip=skip, offset=S.window_offset("dec1", 0))
+            w = r.pack_weights("dec1dec0", {"dec1": p1, "dec0": p0})
+            row = {}
+            for label, stage in (("fused", "dec1dec0@fused"), ("two launches", "dec1dec0")):
+                t = [r.time(stage, w, x, None, repeats=50) for _ in range(RUNS)]
+                row[label] = (t, float(np.median(t)))
+            print(f"dec1dec0 {name} render: " + "; ".join(
+                f"{k} {' '.join(f'{v:.3f}' for v in t)} ({m:.3f}) ms" for k, (t, m) in row.items()))
+            self.assertTrue(all(0.0 < m < 1000.0 for _, m in row.values()))
 
 
 if __name__ == "__main__":

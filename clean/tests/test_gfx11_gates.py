@@ -44,12 +44,13 @@ class TestGateTable(unittest.TestCase):
         self.assertEqual(sorted(self.table["gates"]["bmegahg"]), ["swin_bneck6", "swin_bneck6_nc"])
         self.assertGreaterEqual(self.table["gates"]["bmegahg"]["swin_bneck6"]["waves"], 6)
 
-    def test_the_encoder_and_decoder_are_gated(self):
-        """E4: input_encoder (encoder.hip) and coef_decoder (decoder.hip): each its own build in the table, no spill by
-        construction (a spilling kernel is not recorded)."""
+    def test_the_encoder_decoder_and_fused_kernels_are_gated(self):
+        """E4: input_encoder (encoder.hip), coef_decoder (decoder.hip) and swin_block_c64_add_dec0[_nc] (dec1_dec0.hip): each
+        its own build in the table, no spill by construction (a spilling kernel is not recorded)."""
         gates = self.table["gates"]
         self.assertEqual(sorted(gates["enc0"]), ["input_encoder"])
         self.assertEqual(sorted(gates["dec0"]), ["coef_decoder"])
+        self.assertEqual(sorted(gates["dec1dec0"]), ["swin_block_c64_add_dec0", "swin_block_c64_add_dec0_nc"])
         self.assertEqual(G.SOURCE_BUILDS["enc0"][0], "encoder.hip")
 
     def test_recorded_numbers_are_plausible(self):
