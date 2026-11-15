@@ -130,6 +130,8 @@ class Runner:
         self._funcs = {}
         self.mega_groups = None  # megakernel grid (None: the variant's default, variants.py geometry["mega"])
         self.mid_groups = None   # swin_mid grid (None: the variant's default, variants.py geometry["mid"])
+        self.resident = 0        # N > 0: the plain C = 64 block launches (enc1, dec1) run the weight-resident kernels
+                                 # swin_block_c64[_add]_r with at most N workgroups of 512 lanes (the runtime's swin_resident)
 
     # ---- public API (spec 90) --------------------------------------------------------------------------------------
 
@@ -524,6 +526,10 @@ class Runner:
             launch_name = kname + ("_nc" if safe else "")
             profile = int(geo.get("profile", 0))
             prof_args = []
+            nwg_res = min(int(self.resident), _cdiv(nwin, 16)) if C == 64 and not fused and not profile else 0
+            if nwg_res:  # a persistent grid; the kernels take the workgroup count where the profile build has its buffer
+                launch_name = kname + "_r" + ("_nc" if safe else "")
+                block_grid, swin_block, prof_args = nwg_res, 512, [ctypes.c_int(nwg_res)]
             if profile:
                 waves = block_grid * (swin_block // 32)
                 alloc("prof", waves * V.PROF_WORDS * 4)
