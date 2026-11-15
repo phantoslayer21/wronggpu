@@ -23,6 +23,9 @@
 //   WG_SWIN_THREADS  default lanes per Swin block workgroup (128, 256 or 512); WG_THREADS_<kernel> overrides one
 //   WG_WPW_C64 / _C96 / _C128  windows per wave in the block kernel of that width
 //   WG_UNIT_BYTES    upper limit of a staged MLP weight unit
+//   WG_F16_A         gfx11 only (with WG_F16_W or alone): 1 makes each activation operand (the FP8 values of a 16-token
+//                    tile that feed matrix instructions) once, already exchanged with the other half of the wave and
+//                    widened to F16, instead of at every use: 8 registers per K group instead of 2. Bit-identical.
 //   WG_F16_W         gfx11 only (FP16 route, see wg_platform.h): 1 widens the weights to F16 once per workgroup, when the
 //                    unit is copied to LDS (a unit then holds half the code bytes, so the LDS stays the same); the plain
 //                    block kernels only (not the fused merge / expand, not the resident kernels). Bit-identical.
@@ -86,8 +89,11 @@
 #ifndef WG_F16_W
 #define WG_F16_W 0
 #endif
-#if WG_F16_W && !(defined(WG_GFX11) || defined(WG_EMU_GFX11))
-#error "WG_F16_W is for the gfx11 matrix wrappers (wg_platform.h)"
+#ifndef WG_F16_A
+#define WG_F16_A 0
+#endif
+#if (WG_F16_W || WG_F16_A) && !(defined(WG_GFX11) || defined(WG_EMU_GFX11))
+#error "WG_F16_W and WG_F16_A are for the gfx11 matrix wrappers (wg_platform.h)"
 #endif
 #ifndef WG_GEMM_THREADS
 #define WG_GEMM_THREADS 256
@@ -387,6 +393,35 @@ WG_FN v2i pack_in(v8f d) {  // timing-only stand-in for wg_pack_q8_inner: 6 adds
 template <bool SAFE>
 WG_FN v2i pack_in(v8f d) { return SAFE ? wg_pack_q8_nc(d) : wg_pack_q8_inner(d); }
 #endif
+// An activation operand of the matrix instruction (the quantized values of a tile): the FP8 codes, or (A16, WG_F16_A) the 16
+// F16 values of a K group, ready for the instruction.
+template <bool A16>
+struct ActOp {
+  typedef v2i type;
+};
+#if WG_F16_A
+template <>
+struct ActOp<true> {
+  typedef v16h type;
+};
+#endif
+template <bool SAFE, bool A16>
+WG_FN typename ActOp<A16>::type pack_act(v8f d) {
+#if WG_F16_A
+  if constexpr (A16) return wg_k16_codes(pack_in<SAFE>(d));
+  else
+#endif
+  return pack_in<SAFE>(d);
+}
+// The F16 operand the matrix instruction takes for 8 F16 values per lane (the softmax probabilities).
+template <bool A16>
+WG_FN auto act_f16(v8h p) {
+#if WG_F16_A
+  if constexpr (A16) return wg_k16_f16(p);
+  else
+#endif
+  return p;
+}
 #if defined(WG_ABLATE_LDS) && WG_ABLATE_LDS
 WG_FN v2i fake_frag(int index, u32 lane) {  // timing-only: a fragment made from registers, no LDS read
   v2i r;
@@ -540,6 +575,14 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
   // plain block path has it.
   static_assert(!HYB || (MCO == 0 && ECL == 0 && !RESIDENT && !WG_AV8 && !WG_SMAX16), "HYB: plain block path only");
   constexpr int UB = W16 ? 2 * MAXU : MAXU;  // bytes of a weight unit buffer in LDS
+#if WG_F16_A
+  constexpr bool A16 = C < 96;  // activations as F16 operands (pack_act); not the wider kernels: C = 96 spills 30 registers
+  static_assert(!WG_AV8 && WG_GELU_MODE < 3, "WG_F16_A: no FP8 A.V, no packed-FP16 GELU");
+#else
+  constexpr bool A16 = false;
+#endif
+  typedef typename ActOp<A16>::type AO;
+  static_assert(!HYB || (!W16 && !A16), "HYB: FP8 weight and activation operands only (no gfx11 F16 operand variants)");
   // RESIDENT (kernels *_r): the block's whole weight stream (every head and MLP unit) stays in LDS for the whole
   // launch; each wave runs windows wave_id, wave_id + total waves, ... with no staging and no barrier after the first
   // copy. Same arithmetic per window as the staged kernel (bit-identical).
@@ -643,7 +686,7 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
 #else
   // Steps 1-2: a = q8(RMSNorm(x; gamma1)). The accumulator for step 7, x1 = x + Wp q8(o) + bp, starts as x + bp;
   // each head adds its slice of Wp q8(o) as soon as its o is known (only one head's o is ever live).
-  v2i af[WPW][KC];
+  AO af[WPW][KC];
   v8f acc[WPW][KC];
   {
     const float* g1 = (const float*)(w + L::G1) + hh * HALF;
@@ -687,7 +730,7 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
 #endif
 #pragma unroll
       for (int k = 0; k < KC; ++k) {
-        af[i][k] = pack_in<SAFE>(acc[i][k] * r * wg_load8f(g1 + 8 * k));
+        af[i][k] = pack_act<SAFE, A16>(acc[i][k] * r * wg_load8f(g1 + 8 * k));
         acc[i][k] += WG_BIAS8(bp + k * 16);
       }
     }
@@ -705,7 +748,7 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
     }
     const u8* U = RESIDENT ? lds + hd * L::HEAD_BYTES : lds + buf * UB;
     // u = q8(Wqk a): result rows are this head's 32 channels in two tiles, columns are tokens.
-    v2i uf[WPW][2];
+    AO uf[WPW][2];
     // V^T = a^T Wv^T: rows are tokens (key index s), columns are the 32 value channels in two tiles.
 #if WG_AV8
     v2i vt[WPW][2];
@@ -735,7 +778,7 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
 #pragma unroll
       for (int i = 0; i < WPW; ++i) {
         if constexpr (HYB) uf[i][mt] = hyb_q8_of_chain(accq[i]);
-        else uf[i][mt] = pack_in<SAFE>(accq[i]);
+        else uf[i][mt] = pack_act<SAFE, A16>(accq[i]);
 #if WG_AV8
         vt[i][mt] = pack_in<SAFE>(accv[i]);
 #else
@@ -745,14 +788,14 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
     }
     WG_PHASE(2, uf[0][1][0]);
 #if defined(WG_ABLATE_ATTN) && WG_ABLATE_ATTN
-    v2i of[WPW][2];
+    AO of[WPW][2];
 #pragma unroll
     for (int i = 0; i < WPW; ++i) { of[i][0] = uf[i][0]; of[i][1] = uf[i][1]; (void)vt[i][0]; (void)vt[i][1]; }
     (void)t;
 #else
     // Lane (t, h) holds logits S(t, s) for the 8 keys s = drow(h, v); bias is packed in the same order.
     const v8f bias = wg_load8f((const float*)(w + L::BIAS) + ((hd * 16 + (int)t) * 2 + (int)hh) * 8);
-    v2i of[WPW][2];
+    AO of[WPW][2];
 #pragma unroll
     for (int i = 0; i < WPW; ++i) {
       if constexpr (HYB) {   // s = one 32-term FP8 op started at B; the original's weights; o = FP8(RN16(P V))
@@ -830,11 +873,13 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
 #endif
 #endif
       // o = A V: rows are value channels, columns are tokens; K = keys, paired by drow on both sides.
-#pragma unroll
 #if WG_AV8
+#pragma unroll
       for (int dt = 0; dt < 2; ++dt) of[i][dt] = pack_in<SAFE>(wg_wmma_fp8(vt[i][dt], p, wg_splat(0.0f)));
 #else
-      for (int dt = 0; dt < 2; ++dt) of[i][dt] = pack_in<SAFE>(wg_wmma_f16(vt[i][dt], p, wg_splat(0.0f)));
+      const auto pw = act_f16<A16>(p);  // the exchange of the probabilities once for both value tiles
+#pragma unroll
+      for (int dt = 0; dt < 2; ++dt) of[i][dt] = pack_act<SAFE, A16>(wg_wmma_f16(vt[i][dt], pw, wg_splat(0.0f)));
 #endif
     }
 #endif
@@ -865,7 +910,7 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
   }
 
   // Step 8: m = q8(RMSNorm(x1; gamma2)). Then add b2 to the residual accumulator.
-  v2i mf[WPW][KC];
+  AO mf[WPW][KC];
   {
     const float* g2 = (const float*)(w + L::G2) + hh * HALF;
     const float* b2 = (const float*)(w + L::B2) + hh * 8;
@@ -894,7 +939,7 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
 #endif
 #pragma unroll
       for (int k = 0; k < KC; ++k) {
-        mf[i][k] = pack_in<SAFE>(acc[i][k] * r * wg_load8f(g2 + 8 * k));
+        mf[i][k] = pack_act<SAFE, A16>(acc[i][k] * r * wg_load8f(g2 + 8 * k));
         acc[i][k] += WG_BIAS8(b2 + k * 16);
       }
     }
@@ -964,7 +1009,7 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
       WG_SCHED_FENCE();  // ... and no instruction at all (machine scheduler): the loads stay ahead of the GELU
 #endif
       // GELU + q8.
-      v2i hf[GROUP][WPW];
+      AO hf[GROUP][WPW];
 #pragma unroll
       for (int g = 0; g < GROUP; ++g)
 #pragma unroll
@@ -986,7 +1031,7 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
           r[1] = __builtin_bit_cast(int, (ge[4] + ge[5]) + (ge[6] + ge[7]));
           hf[g][i] = r;
 #else
-          hf[g][i] = SAFE ? wg_pack_q8_nc(ge) : wg_pack_q8_inner(ge);
+          hf[g][i] = pack_act<SAFE, A16>(ge);
 #endif
         }
       WG_PHASE(8, hf[GROUP - 1][0][0]);

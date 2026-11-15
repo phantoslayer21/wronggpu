@@ -198,6 +198,9 @@ WG_FN v8f wg_wmma_f16(v8h a, v8h b, v8f c) { return wg_wmma16_f16(wg_k16_f16(a),
 // the other is made as above.
 WG_FN v8f wg_wmma_fp8(v16h a, v2i b, v8f c) { return wg_wmma16_f16(a, wg_k16_codes(b), c); }
 WG_FN v8f wg_wmma_fp8(v2i a, v16h b, v8f c) { return wg_wmma16_f16(wg_k16_codes(a), b, c); }
+// Both operands already hold their 16 F16 values in K order (swin.hip WG_F16_A: an activation made once and used many times).
+WG_FN v8f wg_wmma_fp8(v16h a, v16h b, v8f c) { return wg_wmma16_f16(a, b, c); }
+WG_FN v8f wg_wmma_f16(v8h a, v16h b, v8f c) { return wg_wmma16_f16(wg_k16_f16(a), b, c); }
 // 8 E4M3 codes (one lane's fragment) as 8 F16 values: the half of a K group that one lane of a half-wave contributes.
 WG_FN v8h wg_widen_e4m3x8(v2i p) {
   const v4h a = wg_widen_e4m3x4((u32)p[0]), b = wg_widen_e4m3x4((u32)p[1]);
