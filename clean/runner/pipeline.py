@@ -31,7 +31,7 @@ Extra keyword arguments (not needed by the spec team): backend="emu" runs everyt
 backend="dx12" the hybrid D3D12 device (the kernels with a D3D12 port in <build_dir>/dx12 on D3D12, WG_DX12_KERNELS;
 clean/dx12/README.md); backend="d3d12" selects native D3D12 (backend 3; unsupported routes fail, no HIP fallback);
 variant selects a Swin build variant (variants.py; same as kernels["swin"]); d_row the WMMA accumulator layout
-(see selftest.py).
+(see selftest.py; "runtime": the table is left to the runtime, which takes the one of its device, as a game's interop does).
 """
 import ctypes
 import json
@@ -222,7 +222,9 @@ class Pipeline:
             lib.wg_rt_upload_motion_hi.argtypes = [vp, ctypes.c_int, ctypes.c_int, ctypes.c_int, vp,
                                                    P(ctypes.c_float), P(ctypes.c_float)]
 
-        self.d_row = resolve_d_row(d_row if d_row is not None else os.environ.get("WG_D_ROW") or family.build_family(build_dir))
+        runtime_rows = isinstance(d_row, str) and d_row == "runtime"   # cfg.d_row stays 0: the runtime's own choice, as in a game
+        self.d_row = resolve_d_row(d_row if d_row is not None and not runtime_rows
+                                   else os.environ.get("WG_D_ROW") or family.build_family(build_dir))
         geo, code_object = V.DEFAULT_GEOMETRY, V.code_object(variant)
         manifest = os.path.join(build_dir, V.MANIFEST)
         if os.path.exists(manifest):
@@ -272,7 +274,7 @@ class Pipeline:
         cfg.wpw64, cfg.wpw96, cfg.wpw128 = (geo["wpw"]["swin_block_c64"], geo["wpw"]["swin_block_c96"],
                                             geo["wpw"]["swin_block_c128"])
         for i, v in enumerate(np.asarray(self.d_row).reshape(-1)):
-            cfg.d_row[i] = int(v)
+            cfg.d_row[i] = 0 if runtime_rows else int(v)
         self._cfg = cfg
         rt, err = ctypes.c_void_p(), ctypes.create_string_buffer(2048)
         if lib.wg_rt_create(ctypes.byref(cfg), ctypes.byref(rt), err, len(err)) != 0:

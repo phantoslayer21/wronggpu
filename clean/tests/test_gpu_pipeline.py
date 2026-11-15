@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: MIT
 """The whole Model M frame on a gfx11 (RDNA 3) GPU through clean/runner/pipeline.py (E5): synthetic weights and frames only.
 
-THIS NEEDS A RUNTIME THAT THE REPOSITORY DOES NOT HAVE YET. Skipped, with the runtime's own message, until it runs:
-  - build.py makes no libwg_runtime.so for a gfx11 target (the gfx11 branch returns before the runtime step), and
-  - the runtime refuses the device (device.cpp: "no matching HIP device with packaged gfx1200/gfx1201 kernels") and looks up
-    its code objects as <arch>/<name> or <arch>.<name> in the build folder.
-With those three things changed in a scratch copy (runtime built by build.runtime_command with embed=False, device.cpp
-accepting gfx1100, the code objects linked as gfx1100/<name>) the cases below ran on the RX 7900 XT; the numbers are in the
-commit message. Which of these changes the project takes, and how, is the maintainer's decision.
+It needs a gfx11 build that includes the runtime library (build.py makes it for a gfx11 target unless --no-runtime), and runs
+on the card that the runtime finds: the gate takes gfx1100 and gfx1101 (clean/runtime/target_family.h). The runtime reads
+its code objects as <arch>.<name> from the folder (the build writes those copies) and, with no table in the config, packs
+the weights with the accumulator rows of the device's family, as a game's interop leaves it. Which players get a gfx11
+runtime, and how that is gated, is the maintainer's decision; this test only shows that the whole frame runs.
 
 What it checks, with the provisional acceptance of the other card tests (the output standard of an RDNA 3 build is the
 maintainer's open decision, plan question 7):
@@ -15,6 +13,8 @@ maintainer's open decision, plan question 7):
     run on the card's own stage input and weights (both are the same instruction sequence up to the matrix instruction's
     rounding): no non-finite value, fewer than 5 % one-code flips per stage and case, at most 2 % more than one step off.
     The bottleneck is checked as the chain b0 .. b5 (the persistent kernel does not write the maps between the blocks);
+  - the runtime's own accumulator rows (no table in the config, Pipeline d_row="runtime") pack every stage exactly as
+    packing.py does for gfx11, and the frame is the same bits as with the table given;
   - the final output of three frames is finite;
   - the output pixels against the exact (gfx12-arithmetic) emulator frame: an EXPECTED FAILURE. The stages differ by a few
     one-code flips each and a random synthetic network compounds them (about 3 % of the RMS at the end of the encoder, 8 % at the
@@ -35,7 +35,8 @@ import numpy as np
 from clean.reference import encoder as En
 from clean.reference.swin import window_offset
 from clean.runner import family
-from clean.runner.pipeline import SWIN_ORDER, Pipeline
+from clean.runner.packing import pack_stage
+from clean.runner.pipeline import SWIN_ORDER, Pipeline, logical_tensors, read_model_tensors
 from clean.runner.synthetic_model import synthetic_tensors, write_raw
 from clean.tests import test_kernels_emu as TK
 from clean.tests import test_kernels_emu_gfx11 as TG
@@ -109,6 +110,19 @@ class WholeFrameGpu(unittest.TestCase):
                 r = emu.run(s, p.stage_blob(s), o["b5" if s == "dec2" else "dec2"]["out"], window_offset(s, parity),
                             o[skip]["skip"])
                 check(s, o[s]["out"], r["out"])
+
+    def test_the_runtime_picks_the_rows_of_the_cards_family(self):
+        render, output = SMALL[0]
+        # two new pipelines: the cached ones have run frames, and the frame counter (window parity, dither) is part of the result
+        given, own = (Pipeline(self.build, self.rocm, self.model, render, output, FLAGS, model_format="raw", d_row=rows,
+                               check_packing=False) for rows in (None, "runtime"))
+        own.check_packing(self.model)    # raises when a stage blob differs from packing.py on the gfx11 table
+        tensors = logical_tensors(read_model_tensors(self.model))
+        self.assertNotEqual(own.stage_blob("enc1"), pack_stage("enc1", tensors["enc1"], "gfx12"))
+        for s in ["enc0"] + SWIN_ORDER + ["dec0"]:
+            self.assertEqual(own.stage_blob(s), given.stage_blob(s), s)
+        f = frames(*render)[0]
+        np.testing.assert_array_equal(own.frame(f)["out"], given.frame(f)["out"])
 
     def test_the_output_of_three_frames_is_finite(self):
         for render, output in SMALL:
