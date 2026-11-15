@@ -1,10 +1,17 @@
 {
  "what": "negative control of Model L's oracle block form: one recorded run checked against the Model M-form oracle and the FP16-form oracle in one process",
- "command": "python clean/l/runner/l_q7_negative_control.py --build <build> --runtime-commit 9ef4da70ad607e02878a6c82ba50e71b2768b1a8 --mm8 exact --json <out>",
- "runtime_commit": "9ef4da70ad607e02878a6c82ba50e71b2768b1a8",
+ "command": "python clean/l/runner/l_q7_negative_control.py --build <build> --mm8 exact --json <out>",
+ "runtime_commit": "4ef40d2223bc6be232d67793025daaaf73bc1a0a",
+ "identity_verified": {
+  "git_commit": "4ef40d2223bc6be232d67793025daaaf73bc1a0a",
+  "git_tracked_changes": false,
+  "runtime_library_sha256": "594fbff57ae3f4020393e71c473e6340abd21ce979711199d811e1da2c14192c",
+  "params_pkl_sha256": "26874860dec760e466379f76450228a7b6d00c3018fa07180c212bba59f661f9",
+  "source_json_sha256": "5056738fd1287935bd924949c7a9697bf3c7c6fafe01fc6c1b6f559a2cbb8ecd"
+ },
  "recorded_run": {
   "file": "lframe_L_stages.pkl",
-  "sha256": "f942be35d7e4b5686f2dad522c49e2fe3d1c8a67f049aa08cf24ee2e6a64aeb9",
+  "sha256": "a3d098bc39397b8131dc2d95a3ebd190353fc44306f4dc52cebe218d13125099",
   "frames": 11,
   "model": "L",
   "kernels": {
@@ -51,7 +58,6 @@
    "outputs_raw": "843c86d99a05bf6e9e07b408efd2609b7a1ae81633988c3e03bdadda88a67359"
   }
  },
- "runtime_library_sha256": "f55f5ecc67e7ee3c999afc836614085f60c8507daf3bf1dfad5acc0ad79eb8cc",
  "model_source": {
   "kind": "converter",
   "model_sha256": "d3c040191ec7ab0164efc03ee76413277e7fb54e6e6d2b168f2c0202aa1ad806",
@@ -61,6 +67,7 @@
  "dec0_rule": "A, B and latent codes and C values each at most 0.5 % differing (l_frame_check dec0)",
  "forms": {
   "model_m_form": {
+   "fp8_op_model": "exact",
    "dec0_frames_passed": 11,
    "enc0_frames_passed": 11,
    "alignment_frames_ok": 11,
@@ -411,6 +418,7 @@
    ]
   },
   "fp16_form": {
+   "fp8_op_model": "exact",
    "dec0_frames_passed": 0,
    "enc0_frames_passed": 0,
    "alignment_frames_ok": 11,
