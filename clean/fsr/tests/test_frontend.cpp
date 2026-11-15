@@ -1430,13 +1430,19 @@ static void TestSplitRetryPendingStoresNoFailure() {
     CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
 }
 
-// R1: the hold is taken owner first, retain after: whatever fails while the owner is built (an allocation: a callable whose copy
-// throws stands for it) fails before anything was retained, so nothing is leaked; the normal path retains once and gives it
-// back once.
-struct ThrowsOnCopy {
-    ThrowsOnCopy() = default;
-    ThrowsOnCopy(ThrowsOnCopy&&) noexcept = default;
-    ThrowsOnCopy(const ThrowsOnCopy&) { throw std::bad_alloc(); }
+// R1: the hold is taken owner first, retain after: everything that can throw (the allocations that build the owner) happens
+// before the reference is retained, so a failure there leaks nothing; and the normal path retains once and gives it back once.
+// The order is observed without throwing: a release callable that records, each time it is copied (building the owner copies
+// it), whether the reference had already been retained at that moment.
+struct RecordsRetainsWhenCopied {
+    int* retains;
+    int* copies;
+    int* copiesAfterRetain;
+    RecordsRetainsWhenCopied(int* r, int* c, int* a) : retains(r), copies(c), copiesAfterRetain(a) {}
+    RecordsRetainsWhenCopied(const RecordsRetainsWhenCopied& o) : retains(o.retains), copies(o.copies), copiesAfterRetain(o.copiesAfterRetain) {
+        ++*copies;
+        if (*retains > 0) ++*copiesAfterRetain;
+    }
     void operator()(void*) const {}
 };
 
@@ -1450,16 +1456,16 @@ static void TestDeviceHoldAllocationFailure() {
         CHECK(hold && retains == 1 && releases == 0);
     }
     CHECK(retains == 1 && releases == 1);  // given back once, by the owner going away
-    retains = releases = 0;
-    bool threw = false;
-    std::function<void(void*)> failing = ThrowsOnCopy();  // building the owner copies it: that throws, as a failed allocation would
-    try {
-        ScopedRelease hold = AcquireHold(reinterpret_cast<void*>(0x1), retain, failing);
-    } catch (const std::bad_alloc&) {
-        threw = true;
+    retains = 0;
+    int copies = 0, copiesAfterRetain = 0;
+    std::function<void(void*)> observed = RecordsRetainsWhenCopied(&retains, &copies, &copiesAfterRetain);
+    copies = copiesAfterRetain = 0;  // (building `observed` itself is not part of AcquireHold)
+    {
+        ScopedRelease hold = AcquireHold(reinterpret_cast<void*>(0x1), retain, observed);
+        CHECK(hold && retains == 1);
     }
-    CHECK(threw);                          // the failure reached the caller
-    CHECK(retains == 0 && releases == 0);  // and no reference was taken, so none is leaked
+    CHECK(copies >= 1);               // building the owner did copy the callable (the observation is real)
+    CHECK(copiesAfterRetain == 0);    // and every copy happened before the retain: the owner is built first
 }
 
 // R1: the create worker's device reference is owned (RAII): it is given back when the worker could not be started at all
