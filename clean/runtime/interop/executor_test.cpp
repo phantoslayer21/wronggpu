@@ -4,6 +4,7 @@
 // `out`, and signals `done`. view 0: color times the exposure (so the exposure plumbing is visible); 1: depth (d, d,
 // d); 2: motion in render pixels (mx, my, 0). WrongGPU's own code.
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "executor.h"
@@ -291,6 +292,52 @@ class TestExecutor : public Executor {
 
 std::unique_ptr<Executor> make_test_executor(int view, bool handles, bool keep) {
   return std::unique_ptr<Executor>(new TestExecutor(view, handles, keep));
+}
+
+// ---- executor=dx12-test: the scripted executor on the D3D12 route (executor.h make_scripted_dx12_executor) ----------------
+
+namespace {
+
+class ScriptedDx12Executor final : public Executor {
+ public:
+  explicit ScriptedDx12Executor(std::string script) : script_(script.empty() ? "o" : std::move(script)) {}
+  const char* name() const override { return "dx12-scripted"; }
+  bool needs_handles() const override { return false; }
+  bool init(ID3D12Device*, const SharedSet&, std::string*) override { return true; }
+  bool submit(const Job&, bool*, std::string* err) override {
+    *err = "the scripted executor records into the game's list";
+    return false;
+  }
+  bool records_into_list() const override { return true; }
+  bool record(const Job& job, ID3D12GraphicsCommandList*, bool* output_written, std::string* err) override {
+    const size_t k = job.value ? (size_t)(job.value - 1) : 0;
+    const char c = script_[k < script_.size() ? k : script_.size() - 1];
+    const std::string n = std::to_string((unsigned long long)job.value);
+    *output_written = false;
+    if (c == 'r') {
+      *err = "frame not taken (nothing recorded): scripted refusal of frame " + n;
+      return false;
+    }
+    completed_ = job.value;
+    if (c == 'f') {
+      *err = "scripted failure of frame " + n + " inside the network";
+      return false;
+    }
+    *output_written = true;
+    return true;
+  }
+  uint64_t completed() const override { return completed_; }
+  void drain() override {}
+
+ private:
+  std::string script_;
+  uint64_t completed_ = 0;
+};
+
+}  // namespace
+
+std::unique_ptr<Executor> make_scripted_dx12_executor(const std::string& script) {
+  return std::unique_ptr<Executor>(new ScriptedDx12Executor(script));
 }
 
 }  // namespace wgi

@@ -219,6 +219,18 @@ private:
     std::string FailureKey(const WgUpscalerBackend* backend, const UpscaleContext& u) const;
     void ResizeForFrame(UpscaleContext& u, WgFrame& frame, const std::string& tag);  // bug hunt H
     ffxReturnCode_t BrokenFrame(UpscaleContext& u, WgFrame& frame, const std::string& tag, uint64_t frameIndex);  // bug hunt F1
+    // B8, the refused-frame contract: what a frame gets is explicit. When AMD's FSR and the stand-in have both failed for a frame,
+    // the error goes back with ONE line naming both failures (per context, also after an earlier success or a takeover; the count
+    // is logged when the context is destroyed), never silently. A non-linear sRGB / PQ frame is AMD's alone: it never reaches the
+    // stand-in, on any path. NoteAmdFailure: AMD's failures, logged once per context, counted. NoteBothFailed: the one line.
+    // StandInFrame: the stand-in upscales `frame` (false: why not, in *why). AfterAmdFailure: AMD's dispatch failed for this frame
+    // (rc): the stand-in (unless `perceptual`, or in OptiScaler's custom slot, whose host upscales on an error), else rc.
+    void NoteAmdFailure(UpscaleContext& u, const std::string& tag, uint64_t frameIndex, ffxReturnCode_t rc);
+    void NoteBothFailed(UpscaleContext& u, const std::string& tag, uint64_t frameIndex, const std::string& amdWhy,
+                        const std::string& standInWhy);
+    bool StandInFrame(UpscaleContext& u, WgFrame& frame, std::string* why);
+    ffxReturnCode_t AfterAmdFailure(UpscaleContext& u, const std::string& tag, uint64_t frameIndex, WgFrame* frame,
+                                    ffxReturnCode_t rc, bool perceptual, const std::string& noFrameWhy = std::string());
     void Fail(UpscaleContext& u, const std::string& why, uint64_t call, bool error = true);
     // Platform::status for one upscale dispatch of `u` (frame: the mapped frame when WrongGPU upscaled it, else null).
     // amdReason: why AMD's FSR upscaled this one frame of a context that stays WrongGPU's (state Amd).

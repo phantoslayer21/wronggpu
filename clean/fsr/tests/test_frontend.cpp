@@ -197,14 +197,17 @@ static const WgUpscalerBackend* g_useBackend = &g_backend;
 static std::vector<WgFrame> g_standInFrames;
 static WgCreateInfo g_standInCreate{};
 static int g_standInDestroyed = 0;
+static bool g_standInCreateFails = false;    // B8: the stand-in cannot be made
+static bool g_standInDispatchFails = false;  // B8: the stand-in's dispatch fails
 static WgResult StandInCreate(const WgCreateInfo* info, WgUpscaler** out) {
     g_standInCreate = *info;
+    if (g_standInCreateFails) return WG_ERROR_DEVICE;
     *out = reinterpret_cast<WgUpscaler*>(new FakeUpscaler{2});
     return WG_OK;
 }
 static WgResult StandInDispatch(WgUpscaler*, const WgFrame* frame) {
     g_standInFrames.push_back(*frame);
-    return WG_OK;
+    return g_standInDispatchFails ? WG_ERROR_DEVICE : WG_OK;
 }
 static void StandInDestroy(WgUpscaler* u) {
     ++g_standInDestroyed;
@@ -361,6 +364,7 @@ static void Reset() {
     g_createGate = true;
     g_useBackend = &g_backend;
     g_standInFrames.clear();
+    g_standInCreateFails = g_standInDispatchFails = false;
     g_standInCreate = WgCreateInfo{};
     g_standInDestroyed = 0;
     g_servicesAsked.clear();
@@ -1880,6 +1884,11 @@ static void TestFailedFrameProviderTruth() {
         if (failure == 2) g_amdDispatchResult = FFX_API_RETURN_ERROR_RUNTIME_ERROR;
         auto dispatch = MakeDispatch();
         if (failure == 3) dispatch.flags = FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB;
+        if (failure == 2) {
+            // B8: AMD's dispatch fails after the upscaler failed: the stand-in upscales the frame (it was an error before)
+            CHECK(fe->Dispatch(&ctx, &dispatch.header) == FFX_API_RETURN_OK);
+            CHECK(!g_statuses.empty() && g_statuses.back().state == UpscaleState::StandIn);
+        } else {
         CHECK(fe->Dispatch(&ctx, &dispatch.header) != FFX_API_RETURN_OK);
         CHECK(!g_statuses.empty());
         if (!g_statuses.empty()) {
@@ -1887,6 +1896,7 @@ static void TestFailedFrameProviderTruth() {
             CHECK(status.state != UpscaleState::Amd && status.state != UpscaleState::Network &&
                   status.state != UpscaleState::StandIn && status.state != UpscaleState::Compare);
             CHECK(!status.reason.empty());
+        }
         }
         CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
     }
@@ -2443,6 +2453,144 @@ static void TestRefusedFrames() {
         CHECK(CountLog("HIP") == 0);
         CHECK(CountLog("AMD FSR is not available for this context; the stand-in upscales the frames the upscaler does not take") == 1);
         CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    }
+}
+
+// B8 (REVIEW-215d P1, shrunk by REVIEW-228b): what a frame the upscaler refuses gets is explicit. The upscaler answers
+// WG_ERROR_UNSUPPORTED for frames 1 .. 300; AMD's FSR is missing, cannot be created or fails; the stand-in cannot be made or
+// fails: the frame returns the error with ONE line naming both failures (per context, not per frame), the count is logged when the
+// context is destroyed. Every model (the contract is shared). An answer another upscaler can give stays an OK frame.
+static void TestRefusedFrameContract() {
+    const uint64_t models[] = {kWrongGpuProviderVersionId, kWrongGpuKProviderVersionId, kWrongGpuLProviderVersionId};
+    const ffxReturnCode_t amdBad = FFX_API_RETURN_ERROR_RUNTIME_ERROR;
+    const ffxReturnCode_t ok = FFX_API_RETURN_OK;
+    for (const uint64_t model : models) {
+        struct Case {
+            const char* name;
+            bool amd;
+            ffxReturnCode_t amdResult;
+            ffxReturnCode_t amdCreate;
+            bool standInCreateFails, standInDispatchFails, customSlot;
+            const char* amdWhy;      // what the one line says about AMD
+            const char* standInWhy;  // ... and about the stand-in
+        };
+        const Case cases[] = {
+            {"no AMD, stand-in create fails", false, ok, ok, true, false, false, "is not available", "could not be created"},
+            {"no AMD, stand-in dispatch fails", false, ok, ok, false, true, false, "is not available", "dispatch failed"},
+            {"AMD create fails, stand-in ok", true, ok, FFX_API_RETURN_NO_PROVIDER, false, false, false, nullptr, nullptr},
+            {"AMD create fails, stand-in fails", true, ok, FFX_API_RETURN_NO_PROVIDER, true, false, false, "is not available", "could not be created"},
+            {"AMD dispatch fails, stand-in ok", true, amdBad, ok, false, false, false, nullptr, nullptr},
+            {"AMD dispatch fails, stand-in create fails", true, amdBad, ok, true, false, false, "dispatch failed (ERROR_RUNTIME_ERROR)", "could not be created"},
+            {"AMD dispatch fails, stand-in dispatch fails", true, amdBad, ok, false, true, false, "dispatch failed (ERROR_RUNTIME_ERROR)", "dispatch failed"},
+            {"custom slot, no AMD, stand-in fails", false, ok, ok, true, false, true, "is not available", "could not be created"},
+        };
+        for (const Case& c : cases) {
+            Reset();
+            g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+            g_originalAvailable = c.amd;
+            g_amdDispatchResult = c.amdResult;
+            g_amdCreateResult = c.amdCreate;
+            g_standInCreateFails = c.standInCreateFails;
+            g_standInDispatchFails = c.standInDispatchFails;
+            Config config;
+            config.hosted = true;
+            config.customSlot = c.customSlot;
+            auto fe = MakeFrontEnd(config);
+            UpscaleCreate own(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE, /*withOverride=*/true);
+            own.version.versionId = model;
+            ffxContext ctx = nullptr;
+            CHECK(fe->CreateContext(&ctx, &own.upscale.header, kMemCb) == FFX_API_RETURN_OK && fe->OwnContextCount() == 1);
+            ffxDispatchDescUpscale d = MakeDispatch();
+            CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK && g_statuses.back().state == UpscaleState::Network);
+            const int kFrames = 300;   // a long run: the logs must not grow with it
+            std::set<int> refused;
+            for (int i = 1; i <= kFrames; ++i) refused.insert(i);
+            g_unsupportedAt = refused;
+            std::vector<ffxReturnCode_t> rcs;
+            for (int i = 0; i < kFrames; ++i) rcs.push_back(fe->Dispatch(&ctx, &d.header));
+            const bool answered = !c.standInCreateFails && !c.standInDispatchFails;   // the stand-in took every frame
+            const bool amdFailing = c.amd && c.amdResult != ok;
+            for (ffxReturnCode_t rc : rcs) CHECK(rc == (answered ? ok : (amdFailing ? amdBad : FFX_API_RETURN_ERROR_RUNTIME_ERROR)));
+            if (answered) {
+                CHECK(g_standInFrames.size() == (size_t)kFrames);
+                CHECK(CountLog("no upscaler could take this frame") == 0);
+            } else {
+                // one line naming both failures, not one a frame
+                CHECK(CountLog("no upscaler could take this frame") == 1);
+                CHECK(CountLog(std::string("AMD FSR ").append(c.amdWhy).append("; the stand-in ").append(c.standInWhy).c_str()) == 1);
+            }
+            CHECK(CountLog("its later failures in this context are counted") <= 1);   // AMD's failure: once per context
+            CHECK(g_log.size() < 60);   // the logs do not grow with the run
+            const size_t lines = g_log.size();
+            CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+            if (!answered || amdFailing) CHECK(CountLog("fallback counts:") == 1 && g_log.size() > lines);   // the count, logged at the context's end
+            if (g_failures) {
+                std::printf("case: %s (%zu log lines)\n", c.name, g_log.size());
+                for (size_t k = 0; k < g_log.size() && k < 60; ++k) std::printf("    log: %.200s\n", g_log[k].c_str());
+                return;
+            }
+        }
+    }
+
+    // a failure after an earlier success is reported too: no AMD, the stand-in takes frames 1-2, then it fails
+    {
+        Reset();
+        g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+        g_originalAvailable = false;
+        Config config;
+        config.hosted = true;
+        auto fe = MakeFrontEnd(config);
+        UpscaleCreate own(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE, /*withOverride=*/true);
+        own.version.versionId = kWrongGpuProviderVersionId;
+        ffxContext ctx = nullptr;
+        CHECK(fe->CreateContext(&ctx, &own.upscale.header, kMemCb) == FFX_API_RETURN_OK);
+        ffxDispatchDescUpscale d = MakeDispatch();
+        CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
+        g_unsupportedAt = {1, 2, 3, 4};
+        CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK && fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
+        CHECK(g_standInFrames.size() == 2 && CountLog("no upscaler could take this frame") == 0);
+        g_standInDispatchFails = true;
+        CHECK(fe->Dispatch(&ctx, &d.header) != FFX_API_RETURN_OK);
+        CHECK(CountLog("no upscaler could take this frame") == 1 && CountLog("the stand-in dispatch failed") == 1);   // after two successes
+        CHECK(fe->Dispatch(&ctx, &d.header) != FFX_API_RETURN_OK && CountLog("no upscaler could take this frame") == 1);
+        CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    }
+
+    // a frame the game flags as non-linear (sRGB / PQ) is not a refused frame: it is AMD's alone and never reaches the stand-in,
+    // on any path: AMD missing, AMD failing from the start, the takeover at the bad-frame threshold, and a context already handed
+    // to AMD whose AMD dispatch starts failing
+    const uint32_t flags[] = {FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB, FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_PQ};
+    for (const uint32_t flag : flags) {
+        for (const int path : {0, 1, 2}) {   // 0 AMD missing, 1 AMD failing from the start (40 frames: the takeover threshold too)
+            Reset();
+            g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+            g_originalAvailable = path != 0;
+            g_amdDispatchResult = path == 1 ? FFX_API_RETURN_ERROR_RUNTIME_ERROR : FFX_API_RETURN_OK;
+            Config config;
+            config.hosted = true;
+            auto fe = MakeFrontEnd(config);
+            UpscaleCreate own(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE, /*withOverride=*/true);
+            own.version.versionId = kWrongGpuProviderVersionId;
+            ffxContext ctx = nullptr;
+            CHECK(fe->CreateContext(&ctx, &own.upscale.header, kMemCb) == FFX_API_RETURN_OK);
+            ffxDispatchDescUpscale d = MakeDispatch();
+            if (path == 2) {
+                // an ordinary refused frame hands the context to AMD (its dispatch works), then AMD starts failing
+                CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
+                g_unsupportedAt = {1};
+                CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK && g_statuses.back().state == UpscaleState::Amd);
+                g_amdDispatchResult = FFX_API_RETURN_ERROR_RUNTIME_ERROR;
+            }
+            ffxDispatchDescUpscale p = d;
+            p.flags |= flag;
+            for (int i = 0; i < 40; ++i) CHECK(fe->Dispatch(&ctx, &p.header) != FFX_API_RETURN_OK);
+            CHECK(g_standInFrames.empty());   // perceptual input never reaches the stand-in
+            CHECK(CountLog("no upscaler could take this frame") == 1 && CountLog("the stand-in is not used for non-linear (sRGB / PQ) input") == 1);
+            if (path == 2) {  // and an ordinary frame of the same context still gets the stand-in
+                CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK && g_standInFrames.size() == 1);
+            }
+            CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+        }
     }
 }
 
@@ -3493,6 +3641,7 @@ int main() {
     TestRegistryEntries();
     TestUnsupportedFrames();
     TestRefusedFrames();
+    TestRefusedFrameContract();
     TestSplitBlocked();
     TestRuntimeProviderName();
     TestWithoutModelKItems();

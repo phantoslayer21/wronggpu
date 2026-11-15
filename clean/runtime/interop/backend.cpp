@@ -44,6 +44,10 @@ struct WgUpscaler;
 
 namespace wgi {
 
+// HIP executors made by this process's contexts (wgDiagHipExecutorsMade): the integration test of the refused-frame contract
+// checks that none was made.
+std::atomic<uint32_t> g_hip_executors_made{0};
+
 namespace {
 
 // the converter maps and model K's folder, from the model table (clean/runtime/model_select.h)
@@ -168,6 +172,7 @@ struct Options {
   int test_view = 0;                // d3d12-test executor: 0 color, 1 depth, 2 motion
   bool test_handles = false;        // d3d12-test executor: make shared objects with NT handles (sharing paths)
   bool test_keep = false;           // d3d12-test executor with test_handles: keep the arena for later contexts (pool)
+  std::string test_script;          // dx12-test executor: one character per frame (executor.h make_scripted_dx12_executor)
   bool timing_stages = true;        // timing_stages=0: keep D3D12 full-span timestamps only
   bool timing_log = false;          // one timing summary line every 300 dispatches
   bool watchdog = false;            // diagnostics: report a dispatch or network frame stuck for more than 3 s
@@ -221,6 +226,7 @@ Options parse_options(const char* text) {
     else if (key == "model_format") o.model_format = value;
     else if (key == "test_handles") o.test_handles = value == "1";
     else if (key == "test_keep") o.test_keep = value == "1";
+    else if (key == "test_script") o.test_script = value;
     else if (key == "share_path") o.share_path = value;
     else if (key == "timing_log") o.timing_log = value == "1";
     else if (key == "timing_stages") o.timing_stages = value != "0";
@@ -600,6 +606,7 @@ class Context {
       say(WG_LOG_WARN, "WG_RUNTIME_OPTIONS is longer than 4095 characters and is ignored");
     }
     Options o = parse_options(text.c_str());
+    bool test_model_k = false;  // dx12-test: the model the options name (no configure_hip there)
     {  // the executor (executor_select.h): the option, else the default (dx12 for model M on RDNA 4); one log line why
       ExecutorRequest q;
       q.executor = o.executor;
@@ -609,6 +616,7 @@ class Context {
       std::string merr;
       // model K only (Model L runs on the D3D12 executor in builds with it: runtime.cpp, native D3D12 backend 3)
       q.model_k = wgrt::model_from_options(probe, &model, &merr) && model == wgrt::ModelId::K;
+      test_model_k = q.model_k;
       q.adapter_known = adapter_info(device_, &q.adapter, &q.vendor_id, &q.software);
       q.sparkle_guard = o.sparkle_guard > 0.0f;
       q.capture = !o.capture_dir.empty();
@@ -632,7 +640,7 @@ class Context {
     split_ = split;
     share_path_opt_ = o.share_path;
     input_copy_opt_ = o.input_copy;
-    if (!split && o.executor != "dx12")
+    if (!split && o.executor != "dx12" && o.executor != "dx12-test")
       return fail(WG_ERROR_UNSUPPORTED, "the front end offers no command-list split (interface version 2)");
     if (!o.unknown.empty()) say(WG_LOG_INFO, "options passed on to the network runtime: " + o.unknown);
     if (o.motion_outres != "original" && o.motion_outres != "point")
@@ -645,6 +653,10 @@ class Context {
     bool dx12 = false;
     if (o.executor == "d3d12-test") {
       exec_ = make_test_executor(o.test_view, o.test_handles, o.test_keep);
+    } else if (o.executor == "dx12-test") {
+#ifndef WG_NO_MODEL_K
+      model_k_ = test_model_k;
+#endif
     } else if (o.executor == "hip" || o.executor == "dx12") {
       if (!configure_hip(o, &err)) return fail(WG_ERROR, err);
     } else {
@@ -659,15 +671,17 @@ class Context {
     // the game's command list. Paths without D3D12 ports, and the diagnostics that need HIP, got the HIP executor
     // above (choose_executor). (Motion at output resolution: the D3D12 ports of the emo / pmo kernels read the game's
     // motion texture with motion_outres=original; with point the executor's D3D12 pass resamples it.)
-    dx12 = o.executor == "dx12";
+    const bool dx12_test = o.executor == "dx12-test";
+    dx12 = o.executor == "dx12" || dx12_test;
+    if (dx12_test) dx12_default_ = true;  // the scripted executor stands in for the default D3D12 executor
     if (dx12) {
-      exec_ = make_d3d12_executor(rt_cfg_);
+      exec_ = dx12_test ? make_scripted_dx12_executor(o.test_script) : make_d3d12_executor(rt_cfg_);
       exec_->set_log_sink([this](bool warning, const std::string& m) {
         say(warning ? WG_LOG_WARN : WG_LOG_INFO, "D3D12 executor: " + m);
       });
       no_slots_ = true;  // its kernels read the game's textures: no slot buffers (fences and a 128 KB flag arena only)
       if (!exec_->prepare(&err) || !exec_->prepare_device(device_, &err) ||
-          !make_shared_objects(false, "arena", &err) || !exec_->init(device_, set_, &err)) {
+          (!dx12_test && !make_shared_objects(false, "arena", &err)) || !exec_->init(device_, set_, &err)) {
         // model K: no HIP route in a game; the one error line below is the whole report, the game keeps its own upscaler
         if (model_k_) return fail(WG_ERROR_UNSUPPORTED, dx12_refused_line_k(dx12_default_, err));
         say(WG_LOG_WARN, dx12_refused_line(dx12_default_, err));
@@ -687,6 +701,7 @@ class Context {
     }
     if (!dx12 && !exec_) {
       if (!split) return fail(WG_ERROR_UNSUPPORTED, "the front end offers no command-list split (interface version 2)");
+      ++g_hip_executors_made;
       exec_ = make_hip_executor(rt_cfg_, adapter_);
     }
     if (!dx12) {
@@ -1204,6 +1219,7 @@ class Context {
     if (!split_) {
       err = "the front end offers no command-list split (interface version 2)";
     } else {
+      ++g_hip_executors_made;
       hip = make_hip_executor(rt_cfg_, adapter_);
       hip->set_log_sink([this](bool warning, const std::string& m) {
         say(warning ? WG_LOG_WARN : WG_LOG_INFO, "destroy: " + m);
@@ -2214,6 +2230,10 @@ const WgUpscalerBackend kBackend = {sizeof(WgUpscalerBackend), WG_UPSCALER_INTER
                                     &wg_create,  &wg_dispatch, &wg_destroy, &wg_memory, WG_BACKEND_NEEDS_SPLIT};
 
 }  // namespace
+
+// A diagnostic for tests of the refused-frame contract: how many HIP executors this process's contexts have made (none in a
+// game: HIP is an explicit diagnostic only).
+extern "C" __declspec(dllexport) uint32_t wgDiagHipExecutorsMade() { return wgi::g_hip_executors_made.load(); }
 
 // Interface version 2 only: the backend needs the front end's command-list split.
 extern "C" __declspec(dllexport) const WgUpscalerBackend* wgGetUpscalerBackend(uint32_t interface_version) {

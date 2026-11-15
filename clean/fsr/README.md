@@ -269,7 +269,20 @@ OptiScaler folder ships `amd_fidelityfx_upscaler_dx12.dll`; OptiScaler.ini `[Lib
 - **Frames the upscaler does not take:** `WG_ERROR_UNSUPPORTED` from the upscaler's dispatch (the network runtime with
   `hip_switch=off`, its default since 2026-11-04: frames above the render size checked at create) hands the context to
   AMD's FSR at once;
-  without AMD's FSR the stand-in upscales such frames.
+  without AMD's FSR the stand-in upscales such frames. This is one contract for every model (K refused frames take exactly
+  model M's path), and what a frame gets is explicit (B8): when AMD's FSR (missing, not created, or its dispatch failed) and
+  the stand-in (not made, or its dispatch failed) have both failed, the error goes back to the game with ONE line naming both
+  failures per context (also after an earlier success or a takeover); the count is logged when the context is destroyed. AMD's
+  own failures are logged once per context and counted, and AMD's per-frame context create for a bad frame is retried at the
+  1st, 2nd, 3rd, 10th, 100th ... frame. A frame the game flags as non-linear (sRGB / PQ) is AMD's alone: it never reaches the
+  stand-in, on any path (AMD missing, failing, the takeover at the bad-frame threshold, a context already handed to AMD).
+  `tests/test_frontend.cpp` covers each failure case for models M, K and L over a long run (CI).
+  `tests/test_refusal_integration.cpp` is a release check: it drives refused frames through the real network backend (the
+  runtime DLL's `Context`, with the scripted executor `executor=dx12-test`) and the real front end on a D3D12 device (WARP is
+  enough), with and without AMD's FSR, the stand-in working and not, for K and M, and checks that no HIP executor was ever
+  made (`wgDiagHipExecutorsMade`, an export for that test only). It needs the runtime DLL of a build (so it is not in the CI),
+  and fails without one; its build command is in the file's header, and the release script under `tools/release` builds it
+  from that source.
 - **Model location:** the front end looks for the converted model (`model.wgcm`, Model K in `K\`) in `[fsr] model_dir`
   of `wronggpu.ini` (relative: from the data folder), then `<game exe folder>\WrongGPU\model`, and passes the first
   folder that has it to the runtime as `model_dir=`; otherwise the runtime's own default (`%LOCALAPPDATA%\WrongGPU\model`,
