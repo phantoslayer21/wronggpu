@@ -66,8 +66,8 @@ def test_choice(t):
     rc = t.run("model", "convert", "--preset=K", "--model=" + ksrc)
     t.check("Model K's data converted (model convert --preset=K)", rc == 0 and ml.holds(t.model_path("K", "model.wgcm"), k_case()), (rc, t.j))
     rc = t.run("set", exe, "model=K")
-    w = read(wini).decode("utf-8", "replace")
-    t.check("set model=K: exit 0; wronggpu.ini's last model item is model=K", rc == 0 and suite_options_model(w) == "K", (rc, t.j.get("message"), w))
+    t.check("set model=K: exit 0; wronggpu.ini byte for byte as the install wrote it (the model is the record's, never written there)",
+            rc == 0 and read(wini) == m_w, (rc, t.j.get("message"), read(wini)[-200:]))
     o = read(oini).decode("utf-8", "replace")
     t.check("...OptiScaler's UpscalerIndex names Model K's entry (1: right after Model M)", upscaler_index(o) == "1", o)
     t.check("...the record's hashes follow both files (the file-ownership rule: they are WrongGPU's writes)",
@@ -94,11 +94,11 @@ def test_choice(t):
     rc = t.run("model", "convert", "--preset=L", "--model=" + lsrc)
     t.check("L control: Model L's data converted", rc == 0, (rc, t.j))
     rc = t.run("set", exe, "model=L")
-    t.check("L control: set model=L writes model=L and index 2 (after Model K's entry)",
-            rc == 0 and suite_options_model(read(wini).decode("utf-8", "replace")) == "L" and upscaler_index(read(oini).decode("utf-8", "replace")) == "2",
-            (rc, t.j.get("message"), read(wini), read(oini)))
+    t.check("L control: set model=L records L and sets index 2 (after Model K's entry); wronggpu.ini unchanged",
+            rc == 0 and choice_record(b).get("model") == "L" and upscaler_index(read(oini).decode("utf-8", "replace")) == "2" and read(wini) == m_w,
+            (rc, t.j.get("message"), choice_record(b), read(oini)))
     rc = t.run("set", exe, "model=K")
-    t.check("L to K: model=K and index 1", rc == 0 and suite_options_model(read(wini).decode("utf-8", "replace")) == "K" and
+    t.check("L to K: record K and index 1", rc == 0 and choice_record(b).get("model") == "K" and
             upscaler_index(read(oini).decode("utf-8", "replace")) == "1", (rc, t.j.get("message")))
     rc = t.run("set", exe, "model=L")
     rc2 = t.run("set", exe, "model=M")
@@ -108,9 +108,9 @@ def test_choice(t):
     os.remove(os.path.join(t.lad, "WrongGPU", "model", "K", "model.wgcm"))
     rc = t.run("repair", exe, "--opti=" + opti, "--force")
     msgs = " ".join(t.j.get("warnings", []) + t.j.get("notes", []))
-    t.check("repair of a game set to K without Model K's data: exit 0, the files say Model M, the player is told how to convert it",
-            rc == 0 and suite_options_model(read(wini).decode("utf-8", "replace")) == "M" and "Model K's data on this PC is not ready" in msgs and
-            "model convert --preset=K" in msgs, (rc, t.j.get("message"), msgs[:600]))
+    t.check("repair of a game set to K without Model K's data: exit 0, the record says Model M, the player is told how to convert it",
+            rc == 0 and choice_record(b).get("model") == "M" and "Model K's data on this PC is not ready" in msgs and
+            "model convert --preset=K" in msgs, (rc, t.j.get("message"), msgs[:600], choice_record(b)))
     t.check("...the choice stays in profile.ini (model=k)", b"model=k\r\n" in profile_text(b))
     rc = t.run("uninstall", exe)
     # A build with Preset K seeds the plugin's own settings file wronggpu-asi.ini on every OptiScaler install; an uninstall leaves

@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "../include/wronggpu_host_event.h"
+#include "../../wgshared/include/wg_model_entries.h"
 #include "../src/config.h"
 #include "../src/ffx_describe.h"
 #include "../src/frontend.h"
@@ -246,7 +247,7 @@ static bool g_asiHooked = false;   // and it reports a successful hook
 static char g_asiModel = 0;        // 0 (AMD), 'M', 'K'
 static std::vector<char> g_asiShown;          // Platform::asiShowModel calls
 static std::filesystem::path g_choiceRecord;  // Platform::choiceRecord (a real file; empty: none)
-static char g_asiPendingModel = 0;            // Platform::asiPending (the plugin's unsaved click)
+static std::string g_iniOnDisk;               // Platform::readWronggpuIni (empty: not wired); not cleared by Reset
 
 // Fake shared settings (Platform::menu, settings_bridge.h in the DLL): values set "somewhere" (block / env / ini),
 // the writes of the menu's choices, whether this module is the writer, the folder sidecar's entry.
@@ -290,7 +291,7 @@ static std::unique_ptr<FrontEnd> MakeFrontEnd(const Config& config) {
     if (g_asiPresent)
         p.asiPlugin = [](char* model) { if (model) *model = g_asiModel; return g_asiHooked; };
     if (g_asiPresent) p.asiShowModel = [](char model) { g_asiShown.push_back(model); };
-    if (g_asiPresent) p.asiPending = [] { return g_asiPendingModel; };
+    if (!g_iniOnDisk.empty()) p.readWronggpuIni = [] { return g_iniOnDisk; };
     p.choiceRecord = g_choiceRecord;
     p.compareApi = []() -> const OriginalApi* { return g_compareApi; };
     p.backend = [](const Config&, std::string&) -> const WgUpscalerBackend* { return g_useBackend; };
@@ -386,7 +387,6 @@ static void Reset() {
     g_asiHooked = false;
     g_asiModel = 0;
     g_asiShown.clear();
-    g_asiPendingModel = 0;
     g_createInfo = WgCreateInfo{};
     g_compare = false;
     g_statuses.clear();
@@ -2668,13 +2668,14 @@ static void TestAsiPluginPresetK() {
 #endif
 }
 
-// 0.6.5 (#213): the game's model choice record (model_choice_record.h) decides the WrongGPU model of a hosted create, on
-// REAL files in a fresh folder under the temporary folder, through the front end: the upgrade migration (wronggpu.ini's
-// model item, never the stored index); the index OptiScaler stores is never a choice (hooked route and custom slot);
-// a player's selection in OptiScaler's list arrives as an event (HostSelected) and is recorded, also re-selecting the
-// same entry after a plugin choice; each source winning in turn; AMD; corrupt, unreadable and exhausted records; a
-// failed event write that runs for the session and is written at the next create (or dropped when superseded); the
-// plugin's unsaved click; a game without a record. Plus the audit's case without any record (the launcher's model item).
+// 0.6.5 (#213): the game's model choice record (model_choice_record.h) decides the WrongGPU model of a create, on REAL
+// files in a fresh folder under the temporary folder, through the front end: the upgrade migration (wronggpu.ini's model
+// item as it is on disk, read under the state lock; never the stored index); the index OptiScaler stores is never a
+// choice (hooked route, custom slot, and when the record fails); a player's selection in OptiScaler's list arrives as an
+// event (HostSelected): 1 when the model that runs changes (also re-selecting the same entry after a plugin choice), 0
+// when it does not, negative when it is not saved (busy, failed write, end of seq), which changes nothing; each source
+// winning in turn; AMD; corrupt and unreadable records (the last choice of the session, else wronggpu.ini's item); the
+// direct route; a game without a record. Plus the audit's case without any record (the launcher's model item).
 struct RecordFolder {
     std::filesystem::path dir;
     RecordFolder() {
@@ -2706,37 +2707,45 @@ static void WriteRec(const std::filesystem::path& p, const std::string& text) {
     o << text;
 }
 
-// One hosted create, OptiScaler's list naming `overrideId` (0: none). hooked: the plugin hooked with its entry `plugin`
-// (0 AMD or a WrongGPU model); else the custom slot / FFX route without the plugin (the host's entry). `before` runs on
-// the front end first (a host event). The provider the context runs ("" for AMD).
-static std::string HostedCreate(const char* ini, char plugin, uint64_t overrideId, bool hooked = true,
-                                const std::function<void(FrontEnd&)>& before = {}) {
+// A front end for hosted creates: hooked (the plugin hooked, its entry `plugin`: 0 AMD or a WrongGPU model) or not (the
+// custom slot / FFX route without the plugin). hosted false: the direct route.
+static std::unique_ptr<FrontEnd> ChoiceFrontEnd(const char* ini, char plugin, bool hooked, bool hosted = true) {
     Reset();
     g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
     std::string warnings;
     Config c = ParseConfig(ini, &warnings);
     CHECK(warnings.empty());
-    c.hosted = true;
+    c.hosted = hosted;
     c.upscaler = UpscalerChoice::Network;
     c.contextParkMs = 0;
     g_asiPresent = hooked;
     g_asiHooked = hooked;
     g_asiModel = plugin;
-    auto fe = MakeFrontEnd(c);
-    if (before) before(*fe);
+    return MakeFrontEnd(c);
+}
+
+// One create on `fe`, the host's list naming `overrideId` (0: none); the provider the context runs ("" for AMD).
+static std::string ChoiceCreate(FrontEnd& fe, uint64_t overrideId) {
     const size_t amd = g_amd.size();
     UpscaleCreate create(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE, overrideId != 0);
     create.version.versionId = overrideId;
     ffxContext ctx = nullptr;
-    CHECK(fe->CreateContext(&ctx, &create.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
+    CHECK(fe.CreateContext(&ctx, &create.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
     std::string provider;
     if (g_amd.size() == amd) {
         ffxQueryGetProviderVersion q{};
         q.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
-        if (fe->Query(&ctx, &q.header) == FFX_API_RETURN_OK && q.versionName) provider = q.versionName;
+        if (fe.Query(&ctx, &q.header) == FFX_API_RETURN_OK && q.versionName) provider = q.versionName;
     }
-    CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    CHECK(fe.DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
     return provider;
+}
+
+static std::string HostedCreate(const char* ini, char plugin, uint64_t overrideId, bool hooked = true,
+                                const std::function<void(FrontEnd&)>& before = {}) {
+    auto fe = ChoiceFrontEnd(ini, plugin, hooked);
+    if (before) before(*fe);
+    return ChoiceCreate(*fe, overrideId);
 }
 
 static void TestAsiChoiceRecord() {
@@ -2753,60 +2762,67 @@ static void TestAsiChoiceRecord() {
     const std::filesystem::path& rec = f.record();
     std::string why;
     // The audit's case without a record (a front end without the state folder): the launcher's K / L item decides over the
-    // plugin's saved default entry (Model M).
+    // plugin's saved default entry (Model M); a host event there changes nothing (0: the host's entry decides)
     if (b) {
         const std::string ini = std::string("runtime_options = model=") + b + "\n";
         CHECK(HostedCreate(ini.c_str(), 'M', kWrongGpuProviderVersionId) == name(b));
         CHECK(CountLog("no model choice record; the launcher's model item") == 1);
-        // a host event without a record (no launcher state folder): it runs this session only
-        int32_t rc = 0;
-        CHECK(HostedCreate(ini.c_str(), 'M', idOf('M'), true, [&](FrontEnd& fe) { rc = fe.HostSelected(idOf('M')); }) == name('M'));
-        CHECK(rc == WG_HOST_SELECTED_SESSION_ONLY && CountLog("selected in OptiScaler's upscaler list this session") == 1);
+        int32_t rc = 9;
+        CHECK(HostedCreate(ini.c_str(), 'M', idOf('M'), true, [&](FrontEnd& fe) { rc = fe.HostSelected(idOf('M')); }) == name(b));
+        CHECK(rc == WG_HOST_SELECTED_NOTHING_CHANGED);
     }
     g_choiceRecord = rec;
     if (b) {
         const std::string iniB = std::string("runtime_options = model=") + b + "\n";
         const char* iniM = "runtime_options = model=M\n";
-        // (1) upgrade: no record, wronggpu.ini says b, OptiScaler's box names Model M: the record is migrated from the model
-        // item (b, seq 1, source=launcher), never from the box; b runs
-        CHECK(HostedCreate(iniB.c_str(), 'M', idOf('M')) == name(b));
+        // (1) upgrade: no record; wronggpu.ini ON DISK says b (the configuration read at start said M), OptiScaler's box
+        // names Model M: the record is migrated from the file as it is now (b, seq 1, source=launcher), never from the box
+        g_iniOnDisk = iniB;
+        CHECK(HostedCreate(iniM, 'M', idOf('M')) == name(b));
+        g_iniOnDisk.clear();
         wgchoice::Record r = ReadRec(rec);
         CHECK(r.model == b && r.seq == 1 && r.source == wgchoice::Source::Launcher);
-        CHECK(lines(std::string("model choice: no record yet (an install from before 0.6.5): Model ") + b + " from wronggpu.ini's model item") == 1);
+        CHECK(lines(std::string("model choice: no record yet (an install from before 0.6.5): Model ") + b) == 1);
         CHECK(lines("selected in the host's upscaler list (the model choice record: the launcher, seq 1)") == 1);
         // (2) the stored index is never a choice: the box names M at every create, the record stays b, seq 1
         CHECK(HostedCreate(iniB.c_str(), 'M', idOf('M')) == name(b));
         CHECK(HostedCreate(iniB.c_str(), 'M', idOf('M')) == name(b));
         CHECK(ReadRec(rec).seq == 1 && g_asiShown.size() == 1 && g_asiShown[0] == b);
-        // (3) the player selects Model M in OptiScaler's list: the event is recorded (seq 2, source=ffx); M runs
-        int32_t rc = 0;
+        // (3) the player selects Model M in OptiScaler's list: recorded (seq 2, source=ffx), 1 (M runs now instead of b)
+        int32_t rc = 9;
         CHECK(HostedCreate(iniB.c_str(), 'M', idOf('M'), true, [&](FrontEnd& fe) { rc = fe.HostSelected(idOf('M')); }) == name('M'));
         r = ReadRec(rec);
         CHECK(rc == WG_HOST_SELECTED_RECORDED && r.model == 'M' && r.seq == 2 && r.source == wgchoice::Source::Ffx);
         CHECK(lines("the player selected Model M in OptiScaler's upscaler list: recorded (seq 2, source=ffx)") == 1);
-        CHECK(lines(std::string("model choice conflict: wronggpu.ini's model item says Model ") + b) == 1);
+        CHECK(lines(std::string("model choice: wronggpu.ini's model item (the install's default) says Model ") + b) == 1);
         // (4) the player clicks b in the plugin's menu (the plugin writes seq 3, source=plugin); the box still names M: b runs
         wgchoice::Record after;
         CHECK(wgchoice::RecordChoice(rec, b, wgchoice::Source::Plugin, &after, &why) == wgchoice::Outcome::Written);
         CHECK(HostedCreate(iniB.c_str(), b, idOf('M')) == name(b));
-        CHECK(ReadRec(rec).seq == 3);
-        // (5) the player selects the SAME entry (M) in OptiScaler's list again after the plugin's choice: it wins (seq 4)
-        CHECK(HostedCreate(iniB.c_str(), b, idOf('M'), true, [&](FrontEnd& fe) { rc = fe.HostSelected(idOf('M')); }) == name('M'));
-        r = ReadRec(rec);
-        CHECK(rc == WG_HOST_SELECTED_RECORDED && r.model == 'M' && r.seq == 4 && r.source == wgchoice::Source::Ffx);
-        // (6) the launcher applies b (seq 5): b runs
+        // (5) the player selects the SAME entry (M) again after the plugin's choice: it wins (seq 4) and returns 1, so the
+        // host recreates the upscaler although its index did not change
+        {
+            auto fe = ChoiceFrontEnd(iniB.c_str(), b, true);
+            CHECK(ChoiceCreate(*fe, idOf('M')) == name(b));  // the session runs b
+            CHECK(fe->HostSelected(idOf('M')) == WG_HOST_SELECTED_RECORDED);
+            CHECK(ChoiceCreate(*fe, idOf('M')) == name('M'));
+            // ... and once more: recorded again (seq 5), but nothing changes in what runs: 0
+            CHECK(fe->HostSelected(idOf('M')) == WG_HOST_SELECTED_NOTHING_CHANGED);
+            r = ReadRec(rec);
+            CHECK(r.model == 'M' && r.seq == 5 && r.source == wgchoice::Source::Ffx);
+        }
+        // (6) the launcher applies b (seq 6): b runs
         CHECK(wgchoice::RecordChoice(rec, b, wgchoice::Source::Launcher, &after, &why) == wgchoice::Outcome::Written);
         CHECK(HostedCreate(iniB.c_str(), 'M', idOf('M')) == name(b));
         // (7) a third model selected in the list (a build with K and L)
         if (c3) {
             CHECK(HostedCreate(iniM, b, idOf(b), true, [&](FrontEnd& fe) { rc = fe.HostSelected(idOf(c3)); }) == name(c3));
-            r = ReadRec(rec);
-            CHECK(r.model == c3 && r.seq == 6 && r.source == wgchoice::Source::Ffx);
+            CHECK(rc == WG_HOST_SELECTED_RECORDED && ReadRec(rec).model == c3 && ReadRec(rec).source == wgchoice::Source::Ffx);
         }
-        // (8) an AMD version selected in the list is no model choice; the plugin's AMD entry runs AMD; the record is untouched
+        // (8) an AMD version selected in the list is no model choice (0); the plugin's AMD entry runs AMD; record untouched
         const uint64_t s0 = ReadRec(rec).seq;
         CHECK(HostedCreate(iniM, 'M', idOf('M'), true, [&](FrontEnd& fe) { rc = fe.HostSelected(g_versionIds[0]); }) != "");
-        CHECK(rc == WG_HOST_SELECTED_NOT_A_MODEL && ReadRec(rec).seq == s0);
+        CHECK(rc == WG_HOST_SELECTED_NOTHING_CHANGED && ReadRec(rec).seq == s0);
         CHECK(HostedCreate(iniM, 0, idOf('M')).empty());
         CHECK(ReadRec(rec).seq == s0 && CountLog("OptiScaler plugin: AMD FSR selected in the host's upscaler list") == 1);
         // (9) the custom slot / FFX route without the plugin: the host's entry names M, the record says b: b runs
@@ -2816,73 +2832,61 @@ static void TestAsiChoiceRecord() {
         // ... and a selection event there is recorded and runs
         CHECK(HostedCreate(iniM, 0, idOf(b), false, [&](FrontEnd& fe) { rc = fe.HostSelected(idOf('M')); }) == name('M'));
         CHECK(rc == WG_HOST_SELECTED_RECORDED && ReadRec(rec).model == 'M');
+        // (10) the direct route (not hosted, no entry): the record's model too
+        CHECK(wgchoice::RecordChoice(rec, b, wgchoice::Source::Launcher, &after, &why) == wgchoice::Outcome::Written);
+        {
+            auto fe = ChoiceFrontEnd(iniM, 0, false, /*hosted=*/false);
+            CHECK(ChoiceCreate(*fe, 0) == name(b));
+        }
 #ifdef _WIN32
-        // (10) a selection whose write fails (the record held open without delete sharing): it runs this session, said as an
-        // ERROR, and is written at the next create once the record is free
-        CHECK(wgchoice::RecordChoice(rec, 'M', wgchoice::Source::Launcher, &after, &why) == wgchoice::Outcome::Written);
-        const uint64_t s1 = after.seq;
-        HANDLE hold = CreateFileW(rec.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        CHECK(hold != INVALID_HANDLE_VALUE);
+        // (11) the game's state lock held by another WrongGPU program for longer than the event waits: the selection is
+        // NOT saved (-1), nothing changes and nothing is kept; a create meanwhile runs the session's last choice (b), never
+        // the host's entry (M)
         {
-            Reset();
-            g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
-            std::string w;
-            Config c = ParseConfig(iniM, &w);
-            c.hosted = true;
-            c.upscaler = UpscalerChoice::Network;
-            c.contextParkMs = 0;
-            g_asiPresent = g_asiHooked = true;
-            g_asiModel = 'M';
-            auto fe = MakeFrontEnd(c);
-            CHECK(fe->HostSelected(idOf(b)) == WG_HOST_SELECTED_PENDING);
-            CHECK(CountLog("is written at the next create") == 1 && ReadRec(rec).seq == s1);
-            auto create = [&] {
-                UpscaleCreate cr(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE, true);
-                cr.version.versionId = idOf('M');
-                ffxContext ctx = nullptr;
-                CHECK(fe->CreateContext(&ctx, &cr.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
-                ffxQueryGetProviderVersion q{};
-                q.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
-                std::string p;
-                if (fe->Query(&ctx, &q.header) == FFX_API_RETURN_OK && q.versionName) p = q.versionName;
-                CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
-                return p;
-            };
-            CHECK(create() == name(b));  // still held: runs this session
-            CHECK(CountLog("still cannot be written") == 1 && ReadRec(rec).seq == s1);
-            CloseHandle(hold);
-            CHECK(create() == name(b));  // free: written now
-            r = ReadRec(rec);
-            CHECK(r.model == b && r.seq == s1 + 1 && r.source == wgchoice::Source::Ffx && CountLog("written now") == 1);
-            // superseded: a selection that fails, then the launcher writes M; the pending one is dropped, M runs
-            hold = CreateFileW(rec.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-            CHECK(fe->HostSelected(idOf(b)) == WG_HOST_SELECTED_PENDING);
-            CloseHandle(hold);
-            CHECK(wgchoice::RecordChoice(rec, 'M', wgchoice::Source::Launcher, &after, &why) == wgchoice::Outcome::Written);
-            CHECK(create() == name('M'));
-            CHECK(CountLog("is dropped: a newer choice was recorded meanwhile") == 1 && ReadRec(rec).model == 'M');
+            auto fe = ChoiceFrontEnd(iniM, 0, false);
+            CHECK(ChoiceCreate(*fe, idOf('M')) == name(b));  // the session read b
+            const std::string kept = [&] { std::ifstream i(rec, std::ios::binary); return std::string(std::istreambuf_iterator<char>(i), {}); }();
+            std::atomic<bool> held{false}, release{false};
+            std::thread holder([&] {
+                wgstate::StateLock l(f.dir.wstring());
+                held.store(l.held());
+                while (!release.load()) Sleep(1);
+            });
+            while (!held.load()) Sleep(1);
+            CHECK(fe->HostSelected(idOf('M')) == WG_HOST_SELECTED_NOT_SAVED);
+            CHECK(CountLog("but it was not saved: the game's state lock could not be taken in time") == 1);
+            CHECK(ChoiceCreate(*fe, idOf('M')) == name(b));
+            CHECK(CountLog("the model choice record was busy; the last model choice read this session") == 1);
+            release.store(true);
+            holder.join();
+            const std::string now = [&] { std::ifstream i(rec, std::ios::binary); return std::string(std::istreambuf_iterator<char>(i), {}); }();
+            CHECK(now == kept);
+            CHECK(ChoiceCreate(*fe, idOf('M')) == name(b));  // still b: the unsaved selection was not kept for later
         }
-        // (11) the plugin's click it could not write yet: it runs this session
+        // (12) a selection whose write fails (the record held open without delete sharing): not saved, nothing changes
         {
-            const uint64_t s2 = ReadRec(rec).seq;
-            CHECK(HostedCreate(iniM, b, idOf('M'), true, [&](FrontEnd&) { g_asiPendingModel = b; }) == name(b));
-            g_asiPendingModel = 0;
-            CHECK(CountLog("the plugin's click this session, not saved yet") == 1 && ReadRec(rec).seq == s2);
+            auto fe = ChoiceFrontEnd(iniM, 0, false);
+            HANDLE hold = CreateFileW(rec.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            CHECK(hold != INVALID_HANDLE_VALUE);
+            const uint64_t s1 = ReadRec(rec).seq;
+            CHECK(fe->HostSelected(idOf('M')) == WG_HOST_SELECTED_NOT_SAVED);
+            CloseHandle(hold);
+            CHECK(ReadRec(rec).seq == s1 && ChoiceCreate(*fe, idOf('M')) == name(b));
         }
-        // (12) a record another program holds open without sharing: not read, NEVER written over; the launcher's item decides
-        const std::string kept = ReadRec(rec).model == 'M' ? "M" : "?";
-        hold = CreateFileW(rec.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        // (13) a record another program holds open without sharing: not read, NEVER written over. A fresh session uses
+        // wronggpu.ini's item (b), never the host's entry (M or the third model)
+        HANDLE hold = CreateFileW(rec.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         CHECK(hold != INVALID_HANDLE_VALUE);
-        CHECK(HostedCreate(iniB.c_str(), 'M', idOf('M')) == name(b));
+        CHECK(HostedCreate(iniB.c_str(), 0, idOf('M'), false) == name(b));
         CHECK(CountLog("model choice: the record (wronggpu-setup\\model-choice.ini) cannot be read (") == 1);
-        CHECK(CountLog("(the model choice record cannot be read; the launcher's model item") == 1);
+        CHECK(CountLog("(the model choice record cannot be read; wronggpu.ini model=") == 1);
         CloseHandle(hold);
-        CHECK(kept == "M" && ReadRec(rec).model == 'M');
+        CHECK(ReadRec(rec).model == b);
 #endif
-        // (13) a corrupt record (seq overflow): said once, treated as no choice (the launcher's item), not written over by a
-        // create; the next real choice replaces it
+        // (14) a corrupt record (seq overflow): said once, not used (a fresh session: wronggpu.ini's item, never the host's
+        // entry), not written over by a create; the next real choice replaces it
         WriteRec(rec, "model=L\nseq=18446744073709551616\nsource=launcher\n");
-        CHECK(HostedCreate(iniB.c_str(), 'M', idOf('M')) == name(b));
+        CHECK(HostedCreate(iniB.c_str(), 0, idOf('M'), false) == name(b));
         CHECK(CountLog("is corrupt (seq is not a number") == 1);
         wgchoice::ReadResult rr;
         ReadRec(rec, &rr);
@@ -2890,7 +2894,7 @@ static void TestAsiChoiceRecord() {
         CHECK(HostedCreate(iniB.c_str(), 'M', idOf('M'), true, [&](FrontEnd& fe) { rc = fe.HostSelected(idOf('M')); }) == name('M'));
         r = ReadRec(rec);
         CHECK(rc == WG_HOST_SELECTED_RECORDED && r.model == 'M' && r.seq == 1 && r.source == wgchoice::Source::Ffx);
-        // (14) the end of the sequence numbers: the selection is refused loudly, the record unchanged
+        // (15) the end of the sequence numbers: the selection is refused loudly (-2), the record unchanged
         WriteRec(rec, std::string("model=") + b + "\nseq=18446744073709551615\nsource=plugin\n");
         CHECK(HostedCreate(iniM, 'M', idOf('M'), true, [&](FrontEnd& fe) { rc = fe.HostSelected(idOf('M')); }) == name(b));
         r = ReadRec(rec);
@@ -2905,6 +2909,40 @@ static void TestAsiChoiceRecord() {
     g_asiPresent = present;
     g_asiHooked = hooked;
     g_asiModel = saved;
+}
+
+// The order of WrongGPU's model entries in the list the front end gives a host (ListVersions) is the one shared
+// definition (wgshared wg_model_entries.h) the launcher writes OptiScaler's UpscalerIndex from: M, then K, then L, for this
+// build's K / L flags.
+static void TestModelEntryOrder() {
+    Reset();
+    Config config;
+    config.hosted = true;
+    auto fe = MakeFrontEnd(config);
+    uint64_t count = 0;
+    ffxQueryDescGetVersions versions{};
+    versions.header.type = FFX_API_QUERY_DESC_TYPE_GET_VERSIONS;
+    versions.createDescType = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
+    versions.device = kDevice;
+    versions.outputCount = &count;
+    CHECK(fe->Query(nullptr, &versions.header) == FFX_API_RETURN_OK && count > 0);
+    std::vector<uint64_t> ids(count);
+    std::vector<const char*> names(count);
+    versions.versionIds = ids.data();
+    versions.versionNames = names.data();
+    CHECK(fe->Query(nullptr, &versions.header) == FFX_API_RETURN_OK);
+    const bool withK = ModelOfName("K") >= 0, withL = ModelOfName("L") >= 0;
+    int listed = 0;
+    for (char m : {'M', 'K', 'L'}) {
+        const int want = wgentries::ModelEntryIndex(m, withK, withL);
+        const int32_t row = ModelOfName(std::string(1, m));
+        const WgEntryDef* sr = row >= 0 ? SrEntryOfModel(row) : nullptr;
+        CHECK((want < 0) == (sr == nullptr));
+        if (!sr) continue;
+        ++listed;
+        CHECK(want < int(count) && ids[size_t(want)] == sr->id);
+    }
+    CHECK(listed == 1 + (withK ? 1 : 0) + (withL ? 1 : 0));
 }
 
 // i15: WrongGPU's version-list entries come from the registry (clean/wgshared). i20 (owner 2026-10-31): only the SR
@@ -3756,6 +3794,7 @@ int main() {
     TestAsiPluginNotHooked();
     TestAsiPluginPresetK();
     TestAsiChoiceRecord();
+    TestModelEntryOrder();
     {
         Config profile;
         const auto original = profile.BackendOptions();

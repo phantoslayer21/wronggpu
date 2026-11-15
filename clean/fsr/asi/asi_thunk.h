@@ -56,8 +56,9 @@ inline const char* LabelOf(char model) {
 // Shared plugin state. `hooked` is read by the front end through the exported query; `model` is the player's choice
 // within OptiScaler's FSR 3.X entry (0: AMD). `shown` is the model the front end reported as running (kShowSaved until
 // it reports one): the menu marks that one, so the model the choice record decided is what the player sees checked.
-// `unsaved`: a model click the plugin could not write to the model choice record yet (0: none); its entry says so in
-// the menu, "(not saved yet, retrying)", or with `refused` "(not saved: the choice record is full)".
+// `unsaved`: the model of the last click the plugin could not write to the model choice record (0: none). That click
+// changed nothing (nothing is kept for later); its entry says "(not saved, try again)", or with `refused` "(not saved:
+// the choice record is full, ...)", until the next click.
 struct PluginState {
     std::atomic<bool> hooked{false};
     std::atomic<char> model{kDefaultModel};
@@ -66,10 +67,10 @@ struct PluginState {
     std::atomic<bool> refused{false};
 };
 
-constexpr const char* kUnsavedSuffix = " (not saved yet, retrying)";
+constexpr const char* kUnsavedSuffix = " (not saved, try again)";
 constexpr const char* kRefusedSuffix = " (not saved: the choice record is full, see the plugin's log)";
 
-// The label drawn for entry `e`: its name, with the not-saved note when its click is not in the record yet.
+// The label drawn for entry `e`: its name, with the not-saved note when its last click could not be saved.
 inline std::string EntryLabel(const Entry& e, const PluginState& st) {
     if (st.unsaved.load() != e.model) return e.label;
     return std::string(e.label) + (st.refused.load() ? kRefusedSuffix : kUnsavedSuffix);
@@ -84,14 +85,20 @@ inline bool IsFsr3xLabel(const char* label) {
     return label && (std::strcmp(label, "FSR 3.X") == 0 || std::strcmp(label, "FSR 3.X/4") == 0);
 }
 
+// The result of saving a model click (SaveFn): saved; not saved (busy, unreadable, a failed write); refused (the
+// record's sequence numbers are at their end).
+enum class Save { Saved, NotSaved, Refused };
+
 // The Selectable thunk. `sel` is the real ImGui::Selectable(label, selected, flags, size). For OptiScaler's FSR 3.X
 // entry it draws the WrongGPU items first, then the original entry, records any click as the selected model, and
 // returns true (click) to OptiScaler when any of them was clicked so OptiScaler switches to its FSR 3.X backend.
 // `selected` (OptiScaler's backend is FSR 3.X) marks the item of the model shown (ShownModel). Every other entry passes
-// through unchanged. *clickedOut (when given) is set to true on a click on one of these items (the caller saves it).
-template <class SelFn>
+// through unchanged. A click on a WrongGPU model is first written to the model choice record (`save(model)`); when that
+// fails NOTHING changes (the selection, the mark, OptiScaler: no click is passed on) and the entry says it was not
+// saved. *clickedOut (when given) is set to true on a click that took effect (the caller saves the selection).
+template <class SelFn, class SaveFn>
 bool SelectableThunkLogic(SelFn&& sel, const char* label, bool selected, int flags, const void* size, PluginState& st,
-                          bool* clickedOut = nullptr) {
+                          SaveFn&& save, bool* clickedOut = nullptr) {
     if (clickedOut) *clickedOut = false;
     if (!IsFsr3xLabel(label)) return sel(label, selected, flags, size);
     const char model = ShownModel(st);
@@ -100,10 +107,27 @@ bool SelectableThunkLogic(SelFn&& sel, const char* label, bool selected, int fla
         if (sel(EntryLabel(e, st).c_str(), selected && model == e.model, flags, size) && clicked == 1) clicked = e.model;
     if (sel(label, selected && model == kModelAmd, flags, size) && clicked == 1) clicked = kModelAmd;
     if (clicked == 1) return false;
+    if (clicked != kModelAmd) {
+        const Save r = save(clicked);
+        if (r != Save::Saved) {
+            st.refused.store(r == Save::Refused);
+            st.unsaved.store(clicked);
+            return false;
+        }
+    }
+    st.unsaved.store(0);
+    st.refused.store(false);
     st.model.store(clicked);
     st.shown.store(kShowSaved);  // the player's click is the newest choice: it runs and is marked
     if (clickedOut) *clickedOut = true;
     return true;
+}
+
+// The same without a model choice record to write (every click is saved).
+template <class SelFn>
+bool SelectableThunkLogic(SelFn&& sel, const char* label, bool selected, int flags, const void* size, PluginState& st,
+                          bool* clickedOut = nullptr) {
+    return SelectableThunkLogic(sel, label, selected, flags, size, st, [](char) { return Save::Saved; }, clickedOut);
 }
 
 // The BeginCombo thunk: when a WrongGPU model is shown and OptiScaler would show its FSR 3.X name as the closed

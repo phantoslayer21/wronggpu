@@ -282,8 +282,8 @@ def test_choice(t):
     rc = t.run("model", "convert", "--preset=L", "--model=" + lsrc)
     t.check("Model L's data converted (model convert --preset=L)", rc == 0, (rc, t.j))
     rc = t.run("set", exe, "model=L")
-    w = read(wini).decode("utf-8", "replace")
-    t.check("set model=L: exit 0; wronggpu.ini's last model item is model=L", rc == 0 and suite_options_model(w) == "L", (rc, t.j.get("message"), w))
+    t.check("set model=L: exit 0; wronggpu.ini byte for byte as the install wrote it (the model is the record's, never written there)",
+            rc == 0 and read(wini) == m_w, (rc, t.j.get("message"), read(wini)[-200:]))
     t.check("...OptiScaler's UpscalerIndex names Model L's entry (1: after Model M in a build without Preset K)",
             upscaler_index(read(oini).decode("utf-8", "replace")) == "1", read(oini).decode("utf-8", "replace"))
     t.check("...the record's hashes follow both files (the file-ownership rule: they are WrongGPU's writes)",
@@ -296,7 +296,23 @@ def test_choice(t):
     rc = t.run("set", exe, "model=L")
     r2 = choice_record(b)
     t.check("set model=L again: the record's seq grows (the newest choice); wronggpu.ini and OptiScaler.ini unchanged",
-            rc == 0 and r2.get("model") == "L" and int(r2.get("seq", "0")) == int(r1.get("seq", "0")) + 1, (r1, r2))
+            rc == 0 and r2.get("model") == "L" and int(r2.get("seq", "0")) == int(r1.get("seq", "0")) + 1 and read(wini) == m_w, (r1, r2))
+    # an explicit model choice in the launcher (set model=..., or the launcher's Apply) wins over a NEWER choice made in the
+    # game even when the profile's model is unchanged; a launcher change of another setting does not touch the record
+    rec_path = os.path.join(b, "wronggpu-setup", "model-choice.ini")
+    newer = int(r2.get("seq", "0")) + 1
+    write(rec_path, ("model=M\r\nseq=%d\r\nsource=plugin\r\n" % newer).encode("ascii"))
+    o_before = read(oini)
+    rc = t.run("set", exe, "fps_overlay=on")
+    t.check("set fps_overlay=on: the plugin's newer choice (M) stays the record", rc == 0 and choice_record(b) == {"model": "M", "seq": str(newer), "source": "plugin"},
+            (rc, choice_record(b)))
+    rc = t.run("set", exe, "fps_overlay=keep")  # ("keep" leaves the key as it is: the file goes back by hand, and
+    write(oini, o_before)                       # the next model choice rewrites it and its hash)
+    rc = t.run("set", exe, "model=L")
+    r2b = choice_record(b)
+    t.check("set model=L (the profile already says L) after the plugin's newer M: L is recorded with the next seq",
+            rc == 0 and r2b.get("model") == "L" and r2b.get("source") == "launcher" and int(r2b.get("seq", "0")) == newer + 1, r2b)
+    r2 = r2b
     rc = t.run("set", exe, "model=M")
     t.check("set model=M: wronggpu.ini and OptiScaler.ini back byte for byte as the install wrote them",
             rc == 0 and read(wini) == m_w and read(oini) == m_o, (rc, read(wini)[-200:], read(oini)[-200:]))
@@ -343,9 +359,10 @@ def test_choice(t):
     os.remove(os.path.join(t.lad, "WrongGPU", "model", "L", "model.wgcm"))  # (t.model is the case here, not the path helper)
     rc = t.run("repair", exe, "--opti=" + opti, "--force")
     msgs = " ".join(t.j.get("warnings", []) + t.j.get("notes", []))
-    t.check("repair of a game set to L without Model L's data: exit 0, the files say Model M, the player is told how to convert it",
-            rc == 0 and suite_options_model(read(wini).decode("utf-8", "replace")) == "M" and "Model L's data on this PC is not ready" in msgs and
-            "model convert --preset=L" in msgs, (rc, t.j.get("message"), msgs[:600]))
+    t.check("repair of a game set to L without Model L's data: exit 0, the record says Model M (the launcher's own choice can't run),"
+            " the player is told how to convert it",
+            rc == 0 and choice_record(b).get("model") == "M" and choice_record(b).get("source") == "launcher" and
+            "Model L's data on this PC is not ready" in msgs and "model convert --preset=L" in msgs, (rc, t.j.get("message"), msgs[:600], choice_record(b)))
     t.check("...the choice stays in profile.ini (model=l)", b"model=l\r\n" in read(os.path.join(b, "wronggpu-setup", "profile.ini")))
     rc = t.run("uninstall", exe)
     t.check("uninstall: the game folder byte for byte as before the install", rc == 0 and suite.snapshot(root) == before, (rc, suite.diff(before, suite.snapshot(root))))

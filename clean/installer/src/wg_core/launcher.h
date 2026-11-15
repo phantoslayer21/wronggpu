@@ -180,7 +180,7 @@ struct OpRequest {
     std::vector<std::pair<wstring, wstring>> movePluginsList, moveModsList;
     bool otherSetupOk = false;     // 0.6.1: Clean up / Adopt of WrongGPU files another mod's setup uses, confirmed (--confirm-other-setup)
     bool hasProfile = false;       // apply: this profile (else the game's profile.ini); install: the profile a new install starts with
-    bool modelChosen = false;      // apply: the player explicitly applied the profile's model (set <game> model=...): recorded
+    bool modelChosen = false;      // apply: the player applied the profile's model (the launcher's Apply, set <game> model=...): recorded
     Profile profile;
     // apply, the OptiScaler tab: edits of editable keys ("Section.Key", value); reset: the editable keys back to what the
     // install wrote (inikey journal, byte for byte); keep: values OptiScaler's menu saved over the launcher's are kept.

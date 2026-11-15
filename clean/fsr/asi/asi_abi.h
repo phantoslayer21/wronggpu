@@ -88,9 +88,3 @@ typedef void (*PfnWrongGpuAsiSetChoiceRecordV1)(const wchar_t* path);
 // to marking the saved choice. Display only: nothing is saved.
 #define WRONGGPU_ASI_SHOW_MODEL "WrongGpuAsiShowModelV1"
 typedef void (*PfnWrongGpuAsiShowModelV1)(char model);
-
-// The model of a click on one of the plugin's model entries that the plugin could not write to the record yet (the
-// record was busy or a write failed; the plugin tries again, and its menu says "not saved yet"), else 0. The front end
-// runs that model for the session until the record has it.
-#define WRONGGPU_ASI_PENDING_CHOICE "WrongGpuAsiPendingChoiceV1"
-typedef char (*PfnWrongGpuAsiPendingChoiceV1)(void);

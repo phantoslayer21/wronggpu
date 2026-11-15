@@ -131,9 +131,7 @@ int main(int argc, char** argv) {
             int hooked = -1; char model = '?';
             CHECK(legacy(&hooked, &model) == 1 && hooked == 0 && model == 'M');  // the saved entry is unchanged
         }
-        // no click was made: nothing is pending
-        auto pending = reinterpret_cast<PfnWrongGpuAsiPendingChoiceV1>(GetProcAddress(module, WRONGGPU_ASI_PENDING_CHOICE));
-        CHECK(pending != nullptr && pending() == 0);
+        CHECK(GetProcAddress(module, "WrongGpuAsiPendingChoiceV1") == nullptr);  // no queued choice exists any more
         CHECK(FreeLibrary(module) != 0); // No initialization or patches ever occurred.
         CHECK(GetModuleHandleA(argv[1]) == nullptr); // Query-only loading did not permanently pin it.
     }

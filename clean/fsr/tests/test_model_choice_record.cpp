@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: MIT
 // Unit tests of the game's model choice record (clean/fsr/src/model_choice_record.h) on REAL files in a fresh folder under
-// the system temporary folder, and with REAL processes (this program started again as a writer, a reader or a lock
-// holder that dies): the strict three-key format, seq order with each source winning in turn, the cross-process lock
-// (concurrent writers lose no update, seq never goes back; an abandoned lock is taken over), the upgrade migration,
-// corrupt and overflowing records, the end of the sequence numbers, a failed write and its retry, a stale temporary file.
+// the system temporary folder, and with REAL processes (this program started again as a writer, a reader, a launcher
+// apply, a lock holder, or a lock holder that dies): the strict three-key format, seq order with each source winning in
+// turn, the game's state lock (wg_state.h: concurrent writers lose no update, seq never goes back; an abandoned lock is
+// taken over; two path aliases of one folder are one lock), the upgrade migration (under the lock, against a launcher
+// apply in another process), corrupt and overflowing records, the end of the sequence numbers, failures that change
+// nothing (no queue), a stale temporary file.
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cwctype>
 #include <fstream>
 #include <string>
 #include <thread>
@@ -57,13 +60,6 @@ void TestStrictFormat() {
     CHECK(Parses(FormatRecord(Record{'K', 42, Source::Plugin}), &r) && r.model == 'K' && r.seq == 42 && r.source == Source::Plugin);
 }
 
-void TestLockName() {
-    const std::wstring a = LockName(L"C:\\Games\\X\\wronggpu-setup\\model-choice.ini");
-    CHECK(a.rfind(L"Local\\WrongGPU-choice-", 0) == 0 && a.size() == std::wstring(L"Local\\WrongGPU-choice-").size() + 16);
-    CHECK(LockName(L"c:/games/x/WRONGGPU-SETUP/model-choice.ini") == a);  // the same file however it is spelt
-    CHECK(LockName(L"C:\\Games\\Y\\wronggpu-setup\\model-choice.ini") != a);  // another game: another lock
-}
-
 struct Folder {
     fs::path dir;
     explicit Folder(const char* name = "") {
@@ -108,7 +104,7 @@ int TmpFiles(const Folder& f) {
     int n = 0;
     std::error_code ec;
     for (auto& e : fs::directory_iterator(f.dir / kStateFolder, ec))
-        if (e.path().extension() == ".tmp") ++n;
+        if (wgstate::IsTempName(e.path().filename().wstring())) ++n;
     return n;
 }
 
@@ -137,7 +133,7 @@ void TestChoicesInTurn() {
     CHECK(RecordChoice(f.record(), 'L', Source::Launcher, &after, &why) == Outcome::Written);  // the same choice again: seq grows
     CHECK(Rec(f.record()).seq == 6);
     // a stale temporary file a crash left next to the record (and garbage in it): never read, writes still work
-    const fs::path stale = f.record().string() + ".999.0.0.tmp";
+    const fs::path stale = f.record().wstring() + wgstate::kTempMark + L"999-1";
     WriteRaw(stale, "model=K\nseq=999999");
     CHECK(Rec(f.record()).seq == 6);
     CHECK(RecordChoice(f.record(), 'K', Source::Plugin, &after, &why) == Outcome::Written && Rec(f.record()).seq == 7);
@@ -180,73 +176,74 @@ void TestMigration() {
     Record r;
     bool migrated = false;
     std::string why;
+    auto model = [](char m) { return [m] { return m; }; };
     // an install from before 0.6.5 (no record): wronggpu.ini's model item, seq 1, source=launcher; the stamp files of the
     // earlier designs next to it are ignored
     WriteRaw(f.dir / kStateFolder / "wronggpu-ffx-choice.ini", "model=K\nchosen=99999999999\n");
-    CHECK(LoadOrMigrateRecord(f.record(), 'L', &r, &migrated, &why) == ReadResult::Ok && migrated);
+    CHECK(LoadOrMigrateRecord(f.record(), model('L'), &r, &migrated, &why) == LoadResult::Ok && migrated);
     CHECK(r.model == 'L' && r.seq == 1 && r.source == Source::Launcher);
     r = Rec(f.record());
     CHECK(r.model == 'L' && r.seq == 1 && r.source == Source::Launcher);
-    // a record now: returned as it is, nothing written
+    // a record now: returned as it is, nothing written, the model item not even read
     const std::string text = ReadRaw(f.record());
-    CHECK(LoadOrMigrateRecord(f.record(), 'K', &r, &migrated, &why) == ReadResult::Ok && !migrated && r.model == 'L');
+    bool asked = false;
+    CHECK(LoadOrMigrateRecord(f.record(), [&] { asked = true; return 'K'; }, &r, &migrated, &why) == LoadResult::Ok && !migrated &&
+          r.model == 'L' && !asked);
     CHECK(ReadRaw(f.record()) == text);
     // no model item: Model M
     std::error_code ec;
     fs::remove(f.record(), ec);
-    CHECK(LoadOrMigrateRecord(f.record(), 0, &r, &migrated, &why) == ReadResult::Ok && migrated && r.model == 'M' && r.seq == 1);
+    CHECK(LoadOrMigrateRecord(f.record(), model(0), &r, &migrated, &why) == LoadResult::Ok && migrated && r.model == 'M' && r.seq == 1);
     // a corrupt record is not migrated over (it stays corrupt until a real choice replaces it)
     WriteRaw(f.record(), "model=L\n");
-    CHECK(LoadOrMigrateRecord(f.record(), 'K', &r, &migrated, &why) == ReadResult::Corrupt && !migrated);
+    CHECK(LoadOrMigrateRecord(f.record(), model('K'), &r, &migrated, &why) == LoadResult::Corrupt && !migrated);
     CHECK(ReadRaw(f.record()) == "model=L\n");
     fs::remove(f.dir / kStateFolder / "wronggpu-ffx-choice.ini", ec);
 }
 
 #ifdef _WIN32
-// A write that fails (the record held open without delete sharing, so it cannot be replaced) and its retry; a choice
-// superseded while it waited; a lock another thread holds (NoLock); an unreadable record never written over.
-void TestFailureAndRetry() {
+// Failures change nothing and nothing is kept for later: a write that fails (the record held open without delete sharing,
+// so it cannot be replaced), the game's state lock held by another thread (through another spelling of the game folder),
+// an unreadable record (never written over). After each, the next choice is written normally from the record as it is.
+void TestFailures() {
     Folder f;
-    Record after;
+    Record after, before;
     std::string why;
     CHECK(RecordChoice(f.record(), 'L', Source::Launcher, &after, &why) == Outcome::Written);  // seq 1
+    CHECK(RecordChoice(f.record(), 'K', Source::Plugin, &after, &why, &before) == Outcome::Written && before.model == 'L' &&
+          before.seq == 1 && after.seq == 2);  // the record replaced is reported
     HANDLE h = CreateFileW(f.record().c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     CHECK(h != INVALID_HANDLE_VALUE);
-    Pending p;
-    CHECK(RecordChoice(f.record(), 'K', Source::Plugin, &after, &why, &p) == Outcome::WriteFailed);
-    CHECK(p.active() && p.model == 'K' && p.baseKnown && p.baseSeq == 1 && !why.empty());
-    CHECK(RetryPending(f.record(), &p, &after, &why) == Outcome::WriteFailed && p.active());  // still held: still pending
+    const std::string kept = ReadRaw(f.record());
+    CHECK(RecordChoice(f.record(), 'M', Source::Ffx, &after, &why) == Outcome::WriteFailed && !why.empty());
     CloseHandle(h);
-    CHECK(Rec(f.record()).seq == 1 && Rec(f.record()).model == 'L');  // nothing changed while it failed
-    CHECK(RetryPending(f.record(), &p, &after, &why) == Outcome::Written && !p.active());
-    Record r = Rec(f.record());
-    CHECK(r.model == 'K' && r.seq == 2 && r.source == Source::Plugin);
-    // a pending choice superseded meanwhile (the launcher wrote after it): dropped, the newer choice stays
-    h = CreateFileW(f.record().c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    CHECK(RecordChoice(f.record(), 'M', Source::Ffx, &after, &why, &p) == Outcome::WriteFailed && p.baseSeq == 2);
-    CloseHandle(h);
+    CHECK(ReadRaw(f.record()) == kept);  // nothing changed, nothing to be written later
     CHECK(RecordChoice(f.record(), 'L', Source::Launcher, &after, &why) == Outcome::Written && after.seq == 3);
-    CHECK(RetryPending(f.record(), &p, &after, &why) == Outcome::Superseded && !p.active());
-    r = Rec(f.record());
-    CHECK(r.model == 'L' && r.seq == 3 && r.source == Source::Launcher);
-    // the lock held by another thread: NoLock (base unknown), nothing written; once free the retry writes
+    // the game's state lock (wg_state.h, the lock settings.ini's writers take too) held by another thread, through the game
+    // folder spelt differently: NoLock within the wait, nothing written
     std::atomic<bool> held{false}, release{false};
     std::thread holder([&] {
-        Lock l(f.record());
-        held.store(l.ok());
+        std::wstring other = f.dir.wstring();
+        for (auto& c : other) c = c == L'\\' ? L'/' : wchar_t(towupper(c));
+        wgstate::StateLock l(other);
+        held.store(l.held());
         while (!release.load()) Sleep(1);
     });
     while (!held.load()) Sleep(1);
-    CHECK(RecordChoice(f.record(), 'K', Source::Ffx, &after, &why, &p, 100) == Outcome::NoLock && p.active() && !p.baseKnown);
-    CHECK(Rec(f.record()).seq == 3);
+    CHECK(RecordChoice(f.record(), 'K', Source::Ffx, &after, &why, nullptr, 100) == Outcome::NoLock);
+    bool migrated = false;
+    Record r;
+    CHECK(LoadOrMigrateRecord(f.record(), [] { return 'M'; }, &r, &migrated, &why, 100) == LoadResult::NoLock);
     release.store(true);
     holder.join();
-    CHECK(RetryPending(f.record(), &p, &after, &why) == Outcome::Written && Rec(f.record()).seq == 4 && Rec(f.record()).model == 'K');
+    r = Rec(f.record());
+    CHECK(r.model == 'L' && r.seq == 3);
     // a record held open without any sharing: Unreadable, never written over
     h = CreateFileW(f.record().c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    CHECK(RecordChoice(f.record(), 'M', Source::Plugin, &after, &why, &p) == Outcome::Unreadable && p.active() && !p.baseKnown);
+    CHECK(RecordChoice(f.record(), 'M', Source::Plugin, &after, &why) == Outcome::Unreadable);
+    CHECK(LoadOrMigrateRecord(f.record(), [] { return 'M'; }, &r, &migrated, &why) == LoadResult::Unreadable);
     CloseHandle(h);
-    CHECK(Rec(f.record()).seq == 4 && Rec(f.record()).model == 'K');
+    CHECK(Rec(f.record()).seq == 3 && Rec(f.record()).model == 'L');
     CHECK(TmpFiles(f) == 0);
 }
 
@@ -262,6 +259,15 @@ HANDLE Spawn(const std::wstring& args) {
     si.cb = sizeof si;
     PROCESS_INFORMATION pi{};
     if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) return nullptr;
+    CloseHandle(pi.hThread);
+    return pi.hProcess;
+}
+
+HANDLE Spawn2(std::wstring cmd) {  // another program's command line
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) return nullptr;
     CloseHandle(pi.hThread);
     return pi.hProcess;
 }
@@ -312,6 +318,90 @@ void TestAbandonedLock() {
     CHECK(Rec(f.record()).model == 'K');
 }
 
+// The upgrade migration reads wronggpu.ini's model item WHILE it holds the game's state lock, so a launcher apply (which
+// holds the same lock across wronggpu.ini and the record) is wholly before or after it, in two REAL processes:
+// (1) a launcher process takes the lock, writes wronggpu.ini (model=L) and dies before it writes the record: the waiting
+//     migration reads L, never the M it would have read before the lock;
+// (2) a launcher process takes the lock, writes wronggpu.ini and then the record (L, seq 1): the waiting migration finds
+//     that record and writes nothing.
+char IniModel(const fs::path& ini) {
+    const std::string text = ReadRaw(ini);
+    const size_t at = text.rfind("model=");
+    return at == std::string::npos || at + 6 >= text.size() ? 0 : text[at + 6];
+}
+
+void TestMigrationUnderLock() {
+    for (int crash = 1; crash >= 0; --crash) {
+        Folder f(crash ? "-mig1" : "-mig2");
+        const fs::path ini = f.dir / "wronggpu.ini", signal = f.dir / "locked.txt";
+        WriteRaw(ini, "[fsr]\r\nruntime_options = model=M\r\n");
+        HANDLE p = Spawn(std::wstring(crash ? L"apply-and-die" : L"apply") + L" \"" + f.dir.wstring() + L"\"");
+        CHECK(p != nullptr);
+        for (int i = 0; i < 5000 && !fs::exists(signal); ++i) Sleep(1);  // the launcher holds the lock now
+        CHECK(fs::exists(signal));
+        CHECK(IniModel(ini) == 'M');  // read now, before the lock, it would still be M
+        Record r;
+        bool migrated = false;
+        std::string why;
+        CHECK(LoadOrMigrateRecord(f.record(), [&] { return IniModel(ini); }, &r, &migrated, &why, 10000) == LoadResult::Ok);
+        CHECK(r.model == 'L' && r.seq == 1 && r.source == Source::Launcher && migrated == (crash == 1));
+        CHECK(Wait(p) == DWORD(crash ? 97 : 0));
+        r = Rec(f.record());
+        CHECK(r.model == 'L' && r.seq == 1);
+        std::error_code ec;
+        fs::remove(ini, ec);
+        fs::remove(signal, ec);
+    }
+}
+
+// Two path aliases of one game folder (a directory junction, and the \\?\ form) name ONE lock: a process holding the
+// game's state lock through the junction keeps a writer that uses the real path out.
+void TestAliasesOneLock() {
+    Folder f("-alias");
+    const std::wstring alias = f.dir.wstring() + L"-junction";
+    RemoveDirectoryW(alias.c_str());
+    HANDLE mk = Spawn2(L"cmd.exe /d /c mklink /J \"" + alias + L"\" \"" + f.dir.wstring() + L"\" >nul");
+    CHECK(mk != nullptr && Wait(mk) == 0);
+    std::wstring a, b, c;
+    CHECK(wgstate::LockNameFor(f.dir.wstring(), &a) && wgstate::LockNameFor(alias, &b) &&
+          wgstate::LockNameFor(L"\\\\?\\" + f.dir.wstring(), &c));
+    CHECK(!a.empty() && a == b && a == c);
+    const fs::path signal = f.dir / "held.txt";
+    HANDLE p = Spawn(L"hold \"" + alias + L"\" 1500");
+    for (int i = 0; i < 5000 && !fs::exists(signal); ++i) Sleep(1);
+    CHECK(fs::exists(signal));
+    Record after;
+    std::string why;
+    CHECK(RecordChoice(f.record(), 'K', Source::Plugin, &after, &why, nullptr, 200) == Outcome::NoLock);
+    CHECK(p != nullptr && Wait(p) == 0);
+    CHECK(RecordChoice(f.record(), 'K', Source::Plugin, &after, &why, nullptr, 2000) == Outcome::Written && after.seq == 1);
+    std::error_code ec;
+    fs::remove(signal, ec);
+    CHECK(RemoveDirectoryW(alias.c_str()) != 0);  // the junction only; the folder stays
+    CHECK(fs::exists(f.record()));
+}
+
+int ChildApply(const fs::path& gameDir, bool crash) {
+    const fs::path record = RecordPathIn(gameDir);
+    Lock lock(record);
+    if (!lock.ok()) return 1;
+    WriteRaw(gameDir / "locked.txt", "1");
+    Sleep(300);
+    WriteRaw(gameDir / "wronggpu.ini", "[fsr]\r\nruntime_options = model=L\r\n");
+    if (crash) TerminateProcess(GetCurrentProcess(), 97);  // dies holding the lock, before the record
+    Record after;
+    std::string why;
+    return RecordChoiceUnlocked(record, 'L', Source::Launcher, &after, &why) == Outcome::Written ? 0 : 2;
+}
+
+int ChildHold(const std::wstring& gameDir, int ms) {
+    wgstate::StateLock lock(gameDir);
+    if (!lock.held()) return 1;
+    WriteRaw(fs::path(gameDir) / "held.txt", "1");
+    Sleep(ms);
+    return 0;
+}
+
 int ChildWriter(const fs::path& record, char model, const std::string& source, int count) {
     const Source s = source == "launcher" ? Source::Launcher : source == "ffx" ? Source::Ffx : Source::Plugin;
     uint64_t last = 0;
@@ -327,6 +417,7 @@ int ChildWriter(const fs::path& record, char model, const std::string& source, i
         }
         if (after.seq <= last) ++bad;  // seq went back or stood still for this writer
         last = after.seq;
+        Sleep(0);  // let the other processes take the lock between two writes
     }
     return bad;
 }
@@ -336,16 +427,19 @@ int ChildReader(const fs::path& record, uint64_t until) {
     int bad = 0;
     const ULONGLONG start = GetTickCount64();
     while (last < until && GetTickCount64() - start < 100000) {
-        Lock lock(record, 20000);
-        if (!lock.ok()) return 100;
-        Record r;
-        std::string why;
-        const ReadResult rr = ReadRecordFile(record, &r, &why);
-        if (rr == ReadResult::Corrupt || rr == ReadResult::Unreadable) ++bad;
-        if (rr == ReadResult::Ok) {
-            if (r.seq < last) ++bad;
-            last = r.seq;
+        {
+            Lock lock(record, 20000);
+            if (!lock.ok()) return 100;
+            Record r;
+            std::string why;
+            const ReadResult rr = ReadRecordFile(record, &r, &why);
+            if (rr == ReadResult::Corrupt || rr == ReadResult::Unreadable) ++bad;
+            if (rr == ReadResult::Ok) {
+                if (r.seq < last) ++bad;
+                last = r.seq;
+            }
         }
+        Sleep(1);  // a Windows mutex is not fair: a reader that takes it again at once could keep the writers out
     }
     return bad + (last < until ? 1000 : 0);
 }
@@ -357,6 +451,9 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
     if (argc >= 6 && std::string(argv[1]) == "writer") return ChildWriter(argv[2], argv[3][0], argv[4], std::atoi(argv[5]));
     if (argc >= 4 && std::string(argv[1]) == "reader") return ChildReader(argv[2], std::strtoull(argv[3], nullptr, 10));
+    if (argc >= 3 && std::string(argv[1]) == "apply") return ChildApply(argv[2], false);
+    if (argc >= 3 && std::string(argv[1]) == "apply-and-die") return ChildApply(argv[2], true);
+    if (argc >= 4 && std::string(argv[1]) == "hold") return ChildHold(fs::path(argv[2]).wstring(), std::atoi(argv[3]));
     if (argc >= 3 && std::string(argv[1]) == "lock-and-die") {
         Lock lock(argv[2]);
         if (!lock.ok()) return 1;
@@ -367,14 +464,15 @@ int main(int argc, char** argv) {
     (void)argv;
 #endif
     TestStrictFormat();
-    TestLockName();
     TestChoicesInTurn();
     TestCorruptAndEnd();
     TestMigration();
 #ifdef _WIN32
-    TestFailureAndRetry();
+    TestFailures();
     TestConcurrentProcesses();
     TestAbandonedLock();
+    TestMigrationUnderLock();
+    TestAliasesOneLock();
 #endif
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;

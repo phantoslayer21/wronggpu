@@ -1042,8 +1042,17 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
             if (warnings) warnings->push_back(w);
         }
     }
-    string winiBefore, winiAfter;  // the model choice record (below)
-    char forcedEntry = 0;          // the model whose entry OptiScaler.ini's UpscalerIndex is set to (after the record)
+    // The game's state lock (wg_state.h, held by the launcher, the front end and the plugins for every read-modify-write
+    // of the game's state) is held across wronggpu.ini, the model choice record and OptiScaler.ini's entry: the front end's
+    // upgrade migration, which reads wronggpu.ini's model item under the same lock, comes wholly before or after this.
+    // Not taken in time (the game is writing its state): nothing is applied.
+    const std::filesystem::path recordPath = Join(StateDir(dir), wgchoice::kRecordFile);
+    wgchoice::Lock lock(recordPath);
+    if (!lock.ok())
+        Fail(L"Settings not applied: the game is saving WrongGPU's state right now (" + FromUtf8(wgchoice::OutcomeWords(wgchoice::Outcome::NoLock)) +
+                 L"). Try again.",
+             EXIT_REFUSED);
+    char forcedEntry = 0;  // the model whose entry OptiScaler.ini's UpscalerIndex is set to (after the record)
     auto renderFile = [&](const wchar_t* name, bool opti) {
         const wstring path = Join(dir, name);
         string in;
@@ -1059,9 +1068,13 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
                 for (auto& n : kGameNotices) if (IEq(BaseName(m.exe), n.exe)) notes.push_back(n.notice);
             JournalChanges(m.inikeys, name, in, out);
             recordChanged = recordChanged || out != in;
+        } else {
+            // the model is never written into wronggpu.ini (it is the model choice record's): its model item stays as the
+            // install wrote it, the install's default
+            Profile qw = q;
+            if (FindSetting("model")) qw.v["model"] = EffectiveSettings(in, "")["model"];
+            if (!RenderWronggpuIni(qw, in, out, &why)) Fail(L"Settings not applied: " + why, EXIT_USAGE);
         }
-        else if (!RenderWronggpuIni(q, in, out, &why)) Fail(L"Settings not applied: " + why, EXIT_USAGE);
-        else { winiBefore = in; winiAfter = out; }
         if (out == in && (had || out.empty())) return;  // unchanged, or nothing to write into a missing file
         WriteFileAtomic(path, out.data(), out.size());
         const wstring h = Sha256Bytes(out.data(), out.size());
@@ -1070,34 +1083,27 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
     };
     renderFile(L"wronggpu.ini", false);
     // The model choice record (clean/fsr/src/model_choice_record.h): the launcher's model choice, with the next seq, when the
-    // player explicitly applied a model (also the same one again) or the model the files run changed. Under the record's
-    // cross-process lock (the game's front end and menu plugin take it too): the record first, then OptiScaler.ini's
-    // UpscalerIndex set to that model's entry whatever it was (display only: the front end never takes the index for a
-    // choice, so a crash between the two leaves nothing wrong). A model the files cannot run yet, written as Model M
-    // above, is recorded as what runs: Model M.
-    const char modelBefore = ModelOfWronggpuIni(winiBefore), modelAfter = ModelOfWronggpuIni(winiAfter);
-    const bool modelChoice = modelChosen || modelBefore != modelAfter;
-    const char model = modelAfter ? modelAfter : 'M';
-    {
-        std::unique_ptr<wgchoice::Lock> lock;
-        if (modelChoice) {
-            lock = std::make_unique<wgchoice::Lock>(Join(StateDir(dir), wgchoice::kRecordFile));
-            if (!lock->ok()) {
-                const wstring w = L"The model choice record was not changed: " + FromUtf8(wgchoice::OutcomeWords(wgchoice::Outcome::NoLock)) +
-                                  L" (the game holds it). Apply the model again.";
-                LogLine(ctx, w);
-                notes.push_back(w);
-                if (warnings) warnings->push_back(w);
-            } else if (WriteLauncherModelChoice(ctx, dir, model, notes, warnings)) {
-                forcedEntry = model;
+    // player applied a model (Apply in the launcher, or `set <game> model=<m>`: always, also the same model again, so it
+    // wins over a newer choice made in the game), when the game has no record yet (from the profile), or when the
+    // launcher's own last choice can no longer run as recorded (a model whose data is not ready: Model M until it is).
+    // Then OptiScaler.ini's UpscalerIndex is set to that model's entry whatever it was (display only: the front end never
+    // takes the index for a choice, so a crash between the two leaves nothing wrong).
+    if (FindSetting("model")) {
+        const string want = q.get("model");
+        const char model = want == "l" ? 'L' : want == "k" ? 'K' : 'M';
+        wgchoice::Record cur;
+        std::string err;
+        const wgchoice::ReadResult rr = wgchoice::ReadRecordFile(recordPath, &cur, &err);
+        const bool write = modelChosen || rr == wgchoice::ReadResult::Missing ||
+                           (rr == wgchoice::ReadResult::Ok && cur.source == wgchoice::Source::Launcher && cur.model != model);
+        if (write && WriteLauncherModelChoice(ctx, dir, model, notes, warnings)) {
+            forcedEntry = model;
 #ifdef WRONGGPU_TESTING
-                // tests: the apply ends here, after the record and before OptiScaler.ini (a crash between the two)
-                if (EnvVar(L"WRONGGPU_TEST_STOP_AFTER_CHOICE_RECORD") == L"1") TerminateProcess(GetCurrentProcess(), 97);
+            // tests: the apply ends here, after the record and before OptiScaler.ini (a crash between the two)
+            if (EnvVar(L"WRONGGPU_TEST_STOP_AFTER_CHOICE_RECORD") == L"1") TerminateProcess(GetCurrentProcess(), 97);
 #endif
-            }
         }
-        if (HostedRecord(m)) renderFile(L"OptiScaler.ini", true);
-        if (forcedEntry && HostedRecord(m)) {  // the menu plugin's AMD entry chosen earlier: the launcher's model choice is newer
+        if (forcedEntry && modelChosen && HostedRecord(m)) {  // the menu plugin's AMD entry chosen earlier: this choice is newer
             const wstring asi = Join(dir, L"wronggpu-asi.ini");
             string text;
             if (ReadAll(asi, text) && wgasi::ParseSelection(text) == wgasi::kModelAmd) {
@@ -1107,6 +1113,7 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
             }
         }
     }
+    if (HostedRecord(m)) renderFile(L"OptiScaler.ini", true);
     if (RecordHasRr(m)) {  // Ray Reconstruction (rr.h): the RR plugin's settings file (RR stays off while its data is not ready)
         const wstring path = Join(dir, kRrSettings);
         string in;

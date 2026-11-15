@@ -197,30 +197,48 @@ void TestClickAndShownModel() {
 #endif
 }
 
-// A model click the plugin could not write to the model choice record yet: its entry says so in the menu ("not saved
-// yet, retrying"; "not saved: the choice record is full" when refused), the other entries are unchanged, and a click on
-// the labelled entry is still that model's click.
-void TestUnsavedLabel() {
+// A model click the plugin cannot write to the model choice record (the lock not taken in time, a failed write, the end of
+// the sequence numbers): NOTHING changes (the selection, the mark, no click passed on to OptiScaler, nothing kept for
+// later) and the entry says "(not saved, try again)" ("not saved: the choice record is full" when refused) until a click
+// that is saved. The AMD entry never writes the record.
+void TestUnsavedClick() {
     PluginState st;
     const int size = 0;
+    const Entry& first = kEntries[0];
     const Entry& last = kEntries[kEntryCount - 1];
-    st.unsaved.store(last.model);
-    FakeSelectable draw;
-    SelectableThunkLogic(draw, "FSR 3.X", true, 0, &size, st);
-    CHECK(draw.calls.size() == kEntryCount + 1);
-    for (size_t i = 0; i + 1 < kEntryCount; ++i) CHECK(draw.calls[i].label == kEntries[i].label);
-    CHECK(draw.calls[kEntryCount - 1].label == std::string(last.label) + kUnsavedSuffix);
-    CHECK(draw.calls[kEntryCount].label == "FSR 3.X");
-    st.refused.store(true);
-    FakeSelectable refused;
-    SelectableThunkLogic(refused, "FSR 3.X", true, 0, &size, st);
-    CHECK(refused.calls[kEntryCount - 1].label == std::string(last.label) + kRefusedSuffix);
-    st.refused.store(false);
+    st.model.store(first.model);
+    st.shown.store(first.model);  // the front end runs the first model
+    int saves = 0;
+    auto fail = [&](char) { ++saves; return Save::NotSaved; };
     FakeSelectable click;
-    click.clickLabel = std::string(last.label) + kUnsavedSuffix;
-    bool clicked = false;
-    CHECK(SelectableThunkLogic(click, "FSR 3.X", true, 0, &size, st, &clicked) && clicked && st.model.load() == last.model);
-    st.unsaved.store(0);
+    click.clickLabel = last.label;
+    bool clicked = true;
+    CHECK(!SelectableThunkLogic(click, "FSR 3.X", true, 0, &size, st, fail, &clicked) && !clicked && saves == 1);
+    CHECK(st.model.load() == first.model && st.shown.load() == first.model && st.unsaved.load() == last.model);
+    FakeSelectable draw;
+    SelectableThunkLogic(draw, "FSR 3.X", true, 0, &size, st, fail);
+    CHECK(draw.calls.size() == kEntryCount + 1 && draw.calls[kEntryCount - 1].label == std::string(last.label) + kUnsavedSuffix);
+    CHECK(draw.calls[0].selected == true || kEntryCount == 1);  // the model that runs stays marked
+    for (size_t i = 0; i + 1 < kEntryCount; ++i) CHECK(draw.calls[i].label == kEntries[i].label);
+    // refused (the end of the sequence numbers): said so
+    auto refuse = [&](char) { return Save::Refused; };
+    FakeSelectable click2;
+    click2.clickLabel = std::string(last.label) + kUnsavedSuffix;
+    CHECK(!SelectableThunkLogic(click2, "FSR 3.X", true, 0, &size, st, refuse, &clicked) && st.model.load() == first.model);
+    FakeSelectable draw2;
+    SelectableThunkLogic(draw2, "FSR 3.X", true, 0, &size, st, refuse);
+    CHECK(draw2.calls[kEntryCount - 1].label == std::string(last.label) + kRefusedSuffix);
+    // the AMD entry: no record write, takes effect
+    int amdSaves = 0;
+    FakeSelectable amd;
+    amd.clickLabel = "FSR 3.X";
+    CHECK(SelectableThunkLogic(amd, "FSR 3.X", true, 0, &size, st, [&](char) { ++amdSaves; return Save::NotSaved; }, &clicked) &&
+          clicked && amdSaves == 0 && st.model.load() == kModelAmd && st.unsaved.load() == 0);
+    // a click that is saved: takes effect, the note goes
+    FakeSelectable ok;
+    ok.clickLabel = last.label;
+    CHECK(SelectableThunkLogic(ok, "FSR 3.X", true, 0, &size, st, [](char) { return Save::Saved; }, &clicked) && clicked &&
+          st.model.load() == last.model && st.unsaved.load() == 0);
     FakeSelectable plain;
     SelectableThunkLogic(plain, "FSR 3.X", true, 0, &size, st);
     CHECK(plain.calls[kEntryCount - 1].label == last.label);
@@ -238,7 +256,7 @@ int main() {
     TestPreviewRelabel();
     TestSelectionFile();
     TestClickAndShownModel();
-    TestUnsavedLabel();
+    TestUnsavedClick();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

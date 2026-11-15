@@ -240,20 +240,33 @@ FrontEnd& Get() {
             // mode as before.
             p.asiPlugin = [](char* model) { return QueryAsiPlugin(model); };
             p.asiShowModel = [](char model) { ShowAsiModel(model); };
-            p.asiPending = [] { return QueryAsiPending(); };
-            {
-                const std::wstring& ini = Place().ini;
-                const size_t slash = ini.find_last_of(L"\\/");
-                const std::filesystem::path record =
-                    wgchoice::RecordPathIn(slash == std::wstring::npos ? std::wstring(L".") : ini.substr(0, slash));
-                std::error_code ec;
-                if (std::filesystem::is_directory(record.parent_path(), ec)) {  // a launcher install: its state folder
-                    p.choiceRecord = record;
-                    SetAsiChoiceRecord(record.wstring());  // the plugin writes its menu's model clicks there too
-                    SetHostIniPollModels(false);           // the host's stored index is no model choice (the record decides)
-                } else {
-                    L().Write("model choice: no launcher state folder next to wronggpu.ini: no model choice record (the model item decides)");
+        }
+        // The game's model choice record (model_choice_record.h, in the game's WrongGPU state folder next to wronggpu.ini)
+        // decides the WrongGPU model on every route; the plugin writes its menu's model clicks there too. Without the
+        // state folder (no launcher install): no record, as before.
+        {
+            const std::wstring ini = Place().ini;
+            const size_t slash = ini.find_last_of(L"\\/");
+            const std::filesystem::path record =
+                wgchoice::RecordPathIn(slash == std::wstring::npos ? std::wstring(L".") : ini.substr(0, slash));
+            std::error_code ec;
+            if (std::filesystem::is_directory(record.parent_path(), ec)) {  // a launcher install: its state folder
+                // While this DLL is loaded the game keeps WrongGPU's loaded marker open (wg_state.h): the launcher refuses
+                // an uninstall, repair or update meanwhile. Never released: the OS drops it with the process.
+                static wgstate::LoadedMarker* marker = new wgstate::LoadedMarker(wgchoice::GameDirOf(record).wstring());
+                if (!marker->held()) L().Write("model choice: the loaded marker could not be created (error %lu)", marker->error());
+                p.choiceRecord = record;
+                p.readWronggpuIni = [ini] {  // the upgrade migration reads wronggpu.ini's model item under the state lock
+                    std::string text;
+                    wgstate::ReadBytes(ini, &text);
+                    return text;
+                };
+                if (g_hosted) {
+                    SetAsiChoiceRecord(record.wstring());
+                    SetHostIniPollModels(false);  // the host's stored index is no model choice (the record decides)
                 }
+            } else {
+                L().Write("model choice: no launcher state folder next to wronggpu.ini: no model choice record (the model item decides)");
             }
         }
         p.menu = Menu();

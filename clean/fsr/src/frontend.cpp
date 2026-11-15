@@ -579,7 +579,7 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
     bool forceAmd = false;
     if (asiHooked) {
         std::string why;
-        char model = asiModel != 0 ? ChooseModel(asiModel, platform_.asiPending ? platform_.asiPending() : 0, 0, tag, &why) : 0;
+        char model = asiModel != 0 ? ChooseModel(asiModel, 0, tag, &why) : 0;
         if (asiModel != 0) {
             const int32_t m = ModelOfName(std::string(1, model));
             const WgEntryDef* sr = m >= 0 ? SrEntryOfModel(m) : nullptr;
@@ -655,8 +655,22 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
         }
         u->hasOverride = false;  // WrongGPU's own id means nothing to AMD's DLL (fallback, comparison)
     }
-    // No entry chose the model (direct route, no override, an id WrongGPU did not list): sr_model when it is set in
-    // the shared block, the environment or wronggpu.ini; otherwise runtime_options / the runtime's default as before.
+    // No entry chose the model (direct route, no override, an id WrongGPU did not list): with a model choice record (a
+    // launcher install) the record's model (ChooseModel); else sr_model when it is set in the shared block, the
+    // environment or wronggpu.ini; otherwise runtime_options / the runtime's default as before.
+    if (!forceAmd && !u->selectedModel && !u->modelOption && !platform_.choiceRecord.empty()) {
+        std::string why;
+        const int32_t model = ModelOfName(std::string(1, ChooseModel(0, 0, tag, &why)));
+        if (const WgEntryDef* sr = model >= 0 ? SrEntryOfModel(model) : nullptr) {
+            u->selectedModel = kWgModelRows[model].name[0];
+            u->modelOption = kWgModelRows[model].runtime_option;
+            u->modelProviderId = sr->id;
+            u->modelProviderName = EntryProviderName(*sr);
+            Log(tag + " model choice: Model " + u->selectedModel + " (" + why + ")");
+        } else {
+            LogOnce(tag, "note: model choice: that model is not part of this build of the front end; the configured model is used");
+        }
+    }
     if (!forceAmd && !u->selectedModel && !u->modelOption) {
         int32_t model = -1;
         std::string described;
@@ -1399,82 +1413,80 @@ void FrontEnd::LogOnce(const std::string& tag, const std::string& line) {
     Log(tag + " " + line);
 }
 
-char FrontEnd::ChooseModel(char plugin, char pluginPending, char entry, const std::string& tag, std::string* why) {
-    const char launcher = LauncherModel();
+char FrontEnd::WronggpuIniModel() const {
+    if (!platform_.readWronggpuIni) return LauncherModel();
+    std::string warnings;
+    const Config c = ParseConfig(platform_.readWronggpuIni(), &warnings);
+    bool found = false;
+    const std::string v = OptionValue(c.runtimeOptions, "model", &found);
+    if (!found || v.size() != 1) return 0;
+    const char m = char(std::toupper(static_cast<unsigned char>(v[0])));
+    return wgchoice::IsModel(m) ? m : 0;
+}
+
+char FrontEnd::ChooseModel(char plugin, char entry, const std::string& tag, std::string* why) {
     const std::filesystem::path& path = platform_.choiceRecord;
-    std::lock_guard lock(choiceMutex_);
-    // without a record: a host selection made this session, the host's entry, the launcher's K / L item, the plugin's
-    // saved WrongGPU entry (0.6.0's rule), Model M
-    auto noRecord = [&](const std::string& reason) {
-        if (wgchoice::IsModel(sessionChoice_)) {
-            *why = reason + "; selected in OptiScaler's upscaler list this session";
-            return sessionChoice_;
-        }
+    if (path.empty()) {
+        // no launcher state folder (a hand install): as before 0.6.5
+        const char launcher = LauncherModel();
         if (wgchoice::IsModel(entry)) {
-            *why = reason + "; the host's entry";
+            *why = "no model choice record; the host's entry";
             return entry;
         }
         if (launcher == 'K' || launcher == 'L') {
-            *why = reason + "; the launcher's model item, wronggpu.ini model=" + launcher;
+            *why = std::string("no model choice record; the launcher's model item, wronggpu.ini model=") + launcher;
             return launcher;
         }
         if (wgchoice::IsModel(plugin)) {
-            *why = reason + "; the plugin's saved entry";
+            *why = "no model choice record; the plugin's saved entry";
             return plugin;
         }
-        *why = launcher ? reason + "; wronggpu.ini model=" + launcher : reason + "; the default";
+        *why = launcher ? std::string("no model choice record; wronggpu.ini model=") + launcher : std::string("no model choice record; the default");
         return 'M';
-    };
-    if (path.empty()) return noRecord("no model choice record");
-    // A host selection that could not be written when it was made: tried again (dropped when a newer choice exists).
-    if (hostPending_.active()) {
-        const char model = hostPending_.model;
-        wgchoice::Record after;
-        std::string err;
-        const wgchoice::Outcome o = wgchoice::RetryPending(path, &hostPending_, &after, &err);
-        if (o == wgchoice::Outcome::Written)
-            Log(tag + " model choice: Model " + model + " (selected in OptiScaler's upscaler list earlier) written now (seq " +
-                std::to_string(after.seq) + ")");
-        else if (o == wgchoice::Outcome::Superseded)
-            Log(tag + " model choice: Model " + model + " (selected in OptiScaler's upscaler list earlier, not written then) is "
-                "dropped: a newer choice was recorded meanwhile");
-        else if (o == wgchoice::Outcome::SeqExhausted)
-            Log(tag + " ERROR: model choice: Model " + model + " selected in OptiScaler's upscaler list is refused: " + wgchoice::OutcomeWords(o));
-        if (hostPending_.active()) {
-            LogOnce(tag, std::string("ERROR: model choice: Model ") + model + " (selected in OptiScaler's upscaler list) still cannot be "
-                         "written (" + wgchoice::OutcomeWords(o) + (err.empty() ? "" : ": " + err) + "); it runs this session, tried again at each create");
-            *why = "selected in OptiScaler's upscaler list this session, not saved yet";
-            return model;
+    }
+    std::lock_guard lock(choiceMutex_);
+    // the record cannot be used now: the last record this session read or wrote, else wronggpu.ini's model item, else M
+    // (never the host's stored entry)
+    auto fallback = [&](const std::string& reason) {
+        if (wgchoice::IsModel(lastChoice_)) {
+            *why = reason + "; the last model choice read this session";
+            return lastChoice_;
         }
-    }
-    if (wgchoice::IsModel(pluginPending)) {
-        *why = "the plugin's click this session, not saved yet (the plugin tries again)";
-        return pluginPending;
-    }
+        const char ini = LauncherModel();
+        *why = ini ? reason + "; wronggpu.ini model=" + ini : reason + "; the default";
+        return ini ? ini : 'M';
+    };
     wgchoice::Record rec;
     bool migrated = false;
     std::string err;
-    const wgchoice::ReadResult rr = wgchoice::LoadOrMigrateRecord(path, launcher, &rec, &migrated, &err);
-    if (rr == wgchoice::ReadResult::Corrupt) {
-        LogOnce(tag, "model choice: the record (wronggpu-setup\\model-choice.ini) is corrupt (" + err + "): treated as no choice until the next choice replaces it");
-        return noRecord("the model choice record is corrupt");
-    }
-    if (rr == wgchoice::ReadResult::Unreadable) {
+    const wgchoice::LoadResult lr =
+        wgchoice::LoadOrMigrateRecord(path, [this] { return WronggpuIniModel(); }, &rec, &migrated, &err);
+    switch (lr) {
+    case wgchoice::LoadResult::Ok: break;
+    case wgchoice::LoadResult::Corrupt:
+        LogOnce(tag, "model choice: the record (wronggpu-setup\\model-choice.ini) is corrupt (" + err + "): not used until the next choice replaces it");
+        return fallback("the model choice record is corrupt");
+    case wgchoice::LoadResult::Unreadable:
         // (never written over: a record held open for a moment must not be replaced by a guess)
-        LogOnce(tag, "model choice: the record (wronggpu-setup\\model-choice.ini) cannot be read (" + err + "): treated as no record");
-        return noRecord("the model choice record cannot be read");
-    }
-    if (rr == wgchoice::ReadResult::Missing) {
+        LogOnce(tag, "model choice: the record (wronggpu-setup\\model-choice.ini) cannot be read (" + err + ")");
+        return fallback("the model choice record cannot be read");
+    case wgchoice::LoadResult::NoLock:
+        Log(tag + " model choice: the record was not read (" + err + ")");
+        return fallback("the model choice record was busy");
+    case wgchoice::LoadResult::Missing:
         LogOnce(tag, "ERROR: model choice: no record yet, and it could not be written (" + err + ")");
-        return noRecord("no model choice record (not written)");
+        return fallback("no model choice record (not written)");
     }
+    lastChoice_ = rec.model;
     if (migrated)
-        Log(tag + " model choice: no record yet (an install from before 0.6.5): Model " + rec.model + " from " +
-            (launcher ? std::string("wronggpu.ini's model item") : std::string("the default")) + " recorded (seq 1, source=launcher)");
+        Log(tag + " model choice: no record yet (an install from before 0.6.5): Model " + rec.model +
+            " from wronggpu.ini's model item (or the default) recorded (seq 1, source=launcher)");
     *why = std::string("the model choice record: ") + wgchoice::SourceWords(rec.source) + ", seq " + std::to_string(rec.seq);
+    const char launcher = LauncherModel();
     if (launcher && launcher != rec.model)
-        LogOnce(tag, std::string("model choice conflict: wronggpu.ini's model item says Model ") + launcher + "; the more recent choice, Model " +
-                         rec.model + " from " + wgchoice::SourceWords(rec.source) + " (seq " + std::to_string(rec.seq) + "), runs");
+        LogOnce(tag, std::string("model choice: wronggpu.ini's model item (the install's default) says Model ") + launcher +
+                         "; the model choice record says Model " + rec.model + " (" + wgchoice::SourceWords(rec.source) + ", seq " +
+                         std::to_string(rec.seq) + "), which runs");
     return rec.model;
 }
 
@@ -1484,35 +1496,34 @@ int32_t FrontEnd::HostSelected(uint64_t versionId) {
     if (!e || e->slot != WG_OPT_SR_MODEL || e->value < 0 || e->value >= WG_SR_MODEL_COUNT) {
         Log(tag + " the player selected " + (e ? std::string(EntryProviderName(*e)) : "version " + Hex(versionId)) +
             " in OptiScaler's upscaler list: no WrongGPU model choice");
-        return WG_HOST_SELECTED_NOT_A_MODEL;
+        return WG_HOST_SELECTED_NOTHING_CHANGED;
     }
     const char model = kWgModelRows[e->value].name[0];
-    std::lock_guard lock(choiceMutex_);
     if (platform_.choiceRecord.empty()) {
-        sessionChoice_ = model;
+        // no launcher state folder: no record to write; the host's entry decides at the next create (as before 0.6.5)
         Log(tag + " the player selected Model " + model + " in OptiScaler's upscaler list; no model choice record (no launcher "
-                  "state folder): it runs this session");
-        return WG_HOST_SELECTED_SESSION_ONLY;
+                  "state folder): the host's entry decides");
+        return WG_HOST_SELECTED_NOTHING_CHANGED;
     }
-    wgchoice::Record after;
-    wgchoice::Pending pending;
+    std::lock_guard lock(choiceMutex_);
+    wgchoice::Record after, before;
     std::string err;
-    const wgchoice::Outcome o = wgchoice::RecordChoice(platform_.choiceRecord, model, wgchoice::Source::Ffx, &after, &err, &pending);
+    const wgchoice::Outcome o = wgchoice::RecordChoice(platform_.choiceRecord, model, wgchoice::Source::Ffx, &after, &err, &before);
     if (o == wgchoice::Outcome::Written) {
-        hostPending_ = wgchoice::Pending{};
+        const char was = wgchoice::IsModel(before.model) ? before.model : lastChoice_;
+        lastChoice_ = model;
         Log(tag + " the player selected Model " + model + " in OptiScaler's upscaler list: recorded (seq " + std::to_string(after.seq) +
             ", source=ffx)" + (err.empty() ? "" : "; " + err));
-        return WG_HOST_SELECTED_RECORDED;
+        return was == model ? WG_HOST_SELECTED_NOTHING_CHANGED : WG_HOST_SELECTED_RECORDED;
     }
     if (o == wgchoice::Outcome::SeqExhausted) {
         Log(tag + " ERROR: the player selected Model " + model + " in OptiScaler's upscaler list: " + wgchoice::OutcomeWords(o) +
             ". Delete wronggpu-setup\\model-choice.ini or apply the model in the launcher.");
         return WG_HOST_SELECTED_REFUSED;
     }
-    hostPending_ = pending;
-    Log(tag + " ERROR: the player selected Model " + model + " in OptiScaler's upscaler list, but " + wgchoice::OutcomeWords(o) +
-        (err.empty() ? "" : " (" + err + ")") + ": it runs this session and is written at the next create");
-    return WG_HOST_SELECTED_PENDING;
+    Log(tag + " ERROR: the player selected Model " + model + " in OptiScaler's upscaler list, but it was not saved: " +
+        wgchoice::OutcomeWords(o) + (err.empty() ? "" : " (" + err + ")") + ". Nothing changes; select it again.");
+    return WG_HOST_SELECTED_NOT_SAVED;
 }
 
 void FrontEnd::ApplyEntry(const WgEntryDef& e, UpscaleContext& u, const std::string& tag, const char* source) {
@@ -1527,7 +1538,7 @@ void FrontEnd::ApplyEntry(const WgEntryDef& e, UpscaleContext& u, const std::str
     if (config_.hosted && !platform_.choiceRecord.empty() && std::strcmp(source, "folder") != 0) {
         std::string why;
         const char entry = model >= 0 && model < WG_SR_MODEL_COUNT ? kWgModelRows[model].name[0] : 0;
-        const char chosen = ChooseModel(0, platform_.asiPending ? platform_.asiPending() : 0, entry, tag, &why);
+        const char chosen = ChooseModel(0, entry, tag, &why);
         const int32_t m = ModelOfName(std::string(1, chosen));
         if (m >= 0 && SrEntryOfModel(m)) {
             if (m != model)
