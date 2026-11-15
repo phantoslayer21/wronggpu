@@ -478,7 +478,6 @@ std::vector<wstring> ListDirs(const wstring& dir) {
     std::sort(r.begin(), r.end(), [](const wstring& a, const wstring& b) { return Lower(a) < Lower(b); });
     return r;
 }
-// Every file named `name` below root (depth-limited, budgeted, no links), sorted by path.
 // ---- store access (#243): the one way to the store libraries' metadata and folders --------------------------------------
 static std::atomic<size_t> g_libraryAccesses{0};
 
@@ -496,6 +495,7 @@ bool TestLibraries(wstring* folder) {
 #endif
 }
 
+#ifdef WRONGGPU_TESTING
 // A path as one form for the scope test: \\?\C:\x and \??\C:\x as C:\x, \\?\UNC\srv\share as \\srv\share, then full.
 static wstring ScopeForm(const wstring& p) {
     wstring s = p;
@@ -506,7 +506,6 @@ static wstring ScopeForm(const wstring& p) {
     return s;
 }
 
-#ifdef WRONGGPU_TESTING
 // Test builds: the access log (WRONGGPU_TEST_ACCESS_LOG). A new log starts with "run <WRONGGPU_TEST_RUN_ID>" (the tests' guard
 // checks it is this run's); every line is appended before the read it records. false: not written (the read is refused).
 static bool TestAccessLine(const wstring& line) {
@@ -627,6 +626,7 @@ void TestAccessStart(const wchar_t* program) {
 
 size_t LibraryAccessCount() { return g_libraryAccesses; }
 
+// Every file named `name` below root (depth-limited, budgeted, no links), sorted by path.
 std::vector<wstring> FindFilesNamed(const wstring& root, const wchar_t* name, size_t budget, int maxDepth) {
     std::vector<wstring> out;
     std::vector<std::pair<wstring, int>> stack{{root, 0}};
