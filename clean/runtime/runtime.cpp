@@ -28,6 +28,7 @@
 #include "model.h"
 #include "model_select.h"
 #include "runtime_core.h"
+#include "target_family.h"
 #include "wg_runtime.h"
 
 namespace wgrt {
@@ -779,11 +780,34 @@ struct Runtime {
     if (model_l && !p12 && c.backend == 3)
       return fail("Model L on native D3D12 needs the pack12 post path (post_pack=p12; Model M's decoder__pack12.co "
                   "selects it)");
+    // The device first: the accumulator row table of the weights depends on its target. A failure to make it is
+    // reported where it always was, after the model has loaded.
+    std::string dev_err;
+    if (given) {
+      dev = std::move(given);
+    } else if (c.backend == 1) {
+      const std::string lib = c.emu_library ? c.emu_library : build_dir + "/wg_emu.so";
+      dev = make_emu_device(lib, &dev_err);
+    } else if (c.backend == 2) {  // hybrid D3D12: the D3D12 ports of <build_dir>/dx12 + HIP (device_dx12.cpp)
+      dev = make_dx12_device(c.rocm_dir ? c.rocm_dir : "", build_dir, &dev_err);
+    } else if (c.backend == 3) {
+#if defined(_WIN32)
+      dev = make_d3d12_device(build_dir, &dev_err);
+#else
+      dev_err = "native D3D12 requires Windows";
+#endif
+    } else {
+      dev = make_hip_device(c.rocm_dir ? c.rocm_dir : "", &dev_err);
+    }
+    // WMMA accumulator layout: the config's table when it has one, else the one of the device's target family (the
+    // gfx11 matrix instruction returns row 2 v + h, the gfx12 one v + 8 h), else gfx12's
     bool any = false;
     for (int i = 0; i < 16; ++i) any |= c.d_row[i] != 0;
     drow = drow_gfx12();
     if (any)
       for (int i = 0; i < 16; ++i) drow[i / 8][i % 8] = c.d_row[i];
+    else if (dev && target_family(dev->arch()) == "gfx11")
+      drow = drow_gfx11();
     if (native_direct_io && drow != drow_gfx12())
       return fail("native direct resources require the ported gfx12 WMMA accumulator layout");
 
@@ -870,24 +894,8 @@ struct Runtime {
       std::memcpy(blobs[kFilterStage].data(), output_taps, sizeof(output_taps));
     }
 
-    // device and code objects
-    if (given) {
-      dev = std::move(given);
-    } else if (c.backend == 1) {
-      const std::string lib = c.emu_library ? c.emu_library : build_dir + "/wg_emu.so";
-      dev = make_emu_device(lib, &e);
-    } else if (c.backend == 2) {  // hybrid D3D12: the D3D12 ports of <build_dir>/dx12 + HIP (device_dx12.cpp)
-      dev = make_dx12_device(c.rocm_dir ? c.rocm_dir : "", build_dir, &e);
-    } else if (c.backend == 3) {
-#if defined(_WIN32)
-      dev = make_d3d12_device(build_dir, &e);
-#else
-      return fail("native D3D12 requires Windows");
-#endif
-    } else {
-      dev = make_hip_device(c.rocm_dir ? c.rocm_dir : "", &e);
-    }
-    if (!dev) return fail(e);
+    // code objects (the device is made above, before the weights are packed)
+    if (!dev) return fail(dev_err);
     for (const std::string& co : {swin_co, enc0_co, dec0_co, exposure_co, std::string("post.co"),
                                   std::string("frame.co")}) {
       if (model_l && (co == enc0_co || co == dec0_co)) continue;  // Model L's encoder and decoder: below
