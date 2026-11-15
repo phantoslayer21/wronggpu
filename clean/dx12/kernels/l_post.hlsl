@@ -31,7 +31,8 @@
 // gives 0), the reduced codes rint(clamp(mean, 0, 1) 1023).
 //
 // @wg-kernel l_post_recon co=l_post.co block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p
-// @wg-kernel l_post_recon_p12 co=l_post.co entry=l_post_recon_p12 block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1
+// @wg-kernel l_post_recon_p12 co=l_post.co entry=l_post_recon_p12 block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1,LP_ENCFOLD=1 needs=fold isa=v_fma_mixlo_f16+v_fma_mixhi_f16>=6,s_round_mode==0
+// @wg-kernel l_post_recon_p12 co=l_post.co entry=l_post_recon_p12 file=l_post_recon_p12__nofold block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1 needs=nofold
 // @wg-kernel l_post_recon_ldr co=l_post.co entry=l_post_recon_ldr block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_LDR=1
 // @wg-kernel l_post_recon_p12_ldr co=l_post.co entry=l_post_recon_p12_ldr block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1,LP_LDR=1
 #include "wg_platform.hlsli"
@@ -49,6 +50,7 @@ WG_ARGS_BEGIN
     uint expo;
 WG_ARGS_END
 
+#include "l_post_encode.hlsli"   // kEncK and the history encode through the driver's conversion fold
 #define kThreads 256
 #define kTileX 32
 #define kTilePairs 8
@@ -56,7 +58,6 @@ WG_ARGS_END
 #define kLWin 4
 #define kTexDw 6   // staged texel: f0 f1 | f2 f3 | f4 f5 | f6 f7 | f8 kA | kB kC (FP16 bits)
 
-static const float kEncK = asfloat(0x3dddf184u);        // 0.36f * 0.30102999566398120f
 static const float kDecK = asfloat(0x4113a428u);        // 3.32192809488736235f / 0.36f
 static const float kDecLn = asfloat(0x40ccac9au);       // 2.30258509299404568f / 0.36f
 static const float kDecPolyMax = asfloat(0x3d60233du);  // 0.35f / kDecLn
@@ -81,11 +82,15 @@ static float g_e, g_ep;   // exposures (0 replaced by 1)
 static float g_rp;       // 1 / e_prev (IEEE division, round to nearest even)
 float opq(float x) { return asfloat(asuint(x) ^ g_z); }
 half opqh(half x) { return asfloat16((uint16_t)(asuint16(x) ^ (uint16_t)g_z)); }
+float mul_nz(float a, float b) { return mad(a, b, asfloat(g_z | 0x80000000u)); }
 #ifndef LP_MUT
-#define LP_MUT 0   // 1..4: negative controls of the byte checks (never shipped)
+#define LP_MUT 0   // 1..7: negative controls of the byte checks (never shipped)
+#endif
+#ifndef LP_DP
+#define LP_DP 1
 #endif
 #ifndef LP_ENCFOLD
-#define LP_ENCFOLD 1
+#define LP_ENCFOLD 0   // 1 (l_post_recon_p12's fold port): the history encode through the driver's conversion fold
 #endif
 #ifndef LP_FMANZ
 #define LP_FMANZ 1
@@ -128,8 +133,20 @@ float dec_m1_poly(float qc)
 float l_dec(float q)
 {
     const float qc = clampf(q, k1em4, 3.0f);
+#if LP_DP
+    // Model M's wave-level skip (post.hlsl post_core_s): the exponential for every lane, the polynomial only when some
+    // active lane of the wave is below kDecPolyMax; per lane the same select as below, so the same value
+    float v = exp2(qc * kDecK) - 1.0f;
+    const bool sm = qc < kDecPolyMax;
+#if LP_MUT == 6
+    [branch] if (WaveActiveAllTrue(sm)) v = sm ? dec_m1_poly(qc) : v;   // mutant 6: all lanes instead of any lane
+#else
+    [branch] if (WaveActiveAnyTrue(sm)) v = sm ? dec_m1_poly(qc) : v;
+#endif
+#else
     const float v = qc < kDecPolyMax ? dec_m1_poly(qc) : exp2(qc * kDecK) - 1.0f;
-    return isnan(q) ? q : opq(v) * k0p01;
+#endif
+    return isnan(q) ? q : mul_nz(v, k0p01);
 }
 
 // (_Float16)((float)k / 255.0f) for the code k = 0 ... 255 (an IEEE FP32 division, then round to nearest even: HIP's
@@ -318,15 +335,22 @@ void l_post_core(LGather g, int x, int y, int fx, int fy, float mx[3], float my[
     float fbar[9];
     [unroll] for (int k = 0; k < 9; ++k) fbar[k] = inv * (float)opqh(g.F[k]);
     const float sig0 = fbar[3], sig1 = fbar[4], sig2 = fbar[5];
-    int first = 0;
-    float best = sig0;
-    if (sig1 > best) { first = 1; best = sig1; }
-    if (sig2 > best) first = 2;
-    const int o1 = first == 0 ? 1 : 0, o2 = first == 2 ? 1 : 2;
-    const float so1 = o1 == 1 ? sig1 : sig0, so2 = o2 == 1 ? sig1 : sig2;
-    const int second = so2 > so1 ? o2 : o1;
-    const float s1 = first == 0 ? sig0 : (first == 1 ? sig1 : sig2);
-    const float s2 = second == 0 ? sig0 : (second == 1 ? sig1 : sig2);
+    const bool sb1 = sig1 > sig0;
+    const float best = sb1 ? sig1 : sig0;
+    const bool sb2 = sig2 > best;
+    const float s1 = sb2 ? sig2 : best;
+    const float m1x = sb2 ? mx[2] : (sb1 ? mx[1] : mx[0]), m1y = sb2 ? my[2] : (sb1 ? my[1] : my[0]);
+    const bool sf0 = !or(sb1, sb2);
+    const float so1 = sf0 ? sig1 : sig0, so2 = sb2 ? sig1 : sig2;
+    const float mo1x = sf0 ? mx[1] : mx[0], mo1y = sf0 ? my[1] : my[0];
+#if LP_MUT == 7
+    const float mo2x = sb2 ? mx[2] : mx[1], mo2y = sb2 ? my[1] : my[2];   // mutant 7: wrong candidate motion
+#else
+    const float mo2x = sb2 ? mx[1] : mx[2], mo2y = sb2 ? my[1] : my[2];
+#endif
+    const bool scc = so2 > so1;
+    const float s2 = scc ? so2 : so1;
+    const float m2x = scc ? mo2x : mo1x, m2y = scc ? mo2y : mo1y;
     const float q1 = clampf(k1p1 * s1 - k0p05, 0.0f, 1.0f);
     const float q2 = clampf(k1p1 * s2 - k0p05, 0.0f, 1.0f);
     const float rden = rcp(max(q1 + q2, k1em10));
@@ -343,10 +367,13 @@ void l_post_core(LGather g, int x, int y, int fx, int fy, float mx[3], float my[
     [unroll] for (int n = 0; n < 2; ++n) {
         L[n][0] = 0.0f; L[n][1] = 0.0f; L[n][2] = 0.0f;
         if (n < ncand) {
-            const int k = n == 0 ? first : second;
-            const float qx = X + (k == 0 ? mx[0] : (k == 1 ? mx[1] : mx[2]));
-            const float qy = Y + (k == 0 ? my[0] : (k == 1 ? my[1] : my[2]));
-            const bool valid = P_reset == 0 && qx >= 0.0f && qx <= (float)P_dw && qy >= 0.0f && qy <= (float)P_dh;
+            const float qx = X + (n == 0 ? m1x : m2x);
+            const float qy = Y + (n == 0 ? m1y : m2y);
+#if LP_MUT == 5
+            const bool valid = and(and(and(and(P_reset == 0, qx >= 0.0f), qx <= (float)P_dh), qy >= 0.0f), qy <= (float)P_dh);   // mutant 5
+#else
+            const bool valid = and(and(and(and(P_reset == 0, qx >= 0.0f), qx <= (float)P_dw), qy >= 0.0f), qy <= (float)P_dh);
+#endif
             if (valid) {
                 const float3 h = history_cr(qx, qy);
 #if LP_LDR
@@ -370,9 +397,9 @@ void l_post_core(LGather g, int x, int y, int fx, int fy, float mx[3], float my[
 #if LP_LDR
         Hl[i] = opq(comb);
 #else
-        Hl[i] = opq(comb) * g_e;
+        Hl[i] = mul_nz(comb, g_e);
 #endif
-        hl_inf = hl_inf || abs(Hl[i]) == asfloat(0x7f800000u);
+        hl_inf = or(hl_inf, abs(Hl[i]) == asfloat(0x7f800000u));
 #if LP_LDR
         Cl[i] = fbar[i];
 #else
@@ -387,10 +414,10 @@ void l_post_core(LGather g, int x, int y, int fx, int fy, float mx[3], float my[
         oh[i] = mad(Cl[i] - Hl[i], bo2, Hl[i]);
     }
     const float sh = hh[0] + hh[1] + hh[2], so = oh[0] + oh[1] + oh[2];
-    if (isnan(sh) || hl_inf) {
+    if (or(isnan(sh), hl_inf)) {
         [unroll] for (int i = 0; i < 3; ++i) hh[i] = Cl[i];
     }
-    if (isnan(so) || hl_inf) {
+    if (or(isnan(so), hl_inf)) {
         [unroll] for (int i = 0; i < 3; ++i) oh[i] = Cl[i];
     }
 }
@@ -482,7 +509,7 @@ WG_KERNEL(l_post_recon)
     }
     GroupMemoryBarrierWithGroupSync();
 
-    const bool active = x0 + (lane & 31) < P_dw && k0 + (lane >> 5) < npairs;
+    const bool active = and(x0 + (lane & 31) < P_dw, k0 + (lane >> 5) < npairs);
     const int x = mini(x0 + (lane & 31), P_dw - 1);
     const int y0 = 2 * mini(k0 + (lane >> 5), npairs - 1);
     const bool has1 = y0 + 1 < P_dh;
@@ -551,6 +578,14 @@ WG_KERNEL(l_post_recon)
         if (second) g = g1;
         float hh[3], oo[3];
         finish_pixel(g, x, y0 + row, px, second ? py1 : py0, s, hh, oo);
+#if !LP_LDR && LP_ENCFOLD
+        float xe[3], de[3];
+        [unroll] for (int ce = 0; ce < 3; ++ce) {
+            xe[ce] = enc_log(hh[ce]);
+            de[ce] = opq(clampf(enc_e(oo[ce]), 0.0f, kDisplayMax));
+        }
+        const uint4 hc = lp_encode_fold(xe[0], xe[1], xe[2], de[0], de[1], de[2], g_z);
+#else
         v8f cv;
         [unroll] for (int ci = 0; ci < 3; ++ci) {
 #if LP_LDR
@@ -561,23 +596,16 @@ WG_KERNEL(l_post_recon)
             cv.v[ci] = opq(hh[ci]);
             cv.v[3 + ci] = opq(floor(clampf(mad(oo[ci], n, 0.5f), 0.0f, n)) * k);
 #else
-#if LP_ENCFOLD
-#if LP_MUT == 3
-            cv.v[ci] = opq(kEncK * enc_log(hh[ci]));   // mutant 3: two roundings (FP32 product, then FP16)
-#else
-            cv.v[ci] = mad(enc_log(hh[ci]), kEncK, 0.0f);   // folded by the driver: v_fma_mixlo_f16 .., kEncK, 0 (HIP's)
-#endif
-#else
             cv.v[ci] = mul_odd(kEncK, enc_log(hh[ci]));
-#endif
             cv.v[3 + ci] = opq(clampf(enc_e(oo[ci]), 0.0f, kDisplayMax));
 #endif
         }
         cv.v[6] = 0.0f;
         cv.v[7] = 0.0f;
         const uint4 hc = wg_to_f16_ags(cv);
+#endif
         const int y = y0 + row;
-        if (active && (!second || has1)) {
+        if (and(active, or(!second, has1))) {
 #if LP_LDR
             const uint q0 = hc.x & 0xffffu, q1 = hc.x >> 16, q2 = hc.y & 0xffffu;
 #else

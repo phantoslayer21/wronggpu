@@ -191,6 +191,16 @@ def kernel_decls(path):
             if d["rs"] not in ("buffer", "tex", "direct"):
                 raise SystemExit(f"{path}: {name}: unsupported root-signature kind {d['rs']}")
             d["arg_dwords"] = arg_dwords(d["args"], f"{path}: {name}")
+            # needs=fold | nofold: a port the device runs only when its start-up probe of the driver's conversion fold
+            # passed (fold) or failed (nofold); the two ports of one name and code object differ by this key
+            d["needs"] = kv.get("needs", "")
+            if d["needs"] not in ("", "fold", "nofold"):
+                raise SystemExit(f"{path}: {name}: needs={d['needs']} (fold or nofold)")
+            # isa=<rule>,<rule>: the port's RGA ISA must satisfy each rule, <op>[+<op>...]>=<n> or <op>==<n> (counts of
+            # instruction mnemonics), checked after the build (isa_check; WG_DX12_ISA_CHECK=0 skips it)
+            d["isa"] = kv.get("isa", "")
+            if d["isa"]:
+                parse_isa_rules(d["isa"], f"{path}: {name}")
             decls.append(d)
     return decls
 
@@ -298,6 +308,45 @@ def rga_isa(dxil, isa_dir, stem):
                 shutil.copyfile(os.path.join(tmp, f), os.path.join(isa_dir, f"{stem}.{kind}"))
 
 
+def parse_isa_rules(text, where):
+    """isa=<rule>,...: [(mnemonics, op, n)] with op '>=' or '=='."""
+    rules = []
+    for r in text.split(","):
+        m = re.fullmatch(r"([a-z0-9_+]+)(>=|==)(\d+)", r)
+        if not m:
+            raise SystemExit(f"{where}: isa rule {r!r} (<op>[+<op>]>=<n> or <op>==<n>)")
+        rules.append((m.group(1).split("+"), m.group(2), int(m.group(3))))
+    return rules
+
+
+def isa_check(built_isa):
+    """built_isa: [(kernel name, dxil path, rules text)] of this build's ports with isa=. Each port's RGA ISA must
+    satisfy its rules (e.g. a driver fold the port's exactness depends on: a v_fma_mixlo_f16 count). Fails the build
+    otherwise; WG_DX12_ISA_CHECK=0 skips it (no RGA)."""
+    if not built_isa or os.environ.get("WG_DX12_ISA_CHECK", "1") == "0":
+        return
+    if not os.path.exists(RGA) and not RGA.endswith(".cmd"):
+        raise SystemExit(f"ISA check: RGA not found at {RGA} (WG_RGA, or WG_DX12_ISA_CHECK=0 to skip)")
+    bad = []
+    for name, dxil, text in built_isa:
+        with tempfile.TemporaryDirectory(prefix="wgisa_") as tmp:
+            rga_isa(dxil, tmp, "k")
+            path = os.path.join(tmp, "k.isa.txt")
+            if not os.path.exists(path):
+                bad.append(f"{name}: RGA gave no ISA")
+                continue
+            ops = [l.split("//")[0].split() for l in open(path, encoding="utf-8", errors="replace")]
+            ops = [o[0] for o in ops if o]
+        for mn, op, n in parse_isa_rules(text, name):
+            c = sum(ops.count(x) for x in mn)
+            ok = c >= n if op == ">=" else c == n
+            print(f"ISA {name:40s} {'+'.join(mn)} = {c} (rule {op} {n}) {'ok' if ok else 'FAILED'}", flush=True)
+            if not ok:
+                bad.append(f"{name} ({os.path.basename(dxil)}): {'+'.join(mn)} = {c}, rule {op} {n}")
+    if bad:
+        raise SystemExit("ISA check failed:\n  " + "\n  ".join(bad))
+
+
 VGPR_LIMITS = os.path.join(HERE, "vgpr_limits.json")
 
 
@@ -375,9 +424,12 @@ def main(argv=None):
     old = {}
     if only and os.path.exists(man_path):  # partial build: keep the other kernels' entries
         with open(man_path) as f:
-            old = {(k["name"], k.get("co", "")): k for k in json.load(f)["kernels"]}
-    kernels = dict(old)   # (name, co) -> manifest entry
+            # every port of a rebuilt name is replaced (a name may gain or lose ports, e.g. needs=fold / nofold)
+            old = {(k["name"], k.get("co", ""), k.get("needs", "")): k for k in json.load(f)["kernels"]
+                   if k["name"] not in only}
+    kernels = dict(old)   # (name, co, needs) -> manifest entry
     built = []
+    built_isa = []   # (name, dxil, isa rules) of the ports with isa=
     # generated kernels (kernels/fused_*_gen.py: the fused forms of swin_block.hlsl / bneck.hlsl) are regenerated from
     # the live sources first, so that no build compiles a stale copy
     for fn in sorted(os.listdir(KERNEL_DIR)) if os.path.isdir(KERNEL_DIR) else []:
@@ -400,7 +452,7 @@ def main(argv=None):
                 continue
             if not only and is_frame_gen(d):
                 continue
-            key = (d["name"], d["co"])
+            key = (d["name"], d["co"], d["needs"])
             if key in kernels and key not in old:
                 raise SystemExit(f"kernel {d['name']} ({d['co']}) declared twice")
             kernels[key] = None  # placeholder: the declared-twice check sees it before any compile starts
@@ -425,6 +477,8 @@ def main(argv=None):
         r = {"name": d["name"], "file": os.path.basename(out), "co": d["co"], "entry": d["entry"],
              "block": d["block"], "wave": d["wave"], "args": d["args"], "arg_dwords": d["arg_dwords"],
              "source": d["source"], "sha256": sha, "rs": d["rs"]}
+        if d["needs"]:
+            r["needs"] = d["needs"]
         if d["group"] != d["block"]:
             r["group"] = d["group"]
             r["gscale"] = d["gscale"]
@@ -440,18 +494,21 @@ def main(argv=None):
         futures = [pool.submit(build_one, j) for j in jobs]
         try:
             for (src, d, out, _k), fut in zip(jobs, futures):
-                kernels[(d["name"], d["co"])] = fut.result()
+                kernels[(d["name"], d["co"], d["needs"])] = fut.result()
                 built.append((d["name"], out))
+                if d["isa"]:
+                    built_isa.append((d["name"], out, d["isa"]))
                 print(f"{d['name']:40s} -> {os.path.basename(out)}  block {d['block']} wave {d['wave']} "
                       f"args {d['args']}", flush=True)
         except BaseException:
             for fut in futures:
                 fut.cancel()  # kernels not started yet; the running ones finish their current child process
             raise
-    names = {n for n, _ in kernels}
+    names = {k[0] for k in kernels}
     if only and not (only <= names):
         raise SystemExit(f"not declared in clean/dx12/kernels or clean/k/dx12/kernels: {sorted(only - names)}")
     vgpr_check(built)
+    isa_check(built_isa)
     with open(man_path, "w") as f:
         json.dump({"format": FORMAT, "dxc": os.path.basename(os.path.dirname(os.path.dirname(DXC_DIR))),
                    "kernels": [kernels[k] for k in sorted(kernels)]}, f, indent=1)
