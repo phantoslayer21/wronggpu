@@ -211,14 +211,24 @@ int main() {
             require(NeedsRx9000Sentence() == L"WrongGPU's models need an RX 9000-series GPU; using AMD FSR", "NeedsRx9000Sentence: the runtime's sentence");
             GpuInfo rdna4;
             rdna4.amd = rdna4.rdna4 = true;
-            require(GpuRuntimeLine(rdna4) == L" \u00b7 Direct3D 12", "GpuRuntimeLine: RDNA 4 runs on Direct3D 12");
+            require(GpuToolbarLine(L"RX 9070 XT", rdna4) == L"RX 9070 XT (detected) \u00b7 Direct3D 12",
+                    "GpuToolbarLine: RDNA 4 is detected and runs on Direct3D 12");
             GpuInfo rdna3;
             rdna3.amd = true;
-            require(GpuRuntimeLine(rdna3).find(NeedsRx9000Sentence()) != wstring::npos && !Contains(GpuRuntimeLine(rdna3), L"HIP"),
-                    "GpuRuntimeLine: another AMD card gets the sentence, no HIP");
+            const wstring l3 = GpuToolbarLine(L"RX 7900 XTX", rdna3);
+            require(l3.find(NeedsRx9000Sentence()) != wstring::npos && !Contains(l3, L"HIP") && Contains(l3, L"(detected)"),
+                    "GpuToolbarLine: another AMD card gets the sentence, no HIP");
             GpuInfo other;
-            require(GpuRuntimeLine(other).find(NeedsRx9000Sentence()) != wstring::npos && !Contains(GpuRuntimeLine(other), L"Not supported"),
-                    "GpuRuntimeLine: another vendor, or no card, gets the sentence");
+            const wstring lo = GpuToolbarLine(L"Other Vendor 4070", other);
+            require(lo.find(NeedsRx9000Sentence()) != wstring::npos && !Contains(lo, L"Not supported"),
+                    "GpuToolbarLine: another vendor gets the sentence");
+            const wstring none = GpuToolbarLine(L"", other);
+            require(none == L"No graphics card detected \u00b7 " + NeedsRx9000Sentence(),
+                    "GpuToolbarLine: no card, an unidentified one, gets the sentence too");
+            GpuInfo unnamed;  // found, but its name could not be read
+            unnamed.amd = true;
+            require(GpuToolbarLine(L"", unnamed).find(NeedsRx9000Sentence()) != wstring::npos,
+                    "GpuToolbarLine: an unnamed AMD card gets the sentence");
         }
 
         // Linux's device list from a made-up folder (any host): every card in number order, connectors skipped, junk and

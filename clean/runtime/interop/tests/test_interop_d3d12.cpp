@@ -1846,6 +1846,21 @@ bool case_dx12_same(Gpu& g, const char* dll, const std::string& common, int fram
                 w ? " (through a device wrapper)" : "");
     if (w) w->Release();  // the context holds its own references
     CHECK(debug_messages(g, mode ? "dx12 create" : "hip create") == 0);
+    // WG_TEST_EXPECT=refused (R1): the D3D12 executor cannot take this context and create answers WG_ERROR_UNSUPPORTED with
+    // one line, no HIP executor and no context: the front end's upscaler keeps the game
+    {
+      const char* ex0 = std::getenv("WG_TEST_EXPECT");
+      if (mode == 1 && ex0 && std::string(ex0) == "refused") {
+        bool line = false, hip_started = false;
+        for (const auto& m : g_log) {
+          line |= m.find("could not take this context") != std::string::npos && m.find("no HIP route") != std::string::npos;
+          hip_started |= m.find("about to start the HIP runtime") != std::string::npos;
+        }
+        std::printf("  second context: create %d, refusal line %d, HIP started %d\n", (int)r, (int)line, (int)hip_started);
+        CHECK(r == WG_ERROR_UNSUPPORTED && line && !hip_started);
+        return true;
+      }
+    }
     CHECK(r == WG_OK);
     if (r != WG_OK) return false;
     for (int t = 1; t <= frames; ++t) {
@@ -1881,8 +1896,7 @@ bool case_dx12_same(Gpu& g, const char* dll, const std::string& common, int fram
     }
     // WG_TEST_EXPECT (second context): dx12 (default: the D3D12 executor ran every frame and wrote the output), switch
     // (the default executor met a frame it does not take and the HIP executor took over the context; since the owner's
-    // decision of 2026-11-04 only with hip_switch=on in the options), hip (the HIP executor from create on, after the
-    // D3D12 executor refused the context)
+    // decision of 2026-11-04 only with hip_switch=on in the options), refused (create answered WG_ERROR_UNSUPPORTED, above)
     const char* ex = std::getenv("WG_TEST_EXPECT");
     const std::string expect = ex ? ex : "dx12";
     if (mode == 1 && expect != "dx12") {
@@ -1895,8 +1909,8 @@ bool case_dx12_same(Gpu& g, const char* dll, const std::string& common, int fram
       }
       std::printf("  second context: ready dx12 %d, ready hip %d, switched to HIP %d, refused at create %d\n",
                   (int)ready_dx12, (int)ready_hip, (int)switched, (int)refused);
-      if (expect == "switch") CHECK(ready_dx12 && switched && !refused);
-      else CHECK(ready_hip && refused && !switched);
+      CHECK(expect == "switch");  // (any other value is a typo: "refused" returned above)
+      CHECK(ready_dx12 && switched && !refused && !ready_hip);
     }
     if (mode == 1 && expect == "dx12") {
       bool ran = false, direct_in = false, wrote = false;

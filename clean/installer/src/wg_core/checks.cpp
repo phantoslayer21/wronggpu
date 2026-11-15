@@ -28,7 +28,10 @@ WinInfo WindowsInfo() {
 }
 
 wstring NeedsRx9000Sentence() { return L"WrongGPU's models need an RX 9000-series GPU; using AMD FSR"; }
-wstring GpuRuntimeLine(const GpuInfo& gpu) { return gpu.rdna4 ? wstring(L" \u00b7 Direct3D 12") : L" \u00b7 " + NeedsRx9000Sentence(); }
+wstring GpuToolbarLine(const wstring& shortName, const GpuInfo& gpu) {
+    if (shortName.empty()) return L"No graphics card detected \u00b7 " + NeedsRx9000Sentence();
+    return shortName + L" (detected) \u00b7 " + (gpu.rdna4 ? wstring(L"Direct3D 12") : NeedsRx9000Sentence());
+}
 bool IsRdna4Name(const wstring& name) { return Contains(name, L"RX 90") || Contains(name, L"PRO R97") || Contains(name, L"PRO R96"); }
 // Under Wine, Wine's own DXGI can name an RDNA 4 card after an old Radeon ("ATI Radeon HD 5600 Series"); the PCI ids of
 // Linux's DRM devices (/sys/class/drm/cardN/device, reached through Z:) are the card's own. The RDNA 4 ids are the RR
