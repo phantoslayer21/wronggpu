@@ -72,8 +72,8 @@ TABLE = {
         {"op": "dec_project", "src": "features", "dst": "yt", "w": "W", "b": "b", "groups": (32, 32),
          "out_round": "q8"},
         {"op": "depth_to_space", "src": "yt", "dst": "y"},
-        {"op": "swin", "src": "y", "dst": "y2", "params": "dec0_block", **C32_BLOCK, "offsets": "second",
-         "border": "coarse", "out_round": "f16"},
+        {"op": "swin", "src": "y", "skip": "skip", "dst": "y2", "params": "dec0_block", **C32_BLOCK,
+         "offsets": "second", "border": "coarse", "out_round": "f16"},
         {"op": "pick", "src": "y2", "values": L_DEC_VALUES},
     ),
     "dec_pixel": "l",
@@ -95,13 +95,27 @@ TABLE = {
     # Window offsets (ox, oy) of an L block for frame parity 0 and 1, in pixels; the blocks run on the padded grid F
     # and keep every grid position's output.
     "window_offsets": {"first": ((2, 2), (0, 2)), "second": ((0, 0), (2, 0))},
-    # Per-block constants; a block's own entry (key = its params stage) wins over "default".
-    "consts": {"default": dict(M_BLOCK_CONSTS)},
+    # Per-block constants; a block's own entry (key = its params stage) wins over "default". "form": "q7" = the
+    # block's FP16 form (oracle._block_tokens_q7: FP16 accumulators per 32-wide FP8 op, the polynomial-and-bit-shift
+    # attention weights, the FP16 GELU polynomial, the FP16 norm tree with sqrt(C) in the gain, residuals as
+    # accumulator starts), both of L's own blocks; "m" = Model M's block arithmetic (oracle._block_tokens).
+    "consts": {"default": dict(M_BLOCK_CONSTS, form="q7")},
+    # The arithmetic inside one FP8 matrix op (oracle.MM8_MODELS): "exact" (the exact sum rounded once to FP16, the
+    # reference) or "trunc13" (two blocks of 16 products, terms truncated to 13 bits below the largest). Every record
+    # names the model it used.
+    "mm8": "exact",
+    # The encoder map the decoder block's skip input reads (the encoder block's output, FP8, no clamp). A swin op's
+    # "skip": each window member's input is RN16(src member + skip member); the skip member is read with the mirror
+    # about the grid size (fine positions), whatever the op's border (the decoder: "coarse" for the projection).
+    "skip_map": "x3",
 }
 
 DEC_PIXEL_VALUES = {"l": len(L_DEC_VALUES), "m": len(M_DEC0_VALUES)}
 
-PROVISIONAL = {}
+PROVISIONAL = {
+    "S8": "the ten shared stages run Model M's oracle (clean/reference/swin.py, Model M's block arithmetic); their FP16 "
+          "form is pending a decision",
+}
 
 # Model M's reconstruction in the same terms (clean/reference/post.py reconstruct): for reductions and tests.
 M_RECON = {"rule": "d_over_render_at_least", "ratio": 3.0, "variants": ("3/2", "3/1"), "window": 3,
@@ -199,7 +213,7 @@ def encoder_plan(t=TABLE):
 
 def decoder_plan(t=TABLE):
     """(op, level, channels) after each decoder op, from the op list alone."""
-    return _plan(t["dec_ops"], {"features": ("token", 64)}, "decoder", last="pick")
+    return _plan(t["dec_ops"], {"features": ("token", 64), "skip": ("pixel", 32)}, "decoder", last="pick")
 
 
 def _plan(ops, maps, what, last):
@@ -237,6 +251,8 @@ def _plan(ops, maps, what, last):
                 raise ValueError(f"swin: border {border!r} needs a pixel-level map")
             if border == "input" and any(p[0] not in ("quant", "linear", "select", "concat") for p in plan):
                 raise ValueError("swin: border 'input' needs only per-pixel ops before the block")
+            if op.get("skip") and maps.get(op["skip"]) != src:
+                raise ValueError(f"swin: the skip map {op['skip']!r} must match the input {src}")
             out = src
         elif k == "concat":
             parts = [maps[s] for s in op["srcs"]]

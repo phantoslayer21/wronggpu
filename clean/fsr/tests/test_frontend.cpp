@@ -27,6 +27,7 @@
 #include "../src/frontend.h"
 #include "../src/param_map.h"
 #include "wg_settings_io.h"  // pure part: describe()
+#include "../../runtime/interop/executor_select.h"  // the network runtime's refused-frame policy (header only)
 
 using namespace wgfsr;
 
@@ -147,6 +148,7 @@ static int g_failDispatchAt = -1;
 static int g_notReadyUntil = 0;  // FakeDispatch answers WG_ERROR_NOT_READY for frames below this count
 static int g_parameterErrorAt = -1;  // FakeDispatch answers WG_ERROR_PARAMETER for this frame (inputs it cannot take)
 static int g_unsupportedFrom = -1;   // FakeDispatch answers WG_ERROR_UNSUPPORTED from this frame on (frames it does not take)
+static std::set<int> g_unsupportedAt;  // FakeDispatch answers WG_ERROR_UNSUPPORTED at these frames only (refused frames)
 static int g_inputErrorFrom = -1;    // FakeDispatch answers WG_ERROR_INPUT from this frame on (inputs it never takes)
 static std::set<int> g_inputErrorAt; // ...and at these frames (a menu or loading frame with an odd texture)
 static int g_deviceErrorFrom = -1;   // FakeDispatch answers WG_ERROR_DEVICE from this frame on (bug hunt F1)
@@ -175,6 +177,7 @@ static WgResult FakeDispatch(WgUpscaler*, const WgFrame* frame) {
     g_frames.push_back(*frame);
     if (int(g_frames.size()) - 1 == g_parameterErrorAt) return WG_ERROR_PARAMETER;
     if (g_unsupportedFrom >= 0 && int(g_frames.size()) - 1 >= g_unsupportedFrom) return WG_ERROR_UNSUPPORTED;
+    if (g_unsupportedAt.count(int(g_frames.size()) - 1)) return WG_ERROR_UNSUPPORTED;
     if (g_inputErrorFrom >= 0 && int(g_frames.size()) - 1 >= g_inputErrorFrom) return WG_ERROR_INPUT;
     if (g_inputErrorAt.count(int(g_frames.size()) - 1)) return WG_ERROR_INPUT;
     if (g_deviceErrorFrom >= 0 && int(g_frames.size()) - 1 >= g_deviceErrorFrom) return WG_ERROR_DEVICE;
@@ -353,6 +356,7 @@ static void Reset() {
     g_notReadyUntil = 0;
     g_parameterErrorAt = -1;
     g_unsupportedFrom = -1;
+    g_unsupportedAt.clear();
     g_inputErrorFrom = -1;
     g_inputErrorAt.clear();
     g_deviceErrorFrom = -1;
@@ -2400,6 +2404,60 @@ static void TestUnsupportedFrames() {
     CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
 }
 
+// REVIEW-215c: a refused frame of model K takes the same front-end path as model M's. The backend's answer comes from the
+// real policy (wgi::refused_frame_action, executor_select.h: a refused K frame, and a refused M frame with hip_switch=off,
+// are answered WG_ERROR_UNSUPPORTED, never a switch to HIP and never a bilinear fallback), the fake upscaler answers
+// that for the refused frames, and the front end must give every frame an upscaler: AMD's FSR when it exists (it takes
+// the context over at the first refusal, as for model M), else the stand-in for each refused frame (any number in a row,
+// the context stays WrongGPU's and takes the next frame it can). No HIP runtime is ever started.
+static void TestRefusedFrames() {
+    for (const bool model_k : {true, false}) {   // model K, and model M as the control
+        const bool unsupported =
+            wgi::refused_frame_action(model_k, /*by_default=*/true, /*hip_switch=*/false) == wgi::RefusedAction::kNoSwitch;
+        CHECK(unsupported);   // the backend's answer for a refused frame is WG_ERROR_UNSUPPORTED
+        const std::set<int> pattern = unsupported ? std::set<int>{1, 2, 3, 5, 6} : std::set<int>{};
+        // with AMD's FSR: the first refused frame hands the context to it; no later frame is lost
+        Reset();
+        g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+        Config config;
+        config.hosted = true;
+        auto fe = MakeFrontEnd(config);
+        UpscaleCreate own(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE, /*withOverride=*/true);
+        own.version.versionId = kWrongGpuProviderVersionId;
+        ffxContext ctx = nullptr;
+        CHECK(fe->CreateContext(&ctx, &own.upscale.header, kMemCb) == FFX_API_RETURN_OK && fe->OwnContextCount() == 1);
+        g_unsupportedAt = pattern;
+        ffxDispatchDescUpscale d = MakeDispatch();
+        for (int i = 0; i < 8; ++i) CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);   // every frame has an upscaler
+        CHECK(g_frames.size() == 2 && g_standInFrames.empty());   // frame 0 the network's, frame 1 refused: AMD from there on
+        CHECK(!g_amd.empty() && g_amd.back().fn == "dispatch" && g_statuses.back().state == UpscaleState::Amd);
+        CHECK(CountLog("HIP") == 0);   // no HIP runtime on the way
+        CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+
+        // without AMD's FSR: each refused frame goes to the stand-in (five in a row, then a taken frame, then two more
+        // refused ones), every frame gets an upscaler, the network takes the frames between
+        Reset();
+        g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+        g_originalAvailable = false;
+        fe = MakeFrontEnd(config);
+        ctx = nullptr;
+        CHECK(fe->CreateContext(&ctx, &own.upscale.header, kMemCb) == FFX_API_RETURN_OK && fe->OwnContextCount() == 1);
+        g_unsupportedAt = unsupported ? std::set<int>{1, 2, 3, 4, 5, 8, 9} : std::set<int>{};
+        const std::vector<UpscaleState> want = {UpscaleState::Network, UpscaleState::StandIn, UpscaleState::StandIn,
+                                                UpscaleState::StandIn, UpscaleState::StandIn, UpscaleState::StandIn,
+                                                UpscaleState::Network, UpscaleState::Network, UpscaleState::StandIn,
+                                                UpscaleState::StandIn, UpscaleState::Network};
+        for (size_t i = 0; i < want.size(); ++i) {
+            CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
+            CHECK(g_statuses.back().state == want[i]);
+        }
+        CHECK(g_frames.size() == want.size() && g_standInFrames.size() == 7 && g_amd.empty());
+        CHECK(CountLog("HIP") == 0);
+        CHECK(CountLog("AMD FSR is not available for this context; the stand-in upscales the frames the upscaler does not take") == 1);
+        CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    }
+}
+
 static void TestSplitBlocked() {
     Reset();
     g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
@@ -3687,6 +3745,7 @@ int main() {
 #endif
     TestRegistryEntries();
     TestUnsupportedFrames();
+    TestRefusedFrames();
     TestSplitBlocked();
     TestRuntimeProviderName();
     TestWithoutModelKItems();

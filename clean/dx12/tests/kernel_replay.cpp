@@ -265,6 +265,7 @@ bool bind_direct(NativeD3D12Ext* ext, Case& c, const std::string& base) {
     if (t.slot == "color") f.color = t.tex, f.color_format = (DXGI_FORMAT)t.format;
     else if (t.slot == "depth") f.depth = t.tex, f.depth_format = (DXGI_FORMAT)t.format;
     else if (t.slot == "motion") f.motion = t.tex, f.motion_format = (DXGI_FORMAT)t.format;
+    else if (t.slot == "exposure") f.exposure = t.tex, f.exposure_format = (DXGI_FORMAT)t.format;
     else if (t.slot == "output") f.output = t.tex, f.output_format = (DXGI_FORMAT)t.format;
   }
   f.params = c.dparams;
@@ -273,6 +274,55 @@ bool bind_direct(NativeD3D12Ext* ext, Case& c, const std::string& base) {
     return false;
   }
   return true;
+}
+
+// The three direct lines of a case or a chain (see the header comment); true when `w` is one of them (*bad set on error).
+bool parse_direct_line(const std::string& w, std::istringstream& s, Case& c, bool* bad) {
+  *bad = false;
+  if (w == "direct") {
+    DirectTex t;
+    s >> t.slot >> t.format >> t.width >> t.height >> t.file;
+    if (t.slot != "color" && t.slot != "depth" && t.slot != "motion" && t.slot != "exposure" && t.slot != "output") {
+      std::printf("unknown direct slot %s\n", t.slot.c_str());
+      *bad = true;
+    }
+    c.direct.push_back(t);
+    return true;
+  }
+  if (w == "direct_params") {
+    s >> c.dparams.rx >> c.dparams.ry >> c.dparams.rw >> c.dparams.rh;
+    std::string tok;
+    int pos = 0;
+    while (s >> tok) {   // [pi [rne16]] then key=value words: ms=<x>,<y> mo=<x>,<y> expo=<mode>
+      const size_t eq = tok.find('=');
+      if (eq == std::string::npos) {
+        if (pos == 0) c.dparams.color_pi = std::stof(tok);
+        else if (pos == 1) c.dparams.output_rne16 = (unsigned)std::stoul(tok);
+        ++pos;
+      } else {
+        const std::string key = tok.substr(0, eq), val = tok.substr(eq + 1);
+        const size_t comma = val.find(',');
+        if (key == "ms" && comma != std::string::npos) {
+          c.dparams.msx = std::stof(val.substr(0, comma));
+          c.dparams.msy = std::stof(val.substr(comma + 1));
+        } else if (key == "mo" && comma != std::string::npos) {
+          c.dparams.mox = std::stof(val.substr(0, comma));
+          c.dparams.moy = std::stof(val.substr(comma + 1));
+        } else if (key == "expo") {
+          c.dparams.exposure_mode = (unsigned)std::stoul(val);
+        } else {
+          std::printf("unknown direct_params word %s\n", tok.c_str());
+          *bad = true;
+        }
+      }
+    }
+    return true;
+  }
+  if (w == "direct_out") {
+    s >> c.direct_out;
+    return true;
+  }
+  return false;
 }
 
 std::string dir_of(const std::string& path) {
@@ -375,6 +425,7 @@ struct Chain {
   std::vector<ChainStep> steps;
   std::vector<std::pair<std::string, std::string>> saves;   // (id, file)
   int time_runs = 0;
+  Case dcase;   // direct textures bound around the steps (rs=direct kernels): direct / direct_params / direct_out lines
 };
 
 int run_chain(Device* d, Chain& c, const std::string& base) {
@@ -484,7 +535,33 @@ int run_chain(Device* d, Chain& c, const std::string& base) {
     if (!d->sync()) { std::printf("%s: sync: %s\n", c.name.c_str(), d->err().c_str()); return false; }
     return true;
   };
+  NativeD3D12Ext* dext = nullptr;
+  if (rc == 0 && !c.dcase.direct.empty()) {
+    c.dcase.name = c.name;
+    dext = d3d12_ext(d);
+    if (!dext || !bind_direct(dext, c.dcase, base)) {
+      std::string e;
+      if (dext) dext->sync(&e);   // the upload pass may still be queued: the textures are released only after it ran
+      release_direct(c.dcase);
+      rc = 1;
+    }
+  }
   if (rc == 0 && !run_steps()) rc = 1;
+  if (dext) {   // the direct frame ends after the first run; an output texture is read back
+    std::string derr;
+    if (rc == 0 && (!dext->end_direct_frame(&derr) || !dext->sync(&derr))) {
+      std::printf("%s: direct: %s\n", c.name.c_str(), derr.c_str());
+      rc = 1;
+    }
+    if (rc == 0 && !c.dcase.direct_out.empty()) {
+      std::vector<uint8_t> texels;
+      if (!read_direct_output(dext, c.dcase, texels, derr) || !write_file(base + "/" + c.dcase.direct_out, texels)) {
+        std::printf("%s: direct output: %s\n", c.name.c_str(), derr.c_str());
+        rc = 1;
+      }
+    }
+    release_direct(c.dcase);
+  }
   for (size_t i = 0; rc == 0 && i < c.saves.size(); ++i) {
     ChainBuf* b = find(c.saves[i].first);
     std::vector<uint8_t> data(b ? b->bytes : 0);
@@ -551,6 +628,10 @@ int main(int argc, char** argv) {
         ch.saves.emplace_back(id, file);
       } else if (w == "time") {
         s >> ch.time_runs;
+      } else if (w == "direct" || w == "direct_params" || w == "direct_out") {
+        bool bad = false;
+        parse_direct_line(w, s, ch.dcase, &bad);
+        if (bad) return 2;
       } else {
         std::printf("unknown chain line: %s\n", line.c_str());
         return 2;
@@ -565,22 +646,10 @@ int main(int argc, char** argv) {
       c.modules.emplace_back(m, tag);
     } else if (w == "kernel") {
       s >> c.kernel >> c.grid >> c.block;
-    } else if (w == "direct") {
-      DirectTex t;
-      s >> t.slot >> t.format >> t.width >> t.height >> t.file;
-      if (t.slot != "color" && t.slot != "depth" && t.slot != "motion" && t.slot != "output") {
-        std::printf("unknown direct slot %s\n", t.slot.c_str());
-        return 2;
-      }
-      c.direct.push_back(t);
-    } else if (w == "direct_params") {
-      s >> c.dparams.rx >> c.dparams.ry >> c.dparams.rw >> c.dparams.rh;
-      float pi = 1.0f;
-      unsigned rne16 = 0;
-      if (s >> pi) c.dparams.color_pi = pi;   // optional: color_pi, then output_rne16
-      if (s >> rne16) c.dparams.output_rne16 = rne16;
-    } else if (w == "direct_out") {
-      s >> c.direct_out;
+    } else if (w == "direct" || w == "direct_params" || w == "direct_out") {
+      bool bad = false;
+      parse_direct_line(w, s, c, &bad);
+      if (bad) return 2;
     } else if (w == "arg") {
       Arg a;
       s >> a.kind;

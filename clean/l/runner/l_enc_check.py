@@ -30,6 +30,7 @@ from clean.l.reference import oracle as L  # noqa: E402
 from clean.l.reference import table as T  # noqa: E402
 from clean.l.runner import l_c32_check as C32  # noqa: E402
 from clean.l.runner import l_pack as LP  # noqa: E402
+from clean.l.runner import l_record as LR  # noqa: E402
 from clean.reference import encoder as ME  # noqa: E402
 from clean.reference.fp8 import fp8_decode  # noqa: E402
 from clean.runner import enc0 as E0  # noqa: E402
@@ -121,8 +122,7 @@ def main(argv=None):
     ap.add_argument("--json", required=True)
     a = ap.parse_args(argv)
     res = run(a.build, a.rocm, tuple(range(89, 89 + a.seeds)))
-    with open(a.json, "w") as f:
-        json.dump(res, f, indent=1)
+    LR.write_l_record(res, a.json)
     print({"total": res["total"], "pass": res["pass"]})
     for m in res["frames"]:
         if not m["pass"]:

@@ -30,7 +30,7 @@ GPU_MODULES = {   # load a D3D12 / HIP device (BUILDING.md, section 6)
     'clean/k/tests/test_k_hidden_guard.py', 'clean/k/tests/test_k_input_uniforms.py',
     'clean/k/tests/test_k_interop_timing.py', 'clean/k/tests/test_k_norm_r16.py',
     'clean/k/tests/test_k_output_arithmetic.py', 'clean/k/tests/test_k_output_selector.py',
-    'clean/k/tests/test_k_runtime_gpu.py', 'clean/k/tests/test_k_tiled_input.py',
+    'clean/k/tests/test_k_runtime_d3d12.py', 'clean/k/tests/test_k_runtime_gpu.py', 'clean/k/tests/test_k_tiled_input.py',
     'clean/rr_f/proxy/tests/test_capture_replay.py', 'clean/rr_f/runtime/tests/test_model_pack.py',
 }
 RUN_ELSEWHERE = {'clean/wgshared/tests/test_dummy_extension.py', 'clean/wgshared/tests/test_gen_registry.py'}

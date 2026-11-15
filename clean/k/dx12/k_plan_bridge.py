@@ -124,7 +124,7 @@ def chain_step(kernel, grid, block, args, tokens, bufs, cdir, tag):
     return f"step {kernel} {grid} {block} " + " ".join(out)
 
 
-def chain_lines(name, plan, pdev, tokens_of, cdir, modules, outputs, prefix="", grid_div=1, d3d12_name=None):
+def chain_lines(name, plan, pdev, tokens_of, cdir, modules, outputs, prefix="", grid_div=1, d3d12_name=None, extra=()):
     """The kernel_replay chain of a plan: buffers (inputs from files, the rest filled with the D3D12 sentinel), one step
     per launch, a save per output buffer (<prefix><name>.<buffer>.d3d12). grid_div: launch with grid // grid_div (the
     negative control uses 2). d3d12_name: the manifest's name of a plan kernel (default: the part after the code object's
@@ -136,6 +136,7 @@ def chain_lines(name, plan, pdev, tokens_of, cdir, modules, outputs, prefix="", 
             lines.append(f"buf b_{n} {size + SLACK} {name}.{n}.in {D3D12_SENTINEL}")
         else:
             lines.append(f"buf b_{n} {size + SLACK} - {D3D12_SENTINEL}")
+    lines += list(extra)   # e.g. the direct texture lines of kernel_replay
     for li, (kernel, grid, block, args) in enumerate(plan["launches"]):
         dname = d3d12_name(kernel) if d3d12_name else kernel.split(":")[-1]
         lines.append(chain_step(dname, max(1, grid // grid_div), block, args, tokens_of(dname), bufs, cdir,
