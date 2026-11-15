@@ -181,6 +181,59 @@ class TestBottleneckMegakernelGpu(MegaGpu, unittest.TestCase):
             self.assertTrue(all(0.0 < m < 1000.0 for _, m in row.values()))
 
 
+class TestResidentBlockGpu(MegaGpu, unittest.TestCase):
+    """The C = 64 block kernels of the persistent build (swin_block_c64[_add], clamping and clamp-free; weights resident in LDS,
+    one wave per window) launched alone, with window counts that leave the last workgroup with one to seven idle waves and the
+    last wave of a 2-window launch with one window.
+
+    v_wmma and v_permlanex16 need every lane executing. The loop over a wave's windows ends with `if (win0 + i >= nwin) break;`,
+    and with win0 a vector value the compiler could not see that the test is the same for the whole wave: it put the whole loop
+    body under a lane mask. The mask is all or nothing at run time (win0 comes from the wave's index), so the old code gave the
+    right bytes on the card too: this test cannot go red from the old code, test_exec_scan (the check of the instruction stream) does.
+    What it holds: the kernels with the scalar window index give the bytes of the plain build's kernels and stay within the
+    reference limits of test_gpu_enc1 on every window count."""
+
+    # (stage, H, W, offset): the window count nwin = ceil((W + ox) / 4) * ceil((H + oy) / 4) takes 1, 2, 3, 5, 7, 8, 9, 15, 17
+    CASES = (("enc1", 4, 4, (0, 0)), ("enc1", 4, 8, (0, 0)), ("enc1", 4, 12, (0, 0)), ("enc1", 8, 12, (2, 2)),
+             ("enc1", 12, 24, (0, 2)), ("enc1", 8, 28, (0, 0)), ("enc1", 36, 32, (2, 2)),
+             ("dec1", 4, 4, (0, 0)), ("dec1", 4, 8, (0, 0)), ("dec1", 12, 20, (2, 0)), ("dec1", 28, 36, (0, 0)),
+             ("dec1", 36, 32, (2, 0)))
+
+    def run_both(self, stage, H, W, offset, seed, clamp=False):
+        rng = np.random.default_rng(seed)
+        p = S.random_params(stage, rng)
+        x, skip = S.random_inputs(stage, H, W, rng)
+        w = self.plain.pack_weights(stage, p)
+        if clamp:
+            w = flags_cleared(w)
+        want = self.plain.run(stage, w, x, offset, skip)
+        got = self.mega.run(stage, w, x, offset, skip)
+        return p, x, skip, want, got
+
+    def test_the_block_kernels_of_the_persistent_build_are_launched(self):
+        for stage, kernel in (("enc1", "swin_block_c64_nc"), ("dec1", "swin_block_c64_add_nc")):
+            rng = np.random.default_rng(1)
+            x, skip = S.random_inputs(stage, 12, 12, rng)
+            w = self.mega.pack_weights(stage, S.random_params(stage, rng))
+            plan = self.mega._prepare(stage, w, x, S.window_offset(stage, 0), skip)
+            try:
+                self.assertIn(kernel, [launch[0] for launch in plan["launches"]])
+            finally:
+                self.mega._release(plan)
+
+    def test_bit_identical_to_the_plain_build_and_within_the_reference_limits(self):
+        for i, (stage, H, W, offset) in enumerate(self.CASES):
+            for clamp in (False, True):
+                p, x, skip, want, got = self.run_both(stage, H, W, offset, 900 + i, clamp)
+                with self.subTest(stage=stage, H=H, W=W, offset=offset, clamp=clamp):
+                    for k in want:
+                        self.assertTrue(same(got[k], want[k]), k)
+                    if not clamp and H * W >= 96:  # a per-case fraction of a few hundred values is too coarse for 5 %
+                        ref = S.run_stage(stage, p, x, offset, skip, gelu="sigmoid")
+                        for k in ref:
+                            self.check_block(f"{stage} {H}x{W} {k}", got[k], ref[k])
+
+
 class TestMidGpu(MegaGpu, unittest.TestCase):
     """swin_mid against the ten launches (enc2, patch merge, b0 to b5, expand, dec2) on the card."""
 
