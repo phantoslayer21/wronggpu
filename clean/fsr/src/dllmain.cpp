@@ -239,6 +239,8 @@ FrontEnd& Get() {
             // before.
             p.asiPlugin = [](wgfsr::PluginModelChoice* choice) { return QueryAsiPlugin(choice); };
             p.asiShowModel = [](char model) { ShowAsiModel(model); };
+            p.loadFfxChoice = [](wgfsr::FfxModelChoice* c) { return LoadFfxChoice(Place().ini, c); };
+            p.saveFfxChoice = [](const wgfsr::FfxModelChoice& c) { SaveFfxChoice(Place().ini, c); };
         }
         p.menu = Menu();
         g_frontEnd = new FrontEnd(p, config);

@@ -82,13 +82,11 @@ wgasi::Selection LoadSelection() {
     return wgasi::ParseSelectionFile(text);
 }
 
-// Seconds since 1970-01-01 UTC (the launcher stamps its model choice on the same clock).
-uint64_t NowUnixSeconds() {
+// Windows FILETIME units, 100 ns since 1601-01-01 UTC (the launcher and the front end stamp on the same clock and unit).
+uint64_t NowFileTime() {
     FILETIME ft;
     GetSystemTimeAsFileTime(&ft);
-    const uint64_t t = (uint64_t(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;  // 100 ns since 1601
-    const uint64_t epoch = 116444736000000000ull;                                // 1970-01-01 in that unit
-    return t > epoch ? (t - epoch) / 10000000ull : 0;
+    return (uint64_t(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
 }
 
 void SaveSelection(char model, uint64_t chosenAt) {
@@ -105,7 +103,7 @@ extern "C" bool WgSelectableThunk(const char* label, bool selected, int flags, c
     bool ours = false;
     const bool clicked = wgasi::SelectableThunkLogic(
         [](const char* l, bool s, int f, const void* z) { return g_realSelectable(l, s, f, z); },
-        label, selected, flags, size, g_state, NowUnixSeconds(), &ours);
+        label, selected, flags, size, g_state, NowFileTime(), &ours);
     if (ours) {  // a click on an entry of the FSR 3.X group: the player's explicit choice, with its time (rare; menu thread)
         const char after = g_state.model.load();
         const uint64_t at = g_state.chosenAt.load();

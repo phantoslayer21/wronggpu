@@ -21,16 +21,24 @@ What the front end does with the plugin's entry (`src/frontend.cpp`, `TestAsiPlu
 whatever the FFX box names; "FSR 3.X(/4)" runs AMD: the AMD version the FFX box names, else AMD's newest listed version.
 The FFX box's list is the same with and without the plugin (WrongGPU first).
 
-Which model runs (0.6.5, `src/model_precedence.h`, `TestAsiLauncherPrecedence`): the plugin's saved entry is weighed
-against the launcher's model choice, the last `model=` item of wronggpu.ini's `runtime_options`. Each side records when
-it was chosen: the plugin writes `chosen=<seconds since 1970 UTC>` into `wronggpu-asi.ini` on every click in the menu,
-and the launcher writes `model_chosen=<seconds>` into wronggpu.ini whenever it changes the model item. A choice is a
-*default* when nobody made it (no file, or Model M with no time on either side). The launcher's choice wins over the
-plugin's default; the plugin's explicit choice wins over the launcher's default; when both are explicit and differ, the
-more recent one wins (equal or missing times: the plugin's, the choice made in the game), and the front end logs one
-`model choice conflict:` line naming both and the winner. The front end tells the plugin which model runs
-(`WrongGpuAsiShowModelV1`), so the menu marks that entry. Model L's own entry ("WrongGPU Model L") is in the menu of a
-build with `WG_MODEL_L`; a model the front end was built without runs as Model M, with a note in the log.
+Which model runs (0.6.5, `src/model_precedence.h`, `TestAsiLauncherPrecedence`, `TestAsiFfxIndexChoice`): three places
+can choose, each with the time it was chosen in Windows FILETIME units (100 ns since 1601 UTC):
+- the launcher: the last `model=` item of wronggpu.ini's `runtime_options` and `model_chosen=`, written whenever the
+  launcher changes that item and whenever the player explicitly applies a model, also the same one again
+  (`WrongGPU.exe set <game> model=<m>`);
+- OptiScaler's FFX upscaler box: the WrongGPU entry picked there (the version id OptiScaler passes with each create). The
+  front end saves the entry it saw in `wronggpu-ffx-choice.ini` next to wronggpu.ini and stamps the time when it sees a
+  different one; the first entry it ever sees is saved untimed;
+- the plugin's menu: `selection=` and `chosen=` in `wronggpu-asi.ini`, written on every click.
+
+A choice is a *default* when nobody made it (no file, or Model M with no time; an untimed FFX entry). The most recent
+explicit choice wins; an untimed explicit choice (a file of an earlier version) counts as the oldest; on an exact tie the
+launcher wins, then the FFX box, then the plugin's menu. Explicit choices naming different models are a conflict: the
+front end logs one `model choice conflict:` line naming each with its time and the winner with the reason. The front end
+tells the plugin which model runs (`WrongGpuAsiShowModelV1`), so the menu marks that entry. Model L's own entry
+("WrongGPU Model L") is in the menu of a build with `WG_MODEL_L`; a model the front end was built without runs as Model M,
+with a note in the log. Known limit: the order follows the PC's clock; a clock set back between two choices can order
+them wrongly.
 
 ## How it works
 

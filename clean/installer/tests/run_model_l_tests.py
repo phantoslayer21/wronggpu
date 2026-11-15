@@ -224,10 +224,27 @@ def recorded_hash(b, name):
     return None
 
 
+def no_stamp(data):
+    """wronggpu.ini without its model_chosen line: the launcher stamps every explicit model choice (also the same model
+    again, and Model M), so `set model=...` changes that line and nothing else of a file that already says the model."""
+    kept = b"".join(l for l in data.splitlines(True) if not l.replace(b" ", b"").lower().startswith(b"model_chosen="))
+    return kept.rstrip(b"\r\n")  # (appending the line may give a file that had no final line end one)
+
+
+def stamp(data):
+    """wronggpu.ini's model_chosen value (FILETIME units), 0 without one."""
+    for l in data.splitlines():
+        k, _, v = l.replace(b" ", b"").partition(b"=")
+        if k.lower() == b"model_chosen" and v.isdigit():
+            return int(v)
+    return 0
+
+
 def test_choice(t):
     """The launcher's Model L choice (a build with WRONGGPU_MODEL_L on and the test map): set <game> model=L/M on an installed
     game. L only with Model L's data on this PC; it writes wronggpu.ini's model item and OptiScaler's UpscalerIndex, the
-    record's hashes follow (the file-ownership rule); M puts both files back byte for byte; uninstall restores the game."""
+    record's hashes follow (the file-ownership rule); M puts both files back as the install wrote them (wronggpu.ini then
+    also has model_chosen, the time of the player's explicit model choice); uninstall restores the game."""
     print("\n[3] the model choice: set <game> model=L / model=M (a build with the choice on)")
     import run_launcher_tests as rl  # (its game and OptiScaler fixtures: names and synthetic bytes only)
     t.model = m_case()  # rl.game() writes t.model.file as the game's DLSS file (this hides T.model, the path helper)
@@ -260,9 +277,15 @@ def test_choice(t):
             recorded_hash(b, "wronggpu.ini") == hashlib.sha256(read(wini)).hexdigest() and recorded_hash(b, "OptiScaler.ini") == hashlib.sha256(read(oini)).hexdigest(),
             (recorded_hash(b, "wronggpu.ini"), recorded_hash(b, "OptiScaler.ini")))
     t.check("...profile.ini says model=l", b"model=l\r\n" in read(os.path.join(b, "wronggpu-setup", "profile.ini")))
+    l_stamp = stamp(read(wini))
+    t.check("...wronggpu.ini has model_chosen (the time of the choice, FILETIME units)", l_stamp > 133000000000000000, read(wini))
+    rc = t.run("set", exe, "model=L")
+    t.check("set model=L again: model_chosen stamped again (the newest choice), nothing else changes",
+            rc == 0 and stamp(read(wini)) > l_stamp and suite_options_model(read(wini).decode("utf-8", "replace")) == "L", (rc, read(wini)))
     rc = t.run("set", exe, "model=M")
-    t.check("set model=M: wronggpu.ini and OptiScaler.ini back byte for byte as the install wrote them",
-            rc == 0 and read(wini) == m_w and read(oini) == m_o, (rc, read(wini)[-200:], read(oini)[-200:]))
+    t.check("set model=M: wronggpu.ini (but its model_chosen line) and OptiScaler.ini back byte for byte as the install wrote them",
+            rc == 0 and no_stamp(read(wini)) == no_stamp(m_w) and read(oini) == m_o and stamp(read(wini)) > l_stamp,
+            (rc, read(wini)[-200:], read(oini)[-200:]))
     t.check("...profile.ini has no model line again", b"model=" not in read(os.path.join(b, "wronggpu-setup", "profile.ini")))
     # a game saved on L whose data goes away: a repair keeps the player's choice, the files say Model M with a warning
     rc = t.run("set", exe, "model=L")

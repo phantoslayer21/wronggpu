@@ -2,6 +2,8 @@
 #pragma once
 // Front-end side of the WrongGPU ASI plugin interface (clean/fsr/asi/asi_abi.h): find WrongGPU.asi if it is loaded
 // in the process and ask it which upscaler entry the player selected in OptiScaler's menu. No link to the plugin.
+#include <string>
+
 #include "model_precedence.h"
 
 namespace wgwin {
@@ -14,5 +16,10 @@ bool QueryAsiPlugin(wgfsr::PluginModelChoice* choice);
 
 // Tells the plugin which model runs (its menu marks that entry). Nothing happens without the plugin or the export.
 void ShowAsiModel(char model);
+
+// wronggpu-ffx-choice.ini next to `ini` (the front end's wronggpu.ini): the WrongGPU entry last seen in OptiScaler's FFX
+// upscaler box (model_precedence.h). Load: false when there is no such file.
+bool LoadFfxChoice(const std::wstring& ini, wgfsr::FfxModelChoice* choice);
+void SaveFfxChoice(const std::wstring& ini, const wgfsr::FfxModelChoice& choice);
 
 }  // namespace wgwin

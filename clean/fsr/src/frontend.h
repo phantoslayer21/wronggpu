@@ -96,6 +96,12 @@ struct Platform {
     std::function<bool(PluginModelChoice* choice)> asiPlugin;
     // Tells the plugin which model the context runs (0 AMD, 'M', 'K', 'L'), so its menu marks that entry. May be empty.
     std::function<void(char model)> asiShowModel;
+    // With the plugin hooked: the WrongGPU entry last seen in OptiScaler's FFX upscaler box and when it changed
+    // (model_precedence.h FfxChoiceSeen; wronggpu-ffx-choice.ini in the DLL). Empty: nothing is kept between sessions.
+    std::function<bool(FfxModelChoice* choice)> loadFfxChoice;
+    std::function<void(const FfxModelChoice& choice)> saveFfxChoice;
+    // The time a choice is stamped with: Windows FILETIME units (100 ns since 1601 UTC). Empty: the system clock.
+    std::function<uint64_t()> clock;
     // Registry options and the menu's choices (shared settings block). Empty members: defaults, nothing written.
     MenuSettings menu;
 };
@@ -209,6 +215,8 @@ private:
     bool ConfiguredModel(int32_t* model, std::string* described);
     // The launcher's model choice in wronggpu.ini (model_precedence.h), weighed against the OptiScaler plugin's.
     LauncherModelChoice LauncherChoice() const;
+    // The FFX sub-box's WrongGPU entry seen by a create (`seen`, or kChoiceNone), saved and stamped when it changes.
+    FfxModelChoice SeeFfxChoice(char seen, const std::string& tag);
     // AMD's DLL behind a forwarded context (the one that created it), else AMD's original.
     const OriginalApi* ApiOf(void* context);
     // `u` runs on AMD while its upscaler's create runs (u.pending): takes the upscaler over when the create has finished.
@@ -269,6 +277,8 @@ private:
     uint32_t inputRefusedRun_ = 0;                 // refusals in a row with that key (mutex_)
     std::atomic<bool> inputRefusedAny_{false};     // inputRefusedRun_ > 0 (the taken-frame path's cheap check)
     std::map<std::string, bool> modelLogged_;      // ApplyModelDir: each distinct choice logged once (mutex_)
+    bool ffxLoaded_ = false;                       // SeeFfxChoice: the saved FFX entry read (mutex_)
+    FfxModelChoice ffxSaved_;
     std::atomic<uint64_t> reentered_{0};           // calls refused because they re-entered this front end on one thread
     std::mutex parkMutex_;                           // guards the three below; held while a parked context is destroyed
     UpscaleContext* parked_ = nullptr;

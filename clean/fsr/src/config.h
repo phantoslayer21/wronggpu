@@ -79,7 +79,7 @@ struct Config {
     // Extra "key=value;key=value" text for the upscaler (the network runtime's own keys, e.g. timing_log=1;sync=pipelined),
     // appended to BackendOptions() after the front end's keys. Normalized: items trimmed, empty items dropped.
     std::string runtimeOptions;
-    // [fsr] model_chosen: when the launcher last changed the model item of runtime_options (seconds since 1970 UTC;
+    // [fsr] model_chosen: when the launcher last changed the model item of runtime_options (Windows FILETIME, 100 ns since 1601 UTC;
     // 0 = not recorded). Weighed against the OptiScaler menu plugin's saved choice (model_precedence.h).
     uint64_t modelChosenAt = 0;
 

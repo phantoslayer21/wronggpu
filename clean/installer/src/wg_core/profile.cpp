@@ -4,7 +4,7 @@
 
 #include <cmath>
 #include <cstdlib>
-#include <ctime>
+#include <chrono>
 
 #include "record.h"
 #include "settings.h"
@@ -284,7 +284,12 @@ std::map<string, string> EffectiveSettings(const string& wronggpuIni, const stri
     return eff;
 }
 
-bool RenderWronggpuIni(const Profile& p, const string& in, string& out, wstring* why, uint64_t now) {
+uint64_t NowFileTime() {
+    using namespace std::chrono;
+    return uint64_t(duration_cast<nanoseconds>(system_clock::now().time_since_epoch()).count() / 100) + 116444736000000000ull;
+}
+
+bool RenderWronggpuIni(const Profile& p, const string& in, string& out, wstring* why, uint64_t now, bool modelChosen) {
     for (auto& d : kSettings) {
         if (!ValidateSetting(d, p.get(d.key), nullptr, why)) return false;
     }
@@ -322,10 +327,10 @@ bool RenderWronggpuIni(const Profile& p, const string& in, string& out, wstring*
     if (FindSetting("model")) {
         auto isModel = [](const std::pair<string, string>& kv) { return LowerA(kv.first) == "model"; };
         const string want = p.get("model");
-        if (want == "l" || want == "k") {
+        if (want == "l" || want == "k" || (modelChosen && want == "m")) {  // (Model M explicitly applied: model=M last)
             std::vector<std::pair<string, string>> kept;
             for (auto& kv : items) if (!isModel(kv)) kept.push_back(kv);
-            kept.push_back({"model", want == "k" ? "K" : "L"});
+            kept.push_back({"model", want == "k" ? "K" : want == "l" ? "L" : "M"});
             items = kept;
         } else {
             for (auto& kv : items) {
@@ -338,15 +343,17 @@ bool RenderWronggpuIni(const Profile& p, const string& in, string& out, wstring*
     const string joined = JoinOptions(items);
     // the line is rewritten only when its items change (a player's spacing and comment stay otherwise)
     if (hadOptions ? joined != JoinOptions(SplitOptions(options)) : !joined.empty()) text = IniSet(text, hadOptions ? section : "fsr", "runtime_options", joined);
-    // the model choice's time (profile.h): written when the model the front end runs changes, for any model letter
+    // the model choice's time (profile.h): written when the model the front end runs changes, for any model letter, and
+    // when the player explicitly applied a model (also the same one again)
     auto lastModel = [](const string& opts) {
         string m;
         for (auto& kv : SplitOptions(opts)) if (LowerA(kv.first) == "model") m = LowerA(TrimA(kv.second));
         return m;
     };
     const string modelBefore = hadOptions ? lastModel(options) : string(), modelAfter = lastModel(joined);
-    if (modelAfter != modelBefore && !modelAfter.empty())
-        text = IniSet(text, hadOptions ? section : "fsr", "model_chosen", std::to_string(now ? now : uint64_t(std::time(nullptr))));
+    if (!modelAfter.empty() && (modelAfter != modelBefore || modelChosen))
+        text = IniSet(text, hadOptions ? section : "fsr", "model_chosen",
+                      std::to_string(now ? now : NowFileTime()));
     out = text;
     return true;
 }

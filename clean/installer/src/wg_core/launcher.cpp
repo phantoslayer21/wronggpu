@@ -750,7 +750,8 @@ Profile GameProfile(const wstring& dir) {
     return p;
 }
 
-void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vector<wstring>& notes, std::vector<wstring>* warnings) {
+void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vector<wstring>& notes, std::vector<wstring>* warnings,
+                  bool modelChosen) {
     Record m;
     if (!LoadRecord(RecordPath(dir), m) || m.legacy) Fail(L"WrongGPU is not installed in " + dir + L".", EXIT_NOT_INSTALLED);
     InferOwners(ctx, m);
@@ -783,7 +784,9 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
             JournalChanges(m.inikeys, name, in, out);
             recordChanged = recordChanged || out != in;
         }
-        else if (!RenderWronggpuIni(q, in, out, &why)) Fail(L"Settings not applied: " + why, EXIT_USAGE);
+        // (a model the files cannot run yet, written as Model M above, is not stamped as the player's choice)
+        else if (!RenderWronggpuIni(q, in, out, &why, 0, modelChosen && q.get("model") == p.get("model")))
+            Fail(L"Settings not applied: " + why, EXIT_USAGE);
         if (out == in && (had || out.empty())) return;  // unchanged, or nothing to write into a missing file
         WriteFileAtomic(path, out.data(), out.size());
         const wstring h = Sha256Bytes(out.data(), out.size());
@@ -1151,7 +1154,8 @@ OpResult RunOp(Context& ctx, const OpRequest& r, Ui& ui) {
                             Fail(wstring(L"Model ") + chosen + L" can't be chosen. " + ModelNotReady(chosen, why) + L" Nothing was changed.", EXIT_NO_MODEL);
                     }
                 }
-                if (!r.optiOnly) ApplyProfile(ctx, r.dir, r.hasProfile ? r.profile : GameProfile(r.dir), res.notes, &res.warnings);
+                if (!r.optiOnly)
+                    ApplyProfile(ctx, r.dir, r.hasProfile ? r.profile : GameProfile(r.dir), res.notes, &res.warnings, r.hasProfile && r.modelChosen);
                 ApplyOptiTab(ctx, r.dir, r, res.notes);
                 res.message = L"Settings applied; they take effect the next time the game starts";
                 break;

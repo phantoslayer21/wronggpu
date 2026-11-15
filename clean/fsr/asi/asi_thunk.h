@@ -57,8 +57,8 @@ inline const char* LabelOf(char model) {
 
 // Shared plugin state. `hooked` is read by the front end through the exported query. `model` is the player's saved
 // choice within OptiScaler's FSR 3.X entry; `explicitChoice` says whether the player (or an earlier version's file)
-// actually chose it, as opposed to the default entry; `chosenAt` is when the player clicked it (seconds since
-// 1970-01-01 UTC, 0 = not recorded: a file written before 0.6.5, or by an installer). `shown` is the model the front
+// actually chose it, as opposed to the default entry; `chosenAt` is when the player clicked it (Windows FILETIME:
+// 100 ns since 1601-01-01 UTC, 0 = not recorded: a file written before 0.6.5, or by an installer). `shown` is the model the front
 // end reported as running (kShowSaved until it reports one): the menu marks that one, so a launcher choice that won
 // over the plugin's default is what the player sees checked.
 struct PluginState {
@@ -80,7 +80,7 @@ inline bool IsFsr3xLabel(const char* label) {
 
 // The Selectable thunk. `sel` is the real ImGui::Selectable(label, selected, flags, size). For OptiScaler's FSR 3.X
 // entry it draws the WrongGPU items first, then the original entry, records any click as the player's explicit choice
-// (made at `now`, seconds since 1970 UTC), and returns true (click) to OptiScaler when any of them was clicked so
+// (made at `now`, FILETIME units), and returns true (click) to OptiScaler when any of them was clicked so
 // OptiScaler switches to its FSR 3.X backend. `selected` (OptiScaler's backend is FSR 3.X) marks the WrongGPU item or
 // the FSR 3.X item of the model shown (ShownModel). Every other entry passes through unchanged. *clickedOut (when
 // given) is set to true on a click on one of these items, so the caller saves the choice.
@@ -113,7 +113,7 @@ bool BeginComboThunkLogic(BcFn&& bc, const char* label, const char* preview, int
 }
 
 // The remembered choice (wronggpu-asi.ini next to the plugin): "selection=wronggpu" (Model M), "wronggpu-k",
-// "wronggpu-l" or "amd", and since 0.6.5 "chosen=<seconds since 1970 UTC>", the time of the player's click.
+// "wronggpu-l" or "amd", and since 0.6.5 "chosen=<FILETIME>" (100 ns since 1601 UTC), the time of the player's click.
 struct Selection {
     char model = kDefaultModel;
     bool explicitChoice = false;  // false: the default entry (no file, no selection line, an unknown value, or
@@ -166,7 +166,7 @@ inline const char* SelectionValue(char model) {
 // `chosenAt` 0 writes no time (the default entry's file, as installers write it).
 inline std::string FormatSelection(char model, uint64_t chosenAt = 0) {
     std::string text = std::string("; WrongGPU OptiScaler plugin: the entry last selected in OptiScaler's upscaler list\r\n") +
-                       "; (wronggpu, wronggpu-k, wronggpu-l or amd) and when (chosen: seconds since 1970 UTC).\r\n"
+                       "; (wronggpu, wronggpu-k, wronggpu-l or amd) and when (chosen: Windows FILETIME, 100 ns since 1601 UTC).\r\n"
                        "; Deleting this file selects WrongGPU's default; the launcher's model choice then decides.\r\n"
                        "selection=" + SelectionValue(model) + "\r\n";
     if (chosenAt) text += "chosen=" + std::to_string(chosenAt) + "\r\n";

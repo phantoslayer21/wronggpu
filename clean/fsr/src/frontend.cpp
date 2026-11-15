@@ -566,17 +566,23 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
         }
     }
 
-    // OptiScaler ASI plugin (clean/fsr/asi): when it has hooked the host's MAIN upscaler list, the FFX sub-box no
-    // longer chooses: the plugin's saved entry and the launcher's model choice (wronggpu.ini runtime_options' model item
-    // with model_chosen) do, by model_precedence.h (the launcher's choice wins over the plugin's default entry; on a
-    // conflict the more recent explicit choice wins, with one log line). A WrongGPU model -> WrongGPU, whatever the FFX
-    // sub-box names. AMD ("FSR 3.X(/4)") -> AMD: the version the FFX sub-box names when that is one of AMD's, else AMD's
-    // newest listed version (FSR 4 when the AMD provider has it).
+    // OptiScaler ASI plugin (clean/fsr/asi): when it has hooked the host's MAIN upscaler list, three choices are weighed
+    // by model_precedence.h: the launcher's (wronggpu.ini runtime_options' model item with model_chosen), the WrongGPU
+    // entry picked in OptiScaler's FFX sub-box (the override id, stamped when it changes: FfxChoiceSeen) and the plugin's
+    // saved entry. The most recent explicit choice wins (a tie: the launcher's), with one log line on a conflict. A
+    // WrongGPU model -> WrongGPU; an AMD version in the FFX sub-box is not a model choice and never routes it to AMD.
+    // AMD ("FSR 3.X(/4)" chosen in the plugin's list) -> AMD: the version the FFX sub-box names when that is one of AMD's,
+    // else AMD's newest listed version (FSR 4 when the AMD provider has it).
     PluginModelChoice asiChoice;
     const bool asiHooked = config_.hosted && platform_.asiPlugin && platform_.asiPlugin(&asiChoice);
     bool forceAmd = false;
     if (asiHooked) {
-        const ModelDecision decision = DecideModel(asiChoice, LauncherChoice());
+        char seen = kChoiceNone;  // the WrongGPU model entry the FFX sub-box names, if any
+        if (u->hasOverride)
+            if (const WgEntryDef* e = OwnEntryOfId(u->overrideId))
+                if (e->slot == WG_OPT_SR_MODEL && e->value >= 0 && e->value < WG_SR_MODEL_COUNT) seen = kWgModelRows[e->value].name[0];
+        const FfxModelChoice ffx = SeeFfxChoice(seen, tag);
+        const ModelDecision decision = DecideModel(asiChoice, LauncherChoice(), ffx);
         if (decision.conflict) {
             bool first = false;
             {
@@ -590,6 +596,8 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
         // model that runs (asiShowModel), also when the launcher's choice decided.
         const std::string by = decision.winner == ModelWinner::Launcher
                                    ? std::string(" (the launcher's model choice: wronggpu.ini runtime_options model=") + decision.model + ")"
+                               : decision.winner == ModelWinner::Ffx
+                                   ? std::string(" (the WrongGPU entry picked in OptiScaler's upscaler box: Model ") + decision.model + ")"
                                    : std::string();
         char model = decision.model;
         if (model != kChoiceAmd) {
@@ -1410,6 +1418,33 @@ LauncherModelChoice FrontEnd::LauncherChoice() const {
     }
     c.chosenAt = config_.modelChosenAt;
     return c;
+}
+
+FfxModelChoice FrontEnd::SeeFfxChoice(char seen, const std::string& tag) {
+    FfxModelChoice before, after;
+    {
+        std::lock_guard lock(mutex_);
+        if (!ffxLoaded_) {
+            ffxLoaded_ = true;
+            if (platform_.loadFfxChoice) platform_.loadFfxChoice(&ffxSaved_);
+        }
+        before = ffxSaved_;
+        uint64_t now = 0;
+        if (seen != kChoiceNone && before.model != kChoiceNone && before.model != seen)
+            now = platform_.clock ? platform_.clock()
+                                  : uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                 std::chrono::system_clock::now().time_since_epoch()).count() / 100) +
+                                        116444736000000000ull;  // 1970 in FILETIME units
+        after = FfxChoiceSeen(before, seen, now);
+        ffxSaved_ = after;
+    }
+    if (after.model != before.model || after.chosenAt != before.chosenAt) {
+        if (platform_.saveFfxChoice) platform_.saveFfxChoice(after);
+        Log(tag + " OptiScaler's upscaler box names " + ChoiceName(after.model) +
+            (after.chosenAt ? " (changed there: an explicit choice, chosen=" + std::to_string(after.chosenAt) + ")"
+                            : std::string(" (the first entry seen: not counted as a choice)")));
+    }
+    return after;
 }
 
 void FrontEnd::ApplyEntry(const WgEntryDef& e, UpscaleContext& u, const std::string& tag, const char* source) {

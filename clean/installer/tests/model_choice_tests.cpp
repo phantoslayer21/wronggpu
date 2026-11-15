@@ -22,10 +22,10 @@ Profile With(const char* model) {
     if (!SetSetting(p, "model", model, &why)) throw std::runtime_error("test setup: model");
     return p;
 }
-string Wini(const Profile& p, const string& in, uint64_t now = 0) {
+string Wini(const Profile& p, const string& in, uint64_t now = 0, bool chosen = false) {
     string out;
     wstring why;
-    if (!RenderWronggpuIni(p, in, out, &why, now)) throw std::runtime_error("test setup: render");
+    if (!RenderWronggpuIni(p, in, out, &why, now, chosen)) throw std::runtime_error("test setup: render");
     return out;
 }
 string Oini(const Profile& p, const string& in, std::vector<wstring>* notes = nullptr) {
@@ -90,6 +90,19 @@ int main() {
         require(Wini(With("l"), "[fsr]\r\nupscaler = network\r\n", 7000).find("model_chosen=7000") != string::npos,
                 "a file without runtime_options gets model=L and model_chosen");
         require(Wini(With("l"), fresh).find("model_chosen=") != string::npos, "now = 0: the current time is written");
+        // #213 review P1: the player explicitly applies the SAME model again (set <game> model=...): stamped again, newest
+        const string againL = Wini(With("l"), toLt, 3000, true);
+        require(againL.find("model_chosen=3000\r\n") != string::npos && againL.find("model_chosen=1000") == string::npos &&
+                    againL.find("runtime_options=model=L\r\n") != string::npos,
+                "Model L applied again by the player: model_chosen = the new time (the model item unchanged)");
+        const string chosenM = Wini(DefaultProfile(), fresh, 3000, true);
+        require(chosenM.find("model_chosen=3000\r\n") != string::npos && chosenM.find("runtime_options = model=M ; the model\r\n") != string::npos,
+                "Model M explicitly applied on the installer's file: its model=M line kept as it is, stamped (an explicit M, not the default)");
+        const string againM = Wini(DefaultProfile(), chosenM, 4000, true);
+        require(againM.find("model_chosen=4000\r\n") != string::npos && againM.find("model_chosen=3000") == string::npos,
+                "Model M applied again: stamped again");
+        require(Wini(DefaultProfile(), chosenM, 5000) == chosenM, "another apply that is not a model choice: model_chosen stays");
+        require(NowFileTime() > 133000000000000000ull, "NowFileTime: FILETIME units (100 ns since 1601), after 2022");
 
         // ---- OptiScaler.ini: the entry OptiScaler starts with -----------------------------------------------------------
         const string L = kModelLEntryIndex;

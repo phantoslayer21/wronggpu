@@ -180,6 +180,7 @@ struct OpRequest {
     std::vector<std::pair<wstring, wstring>> movePluginsList, moveModsList;
     bool otherSetupOk = false;     // 0.6.1: Clean up / Adopt of WrongGPU files another mod's setup uses, confirmed (--confirm-other-setup)
     bool hasProfile = false;       // apply: this profile (else the game's profile.ini); install: the profile a new install starts with
+    bool modelChosen = false;      // apply: the player explicitly applied the profile's model (set <game> model=...): stamped
     Profile profile;
     // apply, the OptiScaler tab: edits of editable keys ("Section.Key", value); reset: the editable keys back to what the
     // install wrote (inikey journal, byte for byte); keep: values OptiScaler's menu saved over the launcher's are kept.
@@ -210,7 +211,10 @@ bool NeedsElevation(const wstring& dir);
 // Writes the profile into the game's files (wronggpu.ini, OptiScaler.ini), the record's hashes of those files and
 // owned-files.json; saves profile.ini.
 // warnings: what could not be done that the player should hear (rr_config_fix: the game's Engine.ini, rrconfig.h).
-void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vector<wstring>& notes, std::vector<wstring>* warnings = nullptr);
+// modelChosen: the player explicitly applied the profile's model (`set <game> model=<m>`): wronggpu.ini's model_chosen is
+// stamped now even when the model is the same (profile.h RenderWronggpuIni).
+void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vector<wstring>& notes, std::vector<wstring>* warnings = nullptr,
+                  bool modelChosen = false);
 Profile GameProfile(const wstring& dir);  // profile.ini, else the profile its wronggpu.ini implies
 // The OptiScaler tab: reset / keep / edits of OpRequest written into the installed OptiScaler.ini with the inikey
 // journal in the record. Nothing to do: no change.

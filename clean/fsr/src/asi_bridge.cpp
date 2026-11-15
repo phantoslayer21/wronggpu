@@ -47,4 +47,32 @@ void ShowAsiModel(char model) {
         show(model);
 }
 
+static std::wstring FfxChoicePath(const std::wstring& ini) {
+    const size_t slash = ini.find_last_of(L"\\/");
+    return (slash == std::wstring::npos ? std::wstring(L".") : ini.substr(0, slash)) + L"\\wronggpu-ffx-choice.ini";
+}
+
+bool LoadFfxChoice(const std::wstring& ini, wgfsr::FfxModelChoice* choice) {
+    HANDLE h = CreateFileW(FfxChoicePath(ini).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    char buf[1024];
+    DWORD got = 0;
+    const bool ok = ReadFile(h, buf, sizeof buf, &got, nullptr) != 0;
+    CloseHandle(h);
+    if (!ok) return false;
+    if (choice) *choice = wgfsr::ParseFfxChoiceFile(std::string(buf, got));
+    return true;
+}
+
+void SaveFfxChoice(const std::wstring& ini, const wgfsr::FfxModelChoice& choice) {
+    const std::string text = wgfsr::FormatFfxChoiceFile(choice);
+    HANDLE h = CreateFileW(FfxChoicePath(ini).c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
+                           nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    DWORD written = 0;
+    WriteFile(h, text.data(), DWORD(text.size()), &written, nullptr);
+    CloseHandle(h);
+}
+
 }  // namespace wgwin

@@ -79,7 +79,7 @@ typedef int (*PfnWrongGpuAsiQueryStatusV1)(WrongGpuAsiStatusV1* status, uint32_t
 // The player's saved choice with what the front end needs to weigh it against the launcher's model choice (0.6.5;
 // src/model_precedence.h). model: 0 (AMD), 'M', 'K' or 'L'. explicit_choice: 1 when the player chose it in the menu (or
 // a file of an earlier version names a non-default entry), 0 for the default entry (no file, or Model M with no time).
-// chosen_at: when the player clicked it, seconds since 1970-01-01 UTC; 0 = not recorded. Same size/version rules and
+// chosen_at: when the player clicked it, Windows FILETIME (100 ns since 1601-01-01 UTC); 0 = not recorded. Same size/version rules and
 // return codes as WrongGpuAsiQueryStatusV1. A front end that finds no such export uses WrongGpuAsiQuery and treats
 // Model M as the default entry and K / AMD as explicit choices with no recorded time.
 #define WRONGGPU_ASI_CHOICE_QUERY "WrongGpuAsiQueryChoiceV1"
