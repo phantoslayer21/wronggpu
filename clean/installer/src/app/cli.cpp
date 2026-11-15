@@ -841,6 +841,12 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
             OpLogBegin();
             OpRequest r; r.op = Op::Apply; r.dir = dir; r.hasProfile = true; r.profile = p; r.optiEdits = optiEdits;
             r.modelChosen = modelGiven;  // set <game> model=<m>: the player's explicit model choice, stamped (also the same model)
+#ifdef WRONGGPU_TESTING
+            if (a.has(L"gui-apply")) {  // tests: the request the launcher window's Apply makes (GuiApplyRequest), the same code
+                r = GuiApplyRequest(dir, p);
+                r.optiEdits = optiEdits;
+            }
+#endif
             Ui ui; ui.step = [](int, int, const wstring&) {}; ui.log = [](const wstring& s) { LogLine(g.ctx, s); };
             const OpResult res = RunOp(g.ctx, r, ui);
             OpLogEnd();

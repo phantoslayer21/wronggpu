@@ -25,6 +25,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 os.environ["WRONGGPU_TESTING"] = "1"
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -254,6 +255,9 @@ def choice_record(b):
     return r
 
 
+RECORD_TOOL = None  # --record-tool
+
+
 def test_choice(t):
     """The launcher's Model L choice (a build with WRONGGPU_MODEL_L on and the test map): set <game> model=L/M on an installed
     game. L only with Model L's data on this PC; it writes wronggpu.ini's model item and OptiScaler's UpscalerIndex, the
@@ -312,7 +316,16 @@ def test_choice(t):
     r2b = choice_record(b)
     t.check("set model=L (the profile already says L) after the plugin's newer M: L is recorded with the next seq",
             rc == 0 and r2b.get("model") == "L" and r2b.get("source") == "launcher" and int(r2b.get("seq", "0")) == newer + 1, r2b)
-    r2 = r2b
+    # the launcher window's Apply (the request its button makes, GuiApplyRequest, run by `set ... --gui-apply`): the model
+    # shown is a choice even unchanged, so it wins over a newer choice made in the game
+    newer = int(r2b.get("seq", "0")) + 1
+    write(rec_path, ("model=M\r\nseq=%d\r\nsource=ffx\r\n" % newer).encode("ascii"))
+    rc = t.run("set", exe, "fps_overlay=keep", "--gui-apply")
+    r2c = choice_record(b)
+    t.check("the launcher's Apply with the unchanged model L after a newer choice in OptiScaler's list (M): L is recorded with the next seq",
+            rc == 0 and r2c.get("model") == "L" and r2c.get("source") == "launcher" and int(r2c.get("seq", "0")) == newer + 1 and read(wini) == m_w,
+            (rc, r2c))
+    r2 = r2c
     rc = t.run("set", exe, "model=M")
     t.check("set model=M: wronggpu.ini and OptiScaler.ini back byte for byte as the install wrote them",
             rc == 0 and read(wini) == m_w and read(oini) == m_o, (rc, read(wini)[-200:], read(oini)[-200:]))
@@ -354,6 +367,43 @@ def test_choice(t):
             rc == 0 and read(wini) == m_w and upscaler_index(read(oini).decode("utf-8", "replace")) == "0" and
             sorted(read(oini).split(b"\r\n")) == sorted(m_o.split(b"\r\n")),
             (rc, read(wini) == m_w, set(read(oini).split(b"\r\n")) ^ set(m_o.split(b"\r\n")), read(wini)[-200:]))
+    # OptiScaler.ini missing: the model choice is still saved, and the player is told OptiScaler's list could not be updated
+    os.replace(oini, oini + ".away")
+    r7 = choice_record(b)
+    rc = t.run("set", exe, "model=L")
+    msgs = " ".join(t.j.get("warnings", []) + t.j.get("notes", []))
+    t.check("set model=L without OptiScaler.ini: exit 0, the record has L with the next seq, and it says OptiScaler's list couldn't be updated",
+            rc == 0 and choice_record(b).get("model") == "L" and int(choice_record(b).get("seq", "0")) == int(r7.get("seq", "0")) + 1 and
+            "OptiScaler's list couldn't be updated; the model choice is saved" in msgs and not os.path.exists(oini), (rc, msgs[:400], choice_record(b)))
+    os.replace(oini + ".away", oini)
+    rc = t.run("set", exe, "model=M")
+    t.check("...set model=M with OptiScaler.ini back: its entry is Model M's (0)", rc == 0 and upscaler_index(read(oini).decode("utf-8", "replace")) == "0", rc)
+    # the front end's upgrade migration (no record yet) against a REAL launcher apply in another process: the launcher holds the
+    # game's state lock (test hook: it pauses after reading the record, before writing it); the migration, started then, waits
+    # for the lock and finds the launcher's record (L), so it writes nothing (without the lock it would have written M first)
+    if RECORD_TOOL:
+        os.remove(rec_path)
+        sig = os.path.join(t.work, "choice-lock.signal")
+        if os.path.exists(sig):
+            os.remove(sig)
+        if os.path.exists(t.out):
+            os.remove(t.out)
+        env = dict(t.env, WRONGGPU_TEST_PAUSE_IN_CHOICE_LOCK=sig + "|1500")
+        cmd = [t.exe, "set", exe, "model=L", "--noscan", "--log=" + t.log, "--out=" + t.out, "--data=" + os.path.join(t.work, "data")]
+        launcher = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        for _ in range(500):
+            if os.path.exists(sig):
+                break
+            time.sleep(0.01)
+        mig = subprocess.run([RECORD_TOOL, "migrate", b], env=t.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        lrc = launcher.wait(timeout=120)
+        out = mig.stdout.decode("utf-8", "replace").strip()
+        rr = choice_record(b)
+        t.check("migration against a real launcher apply holding the lock: the launcher records L (seq 1), the migration waits and writes nothing",
+                os.path.exists(sig) and lrc == 0 and mig.returncode == 0 and out == "migrate: ok model=L seq=1 migrated=0" and
+                rr == {"model": "L", "seq": "1", "source": "launcher"}, (lrc, mig.returncode, out, rr))
+    else:
+        print("  (the migration race against a real launcher apply: no --record-tool given, not run)")
     # a game saved on L whose data goes away: a repair keeps the player's choice, the files say Model M with a warning
     rc = t.run("set", exe, "model=L")
     os.remove(os.path.join(t.lad, "WrongGPU", "model", "L", "model.wgcm"))  # (t.model is the case here, not the path helper)
@@ -409,7 +459,11 @@ def main():
     ap.add_argument("--reference-launcher", help="WrongGPU.exe of the base branch (same payload and test map)")
     ap.add_argument("--launcher-choice", help="WrongGPU.exe built with -DWRONGGPU_MODEL_L=ON and the test map (the model choice)")
     ap.add_argument("--work", default=os.path.join(HERE, "..", "build-tests", "model-l"))
+    ap.add_argument("--record-tool", help="clean/fsr's test_model_choice_record.exe: the front end's upgrade migration in its own "
+                    "process, for the race against a real launcher apply (skipped without it)")
     a = ap.parse_args()
+    global RECORD_TOOL
+    RECORD_TOOL = os.path.abspath(a.record_tool) if a.record_tool else None
     if a.write_test_map:
         write(a.write_test_map, map_bytes(l_case()))
         print("test map: " + a.write_test_map)

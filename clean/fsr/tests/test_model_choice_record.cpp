@@ -396,6 +396,18 @@ int ChildApply(const fs::path& gameDir, bool crash) {
     return RecordChoiceUnlocked(record, 'L', Source::Launcher, &after, &why) == Outcome::Written ? 0 : 2;
 }
 
+// The front end's upgrade migration for the game in gameDir, run by the launcher's end-to-end test against a REAL launcher
+// apply in another process (run_model_l_tests.py): reads wronggpu.ini's model item under the state lock; prints the result.
+int ChildMigrate(const fs::path& gameDir) {
+    Record r;
+    bool migrated = false;
+    std::string why;
+    const LoadResult lr = LoadOrMigrateRecord(RecordPathIn(gameDir), [&] { return IniModel(gameDir / "wronggpu.ini"); }, &r, &migrated, &why, 20000);
+    std::printf("migrate: %s model=%c seq=%llu migrated=%d\n", lr == LoadResult::Ok ? "ok" : "failed", lr == LoadResult::Ok ? r.model : '-',
+                static_cast<unsigned long long>(r.seq), migrated ? 1 : 0);
+    return lr == LoadResult::Ok ? 0 : 1;
+}
+
 int ChildHold(const std::wstring& gameDir, int ms) {
     wgstate::StateLock lock(gameDir);
     if (!lock.held()) return 1;
@@ -459,6 +471,7 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
     if (argc >= 6 && std::string(argv[1]) == "writer") return ChildWriter(argv[2], argv[3][0], argv[4], std::atoi(argv[5]));
     if (argc >= 4 && std::string(argv[1]) == "reader") return ChildReader(argv[2], std::strtoull(argv[3], nullptr, 10));
+    if (argc >= 3 && std::string(argv[1]) == "migrate") return ChildMigrate(argv[2]);
     if (argc >= 3 && std::string(argv[1]) == "apply") return ChildApply(argv[2], false);
     if (argc >= 3 && std::string(argv[1]) == "apply-and-die") return ChildApply(argv[2], true);
     if (argc >= 4 && std::string(argv[1]) == "hold") return ChildHold(fs::path(argv[2]).wstring(), std::atoi(argv[3]));

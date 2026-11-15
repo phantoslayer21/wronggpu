@@ -1966,12 +1966,15 @@ static void TestRuntimeProviderName() {
         g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
         Config c;
         c.hosted = true;
-        // Deliberately configure the opposite default: the in-game choice must win.
-        c.runtimeOptions = std::string("model=") + (model[0] == 'M' ? "K" : "M");
+        // The host's stored entry deliberately names ANOTHER model: it is no choice (0.6.5 #213); the model choice route
+        // decides (no state folder here: wronggpu.ini's model item).
+        c.runtimeOptions = std::string("model=") + model;
         auto f = MakeFrontEnd(c);
         UpscaleCreate create(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE, true);
-        create.version.versionId = model[0] == 'K' ? kWrongGpuKProviderVersionId
-                                   : model[0] == 'L' ? kWrongGpuLProviderVersionId : kWrongGpuProviderVersionId;
+        create.version.versionId = model[0] == 'M' ? (WRONGGPU_MODEL_L ? kWrongGpuLProviderVersionId : WRONGGPU_MODEL_K ? kWrongGpuKProviderVersionId
+                                                                                                               : kWrongGpuProviderVersionId)
+                                                   : kWrongGpuProviderVersionId;
+        const uint64_t modelId = model[0] == 'K' ? kWrongGpuKProviderVersionId : model[0] == 'L' ? kWrongGpuLProviderVersionId : kWrongGpuProviderVersionId;
         ffxContext ctx = nullptr;
         CHECK(f->CreateContext(&ctx, &create.upscale.header, kMemCb) == FFX_API_RETURN_OK);
         auto frame = MakeDispatch();
@@ -1981,7 +1984,7 @@ static void TestRuntimeProviderName() {
         CHECK(f->Query(&ctx, &q.header) == FFX_API_RETURN_OK);
         const std::string expected = std::string("WrongGPU Model ") + model;
         CHECK(q.versionName && expected == q.versionName);
-        CHECK(q.versionId == create.version.versionId);
+        CHECK(q.versionId == modelId);
         CHECK(std::string(g_createInfo.options).rfind(std::string("model=") + model) == std::string(g_createInfo.options).size() - 7);
         CHECK(!g_statuses.empty() && g_statuses.back().upscaler.find(expected) != std::string::npos);
         // After a frame failure, version queries must report the actual AMD fallback.
@@ -2338,17 +2341,18 @@ static void TestHostVersionHandling() {
     CHECK(std::strcmp(names[0], "WrongGPU Model M##3.1.0") == 0);
     CHECK(WRONGGPU_MODEL_K == 0 || std::strcmp(names[1], "WrongGPU Model K##3.1.0") == 0);
     CHECK(WRONGGPU_MODEL_L == 0 || std::strcmp(names[kOwn - 1], "WrongGPU Model L##3.1.0") == 0);
-    // The selection still works by id, and a context's own provider name stays the label alone (the last SR model).
+    // A context's own provider name stays the label alone. The host's stored entry (the last SR model) is no choice: with no
+    // record and no model item, Model M runs.
     const uint64_t lastModel = WRONGGPU_MODEL_L ? kWrongGpuLProviderVersionId
                                : WRONGGPU_MODEL_K ? kWrongGpuKProviderVersionId : kWrongGpuProviderVersionId;
-    const char* const lastName = WRONGGPU_MODEL_L ? "WrongGPU Model L" : WRONGGPU_MODEL_K ? "WrongGPU Model K" : "WrongGPU Model M";
+    const char* const lastName = "WrongGPU Model M";
     UpscaleCreate own(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE, /*withOverride=*/true);
     own.version.versionId = lastModel;
     ffxContext ctx = nullptr;
     CHECK(fe->CreateContext(&ctx, &own.upscale.header, kMemCb) == FFX_API_RETURN_OK && fe->OwnContextCount() == 1);
     ffxQueryGetProviderVersion provider{};
     provider.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
-    CHECK(fe->Query(&ctx, &provider.header) == FFX_API_RETURN_OK && provider.versionId == lastModel && provider.versionName &&
+    CHECK(fe->Query(&ctx, &provider.header) == FFX_API_RETURN_OK && provider.versionId == kWrongGpuProviderVersionId && provider.versionName &&
           std::strcmp(provider.versionName, lastName) == 0);
     CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
 
@@ -2561,12 +2565,10 @@ static void TestAsiPluginHooked() {
     ownRun(kWrongGpuProviderVersionId, "WrongGPU Model M", kWrongGpuProviderVersionId);
     ownRun(g_versionIds[0], "WrongGPU Model M", kWrongGpuProviderVersionId);
     ownRun(0, "WrongGPU Model M", kWrongGpuProviderVersionId);
+    // The plugin's saved WrongGPU model is no model choice (0.6.5 #213: the model choice record decides; none here, no model
+    // item: Model M).
     g_asiModel = 'K';
-#if WRONGGPU_MODEL_K
-    ownRun(kWrongGpuProviderVersionId, "WrongGPU Model K", kWrongGpuKProviderVersionId);
-#else
-    ownRun(kWrongGpuProviderVersionId, "WrongGPU Model M", kWrongGpuProviderVersionId);  // no Model K in this build
-#endif
+    ownRun(kWrongGpuProviderVersionId, "WrongGPU Model M", kWrongGpuProviderVersionId);
 
     // The host's FSR 3.X(/4) entry: AMD upscales.
     g_asiModel = 0;
@@ -2761,15 +2763,21 @@ static void TestAsiChoiceRecord() {
     RecordFolder f;
     const std::filesystem::path& rec = f.record();
     std::string why;
-    // The audit's case without a record (a front end without the state folder): the launcher's K / L item decides over the
-    // plugin's saved default entry (Model M); a host event there changes nothing (0: the host's entry decides)
+    // No state folder (a hand install, or one that cannot be found): the record route all the same: the session's last
+    // choice, else wronggpu.ini's model item (the audit's case: L / K over the plugin's saved default entry, Model M), else
+    // Model M; NEVER the host's entry (the box names M, on the hooked route and on the custom slot). A selection there is
+    // not saved (-1) and changes nothing.
     if (b) {
         const std::string ini = std::string("runtime_options = model=") + b + "\n";
         CHECK(HostedCreate(ini.c_str(), 'M', kWrongGpuProviderVersionId) == name(b));
-        CHECK(CountLog("no model choice record; the launcher's model item") == 1);
+        CHECK(CountLog("model choice: no WrongGPU state folder (wronggpu-setup) for this game") == 1);
+        CHECK(CountLog((std::string("(no WrongGPU state folder; wronggpu.ini model=") + b + ")").c_str()) == 1);
+        CHECK(HostedCreate(ini.c_str(), 0, idOf('M'), false) == name(b));  // the custom slot: the stored M is no choice
         int32_t rc = 9;
         CHECK(HostedCreate(ini.c_str(), 'M', idOf('M'), true, [&](FrontEnd& fe) { rc = fe.HostSelected(idOf('M')); }) == name(b));
-        CHECK(rc == WG_HOST_SELECTED_NOTHING_CHANGED);
+        CHECK(rc == WG_HOST_SELECTED_NOT_SAVED);
+        CHECK(CountLog("but it was not saved: no WrongGPU state folder (wronggpu-setup) for this game") == 1);
+        CHECK(HostedCreate("runtime_options = timing_log=1\n", 'M', idOf(b), false) == name('M'));  // no model item: Model M
     }
     g_choiceRecord = rec;
     if (b) {
@@ -2811,7 +2819,20 @@ static void TestAsiChoiceRecord() {
             r = ReadRec(rec);
             CHECK(r.model == 'M' && r.seq == 5 && r.source == wgchoice::Source::Ffx);
         }
-        // (6) the launcher applies b (seq 6): b runs
+        // (5b) the record changed underneath (a launcher Apply while the game is open): the session runs b, the launcher
+        // records M, the player selects M (the box already shows it): 1, so the host recreates, and M runs
+        {
+            wgchoice::Record after0;
+            CHECK(wgchoice::RecordChoice(rec, b, wgchoice::Source::Launcher, &after0, &why) == wgchoice::Outcome::Written);
+            auto fe = ChoiceFrontEnd(iniB.c_str(), 0, false);
+            CHECK(ChoiceCreate(*fe, idOf('M')) == name(b));  // runs b (the box names M)
+            CHECK(wgchoice::RecordChoice(rec, 'M', wgchoice::Source::Launcher, &after0, &why) == wgchoice::Outcome::Written);
+            CHECK(fe->HostSelected(idOf('M')) == WG_HOST_SELECTED_RECORDED);
+            CHECK(CountLog((std::string("it runs after the upscaler is recreated (now running: Model ") + b + ")").c_str()) == 1);
+            CHECK(ChoiceCreate(*fe, idOf('M')) == name('M'));
+            CHECK(fe->HostSelected(idOf('M')) == WG_HOST_SELECTED_NOTHING_CHANGED);  // M runs now: nothing to recreate
+        }
+        // (6) the launcher applies b: b runs
         CHECK(wgchoice::RecordChoice(rec, b, wgchoice::Source::Launcher, &after, &why) == wgchoice::Outcome::Written);
         CHECK(HostedCreate(iniB.c_str(), 'M', idOf('M')) == name(b));
         // (7) a third model selected in the list (a build with K and L)
@@ -3007,20 +3028,21 @@ static void TestRegistryEntries() {
           std::get<1>(g_menuWrites[0]) == WG_SR_MODEL_M && std::get<2>(g_menuWrites[0]) == "menu");
     CHECK(CountLog("the host chose WrongGPU Model M (0x5747000000000001): settings: sr_model=M (menu)") == 1);
 #if WRONGGPU_MODEL_K
-    // Model K chosen: sr_model=K written, the context runs Model K.
-    CHECK(run(kWrongGpuKProviderVersionId, true) == "WrongGPU Model K");
-    CHECK(g_menuWrites.size() == 2 && std::get<0>(g_menuWrites[1]) == WG_OPT_SR_MODEL && std::get<1>(g_menuWrites[1]) == WG_SR_MODEL_K);
-    CHECK(g_createOptions.size() >= 8 && g_createOptions.compare(g_createOptions.size() - 8, 8, ";model=K") == 0);
-    CHECK(g_menuValues[WG_OPT_SR_MODEL] == WG_SR_MODEL_K);
-    // No override at all (the host passes none): sr_model as configured (K), nothing written.
-    CHECK(run(0, false) == "WrongGPU Model K" && g_menuWrites.size() == 2);
-    CHECK(CountLog("settings: sr_model=K (ini)") >= 1);
+    // Model K's entry: the host's stored entry is no choice (0.6.5 #213): the model choice route decides (no state folder
+    // and no model item here: Model M); sr_model=M written, the context runs Model M, the log names both.
+    CHECK(run(kWrongGpuKProviderVersionId, true) == "WrongGPU Model M");
+    CHECK(g_menuWrites.size() == 2 && std::get<0>(g_menuWrites[1]) == WG_OPT_SR_MODEL && std::get<1>(g_menuWrites[1]) == WG_SR_MODEL_M);
+    CHECK(g_createOptions.size() >= 8 && g_createOptions.compare(g_createOptions.size() - 8, 8, ";model=M") == 0);
+    CHECK(CountLog("model choice: the host's entry names Model K; Model M runs") == 1);
+    // No override at all (the host passes none): the same route, nothing written.
+    CHECK(run(0, false) == "WrongGPU Model M" && g_menuWrites.size() == 2);
 #endif
-    // Every entry the registry has: its option = its value, and nothing writes rr_mode (the RR plugin's box owns it).
+    // Every entry the registry has: the model choice route's model (here Model M) is written, whatever the entry names,
+    // and nothing writes rr_mode (the RR plugin's box owns it).
     for (int i = 0; i < kOwn; ++i) {
         const WgEntryDef* e = OwnEntry(i);
-        CHECK(!run(e->id, true).empty());
-        CHECK(!g_menuWrites.empty() && std::get<0>(g_menuWrites.back()) == e->slot && std::get<1>(g_menuWrites.back()) == e->value);
+        CHECK(run(e->id, true) == "WrongGPU Model M");
+        CHECK(!g_menuWrites.empty() && std::get<0>(g_menuWrites.back()) == WG_OPT_SR_MODEL && std::get<1>(g_menuWrites.back()) == WG_SR_MODEL_M);
         CHECK(CountLog((std::string("the host chose ") + EntryProviderName(*e) + " (").c_str()) >= 1);
     }
     for (const auto& w : g_menuWrites) CHECK(std::get<0>(w) != WG_OPT_RR_MODE);
@@ -3223,15 +3245,15 @@ static void TestCustomSlotFailedCreate() {
     CHECK(CountLog("this failure is remembered for the session") == 1);
     CHECK(CountLog("no context, the host's own upscaler takes over") == 1);
     CHECK(CountLog("custom slot: create ") == 4 && CountLog("custom slot: create 10 since the failure") == 1);
-    // Another model is something new: one attempt of its own.
+    // Another entry (Model K's) is no other model (0.6.5 #213: the stored entry is no choice): the same upscaler with the
+    // same options, so the remembered failure stands and nothing is tried again.
 #if WRONGGPU_MODEL_K
     {
         UpscaleCreate k(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE, true);
         k.version.versionId = kWrongGpuKProviderVersionId;
         ffxContext ctx = nullptr;
         CHECK(fe->CreateContext(&ctx, &k.upscale.header, nullptr) == FFX_API_RETURN_ERROR_RUNTIME_ERROR && !ctx);
-        CHECK(g_createCalls == 2 && CountLog("this failure is remembered for the session") == 2);
-        CHECK(fe->CreateContext(&ctx, &k.upscale.header, nullptr) == FFX_API_RETURN_ERROR_RUNTIME_ERROR && g_createCalls == 2);
+        CHECK(g_createCalls == 1);
     }
 #endif
     // A working upscaler (the model was there) in a fresh session: created, hooks after the create.

@@ -579,7 +579,7 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
     bool forceAmd = false;
     if (asiHooked) {
         std::string why;
-        char model = asiModel != 0 ? ChooseModel(asiModel, 0, tag, &why) : 0;
+        char model = asiModel != 0 ? ChooseModel(tag, &why) : 0;
         if (asiModel != 0) {
             const int32_t m = ModelOfName(std::string(1, model));
             const WgEntryDef* sr = m >= 0 ? SrEntryOfModel(m) : nullptr;
@@ -645,6 +645,7 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
                     const std::string name = "amd:upscale#" + std::to_string(nextId_++);
                     std::lock_guard lock(mutex_);
                     forwarded_[*context] = Forwarded{name, 0, api, status, true};
+                    runningModel_.store(0);  // AMD's upscaler runs
                 }
                 Log(tag + " -> " + RcName(rc) + " (the host chose AMD's upscaler version " + Hex(chosen) + "; forwarded) context=" +
                     Name(context));
@@ -655,12 +656,13 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
         }
         u->hasOverride = false;  // WrongGPU's own id means nothing to AMD's DLL (fallback, comparison)
     }
-    // No entry chose the model (direct route, no override, an id WrongGPU did not list): with a model choice record (a
-    // launcher install) the record's model (ChooseModel); else sr_model when it is set in the shared block, the
-    // environment or wronggpu.ini; otherwise runtime_options / the runtime's default as before.
-    if (!forceAmd && !u->selectedModel && !u->modelOption && !platform_.choiceRecord.empty()) {
+    // No entry named a model (no override, an id WrongGPU did not list, or the direct route): hosted, or with a model choice
+    // record path (the DLL always sets one), the model choice route (ChooseModel); else (tests of the direct route) sr_model
+    // when it is set in the shared block, the environment or wronggpu.ini; otherwise runtime_options / the runtime's
+    // default as before.
+    if (!forceAmd && !u->selectedModel && !u->modelOption && (config_.hosted || !platform_.choiceRecord.empty())) {
         std::string why;
-        const int32_t model = ModelOfName(std::string(1, ChooseModel(0, 0, tag, &why)));
+        const int32_t model = ModelOfName(std::string(1, ChooseModel(tag, &why)));
         if (const WgEntryDef* sr = model >= 0 ? SrEntryOfModel(model) : nullptr) {
             u->selectedModel = kWgModelRows[model].name[0];
             u->modelOption = kWgModelRows[model].runtime_option;
@@ -889,6 +891,8 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
         std::lock_guard lock(mutex_);
         own_[u] = true;
     }
+    // the model the active context runs (HostSelected compares a selection with it): none while it runs AMD's upscaler
+    runningModel_.store(u->mode == UpscaleContext::Mode::Amd && !u->pending ? char(0) : u->selectedModel);
     *context = u;
     Log(tag + " -> OK context=" + Name(context) + (u->mode == UpscaleContext::Mode::Amd ? " amd=" + Pointer(u->amd) : ""));
     return FFX_API_RETURN_OK;
@@ -1424,29 +1428,10 @@ char FrontEnd::WronggpuIniModel() const {
     return wgchoice::IsModel(m) ? m : 0;
 }
 
-char FrontEnd::ChooseModel(char plugin, char entry, const std::string& tag, std::string* why) {
-    const std::filesystem::path& path = platform_.choiceRecord;
-    if (path.empty()) {
-        // no launcher state folder (a hand install): as before 0.6.5
-        const char launcher = LauncherModel();
-        if (wgchoice::IsModel(entry)) {
-            *why = "no model choice record; the host's entry";
-            return entry;
-        }
-        if (launcher == 'K' || launcher == 'L') {
-            *why = std::string("no model choice record; the launcher's model item, wronggpu.ini model=") + launcher;
-            return launcher;
-        }
-        if (wgchoice::IsModel(plugin)) {
-            *why = "no model choice record; the plugin's saved entry";
-            return plugin;
-        }
-        *why = launcher ? std::string("no model choice record; wronggpu.ini model=") + launcher : std::string("no model choice record; the default");
-        return 'M';
-    }
+char FrontEnd::ChooseModel(const std::string& tag, std::string* why) {
     std::lock_guard lock(choiceMutex_);
-    // the record cannot be used now: the last record this session read or wrote, else wronggpu.ini's model item, else M
-    // (never the host's stored entry)
+    // the record cannot be used now (no state folder, unreadable, corrupt, busy): the last record this session read or
+    // wrote, else wronggpu.ini's model item, else Model M; never the host's stored entry
     auto fallback = [&](const std::string& reason) {
         if (wgchoice::IsModel(lastChoice_)) {
             *why = reason + "; the last model choice read this session";
@@ -1456,6 +1441,15 @@ char FrontEnd::ChooseModel(char plugin, char entry, const std::string& tag, std:
         *why = ini ? reason + "; wronggpu.ini model=" + ini : reason + "; the default";
         return ini ? ini : 'M';
     };
+    const std::filesystem::path& path = platform_.choiceRecord;
+    DWORD dirErr = 0;
+    const wgstate::PathState dir = path.empty() ? wgstate::PathState::Missing : wgstate::DirectoryState(path.parent_path().wstring(), &dirErr);
+    if (dir != wgstate::PathState::Present) {
+        LogOnce(tag, dir == wgstate::PathState::Missing
+                         ? std::string("model choice: no WrongGPU state folder (wronggpu-setup) for this game: no model choice record")
+                         : "model choice: the WrongGPU state folder (wronggpu-setup) cannot be checked (error " + std::to_string(dirErr) + ")");
+        return fallback(dir == wgstate::PathState::Missing ? "no WrongGPU state folder" : "the WrongGPU state folder cannot be checked");
+    }
     wgchoice::Record rec;
     bool migrated = false;
     std::string err;
@@ -1499,22 +1493,29 @@ int32_t FrontEnd::HostSelected(uint64_t versionId) {
         return WG_HOST_SELECTED_NOTHING_CHANGED;
     }
     const char model = kWgModelRows[e->value].name[0];
-    if (platform_.choiceRecord.empty()) {
-        // no launcher state folder: no record to write; the host's entry decides at the next create (as before 0.6.5)
-        Log(tag + " the player selected Model " + model + " in OptiScaler's upscaler list; no model choice record (no launcher "
-                  "state folder): the host's entry decides");
-        return WG_HOST_SELECTED_NOTHING_CHANGED;
+    const char running = runningModel_.load();
+    const std::filesystem::path& path = platform_.choiceRecord;
+    DWORD dirErr = 0;
+    if (path.empty() || wgstate::DirectoryState(path.parent_path().wstring(), &dirErr) != wgstate::PathState::Present) {
+        // no record to write: not saved, nothing changes (the host's index is never a choice)
+        Log(tag + " ERROR: the player selected Model " + model + " in OptiScaler's upscaler list, but it was not saved: no WrongGPU "
+                  "state folder (wronggpu-setup) for this game" + (dirErr ? " (error " + std::to_string(dirErr) + ")" : std::string()) +
+            ". Nothing changes; apply the model in the WrongGPU launcher.");
+        return WG_HOST_SELECTED_NOT_SAVED;
     }
     std::lock_guard lock(choiceMutex_);
-    wgchoice::Record after, before;
+    wgchoice::Record after;
     std::string err;
-    const wgchoice::Outcome o = wgchoice::RecordChoice(platform_.choiceRecord, model, wgchoice::Source::Ffx, &after, &err, &before);
+    const wgchoice::Outcome o = wgchoice::RecordChoice(path, model, wgchoice::Source::Ffx, &after, &err);
     if (o == wgchoice::Outcome::Written) {
-        const char was = wgchoice::IsModel(before.model) ? before.model : lastChoice_;
         lastChoice_ = model;
+        // 1 when the selected model is not what the active context runs (also when the record changed underneath, a
+        // launcher Apply while the game is open): the host recreates the upscaler, which then runs the record's model
         Log(tag + " the player selected Model " + model + " in OptiScaler's upscaler list: recorded (seq " + std::to_string(after.seq) +
-            ", source=ffx)" + (err.empty() ? "" : "; " + err));
-        return was == model ? WG_HOST_SELECTED_NOTHING_CHANGED : WG_HOST_SELECTED_RECORDED;
+            ", source=ffx)" + (err.empty() ? "" : "; " + err) +
+            (running == model ? "; it already runs" : std::string("; it runs after the upscaler is recreated (now running: ") +
+                                                          (wgchoice::IsModel(running) ? std::string("Model ") + running : std::string("no WrongGPU model")) + ")"));
+        return running == model ? WG_HOST_SELECTED_NOTHING_CHANGED : WG_HOST_SELECTED_RECORDED;
     }
     if (o == wgchoice::Outcome::SeqExhausted) {
         Log(tag + " ERROR: the player selected Model " + model + " in OptiScaler's upscaler list: " + wgchoice::OutcomeWords(o) +
@@ -1531,26 +1532,28 @@ void FrontEnd::ApplyEntry(const WgEntryDef& e, UpscaleContext& u, const std::str
     std::string described;
     if (model < 0 && ConfiguredModel(&model, &described))
         Log(tag + " settings: " + described + " (the SR context's model)");
-    // With a model choice record (a launcher install), the entry the host passes at a create is the index its ini stores,
-    // not a choice: the record decides the SR context's model (ChooseModel; a player's selection in the host's list
-    // reaches the record as an event, HostSelected). One folder per choice keeps its folder's model.
+    // The entry the host passes at a create is the index its ini stores, never a choice: the model choice record decides
+    // the SR context's model (ChooseModel: the record, or when it cannot be used the session's last choice, wronggpu.ini's
+    // model item, Model M; a player's selection in the host's list reaches the record as an event, HostSelected). One
+    // folder per choice keeps its folder's model.
     const WgEntryDef* shown = &e;  // the entry written to the shared settings and logged
-    if (config_.hosted && !platform_.choiceRecord.empty() && std::strcmp(source, "folder") != 0) {
+    if (config_.hosted && std::strcmp(source, "folder") != 0) {
         std::string why;
         const char entry = model >= 0 && model < WG_SR_MODEL_COUNT ? kWgModelRows[model].name[0] : 0;
-        const char chosen = ChooseModel(0, entry, tag, &why);
-        const int32_t m = ModelOfName(std::string(1, chosen));
-        if (m >= 0 && SrEntryOfModel(m)) {
-            if (m != model)
-                Log(tag + " model choice: the host's entry names " + (entry ? std::string("Model ") + entry : std::string("no model")) +
-                    "; Model " + chosen + " runs (" + why + "; an entry the host stores is not a choice)");
-            else
-                Log(tag + " model choice: Model " + chosen + " (" + why + ")");
-            model = m;
-            if (e.slot == WG_OPT_SR_MODEL) shown = SrEntryOfModel(m);
-        } else {
-            LogOnce(tag, std::string("note: model choice: Model ") + chosen + " is not part of this build of the front end; the host's entry is used");
+        char chosen = ChooseModel(tag, &why);
+        int32_t m = ModelOfName(std::string(1, chosen));
+        if (m < 0 || !SrEntryOfModel(m)) {
+            LogOnce(tag, std::string("note: model choice: Model ") + chosen + " is not part of this build of the front end; Model M is used");
+            chosen = 'M';
+            m = ModelOfName("M");
         }
+        if (m != model)
+            Log(tag + " model choice: the host's entry names " + (entry ? std::string("Model ") + entry : std::string("no model")) +
+                "; Model " + chosen + " runs (" + why + "; an entry the host stores is not a choice)");
+        else
+            Log(tag + " model choice: Model " + chosen + " (" + why + ")");
+        model = m;
+        if (e.slot == WG_OPT_SR_MODEL) shown = SrEntryOfModel(m);
     }
     if (const WgEntryDef* sr = model >= 0 ? SrEntryOfModel(model) : nullptr) {
         u.selectedModel = kWgModelRows[model].name[0];

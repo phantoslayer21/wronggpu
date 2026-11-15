@@ -241,28 +241,24 @@ FrontEnd& Get() {
             p.asiPlugin = [](char* model) { return QueryAsiPlugin(model); };
             p.asiShowModel = [](char model) { ShowAsiModel(model); };
         }
-        // The game's model choice record (model_choice_record.h, in the game's WrongGPU state folder next to wronggpu.ini)
-        // decides the WrongGPU model on every route; the plugin writes its menu's model clicks there too. Without the
-        // state folder (no launcher install): no record, as before.
+        // The game's model choice record (model_choice_record.h, in the game's WrongGPU state folder wronggpu-setup next to
+        // wronggpu.ini) decides the WrongGPU model on every route; the plugin writes its menu's model clicks there too.
+        // Always set: without the state folder the front end runs the session's last choice, wronggpu.ini's model item or
+        // Model M, never the host's stored index (FrontEnd::ChooseModel).
         {
             const std::wstring ini = Place().ini;
             const size_t slash = ini.find_last_of(L"\\/");
             const std::filesystem::path record =
                 wgchoice::RecordPathIn(slash == std::wstring::npos ? std::wstring(L".") : ini.substr(0, slash));
-            std::error_code ec;
-            if (std::filesystem::is_directory(record.parent_path(), ec)) {  // a launcher install: its state folder
-                p.choiceRecord = record;
-                p.readWronggpuIni = [ini] {  // the upgrade migration reads wronggpu.ini's model item under the state lock
-                    std::string text;
-                    wgstate::ReadBytes(ini, &text);
-                    return text;
-                };
-                if (g_hosted) {
-                    SetAsiChoiceRecord(record.wstring());
-                    SetHostIniPollModels(false);  // the host's stored index is no model choice (the record decides)
-                }
-            } else {
-                L().Write("model choice: no launcher state folder next to wronggpu.ini: no model choice record (the model item decides)");
+            p.choiceRecord = record;
+            p.readWronggpuIni = [ini] {  // the upgrade migration reads wronggpu.ini's model item under the state lock
+                std::string text;
+                wgstate::ReadBytes(ini, &text);
+                return text;
+            };
+            if (g_hosted) {
+                SetAsiChoiceRecord(record.wstring());
+                SetHostIniPollModels(false);  // the host's stored index is no model choice (the record decides)
             }
         }
         p.menu = Menu();

@@ -221,14 +221,12 @@ private:
     bool ConfiguredModel(int32_t* model, std::string* described);
     // The model the launcher's wronggpu.ini names (the last model item of runtime_options: 'M', 'K', 'L'), else 0.
     char LauncherModel() const;
-    // The WrongGPU model a create runs. With a record path (a launcher install, model_choice_record.h): the record's
-    // model (a game without one gets one from wronggpu.ini's model item, read under the game's state lock, else Model
-    // M: LoadOrMigrateRecord); when the record cannot be read, is corrupt or its lock is not taken in time: the last
-    // record this session read or wrote (lastChoice_), else wronggpu.ini's model item, else Model M; NEVER the host's
-    // stored entry. Without a record path (no launcher state folder: a hand install, as before 0.6.5): the host's entry
-    // (`entry`, 0 for none), else the launcher's model item when it names Model K or L, else the plugin's saved WrongGPU
-    // entry (`plugin`), else Model M. *why: which choice decided, for the log.
-    char ChooseModel(char plugin, char entry, const std::string& tag, std::string* why);
+    // The WrongGPU model a create runs: the model choice record's (model_choice_record.h; a game without one gets one from
+    // wronggpu.ini's model item, read under the game's state lock, else Model M: LoadOrMigrateRecord). When the record
+    // cannot be used (no state folder or one that cannot be checked, unreadable, corrupt, its lock not taken in time): the
+    // last record this session read or wrote (lastChoice_), else wronggpu.ini's model item, else Model M. NEVER the host's
+    // stored entry, NEVER the plugin's saved entry. *why: which choice decided, for the log.
+    char ChooseModel(const std::string& tag, std::string* why);
     // wronggpu.ini's model item as it is on disk now (readWronggpuIni), else as read at start ('M', 'K', 'L' or 0).
     char WronggpuIniModel() const;
     // `line` logged once per session (after `tag`).
@@ -295,6 +293,7 @@ private:
     std::map<std::string, bool> modelLogged_;      // ApplyModelDir: each distinct choice logged once (mutex_)
     std::mutex choiceMutex_;                       // ChooseModel / HostSelected: lastChoice_
     char lastChoice_ = 0;                          // the model of the last record read or written this session
+    std::atomic<char> runningModel_{0};            // the model the last created context runs (0: none / AMD's upscaler)
     std::atomic<uint64_t> reentered_{0};           // calls refused because they re-entered this front end on one thread
     std::mutex parkMutex_;                           // guards the three below; held while a parked context is destroyed
     UpscaleContext* parked_ = nullptr;

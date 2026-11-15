@@ -218,6 +218,10 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
 // The launcher's model choice into the game's model choice record (wronggpu-setup\model-choice.ini), with the next seq,
 // source=launcher. Call it holding the record's lock (wgchoice::Lock). false: not written (said in the notes and warnings).
 bool WriteLauncherModelChoice(Context& ctx, const wstring& dir, char model, std::vector<wstring>& notes, std::vector<wstring>* warnings);
+// The request of the launcher window's Apply (launcher_ui.cpp OnApply calls it; the OptiScaler tab's edits are added there):
+// the profile shown, applied, with the model shown as the player's model choice (modelChosen) whenever the build has the
+// model setting, also when it is unchanged. `set <game> ... --gui-apply` (a WRONGGPU_TESTING build) runs it for the tests.
+OpRequest GuiApplyRequest(const wstring& dir, const Profile& edit);
 Profile GameProfile(const wstring& dir);  // profile.ini, else the profile its wronggpu.ini implies
 // The OptiScaler tab: reset / keep / edits of OpRequest written into the installed OptiScaler.ini with the inikey
 // journal in the record. Nothing to do: no change.
