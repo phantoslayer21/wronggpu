@@ -131,6 +131,7 @@ def main():
     d = os.path.join(os.path.abspath(a.work), "choice")
     shutil.rmtree(d, ignore_errors=True)
     os.makedirs(d)
+    __import__("launcher_isolation").self_test(d)  # (#243) first: no launcher call with a broken guard
     t = ml.T(os.path.abspath(a.launcher), d)
     t.model_path = t.model  # (test_choice replaces t.model with the Model M case, as the Model L script does)
     test_choice(t)
