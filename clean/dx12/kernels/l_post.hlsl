@@ -82,7 +82,7 @@ static float g_rp;       // 1 / e_prev (IEEE division, round to nearest even)
 float opq(float x) { return asfloat(asuint(x) ^ g_z); }
 half opqh(half x) { return asfloat16((uint16_t)(asuint16(x) ^ (uint16_t)g_z)); }
 #ifndef LP_MUT
-#define LP_MUT 0   // 1..3: negative controls of the byte checks (never shipped)
+#define LP_MUT 0   // 1..4: negative controls of the byte checks (never shipped)
 #endif
 #ifndef LP_ENCFOLD
 #define LP_ENCFOLD 1
@@ -274,6 +274,24 @@ float3 history_cr(float qx, float qy)
     const float4 wx = cr_weights(tx - fx0), wy = cr_weights(ty - fy0);
     const int ix = (int)fx0, iy = (int)fy0;
     const uint pitch = (uint)P_dw * 8u;
+    // interior fast path (Model M's history_cr_span): every active lane's 4 x 4 footprint inside the image, so the
+    // clamps are the identity; six 16-byte span loads from one base instead of twelve 8-byte loads, the same texels
+    // in the same sums (same mad order)
+    [branch] if (WaveActiveAllTrue(and((uint)(ix - 1) <= (uint)(P_dw - 4), (uint)(iy - 1) <= (uint)(P_dh - 4)))) {
+        const uint b0 = hist_prev + (uint)(ix - 1) * 8u + (uint)(iy - 1) * pitch;
+        const uint b1 = b0 + pitch, b2 = b0 + 2u * pitch, b3 = b0 + 3u * pitch;
+        const uint4 a0 = wg_mem.Load4(b0 + 8u), a10 = wg_mem.Load4(b1), a11 = wg_mem.Load4(b1 + 16u);
+        const uint4 a20 = wg_mem.Load4(b2), a21 = wg_mem.Load4(b2 + 16u), a3 = wg_mem.Load4(b3 + (LP_MUT == 4 ? 16u : 8u));   // mutant 4: wrong row span
+        const float3 zi = float3(0.0f, 0.0f, 0.0f);
+        const float3 q0 = mad(wx.z, h3(a0.zw), mad(wx.y, h3(a0.xy), zi));
+        const float3 q1 = mad(wx.w, h3(a11.zw), mad(wx.z, h3(a11.xy), mad(wx.y, h3(a10.zw), mad(wx.x, h3(a10.xy), zi))));
+        const float3 q2 = mad(wx.w, h3(a21.zw), mad(wx.z, h3(a21.xy), mad(wx.y, h3(a20.zw), mad(wx.x, h3(a20.xy), zi))));
+        const float3 q3 = mad(wx.z, h3(a3.zw), mad(wx.y, h3(a3.xy), zi));
+        const float3 acci = mad(wy.w, q3, mad(wy.z, q2, mad(wy.y, q1, mad(wy.x, q0, zi))));
+        const float sxi = ((wx.x + wx.y) + wx.z) + wx.w;
+        const float normi = (wx.y + wx.z) * (wy.x + wy.w) + sxi * (wy.y + wy.z);
+        return acci * rcp(normi);
+    }
     uint ro[4], co[4];
     [unroll] for (int k = 0; k < 4; ++k) {
         co[k] = hist_prev + (uint)clampi(ix - 1 + k, 0, P_dw - 1) * 8u;
