@@ -127,6 +127,32 @@ def record_060(t, m, b):
             os.remove(os.path.join(b, "wronggpu-setup", f))
 
 
+def kept_backup(t, m):
+    """A file an earlier uninstall kept in wronggpu-setup\\backup (here backup\\wronggpu.ini) and a later install that backs up
+    the game's wronggpu.ini: the kept file stays byte for byte, the new backup takes a recorded new name, the uninstall puts the
+    game's file back from that name and keeps (and lists) the old one."""
+    inst = ("--opti=" + t.opti, "--noscan", "--force", "--experimental")
+    root, b, exe = m.game(t, "State Kept Backup")
+    players, kept = b"[fsr]\r\n; the player's own wronggpu.ini\r\n", b"; an earlier backup the uninstall kept (changed since)\r\n"
+    write(os.path.join(b, "wronggpu.ini"), players)
+    kb = os.path.join(b, "wronggpu-setup", "backup", "wronggpu.ini")
+    write(kb, kept)
+    before = snapshot(root)
+    rc = t.run("install", exe, *inst)
+    rec = read(os.path.join(b, "wronggpu-setup", "install.record")).decode("utf-8", "replace") if rc == 0 else ""
+    nb = os.path.join(b, "wronggpu-setup", "backup", "wronggpu.ini.1")
+    t.check("install with a kept backup\\wronggpu.ini: it stays byte for byte; the game's wronggpu.ini is backed up as wronggpu.ini.1 (recorded), the kept file listed",
+            rc == 0 and read(kb) == kept and os.path.isfile(nb) and read(nb) == players and "\nbackup\tcopy\twronggpu.ini\twronggpu.ini.1\r\n" in rec and
+            any("backup\\wronggpu.ini" in w and w.startswith("Left in place") for w in t.j.get("warnings", [])),
+            (rc, read(kb) == kept, os.path.isfile(nb), [l for l in rec.split("\r\n") if l.startswith("backup\t")], t.j.get("warnings")))
+    rc = t.run("uninstall", exe)
+    left = kept_runtime(before, root, *unrecorded_wronggpu_files(root))
+    t.check("...the uninstall restores the game's wronggpu.ini from the recorded name; the kept backup stays (listed); the folder as before",
+            rc == 0 and read(os.path.join(b, "wronggpu.ini")) == players and read(kb) == kept and not os.path.exists(nb) and snapshot(root) == left,
+            (rc, diff(left, snapshot(root)), t.j.get("warnings")))
+    shutil.rmtree(root, ignore_errors=True)
+
+
 def failed_runs(t, m):
     """A repair or install that fails takes back only what it made (the run journal): the player's files in the state folder
     (a note, a folder, a kept temporary file, a copy of the settings file) stay byte for byte, whichever way the run fails."""
@@ -249,6 +275,7 @@ def run(t, opti, m):
                 "bin/x64/sl.dlss_d.dll": b"MZ synthetic stand-in"}  # the DLSS RR plugin stand-in
     seed_appears(t, m, "RR", m.RR_SETTINGS, extra=rr_files)
     failed_runs(t, m)
+    kept_backup(t, m)
     inst = ("--opti=" + opti, "--noscan", "--force", "--experimental")
     root, b, exe = m.game(t, "State Game", extra=rr_files)
     before = snapshot(root)

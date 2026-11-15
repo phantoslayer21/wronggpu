@@ -45,7 +45,9 @@ namespace wg {
 // renamed aside and put back byte for byte). Action lines keep their five fields, so a 0.5.x uninstaller still reads a
 // v2 record (it skips the lines it does not know). Lines of a later version are kept as they are.
 // ------------------------------------------------------------------------------------------------
-struct Entry { wstring action, rel; bool existed = false; wstring orig, inst, owner; };
+// backup: the entry's backup below wronggpu-setup\backup when it is not `rel` (a file that an earlier uninstall kept was at
+// that name: the new backup went to <rel>.<n>; the record's "backup" line). Empty: backup\<rel>.
+struct Entry { wstring action, rel; bool existed = false; wstring orig, inst, owner, backup; };
 // The rrconfig line (rrconfig.h): what "Fix it for me" did to the game's Engine.ini, so that =off and the uninstall undo it.
 struct RrConfigFix {
     bool present = false;
@@ -108,6 +110,14 @@ void RemoveManagedGame(const wstring& dir);
 wstring StateDir(const wstring& dir);
 wstring RecordPath(const wstring& dir);
 wstring BackupPath(const wstring& dir, const wstring& rel);
+// The entry's backup file (its recorded name, else backup\<rel>).
+wstring EntryBackupPath(const wstring& dir, const Entry& e);
+struct RunJournal;
+// The backup of `source` for entry e, created ONLY where nothing is (CopyFileW fail-if-exists): backup\<rel>, or, when a file
+// is there already (one an earlier uninstall kept: never overwritten), the first free backup\<rel>.<n>, which goes into
+// e.backup (and so into the record). The kept file stays; it is logged and (warnings) listed. Checked against e.orig.
+// j: the run journal (each create written down before it). Returns the backup's path.
+wstring CopyBackup(Context& ctx, const wstring& dir, Entry& e, const wstring& source, RunJournal* j, std::vector<wstring>* warnings);
 wstring LegacyStateDir(const wstring& dir);
 wstring LegacyRecordPath(const wstring& dir);
 wstring LegacyBackupPath(const wstring& dir, const wstring& rel);

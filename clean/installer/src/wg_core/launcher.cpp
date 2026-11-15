@@ -1377,7 +1377,13 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
         Record m;
         if (LoadRecord(RecordPath(dir), m)) {
             m.rrconfig = keepFix;
-            if (keepFix.backup) { EnsureDir(Parent(RrConfigBackupPath(dir))); WriteFileAtomic(RrConfigBackupPath(dir), keepBackup.data(), keepBackup.size()); }
+            if (keepFix.backup) {  // created only where nothing is: a file already there stays (the revert then leaves Engine.ini's
+                                   // copy as it is and says so)
+                EnsureDir(Parent(RrConfigBackupPath(dir)));
+                PinnedFile pf;
+                if (pf.Create(RrConfigBackupPath(dir))) { if (!pf.OverwriteBytes(keepBackup.data(), keepBackup.size())) pf.Delete(); pf.Close(); }
+                else LogLine(ctx, L"kept " + RrConfigBackupPath(dir) + L" (there already, not this install's copy: not overwritten)");
+            }
             SaveRecord(RecordPath(dir), m);
         }
     }

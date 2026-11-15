@@ -31,6 +31,7 @@ namespace wg {
 wstring StateDir(const wstring& dir) { return Join(dir, kStateDirName); }
 wstring RecordPath(const wstring& dir) { return Join(StateDir(dir), L"install.record"); }
 wstring BackupPath(const wstring& dir, const wstring& rel) { return Join(Join(StateDir(dir), L"backup"), rel); }
+wstring EntryBackupPath(const wstring& dir, const Entry& e) { return BackupPath(dir, e.backup.empty() ? e.rel : e.backup); }
 wstring LegacyStateDir(const wstring& dir) { return Join(dir, kLegacyStateDir); }
 wstring LegacyRecordPath(const wstring& dir) { return Join(LegacyStateDir(dir), L"install.manifest"); }
 wstring LegacyBackupPath(const wstring& dir, const wstring& rel) { return Join(Join(LegacyStateDir(dir), L"backup"), rel); }
@@ -75,7 +76,7 @@ bool LoadRecord(const wstring& path, Record& m) {
     m = Record();  // the file's record alone (#219: a second load into the same Record listed every entry again)
     wstring text = FromUtf8(raw);
     size_t pos = 0; bool header = false;
-    std::vector<std::array<wstring, 3>> owners;
+    std::vector<std::array<wstring, 3>> owners, backups;
     while (pos < text.size()) {
         size_t nl = text.find(L'\n', pos);
         wstring line = text.substr(pos, nl == wstring::npos ? wstring::npos : nl - pos);
@@ -139,6 +140,8 @@ bool LoadRecord(const wstring& path, Record& m) {
             x.folder = f[4] == L"-" ? wstring() : f[4];
         } else if (!m.legacy && f[0] == L"owner" && f.size() == 4) {
             owners.push_back({f[1], f[2], f[3]});
+        } else if (!m.legacy && f[0] == L"backup" && f.size() == 4 && f[3].find(L"..") == wstring::npos && f[3].find_first_of(L"/:") == wstring::npos) {
+            backups.push_back({f[1], f[2], f[3]});
         } else if (!m.legacy && f[0] == L"runtime" && f.size() == 3 && StartsWithI(f[2], L"wronggpu-") && f[2].find_first_of(L"\\/:") == wstring::npos) {
             m.runtime.push_back({f[1], f[2]});
         } else if (!m.legacy) {
@@ -147,6 +150,8 @@ bool LoadRecord(const wstring& path, Record& m) {
     }
     for (auto& o : owners)  // owner lines name an action line by its action and path
         for (auto& e : m.e) if (e.owner.empty() && e.action == o[0] && IEq(e.rel, o[1])) { e.owner = o[2]; break; }
+    for (auto& o : backups)  // backup lines too: the entry's backup under another name
+        for (auto& e : m.e) if (e.backup.empty() && e.action == o[0] && IEq(e.rel, o[1])) { e.backup = o[2]; break; }
     // rc6 L1: the record of a game folder that was moved names the old folder; read from <dir>\wronggpu-setup\install.record
     // it is the record of dir (its entries are relative to it, its backup is next to it): rebased to dir
     if (header && !m.game.empty() && !m.legacy && IEq(BaseName(path), L"install.record") && IEq(BaseName(Parent(path)), kStateDirName))
@@ -181,6 +186,8 @@ void SaveRecord(const wstring& path, const Record& m) {
         t += e.action + L"\t" + (e.existed ? L"1" : L"0") + L"\t" + (e.orig.empty() ? L"-" : e.orig) + L"\t" + (e.inst.empty() ? L"-" : e.inst) + L"\t" + e.rel + L"\r\n";
     for (auto& e : m.e)
         if (!e.owner.empty()) t += L"owner\t" + e.action + L"\t" + e.rel + L"\t" + e.owner + L"\r\n";
+    for (auto& e : m.e)
+        if (!e.backup.empty()) t += L"backup\t" + e.action + L"\t" + e.rel + L"\t" + e.backup + L"\r\n";
     string u = ToUtf8(t);
     EnsureDir(Parent(path));
     WriteFileAtomic(path, u.data(), u.size());
@@ -427,7 +434,7 @@ static std::function<bool(const wstring&, PinnedFile&)> StateOwned(const wstring
     if (m) {
         const string json = OwnedFilesJson(*m);
         (*names)[L"owned-files.json"] = Sha256Bytes(json.data(), json.size());
-        for (auto& e : m->e) if (e.action != L"dir" && !e.orig.empty()) (*names)[LowerRel(L"backup\\" + e.rel)] = Lower(e.orig);
+        for (auto& e : m->e) if (e.action != L"dir" && !e.orig.empty()) (*names)[LowerRel(L"backup\\" + (e.backup.empty() ? e.rel : e.backup))] = Lower(e.orig);
     }
     string raw;
     if (ReadAll(Join(Join(StateDir(dir), L"previous"), L"previous.txt"), raw)) {  // the kept version: "file=<sha>|<rel>" lines
@@ -768,7 +775,7 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
             const Entry& e = m.e[i];
             Plan& p = plan[i];
             if (e.action == L"dir") continue;
-            const wstring t = Target(dir, e.rel), b = BackupPath(dir, e.rel);
+            const wstring t = Target(dir, e.rel), b = EntryBackupPath(dir, e);
             // the player's original: the backup, or (a game FSR DLL) its renamed copy beside WrongGPU's
             const bool hasOriginal = e.existed || e.action == L"disable";
             if (hasOriginal) {
@@ -809,7 +816,7 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
             const Entry& e = m.e[i];
             Plan& p = plan[i];
             if (e.action == L"dir" || e.action == L"rename") continue;
-            p.source = BackupPath(dir, e.rel);
+            p.source = EntryBackupPath(dir, e);
             if (e.action == L"copy" && e.owner == L"adopted") continue;
             const bool hasOriginal = e.action == L"disable" || e.existed;
             const wstring t = Target(dir, e.rel);
@@ -1093,6 +1100,32 @@ bool StateHasSettings(const wstring& dir) {
     for (auto& d : ListDirs(state)) if (SettingsName(BaseName(d), true)) return true;
     return false;
 }
+wstring CopyBackup(Context& ctx, const wstring& dir, Entry& e, const wstring& source, RunJournal* j, std::vector<wstring>* warnings) {
+    for (int n = 0; n < 100; ++n) {
+        const wstring name = n == 0 ? e.rel : e.rel + L"." + std::to_wstring(n);
+        const wstring b = BackupPath(dir, name);
+        if (Exists(b)) continue;  // something is there that this install did not make: never overwritten
+        const size_t mark = j ? j->created.size() : 0;
+        if (j) JournalCreate(*j, b, false);
+        EnsureDir(Parent(b));
+        DWORD err = 0;
+        if (!CopyNew(source, b, &err)) {
+            if (j && j->created.size() > mark && j->created.back().first == b) j->created.pop_back();  // (not this run's: not created)
+            if (err == ERROR_FILE_EXISTS || err == ERROR_ALREADY_EXISTS) continue;  // it appeared a moment ago: the next name
+            Fail(L"Cannot copy " + source + L" to " + b + L": " + ErrText(err));
+        }
+        if (Sha256File(b) != e.orig) Fail(L"Backup verification failed for " + e.rel);
+        e.backup = n == 0 ? wstring() : name;
+        if (n) {
+            const wstring w = L"Left in place (not this install's; an earlier uninstall kept it): " + Join(Join(kStateDirName, L"backup"), e.rel) +
+                              L"; this install's backup of " + e.rel + L" is " + Join(Join(kStateDirName, L"backup"), name);
+            LogLine(ctx, w);
+            if (warnings) warnings->push_back(w);
+        }
+        return b;
+    }
+    Fail(L"No free name for the backup of " + e.rel + L" in " + Join(StateDir(dir), L"backup"));
+}
 wstring NewInstallId() {
     std::random_device rd;  // (the CRT's system random source)
     wchar_t buf[33] = {};
@@ -1329,7 +1362,11 @@ bool UpgradeRecord(Context& ctx, const wstring& dir, std::vector<wstring>* notes
     Record m;
     if (!LoadRecord(RecordPath(dir), m) || m.legacy) return false;
     if (m.format >= 2) return false;
-    CopyChecked(RecordPath(dir), RecordPath(dir) + L".v1");
+    {  // the 0.5.x record kept beside it, created only where nothing is (a file an earlier uninstall kept there stays)
+        bool kept = false;
+        for (int n = 0; n < 100 && !kept; ++n) kept = CopyNew(RecordPath(dir), RecordPath(dir) + L".v1" + (n ? L"." + std::to_wstring(n) : wstring()));
+        if (!kept) Fail(L"Cannot keep a copy of the earlier record " + RecordPath(dir));
+    }
     InferOwners(ctx, m);
     if (m.payloadVersion.empty()) {  // what the 0.5.x install wrote: its version, the hashes from its own entries
         m.payloadVersion = m.version;

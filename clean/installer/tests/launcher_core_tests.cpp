@@ -1628,6 +1628,34 @@ int main() {
                 RemoveTree(StateDir(fs));
             }
             {
+                // a backup never overwrites a file an earlier uninstall kept in wronggpu-setup\backup: a new recorded name
+                const wstring bg = Join(dir, L"backup-collision");
+                const string kept = "the player's file an earlier uninstall kept", game = "the game's wronggpu.ini (the player's settings)";
+                file(BackupPath(bg, L"wronggpu.ini"), kept);
+                file(Join(bg, L"wronggpu.ini"), game);
+                Entry e; e.action = L"copy"; e.rel = L"wronggpu.ini"; e.existed = true; e.orig = Sha256Bytes(game.data(), game.size());
+                RunJournal j;
+                std::vector<wstring> w;
+                const wstring b = CopyBackup(mc, bg, e, Join(bg, L"wronggpu.ini"), &j, &w);
+                string k, nb;
+                require(ReadAll(BackupPath(bg, L"wronggpu.ini"), k) && k == kept && ReadAll(b, nb) && nb == game && e.backup == L"wronggpu.ini.1" &&
+                            IEq(b, EntryBackupPath(bg, e)) && w.size() == 1 && w[0].find(L"backup\\wronggpu.ini") != wstring::npos &&
+                            j.created.size() == 1 && IEq(j.created[0].first, b),
+                        "backup collision: the kept backup\\wronggpu.ini stays byte for byte; the new backup is wronggpu.ini.1 (created only where nothing "
+                        "was, written down in the run journal alone), listed");
+                Record br;
+                br.version = L"0.6.5"; br.game = bg; br.exe = Join(bg, L"Game.exe"); br.format = 2; br.e.push_back(e);
+                SaveRecord(RecordPath(bg), br);
+                Record back;
+                require(LoadRecord(RecordPath(bg), back) && back.e.size() == 1 && back.e[0].backup == L"wronggpu.ini.1" && IEq(EntryBackupPath(bg, back.e[0]), b),
+                        "backup collision: the record keeps the backup's name (its backup line), so the restore reads that file");
+                Entry e2 = e;
+                e2.backup.clear();
+                CopyBackup(mc, bg, e2, Join(bg, L"wronggpu.ini"), nullptr, nullptr);
+                require(e2.backup == L"wronggpu.ini.2", "backup collision: the next free name when .1 is taken too");
+                RemoveTree(bg);
+            }
+            {
                 // the tests' failure and file hooks exist in WRONGGPU_TESTING builds only: in a release build the variables
                 // change nothing (CI runs this test in its release-flag builds)
                 const wstring made = Join(dir, L"hook-made.txt");

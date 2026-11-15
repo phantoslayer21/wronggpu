@@ -850,10 +850,8 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     try {
         for (auto& e : m.e) {
             if (!e.existed) continue;
-            wstring b = BackupPath(dir, e.rel);
-            JournalCreate(journal, b, false);
-            CopyChecked(Target(dir, e.rel), b);
-            if (Sha256File(b) != e.orig) Fail(L"Backup verification failed for " + e.rel);
+            // created only where nothing is: a file an earlier uninstall kept in backup\ stays, this backup takes a new name
+            CopyBackup(ctx, dir, e, Target(dir, e.rel), &journal, &warnings);
             ui.step(++done, total, L"Backed up " + e.rel);
             ui.log(L"backup " + e.rel);
         }
