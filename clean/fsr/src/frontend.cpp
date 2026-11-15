@@ -566,52 +566,27 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
         }
     }
 
-    // OptiScaler ASI plugin (clean/fsr/asi): when it has hooked the host's MAIN upscaler list, three choices are weighed
-    // by model_precedence.h: the launcher's (wronggpu.ini runtime_options' model item with model_chosen), the WrongGPU
-    // entry picked in OptiScaler's FFX sub-box (the override id, stamped when it changes: FfxChoiceSeen) and the plugin's
-    // saved entry. The most recent explicit choice wins (a tie: the launcher's), with one log line on a conflict. A
-    // WrongGPU model -> WrongGPU; an AMD version in the FFX sub-box is not a model choice and never routes it to AMD.
-    // AMD ("FSR 3.X(/4)" chosen in the plugin's list) -> AMD: the version the FFX sub-box names when that is one of AMD's,
+    // OptiScaler ASI plugin (clean/fsr/asi): when it has hooked the host's MAIN upscaler list, its entry says WrongGPU or
+    // AMD ("FSR 3.X(/4)"), and the game's model choice record (model_choice_record.h) says which WrongGPU model: the
+    // launcher, OptiScaler's FFX box (a WrongGPU entry the record did not know: the player picked it there) and the
+    // plugin's own model entries all write it, the highest seq is the most recent choice. A WrongGPU model -> WrongGPU,
+    // whatever AMD version the FFX box names. AMD -> AMD: the version the FFX sub-box names when that is one of AMD's,
     // else AMD's newest listed version (FSR 4 when the AMD provider has it).
-    PluginModelChoice asiChoice;
-    const bool asiHooked = config_.hosted && platform_.asiPlugin && platform_.asiPlugin(&asiChoice);
+    char asiModel = 0;
+    const bool asiHooked = config_.hosted && platform_.asiPlugin && platform_.asiPlugin(&asiModel);
     bool forceAmd = false;
     if (asiHooked) {
-        char seen = kChoiceNone;  // the WrongGPU model entry the FFX sub-box names, if any
+        char seen = wgchoice::kUnknown;  // the WrongGPU model entry the FFX box names, if any
         if (u->hasOverride)
             if (const WgEntryDef* e = OwnEntryOfId(u->overrideId))
                 if (e->slot == WG_OPT_SR_MODEL && e->value >= 0 && e->value < WG_SR_MODEL_COUNT) seen = kWgModelRows[e->value].name[0];
-        const FfxModelChoice ffx = SeeFfxChoice(seen, tag);
-        const ModelDecision decision = DecideModel(asiChoice, LauncherChoice(), ffx);
-        if (decision.conflict) {
-            bool first = false;
-            {
-                std::lock_guard lock(mutex_);
-                first = !modelLogged_.count(decision.line);
-                modelLogged_[decision.line] = true;
-            }
-            if (first) Log(tag + " " + decision.line);
-        }
-        // "selected in the host's upscaler list" (the launcher's log reader looks for it): the plugin's menu marks the
-        // model that runs (asiShowModel), also when the launcher's choice decided.
-        const std::string by = decision.winner == ModelWinner::Launcher
-                                   ? std::string(" (the launcher's model choice: wronggpu.ini runtime_options model=") + decision.model + ")"
-                               : decision.winner == ModelWinner::Ffx
-                                   ? std::string(" (the WrongGPU entry picked in OptiScaler's upscaler box: Model ") + decision.model + ")"
-                                   : std::string();
-        char model = decision.model;
-        if (model != kChoiceAmd) {
+        std::string why;
+        char model = ChooseModel(seen, asiModel, tag, &why);
+        if (asiModel != 0) {
             const int32_t m = ModelOfName(std::string(1, model));
             const WgEntryDef* sr = m >= 0 ? SrEntryOfModel(m) : nullptr;
             if (!sr) {  // a model this build of the front end lacks (CMake WG_MODEL_K / WG_MODEL_L): Model M, said once
-                const std::string line = "note: OptiScaler plugin: " + ChoiceName(model) + " is not part of this build of the front end; Model M is used";
-                bool first = false;
-                {
-                    std::lock_guard lock(mutex_);
-                    first = !modelLogged_.count(line);
-                    modelLogged_[line] = true;
-                }
-                if (first) Log(tag + " " + line);
+                LogOnce(tag, std::string("note: model choice: Model ") + model + " is not part of this build of the front end; Model M is used");
                 model = 'M';
                 sr = SrEntryOfModel(ModelOfName("M"));
             }
@@ -619,10 +594,13 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
             u->modelProviderId = sr ? sr->id : kWrongGpuProviderVersionId;
             u->modelProviderName = sr ? EntryProviderName(*sr) : kWrongGpuVersionName;
             u->hasOverride = false;  // an AMD version in the FFX sub-box must not route this context to AMD
-            Log(tag + " OptiScaler plugin: " + u->modelProviderName + " selected in the host's upscaler list" + by);
+            // "selected in the host's upscaler list" (the launcher's log reader looks for it): the plugin's menu marks the
+            // model that runs (asiShowModel)
+            Log(tag + " OptiScaler plugin: " + u->modelProviderName + " selected in the host's upscaler list (" + why + ")");
         } else {
             forceAmd = true;
-            Log(tag + " OptiScaler plugin: AMD FSR selected in the host's upscaler list" + by);
+            model = 0;
+            Log(tag + " OptiScaler plugin: AMD FSR selected in the host's upscaler list");
         }
         if (platform_.asiShowModel) platform_.asiShowModel(model);
     }
@@ -1404,47 +1382,75 @@ bool FrontEnd::ConfiguredModel(int32_t* model, std::string* described) {
     return true;
 }
 
-LauncherModelChoice FrontEnd::LauncherChoice() const {
-    // The launcher's choice: the last model item of wronggpu.ini's runtime_options (the launcher writes model=<letter>
-    // there; a build without Model K / L has already dropped those items, IgnoreModelK / IgnoreModelL) and
-    // model_chosen, when the launcher last changed it. WG_RUNTIME_OPTIONS is a developer's override, not a choice: it
-    // is checked against the decided model further on (CreateUpscale).
-    LauncherModelChoice c;
+char FrontEnd::LauncherModel() const {
+    // The last model item of wronggpu.ini's runtime_options (the launcher writes model=<letter> there; a build without
+    // Model K / L has already dropped those items, IgnoreModelK / IgnoreModelL).
     bool found = false;
     const std::string v = OptionValue(config_.runtimeOptions, "model", &found);
-    if (found && v.size() == 1) {
-        const char m = char(std::toupper(static_cast<unsigned char>(v[0])));
-        if (m == 'M' || m == 'K' || m == 'L') c.model = m;
-    }
-    c.chosenAt = config_.modelChosenAt;
-    return c;
+    if (!found || v.size() != 1) return 0;
+    const char m = char(std::toupper(static_cast<unsigned char>(v[0])));
+    return wgchoice::IsModel(m) ? m : 0;
 }
 
-FfxModelChoice FrontEnd::SeeFfxChoice(char seen, const std::string& tag) {
-    FfxModelChoice before, after;
+void FrontEnd::LogOnce(const std::string& tag, const std::string& line) {
     {
         std::lock_guard lock(mutex_);
-        if (!ffxLoaded_) {
-            ffxLoaded_ = true;
-            if (platform_.loadFfxChoice) platform_.loadFfxChoice(&ffxSaved_);
+        if (modelLogged_.count(line)) return;
+        modelLogged_[line] = true;
+    }
+    Log(tag + " " + line);
+}
+
+char FrontEnd::ChooseModel(char seen, char plugin, const std::string& tag, std::string* why) {
+    const char launcher = LauncherModel();
+    // no record: the launcher's K / L item, else the plugin's saved WrongGPU entry (0.6.0's rule), else Model M
+    auto noRecord = [&] {
+        if (launcher == 'K' || launcher == 'L') {
+            *why = std::string("no model choice record; the launcher's model item, wronggpu.ini model=") + launcher;
+            return launcher;
         }
-        before = ffxSaved_;
-        uint64_t now = 0;
-        if (seen != kChoiceNone && before.model != kChoiceNone && before.model != seen)
-            now = platform_.clock ? platform_.clock()
-                                  : uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                                 std::chrono::system_clock::now().time_since_epoch()).count() / 100) +
-                                        116444736000000000ull;  // 1970 in FILETIME units
-        after = FfxChoiceSeen(before, seen, now);
-        ffxSaved_ = after;
+        if (wgchoice::IsModel(plugin)) {
+            *why = std::string("no model choice record; the plugin's saved entry");
+            return plugin;
+        }
+        *why = launcher ? std::string("no model choice record; wronggpu.ini model=") + launcher : std::string("no model choice record; the default");
+        return 'M';
+    };
+    if (platform_.choiceRecord.empty()) return noRecord();
+    std::lock_guard lock(choiceMutex_);  // one read-modify-write of the record at a time in this process
+    wgchoice::Record cur;
+    std::string err;
+    const wgchoice::ReadResult rr = wgchoice::ReadRecordFile(platform_.choiceRecord, &cur, &err);
+    if (rr == wgchoice::ReadResult::Corrupt)
+        LogOnce(tag, "model choice: the record (wronggpu-setup\\model-choice.ini) is corrupt (" + err + "): treated as no choice");
+    if (rr == wgchoice::ReadResult::Unreadable) {
+        // (never written over: a record held open for a moment must not be replaced by a guess)
+        LogOnce(tag, "model choice: the record (wronggpu-setup\\model-choice.ini) cannot be read (" + err + "): treated as no record");
+        return noRecord();
     }
-    if (after.model != before.model || after.chosenAt != before.chosenAt) {
-        if (platform_.saveFfxChoice) platform_.saveFfxChoice(after);
-        Log(tag + " OptiScaler's upscaler box names " + ChoiceName(after.model) +
-            (after.chosenAt ? " (changed there: an explicit choice, chosen=" + std::to_string(after.chosenAt) + ")"
-                            : std::string(" (the first entry seen: not counted as a choice)")));
+    const wgchoice::Record* have = rr == wgchoice::ReadResult::Ok ? &cur : nullptr;
+    wgchoice::Record next;
+    const wgchoice::FfxStep step = wgchoice::FfxObservation(have, seen, &next);
+    if (step != wgchoice::FfxStep::None) {
+        if (wgchoice::WriteRecordFile(platform_.choiceRecord, next, &err)) {
+            if (step == wgchoice::FfxStep::Choice)
+                Log(tag + " model choice: Model " + next.model + " picked in OptiScaler's upscaler list (seq " + std::to_string(next.seq) +
+                    (have ? std::string(", replacing Model ") + have->model + " from " + wgchoice::SourceWords(have->source) +
+                                ", seq " + std::to_string(have->seq) + ")"
+                          : std::string(", the first choice recorded for this game)")));
+        } else {
+            LogOnce(tag, "ERROR: model choice: the record (wronggpu-setup\\model-choice.ini) could not be written (" + err + ")" +
+                (step == wgchoice::FfxStep::Choice ? "; this session uses the choice, the next one may not" : ""));
+        }
+        cur = next;  // the player's choice in the list is real even when it could not be saved
+        have = &cur;
     }
-    return after;
+    if (!have) return noRecord();
+    *why = std::string("the model choice record: ") + wgchoice::SourceWords(have->source) + ", seq " + std::to_string(have->seq);
+    if (launcher && launcher != have->model)
+        LogOnce(tag, std::string("model choice conflict: wronggpu.ini's model item says Model ") + launcher + "; the more recent choice, Model " +
+                         have->model + " from " + wgchoice::SourceWords(have->source) + " (seq " + std::to_string(have->seq) + "), runs");
+    return have->model;
 }
 
 void FrontEnd::ApplyEntry(const WgEntryDef& e, UpscaleContext& u, const std::string& tag, const char* source) {

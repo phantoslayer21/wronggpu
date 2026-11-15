@@ -4,7 +4,6 @@
 
 #include <cmath>
 #include <cstdlib>
-#include <chrono>
 
 #include "record.h"
 #include "settings.h"
@@ -284,12 +283,7 @@ std::map<string, string> EffectiveSettings(const string& wronggpuIni, const stri
     return eff;
 }
 
-uint64_t NowFileTime() {
-    using namespace std::chrono;
-    return uint64_t(duration_cast<nanoseconds>(system_clock::now().time_since_epoch()).count() / 100) + 116444736000000000ull;
-}
-
-bool RenderWronggpuIni(const Profile& p, const string& in, string& out, wstring* why, uint64_t now, bool modelChosen) {
+bool RenderWronggpuIni(const Profile& p, const string& in, string& out, wstring* why) {
     for (auto& d : kSettings) {
         if (!ValidateSetting(d, p.get(d.key), nullptr, why)) return false;
     }
@@ -327,10 +321,10 @@ bool RenderWronggpuIni(const Profile& p, const string& in, string& out, wstring*
     if (FindSetting("model")) {
         auto isModel = [](const std::pair<string, string>& kv) { return LowerA(kv.first) == "model"; };
         const string want = p.get("model");
-        if (want == "l" || want == "k" || (modelChosen && want == "m")) {  // (Model M explicitly applied: model=M last)
+        if (want == "l" || want == "k") {
             std::vector<std::pair<string, string>> kept;
             for (auto& kv : items) if (!isModel(kv)) kept.push_back(kv);
-            kept.push_back({"model", want == "k" ? "K" : want == "l" ? "L" : "M"});
+            kept.push_back({"model", want == "k" ? "K" : "L"});
             items = kept;
         } else {
             for (auto& kv : items) {
@@ -343,19 +337,31 @@ bool RenderWronggpuIni(const Profile& p, const string& in, string& out, wstring*
     const string joined = JoinOptions(items);
     // the line is rewritten only when its items change (a player's spacing and comment stay otherwise)
     if (hadOptions ? joined != JoinOptions(SplitOptions(options)) : !joined.empty()) text = IniSet(text, hadOptions ? section : "fsr", "runtime_options", joined);
-    // the model choice's time (profile.h): written when the model the front end runs changes, for any model letter, and
-    // when the player explicitly applied a model (also the same one again)
-    auto lastModel = [](const string& opts) {
-        string m;
-        for (auto& kv : SplitOptions(opts)) if (LowerA(kv.first) == "model") m = LowerA(TrimA(kv.second));
-        return m;
-    };
-    const string modelBefore = hadOptions ? lastModel(options) : string(), modelAfter = lastModel(joined);
-    if (!modelAfter.empty() && (modelAfter != modelBefore || modelChosen))
-        text = IniSet(text, hadOptions ? section : "fsr", "model_chosen",
-                      std::to_string(now ? now : NowFileTime()));
     out = text;
     return true;
+}
+
+char ModelOfWronggpuIni(const string& text) {
+    string options, section;
+    if (!IniGetFrontEnd(text, "runtime_options", &options, &section)) return 0;
+    string m;
+    for (auto& kv : SplitOptions(options)) if (LowerA(kv.first) == "model") m = TrimA(kv.second);
+    if (m.size() != 1) return 0;
+    const char c = char(toupper((unsigned char)m[0]));
+    return c == 'M' || c == 'K' || c == 'L' ? c : 0;
+}
+
+char ModelEntryOfOptiIni(const string& text) {
+    string cur;
+    if (!IniHasKey(text, "WrongGPU", "UpscalerIndex", &cur) && !IniHasKey(text, "FSR", "UpscalerIndex", &cur)) return '-';
+    cur = TrimA(cur);
+#if WRONGGPU_MODEL_L
+    if (cur == kModelLEntryIndex) return 'L';
+#endif
+#if WRONGGPU_MODEL_K || WRONGGPU_PRESET_K
+    if (cur == kModelKEntryIndex) return 'K';
+#endif
+    return cur == "0" ? 'M' : '-';
 }
 
 bool RenderOptiIni(const Profile& p, const string& in, string& out, std::vector<wstring>* notes) {

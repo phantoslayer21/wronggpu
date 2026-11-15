@@ -23,10 +23,10 @@ Profile With(const char* model) {
     if (!SetSetting(p, "model", model, &why)) throw std::runtime_error("test setup: model");
     return p;
 }
-string Wini(const Profile& p, const string& in, uint64_t now = 0, bool chosen = false) {
+string Wini(const Profile& p, const string& in) {
     string out;
     wstring why;
-    if (!RenderWronggpuIni(p, in, out, &why, now, chosen)) throw std::runtime_error("test setup: render");
+    if (!RenderWronggpuIni(p, in, out, &why)) throw std::runtime_error("test setup: render");
     return out;
 }
 string Oini(const Profile& p, const string& in, std::vector<wstring>* notes = nullptr) {
@@ -71,29 +71,13 @@ int main() {
                     toK.find("upscaler = network") != string::npos && toK.find("# WrongGPU settings") != string::npos,
                 "Model K: the model item is model=K; the other lines stay");
         require(Wini(With("k"), toK) == toK, "Model K again: unchanged (the line is rewritten only when its items change)");
-        // #213 review P1: Model K applied again by the player (set <game> model=K): model_chosen = the new time
-        const string kAt1000 = Wini(With("k"), fresh, 1000);
-        const string kAt3000 = Wini(With("k"), kAt1000, 3000, true);
-        require(kAt1000.find("model_chosen=1000\r\n") != string::npos && kAt3000.find("model_chosen=3000\r\n") != string::npos &&
-                    kAt3000.find("model_chosen=1000") == string::npos && kAt3000.find("runtime_options=model=K\r\n") != string::npos,
-                "Model K applied again: stamped again (the newest choice), the model item unchanged");
-        require(Wini(With("k"), kAt1000, 3000) == kAt1000, "Model K kept by an apply that is not a model choice: not stamped");
         const string mixed = "[fsr]\r\nruntime_options = model=M;timing_log=1;model=L\r\n";
         require(Wini(With("k"), mixed).find("runtime_options=timing_log=1;model=K\r\n") != string::npos,
                 "Model K: every model item out (an L item too), model=K last (the last one wins); timing_log kept");
         const string backM = Wini(DefaultProfile(), "[fsr]\r\nruntime_options = timing_log=1;model=K\r\n");
         require(backM.find("runtime_options=timing_log=1;model=M\r\n") != string::npos, "back to Model M: Model K's item becomes model=M");
-        // (model_chosen: the time of the launcher's model choice, written on every model change, profile.h)
-        auto noTime = [](string s) {
-            const size_t a = s.find("model_chosen=");
-            if (a != string::npos) s.erase(a, s.find("\r\n", a) + 2 - a);
-            return s;
-        };
-        require(toK.find("model_chosen=") != string::npos, "Model K chosen: model_chosen written");
-        const string kThenM = Wini(DefaultProfile(), toK);
-        require(noTime(kThenM) == fresh.substr(0, fresh.find("runtime_options")) + "runtime_options=model=M\r\n" && kThenM.find("model_chosen=") != string::npos,
-                "K then M: only the runtime_options line is rewritten (the installer's comment on it is gone as it is for L), "
-                "and model_chosen is the time of that change");
+        require(Wini(DefaultProfile(), toK) == fresh.substr(0, fresh.find("runtime_options")) + "runtime_options=model=M\r\n",
+                "K then M: only the runtime_options line is rewritten (the installer's comment on it is gone as it is for L)");
         const string withLItem = "[fsr]\r\nruntime_options = model=L\r\n";
         if (withL) {
             require(Wini(DefaultProfile(), withLItem).find("model=M") != string::npos, "Model M control: Model L's item still goes back to model=M");
@@ -106,6 +90,11 @@ int main() {
         require(EffectiveSettings(toK, "")["model"] == "k" && EffectiveSettings(fresh, "")["model"] == "m",
                 "the file's model: K from its last model item, M otherwise");
         require(EffectiveSettings("[fsr]\r\nruntime_options = model=K;model=M\r\n", "")["model"] == "m", "the file's model: the last model item counts");
+        // ---- the model choice record's inputs (launcher.cpp ApplyProfile)
+        require(ModelOfWronggpuIni(toK) == 'K', "ModelOfWronggpuIni: model=K");
+        require(ModelEntryOfOptiIni("[WrongGPU]\r\nUpscalerIndex=" + K + "\r\n") == 'K' &&
+                    ModelEntryOfOptiIni("[FSR]\r\nUpscalerIndex=" + L + "\r\n") == (withL ? 'L' : '-'),
+                "ModelEntryOfOptiIni: K's entry (1); L's entry (2) only with the L choice");
         require(EffectiveSettings(withLItem, "")["model"] == (withL ? "l" : "m"), "the file's model: L only with the Model L choice");
         // the profile a game's files imply (no profile.ini): K when the files say K (an install that started on Preset K)
         require(ImportProfile(toK, "").get("model") == "k" && ImportProfile(fresh, "").get("model") == "m", "the imported profile: model=k from model=K");

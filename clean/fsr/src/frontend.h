@@ -16,7 +16,7 @@
 #include "amd_compare.h"
 #include "async_create.h"
 #include "config.h"
-#include "model_precedence.h"
+#include "model_choice_record.h"
 #include "status.h"
 #include "ffx_headers.h"
 #include "param_map.h"
@@ -90,18 +90,14 @@ struct Platform {
     std::function<bool(void* device)> deviceLost;
     // OptiScaler ASI plugin bridge (clean/fsr/asi): when WrongGPU.asi is loaded and has hooked OptiScaler's menu,
     // WrongGPU is its own entry in the host's MAIN upscaler list, not a version in the FFX sub-box. Returns true when
-    // hooked (then the plugin's saved choice, weighed against the launcher's model choice by model_precedence.h, not an
-    // FFX override, chooses the model) and fills *choice: model 0 (AMD FSR), 'M', 'K' or 'L', whether the player chose
-    // it, and when. Null or returns false: no plugin / unknown host build; hosted mode as before.
-    std::function<bool(PluginModelChoice* choice)> asiPlugin;
+    // hooked and sets *model to 0 (AMD FSR chosen there) or a WrongGPU model (then the model choice record decides which,
+    // choiceRecord below). Null or returns false: no plugin / unknown host build; hosted mode as before.
+    std::function<bool(char* model)> asiPlugin;
     // Tells the plugin which model the context runs (0 AMD, 'M', 'K', 'L'), so its menu marks that entry. May be empty.
     std::function<void(char model)> asiShowModel;
-    // With the plugin hooked: the WrongGPU entry last seen in OptiScaler's FFX upscaler box and when it changed
-    // (model_precedence.h FfxChoiceSeen; wronggpu-ffx-choice.ini in the DLL). Empty: nothing is kept between sessions.
-    std::function<bool(FfxModelChoice* choice)> loadFfxChoice;
-    std::function<void(const FfxModelChoice& choice)> saveFfxChoice;
-    // The time a choice is stamped with: Windows FILETIME units (100 ns since 1601 UTC). Empty: the system clock.
-    std::function<uint64_t()> clock;
+    // The game's model choice record (model_choice_record.h: wronggpu-setup\model-choice.ini next to wronggpu.ini), read
+    // and written with real files. Empty: no record (the launcher's model item decides, as before).
+    std::filesystem::path choiceRecord;
     // Registry options and the menu's choices (shared settings block). Empty members: defaults, nothing written.
     MenuSettings menu;
 };
@@ -213,10 +209,15 @@ private:
     // The configured SR model (sr_model: block > environment > ini) for a context no entry chose; false: not set
     // anywhere (the model then comes from runtime_options / the runtime's default, as before the registry).
     bool ConfiguredModel(int32_t* model, std::string* described);
-    // The launcher's model choice in wronggpu.ini (model_precedence.h), weighed against the OptiScaler plugin's.
-    LauncherModelChoice LauncherChoice() const;
-    // The FFX sub-box's WrongGPU entry seen by a create (`seen`, or kChoiceNone), saved and stamped when it changes.
-    FfxModelChoice SeeFfxChoice(char seen, const std::string& tag);
+    // The model the launcher's wronggpu.ini names (the last model item of runtime_options: 'M', 'K', 'L'), else 0.
+    char LauncherModel() const;
+    // With the plugin hooked: the model choice record after a create that sees OptiScaler's list name `seen` (a WrongGPU
+    // model's entry, or wgchoice::kUnknown); writes the record when the list names an entry it did not know. The model
+    // that runs: the record's; without a record, the launcher's model item when it names Model K or L, else the plugin's
+    // saved WrongGPU entry (`plugin`; what decided before 0.6.5), else Model M. *why: which choice decided, for the log.
+    char ChooseModel(char seen, char plugin, const std::string& tag, std::string* why);
+    // `line` logged once per session (after `tag`).
+    void LogOnce(const std::string& tag, const std::string& line);
     // AMD's DLL behind a forwarded context (the one that created it), else AMD's original.
     const OriginalApi* ApiOf(void* context);
     // `u` runs on AMD while its upscaler's create runs (u.pending): takes the upscaler over when the create has finished.
@@ -277,8 +278,7 @@ private:
     uint32_t inputRefusedRun_ = 0;                 // refusals in a row with that key (mutex_)
     std::atomic<bool> inputRefusedAny_{false};     // inputRefusedRun_ > 0 (the taken-frame path's cheap check)
     std::map<std::string, bool> modelLogged_;      // ApplyModelDir: each distinct choice logged once (mutex_)
-    bool ffxLoaded_ = false;                       // SeeFfxChoice: the saved FFX entry read (mutex_)
-    FfxModelChoice ffxSaved_;
+    std::mutex choiceMutex_;                       // ChooseModel: one read-modify-write of the choice record at a time
     std::atomic<uint64_t> reentered_{0};           // calls refused because they re-entered this front end on one thread
     std::mutex parkMutex_;                           // guards the three below; held while a parked context is destroyed
     UpscaleContext* parked_ = nullptr;

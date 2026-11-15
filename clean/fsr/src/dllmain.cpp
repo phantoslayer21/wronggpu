@@ -234,13 +234,24 @@ FrontEnd& Get() {
                     return CompareApi(dll);
                 };
             }
-            // If WrongGPU.asi has hooked OptiScaler's menu, its saved entry weighed against the launcher's model choice
-            // (not an FFX version override) chooses the model (model_precedence.h). Absent or not hooked: hosted mode as
-            // before.
-            p.asiPlugin = [](wgfsr::PluginModelChoice* choice) { return QueryAsiPlugin(choice); };
+            // If WrongGPU.asi has hooked OptiScaler's menu, its entry says WrongGPU or AMD, and the game's model choice
+            // record (model_choice_record.h, next to wronggpu.ini) says which WrongGPU model. Absent or not hooked: hosted
+            // mode as before.
+            p.asiPlugin = [](char* model) { return QueryAsiPlugin(model); };
             p.asiShowModel = [](char model) { ShowAsiModel(model); };
-            p.loadFfxChoice = [](wgfsr::FfxModelChoice* c) { return LoadFfxChoice(Place().ini, c); };
-            p.saveFfxChoice = [](const wgfsr::FfxModelChoice& c) { SaveFfxChoice(Place().ini, c); };
+            {
+                const std::wstring& ini = Place().ini;
+                const size_t slash = ini.find_last_of(L"\\/");
+                const std::filesystem::path record =
+                    wgchoice::RecordPathIn(slash == std::wstring::npos ? std::wstring(L".") : ini.substr(0, slash));
+                std::error_code ec;
+                if (std::filesystem::is_directory(record.parent_path(), ec)) {  // a launcher install: its state folder
+                    p.choiceRecord = record;
+                    SetAsiChoiceRecord(record.wstring());  // the plugin writes its menu's model clicks there too
+                } else {
+                    L().Write("model choice: no launcher state folder next to wronggpu.ini: no model choice record (the model item decides)");
+                }
+            }
         }
         p.menu = Menu();
         g_frontEnd = new FrontEnd(p, config);

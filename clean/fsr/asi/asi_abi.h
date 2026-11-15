@@ -4,6 +4,7 @@
 // entry the player selected in OptiScaler's menu. The front end finds the plugin by module (GetModuleHandle of the
 // plugin file name) and resolves this one export by name, so load order does not matter and neither DLL links the
 // other. Defined once, shared by the plugin (which exports it) and the front-end bridge (which calls it).
+#include <stddef.h>
 #include <stdint.h>
 
 #define WRONGGPU_ASI_MODULE  L"WrongGPU.asi"
@@ -13,7 +14,8 @@
 // Query result. `hooked` is 1 after the prepared menu call-patch transaction commits; it does not promise
 // complete menu adaptation. The FFX list still contains WrongGPU and AMD entries. Zero means inactive: the
 // front end then behaves as if no plugin were present. `model` is 0 (OptiScaler's own FSR 3.X / AMD), 'M' or 'K'
-// (a saved Model L reads as 'M' here, for an older front end; WrongGpuAsiQueryChoiceV1 below reports it). Returns the ABI version (>= 1), or 0 on error. Signature: int WrongGpuAsiQuery(int* hooked, char* model).
+// (a saved Model L reads as 'M' here, for an older front end; which WrongGPU model runs is the model choice
+// record's, src/model_choice_record.h). Returns the ABI version (>= 1), or 0 on error. Signature: int WrongGpuAsiQuery(int* hooked, char* model).
 typedef int (*PfnWrongGpuAsiQuery)(int* hooked, char* model);
 
 // Additive WrongGPU-owned diagnostic API; this is NOT a host plugin or RR frame ABI.
@@ -76,24 +78,11 @@ typedef struct WrongGpuAsiStatusV1 {
 
 typedef int (*PfnWrongGpuAsiQueryStatusV1)(WrongGpuAsiStatusV1* status, uint32_t caller_size);
 
-// The player's saved choice with what the front end needs to weigh it against the launcher's model choice (0.6.5;
-// src/model_precedence.h). model: 0 (AMD), 'M', 'K' or 'L'. explicit_choice: 1 when the player chose it in the menu (or
-// a file of an earlier version names a non-default entry), 0 for the default entry (no file, or Model M with no time).
-// chosen_at: when the player clicked it, Windows FILETIME (100 ns since 1601-01-01 UTC); 0 = not recorded. Same size/version rules and
-// return codes as WrongGpuAsiQueryStatusV1. A front end that finds no such export uses WrongGpuAsiQuery and treats
-// Model M as the default entry and K / AMD as explicit choices with no recorded time.
-#define WRONGGPU_ASI_CHOICE_QUERY "WrongGpuAsiQueryChoiceV1"
-#define WRONGGPU_ASI_CHOICE_VERSION 1u
-typedef struct WrongGpuAsiChoiceV1 {
-    uint32_t size;
-    uint32_t version;
-    uint32_t hooked;
-    uint32_t model;
-    uint32_t explicit_choice;
-    uint32_t reserved;
-    uint64_t chosen_at;
-} WrongGpuAsiChoiceV1;
-typedef int (*PfnWrongGpuAsiQueryChoiceV1)(WrongGpuAsiChoiceV1* choice, uint32_t caller_size);
+// The front end tells the plugin where the game's model choice record is (wronggpu-setup\model-choice.ini next to
+// its wronggpu.ini; src/model_choice_record.h). A click on one of the plugin's model entries is written there (seq + 1,
+// source=plugin). Without this call the plugin uses wronggpu-setup\model-choice.ini in its own data folder.
+#define WRONGGPU_ASI_SET_CHOICE_RECORD "WrongGpuAsiSetChoiceRecordV1"
+typedef void (*PfnWrongGpuAsiSetChoiceRecordV1)(const wchar_t* path);
 
 // The front end reports which model it runs (0 AMD, 'M', 'K', 'L'), so the plugin's menu marks that entry; 1 returns
 // to marking the saved choice. Display only: nothing is saved.

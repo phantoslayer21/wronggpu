@@ -403,10 +403,13 @@ static wstring LowerRel(wstring r) {
 // What the state folder holds that WrongGPU wrote, with the bytes it must have: its path below the folder (lower case) -> SHA-256
 // ("": by name only). The backups the record lists (the hash is the entry's `orig`), the previous version's files (the hash
 // previous.txt states) and owned-files.json (the bytes WrongGPU makes of this record) are deleted only while their bytes are
-// those; the record, previous.txt, uninstall.exe, setup.log and profile.ini carry no recorded hash and go by their fixed names.
+// those; the record, previous.txt, uninstall.exe, setup.log, profile.ini and model-choice.ini carry no recorded hash and go by
+// their fixed names.
 static std::function<bool(const wstring&, PinnedFile&)> StateOwned(const wstring& dir, const Record* m) {
     auto names = std::make_shared<std::map<wstring, wstring>>();
-    for (const wchar_t* n : {L"install.record", L"uninstall.exe", L"setup.log", L"profile.ini"}) (*names)[n] = L"";
+    // (model-choice.ini: the game's model choice record, which the launcher, the front end and its menu plugin write, so it
+    // carries no recorded hash either; clean/fsr/src/model_choice_record.h)
+    for (const wchar_t* n : {L"install.record", L"uninstall.exe", L"setup.log", L"profile.ini", L"model-choice.ini"}) (*names)[n] = L"";
     if (m) {
         const string json = OwnedFilesJson(*m);
         (*names)[L"owned-files.json"] = Sha256Bytes(json.data(), json.size());
@@ -908,7 +911,7 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
 }
 
 static bool SettingsName(const wstring& name, bool folder) {
-    return folder ? IEq(name, L"previous") || IEq(name, L"rr-config") : IEq(name, L"profile.ini");
+    return folder ? IEq(name, L"previous") || IEq(name, L"rr-config") : IEq(name, L"profile.ini") || IEq(name, L"model-choice.ini");
 }
 bool StateHasSettings(const wstring& dir) {
     const wstring state = StateDir(dir);

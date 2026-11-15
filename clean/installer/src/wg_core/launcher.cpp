@@ -14,6 +14,8 @@
 #include <ctime>
 
 #include "gamerules.h"
+#include "../../../fsr/asi/asi_thunk.h"            // wronggpu-asi.ini (ParseSelection / FormatSelection), pure
+#include "../../../fsr/src/model_choice_record.h"  // the game's model choice record
 #include "json_writer.h"
 #include "model.h"
 #include "optiscaler.h"
@@ -738,6 +740,28 @@ static bool OptInKey(const wstring& exe, const IniKeyChange& c) {
     return false;
 }
 
+// The launcher's entry in the game's model choice record (wronggpu-setup\model-choice.ini; model_choice_record.h): read,
+// the next seq, written atomically. A record that cannot be read is not written over (said in the notes).
+void WriteLauncherModelChoice(Context& ctx, const wstring& dir, char model, char ffx, std::vector<wstring>& notes,
+                              std::vector<wstring>* warnings) {
+    const std::filesystem::path path = Join(StateDir(dir), wgchoice::kRecordFile);
+    wgchoice::Record cur, next;
+    std::string why;
+    const wgchoice::ReadResult rr = wgchoice::ReadRecordFile(path, &cur, &why);
+    auto warn = [&](const wstring& w) {
+        LogLine(ctx, w);
+        notes.push_back(w);
+        if (warnings) warnings->push_back(w);
+    };
+    if (rr == wgchoice::ReadResult::Unreadable) return warn(L"The model choice record could not be read (" + FromUtf8(why) + L"); it was not changed.");
+    if (rr == wgchoice::ReadResult::Corrupt) LogLine(ctx, L"model-choice.ini was corrupt (" + FromUtf8(why) + L"); written anew");
+    if (!wgchoice::NextRecord(rr == wgchoice::ReadResult::Ok ? &cur : nullptr, model, wgchoice::Source::Launcher, ffx, &next))
+        return warn(L"The model choice record could not take another choice (its sequence number is at its end).");
+    if (!wgchoice::WriteRecordFile(path, next, &why)) return warn(L"The model choice record could not be written (" + FromUtf8(why) + L").");
+    LogLine(ctx, wstring(L"model choice record: Model ") + wchar_t(model) + L" (seq " + std::to_wstring(next.seq) + L", source=launcher, ffx=" +
+                     wchar_t(next.ffx) + L")");
+}
+
 Profile GameProfile(const wstring& dir) {
     Profile p;
     if (!LoadProfile(ProfilePath(dir), p)) {
@@ -769,12 +793,18 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
             if (warnings) warnings->push_back(w);
         }
     }
+    string winiBefore, winiAfter, optiAfter;  // the model choice record (below)
+    bool haveOpti = false;
     auto renderFile = [&](const wchar_t* name, bool opti) {
         const wstring path = Join(dir, name);
         string in;
         const bool had = ReadAll(path, in);
         if (opti && !had) return;  // OptiScaler.ini: only an existing file (ours) is changed
         string out; wstring why;
+        auto keep = [&] {
+            if (opti) { optiAfter = out; haveOpti = true; }
+            else { winiBefore = in; winiAfter = out; }
+        };
         if (opti) {
             RenderOptiIni(q, in, out, &notes);
             bool wrote = false;
@@ -784,9 +814,8 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
             JournalChanges(m.inikeys, name, in, out);
             recordChanged = recordChanged || out != in;
         }
-        // (a model the files cannot run yet, written as Model M above, is not stamped as the player's choice)
-        else if (!RenderWronggpuIni(q, in, out, &why, 0, modelChosen && q.get("model") == p.get("model")))
-            Fail(L"Settings not applied: " + why, EXIT_USAGE);
+        else if (!RenderWronggpuIni(q, in, out, &why)) Fail(L"Settings not applied: " + why, EXIT_USAGE);
+        keep();
         if (out == in && (had || out.empty())) return;  // unchanged, or nothing to write into a missing file
         WriteFileAtomic(path, out.data(), out.size());
         const wstring h = Sha256Bytes(out.data(), out.size());
@@ -795,6 +824,24 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
     };
     renderFile(L"wronggpu.ini", false);
     if (HostedRecord(m)) renderFile(L"OptiScaler.ini", true);
+    // The model choice record (clean/fsr/src/model_choice_record.h): the launcher's model choice, with the next seq, when the
+    // player explicitly applied a model (also the same one again) or the model the files run changed. ffx: the WrongGPU entry
+    // OptiScaler.ini now names (set with the model), so the front end never takes that entry for a choice in the game. (A
+    // model the files cannot run yet, written as Model M above, is recorded as what runs: Model M.)
+    const char modelBefore = ModelOfWronggpuIni(winiBefore), modelAfter = ModelOfWronggpuIni(winiAfter);
+    if (modelChosen || modelBefore != modelAfter) {
+        const char model = modelAfter ? modelAfter : 'M';
+        WriteLauncherModelChoice(ctx, dir, model, haveOpti ? ModelEntryOfOptiIni(optiAfter) : wgchoice::kUnknown, notes, warnings);
+        if (HostedRecord(m)) {  // the menu plugin's AMD entry chosen earlier: the launcher's model choice is newer
+            const wstring asi = Join(dir, L"wronggpu-asi.ini");
+            string text;
+            if (ReadAll(asi, text) && wgasi::ParseSelection(text) == wgasi::kModelAmd) {
+                const string fresh = wgasi::FormatSelection(model);
+                WriteFileAtomic(asi, fresh.data(), fresh.size());
+                notes.push_back(L"wronggpu-asi.ini: WrongGPU selected again in OptiScaler's list (the launcher's model choice is newer than AMD's FSR there)");
+            }
+        }
+    }
     if (RecordHasRr(m)) {  // Ray Reconstruction (rr.h): the RR plugin's settings file (RR stays off while its data is not ready)
         const wstring path = Join(dir, kRrSettings);
         string in;

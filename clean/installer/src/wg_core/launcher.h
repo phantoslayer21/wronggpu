@@ -180,7 +180,7 @@ struct OpRequest {
     std::vector<std::pair<wstring, wstring>> movePluginsList, moveModsList;
     bool otherSetupOk = false;     // 0.6.1: Clean up / Adopt of WrongGPU files another mod's setup uses, confirmed (--confirm-other-setup)
     bool hasProfile = false;       // apply: this profile (else the game's profile.ini); install: the profile a new install starts with
-    bool modelChosen = false;      // apply: the player explicitly applied the profile's model (set <game> model=...): stamped
+    bool modelChosen = false;      // apply: the player explicitly applied the profile's model (set <game> model=...): recorded
     Profile profile;
     // apply, the OptiScaler tab: edits of editable keys ("Section.Key", value); reset: the editable keys back to what the
     // install wrote (inikey journal, byte for byte); keep: values OptiScaler's menu saved over the launcher's are kept.
@@ -211,10 +211,14 @@ bool NeedsElevation(const wstring& dir);
 // Writes the profile into the game's files (wronggpu.ini, OptiScaler.ini), the record's hashes of those files and
 // owned-files.json; saves profile.ini.
 // warnings: what could not be done that the player should hear (rr_config_fix: the game's Engine.ini, rrconfig.h).
-// modelChosen: the player explicitly applied the profile's model (`set <game> model=<m>`): wronggpu.ini's model_chosen is
-// stamped now even when the model is the same (profile.h RenderWronggpuIni).
+// modelChosen: the player explicitly applied the profile's model (`set <game> model=<m>`): the game's model choice record
+// gets the launcher's choice with the next seq even when the model is the same (clean/fsr/src/model_choice_record.h).
 void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vector<wstring>& notes, std::vector<wstring>* warnings = nullptr,
                   bool modelChosen = false);
+// The launcher's model choice into the game's model choice record (wronggpu-setup\model-choice.ini), with the next seq;
+// ffx: the WrongGPU entry OptiScaler.ini names now ('-' when not known).
+void WriteLauncherModelChoice(Context& ctx, const wstring& dir, char model, char ffx, std::vector<wstring>& notes,
+                              std::vector<wstring>* warnings);
 Profile GameProfile(const wstring& dir);  // profile.ini, else the profile its wronggpu.ini implies
 // The OptiScaler tab: reset / keep / edits of OpRequest written into the installed OptiScaler.ini with the inikey
 // journal in the record. Nothing to do: no change.

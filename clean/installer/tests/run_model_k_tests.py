@@ -25,7 +25,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import run_model_l_tests as ml  # noqa: E402  (T, the Model L case and the install helpers; it sets WRONGGPU_TESTING)
 from run_installer_tests import read, write  # noqa: E402
-from run_model_l_tests import m_case, l_case, recorded_hash, suite, suite_options_model, upscaler_index, no_stamp, stamp  # noqa: E402
+from run_model_l_tests import m_case, l_case, recorded_hash, suite, suite_options_model, upscaler_index, choice_record  # noqa: E402
 
 
 def k_case():
@@ -75,14 +75,18 @@ def test_choice(t):
             (recorded_hash(b, "wronggpu.ini"), recorded_hash(b, "OptiScaler.ini")))
     t.check("...profile.ini says model=k", b"model=k\r\n" in profile_text(b))
     k_w, k_o = read(wini), read(oini)
+    r1 = choice_record(b)
+    t.check("...the model choice record: model=K, source=launcher, ffx=K (the entry it set)",
+            r1.get("model") == "K" and r1.get("source") == "launcher" and r1.get("ffx") == "K", r1)
     rc = t.run("set", exe, "model=K")
-    t.check("set model=K again: only model_chosen changes (stamped again: the newest choice)",
-            rc == 0 and no_stamp(read(wini)) == no_stamp(k_w) and read(oini) == k_o and stamp(read(wini)) > stamp(k_w) > 0, rc)
+    r2 = choice_record(b)
+    t.check("set model=K again: wronggpu.ini and OptiScaler.ini unchanged; the record's seq grows (the newest choice)",
+            rc == 0 and read(wini) == k_w and read(oini) == k_o and int(r2.get("seq", "0")) == int(r1.get("seq", "0")) + 1, (rc, r1, r2))
     rc = t.run("get", exe, "model")
     t.check("get model: k", rc == 0 and t.j.get("settings", {}).get("model", {}).get("profile") == "k", t.j.get("settings"))
     rc = t.run("set", exe, "model=M")
-    t.check("set model=M: wronggpu.ini (but its model_chosen line) and OptiScaler.ini back byte for byte as the install wrote them",
-            rc == 0 and no_stamp(read(wini)) == no_stamp(m_w) and read(oini) == m_o and stamp(read(wini)) > 0, (rc, read(wini)[-200:], read(oini)[-200:]))
+    t.check("set model=M: wronggpu.ini and OptiScaler.ini back byte for byte as the install wrote them",
+            rc == 0 and read(wini) == m_w and read(oini) == m_o, (rc, read(wini)[-200:], read(oini)[-200:]))
     t.check("...profile.ini has no model line again", b"model=" not in profile_text(b))
     # the Model L control: unchanged by the K choice (its entry follows Model K's, so it is 2)
     lsrc = os.path.join(t.work, "l-source", "nvngx_dlss.dll")
@@ -98,8 +102,7 @@ def test_choice(t):
             upscaler_index(read(oini).decode("utf-8", "replace")) == "1", (rc, t.j.get("message")))
     rc = t.run("set", exe, "model=L")
     rc2 = t.run("set", exe, "model=M")
-    t.check("K to L to M: back byte for byte as the install wrote them (but model_chosen)",
-            rc == 0 and rc2 == 0 and no_stamp(read(wini)) == no_stamp(m_w) and read(oini) == m_o, (rc, rc2))
+    t.check("K to L to M: back byte for byte as the install wrote them", rc == 0 and rc2 == 0 and read(wini) == m_w and read(oini) == m_o, (rc, rc2))
     # a game saved on K whose data goes away: a repair keeps the player's choice, the files say Model M with a warning
     rc = t.run("set", exe, "model=K")
     os.remove(os.path.join(t.lad, "WrongGPU", "model", "K", "model.wgcm"))

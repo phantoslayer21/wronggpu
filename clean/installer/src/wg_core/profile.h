@@ -75,17 +75,13 @@ std::map<string, string> EffectiveSettings(const string& wronggpuIni, const stri
 // runtime items removed from runtime_options (and their own lines) and the non-default ones appended in a fixed
 // order; unmanaged items and every other line stay as they are. OptiScaler keys only where the key already exists.
 // false with *why when a profile value does not validate (nothing is rendered then).
-// When the rendering changes the last model item of runtime_options (the model the front end runs), or `modelChosen`
-// says the player explicitly applied a model (also the same one again; Model M then becomes the last model item), it
-// also writes model_chosen = `now` (Windows FILETIME, 100 ns since 1601 UTC; 0: the current time) in that section: the
-// time of the launcher's model choice, which the front end weighs against the OptiScaler side's choices (the plugin's
-// menu, the entry picked in OptiScaler's FFX box; clean/fsr/src/model_precedence.h: the most recent explicit choice
-// wins; a tie goes to the launcher). Otherwise an unchanged model item leaves
-// model_chosen as it is (another setting applied is not a model choice).
-bool RenderWronggpuIni(const Profile& p, const string& in, string& out, wstring* why, uint64_t now = 0, bool modelChosen = false);
-// The current time in Windows FILETIME units (100 ns since 1601-01-01 UTC), the unit every model choice is stamped in.
-uint64_t NowFileTime();
+bool RenderWronggpuIni(const Profile& p, const string& in, string& out, wstring* why);
 bool RenderOptiIni(const Profile& p, const string& in, string& out, std::vector<wstring>* notes = nullptr);
+// The model a wronggpu.ini text runs: its last runtime_options model item, 'M', 'K' or 'L'; 0 without one.
+char ModelOfWronggpuIni(const string& text);
+// The WrongGPU model entry an OptiScaler.ini text's UpscalerIndex names ([WrongGPU] of OptiScaler 10's slot, else [FSR]):
+// 'M' (0), 'K' (kModelKEntryIndex, a build with Model K), 'L' (kModelLEntryIndex, a build with the L choice); '-' otherwise.
+char ModelEntryOfOptiIni(const string& text);
 // The profile a 0.5.x install implies: the effective values of its wronggpu.ini and OptiScaler.ini (defaults and the
 // stale defaults of earlier versions dropped; upscaler=standin counts as on). Only keys of the settings schema
 // (kSettings) are taken: developer and test keys (runtime_options items such as timing_log, capture_dir, model_dir,

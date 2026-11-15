@@ -162,48 +162,16 @@ void TestSelectionFile() {
     CHECK(ParseSelection("selection=wronggpu-l") == (WRONGGPU_MODEL_L ? kModelL : kModelM));
 }
 
-// 0.6.5: the saved choice says whether the player chose it and when (chosen=), so the front end can weigh it against
-// the launcher's model choice (src/model_precedence.h).
-void TestSelectionExplicitAndTime() {
-    Selection s = ParseSelectionFile("");
-    CHECK(s.model == kModelM && !s.explicitChoice && s.chosenAt == 0);  // no file: the default entry
-    s = ParseSelectionFile("; c\r\nselection=wronggpu\r\n");             // what installers seed / 0.6.0 saved for M
-    CHECK(s.model == kModelM && !s.explicitChoice && s.chosenAt == 0);
-    s = ParseSelectionFile("selection=wronggpu\r\nchosen=1763150000\r\n");  // a click on Model M, with its time
-    CHECK(s.model == kModelM && s.explicitChoice && s.chosenAt == 1763150000ull);
-    s = ParseSelectionFile("chosen=77\r\nselection=amd\r\n");  // order does not matter
-    CHECK(s.model == kModelAmd && s.explicitChoice && s.chosenAt == 77);
-    s = ParseSelectionFile("selection=amd\r\n");  // an earlier version's AMD: explicit, no time
-    CHECK(s.model == kModelAmd && s.explicitChoice && s.chosenAt == 0);
-    s = ParseSelectionFile("selection=wronggpu\r\nchosen=soon\r\n");  // a bad time: not recorded
-    CHECK(s.model == kModelM && !s.explicitChoice && s.chosenAt == 0);
-    s = ParseSelectionFile("selection=garbage\r\nchosen=5\r\n");  // an unknown entry: the default, whatever the time
-    CHECK(s.model == kModelM && !s.explicitChoice && s.chosenAt == 0);
-    s = ParseSelectionFile("selection=wronggpu-k\r\n");
-    CHECK(WRONGGPU_MODEL_K ? (s.model == kModelK && s.explicitChoice) : (s.model == kModelM && !s.explicitChoice));
-    s = ParseSelectionFile("selection=wronggpu-l\r\nchosen=9\r\n");  // Model L; in a build without it, the default
-    CHECK(WRONGGPU_MODEL_L ? (s.model == kModelL && s.explicitChoice && s.chosenAt == 9) : (s.model == kModelM && !s.explicitChoice));
-    // round trip of every entry with and without a time
-    for (const Entry& e : kEntries) {
-        const Selection t = ParseSelectionFile(FormatSelection(e.model, 1234));
-        CHECK(t.model == e.model && t.explicitChoice && t.chosenAt == 1234);
-        const Selection u = ParseSelectionFile(FormatSelection(e.model));
-        CHECK(u.model == e.model && u.chosenAt == 0 && u.explicitChoice == (e.model != kModelM));
-    }
-    CHECK(FormatSelection(kModelL, 5).find("selection=wronggpu-l\r\nchosen=5\r\n") != std::string::npos);
-    CHECK(FormatSelection(kModelM).find("chosen=") == std::string::npos);
-}
-
-// A click records an explicit choice with its time and reports it; the menu marks the model the front end reported
-// (ShownModel) until the next click.
-void TestClickRecordsTimeAndShownModel() {
+// A click records the model and reports it; the menu marks the model the front end reported (ShownModel) until the
+// next click. (The click's entry in the game's model choice record is the live plugin's: wronggpu_asi.cpp.)
+void TestClickAndShownModel() {
     PluginState st;
     FakeSelectable none;
     bool clicked = true;
     const int size = 0;
-    SelectableThunkLogic(none, "FSR 3.X", true, 0, &size, st, 100, &clicked);
-    CHECK(!clicked && !st.explicitChoice.load() && st.chosenAt.load() == 0);  // drawing alone records nothing
-    // the front end reports that another model runs (the launcher's choice won over the plugin's default)
+    SelectableThunkLogic(none, "FSR 3.X", true, 0, &size, st, &clicked);
+    CHECK(!clicked && st.model.load() == kModelM);  // drawing alone records nothing
+    // the front end reports that another model runs (the model choice record decided)
     st.shown.store(kEntries[kEntryCount - 1].model);
     FakeSelectable marks;
     SelectableThunkLogic(marks, "FSR 3.X", true, 0, &size, st);
@@ -211,21 +179,21 @@ void TestClickRecordsTimeAndShownModel() {
     FakeBeginCombo bc;
     BeginComboThunkLogic(bc, "", "FSR 3.X", 0, st);
     CHECK(bc.preview == kEntries[kEntryCount - 1].label);
-    // the player clicks Model M: explicit, timed, and marked again
+    // the player clicks the first entry: recorded, marked again
     FakeSelectable click;
     click.clickLabel = kEntries[0].label;
-    CHECK(SelectableThunkLogic(click, "FSR 3.X", true, 0, &size, st, 1763150000ull, &clicked));
-    CHECK(clicked && st.model.load() == kModelM && st.explicitChoice.load() && st.chosenAt.load() == 1763150000ull);
-    CHECK(st.shown.load() == kShowSaved && ShownModel(st) == kModelM);
-    // a click on the entry already saved is still an explicit choice with a new time
-    FakeSelectable again;
-    again.clickLabel = kEntries[0].label;
-    CHECK(SelectableThunkLogic(again, "FSR 3.X", true, 0, &size, st, 1763150500ull, &clicked) && clicked);
-    CHECK(st.chosenAt.load() == 1763150500ull);
+    CHECK(SelectableThunkLogic(click, "FSR 3.X", true, 0, &size, st, &clicked));
+    CHECK(clicked && st.model.load() == kModelM && st.shown.load() == kShowSaved && ShownModel(st) == kModelM);
 #if WRONGGPU_MODEL_L
     FakeSelectable l;
     l.clickLabel = "WrongGPU Model L";
-    CHECK(SelectableThunkLogic(l, "FSR 3.X", true, 0, &size, st, 1763151000ull, &clicked) && clicked && st.model.load() == kModelL);
+    CHECK(SelectableThunkLogic(l, "FSR 3.X", true, 0, &size, st, &clicked) && clicked && st.model.load() == kModelL);
+    CHECK(ParseSelection(FormatSelection(kModelL)) == kModelL);
+#endif
+#if WRONGGPU_MODEL_K
+    FakeSelectable k;
+    k.clickLabel = "WrongGPU Model K";
+    CHECK(SelectableThunkLogic(k, "FSR 3.X", true, 0, &size, st, &clicked) && clicked && st.model.load() == kModelK);
 #endif
 }
 
@@ -240,8 +208,7 @@ int main() {
     TestClickAmd();
     TestPreviewRelabel();
     TestSelectionFile();
-    TestSelectionExplicitAndTime();
-    TestClickRecordsTimeAndShownModel();
+    TestClickAndShownModel();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }
