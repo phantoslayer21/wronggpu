@@ -48,10 +48,10 @@ int main() {
   EXPECT(std::string(m.name) == "M" && std::string(m.map_file) == "preset-M.v1.map.json" &&
          std::string(m.model_subdir).empty() && m.native_d3d12);
   EXPECT(std::string(k.name) == "K" && std::string(k.map_file) == "preset-K.v1.map.json" &&
-         std::string(k.model_subdir) == "K" && !k.native_d3d12);
+         std::string(k.model_subdir) == "K" && k.native_d3d12);
   EXPECT(std::string(l.name) == "L" && std::string(l.map_file) == "preset-L.v1.map.json" &&
          std::string(l.model_subdir) == "L" && !l.native_d3d12);
-  EXPECT(wgrt::native_d3d12_models() == "Model M");  // "native D3D12 supports Model M only", as before
+  EXPECT(wgrt::native_d3d12_models() == "Models M, K");  // "native D3D12 supports Models M, K only" (Model L: native_ok in runtime.cpp)
   ModelId id = ModelId::K;
   EXPECT(wgrt::model_from_name("m", &id) && id == ModelId::M);
   EXPECT(wgrt::model_from_name("L", &id) && id == ModelId::L);

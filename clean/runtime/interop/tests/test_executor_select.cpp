@@ -73,13 +73,27 @@ int main() {
     c = choose_executor(r);
     expect("default: unknown adapter -> hip", c.executor == "hip" && has(c.why, "not identified"));
   }
-  // default with what has no D3D12 port -> hip, one line with the reason
+  // default with model K on RDNA 4 -> dx12 by the default rule (the D3D12 executor's create checks K's ports and
+  // refuses the context when one is missing: dx12_refused_line, then the HIP executor); on other GPUs -> hip
   {
     ExecutorRequest r = gpu("AMD Radeon RX 9070 XT");
     r.model_k = true;
     ExecutorChoice c = choose_executor(r);
-    expect("default: model K -> hip", c.executor == "hip" && has(c.why, "model K"));
+    expect("default: model K on RDNA 4 -> dx12 (by default)", c.executor == "dx12" && c.by_default && c.why.empty());
+    r = gpu("AMD Radeon RX 7900 XTX");
+    r.model_k = true;
+    c = choose_executor(r);
+    expect("default: model K on RDNA 3 -> hip", c.executor == "hip" && has(c.why, "not an RDNA 4"));
     r = gpu("AMD Radeon RX 9070 XT");
+    r.model_k = true;
+    r.capture = true;
+    c = choose_executor(r);
+    expect("default: model K + frame capture -> hip", c.executor == "hip" && has(c.why, "frame capture"));
+  }
+  // default with what has no D3D12 port -> hip, one line with the reason
+  {
+    ExecutorRequest r = gpu("AMD Radeon RX 9070 XT");
+    ExecutorChoice c;
     r.sparkle_guard = true;
     c = choose_executor(r);
     expect("default: sparkle guard -> hip", c.executor == "hip" && has(c.why, "sparkle guard"));
@@ -93,7 +107,12 @@ int main() {
     ExecutorRequest r = gpu("AMD Radeon RX 9070 XT");
     r.executor = "hip";
     ExecutorChoice c = choose_executor(r);
-    expect("executor=hip on RDNA 4 -> hip", c.executor == "hip" && !c.by_default && c.why.empty());
+    expect("executor=hip on RDNA 4 -> hip, as a loud diagnostic",
+           c.executor == "hip" && !c.by_default && c.warn && has(c.why, "diagnostic: executor=hip"));
+    r.model_k = true;
+    c = choose_executor(r);
+    expect("executor=hip + model K -> hip, the same diagnostic line (never a game route)",
+           c.executor == "hip" && !c.by_default && c.warn && has(c.why, "not the in-game runtime"));
   }
   // forced: executor=dx12 (or d3d12) -> dx12 on any adapter (the device refuses unsupported ones), not by default
   {
@@ -110,8 +129,17 @@ int main() {
     r.executor = "dx12";
     r.model_k = true;
     c = choose_executor(r);
-    expect("executor=dx12 + model K -> hip with the earlier warning",
-           c.executor == "hip" && c.warn && c.why == "executor=dx12: model K has no D3D12 port; the HIP executor runs it");
+    expect("executor=dx12 + model K -> dx12 (forced; ports checked at the executor's create)",
+           c.executor == "dx12" && !c.by_default && c.why.empty());
+    {
+      const std::string e = "D3D12 runtime: model K: the D3D12 build has no port of k_out_color_direct";
+      expect("model K port missing (default): the refusal line names it",
+             has(wgi::dx12_refused_line_k(true, e), "no port of k_out_color_direct") &&
+                 has(wgi::dx12_refused_line_k(true, e), "model K has no HIP route") &&
+                 has(wgi::dx12_refused_line_k(true, e), "the game keeps its own upscaler") &&
+                 !has(wgi::dx12_refused_line_k(true, e), "the HIP executor runs it") &&
+                 wgi::dx12_refused_line_k(true, e).find('\n') == std::string::npos);
+    }
     r.model_k = false;
     r.sparkle_guard = true;
     c = choose_executor(r);
@@ -149,6 +177,91 @@ int main() {
     expect("the hip_switch=off line names the frame, the reason, no HIP and the front end's fallback",
            has(l, "frame 2: executor dx12 (default on RDNA 4) does not take this frame") && has(l, "native direct frame") &&
                has(l, "does not move to the HIP executor") && has(l, "AMD FSR, else its stand-in"));
+  }
+  // REVIEW-215b P1-a: model K's executor selection
+  {
+    using wgi::RefusedAction;
+    ExecutorRequest r = gpu("AMD Radeon RX 9070 XT");
+    r.model_k = true;
+    ExecutorChoice c = choose_executor(r);
+    expect("K auto on RDNA 4 -> dx12 (by default), nothing to log", c.executor == "dx12" && c.by_default && c.why.empty());
+    r.sparkle_guard = true;
+    c = choose_executor(r);
+    expect("K auto + sparkle guard -> dx12 with the guard turned off, one line",
+           c.executor == "dx12" && c.by_default && c.sparkle_off && c.warn && has(c.why, "turned off for model K") &&
+               has(c.why, "runs on the D3D12 executor"));
+    r.executor = "dx12";
+    c = choose_executor(r);
+    expect("K executor=dx12 + sparkle guard -> dx12, guard off", c.executor == "dx12" && c.sparkle_off && c.warn);
+    r = gpu("AMD Radeon RX 9070 XT");
+    r.model_k = true;
+    r.sparkle_guard = false;
+    r.capture = true;
+    c = choose_executor(r);
+    expect("K auto + capture -> hip with the loud diagnostic line",
+           c.executor == "hip" && c.warn && c.why == "diagnostic: frame capture forces the HIP executor (model K runs on the "
+                                                    "D3D12 executor without it)");
+    r.executor = "dx12";
+    c = choose_executor(r);
+    expect("K executor=dx12 + capture -> hip, the same diagnostic line",
+           c.executor == "hip" && c.warn && has(c.why, "diagnostic: frame capture forces the HIP executor"));
+    r.capture = false;
+    r.executor = "auto";
+    r.sparkle_guard = true;
+    r.model_k = false;
+    c = choose_executor(r);
+    expect("model M + sparkle guard -> hip as before (the guard rule is K's exception only)",
+           c.executor == "hip" && !c.sparkle_off && has(c.why, "sparkle guard"));
+    r = gpu("AMD Radeon RX 7900 XTX");
+    r.model_k = true;
+    c = choose_executor(r);
+    expect("K auto on a non-RDNA 4 adapter: today's rule, logged (owner question)",
+           c.executor == "hip" && has(c.why, "not an RDNA 4"));
+    r = wgi::ExecutorRequest();
+    r.model_k = true;
+    c = choose_executor(r);
+    expect("K auto on an unidentified adapter: today's rule, logged", c.executor == "hip" && has(c.why, "not identified"));
+
+    // hip_switch: ignored for K, one line when it is set
+    expect("K: no line when hip_switch is not set", wgi::k_hip_switch_note("").empty());
+    expect("K: hip_switch=on is ignored with one line",
+           has(wgi::k_hip_switch_note("on"), "model K ignores hip_switch=on") &&
+               has(wgi::k_hip_switch_note("on"), "never to HIP"));
+
+    // REVIEW-215b P1-b: a frame the D3D12 executor did not take. The three paths of the review and the messages the
+    // executor gives them: no output texture, a render size outside the configured maximum, an unsupported frame (an
+    // output texture without unordered access); each with hip_switch off and on, by default and forced.
+    const char* const refusals[] = {
+        "frame not taken (nothing recorded): no output texture",
+        "frame not taken (nothing recorded): model K direct frame: render size outside the configured maximum",
+        "frame not taken: output texture has no unordered access",
+    };
+    for (const char* why : refusals) {
+      const std::string w = why;
+      expect(("refused frame recognised: " + w).c_str(), wgi::frame_refused(w));
+      for (bool by_default : {true, false}) {
+        for (bool hip_switch : {false, true}) {
+          const std::string tag = w.substr(0, 40) + (by_default ? " default" : " forced") + (hip_switch ? " switch=on" : " switch=off");
+          // no counter, no state: every refused K frame is answered the same way (WG_ERROR_UNSUPPORTED), whatever came before
+          expect(("K refused frame -> WG_ERROR_UNSUPPORTED, the front end's upscaler: " + tag).c_str(),
+                 wgi::refused_frame_action(true, by_default, hip_switch) == RefusedAction::kNoSwitch);
+        }
+      }
+    }
+    expect("a frame that is not a refusal is not a 'frame not taken'",
+           !wgi::frame_refused("input refused: texture format") && !wgi::frame_refused("model K: kernel failed"));
+    // the other models keep their rules
+    expect("M default + hip_switch=on -> switch to HIP (the 0.6.0 option)",
+           wgi::refused_frame_action(false, true, true) == RefusedAction::kSwitchToHip);
+    expect("M default + hip_switch=off -> front end's upscaler",
+           wgi::refused_frame_action(false, true, false) == RefusedAction::kNoSwitch);
+    expect("M executor=dx12 -> bilinear fallback", wgi::refused_frame_action(false, false, true) == RefusedAction::kBilinear);
+    const std::string rl = wgi::k_refusal_line(7, "frame not taken (nothing recorded): no output texture");
+    expect("the refusal line names the frame, the reason, the front end's upscaler and 'never to the HIP executor'",
+           has(rl, "frame 7: model K") && has(rl, "no output texture") && has(rl, "AMD FSR, else its stand-in") &&
+               has(rl, "never to the HIP executor") && rl.find('\n') == std::string::npos);
+    expect("K and M (hip_switch=off) take the same path: the same action",
+           wgi::refused_frame_action(true, true, true) == wgi::refused_frame_action(false, true, false));
   }
   // test executor and unknown values
   {
