@@ -113,6 +113,8 @@ void AddSplitServices(PlatformT& p, const wgfsr::Config& config) {
 
 bool D3D12ResourceInfo(void* resource, wgfsr::ResourceInfo* out);
 void* DeviceFromCommandList(void* commandList);  // ID3D12Device* (the game keeps it alive), or null
+void RetainDevice(void* device);   // AddRef on the game's ID3D12Device: a create worker's own reference (async_create.h)
+void ReleaseDevice(void* device);  // its Release, by the worker when its create is over
 
 // "name.dll" of the module that contains `address` (cached per thread for repeated callers).
 const char* ModuleNameOf(const void* address);

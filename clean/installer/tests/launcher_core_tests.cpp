@@ -177,7 +177,8 @@ int main() {
         const SettingDef* sparkle = FindSetting("sparkle_guard");
         require(exec && filter && sparkle && FindSetting("wronggpu") && FindSetting("pre_exposure") && FindSetting("fps_overlay"), "the Basic tier has its six settings");
         require(ValidateSetting(*exec, "D3D12", &n, &why) && n == "dx12", "executor d3d12 -> dx12");
-        require(!ValidateSetting(*exec, "vulkan", &n, &why) && why.find(L"auto, dx12, hip") != wstring::npos, "a bad executor is refused and the allowed values named");
+        require(!ValidateSetting(*exec, "vulkan", &n, &why) && why.find(L"auto, dx12") != wstring::npos && why.find(L"hip") == wstring::npos, "a bad executor is refused and the allowed values named (no hip)");
+        require(!ValidateSetting(*exec, "hip", &n, &why), "executor=hip is no value of the setting any more (R1)");
         require(!ValidateSetting(*filter, "quality7", &n, &why), "output_filter: only the runtime's values");
         require(ValidateSetting(*filter, "quality9", &n, &why) && n == "quality9", "output_filter quality9");
         require(ValidateSetting(*sparkle, "0.25", &n, &why) && n == "0.25", "sparkle_guard rate");
@@ -185,7 +186,33 @@ int main() {
         require(!ValidateSetting(*sparkle, "1.5", &n, &why) && !ValidateSetting(*sparkle, "-0.1", &n, &why) && !ValidateSetting(*sparkle, "abc", &n, &why), "sparkle_guard rate must be in (0, 1)");
         Profile p = DefaultProfile();
         require(!SetSetting(p, "nosuchkey", "1", &why) && !SetSetting(p, "pre_exposure", "bright", &why), "unknown keys and bad values are refused by set");
-        require(SetSetting(p, "Executor", " HIP ", &why) && p.get("executor") == "hip", "set trims and lowers");
+        require(SetSetting(p, "Executor", " DX12 ", &why) && p.get("executor") == "dx12", "set trims and lowers");
+        require(!SetSetting(p, "Executor", " HIP ", &why) && p.get("executor") == "dx12", "set refuses executor=hip: not a game setting");
+
+        // ---- R1: the choices that exist on the HIP runtime only are not offered on an RX 9000 card ----------------
+        require(NeedsHipRuntime("executor", "hip") && NeedsHipRuntime("executor", " HIP "), "executor=hip needs the HIP runtime");
+        require(!NeedsHipRuntime("executor", "auto") && !NeedsHipRuntime("executor", "dx12"), "auto and dx12 run on Direct3D 12");
+        require(NeedsHipRuntime("output_filter", "quality5") && NeedsHipRuntime("output_filter", "quality9"), "Quality 5 / 9 need the HIP runtime");
+        require(!NeedsHipRuntime("output_filter", "default") && !NeedsHipRuntime("output_filter", "original") && !NeedsHipRuntime("output_filter", "analytic"),
+                "the other output filters run on Direct3D 12");
+        require(NeedsHipRuntime("sparkle_guard", "on") && NeedsHipRuntime("sparkle_guard", "0.25") && !NeedsHipRuntime("sparkle_guard", "off") && !NeedsHipRuntime("sparkle_guard", "0"),
+                "the sparkle guard needs the HIP runtime, off does not");
+        require(!NeedsHipRuntime("pre_exposure", "original") && !NeedsHipRuntime("wronggpu", "off") && !NeedsHipRuntime("nosuchkey", "hip"), "no other key is HIP-only");
+        require(wstring(NotOnDx12Text()) == L"Not available on the DX12 runtime yet", "the words the launcher shows");
+        for (const char* key : {"executor", "output_filter", "sparkle_guard"}) {
+            const SettingDef* d = FindSetting(key);
+            const wstring help = d ? d->help : L"";
+            require(d && help.find(L"Uses HIP") == wstring::npos && help.find(L"Needs the HIP runtime") == wstring::npos && help.find(L"HIP is used anyway") == wstring::npos,
+                    "the help text of a HIP-only setting no longer promises HIP");
+        }
+        require(wstring(FindSetting("output_filter")->help).find(L"not available on the DX12 runtime yet") != wstring::npos &&
+                    wstring(FindSetting("sparkle_guard")->help).find(L"Not available on the DX12 runtime yet") != wstring::npos,
+                "the help texts say the same words");
+        // a profile or ini that already holds one still renders (the runtime falls back with one log line; no HIP)
+        {
+            Profile q = DefaultProfile();
+            require(SetSetting(q, "output_filter", "quality9", nullptr) && q.get("output_filter") == "quality9", "an existing quality9 profile is still valid");
+        }
 
         // ---- rendering wronggpu.ini ---------------------------------------------------------------------------
         const string front = "# WrongGPU settings\r\n[fsr]\r\n# who upscales\r\nupscaler = network\r\nruntime_dll = wronggpu_runtime.dll\r\n"
@@ -267,6 +294,37 @@ int main() {
         { const string broken = "[profile]\r\nexecutor=warp\r\n"; WriteFileAtomic(pp, broken.data(), broken.size()); }
         std::vector<wstring> problems;
         require(LoadProfile(pp, loaded, &problems) && loaded.get("executor") == "auto" && problems.size() == 1, "a bad profile value falls back to the default, reported");
+
+        {   // R1: executor=hip is not a game setting: a profile or an ini that holds it loses it, and the removal is reported
+            const string hipProfile = "[profile]\r\nformat=1\r\nexecutor=hip\r\noutput_filter=analytic\r\n";
+            WriteFileAtomic(pp, hipProfile.data(), hipProfile.size());
+            std::vector<wstring> pr;
+            Profile lp;
+            require(LoadProfile(pp, lp, &pr) && lp.get("executor") == "auto" && lp.get("output_filter") == "analytic" && pr.size() == 1 &&
+                        pr[0].find(kRetiredHipNote) != wstring::npos,
+                    "profile.ini with executor=hip: the key is removed (Auto), the rest is kept, the removal is reported");
+            SaveProfile(pp, lp);
+            string savedText;
+            ReadAll(pp, savedText);
+            require(savedText.find("hip") == string::npos && savedText.find("executor=auto") != string::npos, "the saved profile no longer holds hip");
+            const string hipIni = "[fsr]\r\nupscaler = network\r\nruntime_options = model=M;executor=hip;pre_exposure=original\r\n";
+            std::vector<wstring> notes;
+            const Profile imp2 = ImportProfile(hipIni, "", &notes);
+            bool said = false;
+            for (auto& n : notes) said = said || n.find(kRetiredHipNote) != wstring::npos;
+            require(imp2.get("executor") == "auto" && imp2.get("pre_exposure") == "original" && said,
+                    "a wronggpu.ini with executor=hip: not imported, the removal is reported, the other settings are kept");
+            string rendered;
+            wstring rwhy;
+            require(RenderWronggpuIni(imp2, hipIni, rendered, &rwhy) && rendered.find("executor") == string::npos && rendered.find("pre_exposure=original") != string::npos,
+                    "the next Apply writes wronggpu.ini without executor=hip");
+            bool listed = false;
+            for (auto& e : OutsideEdits(imp2, hipIni, "")) listed = listed || e.key == "executor";
+            require(!listed, "a retired executor=hip is not offered as a change made outside the launcher");
+            const string dx = "[fsr]\r\nruntime_options = executor=dx12\r\n";
+            std::vector<wstring> n2;
+            require(ImportProfile(dx, "", &n2).get("executor") == "dx12", "executor=dx12 is still imported");
+        }
 
         // ---- record v1 -> v2 -------------------------------------------------------------------------------------------
         const wstring game = Join(dir, L"game");
@@ -1725,11 +1783,11 @@ int main() {
 
         // ---- job and result files -----------------------------------------------------------------------------------------
         OpRequest job; job.op = Op::Update; job.exe = L"C:\\Games\\X\\x.exe"; job.dir = L"C:\\Games\\X"; job.optiPackage = L"C:\\dl\\Opti.7z"; job.moveMods = true;
-        job.hasProfile = true; job.profile = DefaultProfile(); SetSetting(job.profile, "executor", "hip", nullptr);
+        job.hasProfile = true; job.profile = DefaultProfile(); SetSetting(job.profile, "executor", "dx12", nullptr);
         const string jt = JobText(job, L"C:\\Users\\p\\AppData\\Local", L"C:\\log.txt");
         OpRequest back; wstring lad, lf;
         require(ParseJob(jt, back, lad, lf, &why) && back.op == Op::Update && back.exe == job.exe && back.dir == job.dir && back.moveMods && !back.removeOld &&
-                back.hasProfile && back.profile.get("executor") == "hip" && lad == L"C:\\Users\\p\\AppData\\Local" && lf == L"C:\\log.txt", "job file round trip");
+                back.hasProfile && back.profile.get("executor") == "dx12" && lad == L"C:\\Users\\p\\AppData\\Local" && lf == L"C:\\log.txt", "job file round trip");
         {   // the player's account and whether a new install gets its own entry: carried to the worker (another account may run it)
             wstring sid; int per = 7;
             require(ParseJob(JobText(job, L"C:\\Users\\p\\AppData\\Local", L"", L"S-1-5-21-1-2-3-1001", 0), back, lad, lf, &why, &sid, &per) && sid == L"S-1-5-21-1-2-3-1001" && per == 0 &&

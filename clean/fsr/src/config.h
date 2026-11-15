@@ -37,6 +37,10 @@ struct Config {
     // How long a game thread waits for the upscaler's create (async_create.h); after that AMD's FSR upscales until the
     // create finishes (with fallbackToAmd; without it the game thread waits until the create finishes).
     uint32_t createWaitMs = 3000;
+    // The longest a game thread waits for the upscaler's create when AMD's FSR cannot upscale meanwhile (fallback_to_amd = 0,
+    // or a custom slot without an AMD DLL of its own). After that the create is refused, logged, and the context goes to
+    // the front end's upscaler (a create that hangs must not hang the game). create_giveup_ms.
+    uint32_t createGiveUpMs = 30000;
     // A destroyed upscaler context keeps its upscaler warm ("parked") for this long; a context created with the same
     // device, sizes, flags, options and model within that time takes it over instead of creating one (games that
     // re-create their upscaler at every step of a dynamic resolution). One parked upscaler at most; 0: never.

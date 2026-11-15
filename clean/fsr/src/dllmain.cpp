@@ -176,6 +176,8 @@ FrontEnd& Get() {
         p.logBytes = [] { return L().Bytes(); };
         p.resourceInfo = &D3D12ResourceInfo;
         p.timer = &StartTimer;
+        p.retainDevice = &RetainDevice;
+        p.releaseDevice = &ReleaseDevice;
         p.deviceLost = [](void* device) {
             return device && static_cast<ID3D12Device*>(device)->GetDeviceRemovedReason() != S_OK;
         };

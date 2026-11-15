@@ -612,6 +612,14 @@ void* DeviceFromCommandList(void* commandList) {
     return device;
 }
 
+void RetainDevice(void* device) {
+    if (device) static_cast<ID3D12Device*>(device)->AddRef();
+}
+
+void ReleaseDevice(void* device) {
+    if (device) static_cast<ID3D12Device*>(device)->Release();
+}
+
 const char* ModuleNameOf(const void* address) {
     thread_local const void* lastBase = nullptr;
     thread_local char lastName[MAX_PATH] = "?";

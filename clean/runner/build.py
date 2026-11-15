@@ -17,6 +17,7 @@ Each kernel source is compiled with the command given in spec 90, plus a fixed c
 """
 import argparse
 import json
+import hashlib
 import os
 import re
 import shutil
@@ -79,6 +80,9 @@ MODELS_BUILT = {name: True for name in OPTIONAL_MODELS}
 # l_post from clean/l/kernels, l_enc_values = encoder.hip with WG_ENC_VALUES_OUT=1) and its map built in. The D3D12
 # ports of Model L's kernels are built by clean/dx12/build_dx12.py --model-l.
 MODEL_L = False
+# R1: a developer build only (--dev-diagnostics): executor=hip and the frame capture work in the runtime library. Never a
+# release build or a package: the library says which it is (wgBuildMarker), clean/tests/check_no_dev_diagnostics.py checks.
+DEV_DIAGNOSTICS = False
 L_RUNTIME_SOURCES = [os.path.join("..", "l", "runtime", "l_model.cpp"), os.path.join("..", "l", "runtime", "l_pack.cpp")]
 L_MAP_FILE = os.path.join(os.path.dirname(os.path.dirname(HERE)), "data", "preset-L.v1.map.json")
 L_KERNEL_DIR = os.path.join(os.path.dirname(HERE), "l", "kernels")
@@ -326,6 +330,8 @@ def runtime_command(cxx, out, embedded=None):
             cmd += ["-D" + m["define"]]
     if MODEL_L:
         cmd += ["-DWG_MODEL_L"]
+    if DEV_DIAGNOSTICS:
+        cmd += ["-DWG_DEV_DIAGNOSTICS=1"]
     cmd += srcs
     if RR_OBJECTS and sys.platform == "win32":
         # release 0.6.0 (owner 2026-11-02: one runtime DLL, "just like before"): the RR runtime (clean/rr_f/runtime, built by
@@ -350,7 +356,35 @@ def build_runtime(cxx, out_dir, embed=True):
             ([L_MAP_FILE] if MODEL_L else []):
         shutil.copyfile(m, os.path.join(out_dir, os.path.basename(m)))
     embedded = write_embedded(out_dir) if embed else None
-    run(runtime_command(cxx, os.path.join(out_dir, runtime_library_name()), embedded))
+    cmd = runtime_command(cxx, os.path.join(out_dir, runtime_library_name()), embedded)
+    run(cmd)
+    if os.path.isfile(os.path.join(out_dir, runtime_library_name())):  # (a build that failed raised in run)
+        write_build_manifest(out_dir, cmd, embedded is not None)
+
+
+def write_build_manifest(out_dir, cmd, embedded):
+    """<runtime library>.build.json next to the library: what this build is (R1). The payload packager accepts a runtime
+    library only when its SHA-256 matches a manifest that says dev_diagnostics = false (make_payload.py, failing closed);
+    any later change of the library (stripping, signing, a copy from another build) breaks the match."""
+    dll = os.path.join(out_dir, runtime_library_name())
+    with open(dll, "rb") as f:
+        data = f.read()
+    manifest = {
+        "format": 1,
+        "file": os.path.basename(dll),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "size": len(data),
+        "dev_diagnostics": bool(DEV_DIAGNOSTICS),
+        "model_l": bool(MODEL_L),
+        "models_left_out": sorted(n for n in OPTIONAL_MODELS if not MODELS_BUILT[n]),
+        "embedded_files": bool(embedded),
+        "defines": sorted(a for a in cmd if a.startswith("-D")),
+    }
+    path = os.path.splitext(dll)[0] + ".build.json"
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(manifest, f, indent=2, sort_keys=True)
+        f.write("\n")
+    print(f"build manifest: {path} (dev_diagnostics={str(manifest['dev_diagnostics']).lower()}, sha256 {manifest['sha256'][:16]}...)", flush=True)
 
 
 def run(cmd):
@@ -487,7 +521,12 @@ def main(argv=None):
                     help="Model L in the runtime library (#89; off by default): its runtime sources with WG_MODEL_L, its "
                          "code objects and its map built in (with --runtime-only and --rocm its code objects are built "
                          "first, for every target); its D3D12 kernels come from clean/dx12/build_dx12.py --model-l")
+    ap.add_argument("--dev-diagnostics", action="store_true",
+                    help="developer build: executor=hip and the frame capture work in the runtime library (WG_DEV_DIAGNOSTICS; "
+                         "off in every release build and package, R1)")
     args = ap.parse_args(argv)
+    global DEV_DIAGNOSTICS
+    DEV_DIAGNOSTICS = args.dev_diagnostics
     for name in OPTIONAL_MODELS:
         set_model(name, not getattr(args, "no_model_" + name.lower()))
     set_model_l(args.model_l)

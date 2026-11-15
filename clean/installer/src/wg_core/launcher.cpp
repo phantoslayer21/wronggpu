@@ -1333,11 +1333,14 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
     for (auto& n : CleanLeftovers(ctx, dir, leftovers)) res.notes.push_back(n);
     // what the game had before: its profile (kept through the update) and, for Update, the installed version
     Profile profile;
-    bool haveProfile = LoadProfile(ProfilePath(dir), profile);
+    std::vector<wstring> profileNotes;  // (R1: executor=hip is not kept; install, repair and update log its removal)
+    bool haveProfile = LoadProfile(ProfilePath(dir), profile, &profileNotes);
     if (!haveProfile) {
         string wini, oini;
-        if (IsFile(Join(dir, L"wronggpu.ini"))) { wini = EffectiveWronggpuIni(dir); ReadAll(Join(dir, L"OptiScaler.ini"), oini); profile = ImportProfile(wini, oini); haveProfile = true; }
+        if (IsFile(Join(dir, L"wronggpu.ini"))) { wini = EffectiveWronggpuIni(dir); ReadAll(Join(dir, L"OptiScaler.ini"), oini); profile = ImportProfile(wini, oini, &profileNotes); haveProfile = true; }
     }
+    for (auto& n : profileNotes)
+        if (n.find(kRetiredHipNote) != wstring::npos) LogLine(ctx, L"launcher: " + n);
     if (!haveProfile) profile = r.hasProfile ? r.profile : DefaultProfile();
     MigrateRrState(ctx, dir);      // #219: an older plugin's or the player's edit of WrongGPU\wronggpu.ini: its mode into the state folder
     FoldRrFromGame(dir, profile);  // a Ray Reconstruction mode chosen in the game stays (the state folder keeps it through the install)

@@ -155,6 +155,25 @@ jobs:
           cmake -S clean/installer -B out/launcher-models -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DWRONGGPU_PAYLOAD_DIR="$PWD/out/no-payload" -DWRONGGPU_TESTING=OFF -DWRONGGPU_PRESET_K=ON -DWRONGGPU_MODEL_K=ON -DWRONGGPU_MODEL_L=ON -DWRONGGPU_DIRECT_ROUTE=OFF
           cmake --build out/launcher-models --target wg-core-tests launcher-core-tests coexist-core-tests convert-ignore-tests model-choice-tests model-choice-k-tests model-choice-k-only-tests
           ctest --test-dir out/launcher-models --output-on-failure -R "^(wg-core|launcher-core|coexist-core|convert-ignore|model-choice|model-choice-k|model-choice-k-only|source-size|wording)$"
+      - name: Payload packager and package check refuse a developer runtime (R1)
+        # The packager (clean/installer/tools/make_payload.py) runs clean/tests/check_no_dev_diagnostics.py on every runtime
+        # library it embeds and refuses the payload for dev-diagnostics=1 or a missing marker; tools/release runs the same
+        # check on the final package. Here the real packager is run on runtime files carrying each marker, and the check on
+        # packages (zip, launcher executable): what is tested are the bytes that would ship, not source strings.
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -m unittest clean.tests.test_dev_diagnostics_off -v
+      - name: Package gate on the real runtime library (R1)
+        # The runtime library is built from this tree (clean/runner/build.py --runtime-only --no-embed: the C++ runtime without
+        # the GPU code objects) in the release configuration the package gets, and as a developer build; the gate's functions
+        # then check THOSE libraries: the release one passes the real packager (marker, no developer-diagnostic code text,
+        # build manifest with its SHA-256); the developer one, the same with a forged marker, a stripped and a changed
+        # library are refused.
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $clang = (Get-Command clang++ -ErrorAction SilentlyContinue).Source
+          if (-not $clang) { $clang = "C:\Program Files\LLVM\bin\clang++.exe" }
+          python tools/ci/check_release_runtime.py --out out/runtime-gate --cxx $clang
 
   rr-plugin:
     name: "CPU: Ray Reconstruction plugin"

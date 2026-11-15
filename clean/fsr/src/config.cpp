@@ -335,6 +335,10 @@ Config ParseConfig(const std::string& text, std::string* warnings) {
             float f = 0;
             ok = ParseFloat(value, f) && f >= 0.0f && f <= 600000.0f;
             if (ok) c.createWaitMs = static_cast<uint32_t>(f);
+        } else if (key == "create_giveup_ms") {
+            float f = 0;
+            ok = ParseFloat(value, f) && f >= 1.0f && f <= 600000.0f;
+            if (ok) c.createGiveUpMs = static_cast<uint32_t>(f);
         } else if (key == "context_park_ms") {
             float f = 0;
             ok = ParseFloat(value, f) && f >= 0.0f && f <= 60000.0f;
@@ -512,7 +516,8 @@ std::string Config::Describe() const {
     // Paths (runtime_dll, runtime_options) can be long: no fixed-size buffer for them.
     return std::string("upscaler=") + up + " runtime_dll=" + runtimeDll + (modelDir.empty() ? "" : " model_dir=" + modelDir) +
            " fallback_to_amd=" + (fallbackToAmd ? "1" : "0") +
-           " create_wait_ms=" + std::to_string(createWaitMs) + " context_park_ms=" + std::to_string(contextParkMs) + " " +
+           " create_wait_ms=" + std::to_string(createWaitMs) + " create_giveup_ms=" + std::to_string(createGiveUpMs) +
+           " context_park_ms=" + std::to_string(contextParkMs) + " " +
            BackendOptions() + buffer;
 }
 
