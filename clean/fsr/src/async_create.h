@@ -48,6 +48,15 @@ private:
     std::function<void()> release_;
 };
 
+// Takes the create worker's hold on the game's device: the owner is built FIRST (its callable is the only allocation), the
+// reference is retained AFTER it, and the owner is returned by a noexcept move: nothing that can throw lies between the
+// retain and the owner, so a throwing allocation never leaks the reference (it throws before anything was retained).
+inline ScopedRelease AcquireHold(void* device, const std::function<void(void*)>& retain, const std::function<void(void*)>& release) {
+    ScopedRelease hold([release, device] { release(device); });
+    retain(device);
+    return hold;
+}
+
 class PendingCreate {
 public:
     // Starts backend->create(info) on a new thread. `info` and what it points to (options, log user) must stay valid

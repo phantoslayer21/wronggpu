@@ -984,9 +984,7 @@ void FrontEnd::CheckPending(UpscaleContext& u, uint64_t call) {
 // depend on this object.
 ScopedRelease FrontEnd::HoldDevice(void* device) {
     if (!device || !platform_.retainDevice || !platform_.releaseDevice) return {};
-    platform_.retainDevice(device);
-    std::function<void(void*)> release = platform_.releaseDevice;
-    return ScopedRelease([release, device] { release(device); });
+    return AcquireHold(device, platform_.retainDevice, platform_.releaseDevice);  // (owner first, retain after: no leak if an allocation throws)
 }
 
 bool FrontEnd::ActivateSplit(UpscaleContext& u, const WgUpscalerBackend* backend, const std::string& tag) {

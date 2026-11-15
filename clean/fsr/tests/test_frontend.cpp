@@ -158,6 +158,16 @@ static std::function<uint32_t()> g_timerFn;
 static int g_timersStarted = 0;
 static std::atomic<bool> g_createGate{true};  // FakeCreate (on the front end's create thread) waits while false
 static std::atomic<int> g_createCalls{0};  // every FakeCreate call (made an upscaler or not)
+// Allocation failure injection (TestDeviceHoldAllocationFailure): while set, every `new` in the process throws std::bad_alloc.
+static std::atomic<bool> g_throwOnNew{false};
+void* operator new(std::size_t n) {
+    if (g_throwOnNew.load()) throw std::bad_alloc();
+    if (void* p = std::malloc(n ? n : 1)) return p;
+    throw std::bad_alloc();
+}
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+
 static bool g_failCreateUnsupported = false;  // FakeCreate answers WG_ERROR_UNSUPPORTED (a hard incompatibility, R1)
 static std::atomic<int> g_holdFromCall{0};    // FakeCreate waits for the gate from this call on (1-based); 0: every call
 static bool g_deviceHoldOn = false;           // the platform gives the create worker a hold on the device (retain / release)
@@ -1428,6 +1438,33 @@ static void TestSplitRetryPendingStoresNoFailure() {
     CHECK(g_createCalls > callsBefore && CountLog("failed earlier in this session") == 0);
     CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK && g_frames.size() == framesBefore + 1);  // and WrongGPU upscales
     CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+}
+
+// R1: the hold is taken owner first, retain after: an allocation that throws while the hold is made leaks nothing (it throws
+// before anything was retained); the normal path retains once and gives it back once.
+static void TestDeviceHoldAllocationFailure() {
+    static int retains = 0, releases = 0;
+    retains = releases = 0;
+    std::function<void(void*)> retain = [](void*) { ++retains; };
+    std::function<void(void*)> release = [](void*) { ++releases; };
+    unsigned char big[256] = {};  // callables too big for a small buffer: copying them allocates
+    std::function<void(void*)> bigRelease = [big](void*) { (void)big[0]; ++releases; };
+    {
+        ScopedRelease hold = AcquireHold(reinterpret_cast<void*>(0x1), retain, release);
+        CHECK(hold && retains == 1 && releases == 0);
+    }
+    CHECK(retains == 1 && releases == 1);  // given back once, by the owner going away
+    retains = releases = 0;
+    bool threw = false;
+    g_throwOnNew = true;  // every allocation fails from here: building the owner throws before the retain
+    try {
+        ScopedRelease hold = AcquireHold(reinterpret_cast<void*>(0x1), retain, bigRelease);
+    } catch (const std::bad_alloc&) {
+        threw = true;
+    }
+    g_throwOnNew = false;
+    CHECK(threw);                           // the allocation did fail (the injection works on this code)
+    CHECK(retains == 0 && releases == 0);   // and no reference was taken, so none is leaked
 }
 
 // R1: the create worker's device reference is owned (RAII): it is given back when the worker could not be started at all
@@ -3863,6 +3900,7 @@ int main() {
     TestRememberedHardIncompatibility();
     TestSplitRetryPendingStoresNoFailure();
     TestWorkerLaunchFailureGivesTheDeviceBack();
+    TestDeviceHoldAllocationFailure();
     TestInterfaceVersions();
     TestAmdMode();
     TestNonLinearColour();
