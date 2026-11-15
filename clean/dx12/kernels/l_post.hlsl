@@ -81,6 +81,25 @@ static float g_e, g_ep;   // exposures (0 replaced by 1)
 static float g_rp;       // 1 / e_prev (IEEE division, round to nearest even)
 float opq(float x) { return asfloat(asuint(x) ^ g_z); }
 half opqh(half x) { return asfloat16((uint16_t)(asuint16(x) ^ (uint16_t)g_z)); }
+#ifndef LP_MUT
+#define LP_MUT 0   // 1..3: negative controls of the byte checks (never shipped)
+#endif
+#ifndef LP_ENCFOLD
+#define LP_ENCFOLD 1
+#endif
+#ifndef LP_FMANZ
+#define LP_FMANZ 1
+#endif
+// h(a b) as its own rounding that the driver cannot fuse into a following FP16 add: fma(a, b, -0) with an opaque -0
+// (RN16(a b + -0) = RN16(a b) for every non-NaN pair, zeros included); LP_FMANZ 0: the product through the xor guard
+half mulh(half a, half b)
+{
+#if LP_FMANZ
+    return mad(a, b, asfloat16((uint16_t)(0x8000u | g_z)));
+#else
+    return opqh(a * b);
+#endif
+}
 half h_bits(uint b) { return asfloat16((uint16_t)b); }
 uint bits_h(half h) { return (uint)asuint16(h); }
 
@@ -216,7 +235,11 @@ LGather gather_zero()
 float tap_weight(uint t[kTexDw], half uu, half vv, half uv)
 {
     const half kA = h_bits(t[4] >> 16), kB = h_bits(t[5]), kC = h_bits(t[5] >> 16);
-    const half ta = opqh(uu * kA), tb = opqh(vv * kB);
+#if LP_MUT == 1
+    const half ta = mulh(uu, kB), tb = mulh(vv, kB);   // mutant 1: wrong factor
+#else
+    const half ta = mulh(uu, kA), tb = mulh(vv, kB);
+#endif
     const half s = tb + ta;
     const half eps = mad(uv, kC, s);
     const float w = exp2((float)opqh(eps));
@@ -464,26 +487,33 @@ WG_KERNEL(l_post_recon)
     [unroll] for (int jj = 0; jj < kLWin; ++jj) {
         v0[jj] = dy0 + (half)(float)(jj - 1);
         v1[jj] = dy1 + (half)(float)(jj - 1);
-        vv0[jj] = opqh(v0[jj] * v0[jj]);
-        vv1[jj] = opqh(v1[jj] * v1[jj]);
+        vv0[jj] = mulh(v0[jj], v0[jj]);
+        vv1[jj] = mulh(v1[jj], v1[jj]);
     }
     // taps column by column (i outer, j inner, each gather in that order as before); per column the eight weights (four
     // rows, two pixels) are rounded to FP16 by one driver conversion
     LGather g0 = gather_zero(), g1 = gather_zero();
+    // the staged texel's LDS index without per-tap multiplies: one base per lane, the row stride and the column
+    // step wave-uniform (integer identity: ((b + j - r0) ncol + (ax + i - c0)) kTexDw)
+    const int tb0 = ((b - 1 - r0) * ncol + (ax - 1 - c0)) * kTexDw, rstride = ncol * kTexDw;
     [loop] for (int i = -1; i <= kLWin - 2; ++i) {
         const half u = dx + (half)(float)i;
-        const half uu = opqh(u * u);
+        const half uu = mulh(u, u);
         uint t[kLWin][kTexDw];
         v8f wv;
         [unroll] for (int j = -1; j <= kLWin - 2; ++j) {
             if (staged) {
-                const int base = ((b + j - r0) * ncol + (ax + i - c0)) * kTexDw;
+                const int base = tb0 + (j + 1) * rstride + (i + 1) * kTexDw
+#if LP_MUT == 2
+                                 + (j == 2 && i == 2 ? kTexDw : 0)   // mutant 2: one tap reads the wrong texel
+#endif
+                                 ;
                 [unroll] for (int d = 0; d < kTexDw; ++d) t[j + 1][d] = sh_tex[base + d];
             } else {
                 load_texel_hw(clampi(b + j, 0, P_rh - 1) * P_rw + clampi(ax + i, 0, P_rw - 1), t[j + 1]);
             }
-            wv.v[2 * (j + 1)] = tap_weight(t[j + 1], uu, vv0[j + 1], opqh(u * v0[j + 1]));
-            wv.v[2 * (j + 1) + 1] = tap_weight(t[j + 1], uu, vv1[j + 1], opqh(u * v1[j + 1]));
+            wv.v[2 * (j + 1)] = tap_weight(t[j + 1], uu, vv0[j + 1], mulh(u, v0[j + 1]));
+            wv.v[2 * (j + 1) + 1] = tap_weight(t[j + 1], uu, vv1[j + 1], mulh(u, v1[j + 1]));
         }
         const uint4 hw = wg_to_f16_ags(wv);
         [unroll] for (int jj = 0; jj < kLWin; ++jj) {
@@ -513,7 +543,15 @@ WG_KERNEL(l_post_recon)
             cv.v[ci] = opq(hh[ci]);
             cv.v[3 + ci] = opq(floor(clampf(mad(oo[ci], n, 0.5f), 0.0f, n)) * k);
 #else
+#if LP_ENCFOLD
+#if LP_MUT == 3
+            cv.v[ci] = opq(kEncK * enc_log(hh[ci]));   // mutant 3: two roundings (FP32 product, then FP16)
+#else
+            cv.v[ci] = mad(enc_log(hh[ci]), kEncK, 0.0f);   // folded by the driver: v_fma_mixlo_f16 .., kEncK, 0 (HIP's)
+#endif
+#else
             cv.v[ci] = mul_odd(kEncK, enc_log(hh[ci]));
+#endif
             cv.v[3 + ci] = opq(clampf(enc_e(oo[ci]), 0.0f, kDisplayMax));
 #endif
         }
@@ -525,9 +563,13 @@ WG_KERNEL(l_post_recon)
 #if LP_LDR
             const uint q0 = hc.x & 0xffffu, q1 = hc.x >> 16, q2 = hc.y & 0xffffu;
 #else
+#if LP_ENCFOLD
+            const uint q0 = hc.x & 0xffffu, q1 = hc.x >> 16, q2 = hc.y & 0xffffu;   // the fold's +0 addend gives +0
+#else
             const uint q0 = mul_zero(kEncK, enc_log(hh[0])) ? 0u : (hc.x & 0xffffu);
             const uint q1 = mul_zero(kEncK, enc_log(hh[1])) ? 0u : (hc.x >> 16);
             const uint q2 = mul_zero(kEncK, enc_log(hh[2])) ? 0u : (hc.y & 0xffffu);
+#endif
 #endif
             wg_st64(hist_out, (uint)(y * P_dw + x) * 8u, uint2(q0 | (q1 << 16), q2));
             const int di = y * pitch + x;
