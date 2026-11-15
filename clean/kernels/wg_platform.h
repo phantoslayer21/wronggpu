@@ -33,9 +33,12 @@ typedef u32 v4u __attribute__((ext_vector_type(4)));
 #ifndef WG_SOFT_FP8
 #define WG_SOFT_FP8 1
 #endif
-// The faster exact software conversion (below). -DWG_SLOW_Q8 selects the plain form again (timing comparisons).
-#ifndef WG_SLOW_Q8
+// The faster exact software conversion (below). -DWG_SLOW_Q8 (or -DWG_SLOW_Q8=1) selects the plain form again (timing
+// comparisons); -DWG_SLOW_Q8=0 the faster one.
+#if !defined(WG_SLOW_Q8) || !WG_SLOW_Q8
+#ifndef WG_FAST_Q8
 #define WG_FAST_Q8 1
+#endif
 #endif
 #endif
 #if defined(WG_FAST_Q8) && (defined(__FAST_MATH__) || (defined(__FINITE_MATH_ONLY__) && __FINITE_MATH_ONLY__))
@@ -207,6 +210,59 @@ WG_FN v8h wg_widen_e4m3x8(v2i p) {
   v8h r = {a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]};
   return r;
 }
+
+// ---- E4M3 rounding of FP32 values as FP32 arithmetic (the method is explained with wg_f32_to_e4m3_t, below), delivered as
+// F16 operands without code bytes (swin.hip WG_F16_Q); also what the faster code conversion (WG_FAST_Q8) is made from ----
+// v_med3_f32 clamps, because fminf / fmaxf get a canonicalising v_max in front of them on gfx11.
+WG_FN float wg_q8m_clamp(float x, float lo, float hi) {
+#if defined(__AMDGCN__)
+  return __builtin_amdgcn_fmed3f(x, lo, hi);
+#else
+  return x < lo ? lo : (x > hi ? hi : x);
+#endif
+}
+WG_FN u32 wg_q8m_bits(float f) { return __builtin_bit_cast(u32, f); }
+WG_FN float wg_q8m_flt(u32 u) { return __builtin_bit_cast(float, u); }
+
+// C = 1.5 * 2^(E + 20) for |x| (E clamped to [-6, 8]), as FP32 bits.
+WG_FN u32 wg_q8m_magic(float ax) {
+  return (wg_q8m_bits(wg_q8m_clamp(ax, 0.015625f, 448.0f)) & 0x7f800000u) + 0x0a400000u;
+}
+
+
+// Two floats as two F16 (v_cvt_pk_rtz_f16_f32); exact for the values here (at most 4 significant bits).
+WG_FN u32 wg_cvt_pk_f16(float a, float b) {
+#if defined(__AMDGCN__)
+  return __builtin_bit_cast(u32, __builtin_amdgcn_cvt_pkrtz(a, b));
+#else
+  const v2h r = {(_Float16)a, (_Float16)b};
+  return __builtin_bit_cast(u32, r);
+#endif
+}
+// The E4M3-rounded value as F16 bits (every E4M3 value is exact in F16), the next operand of the F16 matrix instruction.
+// CL: saturate at +-448 (also infinity); NANFIX: a NaN gives an F16 NaN. v_cvt_pk_rtz_f16_f32 is exact here: the value has
+// at most 4 significant bits. The sign of a zero result is the input's.
+template <bool NANFIX, bool CL>
+WG_FN float wg_q8m_round(float f) {
+  const float ax = __builtin_fabsf(f);
+  const float c = wg_q8m_flt(wg_q8m_magic(ax));
+  float r = (ax + c) - c;
+  if (CL) r = wg_q8m_clamp(r, 0.0f, 448.0f);
+  u32 rb = wg_q8m_bits(r);
+  if (NANFIX) rb = (f != f) ? 0x7fc00000u : rb;
+  return wg_q8m_flt(rb | (wg_q8m_bits(f) & 0x80000000u));
+}
+template <bool NANFIX, bool CL>
+WG_FN v8h wg_q8_to_f16_t(v8f d) {
+  u32 w[4];
+#pragma unroll
+  for (int i = 0; i < 4; ++i)
+    w[i] = wg_cvt_pk_f16(wg_q8m_round<NANFIX, CL>(d[2 * i]), wg_q8m_round<NANFIX, CL>(d[2 * i + 1]));
+  return __builtin_bit_cast(v8h, w);
+}
+WG_FN v8h wg_q8_to_f16(v8f d) { return wg_q8_to_f16_t<true, true>(d); }         // a NaN gives an F16 NaN
+WG_FN v8h wg_q8_to_f16_inner(v8f d) { return wg_q8_to_f16_t<false, true>(d); }  // a NaN gives +-0
+WG_FN v8h wg_q8_to_f16_nc(v8f d) { return wg_q8_to_f16_t<false, false>(d); }    // |x| <= 464, not NaN
 #endif
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -220,16 +276,6 @@ WG_FN v8h wg_widen_e4m3x8(v2i p) {
 // With z = |x| clamped to [2^-6, 448] and C = 1.5 * 2^(E + 20), E the exponent of z, the FP32 sum |x| + C rounds |x| to a
 // multiple of 2^(E - 3) (ties to even: the mantissa of C is even) and the difference sum - C is exact; the floor 2^-6 gives
 // the E4M3 subnormal step 2^-9. The compiler must keep (|x| + C) - C (no reassociation: no fast-math, see above).
-// v_med3_f32 clamps, because fminf / fmaxf get a canonicalising v_max in front of them on gfx11.
-WG_FN float wg_q8m_clamp(float x, float lo, float hi) { return __builtin_amdgcn_fmed3f(x, lo, hi); }
-WG_FN u32 wg_q8m_bits(float f) { return __builtin_bit_cast(u32, f); }
-WG_FN float wg_q8m_flt(u32 u) { return __builtin_bit_cast(float, u); }
-
-// C = 1.5 * 2^(E + 20) for |x| (E clamped to [-6, 8]), as FP32 bits.
-WG_FN u32 wg_q8m_magic(float ax) {
-  return (wg_q8m_bits(wg_q8m_clamp(ax, 0.015625f, 448.0f)) & 0x7f800000u) + 0x0a400000u;
-}
-
 // E4M3 code bytes. The code comes straight from the rounded sum: bits(sum) - bits(C) is the index on the grid and
 // code = 8 (E + 6) + index = (bits(C) >> 20) - 1132 + index; min(., 0x7e) saturates (also +-inf). NANFIX: a NaN gives
 // sign|0x7f, else it gives sign|0x7e.
@@ -264,31 +310,6 @@ WG_FN v2i wg_pack_q8_inner(v8f d) { return wg_pack_q8_t<false>(d); }
 // For inputs proven within +-464 and not NaN: the bytes of wg_pack_q8.
 WG_FN v2i wg_pack_q8_nc(v8f d) { return wg_pack_q8_t<false>(d); }
 
-// The E4M3-rounded value as F16 bits (every E4M3 value is exact in F16), the next operand of the F16 matrix instruction.
-// CL: saturate at +-448 (also infinity); NANFIX: a NaN gives an F16 NaN. v_cvt_pk_rtz_f16_f32 is exact here: the value has
-// at most 4 significant bits. The sign of a zero result is the input's.
-template <bool NANFIX, bool CL>
-WG_FN float wg_q8m_round(float f) {
-  const float ax = __builtin_fabsf(f);
-  const float c = wg_q8m_flt(wg_q8m_magic(ax));
-  float r = (ax + c) - c;
-  if (CL) r = wg_q8m_clamp(r, 0.0f, 448.0f);
-  u32 rb = wg_q8m_bits(r);
-  if (NANFIX) rb = (f != f) ? 0x7fc00000u : rb;
-  return wg_q8m_flt(rb | (wg_q8m_bits(f) & 0x80000000u));
-}
-template <bool NANFIX, bool CL>
-WG_FN v8h wg_q8_to_f16_t(v8f d) {
-  u32 w[4];
-#pragma unroll
-  for (int i = 0; i < 4; ++i)
-    w[i] = __builtin_bit_cast(u32, __builtin_amdgcn_cvt_pkrtz(wg_q8m_round<NANFIX, CL>(d[2 * i]),
-                                                              wg_q8m_round<NANFIX, CL>(d[2 * i + 1])));
-  return __builtin_bit_cast(v8h, w);
-}
-WG_FN v8h wg_q8_to_f16(v8f d) { return wg_q8_to_f16_t<true, true>(d); }         // a NaN gives an F16 NaN
-WG_FN v8h wg_q8_to_f16_inner(v8f d) { return wg_q8_to_f16_t<false, true>(d); }  // a NaN gives +-0
-WG_FN v8h wg_q8_to_f16_nc(v8f d) { return wg_q8_to_f16_t<false, false>(d); }    // |x| <= 464, not NaN
 #else
 WG_FN u32 wg_f32_to_e4m3(float f) {
   // Branch-free: every path is computed and the result picked with selects (no divergent control flow).

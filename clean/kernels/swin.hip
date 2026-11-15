@@ -26,6 +26,9 @@
 //   WG_F16_A         gfx11 only (with WG_F16_W or alone): 1 makes each activation operand (the FP8 values of a 16-token
 //                    tile that feed matrix instructions) once, already exchanged with the other half of the wave and
 //                    widened to F16, instead of at every use: 8 registers per K group instead of 2. Bit-identical.
+//   WG_F16_Q         gfx11 only, with WG_F16_A: 1 makes the F16 operands straight from the FP32 values (E4M3 rounding in FP32,
+//                    then v_cvt_pk_rtz_f16_f32; wg_q8_to_f16) instead of through the code bytes. The code bytes are
+//                    then made only for the stores. Same values as the code form for finite inputs.
 //   WG_F16_W         gfx11 only (FP16 route, see wg_platform.h): 1 widens the weights to F16 once per workgroup, when the
 //                    unit is copied to LDS (a unit then holds half the code bytes, so the LDS stays the same); the plain
 //                    block kernels only (not the fused merge / expand, not the resident kernels). Bit-identical.
@@ -92,8 +95,14 @@
 #ifndef WG_F16_A
 #define WG_F16_A 0
 #endif
-#if (WG_F16_W || WG_F16_A) && !(defined(WG_GFX11) || defined(WG_EMU_GFX11))
-#error "WG_F16_W and WG_F16_A are for the gfx11 matrix wrappers (wg_platform.h)"
+#ifndef WG_F16_Q
+#define WG_F16_Q 0
+#endif
+#if (WG_F16_W || WG_F16_A || WG_F16_Q) && !(defined(WG_GFX11) || defined(WG_EMU_GFX11))
+#error "WG_F16_W, WG_F16_A and WG_F16_Q are for the gfx11 matrix wrappers (wg_platform.h)"
+#endif
+#if WG_F16_Q && !WG_F16_A
+#error "WG_F16_Q makes the F16 operands that WG_F16_A keeps: set both"
 #endif
 #ifndef WG_GEMM_THREADS
 #define WG_GEMM_THREADS 256
@@ -405,11 +414,17 @@ struct ActOp<true> {
   typedef v16h type;
 };
 #endif
-template <bool SAFE, bool A16>
+// F16: the operand made from the FP32 values directly (WG_F16_Q), not through the code bytes.
+template <bool SAFE, bool A16, bool F16 = WG_F16_Q != 0>
 WG_FN typename ActOp<A16>::type pack_act(v8f d) {
 #if WG_F16_A
-  if constexpr (A16) return wg_k16_codes(pack_in<SAFE>(d));
-  else
+  if constexpr (A16) {
+#if WG_F16_Q
+    if constexpr (F16) return wg_k16_f16(SAFE ? wg_q8_to_f16_nc(d) : wg_q8_to_f16_inner(d));
+    else
+#endif
+    return wg_k16_codes(pack_in<SAFE>(d));
+  } else
 #endif
   return pack_in<SAFE>(d);
 }
@@ -879,7 +894,7 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
 #else
       const auto pw = act_f16<A16>(p);  // the exchange of the probabilities once for both value tiles
 #pragma unroll
-      for (int dt = 0; dt < 2; ++dt) of[i][dt] = pack_act<SAFE, A16>(wg_wmma_f16(vt[i][dt], pw, wg_splat(0.0f)));
+      for (int dt = 0; dt < 2; ++dt) of[i][dt] = pack_act<SAFE, A16, false>(wg_wmma_f16(vt[i][dt], pw, wg_splat(0.0f)));  // codes: 75 spills in the F16 form
 #endif
     }
 #endif

@@ -17,7 +17,7 @@ SWIN_KERNELS = {  # block kernel -> (threads macro, windows-per-wave macro)
 }
 DEFAULTS = {"WG_WPW_C64": 1, "WG_WPW_C96": 1, "WG_WPW_C128": 1, "WG_GEMM_THREADS": 256, "WG_NT": 2,
             "WG_THREADS_C64": 256, "WG_THREADS_C64ADD": 256, "WG_THREADS_C96": 256, "WG_THREADS_C96ADD": 256,
-            "WG_THREADS_C128": 256, "WG_MINW_C64": 1, "WG_MINW_C96": 5, "WG_MINW_C128": 1, "WG_MLP_GROUP": 2, "WG_FORCE_CLAMP": 0, "WG_FUSE": 0, "WG_NORM_DOT4": 0, "WG_PROFILE": 0, "WG_AV8": 0, "WG_SMAX16": 0, "WG_GELU_MODE": 2, "WG_GELU_MIX": 1, "WG_MLP_PF": 0, "WG_UNIT_BYTES": 16384, "WG_SAT_MINMAX": 1, "WG_NUMV_C96": 0, "WG_F16_W": 0, "WG_F16_A": 0}
+            "WG_THREADS_C128": 256, "WG_MINW_C64": 1, "WG_MINW_C96": 5, "WG_MINW_C128": 1, "WG_MLP_GROUP": 2, "WG_FORCE_CLAMP": 0, "WG_FUSE": 0, "WG_NORM_DOT4": 0, "WG_PROFILE": 0, "WG_AV8": 0, "WG_SMAX16": 0, "WG_GELU_MODE": 2, "WG_GELU_MIX": 1, "WG_MLP_PF": 0, "WG_UNIT_BYTES": 16384, "WG_SAT_MINMAX": 1, "WG_NUMV_C96": 0, "WG_F16_W": 0, "WG_F16_A": 0, "WG_F16_Q": 0}
 
 
 def all_threads(n):
@@ -87,9 +87,13 @@ VARIANTS = {
     # And every activation operand made once, exchanged and widened, where it is quantized (8 registers per K group
     # instead of 2; the C = 64 kernels only: C = 96 would spill 30). Occupancy floor 7 waves (8: 8 spills).
     "f16wa": {"WG_F16_W": 1, "WG_F16_A": 1, "WG_MINW_C64": 7},
+    # And the operands made straight from the FP32 values (E4M3 rounding as FP32 arithmetic, v_cvt_pk_rtz_f16_f32), the code
+    # bytes only for the stores: the exact conversion of runner/q8_exhaustive.py, without the code bytes in between (not for
+    # the attention output o: with that one the C = 64 kernels spill 75).
+    "f16wq": {"WG_F16_W": 1, "WG_F16_A": 1, "WG_F16_Q": 1, "WG_MINW_C64": 7},
 }
 # The variants of each GPU family's build of swin.hip (gfx11: the gfx11 matrix wrappers); `--variants` alone builds these.
-FAMILY_VARIANTS = {"gfx11": ("f16w", "f16wa")}
+FAMILY_VARIANTS = {"gfx11": ("f16w", "f16wa", "f16wq")}
 
 # Variants whose output differs from base (a different GELU than the default). The sweep reports their mismatches but
 # does not treat them as an error.
