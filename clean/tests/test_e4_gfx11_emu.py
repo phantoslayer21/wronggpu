@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: MIT
-"""The encoder (kernels/encoder.hip) with the gfx11 (RDNA 3) matrix wrappers of kernels/wg_platform.h, in the host lane
-emulator's gfx11 mode (-DWG_EMU_GFX11) with the gfx11 accumulator row table: the same cases and the same limits as
-test_encoder_emu. The emulator's matrix instruction sums exactly, so the stricter limits of that test hold here (the card:
-test_gpu_e4).
+"""The encoder (kernels/encoder.hip) and the decoder (kernels/decoder.hip) with the gfx11 (RDNA 3) matrix wrappers of
+kernels/wg_platform.h, in the host lane emulator's gfx11 mode (-DWG_EMU_GFX11) with the gfx11 accumulator row table: the same
+cases and the same limits as test_encoder_emu and test_decoder_emu. The emulator's matrix instruction sums exactly, so the
+stricter limits of those tests hold here (the card: test_gpu_e4).
 """
 import unittest
 
 import numpy as np
 
+from clean.tests import test_decoder_emu as TD
 from clean.tests import test_encoder_emu as TE
 from clean.tests.test_kernels_emu_gfx11 import Gfx11Case, build_dir
 
@@ -22,6 +23,17 @@ class TestEncoderEmuGfx11(Gfx11Case, TE.TestEncoderEmu):
         wrong = self.Runner(build_dir(), "", backend="emu", arch="gfx11", d_row="gfx12")
         b = wrong.run("enc0", wrong.pack_weights("enc0", p), x, None)
         self.assertGreater(float(np.mean(a["features"] != b["features"])), 0.2)
+
+
+class TestDecoderEmuGfx11(Gfx11Case, TD.TestDecoderEmu):
+    def test_the_row_table_matters(self):
+        rng = np.random.default_rng(31)
+        x = TD.Dc.random_inputs(rng)
+        p = TD.Dc.random_params(rng)
+        a = self.run_dec0(x, p)
+        wrong = self.Runner(build_dir(), "", backend="emu", arch="gfx11", d_row="gfx12")
+        b = self.run_dec0(x, p, runner=wrong)
+        self.assertGreater(float(np.mean(a["A"] != b["A"])), 0.2)
 
 
 if __name__ == "__main__":

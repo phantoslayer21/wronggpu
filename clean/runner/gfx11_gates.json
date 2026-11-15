@@ -756,6 +756,13 @@
     "waves": 10,
     "lds": 0
    }
+  },
+  "dec0": {
+   "coef_decoder": {
+    "vgprs": 103,
+    "waves": 12,
+    "lds": 10240
+   }
   }
  }
 }

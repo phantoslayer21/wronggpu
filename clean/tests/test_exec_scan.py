@@ -132,6 +132,7 @@ RUN_ON_THE_CARD = {
                          "swin_block_c96_nc", "swin_block_c96_add", "swin_block_c96_add_nc", "swin_block_c128",
                          "swin_block_c128_nc", "swin_bneck6", "swin_bneck6_nc"),
     "encoder.co": ("input_encoder",),
+    "decoder.co": ("coef_decoder",),
 }
 
 
