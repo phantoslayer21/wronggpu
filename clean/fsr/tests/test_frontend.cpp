@@ -248,7 +248,6 @@ static char g_asiModel = 0;        // 0 (AMD), 'M', 'K'
 static std::vector<char> g_asiShown;          // Platform::asiShowModel calls
 static std::filesystem::path g_choiceRecord;  // Platform::choiceRecord (a real file; empty: none)
 static std::string g_iniOnDisk;               // Platform::readWronggpuIni (empty: not wired); not cleared by Reset
-static std::string g_stateUnavailable;        // Platform::stateUnavailable (not registered as loaded); not cleared by Reset
 
 // Fake shared settings (Platform::menu, settings_bridge.h in the DLL): values set "somewhere" (block / env / ini),
 // the writes of the menu's choices, whether this module is the writer, the folder sidecar's entry.
@@ -293,7 +292,6 @@ static std::unique_ptr<FrontEnd> MakeFrontEnd(const Config& config) {
         p.asiPlugin = [](char* model) { if (model) *model = g_asiModel; return g_asiHooked; };
     if (g_asiPresent) p.asiShowModel = [](char model) { g_asiShown.push_back(model); };
     if (!g_iniOnDisk.empty()) p.readWronggpuIni = [] { return g_iniOnDisk; };
-    p.stateUnavailable = g_stateUnavailable;
     p.choiceRecord = g_choiceRecord;
     p.compareApi = []() -> const OriginalApi* { return g_compareApi; };
     p.backend = [](const Config&, std::string&) -> const WgUpscalerBackend* { return g_useBackend; };
@@ -2902,19 +2900,6 @@ static void TestAsiChoiceRecord() {
         r = ReadRec(rec);
         CHECK(rc == WG_HOST_SELECTED_REFUSED && r.model == b && r.seq == UINT64_MAX);
         CHECK(CountLog("ERROR: the player selected Model M in OptiScaler's upscaler list: the record's sequence number is at its end") == 1);
-        // (16) the front end could not register as loaded in the game (wg_state.h: an uninstall, repair or update running):
-        // the record is neither read nor written this session; wronggpu.ini's item runs; a selection is not saved
-        WriteRec(rec, "model=M\nseq=3\nsource=launcher\n");
-        g_stateUnavailable = "the game's state lock was not free in time";
-        {
-            auto fe = ChoiceFrontEnd(iniB.c_str(), 0, false);
-            CHECK(ChoiceCreate(*fe, idOf('M')) == name(b));
-            CHECK(CountLog("WrongGPU's state is not used this session (the game's state lock was not free in time); wronggpu.ini model=") == 1);
-            CHECK(fe->HostSelected(idOf('M')) == WG_HOST_SELECTED_NOT_SAVED);
-        }
-        g_stateUnavailable.clear();
-        r = ReadRec(rec);
-        CHECK(r.model == 'M' && r.seq == 3);
     } else {
         // Model M only: the record is migrated (M, seq 1, launcher) and says what runs
         CHECK(HostedCreate("runtime_options = model=M\n", 'M', idOf('M')) == name('M'));

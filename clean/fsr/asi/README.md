@@ -35,8 +35,7 @@ named mutex per game folder, from its volume and file identity, shared with ever
 A click that cannot be saved in time changes nothing: its entry says "not saved, try again" and nothing is kept for later.
 When the record cannot be read, is corrupt or busy at a create, the front end runs the last choice it read this session,
 else wronggpu.ini's model item, else Model M. Without a record (no launcher state folder) the launcher's Model K / L item
-decides, else the plugin's saved entry, else Model M. While the game has the plugin loaded it keeps WrongGPU's loaded
-marker open, so the launcher does not uninstall, repair or update it meanwhile. The front end logs the model and which
+decides, else the plugin's saved entry, else Model M. The front end logs the model and which
 choice decided and tells the plugin which model runs (`WrongGpuAsiShowModelV1`), so the menu marks that entry. Model L's
 own entry ("WrongGPU Model L") is in the menu of a build with `WG_MODEL_L`; a model the front end was built without runs
 as Model M, with a note in the log.

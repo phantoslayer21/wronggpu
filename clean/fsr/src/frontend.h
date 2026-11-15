@@ -101,9 +101,6 @@ struct Platform {
     // wronggpu.ini's text as it is on disk now (the record's upgrade migration reads its model item while it holds the
     // game's state lock). Empty: the model item of the configuration read at start.
     std::function<std::string()> readWronggpuIni;
-    // Not empty: the front end could not register as loaded in the game (wg_state.h LoadedRegistration; the reason): the
-    // record is neither read nor written this session; wronggpu.ini's model item (else Model M) runs.
-    std::string stateUnavailable;
     // Registry options and the menu's choices (shared settings block). Empty members: defaults, nothing written.
     MenuSettings menu;
 };

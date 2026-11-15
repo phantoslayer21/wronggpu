@@ -299,7 +299,9 @@ void TestConcurrentProcesses() {
         if (w && Wait(w) != 0) ++failed;
     }
     CHECK(failed == 0);
-    CHECK(reader != nullptr && Wait(reader) == 0);
+    const DWORD readerCode = reader ? Wait(reader) : 999;
+    if (readerCode != 0) std::printf("reader exit %lu\n", static_cast<unsigned long>(readerCode));
+    CHECK(readerCode == 0);
     Record r = Rec(f.record());
     CHECK(r.seq == uint64_t(kWriters * kWrites));  // no lost update
     std::printf("concurrent processes: %d writers x %d writes, final seq %llu\n", kWriters, kWrites, static_cast<unsigned long long>(r.seq));
@@ -429,13 +431,19 @@ int ChildReader(const fs::path& record, uint64_t until) {
     while (last < until && GetTickCount64() - start < 100000) {
         {
             Lock lock(record, 20000);
-            if (!lock.ok()) return 100;
+            if (!lock.ok()) { std::printf("reader: lock not taken\n"); return 100; }
             Record r;
             std::string why;
             const ReadResult rr = ReadRecordFile(record, &r, &why);
-            if (rr == ReadResult::Corrupt || rr == ReadResult::Unreadable) ++bad;
+            // a partial or corrupt record would be a failure; a read another program (a virus scanner looking at the new
+            // file) briefly refused is not, and is only reported
+            if (rr == ReadResult::Corrupt) {
+                ++bad;
+                std::printf("reader: corrupt (%s)\n", why.c_str());
+            }
+            if (rr == ReadResult::Unreadable) std::printf("reader: one read refused (%s)\n", why.c_str());
             if (rr == ReadResult::Ok) {
-                if (r.seq < last) ++bad;
+                if (r.seq < last) { ++bad; std::printf("reader: seq went back %llu -> %llu\n", (unsigned long long)last, (unsigned long long)r.seq); }
                 last = r.seq;
             }
         }
