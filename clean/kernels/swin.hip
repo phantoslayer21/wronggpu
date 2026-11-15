@@ -116,6 +116,16 @@
 #ifndef WG_SCHED_FRAGS
 #define WG_SCHED_FRAGS 0
 #endif
+// WG_MERGE_REUSE 1 (gfx11, variant mgx): patch_merge widens each token operand to F16 once for a group of output tiles (the
+// loops run K group outermost over MC tiles at a time, their accumulators stay in registers) and each weight fragment once
+// for all NT token groups, instead of both once per matrix instruction. Every accumulator still adds its K groups in the same
+// order, so the result is bit-identical.
+#ifndef WG_MERGE_REUSE
+#define WG_MERGE_REUSE 0
+#endif
+#if WG_MERGE_REUSE && !(defined(WG_GFX11) || defined(WG_EMU_GFX11))
+#error "WG_MERGE_REUSE is for the gfx11 matrix wrappers (wg_platform.h)"
+#endif
 #if (WG_F16_W || WG_F16_A || WG_F16_Q || WG_F16_AWIDE || WG_F16_QWIDE || WG_F16_M || WG_SCHED_FRAGS) && !(defined(WG_GFX11) || defined(WG_EMU_GFX11))
 #error "WG_F16_*, WG_SCHED_FRAGS are for the gfx11 matrix wrappers (wg_platform.h)"
 #endif
@@ -1210,6 +1220,39 @@ WG_FN void patch_merge(const u8* __restrict__ s, u8* __restrict__ out, const u8*
   }
   copy_to_lds<kGemmThreads>(lds, w + WM, WBYTES, tid);
   const float* bm = (const float*)(w + BM) + hh * 8;
+#if WG_MERGE_REUSE
+  constexpr int MC = MO <= 6 ? MO : MO / 2;  // output tiles per pass: their accumulators (MC * NT * 8 registers) stay live
+  static_assert(MO % MC == 0, "the output tiles must divide into equal passes");
+#pragma unroll 1
+  for (int m0 = 0; m0 < MO; m0 += MC) {
+    v8f acc[MC][NT];
+#pragma unroll
+    for (int j = 0; j < MC; ++j) {
+      const v8f b = wg_load8f(bm + (m0 + j) * 16);
+#pragma unroll
+      for (int i = 0; i < NT; ++i) acc[j][i] = b;
+    }
+#pragma unroll
+    for (int g = 0; g < KZ; ++g) {
+      v16h z[NT];
+#pragma unroll
+      for (int i = 0; i < NT; ++i) z[i] = wg_k16_codes(zf[i][g]);
+#pragma unroll
+      for (int j = 0; j < MC; ++j) {
+        const v16h f = wg_k16_codes(lfrag(lds, (m0 + j) * KZ + g, lane));
+#pragma unroll
+        for (int i = 0; i < NT; ++i) acc[j][i] = wg_wmma_fp8(f, z[i], acc[j][i]);
+      }
+    }
+#pragma unroll
+    for (int j = 0; j < MC; ++j)
+#pragma unroll
+      for (int i = 0; i < NT; ++i) {
+        const int d = tok[i] < ntok ? tok[i] : ntok - 1;
+        *(v2i*)(out + (size_t)d * CO + hh * (CO / 2) + 8 * (m0 + j)) = wg_pack_q8(acc[j][i]);
+      }
+  }
+#else
   // One output tile (8 channels per lane) at a time, stored right away: keeps register use low.
 #pragma unroll 1
   for (int mt = 0; mt < MO; ++mt) {
@@ -1234,6 +1277,7 @@ WG_FN void patch_merge(const u8* __restrict__ s, u8* __restrict__ out, const u8*
 #endif
     }
   }
+#endif
 }
 
 // Expand (spec 02): e = q8(We y + be) for each low-resolution token, written as an FP8 map e [2Hl][2Wl][C]

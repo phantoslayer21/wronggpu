@@ -178,14 +178,14 @@ class PartialTileGpu:
 class TestEnc1PartialTilesGpu(PartialTileGpu, T1.Enc1Gpu, TK.EmuTest):
     """patch_merge_c64 (the enc1 block shapes are in test_gpu_enc1)."""
 
-    PARTIAL = [("enc1", 12, 20), ("enc1", 36, 28)]
+    PARTIAL = [("enc1", 12, 20), ("enc1", 36, 28), ("enc1", 12, 12)]
 
 
 class TestEnc2Gpu(PartialTileGpu, StagesGpu, T1.Enc1Gpu, TK.EmuTest):
     """swin_block_c96 and patch_merge_c96."""
 
     CASES = cases_of("enc2", extra=[("enc2", 36, 32, (2, 2))])
-    PARTIAL = [("enc2", 12, 20), ("enc2", 20, 28)]
+    PARTIAL = [("enc2", 12, 20), ("enc2", 20, 28), ("enc2", 12, 12)]
     TIMED = ("enc2",)
     SIZE_KEY = "enc2"
 
@@ -209,7 +209,7 @@ class TestDec2Gpu(PartialTileGpu, StagesGpu, T1.Enc1Gpu, TK.EmuTest):
     """expand_c128 and swin_block_c96_add."""
 
     CASES = cases_of("dec2", extra=[("dec2", 36, 32, (2, 0))])
-    PARTIAL = [("dec2", 12, 20), ("dec2", 20, 28)]
+    PARTIAL = [("dec2", 12, 20), ("dec2", 20, 28), ("dec2", 12, 12)]
     TIMED = ("dec2",)
     SIZE_KEY = "dec2"
 
@@ -222,7 +222,7 @@ class TestDec1Gpu(PartialTileGpu, StagesGpu, T1.Enc1Gpu, TK.EmuTest):
 
     CASES = [("dec1", 8, 8, (0, 0)), ("dec1", 12, 20, (2, 0)), ("dec1", 16, 20, (2, 0)), ("dec1", 36, 32, (2, 0)),
              ("dec1", 36, 32, (0, 0))]
-    PARTIAL = [("dec1", 12, 20), ("dec1", 12, 40), ("dec1", 20, 28), ("dec1", 24, 20), ("dec1", 28, 36)]
+    PARTIAL = [("dec1", 12, 20), ("dec1", 12, 40), ("dec1", 20, 28), ("dec1", 24, 20), ("dec1", 28, 36), ("dec1", 12, 12)]
     TIMED = ("dec1",)
     SIZE_KEY = "dec1"
 

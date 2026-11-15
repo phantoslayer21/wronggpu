@@ -127,8 +127,9 @@ def main():
         for k, m in kernels.items():
             print(f"{name:7s} {k:26s} {m['vgprs']:3d} VGPRs  {m['spills']:3d} spills  {m['waves']} waves/SIMD  LDS {m['lds']}")
     if args.write:
+        table = record(measured, version)  # before the file is opened: a kernel that spills must not leave an empty table
         with open(TABLE, "w") as f:
-            json.dump(record(measured, version), f, indent=1)
+            json.dump(table, f, indent=1)
             f.write("\n")
         print(f"recorded in {TABLE} (clang {version})")
         return
