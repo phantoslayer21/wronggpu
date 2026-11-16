@@ -156,8 +156,17 @@ bool VersionLess(const wstring& a, const wstring& b) {
 std::vector<wstring> HipCandidates() {
     std::vector<wstring> c;
 #ifdef WRONGGPU_TESTING
-    const wstring mocks = EnvVar(L"WRONGGPU_TEST_HIP_CANDIDATES");
-    if (!mocks.empty()) {
+    // tests: WRONGGPU_TEST_HIP_CANDIDATES set (even empty, or too long to read) is the whole list: never the system's,
+    // PATH's or ROCm's runtime; set but empty or unreadable: no candidate at all
+    SetLastError(ERROR_SUCCESS);
+    const DWORD need = GetEnvironmentVariableW(L"WRONGGPU_TEST_HIP_CANDIDATES", nullptr, 0);
+    if (need > 0 || GetLastError() != ERROR_ENVVAR_NOT_FOUND) {
+        wstring mocks;
+        if (need > 1) {
+            mocks.resize(need);
+            const DWORD got = GetEnvironmentVariableW(L"WRONGGPU_TEST_HIP_CANDIDATES", mocks.data(), need);
+            mocks.resize(got > 0 && got < need ? got : 0);
+        }
         for (size_t i = 0; i < mocks.size();) {
             const size_t end = mocks.find(L';', i);
             c.push_back(mocks.substr(i, end == wstring::npos ? end : end - i));

@@ -14,6 +14,7 @@
 #include <stdexcept>
 
 #include "app/ui_palette.h"
+#include "wg_core/checks.h"
 #include "wg_core/detect.h"
 #include "wg_core/gamerules.h"
 #include "wg_core/install.h"
@@ -26,6 +27,9 @@
 #include "wg_core/record.h"
 #include "wg_core/rr.h"
 #include "wg_core/rrconfig.h"
+#include "wg_core/rrprep.h"
+
+#include <shlobj.h>
 #include "wg_core/settings.h"
 
 using namespace wg;
@@ -2657,6 +2661,55 @@ int main() {
 #else
             require(!TestLibraries(), "a build without WRONGGPU_TESTING never takes a test library list");
 #endif
+        }
+
+#ifdef WRONGGPU_TESTING
+        {  // the HIP check's test candidates (checks.cpp HipCandidates): set is the whole list, never the system search
+            wchar_t savedList[512] = {};
+            const bool hadList = GetEnvironmentVariableW(L"WRONGGPU_TEST_HIP_CANDIDATES", savedList, 512) > 0;
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_HIP_CANDIDATES", L"");
+            require(HipCandidates().empty(), "WRONGGPU_TEST_HIP_CANDIDATES set but empty: no HIP candidate at all (never the system search)");
+            const wstring longPath = L"C:\\x\\" + wstring(20000, L'a') + L"\\amdhip64_7.dll";
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_HIP_CANDIDATES", longPath.c_str());
+            const auto longList = HipCandidates();
+            require(longList.size() == 1 && longList[0] == longPath,
+                    "WRONGGPU_TEST_HIP_CANDIDATES longer than EnvVar reads: still the whole list (that one path), never the system search");
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_HIP_CANDIDATES", hadList ? savedList : nullptr);
+        }
+#endif
+        {  // the rr-prepare helper's environment (rrprep.h RrHelperEnvironment): the tests' LOCALAPPDATA is kept in a test build
+            auto valueOf = [](const std::vector<wchar_t>& env, const wstring& key) {
+                wstring found = L"(none)";
+                for (const wchar_t* s = env.data(); *s; s += wcslen(s) + 1)
+                    if (StartsWithI(s, key + L"=")) found = s + key.size() + 1;
+                return found;
+            };
+            wchar_t saved[MAX_PATH * 2] = {}, savedReal[64] = {};
+            const bool had = GetEnvironmentVariableW(L"LOCALAPPDATA", saved, MAX_PATH * 2) > 0;
+            const bool hadReal = GetEnvironmentVariableW(L"WRONGGPU_TEST_REAL_DRIVER_CACHE", savedReal, 64) > 0;
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_REAL_DRIVER_CACHE", nullptr);  // (whatever the caller had)
+            const wstring sandbox = Join(dir, L"sandbox-localappdata");
+            SetEnvironmentVariableW(L"LOCALAPPDATA", sandbox.c_str());
+            wstring real;
+            PWSTR kp = nullptr;
+            if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DONT_VERIFY, nullptr, &kp)) && kp) real = kp;
+            if (kp) CoTaskMemFree(kp);
+            std::vector<wchar_t> env = RrHelperEnvironment(L"C:\\log\\prepare.log");
+            require(valueOf(env, L"WG_RR_LOG") == L"C:\\log\\prepare.log", "the helper's environment: the runtime log in WG_RR_LOG");
+#ifdef WRONGGPU_TESTING
+            require(valueOf(env, L"LOCALAPPDATA") == sandbox,
+                    "a test build's rr-prepare helper keeps the tests' redirected LOCALAPPDATA (never the user's real folder)");
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_REAL_DRIVER_CACHE", L"1");
+            env = RrHelperEnvironment(L"x");
+            require(!real.empty() && IEq(valueOf(env, L"LOCALAPPDATA"), real),
+                    "a test build's helper gets the real LOCALAPPDATA only with the explicit opt-in WRONGGPU_TEST_REAL_DRIVER_CACHE=1");
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_REAL_DRIVER_CACHE", nullptr);
+#else
+            require(!real.empty() && IEq(valueOf(env, L"LOCALAPPDATA"), real),
+                    "a release build's rr-prepare helper gets the user's real LOCALAPPDATA (where the driver keeps the game's shader cache)");
+#endif
+            SetEnvironmentVariableW(L"LOCALAPPDATA", had ? saved : nullptr);
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_REAL_DRIVER_CACHE", hadReal ? savedReal : nullptr);
         }
 
         RemoveTree(dir);

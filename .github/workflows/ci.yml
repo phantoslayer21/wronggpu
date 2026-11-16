@@ -126,7 +126,12 @@ jobs:
           $common = @("-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_POLICY_DEFAULT_CMP0091=NEW", "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
                       "-DWRONGGPU_PAYLOAD_DIR=$PWD/out/mock/prepared/payload", "-DWRONGGPU_MAP=$PWD/out/mock/prepared/test-map.json", "-DWRONGGPU_VERSION=0.3.0-test")
           cmake -S clean/installer -B out/launcher-mock @common -DWRONGGPU_TESTING=ON
-          cmake --build out/launcher-mock --target WrongGPU
+          cmake --build out/launcher-mock --target WrongGPU launcher-core-tests
+          # the core tests in a WRONGGPU_TESTING build too: its test-only rules (the rr-prepare helper keeps the tests' LOCALAPPDATA)
+          out/launcher-mock/launcher-core-tests.exe
+          # the launcher suite runs only a testing build, by its identity (launcher_build_facts.py): this launcher and its restorer
+          # pass; the negative controls (not testing builds, one carrying the hooks' strings) are refused
+          python -c "import sys; sys.path.insert(0, 'clean/installer/tests'); import launcher_build_facts as f; ok = [p for p in ('WrongGPU.exe', 'WrongGPU-Restore.exe') if f.missing_test_hooks('out/launcher-mock/' + p)]; bad = [p for p in ('wg-test-canary.exe', 'wg-test-canary-strings.exe') if not f.missing_test_hooks('out/launcher-mock/' + p)]; sys.exit('not accepted: %s; not refused: %s' % (ok, bad) if ok or bad else 0)"
           # the negative control: a release build (WRONGGPU_TESTING=OFF) with the same stand-in refuses it at the payload step
           cmake -S clean/installer -B out/launcher-mock-release @common -DWRONGGPU_TESTING=OFF
           $PSNativeCommandUseErrorActionPreference = $false

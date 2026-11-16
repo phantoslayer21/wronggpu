@@ -22,6 +22,7 @@ import sys
 import time
 import zipfile
 
+sys.dont_write_bytecode = True  # before any local module: no __pycache__ in the source tree (also as the launcher suite's module)
 HERE = os.path.dirname(os.path.abspath(__file__))
 INSTALLER = os.path.dirname(HERE)
 CONVERTER_TESTS = os.path.join(INSTALLER, "..", "converter", "tests")
@@ -317,13 +318,18 @@ FSR3UP = mockpe.make_dll(None, extra=b"game-built upscaler v1" * 10, exports=moc
 FSR3UP_V2 = mockpe.make_dll(None, extra=b"game-built upscaler v2 (game update)" * 10, exports=mockpe.FSR3UPSCALER_EXPORTS, dll_name=SLOTS[2])
 FOREIGN_FSR3 = mockpe.make_dll(None, extra=b"some other mod", exports=["ModInit", "ModHook"], dll_name=SLOTS[1])
 OLD_DLSS = mockpe.make_dll({"CompanyName": "Mock", "ProductName": "Mock DLSS"}, (310, 1, 0, 0), extra=random.Random(5).randbytes(200_000))
+# the release marker the payload gate looks for in a runtime (tools/make_payload.py)
+RELEASE_MARKER = b"\0wg-build dev-diagnostics=0\0"
+# the test payload's WrongGPU runtime as installed: a stand-in without kernels (it cannot prepare anything on a GPU), with
+# the marker (stand_in_runtime)
+STAND_IN_RUNTIME = mockpe.make_dll({"ProductName": "WrongGPU", "FileDescription": "WrongGPU runtime"}, (0, 3, 0, 0)) + RELEASE_MARKER
 
 
 def stand_in_runtime(folder, data, name="wronggpu_runtime.dll"):
     """The test payload's WrongGPU runtime, a stand-in without kernels: its bytes carry the release marker
     ("wg-build dev-diagnostics=0"), and its build manifest (<name>.build.json, as clean/runner/build.py writes one) is for these
     exact bytes and says stand_in, so the payload gate (tools/make_payload.py) embeds it only in a WRONGGPU_TESTING build."""
-    data = data + b"\0wg-build dev-diagnostics=0\0"
+    data = data if data.endswith(RELEASE_MARKER) else data + RELEASE_MARKER
     write(os.path.join(folder, name), data)
     manifest = {"format": 1, "file": name, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data), "dev_diagnostics": False,
                 "stand_in": True}
@@ -334,7 +340,7 @@ def payload(root):
     exports = {SLOTS[0]: mockpe.FFX_API_EXPORTS, SLOTS[1]: mockpe.FSR3_EXPORTS, SLOTS[2]: mockpe.FSR3UPSCALER_EXPORTS}
     for name in SLOTS:  # WrongGPU's three FSR DLLs (front end, spec 20)
         write(os.path.join(root, name), mockpe.make_dll(mockpe.FRONT_END, (0, 3, 0, 0), extra=("front end " + name).encode(), exports=exports[name], dll_name=name))
-    stand_in_runtime(root, mockpe.make_dll({"ProductName": "WrongGPU", "FileDescription": "WrongGPU runtime"}, (0, 3, 0, 0)))
+    stand_in_runtime(root, STAND_IN_RUNTIME)
     rng = random.Random(11)
     for k in ("enc", "swin", "dec"):
         write(os.path.join(root, "wronggpu", "kernels", k + ".hsaco"), rng.randbytes(3000))

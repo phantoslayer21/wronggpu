@@ -920,7 +920,7 @@ Windows (the Wine run was not repeated for them):
   the list and line), converted again by a second game's install, a list held open (exit 10), and the last game's uninstall
   keeping `ignore-files.txt` with the kept line in its result.
 - `tests/run_launcher_tests.py --launcher <WrongGPU.exe> --work <dir> [--baseline <0.5.1 WrongGPU-Setup.exe>]
-  [--hip <mock>]`: the verbs against generated fixture games (names and synthetic bytes only) with a
+  [--hip <mock>] [--no-direct-launcher <WrongGPU.exe>] [--rr-prepare-gpu]`: the verbs against generated fixture games (names and synthetic bytes only) with a
   `WRONGGPU_TESTING` build of the suite's test map: scan statuses, refusals (anti-cheat, DLSS-NR) with nothing changed,
   install (record v2, owned-files.json, the restorer as uninstall.exe, the managed list), set/get with validation,
   OptiScaler's FPS key, an outside edit and its revert, the last run from a synthetic log, update with `previous\`,
@@ -929,6 +929,48 @@ Windows (the Wine run was not repeated for them):
   the experimental confirmation, the model kept while another managed game uses it, adoption of a real 0.5.1
   install (v1 record, settings imported, restorer, entries), self-install / self-uninstall with one Apps & features
   entry, portable paths, the update check off, and the window built hidden (`ui-dump`: pages, names, visibility).
+  The suite runs only `WRONGGPU_TESTING` builds, by their identity: the named resource `WRONGGPU_TESTING_BUILD` only such
+  a build links in, a PE checksum that matches (MSVC `/RELEASE`: a program changed or appended to after its link fails)
+  and the test hooks' strings inside its sections. Every launcher it is given, their copies and the `uninstall.exe` they
+  write are checked before they run; anything else is refused unrun (a release launcher could reach the real download
+  page, the PC's stores and the real Apps & features root). Negative controls: `wg-test-canary` and
+  `wg-test-canary-strings` (not testing builds, the second carrying the hooks' strings) are built with a testing
+  `WrongGPU` target, which then writes `wg-test-build.sha256` (the SHA-256 of that `WrongGPU.exe` and of the canaries)
+  next to itself. The suite starts only canaries that list verifies as this build's, by their full path and with its own
+  child environment: they start when run directly and are refused through every launch path. The 0.5.1 baseline predates
+  the hooks: `--run-old-baseline` runs it OUTSIDE the suite's isolation guarantee, unchecked, and only in a disposable,
+  fully redirected sandbox. `--work` must be a plain folder (no junction or link in it or above it, no `;`): each run makes
+  a NEW folder of its own in it (`run-<UTC time>-<pid>`) and writes everything there, nested test instances in new folders of
+  their own, so nothing that was in `--work` before is written to, followed or loaded. Every launcher call gets its
+  instance's fresh `tmp` as `TEMP` and `TMP`, and no inherited test override (`WRONGGPU_TEST_*`, `WG_*`;
+  `WRONGGPU_HIP_RUNTIME` only from `--hip`, which must be an existing plain file; an empty `--hip=` is refused). Checks that depend on how the launcher was built follow the build under
+  test (`launcher_build_facts.py`). The edition section always runs with `--launcher`: its download, cache and address
+  rules on either route, and a repair without any OptiScaler ending through the direct route (exit 0) or refused (exit 2)
+  without it. `--no-direct-launcher` (a testing build with `-DWRONGGPU_DIRECT_ROUTE=OFF`, as releases) runs the section
+  again in a pass of its own for the exit-2 refusals. rr-prepare stays in the work folder: its no-card path, and with the
+  suite's stand-in runtime the helper's expected failure to load it (under a test driver version, so on any PC) with the
+  suite's `LOCALAPPDATA` kept. The checks of RR's kernels really prepared need a payload with the real runtime and fill the
+  user's real graphics driver cache, so they run only with `--rr-prepare-gpu`. A test build starts no rr-prepare helper
+  unless the test allows it (`WRONGGPU_TEST_ALLOW_RR_HELPER=1`: the stand-in case and the opt-in pass only). Test builds'
+  other hooks for this: `WRONGGPU_TEST_RR_DRIVER` (a driver version, or `none`), `WRONGGPU_TEST_HELPER_ENV_LOG`, and
+  `WRONGGPU_TEST_REAL_DRIVER_CACHE=1` (the helper gets the user's real `LOCALAPPDATA`; release builds always do).
+  The HIP check only ever tries `--hip` (an existing file, named at the start), or in a default run a file in the run
+  folder that is not there (`WRONGGPU_TEST_HIP_CANDIDATES`): a default run never loads a real HIP runtime.
+  On a fresh clone, from the repository root in an x64 Visual Studio developer prompt (PowerShell), with nothing else
+  needed (a single `WrongGPU` target builds the restorer and the canaries too):
+
+  ```
+  python clean/installer/tests/run_installer_tests.py --work out/mock --prepare-only
+  $common = @("-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_POLICY_DEFAULT_CMP0091=NEW", "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
+              "-DWRONGGPU_PAYLOAD_DIR=$PWD/out/mock/prepared/payload", "-DWRONGGPU_MAP=$PWD/out/mock/prepared/test-map.json",
+              "-DWRONGGPU_VERSION=0.3.0-test", "-DWRONGGPU_TESTING=ON")
+  cmake -S clean/installer -B out/launcher-test @common
+  cmake --build out/launcher-test --target WrongGPU
+  cmake -S clean/installer -B out/launcher-test-nodirect @common -DWRONGGPU_DIRECT_ROUTE=OFF
+  cmake --build out/launcher-test-nodirect --target WrongGPU
+  python clean/installer/tests/run_launcher_tests.py --launcher out/launcher-test/WrongGPU.exe --work out/launcher-suite --no-direct-launcher out/launcher-test-nodirect/WrongGPU.exe
+  ```
+
   Its `[direct-rr]` part: a game that ships the RR library without the game interface's RR plugin (the Unreal Engine
   plugin layout of Hogwarts Legacy, LEGO Batman, Borderlands 4) creates Ray Reconstruction itself (`rr.h`
   `RrUse::direct`; status `rr_direct`). WrongGPU's RR runs there only through WrongGPU's edition of OptiScaler (plugin
@@ -994,7 +1036,8 @@ The run stops, loudly, on:
 
 The `[isolation-verbs]` section runs install, repair, update, uninstall, the window's refresh, a batch (a noscan job, then a
 normal one) and `/FSR4` / `/LIST`, with and without no-scan, against a non-empty test library. The 0.5.1 baseline installer
-predates all this and runs only with `--run-old-baseline`, in a fully redirected sandbox.
+predates all this and runs only with `--run-old-baseline`: outside the suite's isolation guarantee, in a disposable, fully
+redirected sandbox.
 
 On Windows: `python tests\run_installer_tests.py --prepare-only` writes the mock payload and the synthetic map; build
 the installer from them with CMake (`-DWRONGGPU_TESTING=ON -DWRONGGPU_PAYLOAD_DIR=... -DWRONGGPU_MAP=...`) and run
