@@ -575,8 +575,8 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   smx_test_ = option(c, "k_smx_test");
 #ifdef WG_DEV_DIAGNOSTICS
   if (!smx_test_.empty() && smx_test_ != "mix_fail" && smx_test_ != "both_fail" && smx_test_ != "rodd_unchecked" &&
-      smx_test_ != "report")
-    return fail("model K: k_smx_test must be mix_fail, both_fail, rodd_unchecked or report");
+      smx_test_ != "mix_unchecked" && smx_test_ != "report")
+    return fail("model K: k_smx_test must be mix_fail, both_fail, rodd_unchecked, mix_unchecked or report");
 #else
   if (!smx_test_.empty()) return fail("model K: k_smx_test is a test hook of developer builds only");
 #endif
@@ -903,6 +903,14 @@ bool KRuntime::smx_select(int backend, const std::string& hook) {
     add_note("model K: test hook: the round-to-odd softmax ports without the create-time check");
     return true;
   }
+#ifdef WG_DEV_DIAGNOSTICS
+  if (hook == "mix_unchecked") {  // the mix form without the check: a gfx11 board's hashes differ from the gfx12 HIP ones
+    smx_rodd_ = false;
+    smx_note_ = " smx=mix(unchecked)";
+    add_note("model K: test hook: the mix softmax ports without the create-time check");
+    return true;
+  }
+#endif
   int bad[2] = {0, 0};
   std::vector<std::pair<std::string, uint64_t>> h[2];
   const bool all = hook == "report";
