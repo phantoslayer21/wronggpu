@@ -17,6 +17,9 @@
 //     FP16 is the single rounding of the exact product), then the same conversion. Truncation of w inv is p, or p - 1
 //     ulp when e < 0; the inexact bit e != 0 makes it odd (the same bits as wg_round_odd for every finite p > 0).
 //   K_SMX_MUT 1: negative control of the checks (the residual dropped: a second rounding); never shipped.
+//   K_SMX_MUT4 1: negative control of the offsets (a second, residual-dropped conversion whose result is taken only
+//     when the window offset is 4; the exact folded conversion is unchanged elsewhere; needs the stage kernels' P_ox);
+//     never shipped.
 //   K_SMX_RODD_MUT 1: negative control of the __rodd ports (the inexact bit dropped: truncation, then the conversion's
 //     rounding, wrong where the product is an FP16 midpoint); never shipped.
 #pragma once
@@ -26,6 +29,9 @@
 #endif
 #ifndef K_SMX_MUT
 #define K_SMX_MUT 0
+#endif
+#ifndef K_SMX_MUT4
+#define K_SMX_MUT4 0
 #endif
 #ifndef K_SMX_RODD_MUT
 #define K_SMX_RODD_MUT 0
@@ -44,6 +50,9 @@ uint k_smx_round_odd_pos(float p, float e)
 uint4 k_smx_weights8(float w[8], float inv)
 {
     v8f ro;
+#if K_SMX >= 2 && K_SMX_MUT4
+    v8f rb;   // negative control only: the residual-dropped conversion, taken at window offset 4 alone
+#endif
     [unroll] for (uint j = 0; j < 8u; ++j) {
         const float p = w[j] * inv;
         const float e = mad(w[j], inv, -p);   // exact: w inv = p + e
@@ -51,9 +60,18 @@ uint4 k_smx_weights8(float w[8], float inv)
         ro.v[j] = p;
 #elif K_SMX >= 2
         ro.v[j] = p + e;
+#if K_SMX_MUT4
+        rb.v[j] = p;
+#endif
 #else
         ro.v[j] = asfloat(k_smx_round_odd_pos(p, e));
 #endif
     }
+#if K_SMX >= 2 && K_SMX_MUT4
+    // two conversions, the choice made on their results: the folded exact one stays as it is at every other offset
+    const uint4 good = wg_to_f16_ags(ro), bad = wg_to_f16_ags(rb);
+    return P_ox == 4 ? bad : good;
+#else
     return wg_to_f16_ags(ro);
+#endif
 }

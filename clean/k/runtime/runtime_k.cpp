@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <utility>
 
 #include "../../converter/src/json.h"
 #include "../../converter/src/sha256.h"
@@ -266,6 +267,7 @@ const char* const kColorAtDefault = "input";
 const char* const kWarmAtDefault = "e0";
 const char* const kWarmToDefault = "d0";
 
+// SMX-SELFCHECK-SOURCE BEGIN (wide_ng, block_params, stage_kernel_base: the self-check reference depends on them)
 int wide_ng(const std::string& s, bool f16, int nwin) {
   if (f16) return s == "e4" || s == "m" || s == "d4" ? 4 : 0;
   if (s == "m") return 4;
@@ -336,6 +338,7 @@ std::string stage_kernel_base(const KStageInfo& st, bool f16, bool has_y, int nw
   const std::string h = f16 ? "h" : "";
   return (*ng ? "k_stagew" + std::to_string(*ng) : std::string(*w2 ? "k_stage2" : "k_stage")) + h + "_" + st.name;
 }
+// SMX-SELFCHECK-SOURCE END
 
 // Runtime options of model K (runtime_options, then WG_RUNTIME_OPTIONS whose keys win): model_k_dir, model_k_map,
 // network (fused, the default; fused16: FP16 accumulation, the spec 49 speed approximation, opt-in), k_diag (timing
@@ -619,6 +622,11 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   for (int l = 0; l < 8; ++l) k_filter_table(l, 1, tab.data() + (size_t)l * kFilterEntries * kFilterValues);
   if (!dev_->upload(tables_, tab.data(), tab.size() * 2)) return dfail();
   if (!dev_->sync()) return dfail();
+  // the native device prepares (loads, verifies and compiles) every kernel this context can select now: a missing or
+  // corrupt shader fails create here, not at the first frame
+  if (c.backend == 3)
+    for (const std::string& k : d3d12_kernels())
+      if (!dev_->prepare(k)) return dfail();
   return smx_select(c.backend, smx_test_);
 }
 
@@ -630,43 +638,32 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
 // neither is taken on trust. At create the native D3D12 device checks the shaders that will run:
 // - k_mix_probe and k_mix_probe__rodd on k_mix_probe.h's records (FP16-midpoint products with residuals of both signs,
 //   exact ties, FP16 subnormals) against the exact results;
-// - every softmax stage kernel this runtime can select, in both forms, on the same synthetic inputs and weights
-//   (kSmxCases: each stage at a 512 x 384 base map; e4 / d4 (NG = 2) and m again at 1536 x 1280), its
-//   outputs hashed and compared with k_smx_selfcheck.h, the hashes of the HIP reference.
-// The mix form is used when its probe and all its stages match; else the round-to-odd ports when theirs all match (one
-// note of create); else create fails, naming the first stage that differs. Launching each stage kernel also loads,
-// verifies and prepares its shader at create: a missing or corrupt stage shader of either form fails create there.
+// - every softmax stage kernel this runtime can select, in both forms, at the window offsets this model's frames use
+//   (k_stage_offsets over the eight entries of its window table: e2, e3, d3, d2, d1 at (4, 4); e4 and d4 at
+//   (2 t - 4) mod 8; m at the table's entries t), on the runtime's own synthetic inputs and weights (kSmxCases); each
+//   case's outputs are hashed and compared with k_smx_selfcheck.h, the HIP reference's hashes of every offset any window
+//   table can give (clean/k/dx12/gen_k_smx_selfcheck.py, bound to the shader sources by smx_selfcheck_digest.py).
+// The mix form is used when its probe and all its cases match; else the round-to-odd ports when theirs all match (one
+// note of create); else create fails, naming the first case that differs. Every kernel the context can select is
+// prepared at create (KRuntime::create, Device::prepare): a missing or corrupt shader fails create.
 // Test hook (developer builds only, WG_DEV_DIAGNOSTICS): runtime option k_smx_test = mix_fail (the mix form counts as
 // failed), both_fail (both forms count as failed), rodd_unchecked (the round-to-odd ports without the check; for the
-// frame test's negative control), report (adds the computed hashes as a note; on any device).
+// frame test's negative control), report (adds the computed hashes as a note; on any device, every possible offset).
 namespace {
+// SMX-SELFCHECK-SOURCE BEGIN (the cases, the synthetic data, the offsets and the check: k_smx_selfcheck.h's digest covers this text)
 struct SmxCase {
   const char* stage;
-  int wb, hb;    // base map size
-  int sets = 1;  // independent synthetic data sets, the outputs of all hashed together
+  int wb, hb;  // base map size
+  int sets;    // independent synthetic data sets, the outputs of all hashed together
 };
-// the softmax stages (spec 41: e2 ... d1; e0, e1 and d0 mix with fixed weights) at a 512 x 384 base map, which selects
-// k_stage_e2, k_stagew2_e3, k_stagew4_e4, k_stagew4_m, k_stagew4_d4, k_stagew2_d3, k_stage_d2 and k_stage2_d1 (e4 / d4:
-// 20 windows at offset 2; NG = 4 takes at most 24, so these two run on 8 data sets); at 1536 x 1280 e4 and d4 select
-// their NG = 2 kernels (156 windows) and m runs again with 42 windows. Sized so that a one-stage wrong-rounding mutant
-// of either form changes its case's outputs (the mutant runs in the #254 evidence).
-const SmxCase kSmxCases[] = {{"e2", 512, 384},      {"e3", 512, 384},      {"e4", 512, 384, 8}, {"m", 512, 384},
-                             {"d4", 512, 384, 8},   {"d3", 512, 384},      {"d2", 512, 384},    {"d1", 512, 384},
-                             {"e4", 1536, 1280},    {"d4", 1536, 1280},    {"m", 1536, 1280}};
-constexpr int kSmxOffset = 2;          // window offset of every case (even, as the network's)
+// e2, e3, d3, d2, d1 (k_stage_e2, k_stagew2_e3, k_stagew2_d3, k_stage_d2, k_stage2_d1) and e4 / d4 with NG = 4 (at most 24
+// windows: 20 at 512 x 384; on 8 data sets) at a 512 x 384 base map; e4 / d4 with NG = 2 (above 24 windows) and m
+// (k_stagew4_m, 42 or more windows) at 1536 x 1280. Sized so that a one-stage wrong-rounding mutant of either form
+// changes its case's outputs (the mutant runs in the #254 evidence).
+const SmxCase kSmxCases[] = {{"e2", 512, 384, 1},   {"e3", 512, 384, 1},   {"d3", 512, 384, 1}, {"d2", 512, 384, 1},
+                             {"d1", 512, 384, 1},   {"e4", 512, 384, 8},   {"d4", 512, 384, 8}, {"e4", 1536, 1280, 1},
+                             {"d4", 1536, 1280, 1}, {"m", 1536, 1280, 1}};
 constexpr uint32_t kSmxSeed = 0x6b5eu;  // synthetic data (xorshift32)
-static_assert(sizeof kSmxCases / sizeof kSmxCases[0] == k_smx_selfcheck::kCount, "k_smx_selfcheck.h case count");
-
-const KStageInfo& stage_info(const char* name) {
-  for (const KStageInfo& s : k_stage_table())
-    if (std::strcmp(s.name, name) == 0) return s;
-  return k_stage_table()[0];
-}
-size_t level_tokens(int wb, int hb, int level) {
-  int w, h;
-  k_level_size(wb, hb, level, &w, &h);
-  return (size_t)w * h;
-}
 // FP16 words of uniform values in [-scale, scale): also finite FP32 values where two words are read as one
 void smx_fill(std::vector<uint16_t>* v, uint32_t* state, float scale) {
   for (uint16_t& h : *v) {
@@ -678,23 +675,58 @@ void smx_fill(std::vector<uint16_t>* v, uint32_t* state, float scale) {
     h = f32_to_f16(((float)(x >> 8) * (1.0f / 8388608.0f) - 1.0f) * scale);
   }
 }
+constexpr int kSmxCount = (int)(sizeof kSmxCases / sizeof kSmxCases[0]);
+
+const KStageInfo& stage_info(const char* name) {
+  for (const KStageInfo& s : k_stage_table())
+    if (std::strcmp(s.name, name) == 0) return s;
+  return k_stage_table()[0];
+}
+int stage_index(const char* name) {
+  const auto& t = k_stage_table();
+  for (size_t i = 0; i < t.size(); ++i)
+    if (std::strcmp(t[i].name, name) == 0) return (int)i;
+  return 0;
+}
+size_t level_tokens(int wb, int hb, int level) {
+  int w, h;
+  k_level_size(wb, hb, level, &w, &h);
+  return (size_t)w * h;
+}
+// The window offsets of stage `stage` in frames (k_stage_offsets, the network's rule): over the eight entries of
+// `table`, or (table == nullptr) over every table entry 0 .. 7 x 0 .. 7 any model can hold. Distinct, sorted.
+std::vector<std::pair<int, int>> smx_offsets(const char* stage, const int (*table)[2]) {
+  std::vector<std::pair<int, int>> v;
+  const int si = stage_index(stage);
+  for (int e = 0; e < (table ? 8 : 64); ++e) {
+    int t[8][2], off[11][2];
+    for (int k = 0; k < 8; ++k) {
+      t[k][0] = table ? table[k][0] : e % 8;
+      t[k][1] = table ? table[k][1] : e / 8;
+    }
+    k_stage_offsets(table ? e : 0, t, off);
+    v.emplace_back(off[si][0], off[si][1]);
+  }
+  std::sort(v.begin(), v.end());
+  v.erase(std::unique(v.begin(), v.end()), v.end());
+  return v;
+}
 }  // namespace
 
-std::string KRuntime::smx_case_name(int i, bool rodd) const {
+std::string KRuntime::smx_case_name(int i, int ox, int oy, bool rodd) const {
   const SmxCase& c = kSmxCases[i];
   const KStageInfo& st = stage_info(c.stage);
   int lw, lh, ng = 0;
   bool w2 = false;
   k_level_size(c.wb, c.hb, st.level, &lw, &lh);
-  const std::string k = stage_kernel_base(st, false, true, cdiv(lw + kSmxOffset, 8) * cdiv(lh + kSmxOffset, 8),
-                                          &ng, &w2);
+  const std::string k = stage_kernel_base(st, false, true, cdiv(lw + ox, 8) * cdiv(lh + oy, 8), &ng, &w2);
   return k + (rodd ? "__rodd" : "") + "@" + std::to_string(c.wb) + "x" + std::to_string(c.hb) +
-         (c.sets > 1 ? "*" + std::to_string(c.sets) : std::string());
+         (c.sets > 1 ? "*" + std::to_string(c.sets) : std::string()) + "/o" + std::to_string(ox) + "," + std::to_string(oy);
 }
 
-// One form of every case: the outputs' SHA-256 (first 8 bytes, big-endian) per case into *hashes.
-bool KRuntime::smx_check(bool rodd, std::vector<uint64_t>* hashes) {
-  const int n = (int)(sizeof kSmxCases / sizeof kSmxCases[0]);
+// One form of every case at its offsets (this model's: all = false; every possible one: all = true): (case name of the
+// mix form, the outputs' SHA-256, first 8 bytes big-endian) into *out.
+bool KRuntime::smx_check(bool rodd, bool all, std::vector<std::pair<std::string, uint64_t>>* out) {
   size_t in_bytes = 0, y_bytes = 0, m_bytes = 0, w_bytes = 0;
   for (const SmxCase& c : kSmxCases) {
     const KStageInfo& st = stage_info(c.stage);
@@ -717,50 +749,54 @@ bool KRuntime::smx_check(bool rodd, std::vector<uint64_t>* hashes) {
     loaded = set;
     return dev_->upload(din, in.data(), in_bytes) && dev_->upload(dw, w.data(), w_bytes);
   };
-  auto release = [&]() {
-    for (DevPtr p : {din, dw, dy, dm})
-      if (p) dev_->free(p);
-  };
   bool ok = dev_->alloc(&din, in_bytes) && dev_->alloc(&dw, w_bytes) && dev_->alloc(&dy, y_bytes) &&
             dev_->alloc(&dm, std::max<size_t>(m_bytes, 256));
-  std::vector<uint8_t> out;
-  for (int i = 0; ok && i < n; ++i) {
+  std::vector<uint8_t> buf;
+  for (int i = 0; ok && i < kSmxCount; ++i) {
     const SmxCase& c = kSmxCases[i];
     const KStageInfo& st = stage_info(c.stage);
     int lw, lh, iw, ih;
     k_level_size(c.wb, c.hb, st.level, &lw, &lh);
     k_level_size(c.wb, c.hb, st.kind == 'd' ? st.level + 1 : st.level, &iw, &ih);
-    KBlkParams p = block_params(st, dw, din, dy, din, dm, 0, lw, lh, iw, ih, kSmxOffset, kSmxOffset);
-    int ng = 0;
-    bool w2 = false;
-    const std::string k = stage_kernel_base(st, false, true, p.nwx * p.nwy, &ng, &w2) + (rodd ? "__rodd" : "");
     const size_t yb = level_tokens(c.wb, c.hb, st.level) * st.C * 2;
     const size_t mb = st.kind == 'e' ? level_tokens(c.wb, c.hb, st.level + 1) * st.C_next * 2 : 0;
-    wgc::Sha256 sha;
-    out.resize(yb + mb);
-    for (int set = 0; ok && set < c.sets; ++set) {
-      ok = load(set) && dev_->memset(dy, 0, y_bytes) && dev_->memset(dm, 0, std::max<size_t>(m_bytes, 256)) &&
-           launch(k.c_str(), (unsigned)(w2 ? cdiv(p.nwx * p.nwy, 2) : p.nwx * p.nwy), (unsigned)(kThreads * (ng ? ng : 1)),
-                  &p) &&
-           dev_->download(out.data(), dy, yb) && (!mb || dev_->download(out.data() + yb, dm, mb));
-      if (ok) sha.update(out.data(), out.size());
-    }
-    if (ok) {
+    buf.resize(yb + mb);
+    for (const auto& o : smx_offsets(c.stage, all ? nullptr : offsets_table_)) {
+      KBlkParams p = block_params(st, dw, din, dy, din, dm, 0, lw, lh, iw, ih, o.first, o.second);
+      int ng = 0;
+      bool w2 = false;
+      const std::string k = stage_kernel_base(st, false, true, p.nwx * p.nwy, &ng, &w2) + (rodd ? "__rodd" : "");
+      wgc::Sha256 sha;
+      for (int set = 0; ok && set < c.sets; ++set) {
+        ok = load(set) && dev_->memset(dy, 0, y_bytes) && dev_->memset(dm, 0, std::max<size_t>(m_bytes, 256)) &&
+             launch(k.c_str(), (unsigned)(w2 ? cdiv(p.nwx * p.nwy, 2) : p.nwx * p.nwy),
+                    (unsigned)(kThreads * (ng ? ng : 1)), &p) &&
+             dev_->download(buf.data(), dy, yb) && (!mb || dev_->download(buf.data() + yb, dm, mb));
+        if (ok) sha.update(buf.data(), buf.size());
+      }
+      if (!ok) break;
       const wgc::Digest d = sha.finish();
       uint64_t v = 0;
       for (int b = 0; b < 8; ++b) v = (v << 8) | d[b];
-      hashes->push_back(v);
+      out->emplace_back(smx_case_name(i, o.first, o.second, false), v);
     }
   }
-  release();
+  for (DevPtr p : {din, dw, dy, dm})
+    if (p) dev_->free(p);
   return ok || dfail();
 }
+
+// SMX-SELFCHECK-SOURCE END
 
 // The mix / round-to-odd probe: the number of results that differ from the exact ones.
 bool KRuntime::smx_probe(bool rodd, int* bad) {
   DevPtr in = 0, out = 0;
   const size_t out_bytes = (size_t)k_mix_probe::kLanes * 16;
-  if (!dev_->alloc(&in, sizeof k_mix_probe::kRecords) || !dev_->alloc(&out, out_bytes)) return dfail();
+  if (!dev_->alloc(&in, sizeof k_mix_probe::kRecords)) return dfail();
+  if (!dev_->alloc(&out, out_bytes)) {
+    dev_->free(in);
+    return dfail();
+  }
   std::vector<uint16_t> got((size_t)k_mix_probe::kLanes * 8);
   const bool ok = dev_->upload(in, k_mix_probe::kRecords, sizeof k_mix_probe::kRecords) &&
                   dev_->memset(out, 0xA5, out_bytes) &&
@@ -777,26 +813,22 @@ bool KRuntime::smx_probe(bool rodd, int* bad) {
 // smx_select (create, last step): the softmax form of this runtime, from the checks above (native D3D12 device), or only
 // the report hook's hashes (other devices: the HIP reference for clean/k/dx12/gen_k_smx_selfcheck.py).
 bool KRuntime::smx_select(int backend, const std::string& hook) {
-  const int n = (int)(sizeof kSmxCases / sizeof kSmxCases[0]);
-  for (int i = 0; i < n; ++i)
-    if (smx_case_name(i, false) != k_smx_selfcheck::kNames[i])
-      return fail("model K: k_smx_selfcheck.h does not match the self-check cases (" + smx_case_name(i, false) + ")");
   auto hex = [](uint64_t v) {
     char b[17];
     std::snprintf(b, sizeof b, "%016llx", (unsigned long long)v);
     return std::string(b);
   };
-  auto report = [&](const char* form, const std::vector<uint64_t>& h, int probe_bad) {
+  auto report = [&](const char* form, const std::vector<std::pair<std::string, uint64_t>>& h, int probe_bad) {
     std::string r = std::string("model K self-check ") + form + ":" +
                     (probe_bad >= 0 ? " probe=" + std::to_string(probe_bad) : std::string());
-    for (int i = 0; i < (int)h.size(); ++i) r += " " + smx_case_name(i, false) + "=" + hex(h[i]);
+    for (const auto& e : h) r += " " + e.first + "=" + hex(e.second);
     return r;
   };
   auto add_note = [&](const std::string& line) { notes_ += (notes_.empty() ? "" : "\n") + line; };
-  if (backend != 3) {  // the report hook only: the reference's hashes
+  if (backend != 3) {  // the report hook only: the reference's hashes at every possible offset
     if (hook != "report") return true;
-    std::vector<uint64_t> h;
-    if (!smx_check(false, &h)) return false;
+    std::vector<std::pair<std::string, uint64_t>> h;
+    if (!smx_check(false, true, &h)) return false;
     add_note(report("reference", h, -1));
     return true;
   }
@@ -807,16 +839,26 @@ bool KRuntime::smx_select(int backend, const std::string& hook) {
     return true;
   }
   int bad[2] = {0, 0};
-  std::vector<uint64_t> h[2];
-  if (!smx_probe(false, &bad[0]) || !smx_probe(true, &bad[1]) || !smx_check(false, &h[0]) || !smx_check(true, &h[1]))
+  std::vector<std::pair<std::string, uint64_t>> h[2];
+  const bool all = hook == "report";
+  if (!smx_probe(false, &bad[0]) || !smx_probe(true, &bad[1]) || !smx_check(false, all, &h[0]) ||
+      !smx_check(true, all, &h[1]))
     return false;
-  // the first check that differs, per form ("" = none)
+  // the first check that differs, per form ("" = none); a case without a reference refuses create
   std::string first[2];
   for (int f = 0; f < 2; ++f) {
     if (bad[f]) first[f] = std::string(f ? "k_mix_probe__rodd" : "k_mix_probe") + " " + std::to_string(bad[f]) + " of " +
                            std::to_string(k_mix_probe::kLanes * 8);
-    for (int i = 0; first[f].empty() && i < n; ++i)
-      if (h[f][i] != k_smx_selfcheck::kExpected[i]) first[f] = smx_case_name(i, f == 1);
+    for (const auto& e : h[f]) {
+      int at = -1;
+      for (int j = 0; j < k_smx_selfcheck::kCount && at < 0; ++j)
+        if (e.first == k_smx_selfcheck::kNames[j]) at = j;
+      if (at < 0) return fail("model K: k_smx_selfcheck.h has no reference for " + e.first + " (regenerate it)");
+      if (first[f].empty() && e.second != k_smx_selfcheck::kExpected[at]) {
+        const size_t a = e.first.find('@');
+        first[f] = f ? e.first.substr(0, a) + "__rodd" + e.first.substr(a) : e.first;
+      }
+    }
   }
   if (hook == "mix_fail" || hook == "both_fail") first[0] = "test hook";
   if (hook == "both_fail") first[1] = "test hook";

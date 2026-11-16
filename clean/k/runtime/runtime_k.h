@@ -105,12 +105,13 @@ class KRuntime {
   bool tiled_guard(int rw, int rh, float jx, float jy) const;
   bool options_ok_direct();
   // the softmax weight rounding (runtime_k.cpp "create-time self-check"): smx_select picks the mix form or the __rodd
-  // ports after checking both on this device (native D3D12), or refuses; smx_check hashes one form's stage outputs,
-  // smx_probe counts one form's probe mismatches, smx_case_name names a self-check case
+  // ports after checking both on this device (native D3D12), or refuses; smx_check hashes one form's stage outputs at
+  // this model's window offsets (all: every possible offset), smx_probe counts one form's probe mismatches,
+  // smx_case_name names a self-check case
   bool smx_select(int backend, const std::string& hook);
-  bool smx_check(bool rodd, std::vector<uint64_t>* hashes);
+  bool smx_check(bool rodd, bool all, std::vector<std::pair<std::string, uint64_t>>* out);
   bool smx_probe(bool rodd, int* bad);
-  std::string smx_case_name(int i, bool rodd) const;
+  std::string smx_case_name(int i, int ox, int oy, bool rodd) const;
   // the stage kernel network() launches: the __rodd form of a softmax stage after a failed probe
   std::string stage_kernel(const std::string& k, const char* stage) const;
   int fill_ = -1;  // option k_fill (test hook): the byte every frame-written buffer and the histories start with

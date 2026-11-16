@@ -26,8 +26,8 @@ Refusals (one line, create or frame): an approximation option on the native devi
 Softmax weight rounding (native device; runtime_k.cpp "create-time self-check"): with nothing set the mix form passes
 the check (smx=mix, no note); with the developer hook k_smx_test=mix_fail the round-to-odd ports are taken (smx=rodd,
 exactly one note of create, which the executor logs) and the frames match HIP with every softmax stage on its __rodd port,
-in both e4 / d4 shapes (1440p Quality: NG = 4; 4K Performance: NG = 2); with both forms failed, or with a corrupt __rodd
-shader, create refuses in one line. Each create leg runs in its own process. The hook exists only in a runtime library
+in both e4 / d4 shapes (1440p Quality: NG = 4; 4K Performance: NG = 2); with both forms failed, or with a corrupt stage
+shader (a softmax stage's __rodd port, the fixed-weight stage e0), create refuses in one line. Each create leg runs in its own process. The hook exists only in a runtime library
 built with clean/runner/build.py --dev-diagnostics: these tests skip on another build.
 
 GPU only: WG_K_GPU_BUILD=<full build dir: clean/runner/build.py with the runtime library, and clean/dx12/build_dx12.py
@@ -307,8 +307,8 @@ class TestKRuntimeD3D12(unittest.TestCase):
         self.assertIn("test hook", fb["notes"][0])
 
     def test_native_softmax_refusals(self):
-        """Neither form shown exact, or a corrupt fallback shader: create refuses in one line (the game keeps its own
-        upscaler)."""
+        """Neither form shown exact, or a corrupt stage shader (a softmax stage's __rodd port, a fixed-weight stage): create
+        refuses in one line naming it (the game keeps its own upscaler)."""
         import shutil
         import tempfile
         self.need_dev_build()
@@ -316,24 +316,27 @@ class TestKRuntimeD3D12(unittest.TestCase):
         self.assertFalse(both["ok"], both)
         self.assertIn("not exact on this driver", both["error"])
         self.assertNotIn("\n", both["error"].strip())
-        # a copy of the build (its top-level files and dx12/) with one flipped byte in a __rodd stage shader
-        tmp = tempfile.mkdtemp(prefix="k_smx_corrupt_")
-        try:
-            for f in os.listdir(self.build):
-                src = os.path.join(self.build, f)
-                if os.path.isfile(src):
-                    shutil.copy2(src, tmp)
-            shutil.copytree(os.path.join(self.build, "dx12"), os.path.join(tmp, "dx12"))
-            victim = os.path.join(tmp, "dx12", "k_stagew2_e3__rodd.dxil")
-            data = bytearray(open(victim, "rb").read())
-            data[len(data) // 2] ^= 0x40
-            open(victim, "wb").write(bytes(data))
-            bad = self.leg("", build=tmp)
-            self.assertFalse(bad["ok"], bad)
-            self.assertIn("k_stagew2_e3__rodd", bad["error"])
-            self.assertNotIn("\n", bad["error"].strip())
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+        # a copy of the build (its top-level files and dx12/) with one flipped byte in one stage shader: a softmax stage's
+        # __rodd port and a fixed-weight stage (e0); create prepares every selectable kernel, so it refuses in one line
+        for victim in ("k_stagew2_e3__rodd", "k_stage2_e0"):
+            with self.subTest(victim=victim):
+                tmp = tempfile.mkdtemp(prefix="k_smx_corrupt_")
+                try:
+                    for f in os.listdir(self.build):
+                        src = os.path.join(self.build, f)
+                        if os.path.isfile(src):
+                            shutil.copy2(src, tmp)
+                    shutil.copytree(os.path.join(self.build, "dx12"), os.path.join(tmp, "dx12"))
+                    path = os.path.join(tmp, "dx12", victim + ".dxil")
+                    data = bytearray(open(path, "rb").read())
+                    data[len(data) // 2] ^= 0x40
+                    open(path, "wb").write(bytes(data))
+                    bad = self.leg("", build=tmp)
+                    self.assertFalse(bad["ok"], bad)
+                    self.assertIn(victim, bad["error"])
+                    self.assertNotIn("\n", bad["error"].strip())
+                finally:
+                    shutil.rmtree(tmp, ignore_errors=True)
 
     def check_fallback_frames(self, frames, big, **size):
         """Forced fallback: the frames match HIP (raw outputs and intermediates) and every softmax stage ran its __rodd

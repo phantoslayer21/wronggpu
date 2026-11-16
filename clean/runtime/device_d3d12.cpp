@@ -756,6 +756,13 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
       if (variant_matches(i->second)) return &i->second;
     return range.first == range.second ? nullptr : &range.first->second;
   }
+  bool prepare(const std::string& name) override {
+    NativeKernel* port = find_port(name);
+    if (!port) return fail("native D3D12 unsupported kernel: " + name + "; no HIP fallback");
+    NativeKernel& k = *port;
+    if (k.pso || !variant_matches(k) || (k.rs != "buffer" && k.rs != "direct")) return true;
+    return create_pso(k);
+  }
   bool launch(const std::string& name, unsigned grid, unsigned block, void** args) override {
     NativeKernel* port = find_port(name);
     if (!port) return fail("native D3D12 unsupported kernel: " + name + "; no HIP fallback");

@@ -403,6 +403,14 @@ RR_OBJECTS = None  # --with-rr: the RR runtime's object files (clean/rr_f/runtim
 
 
 def build_runtime(cxx, out_dir, embed=True):
+    if MODELS_BUILT.get("K"):   # model K's softmax self-check reference must belong to these sources (no bypass here)
+        root = os.path.dirname(os.path.dirname(HERE))
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        from clean.k.dx12 import smx_selfcheck_digest as D
+        why = D.stale()
+        if why:
+            raise SystemExit("softmax self-check reference: " + why)
     for m in [MAP_FILE] + [o["map"] for name, o in OPTIONAL_MODELS.items() if MODELS_BUILT[name]] + \
             ([L_MAP_FILE] if MODEL_L else []):
         shutil.copyfile(m, os.path.join(out_dir, os.path.basename(m)))

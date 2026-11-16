@@ -376,6 +376,22 @@ def rga_mnemonics(dxil):
     return None
 
 
+def smx_digest_check(names, defines):
+    """Model K's softmax self-check reference (clean/k/runtime/k_smx_selfcheck.h) must belong to the sources and defines of
+    this build when it builds one of the self-check kernels (clean/k/dx12/smx_selfcheck_digest.py); a stale header would
+    let the runtime compare its stage shaders with values from other sources. WG_DX12_SMX_DIGEST=0 lets a negative-
+    control build through (test variants with --define), never a shipped build."""
+    root = os.path.dirname(os.path.dirname(HERE))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from clean.k.dx12 import smx_selfcheck_digest as D
+    if not set(names) & set(D.KERNELS) or os.environ.get("WG_DX12_SMX_DIGEST", "1") == "0":
+        return
+    why = D.stale(defines=defines)
+    if why:
+        raise SystemExit("softmax self-check reference: " + why)
+
+
 def isa_check(built):
     """built: [(kernel name, dxil path)] of this build. Fails when a kernel listed in isa_checks.json has another number
     of instructions matching one of its patterns."""
@@ -550,6 +566,7 @@ def main(argv=None):
                 raise SystemExit(f"kernel {d['name']} ({d['co']}): DXIL file {os.path.basename(out)} already used "
                                  "(a second port of a name needs file=<stem>)")
             jobs.append((src, d, out, k_source))
+    smx_digest_check({j[1]["name"] for j in jobs}, a.define)
     # the ISA rules' mutants beside every build of hybrid kernels: into a temporary folder of their own, never into the
     # build's output (a release folder, its manifest and a payload hold no check object); removed after the scan
     scan_dir = None
