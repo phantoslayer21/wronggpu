@@ -12,6 +12,7 @@
 //  - the system's own DXGI, <system directory>\dxgi.dll loaded by its full path (a bare "dxgi.dll", with or without
 //    LOAD_LIBRARY_SEARCH_SYSTEM32, returns a proxy that is already loaded under that name), enumerated by the same LUID:
 //    its description is shown in log lines, it never decides.
+// Under Wine only, where the driver's query answers STATUS_NOT_IMPLEMENTED, the system DXGI's ids stand in (rdna4.h, #248).
 #pragma once
 
 #include <windows.h>
@@ -64,22 +65,23 @@ inline LUID to_win_luid(const AdapterLuid& l) {
   return r;
 }
 
-// The kernel-mode driver's PCI vendor and device id of the adapter with this LUID. False when the query is not
-// available (Wine without the thunks, a refused call).
-inline bool driver_device_ids(const AdapterLuid& luid, uint32_t* vendor, uint32_t* device) {
+// The kernel-mode driver's PCI vendor and device id of the adapter with this LUID, and the query's own status: 0 when the
+// ids were read, the query's NTSTATUS when it refused (Wine: STATUS_NOT_IMPLEMENTED), kStatusUnsuccessful when it could not
+// be asked at all (no thunks, the adapter not opened).
+inline int32_t driver_query_status(const AdapterLuid& luid, uint32_t* vendor, uint32_t* device) {
   using OpenFn = LONG(WINAPI*)(kmt::OpenAdapterFromLuid*);
   using QueryFn = LONG(WINAPI*)(kmt::QueryAdapterInfo*);
   using CloseFn = LONG(WINAPI*)(kmt::CloseAdapter*);
   HMODULE gdi = GetModuleHandleW(L"gdi32.dll");
   if (!gdi) gdi = LoadLibraryExW(L"gdi32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-  if (!gdi) return false;
+  if (!gdi) return kStatusUnsuccessful;
   auto open = reinterpret_cast<OpenFn>(reinterpret_cast<void*>(GetProcAddress(gdi, "D3DKMTOpenAdapterFromLuid")));
   auto query = reinterpret_cast<QueryFn>(reinterpret_cast<void*>(GetProcAddress(gdi, "D3DKMTQueryAdapterInfo")));
   auto close = reinterpret_cast<CloseFn>(reinterpret_cast<void*>(GetProcAddress(gdi, "D3DKMTCloseAdapter")));
-  if (!open || !query || !close) return false;
+  if (!open || !query || !close) return kStatusUnsuccessful;
   kmt::OpenAdapterFromLuid o = {};
   o.AdapterLuid = to_win_luid(luid);
-  if (open(&o) != 0) return false;
+  if (open(&o) != 0) return kStatusUnsuccessful;
   kmt::QueryDeviceIds ids = {};
   kmt::QueryAdapterInfo q = {};
   q.hAdapter = o.hAdapter;
@@ -90,10 +92,21 @@ inline bool driver_device_ids(const AdapterLuid& luid, uint32_t* vendor, uint32_
   kmt::CloseAdapter c = {};
   c.hAdapter = o.hAdapter;
   close(&c);
-  if (st != 0) return false;
+  if (st != 0) return static_cast<int32_t>(st);
   *vendor = ids.Ids.VendorID;
   *device = ids.Ids.DeviceID;
-  return true;
+  return 0;
+}
+
+// The same as a yes or no: the ids were read.
+inline bool driver_device_ids(const AdapterLuid& luid, uint32_t* vendor, uint32_t* device) {
+  return driver_query_status(luid, vendor, device) == 0;
+}
+
+// The process runs under Wine (Proton included): Wine's ntdll exports wine_get_version, Windows' never does.
+inline bool running_under_wine() {
+  HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+  return ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr;
 }
 
 inline std::string wide_to_utf8(const wchar_t* w) {
@@ -129,6 +142,7 @@ inline bool system_dxgi_adapter(const AdapterLuid& luid, AdapterRecord* out) {
         ok = true;
         out->luid = to_luid(d.AdapterLuid);
         out->vendor = d.VendorId;
+        out->device = d.DeviceId;
         out->software = (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
         out->description = wide_to_utf8(d.Description);
       }
@@ -139,10 +153,21 @@ inline bool system_dxgi_adapter(const AdapterLuid& luid, AdapterRecord* out) {
   return ok;
 }
 
+// The system DXGI's vendor and device id of the adapter with this LUID: the Wine fallback's source only (rdna4.h).
+inline bool system_dxgi_ids(const AdapterLuid& luid, uint32_t* vendor, uint32_t* device) {
+  AdapterRecord r;
+  if (!system_dxgi_adapter(luid, &r)) return false;
+  *vendor = r.vendor;
+  *device = r.device;
+  return true;
+}
+
 inline AdapterSources system_sources() {
   AdapterSources s;
   s.find_adapter = system_dxgi_adapter;
-  s.driver_ids = driver_device_ids;
+  s.driver_query = driver_query_status;
+  s.under_wine = running_under_wine;
+  s.dxgi_ids = system_dxgi_ids;
   return s;
 }
 
