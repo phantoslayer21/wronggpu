@@ -35,8 +35,8 @@ own and do not mix them.
 So in this scene the network takes 2.67 ms with Model L and 1.17 ms with Model M, on the same PC in the same
 sitting. "Network total" runs from the start of the network to the end of its last kernel. Record:
 [`cp2077-model-l-timing-2026-11-16.json`](records/cp2077-model-l-timing-2026-11-16.json). The earlier record
-[`cp2077-model-l-timing-2026-11-14.json`](records/cp2077-model-l-timing-2026-11-14.json) timed a form of Model L
-that this release does not ship (2.25 ms).
+[`cp2077-model-l-timing-2026-11-14.json`](records/cp2077-model-l-timing-2026-11-14.json) timed an earlier form of
+Model L that this release does not ship.
 
 ## Harness: Model L, 1440p Quality, Direct3D 12
 
