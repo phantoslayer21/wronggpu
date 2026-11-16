@@ -99,6 +99,7 @@ The launcher embeds two folders:
 out\payload\amd_fidelityfx_dx12.dll          from out\frontend
 out\payload\plugins\WrongGPU.asi             from out\frontend
 out\payload\wronggpu_runtime.dll             from out\runtime
+out\payload\wronggpu_runtime.build.json      from out\runtime (read by the packager, not shipped)
 out\payload\wronggpu-license.txt             LICENSE (the MIT licence; official builds ship it as their licence)
 out\payload\wronggpu-notices.txt             clean\fsr\NOTICES.txt
 out\rr\plugins\WrongGPU-RR.asi               from out\rr-proxy\hook
@@ -110,11 +111,17 @@ mkdir out\payload\plugins out\rr\plugins
 copy /y out\frontend\amd_fidelityfx_dx12.dll out\payload\
 copy /y out\frontend\WrongGPU.asi out\payload\plugins\
 copy /y out\runtime\wronggpu_runtime.dll out\payload\
+copy /y out\runtime\wronggpu_runtime.build.json out\payload\
 copy /y LICENSE out\payload\wronggpu-license.txt
 copy /y clean\fsr\NOTICES.txt out\payload\wronggpu-notices.txt
 copy /y out\rr-proxy\hook\WrongGPU-RR.asi out\rr\plugins\
 copy /y clean\rr_f\proxy\binding\interposer.json out\rr\
 ```
+
+`wronggpu_runtime.build.json` is the build manifest that `clean\runner\build.py` writes next to the runtime library.
+The payload packager (`clean\installer\tools\make_payload.py`) refuses a runtime library without it, or one whose
+SHA-256 does not match it, so keep the two together and do not change the library after the build (no signing or
+stripping). The manifest is read for that check and is not shipped.
 
 For tests, build the HIP runtime stand-in and point `WRONGGPU_HIP_RUNTIME` at it, so no test loads the real HIP
 runtime:
