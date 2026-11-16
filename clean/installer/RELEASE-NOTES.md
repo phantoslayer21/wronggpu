@@ -43,6 +43,16 @@ scene, your settings) and a screenshot. Every report helps us fix it.
   1.03 ms with Model K and 1.17 ms with Model M
   ([clean/k/records/cp2077-model-k-timing-2026-11-15.json](https://github.com/phantoslayer21/wronggpu/blob/main/clean/k/records/cp2077-model-k-timing-2026-11-15.json)
   has the record).
+- **Optional faster approximation (`k_approx`), off by default.** With nothing set, Model K runs its exact path. Adding
+  `k_approx=a1,a2` to the `runtime_options` line of the game's `wronggpu.ini` selects close approximations of two
+  stages: the input stage's logarithm, exponent and divisions (`a1`) and the output stage's divisions (`a2`). Model K,
+  1440p Quality, WrongGPU's test harness (direct route) on a Radeon RX 9070 XT: the frame takes 1.37 ms with
+  `k_approx=a1,a2` and 1.58 ms on the exact path of the same build. The output is not bit-identical to the exact path;
+  compared with the exact path and with reference images it was rated very, very close on both test sets (a Cyberpunk
+  2077 sequence and a thin-line scene), with no drift over time. Frames with a render size above 0.68x the output (for
+  example DLAA) or a jitter outside +-0.5 keep the exact input stage even with `a1` (one log line). It runs only on
+  WrongGPU's native Direct3D 12 route (the in-game route); where it can't be used, Model K is refused at start and the
+  game keeps its own upscaler.
 - If you used Preset K with an older WrongGPU, the launcher no longer asks to switch that game to Model M when it
   updates it: the game stays on Model K.
 
