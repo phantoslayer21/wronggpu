@@ -101,12 +101,21 @@ inline bool Faulted(const char* step) { return TestFault() && TestFault()(step);
 // a moment (an antivirus or indexer scan of a file just written, typically while a build writes many files): the rename then
 // fails with ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION or ERROR_LOCK_VIOLATION. Those are retried, with short pauses, for up
 // to kMoveRetryMs; any other error, or the same one after that time, is the result (false, *err). The caller holds the state
-// lock, so no WrongGPU program can hold the file meanwhile.
+// lock, so no WrongGPU program can hold the file meanwhile. `unchanged` (optional) is asked before every attempt after the
+// first: the program that held the file may have written it meanwhile; false stops without replacing (false, *err 0,
+// *changed true), so that program's bytes stay.
 constexpr DWORD kMoveRetryMs = 2000;
-inline bool MoveIntoPlace(const std::wstring& from, const std::wstring& to, DWORD flags, DWORD* err) {
+inline bool MoveIntoPlace(const std::wstring& from, const std::wstring& to, DWORD flags, DWORD* err,
+                          const std::function<bool()>& unchanged = nullptr, bool* changed = nullptr) {
     const ULONGLONG start = GetTickCount64();
     DWORD pause = 5;
-    for (;;) {
+    if (changed) *changed = false;
+    for (bool first = true;; first = false) {
+        if (!first && unchanged && !unchanged()) {
+            *err = 0;
+            if (changed) *changed = true;
+            return false;
+        }
         DWORD e = 0;
         if (Faulted("move-busy")) e = ERROR_ACCESS_DENIED;
         else if (MoveFileExW(from.c_str(), to.c_str(), flags)) return true;
@@ -891,8 +900,11 @@ inline SetOutcome UpdateStateFile(const std::wstring& gameDir, const wchar_t* fi
     Faulted("replace-check");  // (tests: another program changes or makes the file in this moment)
     if (existed ? !StillIdentity(path, before) : false) { dropTemp(); return fail(SetResult::Changed, 0); }
     DWORD me = 0;
-    if (!MoveIntoPlace(tmp, target, (existed ? MOVEFILE_REPLACE_EXISTING : 0) | MOVEFILE_WRITE_THROUGH, &me)) {
+    bool changedMeanwhile = false;  // a retried replace: the file must still be the one decided on
+    const auto unchanged = [&]() { return !existed || StillIdentity(path, before); };  // (absent: one that appears refuses the move itself)
+    if (!MoveIntoPlace(tmp, target, (existed ? MOVEFILE_REPLACE_EXISTING : 0) | MOVEFILE_WRITE_THROUGH, &me, unchanged, &changedMeanwhile)) {
         dropTemp();
+        if (changedMeanwhile) return fail(SetResult::Changed, 0);  // the program that held the file wrote it: its bytes stay
         if (!existed && (me == ERROR_ALREADY_EXISTS || me == ERROR_FILE_EXISTS)) return fail(SetResult::Changed, 0);  // it appeared: the other program's
         o.write.error = me;
         return fail(me == ERROR_ACCESS_DENIED ? SetResult::AccessDenied : SetResult::WriteFailed, me);

@@ -582,6 +582,22 @@ int wmain(int argc, wchar_t** argv) {
         check(o.result == SetResult::Changed && !o.written && ReadText(f) == "rr_mode=exact\r\n; the player's save\r\n" && List(state).size() == 1 &&
                   o.words().find("nothing was saved") != std::string::npos,
               "a change in the last moment before the move: WrongGPU's save is refused (Changed, in words), the player's bytes stay, no temporary file");
+        // 2b. the replace refused while another program holds the file, which it writes and lets go during the retries: refused
+        WriteText(f, "rr_mode=fast\r\n");
+        static int busyCalls = 0;
+        busyCalls = 0;
+        TestFault() = [](const char* step) {
+            if (std::strcmp(step, "move-busy") != 0) return false;
+            if (++busyCalls > 1) return false;
+            Sleep(20);
+            WriteText(g_hookFile, "rr_mode=exact\r\n; the editor's save\r\n");
+            return true;
+        };
+        o = SetSettings(game, {{"rr_mode", "accurate"}});
+        TestFault() = nullptr;
+        check(o.result == SetResult::Changed && !o.written && busyCalls == 1 && ReadText(f) == "rr_mode=exact\r\n; the editor's save\r\n" &&
+                  List(state).size() == 1,
+              "the replace refused, the holder writes the file meanwhile: the retry stops (Changed), the holder's bytes stay, no temporary file");
         // 3. the file was not there: another program makes it before the move: refused, its bytes stay
         DeleteFileW(f.c_str());
         TestFault() = [](const char* step) {
