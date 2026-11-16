@@ -44,7 +44,8 @@
 //
 // Writes are atomic (WriteAtomic): a new temporary file in the same folder (<name>.wgtmp-<pid>-<n>, created only where
 // nothing is), written in checked chunks, flushed and closed (both checked), then MoveFileExW(REPLACE_EXISTING |
-// WRITE_THROUGH) over the file. A reader sees the old file or the new one, never part of one. On a failure the temporary file
+// WRITE_THROUGH) over the file (MoveIntoPlace: retried for up to kMoveRetryMs while another program, an antivirus or indexer
+// scan, briefly holds the file or the temporary one). A reader sees the old file or the new one, never part of one. On a failure the temporary file
 // is deleted when possible; the result (WriteResult, and SetOutcome for SetSettings) carries the first failure AND every
 // secondary one: a close that failed after an earlier failure, a cleanup that failed (its error and the file left). words()
 // says all of them. State files are small: more than kMaxStateBytes is refused.
@@ -89,10 +90,46 @@ constexpr size_t kMaxStateBytes = 1u << 20;       // no state file is larger
 constexpr DWORD kChunk = 64u * 1024u;
 
 // Test seam (tests only): called before each step of WriteAtomic ("write", "flush", "close", "move") and of its cleanup
-// ("delete"); returning true makes that step fail as a failed call would (error ERROR_WRITE_FAULT). nullptr: never.
+// ("delete"); returning true makes that step fail as a failed call would (error ERROR_WRITE_FAULT). "move-busy", before each
+// attempt of MoveIntoPlace: true makes that attempt fail as if another program held the file (ERROR_ACCESS_DENIED).
+// nullptr: never.
 using FaultHook = bool (*)(const char* step);
 inline FaultHook& TestFault() { static FaultHook hook = nullptr; return hook; }
 inline bool Faulted(const char* step) { return TestFault() && TestFault()(step); }
+
+// A state file's rename into place (MoveFileExW with `flags`). Another program can hold the file or the new temporary file for
+// a moment (an antivirus or indexer scan of a file just written, typically while a build writes many files): the rename then
+// fails with ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION or ERROR_LOCK_VIOLATION. Those are retried, with short pauses, for up
+// to kMoveRetryMs; any other error, or the same one after that time, is the result (false, *err). The caller holds the state
+// lock, so no WrongGPU program can hold the file meanwhile. `unchanged` (optional) is asked before every attempt after the
+// first: the program that held the file may have written it meanwhile; false stops without replacing (false, *err 0,
+// *changed true), so that program's bytes stay.
+constexpr DWORD kMoveRetryMs = 2000;
+inline bool MoveIntoPlace(const std::wstring& from, const std::wstring& to, DWORD flags, DWORD* err,
+                          const std::function<bool()>& unchanged = nullptr, bool* changed = nullptr) {
+    const ULONGLONG start = GetTickCount64();
+    DWORD pause = 5;
+    if (changed) *changed = false;
+    for (bool first = true;; first = false) {
+        if (!first && unchanged && !unchanged()) {
+            *err = 0;
+            if (changed) *changed = true;
+            return false;
+        }
+        DWORD e = 0;
+        if (Faulted("move-busy")) e = ERROR_ACCESS_DENIED;
+        else if (MoveFileExW(from.c_str(), to.c_str(), flags)) return true;
+        else e = GetLastError();
+        const bool held = e == ERROR_ACCESS_DENIED || e == ERROR_SHARING_VIOLATION || e == ERROR_LOCK_VIOLATION;
+        if (!held || GetTickCount64() - start >= kMoveRetryMs) {
+            *err = e;
+            SetLastError(e);
+            return false;
+        }
+        Sleep(pause);
+        if (pause < 100) pause *= 2;
+    }
+}
 
 inline std::wstring JoinPath(std::wstring a, const std::wstring& b) {
     if (!a.empty() && a.back() != L'\\' && a.back() != L'/') a.push_back(L'\\');
@@ -367,7 +404,7 @@ private:
         }
         if (!e && !FlushFileBuffers(t)) e = GetLastError();
         if (!CloseHandle(t) && !e) e = GetLastError();
-        if (!e && !MoveFileExW(tmp.c_str(), target.c_str(), MOVEFILE_WRITE_THROUGH)) e = GetLastError();
+        if (!e) MoveIntoPlace(tmp, target, MOVEFILE_WRITE_THROUGH, &e);
         if (e) DeleteFileW(tmp.c_str());
         return e;
     }
@@ -468,7 +505,7 @@ inline WriteResult WriteAtomic(const std::wstring& path, const std::string& byte
         }
         if (ok) {
             if (Faulted("move")) { ok = false; r.error = ERROR_WRITE_FAULT; }
-            else if (!MoveFileExW(tmp.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) { ok = false; r.error = GetLastError(); }
+            else if (!MoveIntoPlace(tmp, target, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH, &r.error)) ok = false;
         }
         if (ok) { r.ok = true; r.error = 0; return r; }
         const bool faultDelete = Faulted("delete");
@@ -862,9 +899,12 @@ inline SetOutcome UpdateStateFile(const std::wstring& gameDir, const wchar_t* fi
     if (existed) { CloseHandle(held.h); held.h = INVALID_HANDLE_VALUE; }
     Faulted("replace-check");  // (tests: another program changes or makes the file in this moment)
     if (existed ? !StillIdentity(path, before) : false) { dropTemp(); return fail(SetResult::Changed, 0); }
-    if (!MoveFileExW(tmp.c_str(), target.c_str(), (existed ? MOVEFILE_REPLACE_EXISTING : 0) | MOVEFILE_WRITE_THROUGH)) {
-        const DWORD me = GetLastError();
+    DWORD me = 0;
+    bool changedMeanwhile = false;  // a retried replace: the file must still be the one decided on
+    const auto unchanged = [&]() { return !existed || StillIdentity(path, before); };  // (absent: one that appears refuses the move itself)
+    if (!MoveIntoPlace(tmp, target, (existed ? MOVEFILE_REPLACE_EXISTING : 0) | MOVEFILE_WRITE_THROUGH, &me, unchanged, &changedMeanwhile)) {
         dropTemp();
+        if (changedMeanwhile) return fail(SetResult::Changed, 0);  // the program that held the file wrote it: its bytes stay
         if (!existed && (me == ERROR_ALREADY_EXISTS || me == ERROR_FILE_EXISTS)) return fail(SetResult::Changed, 0);  // it appeared: the other program's
         o.write.error = me;
         return fail(me == ERROR_ACCESS_DENIED ? SetResult::AccessDenied : SetResult::WriteFailed, me);
