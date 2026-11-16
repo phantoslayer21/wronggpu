@@ -370,34 +370,46 @@ def self_checks(t):
             read(os.path.join(target, "library-access.log")) == b"keep", (jlinked, p.returncode, (p.stderr + p.stdout)[-300:], os.listdir(target)))
     if os.path.lexists(jroot):
         os.rmdir(jroot)  # (the junction only)
-    # --work holding ';', and an explicit empty --hip=: refused before anything is made
-    entry = {}
+    # --work holding ';', and an explicit empty --hip=: refused before anything is made, anywhere (the work path stays absent,
+    # and nothing in the tests folder changes: no bytecode either)
+    here = os.path.dirname(os.path.abspath(__file__))
+
+    def tree(top):
+        out = {}
+        for dp, dn, fn in os.walk(top):
+            for f in fn:
+                st = os.stat(os.path.join(dp, f))
+                out[os.path.relpath(os.path.join(dp, f), top)] = (st.st_size, st.st_mtime_ns)
+        return out
+
+    entry, before_tree = {}, tree(here)
+    child = dict(os.environ)
+    child.pop("PYTHONDONTWRITEBYTECODE", None)  # (the suite itself must keep its source tree clean)
     for name, args, folder in (("--work with ';'", ["--work", os.path.join(d, "semi;colon")], os.path.join(d, "semi;colon")),
                                ("--hip=", ["--work", os.path.join(d, "hip-empty"), "--hip="], os.path.join(d, "hip-empty"))):
-        p = subprocess.run([sys.executable, suite, "--launcher", t.exe] + args, env=dict(os.environ),
+        p = subprocess.run([sys.executable, suite, "--launcher", t.exe] + args, env=child,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
         entry[name] = p.returncode != 0 and b"not run" in p.stderr + p.stdout and not os.path.exists(folder)
+    changed = sorted(k for k in set(before_tree) | set(tree(here)) if before_tree.get(k) != tree(here).get(k))
     t.check("--work holding ';' (it would split the HIP candidate list) and an explicit empty --hip= are refused before anything "
-            "is made", all(entry.values()), entry)
-    # the run's own folder: a link and a load-marker DLL planted where an older run wrote (<--work>\library-access.log,
-    # <--work>\no-hip\amdhip64_7.dll) are never written, followed or loaded (only when nothing is there already)
-    root = os.path.dirname(t.work)
+            "is made: the work path absent, nothing in the tests folder changed (no bytecode)", all(entry.values()) and not changed,
+            (entry, changed[:5]))
+    # the run's own fresh folder: a work root that already holds a link at library-access.log (to user data) and a load-marker
+    # DLL at no-hip\amdhip64_7.dll, where an older run wrote, gets a run's real start and HIP check (a child suite run,
+    # --startup-only); both fixtures freshly planted here in a simulated root inside this run folder, and checked to work
+    sim = new_run_folder(t.work, "simulated-work")
     user = os.path.join(d, "user-data.txt")
     write(user, b"user data")
-    planted, kind = [], ""
-    link = os.path.join(root, "library-access.log")
-    if not os.path.lexists(link):
-        try:
-            os.symlink(user, link)
-            kind = "symbolic link"
-        except OSError:
-            os.link(user, link)
-            kind = "hard link"
-        planted.append(link)
-    stand_in = os.path.join(root, "no-hip", "amdhip64_7.dll")
-    marker_dll = canaries.get(LOAD_MARKER)
-    loads = False
-    if marker_dll and not os.path.lexists(os.path.dirname(stand_in)):
+    link, stand_in, kind = os.path.join(sim, "library-access.log"), os.path.join(sim, "no-hip", "amdhip64_7.dll"), ""
+    try:
+        os.symlink(user, link)
+        kind = "symbolic link"
+    except OSError:
+        os.link(user, link)
+        kind = "hard link"
+    linked = os.path.lexists(link) and read(link) == b"user data"
+    marker_dll, loads = canaries.get(LOAD_MARKER), False
+    if marker_dll:
         probe = os.path.join(d, "marker-probe", "amdhip64_7.dll")  # the marker works: loaded here, it writes <dll>.loaded
         write(probe, marker_dll)
         import ctypes
@@ -405,22 +417,19 @@ def self_checks(t):
         ctypes.windll.kernel32.FreeLibrary(ctypes.c_void_p(h._handle))
         loads = os.path.isfile(probe + ".loaded")
         write(stand_in, marker_dll)
-        planted.append(os.path.dirname(stand_in))
-    again = new_run_folder(t.work, "isolation-again")
-    import launcher_isolation as iso
-    iso.self_test(again)  # the start of a run again, in a fresh folder: the guard's own writes
-    t.run("version")
-    t.run("hipcheck")
-    t.check("the run's own fresh folder: a %s at <--work>\\library-access.log and a load-marker DLL at <--work>\\no-hip are never "
-            "written, followed or loaded (the target's bytes, the link and the DLL unchanged; no load marker)" % (kind or "file"),
-            read(user) == b"user data" and (not planted or (loads and os.path.isfile(stand_in) and read(stand_in) == marker_dll and
-                                                            not os.path.exists(stand_in + ".loaded"))) and
-            (link not in planted or read(link) == b"user data"), (kind, loads, planted))
-    for p in planted:  # (only what this check planted)
-        if os.path.isdir(p) and not os.path.islink(p):
-            shutil.rmtree(p, ignore_errors=True)
-        elif os.path.lexists(p):
-            os.remove(p)
+    planted = sorted(os.listdir(sim))
+    p = subprocess.run([sys.executable, suite, "--launcher", t.exe, "--work", sim, "--startup-only"], env=child,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600)
+    after = sorted(os.listdir(sim))
+    runs = [n for n in after if n not in planted]
+    t.check("the run's own fresh folder: a work root holding a %s at library-access.log (to user data) and a load-marker DLL at "
+            "no-hip\\amdhip64_7.dll (both planted here and shown to work) gets a run's real start and HIP check (a child suite "
+            "run): one new run folder, the link, its target and the DLL unchanged, no load marker" % (kind or "link"),
+            planted == ["library-access.log", "no-hip"] and linked and loads and p.returncode == 0 and
+            len(runs) == 1 and runs[0].startswith("run-") and read(user) == b"user data" and read(link) == b"user data" and
+            read(stand_in) == marker_dll and not os.path.exists(stand_in + ".loaded") and sorted(os.listdir(os.path.dirname(stand_in))) == ["amdhip64_7.dll"],
+            (kind, linked, loads, p.returncode, after, (p.stderr + p.stdout)[-400:]))
+    os.remove(link)  # (the link only, never its target)
     # the temporary folder: a junction in its place is refused (fresh_temp), never followed
     jw = os.path.join(d, "junction-work")
     os.makedirs(os.path.join(d, "elsewhere"))

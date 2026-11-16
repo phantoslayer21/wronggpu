@@ -19,6 +19,8 @@ import subprocess
 import sys
 import time
 
+sys.dont_write_bytecode = True  # before any local module: the suite writes nothing outside its run folder (no __pycache__)
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"  # (and the Python programs it starts)
 os.environ["WRONGGPU_TESTING"] = "1"
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -3052,6 +3054,8 @@ def main():
     ap.add_argument("--rr-prepare-gpu", action="store_true", help="opt-in: rr-prepare's GPU checks with a payload's real runtime "
                     "(they fill the user's real graphics driver cache; never in the default run)")
     ap.add_argument("--only", nargs="*", default=[], help="development: only these tests (names without test_) after the basics")
+    ap.add_argument("--startup-only", action="store_true", help="the run's start (its own run folder, the isolation self-test) "
+                    "and the HIP check, then stop (the self-checks' untouched-target control)")
     ap.add_argument("--synth-f", default=os.environ.get("WGC_SYNTH_BINS", ""),
                     help="folder with the spec team's synthetic preset-F file synth-common-v0.bin (the test build's F map is synth-r0)")
     a = ap.parse_args()
@@ -3078,6 +3082,10 @@ def main():
     for k, v in t.reg_keys().items():
         if (k.startswith("WrongGPU-") and v.get("InstallLocation", "").lower().startswith(work.lower())) or (k == "WrongGPU" and work.lower() in v.get("InstallLocation", "").lower()):
             subprocess.run(["reg", "delete", t.uninstall + "\\" + k, "/f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if a.startup_only:  # the start of a run and the HIP check only
+        rc = t.run("hipcheck")
+        print("startup-only: run folder %s; hipcheck exit %d" % (work, rc))
+        return 0 if rc == 0 else 1
     opti = opti_package(t)
     t0 = time.time()
     facts.self_checks(t)  # the suite's own guards (launcher_build_facts.py), before any launcher call

@@ -22,6 +22,7 @@ import sys
 import time
 import zipfile
 
+sys.dont_write_bytecode = True  # before any local module: no __pycache__ in the source tree (also as the launcher suite's module)
 HERE = os.path.dirname(os.path.abspath(__file__))
 INSTALLER = os.path.dirname(HERE)
 CONVERTER_TESTS = os.path.join(INSTALLER, "..", "converter", "tests")
