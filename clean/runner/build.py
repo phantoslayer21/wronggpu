@@ -86,7 +86,10 @@ DEV_DIAGNOSTICS = False
 L_RUNTIME_SOURCES = [os.path.join("..", "l", "runtime", "l_model.cpp"), os.path.join("..", "l", "runtime", "l_pack.cpp")]
 L_MAP_FILE = os.path.join(os.path.dirname(os.path.dirname(HERE)), "data", "preset-L.v1.map.json")
 L_KERNEL_DIR = os.path.join(os.path.dirname(HERE), "l", "kernels")
-L_CODE_OBJECTS = ["l_swin.co", "l_ops.co", "l_post.co", "l_enc_values.co"]
+# (the hybrid default's own objects: l_q7__hyb / l_q7w__hyb, the C32 and shared-stage blocks of HIP's hybrid route, and
+# l_post__lc12, the C1/C2 reconstruction: built in, so that a deployed library alone creates the default)
+L_CODE_OBJECTS = ["l_swin.co", "l_ops.co", "l_post.co", "l_enc_values.co", "l_q7.co", "l_q7w.co", "l_q7__hyb.co",
+                  "l_q7w__hyb.co", "l_post__lc12.co"]
 L_EMBED_FILES = L_CODE_OBJECTS + [os.path.basename(L_MAP_FILE)]
 
 
@@ -104,6 +107,12 @@ def set_model_l(on):
         EMBED_FILES[:] = [n for n in EMBED_FILES if n not in L_EMBED_FILES]
 
 
+def is_check_object(name):
+    """A check-only code object (a mutant, a probe, a HIP twin of the D3D12 hybrid ports): developer builds only."""
+    n = os.path.basename(name)
+    return "mut" in n or "probe" in n or n in ("l_swin_hyb.co", "swin_hyb.co")
+
+
 def build_device_l(clang, rocm, out_dir, device_libs=True, report=False, arch=None):
     """Model L's code objects into out_dir (as clean/l/runner/l_c32_check.py compile_kernels builds them), for `arch`
     (default ARCH)."""
@@ -112,9 +121,37 @@ def build_device_l(clang, rocm, out_dir, device_libs=True, report=False, arch=No
     ARCH = arch or ARCH
     try:
         os.makedirs(out_dir, exist_ok=True)
-        for name in ("l_swin", "l_ops", "l_post"):
+        for name in ("l_swin", "l_ops", "l_post", "l_q7", "l_q7w"):   # l_q7*: the FP16-form blocks (default form)
             run(device_command(clang, rocm, os.path.join(L_KERNEL_DIR, name + ".hip"), os.path.join(out_dir, name + ".co"),
                                device_libs=device_libs, report=report, extra=["-I", KERNEL_DIR]))
+        # Q11 part C evaluation code objects. Model M's HYBRID form (runtime WG_M_FORM=hybrid) and its check mutant:
+        # l_q7w with float32 chains (l_q7w.hip Q7_HYB). Model M's ORIGINAL reconstruction (Q11 part C, runtime WG_M_POST=orig): l_post.hip with M's steps D1-D3, the
+        # machine-form exponent C1 and the Catmull-Rom weights C2; the C1/C2 probe and its mutant
+        # (clean/l/runner/l_post_c12_check.py). Not embedded, read from the build folder.
+        evals = (("l_q7w__hyb", "l_q7w.hip", {"Q7_HYB": 1}),
+                 ("l_q7w__hybmut", "l_q7w.hip", {"Q7_HYB": 1, "Q7_HYB_MUTANT": 1}),
+                 ("l_post__morig", "l_post.hip", {"WG_LP_M": 1, "WG_LP_C1": 1, "WG_CR_C2": 1}),
+                 ("l_post_c12_probe", "l_post_c12_probe.hip", {"WG_LP_C1": 1, "WG_CR_C2": 1}),
+                 ("l_post_c12_probe__mut", "l_post_c12_probe.hip", {"WG_LP_C1": 0, "WG_CR_C2": 2}),
+                 # Model L's evaluation forms: C32 blocks with float32 chains (runtime WG_L_FORM=hybrid) + mutant;
+                 # L's own reconstruction with C1 (machine form) and C2 (runtime WG_L_POST=c12)
+                 ("l_q7__hyb", "l_q7.hip", {"Q7_HYB": 1}),
+                 ("l_q7__hybmut", "l_q7.hip", {"Q7_HYB": 1, "Q7_HYB_MUTANT": 1}),
+                 ("l_post__lc12", "l_post.hip", {"WG_LP_C1": 1, "WG_CR_C2": 1}),
+                 # the fast hybrid form's HIP twins (the D3D12 *_hyb ports' byte twins; runtime WG_L_FORM=hybrid_twin,
+                 # the network-level byte leg): Model L's C32 blocks and the shared stages' blocks / merges / expands
+                 ("l_swin_hyb", "l_swin_hyb.hip", {}),
+                 ("swin_hyb", os.path.join("..", "..", "kernels", "swin_hyb.hip"), {}))
+        # mutants, probes and the HIP twins are check objects: developer builds only (a release build neither contains
+        # nor can select them; clean/tests/check_no_dev_diagnostics.py PAYLOAD_CHECK_NAMES)
+        if not DEV_DIAGNOSTICS:
+            evals = tuple(e for e in evals if not is_check_object(e[0] + ".co"))
+        for tag, src, defs in evals:
+            run(device_command(clang, rocm, os.path.join(L_KERNEL_DIR, src), os.path.join(out_dir, tag + ".co"),
+                               device_libs=device_libs, report=report, extra=["-I", KERNEL_DIR], defines=defs))
+            # the HIP loader reads "<arch>.<name>" (or "<arch>/<name>"); an extra arch builds into out_dir = <arch>/
+            if os.path.basename(os.path.normpath(out_dir)) != ARCH:
+                shutil.copyfile(os.path.join(out_dir, tag + ".co"), os.path.join(out_dir, f"{ARCH}.{tag}.co"))
         run(device_command(clang, rocm, os.path.join(KERNEL_DIR, "encoder.hip"), os.path.join(out_dir, "l_enc_values.co"),
                            device_libs=device_libs, report=report, defines={"WG_ENC_VALUES_OUT": 1}))
     finally:

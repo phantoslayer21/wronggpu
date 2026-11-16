@@ -108,18 +108,32 @@ TABLE = {
     # "skip": each window member's input is RN16(src member + skip member); the skip member is read with the mirror
     # about the grid size (fine positions), whatever the op's border (the decoder: "coarse" for the projection).
     "skip_map": "x3",
+    # The ten shared stages (enc1, enc2, b0-b5, dec2, dec1, L's own weights): "m" = Model M's oracle (clean/reference/
+    # swin.py run_stage); "q7" = their FP16 form (oracle.run_stage_q7: the blocks as L's own, the merges' FP8 op chains
+    # from the bias with the clamp to +-6.28125 then FP8, the expansions' chains from the bias then FP8, the decoder
+    # blocks' input RN16(E + S) with S, the encoder block's FP8 output, read with the fine mirror).
+    "shared_form": "q7",
+    # The window border of a shared decoder stage's expansion E for members outside the grid (form "q7"): "coarse" =
+    # as dec0's projection, the coarse mirror (spec Q10b: FACT for dec2 and dec1; S takes the fine mirror), the
+    # member's own sub-pixel kept (Q10b: INFERENCE, UNCONFIRMED U2); "mirror" = the fine mirror (Model M's oracle).
+    "shared_dec_border": "coarse",
 }
+
+MERGE_CLAMP = 6.28125      # RN16(2 pi): the merges' clamp (Q8 B4)
 
 DEC_PIXEL_VALUES = {"l": len(L_DEC_VALUES), "m": len(M_DEC0_VALUES)}
 
-PROVISIONAL = {
-    "S8": "the ten shared stages run Model M's oracle (clean/reference/swin.py, Model M's block arithmetic); their FP16 "
-          "form is pending a decision",
-}
+PROVISIONAL = {}   # (S8 ended: the shared stages' FP16 form is the default since Model L's q7 kernels run them)
 
 # Model M's reconstruction in the same terms (clean/reference/post.py reconstruct): for reductions and tests.
 M_RECON = {"rule": "d_over_render_at_least", "ratio": 3.0, "variants": ("3/2", "3/1"), "window": 3,
            "history_combine": "encoded", "fallback": "encoded_colour", "gather": "float64", "blend": "float64"}
+# Model M's ORIGINAL reconstruction as the spec side states it (handoff preset-M/from-spec/Q11C-M-POST-ITEMS.md; Q11
+# part C evaluation, kernel l_post__morig.co): Model L's form (half-precision gather, float32 blend) with M's three
+# steps (window 3, encoded-domain combination, encoded fallback) and the gather exponent in the machine-code form
+# ("c1": "machine", PRESET-M-C1C2-machine-code.md). C2 (the Catmull-Rom weights' fused forms) is a float32 rounding
+# matter below this oracle's float64 history sample; the C1/C2 probe checks it bit for bit.
+M_RECON_ORIG = dict(M_RECON, gather="half", blend="float32", c1="machine")
 
 
 def recon_size(output_w, output_h):
@@ -142,6 +156,9 @@ def recon_variant(t, render_w, render_h, output_w, output_h):
 UNCONFIRMED = {
     "U1": "encoder halo: a mirrored render position below 0 (only when fw + halo > 2 rw - 2, i.e. render sizes near "
           "the padding) is clamped to 0",
+    "U2": "decoder stages (dec0's projection, dec2, dec1): an out-of-grid member takes the expansion output of its own "
+          "sub-pixel (the parity of its unmirrored fine position) from the coarse-mirrored token (spec Q10b: the coarse "
+          "mirror for E and the fine mirror for S are FACT, the kept sub-pixel is INFERENCE)",
 }
 
 

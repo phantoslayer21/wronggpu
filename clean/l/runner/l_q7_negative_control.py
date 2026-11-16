@@ -46,6 +46,7 @@ def model_m_form_table():
     t = copy.deepcopy(T.TABLE)
     t["consts"]["default"]["form"] = "m"
     t["consts"]["default"]["gelu"] = "sigmoid"
+    t["shared_form"] = "m"            # the shared stages on Model M's oracle, as before their FP16 form
     for op in t["dec_ops"]:
         op.pop("skip", None)
     return t

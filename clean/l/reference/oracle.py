@@ -89,8 +89,25 @@ def _block_tokens(xw, p, heads, k):
 #   FP16; block 1's result is block 2's start value.
 # The attention product P V (FP16 operands, 16 terms) is summed in float64 and rounded once (its accumulation precision
 # does not move an FP16 result).
+# - "f32chain" (NOT the original: Model M's HYBRID evaluation form, Q11 part C): the whole chain of a linear (all its
+#   32-wide chunks) accumulates in float32, starting from the FP16 start value widened exactly; the products (exact
+#   in float32: FP8 x FP8) are added one at a time, chunks ascending and k ascending inside a chunk, each addition
+#   rounded to float32 (RNE); ONE FP16 rounding at the end of the chain. A chain split over several calls (W2 over
+#   the MLP slices) keeps its float32 accumulator between them (mm8 final=False).
 
-MM8_MODELS = ("exact", "trunc13")
+MM8_MODELS = ("exact", "trunc13", "f32chain")
+
+
+def _f32chain(start, a8, W8):
+    """The float32 sequential chain: start [..., n] (float32-exact values), a8 [..., K], W8 [n, K] -> float32 [..., n]
+    (not rounded to FP16)."""
+    a = np.asarray(a8, np.float32)
+    w = np.asarray(W8, np.float32)
+    acc = np.array(np.broadcast_to(np.asarray(start, np.float32), a.shape[:-1] + (w.shape[0],)), np.float32)
+    with np.errstate(over="ignore", invalid="ignore"):
+        for k in range(a.shape[-1]):
+            acc = (acc + a[..., k:k + 1] * w[:, k]).astype(np.float32)
+    return acc
 
 
 def _trunc13_block(start, prods):
@@ -130,9 +147,13 @@ def _op8(start, a8, W8, model):
         return out
 
 
-def mm8(start, a8, W8, model="exact"):
+def mm8(start, a8, W8, model="exact", final=True):
     """The chain of FP8 matrix ops over the 32-wide chunks of K, ascending: a8 [..., K], W8 [n, K], start [..., n] or
-    [n] (FP16) -> FP16 [..., n]."""
+    [n] (FP16) -> FP16 [..., n]. Model "f32chain": float32 over the whole chain, one FP16 rounding at the end; with
+    final=False the float32 accumulator is returned unrounded (the chain continues in the next call)."""
+    if model == "f32chain":
+        acc = _f32chain(start, a8, W8)
+        return f16(acc.astype(np.float64)) if final else acc
     a8 = np.asarray(a8, np.float64)
     W8 = np.asarray(W8, np.float64)
     acc = start
@@ -257,6 +278,13 @@ def _score_op(B, u, model):
     with np.errstate(over="ignore", invalid="ignore"):
         if model == "exact":
             return f16(B + np.einsum("...htd,...hsd->...hts", u, u))
+        if model == "f32chain":                                    # 32 terms from B, float32 sequential, one rounding
+            acc = np.array(np.broadcast_to(np.asarray(B, np.float32), u.shape[:-3] + (u.shape[-3], u.shape[-2],
+                                                                                      u.shape[-2])), np.float32)
+            uf = np.asarray(u, np.float32)
+            for d in range(uf.shape[-1]):
+                acc = (acc + uf[..., :, None, d] * uf[..., None, :, d]).astype(np.float32)
+            return f16(acc.astype(np.float64))
         if model != "trunc13":
             raise ValueError(f"unknown FP8 op model {model!r}")
         prods = u[..., :, None, :] * u[..., None, :, :]           # [..., h, T, T, 32]
@@ -282,20 +310,23 @@ def _block_tokens_q7(xw, p, heads, k):
     lead = xw.shape[:-2]
     x = np.asarray(xw, np.float64)
     W = {n: q8(p[n]) for n in ("Wqk", "Wv", "Wp", "W1", "W2")}
+    V = {n: f16(p[n]) for n in ("bp", "b1", "b2", "B")}   # FP16 vectors as the device holds them (no change for FP16)
     with np.errstate(over="ignore", invalid="ignore"):
         a8 = q8(norm_q7(x, gamma_q7(p["gamma1"])))
         u = np.stack([q8(mm8(0.0, a8, W["Wqk"][h], model)) for h in range(heads)], axis=-3)   # [..., h, T, 32]
         v = np.stack([mm8(0.0, a8, W["Wv"][h], model) for h in range(heads)], axis=-3)
-        s = _score_op(p["B"], u, model)
+        s = _score_op(V["B"], u, model)
         o = f16(np.einsum("...hts,...hsd->...htd", softmax_q7(s), v))
         o8 = q8(np.moveaxis(o, -3, -2).reshape(lead + (T, heads * 32)))
-        z = mm8(f16(p["bp"] + x), o8, W["Wp"], model)
+        z = mm8(f16(V["bp"] + x), o8, W["Wp"], model)
         m8 = q8(norm_q7(z, gamma_q7(p["gamma2"])))
-        acc = f16(p["b2"] + z)
-        for sl in range(W["W1"].shape[0] // 32):
+        acc = f16(V["b2"] + z)
+        nsl = W["W1"].shape[0] // 32
+        for sl in range(nsl):
             r = slice(32 * sl, 32 * sl + 32)
-            hs = mm8(p["b1"][r], m8, W["W1"][r], model)
-            acc = mm8(acc, q8(gelu_q7(hs)), W["W2"][:, r], model)
+            hs = mm8(V["b1"][r], m8, W["W1"][r], model)
+            # f32chain: W2's chain runs over all slices in float32, rounded to FP16 once after the last
+            acc = mm8(acc, q8(gelu_q7(hs)), W["W2"][:, r], model, final=(model != "f32chain" or sl == nsl - 1))
     return acc
 
 
@@ -340,6 +371,7 @@ def swin_block(x, p, offset, heads, consts, border="mirror", halo=0, max_tokens=
     p = {k: np.asarray(v, dtype=np.float64) for k, v in p.items()}
     rows, cols = window_grid(H, W, offset, win)
     out = np.full((H, W, C), np.nan)
+    covered = np.zeros((H, W), bool)          # not the NaN fill: a NaN input member legitimately gives NaN outputs
     fr, fc = border_index(border, H, h), border_index(border, W, h)
     if consts.get("mm8") == "trunc13":
         max_tokens = min(max_tokens, 4096)
@@ -359,7 +391,8 @@ def swin_block(x, p, offset, heads, consts, border="mirror", halo=0, max_tokens=
         R = np.broadcast_to(r[:, None, :, None], sel.shape)
         K = np.broadcast_to(cols[None, :, None, :], sel.shape)
         out[R[sel], K[sel]] = x2[sel]
-    if np.isnan(out).any():
+        covered[R[sel], K[sel]] = True
+    if not covered.all():
         raise AssertionError("window grid does not cover the map")
     return out
 
@@ -619,6 +652,44 @@ def reconstruct(x, params, t=_table.TABLE, ldr=False):
     return _recon.reconstruct(x, params["post"]["s"], t, ldr)
 
 
+# ---- the shared stages in their FP16 form ---------------------------------------------------------------------------
+
+def run_stage_q7(stage, p, x, offset, skip=None, t=_table.TABLE):
+    """One shared stage (enc1, enc2, b0-b5, dec2, dec1; Model M's shapes, L's weights) in the FP16 form (table
+    shared_form "q7", Q8 Part B, Q10). x: the stage's FP8 input map (enc / b: [H, W, C]; dec: [H/2, W/2, C_low]);
+    skip (dec): the matching encoder stage's FP8 block output [H, W, C]. Encoder: block (border "mirror") -> FP8 output
+    = the skip; merged = FP8(clamp(the Wm chain over the 2 x 2 patch of the FP8 output (space_to_depth order), started
+    from bm), +-MERGE_CLAMP)). Bottleneck: FP8(block). Decoder: E = FP8(the We chain started from be) on the coarse
+    grid, depth_to_space to [H, W, C]; the block's member input RN16(E + S) (swin_block skip: S by the fine mirror, E by
+    the table's shared_dec_border), output FP8. Returns Model M's run_stage keys (float32 FP8 values)."""
+    cfg = _swin.STAGES[stage]
+    k = _table.block_consts(t, stage)
+    k["mm8"] = t.get("mm8", "exact")
+    model = k["mm8"]
+    if k.get("form") != "q7":
+        raise ValueError("run_stage_q7: the stage's consts must have form 'q7'")
+    x = np.asarray(x, np.float64)
+    if cfg["kind"] == "dec":
+        e = q8(mm8(f16(p["be"]), x, q8(p["We"]), model))                    # [H/2, W/2, 4C]
+        y = swin_block(depth_to_space(e), p, offset, cfg["heads"], k, t["shared_dec_border"],
+                       skip=np.asarray(skip, np.float64))
+    else:
+        y = swin_block(x, p, offset, cfg["heads"], k, "mirror")
+    out = q8(y)
+    if cfg["kind"] == "enc":
+        m = mm8(f16(p["bm"]), space_to_depth(out), q8(p["Wm"]), model)
+        merged = q8(np.minimum(np.maximum(m, -_table.MERGE_CLAMP), _table.MERGE_CLAMP))
+        return {"skip": out.astype(np.float32), "merged": merged.astype(np.float32)}
+    return {"out": out.astype(np.float32)}
+
+
+def run_shared_stage(stage, p, x, offset, skip=None, t=_table.TABLE):
+    """A shared stage by the table's shared_form: "m" Model M's oracle, "q7" run_stage_q7."""
+    if t.get("shared_form", "m") == "q7":
+        return run_stage_q7(stage, p, x, offset, skip, t)
+    return _swin.run_stage(stage, p, x, offset, skip)
+
+
 # ---- whole network --------------------------------------------------------------------------------------------------
 
 def network(x_enc, x_dec, params, parity, t=_table.TABLE, keep=False):
@@ -634,15 +705,15 @@ def network(x_enc, x_dec, params, parity, t=_table.TABLE, keep=False):
         cfg = _swin.STAGES[s]
         off = _swin.window_offset(s, parity)
         if cfg["kind"] == "enc":
-            o = _swin.run_stage(s, params[s], x, off)
+            o = run_shared_stage(s, params[s], x, off, t=t)
             skips[s] = o["skip"]
             x = o["merged"]
         elif cfg["kind"] == "dec":
             skip = skips["enc2" if s == "dec2" else "enc1"]
-            o = _swin.run_stage(s, params[s], x, off, skip)
+            o = run_shared_stage(s, params[s], x, off, skip, t=t)
             x = o["out"]
         else:
-            o = _swin.run_stage(s, params[s], x, off)
+            o = run_shared_stage(s, params[s], x, off, t=t)
             x = o["out"]
         res[s] = o
     xd = dict(x_dec)

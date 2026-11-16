@@ -35,6 +35,15 @@ dxv. Any other float division ('/', which would be an IEEE division) or float re
 VGPR check: every Swin / bottleneck kernel built (a name with a swin_ or l_swin_ part) is run through RGA (gfx1201) and its
 USED_VGPRs compared with its bound in clean/dx12/vgpr_limits.json (the count that keeps its present workgroups per CU);
 over the bound, or no bound listed, fails the build. WG_DX12_VGPR_CHECK=0 skips it.
+ISA rules of the hybrid kernels: every hybrid kernel built (a name with a _hyb part) is checked in the same RGA run by
+hyb_isa_scan.py: rule 1, no fused multiply-add of a square (a driver contracting the norm's RN16(x x) into its sum,
+copies of a register included); rule 2, both sources of every FP8 conversion are FP16 values (no RN16 dropped or folded
+into the FP8 pack). A finding fails the build. No skip switch (WG_DX12_VGPR_CHECK=0 does not skip them; RGA is required
+when hybrid kernels are built). Negative controls, fail-closed: every model hybrid kernel K built (probe=0) needs its
+mutant K_scanmut (the same kernel without the contraction barrier and without the RN16 before the FP8 pack,
+HYB_SCAN_MUTANT=1, probe=1), built beside every build of hybrid kernels into <out>/dx12/scanmut (never in the manifest);
+the build fails when it is not declared, gives no ISA, or PASSES rule 2, or rule 1 (unless K has no norm tree:
+HYB_NO_NORM).
 """
 import argparse
 import concurrent.futures
@@ -184,6 +193,8 @@ def kernel_decls(path):
             d["gscale"] = int(kv.get("gscale", d["block"] // d["group"]))
             if d["gscale"] < 1 or d["gscale"] > d["block"] // d["group"]:
                 raise SystemExit(f"{path}: {name}: gscale {d['gscale']}")
+            # probe=1: a measurement probe, built only when --only names it (never part of a model's kernel set)
+            d["probe"] = kv.get("probe", "0") == "1"
             d["file"] = kv.get("file", "")   # DXIL file stem of a second port of the same name (module doc)
             if d["file"] and not re.fullmatch(r"[A-Za-z0-9_]+", d["file"]):
                 raise SystemExit(f"{path}: {name}: file={d['file']} (letters, digits and _ only)")
@@ -202,8 +213,10 @@ MODEL_L_ONLY = {"swin_block_c64_add_ex_nc", "lev/input_encoder_q20", "lev/input_
 
 def is_model_l(decl):
     """A port of one of Model L's code objects (#89: l_swin.co, l_ops.co, l_post.co, l_enc_values.co), a Model L kernel
-    of the direct route with no code object (co "-", named l_*), or a kernel only Model L launches (MODEL_L_ONLY)."""
-    return decl["co"].startswith("l_") or decl["name"].startswith("l_") or decl["name"] in MODEL_L_ONLY
+    of the direct route with no code object (co "-", named l_*), a kernel only Model L launches (MODEL_L_ONLY), or a
+    kernel of the hybrid form (named *_hyb: WG_L_FORM = hybrid, Model L's route only so far)."""
+    return (decl["co"].startswith("l_") or decl["name"].startswith("l_") or decl["name"] in MODEL_L_ONLY
+            or decl["name"].endswith("_hyb"))
 
 
 def is_frame_gen(decl):
@@ -233,11 +246,11 @@ def source_files(model_k=False, only_k=False):
 def kernel_set(model_l=False, model_k=False):
     """(name, code object) of every kernel a full build compiles (no --only), sorted: Model M's set, plus Model L's
     with model_l, plus Model K's with model_k. From the sources' declarations alone (nothing is compiled). Frame
-    generation's kernels are never in it (is_frame_gen)."""
+    generation's kernels and measurement probes (probe=1) are never in it (is_frame_gen)."""
     keys = set()
     for path, k_source in source_files(model_k):
         for d in kernel_decls(path):
-            if is_frame_gen(d):
+            if is_frame_gen(d) or d["probe"]:
                 continue
             if k_source or is_model_k(d):
                 if model_k:
@@ -305,32 +318,98 @@ def vgpr_checked(name):
     return re.search(r"(^|/|l_)swin_", name) is not None   # l_swin_*: Model L's blocks (#89)
 
 
-def rga_vgprs(dxil):
-    """RGA's USED_VGPRs of one kernel (gfx1201), None when RGA gives no statistics."""
+def rga_vgprs(dxil, isa=False):
+    """RGA's USED_VGPRs of one kernel (gfx1201), None when RGA gives no statistics; with isa: (VGPRs, ISA text or
+    None)."""
     with tempfile.TemporaryDirectory(prefix="wgrga_") as tmp:
-        subprocess.run([RGA, "-s", "dx12", "-c", "gfx1201", "--cs-blob", dxil, "-a", os.path.join(tmp, "s.csv")],
-                       capture_output=True, text=True)
+        cmd = [RGA, "-s", "dx12", "-c", "gfx1201", "--cs-blob", dxil, "-a", os.path.join(tmp, "s.csv")]
+        if isa:
+            cmd += ["--isa", os.path.join(tmp, "x.txt")]
+        subprocess.run(cmd, capture_output=True, text=True)
+        v, text = None, None
         for f in os.listdir(tmp):
             if f.endswith("_s_comp.csv"):
                 with open(os.path.join(tmp, f), newline="") as fh:
                     rows = list(csv.DictReader(fh))
-                return int(rows[0]["USED_VGPRs"]) if rows else None
-    return None
+                v = int(rows[0]["USED_VGPRs"]) if rows else None
+            elif f.endswith("_x_comp.txt"):
+                with open(os.path.join(tmp, f), encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+    return (v, text) if isa else v
 
 
-def vgpr_check(built):
-    """built: [(kernel name, dxil path)] of this build. Fails when a Swin / bottleneck kernel exceeds its bound."""
-    todo = [(n, p) for n, p in built if vgpr_checked(n)]
-    if not todo or os.environ.get("WG_DX12_VGPR_CHECK", "1") == "0":
+def hyb_scanned(name):
+    return "_hyb" in name and not name.endswith("_scanmut")
+
+
+# Model hybrid kernels with no norm tree (no square to fuse): their mutants must fail rule 2 only.
+HYB_NO_NORM = {"patch_merge_c64_hyb", "patch_merge_c96_hyb", "expand_c96_hyb", "expand_c128_hyb"}
+
+
+def scan_mutant(name):
+    return name.endswith("_scanmut")
+
+
+def vgpr_check(built, required=()):
+    """built: [(kernel name, dxil path)] of this build. Fails when a Swin / bottleneck kernel exceeds its bound, when a
+    hybrid kernel breaks an ISA rule, and when a kernel of `required` (the model hybrid kernels built) has no built
+    mutant or its mutant passes the rules it must fail."""
+    vg_on = os.environ.get("WG_DX12_VGPR_CHECK", "1") != "0"
+    todo = [(n, p) for n, p in built if (vg_on and vgpr_checked(n)) or hyb_scanned(n) or scan_mutant(n)]
+    if not todo and not required:
         return
     if not os.path.exists(RGA):
-        raise SystemExit(f"VGPR check: RGA not found at {RGA} (WG_RGA, or WG_DX12_VGPR_CHECK=0 to skip)")
+        raise SystemExit(f"VGPR check / fused-square scan: RGA not found at {RGA} (WG_RGA; WG_DX12_VGPR_CHECK=0 skips "
+                         "the VGPR check only, never the hybrid kernels' scan)")
     with open(VGPR_LIMITS, encoding="utf-8") as f:
         limits = {k: v for k, v in json.load(f).items() if not k.startswith("_")}
     # RGA runs are compiles too: at most 6 at a time, fewer when WG_DX12_JOBS asks for fewer
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(6, int(os.environ.get("WG_DX12_JOBS", 6))))) as ex:
-        counts = dict(zip([n for n, _ in todo], ex.map(rga_vgprs, [p for _, p in todo])))
+        res = dict(zip([n for n, _ in todo], ex.map(lambda np_: rga_vgprs(np_[1], isa=hyb_scanned(np_[0]) or
+                                                                         scan_mutant(np_[0])), todo)))
     bad = []
+    if HERE not in sys.path:   # python -I keeps the script's folder off sys.path
+        sys.path.insert(0, HERE)
+    from hyb_isa_scan import fused_squares, fp8_sources_not_fp16   # clean/dx12 (this folder)
+    for n in sorted(n for n in res if hyb_scanned(n)):
+        text = res[n][1]
+        hits = fused_squares(text) if text is not None else None
+        conv = fp8_sources_not_fp16(text) if text is not None else None
+        print(f"ISA-RULES {n:40s} fused squares {len(hits) if hits is not None else '?'}, FP8 sources not FP16 "
+              f"{len(conv) if conv is not None else '?'}", flush=True)
+        if hits is None:
+            bad.append(f"{n}: RGA gave no ISA (hybrid ISA rules)")
+            continue
+        if hits:
+            bad.append(f"{n}: {len(hits)} fused square(s), e.g. {hits[0][1]} (the driver contracts RN16(x x) into a "
+                       "sum: hyb_isa_scan.py rule 1, hlsl/hyb_block.hlsli HYB_OPAQUE0)")
+        if conv:
+            bad.append(f"{n}: {len(conv)} FP8 conversion(s) with a source that is not an FP16 value, e.g. {conv[0][1]} "
+                       "(an RN16 dropped or folded into the FP8 pack: hyb_isa_scan.py rule 2)")
+    for n in sorted(required):   # fail-closed: every model hybrid kernel has its built mutant
+        if n + "_scanmut" not in res:
+            bad.append(f"{n}: its ISA rules' mutant {n}_scanmut was not built (declare it beside the kernel: every "
+                       "model hybrid kernel has one)")
+    for n in sorted(n for n in res if scan_mutant(n)):   # the mutants: must FAIL rule 2, and rule 1 with a norm tree
+        text = res[n][1]
+        base = n[:-len("_scanmut")]
+        hits = fused_squares(text) if text is not None else None
+        conv = fp8_sources_not_fp16(text) if text is not None else None
+        need1 = base not in HYB_NO_NORM
+        print(f"ISA-RULES {n:40s} fused squares {len(hits) if hits is not None else '?'}"
+              f"{' (must be > 0)' if need1 else ''}, FP8 sources not FP16 {len(conv) if conv is not None else '?'} "
+              "(must be > 0)", flush=True)
+        if text is None:
+            bad.append(f"{n}: RGA gave no ISA for the mutant: the ISA rules prove nothing for {base}")
+            continue
+        if need1 and not hits:
+            bad.append(f"{n}: the mutant (no contraction barrier) PASSES rule 1 (0 fused squares): the rule no longer "
+                       f"proves anything for {base}")
+        if not conv:
+            bad.append(f"{n}: the mutant (no RN16 before the FP8 pack) PASSES rule 2: the rule no longer proves "
+                       f"anything for {base}")
+    counts = {n: (r[0] if (hyb_scanned(n) or scan_mutant(n)) else r) for n, r in res.items()
+              if vg_on and vgpr_checked(n) and not scan_mutant(n)}
     for n in sorted(counts):
         v, lim = counts[n], limits.get(n)
         print(f"VGPR {n:40s} {v if v is not None else '?':>4} / {lim if lim is not None else '-'}", flush=True)
@@ -342,7 +421,7 @@ def vgpr_check(built):
             bad.append(f"{n}: {v} VGPRs > {lim} (one workgroup per CU less: restore the bound or re-measure and "
                        "change it in vgpr_limits.json)")
     if bad:
-        raise SystemExit("VGPR check failed:\n  " + "\n  ".join(bad))
+        raise SystemExit("VGPR check / fused-square scan failed:\n  " + "\n  ".join(bad))
 
 
 def main(argv=None):
@@ -406,7 +485,7 @@ def main(argv=None):
                 continue
             if not only and not k_source and not is_model_k(d) and not a.model_l and is_model_l(d):
                 continue
-            if not only and is_frame_gen(d):
+            if not only and (is_frame_gen(d) or d["probe"]):
                 continue
             key = (d["name"], d["co"])
             if key in kernels and key not in old:
@@ -417,6 +496,14 @@ def main(argv=None):
                 raise SystemExit(f"kernel {d['name']} ({d['co']}): DXIL file {os.path.basename(out)} already used "
                                  "(a second port of a name needs file=<stem>)")
             jobs.append((src, d, out, k_source))
+    # the fused-square scan's mutants beside every build of hybrid kernels (outside the manifest, <out>/dx12/scanmut)
+    if any(hyb_scanned(j[1]["name"]) for j in jobs):
+        have = {j[1]["name"] for j in jobs}
+        for src, k_source in source_files(False):
+            for d in kernel_decls(src):
+                if scan_mutant(d["name"]) and d["name"] not in have:
+                    os.makedirs(os.path.join(dst, "scanmut"), exist_ok=True)
+                    jobs.append((src, d, os.path.join(dst, "scanmut", output_name(d["name"])), k_source))
 
     def build_one(job):
         src, d, out, k_source = job
@@ -448,7 +535,11 @@ def main(argv=None):
         futures = [pool.submit(build_one, j) for j in jobs]
         try:
             for (src, d, out, _k), fut in zip(jobs, futures):
-                kernels[(d["name"], d["co"])] = fut.result()
+                r_ = fut.result()
+                if not scan_mutant(d["name"]):
+                    kernels[(d["name"], d["co"])] = r_
+                else:
+                    kernels.pop((d["name"], d["co"]), None)
                 built.append((d["name"], out))
                 print(f"{d['name']:40s} -> {os.path.basename(out)}  block {d['block']} wave {d['wave']} "
                       f"args {d['args']}", flush=True)
@@ -456,10 +547,10 @@ def main(argv=None):
             for fut in futures:
                 fut.cancel()  # kernels not started yet; the running ones finish their current child process
             raise
-    names = {n for n, _ in kernels}
+    names = {n for n, _ in kernels} | {n for n, _ in built}
     if only and not (only <= names):
         raise SystemExit(f"not declared in clean/dx12/kernels or clean/k/dx12/kernels: {sorted(only - names)}")
-    vgpr_check(built)
+    vgpr_check(built, {d["name"] for _, d, _, _ in jobs if hyb_scanned(d["name"]) and not d["probe"]})
     with open(man_path, "w") as f:
         json.dump({"format": FORMAT, "dxc": os.path.basename(os.path.dirname(os.path.dirname(DXC_DIR))),
                    "kernels": [kernels[k] for k in sorted(kernels)]}, f, indent=1)

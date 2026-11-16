@@ -14,6 +14,7 @@
 
 // x, xadd (unused, may be null), out, w, H, W, ox, oy: as swin_block_c64. `_nc` when bit 0 of the blob's flags word is
 // set (the weights prove every inner FP8 pack in range), with identical results.
+#ifndef L_SWIN_HELPERS_ONLY   // l_swin_hyb.hip includes this file for its source / epilogue types only
 WG_KERNEL_NW(l_swin_block_c32, 256, WG_MINW_C32)(const u8* x, const u8* xadd, u8* out, const u8* w, int H, int W,
                                                   int ox, int oy) {
   swin_block<32, 2, 128, 1, false, WG_MLP_GROUP, false, 256>(x, xadd, out, w, H, W, ox, oy, nullptr);
@@ -22,6 +23,7 @@ WG_KERNEL_NW(l_swin_block_c32_nc, 256, WG_MINW_C32)(const u8* x, const u8* xadd,
                                                      int ox, int oy) {
   swin_block<32, 2, 128, 1, false, WG_MLP_GROUP, true, 256>(x, xadd, out, w, H, W, ox, oy, nullptr);
 }
+#endif
 
 // ---- Model L's two blocks (clean/l/FORMATS.md) ---------------------------------------------------------------------
 
@@ -85,6 +87,7 @@ struct LStoreF16Epi {
     swin_block<32, 2, 128, 1, false, WG_MLP_GROUP, NC, 256, 0, 0, EPI, false, SRC>(x, xadd, OUTARG, w, H, W, ox, oy, \
                                                                                    nullptr, out);                    \
   }
+#ifndef L_SWIN_HELPERS_ONLY
 L_BLOCK_KERNEL(l_swin_block_c32_enc, false, SwinStoreEpi, LHaloF16Src, out)
 L_BLOCK_KERNEL(l_swin_block_c32_enc_nc, true, SwinStoreEpi, LHaloF16Src, out)
 L_BLOCK_KERNEL(l_swin_block_c32_dec, false, LStoreF16Epi, LCoarseFp8Src, nullptr)
@@ -96,3 +99,4 @@ WG_KERNEL_NW(l_swin_block_c64, 256, WG_MINW_C64)(const u8* x, const u8* xadd, u8
                                                   int ox, int oy) {
   swin_block<64, 2, 256, 1, false, WG_MLP_GROUP, false, 256>(x, xadd, out, w, H, W, ox, oy, nullptr);
 }
+#endif  // L_SWIN_HELPERS_ONLY

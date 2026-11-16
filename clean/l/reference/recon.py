@@ -133,7 +133,7 @@ def target_positions_f32(rw, rh, dw, dh, jx, jy):
     return px, py
 
 
-def gather_half(feat, C, px, py, rw, rh, window):
+def gather_half(feat, C, px, py, rw, rh, window, c1="item3"):
     """Step 2 in the model's precision (spec side, confirmed for Model L and Model M):
     - per render pixel: A = h(f32(a -0.721325)), B = h(f32(b -0.721325)), C = h(f32(c -1.44265)); the nine features
       in FP16 (feat must already be FP16 values);
@@ -143,7 +143,9 @@ def gather_half(feat, C, px, py, rw, rh, window):
     - w = 2^eps in float32, flushed to +0 below 2^-126; W = float32 sum of the unrounded w in tap order;
     - F_k = fused_half(h(w), f_k, F_k), from +0; r = 1 / W, f-bar_k = float32(r F_k).
     Tap order: i (columns) outer, j (rows) inner. Fused half multiply-adds are evaluated in float64 and rounded once
-    to FP16 (exact unless the addends' exponents differ by more than about 30, far outside these values)."""
+    to FP16 (exact unless the addends' exponents differ by more than about 30, far outside these values).
+    c1="machine": the exponent in the machine-code form (PRESET-M-C1C2-machine-code.md): the row term fused too,
+    eps = fused_half(h(u v), C, fused_half(h(v v), B, h(h(u u) A)))."""
     ax, b = _post.kernel_window(px, py)
     Cc = np.asarray(C, np.float64)
     kA = _h(_f32(Cc[..., 0] * _f32(-0.721325)))
@@ -165,7 +167,10 @@ def gather_half(feat, C, px, py, rw, rh, window):
                 sy = np.clip(b + j, 0, rh - 1)
                 v = _h(dyv + j)
                 a_, b_, c_ = kA[sy][:, sx], kB[sy][:, sx], kC[sy][:, sx]
-                s_ = _h(_h(_h(u * u) * a_) + _h(_h(v * v) * b_))
+                if c1 == "machine":
+                    s_ = _h(_h(v * v) * b_ + _h(_h(u * u) * a_))
+                else:
+                    s_ = _h(_h(_h(u * u) * a_) + _h(_h(v * v) * b_))
                 eps = _h(_h(u * v) * c_ + s_)
                 w = _f32(np.exp2(eps))
                 w = np.where(w < 2.0 ** -126, 0.0, w)
@@ -206,7 +211,7 @@ def reconstruct(x, s, t=_table.TABLE, ldr=False):
     feat = np.concatenate([ec, np.asarray(x["B"], np.float64), np.asarray(x["A"], np.float64)], axis=2)
     if rc.get("gather", "float64") == "half":
         px, py = target_positions_f32(rw, rh, dw, dh, jx, jy)
-        W, fbar = gather_half(_h(feat), x["C"], px, py, rw, rh, window)
+        W, fbar = gather_half(_h(feat), x["C"], px, py, rw, rh, window, rc.get("c1", "item3"))
     else:
         px, py = _post.target_positions(rw, rh, dw, dh, jx, jy)
         W, fbar = gather(feat, x["C"], px, py, rw, rh, window)
@@ -282,7 +287,8 @@ def reconstruct(x, s, t=_table.TABLE, ldr=False):
             # alpha = sat(f32(f32(s W) g-bar)), beta' = fused(alpha f32(1 - beta-bar) + beta-bar),
             # H^ = fused(f32(C - Hl) beta' + Hl), O^ likewise.
             C_lin = r32(dec(cbar))
-            H_lin = r32(H * e)
+            # encoded combination (Model M's original): one decode of the combined H, H_lin = (D(H) / e_prev) e
+            H_lin = r32(H * e) if linear else r32(r32(r32(dec(H)) / e_prev) * e)
             alpha = _post.clamp(r32(r32(np.float32(s) * W) * gbar), 0.0, 1.0)
             bh2 = fma(alpha, r32(1.0 - bh), bh)[..., None]
             bo2 = fma(alpha, r32(1.0 - bo), bo)[..., None]

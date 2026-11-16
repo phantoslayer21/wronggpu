@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Model L weight packing for the runtime; see l_pack.h.
 #include "l_pack.h"
+#include "l_q7_pack.h"
 
 namespace wgrt {
 namespace l {
@@ -129,6 +130,57 @@ bool pack_dec_project(const std::vector<float>& W, const std::vector<float>& b, 
   const pack_parts::Order RE = pack_parts::rows_expand(32, d);  // tile 2 s + g: sub-pixel s, channels 16 g ..
   pack_parts::put_tile_vector(out, b.data(), RE, d);
   pack_parts::put_frags(out, pack_parts::frags(W.data(), 128, n, RE, kord_groups32(n)));
+  return true;
+}
+
+bool pack_q7_model(const std::map<std::string, StageTensors>& params, std::map<std::string, std::vector<uint8_t>>* out,
+                   std::string* err) {
+  struct S {
+    const char* stage;
+    const char* blob;
+    int C, heads, lin_n, lin_k;   // lin: merge (n C_out, K 4 C) or expansion (n 4 C, K C_low); 0 = none
+    const char *lw, *lb;
+  };
+  static const S kS[] = {{"enc0_block", "enc0_block.q7", 32, 2, 0, 0, nullptr, nullptr},
+                         {"dec0_block", "dec0_block.q7", 32, 2, 0, 0, nullptr, nullptr},
+                         {"enc1", "enc1.q7", 64, 2, 96, 256, "Wm", "bm"},
+                         {"enc2", "enc2.q7", 96, 4, 128, 384, "Wm", "bm"},
+                         {"b0", "b0.q7", 128, 4, 0, 0, nullptr, nullptr},
+                         {"b1", "b1.q7", 128, 4, 0, 0, nullptr, nullptr},
+                         {"b2", "b2.q7", 128, 4, 0, 0, nullptr, nullptr},
+                         {"b3", "b3.q7", 128, 4, 0, 0, nullptr, nullptr},
+                         {"b4", "b4.q7", 128, 4, 0, 0, nullptr, nullptr},
+                         {"b5", "b5.q7", 128, 4, 0, 0, nullptr, nullptr},
+                         {"dec2", "dec2.q7", 96, 4, 384, 128, "We", "be"},
+                         {"dec1", "dec1.q7", 64, 2, 256, 96, "We", "be"}};
+  for (const S& s : kS) {
+    const StageTensors* t = stage(params, s.stage, err);
+    if (!t) return false;
+    const size_t C = (size_t)s.C, h = (size_t)s.heads, m = 4 * C;
+    const Tensor *g1, *g2, *bp, *b1, *b2, *B, *Wqk, *Wv, *Wp, *W1, *W2;
+    if (!need(*t, s.stage, "gamma1", C, &g1, err) || !need(*t, s.stage, "gamma2", C, &g2, err) ||
+        !need(*t, s.stage, "bp", C, &bp, err) || !need(*t, s.stage, "b1", m, &b1, err) ||
+        !need(*t, s.stage, "b2", C, &b2, err) || !need(*t, s.stage, "B", h * 256, &B, err) ||
+        !need(*t, s.stage, "Wqk", h * 32 * C, &Wqk, err) || !need(*t, s.stage, "Wv", h * 32 * C, &Wv, err) ||
+        !need(*t, s.stage, "Wp", C * 32 * h, &Wp, err) || !need(*t, s.stage, "W1", m * C, &W1, err) ||
+        !need(*t, s.stage, "W2", C * m, &W2, err))
+      return false;
+    std::vector<uint8_t> blob;
+    if (!q7pack::pack_block(g1->f, g2->f, bp->f, b1->f, b2->f, B->f, Wqk->f, Wv->f, Wp->f, W1->f, W2->f, s.C, s.heads,
+                            (int)m, &blob, err))
+      return *err = std::string(s.stage) + ": " + *err, false;
+    (*out)[s.blob] = std::move(blob);
+    if (s.lin_n) {
+      const Tensor *lw, *lb;
+      if (!need(*t, s.stage, s.lw, (size_t)s.lin_n * s.lin_k, &lw, err) ||
+          !need(*t, s.stage, s.lb, (size_t)s.lin_n, &lb, err))
+        return false;
+      if (!q7pack::pack_linear(lw->f, lb->f, s.lin_n, s.lin_k, &blob, err))
+        return *err = std::string(s.stage) + ": " + *err, false;
+      (*out)[std::string(s.stage) + ".q7lin"] = std::move(blob);
+    }
+  }
+  (*out)["q7.tab"] = q7pack::q7_tables();
   return true;
 }
 

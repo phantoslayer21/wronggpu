@@ -349,7 +349,7 @@ class NetworkTest(unittest.TestCase):
         """With Model M's encoder and decoder op lists, the L network is Model M's oracle chain."""
         rng = np.random.default_rng(13)
         xe, xd = self._inputs(rng, 40, 24)
-        t = T.table(enc_ops=M_ENC_OPS, dec_ops=M_DEC_OPS, dec_pixel="m")
+        t = T.table(enc_ops=M_ENC_OPS, dec_ops=M_DEC_OPS, dec_pixel="m", shared_form="m")
         p = L.random_params(rng, t)
         p["enc0"] = ME.random_params(rng)
         pm_dec = MD.random_params(rng)
@@ -503,6 +503,18 @@ class Q7FormTest(unittest.TestCase):
         q = L._block_tokens(x, p, 2, T.block_consts(T.TABLE, "dec0_block"))
         self.assertFalse(np.array_equal(L.f16(m), q))
         self.assertTrue(np.array_equal(L.f16(q), q))                  # the FP16 form's output is FP16
+
+    def test_nan_member_stays_in_its_window(self):
+        """A NaN input member gives NaN outputs in its own window only (the coverage check does not use NaN)."""
+        rng = np.random.default_rng(6)
+        p = L.random_block_params(rng, 32, 2, 128)
+        k = T.block_consts(T.TABLE, "dec0_block")
+        x = q8(rng.normal(0, 2, (8, 8, 32)))
+        x[1, 2, 3] = np.nan
+        y = L.swin_block(x, p, (0, 0), 2, k, "coarse")
+        bad = np.isnan(y).any(-1)
+        self.assertTrue(bad[:4, :4].all())
+        self.assertFalse(bad[4:, :].any() or bad[:, 4:].any())
 
 
 if __name__ == "__main__":

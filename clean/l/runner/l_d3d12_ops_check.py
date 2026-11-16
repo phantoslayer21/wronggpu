@@ -369,15 +369,26 @@ def enc_direct_cases(kernel, rng):
     return cases
 
 
+def lc12_post_cases(kernel, rng):
+    """lc12/l_post_recon[_p12][_ldr]: the C1/C2 reconstruction (D3D12 port LP_C12 = 1 of l_post__lc12.co, tag lc12)
+    against l_post__lc12.co's kernel on HIP, on post_cases' inputs."""
+    base = kernel.split("/", 1)[1]
+    for c in post_cases(base, rng):
+        c = dict(c)
+        c.update({"co": "l_post__lc12.co", "tag": "lc12", "hip_kernel": base, "kernel": kernel})
+        yield c
+
+
+LC12_KERNELS = ("lc12/l_post_recon", "lc12/l_post_recon_p12", "lc12/l_post_recon_ldr", "lc12/l_post_recon_p12_ldr")
 KINDS = {"l_linear_32_32_relu": linear_cases, "l_linear_32_32_f16": linear_cases,
          "l_project_gather": project_cases, "l_dec_project": project_cases, "l_coef": coef_cases,
          "l_coef_pack12": coef_cases, "lev/input_encoder": enc_cases, "l_post_recon": post_cases,
          "l_post_recon_p12": post_cases, "l_post_recon_ldr": post_cases, "l_post_recon_p12_ldr": post_cases,
          "l_post_filter_ldr": filter_ldr_cases, "lev/input_encoder_direct": enc_direct_cases,
-         "swin_block_c64_add_ex_nc": dec1_ex_cases}
+         "swin_block_c64_add_ex_nc": dec1_ex_cases, **{k: lc12_post_cases for k in LC12_KERNELS}}
 CONTROL_KINDS = {"swin_block_c96_nc": control_cases}
 # kernels that get a negative control of their own (besides the run's first case)
-NEG_KERNELS = ("l_post_recon", "l_post_recon_p12", "l_post_recon_ldr", "l_post_recon_p12_ldr", "l_post_filter_ldr")
+NEG_KERNELS = ("l_post_recon", "l_post_recon_p12", "l_post_recon_ldr", "l_post_recon_p12_ldr", "l_post_filter_ldr") +     LC12_KERNELS
 CO = "l_ops.co"
 
 
@@ -536,6 +547,16 @@ def run(build, rocm, seeds, kernels, kinds=None):
                          for k in kernels}
     res["pass"] = r.returncode == 0 and caught is True and all(v["cases"] > 0 and v["identical"] == v["cases"]
                                                                for v in res["per_kernel"].values())
+    # The C1/C2 forms against the default reconstruction on HIP, the same cases: they must differ somewhere (the lc12
+    # build is not l_post.co); the default kernels' cases come from the same seeds (both in --kernels).
+    for k in LC12_KERNELS:
+        b = k.split("/", 1)[1]
+        if k in kernels and b in kernels:
+            kn, bn = k.replace("/", "_"), b
+            pairs = [(n, bn + n[len(kn):]) for n in hip_out if hip_out[n][0] == k]
+            differ = sum(hip_out[a][1] != hip_out[c][1] for a, c in pairs if c in hip_out)
+            res.setdefault("lc12_differs_from_default_on_hip", {})[k] = {"cases": len(pairs), "differing": differ}
+            res["pass"] = res["pass"] and differ > 0
     for sfx in ("", "_ldr"):
         if "l_post_recon" + sfx in kernels and "l_post_recon_p12" + sfx in kernels:
             # The same cases (same seeds) on both coefficient forms: on HIP, the pack12 kernel's raw output bytes must

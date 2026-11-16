@@ -233,6 +233,31 @@ class PackagerRefusesDeveloperRuntime(unittest.TestCase):
         r, _ = self._pack({"wronggpu_runtime.dll": good, "sub/other.dll": b"plain"}, mf)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_check_routes_and_check_objects_are_refused(self):
+        """The check routes' selector texts (the mutant / twin code objects, the forced bottleneck timeout) and the
+        check-only code objects (mutants, probes, the timeout control, the HIP twins, the scan mutants) are never in a
+        release library or payload; the default route's objects are."""
+        for t in chk.DEV_ONLY_STRINGS:
+            ok, text = chk.check_bytes(b"MZ" + MARK0 + b" " + t)
+            self.assertFalse(ok, t)
+            self.assertIn("forged marker", text)
+        for t in (b"l_q7__hybmut.co", b"l_q7w__hybmut.co", b"l_swin_hyb.co", b"swin_hyb.co", b"x_scanmut",
+                  b"l_post_c12_probe"):
+            ok, text = chk.check_bytes(b"MZ" + MARK0 + b" " + t)
+            self.assertFalse(ok, t)
+            self.assertIn("check-only code objects", text)
+        for n in ("l_q7__hybmut.co", "l_q7w__hybmut.co", "swin_hyb.co", "sub/l_swin_hyb.co", "l_post_c12_probe.co",
+                  "l_post_c12_probe__mut.co", "l_hyb_probe.co",
+                  "dx12/scanmut/swin_block_c128_hyb_scanmut.dxil", "swin_bneck6_hyb_mut.dxil", "swin_bneck6_hyb_tmo.dxil"):
+            ok, text, _ = chk.check_artifact(n, b"plain")
+            self.assertFalse(ok, n)
+        for n in ("l_q7__hyb.co", "l_q7w__hyb.co", "l_post__lc12.co", "swin_bneck6_hyb.dxil", "swin_block_c128_hyb.dxil",
+                  "manifest.json", "probe.co", "native_driver_probe.dxil"):
+            ok, text, _ = chk.check_artifact(n, b"plain")
+            self.assertTrue(ok, (n, text))
+        ok, text = chk.check_bytes(b"MZ" + MARK0 + b" /l_q7__hyb.co /l_q7w__hyb.co /l_post__lc12.co")
+        self.assertTrue(ok, text)
+
     def test_the_final_package_check(self):
         with tempfile.TemporaryDirectory() as d:
             good_zip, bad_zip = os.path.join(d, "good.zip"), os.path.join(d, "bad.zip")

@@ -17,6 +17,10 @@
    "frame.co"
   ],
   [
+   "d1p12/dec0_q7",
+   "dec1_dec0__pack12.co"
+  ],
+  [
    "d1p12/swin_block_c64_add_dec0_nc",
    "dec1_dec0__pack12.co"
   ],
@@ -187,6 +191,14 @@
  ],
  "model_l": [
   [
+   "expand_c128_hyb",
+   "-"
+  ],
+  [
+   "expand_c96_hyb",
+   "-"
+  ],
+  [
    "l_coef",
    "l_ops.co"
   ],
@@ -247,12 +259,72 @@
    "l_ops.co"
   ],
   [
+   "l_q7_block_c128",
+   "l_q7w.co"
+  ],
+  [
+   "l_q7_block_c32_dec",
+   "l_q7.co"
+  ],
+  [
+   "l_q7_block_c32_enc",
+   "l_q7.co"
+  ],
+  [
+   "l_q7_block_c64",
+   "l_q7w.co"
+  ],
+  [
+   "l_q7_block_c64_dec",
+   "l_q7w.co"
+  ],
+  [
+   "l_q7_block_c96",
+   "l_q7w.co"
+  ],
+  [
+   "l_q7_block_c96_dec",
+   "l_q7w.co"
+  ],
+  [
+   "l_q7_expand_c128",
+   "l_q7w.co"
+  ],
+  [
+   "l_q7_expand_c96",
+   "l_q7w.co"
+  ],
+  [
+   "l_q7_merge_c64",
+   "l_q7w.co"
+  ],
+  [
+   "l_q7_merge_c96",
+   "l_q7w.co"
+  ],
+  [
+   "l_swin_block_c32_dec_coef12_hyb",
+   "-"
+  ],
+  [
    "l_swin_block_c32_dec_coef12_nc",
+   "-"
+  ],
+  [
+   "l_swin_block_c32_dec_hyb",
    "-"
   ],
   [
    "l_swin_block_c32_dec_nc",
    "l_swin.co"
+  ],
+  [
+   "l_swin_block_c32_enc_hyb",
+   "-"
+  ],
+  [
+   "l_swin_block_c32_enc_lin_hyb",
+   "-"
   ],
   [
    "l_swin_block_c32_enc_lin_nc",
@@ -265,6 +337,22 @@
   [
    "l_swin_block_c32_nc",
    "l_swin.co"
+  ],
+  [
+   "lc12/l_post_recon",
+   "l_post__lc12.co"
+  ],
+  [
+   "lc12/l_post_recon_ldr",
+   "l_post__lc12.co"
+  ],
+  [
+   "lc12/l_post_recon_p12",
+   "l_post__lc12.co"
+  ],
+  [
+   "lc12/l_post_recon_p12_ldr",
+   "l_post__lc12.co"
   ],
   [
    "lev/input_encoder",
@@ -283,8 +371,40 @@
    "-"
   ],
   [
+   "patch_merge_c64_hyb",
+   "-"
+  ],
+  [
+   "patch_merge_c96_hyb",
+   "-"
+  ],
+  [
+   "swin_block_c128_hyb",
+   "-"
+  ],
+  [
    "swin_block_c64_add_ex_nc",
    "swin.co"
+  ],
+  [
+   "swin_block_c64_add_hyb",
+   "-"
+  ],
+  [
+   "swin_block_c64_hyb",
+   "-"
+  ],
+  [
+   "swin_block_c96_add_hyb",
+   "-"
+  ],
+  [
+   "swin_block_c96_hyb",
+   "-"
+  ],
+  [
+   "swin_bneck6_hyb",
+   "-"
   ]
  ],
  "model_k": [
