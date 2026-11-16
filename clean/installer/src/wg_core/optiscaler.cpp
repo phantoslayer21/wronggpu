@@ -48,6 +48,7 @@ OptiPackage PrepareOptiScaler(Context& ctx, const wstring& chosen) {
         const int code = RunHiddenWait(tar, L"-xf \"" + p.source + L"\" -C \"" + Join(p.tempDir, L"package") + L"\"", 300000);
         if (code != 0) { p.error = L"Could not unpack " + BaseName(p.source) + L" (tar exit code " + std::to_wstring(code) + L") - unpack it yourself and choose its folder"; return p; }
         root = Join(p.tempDir, L"package");
+        LogLine(ctx, L"OptiScaler: unpacked " + BaseName(p.source) + L" in " + p.tempDir);
     } else {
         p.error = L"Choose OptiScaler's release archive (.7z or .zip), the folder you unpacked it to, or the OptiScaler.dll in it";
         return p;

@@ -192,6 +192,15 @@ int PrepareRr(Context& ctx, const wstring& dataDir, const wstring& exe, const ws
     const wstring driver = RrDriverVersion();
     if (driver.empty()) { if (why) *why = L"no AMD graphics card found"; return 2; }
     if (!IsFile(runtimeDll)) { if (why) *why = L"the runtime isn't there (" + runtimeDll + L")"; return 3; }
+#ifdef WRONGGPU_TESTING
+    // tests: a test build starts no helper unless the test allows it (WRONGGPU_TEST_ALLOW_RR_HELPER=1): whatever was decided
+    // above, a default test run never prepares anything on the GPU
+    if (EnvVar(L"WRONGGPU_TEST_ALLOW_RR_HELPER") != L"1") {
+        if (why) *why = L"test: the helper may not start (WRONGGPU_TEST_ALLOW_RR_HELPER)";
+        LogLine(ctx, L"Ray Reconstruction: test: the helper may not start for " + BaseName(exe) + L" (WRONGGPU_TEST_ALLOW_RR_HELPER)");
+        return 3;
+    }
+#endif
     const wstring run = Join(PrepDir(dataDir), L"run");
     EnsureDir(run);
     const wstring helper = Join(run, BaseName(exe));

@@ -2669,8 +2669,10 @@ int main() {
                     if (StartsWithI(s, key + L"=")) found = s + key.size() + 1;
                 return found;
             };
-            wchar_t saved[MAX_PATH * 2] = {};
+            wchar_t saved[MAX_PATH * 2] = {}, savedReal[64] = {};
             const bool had = GetEnvironmentVariableW(L"LOCALAPPDATA", saved, MAX_PATH * 2) > 0;
+            const bool hadReal = GetEnvironmentVariableW(L"WRONGGPU_TEST_REAL_DRIVER_CACHE", savedReal, 64) > 0;
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_REAL_DRIVER_CACHE", nullptr);  // (whatever the caller had)
             const wstring sandbox = Join(dir, L"sandbox-localappdata");
             SetEnvironmentVariableW(L"LOCALAPPDATA", sandbox.c_str());
             wstring real;
@@ -2692,6 +2694,7 @@ int main() {
                     "a release build's rr-prepare helper gets the user's real LOCALAPPDATA (where the driver keeps the game's shader cache)");
 #endif
             SetEnvironmentVariableW(L"LOCALAPPDATA", had ? saved : nullptr);
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_REAL_DRIVER_CACHE", hadReal ? savedReal : nullptr);
         }
 
         RemoveTree(dir);

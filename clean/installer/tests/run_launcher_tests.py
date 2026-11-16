@@ -39,17 +39,27 @@ class T:
         self.data = os.path.join(work, "data")
         self.log = os.path.join(work, "launcher-test.log")
         self.out = os.path.join(work, "out.json")
-        self.env = dict(os.environ, LOCALAPPDATA=os.path.join(work, "localappdata"), ProgramData=os.path.join(work, "programdata"))
-        if hip:
-            self.env["WRONGGPU_HIP_RUNTIME"] = hip
-        for k in [k for k in self.env if k.upper().startswith("WG_") or k.upper() in ("HIP_PATH", "ROCM_PATH", "LLVM_PATH", "HIP_DEVICE_LIB_PATH")]:
-            self.env.pop(k)
-        os.makedirs(self.env["LOCALAPPDATA"], exist_ok=True)
+        self.hip = hip
+        self.env = self.child_env(os.environ)
         # the store libraries: <work>\libraries only; every store access logged and checked after each call (launcher_isolation)
         iso.test_env(self.env, work)
         self.expect_scan = False  # set by a test whose next call must search the test libraries (the guard's sensitivity)
         self.uninstall = suite.uninstall_root(self.env["LOCALAPPDATA"])  # this run's Apps & features root (the build's own)
         self.j = {}
+
+    def child_env(self, inherited):
+        """The launcher's environment from the caller's: LOCALAPPDATA, ProgramData, TEMP and TMP in the work folder, and no
+        inherited test override (WRONGGPU_TEST_*, WG_*: a test sets its own for one call) or HIP path."""
+        tmp = os.path.join(self.work, "tmp")
+        env = dict(inherited, LOCALAPPDATA=os.path.join(self.work, "localappdata"), ProgramData=os.path.join(self.work, "programdata"),
+                   TEMP=tmp, TMP=tmp)
+        for k in [k for k in env if k.upper().startswith(("WG_", "WRONGGPU_TEST_")) or k.upper() in ("HIP_PATH", "ROCM_PATH", "LLVM_PATH", "HIP_DEVICE_LIB_PATH")]:
+            env.pop(k)
+        if self.hip:
+            env["WRONGGPU_HIP_RUNTIME"] = self.hip
+        os.makedirs(env["LOCALAPPDATA"], exist_ok=True)
+        os.makedirs(tmp, exist_ok=True)
+        return env
 
     def check(self, name, cond, detail=""):
         if cond:
@@ -3007,9 +3017,11 @@ def test_data_root_junctions(parent):
     def invoke_without_log(exe, verb):
         out = os.path.join(work, verb + "-result.json")
         astart = iso.access_size(t.work)
+        facts.require_test_hooks(exe)  # as every launcher call: a testing build only
         proc = subprocess.Popen([exe, verb, "--out=" + out], env=t.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         proc.communicate(timeout=180)
-        log = os.path.join(t.env.get("TEMP", ""), "WrongGPU-junction-%d.log" % proc.pid)
+        log = os.path.join(t.env["TEMP"], "WrongGPU-junction-%d.log" % proc.pid)  # TEMP: the work folder's tmp (child_env)
+        assert os.path.abspath(log).lower().startswith(os.path.abspath(t.work).lower() + os.sep), log
         iso.check_isolation(log if os.path.isfile(log) else None, t.work, 0, (verb,), astart)  # (#243: every launcher call)
         text = read(log).decode("utf-8", "replace") if os.path.isfile(log) else ""
         if os.path.isfile(log): os.remove(log)

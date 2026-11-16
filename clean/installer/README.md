@@ -929,18 +929,24 @@ Windows (the Wine run was not repeated for them):
   the experimental confirmation, the model kept while another managed game uses it, adoption of a real 0.5.1
   install (v1 record, settings imported, restorer, entries), self-install / self-uninstall with one Apps & features
   entry, portable paths, the update check off, and the window built hidden (`ui-dump`: pages, names, visibility).
-  The suite runs only `WRONGGPU_TESTING` builds with the test isolation hooks: every launcher it is given, their copies
-  and the `uninstall.exe` they write are checked before they run, and anything else is refused unrun (a release launcher
-  could reach the real download page, the PC's stores and the real Apps & features root). The 0.5.1 baseline predates the
-  hooks and runs only with `--run-old-baseline`. Checks that depend on how the launcher was built follow the build under
+  The suite runs only `WRONGGPU_TESTING` builds, by their identity: the named resource `WRONGGPU_TESTING_BUILD` only such
+  a build links in, a PE checksum that matches (MSVC `/RELEASE`: a program changed or appended to after its link fails)
+  and the test hooks' strings inside its sections. Every launcher it is given, their copies and the `uninstall.exe` they
+  write are checked before they run; anything else is refused unrun (a release launcher could reach the real download
+  page, the PC's stores and the real Apps & features root). Negative controls: `wg-test-canary` and
+  `wg-test-canary-strings` (CMake targets of a testing build, built next to the launcher; not testing builds, the second
+  carrying the hooks' strings) start when run directly and are refused through every entry point. The 0.5.1 baseline
+  predates the hooks and runs only with `--run-old-baseline`. Every launcher call gets the work folder's `tmp` as `TEMP`
+  and `TMP`, and no inherited test override (`WRONGGPU_TEST_*`, `WG_*`). Checks that depend on how the launcher was built follow the build under
   test (`launcher_build_facts.py`). The edition section always runs with `--launcher`: its download, cache and address
   rules on either route, and a repair without any OptiScaler ending through the direct route (exit 0) or refused (exit 2)
   without it. `--no-direct-launcher` (a testing build with `-DWRONGGPU_DIRECT_ROUTE=OFF`, as releases) runs the section
   again in a pass of its own for the exit-2 refusals. rr-prepare stays in the work folder: its no-card path, and with the
   suite's stand-in runtime the helper's expected failure to load it (under a test driver version, so on any PC) with the
   suite's `LOCALAPPDATA` kept. The checks of RR's kernels really prepared need a payload with the real runtime and fill the
-  user's real graphics driver cache, so they run only with `--rr-prepare-gpu`. Test builds' hooks for this:
-  `WRONGGPU_TEST_RR_DRIVER` (a driver version, or `none`), `WRONGGPU_TEST_HELPER_ENV_LOG`, and
+  user's real graphics driver cache, so they run only with `--rr-prepare-gpu`. A test build starts no rr-prepare helper
+  unless the test allows it (`WRONGGPU_TEST_ALLOW_RR_HELPER=1`: the stand-in case and the opt-in pass only). Test builds'
+  other hooks for this: `WRONGGPU_TEST_RR_DRIVER` (a driver version, or `none`), `WRONGGPU_TEST_HELPER_ENV_LOG`, and
   `WRONGGPU_TEST_REAL_DRIVER_CACHE=1` (the helper gets the user's real `LOCALAPPDATA`; release builds always do).
   Its `[direct-rr]` part: a game that ships the RR library without the game interface's RR plugin (the Unreal Engine
   plugin layout of Hogwarts Legacy, LEGO Batman, Borderlands 4) creates Ray Reconstruction itself (`rr.h`

@@ -97,8 +97,14 @@ def _section(t, opti, game, edition_package, OPTI_INI, tag, refuses):
         t.run("set", "--global", "optiscaler=")  # no player's own download (an earlier pass may have set one)
         root, b, exe = game(t, "Edition Game", validated=True)
         before = snapshot(root)
+        start = os.path.getsize(t.log) if os.path.isfile(t.log) else 0
         rc = t.run("install", exe, "--noscan", "--force")
         log = read(t.log).decode("utf-8", "replace")
+        unpack = [l.split(" in ", 1)[1].strip() for l in read(t.log)[start:].decode("utf-8", "replace").splitlines()
+                  if "OptiScaler: unpacked edition-test.zip in " in l]
+        check("the edition archive is unpacked in the run's own temporary folder (TEMP in the work folder), nowhere else",
+              len(unpack) == 1 and os.path.abspath(unpack[0]).lower().startswith(os.path.join(t.work, "tmp").lower() + os.sep) and
+              t.env.get("TEMP") == os.path.join(t.work, "tmp"), (unpack, t.env.get("TEMP")))
         proxy = [n for n in ("dxgi.dll", "winmm.dll", "version.dll") if os.path.isfile(os.path.join(b, n))]
         check("no OptiScaler chosen: the launcher downloads its edition (one GET), checks it (sha256), caches it in its data folder and installs it",
               rc == 0 and len(hits) == 1 and read(cache) == zbytes and "downloaded and checked" in log and proxy and read(os.path.join(b, proxy[0])) == dll and

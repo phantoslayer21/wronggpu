@@ -10,7 +10,9 @@ The default run stays inside its work folder and never prepares anything on the 
   version, and must fail to load that runtime: the expected result, with its diagnostic. The helper must keep the suite's
   redirected LOCALAPPDATA (a test build's rule, rrprep.h RrHelperEnvironment);
 - the checks that need RR's kernels really prepared (a payload with the real runtime and an RDNA 4 card) fill the user's
-  real graphics driver cache, so they run only with the opt-in --rr-prepare-gpu."""
+  real graphics driver cache, so they run only with the opt-in --rr-prepare-gpu.
+A test build starts no helper at all unless the test allows it (WRONGGPU_TEST_ALLOW_RR_HELPER=1, rrprep.cpp): only the
+stand-in case and the opt-in pass do; a negative control shows a game the classification does not stop gets no helper."""
 import os
 import shutil
 
@@ -60,19 +62,34 @@ def run(t, exe, b, gpu_opt_in=False):
             sorted(os.listdir(b)) == game_before, (rc, rp, os.listdir(b)))
     shutil.rmtree(os.path.join(t.work, "data-rr-nocard"), ignore_errors=True)
 
+    envlog = os.path.join(t.work, "rr-helper-env.log")
+    if os.path.exists(envlog):
+        os.remove(envlog)
+    # the negative control: a game the in-game classification does not stop, a driver, no permission: no helper starts
+    t.env["WRONGGPU_TEST_RR_DRIVER"] = "99.0.0.1"
+    t.env["WRONGGPU_TEST_HELPER_ENV_LOG"] = envlog
+    try:
+        rc = t.run("rr-prepare", exe, "--passes=1")
+    finally:
+        t.env.pop("WRONGGPU_TEST_RR_DRIVER", None)
+        t.env.pop("WRONGGPU_TEST_HELPER_ENV_LOG", None)
+    rp = t.j.get("rr_prepare", {})
+    t.check("rr-prepare without the test's permission: no helper starts, whatever the classification (result 3, exit 1, said why)",
+            rc == 1 and rp.get("result") == 3 and "WRONGGPU_TEST_ALLOW_RR_HELPER" in rp.get("why", "") and not os.path.exists(envlog) and
+            _helper_gone(os.path.join(prep_dir, "run")), (rc, rp))
+
     if facts.stand_in_runtime(b):
         # the suite's stand-in runtime: the helper really runs (a test driver version, so on any PC) and cannot load it; it
-        # must keep the suite's LOCALAPPDATA (a test build never hands the helper the user's real folder)
-        envlog = os.path.join(t.work, "rr-helper-env.log")
-        if os.path.exists(envlog):
-            os.remove(envlog)
-        t.env["WRONGGPU_TEST_RR_DRIVER"] = "99.0.0.1"
-        t.env["WRONGGPU_TEST_HELPER_ENV_LOG"] = envlog
+        # must keep the suite's LOCALAPPDATA even when the caller's environment asks for the real one (the suite strips that)
+        saved_env = t.env
+        t.env = t.child_env(dict(os.environ, WRONGGPU_TEST_REAL_DRIVER_CACHE="1"))
+        t.env.update({k: v for k, v in saved_env.items() if k in ("WRONGGPU_TEST_LIBRARIES", "WRONGGPU_TEST_ACCESS_LOG", "WRONGGPU_TEST_RUN_ID")})
+        stripped = "WRONGGPU_TEST_REAL_DRIVER_CACHE" not in t.env
+        t.env.update(WRONGGPU_TEST_RR_DRIVER="99.0.0.1", WRONGGPU_TEST_HELPER_ENV_LOG=envlog, WRONGGPU_TEST_ALLOW_RR_HELPER="1")
         try:
             rc = t.run("rr-prepare", exe, "--passes=1")
         finally:
-            t.env.pop("WRONGGPU_TEST_RR_DRIVER", None)
-            t.env.pop("WRONGGPU_TEST_HELPER_ENV_LOG", None)
+            t.env = saved_env
         rp = t.j.get("rr_prepare", {})
         why = rp.get("why", "")
         t.check("rr-prepare with the suite's stand-in runtime: the helper ran and could not load it (result 3, exit 1, the helper's "
@@ -80,8 +97,9 @@ def run(t, exe, b, gpu_opt_in=False):
                 rc == 1 and rp.get("result") == 3 and ("the helper ended with 7" in why or "the helper ended with 8" in why) and
                 "prepare.log" in why and rp.get("ready") is False and not os.path.isfile(os.path.join(prep_dir, "prepared.txt")), (rc, rp))
         seen = read(envlog).decode("utf-8", "replace").splitlines() if os.path.isfile(envlog) else []
-        t.check("rr-prepare: the helper kept the suite's redirected LOCALAPPDATA (never the user's real folder)",
-                seen == ["LOCALAPPDATA=" + t.env["LOCALAPPDATA"]], (seen, t.env["LOCALAPPDATA"]))
+        t.check("rr-prepare: the helper kept the suite's redirected LOCALAPPDATA, also when the caller's environment had "
+                "WRONGGPU_TEST_REAL_DRIVER_CACHE=1 (stripped before any launcher call)",
+                stripped and seen == ["LOCALAPPDATA=" + t.env["LOCALAPPDATA"]], (stripped, seen, t.env["LOCALAPPDATA"]))
         t.check("rr-prepare: the helper copy is gone, nothing new in the game's folder (the runtime log went to the data folder)",
                 _helper_gone(os.path.join(prep_dir, "run")) and (read(glog) if os.path.exists(glog) else None) == glog_before and
                 sorted(os.listdir(b)) == game_before, (os.listdir(prep_dir) if os.path.isdir(prep_dir) else None, os.listdir(b)))
@@ -92,12 +110,13 @@ def run(t, exe, b, gpu_opt_in=False):
         print("  skipped: rr-prepare's GPU checks (a real runtime prepares RR's kernels into the user's real graphics driver "
               "cache: only with the opt-in --rr-prepare-gpu)")
         return
-    # opt-in: the real driver cache, as a player's launcher fills it
-    t.env["WRONGGPU_TEST_REAL_DRIVER_CACHE"] = "1"
+    # opt-in: the helper allowed, with the real driver cache, as a player's launcher fills it
+    t.env.update(WRONGGPU_TEST_REAL_DRIVER_CACHE="1", WRONGGPU_TEST_ALLOW_RR_HELPER="1")
     try:
         _gpu(t, exe, b, prep_dir, glog, glog_before)
     finally:
         t.env.pop("WRONGGPU_TEST_REAL_DRIVER_CACHE", None)
+        t.env.pop("WRONGGPU_TEST_ALLOW_RR_HELPER", None)
 
 
 def _gpu(t, exe, b, prep_dir, glog, glog_before):

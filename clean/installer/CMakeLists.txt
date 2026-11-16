@@ -206,6 +206,16 @@ if(MSVC)
 else()
   target_link_options(WrongGPU-Restore PRIVATE -municode -static)
 endif()
+# A WRONGGPU_TESTING build's identity, which the launcher suite checks before it runs a program (tests/launcher_build_facts.py):
+# a named resource only such a build has, and a PE checksum (MSVC /RELEASE) that a program changed after its link fails.
+if(WRONGGPU_TESTING)
+  file(GENERATE OUTPUT ${GEN}/testing_identity.rc
+       CONTENT "WRONGGPU_TESTING_BUILD RCDATA\nBEGIN\n  \"wg-testing-build 1: store libraries, access log, edition download, uninstall root\\0\"\nEND\n")
+  target_sources(WrongGPU-Restore PRIVATE ${GEN}/testing_identity.rc)
+  if(MSVC)
+    target_link_options(WrongGPU-Restore PRIVATE /RELEASE)
+  endif()
+endif()
 add_custom_command(OUTPUT ${GEN}/restorer.bin
   COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:WrongGPU-Restore> ${GEN}/restorer.bin
   DEPENDS WrongGPU-Restore COMMENT "Embedding the restorer")
@@ -218,6 +228,15 @@ add_executable(WrongGPU WIN32 src/app/main.cpp src/app/wizard.cpp src/app/cli.cp
                ${GEN}/resources.rc ${GEN}/restore.rc ${GEN}/restorer.bin ${GEN}/payload_table.h ${MANIFEST_SOURCE})
 add_dependencies(WrongGPU WrongGPU-Restore)
 if(WRONGGPU_TESTING)
+  target_sources(WrongGPU PRIVATE ${GEN}/testing_identity.rc)
+  if(MSVC)
+    target_link_options(WrongGPU PRIVATE /RELEASE)
+  endif()
+  # the launcher suite's negative controls: programs that are not testing builds (no identity), one with the hook strings;
+  # each leaves <program>.started next to itself when it starts, so the suite can prove it never started them
+  add_executable(wg-test-canary tests/canary.cpp)
+  add_executable(wg-test-canary-strings tests/canary.cpp)
+  target_compile_definitions(wg-test-canary-strings PRIVATE WG_CANARY_HOOK_STRINGS)
   add_executable(wizard-policy-tests tests/wizard_policy_tests.cpp)
   target_compile_definitions(wizard-policy-tests PRIVATE ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION} ${MODEL_L_DEFINITION} ${MODEL_K_DEFINITION})
 endif()

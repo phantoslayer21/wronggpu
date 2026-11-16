@@ -51,13 +51,98 @@ TEST_HOOKS = ("WRONGGPU_TEST_LIBRARIES", "WRONGGPU_TEST_ACCESS_LOG", "WRONGGPU_T
 _hooks_ok = {}
 
 
+IDENTITY_NAME = "WRONGGPU_TESTING_BUILD"  # the named RCDATA resource only a WRONGGPU_TESTING build links in (CMakeLists.txt)
+IDENTITY_TEXT = b"wg-testing-build 1: store libraries, access log, edition download, uninstall root"
+
+
+def pe_checksum(data, at):
+    """The PE image checksum of data (the field at offset at counted as 0): what the linker (/RELEASE) writes."""
+    import array
+    body = bytearray(data[:at]) + b"\0\0\0\0" + data[at + 4:]
+    if len(body) % 2:
+        body += b"\0"
+    total = sum(array.array("H", bytes(body)))
+    s = total % 0xFFFF
+    if s == 0 and total:
+        s = 0xFFFF
+    return (s + len(data)) & 0xFFFFFFFF
+
+
+def testing_identity(data):
+    """Why data is not a WRONGGPU_TESTING build's program, read from its structure ('' when it is one): a valid PE whose
+    checksum matches (nothing changed or appended after its link), the identity resource in its resource directory, and the
+    test hooks' strings inside its sections (not in data appended to it)."""
+    import struct
+    try:
+        if data[:2] != b"MZ":
+            return "not a program (no MZ header)"
+        pe = struct.unpack_from("<I", data, 0x3C)[0]
+        if data[pe:pe + 4] != b"PE\0\0":
+            return "not a PE file"
+        nsec, optsize = struct.unpack_from("<H", data, pe + 6)[0], struct.unpack_from("<H", data, pe + 20)[0]
+        opt = pe + 24
+        magic = struct.unpack_from("<H", data, opt)[0]
+        if magic not in (0x10B, 0x20B):
+            return "not a PE image"
+        csum_at = opt + 64
+        csum = struct.unpack_from("<I", data, csum_at)[0]
+        if csum == 0 or csum != pe_checksum(data, csum_at):
+            return "its PE checksum is missing or does not match (changed after its link, or not a testing build)"
+        dirs = opt + (96 if magic == 0x10B else 112)
+        rsrc_rva, rsrc_size = struct.unpack_from("<II", data, dirs + 2 * 8)
+        sections = []
+        for i in range(nsec):
+            s = opt + optsize + 40 * i
+            vsize, va, rsize, raw = struct.unpack_from("<IIII", data, s + 8)
+            sections.append((va, max(vsize, rsize), raw, rsize))
+        end = max((raw + rsize for _, _, raw, rsize in sections), default=0)
+        image = data[:end]
+        if [m for m in TEST_HOOKS if m.encode("utf-16-le") not in image]:
+            return "the test hooks' strings are not in its sections"
+
+        def off(rva):
+            for va, size, raw, rsize in sections:
+                if va <= rva < va + size and rva - va < rsize:
+                    return raw + rva - va
+            raise ValueError("rva %x outside the sections" % rva)
+
+        if not rsrc_rva:
+            return "no resources"
+        base = off(rsrc_rva)
+
+        def entries(at):
+            named, ids = struct.unpack_from("<HH", data, at + 12)
+            for k in range(named + ids):
+                name, target = struct.unpack_from("<II", data, at + 16 + 8 * k)
+                yield name, target
+
+        for name, target in entries(base):
+            if name != 10 or not target & 0x80000000:  # RT_RCDATA, a sub-directory
+                continue
+            for name2, target2 in entries(base + (target & 0x7FFFFFFF)):
+                if not name2 & 0x80000000:
+                    continue
+                n_at = base + (name2 & 0x7FFFFFFF)
+                length = struct.unpack_from("<H", data, n_at)[0]
+                if data[n_at + 2:n_at + 2 + 2 * length].decode("utf-16-le") != IDENTITY_NAME or not target2 & 0x80000000:
+                    continue
+                for _, leaf in entries(base + (target2 & 0x7FFFFFFF)):
+                    rva, size = struct.unpack_from("<II", data, base + (leaf & 0x7FFFFFFF))
+                    if data[off(rva):off(rva) + size].startswith(IDENTITY_TEXT):
+                        return ""
+        return "no %s resource (not a WRONGGPU_TESTING build)" % IDENTITY_NAME
+    except (struct.error, ValueError, UnicodeDecodeError) as e:
+        return "not a readable PE file (%s)" % e
+
+
 def missing_test_hooks(path):
-    """The test isolation hooks the program at path lacks (UTF-16 strings in its bytes); empty: a testing build with all."""
+    """Why the program at path is not a WRONGGPU_TESTING build with the test isolation hooks, as a list (empty: it is one)."""
     try:
         data = read(path)
-    except OSError:
-        return list(TEST_HOOKS)
-    return [m for m in TEST_HOOKS if m.encode("utf-16-le") not in data]
+    except OSError as e:
+        return ["not readable (%s)" % e]
+    why = testing_identity(data)
+    return [why] if why else []
 
 
 def require_test_hooks(path, what="the program"):
@@ -71,8 +156,8 @@ def require_test_hooks(path, what="the program"):
     if key not in _hooks_ok:
         missing = missing_test_hooks(path)
         if missing:
-            raise SystemExit("%s %s is not a WRONGGPU_TESTING build with the test isolation hooks (missing: %s): the suite never "
-                             "runs it (build it with -DWRONGGPU_TESTING=ON)" % (what, path, ", ".join(missing)))
+            raise SystemExit("%s %s is not a WRONGGPU_TESTING build with the test isolation hooks (%s): the suite never "
+                             "runs it (build it with -DWRONGGPU_TESTING=ON)" % (what, path, "; ".join(missing)))
         _hooks_ok[key] = True
 
 
@@ -87,21 +172,59 @@ def self_checks(t):
     refused before it runs (nothing started, nothing logged), the launcher under test has the hooks, and the RR-free check
     finds an RR settings file that landed in the payload's lower-case wronggpu\\ folder."""
     print("\n[self-checks] the suite's guards: only testing builds run; the RR-free check")
+    import subprocess
+    import sys
     d = os.path.join(t.work, "self-checks")
     shutil.rmtree(d, ignore_errors=True)
-    fake = os.path.join(d, "release", "WrongGPU.exe")
-    write(fake, STAND_IN_RUNTIME)  # a program without the hooks, as a release launcher is
+    os.makedirs(d)
+    t.check("preflight: the launcher under test is a WRONGGPU_TESTING build (its identity resource, a matching PE checksum, the hooks)",
+            not missing_test_hooks(t.exe), missing_test_hooks(t.exe))
+    # programs that are not testing builds, each leaving <program>.started when it starts (tests/canary.cpp; built with the
+    # launcher in a testing build): one plain, one carrying the hooks' strings; first run directly, to show they do start
     size = lambda: os.path.getsize(t.log) if os.path.isfile(t.log) else 0
-    before, why = size(), ""
-    try:
-        t.run("version", exe=fake)
-    except SystemExit as e:
-        why = str(e)
-    t.check("preflight: a program without the test isolation hooks is refused before it runs (a release launcher never reaches the "
-            "real download page, the PC's stores or the real uninstall registry root)",
-            "not a WRONGGPU_TESTING build" in why and size() == before and not os.path.exists(t.out), why)
-    t.check("preflight: the launcher under test is a WRONGGPU_TESTING build with every isolation hook", not missing_test_hooks(t.exe),
-            missing_test_hooks(t.exe))
+    for name in ("wg-test-canary.exe", "wg-test-canary-strings.exe"):
+        built = os.path.join(os.path.dirname(t.exe), name)
+        if not os.path.isfile(built):
+            t.check("negative control %s: built next to the launcher (CMake target %s)" % (name, name[:-4]), False, built)
+            continue
+        canary = os.path.join(d, name)
+        shutil.copyfile(built, canary)
+        started = canary + ".started"
+        subprocess.run([canary], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        runs = os.path.isfile(started)
+        if runs:
+            os.remove(started)
+        before, why = size(), ""
+        try:
+            t.run("version", exe=canary)
+        except SystemExit as e:
+            why = str(e)
+        entry = []
+        suite = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run_launcher_tests.py")
+        for args in (["--launcher", canary], ["--launcher", t.exe, "--no-direct-launcher", canary]):  # the suite's entry points
+            p = subprocess.run([sys.executable, suite] + args + ["--work", os.path.join(d, "entry")], env=dict(os.environ),
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
+            entry.append(p.returncode != 0 and b"not a WRONGGPU_TESTING build" in p.stderr + p.stdout)
+        t.check("negative control %s: it starts when run directly; the suite never starts it (a launcher call, --launcher, "
+                "--no-direct-launcher): refused before it runs, nothing logged" % name,
+                runs and "not a WRONGGPU_TESTING build" in why and entry == [True, True] and not os.path.exists(started) and size() == before,
+                (runs, why, entry))
+    # the real launcher changed after its link: one byte, or data appended (the hooks' strings and the identity text)
+    data = read(t.exe)
+    mid = len(data) // 2
+    mixed = {"one byte changed": data[:mid] + bytes([data[mid] ^ 0xFF]) + data[mid + 1:],
+             "data appended": data + b"".join(m.encode("utf-16-le") for m in TEST_HOOKS) + IDENTITY_TEXT}
+    strings = os.path.join(os.path.dirname(t.exe), "wg-test-canary-strings.exe")
+    if os.path.isfile(strings):  # the hooks' strings and a valid checksum, but no identity resource: still not a testing build
+        import struct
+        c = bytearray(read(strings))
+        at = struct.unpack_from("<I", c, 0x3C)[0] + 24 + 64
+        struct.pack_into("<I", c, at, pe_checksum(bytes(c), at))
+        mixed["the hooks' strings and a valid checksum, no identity resource"] = bytes(c)
+    refused = {k: bool(testing_identity(v)) for k, v in mixed.items()}
+    t.check("preflight: a launcher changed after its link (a byte, or the hooks' strings and the identity appended), or a program "
+            "with the strings and a valid checksum but no identity resource, is refused",
+            all(refused.values()), refused)
     b = os.path.join(d, "Game", "bin")
     write(os.path.join(b, "wronggpu", "kernels", "enc.hsaco"), b"kernel")
     ok_kernels = rr_free(b, "file wronggpu\\kernels\\enc.hsaco")
