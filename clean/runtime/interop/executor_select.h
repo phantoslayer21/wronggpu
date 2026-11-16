@@ -241,6 +241,17 @@ inline std::string drop_hip_only_filter(const std::string& options, std::string*
 // no output texture, a render size outside the configured maximum, an output texture without unordered access, ...).
 inline bool frame_refused(const std::string& err) { return err.rfind("frame not taken", 0) == 0; }
 
+// Model L hybrid: the frame after one whose bottleneck wait timed out on the GPU (runtime.cpp kBneckTimeoutRefusal;
+// hyb_bneck.hlsl). The documented result: "refused, keep previous output". The timed-out frame and the frames queued
+// after it were skipped on the GPU, their output pass included (the device's frame guard predicates the network and the
+// executor's output pass alike): the game's output keeps what it held. This frame records nothing that writes (only the
+// game textures' state changes, restored), the backend writes no fallback into the output, logs exactly one line,
+// answers WG_OK and keeps the context (never failed_); the next frame is a reset (the runtime starts over, and the
+// backend asks for the reset too).
+inline bool frame_timeout_refused(const std::string& err) {
+  return err.rfind("frame refused (bottleneck wait timeout): ", 0) == 0;
+}
+
 inline std::string k_refusal_line(uint64_t frame, const std::string& why) {
   return "frame " + std::to_string(frame) + ": model K: the D3D12 executor does not take this frame (" + why +
          "); the frame goes to the front end's own upscaler (AMD FSR, else its stand-in), never to the HIP executor";

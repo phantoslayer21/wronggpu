@@ -1313,7 +1313,9 @@ class ReleaseDefault(unittest.TestCase):
                        manifest=full_ports(), **kw)
         base = l_run()
         for env in ({"WG_AB_FUSION": "none", "WG_AB_BLOCK": "1"}, {"WG_D3D12_NOBAR": "swin_bneck6_hyb"},
-                    {"WG_D3D12_KSUB": "swin_bneck6_hyb=swin_block_c128_hyb"}):
+                    {"WG_D3D12_KSUB": "swin_bneck6_hyb=swin_block_c128_hyb"},
+                    # an invalid value is not even read: it cannot refuse the release hybrid create (review P2)
+                    {"WG_AB_FUSION": "no-such-fusion", "WG_AB_BLOCK": "x"}, {"WG_AB_KSUB": "=", "WG_AB_NOBAR": ","}):
             with self.subTest(env=env):
                 got = l_run(env=env)
                 self.assertTrue(any(x.startswith("kernels ") and " diag_hooks=ignored" in x for x in got))

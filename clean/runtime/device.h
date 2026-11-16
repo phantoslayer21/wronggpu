@@ -113,7 +113,10 @@ class Device {
   // nonzero, read as they are at this point of the stream (a copy into a predicate buffer; D3D12 predication). Called
   // again, it reads the word again. guard_end(): the guard is lifted (nothing after it is skipped) and the 16 bytes at
   // `word` are copied into host-visible memory; guard_read(w) gives the newest copy the GPU has written (zeros before
-  // the first), without waiting. A device without the guard returns false (has_guard() false).
+  // the first), without waiting. Recording into a caller's list (native D3D12 begin_external), the predicate stays on
+  // after guard_end until end_external, so the caller's own pass after the network (e.g. a copy into the game's output)
+  // is skipped with the frame; the caller's commands after end_external never are. A device without the guard returns
+  // false (has_guard() false).
   virtual bool has_guard() const { return false; }
   virtual bool guard_begin(DevPtr word) {
     (void)word;

@@ -1136,6 +1136,14 @@ class Context {
       }
       return WG_ERROR_UNSUPPORTED;  // one frame's answer: the context stays usable (failed_ not set)
     }
+    // Model L hybrid, the frame after a bottleneck wait timeout: "refused, keep previous output" (executor_select.h
+    // frame_timeout_refused). One line, no fallback written into the game's output, WG_OK, the context kept; the next
+    // frame starts over.
+    if (!ok && frame_timeout_refused(err)) {
+      say(WG_LOG_WARN, "frame " + std::to_string(v) + ": " + err + "; the game keeps its previous output for this frame");
+      force_reset_ = true;
+      return WG_OK;
+    }
     note_path(&input_path_, "input: read directly by the network's D3D12 kernels (executor dx12, no input pass)");
     if ((flags_ & WG_CREATE_MOTION_OUTPUT_RES) && model_k_)
       note_path(&motion_path_, "motion: output resolution, the texel under each render pixel's centre picked by the "

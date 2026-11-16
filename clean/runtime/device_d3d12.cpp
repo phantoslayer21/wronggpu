@@ -469,7 +469,7 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
   }
   bool end_external(std::string* error) override {
     if (!external_ || inside_pass_) return extension_result(fail("native D3D12 end_external: not recording"), error);
-    const bool guard_lifted = guard_end();   // never leave the caller's list predicated
+    const bool guard_lifted = guard_lift();   // never leave the caller's list predicated
     need_uav_barrier_ = true; uav_barrier();  // the caller's passes after ours read our results
     ++ext_recorded_;
     bool ok = true;
@@ -668,7 +668,8 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     if (inside_pass_) return fail("native D3D12 guard_begin: not from a record_pass callback");
     if ((word & 7u) || !range(word, 16, "guard word")) return fail("native D3D12 guard_begin: invalid guard word");
     if (!guard_buffers() || !open_list()) return false;
-    if (guard_on_) cl()->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+    if (guard_on_ || guard_held_) cl()->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+    guard_held_ = false;
     // the word as the stream has it here: earlier UAV writes complete (the arena transition), then 8 bytes copied
     need_uav_barrier_ = true; uav_barrier();
     transition_arena(D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -683,15 +684,32 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     if (!guard_on_) return true;
     guard_on_ = false;
     if (!open_list()) return false;
-    cl()->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
-    guard_transition(D3D12_RESOURCE_STATE_COMMON);
+    cl()->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);   // the copy below is never skipped
+    const bool hold = external_ && !guard_ending_;
+    if (!hold) guard_transition(D3D12_RESOURCE_STATE_COMMON);
     need_uav_barrier_ = true; uav_barrier();
     transition_arena(D3D12_RESOURCE_STATE_COPY_SOURCE);
     cl()->CopyBufferRegion(guard_copy_.get(), 0, arena_.get(), guard_word_, 16);
     // the arena back in COMMON (explicitly): what begin_external assumes for a next frame recorded into the same list
     transition(arena_.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
     arena_state_ = D3D12_RESOURCE_STATE_COMMON;
+    if (hold) {   // caller-list frame: predicated again until end_external (the executor's output pass)
+      cl()->SetPredication(guard_pred_.get(), 0, D3D12_PREDICATION_OP_NOT_EQUAL_ZERO);
+      guard_held_ = true;
+    }
     return true;
+  }
+  // end_external: the guard ended (if the runtime did not) and the held predicate lifted
+  bool guard_lift() {
+    guard_ending_ = true;
+    const bool ok = guard_end();
+    guard_ending_ = false;
+    if (guard_held_) {
+      cl()->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+      guard_transition(D3D12_RESOURCE_STATE_COMMON);
+      guard_held_ = false;
+    }
+    return ok;
   }
   bool guard_read(uint32_t w[4]) override {
     for (int i = 0; i < 4; ++i) w[i] = guard_map_ ? guard_map_[i] : 0u;
@@ -1821,6 +1839,9 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
   volatile uint32_t* guard_map_ = nullptr;
   D3D12_RESOURCE_STATES guard_state_ = D3D12_RESOURCE_STATE_COMMON;
   bool guard_on_ = false;
+  // a caller-list recording keeps the predicate after guard_end (the executor's output pass after the network, e.g. a
+  // proxy copy into the game's output, is skipped with the frame) until end_external lifts it
+  bool guard_held_ = false, guard_ending_ = false;
   DevPtr guard_word_ = 0;
   NativeCom<ID3D12QueryHeap> query_heap_;
   PFN_D3D12_SERIALIZE_ROOT_SIGNATURE serialize_ = nullptr;

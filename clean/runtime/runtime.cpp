@@ -232,6 +232,10 @@ int json_int(const wgc::Json* j, int def) {
 
 }  // namespace
 
+// The bottleneck wait timeout's refusal (hyb_bneck.hlsl, frame_body): the message of the refused frame starts with this
+// text; the interop path recognises it (interop/executor_select.h frame_timeout_refused) as one recoverable frame.
+constexpr const char* kBneckTimeoutRefusal = "frame refused (bottleneck wait timeout): ";
+
 struct Runtime {
   WgRtConfig cfg = {};
   std::string build_dir, err;
@@ -624,23 +628,27 @@ struct Runtime {
       if (lf == "m")
         return fail("WG_L_FORM=m refused: the M-form is not offered for Model L (default hybrid_full; q7 = reference)");
 #ifndef WG_DEV_DIAGNOSTICS
-      // release builds: the check routes (the deliberately altered mutant, the HIP twins) are not offered
-      if (lf == "hybrid_mutant" || lf == "hybrid_twin")
-        return fail("WG_L_FORM=" + lf + " refused: a check route of developer builds only (unset = hybrid_full)");
-#endif
-      if (!lf.empty() && lf != "q7" && lf != "hybrid" && lf != "hybrid_mutant" && lf != "hybrid_twin")
+      // release builds know no check route (the deliberately altered mutant, the HIP twins): not even their names
+      const bool l_twin = false, l_mut = false;
+      if (!lf.empty() && lf != "q7" && lf != "hybrid")
+        return fail("WG_L_FORM=" + lf + " refused: not a form of this build (unset = hybrid_full, q7 = reference; the "
+                    "check routes exist in developer builds only)");
+#else
+      const bool l_twin = lf == "hybrid_twin", l_mut = lf == "hybrid_mutant";
+      if (!lf.empty() && lf != "q7" && lf != "hybrid" && !l_mut && !l_twin)
         return fail("WG_L_FORM: unknown form \"" + lf + "\" (hybrid = the default, q7 = reference)");
       // hybrid_twin (HIP backend, check only): the fast hybrid route of native D3D12 on the HIP twins of its *_hyb
       // ports (l_swin_hyb.co, swin_hyb.co): the network-level byte leg (twins vs port)
-      if (lf == "hybrid_twin" && c.backend != 0) return fail("WG_L_FORM=hybrid_twin runs on the HIP backend only");
-      const bool hyb = lf.empty() || lf == "hybrid" || lf == "hybrid_twin";
+      if (l_twin && c.backend != 0) return fail("WG_L_FORM=hybrid_twin runs on the HIP backend only");
+      if (l_mut && c.backend != 0) return fail("WG_L_FORM=hybrid_mutant: the HIP backend only");
+#endif
+      const bool hyb = lf.empty() || lf == "hybrid" || l_twin;
       l_q7 = true;
-      l_form_name = hyb ? std::string("hybrid") : (lf == "hybrid_mutant" ? lf : std::string());
+      l_form_name = hyb ? std::string("hybrid") : (l_mut ? lf : std::string());
       // the hybrid refusals name the form as resolved: nothing set is the release default, not a WG_L_FORM value
       l_form_label = lf.empty() ? std::string("Model L hybrid (default)") : "WG_L_FORM=" + lf;
-      l_hyb_d3d12 = (hyb && c.backend == 3) || lf == "hybrid_twin";   // the fast hybrid route (twins: on HIP)
+      l_hyb_d3d12 = (hyb && c.backend == 3) || l_twin;   // the fast hybrid route (twins: on HIP)
       if (l_hyb_d3d12) l_q7 = false;  // the fast kernels' M-form layout (the HIP reference route keeps l_q7__hyb)
-      if (lf == "hybrid_mutant" && c.backend != 0) return fail("WG_L_FORM=hybrid_mutant: the HIP backend only");
       const char* lpost = std::getenv("WG_L_POST");
       const std::string lp = lpost ? lpost : "";
       if (!lp.empty() && lp != "c12") return fail("WG_L_POST: unknown value \"" + lp + "\" (c12)");
@@ -654,10 +662,14 @@ struct Runtime {
       const char* mform = std::getenv("WG_M_FORM");
       const std::string mf = mform ? mform : "";
 #ifndef WG_DEV_DIAGNOSTICS
-      if (mf == "hybrid_mutant")
-        return fail("WG_M_FORM=hybrid_mutant refused: a check route of developer builds only");
-#endif
+      // release builds know no check route (not even its name)
+      if (!mf.empty() && mf != "q7" && mf != "hybrid")
+        return fail("WG_M_FORM=" + mf + " refused: not a form of this build (the check routes exist in developer "
+                    "builds only)");
+      m_q7 = mf == "q7" || mf == "hybrid";
+#else
       m_q7 = mf == "q7" || mf == "hybrid" || mf == "hybrid_mutant";
+#endif
       m_form_name = m_q7 ? mf : "";
       if (!mf.empty() && !m_q7) return fail("WG_M_FORM: unknown form \"" + mf + "\" (q7, hybrid)");
       const char* mpost = std::getenv("WG_M_POST");
@@ -973,11 +985,7 @@ struct Runtime {
         if (!dev->has_guard())
           return fail(l_form_label + " on native D3D12: the device has no frame guard (the bottleneck's wait timeout)");
 #ifdef WG_DEV_DIAGNOSTICS
-        if (const char* e = std::getenv("WG_DEV_BNECK_ABORT")) {
-          if (external_io || native_direct_io)
-            return fail("WG_DEV_BNECK_ABORT: a check of the runtime's own frames (not interop / direct I/O)");
-          dev_bneck_abort = std::atoi(e);
-        }
+        if (const char* e = std::getenv("WG_DEV_BNECK_ABORT")) dev_bneck_abort = std::atoi(e);
 #endif
         const size_t FH = ceil32(max_rh), FW = ceil32(max_rw), H8 = FH / 8, W8 = FW / 8;
         const size_t nsync = 16 + 7 * ((H8 + 6) / 4);
@@ -1111,7 +1119,13 @@ struct Runtime {
       const char* abn = std::getenv("WG_AB_NOBAR");
       const char* abb = std::getenv("WG_AB_BLOCK");
       const char* abk = std::getenv("WG_AB_KSUB");
-      if ((abf && *abf) || (abn && *abn) || (abk && *abk)) {
+#ifndef WG_DEV_DIAGNOSTICS
+      // release builds: the hybrid route never reads the A/B values (an invalid one cannot refuse its create)
+      const bool ab_read = !l_hyb_d3d12;
+#else
+      const bool ab_read = true;
+#endif
+      if (ab_read && ((abf && *abf) || (abn && *abn) || (abk && *abk))) {
         ab_block = abb && *abb ? std::max(1, std::atoi(abb)) : 300;
         if (abf && *abf && !parse_fusion(abf, &fz_set[1])) return false;
         nobar_ab = split_list(abn ? abn : "");
@@ -1119,7 +1133,8 @@ struct Runtime {
       }
 #ifndef WG_DEV_DIAGNOSTICS
       if (l_hyb_d3d12) {   // release builds: the hybrid route is never switched or altered by the diagnostic hooks
-        const bool any = ab_block || !nobar_list.empty() || !nobar_ab.empty() || !ksub_list.empty() || !ksub_ab.empty();
+        const bool any = (abf && *abf) || (abn && *abn) || (abk && *abk) || (abb && *abb) || !nobar_list.empty() ||
+                         !ksub_list.empty();
         ab_block = 0;
         fz_set[1] = fz_set[0];
         nobar_list.clear();
@@ -1749,10 +1764,15 @@ struct Runtime {
     if (native_direct_io) kernels_text += " native_io=direct_textures";
     // Model L: its encoder and decoder (enc0= / dec0= above name Model M's, not loaded for Model L)
     // (l_post: Model L's own reconstruction, HDR or LDR, on every backend)
+#ifdef WG_DEV_DIAGNOSTICS
+    const char* l_q7_tag = l_form_name == "hybrid" ? "__hyb" : "__hybmut";
+#else
+    const char* l_q7_tag = "__hyb";   // (a release build has no other hybrid form)
+#endif
     if (model_l)
       kernels_text += std::string(" model=L l_kernels=l_enc_values.co,l_ops.co,l_swin.co,l_post.co") +
                       (l_q7 ? (l_form_name.empty() ? std::string(",l_q7.co,l_q7w.co l_form=q7")
-                                                   : ",l_q7" + std::string(l_form_name == "hybrid" ? "__hyb" : "__hybmut") +
+                                                   : ",l_q7" + std::string(l_q7_tag) +
                                                          ".co,l_q7w__hyb.co l_form=" + l_form_name)
                             : std::string(l_hyb_d3d12 ? " l_form=hybrid" : " l_form=m")) +
                       (l_post_c12 ? " l_post_c12=on" : "") + " l_post=" +
@@ -2428,10 +2448,13 @@ struct Runtime {
       if (g[3] != bneck_seen) {
         bneck_seen = g[3];
         bneck_clear = true;
-        frames = 0;
-        return fail(l_form_label + ": the bottleneck's wait timed out on the GPU (swin_bneck6_hyb, " +
-                    std::to_string(g[3]) + " in all): that frame and the frames queued after it were skipped (no output, "
-                    "no history); this frame is refused, the next one starts over");
+        // the next frame starts over as a newly created runtime's first frame (reset = 2 above: every host state a
+        // frame leaves for the next one), so nothing of the skipped frames reaches it
+        frames = n = f = last_rw = last_rh = 0;
+        jprev[0] = jprev[1] = 0.0f;
+        return fail(std::string(kBneckTimeoutRefusal) + l_form_label + ": the bottleneck's wait timed out on the GPU "
+                    "(swin_bneck6_hyb, " + std::to_string(g[3]) + " in all): that frame and the frames queued after it "
+                    "were skipped (no output, no history); this frame is refused, the next one starts over");
       }
       if (bneck_clear && !(dev->memset(bneck_sync + 48, 0, 4) || dfail())) return false;
       bneck_clear = false;
@@ -2725,9 +2748,9 @@ struct Runtime {
       x = bout[5];
 #ifdef WG_DEV_DIAGNOSTICS
       if (dev_bneck_abort >= 0 && dev_bneck_abort == frames) {   // the check's forced timeout: the words it would write
-        dev_bneck_abort = -1;
-        const uint32_t wv[4] = {1u, 0u, 0u, bneck_seen + 1u};
-        if (!dev->upload(bneck_sync + 48, wv, sizeof wv)) return dfail();
+        dev_bneck_abort = -1;   // (fills: launches, so they record into a caller's list as well as into our own)
+        const int b = bneck_seen == 0x5A5A5A5Au ? 0x5B : 0x5A;   // a count other than the one last seen
+        if (!(dev->memset(bneck_sync + 48, 1, 4) && dev->memset(bneck_sync + 60, b, 4))) return dfail();
       }
 #endif
       if (!dev->guard_begin(bneck_sync + 48)) return dfail();   // this frame's bottleneck may have refused it

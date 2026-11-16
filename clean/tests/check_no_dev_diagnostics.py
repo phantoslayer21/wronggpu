@@ -42,19 +42,22 @@ DEV_ONLY_STRINGS = (
     b"/l_q7__hybmut.co",
     b"/l_q7w__hybmut.co",
     b"(WG_L_FORM=hybrid_twin: l_swin_hyb.co, swin_hyb.co)", b"WG_DEV_BNECK_ABORT",
+    # the check routes' selector values (WG_L_FORM / WG_M_FORM): a release build does not know their names
+    b"hybrid_mutant", b"hybrid_twin", b"__hybmut",
 )
 
 # Check-only code objects (mutants, probes, the HIP twins of the D3D12 hybrid ports, the fused-square scan's mutants): never
 # in a release payload, a package or a runtime library's built-in files.
 # (The HIP self-test's probe.co and the D3D12 device's native_driver_probe are not check objects.)
-PAYLOAD_CHECK_NAMES = re.compile(r"(mut\b|mut\.co|_mut\.dxil|_tmo\.dxil|_scanmut|_probe(__mut)?\.co|(^|[\\/])l_swin_hyb\.co|(^|[\\/])swin_hyb\.co)",
+PAYLOAD_CHECK_NAMES = re.compile(r"(mut\b|mut\.co|_mut\.dxil|_mutdump\.dxil|_dump\.dxil|_tmo\.dxil|_scanmut|_probe(__mut)?\.co|l_hyb_probe|(^|[\\/]|gfx\w+\.)l?_?swin_hyb\.co)",
                                  re.I)
 
 
 def check_object_names_in(data):
     """Built-in check-object names in a runtime library (embedded files are listed by name)."""
     return [t.decode() for t in (b"l_q7__hybmut.co", b"l_q7w__hybmut.co", b"l_post_c12_probe", b"l_swin_hyb.co",
-                                 b"swin_hyb.co", b"_scanmut") if t in data]
+                                 b"swin_hyb.co", b"_scanmut", b"_mut.dxil", b"_mutdump.dxil", b"_dump.dxil",
+                                 b"_tmo.dxil", b"l_hyb_probe", b'_hyb_mut"', b'_hyb_tmo"', b'_hyb_dump"') if t in data]
 
 
 def dev_only_strings_in(data):

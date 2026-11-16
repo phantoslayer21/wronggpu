@@ -23,7 +23,8 @@ contracts an FP16 product into an add, or folds the FP16 rounding before an FP8 
    by v_cvt_f32_f16 (the exact widening after the RN16), or by the saturating pack's steps on such values only
    (v_mov_b32, v_cndmask_b32, v_max / v_min / v_max3 / v_min3 / v_maxmin / v_minmax / v_med3 (_num)_f32 with constants:
    the ReLU and the clamps; the NaN quieting v_or_b32 with 0x400000), on every path to the conversion (a dataflow over
-   the basic blocks). Anything else
+   the basic blocks). A constant is a literal, or a scalar register that s_mov_b32 / s_movk_i32 set to a literal on
+   every path (any other write makes it unknown); an unknown scalar register is not an FP16 value. Anything else
    (a WMMA result, an FMA, a load, an instruction the rule does not know) fails: a driver that drops the RN16 or folds
    it into the FP8 conversion leaves the float32 value as the source.
 
@@ -51,6 +52,12 @@ KEEP = {"v_mov_b32", "v_cndmask_b32", "v_max_num_f32", "v_min_num_f32", "v_maxmi
 QUIET_NAN = "0x400000"
 NO_DEST = re.compile(r"^(s_|v_cmp_|v_cmpx_|v_readlane|v_readfirstlane|.*_store|ds_write|exp\b|v_nop)")
 VREG = re.compile(r"^v(\d+)(?:\.(l|h))?$")
+SREG = re.compile(r"^s(\d+)$")
+SRANGE = re.compile(r"^s\[(\d+):(\d+)\]$")
+LITERAL = re.compile(r"^-?(0x[0-9a-fA-F]+|\d+(\.\d+)?(e[-+]?\d+)?)$")
+# scalar instructions whose first operand is read, not written
+S_NO_DEST = re.compile(r"^(s_cmp|s_bitcmp|s_cbranch|s_branch|s_wait|s_delay_alu|s_nop|s_barrier|s_endpgm|s_sendmsg|"
+                       r"s_setprio|s_sleep|s_clause|s_set_inst_prefetch|s_trap|s_setpc|.*_store)")
 VRANGE = re.compile(r"^v\[(\d+):(\d+)\]$")
 MOD = re.compile(r"\b[a-z_]+:(?:\[[^\]]*\]|[^\s,]+)")
 LABEL = re.compile(r"^\s*([A-Za-z_][\w.$]*):\s*(?://.*)?$")
@@ -284,14 +291,49 @@ def fused_squares(text):
 ALL = None   # the meet's top: every register an FP16 value (blocks not reached yet)
 
 
+def _sdest(ins):
+    """Scalar registers an instruction writes ("s<n>" names): the first operand of a scalar instruction (but compares,
+    branches, waits, stores) or of a vector instruction that writes a scalar (compares, readlane)."""
+    if not ins.ops or (ins.op.startswith("s_") and S_NO_DEST.match(ins.op)):
+        return []
+    if not (ins.op.startswith("s_") or ins.op.startswith(("v_cmp_", "v_readlane", "v_readfirstlane"))):
+        return []
+    t = _reg(ins.ops[0])
+    m = SREG.match(t)
+    if m:
+        return ["s" + m.group(1)]
+    m = SRANGE.match(t)
+    return ["s%d" % i for i in range(int(m.group(1)), int(m.group(2)) + 1)] if m else []
+
+
+def _value_ok(tok, ex):
+    """A source that is an FP16 value: a VGPR the dataflow says is one, a literal, or a constant scalar register."""
+    t = _reg(tok)
+    rs = _vregs(t)
+    if rs:
+        return all(r in ex for r in rs)
+    if LITERAL.match(t):
+        return True
+    m = SREG.match(t)
+    return bool(m) and ("s" + m.group(1)) in ex
+
+
 def _exact_transfer(ex, ins, bad):
     srcs = ins.ops[1:]
     if bad is not None and ins.op in FP8_PACK:
         for s in srcs[:2]:
-            rs = _vregs(s)
-            if rs and not all(r in ex for r in rs):
+            if not _value_ok(s, ex):
                 bad.append((ins.line, ins.text))
                 break
+    sd = _sdest(ins)
+    if sd:   # scalar provenance: a constant only from a literal (or a constant) moved in on every path
+        ex = set(ex)
+        const = ins.op in ("s_mov_b32", "s_movk_i32") and len(sd) == 1 and len(srcs) == 1 and _value_ok(srcs[0], ex) \
+            and not _vregs(srcs[0])
+        ex.difference_update(sd)
+        if const:
+            ex.add(sd[0])
+        ex = frozenset(ex)
     dregs = _dest(ins)
     if not dregs:
         return ex
@@ -299,7 +341,8 @@ def _exact_transfer(ex, ins, bad):
     if ins.op in WIDEN:
         keep = True
     elif ins.op in KEEP:
-        keep = all(r in ex for r in vsrc) and not ("v_cndmask" in ins.op and ins.mods and "neg" in ins.mods)
+        vals = srcs[:2] if ins.op == "v_cndmask_b32" else srcs   # (cndmask's third operand: the lane mask)
+        keep = all(_value_ok(s, ex) for s in vals) and not ("v_cndmask" in ins.op and ins.mods and "neg" in ins.mods)
     elif ins.op == "v_or_b32":
         lits = [_reg(s) for s in srcs if not _vregs(s)]
         keep = len(vsrc) == 1 and lits == [QUIET_NAN] and vsrc[0] in ex

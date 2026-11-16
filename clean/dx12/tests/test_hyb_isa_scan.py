@@ -67,7 +67,8 @@ class Fp8Sources(unittest.TestCase):
     def test_fp16_sources(self):
         self.assertEqual(self.bad(*self.WIDEN, "v_cvt_pk_fp8_f32 v5.l, v3, v4"), 0)
         # the saturating pack's steps on FP16 values: clamp, NaN quieting, select
-        self.assertEqual(self.bad(*self.WIDEN, "v_maxmin_num_f32 v6, s6, v3, 0x43e00000", "v_or_b32_e32 v7, 0x400000, v3",
+        self.assertEqual(self.bad(*self.WIDEN, "s_mov_b32 s6, 0xc3e00000", "v_maxmin_num_f32 v6, s6, v3, 0x43e00000",
+                                  "v_or_b32_e32 v7, 0x400000, v3",
                                   "v_cndmask_b32_e64 v8, v6, v7, s4", "v_max3_num_f32 v9, 0, v4, 0xc3e00000",
                                   "v_cvt_pk_fp8_f32 v5.h, v8, v9 op_sel:[0,0,1]"), 0)
         self.assertEqual(self.bad("v_mov_b32_e32 v3, 0", "v_cvt_pk_fp8_f32 v5.l, v3, 0"), 0)   # constants
@@ -86,6 +87,30 @@ class Fp8Sources(unittest.TestCase):
         self.assertEqual(self.bad(*self.WIDEN, "v_permlanex16_b32 v6, v3, s0, s1", "v_cvt_pk_fp8_f32 v5.l, v6, v4"), 1)
         # loads are not FP16 values
         self.assertEqual(self.bad("global_load_b32 v3, v1, s[0:1]", "v_cvt_pk_fp8_f32 v5.l, v3, v3"), 1)
+
+    def test_scalar_sources(self):
+        """The negative control the re-check asked for: a scalar register is a constant only when a literal was moved
+        into it on every path; an unknown one (a load, an arithmetic result, a kernel argument) is not an FP16 value."""
+        self.assertEqual(self.bad("v_mov_b32_e32 v3, s0", "v_cvt_pk_fp8_f32 v5.l, v3, v3"), 1)
+        self.assertEqual(self.bad("s_load_b32 s0, s[2:3], 0x0", "v_mov_b32_e32 v3, s0", "v_cvt_pk_fp8_f32 v5.l, v3, v3"), 1)
+        self.assertEqual(self.bad(*self.WIDEN, "s_add_f32 s6, s7, s8", "v_maxmin_num_f32 v6, s6, v3, 0x43e00000",
+                                  "v_cvt_pk_fp8_f32 v5.l, v6, v4"), 1)
+        self.assertEqual(self.bad("v_cvt_pk_fp8_f32 v5.l, s0, s0"), 1)
+        # a literal moved in (also through a second scalar), then overwritten
+        self.assertEqual(self.bad("s_mov_b32 s0, 0x3f800000", "v_mov_b32_e32 v3, s0", "v_cvt_pk_fp8_f32 v5.l, v3, v3"), 0)
+        self.assertEqual(self.bad(*self.WIDEN, "s_mov_b32 s6, 0xc3e00000", "s_mov_b32 s7, s6",
+                                  "v_maxmin_num_f32 v6, s7, v3, 0x43e00000", "v_cvt_pk_fp8_f32 v5.l, v6, v4"), 0)
+        self.assertEqual(self.bad("s_mov_b32 s0, 0x3f800000", "s_mul_i32 s0, s0, s1", "v_mov_b32_e32 v3, s0",
+                                  "v_cvt_pk_fp8_f32 v5.l, v3, v3"), 1)
+        # a compare reads its scalars (no write), a vector compare writes its scalar destination
+        self.assertEqual(self.bad("s_mov_b32 s0, 0x3f800000", "s_cmp_eq_u32 s0, 0", "v_mov_b32_e32 v3, s0",
+                                  "v_cvt_pk_fp8_f32 v5.l, v3, v3"), 0)
+        self.assertEqual(self.bad("s_mov_b32 s0, 0x3f800000", "v_cmp_eq_f32_e64 s0, v1, v2", "v_mov_b32_e32 v3, s0",
+                                  "v_cvt_pk_fp8_f32 v5.l, v3, v3"), 1)
+        # on one path only
+        one = isa("s_cbranch_scc0 L1", "s_mov_b32 s0, 0x3f800000", "L1:", "v_mov_b32_e32 v3, s0",
+                  "v_cvt_pk_fp8_f32 v5.l, v3, v3")
+        self.assertEqual(len(S.fp8_sources_not_fp16(one)), 1)
 
     def test_paths(self):
         both = isa("s_cbranch_scc0 L1", *self.WIDEN, "s_branch L2", "L1:", *self.WIDEN, "L2:",

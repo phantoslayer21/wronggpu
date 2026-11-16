@@ -41,7 +41,8 @@ copies of a register included); rule 2, both sources of every FP8 conversion are
 into the FP8 pack). A finding fails the build. No skip switch (WG_DX12_VGPR_CHECK=0 does not skip them; RGA is required
 when hybrid kernels are built). Negative controls, fail-closed: every model hybrid kernel K built (probe=0) needs its
 mutant K_scanmut (the same kernel without the contraction barrier and without the RN16 before the FP8 pack,
-HYB_SCAN_MUTANT=1, probe=1), built beside every build of hybrid kernels into <out>/dx12/scanmut (never in the manifest);
+HYB_SCAN_MUTANT=1, probe=1), built beside every build of hybrid kernels into a temporary folder of their own (never
+into <out>, its manifest or a payload; removed after the scan);
 the build fails when it is not declared, gives no ISA, or PASSES rule 2, or rule 1 (unless K has no norm tree:
 HYB_NO_NORM).
 """
@@ -496,14 +497,16 @@ def main(argv=None):
                 raise SystemExit(f"kernel {d['name']} ({d['co']}): DXIL file {os.path.basename(out)} already used "
                                  "(a second port of a name needs file=<stem>)")
             jobs.append((src, d, out, k_source))
-    # the fused-square scan's mutants beside every build of hybrid kernels (outside the manifest, <out>/dx12/scanmut)
+    # the ISA rules' mutants beside every build of hybrid kernels: into a temporary folder of their own, never into the
+    # build's output (a release folder, its manifest and a payload hold no check object); removed after the scan
+    scan_dir = None
     if any(hyb_scanned(j[1]["name"]) for j in jobs):
         have = {j[1]["name"] for j in jobs}
         for src, k_source in source_files(False):
             for d in kernel_decls(src):
                 if scan_mutant(d["name"]) and d["name"] not in have:
-                    os.makedirs(os.path.join(dst, "scanmut"), exist_ok=True)
-                    jobs.append((src, d, os.path.join(dst, "scanmut", output_name(d["name"])), k_source))
+                    scan_dir = scan_dir or tempfile.mkdtemp(prefix="wg_scanmut_")
+                    jobs.append((src, d, os.path.join(scan_dir, output_name(d["name"])), k_source))
 
     def build_one(job):
         src, d, out, k_source = job
@@ -525,6 +528,8 @@ def main(argv=None):
             r["gscale"] = d["gscale"]
         if info.get("ext_doubles"):
             r["fp64"] = "ext"
+        if d["probe"]:
+            r["probe"] = True   # a check kernel (built only when --only names it): clean/runner/build.py never embeds it
         return r
 
     # Every kernel is an independent chain of child processes (dxc -> dxil_asm -> dxv [-> rga]) with its own temporary
@@ -550,7 +555,11 @@ def main(argv=None):
     names = {n for n, _ in kernels} | {n for n, _ in built}
     if only and not (only <= names):
         raise SystemExit(f"not declared in clean/dx12/kernels or clean/k/dx12/kernels: {sorted(only - names)}")
-    vgpr_check(built, {d["name"] for _, d, _, _ in jobs if hyb_scanned(d["name"]) and not d["probe"]})
+    try:
+        vgpr_check(built, {d["name"] for _, d, _, _ in jobs if hyb_scanned(d["name"]) and not d["probe"]})
+    finally:
+        if scan_dir:
+            shutil.rmtree(scan_dir, ignore_errors=True)
     with open(man_path, "w") as f:
         json.dump({"format": FORMAT, "dxc": os.path.basename(os.path.dirname(os.path.dirname(DXC_DIR))),
                    "kernels": [kernels[k] for k in sorted(kernels)]}, f, indent=1)

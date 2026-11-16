@@ -10,14 +10,22 @@ Adversarial families (each a set of single 32-term ops):
 - dynamic_range: products spread over the whole FP8 x FP8 range (2^-18 ... 448^2);
 - near_tie: the exact sum placed on an FP16 rounding tie, plus or minus one small product;
 - subnormal: FP8 subnormal operands (2^-9 ... 7 x 2^-9) with normal ones.
-Every op where the two differ is recorded (the 32 FP8 codes of each operand and the start's FP16 bits) with the
-difference in FP16 steps. With --frames <build>, the same comparison runs on every FP8 op of Model L's own stages for
-the recorded run's frames (l_frame_check), and each op's margin is reported: the distance of its exact sum from the
-nearest FP16 rounding boundary divided by the bound on the FP32-sequential error (the two can differ only below 1).
+Every synthetic op where the two differ is recorded (the 32 FP8 codes of each operand and the start's FP16 bits) with
+the difference in FP16 steps.
 
-    python clean/l/runner/l_mm8_f32_check.py --json out.json [--frames <build>] [--cases 20000]
-    python clean/l/runner/l_mm8_f32_check.py --wmma-prepare <dir> [--frames <build>] --json x   # CPU
-    python clean/l/runner/l_mm8_f32_check.py --wmma-run <dir> --json out.json                  # GPU (a GPU slot)
+Synthetic values only, by default. --real (with --frames <build>: a local recorded run of the real model) adds the same
+comparison on every FP8 op of Model L's own stages for that run's frames, and each op's margin: the distance of its
+exact sum from the nearest FP16 rounding boundary divided by the bound on the FP32-sequential error (the two can differ
+only below 1). Real-model values never reach the repository (the synthetic-values rule):
+- a real run's intermediates (the probe's sample of real ops) go only to --private-out, a folder OUTSIDE the
+  repository (a path inside it is refused);
+- every record a real run writes (--json) is aggregate-only: counts, rates, margins and hashes, never an operand, a
+  start value or a result of a real op (assert_aggregate_only refuses one that is not).
+
+    python clean/l/runner/l_mm8_f32_check.py --json out.json [--cases 20000]                             # synthetic
+    python clean/l/runner/l_mm8_f32_check.py --json out.json --real --frames <build> --private-out <dir>
+    python clean/l/runner/l_mm8_f32_check.py --wmma-prepare <dir> --json x [--real --frames <build> --private-out <d>]
+    python clean/l/runner/l_mm8_f32_check.py --wmma-run <dir> --json out.json [--cases-dir <d>]  # GPU (a GPU slot)
 """
 import argparse
 import copy
@@ -34,6 +42,44 @@ sys.path.insert(0, ROOT)
 
 from clean.l.reference import oracle as L  # noqa: E402
 from clean.reference.fp8 import f16, fp8_encode, q8  # noqa: E402
+
+# Operand-level fields of an op: allowed in a record only for synthetic sets (assert_aggregate_only)
+OP_FIELDS = ("start_f16_bits", "a_fp8_codes", "w_fp8_codes", "exact", "f32seq", "exact_sum", "instruction_f32")
+REAL_SETS = ("real_frames_sample",)
+
+
+def private_dir(path):
+    """A real run's private output folder: refused when it is inside the repository (the synthetic-values rule)."""
+    p = os.path.realpath(os.path.abspath(path))
+    root = os.path.realpath(ROOT)
+    try:
+        inside = os.path.commonpath([p, root]) == root
+    except ValueError:   # another drive
+        inside = False
+    if inside:
+        raise SystemExit(f"--private-out {path}: inside the repository ({root}); a real run's intermediates go only "
+                         "to a folder outside it")
+    os.makedirs(p, exist_ok=True)
+    return p
+
+
+def assert_aggregate_only(res, path="record"):
+    """A real run's record: no operand-level field under a real set (or anywhere under a "frames" study)."""
+    if isinstance(res, dict):
+        for k, v in res.items():
+            real = k in REAL_SETS or k == "frames"
+            if real and _has_op_fields(v):
+                raise SystemExit(f"{path}.{k}: holds operand-level values of real ops; a record is aggregate-only")
+            assert_aggregate_only(v, path + "." + str(k))
+
+
+def _has_op_fields(v):
+    if isinstance(v, dict):
+        return any(k in OP_FIELDS for k in v) or any(_has_op_fields(x) for x in v.values())
+    if isinstance(v, list):
+        return any(_has_op_fields(x) for x in v)
+    return False
+
 
 FP8_VALUES = np.unique(np.abs(np.nan_to_num(np.asarray(__import__("clean.reference.fp8", fromlist=["DECODE"]).DECODE),
                                             nan=0.0)))
@@ -272,9 +318,14 @@ def frames_study(build):
 
 # ---- the matrix instruction (GPU probe, a side measurement) ------------------------------------------------------------
 
-def wmma_prepare(build, n, seed=7, real_build=None, real_max=200000):
-    """CPU: the probe's inputs (every family, and a sample of a local recorded run's 32-term FP8 ops) with the exact sums and
-    the exact model's FP16 results, saved to <build>/l_wmma_cases.pkl."""
+def wmma_prepare(build, n, seed=7, real_build=None, real_max=200000, private_out=None):
+    """CPU: the probe's inputs (every family, and with real_build a sample of a local recorded run's 32-term FP8 ops)
+    with the exact sums and the exact model's FP16 results, saved to <build>/l_wmma_cases.pkl; with a real sample, to
+    <private_out>/l_wmma_cases.pkl only (a folder outside the repository: private_dir)."""
+    if real_build:
+        if not private_out:
+            raise SystemExit("--real: the probe's real sample needs --private-out (a folder outside the repository)")
+        build = private_dir(private_out)
     sets = {}
     for name in FAMILIES:
         st, a, w = family(name, np.random.default_rng([seed, FAMILIES.index(name)]), n)
@@ -318,14 +369,15 @@ def wmma_prepare(build, n, seed=7, real_build=None, real_max=200000):
         pickle.dump({"cases": cases, "identity": identity}, f)
 
 
-def wmma_run(build, rocm):
+def wmma_run(build, rocm, cases_dir=None):
     """GPU: the probe kernel (clean/l/kernels/l_wmma_probe.hip, <build>/l_wmma_probe.co) on every prepared set: per op,
     whether the instruction's float32 result equals the exact sum rounded once to float32, and whether its FP16 rounding
     equals the exact model's result."""
     import ctypes
     from clean.runner.hip import Hip, clean_process_environment
     clean_process_environment(rocm)
-    with open(os.path.join(build, "l_wmma_cases.pkl"), "rb") as f:
+    cases_pkl = os.path.join(cases_dir or build, "l_wmma_cases.pkl")
+    with open(cases_pkl, "rb") as f:
         prep = pickle.load(f)
     h = Hip(rocm)
     with open(os.path.join(build, "l_wmma_probe.co"), "rb") as f:
@@ -365,10 +417,11 @@ def wmma_run(build, rocm):
                       "bounded_pre_63_not_exact": int(np.sum(fin & (bp0 < 63) & ~p_exact))}
         f32_exact = got == c["exact_sum"].astype(np.float32).astype(np.float64)
         d16 = f16_steps(f16(got), c["ref16"])
-        rows = [{"start_f16_bits": int(np.array([st[i]], np.float16).view(np.uint16)[0]),
-                 "a_fp8_codes": fp8_encode(a[i]).tolist(), "w_fp8_codes": fp8_encode(w[i]).tolist(),
-                 "exact_sum": float(c["exact_sum"][i]), "instruction_f32": float(got[i])}
-                for i in np.flatnonzero(fin & (d16 > 0))[:20]]
+        rows = [] if name in REAL_SETS else [   # a real op's values never go into a record
+            {"start_f16_bits": int(np.array([st[i]], np.float16).view(np.uint16)[0]),
+             "a_fp8_codes": fp8_encode(a[i]).tolist(), "w_fp8_codes": fp8_encode(w[i]).tolist(),
+             "exact_sum": float(c["exact_sum"][i]), "instruction_f32": float(got[i])}
+            for i in np.flatnonzero(fin & (d16 > 0))[:20]]
         # S2a's exactness argument: while the bound stays below 63, every partial sum is a multiple of 2^-18 below 2^6,
         # exact in float32 in any order, so the instruction must give the exact sum. Two bounds: the true sum |a w| and
         # the one the kernels can afford (precomputed sum |w| of the row, times the op's max |a|).
@@ -386,7 +439,10 @@ def wmma_run(build, rocm):
     if prep["identity"]:
         res["real_frames_identity"] = prep["identity"]
     from clean.l.runner.l_q7_check import run_identity
-    res["identity"] = run_identity(build, ["l_wmma_probe.co", "l_wmma_cases.pkl"])
+    res["identity"] = run_identity(build, ["l_wmma_probe.co"])
+    import hashlib
+    with open(cases_pkl, "rb") as f:
+        res["identity"]["l_wmma_cases_pkl_sha256"] = hashlib.sha256(f.read()).hexdigest()
     return res
 
 
@@ -395,18 +451,29 @@ def main(argv=None):
     ap.add_argument("--json", required=True)
     ap.add_argument("--cases", type=int, default=20000)
     ap.add_argument("--seed", type=int, default=7)
-    ap.add_argument("--frames", help="a build with a recorded l_frame_check run (lframe_L_stages.pkl)")
+    ap.add_argument("--frames", help="with --real: a build with a local recorded l_frame_check run of the real model")
+    ap.add_argument("--real", action="store_true", help="also the local recorded run (--frames; needs --private-out)")
+    ap.add_argument("--private-out", help="--real: the folder (outside the repository) for a real run's intermediates")
+    ap.add_argument("--cases-dir", help="--wmma-run: the folder of l_wmma_cases.pkl (default the build folder)")
     ap.add_argument("--wmma-prepare", metavar="BUILD", help="CPU: the matrix-instruction probe's inputs into BUILD")
     ap.add_argument("--wmma-run", metavar="BUILD", help="GPU: the probe (BUILD/l_wmma_probe.co) on the prepared inputs")
     ap.add_argument("--rocm", default=r"C:\Program Files\AMD\ROCm\7.2")
     a = ap.parse_args(argv)
+    if a.frames and not a.real:
+        raise SystemExit("--frames reads a local recorded run of the real model: say --real (with --private-out)")
+    if a.real and not (a.frames and a.private_out):
+        raise SystemExit("--real needs --frames <build> and --private-out <folder outside the repository>")
+    if a.real:
+        private_dir(a.private_out)
     if a.wmma_prepare:
-        wmma_prepare(a.wmma_prepare, a.cases, a.seed, a.frames)
+        wmma_prepare(a.wmma_prepare, a.cases, a.seed, a.frames if a.real else None, private_out=a.private_out)
         return 0
     if a.wmma_run:
         from clean.l.runner import l_record as LR
         res = {"what": "RDNA 4 FP8 matrix instruction (two 16-term steps, float32 accumulator from the start) against "
-                       "the exact model, a side measurement", "fp8_op_model": "exact", "probe": wmma_run(a.wmma_run, a.rocm)}
+                       "the exact model, a side measurement", "fp8_op_model": "exact",
+               "probe": wmma_run(a.wmma_run, a.rocm, a.cases_dir)}
+        assert_aggregate_only(res)
         LR.write_l_record(res, a.json)
         return 0
     rng = np.random.default_rng(a.seed)
@@ -418,10 +485,11 @@ def main(argv=None):
             res["families"].setdefault(name, {})[opname] = r
             print(f"{name:14s} {opname:7s} cases {r['cases']}  differ {r['differ']}  more than 1 step "
                   f"{r['differ_over_1']}  max {r['max_f16_steps']}", flush=True)
-    if a.frames:
+    if a.real:
         res["frames"] = frames_study(a.frames)
         print("local recorded run:", json.dumps({k: v for k, v in res["frames"].items() if k != "identity"}))
     from clean.l.runner import l_record as LR
+    assert_aggregate_only(res)
     LR.write_l_record(res, a.json)
     return 0
 

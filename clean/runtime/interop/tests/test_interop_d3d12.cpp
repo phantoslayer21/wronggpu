@@ -23,6 +23,9 @@
 //   test_interop_d3d12.exe <runtime> matrix "<options naming the model>" [output heights, default 1080,1440,2160]
 //     R1 / H2: every usual upscaler-mode ratio x output size x declared maximum x HDR / LDR gets a default-executor context and a
 //     frame: each must be taken by the D3D12 executor (no create refusal, no HIP line); see case_matrix.
+//   test_interop_d3d12.exe <developer runtime> bnecktimeout "<Model L options>"
+//     Model L hybrid, the bottleneck wait timeout through the game path (WG_DEV_BNECK_ABORT=<n> in the environment: the
+//     developer runtime makes accepted frame n's bottleneck time out); see case_bneck_timeout. Synchronous, then pipelined.
 //   test_interop_d3d12.exe <runtime> hipswitch "<Model M options>" "<Model K options>"
 //     Creates, dispatches, destroys M -> K -> M in one process and verifies the HIP DLL stays loaded between them.
 //   test_interop_d3d12.exe <runtime> hipleak "<options A>" ["<options B>" | -] [cycles] [frames] [MiB per cycle] [hold] [thread]
@@ -2528,6 +2531,157 @@ bool case_async_sim(Gpu& g, const char* dll, const std::string& common, const st
   return ok;
 }
 
+// Model L hybrid: the bottleneck wait timeout through the game path (the backend's dispatch on the game's list, the
+// executor's caller-list recording; developer runtime with WG_DEV_BNECK_ABORT=<n>, read at create). Three frames:
+//   1. the timed-out frame (WG_OK): the game's output keeps the previous frame's bytes (the network and the executor's
+//      output pass are skipped under the device's frame guard), and the game's own copy of the output after our
+//      dispatch in the same list still runs (the readback below is that copy: the guard is lifted at our end);
+//   2. the refused frame: WG_OK ("refused, keep previous output", executor_select.h frame_timeout_refused), exactly one
+//      captured log line names the refusal, no failure or fallback line, the output still the previous frame's;
+//   3. the reset frame (WG_OK): the output is written again, byte for byte a fresh context's first frame on the same
+//      inputs (a reset reads no history), and the frames after it run.
+// pipelined: up to 4 frames in flight, static colour, cyclic jitter; the refusal comes once the timeout count is read
+// back (1 .. 4 frames later); every frame from the timed-out one to the refused one keeps the previous output.
+bool case_bneck_timeout(Gpu& g, const char* dll, const std::string& options, bool pipelined) {
+  const char* ab = std::getenv("WG_DEV_BNECK_ABORT");
+  if (!ab) { std::printf("  WG_DEV_BNECK_ABORT is not set (a developer runtime's check)\n"); CHECK(false); return false; }
+  const int A = std::atoi(ab) + 1;   // the runtime counts accepted frames from 0, this test's frames from 1
+  CHECK(A >= 3);
+  Scene s;
+  s.tw = 1707, s.th = 960, s.rx = 0, s.ry = 0, s.rw = 1707, s.rh = 960, s.ow = 2560, s.oh = 1440, s.mw = 1707,
+  s.mh = 960;
+  apply_test_dimensions(&s);
+  s.make(g);
+  s.set_color(g, 1);
+  Ctx c;
+  c.g = &g;
+  if (!c.be.load(dll)) return false;
+  const WgResult cr = c.create(s, WG_CREATE_HDR | WG_CREATE_DEPTH_INVERTED, options.c_str());
+  CHECK(cr == WG_OK);
+  if (cr != WG_OK) return false;
+  const int T = A + 6;
+  std::vector<std::vector<float>> out(T + 1);
+  std::vector<WgResult> res(T + 1, WG_OK);
+  std::vector<std::vector<std::string>> lines(T + 1);
+  const float jit[4][2] = {{0, -1.0f / 6}, {-0.25f, 1.0f / 6}, {0.25f, -7.0f / 18}, {-0.375f, -1.0f / 18}};
+  auto frame_of = [&](int t) {
+    WgFrame f = s.frame(g, t);
+    f.motion_scale[0] = f.motion_scale[1] = 0.0f;
+    f.motion_offset[0] = f.motion_offset[1] = 0.0f;
+    f.jitter[0] = jit[(t - 1) % 4][0];
+    f.jitter[1] = jit[(t - 1) % 4][1];
+    return f;
+  };
+  if (!pipelined) {
+    for (int t = 1; t <= T; ++t) {
+      s.set_color(g, t);
+      const size_t before = g_log.size();
+      out[t] = c.run(s, frame_of(t), &res[t]);
+      lines[t].assign(g_log.begin() + (long)before, g_log.end());
+    }
+  } else {
+    std::vector<ID3D12Resource*> rb(T + 1, nullptr);
+    std::vector<UINT> pitch(T + 1, 0);
+    for (int t = 1; t <= T; ++t) {
+      const int k = t % 4;
+      if (!g.begin_ring(k)) { std::printf("  HANG before frame %d\n", t); CHECK(false); return false; }
+      WgFrame f = frame_of(t);
+      f.command_list = g.list;
+      const size_t before = g_log.size();
+      res[t] = c.be.b->dispatch(c.u, &f);
+      lines[t].assign(g_log.begin() + (long)before, g_log.end());
+      rb[t] = record_readback(g, s.out, s.ow, s.oh, s.outState, &pitch[t]);   // the game's pass after ours
+      g.ringv[k] = c.fe.submit_nowait();
+    }
+    g.wait_idle();
+    CHECK(g.fence->GetCompletedValue() >= g.fv);
+    g.split_alloc = nullptr;
+    for (int t = 1; t <= T; ++t) {
+      out[t] = read_rgb(rb[t], s.ow, s.oh, pitch[t]);
+      rb[t]->Release();
+    }
+  }
+  int R = -1, refusals = 0, bad = 0;
+  for (int t = 1; t <= T; ++t) {
+    CHECK(res[t] == WG_OK);
+    for (const std::string& m : lines[t]) {
+      if (m.find("frame refused (bottleneck wait timeout): ") != std::string::npos) ++refusals, R = t;
+      if (m.find("network frame failed") != std::string::npos || m.find("fallback") != std::string::npos) ++bad;
+    }
+  }
+  std::printf("  %s: timed-out frame %d, refused frame %d, refusal lines %d, failure / fallback lines %d\n",
+              pipelined ? "pipelined" : "synchronous", A, R, refusals, bad);
+  CHECK(refusals == 1);
+  CHECK(bad == 0);
+  if (refusals != 1) return false;
+  CHECK(pipelined ? (R > A && R <= A + 4) : R == A + 1);
+  CHECK(R + 2 <= T);
+  if (R + 2 > T) return false;
+  const std::vector<float>& prev = out[A - 1];
+  bool lit = false;
+  for (float v : prev) lit = lit || v != 0.0f;
+  CHECK(lit);   // the previous output is a real image (a skipped copy would leave the fresh readback at zero)
+  for (int t = A; t <= R; ++t) {
+    const bool same = out[t] == prev;
+    if (!same) std::printf("  frame %d: the game's output changed under the timeout (must keep frame %d's)\n", t, A - 1);
+    CHECK(same);
+  }
+  CHECK(out[R + 1] != prev);
+  size_t nonfinite = 0;
+  for (int t = R + 1; t <= T; ++t)
+    for (float v : out[t]) nonfinite += !std::isfinite(v);
+  CHECK(nonfinite == 0);
+  if (!pipelined) {   // the reset frame against a fresh context's first frame on the same inputs
+    Ctx d;
+    d.g = &g;
+    if (!d.be.load(dll)) return false;
+    CHECK(d.create(s, WG_CREATE_HDR | WG_CREATE_DEPTH_INVERTED, options.c_str()) == WG_OK);
+    s.set_color(g, R + 1);
+    WgResult r2 = WG_ERROR;
+    const std::vector<float> fresh = d.run(s, frame_of(R + 1), &r2);
+    CHECK(r2 == WG_OK);
+    auto diff = [](const std::vector<float>& x, const std::vector<float>& y, double* worst) {
+      size_t n = 0;
+      *worst = 0.0;
+      for (size_t i = 0; i < x.size() && i < y.size(); ++i)
+        if (!(x[i] == y[i])) {
+          ++n;
+          const double d = std::fabs((double)x[i] - (double)y[i]);
+          *worst = d > *worst ? d : *worst;
+        }
+      return n;
+    };
+    double w1 = 0.0;
+    const size_t n1 = diff(fresh, out[R + 1], &w1);
+    std::printf("  reset frame %d vs a fresh context's first frame: %zu of %zu values differ (max %.6g)\n", R + 1, n1,
+                fresh.size(), w1);
+    // control: the same context history (frames 1 .. A - 1), then the game's own reset at frame R + 1
+    {
+      Ctx e;
+      e.g = &g;
+      if (!e.be.load(dll)) return false;
+      CHECK(e.create(s, WG_CREATE_HDR | WG_CREATE_DEPTH_INVERTED, options.c_str()) == WG_OK);
+      std::vector<float> oe;
+      for (int t = 1; t < A; ++t) {
+        s.set_color(g, t);
+        WgResult r3 = WG_ERROR;
+        oe = e.run(s, frame_of(t), &r3);
+      }
+      s.set_color(g, R + 1);
+      WgFrame fr = frame_of(R + 1);
+      fr.reset = 1;
+      WgResult r4 = WG_ERROR;
+      oe = e.run(s, fr, &r4);
+      double w2 = 0.0, w3 = 0.0;
+      const size_t n2 = diff(oe, fresh, &w2), n3 = diff(oe, out[R + 1], &w3);
+      std::printf("  control (game reset after frames 1..%d): vs fresh %zu differ (max %.6g); vs the refusal's reset %zu "
+                  "differ (max %.6g)\n", A - 1, n2, w2, n3, w3);
+    }
+    CHECK(n1 == 0);
+  }
+  return true;
+}
+
 int main(int argc, char** argv) {
   if (argc < 2) {
     std::printf("usage: test_interop_d3d12 <wronggpu_runtime.dll> [case]\n");
@@ -2620,6 +2774,13 @@ int main(int argc, char** argv) {
                                  flag("hold"), flag("thread"));
     std::puts(ok && !g_fail ? "PASS" : "FAIL");
     return ok && !g_fail ? 0 : 1;
+  }
+  if (only == "bnecktimeout") {
+    const std::string opt = argc > 3 ? argv[3] : "";
+    const bool a = case_bneck_timeout(g, dll, opt, false);
+    const bool b = case_bneck_timeout(g, dll, opt, true);
+    std::puts(a && b && !g_fail ? "PASS" : "FAIL");
+    return a && b && !g_fail ? 0 : 1;
   }
   if (only == "hipbench") {
     const int frames = argc > 4 ? std::atoi(argv[4]) : 1500;

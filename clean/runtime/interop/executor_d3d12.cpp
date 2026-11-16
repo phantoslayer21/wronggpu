@@ -44,6 +44,7 @@
 #include "../runtime_core.h"
 #include "convert.h"
 #include "executor.h"
+#include "executor_select.h"
 #include "texture_shape.h"
 
 namespace wgi {
@@ -324,7 +325,13 @@ class D3d12Executor : public Executor {
                              },
                              &e, "dx12_input_states");
     }
-    if (ok && !wgrt::runtime_frame(rt_, job.frame, &io)) ok = false, e = "network frame failed: " + wgrt::runtime_error(rt_);
+    bool timeout = false;   // the bottleneck wait timeout's refusal: passed on as it is (executor_select.h)
+    if (ok && !wgrt::runtime_frame(rt_, job.frame, &io)) {
+      ok = false;
+      e = wgrt::runtime_error(rt_);
+      timeout = frame_timeout_refused(e);
+      if (!timeout) e = "network frame failed: " + e;
+    }
     if (restore) {  // also after a failed frame: the game's textures go back to the states it reported
       std::string e2;
       const bool r = ext_->record_pass(
@@ -355,7 +362,7 @@ class D3d12Executor : public Executor {
     }
     serials_.push_back({ext_->external_recorded(), job.value});
     while (serials_.size() > 64) serials_.pop_front();
-    if (!ok) return *err = "D3D12 executor: " + e, false;
+    if (!ok) return *err = timeout ? e : "D3D12 executor: " + e, false;
     *output_written = true;
     if (tb >= 0) tagged_[job.value % kRing] = job.value;
     return true;
