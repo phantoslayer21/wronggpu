@@ -1881,9 +1881,35 @@ ffxReturnCode_t FrontEnd::DispatchUpscale(UpscaleContext& u, const ffxDispatchDe
             Log(tag + " note U" + std::to_string(u.id) + ": AMD FSR is not available for this context; the stand-in upscales the frames the upscaler does not take");
         }
     }
+    // WG_ERROR_NOT_READY whose stand-in failed (create or dispatch; DispatchWithFallback keeps the refusal's code):
+    // still THIS frame only, never a takeover: AMD's FSR for this frame (its context from the saved parameters,
+    // takeOver = false); when that fails too, the frame is skipped (the game's output keeps what it held). No Fail, no
+    // broken mark, no bad-frame count; the upscaler's next frame starts without history.
+    if (mapped && r == WG_ERROR_NOT_READY && u.fallbackBackend && u.fallbackBackend != u.backend) {
+        u.resetNext = true;
+        const std::string what = "frame " + std::to_string(frameIndex) + ": upscaler not ready and its stand-in failed";
+        if (config_.fallbackToAmd && CreateAmdFromSaved(u, call, false) == FFX_API_RETURN_OK) {
+            ffxDispatchDescUpscale amd = d;
+            if (!u.amdLast) amd.reset = true;  // AMD's history is old, or never started
+            u.amdLast = true;
+            const ffxReturnCode_t rc = u.amdApi->dispatch(&u.amd, &amd.header);
+            Log(tag + " note U" + std::to_string(u.id) + ": " + what + ": AMD FSR upscales this frame only -> " + RcName(rc) +
+                "; the context stays WrongGPU's");
+            if (rc == FFX_API_RETURN_OK) {
+                Report(u, UpscaleState::Amd, nullptr);
+                return rc;
+            }
+        }
+        Log(tag + " note U" + std::to_string(u.id) + ": " + what + ": this frame is skipped (the game's output keeps what it held); "
+            "the context stays WrongGPU's");
+        Report(u, UpscaleState::Failed, nullptr, what + "; skipped");
+        return FFX_API_RETURN_OK;
+    }
     // Inputs the upscaler cannot take (the mapping's checks, or the upscaler's own: WG_ERROR_PARAMETER,
-    // WG_ERROR_UNSUPPORTED) are one frame's matter (BadFrame); every other result means the upscaler is broken.
-    if (!mapped || r == WG_ERROR_PARAMETER || r == WG_ERROR_UNSUPPORTED) {
+    // WG_ERROR_UNSUPPORTED) are one frame's matter (BadFrame), and so is WG_ERROR_NOT_READY that the stand-in could
+    // not take above (none, or it failed): AMD's FSR for this frame only, the context stays the upscaler's. Every
+    // other result means the upscaler is broken.
+    if (!mapped || r == WG_ERROR_PARAMETER || r == WG_ERROR_UNSUPPORTED || r == WG_ERROR_NOT_READY) {
         frame.reset = resetAsked ? 1u : 0u;  // (for the stand-in: as the game gave it)
         return BadFrame(u, d, call, frameIndex, problem, &frame, false, mapped ? r : WG_ERROR_PARAMETER);
     }

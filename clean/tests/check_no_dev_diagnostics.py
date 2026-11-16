@@ -37,7 +37,27 @@ DEV_ONLY_STRINGS = (
     b"diagnostic: executor=hip selects the HIP executor",
     b"diagnostic: frame capture forces the HIP executor",
     b"frame capture armed: create ",
+    b"diagnostic: hybrid tables off",
+    # the check routes of Model L / M (runtime.cpp, behind WG_DEV_DIAGNOSTICS): the mutant and twin code objects
+    b"/l_q7__hybmut.co",
+    b"/l_q7w__hybmut.co",
+    b"(WG_L_FORM=hybrid_twin: l_swin_hyb.co, swin_hyb.co)", b"WG_DEV_BNECK_ABORT",
+    # the check routes' selector values (WG_L_FORM / WG_M_FORM): a release build does not know their names
+    b"hybrid_mutant", b"hybrid_twin", b"__hybmut",
 )
+
+# Check-only code objects (mutants, probes, the HIP twins of the D3D12 hybrid ports, the fused-square scan's mutants): never
+# in a release payload, a package or a runtime library's built-in files.
+# (The HIP self-test's probe.co and the D3D12 device's native_driver_probe are not check objects.)
+PAYLOAD_CHECK_NAMES = re.compile(r"(mut\b|mut\.co|_mut\.dxil|_mutdump\.dxil|_dump\.dxil|_tmo\.dxil|_scanmut|_probe(__mut)?\.co|l_hyb_probe|(^|[\\/]|gfx\w+\.)l?_?swin_hyb\.co)",
+                                 re.I)
+
+
+def check_object_names_in(data):
+    """Built-in check-object names in a runtime library (embedded files are listed by name)."""
+    return [t.decode() for t in (b"l_q7__hybmut.co", b"l_q7w__hybmut.co", b"l_post_c12_probe", b"l_swin_hyb.co",
+                                 b"swin_hyb.co", b"_scanmut", b"_mut.dxil", b"_mutdump.dxil", b"_dump.dxil",
+                                 b"_tmo.dxil", b"l_hyb_probe", b'_hyb_mut"', b'_hyb_tmo"', b'_hyb_dump"') if t in data]
 
 
 def dev_only_strings_in(data):
@@ -59,6 +79,9 @@ def check_bytes(data):
     carried = dev_only_strings_in(data)
     if carried:
         return False, "says dev-diagnostics=0 but carries developer-diagnostic code (%r): a forged marker" % carried[0]
+    objs = check_object_names_in(data)
+    if objs:
+        return False, "carries check-only code objects (%r)" % objs[0]
     return True, "dev-diagnostics=0"
 
 
@@ -96,6 +119,8 @@ def check_artifact(name, data):
     if is_runtime_name(name):
         ok, text = check_bytes(data)
         return ok, text, ok
+    if PAYLOAD_CHECK_NAMES.search(os.path.basename(name)):
+        return False, "a check-only code object (mutant, probe or HIP twin) in a release payload", False
     if any(v == b"1" for v in found):
         return False, "carries a developer runtime (dev-diagnostics=1)", False
     carried = dev_only_strings_in(data)
@@ -113,6 +138,8 @@ def artifacts(path):
                 low = n.lower()
                 if is_runtime_name(n) or low.endswith((".zip", ".exe", ".asi")):
                     out += artifacts(os.path.join(dirpath, n))
+                elif PAYLOAD_CHECK_NAMES.search(n):   # a check-only object anywhere in the folder fails the check
+                    out.append((os.path.join(dirpath, n), n, b""))
         return out
     if path.lower().endswith(".zip"):
         with zipfile.ZipFile(path) as z:

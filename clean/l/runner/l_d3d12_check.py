@@ -55,6 +55,51 @@ def prepare(build, rocm):
     return prepare_replay(build, rocm, D3D12_KERNELS + CONTROL_KERNELS)
 
 
+# ---- the default leg (standing rule, oversight 2026-11-15) -----------------------------------------------------------
+# Every release-path check also runs once with NO model / form environment variable set (the shipped default); its
+# output must equal the explicit setting's byte for byte. FORM_VARS: the variables that choose a model's form or route.
+FORM_VARS = ("WG_L_FORM", "WG_M_FORM", "WG_L_POST", "WG_M_POST", "WG_HYB_TABLES", "WG_SWIN_FUSE_STAGES")
+
+
+def default_env(base=None):
+    """base (default os.environ) without any FORM_VARS variable."""
+    return {k: v for k, v in (base if base is not None else os.environ).items() if k.upper() not in FORM_VARS}
+
+
+def replay_outputs(cases_path):
+    """The output file names of a kernel_replay cases file (arg out ... <name> ...; a chain's save <id> <name>)."""
+    names = []
+    for ln in open(cases_path, encoding="utf-8"):
+        p = ln.split()
+        if len(p) >= 4 and p[0] == "arg" and p[1] == "out":
+            names.append(p[3])
+        elif len(p) == 3 and p[0] == "save":
+            names.append(p[2])
+    return names
+
+
+def replay_default_leg(build, cases_path, env, timeout=150):
+    """Re-run kernel_replay on cases_path with env minus FORM_VARS and compare every output file with the explicit
+    run's (already on disk); the explicit outputs are restored afterwards. Returns the record's default-leg entry."""
+    cdir = os.path.dirname(cases_path)
+    names = replay_outputs(cases_path)
+    before = {n: open(os.path.join(cdir, n), "rb").read() for n in names if os.path.exists(os.path.join(cdir, n))}
+    r = subprocess.run([os.path.join(build, "kernel_replay.exe"), build, cases_path], env=default_env(env),
+                       capture_output=True, text=True, timeout=timeout, creationflags=0x08000000)
+    differ = []
+    for n in names:
+        p = os.path.join(cdir, n)
+        got = open(p, "rb").read() if os.path.exists(p) else None
+        if got != before.get(n):
+            differ.append(n)
+        if n in before:
+            with open(p, "wb") as f:
+                f.write(before[n])
+    return {"env_removed": [k for k in FORM_VARS if k in env], "replay_exit": r.returncode,
+            "outputs": len(names), "identical": len(names) - len(differ), "differ": differ[:8],
+            "pass": r.returncode == 0 and not differ, "tail": "" if r.returncode == 0 else (r.stdout[-400:] + r.stderr[-200:])}
+
+
 def prepare_replay(build, rocm, kernels):
     """The D3D12 ports `kernels` (and native_fill, the device's memset) into <build>/dx12, and kernel_replay.exe."""
     from clean.runner.hip import hip_child_environment

@@ -44,6 +44,7 @@
 #include "../runtime_core.h"
 #include "convert.h"
 #include "executor.h"
+#include "executor_select.h"
 #include "texture_shape.h"
 
 namespace wgi {
@@ -298,6 +299,17 @@ class D3d12Executor : public Executor {
       df.params.padding[4] = (Converter::motion_fp16(f) ? 1u : 0u) | ((cw - 1u) << 1) | ((ch - 1u) << 16);
     }
 
+    // Model L hybrid: the device's frame guard predicates this frame on the game's list, in place of the game's own
+    // predicate, which is lifted while we record and set again after (its conditional work after ours stays
+    // conditional); a frame whose game predicate the front end cannot tell is not taken THIS time (frame_not_ready).
+    const bool guarded = wgrt::runtime_frame_guard(rt_);
+    if (guarded && !job.caller_pred_known)
+      return *err = "frame not ready (nothing recorded): the front end does not know the predicate set on the game's "
+                    "command list, which the Model L hybrid frame guard would replace", false;
+    if (guarded)
+      ext_->set_caller_predicate(static_cast<ID3D12Resource*>(job.caller_pred), job.caller_pred_offset,
+                                 (D3D12_PREDICATION_OP)job.caller_pred_op);
+
     std::string e;
     if (!ext_->begin_external(list, &e)) return *err = "D3D12 executor: " + e, false;
     bool ok = ext_->bind_direct_frame(df, &e);
@@ -324,7 +336,13 @@ class D3d12Executor : public Executor {
                              },
                              &e, "dx12_input_states");
     }
-    if (ok && !wgrt::runtime_frame(rt_, job.frame, &io)) ok = false, e = "network frame failed: " + wgrt::runtime_error(rt_);
+    bool timeout = false;   // the bottleneck wait timeout's refusal: passed on as it is (executor_select.h)
+    if (ok && !wgrt::runtime_frame(rt_, job.frame, &io)) {
+      ok = false;
+      e = wgrt::runtime_error(rt_);
+      timeout = frame_timeout_refused(e);
+      if (!timeout) e = "network frame failed: " + e;
+    }
     if (restore) {  // also after a failed frame: the game's textures go back to the states it reported
       std::string e2;
       const bool r = ext_->record_pass(
@@ -344,6 +362,26 @@ class D3d12Executor : public Executor {
             if (!ok) return true;
             if (route == kProxy16) copy16(l, f);
             if (route == kProxy32 && job.conv && !job.conv->record_output_tex(l, f, proxy32_, &m)) return false;
+            // The frame guard's fallback: everything above (the network, and this output pass) is skipped on the GPU
+            // when the frame's bottleneck wait timed out or an earlier one did (the abort word set); under the INVERSE
+            // predication on the same word, a simple upscale of this frame's colour goes into this frame's output by the
+            // same route instead. No CPU wait; when the word is clear, these commands are skipped (barriers still run).
+            if (ID3D12Resource* gp = ext_->guard_held_predicate()) {
+              if (!job.conv) return m = "no Converter for the frame guard's fallback", false;
+              l->SetPredication(gp, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+              bool fb = true;
+              if (route == kDirect) job.conv->record_output(l, f, BufferRange());
+              if (route == kProxy16) {
+                job.conv->record_fallback_into(l, f, proxy16_, DXGI_FORMAT_R16G16B16A16_FLOAT);
+                copy16(l, f);
+              }
+              if (route == kProxy32) {
+                job.conv->record_fallback_into(l, f, proxy32_, DXGI_FORMAT_R32G32B32A32_FLOAT);
+                fb = job.conv->record_output_tex(l, f, proxy32_, &m);
+              }
+              l->SetPredication(gp, 0, D3D12_PREDICATION_OP_NOT_EQUAL_ZERO);   // the guard's own, held until end_external
+              if (!fb) return false;
+            }
             return true;
           },
           &e2, "dx12_output");
@@ -355,7 +393,7 @@ class D3d12Executor : public Executor {
     }
     serials_.push_back({ext_->external_recorded(), job.value});
     while (serials_.size() > 64) serials_.pop_front();
-    if (!ok) return *err = "D3D12 executor: " + e, false;
+    if (!ok) return *err = timeout ? e : "D3D12 executor: " + e, false;
     *output_written = true;
     if (tb >= 0) tagged_[job.value % kRing] = job.value;
     return true;

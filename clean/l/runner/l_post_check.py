@@ -30,6 +30,11 @@ criteria; the ill-conditioned pixels (a large fallback colour cancelled in the b
 Known answers (C = (65504, 65504, 0), D = R, every target offset from a texel centre by the jitter): offset 0.1, total
 weight 0 everywhere: history -1.4404296875, display 0, reduced code 0; offset 0.05, total weight > 0 but every FP16
 weight 0: the output is the candidate history (here the reset fallback: the linear colour times e).
+--form morig (Q11 part C): l_post__morig.co (Model M's ORIGINAL reconstruction: 3 x 3 window, encoded-domain
+combination and fallback, C1 machine form, C2) against the oracle table M_RECON_ORIG, the same criteria and negative
+control; offset 0.05's known answer is M's fallback through one decode, h(E((D(E(e_prev c)) / e_prev) e)), within one
+FP16 step. Also reported (not a criterion): the values that differ from the oracle with C1 in item 3's form, which
+must be more than with the machine form (the compiled kernel uses C1; the bit-exact check is l_post_c12_check.py).
 """
 import argparse
 import ctypes
@@ -44,6 +49,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
 sys.path.insert(0, ROOT)
 
 from clean.l.reference import recon as R  # noqa: E402
+from clean.l.reference import table as T  # noqa: E402
 from clean.l.runner import l_c32_check as C32  # noqa: E402
 from clean.reference import post as MP  # noqa: E402
 from clean.runner import post as RP  # noqa: E402
@@ -174,13 +180,31 @@ def m_rule(got, ref):
     return res
 
 
-def check_case(hip, mod, x, kind, s=S, ldr=False):
+FORMS = {"l": ("l_post.co", None), "morig": ("l_post__morig.co", {"recon": T.M_RECON_ORIG}),
+         # Model L's own reconstruction with C1 in the machine-code form and C2 (WG_L_POST=c12, Q11 part C)
+         "lc12": ("l_post__lc12.co", {"recon": dict(T.TABLE["recon"], c1="machine")})}
+
+
+def _ref(x, s, ldr, table):
+    return R.reconstruct(x, s, ldr=ldr) if table is None else R.reconstruct(x, s, table, ldr=ldr)
+
+
+def check_case(hip, mod, x, kind, s=S, ldr=False, table=None):
     raw, sizes, dims = run_kernel(hip, mod, x, s, "l_post_recon_ldr" if ldr else "l_post_recon")
     got = decode(raw, sizes, dims)
-    ref = R.reconstruct(x, s, ldr=ldr)
+    ref = _ref(x, s, ldr, table)
+    if table is not None and table["recon"].get("c1") == "machine":
+        alt = _ref(x, s, ldr, {"recon": dict(table["recon"], c1="item3")})
+        fin = np.isfinite(got["history"])
+        m_alt = {"history_differ_machine_c1": int(np.sum(fin & (got["history"] != ref["history"]))),
+                 "history_differ_item3_c1": int(np.sum(fin & (got["history"] != alt["history"])))}
+    else:
+        m_alt = None
     m = m_rule(got, ref)
     m.update({"alpha_zero": got["alpha_zero"], "reduced_top_zero": got["reduced_top_zero"],
               "slack_untouched": got["slack_untouched"]})
+    if m_alt is not None:
+        m["c1_report"] = m_alt
     ok = m["pass"] and got["alpha_zero"] and got["reduced_top_zero"] and got["slack_untouched"]
     W = ref["_lin"]["W"]
     m["weight_zero_pixels"] = int((W == 0).sum())
@@ -206,26 +230,35 @@ def check_case(hip, mod, x, kind, s=S, ldr=False):
     if kind == "offset_0.05":
         if ldr:   # LDR: the linear colour as it is (no exposure, identity transfer)
             want = MP.f16(np.asarray(x["color"], np.float64))
+        elif table is not None and table["recon"]["fallback"] != "linear_colour":   # M: encoded fallback, one decode
+            c = np.asarray(x["color"], np.float64)
+            ep, ec = float(np.asarray(x["exposure_prev"])), float(np.asarray(x["exposure"]))
+            want = MP.f16(MP.enc(R.dec(MP.enc(ep * c)) / ep * ec))
         else:
             want = MP.f16(MP.enc(np.asarray(x["color"], np.float64) * float(np.asarray(x["exposure"]))))
-        known = bool((W > 0).all()) and np.array_equal(got["history"], want, equal_nan=True)
+        if table is not None and table["recon"]["fallback"] != "linear_colour":
+            known = bool((W > 0).all()) and int(C32.f16_steps(got["history"], want).max()) <= 1
+        else:
+            known = bool((W > 0).all()) and np.array_equal(got["history"], want, equal_nan=True)
         m["known_answer"] = bool(known)
         ok = ok and known
     m["pass"] = bool(ok)
     return m
 
 
-def run(build, rocm, seeds=(89,), ldr=False):
+def run(build, rocm, seeds=(89,), ldr=False, form="l"):
     from clean.runner.hip import Hip
     hip = Hip(rocm)
-    with open(os.path.join(build, "l_post.co"), "rb") as f:
+    co, table = FORMS[form]
+    with open(os.path.join(build, co), "rb") as f:
         mod = hip.load_module(f.read())
-    res = {"cases": [], "kernel": "l_post_recon_ldr" if ldr else "l_post_recon", "ldr": ldr}
+    res = {"cases": [], "kernel": "l_post_recon_ldr" if ldr else "l_post_recon", "ldr": ldr, "form": form,
+           "code_object": co}
     for seed in seeds:
         rng = np.random.default_rng(seed)
         for rw, rh, dw, dh, reset, kind in CASES:
             x = make_case(rng, rw, rh, dw, dh, reset, kind)
-            m = check_case(hip, mod, x, kind, ldr=ldr)
+            m = check_case(hip, mod, x, kind, ldr=ldr, table=table)
             m["case"] = [rw, rh, dw, dh, reset, kind]
             res["cases"].append(m)
     # Negative control: the first random case with the jitter moved by half a render pixel must fail.
@@ -233,11 +266,14 @@ def run(build, rocm, seeds=(89,), ldr=False):
     x = make_case(rng, *CASES[0])
     raw, sizes, dims = run_kernel(hip, mod, dict(x, jitter=np.asarray(x["jitter"], np.float32) + 0.5), S,
                                   "l_post_recon_ldr" if ldr else "l_post_recon")
-    neg = m_rule(decode(raw, sizes, dims), R.reconstruct(x, S, ldr=ldr))
+    neg = m_rule(decode(raw, sizes, dims), _ref(x, S, ldr, table))
     res["negative_control_fails"] = not neg["pass"]
     res["run"] = {k: l_post_run([c[k] for c in res["cases"]]) for k in ("history", "display")}
     res["pass"] = (all(c["pass"] for c in res["cases"]) and res["negative_control_fails"]
                    and all(r["pass"] for r in res["run"].values()))
+    rep = [c["c1_report"] for c in res["cases"] if "c1_report" in c]
+    if rep:
+        res["c1_report"] = {k: sum(r[k] for r in rep) for k in rep[0]}
     return res
 
 
@@ -247,15 +283,21 @@ def main(argv=None):
     ap.add_argument("--rocm", required=True)
     ap.add_argument("--seeds", type=int, default=1, help="run the case list with this many seeds (89, 90, ...)")
     ap.add_argument("--ldr", action="store_true", help="the LDR form l_post_recon_ldr against the LDR oracle")
+    ap.add_argument("--form", choices=sorted(FORMS), default="l",
+                    help="morig: l_post__morig.co (Model M's original reconstruction); lc12: l_post__lc12.co (Model L's with "
+                         "C1 machine form + C2); Q11 part C")
     ap.add_argument("--json", required=True)
     a = ap.parse_args(argv)
-    res = run(a.build, a.rocm, tuple(range(89, 89 + a.seeds)), ldr=a.ldr)
+    if a.form == "morig" and a.ldr:
+        ap.error("--form morig: HDR only")
+    res = run(a.build, a.rocm, tuple(range(89, 89 + a.seeds)), ldr=a.ldr, form=a.form)
     with open(a.json, "w") as f:
         json.dump(res, f, indent=1)
     for c in res["cases"]:
         print(json.dumps({k: c[k] for k in c if k not in ("history", "display", "reduced")}),
               {k: (c[k]["differ"], c[k].get("max_steps", c[k].get("max"))) for k in ("history", "display", "reduced")})
-    print({"run": res["run"], "negative_control_fails": res["negative_control_fails"], "pass": res["pass"]})
+    print({"run": res["run"], "negative_control_fails": res["negative_control_fails"], "pass": res["pass"],
+           "c1_report": res.get("c1_report")})
     return 0 if res["pass"] else 1
 
 

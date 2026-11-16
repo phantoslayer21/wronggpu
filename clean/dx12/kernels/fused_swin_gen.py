@@ -73,6 +73,9 @@ ARGS_OLD = """WG_ARGS_BEGIN
 #if SW_SRC == 3
     uint linW1, linW2;                 // pointers: enc0.Win1, enc0.Win2 (x = the FP8 q halo map)
 #endif
+#if SW_HYB_DUMP
+    uint dumpp;                        // pointer: the stage dump (HD_WORDS words per lane of every real window)
+#endif
 WG_ARGS_END"""
 ARGS_NEW = """#ifndef SW_PM
 #define SW_PM 0

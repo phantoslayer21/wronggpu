@@ -22,11 +22,29 @@
 // l_post_filter_ldr / l_post_filter_ldr_h: the output stage for that display image (Q2): Model M's 5-tap filter
 // (post.hip filter_row_c1, lz5) with no clamp to [1e-4, 3], no decode and no exposure; 3 x f32, or RGBA16F rows with pi
 // folded in (framebuffer_half(v pi), alpha 1).
+//
+// Q11 part C evaluation switches (all 0 by default: Model L's kernel as above, unchanged), built together as
+// l_post__morig.co = Model M's ORIGINAL reconstruction (handoff preset-M/from-spec/Q11C-M-POST-ITEMS.md), which the
+// runtime runs for Model M with WG_M_POST=orig (HIP only), with M's scale s and M's coefficients:
+//  WG_LP_M = 1: M's three steps (HDR; the LDR forms are the same for both presets): D1 a 3 x 3 gather (columns
+//    ax - 1 ... ax + 1, rows b - 1 ... b + 1); D2 the two candidates combined in the ENCODED domain,
+//    H = fused(w1 H1 + (w2 H2)) (w1 H1 when w2 = 0), then one decode H_lin = (D(H) / e_prev) e; D3 an invalid or reset
+//    candidate is E(e_prev colour) (no 32752 cap).
+//  WG_LP_C1 = 1: the gather exponent in the machine-code form (PRESET-M-C1C2-machine-code.md, for M and L):
+//    eps = fused_half(h(u v), C, fused_half(h(v v), B, h(h(u u) A))) (0: item 3's form, Model L's kernel; one
+//    rounding more, the probe's near-miss mutant).
+//  WG_CR_C2 (post.hip cr_weights): the Catmull-Rom weights' C2 form.
+#ifndef WG_LP_M
+#define WG_LP_M 0
+#endif
+#ifndef WG_LP_C1
+#define WG_LP_C1 0
+#endif
 #include "post.hip"
 
 namespace {
 
-constexpr int kLWin = 4;  // taps -1 ... 2
+constexpr int kLWin = WG_LP_M ? 3 : 4;  // taps -1 ... 2 (Model L), -1 ... 1 (WG_LP_M)
 typedef _Float16 h16;
 
 // D(.) with a NaN passed through.
@@ -111,11 +129,22 @@ WG_FN void l_gather_zero(LGather& g) {
 
 // One tap: eps = fused_half(h(u v), C, h(h(h(u u) A) + h(h(v v) B))), w = 2^eps (float32, +0 below 2^-126),
 // W += w, F_k = fused_half(h(w), f_k, F_k). One FP16 operation per statement (contraction is off in post.hip).
-WG_FN void l_gather_add(LGather& g, const LTexel& t, h16 u, h16 v) {
+// The tap's exponent (WG_LP_C1: the machine-code form; also called by the C1/C2 probe, l_post_c12_probe.hip).
+WG_FN h16 l_eps(h16 u, h16 v, h16 kA, h16 kB, h16 kC) {
   const h16 uu = u * u, vv = v * v, uv = u * v;
-  const h16 ta = uu * t.kA, tb = vv * t.kB;
+#if WG_LP_C1 == 1
+  const h16 ta = uu * kA;
+  const h16 s = __builtin_fmaf16(vv, kB, ta);
+  return __builtin_fmaf16(uv, kC, s);
+#else
+  const h16 ta = uu * kA, tb = vv * kB;
   const h16 s = ta + tb;
-  const h16 eps = __builtin_fmaf16(uv, t.kC, s);
+  return __builtin_fmaf16(uv, kC, s);
+#endif
+}
+
+WG_FN void l_gather_add(LGather& g, const LTexel& t, h16 u, h16 v) {
+  const h16 eps = l_eps(u, v, t.kA, t.kB, t.kC);
   float w = wg_exp2((float)eps);
   if (!(w >= 0x1p-126f)) w = 0.0f;  // flush to zero (also a NaN exponent gives 0, as 2^NaN never occurs here)
   g.W += w;
@@ -170,6 +199,7 @@ WG_FN void l_post_core(const LGather& g, int x, int y, int fx, int fy, const flo
   const float X = (float)x + 0.5f, Y = (float)y + 0.5f;
   const int ncand = sl.w2 != 0.0f ? 2 : 1;
   const float rp = kLdr ? 1.0f : 1.0f / p.e_prev;  // IEEE division
+  constexpr bool kEnc = WG_LP_M && !kLdr;  // D2 / D3: candidates in the encoded domain
   float L[2][3];
   for (int n = 0; n < ncand; ++n) {
     const int k = n == 0 ? sl.first : sl.second;
@@ -179,11 +209,11 @@ WG_FN void l_post_core(const LGather& g, int x, int y, int fx, int fy, const flo
       float h[3];
       history_cr<false>(hist_prev, p.dw, p.dh, qx, qy, h);
 #pragma unroll
-      for (int i = 0; i < 3; ++i) L[n][i] = kLdr ? h[i] : l_dec(h[i]) * rp;
+      for (int i = 0; i < 3; ++i) L[n][i] = (kLdr || kEnc) ? h[i] : l_dec(h[i]) * rp;
     } else {
       const v4f c = color[fy * p.rw + fx];
 #pragma unroll
-      for (int i = 0; i < 3; ++i) L[n][i] = c[i];
+      for (int i = 0; i < 3; ++i) L[n][i] = kEnc ? enc_e(p.e_prev * c[i]) : c[i];
     }
   }
   float Hl[3], Cl[3];
@@ -191,7 +221,7 @@ WG_FN void l_post_core(const LGather& g, int x, int y, int fx, int fy, const flo
 #pragma unroll
   for (int i = 0; i < 3; ++i) {
     const float comb = ncand == 2 ? __builtin_fmaf(sl.w1, L[0][i], sl.w2 * L[1][i]) : sl.w1 * L[0][i];
-    Hl[i] = kLdr ? comb : comb * p.e;
+    Hl[i] = kLdr ? comb : (kEnc ? (l_dec(comb) * rp) * p.e : comb * p.e);
     hl_inf |= __builtin_fabsf(Hl[i]) == __builtin_inff();
     Cl[i] = kLdr ? sl.fbar[i] : l_dec(sl.fbar[i]);
   }

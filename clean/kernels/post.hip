@@ -262,7 +262,26 @@ WG_FN PostTexel load_texel12(const v4f* color, const u32* A8, const u32* C4, int
 }
 
 // Catmull-Rom (cubic convolution, a = -1/2) weights for taps -1, 0, 1, 2 at fraction f.
+// WG_CR_C2 = 1 (Q11 part C evaluation builds only, l_post__morig.co): the original's form, correction C2
+// (handoff PRESET-M-C1C2-machine-code.md, L part 3 item 3), float32 one rounding per operation (contraction is off):
+// f2 = f f, f3 = f f2, w0 = fused(-(f + f3), 1/2, f2), w1 = fused(f3, 1.5, -RN(2.5 f2)) + 1, w3 = RN(RN(f3 - f2) 1/2),
+// w2 = ((1 - w0) - w1) - w3. WG_CR_C2 = 2: the check's mutant (w1 with the product 2.5 f2 fused instead).
+#ifndef WG_CR_C2
+#define WG_CR_C2 0
+#endif
 WG_FN void cr_weights(float f, float w[4]) {
+#if WG_CR_C2
+  const float f2 = f * f, f3 = f * f2;
+  w[0] = __builtin_fmaf(-(f + f3), 0.5f, f2);
+#if WG_CR_C2 == 2
+  w[1] = __builtin_fmaf(f3, 1.5f, __builtin_fmaf(-2.5f, f2, 1.0f));
+#else
+  w[1] = __builtin_fmaf(f3, 1.5f, -(2.5f * f2)) + 1.0f;
+#endif
+  w[3] = (f3 - f2) * 0.5f;
+  w[2] = ((1.0f - w[0]) - w[1]) - w[3];
+  return;
+#endif
   w[0] = f * (-0.5f + f * (1.0f - 0.5f * f));
   w[1] = 1.0f + f * f * (-2.5f + 1.5f * f);
   w[2] = f * (0.5f + f * (2.0f - 1.5f * f));

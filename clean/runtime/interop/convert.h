@@ -70,6 +70,10 @@ class Converter {
   // Records the output write: from the result buffer (R32_FLOAT elements, 3 per pixel; model K: 4 per pixel, RGBA) or,
   // when result is null, the bilinear fallback from the game's color texture (result.resource null).
   void record_output(ID3D12GraphicsCommandList* list, const WgFrame& f, const BufferRange& result);
+  // That bilinear fallback into `dst` instead of the game's output (executor=dx12, an output route through a texture
+  // of ours): `dst` has unordered access, is in UNORDERED_ACCESS before and after, and is viewed as `fmt` (a linear
+  // float format: no sRGB encoding here, the route's own pass after it does that).
+  void record_fallback_into(ID3D12GraphicsCommandList* list, const WgFrame& f, ID3D12Resource* dst, DXGI_FORMAT fmt);
   // The output pass from an RGBA32F texture holding the result (executor=dx12; the texture in UNORDERED_ACCESS before
   // and after): the operations of record_output's pass on the same FP32 values. False (*err) if its shader fails.
   bool record_output_tex(ID3D12GraphicsCommandList* list, const WgFrame& f, ID3D12Resource* proxy, std::string* err);
@@ -107,6 +111,9 @@ class Converter {
   uint32_t result_pixel_bytes() const { return model_k_ ? 16u : 12u; }
 
  private:
+  // record_output / record_fallback_into: the output pass into `out` (in `ostate` before and after), viewed as `ofmt`
+  void output_pass(ID3D12GraphicsCommandList* list, const WgFrame& f, const BufferRange& result, ID3D12Resource* out,
+                   DXGI_FORMAT ofmt, D3D12_RESOURCE_STATES ostate);
   bool model_k_ = false;
   struct Constants {
     uint32_t rx, ry, rw, rh;

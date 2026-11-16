@@ -23,6 +23,13 @@
 //   test_interop_d3d12.exe <runtime> matrix "<options naming the model>" [output heights, default 1080,1440,2160]
 //     R1 / H2: every usual upscaler-mode ratio x output size x declared maximum x HDR / LDR gets a default-executor context and a
 //     frame: each must be taken by the D3D12 executor (no create refusal, no HIP line); see case_matrix.
+//   test_interop_d3d12.exe <developer runtime> bnecktimeout "<Model L options>"
+//     Model L hybrid, the bottleneck wait timeout through the game path (WG_DEV_BNECK_ABORT=<n> in the environment: the
+//     developer runtime makes accepted frame n's bottleneck time out; 0: the very first frame); see case_bneck_timeout.
+//     Synchronous, pipelined, then synchronous with an output texture without unordered access.
+//   test_interop_d3d12.exe <runtime> callerpred "<Model L options>"
+//     Model L hybrid: the game's predicate on its list set again after our frame (false and true, and not known to the
+//     front end); see case_caller_predicate.
 //   test_interop_d3d12.exe <runtime> hipswitch "<Model M options>" "<Model K options>"
 //     Creates, dispatches, destroys M -> K -> M in one process and verifies the HIP DLL stays loaded between them.
 //   test_interop_d3d12.exe <runtime> hipleak "<options A>" ["<options B>" | -] [cycles] [frames] [MiB per cycle] [hold] [thread]
@@ -31,7 +38,7 @@
 //     (e.g. "" and "model=K"); fails when the process's GPU memory grows by more than the tolerance per cycle.
 //
 // Cases: inline, pipelined, depth, motion, motion_outres, exposure, not_ready, pipelined_not_ready, nohip,
-// noservices, timing (timing_log=1 summary), ready_flag (ready_wait=memory flag pass with timing marks), arena, arena_minsize (wrapper refusing shared objects below 100 MB), arena_keep (arena pool), wrapped, wrapped_noopen, wrapped_own
+// noservices, oldservices (an older version 2 services table), timing (timing_log=1 summary), ready_flag (ready_wait=memory flag pass with timing marks), arena, arena_minsize (wrapper refusing shared objects below 100 MB), arena_keep (arena pool), wrapped, wrapped_noopen, wrapped_own
 // (device wrapper whose CreateSharedHandle fails); default all.
 // "hip" (only when named; Windows with an RX 9000 GPU, the kernels next to the DLL and an installed model): the real
 // network through the same split, at 1707x960 -> 2560x1440, inline then pipelined; checks finite output, that the
@@ -52,6 +59,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -318,6 +326,21 @@ struct FrontEnd {
   uint64_t resumeValue = 0;
   int splits = 0;
   WgResult answer = WG_OK;  // what split_command_list returns (WG_ERROR_NOT_READY to test that path)
+  // command_list_predication: what the front end tracked on the game's list (the test sets it as it records)
+  WgResult predAnswer = WG_OK;
+  ID3D12Resource* predBuffer = nullptr;
+  uint64_t predOffset = 0;
+  uint32_t predOp = 0;
+  int predQueries = 0;
+  static WgResult predication(void* ctx, const WgFrame*, void** b, uint64_t* o, uint32_t* op) {
+    FrontEnd* fe = (FrontEnd*)ctx;
+    fe->predQueries++;
+    if (!b || !o || !op) return WG_ERROR_PARAMETER;
+    *b = nullptr, *o = 0, *op = 0;
+    if (fe->predAnswer != WG_OK) return fe->predAnswer;
+    *b = fe->predBuffer, *o = fe->predOffset, *op = fe->predOp;
+    return WG_OK;
+  }
 
   static WgResult split(void* ctx, const WgFrame* f, const WgSplitRequest* r) {
     FrontEnd* fe = (FrontEnd*)ctx;
@@ -534,11 +557,13 @@ struct Ctx {
   FrontEnd fe;
   WgFrontEndServices services = {};
   WgUpscaler* u = nullptr;
+  uint32_t servicesSize = 0;   // 0: sizeof(WgFrontEndServices); else an older front end's table size
   WgResult create(const Scene& s, uint32_t flags, const char* options, bool withServices = true) {
     fe.g = g;
-    services.struct_size = sizeof services;
+    services.struct_size = servicesSize ? servicesSize : (uint32_t)sizeof services;
     services.context = &fe;
     services.split_command_list = &FrontEnd::split;
+    services.command_list_predication = &FrontEnd::predication;
     WgCreateInfo ci = {};
     ci.struct_size = sizeof ci;
     ci.interface_version = WG_UPSCALER_INTERFACE_VERSION;
@@ -2528,6 +2553,406 @@ bool case_async_sim(Gpu& g, const char* dll, const std::string& common, const st
   return ok;
 }
 
+// Model L hybrid scene for the frame guard's cases: 1707 x 960 -> 2560 x 1440 (apply_test_dimensions may change it).
+static void guard_scene(Gpu& g, Scene& s, bool proxy) {
+  s.tw = 1707, s.th = 960, s.rx = 0, s.ry = 0, s.rw = 1707, s.rh = 960, s.ow = 2560, s.oh = 1440, s.mw = 1707,
+  s.mh = 960;
+  apply_test_dimensions(&s);
+  s.outUav = !proxy;   // proxy: an RGBA16F output without unordered access (the executor's RGBA16F texture + copy)
+  if (proxy)           // (a shader-resource state: no render-target flag on this texture)
+    s.outState = test_compute_list() ? D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+                                     : D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+  s.make(g);
+  s.set_color(g, 1);
+}
+
+// A texture of the output's shape filled with -7 (FP16) in every channel, in COPY_SOURCE: copied into a frame's output
+// texture before the dispatch, it shows what nothing of ours wrote.
+static ID3D12Resource* sentinel_texture(Gpu& g, const Scene& s) {
+  ID3D12Resource* t = g.texture(s.ow, s.oh, s.outRes, false, D3D12_RESOURCE_STATE_COPY_DEST);
+  std::vector<uint16_t> v((size_t)s.ow * s.oh * 4, to_half(-7.0f));
+  g.upload(t, s.ow, s.oh, 8, v.data(), D3D12_RESOURCE_STATE_COPY_SOURCE);
+  return t;
+}
+static void record_sentinel(Gpu& g, const Scene& s, ID3D12Resource* out, ID3D12Resource* sentinel) {
+  g.barrier(out, s.outState, D3D12_RESOURCE_STATE_COPY_DEST);
+  g.list->CopyResource(out, sentinel);
+  g.barrier(out, D3D12_RESOURCE_STATE_COPY_DEST, s.outState);
+}
+static bool all_sentinel(const std::vector<float>& o) {
+  for (float v : o)
+    if (v != -7.0f) return false;
+  return !o.empty();
+}
+static size_t count_sentinel(const std::vector<float>& o) {
+  size_t n = 0;
+  for (float v : o) n += v == -7.0f;
+  return n;
+}
+// The executor's fallback for a skipped frame (convert.cpp PASS_FALLBACK): the bilinear upscale of frame t's colour.
+static float fallback_err(const Scene& s, const std::vector<float>& o, int t) {
+  return max_err(o, [&](UINT x, UINT y, int k) {
+    const double fx = (x + 0.5) * s.rw / s.ow - 0.5, fy = (y + 0.5) * s.rh / s.oh - 0.5;
+    const int ax = (int)std::floor(fx), ay = (int)std::floor(fy);
+    const double wx = fx - ax, wy = fy - ay;
+    auto at = [&](int px, int py) {
+      px = std::min(std::max(px, 0), (int)s.rw - 1);
+      py = std::min(std::max(py, 0), (int)s.rh - 1);
+      return (double)Scene::cval(t, s.rx + px, s.ry + py, k);
+    };
+    const double top = at(ax, ay) * (1 - wx) + at(ax + 1, ay) * wx;
+    const double bot = at(ax, ay + 1) * (1 - wx) + at(ax + 1, ay + 1) * wx;
+    return (float)(top * (1 - wy) + bot * wy);
+  }, s.ow, s.oh);
+}
+
+// Frame t of the frame guard's cases: cyclic jitter, no motion, the given output texture.
+static WgFrame guard_frame(Gpu& g, const Scene& s, int t, ID3D12Resource* out) {
+  static const float jit[4][2] = {{0, -1.0f / 6}, {-0.25f, 1.0f / 6}, {0.25f, -7.0f / 18}, {-0.375f, -1.0f / 18}};
+  WgFrame f = s.frame(g, t);
+  f.motion_scale[0] = f.motion_scale[1] = 0.0f;
+  f.motion_offset[0] = f.motion_offset[1] = 0.0f;
+  f.jitter[0] = jit[(t - 1) % 4][0];
+  f.jitter[1] = jit[(t - 1) % 4][1];
+  f.output.resource = out;
+  return f;
+}
+
+// "bneckfresh" (a child process of case_bneck_timeout): a fresh context's first frame on frame t's inputs, its output
+// written to `path` as raw floats. A child, started without WG_DEV_BNECK_ABORT: the runtime reads that hook at create
+// from its own C runtime's copy of the environment, so a context made in the parent process would get the hook too
+// (with the hook on frame 0, its first frame would time out).
+static bool case_bneck_fresh(Gpu& g, const char* dll, const std::string& options, int t, bool proxy, const char* path) {
+  Scene s;
+  guard_scene(g, s, proxy);
+  s.set_color(g, t);
+  Ctx d;
+  d.g = &g;
+  if (!d.be.load(dll)) return false;
+  CHECK(d.create(s, WG_CREATE_HDR | WG_CREATE_DEPTH_INVERTED, options.c_str()) == WG_OK);
+  if (!d.u) return false;
+  WgResult r = WG_ERROR;
+  const std::vector<float> o = d.run(s, guard_frame(g, s, t, s.out), &r);
+  CHECK(r == WG_OK);
+  FILE* f = std::fopen(path, "wb");
+  if (!f) return false;
+  const bool ok = std::fwrite(o.data(), sizeof(float), o.size(), f) == o.size();
+  std::fclose(f);
+  return ok && r == WG_OK;
+}
+
+static bool fresh_in_child(const char* dll, const std::string& options, int t, bool proxy, std::vector<float>* out) {
+  char exe[MAX_PATH] = {}, tmp[MAX_PATH] = {};
+  GetModuleFileNameA(nullptr, exe, MAX_PATH);
+  GetTempPathA(MAX_PATH, tmp);
+  const std::string path = std::string(tmp) + "wg_bneck_fresh_" + std::to_string(GetCurrentProcessId()) + ".bin";
+  std::string cmd = std::string("\"") + exe + "\" \"" + dll + "\" bneckfresh \"" + options + "\" " + std::to_string(t) +
+                    (proxy ? " 1" : " 0") + " \"" + path + "\"";
+  char saved[64] = {};
+  const DWORD had = GetEnvironmentVariableA("WG_DEV_BNECK_ABORT", saved, sizeof saved);
+  SetEnvironmentVariableA("WG_DEV_BNECK_ABORT", nullptr);
+  STARTUPINFOA si = {};
+  si.cb = sizeof si;
+  PROCESS_INFORMATION pi = {};
+  std::vector<char> line(cmd.begin(), cmd.end());
+  line.push_back(0);
+  const BOOL started = CreateProcessA(nullptr, line.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi);
+  if (had && had < sizeof saved) SetEnvironmentVariableA("WG_DEV_BNECK_ABORT", saved);
+  if (!started) return std::printf("  cannot start the fresh-context child\n"), false;
+  const DWORD w = WaitForSingleObject(pi.hProcess, 120000);
+  DWORD code = 1;
+  GetExitCodeProcess(pi.hProcess, &code);
+  CloseHandle(pi.hThread);
+  CloseHandle(pi.hProcess);
+  if (w != WAIT_OBJECT_0 || code != 0) return std::printf("  fresh-context child failed (%lu)\n", code), false;
+  FILE* f = std::fopen(path.c_str(), "rb");
+  if (!f) return false;
+  std::fseek(f, 0, SEEK_END);
+  const long n = std::ftell(f);
+  std::fseek(f, 0, SEEK_SET);
+  out->assign((size_t)n / sizeof(float), 0.0f);
+  const bool ok = std::fread(out->data(), sizeof(float), out->size(), f) == out->size();
+  std::fclose(f);
+  DeleteFileA(path.c_str());
+  return ok;
+}
+
+// Model L hybrid: the bottleneck wait timeout through the game path (the backend's dispatch on the game's list, the
+// executor's caller-list recording; developer runtime with WG_DEV_BNECK_ABORT=<n>, read at create; n = 0: the very
+// first frame). The game passes a different output texture on each frame (two, alternating) and copies a sentinel
+// into it before our dispatch, so each frame's output shows exactly what that frame wrote:
+//   1. the timed-out frame (WG_OK), and in pipelined mode every frame queued after it until the refusal: the network
+//      and the executor's output pass are skipped under the device's frame guard, and the fallback under the inverse
+//      predication writes the bilinear upscale of THAT frame's colour into THAT frame's output texture; the game's own
+//      copy of the output after our dispatch in the same list still runs (the readback below is that copy);
+//   2. the refused frame: WG_ERROR_NOT_READY (this frame only: the front end's stand-in renders it, no takeover; in
+//      this harness nothing does), exactly one captured log line names the refusal, no failure or fallback line,
+//      nothing of ours in its output (the sentinel), the context kept;
+//   3. the reset frame (WG_OK): the network's output again, byte for byte a fresh context's first frame on the same
+//      inputs (a reset reads no history), and the frames after it run.
+// pipelined: up to 4 frames in flight, static colour, cyclic jitter; the refusal comes once the timeout count is read
+// back (1 .. 4 frames later). proxy: an output without unordered access (the RGBA16F texture + copy route).
+bool case_bneck_timeout(Gpu& g, const char* dll, const std::string& options, bool pipelined, bool proxy = false) {
+  const char* ab = std::getenv("WG_DEV_BNECK_ABORT");
+  if (!ab) { std::printf("  WG_DEV_BNECK_ABORT is not set (a developer runtime's check)\n"); CHECK(false); return false; }
+  const int A = std::atoi(ab) + 1;   // the runtime counts accepted frames from 0, this test's frames from 1
+  CHECK(A >= 1);
+  Scene s;
+  guard_scene(g, s, proxy);
+  ID3D12Resource* outs[2] = {s.out, g.texture(s.ow, s.oh, s.outRes, s.outUav, s.outState)};
+  ID3D12Resource* sentinel = sentinel_texture(g, s);
+  Ctx c;
+  c.g = &g;
+  if (!c.be.load(dll)) return false;
+  const WgResult cr = c.create(s, WG_CREATE_HDR | WG_CREATE_DEPTH_INVERTED, options.c_str());
+  CHECK(cr == WG_OK);
+  if (cr != WG_OK) return false;
+  const int T = A + 6;
+  std::vector<std::vector<float>> out(T + 1);
+  std::vector<WgResult> res(T + 1, WG_OK);
+  std::vector<std::vector<std::string>> lines(T + 1);
+  auto frame_of = [&](int t) { return guard_frame(g, s, t, outs[t % 2]); };
+  std::vector<ID3D12Resource*> rb(T + 1, nullptr);
+  std::vector<UINT> pitch(T + 1, 0);
+  for (int t = 1; t <= T; ++t) {
+    const int k = t % 4;
+    if (!pipelined) {
+      s.set_color(g, t);
+      g.begin();
+    } else if (!g.begin_ring(k)) {
+      std::printf("  HANG before frame %d\n", t);
+      CHECK(false);
+      return false;
+    }
+    record_sentinel(g, s, outs[t % 2], sentinel);
+    WgFrame f = frame_of(t);
+    f.command_list = g.list;
+    const size_t before = g_log.size();
+    res[t] = c.be.b->dispatch(c.u, &f);
+    lines[t].assign(g_log.begin() + (long)before, g_log.end());
+    rb[t] = record_readback(g, outs[t % 2], s.ow, s.oh, s.outState, &pitch[t]);   // the game's pass after ours
+    if (pipelined) g.ringv[k] = c.fe.submit_nowait();
+    else c.fe.submit();
+  }
+  g.wait_idle();
+  CHECK(g.fence->GetCompletedValue() >= g.fv);
+  g.split_alloc = nullptr;
+  for (int t = 1; t <= T; ++t) {
+    out[t] = read_rgb(rb[t], s.ow, s.oh, pitch[t]);
+    rb[t]->Release();
+  }
+  int R = -1, refusals = 0, bad = 0;
+  for (int t = 1; t <= T; ++t)
+    for (const std::string& m : lines[t]) {
+      if (m.find("frame refused (bottleneck wait timeout): ") != std::string::npos) ++refusals, R = t;
+      if (m.find("network frame failed") != std::string::npos || m.find("fallback") != std::string::npos) ++bad;
+    }
+  std::printf("  %s%s: timed-out frame %d, refused frame %d, refusal lines %d, failure / fallback lines %d\n",
+              pipelined ? "pipelined" : "synchronous", proxy ? " (output without unordered access)" : "", A, R,
+              refusals, bad);
+  CHECK(refusals == 1);
+  CHECK(bad == 0);
+  if (refusals != 1) return false;
+  CHECK(pipelined ? (R > A && R <= A + 4) : R == A + 1);
+  CHECK(R + 2 <= T);
+  if (R + 2 > T) return false;
+  for (int t = 1; t <= T; ++t) {
+    const WgResult want = t == R ? WG_ERROR_NOT_READY : WG_OK;
+    if (res[t] != want) std::printf("  frame %d: result %d (want %d)\n", t, (int)res[t], (int)want);
+    CHECK(res[t] == want);
+  }
+  // the skipped frames: this frame's colour, upscaled, in this frame's output texture
+  for (int t = A; t < R; ++t) {
+    const int ct = pipelined ? 1 : t;
+    const float e = fallback_err(s, out[t], ct);
+    const size_t sn = count_sentinel(out[t]);
+    std::printf("  frame %d (output %d): fallback max error vs the upscale of frame %d's colour %g, sentinel values %zu\n",
+                t, t % 2, ct, e, sn);
+    CHECK(e <= kTol);
+    CHECK(sn == 0);
+    if (!pipelined && t > 1) {
+      const float ep = fallback_err(s, out[t], t - 1);
+      CHECK(ep > 10 * kTol);   // not the previous frame's colour
+    }
+  }
+  // the refused frame: nothing of ours written (the front end's stand-in would render it)
+  {
+    const bool none = all_sentinel(out[R]);
+    std::printf("  refused frame %d (output %d): %s\n", R, R % 2,
+                none ? "nothing written (the sentinel)" : "WRITTEN (must be nothing)");
+    CHECK(none);
+  }
+  // the network's frames before and after: written, finite
+  size_t nonfinite = 0, sentinels = 0;
+  for (int t = 1; t <= T; ++t) {
+    if (t >= A && t <= R) continue;
+    for (float v : out[t]) nonfinite += !std::isfinite(v);
+    sentinels += count_sentinel(out[t]);
+  }
+  CHECK(nonfinite == 0);
+  CHECK(sentinels == 0);
+  if (!pipelined) {   // the reset frame against a fresh context's first frame on the same inputs (a child process)
+    std::vector<float> fresh;
+    const bool got = fresh_in_child(dll, options, R + 1, proxy, &fresh);
+    CHECK(got);
+    CHECK(fresh.size() == out[R + 1].size());
+    size_t n1 = 0;
+    double w1 = 0.0;
+    for (size_t i = 0; i < fresh.size() && i < out[R + 1].size(); ++i)
+      if (!(fresh[i] == out[R + 1][i])) {
+        ++n1;
+        w1 = std::max(w1, std::fabs((double)fresh[i] - (double)out[R + 1][i]));
+      }
+    std::printf("  reset frame %d vs a fresh context's first frame: %zu of %zu values differ (max %.6g)\n", R + 1, n1,
+                fresh.size(), w1);
+    CHECK(n1 == 0);
+  }
+  outs[1]->Release();
+  sentinel->Release();
+  return true;
+}
+
+// An older version 2 front end: its WgFrontEndServices ends after split_command_list (no command_list_predication).
+// The split executor's create must take it (the table is checked up to the split service), and its frames split; the
+// appended predicate service is never called through the short table.
+bool case_old_services(Gpu& g, const char* dll) {
+  Ctx c;
+  c.g = &g;
+  if (!c.be.load(dll)) return false;
+  Scene s;
+  s.make(g);
+  c.servicesSize = (uint32_t)offsetof(WgFrontEndServices, command_list_predication);
+  const WgResult cr = c.create(s, WG_CREATE_HDR | WG_CREATE_DEPTH_INVERTED, "executor=d3d12-test");
+  std::printf("  version 2 table of %u bytes (current %u): create %d\n", c.servicesSize, (unsigned)sizeof(WgFrontEndServices),
+              (int)cr);
+  CHECK(cr == WG_OK);
+  if (!c.u) return false;
+  for (int t = 1; t <= 2; ++t) {
+    s.set_color(g, t);
+    WgResult r = WG_ERROR;
+    c.run(s, s.frame(g, t), &r);
+    CHECK(r == WG_OK);
+  }
+  CHECK(c.fe.splits == 2);
+  CHECK(c.fe.predQueries == 0);
+  return true;
+}
+
+// Model L hybrid, the game's predicate on its list (WgFrontEndServices::command_list_predication): the frame guard
+// replaces it while our frame records and sets it again after. The game sets SetPredication(buffer, 8, NOT_EQUAL_ZERO)
+// before our dispatch (the value at offset 8; offset 0 holds the opposite value, so a predicate set again at another
+// offset shows), and records conditional work after it: a copy of a marker into a readback buffer.
+//   frame 1, predicate false (0: the game's conditional work runs): our output written, the marker copied;
+//   frame 2, predicate true (1: skipped): our output written all the same (our frame records unconditionally), the
+//            marker NOT copied (the game's predicate is in effect again after our dispatch);
+//   frame 3, the front end cannot tell the predicate (WG_ERROR_NOT_READY): WG_ERROR_NOT_READY, nothing of ours
+//            written, the game's predicate untouched (true: the marker not copied);
+//   frame 4, predicate false again: the context kept, our output written, the marker copied.
+bool case_caller_predicate(Gpu& g, const char* dll, const std::string& options) {
+  Scene s;
+  guard_scene(g, s, false);
+  ID3D12Resource* sentinel = sentinel_texture(g, s);
+  ID3D12Resource* pred = g.buffer(256, D3D12_HEAP_TYPE_DEFAULT);   // COPY_DEST
+  ID3D12Resource* marker = g.buffer(256, D3D12_HEAP_TYPE_DEFAULT);
+  ID3D12Resource* up = g.buffer(512, D3D12_HEAP_TYPE_UPLOAD);
+  {
+    uint8_t* p = nullptr;
+    up->Map(0, nullptr, (void**)&p);
+    for (int i = 0; i < 256; ++i) p[256 + i] = (uint8_t)(0xA5 ^ i);   // the marker
+    up->Unmap(0, nullptr);
+    g.begin();
+    g.list->CopyBufferRegion(marker, 0, up, 256, 256);
+    g.barrier(marker, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    g.barrier(pred, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PREDICATION);
+    g.submit();
+  }
+  auto set_pred = [&](uint64_t v) {
+    uint8_t* p = nullptr;
+    up->Map(0, nullptr, (void**)&p);
+    const uint64_t other = v ? 0 : 1;
+    std::memcpy(p, &other, 8);
+    std::memcpy(p + 8, &v, 8);
+    up->Unmap(0, nullptr);
+    g.begin();
+    g.barrier(pred, D3D12_RESOURCE_STATE_PREDICATION, D3D12_RESOURCE_STATE_COPY_DEST);
+    g.list->CopyBufferRegion(pred, 0, up, 0, 16);
+    g.barrier(pred, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PREDICATION);
+    g.submit();
+  };
+  Ctx c;
+  c.g = &g;
+  if (!c.be.load(dll)) return false;
+  const WgResult cr = c.create(s, WG_CREATE_HDR | WG_CREATE_DEPTH_INVERTED, options.c_str());
+  CHECK(cr == WG_OK);
+  if (cr != WG_OK) return false;
+  c.fe.predBuffer = pred;
+  c.fe.predOffset = 8;
+  c.fe.predOp = (uint32_t)D3D12_PREDICATION_OP_NOT_EQUAL_ZERO;
+  struct Step {
+    uint64_t value;
+    WgResult answer, want;
+    bool written, copied;
+  } steps[4] = {{0, WG_OK, WG_OK, true, true},
+                {1, WG_OK, WG_OK, true, false},
+                {1, WG_ERROR_NOT_READY, WG_ERROR_NOT_READY, false, false},
+                {0, WG_OK, WG_OK, true, true}};
+  for (int t = 1; t <= 4; ++t) {
+    const Step& st = steps[t - 1];
+    set_pred(st.value);
+    s.set_color(g, t);
+    c.fe.predAnswer = st.answer;
+    ID3D12Resource* mrb = g.buffer(256, D3D12_HEAP_TYPE_READBACK);
+    {
+      uint8_t* p = nullptr;
+      D3D12_RANGE none = {0, 0};
+      mrb->Map(0, &none, (void**)&p);
+      std::memset(p, 0, 256);
+      mrb->Unmap(0, nullptr);
+    }
+    g.begin();
+    record_sentinel(g, s, s.out, sentinel);
+    g.list->SetPredication(pred, 8, D3D12_PREDICATION_OP_NOT_EQUAL_ZERO);
+    WgFrame f = s.frame(g, t);
+    f.command_list = g.list;
+    const WgResult r = c.be.b->dispatch(c.u, &f);
+    g.list->CopyBufferRegion(mrb, 0, marker, 0, 256);   // the game's conditional work after ours
+    g.list->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+    UINT pitch = 0;
+    ID3D12Resource* rb = record_readback(g, s.out, s.ow, s.oh, s.outState, &pitch);
+    c.fe.submit();
+    const std::vector<float> o = read_rgb(rb, s.ow, s.oh, pitch);
+    rb->Release();
+    bool copied = true, untouched = true;
+    {
+      uint8_t* p = nullptr;
+      mrb->Map(0, nullptr, (void**)&p);
+      for (int i = 0; i < 256; ++i) copied &= p[i] == (uint8_t)(0xA5 ^ i), untouched &= p[i] == 0;
+      mrb->Unmap(0, nullptr);
+    }
+    mrb->Release();
+    size_t nonfinite = 0;
+    for (float v : o) nonfinite += !std::isfinite(v);
+    const size_t sn = count_sentinel(o);
+    const bool written = sn == 0 && nonfinite == 0;
+    std::printf("  frame %d: game predicate %s%s, result %d, our output %s, the game's conditional copy after ours %s\n", t,
+                st.value ? "true (skip)" : "false (run)", st.answer == WG_OK ? "" : " (front end: not known)", (int)r,
+                written ? "written" : sn == o.size() ? "not written" : "PARTLY written",
+                copied ? "ran" : untouched ? "skipped" : "PARTLY ran");
+    CHECK(r == st.want);
+    CHECK(written == st.written);
+    if (!st.written) CHECK(sn == o.size());
+    CHECK(copied == st.copied);
+    CHECK(copied || untouched);
+  }
+  CHECK(c.fe.predQueries >= 4);
+  c.fe.predAnswer = WG_OK;
+  pred->Release();
+  marker->Release();
+  up->Release();
+  sentinel->Release();
+  return true;
+}
+
 int main(int argc, char** argv) {
   if (argc < 2) {
     std::printf("usage: test_interop_d3d12 <wronggpu_runtime.dll> [case]\n");
@@ -2557,6 +2982,7 @@ int main(int argc, char** argv) {
       {"pipelined_not_ready", [&] { return case_pipelined_not_ready(g, dll); }},
       {"nohip", [&] { return case_create_fails(g, dll, true); }},
       {"noservices", [&] { return case_create_fails(g, dll, false); }},
+      {"oldservices", [&] { return case_old_services(g, dll); }},
       {"timing", [&] { return case_timing(g, dll); }},
       {"copies", [&] { return case_sync(g, dll, true, "executor=d3d12-test;input_copy=1;output_copy=1") && copied(); }},
       {"copies_pipelined",
@@ -2618,6 +3044,25 @@ int main(int argc, char** argv) {
     const bool ok = case_hipleak(g, dll, a, b, argc > 5 ? std::atoi(argv[5]) : 12, argc > 6 ? std::atoi(argv[6]) : 30,
                                  argc > 7 ? std::atof(argv[7]) : kLeakToleranceMiB,
                                  flag("hold"), flag("thread"));
+    std::puts(ok && !g_fail ? "PASS" : "FAIL");
+    return ok && !g_fail ? 0 : 1;
+  }
+  if (only == "bnecktimeout") {   // synchronous, pipelined, synchronous with an output without unordered access
+    const std::string opt = argc > 3 ? argv[3] : "";
+    const std::string which = argc > 4 ? argv[4] : "";   // "proxy": that variant alone
+    const bool a = which == "proxy" || case_bneck_timeout(g, dll, opt, false);
+    const bool b = which == "proxy" || case_bneck_timeout(g, dll, opt, true);
+    const bool p = case_bneck_timeout(g, dll, opt, false, true);
+    std::puts(a && b && p && !g_fail ? "PASS" : "FAIL");
+    return a && b && p && !g_fail ? 0 : 1;
+  }
+  if (only == "bneckfresh") {   // (case_bneck_timeout's child) <options> <frame> <proxy 0|1> <output file>
+    if (argc < 7) return 2;
+    const bool ok = case_bneck_fresh(g, dll, argv[3], std::atoi(argv[4]), std::atoi(argv[5]) != 0, argv[6]);
+    return ok && !g_fail ? 0 : 1;
+  }
+  if (only == "callerpred") {   // Model L hybrid options (release or developer runtime)
+    const bool ok = case_caller_predicate(g, dll, argc > 3 ? argv[3] : "");
     std::puts(ok && !g_fail ? "PASS" : "FAIL");
     return ok && !g_fail ? 0 : 1;
   }

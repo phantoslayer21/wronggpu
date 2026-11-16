@@ -34,9 +34,22 @@
 // @wg-kernel l_post_recon_p12 co=l_post.co entry=l_post_recon_p12 block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1
 // @wg-kernel l_post_recon_ldr co=l_post.co entry=l_post_recon_ldr block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_LDR=1
 // @wg-kernel l_post_recon_p12_ldr co=l_post.co entry=l_post_recon_p12_ldr block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1,LP_LDR=1
+//
+// LP_C12 = 1 (Q11 part C / 0.6.5 hybrid_full: runtime WG_L_POST=c12, and WG_L_FORM=hybrid on native D3D12; port of
+// l_post__lc12.co = l_post.hip with WG_LP_C1 = 1, WG_CR_C2 = 1, tag "lc12"): the gather exponent in the machine-code form
+// eps = fma(h(u v), C, fma(h(v v), B, h(h(u u) A))) (C1) and the Catmull-Rom weights' fused forms (C2: f2 = f f,
+// f3 = f f2, w0 = fused(-(f + f3), 1/2, f2), w1 = fused(f3, 1.5, -RN(2.5 f2)) + 1, w3 = RN(RN(f3 - f2) 1/2),
+// w2 = ((1 - w0) - w1) - w3). The default entries above are unchanged (LP_C12 = 0).
+// @wg-kernel lc12/l_post_recon co=l_post__lc12.co entry=l_post_recon block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_C12=1
+// @wg-kernel lc12/l_post_recon_p12 co=l_post__lc12.co entry=l_post_recon_p12 block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1,LP_C12=1
+// @wg-kernel lc12/l_post_recon_ldr co=l_post__lc12.co entry=l_post_recon_ldr block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_LDR=1,LP_C12=1
+// @wg-kernel lc12/l_post_recon_p12_ldr co=l_post__lc12.co entry=l_post_recon_p12_ldr block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1,LP_LDR=1,LP_C12=1
 #include "wg_platform.hlsli"
 #ifndef LP_P12
 #define LP_P12 0
+#endif
+#ifndef LP_C12
+#define LP_C12 0
 #endif
 #ifndef LP_LDR
 #define LP_LDR 0
@@ -251,6 +264,11 @@ LGather gather_zero()
 float tap_weight(uint t[kTexDw], half uu, half vv, half uv)
 {
     const half kA = h_bits(t[4] >> 16), kB = h_bits(t[5]), kC = h_bits(t[5] >> 16);
+#if LP_C12
+    const half ta = mulh(uu, kA);                 // (#231's product: opqh(uu kA), or mad(uu, kA, -0) with LP_FMANZ)
+    const half s = mad(vv, kB, ta);               // C1: the row term fused into the sum
+    const half eps = mad(uv, kC, s);
+#else
 #if LP_MUT == 1
     const half ta = mulh(uu, kB), tb = mulh(vv, kB);   // mutant 1: wrong factor
 #else
@@ -258,6 +276,7 @@ float tap_weight(uint t[kTexDw], half uu, half vv, half uv)
 #endif
     const half s = tb + ta;
     const half eps = mad(uv, kC, s);
+#endif
     const float w = exp2((float)opqh(eps));
     return w >= kMinNormal ? w : 0.0f;
 }
@@ -275,6 +294,14 @@ void gather_acc(inout LGather g, uint t[kTexDw], float w, uint hwb)
 float4 cr_weights(float f)
 {
     float4 w;
+#if LP_C12
+    const float f2 = opq(f * f), f3 = opq(f * f2);
+    w.x = mad(-(f + f3), 0.5f, f2);
+    w.y = mad(f3, 1.5f, -opq(2.5f * f2)) + 1.0f;
+    w.w = opq(opq(f3 - f2) * 0.5f);
+    w.z = ((1.0f - w.x) - w.y) - w.w;
+    return w;
+#endif
     w.x = f * (-0.5f + f * (1.0f - 0.5f * f));
     w.y = 1.0f + f * f * (-2.5f + 1.5f * f);
     w.z = f * (0.5f + f * (2.0f - 1.5f * f));

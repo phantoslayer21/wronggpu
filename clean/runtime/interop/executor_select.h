@@ -241,6 +241,26 @@ inline std::string drop_hip_only_filter(const std::string& options, std::string*
 // no output texture, a render size outside the configured maximum, an output texture without unordered access, ...).
 inline bool frame_refused(const std::string& err) { return err.rfind("frame not taken", 0) == 0; }
 
+// A frame the executor cannot take THIS time only (nothing recorded), the next one may run: Model L hybrid when the
+// front end cannot report the game's predicate on its list (WgFrontEndServices::command_list_predication; the frame
+// guard would replace it). The backend answers WG_ERROR_NOT_READY: the front end's stand-in renders that frame, no
+// takeover, and the context stays the backend's.
+inline bool frame_not_ready(const std::string& err) { return err.rfind("frame not ready", 0) == 0; }
+
+// Model L hybrid: the frame after one whose bottleneck wait timed out on the GPU (runtime.cpp kBneckTimeoutRefusal;
+// hyb_bneck.hlsl). The timed-out frame and the frames queued after it were skipped on the GPU (the device's frame guard
+// predicates the network and the executor's output pass alike), and each of them got the executor's fallback instead:
+// under the INVERSE predication on the same word, a simple upscale of that frame's colour into that frame's output
+// texture (Converter::record_output with no result, or through the route's texture of ours), so every such frame,
+// the first one of a context included, shows an image whatever output texture the game passed. This frame (the one
+// whose start sees the timeout count move) records nothing that writes (only the game textures' state changes,
+// restored): the backend logs one line and answers WG_ERROR_NOT_READY, the documented one-frame result, so the front
+// end's stand-in renders that frame without taking the context over; the context stays the backend's (never failed_),
+// and the next frame runs the network as a reset (the runtime starts over, and the backend asks for the reset too).
+inline bool frame_timeout_refused(const std::string& err) {
+  return err.rfind("frame refused (bottleneck wait timeout): ", 0) == 0;
+}
+
 inline std::string k_refusal_line(uint64_t frame, const std::string& why) {
   return "frame " + std::to_string(frame) + ": model K: the D3D12 executor does not take this frame (" + why +
          "); the frame goes to the front end's own upscaler (AMD FSR, else its stand-in), never to the HIP executor";

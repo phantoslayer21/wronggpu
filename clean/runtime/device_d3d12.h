@@ -87,6 +87,17 @@ class NativeD3D12Ext {
   // completion marker (ID3D12GraphicsCommandList2::WriteBufferImmediate) behind the recorded work.
   virtual bool begin_external(ID3D12GraphicsCommandList* list, std::string* err) = 0;
   virtual bool end_external(std::string* err) = 0;
+  // The caller's predicate on that list before our recording (ID3D12GraphicsCommandList::SetPredication as the front
+  // end tracked it; buffer null: none), given before begin_external for a recording that uses the frame guard
+  // (Device::guard_begin, Model L hybrid), whose predication replaces the caller's on that list: begin_external lifts
+  // it (the whole recording runs unconditionally) and end_external sets it again exactly as given, so the caller's
+  // conditional work after ours stays conditional. Not given: the predication is left as the recording leaves it.
+  virtual void set_caller_predicate(ID3D12Resource* buffer, uint64_t offset, D3D12_PREDICATION_OP op) = 0;
+  // The frame guard's predicate buffer while it is held on the caller's list (after the network's frame, until
+  // end_external), else null: the executor records its output-pass fallback under the INVERSE predication on it
+  // (D3D12_PREDICATION_OP_EQUAL_ZERO: runs only when the frame was skipped) and sets the guard's
+  // (D3D12_PREDICATION_OP_NOT_EQUAL_ZERO) again after it. Only from within a record_pass callback of that recording.
+  virtual ID3D12Resource* guard_held_predicate() const = 0;
   // Frames recorded so far / known complete (the marker, read without waiting). Without ID3D12GraphicsCommandList2
   // there is no marker and every recorded frame counts as complete (external_markers() false).
   virtual uint64_t external_recorded() const = 0;

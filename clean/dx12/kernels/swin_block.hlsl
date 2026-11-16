@@ -31,7 +31,107 @@
 // @wg-kernel swin_block_c96_add_ex_nc co=swin.co block=256 wave=32 args=p,p,p,p,u,u,u,u,p defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=1,SW_SAFE=1,SW_ECL=128
 #include "wg_platform.hlsli"
 #include "wg_gelu_lut.hlsli"
+// SW_HYB 1: the HYBRID block form (WG_L_FORM / WG_M_FORM = hybrid; hlsl/wg_hyb.hlsli, hlsl/hyb_block.hlsli): float32 FP8
+// chains with one FP16 rounding at each chain's end, the original's FP16 norm / softmax / GELU and its start values;
+// the weights in this file's layout with the original's values (FP16 biases, g', B; plain FP8 matrices). Default 0.
+#ifndef SW_HYB
+#define SW_HYB 0
+#endif
+#ifndef SW_HYB_MUT_ORDER
+#define SW_HYB_MUT_ORDER 0   // check mutants only: 1 one W2 chunk pair reversed, 2 the pair of every W2 group,
+                             // 3 the odd W2 groups in a second accumulator added at the end (one extra f32 rounding),
+                             // 4 the W2 chain end moved by one float32 ulp before its RN16
+#endif
+#ifndef SW_HYB_DUMP
+#define SW_HYB_DUMP 0        // check variant only (probe kernels, l_hyb_stage_check.py): every stage's values to `dumpp`
+#endif
+#if SW_HYB_DUMP && !SW_HYB
+#error "SW_HYB_DUMP: hybrid kernels only"
+#endif
+#if SW_HYB
+// The hybrid kernels at every width (C = 32, 64, 96, 128) run the plain schedule (the C = 32 knob set): no scheduling
+// knob of the M-form kernels, no GELU table of theirs (hyb_gelu_q8 has its own), and every output pack through
+// hyb_q8_of_chain (no clamp-skip shortcut: FP8(x2) without the RN16 is not the hybrid output). Set here, before the
+// defaults below; setting one of them on a kernel line stops the build (the check after this block).
+#ifndef SW_GELU
+#define SW_GELU 0
+#endif
+#ifndef SW_CLAMP_SKIP
+#define SW_CLAMP_SKIP 0
+#endif
+#ifndef SW_NORM1_EARLY
+#define SW_NORM1_EARLY 0
+#endif
+#ifndef SW_NORM2_EARLY
+#define SW_NORM2_EARLY 0
+#endif
+#ifndef SW_NORM_R2
+#define SW_NORM_R2 0
+#endif
+#ifndef SW_SMAX_ADDST
+#define SW_SMAX_ADDST 0
+#endif
+#ifndef SW_SMAX_STAGED
+#define SW_SMAX_STAGED 0
+#endif
+#ifndef SW_HEAD_UNROLL
+#define SW_HEAD_UNROLL 0
+#endif
+#ifndef SW_HEAD_PAIRS
+#define SW_HEAD_PAIRS 0
+#endif
+#ifndef SW_MLP_PAIRS
+#define SW_MLP_PAIRS 0
+#endif
+#ifndef SW_MLP_STEP
+#define SW_MLP_STEP 1
+#endif
+#ifndef SW_REV_PHI
+#define SW_REV_PHI 0
+#endif
+#ifndef SW_COMMIT_EARLY
+#define SW_COMMIT_EARLY 0
+#endif
+#ifndef SW_N2_BATCH
+#define SW_N2_BATCH 0
+#endif
+#ifndef SW_GELU_LATE0
+#define SW_GELU_LATE0 0
+#endif
+#endif
+#if SW_HYB && (SW_GELU != 0 || SW_HEAD_UNROLL || SW_HEAD_PAIRS || SW_MLP_PAIRS || SW_MLP_STEP != 1 || SW_COMMIT_EARLY || \
+               SW_N2_BATCH)
+#error "SW_HYB: the hybrid kernels run the plain schedule (no M-form scheduling knobs)"
+#endif
+// (SW_SRC 3 and SW_OUT_COEF12 are allowed: the linears' prologue gives the block the same FP16 values as the x2 map,
+// and the pack12 epilogue reads the same FP16 output, converted by the driver's RNE as the hybrid output point does)
+#if SW_HYB &&(SW_ECL > 0 || SW_NORM1_EARLY || SW_NORM2_EARLY || SW_NORM_R2 || SW_SMAX_STAGED || SW_SMAX_ADDST || \
+               SW_REV_PHI || SW_CLAMP_SKIP)
+#error "SW_HYB: only the plain block path (no fused expand, no scheduling knobs) has the hybrid form so far"
+#endif
+#if SW_HYB && SW_OUT_COEF12 && !COEF_CVT_HW
+#error "SW_HYB with SW_OUT_COEF12: COEF_CVT_HW 1 (the driver's RNE conversion of the hybrid output point)"
+#endif
+// SW_MEGA 1 (kernels/hyb_bneck.hlsl only): the body below becomes the function sw_item(), one item (8 windows) of the
+// bottleneck's persistent queue; its arguments are the queue kernel's (bneck.hlsl's), and the block's x, out_p, w, ox,
+// oy are statics the queue sets per item (wg_bid_ = the item's index in its block). The input gather and the output
+// store use the coherent view (the maps are written by other workgroups of the same launch). The same instructions on
+// the same values otherwise: b5's bytes equal six swin_block_c128_hyb launches.
+#ifndef SW_MEGA
+#define SW_MEGA 0
+#endif
+#if SW_MEGA && (!SW_HYB || SW_C != 128 || SW_ADD || SW_ECL > 0 || SW_SRC || SW_OUT_F16 || SW_OUT_COEF12 || SW_HYB_DUMP)
+#error "SW_MEGA: the hybrid C128 bottleneck block only (plain FP8 map in and out, no dump)"
+#endif
 
+#if SW_MEGA
+WG_ARGS_BEGIN
+    uint a_x, a_out, a_tmp, a_sync, a_w0, a_w1, a_w2, a_w3, a_w4, a_w5;   // pointers (bneck.hlsl's arguments)
+    int H, W, a_oxe, a_oye, a_oxo, a_oyo, a_groups;
+WG_ARGS_END
+static uint x, out_p, w;   // the current item's block: input map, output map, weight section
+static int ox, oy;         // its window offsets
+#else
 WG_ARGS_BEGIN
     uint x, xadd, out_p, w;   // pointers
     int H, W, ox, oy;
@@ -45,7 +145,11 @@ WG_ARGS_BEGIN
 #if SW_SRC == 3
     uint linW1, linW2;                 // pointers: enc0.Win1, enc0.Win2 (x = the FP8 q halo map)
 #endif
+#if SW_HYB_DUMP
+    uint dumpp;                        // pointer: the stage dump (HD_WORDS words per lane of every real window)
+#endif
 WG_ARGS_END
+#endif
 
 // ---- BlockLayout<C, HEADS, MLP> (FORMATS.md, "Swin block section") ---------------------------------------------------
 #define KC (SW_C / 16)
@@ -88,6 +192,8 @@ WG_ARGS_END
 #define HPU 8     // MTH 16, limit 8
 #elif SW_C == 96
 #define HPU 4     // MTH 24, limit 5
+#elif SW_C == 128 && SW_HYB
+#define HPU 4     // MTH 32, limit 4 (the hybrid bottleneck block; the M-form C = 128 blocks are bneck.hlsl)
 #else
 #error "SW_C: 64 or 96"
 #endif
@@ -395,12 +501,56 @@ uint L_mlp(uint u) { return L_STREAM + SW_HEADS * HEAD_BYTES + u * MLP_BYTES; }
 // Inner FP8 pack (HIP pack_in<SAFE>) with the driver conversion (wave-uniform control flow); the output pack is sw_pack_q8.
 uint2 pack_in(v8f d)
 {
-#if SW_SAFE
+#if SW_HYB
+    return wg_pack_q8_ags(d);
+#elif SW_SAFE
     return wg_pack_q8_nc_ags(d);
 #else
     return wg_pack_q8_inner_ags(d);
 #endif
 }
+
+#if SW_HYB
+#include "wg_hyb.hlsli"
+// a zero the compiler cannot prove (the grid height is never negative): hyb_block.hlsli's contraction barrier.
+// HYB_SCAN_MUTANT=1 (the fused-square scan's mutant, *_scanmut, never in a model build): a literal zero, i.e. the
+// barrier removed; build_dx12.py requires the scan to FAIL on it
+#if HYB_SCAN_MUTANT
+#define HYB_OPAQUE0 0u
+#else
+// the unknown bit in BOTH FP16 halves (bits 0 and 16): with bit 0 only, the compiler proved the high half untouched
+// and fused it (v_and_or_b32 on the low half, v_fma_f16 on .h)
+#define HYB_OPAQUE0 (((uint)H >> 31u) * 0x10001u)
+#endif
+#include "hyb_block.hlsli"
+#endif
+#if SW_HYB_DUMP
+// Stage dump (l_hyb_stage_check.py): per real window and lane, HD_WORDS 32-bit words, every value in the lane's own
+// register layout (float32 bits; P as its packed FP16 words). Fields: X the block input (after the skip add), Y1 norm1's
+// output; per head (60 words): UQ RN16 of the q/k chain (2 tiles), V RN16 of the v chain (2 tiles), S RN16 of the score
+// chain, P (4 words), O RN16 of the P V chain (2 tiles); Z RN16 of the Wp chain, Y2 norm2's output, H RN16 of the W1
+// chains (MTH tiles), OUT RN16 of the W2 chain (the block output before its FP8 / FP16 point). Only values the kernel
+// computes anyway; the stores are its only addition.
+#define HD_HEAD (16u * KC)
+#define HD_Z (HD_HEAD + 60u * SW_HEADS)
+#define HD_Y2 (HD_Z + 8u * KC)
+#define HD_H (HD_Y2 + 8u * KC)
+#define HD_OUT (HD_H + 8u * MTH)
+#define HD_WORDS (HD_OUT + 8u * KC)
+static uint hd_base;
+static bool hd_on;
+void hd_st4(uint word, uint4 a) { if (hd_on) wg_st128(dumpp, (hd_base + word) * 4u, a); }
+void hd_st8(uint word, v8f a)
+{
+    hd_st4(word, uint4(asuint(a.v[0]), asuint(a.v[1]), asuint(a.v[2]), asuint(a.v[3])));
+    hd_st4(word + 4u, uint4(asuint(a.v[4]), asuint(a.v[5]), asuint(a.v[6]), asuint(a.v[7])));
+}
+#define HD_ST8(word, a) hd_st8(word, a)
+#define HD_ST4(word, a) hd_st4(word, a)
+#else
+#define HD_ST8(word, a)
+#define HD_ST4(word, a)
+#endif
 
 // ---- Stager<MAXU, THREADS>: global -> registers (fetch) -> LDS (commit), `chunks` 16-byte chunks (a compile-time
 // constant at every call, so the row tests fold): lane tid moves chunks tid, tid + THREADS, ...; in a partial last row the
@@ -432,7 +582,11 @@ void st_commit(Stager s, uint dst, uint chunks, uint tid)
 void load_frags_g(uint base, uint off, out uint2 f[KC])
 {
     [unroll] for (uint i = 0; i < KC / 2; ++i) {
+#if SW_MEGA
+        uint4 v = wg_mem_gc.Load4(base + off + 16u * i);   // written by other workgroups of this launch
+#else
         uint4 v = wg_ld128(base, off + 16u * i);
+#endif
         f[2 * i] = v.xy; f[2 * i + 1] = v.zw;
     }
 }
@@ -443,8 +597,8 @@ void load_frags_g(uint base, uint off, out uint2 f[KC])
 #ifndef SW_OUT_F16
 #define SW_OUT_F16 0
 #endif
-#if (SW_SRC != 0 || SW_OUT_F16) && (SW_ADD || SW_ECL > 0)
-#error "SW_SRC / SW_OUT_F16: plain blocks only"
+#if (SW_SRC != 0 || (SW_OUT_F16 && !SW_HYB)) && (SW_ADD || SW_ECL > 0)
+#error "SW_SRC / SW_OUT_F16: plain blocks only (the hybrid C32 decoder: SW_OUT_F16 with SW_ADD, the skip)"
 #endif
 #ifndef SW_OUT_COEF12
 #define SW_OUT_COEF12 0
@@ -509,9 +663,10 @@ void sw_load_halo_lin(uint base, int pr, int pc, int W, uint lane, uint hh, out 
         f[k].v[4] = wg_h2f_lo(y[k].z); f[k].v[5] = wg_h2f_hi(y[k].z); f[k].v[6] = wg_h2f_lo(y[k].w); f[k].v[7] = wg_h2f_hi(y[k].w);
     }
 }
-#elif SW_SRC == 2
+#elif SW_SRC == 2 || (SW_HYB && SW_ADD)
 // LCoarseFp8Src: a member outside the grid takes the mirrored 2 x 2 group (mirror of the group index) and keeps its
-// sub-pixel; the byte offset of the lane's half of that pixel
+// sub-pixel; the byte offset of the lane's half of that pixel (also the hybrid decoder blocks' expanded map E: the
+// table's shared_dec_border "coarse"; their skip map S keeps the fine mirror)
 uint sw_coarse_src(int pr, int pc, int H, int W, uint hh)
 {
     const int r = 2 * sw_mirror(pr >> 1, H >> 1) + (pr & 1), c = 2 * sw_mirror(pc >> 1, W >> 1) + (pc & 1);
@@ -634,14 +789,26 @@ void fused_expand(uint tail, uint e_lds, int nwx, int nwin, uint tid, int blk, u
 #define SW_ENTRY SW_ENTRY_OVERRIDE
 #endif
 
+#if SW_MEGA
+// the body's global stores (its output map, read by other workgroups of this launch) through the coherent view
+#define wg_st128(b, o, v) wg_mem_gc.Store4((b) + (o), (v))
+void sw_item()   // one queue item (hyb_bneck.hlsl): the block on windows 8 wg_bid_ .. + 7 of the current block
+#else
 WG_KERNEL(SW_ENTRY)
+#endif
 {
+#if !SW_MEGA
     WG_SETUP();
+#endif
     const uint tid = wg_lane_id();
     const uint lane = tid & 31u, t = lane & 15u, hh = lane >> 4;
     const int nwx = (W + ox + 3) >> 2, nwy = (H + oy + 3) >> 2, nwin = nwx * nwy;
     const uint wave_id = (uint)wg_uniform((int)(tid >> 5));
     const int win0 = (int)(wg_block_id() * (THREADS / 32) + wave_id);
+#if SW_HYB_DUMP
+    hd_on = win0 < nwin;
+    hd_base = ((uint)win0 * 32u + lane) * HD_WORDS;
+#endif
 
     Stager stage;
     st_fetch(stage, w + L_head(0), HEAD_BYTES / 16, tid);   // unit 0
@@ -676,7 +843,7 @@ WG_KERNEL(SW_ENTRY)
 #elif SW_SRC == 3
     v8f xf[KC];
     sw_load_halo_lin(x, pr, pc, W, lane, hh, xf);
-#elif SW_SRC == 2
+#elif SW_SRC == 2 || (SW_HYB && SW_ADD)
     load_frags_g(x, sw_coarse_src(pr, pc, H, W, hh), xa);
 #else
     load_frags_g(x, src, xa);
@@ -714,8 +881,25 @@ WG_KERNEL(SW_ENTRY)
 #endif
 #if SW_ADD
             acc[k] = sw_add8(acc[k], sw_unpack_fp8(xb[k]));
+#if SW_HYB
+            acc[k] = hyb_round16(acc[k]);   // x = RN16(dec(P) + dec(S))
+#endif
 #endif
         }
+#if SW_HYB
+        // y = the original's norm (FP16 tree); a = FP8(y); the Wp chain starts at RN16(bp + x)
+        {
+            const uint g1 = w + L_G1 + hh * (HALF * 4), bp = w + L_BP + hh * 32u;
+            v8f gp[KC], y[KC];
+            [unroll] for (uint k1 = 0; k1 < KC; ++k1) gp[k1] = wg_load8f(g1, 32u * k1);
+            hyb_norm(acc, gp, hh, y);
+            [unroll] for (uint kd = 0; kd < KC; ++kd) { HD_ST8(8u * kd, acc[kd]); HD_ST8(8u * (KC + kd), y[kd]); }
+            [unroll] for (uint k3 = 0; k3 < KC; ++k3) {
+                af[k3] = hyb_q8(y[k3]);
+                acc[k3] = hyb_add16(acc[k3], wg_load8f(bp, 64u * k3));
+            }
+        }
+#else
         const float r = norm_r(acc);
 #if SW_NORM_R2 & 1
         const float r2 = sw_opaque_copy(r);
@@ -738,6 +922,7 @@ WG_KERNEL(SW_ENTRY)
             af[k2] = pack_in(d);
             acc[k2] = sw_add8(acc[k2], b);
         }
+#endif
     }
 
     // Steps 3-7, one head at a time; one staged unit per head (QKV fragments, then the head's slice of Wp).
@@ -778,13 +963,29 @@ WG_KERNEL(SW_ENTRY)
                 accq = wg_wmma_fp8(fq[kc2], af[kc2], accq);
                 accv = wg_wmma_fp8(af[kc2], fv[kc2], accv);
             }
+#if SW_HYB
+            uf[mt] = hyb_q8_of_chain(accq);
+            HD_ST8(HD_HEAD + 60u * hd + 8u * mt, hyb_round16(accq));
+#else
             uf[mt] = pack_in(accq);
+#endif
             vt[mt] = wg_to_f16_ags(accv);
+#if SW_HYB_DUMP
+            HD_ST8(HD_HEAD + 60u * hd + 16u + 8u * mt, hyb_h2f8(vt[mt]));
+#endif
         }
         // Lane (t, h) holds the logits S(t, s) of 8 keys; the position bias is packed in the same order.
 #if SW_C != 64
         const v8f bias = wg_load8f(biasl, hd * 1024u);
 #endif
+#if SW_HYB
+        // s = one 32-term FP8 op started at B (the position bias, FP16 values); the original's weights P
+        v8f s = wg_wmma_fp8(uf[0], uf[0], bias);
+        s = wg_wmma_fp8(uf[1], uf[1], s);
+        const uint4 p = hyb_softmax_p(s, hh);
+        HD_ST8(HD_HEAD + 60u * hd + 32u, hyb_round16(s));
+        HD_ST4(HD_HEAD + 60u * hd + 40u, p);
+#else
         v8f s = wg_wmma_fp8(uf[0], uf[0], sw_zero8());   // S = U^T U
         s = wg_wmma_fp8(uf[1], uf[1], s);
         // soft cap: c = clamp(S + B, -cap, cap); t = c - c^3 / (3 cap^2) (fused); z = t tau log2(e). Written stage by stage
@@ -843,9 +1044,18 @@ WG_KERNEL(SW_ENTRY)
         [unroll] for (uint vb = 0; vb < 8; ++vb) po.v[vb] = asfloat(qs[vb] | nz[vb]);
         const uint4 p = wg_to_f16_ags(po);
 #endif
+#endif
         // o = A V (rows value channels, columns tokens)
         uint2 of[2];
+#if SW_HYB
+        [unroll] for (uint dt = 0; dt < 2; ++dt) {
+            const v8f pv = wg_wmma_f16(vt[dt], p, sw_zero8());
+            of[dt] = hyb_q8_of_chain(pv);
+            HD_ST8(HD_HEAD + 60u * hd + 44u + 8u * dt, hyb_round16(pv));
+        }
+#else
         [unroll] for (uint dt = 0; dt < 2; ++dt) of[dt] = pack_in(wg_wmma_f16(vt[dt], p, sw_zero8()));
+#endif
         // x1 += Wp[:, head hd] q8(o_hd)
         uint2 fp[KC][2];
         [unroll] for (uint m = 0; m < KC; ++m) {
@@ -883,6 +1093,21 @@ WG_KERNEL(SW_ENTRY)
 
     // Step 8: m = q8(RMSNorm(x1; gamma2)), then b2 into the residual accumulator.
     uint2 mf[KC];
+#if SW_HYB
+    {
+        // z = RN16(the Wp chain); m = FP8(norm(z; g2')); the W2 chain starts at RN16(b2 + z)
+        [unroll] for (uint kz = 0; kz < KC; ++kz) acc[kz] = hyb_round16(acc[kz]);
+        const uint g2 = w + L_G2 + hh * (HALF * 4), b2 = w + L_B2 + hh * 32u;
+        v8f gp[KC], y[KC];
+        [unroll] for (uint k1 = 0; k1 < KC; ++k1) gp[k1] = wg_load8f(g2, 32u * k1);
+        hyb_norm(acc, gp, hh, y);
+        [unroll] for (uint kd = 0; kd < KC; ++kd) { HD_ST8(HD_Z + 8u * kd, acc[kd]); HD_ST8(HD_Y2 + 8u * kd, y[kd]); }
+        [unroll] for (uint k3 = 0; k3 < KC; ++k3) {
+            mf[k3] = hyb_q8(y[k3]);
+            acc[k3] = hyb_add16(acc[k3], wg_load8f(b2, 64u * k3));
+        }
+    }
+#else
     {
         const float r = norm_r(acc);
 #if SW_NORM_R2 & 2
@@ -913,9 +1138,14 @@ WG_KERNEL(SW_ENTRY)
             acc[k] = sw_add8(acc[k], b);
         }
     }
+#endif
 
     // Steps 9-10: x2 = x1 + W2 q8(GELU(W1 m + b1)) + b2, GROUP hidden tiles of 16 at a time.
     const uint b1 = w + L_B1 + hh * 32u;
+#if SW_HYB && SW_HYB_MUT_ORDER == 3
+    v8f acc2[KC];   // check mutant 3: the odd tile groups' W2 chunks accumulate here (from 0), added at the end
+    [unroll] for (uint ma = 0; ma < KC; ++ma) acc2[ma] = sw_zero8();
+#endif
 #if SW_REV_PHI
     v8f racc[KC];
     [unroll] for (uint rk = 0; rk < KC; ++rk) racc[rk] = sw_perm8(acc[rk], 7u, 7u);
@@ -982,7 +1212,7 @@ WG_KERNEL(SW_ENTRY)
 #endif
             [unroll] for (uint g4 = 0; g4 < GROUP; ++g4)
                 [unroll] for (uint m = 0; m < KC; ++m) f2[g4][m] = sw_lfrag_b(fb, g4 * 2u * KC + KC + m);
-#if SW_GELU != 0
+#if SW_GELU != 0 && !SW_HYB
 #if !SW_SAFE
 #error "the GELU tables give HIP's pack_in<SAFE> bytes (no clamp)"
 #endif
@@ -1005,7 +1235,12 @@ WG_KERNEL(SW_ENTRY)
                 [unroll] for (uint g7 = 0; g7 < GROUP; ++g7) hnext[g7] = hcur[g7];
             }
             uint2 hf[GROUP];
-#if SW_GELU != 0
+#if SW_HYB
+            [unroll] for (uint gh = 0; gh < GROUP; ++gh) {
+                hf[gh] = hyb_gelu_q8(hyb_rn16x8(hcur[gh]));
+                HD_ST8(HD_H + 8u * (u * HPU + j0 + gh), hyb_round16(hcur[gh]));
+            }
+#elif SW_GELU != 0
 #if SW_GELU_EARLY
             if ((SW_GELU_LATE0 >> ((j0 / GROUP) % 2u)) & 1u) gp = sw_gelu_pre(hcur);
             sw_gelu_fin(hcur, gp, hf);
@@ -1035,8 +1270,27 @@ WG_KERNEL(SW_ENTRY)
             if (j0 == GROUP * (SW_STAGE_LATE - 1) && (SW_MLP_STEP != NMLP || more))
                 st_fetch(stage, wd + (hf[0].x & sw_zero_bits()) + L_mlp(more ? u + 1u : u), MLP_BYTES / 16, tid);
 #endif
+#if SW_HYB && SW_HYB_MUT_ORDER
+            // check mutant (never shipped): the first unit's first tile group accumulates its W2 chunks in reverse order
+            // (same products, same start): inside the f32chain tolerance, but not HIP's bytes (l_hyb_stage_check.py)
+#if SW_HYB_MUT_ORDER == 3
+            if ((j0 / GROUP) & 1u) {     // 3: odd groups into the second accumulator
+                [unroll] for (uint m5 = 0; m5 < KC; ++m5)
+                    [unroll] for (uint g11 = 0; g11 < GROUP; ++g11) acc2[m5] = wg_wmma_fp8(f2[g11][m5], hf[g11], acc2[m5]);
+            } else
+#endif
+            if (SW_HYB_MUT_ORDER == 2 || (SW_HYB_MUT_ORDER == 1 && u == 0u && j0 == 0u)) {   // 1: first group; 2: every group
+                [unroll] for (uint m3 = 0; m3 < KC; ++m3)
+                    [unroll] for (uint g9 = 0; g9 < GROUP; ++g9)
+                        acc[m3] = wg_wmma_fp8(f2[GROUP - 1u - g9][m3], hf[GROUP - 1u - g9], acc[m3]);
+            } else {
+                [unroll] for (uint m4 = 0; m4 < KC; ++m4)
+                    [unroll] for (uint g10 = 0; g10 < GROUP; ++g10) acc[m4] = wg_wmma_fp8(f2[g10][m4], hf[g10], acc[m4]);
+            }
+#else
             [unroll] for (uint m2 = 0; m2 < KC; ++m2)
                 [unroll] for (uint g6 = 0; g6 < GROUP; ++g6) acc[m2] = wg_wmma_fp8(f2[g6][m2], hf[g6], acc[m2]);
+#endif
             [unroll] for (uint g8 = 0; g8 < GROUP; ++g8) hcur[g8] = hnext[g8];
 #if SW_COMMIT_EARLY
             if (more && j0 == GROUP * (SW_COMMIT_EARLY - 1)) st_commit(stage, (buf ^ 1u) * MAXU + 8u * SW_MDZ, MLP_BYTES / 16, tid);
@@ -1056,6 +1310,18 @@ WG_KERNEL(SW_ENTRY)
 #if SW_REV_PHI
     [unroll] for (uint rk2 = 0; rk2 < KC; ++rk2) acc[rk2] = sw_unperm8(racc[rk2], 7u, 7u);
 #endif
+#if SW_HYB && SW_HYB_MUT_ORDER == 3
+    [unroll] for (uint mb = 0; mb < KC; ++mb) [unroll] for (uint vb = 0; vb < 8; ++vb) acc[mb].v[vb] = acc[mb].v[vb] + acc2[mb].v[vb];
+#endif
+#if SW_HYB && SW_HYB_MUT_ORDER == 4
+    // check mutant 4: the W2 chain end moved by one float32 ulp (last mantissa bit flipped) before its RN16: far inside
+    // the f32chain tolerance, visible in the bytes wherever the value sits on an FP16 rounding tie
+    [unroll] for (uint mc = 0; mc < KC; ++mc)
+        [unroll] for (uint vc = 0; vc < 8; ++vc) acc[mc].v[vc] = asfloat(asuint(acc[mc].v[vc]) ^ 1u);
+#endif
+#if SW_HYB_DUMP
+    [unroll] for (uint kdo = 0; kdo < KC; ++kdo) HD_ST8(HD_OUT + 8u * kdo, hyb_round16(acc[kdo]));
+#endif
 
 #if SW_OUT_F16
     // Output RN16(x2) as FP16, real window members only (HIP LStoreF16Epi).
@@ -1074,7 +1340,12 @@ WG_KERNEL(SW_ENTRY)
     }
     return;
 #endif
+#if SW_HYB
+    // the driver's RNE conversion (the chain-end RN16 of the hybrid helpers; HIP's LStoreF16Epi v_cvt_f16_f32)
+    [unroll] for (uint kf = 0; kf < KC; ++kf) o16[kf] = wg_to_f16_ags(acc[kf]);
+#else
     [unroll] for (uint kf = 0; kf < KC; ++kf) o16[kf] = wg_to_f16(acc[kf]);
+#endif
 #if SW_OUT_COEF12
     // l_coef_pack12 of the map: o16[0] / o16[1] of the hh = 0 lane are the pixel's channels 0..7 / 8..15 (the map's
     // bytes dst * 64 + 0 .. 31, its lo / hi loads); Model L's 13 values are all among them
@@ -1104,7 +1375,11 @@ WG_KERNEL(SW_ENTRY)
     } else
 #endif
     {
+#if SW_HYB
+        [unroll] for (uint k = 0; k < KC; ++k) o[k] = hyb_q8_of_chain(acc[k]);
+#else
         [unroll] for (uint k = 0; k < KC; ++k) o[k] = sw_pack_q8_v2(acc[k]);
+#endif
     }
     if (dst >= 0) {
         const uint ob = (uint)dst * SW_C + hh * HALF;

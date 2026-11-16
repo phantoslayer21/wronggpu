@@ -212,14 +212,17 @@ static const WgUpscalerBackend* g_useBackend = &g_backend;
 static std::vector<WgFrame> g_standInFrames;
 static WgCreateInfo g_standInCreate{};
 static int g_standInDestroyed = 0;
+static WgResult g_standInCreateResult = WG_OK;    // StandInCreate answers this (a stand-in that cannot be made)
+static WgResult g_standInDispatchResult = WG_OK;  // StandInDispatch answers this (a stand-in that fails its frame)
 static WgResult StandInCreate(const WgCreateInfo* info, WgUpscaler** out) {
     g_standInCreate = *info;
+    if (g_standInCreateResult != WG_OK) return g_standInCreateResult;
     *out = reinterpret_cast<WgUpscaler*>(new FakeUpscaler{2});
     return WG_OK;
 }
 static WgResult StandInDispatch(WgUpscaler*, const WgFrame* frame) {
     g_standInFrames.push_back(*frame);
-    return WG_OK;
+    return g_standInDispatchResult;
 }
 static void StandInDestroy(WgUpscaler* u) {
     ++g_standInDestroyed;
@@ -393,6 +396,7 @@ static void Reset() {
     g_standInFrames.clear();
     g_standInCreate = WgCreateInfo{};
     g_standInDestroyed = 0;
+    g_standInCreateResult = g_standInDispatchResult = WG_OK;
     g_servicesAsked.clear();
     g_notes.clear();
     g_amdCreateResult = FFX_API_RETURN_OK;
@@ -1757,6 +1761,40 @@ static void TestInterfaceVersions() {
     CHECK(fe2->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
     CHECK(g_notes.size() == 1 && g_notes[0].first == kCommandList && !g_notes[0].second);
     CHECK(fe2->DestroyContext(&ctx, nullptr) == FFX_API_RETURN_OK);
+}
+
+// WG_ERROR_NOT_READY (one frame only) whose stand-in FAILS never becomes a takeover: the stand-in's error is not
+// passed on, AMD's FSR takes that frame only (takeOver = false), and without AMD's FSR the frame is skipped (FFX OK, the
+// output as it was); no Fail, no broken mark, and the next frame goes to the upscaler again, with a reset. The stand-in
+// fails its dispatch with WG_ERROR_UNSUPPORTED (an error that would otherwise reach the permanent handoff), or cannot be
+// created (WG_ERROR_MEMORY: an error that would otherwise mark the upscaler broken).
+static void TestNotReadyStandInFails() {
+    for (int amd = 1; amd >= 0; --amd)
+        for (int failCreate = 0; failCreate < 2; ++failCreate) {
+            Reset();
+            g_originalAvailable = amd != 0;
+            if (failCreate) g_standInCreateResult = WG_ERROR_MEMORY;
+            else g_standInDispatchResult = WG_ERROR_UNSUPPORTED;
+            auto fe = MakeFrontEnd(Config{});
+            UpscaleCreate c(0);
+            ffxContext ctx = nullptr;
+            CHECK(fe->CreateContext(&ctx, &c.upscale.header, nullptr) == FFX_API_RETURN_OK);
+            g_notReadyUntil = 2;  // frames 0 and 1 refused (one frame each)
+            ffxDispatchDescUpscale d = MakeDispatch();
+            for (int i = 0; i < 4; ++i) CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
+            // every frame reached the upscaler: the context stayed WrongGPU's
+            CHECK(g_frames.size() == 4);
+            CHECK(g_frames.size() == 4 && g_frames[2].reset != 0 && g_frames[3].reset == 0);
+            size_t amdDispatches = 0;
+            for (const AmdCall& a : g_amd) amdDispatches += a.fn == "dispatch";
+            CHECK(amdDispatches == (amd ? 2u : 0u));   // AMD's FSR for the two refused frames only
+            CHECK(CountLog("its stand-in failed") == 2);
+            CHECK(CountLog(amd ? "AMD FSR upscales this frame only" : "this frame is skipped") == 2);
+            CHECK(CountLog("AMD FSR upscales this context") == 0 && CountLog("for the rest of its life") == 0);
+            CHECK(CountLog(" ERROR U") == 0 && CountLog("ERROR:") == 0);
+            CHECK(g_destroyed == 0);
+            CHECK(fe->DestroyContext(&ctx, nullptr) == FFX_API_RETURN_OK);
+        }
 }
 
 // Non-linear (perceptual) colour goes to AMD's FSR (ANSWERS.md, spec 20 item 5): at create (context flag) and per
@@ -4259,6 +4297,7 @@ int main() {
     TestWorkerLaunchFailureGivesTheDeviceBack();
     TestDeviceHoldAllocationFailure();
     TestInterfaceVersions();
+    TestNotReadyStandInFails();
     TestAmdMode();
     TestNonLinearColour();
     TestMappingDetails();

@@ -17,6 +17,7 @@
 // from there; the Swin block streams them in double-buffered units of at most 8 KB, so every weight byte is read
 // from global memory once per 8 or 16 windows instead of once per window.
 #include "wg_platform.h"
+#include "wg_hyb.h"   // the HYBRID block form (swin_block<..., HYB = true>)
 
 // Build-time knobs (build.py variants; defaults are the shipped configuration):
 //   WG_SWIN_THREADS  default lanes per Swin block workgroup (128, 256 or 512); WG_THREADS_<kernel> overrides one
@@ -461,12 +462,16 @@ struct SwinFp8Src {
 };
 
 template <int C, int HEADS, int MLP, int WPW, bool ADD, int GROUP, bool SAFE, int THREADS, int MCO = 0, int ECL = 0,
-          class EPI = SwinStoreEpi, bool RESIDENT = false, class SRC = SwinFp8Src>
+          class EPI = SwinStoreEpi, bool RESIDENT = false, class SRC = SwinFp8Src, bool HYB = false>
 WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8* __restrict__ out,
                       const u8* __restrict__ w, int H, int W, int ox, int oy, u8* __restrict__ aux WG_PROF_ARG_DECL,
                       const void* epi = nullptr, int nwg = 0) {
   typedef BlockLayout<C, HEADS, MLP> L;
   constexpr int KC = L::KC, HALF = C / 2, MAXU = L::MAXU;
+  // HYB: the hybrid block form (clean/kernels/wg_hyb.h; the twin of the D3D12 SW_HYB kernels, same bytes): float32 FP8
+  // chains with one FP16 rounding at each chain's end, the original's norm / softmax / GELU and start values. Only the
+  // plain block path has it.
+  static_assert(!HYB || (MCO == 0 && ECL == 0 && !RESIDENT && !WG_AV8 && !WG_SMAX16), "HYB: plain block path only");
   // RESIDENT (kernels *_r): the block's whole weight stream (every head and MLP unit) stays in LDS for the whole
   // launch; each wave runs windows wave_id, wave_id + total waves, ... with no staging and no barrier after the first
   // copy. Same arithmetic per window as the staged kernel (bit-identical).
@@ -531,7 +536,12 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
     if constexpr (SRC::kCustom) {
       SRC::template load<C, KC>(x, pr, pc, H, W, hh, xf[i]);
     } else {
-      if constexpr (ECL == 0) load_frags<KC>(x + src, xa[i]);
+      if constexpr (HYB && ADD) {  // hybrid decoder: E by the coarse mirror (shared_dec_border), S by the fine one
+        const int cr = 2 * wg_mirror(pr >> 1, H >> 1) + (pr & 1), cc = 2 * wg_mirror(pc >> 1, W >> 1) + (pc & 1);
+        load_frags<KC>(x + ((size_t)(cr * W + cc) * C) + hh * HALF, xa[i]);
+      } else if constexpr (ECL == 0) {
+        load_frags<KC>(x + src, xa[i]);
+      }
       if (ADD) load_frags<KC>(xadd + src, xb[i]);
     }
 #endif
@@ -576,7 +586,21 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
         if constexpr (SRC::kCustom) acc[i][k] = xf[i][k];
         else acc[i][k] = wg_unpack_fp8(xa[i][k]);
         if (ADD) acc[i][k] += wg_unpack_fp8(xb[i][k]);
-        if (!(WG_NORM_DOT4 && !ADD && !SRC::kCustom)) ss += hsum8(acc[i][k] * acc[i][k]);
+        if constexpr (HYB) {
+          if (ADD) acc[i][k] = hyb_round16(acc[i][k]);   // x = RN16(dec(P) + dec(S))
+        } else if (!(WG_NORM_DOT4 && !ADD && !SRC::kCustom)) {
+          ss += hsum8(acc[i][k] * acc[i][k]);
+        }
+      }
+      if constexpr (HYB) {   // y = the original's norm; a = FP8(y); the Wp chain starts at RN16(bp + x)
+        v8f y[KC];
+        hyb_norm<KC>(acc[i], g1, hh, y);
+#pragma unroll
+        for (int k = 0; k < KC; ++k) {
+          af[i][k] = wg_pack_q8(y[k]);
+          acc[i][k] = hyb_round16(acc[i][k] + WG_BIAS8(bp + k * 16));
+        }
+        continue;
       }
       if (WG_NORM_DOT4 && !ADD && !SRC::kCustom) {
 #pragma unroll
@@ -640,7 +664,8 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
       }
 #pragma unroll
       for (int i = 0; i < WPW; ++i) {
-        uf[i][mt] = pack_in<SAFE>(accq[i]);
+        if constexpr (HYB) uf[i][mt] = hyb_q8_of_chain(accq[i]);
+        else uf[i][mt] = pack_in<SAFE>(accq[i]);
 #if WG_AV8
         vt[i][mt] = pack_in<SAFE>(accv[i]);
 #else
@@ -660,6 +685,14 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
     v2i of[WPW][2];
 #pragma unroll
     for (int i = 0; i < WPW; ++i) {
+      if constexpr (HYB) {   // s = one 32-term FP8 op started at B; the original's weights; o = FP8(RN16(P V))
+        v8f sh = wg_wmma_fp8(uf[i][0], uf[i][0], bias);
+        sh = wg_wmma_fp8(uf[i][1], uf[i][1], sh);
+        const v8h ph = hyb_softmax_p(sh, hh);
+#pragma unroll
+        for (int dt = 0; dt < 2; ++dt) of[i][dt] = hyb_q8_of_chain(wg_wmma_f16(vt[i][dt], ph, wg_splat(0.0f)));
+        continue;
+      }
       v8f s = wg_wmma_fp8(uf[i][0], uf[i][0], wg_splat(0.0f));  // S = U^T U is symmetric
       s = wg_wmma_fp8(uf[i][1], uf[i][1], s);
 #if WG_SMAX16 && !WG_AV8 && !(defined(WG_ABLATE_CAP) && WG_ABLATE_CAP) && !(defined(WG_ABLATE_SMAX) && WG_ABLATE_SMAX)
@@ -768,6 +801,18 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
     const float* b2 = (const float*)(w + L::B2) + hh * 8;
 #pragma unroll
     for (int i = 0; i < WPW; ++i) {
+      if constexpr (HYB) {   // z = RN16(the Wp chain); m = FP8(norm(z)); the W2 chain starts at RN16(b2 + z)
+        v8f y[KC];
+#pragma unroll
+        for (int k = 0; k < KC; ++k) acc[i][k] = hyb_round16(acc[i][k]);
+        hyb_norm<KC>(acc[i], g2, hh, y);
+#pragma unroll
+        for (int k = 0; k < KC; ++k) {
+          mf[i][k] = wg_pack_q8(y[k]);
+          acc[i][k] = hyb_round16(acc[i][k] + WG_BIAS8(b2 + k * 16));
+        }
+        continue;
+      }
       float ss = 0.0f;
 #pragma unroll
       for (int k = 0; k < KC; ++k) ss += hsum8(acc[i][k] * acc[i][k]);
@@ -854,6 +899,10 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
       for (int g = 0; g < GROUP; ++g)
 #pragma unroll
         for (int i = 0; i < WPW; ++i) {
+          if constexpr (HYB) {   // GELU16 of RN16(h), the W1 chain started at b1
+            hf[g][i] = hyb_gelu_q8(hyb_round16(hacc[g][i]));
+            continue;
+          }
 #if (WG_GELU_MODE == 3 || WG_GELU_MODE == 4) && !(defined(WG_ABLATE_PACK) && WG_ABLATE_PACK) && !(defined(WG_ABLATE_GELU) && WG_ABLATE_GELU)
           hf[g][i] = wg_hidden_mix<SAFE, (WG_GELU_MODE == 3 ? 4 : WG_GELU_MIX)>(hacc[g][i]);
           continue;
@@ -922,7 +971,7 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
     if (dst[i] < 0) continue;
     v2i o[KC];
 #pragma unroll
-    for (int k = 0; k < KC; ++k) o[k] = wg_pack_q8(acc[i][k]);
+    for (int k = 0; k < KC; ++k) o[k] = HYB ? hyb_q8_of_chain(acc[i][k]) : wg_pack_q8(acc[i][k]);
 #if defined(WG_ABLATE_STORE) && WG_ABLATE_STORE
     int chk = 0;  // timing-only: store only if an impossible pattern shows up, so the packed values stay alive
 #pragma unroll
@@ -963,7 +1012,8 @@ constexpr int kGemmThreads = WG_GEMM_THREADS;  // patch merge / expand workgroup
 // Patch merge (spec 02): merged(i, j) = q8(Wm concat(TL, TR, BL, BR) + bm) from the q8 block output s [H][W][C].
 // Lane half h loads the 2C contiguous bytes of row 2i + h (left and right token), i.e. z[h*2C, (h+1)*2C).
 // NT groups of 16 merged tokens per wave; Wm is staged in LDS once per workgroup.
-template <int C, int CO, int NT>
+// HYB (the hybrid form, kernels patch_merge_c*_hyb in swin_hyb.hip): FP8(clamp(RN16(chain), +-6.28125)) (hyb_merge_q8).
+template <int C, int CO, int NT, bool HYB = false>
 WG_FN void patch_merge(const u8* __restrict__ s, u8* __restrict__ out, const u8* __restrict__ w, int H, int W) {
   constexpr int KZ = C / 4, MO = CO / 16;  // 4C / 16 input groups, CO / 16 output tiles
   constexpr int BM = 0, WM = 4 * CO, WBYTES = MO * KZ * 256;
@@ -998,13 +1048,15 @@ WG_FN void patch_merge(const u8* __restrict__ s, u8* __restrict__ out, const u8*
     }
 #pragma unroll
     for (int i = 0; i < NT; ++i)
-      if (tok[i] < ntok) *(v2i*)(out + (size_t)tok[i] * CO + hh * (CO / 2) + 8 * mt) = wg_pack_q8(acc[i]);
+      if (tok[i] < ntok)
+        *(v2i*)(out + (size_t)tok[i] * CO + hh * (CO / 2) + 8 * mt) = HYB ? hyb_merge_q8(acc[i]) : wg_pack_q8(acc[i]);
   }
 }
 
 // Expand (spec 02): e = q8(We y + be) for each low-resolution token, written as an FP8 map e [2Hl][2Wl][C]
 // (sub-pixel k goes to (2r + k/2, 2c + k%2)). The decoder block then adds the skip map (ADD = true).
-template <int CL, int C, int NT>
+// HYB (the hybrid form, kernels expand_c*_hyb in swin_hyb.hip): FP8(RN16(chain)) (hyb_q8_of_chain).
+template <int CL, int C, int NT, bool HYB = false>
 WG_FN void expand(const u8* __restrict__ y, u8* __restrict__ e, const u8* __restrict__ w, int Hl, int Wl) {
   constexpr int KC = CL / 16, G = C / 16;
   constexpr int BE = 0, WE = 16 * C, WBYTES = 4 * G * KC * 256;
@@ -1040,7 +1092,7 @@ WG_FN void expand(const u8* __restrict__ y, u8* __restrict__ e, const u8* __rest
         for (int i = 0; i < NT; ++i) acc[i] = wg_wmma_fp8(f, yf[i][kc], acc[i]);
       }
 #pragma unroll
-      for (int i = 0; i < NT; ++i) res[i][g] = wg_pack_q8(acc[i]);
+      for (int i = 0; i < NT; ++i) res[i][g] = HYB ? hyb_q8_of_chain(acc[i]) : wg_pack_q8(acc[i]);
     }
 #pragma unroll
     for (int i = 0; i < NT; ++i) {

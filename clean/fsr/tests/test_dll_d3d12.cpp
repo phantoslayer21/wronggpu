@@ -42,7 +42,8 @@
 //   network_cyberpunk_fail Cyberpunk's FSR 3.0 path: the runtime fails on frame 1, AMD's upscaler takes over
 // By hand, with the real runtime (not ctests): park_real (a game's dynamic resolution), switch_real (a player
 // switching upscalers in an upscaler mod's menu; GPU memory after every step; see RunSwitchReal), resize_real (a game
-// changing its output size: the upscalers kept until the context is destroyed, GPU memory per step; see RunResizeReal).
+// changing its output size: the upscalers kept until the context is destroyed, GPU memory per step; see RunResizeReal),
+// bneck_real (Model L hybrid's one-frame refusals through the real front end, developer runtime; see RunBneckReal).
 // With MSVC, the D3D12 debug layer is on when installed (WG_TEST_D3D12_DEBUG=0 turns it off); its errors fail the test.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -2131,6 +2132,97 @@ void RunResizeReal(Api& api, Gpu& gpu) {
     removed("at the end");
 }
 
+// bneck_real (run by hand, not a ctest; needs a DEVELOPER wronggpu_runtime.dll with Model L next to the test's DLLs,
+// WG_TEST_RUNTIME_OPTIONS naming its model and kernels, and WG_DEV_BNECK_ABORT=2): the Model L hybrid one-frame
+// refusals through the real front end, with AMD's FSR (the test double) available, so a takeover would show.
+//   frames 0 .. 5 on the game's list: frame 2's bottleneck wait times out (the network skips it, its fallback upscale is
+//   the output), frame 3 is refused (WG_ERROR_NOT_READY: the stand-in renders it, no takeover), frame 4 runs the
+//   network again (the reset), frame 5 too;
+//   frame 6 on a second list the game reset before the front end installed its hooks and did not reset since: its
+//   predicate cannot be reported (WG_ERROR_NOT_READY: the stand-in, no takeover);
+//   frame 7 on the game's list again: the network.
+// The checks are on the log (main): two stand-in frames, no AMD FSR, every frame OK, the refusal and the unknown
+// predicate each named.
+void RunBneckReal(Api& api, Gpu& gpu) {
+    const UINT W = 2560, H = 1440, RW = 1706, RH = 960;
+    ID3D12Resource* color = gpu.Texture(DXGI_FORMAT_R16G16B16A16_FLOAT, W, H, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+    ID3D12Resource* depth = gpu.Texture(DXGI_FORMAT_R32_FLOAT, W, H, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+    ID3D12Resource* motion = gpu.Texture(DXGI_FORMAT_R16G16_FLOAT, W, H, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+    ID3D12Resource* out = gpu.Texture(DXGI_FORMAT_R16G16B16A16_FLOAT, W, H, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                      D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    CHECK(color && depth && motion && out);
+    if (!color || !depth || !motion || !out) return;
+    {
+        std::vector<uint16_t> px(size_t(W) * H * 4);
+        for (UINT y = 0; y < H; ++y)
+            for (UINT x = 0; x < W; ++x) {
+                uint16_t* p = &px[(size_t(y) * W + x) * 4];
+                p[0] = HalfOf(((x / 16 + y / 16) & 1) ? 0.6f : 0.15f);
+                p[1] = HalfOf(0.1f + 0.8f * float(y % 193) / 193.0f);
+                p[2] = HalfOf(0.05f + 1.5f * float((x + y) % 61) / 61.0f);
+                p[3] = HalfOf(1.0f);
+            }
+        std::vector<float> z(size_t(W) * H);
+        for (UINT y = 0; y < H; ++y)
+            for (UINT x = 0; x < W; ++x) z[size_t(y) * W + x] = 0.02f + 0.9f * float((x / 64 + y / 64) % 11) / 11.0f;
+        std::vector<uint16_t> mv(size_t(W) * H * 2, 0);
+        gpu.Begin();
+        gpu.Upload(color, px.data(), 8, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        gpu.Upload(depth, z.data(), 4, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        gpu.Upload(motion, mv.data(), 4, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        CHECK(gpu.SubmitAndWait());
+    }
+    // the second list: reset now, before the context (and the front end's hooks) exist, and not reset again
+    gpu.allocatorB->Reset();
+    gpu.listB->Reset(gpu.allocatorB, nullptr);
+    ffxCreateBackendDX12Desc backend{};
+    backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12;
+    backend.device = gpu.device;
+    ffxCreateContextDescUpscale c{};
+    c.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
+    c.header.pNext = &backend.header;
+    c.flags = FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE | FFX_UPSCALE_ENABLE_DEPTH_INVERTED;
+    c.maxRenderSize = {RW, RH};   // (a game's Quality mode)
+    c.maxUpscaleSize = {W, H};
+    ffxContext ctx = nullptr;
+    CHECK(api.create(&ctx, &c.header, nullptr) == FFX_API_RETURN_OK && ctx);
+    if (!ctx) return;
+    static const float kJitter[4][2] = {{0.0f, -1.0f / 6}, {-0.25f, 1.0f / 6}, {0.25f, -7.0f / 18}, {-0.375f, -1.0f / 18}};
+    for (int i = 0; i < 8; ++i) {
+        const bool second = i == 6;
+        ID3D12GraphicsCommandList* list = second ? gpu.listB : gpu.list;
+        if (!second) gpu.Begin();
+        ffxDispatchDescUpscale d{};
+        d.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE;
+        d.commandList = list;
+        d.color = Resource(color, FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT, W, H, FFX_API_RESOURCE_STATE_COMPUTE_READ);
+        d.depth = Resource(depth, FFX_API_SURFACE_FORMAT_R32_FLOAT, W, H, FFX_API_RESOURCE_STATE_COMPUTE_READ);
+        d.motionVectors = Resource(motion, FFX_API_SURFACE_FORMAT_R16G16_FLOAT, W, H, FFX_API_RESOURCE_STATE_COMPUTE_READ);
+        d.output = Resource(out, FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT, W, H, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
+        d.jitterOffset = {kJitter[i & 3][0], kJitter[i & 3][1]};
+        d.motionVectorScale = {float(RW), float(RH)};
+        d.renderSize = {RW, RH};
+        d.upscaleSize = {W, H};
+        d.preExposure = 1.0f;
+        d.frameTimeDelta = 16.7f;
+        d.cameraNear = 100000.0f;
+        d.cameraFar = 0.1f;
+        d.cameraFovAngleVertical = 1.0472f;
+        const ffxReturnCode_t rc = api.dispatch(&ctx, &d.header);
+        std::printf("bneck_real: frame %d (%s list) -> %d\n", i, second ? "second" : "game's", int(rc));
+        CHECK(rc == FFX_API_RETURN_OK);
+        if (second) {
+            CHECK(SUCCEEDED(gpu.listB->Close()));
+            ID3D12CommandList* lists[] = {gpu.listB};
+            gpu.queue->ExecuteCommandLists(1, lists);
+            CHECK(gpu.Wait());
+        } else {
+            CHECK(gpu.SubmitAndWait());
+        }
+    }
+    CHECK(api.destroy(&ctx, nullptr) == FFX_API_RETURN_OK);
+}
+
 int main(int argc, char** argv) {
     const std::string mode = argc > 1 ? argv[1] : "upscale";
     if (mode == "switch_real") g_dllName = L"wronggpu_ffx_dx12.dll";
@@ -2155,6 +2247,12 @@ int main(int argc, char** argv) {
                          : mode == "network_split" || mode.rfind("network_split_stats",0)==0 || mode == "network_park" ? "split" : mode == "network_v1" ? "v1" : mode == "network_bad" ? "bad" : "ok";
         SetEnvironmentVariableA("WG_FAKE_RUNTIME", fake);
         if (mode == "network_park") settings += "context_park_ms = 300\n";
+    }
+    if (mode == "bneck_real") {
+        char options[2048] = "";
+        GetEnvironmentVariableA("WG_TEST_RUNTIME_OPTIONS", options, sizeof options);
+        settings = "upscaler = network\ncreate_wait_ms = 60000\n";   // (the first frame waits for the real create)
+        if (options[0]) settings += std::string("runtime_options = ") + options + "\n";
     }
     if (mode == "park_real" || mode == "resize_real") {
         char park[32] = "3000", options[2048] = "";
@@ -2212,6 +2310,7 @@ int main(int argc, char** argv) {
         else if (mode == "network_park") RunNetworkPark(api, gpu);
         else if (mode == "park_real") RunParkReal(api, gpu);
         else if (mode == "resize_real") RunResizeReal(api, gpu);
+        else if (mode == "bneck_real") RunBneckReal(api, gpu);
         else if (mode == "switch_real")
             RunSwitchReal(api, gpu, argc > 2 ? std::atoi(argv[2]) : 6, argc > 3 ? std::atoi(argv[3]) : 20, argc > 4 ? std::atoi(argv[4]) : 3500);
         else if (mode.rfind("network_", 0) == 0) RunNetwork(api, gpu, mode);
@@ -2284,6 +2383,21 @@ int main(int argc, char** argv) {
             std::printf("park_real: log: %s\n", log.substr(a + 1, b - a - 1).c_str());
         }
     }
+    if (mode == "bneck_real") {
+        const size_t standIn = Count(log, "stand-in for this frame"), refused = Count(log, "frame refused (bottleneck wait timeout)"),
+                     unknown = Count(log, "does not know the predicate"), ok = Count(log, "-> OK (WrongGPU)"),
+                     amd = Count(log, "AMD FSR upscales") + Count(log, "forwarded to AMD") + Count(log, "for the rest of its life");
+        std::printf("bneck_real: log: %zu frames OK, %zu of them the stand-in's, %zu bottleneck refusal(s), %zu unknown-predicate line(s), "
+                    "%zu AMD FSR line(s), %zu error line(s)\n", ok, standIn, refused, unknown, amd,
+                    Count(log, "ERROR:") + Count(log, " ERROR U") + Count(log, "upscaler ERROR"));
+        CHECK(ok == 8);
+        CHECK(standIn == 2);
+        CHECK(refused == 1);
+        CHECK(unknown >= 1);
+        CHECK(amd == 0);
+        CHECK(Count(log, "ERROR:") == 0 && Count(log, " ERROR U") == 0 && Count(log, "upscaler ERROR") == 0);
+        CHECK(Count(log, "network runtime ready") == 1);   // one network context throughout
+    }
     if (mode == "resize_real") {
         std::printf("resize_real: log: %zu upscalers created, %zu created again for a new output size, %zu old upscalers kept until the context is destroyed, "
                     "%zu not created again after the limit, %zu errors\n",
@@ -2306,7 +2420,9 @@ int main(int argc, char** argv) {
                     Count(log, "kept arena of"), Count(log, "the host chose AMD's upscaler version"), Count(log, "ERROR"));
     }
     // Same-frame split and submission trace (interface version 2).
-    if (mode.rfind("split_", 0) != 0 && !trace && mode != "network_split" && mode.rfind("network_split_stats",0)!=0 && !parks) CHECK(Count(log, "d3d12 hooks:") == 0);  // auto: no hooks without a split backend
+    if (mode.rfind("split_", 0) != 0 && !trace && mode != "network_split" && mode.rfind("network_split_stats",0)!=0 && !parks &&
+        mode != "bneck_real")  // (the real runtime sets WG_BACKEND_NEEDS_SPLIT)
+        CHECK(Count(log, "d3d12 hooks:") == 0);  // auto: no hooks without a split backend
     // upscaler = network: the runtime from the FSR DLLs' folder, its errors in words, AMD after a failure.
     if (mode.rfind("network_", 0) == 0) {
         const bool loads = mode != "network_missing";

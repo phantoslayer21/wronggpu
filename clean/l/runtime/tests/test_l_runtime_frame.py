@@ -3,23 +3,32 @@
 on the recording device of clean/tests/runtime_frame_trace.cpp (launches recorded with their arguments, not executed;
 no GPU, no HIP). The interface is clean/l/FORMATS.md.
 
-- Launch for launch: Model L's frame is Model M's frame with step 2 (encoder) and step 4 (decoder) replaced: the
-  values into the halo map, the two per-pixel linears, the encoder block and the gather projection in place of
-  input_encoder; the decoder projection, the decoder block and l_coef in place of coef_decoder. The grids come from
-  FORMATS.md, the window offsets from the default table (clean/l/reference/table.py), the clamp-free block kernel
-  (_nc) from bit 0 of the Python packer's block blobs. With an empty build folder and with a full build's optional
-  code objects: Model L runs without pack12 (l_coef writes the base coefficient format).
+- The 0.6.5 release routes (WG_L_FORM unset = hybrid_full): on HIP the scalar reference (the FP16-form kernels with
+  float32 chains, l_q7__hyb.co / l_q7w__hyb.co, for Model L's two blocks and the ten shared stages) and the C1/C2
+  reconstruction (lc12/); on native D3D12 the fast route (every Swin / merge / expand kernel the manifest's "_hyb"
+  twin on the unfused M-form layout, the pack12 store, lc12/ reconstruction). Both decoder blocks read the encoder
+  block's map as their skip. The M-form L route is refused (ReleaseDefault); no test here runs it.
+- Launch for launch (HIP): Model L's frame is Model M's frame with steps 2 to 5 replaced: the values into the halo
+  map, the two per-pixel linears, the encoder block and the gather projection in place of input_encoder; the ten
+  FP16-form shared stages in place of Model M's; the decoder projection, the decoder block and l_coef in place of
+  coef_decoder; the C1/C2 reconstruction in place of post_recon. The grids come from FORMATS.md and the kernels, the
+  window offsets from the default tables (clean/l/reference/table.py, clean/reference/swin.py). With an empty build
+  folder and with a full build's optional code objects: Model L on HIP runs without pack12 (l_coef writes the base
+  coefficient format).
 - Arguments: every map goes from the launch that writes it to the one that reads it (q -> x1 -> x2 -> x3 -> enc0's
   features -> enc1; dec1's output -> y -> y2 -> l_coef), no launch writes what it reads, every buffer holds its map
   (allocation sizes), the extents (npix, tw, th, H, W), the window offsets of both parities, the render size, padded
   grid and reset in the encoder's and decoder's parameters, and the history (the latent l_coef writes is what the next
   frame's encoder reads). Sizes aligned, non-aligned and changing from frame to frame, and a game reset.
 - A failing launch stops its frame; the next frame runs whole.
-- Model L's code objects are loaded (l_enc_values.co under the tag lev, l_ops.co, l_swin.co), Model M's encoder and
-  decoder not. Model M runs unchanged in the build with Model L.
+- Model L's code objects are loaded (l_enc_values.co under the tag lev, l_ops.co, l_swin.co, l_post.co, the hybrid
+  builds l_q7__hyb.co / l_q7w__hyb.co, l_post__lc12.co under the tag lc12), Model M's encoder and decoder not. Model M runs unchanged in the build with Model L.
 - Model data: only the converter's model.wgcm, checked against the preset-L map (a synthetic file and map here). A raw
   folder is refused, so is a file whose shared stages are Model M's (their digests are not the map's), and a missing
   file. The paths that keep dec1's map on chip, need Model M's encoder or the pack12 decoder are refused.
+- Native D3D12: the shared stages, the pack12 store and the C1/C2 reconstruction, every argument by its buffer or
+  blob (the twins' blobs: Model M's packer on the hybrid values); the route stays unfused whatever the fusion option
+  or the manifest offers; each port the route needs refused by name when missing.
 
 Built with the host C++ compiler (clean/tests/host_cxx.py; skipped without one).
 
@@ -43,7 +52,10 @@ import numpy as np
 import test_l_runtime_load as LL
 from clean.l.reference import oracle as L
 from clean.l.reference import table as T
+from clean.l.runner import l_hyb_stage_pack as HSP
 from clean.l.runner import l_pack as LP
+from clean.reference import swin as SW
+from clean.runner import packing as P
 from clean.runner import synthetic_model as SM
 from clean.tests import host_cxx
 from clean.tests import test_runtime_frame_trace as FT
@@ -113,42 +125,106 @@ def run(options="", frames=4, build_files=(), env=None, model=None, exe=None, fl
     return r.stdout.splitlines()
 
 
-def blob_digests():
-    """{blob name: SHA-256 hex} of Model L's blobs packed in Python (clean/l/runner/l_pack.py) from the test model's
-    parameters: the independent names of the weight buffers (the recorder logs what create uploads, with its hash)."""
-    blobs = LP.pack_model_l(L.random_params(np.random.default_rng(SEED)))
+def blob_digests(route="hip"):
+    """{blob name: SHA-256 hex} of the blobs Model L's launches read on `route`, packed in Python from the test model's
+    parameters: the independent names of the weight buffers (the recorder logs what create uploads, with its hash).
+    hip (the scalar hybrid_full reference): Model L's own blobs (clean/l/runner/l_pack.py pack_model_l) with the
+    FP16-form blobs in place of the two block blobs (pack_q7_block: "enc0_block.q7", "dec0_block.q7"), the ten shared
+    stages' "<s>.q7" / "<s>.q7lin" and the tables "q7.tab"; d3d12 (the fast hybrid route): pack_model_l of the
+    parameters in the hybrid values (clean/l/runner/l_hyb_stage_pack.py hyb_params), the ten shared stages' blobs
+    packed from them by Model M's packer (clean/runner/packing.py pack_stage)."""
+    params = L.random_params(np.random.default_rng(SEED))
+    if route == "d3d12":
+        hyb = HSP.hyb_params(params)
+        blobs = LP.pack_model_l(hyb)
+        blobs.update({s: P.pack_stage(s, hyb[s], "gfx12", model="M") for s in SHARED})   # the twins' stage blobs
+    else:
+        blobs = LP.pack_model_l(params)
+        del blobs["enc0_block"], blobs["dec0_block"]
+        for s, C, heads, lin in Q7_STAGES:
+            blobs[s + ".q7"] = LP.pack_q7_block(params[s], C, heads, 4 * C)
+            if lin:
+                blobs[s + ".q7lin"] = LP.pack_q7_linear(params[s][lin[0]], params[s][lin[1]])
+        blobs["q7.tab"] = LP.q7_tables()
     # the post blob: s as float32, zero padding to 16 bytes (Model M's layout; the test model's s, LL.raw_model)
     blobs["post"] = struct.pack("<f", 1.25) + bytes(12)
     return {n: hashlib.sha256(b).hexdigest() for n, b in blobs.items()}
 
 
-L_KERNELS = ("lev/input_encoder", "l_linear_32_32_relu", "l_linear_32_32_f16", "l_swin_block_c32_enc",
-             "l_project_gather", "l_dec_project", "l_swin_block_c32_dec", "l_coef", "l_post_recon")
-# native D3D12, fusion lc (the default): the decoder block with l_coef_pack12 as its epilogue, in place of the pair
+# The FP16-form blobs (clean/l/runtime/l_pack.cpp pack_q7_model): stage, C, heads, the merge / expansion tensors
+Q7_STAGES = (("enc0_block", 32, 2, None), ("dec0_block", 32, 2, None), ("enc1", 64, 2, ("Wm", "bm")),
+             ("enc2", 96, 4, ("Wm", "bm"))) + tuple((b, 128, 4, None) for b in ("b0", "b1", "b2", "b3", "b4", "b5")) + \
+    (("dec2", 96, 4, ("We", "be")), ("dec1", 64, 2, ("We", "be")))
+
+# 0.6.5 (oversight 2026-11-15 18:36Z): Model L = hybrid_full (WG_L_FORM unset). Its two routes:
+#   HIP: the scalar reference (l_q7__hyb.co, l_q7w__hyb.co: the FP16-form kernels with float32 chains), the C1/C2
+#        reconstruction (lc12/l_post_recon[_ldr], l_post__lc12.co);
+#   native D3D12: the fast route, the manifest's "_hyb" twins on the unfused M-form layout, the pack12 store and the
+#        C1/C2 reconstruction (lc12/l_post_recon_p12[_ldr]; frames the pack12 kernels do not take: l_coef and
+#        lc12/l_post_recon[_ldr]).
+# Both decoder blocks read the encoder block's map as their skip S (RN16(E + S)).
+ENC_BLOCK = {"hip": "l_q7_block_c32_enc", "d3d12": "l_swin_block_c32_enc_hyb"}
+DEC_BLOCK = {"hip": "l_q7_block_c32_dec", "d3d12": "l_swin_block_c32_dec_hyb"}
+L_KERNELS = ("lev/input_encoder", "l_linear_32_32_relu", "l_linear_32_32_f16", "l_enc_block", "l_project_gather",
+             "l_dec_project", "l_dec_block", "l_coef", "l_post_recon")
+# what neither release route runs: the M-form L blocks and the native fusions on them (lc: the decoder block with
+# l_coef_pack12 folded in; ll: the two linears in one kernel; le: the encoder block with the linears as its prologue)
 FOLD = "l_swin_block_c32_dec_coef12_nc"
-FOLD_BASE = "l_swin_block_c32_dec_coef12"
-# native D3D12, fusion ll (the default): the two input linears in one kernel (x1 in registers; q in l.narrow)
 LIN = "l_linear_32_32_fused"
-# native D3D12, fusion le (the default): the encoder block with the two input linears as its prologue (q in l.narrow,
-# x1 and x2 in registers)
 ENCLIN = "l_swin_block_c32_enc_lin_nc"
-ENCLIN_BASE = "l_swin_block_c32_enc_lin"
-# the default fusions without lc, ll and le: the pairs (the fallback routes); without le: the fused linears and the block
+# (speed lever 3: the hybrid route's encoder block takes the linears from the q20 map itself, so the fused linears and
+# the q20 input encoder are no longer M-form only: lev/input_encoder_q20 is the native route's encoder, LIN unused)
+M_FORM_L = ("l_swin_block_c32_enc", "l_swin_block_c32_enc_nc", "l_swin_block_c32_dec", "l_swin_block_c32_dec_nc",
+            FOLD, ENCLIN)
+# the native-D3D12 hybrid route's fused twins (speed lever 3): the encoder block with the two input linears (q from the
+# q20 map), the decoder block with the pack12 coefficient store (pack12 frames); required, refused by name if missing
+ENC_LIN_HYB = "l_swin_block_c32_enc_lin_hyb"
+DEC_COEF_HYB = "l_swin_block_c32_dec_coef12_hyb"
+# the hybrid bottleneck in one launch (speed lever 4: kernels/hyb_bneck.hlsl), b0 ... b5 on the native route
+BNECK_HYB = "swin_bneck6_hyb"
+FUSED_REQUIRED = (ENC_LIN_HYB, DEC_COEF_HYB, "lev/input_encoder_q20", "lev/input_encoder_direct_q20", BNECK_HYB)
 NO_FOLD = {"WG_D3D12_FUSION": "pm,xe,mb,rv,xo,xd"}
 NO_LIN = {"WG_D3D12_FUSION": "pm,xe,mb,rv,xo,xd,lc"}
 NO_ENCLIN = {"WG_D3D12_FUSION": "pm,xe,mb,rv,xo,xd,lc,ll"}
+# the D3D12 route's ten shared stages: the twins in launch order (unfused: dec2's and dec1's own blocks and expands)
+TWIN_STAGES = ("swin_block_c64_hyb", "patch_merge_c64_hyb", "swin_block_c96_hyb", "patch_merge_c96_hyb",
+               "swin_bneck6_hyb", "expand_c128_hyb", "swin_block_c96_add_hyb", "expand_c96_hyb",
+               "swin_block_c64_add_hyb")
+
+
+def same_frames(lines):
+    """A trace's lines for comparing two runs of the release route: the build folder's name dropped, and the kernel
+    line's fusion reports (d3d12_fusion, l_lin_fused, l_dec_fold, l_enc_lin: whether the manifest has kernels that
+    do not change the route)."""
+    out = []
+    for x in lines:
+        x = re.sub(r"wg_lfb_\w+", "B", x)
+        if x.startswith("kernels "):
+            x = re.sub(r" (d3d12_fusion|l_lin_fused|l_dec_fold|l_enc_lin)=\S+", "", x)
+        out.append(x)
+    return out
+
+
+def route_of(t):
+    """The route a trace ran: d3d12 (the hybrid twins) or hip (the FP16-form reference)."""
+    return "d3d12" if "l_hyb_d3d12" in t.kernels else "hip"
 
 
 def latent_out(coef):
-    """The new latent a frame's coefficient store wrote (l_coef / l_coef_pack12, or the folded block)."""
-    return coef.args[10] if coef.kernel == FOLD else coef.args[4]
+    """The new latent a frame's coefficient store wrote (l_coef / l_coef_pack12)."""
+    return coef.args[4]
 
 
-def expected_args(t, f, digests):
+def block_args(route, x, skip, out, w, tab, fh, fw, offsets):
+    """A Model L block's arguments: x, skip, out, w, H, W, ox, oy (the twins); the FP16-form blocks take the tables
+    after w."""
+    return [x, skip, out, w] + ([tab] if route == "hip" else []) + [str(fh), str(fw)] + offsets
+
+
+def expected_args(t, f, digests, route):
     """Every Model L launch's arguments from the buffers' names (the runtime's wg_rt_buffer names after the frame) and
     the weight blobs' addresses (the upload holding each blob's bytes), independently of the launches themselves:
-    {kernel (without _nc): [argument]}, None where the parameters E / D / P stand (checked field by field
-    elsewhere)."""
+    {kernel role (base): [argument]}, None where the parameters E / D / P stand (checked field by field elsewhere)."""
     n = f["names"]
     w = {}
     for blob, digest in digests.items():
@@ -160,28 +236,36 @@ def expected_args(t, f, digests):
     npix, tw, th = str((fh + 4) * (fw + 4)), str(fw // 2), str(fh // 2)
     eo = [str(v) for v in T.block_offset(T.TABLE, "first", info["parity"])]
     do = [str(v) for v in T.block_offset(T.TABLE, "second", info["parity"])]
-    # fused linears, or the linears in the block: q not under x2
-    q = n["l.narrow"] if any(ln.kernel in (LIN, ENCLIN) for ln in f["launches"]) else n["l.wide"]
+    hip = route == "hip"
+    tab = w.get("q7.tab")
+    fused = any(ln.kernel == ENC_LIN_HYB for ln in f["launches"])
+    q_map = n["l.narrow"] if fused else n["l.wide"]
     return {
         # the input encoder's values: Model M's encoder inputs (the colour as the network reads it, here the game's,
         # pre-exposure 1), the state it reads, q into the wide map, the motion surfaces, the exposure pair
         "lev/input_encoder": [n["input.color"], n["input.depth"], n["input.motion"], n["post.reduced"],
-                              n["state.latent_prev"], n["state.motion_history"], q, n["enc0.m_near"],
+                              n["state.latent_prev"], n["state.motion_history"], q_map, n["enc0.m_near"],
                               n["enc0.m_far"], n["enc0.m_center"], n["exposure.pair"], w["enc0.values"], None],
         "l_linear_32_32_relu": [n["l.wide"], n["l.narrow"], w["enc0.Win1"], npix],  # q -> x1
         "l_linear_32_32_f16": [n["l.narrow"], n["l.wide"], w["enc0.Win2"], npix],   # x1 -> x2
-        LIN: [n["l.narrow"], n["l.wide"], w["enc0.Win1"], w["enc0.Win2"], npix],      # q -> x2 (x1 in registers)
-        "l_swin_block_c32_enc": [n["l.wide"], "0", n["l.x3"], w["enc0_block"], str(fh), str(fw)] + eo,  # x2 -> x3
-        # the block with the linears as its prologue: q -> x3, then the two linear blobs
-        ENCLIN_BASE: [n["l.narrow"], "0", n["l.x3"], w["enc0_block"], str(fh), str(fw)] + eo +
-                     [w["enc0.Win1"], w["enc0.Win2"]],
+        # x2 -> x3 (no skip)
+        "l_enc_block": block_args(route, n["l.wide"], "0", n["l.x3"], w["enc0_block.q7" if hip else "enc0_block"],
+                                  tab, fh, fw, eo),
         "l_project_gather": [n["l.x3"], n["enc0.features"], w["enc0.project"], tw, th],  # x3 -> enc1's input
         "l_dec_project": [n["dec1.out"], n["l.narrow"], w["dec0.project"], tw, th],      # dec1's output -> y
-        "l_swin_block_c32_dec": [n["l.narrow"], "0", n["l.wide"], w["dec0_block"], str(fh), str(fw)] + do,  # -> y2
+        # y with the skip S = x3 -> y2
+        "l_dec_block": block_args(route, n["l.narrow"], n["l.x3"], n["l.wide"],
+                                  w["dec0_block.q7" if hip else "dec0_block"], tab, fh, fw, do),
+        # the native hybrid route (speed lever 3): q in the narrow map's 20-byte form (lev/input_encoder_q20: the same
+        # arguments, q -> l.narrow), the encoder block with the linears as its prologue (x2 neither written nor read),
+        # the decoder block with the pack12 store as its epilogue (y2 not stored; A / C its pack12 images)
+        **({"l_enc_block_lin": [n["l.narrow"], "0", n["l.x3"], w["enc0_block"], str(fh), str(fw)] + eo +
+                                [w["enc0.Win1"], w["enc0.Win2"]],
+            "l_dec_block_coef": [n["l.narrow"], n["l.x3"], "0", w["dec0_block"], str(fh), str(fw)] + do +
+                                [n["dec0.A"], n["dec0.C"], n["dec0.latent"], w["dec0.coef"], str(info["rw"]),
+                                 str(info["rh"])]} if fused else {}),
+        # (l_coef_pack12: the same arguments; A and C its pack12 images)
         "l_coef": [n["l.wide"], n["dec0.A"], n["dec0.B"], n["dec0.C"], n["dec0.latent"], w["dec0.coef"], None],
-        # the folded form: the block's arguments (no map out), then the pack12 store's images, latent, blob, rectangle
-        FOLD_BASE: [n["l.narrow"], "0", "0", w["dec0_block"], str(fh), str(fw)] + do +
-                   [n["dec0.A"], n["dec0.C"], n["dec0.latent"], w["dec0.coef"], str(info["rw"]), str(info["rh"])],
         # the reconstruction (Model M's post_recon arguments): colour, A, B, C, the previous history, this frame's
         # motion surfaces, the post blob, the new history, the reduced history, the display image, P, exposure pair
         "l_post_recon": [n["input.color"], n["dec0.A"], n["dec0.B"], n["dec0.C"], n["state.history_prev"],
@@ -191,13 +275,22 @@ def expected_args(t, f, digests):
 
 
 def base(kernel):
-    """A Model L launch's kernel without its clamp-free suffix; the pack12 coefficient store (native D3D12) as l_coef,
-    whose arguments it shares."""
-    k = kernel.replace("_nc", "")
-    post = ("l_post_recon_p12", "l_post_recon_ldr", "l_post_recon_p12_ldr")   # pack12 and LDR forms
-    if k.startswith("lev/input_encoder") and k.endswith("_q20"):   # the q20 forms (fusion le): the same arguments
-        return k[:-len("_q20")]
-    return "l_coef" if k == "l_coef_pack12" else "l_post_recon" if k in post else k
+    """A Model L launch's role: the blocks of both routes as l_enc_block / l_dec_block, the pack12 coefficient store
+    as l_coef (whose arguments it shares), every form of the reconstruction (C1/C2 lc12/, pack12, LDR) as
+    l_post_recon."""
+    if kernel == ENC_LIN_HYB:
+        return "l_enc_block_lin"
+    if kernel == DEC_COEF_HYB:
+        return "l_dec_block_coef"
+    if kernel == "lev/input_encoder_q20":
+        return "lev/input_encoder"
+    if kernel in ENC_BLOCK.values():
+        return "l_enc_block"
+    if kernel in DEC_BLOCK.values():
+        return "l_dec_block"
+    k = kernel[len("lc12/"):] if kernel.startswith("lc12/") else kernel
+    post = ("l_post_recon", "l_post_recon_p12", "l_post_recon_ldr", "l_post_recon_p12_ldr")
+    return "l_coef" if k == "l_coef_pack12" else "l_post_recon" if k in post else kernel
 
 
 def model_m_post(names):
@@ -207,12 +300,15 @@ def model_m_post(names):
             or n.startswith("pmo/") or n.endswith("_band")]
 
 
-def check_roles(t, f, digests, l_post=True):
-    """Raises AssertionError naming every Model L launch argument that is not the expected buffer or blob."""
-    exp = expected_args(t, f, digests)
+def check_roles(t, f, digests, route, l_post=True):
+    """Raises AssertionError naming every Model L launch argument that is not the expected buffer or blob, every role
+    not launched, and any M-form L block or fusion launched."""
+    exp = expected_args(t, f, digests, route)
     seen, bad = set(), []
     for ln in f["launches"]:
         k = base(ln.kernel)
+        if ln.kernel in M_FORM_L:
+            bad.append("%s launched (the M-form L route is not offered)" % ln.kernel)
         if k not in exp:
             continue
         seen.add(k)
@@ -222,21 +318,100 @@ def check_roles(t, f, digests, l_post=True):
             continue
         bad += ["%s argument %d: %s, expected %s" % (k, i, a, e) for i, (a, e) in enumerate(zip(ln.args, want))
                 if e is not None and a != e]
-    fold, lin, el = FOLD_BASE in seen, LIN in seen, ENCLIN_BASE in seen
-    pair_d, pair_l = ("l_swin_block_c32_dec", "l_coef"), ("l_linear_32_32_relu", "l_linear_32_32_f16")
-    pair_e = pair_l + ("l_swin_block_c32_enc",)
-    need = [k for k in L_KERNELS if not (fold and k in pair_d) and not (lin and k in pair_l) and
-            not (el and k in pair_e)] + ([FOLD_BASE] if fold else []) + ([LIN] if lin else []) + \
-        ([ENCLIN_BASE] if el else [])
-    if el and (lin or set(pair_e) & seen):
-        bad.append("the encoder block with the linears and the linears or the plain block in one frame")
-    if fold and (set(pair_d) & seen):
-        bad.append("the folded decoder block and the pair in one frame")
-    if lin and (set(pair_l) & seen):
-        bad.append("the fused linears and the pair in one frame")
+    names = [ln.kernel for ln in f["launches"]]
+    need = L_KERNELS
+    if ENC_LIN_HYB in names:   # the native hybrid route (lever 3): no separate linears; the fold on pack12 frames
+        need = tuple(k for k in L_KERNELS if k not in ("l_linear_32_32_relu", "l_linear_32_32_f16", "l_enc_block"))
+        need += ("l_enc_block_lin",)
+        if DEC_COEF_HYB in names:
+            need = tuple(k for k in need if k not in ("l_dec_block", "l_coef")) + ("l_dec_block_coef",)
     missing = [k for k in need if k not in seen and (l_post or k != "l_post_recon")]
     if bad or missing:
         raise AssertionError("; ".join(bad + ["not launched: " + k for k in missing]))
+
+
+def shared_stages(t, f, route, digests=None):
+    """The ten shared stages between l_project_gather and l_dec_project, argument for argument (AssertionError):
+    HIP the FP16-form kernels (l_q7_stages: each block one 4 x 4 window per workgroup of 32 lanes, its "<s>.q7" blob
+    and the tables; the merges and expansions their "<s>.q7lin" blob), D3D12 the twins on the unfused layout (Model M's
+    block arguments and grids). The maps by the runtime's names; the offsets from the reference table
+    (clean/reference/swin.py window_offset); with digests, every FP16-form blob by its bytes."""
+    ls, n, info = f["launches"], f["names"], f["info"]
+    fw, fh = cdiv(info["rw"], 32) * 32, cdiv(info["rh"], 32) * 32
+    H2, W2, H4, W4, H8, W8 = fh // 2, fw // 2, fh // 4, fw // 4, fh // 8, fw // 8
+    names = [ln.kernel for ln in ls]
+    a, b = names.index("l_project_gather"), names.index("l_dec_project")
+    got = ls[a + 1:b]
+    par = info["parity"]
+    bouts = [n["b%d.out" % i] for i in range(6)]
+
+    def off(stage):
+        return [str(v) for v in SW.window_offset(stage, par)]
+
+    w = (lambda blob: t.uploaded(digests[blob])) if digests else (lambda blob: None)
+    if route == "hip":
+        tab = w("q7.tab")
+
+        def blk(k, x, skip, out, stage, H, W):
+            ox, oy = SW.window_offset(stage, par)
+            return (k, cdiv(W + ox, 4) * cdiv(H + oy, 4), 32, [x, skip, out, w(stage + ".q7"), tab, str(H), str(W)] +
+                    off(stage))
+
+        def lin(k, x, out, stage, h, w_, grid):
+            return (k, grid, 32, [x, out, w(stage + ".q7lin"), str(h), str(w_)])
+
+        e2 = got[10].args[1] if len(got) > 10 and got[10].args else None   # the expansions' maps (no name)
+        e1 = got[12].args[1] if len(got) > 12 and got[12].args else None
+        want = [blk("l_q7_block_c64", n["enc0.features"], "0", n["enc1.skip"], "enc1", H2, W2),
+                lin("l_q7_merge_c64", n["enc1.skip"], n["enc1.merged"], "enc1", H2, W2, (H2 // 2) * (W2 // 2)),
+                blk("l_q7_block_c96", n["enc1.merged"], "0", n["enc2.skip"], "enc2", H4, W4),
+                lin("l_q7_merge_c96", n["enc2.skip"], n["enc2.merged"], "enc2", H4, W4, (H4 // 2) * (W4 // 2))]
+        x = n["enc2.merged"]
+        for i in range(6):
+            want.append(blk("l_q7_block_c128", x, "0", bouts[i], "b%d" % i, H8, W8))
+            x = bouts[i]
+        want += [lin("l_q7_expand_c128", bouts[5], e2, "dec2", H8, W8, H8 * W8),
+                 blk("l_q7_block_c96_dec", e2, n["enc2.skip"], n["dec2.out"], "dec2", H4, W4),
+                 lin("l_q7_expand_c96", n["dec2.out"], e1, "dec1", H4, W4, H4 * W4),
+                 blk("l_q7_block_c64_dec", e1, n["enc1.skip"], n["dec1.out"], "dec1", H2, W2)]
+        if e2 in (None, "0") or e1 in (None, "0") or e1 == e2 or {e1, e2} & set(n.values()):
+            raise AssertionError("the expansions' maps: %s, %s" % (e2, e1))
+    else:
+        def blk(k, x, skip, out, stage, H, W):
+            ox, oy = SW.window_offset(stage, par)
+            return (k, cdiv(cdiv(W + ox, 4) * cdiv(H + oy, 4), 8), 256, [x, skip, out, w(stage), str(H), str(W)] +
+                    off(stage))
+
+        want = [blk("swin_block_c64_hyb", n["enc0.features"], "0", n["enc1.skip"], "enc1", H2, W2),
+                ("patch_merge_c64_hyb", None, None, None),
+                blk("swin_block_c96_hyb", n["enc1.merged"], "0", n["enc2.skip"], "enc2", H4, W4),
+                ("patch_merge_c96_hyb", None, None, None)]
+        # b0 ... b5: one launch (speed lever 4) of 128 workgroups; enc2's merged map in, b5.out out (tmp and the
+        # sync words: the runtime's scratch, not named), the six blobs, the even (b0) and odd (b1) blocks' offsets
+        want.append((BNECK_HYB, 128, 256, [n["enc2.merged"], bouts[5], None, None] + [w("b%d" % i) for i in range(6)] +
+                     [str(H8), str(W8)] + off("b0") + off("b1") + ["128"]))
+        want += [("expand_c128_hyb", None, None, None),
+                 blk("swin_block_c96_add_hyb", None, n["enc2.skip"], n["dec2.out"], "dec2", H4, W4),
+                 ("expand_c96_hyb", None, None, None),
+                 blk("swin_block_c64_add_hyb", None, n["enc1.skip"], n["dec1.out"], "dec1", H2, W2)]
+    bad = []
+    if [ln.kernel for ln in got] != [k for k, _, _, _ in want]:
+        raise AssertionError("shared stages: %s, expected %s" % ([ln.kernel for ln in got], [k for k, *_ in want]))
+    for i, (ln, (k, grid, block, args)) in enumerate(zip(got, want)):
+        if grid is not None and (ln.grid, ln.block) != (grid, block):
+            bad.append("%s (launch %d): grid %s x %s, expected %s x %s" % (k, i, ln.grid, ln.block, grid, block))
+        if args is not None:
+            if len(ln.args) != len(args):
+                bad.append("%s (launch %d): %d arguments, expected %d" % (k, i, len(ln.args), len(args)))
+                continue
+            bad += ["%s (launch %d) argument %d: %s, expected %s" % (k, i, j, a_, e) for j, (a_, e) in
+                    enumerate(zip(ln.args, args)) if e is not None and a_ != e]
+    if route == "d3d12":   # the maps the twin expansions write (no name, arguments not recorded): new maps
+        e2, e1 = got[6].args[0], got[8].args[0]
+        if e2 == e1 or {e2, e1} & ({"0"} | set(n.values())):
+            bad.append("the expanded maps: %s, %s" % (e2, e1))
+    if bad:
+        raise AssertionError("; ".join(bad))
 
 
 def declared_ports():
@@ -251,11 +426,15 @@ def declared_ports():
     return out
 
 
-# Model L's D3D12 kernels the runtime checks at create (runtime.cpp l_native_missing), with their code objects
+# The hybrid route's D3D12 kernels the runtime checks at create besides the twins and the reconstruction
+# (runtime.cpp l_native_missing), with their code objects
 L_D3D12 = [("lev/input_encoder", "l_enc_values.co"), ("l_linear_32_32_relu", "l_ops.co"),
-           ("l_linear_32_32_f16", "l_ops.co"), ("l_swin_block_c32_enc_nc", "l_swin.co"), ("l_project_gather", "l_ops.co"),
-           ("swin_block_c64_add_ex_nc", "swin.co"), ("l_dec_project", "l_ops.co"), ("l_swin_block_c32_dec_nc", "l_swin.co"),
+           ("l_linear_32_32_f16", "l_ops.co"), ("l_project_gather", "l_ops.co"), ("l_dec_project", "l_ops.co"),
            ("l_coef_pack12", "l_ops.co")]
+HYB_TWINS = ("l_swin_block_c32_enc_hyb", "l_swin_block_c32_dec_hyb", "swin_block_c64_hyb", "patch_merge_c64_hyb",
+             "swin_block_c96_hyb", "patch_merge_c96_hyb", "swin_block_c128_hyb", "expand_c128_hyb",
+             "swin_block_c96_add_hyb", "expand_c96_hyb", "swin_block_c64_add_hyb")
+LC12 = ("lc12/l_post_recon", "lc12/l_post_recon_p12", "lc12/l_post_recon_ldr", "lc12/l_post_recon_p12_ldr")
 
 
 def full_ports():
@@ -274,44 +453,65 @@ class Ports(unittest.TestCase):
         for k in ("w64/post_tf_f32_p12_diet_vsit", "w64/post_tf4_dl_f32_p12_diet_vsit"):
             self.assertIn((k, "post_w64.co"), have)
 
+    def test_release_route_declared(self):
+        """Every port of the release route (the hybrid twins, the C1/C2 reconstruction, Model L's own kernels and its
+        filters) is declared: a full build's manifest has them all."""
+        have = [k for k, _ in declared_ports()]
+        need = [k for k, _ in L_D3D12] + list(HYB_TWINS) + list(LC12) + ["l_coef", "w64/post_filter_c1_s4",
+                                                                          "l_post_filter_ldr"]
+        self.assertEqual([k for k in need if k not in have], [])
+
 
 def cdiv(a, b):
     return -(-a // b)
 
 
-def nc_flags():
-    blobs = LP.pack_model_l(L.random_params(np.random.default_rng(SEED)))
-    return [bool(int.from_bytes(blobs[n][:4], "little") & 1) for n in ("enc0_block", "dec0_block")]
-
-
 def expected_l(m_frame, parity, fh, fw):
-    """Model M's launches of one frame (on the unbanded post_recon route) with Model L's steps 2, 4 and 5
-    (clean/l/FORMATS.md, "Kernels" and "Launch order of one frame"): kernel, grid, block."""
-    nc = nc_flags()
+    """Model M's launches of one frame (on the unbanded post_recon route) with Model L's steps 2 to 5 on the HIP
+    reference route (clean/l/FORMATS.md, "Kernels" and "Launch order of one frame"; the FP16-form kernels): kernel,
+    grid, block. Model M's input encoder -> Model L's values, linears, encoder block and gather; Model M's ten shared
+    stages -> the FP16-form stages (l_q7_stages); its decoder -> Model L's projection, decoder block and l_coef; its
+    post_recon -> the C1/C2 reconstruction (same arguments and grid)."""
     npix, tokens = (fh + 4) * (fw + 4), (fh // 2) * (fw // 2)
+    H2, W2, H4, W4, H8, W8 = fh // 2, fw // 2, fh // 4, fw // 4, fh // 8, fw // 8
 
-    def block(kind, offsets, i):
-        ox, oy = T.block_offset(T.TABLE, offsets, parity)
-        nwin = cdiv(fw + ox, 4) * cdiv(fh + oy, 4)
-        return ("l_swin_block_c32_%s%s" % (kind, "_nc" if nc[i] else ""), cdiv(nwin, 8), 256)
+    def nwin(H, W, ox, oy):
+        return cdiv(W + ox, 4) * cdiv(H + oy, 4)
 
-    out = []
+    def lblock(k, offsets):
+        return (k, nwin(fh, fw, *T.block_offset(T.TABLE, offsets, parity)), 32)
+
+    def sblock(k, stage, H, W):
+        return (k, nwin(H, W, *SW.window_offset(stage, parity)), 32)
+
+    stages = [sblock("l_q7_block_c64", "enc1", H2, W2), ("l_q7_merge_c64", (H2 // 2) * (W2 // 2), 32),
+              sblock("l_q7_block_c96", "enc2", H4, W4), ("l_q7_merge_c96", (H4 // 2) * (W4 // 2), 32)] + \
+        [sblock("l_q7_block_c128", "b%d" % i, H8, W8) for i in range(6)] + \
+        [("l_q7_expand_c128", H8 * W8, 32), sblock("l_q7_block_c96_dec", "dec2", H4, W4),
+         ("l_q7_expand_c96", H4 * W4, 32), sblock("l_q7_block_c64_dec", "dec1", H2, W2)]
+    out, in_stages = [], False
     for k, g, b in m_frame:
         if k == "input_encoder":
             out += [("lev/input_encoder", cdiv(((fh + 4) // 2) * ((fw + 4) // 2), 128), 256),
                     ("l_linear_32_32_relu", cdiv(npix, 128), 256), ("l_linear_32_32_f16", cdiv(npix, 128), 256),
-                    block("enc", "first", 0), ("l_project_gather", cdiv(tokens, 128), 256)]
+                    lblock("l_q7_block_c32_enc", "first"), ("l_project_gather", cdiv(tokens, 128), 256)] + stages
+            in_stages = True   # Model M's shared stages follow, up to its decoder
         elif k == "coef_decoder":
-            out += [("l_dec_project", cdiv(tokens, 128), 256), block("dec", "second", 1),
+            out += [("l_dec_project", cdiv(tokens, 128), 256), lblock("l_q7_block_c32_dec", "second"),
                     ("l_coef", cdiv(tokens, 128), 256)]
-        elif k.split("/")[-1] == "post_recon":  # Model L's reconstruction, same arguments and grid
-            out.append(("l_post_recon", g, b))
+            in_stages = False
+        elif in_stages:
+            continue
+        elif k.split("/")[-1] == "post_recon":  # Model L's C1/C2 reconstruction, same arguments and grid
+            out.append(("lc12/l_post_recon", g, b))
         else:
             out.append((k, g, b))
     return out
 
 
 class Frame(unittest.TestCase):
+    """The HIP release route (the scalar hybrid_full reference) launch for launch against Model M's frame."""
+
     def check(self, build_files=(), m_env=None):
         # Model M on the route Model L's reconstruction takes: the unbanded post_recon, then the unbanded filter
         fh, fw = cdiv(RH, 32) * 32, cdiv(RW, 32) * 32
@@ -326,11 +526,14 @@ class Frame(unittest.TestCase):
             self.assertIn("coef_decoder", names)  # Model M's base decoder: the one Model L's l_coef stands in for
             self.assertEqual(sum(k.split("/")[-1] == "post_recon" for k in names), 1)
             self.assertEqual(l_, expected_l(m, i & 1, fh, fw), "frame %d" % i)
-        l_mods = ["l_enc_values.co as lev", "l_ops.co", "l_swin.co", "l_post.co"]
+        l_mods = ["l_enc_values.co as lev", "l_ops.co", "l_swin.co", "l_post.co", "l_q7__hyb.co", "l_q7w__hyb.co",
+                  "l_post__lc12.co as lc12"]
         self.assertEqual([x for x in ll if x not in l_mods], [x for x in lm if x not in (km["enc0"], km["dec0"])])
         for want in l_mods:
             self.assertIn(want, ll)
         self.assertEqual(kl.get("model"), "L")
+        self.assertEqual(kl.get("l_form"), "hybrid")
+        self.assertEqual(kl.get("l_post_c12"), "on")
         self.assertEqual(kl.get("post_pack"), "none")
         self.assertEqual(kl.get("model_map"), "same")  # read from model.wgcm, checked against its map
         return fl
@@ -339,8 +542,8 @@ class Frame(unittest.TestCase):
         self.check()
 
     def test_shipping_build(self):
-        # l_coef writes Model M's base coefficient format: Model L runs without pack12 (and so without the fused pack12
-        # dec1 + dec0), compared with Model M without it (WG_POST_PACK=none)
+        # l_coef writes Model M's base coefficient format: Model L on HIP runs without pack12 (and so without the fused
+        # pack12 dec1 + dec0), compared with Model M without it (WG_POST_PACK=none)
         fl = self.check(FT.SHIPPING, {"WG_POST_PACK": "none"})
         names = [k for k, _, _ in fl[0]]
         self.assertTrue(all(not n.startswith(("d0p12/", "d1p12/")) and "_p12" not in n for n in names), names)
@@ -353,75 +556,127 @@ class Frame(unittest.TestCase):
 
 
 class Arguments(unittest.TestCase):
-    """The recorder's view of every Model L launch (clean/l/FORMATS.md, "Maps" and "Kernels")."""
+    """The recorder's view of every Model L launch (clean/l/FORMATS.md, "Maps" and "Kernels") on the release routes."""
 
-    def check_frame(self, t, f, roles=True, l_post=True):
+    def check_frame_fused(self, t, f, roles=True, l_post=True):
+        """check_frame for the native hybrid route with its fused twins (speed lever 3): q (20-byte form) -> the encoder
+        block with the linears -> x3; y with the skip x3 -> the decoder block with the pack12 store (pack12 frames) or
+        the decoder block -> y2 -> l_coef (other frames). Returns (lev, coef) with coef the launch holding A / C /
+        latent at the l_coef positions 1 / 3 / 4 (a stand-in object for the folded store)."""
         info, ls = f["info"], f["launches"]
         rw, rh = info["rw"], info["rh"]
         fw, fh = cdiv(rw, 32) * 32, cdiv(rh, 32) * 32
         npix, tw, th = (fh + 4) * (fw + 4), fw // 2, fh // 2
+        names = [ln.kernel for ln in ls]
+        self.assertEqual([n for n in names if n in M_FORM_L], [])
+        self.assertEqual([n for n in names if n in ("l_linear_32_32_relu", "l_linear_32_32_f16", LIN)], [])
         k = {base(ln.kernel): (i, ln) for i, ln in enumerate(ls)}
         _, lev = k["lev/input_encoder"]
-        el = k[ENCLIN_BASE][1] if ENCLIN_BASE in k else None   # the block with the linears (fusion le)
-        lin = k[LIN][1] if LIN in k else None
-        if not lin and not el:
-            _, relu = k["l_linear_32_32_relu"]
-            _, f16 = k["l_linear_32_32_f16"]
-        enc = el if el else k["l_swin_block_c32_enc"][1]
+        self.assertEqual(lev.kernel, "lev/input_encoder_q20")
+        _, enc = k["l_enc_block_lin"]
         gi, gather = k["l_project_gather"]
         di, dproj = k["l_dec_project"]
-        fold = FOLD_BASE in k
-        if fold:  # one launch: the block with the coefficient store as its epilogue (no y2 map)
-            _, dec = k[FOLD_BASE]
-            coef = dec
+        q, x3, feat = lev.args[6], enc.args[2], gather.args[1]
+        self.assertEqual(enc.args[0], q)       # the block reads q itself
+        self.assertEqual(enc.args[1], "0")
+        self.assertEqual(gather.args[0], x3)
+        self.assertEqual(ls[gi + 1].kernel, "swin_block_c64_hyb")
+        self.assertEqual(ls[gi + 1].args[0], feat)
+        dec1 = ls[di - 1]
+        self.assertEqual(dec1.kernel, "swin_block_c64_add_hyb")
+        y = dproj.args[1]
+        self.assertEqual(dproj.args[0], dec1.args[2])
+        fold = "l_dec_block_coef" in k
+        if fold:
+            _, dec = k["l_dec_block_coef"]
+            self.assertEqual((dec.args[0], dec.args[1], dec.args[2]), (y, x3, "0"))
+            A, C, L = dec.args[8], dec.args[9], dec.args[10]
+            self.assertEqual(dec.args[12:14], [str(rw), str(rh)])
+
+            class _Coef:
+                args = [None, A, None, C, L]
+            coef = _Coef()
+            self.assertGreaterEqual(t.extent(A), 8 * rw * rh)
+            self.assertGreaterEqual(t.extent(C), 4 * rw * rh)
+            self.assertGreaterEqual(t.extent(L), 4 * rw * rh)
         else:
-            _, dec = k["l_swin_block_c32_dec"]
+            _, dec = k["l_dec_block"]
             _, coef = k["l_coef"]
+            self.assertEqual((dec.args[0], dec.args[1]), (y, x3))
+            self.assertEqual(coef.args[0], dec.args[2])
+        for a_, b_ in ((q, x3), (x3, feat), (dec1.args[2], y), (x3, y)):
+            self.assertNotEqual(a_, b_)
+        self.assertGreaterEqual(t.extent(q), 20 * npix)   # the q20 map: 16 + 4 bytes a pixel (two planes)
+        self.assertGreaterEqual(t.extent(x3), 32 * fh * fw)
+        self.assertEqual(gather.args[3:5], [str(tw), str(th)])
+        self.assertEqual(dproj.args[3:5], [str(tw), str(th)])
+        for blk, kind in ((enc, "first"), (dec, "second")):
+            ox, oy = T.block_offset(T.TABLE, kind, info["parity"])
+            self.assertEqual(blk.args[4:8], [str(fh), str(fw), str(ox), str(oy)])
+            nwin = cdiv(fw + ox, 4) * cdiv(fh + oy, 4)
+            self.assertEqual((blk.grid, blk.block), (cdiv(nwin, 8), 256))
+        e = lev.params(12)
+        self.assertEqual(e[:4], [rw, rh, fw, fh])
+        self.assertEqual(e[5], info["reset"])
+        post = [ln for ln in ls if base(ln.kernel) == "l_post_recon"]
+        self.assertEqual(len(post), 1 if l_post else 0)
+        if l_post:
+            self.assertTrue(post[0].kernel.startswith("lc12/"), post[0].kernel)
+        digests = blob_digests("d3d12") if roles else None
+        shared_stages(t, f, "d3d12", digests)
+        if roles:
+            check_roles(t, f, digests, "d3d12", l_post)
+        return lev, coef
+
+    def check_frame(self, t, f, roles=True, l_post=True):
+        route = route_of(t)
+        if route == "d3d12" and any(ln.kernel == ENC_LIN_HYB for ln in f["launches"]):
+            return Arguments.check_frame_fused(self, t, f, roles, l_post)
+        info, ls = f["info"], f["launches"]
+        rw, rh = info["rw"], info["rh"]
+        fw, fh = cdiv(rw, 32) * 32, cdiv(rh, 32) * 32
+        npix, tw, th = (fh + 4) * (fw + 4), fw // 2, fh // 2
+        names = [ln.kernel for ln in ls]
+        self.assertEqual([n for n in names if n in M_FORM_L], [])   # no M-form L block, no fusion on it
+        k = {base(ln.kernel): (i, ln) for i, ln in enumerate(ls)}
+        _, lev = k["lev/input_encoder"]
+        _, relu = k["l_linear_32_32_relu"]
+        _, f16 = k["l_linear_32_32_f16"]
+        _, enc = k["l_enc_block"]
+        gi, gather = k["l_project_gather"]
+        di, dproj = k["l_dec_project"]
+        _, dec = k["l_dec_block"]
+        _, coef = k["l_coef"]
+        self.assertEqual((enc.kernel, dec.kernel), (ENC_BLOCK[route], DEC_BLOCK[route]))
+        h = 5 if route == "hip" else 4   # the block's H (the FP16-form blocks take the tables after w)
         q, x3, feat = lev.args[6], enc.args[2], gather.args[1]
         # the chain of maps (no launch reads what it writes)
-        if el:  # one launch for the linears and the block: no x1 or x2 map
-            x1 = x2 = None
-            self.assertEqual(el.args[0], q)
-        elif lin:  # one launch, x1 in registers: no map
-            x1, x2 = None, lin.args[1]
-            self.assertEqual(lin.args[0], q)
-            self.assertEqual(lin.args[4], str(npix))
-        else:
-            x1, x2 = relu.args[1], f16.args[1]
-            self.assertEqual(relu.args[0], q)
-            self.assertEqual(f16.args[0], x1)
-            self.assertEqual(relu.args[3], str(npix))
-            self.assertEqual(f16.args[3], str(npix))
-        if not el:
-            self.assertEqual(enc.args[0], x2)
-        self.assertEqual(enc.args[1], "0")  # xadd: none
+        x1, x2 = relu.args[1], f16.args[1]
+        self.assertEqual(relu.args[0], q)
+        self.assertEqual(f16.args[0], x1)
+        self.assertEqual(relu.args[3], str(npix))
+        self.assertEqual(f16.args[3], str(npix))
+        self.assertEqual(enc.args[0], x2)
+        self.assertEqual(enc.args[1], "0")  # the encoder block: no skip
         self.assertEqual(gather.args[0], x3)
-        self.assertTrue(ls[gi + 1].kernel.startswith("swin_block_c64"))
+        self.assertEqual(ls[gi + 1].kernel, "l_q7_block_c64" if route == "hip" else "swin_block_c64_hyb")
         self.assertEqual(ls[gi + 1].args[0], feat)  # enc1 reads Model L's features
-        dec1 = [ln for ln in ls[:di] if ln.kernel.startswith("swin_block_c64")][-1]
+        dec1 = ls[di - 1]   # dec1's block, right before the decoder
+        self.assertEqual(dec1.kernel, "l_q7_block_c64_dec" if route == "hip" else "swin_block_c64_add_hyb")
         y, y2 = dproj.args[1], dec.args[2]
         self.assertEqual(dproj.args[0], dec1.args[2])  # the decoder reads dec1's output
         self.assertEqual(dec.args[0], y)
-        self.assertEqual(dec.args[1], "0")
-        if fold:
-            self.assertEqual(y2, "0")  # the map is not written
-        else:
-            self.assertEqual(coef.args[0], y2)
-        for a, b in ((q, x1), (x1, x2), (q, x2 if lin else None), (x2, x3), (q, x3), (x3, feat), (dec1.args[2], y),
-                     (y, y2)):
-            if a is not None and b is not None:
-                self.assertNotEqual(a, b)
-        if not lin and not el:
-            self.assertEqual(q, x2)  # the pair: x2 over q (q is dead once x1 is written)
+        self.assertEqual(dec.args[1], x3)  # the decoder block's skip S: the encoder block's map
+        self.assertEqual(coef.args[0], y2)
+        for a, b in ((q, x1), (x1, x2), (x2, x3), (x3, feat), (dec1.args[2], y), (y, y2), (x3, y), (x3, y2)):
+            self.assertNotEqual(a, b)
+        self.assertEqual(q, x2)  # x2 over q (q is dead once x1 is written)
         # every buffer holds its map (FORMATS.md "Maps")
-        maps = ((q, 32 * npix), (x3, 32 * fh * fw), (feat, 64 * tw * th), (y, 32 * fh * fw)) + \
-            (() if el else ((x2, 64 * npix),)) + (() if fold else ((y2, 64 * fh * fw),)) + \
-            (() if lin or el else ((x1, 32 * npix),))
-        if fold:  # pack12 image A (8 bytes a pixel), image C (4), the new latent
-            coefs = ((coef.args[8], 8 * rw * rh), (coef.args[9], 4 * rw * rh), (coef.args[10], 4 * rw * rh))
-        else:
-            coefs = ((coef.args[1], 4 * rw * rh), (coef.args[2], 4 * rw * rh), (coef.args[3], 8 * rw * rh),
-                     (coef.args[4], 4 * rw * rh))  # A, B, C, the new latent: Model M's formats
+        maps = ((q, 32 * npix), (x1, 32 * npix), (x2, 64 * npix), (x3, 32 * fh * fw), (feat, 64 * tw * th),
+                (y, 32 * fh * fw), (y2, 64 * fh * fw))
+        p12 = coef.kernel == "l_coef_pack12"   # pack12 image A: 8 bytes a pixel, C 4; Model M's base: A 4, C 8
+        coefs = ((coef.args[1], (8 if p12 else 4) * rw * rh), (coef.args[2], 4 * rw * rh),
+                 (coef.args[3], (4 if p12 else 8) * rw * rh), (coef.args[4], 4 * rw * rh))
         for buf, need in maps + coefs:
             self.assertGreaterEqual(t.extent(buf), need, buf)
         # extents, offsets, parameters
@@ -429,30 +684,36 @@ class Arguments(unittest.TestCase):
         self.assertEqual(dproj.args[3:5], [str(tw), str(th)])
         for blk, kind in ((enc, "first"), (dec, "second")):
             ox, oy = T.block_offset(T.TABLE, kind, info["parity"])
-            self.assertEqual(blk.args[4:8], [str(fh), str(fw), str(ox), str(oy)])
+            self.assertEqual(blk.args[h:h + 4], [str(fh), str(fw), str(ox), str(oy)])
+            nwin = cdiv(fw + ox, 4) * cdiv(fh + oy, 4)
+            self.assertEqual((blk.grid, blk.block), (nwin, 32) if route == "hip" else (cdiv(nwin, 8), 256))
+        if route == "hip":
+            self.assertEqual(enc.args[4], dec.args[4])  # the FP16-form tables
+            self.assertTrue(enc.args[4].startswith("b"))
         e = lev.params(12)
         self.assertEqual(e[:4], [rw, rh, fw, fh])
         self.assertEqual(e[5], info["reset"])
-        if fold:
-            self.assertEqual(coef.args[12:14], [str(rw), str(rh)])
-        else:
-            self.assertEqual(coef.params(6), [rw, rh, fw, fh, info["reset"]])
+        self.assertEqual(coef.params(6), [rw, rh, fw, fh, info["reset"]])
         post = [ln for ln in ls if base(ln.kernel) == "l_post_recon"]
         self.assertEqual(len(post), 1 if l_post else 0)
         if l_post:
+            self.assertTrue(post[0].kernel.startswith("lc12/"), post[0].kernel)   # the C1/C2 reconstruction
             self.assertEqual(post[0].params(12), [rw, rh, (3 * 120 + 1) // 2, (3 * 72 + 1) // 2, info["reset"]])
             self.assertEqual(post[0].grid, cdiv((3 * 120 + 1) // 2, 32) * cdiv(cdiv((3 * 72 + 1) // 2, 2), 8))
             nxt = ls[ls.index(post[0]) + 1].kernel   # the output filter next (LDR: Model L's LDR output stage)
             self.assertTrue(nxt.endswith("post_filter_c1_s4") or nxt == "l_post_filter_ldr", nxt)
         self.assertTrue(lev.args[11].startswith("b"))  # the values blob: an allocation
+        digests = blob_digests(route) if roles else None
+        shared_stages(t, f, route, digests)
         if roles:  # every argument against the named buffers and blobs
-            check_roles(t, f, blob_digests(), l_post)
+            check_roles(t, f, digests, route, l_post)
         return lev, coef
 
     def test_sizes_reset_history(self):
         sizes = "--sizes=96x96,96x96,80x48,80x48,80x48,64x64"  # aligned, non-aligned, a smaller aligned size
         t = FT.Trace(run("model=L", frames=6, rw=96, rh=96, flags=(sizes, "--reset=4")))
         self.assertEqual(t.create, "create ok model L")
+        self.assertEqual(t.unknown(), [])
         # first frame, a size change, the game's reset, a size change
         self.assertEqual([f["info"]["reset"] for f in t.frames], [1, 0, 1, 0, 1, 1])
         prev = None
@@ -477,24 +738,29 @@ class Arguments(unittest.TestCase):
             prev = (lev, coef)
 
     def test_failed_launch_stops_the_frame(self):
-        t = FT.Trace(run("model=L", frames=3, flags=("--fail=l_coef@1",)))
-        ok0, bad, ok2 = t.frames
-        self.assertEqual(bad["failed"], "l_coef")
-        self.assertIn("injected launch failure: l_coef", bad["error"])
-        names = [ln.kernel for ln in bad["launches"]]
-        self.assertEqual(names, [ln.kernel for ln in ok0["launches"]][:len(names)])
-        self.assertTrue(names[-1].startswith("l_swin_block_c32_dec"))  # stopped right before l_coef
-        self.assertIsNone(ok2["error"])
-        self.check_frame(t, ok2)
+        for kernel, before in (("l_coef", "l_q7_block_c32_dec"), ("l_q7_block_c128", "l_q7_merge_c96"),
+                               ("lc12/l_post_recon", "l_coef")):
+            with self.subTest(kernel=kernel):
+                t = FT.Trace(run("model=L", frames=3, flags=("--fail=%s@1" % kernel,)))
+                ok0, bad, ok2 = t.frames
+                self.assertEqual(bad["failed"], kernel)
+                self.assertIn("injected launch failure: " + kernel, bad["error"])
+                names = [ln.kernel for ln in bad["launches"]]
+                self.assertEqual(names, [ln.kernel for ln in ok0["launches"]][:len(names)])
+                self.assertEqual(names[-1], before)  # stopped right before the failing launch
+                self.assertIsNone(ok2["error"])
+                self.check_frame(t, ok2)
 
 
 class Roles(unittest.TestCase):
     """Buffer identities: each Model L launch's weight blob, inputs and outputs are the named ones, and a mix-up of two
-    of them fails even where the map chain, sizes and argument kinds stay as they were."""
+    of them fails even where the map chain, sizes and argument kinds stay as they were; on both release routes."""
 
-    MIXUPS = (  # (kernel, argument, kernel, argument) swapped in a recorded frame
+    MIXUPS = (  # (kernel role, argument, kernel role, argument) swapped in a recorded frame
         ("l_linear_32_32_relu", 2, "l_linear_32_32_f16", 2),        # enc0.Win1 <-> enc0.Win2
-        ("l_swin_block_c32_enc", 3, "l_swin_block_c32_dec", 3),     # enc0_block <-> dec0_block
+        ("l_enc_block", 3, "l_dec_block", 3),                       # the encoder's block blob <-> the decoder's
+        ("l_enc_block", 1, "l_dec_block", 1),                       # no skip <-> the decoder's skip S (x3)
+        ("l_dec_block", 0, "l_dec_block", 1),                       # y <-> the skip S
         ("l_project_gather", 2, "l_dec_project", 2),                # enc0.project <-> dec0.project
         ("lev/input_encoder", 11, "l_coef", 5),                     # enc0.values <-> dec0.coef
         ("l_coef", 1, "l_coef", 2),                                 # A <-> B
@@ -507,31 +773,86 @@ class Roles(unittest.TestCase):
         ("l_post_recon", 8, "l_coef", 5),                           # post blob <-> dec0.coef
         ("l_post_recon", 1, "l_post_recon", 3),                     # A <-> C
     )
+    Q7_MIXUPS = (("l_enc_block", 4, "l_dec_block", 3),)              # the tables <-> the decoder's block blob
+    # the native route's fused twins (speed lever 3): the same mix-ups on their arguments (the encoder block with the
+    # linears: q, -, x3, block blob, H, W, ox, oy, Win1, Win2; the decoder block with the store: y, S, -, block blob,
+    # H, W, ox, oy, A, C, latent, dec0.coef, rw, rh)
+    FUSED_MIXUPS = (
+        ("l_enc_block_lin", 8, "l_enc_block_lin", 9),               # enc0.Win1 <-> enc0.Win2
+        ("l_enc_block_lin", 3, "l_dec_block_coef", 3),              # the encoder's block blob <-> the decoder's
+        ("l_enc_block_lin", 1, "l_dec_block_coef", 1),              # no skip <-> the decoder's skip S (x3)
+        ("l_dec_block_coef", 0, "l_dec_block_coef", 1),             # y <-> the skip S
+        ("l_project_gather", 2, "l_dec_project", 2),                # enc0.project <-> dec0.project
+        ("lev/input_encoder", 11, "l_dec_block_coef", 11),          # enc0.values <-> dec0.coef
+        ("l_dec_block_coef", 8, "l_dec_block_coef", 9),             # A <-> C
+        ("l_dec_block_coef", 9, "l_dec_block_coef", 10),            # C <-> the new latent
+        ("lev/input_encoder", 0, "lev/input_encoder", 1),           # colour <-> depth
+        ("lev/input_encoder", 4, "lev/input_encoder", 5),           # previous latent <-> motion history
+        ("lev/input_encoder", 7, "lev/input_encoder", 8),           # m_near <-> m_far
+        ("l_enc_block_lin", 0, "l_enc_block_lin", 2),               # q's map <-> x3's map
+        ("l_post_recon", 4, "l_post_recon", 9),                     # history read <-> history written
+        ("l_post_recon", 8, "l_dec_block_coef", 11),                # post blob <-> dec0.coef
+        ("l_post_recon", 1, "l_post_recon", 3),                     # A <-> C
+    )
 
     @classmethod
     def setUpClass(cls):
-        cls.trace = FT.Trace(run("model=L", frames=3, rw=96, rh=64, flags=("--sizes=96x64,80x48,80x48",)))
+        sizes = ("--sizes=96x64,80x48,80x48",)
+        cls.traces = {"hip": FT.Trace(run("model=L", frames=3, rw=96, rh=64, flags=sizes)),
+                      "d3d12": FT.Trace(run("model=L", frames=3, rw=96, rh=64, build_files=FT.SHIPPING,
+                                            flags=("--backend=3",) + sizes, manifest=full_ports()))}
 
     def test_every_argument_named(self):
-        t, digests = self.trace, blob_digests()
-        addrs = [t.uploaded(d) for d in digests.values()]
-        self.assertNotIn(None, addrs)
-        self.assertEqual(len(set(addrs)), len(addrs))  # nine distinct blobs, each in its own allocation
-        for f in t.frames:
-            self.assertEqual(len(f["names"]) >= 30, True, sorted(f["names"]))
-            check_roles(t, f, digests)
+        for route, t in self.traces.items():
+            with self.subTest(route=route):
+                self.assertEqual(route_of(t), route)
+                self.assertEqual(t.unknown(), [])
+                digests = blob_digests(route)
+                addrs = [t.uploaded(d) for d in digests.values()]
+                self.assertNotIn(None, addrs)
+                self.assertEqual(len(set(addrs)), len(addrs))  # distinct blobs, each in its own allocation
+                for f in t.frames:
+                    self.assertEqual(len(f["names"]) >= 30, True, sorted(f["names"]))
+                    check_roles(t, f, digests, route)
+                    shared_stages(t, f, route, digests)
 
     def test_mixups_fail(self):
-        digests = blob_digests()
-        for ka, ia, kb, ib in self.MIXUPS:
-            with self.subTest(mixup=(ka, ia, kb, ib)):
-                t = copy.deepcopy(self.trace)
-                f = t.frames[1]
-                ls = {ln.kernel.replace("_nc", ""): ln for ln in f["launches"]}
-                a, b = ls[ka], ls[kb]
-                a.args[ia], b.args[ib] = b.args[ib], a.args[ia]
-                with self.assertRaises(AssertionError):
-                    check_roles(t, f, digests)
+        for route, t0 in self.traces.items():
+            digests = blob_digests(route)
+            mixups = self.FUSED_MIXUPS if route == "d3d12" else self.MIXUPS + self.Q7_MIXUPS
+            for ka, ia, kb, ib in mixups:
+                with self.subTest(route=route, mixup=(ka, ia, kb, ib)):
+                    t = copy.deepcopy(t0)
+                    f = t.frames[1]
+                    ls = {base(ln.kernel): ln for ln in f["launches"]}
+                    a, b = ls[ka], ls[kb]
+                    a.args[ia], b.args[ib] = b.args[ib], a.args[ia]
+                    with self.assertRaises(AssertionError):
+                        check_roles(t, f, digests, route)
+
+    def test_shared_stage_mixups_fail(self):
+        """The shared stages' check catches a swapped map or blob (HIP: the FP16-form blobs by their bytes)."""
+        for route, t0 in self.traces.items():
+            digests = blob_digests(route)
+            # (launch, argument) pairs after l_project_gather; the d3d12 route runs b0 ... b5 as one launch (speed lever
+            # 4: positions 0 c64, 2 c96, 4 the bottleneck, 6 c96_add, 8 c64_add), swapped inside it too: its input and
+            # output maps, b0's and b5's blobs
+            swaps = (((0, 2, 2, 2), (4, 0, 5, 0), (11, 1, 13, 1), (4, 3, 5, 3), (0, 3, 13, 3)) if route != "d3d12" else
+                     ((0, 2, 2, 2), (4, 0, 4, 1), (6, 1, 8, 1), (4, 4, 4, 9), (0, 3, 8, 3), (2, 2, 4, 1)))
+            for i, ia, j, ib in swaps:
+                with self.subTest(route=route, swap=(i, ia, j, ib)):
+                    t = copy.deepcopy(t0)
+                    f = t.frames[1]
+                    names = [ln.kernel for ln in f["launches"]]
+                    st = f["launches"][names.index("l_project_gather") + 1:]
+                    a, b = st[i], st[j]
+                    if not a.args or not b.args:   # a twin merge / expand: arguments not recorded
+                        continue
+                    a.args[ia], b.args[ib] = b.args[ib], a.args[ia]
+                    if a.args == b.args or a.args[ia] == b.args[ib]:
+                        continue
+                    with self.assertRaises(AssertionError):
+                        shared_stages(t, f, route, digests)
 
     def test_swapped_weights_in_the_runtime(self):
         """The review's example in the runtime itself: enc0.Win1 and enc0.Win2 swapped in its source. The map chain,
@@ -549,35 +870,38 @@ class Roles(unittest.TestCase):
                    for s in FT.SOURCES] + L_SOURCES
         exe = host_cxx.build("runtime_frame_trace_lmut", sources, ["WG_NO_MODEL_K", "WG_MODEL_L"],
                              include_dirs=[os.path.join(host_cxx.ROOT, "clean", "runtime")])
-        t = FT.Trace(run("model=L", frames=2, exe=exe))
-        digests = blob_digests()
-        for f in t.frames:
-            Arguments.check_frame(self, t, f, roles=False)
-            with self.assertRaises(AssertionError) as cm:
-                check_roles(t, f, digests)
-            msg = str(cm.exception)
-            self.assertIn("l_linear_32_32_relu argument 2", msg)
-            self.assertIn("l_linear_32_32_f16 argument 2", msg)
-            self.assertEqual(msg.count("argument"), 2, msg)
+        for route, kw in (("hip", {}), ("d3d12", dict(build_files=FT.SHIPPING, flags=("--backend=3",),
+                                                      manifest=full_ports()))):
+            with self.subTest(route=route):
+                t = FT.Trace(run("model=L", frames=2, exe=exe, **kw))
+                self.assertEqual(route_of(t), route)
+                digests = blob_digests(route)
+                for f in t.frames:
+                    Arguments.check_frame(self, t, f, roles=False)
+                    with self.assertRaises(AssertionError) as cm:
+                        check_roles(t, f, digests, route)
+                    msg = str(cm.exception)
+                    if route == "d3d12":   # the native route's encoder block takes both blobs (speed lever 3)
+                        self.assertIn("l_enc_block_lin argument 8", msg)
+                        self.assertIn("l_enc_block_lin argument 9", msg)
+                    else:
+                        self.assertIn("l_linear_32_32_relu argument 2", msg)
+                        self.assertIn("l_linear_32_32_f16 argument 2", msg)
+                    self.assertEqual(msg.count("argument"), 2, msg)
 
 
 class D3D12(unittest.TestCase):
-    """Model L on native D3D12 (backend 3): Model M's native frame with Model L's encoder, decoder, pack12 coefficient
-    store and its own reconstruction (no Model M post route); each missing D3D12 port refused by name, never
-    replaced."""
+    """Model L on native D3D12 (backend 3), the release route: Model M's native frame layout, unfused, with every Swin /
+    merge / expand kernel its hybrid twin, Model L's encoder and decoder, the pack12 coefficient store and the C1/C2
+    reconstruction (no Model M post route); each missing D3D12 port refused by name, never replaced."""
 
     def l_run(self, ports, frames=3, flags=(), **kw):
         return run("model=L", frames=frames, build_files=FT.SHIPPING, flags=("--backend=3",) + tuple(flags),
                    manifest=ports, **kw)
 
-    def test_missing_ports_named(self):
-        have = [k for k, _ in declared_ports()]
-        missing = [k for k, _ in L_D3D12 if k not in have]
+    def test_declared_build_creates(self):
         got = self.l_run(declared_ports(), frames=1)
-        if not missing:
-            self.assertEqual(got[0], "create ok model L")
-            return
-        self.assertEqual(got, ["ERR create: Model L on native D3D12: not yet ported to D3D12: " + ", ".join(missing)])
+        self.assertEqual(got[0], "create ok model L")
 
     def test_each_port_named(self):
         for k, _ in L_D3D12:
@@ -585,94 +909,79 @@ class D3D12(unittest.TestCase):
                 got = self.l_run([kc for kc in full_ports() if kc[0] != k], frames=1)
                 self.assertEqual(got, ["ERR create: Model L on native D3D12: not yet ported to D3D12: " + k])
 
-    def check_d3d12_frame(self, t, f):
-        """The #111 checks (map chain, extents, offsets, parameters, every argument's buffer or blob, Model L's
-        reconstruction and the filter after it), then what the native frame adds: the pack12 store's images, dec1's own
-        block, l_post_recon_p12 right after the store, and no Model M post kernel."""
+    def test_m_form_ports_not_needed(self):
+        """The M-form L blocks, dec1's M-form block and the fused L kernels are not the release route's: a manifest
+        without them creates and traces the same frames."""
+        drop = ("l_swin_block_c32_enc_nc", "l_swin_block_c32_dec_nc", "swin_block_c64_add_ex_nc", FOLD, LIN, ENCLIN)
+        a = same_frames(self.l_run(full_ports(), frames=2, rw=96, rh=64))
+        b = same_frames(self.l_run([kc for kc in full_ports() if kc[0] not in drop], frames=2, rw=96, rh=64))
+        self.assertEqual(a[0], "create ok model L")
+        self.assertEqual(b, a)
+
+    def check_d3d12_frame(self, t, f, sfx=""):
+        """The Arguments checks (map chain, extents, offsets, parameters, every argument's buffer or blob, the shared
+        stages, the C1/C2 reconstruction and the filter after it), then what the native frame adds: the twins only (no
+        M-form Swin, merge or expand kernel), the pack12 store's images and lc12/l_post_recon_p12 right after it (a
+        frame the pack12 kernels do not take: l_coef and lc12/l_post_recon), no Model M post kernel."""
         info = f["info"]
         rw, rh = info["rw"], info["rh"]
         names = [ln.kernel for ln in f["launches"]]
-        fold = FOLD in names
-        if fold:
-            self.assertNotIn("l_coef_pack12", names)
-            self.assertNotIn("l_swin_block_c32_dec_nc", names)
-            self.assertEqual(names[names.index(FOLD) - 1], "l_dec_project")
-        else:
-            self.assertIn("l_coef_pack12", names)
-        if ENCLIN in names:
-            self.assertNotIn(LIN, names)
-            self.assertNotIn("l_linear_32_32_relu", names)
-            self.assertNotIn("l_swin_block_c32_enc_nc", names)
-            self.assertTrue(names[names.index(ENCLIN) - 1].startswith("lev/input_encoder"))
-        elif LIN in names:
-            self.assertNotIn("l_linear_32_32_relu", names)
-            self.assertNotIn("l_linear_32_32_f16", names)
-            self.assertTrue(names[names.index(LIN) - 1].startswith("lev/input_encoder"))
-        else:
-            self.assertIn("l_linear_32_32_relu", names)
-        self.assertNotIn("l_coef", names)
+        fold = DEC_COEF_HYB in names   # pack12 frames: the decoder block with the store (speed lever 3)
+        p12 = fold or "l_coef_pack12" in names
+        self.assertEqual(int(fold) + int("l_coef_pack12" in names) + int("l_coef" in names), 1)   # one store
+        self.assertNotIn("l_coef_pack12", names)   # (the native route folds every pack12 store)
         self.assertTrue(all(not n.startswith(("d1p12/", "d0p12/")) and n != "input_encoder" for n in names), names)
-        dec1 = [ln for ln in f["launches"] if ln.kernel.startswith("swin_block_c64_add")]
-        self.assertEqual([ln.kernel for ln in dec1], ["swin_block_c64_add_ex_nc"])  # dec1's own block, not fused
+        stages = [n for n in names if n.split("/")[-1].startswith(("swin_", "l_swin_", "patch_merge", "expand"))]
+        self.assertEqual(stages, [ENC_LIN_HYB] + list(TWIN_STAGES) + [DEC_COEF_HYB if fold else "l_swin_block_c32_dec_hyb"])
+        self.assertEqual([n for n in names if "l_q7" in n], [])
         lev, coef = Arguments.check_frame(self, t, f)
-        a, c = (coef.args[8], coef.args[9]) if fold else (coef.args[1], coef.args[3])
-        self.assertGreaterEqual(t.extent(a), 8 * rw * rh)  # pack12 image A: 8 bytes per pixel
-        self.assertGreaterEqual(t.extent(c), 4 * rw * rh)  # pack12 image C: 4 bytes per pixel
-        i = names.index(FOLD if fold else "l_coef_pack12")
-        self.assertEqual(names[i + 1], "l_post_recon_p12", names[i + 1:])
+        if p12:
+            self.assertGreaterEqual(t.extent(coef.args[1]), 8 * rw * rh)  # pack12 image A: 8 bytes per pixel
+            self.assertGreaterEqual(t.extent(coef.args[3]), 4 * rw * rh)  # pack12 image C: 4 bytes per pixel
+        i = names.index(DEC_COEF_HYB if fold else "l_coef")
+        self.assertEqual(names[i + 1], ("lc12/l_post_recon_p12" if p12 else "lc12/l_post_recon") + sfx, names[i + 1:])
         self.assertEqual(model_m_post(names), [])
         return lev, coef
 
     def test_frame(self):
-        """Sizes aligned, non-aligned and changing, a game reset; history handed from frame to frame."""
+        """Sizes aligned, non-aligned and changing, a game reset; history handed from frame to frame. The route is the
+        unfused one whatever the fusion option asks or the manifest offers."""
         # upscaling sizes the pack12 post path takes (D = 180 x 108): aligned, non-aligned, a change of size
         sizes = "--sizes=96x64,96x64,80x48,80x48,80x48,77x45"
-        t = FT.Trace(self.l_run(full_ports(), frames=6, rw=96, rh=64, flags=(sizes, "--reset=4")))
+        lines = self.l_run(full_ports(), frames=6, rw=96, rh=64, flags=(sizes, "--reset=4"))
+        t = FT.Trace(lines)
         self.assertEqual(t.create, "create ok model L")
         self.assertEqual(t.unknown(), [])
+        self.assertEqual(t.kernels.get("swin_fused"), "none")
         self.assertEqual([f["info"]["reset"] for f in t.frames], [1, 0, 1, 0, 1, 1])
         self.assertEqual(len({f["info"]["parity"] for f in t.frames}), 2)
+        prev = None
+        for f in t.frames:
+            self.assertIsNone(f["error"])
+            self.assertIn(DEC_COEF_HYB, [ln.kernel for ln in f["launches"]])
+            lev, coef = self.check_d3d12_frame(t, f)
+            if prev:
+                self.assertEqual(lev.args[4], latent_out(prev[1]))  # the latent the last frame's store wrote
+                self.assertEqual(lev.args[5], prev[0].args[7])  # its near motion
+            prev = (lev, coef)
         without = lambda *ks: [kc for kc in full_ports() if kc[0] not in ks]  # noqa: E731
-        for env, ports, fold, lin, el in ((None, full_ports(), True, False, True),
-                                          (NO_FOLD, full_ports(), False, False, False),
-                                          (None, without(FOLD), False, False, True),
-                                          (NO_LIN, full_ports(), True, False, False),
-                                          (NO_ENCLIN, full_ports(), True, True, False),
-                                          (None, without(ENCLIN), True, True, False),
-                                          (None, without(ENCLIN, LIN), True, False, False),
-                                          (None, without(LIN), True, False, True),
-                                          (None, without("lev/input_encoder_q20"), True, True, False)):
-            with self.subTest(fusion=env, fold_in_manifest=any(kc[0] == FOLD for kc in ports),
-                              lin_in_manifest=any(kc[0] == LIN for kc in ports),
-                              enclin_in_manifest=any(kc[0] == ENCLIN for kc in ports)):
-                # the fusions (lc, ll, le: the default; le over ll) and their fallbacks: without the fusion, or without
-                # the kernel
-                t = FT.Trace(self.l_run(ports, frames=6, rw=96, rh=64, flags=(sizes, "--reset=4"), env=env))
-                self.assertEqual(t.create, "create ok model L")
-                self.assertEqual(t.unknown(), [])
-                self.assertEqual([f["info"]["reset"] for f in t.frames], [1, 0, 1, 0, 1, 1])
-                self.assertEqual(len({f["info"]["parity"] for f in t.frames}), 2)
-                prev = None
-                for f in t.frames:
-                    self.assertIsNone(f["error"])
-                    self.assertEqual(FOLD in [ln.kernel for ln in f["launches"]], fold)
-                    self.assertEqual(LIN in [ln.kernel for ln in f["launches"]], lin)
-                    self.assertEqual(ENCLIN in [ln.kernel for ln in f["launches"]], el)
-                    lev, coef = self.check_d3d12_frame(t, f)
-                    if prev:
-                        self.assertEqual(lev.args[4], latent_out(prev[1]))  # the latent the last frame's store wrote
-                        self.assertEqual(lev.args[5], prev[0].args[7])  # its near motion
-                    prev = (lev, coef)
+        for env, ports in ((NO_FOLD, full_ports()), (NO_LIN, full_ports()), (NO_ENCLIN, full_ports()),
+                           ({"WG_D3D12_FUSION": "none"}, full_ports()),
+                           (None, without(FOLD, LIN, ENCLIN))):   # the M-form fusions' kernels: not needed
+            with self.subTest(fusion=env, ports=len(ports)):
+                got = self.l_run(ports, frames=6, rw=96, rh=64, flags=(sizes, "--reset=4"), env=env)
+                self.assertEqual(same_frames(got), same_frames(lines))
 
     def test_failed_launch_stops_the_frame(self):
-        for env, kernel, before in ((None, FOLD, "l_dec_project"), (NO_FOLD, "l_coef_pack12", "l_swin_block_c32_dec")):
+        for kernel, before in ((DEC_COEF_HYB, "l_dec_project"), (BNECK_HYB, "patch_merge_c96_hyb"),
+                               ("lc12/l_post_recon_p12", DEC_COEF_HYB)):
             with self.subTest(kernel=kernel):
-                t = FT.Trace(self.l_run(full_ports(), frames=3, flags=("--fail=%s@1" % kernel,), env=env))
+                t = FT.Trace(self.l_run(full_ports(), frames=3, flags=("--fail=%s@1" % kernel,)))
                 ok0, bad, ok2 = t.frames
                 self.assertEqual(bad["failed"], kernel)
                 names = [ln.kernel for ln in bad["launches"]]
                 self.assertEqual(names, [ln.kernel for ln in ok0["launches"]][:len(names)])
-                self.assertTrue(names[-1].startswith(before))
+                self.assertEqual(names[-1], before)
                 self.assertIsNone(ok2["error"])
                 self.check_d3d12_frame(t, ok2)
 
@@ -689,21 +998,21 @@ class D3D12(unittest.TestCase):
         self.assertTrue(run("model=L", build_files=FT.SHIPPING, env={"WG_POST_PACK": "p12"})[0].startswith(
             "ERR create: Model L: post_pack=p12"))
 
-    # Model L's reconstruction on native D3D12, HDR and LDR colour: its D3D12 ports, then the output filter
-    OWN = {1: [("l_post_recon_p12", "l_post.co"), ("l_post_recon", "l_post.co"), ("l_coef", "l_ops.co"),
-               ("w64/post_filter_c1_s4", "post_w64.co")],
-           0: [("l_post_recon_p12_ldr", "l_post.co"), ("l_post_recon_ldr", "l_post.co"), ("l_coef", "l_ops.co"),
-               ("l_post_filter_ldr", "l_post.co")]}
+    # Model L's C1/C2 reconstruction on native D3D12, HDR and LDR colour: its D3D12 ports, then the output filter
+    OWN = {1: [("lc12/l_post_recon_p12", "l_post__lc12.co"), ("lc12/l_post_recon", "l_post__lc12.co"),
+               ("l_coef", "l_ops.co"), ("w64/post_filter_c1_s4", "post_w64.co")],
+           0: [("lc12/l_post_recon_p12_ldr", "l_post__lc12.co"), ("lc12/l_post_recon_ldr", "l_post__lc12.co"),
+               ("l_coef", "l_ops.co"), ("l_post_filter_ldr", "l_post.co")]}
 
     def own_ports(self):
         have = full_ports()
         return have + [kc for hdr in self.OWN for kc in self.OWN[hdr] if kc not in have]
 
     def test_own_post(self):
-        """HDR and LDR colour: l_post_recon_p12[_ldr] on the frames l_coef_pack12 stores, with post_recon's arguments
-        (the #111 role checks), then the unbanded filter (HDR w64/post_filter_c1_s4 with the exposure pair; LDR
+        """HDR and LDR colour: lc12/l_post_recon_p12[_ldr] on the frames l_coef_pack12 stores, with post_recon's
+        arguments (the role checks), then the unbanded filter (HDR w64/post_filter_c1_s4 with the exposure pair; LDR
         l_post_filter_ldr) from its display image into the output; no Model M post kernel. A frame the pack12 kernels
-        do not take (render 180 x 108 = D) runs l_coef and l_post_recon[_ldr] (the fallback route)."""
+        do not take (render 180 x 108 = D) runs l_coef and lc12/l_post_recon[_ldr] (the fallback route)."""
         sizes = "--sizes=96x64,96x64,180x108,80x48,77x45,180x108"
         for hdr in (1, 0):
             sfx = "" if hdr else "_ldr"
@@ -713,18 +1022,21 @@ class D3D12(unittest.TestCase):
                 self.assertEqual(t.create, "create ok model L")
                 self.assertEqual(t.unknown(), [])
                 self.assertEqual(t.kernels.get("l_post"), "l_post_recon" + sfx)
+                self.assertEqual(t.kernels.get("l_post_c12"), "on")
                 prev = None
                 for f in t.frames:
                     self.assertIsNone(f["error"])
                     info, ls = f["info"], f["launches"]
                     names = [ln.kernel for ln in ls]
-                    p12 = (info["rw"], info["rh"]) != (180, 108)  # pack12 frames: the fold (fusion lc, the default)
-                    self.assertIn(FOLD if p12 else "l_coef", names)
-                    self.assertFalse({"l_coef_pack12", "l_coef" if p12 else FOLD} & set(names), names)
+                    p12 = (info["rw"], info["rh"]) != (180, 108)  # pack12 frames
+                    self.assertIn(DEC_COEF_HYB if p12 else "l_coef", names)   # (lever 3: the store folded)
+                    self.assertNotIn("l_coef" if p12 else DEC_COEF_HYB, names)
+                    self.assertNotIn("l_coef_pack12", names)
                     self.assertEqual(model_m_post(names), [])
-                    post = [ln for ln in ls if ln.kernel == ("l_post_recon_p12" if p12 else "l_post_recon") + sfx]
+                    post = [ln for ln in ls if ln.kernel == ("lc12/l_post_recon_p12" if p12 else "lc12/l_post_recon") +
+                            sfx]
                     self.assertEqual(len(post), 1, names)
-                    lev, coef = Arguments.check_frame(self, t, f)  # every argument's role, the filter after the post
+                    lev, coef = self.check_d3d12_frame(t, f, sfx)  # every argument's role, the filter after the post
                     flt = ls[ls.index(post[0]) + 1]
                     self.assertEqual(flt.kernel, "w64/post_filter_c1_s4" if hdr else "l_post_filter_ldr")
                     self.assertEqual((flt.grid, flt.block), (cdiv(120, 40) * cdiv(cdiv(72, 2), 8), 64))
@@ -732,9 +1044,9 @@ class D3D12(unittest.TestCase):
                     self.assertEqual(flt.args[2:6], [str((3 * 120 + 1) // 2), str((3 * 72 + 1) // 2), "120", "72"])
                     if hdr:
                         self.assertEqual(flt.args[7], f["names"]["exposure.pair"])
-                    if p12:  # pack12 image A (the fold's argument 8) is what the reconstruction reads
-                        self.assertEqual(coef.args[8], post[0].args[1])
-                        self.assertGreaterEqual(t.extent(coef.args[8]), 8 * info["rw"] * info["rh"])
+                    if p12:  # pack12 image A (the store's argument 1) is what the reconstruction reads
+                        self.assertEqual(coef.args[1], post[0].args[1])
+                        self.assertGreaterEqual(t.extent(coef.args[1]), 8 * info["rw"] * info["rh"])
                     if prev:
                         self.assertEqual(lev.args[4], latent_out(prev[1]))  # the latent the last frame's store wrote
                     prev = (lev, coef)
@@ -753,9 +1065,9 @@ class D3D12(unittest.TestCase):
 
     def test_no_model_m_post_route(self):
         """Model L never runs Model M's post: every route traced (HDR and LDR colour; HIP and native D3D12; pack12 and
-        fallback frames) launches Model L's reconstruction and no Model M post kernel; l_post=m is refused; where Model
-        L's own route cannot run (a port missing, another post / filter route asked for) creation is refused with the
-        reason, never a different algorithm."""
+        fallback frames) launches Model L's C1/C2 reconstruction and no Model M post kernel; l_post=m is refused; where
+        Model L's own route cannot run (a port missing, another post / filter route asked for) creation is refused with
+        the reason, never a different algorithm."""
         def first(options, **kw):
             return run(options, frames=1, build_files=FT.SHIPPING, **kw)[0]
         d3d12 = dict(flags=("--backend=3",), manifest=self.own_ports())
@@ -766,21 +1078,26 @@ class D3D12(unittest.TestCase):
                          "ERR create: l_post must be own (Model L's reconstruction; there is no other)")
         self.assertEqual(first("l_post=own", **d3d12), "ERR create: l_post=own is a Model L option (its own "
                                                         "reconstruction)")
-        # a missing port of Model L's route: refused by name (HDR and LDR), never another post
+        # a missing port of Model L's route: refused by name (HDR and LDR), never another post (the C1/C2 ports: all
+        # four checked first, by the hybrid_full form)
         for hdr, kcs in self.OWN.items():
             for k, _ in kcs:
                 with self.subTest(hdr=hdr, port=k):
                     got = first("model=L", hdr=hdr, flags=("--backend=3",),
                                 manifest=[kc for kc in self.own_ports() if kc[0] != k])
-                    self.assertEqual(got, "ERR create: Model L on native D3D12 (%s): not yet ported to D3D12: %s; "
-                                          "Model L has no other reconstruction (no Model M post route)"
-                                     % ("HDR" if hdr else "LDR", k))
+                    if k.startswith("lc12/"):
+                        self.assertEqual(got, "ERR create: WG_L_POST=c12 on native D3D12: not in the kernel manifest: "
+                                         + k)
+                    else:
+                        self.assertEqual(got, "ERR create: Model L on native D3D12 (%s): not yet ported to D3D12: %s; "
+                                              "Model L has no other reconstruction (no Model M post route)"
+                                         % ("HDR" if hdr else "LDR", k))
         # another of Model M's filter routes asked for: refused (the RGBA16F filter output)
         got = first("model=L", env={"WG_FILTER_KERNEL": "post_filter_c1_s4_o16"}, **d3d12)
         self.assertTrue(got.startswith("ERR create: "), got)
         self.assertNotIn("create ok", got)
-        # every route: Model L's reconstruction, no Model M post kernel (HIP: base coefficients and l_post_recon[_ldr];
-        # native D3D12: pack12 frames and the fallback frame)
+        # every route: Model L's C1/C2 reconstruction, no Model M post kernel (HIP: base coefficients and
+        # lc12/l_post_recon[_ldr]; native D3D12: pack12 frames and the fallback frame)
         sizes = "--sizes=96x64,180x108,80x48"
         for hdr in (1, 0):
             sfx = "" if hdr else "_ldr"
@@ -797,7 +1114,7 @@ class D3D12(unittest.TestCase):
                         self.assertEqual(model_m_post(names), [], names)
                         own = [n for n in names if base(n) == "l_post_recon"]
                         self.assertEqual(len(own), 1, names)
-                        self.assertTrue(own[0].endswith(sfx), own)
+                        self.assertTrue(own[0].startswith("lc12/") and own[0].endswith(sfx), own)
                         if not hdr:  # LDR: Model L's LDR output stage, no exposure-decoding filter
                             self.assertIn("l_post_filter_ldr", names)
                             self.assertFalse([n for n in names if n.endswith("post_filter_c1_s4")], names)
@@ -889,6 +1206,215 @@ class Refusals(unittest.TestCase):
             self.assertEqual(run("model=L", model=d, frames=1)[0], "create ok model L")
         finally:
             shutil.rmtree(d, ignore_errors=True)
+
+
+class ReleaseDefault(unittest.TestCase):
+    """0.6.5 (oversight 2026-11-15 18:36Z): Model L = hybrid_full when WG_L_FORM is unset. On native D3D12 the fast
+    hybrid route (the manifest's "_hyb" twins on the unfused layout, the C1/C2 reconstruction lc12/*); on HIP the scalar
+    reference route (l_q7__hyb.co, l_q7w__hyb.co, l_post__lc12.co). q7 is an opt-in reference; the M-form is refused.
+    A hybrid route that cannot be taken is refused at create, by name, in one line: no fallback to the q7 reference,
+    the M-form or HIP. (The game-side rule, no move to the HIP executor when the D3D12 executor refuses a context at
+    create, is #225's for every model: clean/runtime/interop/executor_select.h dx12_refused_line.)"""
+
+    def d3d12(self, ports, env=None, frames=1, **kw):
+        return run("model=L", frames=frames, build_files=FT.SHIPPING, flags=("--backend=3",), manifest=ports, env=env,
+                   **kw)
+
+    @staticmethod
+    def launched(lines):
+        return {ln.split()[1] for ln in lines if ln.startswith("launch ")}
+
+    @staticmethod
+    def kernels_text(lines):
+        return next(ln for ln in lines if ln.startswith("kernels "))
+
+    def test_default_is_hybrid_full_on_d3d12(self):
+        for env in (None, {"WG_L_FORM": "hybrid"}):
+            with self.subTest(env=env):
+                got = self.d3d12(full_ports(), env=env)
+                self.assertEqual(got[0], "create ok model L")
+                text = self.kernels_text(got)
+                ntwins = sum(k.endswith("_hyb") for k, _ in full_ports())
+                for want in ("l_form=hybrid", "l_hyb_d3d12=on", "l_post_c12=on", "hyb_twins=%d" % ntwins,
+                             "swin_fused=none", "hyb_tables=on"):
+                    self.assertIn(want, text)
+                names = self.launched(got)
+                used = set(HYB_TWINS) - {"l_swin_block_c32_enc_hyb", "l_swin_block_c32_dec_hyb",
+                                         "swin_block_c128_hyb"} | {ENC_LIN_HYB, DEC_COEF_HYB, BNECK_HYB}
+                self.assertTrue(used <= names, sorted(used - names))
+                self.assertIn("lc12/l_post_recon_p12", names)
+                blocks = [n for n in names if n.split("/")[-1].startswith(("swin_", "l_swin_", "patch_merge", "expand"))]
+                self.assertEqual([n for n in blocks if not n.endswith("_hyb")], [])   # no M-form block, merge, expand
+                self.assertEqual([n for n in names if "l_q7" in n], [])               # no q7 reference kernel
+                self.assertEqual([n for n in names if n.startswith("l_post_recon")], [])   # only the C1/C2 post
+
+    def test_hybrid_route_refused_never_falls_back(self):
+        """Each twin and each C1/C2 port missing: create refused in one line naming it; nothing created, nothing
+        launched (no fallback to the q7 reference, the M-form or HIP)."""
+        for missing in HYB_TWINS + LC12 + FUSED_REQUIRED:
+            for env in (None, {"WG_L_FORM": "hybrid"}):
+                with self.subTest(missing=missing, env=env):
+                    got = self.d3d12([kc for kc in full_ports() if kc[0] != missing], env=env, frames=2)
+                    self.assertEqual(len(got), 1, got[:3])
+                    self.assertTrue(got[0].startswith("ERR create: ") and missing in got[0], got[0])
+                    # the form as resolved: nothing set = the release default (review finding)
+                    form = "Model L hybrid (default)" if env is None else "WG_L_FORM=hybrid"
+                    self.assertTrue(form in got[0] or "WG_L_POST=c12" in got[0], got[0])
+
+    def test_hybrid_geometry_overrides_refused(self):
+        """A Swin / GEMM launch-geometry override is refused at create for every hybrid context: the HIP route and the
+        native-D3D12 route without direct I/O (review P1: nt=4 sized the merge / expand grids for 512 tokens per workgroup
+        while the shaders kept 256; wpg 16 halved the block grid), explicit and default form, before any allocation."""
+        for geo in ("nt=4", "gemm_threads=128", "swin_threads=128", "wpw64=2", "wpw96=2", "wpw128=2", "wpg0=16",
+                    "wpg4=16"):
+            for backend, kw in ((0, {}), (3, dict(build_files=FT.SHIPPING, manifest=full_ports()))):
+                for env in (None, {"WG_L_FORM": "hybrid"}):
+                    with self.subTest(geo=geo, backend=backend, env=env):
+                        got = run("model=L", frames=2, flags=("--backend=%d" % backend, "--geo=" + geo), env=env, **kw)
+                        self.assertEqual(len(got), 1, got[:3])
+                        self.assertTrue(got[0].startswith("ERR create: ") and "launch-geometry override" in got[0], got[0])
+        # the base geometry spelled out is not an override
+        got = run("model=L", frames=1, flags=("--backend=3", "--geo=nt=2", "--geo=wpg4=8"), build_files=FT.SHIPPING,
+                  manifest=full_ports())
+        self.assertTrue(got[0].startswith("create ok model L"), got[0])
+
+    def test_default_route_loads_only_deployed_objects(self):
+        """Every Model L code object the default (hybrid) route loads on the HIP backend is built into a release runtime
+        library (clean/runner/build.py L_EMBED_FILES): a deployed library alone creates the default (review P2: l_q7__hyb,
+        l_q7w__hyb and l_post__lc12 were read from the build folder only)."""
+        from clean.runner import build as B
+        B.set_model_l(True)
+        deployed = set(B.EMBED_FILES)
+        for env in (None, {"WG_L_FORM": "hybrid"}):
+            with self.subTest(env=env):
+                got = run("model=L", frames=1, env=env)
+                self.assertTrue(got[0].startswith("create ok model L"), got[0])
+                loads = [x.split()[1] for x in got if x.startswith("load ")]
+                self.assertTrue([n for n in loads if n.startswith("l_q7")], loads)
+                self.assertEqual([n for n in loads if n.startswith("l_") and n not in deployed], [])
+        self.assertFalse([n for n in deployed if B.is_check_object(n)])
+
+    def test_release_build_refuses_check_routes(self):
+        """The check routes (the mutant, the HIP twins) are not offered by a release build (the recorder is built
+        without WG_DEV_DIAGNOSTICS): refused at create in one line, nothing created."""
+        for env in ({"WG_L_FORM": "hybrid_mutant"}, {"WG_L_FORM": "hybrid_twin"}):
+            with self.subTest(env=env):
+                got = run("model=L", frames=1, env=env)
+                self.assertEqual(len(got), 1, got[:3])
+                self.assertTrue(got[0].startswith("ERR create: ") and "developer builds only" in got[0], got[0])
+        got = run("", frames=1, env={"WG_M_FORM": "hybrid_mutant"})
+        self.assertTrue(got[0].startswith("ERR create: ") and "developer builds only" in got[0], got[0])
+
+    def test_release_hybrid_route_ignores_the_diagnostic_hooks(self):
+        """A release build's hybrid route is never switched by WG_AB_FUSION / WG_AB_BLOCK (or the barrier / kernel
+        substitution hooks): the frames trace as without them, and one note says the keys were ignored."""
+        def l_run(**kw):
+            return run("model=L", frames=4, rw=96, rh=64, build_files=FT.SHIPPING, flags=("--backend=3",),
+                       manifest=full_ports(), **kw)
+        base = l_run()
+        for env in ({"WG_AB_FUSION": "none", "WG_AB_BLOCK": "1"}, {"WG_D3D12_NOBAR": "swin_bneck6_hyb"},
+                    {"WG_D3D12_KSUB": "swin_bneck6_hyb=swin_block_c128_hyb"},
+                    # an invalid value is not even read: it cannot refuse the release hybrid create (review P2)
+                    {"WG_AB_FUSION": "no-such-fusion", "WG_AB_BLOCK": "x"}, {"WG_AB_KSUB": "=", "WG_AB_NOBAR": ","}):
+            with self.subTest(env=env):
+                got = l_run(env=env)
+                self.assertTrue(any(x.startswith("kernels ") and " diag_hooks=ignored" in x for x in got))
+                self.assertEqual(same_frames([x.replace(" diag_hooks=ignored", "") for x in got]), same_frames(base))
+
+    def test_hybrid_tables_refused_never_falls_back(self):
+        """The device refuses the hybrid tables (the recorder's --fail-hyb-tables, as native D3D12 when their arena
+        range is held): create refused in one line naming the resolved form, nothing launched; with the tables the
+        same build creates (the CPU recorder implements Device::hyb_reserve: review finding P1)."""
+        for env in (None, {"WG_L_FORM": "hybrid"}):
+            with self.subTest(env=env):
+                got = run("model=L", frames=2, build_files=FT.SHIPPING, flags=("--backend=3", "--fail-hyb-tables"),
+                          manifest=full_ports(), env=env)
+                form = "Model L hybrid (default)" if env is None else "WG_L_FORM=hybrid"
+                self.assertEqual(len(got), 1, got[:3])
+                self.assertTrue(got[0].startswith("ERR create: " + form + " on native D3D12: no hybrid tables"), got[0])
+                ok = self.d3d12(full_ports(), env=env)
+                self.assertEqual(ok[0], "create ok model L")
+                self.assertIn("hyb_tables=on", self.kernels_text(ok))
+        # the HIP reference route and Model L's q7 reference never ask for the tables
+        for flags, env in (((), None), (("--backend=3",), {"WG_L_FORM": "q7"})):
+            with self.subTest(flags=flags, env=env):
+                got = run("model=L", frames=1, build_files=FT.SHIPPING, flags=flags + ("--fail-hyb-tables",),
+                          manifest=full_ports() if flags else None, env=env)
+                self.assertEqual(got[0], "create ok model L")
+
+    def test_hybrid_bneck_timeout_refuses_and_writes_no_history(self):
+        """The bottleneck's bounded wait (swin_bneck6_hyb) REFUSES a frame and lets nothing of it through (review P1):
+        the whole hybrid frame runs under the device's frame guard, read again right after the bottleneck. In the frame
+        whose wait times out (the recorder's --guard-timeout), every launch after the bottleneck is skipped (the post
+        that writes the history and the output among them); the next frame is refused in one line, launching nothing;
+        the frame after it starts over (reset 1) with the abort word cleared first. Control: without the timeout,
+        nothing is skipped or refused. Default form and explicit form."""
+        for env in (None, {"WG_L_FORM": "hybrid"}):
+            for timeout in (None, 1):
+                with self.subTest(env=env, timeout=timeout):
+                    flags = ("--backend=3",) + (("--guard-timeout=%d" % timeout,) if timeout is not None else ())
+                    got = run("model=L", frames=5, rw=96, rh=64, build_files=FT.SHIPPING, flags=flags,
+                              manifest=full_ports(), env=env)
+                    self.assertEqual(got[0], "create ok model L")
+                    blocks, cur = [], None
+                    for x in got:
+                        if x.startswith("frame "):
+                            cur = [x]
+                            blocks.append(cur)
+                        elif cur is not None and not x.startswith(("name ", "kernels ")):
+                            cur.append(x)
+                    self.assertEqual(len(blocks), 5)
+                    dev = [[x for x in b[1:] if x.startswith(("launch ", "skipped ", "guard_", "ERR "))] for b in blocks]
+                    for f, d in enumerate(dev):
+                        refused = timeout is not None and f == timeout + 1
+                        if refused:
+                            self.assertEqual(len(d), 1, d[:4])
+                            self.assertTrue(d[0].startswith("ERR frame %d: " % f) and "timed out" in d[0]
+                                            and "refused" in d[0] and "starts over" in d[0], d[0])
+                            continue
+                        clear = timeout is not None and f == timeout + 2
+                        if clear:
+                            self.assertEqual(d[0], "guard_clear", d[:2])
+                        g = d[1:] if clear else d
+                        self.assertNotIn("guard_clear", g)
+                        self.assertTrue(g[0].startswith("guard_begin ") and "(skipping)" not in g[0], g[:2])
+                        self.assertEqual(g[-1], "guard_end")
+                        i = [x.startswith("launch swin_bneck6_hyb ") for x in g].index(True)
+                        self.assertEqual(g[i + 1].split(" (")[0], g[0])   # the guard read again, same word
+                        after = g[i + 2:-1]
+                        self.assertTrue([x for x in after if "post" in x], after)
+                        if timeout is not None and f == timeout:
+                            self.assertTrue(g[i + 1].endswith("(skipping)"), g[i + 1])
+                            self.assertEqual([x for x in after if not x.startswith("skipped ")], [])
+                        else:
+                            self.assertFalse([x for x in g if x.startswith("skipped ") or "(skipping)" in x])
+                        reset = int(blocks[f][0].split(" reset ")[1].split()[0])
+                        self.assertEqual(reset, 1 if f == 0 or clear else 0, blocks[f][0])
+
+    def test_m_form_refused(self):
+        for flags in ((), ("--backend=3",)):
+            with self.subTest(flags=flags):
+                got = run("model=L", frames=1, build_files=FT.SHIPPING, flags=flags,
+                          manifest=full_ports() if flags else None, env={"WG_L_FORM": "m"})
+                self.assertEqual(got, ["ERR create: WG_L_FORM=m refused: the M-form is not offered for Model L "
+                                       "(default hybrid_full; q7 = reference)"])
+
+    def test_q7_is_opt_in_reference(self):
+        got = self.d3d12(full_ports(), env={"WG_L_FORM": "q7"})
+        self.assertEqual(got[0], "create ok model L")
+        names = self.launched(got)
+        self.assertTrue(any(n.startswith("l_q7_") for n in names), sorted(names))
+        self.assertEqual([n for n in names if n.endswith("_hyb") or n.startswith("lc12/")], [])
+
+    def test_hip_default_is_the_reference_hybrid(self):
+        got = run("model=L", frames=1, build_files=FT.SHIPPING)
+        self.assertEqual(got[0], "create ok model L")
+        self.assertIn("load l_q7__hyb.co", got)
+        self.assertIn("load l_q7w__hyb.co", got)
+        text = self.kernels_text(got)
+        self.assertIn("l_form=hybrid", text)
+        self.assertIn("l_post_c12=on", text)
+        self.assertIn("lc12/l_post_recon", self.launched(got))
 
 
 if __name__ == "__main__":

@@ -233,6 +233,78 @@ class PackagerRefusesDeveloperRuntime(unittest.TestCase):
         r, _ = self._pack({"wronggpu_runtime.dll": good, "sub/other.dll": b"plain"}, mf)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_check_routes_and_check_objects_are_refused(self):
+        """The check routes' selector texts (the mutant / twin code objects, the forced bottleneck timeout) and the
+        check-only code objects (mutants, probes, the timeout control, the HIP twins, the scan mutants) are never in a
+        release library or payload; the default route's objects are."""
+        for t in chk.DEV_ONLY_STRINGS:
+            ok, text = chk.check_bytes(b"MZ" + MARK0 + b" " + t)
+            self.assertFalse(ok, t)
+            self.assertIn("forged marker", text)
+        for t in (b"l_q7__hybmut.co", b"l_q7w__hybmut.co", b"l_swin_hyb.co", b"swin_hyb.co", b"x_scanmut",
+                  b"l_post_c12_probe"):
+            ok, text = chk.check_bytes(b"MZ" + MARK0 + b" " + t)
+            self.assertFalse(ok, t)
+            # the mutant objects' names hold a selector text too ("__hybmut"): either refusal
+            self.assertTrue("check-only code objects" in text or "forged marker" in text, text)
+        for n in ("l_q7__hybmut.co", "l_q7w__hybmut.co", "swin_hyb.co", "sub/l_swin_hyb.co", "l_post_c12_probe.co",
+                  "l_post_c12_probe__mut.co", "l_hyb_probe.co", "gfx1201.swin_hyb.co", "gfx1201.l_swin_hyb.co",
+                  "gfx1201.l_q7__hybmut.co", "swin_bneck6_hyb_mutdump.dxil", "l_swin_block_c32_enc_hyb_dump.dxil",
+                  "dx12/scanmut/swin_block_c128_hyb_scanmut.dxil", "swin_bneck6_hyb_mut.dxil", "swin_bneck6_hyb_tmo.dxil"):
+            ok, text, _ = chk.check_artifact(n, b"plain")
+            self.assertFalse(ok, n)
+        for n in ("l_q7__hyb.co", "l_q7w__hyb.co", "l_post__lc12.co", "swin_bneck6_hyb.dxil", "swin_block_c128_hyb.dxil",
+                  "manifest.json", "probe.co", "native_driver_probe.dxil"):
+            ok, text, _ = chk.check_artifact(n, b"plain")
+            self.assertTrue(ok, (n, text))
+        ok, text = chk.check_bytes(b"MZ" + MARK0 + b" /l_q7__hyb.co /l_q7w__hyb.co /l_post__lc12.co")
+        self.assertTrue(ok, text)
+
+    def test_each_selector_text_is_refused_alone(self):
+        """Every check route's selector value is refused on its own in a library that says dev-diagnostics=0 (review:
+        one negative test per selector)."""
+        for t in (b"hybrid_mutant", b"hybrid_twin", b"__hybmut", b"WG_DEV_BNECK_ABORT", b"/l_q7__hybmut.co",
+                  b"/l_q7w__hybmut.co"):
+            with self.subTest(t=t):
+                self.assertIn(t, chk.DEV_ONLY_STRINGS)
+                ok, text = chk.check_bytes(b"MZ" + MARK0 + b" ... " + t + b" ...")
+                self.assertFalse(ok, t)
+        for t in (b"swin_bneck6_hyb_mut.dxil", b"swin_bneck6_hyb_tmo.dxil", b'"swin_bneck6_hyb_tmo"',
+                  b'"l_swin_block_c32_dec_hyb_mut"', b"gfx1201.swin_hyb.co", b"l_hyb_probe"):
+            with self.subTest(t=t):
+                ok, text = chk.check_bytes(b"MZ" + MARK0 + b" ... " + t + b" ...")
+                self.assertFalse(ok, t)
+                self.assertIn("check-only code objects", text)
+
+    def test_build_never_embeds_a_check_kernel(self):
+        """clean/runner/build.py write_embedded refuses a D3D12 manifest that lists a check kernel (marked probe by
+        build_dx12.py, or named as one: mutant, dump, scan mutant, timeout control, probe), e.g. after a partial --only
+        build of check kernels into a release folder; the same folder without it embeds."""
+        B = load_build()
+        self.assertTrue(B.is_check_kernel({"name": "swin_bneck6_hyb_tmo"}))
+        self.assertTrue(B.is_check_kernel({"name": "swin_block_c64_hyb_scanmut"}))
+        self.assertTrue(B.is_check_kernel({"name": "l_swin_block_c32_enc_hyb_mutdump"}))
+        self.assertTrue(B.is_check_kernel({"name": "anything", "probe": True}))
+        self.assertFalse(B.is_check_kernel({"name": "swin_bneck6_hyb"}))
+        self.assertFalse(B.is_check_kernel({"name": "native_driver_probe"}))
+        for bad in ({"name": "swin_bneck6_hyb_mut", "file": "swin_bneck6_hyb_mut.dxil"},
+                    {"name": "x", "file": "x.dxil", "probe": True}):
+            with self.subTest(bad=bad["name"]), tempfile.TemporaryDirectory() as d:
+                for n in B.EMBED_FILES:
+                    open(os.path.join(d, n), "wb").close()
+                os.makedirs(os.path.join(d, "dx12"))
+                good = {"name": "swin_bneck6_hyb", "file": "swin_bneck6_hyb.dxil"}
+                for k in (good, bad):
+                    open(os.path.join(d, "dx12", k["file"]), "wb").close()
+                with open(os.path.join(d, "dx12", "manifest.json"), "w") as f:
+                    json.dump({"format": 1, "kernels": [good, bad]}, f)
+                with self.assertRaises(SystemExit) as cm:
+                    B.write_embedded(d)
+                self.assertIn("check kernels", str(cm.exception))
+                with open(os.path.join(d, "dx12", "manifest.json"), "w") as f:
+                    json.dump({"format": 1, "kernels": [good]}, f)
+                B.write_embedded(d)   # without it: embedded
+
     def test_the_final_package_check(self):
         with tempfile.TemporaryDirectory() as d:
             good_zip, bad_zip = os.path.join(d, "good.zip"), os.path.join(d, "bad.zip")
