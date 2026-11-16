@@ -47,7 +47,7 @@ scene, your settings) and a screenshot. Every report helps us fix it.
   `k_approx=a1,a2` to the `runtime_options` line of the game's `wronggpu.ini` selects close approximations of two
   stages: the input stage's logarithm, exponent and divisions (`a1`) and the output stage's divisions (`a2`). Model K,
   1440p Quality, WrongGPU's test harness (direct route) on a Radeon RX 9070 XT: the frame takes 1.37 ms with
-  `k_approx=a1,a2` and 1.58 ms on the exact path of the same build. The output is not bit-identical to the exact path;
+  `k_approx=a1,a2` and 1.58 ms on the exact path of the same build. The output differs slightly from the exact path;
   compared with the exact path and with reference images it was rated very, very close on both test sets (a Cyberpunk
   2077 sequence and a thin-line scene), with no drift over time. Frames with a render size above 0.68x the output (for
   example DLAA) or a jitter outside +-0.5 keep the exact input stage even with `a1` (one log line). It runs only on
