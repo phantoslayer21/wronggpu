@@ -3014,18 +3014,8 @@ def test_data_root_junctions(parent):
     def link():
         return subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", shared, target],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode == 0
-    def invoke_without_log(exe, verb):
-        out = os.path.join(work, verb + "-result.json")
-        astart = iso.access_size(t.work)
-        facts.require_test_hooks(exe)  # as every launcher call: a testing build only
-        proc = subprocess.Popen([exe, verb, "--out=" + out], env=t.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        proc.communicate(timeout=180)
-        log = os.path.join(t.env["TEMP"], "WrongGPU-junction-%d.log" % proc.pid)  # TEMP: the work folder's tmp (child_env)
-        assert os.path.abspath(log).lower().startswith(os.path.abspath(t.work).lower() + os.sep), log
-        iso.check_isolation(log if os.path.isfile(log) else None, t.work, 0, (verb,), astart)  # (#243: every launcher call)
-        text = read(log).decode("utf-8", "replace") if os.path.isfile(log) else ""
-        if os.path.isfile(log): os.remove(log)
-        return proc.returncode, text
+    def invoke_without_log(exe, verb):  # (launcher_build_facts.junction_call: also the negative controls' path)
+        return facts.junction_call(t, exe, verb, work)
     linked = link()
     rc2, log = invoke_without_log(os.path.join(program, "WrongGPU.exe"), "self-uninstall") if linked else (-1, "")
     parent.check("self-uninstall: data-root junction unlinked, target unchanged, and link removal logged",

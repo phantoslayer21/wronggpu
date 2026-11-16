@@ -161,6 +161,25 @@ def require_test_hooks(path, what="the program"):
         _hooks_ok[key] = True
 
 
+def junction_call(t, exe, verb, work):
+    """The data-root junction test's launcher call without --log (its log goes to TEMP\\WrongGPU-junction-<pid>.log, TEMP being
+    the work folder's tmp): the preflight first, as for every launcher call. Returns (exit code, the log's text)."""
+    import subprocess
+    import launcher_isolation as iso
+    out = os.path.join(work, verb + "-result.json")
+    astart = iso.access_size(t.work)
+    require_test_hooks(exe)  # a testing build only, before it starts
+    proc = subprocess.Popen([exe, verb, "--out=" + out], env=t.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc.communicate(timeout=180)
+    log = os.path.join(t.env["TEMP"], "WrongGPU-junction-%d.log" % proc.pid)
+    assert os.path.abspath(log).lower().startswith(os.path.abspath(t.work).lower() + os.sep), log
+    iso.check_isolation(log if os.path.isfile(log) else None, t.work, 0, (verb,), astart)  # (#243: every launcher call)
+    text = read(log).decode("utf-8", "replace") if os.path.isfile(log) else ""
+    if os.path.isfile(log):
+        os.remove(log)
+    return proc.returncode, text
+
+
 def rr_free(folder, record):
     """No RR settings file in an RR-free install: neither WrongGPU\\wronggpu.ini on disk (case-insensitively: on Windows the
     payload's own lower-case wronggpu\\ folder is the same folder, and its kernels are allowed) nor its record line."""
@@ -194,21 +213,25 @@ def self_checks(t):
         runs = os.path.isfile(started)
         if runs:
             os.remove(started)
-        before, why = size(), ""
+        before, why, jwhy = size(), "", ""
         try:
             t.run("version", exe=canary)
         except SystemExit as e:
             why = str(e)
+        try:
+            junction_call(t, canary, "remove-data", d)  # the data-root junction test's path
+        except SystemExit as e:
+            jwhy = str(e)
         entry = []
         suite = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run_launcher_tests.py")
         for args in (["--launcher", canary], ["--launcher", t.exe, "--no-direct-launcher", canary]):  # the suite's entry points
             p = subprocess.run([sys.executable, suite] + args + ["--work", os.path.join(d, "entry")], env=dict(os.environ),
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
             entry.append(p.returncode != 0 and b"not a WRONGGPU_TESTING build" in p.stderr + p.stdout)
-        t.check("negative control %s: it starts when run directly; the suite never starts it (a launcher call, --launcher, "
-                "--no-direct-launcher): refused before it runs, nothing logged" % name,
-                runs and "not a WRONGGPU_TESTING build" in why and entry == [True, True] and not os.path.exists(started) and size() == before,
-                (runs, why, entry))
+        t.check("negative control %s: it starts when run directly (its start marker); the suite never starts it (a launcher call, "
+                "the junction test's call, --launcher, --no-direct-launcher): refused before it runs, no start marker, nothing logged" % name,
+                runs and "not a WRONGGPU_TESTING build" in why and "not a WRONGGPU_TESTING build" in jwhy and entry == [True, True] and
+                not os.path.exists(started) and size() == before, (runs, why, jwhy, entry))
     # the real launcher changed after its link: one byte, or data appended (the hooks' strings and the identity text)
     data = read(t.exe)
     mid = len(data) // 2
