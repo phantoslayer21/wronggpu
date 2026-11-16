@@ -360,12 +360,18 @@ class TestTranslatorK16(unittest.TestCase):
         return sum(1 for o in ops if o == op)
 
     def test_one_multiply_per_k16_step_and_no_exchange(self):
-        for config in ("wmma_rdna3_raw_fp8", ""):   # with and without the shortcut's configuration
-            self.assertEqual(self.count("k16n", "OpCooperativeMatrixMulAddKHR", config), 1)
-            self.assertEqual(self.count("k64n", "OpCooperativeMatrixMulAddKHR", config), 4)
-            for e in ("k16n", "k64n", "nat_ldA"):
-                ops = spirv_ops(e, self.dir, config=config)
-                self.assertFalse([o for o in ops if o.startswith("OpGroupNonUniformShuffle")], (e, config))
+        config = "wmma_rdna3_raw_fp8"   # the shortcut's configuration, which the K = 16 opcode requires
+        self.assertEqual(self.count("k16n", "OpCooperativeMatrixMulAddKHR", config), 1)
+        self.assertEqual(self.count("k64n", "OpCooperativeMatrixMulAddKHR", config), 4)
+        for e in ("k16n", "k64n", "nat_ldA"):
+            ops = spirv_ops(e, self.dir, config=config)
+            self.assertFalse([o for o in ops if o.startswith("OpGroupNonUniformShuffle")], e)
+
+    def test_patched_translator_needs_the_configuration(self):
+        """Without DXIL_SPIRV_CONFIG=wmma_rdna3_raw_fp8 the patched translator refuses the K = 16 opcode: only that
+        configuration keeps the kernels' F32 -> F16 -> F32 rounding pairs unfolded (NoContraction, RTE)."""
+        for e in ("k16n", "k64n", "nat_ldA"):
+            self.assertIsNone(spirv_ops(e, self.dir, config=""), e)
 
     def test_stock_translator_refuses_the_opcode(self):
         """WG_GFX11_DXIL_SPIRV_STOCK (the translator without the K = 16 patch): the opcode is unknown, so it must refuse
