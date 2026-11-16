@@ -160,7 +160,9 @@ def prepare(cases, seeds, timing=False, time_runs=0):
 # ---- the CPU dry run: the case files through the emulation of the kernel text --------------------------------------
 def _parse_chains(path):
     chains, cur = [], None
-    for line in open(path).read().splitlines():
+    with open(path) as f:
+        text = f.read()
+    for line in text.splitlines():
         w = line.split()
         if not w:
             continue
@@ -212,7 +214,8 @@ def emulate(cases, work):
                         words.append(ptr[b] + int(off or 0))
                     elif a.startswith("S:"):
                         f, _, patch = a[2:].partition(":")
-                        data = bytearray(open(os.path.join(cases, f), "rb").read())
+                        with open(os.path.join(cases, f), "rb") as fh:
+                            data = bytearray(fh.read())
                         for pt in filter(None, patch.split(",")):
                             o, _, r = pt.partition("=")
                             b, _, off = r[1:].partition("+")
@@ -241,10 +244,16 @@ def _sign_only(a, b):
 
 
 def compare(cases):
-    meta = json.load(open(os.path.join(cases, "cases.json")))
+    with open(os.path.join(cases, "cases.json")) as f:
+        meta = json.load(f)
     res = {"cases": 0, "outputs": 0, "differ": 0, "sign_only": 0, "slack": 0, "limits": 0, "missing": 0,
            "worst": {}, "failures": []}
-    read = lambda fn: open(os.path.join(cases, fn), "rb").read() if os.path.exists(os.path.join(cases, fn)) else None
+    def read(fn):
+        path = os.path.join(cases, fn)
+        if not os.path.exists(path):
+            return None
+        with open(path, "rb") as f:
+            return f.read()
     for c in meta["cases"]:
         res["cases"] += 1
         for n, o in c["outputs"].items():
@@ -315,7 +324,8 @@ def main(argv=None):
         for f in r["failures"][:40]:
             print("FAIL", f)
         if a.json:
-            json.dump(r, open(a.json, "w"), indent=1)
+            with open(a.json, "w") as f:
+                json.dump(r, f, indent=1)
         return 0 if r["pass"] else 1
     return 0
 
