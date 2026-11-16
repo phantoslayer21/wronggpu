@@ -91,8 +91,11 @@ The reference is bound to its sources: `k_smx_selfcheck.h` records `kSourceDiges
 kernels' `@wg-kernel` lines, their sources' include closure, the runtime regions marked `SMX-SELFCHECK-SOURCE` (the cases,
 the synthetic data, the block parameters, the kernel-name and window-offset rules) and a build's extra defines
 (`smx_selfcheck_digest.py`). `build_dx12.py` (building a self-check kernel) and `build.py` (the runtime with model K)
-refuse a header whose digest differs; `WG_DX12_SMX_DIGEST=0` lets a negative-control DXIL build through, never a shipped
-one (`clean/k/tests/test_k_smx_selfcheck_digest.py`).
+refuse a header whose digest differs; `WG_DX12_SMX_DIGEST=0` lets a negative-control DXIL build through only with
+`--test-only`, into a test-only output (the manifest says `test_only` and the entries `smx_bypass`;
+`clean/k/tests/test_k_smx_selfcheck_digest.py`). Every manifest entry records its `source_digest` and extra `defines`;
+`build.py` never embeds a test-only, bypassed, define-built, unprovenanced or stale entry, and the payload packager
+refuses a library whose build manifest does not record that check (`clean/tests/test_dev_diagnostics_off.py`).
 
 The test hook `k_smx_test` (`mix_fail`, `both_fail`, `rodd_unchecked`, `report`) exists only in runtime libraries built
 with `build.py --dev-diagnostics`; a release build refuses it (`test_k_runtime_d3d12.py`:

@@ -11,8 +11,8 @@ The digest is a SHA-256 over:
   cases, the synthetic data, the block parameters, the kernel-name rule and the window-offset rule);
 - the extra preprocessor defines of a build (build_dx12.py --define).
 gen_k_smx_selfcheck.py writes it into the header (kSourceDigest); build_dx12.py and build.py refuse to build when the
-current digest differs from the header's (WG_DX12_SMX_DIGEST=0 lets a negative-control build through, never a shipped
-one); clean/k/tests/test_k_smx_selfcheck_digest.py checks the committed header and that a changed byte is caught.
+current digest differs from the header's (WG_DX12_SMX_DIGEST=0 lets a negative-control build through only into a
+test-only output, build_dx12.py --test-only, which build.py never embeds); clean/k/tests/test_k_smx_selfcheck_digest.py checks the committed header and that a changed byte is caught.
 """
 import hashlib
 import os

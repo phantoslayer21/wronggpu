@@ -8,7 +8,7 @@ of the shader sources, @wg-kernel definitions, runtime regions and extra defines
 - a copy of the sources with one changed byte in a shader source, a definition line or a runtime region, or with an
   extra define, gives another digest and is reported stale;
 - clean/dx12/build_dx12.py refuses to build a self-check kernel with a stale header (WG_DX12_SMX_DIGEST=0 lets a
-  negative-control build through), and ignores builds without one.
+  negative-control build through only into a test-only output, --test-only), and ignores builds without one.
 
 Run: python -m unittest clean.k.tests.test_k_smx_selfcheck_digest
 """
@@ -78,7 +78,13 @@ class TestSmxSelfcheckDigest(unittest.TestCase):
             B.smx_digest_check({"k_stage_e2"}, [])             # current header, no extra define: builds
             B.smx_digest_check({"k_out_color"}, ["K_SMX_MUT=1"])   # no self-check kernel: not concerned
         with mock.patch.dict(os.environ, {"WG_DX12_SMX_DIGEST": "0"}):
-            B.smx_digest_check({"k_stage_e2"}, ["K_SMX_MUT=1"])   # negative-control build
+            with self.assertRaises(SystemExit) as cm:   # the bypass alone: refused (never into a normal output)
+                B.smx_digest_check({"k_stage_e2"}, ["K_SMX_MUT=1"])
+            self.assertIn("--test-only", str(cm.exception))
+            # a negative-control build into a test-only output: through, and the bypassed kernels are reported
+            self.assertEqual(B.smx_digest_check({"k_stage_e2", "k_out_color"}, ["K_SMX_MUT=1"], test_only=True),
+                             {"k_stage_e2"})
+            self.assertEqual(B.smx_digest_check({"k_stage_e2"}, [], test_only=True), set())   # current: no bypass
 
 
 if __name__ == "__main__":
