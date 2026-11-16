@@ -54,17 +54,16 @@ that this release does not ship (2.25 ms).
 | Swin | 1.825 |
 | dec0 | 0.903 |
 | post | 1.081 |
-| **Frame** | **4.852** |
+| **Frame** | **4.85** |
 
 So in the harness at 1440p Quality a Model L frame takes 4.85 ms. Record:
-[`l_time_1440q_hybrid_d3d12.json`](records/l_time_1440q_hybrid_d3d12.json) (configuration `hybdef`; the frame
-figure is the median of its five rounds, 4.8515, rounded half up; the record stores it as 4.851). Model L's
+[`l_time_1440q_hybrid_d3d12.json`](records/l_time_1440q_hybrid_d3d12.json) (configuration `hybdef`). Model L's
 other shapes will be re-measured with this form; until then this page shows no harness figures for them.
 
 ## Harness: Model M, from an earlier harness record
 
-These come from a different record (synthetic models, per-kernel times, build main 6622148, 5 runs per shape), so do
-not compare them with the Model L harness table above.
+These come from a different record (synthetic models, per-kernel times, build main 6622148 of 2026-11-14, 5 runs per
+shape), so do not compare them with the Model L harness table above.
 
 | Shape | Frame span (ms) | enc0 | Swin | dec0 | post | other (exposure) |
 |---|---|---|---|---|---|---|
