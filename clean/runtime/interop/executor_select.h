@@ -242,12 +242,15 @@ inline std::string drop_hip_only_filter(const std::string& options, std::string*
 inline bool frame_refused(const std::string& err) { return err.rfind("frame not taken", 0) == 0; }
 
 // Model L hybrid: the frame after one whose bottleneck wait timed out on the GPU (runtime.cpp kBneckTimeoutRefusal;
-// hyb_bneck.hlsl). The documented result: "refused, keep previous output". The timed-out frame and the frames queued
-// after it were skipped on the GPU, their output pass included (the device's frame guard predicates the network and the
-// executor's output pass alike): the game's output keeps what it held. This frame records nothing that writes (only the
-// game textures' state changes, restored), the backend writes no fallback into the output, logs exactly one line,
-// answers WG_OK and keeps the context (never failed_); the next frame is a reset (the runtime starts over, and the
-// backend asks for the reset too).
+// hyb_bneck.hlsl). The timed-out frame and the frames queued after it were skipped on the GPU (the device's frame guard
+// predicates the network and the executor's output pass alike), and each of them got the executor's fallback instead:
+// under the INVERSE predication on the same word, a simple upscale of that frame's colour into that frame's output
+// texture (Converter::record_output with no result, or through the route's texture of ours), so every such frame,
+// the first one of a context included, shows an image whatever output texture the game passed. This frame (the one
+// whose start sees the timeout count move) records nothing that writes (only the game textures' state changes,
+// restored) and takes the path of a frame the executor did not take: the backend logs one line and answers
+// WG_ERROR_UNSUPPORTED, so the front end's stand-in (AMD FSR, else its own upscale) renders it; the context is kept
+// (never failed_), and the next frame is a reset (the runtime starts over, and the backend asks for the reset too).
 inline bool frame_timeout_refused(const std::string& err) {
   return err.rfind("frame refused (bottleneck wait timeout): ", 0) == 0;
 }

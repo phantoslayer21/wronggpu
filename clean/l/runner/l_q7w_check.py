@@ -4,7 +4,8 @@ clean/dx12/kernels/l_q7w.hlsl) against the oracle (clean/l/reference/oracle.py r
 "exact"), raw bytes.
 
     python clean/l/runner/l_q7w_check.py --build <dir> --compile                # CPU: <dir>/l_q7w.co
-    python clean/l/runner/l_q7w_check.py --build <dir> --prepare [--real <build with lframe_model/params.pkl>]  # CPU
+    python clean/l/runner/l_q7w_check.py --build <dir> --prepare [--real <build with lframe_model/params.pkl>
+                                         --private-out <folder outside the repository>]  # CPU
     python clean/l/runner/l_q7w_check.py --build <dir> --prepare-d3d12          # CPU: D3D12 ports + kernel_replay.exe
     python clean/l/runner/l_q7w_check.py --build <dir> --run [--d3d12] --json out.json   # GPU (inside a GPU slot)
 
@@ -16,6 +17,8 @@ enc2, b0, b5, dec2, dec1). Grids of several sizes, both window offsets of each s
 (+-448, zeros, a NaN code). Every output buffer is filled with the back end's sentinel (HIP 0xA5, D3D12 0x5A) and
 has 64 slack bytes after it that must keep it; the output must equal the oracle's bytes exactly. Negative control
 per kernel: its first case with 4 or more workgroups launched with half of them must differ. Counts and digests only.
+--real (the synthetic-values rule): the cases file and the D3D12 replay folder go only to --private-out, a folder
+outside the repository (refused inside it); give the same --private-out to --run.
 """
 import argparse
 import ctypes
@@ -34,7 +37,7 @@ from clean.l.reference import oracle as L  # noqa: E402
 from clean.l.reference import table as T  # noqa: E402
 from clean.l.runner import l_pack as LP  # noqa: E402
 from clean.l.runner import l_record as LR  # noqa: E402
-from clean.l.runner.l_q7_check import mask_control, mask_nan, out8, run_identity  # noqa: E402
+from clean.l.runner.l_q7_check import data_dir, load_cases, mask_control, mask_nan, out8, run_identity  # noqa: E402
 from clean.reference import swin as MS  # noqa: E402
 from clean.reference.fp8 import f16, fp8_encode, q8  # noqa: E402
 
@@ -197,17 +200,18 @@ def _check(got, case, sentinel):
             "sha256": hashlib.sha256(body).hexdigest()}
 
 
-def run(build, rocm, d3d12=False):
+def run(build, rocm, d3d12=False, private_out=None):
     from clean.runner.hip import Hip, clean_process_environment
+    ddir = data_dir(build, private_out)
+    prep = load_cases(os.path.join(ddir, "l_q7w_cases.pkl"), private_out)
     clean_process_environment(rocm)
-    with open(os.path.join(build, "l_q7w_cases.pkl"), "rb") as f:
-        prep = pickle.load(f)
     cases = prep["cases"]
     h = Hip(rocm)
     with open(os.path.join(build, CO), "rb") as f:
         mod = h.load_module(f.read())
     res = {"what": "the shared stages' FP16-form kernels against the oracle, raw bytes", "fp8_op_model": "exact",
-           "identity": run_identity(build, [CO, "l_q7w_cases.pkl"]), "real_params_sha256": prep["real_params_sha256"],
+           "identity": run_identity(build, [CO, os.path.join(ddir, "l_q7w_cases.pkl") if private_out
+                                            else "l_q7w_cases.pkl"]), "real_params_sha256": prep["real_params_sha256"],
            "nan_sign_masked": "outputs compared and hashed with only a NaN's sign bit cleared (accepted port exception; "
                               "a canonical NaN store costs about 3 VALU per stored dword in the RGA ISA)",
            "nan_mask_control": mask_control(),
@@ -236,7 +240,7 @@ def run(build, rocm, d3d12=False):
     res["pass"] = (res["cases_identical"] == len(cases) and set(res["negative_controls"]) == set(KERNELS)
                    and all(v["caught"] for v in res["negative_controls"].values()) and res["nan_mask_control"]["pass"])
     if d3d12:
-        res["d3d12"] = run_d3d12(build, cases, res, negs)
+        res["d3d12"] = run_d3d12(build, cases, res, negs, ddir)
         res["pass"] = res["pass"] and res["d3d12"]["pass"]
     return res
 
@@ -246,10 +250,10 @@ def prepare_d3d12(build, rocm):
     return prepare_replay(build, rocm, list(KERNELS))
 
 
-def run_d3d12(build, cases, res, negs):
+def run_d3d12(build, cases, res, negs, ddir=None):
     import subprocess
     import time
-    cdir = os.path.join(build, "replay-q7w-" + time.strftime("%Y%m%d-%H%M%S"))
+    cdir = os.path.join(ddir or build, "replay-q7w-" + time.strftime("%Y%m%d-%H%M%S"))   # the cases file's folder
     os.makedirs(cdir)
     files, lines = {}, []
 
@@ -319,18 +323,27 @@ def main(argv=None):
     g.add_argument("--run", action="store_true")
     ap.add_argument("--d3d12", action="store_true")
     ap.add_argument("--real")
+    ap.add_argument("--private-out", help="--real: the folder (outside the repository) for the cases file and the "
+                    "replay folder; the same one for --run")
     ap.add_argument("--json")
     a = ap.parse_args(argv)
+    if a.real and not a.prepare:
+        ap.error("--real: with --prepare (give --run the same --private-out)")
+    if a.real and not a.private_out:
+        raise SystemExit("--real is required to have --private-out <folder outside the repository>: the cases file "
+                         "holds real weights and the oracle's bytes on them")
+    if a.private_out and (a.real or a.run):
+        data_dir(a.build, a.private_out)   # refused inside the repository, before anything is read
     if a.compile:
         compile_kernel(a.build, a.rocm)
         return 0
     if a.prepare:
-        print("cases", prepare(a.build, a.real))
+        print("cases", prepare(data_dir(a.build, a.private_out) if a.real else a.build, a.real))
         return 0
     if a.prepare_d3d12:
         print("built", prepare_d3d12(a.build, a.rocm))
         return 0
-    res = run(a.build, a.rocm, a.d3d12)
+    res = run(a.build, a.rocm, a.d3d12, a.private_out)
     for k, v in res["per_kernel"].items():
         print(f"{k:22s} HIP identical {v['identical']} of {v['cases']}  negative control caught "
               f"{res['negative_controls'].get(k, {}).get('caught')}")

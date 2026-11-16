@@ -1,5 +1,5 @@
 {
- "what": "Model L, 1440p Quality, harness, D3D12: frame GPU time per configuration, 5 interleaved rounds (median of each round's frames), the direct-route benchmark (clean/runner/direct_bench.py) on the D3D12 interop test harness, executor dx12",
+ "what": "Model L, 1440p Quality, harness, D3D12: frame GPU time per configuration, 5 interleaved rounds (median of each round's frames), the direct-route benchmark (clean/runner/direct_bench.py) on the D3D12 interop test harness built from this branch (every configuration), executor dx12",
  "label": "Model L, 1440p Quality, harness, D3D12",
  "shape": "1440p Quality",
  "render": [
@@ -23,57 +23,57 @@
     "dx12"
    ],
    "total_ms": [
-    3.8125,
-    3.883,
-    3.887,
-    3.8905,
-    3.893
+    3.812,
+    3.8855,
+    3.889,
+    3.8865,
+    3.889
    ],
    "network_ms": [
-    3.806,
-    3.876,
-    3.8805,
-    3.8845,
-    3.8865
+    3.8055,
+    3.8785,
+    3.883,
+    3.8795,
+    3.8825
    ],
    "parts_ms": [
     {
-     "enc0": 0.8145,
+     "enc0": 0.814,
      "Swin": 1.225,
-     "dec0": 0.6465,
-     "post": 1.1195
+     "dec0": 0.6475,
+     "post": 1.119
     },
     {
      "enc0": 0.826,
-     "Swin": 1.25,
-     "dec0": 0.6605,
-     "post": 1.14
-    },
-    {
-     "enc0": 0.827,
-     "Swin": 1.2515,
+     "Swin": 1.2505,
      "dec0": 0.661,
-     "post": 1.14
+     "post": 1.1415
     },
     {
-     "enc0": 0.828,
+     "enc0": 0.8265,
+     "Swin": 1.252,
+     "dec0": 0.662,
+     "post": 1.1425
+    },
+    {
+     "enc0": 0.826,
+     "Swin": 1.252,
+     "dec0": 0.6615,
+     "post": 1.1405
+    },
+    {
+     "enc0": 0.826,
      "Swin": 1.252,
      "dec0": 0.662,
      "post": 1.142
-    },
-    {
-     "enc0": 0.828,
-     "Swin": 1.2525,
-     "dec0": 0.662,
-     "post": 1.143
     }
    ],
-   "total_median_ms": 3.887,
+   "total_median_ms": 3.886,
    "parts_median_ms": {
-    "enc0": 0.827,
+    "enc0": 0.826,
     "Swin": 1.252,
     "dec0": 0.661,
-    "post": 1.14
+    "post": 1.141
    }
   },
   "hyb": {
@@ -89,57 +89,57 @@
     "dx12"
    ],
    "total_ms": [
-    4.8135,
-    4.846,
-    4.8565,
-    4.856,
-    4.855
+    4.815,
+    4.8445,
+    4.857,
+    4.8545,
+    4.853
    ],
    "network_ms": [
-    4.8035,
-    4.8355,
-    4.846,
+    4.804,
+    4.8335,
     4.8455,
-    4.845
+    4.843,
+    4.8415
    ],
    "parts_ms": [
     {
-     "enc0": 1.025,
-     "Swin": 1.8075,
+     "enc0": 1.0255,
+     "Swin": 1.8085,
      "dec0": 0.895,
-     "post": 1.0755
+     "post": 1.074
     },
     {
      "enc0": 1.031,
-     "Swin": 1.821,
+     "Swin": 1.8215,
      "dec0": 0.901,
-     "post": 1.083
+     "post": 1.08
+    },
+    {
+     "enc0": 1.0325,
+     "Swin": 1.8275,
+     "dec0": 0.903,
+     "post": 1.0825
     },
     {
      "enc0": 1.0325,
      "Swin": 1.826,
-     "dec0": 0.9035,
-     "post": 1.0845
+     "dec0": 0.903,
+     "post": 1.082
     },
     {
      "enc0": 1.032,
-     "Swin": 1.8265,
-     "dec0": 0.903,
-     "post": 1.084
-    },
-    {
-     "enc0": 1.033,
-     "Swin": 1.826,
-     "dec0": 0.902,
-     "post": 1.0835
+     "Swin": 1.8255,
+     "dec0": 0.9025,
+     "post": 1.0815
     }
    ],
-   "total_median_ms": 4.855,
+   "total_median_ms": 4.853,
    "parts_median_ms": {
     "enc0": 1.032,
-    "Swin": 1.826,
-    "dec0": 0.902,
-    "post": 1.083
+    "Swin": 1.825,
+    "dec0": 0.903,
+    "post": 1.082
    }
   },
   "hybdef": {
@@ -154,56 +154,56 @@
    ],
    "total_ms": [
     4.822,
-    4.8395,
-    4.858,
-    4.855,
-    4.856
+    4.839,
+    4.8585,
+    4.8535,
+    4.8515
    ],
    "network_ms": [
-    4.812,
-    4.8295,
-    4.848,
-    4.8445,
-    4.8455
+    4.811,
+    4.8275,
+    4.8475,
+    4.8425,
+    4.8405
    ],
    "parts_ms": [
     {
      "enc0": 1.027,
-     "Swin": 1.812,
+     "Swin": 1.8115,
      "dec0": 0.8975,
-     "post": 1.0765
+     "post": 1.075
     },
     {
-     "enc0": 1.03,
-     "Swin": 1.8185,
+     "enc0": 1.0305,
+     "Swin": 1.8195,
      "dec0": 0.9,
-     "post": 1.0815
+     "post": 1.0785
     },
     {
      "enc0": 1.033,
-     "Swin": 1.827,
+     "Swin": 1.8285,
      "dec0": 0.903,
-     "post": 1.0845
+     "post": 1.082
     },
     {
-     "enc0": 1.0325,
-     "Swin": 1.8265,
-     "dec0": 0.9025,
-     "post": 1.0835
-    },
-    {
-     "enc0": 1.0335,
+     "enc0": 1.032,
      "Swin": 1.826,
      "dec0": 0.9025,
-     "post": 1.084
+     "post": 1.082
+    },
+    {
+     "enc0": 1.032,
+     "Swin": 1.8245,
+     "dec0": 0.9025,
+     "post": 1.081
     }
    ],
-   "total_median_ms": 4.855,
+   "total_median_ms": 4.851,
    "parts_median_ms": {
     "enc0": 1.032,
-    "Swin": 1.826,
+    "Swin": 1.825,
     "dec0": 0.903,
-    "post": 1.083
+    "post": 1.081
    }
   },
   "ng": {
@@ -217,55 +217,55 @@
     "dx12"
    ],
    "total_ms": [
-    4.822,
+    4.8225,
     4.826,
-    4.852,
-    4.8515,
-    4.851
+    4.851,
+    4.849,
+    4.849
    ],
    "network_ms": [
-    4.815,
+    4.816,
     4.82,
-    4.8455,
-    4.8445,
-    4.844
+    4.845,
+    4.8425,
+    4.8425
    ],
    "parts_ms": [
     {
-     "enc0": 1.0295,
-     "Swin": 1.8095,
+     "enc0": 1.0285,
+     "Swin": 1.812,
      "dec0": 0.8985,
-     "post": 1.078
+     "post": 1.0775
     },
     {
-     "enc0": 1.029,
-     "Swin": 1.811,
+     "enc0": 1.0295,
+     "Swin": 1.8115,
      "dec0": 0.899,
-     "post": 1.0805
-    },
-    {
-     "enc0": 1.033,
-     "Swin": 1.825,
-     "dec0": 0.9035,
-     "post": 1.0845
-    },
-    {
-     "enc0": 1.032,
-     "Swin": 1.8245,
-     "dec0": 0.9035,
-     "post": 1.084
+     "post": 1.0795
     },
     {
      "enc0": 1.033,
      "Swin": 1.8235,
+     "dec0": 0.904,
+     "post": 1.084
+    },
+    {
+     "enc0": 1.032,
+     "Swin": 1.823,
      "dec0": 0.9035,
-     "post": 1.085
+     "post": 1.084
+    },
+    {
+     "enc0": 1.0325,
+     "Swin": 1.823,
+     "dec0": 0.904,
+     "post": 1.084
     }
    ],
-   "total_median_ms": 4.851,
+   "total_median_ms": 4.849,
    "parts_median_ms": {
     "enc0": 1.032,
-    "Swin": 1.824,
+    "Swin": 1.823,
     "dec0": 0.903,
     "post": 1.084
    }
@@ -274,20 +274,20 @@
  "frame_guard_cost": {
   "what": "the bottleneck wait timeout's frame guard (D3D12 predication, read at frame start and after the bottleneck, lifted at the end, and the kernel's abort-word check): the release default minus the same build with the guard compiled out, per interleaved round",
   "total_ms_per_round": [
-   0.0,
-   0.0135,
-   0.006,
-   0.0035,
-   0.005
+   -0.0005,
+   0.013,
+   0.0075,
+   0.0045,
+   0.0025
   ],
-  "total_ms_median": 0.005,
+  "total_ms_median": 0.0045,
   "network_ms_per_round": [
-   -0.003,
-   0.0095,
+   -0.005,
+   0.0075,
    0.0025,
    0.0,
-   0.0015
+   -0.002
   ],
-  "network_ms_median": 0.0015
+  "network_ms_median": 0.0
  }
 }

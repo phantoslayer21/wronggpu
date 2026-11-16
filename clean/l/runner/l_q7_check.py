@@ -4,7 +4,8 @@
 byte for byte.
 
     python clean/l/runner/l_q7_check.py --build <dir> --compile                 # CPU: <dir>/l_q7.co
-    python clean/l/runner/l_q7_check.py --build <dir> --prepare [--real <build with lframe_model/params.pkl>]  # CPU
+    python clean/l/runner/l_q7_check.py --build <dir> --prepare [--real <build with lframe_model/params.pkl>
+                                        --private-out <folder outside the repository>]  # CPU
     python clean/l/runner/l_q7_check.py --build <dir> --prepare-d3d12           # CPU: D3D12 ports + kernel_replay.exe
     python clean/l/runner/l_q7_check.py --build <dir> --run [--d3d12] --json out.json   # GPU (inside a GPU slot)
 
@@ -17,7 +18,9 @@ magnitudes, zeros and a NaN member. Negative control: the same launch with half 
 With --d3d12 the same cases run on the native D3D12 device (the ports in clean/dx12/kernels/l_q7.hlsl, kernel_replay,
 output buffers filled with the D3D12 sentinel 0x5A): raw bytes identical to the HIP run's and to the oracle's, slack
 kept, and its own half-grid control.
-Output: counts and digests only.
+Output: counts and digests only. --real (the synthetic-values rule): the cases file (real weights, the oracle's bytes on
+them) and the D3D12 replay folder go only to --private-out, a folder outside the repository (refused inside it); give
+the same --private-out to --run.
 --form hyb / hybmut (Q11 part C, Model L's HYBRID evaluation form; HIP only): l_q7__hyb.co (l_q7.hip Q7_HYB: float32
 chains, one FP16 rounding each) against the oracle with FP8 op model "f32chain", raw bytes, the same cases (synthetic
 weights) and half-grid control; negative control: the exact (q7) oracle's bytes must differ in some case. hybmut:
@@ -69,8 +72,9 @@ def run_identity(build, files):
         return r.stdout.strip()
     ident = {"git_commit": git("rev-parse", "HEAD"),
              "git_tracked_changes": bool(git("status", "--porcelain", "--untracked-files=no"))}
-    for f in files:
-        ident[f.replace(".", "_") + "_sha256"] = _sha256(os.path.join(build, f))
+    for f in files:   # an absolute path (a private folder) is named by its file name only
+        key = os.path.basename(f) if os.path.isabs(f) else f
+        ident[key.replace(".", "_") + "_sha256"] = _sha256(os.path.join(build, f))
     return ident
 
 
@@ -229,8 +233,26 @@ def compare(got, want, out_bytes, kind="fp8"):
             "bytes_differ": sum(a != b for a, b in zip(body, want))}
 
 
+def data_dir(build, private_out):
+    """Where the cases file and the replay folder are: --private-out (resolved, outside the repository) or the build."""
+    if private_out:
+        from clean.l.runner.l_private import private_dir
+        return private_dir(private_out)
+    return build
+
+
+def load_cases(path, private_out):
+    """The prepared cases; a file holding real weights is read only from a private folder (--private-out)."""
+    with open(path, "rb") as f:
+        prep = pickle.load(f)
+    if prep.get("real_params_sha256") and not private_out:
+        raise SystemExit(f"{path}: prepared with --real (real weights); run it from its --private-out folder")
+    return prep
+
+
 def prepare(build, real=None, form="q7"):
-    """CPU: every case's inputs and the oracle's bytes, saved to <build>/l_q7_cases.pkl (the GPU run only launches)."""
+    """CPU: every case's inputs and the oracle's bytes, saved to <build>/l_q7_cases.pkl (the GPU run only launches);
+    with real (real weights), `build` is the private folder (data_dir)."""
     blocks = [("synthetic_%d" % s, {k: np.asarray(v, np.float64) for k, v in
                                     L.random_block_params(np.random.default_rng(s), 32, 2, 128).items()})
               for s in (89, 90)]
@@ -268,16 +290,17 @@ def prepare(build, real=None, form="q7"):
     return len(cases)
 
 
-def run(build, rocm, d3d12=False, form="q7"):
+def run(build, rocm, d3d12=False, form="q7", private_out=None):
     """GPU: launch every prepared case and compare with the oracle's bytes (with d3d12, also the D3D12 ports)."""
-    with open(cases_file(build, form), "rb") as f:
-        prep = pickle.load(f)
+    ddir = data_dir(build, private_out)
+    prep = load_cases(cases_file(ddir, form), private_out)
     cases = prep["cases"]
     co = FORM_CO[form]
     g = Gpu(build, rocm, co)
     res = {"what": "FP16-form width-32 block kernels against the oracle, raw bytes", "cases": [], "form": form,
            "fp8_op_model": "exact" if form == "q7" else "f32chain",
-           "identity": run_identity(build, [co, os.path.basename(cases_file(build, form))]),
+           "identity": run_identity(build, [co, cases_file(ddir, form) if private_out
+                                            else os.path.basename(cases_file(build, form))]),
            "real_params_sha256": prep["real_params_sha256"],
            "nan_sign_masked": "outputs compared and hashed with only a NaN's sign bit cleared (accepted port exception; "
                               "a canonical NaN store costs about 3 VALU per stored dword in the RGA ISA)",
@@ -314,7 +337,7 @@ def run(build, rocm, d3d12=False, form="q7"):
         res["cases_differing_from_exact_oracle"] = sum(bool(r["differs_from_exact_oracle"]) for r in res["cases"])
         res["pass"] = res["pass"] and res["cases_differing_from_exact_oracle"] > 0
     if d3d12:
-        res["d3d12"] = run_d3d12(build, cases, res)
+        res["d3d12"] = run_d3d12(build, cases, res, ddir)
         res["pass"] = res["pass"] and res["d3d12"]["pass"]
     return res
 
@@ -325,12 +348,13 @@ def prepare_d3d12(build, rocm):
     return prepare_replay(build, rocm, list(KERNELS))
 
 
-def run_d3d12(build, cases, res):
+def run_d3d12(build, cases, res, ddir=None):
     """GPU: every prepared case on the native D3D12 device (kernel_replay, a child process), output buffers filled with
-    the D3D12 sentinel 0x5A; raw bytes against the HIP run's and the oracle's, and the half-grid control."""
+    the D3D12 sentinel 0x5A; raw bytes against the HIP run's and the oracle's, and the half-grid control. The replay
+    folder is made in ddir (the cases file's folder: the private one for real weights)."""
     import subprocess
     import time
-    cdir = os.path.join(build, "replay-q7-" + time.strftime("%Y%m%d-%H%M%S"))
+    cdir = os.path.join(ddir or build, "replay-q7-" + time.strftime("%Y%m%d-%H%M%S"))
     os.makedirs(cdir)
     with open(os.path.join(cdir, "tab.bin"), "wb") as f:
         f.write(LP.q7_tables())
@@ -414,9 +438,18 @@ def main(argv=None):
     g.add_argument("--run", action="store_true")
     ap.add_argument("--d3d12", action="store_true", help="with --run: also the D3D12 ports through kernel_replay")
     ap.add_argument("--real")
+    ap.add_argument("--private-out", help="--real: the folder (outside the repository) for the cases file and the "
+                    "replay folder; the same one for --run")
     ap.add_argument("--form", choices=sorted(FORM_CO), default="q7")
     ap.add_argument("--json")
     a = ap.parse_args(argv)
+    if a.real and not a.prepare:
+        ap.error("--real: with --prepare (give --run the same --private-out)")
+    if a.real and not a.private_out:
+        raise SystemExit("--real is required to have --private-out <folder outside the repository>: the cases file "
+                         "holds real weights and the oracle's bytes on them")
+    if a.private_out and (a.real or a.run):
+        data_dir(a.build, a.private_out)   # refused inside the repository, before anything is read
     if a.compile:
         compile_kernel(a.build, a.rocm)
         return 0
@@ -426,13 +459,13 @@ def main(argv=None):
     if a.prepare:
         if a.form == "hybmut":
             ap.error("prepare with --form hyb (its cases serve hybmut too)")
-        print("cases", prepare(a.build, a.real, a.form))
+        print("cases", prepare(data_dir(a.build, a.private_out) if a.real else a.build, a.real, a.form))
         return 0
     from clean.runner.hip import clean_process_environment
     clean_process_environment(a.rocm)
     if a.form != "q7" and a.d3d12:
         ap.error("--form hyb / hybmut: HIP only")
-    res = run(a.build, a.rocm, a.d3d12, a.form)
+    res = run(a.build, a.rocm, a.d3d12, a.form, a.private_out)
     print("form", a.form, "| HIP cases identical", res["cases_identical"], "of", len(res["cases"]),
           "| negative control caught", res["negative_control"]["half_grid_differs"],
           "| differing from exact oracle", res.get("cases_differing_from_exact_oracle"),

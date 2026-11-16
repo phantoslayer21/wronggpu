@@ -50,17 +50,8 @@ REAL_SETS = ("real_frames_sample",)
 
 def private_dir(path):
     """A real run's private output folder: refused when it is inside the repository (the synthetic-values rule)."""
-    p = os.path.realpath(os.path.abspath(path))
-    root = os.path.realpath(ROOT)
-    try:
-        inside = os.path.commonpath([p, root]) == root
-    except ValueError:   # another drive
-        inside = False
-    if inside:
-        raise SystemExit(f"--private-out {path}: inside the repository ({root}); a real run's intermediates go only "
-                         "to a folder outside it")
-    os.makedirs(p, exist_ok=True)
-    return p
+    from clean.l.runner.l_private import private_dir as shared
+    return shared(path)
 
 
 def assert_aggregate_only(res, path="record"):

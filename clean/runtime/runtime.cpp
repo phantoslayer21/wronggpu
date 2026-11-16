@@ -3188,6 +3188,7 @@ const std::string& runtime_error(Runtime* rt) { return rt->err; }
 Device* runtime_device(Runtime* rt) { return rt->dev.get(); }
 float runtime_effective_pre_exposure(Runtime* rt, float value) { return rt->effective_pre_exposure(value); }
 const char* runtime_kernels(Runtime* rt) { return rt->kernels(); }
+bool runtime_frame_guard(Runtime* rt) { return rt->hyb_mega; }
 const char* runtime_notes(Runtime* rt) { return rt->notes_text.c_str(); }
 uint64_t runtime_memory_bytes(Runtime* rt) { return rt->owned_bytes; }
 #ifdef WG_NO_MODEL_K

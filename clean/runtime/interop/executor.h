@@ -114,6 +114,14 @@ struct Job {
   // output pass for formats the network's post kernel cannot store).
   bool output_copy = true;
   class Converter* conv = nullptr;
+  // executor=dx12: the game's predicate on its list before this frame (WgFrontEndServices::command_list_predication;
+  // caller_pred_known false: the front end could not tell). A frame under the device's frame guard (Model L hybrid)
+  // replaces it while it records and sets it again after (NativeD3D12Ext::set_caller_predicate); such a frame is not
+  // taken when it is not known.
+  bool caller_pred_known = false;
+  void* caller_pred = nullptr;   // ID3D12Resource*, null: none set
+  uint64_t caller_pred_offset = 0;
+  uint32_t caller_pred_op = 0;   // D3D12_PREDICATION_OP
 };
 
 // Motion at output resolution (model M, both executors): motion_scale converts the game's raw motion to render pixels

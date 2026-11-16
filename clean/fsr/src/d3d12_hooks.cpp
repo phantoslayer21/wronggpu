@@ -2064,7 +2064,40 @@ WgResult WGAPI_Split(void*, const WgFrame* frame, const WgSplitRequest* request)
     }
 }
 
-const WgFrontEndServices g_services = {sizeof(WgFrontEndServices), nullptr, &WGAPI_Split};
+// WgFrontEndServices::command_list_predication: the list's predicate as tracked (HPredication; a Reset clears it),
+// when every call it recorded since its Reset reached the hooks (a patched class table, or its own table tracked since
+// that Reset).
+WgResult PredicationImpl(const WgFrame* frame, void** buffer, uint64_t* offset, uint32_t* op) {
+    if (!frame || !frame->command_list || !buffer || !offset || !op) return WG_ERROR_PARAMETER;
+    *buffer = nullptr;
+    *offset = 0;
+    *op = 0;
+    if (!g_installed.load()) return WG_ERROR_NOT_READY;
+    std::lock_guard<std::mutex> once(g_patchMutex);
+    auto* list = static_cast<CmdList*>(frame->command_list);
+    void** vt = *reinterpret_cast<void***>(list);
+    ListState* s = FindState(list);
+    if (!s || !s->known) return WG_ERROR_NOT_READY;
+    const bool tracked = IsPatched(g_listVt, vt) || (s->own && s->own->table == vt && s->own->tracked && OwnIntact(*s->own));
+    if (!tracked) return WG_ERROR_NOT_READY;
+    if (s->b.predicationSet) {
+        *buffer = s->b.predicationBuffer;
+        *offset = s->b.predicationOffset;
+        *op = static_cast<uint32_t>(s->b.predicationOp);
+    }
+    return WG_OK;
+}
+
+WgResult WGAPI_Predication(void*, const WgFrame* frame, void** buffer, uint64_t* offset, uint32_t* op) {
+    try {
+        return PredicationImpl(frame, buffer, offset, op);
+    } catch (...) {
+        HLog("ERROR: exception in command_list_predication");
+        return WG_ERROR;
+    }
+}
+
+const WgFrontEndServices g_services = {sizeof(WgFrontEndServices), nullptr, &WGAPI_Split, &WGAPI_Predication};
 
 void NoteImpl(void* listPtr, WgFrame* frame) {
     if (!listPtr) return;

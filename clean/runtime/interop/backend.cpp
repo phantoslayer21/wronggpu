@@ -1117,6 +1117,19 @@ class Context {
     job.game = &f;
     job.output_copy = output_copy_;
     job.conv = &conv_;
+    // the game's predicate on its list (the executor's frame guard replaces it while it records, then sets it again)
+    if (services_ && services_->struct_size >= offsetof(WgFrontEndServices, command_list_predication) + sizeof(void*) &&
+        services_->command_list_predication) {
+      void* pb = nullptr;
+      uint64_t po = 0;
+      uint32_t pop = 0;
+      if (services_->command_list_predication(services_->context, &f, &pb, &po, &pop) == WG_OK) {
+        job.caller_pred_known = true;
+        job.caller_pred = pb;
+        job.caller_pred_offset = po;
+        job.caller_pred_op = pop;
+      }
+    }
     if (timing_) timing_->stamp(list, v, 0);
     if (timing_) timing_->stamp(list, v, 1);
     bool wrote = false;
@@ -1136,13 +1149,14 @@ class Context {
       }
       return WG_ERROR_UNSUPPORTED;  // one frame's answer: the context stays usable (failed_ not set)
     }
-    // Model L hybrid, the frame after a bottleneck wait timeout: "refused, keep previous output" (executor_select.h
-    // frame_timeout_refused). One line, no fallback written into the game's output, WG_OK, the context kept; the next
-    // frame starts over.
+    // Model L hybrid, the frame after a bottleneck wait timeout (executor_select.h frame_timeout_refused): nothing of
+    // it written, the path of a frame not taken: one line, WG_ERROR_UNSUPPORTED (the front end's stand-in renders it),
+    // the context kept; the next frame starts over.
     if (!ok && frame_timeout_refused(err)) {
-      say(WG_LOG_WARN, "frame " + std::to_string(v) + ": " + err + "; the game keeps its previous output for this frame");
+      say(WG_LOG_WARN, "frame " + std::to_string(v) + ": " + err + "; this frame goes back to the front end (AMD FSR, "
+                       "else its stand-in), the context stays");
       force_reset_ = true;
-      return WG_OK;
+      return WG_ERROR_UNSUPPORTED;  // one frame's answer: the context stays usable (failed_ not set)
     }
     note_path(&input_path_, "input: read directly by the network's D3D12 kernels (executor dx12, no input pass)");
     if ((flags_ & WG_CREATE_MOTION_OUTPUT_RES) && model_k_)

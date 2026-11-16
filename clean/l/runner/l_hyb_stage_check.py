@@ -362,13 +362,24 @@ def main(argv=None):
     ap.add_argument("--no-replay", action="store_true", help="analyse the outputs of an earlier --replay-only (CPU)")
     ap.add_argument("--real", action="store_true", help="real L weights / recorded frames: the allowance share counts")
     ap.add_argument("--real-inputs", help="a directory of <fixture>-<frame>.npz (real L weights and recorded-frame block "
-                    "inputs: x2, x3, y, parity, enc0_block, dec0_block; private, never in the repository); implies --real")
+                    "inputs: x2, x3, y, parity, enc0_block, dec0_block; private, never in the repository); implies --real; "
+                    "needs --private-out")
+    ap.add_argument("--private-out", help="--real-inputs: the folder (outside the repository) for the real cases' files "
+                    "and replay outputs (refused inside the repository)")
     ap.add_argument("--set", choices=("c32", "s3", "fused"), default="c32", help="c32: Model L's two blocks; s3: the "
                     "shared stages' hybrid blocks (C64, C96 with and without the skip, C128); fused: the twins of the "
                     "fusions le / lc (encoder with the linears, decoder with the pack12 epilogue)")
     ap.add_argument("--mutant", action="store_true",
                     help="the order mutant's dump kernel (SW_HYB_MUT_ORDER=2, encoder): the tolerance leg must PASS it")
     a = ap.parse_args(argv)
+    # the synthetic-values rule: a real run's case files and replay outputs only in a private folder outside the
+    # repository, checked before anything is read or built
+    cdir = None
+    if a.real_inputs:
+        from clean.l.runner.l_private import private_dir
+        cdir = private_dir(a.private_out, what="--real-inputs: the real cases' files and replay outputs")
+    elif a.private_out:
+        raise SystemExit("--private-out: only with --real-inputs")
     if a.set == "fused":
         kernels = FUSED_MUT if a.mutant else FUSED_KERNELS
     else:
@@ -379,12 +390,13 @@ def main(argv=None):
     if not a.run:
         return 0
     rng = np.random.default_rng(13)
-    cdir = os.path.join(a.build, "hyb_stage")
-    os.makedirs(cdir, exist_ok=True)
+    if cdir is None:
+        cdir = os.path.join(a.build, "hyb_stage")
+        os.makedirs(cdir, exist_ok=True)
     lines, meta, nan_leg = [], [], set()
     n = 0
     # the random legs (finite codes), then the one NaN-input leg (seed a.seeds, every case special, NaN codes included)
-    for seed in range(a.seeds + 1):
+    for seed in (range(a.seeds + 1) if not a.real_inputs else ()):   # (the real cases replace them)
         is_nan = seed == a.seeds
         sp8 = LD.SPECIAL_FP8 if is_nan else FINITE_FP8
         sp16 = LD.SPECIAL_F16 if is_nan else FINITE_F16

@@ -96,6 +96,8 @@ float runtime_effective_pre_exposure(Runtime* rt, float pre_exposure);
 // The kernels in use, one line (as wg_rt_kernels): for the front end's log at create, so that every run documents its
 // kernel choice. Valid until the next call.
 const char* runtime_kernels(Runtime* rt);
+// Whether the frames use the device's frame guard (Model L hybrid on native D3D12: the bottleneck wait timeout).
+bool runtime_frame_guard(Runtime* rt);
 // Notes of create for the front end's log (as wg_rt_notes): one per line, or empty. Valid while the runtime lives.
 const char* runtime_notes(Runtime* rt);
 // Device memory the runtime allocated itself (model data, state, intermediates), in bytes.
