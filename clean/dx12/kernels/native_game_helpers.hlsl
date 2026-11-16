@@ -7,7 +7,7 @@
 // @wg-kernel native_round_probe co=- block=32 wave=32 args=p defines=NATIVE_ROUND_PROBE=1 gfx=11
 // @wg-kernel exposure_pair_diet co=exposure.co block=32 wave=32 args=p,p,u,u,u,u defines=NATIVE_EXPOSURE_PAIR=1
 // @wg-kernel exposure_pair_diet_direct co=exposure.co entry=exposure_pair_diet block=32 wave=32 args=p,p,u,u,u,u rs=direct defines=NATIVE_EXPOSURE_PAIR=1,WG_DIRECT_TEXTURES=1
-#include "wg_platform.hlsli"
+#include "wg_gfx11.hlsli"
 #if defined(WG_DIRECT_TEXTURES)
 #include "native_direct.hlsli"
 #endif

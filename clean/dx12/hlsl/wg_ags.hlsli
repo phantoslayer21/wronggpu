@@ -25,20 +25,13 @@ RWByteAddressBuffer wg_ags_uav : register(u0, space2147420894);
 
 #define WG_AGS_MMA 0x28u
 #define WG_AGS_CONVERT 0x32u
-#ifndef WG_GFX
-#define WG_GFX 12
-#endif
-#if WG_GFX == 12   // RDNA 3 has no FP8 operations: a shader with one fails to compile there
 #define WG_AGS_FP8_F32 0x7u   // A, B FP8 E4M3 (2 dwords per lane), C / D FP32 (8 dwords)
-#endif
 #define WG_AGS_F16_F32 0x5u   // A, B F16 (4 dwords), C / D FP32
 #define WG_AGS_F16_F16 0x1u   // A, B F16, C / D F16 (4 dwords)
 #define WG_AGS_T_F32_ACC 0x26u
 #define WG_AGS_T_F16_ACC 0x24u
 #define WG_AGS_T_F16_B 0x14u
-#if WG_GFX == 12
 #define WG_AGS_T_FP8_B 0x1au
-#endif
 
 // Eight dwords of one lane's matrix fragment (unused trailing dwords are 0).
 struct wg_frag { uint v[8]; };
@@ -64,7 +57,7 @@ wg_frag wg_ags_result(uint op)
     return r;
 }
 
-// D = A x B + C (16 x 16 x 16, wave32 fragment layouts of gfx12's v_wmma_*_w32; on gfx11 the layout of wg_platform.hlsli).
+// D = A x B + C (16 x 16 x 16, wave32 fragment layouts of gfx12's v_wmma_*_w32).
 wg_frag wg_ags_mma(uint format, wg_frag a, wg_frag b, wg_frag c)
 {
     wg_ags_load(WG_AGS_MMA, 1u, a);

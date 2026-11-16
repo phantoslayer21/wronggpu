@@ -22,18 +22,6 @@
 #ifndef WG_WAVE
 #define WG_WAVE 32
 #endif
-// GPU family of the build (build_dx12.py --gfx): 12 = RDNA 4 (gfx12, the default), 11 = RDNA 3 (gfx11, the native matrix
-// instruction takes F16 only, with its own fragment layout: see "matrix instructions" below). Nothing under WG_GFX 12
-// changes with this switch.
-#ifndef WG_GFX
-#define WG_GFX 12
-#endif
-#if WG_GFX != 11 && WG_GFX != 12
-#error "WG_GFX is 11 (RDNA 3) or 12 (RDNA 4)"
-#endif
-#if WG_GFX == 11 && WG_WAVE != 32
-#error "WG_GFX 11 kernels run in wave32"
-#endif
 
 #include "wg_math.hlsli"
 
@@ -227,13 +215,10 @@ wg_frag wg_frag4(uint4 a)
     [unroll] for (uint i = 4; i < 8; ++i) f.v[i] = 0u;
     return f;
 }
-#if WG_GFX == 12
 // D = A x B + C, 16x16x16, FP8 E4M3 A / B, FP32 accumulate (v_wmma_f32_16x16x16_fp8_fp8, HIP wg_wmma_fp8).
 v8f wg_wmma_fp8(uint2 a, uint2 b, v8f c) { return wg_v8f_frag(wg_ags_mma(WG_AGS_FP8_F32, wg_frag2(a), wg_frag2(b), wg_frag_v8f(c))); }
 // D = A x B + C, 16x16x16, FP16 A / B, FP32 accumulate (v_wmma_f32_16x16x16_f16, HIP wg_wmma_f16).
 v8f wg_wmma_f16(uint4 a, uint4 b, v8f c) { return wg_v8f_frag(wg_ags_mma(WG_AGS_F16_F32, wg_frag4(a), wg_frag4(b), wg_frag_v8f(c))); }
-// Row of D held by accumulator element i of this lane (the gfx12 table: v + 8 h, h = lane / 16).
-uint wg_d_row(uint i) { return i + 8u * (WaveGetLaneIndex() >> 4); }
 // wg_pack_q8* with the driver's conversion (v_cvt_pk_fp8_f32; the same bytes as the software ones above).
 uint2 wg_pack_q8_nc_ags(v8f d)
 {
@@ -250,39 +235,7 @@ uint2 wg_pack_q8_inner_ags(v8f d)
     [unroll] for (uint i = 0; i < 8; ++i) d.v[i] = wg_sat448_inner(d.v[i]);
     return wg_pack_q8_nc_ags(d);
 }
-#else
-// RDNA 3 (measured on gfx1100 through vkd3d-proton's raw fragments): there is no FP8 matrix
-// instruction, no FP8 conversion and no wg_wmma_fp8 (the whole pipeline of a shader that has one fails): E4M3 values are
-// packed by software (wg_pack_q8*) and widened to F16 for the matrix instruction. The F16 instruction (format 0x5) takes
-// 8 K values per call from the channel's fragment (K 0 .. 7; the K 8 .. 15 slots are zero) and, per lane l (half
-// h = l / 16, c = l % 16):
-//   A: accumulator row r reads its A values from lane 16 (r & 1) + r  -> hold row r's values in lanes r and r + 16;
-//   B: column c reads lane l itself                                      -> lanes c and c + 16 hold column c;
-//   C / D: element i of lane l is row 2 i + h, column c (wg_d_row).
-// So an operand is replicated across the two halves of the wave, where gfx12 splits K between them. A K = 16 step is two
-// chained instructions (the second takes K 8 .. 15 and the first's result as its C): the result equals HIP's one-
-// instruction v_wmma_f32_16x16x16_f16 bit for bit.
-bool wg_in_upper_half() { return (WaveGetLaneIndex() & 16u) != 0u; }
-uint4 wg_xor16_4(uint4 v) { return uint4(wg_xor16_u(v.x), wg_xor16_u(v.y), wg_xor16_u(v.z), wg_xor16_u(v.w)); }
-// One instruction: D = A x B + C over K 0 .. 7. a / b: the 8 halves of this lane's row / column, replicated across halves.
-v8f wg_wmma_f16_k8(uint4 a, uint4 b, v8f c) { return wg_v8f_frag(wg_ags_mma(WG_AGS_F16_F32, wg_frag4(a), wg_frag4(b), wg_frag_v8f(c))); }
-// K = 16: a0 / b0 hold K 0 .. 7, a1 / b1 K 8 .. 15 (replicated as above); two chained instructions.
-v8f wg_wmma_f16_k16(uint4 a0, uint4 b0, uint4 a1, uint4 b1, v8f c)
-{
-    return wg_wmma_f16_k8(a1, b1, wg_wmma_f16_k8(a0, b0, c));
-}
-// Row of D held by accumulator element i of this lane (the gfx11 table: 2 i + h; packing.py D_ROW_LAYOUTS["gfx11"]).
-uint wg_d_row(uint i) { return 2u * i + (WaveGetLaneIndex() >> 4); }
-// HIP's wg_wmma_f16 on gfx11: operands in the gfx12 shape (lane l: row / column l % 16, half h holds K 8 h .. 8 h + 7);
-// one half-wave exchange per dword, then the K = 16 chain.
-v8f wg_wmma_f16(uint4 a, uint4 b, v8f c)
-{
-    const uint4 ya = wg_xor16_4(a), yb = wg_xor16_4(b);
-    const bool hi = wg_in_upper_half();
-    return wg_wmma_f16_k16(hi ? ya : a, hi ? yb : b, hi ? a : ya, hi ? b : yb, c);
-}
-#endif
-// wg_to_f16 with the driver's conversion (v_cvt_f16_f32, round to nearest even; the same bits as the software one)
+// wg_to_f16 with the driver's conversion (v_cvt_f16_f32, round to nearest even)
 uint4 wg_to_f16_ags(v8f d)
 {
     wg_frag r = wg_ags_convert(wg_frag_v8f(d), WG_AGS_T_F32_ACC, WG_AGS_T_F16_ACC);

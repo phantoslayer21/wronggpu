@@ -3,7 +3,7 @@
 // test_gfx11_helpers.py through gfx11_probe_host.cpp. Lane l of a 32-lane workgroup; every array is in the arena at the
 // byte offset of its argument. Fragments are 8 halves per lane (uint4), accumulators 8 floats per lane stored element-major:
 // element i of lane l at (i * 32 + l) * 4, matrix e at + e * 1024.
-#include "wg_platform.hlsli"
+#include "wg_gfx11.hlsli"
 WG_ARGS_BEGIN
     uint pa, pb, pc, po, n, pa2, pb2;
 WG_ARGS_END

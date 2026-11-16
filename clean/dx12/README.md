@@ -128,7 +128,9 @@ WG_KERNEL(exposure_auto_diet) { WG_SETUP(); ... }   // entry name = HIP kernel n
 * `gfx=<11|12|11,12>` (optional, default 12) = the GPU families the declaration is built for (`build_dx12.py --gfx`,
   default 12): `--gfx 11` (RDNA 3, `WG_GFX=11` in every kernel) builds only the declarations that list 11 into
   `<build>/dx12-gfx11/` with a `"gfx": 11` key in its manifest (a gfx12 manifest has no `gfx` key), without RGA. The
-  gfx11 helpers (`wg_wmma_f16_k8` / `_k16`, `wg_d_row`, no FP8 matrix instruction) are in `wg_platform.hlsli`.
+  gfx11 helpers (`wg_wmma_f16_k8` / `_k16`, `wg_d_row`, no FP8 matrix instruction) are in `wg_gfx11.hlsli`, which a gfx11 kernel includes
+  instead of `wg_platform.hlsli` (it includes that itself); the platform layer and `wg_ags.hlsli` hold no gfx11 code, because
+  model K's softmax self-check digest covers them.
 * `args` = the HIP kernel's arguments in order: `p` pointer (DWORD: arena byte offset), `u` any 32-bit scalar,
   `b<N>` struct by value (N bytes = N/4 DWORDs, copied verbatim). At most 57 DWORDs. The `WG_ARGS_BEGIN` block must
   declare exactly these DWORDs in order, **32-bit scalars only** (no vectors / arrays / structs: cbuffer packing).

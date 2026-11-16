@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""The gfx11 (RDNA 3) platform helpers of hlsl/wg_platform.hlsli (WG_GFX 11), run headless on the card through
+"""The gfx11 (RDNA 3) platform helpers of hlsl/wg_gfx11.hlsli (WG_GFX 11), run headless on the card through
 vkd3d-proton under Wine and compared with numpy and with a small HIP kernel on the same card (the native
 v_wmma_f32_16x16x16_f16 of gfx1100): fragment layout of the raw F16 matrix instruction, the K = 16 step as two chained
 instructions, the accumulator row table, the F32 -> F16 conversion and the half-wave exchange. The layout and the
@@ -357,7 +357,7 @@ class TestGfx11Compile(unittest.TestCase):
         path = os.path.join(WORK, "compile_check.hlsl")
         os.makedirs(WORK, exist_ok=True)
         with open(path, "w") as f:
-            f.write('#include "wg_platform.hlsli"\nWG_ARGS_BEGIN\n    uint po;\nWG_ARGS_END\nWG_KERNEL(k)\n{\n'
+            f.write('#include "wg_gfx11.hlsli"\nWG_ARGS_BEGIN\n    uint po;\nWG_ARGS_END\nWG_KERNEL(k)\n{\n'
                     "    WG_SETUP();\n" + body + "\n}\n")
         return path
 
