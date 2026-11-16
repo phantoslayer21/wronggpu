@@ -952,6 +952,23 @@ Windows (the Wine run was not repeated for them):
   unless the test allows it (`WRONGGPU_TEST_ALLOW_RR_HELPER=1`: the stand-in case and the opt-in pass only). Test builds'
   other hooks for this: `WRONGGPU_TEST_RR_DRIVER` (a driver version, or `none`), `WRONGGPU_TEST_HELPER_ENV_LOG`, and
   `WRONGGPU_TEST_REAL_DRIVER_CACHE=1` (the helper gets the user's real `LOCALAPPDATA`; release builds always do).
+  The HIP check only ever tries `--hip` (an existing file, named at the start), or in a default run a file in the work
+  folder that is not there (`WRONGGPU_TEST_HIP_CANDIDATES`): a default run never loads a real HIP runtime.
+  On a fresh clone, from the repository root in an x64 Visual Studio developer prompt (PowerShell), with nothing else
+  needed (a single `WrongGPU` target builds the restorer and the canaries too):
+
+  ```
+  python clean/installer/tests/run_installer_tests.py --work out/mock --prepare-only
+  $common = @("-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_POLICY_DEFAULT_CMP0091=NEW", "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
+              "-DWRONGGPU_PAYLOAD_DIR=$PWD/out/mock/prepared/payload", "-DWRONGGPU_MAP=$PWD/out/mock/prepared/test-map.json",
+              "-DWRONGGPU_VERSION=0.3.0-test", "-DWRONGGPU_TESTING=ON")
+  cmake -S clean/installer -B out/launcher-test @common
+  cmake --build out/launcher-test --target WrongGPU
+  cmake -S clean/installer -B out/launcher-test-nodirect @common -DWRONGGPU_DIRECT_ROUTE=OFF
+  cmake --build out/launcher-test-nodirect --target WrongGPU
+  python clean/installer/tests/run_launcher_tests.py --launcher out/launcher-test/WrongGPU.exe --work out/launcher-suite --no-direct-launcher out/launcher-test-nodirect/WrongGPU.exe
+  ```
+
   Its `[direct-rr]` part: a game that ships the RR library without the game interface's RR plugin (the Unreal Engine
   plugin layout of Hogwarts Legacy, LEGO Batman, Borderlands 4) creates Ray Reconstruction itself (`rr.h`
   `RrUse::direct`; status `rr_direct`). WrongGPU's RR runs there only through WrongGPU's edition of OptiScaler (plugin

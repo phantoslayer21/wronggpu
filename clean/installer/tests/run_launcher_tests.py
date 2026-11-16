@@ -59,6 +59,9 @@ class T:
             env.pop(k)
         if self.hip:
             env["WRONGGPU_HIP_RUNTIME"] = self.hip
+        # the HIP check tries these candidates only, never the system's, PATH's or ROCm's runtime (checks.cpp HipCandidates):
+        # the --hip mock, else a file that is not there (a default run never loads a real HIP runtime)
+        env["WRONGGPU_TEST_HIP_CANDIDATES"] = self.hip or os.path.join(self.work, "no-hip", "amdhip64_7.dll")
         os.makedirs(env["LOCALAPPDATA"], exist_ok=True)
         os.makedirs(tmp, exist_ok=True)
         return env
@@ -3057,7 +3060,15 @@ def main():
     for what, p in (("--launcher", a.launcher), ("--no-direct-launcher", NO_DIRECT)):  # before anything runs
         if p:
             facts.require_test_hooks(p, what)
+    if a.hip:  # the mock HIP runtime: an existing plain file, named before anything runs
+        a.hip = os.path.abspath(a.hip)
+        if not os.path.isfile(a.hip) or facts.reparse_in_path(a.hip):
+            raise SystemExit("--hip %s is not an existing plain file: not run" % a.hip)
+        print("HIP runtime for the tests (--hip): %s" % a.hip)
     work = os.path.abspath(a.work)
+    bad = facts.reparse_in_path(work)  # before the isolation self-test or anything is made or removed in it
+    if bad:
+        raise SystemExit("--work %s is not a plain folder (%s is a junction or link): not run" % (work, bad))
     iso.self_test(work)  # (#243) first: no launcher call with a broken guard
     for d in ("games", "data", "localappdata", "programs", "startmenu"):
         shutil.rmtree(os.path.join(work, d), ignore_errors=True)

@@ -237,6 +237,10 @@ if(WRONGGPU_TESTING)
   add_executable(wg-test-canary tests/canary.cpp)
   add_executable(wg-test-canary-strings tests/canary.cpp)
   target_compile_definitions(wg-test-canary-strings PRIVATE WG_CANARY_HOOK_STRINGS)
+  if(NOT MSVC)
+    target_link_options(wg-test-canary PRIVATE -municode)  # (wmain, as the launcher and restorer)
+    target_link_options(wg-test-canary-strings PRIVATE -municode)
+  endif()
   # built with the testing launcher (a single-target build has them), and the build list the suite checks before it starts
   # one: the SHA-256 of this WrongGPU.exe and of the canaries, written after the launcher's link
   add_dependencies(WrongGPU wg-test-canary wg-test-canary-strings)

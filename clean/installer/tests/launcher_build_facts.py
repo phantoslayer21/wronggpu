@@ -311,19 +311,38 @@ def self_checks(t):
     t.check("preflight: a launcher changed after its link (a byte, or the hooks' strings and the identity appended), or a program "
             "with the strings and a valid checksum but no identity resource, is refused",
             all(refused.values()), refused)
-    # WRONGGPU_HIP_RUNTIME only from --hip: an inherited value (another HIP library) is never the launcher's
+    # the HIP check: only the --hip mock, or in a default run a file that is not there, is ever tried (never the system's,
+    # PATH's or ROCm's runtime), and an inherited WRONGGPU_HIP_RUNTIME / WRONGGPU_TEST_HIP_CANDIDATES is never tried: a safe
+    # stand-in file at those paths (the --hip mock's copy, else not a library), and the probe's own log line per candidate
     conflict = os.path.join(d, "conflict", "amdhip64_7.dll")
-    env = t.child_env(dict(os.environ, WRONGGPU_HIP_RUNTIME=conflict))
+    write(conflict, read(t.hip) if t.hip else b"not a library")
+    env = t.child_env(dict(os.environ, WRONGGPU_HIP_RUNTIME=conflict, WRONGGPU_TEST_HIP_CANDIDATES=conflict))
     saved = t.env
     t.env = dict(env, **{k: v for k, v in saved.items() if k in ("WRONGGPU_TEST_LIBRARIES", "WRONGGPU_TEST_ACCESS_LOG", "WRONGGPU_TEST_RUN_ID")})
+    start = size()
     try:
         t.run("hipcheck")
     finally:
         t.env = saved
-    dll = t.j.get("dll", "")
-    t.check("HIP runtime: an inherited WRONGGPU_HIP_RUNTIME is dropped, only --hip sets it (hipcheck never uses the inherited one)",
-            env.get("WRONGGPU_HIP_RUNTIME") == t.hip and conflict.lower() not in dll.lower() and (not t.hip or dll.lower() == t.hip.lower()),
-            (env.get("WRONGGPU_HIP_RUNTIME"), t.hip, t.j))
+    tried = [l.split("HIP check: ", 1)[1].rsplit(" -> probe code", 1)[0] for l in read(t.log)[start:].decode("utf-8", "replace").splitlines()
+             if "HIP check: " in l and " -> probe code" in l]
+    allowed = os.path.abspath(t.hip or os.path.join(t.work, "no-hip", "amdhip64_7.dll")).lower()
+    t.check("HIP check: only the --hip mock (a default run: a file in the work folder that is not there) is tried; never a system, "
+            "PATH or ROCm runtime, nor an inherited WRONGGPU_HIP_RUNTIME or candidate list",
+            env.get("WRONGGPU_HIP_RUNTIME") == t.hip and len(tried) == 1 and os.path.abspath(tried[0]).lower() == allowed and
+            conflict.lower() not in " ".join(tried).lower(), (tried, allowed, t.j))
+    # --work: a junction (to another folder) is refused before the isolation self-test writes or removes anything in it
+    target, jroot = os.path.join(d, "work-target"), os.path.join(d, "work-junction")
+    write(os.path.join(target, "library-access.log"), b"keep")
+    jlinked = subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", jroot, target], stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode == 0
+    suite = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run_launcher_tests.py")
+    p = subprocess.run([sys.executable, suite, "--launcher", t.exe, "--work", jroot], env=dict(os.environ),
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
+    t.check("--work: a junction is refused before the isolation self-test or any create or delete in it (its target untouched)",
+            jlinked and p.returncode != 0 and b"junction or link" in p.stderr + p.stdout and sorted(os.listdir(target)) == ["library-access.log"] and
+            read(os.path.join(target, "library-access.log")) == b"keep", (jlinked, p.returncode, (p.stderr + p.stdout)[-300:], os.listdir(target)))
+    if os.path.lexists(jroot):
+        os.rmdir(jroot)  # (the junction only)
     # the temporary folder: a junction in its place is refused (fresh_temp), never followed
     jw = os.path.join(d, "junction-work")
     os.makedirs(os.path.join(d, "elsewhere"))
