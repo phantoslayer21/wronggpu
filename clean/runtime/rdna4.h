@@ -32,6 +32,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <string>
 #include <vector>
@@ -50,6 +51,20 @@ inline bool rdna4_device_id(uint32_t device) {
 inline constexpr bool kDevGfx11 = true;
 #else
 inline constexpr bool kDevGfx11 = false;
+#endif
+
+// The second developer-only choice inside the opening, the SHORTCUT: the board runs the UNCHANGED gfx12 kernel set (dx12) and
+// the gfx12 accumulator table, the FP8 matrix operations being emulated by dxil-spirv (the process runs with
+// DXIL_SPIRV_CONFIG=wmma_rdna3_raw_fp8 in a patched vkd3d-proton). Chosen by the environment variable
+// WG_DEV_GFX11_SHORTCUT=1, which is read only in a build made with WG_DEV_GFX11 (without the macro this function is
+// constant false and the library never asks the environment). A mechanism for the maintainer to replace.
+#ifdef WG_DEV_GFX11
+inline bool dev_gfx11_shortcut() {
+  const char* v = std::getenv("WG_DEV_GFX11_SHORTCUT");
+  return v && v[0] == '1' && v[1] == 0;
+}
+#else
+inline bool dev_gfx11_shortcut() { return false; }
 #endif
 
 // RDNA 3 PCI device id the opening takes: Navi 31 (1002:744C, which the RX 7900 XT, XTX and GRE share; gfx1100), the id

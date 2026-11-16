@@ -208,6 +208,8 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
       if (!borrow_device(borrowed_device, borrowed_queue)) return false;
     } else if (!create_device()) return false;
     if (wgrt::kDevGfx11 && !read_manifest(build + "/" + wgrt::dx12_folder(arch()) + "/manifest.json")) return false;
+    // shortcut mode: the gfx12 set above, plus the one tiny kernel of the rounding check, which only the gfx11 build makes
+    if (shortcut_ && !read_manifest(build + "/dx12-gfx11/manifest.json", "native_round_probe")) return false;
     // ports needing binary64 fma / division (model K's exact input stage) are dropped on an adapter without them: the
     // kernel then has no port and a context that needs it is refused (no silent fallback). D3D12 folds the D3D11.1
     // extended doubles (DFMA / DDIV / DRCP) into DoublePrecisionFloatShaderOps (d3d12.h has no separate field)
@@ -222,7 +224,7 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     }
     if (!create_objects()) return false;
     if (!profile_init()) return false;
-    return reserve_events(64) && (!borrowed_ || driver_probe()) && gelu_lut_upload() && gelu_t5_upload();
+    return reserve_events(64) && (!borrowed_ || driver_probe()) && (!shortcut_ || rounding_probe()) && gelu_lut_upload() && gelu_t5_upload();
   }
 
   // The hybrid block form's tables (hlsl/wg_hyb.hlsli, hyb_tables.h) at their fixed arena range right after the GELU
@@ -522,7 +524,8 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
   std::string note() const override {
     return "native D3D12: arena " + std::to_string(arena_bytes_ >> 20) +
            " MiB; no HIP runtime or fallback; timestamp frequency " + std::to_string(timestamp_frequency_) + " Hz" +
-           (borrowed_ ? (gfx11_ ? "; borrowed device/queue; FP16 driver-channel probe passed (gfx11, developer build)"
+           (borrowed_ ? (shortcut_ ? "; borrowed device/queue; driver-channel probe passed within tolerance (gfx11 shortcut, developer build)"
+                    : gfx11_ ? "; borrowed device/queue; FP16 driver-channel probe passed (gfx11, developer build)"
                               : "; borrowed device/queue; exact FP16/FP8 driver-channel probe passed")
                      : "");
   }
@@ -1403,7 +1406,7 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
                                                   __uuidof(ID3D12Resource), result.pv()), "CreateCommittedResource");
   }
 
-  bool read_manifest(const std::string& path) {
+  bool read_manifest(const std::string& path, const char* only = nullptr) {   // only: keep just the kernel of that name
     // The file on disk, else the copy built into the library under the same name (clean/runner/build.py).
     std::vector<char> bytes;
     if (!wg_read_file(path, &bytes)) return fail("native D3D12 manifest missing: " + path);
@@ -1430,6 +1433,7 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
           !string_field("args", arguments) || !string_field("sha256", hash) || !number_field("block", k.block) ||
           !number_field("wave", k.wave) || !number_field("arg_dwords", k.dwords))
         return fail("native D3D12 manifest: incomplete or wrongly typed kernel entry");
+      if (only && k.name != only) continue;
       if (const auto* gp = entry.find("group")) {
         int64_t gn = 0;
         if (!gp->as_int64(gn) || gn <= 0 || gn > (int64_t)k.block || k.block % (unsigned)gn || (unsigned)gn % k.wave)
@@ -1540,7 +1544,8 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     const bool gfx11_card = wgrt::dev_gfx11_identity(identity);  // WG_DEV_GFX11 only (rdna4.h); false in every normal build
     if (!wgrt::rdna4_identity(identity) && !gfx11_card)
       return fail("native D3D12 borrowed device requires the supported Radeon RX 9070/9060 adapter");
-    gfx11_ = gfx11_card;
+    gfx11_ = gfx11_card && !wgrt::dev_gfx11_shortcut();
+    shortcut_ = gfx11_card && wgrt::dev_gfx11_shortcut();
     D3D12_FEATURE_DATA_SHADER_MODEL sm{D3D_SHADER_MODEL_6_6};
     if (!check(device_->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &sm, sizeof sm), "CheckFeatureSupport(shader model)") ||
         sm.HighestShaderModel < D3D_SHADER_MODEL_6_6) return fail("native D3D12 requires shader model 6.6");
@@ -1560,29 +1565,63 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
   bool driver_probe() {
     // RDNA 4: the FP16 and FP8 probe, exact. RDNA 3 (WG_DEV_GFX11): the FP16-only probe (no FP8 matrix instruction exists
     // there), compared within wmma_probe::gfx11::kTolerance (the card's accumulation differs from the exact sum in the last bit).
-    const char* const probe_name = gfx11_ ? "native_driver_probe_f16" : "native_driver_probe";
+    const bool f16_probe = gfx11_;   // shortcut mode: the gfx12 probe (FP16 and emulated FP8), within a tolerance
+    const char* const probe_name = f16_probe ? "native_driver_probe_f16" : "native_driver_probe";
     auto probe = kernels_.find(probe_name);
     if (probe == kernels_.end() || probe->second.co != "-" || probe->second.rs != "buffer" ||
         probe->second.block != 32 || probe->second.wave != 32 || probe->second.dwords != 1 ||
         probe->second.args.size() != 1 || probe->second.args[0].kind != 'p')
       return fail(std::string("native D3D12 borrowed device requires ") + probe_name + " (co=-, buffer, block/wave=32, args=p)");
     // Operands with distinct values per lane and element, expected results computed on the CPU (wmma_probe.h).
-    const size_t bytes = gfx11_ ? wmma_probe::gfx11::kBytes : wmma_probe::kBytes;
+    const size_t bytes = f16_probe ? wmma_probe::gfx11::kBytes : wmma_probe::kBytes;
     DevPtr output = 0;
     if (!alloc(&output, bytes)) return false;
     uint8_t buffer[wmma_probe::kBytes > wmma_probe::gfx11::kBytes ? wmma_probe::kBytes : wmma_probe::gfx11::kBytes];
-    if (gfx11_) wmma_probe::gfx11::fill(buffer); else wmma_probe::fill(buffer);
+    if (f16_probe) wmma_probe::gfx11::fill(buffer); else wmma_probe::fill(buffer);
     float values[wmma_probe::kResults > wmma_probe::gfx11::kResults ? wmma_probe::kResults : wmma_probe::gfx11::kResults] = {};
     void* args[] = {&output};
     bool ok = upload(output, buffer, bytes) && launch(probe_name, 1, 32, args) &&
-              download(values, output, (gfx11_ ? wmma_probe::gfx11::kResults : wmma_probe::kResults) * sizeof(float));
+              download(values, output, (f16_probe ? wmma_probe::gfx11::kResults : wmma_probe::kResults) * sizeof(float));
     // tests of the fallback (interop test, WG_TEST_DRIVER_PROBE_FAIL=1): the probe reports a mismatch
     const char* fail_test = std::getenv("WG_TEST_DRIVER_PROBE_FAIL");
     if (ok && fail_test && fail_test[0] == '1') values[7] = -1.0f;
-    const int bad = ok ? (gfx11_ ? wmma_probe::gfx11::first_mismatch(values) : wmma_probe::first_mismatch(values)) : -1;
+    const int bad = !ok ? -1 : f16_probe ? wmma_probe::gfx11::first_mismatch(values)
+                    : shortcut_ ? wmma_probe::first_mismatch_within(values, wmma_probe::gfx11::kTolerance)
+                    : wmma_probe::first_mismatch(values);
     if (bad >= 0) ok = fail("native D3D12 borrowed driver-channel probe mismatch at float " + std::to_string(bad));
     const std::string error = err_;
     free(output);
+    if (!ok) err_ = error;
+    return ok;
+  }
+  // Shortcut mode (rdna4.h): the emulation is correct only while the driver's compiler keeps the F32 -> F16 -> F32 pair the
+  // kernels use to round (wmma_probe.h, round16). Runs at create for every shortcut device; refuses with a log line if the pair
+  // does not round.
+  bool rounding_probe() {
+    auto probe = kernels_.find("native_round_probe");
+    if (probe == kernels_.end() || probe->second.co != "-" || probe->second.rs != "buffer" || probe->second.block != 32 ||
+        probe->second.wave != 32 || probe->second.dwords != 1 || probe->second.args.size() != 1 || probe->second.args[0].kind != 'p')
+      return fail("native D3D12 shortcut requires native_round_probe (co=-, buffer, block/wave=32, args=p)");
+    DevPtr buffer = 0;
+    if (!alloc(&buffer, wmma_probe::round16::kBytes)) return false;
+    uint8_t input[wmma_probe::round16::kBytes];
+    wmma_probe::round16::fill(input);
+    float values[wmma_probe::round16::kResults] = {};
+    void* args[] = {&buffer};
+    bool ok = upload(buffer, input, sizeof input) && launch("native_round_probe", 1, 32, args) &&
+              download(values, buffer, sizeof values);
+    // tests of the refusal (WG_TEST_ROUNDING_FAIL=1): the results are the unrounded inputs, as when the pair is folded away
+    const char* fail_test = std::getenv("WG_TEST_ROUNDING_FAIL");
+    if (ok && fail_test && fail_test[0] == '1')
+      for (unsigned i = 0; i < wmma_probe::round16::kResults; ++i) values[i] = wmma_probe::round16::input(i);
+    const int bad = ok ? wmma_probe::round16::first_mismatch(values) : -1;
+    if (bad >= 0) {
+      ok = fail("native D3D12 shortcut refused: the driver does not round F32 -> F16 -> F32 (float " + std::to_string(bad) +
+                " came back unrounded: the conversion pair was folded away; the FP8 emulation would give wrong features)");
+      log(true, err_);
+    }
+    const std::string error = err_;
+    free(buffer);
     if (!ok) err_ = error;
     return ok;
   }
@@ -1619,7 +1658,8 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
       const wgrt::AdapterIdentity identity = wgrt::read_adapter_identity(description.AdapterLuid);
       const bool gfx11_card = wgrt::dev_gfx11_identity(identity);  // WG_DEV_GFX11 only (rdna4.h)
       if (wgrt::rdna4_identity(identity) || gfx11_card) {
-        selected = std::move(adapter); adapter_name_ = name; adapter_luid_ = description.AdapterLuid; gfx11_ = gfx11_card; break;
+        selected = std::move(adapter); adapter_name_ = name; adapter_luid_ = description.AdapterLuid; gfx11_ = gfx11_card && !wgrt::dev_gfx11_shortcut();
+        shortcut_ = gfx11_card && wgrt::dev_gfx11_shortcut(); break;
       }
     }
     if (!selected) return fail("native D3D12: no supported Radeon RX 9070/9060 adapter");
@@ -1890,7 +1930,10 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
   HANDLE event_ = nullptr;
   LUID adapter_luid_{};
   std::string adapter_name_;
-  bool gfx11_ = false;  // the adapter is a board of the WG_DEV_GFX11 opening (rdna4.h); never true in a normal build
+  bool gfx11_ = false;  // the adapter is a board of the WG_DEV_GFX11 opening (rdna4.h) that runs the gfx11 kernel set; never true in a normal build
+  // The board of the opening runs the UNCHANGED gfx12 kernels, layouts and no target (as on RDNA 4) through dxil-spirv's FP8
+  // emulation (WG_DEV_GFX11_SHORTCUT=1, rdna4.h); then gfx11_ is false. Never true in a normal build.
+  bool shortcut_ = false;
   std::string debug_failure_;
   std::ofstream profile_output_;
   std::string profile_session_, profile_failure_;

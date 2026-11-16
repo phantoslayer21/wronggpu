@@ -188,5 +188,67 @@ inline int first_mismatch(const float* results) {
 }
 }  // namespace gfx11
 
+// The same probe on an RDNA 3 board that runs the UNCHANGED gfx12 kernels through the emulation of the matrix FP8 operations
+// in dxil-spirv (the developer-only shortcut mode of WG_DEV_GFX11, device_d3d12.cpp). The emulation keeps gfx12's fragment
+// layouts (so fill() and the expected numbers above stand), but it multiplies in the FP16 instruction, whose accumulation
+// is not exact on gfx1100 (see gfx11::kTolerance), so the results are compared within the same tolerance.
+inline int first_mismatch_within(const float* results, float tolerance) {
+  for (unsigned i = 0; i < kResults; ++i) {
+    const float d = results[i] - expected(i);
+    if (!(d <= tolerance && d >= -tolerance)) return static_cast<int>(i);   // a NaN fails too
+  }
+  return -1;
+}
+
+// Correctness of the shortcut depends on the F32 -> F16 -> F32 pair that the encoder (and other kernels) write on purpose
+// to round to FP16: the driver's compiler may fold such a pair into nothing (found with RADV, SHORTCUT-PROBE), and the
+// features then differ by one FP8 step. native_round_probe (clean/dx12/kernels/native_game_helpers.hlsl) runs the pair
+// on 256 values at create; every input has nonzero bits below FP16's precision, so a folded pair returns the input and
+// differs from every expected result. Buffer: the results (floats, element i of lane l = float 32 i + l) at byte 0, the
+// inputs at kIn.
+namespace round16 {
+constexpr uint32_t kIn = 1024, kBytes = 2048;
+constexpr unsigned kResults = 256;
+
+inline float input(unsigned i) {
+  // exponent -14..14 (FP16 normal range with room to round up), 13 low bits 1..8190 (never 0, so rounding always moves the value),
+  // alternating sign; every 16th value is an exact tie (low bits 4096), with an odd kept mantissa (rounds up) when i % 16 == 5 and
+  // an even one (stays) when i % 16 == 8, since the kept bits' lowest bit is the parity of i
+  uint32_t low = 1u + (i * 37u) % 8190u;
+  if (i % 16 == 5 || i % 16 == 8) low = 4096u;
+  const uint32_t exponent = 127u - 14u + (i * 7u) % 29u, high = (i * 389u) & 0x3ffu;
+  const uint32_t bits = ((i & 1u) << 31) | (exponent << 23) | (high << 13) | low;
+  float f;
+  std::memcpy(&f, &bits, 4);
+  return f;
+}
+// (float)(_Float16) x, round to nearest even, for the normal range input() uses
+inline float rounded(float x) {
+  uint32_t bits;
+  std::memcpy(&bits, &x, 4);
+  const uint32_t low = bits & 0x1fffu;
+  uint32_t kept = bits & ~0x1fffu;
+  if (low > 0x1000u || (low == 0x1000u && (bits & 0x2000u))) kept += 0x2000u;   // a carry into the exponent is the right result
+  float f;
+  std::memcpy(&f, &kept, 4);
+  return f;
+}
+inline void fill(uint8_t* buffer) {
+  std::memset(buffer, 0, kBytes);
+  for (unsigned i = 0; i < kResults; ++i) {
+    const float f = input(i);
+    std::memcpy(buffer + kIn + 4 * i, &f, 4);
+  }
+}
+// First result whose bits differ from the correctly rounded input, or -1.
+inline int first_mismatch(const float* results) {
+  for (unsigned i = 0; i < kResults; ++i) {
+    const float e = rounded(input(i));
+    if (std::memcmp(&results[i], &e, 4) != 0) return static_cast<int>(i);
+  }
+  return -1;
+}
+}  // namespace round16
+
 }  // namespace wmma_probe
 }  // namespace wgrt

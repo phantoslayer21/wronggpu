@@ -4,6 +4,7 @@
 // spec 07/10 and the existing strict build arithmetic contract. No alternate I/O path.
 // @wg-kernel native_driver_probe co=- block=32 wave=32 args=p defines=NATIVE_DRIVER_PROBE=1
 // @wg-kernel native_driver_probe_f16 co=- block=32 wave=32 args=p defines=NATIVE_DRIVER_PROBE_F16=1 gfx=11
+// @wg-kernel native_round_probe co=- block=32 wave=32 args=p defines=NATIVE_ROUND_PROBE=1 gfx=11
 // @wg-kernel exposure_pair_diet co=exposure.co block=32 wave=32 args=p,p,u,u,u,u defines=NATIVE_EXPOSURE_PAIR=1
 // @wg-kernel exposure_pair_diet_direct co=exposure.co entry=exposure_pair_diet block=32 wave=32 args=p,p,u,u,u,u rs=direct defines=NATIVE_EXPOSURE_PAIR=1,WG_DIRECT_TEXTURES=1
 #include "wg_platform.hlsli"
@@ -49,6 +50,23 @@ WG_KERNEL(native_driver_probe_f16) {
   [unroll] for(uint i=0;i<8u;++i) c.v[i]=wg_ldf(dst,2048u+(i*32u+lane)*4u);
   v8f h=wg_wmma_f16_k16(a0,b0,a1,b1,c);
   [unroll] for(uint k=0;k<8u;++k) wg_stf(dst,(k*32u+lane)*4u,h.v[k]);
+}
+#endif
+#if defined(NATIVE_ROUND_PROBE)
+WG_ARGS_BEGIN
+  uint dst;
+WG_ARGS_END
+// Developer-only shortcut check (WG_DEV_GFX11, runtime/wmma_probe.h namespace round16): the F32 -> F16 -> F32 pair of the
+// driver's matrix conversion, exactly as the encoder's round_f16 writes it. A compiler that folds the pair away returns
+// the input unchanged. Float 32 i + lane of the buffer at byte 1024 is element i of lane `lane`; the results go to byte 0.
+WG_KERNEL(native_round_probe) {
+  WG_SETUP();
+  uint lane=wg_lane_id();
+  v8f a;
+  [unroll] for(uint i=0;i<8u;++i) a.v[i]=wg_ldf(dst,1024u+(i*32u+lane)*4u);
+  wg_frag hf=wg_ags_convert(wg_frag_v8f(a),WG_AGS_T_F32_ACC,WG_AGS_T_F16_ACC);
+  wg_frag bf=wg_ags_convert(hf,WG_AGS_T_F16_ACC,WG_AGS_T_F32_ACC);
+  [unroll] for(uint k=0;k<8u;++k) wg_stf(dst,(k*32u+lane)*4u,asfloat(bf.v[k]));
 }
 #endif
 #if defined(NATIVE_EXPOSURE_PAIR)
