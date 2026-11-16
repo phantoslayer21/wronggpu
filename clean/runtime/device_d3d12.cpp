@@ -210,6 +210,20 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     if (wgrt::kDevGfx11 && !read_manifest(build + "/" + wgrt::dx12_folder(arch()) + "/manifest.json")) return false;
     // shortcut mode: the gfx12 set above, plus the one tiny kernel of the rounding check, which only the gfx11 build makes
     if (shortcut_ && !read_manifest(build + "/dx12-gfx11/manifest.json", "native_round_probe")) return false;
+#ifdef WG_DEV_GFX11
+    // native K (rdna4.h): the shortcut's gfx12 set plus the __g11 kernels of the gfx11 set, which launch() prefers by name
+    if (wgrt::dev_gfx11_native_k()) {
+      if (!shortcut_) return fail("WG_DEV_GFX11_NATIVE_K=1 needs WG_DEV_GFX11_SHORTCUT=1 on an RX 7900 series board (its base)");
+      native_k_ = true;
+      g11_only_ = true;
+      const bool read = read_manifest(build + "/dx12-gfx11/manifest.json");
+      g11_only_ = false;
+      if (!read) return false;
+      unsigned n = 0;
+      for (const auto& e : kernels_) n += wgrt::dev_gfx11_native_name_taken(e.first);
+      log(true, "native D3D12: native K on, " + std::to_string(n) + " __g11 kernels loaded (the rest run as gfx12 kernels through the shortcut)");
+    }
+#endif
     // ports needing binary64 fma / division (model K's exact input stage) are dropped on an adapter without them: the
     // kernel then has no port and a context that needs it is refused (no silent fallback). D3D12 folds the D3D11.1
     // extended doubles (DFMA / DDIV / DRCP) into DoublePrecisionFloatShaderOps (d3d12.h has no separate field)
@@ -761,12 +775,23 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
   // The port of `name` that the loaded code objects select. One name can have ports of several builds of its HIP kernel
   // (manifest entries with the same name and different "co", for example post_w64.co and post_w64__orig.co); without
   // a selected one, the first port (variant_loaded then names what it requires).
-  NativeKernel* find_port(const std::string& name) {
+  NativeKernel* find_port(const std::string& requested) {
+#ifdef WG_DEV_GFX11
+    const std::string name = native_kernel_name(requested);
+#else
+    const std::string& name = requested;
+#endif
     auto range = kernels_.equal_range(name);
     for (auto i = range.first; i != range.second; ++i)
       if (variant_matches(i->second)) return &i->second;
     return range.first == range.second ? nullptr : &range.first->second;
   }
+#ifdef WG_DEV_GFX11
+  // WG_DEV_GFX11_NATIVE_K (rdna4.h): the kernel that runs for a requested name, its __g11 form when the manifest has it
+  std::string native_kernel_name(const std::string& name) const {
+    return wgrt::dev_gfx11_native_kernel(native_k_, name, [&](const std::string& n) { return kernels_.count(n) != 0; });
+  }
+#endif
   bool prepare(const std::string& name) override {
     NativeKernel* port = find_port(name);
     if (!port) return fail("native D3D12 unsupported kernel: " + name + "; no HIP fallback");
@@ -798,7 +823,12 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     unordered_next_ = false;
     uav_barrier();
     cl()->SetPipelineState(k.pso.get()); constants[1] = static_cast<uint32_t>(groups);
-    const auto stamp = profile_begin(name == "native_fill" ? "fill" : "dispatch", name.c_str());
+#ifdef WG_DEV_GFX11
+    const std::string& ran = k.name;   // WG_DEV_GFX11_NATIVE_K: the profile and the trace name the kernel that ran
+#else
+    const std::string& ran = name;
+#endif
+    const auto stamp = profile_begin(name == "native_fill" ? "fill" : "dispatch", ran.c_str());
     for (uint64_t base = 0; base < groups; base += kNativeGroups) {
       constants[0] = static_cast<uint32_t>(base);
       cl()->SetComputeRoot32BitConstants(2, kNativeConstants + k.dwords, constants, 0);
@@ -806,7 +836,7 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     }
     profile_end(stamp);
     need_uav_barrier_ = true;
-    trace_launch(name, grid, block, "d3d12");
+    trace_launch(ran, grid, block, "d3d12");
     ++dispatches_;
     return !batch_ || external_ || dispatches_ < batch_ || submit();
   }
@@ -1434,6 +1464,9 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
           !number_field("wave", k.wave) || !number_field("arg_dwords", k.dwords))
         return fail("native D3D12 manifest: incomplete or wrongly typed kernel entry");
       if (only && k.name != only) continue;
+#ifdef WG_DEV_GFX11
+      if (g11_only_ && !wgrt::dev_gfx11_native_name_taken(k.name)) continue;   // WG_DEV_GFX11_NATIVE_K: just the kernels named *__g11
+#endif
       if (const auto* gp = entry.find("group")) {
         int64_t gn = 0;
         if (!gp->as_int64(gn) || gn <= 0 || gn > (int64_t)k.block || k.block % (unsigned)gn || (unsigned)gn % k.wave)
@@ -1934,6 +1967,10 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
   // The board of the opening runs the UNCHANGED gfx12 kernels, layouts and no target (as on RDNA 4) through dxil-spirv's FP8
   // emulation (WG_DEV_GFX11_SHORTCUT=1, rdna4.h); then gfx11_ is false. Never true in a normal build.
   bool shortcut_ = false;
+#ifdef WG_DEV_GFX11
+  bool native_k_ = false;   // WG_DEV_GFX11_NATIVE_K=1 on top of the shortcut (rdna4.h): launch the __g11 kernels the manifest has
+  bool g11_only_ = false;   // read_manifest keeps just the kernels named *__g11
+#endif
   std::string debug_failure_;
   std::ofstream profile_output_;
   std::string profile_session_, profile_failure_;

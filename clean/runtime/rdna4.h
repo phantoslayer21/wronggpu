@@ -67,6 +67,33 @@ inline bool dev_gfx11_shortcut() {
 inline bool dev_gfx11_shortcut() { return false; }
 #endif
 
+// The third developer-only choice, NATIVE K on top of the shortcut: the board runs the shortcut (above) and, for Model K,
+// launches the native RDNA 3 kernel <name>__g11 of the dx12-gfx11 set wherever that manifest has it (K-NATIVE-1.md 5.1 (a));
+// every other kernel still runs as its gfx12 port through the shortcut. Chosen by WG_DEV_GFX11_NATIVE_K=1 together with
+// WG_DEV_GFX11_SHORTCUT=1 (its base; the device refuses the one without the other), read only in a build made with
+// WG_DEV_GFX11. One build times both: the same run without WG_DEV_GFX11_NATIVE_K is the shortcut.
+#ifdef WG_DEV_GFX11
+inline bool dev_gfx11_native_k() {
+  const char* v = std::getenv("WG_DEV_GFX11_NATIVE_K");
+  return v && v[0] == '1' && v[1] == 0;
+}
+inline bool dev_gfx11_native_name_taken(const std::string& name) {  // a native kernel's own name is never looked up again
+  return name.size() > 5 && name.compare(name.size() - 5, 5, "__g11") == 0;
+}
+// The kernel that runs for `name`: `name__g11` when `native` is on and the manifest has it (`has` answers for a name),
+// else `name`.
+template <class Has>
+inline std::string dev_gfx11_native_kernel(bool native, const std::string& name, Has has) {
+  if (!native || dev_gfx11_native_name_taken(name)) return name;
+  const std::string g11 = name + "__g11";
+  return has(g11) ? g11 : name;
+}
+#else
+inline bool dev_gfx11_native_k() { return false; }
+template <class Has>
+inline std::string dev_gfx11_native_kernel(bool, const std::string& name, Has) { return name; }
+#endif
+
 // RDNA 3 PCI device id the opening takes: Navi 31 (1002:744C, which the RX 7900 XT, XTX and GRE share; gfx1100), the id
 // read on the development card. No other RDNA 3 id: gfx1101 and later boards were never measured here.
 inline bool gfx11_device_id(uint32_t device) { return device == 0x744C; }
