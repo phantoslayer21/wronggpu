@@ -101,6 +101,11 @@ static std::wstring Q(const std::wstring& s) {
     while (tail < s.size() && s[s.size() - 1 - tail] == L'\\') ++tail;
     return L"\"" + s + std::wstring(tail, L'\\') + L"\"";
 }
+// A setting's value, or "(none)" when the key is missing (a failed write or read fails the check, never crashes the test).
+static std::string Val(const Settings& s, const char* key) {
+    const std::string* v = Get(s, key);
+    return v ? *v : std::string("(none)");
+}
 static unsigned long Counter(const std::wstring& game) {
     const Settings s = ReadSettings(game);
     const std::string* v = Get(s, "counter");
@@ -117,16 +122,24 @@ static int Child(int argc, wchar_t** argv) {
     const std::wstring mode = argv[1], game = argv[2];
     if (mode == L"--child-add" && argc >= 4) {  // n locked read-modify-write increments of one counter
         const int n = _wtoi(argv[3]);
+        const std::wstring diag = argc >= 5 ? argv[4] : L"";  // why it stopped, for the parent's failure line
+        auto stop = [&](int code, const std::string& why) {
+            if (!diag.empty()) WriteText(diag, why);
+            return code;
+        };
         for (int i = 0; i < n; ++i) {
             StateLock lock(game, 30000);
-            if (!lock.held()) return 3;
+            if (!lock.held()) return stop(3, "lock not held at increment " + std::to_string(i) + " (error " + std::to_string(lock.error()) + ")");
             const Settings s = ReadSettings(game);  // re-read after the lock is taken
+            if (!s.why.empty()) return stop(5, "settings.ini " + s.why + " at increment " + std::to_string(i));  // never count from 0
             const std::string* v = Get(s, "counter");
-            const unsigned long c = v ? std::strtoul(v->c_str(), nullptr, 10) : 0;
+            if (!v) return stop(6, "no counter in settings.ini at increment " + std::to_string(i));
+            const unsigned long c = std::strtoul(v->c_str(), nullptr, 10);
             Settings w = s;
             Set(w, "counter", std::to_string(c + 1));
             Sleep(0);  // widen the window a lost update would need
-            if (!WriteAtomic(SettingsPathOf(game), RenderSettings(w)).ok) return 4;
+            const WriteResult r = WriteAtomic(SettingsPathOf(game), RenderSettings(w));
+            if (!r.ok) return stop(4, "write " + r.words() + " at increment " + std::to_string(i) + " (counter was " + std::to_string(c) + ")");
         }
         return 0;
     }
@@ -208,7 +221,7 @@ int wmain(int argc, wchar_t** argv) {
     // ---- the format: tolerant, everything kept; corrupt only for text that cannot be kept
     {
         Settings s = ParseSettings("; comment\r\n\r\nrr_mode=fast\r\nrr_enabled=1\n");
-        check(s.present && !s.corrupt && s.kv.size() == 2 && *Get(s, "rr_mode") == "fast" && *Get(s, "rr_enabled") == "1", "parse: comments, blank lines, CRLF and LF");
+        check(s.present && !s.corrupt && s.kv.size() == 2 && Val(s, "rr_mode") == "fast" && Val(s, "rr_enabled") == "1", "parse: comments, blank lines, CRLF and LF");
         struct { const char* text; const char* key; const char* value; } kept[] = {
             {"rr_mode = fast\r\n", "rr_mode", "fast"}, {"[wronggpu]\r\nrr_mode=fast\r\n", "rr_mode", "fast"},
             {"RR_MODE=fast\r\n", nullptr, nullptr}, {"rr_mode=fast\r\nrr_mode=accurate\r\n", "rr_mode", "fast"},
@@ -263,7 +276,7 @@ int wmain(int argc, wchar_t** argv) {
         WriteText(JoinPath(state, L"install.record"), std::string("WRONGGPU-RECORD 2\r\nversion\t0.6.5\r\ninstall-id\t") + kId + "\r\n");
         check(InstallIdOf(game) == kId, "InstallIdOf: the record's install-id line");
         const std::wstring f = SettingsPathOf(game);
-        check(SetSettings(game, {{"rr_mode", "fast"}}).ok() && *Get(ReadSettings(game), "rr_mode") == "fast", "SetSettings writes the file");
+        check(SetSettings(game, {{"rr_mode", "fast"}}).ok() && Val(ReadSettings(game), "rr_mode") == "fast", "SetSettings writes the file");
         const std::string before = ReadText(f);
         WriteResult w = WriteAtomic(f, std::string(kMaxStateBytes + 1, 'x'));
         check(!w.ok && w.error == ERROR_FILE_TOO_LARGE && ReadText(f) == before, "over kMaxStateBytes: refused, the file unchanged");
@@ -302,7 +315,7 @@ int wmain(int argc, wchar_t** argv) {
         WriteText(f, ReadText(f) + "player_key = 7\r\n; the player's note \xc3\xa4\r\n; wronggpu-written a player's line\r\n");
         SetOutcome o = SetSettings(game, {{"rr_mode", "accurate"}});
         std::string t = ReadText(f);
-        check(o.ok() && o.written && *Get(ReadSettings(game), "rr_mode") == "accurate" && t.find("player_key = 7\r\n") != std::string::npos &&
+        check(o.ok() && o.written && Val(ReadSettings(game), "rr_mode") == "accurate" && t.find("player_key = 7\r\n") != std::string::npos &&
                   t.find("; the player's note \xc3\xa4\r\n; wronggpu-written a player's line\r\n") != std::string::npos && !StampedByWrongGPU(t, "settings.ini", kId),
               "a file the player edited: the menu's save keeps the player's key and note as they are and writes no stamp (the player's file now)");
         WriteText(f, "\xEF\xBB\xBF# made by the player\r\nRR Mode = Fast\r\n");
@@ -405,7 +418,7 @@ int wmain(int argc, wchar_t** argv) {
         }
         std::wstring dn;
         CreateDirectoryW(ExtendedPath(StateDirOf(deep)).c_str(), nullptr);
-        check(LockNameFor(deep, &dn) && Narrow(dn) != names[0] && SetSettings(deep, {{"k", "v"}}).ok() && *Get(ReadSettings(deep), "k") == "v",
+        check(LockNameFor(deep, &dn) && Narrow(dn) != names[0] && SetSettings(deep, {{"k", "v"}}).ok() && Val(ReadSettings(deep), "k") == "v",
               "a game folder deeper than MAX_PATH: lock name, write and read work");
         const std::wstring dout = JoinPath(root, L"name-deep");
         HANDLE k = Spawn(L"--child-lockname " + Q(deep) + L" " + Q(dout));
@@ -425,10 +438,28 @@ int wmain(int argc, wchar_t** argv) {
     {
         WriteText(SettingsPathOf(game), "counter=0\r\n");
         std::vector<HANDLE> kids;
-        for (int i = 0; i < 4; ++i) kids.push_back(Spawn(L"--child-add " + Q(aliases[(i * 2 + 1) % aliases.size()]) + L" 50"));
+        std::vector<std::wstring> diags;
+        for (int i = 0; i < 4; ++i) {
+            diags.push_back(JoinPath(root, L"add-diag-" + std::to_wstring(i)));
+            DeleteFileW(diags.back().c_str());
+            kids.push_back(Spawn(L"--child-add " + Q(aliases[(i * 2 + 1) % aliases.size()]) + L" 50 " + Q(diags.back())));
+        }
         bool ok = true;
-        for (HANDLE k : kids) ok = k && WaitExit(k, 120000) == 0 && ok;
-        check(ok && Counter(game) == 200, "4 processes, 4 different aliases, 50 locked increments each: 200 (one lock for all spellings)");
+        std::vector<DWORD> codes;
+        for (HANDLE k : kids) {
+            codes.push_back(k ? WaitExit(k, 120000) : 998);  // 998: not started, 999: no exit in time
+            ok = codes.back() == 0 && ok;
+        }
+        const unsigned long count = Counter(game);
+        if (!ok || count != 200) {  // which way it failed: a child that stopped (and why), or increments lost
+            std::printf("  (count %lu; exit codes", count);
+            for (DWORD c : codes) std::printf(" %lu", static_cast<unsigned long>(c));
+            std::printf(")\n");
+            for (size_t i = 0; i < diags.size(); ++i)
+                if (Exists(diags[i])) std::printf("  (child %zu, alias %s: %s)\n", i, Narrow(aliases[(i * 2 + 1) % aliases.size()]).c_str(), ReadText(diags[i]).c_str());
+        }
+        for (auto& d : diags) DeleteFileW(d.c_str());
+        check(ok && count == 200, "4 processes, 4 different aliases, 50 locked increments each: 200 (one lock for all spellings)");
         check(List(state).size() == 1, "no temporary file stays after concurrent writes");
     }
 
@@ -450,7 +481,7 @@ int wmain(int argc, wchar_t** argv) {
         CreateDirectoryW(state.c_str(), nullptr);
         DeleteFileW(SettingsPathOf(game).c_str());
         check(SetSettings(game, {{"rr_mode", "fast"}}).ok(), "(interleaving: the file starts with fast)");
-        const std::string staleRead = *Get(ReadSettings(game), "rr_mode");  // a decision would rest on this read: "fast"
+        const std::string staleRead = Val(ReadSettings(game), "rr_mode");  // a decision would rest on this read: "fast"
         HANDLE held = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         std::thread menu([&] {  // the game's menu: takes the lock, saves accurate a moment later, lets go
             StateLock lock(game, 2000);
@@ -463,13 +494,13 @@ int wmain(int argc, wchar_t** argv) {
         WaitForSingleObject(held, 5000);
         std::string seen;
         const SetOutcome o = UpdateSettings(game, [&](const Settings& now, std::vector<std::pair<std::string, std::string>>* out) {
-            seen = Get(now, "rr_mode") ? *Get(now, "rr_mode") : "";
+            seen = Get(now, "rr_mode") ? Val(now, "rr_mode") : "";
             if (seen.empty()) out->push_back({"rr_mode", staleRead});  // only when there is none: a saved mode stays
             out->push_back({"rr_exact_allowed", seen == "exact" ? "1" : "0"});
         }, 5000);
         menu.join();
         CloseHandle(held);
-        check(staleRead == "fast" && o.ok() && seen == "accurate" && *Get(ReadSettings(game), "rr_mode") == "accurate" && StampedByWrongGPU(ReadText(SettingsPathOf(game)), "settings.ini", kId),
+        check(staleRead == "fast" && o.ok() && seen == "accurate" && Val(ReadSettings(game), "rr_mode") == "accurate" && StampedByWrongGPU(ReadText(SettingsPathOf(game)), "settings.ini", kId),
               "UpdateSettings: decide() sees the mode another thread saved while this one waited for the lock (accurate), not the older read "
               "(fast); the newer mode stays");
         const std::string before = ReadText(SettingsPathOf(game));
@@ -500,7 +531,7 @@ int wmain(int argc, wchar_t** argv) {
         };
         SetOutcome o = SetSettings(game, {{"rr_mode", "accurate"}});
         TestFault() = nullptr;
-        check(g_editorWriteError == ERROR_SHARING_VIOLATION && g_editorMoveError != 0 && o.ok() && o.written && *Get(ReadSettings(game), "rr_mode") == "accurate",
+        check(g_editorWriteError == ERROR_SHARING_VIOLATION && g_editorMoveError != 0 && o.ok() && o.written && Val(ReadSettings(game), "rr_mode") == "accurate",
               "while WrongGPU holds the file, an editor's write and an editor's replace are refused by Windows (its bytes never land); WrongGPU's save completes");
         // 2. the last moment (the file let go, before the move): another program changes the file: WrongGPU's save is refused
         WriteText(f, "rr_mode=fast\r\n");
@@ -540,12 +571,12 @@ int wmain(int argc, wchar_t** argv) {
         {
             StateLock lock(game, 5000);
             const Settings s = ReadSettings(game);  // re-read after the lock
-            check(up && keep && lock.held() && lock.abandoned() && !s.corrupt && *Get(s, "counter") == "7",
+            check(up && keep && lock.held() && lock.abandoned() && !s.corrupt && Val(s, "counter") == "7",
                   "a holder that died mid-write: the lock is taken (abandoned), the state re-read is the old whole file");
             std::wstring temp;
             for (auto& n : List(state)) if (IsTempName(n)) temp = n;
             check(!temp.empty(), "the half-written temporary file is there and named as a temporary file (never read as state)");
-            check(SetSettings(game, {{"counter", "8"}}).ok() && *Get(ReadSettings(game), "counter") == "8", "a write under the abandoned-then-taken lock works");
+            check(SetSettings(game, {{"counter", "8"}}).ok() && Val(ReadSettings(game), "counter") == "8", "a write under the abandoned-then-taken lock works");
             if (!temp.empty()) DeleteFileW(JoinPath(state, temp).c_str());
         }
         if (keep) CloseHandle(keep);
