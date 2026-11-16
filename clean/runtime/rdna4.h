@@ -20,6 +20,12 @@
 // vendor and device id of the adapter with the same LUID stand in for the driver's, against the same vendor and the same
 // id list. Any other failure, and the same status outside Wine, fails closed as before. Windows never takes this path.
 //
+// Developer-only opening of RDNA 3 (WG_DEV_GFX11, OFF in every normal build, never defined by clean/runner/build.py): the
+// D3D12 device, the executor choice and the Wine log line also accept the RX 7900 series board id (Navi 31, gfx1100) and
+// the device then runs the gfx11 kernel set (dx12-gfx11, clean/dx12/build_dx12.py --gfx 11). rdna4_identity itself never
+// changes (the Ray Reconstruction runtime has no gfx11 kernels); the places that open the device ask
+// dev_gfx11_identity as well, which is false without the macro, so a normal build behaves exactly as before.
+//
 // Header only and portable: the lookup takes its sources as functions (AdapterSources), so that tests run on any host
 // with fakes; rdna4_win.h supplies the system's.
 #pragma once
@@ -37,6 +43,26 @@ namespace wgrt {
 inline bool rdna4_device_id(uint32_t device) {
   return device == 0x7550 || device == 0x7551 || device == 0x7590 || device == 0x7591;
 }
+
+// WG_DEV_GFX11: the developer opening of RDNA 3 (see the header comment). A constant, so that both builds are compiled and
+// tested; without the macro every function below that mentions it answers as it did before it existed.
+#ifdef WG_DEV_GFX11
+inline constexpr bool kDevGfx11 = true;
+#else
+inline constexpr bool kDevGfx11 = false;
+#endif
+
+// RDNA 3 PCI device id the opening takes: Navi 31 (1002:744C, which the RX 7900 XT, XTX and GRE share; gfx1100), the id
+// read on the development card. No other RDNA 3 id: gfx1101 and later boards were never measured here.
+inline bool gfx11_device_id(uint32_t device) { return device == 0x744C; }
+
+// The target the D3D12 device reports for an adapter of the opening (runtime.cpp takes the accumulator row table of the
+// target's family from it, as for a HIP device).
+inline const char* dev_gfx11_arch() { return "gfx1100"; }
+
+// The folder of a build's D3D12 kernel set (<build>/<folder>/manifest.json): dx12 (RDNA 4), dx12-gfx11 for a target of the
+// opening. `arch` is the device's target name ("" for RDNA 4).
+inline const char* dx12_folder(const std::string& arch) { return kDevGfx11 && arch == dev_gfx11_arch() ? "dx12-gfx11" : "dx12"; }
 
 struct AdapterLuid {
   uint32_t low = 0;
@@ -123,6 +149,14 @@ inline bool rdna4_identity(const AdapterIdentity& a) {
   return a.wine_fallback && a.wine_vendor == 0x1002 && rdna4_device_id(a.wine_device);
 }
 
+// The adapter is an RX 7900 series board and the developer opening is on (WG_DEV_GFX11): the same rule as rdna4_identity (the
+// driver's ids, else the Wine fallback's, vendor and device id only), against the RDNA 3 id. Always false without the macro.
+inline bool dev_gfx11_identity(const AdapterIdentity& a) {
+  if (!kDevGfx11) return false;
+  if (a.kmt_known) return a.kmt_vendor == 0x1002 && gfx11_device_id(a.kmt_device);
+  return a.wine_fallback && a.wine_vendor == 0x1002 && gfx11_device_id(a.wine_device);
+}
+
 // The adapter as a log line shows it: the system DXGI's description when it has one, the driver's ids when known, and the
 // words "not identified" when neither is.
 inline std::string describe_identity(const AdapterIdentity& a) {
@@ -138,13 +172,14 @@ inline std::string describe_identity(const AdapterIdentity& a) {
   }
   if (s.empty()) s = "adapter not identified";
   const uint32_t vendor = wine ? a.wine_vendor : a.kmt_vendor, device = wine ? a.wine_device : a.kmt_device;
-  if ((a.kmt_known || wine) && vendor == 0x1002 && !rdna4_device_id(device)) s += "; an AMD board outside the RDNA 4 id list";
+  if ((a.kmt_known || wine) && vendor == 0x1002 && !rdna4_device_id(device) && !dev_gfx11_identity(a))
+    s += "; an AMD board outside the RDNA 4 id list";
   return s;
 }
 
 // The one line when an adapter was accepted by the Wine fallback (#248); empty otherwise.
 inline std::string wine_fallback_line(const AdapterIdentity& a) {
-  if (a.kmt_known || !a.wine_fallback || !rdna4_identity(a)) return std::string();
+  if (a.kmt_known || !a.wine_fallback || !(rdna4_identity(a) || dev_gfx11_identity(a))) return std::string();
   return "Wine: the driver's adapter id query is not implemented; the adapter was identified from the system DXGI's ids (" +
          describe_identity(a) + ")";
 }

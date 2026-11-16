@@ -14,6 +14,8 @@
 //    every kernel must have a port in the build's dx12/manifest.json and its options select the exact default path), the
 //    context is not created either: one error line and the front end's upscaler; never the HIP executor. The sparkle guard
 //    (HIP only) is turned off for every model with one line; the model stays on D3D12.
+//    A build made with WG_DEV_GFX11 (developer only, rdna4.h) takes the RX 7900 series board id as well; without the macro
+//    the rule is the one above.
 //  - `dx12` (or `d3d12`): the D3D12 executor on any adapter (the device refuses unsupported ones, and the context is not
 //    created).
 //  - A frame the D3D12 executor does not take later (e.g. above the checked render size) is answered WG_ERROR_UNSUPPORTED
@@ -153,7 +155,7 @@ inline ExecutorChoice choose_executor(const ExecutorRequest& r, bool devRequeste
   if (!forced && e != "auto" && !e.empty()) return c;  // unknown value
   if (!forced) {
     c.by_default = true;
-    if (!wgrt::rdna4_identity(adapter_identity(r))) {
+    if (!wgrt::rdna4_identity(adapter_identity(r)) && !wgrt::dev_gfx11_identity(adapter_identity(r))) {
       c.executor = "fsr";  // every model: the kernels are RX 9000-only; the front end's own upscaler takes the game
       c.warn = true;
       c.why = needs_rx9000_line(adapter_identity(r));

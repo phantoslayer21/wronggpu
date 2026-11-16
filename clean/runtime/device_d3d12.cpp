@@ -201,10 +201,13 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     const char* selection = std::getenv("WG_DX12_KERNELS");
     if (selection && std::string(selection) != "all")
       return fail("native D3D12 requires all ports; unset WG_DX12_KERNELS or set it to all");
-    if (!read_manifest(build + "/dx12/manifest.json")) return false;
+    // WG_DEV_GFX11 (rdna4.h): the kernel folder depends on the adapter's family, so that build reads the manifest after the
+    // device; every other build reads it first, as it always did.
+    if (!wgrt::kDevGfx11 && !read_manifest(build + "/dx12/manifest.json")) return false;
     if (borrowed_device || borrowed_queue) {
       if (!borrow_device(borrowed_device, borrowed_queue)) return false;
     } else if (!create_device()) return false;
+    if (wgrt::kDevGfx11 && !read_manifest(build + "/" + wgrt::dx12_folder(arch()) + "/manifest.json")) return false;
     // ports needing binary64 fma / division (model K's exact input stage) are dropped on an adapter without them: the
     // kernel then has no port and a context that needs it is refused (no silent fallback). D3D12 folds the D3D11.1
     // extended doubles (DFMA / DDIV / DRCP) into DoublePrecisionFloatShaderOps (d3d12.h has no separate field)
@@ -513,10 +516,15 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
   }
 
   std::string name() const override { return adapter_name_ + " (native D3D12)"; }
+  // The target of the adapter: empty for RDNA 4 (the family the kernels were written for), gfx1100 on a board of the
+  // WG_DEV_GFX11 opening, from which runtime.cpp takes the accumulator row table and the kernel folder.
+  std::string arch() const override { return gfx11_ ? wgrt::dev_gfx11_arch() : std::string(); }
   std::string note() const override {
     return "native D3D12: arena " + std::to_string(arena_bytes_ >> 20) +
            " MiB; no HIP runtime or fallback; timestamp frequency " + std::to_string(timestamp_frequency_) + " Hz" +
-           (borrowed_ ? "; borrowed device/queue; exact FP16/FP8 driver-channel probe passed" : "");
+           (borrowed_ ? (gfx11_ ? "; borrowed device/queue; FP16 driver-channel probe passed (gfx11, developer build)"
+                              : "; borrowed device/queue; exact FP16/FP8 driver-channel probe passed")
+                     : "");
   }
   bool adapter_luid(uint8_t out[8]) const override {
     if (!out) return false;
@@ -1529,8 +1537,10 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     // game process rewrote (rdna4_win.h): a real RX 9000 keeps WrongGPU whatever name it is shown under
     const wgrt::AdapterIdentity identity = wgrt::read_adapter_identity(adapter_luid_);
     if (identity.dxgi_known) adapter_name_ = identity.description;
-    if (!wgrt::rdna4_identity(identity))
+    const bool gfx11_card = wgrt::dev_gfx11_identity(identity);  // WG_DEV_GFX11 only (rdna4.h); false in every normal build
+    if (!wgrt::rdna4_identity(identity) && !gfx11_card)
       return fail("native D3D12 borrowed device requires the supported Radeon RX 9070/9060 adapter");
+    gfx11_ = gfx11_card;
     D3D12_FEATURE_DATA_SHADER_MODEL sm{D3D_SHADER_MODEL_6_6};
     if (!check(device_->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &sm, sizeof sm), "CheckFeatureSupport(shader model)") ||
         sm.HighestShaderModel < D3D_SHADER_MODEL_6_6) return fail("native D3D12 requires shader model 6.6");
@@ -1548,24 +1558,28 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     return true;
   }
   bool driver_probe() {
-    auto probe = kernels_.find("native_driver_probe");
+    // RDNA 4: the FP16 and FP8 probe, exact. RDNA 3 (WG_DEV_GFX11): the FP16-only probe (no FP8 matrix instruction exists
+    // there), compared within wmma_probe::gfx11::kTolerance (the card's accumulation differs from the exact sum in the last bit).
+    const char* const probe_name = gfx11_ ? "native_driver_probe_f16" : "native_driver_probe";
+    auto probe = kernels_.find(probe_name);
     if (probe == kernels_.end() || probe->second.co != "-" || probe->second.rs != "buffer" ||
         probe->second.block != 32 || probe->second.wave != 32 || probe->second.dwords != 1 ||
         probe->second.args.size() != 1 || probe->second.args[0].kind != 'p')
-      return fail("native D3D12 borrowed device requires native_driver_probe (co=-, buffer, block/wave=32, args=p)");
+      return fail(std::string("native D3D12 borrowed device requires ") + probe_name + " (co=-, buffer, block/wave=32, args=p)");
     // Operands with distinct values per lane and element, expected results computed on the CPU (wmma_probe.h).
+    const size_t bytes = gfx11_ ? wmma_probe::gfx11::kBytes : wmma_probe::kBytes;
     DevPtr output = 0;
-    if (!alloc(&output, wmma_probe::kBytes)) return false;
-    uint8_t buffer[wmma_probe::kBytes];
-    wmma_probe::fill(buffer);
-    float values[wmma_probe::kResults] = {};
+    if (!alloc(&output, bytes)) return false;
+    uint8_t buffer[wmma_probe::kBytes > wmma_probe::gfx11::kBytes ? wmma_probe::kBytes : wmma_probe::gfx11::kBytes];
+    if (gfx11_) wmma_probe::gfx11::fill(buffer); else wmma_probe::fill(buffer);
+    float values[wmma_probe::kResults > wmma_probe::gfx11::kResults ? wmma_probe::kResults : wmma_probe::gfx11::kResults] = {};
     void* args[] = {&output};
-    bool ok = upload(output, buffer, sizeof buffer) && launch("native_driver_probe", 1, 32, args) &&
-              download(values, output, sizeof values);
+    bool ok = upload(output, buffer, bytes) && launch(probe_name, 1, 32, args) &&
+              download(values, output, (gfx11_ ? wmma_probe::gfx11::kResults : wmma_probe::kResults) * sizeof(float));
     // tests of the fallback (interop test, WG_TEST_DRIVER_PROBE_FAIL=1): the probe reports a mismatch
     const char* fail_test = std::getenv("WG_TEST_DRIVER_PROBE_FAIL");
     if (ok && fail_test && fail_test[0] == '1') values[7] = -1.0f;
-    const int bad = ok ? wmma_probe::first_mismatch(values) : -1;
+    const int bad = ok ? (gfx11_ ? wmma_probe::gfx11::first_mismatch(values) : wmma_probe::first_mismatch(values)) : -1;
     if (bad >= 0) ok = fail("native D3D12 borrowed driver-channel probe mismatch at float " + std::to_string(bad));
     const std::string error = err_;
     free(output);
@@ -1602,8 +1616,10 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
       char name[256] = {};
       WideCharToMultiByte(CP_UTF8, 0, description.Description, -1, name, sizeof name - 1, nullptr, nullptr);
       // The driver-channel WMMA ports are qualified only for the project's RDNA4 target. Do not select an AMD iGPU.
-      if (wgrt::rdna4_identity(wgrt::read_adapter_identity(description.AdapterLuid))) {
-        selected = std::move(adapter); adapter_name_ = name; adapter_luid_ = description.AdapterLuid; break;
+      const wgrt::AdapterIdentity identity = wgrt::read_adapter_identity(description.AdapterLuid);
+      const bool gfx11_card = wgrt::dev_gfx11_identity(identity);  // WG_DEV_GFX11 only (rdna4.h)
+      if (wgrt::rdna4_identity(identity) || gfx11_card) {
+        selected = std::move(adapter); adapter_name_ = name; adapter_luid_ = description.AdapterLuid; gfx11_ = gfx11_card; break;
       }
     }
     if (!selected) return fail("native D3D12: no supported Radeon RX 9070/9060 adapter");
@@ -1874,6 +1890,7 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
   HANDLE event_ = nullptr;
   LUID adapter_luid_{};
   std::string adapter_name_;
+  bool gfx11_ = false;  // the adapter is a board of the WG_DEV_GFX11 opening (rdna4.h); never true in a normal build
   std::string debug_failure_;
   std::ofstream profile_output_;
   std::string profile_session_, profile_failure_;
