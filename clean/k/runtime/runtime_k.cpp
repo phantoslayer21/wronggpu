@@ -4,14 +4,17 @@
 #include "runtime_k.h"
 #include "k_input_uniforms.h"
 #include "k_mix_probe.h"
+#include "k_smx_selfcheck.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 
 #include "../../converter/src/json.h"
+#include "../../converter/src/sha256.h"
 #include "../../runtime/embedded.h"
 #include "../../runtime/fpconv.h"
 #include "../../runtime/runtime_core.h"
@@ -271,6 +274,69 @@ int wide_ng(const std::string& s, bool f16, int nwin) {
   return 0;
 }
 
+// The block parameters of stage st (KBlkParams): its weight blob, its maps and the window grid of a level map of lw x lh
+// with window offset (ox, oy); iw x ih is a decoder's input map. network() and the softmax self-check (smx_check).
+KBlkParams block_params(const KStageInfo& st, DevPtr blob, DevPtr x, DevPtr y, DevPtr skip, DevPtr merged, DevPtr head,
+                        int lw, int lh, int iw, int ih, int ox, int oy) {
+  const StageSec sec = stage_sections(st);
+  const BlockSec bs = block_sections(st);
+  const DevPtr blk = blob + sec.block;
+  KBlkParams p = {};
+  p.x = x;
+  p.y = y;
+  p.g1 = blk + bs.g1;
+  p.g2 = blk + bs.g2;
+  p.wqkv = blk + bs.qkv;
+  p.mix = blk + bs.mix;
+  p.wo = blk + bs.wo;
+  p.bo = blk + bs.bo;
+  p.w1 = blk + bs.w1;
+  p.b1 = blk + bs.b1;
+  p.w2 = blk + bs.w2;
+  p.b2 = blk + bs.b2;
+  p.w = lw;
+  p.h = lh;
+  p.ox = ox;
+  p.oy = oy;
+  p.nwx = cdiv(lw + ox, 8);  // layout.py window_grid
+  p.nwy = cdiv(lh + oy, 8);
+  if (st.embed) {
+    p.wa = blob + sec.embed;
+    p.ba = blob + sec.embed + linear_bias(32, 16);
+  }
+  if (st.kind == 'd') {
+    p.wa = blob + sec.expand;
+    p.ba = blob + sec.expand + linear_bias(4 * st.C, st.C_prev);
+    p.skip = skip;
+    p.cw = iw;
+    p.ch = ih;
+  }
+  if (st.kind == 'e') {
+    p.wz = blob + sec.merge;
+    p.bz = blob + sec.merge + linear_bias(st.C_next, 4 * st.C);
+    p.merged = merged;
+  }
+  if (st.head) {
+    p.wz = blob + sec.head;
+    p.bz = blob + sec.head + linear_bias(40, st.C);
+    p.head = head;
+  }
+  return p;
+}
+
+// The stage kernel of a non-head stage as network() launches it (before a __rodd suffix): k_stagew<NG>_<name> for the
+// wide stages, k_stage2_<name> (two windows per workgroup) for e0, e1, d1 with its block output map and d0, else
+// k_stage_<name>; *ng = NG (0: not wide), *w2 = two windows per workgroup.
+std::string stage_kernel_base(const KStageInfo& st, bool f16, bool has_y, int nwin, int* ng, bool* w2) {
+  *ng = wide_ng(st.name, f16, nwin);
+  // e0, e1, d1, d0: two windows per workgroup (k_stage2_*, k_launch.py WINDOWS2_STAGES; k_net.py WINDOWS2_VARIANTS;
+  // d1's needs its block output map p.y, which the network always gives it)
+  *w2 = !*ng && (std::strcmp(st.name, "e0") == 0 || std::strcmp(st.name, "e1") == 0 ||
+                 (std::strcmp(st.name, "d1") == 0 && has_y) || std::strcmp(st.name, "d0") == 0);
+  const std::string h = f16 ? "h" : "";
+  return (*ng ? "k_stagew" + std::to_string(*ng) : std::string(*w2 ? "k_stage2" : "k_stage")) + h + "_" + st.name;
+}
+
 // Runtime options of model K (runtime_options, then WG_RUNTIME_OPTIONS whose keys win): model_k_dir, model_k_map,
 // network (fused, the default; fused16: FP16 accumulation, the spec 49 speed approximation, opt-in), k_diag (timing
 // diagnostics, same output: "input2" runs the input stage once more before its timing mark, so the "input" part is a
@@ -446,6 +512,15 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
     if (end == kfill.c_str() || *end || v < 0 || v > 255) return fail("model K: k_fill must be 0..255");
     fill_ = (int)v;
   }
+  // k_smx_test: the softmax self-check's test hook (smx_select), developer builds only
+  smx_test_ = option(c, "k_smx_test");
+#ifdef WG_DEV_DIAGNOSTICS
+  if (!smx_test_.empty() && smx_test_ != "mix_fail" && smx_test_ != "both_fail" && smx_test_ != "rodd_unchecked" &&
+      smx_test_ != "report")
+    return fail("model K: k_smx_test must be mix_fail, both_fail, rodd_unchecked or report");
+#else
+  if (!smx_test_.empty()) return fail("model K: k_smx_test is a test hook of developer builds only");
+#endif
   // The native D3D12 device (backend 3: the D3D12 executor, or k_bench.py's own-buffer timing) runs the exact default
   // path only, and only when every kernel this context can launch has a port in <build>/dx12/manifest.json; both are
   // checked here, before the model is loaded, so a refused context costs nothing more (for model K the context ends and
@@ -544,40 +619,229 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   for (int l = 0; l < 8; ++l) k_filter_table(l, 1, tab.data() + (size_t)l * kFilterEntries * kFilterValues);
   if (!dev_->upload(tables_, tab.data(), tab.size() * 2)) return dfail();
   if (!dev_->sync()) return dfail();
-  return c.backend != 3 || mix_probe();
+  return smx_select(c.backend, smx_test_);
 }
 
-// The softmax stages' weight rounding A = f16(w inv) (clean/k/dx12/hlsl/k_smx.hlsli) relies on the driver folding the
-// exact sum p + e into one v_fma_mix*_f16 rounding. The native D3D12 device checks that fold on this adapter once, at
-// create: k_mix_probe runs the same helper on k_mix_probe.h's records (FP16-midpoint products with residuals of both
-// signs, exact ties, FP16 subnormals) and must return the exact results; otherwise every softmax stage takes its
-// round-to-odd port (suffix __rodd, the same bits by another sequence). The result goes into the kernels line
-// (smx=mix | smx=rodd), and taking the round-to-odd ports adds one line to the notes of create (wg_rt_notes; the
-// executor logs it), so the switch is never silent. WG_TEST_K_MIX_PROBE_FAIL=1 (test hook) treats the probe as failed.
-bool KRuntime::mix_probe() {
+// ---- the softmax weight rounding: create-time self-check (native D3D12 device) ---------------------------------------
+// The softmax stages' weight rounding A = f16(w inv) (clean/k/dx12/hlsl/k_smx.hlsli) has two forms: the mix form (the
+// exact sum p + e into the driver's round-to-nearest conversion, exact when the driver folds it into one
+// v_fma_mix*_f16) and the round-to-odd ports (suffix __rodd, exact when the driver keeps the round-to-odd integer
+// operations and converts round-to-nearest). Both depend on how the player's driver compiles each stage shader, so
+// neither is taken on trust. At create the native D3D12 device checks the shaders that will run:
+// - k_mix_probe and k_mix_probe__rodd on k_mix_probe.h's records (FP16-midpoint products with residuals of both signs,
+//   exact ties, FP16 subnormals) against the exact results;
+// - every softmax stage kernel this runtime can select, in both forms, on the same synthetic inputs and weights
+//   (kSmxCases: each stage at a 512 x 384 base map; e4 / d4 (NG = 2) and m again at 1536 x 1280), its
+//   outputs hashed and compared with k_smx_selfcheck.h, the hashes of the HIP reference.
+// The mix form is used when its probe and all its stages match; else the round-to-odd ports when theirs all match (one
+// note of create); else create fails, naming the first stage that differs. Launching each stage kernel also loads,
+// verifies and prepares its shader at create: a missing or corrupt stage shader of either form fails create there.
+// Test hook (developer builds only, WG_DEV_DIAGNOSTICS): runtime option k_smx_test = mix_fail (the mix form counts as
+// failed), both_fail (both forms count as failed), rodd_unchecked (the round-to-odd ports without the check; for the
+// frame test's negative control), report (adds the computed hashes as a note; on any device).
+namespace {
+struct SmxCase {
+  const char* stage;
+  int wb, hb;    // base map size
+  int sets = 1;  // independent synthetic data sets, the outputs of all hashed together
+};
+// the softmax stages (spec 41: e2 ... d1; e0, e1 and d0 mix with fixed weights) at a 512 x 384 base map, which selects
+// k_stage_e2, k_stagew2_e3, k_stagew4_e4, k_stagew4_m, k_stagew4_d4, k_stagew2_d3, k_stage_d2 and k_stage2_d1 (e4 / d4:
+// 20 windows at offset 2; NG = 4 takes at most 24, so these two run on 8 data sets); at 1536 x 1280 e4 and d4 select
+// their NG = 2 kernels (156 windows) and m runs again with 42 windows. Sized so that a one-stage wrong-rounding mutant
+// of either form changes its case's outputs (the mutant runs in the #254 evidence).
+const SmxCase kSmxCases[] = {{"e2", 512, 384},      {"e3", 512, 384},      {"e4", 512, 384, 8}, {"m", 512, 384},
+                             {"d4", 512, 384, 8},   {"d3", 512, 384},      {"d2", 512, 384},    {"d1", 512, 384},
+                             {"e4", 1536, 1280},    {"d4", 1536, 1280},    {"m", 1536, 1280}};
+constexpr int kSmxOffset = 2;          // window offset of every case (even, as the network's)
+constexpr uint32_t kSmxSeed = 0x6b5eu;  // synthetic data (xorshift32)
+static_assert(sizeof kSmxCases / sizeof kSmxCases[0] == k_smx_selfcheck::kCount, "k_smx_selfcheck.h case count");
+
+const KStageInfo& stage_info(const char* name) {
+  for (const KStageInfo& s : k_stage_table())
+    if (std::strcmp(s.name, name) == 0) return s;
+  return k_stage_table()[0];
+}
+size_t level_tokens(int wb, int hb, int level) {
+  int w, h;
+  k_level_size(wb, hb, level, &w, &h);
+  return (size_t)w * h;
+}
+// FP16 words of uniform values in [-scale, scale): also finite FP32 values where two words are read as one
+void smx_fill(std::vector<uint16_t>* v, uint32_t* state, float scale) {
+  for (uint16_t& h : *v) {
+    uint32_t x = *state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = x;
+    h = f32_to_f16(((float)(x >> 8) * (1.0f / 8388608.0f) - 1.0f) * scale);
+  }
+}
+}  // namespace
+
+std::string KRuntime::smx_case_name(int i, bool rodd) const {
+  const SmxCase& c = kSmxCases[i];
+  const KStageInfo& st = stage_info(c.stage);
+  int lw, lh, ng = 0;
+  bool w2 = false;
+  k_level_size(c.wb, c.hb, st.level, &lw, &lh);
+  const std::string k = stage_kernel_base(st, false, true, cdiv(lw + kSmxOffset, 8) * cdiv(lh + kSmxOffset, 8),
+                                          &ng, &w2);
+  return k + (rodd ? "__rodd" : "") + "@" + std::to_string(c.wb) + "x" + std::to_string(c.hb) +
+         (c.sets > 1 ? "*" + std::to_string(c.sets) : std::string());
+}
+
+// One form of every case: the outputs' SHA-256 (first 8 bytes, big-endian) per case into *hashes.
+bool KRuntime::smx_check(bool rodd, std::vector<uint64_t>* hashes) {
+  const int n = (int)(sizeof kSmxCases / sizeof kSmxCases[0]);
+  size_t in_bytes = 0, y_bytes = 0, m_bytes = 0, w_bytes = 0;
+  for (const SmxCase& c : kSmxCases) {
+    const KStageInfo& st = stage_info(c.stage);
+    const size_t own = level_tokens(c.wb, c.hb, st.level) * st.C * 2;
+    in_bytes = std::max({in_bytes, own, st.kind == 'd' ? level_tokens(c.wb, c.hb, st.level + 1) * st.C_prev * 2 : 0});
+    y_bytes = std::max(y_bytes, own);
+    if (st.kind == 'e') m_bytes = std::max(m_bytes, level_tokens(c.wb, c.hb, st.level + 1) * st.C_next * 2);
+    w_bytes = std::max(w_bytes, blobs_.at(c.stage).size());
+  }
+  // inputs (the input map and a decoder's skip map read the same synthetic data) and one weight blob for every stage
+  std::vector<uint16_t> in(in_bytes / 2), w(w_bytes / 2);
+  DevPtr din = 0, dw = 0, dy = 0, dm = 0;
+  int loaded = -1;  // the data set in din / dw
+  auto load = [&](int set) {
+    if (set == loaded) return true;
+    uint32_t state = kSmxSeed + 0x9e3779b9u * (uint32_t)set;
+    if (!state) state = 1;
+    smx_fill(&in, &state, 1.0f);
+    smx_fill(&w, &state, 0.25f);
+    loaded = set;
+    return dev_->upload(din, in.data(), in_bytes) && dev_->upload(dw, w.data(), w_bytes);
+  };
+  auto release = [&]() {
+    for (DevPtr p : {din, dw, dy, dm})
+      if (p) dev_->free(p);
+  };
+  bool ok = dev_->alloc(&din, in_bytes) && dev_->alloc(&dw, w_bytes) && dev_->alloc(&dy, y_bytes) &&
+            dev_->alloc(&dm, std::max<size_t>(m_bytes, 256));
+  std::vector<uint8_t> out;
+  for (int i = 0; ok && i < n; ++i) {
+    const SmxCase& c = kSmxCases[i];
+    const KStageInfo& st = stage_info(c.stage);
+    int lw, lh, iw, ih;
+    k_level_size(c.wb, c.hb, st.level, &lw, &lh);
+    k_level_size(c.wb, c.hb, st.kind == 'd' ? st.level + 1 : st.level, &iw, &ih);
+    KBlkParams p = block_params(st, dw, din, dy, din, dm, 0, lw, lh, iw, ih, kSmxOffset, kSmxOffset);
+    int ng = 0;
+    bool w2 = false;
+    const std::string k = stage_kernel_base(st, false, true, p.nwx * p.nwy, &ng, &w2) + (rodd ? "__rodd" : "");
+    const size_t yb = level_tokens(c.wb, c.hb, st.level) * st.C * 2;
+    const size_t mb = st.kind == 'e' ? level_tokens(c.wb, c.hb, st.level + 1) * st.C_next * 2 : 0;
+    wgc::Sha256 sha;
+    out.resize(yb + mb);
+    for (int set = 0; ok && set < c.sets; ++set) {
+      ok = load(set) && dev_->memset(dy, 0, y_bytes) && dev_->memset(dm, 0, std::max<size_t>(m_bytes, 256)) &&
+           launch(k.c_str(), (unsigned)(w2 ? cdiv(p.nwx * p.nwy, 2) : p.nwx * p.nwy), (unsigned)(kThreads * (ng ? ng : 1)),
+                  &p) &&
+           dev_->download(out.data(), dy, yb) && (!mb || dev_->download(out.data() + yb, dm, mb));
+      if (ok) sha.update(out.data(), out.size());
+    }
+    if (ok) {
+      const wgc::Digest d = sha.finish();
+      uint64_t v = 0;
+      for (int b = 0; b < 8; ++b) v = (v << 8) | d[b];
+      hashes->push_back(v);
+    }
+  }
+  release();
+  return ok || dfail();
+}
+
+// The mix / round-to-odd probe: the number of results that differ from the exact ones.
+bool KRuntime::smx_probe(bool rodd, int* bad) {
   DevPtr in = 0, out = 0;
   const size_t out_bytes = (size_t)k_mix_probe::kLanes * 16;
-  if (!alloc(&in, sizeof k_mix_probe::kRecords) || !alloc(&out, out_bytes)) return false;
-  if (!dev_->upload(in, k_mix_probe::kRecords, sizeof k_mix_probe::kRecords) || !dev_->memset(out, 0xA5, out_bytes))
-    return dfail();
-  if (!launch("k_mix_probe", (unsigned)(k_mix_probe::kLanes / 32), 32, &in, &out)) return false;
+  if (!dev_->alloc(&in, sizeof k_mix_probe::kRecords) || !dev_->alloc(&out, out_bytes)) return dfail();
   std::vector<uint16_t> got((size_t)k_mix_probe::kLanes * 8);
-  if (!dev_->download(got.data(), out, out_bytes)) return dfail();
-  int bad = 0;
-  for (size_t i = 0; i < got.size(); ++i) bad += got[i] != k_mix_probe::kExpected[i];
-  const char* hook = std::getenv("WG_TEST_K_MIX_PROBE_FAIL");
-  const bool forced = hook && std::strcmp(hook, "1") == 0;
-  smx_rodd_ = bad != 0 || forced;
-  // one token (the kernels line is split at spaces into key=value pairs); the details are in the note
-  smx_note_ = smx_rodd_ ? std::string(" smx=rodd(") + (forced ? std::string("hook") : std::to_string(bad) + "/" +
-                                                                                     std::to_string(got.size())) + ")"
-                        : std::string(" smx=mix");
-  notes_ = smx_rodd_ ? std::string("model K: softmax weight rounding takes the round-to-odd ports (") +
-                           (forced ? "probe failed by test hook" : "mix-form probe: " + std::to_string(bad) + " of " +
-                                                                    std::to_string(got.size()) + " differ") +
-                           "); output unchanged, both forms are exact"
-                     : std::string();
+  const bool ok = dev_->upload(in, k_mix_probe::kRecords, sizeof k_mix_probe::kRecords) &&
+                  dev_->memset(out, 0xA5, out_bytes) &&
+                  launch(rodd ? "k_mix_probe__rodd" : "k_mix_probe", (unsigned)(k_mix_probe::kLanes / 32), 32, &in, &out) &&
+                  dev_->download(got.data(), out, out_bytes);
+  dev_->free(in);
+  dev_->free(out);
+  if (!ok) return dfail();
+  *bad = 0;
+  for (size_t i = 0; i < got.size(); ++i) *bad += got[i] != k_mix_probe::kExpected[i];
   return true;
+}
+
+// smx_select (create, last step): the softmax form of this runtime, from the checks above (native D3D12 device), or only
+// the report hook's hashes (other devices: the HIP reference for clean/k/dx12/gen_k_smx_selfcheck.py).
+bool KRuntime::smx_select(int backend, const std::string& hook) {
+  const int n = (int)(sizeof kSmxCases / sizeof kSmxCases[0]);
+  for (int i = 0; i < n; ++i)
+    if (smx_case_name(i, false) != k_smx_selfcheck::kNames[i])
+      return fail("model K: k_smx_selfcheck.h does not match the self-check cases (" + smx_case_name(i, false) + ")");
+  auto hex = [](uint64_t v) {
+    char b[17];
+    std::snprintf(b, sizeof b, "%016llx", (unsigned long long)v);
+    return std::string(b);
+  };
+  auto report = [&](const char* form, const std::vector<uint64_t>& h, int probe_bad) {
+    std::string r = std::string("model K self-check ") + form + ":" +
+                    (probe_bad >= 0 ? " probe=" + std::to_string(probe_bad) : std::string());
+    for (int i = 0; i < (int)h.size(); ++i) r += " " + smx_case_name(i, false) + "=" + hex(h[i]);
+    return r;
+  };
+  auto add_note = [&](const std::string& line) { notes_ += (notes_.empty() ? "" : "\n") + line; };
+  if (backend != 3) {  // the report hook only: the reference's hashes
+    if (hook != "report") return true;
+    std::vector<uint64_t> h;
+    if (!smx_check(false, &h)) return false;
+    add_note(report("reference", h, -1));
+    return true;
+  }
+  if (hook == "rodd_unchecked") {
+    smx_rodd_ = true;
+    smx_note_ = " smx=rodd(unchecked)";
+    add_note("model K: test hook: the round-to-odd softmax ports without the create-time check");
+    return true;
+  }
+  int bad[2] = {0, 0};
+  std::vector<uint64_t> h[2];
+  if (!smx_probe(false, &bad[0]) || !smx_probe(true, &bad[1]) || !smx_check(false, &h[0]) || !smx_check(true, &h[1]))
+    return false;
+  // the first check that differs, per form ("" = none)
+  std::string first[2];
+  for (int f = 0; f < 2; ++f) {
+    if (bad[f]) first[f] = std::string(f ? "k_mix_probe__rodd" : "k_mix_probe") + " " + std::to_string(bad[f]) + " of " +
+                           std::to_string(k_mix_probe::kLanes * 8);
+    for (int i = 0; first[f].empty() && i < n; ++i)
+      if (h[f][i] != k_smx_selfcheck::kExpected[i]) first[f] = smx_case_name(i, f == 1);
+  }
+  if (hook == "mix_fail" || hook == "both_fail") first[0] = "test hook";
+  if (hook == "both_fail") first[1] = "test hook";
+  if (hook == "report") {
+    add_note(report("mix", h[0], bad[0]));
+    add_note(report("rodd", h[1], bad[1]));
+  }
+  if (first[0].empty()) {
+    smx_rodd_ = false;
+    smx_note_ = " smx=mix";
+    if (!first[1].empty())
+      add_note("model K: the round-to-odd softmax ports failed the create-time check on this driver (" + first[1] +
+               "); the mix form passed it and is used");
+    return true;
+  }
+  if (first[1].empty()) {
+    smx_rodd_ = true;
+    std::string token = first[0] == "test hook" ? std::string("hook") : first[0].substr(0, first[0].find(' '));
+    smx_note_ = " smx=rodd(" + token + ")";
+    add_note("model K: softmax weight rounding takes the round-to-odd ports (the mix form failed the create-time check: " +
+             first[0] + "); they passed it, output unchanged");
+    return true;
+  }
+  return fail("model K: the D3D12 softmax stages are not exact on this driver (create-time check: mix form " + first[0] +
+              ", round-to-odd form " + first[1] + "); not started");
 }
 
 std::string KRuntime::stage_kernel(const std::string& k, const char* stage) const {
@@ -630,58 +894,12 @@ bool KRuntime::network(int f, const std::function<bool(const char*)>& after) {
     const int ox = off[i][0], oy = off[i][1];
     if (st.kind != 'm' && (ox % 2 || oy % 2)) return fail(std::string("model K: odd window offset at ") + st.name);
     const DevPtr blob = wdev_[st.name];
-    const StageSec sec = stage_sections(st);
-    const BlockSec bs = block_sections(st);
-    const DevPtr blk = blob + sec.block;
-    KBlkParams p = {};
-    p.x = net_[io.in];
-    p.y = io.block ? net_[io.block] : 0;
-    p.g1 = blk + bs.g1;
-    p.g2 = blk + bs.g2;
-    p.wqkv = blk + bs.qkv;
-    p.mix = blk + bs.mix;
-    p.wo = blk + bs.wo;
-    p.bo = blk + bs.bo;
-    p.w1 = blk + bs.w1;
-    p.b1 = blk + bs.b1;
-    p.w2 = blk + bs.w2;
-    p.b2 = blk + bs.b2;
-    p.w = lw;
-    p.h = lh;
-    p.ox = ox;
-    p.oy = oy;
-    p.nwx = cdiv(lw + ox, 8);  // layout.py window_grid
-    p.nwy = cdiv(lh + oy, 8);
-    if (st.embed) {
-      p.wa = blob + sec.embed;
-      p.ba = blob + sec.embed + linear_bias(32, 16);
-    }
-    if (st.kind == 'd') {
-      p.wa = blob + sec.expand;
-      p.ba = blob + sec.expand + linear_bias(4 * st.C, st.C_prev);
-      p.skip = net_[io.skip];
-      p.cw = iw;
-      p.ch = ih;
-    }
-    if (st.kind == 'e') {
-      p.wz = blob + sec.merge;
-      p.bz = blob + sec.merge + linear_bias(st.C_next, 4 * st.C);
-      p.merged = net_[io.merged];
-    }
-    if (st.head) {
-      p.wz = blob + sec.head;
-      p.bz = blob + sec.head + linear_bias(40, st.C);
-      p.head = net_[io.head];
-    }
-    const int ng = wide_ng(st.name, f16_, p.nwx * p.nwy);
+    KBlkParams p = block_params(st, blob, net_[io.in], io.block ? net_[io.block] : 0, io.skip ? net_[io.skip] : 0,
+                                io.merged ? net_[io.merged] : 0, io.head ? net_[io.head] : 0, lw, lh, iw, ih, ox, oy);
+    int ng = 0;
+    bool w2 = false;
+    const std::string k = stage_kernel_base(st, f16_, p.y != 0, p.nwx * p.nwy, &ng, &w2);
     if (st.kind == 'm' && !ng) return fail("model K: stage m needs its wide kernel");
-    const std::string h = f16_ ? "h" : "";
-    // e0, e1, d1, d0: two windows per workgroup (k_stage2_*, k_launch.py WINDOWS2_STAGES; k_net.py WINDOWS2_VARIANTS;
-    // d1's needs its block output map p.y, which the network always gives it)
-    const bool w2 = !ng && (std::strcmp(st.name, "e0") == 0 || std::strcmp(st.name, "e1") == 0 ||
-                            (std::strcmp(st.name, "d1") == 0 && p.y) || std::strcmp(st.name, "d0") == 0);
-    const std::string k =
-        (ng ? "k_stagew" + std::to_string(ng) : std::string(w2 ? "k_stage2" : "k_stage")) + h + "_" + st.name;
     const unsigned grid = (unsigned)(w2 ? cdiv(p.nwx * p.nwy, 2) : p.nwx * p.nwy);
     auto f8 = f8data_.find(st.name);
     if (f8_ && w2 && f8 != f8data_.end()) {  // network=fused8: k_stage2q_* (k_block8.h)
@@ -1098,12 +1316,13 @@ std::vector<std::string> KRuntime::d3d12_kernels() const {
       else if (ng) k = "k_stagew" + std::to_string(ng) + "_" + n;
       else k = (n == "e0" || n == "e1" || n == "d1" ? "k_stage2_" : "k_stage_") + n;
       if (std::find(v.begin(), v.end(), k) == v.end()) v.push_back(k);
-      // the round-to-odd form a failed mix-form probe switches to (KRuntime::mix_probe)
+      // the round-to-odd form the create-time self-check can select (KRuntime::smx_select)
       if (!st.head && n != "e0" && n != "e1" && std::find(v.begin(), v.end(), k + "__rodd") == v.end())
         v.push_back(k + "__rodd");
     }
   }
   v.push_back("k_mix_probe");
+  v.push_back("k_mix_probe__rodd");
   v.push_back((compact_head_ ? "k_out_pixel_c" : "k_out_pixel") + d);
   if (!warm_at_.empty()) v.push_back("k_warm");  // k_warm (option k_warm, backend 3)
   v.push_back("timing_barrier");  // the timing marks (timing_log=1)

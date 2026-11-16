@@ -17,6 +17,8 @@
 //     FP16 is the single rounding of the exact product), then the same conversion. Truncation of w inv is p, or p - 1
 //     ulp when e < 0; the inexact bit e != 0 makes it odd (the same bits as wg_round_odd for every finite p > 0).
 //   K_SMX_MUT 1: negative control of the checks (the residual dropped: a second rounding); never shipped.
+//   K_SMX_RODD_MUT 1: negative control of the __rodd ports (the inexact bit dropped: truncation, then the conversion's
+//     rounding, wrong where the product is an FP16 midpoint); never shipped.
 #pragma once
 
 #ifndef K_SMX
@@ -25,10 +27,17 @@
 #ifndef K_SMX_MUT
 #define K_SMX_MUT 0
 #endif
+#ifndef K_SMX_RODD_MUT
+#define K_SMX_RODD_MUT 0
+#endif
 
 uint k_smx_round_odd_pos(float p, float e)
 {
+#if K_SMX_RODD_MUT
+    return asuint(p) - (e < 0.0f ? 1u : 0u);
+#else
     return (asuint(p) - (e < 0.0f ? 1u : 0u)) | (e != 0.0f ? 1u : 0u);
+#endif
 }
 
 // A = f16(w[j] inv) for one fragment's eight weights, packed two per dword (element 2 i in the low half of dword i).

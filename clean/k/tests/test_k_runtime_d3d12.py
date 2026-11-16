@@ -23,9 +23,12 @@ Sequences: a reset frame, steady frames with a pan, a game reset, a render-size 
 value, with the game's exposure texel, and with auto-exposure, and LDR; output rows RGBA16F and dense RGB; render size
 equal to the output (native AA, DLAA 1.0: the legacy input kernels), a jitter outside [-0.5, 0.5], and input_tiled=0.
 Refusals (one line, create or frame): an approximation option on the native device, an input-copy frame (raw_inputs).
-Softmax rounding switch (native device): with the create-time probe failed (test hook WG_TEST_K_MIX_PROBE_FAIL=1) the
-runtime reports smx=rodd and exactly one note of create (wg_rt_notes, logged by the executor); with nothing set,
-smx=mix and no note. Each leg runs in its own process.
+Softmax weight rounding (native device; runtime_k.cpp "create-time self-check"): with nothing set the mix form passes
+the check (smx=mix, no note); with the developer hook k_smx_test=mix_fail the round-to-odd ports are taken (smx=rodd,
+exactly one note of create, which the executor logs) and the frames match HIP with every softmax stage on its __rodd port,
+in both e4 / d4 shapes (1440p Quality: NG = 4; 4K Performance: NG = 2); with both forms failed, or with a corrupt __rodd
+shader, create refuses in one line. Each create leg runs in its own process. The hook exists only in a runtime library
+built with clean/runner/build.py --dev-diagnostics: these tests skip on another build.
 
 GPU only: WG_K_GPU_BUILD=<full build dir: clean/runner/build.py with the runtime library, and clean/dx12/build_dx12.py
 --model-k (or --only the K kernels and exposure_auto_diet) into the same folder>, ROCM_PATH; run each test under the
@@ -134,7 +137,8 @@ class TestKRuntimeD3D12(unittest.TestCase):
                 for ln in lines:
                     parts = ln.split()
                     if parts:
-                        tgt = on_dx if parts[-1] == "dx12" else on_hip
+                        # where: "dx12" (hybrid device) or "d3d12" (native device), else HIP
+                        tgt = on_dx if parts[-1] in ("dx12", "d3d12") else on_hip
                         tgt[parts[0]] = tgt.get(parts[0], 0) + 1
                 want, got = out_bytes(hip, half), out_bytes(dx, half)
                 compare_raw(f"frame {i}: output", want, got)
@@ -275,23 +279,79 @@ class TestKRuntimeD3D12(unittest.TestCase):
                 self.assertNotIn("\n", msg.strip())
                 self.assertIn("HIP", msg)
 
+    # ---- softmax weight rounding: the create-time self-check and its round-to-odd ports ----------------------------
+    def leg(self, options, build=None):
+        """One native create in its own process: {"ok", "smx", "notes", "error"}."""
+        r = subprocess.run([sys.executable, "-m", "clean.k.tests.test_k_runtime_d3d12", "--softmax-leg", self.mdir,
+                            self.map, options, build or self.build], capture_output=True, text=True, timeout=300)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return json.loads(r.stdout.strip().splitlines()[-1])
+
+    def need_dev_build(self):
+        got = self.leg("k_smx_test=report")
+        if not got["ok"] and "developer builds only" in got["error"]:
+            self.skipTest("the softmax test hook needs a runtime built with --dev-diagnostics")
+        self.assertTrue(got["ok"], got)
+
     def test_native_softmax_switch_is_logged(self):
         """The round-to-odd softmax ports are exact too, but taking them is never silent: one note of create."""
-        legs = {}
-        for hook in ("", "1"):
-            env = {k: v for k, v in os.environ.items() if k != "WG_TEST_K_MIX_PROBE_FAIL"}
-            if hook:
-                env["WG_TEST_K_MIX_PROBE_FAIL"] = hook
-            r = subprocess.run([sys.executable, "-m", "clean.k.tests.test_k_runtime_d3d12", "--softmax-leg", self.mdir,
-                                self.map], env=env, capture_output=True, text=True, timeout=300)
-            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-            legs[hook] = json.loads(r.stdout.strip().splitlines()[-1])
-        self.assertEqual(legs[""]["smx"], "mix")
-        self.assertEqual(legs[""]["notes"], [])
-        self.assertTrue(legs["1"]["smx"].startswith("rodd"), legs["1"])
-        self.assertEqual(len(legs["1"]["notes"]), 1, legs["1"])
-        self.assertIn("round-to-odd", legs["1"]["notes"][0])
-        self.assertIn("test hook", legs["1"]["notes"][0])
+        self.need_dev_build()
+        plain = self.leg("")
+        self.assertTrue(plain["ok"], plain)
+        self.assertEqual((plain["smx"], plain["notes"]), ("mix", []))
+        fb = self.leg("k_smx_test=mix_fail")
+        self.assertTrue(fb["ok"], fb)
+        self.assertEqual(fb["smx"], "rodd(hook)")
+        self.assertEqual(len(fb["notes"]), 1, fb)
+        self.assertIn("round-to-odd", fb["notes"][0])
+        self.assertIn("test hook", fb["notes"][0])
+
+    def test_native_softmax_refusals(self):
+        """Neither form shown exact, or a corrupt fallback shader: create refuses in one line (the game keeps its own
+        upscaler)."""
+        import shutil
+        import tempfile
+        self.need_dev_build()
+        both = self.leg("k_smx_test=both_fail")
+        self.assertFalse(both["ok"], both)
+        self.assertIn("not exact on this driver", both["error"])
+        self.assertNotIn("\n", both["error"].strip())
+        # a copy of the build (its top-level files and dx12/) with one flipped byte in a __rodd stage shader
+        tmp = tempfile.mkdtemp(prefix="k_smx_corrupt_")
+        try:
+            for f in os.listdir(self.build):
+                src = os.path.join(self.build, f)
+                if os.path.isfile(src):
+                    shutil.copy2(src, tmp)
+            shutil.copytree(os.path.join(self.build, "dx12"), os.path.join(tmp, "dx12"))
+            victim = os.path.join(tmp, "dx12", "k_stagew2_e3__rodd.dxil")
+            data = bytearray(open(victim, "rb").read())
+            data[len(data) // 2] ^= 0x40
+            open(victim, "wb").write(bytes(data))
+            bad = self.leg("", build=tmp)
+            self.assertFalse(bad["ok"], bad)
+            self.assertIn("k_stagew2_e3__rodd", bad["error"])
+            self.assertNotIn("\n", bad["error"].strip())
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def check_fallback_frames(self, frames, big, **size):
+        """Forced fallback: the frames match HIP (raw outputs and intermediates) and every softmax stage ran its __rodd
+        port on D3D12, none its mix form."""
+        self.need_dev_build()
+        on_dx, _ = self.sequence(3, True, 0, True, frames, "k_smx_test=mix_fail", **size)
+        ng = "k_stagew2_" if big else "k_stagew4_"
+        want = ["k_stage_e2", "k_stagew2_e3", ng + "e4", "k_stagew4_m", ng + "d4", "k_stagew2_d3", "k_stage_d2",
+                "k_stage2_d1"]
+        self.assertEqual([k for k in want if not on_dx.get(k + "__rodd")], [], on_dx)
+        self.assertEqual([k for k in want if on_dx.get(k)], [], on_dx)
+
+    def test_native_fallback_frames_1440p_quality(self):
+        self.check_fallback_frames(self.FRAMES_Q, False, **self.QUALITY)
+
+    def test_native_fallback_frames_4k_performance(self):
+        self.check_fallback_frames([(1920, 1080, True, 1.0, 1.0), (1920, 1080, False, 1.0, 1.0)], True,
+                                   out=(3840, 2160), max_render=(1920, 1080))
 
     def test_input_copy_frames_refused_on_d3d12(self):
         """raw_inputs (the interop's HIP input copies) has no checked D3D12 port: refused, not run unchecked."""
@@ -313,19 +373,23 @@ class TestKRuntimeD3D12(unittest.TestCase):
                     del rt
 
 
-def softmax_leg(mdir, map_path):
-    """Child of test_native_softmax_switch_is_logged: create on the native device, print the smx field and the notes."""
-    rt = KRuntimeExt(gpu_build(), mdir, map_path, OUT, MAX_RENDER, True, False, False, "", backend=3)
+def softmax_leg(mdir, map_path, options, build):
+    """Child of the softmax tests: one native create; prints ok, the smx field, the notes and the error as JSON."""
+    try:
+        rt = KRuntimeExt(build, mdir, map_path, OUT, MAX_RENDER, True, False, False, options, backend=3)
+    except RuntimeError as e:
+        print(json.dumps({"ok": False, "smx": "", "notes": [], "error": str(e)}))
+        return
     rt.lib.wg_rt_notes.argtypes = [ctypes.c_void_p]
     rt.lib.wg_rt_notes.restype = ctypes.c_char_p
     kern = rt.lib.wg_rt_kernels(rt.rt).decode().split()
     smx = [kv.split("=", 1)[1] for kv in kern if kv.startswith("smx=")]
     notes = [n for n in rt.lib.wg_rt_notes(rt.rt).decode().split("\n") if n]
-    print(json.dumps({"smx": smx[0] if smx else "", "notes": notes}))
+    print(json.dumps({"ok": True, "smx": smx[0] if smx else "", "notes": notes, "error": ""}))
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 4 and sys.argv[1] == "--softmax-leg":
-        softmax_leg(sys.argv[2], sys.argv[3])
+    if len(sys.argv) == 6 and sys.argv[1] == "--softmax-leg":
+        softmax_leg(*sys.argv[2:6])
     else:
         unittest.main()

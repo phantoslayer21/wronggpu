@@ -104,9 +104,13 @@ class KRuntime {
   // the tiled input stage's guard (frame and direct_preflight): sizes, the 0.68 ratio, finite jitter in [-0.5, 0.5]
   bool tiled_guard(int rw, int rh, float jx, float jy) const;
   bool options_ok_direct();
-  // the native D3D12 device's softmax rounding probe (k_mix_probe at create): sets smx_rodd_ when the driver's fold of
-  // the mix form (clean/k/dx12/hlsl/k_smx.hlsli) does not give the exact single rounding on this adapter
-  bool mix_probe();
+  // the softmax weight rounding (runtime_k.cpp "create-time self-check"): smx_select picks the mix form or the __rodd
+  // ports after checking both on this device (native D3D12), or refuses; smx_check hashes one form's stage outputs,
+  // smx_probe counts one form's probe mismatches, smx_case_name names a self-check case
+  bool smx_select(int backend, const std::string& hook);
+  bool smx_check(bool rodd, std::vector<uint64_t>* hashes);
+  bool smx_probe(bool rodd, int* bad);
+  std::string smx_case_name(int i, bool rodd) const;
   // the stage kernel network() launches: the __rodd form of a softmax stage after a failed probe
   std::string stage_kernel(const std::string& k, const char* stage) const;
   int fill_ = -1;  // option k_fill (test hook): the byte every frame-written buffer and the histories start with
@@ -158,6 +162,7 @@ class KRuntime {
   // the softmax stages run their round-to-odd (__rodd) ports: the mix-form probe failed (native D3D12 device only)
   bool smx_rodd_ = false;
   std::string smx_note_;
+  std::string smx_test_;  // option k_smx_test (developer builds only)
   std::string notes_;  // notes of create for the caller's log (notes()), one per line, or empty
   unsigned warm_line_ = 128, warm_groups_ = 64;
   DevPtr warm_dummy_ = 0;

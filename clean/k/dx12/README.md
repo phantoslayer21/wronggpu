@@ -67,13 +67,24 @@ form the ports had before; the same bits). `kernels/k_mix_probe.hlsl` runs the s
 `k_mix_cases.py`: products whose FP32 rounding is an FP16 midpoint with a residual of either sign (normal and subnormal
 FP16), exact midpoints (ties to even) and ordinary products; every result must equal the exact single rounding
 (Fraction arithmetic), for `k_mix_probe` and `k_mix_probe__rodd`, and the records must tell a second rounding through
-FP32 apart (the residual-dropped control `K_SMX_MUT=1` fails this family). Two more guards keep the fold: the build's
-ISA check (`clean/dx12/isa_checks.json`: one `v_fma_mix*_f16` per weight in every mix-form port, none in the `__rodd`
-ports) and the native D3D12 runtime, which runs `k_mix_probe` on the records of `clean/k/runtime/k_mix_probe.h` at
-create and launches the `__rodd` stage ports when the result is not exact (kernels line: `smx=mix` or `smx=rodd(...)`;
-test hook `WG_TEST_K_MIX_PROBE_FAIL=1`). The `__rodd` ports give the same bits, but the switch is never silent: it adds
-one note of create (`wg_rt_notes`, which the executor logs; `test_k_runtime_d3d12.py`
-`test_native_softmax_switch_is_logged`).
+FP32 apart (the residual-dropped control `K_SMX_MUT=1` fails this family). The build's ISA check
+(`clean/dx12/isa_checks.json`: one `v_fma_mix*_f16` per weight in every mix-form port, none in the `__rodd` ports) keeps
+the fold in the shipped DXIL as RGA compiles it.
+
+The player's driver compiles every stage shader on its own, so neither form is taken on trust there: at create the native
+D3D12 runtime checks the shaders that will run (`clean/k/runtime/runtime_k.cpp`, "create-time self-check"). It runs
+`k_mix_probe` and `k_mix_probe__rodd` on the records of `clean/k/runtime/k_mix_probe.h`, and every softmax stage kernel it
+can select, in both forms (`k_stage_e2`, `k_stagew2_e3`, `k_stagew4_e4`, `k_stagew4_m`, `k_stagew4_d4`, `k_stagew2_d3`,
+`k_stage_d2`, `k_stage2_d1` at a 512 x 384 base map; `k_stagew2_e4`, `k_stagew2_d4`, `k_stagew4_m` at 1536 x 1280), on the runtime's own
+synthetic inputs and weights; the outputs' hashes must equal the HIP reference's (`clean/k/runtime/k_smx_selfcheck.h`,
+written by `gen_k_smx_selfcheck.py`). The mix form is used when its probe and all its stages match, else the `__rodd`
+ports when theirs all do (kernels line `smx=rodd(...)` and one note of create, `wg_rt_notes`, which the executor logs),
+else create fails and names the first stage that differs. Launching every stage kernel of both forms at create also loads,
+verifies and prepares their shaders: a missing or corrupt one fails create. The test hook `k_smx_test` (`mix_fail`,
+`both_fail`, `rodd_unchecked`, `report`) exists only in runtime libraries built with `build.py --dev-diagnostics`; a
+release build refuses it (`test_k_runtime_d3d12.py`: `test_native_softmax_switch_is_logged`,
+`test_native_softmax_refusals`, `test_native_fallback_frames_*`). `K_SMX_RODD_MUT=1` is the `__rodd` ports' negative
+control (the inexact bit dropped), never shipped.
 
 NaN: IEEE 754 does not define the sign of a NaN that a stage generates or propagates, and where the input holds NaN the
 two devices can differ in it (the decoder stages). For the cases with NaN in the input the check compares the raw bytes
