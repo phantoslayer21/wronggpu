@@ -12,7 +12,10 @@ WG_DEV_DIAGNOSTICS has no code or text for the diagnostics at all, so none of th
 found in it (DEV_ONLY_STRINGS: a developer build whose marker was forged to =0 still carries them); (2) the payload packager
 also demands the library's BUILD MANIFEST (clean/runner/build.py writes <library>.build.json: the build's configuration and the
 SHA-256 of the library) and accepts a library only when its SHA-256 matches a manifest that says dev_diagnostics = false
-(check_runtime_with_manifest).
+and records that the D3D12 kernels it embeds were checked against their sources ("dx12_kernels": null, or provenance
+"checked": clean/runner/build.py refuses test-only, bypassed, define-built or stale kernels before embedding them)
+(check_runtime_with_manifest). A loose D3D12 kernel manifest (dx12/manifest.json) in a payload or package fails when it is
+test-only or holds a bypassed, define-built or unprovenanced entry (dx12_manifest_problem).
 
 A path is a runtime library (wronggpu_runtime*.dll), a folder (searched for libraries, zip files and executables), a zip
 file (every member), or an executable (the launcher embeds the payload's files as they are, so its bytes hold the marker).
@@ -108,7 +111,34 @@ def check_runtime_with_manifest(name, data, manifest_bytes):
         return False, "the library does not match its build manifest (SHA-256): changed after its build, or another build's file"
     if m.get("dev_diagnostics") is not False:
         return False, "the build manifest says dev_diagnostics is not false"
+    if "dx12_kernels" not in m:
+        return False, ("the build manifest does not record the check of the D3D12 kernels the library embeds (a build "
+                       "older than that check): rebuild it with clean/runner/build.py")
+    dk = m["dx12_kernels"]
+    if dk is not None and not (isinstance(dk, dict) and dk.get("provenance") == "checked"):
+        return False, "the build manifest says the library's D3D12 kernels were not checked against their sources"
     return True, "dev-diagnostics=0, matches its build manifest"
+
+
+def dx12_manifest_problem(name, data):
+    """None, or why a file named manifest.json that is a D3D12 kernel manifest (clean/dx12/build_dx12.py: format, kernels)
+    must not ship: test-only (or older than the flag), or an entry built past the softmax self-check reference, with
+    extra defines, or without provenance."""
+    if os.path.basename(name).lower() != "manifest.json":
+        return None
+    try:
+        doc = json.loads(data.decode("utf-8"))
+    except Exception:
+        return None
+    if not (isinstance(doc, dict) and isinstance(doc.get("kernels"), list) and "format" in doc):
+        return None
+    if doc.get("test_only") is not False:
+        return "a test-only D3D12 kernel manifest (or one older than the test-only flag)"
+    for e in doc["kernels"]:
+        if not isinstance(e, dict) or e.get("smx_bypass") or e.get("defines") or "source_digest" not in e or "defines" not in e:
+            return "a D3D12 kernel manifest with a bypassed, define-built or unprovenanced entry (%s)" % (
+                e.get("name") if isinstance(e, dict) else e)
+    return None
 
 
 def check_artifact(name, data):
@@ -121,6 +151,9 @@ def check_artifact(name, data):
         return ok, text, ok
     if PAYLOAD_CHECK_NAMES.search(os.path.basename(name)):
         return False, "a check-only code object (mutant, probe or HIP twin) in a release payload", False
+    why = dx12_manifest_problem(name, data)
+    if why:
+        return False, why, False
     if any(v == b"1" for v in found):
         return False, "carries a developer runtime (dev-diagnostics=1)", False
     carried = dev_only_strings_in(data)
@@ -136,7 +169,7 @@ def artifacts(path):
         for dirpath, _, names in os.walk(path):
             for n in sorted(names):
                 low = n.lower()
-                if is_runtime_name(n) or low.endswith((".zip", ".exe", ".asi")):
+                if is_runtime_name(n) or low.endswith((".zip", ".exe", ".asi")) or low == "manifest.json":
                     out += artifacts(os.path.join(dirpath, n))
                 elif PAYLOAD_CHECK_NAMES.search(n):   # a check-only object anywhere in the folder fails the check
                     out.append((os.path.join(dirpath, n), n, b""))

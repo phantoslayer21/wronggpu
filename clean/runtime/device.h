@@ -49,6 +49,9 @@ class Device {
   }
   // args: pointers to the argument values (hipModuleLaunchKernel convention).
   virtual bool launch(const std::string& kernel, unsigned grid, unsigned block, void** args) = 0;
+  // Loads, verifies and compiles one kernel now (its first launch then compiles nothing); false with err() when its
+  // shader is missing or corrupt. Devices that prepare nothing ahead: true.
+  virtual bool prepare(const std::string& kernel) { (void)kernel; return true; }
   // The next launch may start before the previous one has finished (native D3D12: no UAV barrier between the two; the
   // kernels synchronize themselves). Devices that always order launches ignore it.
   virtual void unordered_next() {}

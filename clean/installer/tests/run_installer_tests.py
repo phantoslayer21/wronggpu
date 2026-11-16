@@ -332,7 +332,7 @@ def stand_in_runtime(folder, data, name="wronggpu_runtime.dll"):
     data = data if data.endswith(RELEASE_MARKER) else data + RELEASE_MARKER
     write(os.path.join(folder, name), data)
     manifest = {"format": 1, "file": name, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data), "dev_diagnostics": False,
-                "stand_in": True}
+                "dx12_kernels": None, "stand_in": True}
     write(os.path.join(folder, os.path.splitext(name)[0] + ".build.json"), json.dumps(manifest, indent=1).encode())
 
 

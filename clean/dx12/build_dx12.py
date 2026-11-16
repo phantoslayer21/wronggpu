@@ -45,6 +45,20 @@ HYB_SCAN_MUTANT=1, probe=1), built beside every build of hybrid kernels into a t
 into <out>, its manifest or a payload; removed after the scan);
 the build fails when it is not declared, gives no ISA, or PASSES rule 2, or rule 1 (unless K has no norm tree:
 HYB_NO_NORM).
+
+ISA check: every kernel built that clean/dx12/isa_checks.json lists is run through RGA (gfx1201) and the number of
+instructions whose mnemonic matches each of its patterns must equal the listed count (Model K's softmax weights: one
+v_fma_mixlo/hi_f16 per weight, the driver's fold that makes the mix form exact; none in the __rodd ports). A different
+count fails the build. WG_DX12_ISA_CHECK=0 skips it.
+
+Provenance: every manifest entry records "source_digest" (source_digest(): its declaration, the text of its source file and
+#include closure, and the build's extra defines) and "defines" (the extra defines, {} for a normal build). A build with
+--define, or with --test-only, writes a TEST-ONLY manifest ("test_only": true; a partial build keeps the flag, only a full
+build without them clears it). Model K's softmax self-check reference must belong to the sources of a self-check kernel
+built (smx_digest_check); WG_DX12_SMX_DIGEST=0 lets a negative-control build through only together with --test-only, and
+marks those entries "smx_bypass". clean/runner/build.py never embeds a test-only manifest, a bypassed, define-built or
+unprovenanced entry, or one whose source digest differs from this tree's (dx12_manifest_problems); the payload packager
+refuses a library whose build manifest does not record that check (clean/tests/check_no_dev_diagnostics.py).
 """
 import argparse
 import concurrent.futures
@@ -351,6 +365,129 @@ def scan_mutant(name):
     return name.endswith("_scanmut")
 
 
+ISA_CHECKS = os.path.join(HERE, "isa_checks.json")
+
+
+def rga_mnemonics(dxil):
+    """The mnemonics of one kernel's RGA (gfx1201) ISA, in order; None when RGA gives no ISA."""
+    with tempfile.TemporaryDirectory(prefix="wgrga_") as tmp:
+        subprocess.run([RGA, "-s", "dx12", "-c", "gfx1201", "--cs-blob", dxil, "--isa", os.path.join(tmp, "x.txt")],
+                       capture_output=True, text=True)
+        for f in os.listdir(tmp):
+            if f.endswith("_x_comp.txt"):
+                out = []
+                with open(os.path.join(tmp, f), errors="replace") as fh:
+                    for line in fh:
+                        t = line.split("//")[0].strip()
+                        if re.match(r"^[sv]_|^(buffer|global|ds|image|scratch|flat)_", t):
+                            out.append(t.split()[0])
+                return out
+    return None
+
+
+def smx_digest_check(names, defines, test_only=False):
+    """Model K's softmax self-check reference (clean/k/runtime/k_smx_selfcheck.h) must belong to the sources and defines of
+    this build when it builds one of the self-check kernels (clean/k/dx12/smx_selfcheck_digest.py); a stale header would
+    let the runtime compare its stage shaders with values from other sources. WG_DX12_SMX_DIGEST=0 lets a negative-
+    control build through only into a test-only output (test_only: --test-only); returns the self-check kernels built
+    past a stale header that way (their entries say "smx_bypass"), else an empty set."""
+    root = os.path.dirname(os.path.dirname(HERE))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from clean.k.dx12 import smx_selfcheck_digest as D
+    checked = set(names) & set(D.KERNELS)
+    why = D.stale(defines=defines) if checked else None
+    if not why:
+        return set()
+    if os.environ.get("WG_DX12_SMX_DIGEST", "1") != "0":
+        raise SystemExit("softmax self-check reference: " + why)
+    if not test_only:
+        raise SystemExit("softmax self-check reference: WG_DX12_SMX_DIGEST=0 builds past a stale header only into a "
+                         "test-only output: pass --test-only (the manifest then says test_only, and clean/runner/build.py "
+                         "and the payload packager refuse it)")
+    return checked
+
+
+_INCLUDE = re.compile(r'^\s*#\s*include\s+"([^"]+)"', re.M)
+
+
+def source_digest(src, decl, defines, gen_dir=None, _cache=None):
+    """SHA-256 (hex) of what one shader is compiled from: its declaration (kernel_decls), the text of its source file and
+    of its #include closure (looked up as DXC does: the including file's folder, clean/dx12/hlsl, and for a Model K
+    source clean/k/dx12/hlsl and the build's generated folder gen_dir), and the extra defines ({name: value}). Line ends
+    are normalised; paths enter relative to the repository (a generated include as gen/<name>), so the digest does not
+    depend on where the clone or the build folder is."""
+    root = os.path.dirname(os.path.dirname(HERE))
+    k_source = os.path.normcase(os.path.abspath(src)).startswith(os.path.normcase(os.path.abspath(K_KERNEL_DIR)))
+    dirs = [HLSL_DIR] + ([K_HLSL_DIR] + ([gen_dir] if gen_dir else []) if k_source else [])
+    cache = {} if _cache is None else _cache
+
+    def text(path):
+        if path not in cache:
+            with open(path, "rb") as f:
+                cache[path] = f.read().replace(b"\r\n", b"\n")
+        return cache[path]
+
+    def label(path):
+        if gen_dir and os.path.normcase(os.path.abspath(path)).startswith(os.path.normcase(os.path.abspath(gen_dir))):
+            return "gen/" + os.path.relpath(path, gen_dir).replace(os.sep, "/")
+        return os.path.relpath(path, root).replace(os.sep, "/")
+
+    seen, order, missing = set(), [], set()
+
+    def walk(path):
+        key = os.path.normcase(os.path.abspath(path))
+        if key in seen:
+            return
+        seen.add(key)
+        order.append(path)
+        for inc in _INCLUDE.findall(text(path).decode("utf-8", "replace")):
+            for d in [os.path.dirname(path)] + dirs:
+                cand = os.path.normpath(os.path.join(d, inc))
+                if os.path.isfile(cand):
+                    walk(cand)
+                    break
+            else:
+                missing.add(inc)
+
+    walk(src)
+    h = hashlib.sha256()
+    h.update(b"decl\n" + json.dumps(decl, sort_keys=True).encode() + b"\n")
+    for path in sorted(order, key=label):
+        h.update(b"file " + label(path).encode() + b"\n" + text(path) + b"\n")
+    h.update(b"missing " + ",".join(sorted(missing)).encode() + b"\n")
+    h.update(b"defines\n" + "\n".join("%s=%s" % kv for kv in sorted(defines.items())).encode() + b"\n")
+    return h.hexdigest()
+
+
+def isa_check(built):
+    """built: [(kernel name, dxil path)] of this build. Fails when a kernel listed in isa_checks.json has another number
+    of instructions matching one of its patterns."""
+    if os.environ.get("WG_DX12_ISA_CHECK", "1") == "0":
+        return
+    with open(ISA_CHECKS, encoding="utf-8") as f:
+        checks = {k: v for k, v in json.load(f).items() if not k.startswith("_")}
+    todo = [(n, p) for n, p in built if n in checks]
+    if not todo:
+        return
+    if not os.path.exists(RGA):
+        raise SystemExit(f"ISA check: RGA not found at {RGA} (WG_RGA, or WG_DX12_ISA_CHECK=0 to skip)")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(6, int(os.environ.get("WG_DX12_JOBS", 6))))) as ex:
+        isa = dict(zip([n for n, _ in todo], ex.map(rga_mnemonics, [p for _, p in todo])))
+    bad = []
+    for n in sorted(isa):
+        if isa[n] is None:
+            bad.append(f"{n}: RGA gave no ISA")
+            continue
+        for pat, want in checks[n].items():
+            got = sum(1 for m in isa[n] if re.match(pat, m))
+            print(f"ISA  {n:40s} {pat} {got} / {want}", flush=True)
+            if got != want:
+                bad.append(f"{n}: {got} instructions match {pat}, {want} expected ({os.path.basename(ISA_CHECKS)})")
+    if bad:
+        raise SystemExit("ISA check failed:\n  " + "\n  ".join(bad))
+
+
 def vgpr_check(built, required=()):
     """built: [(kernel name, dxil path)] of this build. Fails when a Swin / bottleneck kernel exceeds its bound, when a
     hybrid kernel breaks an ISA rule, and when a kernel of `required` (the model hybrid kernels built) has no built
@@ -441,6 +578,9 @@ def main(argv=None):
     ap.add_argument("--define", action="append", default=[], metavar="NAME=VALUE",
                     help="an extra preprocessor define for every kernel built (test variants: negative-control mutants, "
                          "test counters; never for a shipped build)")
+    ap.add_argument("--test-only", action="store_true",
+                    help="mark the output test-only (the manifest says test_only: clean/runner/build.py never embeds it and "
+                         "the payload packager refuses it); required for WG_DX12_SMX_DIGEST=0; implied by --define")
     ap.add_argument("--list", action="store_true",
                     help="print the kernels a build with these options compiles (name and code object, JSON) and exit: "
                          "the cheap check before a build (kernel_sets.json, tests/test_kernel_sets.py)")
@@ -461,9 +601,12 @@ def main(argv=None):
     only = set(a.only.split(",")) if a.only else None
     man_path = os.path.join(dst, MANIFEST)
     old = {}
-    if only and os.path.exists(man_path):  # partial build: keep the other kernels' entries
+    old_test_only = False
+    if only and os.path.exists(man_path):  # partial build: keep the other kernels' entries (and a test-only flag)
         with open(man_path) as f:
-            old = {(k["name"], k.get("co", "")): k for k in json.load(f)["kernels"]}
+            old_doc = json.load(f)
+        old = {(k["name"], k.get("co", "")): k for k in old_doc["kernels"]}
+        old_test_only = old_doc.get("test_only") is True
     kernels = dict(old)   # (name, co) -> manifest entry
     built = []
     # generated kernels (kernels/fused_*_gen.py: the fused forms of swin_block.hlsl / bneck.hlsl) are regenerated from
@@ -497,6 +640,9 @@ def main(argv=None):
                 raise SystemExit(f"kernel {d['name']} ({d['co']}): DXIL file {os.path.basename(out)} already used "
                                  "(a second port of a name needs file=<stem>)")
             jobs.append((src, d, out, k_source))
+    bypassed = smx_digest_check({j[1]["name"] for j in jobs}, a.define, a.test_only)
+    test_only = bool(a.test_only or extra_defs or bypassed or old_test_only)
+    digest_cache = {}
     # the ISA rules' mutants beside every build of hybrid kernels: into a temporary folder of their own, never into the
     # build's output (a release folder, its manifest and a payload hold no check object); removed after the scan
     scan_dir = None
@@ -522,7 +668,12 @@ def main(argv=None):
             rga_isa(out, os.path.join(dst, "isa"), os.path.basename(out)[:-5])
         r = {"name": d["name"], "file": os.path.basename(out), "co": d["co"], "entry": d["entry"],
              "block": d["block"], "wave": d["wave"], "args": d["args"], "arg_dwords": d["arg_dwords"],
-             "source": d["source"], "sha256": sha, "rs": d["rs"]}
+             "source": d["source"], "sha256": sha, "rs": d["rs"],
+             # provenance (module doc): what it was compiled from, and the extra defines of this build
+             "source_digest": source_digest(src, d, extra_defs, k_gen if k_source else None, digest_cache),
+             "defines": dict(sorted(extra_defs.items()))}
+        if d["name"] in bypassed:
+            r["smx_bypass"] = True   # built past a stale self-check reference (WG_DX12_SMX_DIGEST=0, --test-only)
         if d["group"] != d["block"]:
             r["group"] = d["group"]
             r["gscale"] = d["gscale"]
@@ -557,13 +708,14 @@ def main(argv=None):
         raise SystemExit(f"not declared in clean/dx12/kernels or clean/k/dx12/kernels: {sorted(only - names)}")
     try:
         vgpr_check(built, {d["name"] for _, d, _, _ in jobs if hyb_scanned(d["name"]) and not d["probe"]})
+        isa_check(built)
     finally:
         if scan_dir:
             shutil.rmtree(scan_dir, ignore_errors=True)
     with open(man_path, "w") as f:
         json.dump({"format": FORMAT, "dxc": os.path.basename(os.path.dirname(os.path.dirname(DXC_DIR))),
-                   "kernels": [kernels[k] for k in sorted(kernels)]}, f, indent=1)
-    print(f"{len(kernels)} kernel(s) in {man_path}")
+                   "test_only": test_only, "kernels": [kernels[k] for k in sorted(kernels)]}, f, indent=1)
+    print(f"{len(kernels)} kernel(s) in {man_path}" + (" (TEST-ONLY: never embedded or packaged)" if test_only else ""))
     return 0
 
 

@@ -417,6 +417,14 @@
    "k_io.co"
   ],
   [
+   "k_mix_probe",
+   "k_block.co"
+  ],
+  [
+   "k_mix_probe__rodd",
+   "k_block.co"
+  ],
+  [
    "k_out_color",
    "k_io.co"
   ],
@@ -453,6 +461,10 @@
    "k_block.co"
   ],
   [
+   "k_stage2_d1__rodd",
+   "k_block.co"
+  ],
+  [
    "k_stage2_e0",
    "k_block.co"
   ],
@@ -469,6 +481,10 @@
    "k_block.co"
   ],
   [
+   "k_stage_d2__rodd",
+   "k_block.co"
+  ],
+  [
    "k_stage_e0",
    "k_block.co"
   ],
@@ -481,7 +497,15 @@
    "k_block.co"
   ],
   [
+   "k_stage_e2__rodd",
+   "k_block.co"
+  ],
+  [
    "k_stagew2_d3",
+   "k_block_wide.co"
+  ],
+  [
+   "k_stagew2_d3__rodd",
    "k_block_wide.co"
   ],
   [
@@ -489,7 +513,15 @@
    "k_block_wide.co"
   ],
   [
+   "k_stagew2_d4__rodd",
+   "k_block_wide.co"
+  ],
+  [
    "k_stagew2_e3",
+   "k_block_wide.co"
+  ],
+  [
+   "k_stagew2_e3__rodd",
    "k_block_wide.co"
   ],
   [
@@ -497,7 +529,15 @@
    "k_block_wide.co"
   ],
   [
+   "k_stagew2_e4__rodd",
+   "k_block_wide.co"
+  ],
+  [
    "k_stagew4_d4",
+   "k_block_wide.co"
+  ],
+  [
+   "k_stagew4_d4__rodd",
    "k_block_wide.co"
   ],
   [
@@ -505,7 +545,15 @@
    "k_block_wide.co"
   ],
   [
+   "k_stagew4_e4__rodd",
+   "k_block_wide.co"
+  ],
+  [
    "k_stagew4_m",
+   "k_block_wide.co"
+  ],
+  [
+   "k_stagew4_m__rodd",
    "k_block_wide.co"
   ],
   [

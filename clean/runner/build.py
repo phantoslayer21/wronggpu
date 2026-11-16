@@ -402,7 +402,69 @@ def runtime_command(cxx, out, embedded=None):
 RR_OBJECTS = None  # --with-rr: the RR runtime's object files (clean/rr_f/runtime/tools/build.py <out>/obj)
 
 
+def dx12_manifest_problems(out_dir, doc):
+    """Why the D3D12 kernel manifest `doc` (<out_dir>/dx12/manifest.json) must not be built into a runtime library: a
+    test-only manifest (clean/dx12/build_dx12.py --define / --test-only / the self-check bypass), an entry built past a
+    stale self-check reference, with extra defines, without provenance (a build older than the provenance fields), not
+    declared in this tree's sources, or whose source digest differs from this tree's sources (a stale or foreign DXIL).
+    Empty when every entry is a normal build of this tree."""
+    from clean.dx12 import build_dx12 as BD
+    out = []
+    if doc.get("test_only") is not False:
+        out.append("the manifest is test-only or older than the test-only flag (a build with --define, --test-only or "
+                   "WG_DX12_SMX_DIGEST=0, or before provenance was recorded)")
+    decls = {}
+    for src, k_source in BD.source_files(model_k=True):
+        for d in BD.kernel_decls(src):
+            decls[(d["name"], d["co"])] = (src, d, k_source)
+    gen, cache = os.path.join(out_dir, "dx12", "gen"), {}
+    for e in doc.get("kernels", []):
+        n = e.get("name")
+        hit = decls.get((n, e.get("co", "")))
+        if e.get("smx_bypass"):
+            out.append(f"{n}: built past a stale softmax self-check reference (WG_DX12_SMX_DIGEST=0)")
+        elif e.get("defines"):
+            out.append(f"{n}: built with extra defines {e['defines']}")
+        elif "source_digest" not in e or "defines" not in e:
+            out.append(f"{n}: no provenance (source_digest / defines)")
+        elif hit is None:
+            out.append(f"{n}: not declared in this tree's sources")
+        elif BD.source_digest(hit[0], hit[1], {}, gen if hit[2] else None, cache) != e["source_digest"]:
+            out.append(f"{n}: built from other sources than this tree's")
+    return out
+
+
+def check_dx12_kernels(out_dir):
+    """Before a runtime library embeds <out_dir>/dx12: refuses any problem of dx12_manifest_problems (failing closed).
+    Returns the record for the build manifest ("dx12_kernels"): None without a D3D12 manifest, else its SHA-256, its
+    entry count and provenance "checked"."""
+    man = os.path.join(out_dir, "dx12", "manifest.json")
+    if not os.path.isfile(man):
+        return None
+    with open(man, "rb") as f:
+        raw = f.read()
+    doc = json.loads(raw.decode("utf-8"))
+    bad = dx12_manifest_problems(out_dir, doc)
+    if bad:
+        raise SystemExit(f"{man}: a runtime library embeds only a normal D3D12 kernel build of this tree; rebuild them "
+                         "(clean/dx12/build_dx12.py, without --define / --test-only, into this folder) or build test "
+                         "kernels into a folder of their own:\n  " + "\n  ".join(bad[:12]) +
+                         (f"\n  ... ({len(bad)} problems)" if len(bad) > 12 else ""))
+    return {"manifest_sha256": hashlib.sha256(raw).hexdigest(), "entries": len(doc.get("kernels", [])),
+            "provenance": "checked"}
+
+
 def build_runtime(cxx, out_dir, embed=True):
+    # the D3D12 kernels a library embeds: a normal build of this tree only (never a test-only or stale one)
+    dx12 = check_dx12_kernels(out_dir) if embed else None
+    if MODELS_BUILT.get("K"):   # model K's softmax self-check reference must belong to these sources (no bypass here)
+        root = os.path.dirname(os.path.dirname(HERE))
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        from clean.k.dx12 import smx_selfcheck_digest as D
+        why = D.stale()
+        if why:
+            raise SystemExit("softmax self-check reference: " + why)
     for m in [MAP_FILE] + [o["map"] for name, o in OPTIONAL_MODELS.items() if MODELS_BUILT[name]] + \
             ([L_MAP_FILE] if MODEL_L else []):
         shutil.copyfile(m, os.path.join(out_dir, os.path.basename(m)))
@@ -410,13 +472,15 @@ def build_runtime(cxx, out_dir, embed=True):
     cmd = runtime_command(cxx, os.path.join(out_dir, runtime_library_name()), embedded)
     run(cmd)
     if os.path.isfile(os.path.join(out_dir, runtime_library_name())):  # (a build that failed raised in run)
-        write_build_manifest(out_dir, cmd, embedded is not None)
+        write_build_manifest(out_dir, cmd, embedded is not None, dx12)
 
 
-def write_build_manifest(out_dir, cmd, embedded):
+def write_build_manifest(out_dir, cmd, embedded, dx12=None):
     """<runtime library>.build.json next to the library: what this build is (R1). The payload packager accepts a runtime
     library only when its SHA-256 matches a manifest that says dev_diagnostics = false (make_payload.py, failing closed);
-    any later change of the library (stripping, signing, a copy from another build) breaks the match."""
+    any later change of the library (stripping, signing, a copy from another build) breaks the match. dx12_kernels: the
+    embedded D3D12 kernels' check (check_dx12_kernels), None when the library embeds none; the packager refuses a manifest
+    without it."""
     dll = os.path.join(out_dir, runtime_library_name())
     with open(dll, "rb") as f:
         data = f.read()
@@ -430,6 +494,7 @@ def write_build_manifest(out_dir, cmd, embedded):
         "models_left_out": sorted(n for n in OPTIONAL_MODELS if not MODELS_BUILT[n]),
         "embedded_files": bool(embedded),
         "defines": sorted(a for a in cmd if a.startswith("-D")),
+        "dx12_kernels": dx12 if embedded else None,
     }
     path = os.path.splitext(dll)[0] + ".build.json"
     with open(path, "w", encoding="utf-8", newline="\n") as f:
