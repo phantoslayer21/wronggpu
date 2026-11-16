@@ -83,6 +83,9 @@ class KRuntime {
   const std::string& err() const { return err_; }
   // notes of create for the caller's log (wg_rt_notes), one per line, or empty: the round-to-odd softmax ports
   const std::string& notes() const { return notes_; }
+  // true when create prepared every kernel this context can select (the native D3D12 device): the caller then
+  // prepares nothing more (the executor's warm_up would also compile kernels the context never runs)
+  bool prepared() const { return prepared_; }
   const std::string& model_path() const { return model_path_; }
   // What the timing marks 0..4 bracket (FrameIo.timing_base): "exposure", "input", "network", "output".
   static const char* const kTimingLabels[4];
@@ -163,7 +166,7 @@ class KRuntime {
   // the softmax stages run their round-to-odd (__rodd) ports (smx_select: the mix form failed the create-time
   // self-check, native D3D12 device only)
   bool smx_rodd_ = false;
-  // runtime option k_approx (opt-in, D3D12 devices; never the default): close-approximation variants by tag
+  // runtime option k_approx (opt-in, the native D3D12 device; never the default): close-approximation variants by tag
   // ("a1": the tiled input stage on the transcendental unit, kernels kx/k_in_tiled*__a1)
   bool approx_a1_ = false;
   bool approx_a2_ = false;  // "a2": the output stage (k_out_color, k_out_pixel_c) with KO_APPROX, kernels *__a2
@@ -177,6 +180,7 @@ class KRuntime {
   std::string smx_note_;
   std::string smx_test_;  // option k_smx_test (developer builds only)
   std::string notes_;  // notes of create for the caller's log (notes()), one per line, or empty
+  bool prepared_ = false;  // prepared()
   unsigned warm_line_ = 128, warm_groups_ = 64;
   DevPtr warm_dummy_ = 0;
   WgRtFrameInfo info_ = {};

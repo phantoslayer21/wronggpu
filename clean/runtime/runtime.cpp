@@ -3194,8 +3194,10 @@ const char* runtime_notes(Runtime* rt) { return rt->notes_text.c_str(); }
 uint64_t runtime_memory_bytes(Runtime* rt) { return rt->owned_bytes; }
 #ifdef WG_NO_MODEL_K
 const char* runtime_timing_info(Runtime*) { return nullptr; }
+bool runtime_prepared_kernels(Runtime*) { return false; }
 #else
 const char* runtime_timing_info(Runtime* rt) { return rt->k ? KRuntime::timing_info() : nullptr; }
+bool runtime_prepared_kernels(Runtime* rt) { return rt->k && rt->k->prepared(); }
 #endif
 const char* const* runtime_timing_labels(Runtime* rt) {
   static const char* const kM[4] = {"enc0", "Swin", "dec0", "post"};

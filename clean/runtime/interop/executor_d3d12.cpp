@@ -158,7 +158,9 @@ class D3d12Executor : public Executor {
     rt_ = wgrt::runtime_create(c, std::move(dev), err, true, true);
     if (!rt_) return *err = "D3D12 runtime: " + *err, false;
     ext_ = wgrt::d3d12_ext(wgrt::runtime_device(rt_));
-    if (!ext_->warm_up(&e) || !wgrt::runtime_device(rt_)->sync())
+    // model K prepared exactly the kernels its context can select at create; warm_up would also compile the others
+    // (unselected opt-in forms among them), so it runs only for a runtime that did not prepare its own
+    if (!(wgrt::runtime_prepared_kernels(rt_) || ext_->warm_up(&e)) || !wgrt::runtime_device(rt_)->sync())
       return *err = "D3D12 executor: " + (e.empty() ? wgrt::runtime_device(rt_)->err() : e), false;
     return true;
   }

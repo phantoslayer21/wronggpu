@@ -355,6 +355,25 @@ std::string stage_kernel_base(const KStageInfo& st, bool f16, bool has_y, int nw
 // is refused with k_fast=1 or k_fast_in=1), k_expo_rule (spec, the default: spec 42 draft 3 section 4, E_cur = the
 // game's exposure or 1, E_aux = the auto-exposure value; v051: opt-in, for A/B only, the 0.5.1 rule E_cur = E_aux =
 // the auto-exposure value when it runs).
+// whether key= appears in the runtime options or WG_RUNTIME_OPTIONS (also with an empty value)
+bool option_given(const WgRtConfig& c, const std::string& key) {
+  const char* env = std::getenv("WG_RUNTIME_OPTIONS");
+  const std::string text = std::string(c.runtime_options ? c.runtime_options : "") + ";" + (env ? env : "");
+  for (size_t a = 0; a <= text.size();) {
+    size_t b = text.find(';', a);
+    if (b == std::string::npos) b = text.size();
+    if (text.compare(a, key.size() + 1, key + "=") == 0) return true;
+    a = b + 1;
+  }
+  return false;
+}
+// a value for a one-line message: control characters as '?'
+std::string one_line(std::string v) {
+  for (char& ch : v)
+    if ((unsigned char)ch < 32 || ch == 127) ch = '?';
+  return v;
+}
+
 std::string option(const WgRtConfig& c, const std::string& key) {
   const char* env = std::getenv("WG_RUNTIME_OPTIONS");
   const std::string text = std::string(c.runtime_options ? c.runtime_options : "") + ";" + (env ? env : "");
@@ -477,21 +496,28 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   // on the transcendental unit (kernels kx/k_in_tiled*__a1; clean/k/dx12/hlsl/k_in_common.hlsli KI_HWMATH).
   // "a2": the output stage's divisions on v_rcp_f32 with one quotient correction and two reciprocals without their
   // Newton step (kernels k_out_color*__a2, k_out_pixel_c*__a2; clean/k/dx12/hlsl/k_out.hlsli KO_APPROX). A comma list
-  // selects several. D3D12 devices only (HIP refuses); taking one adds a note of create (not bit-exact).
-  const std::string kapprox = option(c, "k_approx");
-  if (!kapprox.empty()) {
+  // selects several. The native D3D12 device only (HIP and the hybrid device refuse); taking one adds a note of create
+  // (not bit-exact).
+  if (option_given(c, "k_approx")) {
+    const std::string kapprox = option(c, "k_approx");
+    if (kapprox.empty()) return fail("model K: k_approx is empty (a1, a2 or a1,a2)");
     size_t at = 0;
     while (at <= kapprox.size()) {
       const size_t end = std::min(kapprox.find(',', at), kapprox.size());
       const std::string tag = kapprox.substr(at, end - at);
       if (tag == "a1") approx_a1_ = true;
       else if (tag == "a2") approx_a2_ = true;
-      else return fail("model K: unknown k_approx " + tag + " (a1, a2)");
+      else if (tag.empty()) return fail("model K: k_approx has an empty item: " + one_line(kapprox) + " (a1, a2)");
+      else return fail("model K: unknown k_approx " + one_line(tag) + " (a1, a2)");
       at = end + 1;
     }
-    if (c.backend < 2) return fail("model K: k_approx runs on the D3D12 devices only");
+    // the native D3D12 device only: it prepares the selected forms at create and refuses the fast input stage; the
+    // hybrid device (backend 2) and HIP are refused
+    if (c.backend != 3) return fail("model K: k_approx runs on the native D3D12 device only");
     if (approx_a1_ && !in_exact_) return fail("model K: k_approx=a1 needs the exact input kernels (k_io_exact.co)");
     if (approx_a2_ && fast_) return fail("model K: k_approx=a2 and k_fast=1 exclude each other");
+    // a2 has forms of k_out_color and k_out_pixel_c only: the full head's k_out_pixel would stay exact
+    if (approx_a2_ && !compact_head_) return fail("model K: k_approx=a2 needs the compact head (k_head=compact, the default)");
     approx_note_ = std::string("model K: close approximation k_approx=") + (approx_a1_ ? "a1" : "") +
                    (approx_a1_ && approx_a2_ ? "," : "") + (approx_a2_ ? "a2" : "") +
                    " (opt-in, not bit-exact; the default path is exact)";
@@ -653,9 +679,11 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   if (!dev_->sync()) return dfail();
   // the native device prepares (loads, verifies and compiles) every kernel this context can select now: a missing or
   // corrupt shader fails create here, not at the first frame
-  if (c.backend == 3)
+  if (c.backend == 3) {
     for (const std::string& k : d3d12_kernels())
       if (!dev_->prepare(k)) return dfail();
+    prepared_ = true;
+  }
   if (!smx_select(c.backend, smx_test_)) return false;
   if (!approx_note_.empty()) notes_ += (notes_.empty() ? "" : "\n") + approx_note_;
   return true;

@@ -116,17 +116,23 @@ Known limit, shared with Model M's ports: D3D12 flushes FP32 denormals (inputs a
 ## Close approximations (runtime option `k_approx`, opt-in)
 
 Every port above is exact, and nothing set is the exact path. `k_approx` selects close approximations of two stages on
-the D3D12 devices (HIP refuses the option); they are judged by image quality against the exact path, not byte for byte,
-and taking one adds a note of create.
+the native D3D12 device (HIP and the hybrid device refuse the option); they are judged by image quality against the
+exact path, not byte for byte, and taking one adds a note of create.
 
 - `a1`, the tiled input stage (`kx/k_in_tiled*__a1`, `hlsl/k_in_common.hlsli` `KI_HWMATH`): its correctly rounded log2,
   2^x and divisions (FP32 double-word arithmetic with a Ziv test and a binary64 fallback) become `v_log_f32`,
-  `v_exp_f32` (about 1 FP32 ulp) and `v_rcp_f32` times the dividend (scaled for |b| >= 2^126). On the port-check input
-  family the network input x0 differs from exact in about 1e-5 of its FP16 values, always by one FP16 ulp.
+  `v_exp_f32` (about 1 FP32 ulp) and `v_rcp_f32` times the dividend (scaled for |b| >= 2^126). Frames that take the
+  legacy input kernels (a render size above 0.68 x the output, a jitter outside [-0.5, 0.5], `input_tiled=0`) run the
+  exact input stage.
 - `a2`, the output stage (`k_out_color*__a2`, `k_out_pixel_c*__a2`, `hlsl/k_out.hlsli` `KO_APPROX`): its exact divisions
   become `v_rcp_f32` times the dividend plus one correction of the quotient from its exact residual, and two refined
-  reciprocals drop their Newton step; every opaque barrier stays. On the port-check output family (plain and
-  special-value inputs) every FP16 output is within one ulp of exact.
+  reciprocals drop their Newton step; every opaque barrier stays. It needs the compact head (`k_head=compact`, the
+  default): the full head's `k_out_pixel` has no `a2` form.
 
-`k_approx=a1,a2` takes both. `test_k_runtime_d3d12.py` (`test_k_approx_refusals`, `test_native_k_approx_close`) checks
-the refusals, the note, that the `__a1` / `__a2` kernels run, and loose closeness bounds on the synthetic model.
+`k_approx=a1,a2` takes both. Create refuses, in one line, an empty value or list item, an unknown tag, `a1` without the
+exact input kernels, and `a2` with `k_fast=1` or `k_head=full`. It prepares the `__a1` / `__a2` forms (and checks their
+manifest digests) only when they are selected, and the D3D12 executor runs no warm-up of its own for model K, so an
+unusable approximate shader cannot affect a context that does not select it. `test_k_runtime_d3d12.py`
+(`test_k_approx_*`, `test_native_k_approx_frames`) checks the refusals, the notes, the per-frame kernel selection and
+loose closeness bounds on the synthetic model; `test_k_approx_executor.py` checks the executor with a changed
+approximate shader, selected and not.
