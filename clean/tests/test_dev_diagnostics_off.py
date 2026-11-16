@@ -230,6 +230,20 @@ class PackagerRefusesDeveloperRuntime(unittest.TestCase):
             res = chk.check_path(os.path.join(d, "folder"))
             self.assertTrue(any(not ok for _, ok, _, _ in res), res)
 
+    def test_a_test_program_switch_is_refused(self):
+        """WG_TEST_JITTER_OUT (test_interop_d3d12.exe's dx12same switch) exists only in the test program: a runtime library
+        or any payload or package file naming it is refused."""
+        self.assertFalse(chk.check_bytes(b"MZ" + MARK0 + b" WG_TEST_JITTER_OUT ")[0])
+        ok, text, _ = chk.check_artifact("test_interop_d3d12.exe", b"MZ ... WG_TEST_JITTER_OUT ...")
+        self.assertFalse(ok)
+        self.assertIn("test program", text)
+        self.assertTrue(chk.check_artifact("readme.txt", b"plain text")[0])
+        lib = self._release()
+        r, _ = self._pack({"wronggpu_runtime.dll": lib, "tools/harness.exe": b"MZ WG_TEST_JITTER_OUT"},
+                          {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", lib)})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("test program", r.stderr + r.stdout)
+
     def test_no_manifest_refuses_the_payload(self):
         r, out = self._pack({"wronggpu_runtime.dll": self._release()})
         self.assertNotEqual(r.returncode, 0)

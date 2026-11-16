@@ -593,17 +593,22 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
         !alloc(&Hh_[p], (size_t)Bw_ * Bh_ * 4 * 2, true))
       return false;
   const int ny = std::max(256, max_rh_ / 2);
-  // native_direct: no dense inputs (the kernels read the game's textures) and no legacy input-stage maps (cpre, cpre2:
-  // the tiled input stage, the only one with direct forms, reads neither)
-  if (!(native_direct_ || (alloc(&color_, R * 16) && alloc(&depth_, R * 4) && alloc(&motion_, R * 8) &&
-                           alloc(&cpre_, R * 16) && alloc(&cpre2_, R * 8))) ||
-      !alloc(&ctap_, R * 8) || !alloc(&ctapT_, R * 2) ||
+  // native_direct: no dense inputs (the kernels read the game's textures). The legacy input stage's maps (cpre, cpre2)
+  // are needed by every context: its direct forms (kx/k_in_color_direct, then kx/k_in_reset or kx/k_in_base_direct) run
+  // on a frame outside the tiled guard (a render size above 0.68 x the output, a jitter outside [-0.5, 0.5],
+  // input_tiled=0) and write and read them
+  if (!(native_direct_ || (alloc(&color_, R * 16) && alloc(&depth_, R * 4) && alloc(&motion_, R * 8))) ||
+      !alloc(&cpre_, R * 16) || !alloc(&cpre2_, R * 8) || !alloc(&ctap_, R * 8) || !alloc(&ctapT_, R * 2) ||
       // exp2tab: read only by the host emulator's k_out_pixel (the GPU uses v_exp_f16); a valid, zeroed buffer
       !alloc(&exp2tab_, 65536 * 2, true) || !alloc(&tables_, 8 * kTableBytes) ||
       !alloc(&expo_, 32, true) || !alloc(&expo_partials_, 4 * (size_t)cdiv(ny, 4)) || !alloc(&expo_computed_, 4, true) ||
       !alloc(&expo_sync_, 4, true) || !alloc(&xs_, 16, true) || !alloc(&kexpo_, 16, true) ||
       (!warm_at_.empty() && !alloc(&warm_dummy_, 16, true)))
     return false;
+  // every buffer an input-stage kernel of this context can be handed is allocated: a null pointer would be packed as
+  // arena offset 0 (clean/runtime/struct_args.h) and alias the arena's first allocation
+  if (!cpre_ || !cpre2_ || !ctap_ || !ctapT_ || (!native_direct_ && (!color_ || !depth_ || !motion_)))
+    return fail("model K: an input-stage buffer is not allocated (it would be packed as arena offset 0)");
   // the own output buffer (tests): dense RGB f32, dense RGBA f32 (FrameIo.out_rgba32f) or RGBA16F rows that fit
   if (!external_io_ && !alloc(&out_, (size_t)W_ * H_ * 16, true)) return false;
   if (fill_ >= 0) {  // k_fill (test hook): the sentinel in everything a frame writes, before the first frame
@@ -1198,6 +1203,9 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
       ++tiled_launches_;
     } else {
       const std::string color_name = std::string(in_exact_ ? "kx/k_in_color" : "k_in_color") + (native_direct_ ? "_direct" : "");
+      // the legacy input kernels write and read cpre / cpre2: never launched with a null one (packed as arena offset 0)
+      if (!ip.cpre || !ip.cpre2)
+        return fail("model K: " + color_name + " would get a null cpre / cpre2 (arena offset 0); the frame is refused");
       if (!launch(color_name.c_str(), cdiv((long long)rw * rh, kThreads), kThreads, &ip)) return false;
       ++legacy_color_launches_;
       // native_direct: k_in_color / k_in_base read the game's textures (their "_direct" forms); k_in_reset reads buffers only
