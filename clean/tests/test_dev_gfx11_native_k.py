@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MIT
 """The developer-only native Model K choice of the WG_DEV_GFX11 opening (clean/runtime/rdna4.h): the runtime launches the
 native kernel <name>__g11 where the dx12-gfx11 manifest has it, only in a build made with the macro, only when
-WG_DEV_GFX11_NATIVE_K=1 is set on top of the shortcut.
+WG_DEV_GFX11_NATIVE_K is set on top of the shortcut: 1 for every kernel the manifest has, or a comma list of port names
+for only those.
 
 No GPU: clean/runtime/tests/test_native_k_name.cpp is built twice with the host C++ compiler (CXX, clang++ or g++; skipped
 without one), without and with -DWG_DEV_GFX11, and both builds must pass (the lookup picks __g11 only in the second, only when
