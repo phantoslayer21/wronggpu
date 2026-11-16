@@ -6,7 +6,7 @@ A copy of the runtime build with one byte changed in k_out_pixel_c__a2.dxil and 
 k_approx=a2 output form; the executor runs the direct one) runs
 test_interop_d3d12.exe's `matrix` case at 1080p (every usual upscaler-mode ratio, HDR and LDR, both declared maximum
 sizes): with nothing set every context is taken by the D3D12 executor and its frame runs (the executor's warm-up does not
-compile the unselected form) and its mode line names the exact path; with k_approx=a2 every context is refused, naming
+compile the unselected form) and its mode line names the standard path; with k_approx=a2 every context is refused, naming
 the shader. The unchanged build passes with k_approx=a2 (control: the refusal comes from the changed byte) and its mode
 line names k_approx=a2 and an approximation.
 
@@ -84,17 +84,17 @@ class TestKApproxExecutor(unittest.TestCase):
         self.assertTrue(out.rstrip().endswith("PASS"), out)
         modes = mode_lines(out)
         self.assertEqual(len(modes), 20, modes)
-        self.assertTrue(all(";k_approx=a2;" in m and "an approximation (not bit-exact)" in m for m in modes), modes)
+        self.assertTrue(all(";k_approx=a2;" in m and "an approximation (opt-in)" in m for m in modes), modes)
 
     def test_unselected_form_is_not_prepared(self):
-        """The changed shader, nothing set: every context runs on the exact path (the warm-up skips the form)."""
+        """The changed shader, nothing set: every context runs on the standard path (the warm-up skips the form)."""
         rc, out = self.run_case(True, [])
         self.assertEqual(rc, 0, out)
         self.assertTrue(out.rstrip().endswith("PASS"), out)
         self.assertNotIn("integrity mismatch", out)
         modes = mode_lines(out)
         self.assertEqual(len(modes), 20, modes)
-        self.assertTrue(all("k_approx" not in m and "the exact path" in m for m in modes), modes)
+        self.assertTrue(all("k_approx" not in m and "the standard path" in m for m in modes), modes)
 
     def test_a1_legacy_line_once_per_context(self):
         """The a1 contract through the executor: the matrix's DLAA contexts (render size = output: the legacy input path)
