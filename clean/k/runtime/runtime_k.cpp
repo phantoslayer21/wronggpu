@@ -523,7 +523,7 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
     if (approx_a2_ && !compact_head_) return fail("model K: k_approx=a2 needs the compact head (k_head=compact, the default)");
     approx_note_ = std::string("model K: close approximation k_approx=") + (approx_a1_ ? "a1" : "") +
                    (approx_a1_ && approx_a2_ ? "," : "") + (approx_a2_ ? "a2" : "") +
-                   " (opt-in, not bit-exact; the default path is exact)" +
+                   " (opt-in faster approximation; the default is the standard path)" +
                    (approx_a1_ ? std::string("; a1 applies to the tiled input stage, frames on the legacy input path "
                                              "run the exact input stage")
                                : std::string());
