@@ -69,6 +69,89 @@ v8f wg_wmma_f16(uint4 a, uint4 b, v8f c)
     const bool hi = wg_in_upper_half();
     return wg_wmma_f16_k16(hi ? ya : a, hi ? yb : b, hi ? a : ya, hi ? b : yb, c);
 }
+
+// ---- native K = 16 operands (developer-only; the K = 16 opcode needs the translator patch of the native RDNA 3 work) --
+// A native operand is the 16 F16 values one lane hands to ONE K = 16 instruction: lo = K 0 .. 7, hi = K 8 .. 15 of its
+// row (A) or column (B), the same in both half-waves, K in index order (the order of the shortcut's operands, so the
+// products round as the shortcut's do). Built once and reused, it replaces the per-call exchange of wg_wmma_f16 above.
+struct wg_h16 { uint4 lo; uint4 hi; };
+// Opcode WG_AGS_F16_F32_K16: the translator hands all 8 dwords of the A and B fragments (16 halves, element 2 d + e = half
+// e of dword d) to one cooperative-matrix multiply, with no exchange of its own. Not an AMD opcode (0x7e is past AMD's
+// list): a stock translator does not know it, so a PSO that uses it fails to build, loudly.
+#define WG_AGS_F16_F32_K16 0x7eu
+wg_frag wg_frag8(uint4 lo, uint4 hi)
+{
+    wg_frag f;
+    f.v[0] = lo.x; f.v[1] = lo.y; f.v[2] = lo.z; f.v[3] = lo.w;
+    f.v[4] = hi.x; f.v[5] = hi.y; f.v[6] = hi.z; f.v[7] = hi.w;
+    return f;
+}
+// D = A x B + C, K = 16, one instruction. The same arguments and the same result as wg_wmma_f16_k16 (two chained K = 8
+// instructions) when the instruction sums in index order.
+v8f wg_wmma_f16_k16n(uint4 a0, uint4 b0, uint4 a1, uint4 b1, v8f c)
+{
+    return wg_v8f_frag(wg_ags_mma(WG_AGS_F16_F32_K16, wg_frag8(a0, a1), wg_frag8(b0, b1), wg_frag_v8f(c)));
+}
+v8f wg_mma16(wg_h16 a, wg_h16 b, v8f c) { return wg_wmma_f16_k16n(a.lo, b.lo, a.hi, b.hi, c); }
+
+// Row map of a native A operand. The instruction reads accumulator row p's A values from lane 16 (p & 1) + p, and
+// element i of a lane of half h is row 2 i + h. A lane that holds the gfx12 row wg_a_row(lane % 16) = 8 (p & 1) + p / 2
+// therefore leaves element i of half h holding gfx12 row 8 h + i: the gfx12 accumulator layout, so everything after the
+// product (bias, rounding, stores, the next product's B operand) and the weight packing stay as they are on RDNA 4.
+// WG_A_ROW_MUT (tests only, never in a build): a wrong table (rows 2 and 3 swapped), the negative control of the probes.
+uint wg_a_row(uint p)
+{
+#if WG_A_ROW_MUT
+    p = (p & 14u) == 2u ? p ^ 1u : p;
+#endif
+    return 8u * (p & 1u) + (p >> 1);
+}
+uint wg_a_row_lane() { return wg_a_row(WaveGetLaneIndex() & 15u); }
+// A from a 16 x 16 tile stored in the gfx12 fragment order (256 halfs: lane 16 h + r holds row r, K 8 h .. 8 h + 7) in
+// the arena: the two 16-byte slots of row wg_a_row_lane(). tile_h: the tile's offset in halfs from base (a multiple of 8).
+wg_h16 wg_ldA16(uint base, uint tile_h)
+{
+    const uint r = wg_a_row_lane();
+    wg_h16 a;
+    a.lo = wg_ld128(base, (tile_h + 8u * r) * 2u);
+    a.hi = wg_ld128(base, (tile_h + 8u * (16u + r)) * 2u);
+    return a;
+}
+// B from a tile in the same order: the two slots of column lane % 16 (no exchange, no row map).
+wg_h16 wg_ldB16(uint base, uint tile_h)
+{
+    const uint c = WaveGetLaneIndex() & 15u;
+    wg_h16 b;
+    b.lo = wg_ld128(base, (tile_h + 8u * c) * 2u);
+    b.hi = wg_ld128(base, (tile_h + 8u * (16u + c)) * 2u);
+    return b;
+}
+// B from this lane's own fragment in the gfx12 shape (column lane % 16, half h holds K 8 h .. 8 h + 7: an accumulator
+// rounded to FP16, or a fragment loaded as on RDNA 4): one half-wave exchange of its 4 dwords. The same values serve as
+// the A operand of a product whose rows are tokens (v^T = n^T Wv^T), with the instruction's own row order (no row map).
+wg_h16 wg_b16(uint4 own)
+{
+    const uint4 y = wg_xor16_4(own);
+    const bool hi = wg_in_upper_half();
+    wg_h16 b;
+    b.lo = hi ? y : own;
+    b.hi = hi ? own : y;
+    return b;
+}
+// A product whose A rows were NOT row-mapped leaves element i of half h holding row 2 i + h. This puts such a fragment
+// (rounded to FP16) into the gfx12 shape (half h holds rows 8 h .. 8 h + 7 in order): each lane keeps its own elements
+// 4 h .. 4 h + 3, fetches the partner's (one exchange of 2 dwords) and interleaves them (row 8 h + 2 m from half 0,
+// row 8 h + 2 m + 1 from half 1).
+uint4 wg_rows_to_gfx12(uint4 d)
+{
+    const bool hi = wg_in_upper_half();
+    const uint2 own = hi ? uint2(d.z, d.w) : uint2(d.x, d.y);
+    const uint2 snd = hi ? uint2(d.x, d.y) : uint2(d.z, d.w);
+    const uint2 rcv = uint2(wg_xor16_u(snd.x), wg_xor16_u(snd.y));
+    const uint2 e = hi ? rcv : own, o = hi ? own : rcv;   // rows of half 0 (even) / half 1 (odd)
+    return uint4((e.x & 0xffffu) | (o.x << 16), (e.x >> 16) | (o.x & 0xffff0000u),
+                 (e.y & 0xffffu) | (o.y << 16), (e.y >> 16) | (o.y & 0xffff0000u));
+}
 #else
 // Row of D held by accumulator element i of this lane (the gfx12 table: v + 8 h, h = lane / 16).
 uint wg_d_row(uint i) { return i + 8u * (WaveGetLaneIndex() >> 4); }
