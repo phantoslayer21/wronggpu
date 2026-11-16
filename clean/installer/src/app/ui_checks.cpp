@@ -55,7 +55,7 @@ void FirstRunChecks(HWND hwnd, const GlobalSettings& gs, const wstring& dll, boo
         // found or not, and that it is optional (the card is the line above); the file, device and architecture go to the log
         if (h.ok) LogLine(g.ctx, L"first run: HIP runtime " + h.dll + L" works on " + h.device + L" (" + h.arch + L")");
         m->lines.push_back({h.ok ? 0 : 1, h.ok ? wstring(L"HIP runtime: Found (optional)")
-                                               : wstring(L"HIP runtime: Not found (optional). Only Sparkle guard and the HIP choice in Runs\u00a0on need it.")});
+                                               : wstring(L"HIP runtime: Not found (optional). Model M runs on Direct3D\u00a012 without it.")});
     }
     partial();
     // the games first: the model's source game is named as the Library names it (the same list becomes v.games), the

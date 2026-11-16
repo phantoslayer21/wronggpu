@@ -471,8 +471,9 @@ ctest `source-size`.
   against `WrongGPU.exe` unchanged; `/WIZARD` (or switches without `/S`) opens the old wizard.
 
 **Per-game settings** (`src/wg_core/profile.*`): `<install folder>\wronggpu-setup\profile.ini` is the source of truth.
-Basic tier: `wronggpu` (on | off: `[fsr] upscaler = network | amd`), `executor` (auto | dx12 | hip), `output_filter`
-(default | original | analytic | quality5 | quality9; quality5/9 are WrongGPU variations), `pre_exposure` (scale |
+Basic tier: `wronggpu` (on | off: `[fsr] upscaler = network | amd`), `executor` (auto | dx12; an older profile's
+`hip` is dropped when the profile is read), `output_filter` (default | original | analytic | quality5 | quality9;
+quality5/9 are WrongGPU variations), `pre_exposure` (scale |
 original), `sparkle_guard` (off | on | a rate in (0, 1)), `fps_overlay` (keep | on | off: OptiScaler's
 `[Menu] ShowFps`, written only when that key exists in the game's OptiScaler.ini). On the game page Use WrongGPU is in view; Runs on, Output filter, Pre-exposure and Sparkle guard are under
 "Advanced settings (4)", shown when one of them is off its default, unsaved or changed outside the launcher (`AdvancedWanted`). Every value is checked before
