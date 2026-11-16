@@ -83,6 +83,16 @@ class KRuntime {
   const std::string& err() const { return err_; }
   // notes of create for the caller's log (wg_rt_notes), one per line, or empty: the round-to-odd softmax ports
   const std::string& notes() const { return notes_; }
+  // true when create prepared every kernel this context can select (the native D3D12 device): the caller then
+  // prepares nothing more (the executor's warm_up would also compile kernels the context never runs)
+  bool prepared() const { return prepared_; }
+  // A line for the caller's log that a frame produced (k_approx=a1 on the legacy input path: once per context), or an
+  // empty string; taking it clears it.
+  std::string take_frame_note() {
+    std::string n;
+    n.swap(frame_note_);
+    return n;
+  }
   const std::string& model_path() const { return model_path_; }
   // What the timing marks 0..4 bracket (FrameIo.timing_base): "exposure", "input", "network", "output".
   static const char* const kTimingLabels[4];
@@ -160,11 +170,26 @@ class KRuntime {
   // D3D12 latency options (create: k_color_at, k_warm, k_warm_line, k_warm_groups): the stage after which k_out_color
   // runs unordered (empty: before the input stage, HIP's order), the stage after which k_warm runs (empty: off)
   std::string color_at_, warm_at_, warm_to_;
-  // the softmax stages run their round-to-odd (__rodd) ports: the mix-form probe failed (native D3D12 device only)
+  // the softmax stages run their round-to-odd (__rodd) ports (smx_select: the mix form failed the create-time
+  // self-check, native D3D12 device only)
   bool smx_rodd_ = false;
+  // runtime option k_approx (opt-in, the native D3D12 device; never the default): close-approximation variants by tag
+  // ("a1": the tiled input stage on the transcendental unit, kernels kx/k_in_tiled*__a1)
+  bool approx_a1_ = false;
+  bool approx_a2_ = false;  // "a2": the output stage (k_out_color, k_out_pixel_c) with KO_APPROX, kernels *__a2
+  std::string approx_note_;  // the note of create when k_approx is set
+  // " k_approx=a1[,a2]" for the kernels line, or empty
+  std::string approx_tag() const {
+    if (!approx_a1_ && !approx_a2_) return std::string();
+    return std::string(" k_approx=") + (approx_a1_ ? "a1" : "") + (approx_a1_ && approx_a2_ ? "," : "") +
+           (approx_a2_ ? "a2" : "");
+  }
   std::string smx_note_;
   std::string smx_test_;  // option k_smx_test (developer builds only)
   std::string notes_;  // notes of create for the caller's log (notes()), one per line, or empty
+  bool prepared_ = false;  // prepared()
+  std::string frame_note_;         // take_frame_note()
+  bool a1_legacy_noted_ = false;   // the k_approx=a1 legacy-input line was produced (once per context)
   unsigned warm_line_ = 128, warm_groups_ = 64;
   DevPtr warm_dummy_ = 0;
   WgRtFrameInfo info_ = {};

@@ -168,6 +168,10 @@ WG_RT_API const char* wg_rt_kernels(void* rt);
  * output_taps=model|none"); runtime option output_filter=original|analytic|quality5|quality9 selects it (default:
  * original when the model file has the weights, else analytic; original without them fails create). */
 WG_RT_API const char* wg_rt_notes(void* rt);
+/* A line for the caller's log produced by the frames since the last call, or an empty string; taking it clears it. At
+   present one: model K with k_approx=a1, the first frame of the context on the legacy input path (it runs the exact
+   input stage). Valid until the next call. */
+WG_RT_API const char* wg_rt_take_frame_note(void* rt);
 /* The packed weight blob of a stage (host copy), for checks. */
 WG_RT_API int wg_rt_stage_blob(void* rt, const char* stage, const void** data, size_t* bytes);
 

@@ -192,6 +192,11 @@ Model K ships in the same `wronggpu_runtime.dll` as model M; nothing changes for
    `k_in_exact=1` names the default; `k_in_exact=0` is the same as `k_fast_in=1`, which selects `k_io.co`'s GPU log2 /
    2^x / reciprocal estimates instead (not bit-exact, test use). `k_in_exact=1` is refused with `k_fast=1` or
    `k_fast_in=1`.
+   `k_approx=a1|a2|a1,a2` (native D3D12 device only; opt-in, not bit-exact, judged by image quality against the exact
+   path; `clean/k/dx12/README.md`): `a1` the tiled input stage's transcendental unit forms, fast-close where the stage
+   supports it: a frame on the legacy input path (a render size above 0.68 x the output, a jitter outside [-0.5, 0.5],
+   `input_tiled=0`) runs the exact input stage, and the first such frame of a context logs one line; `a2` the output
+   stage's division forms (needs the compact head).
    Exposure (spec 42 draft 3 section 4): E_cur = the game's exposure texture or value, 1 if it passes none; the
    auto-exposure value (spec 07, run when the game asks for it at creation, HDR only) is E_aux and acts only through
    λ. `k_expo_rule=v051` (A/B only) restores the 0.5.1 rule (the measured value as E_cur and E_aux).

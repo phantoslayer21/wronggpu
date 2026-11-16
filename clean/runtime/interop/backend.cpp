@@ -798,9 +798,11 @@ class Context {
                                   "(model K runs its render-resolution motion variant on it)"
                                 : ""));
       const std::string net = option_value(n_rtopts_, "network"), fast = option_value(n_rtopts_, "k_fast");
-      const bool exact = (net.empty() || net == "fused") && fast != "1";
+      const std::string approx = option_value(n_rtopts_, "k_approx");   // the opt-in close approximations
+      const bool exact = (net.empty() || net == "fused") && fast != "1" && approx.empty();
       say(WG_LOG_INFO, std::string("network model K mode: network=") + (net.empty() ? "fused" : net) + ";k_fast=" +
-                           (fast.empty() ? "0" : fast) + ";handover=" + (staged_out_ ? "staged" : "fence") +
+                           (fast.empty() ? "0" : fast) + (approx.empty() ? std::string() : ";k_approx=" + approx) +
+                           ";handover=" + (staged_out_ ? "staged" : "fence") +
                            (exact ? ", the exact path" : ", an approximation (not bit-exact)") +
                            (k_default_ ? " (the default mode; network=fused8;k_fast=1;handover=staged selects the "
                                          "fastest mode)"

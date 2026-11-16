@@ -8,7 +8,8 @@ and read the intermediates cpre / cpre2, which a direct context must allocate li
 packed as arena offset 0, clean/runtime/struct_args.h, and the frame would overwrite the arena's first allocation).
 test_interop_d3d12.exe dx12same runs the same 6 frames (resets at frames 1 and 5) through executor=hip (the exact
 reference on the buffer route) and executor=dx12 (the native direct route: "inputs read directly 1") and compares the
-raw output texture bytes: every frame must be identical. The tiled Quality case is the control.
+raw output texture bytes: every frame must be identical. The tiled Quality case is the control. With k_approx=a1 on the
+direct context, the legacy frames (DLAA, a jitter outside the guard) run the exact input stage: still identical.
 
 Set WG_K_GPU_BUILD (a developer runtime build: executor=hip is a diagnostic key) and WG_K_INTEROP_EXE
 (test_interop_d3d12.exe); run under the shared GPU lock. Only synthetic parameters (random_network_params).
@@ -31,6 +32,12 @@ CASES = [  # (label, render w, h, output w, h, extra options, extra environment)
     ("jitter outside the guard, Quality", 853, 480, 1280, 720, "", {"WG_TEST_JITTER_OUT": "1"}),
     ("input_tiled=0, Quality", 853, 480, 1280, 720, "input_tiled=0", {}),
     ("control: tiled Quality", 853, 480, 1280, 720, "", {}),
+    # k_approx=a1 on the direct context only (WG_TEST_DX12_OPTIONS: the HIP reference refuses k_approx): a legacy frame
+    # runs the EXACT input stage (a1 applies to the tiled input stage only) and a1 changes nothing else, so every output
+    # byte still equals the exact reference
+    ("k_approx=a1, DLAA", 1280, 720, 1280, 720, "", {"WG_TEST_DX12_OPTIONS": "k_approx=a1"}),
+    ("k_approx=a1, jitter outside the guard", 853, 480, 1280, 720, "", {"WG_TEST_JITTER_OUT": "1",
+                                                                       "WG_TEST_DX12_OPTIONS": "k_approx=a1"}),
 ]
 ROW = re.compile(r"frame (\d+): (\d+) of (\d+) bytes differ")
 
@@ -73,6 +80,8 @@ class TestKDirectLegacy(unittest.TestCase):
                 self.assertEqual([d for _, d, _ in rows], [0] * FRAMES, "%s: output bytes differ from the exact reference"
                                  % label)
                 self.assertNotIn("null cpre", out)
+                if "k_approx=a1" in env_extra.get("WG_TEST_DX12_OPTIONS", ""):   # the option took effect: its one line
+                    self.assertEqual(out.count("k_approx=a1 applies to the tiled input stage only"), 1, out[-2000:])
                 self.assertEqual(rc, 0, out[-2000:])
 
 

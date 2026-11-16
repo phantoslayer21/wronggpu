@@ -429,7 +429,15 @@
    "k_io.co"
   ],
   [
+   "k_out_color__a2",
+   "k_io.co"
+  ],
+  [
    "k_out_color_direct",
+   "k_io.co"
+  ],
+  [
+   "k_out_color_direct__a2",
    "k_io.co"
   ],
   [
@@ -441,7 +449,15 @@
    "k_io.co"
   ],
   [
+   "k_out_pixel_c__a2",
+   "k_io.co"
+  ],
+  [
    "k_out_pixel_c_direct",
+   "k_io.co"
+  ],
+  [
+   "k_out_pixel_c_direct__a2",
    "k_io.co"
   ],
   [
@@ -585,11 +601,23 @@
    "k_io_exact.co"
   ],
   [
+   "kx/k_in_tiled__a1",
+   "k_io_exact.co"
+  ],
+  [
    "kx/k_in_tiled_direct",
    "k_io_exact.co"
   ],
   [
+   "kx/k_in_tiled_direct__a1",
+   "k_io_exact.co"
+  ],
+  [
    "kx/k_in_tiled_uniform",
+   "k_io_exact.co"
+  ],
+  [
+   "kx/k_in_tiled_uniform__a1",
    "k_io_exact.co"
   ]
  ]

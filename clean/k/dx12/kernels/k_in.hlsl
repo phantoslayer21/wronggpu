@@ -31,6 +31,11 @@
 // @wg-kernel kx/k_in_tiled_uniform co=k_io_exact.co block=256 wave=64 args=s248:p4.b128.p5.b48 defines=K_UNIFORM=1
 // @wg-kernel kx/k_in_tiled co=k_io_exact.co block=256 wave=64 args=s200:p4.b128.p5
 // @wg-kernel kx/k_in_tiled_direct co=k_io_exact.co entry=k_in_tiled block=256 wave=64 args=s200:p4.b128.p5 rs=direct defines=WG_DIRECT_TEXTURES=1
+// The __a1 forms: the opt-in close approximation a1 (runtime option k_approx=a1, never the default): log2 / 2^x /
+// divisions on the transcendental unit (hlsl/k_in_common.hlsli KI_HWMATH); not byte-identical to HIP.
+// @wg-kernel kx/k_in_tiled_uniform__a1 co=k_io_exact.co entry=k_in_tiled_uniform block=256 wave=64 args=s248:p4.b128.p5.b48 defines=K_UNIFORM=1,KI_HWMATH=1
+// @wg-kernel kx/k_in_tiled__a1 co=k_io_exact.co entry=k_in_tiled block=256 wave=64 args=s200:p4.b128.p5 defines=KI_HWMATH=1
+// @wg-kernel kx/k_in_tiled_direct__a1 co=k_io_exact.co entry=k_in_tiled block=256 wave=64 args=s200:p4.b128.p5 rs=direct defines=WG_DIRECT_TEXTURES=1,KI_HWMATH=1
 #include "wg_platform.hlsli"
 #ifndef K_UNIFORM
 #define K_UNIFORM 0

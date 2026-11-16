@@ -158,7 +158,9 @@ class D3d12Executor : public Executor {
     rt_ = wgrt::runtime_create(c, std::move(dev), err, true, true);
     if (!rt_) return *err = "D3D12 runtime: " + *err, false;
     ext_ = wgrt::d3d12_ext(wgrt::runtime_device(rt_));
-    if (!ext_->warm_up(&e) || !wgrt::runtime_device(rt_)->sync())
+    // model K prepared exactly the kernels its context can select at create; warm_up would also compile the others
+    // (unselected opt-in forms among them), so it runs only for a runtime that did not prepare its own
+    if (!(wgrt::runtime_prepared_kernels(rt_) || ext_->warm_up(&e)) || !wgrt::runtime_device(rt_)->sync())
       return *err = "D3D12 executor: " + (e.empty() ? wgrt::runtime_device(rt_)->err() : e), false;
     return true;
   }
@@ -337,7 +339,10 @@ class D3d12Executor : public Executor {
                              &e, "dx12_input_states");
     }
     bool timeout = false;   // the bottleneck wait timeout's refusal: passed on as it is (executor_select.h)
-    if (ok && !wgrt::runtime_frame(rt_, job.frame, &io)) {
+    const bool framed = ok && wgrt::runtime_frame(rt_, job.frame, &io);
+    if (framed && log_)   // a line the frame produced (model K: k_approx=a1 on the legacy input path, once per context)
+      if (const char* note = wgrt::runtime_take_frame_note(rt_)) log_(false, note);
+    if (ok && !framed) {
       ok = false;
       e = wgrt::runtime_error(rt_);
       timeout = frame_timeout_refused(e);

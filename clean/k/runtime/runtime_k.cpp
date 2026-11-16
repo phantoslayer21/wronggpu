@@ -355,6 +355,25 @@ std::string stage_kernel_base(const KStageInfo& st, bool f16, bool has_y, int nw
 // is refused with k_fast=1 or k_fast_in=1), k_expo_rule (spec, the default: spec 42 draft 3 section 4, E_cur = the
 // game's exposure or 1, E_aux = the auto-exposure value; v051: opt-in, for A/B only, the 0.5.1 rule E_cur = E_aux =
 // the auto-exposure value when it runs).
+// whether key= appears in the runtime options or WG_RUNTIME_OPTIONS (also with an empty value)
+bool option_given(const WgRtConfig& c, const std::string& key) {
+  const char* env = std::getenv("WG_RUNTIME_OPTIONS");
+  const std::string text = std::string(c.runtime_options ? c.runtime_options : "") + ";" + (env ? env : "");
+  for (size_t a = 0; a <= text.size();) {
+    size_t b = text.find(';', a);
+    if (b == std::string::npos) b = text.size();
+    if (text.compare(a, key.size() + 1, key + "=") == 0) return true;
+    a = b + 1;
+  }
+  return false;
+}
+// a value for a one-line message: control characters as '?'
+std::string one_line(std::string v) {
+  for (char& ch : v)
+    if ((unsigned char)ch < 32 || ch == 127) ch = '?';
+  return v;
+}
+
 std::string option(const WgRtConfig& c, const std::string& key) {
   const char* env = std::getenv("WG_RUNTIME_OPTIONS");
   const std::string text = std::string(c.runtime_options ? c.runtime_options : "") + ";" + (env ? env : "");
@@ -472,6 +491,43 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   // the exact input stage is the default (spec 09 / 49 accuracy); k_fast_in=1 (or k_in_exact=0, or k_fast=1, whose
   // "_f" kernels include the fast input stage) selects the fast one
   in_exact_ = !(fast_ || kfastin == "1" || kexact == "0");
+  // k_approx (opt-in, never the default): close approximations of the D3D12 ports, judged by image quality against
+  // the exact path, which stays the default and the reference. "a1": the tiled input stage's log2 / 2^x / divisions
+  // on the transcendental unit (kernels kx/k_in_tiled*__a1; clean/k/dx12/hlsl/k_in_common.hlsli KI_HWMATH): fast-close
+  // where the stage supports it; a frame on the legacy input path (kx/k_in_color + k_in_base / k_in_reset: a render
+  // size above 0.68 x the output, a jitter outside [-0.5, 0.5], input_tiled=0) runs the exact input stage, which is
+  // never refused (exact is always within quality) and is logged once per context (take_frame_note).
+  // "a2": the output stage's divisions on v_rcp_f32 with one quotient correction and two reciprocals without their
+  // Newton step (kernels k_out_color*__a2, k_out_pixel_c*__a2; clean/k/dx12/hlsl/k_out.hlsli KO_APPROX). A comma list
+  // selects several. The native D3D12 device only (HIP and the hybrid device refuse); taking one adds a note of create
+  // (not bit-exact).
+  if (option_given(c, "k_approx")) {
+    const std::string kapprox = option(c, "k_approx");
+    if (kapprox.empty()) return fail("model K: k_approx is empty (a1, a2 or a1,a2)");
+    size_t at = 0;
+    while (at <= kapprox.size()) {
+      const size_t end = std::min(kapprox.find(',', at), kapprox.size());
+      const std::string tag = kapprox.substr(at, end - at);
+      if (tag == "a1") approx_a1_ = true;
+      else if (tag == "a2") approx_a2_ = true;
+      else if (tag.empty()) return fail("model K: k_approx has an empty item: " + one_line(kapprox) + " (a1, a2)");
+      else return fail("model K: unknown k_approx " + one_line(tag) + " (a1, a2)");
+      at = end + 1;
+    }
+    // the native D3D12 device only: it prepares the selected forms at create and refuses the fast input stage; the
+    // hybrid device (backend 2) and HIP are refused
+    if (c.backend != 3) return fail("model K: k_approx runs on the native D3D12 device only");
+    if (approx_a1_ && !in_exact_) return fail("model K: k_approx=a1 needs the exact input kernels (k_io_exact.co)");
+    if (approx_a2_ && fast_) return fail("model K: k_approx=a2 and k_fast=1 exclude each other");
+    // a2 has forms of k_out_color and k_out_pixel_c only: the full head's k_out_pixel would stay exact
+    if (approx_a2_ && !compact_head_) return fail("model K: k_approx=a2 needs the compact head (k_head=compact, the default)");
+    approx_note_ = std::string("model K: close approximation k_approx=") + (approx_a1_ ? "a1" : "") +
+                   (approx_a1_ && approx_a2_ ? "," : "") + (approx_a2_ ? "a2" : "") +
+                   " (opt-in, not bit-exact; the default path is exact)" +
+                   (approx_a1_ ? std::string("; a1 applies to the tiled input stage, frames on the legacy input path "
+                                             "run the exact input stage")
+                               : std::string());
+  }
   const std::string krule = option(c, "k_expo_rule");
   if (!krule.empty() && krule != "spec" && krule != "v051")
     return fail("model K: unknown k_expo_rule " + krule + " (spec or v051)");
@@ -629,10 +685,14 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   if (!dev_->sync()) return dfail();
   // the native device prepares (loads, verifies and compiles) every kernel this context can select now: a missing or
   // corrupt shader fails create here, not at the first frame
-  if (c.backend == 3)
+  if (c.backend == 3) {
     for (const std::string& k : d3d12_kernels())
       if (!dev_->prepare(k)) return dfail();
-  return smx_select(c.backend, smx_test_);
+    prepared_ = true;
+  }
+  if (!smx_select(c.backend, smx_test_)) return false;
+  if (!approx_note_.empty()) notes_ += (notes_.empty() ? "" : "\n") + approx_note_;
+  return true;
 }
 
 // ---- the softmax weight rounding: create-time self-check (native D3D12 device) ---------------------------------------
@@ -1176,10 +1236,19 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
       kname_buf = n;
     }
     if (native_direct_ && io_kernel) kname_buf += "_direct";
+    if (approx_a1_ && kname_buf.rfind("kx/k_in_tiled", 0) == 0) kname_buf += "__a1";
+    if (approx_a2_ && (kname_buf.rfind("k_out_color", 0) == 0 || kname_buf.rfind("k_out_pixel_c", 0) == 0))
+      kname_buf += "__a2";
     return kname_buf.c_str();
   };
   // backend 1 (the host emulator) has no tiled input kernels; HIP (0) and the D3D12 devices (2 hybrid, 3 native) do
   const bool use_tiled = tiled_input_ && cfg_.backend != 1 && fin.s == 0.5f && tiled_guard(rw, rh, fin.jx, fin.jy);
+  // k_approx=a1 on a legacy-input frame: the exact input stage runs (a1 has no legacy form); one line for the caller's
+  // log, the first time in this context (take_frame_note)
+  if (approx_a1_ && !use_tiled && !a1_legacy_noted_) {
+    a1_legacy_noted_ = true;
+    frame_note_ = "model K: k_approx=a1 applies to the tiled input stage only; this context's frames on the legacy input path (a render size above 0.68 x the output, a jitter outside [-0.5, 0.5], or input_tiled=0) run the exact input stage (this line once per context)";
+  }
   // k_in_exact: the output colour taps by k_out_color (KFrame's exact plan), not by the tiled input kernel
   const bool use_tiled_color = use_tiled && !in_exact_ && !reset && 4LL * Bw_ >= W_ && 4LL * Bh_ >= H_;
   KiHost input_host = {};
@@ -1348,6 +1417,14 @@ std::vector<std::string> KRuntime::d3d12_kernels() const {
   v.push_back("k_out_color" + d);
   if (!native_direct_) v.push_back("kx/k_in_tiled_uniform");  // (no direct form: the direct frame uses k_in_tiled_direct)
   v.push_back("kx/k_in_tiled" + d);  // input_uniforms_safe refusing the host uniforms
+  if (approx_a1_) {  // k_approx=a1 (opt-in)
+    if (!native_direct_) v.push_back("kx/k_in_tiled_uniform__a1");
+    v.push_back("kx/k_in_tiled" + d + "__a1");
+  }
+  if (approx_a2_) {  // k_approx=a2 (opt-in)
+    v.push_back("k_out_color" + d + "__a2");
+    if (compact_head_) v.push_back("k_out_pixel_c" + d + "__a2");
+  }
   // the legacy input kernels: a render size above 0.68 x the output (up to 1.0, native AA / DLAA), a jitter outside
   // [-0.5, 0.5], or input_tiled=0 (k_in_reset reads buffers only: no direct form)
   v.push_back("kx/k_in_color" + d);
@@ -1438,7 +1515,8 @@ const char* KRuntime::kernels() {
                   " legacy_color_launches=" + std::to_string(legacy_color_launches_) +
                   " legacy_base_launches=" + std::to_string(legacy_base_launches_) +
                   (fast_ ? " k_fast=1" : "") + (expo_v051_ ? " k_expo_rule=v051" : "") +
-                  smx_note_ + " hidden=fused_d0" + std::string(" head=") + (compact_head_ ? "compact" : "full") +
+                  smx_note_ + approx_tag() + " hidden=fused_d0" + std::string(" head=") +
+                  (compact_head_ ? "compact" : "full") +
                   " base=" + std::to_string(Bw_) + "x" + std::to_string(Bh_) +
                   " hdr=" + (hdr_ ? "1" : "0") + " mv=render" +
                   " filter_level=" + std::to_string(level_last_) +

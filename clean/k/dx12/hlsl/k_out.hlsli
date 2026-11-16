@@ -49,6 +49,16 @@ WG_ARGS_END
 // opaque zero (the launch's workgroup count is below 2^31): x ^ ko_z is x, but the D3D12 shader compiler cannot see
 // through it. Used where the driver was seen to regroup chains of products by a shared / uniform factor or to fuse
 // FP16 multiply + add (wg_math.hlsli "DRIVER EXCEPTIONS"); HIP keeps every such product as written (contract off).
+#ifndef KO_APPROX
+#define KO_APPROX 0
+#endif
+// KO_APPROX 1: CLOSE-APPROXIMATION variant a2 (runtime option k_approx=a2; opt-in, never the default): ko_div is
+// v_rcp_f32 times the dividend plus one correction of the quotient from its exact residual (q + r (a - b q), two fma)
+// instead of the exact division, and ko_div_axis and ko_rcp_refined drop their Newton step. ko_rcp_output_bounded and
+// every opaque barrier (kof, koh, kp_opq, the conversion input) stay: without them, measured, one-FP16-ulp differences
+// of mid-range intermediates reach outputs near zero (a few at 4 ulp). Not byte-identical; measured on the port-check
+// output family (6 seeds, plain and special-value inputs): every FP16 output within 1 ulp of exact, about 1e-5 of the
+// values differ.
 #define ko_z (wg_grid_ >> 31)
 float kof(float x) { return asfloat(asuint(x) ^ ko_z); }
 double kod(double x) { uint lo, hi; asuint(x, lo, hi); return asdouble(lo ^ ko_z, hi); }
@@ -139,6 +149,17 @@ half kh_mul(half a, half b) { return koh(a * b); }
 // scaled back by the exact power of two 2^(127 - eb); every later step is then wg_div's step times a power of two with
 // all values normal (quotient within 2^+-71, residuals >= 2^-82), so each rounds to the scaled bits of wg_div's result,
 // and wg_div's exponent reassembly gives that same value. Other operands (zero, inf, NaN, far exponents): wg_div.
+#if KO_APPROX
+// a2: a rcp(b), branch free (|b| >= 2^126 scaled by 2^-64 first, see k_in_common.hlsli ki_div), plus one correction of
+// the quotient from its exact residual: within about half an FP32 ulp
+float ko_div(float a, float b)
+{
+    const float s = abs(b) < 8.5070592e+37f ? 1.0f : 5.4210109e-20f;
+    const float bs = b * s, r = rcp(bs);
+    const float q = a * r;
+    return mad(mad(-bs, q, a), r, q) * s;
+}
+#else
 float ko_div(float a, float b)
 {
     const uint ua = asuint(a), ub = asuint(b);
@@ -153,6 +174,7 @@ float ko_div(float a, float b)
     [branch] if (ea - 92u > 70u || eb - 92u > 70u) q = wg_div(a, b);
     return q;
 }
+#endif
 half kh_div(half a, half b) { return kh_round(ko_div((float)a, (float)b)); }
 
 // ---- binary64 log / 2^x (k_fp.h kd_*) ---------------------------------------------------------------------------------
@@ -433,6 +455,9 @@ void ko_color_tap(float4 c, out uint2 tap, out uint tT)
 // beta quotient of the axis coefficients (ko_div_axis: v_rcp_f32, one Newton step, residual correction)
 float ko_div_axis(float a, float b)
 {
+#if KO_APPROX  // a2: without the Newton step
+    return a * rcp(b);
+#endif
     float r = rcp(b);
     r = mad(mad(-b, r, 1.0f), r, r);
     const float q = a * r;
@@ -496,6 +521,9 @@ float ko_cubic_unit(float Am1, float A0, float A1, float A2, KoAxis a)
 // the IEEE division elsewhere
 float ko_rcp_refined(float x)
 {
+#if KO_APPROX  // a2: without the Newton step
+    return rcp(x);
+#endif
     [branch] if (x >= asfloat(0x2f800000u) && x <= asfloat(0x4f800000u)) {
         const float r = rcp(x);
         return mad(mad(-x, r, 1.0f), r, r);
