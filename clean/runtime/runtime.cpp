@@ -496,6 +496,7 @@ struct Runtime {
   std::string output_filter_opt;  // the option as given ("" = none)
   uint32_t lz_bits[5] = {0, 0, 0, 0, 0};  // FP16 bit patterns of the weights w(-2) ... w(+2), even output index
   std::string notes_text;         // lines for the front end's log at create (runtime_notes)
+  std::string frame_note_text;    // runtime_take_frame_note
   // Motion vectors at output resolution (runtime option motion_outres=original|point; no option: frames never use
   // FrameIo.motion_hi and nothing is loaded for it). 1 = "original": the kernels of encoder_mo.co / post_mo_w64*.co
   // (spec 03 draft 4, spec 06 section 3) run on frames that bring the raw motion; 2 = "point": such frames run on the
@@ -3195,9 +3196,14 @@ uint64_t runtime_memory_bytes(Runtime* rt) { return rt->owned_bytes; }
 #ifdef WG_NO_MODEL_K
 const char* runtime_timing_info(Runtime*) { return nullptr; }
 bool runtime_prepared_kernels(Runtime*) { return false; }
+const char* runtime_take_frame_note(Runtime*) { return nullptr; }
 #else
 const char* runtime_timing_info(Runtime* rt) { return rt->k ? KRuntime::timing_info() : nullptr; }
 bool runtime_prepared_kernels(Runtime* rt) { return rt->k && rt->k->prepared(); }
+const char* runtime_take_frame_note(Runtime* rt) {
+  rt->frame_note_text = rt->k ? rt->k->take_frame_note() : std::string();
+  return rt->frame_note_text.empty() ? nullptr : rt->frame_note_text.c_str();
+}
 #endif
 const char* const* runtime_timing_labels(Runtime* rt) {
   static const char* const kM[4] = {"enc0", "Swin", "dec0", "post"};
@@ -3361,6 +3367,10 @@ WG_RT_API int wg_rt_download(void* rt, uintptr_t ptr, void* dst, size_t bytes) {
 }
 WG_RT_API const char* wg_rt_kernels(void* rt) { return ((Runtime*)rt)->kernels(); }
 WG_RT_API const char* wg_rt_notes(void* rt) { return ((Runtime*)rt)->notes_text.c_str(); }
+WG_RT_API const char* wg_rt_take_frame_note(void* rt) {
+  const char* n = runtime_take_frame_note((Runtime*)rt);
+  return n ? n : "";
+}
 WG_RT_API const char* wg_rt_model_source(void* rt) { return ((Runtime*)rt)->model_source.c_str(); }
 WG_RT_API int wg_rt_stage_blob(void* rt, const char* stage, const void** data, size_t* bytes) {
   Runtime* r = (Runtime*)rt;

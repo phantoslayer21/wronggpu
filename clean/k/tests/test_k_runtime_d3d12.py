@@ -475,6 +475,50 @@ class TestKRuntimeD3D12(unittest.TestCase):
         self.assertGreater(psnr, APPROX_MIN_PSNR)
         return differ, psnr
 
+    A1_LEGACY_NOTE = "k_approx=a1 applies to the tiled input stage only"
+
+    def take_note(self, rt):
+        rt.lib.wg_rt_take_frame_note.argtypes = [ctypes.c_void_p]
+        rt.lib.wg_rt_take_frame_note.restype = ctypes.c_char_p
+        return rt.lib.wg_rt_take_frame_note(rt.rt).decode()
+
+    def test_native_k_approx_a1_legacy_note(self):
+        """The a1 contract: fast-close where the stage supports it. A frame on the legacy input path (here a jitter outside
+        [-0.5, 0.5]) runs the exact input stage, never refused, and the first such frame of a context produces ONE line
+        for the log (wg_rt_take_frame_note): across tiled -> legacy -> legacy -> tiled -> legacy -> tiled -> legacy frames
+        exactly one line, at the first legacy frame; a second a1 context gets its own line; no line without a1 (nothing
+        set, k_approx=a2). The launch trace shows every frame took the path it was meant to (the check is not vacuous)."""
+        legacy_jitter = (0.75, -0.8)
+        plan = [False, True, True, False, True, False, True]   # legacy?
+        for options, expect in (("k_approx=a1", True), ("k_approx=a1", True), ("", False), ("k_approx=a2", False)):
+            with self.subTest(options=options):
+                rt = self.make(3, True, False, options, OUT, MAX_RENDER)
+                pos = os.path.getsize(TRACE) if os.path.exists(TRACE) else 0
+                try:
+                    notes = []
+                    for i, legacy in enumerate(plan):
+                        x = inputs(np.random.default_rng(700 + i), 130, 78, True, i == 0,
+                                   jitter=legacy_jitter if legacy else (0.25, -0.25))
+                        ran, pos = self.frame_kernels(rt, x, pos)
+                        on_legacy = "kx/k_in_color" in ran
+                        on_tiled = any(k.startswith("kx/k_in_tiled") for k in ran)
+                        self.assertEqual((on_legacy, on_tiled), (legacy, not legacy), (i, sorted(ran)))
+                        if legacy or "a1" not in options:
+                            self.assertFalse([k for k in ran if k.endswith("__a1")], (i, sorted(ran)))
+                        else:
+                            self.assertTrue(all(k.endswith("__a1") for k in ran if k.startswith("kx/k_in_tiled")), sorted(ran))
+                        notes.append(self.take_note(rt))
+                    got = [(i, n) for i, n in enumerate(notes) if n]
+                    if expect:
+                        self.assertEqual(len(got), 1, got)
+                        self.assertEqual(got[0][0], 1, got)   # the first legacy frame
+                        self.assertIn(self.A1_LEGACY_NOTE, got[0][1])
+                        self.assertNotIn("\n", got[0][1])
+                    else:
+                        self.assertEqual(got, [])
+                finally:
+                    del rt
+
     def test_native_k_approx_frames(self):
         """k_approx=a1,a2 against nothing set, frame by frame (1440p Quality, a reset, steady frames and a smaller
         render size): every approximate frame runs the a1 tiled input and the a2 output forms and no exact one, every

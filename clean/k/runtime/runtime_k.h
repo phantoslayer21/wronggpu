@@ -86,6 +86,13 @@ class KRuntime {
   // true when create prepared every kernel this context can select (the native D3D12 device): the caller then
   // prepares nothing more (the executor's warm_up would also compile kernels the context never runs)
   bool prepared() const { return prepared_; }
+  // A line for the caller's log that a frame produced (k_approx=a1 on the legacy input path: once per context), or an
+  // empty string; taking it clears it.
+  std::string take_frame_note() {
+    std::string n;
+    n.swap(frame_note_);
+    return n;
+  }
   const std::string& model_path() const { return model_path_; }
   // What the timing marks 0..4 bracket (FrameIo.timing_base): "exposure", "input", "network", "output".
   static const char* const kTimingLabels[4];
@@ -181,6 +188,8 @@ class KRuntime {
   std::string smx_test_;  // option k_smx_test (developer builds only)
   std::string notes_;  // notes of create for the caller's log (notes()), one per line, or empty
   bool prepared_ = false;  // prepared()
+  std::string frame_note_;         // take_frame_note()
+  bool a1_legacy_noted_ = false;   // the k_approx=a1 legacy-input line was produced (once per context)
   unsigned warm_line_ = 128, warm_groups_ = 64;
   DevPtr warm_dummy_ = 0;
   WgRtFrameInfo info_ = {};

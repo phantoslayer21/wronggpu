@@ -96,6 +96,23 @@ class TestKApproxExecutor(unittest.TestCase):
         self.assertEqual(len(modes), 20, modes)
         self.assertTrue(all("k_approx" not in m and "the exact path" in m for m in modes), modes)
 
+    def test_a1_legacy_line_once_per_context(self):
+        """The a1 contract through the executor: the matrix's DLAA contexts (render size = output: the legacy input path)
+        log the a1 line exactly once each, and their frames run (no refusal); the other ratios (the tiled path) never."""
+        rc, out = self.run_case(False, ["k_approx=a1"])
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(out.rstrip().endswith("PASS"), out)
+        blocks, cur = [], []
+        for ln in out.splitlines():
+            if ln.strip().startswith("matrix "):
+                blocks.append((ln.strip(), sum("k_approx=a1 applies to the tiled input stage only" in c for c in cur)))
+                cur = []
+            else:
+                cur.append(ln)
+        self.assertEqual(len(blocks), 20, blocks)
+        for label, n in blocks:
+            self.assertEqual(n, 1 if label.startswith("matrix DLAA") else 0, (label, n))
+
     def test_selected_changed_form_is_refused(self):
         """The changed shader, k_approx=a2: every context is refused, naming the shader."""
         rc, out = self.run_case(True, ["k_approx=a2"])

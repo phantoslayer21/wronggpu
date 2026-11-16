@@ -493,7 +493,10 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   in_exact_ = !(fast_ || kfastin == "1" || kexact == "0");
   // k_approx (opt-in, never the default): close approximations of the D3D12 ports, judged by image quality against
   // the exact path, which stays the default and the reference. "a1": the tiled input stage's log2 / 2^x / divisions
-  // on the transcendental unit (kernels kx/k_in_tiled*__a1; clean/k/dx12/hlsl/k_in_common.hlsli KI_HWMATH).
+  // on the transcendental unit (kernels kx/k_in_tiled*__a1; clean/k/dx12/hlsl/k_in_common.hlsli KI_HWMATH): fast-close
+  // where the stage supports it; a frame on the legacy input path (kx/k_in_color + k_in_base / k_in_reset: a render
+  // size above 0.68 x the output, a jitter outside [-0.5, 0.5], input_tiled=0) runs the exact input stage, which is
+  // never refused (exact is always within quality) and is logged once per context (take_frame_note).
   // "a2": the output stage's divisions on v_rcp_f32 with one quotient correction and two reciprocals without their
   // Newton step (kernels k_out_color*__a2, k_out_pixel_c*__a2; clean/k/dx12/hlsl/k_out.hlsli KO_APPROX). A comma list
   // selects several. The native D3D12 device only (HIP and the hybrid device refuse); taking one adds a note of create
@@ -520,7 +523,10 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
     if (approx_a2_ && !compact_head_) return fail("model K: k_approx=a2 needs the compact head (k_head=compact, the default)");
     approx_note_ = std::string("model K: close approximation k_approx=") + (approx_a1_ ? "a1" : "") +
                    (approx_a1_ && approx_a2_ ? "," : "") + (approx_a2_ ? "a2" : "") +
-                   " (opt-in, not bit-exact; the default path is exact)";
+                   " (opt-in, not bit-exact; the default path is exact)" +
+                   (approx_a1_ ? std::string("; a1 applies to the tiled input stage, frames on the legacy input path "
+                                             "run the exact input stage")
+                               : std::string());
   }
   const std::string krule = option(c, "k_expo_rule");
   if (!krule.empty() && krule != "spec" && krule != "v051")
@@ -1237,6 +1243,12 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
   };
   // backend 1 (the host emulator) has no tiled input kernels; HIP (0) and the D3D12 devices (2 hybrid, 3 native) do
   const bool use_tiled = tiled_input_ && cfg_.backend != 1 && fin.s == 0.5f && tiled_guard(rw, rh, fin.jx, fin.jy);
+  // k_approx=a1 on a legacy-input frame: the exact input stage runs (a1 has no legacy form); one line for the caller's
+  // log, the first time in this context (take_frame_note)
+  if (approx_a1_ && !use_tiled && !a1_legacy_noted_) {
+    a1_legacy_noted_ = true;
+    frame_note_ = "model K: k_approx=a1 applies to the tiled input stage only; this context's frames on the legacy input path (a render size above 0.68 x the output, a jitter outside [-0.5, 0.5], or input_tiled=0) run the exact input stage (this line once per context)";
+  }
   // k_in_exact: the output colour taps by k_out_color (KFrame's exact plan), not by the tiled input kernel
   const bool use_tiled_color = use_tiled && !in_exact_ && !reset && 4LL * Bw_ >= W_ && 4LL * Bh_ >= H_;
   KiHost input_host = {};

@@ -339,7 +339,10 @@ class D3d12Executor : public Executor {
                              &e, "dx12_input_states");
     }
     bool timeout = false;   // the bottleneck wait timeout's refusal: passed on as it is (executor_select.h)
-    if (ok && !wgrt::runtime_frame(rt_, job.frame, &io)) {
+    const bool framed = ok && wgrt::runtime_frame(rt_, job.frame, &io);
+    if (framed && log_)   // a line the frame produced (model K: k_approx=a1 on the legacy input path, once per context)
+      if (const char* note = wgrt::runtime_take_frame_note(rt_)) log_(false, note);
+    if (ok && !framed) {
       ok = false;
       e = wgrt::runtime_error(rt_);
       timeout = frame_timeout_refused(e);

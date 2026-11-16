@@ -121,9 +121,10 @@ exact path, not byte for byte, and taking one adds a note of create.
 
 - `a1`, the tiled input stage (`kx/k_in_tiled*__a1`, `hlsl/k_in_common.hlsli` `KI_HWMATH`): its correctly rounded log2,
   2^x and divisions (FP32 double-word arithmetic with a Ziv test and a binary64 fallback) become `v_log_f32`,
-  `v_exp_f32` (about 1 FP32 ulp) and `v_rcp_f32` times the dividend (scaled for |b| >= 2^126). Frames that take the
-  legacy input kernels (a render size above 0.68 x the output, a jitter outside [-0.5, 0.5], `input_tiled=0`) run the
-  exact input stage.
+  `v_exp_f32` (about 1 FP32 ulp) and `v_rcp_f32` times the dividend (scaled for |b| >= 2^126). Fast-close where the
+  stage supports it: frames that take the legacy input kernels (a render size above 0.68 x the output, a jitter outside
+  [-0.5, 0.5], `input_tiled=0`) run the exact input stage (never refused: exact is always within quality); the first
+  such frame of a context logs one line (`wg_rt_take_frame_note`, logged by the D3D12 executor).
 - `a2`, the output stage (`k_out_color*__a2`, `k_out_pixel_c*__a2`, `hlsl/k_out.hlsli` `KO_APPROX`): its exact divisions
   become `v_rcp_f32` times the dividend plus one correction of the quotient from its exact residual, and two refined
   reciprocals drop their Newton step; every opaque barrier stays. It needs the compact head (`k_head=compact`, the

@@ -113,6 +113,9 @@ const char* runtime_timing_info(Runtime* rt);
 // Whether create already prepared every kernel this context can select (model K on the native D3D12 device): the
 // executor then skips its warm_up, which would compile every kernel of the loaded code objects, the unselected ones too.
 bool runtime_prepared_kernels(Runtime* rt);
+// A line for the caller's log produced by the last frames (model K: k_approx=a1 on the legacy input path, once per
+// context), or null; taking it clears it. Valid until the next call.
+const char* runtime_take_frame_note(Runtime* rt);
 // Whether cfg (recon_output) or the environment (WG_RECON_SIZE=output) asks for the experimental D = O.
 bool recon_output_requested(const WgRtConfig& cfg);
 
