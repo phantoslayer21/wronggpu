@@ -674,13 +674,14 @@ inline Settings ParseSettings(const std::string& in) {
     }
     return s;
 }
-// The file's text: a new file (nothing read) starts with a comment saying what it is; a read one keeps its BOM and every line
-// with its own line end, the changed keys rewritten and new keys at the end. No stamp (UpdateSettings adds it when the file is
-// WrongGPU's).
-inline std::string RenderSettings(const Settings& s) {
+// The file's text: a new file (nothing read) starts with a comment saying what it is (newFileHeader: complete lines; null:
+// settings.ini's); a read one keeps its BOM and every line with its own line end, the changed keys rewritten and new keys at
+// the end. No stamp (UpdateStateFile adds it when the file is WrongGPU's).
+inline std::string RenderSettings(const Settings& s, const char* newFileHeader = nullptr) {
     std::string out = s.bom ? "\xEF\xBB\xBF" : "";
     if (!s.present && s.lines.empty()) {
-        out += "; WrongGPU: settings chosen in the launcher or in a WrongGPU menu in the game (they take precedence over wronggpu.ini)\r\n";
+        out += newFileHeader ? newFileHeader
+                             : "; WrongGPU: settings chosen in the launcher or in a WrongGPU menu in the game (they take precedence over wronggpu.ini)\r\n";
         for (const auto& p : s.kv) out += p.first + "=" + p.second + "\r\n";
         return out;
     }
@@ -780,7 +781,11 @@ using SettingsDecision = std::function<void(const Settings& now, std::vector<std
 // - The state folder is never created here. AccessDenied and LockDenied point to the launcher's elevated repair; Busy is
 //   contention. Test seam: TestFault("replace-held") with the file held, TestFault("replace-check") after it is let go and
 //   before the identity check (the tests act there; returning false).
-inline SetOutcome UpdateSettings(const std::wstring& gameDir, const SettingsDecision& decide, DWORD waitMs = kDefaultWaitMs) {
+// UpdateStateFile: the same for any key=value state file of the game's state folder (`fileName`, e.g. the model choice
+// record; newFileHeader: the comment a new file starts with, as RenderSettings). The lock is recursive on one thread, so a
+// caller already holding the game's state lock may call it.
+inline SetOutcome UpdateStateFile(const std::wstring& gameDir, const wchar_t* fileName, const SettingsDecision& decide, DWORD waitMs,
+                                  const char* newFileHeader) {
     SetOutcome o;
     auto fail = [&](SetResult r, DWORD e) { o.result = r; o.error = e; return o; };
     DWORD e = 0;
@@ -791,7 +796,7 @@ inline SetOutcome UpdateSettings(const std::wstring& gameDir, const SettingsDeci
     }
     StateLock lock(gameDir, waitMs);
     if (!lock.held()) return fail(lock.timedOut() ? SetResult::Busy : lock.denied() ? SetResult::LockDenied : SetResult::StateFolderUnknown, lock.error());
-    const std::wstring path = SettingsPathOf(gameDir), target = ExtendedPath(path);
+    const std::wstring path = JoinPath(StateDirOf(gameDir), fileName), target = ExtendedPath(path);
     struct Held { HANDLE h = INVALID_HANDLE_VALUE; ~Held() { if (h != INVALID_HANDLE_VALUE) CloseHandle(h); } } held;
     held.h = CreateFileW(target.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     std::string text;
@@ -829,7 +834,7 @@ inline SetOutcome UpdateSettings(const std::wstring& gameDir, const SettingsDeci
         if (!now || *now != c.second) { Set(s, c.first, c.second); changed = true; }
     }
     if (!changed) return o;
-    std::string body = RenderSettings(s);
+    std::string body = RenderSettings(s, newFileHeader);
     if (ours && !body.empty() && body.back() != '\n') body += s.eol;  // (WrongGPU's own file: its stamp on a line of its own)
     const std::string bytes = ours ? Stamped(body, name, id) : body;
     if (bytes.size() > kMaxStateBytes) { o.write.error = ERROR_FILE_TOO_LARGE; return fail(SetResult::WriteFailed, ERROR_FILE_TOO_LARGE); }
@@ -867,6 +872,9 @@ inline SetOutcome UpdateSettings(const std::wstring& gameDir, const SettingsDeci
     o.write.ok = true;
     o.written = true;
     return o;
+}
+inline SetOutcome UpdateSettings(const std::wstring& gameDir, const SettingsDecision& decide, DWORD waitMs = kDefaultWaitMs) {
+    return UpdateStateFile(gameDir, kSettingsFile, decide, waitMs, nullptr);
 }
 // UpdateSettings with fixed changes (a key already at its value is not written again).
 inline SetOutcome SetSettings(const std::wstring& gameDir, const std::vector<std::pair<std::string, std::string>>& changes, DWORD waitMs = kDefaultWaitMs) {

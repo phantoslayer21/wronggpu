@@ -1181,6 +1181,7 @@ def test_rr(t, opti, synth_f):
     st = t.j.get("settings", {})
     t.check("get: the RR settings, profile and file agree; no outside edits", rc == 0 and st.get("rr_mode", {}).get("profile") == "accurate" and
             st.get("rr_mode", {}).get("file") == "accurate" and st.get("rr_enabled", {}).get("profile") == "on" and not t.j.get("outside_edits"), (st, t.j.get("outside_edits")))
+    __import__("launcher_partial_apply_cases").run(t, exe, b, rr_ini, state_kv)  # a partial apply (RR write fails)
     # rc5 (owner 2026-11-05: Fast is the default): a player's rr_mode=accurate survives Repair and Update, never rewritten
     rc = t.run("repair", exe, "--opti=" + opti, "--noscan", "--force", "--experimental")
     rcg = t.run("get", exe)

@@ -180,6 +180,7 @@ struct OpRequest {
     std::vector<std::pair<wstring, wstring>> movePluginsList, moveModsList;
     bool otherSetupOk = false;     // 0.6.1: Clean up / Adopt of WrongGPU files another mod's setup uses, confirmed (--confirm-other-setup)
     bool hasProfile = false;       // apply: this profile (else the game's profile.ini); install: the profile a new install starts with
+    bool modelChosen = false;      // apply: the player applied the profile's model (the launcher's Apply, set <game> model=...): recorded
     Profile profile;
     // apply, the OptiScaler tab: edits of editable keys ("Section.Key", value); reset: the editable keys back to what the
     // install wrote (inikey journal, byte for byte); keep: values OptiScaler's menu saved over the launcher's are kept.
@@ -210,7 +211,17 @@ bool NeedsElevation(const wstring& dir);
 // Writes the profile into the game's files (wronggpu.ini, OptiScaler.ini), the record's hashes of those files and
 // owned-files.json; saves profile.ini.
 // warnings: what could not be done that the player should hear (rr_config_fix: the game's Engine.ini, rrconfig.h).
-void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vector<wstring>& notes, std::vector<wstring>* warnings = nullptr);
+// modelChosen: the player explicitly applied the profile's model (`set <game> model=<m>`): the game's model choice record
+// gets the launcher's choice with the next seq even when the model is the same (clean/fsr/src/model_choice_record.h).
+void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vector<wstring>& notes, std::vector<wstring>* warnings = nullptr,
+                  bool modelChosen = false);
+// The launcher's model choice into the game's model choice record (wronggpu-setup\model-choice.ini), with the next seq,
+// source=launcher. Call it holding the record's lock (wgchoice::Lock). false: not written (said in the notes and warnings).
+bool WriteLauncherModelChoice(Context& ctx, const wstring& dir, char model, std::vector<wstring>& notes, std::vector<wstring>* warnings);
+// The request of the launcher window's Apply (launcher_ui.cpp OnApply calls it; the OptiScaler tab's edits are added there):
+// the profile shown, applied, with the model shown as the player's model choice (modelChosen) whenever the build has the
+// model setting, also when it is unchanged. `set <game> ... --gui-apply` (a WRONGGPU_TESTING build) runs it for the tests.
+OpRequest GuiApplyRequest(const wstring& dir, const Profile& edit);
 Profile GameProfile(const wstring& dir);  // profile.ini, else the profile its wronggpu.ini implies
 // #219 (0.6.5): the launcher never rewrites the game's wronggpu.ini after the install (the install's defaults, the player's to
 // edit). The front end's settings it manages go into the game's state folder, wronggpu-setup\settings.ini (wg_state.h), which

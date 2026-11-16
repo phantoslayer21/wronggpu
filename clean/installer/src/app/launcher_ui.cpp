@@ -1003,7 +1003,7 @@ void StartNextQueued() {
 // (WM_APP_OPDONE), never lost.
 void OnApply() {
     if (PageWritesWait()) return;  // one rule for every write of the page (its Apply says why)
-    OpRequest r; r.op = Op::Apply; r.dir = v.cur.dir; r.hasProfile = true; r.profile = v.edit;
+    OpRequest r = GuiApplyRequest(v.cur.dir, v.edit);  // the model shown is the player's model choice, even unchanged
     for (size_t i = 0; i < v.opti.editable.size() && i < v.optiValues.size(); ++i)
         if (v.optiValues[i] != v.opti.editable[i].value) r.optiEdits.push_back({v.opti.editable[i].section + "." + v.opti.editable[i].key, v.optiValues[i]});
     for (auto& e : r.optiEdits) {  // the values typed are checked before anything is written

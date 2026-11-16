@@ -117,6 +117,21 @@ int main(int argc, char** argv) {
                 CHECK(s.selected_model == 'M' && s.rr_ready == 0);
             }
         }
+        // 0.6.5: the front end's report of the model that runs (display only) and of where the game's model choice record is
+        // (the plugin writes its menu's model clicks there). Neither is saved, neither hooks anything.
+        auto show = reinterpret_cast<PfnWrongGpuAsiShowModelV1>(GetProcAddress(module, WRONGGPU_ASI_SHOW_MODEL));
+        auto setRecord = reinterpret_cast<PfnWrongGpuAsiSetChoiceRecordV1>(GetProcAddress(module, WRONGGPU_ASI_SET_CHOICE_RECORD));
+        CHECK(show != nullptr && setRecord != nullptr);
+        if (show && setRecord && legacy) {
+            show('L');
+            show('Z');  // not an entry: ignored
+            show(1);
+            setRecord(L"X:\\nowhere\\wronggpu-setup\\model-choice.ini");
+            setRecord(nullptr);
+            int hooked = -1; char model = '?';
+            CHECK(legacy(&hooked, &model) == 1 && hooked == 0 && model == 'M');  // the saved entry is unchanged
+        }
+        CHECK(GetProcAddress(module, "WrongGpuAsiPendingChoiceV1") == nullptr);  // no queued choice exists any more
         CHECK(FreeLibrary(module) != 0); // No initialization or patches ever occurred.
         CHECK(GetModuleHandleA(argv[1]) == nullptr); // Query-only loading did not permanently pin it.
     }

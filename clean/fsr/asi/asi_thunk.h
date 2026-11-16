@@ -6,8 +6,10 @@
 //
 // It writes none of OptiScaler's data. When the player clicks a WrongGPU item, the Selectable thunk returns "clicked"
 // for OptiScaler's own "FSR 3.X" entry, so OptiScaler's unchanged code sets its backend to FSR 3.X (which loads
-// WrongGPU's FidelityFX DLL); the plugin only remembers which entry the player chose, and the front end reads that
-// back. The WrongGPU labels are plain UI text.
+// WrongGPU's FidelityFX DLL). The plugin remembers whether WrongGPU or AMD was chosen (wronggpu-asi.ini); a click on a
+// WrongGPU model is also written to the game's model choice record (clean/fsr/src/model_choice_record.h), which decides
+// the model with the launcher's and OptiScaler's list's choices. The front end reports the model it runs, so the menu
+// marks that one. The WrongGPU labels are plain UI text.
 #include <atomic>
 #include <cctype>
 #include <cstring>
@@ -16,21 +18,30 @@
 #ifndef WRONGGPU_MODEL_K
 #define WRONGGPU_MODEL_K 1
 #endif
+#ifndef WRONGGPU_MODEL_L
+#define WRONGGPU_MODEL_L 0
+#endif
 
 namespace wgasi {
 
 constexpr char kModelAmd = 0;  // no WrongGPU model: OptiScaler's own FSR 3.X (AMD) is selected
 constexpr char kModelM = 'M';
 constexpr char kModelK = 'K';
+constexpr char kModelL = 'L';
 constexpr char kDefaultModel = kModelM;  // WrongGPU is the default entry wherever the plugin hooks
+constexpr char kShowSaved = 1;           // PluginState::shown: no model reported by the front end, mark the saved one
 
-// The entries the plugin adds in front of OptiScaler's FSR 3.X entry. A build without Model K has one, "WrongGPU".
+// The entries the plugin adds in front of OptiScaler's FSR 3.X entry. A build with only Model M has one, "WrongGPU".
 struct Entry {
     char model;
     const char* label;
 };
-#if WRONGGPU_MODEL_K
+#if WRONGGPU_MODEL_K && WRONGGPU_MODEL_L
+constexpr Entry kEntries[] = {{kModelM, "WrongGPU Model M"}, {kModelK, "WrongGPU Model K"}, {kModelL, "WrongGPU Model L"}};
+#elif WRONGGPU_MODEL_K
 constexpr Entry kEntries[] = {{kModelM, "WrongGPU Model M"}, {kModelK, "WrongGPU Model K"}};
+#elif WRONGGPU_MODEL_L
+constexpr Entry kEntries[] = {{kModelM, "WrongGPU Model M"}, {kModelL, "WrongGPU Model L"}};
 #else
 constexpr Entry kEntries[] = {{kModelM, "WrongGPU"}};
 #endif
@@ -42,46 +53,95 @@ inline const char* LabelOf(char model) {
     return nullptr;
 }
 
-// Shared plugin state. `hooked` is read by the front end through the exported query; `model` is the player's current
-// choice within OptiScaler's FSR 3.X entry.
+// Shared plugin state. `hooked` is read by the front end through the exported query; `model` is the player's choice
+// within OptiScaler's FSR 3.X entry (0: AMD). `shown` is the model the front end reported as running (kShowSaved until
+// it reports one): the menu marks that one, so the model the choice record decided is what the player sees checked.
+// `unsaved`: the model of the last click the plugin could not write to the model choice record (0: none). That click
+// changed nothing (nothing is kept for later); its entry says "(not saved, try again)", or with `refused` "(not saved:
+// the choice record is full, ...)", until the next click.
 struct PluginState {
     std::atomic<bool> hooked{false};
     std::atomic<char> model{kDefaultModel};
+    std::atomic<char> shown{kShowSaved};
+    std::atomic<char> unsaved{0};
+    std::atomic<bool> refused{false};
 };
+
+constexpr const char* kUnsavedSuffix = " (not saved, try again)";
+constexpr const char* kRefusedSuffix = " (not saved: the choice record is full, see the plugin's log)";
+
+// The label drawn for entry `e`: its name, with the not-saved note when its last click could not be saved.
+inline std::string EntryLabel(const Entry& e, const PluginState& st) {
+    if (st.unsaved.load() != e.model) return e.label;
+    return std::string(e.label) + (st.refused.load() ? kRefusedSuffix : kUnsavedSuffix);
+}
+
+inline char ShownModel(const PluginState& st) {
+    const char s = st.shown.load();
+    return s == kShowSaved ? st.model.load() : s;
+}
 
 inline bool IsFsr3xLabel(const char* label) {
     return label && (std::strcmp(label, "FSR 3.X") == 0 || std::strcmp(label, "FSR 3.X/4") == 0);
 }
 
+// The result of saving a model click (SaveFn): saved; not saved (busy, unreadable, a failed write); refused (the
+// record's sequence numbers are at their end).
+enum class Save { Saved, NotSaved, Refused };
+
 // The Selectable thunk. `sel` is the real ImGui::Selectable(label, selected, flags, size). For OptiScaler's FSR 3.X
 // entry it draws the WrongGPU items first, then the original entry, records any click as the selected model, and
 // returns true (click) to OptiScaler when any of them was clicked so OptiScaler switches to its FSR 3.X backend.
-// `selected` (OptiScaler's backend is FSR 3.X) marks the WrongGPU item or the FSR 3.X item, whichever is chosen.
-// Every other entry passes through unchanged.
-template <class SelFn>
-bool SelectableThunkLogic(SelFn&& sel, const char* label, bool selected, int flags, const void* size, PluginState& st) {
+// `selected` (OptiScaler's backend is FSR 3.X) marks the item of the model shown (ShownModel). Every other entry passes
+// through unchanged. A click on a WrongGPU model is first written to the model choice record (`save(model)`); when that
+// fails NOTHING changes (the selection, the mark, OptiScaler: no click is passed on) and the entry says it was not
+// saved. *clickedOut (when given) is set to true on a click that took effect (the caller saves the selection).
+template <class SelFn, class SaveFn>
+bool SelectableThunkLogic(SelFn&& sel, const char* label, bool selected, int flags, const void* size, PluginState& st,
+                          SaveFn&& save, bool* clickedOut = nullptr) {
+    if (clickedOut) *clickedOut = false;
     if (!IsFsr3xLabel(label)) return sel(label, selected, flags, size);
-    const char model = st.model.load();
+    const char model = ShownModel(st);
     char clicked = 1;  // 1: nothing clicked
     for (const Entry& e : kEntries)
-        if (sel(e.label, selected && model == e.model, flags, size) && clicked == 1) clicked = e.model;
+        if (sel(EntryLabel(e, st).c_str(), selected && model == e.model, flags, size) && clicked == 1) clicked = e.model;
     if (sel(label, selected && model == kModelAmd, flags, size) && clicked == 1) clicked = kModelAmd;
     if (clicked == 1) return false;
+    if (clicked != kModelAmd) {
+        const Save r = save(clicked);
+        if (r != Save::Saved) {
+            st.refused.store(r == Save::Refused);
+            st.unsaved.store(clicked);
+            return false;
+        }
+    }
+    st.unsaved.store(0);
+    st.refused.store(false);
     st.model.store(clicked);
+    st.shown.store(kShowSaved);  // the player's click is the newest choice: it runs and is marked
+    if (clickedOut) *clickedOut = true;
     return true;
 }
 
-// The BeginCombo thunk: when a WrongGPU model is selected and OptiScaler would show its FSR 3.X name as the closed
+// The same without a model choice record to write (every click is saved).
+template <class SelFn>
+bool SelectableThunkLogic(SelFn&& sel, const char* label, bool selected, int flags, const void* size, PluginState& st,
+                          bool* clickedOut = nullptr) {
+    return SelectableThunkLogic(sel, label, selected, flags, size, st, [](char) { return Save::Saved; }, clickedOut);
+}
+
+// The BeginCombo thunk: when a WrongGPU model is shown and OptiScaler would show its FSR 3.X name as the closed
 // combo's preview, show the WrongGPU entry's name instead. `bc` is the real ImGui::BeginCombo(label, preview, flags).
 template <class BcFn>
 bool BeginComboThunkLogic(BcFn&& bc, const char* label, const char* preview, int flags, PluginState& st) {
     if (IsFsr3xLabel(preview))
-        if (const char* own = LabelOf(st.model.load())) preview = own;
+        if (const char* own = LabelOf(ShownModel(st))) preview = own;
     return bc(label, preview, flags);
 }
 
-// The remembered choice (wronggpu-asi.ini next to the plugin): "selection=wronggpu", "wronggpu-k" or "amd". Anything
-// else, or no file, is the default (WrongGPU). Model K in a build without it reads as WrongGPU.
+// The remembered entry (wronggpu-asi.ini next to the plugin): "selection=wronggpu" (Model M), "wronggpu-k", "wronggpu-l"
+// or "amd". Anything else, or no file, is the default (WrongGPU). A model this build lacks reads as WrongGPU (Model M).
+// Which WrongGPU model runs is the model choice record's (model_choice_record.h); this file says WrongGPU or AMD.
 inline char ParseSelection(const std::string& text) {
     size_t at = 0;
     while (at < text.size()) {
@@ -95,15 +155,42 @@ inline char ParseSelection(const std::string& text) {
         const std::string v = line.substr(10);
         if (v == "amd") return kModelAmd;
         if (v == "wronggpu-k") return LabelOf(kModelK) ? kModelK : kModelM;
+        if (v == "wronggpu-l") return LabelOf(kModelL) ? kModelL : kModelM;
         return kDefaultModel;
     }
     return kDefaultModel;
 }
 
+inline const char* SelectionValue(char model) {
+    return model == kModelAmd ? "amd" : model == kModelK ? "wronggpu-k" : model == kModelL ? "wronggpu-l" : "wronggpu";
+}
+
 inline std::string FormatSelection(char model) {
-    const char* v = model == kModelAmd ? "amd" : model == kModelK ? "wronggpu-k" : "wronggpu";
     return std::string("; WrongGPU OptiScaler plugin: the entry last selected in OptiScaler's upscaler list\r\n") +
-           "; (wronggpu or amd). Deleting this file selects WrongGPU.\r\nselection=" + v + "\r\n";
+           "; (wronggpu, wronggpu-k, wronggpu-l or amd). Deleting this file selects WrongGPU.\r\nselection=" + SelectionValue(model) + "\r\n";
+}
+
+// `text` with its selection set to `model`, every other byte kept: the line ParseSelection reads (the first one that is
+// "selection=..." once spaces are ignored) becomes "selection=<value>" and keeps its own line end; a file without one gets
+// the line at its end (with the file's first line end, CRLF when it has none; a last line without a line end gets one).
+inline std::string WithSelection(const std::string& text, char model) {
+    const std::string want = std::string("selection=") + SelectionValue(model);
+    size_t at = 0;
+    while (at < text.size()) {
+        size_t end = text.find('\n', at);
+        const size_t next = end == std::string::npos ? text.size() : end + 1;
+        if (end == std::string::npos) end = text.size();
+        size_t stop = end;
+        if (stop > at && text[stop - 1] == '\r') --stop;  // the line end ("\r\n" or "\n") stays
+        std::string line;
+        for (size_t i = at; i < stop; ++i)
+            if (!std::isspace(static_cast<unsigned char>(text[i]))) line += char(std::tolower(static_cast<unsigned char>(text[i])));
+        if (line.rfind("selection=", 0) == 0) return text.substr(0, at) + want + text.substr(stop);
+        at = next;
+    }
+    const size_t lf = text.find('\n');
+    const std::string eol = lf != std::string::npos && lf > 0 && text[lf - 1] == '\r' ? "\r\n" : lf != std::string::npos ? "\n" : "\r\n";
+    return text + (text.empty() || text.back() == '\n' ? "" : eol) + want + eol;
 }
 
 }  // namespace wgasi
