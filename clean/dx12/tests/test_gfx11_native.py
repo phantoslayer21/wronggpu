@@ -68,20 +68,59 @@ def acc_gfx12(C):
     return a
 
 
-def run(dev, kernel, A, Bm, C, out_f16=False):
-    """A, Bm (N, 16, 16) f16 logical, C (N, 16, 16) f32 -> the raw output of `kernel` (N cases)."""
+def arena_tiles(A, Bm, C):
+    """The probe arena of the tile kernels (nat_*): pa, pb (gfx12 tiles), pc (gfx12 accumulator), po (output, 0x7F)."""
     n = A.shape[0]
+    parts = [tile_gfx12(A.astype(np.float16)).tobytes(), tile_gfx12(np.swapaxes(Bm, 1, 2).astype(np.float16)).tobytes(),
+             acc_gfx12(C).tobytes(), b"\x7f" * (n * 1024)]
+    return b"".join(parts), [0, n * 512, n * 1024, n * 2048, n]
+
+
+def arena_channel(A, Bm, C, gfx12_shape=False):
+    """The probe arena of the channel kernels (k16n, k16_chain, k16_xchg, k64n): the instruction's own operands (lane l:
+    K 0 .. 7 at 32 l, K 8 .. 15 at 32 l + 16; gfx12_shape: lane l's K 8 h .. 8 h + 7 first) and its accumulator layout
+    (element i of lane l: row 2 i + l / 16)."""
+    n = A.shape[0]
+    fa = np.zeros((n, 32, 16), np.float16)
+    fb = np.zeros((n, 32, 16), np.float16)
+    for l in range(32):
+        if gfx12_shape:
+            fa[:, l, :8] = A[:, l % 16, 8 * (l // 16):8 * (l // 16) + 8]
+            fb[:, l, :8] = Bm[:, 8 * (l // 16):8 * (l // 16) + 8, l % 16]
+        else:
+            fa[:, l] = A[:, l % 16]
+            fb[:, l] = Bm[:, :, l % 16]
+    ca = np.zeros((n, 32, 8), np.float32)
+    for l in range(32):
+        for i in range(8):
+            ca[:, l, i] = C[:, 2 * i + l // 16, l % 16]
+    return fa.tobytes() + fb.tobytes() + ca.tobytes() + b"\x7f" * (n * 1024), [0, n * 1024, 2 * n * 1024, 3 * n * 1024, n]
+
+
+def channel_logical(raw):
+    """Channel kernels' output (N, 32, 8) -> logical D (N, 16, 16)."""
+    D = np.zeros((raw.shape[0], 16, 16), raw.dtype)
+    for l in range(32):
+        for i in range(8):
+            D[:, 2 * i + l // 16, l % 16] = raw[:, l, i]
+    return D
+
+
+def emu_arena(dev, kernel, arena, offs):
+    """Run a probe kernel on the emulated device over one arena laid out at offsets offs (pa, pb, pc, po, n)."""
     dev.reset()
-    pa, pb = dev.malloc(n * 512), dev.malloc(n * 512)
-    pc, po = dev.malloc(n * 1024), dev.malloc(n * 1024)
-    dev.upload(pa, tile_gfx12(A.astype(np.float16)).tobytes())
-    dev.upload(pb, tile_gfx12(np.swapaxes(Bm, 1, 2).astype(np.float16)).tobytes())
-    dev.upload(pc, acc_gfx12(C).tobytes())
-    dev.memset(po, 0x7F, n * 1024)
-    dev.launch(kernel, 1, 32, [ctypes.c_void_p(pa), ctypes.c_void_p(pb), ctypes.c_void_p(pc), ctypes.c_void_p(po),
-                               ctypes.c_uint(n)])
-    raw = dev.download(po, n * (512 if out_f16 else 1024))
-    return np.frombuffer(raw, np.float16 if out_f16 else np.float32).reshape(n, 32, 8)
+    base = dev.malloc(len(arena))
+    dev.upload(base, arena)
+    dev.launch(kernel, 1, 32, [ctypes.c_void_p(base + o) for o in offs[:4]] + [ctypes.c_uint(offs[4])])
+    return np.frombuffer(dev.download(base, len(arena)), np.uint8)
+
+
+def run(dev, kernel, A, Bm, C, out_f16=False):
+    """A, Bm (N, 16, 16) f16 logical, C (N, 16, 16) f32 -> the raw output of a tile kernel (N cases)."""
+    n = A.shape[0]
+    arena, offs = arena_tiles(A, Bm, C)
+    out = emu_arena(dev, kernel, arena, offs)[offs[3]:offs[3] + n * (512 if out_f16 else 1024)].tobytes()
+    return np.frombuffer(out, np.float16 if out_f16 else np.float32).reshape(n, 32, 8)
 
 
 def onehot_cases():
@@ -166,25 +205,9 @@ class TestOneHotEmu(unittest.TestCase):
         dev = device()
 
         def native(kernel, gfx12_shape=False):
-            dev.reset()
-            pa, pb, pc, po = (dev.malloc(n * 1024) for _ in range(4))
-            fa = np.zeros((n, 32, 16), np.float16)
-            fb = np.zeros((n, 32, 16), np.float16)
-            for l in range(32):
-                if gfx12_shape:   # lane l: K 8 h .. 8 h + 7 in its first 8 halves
-                    fa[:, l, :8] = A[:, l % 16, 8 * (l // 16):8 * (l // 16) + 8]
-                    fb[:, l, :8] = Bm[:, 8 * (l // 16):8 * (l // 16) + 8, l % 16]
-                else:
-                    fa[:, l] = A[:, l % 16]
-                    fb[:, l] = Bm[:, :, l % 16]
-            ca = np.zeros((n, 32, 8), np.float32)
-            for l in range(32):
-                for i in range(8):
-                    ca[:, l, i] = C[:, 2 * i + l // 16, l % 16]
-            dev.upload(pa, fa.tobytes()); dev.upload(pb, fb.tobytes()); dev.upload(pc, ca.tobytes())
-            dev.launch(kernel, 1, 32, [ctypes.c_void_p(pa), ctypes.c_void_p(pb), ctypes.c_void_p(pc),
-                                       ctypes.c_void_p(po), ctypes.c_uint(n)])
-            return np.frombuffer(dev.download(po, n * 1024), np.float32).reshape(n, 32, 8)
+            arena, offs = arena_channel(A, Bm, C, gfx12_shape)
+            out = emu_arena(dev, kernel, arena, offs)[offs[3]:offs[3] + n * 1024].tobytes()
+            return np.frombuffer(out, np.float32).reshape(n, 32, 8)
 
         want = np.zeros((n, 32, 8), np.float32)
         D = np.einsum("nik,nkj->nij", A.astype(np.float64), Bm.astype(np.float64)) + C
@@ -194,6 +217,95 @@ class TestOneHotEmu(unittest.TestCase):
         np.testing.assert_array_equal(native("k16n"), want)
         np.testing.assert_array_equal(native("k16_chain"), want)
         np.testing.assert_array_equal(native("k16_xchg", gfx12_shape=True), want)
+
+
+# ---- the card (GPU-TESTS.md of the native RDNA 3 work): the same probes through vkd3d-proton with the K = 16 patch -----
+sys.path.insert(0, HERE)
+import test_gfx11_helpers as GH  # noqa: E402  (the card harness of the gfx11 helpers: its env variables, module doc)
+CARD = GH.HAVE_CARD
+
+
+def card_arena(kernel, arena, offs):
+    out, txt = GH.Card.run(kernel, arena, offs, tag=kernel, out_bytes=len(arena))
+    if out is None:
+        raise AssertionError(f"{kernel}: no result\n{txt[-400:]}")
+    return out
+
+
+@unittest.skipUnless(CARD, "no card configured (test_gfx11_helpers.py module doc; needs the K = 16 patched DLLs)")
+class TestNativeOnCard(unittest.TestCase):
+    """GPU: the K = 16 opcode and the operand forms on the RX 7900 XT. WG_GFX11_VKD3D must hold the K = 16 patched
+    vkd3d-proton (a stock build refuses the opcode)."""
+
+    @classmethod
+    def setUpClass(cls):
+        GH.Card.setup()
+        for e in NAMES:
+            GH.Card.dxil[e] = GH.compile_kernel(e, src=SRC)
+        cls.rng = np.random.default_rng(20261116)
+
+    def channel(self, kernel, A, Bm, C, gfx12_shape=False):
+        n = A.shape[0]
+        arena, offs = arena_channel(A, Bm, C, gfx12_shape)
+        raw = card_arena(kernel, arena, offs)[offs[3]:offs[3] + n * 1024].tobytes()
+        return channel_logical(np.frombuffer(raw, np.float32).reshape(n, 32, 8))
+
+    def data(self, n, specials=False):
+        A = self.rng.normal(0, 1, (n, 16, 16))
+        Bm = self.rng.normal(0, 1, (n, 16, 16))
+        A[: n // 4] *= 2.0 ** self.rng.integers(-12, 12, (n // 4, 16, 1))      # cancellation across K
+        C = self.rng.normal(0, 4, (n, 16, 16)).astype(np.float32)
+        if specials:   # infinities and NaNs in both operand roles, signed zeros
+            for M in (A, Bm):
+                pick = self.rng.random(M.shape) < 0.01
+                M[pick] = self.rng.choice([np.inf, -np.inf, np.nan, 0.0, -0.0, 65504.0], int(pick.sum()))
+        return A.astype(np.float16), Bm.astype(np.float16), C
+
+    def test_k16_opcode_equals_the_chain_bit_for_bit(self):
+        for specials in (False, True):
+            A, Bm, C = self.data(256, specials)
+            one = self.channel("k16n", A, Bm, C)
+            chain = self.channel("k16_chain", A, Bm, C)
+            same = (one.view(np.uint32) == chain.view(np.uint32)) | (np.isnan(one) & np.isnan(chain))
+            self.assertEqual(float(np.mean(same)), 1.0, f"specials={specials}")
+
+    def test_k16_opcode_matches_hip(self):
+        if not GH.HIP_RUN:
+            self.skipTest("WG_GFX11_HIP_RUN not set")
+        A, Bm, C = self.data(64)
+        self.assertEqual(GH.bits_equal(self.channel("k16n", A, Bm, C), GH.hip_ref(A, Bm, C)), 1.0)
+
+    def test_k16_opcode_close_to_float64(self):
+        A, Bm, C = self.data(64)
+        D = self.channel("k16n", A, Bm, C)
+        ref = np.einsum("nik,nkj->nij", A.astype(np.float64), Bm.astype(np.float64)) + C
+        self.assertLess(float(np.max(np.abs(D - ref) / (np.abs(ref) + 1.0))), 1e-3)
+
+    def test_operand_forms_one_hot(self):
+        A, Bm = onehot_cases()
+        C0 = np.zeros((A.shape[0], 16, 16), np.float32)
+        want = acc_gfx12(np.einsum("nik,nkj->nij", A.astype(np.float64), Bm.astype(np.float64)))
+        n = A.shape[0]
+        for kernel in ("nat_ldA", "nat_b16"):
+            arena, offs = arena_tiles(A, Bm, C0)
+            got = np.frombuffer(card_arena(kernel, arena, offs)[offs[3]:offs[3] + n * 1024].tobytes(),
+                                np.float32).reshape(n, 32, 8)
+            np.testing.assert_array_equal(got, want, kernel)
+        arena, offs = arena_tiles(A, Bm, C0)
+        got = np.frombuffer(card_arena("nat_vt", arena, offs)[offs[3]:offs[3] + n * 512].tobytes(),
+                            np.float16).reshape(n, 32, 8)
+        D = np.einsum("nik,nkj->nij", A.astype(np.float64), Bm.astype(np.float64))
+        np.testing.assert_array_equal(got, tile_gfx12(np.swapaxes(D, 1, 2).astype(np.float16)))
+
+    def test_operand_forms_equal_the_chain_on_random_data(self):
+        """nat_ldA (row-mapped A, B column) gives the chain's bits on the same logical data: the same K order."""
+        A, Bm, C = self.data(128)
+        n = A.shape[0]
+        arena, offs = arena_tiles(A, Bm, C)
+        got = np.frombuffer(card_arena("nat_ldA", arena, offs)[offs[3]:offs[3] + n * 1024].tobytes(),
+                            np.float32).reshape(n, 32, 8)
+        chain = acc_gfx12(self.channel("k16_chain", A, Bm, C))
+        self.assertEqual(GH.bits_equal(got, chain), 1.0)
 
 
 # ---- S2: the translator (CPU: DXC + the dxil-spirv command line tool) --------------------------------------------------
