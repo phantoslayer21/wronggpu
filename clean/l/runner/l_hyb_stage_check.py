@@ -374,13 +374,18 @@ def main(argv=None):
     a = ap.parse_args(argv)
     # the synthetic-values rule: a real run's case files and replay outputs only in a private folder outside the
     # repository, checked before anything is read or built
+    from clean.l.runner.l_private import guard_cases, mark_real, private_dir, private_json
     cdir = None
     if a.real_inputs:
-        from clean.l.runner.l_private import private_dir, private_json
         private_json(a.json)   # the record of a real run outside the repository
         cdir = private_dir(a.private_out, what="--real-inputs: the real cases' files and replay outputs")
     elif a.private_out:
         raise SystemExit("--private-out: only with --real-inputs")
+    # a case folder holding real cases (the marker next to cases.txt) is read or written only as the private folder of
+    # a --real-inputs run, checked before anything there is read
+    guard_cases(os.path.join(cdir or os.path.join(a.build, "hyb_stage"), "cases.txt"), a.private_out)
+    if a.real_inputs and a.run:
+        mark_real(os.path.join(cdir, "cases.txt"), "l_hyb_stage_check --real-inputs")   # before any real file
     if a.set == "fused":
         kernels = FUSED_MUT if a.mutant else FUSED_KERNELS
     else:

@@ -179,6 +179,35 @@ class MarkedCases(unittest.TestCase):
         P.guard_cases(plain, None)
 
 
+class StageCheckMarker(unittest.TestCase):
+    """l_hyb_stage_check: a --real-inputs run marks its private case folder (cases.txt.real) before it writes any real
+    file; a run on a marked case folder that is not its --private-out refuses before anything there is read (the
+    module's open and numpy's load fail the test if called)."""
+
+    def test_real_run_marks_its_folder(self):
+        d = outside_tmp(self)
+        inputs, priv = os.path.join(d, "inputs"), os.path.join(d, "priv")
+        os.makedirs(inputs)   # no real input files: nothing real is read; the run only lays out its folder
+        HS.main(["--build", d, "--run", "--no-replay", "--real-inputs", inputs, "--private-out", priv])
+        self.assertTrue(os.path.exists(os.path.join(priv, "cases.txt.real")))
+
+    def test_marked_build_folder_refused_before_the_read(self):
+        d = outside_tmp(self)
+        cdir = os.path.join(d, "hyb_stage")
+        os.makedirs(cdir)
+        with open(os.path.join(cdir, "cases.txt"), "w") as f:
+            f.write("constructed")
+        P.mark_real(os.path.join(cdir, "cases.txt"), "test")
+        fail = AssertionError("a file of the real case folder was read")
+        with mock.patch.object(HS, "open", create=True, side_effect=fail), \
+                mock.patch.object(HS.np, "load", side_effect=fail), \
+                mock.patch.object(HS.np, "fromfile", side_effect=fail):
+            for mode in (["--run", "--no-replay"], ["--run", "--replay-only"], ["--run"]):
+                with self.subTest(mode=mode), self.assertRaises(SystemExit) as cm:
+                    HS.main(["--build", d] + mode)
+                self.assertIn("prepared from real data", str(cm.exception))
+
+
 class RealRecords(unittest.TestCase):
     """A real run's --json goes outside the repository (refused inside it before anything is read or written)."""
     J = os.path.join(ROOT, "clean", "l", "records", "real-run-test.json")

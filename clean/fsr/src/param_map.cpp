@@ -245,7 +245,7 @@ WgResult DispatchWithFallback(const WgUpscalerBackend* backend, WgUpscaler* upsc
         if (c != WG_OK || !*fallback) {
             *fallback = nullptr;
             note = "upscaler not ready this frame; the stand-in could not be created: " + WgResultText(c);
-            return c == WG_OK ? WG_ERROR : c;
+            return WG_ERROR_NOT_READY;  // still this frame's answer: never the stand-in's error (a refusal stays one)
         }
     }
     AdaptFrame(standIn, frame);
@@ -253,7 +253,7 @@ WgResult DispatchWithFallback(const WgUpscalerBackend* backend, WgUpscaler* upsc
     AdaptFrame(backend, frame);
     note = s == WG_OK ? "upscaler not ready this frame (WG_ERROR_NOT_READY): stand-in for this frame"
                       : "upscaler not ready this frame; the stand-in failed too: " + WgResultText(s);
-    return s;
+    return s == WG_OK ? WG_OK : WG_ERROR_NOT_READY;  // a failed stand-in never turns the refusal into its own error
 }
 
 bool MapDispatch(const ffxDispatchDescUpscale& d, const UpscaleCreateParams& create, const Config& config,
