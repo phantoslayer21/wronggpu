@@ -803,7 +803,7 @@ class Context {
       say(WG_LOG_INFO, std::string("network model K mode: network=") + (net.empty() ? "fused" : net) + ";k_fast=" +
                            (fast.empty() ? "0" : fast) + (approx.empty() ? std::string() : ";k_approx=" + approx) +
                            ";handover=" + (staged_out_ ? "staged" : "fence") +
-                           (exact ? ", the exact path" : ", an approximation (not bit-exact)") +
+                           (exact ? ", the standard path" : ", an approximation (opt-in)") +
                            (k_default_ ? " (the default mode; network=fused8;k_fast=1;handover=staged selects the "
                                          "fastest mode)"
                                        : " (from the options)"));

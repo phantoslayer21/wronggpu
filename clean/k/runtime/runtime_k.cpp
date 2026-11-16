@@ -525,7 +525,7 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
                    (approx_a1_ && approx_a2_ ? "," : "") + (approx_a2_ ? "a2" : "") +
                    " (opt-in faster approximation; the default is the standard path)" +
                    (approx_a1_ ? std::string("; a1 applies to the tiled input stage, frames on the legacy input path "
-                                             "run the exact input stage")
+                                             "run the standard input stage")
                                : std::string());
   }
   const std::string krule = option(c, "k_expo_rule");
@@ -1247,7 +1247,7 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
   // log, the first time in this context (take_frame_note)
   if (approx_a1_ && !use_tiled && !a1_legacy_noted_) {
     a1_legacy_noted_ = true;
-    frame_note_ = "model K: k_approx=a1 applies to the tiled input stage only; this context's frames on the legacy input path (a render size above 0.68 x the output, a jitter outside [-0.5, 0.5], or input_tiled=0) run the exact input stage (this line once per context)";
+    frame_note_ = "model K: k_approx=a1 applies to the tiled input stage only; this context's frames on the legacy input path (a render size above 0.68 x the output, a jitter outside [-0.5, 0.5], or input_tiled=0) run the standard input stage (this line once per context)";
   }
   // k_in_exact: the output colour taps by k_out_color (KFrame's exact plan), not by the tiled input kernel
   const bool use_tiled_color = use_tiled && !in_exact_ && !reset && 4LL * Bw_ >= W_ && 4LL * Bh_ >= H_;
