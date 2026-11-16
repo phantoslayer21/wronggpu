@@ -24,8 +24,11 @@ scene, your settings) and a screenshot. Every report helps us fix it.
 - **Choosing it.** For one game: `WrongGPU.exe set "<the game's .exe>" model=L` (`model=M` goes back). In OptiScaler's
   menu it is the upscaler **WrongGPU Model L**, next to **WrongGPU Model M**.
 - **Runs on Direct3D 12** inside the game's own command list, like Model M: no AMD HIP runtime needed.
-- **GPU time: pending.** Model L's in-game time for this release's form is not measured yet; it is added before the
-  release.
+- **GPU time.** In Cyberpunk 2077 at 1080p Quality (1280x720 upscaled to 1920x1080) on a Radeon RX 9070 XT, standing
+  still at the same spot, measured in the same sitting: the model's GPU time per frame (all of its kernels) is
+  2.67 ms with Model L and 1.17 ms with Model M
+  ([clean/l/records/cp2077-model-l-timing-2026-11-16.json](https://github.com/phantoslayer21/wronggpu/blob/main/clean/l/records/cp2077-model-l-timing-2026-11-16.json)
+  has the record).
 
 ### Model K (new)
 - **Another model, off by default and still under test.** Model K is a different super-resolution network from

@@ -69,8 +69,9 @@ converted once on your PC from a DLSS model file of one of your games (`WrongGPU
 OptiScaler's menu. Both are still under test. Cyberpunk 2077 at 1080p Quality on an RX 9070 XT, standing still at the
 same spot, measured one right after the other: the model's GPU time per frame (all of its kernels) is 1.03 ms with
 Model K and 1.17 ms with Model M
-([clean/k/records/cp2077-model-k-timing-2026-11-15.json](clean/k/records/cp2077-model-k-timing-2026-11-15.json));
-Model L's time for this release is still pending.
+([clean/k/records/cp2077-model-k-timing-2026-11-15.json](clean/k/records/cp2077-model-k-timing-2026-11-15.json)),
+and 2.67 ms with Model L, measured the same way in a later sitting with Model M again at 1.17 ms
+([clean/l/records/cp2077-model-l-timing-2026-11-16.json](clean/l/records/cp2077-model-l-timing-2026-11-16.json)).
 
 ### Something broken?
 
