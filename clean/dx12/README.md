@@ -125,6 +125,10 @@ WG_KERNEL(exposure_auto_diet) { WG_SETUP(); ... }   // entry name = HIP kernel n
   builds (one manifest entry per name and `co`, for example `w64/post_tf_f32_p12_diet_vsit` of `post_w64__orig.co`
   and of `post_w64.co`): the device runs the port whose code object is loaded. Every port of a name but the first
   sets `file=<stem>`, its DXIL file name (`<stem>.dxil`).
+* `gfx=<11|12|11,12>` (optional, default 12) = the GPU families the declaration is built for (`build_dx12.py --gfx`,
+  default 12): `--gfx 11` (RDNA 3, `WG_GFX=11` in every kernel) builds only the declarations that list 11 into
+  `<build>/dx12-gfx11/` with a `"gfx": 11` key in its manifest (a gfx12 manifest has no `gfx` key), without RGA. The
+  gfx11 helpers (`wg_wmma_f16_k8` / `_k16`, `wg_d_row`, no FP8 matrix instruction) are in `wg_platform.hlsli`.
 * `args` = the HIP kernel's arguments in order: `p` pointer (DWORD: arena byte offset), `u` any 32-bit scalar,
   `b<N>` struct by value (N bytes = N/4 DWORDs, copied verbatim). At most 57 DWORDs. The `WG_ARGS_BEGIN` block must
   declare exactly these DWORDs in order, **32-bit scalars only** (no vectors / arrays / structs: cbuffer packing).
