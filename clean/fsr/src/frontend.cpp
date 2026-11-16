@@ -1882,8 +1882,10 @@ ffxReturnCode_t FrontEnd::DispatchUpscale(UpscaleContext& u, const ffxDispatchDe
         }
     }
     // Inputs the upscaler cannot take (the mapping's checks, or the upscaler's own: WG_ERROR_PARAMETER,
-    // WG_ERROR_UNSUPPORTED) are one frame's matter (BadFrame); every other result means the upscaler is broken.
-    if (!mapped || r == WG_ERROR_PARAMETER || r == WG_ERROR_UNSUPPORTED) {
+    // WG_ERROR_UNSUPPORTED) are one frame's matter (BadFrame), and so is WG_ERROR_NOT_READY that the stand-in could
+    // not take above (none, or it failed): AMD's FSR for this frame only, the context stays the upscaler's. Every
+    // other result means the upscaler is broken.
+    if (!mapped || r == WG_ERROR_PARAMETER || r == WG_ERROR_UNSUPPORTED || r == WG_ERROR_NOT_READY) {
         frame.reset = resetAsked ? 1u : 0u;  // (for the stand-in: as the game gave it)
         return BadFrame(u, d, call, frameIndex, problem, &frame, false, mapped ? r : WG_ERROR_PARAMETER);
     }

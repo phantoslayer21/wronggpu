@@ -116,8 +116,8 @@ struct Job {
   class Converter* conv = nullptr;
   // executor=dx12: the game's predicate on its list before this frame (WgFrontEndServices::command_list_predication;
   // caller_pred_known false: the front end could not tell). A frame under the device's frame guard (Model L hybrid)
-  // replaces it while it records and sets it again after (NativeD3D12Ext::set_caller_predicate); such a frame is not
-  // taken when it is not known.
+  // replaces it while it records and sets it again after (NativeD3D12Ext::set_caller_predicate); when it is not
+  // known, such a frame is not taken this time (executor_select.h frame_not_ready: WG_ERROR_NOT_READY).
   bool caller_pred_known = false;
   void* caller_pred = nullptr;   // ID3D12Resource*, null: none set
   uint64_t caller_pred_offset = 0;

@@ -635,7 +635,10 @@ class Context {
       }
     }
     k_default_ = model_k_default(o);
-    const bool split = services_ && services_->struct_size >= sizeof(WgFrontEndServices) && services_->split_command_list;
+    // (a version 2 table up to split_command_list: fields appended later have their own size checks where they are used)
+    const bool split = services_ &&
+                       services_->struct_size >= offsetof(WgFrontEndServices, split_command_list) + sizeof(void*) &&
+                       services_->split_command_list;
     if (!split && o.executor != "dx12")
       return fail(WG_ERROR_UNSUPPORTED, "the front end offers no command-list split (interface version 2)");
     if (!o.unknown.empty()) say(WG_LOG_INFO, "options passed on to the network runtime: " + o.unknown);
@@ -1149,14 +1152,22 @@ class Context {
       }
       return WG_ERROR_UNSUPPORTED;  // one frame's answer: the context stays usable (failed_ not set)
     }
-    // Model L hybrid, the frame after a bottleneck wait timeout (executor_select.h frame_timeout_refused): nothing of
-    // it written, the path of a frame not taken: one line, WG_ERROR_UNSUPPORTED (the front end's stand-in renders it),
-    // the context kept; the next frame starts over.
+    // Model L hybrid, the frame after a bottleneck wait timeout (executor_select.h frame_timeout_refused), and a
+    // guarded frame whose game predicate the front end cannot report (frame_not_ready): nothing of it recorded, THIS
+    // frame only: WG_ERROR_NOT_READY (the front end's stand-in renders it, no takeover; the context stays this
+    // backend's), and the next frame runs the network again, as a reset.
     if (!ok && frame_timeout_refused(err)) {
-      say(WG_LOG_WARN, "frame " + std::to_string(v) + ": " + err + "; this frame goes back to the front end (AMD FSR, "
-                       "else its stand-in), the context stays");
+      say(WG_LOG_WARN, "frame " + std::to_string(v) + ": " + err + "; the front end's stand-in renders this frame "
+                       "(WG_ERROR_NOT_READY), the next one runs the network again");
       force_reset_ = true;
-      return WG_ERROR_UNSUPPORTED;  // one frame's answer: the context stays usable (failed_ not set)
+      return WG_ERROR_NOT_READY;  // one frame's answer: the context stays this backend's (failed_ not set)
+    }
+    if (!ok && frame_not_ready(err)) {
+      if (pred_unknown_++ == 0 || pred_unknown_ % 600 == 0)
+        say(WG_LOG_WARN, "frame " + std::to_string(v) + ": " + err + "; the front end's stand-in renders this frame "
+                         "(WG_ERROR_NOT_READY; " + std::to_string(pred_unknown_) + " such frame(s) so far)");
+      force_reset_ = true;
+      return WG_ERROR_NOT_READY;
     }
     note_path(&input_path_, "input: read directly by the network's D3D12 kernels (executor dx12, no input pass)");
     if ((flags_ & WG_CREATE_MOTION_OUTPUT_RES) && model_k_)
@@ -2029,6 +2040,7 @@ class Context {
 
   Core log_;
   const WgFrontEndServices* services_ = nullptr;
+  uint64_t pred_unknown_ = 0;   // guarded frames whose game predicate the front end could not report
   ID3D12Device* device_ = nullptr;
   ID3D12Device* underlying_ = nullptr;    // what the given device's objects report as their device (sharing path 2)
   ID3D12Device* own_ = nullptr;           // our own device on the same adapter (sharing path 3)

@@ -161,6 +161,9 @@ def prepare(build, real=None):
         sets.append(("real", {st: params[st] for st in ("enc1", "enc2", "b0", "dec2", "dec1")}))
         sets.append(("real_b5", {"b0": params["b5"], **{st: params[st] for st in ("enc1", "enc2", "dec2", "dec1")}}))
     cases = make_cases(sets)
+    if real:
+        from clean.l.runner.l_private import mark_real
+        mark_real(os.path.join(build, "l_q7w_cases.pkl"), "l_q7w_check --real")
     with open(os.path.join(build, "l_q7w_cases.pkl"), "wb") as f:
         pickle.dump({"cases": cases, "real_params_sha256": real_sha}, f)
     return len(cases)
@@ -333,7 +336,12 @@ def main(argv=None):
         raise SystemExit("--real is required to have --private-out <folder outside the repository>: the cases file "
                          "holds real weights and the oracle's bytes on them")
     if a.private_out and (a.real or a.run):
+        from clean.l.runner.l_private import private_json
+        private_json(a.json)               # a real run's record outside the repository
         data_dir(a.build, a.private_out)   # refused inside the repository, before anything is read
+    if a.run:   # a real prepared file (marker) only from its private folder: checked before anything else
+        from clean.l.runner.l_private import guard_cases
+        guard_cases(os.path.join(data_dir(a.build, a.private_out), "l_q7w_cases.pkl"), a.private_out)
     if a.compile:
         compile_kernel(a.build, a.rocm)
         return 0

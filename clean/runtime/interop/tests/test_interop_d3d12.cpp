@@ -38,7 +38,7 @@
 //     (e.g. "" and "model=K"); fails when the process's GPU memory grows by more than the tolerance per cycle.
 //
 // Cases: inline, pipelined, depth, motion, motion_outres, exposure, not_ready, pipelined_not_ready, nohip,
-// noservices, timing (timing_log=1 summary), ready_flag (ready_wait=memory flag pass with timing marks), arena, arena_minsize (wrapper refusing shared objects below 100 MB), arena_keep (arena pool), wrapped, wrapped_noopen, wrapped_own
+// noservices, oldservices (an older version 2 services table), timing (timing_log=1 summary), ready_flag (ready_wait=memory flag pass with timing marks), arena, arena_minsize (wrapper refusing shared objects below 100 MB), arena_keep (arena pool), wrapped, wrapped_noopen, wrapped_own
 // (device wrapper whose CreateSharedHandle fails); default all.
 // "hip" (only when named; Windows with an RX 9000 GPU, the kernels next to the DLL and an installed model): the real
 // network through the same split, at 1707x960 -> 2560x1440, inline then pipelined; checks finite output, that the
@@ -59,6 +59,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -556,9 +557,10 @@ struct Ctx {
   FrontEnd fe;
   WgFrontEndServices services = {};
   WgUpscaler* u = nullptr;
+  uint32_t servicesSize = 0;   // 0: sizeof(WgFrontEndServices); else an older front end's table size
   WgResult create(const Scene& s, uint32_t flags, const char* options, bool withServices = true) {
     fe.g = g;
-    services.struct_size = sizeof services;
+    services.struct_size = servicesSize ? servicesSize : (uint32_t)sizeof services;
     services.context = &fe;
     services.split_command_list = &FrontEnd::split;
     services.command_list_predication = &FrontEnd::predication;
@@ -2683,7 +2685,7 @@ static bool fresh_in_child(const char* dll, const std::string& options, int t, b
 //      and the executor's output pass are skipped under the device's frame guard, and the fallback under the inverse
 //      predication writes the bilinear upscale of THAT frame's colour into THAT frame's output texture; the game's own
 //      copy of the output after our dispatch in the same list still runs (the readback below is that copy);
-//   2. the refused frame: WG_ERROR_UNSUPPORTED (the path of a frame not taken: the front end's stand-in renders it; in
+//   2. the refused frame: WG_ERROR_NOT_READY (this frame only: the front end's stand-in renders it, no takeover; in
 //      this harness nothing does), exactly one captured log line names the refusal, no failure or fallback line,
 //      nothing of ours in its output (the sentinel), the context kept;
 //   3. the reset frame (WG_OK): the network's output again, byte for byte a fresh context's first frame on the same
@@ -2755,7 +2757,7 @@ bool case_bneck_timeout(Gpu& g, const char* dll, const std::string& options, boo
   CHECK(R + 2 <= T);
   if (R + 2 > T) return false;
   for (int t = 1; t <= T; ++t) {
-    const WgResult want = t == R ? WG_ERROR_UNSUPPORTED : WG_OK;
+    const WgResult want = t == R ? WG_ERROR_NOT_READY : WG_OK;
     if (res[t] != want) std::printf("  frame %d: result %d (want %d)\n", t, (int)res[t], (int)want);
     CHECK(res[t] == want);
   }
@@ -2810,6 +2812,32 @@ bool case_bneck_timeout(Gpu& g, const char* dll, const std::string& options, boo
   return true;
 }
 
+// An older version 2 front end: its WgFrontEndServices ends after split_command_list (no command_list_predication).
+// The split executor's create must take it (the table is checked up to the split service), and its frames split; the
+// appended predicate service is never called through the short table.
+bool case_old_services(Gpu& g, const char* dll) {
+  Ctx c;
+  c.g = &g;
+  if (!c.be.load(dll)) return false;
+  Scene s;
+  s.make(g);
+  c.servicesSize = (uint32_t)offsetof(WgFrontEndServices, command_list_predication);
+  const WgResult cr = c.create(s, WG_CREATE_HDR | WG_CREATE_DEPTH_INVERTED, "executor=d3d12-test");
+  std::printf("  version 2 table of %u bytes (current %u): create %d\n", c.servicesSize, (unsigned)sizeof(WgFrontEndServices),
+              (int)cr);
+  CHECK(cr == WG_OK);
+  if (!c.u) return false;
+  for (int t = 1; t <= 2; ++t) {
+    s.set_color(g, t);
+    WgResult r = WG_ERROR;
+    c.run(s, s.frame(g, t), &r);
+    CHECK(r == WG_OK);
+  }
+  CHECK(c.fe.splits == 2);
+  CHECK(c.fe.predQueries == 0);
+  return true;
+}
+
 // Model L hybrid, the game's predicate on its list (WgFrontEndServices::command_list_predication): the frame guard
 // replaces it while our frame records and sets it again after. The game sets SetPredication(buffer, 8, NOT_EQUAL_ZERO)
 // before our dispatch (the value at offset 8; offset 0 holds the opposite value, so a predicate set again at another
@@ -2817,7 +2845,7 @@ bool case_bneck_timeout(Gpu& g, const char* dll, const std::string& options, boo
 //   frame 1, predicate false (0: the game's conditional work runs): our output written, the marker copied;
 //   frame 2, predicate true (1: skipped): our output written all the same (our frame records unconditionally), the
 //            marker NOT copied (the game's predicate is in effect again after our dispatch);
-//   frame 3, the front end cannot tell the predicate (WG_ERROR_NOT_READY): WG_ERROR_UNSUPPORTED, nothing of ours
+//   frame 3, the front end cannot tell the predicate (WG_ERROR_NOT_READY): WG_ERROR_NOT_READY, nothing of ours
 //            written, the game's predicate untouched (true: the marker not copied);
 //   frame 4, predicate false again: the context kept, our output written, the marker copied.
 bool case_caller_predicate(Gpu& g, const char* dll, const std::string& options) {
@@ -2866,7 +2894,7 @@ bool case_caller_predicate(Gpu& g, const char* dll, const std::string& options) 
     bool written, copied;
   } steps[4] = {{0, WG_OK, WG_OK, true, true},
                 {1, WG_OK, WG_OK, true, false},
-                {1, WG_ERROR_NOT_READY, WG_ERROR_UNSUPPORTED, false, false},
+                {1, WG_ERROR_NOT_READY, WG_ERROR_NOT_READY, false, false},
                 {0, WG_OK, WG_OK, true, true}};
   for (int t = 1; t <= 4; ++t) {
     const Step& st = steps[t - 1];
@@ -2954,6 +2982,7 @@ int main(int argc, char** argv) {
       {"pipelined_not_ready", [&] { return case_pipelined_not_ready(g, dll); }},
       {"nohip", [&] { return case_create_fails(g, dll, true); }},
       {"noservices", [&] { return case_create_fails(g, dll, false); }},
+      {"oldservices", [&] { return case_old_services(g, dll); }},
       {"timing", [&] { return case_timing(g, dll); }},
       {"copies", [&] { return case_sync(g, dll, true, "executor=d3d12-test;input_copy=1;output_copy=1") && copied(); }},
       {"copies_pipelined",

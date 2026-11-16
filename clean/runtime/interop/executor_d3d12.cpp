@@ -301,10 +301,10 @@ class D3d12Executor : public Executor {
 
     // Model L hybrid: the device's frame guard predicates this frame on the game's list, in place of the game's own
     // predicate, which is lifted while we record and set again after (its conditional work after ours stays
-    // conditional); a frame whose game predicate the front end cannot tell is not taken.
+    // conditional); a frame whose game predicate the front end cannot tell is not taken THIS time (frame_not_ready).
     const bool guarded = wgrt::runtime_frame_guard(rt_);
     if (guarded && !job.caller_pred_known)
-      return *err = "frame not taken (nothing recorded): the front end does not know the predicate set on the game's "
+      return *err = "frame not ready (nothing recorded): the front end does not know the predicate set on the game's "
                     "command list, which the Model L hybrid frame guard would replace", false;
     if (guarded)
       ext_->set_caller_predicate(static_cast<ID3D12Resource*>(job.caller_pred), job.caller_pred_offset,

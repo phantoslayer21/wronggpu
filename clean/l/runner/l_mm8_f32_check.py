@@ -356,18 +356,23 @@ def wmma_prepare(build, n, seed=7, real_build=None, real_max=200000, private_out
         ref16 = np.array([op_exact(st[i:i + 1], a[i], w[i:i + 1])[0] for i in range(len(st))])
         cases[name] = {"st": st, "a": a, "w": w, "exact_sum": exact_sum, "ref16": ref16}
         print("prepared", name, len(st), flush=True)
+    if real_build:
+        from clean.l.runner.l_private import mark_real
+        mark_real(os.path.join(build, "l_wmma_cases.pkl"), "l_mm8_f32_check --real")
     with open(os.path.join(build, "l_wmma_cases.pkl"), "wb") as f:
         pickle.dump({"cases": cases, "identity": identity}, f)
 
 
-def wmma_run(build, rocm, cases_dir=None):
+def wmma_run(build, rocm, cases_dir=None, private_out=None):
     """GPU: the probe kernel (clean/l/kernels/l_wmma_probe.hip, <build>/l_wmma_probe.co) on every prepared set: per op,
     whether the instruction's float32 result equals the exact sum rounded once to float32, and whether its FP16 rounding
     equals the exact model's result."""
     import ctypes
+    from clean.l.runner.l_private import guard_cases
     from clean.runner.hip import Hip, clean_process_environment
-    clean_process_environment(rocm)
     cases_pkl = os.path.join(cases_dir or build, "l_wmma_cases.pkl")
+    guard_cases(cases_pkl, private_out)   # a real set (marker) only from its private folder, checked before the read
+    clean_process_environment(rocm)
     with open(cases_pkl, "rb") as f:
         prep = pickle.load(f)
     h = Hip(rocm)
@@ -444,7 +449,8 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--frames", help="with --real: a build with a local recorded l_frame_check run of the real model")
     ap.add_argument("--real", action="store_true", help="also the local recorded run (--frames; needs --private-out)")
-    ap.add_argument("--private-out", help="--real: the folder (outside the repository) for a real run's intermediates")
+    ap.add_argument("--private-out", help="--real: the folder (outside the repository) for a real run's intermediates; "
+                    "--wmma-run: the folder of a real prepared set (its --cases-dir)")
     ap.add_argument("--cases-dir", help="--wmma-run: the folder of l_wmma_cases.pkl (default the build folder)")
     ap.add_argument("--wmma-prepare", metavar="BUILD", help="CPU: the matrix-instruction probe's inputs into BUILD")
     ap.add_argument("--wmma-run", metavar="BUILD", help="GPU: the probe (BUILD/l_wmma_probe.co) on the prepared inputs")
@@ -456,6 +462,12 @@ def main(argv=None):
         raise SystemExit("--real needs --frames <build> and --private-out <folder outside the repository>")
     if a.real:
         private_dir(a.private_out)
+    if a.real or a.private_out:   # a real run: its record outside the repository too
+        from clean.l.runner.l_private import private_json
+        private_json(a.json)
+    if a.wmma_run:   # a real prepared set (marker) only from its private folder, before anything is read
+        from clean.l.runner.l_private import guard_cases
+        guard_cases(os.path.join(a.cases_dir or a.wmma_run, "l_wmma_cases.pkl"), a.private_out)
     if a.wmma_prepare:
         wmma_prepare(a.wmma_prepare, a.cases, a.seed, a.frames if a.real else None, private_out=a.private_out)
         return 0
@@ -463,7 +475,7 @@ def main(argv=None):
         from clean.l.runner import l_record as LR
         res = {"what": "RDNA 4 FP8 matrix instruction (two 16-term steps, float32 accumulator from the start) against "
                        "the exact model, a side measurement", "fp8_op_model": "exact",
-               "probe": wmma_run(a.wmma_run, a.rocm, a.cases_dir)}
+               "probe": wmma_run(a.wmma_run, a.rocm, a.cases_dir, a.private_out)}
         assert_aggregate_only(res)
         LR.write_l_record(res, a.json)
         return 0

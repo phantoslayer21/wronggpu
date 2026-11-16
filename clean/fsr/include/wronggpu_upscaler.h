@@ -40,8 +40,11 @@ typedef enum WgResult {
     WG_ERROR_MEMORY = 4,
     WG_ERROR_PARAMETER = 5,   /* a required input is missing or invalid */
     WG_ERROR_NOT_READY = 6,   /* v2: not possible this frame, try again next frame (e.g. split of a command list the
-                                 front end has not tracked since its last Reset); from dispatch it makes the front end
-                                 use AMD's FSR (or the stand-in) for this frame only, the context stays the backend's */
+                                 front end has not tracked since its last Reset; the network runtime's frame after a
+                                 Model L bottleneck wait timeout, or a Model L frame whose command-list predicate the
+                                 front end cannot report); from dispatch it makes the front end use its stand-in (else
+                                 AMD's FSR) for this frame only, never a takeover: the context stays the backend's and
+                                 its next frame goes to the backend again */
     WG_ERROR_INPUT = 7        /* v2 (0.6.0 follow-up): the game's inputs can never be taken (a texture's shape, format
                                  or flags the upscaler refuses), the same on every frame: from dispatch the context is
                                  failed as for WG_ERROR, and in OptiScaler's custom slot the front end remembers it for

@@ -376,7 +376,8 @@ def main(argv=None):
     # repository, checked before anything is read or built
     cdir = None
     if a.real_inputs:
-        from clean.l.runner.l_private import private_dir
+        from clean.l.runner.l_private import private_dir, private_json
+        private_json(a.json)   # the record of a real run outside the repository
         cdir = private_dir(a.private_out, what="--real-inputs: the real cases' files and replay outputs")
     elif a.private_out:
         raise SystemExit("--private-out: only with --real-inputs")

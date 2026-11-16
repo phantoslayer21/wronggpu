@@ -242,7 +242,10 @@ def data_dir(build, private_out):
 
 
 def load_cases(path, private_out):
-    """The prepared cases; a file holding real weights is read only from a private folder (--private-out)."""
+    """The prepared cases; a file holding real weights is read only from a private folder (--private-out): its marker
+    and the folder are checked before the file is opened (l_private.guard_cases)."""
+    from clean.l.runner.l_private import guard_cases
+    guard_cases(path, private_out)
     with open(path, "rb") as f:
         prep = pickle.load(f)
     if prep.get("real_params_sha256") and not private_out:
@@ -285,6 +288,9 @@ def prepare(build, real=None, form="q7"):
                                       "scale": scale, "special": special, "xb": xb, "sb": sb, "nbytes": nbytes,
                                       "blob": blob, "want": want, "want_exact": want_exact})
                 print(bname, H, W, scale, "prepared", flush=True)
+    if real:
+        from clean.l.runner.l_private import mark_real
+        mark_real(cases_file(build, form), "l_q7_check --real")
     with open(cases_file(build, form), "wb") as f:
         pickle.dump({"cases": cases, "real_params_sha256": real_sha, "form": form}, f)
     return len(cases)
@@ -449,7 +455,12 @@ def main(argv=None):
         raise SystemExit("--real is required to have --private-out <folder outside the repository>: the cases file "
                          "holds real weights and the oracle's bytes on them")
     if a.private_out and (a.real or a.run):
+        from clean.l.runner.l_private import private_json
+        private_json(a.json)               # a real run's record outside the repository
         data_dir(a.build, a.private_out)   # refused inside the repository, before anything is read
+    if a.run:   # a real prepared file (marker) only from its private folder: checked before anything else
+        from clean.l.runner.l_private import guard_cases
+        guard_cases(cases_file(data_dir(a.build, a.private_out), a.form), a.private_out)
     if a.compile:
         compile_kernel(a.build, a.rocm)
         return 0

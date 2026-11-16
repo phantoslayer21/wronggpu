@@ -2,7 +2,8 @@
 """The synthetic-values rule for the Model L checkers' real modes: l_hyb_stage_check --real-inputs, l_q7_check --real
 and l_q7w_check --real write their real-data intermediates (case files, replay inputs and outputs) only to --private-out,
 a resolved folder outside the repository. Each real-input path refuses a missing folder and a folder inside the
-repository before it reads or writes anything; a cases file prepared with --real is read only from such a folder.
+repository before it reads or writes anything; a cases file prepared with --real carries a marker and is read only
+from such a folder, checked before the file is opened; a real run's --json goes outside the repository.
 No GPU, no model, no recorded data (every value here is constructed; the paths given as real inputs do not exist).
 Run: python clean/l/tests/test_l_private_out.py
 """
@@ -11,12 +12,14 @@ import pickle
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
 sys.path.insert(0, ROOT)
 
 from clean.l.runner import l_hyb_stage_check as HS  # noqa: E402
+from clean.l.runner import l_mm8_f32_check as MM8  # noqa: E402
 from clean.l.runner import l_private as P  # noqa: E402
 from clean.l.runner import l_q7_check as Q7  # noqa: E402
 from clean.l.runner import l_q7w_check as Q7W  # noqa: E402
@@ -123,6 +126,77 @@ class Q7Real(unittest.TestCase):
             pickle.dump({"cases": [], "real_params_sha256": "0" * 64, "form": "q7"}, f)
         self.assertEqual(Q7.load_cases(p, priv)["cases"], [])
         self.assertEqual(Q7.data_dir(os.path.join(d, "build"), None), os.path.join(d, "build"))
+
+
+
+class MarkedCases(unittest.TestCase):
+    """A prepared cases file made from real data carries a marker (<file>.real); every run path checks the marker and
+    the private folder BEFORE it opens the file: pickle.load is replaced by a function that fails the test if called.
+    The files here are constructed (a marker and bytes that are no pickle at all)."""
+
+    def marked(self, folder, name):
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, name)
+        with open(path, "wb") as f:
+            f.write(b"not a pickle: never to be opened")
+        P.mark_real(path, "test")
+        return path
+
+    def no_read(self, mod):
+        return mock.patch.object(mod.pickle, "load", side_effect=AssertionError("the cases file was read"))
+
+    def test_q7_and_q7w_refuse_before_the_read(self):
+        for name, mod, fn in Q7Real.MODS:
+            d = outside_tmp(self)
+            self.marked(d, fn)
+            with self.subTest(checker=name), self.no_read(mod), self.assertRaises(SystemExit) as cm:
+                mod.main(["--build", d, "--run"])
+            self.assertIn("prepared from real data", str(cm.exception))
+
+    def test_mm8_wmma_run_refuses_before_the_read(self):
+        d = outside_tmp(self)
+        cases = os.path.join(d, "cases")
+        self.marked(cases, "l_wmma_cases.pkl")
+        j = os.path.join(d, "r.json")
+        for extra in ([], ["--private-out", os.path.join(d, "elsewhere")]):
+            with self.subTest(extra=extra), self.no_read(MM8), self.assertRaises(SystemExit) as cm:
+                MM8.main(["--json", j, "--wmma-run", d, "--cases-dir", cases] + extra)
+            self.assertIn("prepared from real data", str(cm.exception))
+        self.assertFalse(os.path.exists(j))
+
+    def test_guard_cases(self):
+        d = outside_tmp(self)
+        path = self.marked(d, "x.pkl")
+        with self.assertRaises(SystemExit):
+            P.guard_cases(path, None)                         # no private folder
+        with self.assertRaises(SystemExit):
+            P.guard_cases(path, os.path.join(d, "other"))     # not its folder
+        P.guard_cases(path, d)                                # its own private folder outside the repository
+        with mock.patch.object(P, "inside_repository", return_value=True), self.assertRaises(SystemExit) as cm:
+            P.guard_cases(path, d)                            # a real cases folder inside the repository
+        self.assertIn("inside the repository", str(cm.exception))
+        plain = os.path.join(d, "plain.pkl")                  # unmarked (synthetic): passes
+        P.guard_cases(plain, None)
+
+
+class RealRecords(unittest.TestCase):
+    """A real run's --json goes outside the repository (refused inside it before anything is read or written)."""
+    J = os.path.join(ROOT, "clean", "l", "records", "real-run-test.json")
+
+    def test_in_repo_json_refused(self):
+        d = outside_tmp(self)
+        priv = os.path.join(d, "priv")
+        runs = (("l_q7_check", lambda: Q7.main(["--build", d, "--run", "--private-out", priv, "--json", self.J])),
+                ("l_q7w_check", lambda: Q7W.main(["--build", d, "--run", "--private-out", priv, "--json", self.J])),
+                ("l_mm8_f32_check", lambda: MM8.main(["--json", self.J, "--wmma-run", d, "--private-out", priv])),
+                ("l_hyb_stage_check", lambda: HS.main(["--build", d, "--run", "--real-inputs", os.path.join(d, "none"),
+                                                       "--private-out", priv, "--json", self.J])))
+        for name, run in runs:
+            with self.subTest(checker=name), self.assertRaises(SystemExit) as cm:
+                run()
+            self.assertIn("outside the repository", str(cm.exception))
+        self.assertFalse(os.path.exists(self.J))
+        self.assertFalse(os.path.exists(priv))   # refused before the private folder was even made
 
 
 if __name__ == "__main__":
