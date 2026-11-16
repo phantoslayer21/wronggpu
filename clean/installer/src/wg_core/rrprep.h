@@ -30,6 +30,7 @@
 #include "context.h"
 
 #include <functional>
+#include <vector>
 
 namespace wg {
 
@@ -60,5 +61,9 @@ int PrepareRr(Context& ctx, const wstring& dataDir, const wstring& exe, const ws
               const std::function<bool(const RrPrepProgress&)>& progress, wstring* why);
 // The helper side: `<exe> --rr-prepare <runtime dll> <passes>` (main.cpp, before anything else of the launcher runs).
 int RunRrPrepareHelper(int argc, wchar_t** argv);
+// The helper's environment block (NUL-separated, two NULs at the end): this process's, with WG_RR_LOG=log and LOCALAPPDATA
+// set to the user's real local app data folder, where the graphics driver keeps its shader cache. A WRONGGPU_TESTING build
+// keeps this process's LOCALAPPDATA (the tests' sandbox) unless WRONGGPU_TEST_REAL_DRIVER_CACHE=1.
+std::vector<wchar_t> RrHelperEnvironment(const wstring& log);
 
 }  // namespace wg

@@ -26,6 +26,9 @@
 #include "wg_core/record.h"
 #include "wg_core/rr.h"
 #include "wg_core/rrconfig.h"
+#include "wg_core/rrprep.h"
+
+#include <shlobj.h>
 #include "wg_core/settings.h"
 
 using namespace wg;
@@ -2657,6 +2660,38 @@ int main() {
 #else
             require(!TestLibraries(), "a build without WRONGGPU_TESTING never takes a test library list");
 #endif
+        }
+
+        {  // the rr-prepare helper's environment (rrprep.h RrHelperEnvironment): the tests' LOCALAPPDATA is kept in a test build
+            auto valueOf = [](const std::vector<wchar_t>& env, const wstring& key) {
+                wstring found = L"(none)";
+                for (const wchar_t* s = env.data(); *s; s += wcslen(s) + 1)
+                    if (StartsWithI(s, key + L"=")) found = s + key.size() + 1;
+                return found;
+            };
+            wchar_t saved[MAX_PATH * 2] = {};
+            const bool had = GetEnvironmentVariableW(L"LOCALAPPDATA", saved, MAX_PATH * 2) > 0;
+            const wstring sandbox = Join(dir, L"sandbox-localappdata");
+            SetEnvironmentVariableW(L"LOCALAPPDATA", sandbox.c_str());
+            wstring real;
+            PWSTR kp = nullptr;
+            if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DONT_VERIFY, nullptr, &kp)) && kp) real = kp;
+            if (kp) CoTaskMemFree(kp);
+            std::vector<wchar_t> env = RrHelperEnvironment(L"C:\\log\\prepare.log");
+            require(valueOf(env, L"WG_RR_LOG") == L"C:\\log\\prepare.log", "the helper's environment: the runtime log in WG_RR_LOG");
+#ifdef WRONGGPU_TESTING
+            require(valueOf(env, L"LOCALAPPDATA") == sandbox,
+                    "a test build's rr-prepare helper keeps the tests' redirected LOCALAPPDATA (never the user's real folder)");
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_REAL_DRIVER_CACHE", L"1");
+            env = RrHelperEnvironment(L"x");
+            require(!real.empty() && IEq(valueOf(env, L"LOCALAPPDATA"), real),
+                    "a test build's helper gets the real LOCALAPPDATA only with the explicit opt-in WRONGGPU_TEST_REAL_DRIVER_CACHE=1");
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_REAL_DRIVER_CACHE", nullptr);
+#else
+            require(!real.empty() && IEq(valueOf(env, L"LOCALAPPDATA"), real),
+                    "a release build's rr-prepare helper gets the user's real LOCALAPPDATA (where the driver keeps the game's shader cache)");
+#endif
+            SetEnvironmentVariableW(L"LOCALAPPDATA", had ? saved : nullptr);
         }
 
         RemoveTree(dir);

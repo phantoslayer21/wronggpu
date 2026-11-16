@@ -1,17 +1,31 @@
 # SPDX-License-Identifier: MIT
 """rr-prepare and rr-recheck (RR's kernels prepared for a game ahead of its start), for run_launcher_tests.py's RR section
 (which calls run() in its place; this file keeps that suite below the 256 KB source limit, as launcher_edition_cases.py
-does). The section is moved unchanged, except that its GPU checks skip, with the reason, when the installed WrongGPU runtime
-is the suite's own stand-in (a fresh clone's test payload), which cannot prepare anything. Written for this project."""
+does). Written for this project.
+
+The default run stays inside its work folder and never prepares anything on the GPU:
+- the no-card path runs with a fresh data folder (the helper's run folder not made yet) and a test build's driver answer
+  "none" (WRONGGPU_TEST_RR_DRIVER);
+- with the suite's stand-in runtime (a fresh clone's test payload: no kernels), the helper really runs, under a test driver
+  version, and must fail to load that runtime: the expected result, with its diagnostic. The helper must keep the suite's
+  redirected LOCALAPPDATA (a test build's rule, rrprep.h RrHelperEnvironment);
+- the checks that need RR's kernels really prepared (a payload with the real runtime and an RDNA 4 card) fill the user's
+  real graphics driver cache, so they run only with the opt-in --rr-prepare-gpu."""
 import os
+import shutil
 
 import launcher_build_facts as facts
 from run_installer_tests import read, write
 
 
-def run(t, exe, b):
-    """rr-prepare --check, rr-recheck, rr-prepare (the helper under the game's program name) and, with an RDNA 4 card and a
-    real runtime, the prepared state across a driver or runtime change. exe: the RR game's exe, b: its folder."""
+def _helper_gone(run_dir):
+    """No helper left in the helper's run folder; an absent folder is empty (the no-card path never makes it)."""
+    return not os.path.isdir(run_dir) or not os.listdir(run_dir)
+
+
+def run(t, exe, b, gpu_opt_in=False):
+    """rr-prepare --check, rr-recheck, rr-prepare's no-card path, the helper with the stand-in runtime and, with the opt-in, a
+    real runtime and an RDNA 4 card, the prepared state across a driver or runtime change. exe: the RR game's exe, b: its folder."""
     # release 0.6.0 (owner: RR's kernels pre-compiled inside the launcher, rrprep.h): rr-prepare runs the launcher as a helper
     # under the game's program name, which loads the installed wronggpu_runtime.dll (the real runtime of this payload, RR
     # built in) and creates RR's pipelines on the GPU; the driver keeps them per program name, so the game finds them ready
@@ -26,19 +40,76 @@ def run(t, exe, b):
             rc == 0 and rq.get("stale") is False and rq.get("state_before") == "not-prepared", t.j)
     glog = os.path.join(b, "wronggpu-rr.log")  # the RR log an earlier case wrote (Last run): prepare must not touch it
     glog_before = read(glog) if os.path.exists(glog) else None
+    game_before = sorted(os.listdir(b))
+
+    # no AMD graphics card, a fresh data folder: result 2, exit 0, no helper, no run folder made
+    saved = t.data
+    t.data = os.path.join(t.work, "data-rr-nocard")
+    shutil.rmtree(t.data, ignore_errors=True)
+    t.env["WRONGGPU_TEST_RR_DRIVER"] = "none"
+    try:
+        rc = t.run("rr-prepare", exe, "--passes=1")
+    finally:
+        t.env.pop("WRONGGPU_TEST_RR_DRIVER", None)
+        nocard_dir = os.path.join(t.data, "rr-prepare")
+        t.data = saved
+    rp = t.j.get("rr_prepare", {})
+    t.check("rr-prepare without an AMD graphics card (fresh data folder): result 2, exit 0, the reason in words, no helper run, "
+            "nothing in the game's folder", rc == 0 and rp.get("result") == 2 and "no AMD graphics card" in rp.get("why", "") and
+            _helper_gone(os.path.join(nocard_dir, "run")) and not os.path.isfile(os.path.join(nocard_dir, "prepared.txt")) and
+            sorted(os.listdir(b)) == game_before, (rc, rp, os.listdir(b)))
+    shutil.rmtree(os.path.join(t.work, "data-rr-nocard"), ignore_errors=True)
+
+    if facts.stand_in_runtime(b):
+        # the suite's stand-in runtime: the helper really runs (a test driver version, so on any PC) and cannot load it; it
+        # must keep the suite's LOCALAPPDATA (a test build never hands the helper the user's real folder)
+        envlog = os.path.join(t.work, "rr-helper-env.log")
+        if os.path.exists(envlog):
+            os.remove(envlog)
+        t.env["WRONGGPU_TEST_RR_DRIVER"] = "99.0.0.1"
+        t.env["WRONGGPU_TEST_HELPER_ENV_LOG"] = envlog
+        try:
+            rc = t.run("rr-prepare", exe, "--passes=1")
+        finally:
+            t.env.pop("WRONGGPU_TEST_RR_DRIVER", None)
+            t.env.pop("WRONGGPU_TEST_HELPER_ENV_LOG", None)
+        rp = t.j.get("rr_prepare", {})
+        why = rp.get("why", "")
+        t.check("rr-prepare with the suite's stand-in runtime: the helper ran and could not load it (result 3, exit 1, the helper's "
+                "code and the log in the reason), nothing recorded as prepared",
+                rc == 1 and rp.get("result") == 3 and ("the helper ended with 7" in why or "the helper ended with 8" in why) and
+                "prepare.log" in why and rp.get("ready") is False and not os.path.isfile(os.path.join(prep_dir, "prepared.txt")), (rc, rp))
+        seen = read(envlog).decode("utf-8", "replace").splitlines() if os.path.isfile(envlog) else []
+        t.check("rr-prepare: the helper kept the suite's redirected LOCALAPPDATA (never the user's real folder)",
+                seen == ["LOCALAPPDATA=" + t.env["LOCALAPPDATA"]], (seen, t.env["LOCALAPPDATA"]))
+        t.check("rr-prepare: the helper copy is gone, nothing new in the game's folder (the runtime log went to the data folder)",
+                _helper_gone(os.path.join(prep_dir, "run")) and (read(glog) if os.path.exists(glog) else None) == glog_before and
+                sorted(os.listdir(b)) == game_before, (os.listdir(prep_dir) if os.path.isdir(prep_dir) else None, os.listdir(b)))
+        print("  skipped: rr-prepare's checks of RR's kernels really prepared (this payload's WrongGPU runtime is the suite's "
+              "stand-in: they need a payload with the real runtime, an RDNA 4 card and --rr-prepare-gpu)")
+        return
+    if not gpu_opt_in:
+        print("  skipped: rr-prepare's GPU checks (a real runtime prepares RR's kernels into the user's real graphics driver "
+              "cache: only with the opt-in --rr-prepare-gpu)")
+        return
+    # opt-in: the real driver cache, as a player's launcher fills it
+    t.env["WRONGGPU_TEST_REAL_DRIVER_CACHE"] = "1"
+    try:
+        _gpu(t, exe, b, prep_dir, glog, glog_before)
+    finally:
+        t.env.pop("WRONGGPU_TEST_REAL_DRIVER_CACHE", None)
+
+
+def _gpu(t, exe, b, prep_dir, glog, glog_before):
+    """--rr-prepare-gpu: a payload with the real runtime; an RDNA 4 card prepares, another PC answers result 2."""
     rc = t.run("rr-prepare", exe, "--passes=1")
     rp = t.j.get("rr_prepare", {})
     gpu = rp.get("result") != 2  # 2: no RDNA 4 graphics card on this PC (nothing to prepare)
-    if gpu and facts.stand_in_runtime(b):  # a fresh clone's suite payload: its runtime has no kernels
-        print("  skipped: rr-prepare's GPU checks (this payload's WrongGPU runtime is the suite's stand-in, which cannot prepare "
-              "RR's kernels: they need a payload with the real runtime); result %s" % rp.get("result"))
-        gpu = None
-    if gpu is not None:
-        t.check("rr-prepare: the helper prepared the default mode's kernels (result 0, ready, every kernel reported), or no RDNA 4 card",
-                rc == 0 and (not gpu or (rp.get("result") == 0 and rp.get("ready") is True and rp.get("kernels", 0) >= 50)), rp)
+    t.check("rr-prepare: the helper prepared the default mode's kernels (result 0, ready, every kernel reported), or no RDNA 4 card",
+            rc == 0 and (not gpu or (rp.get("result") == 0 and rp.get("ready") is True and rp.get("kernels", 0) >= 50)), rp)
     t.check("rr-prepare: the helper copy is gone, nothing new in the game's folder (the runtime log went to the data folder)",
-            not os.listdir(os.path.join(prep_dir, "run")) and (read(glog) if os.path.exists(glog) else None) == glog_before and
-            (not gpu or os.path.isfile(os.path.join(prep_dir, "prepare.log"))), (os.listdir(prep_dir), os.listdir(b)))
+            _helper_gone(os.path.join(prep_dir, "run")) and (read(glog) if os.path.exists(glog) else None) == glog_before and
+            (not gpu or os.path.isfile(os.path.join(prep_dir, "prepare.log"))), (os.listdir(prep_dir) if os.path.isdir(prep_dir) else None, os.listdir(b)))
     if gpu:
         ptxt = read(os.path.join(prep_dir, "prepared.txt")).decode("utf-8", "replace")
         t.check("rr-prepare: prepared.txt keeps the game's program name, the driver's version, the runtime's SHA-256, the passes",

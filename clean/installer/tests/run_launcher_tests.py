@@ -64,6 +64,7 @@ class T:
         if os.path.exists(self.out):
             os.remove(self.out)
         cmd = [exe or self.exe] + list(args) + ["--log=" + self.log, "--out=" + self.out] + (["--data=" + self.data] if data else [])
+        facts.require_test_hooks(cmd[0])  # fails closed before it runs: a testing build with the isolation hooks only
         start, astart = os.path.getsize(self.log) if os.path.isfile(self.log) else 0, iso.access_size(self.work)
         p = subprocess.run(cmd, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, cwd=cwd)
         try:
@@ -76,7 +77,9 @@ class T:
 
     def raw(self, cmd, timeout=600, guard=True):
         """A program run as it is (no --log/--out added); its store accesses checked as for run() (guard=False only for the old
-        baseline installer, which predates the access log: --run-old-baseline)."""
+        baseline installer, which predates the access log and the hooks: the opt-in --run-old-baseline)."""
+        if guard:
+            facts.require_test_hooks(cmd[0])
         start, astart = os.path.getsize(self.log) if os.path.isfile(self.log) else 0, iso.access_size(self.work)
         rc = subprocess.run(cmd, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout).returncode
         if guard:
@@ -1070,7 +1073,7 @@ def test_rr(t, opti, synth_f):
     rc = t.run("install", exeN, "--opti=" + opti, "--noscan", "--force", "--experimental")
     rec = record_text(bN) if rc == 0 else ""
     t.check("a game without RR: installed without any RR file or record line", rc == 0 and "WrongGPU-RR.asi" not in rec and "wronggpu-rr.ini" not in rec and
-            not os.path.exists(os.path.join(bN, "wronggpu_rr_runtime.dll")) and not facts.has_exact_name(bN, "WrongGPU") and
+            not os.path.exists(os.path.join(bN, "wronggpu_rr_runtime.dll")) and facts.rr_free(bN, rec) and
             not os.path.exists(os.path.join(bN, "wronggpu-rr.ini")) and
             not os.path.exists(os.path.join(bN, "plugins", "WrongGPU-RR.asi")), (rc, t.j.get("message"), rec[:800]))
     # a game that ships the RR model file (a stand-in WrongGPU cannot convert: the RR data is not ready yet)
@@ -1236,7 +1239,7 @@ def test_rr(t, opti, synth_f):
     st = [c["text"] for c in d.get("settings", {}).get("controls", [])]
     t.check("window: Settings has the Ray Reconstruction data row and the Exact mode switch (off)",
             any(x.startswith("Ray Reconstruction data") for x in st) and any(c["text"] == "Exact mode" and c.get("checked") is False for c in d.get("settings", {}).get("controls", [])), st)
-    __import__("launcher_rr_prepare_cases").run(t, exe, b)  # rr-prepare and rr-recheck (launcher_rr_prepare_cases.py)
+    __import__("launcher_rr_prepare_cases").run(t, exe, b, RR_PREPARE_GPU)  # rr-prepare, rr-recheck (launcher_rr_prepare_cases.py)
     # the player edited both RR settings files by hand; the state folder holds the saved settings (#219)
     write(files["ini"], read(files["ini"]) + b"rr_plugin_key=1\r\n")
     write(files["settings"], read(files["settings"]) + b"rr_last_seen=1\r\n")
@@ -2600,6 +2603,7 @@ def test_state(t, opti):  # #219, in launcher_state_cases.py
 
 
 NO_DIRECT = None  # --no-direct-launcher
+RR_PREPARE_GPU = False  # --rr-prepare-gpu (opt-in: rr-prepare with a real runtime fills the user's real driver cache)
 
 
 def test_edition_download(t, opti):  # in launcher_edition_cases.py (this file stays below the 256 KB source limit)
@@ -3034,13 +3038,18 @@ def main():
     ap.add_argument("--run-old-baseline", action="store_true", help="also run --baseline (it predates the test isolation: only in a fully redirected sandbox)")
     ap.add_argument("--no-direct-launcher", help="a testing launcher built with -DWRONGGPU_DIRECT_ROUTE=OFF (as releases) for the edition "
                     "refusals, when --launcher has the direct route")
+    ap.add_argument("--rr-prepare-gpu", action="store_true", help="opt-in: rr-prepare's GPU checks with a payload's real runtime "
+                    "(they fill the user's real graphics driver cache; never in the default run)")
     ap.add_argument("--only", nargs="*", default=[], help="development: only these tests (names without test_) after the basics")
     ap.add_argument("--synth-f", default=os.environ.get("WGC_SYNTH_BINS", ""),
                     help="folder with the spec team's synthetic preset-F file synth-common-v0.bin (the test build's F map is synth-r0)")
     a = ap.parse_args()
-    global RUN_OLD_BASELINE, NO_DIRECT
-    RUN_OLD_BASELINE = a.run_old_baseline
+    global RUN_OLD_BASELINE, NO_DIRECT, RR_PREPARE_GPU
+    RUN_OLD_BASELINE, RR_PREPARE_GPU = a.run_old_baseline, a.rr_prepare_gpu
     NO_DIRECT = os.path.abspath(a.no_direct_launcher) if a.no_direct_launcher else None
+    for what, p in (("--launcher", a.launcher), ("--no-direct-launcher", NO_DIRECT)):  # before anything runs
+        if p:
+            facts.require_test_hooks(p, what)
     work = os.path.abspath(a.work)
     iso.self_test(work)  # (#243) first: no launcher call with a broken guard
     for d in ("games", "data", "localappdata", "programs", "startmenu"):
@@ -3054,6 +3063,7 @@ def main():
             subprocess.run(["reg", "delete", t.uninstall + "\\" + k, "/f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     opti = opti_package(t)
     t0 = time.time()
+    facts.self_checks(t)  # the suite's own guards (launcher_build_facts.py), before any launcher call
     test_basics(t)
     if a.only:  # development: only the tests named (after the basics)
         for name in a.only:

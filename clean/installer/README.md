@@ -920,7 +920,7 @@ Windows (the Wine run was not repeated for them):
   the list and line), converted again by a second game's install, a list held open (exit 10), and the last game's uninstall
   keeping `ignore-files.txt` with the kept line in its result.
 - `tests/run_launcher_tests.py --launcher <WrongGPU.exe> --work <dir> [--baseline <0.5.1 WrongGPU-Setup.exe>]
-  [--hip <mock>] [--no-direct-launcher <WrongGPU.exe>]`: the verbs against generated fixture games (names and synthetic bytes only) with a
+  [--hip <mock>] [--no-direct-launcher <WrongGPU.exe>] [--rr-prepare-gpu]`: the verbs against generated fixture games (names and synthetic bytes only) with a
   `WRONGGPU_TESTING` build of the suite's test map: scan statuses, refusals (anti-cheat, DLSS-NR) with nothing changed,
   install (record v2, owned-files.json, the restorer as uninstall.exe, the managed list), set/get with validation,
   OptiScaler's FPS key, an outside edit and its revert, the last run from a synthetic log, update with `previous\`,
@@ -929,10 +929,19 @@ Windows (the Wine run was not repeated for them):
   the experimental confirmation, the model kept while another managed game uses it, adoption of a real 0.5.1
   install (v1 record, settings imported, restorer, entries), self-install / self-uninstall with one Apps & features
   entry, portable paths, the update check off, and the window built hidden (`ui-dump`: pages, names, visibility).
-  Checks that depend on how the launcher was built follow the build under test (`launcher_build_facts.py`). The edition
-  section's refusals need a launcher without the direct route (`-DWRONGGPU_DIRECT_ROUTE=OFF`, as releases):
-  `--no-direct-launcher` gives one, otherwise they are skipped with that reason. rr-prepare's GPU checks are skipped, with
-  the reason, when the installed runtime is the suite's own stand-in.
+  The suite runs only `WRONGGPU_TESTING` builds with the test isolation hooks: every launcher it is given, their copies
+  and the `uninstall.exe` they write are checked before they run, and anything else is refused unrun (a release launcher
+  could reach the real download page, the PC's stores and the real Apps & features root). The 0.5.1 baseline predates the
+  hooks and runs only with `--run-old-baseline`. Checks that depend on how the launcher was built follow the build under
+  test (`launcher_build_facts.py`). The edition section always runs with `--launcher`: its download, cache and address
+  rules on either route, and a repair without any OptiScaler ending through the direct route (exit 0) or refused (exit 2)
+  without it. `--no-direct-launcher` (a testing build with `-DWRONGGPU_DIRECT_ROUTE=OFF`, as releases) runs the section
+  again in a pass of its own for the exit-2 refusals. rr-prepare stays in the work folder: its no-card path, and with the
+  suite's stand-in runtime the helper's expected failure to load it (under a test driver version, so on any PC) with the
+  suite's `LOCALAPPDATA` kept. The checks of RR's kernels really prepared need a payload with the real runtime and fill the
+  user's real graphics driver cache, so they run only with `--rr-prepare-gpu`. Test builds' hooks for this:
+  `WRONGGPU_TEST_RR_DRIVER` (a driver version, or `none`), `WRONGGPU_TEST_HELPER_ENV_LOG`, and
+  `WRONGGPU_TEST_REAL_DRIVER_CACHE=1` (the helper gets the user's real `LOCALAPPDATA`; release builds always do).
   Its `[direct-rr]` part: a game that ships the RR library without the game interface's RR plugin (the Unreal Engine
   plugin layout of Hogwarts Legacy, LEGO Batman, Borderlands 4) creates Ray Reconstruction itself (`rr.h`
   `RrUse::direct`; status `rr_direct`). WrongGPU's RR runs there only through WrongGPU's edition of OptiScaler (plugin
