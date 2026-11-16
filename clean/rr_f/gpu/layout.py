@@ -11,6 +11,10 @@ them in its own buffers is its own choice"). Built by our loader from the logica
   [h][I = query tile][J = key tile][lane][8] f32 with element v of lane 16 hf + c = B_h(16 I + c, 16 J + 8 hf + v).
 * Biases: f32 vectors (exact widening of the f16 values), followed by their split for the exact step Y
   (kernels/rr_step_y.hlsli): [values | cb | cs] with cb = the nearest integer (ties to even) and cs = value - cb.
+  cb is computed as the runtime's host split computes it (runtime/src/rr_pack.cpp rne_int: floor, then up), so the
+  two packings are the same bytes: a negative value in [-0.5, 0) gets cb = +0.0 (numpy's round would give -0.0), -0.0
+  keeps -0.0. The kernels need only cb + cs = value exactly and |cs| <= 1/2; the sign of a zero cb reaches no output
+  (rr_step_y.hlsli: the start chain is added to a +0 chain first, and cs is always added).
 """
 import numpy as np
 
@@ -37,11 +41,25 @@ def f32(v):
     return np.asarray(v, np.float64).astype(np.float32)
 
 
-def bias_split(v):
-    """f16 bias values -> f32 [values | cb | cs]: cb = nearest integer (ties to even), cs = v - cb (exact)."""
+def rint_host(v):
+    """Nearest integer, ties to even, exactly as the runtime's host split (rr_pack.cpp rne_int): r = floor(v), then
+    r + 1 when v - r > 1/2 or (v - r == 1/2 and r is odd). The same values as numpy's round; zeros differ only in sign:
+    v in [-0.5, 0) gives +0.0 (round: -0.0), v = -0.0 gives -0.0. Non-finite values come back as they are."""
     v = np.asarray(v, np.float64)
-    cb = np.round(v)                                     # halves to even, as the kernel's round (v_rndne)
-    return np.concatenate([f32(v), f32(cb), f32(v - cb)])
+    with np.errstate(invalid="ignore"):
+        r = np.floor(v)
+        d = v - r
+        up = (d > 0.5) | ((d == 0.5) & (np.fmod(r, 2.0) != 0.0))
+    return np.where(up, r + 1.0, r)
+
+
+def bias_split(v):
+    """f16 bias values -> f32 [values | cb | cs]: cb = nearest integer (ties to even; rint_host, the runtime's bytes),
+    cs = v - cb (exact)."""
+    v = np.asarray(v, np.float64)
+    cb = rint_host(v)
+    with np.errstate(invalid="ignore"):
+        return np.concatenate([f32(v), f32(cb), f32(v - cb)])
 
 
 def bias_tiles(Tb):
@@ -75,7 +93,7 @@ def pack_weights(W, C, H):
         qv.append(frags(W["Wv"][h].T))
     P["Wqv"] = np.stack(qv).reshape(H, 2, 2, C // 16, 32, 8)   # [h][q|v][ft][ks]
     tb = bias_tiles(W["Tb"]).astype(np.float64)
-    ca = np.round(tb)                                    # the score bias split for the exact step Y (ties to even)
+    ca = rint_host(tb)                                   # the score bias split for the exact step Y (ties to even)
     P["Tb"] = np.concatenate([f32(tb).ravel(), f32(ca).ravel(), f32(tb - ca).ravel()])   # [values | ca | cb]
     P["Wo"] = np.stack([frags(W["Wo"][h].T) for h in range(H)])  # [h][C/16][2]
     P["bo"] = bias_split(W["bo"])
