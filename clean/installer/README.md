@@ -934,10 +934,14 @@ Windows (the Wine run was not repeated for them):
   and the test hooks' strings inside its sections. Every launcher it is given, their copies and the `uninstall.exe` they
   write are checked before they run; anything else is refused unrun (a release launcher could reach the real download
   page, the PC's stores and the real Apps & features root). Negative controls: `wg-test-canary` and
-  `wg-test-canary-strings` (CMake targets of a testing build, built next to the launcher; not testing builds, the second
-  carrying the hooks' strings) start when run directly and are refused through every entry point. The 0.5.1 baseline
-  predates the hooks and runs only with `--run-old-baseline`. Every launcher call gets the work folder's `tmp` as `TEMP`
-  and `TMP`, and no inherited test override (`WRONGGPU_TEST_*`, `WG_*`). Checks that depend on how the launcher was built follow the build under
+  `wg-test-canary-strings` (not testing builds, the second carrying the hooks' strings) are built with a testing
+  `WrongGPU` target, which then writes `wg-test-build.sha256` (the SHA-256 of that `WrongGPU.exe` and of the canaries)
+  next to itself. The suite starts only canaries that list verifies as this build's, by their full path and with its own
+  child environment: they start when run directly and are refused through every launch path. The 0.5.1 baseline predates
+  the hooks: `--run-old-baseline` runs it OUTSIDE the suite's isolation guarantee, unchecked, and only in a disposable,
+  fully redirected sandbox. Every launcher call gets the work folder's `tmp` (made anew at the start; refused when it or a
+  folder above it is a junction or link) as `TEMP` and `TMP`, and no inherited test override (`WRONGGPU_TEST_*`, `WG_*`;
+  `WRONGGPU_HIP_RUNTIME` only from `--hip`). Checks that depend on how the launcher was built follow the build under
   test (`launcher_build_facts.py`). The edition section always runs with `--launcher`: its download, cache and address
   rules on either route, and a repair without any OptiScaler ending through the direct route (exit 0) or refused (exit 2)
   without it. `--no-direct-launcher` (a testing build with `-DWRONGGPU_DIRECT_ROUTE=OFF`, as releases) runs the section
@@ -1013,7 +1017,8 @@ The run stops, loudly, on:
 
 The `[isolation-verbs]` section runs install, repair, update, uninstall, the window's refresh, a batch (a noscan job, then a
 normal one) and `/FSR4` / `/LIST`, with and without no-scan, against a non-empty test library. The 0.5.1 baseline installer
-predates all this and runs only with `--run-old-baseline`, in a fully redirected sandbox.
+predates all this and runs only with `--run-old-baseline`: outside the suite's isolation guarantee, in a disposable, fully
+redirected sandbox.
 
 On Windows: `python tests\run_installer_tests.py --prepare-only` writes the mock payload and the synthetic map; build
 the installer from them with CMake (`-DWRONGGPU_TESTING=ON -DWRONGGPU_PAYLOAD_DIR=... -DWRONGGPU_MAP=...`) and run

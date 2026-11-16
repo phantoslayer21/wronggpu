@@ -49,11 +49,13 @@ class T:
 
     def child_env(self, inherited):
         """The launcher's environment from the caller's: LOCALAPPDATA, ProgramData, TEMP and TMP in the work folder, and no
-        inherited test override (WRONGGPU_TEST_*, WG_*: a test sets its own for one call) or HIP path."""
+        inherited test override (WRONGGPU_TEST_*, WG_*: a test sets its own for one call; WRONGGPU_HIP_RUNTIME only from --hip)
+        or HIP path."""
         tmp = os.path.join(self.work, "tmp")
         env = dict(inherited, LOCALAPPDATA=os.path.join(self.work, "localappdata"), ProgramData=os.path.join(self.work, "programdata"),
                    TEMP=tmp, TMP=tmp)
-        for k in [k for k in env if k.upper().startswith(("WG_", "WRONGGPU_TEST_")) or k.upper() in ("HIP_PATH", "ROCM_PATH", "LLVM_PATH", "HIP_DEVICE_LIB_PATH")]:
+        for k in [k for k in env if k.upper().startswith(("WG_", "WRONGGPU_TEST_")) or
+                  k.upper() in ("WRONGGPU_HIP_RUNTIME", "HIP_PATH", "ROCM_PATH", "LLVM_PATH", "HIP_DEVICE_LIB_PATH")]:
             env.pop(k)
         if self.hip:
             env["WRONGGPU_HIP_RUNTIME"] = self.hip
@@ -805,6 +807,7 @@ def test_adopt_and_self_install(t, opti, baseline):
         print("  skipped: the 0.5.1 installer predates the test isolation (it may read the PC's own libraries); --run-old-baseline "
               "runs it, only in a fully redirected sandbox")
         return
+    print("  WARNING: --run-old-baseline: the 0.5.1 installer runs OUTSIDE the suite's isolation guarantee (not preflighted)")
     root, b, exe = game(t, "Old Game", exe="Old.exe")
     before = snapshot(root)
     rc = t.raw([baseline, "/S", "/LOG=" + t.log, "/NOSCAN", "/FORCE", "/EXPERIMENTAL", "/DIR=" + root, "/OPTISCALER=" + opti], guard=False)
@@ -3037,7 +3040,9 @@ def main():
     ap.add_argument("--work", required=True)
     ap.add_argument("--baseline", help="the 0.5.1 installer (WRONGGPU_TESTING build, same test map) for the adoption cases")
     ap.add_argument("--hip", help="mock amdhip64_7.dll (WRONGGPU_HIP_RUNTIME)")
-    ap.add_argument("--run-old-baseline", action="store_true", help="also run --baseline (it predates the test isolation: only in a fully redirected sandbox)")
+    ap.add_argument("--run-old-baseline", action="store_true", help="also run --baseline: OUTSIDE the suite's isolation guarantee (the "
+                    "0.5.1 installer predates the test hooks and is not preflighted; it may read the PC's own libraries): only in a "
+                    "disposable, fully redirected sandbox")
     ap.add_argument("--no-direct-launcher", help="a testing launcher built with -DWRONGGPU_DIRECT_ROUTE=OFF (as releases) for the edition "
                     "refusals, when --launcher has the direct route")
     ap.add_argument("--rr-prepare-gpu", action="store_true", help="opt-in: rr-prepare's GPU checks with a payload's real runtime "
@@ -3057,6 +3062,7 @@ def main():
     for d in ("games", "data", "localappdata", "programs", "startmenu"):
         shutil.rmtree(os.path.join(work, d), ignore_errors=True)
     os.makedirs(work, exist_ok=True)
+    facts.fresh_temp(work)  # <work>\tmp made anew; refused when it or a folder above it is a junction or link
     model = suite.cases.f_mini_case(present=0)  # the synthetic source of the test map the launcher was built with
     t = T(os.path.abspath(a.launcher), work, model, a.hip)
     # registry entries of an earlier run (test root only)

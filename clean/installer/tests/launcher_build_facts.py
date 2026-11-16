@@ -161,6 +161,60 @@ def require_test_hooks(path, what="the program"):
         _hooks_ok[key] = True
 
 
+def reparse_in_path(path):
+    """The first folder of path (path itself and every folder above it that exists) that is a junction, a symbolic link or
+    another reparse point; None when there is none."""
+    p = os.path.abspath(path)
+    while True:
+        if os.path.lexists(p):
+            st = os.lstat(p)
+            if os.path.islink(p) or getattr(st, "st_file_attributes", 0) & 0x400:  # FILE_ATTRIBUTE_REPARSE_POINT
+                return p
+        up = os.path.dirname(p)
+        if up == p:
+            return None
+        p = up
+
+
+def fresh_temp(work):
+    """<work>\\tmp, the launcher's TEMP and TMP: refused when it or a folder above it is a reparse point (it could lead
+    outside the work folder), else removed and made anew, empty."""
+    tmp = os.path.join(os.path.abspath(work), "tmp")
+    bad = reparse_in_path(tmp)
+    if bad:
+        raise SystemExit("the suite's temporary folder %s is not a plain folder (%s is a junction or link): not run" % (tmp, bad))
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(tmp)
+    return tmp
+
+
+CANARIES = ("wg-test-canary.exe", "wg-test-canary-strings.exe")
+BUILD_LIST = "wg-test-build.sha256"  # written by the build next to the launcher: SHA-256 of WrongGPU.exe and the canaries
+
+
+def verified_canaries(exe):
+    """The canaries built in THIS build: their names in <launcher dir>\\wg-test-build.sha256 (written by the testing build
+    after it links WrongGPU.exe, CMakeLists.txt), whose WrongGPU.exe line is this launcher's SHA-256 and whose canary lines
+    match the files. Returns ({name: bytes}, why not); a file that is not verified is never started."""
+    import hashlib
+    d = os.path.dirname(os.path.abspath(exe))
+    try:
+        lines = read(os.path.join(d, BUILD_LIST)).decode("ascii").split()
+    except (OSError, UnicodeDecodeError) as e:
+        return {}, "no build list %s (%s)" % (BUILD_LIST, e)
+    listed = dict(zip(lines[1::2], lines[0::2]))
+    if listed.get("WrongGPU.exe") != hashlib.sha256(read(exe)).hexdigest():
+        return {}, "the build list is not this launcher's (another build)"
+    out = {}
+    for name in CANARIES:
+        p = os.path.join(d, name)
+        data = read(p) if os.path.isfile(p) else b""
+        if not data or listed.get(name) != hashlib.sha256(data).hexdigest():
+            return {}, "%s is missing or not the one this build made" % name
+        out[name] = data
+    return out, ""
+
+
 def junction_call(t, exe, verb, work):
     """The data-root junction test's launcher call without --log (its log goes to TEMP\\WrongGPU-junction-<pid>.log, TEMP being
     the work folder's tmp): the preflight first, as for every launcher call. Returns (exit code, the log's text)."""
@@ -199,21 +253,26 @@ def self_checks(t):
     t.check("preflight: the launcher under test is a WRONGGPU_TESTING build (its identity resource, a matching PE checksum, the hooks)",
             not missing_test_hooks(t.exe), missing_test_hooks(t.exe))
     # programs that are not testing builds, each leaving <program>.started when it starts (tests/canary.cpp; built with the
-    # launcher in a testing build): one plain, one carrying the hooks' strings; first run directly, to show they do start
+    # launcher in a testing build): one plain, one carrying the hooks' strings. Only the canaries THIS build made are ever
+    # started (their SHA-256 in the build list next to the launcher, with this launcher's), by their full path, with the
+    # suite's own child environment: first directly, to show they do start
+    import hashlib
     size = lambda: os.path.getsize(t.log) if os.path.isfile(t.log) else 0
-    for name in ("wg-test-canary.exe", "wg-test-canary-strings.exe"):
-        built = os.path.join(os.path.dirname(t.exe), name)
-        if not os.path.isfile(built):
-            t.check("negative control %s: built next to the launcher (CMake target %s)" % (name, name[:-4]), False, built)
-            continue
+    canaries, why_not = verified_canaries(t.exe)
+    t.check("negative controls: the canaries are this build's (wg-test-build.sha256 next to the launcher names this launcher "
+            "and the canaries' bytes)", bool(canaries), why_not)
+    for name, data in canaries.items():
         canary = os.path.join(d, name)
-        shutil.copyfile(built, canary)
+        write(canary, data)
         started = canary + ".started"
-        subprocess.run([canary], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        if hashlib.sha256(read(canary)).digest() != hashlib.sha256(data).digest():
+            t.check("negative control %s: the copy is the verified file" % name, False)
+            continue
+        subprocess.run([canary], env=t.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
         runs = os.path.isfile(started)
         if runs:
             os.remove(started)
-        before, why, jwhy = size(), "", ""
+        before, why, jwhy, rwhy = size(), "", "", ""
         try:
             t.run("version", exe=canary)
         except SystemExit as e:
@@ -222,6 +281,10 @@ def self_checks(t):
             junction_call(t, canary, "remove-data", d)  # the data-root junction test's path
         except SystemExit as e:
             jwhy = str(e)
+        try:
+            t.raw([canary, "/S"])  # a program run as it is (the restorer's path)
+        except SystemExit as e:
+            rwhy = str(e)
         entry = []
         suite = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run_launcher_tests.py")
         for args in (["--launcher", canary], ["--launcher", t.exe, "--no-direct-launcher", canary]):  # the suite's entry points
@@ -229,18 +292,18 @@ def self_checks(t):
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
             entry.append(p.returncode != 0 and b"not a WRONGGPU_TESTING build" in p.stderr + p.stdout)
         t.check("negative control %s: it starts when run directly (its start marker); the suite never starts it (a launcher call, "
-                "the junction test's call, --launcher, --no-direct-launcher): refused before it runs, no start marker, nothing logged" % name,
-                runs and "not a WRONGGPU_TESTING build" in why and "not a WRONGGPU_TESTING build" in jwhy and entry == [True, True] and
-                not os.path.exists(started) and size() == before, (runs, why, jwhy, entry))
+                "the junction test's call, a program run as it is, --launcher, --no-direct-launcher): refused before it runs, no start "
+                "marker, nothing logged" % name,
+                runs and all("not a WRONGGPU_TESTING build" in w for w in (why, jwhy, rwhy)) and entry == [True, True] and
+                not os.path.exists(started) and size() == before, (runs, why, jwhy, rwhy, entry))
     # the real launcher changed after its link: one byte, or data appended (the hooks' strings and the identity text)
     data = read(t.exe)
     mid = len(data) // 2
     mixed = {"one byte changed": data[:mid] + bytes([data[mid] ^ 0xFF]) + data[mid + 1:],
              "data appended": data + b"".join(m.encode("utf-16-le") for m in TEST_HOOKS) + IDENTITY_TEXT}
-    strings = os.path.join(os.path.dirname(t.exe), "wg-test-canary-strings.exe")
-    if os.path.isfile(strings):  # the hooks' strings and a valid checksum, but no identity resource: still not a testing build
+    if "wg-test-canary-strings.exe" in canaries:  # the hooks' strings and a valid checksum, but no identity resource
         import struct
-        c = bytearray(read(strings))
+        c = bytearray(canaries["wg-test-canary-strings.exe"])
         at = struct.unpack_from("<I", c, 0x3C)[0] + 24 + 64
         struct.pack_into("<I", c, at, pe_checksum(bytes(c), at))
         mixed["the hooks' strings and a valid checksum, no identity resource"] = bytes(c)
@@ -248,6 +311,34 @@ def self_checks(t):
     t.check("preflight: a launcher changed after its link (a byte, or the hooks' strings and the identity appended), or a program "
             "with the strings and a valid checksum but no identity resource, is refused",
             all(refused.values()), refused)
+    # WRONGGPU_HIP_RUNTIME only from --hip: an inherited value (another HIP library) is never the launcher's
+    conflict = os.path.join(d, "conflict", "amdhip64_7.dll")
+    env = t.child_env(dict(os.environ, WRONGGPU_HIP_RUNTIME=conflict))
+    saved = t.env
+    t.env = dict(env, **{k: v for k, v in saved.items() if k in ("WRONGGPU_TEST_LIBRARIES", "WRONGGPU_TEST_ACCESS_LOG", "WRONGGPU_TEST_RUN_ID")})
+    try:
+        t.run("hipcheck")
+    finally:
+        t.env = saved
+    dll = t.j.get("dll", "")
+    t.check("HIP runtime: an inherited WRONGGPU_HIP_RUNTIME is dropped, only --hip sets it (hipcheck never uses the inherited one)",
+            env.get("WRONGGPU_HIP_RUNTIME") == t.hip and conflict.lower() not in dll.lower() and (not t.hip or dll.lower() == t.hip.lower()),
+            (env.get("WRONGGPU_HIP_RUNTIME"), t.hip, t.j))
+    # the temporary folder: a junction in its place is refused (fresh_temp), never followed
+    jw = os.path.join(d, "junction-work")
+    os.makedirs(os.path.join(d, "elsewhere"))
+    os.makedirs(jw)
+    linked = subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", os.path.join(jw, "tmp"), os.path.join(d, "elsewhere")],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode == 0
+    jwhy = ""
+    try:
+        fresh_temp(jw)
+    except SystemExit as e:
+        jwhy = str(e)
+    t.check("the suite's temporary folder: a junction in its place (or above it) is refused, never followed or emptied",
+            linked and "junction or link" in jwhy and os.path.isdir(os.path.join(d, "elsewhere")), (linked, jwhy))
+    if os.path.lexists(os.path.join(jw, "tmp")):
+        os.rmdir(os.path.join(jw, "tmp"))  # (removes the junction only)
     b = os.path.join(d, "Game", "bin")
     write(os.path.join(b, "wronggpu", "kernels", "enc.hsaco"), b"kernel")
     ok_kernels = rr_free(b, "file wronggpu\\kernels\\enc.hsaco")

@@ -237,6 +237,13 @@ if(WRONGGPU_TESTING)
   add_executable(wg-test-canary tests/canary.cpp)
   add_executable(wg-test-canary-strings tests/canary.cpp)
   target_compile_definitions(wg-test-canary-strings PRIVATE WG_CANARY_HOOK_STRINGS)
+  # built with the testing launcher (a single-target build has them), and the build list the suite checks before it starts
+  # one: the SHA-256 of this WrongGPU.exe and of the canaries, written after the launcher's link
+  add_dependencies(WrongGPU wg-test-canary wg-test-canary-strings)
+  add_custom_command(TARGET WrongGPU POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -DF1=$<TARGET_FILE:WrongGPU> -DF2=$<TARGET_FILE:wg-test-canary> -DF3=$<TARGET_FILE:wg-test-canary-strings>
+            -DOUT=$<TARGET_FILE_DIR:WrongGPU>/wg-test-build.sha256 -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/sha256_list.cmake
+    VERBATIM)
   add_executable(wizard-policy-tests tests/wizard_policy_tests.cpp)
   target_compile_definitions(wizard-policy-tests PRIVATE ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION} ${MODEL_L_DEFINITION} ${MODEL_K_DEFINITION})
 endif()
