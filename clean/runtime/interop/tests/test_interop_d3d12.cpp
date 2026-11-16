@@ -15,6 +15,7 @@
 //   test_interop_d3d12.exe <runtime> dx12same "<common options>" [frames] [outsrv]
 //     executor=hip against executor=dx12 (the network on this test's D3D12 device, no HIP) through the full interop:
 //     the output textures byte for byte; the common options name the synthetic model (see case_dx12_same).
+//   dx12same: WG_TEST_JITTER_OUT=1 gives every frame a jitter outside [-0.5, 0.5] (model K's legacy input path).
 //   hipbench / dx12same environment: WG_TEST_RENDER_WIDTH / _HEIGHT, WG_TEST_OUTPUT_WIDTH / _HEIGHT (sizes),
 //     WG_TEST_TEX_PAD=n (textures n texels wider than the render size), WG_TEST_MOTION_OUTRES=1 (motion at output size,
 //     WG_CREATE_MOTION_OUTPUT_RES), WG_TEST_MOTIONFMT=rg16f|rg32f, WG_TEST_PI (pre-exposure).
@@ -1996,6 +1997,9 @@ bool case_dx12_same(Gpu& g, const char* dll, const std::string& common, int fram
       f.motion_offset[0] = 0.25f, f.motion_offset[1] = 0.0f;
       const float jit[4][2] = {{0.0f, -1.0f / 6}, {-0.25f, 1.0f / 6}, {0.25f, -7.0f / 18}, {-0.375f, -1.0f / 18}};
       f.jitter[0] = jit[t % 4][0], f.jitter[1] = jit[t % 4][1];
+      // WG_TEST_JITTER_OUT=1 (this test program only): a jitter outside [-0.5, 0.5] on every frame (model K's legacy
+      // input path at any render size)
+      if (std::getenv("WG_TEST_JITTER_OUT")) f.jitter[0] = 0.75f, f.jitter[1] = -0.8f;
       f.exposure_mode = t % 3 == 0 ? WG_EXPOSURE_COMPUTE : t % 3 == 1 ? WG_EXPOSURE_VALUE : WG_EXPOSURE_TEXTURE;
       f.exposure_value = 0.75f + (float)(t % 24) / 24.0f;
       // WG_TEST_PI: the odd frames' pre-exposure (default 1; the even frames: 1.375)

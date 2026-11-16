@@ -63,6 +63,14 @@ def check_object_names_in(data):
                                  b"_tmo.dxil", b"l_hyb_probe", b'_hyb_mut"', b'_hyb_tmo"', b'_hyb_dump"') if t in data]
 
 
+# Switches of the test programs (never in a release artifact: a file that names one is a test build)
+TEST_HARNESS_STRINGS = (b"WG_TEST_JITTER_OUT",)
+
+
+def test_harness_strings_in(data):
+    return [t.decode("ascii") for t in TEST_HARNESS_STRINGS if t in data]
+
+
 def dev_only_strings_in(data):
     return [t.decode("ascii") for t in DEV_ONLY_STRINGS if t in data]
 
@@ -85,6 +93,9 @@ def check_bytes(data):
     objs = check_object_names_in(data)
     if objs:
         return False, "carries check-only code objects (%r)" % objs[0]
+    harness = test_harness_strings_in(data)
+    if harness:
+        return False, "carries a test program's switch (%r)" % harness[0]
     return True, "dev-diagnostics=0"
 
 
@@ -159,6 +170,9 @@ def check_artifact(name, data):
     carried = dev_only_strings_in(data)
     if carried:
         return False, "carries developer-diagnostic code (%r)" % carried[0], False
+    harness = test_harness_strings_in(data)
+    if harness:
+        return False, "carries a test program's switch (%r)" % harness[0], False
     return True, "dev-diagnostics=0" if zero else "nothing to check", zero
 
 
