@@ -52,7 +52,7 @@ def _build(exe, defines=()):
         raise unittest.SkipTest("no host C++ compiler (CXX, clang++, g++ or MSVC cl)")
     objdir = os.path.join(os.path.dirname(exe), "obj")
     os.makedirs(objdir, exist_ok=True)
-    cl = 'cl /nologo /std:c++17 /O1 /EHsc /utf-8 /D_CRT_SECURE_NO_WARNINGS %s "%s" /Fo"%s\\\\" /Fe"%s"' % (
+    cl = 'cl /nologo /std:c++17 /permissive- /O1 /EHsc /utf-8 /D_CRT_SECURE_NO_WARNINGS %s "%s" /Fo"%s\\\\" /Fe"%s"' % (
         " ".join("/D" + d for d in defines), os.path.join(ROOT, TEST), objdir, exe)
     bat = exe + ".bat"
     with open(bat, "w") as f:

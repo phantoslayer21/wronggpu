@@ -606,12 +606,16 @@ class Context {
         q.kmt_known = ident.kmt_known;
         q.kmt_vendor = ident.kmt_vendor;
         q.kmt_device = ident.kmt_device;
+        q.wine_fallback = ident.wine_fallback;
+        q.wine_vendor = ident.wine_vendor;
+        q.wine_device = ident.wine_device;
       }
       q.sparkle_guard = o.sparkle_guard > 0.0f;
       q.capture = !o.capture_dir.empty();
       q.hip_switch = o.hip_switch;
       const ExecutorChoice ch = choose_executor(q);
       if (ch.executor.empty()) return fail(WG_ERROR_PARAMETER, "unknown executor " + o.executor);
+      if (!ch.adapter_note.empty()) say(WG_LOG_INFO, ch.adapter_note);  // Wine: how the adapter was identified (#248)
       if (!ch.why.empty()) say(ch.warn ? WG_LOG_WARN : WG_LOG_INFO, ch.why);
       // R1: a release build ignores the diagnostic keys (executor=hip, capture_dir): one line each, the context stays on D3D12
       for (const std::string& line : ch.ignored) say(WG_LOG_WARN, line);

@@ -223,6 +223,127 @@ int main() {
     expect("RR: the game's RX 9000 (spoofed name) is accepted", wgrt::rdna4_identity(id));
   }
 
+  // ---- Wine and Proton (#248): the driver's query is not implemented there; the system DXGI's ids under the same rule ---
+  {
+    struct WineFake {
+      int32_t status = 0;                       // the driver query's answer
+      uint32_t kvendor = 0x1002, kdevice = 0x7550;  // its ids when it answers 0
+      bool wine = false;                        // ntdll exports wine_get_version
+      bool dxgi_answers = true;
+      uint32_t dvendor = 0x1002, ddevice = 0x7550;  // the system DXGI's ids
+      int asked_query = 0, asked_wine = 0, asked_dxgi_ids = 0;
+      wgrt::AdapterSources sources() {
+        wgrt::AdapterSources s;
+        s.find_adapter = [](const wgrt::AdapterLuid&, wgrt::AdapterRecord* out) {
+          out->vendor = 0x1002;
+          out->description = "AMD Radeon RX 9070 XT";
+          return true;
+        };
+        s.driver_query = [this](const wgrt::AdapterLuid&, uint32_t* v, uint32_t* d) -> int32_t {
+          ++asked_query;
+          if (status == 0) {
+            *v = kvendor;
+            *d = kdevice;
+          }
+          return status;
+        };
+        s.under_wine = [this]() {
+          ++asked_wine;
+          return wine;
+        };
+        s.dxgi_ids = [this](const wgrt::AdapterLuid&, uint32_t* v, uint32_t* d) {
+          ++asked_dxgi_ids;
+          if (!dxgi_answers) return false;
+          *v = dvendor;
+          *d = ddevice;
+          return true;
+        };
+        return s;
+      }
+    };
+    const wgrt::AdapterLuid luid;
+    auto choice = [](const wgrt::AdapterIdentity& id) {
+      ExecutorRequest r = request_for(id);
+      r.wine_fallback = id.wine_fallback;
+      r.wine_vendor = id.wine_vendor;
+      r.wine_device = id.wine_device;
+      return choose_executor(r);
+    };
+
+    WineFake f;
+    f.status = wgrt::kStatusNotImplemented;
+    f.wine = true;
+    wgrt::AdapterIdentity id = wgrt::lookup_adapter(luid, f.sources());
+    ExecutorChoice c = choice(id);
+    expect("Wine: query not implemented + Wine + the system DXGI's 1002:7550: RDNA 4, the D3D12 executor",
+           !id.kmt_known && id.wine_fallback && wgrt::rdna4_identity(id) && c.executor == "dx12" && c.by_default);
+    expect("Wine: the one line says the Wine fallback identified the adapter, with the ids",
+           has(c.adapter_note, "Wine: the driver's adapter id query is not implemented") &&
+               has(c.adapter_note, "PCI 1002:7550 (Wine: the system DXGI's ids)") &&
+               c.adapter_note == wgrt::wine_fallback_line(id) && c.why.empty());
+    for (uint32_t dev : {0x7550u, 0x7551u, 0x7590u, 0x7591u}) {
+      f.ddevice = dev;
+      expect("Wine: every RDNA 4 id of the list is accepted", wgrt::rdna4_identity(wgrt::lookup_adapter(luid, f.sources())));
+    }
+    f.dvendor = 0x8086;
+    f.ddevice = 0x56A0;
+    id = wgrt::lookup_adapter(luid, f.sources());
+    c = choice(id);
+    expect("Wine: another vendor's ids are refused (the front end's upscaler), no Wine line",
+           id.wine_fallback && !wgrt::rdna4_identity(id) && c.executor == "fsr" && c.adapter_note.empty() &&
+               has(c.why, "PCI 8086:56A0"));
+    f.dvendor = 0x10DE;
+    f.ddevice = 0x7550;
+    id = wgrt::lookup_adapter(luid, f.sources());
+    expect("Wine: an RDNA 4 device id under another vendor's id (spoofed) is refused",
+           !wgrt::rdna4_identity(id) && choice(id).executor == "fsr");
+    f.dvendor = 0x1002;
+    f.ddevice = 0x744C;
+    id = wgrt::lookup_adapter(luid, f.sources());
+    expect("Wine: an AMD board outside the list is refused, and said so",
+           !wgrt::rdna4_identity(id) && has(wgrt::describe_identity(id), "outside the RDNA 4 id list"));
+    f.ddevice = 0x7550;
+    f.dxgi_answers = false;
+    id = wgrt::lookup_adapter(luid, f.sources());
+    expect("Wine: the system DXGI not answering: not identified, refused (fail closed)",
+           !id.wine_fallback && !wgrt::rdna4_identity(id) && choice(id).executor == "fsr");
+    f.dxgi_answers = true;
+
+    // outside Wine (Windows): the fallback is never asked
+    WineFake w;
+    w.status = wgrt::kStatusNotImplemented;
+    w.wine = false;
+    id = wgrt::lookup_adapter(luid, w.sources());
+    expect("not under Wine: query not implemented is refused, and the system DXGI's ids are never asked",
+           !id.wine_fallback && !wgrt::rdna4_identity(id) && w.asked_wine == 1 && w.asked_dxgi_ids == 0 &&
+               choice(id).executor == "fsr");
+    for (int32_t st : {wgrt::kStatusUnsuccessful, (int32_t)-1073741811 /* 0xC000000D */, (int32_t)-1073741790 /* 0xC0000022 */}) {
+      WineFake o;
+      o.status = st;
+      o.wine = true;
+      id = wgrt::lookup_adapter(luid, o.sources());
+      expect("another status from the query is refused, under Wine too: neither Wine nor the system DXGI's ids are asked",
+             !id.wine_fallback && !id.kmt_known && !wgrt::rdna4_identity(id) && o.asked_wine == 0 && o.asked_dxgi_ids == 0);
+    }
+    WineFake ok;  // Windows: the driver's ids are read; nothing else is asked, whatever the system DXGI would say
+    ok.dvendor = 0x10DE;
+    id = wgrt::lookup_adapter(luid, ok.sources());
+    c = choice(id);
+    expect("the driver's ids read: they decide, the fallback is never asked, no Wine line",
+           id.kmt_known && !id.wine_fallback && wgrt::rdna4_identity(id) && ok.asked_wine == 0 && ok.asked_dxgi_ids == 0 &&
+               c.executor == "dx12" && c.adapter_note.empty());
+    ok.kdevice = 0x744C;
+    ok.ddevice = 0x7550;
+    ok.wine = true;
+    id = wgrt::lookup_adapter(luid, ok.sources());
+    expect("the driver's ids read under Wine (a future Wine): RDNA 3 ids are refused, the DXGI ids never override them",
+           !wgrt::rdna4_identity(id) && ok.asked_dxgi_ids == 0);
+    // the Ray Reconstruction runtime: the same lookup, rule and line (rr_runtime.cpp)
+    id = wgrt::lookup_adapter(luid, f.sources());
+    expect("RR: the Wine fallback's RX 9000 is accepted, with the one line",
+           wgrt::rdna4_identity(id) && !wgrt::wine_fallback_line(id).empty());
+  }
+
   // ---- the default rule on real boards, every model -----------------------------------------------------------------
   for (bool model_k : {false, true}) {
     const char* tag = model_k ? " (model K)" : " (model M or L)";

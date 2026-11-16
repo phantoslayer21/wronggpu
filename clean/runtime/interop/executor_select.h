@@ -52,6 +52,8 @@ struct ExecutorRequest {
   std::string adapter;            // that DXGI description
   bool kmt_known = false;         // the kernel-mode driver's PCI ids were read (they decide first)
   uint32_t kmt_vendor = 0, kmt_device = 0;
+  bool wine_fallback = false;     // Wine only: the driver's query is not implemented there; the system DXGI's ids (#248)
+  uint32_t wine_vendor = 0, wine_device = 0;
   bool sparkle_guard = false;     // option sparkle_guard on
   bool capture = false;           // option capture_dir set
   std::string hip_switch;         // the 0.6.0 option hip_switch (ignored for every model: hip_switch_note)
@@ -66,6 +68,7 @@ struct ExecutorChoice {
   bool sparkle_off = false; // the sparkle guard (HIP only) is turned off, whatever the model; the context stays on D3D12
   std::string why;          // the one log line about the choice; empty: nothing to log here
   std::string hip_note;     // the one line when the option hip_switch asks for a move to HIP (ignored, any model)
+  std::string adapter_note; // the one line when the Wine fallback identified the adapter (rdna4.h, #248); else empty
   std::vector<std::string> ignored;  // release build: one warning line per diagnostic key that was ignored (executor=hip,
                                      // capture_dir); the context stays on D3D12 (the backend also drops capture_dir)
 };
@@ -106,6 +109,9 @@ inline wgrt::AdapterIdentity adapter_identity(const ExecutorRequest& r) {
   id.kmt_known = r.kmt_known;
   id.kmt_vendor = r.kmt_vendor;
   id.kmt_device = r.kmt_device;
+  id.wine_fallback = r.wine_fallback;
+  id.wine_vendor = r.wine_vendor;
+  id.wine_device = r.wine_device;
   return id;
 }
 
@@ -117,6 +123,7 @@ inline ExecutorChoice choose_executor(const ExecutorRequest& r, bool devRequeste
   const bool dev = kDevDiagnostics && devRequested;
   ExecutorChoice c;
   c.hip_note = hip_switch_note(r.hip_switch);  // the same for every model: the option is ignored
+  c.adapter_note = wgrt::wine_fallback_line(adapter_identity(r));
   std::string e = r.executor;
   bool capture = r.capture;
   if (!dev) {  // R1: a release build never starts HIP, whatever the game's files say

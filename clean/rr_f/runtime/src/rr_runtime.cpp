@@ -1300,6 +1300,8 @@ uint32_t set_device_locked(ID3D12Device* given) {
       log_line(std::string(wgrt::needs_rx9000_sentence()) + " (" + who + "): Ray Reconstruction is not available; the game keeps its own denoiser");
       return WG_E_ADAPTER_NOT_SUPPORTED;
     }
+    const std::string wine = wgrt::wine_fallback_line(id);  // Wine: how the adapter was identified (#248)
+    if (!wine.empty()) log_line(wine);
     rt.adapter_name = id.dxgi_known ? id.description : who;
   }
   D3D12_COMMAND_QUEUE_DESC qd = {};
