@@ -188,7 +188,33 @@ def fresh_temp(work):
     return tmp
 
 
+def new_run_folder(root, prefix="run"):
+    """A NEW folder of its own in root (<prefix>-<UTC time>-<pid>[-n], made with exist_ok off), where a run (or a nested test
+    instance) writes everything: nothing that was in root before is written to, followed or removed. Refused when root holds
+    ';' (it would split the HIP candidate list) or it or a folder above it is a junction or link."""
+    import time
+    root = os.path.abspath(root)
+    if ";" in root:
+        raise SystemExit("--work %s holds ';': not run" % root)
+    bad = reparse_in_path(root)
+    if bad:
+        raise SystemExit("--work %s is not a plain folder (%s is a junction or link): not run" % (root, bad))
+    os.makedirs(root, exist_ok=True)
+    base = os.path.join(root, "%s-%s-%d" % (prefix, time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()), os.getpid()))
+    for n in range(100):
+        run = base if n == 0 else "%s-%d" % (base, n)
+        try:
+            os.mkdir(run)
+        except FileExistsError:
+            continue
+        if reparse_in_path(run):
+            raise SystemExit("the run folder %s is not a plain folder: not run" % run)
+        return run
+    raise SystemExit("no new run folder could be made in %s" % root)
+
+
 CANARIES = ("wg-test-canary.exe", "wg-test-canary-strings.exe")
+LOAD_MARKER = "wg-test-canary-dll.dll"  # writes <dll>.loaded when loaded (tests/canary_dll.cpp)
 BUILD_LIST = "wg-test-build.sha256"  # written by the build next to the launcher: SHA-256 of WrongGPU.exe and the canaries
 
 
@@ -206,7 +232,7 @@ def verified_canaries(exe):
     if listed.get("WrongGPU.exe") != hashlib.sha256(read(exe)).hexdigest():
         return {}, "the build list is not this launcher's (another build)"
     out = {}
-    for name in CANARIES:
+    for name in CANARIES + (LOAD_MARKER,):
         p = os.path.join(d, name)
         data = read(p) if os.path.isfile(p) else b""
         if not data or listed.get(name) != hashlib.sha256(data).hexdigest():
@@ -261,7 +287,8 @@ def self_checks(t):
     canaries, why_not = verified_canaries(t.exe)
     t.check("negative controls: the canaries are this build's (wg-test-build.sha256 next to the launcher names this launcher "
             "and the canaries' bytes)", bool(canaries), why_not)
-    for name, data in canaries.items():
+    for name in [n for n in CANARIES if n in canaries]:
+        data = canaries[name]
         canary = os.path.join(d, name)
         write(canary, data)
         started = canary + ".started"
@@ -343,6 +370,57 @@ def self_checks(t):
             read(os.path.join(target, "library-access.log")) == b"keep", (jlinked, p.returncode, (p.stderr + p.stdout)[-300:], os.listdir(target)))
     if os.path.lexists(jroot):
         os.rmdir(jroot)  # (the junction only)
+    # --work holding ';', and an explicit empty --hip=: refused before anything is made
+    entry = {}
+    for name, args, folder in (("--work with ';'", ["--work", os.path.join(d, "semi;colon")], os.path.join(d, "semi;colon")),
+                               ("--hip=", ["--work", os.path.join(d, "hip-empty"), "--hip="], os.path.join(d, "hip-empty"))):
+        p = subprocess.run([sys.executable, suite, "--launcher", t.exe] + args, env=dict(os.environ),
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
+        entry[name] = p.returncode != 0 and b"not run" in p.stderr + p.stdout and not os.path.exists(folder)
+    t.check("--work holding ';' (it would split the HIP candidate list) and an explicit empty --hip= are refused before anything "
+            "is made", all(entry.values()), entry)
+    # the run's own folder: a link and a load-marker DLL planted where an older run wrote (<--work>\library-access.log,
+    # <--work>\no-hip\amdhip64_7.dll) are never written, followed or loaded (only when nothing is there already)
+    root = os.path.dirname(t.work)
+    user = os.path.join(d, "user-data.txt")
+    write(user, b"user data")
+    planted, kind = [], ""
+    link = os.path.join(root, "library-access.log")
+    if not os.path.lexists(link):
+        try:
+            os.symlink(user, link)
+            kind = "symbolic link"
+        except OSError:
+            os.link(user, link)
+            kind = "hard link"
+        planted.append(link)
+    stand_in = os.path.join(root, "no-hip", "amdhip64_7.dll")
+    marker_dll = canaries.get(LOAD_MARKER)
+    loads = False
+    if marker_dll and not os.path.lexists(os.path.dirname(stand_in)):
+        probe = os.path.join(d, "marker-probe", "amdhip64_7.dll")  # the marker works: loaded here, it writes <dll>.loaded
+        write(probe, marker_dll)
+        import ctypes
+        h = ctypes.WinDLL(probe)
+        ctypes.windll.kernel32.FreeLibrary(ctypes.c_void_p(h._handle))
+        loads = os.path.isfile(probe + ".loaded")
+        write(stand_in, marker_dll)
+        planted.append(os.path.dirname(stand_in))
+    again = new_run_folder(t.work, "isolation-again")
+    import launcher_isolation as iso
+    iso.self_test(again)  # the start of a run again, in a fresh folder: the guard's own writes
+    t.run("version")
+    t.run("hipcheck")
+    t.check("the run's own fresh folder: a %s at <--work>\\library-access.log and a load-marker DLL at <--work>\\no-hip are never "
+            "written, followed or loaded (the target's bytes, the link and the DLL unchanged; no load marker)" % (kind or "file"),
+            read(user) == b"user data" and (not planted or (loads and os.path.isfile(stand_in) and read(stand_in) == marker_dll and
+                                                            not os.path.exists(stand_in + ".loaded"))) and
+            (link not in planted or read(link) == b"user data"), (kind, loads, planted))
+    for p in planted:  # (only what this check planted)
+        if os.path.isdir(p) and not os.path.islink(p):
+            shutil.rmtree(p, ignore_errors=True)
+        elif os.path.lexists(p):
+            os.remove(p)
     # the temporary folder: a junction in its place is refused (fresh_temp), never followed
     jw = os.path.join(d, "junction-work")
     os.makedirs(os.path.join(d, "elsewhere"))

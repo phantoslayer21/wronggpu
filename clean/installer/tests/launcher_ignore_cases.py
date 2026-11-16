@@ -38,9 +38,9 @@ def run(T, base, opti, game):
     print("\n[convert-ignore] the ignore lists on the install path: a listed model source, a list held open, the last uninstall")
     import hashlib
     from run_installer_tests import read, write
-    work = os.path.join(base.work, "convert-ignore")
-    shutil.rmtree(work, ignore_errors=True)
-    t = T(base.exe, work, base.model, base.env.get("WRONGGPU_HIP_RUNTIME"))
+    import launcher_build_facts as facts
+    work = facts.new_run_folder(base.work, "convert-ignore")  # a new folder of its own, with its own fresh tmp (T)
+    t = T(base.exe, work, base.model, base.hip)
     t.check = base.check  # one count, one list of failures
     shared = os.path.join(t.env["LOCALAPPDATA"], "WrongGPU")
     lst = os.path.join(shared, "ignore-files.txt")

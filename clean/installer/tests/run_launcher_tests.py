@@ -40,6 +40,9 @@ class T:
         self.log = os.path.join(work, "launcher-test.log")
         self.out = os.path.join(work, "out.json")
         self.hip = hip
+        facts.fresh_temp(work)  # its own tmp, made here (refused when it or a folder above it is a junction or link)
+        if os.path.lexists(os.path.join(work, "no-hip")):
+            raise SystemExit("%s already holds no-hip: not a fresh run folder" % work)
         self.env = self.child_env(os.environ)
         # the store libraries: <work>\libraries only; every store access logged and checked after each call (launcher_isolation)
         iso.test_env(self.env, work)
@@ -62,8 +65,7 @@ class T:
         # the HIP check tries these candidates only, never the system's, PATH's or ROCm's runtime (checks.cpp HipCandidates):
         # the --hip mock, else a file that is not there (a default run never loads a real HIP runtime)
         env["WRONGGPU_TEST_HIP_CANDIDATES"] = self.hip or os.path.join(self.work, "no-hip", "amdhip64_7.dll")
-        os.makedirs(env["LOCALAPPDATA"], exist_ok=True)
-        os.makedirs(tmp, exist_ok=True)
+        os.makedirs(env["LOCALAPPDATA"], exist_ok=True)  # (in the run's own fresh folder)
         return env
 
     def check(self, name, cond, detail=""):
@@ -3003,8 +3005,7 @@ def test_ui_dump(t, opti):
 
 def test_data_root_junctions(parent):
     """A junction at the data root must be unlinked without modifying anything in its target."""
-    work = os.path.join(parent.work, "junction-regression")
-    os.makedirs(work, exist_ok=True)
+    work = facts.new_run_folder(parent.work, "junction-regression")  # a new folder of its own, with its own fresh tmp (T)
     t = T(parent.exe, work, parent.model, None)
     shared = os.path.join(t.env["LOCALAPPDATA"], "WrongGPU")
     target = os.path.join(work, "junction-target")
@@ -3060,20 +3061,17 @@ def main():
     for what, p in (("--launcher", a.launcher), ("--no-direct-launcher", NO_DIRECT)):  # before anything runs
         if p:
             facts.require_test_hooks(p, what)
-    if a.hip:  # the mock HIP runtime: an existing plain file, named before anything runs
+    if a.hip is not None:  # the mock HIP runtime: an existing plain file (an empty --hip= too is refused), named first
+        if not a.hip or ";" in a.hip:
+            raise SystemExit("--hip %r is empty or holds ';': not run" % a.hip)
         a.hip = os.path.abspath(a.hip)
         if not os.path.isfile(a.hip) or facts.reparse_in_path(a.hip):
             raise SystemExit("--hip %s is not an existing plain file: not run" % a.hip)
         print("HIP runtime for the tests (--hip): %s" % a.hip)
-    work = os.path.abspath(a.work)
-    bad = facts.reparse_in_path(work)  # before the isolation self-test or anything is made or removed in it
-    if bad:
-        raise SystemExit("--work %s is not a plain folder (%s is a junction or link): not run" % (work, bad))
+    # --work: a plain folder (no junction or link in it or above it, no ';' that would split the HIP candidate list); the
+    # run gets a NEW folder of its own in it, and everything the run writes is in that folder (nothing that was there before)
+    work = facts.new_run_folder(os.path.abspath(a.work))
     iso.self_test(work)  # (#243) first: no launcher call with a broken guard
-    for d in ("games", "data", "localappdata", "programs", "startmenu"):
-        shutil.rmtree(os.path.join(work, d), ignore_errors=True)
-    os.makedirs(work, exist_ok=True)
-    facts.fresh_temp(work)  # <work>\tmp made anew; refused when it or a folder above it is a junction or link
     model = suite.cases.f_mini_case(present=0)  # the synthetic source of the test map the launcher was built with
     t = T(os.path.abspath(a.launcher), work, model, a.hip)
     # registry entries of an earlier run (test root only)

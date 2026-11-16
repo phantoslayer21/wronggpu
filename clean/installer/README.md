@@ -939,9 +939,11 @@ Windows (the Wine run was not repeated for them):
   next to itself. The suite starts only canaries that list verifies as this build's, by their full path and with its own
   child environment: they start when run directly and are refused through every launch path. The 0.5.1 baseline predates
   the hooks: `--run-old-baseline` runs it OUTSIDE the suite's isolation guarantee, unchecked, and only in a disposable,
-  fully redirected sandbox. Every launcher call gets the work folder's `tmp` (made anew at the start; refused when it or a
-  folder above it is a junction or link) as `TEMP` and `TMP`, and no inherited test override (`WRONGGPU_TEST_*`, `WG_*`;
-  `WRONGGPU_HIP_RUNTIME` only from `--hip`). Checks that depend on how the launcher was built follow the build under
+  fully redirected sandbox. `--work` must be a plain folder (no junction or link in it or above it, no `;`): each run makes
+  a NEW folder of its own in it (`run-<UTC time>-<pid>`) and writes everything there, nested test instances in new folders of
+  their own, so nothing that was in `--work` before is written to, followed or loaded. Every launcher call gets its
+  instance's fresh `tmp` as `TEMP` and `TMP`, and no inherited test override (`WRONGGPU_TEST_*`, `WG_*`;
+  `WRONGGPU_HIP_RUNTIME` only from `--hip`, which must be an existing plain file; an empty `--hip=` is refused). Checks that depend on how the launcher was built follow the build under
   test (`launcher_build_facts.py`). The edition section always runs with `--launcher`: its download, cache and address
   rules on either route, and a repair without any OptiScaler ending through the direct route (exit 0) or refused (exit 2)
   without it. `--no-direct-launcher` (a testing build with `-DWRONGGPU_DIRECT_ROUTE=OFF`, as releases) runs the section
@@ -952,7 +954,7 @@ Windows (the Wine run was not repeated for them):
   unless the test allows it (`WRONGGPU_TEST_ALLOW_RR_HELPER=1`: the stand-in case and the opt-in pass only). Test builds'
   other hooks for this: `WRONGGPU_TEST_RR_DRIVER` (a driver version, or `none`), `WRONGGPU_TEST_HELPER_ENV_LOG`, and
   `WRONGGPU_TEST_REAL_DRIVER_CACHE=1` (the helper gets the user's real `LOCALAPPDATA`; release builds always do).
-  The HIP check only ever tries `--hip` (an existing file, named at the start), or in a default run a file in the work
+  The HIP check only ever tries `--hip` (an existing file, named at the start), or in a default run a file in the run
   folder that is not there (`WRONGGPU_TEST_HIP_CANDIDATES`): a default run never loads a real HIP runtime.
   On a fresh clone, from the repository root in an x64 Visual Studio developer prompt (PowerShell), with nothing else
   needed (a single `WrongGPU` target builds the restorer and the canaries too):

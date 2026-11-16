@@ -14,6 +14,7 @@
 #include <stdexcept>
 
 #include "app/ui_palette.h"
+#include "wg_core/checks.h"
 #include "wg_core/detect.h"
 #include "wg_core/gamerules.h"
 #include "wg_core/install.h"
@@ -2662,6 +2663,20 @@ int main() {
 #endif
         }
 
+#ifdef WRONGGPU_TESTING
+        {  // the HIP check's test candidates (checks.cpp HipCandidates): set is the whole list, never the system search
+            wchar_t savedList[512] = {};
+            const bool hadList = GetEnvironmentVariableW(L"WRONGGPU_TEST_HIP_CANDIDATES", savedList, 512) > 0;
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_HIP_CANDIDATES", L"");
+            require(HipCandidates().empty(), "WRONGGPU_TEST_HIP_CANDIDATES set but empty: no HIP candidate at all (never the system search)");
+            const wstring longPath = L"C:\\x\\" + wstring(20000, L'a') + L"\\amdhip64_7.dll";
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_HIP_CANDIDATES", longPath.c_str());
+            const auto longList = HipCandidates();
+            require(longList.size() == 1 && longList[0] == longPath,
+                    "WRONGGPU_TEST_HIP_CANDIDATES longer than EnvVar reads: still the whole list (that one path), never the system search");
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_HIP_CANDIDATES", hadList ? savedList : nullptr);
+        }
+#endif
         {  // the rr-prepare helper's environment (rrprep.h RrHelperEnvironment): the tests' LOCALAPPDATA is kept in a test build
             auto valueOf = [](const std::vector<wchar_t>& env, const wstring& key) {
                 wstring found = L"(none)";

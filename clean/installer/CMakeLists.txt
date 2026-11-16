@@ -241,11 +241,14 @@ if(WRONGGPU_TESTING)
     target_link_options(wg-test-canary PRIVATE -municode)  # (wmain, as the launcher and restorer)
     target_link_options(wg-test-canary-strings PRIVATE -municode)
   endif()
+  add_library(wg-test-canary-dll SHARED tests/canary_dll.cpp)  # a load marker: writes <dll>.loaded when loaded
+  set_target_properties(wg-test-canary-dll PROPERTIES PREFIX "")
   # built with the testing launcher (a single-target build has them), and the build list the suite checks before it starts
   # one: the SHA-256 of this WrongGPU.exe and of the canaries, written after the launcher's link
-  add_dependencies(WrongGPU wg-test-canary wg-test-canary-strings)
+  add_dependencies(WrongGPU wg-test-canary wg-test-canary-strings wg-test-canary-dll)
   add_custom_command(TARGET WrongGPU POST_BUILD
     COMMAND ${CMAKE_COMMAND} -DF1=$<TARGET_FILE:WrongGPU> -DF2=$<TARGET_FILE:wg-test-canary> -DF3=$<TARGET_FILE:wg-test-canary-strings>
+            -DF4=$<TARGET_FILE:wg-test-canary-dll>
             -DOUT=$<TARGET_FILE_DIR:WrongGPU>/wg-test-build.sha256 -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/sha256_list.cmake
     VERBATIM)
   add_executable(wizard-policy-tests tests/wizard_policy_tests.cpp)
