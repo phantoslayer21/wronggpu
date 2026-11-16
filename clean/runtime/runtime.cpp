@@ -1193,6 +1193,7 @@ struct Runtime {
     if (!k->create(c, dev.get(), [this](DevPtr* p, size_t n) { return alloc(p, n); }, external_io, native_direct_io))
       return fail(k->err());
     blobs = k->blobs();
+    notes_text = k->notes();  // one line when the softmax stages take their round-to-odd ports (no silent switch)
     model_source = "model.wgcm";
     return true;
   }

@@ -30,6 +30,11 @@
 // @wg-kernel k_stage_d1 co=k_block.co block=128 wave=32 args=s184:p19.b32
 // @wg-kernel k_stage2_d0_hp co=k_block.co block=128 wave=32 args=s184:p19.b32,p defines=KB_HIDDEN_ARG=1
 // @wg-kernel k_stage2_d0_hidden co=k_block.co block=128 wave=32 args=s184:p19.b32,p defines=KB_HIDDEN_ARG=1
+// The __rodd forms: the same stages with the round-to-odd softmax weights (hlsl/k_smx.hlsli K_SMX 1), launched by the
+// native D3D12 runtime when the mix-form probe (kernels/k_mix_probe.hlsl) fails on the adapter's driver.
+// @wg-kernel k_stage_e2__rodd co=k_block.co entry=k_stage_e2 block=128 wave=32 args=s184:p19.b32 defines=K_SMX=1
+// @wg-kernel k_stage_d2__rodd co=k_block.co entry=k_stage_d2 block=128 wave=32 args=s184:p19.b32 defines=K_SMX=1
+// @wg-kernel k_stage2_d1__rodd co=k_block.co entry=k_stage2_d1 block=128 wave=32 args=s184:p19.b32 defines=K_SMX=1
 #include "wg_platform.hlsli"
 #include "k_blkparams.hlsli"
 

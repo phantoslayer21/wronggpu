@@ -81,6 +81,8 @@ class KRuntime {
   const WgRtFrameInfo& info() const { return info_; }
   const std::map<std::string, std::vector<uint8_t>>& blobs() const { return blobs_; }
   const std::string& err() const { return err_; }
+  // notes of create for the caller's log (wg_rt_notes), one per line, or empty: the round-to-odd softmax ports
+  const std::string& notes() const { return notes_; }
   const std::string& model_path() const { return model_path_; }
   // What the timing marks 0..4 bracket (FrameIo.timing_base): "exposure", "input", "network", "output".
   static const char* const kTimingLabels[4];
@@ -102,6 +104,11 @@ class KRuntime {
   // the tiled input stage's guard (frame and direct_preflight): sizes, the 0.68 ratio, finite jitter in [-0.5, 0.5]
   bool tiled_guard(int rw, int rh, float jx, float jy) const;
   bool options_ok_direct();
+  // the native D3D12 device's softmax rounding probe (k_mix_probe at create): sets smx_rodd_ when the driver's fold of
+  // the mix form (clean/k/dx12/hlsl/k_smx.hlsli) does not give the exact single rounding on this adapter
+  bool mix_probe();
+  // the stage kernel network() launches: the __rodd form of a softmax stage after a failed probe
+  std::string stage_kernel(const std::string& k, const char* stage) const;
   int fill_ = -1;  // option k_fill (test hook): the byte every frame-written buffer and the histories start with
 
   WgRtConfig cfg_ = {};
@@ -148,6 +155,10 @@ class KRuntime {
   // D3D12 latency options (create: k_color_at, k_warm, k_warm_line, k_warm_groups): the stage after which k_out_color
   // runs unordered (empty: before the input stage, HIP's order), the stage after which k_warm runs (empty: off)
   std::string color_at_, warm_at_, warm_to_;
+  // the softmax stages run their round-to-odd (__rodd) ports: the mix-form probe failed (native D3D12 device only)
+  bool smx_rodd_ = false;
+  std::string smx_note_;
+  std::string notes_;  // notes of create for the caller's log (notes()), one per line, or empty
   unsigned warm_line_ = 128, warm_groups_ = 64;
   DevPtr warm_dummy_ = 0;
   WgRtFrameInfo info_ = {};

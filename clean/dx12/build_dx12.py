@@ -45,6 +45,11 @@ HYB_SCAN_MUTANT=1, probe=1), built beside every build of hybrid kernels into a t
 into <out>, its manifest or a payload; removed after the scan);
 the build fails when it is not declared, gives no ISA, or PASSES rule 2, or rule 1 (unless K has no norm tree:
 HYB_NO_NORM).
+
+ISA check: every kernel built that clean/dx12/isa_checks.json lists is run through RGA (gfx1201) and the number of
+instructions whose mnemonic matches each of its patterns must equal the listed count (Model K's softmax weights: one
+v_fma_mixlo/hi_f16 per weight, the driver's fold that makes the mix form exact; none in the __rodd ports). A different
+count fails the build. WG_DX12_ISA_CHECK=0 skips it.
 """
 import argparse
 import concurrent.futures
@@ -351,6 +356,54 @@ def scan_mutant(name):
     return name.endswith("_scanmut")
 
 
+ISA_CHECKS = os.path.join(HERE, "isa_checks.json")
+
+
+def rga_mnemonics(dxil):
+    """The mnemonics of one kernel's RGA (gfx1201) ISA, in order; None when RGA gives no ISA."""
+    with tempfile.TemporaryDirectory(prefix="wgrga_") as tmp:
+        subprocess.run([RGA, "-s", "dx12", "-c", "gfx1201", "--cs-blob", dxil, "--isa", os.path.join(tmp, "x.txt")],
+                       capture_output=True, text=True)
+        for f in os.listdir(tmp):
+            if f.endswith("_x_comp.txt"):
+                out = []
+                with open(os.path.join(tmp, f), errors="replace") as fh:
+                    for line in fh:
+                        t = line.split("//")[0].strip()
+                        if re.match(r"^[sv]_|^(buffer|global|ds|image|scratch|flat)_", t):
+                            out.append(t.split()[0])
+                return out
+    return None
+
+
+def isa_check(built):
+    """built: [(kernel name, dxil path)] of this build. Fails when a kernel listed in isa_checks.json has another number
+    of instructions matching one of its patterns."""
+    if os.environ.get("WG_DX12_ISA_CHECK", "1") == "0":
+        return
+    with open(ISA_CHECKS, encoding="utf-8") as f:
+        checks = {k: v for k, v in json.load(f).items() if not k.startswith("_")}
+    todo = [(n, p) for n, p in built if n in checks]
+    if not todo:
+        return
+    if not os.path.exists(RGA):
+        raise SystemExit(f"ISA check: RGA not found at {RGA} (WG_RGA, or WG_DX12_ISA_CHECK=0 to skip)")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(6, int(os.environ.get("WG_DX12_JOBS", 6))))) as ex:
+        isa = dict(zip([n for n, _ in todo], ex.map(rga_mnemonics, [p for _, p in todo])))
+    bad = []
+    for n in sorted(isa):
+        if isa[n] is None:
+            bad.append(f"{n}: RGA gave no ISA")
+            continue
+        for pat, want in checks[n].items():
+            got = sum(1 for m in isa[n] if re.match(pat, m))
+            print(f"ISA  {n:40s} {pat} {got} / {want}", flush=True)
+            if got != want:
+                bad.append(f"{n}: {got} instructions match {pat}, {want} expected ({os.path.basename(ISA_CHECKS)})")
+    if bad:
+        raise SystemExit("ISA check failed:\n  " + "\n  ".join(bad))
+
+
 def vgpr_check(built, required=()):
     """built: [(kernel name, dxil path)] of this build. Fails when a Swin / bottleneck kernel exceeds its bound, when a
     hybrid kernel breaks an ISA rule, and when a kernel of `required` (the model hybrid kernels built) has no built
@@ -557,6 +610,7 @@ def main(argv=None):
         raise SystemExit(f"not declared in clean/dx12/kernels or clean/k/dx12/kernels: {sorted(only - names)}")
     try:
         vgpr_check(built, {d["name"] for _, d, _, _ in jobs if hyb_scanned(d["name"]) and not d["probe"]})
+        isa_check(built)
     finally:
         if scan_dir:
             shutil.rmtree(scan_dir, ignore_errors=True)

@@ -23,13 +23,20 @@ Sequences: a reset frame, steady frames with a pan, a game reset, a render-size 
 value, with the game's exposure texel, and with auto-exposure, and LDR; output rows RGBA16F and dense RGB; render size
 equal to the output (native AA, DLAA 1.0: the legacy input kernels), a jitter outside [-0.5, 0.5], and input_tiled=0.
 Refusals (one line, create or frame): an approximation option on the native device, an input-copy frame (raw_inputs).
+Softmax rounding switch (native device): with the create-time probe failed (test hook WG_TEST_K_MIX_PROBE_FAIL=1) the
+runtime reports smx=rodd and exactly one note of create (wg_rt_notes, logged by the executor); with nothing set,
+smx=mix and no note. Each leg runs in its own process.
 
 GPU only: WG_K_GPU_BUILD=<full build dir: clean/runner/build.py with the runtime library, and clean/dx12/build_dx12.py
 --model-k (or --only the K kernels and exposure_auto_diet) into the same folder>, ROCM_PATH; run each test under the
 machine's GPU lock.
 Run: python -m unittest clean.k.tests.test_k_runtime_d3d12
 """
+import ctypes
+import json
 import os
+import subprocess
+import sys
 import unittest
 
 import numpy as np
@@ -268,6 +275,24 @@ class TestKRuntimeD3D12(unittest.TestCase):
                 self.assertNotIn("\n", msg.strip())
                 self.assertIn("HIP", msg)
 
+    def test_native_softmax_switch_is_logged(self):
+        """The round-to-odd softmax ports are exact too, but taking them is never silent: one note of create."""
+        legs = {}
+        for hook in ("", "1"):
+            env = {k: v for k, v in os.environ.items() if k != "WG_TEST_K_MIX_PROBE_FAIL"}
+            if hook:
+                env["WG_TEST_K_MIX_PROBE_FAIL"] = hook
+            r = subprocess.run([sys.executable, "-m", "clean.k.tests.test_k_runtime_d3d12", "--softmax-leg", self.mdir,
+                                self.map], env=env, capture_output=True, text=True, timeout=300)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            legs[hook] = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertEqual(legs[""]["smx"], "mix")
+        self.assertEqual(legs[""]["notes"], [])
+        self.assertTrue(legs["1"]["smx"].startswith("rodd"), legs["1"])
+        self.assertEqual(len(legs["1"]["notes"]), 1, legs["1"])
+        self.assertIn("round-to-odd", legs["1"]["notes"][0])
+        self.assertIn("test hook", legs["1"]["notes"][0])
+
     def test_input_copy_frames_refused_on_d3d12(self):
         """raw_inputs (the interop's HIP input copies) has no checked D3D12 port: refused, not run unchecked."""
         for backend in (2, 3):
@@ -288,5 +313,19 @@ class TestKRuntimeD3D12(unittest.TestCase):
                     del rt
 
 
+def softmax_leg(mdir, map_path):
+    """Child of test_native_softmax_switch_is_logged: create on the native device, print the smx field and the notes."""
+    rt = KRuntimeExt(gpu_build(), mdir, map_path, OUT, MAX_RENDER, True, False, False, "", backend=3)
+    rt.lib.wg_rt_notes.argtypes = [ctypes.c_void_p]
+    rt.lib.wg_rt_notes.restype = ctypes.c_char_p
+    kern = rt.lib.wg_rt_kernels(rt.rt).decode().split()
+    smx = [kv.split("=", 1)[1] for kv in kern if kv.startswith("smx=")]
+    notes = [n for n in rt.lib.wg_rt_notes(rt.rt).decode().split("\n") if n]
+    print(json.dumps({"smx": smx[0] if smx else "", "notes": notes}))
+
+
 if __name__ == "__main__":
-    unittest.main()
+    if len(sys.argv) == 4 and sys.argv[1] == "--softmax-leg":
+        softmax_leg(sys.argv[2], sys.argv[3])
+    else:
+        unittest.main()

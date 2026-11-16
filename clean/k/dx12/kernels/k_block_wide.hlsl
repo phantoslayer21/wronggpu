@@ -11,6 +11,15 @@
 // @wg-kernel k_stagew4_d4 co=k_block_wide.co block=512 wave=32 args=s184:p19.b32 entry=kw_stage defines=KW_C=128,KW_HEADS=4,KW_IN=1,KW_CIN=160,KW_CNEXT=0,KW_NG=4,KW_RD=12
 // @wg-kernel k_stagew2_d4 co=k_block_wide.co block=256 wave=32 args=s184:p19.b32 entry=kw_stage defines=KW_C=128,KW_HEADS=4,KW_IN=1,KW_CIN=160,KW_CNEXT=0,KW_NG=2
 // @wg-kernel k_stagew2_d3 co=k_block_wide.co block=256 wave=32 args=s184:p19.b32 entry=kw_stage defines=KW_C=96,KW_HEADS=4,KW_IN=1,KW_CIN=128,KW_CNEXT=0,KW_NG=2,KW_RD=4
+// The __rodd forms: the same stages with the round-to-odd softmax weights (hlsl/k_smx.hlsli K_SMX 1), launched by the
+// native D3D12 runtime when the mix-form probe (kernels/k_mix_probe.hlsl) fails on the adapter's driver.
+// @wg-kernel k_stagew2_e3__rodd co=k_block_wide.co block=256 wave=32 args=s184:p19.b32 entry=kw_stage defines=K_SMX=1,KW_C=96,KW_HEADS=4,KW_IN=0,KW_CIN=96,KW_CNEXT=128,KW_NG=2,KW_RD=4
+// @wg-kernel k_stagew4_e4__rodd co=k_block_wide.co block=512 wave=32 args=s184:p19.b32 entry=kw_stage defines=K_SMX=1,KW_C=128,KW_HEADS=4,KW_IN=0,KW_CIN=128,KW_CNEXT=160,KW_NG=4,KW_RD=12
+// @wg-kernel k_stagew2_e4__rodd co=k_block_wide.co block=256 wave=32 args=s184:p19.b32 entry=kw_stage defines=K_SMX=1,KW_C=128,KW_HEADS=4,KW_IN=0,KW_CIN=128,KW_CNEXT=160,KW_NG=2
+// @wg-kernel k_stagew4_m__rodd co=k_block_wide.co block=512 wave=32 args=s184:p19.b32 entry=kw_stage defines=K_SMX=1,KW_C=160,KW_HEADS=8,KW_IN=0,KW_CIN=160,KW_CNEXT=0,KW_NG=4,KW_RD=4
+// @wg-kernel k_stagew4_d4__rodd co=k_block_wide.co block=512 wave=32 args=s184:p19.b32 entry=kw_stage defines=K_SMX=1,KW_C=128,KW_HEADS=4,KW_IN=1,KW_CIN=160,KW_CNEXT=0,KW_NG=4,KW_RD=12
+// @wg-kernel k_stagew2_d4__rodd co=k_block_wide.co block=256 wave=32 args=s184:p19.b32 entry=kw_stage defines=K_SMX=1,KW_C=128,KW_HEADS=4,KW_IN=1,KW_CIN=160,KW_CNEXT=0,KW_NG=2
+// @wg-kernel k_stagew2_d3__rodd co=k_block_wide.co block=256 wave=32 args=s184:p19.b32 entry=kw_stage defines=K_SMX=1,KW_C=96,KW_HEADS=4,KW_IN=1,KW_CIN=128,KW_CNEXT=0,KW_NG=2,KW_RD=4
 #include "wg_platform.hlsli"
 
 WG_ARGS_BEGIN
@@ -20,6 +29,7 @@ WG_ARGS_BEGIN
 WG_ARGS_END
 
 #include "k_wide.hlsli"
+#include "k_smx.hlsli"
 
 // ---- the weight stream ----------------------------------------------------------------------------------------------
 // Every global weight fragment of the kernel's matrix products (A operands; v^T: the B operand), in product order:
@@ -256,15 +266,9 @@ WG_KERNEL(kw_stage)
                 }
             sum += wg_xor16(sum);
             const float inv = rcp(sum);                                                           // v_rcp_f32
-            [unroll] for (int st4 = 0; st4 < 4; ++st4) {
-                v8f ro;
-                [unroll] for (int j = 0; j < 8; ++j) {
-                    const float p = w[st4][j] * inv;
-                    const float e = mad(w[st4][j], inv, -p);   // exact: w inv = p + e
-                    ro.v[j] = asfloat(kw_round_odd_pos(p, e));
-                }
-                pa[st4] = kw_out(ro);   // f16(w inv), one rounding of the exact product
-            }
+            // A = f16(w inv), one rounding of the exact product (k_smx.hlsli: the mix form, or round to odd in the
+            // __rodd ports)
+            [unroll] for (int st4 = 0; st4 < 4; ++st4) pa[st4] = k_smx_weights8(w[st4], inv);
         }
         // z_h^T = VT A^T (the two channel tiles' chains interleaved, each over st)
         uint4 zz[2];

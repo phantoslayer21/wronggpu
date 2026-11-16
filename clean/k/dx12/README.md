@@ -59,6 +59,22 @@ real textures (RGBA16F colour, R32F depth, RG16F motion, exposure, an RGBA16F ou
 mode and compares the output texture and the buffers with the HIP kernels' run on the raw buffer route
 (`KIO_C16` / `KIO_M16`, with the motion scale and offset folded as the interop passes them).
 
+`mixprobe` (D3D12 only, no HIP kernel: checked against the exact rounding): the softmax weight rounding of every
+softmax stage port, A = f16(w inv) rounded once from the exact product (`hlsl/k_smx.hlsli`). The ports write it as the
+FP32 product plus its exact residual fed into the driver's round-to-nearest-even fragment conversion, which the gfx1201
+compiler folds into one `v_fma_mixlo/hi_f16` (the mix form); the `__rodd` ports round the product to odd first (the
+form the ports had before; the same bits). `kernels/k_mix_probe.hlsl` runs the same helper on the records of
+`k_mix_cases.py`: products whose FP32 rounding is an FP16 midpoint with a residual of either sign (normal and subnormal
+FP16), exact midpoints (ties to even) and ordinary products; every result must equal the exact single rounding
+(Fraction arithmetic), for `k_mix_probe` and `k_mix_probe__rodd`, and the records must tell a second rounding through
+FP32 apart (the residual-dropped control `K_SMX_MUT=1` fails this family). Two more guards keep the fold: the build's
+ISA check (`clean/dx12/isa_checks.json`: one `v_fma_mix*_f16` per weight in every mix-form port, none in the `__rodd`
+ports) and the native D3D12 runtime, which runs `k_mix_probe` on the records of `clean/k/runtime/k_mix_probe.h` at
+create and launches the `__rodd` stage ports when the result is not exact (kernels line: `smx=mix` or `smx=rodd(...)`;
+test hook `WG_TEST_K_MIX_PROBE_FAIL=1`). The `__rodd` ports give the same bits, but the switch is never silent: it adds
+one note of create (`wg_rt_notes`, which the executor logs; `test_k_runtime_d3d12.py`
+`test_native_softmax_switch_is_logged`).
+
 NaN: IEEE 754 does not define the sign of a NaN that a stage generates or propagates, and where the input holds NaN the
 two devices can differ in it (the decoder stages). For the cases with NaN in the input the check compares the raw bytes
 and, where they differ, accepts only the elements that are NaN on both sides and differ in the sign bit alone (the

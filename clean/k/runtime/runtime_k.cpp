@@ -3,6 +3,7 @@
 // variant "fused"), k_launch.py (stage_fused_launch) and k_io.py (frame_in, out_uniforms, input / output launches).
 #include "runtime_k.h"
 #include "k_input_uniforms.h"
+#include "k_mix_probe.h"
 
 #include <algorithm>
 #include <cmath>
@@ -542,7 +543,47 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   std::vector<uint16_t> tab((size_t)8 * kFilterEntries * kFilterValues);
   for (int l = 0; l < 8; ++l) k_filter_table(l, 1, tab.data() + (size_t)l * kFilterEntries * kFilterValues);
   if (!dev_->upload(tables_, tab.data(), tab.size() * 2)) return dfail();
-  return dev_->sync() || dfail();
+  if (!dev_->sync()) return dfail();
+  return c.backend != 3 || mix_probe();
+}
+
+// The softmax stages' weight rounding A = f16(w inv) (clean/k/dx12/hlsl/k_smx.hlsli) relies on the driver folding the
+// exact sum p + e into one v_fma_mix*_f16 rounding. The native D3D12 device checks that fold on this adapter once, at
+// create: k_mix_probe runs the same helper on k_mix_probe.h's records (FP16-midpoint products with residuals of both
+// signs, exact ties, FP16 subnormals) and must return the exact results; otherwise every softmax stage takes its
+// round-to-odd port (suffix __rodd, the same bits by another sequence). The result goes into the kernels line
+// (smx=mix | smx=rodd), and taking the round-to-odd ports adds one line to the notes of create (wg_rt_notes; the
+// executor logs it), so the switch is never silent. WG_TEST_K_MIX_PROBE_FAIL=1 (test hook) treats the probe as failed.
+bool KRuntime::mix_probe() {
+  DevPtr in = 0, out = 0;
+  const size_t out_bytes = (size_t)k_mix_probe::kLanes * 16;
+  if (!alloc(&in, sizeof k_mix_probe::kRecords) || !alloc(&out, out_bytes)) return false;
+  if (!dev_->upload(in, k_mix_probe::kRecords, sizeof k_mix_probe::kRecords) || !dev_->memset(out, 0xA5, out_bytes))
+    return dfail();
+  if (!launch("k_mix_probe", (unsigned)(k_mix_probe::kLanes / 32), 32, &in, &out)) return false;
+  std::vector<uint16_t> got((size_t)k_mix_probe::kLanes * 8);
+  if (!dev_->download(got.data(), out, out_bytes)) return dfail();
+  int bad = 0;
+  for (size_t i = 0; i < got.size(); ++i) bad += got[i] != k_mix_probe::kExpected[i];
+  const char* hook = std::getenv("WG_TEST_K_MIX_PROBE_FAIL");
+  const bool forced = hook && std::strcmp(hook, "1") == 0;
+  smx_rodd_ = bad != 0 || forced;
+  // one token (the kernels line is split at spaces into key=value pairs); the details are in the note
+  smx_note_ = smx_rodd_ ? std::string(" smx=rodd(") + (forced ? std::string("hook") : std::to_string(bad) + "/" +
+                                                                                     std::to_string(got.size())) + ")"
+                        : std::string(" smx=mix");
+  notes_ = smx_rodd_ ? std::string("model K: softmax weight rounding takes the round-to-odd ports (") +
+                           (forced ? "probe failed by test hook" : "mix-form probe: " + std::to_string(bad) + " of " +
+                                                                    std::to_string(got.size()) + " differ") +
+                           "); output unchanged, both forms are exact"
+                     : std::string();
+  return true;
+}
+
+std::string KRuntime::stage_kernel(const std::string& k, const char* stage) const {
+  // e0, e1 and d0 mix with fixed weights (no softmax): no __rodd form
+  const bool softmax = std::strcmp(stage, "e0") != 0 && std::strcmp(stage, "e1") != 0 && std::strcmp(stage, "d0") != 0;
+  return smx_rodd_ && softmax ? k + "__rodd" : k;
 }
 
 bool KRuntime::launch(const char* kernel, unsigned grid, unsigned block, void* a0, void* a1, void* a2, void* a3,
@@ -657,7 +698,7 @@ bool KRuntime::network(int f, const std::function<bool(const char*)>& after) {
       const char* k0 = compact_head_ ? (f16_ ? "k_stage2h_d0_hp" : "k_stage2_d0_hp")
                                      : (f16_ ? "k_stage2h_d0_hidden" : "k_stage2_d0_hidden");
       if (!launch(k0, grid, kThreads, &p, &hidden)) return false;
-    } else if (!launch(k.c_str(), grid, (unsigned)(kThreads * (ng ? ng : 1)), &p)) return false;
+    } else if (!launch(stage_kernel(k, st.name).c_str(), grid, (unsigned)(kThreads * (ng ? ng : 1)), &p)) return false;
     if (after && !after(st.name)) return false;
     if (i < 10) {
       info_.offsets[i][0] = ox;  // WgRtFrameInfo has ten rows: e0 ... d1 (d0's offset is (4, 4))
@@ -1057,8 +1098,12 @@ std::vector<std::string> KRuntime::d3d12_kernels() const {
       else if (ng) k = "k_stagew" + std::to_string(ng) + "_" + n;
       else k = (n == "e0" || n == "e1" || n == "d1" ? "k_stage2_" : "k_stage_") + n;
       if (std::find(v.begin(), v.end(), k) == v.end()) v.push_back(k);
+      // the round-to-odd form a failed mix-form probe switches to (KRuntime::mix_probe)
+      if (!st.head && n != "e0" && n != "e1" && std::find(v.begin(), v.end(), k + "__rodd") == v.end())
+        v.push_back(k + "__rodd");
     }
   }
+  v.push_back("k_mix_probe");
   v.push_back((compact_head_ ? "k_out_pixel_c" : "k_out_pixel") + d);
   if (!warm_at_.empty()) v.push_back("k_warm");  // k_warm (option k_warm, backend 3)
   v.push_back("timing_barrier");  // the timing marks (timing_log=1)
@@ -1124,7 +1169,7 @@ const char* KRuntime::kernels() {
                   " legacy_color_launches=" + std::to_string(legacy_color_launches_) +
                   " legacy_base_launches=" + std::to_string(legacy_base_launches_) +
                   (fast_ ? " k_fast=1" : "") + (expo_v051_ ? " k_expo_rule=v051" : "") +
-                  " hidden=fused_d0" + std::string(" head=") + (compact_head_ ? "compact" : "full") +
+                  smx_note_ + " hidden=fused_d0" + std::string(" head=") + (compact_head_ ? "compact" : "full") +
                   " base=" + std::to_string(Bw_) + "x" + std::to_string(Bh_) +
                   " hdr=" + (hdr_ ? "1" : "0") + " mv=render" +
                   " filter_level=" + std::to_string(level_last_) +
