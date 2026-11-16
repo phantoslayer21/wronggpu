@@ -29,6 +29,8 @@ exactly one note of create, which the executor logs) and the frames match HIP wi
 in both e4 / d4 shapes (1440p Quality: NG = 4; 4K Performance: NG = 2); with both forms failed, or with a corrupt stage
 shader (a softmax stage's __rodd port, the fixed-weight stage e0), create refuses in one line. Each create leg runs in its own process. The hook exists only in a runtime library
 built with clean/runner/build.py --dev-diagnostics: these tests skip on another build.
+k_approx (opt-in close approximations): refused on HIP and for an unknown tag; with a1,a2 its __a1 / __a2 kernels run, one
+note of create says so, and the output stays within loose bounds of the exact path's (tone-mapped luma PSNR).
 
 GPU only: WG_K_GPU_BUILD=<full build dir: clean/runner/build.py with the runtime library, and clean/dx12/build_dx12.py
 --model-k (or --only the K kernels and exposure_auto_diet) into the same folder>, ROCM_PATH; run each test under the
@@ -55,6 +57,19 @@ from clean.k.tests.test_k_runtime_gpu import (KRuntimeExt, gpu_build, inputs, pi
                                               write_k_model)
 
 OUT, MAX_RENDER = (200, 120), (130, 78)
+# k_approx=a1,a2 against the exact path on the synthetic model (test_native_k_approx_close): wide bounds; the random
+# synthetic network (random parameters) amplifies small input differences strongly
+# measured (RX 9070 XT, 3 frames at 1440p Quality): at most 17.4 % of the values differ, PSNR 54.7 .. 55.7 dB
+APPROX_MAX_DIFFER, APPROX_MIN_PSNR = 0.35, 45.0
+
+
+def tonemapped_psnr(a, b):
+    """PSNR (dB) of the tone-mapped luma T = Y / (1 + Y) of two linear RGB arrays [n, 3] (the spec side's closeness
+    measure; Y = max(0.2126 R + 0.7152 G + 0.0722 B, 0))."""
+    w = np.array([0.2126, 0.7152, 0.0722])
+    ya, yb = np.maximum(a.astype(np.float64) @ w, 0), np.maximum(b.astype(np.float64) @ w, 0)
+    mse = float(np.mean((ya / (1 + ya) - yb / (1 + yb)) ** 2))
+    return float("inf") if mse == 0 else 10 * np.log10(1 / mse)
 # written in full by every frame: compared raw with a sentinel before the frame (the head buffer is added per frame)
 WRITTEN = ["exposure.pair", "k.scalars", "k.x0", "k.S0", "k.S1", "k.S2", "k.S3", "k.S4", "k.A", "k.B", "k.ctap",
            "k.ctapT"]
@@ -355,6 +370,51 @@ class TestKRuntimeD3D12(unittest.TestCase):
     def test_native_fallback_frames_4k_performance(self):
         self.check_fallback_frames([(1920, 1080, True, 1.0, 1.0), (1920, 1080, False, 1.0, 1.0)], True,
                                    out=(3840, 2160), max_render=(1920, 1080))
+
+    # ---- k_approx: the opt-in close approximations (never the default) --------------------------------------------
+    def test_k_approx_refusals(self):
+        """k_approx runs on the D3D12 devices only (HIP refuses it) and takes only its known tags."""
+        with self.assertRaises(RuntimeError) as cm:
+            self.make(0, True, False, "k_approx=a1", OUT, MAX_RENDER)
+        self.assertIn("D3D12 devices only", str(cm.exception))
+        bad = self.leg("k_approx=a3")
+        self.assertFalse(bad["ok"], bad)
+        self.assertIn("unknown k_approx a3", bad["error"])
+        plain = self.leg("")
+        self.assertEqual(plain["notes"], [])   # nothing set: the exact path, no note
+
+    def test_native_k_approx_close(self):
+        """k_approx=a1,a2: its __a1 / __a2 kernels run, one note of create says so, and the output stays close to the
+        exact path's (the bounds are wide of the measured values; the image-quality scoring is the spec side's)."""
+        got = self.leg("k_approx=a1,a2")
+        self.assertTrue(got["ok"], got)
+        self.assertEqual(len(got["notes"]), 1, got)
+        self.assertIn("close approximation k_approx=a1,a2", got["notes"][0])
+        out, mr = self.QUALITY["out"], self.QUALITY["max_render"]
+        ex = self.make(3, True, False, "", out, mr)
+        ap = self.make(3, True, False, "k_approx=a1,a2", out, mr)
+        pos = os.path.getsize(TRACE) if os.path.exists(TRACE) else 0
+        try:
+            for i, fr in enumerate(self.FRAMES_Q):
+                rw, rh, reset, E, pi = fr[:5]
+                x = inputs(np.random.default_rng(500 + i), rw, rh, True, reset)
+                x["pre_exposure"], x["E_cur"] = pi, float(np.float32(E))
+                ex.frame(x, 0, half=True)
+                ap.frame(x, 0, half=True)
+                a = np.frombuffer(out_bytes(ex, True), np.float16).reshape(-1, 4)[:, :3].astype(np.float32)
+                b = np.frombuffer(out_bytes(ap, True), np.float16).reshape(-1, 4)[:, :3].astype(np.float32)
+                self.assertTrue(np.isfinite(b).all(), "frame %d: non-finite approximate output" % i)
+                differ = float(np.mean(a != b))
+                psnr = tonemapped_psnr(a, b)
+                print("k_approx frame %d: differ %.4f psnr %.2f dB" % (i, differ, psnr))
+                self.assertLess(differ, APPROX_MAX_DIFFER, "frame %d" % i)
+                self.assertGreater(psnr, APPROX_MIN_PSNR, "frame %d" % i)
+            lines, _ = trace_since(pos)
+            ran = {ln.split()[0] for ln in lines if ln.split()}
+            self.assertTrue(any(k.endswith("__a1") for k in ran), sorted(ran))
+            self.assertTrue(any(k.endswith("__a2") for k in ran), sorted(ran))
+        finally:
+            del ex, ap
 
     def test_input_copy_frames_refused_on_d3d12(self):
         """raw_inputs (the interop's HIP input copies) has no checked D3D12 port: refused, not run unchecked."""

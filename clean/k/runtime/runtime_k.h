@@ -160,8 +160,20 @@ class KRuntime {
   // D3D12 latency options (create: k_color_at, k_warm, k_warm_line, k_warm_groups): the stage after which k_out_color
   // runs unordered (empty: before the input stage, HIP's order), the stage after which k_warm runs (empty: off)
   std::string color_at_, warm_at_, warm_to_;
-  // the softmax stages run their round-to-odd (__rodd) ports: the mix-form probe failed (native D3D12 device only)
+  // the softmax stages run their round-to-odd (__rodd) ports (smx_select: the mix form failed the create-time
+  // self-check, native D3D12 device only)
   bool smx_rodd_ = false;
+  // runtime option k_approx (opt-in, D3D12 devices; never the default): close-approximation variants by tag
+  // ("a1": the tiled input stage on the transcendental unit, kernels kx/k_in_tiled*__a1)
+  bool approx_a1_ = false;
+  bool approx_a2_ = false;  // "a2": the output stage (k_out_color, k_out_pixel_c) with KO_APPROX, kernels *__a2
+  std::string approx_note_;  // the note of create when k_approx is set
+  // " k_approx=a1[,a2]" for the kernels line, or empty
+  std::string approx_tag() const {
+    if (!approx_a1_ && !approx_a2_) return std::string();
+    return std::string(" k_approx=") + (approx_a1_ ? "a1" : "") + (approx_a1_ && approx_a2_ ? "," : "") +
+           (approx_a2_ ? "a2" : "");
+  }
   std::string smx_note_;
   std::string smx_test_;  // option k_smx_test (developer builds only)
   std::string notes_;  // notes of create for the caller's log (notes()), one per line, or empty

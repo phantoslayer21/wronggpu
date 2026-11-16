@@ -112,3 +112,21 @@ identical.
 
 Known limit, shared with Model M's ports: D3D12 flushes FP32 denormals (inputs and results) to zero and HIP keeps them.
 `k_expo_scalars` only meets one with a pre-exposure above about 8.5e37, so the check's inputs keep clear of them.
+
+## Close approximations (runtime option `k_approx`, opt-in)
+
+Every port above is exact, and nothing set is the exact path. `k_approx` selects close approximations of two stages on
+the D3D12 devices (HIP refuses the option); they are judged by image quality against the exact path, not byte for byte,
+and taking one adds a note of create.
+
+- `a1`, the tiled input stage (`kx/k_in_tiled*__a1`, `hlsl/k_in_common.hlsli` `KI_HWMATH`): its correctly rounded log2,
+  2^x and divisions (FP32 double-word arithmetic with a Ziv test and a binary64 fallback) become `v_log_f32`,
+  `v_exp_f32` (about 1 FP32 ulp) and `v_rcp_f32` times the dividend (scaled for |b| >= 2^126). On the port-check input
+  family the network input x0 differs from exact in about 1e-5 of its FP16 values, always by one FP16 ulp.
+- `a2`, the output stage (`k_out_color*__a2`, `k_out_pixel_c*__a2`, `hlsl/k_out.hlsli` `KO_APPROX`): its exact divisions
+  become `v_rcp_f32` times the dividend plus one correction of the quotient from its exact residual, and two refined
+  reciprocals drop their Newton step; every opaque barrier stays. On the port-check output family (plain and
+  special-value inputs) every FP16 output is within one ulp of exact.
+
+`k_approx=a1,a2` takes both. `test_k_runtime_d3d12.py` (`test_k_approx_refusals`, `test_native_k_approx_close`) checks
+the refusals, the note, that the `__a1` / `__a2` kernels run, and loose closeness bounds on the synthetic model.
