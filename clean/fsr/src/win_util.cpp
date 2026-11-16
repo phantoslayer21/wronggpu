@@ -12,6 +12,7 @@
 #include "amd_provider.h"
 #include "settings_bridge.h"
 #include "wg_settings_io.h"
+#include "../../wgshared/include/wg_state.h"  // #219: the game's state folder (settings.ini)
 #include "standin_d3d12.h"
 #include "provider_label.h"
 
@@ -462,6 +463,20 @@ wgfsr::Config ReadSettings(const std::string& tag) {
     }
     std::string warnings;
     wgfsr::Config config = wgfsr::ParseConfig(text, &warnings);
+    // #219: the settings chosen in the launcher (the game's state folder beside wronggpu.ini) over wronggpu.ini's defaults
+    {
+        const std::wstring iniDir = path.substr(0, path.find_last_of(L"\\/"));
+        const wgstate::Settings st = wgstate::ReadSettings(iniDir);
+        if (st.corrupt || !st.why.empty())
+            L().WriteLine(tag + "settings: " + Narrow(wgstate::SettingsPathOf(iniDir)) + " not used: " + st.why + " (wronggpu.ini's values apply)");
+        std::string notes;
+        wgfsr::ApplyStateSettings(config, st.kv, &notes);
+        for (size_t a = 0; a < notes.size();) {
+            const size_t e = notes.find('\n', a);
+            L().WriteLine(tag + notes.substr(a, e - a));
+            a = e == std::string::npos ? notes.size() : e + 1;
+        }
+    }
     // Registry options the front end reads (clean/wgshared; [wronggpu] keys, block and environment first): set there,
     // they decide over the [fsr] keys of the same meaning.
     {
@@ -595,6 +610,14 @@ void* DeviceFromCommandList(void* commandList) {
     if (FAILED(static_cast<ID3D12GraphicsCommandList*>(commandList)->GetDevice(IID_PPV_ARGS(&device))) || !device) return nullptr;
     device->Release();  // the game's device outlives its command lists; the upscaler AddRefs what it keeps
     return device;
+}
+
+void RetainDevice(void* device) {
+    if (device) static_cast<ID3D12Device*>(device)->AddRef();
+}
+
+void ReleaseDevice(void* device) {
+    if (device) static_cast<ID3D12Device*>(device)->Release();
 }
 
 const char* ModuleNameOf(const void* address) {

@@ -40,6 +40,8 @@
 
 #include <dxgi1_4.h>
 
+#include "../rdna4_win.h"
+
 struct WgUpscaler;
 
 namespace wgi {
@@ -119,31 +121,19 @@ std::string local_appdata() {
   return n > 0 && n < 32768 ? utf8(buf) : std::string();
 }
 
-// The device's adapter as DXGI reports it (description, vendor, software flag); false when it cannot be read.
-bool adapter_info(ID3D12Device* device, std::string* name, uint32_t* vendor_id = nullptr, bool* software = nullptr) {
-  typedef HRESULT(WINAPI * PfnCreateFactory)(REFIID, void**);
-  HMODULE dxgi = LoadLibraryW(L"dxgi.dll");
-  auto create =
-      dxgi ? reinterpret_cast<PfnCreateFactory>(reinterpret_cast<void*>(GetProcAddress(dxgi, "CreateDXGIFactory1")))
-           : nullptr;
-  bool ok = false;
+// The device's adapter as the SYSTEM's DXGI and the kernel-mode driver report it (rdna4_win.h): never the description the
+// game's own dxgi.dll presents, which OptiScaler's GPU spoofing can rewrite. False when neither source could read it.
+bool adapter_info(ID3D12Device* device, std::string* name, uint32_t* vendor_id = nullptr, bool* software = nullptr,
+                  wgrt::AdapterIdentity* identity = nullptr) {
   name->clear();
-  IDXGIFactory4* f = nullptr;
-  if (create && SUCCEEDED(create(__uuidof(IDXGIFactory4), (void**)&f)) && f) {
-    IDXGIAdapter1* a = nullptr;
-    if (SUCCEEDED(f->EnumAdapterByLuid(device->GetAdapterLuid(), __uuidof(IDXGIAdapter1), (void**)&a)) && a) {
-      DXGI_ADAPTER_DESC1 d = {};
-      if (SUCCEEDED(a->GetDesc1(&d))) {
-        ok = true;
-        *name = utf8(d.Description);
-        if (vendor_id) *vendor_id = d.VendorId;
-        if (software) *software = (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
-      }
-      a->Release();
-    }
-    f->Release();
+  const wgrt::AdapterIdentity id = wgrt::read_adapter_identity(device->GetAdapterLuid());
+  if (identity) *identity = id;
+  if (id.dxgi_known) {
+    *name = id.description;
+    if (vendor_id) *vendor_id = id.dxgi_vendor;
+    if (software) *software = id.software;
   }
-  return ok;
+  return id.dxgi_known || id.kmt_known;
 }
 
 std::string adapter_description(ID3D12Device* device) {
@@ -156,8 +146,8 @@ std::string adapter_description(ID3D12Device* device) {
 
 struct Options {
   std::string sync = "inline";      // inline | pipelined
-  std::string hip_switch;           // on | off (executor_select.h refused_frame_policy); empty: the default
-  std::string executor = "auto";    // auto (not named: dx12 for model M on RDNA 4, else hip; executor_select.h) | hip |
+  std::string hip_switch;           // ignored by every model (executor_select.h: one line when set)
+  std::string executor = "auto";    // auto (not named: dx12 for every model on RDNA 4, else no executor: the front end's upscaler; executor_select.h) | hip |
                                     // dx12 (the network on the game's D3D12 device, no HIP) | d3d12-test (tests)
   std::string model_dir;            // default %LOCALAPPDATA%\WrongGPU\model (installer contract, spec 30)
   std::string kernels_dir;          // default: the folder of this DLL
@@ -600,7 +590,7 @@ class Context {
       say(WG_LOG_WARN, "WG_RUNTIME_OPTIONS is longer than 4095 characters and is ignored");
     }
     Options o = parse_options(text.c_str());
-    {  // the executor (executor_select.h): the option, else the default (dx12 for model M on RDNA 4); one log line why
+    {  // the executor (executor_select.h): the option, else the default (dx12 for models M, L, K on RDNA 4, the front end's upscaler on any other adapter); one log line why
       ExecutorRequest q;
       q.executor = o.executor;
       WgRtConfig probe = WgRtConfig();
@@ -609,29 +599,46 @@ class Context {
       std::string merr;
       // model K only (Model L runs on the D3D12 executor in builds with it: runtime.cpp, native D3D12 backend 3)
       q.model_k = wgrt::model_from_options(probe, &model, &merr) && model == wgrt::ModelId::K;
-      q.adapter_known = adapter_info(device_, &q.adapter, &q.vendor_id, &q.software);
+      {
+        wgrt::AdapterIdentity ident;
+        adapter_info(device_, &q.adapter, &q.vendor_id, &q.software, &ident);
+        q.adapter_known = ident.dxgi_known;
+        q.kmt_known = ident.kmt_known;
+        q.kmt_vendor = ident.kmt_vendor;
+        q.kmt_device = ident.kmt_device;
+        q.wine_fallback = ident.wine_fallback;
+        q.wine_vendor = ident.wine_vendor;
+        q.wine_device = ident.wine_device;
+      }
       q.sparkle_guard = o.sparkle_guard > 0.0f;
       q.capture = !o.capture_dir.empty();
+      q.hip_switch = o.hip_switch;
       const ExecutorChoice ch = choose_executor(q);
       if (ch.executor.empty()) return fail(WG_ERROR_PARAMETER, "unknown executor " + o.executor);
+      if (!ch.adapter_note.empty()) say(WG_LOG_INFO, ch.adapter_note);  // Wine: how the adapter was identified (#248)
       if (!ch.why.empty()) say(ch.warn ? WG_LOG_WARN : WG_LOG_INFO, ch.why);
+      // R1: a release build ignores the diagnostic keys (executor=hip, capture_dir): one line each, the context stays on D3D12
+      for (const std::string& line : ch.ignored) say(WG_LOG_WARN, line);
+      if (!kDevDiagnostics) o.capture_dir.clear();  // (the capture runs on HIP only; no capture buffers are made either)
+      // an adapter that is not an RDNA 4 Radeon RX 9000-series card (or not identified): no executor, no kernel load,
+      // no HIP attempt; the one line above is the whole report and the front end's own upscaler takes the game
+      if (ch.executor == "fsr") return WG_ERROR_UNSUPPORTED;
       o.executor = ch.executor;  // model K's default mode below applies with the HIP executor
       if (ch.sparkle_off) o.sparkle_guard = 0.0f;  // model K: the guard is HIP only; K stays on D3D12
       dx12_default_ = ch.by_default && ch.executor == "dx12";
-      const RefusedFramePolicy pol = refused_frame_policy(o.hip_switch);  // clean/fe-wrapped-list
-      hip_switch_ = pol.switch_to_hip;
-      if (!pol.note.empty()) say(WG_LOG_WARN, pol.note);
-      if (q.model_k) {  // model K never moves to HIP, whatever hip_switch says
-        hip_switch_ = false;
-        const std::string kn = k_hip_switch_note(o.hip_switch);
-        if (!kn.empty()) say(WG_LOG_INFO, kn);
+      // R1: no model moves to HIP in a game, whatever hip_switch says (the 0.6.0 option is ignored, with one line)
+      if (!ch.hip_note.empty()) say(WG_LOG_INFO, ch.hip_note);
+      if (ch.executor == "dx12") {  // H3: the HIP-only output filters (Quality 5 / 9) give the default filter, never HIP
+        std::string fnote;
+        o.runtime = drop_hip_only_filter(o.runtime, &fnote);
+        if (!fnote.empty()) say(WG_LOG_WARN, fnote);
       }
     }
     k_default_ = model_k_default(o);
-    const bool split = services_ && services_->struct_size >= sizeof(WgFrontEndServices) && services_->split_command_list;
-    split_ = split;
-    share_path_opt_ = o.share_path;
-    input_copy_opt_ = o.input_copy;
+    // (a version 2 table up to split_command_list: fields appended later have their own size checks where they are used)
+    const bool split = services_ &&
+                       services_->struct_size >= offsetof(WgFrontEndServices, split_command_list) + sizeof(void*) &&
+                       services_->split_command_list;
     if (!split && o.executor != "dx12")
       return fail(WG_ERROR_UNSUPPORTED, "the front end offers no command-list split (interface version 2)");
     if (!o.unknown.empty()) say(WG_LOG_INFO, "options passed on to the network runtime: " + o.unknown);
@@ -668,15 +675,9 @@ class Context {
       no_slots_ = true;  // its kernels read the game's textures: no slot buffers (fences and a 128 KB flag arena only)
       if (!exec_->prepare(&err) || !exec_->prepare_device(device_, &err) ||
           !make_shared_objects(false, "arena", &err) || !exec_->init(device_, set_, &err)) {
-        // model K: no HIP route in a game; the one error line below is the whole report, the game keeps its own upscaler
-        if (model_k_) return fail(WG_ERROR_UNSUPPORTED, dx12_refused_line_k(dx12_default_, err));
-        say(WG_LOG_WARN, dx12_refused_line(dx12_default_, err));
-        exec_.reset();
-        release_set();
-        no_slots_ = false;
-        dx12 = false;
-        dx12_default_ = false;
-        err.clear();
+        // R1, every model: no HIP route in a game. The context is not created; the one error line is the whole report
+        // and the front end's own upscaler (AMD FSR, else its stand-in) keeps the game
+        return fail(WG_ERROR_UNSUPPORTED, dx12_refused_line(dx12_default_, err));
       } else {
         say(WG_LOG_INFO, std::string("executor dx12: the network runs on the game's D3D12 device, recorded into the "
                                      "game's command list; its kernels read the game's colour, depth and motion and "
@@ -755,11 +756,13 @@ class Context {
                                 " (motion-compensated, disocclusion by depth; WrongGPU's own addition)"
                           : std::string("sparkle guard not available with this executor"));
     }
+#ifdef WG_DEV_DIAGNOSTICS  // developer build only (a release build has dropped capture_dir at create)
     if (!o.capture_dir.empty()) {
       exec_->set_capture(o.capture_dir, o.capture_frames > 0 ? o.capture_frames : 30);
       say(WG_LOG_INFO, "frame capture armed: create " + o.capture_dir + "\\capture.go to write the next " +
                            std::to_string(o.capture_frames) + " network frames there (diagnostics; stalls the GPU)");
     }
+#endif
     if (o.timing_log) {
       timing_.reset(new TimingLog());
       if (!timing_->init(device_, &err)) return fail(WG_ERROR_DEVICE, err);
@@ -795,9 +798,11 @@ class Context {
                                   "(model K runs its render-resolution motion variant on it)"
                                 : ""));
       const std::string net = option_value(n_rtopts_, "network"), fast = option_value(n_rtopts_, "k_fast");
-      const bool exact = (net.empty() || net == "fused") && fast != "1";
+      const std::string approx = option_value(n_rtopts_, "k_approx");   // the opt-in close approximations
+      const bool exact = (net.empty() || net == "fused") && fast != "1" && approx.empty();
       say(WG_LOG_INFO, std::string("network model K mode: network=") + (net.empty() ? "fused" : net) + ";k_fast=" +
-                           (fast.empty() ? "0" : fast) + ";handover=" + (staged_out_ ? "staged" : "fence") +
+                           (fast.empty() ? "0" : fast) + (approx.empty() ? std::string() : ";k_approx=" + approx) +
+                           ";handover=" + (staged_out_ ? "staged" : "fence") +
                            (exact ? ", the exact path" : ", an approximation (not bit-exact)") +
                            (k_default_ ? " (the default mode; network=fused8;k_fast=1;handover=staged selects the "
                                          "fastest mode)"
@@ -890,14 +895,7 @@ class Context {
       }
     }
     const uint64_t v = ++value_;
-    // the D3D12 executor after a switch to HIP (switch_to_hip): released once the game's lists with its frames are done
-    if (retired_ && retired_->completed() >= retired_last_) retired_.reset();
-    if (exec_->records_into_list()) {
-      bool moved = false;
-      const WgResult r = dispatch_record(f, list, v, &moved);
-      if (!moved) return r;
-      // moved: the HIP executor runs this frame (below) and every later one
-    }
+    if (exec_->records_into_list()) return dispatch_record(f, list, v);
     // Slots alternate with every network frame enqueued (not with v: a frame without the network must not make two
     // consecutive network frames share a slot). The slot written now was last used two network frames ago, and the
     // game's queue has waited for that frame (inline) or a later one (pipelined) before this frame's first part.
@@ -1102,10 +1100,7 @@ class Context {
 
   // executor=dx12: the network and its output, recorded into the game's list L (no split). The network's kernels read
   // the game's textures and write its output texture themselves: no input pass, no output pass (executor_d3d12.cpp).
-  // *moved: the executor did not take the frame and the context now runs on the HIP executor (switch_to_hip); nothing
-  // of the frame's own work is recorded yet (the caller records it on the HIP path).
-  WgResult dispatch_record(const WgFrame& f, ID3D12GraphicsCommandList* list, uint64_t v, bool* moved) {
-    *moved = false;
+  WgResult dispatch_record(const WgFrame& f, ID3D12GraphicsCommandList* list, uint64_t v) {
     Job job;
     job.slot = 0;
     job.value = v;
@@ -1127,6 +1122,19 @@ class Context {
     job.game = &f;
     job.output_copy = output_copy_;
     job.conv = &conv_;
+    // the game's predicate on its list (the executor's frame guard replaces it while it records, then sets it again)
+    if (services_ && services_->struct_size >= offsetof(WgFrontEndServices, command_list_predication) + sizeof(void*) &&
+        services_->command_list_predication) {
+      void* pb = nullptr;
+      uint64_t po = 0;
+      uint32_t pop = 0;
+      if (services_->command_list_predication(services_->context, &f, &pb, &po, &pop) == WG_OK) {
+        job.caller_pred_known = true;
+        job.caller_pred = pb;
+        job.caller_pred_offset = po;
+        job.caller_pred_op = pop;
+      }
+    }
     if (timing_) timing_->stamp(list, v, 0);
     if (timing_) timing_->stamp(list, v, 1);
     bool wrote = false;
@@ -1135,21 +1143,34 @@ class Context {
     phase(4);
     const bool ok = exec_->record(job, list, &wrote, &err);
     phase(5);
-    // a frame the executor did not take (nothing of it recorded, e.g. native AA): with the default executor the HIP
-    // executor takes over the context; with executor=dx12 the frame gets the bilinear fallback below
+    // a frame the executor did not take (nothing of it recorded, e.g. native AA): every model and every executor choice
+    // (also a forced executor=dx12) answers WG_ERROR_UNSUPPORTED and the front end takes the frame (AMD FSR, else its
+    // stand-in); never a substitute image made here, never a move to HIP (executor_select.h kRefusedFrameGoesToFrontEnd)
     const bool refused = !ok && frame_refused(err);
-    // a refused frame (executor_select.h refused_frame_action): model K, and model M with hip_switch=off, answer
-    // WG_ERROR_UNSUPPORTED and the front end takes the frame (AMD FSR, else its stand-in); the context stays usable
-    const RefusedAction refused_action = refused_frame_action(model_k_, dx12_default_, hip_switch_);
-    if (refused && refused_action == RefusedAction::kNoSwitch) {  // clean/fe-wrapped-list: no move to HIP; nothing recorded
+    if (refused) {  // nothing recorded; the context stays usable
       if (!no_switch_said_) {
         no_switch_said_ = true;
         say(WG_LOG_WARN, model_k_ ? k_refusal_line(v, err) : no_switch_line(v, err));
       }
       return WG_ERROR_UNSUPPORTED;  // one frame's answer: the context stays usable (failed_ not set)
     }
-    if (refused && refused_action == RefusedAction::kSwitchToHip && switch_to_hip(v, err)) return *moved = true, WG_OK;
-    if (!refused) dx12_last_ = v;
+    // Model L hybrid, the frame after a bottleneck wait timeout (executor_select.h frame_timeout_refused), and a
+    // guarded frame whose game predicate the front end cannot report (frame_not_ready): nothing of it recorded, THIS
+    // frame only: WG_ERROR_NOT_READY (the front end's stand-in renders it, no takeover; the context stays this
+    // backend's), and the next frame runs the network again, as a reset.
+    if (!ok && frame_timeout_refused(err)) {
+      say(WG_LOG_WARN, "frame " + std::to_string(v) + ": " + err + "; the front end's stand-in renders this frame "
+                       "(WG_ERROR_NOT_READY), the next one runs the network again");
+      force_reset_ = true;
+      return WG_ERROR_NOT_READY;  // one frame's answer: the context stays this backend's (failed_ not set)
+    }
+    if (!ok && frame_not_ready(err)) {
+      if (pred_unknown_++ == 0 || pred_unknown_ % 600 == 0)
+        say(WG_LOG_WARN, "frame " + std::to_string(v) + ": " + err + "; the front end's stand-in renders this frame "
+                         "(WG_ERROR_NOT_READY; " + std::to_string(pred_unknown_) + " such frame(s) so far)");
+      force_reset_ = true;
+      return WG_ERROR_NOT_READY;
+    }
     note_path(&input_path_, "input: read directly by the network's D3D12 kernels (executor dx12, no input pass)");
     if ((flags_ & WG_CREATE_MOTION_OUTPUT_RES) && model_k_)
       note_path(&motion_path_, "motion: output resolution, the texel under each render pixel's centre picked by the "
@@ -1190,66 +1211,6 @@ class Context {
     const bool input = !ok && !refused && err.find("input refused: ") != std::string::npos;
     if (!ok) return fail_frame(refused ? WG_ERROR_PARAMETER : input ? WG_ERROR_INPUT : WG_ERROR, err);
     return WG_OK;
-  }
-
-  // The default executor on RDNA 4 (dx12_default_) met a frame its kernels do not take (nothing of it recorded, e.g.
-  // native AA, a render size above the one checked at create): the HIP executor runs this frame and every later one
-  // of the context, starting over (reset), as if it had been chosen at create (shared buffers, split, fences; the
-  // options input_copy and share_path apply). The D3D12 executor stays alive until the game's lists holding its
-  // frames have finished (retired_). One log line; tried once (on failure: the bilinear fallback for such frames).
-  bool switch_to_hip(uint64_t v, const std::string& why) {
-    dx12_default_ = false;
-    std::string err;
-    std::unique_ptr<Executor> hip;
-    if (!split_) {
-      err = "the front end offers no command-list split (interface version 2)";
-    } else {
-      hip = make_hip_executor(rt_cfg_, adapter_);
-      hip->set_log_sink([this](bool warning, const std::string& m) {
-        say(warning ? WG_LOG_WARN : WG_LOG_INFO, "destroy: " + m);
-      });
-      say(WG_LOG_INFO, "about to start the HIP runtime (frame " + std::to_string(v) + ": the context moves to the HIP executor)");
-      if (!hip->prepare(&err)) hip.reset();
-    }
-    if (hip) {
-      std::unique_ptr<Executor> d3d = std::move(exec_);
-      release_set();  // the D3D12 context's fences and flag range (no frame of it uses them)
-      no_slots_ = false;
-      exec_ = std::move(hip);
-      bool shared = make_shared_objects(exec_->needs_handles(), share_path_opt_, &err);
-      if (shared) say(WG_LOG_INFO, "about to import the shared buffers and fences into HIP (" + share_path_ + ")");
-      if (!shared || !exec_->init(device_, set_, &err)) {
-        exec_.reset();
-        release_set();
-        no_slots_ = true;
-        exec_ = std::move(d3d);
-      } else {
-        close_handles();
-        retired_ = std::move(d3d);
-        retired_last_ = dx12_last_;
-        if (!retired_last_ || retired_->completed() >= retired_last_) retired_.reset();
-      }
-    }
-    if (exec_->records_into_list()) {
-      say(WG_LOG_WARN, "frame " + std::to_string(v) + ": executor dx12 (default on RDNA 4) does not take this frame (" +
-                           why + ") and the HIP executor could not take over (" + err +
-                           "); frames it does not take get the bilinear fallback");
-      return false;
-    }
-    input_copy_ = input_copy_opt_;
-    next_slot_ = 0;
-    last_run_ = last_submitted_ = 0;
-    force_reset_ = true;  // the HIP network starts over with this frame
-    if (timing_) {
-      const bool net = exec_->enable_timing();
-      timing_->set_info(net ? exec_->timing_info() : std::string());
-      timing_->set_labels(exec_->timing_labels());
-    }
-    say(WG_LOG_WARN, "frame " + std::to_string(v) + ": executor dx12 (default on RDNA 4) does not take this frame (" +
-                         why + "); the HIP executor runs this context from now on (shared buffers and fences: " +
-                         share_path_ + ", GPU memory " + std::to_string(gpu_memory() >> 20) +
-                         " MiB; executor=dx12 keeps the D3D12 executor with the bilinear fallback for such frames)");
-    return true;
   }
 
   uint64_t gpu_memory() const {
@@ -1987,7 +1948,6 @@ class Context {
         say(WG_LOG_WARN, "destroy: the network's last frame did not finish within 5 s");
     }
     if (exec_) exec_->drain();
-    retired_.reset();  // (drains the game's lists that hold its frames, bounded)
     if (rescue_ && device_ && ev) {
       ID3D12Fence* f = nullptr;
       if (SUCCEEDED(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), (void**)&f))) {
@@ -2082,6 +2042,7 @@ class Context {
 
   Core log_;
   const WgFrontEndServices* services_ = nullptr;
+  uint64_t pred_unknown_ = 0;   // guarded frames whose game predicate the front end could not report
   ID3D12Device* device_ = nullptr;
   ID3D12Device* underlying_ = nullptr;    // what the given device's objects report as their device (sharing path 2)
   ID3D12Device* own_ = nullptr;           // our own device on the same adapter (sharing path 3)
@@ -2144,17 +2105,10 @@ class Context {
 #endif
   bool k_default_ = false;  // model K's default mode was applied (model_k_default)
   // executor choice (executor_select.h): dx12_default_ = the D3D12 executor runs the context by the default rule (not
-  // the option), so a frame it does not take moves the context to the HIP executor (switch_to_hip); what that switch
-  // needs from create: the split service and the options share_path / input_copy
+  // the option); a frame it does not take is answered WG_ERROR_UNSUPPORTED (no HIP in a game), with executor=dx12
+  // forced it gets the bilinear fallback
   bool dx12_default_ = false;
-  bool hip_switch_ = kHipSwitchDefault;  // refused_frame_policy (option hip_switch; clean/fe-wrapped-list)
-  bool no_switch_said_ = false;          // the hip_switch=off line was logged
-  bool split_ = false;
-  std::string share_path_opt_ = "auto";
-  bool input_copy_opt_ = false;
-  uint64_t dx12_last_ = 0;              // last frame the D3D12 executor recorded something of
-  std::unique_ptr<Executor> retired_;   // the D3D12 executor after switch_to_hip, until its frames have finished
-  uint64_t retired_last_ = 0;
+  bool no_switch_said_ = false;          // the refused-frame line was logged
   bool k_input16_ = true;  // model K: compact input pass (runtime option k_input=f32: the FP32 pass)
   std::string n_kernels_, n_model_, n_map_, n_rocm_, n_swin_, n_rtopts_;
   WgRtConfig rt_cfg_ = {};
@@ -2218,4 +2172,15 @@ const WgUpscalerBackend kBackend = {sizeof(WgUpscalerBackend), WG_UPSCALER_INTER
 // Interface version 2 only: the backend needs the front end's command-list split.
 extern "C" __declspec(dllexport) const WgUpscalerBackend* wgGetUpscalerBackend(uint32_t interface_version) {
   return interface_version == WG_UPSCALER_INTERFACE_VERSION ? &kBackend : nullptr;
+}
+
+// Which kind of build this library is (R1): "wg-build dev-diagnostics=0" in every release build and package,
+// "wg-build dev-diagnostics=1" only in a developer build (WG_DEV_DIAGNOSTICS: executor=hip and the frame capture work).
+// clean/tests/check_no_dev_diagnostics.py looks for this text in a built library.
+extern "C" __declspec(dllexport) const char* wgBuildMarker() {
+#ifdef WG_DEV_DIAGNOSTICS
+  return "wg-build dev-diagnostics=1";
+#else
+  return "wg-build dev-diagnostics=0";
+#endif
 }

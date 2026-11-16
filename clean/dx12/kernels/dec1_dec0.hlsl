@@ -22,6 +22,14 @@
 // rounding after each step, not in half arithmetic (the driver contracts half mul + add into v_fma_mix_f32).
 // Bit-identical to the HIP kernel on the synthetic frames (clean/dx12/compare.py, both cases, every buffer).
 // @wg-kernel d1p12/swin_block_c64_add_dec0_nc co=dec1_dec0__pack12.co block=256 wave=32 args=p,p,p,u,u,u,u,p,p,p,p,p,p,p,b56 defines=WG_GELU_T5=0
+//
+// DEC0_ONLY (port d1p12/dec0_q7; Model M on the FP16-form shared stages, WG_M_FORM=q7, where dec1 runs as the q7 block
+// l_q7_block_c64_dec and stores its map): the same kernel without the block. The epilogue's input o[0..3] (lane (t, hh):
+// channels 32 hh .. 32 hh + 31 of token t, the bytes dec1 would store at token * 64 + 32 hh) is read from that stored
+// map (a_x = dec1's output, FP8 [H][W][64]) instead of being packed from the block's accumulators; windows, prc and the
+// whole epilogue are this kernel's own, so the result is d0p12/coef_decoder's on HIP (the fused kernel's contract).
+// a_xadd and a_w are not read. Launched with the fused kernel's arguments and grid.
+// @wg-kernel d1p12/dec0_q7 co=dec1_dec0__pack12.co entry=swin_block_c64_add_dec0_nc block=256 wave=32 args=p,p,p,u,u,u,u,p,p,p,p,p,p,p,b56 defines=WG_GELU_T5=0,DEC0_ONLY=1
 #include "wg_platform.hlsli"
 #include "wg_gelu_lut.hlsli"
 #include "dec1_dec0_diet.hlsli"
@@ -456,6 +464,24 @@ WG_KERNEL(swin_block_c64_add_dec0_nc)
     const uint oz0 = 0u - (wg_grid_ >> 31);
     const uint vw32 = a_w + hh * 32u + oz0, vw128 = a_w + hh * 128u + oz0, vwb = a_w + (t * 2u + hh) * 32u + oz0;
 
+#ifndef DEC0_ONLY
+#define DEC0_ONLY 0
+#endif
+#if DEC0_ONLY
+    // dec0 only: the window's tokens as below (same windows, mirror and prc), their stored FP8 codes as o[0..3]
+    uint prc;
+    uint2 xo[KC];
+    {
+        const int win = win0 < nwin ? win0 : nwin - 1;
+        const int wy = (int)((uint)win / (uint)nwx), wx = win - wy * nwx;
+        const int pr = 4 * wy - a_oy + (int)(t >> 2), pc = 4 * wx - a_ox + (int)(t & 3u);
+        const bool real = (win0 < nwin) & ((uint)pr < (uint)a_H) & ((uint)pc < (uint)a_W);
+        prc = real ? ((uint)pr << 16) | (uint)pc : 0xffffffffu;
+        const uint at = (uint)(wg_mirror(pr, a_H) * a_W + wg_mirror(pc, a_W)) * (uint)C_ + hh * (uint)HALF;
+        const uint4 d0 = wg_ld128(a_x, at), d1 = wg_ld128(a_x, at + 16u);
+        xo[0] = d0.xy; xo[1] = d0.zw; xo[2] = d1.xy; xo[3] = d1.zw;
+    }
+#else
     fetch_head(L_HEAD(0), tid);   // unit 0
 #if DEC_GL_USED
     {
@@ -716,6 +742,7 @@ WG_KERNEL(swin_block_c64_add_dec0_nc)
         }
     }
 
+#endif  // !DEC0_ONLY
     // ---- dec0 as the epilogue (dec1_dec0.hip Dec0Epi::run) ----
     const bool real = prc != 0xffffffffu;
     const int rr = real ? (int)(prc >> 16) : 0, cc = real ? (int)(prc & 0xffffu) : 0;
@@ -732,6 +759,9 @@ WG_KERNEL(swin_block_c64_add_dec0_nc)
     }
     // dec0's B fragments from the block output, exactly the bytes dec1 would store; lane halves swap two 8-byte groups.
     uint2 o[KC];
+#if DEC0_ONLY
+    [unroll] for (uint k = 0; k < KC; ++k) o[k] = xo[k];
+#else
     // wave-uniform skip of the clamp: when every value of the wave is NaN or |x| <= 448 (the driver's max drops NaN),
     // the clamp is the identity and the plain conversion gives the same bytes (NaN -> 0xff on both sides)
     {
@@ -745,6 +775,7 @@ WG_KERNEL(swin_block_c64_add_dec0_nc)
             [unroll] for (uint k = 0; k < KC; ++k) o[k] = dec_pack_q8_ags(acc[k]);
         }
     }
+#endif
     const bool h1 = hh != 0u;
     uint snd0 = h1 ? o[0].x : o[2].x, snd1 = h1 ? o[0].y : o[2].y, snd2 = h1 ? o[1].x : o[3].x, snd3 = h1 ? o[1].y : o[3].y;
     const uint2 r01 = uint2(wg_xor16_u(snd0), wg_xor16_u(snd1)), r23 = uint2(wg_xor16_u(snd2), wg_xor16_u(snd3));

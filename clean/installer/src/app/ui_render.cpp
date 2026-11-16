@@ -1046,7 +1046,7 @@ int RunLauncherUiRender(const wstring& outDir, const wstring& fixtureFile, int w
             v.first.open = true; v.first.busy = false; v.first.installOffer = true; v.first.choice = 1;
             v.first.lines = fixtureFirstRun;
             for (auto& l : v.first.lines)
-                if (l.second.rfind(L"HIP runtime", 0) == 0) l = {1, L"HIP runtime: Not found (optional). Only Sparkle guard and the HIP choice in Runs\u00a0on need it."};
+                if (l.second.rfind(L"HIP runtime", 0) == 0) l = {1, L"HIP runtime: Not found (optional). Model M runs on Direct3D\u00a012 without it."};
         });
         frame(L"first-run-partial", [] {  // the checks arriving: the graphics card's done, the model data and the games still running
             v.first.open = true; v.first.busy = true; v.first.installOffer = true; v.first.choice = 1;

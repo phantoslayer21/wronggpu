@@ -62,6 +62,45 @@ def fail(msg):
     sys.exit("make_payload: " + msg)
 
 
+# R1: nothing in a game starts HIP, so a payload never carries a developer runtime (executor=hip / capture_dir work only in a
+# build made with WG_DEV_DIAGNOSTICS). Every runtime library the payload embeds must say "wg-build dev-diagnostics=0"; a
+# developer build or a library without the marker (older than R1) refuses the payload, failing closed, and so does any other
+# embedded file that carries a developer runtime. The same check runs on the final package (tools/release).
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tests"))
+import check_no_dev_diagnostics as devcheck  # noqa: E402
+
+
+TESTING = False  # --testing: a WRONGGPU_TESTING build (CMake), which may embed the test suite's stand-in runtime
+
+
+def refuse_developer_runtime(rel, data, full=None):
+    """A runtime library is accepted only with its build manifest (clean/runner/build.py writes <library>.build.json next to
+    it): the SHA-256 of the library must match a manifest that says dev_diagnostics = false, as well as the marker and the
+    negative scan; anything else refuses the payload (failing closed). Other embedded files must not carry a developer
+    runtime. The test suite's stand-in runtime (tests/run_installer_tests.py payload: its manifest says "stand_in": true)
+    passes the same checks and is embedded only by a WRONGGPU_TESTING build (--testing); any other build refuses it."""
+    if devcheck.is_runtime_name(rel):
+        manifest = None
+        mpath = os.path.splitext(full)[0] + ".build.json" if full else None
+        if mpath and os.path.isfile(mpath):
+            with open(mpath, "rb") as f:
+                manifest = f.read()
+        ok, text = devcheck.check_runtime_with_manifest(rel, data, manifest)
+        if ok:
+            try:
+                stand_in = json.loads(manifest.decode("utf-8")).get("stand_in") is True
+            except Exception:
+                stand_in = False
+            if stand_in and not TESTING:
+                fail("%s: the test suite's stand-in runtime (its build manifest says stand_in): only a WRONGGPU_TESTING build "
+                     "embeds it; a release build needs the real runtime built with clean/runner/build.py" % rel)
+    else:
+        ok, text, _ = devcheck.check_artifact(rel, data)
+    if not ok:
+        fail("%s: %s: a payload never carries the developer diagnostics (build the runtime with clean/runner/build.py "
+             "without --dev-diagnostics and keep its .build.json next to it)" % (rel, text))
+
+
 def payload_files(root, hosted_only=False):
     rows = []
     for dirpath, dirnames, filenames in os.walk(root):
@@ -78,12 +117,15 @@ def payload_files(root, hosted_only=False):
                 continue
             if low[0] in RESERVED:
                 fail("payload file %s uses a name reserved for the installer" % rel)
+            if low[-1].endswith(".build.json"):  # a runtime library's build manifest (build.py): read for the gate, not shipped
+                continue
             if any(p in ("", ".", "..") or ":" in p for p in parts):
                 fail("bad payload path %s" % rel)
             with open(full, "rb") as f:
                 data = f.read()
             if optiscaler_file(rel, data):
                 fail("payload file %s is OptiScaler: WrongGPU never ships OptiScaler (the launcher downloads its edition)" % rel)
+            refuse_developer_runtime(rel, data, full)
             rows.append((rel, hashlib.sha256(data).hexdigest(), len(data), full))
     rows.sort(key=lambda r: r[0].lower())
     if not any(r[0].lower() == FRONT_END for r in rows):
@@ -111,6 +153,7 @@ def rr_files(root):
                 data = f.read()
             if optiscaler_file(rel, data):
                 fail("RR folder file %s is OptiScaler: WrongGPU never ships OptiScaler (the launcher downloads its edition)" % rel)
+            refuse_developer_runtime(rel, data)
             if os.path.basename(rel).lower() == RR_LEGACY_RUNTIME:
                 fail("%s: the RR runtime is part of wronggpu_runtime.dll (release 0.6.0: one runtime DLL); no RR runtime of its own" % rel)
             if rel.lower() not in RR_FILES and not RR_VARIANT.match(rel.lower()):
@@ -194,8 +237,12 @@ def main():
                     "installer without them")
     ap.add_argument("--map-f", help="the RR converter map (preset F); omit for an installer without it")
     ap.add_argument("--map-l", help="Model L's converter map (preset L); omit for an installer without Model L")
+    ap.add_argument("--testing", action="store_true", help="a WRONGGPU_TESTING build (CMake passes it): it may embed the test "
+                    "suite's stand-in runtime (its build manifest says stand_in); any other build refuses that runtime")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
+    global TESTING
+    TESTING = a.testing
     root = os.path.abspath(a.payload)
     if not os.path.isdir(root):
         fail("payload folder not found: " + root)

@@ -304,9 +304,10 @@ EXACT_ACROSS = ("    acc = start\n    for c0 in range(0, W8.shape[1], 32):\n"
 PER_PRODUCT = ("            return f16(start + a8 @ W8.T)",
                "            acc = start\n            for i in range(a8.shape[-1]):\n"
                "                acc = f16(acc + a8[..., i:i + 1] @ W8[:, i:i + 1].T)\n            return acc")
-W2_SLICE = ('acc = mm8(acc, q8(gelu_q7(hs)), W["W2"][:, r], model)',
-            'acc = mm8(acc, q8(gelu_q7(hs)), W["W2"][:, slice(32 * ((sl + 1) % 4), 32 * ((sl + 1) % 4) + 32)], model)')
-MLP_REVERSED = ('for sl in range(W["W1"].shape[0] // 32):', 'for sl in reversed(range(W["W1"].shape[0] // 32)):')
+W2_SLICE = ('acc = mm8(acc, q8(gelu_q7(hs)), W["W2"][:, r], model, final=(model != "f32chain" or sl == nsl - 1))',
+            'acc = mm8(acc, q8(gelu_q7(hs)), W["W2"][:, slice(32 * ((sl + 1) % 4), 32 * ((sl + 1) % 4) + 32)], model, '
+            'final=(model != "f32chain" or sl == nsl - 1))')
+MLP_REVERSED = ('for sl in range(nsl):', 'for sl in reversed(range(nsl)):')
 
 
 class Q7KnownAnswerTest(unittest.TestCase):

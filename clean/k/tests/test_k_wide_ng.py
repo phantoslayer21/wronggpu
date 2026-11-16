@@ -2,7 +2,8 @@
 """Model K: the NG = 4 forms of the wide stages e3 and d3 (k_stagew4_e3, k_stagew4_d3) cannot be reached (host checks).
 
 The runtime launches a wide stage as k_stagew<NG>_<name> with NG from wide_ng (clean/k/runtime/runtime_k.cpp), in one
-place for the frame (network()) and one for the list of kernels a context can launch (d3d12_kernels()). For the FP32
+place for the frame and the softmax self-check (stage_kernel_base, which network() and smx_check / smx_case_name call)
+and one for the list of kernels a context can launch (d3d12_kernels()). For the FP32
 (exact) network, the only one the D3D12 devices run, wide_ng gives e3 and d3 NG = 2 whatever the window count, the
 render size, the output size or any option; the FP16 networks (network=fused16 / fused8) take other kernels and
 are refused on the native device. So the NG = 4 forms of e3 and d3 are not part of any context's kernel set and are not
@@ -52,13 +53,15 @@ class TestWideNg(unittest.TestCase):
 
     def test_wide_names_come_from_wide_ng(self):
         src = source()
-        # the two sites that build a wide kernel name (the frame and the kernel list) use wide_ng's result only
-        sites = re.findall(r'"k_stagew" \+ std::to_string\((\w+)\)', src)
-        self.assertEqual(sorted(sites), ["ng", "ng"])
-        calls = re.findall(r"const int ng = wide_ng\(([^;]*)\);", src)
-        self.assertEqual(len(calls), 2, calls)
-        self.assertIn("st.name, f16_, p.nwx * p.nwy", calls)
-        self.assertIn("n, false, k_window_count(lw, lh, o, o)", calls)
+        # the two sites that build a wide kernel name use wide_ng's result only: stage_kernel_base (the frame and the
+        # softmax self-check) and the kernel list
+        sites = re.findall(r'"k_stagew" \+ std::to_string\((\*?\w+)\)', src)
+        self.assertEqual(sorted(sites), ["*ng", "ng"])
+        self.assertEqual(re.findall(r"\*ng = wide_ng\(([^;]*)\);", src), ["st.name, f16, nwin"])
+        self.assertEqual(re.findall(r"const int ng = wide_ng\(([^;]*)\);", src), ["n, false, k_window_count(lw, lh, o, o)"])
+        # network() names its stage through stage_kernel_base with the frame's window count; the self-check with FP32
+        self.assertIn("stage_kernel_base(st, f16_, p.y != 0, p.nwx * p.nwy, &ng, &w2)", src)
+        self.assertEqual(len(re.findall(r"stage_kernel_base\(st, false, true,", src)), 2)
         self.assertNotIn("k_stagew4_e3", src)
         self.assertNotIn("k_stagew4_d3", src)
 

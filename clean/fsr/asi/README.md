@@ -21,6 +21,25 @@ What the front end does with the plugin's entry (`src/frontend.cpp`, `TestAsiPlu
 whatever the FFX box names; "FSR 3.X(/4)" runs AMD: the AMD version the FFX box names, else AMD's newest listed version.
 The FFX box's list is the same with and without the plugin (WrongGPU first).
 
+Which model runs (0.6.5, `src/model_choice_record.h`, `TestAsiChoiceRecord`, `tests/test_model_choice_record.cpp`): the
+plugin's entry says WrongGPU or AMD; which WrongGPU model is the game's **model choice record**, `model-choice.ini` in the
+game's WrongGPU state folder (`wronggpu-setup`, beside `settings.ini`; `clean/wgshared/include/wg_state.h`). It holds
+`model=`, `seq=` and `source=` (launcher, ffx or plugin) and is written only for a choice the player made, each time with
+the record's seq + 1, so the highest seq is the most recent choice: by the launcher when the player applies a model (Apply,
+or `set <game> model=`; always, also the same model again; then OptiScaler's `UpscalerIndex` is set to that model's entry,
+for display); by the front end when the WrongGPU edition of OptiScaler reports that the player selected one of WrongGPU's
+entries (`WrongGpuHostSelectedV1`, `include/wronggpu_host_event.h`); and by this plugin when the player clicks one of its
+model entries. The index OptiScaler stores is never a choice, and wronggpu.ini's model item is the install's default, which
+only seeds the record of a game that has none (read under the lock). Every read and write holds the game's state lock (one
+named mutex per game folder, from its volume and file identity, shared with every WrongGPU program); writes are atomic.
+A click that cannot be saved in time changes nothing: its entry says "not saved, try again" and nothing is kept for later.
+When the record cannot be read, is corrupt or busy at a create, the front end runs the last choice it read this session,
+else wronggpu.ini's model item, else Model M. Without a record (no launcher state folder) the launcher's Model K / L item
+decides, else the plugin's saved entry, else Model M. The front end logs the model and which
+choice decided and tells the plugin which model runs (`WrongGpuAsiShowModelV1`), so the menu marks that entry. Model L's
+own entry ("WrongGPU Model L") is in the menu of a build with `WG_MODEL_L`; a model the front end was built without runs
+as Model M, with a note in the log.
+
 ## How it works
 
 1. OptiScaler loads the plugin and calls its exported `InitializeASI()`. `opti_module.h` finds OptiScaler's module
@@ -41,7 +60,8 @@ The FFX box's list is the same with and without the plugin (WrongGPU first).
    none of OptiScaler's data.
 4. WrongGPU's front end (`amd_fidelityfx_dx12.dll`) finds the plugin by module and asks it (`WrongGpuAsiQuery`,
    `asi_abi.h`) which model is selected. The FFX list always starts with WrongGPU entries followed by AMD entries;
-   when hooked, the front end creates Model M / Model K / AMD according to the plugin selection.
+   when hooked, the front end creates Model M / K / L or AMD from the plugin's selection weighed against the launcher's
+   model choice (the model choice record; see "Which model runs" above).
 
 If a required anchor is missing or ambiguous, or a stub cannot be placed, nothing is patched and the plugin reports
 "not hooked". Call sites are prepared and revalidated before publication. A failed write rolls back sites whose

@@ -171,7 +171,7 @@ wstring PlainWarning(const wstring& w) {
         return wstring(w.rfind(L"Special K", 0) == 0 ? L"Special K" : L"ReShade") + L" is in this game too. If Model M switches to AMD FSR next to it, Last run shows it.";
     if (Has(w, L"global injector is running")) return L"Special K's global injector is running and may load into this game too. That pair isn't tested with WrongGPU.";
     if (Has(w, L"Its own HIP runtime may be loaded"))
-        return L"Another program in this game brings its own HIP runtime. Keep Runs on at Auto or Direct3D 12 so the two don't clash.";
+        return L"Another program in this game brings its own HIP runtime. WrongGPU runs on Direct3D 12 in a game, not on HIP, so the two don't clash.";
     if (Has(w, L"An unknown d3d12.dll"))
         return L"Another program's Direct3D 12 file is in this game's folder. WrongGPU leaves it alone; if the game doesn't start with WrongGPU, that file may be why.";
     if (Has(w, L"no [Plugins] Path setting")) return L"Another mod loader in this game might start WrongGPU's plugin twice.";

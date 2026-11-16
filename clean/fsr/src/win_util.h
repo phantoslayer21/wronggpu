@@ -71,6 +71,13 @@ const WgUpscalerBackend* StandInForFallback(const wgfsr::Config& config);
 // and checked (CheckProviderModule). Logs the choice, or "FSR 4 / AMD versions not available: ..." when none is usable
 // (null then).
 const wgfsr::OriginalApi* CompareApi(const std::string& path);
+// CompareApi of a path kept by copy: a named class, not a lambda capturing the string (MSVC /Zc:lambda: a throwing capture
+// copy terminates instead of unwinding; async_create.h DeviceRelease).
+struct CompareApiOf {
+    std::string path;
+    explicit CompareApiOf(const std::string& p) : path(p) {}
+    const wgfsr::OriginalApi* operator()() const { return CompareApi(path); }
+};
 // Whether `m`, got from LoadLibrary of `requested`, is that AMD FidelityFX API DLL: not WrongGPU's own module or a copy
 // of it, the file that was asked for (a host's LoadLibrary hook can hand out OptiScaler's or WrongGPU's module for an
 // AMD file name), the FidelityFX API exports, none of which jumps into a module that is not AMD's (a host's hook).
@@ -105,7 +112,7 @@ void AddSplitServices(PlatformT& p, const wgfsr::Config& config) {
     };
     p.gpuTimer = &OverlayGpuTimer;
     p.compareAmd = &OverlayCompareAmd;
-    p.compareApi = [dll = config.compareDll] { return CompareApi(dll); };
+    p.compareApi = CompareApiOf(config.compareDll);  // (a named class: no lambda copies the path, as in dllmain.cpp)
     p.services = &SplitServices;
     p.noteDispatch = &NoteDispatch;
     p.standIn = &StandInForFallback;
@@ -113,6 +120,8 @@ void AddSplitServices(PlatformT& p, const wgfsr::Config& config) {
 
 bool D3D12ResourceInfo(void* resource, wgfsr::ResourceInfo* out);
 void* DeviceFromCommandList(void* commandList);  // ID3D12Device* (the game keeps it alive), or null
+void RetainDevice(void* device);   // AddRef on the game's ID3D12Device: a create worker's own reference (async_create.h)
+void ReleaseDevice(void* device);  // its Release, by the worker when its create is over
 
 // "name.dll" of the module that contains `address` (cached per thread for repeated callers).
 const char* ModuleNameOf(const void* address);

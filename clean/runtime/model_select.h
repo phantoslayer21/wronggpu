@@ -27,6 +27,8 @@ struct ModelInfo {
 constexpr ModelInfo kModelTable[] = {
     {ModelId::M, "M", "preset-M.v1.map.json", "", true},
     {ModelId::K, "K", "preset-K.v1.map.json", "K", true},
+    // L: false here is the table's default for builds without Model L; runtime.cpp admits L onto the native D3D12 backend
+    // in builds with WG_MODEL_L (model_l_built()), and the D3D12 executor is the default for L on RDNA 4 (executor_select.h)
     {ModelId::L, "L", "preset-L.v1.map.json", "L", false},
 };
 constexpr size_t kModelCount = sizeof kModelTable / sizeof kModelTable[0];

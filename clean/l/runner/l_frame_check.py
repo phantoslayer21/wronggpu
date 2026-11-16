@@ -220,12 +220,29 @@ SENTINELS = {"stages": 0xC3, "default": 0xA5, "d3d12_stages": 0x3C, "d3d12": 0x5
 BNECK_UNWRITTEN = ("b0.out", "b1.out", "b2.out", "b3.out", "b4.out")   # the megakernel writes only b5's output
 
 
+def q7_route(rec):
+    """A recording of Model L's FP16-form route (kernels l_form=q7): every stage runs on its own, nothing stays on
+    chip (no bottleneck megakernel, no fused merge), so b0 ... b4 and enc1's merged map are written."""
+    return (rec.get("kernels") or {}).get("l_form") == "q7"
+
+
 def fill_sentinels(p, value, first):
     """Every output this frame writes set to the run's sentinel (before the frame)."""
     for n in RAW_OUTPUTS:
         if n in CARRIED or (not first and n in NEXT_READS):
             continue
         p.fill(n, value)
+
+
+def with_l_x3(p, raw):
+    """Model L: also the encoder block's map l.x3 (the decoder block's skip; a scratch map, not a byte-compared output),
+    for --compare to run the decoder block on the runtime's own inputs."""
+    if (p.kernels() or {}).get("model") == "L":
+        try:
+            raw["l.x3"] = p.raw("l.x3")
+        except Exception:   # a runtime without the map: --compare falls back to the oracle's skip
+            pass
+    return raw
 
 
 def raw_outputs(p):
@@ -360,7 +377,7 @@ def run_d3d12(build, special=True, stages=False):
                 fr = frame_inputs(rng, rw, rh, reset, special, index=i)
                 fill_sentinels(p, SENTINELS[config], i == 0)
                 out = p.frame(fr, debug=True)
-                frames.append({"inputs": fr, "out": out, "raw": raw_outputs(p)})
+                frames.append({"inputs": fr, "out": out, "raw": with_l_x3(p, raw_outputs(p))})
             rec = {"model": model, "config": config, "sentinel": SENTINELS[config], "kernels": p.kernels(),
                    "ldr": LDR and model == "L",
                    "notes": p.notes(),
@@ -394,11 +411,12 @@ def compare_backends(hip, dx, same_post=True):
     keep on chip (enc1's merged map; Model M's dec2 / dec1 outputs, which its fused decoder reads on chip) and, with the
     fused pack12 post, the display image (that kernel writes none; Model L's own post writes it), on the first frame the
     previous frame's state on both."""
-    fused_onchip = ("enc1.merged",) + (("dec2.out", "dec1.out") if hip["model"] == "M" else ())
+    q7 = q7_route(hip) and q7_route(dx)
+    fused_onchip = (() if q7 else ("enc1.merged",)) + (("dec2.out", "dec1.out") if hip["model"] == "M" else ())
     no_display = "post_tf" in str(dx["kernels"].get("post_last", ""))
 
     def unwritten(k, n):
-        if n in BNECK_UNWRITTEN or (k == 0 and n in UNWRITTEN_ON_FIRST):
+        if (n in BNECK_UNWRITTEN and not q7) or (k == 0 and n in UNWRITTEN_ON_FIRST):
             return "both"
         if n in fused_onchip or (n == "post.display" and no_display):
             return "b"
@@ -411,10 +429,12 @@ def compare_d3d12_configs(st, df):
     """D3D12 default kernels (df) against the run with the fusions off (st), raw defined bytes. Not written by design:
     b0 ... b4 on both (the megakernel runs in both), the display image on both (the fused pack12 post), enc1's merged
     map with the defaults (fusion pm keeps it on chip), on the first frame the previous frame's state on both."""
+    q7 = q7_route(st) and q7_route(df)
+
     def unwritten(k, n):
-        if n in BNECK_UNWRITTEN or n == "post.display" or (k == 0 and n in UNWRITTEN_ON_FIRST):
+        if (n in BNECK_UNWRITTEN and not q7) or n == "post.display" or (k == 0 and n in UNWRITTEN_ON_FIRST):
             return "both"
-        if n == "enc1.merged":
+        if n == "enc1.merged" and not q7:
             return "b"
         return None
     return raw_compare(st, df, st["sentinel"], df["sentinel"], unwritten), unwritten
@@ -490,11 +510,12 @@ def compare_d3d12(build, json_path):
                       "post_compared_with_hip": same_post}
         if same_post:  # the record-level negative controls on this comparison
             dflt = recs["default"]
+            q7 = q7_route(dflt) and q7_route(recs["d3d12"])
+            onchip = ("dec2.out", "dec1.out") if q7 else ("enc1.merged", "dec2.out", "dec1.out")
             res[model]["negative_controls"] = negative_controls(
                 dflt, recs["d3d12"], dflt["sentinel"], recs["d3d12"]["sentinel"],
-                lambda k, n: ("both" if n in BNECK_UNWRITTEN or (k == 0 and n in UNWRITTEN_ON_FIRST) else
-                              "b" if n in ("enc1.merged", "dec2.out", "dec1.out") or (n == "post.display" and
-                                                                                       no_display) else None),
+                lambda k, n: ("both" if (n in BNECK_UNWRITTEN and not q7) or (k == 0 and n in UNWRITTEN_ON_FIRST) else
+                              "b" if n in onchip or (n == "post.display" and no_display) else None),
                 convert_b=True)
         if not same_post:
             # Model L: HIP runs l_post_recon, D3D12 Model M's fused pack12 post, and each frame's encoder reads the
@@ -565,7 +586,7 @@ def run(build, rocm, special=True):
                 fr = frame_inputs(rng, rw, rh, reset, special, index=i)
                 fill_sentinels(p, SENTINELS[config], i == 0)
                 out = p.frame(fr, debug=True)
-                frames.append({"inputs": fr, "out": out, "raw": raw_outputs(p)})
+                frames.append({"inputs": fr, "out": out, "raw": with_l_x3(p, raw_outputs(p))})
             rec = {"model": model, "config": config, "sentinel": SENTINELS[config], "kernels": p.kernels(),
                    "ldr": LDR and model == "L",
                    "notes": p.notes(),
@@ -777,7 +798,14 @@ def compare_model(rec, params, post_ref=None, bneck_unit=False, table=None):
             x0["reduced_history"] = np.zeros_like(reduced)
         ref = L.encode(x0, params, f, t=table) if model == "L" else ME.encode(x0, params["enc0"])
         enc_skip = ref.get("skip") if model == "L" else None   # the encoder block output the decoder block reads
+        x3 = fd.get("raw", {}).get("l.x3")
+        if model == "L" and x3 is not None and x3.size == fh * fw * 32:
+            # the runtime's own encoder block map (recorded l.x3): the decoder block on the runtime's own inputs
+            from clean.reference.fp8 import fp8_decode
+            enc_skip = fp8_decode(np.asarray(x3, np.uint8)).reshape(fh, fw, 32)
         m["enc0"] = {"features": fp8_stage(out["enc0"]["features"], ref["features"])}
+        if model == "L" and enc_skip is not None and enc_skip is not ref.get("skip"):
+            m["enc0"]["x3"] = fp8_stage(enc_skip, ref["skip"])   # the encoder block map against the oracle's
         for s in ("m_near", "m_far", "m_center"):
             m["enc0"][s] = motion_surface(out["enc0"][s], ref[s])
 
@@ -787,7 +815,10 @@ def compare_model(rec, params, post_ref=None, bneck_unit=False, table=None):
             off = S.window_offset(s, f)
             kind = S.STAGES[s]["kind"]
             skip = skips.get("enc2" if s == "dec2" else "enc1") if kind == "dec" else None
-            ref = S.run_stage(s, params[s], x, off, skip, gelu="sigmoid")
+            if model == "L" and (table or T.TABLE).get("shared_form", "m") == "q7":
+                ref = L.run_stage_q7(s, params[s], x, off, skip, table or T.TABLE)   # the FP16 form (L's q7 kernels)
+            else:
+                ref = S.run_stage(s, params[s], x, off, skip, gelu="sigmoid")
             if bneck_unit and s in ("b0", "b1", "b2", "b3", "b4"):
                 x = ref["out"]  # the reference's own chain (the runtime does not write b0 ... b4)
                 continue
@@ -900,8 +931,12 @@ def compare(build, json_path):
         # the default kernels against the six-launch bottleneck, raw defined bytes: b0 ... b4 are not written by the
         # default megakernel; on the first frame the previous frame's state is written by neither (a reset frame does
         # not read it)
+        # Model L's FP16-form route (kernels "l_form=q7") runs every stage on its own in both configurations: no
+        # megakernel, so b0 ... b4 are written by both and compared
+        on_q7 = q7_route(recs["default"])
+
         def unwritten(k, n):
-            if n in BNECK_UNWRITTEN:
+            if n in BNECK_UNWRITTEN and not on_q7:
                 return "b"
             return "both" if k == 0 and n in UNWRITTEN_ON_FIRST else None
         st_, df_ = recs["stages"], recs["default"]

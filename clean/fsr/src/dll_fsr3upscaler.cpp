@@ -82,6 +82,8 @@ Hook& H() {
         p.logBytes = [] { return wronggpu::Log::Get().Bytes(); };
         p.resourceInfo = &D3D12ResourceInfo;
         p.deviceFromCommandList = &DeviceFromCommandList;
+        p.retainDevice = &RetainDevice;
+        p.releaseDevice = &ReleaseDevice;
         AddSplitServices(p, config);
         g_hook = new Hook(p, config, "");
         LoadOriginal();

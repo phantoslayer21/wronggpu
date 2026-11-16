@@ -205,6 +205,32 @@ int main() {
                     "ShortenMiddle keeps the drive and the marker");
         }
 
+        // R1: the launcher's GPU line is the runtime's sentence on every card that is not RDNA 4 (clean/runtime/interop/tests/
+        // test_executor_select.cpp checks the runtime's side of the same sentence)
+        {
+            require(NeedsRx9000Sentence() == L"WrongGPU's models need an RX 9000-series GPU; using AMD FSR", "NeedsRx9000Sentence: the runtime's sentence");
+            GpuInfo rdna4;
+            rdna4.amd = rdna4.rdna4 = true;
+            require(GpuToolbarLine(L"RX 9070 XT", rdna4) == L"RX 9070 XT (detected) \u00b7 Direct3D 12",
+                    "GpuToolbarLine: RDNA 4 is detected and runs on Direct3D 12");
+            GpuInfo rdna3;
+            rdna3.amd = true;
+            const wstring l3 = GpuToolbarLine(L"RX 7900 XTX", rdna3);
+            require(l3.find(NeedsRx9000Sentence()) != wstring::npos && !Contains(l3, L"HIP") && Contains(l3, L"(detected)"),
+                    "GpuToolbarLine: another AMD card gets the sentence, no HIP");
+            GpuInfo other;
+            const wstring lo = GpuToolbarLine(L"Other Vendor 4070", other);
+            require(lo.find(NeedsRx9000Sentence()) != wstring::npos && !Contains(lo, L"Not supported"),
+                    "GpuToolbarLine: another vendor gets the sentence");
+            const wstring none = GpuToolbarLine(L"", other);
+            require(none == L"No graphics card detected \u00b7 " + NeedsRx9000Sentence(),
+                    "GpuToolbarLine: no card, an unidentified one, gets the sentence too");
+            GpuInfo unnamed;  // found, but its name could not be read
+            unnamed.amd = true;
+            require(GpuToolbarLine(L"", unnamed).find(NeedsRx9000Sentence()) != wstring::npos,
+                    "GpuToolbarLine: an unnamed AMD card gets the sentence");
+        }
+
         // Linux's device list from a made-up folder (any host): every card in number order, connectors skipped, junk and
         // missing files ignored, the reported name says the card was not confirmed as the game's adapter
         {

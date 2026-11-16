@@ -60,13 +60,21 @@ void WritePrepared(const wstring& dataDir, const PrepLine& now) {
     WriteFileAtomic(PrepFile(dataDir), text.data(), text.size());
 }
 
-// the environment for the helper: this one, with LOCALAPPDATA set to the user's real local app data folder (the driver
-// keeps its shader cache there; a launcher started with another LOCALAPPDATA, as the tests' sandbox does, must still
-// prepare the cache the game finds) and the runtime's log in the launcher's data folder (never a new file in the game)
-std::vector<wchar_t> HelperEnvironment(const wstring& log) {
+}  // namespace
+
+// the environment for the helper (rrprep.h): this one, with LOCALAPPDATA set to the user's real local app data folder (the
+// driver keeps its shader cache there; a launcher started with another LOCALAPPDATA must still prepare the cache the game
+// finds) and the runtime's log in the launcher's data folder (never a new file in the game). A WRONGGPU_TESTING build keeps
+// the tests' redirected LOCALAPPDATA unless WRONGGPU_TEST_REAL_DRIVER_CACHE=1 (the explicit opt-in of a test that fills the
+// real driver cache): the default test run stays in its work folder.
+std::vector<wchar_t> RrHelperEnvironment(const wstring& log) {
     wstring local;
+    bool real = true;
+#ifdef WRONGGPU_TESTING
+    real = EnvVar(L"WRONGGPU_TEST_REAL_DRIVER_CACHE") == L"1";
+#endif
     PWSTR p = nullptr;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DONT_VERIFY, nullptr, &p)) && p) local = p;
+    if (real && SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DONT_VERIFY, nullptr, &p)) && p) local = p;
     if (p) CoTaskMemFree(p);
     std::vector<wchar_t> env;
     LPWCH block = GetEnvironmentStringsW();
@@ -86,9 +94,12 @@ std::vector<wchar_t> HelperEnvironment(const wstring& log) {
     return env;
 }
 
-}  // namespace
-
 wstring RrDriverVersion() {
+#ifdef WRONGGPU_TESTING
+    // tests: a driver version of their own ("none": no AMD graphics card), so that rr-prepare's paths run on any PC without
+    // touching the GPU (the suite sets it only with its stand-in runtime, which the helper cannot load)
+    if (const wstring t = EnvVar(L"WRONGGPU_TEST_RR_DRIVER"); !t.empty()) return t == L"none" ? wstring() : t;
+#endif
     HMODULE m = LoadSystemDll(L"dxgi.dll");
     if (!m) return L"";
     typedef HRESULT(WINAPI * Create)(REFIID, void**);
@@ -181,6 +192,15 @@ int PrepareRr(Context& ctx, const wstring& dataDir, const wstring& exe, const ws
     const wstring driver = RrDriverVersion();
     if (driver.empty()) { if (why) *why = L"no AMD graphics card found"; return 2; }
     if (!IsFile(runtimeDll)) { if (why) *why = L"the runtime isn't there (" + runtimeDll + L")"; return 3; }
+#ifdef WRONGGPU_TESTING
+    // tests: a test build starts no helper unless the test allows it (WRONGGPU_TEST_ALLOW_RR_HELPER=1): whatever was decided
+    // above, a default test run never prepares anything on the GPU
+    if (EnvVar(L"WRONGGPU_TEST_ALLOW_RR_HELPER") != L"1") {
+        if (why) *why = L"test: the helper may not start (WRONGGPU_TEST_ALLOW_RR_HELPER)";
+        LogLine(ctx, L"Ray Reconstruction: test: the helper may not start for " + BaseName(exe) + L" (WRONGGPU_TEST_ALLOW_RR_HELPER)");
+        return 3;
+    }
+#endif
     const wstring run = Join(PrepDir(dataDir), L"run");
     EnsureDir(run);
     const wstring helper = Join(run, BaseName(exe));
@@ -204,7 +224,7 @@ int PrepareRr(Context& ctx, const wstring& dataDir, const wstring& exe, const ws
     wstring cmd = L"\"" + helper + L"\" --rr-prepare \"" + runtimeDll + L"\" " + std::to_wstring(passes);
     std::vector<wchar_t> cl(cmd.begin(), cmd.end());
     cl.push_back(0);
-    std::vector<wchar_t> env = HelperEnvironment(log);
+    std::vector<wchar_t> env = RrHelperEnvironment(log);
     const BOOL ok = CreateProcessW(helper.c_str(), cl.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | BELOW_NORMAL_PRIORITY_CLASS,
                                    env.data(), run.c_str(), &si, &pi);
     CloseHandle(wr);
@@ -275,6 +295,18 @@ int PrepareRr(Context& ctx, const wstring& dataDir, const wstring& exe, const ws
 
 int RunRrPrepareHelper(int argc, wchar_t** argv) {
     if (argc < 4) return 9;
+#ifdef WRONGGPU_TESTING
+    // tests: the LOCALAPPDATA the helper was started with, appended to this file before the runtime is loaded
+    if (const wstring f = EnvVar(L"WRONGGPU_TEST_HELPER_ENV_LOG"); !f.empty()) {
+        const string line = ToUtf8(L"LOCALAPPDATA=" + EnvVar(L"LOCALAPPDATA")) + "\n";
+        HANDLE h = CreateFileW(f.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h != INVALID_HANDLE_VALUE) {
+            DWORD w = 0;
+            WriteFile(h, line.data(), (DWORD)line.size(), &w, nullptr);
+            CloseHandle(h);
+        }
+    }
+#endif
     HMODULE m = LoadLibraryExW(argv[2], nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!m) return 8;
     typedef int (*Cb)(void*, uint32_t, uint32_t, uint32_t, const char*, uint32_t, uint32_t);

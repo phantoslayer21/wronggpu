@@ -15,10 +15,12 @@
 #include "../converter/src/json.h"
 #include "../converter/src/sha256.h"
 #include "gelu_lut_table.h"
+#include "hyb_tables.h"
 #include "gelu_t5_table.h"
 #include "native_direct_pi.h"
 #include "embedded.h"
 #include "rdna4.h"
+#include "rdna4_win.h"
 #include "wmma_probe.h"
 
 #include <algorithm>
@@ -175,6 +177,8 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     direct_constants_map_ = nullptr;
     if (marker_map_ && marker_) marker_->Unmap(0, nullptr);
     marker_map_ = nullptr; marker_.reset();
+    if (guard_map_ && guard_copy_) guard_copy_->Unmap(0, nullptr);
+    guard_map_ = nullptr; guard_copy_.reset(); guard_pred_.reset();
     direct_constants_.reset(); direct_heap_.reset(); direct_root_.reset();
     arena_.reset(); channel_.reset(); heap_.reset(); root_.reset(); gelu_t5_.reset();
     queue_.reset(); fence_.reset();
@@ -216,6 +220,57 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     if (!create_objects()) return false;
     if (!profile_init()) return false;
     return reserve_events(64) && (!borrowed_ || driver_probe()) && gelu_lut_upload() && gelu_t5_upload();
+  }
+
+  // The hybrid block form's tables (hlsl/wg_hyb.hlsli, hyb_tables.h) at their fixed arena range right after the GELU
+  // table, for a Model L context on the hybrid route only: the runtime's create calls hyb_reserve() (WG_L_FORM unset =
+  // the 0.6.5 release default hybrid_full, or "hybrid") before its first allocation. Device init reserves nothing, so
+  // Model M / K contexts keep their arena layout. The range is carved out of the free list; if anything holds part of
+  // it, the reservation fails and the runtime refuses (never a run on other bytes). Once reserved, the tables stay
+  // for the device's lifetime. WG_HYB_TABLES=off is a developer diagnostic (WG_DEV_DIAGNOSTICS builds only, as #225's
+  // keys): it refuses, to prove the runtime's refusal on the GPU; a release build ignores it with one warning line, so a
+  // stray variable never refuses Model L for a player (the CPU recorder tests the refusal in every build).
+  bool hyb_reserve() override {
+    if (hyb_) return true;
+    const char* off = std::getenv("WG_HYB_TABLES");
+#ifdef WG_DEV_DIAGNOSTICS
+    if (off && std::string(off) == "off") return fail("diagnostic: hybrid tables off (WG_HYB_TABLES=off)");
+#else
+    if (off && *off) log(true, "WG_HYB_TABLES ignored: diagnostic key, release build; the hybrid tables are reserved");
+#endif
+    const uint64_t lo = wg::kHybBase, hi = (wg::kHybBase + wg::kHybBytes + kNativeAlign - 1) & ~(kNativeAlign - 1);
+    if (hi > arena_bytes_) return fail("hybrid tables: arena too small");
+    auto i = free_.upper_bound(lo);
+    if (i == free_.begin()) return fail("hybrid tables: their arena range is in use");
+    --i;
+    if (i->first > lo || i->first + i->second < hi) return fail("hybrid tables: their arena range is in use");
+    const uint64_t start = i->first, size = i->second;
+    free_.erase(i);
+    if (lo > start) free_[start] = lo - start;
+    if (start + size > hi) free_[hi] = start + size - hi;
+    high_ = std::max(high_, hi);
+    if (!hyb_upload()) {   // the context is refused; the range goes back to the free list (the device stays whole)
+      free_range(lo, hi - lo);
+      return false;
+    }
+    hyb_ = true;
+    return true;
+  }
+  bool hyb_upload() {
+    std::vector<uint8_t> table(wg::kHybBytes);
+    wg::hyb_fill(table.data());
+    if (!transient_room(wg::kHybBytes)) return false;
+    NativeCom<ID3D12Resource> staging;
+    if (!buffer(wg::kHybBytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, false, staging)) return false;
+    void* mapped = nullptr;
+    D3D12_RANGE no_read{0, 0};
+    if (!check(staging->Map(0, &no_read, &mapped), "Map(hybrid tables)")) return false;
+    std::memcpy(mapped, table.data(), wg::kHybBytes);
+    D3D12_RANGE written{0, wg::kHybBytes}; staging->Unmap(0, &written);
+    if (!open_list()) return false;
+    transition_arena(D3D12_RESOURCE_STATE_COPY_DEST);
+    list_->CopyBufferRegion(arena_.get(), wg::kHybBase, staging.get(), 0, wg::kHybBytes);
+    keep(std::move(staging), wg::kHybBytes); return true;
   }
 
   // The MLP kernels' exact GELU + FP8 table (hlsl/wg_gelu_lut.hlsli) at its fixed arena offset, reserved in
@@ -405,6 +460,9 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     // Create-time work on our own queue must have finished before the caller's list can run (normally a no-op).
     if (!finish_queue() || !create_direct_objects() || !create_marker()) return extension_result(false, error);
     ext_list_ = list; external_ = true;
+    guard_state_ = D3D12_RESOURCE_STATE_COMMON;
+    // the caller's predicate lifted: our recording runs unconditionally (set again at end_external)
+    if (caller_given_ && caller_pred_) ext_list_->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
     // The arena is a buffer: it starts each ExecuteCommandLists in COMMON and is promoted implicitly to UNORDERED_ACCESS
     // by the first dispatch; only dispatches touch it while recording into the caller's list.
     arena_state_ = D3D12_RESOURCE_STATE_COMMON;
@@ -413,6 +471,7 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
   }
   bool end_external(std::string* error) override {
     if (!external_ || inside_pass_) return extension_result(fail("native D3D12 end_external: not recording"), error);
+    const bool guard_lifted = guard_lift();   // never leave the caller's list predicated
     need_uav_barrier_ = true; uav_barrier();  // the caller's passes after ours read our results
     ++ext_recorded_;
     bool ok = true;
@@ -424,12 +483,15 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     } else if (marker_map_) {
       ok = fail("native D3D12 end_external: the caller's list has no ID3D12GraphicsCommandList2 (completion marker)");
     }
+    ok = ok && guard_lifted;
+    caller_given_ = false; caller_pred_ = nullptr;   // (given again before the next recording)
     ext_list_ = nullptr; external_ = false;
     arena_state_ = D3D12_RESOURCE_STATE_COMMON; native_binding_dirty_ = true;
     direct_bound_ = false;
     return extension_result(ok, error);
   }
   uint64_t arena_high_water() const override { return high_; }
+  bool hyb_tables() const override { return hyb_; }
   uint64_t arena_capacity() const override { return arena_bytes_; }
   uint64_t external_recorded() const override { return ext_recorded_; }
   uint64_t external_done() const override {
@@ -488,6 +550,10 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     drain_debug_messages();
     uint64_t offset = i->first, size = i->second.reserved;
     in_use_ -= size; used_.erase(i);
+    free_range(offset, size);
+  }
+  // [offset, offset + size) back to the free list, merged with its free neighbours
+  void free_range(uint64_t offset, uint64_t size) {
     auto next = free_.lower_bound(offset);
     if (next != free_.end() && offset + size == next->first) { size += next->second; next = free_.erase(next); }
     if (next != free_.begin()) {
@@ -600,6 +666,69 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     profile_end(stamp); return true;
   }
 
+  bool has_guard() const override { return true; }
+  bool guard_begin(DevPtr word) override {
+    if (inside_pass_) return fail("native D3D12 guard_begin: not from a record_pass callback");
+    if ((word & 7u) || !range(word, 16, "guard word")) return fail("native D3D12 guard_begin: invalid guard word");
+    if (!guard_buffers() || !open_list()) return false;
+    // ours, or a caller's that was not given (set_caller_predicate): lifted for the copy below, never skipped
+    if (guard_on_ || guard_held_ || external_) cl()->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+    guard_held_ = false;
+    // the word as the stream has it here: earlier UAV writes complete (the arena transition), then 8 bytes copied
+    need_uav_barrier_ = true; uav_barrier();
+    transition_arena(D3D12_RESOURCE_STATE_COPY_SOURCE);
+    guard_transition(D3D12_RESOURCE_STATE_COPY_DEST);
+    cl()->CopyBufferRegion(guard_pred_.get(), 0, arena_.get(), word, 8);
+    guard_word_ = word; guard_on_ = true;
+    guard_predicate();
+    transition_arena(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    return true;
+  }
+  bool guard_end() override {
+    if (!guard_on_) return true;
+    guard_on_ = false;
+    if (!open_list()) return false;
+    cl()->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);   // the copy below is never skipped
+    const bool hold = external_ && !guard_ending_;
+    if (!hold) guard_transition(D3D12_RESOURCE_STATE_COMMON);
+    need_uav_barrier_ = true; uav_barrier();
+    transition_arena(D3D12_RESOURCE_STATE_COPY_SOURCE);
+    cl()->CopyBufferRegion(guard_copy_.get(), 0, arena_.get(), guard_word_, 16);
+    // the arena back in COMMON (explicitly): what begin_external assumes for a next frame recorded into the same list
+    transition(arena_.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+    arena_state_ = D3D12_RESOURCE_STATE_COMMON;
+    if (hold) {   // caller-list frame: predicated again until end_external (the executor's output pass)
+      cl()->SetPredication(guard_pred_.get(), 0, D3D12_PREDICATION_OP_NOT_EQUAL_ZERO);
+      guard_held_ = true;
+    }
+    return true;
+  }
+  // end_external: the guard ended (if the runtime did not) and the held predicate lifted
+  bool guard_lift() {
+    guard_ending_ = true;
+    const bool ok = guard_end();
+    guard_ending_ = false;
+    if (guard_held_) {
+      cl()->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+      guard_transition(D3D12_RESOURCE_STATE_COMMON);
+      guard_held_ = false;
+    }
+    // the caller's predicate as it was before our recording (its conditional work after ours stays conditional)
+    if (external_ && caller_given_ && caller_pred_) cl()->SetPredication(caller_pred_, caller_pred_offset_, caller_pred_op_);
+    return ok;
+  }
+  void set_caller_predicate(ID3D12Resource* buffer, uint64_t offset, D3D12_PREDICATION_OP op) override {
+    caller_given_ = true;
+    caller_pred_ = buffer;
+    caller_pred_offset_ = offset;
+    caller_pred_op_ = op;
+  }
+  ID3D12Resource* guard_held_predicate() const override { return guard_held_ ? guard_pred_.get() : nullptr; }
+  bool guard_read(uint32_t w[4]) override {
+    for (int i = 0; i < 4; ++i) w[i] = guard_map_ ? guard_map_[i] : 0u;
+    return guard_map_ != nullptr;
+  }
+
   bool load_module(const std::string& path) override {
     const std::string co = native_basename(path);
     if (!valid_co(co)) return fail("native D3D12: invalid code-object identity " + co);
@@ -626,6 +755,13 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     for (auto i = range.first; i != range.second; ++i)
       if (variant_matches(i->second)) return &i->second;
     return range.first == range.second ? nullptr : &range.first->second;
+  }
+  bool prepare(const std::string& name) override {
+    NativeKernel* port = find_port(name);
+    if (!port) return fail("native D3D12 unsupported kernel: " + name + "; no HIP fallback");
+    NativeKernel& k = *port;
+    if (k.pso || !variant_matches(k) || (k.rs != "buffer" && k.rs != "direct")) return true;
+    return create_pso(k);
   }
   bool launch(const std::string& name, unsigned grid, unsigned block, void** args) override {
     NativeKernel* port = find_port(name);
@@ -1005,6 +1141,29 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     auto i = tagged_cos_.find(k.name.substr(0, slash));
     return i != tagged_cos_.end() && i->second == k.co;
   }
+  // The frame guard's buffers: the predicate (8 bytes used) and its host copy (16 bytes; READBACK, mapped for the
+  // device's life and read without a wait, as the completion marker: a stale copy is an older frame's).
+  bool guard_buffers() {
+    if (guard_pred_ && guard_copy_) return true;
+    if (!buffer(256, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, false, guard_pred_) ||
+        !buffer(256, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, false, guard_copy_))
+      return false;
+    void* mapped = nullptr; D3D12_RANGE read{0, 256};
+    if (!check(guard_copy_->Map(0, &read, &mapped), "Map(frame guard)")) return false;
+    guard_map_ = static_cast<volatile uint32_t*>(mapped);
+    for (int i = 0; i < 4; ++i) guard_map_[i] = 0;
+    guard_state_ = D3D12_RESOURCE_STATE_COMMON;
+    return true;
+  }
+  void guard_transition(D3D12_RESOURCE_STATES target) {
+    if (guard_state_ != target) transition(guard_pred_.get(), guard_state_, target);
+    guard_state_ = target;
+  }
+  // predication of the current list from the predicate buffer: launches and copies are skipped while it is nonzero
+  void guard_predicate() {
+    guard_transition(D3D12_RESOURCE_STATE_PREDICATION);
+    cl()->SetPredication(guard_pred_.get(), 0, D3D12_PREDICATION_OP_NOT_EQUAL_ZERO);
+  }
   // The completion marker of caller-list frames: a CPU-visible buffer that WriteBufferImmediate writes (COPY_DEST).
   bool create_marker() {
     if (marker_) return true;
@@ -1103,6 +1262,7 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     if (!check(list_->Reset(slot.allocator.get(), nullptr), "CommandList::Reset")) return false;
     current_slot_ = next; list_open_ = true; dispatches_ = 0;
     bind_native();
+    if (guard_on_) guard_predicate();
     return true;
   }
   void bind_native(bool direct = false) {
@@ -1135,6 +1295,7 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
       // Buffer resources decay to COMMON at the end of each ExecuteCommandLists call. The next list is separately
       // submitted on this ordered queue and can implicitly promote its first arena access without a transition.
       arena_state_ = D3D12_RESOURCE_STATE_COMMON;
+      guard_state_ = D3D12_RESOURCE_STATE_COMMON;
     }
     const uint64_t value = ++next_fence_;
     if (!check(queue_->Signal(fence_.get(), value), "CommandQueue::Signal")) return false;
@@ -1157,7 +1318,7 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     channel_.p = nullptr; heap_.p = nullptr; root_.p = nullptr; gelu_t5_.p = nullptr; queue_.p = nullptr;
     fence_.p = nullptr;
     for (auto& set : direct_textures_) for (auto& texture : set) texture.p = nullptr;
-    marker_.p = nullptr;
+    marker_.p = nullptr; guard_copy_.p = nullptr; guard_pred_.p = nullptr;
     direct_constants_.p = nullptr; direct_heap_.p = nullptr; direct_root_.p = nullptr;
     info_queue_.p = nullptr; device_.p = nullptr;
     // Keep system DLL references and the completion-event handle too: an outstanding registration can still use it.
@@ -1347,7 +1508,7 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     supplied_queue->AddRef(); queue_.p = supplied_queue;
     adapter_luid_ = device_->GetAdapterLuid();
 
-    dxgi_dll_ = LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    dxgi_dll_ = wgrt::load_system_dll(L"dxgi.dll");  // the system's own (not a proxy of the game folder, rdna4_win.h)
     d3d12_dll_ = LoadLibraryExW(L"d3d12.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!dxgi_dll_ || !d3d12_dll_) return fail("native D3D12: system DXGI/D3D12 unavailable");
     using MakeFactory = HRESULT(WINAPI*)(REFIID, void**);
@@ -1364,7 +1525,11 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     char name[256] = {};
     WideCharToMultiByte(CP_UTF8, 0, details.Description, -1, name, sizeof name - 1, nullptr, nullptr);
     adapter_name_ = name;
-    if (!rdna4_adapter(details.VendorId, (details.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0, adapter_name_))
+    // the adapter's identity from the system's DXGI and the kernel-mode driver, never from a description a layer in the
+    // game process rewrote (rdna4_win.h): a real RX 9000 keeps WrongGPU whatever name it is shown under
+    const wgrt::AdapterIdentity identity = wgrt::read_adapter_identity(adapter_luid_);
+    if (identity.dxgi_known) adapter_name_ = identity.description;
+    if (!wgrt::rdna4_identity(identity))
       return fail("native D3D12 borrowed device requires the supported Radeon RX 9070/9060 adapter");
     D3D12_FEATURE_DATA_SHADER_MODEL sm{D3D_SHADER_MODEL_6_6};
     if (!check(device_->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &sm, sizeof sm), "CheckFeatureSupport(shader model)") ||
@@ -1408,7 +1573,7 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     return ok;
   }
   bool create_device() {
-    dxgi_dll_ = LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    dxgi_dll_ = wgrt::load_system_dll(L"dxgi.dll");  // the system's own (not a proxy of the game folder, rdna4_win.h)
     d3d12_dll_ = LoadLibraryExW(L"d3d12.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!dxgi_dll_ || !d3d12_dll_) return fail("native D3D12: system DXGI/D3D12 unavailable");
     using MakeFactory = HRESULT(WINAPI*)(REFIID, void**);
@@ -1437,7 +1602,7 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
       char name[256] = {};
       WideCharToMultiByte(CP_UTF8, 0, description.Description, -1, name, sizeof name - 1, nullptr, nullptr);
       // The driver-channel WMMA ports are qualified only for the project's RDNA4 target. Do not select an AMD iGPU.
-      if (rdna4_adapter(description.VendorId, (description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0, name)) {
+      if (wgrt::rdna4_identity(wgrt::read_adapter_identity(description.AdapterLuid))) {
         selected = std::move(adapter); adapter_name_ = name; adapter_luid_ = description.AdapterLuid; break;
       }
     }
@@ -1610,7 +1775,12 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     if (!arena_buffer() ||
         !buffer(256, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true, channel_)) return false;
     static_assert(wg::kGeluLutBase == kNativeAlign, "the GELU table is the first arena range after the null header");
-    free_[kNativeAlign + wg::kGeluLutBytes] = arena_bytes_ - kNativeAlign - wg::kGeluLutBytes;
+    static_assert(wg::kHybBase == kNativeAlign + wg::kGeluLutBytes, "the hybrid tables follow the GELU table");
+    static_assert(wg::kHybBase % kNativeAlign == 0, "the hybrid tables start on an allocation boundary");
+    {
+      const uint64_t reserved = wg::kGeluLutBytes;   // the hybrid tables: hyb_reserve(), Model L hybrid contexts only
+      free_[kNativeAlign + reserved] = arena_bytes_ - kNativeAlign - reserved;
+    }
     D3D12_DESCRIPTOR_HEAP_DESC heap{}; heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     heap.NumDescriptors = kGeluT5Slot + 1; heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (!check(device_->CreateDescriptorHeap(&heap, __uuidof(ID3D12DescriptorHeap), heap_.pv()), "CreateDescriptorHeap")) return false;
@@ -1684,6 +1854,20 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
   uint64_t ext_recorded_ = 0;
   NativeCom<ID3D12Resource> marker_;
   volatile uint32_t* marker_map_ = nullptr;
+  // the frame guard (Device::guard_begin): the predicate buffer (DEFAULT, COMMON between recordings) and the host copy
+  NativeCom<ID3D12Resource> guard_pred_, guard_copy_;
+  volatile uint32_t* guard_map_ = nullptr;
+  D3D12_RESOURCE_STATES guard_state_ = D3D12_RESOURCE_STATE_COMMON;
+  bool guard_on_ = false;
+  // a caller-list recording keeps the predicate after guard_end (the executor's output pass after the network, e.g. a
+  // proxy copy into the game's output, is skipped with the frame) until end_external lifts it
+  bool guard_held_ = false, guard_ending_ = false;
+  // the caller's predicate for the next / current caller-list recording (set_caller_predicate)
+  bool caller_given_ = false;
+  ID3D12Resource* caller_pred_ = nullptr;
+  uint64_t caller_pred_offset_ = 0;
+  D3D12_PREDICATION_OP caller_pred_op_ = D3D12_PREDICATION_OP_EQUAL_ZERO;
+  DevPtr guard_word_ = 0;
   NativeCom<ID3D12QueryHeap> query_heap_;
   PFN_D3D12_SERIALIZE_ROOT_SIGNATURE serialize_ = nullptr;
   HMODULE dxgi_dll_ = nullptr, d3d12_dll_ = nullptr;
@@ -1695,6 +1879,7 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
   std::string profile_session_, profile_failure_;
   bool profile_enabled_ = false;
   bool borrowed_ = false, native_binding_dirty_ = false, inside_pass_ = false;
+  bool hyb_ = false;   // hybrid tables reserved and filled (hyb_reserve)
   bool direct_bound_ = false, direct_root_bound_ = false;
   D3D12_COMMAND_LIST_TYPE queue_type_ = D3D12_COMMAND_LIST_TYPE_COMPUTE;
   uint64_t debug_cursor_ = 0, debug_denied_ = 0;

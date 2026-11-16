@@ -33,17 +33,19 @@ void log(const std::string& s) {
   if (g_log) g_log(s);
 }
 
-std::wstring settings_file() { return wgss::data_dir() + L"wronggpu.ini"; }
-
-// rr_mode as it stands (block slot, else WG_RR_MODE, else wronggpu.ini, else the default), as a mode id.
+// rr_mode as it stands (block slot, else WG_RR_MODE, else the game's settings: the state folder over wronggpu.ini, else the
+// default), as a mode id.
 int32_t current_mode() { return resolved_mode().mode; }
 
+// #219: the mode the player picks is saved in the game's state folder (wronggpu-setup\settings.ini, wg_state.h: under the
+// game's state lock, written atomically), never into WrongGPU\wronggpu.ini (the install's defaults, the player's to edit).
+// A write that fails (the launcher's operation holds the state lock, the folder is not writable, ...) is logged in words.
 void choose(int32_t mode) {
   const bool live = g_block.write_panel_slot(WG_OPT_RR_MODE, mode);
-  const bool saved = wgss::ini_set(settings_file(), "wronggpu", "rr_mode", kWgRrModeNames[mode]);
+  const wgstate::SetOutcome o = wgstate::SetSettings(wgss::state_game_dir(), {{"rr_mode", kWgRrModeNames[mode]}}, 1000);
+  const std::string saved = o.ok() ? std::string("saved to wronggpu-setup\\settings.ini") : "not saved: " + o.words();
   log(std::string("menu: rr_mode=") + kWgRrModeNames[mode] + " chosen in OptiScaler's menu (" +
-      (live ? "from the next frame" : "shared settings unavailable: from the next start") +
-      (saved ? ", saved to wronggpu.ini)" : ", wronggpu.ini not written)"));
+      (live ? "from the next frame" : "shared settings unavailable: from the next start") + ", " + saved + ")");
 }
 
 void draw(void*) {
@@ -125,7 +127,7 @@ void start(LogFn log_fn, ActiveFn rr_active, GpuMsFn gpu_ms, PreparingFn prepari
   wgss::Snapshot snap;
   const bool have = g_block.present() && g_block.snapshot(WG_READER_RR_PLUGIN, &snap);
   std::vector<wgss::IniEntry> ini;
-  if (!have) wgss::read_ini(settings_file(), &ini);
+  if (!have) wgss::read_rr_settings(&ini);  // (#219: the state folder over wronggpu.ini)
   const bool allowed = wgss::resolve(kWgOptions[WG_OPT_RR_EXACT_ALLOWED], have ? &snap : nullptr, have ? nullptr : &ini).value != 0;
   g_exact_allowed.store(allowed);
   const int32_t mode = current_mode();
@@ -144,7 +146,7 @@ ModeSetting resolved_mode() {
   wgss::Snapshot snap;
   m.shared = g_block.present() && g_block.snapshot(WG_READER_RR_PLUGIN, &snap);
   std::vector<wgss::IniEntry> ini;
-  if (!m.shared) wgss::read_ini(settings_file(), &ini);
+  if (!m.shared) wgss::read_rr_settings(&ini);  // (#219: the state folder over wronggpu.ini)
   const wgss::Resolved r = wgss::resolve(kWgOptions[WG_OPT_RR_MODE], m.shared ? &snap : nullptr,
                                          m.shared ? nullptr : &ini, "wronggpu.ini");
   m.mode = r.value;

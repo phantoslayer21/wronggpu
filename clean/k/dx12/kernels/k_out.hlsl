@@ -47,6 +47,13 @@
 // @wg-kernel k_out_color_direct co=k_io.co entry=k_out_color block=128 wave=64 args=s312:p4.b12.x24.b52.x12.b24.x4.p4.x8.p4.b8.p2.b56 rs=direct defines=WG_DIRECT_TEXTURES=1
 // @wg-kernel k_out_pixel_c_direct co=k_io.co entry=k_out_pixel_c block=128 wave=64 args=s312:p4.b12.x24.b52.x12.b24.x4.p4.x8.p4.b8.p2.b56 rs=direct defines=KO_COMPACT=1,WG_DIRECT_TEXTURES=1
 // @wg-kernel k_out_pixel_direct co=k_io.co entry=k_out_pixel_c block=128 wave=64 args=s312:p4.b12.x24.b52.x12.b24.x4.p4.x8.p4.b8.p2.b56 rs=direct defines=KO_COMPACT=0,WG_DIRECT_TEXTURES=1
+// The __a2 forms: the opt-in close approximation a2 (runtime option k_approx=a2, never the default): divisions on
+// v_rcp_f32 with one quotient correction, two reciprocals without their Newton step, every opaque barrier kept
+// (hlsl/k_out.hlsli KO_APPROX); not byte-identical to HIP.
+// @wg-kernel k_out_color__a2 co=k_io.co entry=k_out_color block=128 wave=64 args=s312:p4.b12.x24.b52.x12.b24.x4.p4.x8.p4.b8.p2.b56 defines=KO_APPROX=1
+// @wg-kernel k_out_pixel_c__a2 co=k_io.co entry=k_out_pixel_c block=128 wave=64 args=s312:p4.b12.x24.b52.x12.b24.x4.p4.x8.p4.b8.p2.b56 defines=KO_COMPACT=1,KO_APPROX=1
+// @wg-kernel k_out_color_direct__a2 co=k_io.co entry=k_out_color block=128 wave=64 args=s312:p4.b12.x24.b52.x12.b24.x4.p4.x8.p4.b8.p2.b56 rs=direct defines=WG_DIRECT_TEXTURES=1,KO_APPROX=1
+// @wg-kernel k_out_pixel_c_direct__a2 co=k_io.co entry=k_out_pixel_c block=128 wave=64 args=s312:p4.b12.x24.b52.x12.b24.x4.p4.x8.p4.b8.p2.b56 rs=direct defines=KO_COMPACT=1,WG_DIRECT_TEXTURES=1,KO_APPROX=1
 #include "wg_platform.hlsli"
 #if defined(WG_DIRECT_TEXTURES)
 #include "native_direct.hlsli"

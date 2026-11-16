@@ -17,6 +17,7 @@ Each kernel source is compiled with the command given in spec 90, plus a fixed c
 """
 import argparse
 import json
+import hashlib
 import os
 import re
 import shutil
@@ -79,10 +80,16 @@ MODELS_BUILT = {name: True for name in OPTIONAL_MODELS}
 # l_post from clean/l/kernels, l_enc_values = encoder.hip with WG_ENC_VALUES_OUT=1) and its map built in. The D3D12
 # ports of Model L's kernels are built by clean/dx12/build_dx12.py --model-l.
 MODEL_L = False
+# R1: a developer build only (--dev-diagnostics): executor=hip and the frame capture work in the runtime library. Never a
+# release build or a package: the library says which it is (wgBuildMarker), clean/tests/check_no_dev_diagnostics.py checks.
+DEV_DIAGNOSTICS = False
 L_RUNTIME_SOURCES = [os.path.join("..", "l", "runtime", "l_model.cpp"), os.path.join("..", "l", "runtime", "l_pack.cpp")]
 L_MAP_FILE = os.path.join(os.path.dirname(os.path.dirname(HERE)), "data", "preset-L.v1.map.json")
 L_KERNEL_DIR = os.path.join(os.path.dirname(HERE), "l", "kernels")
-L_CODE_OBJECTS = ["l_swin.co", "l_ops.co", "l_post.co", "l_enc_values.co"]
+# (the hybrid default's own objects: l_q7__hyb / l_q7w__hyb, the C32 and shared-stage blocks of HIP's hybrid route, and
+# l_post__lc12, the C1/C2 reconstruction: built in, so that a deployed library alone creates the default)
+L_CODE_OBJECTS = ["l_swin.co", "l_ops.co", "l_post.co", "l_enc_values.co", "l_q7.co", "l_q7w.co", "l_q7__hyb.co",
+                  "l_q7w__hyb.co", "l_post__lc12.co"]
 L_EMBED_FILES = L_CODE_OBJECTS + [os.path.basename(L_MAP_FILE)]
 
 
@@ -100,6 +107,21 @@ def set_model_l(on):
         EMBED_FILES[:] = [n for n in EMBED_FILES if n not in L_EMBED_FILES]
 
 
+CHECK_KERNEL = re.compile(r"(_mut|_mutdump|_dump|_scanmut|_tmo)$|(^|/)l_hyb_probe$|_probe__mut$")
+
+
+def is_check_kernel(entry):
+    """A D3D12 manifest entry of a check kernel (mutant, dump, scan mutant, timeout control, probe): never embedded in a
+    runtime library, whatever build put it into the manifest (a partial --only build of check kernels included)."""
+    return bool(entry.get("probe")) or bool(CHECK_KERNEL.search(entry.get("name", "")))
+
+
+def is_check_object(name):
+    """A check-only code object (a mutant, a probe, a HIP twin of the D3D12 hybrid ports): developer builds only."""
+    n = os.path.basename(name)
+    return "mut" in n or "probe" in n or n in ("l_swin_hyb.co", "swin_hyb.co")
+
+
 def build_device_l(clang, rocm, out_dir, device_libs=True, report=False, arch=None):
     """Model L's code objects into out_dir (as clean/l/runner/l_c32_check.py compile_kernels builds them), for `arch`
     (default ARCH)."""
@@ -108,9 +130,37 @@ def build_device_l(clang, rocm, out_dir, device_libs=True, report=False, arch=No
     ARCH = arch or ARCH
     try:
         os.makedirs(out_dir, exist_ok=True)
-        for name in ("l_swin", "l_ops", "l_post"):
+        for name in ("l_swin", "l_ops", "l_post", "l_q7", "l_q7w"):   # l_q7*: the FP16-form blocks (default form)
             run(device_command(clang, rocm, os.path.join(L_KERNEL_DIR, name + ".hip"), os.path.join(out_dir, name + ".co"),
                                device_libs=device_libs, report=report, extra=["-I", KERNEL_DIR]))
+        # Q11 part C evaluation code objects. Model M's HYBRID form (runtime WG_M_FORM=hybrid) and its check mutant:
+        # l_q7w with float32 chains (l_q7w.hip Q7_HYB). Model M's ORIGINAL reconstruction (Q11 part C, runtime WG_M_POST=orig): l_post.hip with M's steps D1-D3, the
+        # machine-form exponent C1 and the Catmull-Rom weights C2; the C1/C2 probe and its mutant
+        # (clean/l/runner/l_post_c12_check.py). Not embedded, read from the build folder.
+        evals = (("l_q7w__hyb", "l_q7w.hip", {"Q7_HYB": 1}),
+                 ("l_q7w__hybmut", "l_q7w.hip", {"Q7_HYB": 1, "Q7_HYB_MUTANT": 1}),
+                 ("l_post__morig", "l_post.hip", {"WG_LP_M": 1, "WG_LP_C1": 1, "WG_CR_C2": 1}),
+                 ("l_post_c12_probe", "l_post_c12_probe.hip", {"WG_LP_C1": 1, "WG_CR_C2": 1}),
+                 ("l_post_c12_probe__mut", "l_post_c12_probe.hip", {"WG_LP_C1": 0, "WG_CR_C2": 2}),
+                 # Model L's evaluation forms: C32 blocks with float32 chains (runtime WG_L_FORM=hybrid) + mutant;
+                 # L's own reconstruction with C1 (machine form) and C2 (runtime WG_L_POST=c12)
+                 ("l_q7__hyb", "l_q7.hip", {"Q7_HYB": 1}),
+                 ("l_q7__hybmut", "l_q7.hip", {"Q7_HYB": 1, "Q7_HYB_MUTANT": 1}),
+                 ("l_post__lc12", "l_post.hip", {"WG_LP_C1": 1, "WG_CR_C2": 1}),
+                 # the fast hybrid form's HIP twins (the D3D12 *_hyb ports' byte twins; runtime WG_L_FORM=hybrid_twin,
+                 # the network-level byte leg): Model L's C32 blocks and the shared stages' blocks / merges / expands
+                 ("l_swin_hyb", "l_swin_hyb.hip", {}),
+                 ("swin_hyb", os.path.join("..", "..", "kernels", "swin_hyb.hip"), {}))
+        # mutants, probes and the HIP twins are check objects: developer builds only (a release build neither contains
+        # nor can select them; clean/tests/check_no_dev_diagnostics.py PAYLOAD_CHECK_NAMES)
+        if not DEV_DIAGNOSTICS:
+            evals = tuple(e for e in evals if not is_check_object(e[0] + ".co"))
+        for tag, src, defs in evals:
+            run(device_command(clang, rocm, os.path.join(L_KERNEL_DIR, src), os.path.join(out_dir, tag + ".co"),
+                               device_libs=device_libs, report=report, extra=["-I", KERNEL_DIR], defines=defs))
+            # the HIP loader reads "<arch>.<name>" (or "<arch>/<name>"); an extra arch builds into out_dir = <arch>/
+            if os.path.basename(os.path.normpath(out_dir)) != ARCH:
+                shutil.copyfile(os.path.join(out_dir, tag + ".co"), os.path.join(out_dir, f"{ARCH}.{tag}.co"))
         run(device_command(clang, rocm, os.path.join(KERNEL_DIR, "encoder.hip"), os.path.join(out_dir, "l_enc_values.co"),
                            device_libs=device_libs, report=report, defines={"WG_ENC_VALUES_OUT": 1}))
     finally:
@@ -271,11 +321,16 @@ def write_embedded(out_dir):
     if os.path.isfile(man):
         src["manifest.json"] = man
         with open(man) as f:
-            for k in json.load(f)["kernels"]:
-                p = os.path.join(out_dir, "dx12", k["file"])
-                if not os.path.isfile(p):
-                    raise SystemExit(f"missing D3D12 kernel file {p} (clean/dx12/build_dx12.py)")
-                src[k["file"]] = p
+            entries = json.load(f)["kernels"]
+        bad = [k.get("name") for k in entries if is_check_kernel(k)]
+        if bad:
+            raise SystemExit(f"{man} lists check kernels ({', '.join(bad[:6])}{' ...' if len(bad) > 6 else ''}): a runtime "
+                             "library never embeds them; build the check kernels into a separate folder")
+        for k in entries:
+            p = os.path.join(out_dir, "dx12", k["file"])
+            if not os.path.isfile(p):
+                raise SystemExit(f"missing D3D12 kernel file {p} (clean/dx12/build_dx12.py)")
+            src[k["file"]] = p
     files = list(src)
     lines = ["// Generated by clean/runner/build.py: files built into the runtime library (clean/runtime/embedded.h).",
              "#include <cstddef>", "namespace wg_embedded {",
@@ -326,6 +381,8 @@ def runtime_command(cxx, out, embedded=None):
             cmd += ["-D" + m["define"]]
     if MODEL_L:
         cmd += ["-DWG_MODEL_L"]
+    if DEV_DIAGNOSTICS:
+        cmd += ["-DWG_DEV_DIAGNOSTICS=1"]
     cmd += srcs
     if RR_OBJECTS and sys.platform == "win32":
         # release 0.6.0 (owner 2026-11-02: one runtime DLL, "just like before"): the RR runtime (clean/rr_f/runtime, built by
@@ -345,12 +402,105 @@ def runtime_command(cxx, out, embedded=None):
 RR_OBJECTS = None  # --with-rr: the RR runtime's object files (clean/rr_f/runtime/tools/build.py <out>/obj)
 
 
+def dx12_manifest_problems(out_dir, doc):
+    """Why the D3D12 kernel manifest `doc` (<out_dir>/dx12/manifest.json) must not be built into a runtime library: a
+    test-only manifest (clean/dx12/build_dx12.py --define / --test-only / the self-check bypass), an entry built past a
+    stale self-check reference, with extra defines, without provenance (a build older than the provenance fields), not
+    declared in this tree's sources, or whose source digest differs from this tree's sources (a stale or foreign DXIL).
+    Empty when every entry is a normal build of this tree."""
+    from clean.dx12 import build_dx12 as BD
+    out = []
+    if doc.get("test_only") is not False:
+        out.append("the manifest is test-only or older than the test-only flag (a build with --define, --test-only or "
+                   "WG_DX12_SMX_DIGEST=0, or before provenance was recorded)")
+    decls = {}
+    for src, k_source in BD.source_files(model_k=True):
+        for d in BD.kernel_decls(src):
+            decls[(d["name"], d["co"])] = (src, d, k_source)
+    gen, cache = os.path.join(out_dir, "dx12", "gen"), {}
+    for e in doc.get("kernels", []):
+        n = e.get("name")
+        hit = decls.get((n, e.get("co", "")))
+        if e.get("smx_bypass"):
+            out.append(f"{n}: built past a stale softmax self-check reference (WG_DX12_SMX_DIGEST=0)")
+        elif e.get("defines"):
+            out.append(f"{n}: built with extra defines {e['defines']}")
+        elif "source_digest" not in e or "defines" not in e:
+            out.append(f"{n}: no provenance (source_digest / defines)")
+        elif hit is None:
+            out.append(f"{n}: not declared in this tree's sources")
+        elif BD.source_digest(hit[0], hit[1], {}, gen if hit[2] else None, cache) != e["source_digest"]:
+            out.append(f"{n}: built from other sources than this tree's")
+    return out
+
+
+def check_dx12_kernels(out_dir):
+    """Before a runtime library embeds <out_dir>/dx12: refuses any problem of dx12_manifest_problems (failing closed).
+    Returns the record for the build manifest ("dx12_kernels"): None without a D3D12 manifest, else its SHA-256, its
+    entry count and provenance "checked"."""
+    man = os.path.join(out_dir, "dx12", "manifest.json")
+    if not os.path.isfile(man):
+        return None
+    with open(man, "rb") as f:
+        raw = f.read()
+    doc = json.loads(raw.decode("utf-8"))
+    bad = dx12_manifest_problems(out_dir, doc)
+    if bad:
+        raise SystemExit(f"{man}: a runtime library embeds only a normal D3D12 kernel build of this tree; rebuild them "
+                         "(clean/dx12/build_dx12.py, without --define / --test-only, into this folder) or build test "
+                         "kernels into a folder of their own:\n  " + "\n  ".join(bad[:12]) +
+                         (f"\n  ... ({len(bad)} problems)" if len(bad) > 12 else ""))
+    return {"manifest_sha256": hashlib.sha256(raw).hexdigest(), "entries": len(doc.get("kernels", [])),
+            "provenance": "checked"}
+
+
 def build_runtime(cxx, out_dir, embed=True):
+    # the D3D12 kernels a library embeds: a normal build of this tree only (never a test-only or stale one)
+    dx12 = check_dx12_kernels(out_dir) if embed else None
+    if MODELS_BUILT.get("K"):   # model K's softmax self-check reference must belong to these sources (no bypass here)
+        root = os.path.dirname(os.path.dirname(HERE))
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        from clean.k.dx12 import smx_selfcheck_digest as D
+        why = D.stale()
+        if why:
+            raise SystemExit("softmax self-check reference: " + why)
     for m in [MAP_FILE] + [o["map"] for name, o in OPTIONAL_MODELS.items() if MODELS_BUILT[name]] + \
             ([L_MAP_FILE] if MODEL_L else []):
         shutil.copyfile(m, os.path.join(out_dir, os.path.basename(m)))
     embedded = write_embedded(out_dir) if embed else None
-    run(runtime_command(cxx, os.path.join(out_dir, runtime_library_name()), embedded))
+    cmd = runtime_command(cxx, os.path.join(out_dir, runtime_library_name()), embedded)
+    run(cmd)
+    if os.path.isfile(os.path.join(out_dir, runtime_library_name())):  # (a build that failed raised in run)
+        write_build_manifest(out_dir, cmd, embedded is not None, dx12)
+
+
+def write_build_manifest(out_dir, cmd, embedded, dx12=None):
+    """<runtime library>.build.json next to the library: what this build is (R1). The payload packager accepts a runtime
+    library only when its SHA-256 matches a manifest that says dev_diagnostics = false (make_payload.py, failing closed);
+    any later change of the library (stripping, signing, a copy from another build) breaks the match. dx12_kernels: the
+    embedded D3D12 kernels' check (check_dx12_kernels), None when the library embeds none; the packager refuses a manifest
+    without it."""
+    dll = os.path.join(out_dir, runtime_library_name())
+    with open(dll, "rb") as f:
+        data = f.read()
+    manifest = {
+        "format": 1,
+        "file": os.path.basename(dll),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "size": len(data),
+        "dev_diagnostics": bool(DEV_DIAGNOSTICS),
+        "model_l": bool(MODEL_L),
+        "models_left_out": sorted(n for n in OPTIONAL_MODELS if not MODELS_BUILT[n]),
+        "embedded_files": bool(embedded),
+        "defines": sorted(a for a in cmd if a.startswith("-D")),
+        "dx12_kernels": dx12 if embedded else None,
+    }
+    path = os.path.splitext(dll)[0] + ".build.json"
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(manifest, f, indent=2, sort_keys=True)
+        f.write("\n")
+    print(f"build manifest: {path} (dev_diagnostics={str(manifest['dev_diagnostics']).lower()}, sha256 {manifest['sha256'][:16]}...)", flush=True)
 
 
 def run(cmd):
@@ -487,7 +637,12 @@ def main(argv=None):
                     help="Model L in the runtime library (#89; off by default): its runtime sources with WG_MODEL_L, its "
                          "code objects and its map built in (with --runtime-only and --rocm its code objects are built "
                          "first, for every target); its D3D12 kernels come from clean/dx12/build_dx12.py --model-l")
+    ap.add_argument("--dev-diagnostics", action="store_true",
+                    help="developer build: executor=hip and the frame capture work in the runtime library (WG_DEV_DIAGNOSTICS; "
+                         "off in every release build and package, R1)")
     args = ap.parse_args(argv)
+    global DEV_DIAGNOSTICS
+    DEV_DIAGNOSTICS = args.dev_diagnostics
     for name in OPTIONAL_MODELS:
         set_model(name, not getattr(args, "no_model_" + name.lower()))
     set_model_l(args.model_l)

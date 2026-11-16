@@ -55,7 +55,7 @@ namespace {
 TS Ts(float size, int weight, Col c, FontFace f = F_TEXT) { TS s; s.size = size; s.weight = weight; s.color = c; s.face = f; return s; }
 TS Wrap(float size, Col c, float lineH) { TS s; s.size = size; s.color = c; s.wrap = true; s.lineH = lineH; return s; }
 
-const char* const kExec[] = {"auto", "dx12", "hip"};
+const char* const kExec[] = {"auto", "dx12"};
 const char* const kFilter[] = {"default", "original", "analytic", "quality5", "quality9"};
 // one name per choice wherever it shows (the row, its menu, the outside-change note), and what it does in a line: the
 // menu item's second line and help text, and the row's sentence for the chosen one
@@ -465,7 +465,7 @@ FindingWords WordsOf(const Finding& f) {
             if (f.what == L"WrongGPU RR (from another package)") w.sub = L"It stays. WrongGPU never moves its own Ray Reconstruction plugin aside.";
             break;
         case Tool::Cet: case Tool::Red4ext: case Tool::Ue4ss: w.sub = L"It stays. WrongGPU doesn't touch it."; break;
-        case Tool::HipRuntime: w.name = L"Another HIP tool"; w.sub = L"Keep Runs on at Auto or Direct3D 12 so the two don't clash."; break;
+        case Tool::HipRuntime: w.name = L"Another HIP tool"; w.sub = L"It stays. WrongGPU runs on Direct3D\u00a012 in a game, not on HIP, so the two don't clash."; break;
         case Tool::NrOnAmd: w.name = L"Another upscaler mod"; w.sub = L"WrongGPU doesn't install next to it and doesn't touch it."; break;
         case Tool::VendorDll:
             if (f.what.rfind(L"A loose ", 0) == 0) { w.name = L"Another tool's file"; w.sub = L"WrongGPU leaves it alone and never writes over it."; }
@@ -609,8 +609,9 @@ std::vector<MenuItem> FilterMenu() {
     std::vector<MenuItem> items;
     const string cur = v.edit.get("output_filter");
     for (int i = 0; i < 5; ++i) {
-        MenuItem it{kFilterNames[i], M_FILTER0 + i, true, false, false, cur == kFilter[i]};
-        it.help = kFilterHelp[i];
+        const bool hipOnly = NeedsHipRuntime("output_filter", kFilter[i]);  // R1: greyed, with the words
+        MenuItem it{kFilterNames[i], M_FILTER0 + i, !hipOnly, false, false, cur == kFilter[i]};
+        it.help = hipOnly ? wstring(NotOnDx12Text()) : wstring(kFilterHelp[i]);
         items.push_back(it);
     }
     return items;
@@ -1217,7 +1218,7 @@ void OpenGameLog(const GameEntry& e) { OpenLater(e, true); }
 // The segmented controls of the page's lists share one segment width (the widest label any of them has), so their left
 // edges line up down a list. Runs on is the one exception: it names its choice the way the rest of the page does
 // ("Direct3D 12": its own sentence, Last run, the header's line), so its segments take that name's width.
-float PageSegW(Gfx& gx) { return SegmentW(gx, {L"Default", L"Auto", L"On", L"Off", L"HIP", L"Scale", L"Original"}); }
+float PageSegW(Gfx& gx) { return SegmentW(gx, {L"Default", L"Auto", L"On", L"Off", L"Scale", L"Original"}); }
 
 // "Turn it on in the game" (UI review #1): after an install, until the first run where Model M worked, what the player does
 // in the game for WrongGPU to run: choose the upscaler there (DLSS on OptiScaler's route, FSR on the direct one; TAA or
@@ -1351,23 +1352,26 @@ static float UpscalerSection(Gfx& gx, float x, float y, float w) {
             yy += ActRow(gx, x, yy, w, false, true, ID_G_ADVMORE, L"Advanced settings (4)", ic::down, true, R_LINK);
             return yy - top;
         }
-        const std::vector<wstring> ex{L"Auto", L"Direct3D\u00a012", L"HIP"};
+        // R1: every model runs on Direct3D 12 in a game; HIP is not a game setting (a profile that held it lost it when it was read)
+        const std::vector<wstring> ex{L"Auto", L"Direct3D\u00a012"};
         const int exi = Index(kExec, v.edit.get("executor"));
-        yy += SRow(gx, x, yy, w, false, L"Runs on", L"Auto uses Direct3D\u00a012 on RX\u00a09000-series cards. HIP is the other way Model\u00a0M can run.", SegmentedW(gx, ex, segW), 36,
+        yy += SRow(gx, x, yy, w, false, L"Runs on", L"Auto uses Direct3D\u00a012 on RX\u00a09000-series cards.",
+                   SegmentedW(gx, ex, segW), 36,
                    [&](const Rc& r) { Segmented(gx, ID_G_EXEC0, r.r(), r.y, ex, exi, sub, L"Runs on", 28, {}, true, segW); }, !sub);
         const int fi = Index(kFilter, v.edit.get("output_filter"));
         float fw = 170;  // .select min-width 170, wider when a name needs it
         for (auto* n : kFilterNames) fw = std::max(fw, std::ceil(gx.TextW(n, Ts(13, 600, pal.text)) + 12 + 30));
         // the sentence says what the chosen filter does (each choice's line is in its menu too)
-        yy += SRow(gx, x, yy, w, false, L"Output filter", kFilterHelp[fi], fw, 30,
+        yy += SRow(gx, x, yy, w, false, L"Output filter",
+                   NeedsHipRuntime("output_filter", v.edit.get("output_filter")) ? NotOnDx12Text() : kFilterHelp[fi], fw, 30,
                    [&](const Rc& r) { Select(gx, ID_G_FILTER, r, kFilterNames[fi], sub, L"Output filter"); }, !sub);
         const std::vector<wstring> pre{L"Scale", L"Original"};
         const int pi = Index(kPre, v.edit.get("pre_exposure"));
         yy += SRow(gx, x, yy, w, false, L"Pre-exposure", L"Scale keeps hair and fine detail steady. Original uses the game's brightness value as it is; in some games that makes hair and fine detail flicker.",
                    SegmentedW(gx, pre, segW), 36, [&](const Rc& r) { Segmented(gx, ID_G_PRE0, r.r(), r.y, pre, pi, sub, L"Pre-exposure", 28, {}, true, segW); }, !sub);
         const bool sp = v.edit.get("sparkle_guard") != "off";
-        yy += SRow(gx, x, yy, w, false, L"Sparkle guard", L"Calms single-pixel flashes on foliage. Uses HIP, even when Model M runs on Direct3D\u00a012.", kSwitchW, kSwitchH,
-                   [&](const Rc& r) { Switch(gx, ID_G_SPARKLE, r, sp, sub, L"Sparkle guard"); }, !sub, L"+0.11 ms");
+        yy += SRow(gx, x, yy, w, false, L"Sparkle guard", NotOnDx12Text(), kSwitchW, kSwitchH,
+                   [&](const Rc& r) { Switch(gx, ID_G_SPARKLE, r, sp, false, L"Sparkle guard"); }, true);  // R1: no D3D12 port yet: off
         if (!outsideAdv) yy += ActRow(gx, x, yy, w, false, true, ID_G_ADVMORE, L"Fewer settings", ic::up, true, R_LINK);
         return yy - top;
     });
@@ -2095,7 +2099,7 @@ static float FolderSection(Gfx& gx, float x, float y, float w) {
             if (notOffered && f.decision == Decision::Refuse && fw.name.size() > 2 && staysOut.find(fw.name) != wstring::npos) continue;
             KvOpt fo;
             fo.sub = notOffered && f.decision == Decision::Refuse ? wstring() : fw.sub;  // the reason is the section above's
-            // a warning about how WrongGPU and the tool would meet (a HIP tool's "Keep Runs on at Auto..."): moot in a game
+            // a warning about how WrongGPU and the tool would meet (a HIP tool's): moot in a game
             // WrongGPU stays out of, where the page has no setting it could name
             const bool moot = notOffered && f.decision == Decision::Warn;
             if (moot) fo.sub = L"Nothing to do: WrongGPU stays out of this game.";

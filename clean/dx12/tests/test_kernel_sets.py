@@ -48,7 +48,10 @@ class TestKernelSets(unittest.TestCase):
         self.assertTrue(m <= full)
         extra = full - m
         self.assertTrue(extra)
-        self.assertFalse([k for k in extra if not (k[1].startswith("l_") or k[0].startswith("l_") or k[0] in B.MODEL_L_ONLY)])
+        # Model L's kernels: its code objects, the l_* direct-route kernels, MODEL_L_ONLY, and the hybrid twins (*_hyb:
+        # Model L's route only; build_dx12.py is_model_l)
+        self.assertFalse([k for k in extra if not (k[1].startswith("l_") or k[0].startswith("l_") or k[0] in B.MODEL_L_ONLY
+                                                   or k[0].endswith("_hyb"))])
 
 
     def test_model_k_adds_only_model_k_kernels(self):

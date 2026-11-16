@@ -540,6 +540,17 @@ void Converter::record_inputs_pass(ID3D12GraphicsCommandList* list, const WgFram
 }
 
 void Converter::record_output(ID3D12GraphicsCommandList* list, const WgFrame& f, const BufferRange& range) {
+  output_pass(list, f, range, static_cast<ID3D12Resource*>(f.output.resource), (DXGI_FORMAT)f.output.format,
+              (D3D12_RESOURCE_STATES)f.output.state);
+}
+
+void Converter::record_fallback_into(ID3D12GraphicsCommandList* list, const WgFrame& f, ID3D12Resource* dst,
+                                     DXGI_FORMAT fmt) {
+  output_pass(list, f, BufferRange(), dst, fmt, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+}
+
+void Converter::output_pass(ID3D12GraphicsCommandList* list, const WgFrame& f, const BufferRange& range,
+                            ID3D12Resource* out, DXGI_FORMAT ofmt, D3D12_RESOURCE_STATES ostate) {
   ID3D12Resource* const result = range.resource;
   const UINT set = next_set();
   D3D12_CPU_DESCRIPTOR_HANDLE cpu = heap_->GetCPUDescriptorHandleForHeapStart();
@@ -547,8 +558,6 @@ void Converter::record_output(ID3D12GraphicsCommandList* list, const WgFrame& f,
   D3D12_CPU_DESCRIPTOR_HANDLE t0 = cpu, u0 = cpu, u1 = cpu;
   u0.ptr += (SIZE_T)4 * increment_;
   u1.ptr += (SIZE_T)5 * increment_;
-  ID3D12Resource* out = static_cast<ID3D12Resource*>(f.output.resource);
-  const DXGI_FORMAT ofmt = (DXGI_FORMAT)f.output.format;
   // bug hunt D: never an unordered access view of an output without unordered access (the backend refuses such an output
   // unless the RGBA16F copy route writes it; a fallback frame of that route leaves the output as it is)
   if (!out || !(out->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) return;
@@ -582,7 +591,7 @@ void Converter::record_output(ID3D12GraphicsCommandList* list, const WgFrame& f,
   c.srgb = is_srgb(ofmt) ? 1 : 0;
   c.flags = model_k_ ? kOutputAlpha : 0;
   Barriers bar;
-  bar.need(out, f.output.state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  bar.need(out, ostate, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   if (!result)
     bar.need(static_cast<ID3D12Resource*>(f.color.resource), f.color.state,
              D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);

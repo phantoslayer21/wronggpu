@@ -24,7 +24,9 @@ FP16 range, special values in the colour, depth, motion and head; input = the ex
 low-resolution motion, inverted depth, reset), odd and tiny base grids, exposure scalars from a device buffer, special values
 in the colour, depth, motion and histories (the same three levels as the stage families); wide = the wide network stages (k_block_wide.co: k_stagew<NG>_e3 .. _d3), as narrow; narrow = the narrow network stages (k_block.co: k_stage_e2 .. k_stage2_d0_hidden; the stage runner's
 launch plans, clean/k/dx12/k_plan_bridge.py), on random stage weights and inputs with special values (NaN, infinity,
-+-65504, zero, -0, subnormal) in every other case; expo = k_expo_scalars against k_io.co (HIP); warm = k_warm (D3D12 only, no HIP kernel: it is checked
++-65504, zero, -0, subnormal) in every other case; expo = k_expo_scalars against k_io.co (HIP); mixprobe = k_mix_probe / k_mix_probe__rodd (D3D12 only: the
+softmax weight rounding of hlsl/k_smx.hlsli on k_mix_cases.py's FP16-midpoint records, against the exact single
+rounding; README.md); warm = k_warm (D3D12 only, no HIP kernel: it is checked
 against its own definition, the dummy word is written exactly when the key equals a lane's loaded value).
 One known limit, shared with Model M's ports: D3D12 flushes FP32 denormals (inputs and results) to zero, HIP keeps them.
 k_expo_scalars only meets one with a pre-exposure above about 8.5e37 (kappa = RN(1 / pi) * E), so the inputs here keep
@@ -53,6 +55,7 @@ CONTROL = "scale_rgb"   # Model M, frame.co
 NARROW_KERNELS = ["k_stage_e2", "k_stage_e0", "k_stage_e1", "k_stage_d2", "k_stage_d1", "k_stage2_e0", "k_stage2_e1",
                   "k_stage2_d1", "k_stage2_d0_hp", "k_stage2_d0_hidden"]
 FAMILY_KERNELS = {"expo": (["k_io.co"], ["k_expo_scalars"]), "warm": ([], ["k_warm"]),
+                  "mixprobe": ([], ["k_mix_probe", "k_mix_probe__rodd"]),
                   "narrow": (["k_block.co"], NARROW_KERNELS),
                   "input": (["k_io_exact.co"], ["kx/k_in_tiled"]),
                   "legacy": (["k_io_exact.co"], ["kx/k_in_color", "kx/k_in_reset", "kx/k_in_base"]),
@@ -299,6 +302,54 @@ def run_warm(build, rocm, seeds, cdir, hip):
                       f"step k_warm 1 256 S:{name}.par:{patch}", f"save dummy {name}.out", ""]
             items.append({"case": name, "key": key, "hit": bool(hit), "acc": acc})
     return items, lines
+
+
+# ---- family mixprobe: the softmax weight rounding (hlsl/k_smx.hlsli) -----------------------------------------------
+
+MIXPROBE_LANES = 256
+
+
+def run_mixprobe(build, rocm, seeds, cdir, hip):
+    """D3D12 only: k_mix_probe (the mix form of every softmax port) and k_mix_probe__rodd (the __rodd ports' form) on
+    the adversarial records of k_mix_cases.py, checked against the exact single rounding; the records must also tell a
+    second rounding through FP32 apart (else they could not catch the residual-dropped control)."""
+    from clean.k.dx12 import k_mix_cases
+    lines, items = [], []
+    for si, seed in enumerate(seeds):
+        rec, want, kinds = k_mix_cases.cases(seed + 2000, MIXPROBE_LANES)
+        dbl = k_mix_cases.double_rounding_bits(rec)
+        name = f"s{si}_mixprobe"
+        write(os.path.join(cdir, name + ".in"), rec.tobytes())
+        for kern in FAMILY_KERNELS["mixprobe"][1]:
+            tag = f"{name}_{kern}"
+            nbytes = MIXPROBE_LANES * 16
+            lines += [f"chain {tag}", "module k_block.co", f"buf in {rec.nbytes} {name}.in 0",
+                      f"buf out {nbytes + SLACK} - {D3D12_SENTINEL}",
+                      f"step {kern} {MIXPROBE_LANES // 32} 32 @in @out", f"save out {tag}.out", ""]
+            items.append({"case": tag, "kernel": kern, "want": want, "double": dbl, "kinds": kinds})
+    return items, lines
+
+
+def check_mixprobe(items, read):
+    out = {}
+    good = True
+    for it in items:
+        got = read(it["case"] + ".out")
+        n = MIXPROBE_LANES * 16
+        if len(got) < n:
+            r = {"written": False}
+            good = False
+        else:
+            g = np.frombuffer(got[:n], np.uint16).reshape(MIXPROBE_LANES, 8)
+            bad = g != it["want"]
+            kinds = np.array(it["kinds"])
+            r = {"elements": int(g.size), "differ": int(bad.sum()),
+                 "differ_by_kind": {k: int((bad & (kinds == k)).sum()) for k in sorted(set(kinds.ravel()))},
+                 "double_rounding_would_differ": int((it["double"] != it["want"]).sum()),
+                 "slack_ok": got[n:] == bytes([D3D12_SENTINEL]) * (len(got) - n)}
+            good = good and r["differ"] == 0 and r["slack_ok"] and r["double_rounding_would_differ"] > 0
+        out[it["case"]] = r
+    return {"cases": len(items), "results": out}, good
 
 
 # ---- family narrow: the narrow network stages (k_block.co) ---------------------------------------------------------
@@ -909,6 +960,9 @@ def run(build, rocm, families, seeds, json_out):
     if "warm" in families:
         state["warm"] = run_warm(build, rocm, seeds, cdir, hip)
         lines += state["warm"][1]
+    if "mixprobe" in families:
+        state["mixprobe"] = run_mixprobe(build, rocm, seeds, cdir, hip)
+        lines += state["mixprobe"][1]
     if "narrow" in families:
         state["narrow"] = run_stages(NARROW, "k_block.co", "nar", build, rocm, seeds, cdir, hip)
         lines += state["narrow"][1]
@@ -982,6 +1036,9 @@ def run(build, rocm, families, seeds, json_out):
                 fails.append(it["case"])
         res["results"]["warm"] = {"cases": len(state["warm"][0]), "as_defined": good, "failures": fails[:5]}
         ok = ok and good == len(state["warm"][0]) and good > 0
+    if "mixprobe" in state:
+        res["results"]["mixprobe"], good = check_mixprobe(state["mixprobe"][0], read)
+        ok = ok and good
     for fam in ("narrow", "wide", "input", "legacy", "output", "direct", "directleg"):
         if fam in state:
             res["results"][fam], good = check_narrow(state[fam], read)

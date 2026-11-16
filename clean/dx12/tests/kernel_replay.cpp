@@ -666,6 +666,13 @@ int main(int argc, char** argv) {
       return 2;
     }
   }
+  // The hybrid kernels (a name with a _hyb part) read the hybrid tables: reserve them as the runtime does for a Model L
+  // hybrid context (Device::hyb_reserve, before any allocation), by kernel name, never by an environment variable
+  bool hyb = false;
+  for (auto& c : cases) hyb = hyb || c.kernel.find("_hyb") != std::string::npos;
+  for (auto& c : chains)
+    for (auto& st : c.steps) hyb = hyb || st.kernel.find("_hyb") != std::string::npos;
+  if (hyb && !d->hyb_reserve()) { std::printf("hybrid tables: %s\n", d->err().c_str()); return 1; }
   int fails = 0;
   for (auto& c : cases) fails += run_case(d.get(), c, base);
   for (auto& c : chains) fails += run_chain(d.get(), c, base);

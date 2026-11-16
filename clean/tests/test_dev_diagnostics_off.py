@@ -1,0 +1,517 @@
+# SPDX-License-Identifier: MIT
+"""R1: WG_DEV_DIAGNOSTICS (executor=hip and the frame capture in a game) is off in every release build and package.
+
+No GPU, no compiler needed: the build script's runtime command, the CI and release files, and the library check are read.
+Run: python -m unittest clean.tests.test_dev_diagnostics_off
+"""
+import hashlib
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest import mock
+import zipfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(HERE))
+sys.path.insert(0, HERE)
+import check_no_dev_diagnostics as chk  # noqa: E402
+
+
+def read(*p):
+    with open(os.path.join(ROOT, *p), encoding="utf-8", errors="replace") as f:
+        return f.read()
+
+
+def load_build():
+    sys.path.insert(0, ROOT)
+    spec = importlib.util.spec_from_file_location("wg_build_for_test", os.path.join(ROOT, "clean", "runner", "build.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class DevDiagnosticsOff(unittest.TestCase):
+    def test_the_runtime_command_has_the_define_only_on_request(self):
+        b = load_build()
+        self.assertFalse(b.DEV_DIAGNOSTICS)
+        self.assertFalse([a for a in b.runtime_command("clang++", "out.dll") if "WG_DEV_DIAGNOSTICS" in a])
+        b.DEV_DIAGNOSTICS = True
+        try:
+            self.assertTrue([a for a in b.runtime_command("clang++", "out.dll") if a.startswith("-DWG_DEV_DIAGNOSTICS")])
+        finally:
+            b.DEV_DIAGNOSTICS = False
+
+    def test_no_release_path_turns_it_on(self):
+        # the define and the build flag appear in the source of the build script and the backend only; no CI workflow,
+        # CMake file, release script or packaging file asks for it
+        offenders = []
+        for base in (".github", os.path.join("tools", "release"), os.path.join("clean", "installer")):
+            full = os.path.join(ROOT, base)
+            if not os.path.isdir(full):
+                continue
+            for dp, _, names in os.walk(full):
+                for n in names:
+                    # (build and packaging scripts and configuration; the packager and the checks only NAME the flag to refuse it)
+                    if n.endswith((".yml", ".yaml", ".txt", ".cmake", ".sh", ".bat", ".ps1", ".json")) or (
+                            n.endswith(".py") and "release" in dp and n != "check_package_diagnostics.py"):
+                        p = os.path.join(dp, n)
+                        with open(p, encoding="utf-8", errors="replace") as f:
+                            t = f.read()
+                        if "WG_DEV_DIAGNOSTICS" in t or "--dev-diagnostics" in t:
+                            offenders.append(os.path.relpath(p, ROOT))
+        self.assertEqual(offenders, [], "a CI, release or installer file turns the developer diagnostics on")
+
+    def test_the_library_marker_and_its_check(self):
+        backend = read("clean", "runtime", "interop", "backend.cpp")
+        self.assertIn('"wg-build dev-diagnostics=0"', backend)
+        self.assertIn('"wg-build dev-diagnostics=1"', backend)
+        self.assertIn("#ifdef WG_DEV_DIAGNOSTICS", backend)
+        ok, _ = chk.check_bytes(b"MZ\x00..wg-build dev-diagnostics=0\x00..")
+        self.assertTrue(ok)
+        for bad in (b"wg-build dev-diagnostics=1", b"no marker here", b"wg-build dev-diagnostics=0 wg-build dev-diagnostics=1"):
+            self.assertFalse(chk.check_bytes(bad)[0], bad)
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(chk.main([d]), 1, "a folder with no library must not pass")
+            good = os.path.join(d, "wronggpu_runtime.dll")
+            with open(good, "wb") as f:
+                f.write(b"x" * 100 + b"wg-build dev-diagnostics=0" + b"y")
+            self.assertEqual(chk.main([d]), 0)
+            with open(os.path.join(d, "wronggpu_runtime_dev.dll"), "wb") as f:
+                f.write(b"wg-build dev-diagnostics=1")
+            self.assertEqual(chk.main([d]), 1, "one developer library among the packaged ones fails the folder")
+
+
+MARK0 = b"wg-build dev-diagnostics=0"
+MARK1 = b"wg-build dev-diagnostics=1"
+DEV_TEXT = b"diagnostic: executor=hip selects the HIP executor; it is not the in-game runtime"  # exists only in the diagnostics' code
+PACKAGER = os.path.join(ROOT, "clean", "installer", "tools", "make_payload.py")
+RELEASE_CHECK = os.path.join(ROOT, "tools", "release", "check_package_diagnostics.py")
+
+
+def manifest_for(name, data, dev=False, **over):
+    m = {"format": 1, "file": name, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data), "dev_diagnostics": dev,
+         "dx12_kernels": None}
+    m.update(over)
+    for k in [k for k, v in m.items() if v is DROP]:
+        del m[k]
+    return json.dumps(m).encode()
+
+
+DROP = object()   # manifest_for(..., key=DROP): the key left out
+
+
+class BuildManifest(unittest.TestCase):
+    def test_build_py_writes_the_manifest_of_what_it_built(self):
+        b = load_build()
+        with tempfile.TemporaryDirectory() as d:
+            dll = os.path.join(d, b.runtime_library_name())
+            with open(dll, "wb") as f:
+                f.write(b"MZ library " + MARK0)
+            for dev in (False, True):
+                b.DEV_DIAGNOSTICS = dev
+                try:
+                    b.write_build_manifest(d, ["clang++", "-DWG_MODEL_L"] + (["-DWG_DEV_DIAGNOSTICS=1"] if dev else []), False)
+                finally:
+                    b.DEV_DIAGNOSTICS = False
+                with open(os.path.splitext(dll)[0] + ".build.json", encoding="utf-8") as f:
+                    m = json.load(f)
+                self.assertEqual(m["format"], 1)
+                self.assertEqual(m["file"], os.path.basename(dll))
+                self.assertEqual(m["sha256"], hashlib.sha256(open(dll, "rb").read()).hexdigest())
+                self.assertEqual(m["dev_diagnostics"], dev)
+                self.assertEqual("-DWG_DEV_DIAGNOSTICS=1" in m["defines"], dev)
+
+
+class PackagerRefusesDeveloperRuntime(unittest.TestCase):
+    """The payload packager and the release check look at the BYTES of the runtime that would ship, and at its build manifest."""
+
+    def _pack(self, files, manifests=None, extra_args=()):
+        """Runs make_payload.py on a payload folder holding `files` ({relative name: bytes}) next to a front end;
+        `manifests` ({library relative name: manifest bytes}) are written as <library>.build.json beside the library."""
+        d = tempfile.mkdtemp(prefix="wg_pl_")
+        payload = os.path.join(d, "payload")
+        os.makedirs(payload)
+        everything = {"amd_fidelityfx_dx12.dll": b"front end", **files}
+        for rel, data in everything.items():
+            p = os.path.join(payload, *rel.split("/"))
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "wb") as f:
+                f.write(data)
+        for rel, mdata in (manifests or {}).items():
+            with open(os.path.splitext(os.path.join(payload, *rel.split("/")))[0] + ".build.json", "wb") as f:
+                f.write(mdata)
+        with open(os.path.join(d, "map.json"), "wb") as f:
+            f.write(b"{}")
+        out = os.path.join(d, "out")
+        r = subprocess.run([sys.executable, PACKAGER, "--payload", payload, "--map", os.path.join(d, "map.json"), "--version", "0.0.1",
+                            "--out", out, *extra_args], capture_output=True, text=True)
+        return r, out
+
+    def _release(self, extra=b""):
+        return b"MZ" + b"x" * 64 + extra + MARK0
+
+    def test_a_release_runtime_with_its_manifest_is_packaged(self):
+        lib = self._release()
+        r, out = self._pack({"wronggpu_runtime.dll": lib}, {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", lib)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        table = open(os.path.join(out, "payload_table.h"), encoding="utf-8").read()
+        self.assertIn("wronggpu_runtime.dll", table)
+        self.assertNotIn("build.json", table, "the manifest is read for the gate and is not shipped")
+
+    def test_the_test_suites_stand_in_only_in_a_testing_build(self):
+        lib = self._release()
+        stand_in = {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", lib, stand_in=True)}
+        r, out = self._pack({"wronggpu_runtime.dll": lib}, stand_in)
+        self.assertNotEqual(r.returncode, 0, "a release build (no --testing) never embeds the test stand-in")
+        self.assertIn("stand-in runtime", r.stderr + r.stdout)
+        self.assertFalse(os.path.isfile(os.path.join(out, "payload_table.h")))
+        r, out = self._pack({"wronggpu_runtime.dll": lib}, stand_in, extra_args=("--testing",))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("wronggpu_runtime.dll", open(os.path.join(out, "payload_table.h"), encoding="utf-8").read())
+        # --testing changes nothing else: a stand-in still needs the marker and its own bytes' manifest
+        r, _ = self._pack({"wronggpu_runtime.dll": b"MZ no marker"}, {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", b"MZ no marker", stand_in=True)},
+                          extra_args=("--testing",))
+        self.assertNotEqual(r.returncode, 0)
+        r, _ = self._pack({"wronggpu_runtime.dll": lib + b"changed"}, stand_in, extra_args=("--testing",))
+        self.assertNotEqual(r.returncode, 0)
+        r, _ = self._pack({"wronggpu_runtime.dll": lib}, extra_args=("--testing",))
+        self.assertNotEqual(r.returncode, 0, "a testing build still needs a manifest")
+
+    def test_unchecked_d3d12_kernels_refuse_the_payload(self):
+        """#254 re-check P1: a library is packaged only when its build manifest records that the D3D12 kernels it embeds
+        were checked against their sources (clean/runner/build.py check_dx12_kernels); an older manifest or an unchecked
+        record refuses the payload, and so does a test-only D3D12 kernel manifest among the payload's files."""
+        lib = self._release()
+        checked = {"manifest_sha256": "0" * 64, "entries": 3, "provenance": "checked"}
+        r, _ = self._pack({"wronggpu_runtime.dll": lib}, {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", lib, dx12_kernels=checked)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)   # control: a checked record is packaged
+        for bad, why in ((DROP, "does not record the check"), ({"provenance": "bypass"}, "not checked"), ("checked", "not checked")):
+            with self.subTest(dx12_kernels=bad):
+                r, out = self._pack({"wronggpu_runtime.dll": lib}, {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", lib, dx12_kernels=bad)})
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn(why, r.stderr + r.stdout)
+                self.assertFalse(os.path.isfile(os.path.join(out, "payload_table.h")))
+        entry = {"name": "k_stage_e2", "file": "k_stage_e2.dxil", "source_digest": "0" * 64, "defines": {}}
+        for doc in ({"format": 1, "test_only": True, "kernels": [entry]},
+                    {"format": 1, "kernels": [entry]},   # older than the flag
+                    {"format": 1, "test_only": False, "kernels": [dict(entry, smx_bypass=True)]},
+                    {"format": 1, "test_only": False, "kernels": [dict(entry, defines={"K_SMX_MUT4": "1"})]},
+                    {"format": 1, "test_only": False, "kernels": [{"name": "k_stage_e2", "file": "k_stage_e2.dxil"}]}):
+            with self.subTest(doc=doc):
+                r, _ = self._pack({"wronggpu_runtime.dll": lib, "dx12/manifest.json": json.dumps(doc).encode()},
+                                  {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", lib)})
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("D3D12 kernel manifest", r.stderr + r.stdout)
+        good = {"format": 1, "test_only": False, "kernels": [entry]}
+        r, _ = self._pack({"wronggpu_runtime.dll": lib, "dx12/manifest.json": json.dumps(good).encode()},
+                          {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", lib)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)   # control: a normal manifest passes
+
+    def test_the_package_check_refuses_a_test_only_d3d12_manifest(self):
+        bad = {"format": 1, "test_only": True, "kernels": [{"name": "k_stage_e2", "file": "k_stage_e2.dxil",
+                                                            "source_digest": "0" * 64, "defines": {"K_SMX_MUT4": "1"},
+                                                            "smx_bypass": True}]}
+        with tempfile.TemporaryDirectory() as d:
+            z = os.path.join(d, "package.zip")
+            with zipfile.ZipFile(z, "w") as f:
+                f.writestr("WrongGPU/wronggpu_runtime.dll", b"MZ" + MARK0)
+                f.writestr("WrongGPU/dx12/manifest.json", json.dumps(bad))
+            res = chk.check_path(z)
+            self.assertTrue(any(not ok and "test-only D3D12 kernel manifest" in text for _, ok, text, _ in res), res)
+            os.makedirs(os.path.join(d, "folder", "dx12"))
+            with open(os.path.join(d, "folder", "wronggpu_runtime.dll"), "wb") as f:
+                f.write(b"MZ" + MARK0)
+            with open(os.path.join(d, "folder", "dx12", "manifest.json"), "w") as f:
+                json.dump(bad, f)
+            res = chk.check_path(os.path.join(d, "folder"))
+            self.assertTrue(any(not ok for _, ok, _, _ in res), res)
+
+    def test_a_test_program_switch_is_refused(self):
+        """WG_TEST_JITTER_OUT (test_interop_d3d12.exe's dx12same switch) exists only in the test program: a runtime library
+        or any payload or package file naming it is refused."""
+        self.assertFalse(chk.check_bytes(b"MZ" + MARK0 + b" WG_TEST_JITTER_OUT ")[0])
+        ok, text, _ = chk.check_artifact("test_interop_d3d12.exe", b"MZ ... WG_TEST_JITTER_OUT ...")
+        self.assertFalse(ok)
+        self.assertIn("test program", text)
+        self.assertTrue(chk.check_artifact("readme.txt", b"plain text")[0])
+        lib = self._release()
+        r, _ = self._pack({"wronggpu_runtime.dll": lib, "tools/harness.exe": b"MZ WG_TEST_JITTER_OUT"},
+                          {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", lib)})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("test program", r.stderr + r.stdout)
+
+    def test_no_manifest_refuses_the_payload(self):
+        r, out = self._pack({"wronggpu_runtime.dll": self._release()})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no build manifest", r.stderr + r.stdout)
+        self.assertFalse(os.path.isfile(os.path.join(out, "payload_table.h")), "no payload table is written for a refused payload")
+
+    def test_a_developer_build_is_refused(self):
+        lib = b"MZ" + MARK1
+        r, _ = self._pack({"wronggpu_runtime.dll": lib}, {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", lib, dev=True)})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("dev-diagnostics=1", r.stderr + r.stdout)
+
+    def test_a_diagnostics_build_with_a_forged_marker_is_refused(self):
+        # the marker says =0, but the library carries the diagnostics' code text (a developer build whose marker was patched)
+        forged = self._release(DEV_TEXT)
+        r, _ = self._pack({"wronggpu_runtime.dll": forged}, {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", forged)})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("forged marker", r.stderr + r.stdout)
+        # the honest manifest of that developer build says dev_diagnostics true: refused even if the text were absent
+        lib = self._release()
+        r, _ = self._pack({"wronggpu_runtime.dll": lib}, {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", lib, dev=True)})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("dev_diagnostics is not false", r.stderr + r.stdout)
+
+    def test_a_stripped_or_changed_library_is_refused(self):
+        lib = self._release()
+        stripped = b"MZ" + b"x" * 64  # the marker removed
+        r, _ = self._pack({"wronggpu_runtime.dll": stripped}, {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", stripped)})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no 'wg-build dev-diagnostics=' marker", r.stderr + r.stdout)
+        changed = lib + b" signed after the build"  # a good library changed after its manifest was written
+        r, _ = self._pack({"wronggpu_runtime.dll": changed}, {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", lib)})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("does not match its build manifest", r.stderr + r.stdout)
+        other = b"MZ another build " + MARK0  # the manifest of another library
+        r, _ = self._pack({"wronggpu_runtime.dll": lib}, {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", other)})
+        self.assertNotEqual(r.returncode, 0)
+        r, _ = self._pack({"wronggpu_runtime.dll": lib}, {"wronggpu_runtime.dll": b"not json"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("not readable JSON", r.stderr + r.stdout)
+        r, _ = self._pack({"wronggpu_runtime.dll": lib}, {"wronggpu_runtime.dll": manifest_for("another.dll", lib)})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("another file", r.stderr + r.stdout)
+
+    def test_every_runtime_library_and_every_file_is_checked(self):
+        good = self._release()
+        bad = b"MZ" + MARK1
+        r, _ = self._pack({"wronggpu_runtime.dll": good, "sub/wronggpu_runtime_extra.dll": bad},
+                          {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", good),
+                           "sub/wronggpu_runtime_extra.dll": manifest_for("wronggpu_runtime_extra.dll", bad)})
+        self.assertNotEqual(r.returncode, 0, "a second library that is a developer build refuses the payload")
+        mf = {"wronggpu_runtime.dll": manifest_for("wronggpu_runtime.dll", good)}
+        r, _ = self._pack({"wronggpu_runtime.dll": good, "sub/other.dll": b"carries a developer runtime " + MARK1}, mf)
+        self.assertNotEqual(r.returncode, 0, "any other embedded file that says dev-diagnostics=1 refuses it too")
+        r, _ = self._pack({"wronggpu_runtime.dll": good, "sub/other.dll": b"has " + DEV_TEXT}, mf)
+        self.assertNotEqual(r.returncode, 0, "or carries the diagnostics' code text")
+        r, _ = self._pack({"wronggpu_runtime.dll": good, "sub/other.dll": b"plain"}, mf)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_check_routes_and_check_objects_are_refused(self):
+        """The check routes' selector texts (the mutant / twin code objects, the forced bottleneck timeout) and the
+        check-only code objects (mutants, probes, the timeout control, the HIP twins, the scan mutants) are never in a
+        release library or payload; the default route's objects are."""
+        for t in chk.DEV_ONLY_STRINGS:
+            ok, text = chk.check_bytes(b"MZ" + MARK0 + b" " + t)
+            self.assertFalse(ok, t)
+            self.assertIn("forged marker", text)
+        for t in (b"l_q7__hybmut.co", b"l_q7w__hybmut.co", b"l_swin_hyb.co", b"swin_hyb.co", b"x_scanmut",
+                  b"l_post_c12_probe"):
+            ok, text = chk.check_bytes(b"MZ" + MARK0 + b" " + t)
+            self.assertFalse(ok, t)
+            # the mutant objects' names hold a selector text too ("__hybmut"): either refusal
+            self.assertTrue("check-only code objects" in text or "forged marker" in text, text)
+        for n in ("l_q7__hybmut.co", "l_q7w__hybmut.co", "swin_hyb.co", "sub/l_swin_hyb.co", "l_post_c12_probe.co",
+                  "l_post_c12_probe__mut.co", "l_hyb_probe.co", "gfx1201.swin_hyb.co", "gfx1201.l_swin_hyb.co",
+                  "gfx1201.l_q7__hybmut.co", "swin_bneck6_hyb_mutdump.dxil", "l_swin_block_c32_enc_hyb_dump.dxil",
+                  "dx12/scanmut/swin_block_c128_hyb_scanmut.dxil", "swin_bneck6_hyb_mut.dxil", "swin_bneck6_hyb_tmo.dxil"):
+            ok, text, _ = chk.check_artifact(n, b"plain")
+            self.assertFalse(ok, n)
+        for n in ("l_q7__hyb.co", "l_q7w__hyb.co", "l_post__lc12.co", "swin_bneck6_hyb.dxil", "swin_block_c128_hyb.dxil",
+                  "manifest.json", "probe.co", "native_driver_probe.dxil"):
+            ok, text, _ = chk.check_artifact(n, b"plain")
+            self.assertTrue(ok, (n, text))
+        ok, text = chk.check_bytes(b"MZ" + MARK0 + b" /l_q7__hyb.co /l_q7w__hyb.co /l_post__lc12.co")
+        self.assertTrue(ok, text)
+
+    def test_each_selector_text_is_refused_alone(self):
+        """Every check route's selector value is refused on its own in a library that says dev-diagnostics=0 (review:
+        one negative test per selector)."""
+        for t in (b"hybrid_mutant", b"hybrid_twin", b"__hybmut", b"WG_DEV_BNECK_ABORT", b"/l_q7__hybmut.co",
+                  b"/l_q7w__hybmut.co"):
+            with self.subTest(t=t):
+                self.assertIn(t, chk.DEV_ONLY_STRINGS)
+                ok, text = chk.check_bytes(b"MZ" + MARK0 + b" ... " + t + b" ...")
+                self.assertFalse(ok, t)
+        for t in (b"swin_bneck6_hyb_mut.dxil", b"swin_bneck6_hyb_tmo.dxil", b'"swin_bneck6_hyb_tmo"',
+                  b'"l_swin_block_c32_dec_hyb_mut"', b"gfx1201.swin_hyb.co", b"l_hyb_probe"):
+            with self.subTest(t=t):
+                ok, text = chk.check_bytes(b"MZ" + MARK0 + b" ... " + t + b" ...")
+                self.assertFalse(ok, t)
+                self.assertIn("check-only code objects", text)
+
+    def test_build_never_embeds_a_check_kernel(self):
+        """clean/runner/build.py write_embedded refuses a D3D12 manifest that lists a check kernel (marked probe by
+        build_dx12.py, or named as one: mutant, dump, scan mutant, timeout control, probe), e.g. after a partial --only
+        build of check kernels into a release folder; the same folder without it embeds."""
+        B = load_build()
+        self.assertTrue(B.is_check_kernel({"name": "swin_bneck6_hyb_tmo"}))
+        self.assertTrue(B.is_check_kernel({"name": "swin_block_c64_hyb_scanmut"}))
+        self.assertTrue(B.is_check_kernel({"name": "l_swin_block_c32_enc_hyb_mutdump"}))
+        self.assertTrue(B.is_check_kernel({"name": "anything", "probe": True}))
+        self.assertFalse(B.is_check_kernel({"name": "swin_bneck6_hyb"}))
+        self.assertFalse(B.is_check_kernel({"name": "native_driver_probe"}))
+        for bad in ({"name": "swin_bneck6_hyb_mut", "file": "swin_bneck6_hyb_mut.dxil"},
+                    {"name": "x", "file": "x.dxil", "probe": True}):
+            with self.subTest(bad=bad["name"]), tempfile.TemporaryDirectory() as d:
+                for n in B.EMBED_FILES:
+                    open(os.path.join(d, n), "wb").close()
+                os.makedirs(os.path.join(d, "dx12"))
+                good = {"name": "swin_bneck6_hyb", "file": "swin_bneck6_hyb.dxil"}
+                for k in (good, bad):
+                    open(os.path.join(d, "dx12", k["file"]), "wb").close()
+                with open(os.path.join(d, "dx12", "manifest.json"), "w") as f:
+                    json.dump({"format": 1, "kernels": [good, bad]}, f)
+                with self.assertRaises(SystemExit) as cm:
+                    B.write_embedded(d)
+                self.assertIn("check kernels", str(cm.exception))
+                with open(os.path.join(d, "dx12", "manifest.json"), "w") as f:
+                    json.dump({"format": 1, "kernels": [good]}, f)
+                B.write_embedded(d)   # without it: embedded
+
+    def test_the_final_package_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            good_zip, bad_zip = os.path.join(d, "good.zip"), os.path.join(d, "bad.zip")
+            with zipfile.ZipFile(good_zip, "w") as z:
+                z.writestr("WrongGPU/wronggpu_runtime.dll", b"MZ" + MARK0)
+                z.writestr("WrongGPU/readme.txt", b"text")
+            with zipfile.ZipFile(bad_zip, "w") as z:
+                z.writestr("WrongGPU/wronggpu_runtime.dll", b"MZ" + MARK1)
+            forged_zip = os.path.join(d, "forged.zip")
+            with zipfile.ZipFile(forged_zip, "w") as z:
+                z.writestr("WrongGPU/wronggpu_runtime.dll", b"MZ" + DEV_TEXT + MARK0)
+            empty_zip = os.path.join(d, "empty.zip")
+            with zipfile.ZipFile(empty_zip, "w") as z:
+                z.writestr("readme.txt", b"no runtime in here")
+            exe_good, exe_bad = os.path.join(d, "WrongGPU.exe"), os.path.join(d, "WrongGPU-dev.exe")
+            with open(exe_good, "wb") as f:
+                f.write(b"MZ" + b"payload " + MARK0 + b" more")
+            with open(exe_bad, "wb") as f:
+                f.write(b"MZ" + b"payload " + MARK1)
+
+            def run(path):
+                return subprocess.run([sys.executable, RELEASE_CHECK, path], capture_output=True, text=True).returncode
+
+            self.assertEqual(run(good_zip), 0)
+            self.assertEqual(run(bad_zip), 1, "a developer runtime inside the package zip fails")
+            self.assertEqual(run(forged_zip), 1, "a forged marker (developer code text present) fails")
+            self.assertEqual(run(empty_zip), 1, "a package with no runtime found must not pass")
+            self.assertEqual(run(exe_good), 0, "the launcher embeds the payload's runtime as it is: its marker is found")
+            self.assertEqual(run(exe_bad), 1)
+            self.assertEqual(run(d), 1, "a folder holding any developer package fails")
+
+
+class Dx12KernelProvenance(unittest.TestCase):
+    """#254 re-check P1: a negative-control D3D12 build (WG_DX12_SMX_DIGEST=0) goes only into a test-only output, and a
+    runtime library never embeds a test-only, bypassed, define-built, unprovenanced or stale kernel. build_dx12.main runs
+    for real with DXC replaced by a writer of stand-in bytes (no compiler, no GPU)."""
+
+    def setUp(self):
+        sys.path.insert(0, ROOT)
+        from clean.dx12 import build_dx12 as BD
+        self.BD = BD
+        self.b = load_build()
+        self.env = mock.patch.dict(os.environ, {"WG_DX12_ISA_CHECK": "0", "WG_DX12_VGPR_CHECK": "0"})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def dx12(self, out, *args, bypass=False, only="k_stage_e2,k_out_color"):
+        def fake_compile(src, entry, out_dxil, defines=None, **kw):
+            with open(out_dxil, "wb") as f:
+                f.write(b"DXBC stand-in " + json.dumps([src, entry, sorted((defines or {}).items())]).encode())
+        with mock.patch.object(self.BD, "compile_hlsl", fake_compile), mock.patch.object(self.BD, "build_asm_tool", lambda o: None), \
+                mock.patch.dict(os.environ, {"WG_DX12_SMX_DIGEST": "0" if bypass else "1"}):
+            return self.BD.main(["--out", out, "--only", only, "-j", "1", *args])
+
+    def manifest(self, out):
+        with open(os.path.join(out, "dx12", "manifest.json"), encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_normal_build_is_embedded(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.dx12(d)
+            doc = self.manifest(d)
+            self.assertIs(doc["test_only"], False)
+            self.assertTrue(all(len(e["source_digest"]) == 64 and e["defines"] == {} for e in doc["kernels"]), doc)
+            rec = self.b.check_dx12_kernels(d)   # control: a normal build of this tree passes
+            self.assertEqual((rec["provenance"], rec["entries"]), ("checked", 2))
+
+    def test_bypass_build_then_runtime_build_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.dx12(d)
+            with self.assertRaises(SystemExit) as cm:   # the bypass without --test-only: refused, the folder unchanged
+                self.dx12(d, "--define", "K_SMX_MUT4=1", bypass=True)
+            self.assertIn("--test-only", str(cm.exception))
+            self.assertIs(self.manifest(d)["test_only"], False)
+            self.dx12(d, "--define", "K_SMX_MUT4=1", "--test-only", bypass=True)   # the negative-control build
+            doc = self.manifest(d)
+            self.assertIs(doc["test_only"], True)
+            e2 = next(e for e in doc["kernels"] if e["name"] == "k_stage_e2")
+            self.assertEqual((e2.get("smx_bypass"), e2["defines"]), (True, {"K_SMX_MUT4": "1"}))
+            for call in (lambda: self.b.check_dx12_kernels(d), lambda: self.b.build_runtime("no-compiler-needed", d)):
+                with self.assertRaises(SystemExit) as cm:   # the ordinary runtime build after it: refused before compiling
+                    call()
+                self.assertIn("test-only", str(cm.exception))
+                self.assertIn("k_stage_e2: built past a stale softmax self-check reference", str(cm.exception))
+            self.dx12(d)   # a normal partial build into that folder keeps it test-only (other entries may be test builds)
+            self.assertIs(self.manifest(d)["test_only"], True)
+            with self.assertRaises(SystemExit):
+                self.b.check_dx12_kernels(d)
+
+    def test_define_build_is_test_only(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.dx12(d, "--define", "WG_SOME_TEST=1", only="k_out_color")   # (a self-check kernel: refused already)
+            self.assertIs(self.manifest(d)["test_only"], True)
+            with self.assertRaises(SystemExit) as cm:
+                self.b.check_dx12_kernels(d)
+            self.assertIn("built with extra defines", str(cm.exception))
+
+    def test_stale_or_unprovenanced_entries_are_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.dx12(d)
+            path = os.path.join(d, "dx12", "manifest.json")
+            base = self.manifest(d)
+            cases = [("other sources", lambda e: e.update(source_digest="0" * 64)),
+                     ("no provenance", lambda e: e.pop("source_digest")),
+                     ("no provenance", lambda e: e.pop("defines")),
+                     ("not declared", lambda e: e.update(name="k_stage_e2_gone"))]
+            for why, change in cases:
+                with self.subTest(why=why):
+                    doc = json.loads(json.dumps(base))
+                    change(doc["kernels"][0])
+                    with open(path, "w", encoding="utf-8") as f:
+                        json.dump(doc, f)
+                    with self.assertRaises(SystemExit) as cm:
+                        self.b.check_dx12_kernels(d)
+                    self.assertIn(why, str(cm.exception))
+            doc = json.loads(json.dumps(base))
+            del doc["test_only"]   # a manifest older than the flag
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(doc, f)
+            with self.assertRaises(SystemExit):
+                self.b.check_dx12_kernels(d)
+
+    def test_build_manifest_records_the_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            dll = os.path.join(d, self.b.runtime_library_name())
+            with open(dll, "wb") as f:
+                f.write(b"MZ library " + MARK0)
+            rec = {"manifest_sha256": "1" * 64, "entries": 2, "provenance": "checked"}
+            self.b.write_build_manifest(d, ["clang++"], True, rec)
+            m = json.load(open(os.path.splitext(dll)[0] + ".build.json", encoding="utf-8"))
+            self.assertEqual(m["dx12_kernels"], rec)
+            ok, text = chk.check_runtime_with_manifest(dll, open(dll, "rb").read(), json.dumps(m).encode())
+            self.assertTrue(ok, text)
+            self.b.write_build_manifest(d, ["clang++"], False, rec)   # nothing embedded: no kernels to vouch for
+            m = json.load(open(os.path.splitext(dll)[0] + ".build.json", encoding="utf-8"))
+            self.assertIsNone(m["dx12_kernels"])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -26,6 +26,8 @@ jobs:
           python-version: "3.12"
       - name: Line endings
         run: python tools/ci/check_line_endings.py
+      - name: Vendored model entry order (OptiScaler WrongGPU edition)
+        run: python tools/ci/check_vendored_model_entries.py
       - name: Licence (REUSE)
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
@@ -117,6 +119,28 @@ jobs:
           cmake -S clean/installer -B out/launcher-tests -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DWRONGGPU_PAYLOAD_DIR="$PWD/out/no-payload" -DWRONGGPU_TESTING=OFF -DWRONGGPU_PRESET_K=OFF -DWRONGGPU_DIRECT_ROUTE=OFF
           cmake --build out/launcher-tests --target wg-core-tests launcher-core-tests coexist-core-tests convert-ignore-tests model-choice-tests model-choice-k-tests model-choice-k-only-tests
           ctest --test-dir out/launcher-tests --output-on-failure -R "^(wg-core|launcher-core|coexist-core|convert-ignore|model-choice|model-choice-k|model-choice-k-only|source-size|wording)$"
+      - name: Test launcher from the test suite's stand-in payload (and a release build refusing it)
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python clean/installer/tests/run_installer_tests.py --work out/mock --prepare-only
+          $common = @("-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_POLICY_DEFAULT_CMP0091=NEW", "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
+                      "-DWRONGGPU_PAYLOAD_DIR=$PWD/out/mock/prepared/payload", "-DWRONGGPU_MAP=$PWD/out/mock/prepared/test-map.json", "-DWRONGGPU_VERSION=0.3.0-test")
+          cmake -S clean/installer -B out/launcher-mock @common -DWRONGGPU_TESTING=ON
+          cmake --build out/launcher-mock --target WrongGPU launcher-core-tests
+          # the core tests in a WRONGGPU_TESTING build too: its test-only rules (the rr-prepare helper keeps the tests' LOCALAPPDATA)
+          out/launcher-mock/launcher-core-tests.exe
+          # the launcher suite runs only a testing build, by its identity (launcher_build_facts.py): this launcher and its restorer
+          # pass; the negative controls (not testing builds, one carrying the hooks' strings) are refused
+          python -c "import sys; sys.path.insert(0, 'clean/installer/tests'); import launcher_build_facts as f; ok = [p for p in ('WrongGPU.exe', 'WrongGPU-Restore.exe') if f.missing_test_hooks('out/launcher-mock/' + p)]; bad = [p for p in ('wg-test-canary.exe', 'wg-test-canary-strings.exe') if not f.missing_test_hooks('out/launcher-mock/' + p)]; sys.exit('not accepted: %s; not refused: %s' % (ok, bad) if ok or bad else 0)"
+          # the negative control: a release build (WRONGGPU_TESTING=OFF) with the same stand-in refuses it at the payload step
+          cmake -S clean/installer -B out/launcher-mock-release @common -DWRONGGPU_TESTING=OFF
+          $PSNativeCommandUseErrorActionPreference = $false
+          cmake --build out/launcher-mock-release --target gen/payload_table.h *> out/mock-release.log
+          $refused = $LASTEXITCODE -ne 0
+          Get-Content out/mock-release.log | Select-Object -Last 15
+          if (-not $refused) { throw "a release build embedded the test suite's stand-in runtime" }
+          if (-not (Select-String -Path out/mock-release.log -SimpleMatch "test suite's stand-in runtime" -Quiet)) { throw "the release build failed for another reason" }
+          $global:LASTEXITCODE = 0  # the refused build above was the expected result; the step's exit code is the last native one
 
   release-models:
     # The front end and launcher with the release's model flags (BUILDING.md 4.1 and 5.2: Model L and Model K on), so a
@@ -155,6 +179,25 @@ jobs:
           cmake -S clean/installer -B out/launcher-models -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DWRONGGPU_PAYLOAD_DIR="$PWD/out/no-payload" -DWRONGGPU_TESTING=OFF -DWRONGGPU_PRESET_K=ON -DWRONGGPU_MODEL_K=ON -DWRONGGPU_MODEL_L=ON -DWRONGGPU_DIRECT_ROUTE=OFF
           cmake --build out/launcher-models --target wg-core-tests launcher-core-tests coexist-core-tests convert-ignore-tests model-choice-tests model-choice-k-tests model-choice-k-only-tests
           ctest --test-dir out/launcher-models --output-on-failure -R "^(wg-core|launcher-core|coexist-core|convert-ignore|model-choice|model-choice-k|model-choice-k-only|source-size|wording)$"
+      - name: Payload packager and package check refuse a developer runtime (R1)
+        # The packager (clean/installer/tools/make_payload.py) runs clean/tests/check_no_dev_diagnostics.py on every runtime
+        # library it embeds and refuses the payload for dev-diagnostics=1 or a missing marker; tools/release runs the same
+        # check on the final package. Here the real packager is run on runtime files carrying each marker, and the check on
+        # packages (zip, launcher executable): what is tested are the bytes that would ship, not source strings.
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -m unittest clean.tests.test_dev_diagnostics_off -v
+      - name: Package gate on the real runtime library (R1)
+        # The runtime library is built from this tree (clean/runner/build.py --runtime-only --no-embed: the C++ runtime without
+        # the GPU code objects) in the release configuration the package gets, and as a developer build; the gate's functions
+        # then check THOSE libraries: the release one passes the real packager (marker, no developer-diagnostic code text,
+        # build manifest with its SHA-256); the developer one, the same with a forged marker, a stripped and a changed
+        # library are refused.
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $clang = (Get-Command clang++ -ErrorAction SilentlyContinue).Source
+          if (-not $clang) { $clang = "C:\Program Files\LLVM\bin\clang++.exe" }
+          python tools/ci/check_release_runtime.py --out out/runtime-gate --cxx $clang
 
   rr-plugin:
     name: "CPU: Ray Reconstruction plugin"

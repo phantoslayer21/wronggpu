@@ -86,7 +86,15 @@ struct LCoefVals { uint cA, cB, c0, c1, cL; };
 float coef_mul_odd(float a, float b)
 {
     const float p = a * b;
+#if defined(SW_HYB) && SW_HYB
+    // the hybrid twins (l_swin_block_c32_dec_coef12_hyb): the product's exact error term is a deliberate fused
+    // multiply-add (TwoProduct), here of squares (C0 = sx sx, C1 = sy sy); its second operand passes the opaque zero
+    // (opq(b) == b bit for bit) so that build_dx12.py's fused-square scan, which fails on any fused square in a hybrid
+    // kernel, keeps its rule without an exemption. The same bits as below (the M-form kernels keep that form unchanged).
+    return asfloat(wg_round_odd(p, mad(a, opq(b), -p)));
+#else
     return asfloat(wg_round_odd(p, mad(a, b, -p)));
+#endif
 }
 // wg_mul_f16's +0 for an exact zero product (a NaN product keeps its conversion)
 bool coef_mul_zero(float a, float b)

@@ -2,8 +2,10 @@
 // WrongGPU launcher core: the install record (v1), the "Apps & features" entry and the restore / uninstall engine.
 // Written for this project.
 #pragma once
+#include <memory>
 #include "context.h"
 #include "optikeys.h"
+#include "../../../wgshared/include/wg_state.h"  // the game's state folder, its lock and the loaded protocol (#219)
 
 namespace wg {
 
@@ -43,7 +45,9 @@ namespace wg {
 // renamed aside and put back byte for byte). Action lines keep their five fields, so a 0.5.x uninstaller still reads a
 // v2 record (it skips the lines it does not know). Lines of a later version are kept as they are.
 // ------------------------------------------------------------------------------------------------
-struct Entry { wstring action, rel; bool existed = false; wstring orig, inst, owner; };
+// backup: the entry's backup below wronggpu-setup\backup when it is not `rel` (a file that an earlier uninstall kept was at
+// that name: the new backup went to <rel>.<n>; the record's "backup" line). Empty: backup\<rel>.
+struct Entry { wstring action, rel; bool existed = false; wstring orig, inst, owner, backup; };
 // The rrconfig line (rrconfig.h): what "Fix it for me" did to the game's Engine.ini, so that =off and the uninstall undo it.
 struct RrConfigFix {
     bool present = false;
@@ -60,6 +64,7 @@ struct RrConfigFix {
 inline const wchar_t* const kRuntimeGameRoot = L"<game-root>";
 struct Record {
     wstring version, game, exe, status, regkey, model, modelM;
+    wstring installId;  // this install's id (32 hex digits; kept by repair and update): WrongGPU's stamp on its state files names it
     std::vector<Entry> e;
     bool legacy = false;
     int format = 1;                                   // 1: 0.5.x setup, 2: the launcher
@@ -105,6 +110,14 @@ void RemoveManagedGame(const wstring& dir);
 wstring StateDir(const wstring& dir);
 wstring RecordPath(const wstring& dir);
 wstring BackupPath(const wstring& dir, const wstring& rel);
+// The entry's backup file (its recorded name, else backup\<rel>).
+wstring EntryBackupPath(const wstring& dir, const Entry& e);
+struct RunJournal;
+// The backup of `source` for entry e, created ONLY where nothing is (CopyFileW fail-if-exists): backup\<rel>, or, when a file
+// is there already (one an earlier uninstall kept: never overwritten), the first free backup\<rel>.<n>, which goes into
+// e.backup (and so into the record). The kept file stays; it is logged and (warnings) listed. Checked against e.orig.
+// j: the run journal (each create written down before it). Returns the backup's path.
+wstring CopyBackup(Context& ctx, const wstring& dir, Entry& e, const wstring& source, RunJournal* j, std::vector<wstring>* warnings);
 wstring LegacyStateDir(const wstring& dir);
 wstring LegacyRecordPath(const wstring& dir);
 wstring LegacyBackupPath(const wstring& dir, const wstring& rel);
@@ -151,11 +164,13 @@ bool OptiIniWrittenByUs(const wstring& dir, const Record& m);
 // with its hash, or the ini is the one WrongGPU last wrote. Used only to decide what the scan reports and asks about (the
 // switch question) and which menu-saved values carry over; never to delete or overwrite a file.
 bool OptiSetupIsOurs(const wstring& dir, const Record& m);
-// Test hook: called at the named steps of DoRestore ("restored", "kept", "record-removed"), of the rollback ("rollback-absent":
+// Test hook: called at the named steps of DoRestore ("restored", "kept", "record-removed"), of the install ("seed-planned": the
+// seed files checked absent, the record not yet made; "seed-recorded": the record written, the seeds not yet), of the rollback ("rollback-absent":
 // about to create the missing payload files; "rollback-held": every payload file held and checked) and of the Engine.ini restore ("rrconfig-held": Engine.ini held and read;
 // "rrconfig-absent": about to create it; "rrconfig-replace": the corrected copy written, the handle closed, about to replace
 // it); a test stops the operation there (as a killed process would) or tries to change
-// the file. Test builds also stop the process at the step named by WRONGGPU_TEST_STOP_AT.
+// the file. Test builds also stop the process at the step named by WRONGGPU_TEST_STOP_AT, and create the file
+// WRONGGPU_TEST_CREATE_FILE (where nothing is) at the step named by WRONGGPU_TEST_CREATE_AT.
 void SetRestoreStepHook(std::function<void(const char*)> hook);
 void RestoreStep(const char* name);  // calls the hook (above)
 // Test seam: a write fault at a named step ("rollback-write": before each payload file Roll back writes; "rrconfig-write": the
@@ -218,7 +233,8 @@ wstring StartCleanup(Context& ctx, const wstring& state, const wstring& self, co
 // when it is WrongGPU's and, where a hash is known, its bytes are those: the backups the record lists (the entry's hash), the
 // previous version's files that previous.txt lists with their hashes, owned-files.json (the bytes WrongGPU makes of the record).
 // The record, previous.txt, uninstall.exe, setup.log and profile.ini carry no recorded hash and go by their fixed names (stated
-// in the README). Anything else, or a listed file whose bytes changed, stays with the folder and the result lists it
+// in the README). settings.ini, model-choice.ini and their <name>.wgtmp-* files go only while they carry WrongGPU's valid
+// stamp (wg_state.h StampedByWrongGPU). Anything else, or a listed file whose bytes changed, stays with the folder and the result lists it
 // (kLeftUnrecorded); only a folder that holds nothing else is removed.
 // RemoveStateFolder: the state folder of `dir` (relocation: the restore has removed the backup); m: the record the install had
 // (the hashes of its backups and of owned-files.json come from it; without it those two are left). keepFile: the running uninstaller. Returns what stays, below the folder.
@@ -234,12 +250,47 @@ wstring LeftText(const wstring& where, const std::vector<wstring>& rels);
 // path or in the kept folder. keepState (update, repair, a move): the state folder stays (record and backup cleared).
 // keptWarnings: the warning of each recorded file left in place, by its path (the update path replaces the warning of a
 // file it then moves aside with the player's OK).
+// #219: the gate of an uninstall, repair, update, roll back or move of the install in `dir` (wg_state.h OperationGuard): the
+// game's state lock, then every WrongGPU binary of the install (the record's copy entries of WrongGPU's that are .dll / .asi)
+// held with write access, so Windows itself says whether a process has one loaded, and no game can load one while the
+// operation runs. Keep the returned gate for the whole operation, on the thread that took it; a nested GuardOperation for the
+// same folder on the same thread returns nullptr (the outer gate covers it). Refuses (EXIT_REFUSED, "Nothing was changed:
+// ...", naming the file) while a binary is in use by the game or another program, while that cannot be told, and while
+// another WrongGPU program holds the lock or it may not be opened. Inside it, the operation writes binaries with PutBinary /
+// PutBinaryFrom (renamed in complete and held at once; a load in that moment stops the operation) and deletes held ones with
+// DeleteHeldBinary; GateHolds tells which files the gate holds (their reads still work; their writes go through the gate).
+// The state files (settings.ini, model-choice.ini) are written inside the same hold (the state lock is recursive per thread).
+struct OperationGate {
+    OperationGate(const wstring& dir, const std::vector<wstring>& binaries);
+    ~OperationGate();
+    OperationGate(const OperationGate&) = delete;
+    OperationGate& operator=(const OperationGate&) = delete;
+    wstring dir;
+    wgstate::OperationGuard guard;
+    OperationGate* prev;
+    std::vector<wstring> oldLeft;  // old binaries a replace could not delete (each stays under its .wronggpu-old name)
+};
+// holdBinaries false: the state lock only, for an operation that holds every file it changes itself with write access (Roll
+// back, PinnedFile: a loaded file refuses that open, and a held file cannot be loaded), the same guarantee.
+std::unique_ptr<OperationGate> GuardOperation(const wstring& dir, const Record* m, bool holdBinaries = true);
+bool IsBinaryName(const wstring& rel);  // .dll / .asi: what a game loads
+bool GateHolds(const wstring& path);
+void PutBinary(const wstring& path, const void* data, size_t size);
+void PutBinaryFrom(const wstring& path, const wstring& source);
+DWORD DeleteHeldBinary(const wstring& path);  // ERROR_SUCCESS, ERROR_NOT_FOUND (not held), or the delete's error
 std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool failedInstall, bool keepState,
                                std::map<wstring, wstring>* keptWarnings = nullptr);
 // rc6 L4: the player's things in the state folder that a failed install or update never removes when they were there before
-// it: profile.ini (the game's settings), previous\ (the version Roll back goes to) and rr-config\ (the Engine.ini fix's backup).
+// it: profile.ini (the game's settings), previous\ (the version Roll back goes to) and rr-config\ (the Engine.ini fix's backup);
+// since 0.6.5 also the state files settings.ini and model-choice.ini (wg_state.h).
 bool StateHasSettings(const wstring& dir);
-// The state folder emptied of everything else (the record, the backup, the uninstaller, logs); removed when nothing is left.
-void RemoveStateKeepingSettings(const wstring& dir);
+// A new install id (32 lower-case hex digits, from the system's random source).
+wstring NewInstallId();
+// What an install run creates, written down BEFORE each create (a file or a folder that was not there), so a failed run takes
+// back only what it made: RollbackCreated deletes those files (newest first) and removes those folders when empty. Everything
+// else stays: it is logged and returned (paths relative to `state`). Never throws (a destructor calls it).
+struct RunJournal { std::vector<std::pair<wstring, bool>> created; bool done = false; };  // (path, is a folder); done: rolled back
+void JournalCreate(RunJournal& j, const wstring& path, bool folder);    // only when nothing is at path; parents first
+std::vector<wstring> RollbackCreated(Context& ctx, const wstring& state, RunJournal& j);
 std::vector<wstring> LegacyRestore(Context& ctx, const wstring& dir, Ui& ui);
 }  // namespace wg

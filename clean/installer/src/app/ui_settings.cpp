@@ -497,8 +497,8 @@ void PaintSettings(Gfx& gx, const Rc& area) {
         [&](float ry, bool b) {
             return SettingRow(gx, lx, ry, lw, b, ic::processor, L"HIP runtime",
                               hip.empty() ? Status{2, L"Not found", L""} : Status{0, L"Found", hipWords.empty() ? L"" : hipWords + L"."},
-                              hip.empty() ? L"Optional. Model M runs on Direct3D\u00a012 without it. Only Sparkle guard and the HIP choice in Runs\u00a0on need it."
-                                          : L"Used by Sparkle guard and the HIP choice in Runs\u00a0on.",
+                              hip.empty() ? L"Optional. Model M runs on Direct3D\u00a012 without it, and no game setting uses it."
+                                          : L"Not used in games: Model M runs on Direct3D\u00a012.",
                               {}, 0, -1, {}, 0, hipPath ? ID_S_HIPTEXT : 0, hipPath ? L"HIP runtime file: " + hip : L"");
         });
     section(modelRows);

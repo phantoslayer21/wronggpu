@@ -477,6 +477,24 @@ WG_KERNEL(swin_block_c64_add_dec0_nc)
     const uint oz0 = 0u - (wg_grid_ >> 31);
     const uint vw32 = a_w + hh * 32u + oz0, vw128 = a_w + hh * 128u + oz0, vwb = a_w + (t * 2u + hh) * 32u + oz0;
 
+#ifndef DEC0_ONLY
+#define DEC0_ONLY 0
+#endif
+#if DEC0_ONLY
+    // dec0 only: the window's tokens as below (same windows, mirror and prc), their stored FP8 codes as o[0..3]
+    uint prc;
+    uint2 xo[KC];
+    {
+        const int win = win0 < nwin ? win0 : nwin - 1;
+        const int wy = (int)((uint)win / (uint)nwx), wx = win - wy * nwx;
+        const int pr = 4 * wy - a_oy + (int)(t >> 2), pc = 4 * wx - a_ox + (int)(t & 3u);
+        const bool real = (win0 < nwin) & ((uint)pr < (uint)a_H) & ((uint)pc < (uint)a_W);
+        prc = real ? ((uint)pr << 16) | (uint)pc : 0xffffffffu;
+        const uint at = (uint)(wg_mirror(pr, a_H) * a_W + wg_mirror(pc, a_W)) * (uint)C_ + hh * (uint)HALF;
+        const uint4 d0 = wg_ld128(a_x, at), d1 = wg_ld128(a_x, at + 16u);
+        xo[0] = d0.xy; xo[1] = d0.zw; xo[2] = d1.xy; xo[3] = d1.zw;
+    }
+#else
     fetch_head(L_HEAD(0), tid);   // unit 0
 #if DEC_GL_USED
     {
@@ -738,6 +756,7 @@ WG_KERNEL(swin_block_c64_add_dec0_nc)
         }
     }
 
+#endif  // !DEC0_ONLY
     // ---- dec0 as the epilogue (dec1_dec0.hip Dec0Epi::run) ----
     const bool real = prc != 0xffffffffu;
     const int rr = real ? (int)(prc >> 16) : 0, cc = real ? (int)(prc & 0xffffu) : 0;
@@ -754,6 +773,9 @@ WG_KERNEL(swin_block_c64_add_dec0_nc)
     }
     // dec0's B fragments from the block output, exactly the bytes dec1 would store; lane halves swap two 8-byte groups.
     uint2 o[KC];
+#if DEC0_ONLY
+    [unroll] for (uint k = 0; k < KC; ++k) o[k] = xo[k];
+#else
     // wave-uniform skip of the clamp: when every value of the wave is NaN or |x| <= 448 (the driver's max drops NaN),
     // the clamp is the identity and the plain conversion gives the same bytes (NaN -> 0xff on both sides)
     {
@@ -767,6 +789,7 @@ WG_KERNEL(swin_block_c64_add_dec0_nc)
             [unroll] for (uint k = 0; k < KC; ++k) o[k] = dec_pack_q8_ags(acc[k]);
         }
     }
+#endif
     const bool h1 = hh != 0u;
     uint snd0 = h1 ? o[0].x : o[2].x, snd1 = h1 ? o[0].y : o[2].y, snd2 = h1 ? o[1].x : o[3].x, snd3 = h1 ? o[1].y : o[3].y;
     const uint2 r01 = uint2(wg_xor16_u(snd0), wg_xor16_u(snd1)), r23 = uint2(wg_xor16_u(snd2), wg_xor16_u(snd3));

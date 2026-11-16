@@ -232,8 +232,7 @@ std::vector<wstring> AdoptLeftovers(Context& ctx, const wstring& exe, const wstr
                 r.inst = Sha256File(orig); r.owner = L"moved";
                 m.e.insert(m.e.begin(), r);
                 e.existed = true; e.orig = r.inst;
-                CopyChecked(orig, BackupPath(dir, f.rel));
-                if (Sha256File(BackupPath(dir, f.rel)) != e.orig) Fail(L"Backup verification failed for " + f.rel);
+                CopyBackup(ctx, dir, e, orig, nullptr, nullptr);  // (only where nothing is: a kept file there stays, logged)
             }
         }
         m.e.push_back(e);

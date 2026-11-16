@@ -604,17 +604,17 @@ int RunLauncherUiDump(const wstring& outFile, const wstring& shotDir, bool noSca
         }
         j.B("found", found).End();
         // the unsaved capsule closed by Discard from the keyboard: the focus goes back to the control that changed the
-        // setting (Sparkle guard here), not to whatever stop was nearest the capsule
+        // setting (Pre-exposure's Original here, an Advanced row: open above), not to whatever stop was nearest the capsule
         v.edit = v.saved; v.focus = 0;
         v.scroll[P_GAME] = v.target[P_GAME] = 0;
         RenderFrame(fw, fh, 1, L"");
-        Activate(ID_G_SPARKLE);
+        Activate(ID_G_PRE0 + 1);
         v.focus = ID_G_DISCARD; v.focusVisible = true;
         RenderFrame(fw, fh, 1, L"");
         const bool capsule = Dirty();
         Activate(ID_G_DISCARD);
         RenderFrame(fw, fh, 1, L"");
-        j.Key("capsule_focus").Obj().B("dirty_before", capsule).B("dirty_after", Dirty()).N("want", ID_G_SPARKLE).N("focus", v.focus).End();
+        j.Key("capsule_focus").Obj().B("dirty_before", capsule).B("dirty_after", Dirty()).N("want", ID_G_PRE0 + 1).N("focus", v.focus).End();
         // the keyboard model: Space acts as it comes up, on the control it went down on (Tab away first: no press); a held
         // arrow in a segmented control steps once; Apply refusing an OptiScaler value puts the focus on that value's field;
         // a menu takes the focus to its control; a lone Alt opens no system-menu mode (Alt+Space still does); Browser Back
@@ -622,14 +622,14 @@ int RunLauncherUiDump(const wstring& outFile, const wstring& shotDir, bool noSca
         v.edit = v.saved; v.optiMore = false;
         v.scroll[P_GAME] = v.target[P_GAME] = 0;
         RenderFrame(fw, fh, 1, L"");
-        v.focus = ID_G_SPARKLE; v.focusVisible = true;
+        v.focus = ID_G_PRE0 + 1; v.focusVisible = true;  // Pre-exposure's Original (Sparkle guard is off without a D3D12 port)
         OnKey(VK_SPACE, 0);
         const bool spaceDown = Dirty();
         SpaceUp();
         const bool spaceUp = Dirty();
         v.edit = v.saved;
         RenderFrame(fw, fh, 1, L"");
-        v.focus = ID_G_SPARKLE;
+        v.focus = ID_G_PRE0 + 1;
         OnKey(VK_SPACE, 0);
         OnKey(VK_TAB, 0);
         SpaceUp();
@@ -883,8 +883,8 @@ int RunLauncherUiDump(const wstring& outFile, const wstring& shotDir, bool noSca
                 return v.advOpen && runsOn;
             };
             j.Key("advanced").Obj().B("defaults", opened([] {}))
-                .B("saved_off_default", opened([] { SetSetting(v.saved, "executor", "hip", nullptr); v.edit = v.saved; }))
-                .B("unsaved", opened([] { SetSetting(v.edit, "sparkle_guard", v.edit.get("sparkle_guard") == "off" ? "on" : "off", nullptr); }))
+                .B("saved_off_default", opened([] { SetSetting(v.saved, "executor", "dx12", nullptr); v.edit = v.saved; }))
+                .B("unsaved", opened([] { SetSetting(v.edit, "pre_exposure", v.edit.get("pre_exposure") == "original" ? "scale" : "original", nullptr); }))
                 .B("outside", opened([] { v.outside.push_back({"output_filter", "analytic", "quality9"}); }))
                 .End();
         }

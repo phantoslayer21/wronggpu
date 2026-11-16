@@ -270,10 +270,22 @@ OptiScaler folder ships `amd_fidelityfx_upscaler_dx12.dll`; OptiScaler.ini `[Lib
   otherwise it is refused with one line and the context gets AMD's FSR (else the stand-in). WrongGPU's queue is never
   made on another device (`test_wrapped_list` case F). The front end writes its log to disk right after an upscaler's
   `about to ...` line (HIP start-up, the shared-memory import) and before the first split's submission.
-- **Frames the upscaler does not take:** `WG_ERROR_UNSUPPORTED` from the upscaler's dispatch (the network runtime with
-  `hip_switch=off`, its default since 2026-11-04: frames above the render size checked at create) hands the context to
-  AMD's FSR at once;
-  without AMD's FSR the stand-in upscales such frames.
+- **Frames the upscaler does not take:** `WG_ERROR_UNSUPPORTED` from the upscaler's dispatch (the network runtime's
+  D3D12 executor: frames above the render size checked at create) hands the context to AMD's FSR at once; without
+  AMD's FSR the stand-in upscales such frames. No model moves to the HIP executor in a game; the old option
+  `hip_switch=on` is ignored with one log line.
+- **Creates the runtime refuses:** a create the runtime answers `WG_ERROR_UNSUPPORTED` (an adapter that is not an RX 9000-series
+  card, a build without its Direct3D 12 kernel set, a Direct3D 12 executor that cannot take the context) is a hard
+  incompatibility, not a runtime failure: the context goes to AMD's FSR whatever `fallback_to_amd` says (`fallback_to_amd = 0`
+  governs runtime failures only). With no AMD provider the answer is `NO_PROVIDER`, explicitly: the game gets no context from
+  WrongGPU and no silent substitute (OptiScaler's custom slot hands the game back to its host). A create that does not finish
+  in `create_giveup_ms` (default 30000; only when nothing could upscale meanwhile: `fallback_to_amd = 0`, or a custom slot
+  without an AMD DLL of its own) is refused, logged, and the context goes to AMD's FSR for now (the late result takes over, as
+  for a create that outlasts `create_wait_ms`); the game's thread does not wait for ever.
+- **Developer diagnostics are not in a game:** `executor=hip` and `capture_dir` are ignored in a release build of the runtime
+  (one log line: `ignored: diagnostic key, release build`); the context stays on Direct3D 12. They work in a developer build
+  only (`clean/runner/build.py --dev-diagnostics`, `WG_DEV_DIAGNOSTICS`), which no release or package is; the library says which
+  kind it is (`wg-build dev-diagnostics=0|1`, `clean/tests/check_no_dev_diagnostics.py`).
 - **Model location:** the front end looks for the converted model (`model.wgcm`, Model K in `K\`) in `[fsr] model_dir`
   of `wronggpu.ini` (relative: from the data folder), then `<game exe folder>\WrongGPU\model`, and passes the first
   folder that has it to the runtime as `model_dir=`; otherwise the runtime's own default (`%LOCALAPPDATA%\WrongGPU\model`,

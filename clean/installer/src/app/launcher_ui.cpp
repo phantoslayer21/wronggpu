@@ -325,7 +325,7 @@ PageData ReadPageData(const GameEntry& e, const Profile& defaults) {
     d.saved = e.hasRecord ? GameProfile(e.dir) : defaults;
     d.opti = ReadOpti(e);
     string wini, oini;
-    ReadAll(Join(e.dir, L"wronggpu.ini"), wini);
+    wini = EffectiveWronggpuIni(e.dir);  // (#219: the state folder over the file)
     ReadAll(Join(e.dir, L"OptiScaler.ini"), oini);
     d.outside = e.hasRecord ? OutsideEdits(d.saved, wini, oini) : std::vector<OutsideEdit>{};
     if (const RrConfigGame* rg = e.hasRecord ? RrConfigGameFor(e.exe) : nullptr) {
@@ -1003,7 +1003,7 @@ void StartNextQueued() {
 // (WM_APP_OPDONE), never lost.
 void OnApply() {
     if (PageWritesWait()) return;  // one rule for every write of the page (its Apply says why)
-    OpRequest r; r.op = Op::Apply; r.dir = v.cur.dir; r.hasProfile = true; r.profile = v.edit;
+    OpRequest r = GuiApplyRequest(v.cur.dir, v.edit);  // the model shown is the player's model choice, even unchanged
     for (size_t i = 0; i < v.opti.editable.size() && i < v.optiValues.size(); ++i)
         if (v.optiValues[i] != v.opti.editable[i].value) r.optiEdits.push_back({v.opti.editable[i].section + "." + v.opti.editable[i].key, v.optiValues[i]});
     for (auto& e : r.optiEdits) {  // the values typed are checked before anything is written
@@ -1098,7 +1098,7 @@ void SetGpu(const GpuInfo& gpu) {
     wstring n = gpu.name;
     for (const wchar_t* p : {L"AMD Radeon ", L"AMD "}) if (n.rfind(p, 0) == 0) { n = n.substr(wcslen(p)); break; }
     v.gpuName = n;
-    v.executorLine = n.empty() ? L"No graphics card found" : n + (gpu.rdna4 ? L" \u00b7 Direct3D 12" : gpu.amd ? L" \u00b7 HIP" : L" \u00b7 Not supported");
+    v.executorLine = GpuToolbarLine(n, gpu);
 }
 void SetHealth(bool model, const GpuInfo& gpu) { v.modelReady = model; SetGpu(gpu); }
 // The model data's state for the toolbar and Settings (any thread): ready or why not, the DLSS file it came from, the HIP

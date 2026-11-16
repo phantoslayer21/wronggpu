@@ -12,7 +12,19 @@
 //   --sizes=WxH,...   the render size of frame 0, 1, ... (repeated; default: the maximum every frame)
 //   --reset=f,...     frames the game asks for a reset (WgRtFrame.reset = 1)
 //   --fail=<kernel>@<frame>  that kernel's launch fails in that frame (the device returns false)
+//   --geo=<key>=<n>   a Swin / GEMM launch-geometry override in WgRtConfig (nt, gemm_threads, swin_threads, wpw64,
+//                     wpw96, wpw128, wpg0 .. wpg4 = block_wpg[k]); repeatable
 //   --hdr=<0|1>       WgRtConfig.hdr (default 0)
+//   --guard-timeout=<frame>  the frame guard (Device::guard_begin, the hybrid bottleneck's wait timeout): in that frame
+//                     the bottleneck "times out" (at the guard's second reading of that frame, the words a timed-out wait
+//                     writes are set first: sync words 12 and 15 + 1). The device models the guard: "guard_begin
+//                     <word>" / "guard_end" lines, and while the word read by the last guard_begin is nonzero, every
+//                     launch, copy, upload and memset is printed as "skipped <what>" and not done; guard_end copies the
+//                     16 bytes at the word for guard_read; a memset / upload of the word prints "guard_clear" /
+//                     "guard_upload <word 12> <word 15>"
+//   --fail-hyb-tables the device refuses the hybrid tables (Device::hyb_reserve returns false: create must refuse a
+//                     Model L hybrid context on the native-D3D12 stand-in, --backend=3); without it the reservation
+//                     succeeds (silently: the trace lines stay those of every other device)
 //
 // Prints the create result and the allocations ("alloc b<k> <bytes>"), what create uploads ("upload b<k>+<offset>
 // <bytes> <SHA-256 of the bytes>": the weight blobs, so a test can tell which blob an address holds), the code objects
@@ -74,11 +86,19 @@ const Signature kSignatures[] = {
     {"input_encoder_q20", "ppppppppppppE"},  // Model L's values, q in its 20-byte form (native D3D12, fusion le)
     {"coef_decoder", "ppppppppD"},          // Model M's decoder (also its pack12 form)
     {"swin_block_*", "ppppiiii"},           // Model M's blocks: x, skip, out, w, H, W, ox, oy
+    {"swin_bneck6_hyb", "ppppppppppiiiiiii"},  // the hybrid bottleneck in one launch (speed lever 4): x, out, tmp,
+                                               // sync, b0 ... b5's blobs, H, W, even / odd offsets, workgroups
     {"l_swin_block_c32_dec_coef12_nc", "ppppiiiippppii"},  // the decoder block with l_coef_pack12 folded in: then
                                                            // A, C, latent, dec0.coef, rw, rh (native D3D12, fusion lc)
     {"l_swin_block_c32_enc_lin_nc", "ppppiiiipp"},  // the encoder block with the linears as its prologue (fusion
                                                     // le): x = q, then enc0.Win1, enc0.Win2
+    {"l_swin_block_c32_enc_lin_hyb", "ppppiiiipp"},      // its hybrid twin (speed lever 3; the same arguments)
+    {"l_swin_block_c32_dec_coef12_hyb", "ppppiiiippppii"},  // its hybrid twin (speed lever 3; the same arguments)
     {"l_swin_block_c32*", "ppppiiii"},      // Model L's blocks (clean/l/FORMATS.md)
+    {"l_q7_block_*", "pppppiiii"},  // the FP16-form blocks (l_q7.co / l_q7w.co, their hybrid builds): x, skip, out,
+                                    // w, the tables, H, W, ox, oy
+    {"l_q7_merge_*", "pppii"},      // the FP16-form merge and expansion: in, out, w, h, w
+    {"l_q7_expand_*", "pppii"},
     {"l_linear_32_32_relu", "pppi"},
     {"l_linear_32_32_f16", "pppi"},
     {"l_linear_32_32_fused", "ppppi"},  // the two in one: q, x2, Win1, Win2, npix (native D3D12, fusion ll)
@@ -115,9 +135,60 @@ class RecordingDevice : public Device {
   std::map<DevPtr, int> index;  // allocation number of each block
   int allocs = 0, frame = -1, fail_frame = -1;
   std::string fail_kernel;
+  bool fail_hyb = false, hyb = false;
   DevPtr next = 0x10000;
+  // the frame guard (see --guard-timeout)
+  int guard_timeout = -1, guard_reads = 0;
+  bool guard_on = false;
+  uint64_t guard_pred = 0;
+  DevPtr guard_word = 0;
+  uint32_t guard_copy[4] = {0, 0, 0, 0};
+  bool skipped(const std::string& what) {
+    if (!guard_on || !guard_pred) return false;
+    log->push_back("skipped " + what);
+    return true;
+  }
+  bool has_guard() const override { return true; }
+  bool guard_begin(DevPtr word) override {
+    uint8_t* w = at(word, 16);
+    if (!w || (word & 7u)) return err_ = "recording device: invalid guard word", false;
+    ++guard_reads;
+    if (frame == guard_timeout && guard_on) {   // the bottleneck's timed-out wait (the second reading of the frame)
+      uint32_t v[4];
+      std::memcpy(v, w, 16);
+      v[0] += 1;
+      v[3] += 1;
+      std::memcpy(w, v, 16);
+    }
+    std::memcpy(&guard_pred, w, 8);
+    guard_on = true;
+    guard_word = word;
+    log->push_back("guard_begin " + addr(word) + (guard_pred ? " (skipping)" : ""));
+    return true;
+  }
+  bool guard_end() override {
+    if (!guard_on) return true;
+    guard_on = false;
+    std::memcpy(guard_copy, at(guard_word, 16), 16);
+    log->push_back("guard_end");
+    return true;
+  }
+  bool guard_read(uint32_t w[4]) override {
+    std::memcpy(w, guard_copy, 16);
+    return true;
+  }
   explicit RecordingDevice(std::vector<std::string>* l) : log(l) {}
   std::string name() const override { return "recording device (CPU test)"; }
+  // the hybrid tables (native D3D12's fixed arena range; nothing to hold here): reserved unless --fail-hyb-tables
+  bool hyb_reserve() override {
+    if (fail_hyb) {
+      err_ = "recording device: hybrid tables refused (--fail-hyb-tables)";
+      return false;
+    }
+    hyb = true;
+    return true;
+  }
+  bool hyb_tables() const override { return hyb; }
   bool alloc(DevPtr* p, size_t bytes) override {
     *p = next;
     mem[next].assign(bytes ? bytes : 1, 0);
@@ -146,6 +217,12 @@ class RecordingDevice : public Device {
     return "b" + std::to_string(index[it->first]) + "+" + std::to_string(p - it->first);
   }
   bool upload(DevPtr dst, const void* src, size_t n) override {
+    if (frame >= 0 && skipped("upload " + addr(dst))) return true;
+    if (guard_word && dst == guard_word && n >= 16) {
+      uint32_t v[4];
+      std::memcpy(v, src, 16);
+      log->push_back("guard_upload " + std::to_string(v[0]) + " " + std::to_string(v[3]));
+    }
     uint8_t* d = at(dst, n);
     if (d && n) std::memcpy(d, src, n);
     if (frame < 0 && d)  // create: the weight blobs (and the runtime's tables)
@@ -159,11 +236,14 @@ class RecordingDevice : public Device {
     return s != nullptr;
   }
   bool copy(DevPtr dst, DevPtr src, size_t n) override {
+    if (frame >= 0 && skipped("copy " + addr(dst))) return true;
     uint8_t *d = at(dst, n), *s = at(src, n);
     if (d && s && n) std::memmove(d, s, n);
     return d && s;
   }
   bool memset(DevPtr dst, int v, size_t n) override {
+    if (frame >= 0 && skipped("memset " + addr(dst))) return true;
+    if (guard_word && dst == guard_word) log->push_back("guard_clear");
     uint8_t* d = at(dst, n);
     if (d && n) std::memset(d, v, n);
     return d != nullptr;
@@ -184,6 +264,7 @@ class RecordingDevice : public Device {
       log->push_back("failed " + kernel);
       return false;
     }
+    if (skipped("launch " + kernel)) return true;
     std::string line = "launch " + kernel + " " + std::to_string(grid) + " " + std::to_string(block);
     if (const char* kinds = kinds_of(kernel)) {
       line += " |";
@@ -274,6 +355,8 @@ int main(int argc, char** argv) {
   cfg.auto_exposure = 0;
   const int frames = std::atoi(argv[7]);
   std::string options, map_path, fail;
+  bool fail_hyb = false;
+  int guard_timeout = -1;
   std::vector<std::pair<int, int>> sizes;
   std::set<int> resets;
   for (int a = 8; a < argc; ++a) {
@@ -296,6 +379,23 @@ int main(int argc, char** argv) {
       cfg.hdr = std::atoi(s.c_str() + 6);
     } else if (s.compare(0, 7, "--fail=") == 0) {
       fail = s.substr(7);
+    } else if (s == "--fail-hyb-tables") {
+      fail_hyb = true;
+    } else if (s.compare(0, 16, "--guard-timeout=") == 0) {
+      guard_timeout = std::atoi(s.c_str() + 16);
+    } else if (s.compare(0, 6, "--geo=") == 0) {
+      const size_t q = s.find('=', 6);
+      if (q == std::string::npos) return std::printf("ERR bad --geo %s\n", s.c_str()), 2;
+      const std::string k = s.substr(6, q - 6);
+      const int v = std::atoi(s.c_str() + q + 1);
+      if (k == "nt") cfg.nt = v;
+      else if (k == "gemm_threads") cfg.gemm_threads = v;
+      else if (k == "swin_threads") cfg.swin_threads = v;
+      else if (k == "wpw64") cfg.wpw64 = v;
+      else if (k == "wpw96") cfg.wpw96 = v;
+      else if (k == "wpw128") cfg.wpw128 = v;
+      else if (k.size() == 4 && k.compare(0, 3, "wpg") == 0 && k[3] >= '0' && k[3] <= '4') cfg.block_wpg[k[3] - '0'] = v;
+      else return std::printf("ERR bad --geo key %s\n", k.c_str()), 2;
     } else if (s.compare(0, 2, "--") == 0) {
       return std::printf("ERR unknown flag %s\n", s.c_str()), 2;
     } else {
@@ -306,6 +406,8 @@ int main(int argc, char** argv) {
   cfg.map_path = map_path.empty() ? nullptr : map_path.c_str();
   auto dev = std::make_unique<RecordingDevice>(&log);
   RecordingDevice* rec = dev.get();
+  rec->fail_hyb = fail_hyb;
+  rec->guard_timeout = guard_timeout;
   if (!fail.empty()) {
     const size_t at = fail.find('@');
     rec->fail_kernel = fail.substr(0, at);

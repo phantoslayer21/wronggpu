@@ -23,13 +23,25 @@ Sequences: a reset frame, steady frames with a pan, a game reset, a render-size 
 value, with the game's exposure texel, and with auto-exposure, and LDR; output rows RGBA16F and dense RGB; render size
 equal to the output (native AA, DLAA 1.0: the legacy input kernels), a jitter outside [-0.5, 0.5], and input_tiled=0.
 Refusals (one line, create or frame): an approximation option on the native device, an input-copy frame (raw_inputs).
+Softmax weight rounding (native device; runtime_k.cpp "create-time self-check"): with nothing set the mix form passes
+the check (smx=mix, no note); with the developer hook k_smx_test=mix_fail the round-to-odd ports are taken (smx=rodd,
+exactly one note of create, which the executor logs) and the frames match HIP with every softmax stage on its __rodd port,
+in both e4 / d4 shapes (1440p Quality: NG = 4; 4K Performance: NG = 2); with both forms failed, or with a corrupt stage
+shader (a softmax stage's __rodd port, the fixed-weight stage e0), create refuses in one line. Each create leg runs in its own process. The hook exists only in a runtime library
+built with clean/runner/build.py --dev-diagnostics: these tests skip on another build.
+k_approx (opt-in close approximations): refused on HIP and for an unknown tag; with a1,a2 its __a1 / __a2 kernels run, one
+note of create says so, and the output stays within loose bounds of the exact path's (tone-mapped luma PSNR).
 
 GPU only: WG_K_GPU_BUILD=<full build dir: clean/runner/build.py with the runtime library, and clean/dx12/build_dx12.py
 --model-k (or --only the K kernels and exposure_auto_diet) into the same folder>, ROCM_PATH; run each test under the
 machine's GPU lock.
 Run: python -m unittest clean.k.tests.test_k_runtime_d3d12
 """
+import ctypes
+import json
 import os
+import subprocess
+import sys
 import unittest
 
 import numpy as np
@@ -45,6 +57,19 @@ from clean.k.tests.test_k_runtime_gpu import (KRuntimeExt, gpu_build, inputs, pi
                                               write_k_model)
 
 OUT, MAX_RENDER = (200, 120), (130, 78)
+# k_approx=a1,a2 against the exact path on the synthetic model (test_native_k_approx_close): wide bounds; the random
+# synthetic network (random parameters) amplifies small input differences strongly
+# measured (RX 9070 XT, 3 frames at 1440p Quality): at most 17.4 % of the values differ, PSNR 54.7 .. 55.7 dB
+APPROX_MAX_DIFFER, APPROX_MIN_PSNR = 0.35, 45.0
+
+
+def tonemapped_psnr(a, b):
+    """PSNR (dB) of the tone-mapped luma T = Y / (1 + Y) of two linear RGB arrays [n, 3] (the spec side's closeness
+    measure; Y = max(0.2126 R + 0.7152 G + 0.0722 B, 0))."""
+    w = np.array([0.2126, 0.7152, 0.0722])
+    ya, yb = np.maximum(a.astype(np.float64) @ w, 0), np.maximum(b.astype(np.float64) @ w, 0)
+    mse = float(np.mean((ya / (1 + ya) - yb / (1 + yb)) ** 2))
+    return float("inf") if mse == 0 else 10 * np.log10(1 / mse)
 # written in full by every frame: compared raw with a sentinel before the frame (the head buffer is added per frame)
 WRITTEN = ["exposure.pair", "k.scalars", "k.x0", "k.S0", "k.S1", "k.S2", "k.S3", "k.S4", "k.A", "k.B", "k.ctap",
            "k.ctapT"]
@@ -127,7 +152,8 @@ class TestKRuntimeD3D12(unittest.TestCase):
                 for ln in lines:
                     parts = ln.split()
                     if parts:
-                        tgt = on_dx if parts[-1] == "dx12" else on_hip
+                        # where: "dx12" (hybrid device) or "d3d12" (native device), else HIP
+                        tgt = on_dx if parts[-1] in ("dx12", "d3d12") else on_hip
                         tgt[parts[0]] = tgt.get(parts[0], 0) + 1
                 want, got = out_bytes(hip, half), out_bytes(dx, half)
                 compare_raw(f"frame {i}: output", want, got)
@@ -268,6 +294,264 @@ class TestKRuntimeD3D12(unittest.TestCase):
                 self.assertNotIn("\n", msg.strip())
                 self.assertIn("HIP", msg)
 
+    # ---- softmax weight rounding: the create-time self-check and its round-to-odd ports ----------------------------
+    def leg(self, options, build=None):
+        """One native create in its own process: {"ok", "smx", "notes", "error"}."""
+        r = subprocess.run([sys.executable, "-m", "clean.k.tests.test_k_runtime_d3d12", "--softmax-leg", self.mdir,
+                            self.map, options, build or self.build], capture_output=True, text=True, timeout=300)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return json.loads(r.stdout.strip().splitlines()[-1])
+
+    def need_dev_build(self):
+        got = self.leg("k_smx_test=report")
+        if not got["ok"] and "developer builds only" in got["error"]:
+            self.skipTest("the softmax test hook needs a runtime built with --dev-diagnostics")
+        self.assertTrue(got["ok"], got)
+
+    def test_native_softmax_switch_is_logged(self):
+        """The round-to-odd softmax ports are exact too, but taking them is never silent: one note of create."""
+        self.need_dev_build()
+        plain = self.leg("")
+        self.assertTrue(plain["ok"], plain)
+        self.assertEqual((plain["smx"], plain["notes"]), ("mix", []))
+        fb = self.leg("k_smx_test=mix_fail")
+        self.assertTrue(fb["ok"], fb)
+        self.assertEqual(fb["smx"], "rodd(hook)")
+        self.assertEqual(len(fb["notes"]), 1, fb)
+        self.assertIn("round-to-odd", fb["notes"][0])
+        self.assertIn("test hook", fb["notes"][0])
+
+    def test_native_softmax_refusals(self):
+        """Neither form shown exact, or a corrupt stage shader (a softmax stage's __rodd port, a fixed-weight stage): create
+        refuses in one line naming it (the game keeps its own upscaler)."""
+        import shutil
+        import tempfile
+        self.need_dev_build()
+        both = self.leg("k_smx_test=both_fail")
+        self.assertFalse(both["ok"], both)
+        self.assertIn("not exact on this driver", both["error"])
+        self.assertNotIn("\n", both["error"].strip())
+        # a copy of the build (its top-level files and dx12/) with one flipped byte in one stage shader: a softmax stage's
+        # __rodd port and a fixed-weight stage (e0); create prepares every selectable kernel, so it refuses in one line
+        for victim in ("k_stagew2_e3__rodd", "k_stage2_e0"):
+            with self.subTest(victim=victim):
+                tmp = tempfile.mkdtemp(prefix="k_smx_corrupt_")
+                try:
+                    for f in os.listdir(self.build):
+                        src = os.path.join(self.build, f)
+                        if os.path.isfile(src):
+                            shutil.copy2(src, tmp)
+                    shutil.copytree(os.path.join(self.build, "dx12"), os.path.join(tmp, "dx12"))
+                    path = os.path.join(tmp, "dx12", victim + ".dxil")
+                    with open(path, "rb") as f:
+                        data = bytearray(f.read())
+                    data[len(data) // 2] ^= 0x40
+                    with open(path, "wb") as f:
+                        f.write(bytes(data))
+                    bad = self.leg("", build=tmp)
+                    self.assertFalse(bad["ok"], bad)
+                    self.assertIn(victim, bad["error"])
+                    self.assertNotIn("\n", bad["error"].strip())
+                finally:
+                    shutil.rmtree(tmp, ignore_errors=True)
+
+    def check_fallback_frames(self, frames, big, **size):
+        """Forced fallback: the frames match HIP (raw outputs and intermediates) and every softmax stage ran its __rodd
+        port on D3D12, none its mix form."""
+        self.need_dev_build()
+        on_dx, _ = self.sequence(3, True, 0, True, frames, "k_smx_test=mix_fail", **size)
+        ng = "k_stagew2_" if big else "k_stagew4_"
+        want = ["k_stage_e2", "k_stagew2_e3", ng + "e4", "k_stagew4_m", ng + "d4", "k_stagew2_d3", "k_stage_d2",
+                "k_stage2_d1"]
+        self.assertEqual([k for k in want if not on_dx.get(k + "__rodd")], [], on_dx)
+        self.assertEqual([k for k in want if on_dx.get(k)], [], on_dx)
+
+    def test_native_fallback_frames_1440p_quality(self):
+        self.check_fallback_frames(self.FRAMES_Q, False, **self.QUALITY)
+
+    def test_native_fallback_frames_4k_performance(self):
+        self.check_fallback_frames([(1920, 1080, True, 1.0, 1.0), (1920, 1080, False, 1.0, 1.0)], True,
+                                   out=(3840, 2160), max_render=(1920, 1080))
+
+    # ---- k_approx: the opt-in close approximations (never the default) --------------------------------------------
+    def test_k_approx_refusals(self):
+        """k_approx runs on the native D3D12 device only (HIP and the hybrid device refuse it), takes only its known
+        tags, refuses an empty value or list item and a2 with the full head; every refusal is one line. Nothing set:
+        a successful create on the exact path (no note, no k_approx in the kernels line)."""
+        for backend in (0, 2):
+            with self.subTest(backend=backend):
+                with self.assertRaises(RuntimeError) as cm:
+                    self.make(backend, True, False, "k_approx=a1", OUT, MAX_RENDER)
+                self.assertIn("native D3D12 device only", str(cm.exception))
+                self.assertNotIn("\n", str(cm.exception).strip())
+        refusals = {"k_approx=": "k_approx is empty", "k_approx=a1,": "empty item", "k_approx=,a2": "empty item",
+                    "k_approx=a1,,a2": "empty item", "k_approx=a3": "unknown k_approx a3",
+                    "esc:k_approx=a\\x01b": "unknown k_approx a?b", "k_approx=a2;k_head=full": "compact head"}
+        for options, why in refusals.items():
+            with self.subTest(options=options):
+                got = self.leg(options)
+                self.assertFalse(got["ok"], got)
+                self.assertIn(why, got["error"])
+                self.assertNotIn("\n", got["error"].strip())
+        plain = self.leg("")
+        self.assertTrue(plain["ok"], plain)
+        self.assertEqual((plain["smx"], plain["notes"], plain["k_approx"]), ("mix", [], ""))
+
+    def test_k_approx_each_tag(self):
+        """a1, a2 and a1,a2 each create, report themselves in the kernels line and add exactly one note; with the
+        self-check's fallback forced the approximation still applies (two notes), and with both forms failed create
+        refuses."""
+        for tags in ("a1", "a2", "a1,a2"):
+            with self.subTest(tags=tags):
+                got = self.leg("k_approx=" + tags)
+                self.assertTrue(got["ok"], got)
+                self.assertEqual(got["k_approx"], tags)
+                self.assertEqual(len(got["notes"]), 1, got)
+                self.assertIn("close approximation k_approx=" + tags, got["notes"][0])
+        self.need_dev_build()
+        fb = self.leg("k_approx=a1,a2;k_smx_test=mix_fail")
+        self.assertTrue(fb["ok"], fb)
+        self.assertEqual((fb["smx"], fb["k_approx"]), ("rodd(hook)", "a1,a2"))
+        self.assertEqual(len(fb["notes"]), 2, fb)
+        bad = self.leg("k_approx=a1,a2;k_smx_test=both_fail")
+        self.assertFalse(bad["ok"], bad)
+        self.assertIn("not exact on this driver", bad["error"])
+
+    def test_k_approx_shaders_prepared_only_when_selected(self):
+        """An unusable approximate shader cannot affect the default: with nothing set create succeeds (the unselected
+        forms are never prepared); selecting that form refuses create in one line naming it."""
+        import shutil
+        import tempfile
+        for victim, tag in (("k_out_pixel_c__a2", "a2"), ("kx__k_in_tiled__a1", "a1")):
+            with self.subTest(victim=victim):
+                tmp = tempfile.mkdtemp(prefix="k_approx_corrupt_")
+                try:
+                    for f in os.listdir(self.build):
+                        src = os.path.join(self.build, f)
+                        if os.path.isfile(src):
+                            shutil.copy2(src, tmp)
+                    shutil.copytree(os.path.join(self.build, "dx12"), os.path.join(tmp, "dx12"))
+                    path = os.path.join(tmp, "dx12", victim + ".dxil")
+                    with open(path, "rb") as f:
+                        data = bytearray(f.read())
+                    data[len(data) // 2] ^= 0x40
+                    with open(path, "wb") as f:
+                        f.write(bytes(data))
+                    plain = self.leg("", build=tmp)
+                    self.assertTrue(plain["ok"], plain)
+                    self.assertEqual(plain["k_approx"], "")
+                    sel = self.leg("k_approx=" + tag, build=tmp)
+                    self.assertFalse(sel["ok"], sel)
+                    self.assertIn(victim.replace("kx__", "kx/"), sel["error"])
+                    self.assertNotIn("\n", sel["error"].strip())
+                finally:
+                    shutil.rmtree(tmp, ignore_errors=True)
+
+    def frame_kernels(self, rt, x, lines_from):
+        """One frame of rt; the kernels it launched (launch trace)."""
+        rt.frame(x, 0, half=True)
+        lines, pos = trace_since(lines_from)
+        return {ln.split()[0] for ln in lines if ln.split() and ln.split()[-1] == "d3d12"}, pos
+
+    def check_variant(self, ran, approx):
+        """The output stage ran its a2 forms (approx) or its exact forms only; a tiled input stage its a1 form or the
+        exact one. Raises AssertionError otherwise."""
+        tiled = [k for k in ran if k.startswith("kx/k_in_tiled")]
+        if approx:
+            self.assertIn("k_out_pixel_c__a2", ran)
+            self.assertNotIn("k_out_pixel_c", ran)
+            self.assertTrue(tiled and all(k.endswith("__a1") for k in tiled), sorted(ran))
+        else:
+            self.assertFalse([k for k in ran if k.endswith(("__a1", "__a2"))], sorted(ran))
+            self.assertIn("k_out_pixel_c", ran)
+
+    def check_close(self, a, b):
+        """The approximate output differs from the exact one (it is not the exact path in disguise) and stays within
+        loose bounds (tone-mapped luma PSNR)."""
+        differ = float(np.mean(a != b))
+        psnr = tonemapped_psnr(a, b)
+        self.assertGreater(differ, 0.0, "the approximate output is identical to the exact output")
+        self.assertLess(differ, APPROX_MAX_DIFFER)
+        self.assertGreater(psnr, APPROX_MIN_PSNR)
+        return differ, psnr
+
+    A1_LEGACY_NOTE = "k_approx=a1 applies to the tiled input stage only"
+
+    def take_note(self, rt):
+        rt.lib.wg_rt_take_frame_note.argtypes = [ctypes.c_void_p]
+        rt.lib.wg_rt_take_frame_note.restype = ctypes.c_char_p
+        return rt.lib.wg_rt_take_frame_note(rt.rt).decode()
+
+    def test_native_k_approx_a1_legacy_note(self):
+        """The a1 contract: fast-close where the stage supports it. A frame on the legacy input path (here a jitter outside
+        [-0.5, 0.5]) runs the exact input stage, never refused, and the first such frame of a context produces ONE line
+        for the log (wg_rt_take_frame_note): across tiled -> legacy -> legacy -> tiled -> legacy -> tiled -> legacy frames
+        exactly one line, at the first legacy frame; a second a1 context gets its own line; no line without a1 (nothing
+        set, k_approx=a2). The launch trace shows every frame took the path it was meant to (the check is not vacuous)."""
+        legacy_jitter = (0.75, -0.8)
+        plan = [False, True, True, False, True, False, True]   # legacy?
+        for options, expect in (("k_approx=a1", True), ("k_approx=a1", True), ("", False), ("k_approx=a2", False)):
+            with self.subTest(options=options):
+                rt = self.make(3, True, False, options, OUT, MAX_RENDER)
+                pos = os.path.getsize(TRACE) if os.path.exists(TRACE) else 0
+                try:
+                    notes = []
+                    for i, legacy in enumerate(plan):
+                        x = inputs(np.random.default_rng(700 + i), 130, 78, True, i == 0,
+                                   jitter=legacy_jitter if legacy else (0.25, -0.25))
+                        ran, pos = self.frame_kernels(rt, x, pos)
+                        on_legacy = "kx/k_in_color" in ran
+                        on_tiled = any(k.startswith("kx/k_in_tiled") for k in ran)
+                        self.assertEqual((on_legacy, on_tiled), (legacy, not legacy), (i, sorted(ran)))
+                        if legacy or "a1" not in options:
+                            self.assertFalse([k for k in ran if k.endswith("__a1")], (i, sorted(ran)))
+                        else:
+                            self.assertTrue(all(k.endswith("__a1") for k in ran if k.startswith("kx/k_in_tiled")), sorted(ran))
+                        notes.append(self.take_note(rt))
+                    got = [(i, n) for i, n in enumerate(notes) if n]
+                    if expect:
+                        self.assertEqual(len(got), 1, got)
+                        self.assertEqual(got[0][0], 1, got)   # the first legacy frame
+                        self.assertIn(self.A1_LEGACY_NOTE, got[0][1])
+                        self.assertNotIn("\n", got[0][1])
+                    else:
+                        self.assertEqual(got, [])
+                finally:
+                    del rt
+
+    def test_native_k_approx_frames(self):
+        """k_approx=a1,a2 against nothing set, frame by frame (1440p Quality, a reset, steady frames and a smaller
+        render size): every approximate frame runs the a1 tiled input and the a2 output forms and no exact one, every
+        default frame none of them; the approximate output differs from the exact one and stays within loose bounds.
+        Negative controls: the variant check fails on a default frame, the closeness check on identical outputs and on
+        a perturbed output."""
+        out, mr = self.QUALITY["out"], self.QUALITY["max_render"]
+        ex = self.make(3, True, False, "", out, mr)
+        ap = self.make(3, True, False, "k_approx=a1,a2", out, mr)
+        pos = os.path.getsize(TRACE) if os.path.exists(TRACE) else 0
+        try:
+            for i, fr in enumerate(self.FRAMES_Q):
+                rw, rh, reset, E, pi = fr[:5]
+                x = inputs(np.random.default_rng(500 + i), rw, rh, True, reset)
+                x["pre_exposure"], x["E_cur"] = pi, float(np.float32(E))
+                ran_ex, pos = self.frame_kernels(ex, x, pos)
+                ran_ap, pos = self.frame_kernels(ap, x, pos)
+                self.check_variant(ran_ex, False)
+                self.check_variant(ran_ap, True)
+                with self.assertRaises(AssertionError):   # negative control: a default frame is not an approximate one
+                    self.check_variant(ran_ex, True)
+                a = np.frombuffer(out_bytes(ex, True), np.float16).reshape(-1, 4)[:, :3].astype(np.float32)
+                b = np.frombuffer(out_bytes(ap, True), np.float16).reshape(-1, 4)[:, :3].astype(np.float32)
+                self.assertTrue(np.isfinite(b).all(), "frame %d: non-finite approximate output" % i)
+                differ, psnr = self.check_close(a, b)
+                print("k_approx frame %d: differ %.4f psnr %.2f dB" % (i, differ, psnr))
+                with self.assertRaises(AssertionError):   # negative controls of the closeness check
+                    self.check_close(a, a.copy())
+                with self.assertRaises(AssertionError):
+                    self.check_close(a, a * 1.5 + 0.25)
+        finally:
+            del ex, ap
+
     def test_input_copy_frames_refused_on_d3d12(self):
         """raw_inputs (the interop's HIP input copies) has no checked D3D12 port: refused, not run unchecked."""
         for backend in (2, 3):
@@ -288,5 +572,27 @@ class TestKRuntimeD3D12(unittest.TestCase):
                     del rt
 
 
+def softmax_leg(mdir, map_path, options, build):
+    """Child of the softmax tests: one native create; prints ok, the smx field, the notes and the error as JSON."""
+    if options.startswith("esc:"):   # escapes for values a command line cannot carry (control characters)
+        options = options[4:].encode().decode("unicode_escape")
+    try:
+        rt = KRuntimeExt(build, mdir, map_path, OUT, MAX_RENDER, True, False, False, options, backend=3)
+    except RuntimeError as e:
+        print(json.dumps({"ok": False, "smx": "", "notes": [], "k_approx": "", "error": str(e)}))
+        return
+    rt.lib.wg_rt_notes.argtypes = [ctypes.c_void_p]
+    rt.lib.wg_rt_notes.restype = ctypes.c_char_p
+    kern = rt.lib.wg_rt_kernels(rt.rt).decode().split()
+    smx = [kv.split("=", 1)[1] for kv in kern if kv.startswith("smx=")]
+    approx = [kv.split("=", 1)[1] for kv in kern if kv.startswith("k_approx=")]
+    notes = [n for n in rt.lib.wg_rt_notes(rt.rt).decode().split("\n") if n]
+    print(json.dumps({"ok": True, "smx": smx[0] if smx else "", "notes": notes, "k_approx": approx[0] if approx else "",
+                      "error": ""}))
+
+
 if __name__ == "__main__":
-    unittest.main()
+    if len(sys.argv) == 6 and sys.argv[1] == "--softmax-leg":
+        softmax_leg(*sys.argv[2:6])
+    else:
+        unittest.main()

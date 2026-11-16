@@ -27,6 +27,11 @@ WinInfo WindowsInfo() {
     return w;
 }
 
+wstring NeedsRx9000Sentence() { return L"WrongGPU's models need an RX 9000-series GPU; using AMD FSR"; }
+wstring GpuToolbarLine(const wstring& shortName, const GpuInfo& gpu) {
+    if (shortName.empty()) return L"No graphics card detected \u00b7 " + NeedsRx9000Sentence();
+    return shortName + L" (detected) \u00b7 " + (gpu.rdna4 ? wstring(L"Direct3D 12") : NeedsRx9000Sentence());
+}
 bool IsRdna4Name(const wstring& name) { return Contains(name, L"RX 90") || Contains(name, L"PRO R97") || Contains(name, L"PRO R96"); }
 // Under Wine, Wine's own DXGI can name an RDNA 4 card after an old Radeon ("ATI Radeon HD 5600 Series"); the PCI ids of
 // Linux's DRM devices (/sys/class/drm/cardN/device, reached through Z:) are the card's own. The RDNA 4 ids are the RR
@@ -151,8 +156,17 @@ bool VersionLess(const wstring& a, const wstring& b) {
 std::vector<wstring> HipCandidates() {
     std::vector<wstring> c;
 #ifdef WRONGGPU_TESTING
-    const wstring mocks = EnvVar(L"WRONGGPU_TEST_HIP_CANDIDATES");
-    if (!mocks.empty()) {
+    // tests: WRONGGPU_TEST_HIP_CANDIDATES set (even empty, or too long to read) is the whole list: never the system's,
+    // PATH's or ROCm's runtime; set but empty or unreadable: no candidate at all
+    SetLastError(ERROR_SUCCESS);
+    const DWORD need = GetEnvironmentVariableW(L"WRONGGPU_TEST_HIP_CANDIDATES", nullptr, 0);
+    if (need > 0 || GetLastError() != ERROR_ENVVAR_NOT_FOUND) {
+        wstring mocks;
+        if (need > 1) {
+            mocks.resize(need);
+            const DWORD got = GetEnvironmentVariableW(L"WRONGGPU_TEST_HIP_CANDIDATES", mocks.data(), need);
+            mocks.resize(got > 0 && got < need ? got : 0);
+        }
         for (size_t i = 0; i < mocks.size();) {
             const size_t end = mocks.find(L';', i);
             c.push_back(mocks.substr(i, end == wstring::npos ? end : end - i));

@@ -25,6 +25,8 @@
 //  * Driver channel calls (WMMA, conversion) only in wave-uniform control flow, with branchless neighbours.
 #pragma once
 
+#include "k_smx.hlsli"
+
 // ---- the opaque zero and half2 views ---------------------------------------------------------------------------------
 // wgk_zero() is 0 at run time (grids < 2^31) and unknown to the compiler; wgk_opq xors it into BOTH halves of a packed
 // pair (x 0x10001): with the plain 0 / 1 value the driver proved the high half's xor zero and dropped it (then fused
@@ -195,53 +197,20 @@ uint4 wgk_act8n(uint4 x)
 
 // ---- softmax weights (HIP wgk_softmax_weights<false>: FP32 weights, the network's default) ---------------------------
 // gg: one query's 4 fragments of 8 keys (lane = query, the clamped polynomial g of spec 41 applied). w = 2^g in FP32
-// (v_exp_f32), the sum over 64 keys = 32 per lane in fragment / element order plus one lane exchange, inv = v_rcp_f32,
-// A = f16(w inv) rounded ONCE from the exact product (HIP: v_fma_mixlo_f16 / v_fma_mixhi_f16 w * inv + 0). Here: the
-// product's FP32 rounding p and its exact residual e = fma(w, inv, -p) give the round-to-odd FP32 value (13 bits more
-// than FP16: rounding it to FP16 is the single rounding of the exact product), then the driver's RNE conversion.
-// w >= 2^-14.43 and inv > 0 are finite and normal, so no zero / sign / FTZ case arises.
-// Round to odd for a positive normal FP32 product p = RNE(x) with exact residual e = x - p (wg_math.hlsli
-// wg_round_odd, specialised: no zero / infinity / sign cases): truncation of x is p, or p - 1 ulp when e < 0; the
-// inexact bit e != 0 makes it odd. Gives the same bits as wg_round_odd for every p > 0 finite.
-uint wgk_round_odd_pos(float p, float e)
-{
-    return (asuint(p) - (e < 0.0f ? 1u : 0u)) | (e != 0.0f ? 1u : 0u);
-}
-#ifndef KB_SMX
-#define KB_SMX 1
-#endif
+// (v_exp_f32, every 2^g first, then the sum in fragment / element order), the sum over 64 keys = 32 per lane plus one
+// lane exchange, inv = v_rcp_f32, A = f16(w inv) rounded ONCE from the exact product (HIP: v_fma_mixlo_f16 /
+// v_fma_mixhi_f16 w * inv + 0): k_smx.hlsli (the mix form, or round to odd in the __rodd ports).
 void wgk_softmax_weights(uint4 gg[4], out uint4 pa[4])
 {
     float w[4][8];
     float sum = 0.0f;
-#if KB_SMX
-    // every 2^g first (independent), then the sum in the same element order
     [unroll] for (uint st = 0; st < 4u; ++st)
         [unroll] for (uint j = 0; j < 8u; ++j) w[st][j] = wg_exp2(wgk_elf(gg[st], j));
     [unroll] for (uint s1 = 0; s1 < 4u; ++s1)
         [unroll] for (uint j = 0; j < 8u; ++j) sum = sum + w[s1][j];
-#else
-    [unroll] for (uint st = 0; st < 4u; ++st)
-        [unroll] for (uint j = 0; j < 8u; ++j) {
-            w[st][j] = wg_exp2(wgk_elf(gg[st], j));
-            sum = sum + w[st][j];
-        }
-#endif
     sum = sum + wgk_xor16(sum);
     const float inv = wg_rcp(sum);
-    [unroll] for (uint s2 = 0; s2 < 4u; ++s2) {
-        v8f ro;
-        [unroll] for (uint j = 0; j < 8u; ++j) {
-            const float p = w[s2][j] * inv;
-            const float e = mad(w[s2][j], inv, -p);
-#if KB_SMX
-            ro.v[j] = asfloat(wgk_round_odd_pos(p, e));
-#else
-            ro.v[j] = asfloat(wg_round_odd(p, e));
-#endif
-        }
-        pa[s2] = wgk_round8(ro);
-    }
+    [unroll] for (uint s2 = 0; s2 < 4u; ++s2) pa[s2] = k_smx_weights8(w[s2], inv);
 }
 
 // ss + the sum of f16(x_c^2) over the 8 channels of x, in channel order, each addition in FP32 (HIP wgk_sumsq8: packed
