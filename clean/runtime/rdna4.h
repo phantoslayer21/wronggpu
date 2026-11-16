@@ -71,27 +71,45 @@ inline bool dev_gfx11_shortcut() { return false; }
 // launches the native RDNA 3 kernel <name>__g11 of the dx12-gfx11 set wherever that manifest has it (K-NATIVE-1.md 5.1 (a));
 // every other kernel still runs as its gfx12 port through the shortcut. Chosen by WG_DEV_GFX11_NATIVE_K=1 together with
 // WG_DEV_GFX11_SHORTCUT=1 (its base; the device refuses the one without the other), read only in a build made with
-// WG_DEV_GFX11. One build times both: the same run without WG_DEV_GFX11_NATIVE_K is the shortcut.
+// WG_DEV_GFX11. One build times both: the same run without WG_DEV_GFX11_NATIVE_K is the shortcut. The value picks the kernels:
+// WG_DEV_GFX11_NATIVE_K=1 all of them, WG_DEV_GFX11_NATIVE_K=<comma list of port names> only those (per-kernel timing found
+// native faster on some stages and slower on others).
 #ifdef WG_DEV_GFX11
-inline bool dev_gfx11_native_k() {
+// The value of WG_DEV_GFX11_NATIVE_K: "1" = every kernel the manifest has a __g11 form of; a comma list of port names
+// (k_stage2_d0_hp,k_stage_e2) = only those; unset, empty or "0" = off.
+inline std::string dev_gfx11_native_k_value() {
   const char* v = std::getenv("WG_DEV_GFX11_NATIVE_K");
-  return v && v[0] == '1' && v[1] == 0;
+  return v ? std::string(v) : std::string();
 }
+inline bool dev_gfx11_native_k_on(const std::string& value) { return !value.empty() && value != "0"; }
+inline bool dev_gfx11_native_k() { return dev_gfx11_native_k_on(dev_gfx11_native_k_value()); }
 inline bool dev_gfx11_native_name_taken(const std::string& name) {  // a native kernel's own name is never looked up again
   return name.size() > 5 && name.compare(name.size() - 5, 5, "__g11") == 0;
 }
-// The kernel that runs for `name`: `name__g11` when `native` is on and the manifest has it (`has` answers for a name),
+// Does `value` select the port `name`: "1" selects every name, a list only the names in it (whole names, no prefixes).
+inline bool dev_gfx11_native_k_selects(const std::string& value, const std::string& name) {
+  if (!dev_gfx11_native_k_on(value)) return false;
+  if (value == "1") return true;
+  for (size_t start = 0; start <= value.size();) {
+    size_t end = value.find(',', start);
+    if (end == std::string::npos) end = value.size();
+    if (value.compare(start, end - start, name) == 0 && end - start == name.size()) return true;
+    start = end + 1;
+  }
+  return false;
+}
+// The kernel that runs for `name`: `name__g11` when `value` selects it and the manifest has it (`has` answers for a name),
 // else `name`.
 template <class Has>
-inline std::string dev_gfx11_native_kernel(bool native, const std::string& name, Has has) {
-  if (!native || dev_gfx11_native_name_taken(name)) return name;
+inline std::string dev_gfx11_native_kernel(const std::string& value, const std::string& name, Has has) {
+  if (dev_gfx11_native_name_taken(name) || !dev_gfx11_native_k_selects(value, name)) return name;
   const std::string g11 = name + "__g11";
   return has(g11) ? g11 : name;
 }
 #else
 inline bool dev_gfx11_native_k() { return false; }
 template <class Has>
-inline std::string dev_gfx11_native_kernel(bool, const std::string& name, Has) { return name; }
+inline std::string dev_gfx11_native_kernel(const std::string&, const std::string& name, Has) { return name; }
 #endif
 
 // RDNA 3 PCI device id the opening takes: Navi 31 (1002:744C, which the RX 7900 XT, XTX and GRE share; gfx1100), the id

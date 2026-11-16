@@ -54,22 +54,27 @@ class HostBuilds(unittest.TestCase):
             self.assertEqual(r.returncode, 0, "build failed:\n" + r.stdout + r.stderr)
             return subprocess.run([exe], capture_output=True, text=True)
 
-    def _ok(self, defines):
+    def _ok(self, defines, passes):
         r = self._run(defines)
         self.assertEqual(r.returncode, 0, "\n".join(l for l in r.stdout.splitlines() if l.startswith("FAIL")) + r.stderr)
         self.assertIn("ALL TESTS PASSED", r.stdout)
-        self.assertEqual(sum(l.startswith("pass") for l in r.stdout.splitlines()), 16)
+        self.assertEqual(sum(l.startswith("pass") for l in r.stdout.splitlines()), passes)
 
     def test_a_normal_build_never_picks_a_native_kernel(self):
-        self._ok([])
+        self._ok([], 25)
 
     def test_the_opening_picks_the_native_kernel_when_the_manifest_has_it(self):
-        self._ok(["WG_DEV_GFX11"])
+        self._ok(["WG_DEV_GFX11"], 28)
 
     def test_negative_control_a_broken_lookup_is_caught(self):
         r = self._run(["WG_DEV_GFX11"], mutate=lambda h: h.replace('name + "__g11"', 'name + "__g12"'))
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("FAIL on: native form only in a WG_DEV_GFX11 build", r.stdout)
+
+    def test_negative_control_a_list_that_selects_every_name_is_caught(self):
+        r = self._run(["WG_DEV_GFX11"], mutate=lambda h: h.replace('  if (value == "1") return true;\n', '  return true;\n'))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("FAIL list negative control: a port not in the list does not switch", r.stdout)
 
     def test_negative_control_picking_without_asking_the_manifest_is_caught(self):
         r = self._run(["WG_DEV_GFX11"], mutate=lambda h: h.replace("return has(g11) ? g11 : name;", "return g11;"))
@@ -80,7 +85,7 @@ class HostBuilds(unittest.TestCase):
 class SourcePins(unittest.TestCase):
     def test_the_variable_is_read_only_in_a_build_with_the_macro(self):
         h = read("clean", "runtime", "rdna4.h")
-        on = h.index("#ifdef WG_DEV_GFX11\ninline bool dev_gfx11_native_k() {")
+        on = h.index("#ifdef WG_DEV_GFX11\n// The value of WG_DEV_GFX11_NATIVE_K")
         off = h.index("#else\ninline bool dev_gfx11_native_k() { return false; }")
         self.assertLess(on, off)
         self.assertIn('std::getenv("WG_DEV_GFX11_NATIVE_K")', h[on:off])
@@ -94,6 +99,7 @@ class SourcePins(unittest.TestCase):
         self.assertEqual(dev.count("native_kernel_name("), 2)  # definition and find_port, which prepare and launch both use
         self.assertEqual(dev.count("find_port("), 3)           # definition, prepare, launch
         self.assertIn("g11_only_ = true;", dev)
+        self.assertIn("native_k_ = wgrt::dev_gfx11_native_k_value();", dev)  # the list form: the device keeps the whole value
         self.assertIn("needs WG_DEV_GFX11_SHORTCUT=1", dev)
         # the manifest read, the variable and the refusal are inside the macro
         i = dev.index("wgrt::dev_gfx11_native_k()")

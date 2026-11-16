@@ -214,14 +214,14 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     // native K (rdna4.h): the shortcut's gfx12 set plus the __g11 kernels of the gfx11 set, which launch() prefers by name
     if (wgrt::dev_gfx11_native_k()) {
       if (!shortcut_) return fail("WG_DEV_GFX11_NATIVE_K=1 needs WG_DEV_GFX11_SHORTCUT=1 on an RX 7900 series board (its base)");
-      native_k_ = true;
+      native_k_ = wgrt::dev_gfx11_native_k_value();
       g11_only_ = true;
       const bool read = read_manifest(build + "/dx12-gfx11/manifest.json");
       g11_only_ = false;
       if (!read) return false;
       unsigned n = 0;
       for (const auto& e : kernels_) n += wgrt::dev_gfx11_native_name_taken(e.first);
-      log(true, "native D3D12: native K on, " + std::to_string(n) + " __g11 kernels loaded (the rest run as gfx12 kernels through the shortcut)");
+      log(true, "native D3D12: native K on (" + native_k_ + "), " + std::to_string(n) + " __g11 kernels loaded (the rest run as gfx12 kernels through the shortcut)");
     }
 #endif
     // ports needing binary64 fma / division (model K's exact input stage) are dropped on an adapter without them: the
@@ -1968,7 +1968,7 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
   // emulation (WG_DEV_GFX11_SHORTCUT=1, rdna4.h); then gfx11_ is false. Never true in a normal build.
   bool shortcut_ = false;
 #ifdef WG_DEV_GFX11
-  bool native_k_ = false;   // WG_DEV_GFX11_NATIVE_K=1 on top of the shortcut (rdna4.h): launch the __g11 kernels the manifest has
+  std::string native_k_;    // WG_DEV_GFX11_NATIVE_K on top of the shortcut (rdna4.h): "1" or the list of ports that launch their __g11 form
   bool g11_only_ = false;   // read_manifest keeps just the kernels named *__g11
 #endif
   std::string debug_failure_;
