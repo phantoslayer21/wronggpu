@@ -6,6 +6,8 @@
                       -DWG_DEV_GFX11 in --cxx makes it (and kernel_replay) accept an RX 7900 series board (runtime/rdna4.h)
   pso_sweep.exe       pso_sweep.cpp (PSO creation per kernel with the runtime's root signatures; no runtime code)
   gfx11_probe_host.exe  the host of test_gfx11_helpers.py
+  frame_host.exe      a whole frame on the runtime library's native D3D12 executor (the host of frame_parity.py; loads
+                      wronggpu_runtime.dll, itself a Windows build of clean/runtime)
     python3 build_kernel_replay.py --cxx <x86_64-w64-mingw32-g++ [flags]> --out <dir> [--only pso_sweep,...]
 """
 import argparse
@@ -26,6 +28,7 @@ TARGETS = {
                           os.path.join(CONV, "sha256.cpp")],
     "pso_sweep": [os.path.join(HERE, "pso_sweep.cpp")],
     "gfx11_probe_host": [os.path.join(HERE, "gfx11_probe_host.cpp")],
+    "frame_host": [os.path.join(HERE, "frame_host.cpp")],
 }
 
 
