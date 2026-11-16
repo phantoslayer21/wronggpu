@@ -3,6 +3,7 @@
 // Original WrongGPU code; basis: own io_probe, exposure.hip exposure_pair_diet,
 // spec 07/10 and the existing strict build arithmetic contract. No alternate I/O path.
 // @wg-kernel native_driver_probe co=- block=32 wave=32 args=p defines=NATIVE_DRIVER_PROBE=1
+// @wg-kernel native_driver_probe_f16 co=- block=32 wave=32 args=p defines=NATIVE_DRIVER_PROBE_F16=1 gfx=11
 // @wg-kernel exposure_pair_diet co=exposure.co block=32 wave=32 args=p,p,u,u,u,u defines=NATIVE_EXPOSURE_PAIR=1
 // @wg-kernel exposure_pair_diet_direct co=exposure.co entry=exposure_pair_diet block=32 wave=32 args=p,p,u,u,u,u rs=direct defines=NATIVE_EXPOSURE_PAIR=1,WG_DIRECT_TEXTURES=1
 #include "wg_platform.hlsli"
@@ -30,6 +31,24 @@ WG_KERNEL(native_driver_probe) {
     wg_stf(dst,(k*32u+lane)*4u,h.v[k]);
     wg_stf(dst,1024u+(k*32u+lane)*4u,q.v[k]);
   }
+}
+#endif
+#if defined(NATIVE_DRIVER_PROBE_F16)
+WG_ARGS_BEGIN
+  uint dst;
+WG_ARGS_END
+// RDNA 3 form of the probe (no FP8 matrix instruction): D = A x B + C with FP16 operands as a K = 16 step of two chained
+// instructions, A and B in the replicated fragment layout of wmma_probe.h (namespace gfx11). Offsets: kOutF16 0, kInC 2048,
+// kInAF16 3072, kInBF16 3584, kInAF16K2 4096, kInBF16K2 4608. All loads come before the first matrix call.
+WG_KERNEL(native_driver_probe_f16) {
+  WG_SETUP();
+  uint lane=wg_lane_id();
+  uint4 a0=wg_ld128(dst,3072u+lane*16u),b0=wg_ld128(dst,3584u+lane*16u);
+  uint4 a1=wg_ld128(dst,4096u+lane*16u),b1=wg_ld128(dst,4608u+lane*16u);
+  v8f c;
+  [unroll] for(uint i=0;i<8u;++i) c.v[i]=wg_ldf(dst,2048u+(i*32u+lane)*4u);
+  v8f h=wg_wmma_f16_k16(a0,b0,a1,b1,c);
+  [unroll] for(uint k=0;k<8u;++k) wg_stf(dst,(k*32u+lane)*4u,h.v[k]);
 }
 #endif
 #if defined(NATIVE_EXPOSURE_PAIR)
