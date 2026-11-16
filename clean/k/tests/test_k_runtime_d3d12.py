@@ -408,6 +408,8 @@ class TestKRuntimeD3D12(unittest.TestCase):
                 self.assertEqual(got["k_approx"], tags)
                 self.assertEqual(len(got["notes"]), 1, got)
                 self.assertIn("close approximation k_approx=" + tags, got["notes"][0])
+                self.assertIn("(opt-in faster approximation; the default is the standard path)", got["notes"][0])
+                self.assertNotIn("default path is exact", got["notes"][0])
         self.need_dev_build()
         fb = self.leg("k_approx=a1,a2;k_smx_test=mix_fail")
         self.assertTrue(fb["ok"], fb)
