@@ -306,6 +306,44 @@ int wmain(int argc, wchar_t** argv) {
                   w.words().find("could not be deleted") != std::string::npos && ReadText(f) == before,
               "a cleanup that fails: its error and the file left are reported (words say so), the file unchanged");
         if (!w.tempLeft.empty()) DeleteFileW(w.tempLeft.c_str());
+        // another program holds the file for a moment (an antivirus or indexer scan): the replace is retried for up to kMoveRetryMs
+        static int busy = 0, tries = 0;
+        TestFault() = [](const char* s) { return std::strcmp(s, "move-busy") == 0 && ++tries <= busy; };
+        busy = 3, tries = 0;
+        w = WriteAtomic(f, "rr_mode=exact\r\n");
+        check(w.ok && tries == 4 && Val(ReadSettings(game), "rr_mode") == "exact" && List(state).size() == 1,
+              "the first 3 replaces refused (file held): retried, the 4th writes the file");
+        busy = 1000000, tries = 0;
+        ULONGLONG t0 = GetTickCount64();
+        w = WriteAtomic(f, "rr_mode=fast\r\n");
+        ULONGLONG took = GetTickCount64() - t0;
+        check(!w.ok && w.error == ERROR_ACCESS_DENIED && took >= kMoveRetryMs - 100 && took < kMoveRetryMs + 3000 && w.tempLeft.empty() &&
+                  Val(ReadSettings(game), "rr_mode") == "exact" && List(state).size() == 1,
+              "refused for longer than kMoveRetryMs: fails with its error (5) after the bound, the file unchanged, no temporary file left");
+        busy = 1000000, tries = 0;
+        SetOutcome so = SetSettings(game, {{"rr_mode", "fast"}});
+        check(!so.ok() && so.result == SetResult::AccessDenied && tries > 1 && Val(ReadSettings(game), "rr_mode") == "exact" && List(state).size() == 1,
+              "SetSettings: the replace refused for longer than the bound is reported (AccessDenied), the file unchanged");
+        TestFault() = nullptr;
+        // the same with a real handle: settings.ini opened for reading only, sharing read (as a scanner does)
+        HANDLE held = CreateFileW(f.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        static HANDLE heldCopy = INVALID_HANDLE_VALUE;
+        heldCopy = held;
+        HANDLE closer = CreateThread(nullptr, 0, [](LPVOID) -> DWORD { Sleep(300); CloseHandle(heldCopy); return 0; }, nullptr, 0, nullptr);
+        w = held != INVALID_HANDLE_VALUE && closer ? WriteAtomic(f, "rr_mode=fast\r\n") : WriteResult{};
+        if (closer) { WaitForSingleObject(closer, 10000); CloseHandle(closer); }
+        check(held != INVALID_HANDLE_VALUE && w.ok && Val(ReadSettings(game), "rr_mode") == "fast" && List(state).size() == 1,
+              "settings.ini held by another handle for 300 ms: the write waits it out and succeeds");
+        held = CreateFileW(f.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        t0 = GetTickCount64();
+        w = held != INVALID_HANDLE_VALUE ? WriteAtomic(f, "rr_mode=exact\r\n") : WriteResult{};
+        took = GetTickCount64() - t0;
+        if (held != INVALID_HANDLE_VALUE) CloseHandle(held);
+        if (!w.ok && w.error != ERROR_ACCESS_DENIED) std::printf("  (held write: error %lu after %llu ms)\n", w.error, took);
+        check(held != INVALID_HANDLE_VALUE && !w.ok && (w.error == ERROR_ACCESS_DENIED || w.error == ERROR_SHARING_VIOLATION) && took >= kMoveRetryMs - 100 &&
+                  w.tempLeft.empty() && Val(ReadSettings(game), "rr_mode") == "fast" && List(state).size() == 1,
+              "settings.ini held by another handle past the bound: fails visibly with its error, the file unchanged, no temporary file left");
+        check(WriteAtomic(f, before).ok, "the stamped file put back for the checks below");
         w = WriteAtomic(JoinPath(JoinPath(root, L"missing-folder"), L"x.ini"), "x");
         check(!w.ok && w.error != 0, "a write into a missing folder fails with its error");
         // the stamp: the file WrongGPU created is stamped and stays so while only WrongGPU writes it
