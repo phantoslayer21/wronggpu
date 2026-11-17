@@ -61,12 +61,17 @@ on thin lines in reflections, blotches in Cyberpunk 2077 with path tracing); in 
 can very occasionally come out far too bright or dark at a scene change. Full details: the release notes
 ([clean/installer/RELEASE-NOTES.md](clean/installer/RELEASE-NOTES.md)).
 
-### Model L (under test)
+### Model L and Model K (new in 0.6.5, off by default)
 
-Model L is a larger model choice planned for 0.6.5, off by default and still under test; until then it is available
-from source. Preliminary numbers, Cyberpunk 2077 at 1080p Quality on an RX 9070 XT: the network takes 2.25 ms with
-Model L and 1.17 ms with Model M. Speed work is ongoing and the numbers will change. Details, test setup and records:
-[clean/l/SPEED.md](clean/l/SPEED.md).
+Model L and Model K are two more super-resolution models you can choose per game; Model M stays the default. Each is
+converted once on your PC from a DLSS model file of one of your games (`WrongGPU.exe model convert --preset=L` or
+`--preset=K`) and chosen per game with `WrongGPU.exe set "<the game's .exe>" model=L` (or `model=K`), or in
+OptiScaler's menu. Both are still under test. Cyberpunk 2077 at 1080p Quality on an RX 9070 XT, standing still at the
+same spot, measured one right after the other: the model's GPU time per frame (all of its kernels) is 1.03 ms with
+Model K and 1.17 ms with Model M
+([clean/k/records/cp2077-model-k-timing-2026-11-15.json](clean/k/records/cp2077-model-k-timing-2026-11-15.json)),
+and 2.67 ms with Model L, measured the same way in a later sitting with Model M again at 1.17 ms
+([clean/l/records/cp2077-model-l-timing-2026-11-16.json](clean/l/records/cp2077-model-l-timing-2026-11-16.json)).
 
 ### Something broken?
 
@@ -129,7 +134,7 @@ implementation's own design and format notes (per-file provenance records are ke
 | `clean/runtime`, `clean/runner`, `clean/kernels` | Model M runtime library, build script, HIP kernels |
 | `clean/dx12` | Direct3D 12 kernels of Model M and their build (`build_dx12.py`) |
 | `clean/rr_f` | Ray Reconstruction: reference, kernels, runtime, plugin, tests |
-| `clean/k` | Model K (preset K; built and tested, not offered in 0.6.0) |
+| `clean/k` | Model K (a per-game choice since 0.6.5, off by default) |
 | `clean/fsr` | FSR front end (FidelityFX API provider) |
 | `clean/installer` | the WrongGPU launcher |
 | `clean/wgshared` | settings registry shared by the front end, the plugin and the launcher |
