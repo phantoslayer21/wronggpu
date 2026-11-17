@@ -75,6 +75,9 @@
 #ifndef POST_OUT
 #define POST_OUT 0
 #endif
+// WG_POST_CUTS: the exact instruction cuts below (history base fold, shared horizontal min / max) in the forms whose
+// bytes the checks cover (0: 3 x f32 rows, 3: direct); the RGBA16F row forms 1 / 2 keep their previous code
+#define WG_POST_CUTS (POST_OUT == 0 || POST_OUT == 3)
 #if POST_OUT == 2
 RWTexture2D<float4> wg_tex_out : register(u3);   // the output texture (RGBA16F), written through a typed UAV
 #endif
@@ -317,7 +320,7 @@ TfRaw tf_fetch(int idx, int col, int row PD_P)
 // ilast (wave-uniform); the same texel and clamps as post_body's other forms
 TfRaw pd_stage_fetch(int lane, int ilast, int st_r, int st_col, float inv_ncol_u, int r0, int c0, int ncol PD_P)
 {
-    // O7 (opus-post): the product as mad(.., -0.0f) (== the product, bit for bit, as pos_y): the driver keeps the
+    // O7: the product as mad(.., -0.0f) (== the product, bit for bit, as pos_y): the driver keeps the
     // wave-uniform value on SALU (a plain * went to v_mul_f32 + v_cvt_i32_f32 + v_readfirstlane)
     const int rl = wg_uniform((int)mad((float)ilast + 0.5f, inv_ncol_u, -0.0f));
     const int cl = wg_uniform(clampi(c0 + (ilast - mul_i24(rl, ncol)), 0, P_rw - 1));
@@ -453,10 +456,17 @@ float3 history_cr_span(float qx, float qy)
     const int ix = (int)fx0, iy = (int)fy0;
     const uint pitch = (uint)P_dw * 8u;
     [branch] if (WaveActiveAllTrue(and((uint)(ix - 1) <= (uint)(P_dw - 4), (uint)(iy - 1) <= (uint)(P_dh - 4)))) {
-        // O1 (opus-post): hist_prev + (ix - 1) 8 + (iy - 1) pitch == ix 8 + iy pitch + (hist_prev - 8 - pitch) mod 2^32, one
+        // O1: hist_prev + (ix - 1) 8 + (iy - 1) pitch == ix 8 + iy pitch + (hist_prev - 8 - pitch) mod 2^32, one
         // lshl_add + one mad_u24 (iy in [1, P_dh - 3] and pitch = 8 P_dw < 2^24, so the 24-bit product is the full one)
         // (the constant opaque, g_z: the driver would otherwise split it again into its parts, one add each)
-        const uint b0 = mul24((uint)iy, pitch) + ((uint)ix * 8u + ((hist_prev - 8u - pitch) ^ g_z));
+#if WG_POST_CUTS
+        uint b0 = mul24((uint)iy, pitch) + ((uint)ix * 8u + ((hist_prev - 8u - pitch) ^ g_z));
+#else
+        uint b0 = hist_prev + (uint)(ix - 1) * 8u + mul24((uint)(iy - 1), pitch);
+#endif
+#if defined(OP_POST_MUTANT) && OP_POST_MUTANT == 4   // test-only mutant (byte check must catch it): history base +8
+        b0 += 8u;
+#endif
         const uint b1 = b0 + pitch, b2 = b0 + 2u * pitch, b3 = b0 + 3u * pitch;
         const uint4 a0 = wg_mem.Load4(b0 + 8u), a10 = wg_mem.Load4(b1), a11 = wg_mem.Load4(b1 + 16u);
         const uint4 a20 = wg_mem.Load4(b2), a21 = wg_mem.Load4(b2 + 16u), a3 = wg_mem.Load4(b3 + 8u);
@@ -771,7 +781,7 @@ uint lz5_odd(uint t[10], int o)
                         hbox(lz_w0));
 }
 
-// O3 (opus-post): lz5_original with the taps' range given (lo, hi). The horizontal pass's four outputs read the windows
+// O3: lz5_original with the taps' range given (lo, hi). The horizontal pass's four outputs read the windows
 // t0-4, t2-6, t3-7, t5-9, so their minima / maxima share the three-tap parts t2-4 and t5-7. A minimum or maximum of the
 // same set is the same value in any grouping here: every ring tap is a finite FP16 display value >= +0 (clamped by
 // max_num(., 0) before its conversion: no NaN, no -0), so 6 + 6 three-input min / max instead of 8 + 8, the same bits.
@@ -1274,6 +1284,12 @@ WG_KERNEL(post_tf_p12_diet_vsit)
                 t[2 * i] = q & 0xffffu;
                 t[2 * i + 1] = q >> 16;
             }
+#if !WG_POST_CUTS
+            hv[0] = lz5_even(t, 0);
+            hv[1] = lz5_odd(t, 2);
+            hv[2] = lz5_even(t, 3);
+            hv[3] = lz5_odd(t, 5);
+#else
             {   // O3: shared window parts (lz5_range)
                 half h[10];
                 [unroll] for (int i = 0; i < 10; ++i) h[i] = hbox(t[i]);
@@ -1282,7 +1298,7 @@ WG_KERNEL(post_tf_p12_diet_vsit)
                 const half e0 = hbox(lz_w0), e1 = hbox(lz_w1), e2 = hbox(lz_w2), e3 = hbox(lz_w3), e4 = hbox(lz_w4);
                 hv[0] = lz5_range(t[0], t[1], t[2], t[3], t[4], e0, e1, e2, e3, e4,
                                   min(min(nA, h[0]), h[1]), max(max(xA, h[0]), h[1]));
-#if defined(OP_POST_MUTANT)   // test-only mutants (byte check must catch them): tap 6 left out of hv1's range in every
+#if defined(OP_POST_MUTANT) && OP_POST_MUTANT <= 3   // test-only mutants (byte check must catch them): tap 6 left out of hv1's range in every
                                  // copy (1), only in the direct form's copy rc false (2), only in its copy rc, pi != 1 (3)
 #if OP_POST_MUTANT == 1 || POST_OUT != 3
                 const bool mut = true;
@@ -1303,6 +1319,7 @@ WG_KERNEL(post_tf_p12_diet_vsit)
                 hv[3] = lz5_range(t[5], t[6], t[7], t[8], t[9], e4, e3, e2, e1, e0,
                                   min(min(nB, h[8]), h[9]), max(max(xB, h[8]), h[9]));
             }
+#endif
 #endif
         }
         tf_row_sync();
