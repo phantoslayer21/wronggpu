@@ -368,6 +368,7 @@ constexpr DWORD WC_ERR_INVALID_CHARS = 0x80;
 int MultiByteToWideChar(UINT cp, DWORD flags, const char* s, int n, wchar_t* out, int outN);
 int WideCharToMultiByte(UINT cp, DWORD flags, const wchar_t* s, int n, char* out, int outN, const char* def, BOOL* used);
 int _wcsicmp(const wchar_t* a, const wchar_t* b);
+inline LPWSTR lstrcatW(LPWSTR a, LPCWSTR b) { return wcscat(a, b); }
 int _wcsnicmp(const wchar_t* a, const wchar_t* b, size_t n);
 int _stricmp(const char* a, const char* b);
 constexpr int CSTR_LESS_THAN = 1;

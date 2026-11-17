@@ -3076,7 +3076,7 @@ def main():
     global RUN_OLD_BASELINE, NO_DIRECT, RR_PREPARE_GPU
     RUN_OLD_BASELINE, RR_PREPARE_GPU = a.run_old_baseline, a.rr_prepare_gpu
     NO_DIRECT = os.path.abspath(a.no_direct_launcher) if a.no_direct_launcher else None
-    for what, p in (("--launcher", a.launcher), ("--no-direct-launcher", NO_DIRECT)):  # before anything runs
+    for what, p in (("--launcher", a.launcher), ("--native-linux", a.native_linux), ("--no-direct-launcher", NO_DIRECT)):  # before anything runs
         if p:
             facts.require_test_hooks(p, what)
     if a.hip is not None:  # the mock HIP runtime: an existing plain file (an empty --hip= too is refused), named first

@@ -391,6 +391,26 @@ if(NOT WIN32)
   target_link_libraries(WrongGPU PRIVATE wg_gfx_cairo wg_window wg_core PkgConfig::WG_JPEG)
   # an installed launcher finds its fonts at ../share/wronggpu/assets/fonts from its binary (ui_gfx_cairo.cpp FontDir)
   if(WRONGGPU_TESTING)
+    # A WRONGGPU_TESTING build's identity on Linux, which the launcher suite checks before it runs a program
+    # (tests/launcher_build_facts.py), as the resource and PE checksum on Windows: the section .wg_testing_id and the file's
+    # SHA-256 written into it after the link (tools/elf_testing_identity.py). The suite's negative controls: programs that are
+    # not testing builds (no identity), one with the hook strings, and a load marker; then the build list of their SHA-256 and
+    # this launcher's, written last.
+    target_sources(WrongGPU PRIVATE src/platform/posix/testing_identity_linux.cpp)
+    add_executable(wg-test-canary tests/canary.cpp)
+    add_executable(wg-test-canary-strings tests/canary.cpp)
+    target_compile_definitions(wg-test-canary-strings PRIVATE WG_CANARY_HOOK_STRINGS)
+    target_link_libraries(wg-test-canary PRIVATE wg_core)
+    target_link_libraries(wg-test-canary-strings PRIVATE wg_core)
+    add_library(wg-test-canary-dll SHARED tests/canary_dll_linux.cpp)
+    set_target_properties(wg-test-canary-dll PROPERTIES PREFIX "" SUFFIX ".dll")
+    add_dependencies(WrongGPU wg-test-canary wg-test-canary-strings wg-test-canary-dll)
+    add_custom_command(TARGET WrongGPU POST_BUILD
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/elf_testing_identity.py $<TARGET_FILE:WrongGPU>
+      COMMAND ${CMAKE_COMMAND} -DF1=$<TARGET_FILE:WrongGPU> -DF2=$<TARGET_FILE:wg-test-canary> -DF3=$<TARGET_FILE:wg-test-canary-strings>
+              -DF4=$<TARGET_FILE:wg-test-canary-dll>
+              -DOUT=$<TARGET_FILE_DIR:WrongGPU>/wg-test-build.sha256 -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/sha256_list.cmake
+      VERBATIM)
     # the window's pages (ui-dump, ui-render) and the live window under SDL's offscreen driver with scripted events (a click, a
     # scroll, typing, WM_CLOSE): each on a home, XDG folders and registry file of its own
     add_test(NAME linux-ui COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_linux_ui_tests.py
