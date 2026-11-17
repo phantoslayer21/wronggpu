@@ -78,6 +78,19 @@ class TestBuildGfx(unittest.TestCase):
         self.assertIn(("vgpr_check", 2), self.calls)
         self.assertFalse(os.path.exists(os.path.join(self.out, "dx12-gfx11")))
 
+    def test_a_source_on_another_drive_still_builds(self):
+        real = os.path.relpath
+        tmp = self.tmp.name
+
+        def cross_drive(path, start=os.curdir):   # Windows: relpath raises across drives
+            if path.startswith(tmp) != str(start).startswith(tmp):
+                raise ValueError(f"path is on mount 'C:', start on mount 'D:'")
+            return real(path, start)
+
+        with mock.patch.object(B.os.path, "relpath", cross_drive):
+            self.build()
+        self.assertEqual([k["name"] for k in self.manifest("dx12")["kernels"]], ["both_kernel", "old_kernel"])
+
     def test_gfx11_build(self):
         self.build("--gfx", "11")
         man = self.manifest("dx12-gfx11")

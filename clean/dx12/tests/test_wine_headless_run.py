@@ -3,6 +3,7 @@
 (it exits 9 before it starts anything). No Wine is needed: the refusals come first."""
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -22,6 +23,7 @@ def run(prefix_reg, scratch):
 NULL = '[Software\\\\Wine\\\\Drivers]\n"Graphics"="null"\n'
 
 
+@unittest.skipUnless(sys.platform.startswith("linux"), "wine_headless_run.sh is a Linux-only bash runner")
 class TestWineHeadlessRun(unittest.TestCase):
     def test_a_prefix_with_a_graphics_driver_is_refused(self):
         r = run('[Software\\\\Wine\\\\Drivers]\n"Graphics"="x11,wayland"\n', lambda d: os.path.join(d, "s"))

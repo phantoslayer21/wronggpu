@@ -440,7 +440,10 @@ def source_digest(src, decl, defines, gen_dir=None, _cache=None):
     def label(path):
         if gen_dir and os.path.normcase(os.path.abspath(path)).startswith(os.path.normcase(os.path.abspath(gen_dir))):
             return "gen/" + os.path.relpath(path, gen_dir).replace(os.sep, "/")
-        return os.path.relpath(path, root).replace(os.sep, "/")
+        try:
+            return os.path.relpath(path, root).replace(os.sep, "/")
+        except ValueError:   # another drive (Windows): no relative path exists; a source outside the repo is named by its file
+            return "ext/" + os.path.basename(path)
 
     seen, order, missing = set(), [], set()
 
