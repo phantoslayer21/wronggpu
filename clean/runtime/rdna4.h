@@ -90,11 +90,11 @@ inline bool dev_gfx11_native_name_taken(const std::string& name) {  // a native 
 inline bool dev_gfx11_native_k_selects(const std::string& value, const std::string& name) {
   if (!dev_gfx11_native_k_on(value)) return false;
   if (value == "1") return true;
-  for (size_t start = 0; start <= value.size();) {
-    size_t end = value.find(',', start);
-    if (end == std::string::npos) end = value.size();
-    if (value.compare(start, end - start, name) == 0 && end - start == name.size()) return true;
-    start = end + 1;
+  size_t start = 0;
+  for (size_t i = 0; i <= value.size(); ++i) {
+    if (i < value.size() && value[i] != ',') continue;
+    if (i - start == name.size() && value.compare(start, i - start, name) == 0) return true;
+    start = i + 1;
   }
   return false;
 }
