@@ -40,10 +40,10 @@ float clamp20(float v) { return select(v >= 20.0f, 20.0f, select(v <= -20.0f, -2
 // buffers (pB unused with COEF_PACK12); i: the pixel's index in the render rectangle (y rw + x).
 void l_coef_px(uint4 lo, uint4 hi, float S, float T, uint pA, uint pB, uint pC, uint pL, uint i)
 {
-    const float a0 = wg_h2f_lo(lo.x), a1 = wg_h2f_hi(lo.x), a2 = wg_h2f_lo(lo.w), a3 = wg_h2f_hi(lo.w);
-    const float a4 = wg_h2f_lo(hi.x), a5 = wg_h2f_hi(hi.x), a6 = wg_h2f_lo(hi.y), a7 = wg_h2f_hi(hi.y);
-    const float a8 = wg_h2f_lo(hi.z);
-    const float a9 = wg_h2f_lo(lo.y), a10 = wg_h2f_hi(lo.y), a11 = wg_h2f_lo(lo.z), a12 = wg_h2f_hi(lo.z);
+    const float a0 = f16tof32(lo.x), a1 = wg_h2f_hi(lo.x), a2 = f16tof32(lo.w), a3 = wg_h2f_hi(lo.w);
+    const float a4 = f16tof32(hi.x), a5 = wg_h2f_hi(hi.x), a6 = f16tof32(hi.y), a7 = wg_h2f_hi(hi.y);
+    const float a8 = f16tof32(hi.z);
+    const float a9 = f16tof32(lo.y), a10 = wg_h2f_hi(lo.y), a11 = f16tof32(lo.z), a12 = wg_h2f_hi(lo.z);
     // A: unorm codes of RN16(sigma(a0..a2))
     const uint cA = unorm8_code(wg_rn16(l_sigma(a0))) | (unorm8_code(wg_rn16(l_sigma(a1))) << 8) |
                     (unorm8_code(wg_rn16(l_sigma(a2))) << 16);
@@ -104,10 +104,10 @@ bool coef_mul_zero(float a, float b)
 
 LCoefVals l_coef_vals_hw(uint4 lo, uint4 hi, float S, float T)
 {
-    const float a0 = wg_h2f_lo(lo.x), a1 = wg_h2f_hi(lo.x), a2 = wg_h2f_lo(lo.w), a3 = wg_h2f_hi(lo.w);
-    const float a4 = wg_h2f_lo(hi.x), a5 = wg_h2f_hi(hi.x), a6 = wg_h2f_lo(hi.y), a7 = wg_h2f_hi(hi.y);
-    const float a8 = wg_h2f_lo(hi.z);
-    const float a9 = wg_h2f_lo(lo.y), a10 = wg_h2f_hi(lo.y), a11 = wg_h2f_lo(lo.z), a12 = wg_h2f_hi(lo.z);
+    const float a0 = f16tof32(lo.x), a1 = wg_h2f_hi(lo.x), a2 = f16tof32(lo.w), a3 = wg_h2f_hi(lo.w);
+    const float a4 = f16tof32(hi.x), a5 = wg_h2f_hi(hi.x), a6 = f16tof32(hi.y), a7 = wg_h2f_hi(hi.y);
+    const float a8 = f16tof32(hi.z);
+    const float a9 = f16tof32(lo.y), a10 = wg_h2f_hi(lo.y), a11 = f16tof32(lo.z), a12 = wg_h2f_hi(lo.z);
     LCoefVals o;
     // RN16 of sigma(a0), sigma(a1), sigma(a2), sigma(clamp20(a6)), sigma(clamp20(a7)): one conversion
     v8f sg;
@@ -116,7 +116,7 @@ LCoefVals l_coef_vals_hw(uint4 lo, uint4 hi, float S, float T)
     sg.v[5] = 0.0f; sg.v[6] = 0.0f; sg.v[7] = 0.0f;
     const uint4 hs = wg_to_f16_ags(sg);
     // A: unorm codes of RN16(sigma(a0..a2))
-    o.cA = unorm8_code(wg_h2f_lo(hs.x)) | (unorm8_code(wg_h2f_hi(hs.x)) << 8) | (unorm8_code(wg_h2f_lo(hs.y)) << 16);
+    o.cA = unorm8_code(f16tof32(hs.x)) | (unorm8_code(wg_h2f_hi(hs.x)) << 8) | (unorm8_code(f16tof32(hs.y)) << 16);
     // B: softmax of a3..a5
     const float m = max(max(a3, a4), a5);
     const float e0 = wg_exp2((a3 - m) * bits(0x3FB8AA3Bu)), e1 = wg_exp2((a4 - m) * bits(0x3FB8AA3Bu)),
@@ -124,7 +124,7 @@ LCoefVals l_coef_vals_hw(uint4 lo, uint4 hi, float S, float T)
     const float rs = wg_rcp(e2 + (e0 + e1));
     o.cB = unorm8_code(opq(e0 * rs)) | (unorm8_code(opq(e1 * rs)) << 8) | (unorm8_code(opq(e2 * rs)) << 16);
     // C: spreads and correlation; the three FP16 products in one conversion
-    const float g0 = wg_h2f_hi(hs.y), g1 = wg_h2f_lo(hs.z);
+    const float g0 = wg_h2f_hi(hs.y), g1 = f16tof32(hs.z);
     const float sx = S * g0, sy = S * g1;
     const float sxy = sx * sy;
     const float rho = l_tanh(a8 * T);

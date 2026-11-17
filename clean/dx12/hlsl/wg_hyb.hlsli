@@ -35,12 +35,16 @@
 
 // RN16 of 8 float32 values (the driver's round-to-nearest-even conversion), packed, and back to float32 (exact).
 uint4 hyb_rn16x8(v8f d) { return wg_to_f16_ags(d); }
+// The FP16 in the low half of v as float32 (exact). f16tof32 reads only the low 16 bits, so this is wg_h2f_lo without
+// its "& 0xffff": the same conversion (v_cvt_f32_f16 of the low half), but the mask made the driver copy the half
+// into a register of its own first (one v_mov_b16 per FP16 pair at every hybrid chain end).
+float hyb_h2f_lo(uint v) { return f16tof32(v); }
 v8f hyb_h2f8(uint4 h)
 {
     v8f r;
     const uint w[4] = { h.x, h.y, h.z, h.w };
     [unroll] for (uint i = 0; i < 4; ++i) {
-        r.v[2 * i] = wg_h2f_lo(w[i]);
+        r.v[2 * i] = hyb_h2f_lo(w[i]);
         r.v[2 * i + 1] = wg_h2f_hi(w[i]);
     }
     return r;
@@ -105,8 +109,8 @@ v8f hyb_softmax_e8(v8f s)
     const uint w[4] = { pb.x, pb.y, pb.z, pb.w };
     v8f e;
     [unroll] for (uint i4 = 0; i4 < 4; ++i4) {
-        e.v[2 * i4] = wg_h2f_lo((w[i4] & 0x03ffu) << 5);
-        e.v[2 * i4 + 1] = wg_h2f_lo(((w[i4] >> 16) & 0x03ffu) << 5);
+        e.v[2 * i4] = hyb_h2f_lo((w[i4] & 0x03ffu) << 5);
+        e.v[2 * i4 + 1] = hyb_h2f_lo(((w[i4] >> 16) & 0x03ffu) << 5);
     }
     return e;
 }
@@ -127,7 +131,7 @@ float hyb_rsq16_tab(uint sbits)
     const int k = (E - (int)p) >> 1;
     const uint off = WG_HYB_RSQ + 2u * (p * 1024u + (sbits & 1023u));
     const uint rb = (wg_mem.Load(off & ~3u) >> (8u * (off & 2u))) & 0xffffu;
-    return wg_h2f_lo((uint)((int)rb - (k << 10)));
+    return hyb_h2f_lo((uint)((int)rb - (k << 10)));
 }
 
 // w = RN16(rcp32(sum)) for a positive normal FP16 row sum (bits) with a normal result (every softmax row), by table.
@@ -136,7 +140,7 @@ float hyb_rcp16(uint sbits)
     const int E = (int)((sbits >> 10) & 31u) - 15;
     const uint off = WG_HYB_RCP + 2u * (sbits & 1023u);
     const uint rb = (wg_mem.Load(off & ~3u) >> (8u * (off & 2u))) & 0xffffu;
-    return wg_h2f_lo((uint)((int)rb - (E << 10)));
+    return hyb_h2f_lo((uint)((int)rb - (E << 10)));
 }
 
 // The merge clamp before the FP8 point: max first, then min, NaN kept (Q8 B4).
