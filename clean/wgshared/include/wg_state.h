@@ -6,8 +6,9 @@
 //                     rr_mode): they take precedence over the install's defaults in wronggpu.ini, which no WrongGPU
 //                     program rewrites after the install (wronggpu.ini is the player's to edit);
 //   model-choice.ini  the model choice record (clean/fsr/src/model_choice_record.h).
-// The folder is always WrongGPU's: an uninstall removes these files, a repair or update keeps them. The launcher creates the
-// folder; nothing here creates it.
+// The folder is WrongGPU's; its files are WrongGPU's by their bytes, their name and their install (the stamp, below): an
+// uninstall removes a state file only while it carries WrongGPU's valid stamp for that name and install (an edited file,
+// a copy, an unknown file stays and is listed); a repair or update keeps them. The launcher creates the folder; nothing here creates it.
 //
 // THE STATE LOCK (StateLock) is the gate for everything below: a named mutex per game folder,
 //   Global\WrongGPU-state-<volume serial, 8 hex>-<file index, 16 hex>
@@ -43,21 +44,24 @@
 //
 // Writes are atomic (WriteAtomic): a new temporary file in the same folder (<name>.wgtmp-<pid>-<n>, created only where
 // nothing is), written in checked chunks, flushed and closed (both checked), then MoveFileExW(REPLACE_EXISTING |
-// WRITE_THROUGH) over the file. A reader sees the old file or the new one, never part of one. On a failure the temporary file
+// WRITE_THROUGH) over the file (MoveIntoPlace: retried for up to kMoveRetryMs while another program, an antivirus or indexer
+// scan, briefly holds the file or the temporary one). A reader sees the old file or the new one, never part of one. On a failure the temporary file
 // is deleted when possible; the result (WriteResult, and SetOutcome for SetSettings) carries the first failure AND every
 // secondary one: a close that failed after an earlier failure, a cleanup that failed (its error and the file left). words()
 // says all of them. State files are small: more than kMaxStateBytes is refused.
 // Paths: every helper turns its path into the \\?\ form (full path; \\?\UNC\ for a share), so a game deeper than MAX_PATH
 // works without the long-path setting.
 //
-// settings.ini, strictly (anything else is CORRUPT: readers treat the file as empty and say so; the next write replaces it):
-//   ; comment lines and blank lines
-//   key=value         key: [a-z0-9_], 1..64 chars; value: [A-Za-z0-9_.+-], 0..256 chars; each key at most once;
-//                     no sections, no spaces around '='; CRLF or LF line ends (a CR anywhere else, also a bare final CR,
-//                     is corrupt); ASCII only.
+// settings.ini (ParseSettings): key=value lines, key [a-z0-9_] 1..64 chars, value [A-Za-z0-9_.+-] 0..256 chars, spaces
+// around '=' allowed; a key's first line counts. Everything else is kept as it is and written back unchanged: a UTF-8 BOM,
+// comments (';' or '#', any UTF-8 text), blank lines, sections, unknown or other lines. CRLF or LF. CORRUPT is only text
+// WrongGPU cannot keep as it is (a NUL or other control character, a CR that is not part of CRLF, bytes that are not UTF-8):
+// readers treat it as empty and say so, and a save is REFUSED (Unparseable): the file is never replaced. Every line keeps
+// its own line end; a save adds no final line end to a file that had none (unless the file is WrongGPU's own).
 // Written for this project; Windows API and the C++ standard library only.
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -86,10 +90,46 @@ constexpr size_t kMaxStateBytes = 1u << 20;       // no state file is larger
 constexpr DWORD kChunk = 64u * 1024u;
 
 // Test seam (tests only): called before each step of WriteAtomic ("write", "flush", "close", "move") and of its cleanup
-// ("delete"); returning true makes that step fail as a failed call would (error ERROR_WRITE_FAULT). nullptr: never.
+// ("delete"); returning true makes that step fail as a failed call would (error ERROR_WRITE_FAULT). "move-busy", before each
+// attempt of MoveIntoPlace: true makes that attempt fail as if another program held the file (ERROR_ACCESS_DENIED).
+// nullptr: never.
 using FaultHook = bool (*)(const char* step);
 inline FaultHook& TestFault() { static FaultHook hook = nullptr; return hook; }
 inline bool Faulted(const char* step) { return TestFault() && TestFault()(step); }
+
+// A state file's rename into place (MoveFileExW with `flags`). Another program can hold the file or the new temporary file for
+// a moment (an antivirus or indexer scan of a file just written, typically while a build writes many files): the rename then
+// fails with ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION or ERROR_LOCK_VIOLATION. Those are retried, with short pauses, for up
+// to kMoveRetryMs; any other error, or the same one after that time, is the result (false, *err). The caller holds the state
+// lock, so no WrongGPU program can hold the file meanwhile. `unchanged` (optional) is asked before every attempt after the
+// first: the program that held the file may have written it meanwhile; false stops without replacing (false, *err 0,
+// *changed true), so that program's bytes stay.
+constexpr DWORD kMoveRetryMs = 2000;
+inline bool MoveIntoPlace(const std::wstring& from, const std::wstring& to, DWORD flags, DWORD* err,
+                          const std::function<bool()>& unchanged = nullptr, bool* changed = nullptr) {
+    const ULONGLONG start = GetTickCount64();
+    DWORD pause = 5;
+    if (changed) *changed = false;
+    for (bool first = true;; first = false) {
+        if (!first && unchanged && !unchanged()) {
+            *err = 0;
+            if (changed) *changed = true;
+            return false;
+        }
+        DWORD e = 0;
+        if (Faulted("move-busy")) e = ERROR_ACCESS_DENIED;
+        else if (MoveFileExW(from.c_str(), to.c_str(), flags)) return true;
+        else e = GetLastError();
+        const bool held = e == ERROR_ACCESS_DENIED || e == ERROR_SHARING_VIOLATION || e == ERROR_LOCK_VIOLATION;
+        if (!held || GetTickCount64() - start >= kMoveRetryMs) {
+            *err = e;
+            SetLastError(e);
+            return false;
+        }
+        Sleep(pause);
+        if (pause < 100) pause *= 2;
+    }
+}
 
 inline std::wstring JoinPath(std::wstring a, const std::wstring& b) {
     if (!a.empty() && a.back() != L'\\' && a.back() != L'/') a.push_back(L'\\');
@@ -364,7 +404,7 @@ private:
         }
         if (!e && !FlushFileBuffers(t)) e = GetLastError();
         if (!CloseHandle(t) && !e) e = GetLastError();
-        if (!e && !MoveFileExW(tmp.c_str(), target.c_str(), MOVEFILE_WRITE_THROUGH)) e = GetLastError();
+        if (!e) MoveIntoPlace(tmp, target, MOVEFILE_WRITE_THROUGH, &e);
         if (e) DeleteFileW(tmp.c_str());
         return e;
     }
@@ -465,7 +505,7 @@ inline WriteResult WriteAtomic(const std::wstring& path, const std::string& byte
         }
         if (ok) {
             if (Faulted("move")) { ok = false; r.error = ERROR_WRITE_FAULT; }
-            else if (!MoveFileExW(tmp.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) { ok = false; r.error = GetLastError(); }
+            else if (!MoveIntoPlace(tmp, target, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH, &r.error)) ok = false;
         }
         if (ok) { r.ok = true; r.error = 0; return r; }
         const bool faultDelete = Faulted("delete");
@@ -479,11 +519,89 @@ inline WriteResult WriteAtomic(const std::wstring& path, const std::string& byte
     return r;
 }
 
+// ---- WrongGPU's stamp: which state files are WrongGPU's, by their bytes, their name and their install --------------------
+// A state file WrongGPU created and nobody else changed ends with the stamp line "; wronggpu-written <check>", where <check>
+// is a 64-bit FNV-1a (16 lower-case hex digits) of every byte before that line, the file's own name (lower case) and this
+// install's id (the record's install-id line, InstallIdOf). It tells WrongGPU's own bytes from an edit, a copy under another
+// name and a copy from another install (it is no protection against a forgery). An uninstall deletes a state file only while
+// its stamp is valid for its name and this install: an edited file, a copy, a file without the stamp (the player's, a
+// temporary file a crash left) stays and is listed. A write keeps a file WrongGPU's only when it was (or nothing was there)
+// and the install has an id: a file the player made or changed is written on WITHOUT a stamp and stays the player's.
+// Readers see the stamp as a comment.
+constexpr const char* kStampPrefix = "; wronggpu-written ";
+inline std::string LowerAscii(std::string s) { for (auto& c : s) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a'); return s; }
+inline std::string StampCheck(const std::string& body, const std::string& name, const std::string& installId) {
+    uint64_t h = 1469598103934665603ull;  // FNV-1a 64 over the body, then "\n<name>\n<install id>"
+    auto feed = [&](const std::string& s) { for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; } };
+    feed(body);
+    feed("\n" + LowerAscii(name) + "\n" + installId);
+    static const char* hex = "0123456789abcdef";
+    std::string s(16, '0');
+    for (int i = 15; i >= 0; --i) { s[static_cast<size_t>(i)] = hex[h & 15u]; h >>= 4; }
+    return s;
+}
+// body + its stamp line for the file `name` of the install `installId` (body ends with a line end, or is empty).
+inline std::string Stamped(const std::string& body, const std::string& name, const std::string& installId) {
+    return body + kStampPrefix + StampCheck(body, name, installId) + "\r\n";
+}
+// Where the stamp line starts when bytes end with one valid for `name` and `installId` ("\r\n" or "\n", or none, after it);
+// npos: no valid stamp (also when installId is empty: an install without an id stamps nothing).
+inline size_t ValidStampAt(const std::string& bytes, const std::string& name, const std::string& installId) {
+    if (installId.empty()) return std::string::npos;
+    std::string t = bytes;
+    if (!t.empty() && t.back() == '\n') t.pop_back();
+    if (!t.empty() && t.back() == '\r') t.pop_back();
+    const size_t nl = t.rfind('\n');
+    const size_t start = nl == std::string::npos ? 0 : nl + 1;
+    const std::string last = t.substr(start), prefix = kStampPrefix;
+    if (last.size() != prefix.size() + 16 || last.compare(0, prefix.size(), prefix) != 0) return std::string::npos;
+    return last.substr(prefix.size()) == StampCheck(bytes.substr(0, start), name, installId) ? start : std::string::npos;
+}
+inline bool StampedByWrongGPU(const std::string& bytes, const std::string& name, const std::string& installId) {
+    return ValidStampAt(bytes, name, installId) != std::string::npos;
+}
+// This install's id: the "install-id<TAB><hex>" line of the record in the game's state folder (written by the launcher's
+// install). Empty: no record, or a record without one (nothing is stamped then).
+inline std::string InstallIdOf(const std::wstring& gameDir) {
+    std::string rec;
+    if (!ReadBytes(JoinPath(StateDirOf(gameDir), L"install.record"), &rec)) return "";
+    const std::string key = "\ninstall-id\t";
+    const size_t at = rec.find(key);
+    if (at == std::string::npos) return "";
+    size_t e = at + key.size();
+    std::string id;
+    while (e < rec.size() && ((rec[e] >= '0' && rec[e] <= '9') || (rec[e] >= 'a' && rec[e] <= 'f'))) id += rec[e++];
+    return id.size() >= 16 && id.size() <= 64 ? id : "";
+}
+inline std::string FileNameOf(const std::wstring& path) {
+    const size_t s = path.find_last_of(L"\\/");
+    std::string n;
+    for (wchar_t c : path.substr(s == std::wstring::npos ? 0 : s + 1)) n += c < 0x80 ? static_cast<char>(c) : '?';
+    return n;
+}
+// A state file written atomically with WrongGPU's stamp for its name and install (for a writer that makes its file whole,
+// such as the model choice record; it takes the state lock first). No install id: written without a stamp.
+inline WriteResult WriteStamped(const std::wstring& gameDir, const std::wstring& path, const std::string& body) {
+    const std::string id = InstallIdOf(gameDir);
+    return WriteAtomic(path, id.empty() ? body : Stamped(body, FileNameOf(path), id));
+}
+
 // ---- settings.ini -------------------------------------------------------------------------------------------------
+// One line of the file as read: its text (without the line end), its own line end ("\r\n", "\n", or none on a last line
+// without one) and, for a key=value line WrongGPU uses, the key.
+struct SettingsLine {
+    std::string text;
+    std::string key;  // empty: a comment, a blank line, a section, or a line kept as it is (not a usable key=value)
+    std::string eol;
+};
 struct Settings {
-    std::vector<std::pair<std::string, std::string>> kv;  // in file order
+    std::vector<std::pair<std::string, std::string>> kv;  // the usable keys, in file order (a key's first line)
+    std::vector<SettingsLine> lines;                      // every line with its own line end, kept for the write
+    bool bom = false;                                     // the file started with a UTF-8 BOM (kept)
+    std::string eol = "\r\n";                             // the line end for lines WrongGPU adds (the file's first one)
+    bool endsWithEol = true;                              // the last line had a line end (or nothing was there)
     bool present = false;                                 // the file was there and read
-    bool corrupt = false;                                 // it was there and not in the format above (kv empty)
+    bool corrupt = false;                                 // it was there and not text WrongGPU can keep (kv and lines empty)
     std::string why;                                      // what was wrong (corrupt), or why it could not be read
 };
 inline bool KeyChar(char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'; }
@@ -504,23 +622,71 @@ inline const std::string* Get(const Settings& s, const std::string& key) {
     for (const auto& p : s.kv) if (p.first == key) return &p.second;
     return nullptr;
 }
-// Sets key=value (added at the end when new). false: not a valid key or value (nothing changed).
+// Sets key=value: its line's text rewritten as "key=value" (its line end kept); a key not there: a new line at the end (the
+// line before it gets a line end if it had none; the new line ends with one only when the file did). false: not a valid key
+// or value (nothing changed).
 inline bool Set(Settings& s, const std::string& key, const std::string& value) {
     if (!ValidKey(key) || !ValidValue(value)) return false;
-    for (auto& p : s.kv) if (p.first == key) { p.second = value; return true; }
+    for (auto& p : s.kv)
+        if (p.first == key) {
+            p.second = value;
+            for (auto& l : s.lines) if (l.key == key) { l.text = key + "=" + value; break; }
+            return true;
+        }
     s.kv.emplace_back(key, value);
+    if (!s.lines.empty() && s.lines.back().eol.empty()) s.lines.back().eol = s.eol;
+    s.lines.push_back({key + "=" + value, key, s.endsWithEol ? s.eol : std::string()});
     return true;
 }
-// Parses settings.ini text strictly; a text not in the format gives corrupt = true and no keys.
-inline Settings ParseSettings(const std::string& text) {
+inline std::string TrimSpaces(const std::string& t) {
+    size_t a = 0, b = t.size();
+    while (a < b && (t[a] == ' ' || t[a] == '\t')) ++a;
+    while (b > a && (t[b - 1] == ' ' || t[b - 1] == '\t')) --b;
+    return t.substr(a, b - a);
+}
+// Well-formed UTF-8 (no overlong forms, no surrogates, at most U+10FFFF).
+inline bool Utf8Ok(const std::string& t) {
+    for (size_t i = 0; i < t.size();) {
+        const unsigned char c = static_cast<unsigned char>(t[i]);
+        size_t n = c < 0x80 ? 0 : (c & 0xE0) == 0xC0 ? 1 : (c & 0xF0) == 0xE0 ? 2 : (c & 0xF8) == 0xF0 ? 3 : 9;
+        if (n == 9 || (n && i + n >= t.size())) return false;
+        uint32_t cp = n == 0 ? c : n == 1 ? (c & 0x1Fu) : n == 2 ? (c & 0x0Fu) : (c & 0x07u);
+        for (size_t k = 1; k <= n; ++k) {
+            const unsigned char d = static_cast<unsigned char>(t[i + k]);
+            if ((d & 0xC0) != 0x80) return false;
+            cp = (cp << 6) | (d & 0x3Fu);
+        }
+        if ((n == 1 && cp < 0x80) || (n == 2 && cp < 0x800) || (n == 3 && (cp < 0x10000 || cp > 0x10FFFF)) || (cp >= 0xD800 && cp <= 0xDFFF)) return false;
+        i += n + 1;
+    }
+    return true;
+}
+// Parses settings.ini text tolerantly and keeps every line, with its own line end, for the write. A UTF-8 BOM, comments
+// (';' or '#', any UTF-8 text, also one that looks like WrongGPU's stamp), blank lines, sections, spaces around '=' and lines
+// WrongGPU does not use (an unknown key in another spelling, a value it does not take, a key's second line) are kept as they
+// are; key=value lines with a valid key and value are the usable keys (a key's first line). CORRUPT (no keys, no lines; why
+// says where): text WrongGPU cannot keep as it is: a NUL or other control character (a tab is fine), a CR that is not part
+// of CRLF, or bytes that are not UTF-8.
+inline Settings ParseSettings(const std::string& in) {
     Settings s;
     s.present = true;
+    std::string text = in;
+    if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF && static_cast<unsigned char>(text[1]) == 0xBB &&
+        static_cast<unsigned char>(text[2]) == 0xBF) {
+        s.bom = true;
+        text.erase(0, 3);
+    }
     auto corrupt = [&](int lineNo, const char* what) {
         s.kv.clear();
+        s.lines.clear();
         s.corrupt = true;
         s.why = "line " + std::to_string(lineNo) + ": " + what;
         return s;
     };
+    if (!Utf8Ok(text)) return corrupt(0, "not UTF-8 text");
+    const size_t firstLf = text.find('\n');
+    if (firstLf != std::string::npos) s.eol = firstLf > 0 && text[firstLf - 1] == '\r' ? "\r\n" : "\n";
+    s.endsWithEol = text.empty() || text.back() == '\n';
     size_t a = 0;
     int lineNo = 0;
     while (a < text.size()) {
@@ -530,23 +696,33 @@ inline Settings ParseSettings(const std::string& text) {
         std::string line = text.substr(a, e - a);
         a = e + 1;
         ++lineNo;
-        if (lf && !line.empty() && line.back() == '\r') line.pop_back();  // CRLF; a CR anywhere else is not a line end
+        std::string eol = lf ? "\n" : "";
+        if (lf && !line.empty() && line.back() == '\r') { line.pop_back(); eol = "\r\n"; }  // CRLF; a CR anywhere else is not a line end
         for (char c : line)
-            if (static_cast<unsigned char>(c) >= 0x80 || (c < 0x20 && c != '\t')) return corrupt(lineNo, c == '\r' ? "a CR that is not part of CRLF" : "not plain text");
-        if (line.empty() || line[0] == ';') continue;
-        const size_t eq = line.find('=');
-        const std::string k = eq == std::string::npos ? line : line.substr(0, eq), v = eq == std::string::npos ? std::string() : line.substr(eq + 1);
-        if (eq == std::string::npos) return corrupt(lineNo, "no key=value");
-        if (!ValidKey(k)) return corrupt(lineNo, "not a valid key");
-        if (!ValidValue(v)) return corrupt(lineNo, "not a valid value");
-        if (Get(s, k)) return corrupt(lineNo, "the key appears twice");
-        s.kv.emplace_back(k, v);
+            if (static_cast<unsigned char>(c) < 0x20 && c != '\t') return corrupt(lineNo, c == '\r' ? "a CR that is not part of CRLF" : "a control character");
+        SettingsLine l{line, "", eol};
+        const std::string t = TrimSpaces(line);
+        const size_t eq = t.find('=');
+        if (!t.empty() && t[0] != ';' && t[0] != '#' && t[0] != '[' && eq != std::string::npos) {
+            const std::string k = TrimSpaces(t.substr(0, eq)), v = TrimSpaces(t.substr(eq + 1));
+            if (ValidKey(k) && ValidValue(v) && !Get(s, k)) { l.key = k; s.kv.emplace_back(k, v); }
+        }
+        s.lines.push_back(std::move(l));
     }
     return s;
 }
-inline std::string RenderSettings(const Settings& s) {
-    std::string out = "; WrongGPU: settings chosen in the launcher or in a WrongGPU menu in the game (they take precedence over wronggpu.ini)\r\n";
-    for (const auto& p : s.kv) out += p.first + "=" + p.second + "\r\n";
+// The file's text: a new file (nothing read) starts with a comment saying what it is (newFileHeader: complete lines; null:
+// settings.ini's); a read one keeps its BOM and every line with its own line end, the changed keys rewritten and new keys at
+// the end. No stamp (UpdateStateFile adds it when the file is WrongGPU's).
+inline std::string RenderSettings(const Settings& s, const char* newFileHeader = nullptr) {
+    std::string out = s.bom ? "\xEF\xBB\xBF" : "";
+    if (!s.present && s.lines.empty()) {
+        out += newFileHeader ? newFileHeader
+                             : "; WrongGPU: settings chosen in the launcher or in a WrongGPU menu in the game (they take precedence over wronggpu.ini)\r\n";
+        for (const auto& p : s.kv) out += p.first + "=" + p.second + "\r\n";
+        return out;
+    }
+    for (const auto& l : s.lines) out += l.text + l.eol;
     return out;
 }
 // settings.ini of the game in gameDir, read now from disk. Missing: present = false, no keys. Unreadable or corrupt: no keys,
@@ -563,7 +739,7 @@ inline Settings ReadSettings(const std::wstring& gameDir) {
     return ParseSettings(text);
 }
 
-enum class SetResult { Ok, NoStateFolder, StateFolderUnknown, Busy, LockDenied, Unreadable, Invalid, AccessDenied, WriteFailed };
+enum class SetResult { Ok, NoStateFolder, StateFolderUnknown, Busy, LockDenied, Unreadable, Unparseable, Changed, Invalid, AccessDenied, WriteFailed };
 inline const char* SetResultWords(SetResult r) {
     switch (r) {
         case SetResult::Ok: return "saved";
@@ -572,35 +748,83 @@ inline const char* SetResultWords(SetResult r) {
         case SetResult::Busy: return "another WrongGPU program kept the game's state lock";
         case SetResult::LockDenied: return "WrongGPU may not use this game's state lock (access denied); run the launcher's repair as administrator";
         case SetResult::Unreadable: return "the settings file could not be read (left as it is)";
+        case SetResult::Unparseable: return "the settings file is not text WrongGPU can keep as it is, so nothing was saved (the file is left as it is)";
+        case SetResult::Changed: return "another program changed or made the settings file while WrongGPU saved, so nothing was saved (its file is left as it is)";
         case SetResult::Invalid: return "not a valid key or value";
         case SetResult::AccessDenied: return "WrongGPU can't write to the game folder; run the launcher's repair as administrator";
         case SetResult::WriteFailed: return "the settings file could not be written";
     }
     return "?";
 }
-// The outcome of SetSettings: the result, its Win32 error, and (a failed write) the write's secondary failures. words() says
-// everything a consumer must show, including a temporary file that could not be deleted.
+// The outcome of SetSettings / UpdateSettings: the result, its Win32 error, what was wrong with the file (Unparseable), whether
+// a write happened, and (a failed write) the write's secondary failures. words() says everything a consumer must show,
+// including a temporary file that could not be deleted.
 struct SetOutcome {
     SetResult result = SetResult::Ok;
     DWORD error = 0;
-    WriteResult write;  // the write's outcome when one was attempted (secondary close / cleanup failures)
+    std::string why;      // Unparseable: where (ParseSettings)
+    bool written = false; // Ok: a new file was written (false: nothing had changed)
+    WriteResult write;    // the write's outcome when one was attempted (secondary close / cleanup failures)
     bool ok() const { return result == SetResult::Ok; }
     std::string words() const {
         std::string w = SetResultWords(result);
+        if (!why.empty()) w += " (" + why + ")";
         if (result != SetResult::Ok && error && error != WAIT_TIMEOUT) w += " (error " + std::to_string(error) + ")";
         if (write.closeError && write.closeError != write.error) w += "; closing the temporary file also failed (error " + std::to_string(write.closeError) + ")";
         if (write.cleanupError) w += "; a temporary file could not be deleted (error " + std::to_string(write.cleanupError) + ") and is left in the state folder";
         return w;
     }
 };
-// The read-modify-write of settings.ini under the game's state lock: the file re-read from disk after the lock is taken, the
-// changes applied (a corrupt file starts empty; an unreadable one is never overwritten), written atomically. The state folder
-// is never created here. Distinct results for a consumer to show: AccessDenied (the game folder is not writable for this
-// process) and LockDenied (the lock may not be opened) both point to the launcher's elevated repair; Busy is contention.
-inline SetOutcome SetSettings(const std::wstring& gameDir, const std::vector<std::pair<std::string, std::string>>& changes, DWORD waitMs = kDefaultWaitMs) {
+// What the file is: its identity and its last write, to tell it was not changed or replaced.
+struct FileIdentity {
+    DWORD volume = 0, indexHigh = 0, indexLow = 0, sizeHigh = 0, sizeLow = 0;
+    FILETIME written{};
+    bool operator==(const FileIdentity& o) const {
+        return volume == o.volume && indexHigh == o.indexHigh && indexLow == o.indexLow && sizeHigh == o.sizeHigh && sizeLow == o.sizeLow &&
+               written.dwLowDateTime == o.written.dwLowDateTime && written.dwHighDateTime == o.written.dwHighDateTime;
+    }
+};
+inline bool IdentityOf(HANDLE h, FileIdentity* id) {
+    BY_HANDLE_FILE_INFORMATION fi{};
+    if (!GetFileInformationByHandle(h, &fi)) return false;
+    id->volume = fi.dwVolumeSerialNumber; id->indexHigh = fi.nFileIndexHigh; id->indexLow = fi.nFileIndexLow;
+    id->sizeHigh = fi.nFileSizeHigh; id->sizeLow = fi.nFileSizeLow; id->written = fi.ftLastWriteTime;
+    return true;
+}
+// The file at path is still the one with `want`'s identity (opened for attributes only, sharing everything).
+inline bool StillIdentity(const std::wstring& path, const FileIdentity& want) {
+    HANDLE h = CreateFileW(ExtendedPath(path).c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                           FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    FileIdentity now;
+    const bool ok = IdentityOf(h, &now) && now == want;
+    CloseHandle(h);
+    return ok;
+}
+// What to change, decided from the file as it is now (read under the state lock): the keys and values to set.
+using SettingsDecision = std::function<void(const Settings& now, std::vector<std::pair<std::string, std::string>>* changes)>;
+// The read-decide-write of settings.ini under the game's state lock, safe against a player or another program writing the
+// file meanwhile (the state lock coordinates WrongGPU's programs only):
+// - The file is opened and HELD (reads shared, no writes, no deletes, no replace) from the read to just before the new file
+//   is moved into place: an editor's save in that time fails with a sharing violation and its bytes never reach the disk.
+// - Right before the move, the file's identity and last write are checked once more (StillIdentity): a file changed or
+//   replaced in that moment refuses the save (Changed). A file that was not there is created only where nothing is
+//   (MoveFileExW without REPLACE): one that appeared meanwhile refuses the save (Changed). The other program's bytes stay.
+// - decide() is called with the file as read under the lock (a decision never rests on a read made before another WrongGPU
+//   program's write); the changes that differ are applied, nothing differs: no write.
+// - Unreadable or Unparseable (text WrongGPU cannot keep): never replaced, refused. Comments, lines WrongGPU does not use and
+//   every line's own line end are kept; only the file's valid stamp is taken off (and put back when the file stays
+//   WrongGPU's: it was WrongGPU's or new, and the install has an id).
+// - The state folder is never created here. AccessDenied and LockDenied point to the launcher's elevated repair; Busy is
+//   contention. Test seam: TestFault("replace-held") with the file held, TestFault("replace-check") after it is let go and
+//   before the identity check (the tests act there; returning false).
+// UpdateStateFile: the same for any key=value state file of the game's state folder (`fileName`, e.g. the model choice
+// record; newFileHeader: the comment a new file starts with, as RenderSettings). The lock is recursive on one thread, so a
+// caller already holding the game's state lock may call it.
+inline SetOutcome UpdateStateFile(const std::wstring& gameDir, const wchar_t* fileName, const SettingsDecision& decide, DWORD waitMs,
+                                  const char* newFileHeader) {
     SetOutcome o;
     auto fail = [&](SetResult r, DWORD e) { o.result = r; o.error = e; return o; };
-    for (const auto& c : changes) if (!ValidKey(c.first) || !ValidValue(c.second)) return fail(SetResult::Invalid, 0);
     DWORD e = 0;
     switch (DirectoryState(StateDirOf(gameDir), &e)) {
         case PathState::Present: break;
@@ -609,21 +833,94 @@ inline SetOutcome SetSettings(const std::wstring& gameDir, const std::vector<std
     }
     StateLock lock(gameDir, waitMs);
     if (!lock.held()) return fail(lock.timedOut() ? SetResult::Busy : lock.denied() ? SetResult::LockDenied : SetResult::StateFolderUnknown, lock.error());
+    const std::wstring path = JoinPath(StateDirOf(gameDir), fileName), target = ExtendedPath(path);
+    struct Held { HANDLE h = INVALID_HANDLE_VALUE; ~Held() { if (h != INVALID_HANDLE_VALUE) CloseHandle(h); } } held;
+    held.h = CreateFileW(target.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     std::string text;
-    bool missing = false;
     Settings s;
-    if (ReadBytes(SettingsPathOf(gameDir), &text, &missing, &e)) s = ParseSettings(text);
-    else if (!missing) return fail(e == ERROR_ACCESS_DENIED ? SetResult::AccessDenied : SetResult::Unreadable, e);
-    if (s.corrupt) s = Settings();
-    bool changed = !s.present;
+    FileIdentity before;
+    if (held.h == INVALID_HANDLE_VALUE) {
+        e = GetLastError();
+        if (e != ERROR_FILE_NOT_FOUND && e != ERROR_PATH_NOT_FOUND) return fail(e == ERROR_ACCESS_DENIED ? SetResult::AccessDenied : SetResult::Unreadable, e);
+    } else {
+        char buf[4096];
+        DWORD got = 0;
+        for (;;) {
+            if (!ReadFile(held.h, buf, sizeof buf, &got, nullptr)) return fail(SetResult::Unreadable, GetLastError());
+            if (!got) break;
+            text.append(buf, got);
+            if (text.size() > kMaxStateBytes) return fail(SetResult::Unreadable, ERROR_FILE_TOO_LARGE);
+        }
+        if (!IdentityOf(held.h, &before)) return fail(SetResult::Unreadable, GetLastError());
+        s = ParseSettings(text);
+        if (s.corrupt) { o.why = s.why; return fail(SetResult::Unparseable, 0); }
+    }
+    const std::string id = InstallIdOf(gameDir), name = FileNameOf(path);
+    const size_t stampAt = s.present ? ValidStampAt(text, name, id) : std::string::npos;
+    const bool ours = !id.empty() && (!s.present || stampAt != std::string::npos);
+    if (stampAt != std::string::npos) {  // the valid stamp is the last line: off for the change (put back below)
+        s.lines.pop_back();
+        s.endsWithEol = true;
+    }
+    std::vector<std::pair<std::string, std::string>> changes;
+    decide(s, &changes);
+    for (const auto& c : changes) if (!ValidKey(c.first) || !ValidValue(c.second)) return fail(SetResult::Invalid, 0);
+    bool changed = false;
     for (const auto& c : changes) {
         const std::string* now = Get(s, c.first);
         if (!now || *now != c.second) { Set(s, c.first, c.second); changed = true; }
     }
     if (!changed) return o;
-    o.write = WriteAtomic(SettingsPathOf(gameDir), RenderSettings(s));
-    if (!o.write.ok) return fail(o.write.error == ERROR_ACCESS_DENIED ? SetResult::AccessDenied : SetResult::WriteFailed, o.write.error);
+    std::string body = RenderSettings(s, newFileHeader);
+    if (ours && !body.empty() && body.back() != '\n') body += s.eol;  // (WrongGPU's own file: its stamp on a line of its own)
+    const std::string bytes = ours ? Stamped(body, name, id) : body;
+    if (bytes.size() > kMaxStateBytes) { o.write.error = ERROR_FILE_TOO_LARGE; return fail(SetResult::WriteFailed, ERROR_FILE_TOO_LARGE); }
+    // the new file, complete and flushed, beside the held one
+    static volatile LONG counter = 0;
+    std::wstring tmp;
+    HANDLE th = INVALID_HANDLE_VALUE;
+    for (int attempt = 0; attempt < 16 && th == INVALID_HANDLE_VALUE; ++attempt) {
+        tmp = target + kTempMark + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(InterlockedIncrement(&counter));
+        th = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (th == INVALID_HANDLE_VALUE && GetLastError() != ERROR_FILE_EXISTS && GetLastError() != ERROR_ALREADY_EXISTS) break;
+    }
+    if (th == INVALID_HANDLE_VALUE) {
+        o.write.error = GetLastError();
+        return fail(o.write.error == ERROR_ACCESS_DENIED ? SetResult::AccessDenied : SetResult::WriteFailed, o.write.error);
+    }
+    DWORD put = 0;
+    bool ok = WriteFile(th, bytes.data(), static_cast<DWORD>(bytes.size()), &put, nullptr) && put == bytes.size() && FlushFileBuffers(th);
+    if (!ok) o.write.error = GetLastError() ? GetLastError() : ERROR_WRITE_FAULT;
+    if (!CloseHandle(th) && ok) { ok = false; o.write.error = o.write.closeError = GetLastError(); }
+    auto dropTemp = [&]() { if (!DeleteFileW(tmp.c_str())) { o.write.cleanupError = GetLastError(); o.write.tempLeft = tmp; } };
+    if (!ok) { dropTemp(); return fail(SetResult::WriteFailed, o.write.error); }
+    Faulted("replace-held");  // (tests: another program tries to save the held file here; Windows refuses it)
+    const bool existed = held.h != INVALID_HANDLE_VALUE;
+    if (existed) { CloseHandle(held.h); held.h = INVALID_HANDLE_VALUE; }
+    Faulted("replace-check");  // (tests: another program changes or makes the file in this moment)
+    if (existed ? !StillIdentity(path, before) : false) { dropTemp(); return fail(SetResult::Changed, 0); }
+    DWORD me = 0;
+    bool changedMeanwhile = false;  // a retried replace: the file must still be the one decided on
+    const auto unchanged = [&]() { return !existed || StillIdentity(path, before); };  // (absent: one that appears refuses the move itself)
+    if (!MoveIntoPlace(tmp, target, (existed ? MOVEFILE_REPLACE_EXISTING : 0) | MOVEFILE_WRITE_THROUGH, &me, unchanged, &changedMeanwhile)) {
+        dropTemp();
+        if (changedMeanwhile) return fail(SetResult::Changed, 0);  // the program that held the file wrote it: its bytes stay
+        if (!existed && (me == ERROR_ALREADY_EXISTS || me == ERROR_FILE_EXISTS)) return fail(SetResult::Changed, 0);  // it appeared: the other program's
+        o.write.error = me;
+        return fail(me == ERROR_ACCESS_DENIED ? SetResult::AccessDenied : SetResult::WriteFailed, me);
+    }
+    o.write.ok = true;
+    o.written = true;
     return o;
+}
+inline SetOutcome UpdateSettings(const std::wstring& gameDir, const SettingsDecision& decide, DWORD waitMs = kDefaultWaitMs) {
+    return UpdateStateFile(gameDir, kSettingsFile, decide, waitMs, nullptr);
+}
+// UpdateSettings with fixed changes (a key already at its value is not written again).
+inline SetOutcome SetSettings(const std::wstring& gameDir, const std::vector<std::pair<std::string, std::string>>& changes, DWORD waitMs = kDefaultWaitMs) {
+    for (const auto& c : changes)
+        if (!ValidKey(c.first) || !ValidValue(c.second)) { SetOutcome o; o.result = SetResult::Invalid; return o; }
+    return UpdateSettings(gameDir, [&](const Settings&, std::vector<std::pair<std::string, std::string>>* out) { *out = changes; }, waitMs);
 }
 
 }  // namespace wgstate

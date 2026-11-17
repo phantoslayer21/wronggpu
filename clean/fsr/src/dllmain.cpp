@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "../include/wronggpu_host_event.h"
 #include "ffx_headers.h"
 #include "frontend.h"
 #include "version.h"
@@ -53,6 +54,18 @@ HMODULE g_self = nullptr;
 std::once_flag g_initOnce;
 FrontEnd* g_frontEnd = nullptr;
 bool g_hosted = false;  // loaded under another name by an upscaler mod (OptiScaler) as its FidelityFX upscaler
+// wronggpu.ini as it is on disk now (FrontEnd::Platform::readWronggpuIni). A named class, not a lambda that captures the
+// path by copy: with MSVC's /Zc:lambda (on with /permissive-, as in CI) a lambda whose capture copy throws terminates the
+// process instead of unwinding; the same copy in a class constructor unwinds normally (async_create.h DeviceRelease).
+struct WronggpuIniReader {
+    std::wstring path;
+    explicit WronggpuIniReader(const std::wstring& p) : path(p) {}
+    std::string operator()() const {
+        std::string text;
+        wgstate::ReadBytes(path, &text);
+        return text;
+    }
+};
 
 std::once_flag g_originalOnce;
 OriginalApi g_original;
@@ -138,6 +151,48 @@ bool StartTimer(uint32_t ms, std::function<uint32_t()> fn) {
     return true;
 }
 
+// The callables Get() gives the front end that keep a string of the configuration. Named classes, not lambdas that
+// capture the string by copy: with MSVC's /Zc:lambda (on with /permissive-, as in CI) a lambda whose capture copy throws
+// (std::bad_alloc) terminates the process instead of unwinding; the same copy in a class constructor unwinds normally
+// (async_create.h DeviceRelease).
+//
+// Where the converted model is looked for (config.h ModelPlace): wronggpu.ini [fsr] model_dir, the game's data folder,
+// then the runtime's own default.
+struct ModelPlacesOf {
+    std::string modelDir;
+    explicit ModelPlacesOf(const std::string& d) : modelDir(d) {}
+    std::vector<ModelPlace> operator()() const {
+        std::vector<ModelPlace> places;
+        const std::wstring data = Place().dataDir;
+        if (!modelDir.empty()) {
+            std::wstring dir = Widen(modelDir);
+            const bool absolute = dir.size() > 1 && (dir[1] == L':' || (dir[0] == L'\\' && dir[1] == L'\\'));
+            if (!absolute) dir = data + L"\\" + dir;
+            places.push_back({Narrow(dir), "wronggpu.ini model_dir", false});
+        }
+        wchar_t exe[MAX_PATH] = {};
+        const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        std::wstring exeDir(exe, n);
+        exeDir = exeDir.substr(0, exeDir.find_last_of(L"\\/") == std::wstring::npos ? 0 : exeDir.find_last_of(L"\\/"));
+        const std::wstring gameData = exeDir + L"\\WrongGPU";
+        places.push_back({Narrow(gameData + L"\\model"), "the game's data folder", false});
+        if (_wcsicmp(data.c_str(), gameData.c_str()) != 0) places.push_back({Narrow(data + L"\\model"), "the data folder (WG_DATA_DIR)", false});
+        wchar_t local[MAX_PATH] = {};
+        const DWORD m = GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
+        if (m > 0 && m < MAX_PATH) places.push_back({Narrow(std::wstring(local, m) + L"\\WrongGPU\\model"), "%LOCALAPPDATA%", true});
+        return places;
+    }
+};
+// AMD's upscaler for fallbacks and the version list: the DLL next to this one, else the comparison DLL.
+struct OriginalOrCompare {
+    std::string dll;
+    explicit OriginalOrCompare(const std::string& d) : dll(d) {}
+    const OriginalApi* operator()() const {
+        if (const OriginalApi* o = LoadOriginal()) return o;
+        return CompareApi(dll);
+    }
+};
+
 FrontEnd& Get() {
     std::call_once(g_initOnce, [] {
         // Shared settings first (clean/wgshared): data folder, wronggpu.ini, the shared block (this DLL writes it when
@@ -176,6 +231,8 @@ FrontEnd& Get() {
         p.logBytes = [] { return L().Bytes(); };
         p.resourceInfo = &D3D12ResourceInfo;
         p.timer = &StartTimer;
+        p.retainDevice = &RetainDevice;
+        p.releaseDevice = &ReleaseDevice;
         p.deviceLost = [](void* device) {
             return device && static_cast<ID3D12Device*>(device)->GetDeviceRemovedReason() != S_OK;
         };
@@ -187,27 +244,7 @@ FrontEnd& Get() {
         // Where the converted model is looked for (config.h ModelPlace): wronggpu.ini [fsr] model_dir, the game's data
         // folder, then the runtime's own default. Files a game reads must be in places the game's process sees: the
         // installer's %LOCALAPPDATA% copy can be private to another app's container.
-        p.modelPlaces = [modelDir = config.modelDir] {
-            std::vector<ModelPlace> places;
-            const std::wstring data = Place().dataDir;
-            if (!modelDir.empty()) {
-                std::wstring dir = Widen(modelDir);
-                const bool absolute = dir.size() > 1 && (dir[1] == L':' || (dir[0] == L'\\' && dir[1] == L'\\'));
-                if (!absolute) dir = data + L"\\" + dir;
-                places.push_back({Narrow(dir), "wronggpu.ini model_dir", false});
-            }
-            wchar_t exe[MAX_PATH] = {};
-            const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
-            std::wstring exeDir(exe, n);
-            exeDir = exeDir.substr(0, exeDir.find_last_of(L"\\/") == std::wstring::npos ? 0 : exeDir.find_last_of(L"\\/"));
-            const std::wstring gameData = exeDir + L"\\WrongGPU";
-            places.push_back({Narrow(gameData + L"\\model"), "the game's data folder", false});
-            if (_wcsicmp(data.c_str(), gameData.c_str()) != 0) places.push_back({Narrow(data + L"\\model"), "the data folder (WG_DATA_DIR)", false});
-            wchar_t local[MAX_PATH] = {};
-            const DWORD m = GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
-            if (m > 0 && m < MAX_PATH) places.push_back({Narrow(std::wstring(local, m) + L"\\WrongGPU\\model"), "%LOCALAPPDATA%", true});
-            return places;
-        };
+        p.modelPlaces = ModelPlacesOf(config.modelDir);
         p.fileExists = [](const std::string& path) {
             const DWORD a = GetFileAttributesW(Widen(path).c_str());
             return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
@@ -229,14 +266,29 @@ FrontEnd& Get() {
                 // host's way in and would route the call back to this DLL (config.h Config::customSlot).
                 p.original = []() -> const OriginalApi* { return LoadOriginal(); };
             } else {
-                p.original = [dll]() -> const OriginalApi* {
-                    if (const OriginalApi* o = LoadOriginal()) return o;
-                    return CompareApi(dll);
-                };
+                p.original = OriginalOrCompare(dll);
             }
-            // If WrongGPU.asi has hooked OptiScaler's menu, it (not an FFX version override) chooses the model, and
-            // WrongGPU's own versions are left out of the FFX sub-box. Absent or not hooked: hosted mode as before.
+            // If WrongGPU.asi has hooked OptiScaler's menu, its entry says WrongGPU or AMD, and the game's model choice
+            // record (model_choice_record.h, next to wronggpu.ini) says which WrongGPU model. Absent or not hooked: hosted
+            // mode as before.
             p.asiPlugin = [](char* model) { return QueryAsiPlugin(model); };
+            p.asiShowModel = [](char model) { ShowAsiModel(model); };
+        }
+        // The game's model choice record (model_choice_record.h, in the game's WrongGPU state folder wronggpu-setup next to
+        // wronggpu.ini) decides the WrongGPU model on every route; the plugin writes its menu's model clicks there too.
+        // Always set: without the state folder the front end runs the session's last choice, wronggpu.ini's model item or
+        // Model M, never the host's stored index (FrontEnd::ChooseModel).
+        {
+            const std::wstring ini = Place().ini;
+            const size_t slash = ini.find_last_of(L"\\/");
+            const std::filesystem::path record =
+                wgchoice::RecordPathIn(slash == std::wstring::npos ? std::wstring(L".") : ini.substr(0, slash));
+            p.choiceRecord = record;
+            p.readWronggpuIni = WronggpuIniReader(ini);  // the upgrade migration reads wronggpu.ini's model item under the state lock
+            if (g_hosted) {
+                SetAsiChoiceRecord(record.wstring());
+                SetHostIniPollModels(false);  // the host's stored index is no model choice (the record decides)
+            }
         }
         p.menu = Menu();
         g_frontEnd = new FrontEnd(p, config);
@@ -285,6 +337,18 @@ FFX_API_ENTRY ffxReturnCode_t ffxQuery(ffxContext* context, ffxQueryDescHeader* 
 
 FFX_API_ENTRY ffxReturnCode_t ffxDispatch(ffxContext* context, const ffxDispatchDescHeader* desc) {
     return Guard("ffxDispatch", [&] { return Get().Dispatch(context, desc); });
+}
+
+// The WrongGPU edition of OptiScaler: the player selected the listed version `versionId` in its upscaler list
+// (include/wronggpu_host_event.h). Not hosted or not initialised: WG_HOST_SELECTED_NOT_READY.
+__declspec(dllexport) int32_t WrongGpuHostSelectedV1(uint64_t versionId) {
+    int32_t rc = WG_HOST_SELECTED_NOT_READY;
+    Guard("WrongGpuHostSelectedV1", [&] {
+        FrontEnd& fe = Get();
+        if (fe.GetConfig().hosted) rc = fe.HostSelected(versionId);
+        return FFX_API_RETURN_OK;
+    });
+    return rc;
 }
 
 }  // extern "C"

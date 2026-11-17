@@ -5,10 +5,32 @@
 #pragma once
 
 // ---- the exact input stage's arithmetic (k_io.hip with KI_FAST = 0) --------------------------------------------------
+#ifndef KI_HWMATH
+#define KI_HWMATH 0
+#endif
+#if KI_HWMATH
+// CLOSE-APPROXIMATION variant (opt-in, never the default): the transcendental unit instead of the correctly rounded
+// sequences: v_log_f32 / v_exp_f32 (about 1 FP32 ulp), v_rcp_f32 and a product for the divisions. The results meet the
+// input stage's FP16 roundings, so they differ from the exact form only where an FP32 result lies within about one
+// FP32 ulp of an FP16 rounding midpoint.
+float ki_log2(float x) { return log2(x); }
+float ki_exp2(float x) { return exp2(x); }
+float ki_rcp(float x) { return rcp(x); }
+// a rcp(b), branch free. For |b| >= 2^126, 1 / b would flush to zero (e.g. the score's g / nu for a colour range near
+// FLT_MAX, where the quotient is about 1/8): there b is scaled by s = 2^-64 first and the product scaled back,
+// (a rcp(b s)) s, which cannot overflow (|a / b| <= 2^2 there) and flushes only where a / b itself is below 2^-126.
+// s = 1 elsewhere (the same value as a rcp(b)); b = 0, +-inf and NaN give the IEEE quotient's special value.
+float ki_div(float a, float b)
+{
+    const float s = abs(b) < 8.5070592e+37f ? 1.0f : 5.4210109e-20f;   // 2^126, 2^-64
+    return (a * rcp(b * s)) * s;
+}
+#else
 float ki_log2(float x) { return kf_log2(x); }
 float ki_exp2(float x) { return kf_exp2(x); }
 float ki_rcp(float x) { return kf_div(1.0f, x); }
 float ki_div(float a, float b) { return kf_div(a, b); }
+#endif
 // spec 42 decode factor D(t)
 float ki_decode(float t)
 {

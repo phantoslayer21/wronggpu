@@ -85,6 +85,102 @@ def pack_block(tensors, C, heads, mlp, d_row="gfx12"):
     return blob + bytes((-len(blob)) % ALIGN)
 
 
+# ---- the FP16-form block kernels' blob ("q7", clean/l/kernels/l_q7.hip) -------------------------------------------------
+#
+# Natural order, no fragment layout: FP16 vectors g1' [C], g2' [C], bp [C], b1 [mlp], b2 [C], B [heads][16][16]
+# (g' = RN16(float32(gamma) x sqrtf(C)), oracle.gamma_q7), then the FP8 codes of Wqk [heads][32][C], Wv [heads][32][C],
+# Wp [C][32 heads], W1 [mlp][C], W2 [C][mlp], each row-major; padded to ALIGN.
+
+def q7_block_offsets(C, heads, mlp):
+    """Byte offsets of the q7 blob's parts and its unpadded length."""
+    o, at = {}, 0
+    for name, n in (("g1", C), ("g2", C), ("bp", C), ("b1", mlp), ("b2", C), ("B", heads * 256)):
+        o[name], at = at, at + 2 * n
+    mats = (("Wqk", heads * 32 * C), ("Wv", heads * 32 * C), ("Wp", C * 32 * heads), ("W1", mlp * C), ("W2", C * mlp))
+    for name, n in mats:
+        o[name], at = at, at + n
+    o["end8"] = at                     # a multiple of 16 for every width
+    for name, n in mats:               # the same matrices as FP16 (exact: every FP8 value is an FP16 value), read by
+        o[name + "16"], at = at, at + 2 * n    # the scalar kernels without an FP8 decode (Q7F-1)
+    o["end16"] = at
+    for name, n in mats:               # sum |w| per 32-wide chunk and row, float32 [K / 32][rows] (exact), the bound of
+        o[name + "_wsum"], at = at, at + 4 * (n // 32)   # the matrix-instruction path (Q7F-2 / S2a, wsum_table)
+    o["end"] = at
+    return o
+
+
+def wsum_table(W):
+    """sum |w| per row and 32-wide chunk of an FP8 matrix W [rows, K] (K a multiple of 32), float32, CHUNK-major
+    [K / 32][rows] (a lane's 8 consecutive rows of one chunk are one 32-byte load): exact (at most 32 FP8 magnitudes,
+    multiples of 2^-9 below 2^14). A NaN weight gives NaN, and wsum x amax < 63 is then false: the exact fallback."""
+    from clean.reference.fp8 import q8
+    a = np.abs(q8(np.asarray(W, np.float64)))
+    rows, K = a.shape
+    s = a.reshape(rows, K // 32, 32).sum(-1).T
+    assert np.array_equal(s.astype(np.float32).astype(np.float64), s, equal_nan=True)
+    return np.ascontiguousarray(s.astype(np.float32))
+
+
+def pack_q7_block(tensors, C, heads, mlp):
+    """One block's q7 blob from its tensors (gamma1, gamma2, Wqk, Wv, B, Wp, bp, W1, b1, W2, b2)."""
+    from clean.l.reference import oracle as L
+    from clean.reference.fp8 import fp8_encode, f16, q8
+    t = {k: np.asarray(v, np.float64) for k, v in tensors.items()}
+    shapes = _table.block_shapes(C, heads, mlp)
+    for name, shape in shapes.items():
+        if t[name].shape != tuple(shape):
+            raise ValueError(f"q7 block: {name} has shape {t[name].shape}, expected {tuple(shape)}")
+    parts = [L.gamma_q7(t["gamma1"], C), L.gamma_q7(t["gamma2"], C), f16(t["bp"]), f16(t["b1"]), f16(t["b2"]),
+             f16(t["B"]).reshape(-1)]
+    blob = b"".join(np.asarray(v, np.float64).astype(np.float16).tobytes() for v in parts)
+    for name in ("Wqk", "Wv", "Wp", "W1", "W2"):
+        blob += fp8_encode(q8(t[name])).reshape(-1).tobytes()
+    for name in ("Wqk", "Wv", "Wp", "W1", "W2"):
+        blob += q8(t[name]).astype(np.float16).reshape(-1).tobytes()
+    for name in ("Wqk", "Wv", "Wp", "W1", "W2"):
+        blob += wsum_table(t[name].reshape(-1, t[name].shape[-1])).tobytes()
+    assert len(blob) == q7_block_offsets(C, heads, mlp)["end"]
+    return blob + bytes((-len(blob)) % ALIGN)
+
+
+def q7_linear_offsets(n, K):
+    """Byte offsets of a q7 linear blob (a merge or an expansion, l_q7w.hip): FP16 bias [n] at 0, FP8 rows [n][K] at
+    the next multiple of 16, then the same rows as FP16 (Q7F-1), then sum |w| [K / 32][n] float32 (Q7F-2)."""
+    rows = (2 * n + 15) // 16 * 16
+    return {"b": 0, "W": rows, "W16": rows + n * K, "W_wsum": rows + 3 * n * K,
+            "end": rows + 3 * n * K + 4 * n * (K // 32)}
+
+
+def pack_q7_linear(W, b):
+    """A merge's (Wm, bm) or an expansion's (We, be) q7 linear blob: W [n, K] (FP8 values), b [n] (FP16 values)."""
+    from clean.reference.fp8 import fp8_encode, f16, q8
+    W = np.asarray(W, np.float64)
+    b = np.asarray(b, np.float64)
+    n, K = W.shape
+    if b.shape != (n,) or K % 32:
+        raise ValueError(f"q7 linear: W {W.shape}, b {b.shape}")
+    o = q7_linear_offsets(n, K)
+    head = f16(b).astype(np.float16).tobytes()
+    blob = (head + bytes(o["W"] - len(head)) + fp8_encode(q8(W)).reshape(-1).tobytes() +
+            q8(W).astype(np.float16).reshape(-1).tobytes() + wsum_table(W).tobytes())
+    assert len(blob) == o["end"]
+    return blob + bytes((-len(blob)) % ALIGN)
+
+
+def q7_tables():
+    """The two FP16 lookup tables of the q7 kernels, indexed by an FP16 bit pattern (65536 entries each, FP16):
+    rsqrt[b] = RN16(float32(1 / float32(sqrt(float32(x))))) (the norm's r of S' = x) and rcp[b] = RN16(float32(1 /
+    float32(x))) (the attention weights' normaliser of a row sum x), as the oracle computes them (oracle._rsqrt32,
+    oracle._rcp32). Returns the bytes rsqrt || rcp."""
+    from clean.l.reference import oracle as L
+    from clean.reference.fp8 import f16
+    x = np.arange(65536, dtype=np.uint32).astype(np.uint16).view(np.float16).astype(np.float64)
+    with np.errstate(all="ignore"):
+        rs = f16(L._rsqrt32(x)).astype(np.float16)
+        rc = f16(L._rcp32(x)).astype(np.float16)
+    return rs.tobytes() + rc.tobytes()
+
+
 def pack_values(tensors, d_row="gfx12"):
     """Model M's enc0 blob with zero projection: only the dither table and the two scalars are used."""
     t = {"W": np.zeros((64, 80), np.float32), "b": np.zeros(64, np.float32),

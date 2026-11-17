@@ -335,6 +335,10 @@ Config ParseConfig(const std::string& text, std::string* warnings) {
             float f = 0;
             ok = ParseFloat(value, f) && f >= 0.0f && f <= 600000.0f;
             if (ok) c.createWaitMs = static_cast<uint32_t>(f);
+        } else if (key == "create_giveup_ms") {
+            float f = 0;
+            ok = ParseFloat(value, f) && f >= 1.0f && f <= 600000.0f;
+            if (ok) c.createGiveUpMs = static_cast<uint32_t>(f);
         } else if (key == "context_park_ms") {
             float f = 0;
             ok = ParseFloat(value, f) && f >= 0.0f && f <= 60000.0f;
@@ -396,6 +400,30 @@ std::string Config::BackendOptions() const {
                   view.c_str(), filter.c_str(), jitterCompensation ? 1 : 0, warpWeight, debugGain, splitTest ? 1 : 0);
     const std::string extra = NormalizeOptions(runtimeOptions);
     return extra.empty() ? std::string(buffer) : std::string(buffer) + ";" + extra;
+}
+
+void ApplyStateSettings(Config& c, const std::vector<std::pair<std::string, std::string>>& kv, std::string* notes) {
+    auto note = [&](const std::string& s) { if (notes) *notes += s + "\n"; };
+    std::string items;
+    for (const auto& p : kv) {
+        const std::string& key = p.first;
+        const std::string lv = Lower(p.second);
+        if (key == "upscaler") {
+            if (lv == "network") c.upscaler = UpscalerChoice::Network;
+            else if (lv == "amd") c.upscaler = UpscalerChoice::Amd;
+            else if (lv == "standin" || lv == "stand-in") c.upscaler = UpscalerChoice::StandIn;
+            else { note("settings.ini: bad value \"" + p.second + "\" for upscaler (wronggpu.ini's kept)"); continue; }
+            note("settings.ini: upscaler = " + lv + " (over wronggpu.ini)");
+        } else if (key.rfind("rr_", 0) == 0 || key == "model") {
+            continue;  // the RR plugin's keys and the model choice record's: not the front end's
+        } else if (IsRuntimeOptionKey(key)) {
+            items += (items.empty() ? "" : ";") + key + "=" + p.second;
+            note("settings.ini: " + key + " = " + p.second + " (over wronggpu.ini)");
+        } else {
+            note("settings.ini: unknown key \"" + key + "\" (ignored)");
+        }
+    }
+    if (!items.empty()) c.runtimeOptions = NormalizeOptions(c.runtimeOptions + ";" + items);
 }
 
 std::string OptionValue(const std::string& options, const char* key, bool* found) {
@@ -488,7 +516,8 @@ std::string Config::Describe() const {
     // Paths (runtime_dll, runtime_options) can be long: no fixed-size buffer for them.
     return std::string("upscaler=") + up + " runtime_dll=" + runtimeDll + (modelDir.empty() ? "" : " model_dir=" + modelDir) +
            " fallback_to_amd=" + (fallbackToAmd ? "1" : "0") +
-           " create_wait_ms=" + std::to_string(createWaitMs) + " context_park_ms=" + std::to_string(contextParkMs) + " " +
+           " create_wait_ms=" + std::to_string(createWaitMs) + " create_giveup_ms=" + std::to_string(createGiveUpMs) +
+           " context_park_ms=" + std::to_string(contextParkMs) + " " +
            BackendOptions() + buffer;
 }
 

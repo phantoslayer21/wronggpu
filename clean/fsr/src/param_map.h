@@ -60,7 +60,8 @@ void AdaptFrame(const WgUpscalerBackend* backend, WgFrame& frame);
 // Dispatches `frame` on `backend`. When it answers WG_ERROR_NOT_READY (version 2: e.g. the command list cannot be
 // split this frame), the stand-in upscales this one frame instead: it is created on first need from `info` (the
 // context's create info; services are not passed on) and kept in *fallback (destroy it with the context). `note`
-// then says so. Returns the backend's result, or the stand-in's after WG_ERROR_NOT_READY.
+// then says so. Returns the backend's result; after WG_ERROR_NOT_READY, WG_OK when the stand-in took the frame, else
+// WG_ERROR_NOT_READY still (the stand-in's create or dispatch failed: `note` says which; never the stand-in's error).
 WgResult DispatchWithFallback(const WgUpscalerBackend* backend, WgUpscaler* upscaler, WgFrame& frame, const WgUpscalerBackend* standIn,
                               const WgCreateInfo& info, WgUpscaler** fallback, std::string& note);
 

@@ -90,6 +90,16 @@ int main() {
         require(EffectiveSettings(toK, "")["model"] == "k" && EffectiveSettings(fresh, "")["model"] == "m",
                 "the file's model: K from its last model item, M otherwise");
         require(EffectiveSettings("[fsr]\r\nruntime_options = model=K;model=M\r\n", "")["model"] == "m", "the file's model: the last model item counts");
+        // ---- the model choice record's inputs (launcher.cpp ApplyProfile)
+        require(ModelOfWronggpuIni(toK) == 'K', "ModelOfWronggpuIni: model=K");
+        {
+            string v;
+            const string toK = SetOptiModelEntry("[WrongGPU]\r\nUpscalerIndex=5\r\n", 'K');
+            require(IniHasKey(toK, "WrongGPU", "UpscalerIndex", &v) && v == K, "SetOptiModelEntry: AMD's value to K's entry (1)");
+            const string toL = SetOptiModelEntry("[FSR]\r\nUpscalerIndex=0\r\n", 'L');
+            require(IniHasKey(toL, "FSR", "UpscalerIndex", &v) && v == (withL ? L : string("0")),
+                    "SetOptiModelEntry: L's entry (2) only with the L choice (else Model M's, 0)");
+        }
         require(EffectiveSettings(withLItem, "")["model"] == (withL ? "l" : "m"), "the file's model: L only with the Model L choice");
         // the profile a game's files imply (no profile.ini): K when the files say K (an install that started on Preset K)
         require(ImportProfile(toK, "").get("model") == "k" && ImportProfile(fresh, "").get("model") == "m", "the imported profile: model=k from model=K");

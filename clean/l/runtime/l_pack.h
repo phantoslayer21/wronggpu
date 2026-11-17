@@ -63,5 +63,11 @@ bool pack_dec_project(const std::vector<float>& W, const std::vector<float>& b, 
 bool pack_model(const std::map<std::string, StageTensors>& params, const DRow& d,
                 std::map<std::string, std::vector<uint8_t>>* out, std::string* err);
 
+// The FP16-form (q7) kernels' blobs (clean/l/runtime/l_q7_pack.h, byte for byte l_pack.py's): "enc0_block.q7",
+// "dec0_block.q7"; per shared stage s (enc1, enc2, b0 ... b5, dec2, dec1) "<s>.q7" (its block) and, for the encoder /
+// decoder stages, "<s>.q7lin" (the merge Wm / bm, the expansion We / be); "q7.tab" (the rsqrt / rcp tables).
+bool pack_q7_model(const std::map<std::string, StageTensors>& params, std::map<std::string, std::vector<uint8_t>>* out,
+                   std::string* err);
+
 }  // namespace l
 }  // namespace wgrt

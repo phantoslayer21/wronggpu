@@ -159,12 +159,19 @@ WG_RT_API const char* wg_rt_model_source(void* rt);
 /* The kernels in use, as "swin=<code object> enc0=<code object> dec0=<code object> exposure=<variant>
  * post=<kernel> filter=<kernel> post_last=<kernel of the last frame>". */
 WG_RT_API const char* wg_rt_kernels(void* rt);
-/* Notes of create for the caller's log, one per line, or an empty string. At present one: the output filter is
- * "analytic" because the model file has no output filter weights (spec 06 draft 4), or because this build cannot
- * run them. The filter in use is also in wg_rt_kernels() ("output_filter=original|analytic|quality5|quality9
+/* Notes of create for the caller's log, one per line, or an empty string. At present two. Model M / L: the output
+ * filter is "analytic" because the model file has no output filter weights (spec 06 draft 4), or because this build
+ * cannot run them. Model K on the native D3D12 device: its softmax stages take their round-to-odd ports because the mix
+ * form failed the create-time self-check (output unchanged; also "smx=rodd(...)" in wg_rt_kernels()), or the
+ * round-to-odd ports failed it while the mix form passed. The filter in use
+ * is also in wg_rt_kernels() ("output_filter=original|analytic|quality5|quality9
  * output_taps=model|none"); runtime option output_filter=original|analytic|quality5|quality9 selects it (default:
  * original when the model file has the weights, else analytic; original without them fails create). */
 WG_RT_API const char* wg_rt_notes(void* rt);
+/* A line for the caller's log produced by the frames since the last call, or an empty string; taking it clears it. At
+   present one: model K with k_approx=a1, the first frame of the context on the legacy input path (it runs the exact
+   input stage). Valid until the next call. */
+WG_RT_API const char* wg_rt_take_frame_note(void* rt);
 /* The packed weight blob of a stage (host copy), for checks. */
 WG_RT_API int wg_rt_stage_blob(void* rt, const char* stage, const void** data, size_t* bytes);
 

@@ -44,6 +44,7 @@ class T:
         self.out = os.path.join(work, "out.json")
         self.lad = os.path.join(work, "localappdata")
         self.env = dict(os.environ, LOCALAPPDATA=self.lad, ProgramData=os.path.join(work, "programdata"))
+        __import__("launcher_isolation").test_env(self.env, work)  # (#243) the store libraries: none of the PC's; every access logged
         for k in [k for k in self.env if k.upper().startswith("WG_") or k.upper() in ("HIP_PATH", "ROCM_PATH", "LLVM_PATH", "HIP_DEVICE_LIB_PATH")]:
             self.env.pop(k)
         os.makedirs(self.lad, exist_ok=True)
@@ -68,6 +69,7 @@ class T:
         if os.path.exists(self.log):
             os.remove(self.log)
         cmd = [self.exe] + list(args) + ["--noscan", "--log=" + self.log, "--out=" + self.out, "--data=" + self.data]
+        astart = __import__("launcher_isolation").access_size(self.work)
         p = subprocess.run(cmd, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600)
         self.stdout = p.stdout.decode("utf-8", "replace")
         try:
@@ -75,6 +77,7 @@ class T:
                 self.j = json.load(f)
         except (OSError, ValueError):
             self.j = {}
+        __import__("launcher_isolation").check_isolation(self.log, self.work, 0, args, astart)  # (#243) never the PC's own game folders
         return p.returncode
 
     def logtext(self):
@@ -920,6 +923,7 @@ def main():
     for d in ("libs", "data", "localappdata", "elsewhere", "programs"):
         shutil.rmtree(os.path.join(work, d), ignore_errors=True)
     os.makedirs(work, exist_ok=True)
+    __import__("launcher_isolation").self_test(work)  # (#243) first: no launcher call with a broken guard
     t = T(os.path.abspath(a.launcher), work)
     t0 = time.time()
     test_empty_lists_same_winner(t)

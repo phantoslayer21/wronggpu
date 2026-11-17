@@ -615,6 +615,7 @@ def main():
     for d in ("games", "data", "localappdata"):
         shutil.rmtree(os.path.join(work, d), ignore_errors=True)
     os.makedirs(work, exist_ok=True)
+    __import__("launcher_isolation").self_test(work)  # (#243) first: no launcher call with a broken guard
     model = suite.cases.f_mini_case(present=0)
     t = lt.T(os.path.abspath(a.launcher), work, model, None)
     t.env.pop("WRONGGPU_TEST_PROCESSES", None)

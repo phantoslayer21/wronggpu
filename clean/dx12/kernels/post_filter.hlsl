@@ -122,6 +122,9 @@ float fd_half(float v)
 }
 #endif
 
+#ifndef PF_MUT
+#define PF_MUT 0   // 1: negative control of the store check (never shipped)
+#endif
 #define kS 4         // row pairs per lane (post_filter_c1_s4)
 #define kGroups 10   // column groups per 32-lane half
 
@@ -184,14 +187,20 @@ WG_KERNEL(post_filter_c1_s4)
 #else
                 const float val = opq(v) * dec_scale;
 #endif
+                // each lane finishes its OWN channel value (the pre-exposure scale, the FP16 rounding) before the lane
+                // gather, instead of channel 0's lane finishing all three after it: the same function on the same
+                // values, one finish per lane instead of three on channel 0's lane
+                float vo = val;
+                if (nd_color_pi != 1.0f) vo = native_direct_scale(vo, nd_color_pi);
+#if PF_MUT == 1   // negative control of the store check (never shipped): only channel 0 rounded
+                if (nd_output_rne16 != 0u && c == 0) vo = fd_half(vo);
+#else
+                if (nd_output_rne16 != 0u) vo = fd_half(vo);
+#endif
                 const uint l0 = (uint)(lane - c);
-                const float v1 = WaveReadLaneAt(val, l0 + 1u), v2 = WaveReadLaneAt(val, l0 + 2u);
+                const float v1 = WaveReadLaneAt(vo, l0 + 1u), v2 = WaveReadLaneAt(vo, l0 + 2u);
                 if (c == 0 && i < ncols) {
-                    float3 o = float3(val, v1, v2);
-                    if (nd_color_pi != 1.0f)
-                        o = float3(native_direct_scale(o.x, nd_color_pi), native_direct_scale(o.y, nd_color_pi),
-                                   native_direct_scale(o.z, nd_color_pi));
-                    if (nd_output_rne16 != 0u) o = float3(fd_half(o.x), fd_half(o.y), fd_half(o.z));
+                    const float3 o = float3(vo, v1, v2);
                     native_direct_output[uint2((uint)(4 * m + i), (uint)y)] = float4(o, 1.0f);
                 }
 #else

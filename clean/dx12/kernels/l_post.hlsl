@@ -34,9 +34,22 @@
 // @wg-kernel l_post_recon_p12 co=l_post.co entry=l_post_recon_p12 block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1
 // @wg-kernel l_post_recon_ldr co=l_post.co entry=l_post_recon_ldr block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_LDR=1
 // @wg-kernel l_post_recon_p12_ldr co=l_post.co entry=l_post_recon_p12_ldr block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1,LP_LDR=1
+//
+// LP_C12 = 1 (Q11 part C / 0.6.5 hybrid_full: runtime WG_L_POST=c12, and WG_L_FORM=hybrid on native D3D12; port of
+// l_post__lc12.co = l_post.hip with WG_LP_C1 = 1, WG_CR_C2 = 1, tag "lc12"): the gather exponent in the machine-code form
+// eps = fma(h(u v), C, fma(h(v v), B, h(h(u u) A))) (C1) and the Catmull-Rom weights' fused forms (C2: f2 = f f,
+// f3 = f f2, w0 = fused(-(f + f3), 1/2, f2), w1 = fused(f3, 1.5, -RN(2.5 f2)) + 1, w3 = RN(RN(f3 - f2) 1/2),
+// w2 = ((1 - w0) - w1) - w3). The default entries above are unchanged (LP_C12 = 0).
+// @wg-kernel lc12/l_post_recon co=l_post__lc12.co entry=l_post_recon block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_C12=1
+// @wg-kernel lc12/l_post_recon_p12 co=l_post__lc12.co entry=l_post_recon_p12 block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1,LP_C12=1
+// @wg-kernel lc12/l_post_recon_ldr co=l_post__lc12.co entry=l_post_recon_ldr block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_LDR=1,LP_C12=1
+// @wg-kernel lc12/l_post_recon_p12_ldr co=l_post__lc12.co entry=l_post_recon_p12_ldr block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1,LP_LDR=1,LP_C12=1
 #include "wg_platform.hlsli"
 #ifndef LP_P12
 #define LP_P12 0
+#endif
+#ifndef LP_C12
+#define LP_C12 0
 #endif
 #ifndef LP_LDR
 #define LP_LDR 0
@@ -81,6 +94,29 @@ static float g_e, g_ep;   // exposures (0 replaced by 1)
 static float g_rp;       // 1 / e_prev (IEEE division, round to nearest even)
 float opq(float x) { return asfloat(asuint(x) ^ g_z); }
 half opqh(half x) { return asfloat16((uint16_t)(asuint16(x) ^ (uint16_t)g_z)); }
+float mul_nz(float a, float b) { return mad(a, b, asfloat(g_z | 0x80000000u)); }
+#ifndef LP_MUT
+#define LP_MUT 0   // 1, 2, 4 ... 9: negative controls of the byte checks (never shipped)
+#endif
+#ifndef LP_DP
+#define LP_DP 1
+#endif
+#ifndef LP_FMANZ
+#define LP_FMANZ 1
+#endif
+#ifndef LP_HSCOUNT
+#define LP_HSCOUNT 0   // 1: test builds only (clean/l/runner/l_post_edge_check.py): the history fast path's wave counter
+#endif
+// h(a b) as its own rounding that the driver cannot fuse into a following FP16 add: fma(a, b, -0) with an opaque -0
+// (RN16(a b + -0) = RN16(a b) for every non-NaN pair, zeros included); LP_FMANZ 0: the product through the xor guard
+half mulh(half a, half b)
+{
+#if LP_FMANZ
+    return mad(a, b, asfloat16((uint16_t)(0x8000u | g_z)));
+#else
+    return opqh(a * b);
+#endif
+}
 half h_bits(uint b) { return asfloat16((uint16_t)b); }
 uint bits_h(half h) { return (uint)asuint16(h); }
 
@@ -109,8 +145,20 @@ float dec_m1_poly(float qc)
 float l_dec(float q)
 {
     const float qc = clampf(q, k1em4, 3.0f);
+#if LP_DP
+    // Model M's wave-level skip (post.hlsl post_core_s): the exponential for every lane, the polynomial only when some
+    // active lane of the wave is below kDecPolyMax; per lane the same select as below, so the same value
+    float v = exp2(qc * kDecK) - 1.0f;
+    const bool sm = qc < kDecPolyMax;
+#if LP_MUT == 6
+    [branch] if (WaveActiveAllTrue(sm)) v = sm ? dec_m1_poly(qc) : v;   // mutant 6: all lanes instead of any lane
+#else
+    [branch] if (WaveActiveAnyTrue(sm)) v = sm ? dec_m1_poly(qc) : v;
+#endif
+#else
     const float v = qc < kDecPolyMax ? dec_m1_poly(qc) : exp2(qc * kDecK) - 1.0f;
-    return isnan(q) ? q : opq(v) * k0p01;
+#endif
+    return isnan(q) ? q : mul_nz(v, k0p01);
 }
 
 // (_Float16)((float)k / 255.0f) for the code k = 0 ... 255 (an IEEE FP32 division, then round to nearest even: HIP's
@@ -216,9 +264,19 @@ LGather gather_zero()
 float tap_weight(uint t[kTexDw], half uu, half vv, half uv)
 {
     const half kA = h_bits(t[4] >> 16), kB = h_bits(t[5]), kC = h_bits(t[5] >> 16);
-    const half ta = opqh(uu * kA), tb = opqh(vv * kB);
+#if LP_C12
+    const half ta = mulh(uu, kA);                 // (#231's product: opqh(uu kA), or mad(uu, kA, -0) with LP_FMANZ)
+    const half s = mad(vv, kB, ta);               // C1: the row term fused into the sum
+    const half eps = mad(uv, kC, s);
+#else
+#if LP_MUT == 1
+    const half ta = mulh(uu, kB), tb = mulh(vv, kB);   // mutant 1: wrong factor
+#else
+    const half ta = mulh(uu, kA), tb = mulh(vv, kB);
+#endif
     const half s = tb + ta;
     const half eps = mad(uv, kC, s);
+#endif
     const float w = exp2((float)opqh(eps));
     return w >= kMinNormal ? w : 0.0f;
 }
@@ -236,6 +294,14 @@ void gather_acc(inout LGather g, uint t[kTexDw], float w, uint hwb)
 float4 cr_weights(float f)
 {
     float4 w;
+#if LP_C12
+    const float f2 = opq(f * f), f3 = opq(f * f2);
+    w.x = mad(-(f + f3), 0.5f, f2);
+    w.y = mad(f3, 1.5f, -opq(2.5f * f2)) + 1.0f;
+    w.w = opq(opq(f3 - f2) * 0.5f);
+    w.z = ((1.0f - w.x) - w.y) - w.w;
+    return w;
+#endif
     w.x = f * (-0.5f + f * (1.0f - 0.5f * f));
     w.y = 1.0f + f * f * (-2.5f + 1.5f * f);
     w.z = f * (0.5f + f * (2.0f - 1.5f * f));
@@ -251,6 +317,36 @@ float3 history_cr(float qx, float qy)
     const float4 wx = cr_weights(tx - fx0), wy = cr_weights(ty - fy0);
     const int ix = (int)fx0, iy = (int)fy0;
     const uint pitch = (uint)P_dw * 8u;
+    // interior fast path (Model M's history_cr_span): every lane's 4 x 4 footprint inside the image, so the clamps are
+    // the identity; six 16-byte span loads from one base instead of twelve 8-byte loads, the same texels in the same
+    // sums (same mad order). Footprint inside: 1 <= ix <= P_dw - 3 and 1 <= iy <= P_dh - 3, the unsigned tests valid only
+    // for an image of at least 4 x 4 (below, P_d* - 4 would wrap to a huge bound): smaller images take the clamped path.
+#if LP_MUT == 8   // mutant 8: the predicate always false (the fast path never taken; same bytes, found by the counter)
+    const bool interior = false;
+#elif LP_MUT == 9   // mutant 9: without the size guard (the span reads past a history narrower or shorter than 4)
+    const bool interior = and((uint)(ix - 1) <= (uint)(P_dw - 4), (uint)(iy - 1) <= (uint)(P_dh - 4));
+#else
+    const bool interior = and(and(P_dw >= 4, P_dh >= 4),
+                              and((uint)(ix - 1) <= (uint)(P_dw - 4), (uint)(iy - 1) <= (uint)(P_dh - 4)));
+#endif
+    [branch] if (WaveActiveAllTrue(interior)) {
+#if LP_HSCOUNT   // test builds only: count the waves taking the fast path, in the first dword after the full history
+        if (WaveIsFirstLane()) wg_atomic_add(hist_out, (uint)(P_dw * P_dh) * 8u, 1u);
+#endif
+        const uint b0 = hist_prev + (uint)(ix - 1) * 8u + (uint)(iy - 1) * pitch;
+        const uint b1 = b0 + pitch, b2 = b0 + 2u * pitch, b3 = b0 + 3u * pitch;
+        const uint4 a0 = wg_mem.Load4(b0 + 8u), a10 = wg_mem.Load4(b1), a11 = wg_mem.Load4(b1 + 16u);
+        const uint4 a20 = wg_mem.Load4(b2), a21 = wg_mem.Load4(b2 + 16u), a3 = wg_mem.Load4(b3 + (LP_MUT == 4 ? 16u : 8u));   // mutant 4: wrong row span
+        const float3 zi = float3(0.0f, 0.0f, 0.0f);
+        const float3 q0 = mad(wx.z, h3(a0.zw), mad(wx.y, h3(a0.xy), zi));
+        const float3 q1 = mad(wx.w, h3(a11.zw), mad(wx.z, h3(a11.xy), mad(wx.y, h3(a10.zw), mad(wx.x, h3(a10.xy), zi))));
+        const float3 q2 = mad(wx.w, h3(a21.zw), mad(wx.z, h3(a21.xy), mad(wx.y, h3(a20.zw), mad(wx.x, h3(a20.xy), zi))));
+        const float3 q3 = mad(wx.z, h3(a3.zw), mad(wx.y, h3(a3.xy), zi));
+        const float3 acci = mad(wy.w, q3, mad(wy.z, q2, mad(wy.y, q1, mad(wy.x, q0, zi))));
+        const float sxi = ((wx.x + wx.y) + wx.z) + wx.w;
+        const float normi = (wx.y + wx.z) * (wy.x + wy.w) + sxi * (wy.y + wy.z);
+        return acci * rcp(normi);
+    }
     uint ro[4], co[4];
     [unroll] for (int k = 0; k < 4; ++k) {
         co[k] = hist_prev + (uint)clampi(ix - 1 + k, 0, P_dw - 1) * 8u;
@@ -277,15 +373,22 @@ void l_post_core(LGather g, int x, int y, int fx, int fy, float mx[3], float my[
     float fbar[9];
     [unroll] for (int k = 0; k < 9; ++k) fbar[k] = inv * (float)opqh(g.F[k]);
     const float sig0 = fbar[3], sig1 = fbar[4], sig2 = fbar[5];
-    int first = 0;
-    float best = sig0;
-    if (sig1 > best) { first = 1; best = sig1; }
-    if (sig2 > best) first = 2;
-    const int o1 = first == 0 ? 1 : 0, o2 = first == 2 ? 1 : 2;
-    const float so1 = o1 == 1 ? sig1 : sig0, so2 = o2 == 1 ? sig1 : sig2;
-    const int second = so2 > so1 ? o2 : o1;
-    const float s1 = first == 0 ? sig0 : (first == 1 ? sig1 : sig2);
-    const float s2 = second == 0 ? sig0 : (second == 1 ? sig1 : sig2);
+    const bool sb1 = sig1 > sig0;
+    const float best = sb1 ? sig1 : sig0;
+    const bool sb2 = sig2 > best;
+    const float s1 = sb2 ? sig2 : best;
+    const float m1x = sb2 ? mx[2] : (sb1 ? mx[1] : mx[0]), m1y = sb2 ? my[2] : (sb1 ? my[1] : my[0]);
+    const bool sf0 = !or(sb1, sb2);
+    const float so1 = sf0 ? sig1 : sig0, so2 = sb2 ? sig1 : sig2;
+    const float mo1x = sf0 ? mx[1] : mx[0], mo1y = sf0 ? my[1] : my[0];
+#if LP_MUT == 7
+    const float mo2x = sb2 ? mx[2] : mx[1], mo2y = sb2 ? my[1] : my[2];   // mutant 7: wrong candidate motion
+#else
+    const float mo2x = sb2 ? mx[1] : mx[2], mo2y = sb2 ? my[1] : my[2];
+#endif
+    const bool scc = so2 > so1;
+    const float s2 = scc ? so2 : so1;
+    const float m2x = scc ? mo2x : mo1x, m2y = scc ? mo2y : mo1y;
     const float q1 = clampf(k1p1 * s1 - k0p05, 0.0f, 1.0f);
     const float q2 = clampf(k1p1 * s2 - k0p05, 0.0f, 1.0f);
     const float rden = rcp(max(q1 + q2, k1em10));
@@ -302,10 +405,13 @@ void l_post_core(LGather g, int x, int y, int fx, int fy, float mx[3], float my[
     [unroll] for (int n = 0; n < 2; ++n) {
         L[n][0] = 0.0f; L[n][1] = 0.0f; L[n][2] = 0.0f;
         if (n < ncand) {
-            const int k = n == 0 ? first : second;
-            const float qx = X + (k == 0 ? mx[0] : (k == 1 ? mx[1] : mx[2]));
-            const float qy = Y + (k == 0 ? my[0] : (k == 1 ? my[1] : my[2]));
-            const bool valid = P_reset == 0 && qx >= 0.0f && qx <= (float)P_dw && qy >= 0.0f && qy <= (float)P_dh;
+            const float qx = X + (n == 0 ? m1x : m2x);
+            const float qy = Y + (n == 0 ? m1y : m2y);
+#if LP_MUT == 5
+            const bool valid = and(and(and(and(P_reset == 0, qx >= 0.0f), qx <= (float)P_dh), qy >= 0.0f), qy <= (float)P_dh);   // mutant 5
+#else
+            const bool valid = and(and(and(and(P_reset == 0, qx >= 0.0f), qx <= (float)P_dw), qy >= 0.0f), qy <= (float)P_dh);
+#endif
             if (valid) {
                 const float3 h = history_cr(qx, qy);
 #if LP_LDR
@@ -329,9 +435,9 @@ void l_post_core(LGather g, int x, int y, int fx, int fy, float mx[3], float my[
 #if LP_LDR
         Hl[i] = opq(comb);
 #else
-        Hl[i] = opq(comb) * g_e;
+        Hl[i] = mul_nz(comb, g_e);
 #endif
-        hl_inf = hl_inf || abs(Hl[i]) == asfloat(0x7f800000u);
+        hl_inf = or(hl_inf, abs(Hl[i]) == asfloat(0x7f800000u));
 #if LP_LDR
         Cl[i] = fbar[i];
 #else
@@ -346,10 +452,10 @@ void l_post_core(LGather g, int x, int y, int fx, int fy, float mx[3], float my[
         oh[i] = mad(Cl[i] - Hl[i], bo2, Hl[i]);
     }
     const float sh = hh[0] + hh[1] + hh[2], so = oh[0] + oh[1] + oh[2];
-    if (isnan(sh) || hl_inf) {
+    if (or(isnan(sh), hl_inf)) {
         [unroll] for (int i = 0; i < 3; ++i) hh[i] = Cl[i];
     }
-    if (isnan(so) || hl_inf) {
+    if (or(isnan(so), hl_inf)) {
         [unroll] for (int i = 0; i < 3; ++i) oh[i] = Cl[i];
     }
 }
@@ -441,7 +547,7 @@ WG_KERNEL(l_post_recon)
     }
     GroupMemoryBarrierWithGroupSync();
 
-    const bool active = x0 + (lane & 31) < P_dw && k0 + (lane >> 5) < npairs;
+    const bool active = and(x0 + (lane & 31) < P_dw, k0 + (lane >> 5) < npairs);
     const int x = mini(x0 + (lane & 31), P_dw - 1);
     const int y0 = 2 * mini(k0 + (lane >> 5), npairs - 1);
     const bool has1 = y0 + 1 < P_dh;
@@ -464,26 +570,33 @@ WG_KERNEL(l_post_recon)
     [unroll] for (int jj = 0; jj < kLWin; ++jj) {
         v0[jj] = dy0 + (half)(float)(jj - 1);
         v1[jj] = dy1 + (half)(float)(jj - 1);
-        vv0[jj] = opqh(v0[jj] * v0[jj]);
-        vv1[jj] = opqh(v1[jj] * v1[jj]);
+        vv0[jj] = mulh(v0[jj], v0[jj]);
+        vv1[jj] = mulh(v1[jj], v1[jj]);
     }
     // taps column by column (i outer, j inner, each gather in that order as before); per column the eight weights (four
     // rows, two pixels) are rounded to FP16 by one driver conversion
     LGather g0 = gather_zero(), g1 = gather_zero();
+    // the staged texel's LDS index without per-tap multiplies: one base per lane, the row stride and the column
+    // step wave-uniform (integer identity: ((b + j - r0) ncol + (ax + i - c0)) kTexDw)
+    const int tb0 = ((b - 1 - r0) * ncol + (ax - 1 - c0)) * kTexDw, rstride = ncol * kTexDw;
     [loop] for (int i = -1; i <= kLWin - 2; ++i) {
         const half u = dx + (half)(float)i;
-        const half uu = opqh(u * u);
+        const half uu = mulh(u, u);
         uint t[kLWin][kTexDw];
         v8f wv;
         [unroll] for (int j = -1; j <= kLWin - 2; ++j) {
             if (staged) {
-                const int base = ((b + j - r0) * ncol + (ax + i - c0)) * kTexDw;
+                const int base = tb0 + (j + 1) * rstride + (i + 1) * kTexDw
+#if LP_MUT == 2
+                                 + (j == 2 && i == 2 ? kTexDw : 0)   // mutant 2: one tap reads the wrong texel
+#endif
+                                 ;
                 [unroll] for (int d = 0; d < kTexDw; ++d) t[j + 1][d] = sh_tex[base + d];
             } else {
                 load_texel_hw(clampi(b + j, 0, P_rh - 1) * P_rw + clampi(ax + i, 0, P_rw - 1), t[j + 1]);
             }
-            wv.v[2 * (j + 1)] = tap_weight(t[j + 1], uu, vv0[j + 1], opqh(u * v0[j + 1]));
-            wv.v[2 * (j + 1) + 1] = tap_weight(t[j + 1], uu, vv1[j + 1], opqh(u * v1[j + 1]));
+            wv.v[2 * (j + 1)] = tap_weight(t[j + 1], uu, vv0[j + 1], mulh(u, v0[j + 1]));
+            wv.v[2 * (j + 1) + 1] = tap_weight(t[j + 1], uu, vv1[j + 1], mulh(u, v1[j + 1]));
         }
         const uint4 hw = wg_to_f16_ags(wv);
         [unroll] for (int jj = 0; jj < kLWin; ++jj) {
@@ -521,7 +634,7 @@ WG_KERNEL(l_post_recon)
         cv.v[7] = 0.0f;
         const uint4 hc = wg_to_f16_ags(cv);
         const int y = y0 + row;
-        if (active && (!second || has1)) {
+        if (and(active, or(!second, has1))) {
 #if LP_LDR
             const uint q0 = hc.x & 0xffffu, q1 = hc.x >> 16, q2 = hc.y & 0xffffu;
 #else

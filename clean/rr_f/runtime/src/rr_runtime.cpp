@@ -49,6 +49,7 @@
 
 #include "../../host/rr_input_host.h"
 #include "../../../runtime/interop/texture_shape.h"
+#include "../../../runtime/rdna4_win.h"
 #include "../../proxy/include/rr_proxy_abi.h"
 #include "../../proxy/include/wg_rr_adapter.h"
 #include "rr_kernels.h"
@@ -65,7 +66,7 @@
 #ifndef WG_RR_RUNTIME_VERSION0
 #define WG_RR_RUNTIME_VERSION0 0
 #define WG_RR_RUNTIME_VERSION1 6
-#define WG_RR_RUNTIME_VERSION2 0
+#define WG_RR_RUNTIME_VERSION2 5
 #endif
 
 namespace wgrr_rt {
@@ -181,54 +182,18 @@ class CompileThread {
   std::function<void()> fn_;
 };
 
-// RDNA 4 boards (the rule of clean/runtime/rdna4.h on clean/rdna4-dx12, WrongGPU's own code)
-bool rdna4_adapter(uint32_t vendor, bool software, const std::string& d) {
-  return vendor == 0x1002 && !software && (d.find("RX 9070") != std::string::npos || d.find("RX 9060") != std::string::npos);
+// RDNA 4 boards: the rule of the network runtime (clean/runtime/rdna4.h, rdna4_win.h): the adapter with this LUID is
+// identified by the kernel-mode driver's PCI vendor and device id and by nothing else, never by a description another layer
+// in the game (OptiScaler's GPU spoofing) can rewrite, and it fails closed: ids that cannot be read, or are not RDNA 4's,
+// are not RDNA 4. *who gets the adapter as a log line shows it (the system DXGI's description and the ids).
+bool rdna4_luid(const LUID& luid, std::string* who) {
+  const wgrt::AdapterIdentity id = wgrt::read_adapter_identity(luid);
+  if (who) *who = wgrt::describe_identity(id);
+  return wgrt::rdna4_identity(id);
 }
 
-// The adapter's PCI vendor / device id as the kernel-mode display driver reports it, looked up by LUID. DXGI's
-// description can be rewritten by other layers in the game process (OptiScaler's GPU spoofing, for games that only
-// offer their upscaler options for another vendor id); this path does not go through DXGI.
-bool kmt_device_ids(LUID luid, uint32_t* vendor, uint32_t* device) {
-  D3DKMT_OPENADAPTERFROMLUID o = {};
-  o.AdapterLuid = luid;
-  if (D3DKMTOpenAdapterFromLuid(&o) != 0) return false;
-  D3DKMT_QUERY_DEVICE_IDS ids = {};
-  ids.PhysicalAdapterIndex = 0;
-  D3DKMT_QUERYADAPTERINFO q = {};
-  q.hAdapter = o.hAdapter;
-  q.Type = KMTQAITYPE_PHYSICALADAPTERDEVICEIDS;
-  q.pPrivateDriverData = &ids;
-  q.PrivateDriverDataSize = sizeof ids;
-  const NTSTATUS st = D3DKMTQueryAdapterInfo(&q);
-  D3DKMT_CLOSEADAPTER c = {};
-  c.hAdapter = o.hAdapter;
-  D3DKMTCloseAdapter(&c);
-  if (st != 0) return false;
-  *vendor = ids.DeviceIds.VendorID;
-  *device = ids.DeviceIds.DeviceID;
-  return true;
-}
-
-// RDNA 4 PCI device ids (Navi 48: RX 9070 XT / 9070 / 9070 GRE; Navi 44: RX 9060 XT / 9060).
-bool rdna4_device_id(uint32_t device) {
-  return device == 0x7550 || device == 0x7551 || device == 0x7590 || device == 0x7591;
-}
-
-// RDNA 4 check for one adapter: DXGI's description first; when that does not say RDNA 4 (or was rewritten), the
-// kernel driver's ids decide. *note gets a log line when the two disagree.
-bool rdna4_adapter_desc(const DXGI_ADAPTER_DESC1& d, std::string* note) {
-  const bool software = (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
-  if (rdna4_adapter(d.VendorId, software, narrow(d.Description))) return true;
-  uint32_t ven = 0, dev = 0;
-  if (software || !kmt_device_ids(d.AdapterLuid, &ven, &dev)) return false;
-  if (ven != 0x1002 || !rdna4_device_id(dev)) return false;
-  if (note)
-    *note = fmt("DXGI reports \"%s\" (vendor 0x%04x, likely spoofed by another layer in the game); the kernel driver "
-                "reports %04x:%04x, an RDNA 4 board: using the driver's identity",
-                narrow(d.Description).c_str(), d.VendorId, ven, dev);
-  return true;
-}
+// The same for an adapter DXGI listed (by its LUID; the description in `d` is never looked at).
+bool rdna4_adapter_desc(const DXGI_ADAPTER_DESC1& d, std::string* note) { return rdna4_luid(d.AdapterLuid, note); }
 
 // ---------------------------------------------------------------------------------------------------- formats (62.5)
 DXGI_FORMAT srv_format(DXGI_FORMAT f, bool depth) {
@@ -1326,34 +1291,24 @@ uint32_t set_device_locked(ID3D12Device* given) {
   }
   rt.device_failed = true;
   std::string err;
+  {  // R1: the game device's adapter is identified by the driver's ids before anything is created; unknown or not RDNA 4
+     // is refused with the network runtime's sentence (the game keeps its own denoiser)
+    std::string who;
+    const wgrt::AdapterIdentity id = wgrt::read_adapter_identity(given->GetAdapterLuid());
+    who = wgrt::describe_identity(id);
+    if (!wgrt::rdna4_identity(id)) {
+      log_line(std::string(wgrt::needs_rx9000_sentence()) + " (" + who + "): Ray Reconstruction is not available; the game keeps its own denoiser");
+      return WG_E_ADAPTER_NOT_SUPPORTED;
+    }
+    const std::string wine = wgrt::wine_fallback_line(id);  // Wine: how the adapter was identified (#248)
+    if (!wine.empty()) log_line(wine);
+    rt.adapter_name = id.dxgi_known ? id.description : who;
+  }
   D3D12_COMMAND_QUEUE_DESC qd = {};
   qd.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
   if (FAILED(given->CreateCommandQueue(&qd, IID_PPV_ARGS(&rt.q))) || FAILED(rt.q->GetDevice(IID_PPV_ARGS(&rt.dev)))) {
     log_line("set-device: no compute queue on the game's device");
     return WG_E_D3D_API;
-  }
-  {
-    LUID luid = rt.dev->GetAdapterLuid();
-    IDXGIFactory4* fac = nullptr;
-    IDXGIAdapter1* a = nullptr;
-    if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&fac))) && SUCCEEDED(fac->EnumAdapterByLuid(luid, IID_PPV_ARGS(&a)))) {
-      DXGI_ADAPTER_DESC1 d;
-      a->GetDesc1(&d);
-      rt.adapter_name = narrow(d.Description);
-      std::string note;
-      const bool rdna4 = rdna4_adapter_desc(d, &note);
-      if (!note.empty()) log_line("set-device: " + note);
-      if (!rdna4) {
-        log_line("set-device: adapter \"" + rt.adapter_name + "\" is not an RDNA 4 board: RR not available");
-        release(a);
-        release(fac);
-        drop_device();
-        rt.device_failed = true;
-        return WG_E_ADAPTER_NOT_SUPPORTED;
-      }
-    }
-    release(a);
-    release(fac);
   }
   rt.inc = rt.dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
   rt.q->GetTimestampFrequency(&rt.ts_freq);

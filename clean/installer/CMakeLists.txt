@@ -31,7 +31,7 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")  # no ru
 
 set(WRONGGPU_PAYLOAD_DIR "" CACHE PATH "Folder with WrongGPU's amd_fidelityfx_dx12.dll, the runtime and its kernels (one release build)")
 set(WRONGGPU_MAP "${CMAKE_CURRENT_SOURCE_DIR}/../../data/preset-M.v1.map.json" CACHE FILEPATH "Converter map (spec 08)")
-set(WRONGGPU_VERSION "0.6.0" CACHE STRING "Installer version")
+set(WRONGGPU_VERSION "0.6.5" CACHE STRING "Installer version")
 set(WRONGGPU_BUILD_ID "" CACHE STRING "The build's own name, e.g. 0.5.5-launcher-dev (empty: the version)")
 set(WRONGGPU_PAYLOAD_NAME "" CACHE STRING "The release build the payload folder holds, e.g. 0.5.5-ea (empty: the version)")
 set(WRONGGPU_MAP_K "${CMAKE_CURRENT_SOURCE_DIR}/../../data/preset-K.v1.map.json" CACHE FILEPATH "Preset K converter map")
@@ -164,12 +164,19 @@ else()
   set(MANIFEST_ARGS --manifest ${MANIFEST})
   set(MANIFEST_SOURCE)
 endif()
+# A WRONGGPU_TESTING build may embed the test suite's stand-in runtime (tests/run_installer_tests.py --prepare-only: the
+# marker and a build manifest that says stand_in); any other build refuses it at this step (make_payload.py --testing).
+if(WRONGGPU_TESTING)
+  set(TESTING_PAYLOAD_ARGS --testing)
+else()
+  set(TESTING_PAYLOAD_ARGS)
+endif()
 add_custom_command(
   OUTPUT ${GEN}/payload_table.h ${GEN}/resources.rc ${GEN}/resources.S ${GEN}/app.ico
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/make_payload.py
           --payload ${WRONGGPU_PAYLOAD_DIR} --map ${WRONGGPU_MAP} ${PRESET_K_MAP_ARGS} --version ${WRONGGPU_VERSION}
           --build-id=${WRONGGPU_BUILD_ID} --payload-name=${WRONGGPU_PAYLOAD_NAME}
-          ${DIRECT_ROUTE_PAYLOAD_ARGS} ${RR_PAYLOAD_ARGS} ${MAP_F_ARGS} ${MAP_L_ARGS} ${MANIFEST_ARGS} --out ${GEN}
+          ${DIRECT_ROUTE_PAYLOAD_ARGS} ${RR_PAYLOAD_ARGS} ${MAP_F_ARGS} ${MAP_L_ARGS} ${MANIFEST_ARGS} ${TESTING_PAYLOAD_ARGS} --out ${GEN}
   DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/make_payload.py ${MANIFEST} ${WRONGGPU_MAP} ${PRESET_K_MAP_FILE} ${MAP_F_FILE} ${MAP_L_FILE} ${WRONGGPU_PAYLOAD_FILES} ${WRONGGPU_RR_FILES}
   COMMENT "Embedding the payload and the converter map")
 
@@ -237,6 +244,16 @@ if(MSVC)
 else()
   target_link_options(WrongGPU-Restore PRIVATE -municode -static)
 endif()
+# A WRONGGPU_TESTING build's identity, which the launcher suite checks before it runs a program (tests/launcher_build_facts.py):
+# a named resource only such a build has, and a PE checksum (MSVC /RELEASE) that a program changed after its link fails.
+if(WRONGGPU_TESTING)
+  file(GENERATE OUTPUT ${GEN}/testing_identity.rc
+       CONTENT "WRONGGPU_TESTING_BUILD RCDATA\nBEGIN\n  \"wg-testing-build 1: store libraries, access log, edition download, uninstall root\\0\"\nEND\n")
+  target_sources(WrongGPU-Restore PRIVATE ${GEN}/testing_identity.rc)
+  if(MSVC)
+    target_link_options(WrongGPU-Restore PRIVATE /RELEASE)
+  endif()
+endif()
 add_custom_command(OUTPUT ${GEN}/restorer.bin
   COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:WrongGPU-Restore> ${GEN}/restorer.bin
   DEPENDS WrongGPU-Restore COMMENT "Embedding the restorer")
@@ -247,6 +264,31 @@ set_source_files_properties(${GEN}/restore.rc PROPERTIES OBJECT_DEPENDS ${GEN}/r
 add_executable(WrongGPU WIN32 ${WRONGGPU_APP_SOURCES} ${WRONGGPU_APP_SOURCES_WINDOWS}
                ${GEN}/resources.rc ${GEN}/restore.rc ${GEN}/restorer.bin ${GEN}/payload_table.h ${MANIFEST_SOURCE})
 add_dependencies(WrongGPU WrongGPU-Restore)
+if(WRONGGPU_TESTING)
+  target_sources(WrongGPU PRIVATE ${GEN}/testing_identity.rc)
+  if(MSVC)
+    target_link_options(WrongGPU PRIVATE /RELEASE)
+  endif()
+  # the launcher suite's negative controls: programs that are not testing builds (no identity), one with the hook strings;
+  # each leaves <program>.started next to itself when it starts, so the suite can prove it never started them
+  add_executable(wg-test-canary tests/canary.cpp)
+  add_executable(wg-test-canary-strings tests/canary.cpp)
+  target_compile_definitions(wg-test-canary-strings PRIVATE WG_CANARY_HOOK_STRINGS)
+  if(NOT MSVC)
+    target_link_options(wg-test-canary PRIVATE -municode)  # (wmain, as the launcher and restorer)
+    target_link_options(wg-test-canary-strings PRIVATE -municode)
+  endif()
+  add_library(wg-test-canary-dll SHARED tests/canary_dll.cpp)  # a load marker: writes <dll>.loaded when loaded
+  set_target_properties(wg-test-canary-dll PROPERTIES PREFIX "")
+  # built with the testing launcher (a single-target build has them), and the build list the suite checks before it starts
+  # one: the SHA-256 of this WrongGPU.exe and of the canaries, written after the launcher's link
+  add_dependencies(WrongGPU wg-test-canary wg-test-canary-strings wg-test-canary-dll)
+  add_custom_command(TARGET WrongGPU POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -DF1=$<TARGET_FILE:WrongGPU> -DF2=$<TARGET_FILE:wg-test-canary> -DF3=$<TARGET_FILE:wg-test-canary-strings>
+            -DF4=$<TARGET_FILE:wg-test-canary-dll>
+            -DOUT=$<TARGET_FILE_DIR:WrongGPU>/wg-test-build.sha256 -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/sha256_list.cmake
+    VERBATIM)
+endif()
 endif()
 if(WRONGGPU_TESTING)
   add_executable(wizard-policy-tests tests/wizard_policy_tests.cpp)

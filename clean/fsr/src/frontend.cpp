@@ -2,12 +2,14 @@
 #include "frontend.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
 
+#include "../include/wronggpu_host_event.h"
 #include "ffx_describe.h"
 #include "diagnostics.h"
 #include "wg_settings_io.h"  // pure part: describe() (the registry's log words)
@@ -565,28 +567,40 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
         }
     }
 
-    // OptiScaler ASI plugin (clean/fsr/asi): when it has hooked the host's MAIN upscaler list, its entry decides.
-    // "WrongGPU" -> WrongGPU, whatever the FFX sub-box names. "FSR 3.X(/4)" -> AMD: the version the FFX sub-box names
-    // when that is one of AMD's, else AMD's newest listed version (FSR 4 when the AMD provider has it).
+    // OptiScaler ASI plugin (clean/fsr/asi): when it has hooked the host's MAIN upscaler list, its entry says WrongGPU or
+    // AMD ("FSR 3.X(/4)"), and the game's model choice record (model_choice_record.h) says which WrongGPU model: the
+    // launcher, a player's selection in OptiScaler's list (an event the WrongGPU edition of OptiScaler sends,
+    // HostSelected) and the plugin's own model entries write it, the highest seq is the most recent choice. The entry the
+    // FFX box stores is never a choice. A WrongGPU model -> WrongGPU, whatever version the FFX box names. AMD -> AMD: the
+    // version the FFX sub-box names when that is one of AMD's, else AMD's newest listed version (FSR 4 when the AMD
+    // provider has it).
     char asiModel = 0;
     const bool asiHooked = config_.hosted && platform_.asiPlugin && platform_.asiPlugin(&asiModel);
     bool forceAmd = false;
     if (asiHooked) {
-        if (asiModel == 'M' || asiModel == 'K') {
-#if WRONGGPU_MODEL_K
-            const char model = asiModel;
-#else
-            const char model = 'M';  // a plugin built with Model K, with a front end without it: Model M
-#endif
-            u->selectedModel = model;
-            u->modelProviderId = model == 'K' ? kWrongGpuKProviderVersionId : kWrongGpuProviderVersionId;
-            u->modelProviderName = model == 'K' ? "WrongGPU Model K" : "WrongGPU Model M";
+        std::string why;
+        char model = asiModel != 0 ? ChooseModel(tag, &why) : 0;
+        if (asiModel != 0) {
+            const int32_t m = ModelOfName(std::string(1, model));
+            const WgEntryDef* sr = m >= 0 ? SrEntryOfModel(m) : nullptr;
+            if (!sr) {  // a model this build of the front end lacks (CMake WG_MODEL_K / WG_MODEL_L): Model M, said once
+                LogOnce(tag, std::string("note: model choice: Model ") + model + " is not part of this build of the front end; Model M is used");
+                model = 'M';
+                sr = SrEntryOfModel(ModelOfName("M"));
+            }
+            u->selectedModel = model;  // passed on as model=<letter> (CreateUpscale, below)
+            u->modelProviderId = sr ? sr->id : kWrongGpuProviderVersionId;
+            u->modelProviderName = sr ? EntryProviderName(*sr) : kWrongGpuVersionName;
             u->hasOverride = false;  // an AMD version in the FFX sub-box must not route this context to AMD
-            Log(tag + " OptiScaler plugin: " + u->modelProviderName + " selected in the host's upscaler list");
+            // "selected in the host's upscaler list" (the launcher's log reader looks for it): the plugin's menu marks the
+            // model that runs (asiShowModel)
+            Log(tag + " OptiScaler plugin: " + u->modelProviderName + " selected in the host's upscaler list (" + why + ")");
         } else {
             forceAmd = true;
+            model = 0;
             Log(tag + " OptiScaler plugin: AMD FSR selected in the host's upscaler list");
         }
+        if (platform_.asiShowModel) platform_.asiShowModel(model);
     }
 
     // One folder per choice (registry option entry_source = folders): this DLL's folder IS the choice; the host's
@@ -631,6 +645,7 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
                     const std::string name = "amd:upscale#" + std::to_string(nextId_++);
                     std::lock_guard lock(mutex_);
                     forwarded_[*context] = Forwarded{name, 0, api, status, true};
+                    runningModel_.store(0);  // AMD's upscaler runs
                 }
                 Log(tag + " -> " + RcName(rc) + " (the host chose AMD's upscaler version " + Hex(chosen) + "; forwarded) context=" +
                     Name(context));
@@ -641,8 +656,31 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
         }
         u->hasOverride = false;  // WrongGPU's own id means nothing to AMD's DLL (fallback, comparison)
     }
-    // No entry chose the model (direct route, no override, an id WrongGPU did not list): sr_model when it is set in
-    // the shared block, the environment or wronggpu.ini; otherwise runtime_options / the runtime's default as before.
+    // No entry named a model (no override, an id WrongGPU did not list, or the direct route): hosted, or with a model choice
+    // record path (the DLL always sets one), the model choice route (ChooseModel); else (tests of the direct route) sr_model
+    // when it is set in the shared block, the environment or wronggpu.ini; otherwise runtime_options / the runtime's
+    // default as before.
+    if (!forceAmd && !u->selectedModel && !u->modelOption && (config_.hosted || !platform_.choiceRecord.empty())) {
+        std::string why;
+        const int32_t model = ModelOfName(std::string(1, ChooseModel(tag, &why)));
+        if (const WgEntryDef* sr = model >= 0 ? SrEntryOfModel(model) : nullptr) {
+            u->selectedModel = kWgModelRows[model].name[0];
+            u->modelOption = kWgModelRows[model].runtime_option;
+            u->modelProviderId = sr->id;
+            u->modelProviderName = EntryProviderName(*sr);
+            Log(tag + " model choice: Model " + u->selectedModel + " (" + why + ")");
+        } else {
+            // a model this build lacks (CMake WG_MODEL_K / WG_MODEL_L): Model M, as in ApplyEntry; never the configured
+            // sr_model, which the menu persists and an earlier session may have left on another model
+            const int32_t mm = ModelOfName("M");
+            const WgEntryDef* srM = SrEntryOfModel(mm);
+            u->selectedModel = 'M';
+            u->modelOption = kWgModelRows[mm].runtime_option;
+            u->modelProviderId = srM->id;
+            u->modelProviderName = EntryProviderName(*srM);
+            LogOnce(tag, "note: model choice: that model is not part of this build of the front end; Model M is used");
+        }
+    }
     if (!forceAmd && !u->selectedModel && !u->modelOption) {
         int32_t model = -1;
         std::string described;
@@ -657,6 +695,10 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
     }
 
     std::string why;
+    // R1: a create the runtime refuses as a HARD INCOMPATIBILITY (WG_ERROR_UNSUPPORTED: an adapter that is not an RDNA 4
+    // card, a build without its D3D12 kernel set, a D3D12 executor that cannot take the context) or that does not finish in
+    // time always goes to the front end's upscaler, whatever fallback_to_amd says: that option governs runtime failures only.
+    bool hardIncompat = false;
     bool repeatedFailure = false;  // custom slot: a failure remembered for the session, not tried again
     if (forceAmd) {
         why = "OptiScaler plugin: AMD FSR selected";
@@ -692,11 +734,13 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
         // Custom slot: the same upscaler with the same options failed earlier in this session: no new attempt.
         std::string remembered;
         uint64_t repeats = 0;
+        bool rememberedHard = false;  // the remembered failure was a hard incompatibility (R1): the repeat hands over too
         if (config_.customSlot && refusal.empty()) {
             std::lock_guard lock(mutex_);
             auto it = failedCreates_.find(FailureKey(backend, *u));
             if (it != failedCreates_.end()) {
                 remembered = it->second.reason;
+                rememberedHard = it->second.hardIncompat;
                 repeats = ++it->second.repeats;
             }
         }
@@ -719,6 +763,7 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
                   "); it is not created again until the game restarts";
             u->failReason = remembered;
             repeatedFailure = true;
+            hardIncompat = rememberedHard;
             if (LogPoint(repeats))
                 Log(tag + " custom slot: create " + std::to_string(repeats) + " since the failure: " + why);
         } else if (t_held) {
@@ -748,13 +793,13 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
                 ms + " ms ago): nothing is created, the first frame starts without history");
         } else {
             // On a worker thread: the game's thread waits create_wait_ms at most (async_create.h). Without the fallback to
-            // AMD there is nothing else to upscale with, so it waits until the create finishes.
+            // AMD there is nothing else to upscale with, so it waits for the create, but not for ever: create_giveup_ms.
             // Custom slot without an AMD DLL of its own there is nothing to upscale with meanwhile: it waits as with
             // fallback_to_amd = 0.
             const bool amdMeanwhile = config_.fallbackToAmd && (!config_.customSlot || UpscaleFallbackApi());
             u->creating = true;
-            auto pending = PendingCreate::Start(backend, u->createInfo);
-            if (pending->Wait(amdMeanwhile ? config_.createWaitMs : UINT32_MAX)) {
+            auto pending = PendingCreate::Start(backend, u->createInfo, HoldDevice(u->createInfo.d3d12_device));
+            if (pending->Wait(amdMeanwhile ? config_.createWaitMs : config_.createGiveUpMs)) {
                 u->creating = false;
                 if (u->failReason.empty()) u->failReason = u->createError;
                 const WgResult r = pending->Result();
@@ -770,27 +815,44 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
                         u->createInfo.services = nullptr;
                         Log(tag + " U" + std::to_string(u->id) + ": created again without the command-list split service");
                         u->creating = true;
-                        WgUpscaler* again = nullptr;
-                        const WgResult r2 = backend->create(&u->createInfo, &again);
-                        u->creating = false;
-                        if (r2 == WG_OK && again) {
-                            u->upscaler = again;
-                            u->backend = backend;
+                        // the same bounded path as the first create: a stalled retry hands over, it does not hang the game
+                        auto again2 = PendingCreate::Start(backend, u->createInfo, HoldDevice(u->createInfo.d3d12_device));
+                        if (again2->Wait(amdMeanwhile ? config_.createWaitMs : config_.createGiveUpMs)) {
+                            u->creating = false;
+                            const WgResult r2 = again2->Result();
+                            WgUpscaler* again = again2->Take();
+                            if (r2 == WG_OK && again) {
+                                u->upscaler = again;
+                                u->backend = backend;
+                            } else {
+                                if (again) backend->destroy(again);
+                                if (u->failReason.empty()) u->failReason = u->createError;
+                                why = std::string("upscaler \"") + backend->name + "\" create without the split service failed: " + WgResultText(r2);
+                                hardIncompat = hardIncompat || r2 == WG_ERROR_UNSUPPORTED;
+                            }
                         } else {
-                            if (again) backend->destroy(again);
-                            if (u->failReason.empty()) u->failReason = u->createError;
-                            why = std::string("upscaler \"") + backend->name + "\" create without the split service failed: " + WgResultText(r2);
+                            u->pending = again2;
+                            u->pendingBackend = backend;
+                            if (amdMeanwhile) {
+                                why = std::string("upscaler \"") + backend->name + "\" is still starting (without the split service) after " +
+                                      std::to_string(config_.createWaitMs) + " ms (create_wait_ms); it takes over when it has started";
+                            } else {
+                                hardIncompat = true;
+                                why = std::string("upscaler \"") + backend->name + "\" did not finish its create (without the split service) in " +
+                                      std::to_string(config_.createGiveUpMs) + " ms (create_giveup_ms): refused";
+                            }
                         }
                     }
                 } else {
                     why = std::string("upscaler \"") + backend->name + "\" create failed: " + WgResultText(r);
                     u->upscaler = nullptr;
+                    hardIncompat = r == WG_ERROR_UNSUPPORTED;
                 }
-                if (!u->backend && config_.customSlot) {
+                if (!u->backend && config_.customSlot && !u->pending) {  // (a retry still running is no failure yet)
                     const std::string reason = u->createError.empty() ? why : why + ": " + u->createError;
                     {
                         std::lock_guard lock(mutex_);
-                        failedCreates_[FailureKey(backend, *u)] = RememberedFailure{reason, 0};
+                        failedCreates_[FailureKey(backend, *u)] = RememberedFailure{reason, 0, hardIncompat};
                     }
                     Log(tag + " custom slot: this failure is remembered for the session: a create of upscaler \"" + backend->name +
                         "\" with the same options fails at once from now on, without a new attempt (logged now and then)");
@@ -798,8 +860,16 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
             } else {
                 u->pending = pending;
                 u->pendingBackend = backend;
-                why = std::string("upscaler \"") + backend->name + "\" is still starting after " + std::to_string(config_.createWaitMs) +
-                      " ms (create_wait_ms); it takes over when it has started";
+                if (amdMeanwhile) {
+                    why = std::string("upscaler \"") + backend->name + "\" is still starting after " + std::to_string(config_.createWaitMs) +
+                          " ms (create_wait_ms); it takes over when it has started";
+                } else {
+                    // nothing could upscale meanwhile and the create did not finish: refused (create_giveup_ms), the context goes
+                    // to the front end's upscaler; the late result takes over if it comes (as for a bounded create)
+                    hardIncompat = true;
+                    why = std::string("upscaler \"") + backend->name + "\" did not finish its create in " +
+                          std::to_string(config_.createGiveUpMs) + " ms (create_giveup_ms): refused";
+                }
             }
         }
     } else if (why.empty()) {
@@ -816,7 +886,7 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
             delete u;
             return FFX_API_RETURN_ERROR_RUNTIME_ERROR;
         }
-        if (config_.upscaler != UpscalerChoice::Amd && !config_.fallbackToAmd) {
+        if (config_.upscaler != UpscalerChoice::Amd && !config_.fallbackToAmd && !hardIncompat) {
             Log(tag + " -> ERROR_RUNTIME_ERROR: " + why + " (fallback_to_amd = 0)");
             delete u;
             return FFX_API_RETURN_ERROR_RUNTIME_ERROR;
@@ -837,7 +907,8 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
             }
             return FFX_API_RETURN_NO_PROVIDER;
         }
-        Log(tag + " upscaler context goes to AMD FSR" + (u->pending ? " for now" : "") + ": " + why);
+        Log(tag + " upscaler context goes to AMD FSR" + (u->pending ? " for now" : "") + ": " + why +
+            (hardIncompat && !config_.fallbackToAmd ? " (a hard incompatibility or a create that did not finish: fallback_to_amd = 0 does not apply)" : ""));
         if (!u->pending && (u->failReason.empty() || config_.upscaler == UpscalerChoice::Amd)) u->failReason = why;
         const ffxReturnCode_t rc = config_.hosted ? CreateAmdWithoutPrivateVersion(*original, &u->amd, desc, memCb)
                                                : original->createContext(&u->amd, desc, memCb);
@@ -861,6 +932,8 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
         std::lock_guard lock(mutex_);
         own_[u] = true;
     }
+    // the model the active context runs (HostSelected compares a selection with it): none while it runs AMD's upscaler
+    runningModel_.store(u->mode == UpscaleContext::Mode::Amd && !u->pending ? char(0) : u->selectedModel);
     *context = u;
     Log(tag + " -> OK context=" + Name(context) + (u->mode == UpscaleContext::Mode::Amd ? " amd=" + Pointer(u->amd) : ""));
     return FFX_API_RETURN_OK;
@@ -927,6 +1000,10 @@ void FrontEnd::CheckPending(UpscaleContext& u, uint64_t call) {
         u.mode = UpscaleContext::Mode::Own;
         u.compared = true;  // the network starts with a reset frame; AMD keeps its history for comparisons
         u.failReason.clear();
+        if (config_.customSlot) {  // a late success clears any session failure stored for these options
+            std::lock_guard lock(mutex_);
+            failedCreates_.erase(FailureKey(u.pendingBackend, u));
+        }
         Log(tag + ": WrongGPU's upscaler \"" + u.backend->name + "\" started after " + seconds + "; it upscales from this frame on");
     } else {
         u.failReason = u.createError.empty() ? std::string("upscaler \"") + u.pendingBackend->name + "\" create failed: " + WgResultText(r)
@@ -935,10 +1012,19 @@ void FrontEnd::CheckPending(UpscaleContext& u, uint64_t call) {
             "; AMD FSR keeps upscaling");
         if (config_.customSlot) {
             std::lock_guard lock(mutex_);
-            failedCreates_[FailureKey(u.pendingBackend, u)] = RememberedFailure{u.failReason, 0};
+            failedCreates_[FailureKey(u.pendingBackend, u)] = RememberedFailure{u.failReason, 0, r == WG_ERROR_UNSUPPORTED};
         }
     }
     u.pending.reset();
+}
+
+// R1: the create worker's own COM reference on the game's D3D12 device, taken here (on the game's thread) before the worker
+// starts and released by the worker as its last step, so a worker that outlives a timeout, the AMD context and the host's
+// own device reference never touches a released device. The release is a copy of the platform's function: it does not
+// depend on this object.
+ScopedRelease FrontEnd::HoldDevice(void* device) {
+    if (!device || !platform_.retainDevice || !platform_.releaseDevice) return {};
+    return AcquireHold(device, platform_.retainDevice, platform_.releaseDevice);  // (owner first, retain after: no leak if an allocation throws)
 }
 
 bool FrontEnd::ActivateSplit(UpscaleContext& u, const WgUpscalerBackend* backend, const std::string& tag) {
@@ -1366,11 +1452,168 @@ bool FrontEnd::ConfiguredModel(int32_t* model, std::string* described) {
     return true;
 }
 
+char FrontEnd::LauncherModel() const {
+    // The last model item of wronggpu.ini's runtime_options (the launcher writes model=<letter> there; a build without
+    // Model K / L has already dropped those items, IgnoreModelK / IgnoreModelL).
+    bool found = false;
+    const std::string v = OptionValue(config_.runtimeOptions, "model", &found);
+    if (!found || v.size() != 1) return 0;
+    const char m = char(std::toupper(static_cast<unsigned char>(v[0])));
+    return wgchoice::IsModel(m) ? m : 0;
+}
+
+void FrontEnd::LogOnce(const std::string& tag, const std::string& line) {
+    {
+        std::lock_guard lock(mutex_);
+        if (modelLogged_.count(line)) return;
+        modelLogged_[line] = true;
+    }
+    Log(tag + " " + line);
+}
+
+char FrontEnd::WronggpuIniModel() const {
+    if (!platform_.readWronggpuIni) return LauncherModel();
+    std::string warnings;
+    const Config c = ParseConfig(platform_.readWronggpuIni(), &warnings);
+    bool found = false;
+    const std::string v = OptionValue(c.runtimeOptions, "model", &found);
+    if (!found || v.size() != 1) return 0;
+    const char m = char(std::toupper(static_cast<unsigned char>(v[0])));
+    return wgchoice::IsModel(m) ? m : 0;
+}
+
+char FrontEnd::ChooseModel(const std::string& tag, std::string* why) {
+    std::lock_guard lock(choiceMutex_);
+    // the record cannot be used now (no state folder, unreadable, corrupt, busy): the last record this session read or
+    // wrote, else wronggpu.ini's model item, else Model M; never the host's stored entry
+    auto fallback = [&](const std::string& reason) {
+        if (wgchoice::IsModel(lastChoice_)) {
+            *why = reason + "; the last model choice read this session";
+            return lastChoice_;
+        }
+        const char ini = LauncherModel();
+        *why = ini ? reason + "; wronggpu.ini model=" + ini : reason + "; the default";
+        return ini ? ini : 'M';
+    };
+    const std::filesystem::path& path = platform_.choiceRecord;
+    DWORD dirErr = 0;
+    const wgstate::PathState dir = path.empty() ? wgstate::PathState::Missing : wgstate::DirectoryState(path.parent_path().wstring(), &dirErr);
+    if (dir != wgstate::PathState::Present) {
+        LogOnce(tag, dir == wgstate::PathState::Missing
+                         ? std::string("model choice: no WrongGPU state folder (wronggpu-setup) for this game: no model choice record")
+                         : "model choice: the WrongGPU state folder (wronggpu-setup) cannot be checked (error " + std::to_string(dirErr) + ")");
+        return fallback(dir == wgstate::PathState::Missing ? "no WrongGPU state folder" : "the WrongGPU state folder cannot be checked");
+    }
+    wgchoice::Record rec;
+    bool migrated = false;
+    std::string err;
+    const wgchoice::LoadResult lr =
+        wgchoice::LoadOrMigrateRecord(path, [this] { return WronggpuIniModel(); }, &rec, &migrated, &err);
+    switch (lr) {
+    case wgchoice::LoadResult::Ok: break;
+    case wgchoice::LoadResult::Corrupt:
+        LogOnce(tag, "model choice: the record (wronggpu-setup\\model-choice.ini) is corrupt (" + err + "): not used until the next choice replaces it");
+        return fallback("the model choice record is corrupt");
+    case wgchoice::LoadResult::Unreadable:
+        // (never written over: a record held open for a moment must not be replaced by a guess)
+        LogOnce(tag, "model choice: the record (wronggpu-setup\\model-choice.ini) cannot be read (" + err + ")");
+        return fallback("the model choice record cannot be read");
+    case wgchoice::LoadResult::NoLock:
+        Log(tag + " model choice: the record was not read (" + err + ")");
+        return fallback("the model choice record was busy");
+    case wgchoice::LoadResult::Missing:
+        LogOnce(tag, "ERROR: model choice: no record yet, and it could not be written (" + err + ")");
+        return fallback("no model choice record (not written)");
+    }
+    lastChoice_ = rec.model;
+    if (migrated)
+        Log(tag + " model choice: no record yet (an install from before 0.6.5): Model " + rec.model +
+            " from wronggpu.ini's model item (or the default) recorded (seq 1, source=launcher)");
+    *why = std::string("the model choice record: ") + wgchoice::SourceWords(rec.source) + ", seq " + std::to_string(rec.seq);
+    const char launcher = LauncherModel();
+    if (launcher && launcher != rec.model)
+        LogOnce(tag, std::string("model choice: wronggpu.ini's model item (the install's default) says Model ") + launcher +
+                         "; the model choice record says Model " + rec.model + " (" + wgchoice::SourceWords(rec.source) + ", seq " +
+                         std::to_string(rec.seq) + "), which runs");
+    return rec.model;
+}
+
+int32_t FrontEnd::HostSelected(uint64_t versionId) {
+    const std::string tag = "host event:";
+    const WgEntryDef* e = OwnEntryOfId(versionId);
+    if (!e || e->slot != WG_OPT_SR_MODEL || e->value < 0 || e->value >= WG_SR_MODEL_COUNT) {
+        Log(tag + " the player selected " + (e ? std::string(EntryProviderName(*e)) : "version " + Hex(versionId)) +
+            " in OptiScaler's upscaler list: no WrongGPU model choice");
+        return WG_HOST_SELECTED_NOTHING_CHANGED;
+    }
+    const char model = kWgModelRows[e->value].name[0];
+    const char running = runningModel_.load();
+    const std::filesystem::path& path = platform_.choiceRecord;
+    DWORD dirErr = 0;
+    if (path.empty() || wgstate::DirectoryState(path.parent_path().wstring(), &dirErr) != wgstate::PathState::Present) {
+        // no record to write: not saved, nothing changes (the host's index is never a choice)
+        Log(tag + " ERROR: the player selected Model " + model + " in OptiScaler's upscaler list, but it was not saved: no WrongGPU "
+                  "state folder (wronggpu-setup) for this game" + (dirErr ? " (error " + std::to_string(dirErr) + ")" : std::string()) +
+            ". Nothing changes; apply the model in the WrongGPU launcher.");
+        return WG_HOST_SELECTED_NOT_SAVED;
+    }
+    std::lock_guard lock(choiceMutex_);
+    wgchoice::Record after;
+    std::string err;
+    const wgchoice::Outcome o = wgchoice::RecordChoice(path, model, wgchoice::Source::Ffx, &after, &err);
+    if (o == wgchoice::Outcome::Written) {
+        lastChoice_ = model;
+        // 1 when the selected model is not what the active context runs (also when the record changed underneath, a
+        // launcher Apply while the game is open): the host recreates the upscaler, which then runs the record's model
+        Log(tag + " the player selected Model " + model + " in OptiScaler's upscaler list: recorded (seq " + std::to_string(after.seq) +
+            ", source=ffx)" + (err.empty() ? "" : "; " + err) +
+            (running == model ? "; it already runs" : std::string("; it runs after the upscaler is recreated (now running: ") +
+                                                          (wgchoice::IsModel(running) ? std::string("Model ") + running : std::string("no WrongGPU model")) + ")"));
+        return running == model ? WG_HOST_SELECTED_NOTHING_CHANGED : WG_HOST_SELECTED_RECORDED;
+    }
+    if (o == wgchoice::Outcome::SeqExhausted) {
+        Log(tag + " ERROR: the player selected Model " + model + " in OptiScaler's upscaler list: " + wgchoice::OutcomeWords(o) +
+            ". Delete wronggpu-setup\\model-choice.ini or apply the model in the launcher.");
+        return WG_HOST_SELECTED_REFUSED;
+    }
+    if (o == wgchoice::Outcome::Corrupt) {  // never replaced: the model that runs stays
+        Log(tag + " ERROR: the player selected Model " + model + " in OptiScaler's upscaler list: " + wgchoice::OutcomeWords(o) +
+            (err.empty() ? "" : " (" + err + ")") + ". Nothing changes.");
+        return WG_HOST_SELECTED_REFUSED;
+    }
+    Log(tag + " ERROR: the player selected Model " + model + " in OptiScaler's upscaler list, but it was not saved: " +
+        wgchoice::OutcomeWords(o) + (err.empty() ? "" : " (" + err + ")") + ". Nothing changes; select it again.");
+    return WG_HOST_SELECTED_NOT_SAVED;
+}
+
 void FrontEnd::ApplyEntry(const WgEntryDef& e, UpscaleContext& u, const std::string& tag, const char* source) {
     int32_t model = e.slot == WG_OPT_SR_MODEL ? e.value : -1;
     std::string described;
     if (model < 0 && ConfiguredModel(&model, &described))
         Log(tag + " settings: " + described + " (the SR context's model)");
+    // The entry the host passes at a create is the index its ini stores, never a choice: the model choice record decides
+    // the SR context's model (ChooseModel: the record, or when it cannot be used the session's last choice, wronggpu.ini's
+    // model item, Model M; a player's selection in the host's list reaches the record as an event, HostSelected). One
+    // folder per choice keeps its folder's model.
+    const WgEntryDef* shown = &e;  // the entry written to the shared settings and logged
+    if (config_.hosted && std::strcmp(source, "folder") != 0) {
+        std::string why;
+        const char entry = model >= 0 && model < WG_SR_MODEL_COUNT ? kWgModelRows[model].name[0] : 0;
+        char chosen = ChooseModel(tag, &why);
+        int32_t m = ModelOfName(std::string(1, chosen));
+        if (m < 0 || !SrEntryOfModel(m)) {
+            LogOnce(tag, std::string("note: model choice: Model ") + chosen + " is not part of this build of the front end; Model M is used");
+            chosen = 'M';
+            m = ModelOfName("M");
+        }
+        if (m != model)
+            Log(tag + " model choice: the host's entry names " + (entry ? std::string("Model ") + entry : std::string("no model")) +
+                "; Model " + chosen + " runs (" + why + "; an entry the host stores is not a choice)");
+        else
+            Log(tag + " model choice: Model " + chosen + " (" + why + ")");
+        model = m;
+        if (e.slot == WG_OPT_SR_MODEL) shown = SrEntryOfModel(m);
+    }
     if (const WgEntryDef* sr = model >= 0 ? SrEntryOfModel(model) : nullptr) {
         u.selectedModel = kWgModelRows[model].name[0];
         u.modelOption = kWgModelRows[model].runtime_option;
@@ -1382,9 +1625,9 @@ void FrontEnd::ApplyEntry(const WgEntryDef& e, UpscaleContext& u, const std::str
             if (OwnEntry(i)->slot == WG_OPT_SR_MODEL && std::strcmp(EntryProviderName(*OwnEntry(i)), u.modelProviderName) == 0)
                 u.modelProviderId = OwnEntry(i)->id;
     }
-    const bool written = platform_.menu.set && platform_.menu.set(e.slot, e.value, source);
+    const bool written = platform_.menu.set && platform_.menu.set(shown->slot, shown->value, source);
     wg::Source word = std::strcmp(source, "folder") == 0 ? wg::Source::Sidecar : wg::Source::Menu;
-    Log(tag + " the host chose " + EntryProviderName(e) + " (" + Hex(e.id) + "): settings: " + wg::describe(e.slot, e.value, word) +
+    Log(tag + " the host chose " + EntryProviderName(e) + " (" + Hex(e.id) + "): settings: " + wg::describe(shown->slot, shown->value, word) +
         (written ? std::string() : platform_.menu.set ? " (not written: another module writes the shared settings)" : std::string()) +
         (e.slot == WG_OPT_SR_MODEL ? std::string() : std::string("; the SR context runs ") + u.modelProviderName));
 }
@@ -1619,7 +1862,7 @@ ffxReturnCode_t FrontEnd::DispatchUpscale(UpscaleContext& u, const ffxDispatchDe
         problem = std::string("upscaler \"") + u.backend->name + "\" dispatch failed: " + WgResultText(r);
         if (platform_.diagnosticFailure) platform_.diagnosticFailure(u.id, frameIndex, u.device);
         // clean/fe-wrapped-list: WG_ERROR_UNSUPPORTED from the upscaler itself: it does not take this context's frames
-        // (the network runtime with hip_switch=off when its D3D12 executor refuses a frame, e.g. native resolution).
+        // (the network runtime when its D3D12 executor refuses a frame, e.g. native resolution).
         // AMD's FSR takes the context over now; without it the stand-in upscales such frames (below) and the context
         // stays the upscaler's. Said once per context.
         if (r == WG_ERROR_UNSUPPORTED && !u.unsupportedSaid) {
@@ -1638,9 +1881,35 @@ ffxReturnCode_t FrontEnd::DispatchUpscale(UpscaleContext& u, const ffxDispatchDe
             Log(tag + " note U" + std::to_string(u.id) + ": AMD FSR is not available for this context; the stand-in upscales the frames the upscaler does not take");
         }
     }
+    // WG_ERROR_NOT_READY whose stand-in failed (create or dispatch; DispatchWithFallback keeps the refusal's code):
+    // still THIS frame only, never a takeover: AMD's FSR for this frame (its context from the saved parameters,
+    // takeOver = false); when that fails too, the frame is skipped (the game's output keeps what it held). No Fail, no
+    // broken mark, no bad-frame count; the upscaler's next frame starts without history.
+    if (mapped && r == WG_ERROR_NOT_READY && u.fallbackBackend && u.fallbackBackend != u.backend) {
+        u.resetNext = true;
+        const std::string what = "frame " + std::to_string(frameIndex) + ": upscaler not ready and its stand-in failed";
+        if (config_.fallbackToAmd && CreateAmdFromSaved(u, call, false) == FFX_API_RETURN_OK) {
+            ffxDispatchDescUpscale amd = d;
+            if (!u.amdLast) amd.reset = true;  // AMD's history is old, or never started
+            u.amdLast = true;
+            const ffxReturnCode_t rc = u.amdApi->dispatch(&u.amd, &amd.header);
+            Log(tag + " note U" + std::to_string(u.id) + ": " + what + ": AMD FSR upscales this frame only -> " + RcName(rc) +
+                "; the context stays WrongGPU's");
+            if (rc == FFX_API_RETURN_OK) {
+                Report(u, UpscaleState::Amd, nullptr);
+                return rc;
+            }
+        }
+        Log(tag + " note U" + std::to_string(u.id) + ": " + what + ": this frame is skipped (the game's output keeps what it held); "
+            "the context stays WrongGPU's");
+        Report(u, UpscaleState::Failed, nullptr, what + "; skipped");
+        return FFX_API_RETURN_OK;
+    }
     // Inputs the upscaler cannot take (the mapping's checks, or the upscaler's own: WG_ERROR_PARAMETER,
-    // WG_ERROR_UNSUPPORTED) are one frame's matter (BadFrame); every other result means the upscaler is broken.
-    if (!mapped || r == WG_ERROR_PARAMETER || r == WG_ERROR_UNSUPPORTED) {
+    // WG_ERROR_UNSUPPORTED) are one frame's matter (BadFrame), and so is WG_ERROR_NOT_READY that the stand-in could
+    // not take above (none, or it failed): AMD's FSR for this frame only, the context stays the upscaler's. Every
+    // other result means the upscaler is broken.
+    if (!mapped || r == WG_ERROR_PARAMETER || r == WG_ERROR_UNSUPPORTED || r == WG_ERROR_NOT_READY) {
         frame.reset = resetAsked ? 1u : 0u;  // (for the stand-in: as the game gave it)
         return BadFrame(u, d, call, frameIndex, problem, &frame, false, mapped ? r : WG_ERROR_PARAMETER);
     }

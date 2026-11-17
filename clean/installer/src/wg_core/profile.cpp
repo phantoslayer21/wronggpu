@@ -15,14 +15,14 @@ namespace wg {
 const SettingDef kSettings[] = {
     {"wronggpu", Layer::Fe, Tier::Basic, "on", "on|off", L"WrongGPU",
      L"On: Model M upscales. Off: AMD's FSR upscales (WrongGPU stays installed and only logs)."},
-    {"executor", Layer::Rt, Tier::Basic, "auto", "auto|dx12|hip", L"Executor",
-     L"Auto: D3D12 on RX 9000 cards. HIP is used anyway for sparkle guard and frame capture."},
+    {"executor", Layer::Rt, Tier::Basic, "auto", "auto|dx12", L"Executor",
+     L"Auto: Direct3D 12 on RX 9000 cards. HIP is not a game setting."},
     {"output_filter", Layer::Rt, Tier::Basic, "default", "default|original|analytic|quality5|quality9", L"Output filter",
-     L"Default and Original: native output. Quality 5 / Quality 9: WrongGPU variations."},
+     L"Default and Original: native output. Quality 5 / Quality 9: not available on the DX12 runtime yet (the default is used)."},
     {"pre_exposure", Layer::Rt, Tier::Basic, "scale", "scale|original", L"Pre-exposure",
      L"Scale (default). Original can change hair and fine detail in some games (Hogwarts Legacy)."},
     {"sparkle_guard", Layer::Rt, Tier::Basic, "off", "off|on|#rate", L"Sparkle guard",
-     L"Calms single bright pixels (about +0.11 ms). Needs the HIP runtime."},
+     L"Calms single bright pixels. Not available on the DX12 runtime yet (it stays off)."},
     {"fps_overlay", Layer::Opti, Tier::Basic, "keep", "keep|on|off", L"OptiScaler FPS overlay",
      L"OptiScaler's own FPS counter (only for OptiScaler builds that have the setting)."},
     // Ray Reconstruction (games that use it, rr.h): the RR plugin's settings file
@@ -71,6 +71,16 @@ static string TrimA(string t) {
     return t.substr(i);
 }
 static string LowerA(string s) { for (auto& c : s) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a'); return s; }
+
+bool NeedsHipRuntime(const string& key, const string& value) {
+    const string v = LowerA(TrimA(value));
+    if (key == "executor") return v == "hip";
+    if (key == "output_filter") return v == "quality5" || v == "quality9";
+    if (key == "sparkle_guard") return !v.empty() && v != "off" && v != "0";
+    return false;
+}
+
+const wchar_t* NotOnDx12Text() { return L"Not available on the DX12 runtime yet"; }
 
 bool ValidateSetting(const SettingDef& d, const string& valueIn, string* normal, wstring* why) {
     string v = LowerA(TrimA(valueIn));
@@ -153,6 +163,10 @@ bool LoadProfile(const wstring& path, Profile& p, std::vector<wstring>* problems
         if (eq == string::npos) continue;
         const string k = LowerA(TrimA(t.substr(0, eq))), val = TrimA(t.substr(eq + 1));
         if (k == "format") continue;
+        if (k == "executor" && LowerA(val) == "hip") {  // R1: removed, and said
+            if (problems) problems->push_back(wstring(L"profile.ini: ") + kRetiredHipNote);
+            continue;
+        }
         const SettingDef* d = FindSetting(k);
         if (!d) { p.v[k] = val; continue; }  // a key of a later launcher: kept
         string n; wstring why;
@@ -341,6 +355,39 @@ bool RenderWronggpuIni(const Profile& p, const string& in, string& out, wstring*
     return true;
 }
 
+char ModelOfWronggpuIni(const string& text) {
+    string options, section;
+    if (!IniGetFrontEnd(text, "runtime_options", &options, &section)) return 0;
+    string m;
+    for (auto& kv : SplitOptions(options)) if (LowerA(kv.first) == "model") m = TrimA(kv.second);
+    if (m.size() != 1) return 0;
+    const char c = char(toupper((unsigned char)m[0]));
+    return c == 'M' || c == 'K' || c == 'L' ? c : 0;
+}
+
+string SetOptiModelEntry(const string& text, char model) {
+    const char* index = "0";
+#if WRONGGPU_MODEL_L
+    if (model == 'L') index = kModelLEntryIndex;
+#endif
+#if WRONGGPU_MODEL_K || WRONGGPU_PRESET_K
+    if (model == 'K') index = kModelKEntryIndex;
+#endif
+    // OptiScaler 10's custom upscaler slot: [WrongGPU] (its key, else its section); else [FSR] (the FFX route)
+    bool slot = IniHasKey(text, "WrongGPU", "UpscalerIndex");
+    if (!slot && !IniHasKey(text, "FSR", "UpscalerIndex")) {
+        size_t at = 0;
+        while (!slot && at < text.size()) {
+            size_t end = text.find('\n', at);
+            if (end == string::npos) end = text.size();
+            const string line = LowerA(TrimA(text.substr(at, end - at)));
+            slot = line == "[wronggpu]";
+            at = end + 1;
+        }
+    }
+    return IniSet(text, slot ? "WrongGPU" : "FSR", "UpscalerIndex", index);
+}
+
 bool RenderOptiIni(const Profile& p, const string& in, string& out, std::vector<wstring>* notes) {
     out = in;
     // the model (WRONGGPU_MODEL_L / WRONGGPU_MODEL_K builds): the entry of WrongGPU's list OptiScaler starts with. OptiScaler
@@ -408,6 +455,10 @@ Profile ImportProfile(const string& wronggpuIni, const string& optiIni, std::vec
     for (auto& d : kSettings) {
         auto it = eff.find(d.key);
         if (it == eff.end() || it->second == d.def) continue;
+        if (!strcmp(d.key, "executor") && LowerA(TrimA(it->second)) == "hip") {  // R1: removed, and said
+            if (notes) notes->push_back(wstring(L"wronggpu.ini: ") + kRetiredHipNote);
+            continue;
+        }
         if (!strcmp(d.key, "sm2_rr_experimental") || !strcmp(d.key, "rr_config_fix")) continue;  // never imported: the player chooses
         string n; wstring why;
         if (ValidateSetting(d, it->second, &n, &why)) {
@@ -431,6 +482,7 @@ std::vector<OutsideEdit> OutsideEdits(const Profile& p, const string& wronggpuIn
         auto it = eff.find(d.key);
         if (it == eff.end()) continue;
         if (it->second == d.def || it->second == p.get(d.key)) continue;
+        if (!strcmp(d.key, "executor") && LowerA(TrimA(it->second)) == "hip") continue;  // retired: the next Apply removes it
         r.push_back({d.key, it->second, p.get(d.key)});
     }
     return r;

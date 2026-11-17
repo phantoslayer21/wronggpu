@@ -570,6 +570,7 @@ static void IgnoreJson(Output& o, const IgnoreReport& r) {
 int Verb(const wstring& verb, const Args& a, Output& o) {
     if (IgnoreArgsMisplaced(verb, a, o)) return o.code;
     const bool noScan = a.has(L"noscan");
+    if (noScan) { g.ctx.noScanAlways = true; g.ctx.noLibraryScan = true; }  // every verb: no store library search (the AMD FSR 4 search too)
     GlobalSettings& gs = gl.global;
     GlobalSettings scan = gs;  // --library=<folder>: scanned this time only, never saved
     for (auto& lib : a.libraries) scan.extraFolders.push_back(FullPath(lib));
@@ -758,6 +759,7 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
                 g.ctx.perGameEntry = perEntry >= 0 ? perEntry == 1 : !LauncherInstalled();
                 Ui ui; ui.step = [](int, int, const wstring&) {}; ui.log = [](const wstring& s) { LogLine(g.ctx, s); };
                 LogLine(g.ctx, wstring(L"elevated worker: ") + OpName(r.op) + L" " + (r.dir.empty() ? r.exe : r.dir) + (IsElevated() ? L" (elevated)" : L" (not elevated)"));
+                r.noScan = r.noScan || g.ctx.noScanAlways;  // apply --noscan: the job's own searches too (#243)
                 res = RunOp(g.ctx, r, ui);
             }
             if (!result.empty()) { const string rt = ResultText(res); try { WriteFileAtomic(result, rt.data(), rt.size()); } catch (const SetupError&) {} }
@@ -814,10 +816,12 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
         if (!LoadRecord(RecordPath(dir), m) || m.legacy) { o.j.S("error", L"WrongGPU is not installed in " + dir); Print(L"WrongGPU is not installed in " + dir); return EXIT_NOT_INSTALLED; }
         Profile p = GameProfile(dir);
         std::vector<std::pair<string, string>> optiEdits;
+        bool modelGiven = false;  // a model=<m> item: the player's explicit model choice
         if (verb == L"set") {
             for (size_t i = 1; i < a.pos.size(); ++i) {
                 const wstring& kv = a.pos[i];
                 const size_t eq = kv.find(L'=');
+                if (eq != wstring::npos && IEq(kv.substr(0, eq), L"model")) modelGiven = true;
                 wstring why;
                 if (eq == wstring::npos) why = L"use key=value: " + kv;
                 else if (StartsWithI(kv, L"opti.")) {  // an OptiScaler.ini key (the OptiScaler tab): checked when applied
@@ -838,6 +842,13 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
             if (NeedsElevation(dir)) { o.j.S("error", L"administrator permission is needed for " + dir); Print(L"administrator permission is needed for " + dir); return EXIT_REFUSED; }
             OpLogBegin();
             OpRequest r; r.op = Op::Apply; r.dir = dir; r.hasProfile = true; r.profile = p; r.optiEdits = optiEdits;
+            r.modelChosen = modelGiven;  // set <game> model=<m>: the player's explicit model choice, stamped (also the same model)
+#ifdef WRONGGPU_TESTING
+            if (a.has(L"gui-apply")) {  // tests: the request the launcher window's Apply makes (GuiApplyRequest), the same code
+                r = GuiApplyRequest(dir, p);
+                r.optiEdits = optiEdits;
+            }
+#endif
             Ui ui; ui.step = [](int, int, const wstring&) {}; ui.log = [](const wstring& s) { LogLine(g.ctx, s); };
             const OpResult res = RunOp(g.ctx, r, ui);
             OpLogEnd();
@@ -845,7 +856,7 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
             if (res.code) return res.code;
         }
         string wini, oini;
-        ReadAll(Join(dir, L"wronggpu.ini"), wini);
+        wini = EffectiveWronggpuIni(dir);  // (#219: the state folder over the file)
         ReadAll(Join(dir, L"OptiScaler.ini"), oini);
         auto eff = EffectiveSettings(wini, oini);
         if (const RrFileState rs = ReadRrSettings(dir); rs.present) {  // Ray Reconstruction: the RR plugin's settings file

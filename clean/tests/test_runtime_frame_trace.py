@@ -77,7 +77,7 @@ def run_trace(rw=64, rh=64, ow=96, oh=96, frames=3, options="", build_files=(), 
 class Trace:
     """A parsed run: create (the first line), allocs {k: bytes}, uploads {address: (bytes, SHA-256 hex)} (create's),
     loads, frames [{"info": {...}, "launches": [Launch], "failed": kernel or None, "error": message or None, "names":
-    {buffer name: address}}], kernels {key: value}."""
+    {buffer name: address}, "guard": [frame guard lines], "skipped": [what the guard skipped]}], kernels {key: value}."""
 
     def __init__(self, lines):
         self.create, self.allocs, self.uploads, self.loads, self.frames, self.kernels = lines[0], {}, {}, [], [], {}
@@ -96,9 +96,14 @@ class Trace:
             elif ln.startswith("frame "):
                 f = ln.split(" ")
                 info = {f[i]: int(f[i + 1]) for i in range(2, len(f) - 1, 2)}
-                self.frames.append({"info": info, "launches": [], "failed": None, "error": None, "names": {}})
+                self.frames.append({"info": info, "launches": [], "failed": None, "error": None, "names": {},
+                                    "guard": [], "skipped": []})
             elif ln.startswith("launch "):
                 self.frames[-1]["launches"].append(Launch(ln[7:]))
+            elif ln.startswith("guard_"):   # the frame guard (the hybrid bottleneck's wait timeout; native D3D12)
+                self.frames[-1]["guard"].append(ln)
+            elif ln.startswith("skipped "):   # what the frame guard skipped (not done)
+                self.frames[-1]["skipped"].append(ln[8:])
             elif ln.startswith("failed "):
                 self.frames[-1]["failed"] = ln[7:]
             elif ln.startswith("ERR frame "):

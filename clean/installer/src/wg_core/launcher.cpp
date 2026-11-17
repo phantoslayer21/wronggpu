@@ -17,6 +17,8 @@
 #include <memory>
 
 #include "gamerules.h"
+#include "../../../fsr/asi/asi_thunk.h"            // wronggpu-asi.ini (ParseSelection / FormatSelection), pure
+#include "../../../fsr/src/model_choice_record.h"  // the game's model choice record
 #include "json_writer.h"
 #include "model.h"
 #include "optiscaler.h"
@@ -24,6 +26,7 @@
 #include "pe.h"
 #include "rr.h"
 #include "rrconfig.h"
+#include "../../../wgshared/include/wg_state.h"  // the game's state folder (settings.ini), its lock, atomic writes
 
 #ifdef _MSC_VER
 #pragma comment(lib, "winhttp.lib")
@@ -371,7 +374,7 @@ GameEntry EntryFor(Context& ctx, const wstring& exeIn, const wstring& name, cons
             if (fix == "on" || fix == "ask") try { g.rrConfigProtected = NeedsElevation(g.dir); } catch (...) {}
         }
         string wini, oini;
-        ReadAll(Join(g.dir, L"wronggpu.ini"), wini);
+        wini = EffectiveWronggpuIni(g.dir);  // (#219: the state folder over the file)
         ReadAll(Join(g.dir, L"OptiScaler.ini"), oini);
         const bool off = EffectiveSettings(wini, oini)["wronggpu"] == "off";
         g.wgOff = off;  // kept with a Running status too (the window's Model M data rule)
@@ -708,6 +711,7 @@ static void Rollback(Context& ctx, const wstring& dir, Ui& ui, OpResult& res) {
     Record m;
     if (!LoadRecord(RecordPath(dir), m) || m.legacy) Fail(L"No WrongGPU installation record was found in " + dir + L".", EXIT_NOT_INSTALLED);
     if (!m.exe.empty() && GameRunning(m.exe)) Fail(BaseName(m.exe) + L" is running. Close it first.", EXIT_REFUSED);
+    const auto gate = GuardOperation(dir, &m, false);  // #219: the state lock for the whole roll back; its files are held below (record.h)
     wstring version, txtSha;
     std::vector<PrevFile> files;
     if (!ReadPrevious(dir, version, files, &txtSha) || files.empty()) Fail(L"There is no earlier version to roll back to in " + dir + L".", EXIT_NOT_INSTALLED);
@@ -988,11 +992,82 @@ static bool OptInKey(const wstring& exe, const IniKeyChange& c) {
     return false;
 }
 
+// The launcher's entry in the game's model choice record (wronggpu-setup\model-choice.ini; model_choice_record.h): read,
+// the next seq, written atomically; the caller holds the record's lock. A record that cannot be read is not written over;
+// every failure is said in the notes and warnings.
+bool WriteLauncherModelChoice(Context& ctx, const wstring& dir, char model, std::vector<wstring>& notes, std::vector<wstring>* warnings) {
+    const std::filesystem::path path = Join(StateDir(dir), wgchoice::kRecordFile);
+    wgchoice::Record after;
+    std::string why;
+    const wgchoice::Outcome o = wgchoice::RecordChoiceUnlocked(path, model, wgchoice::Source::Launcher, &after, &why);
+    if (o != wgchoice::Outcome::Written) {
+        const wstring w = L"The model choice record was not changed: " + FromUtf8(wgchoice::OutcomeWords(o)) +
+                          (why.empty() ? wstring() : L" (" + FromUtf8(why) + L")") + L". The game may keep running its earlier model choice.";
+        LogLine(ctx, w);
+        notes.push_back(w);
+        if (warnings) warnings->push_back(w);
+        return false;
+    }
+    if (!why.empty()) LogLine(ctx, L"model-choice.ini: " + FromUtf8(why));
+    LogLine(ctx, wstring(L"model choice record: Model ") + wchar_t(model) + L" (seq " + std::to_wstring(after.seq) + L", source=launcher)");
+    return true;
+}
+
+OpRequest GuiApplyRequest(const wstring& dir, const Profile& edit) {
+    OpRequest r;
+    r.op = Op::Apply;
+    r.dir = dir;
+    r.hasProfile = true;
+    r.profile = edit;
+    r.modelChosen = FindSetting("model") != nullptr;  // Apply with a model shown is the player's model choice, even unchanged
+    return r;
+}
+
+std::vector<std::pair<string, string>> FrontEndStateKeys(const Profile& p) {
+    std::vector<std::pair<string, string>> r{{"upscaler", p.get("wronggpu") == "off" ? "amd" : "network"}};
+    for (size_t i = 0; i < kSettingCount; ++i)
+        if (kSettings[i].layer == Layer::Rt) r.push_back({kSettings[i].key, p.get(kSettings[i].key)});  // explicit, defaults too
+    return r;
+}
+
+string WithFrontEndState(const string& wronggpuIni, const std::vector<std::pair<string, string>>& state) {
+    string t = wronggpuIni;
+    std::vector<std::pair<string, string>> items;  // the runtime option keys of the state, in its order
+    for (auto& kv : state) {
+        if (kv.first == "upscaler") {
+            string cur, sec;
+            t = IniGetFrontEnd(t, "upscaler", &cur, &sec) ? IniSet(t, sec, "upscaler", kv.second) : IniSet(t, "fsr", "upscaler", kv.second);
+        } else if (kv.first.rfind("rr_", 0) != 0 && kv.first != "model") {
+            items.push_back(kv);
+        }
+    }
+    if (items.empty()) return t;
+    string options, section;
+    const bool had = IniGetFrontEnd(t, "runtime_options", &options, &section);
+    std::vector<std::pair<string, string>> kept;
+    for (auto& kv : SplitOptions(options)) {
+        string k = LowerA(kv.first);
+        if (k == "backend") k = "executor";
+        bool overridden = false;
+        for (auto& s : items) overridden = overridden || s.first == k;
+        if (!overridden) kept.push_back(kv);
+    }
+    for (auto& s : items) { t = IniRemoveFrontEnd(t, s.first); kept.push_back(s); }
+    return IniSet(t, had ? section : "fsr", "runtime_options", JoinOptions(kept));
+}
+
+string EffectiveWronggpuIni(const wstring& dir) {
+    string text;
+    ReadAll(Join(dir, L"wronggpu.ini"), text);
+    const wgstate::Settings s = wgstate::ReadSettings(dir);
+    return s.kv.empty() ? text : WithFrontEndState(text, s.kv);
+}
+
 Profile GameProfile(const wstring& dir) {
     Profile p;
     if (!LoadProfile(ProfilePath(dir), p)) {
         string wini, oini;
-        ReadAll(Join(dir, L"wronggpu.ini"), wini);
+        wini = EffectiveWronggpuIni(dir);  // (#219: the state folder over the file)
         ReadAll(Join(dir, L"OptiScaler.ini"), oini);
         p = ImportProfile(wini, oini);
     }
@@ -1000,11 +1075,16 @@ Profile GameProfile(const wstring& dir) {
     return p;
 }
 
-void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vector<wstring>& notes, std::vector<wstring>* warnings) {
+void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vector<wstring>& notes, std::vector<wstring>* warnings,
+                  bool modelChosen) {
     Record m;
     if (!LoadRecord(RecordPath(dir), m) || m.legacy) Fail(L"WrongGPU is not installed in " + dir + L".", EXIT_NOT_INSTALLED);
     InferOwners(ctx, m);
     bool recordChanged = m.format < 2;
+    Profile before;  // the launcher's choice as saved before this apply: RR's mode is written only when it changes (rr.h WriteRrState)
+    const bool hadBefore = LoadProfile(ProfilePath(dir), before);
+    const string prevMode = before.get("rr_mode").empty() ? string("fast") : before.get("rr_mode");
+    MigrateRrState(ctx, dir);  // #219: an older plugin's or the player's edit of WrongGPU\wronggpu.ini: its mode into the state folder
     // Model L (or Model K, a build with its choice) saved while its data on this PC is not ready (removed since, or an install
     // of a game set to it before the data was converted): the game's files say Model M until it is; the profile keeps the
     // player's choice
@@ -1018,42 +1098,140 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
             if (warnings) warnings->push_back(w);
         }
     }
-    auto renderFile = [&](const wchar_t* name, bool opti) {
+    // The game's state lock (wg_state.h, held by the launcher, the front end and the plugins for every read-modify-write
+    // of the game's state) is held across the model choice record and OptiScaler.ini's entry (and the state folder's other
+    // settings): the front end's upgrade migration, which reads wronggpu.ini's model item under the same lock, comes wholly
+    // before or after this.
+    // Not taken in time (the game is writing its state): nothing is applied.
+    const std::filesystem::path recordPath = Join(StateDir(dir), wgchoice::kRecordFile);
+    wgchoice::Lock lock(recordPath);
+    if (!lock.ok())
+        Fail(L"Settings not applied: the game is saving WrongGPU's state right now (" + FromUtf8(wgchoice::OutcomeWords(wgchoice::Outcome::NoLock)) +
+                 L"). Try again.",
+             EXIT_REFUSED);
+    char forcedEntry = 0;  // the model whose entry OptiScaler.ini's UpscalerIndex is set to (after the record)
+    // What this apply has written so far, for a failure after some of it: the message then says exactly what was applied
+    // and what was not (no rollback: each piece is whole on its own).
+    std::vector<wstring> applied, notApplied;
+    // wronggpu.ini is never rewritten here: it is the install's defaults and the player's file (the settings the launcher
+    // changes go to the game's WrongGPU state folder, wronggpu-setup: the model choice record below, settings.ini)
+    auto renderOpti = [&]() {
+        const wchar_t* name = L"OptiScaler.ini";
         const wstring path = Join(dir, name);
         string in;
-        const bool had = ReadAll(path, in);
-        if (opti && !had) return;  // OptiScaler.ini: only an existing file (ours) is changed
-        string out; wstring why;
-        if (opti) {
-            RenderOptiIni(q, in, out, &notes);
-            bool wrote = false;
-            out = RenderGameOptiKeys(p, m.exe, out, m.inikeys, notes, &wrote);
-            if (wrote)
-                for (auto& n : kGameNotices) if (IEq(BaseName(m.exe), n.exe)) notes.push_back(n.notice);
-            JournalChanges(m.inikeys, name, in, out);
-            recordChanged = recordChanged || out != in;
+        if (!ReadAll(path, in)) {  // missing or unreadable: never created here; a model choice saved without it is said
+            if (forcedEntry) {
+                const wstring w = L"OptiScaler's list couldn't be updated; the model choice is saved (" + wstring(name) +
+                                  (IsFile(path) ? L" could not be read)." : L" is missing).");
+                LogLine(ctx, w);
+                notes.push_back(w);
+                if (warnings) warnings->push_back(w);
+            }
+            return;
         }
-        else if (!RenderWronggpuIni(q, in, out, &why)) Fail(L"Settings not applied: " + why, EXIT_USAGE);
-        if (out == in && (had || out.empty())) return;  // unchanged, or nothing to write into a missing file
+        string out;
+        RenderOptiIni(q, in, out, &notes);
+        if (forcedEntry) out = SetOptiModelEntry(out, forcedEntry);
+        bool wrote = false;
+        out = RenderGameOptiKeys(p, m.exe, out, m.inikeys, notes, &wrote);
+        if (wrote)
+            for (auto& n : kGameNotices) if (IEq(BaseName(m.exe), n.exe)) notes.push_back(n.notice);
+        JournalChanges(m.inikeys, name, in, out);
+        recordChanged = recordChanged || out != in;
+        if (out == in) return;
         WriteFileAtomic(path, out.data(), out.size());
         const wstring h = Sha256Bytes(out.data(), out.size());
         for (auto& e : m.e) if (e.action == L"copy" && IEq(e.rel, name) && e.inst != h) { e.inst = h; recordChanged = true; }
         notes.push_back(wstring(name) + L" written");
+        applied.push_back(L"OptiScaler's list (OptiScaler.ini)");
     };
-    renderFile(L"wronggpu.ini", false);
-    if (HostedRecord(m)) renderFile(L"OptiScaler.ini", true);
-    if (RecordHasRr(m)) {  // Ray Reconstruction (rr.h): the RR plugin's settings file (RR stays off while its data is not ready)
-        const wstring path = Join(dir, kRrSettings);
-        string in;
-        ReadAll(path, in);
-        const string out = RenderRrSettings(p, RrDataValid(ctx), in);
-        if (out != in) {
-            EnsureDir(Parent(path));
-            WriteFileAtomic(path, out.data(), out.size());
-            const wstring h = Sha256Bytes(out.data(), out.size());
-            for (auto& e : m.e) if (e.action == L"copy" && IEq(e.rel, kRrSettings) && e.inst != h) { e.inst = h; recordChanged = true; }
-            notes.push_back(wstring(kRrSettings) + L" written");
+    // #219: the front end's settings go into the game's state folder (wg_state.h), which the front end reads over wronggpu.ini:
+    // wronggpu.ini holds the install's defaults, is the player's to edit, and is never rewritten after the install. (The model
+    // choice is not among these keys: it is the model choice record's, model-choice.ini.)
+    {
+        string unused;
+        wstring why;
+        if (!RenderWronggpuIni(q, "", unused, &why)) Fail(L"Settings not applied: " + why, EXIT_USAGE);  // (validates every setting)
+        const int w = WriteStateKeys(ctx, dir, FrontEndStateKeys(q), &why);
+        if (w < 0) Fail(L"Settings not applied: " + why, EXIT_REFUSED);
+        if (w > 0) {
+            notes.push_back(Join(wgstate::kStateFolder, wgstate::kSettingsFile) + L" written");
+            applied.push_back(L"the upscaler settings (" + Join(wgstate::kStateFolder, wgstate::kSettingsFile) + L")");
         }
+    }
+    // The model choice record (clean/fsr/src/model_choice_record.h): the launcher's model choice, with the next seq, when the
+    // player applied a model (Apply in the launcher, or `set <game> model=<m>`: always, also the same model again, so it
+    // wins over a newer choice made in the game), when the game has no record yet (from the profile), or when the
+    // launcher's own last choice can no longer run as recorded (a model whose data is not ready: Model M until it is).
+    // Then OptiScaler.ini's UpscalerIndex is set to that model's entry whatever it was (display only: the front end never
+    // takes the index for a choice, so a crash between the two leaves nothing wrong).
+    if (FindSetting("model")) {
+        const string want = q.get("model");
+        const char model = want == "l" ? 'L' : want == "k" ? 'K' : 'M';
+        wgchoice::Record cur;
+        std::string err;
+        const wgchoice::ReadResult rr = wgchoice::ReadRecordFile(recordPath, &cur, &err);
+#ifdef WRONGGPU_TESTING
+        // tests: "<signal file>|<ms>": the apply says it holds the lock (the record read, nothing written yet) and waits, so a
+        // test can start the front end's upgrade migration in another process exactly now
+        if (const wstring pause = EnvVar(L"WRONGGPU_TEST_PAUSE_IN_CHOICE_LOCK"); !pause.empty() && pause.find(L'|') != wstring::npos) {
+            const wstring sig = pause.substr(0, pause.find(L'|'));
+            WriteFileAtomic(sig, "1", 1);
+            Sleep(DWORD(_wtoi(pause.substr(pause.find(L'|') + 1).c_str())));
+        }
+#endif
+        const bool write = modelChosen || rr == wgchoice::ReadResult::Missing ||
+                           (rr == wgchoice::ReadResult::Ok && cur.source == wgchoice::Source::Launcher && cur.model != model);
+        const bool recorded = write && WriteLauncherModelChoice(ctx, dir, model, notes, warnings);
+        if (write) (recorded ? applied : notApplied).push_back(wstring(L"the model choice (Model ") + wchar_t(model) + L")");
+        if (recorded) {
+            forcedEntry = model;
+#ifdef WRONGGPU_TESTING
+            // tests: the apply ends here, after the record and before OptiScaler.ini (a crash between the two)
+            if (EnvVar(L"WRONGGPU_TEST_STOP_AFTER_CHOICE_RECORD") == L"1") TerminateProcess(GetCurrentProcess(), 97);
+#endif
+        }
+        if (forcedEntry && modelChosen && HostedRecord(m)) {  // the menu plugin's AMD entry chosen earlier: this choice is newer
+            const wstring asi = Join(dir, L"wronggpu-asi.ini");
+            string text;
+            if (ReadAll(asi, text) && wgasi::ParseSelection(text) == wgasi::kModelAmd) {
+                // only the selection line changes (the player's comments and every other byte stay); ownership stays as
+                // recorded: a file whose bytes were WrongGPU's (the record's hash) stays WrongGPU's under its new hash, a
+                // file the player made or changed stays the player's (the record is not touched for it)
+                const string fresh = wgasi::WithSelection(text, model);
+                const wstring was = Sha256Bytes(text.data(), text.size());
+                WriteFileAtomic(asi, fresh.data(), fresh.size());
+                const wstring h = Sha256Bytes(fresh.data(), fresh.size());
+                for (auto& e : m.e)
+                    if (e.action == L"copy" && IEq(e.rel, L"wronggpu-asi.ini") && IEq(e.inst, was)) { e.inst = h; recordChanged = true; }
+                applied.push_back(L"OptiScaler's list back on WrongGPU (wronggpu-asi.ini)");
+                notes.push_back(L"wronggpu-asi.ini: WrongGPU selected again in OptiScaler's list (the launcher's model choice is newer than AMD's FSR there)");
+            }
+        }
+    }
+    if (HostedRecord(m)) renderOpti();
+    if (RecordHasRr(m)) {  // Ray Reconstruction (rr.h): into the game's state folder (RR stays off while its data is not ready);
+                           // WrongGPU\wronggpu.ini (the install's defaults, the player's to edit) is never rewritten
+        wstring why;
+        int w;
+#ifdef WRONGGPU_TESTING
+        // tests: the RR write fails after the upscaler settings (and the model choice) were written (a partial apply)
+        if (EnvVar(L"WRONGGPU_TEST_FAIL_RR_STATE") == L"1") { w = -1; why = L"the settings file could not be written (test)"; } else
+#endif
+        w = WriteRrState(ctx, dir, p, RrDataValid(ctx), &why, hadBefore ? &prevMode : nullptr);
+        if (w < 0) {
+            notApplied.push_back(L"the Ray Reconstruction settings (" + why + L")");
+            if (applied.empty()) Fail(L"Settings not applied: " + why, EXIT_REFUSED);
+            // the files this apply changed stay known as WrongGPU's (record hashes, owned files); the profile is not saved
+            if (recordChanged) SaveRecord(RecordPath(dir), m);
+            WriteOwnedFiles(dir, m);
+            wstring a, n;
+            for (auto& x : applied) a += (a.empty() ? L"" : L"; ") + x;
+            for (auto& x : notApplied) n += (n.empty() ? L"" : L"; ") + x;
+            LogLine(ctx, L"settings applied in part to " + dir + L": applied: " + a + L"; not applied: " + n);
+            Fail(L"Settings applied in part. Applied: " + a + L". Not applied: " + n + L". Apply again once that is fixed.", EXIT_REFUSED);
+        }
+        if (w > 0) notes.push_back(Join(wgstate::kStateFolder, wgstate::kSettingsFile) + L" written (Ray Reconstruction)");
     }
     if (RrConfigGameFor(m.exe)) {  // Borderlands 4, Hogwarts Legacy: the game's Engine.ini follows rr_config_fix (rrconfig.h)
         std::vector<wstring> w;
@@ -1171,7 +1349,7 @@ std::vector<wstring> AdoptInstall(Context& ctx, const wstring& dir, bool* repair
     }
     if (!IsFile(ProfilePath(dir))) {
         string wini, oini;
-        ReadAll(Join(dir, L"wronggpu.ini"), wini);
+        wini = EffectiveWronggpuIni(dir);  // (#219: the state folder over the file)
         ReadAll(Join(dir, L"OptiScaler.ini"), oini);
         std::vector<wstring> pn;
         const Profile p = ImportProfile(wini, oini, &pn);
@@ -1221,6 +1399,8 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
     GameTarget target = InspectGame(ctx, gameExe);
     const wstring dir = target.dir;
     LogLine(ctx, wstring(L"launcher ") + OpName(r.op) + L": " + target.exe + L" (" + (target.validated ? L"validated" : L"experimental") + L"), install folder " + dir);
+    // #219: a repair or update (an install over a recorded one) holds the game's state lock from here to its end (record.h)
+    const auto gate = IsFile(RecordPath(dir)) ? GuardOperation(dir, target.installed ? &target.record : nullptr) : nullptr;
     // the rules table (design section 5): DLSS-NR on AMD, DXVK / vkd3d-proton, two OptiScaler copies, not D3D12, anti-cheat
     if (const Finding* no = target.coexist.refusal())
         Fail(no->tool == Tool::AntiCheat ? AntiCheatMessage(no->evidence) : no->what + L": " + no->message, no->code ? no->code : EXIT_REFUSED);
@@ -1229,7 +1409,7 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
     if (const GameRule* rule = GameRuleFor(target.exe); rule && rule->needsReFramework && !target.installed && !DetectReFramework(target.exeDir).found)
         Fail(NeedsReFrameworkText(*rule), EXIT_REFUSED);
     SystemInfo sys; sys.win = WindowsInfo(); sys.gpu = DetectGpu();
-    const std::vector<StoreGame> libraries = r.noScan ? std::vector<StoreGame>{} : ScanLibraries();
+    const std::vector<StoreGame> libraries = ctx.noLibraryScan ? std::vector<StoreGame>{} : ScanLibraries();  // (this operation's no-scan: RunOp)
     const ModelState model = FindModel(ctx, &target, r.modelDll.empty() ? wstring() : FullPath(r.modelDll), libraries);
     if (model.ok()) LogLine(ctx, L"model source: " + (model.reused ? wstring(L"model data already on this PC") : model.dll + L" (" + model.origin + L")"));
     const Checks c = RunChecks(ctx, target, sys, &model, r.force);
@@ -1281,13 +1461,17 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
     for (auto& n : CleanLeftovers(ctx, dir, leftovers)) res.notes.push_back(n);
     // what the game had before: its profile (kept through the update) and, for Update, the installed version
     Profile profile;
-    bool haveProfile = LoadProfile(ProfilePath(dir), profile);
+    std::vector<wstring> profileNotes;  // (R1: executor=hip is not kept; install, repair and update log its removal)
+    bool haveProfile = LoadProfile(ProfilePath(dir), profile, &profileNotes);
     if (!haveProfile) {
         string wini, oini;
-        if (ReadAll(Join(dir, L"wronggpu.ini"), wini)) { ReadAll(Join(dir, L"OptiScaler.ini"), oini); profile = ImportProfile(wini, oini); haveProfile = true; }
+        if (IsFile(Join(dir, L"wronggpu.ini"))) { wini = EffectiveWronggpuIni(dir); ReadAll(Join(dir, L"OptiScaler.ini"), oini); profile = ImportProfile(wini, oini, &profileNotes); haveProfile = true; }
     }
+    for (auto& n : profileNotes)
+        if (n.find(kRetiredHipNote) != wstring::npos) LogLine(ctx, L"launcher: " + n);
     if (!haveProfile) profile = r.hasProfile ? r.profile : DefaultProfile();
-    FoldRrFromGame(dir, profile);  // a Ray Reconstruction mode chosen in the game stays (the install below rewrites its file)
+    MigrateRrState(ctx, dir);      // #219: an older plugin's or the player's edit of WrongGPU\wronggpu.ini: its mode into the state folder
+    FoldRrFromGame(dir, profile);  // a Ray Reconstruction mode chosen in the game stays (the state folder keeps it through the install)
     if (target.installed && !target.record.version.empty() && ctx.data && !IEq(target.record.version, ctx.data->version)) SavePrevious(ctx, dir, target.record, ui);
     std::vector<IniKeyChange> oldJournal = target.installed ? target.record.inikeys : !wrongDir.empty() ? wrong.inikeys : std::vector<IniKeyChange>{};
     // a game's opt-in keys follow its setting (ApplyProfile), not the old file
@@ -1324,7 +1508,13 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
         Record m;
         if (LoadRecord(RecordPath(dir), m)) {
             m.rrconfig = keepFix;
-            if (keepFix.backup) { EnsureDir(Parent(RrConfigBackupPath(dir))); WriteFileAtomic(RrConfigBackupPath(dir), keepBackup.data(), keepBackup.size()); }
+            if (keepFix.backup) {  // created only where nothing is: a file already there stays (the revert then leaves Engine.ini's
+                                   // copy as it is and says so)
+                EnsureDir(Parent(RrConfigBackupPath(dir)));
+                PinnedFile pf;
+                if (pf.Create(RrConfigBackupPath(dir))) { if (!pf.OverwriteBytes(keepBackup.data(), keepBackup.size())) pf.Delete(); pf.Close(); }
+                else LogLine(ctx, L"kept " + RrConfigBackupPath(dir) + L" (there already, not this install's copy: not overwritten)");
+            }
             SaveRecord(RecordPath(dir), m);
         }
     }
@@ -1363,6 +1553,14 @@ wstring PartlyText(const wstring& done, const std::vector<wstring>& warnings) {
 
 OpResult RunOp(Context& ctx, const OpRequest& r, Ui& ui) {
     OpResult res;
+    // this operation's no-scan (#243): the process's (--noscan, /NOSCAN, the window's) or its own (a job's noscan), for every
+    // search it makes (the AMD FSR 4 search and the other model read ctx.noLibraryScan); put back when it ends, so a job's
+    // noscan never reaches the next job of a batch
+    struct NoScan {
+        Context& c;
+        NoScan(Context& ctx, bool own) : c(ctx) { c.noLibraryScan = c.noScanAlways || own; }
+        ~NoScan() { c.noLibraryScan = c.noScanAlways; }
+    } noScan(ctx, r.noScan);
     try {
         switch (r.op) {
             case Op::Install: case Op::Repair: case Op::Update: InstallOp(ctx, r, ui, res); break;
@@ -1405,7 +1603,8 @@ OpResult RunOp(Context& ctx, const OpRequest& r, Ui& ui) {
                             Fail(wstring(L"Model ") + chosen + L" can't be chosen. " + ModelNotReady(chosen, why) + L" Nothing was changed.", EXIT_NO_MODEL);
                     }
                 }
-                if (!r.optiOnly) ApplyProfile(ctx, r.dir, r.hasProfile ? r.profile : GameProfile(r.dir), res.notes, &res.warnings);
+                if (!r.optiOnly)
+                    ApplyProfile(ctx, r.dir, r.hasProfile ? r.profile : GameProfile(r.dir), res.notes, &res.warnings, r.hasProfile && r.modelChosen);
                 ApplyOptiTab(ctx, r.dir, r, res.notes);
                 res.message = L"Settings applied; they take effect the next time the game starts";
                 break;

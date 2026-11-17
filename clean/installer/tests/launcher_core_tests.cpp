@@ -8,10 +8,13 @@
 // Written for this project. Run by ctest ("launcher-core").
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
+#include <thread>
 #include <iostream>
 #include <stdexcept>
 
 #include "app/ui_palette.h"
+#include "wg_core/checks.h"
 #include "wg_core/detect.h"
 #include "wg_core/gamerules.h"
 #include "wg_core/install.h"
@@ -24,6 +27,9 @@
 #include "wg_core/record.h"
 #include "wg_core/rr.h"
 #include "wg_core/rrconfig.h"
+#include "wg_core/rrprep.h"
+
+#include <shlobj.h>
 #include "wg_core/settings.h"
 
 using namespace wg;
@@ -175,7 +181,8 @@ int main() {
         const SettingDef* sparkle = FindSetting("sparkle_guard");
         require(exec && filter && sparkle && FindSetting("wronggpu") && FindSetting("pre_exposure") && FindSetting("fps_overlay"), "the Basic tier has its six settings");
         require(ValidateSetting(*exec, "D3D12", &n, &why) && n == "dx12", "executor d3d12 -> dx12");
-        require(!ValidateSetting(*exec, "vulkan", &n, &why) && why.find(L"auto, dx12, hip") != wstring::npos, "a bad executor is refused and the allowed values named");
+        require(!ValidateSetting(*exec, "vulkan", &n, &why) && why.find(L"auto, dx12") != wstring::npos && why.find(L"hip") == wstring::npos, "a bad executor is refused and the allowed values named (no hip)");
+        require(!ValidateSetting(*exec, "hip", &n, &why), "executor=hip is no value of the setting any more (R1)");
         require(!ValidateSetting(*filter, "quality7", &n, &why), "output_filter: only the runtime's values");
         require(ValidateSetting(*filter, "quality9", &n, &why) && n == "quality9", "output_filter quality9");
         require(ValidateSetting(*sparkle, "0.25", &n, &why) && n == "0.25", "sparkle_guard rate");
@@ -183,7 +190,33 @@ int main() {
         require(!ValidateSetting(*sparkle, "1.5", &n, &why) && !ValidateSetting(*sparkle, "-0.1", &n, &why) && !ValidateSetting(*sparkle, "abc", &n, &why), "sparkle_guard rate must be in (0, 1)");
         Profile p = DefaultProfile();
         require(!SetSetting(p, "nosuchkey", "1", &why) && !SetSetting(p, "pre_exposure", "bright", &why), "unknown keys and bad values are refused by set");
-        require(SetSetting(p, "Executor", " HIP ", &why) && p.get("executor") == "hip", "set trims and lowers");
+        require(SetSetting(p, "Executor", " DX12 ", &why) && p.get("executor") == "dx12", "set trims and lowers");
+        require(!SetSetting(p, "Executor", " HIP ", &why) && p.get("executor") == "dx12", "set refuses executor=hip: not a game setting");
+
+        // ---- R1: the choices that exist on the HIP runtime only are not offered on an RX 9000 card ----------------
+        require(NeedsHipRuntime("executor", "hip") && NeedsHipRuntime("executor", " HIP "), "executor=hip needs the HIP runtime");
+        require(!NeedsHipRuntime("executor", "auto") && !NeedsHipRuntime("executor", "dx12"), "auto and dx12 run on Direct3D 12");
+        require(NeedsHipRuntime("output_filter", "quality5") && NeedsHipRuntime("output_filter", "quality9"), "Quality 5 / 9 need the HIP runtime");
+        require(!NeedsHipRuntime("output_filter", "default") && !NeedsHipRuntime("output_filter", "original") && !NeedsHipRuntime("output_filter", "analytic"),
+                "the other output filters run on Direct3D 12");
+        require(NeedsHipRuntime("sparkle_guard", "on") && NeedsHipRuntime("sparkle_guard", "0.25") && !NeedsHipRuntime("sparkle_guard", "off") && !NeedsHipRuntime("sparkle_guard", "0"),
+                "the sparkle guard needs the HIP runtime, off does not");
+        require(!NeedsHipRuntime("pre_exposure", "original") && !NeedsHipRuntime("wronggpu", "off") && !NeedsHipRuntime("nosuchkey", "hip"), "no other key is HIP-only");
+        require(wstring(NotOnDx12Text()) == L"Not available on the DX12 runtime yet", "the words the launcher shows");
+        for (const char* key : {"executor", "output_filter", "sparkle_guard"}) {
+            const SettingDef* d = FindSetting(key);
+            const wstring help = d ? d->help : L"";
+            require(d && help.find(L"Uses HIP") == wstring::npos && help.find(L"Needs the HIP runtime") == wstring::npos && help.find(L"HIP is used anyway") == wstring::npos,
+                    "the help text of a HIP-only setting no longer promises HIP");
+        }
+        require(wstring(FindSetting("output_filter")->help).find(L"not available on the DX12 runtime yet") != wstring::npos &&
+                    wstring(FindSetting("sparkle_guard")->help).find(L"Not available on the DX12 runtime yet") != wstring::npos,
+                "the help texts say the same words");
+        // a profile or ini that already holds one still renders (the runtime falls back with one log line; no HIP)
+        {
+            Profile q = DefaultProfile();
+            require(SetSetting(q, "output_filter", "quality9", nullptr) && q.get("output_filter") == "quality9", "an existing quality9 profile is still valid");
+        }
 
         // ---- rendering wronggpu.ini ---------------------------------------------------------------------------
         const string front = "# WrongGPU settings\r\n[fsr]\r\n# who upscales\r\nupscaler = network\r\nruntime_dll = wronggpu_runtime.dll\r\n"
@@ -265,6 +298,37 @@ int main() {
         { const string broken = "[profile]\r\nexecutor=warp\r\n"; WriteFileAtomic(pp, broken.data(), broken.size()); }
         std::vector<wstring> problems;
         require(LoadProfile(pp, loaded, &problems) && loaded.get("executor") == "auto" && problems.size() == 1, "a bad profile value falls back to the default, reported");
+
+        {   // R1: executor=hip is not a game setting: a profile or an ini that holds it loses it, and the removal is reported
+            const string hipProfile = "[profile]\r\nformat=1\r\nexecutor=hip\r\noutput_filter=analytic\r\n";
+            WriteFileAtomic(pp, hipProfile.data(), hipProfile.size());
+            std::vector<wstring> pr;
+            Profile lp;
+            require(LoadProfile(pp, lp, &pr) && lp.get("executor") == "auto" && lp.get("output_filter") == "analytic" && pr.size() == 1 &&
+                        pr[0].find(kRetiredHipNote) != wstring::npos,
+                    "profile.ini with executor=hip: the key is removed (Auto), the rest is kept, the removal is reported");
+            SaveProfile(pp, lp);
+            string savedText;
+            ReadAll(pp, savedText);
+            require(savedText.find("hip") == string::npos && savedText.find("executor=auto") != string::npos, "the saved profile no longer holds hip");
+            const string hipIni = "[fsr]\r\nupscaler = network\r\nruntime_options = model=M;executor=hip;pre_exposure=original\r\n";
+            std::vector<wstring> notes;
+            const Profile imp2 = ImportProfile(hipIni, "", &notes);
+            bool said = false;
+            for (auto& n : notes) said = said || n.find(kRetiredHipNote) != wstring::npos;
+            require(imp2.get("executor") == "auto" && imp2.get("pre_exposure") == "original" && said,
+                    "a wronggpu.ini with executor=hip: not imported, the removal is reported, the other settings are kept");
+            string rendered;
+            wstring rwhy;
+            require(RenderWronggpuIni(imp2, hipIni, rendered, &rwhy) && rendered.find("executor") == string::npos && rendered.find("pre_exposure=original") != string::npos,
+                    "the next Apply writes wronggpu.ini without executor=hip");
+            bool listed = false;
+            for (auto& e : OutsideEdits(imp2, hipIni, "")) listed = listed || e.key == "executor";
+            require(!listed, "a retired executor=hip is not offered as a change made outside the launcher");
+            const string dx = "[fsr]\r\nruntime_options = executor=dx12\r\n";
+            std::vector<wstring> n2;
+            require(ImportProfile(dx, "", &n2).get("executor") == "dx12", "executor=dx12 is still imported");
+        }
 
         // ---- record v1 -> v2 -------------------------------------------------------------------------------------------
         const wstring game = Join(dir, L"game");
@@ -686,12 +750,18 @@ int main() {
                 // overwritten.
                 {
                     auto said = [](const std::vector<wstring>& ws, const wstring& what) { for (auto& x : ws) if (x == what) return true; return false; };
-                    {  // 1. a recorded file to delete, swapped for another program's bytes before it is held
+                    {  // 1. a recorded binary to delete: #219, the operation's gate holds it from before the plan (wg_state.h
+                       // OperationGuard), so another program cannot swap it between the check and the delete; it goes as checked
                         const wstring d = ownGame(L"Swap remove", {{L"wronggpu_runtime.dll", L"copy", "", W, W}});
-                        SetRestoreStepHook([&](const char* s) { if (string(s) == "kept") file(Join(d, L"wronggpu_runtime.dll"), C); });
+                        bool swapped = false, tried = false;
+                        SetRestoreStepHook([&](const char* s) {
+                            if (string(s) != "kept") return;
+                            tried = true;
+                            try { file(Join(d, L"wronggpu_runtime.dll"), C); swapped = true; } catch (const SetupError&) {}
+                        });
                         std::vector<wstring> w;
-                        require(restore(d, false, &w) && read(Join(d, L"wronggpu_runtime.dll")) == C && said(w, L"Left in place (changed since install): wronggpu_runtime.dll"),
-                                "swap: a recorded file swapped for other bytes between the check and the delete is not deleted, and the result says so");
+                        require(restore(d, false, &w) && tried && !swapped && !IsFile(Join(d, L"wronggpu_runtime.dll")) && !said(w, L"Left in place (changed since install): wronggpu_runtime.dll"),
+                                "swap: a recorded binary is held by the operation's gate; a swap between the check and the delete fails, and the checked file goes");
                     }
                     {  // 2. the same before an original goes back over a file WrongGPU installed
                         const wstring d = ownGame(L"Swap put back", {{L"wronggpu.ini", L"copy", A, W, W}});
@@ -1583,25 +1653,90 @@ int main() {
             require(cpEntries == 1, "the scan lists the game once: the wrong-place install's entry, not the game a second time");
             RemoveTree(cp); RemoveManagedGame(cp);
 
-            // ---- rc6 L4: what a failed install or update leaves in the state folder: the player's settings only ----------------
+            // ---- a failed install or update takes back only what THIS run made (the run journal, written before each create);
+            // everything else in the state folder stays and is listed: never a removal of the whole folder ----------------------
             const wstring fs = Join(dir, L"failed-state");
             require(!StateHasSettings(fs), "L4: no state folder, no settings");
-            file(Join(StateDir(fs), L"uninstall.exe"), "MZ");
-            file(Join(StateDir(fs), L"owned-files.json"), "{}");
-            file(Join(StateDir(fs), L"backup\\x.dll"), "x");
-            require(!StateHasSettings(fs), "L4: an uninstaller and a backup are no settings");
-            RemoveStateKeepingSettings(fs);
-            require(!IsDir(StateDir(fs)), "L4: without settings the state folder goes");
-            file(Join(StateDir(fs), L"uninstall.exe"), "MZ");
-            file(ProfilePath(fs), "[profile]\r\n");
-            file(Join(StateDir(fs), L"previous\\previous.txt"), "version=0.5.9\r\n");
-            file(Join(StateDir(fs), L"rr-config\\Engine.ini"), "[x]\r\n");
-            file(Join(StateDir(fs), L"backup\\x.dll"), "x");
-            require(StateHasSettings(fs), "L4: profile.ini, previous\\ and rr-config\\ are settings");
-            RemoveStateKeepingSettings(fs);
-            require(IsFile(ProfilePath(fs)) && IsFile(Join(StateDir(fs), L"previous\\previous.txt")) && IsFile(Join(StateDir(fs), L"rr-config\\Engine.ini")) &&
-                        !IsFile(Join(StateDir(fs), L"uninstall.exe")) && !IsDir(Join(StateDir(fs), L"backup")),
-                    "L4: the settings stay, the rest goes");
+            {
+                RunJournal j;
+                JournalCreate(j, Join(StateDir(fs), L"backup\\x.dll"), false);  // (the state folder and backup\ first: not there yet)
+                file(Join(StateDir(fs), L"backup\\x.dll"), "x");
+                JournalCreate(j, Join(StateDir(fs), L"uninstall.exe"), false);
+                file(Join(StateDir(fs), L"uninstall.exe"), "MZ");
+                const auto left = RollbackCreated(mc, StateDir(fs), j);
+                require(j.created.size() == 0 && left.empty() && !IsDir(StateDir(fs)), "rollback: a state folder this run made, with only what it made: all of it goes");
+            }
+            {
+                // there before the run: the player's settings, files an earlier uninstall kept and listed, a folder of the player's,
+                // an earlier uninstaller (not this run's)
+                const std::vector<std::pair<wstring, string>> before = {
+                    {ProfilePath(fs), "[profile]\r\n"}, {Join(StateDir(fs), L"previous\\previous.txt"), "version=0.5.9\r\n"},
+                    {Join(StateDir(fs), L"rr-config\\Engine.ini"), "[x]\r\n"}, {Join(StateDir(fs), L"settings.ini.wgtmp-player"), "player_key=1\r\n"},
+                    {Join(StateDir(fs), L"notes\\mine.txt"), "the player's"}, {Join(StateDir(fs), L"uninstall.exe"), "MZ earlier"}};
+                for (auto& f : before) file(f.first, f.second);
+                RunJournal j;
+                JournalCreate(j, StateDir(fs), true);                            // (there: not written down)
+                JournalCreate(j, Join(StateDir(fs), L"backup\\y.dll"), false);  // backup\ and the file: this run's
+                file(Join(StateDir(fs), L"backup\\y.dll"), "y");
+                JournalCreate(j, Join(StateDir(fs), L"owned-files.json"), false);
+                file(Join(StateDir(fs), L"owned-files.json"), "{}");
+                JournalCreate(j, Join(StateDir(fs), L"uninstall.exe"), false);   // (there: an overwrite later is not a create)
+                const auto left = RollbackCreated(mc, StateDir(fs), j);
+                bool same = true;
+                for (auto& f : before) { string b; same = same && ReadAll(f.first, b) && b == f.second; }
+                require(same && left.size() == before.size() && !IsDir(Join(StateDir(fs), L"backup")) && !IsFile(Join(StateDir(fs), L"owned-files.json")),
+                        "rollback: only what this run made goes (backup\\y.dll, backup\\, owned-files.json); the player's settings, a kept temporary file, "
+                        "the player's folder and the earlier uninstaller stay byte for byte and are listed");
+                RemoveTree(StateDir(fs));
+            }
+            {
+                // a backup never overwrites a file an earlier uninstall kept in wronggpu-setup\backup: a new recorded name
+                const wstring bg = Join(dir, L"backup-collision");
+                const string kept = "the player's file an earlier uninstall kept", game = "the game's wronggpu.ini (the player's settings)";
+                file(BackupPath(bg, L"wronggpu.ini"), kept);
+                file(Join(bg, L"wronggpu.ini"), game);
+                Entry e; e.action = L"copy"; e.rel = L"wronggpu.ini"; e.existed = true; e.orig = Sha256Bytes(game.data(), game.size());
+                RunJournal j;
+                std::vector<wstring> w;
+                const wstring b = CopyBackup(mc, bg, e, Join(bg, L"wronggpu.ini"), &j, &w);
+                string k, nb;
+                require(ReadAll(BackupPath(bg, L"wronggpu.ini"), k) && k == kept && ReadAll(b, nb) && nb == game && e.backup == L"wronggpu.ini.1" &&
+                            IEq(b, EntryBackupPath(bg, e)) && w.size() == 1 && w[0].find(L"backup\\wronggpu.ini") != wstring::npos &&
+                            j.created.size() == 1 && IEq(j.created[0].first, b),
+                        "backup collision: the kept backup\\wronggpu.ini stays byte for byte; the new backup is wronggpu.ini.1 (created only where nothing "
+                        "was, written down in the run journal alone), listed");
+                Record br;
+                br.version = L"0.6.5"; br.game = bg; br.exe = Join(bg, L"Game.exe"); br.format = 2; br.e.push_back(e);
+                SaveRecord(RecordPath(bg), br);
+                Record back;
+                require(LoadRecord(RecordPath(bg), back) && back.e.size() == 1 && back.e[0].backup == L"wronggpu.ini.1" && IEq(EntryBackupPath(bg, back.e[0]), b),
+                        "backup collision: the record keeps the backup's name (its backup line), so the restore reads that file");
+                Entry e2 = e;
+                e2.backup.clear();
+                CopyBackup(mc, bg, e2, Join(bg, L"wronggpu.ini"), nullptr, nullptr);
+                require(e2.backup == L"wronggpu.ini.2", "backup collision: the next free name when .1 is taken too");
+                RemoveTree(bg);
+            }
+            {
+                // the tests' failure and file hooks exist in WRONGGPU_TESTING builds only: in a release build the variables
+                // change nothing (CI runs this test in its release-flag builds)
+                const wstring made = Join(dir, L"hook-made.txt");
+                SetEnvironmentVariableW(L"WRONGGPU_TEST_FAIL_AT", L"hook-fail");
+                SetEnvironmentVariableW(L"WRONGGPU_TEST_CREATE_AT", L"hook-make");
+                SetEnvironmentVariableW(L"WRONGGPU_TEST_CREATE_FILE", made.c_str());
+                bool threw = false;
+                RestoreStep("hook-make");  // (each hook at its own step: the failure would stop the step before the file)
+                try { RestoreStep("hook-fail"); } catch (const SetupError&) { threw = true; }
+                SetEnvironmentVariableW(L"WRONGGPU_TEST_FAIL_AT", nullptr);
+                SetEnvironmentVariableW(L"WRONGGPU_TEST_CREATE_AT", nullptr);
+                SetEnvironmentVariableW(L"WRONGGPU_TEST_CREATE_FILE", nullptr);
+#ifdef WRONGGPU_TESTING
+                require(threw && IsFile(made), "testing build: WRONGGPU_TEST_FAIL_AT fails the operation at its step, WRONGGPU_TEST_CREATE_AT makes the file (the tests' hooks)");
+#else
+                require(!threw && !IsFile(made), "release build: WRONGGPU_TEST_FAIL_AT and WRONGGPU_TEST_CREATE_AT change nothing (the hooks are compiled out)");
+#endif
+                DeleteFileW(made.c_str());
+            }
             SetEnvironmentVariableW(L"LOCALAPPDATA", oldLad.c_str());
         }
 
@@ -1652,11 +1787,11 @@ int main() {
 
         // ---- job and result files -----------------------------------------------------------------------------------------
         OpRequest job; job.op = Op::Update; job.exe = L"C:\\Games\\X\\x.exe"; job.dir = L"C:\\Games\\X"; job.optiPackage = L"C:\\dl\\Opti.7z"; job.moveMods = true;
-        job.hasProfile = true; job.profile = DefaultProfile(); SetSetting(job.profile, "executor", "hip", nullptr);
+        job.hasProfile = true; job.profile = DefaultProfile(); SetSetting(job.profile, "executor", "dx12", nullptr);
         const string jt = JobText(job, L"C:\\Users\\p\\AppData\\Local", L"C:\\log.txt");
         OpRequest back; wstring lad, lf;
         require(ParseJob(jt, back, lad, lf, &why) && back.op == Op::Update && back.exe == job.exe && back.dir == job.dir && back.moveMods && !back.removeOld &&
-                back.hasProfile && back.profile.get("executor") == "hip" && lad == L"C:\\Users\\p\\AppData\\Local" && lf == L"C:\\log.txt", "job file round trip");
+                back.hasProfile && back.profile.get("executor") == "dx12" && lad == L"C:\\Users\\p\\AppData\\Local" && lf == L"C:\\log.txt", "job file round trip");
         {   // the player's account and whether a new install gets its own entry: carried to the worker (another account may run it)
             wstring sid; int per = 7;
             require(ParseJob(JobText(job, L"C:\\Users\\p\\AppData\\Local", L"", L"S-1-5-21-1-2-3-1001", 0), back, lad, lf, &why, &sid, &per) && sid == L"S-1-5-21-1-2-3-1001" && per == 0 &&
@@ -1928,6 +2063,210 @@ int main() {
             require(FoldRrFromGame(rg, fold) && fold.get("rr_mode") == "accurate" && !FoldRrFromGame(rg, fold), "the game's rr_mode folds into the profile once");
             require(ReadRrSettings(rg).present && ReadRrSettings(Join(dir, L"nothing")).present == false, "ReadRrSettings: present only with the file");
 
+            // #219: the launcher's settings go into the game's state folder (wg_state.h), read over the install's defaults
+            {
+                auto put = [](const wstring& p, const string& t) { EnsureDir(Parent(p)); WriteFileAtomic(p, t.data(), t.size()); };
+                Context sctx;
+                // the keys the launcher writes
+                const auto rk = RrStateKeys(acc, true);
+                require(rk.size() == 3 && rk[0].second == "1" && rk[1] == std::make_pair(string("rr_mode"), string("accurate")) && rk[2].second == "0",
+                        "RrStateKeys: rr_enabled=1, rr_mode, rr_exact_allowed=0 (Accurate, data ready)");
+                require(RrStateKeys(acc, false)[0].second == "0", "RrStateKeys: no RR data: rr_enabled=0");
+                Profile fe = DefaultProfile();
+                const auto fk = FrontEndStateKeys(fe);
+                require(!fk.empty() && fk[0] == std::make_pair(string("upscaler"), string("network")) &&
+                            std::all_of(fk.begin(), fk.end(), [](const std::pair<string, string>& kv) { return kv.first != "model" && kv.first.rfind("rr_", 0) != 0; }) &&
+                            std::any_of(fk.begin(), fk.end(), [](const std::pair<string, string>& kv) { return kv.first == "executor"; }),
+                        "FrontEndStateKeys: upscaler first, every runtime key of the schema explicitly, never model or rr_*");
+                SetSetting(fe, "wronggpu", "off", nullptr);
+                require(FrontEndStateKeys(fe)[0].second == "amd", "FrontEndStateKeys: WrongGPU off = upscaler=amd");
+                // the effective wronggpu.ini: the state's keys over the file's
+                const string fileIni = "[fsr]\r\nupscaler = network\r\nruntime_options = executor=hip;sync=pipelined;model=L\r\n";
+                const string eff = WithFrontEndState(fileIni, {{"upscaler", "amd"}, {"executor", "dx12"}, {"rr_mode", "fast"}, {"model", "K"}});
+                string v, sec;
+                require(IniGetFrontEnd(eff, "upscaler", &v, &sec) && v == "amd", "WithFrontEndState: the state's upscaler over the file's");
+                require(IniGetFrontEnd(eff, "runtime_options", &v, &sec) && v.find("executor=dx12") != string::npos && v.find("executor=hip") == string::npos &&
+                            v.find("sync=pipelined") != string::npos && v.find("model=L") != string::npos && v.find("model=K") == string::npos && v.find("rr_mode") == string::npos,
+                        "WithFrontEndState: a runtime key replaced, the others kept; rr_* and model of the state left out");
+                require(WithFrontEndState(fileIni, {}) == fileIni, "WithFrontEndState: no state keys: the file as it is");
+                // a game folder with an RR install record: the effective RR settings, the upgrade path, never a write of wronggpu.ini
+                const wstring sg = Join(dir, L"state-game");
+                EnsureDir(StateDir(sg));
+                const string defaults = RenderRrSettings(acc, true, "");  // what the install wrote (rr_mode=accurate)
+                put(Join(sg, kRrSettings), defaults);
+                Record rm;
+                rm.version = L"0.6.5"; rm.game = sg; rm.exe = Join(sg, L"Game.exe"); rm.format = 2;
+                rm.installId = L"0123456789abcdef0123456789abcdef";  // (the state files' stamps name it)
+                const string sid = ToUtf8(rm.installId);
+                auto entry = [](const wstring& rel, const wstring& inst) { Entry e; e.action = L"copy"; e.rel = rel; e.inst = inst; e.owner = L"wg"; return e; };
+                rm.e.push_back(entry(L"plugins\\WrongGPU-RR.asi", L"aa"));
+                rm.e.push_back(entry(kRrSettings, Sha256Bytes(defaults.data(), defaults.size())));
+                SaveRecord(RecordPath(sg), rm);
+                {
+                    Record twice;
+                    require(LoadRecord(RecordPath(sg), twice) && LoadRecord(RecordPath(sg), twice) && twice.e.size() == rm.e.size(),
+                            "LoadRecord into a Record loaded before: the file's entries once (no entry listed twice)");
+                }
+                require(ReadRrSettings(sg).mode == "accurate", "ReadRrSettings: the install's defaults without state");
+                require(!MigrateRrState(sctx, sg) && !IsFile(wgstate::SettingsPathOf(sg)), "upgrade: wronggpu.ini with the record's bytes: nothing copied, no state written");
+                require(WriteStateKeys(sctx, sg, {{"rr_mode", "fast"}}) == 1 && ReadRrSettings(sg).mode == "fast" && !ParseRrSettings(defaults).mode.empty(),
+                        "the state's rr_mode decides over wronggpu.ini's");
+                string after;
+                ReadAll(Join(sg, kRrSettings), after);
+                require(after == defaults, "a state write never touches WrongGPU\\wronggpu.ini");
+                require(WriteStateKeys(sctx, sg, {{"rr_mode", "fast"}}) == 0, "the same values again: nothing written (0)");
+                // upgrade from an older plugin's save (or the player's edit): LF and CRLF, with and without a UTF-8 BOM (a 0.6.0
+                // file an editor saved), each with a mode other than the install's (accurate): the file's mode carried, the file kept
+                require(ParseRrSettings("\xEF\xBB\xBF[wronggpu]\r\nrr_mode=exact\r\n").mode == "exact" && ParseRrSettings("\xEF\xBB\xBF[wronggpu]\nrr_mode=fast\n").mode == "fast",
+                        "ParseRrSettings: a UTF-8 BOM before [wronggpu] (CRLF and LF): the section and its mode are read");
+                for (const char* edited : {"[wronggpu]\nrr_enabled=1\nrr_mode = exact\nrr_overlay=1\n", "[wronggpu]\r\nrr_mode=fast\r\n",
+                                           "\xEF\xBB\xBF[wronggpu]\nrr_mode=exact\n", "\xEF\xBB\xBF[wronggpu]\r\nrr_mode=fast\r\nrr_overlay=1\r\n"}) {
+                    DeleteFileW(wgstate::SettingsPathOf(sg).c_str());
+                    put(Join(sg, kRrSettings), edited);
+                    const bool moved = MigrateRrState(sctx, sg);
+                    const wgstate::Settings st = wgstate::ReadSettings(sg);
+                    string kept;
+                    ReadAll(Join(sg, kRrSettings), kept);
+                    const string want = ParseRrSettings(edited).mode;
+                    require(moved && wgstate::Get(st, "rr_mode") && *wgstate::Get(st, "rr_mode") == want && kept == edited &&
+                                (string(edited).find("rr_overlay") == string::npos || (wgstate::Get(st, "rr_overlay") && *wgstate::Get(st, "rr_overlay") == "1")),
+                            "upgrade: a changed WrongGPU\\wronggpu.ini (" + string(string(edited).find("\r\n") == string::npos ? "LF" : "CRLF") +
+                                (edited[0] == '\xEF' ? ", BOM" : "") + ", rr_mode " + want + ") is the player's: kept as it is, its rr_mode (and rr_overlay) copied into the state folder");
+                    require(!MigrateRrState(sctx, sg), "upgrade: once the state has rr_mode, nothing more is copied");
+                }
+                // the RR mode decided under the state lock (rr.h WriteRrState), forced interleavings: the launcher's view is older
+                // than the menu's save (the menu saved accurate after the launcher read fast)
+                {
+                    Profile stale = DefaultProfile();
+                    stale.v["rr_mode"] = "fast";
+                    const string fastPrev = "fast";
+                    DeleteFileW(wgstate::SettingsPathOf(sg).c_str());
+                    require(wgstate::SetSettings(sg, {{"rr_mode", "accurate"}}).ok(), "(interleaving: the menu saved accurate)");
+                    require(WriteRrState(sctx, sg, stale, true, nullptr, nullptr) >= 0 && ReadRrSettings(sg).mode == "accurate" &&
+                                *wgstate::Get(wgstate::ReadSettings(sg), "rr_exact_allowed") == "0",
+                            "an RR refresh with the launcher's older view (fast): the menu's newer accurate stays (a refresh never changes a saved mode)");
+                    require(WriteRrState(sctx, sg, stale, true, nullptr, &fastPrev) >= 0 && ReadRrSettings(sg).mode == "accurate",
+                            "an apply whose own mode did not change (fast before, fast now): the menu's newer accurate stays (an unchanged field is not written)");
+                    Profile chosen = DefaultProfile();
+                    chosen.v["rr_mode"] = "exact";
+                    require(WriteRrState(sctx, sg, chosen, true, nullptr, &fastPrev) == 1 && ReadRrSettings(sg).mode == "exact" &&
+                                *wgstate::Get(wgstate::ReadSettings(sg), "rr_exact_allowed") == "1",
+                            "an apply where the player changed the mode in the launcher (fast -> exact): written, rr_exact_allowed follows");
+                    DeleteFileW(wgstate::SettingsPathOf(sg).c_str());
+                    require(WriteRrState(sctx, sg, stale, true, nullptr, nullptr) == 1 && ReadRrSettings(sg).mode == "fast",
+                            "no mode saved yet: the launcher's mode is written");
+                    // the menu saves while the launcher's write waits for the lock: the decision is made from the menu's save
+                    require(wgstate::SetSettings(sg, {{"rr_mode", "fast"}}).ok(), "(interleaving 2: fast saved)");
+                    HANDLE held = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+                    std::thread menu([&] {
+                        wgstate::StateLock lock(sg, 2000);
+                        SetEvent(held);
+                        Sleep(300);
+                        wgstate::Settings now = wgstate::ReadSettings(sg);
+                        wgstate::Set(now, "rr_mode", "accurate");
+                        wgstate::WriteAtomic(wgstate::SettingsPathOf(sg), wgstate::Stamped(wgstate::RenderSettings(now), "settings.ini", sid));
+                    });
+                    WaitForSingleObject(held, 5000);
+                    const int w = WriteRrState(sctx, sg, stale, true, nullptr, &fastPrev);  // the launcher read fast before the menu's save
+                    menu.join();
+                    CloseHandle(held);
+                    require(w >= 0 && ReadRrSettings(sg).mode == "accurate",
+                            "the menu saves accurate while the launcher's write waits for the state lock: the launcher decides under the lock and accurate stays");
+                }
+                // the state files go with the state folder only while their stamp is valid for their own name and this install
+                // (wg_state.h): a file the player edited or made, an unknown one, a copy under another name (temporary files among
+                // them) or from another install stay and are listed
+                DeleteFileW(wgstate::SettingsPathOf(sg).c_str());
+                require(wgstate::SetSettings(sg, {{"rr_mode", "fast"}}).ok() && wgstate::StampedByWrongGPU([&] { string b; ReadAll(wgstate::SettingsPathOf(sg), b); return b; }(), "settings.ini", sid),
+                        "(settings.ini written by WrongGPU: stamped for its name and this install's id from the record)");
+                put(Join(StateDir(sg), L"model-choice.ini"), wgstate::Stamped("model=M\r\n", "model-choice.ini", sid));  // (as its writer makes it)
+                put(Join(StateDir(sg), L"settings.ini.wgtmp-1-2"), wgstate::Stamped("rr_mode=fast\r\n", "settings.ini", sid));  // a complete write a crash left
+                put(Join(StateDir(sg), L"player-note.txt"), "mine");
+                auto stay = RemoveStateFolder(sg, &rm);
+                require(!IsFile(wgstate::SettingsPathOf(sg)) && !IsFile(Join(StateDir(sg), L"model-choice.ini")) &&
+                            IsFile(Join(StateDir(sg), L"settings.ini.wgtmp-1-2")) && IsFile(Join(StateDir(sg), L"player-note.txt")) && stay.size() == 2,
+                        "uninstall: settings.ini and model-choice.ini with their valid stamps go; a temporary file (another name) and the player's file stay (listed)");
+                DeleteFileW(Join(StateDir(sg), L"settings.ini.wgtmp-1-2").c_str());
+                DeleteFileW(Join(StateDir(sg), L"player-note.txt").c_str());
+                // negative controls, each alone: the file stays byte for byte and is listed
+                struct Control { const wchar_t* name; string bytes; const char* what; };
+                const string ours = wgstate::Stamped("rr_mode=fast\r\n", "settings.ini", sid);
+                for (const Control& c : {Control{L"settings.ini", ours + "player_key=1\r\n", "settings.ini WrongGPU wrote, the player added a key after it"},
+                                         Control{L"settings.ini", ours.substr(0, 8) + "accurate" + ours.substr(12), "settings.ini WrongGPU wrote, a value edited (the stamp no longer matches)"},
+                                         Control{L"settings.ini", "rr_mode=fast\r\n", "settings.ini the player made (no stamp)"},
+                                         Control{L"settings.ini", "rr_mode=fast\r\n; wronggpu-written 0123456789abcdef\r\n", "settings.ini with a stamp that does not match"},
+                                         Control{L"model-choice.ini", "model=L\r\n", "model-choice.ini without WrongGPU's stamp (unknown)"},
+                                         Control{L"settings.ini.wgtmp-9-9", "player_key=1\r\n", "a file named like a temporary file, not WrongGPU's"},
+                                         Control{L"settings.ini.wgtmp-backup", ours, "a copy of WrongGPU's settings.ini under another name (its stamp names settings.ini)"},
+                                         Control{L"settings-copy.ini", ours, "a copy of WrongGPU's settings.ini as settings-copy.ini"},
+                                         Control{L"model-choice.ini", wgstate::Stamped("model=M\r\n", "settings.ini", sid), "settings.ini's bytes copied to model-choice.ini"},
+                                         Control{L"settings.ini", wgstate::Stamped("rr_mode=fast\r\n", "settings.ini", "fedcba9876543210fedcba9876543210"),
+                                                 "a settings.ini copied from another install (its stamp names that install)"}}) {
+                    const wstring f = Join(StateDir(sg), c.name);
+                    put(f, c.bytes);
+                    stay = RemoveStateFolder(sg, &rm);
+                    string back;
+                    require(ReadAll(f, back) && back == c.bytes && stay.size() == 1, string("uninstall keeps ") + c.what + " byte for byte and lists it");
+                    DeleteFileW(f.c_str());
+                }
+
+                // the operation gate (wg_state.h OperationGuard): the record's binaries held, writes and deletes through it,
+                // refused while a binary is in use, one gate per folder and thread
+                const wstring gg = Join(dir, L"gate-game");
+                EnsureDir(StateDir(gg));
+                const wstring bin = Join(gg, L"wronggpu_runtime.dll");
+                put(bin, "MZ old");
+                Record gm;
+                gm.version = L"0.6.5"; gm.game = gg; gm.exe = Join(gg, L"Game.exe"); gm.format = 2;
+                gm.e.push_back(entry(L"wronggpu_runtime.dll", Sha256Bytes("MZ old", 6)));
+                gm.e.push_back(entry(L"wronggpu.ini", L"bb"));  // not a binary: never held
+                SaveRecord(RecordPath(gg), gm);
+                {
+                    auto gate = GuardOperation(gg, &gm);
+                    require(gate && GateHolds(bin) && !GateHolds(Join(gg, L"wronggpu.ini")), "gate: the record's binaries held, an ini not");
+                    require(GuardOperation(gg, &gm) == nullptr, "gate: a nested gate for the same folder on the same thread is the outer one");
+                    string r;
+                    require(ReadAll(bin, r) && r == "MZ old", "gate: a held binary can still be read by the operation");
+                    PutBinary(bin, "MZ new", 6);
+                    require(ReadAll(bin, r) && r == "MZ new" && GateHolds(bin), "gate: PutBinary replaces the held binary (renamed in complete) and holds the new one");
+                    bool blocked = false;
+                    try { put(bin, "MZ someone else"); } catch (const SetupError&) { blocked = true; }
+                    require(blocked && ReadAll(bin, r) && r == "MZ new", "gate: another writer cannot replace a held binary");
+                    require(DeleteHeldBinary(bin) == ERROR_SUCCESS && !IsFile(bin), "gate: DeleteHeldBinary deletes through the held handle");
+                    PutBinary(Join(gg, L"plugins\\WrongGPU.asi"), "MZ plugin", 9);
+                    require(GateHolds(Join(gg, L"plugins\\WrongGPU.asi")), "gate: a binary the operation creates is renamed in and held");
+                    // a file there that the gate does not hold (an earlier mirror copy the record did not list): replaced and held,
+                    // unless another program has it open without sharing writes (then the operation stops, the file as it was)
+                    const wstring mirror = Join(gg, L"_storage_\\dxgi.dll");
+                    put(mirror, "MZ earlier copy");
+                    PutBinary(mirror, "MZ this copy", 12);
+                    require(ReadAll(mirror, r) && r == "MZ this copy" && GateHolds(mirror), "gate: an unheld file at the path is replaced and the new one held");
+                    const wstring other = Join(gg, L"_storage_\\wronggpu-amd-compare.dll");
+                    put(other, "MZ in use");
+                    HANDLE busy = CreateFileW(other.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+                    string stopped;
+                    try { PutBinary(other, "MZ new", 6); } catch (const SetupError& ex) { stopped = ToUtf8(ex.msg); }
+                    if (busy != INVALID_HANDLE_VALUE) CloseHandle(busy);
+                    require(stopped.find("Stopped") != string::npos && ReadAll(other, r) && r == "MZ in use" && !GateHolds(other),
+                            "gate: an unheld file another program has open: the operation stops, the file as it was");
+                }
+                put(bin, "MZ old");
+                DeleteFileW(Join(gg, L"plugins\\WrongGPU.asi").c_str());
+                {
+                    HANDLE inUse = CreateFileW(bin.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);  // another program, no write sharing
+                    string msg;
+                    try { auto gate = GuardOperation(gg, &gm); } catch (const SetupError& ex) { msg = ToUtf8(ex.msg); }
+                    if (inUse != INVALID_HANDLE_VALUE) CloseHandle(inUse);
+                    require(msg.find("Nothing was changed") != string::npos && msg.find("in use by the game or another program") != string::npos &&
+                                msg.find("wronggpu_runtime.dll") != string::npos,
+                            "gate: a binary in use by another program: refused, nothing changed, the file named");
+                }
+                {
+                    auto gate = GuardOperation(gg, &gm);
+                    require(gate != nullptr, "gate: once the file is free again, the operation runs");
+                }
+            }
+
             // which games: the RR files next to the exe, deeper in the game's folder, a game known to call it, none
             auto file = [](const wstring& p) { EnsureDir(Parent(p)); WriteFileAtomic(p, "x", 1); };
             const wstring a = Join(dir, L"rr-a"), b = Join(dir, L"rr-b"), c = Join(dir, L"rr-c"), d = Join(dir, L"rr-d");
@@ -2163,6 +2502,214 @@ int main() {
             d = DecideLauncherStart(self, L"0.6.0", older, L"0.6.1");
             require(d.choice == LauncherStart::OpenInstalled && !d.sameVersion, "a newer version installed (even an older file): the installed copy opens");
             require(BuildTimeText(0) == L"unknown" && BuildTimeText(nov5).size() == 20 && BuildTimeText(nov5) == L"2026-11-05 23:06 UTC", "BuildTimeText: \"YYYY-MM-DD hh:mm UTC\"");
+        }
+
+        // #243: the store access (util.h LibraryAccess) and the no-scan of each operation
+        {
+            const wstring nsDir = Join(dir, L"noscan");
+            EnsureDir(nsDir);
+            Ui nui;
+            nui.step = [](int, int, const wstring&) {};
+            nui.log = [](const wstring&) {};
+            auto failingOp = [&](bool noScan) {  // an operation that fails at once (no record): only what RunOp does around it matters
+                OpRequest r;
+                r.op = Op::Uninstall;
+                r.dir = Join(nsDir, L"no-such-game");
+                r.noScan = noScan;
+                return r;
+            };
+            // the no-scan is per operation: a job's noscan holds for that job only, the process's for all
+            Context pc;
+            pc.logFile = Join(nsDir, L"per-op.log");
+            require(RunOp(pc, failingOp(true), nui).code != 0 && !pc.noLibraryScan, "a noscan operation: the flag goes back when it ends (never sticks into the next job)");
+            RunOp(pc, failingOp(false), nui);
+            require(!pc.noLibraryScan, "an operation without noscan: no search is held back");
+            Context ac;
+            ac.noScanAlways = true;
+            ac.noLibraryScan = true;
+            RunOp(ac, failingOp(false), nui);
+            require(ac.noLibraryScan, "--noscan for the process: every operation, also one whose own noscan is off, searches nothing");
+            pc.noLibraryScan = true;  // (as RunOp sets it for a noscan operation)
+            const CompareDll none = RecordCompareDll(pc, nui, L"");
+            string plog;
+            ReadAll(pc.logFile, plog);
+            require(none.path.empty() && plog.find("AMD FSR 4 search: libraries not searched") != string::npos && plog.find("candidate") == string::npos,
+                    "noscan: the AMD FSR 4 search leaves the store libraries alone (said in the log)");
+            pc.noLibraryScan = false;
+#ifdef WRONGGPU_TESTING
+            // test builds: WRONGGPU_TEST_LIBRARIES (a NON-EMPTY test library here) is the only library list; every store read is
+            // asked of LibraryAccess first and logged to WRONGGPU_TEST_ACCESS_LOG; nothing outside the test folder is read
+            const wstring libs = Join(nsDir, L"libraries"), access = Join(nsDir, L"access.log");
+            auto put = [](const wstring& p, const string& t) { EnsureDir(Parent(p)); WriteFileAtomic(p, t.data(), t.size()); };
+            put(Join(libs, L"Library Game\\amd_fidelityfx_upscaler_dx12.dll"), "MZ not AMD's DLL");
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_LIBRARIES", libs.c_str());
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_ACCESS_LOG", access.c_str());
+            auto accessLog = [&] { string t; ReadAll(access, t); DeleteFileW(access.c_str()); return t; };
+            const string outsideRoot = "Q:\\NotTheTestFolder";
+            const auto found = ScanLibraries();
+            string al = accessLog();
+            require(found.size() == 1 && found[0].source == L"Test" && TestLibraries() && al.find("library access: " + ToUtf8(libs)) != string::npos &&
+                        al.find("registry") == string::npos,
+                    "ScanLibraries: the test library's games only, logged; no store registry read");
+            require(!LibraryRegistryAccess(L"GOG.com Games") && accessLog().find("library access refused: registry GOG.com Games") != string::npos,
+                    "GOG (and Steam's registry, the art cache's Steam path): a store's registry key is refused in a test build, logged");
+            // Steam: an app manifest inside the test folder is read; one of the PC's is not
+            put(Join(libs, L"steamapps\\appmanifest_123.acf"), "\"AppState\"\r\n{\r\n\t\"appid\"\t\t\"123\"\r\n\t\"name\"\t\t\"Test Game\"\r\n\t\"installdir\"\t\t\"G\"\r\n}\r\n");
+            put(Join(libs, L"steamapps\\common\\G\\Game.exe"), "MZ");
+            require(SteamAppId(Join(libs, L"steamapps\\common\\G\\Game.exe")) == L"123" && GameDisplayName(Join(libs, L"steamapps\\common\\G\\Game.exe")) == L"Test Game" &&
+                        accessLog().find("library access: " + ToUtf8(Join(libs, L"steamapps"))) != string::npos,
+                    "Steam (SteamAppId, GameDisplayName): an app manifest in the test folder is read, logged");
+            require(SteamAppId(FromUtf8(outsideRoot) + L"\\steamapps\\common\\G\\Game.exe").empty() &&
+                        accessLog().find("library access refused: " + outsideRoot + "\\steamapps") != string::npos,
+                    "Steam: an app manifest folder outside the test folder is refused, logged, not read");
+            // Epic: the manifests of a ProgramData in the test folder are read; the PC's are not
+            wchar_t pdWas[MAX_PATH] = {};
+            GetEnvironmentVariableW(L"ProgramData", pdWas, MAX_PATH);
+            const wstring pd = Join(nsDir, L"programdata");
+            {
+                string loc;  // (JSON: the path's backslashes escaped, as Epic writes them)
+                for (char c : ToUtf8(Join(libs, L"E"))) { loc += c; if (c == '\\') loc += '\\'; }
+                put(Join(pd, L"Epic\\EpicGamesLauncher\\Data\\Manifests\\t.item"), "{\"InstallLocation\": \"" + loc + "\", \"AppName\": \"TestApp\"}");
+            }
+            SetEnvironmentVariableW(L"ProgramData", pd.c_str());
+            const wstring epic = EpicAppName(Join(libs, L"E\\Game.exe"));
+            const string eal = accessLog();
+            SetEnvironmentVariableW(L"ProgramData", FromUtf8(outsideRoot).c_str());
+            const wstring epicOut = EpicAppName(Join(libs, L"E\\Game.exe"));
+            const string eal2 = accessLog();
+            SetEnvironmentVariableW(L"ProgramData", pdWas[0] ? pdWas : nullptr);
+            require(epic == L"TestApp" && eal.find("library access: " + ToUtf8(pd)) != string::npos, "Epic (EpicAppName): the manifests of a ProgramData in the test folder are read, logged");
+            require(epicOut.empty() && eal2.find("library access refused: " + outsideRoot) != string::npos, "Epic: the manifests outside the test folder are refused, logged, not read");
+            // the walk of a library game's folder (FindFilesNamed): inside yes, outside no; \\?\ and UNC forms as such
+            require(FindFilesNamed(Join(libs, L"Library Game"), L"amd_fidelityfx_upscaler_dx12.dll").size() == 1 &&
+                        FindFilesNamed(FromUtf8(outsideRoot), L"amd_fidelityfx_upscaler_dx12.dll").empty() && !LibraryAccess(L"\\\\server\\share\\games") &&
+                        !LibraryAccess(L"\\\\?\\UNC\\server\\share\\games") && LibraryAccess(L"\\\\?\\" + Join(libs, L"Library Game")),
+                    "FindFilesNamed and LibraryAccess: inside the test folder walked (also as \\\\?\\), outside and UNC refused");
+            const string wal = accessLog();
+            require(wal.find("library access refused: " + outsideRoot) != string::npos && wal.find("library access refused: \\\\server\\share\\games") != string::npos,
+                    "the refused walks are logged");
+            // what a path really is (recheck P1a): a junction above it, a file symlink, a hard link to an outside file, and a test
+            // folder that is itself a junction are all refused, however inside their spelling looks
+            {
+                const wstring outside = Join(dir, L"outside-target");  // (outside the test run's folder nsDir)
+                put(Join(outside, L"amd_fidelityfx_upscaler_dx12.dll"), "MZ outside");
+                const wstring junction = Join(libs, L"Junction Game");
+                _wsystem((L"cmd /d /c mklink /J \"" + junction + L"\" \"" + outside + L"\" >nul 2>nul").c_str());
+                require(IsDir(junction) && !LibraryAccess(Join(junction, L"amd_fidelityfx_upscaler_dx12.dll")) &&
+                            FindFilesNamed(junction, L"amd_fidelityfx_upscaler_dx12.dll").empty() &&
+                            accessLog().find("library access refused: " + ToUtf8(junction)) != string::npos,
+                        "a junction in the library (an ancestor of the file): refused, not walked, logged");
+                const wstring symDir = Join(libs, L"Symlink Game"), sym = Join(symDir, L"amd_fidelityfx_upscaler_dx12.dll");
+                EnsureDir(symDir);
+                if (CreateSymbolicLinkW(sym.c_str(), Join(outside, L"amd_fidelityfx_upscaler_dx12.dll").c_str(), SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
+                    require(!LibraryAccess(sym) && FindFilesNamed(symDir, L"amd_fidelityfx_upscaler_dx12.dll").empty() &&
+                                accessLog().find("library access refused: " + ToUtf8(sym)) != string::npos,
+                            "a file symlink in the library to an outside file: refused, not returned by the walk, logged");
+                    DeleteFileW(sym.c_str());
+                } else {
+                    std::printf("  skipped: the file symlink case (this account cannot create symbolic links: Windows developer mode off; the "
+                                "junction and hard-link cases cover the same check)\n");
+                }
+                const wstring hardDir = Join(libs, L"Hardlink Game"), hard = Join(hardDir, L"amd_fidelityfx_upscaler_dx12.dll");
+                EnsureDir(hardDir);
+                require(CreateHardLinkW(hard.c_str(), Join(outside, L"amd_fidelityfx_upscaler_dx12.dll").c_str(), nullptr) && !LibraryAccess(hard) &&
+                            FindFilesNamed(hardDir, L"amd_fidelityfx_upscaler_dx12.dll").empty(),
+                        "a hard link in the library to an outside file (a second name): refused, not returned by the walk");
+                DeleteFileW(hard.c_str());
+                RemoveDirectoryW(junction.c_str());  // (the junction only: never what it points to)
+                accessLog();
+                // the test folder itself a junction: nothing is read
+                const wstring realRoot = Join(dir, L"real-root"), linkRoot = Join(nsDir, L"root-junction");
+                EnsureDir(Join(realRoot, L"libraries\\G"));
+                _wsystem((L"cmd /d /c mklink /J \"" + linkRoot + L"\" \"" + realRoot + L"\" >nul 2>nul").c_str());
+                SetEnvironmentVariableW(L"WRONGGPU_TEST_LIBRARIES", Join(linkRoot, L"libraries").c_str());
+                require(IsDir(linkRoot) && !LibraryAccess(Join(linkRoot, L"libraries\\G")) && ScanLibraries().empty(),
+                        "a test folder that resolves elsewhere (itself a junction): every read refused");
+                SetEnvironmentVariableW(L"WRONGGPU_TEST_LIBRARIES", libs.c_str());
+                RemoveDirectoryW(linkRoot.c_str());
+                accessLog();
+            }
+            // the access log (recheck P1b): a read whose line cannot be written is refused; a new log starts with this run's id
+            {
+                SetEnvironmentVariableW(L"WRONGGPU_TEST_ACCESS_LOG", libs.c_str());  // a folder: no line can be appended
+                const bool unwritable = LibraryAccess(Join(libs, L"Library Game"));
+                SetEnvironmentVariableW(L"WRONGGPU_TEST_ACCESS_LOG", nullptr);
+                const bool unset = LibraryAccess(Join(libs, L"Library Game"));
+                SetEnvironmentVariableW(L"WRONGGPU_TEST_ACCESS_LOG", access.c_str());
+                require(!unwritable && !unset, "an access log that cannot be written (or none named): the read is refused (fail closed)");
+                SetEnvironmentVariableW(L"WRONGGPU_TEST_RUN_ID", L"unit-run-7");
+                DeleteFileW(access.c_str());
+                TestAccessStart(L"unit");
+                const string started = accessLog();
+                require(started.rfind("run unit-run-7\r\nprocess ", 0) == 0 && started.find(" unit start") != string::npos,
+                        "a new access log starts with \"run <id>\", then the program's start line");
+                SetEnvironmentVariableW(L"WRONGGPU_TEST_RUN_ID", nullptr);
+            }
+            // a normal operation after a noscan one finds its compare DLL in the test library (the search runs again)
+            RunOp(pc, failingOp(true), nui);
+            DeleteFileW(pc.logFile.c_str());
+            RecordCompareDll(pc, nui, L"");
+            ReadAll(pc.logFile, plog);
+            require(plog.find("AMD FSR 4 search: " + ToUtf8(Join(libs, L"Library Game\\amd_fidelityfx_upscaler_dx12.dll"))) != string::npos &&
+                        accessLog().find("library access: " + ToUtf8(Join(libs, L"Library Game"))) != string::npos,
+                    "after a noscan job, a normal one's AMD FSR 4 search finds the test library's DLL (here: not AMD's, so not used)");
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_LIBRARIES", L"");
+            require(ScanLibraries().empty() && TestLibraries(), "WRONGGPU_TEST_LIBRARIES set but empty: no library at all");
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_LIBRARIES", nullptr);
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_ACCESS_LOG", nullptr);
+            require(!TestLibraries(), "WRONGGPU_TEST_LIBRARIES not set: TestLibraries false (the normal search, never run here)");
+#else
+            require(!TestLibraries(), "a build without WRONGGPU_TESTING never takes a test library list");
+#endif
+        }
+
+#ifdef WRONGGPU_TESTING
+        {  // the HIP check's test candidates (checks.cpp HipCandidates): set is the whole list, never the system search
+            wchar_t savedList[512] = {};
+            const bool hadList = GetEnvironmentVariableW(L"WRONGGPU_TEST_HIP_CANDIDATES", savedList, 512) > 0;
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_HIP_CANDIDATES", L"");
+            require(HipCandidates().empty(), "WRONGGPU_TEST_HIP_CANDIDATES set but empty: no HIP candidate at all (never the system search)");
+            const wstring longPath = L"C:\\x\\" + wstring(20000, L'a') + L"\\amdhip64_7.dll";
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_HIP_CANDIDATES", longPath.c_str());
+            const auto longList = HipCandidates();
+            require(longList.size() == 1 && longList[0] == longPath,
+                    "WRONGGPU_TEST_HIP_CANDIDATES longer than EnvVar reads: still the whole list (that one path), never the system search");
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_HIP_CANDIDATES", hadList ? savedList : nullptr);
+        }
+#endif
+        {  // the rr-prepare helper's environment (rrprep.h RrHelperEnvironment): the tests' LOCALAPPDATA is kept in a test build
+            auto valueOf = [](const std::vector<wchar_t>& env, const wstring& key) {
+                wstring found = L"(none)";
+                for (const wchar_t* s = env.data(); *s; s += wcslen(s) + 1)
+                    if (StartsWithI(s, key + L"=")) found = s + key.size() + 1;
+                return found;
+            };
+            wchar_t saved[MAX_PATH * 2] = {}, savedReal[64] = {};
+            const bool had = GetEnvironmentVariableW(L"LOCALAPPDATA", saved, MAX_PATH * 2) > 0;
+            const bool hadReal = GetEnvironmentVariableW(L"WRONGGPU_TEST_REAL_DRIVER_CACHE", savedReal, 64) > 0;
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_REAL_DRIVER_CACHE", nullptr);  // (whatever the caller had)
+            const wstring sandbox = Join(dir, L"sandbox-localappdata");
+            SetEnvironmentVariableW(L"LOCALAPPDATA", sandbox.c_str());
+            wstring real;
+            PWSTR kp = nullptr;
+            if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DONT_VERIFY, nullptr, &kp)) && kp) real = kp;
+            if (kp) CoTaskMemFree(kp);
+            std::vector<wchar_t> env = RrHelperEnvironment(L"C:\\log\\prepare.log");
+            require(valueOf(env, L"WG_RR_LOG") == L"C:\\log\\prepare.log", "the helper's environment: the runtime log in WG_RR_LOG");
+#ifdef WRONGGPU_TESTING
+            require(valueOf(env, L"LOCALAPPDATA") == sandbox,
+                    "a test build's rr-prepare helper keeps the tests' redirected LOCALAPPDATA (never the user's real folder)");
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_REAL_DRIVER_CACHE", L"1");
+            env = RrHelperEnvironment(L"x");
+            require(!real.empty() && IEq(valueOf(env, L"LOCALAPPDATA"), real),
+                    "a test build's helper gets the real LOCALAPPDATA only with the explicit opt-in WRONGGPU_TEST_REAL_DRIVER_CACHE=1");
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_REAL_DRIVER_CACHE", nullptr);
+#else
+            require(!real.empty() && IEq(valueOf(env, L"LOCALAPPDATA"), real),
+                    "a release build's rr-prepare helper gets the user's real LOCALAPPDATA (where the driver keeps the game's shader cache)");
+#endif
+            SetEnvironmentVariableW(L"LOCALAPPDATA", had ? saved : nullptr);
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_REAL_DRIVER_CACHE", hadReal ? savedReal : nullptr);
         }
 
         RemoveTree(dir);

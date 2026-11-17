@@ -57,6 +57,7 @@ void k_base_size(int ow, int oh, double s, int* wb, int* hb) {
   *hb = one(oh);
 }
 
+// SMX-SELFCHECK-SOURCE BEGIN (level sizes, window offsets and counts: k_smx_selfcheck.h's digest covers this text)
 void k_level_size(int wb, int hb, int level, int* w, int* h) {
   *w = cdiv(wb, 1 << level);
   *h = cdiv(hb, 1 << level);
@@ -75,6 +76,7 @@ void k_stage_offsets(int f, const int table[8][2], int off[11][2]) {
 }
 
 int k_window_count(int w, int h, int ox, int oy) { return cdiv(w + ox, 8) * cdiv(h + oy, 8); }
+// SMX-SELFCHECK-SOURCE END
 
 std::vector<KBuffer> k_buffer_plan(int wb, int hb) {
   auto tokens = [&](int level) {

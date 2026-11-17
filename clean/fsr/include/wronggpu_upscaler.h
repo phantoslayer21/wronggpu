@@ -40,8 +40,11 @@ typedef enum WgResult {
     WG_ERROR_MEMORY = 4,
     WG_ERROR_PARAMETER = 5,   /* a required input is missing or invalid */
     WG_ERROR_NOT_READY = 6,   /* v2: not possible this frame, try again next frame (e.g. split of a command list the
-                                 front end has not tracked since its last Reset); from dispatch it makes the front end
-                                 use AMD's FSR (or the stand-in) for this frame only, the context stays the backend's */
+                                 front end has not tracked since its last Reset; the network runtime's frame after a
+                                 Model L bottleneck wait timeout, or a Model L frame whose command-list predicate the
+                                 front end cannot report); from dispatch it makes the front end use its stand-in (else
+                                 AMD's FSR) for this frame only, never a takeover: the context stays the backend's and
+                                 its next frame goes to the backend again */
     WG_ERROR_INPUT = 7        /* v2 (0.6.0 follow-up): the game's inputs can never be taken (a texture's shape, format
                                  or flags the upscaler refuses), the same on every frame: from dispatch the context is
                                  failed as for WG_ERROR, and in OptiScaler's custom slot the front end remembers it for
@@ -192,6 +195,14 @@ typedef struct WgFrontEndServices {
     void*    context;                /* first argument of every service */
     /* Only from within dispatch, with the frame passed to dispatch. */
     WgResult (*split_command_list)(void* context, const WgFrame* frame, const WgSplitRequest* request);
+    /* Appended (0.6.5; check struct_size): the predicate the game set on frame->command_list
+     * (ID3D12GraphicsCommandList::SetPredication) as the front end tracked it since the list's last Reset. WG_OK with
+     * *buffer (ID3D12Resource*, null: none set), *offset and *op (D3D12_PREDICATION_OP); WG_ERROR_NOT_READY when the
+     * front end has not seen every call the list recorded since its Reset; WG_ERROR_PARAMETER for a null argument.
+     * Only from within dispatch, with the frame passed to dispatch. A backend that replaces the predicate while it
+     * records (the D3D12 executor's frame guard) sets it again with these values before it returns. */
+    WgResult (*command_list_predication)(void* context, const WgFrame* frame, void** buffer, uint64_t* offset,
+                                         uint32_t* op);
 } WgFrontEndServices;
 
 typedef struct WgUpscaler WgUpscaler; /* opaque, owned by the implementation */

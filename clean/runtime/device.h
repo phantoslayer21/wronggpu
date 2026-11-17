@@ -49,6 +49,9 @@ class Device {
   }
   // args: pointers to the argument values (hipModuleLaunchKernel convention).
   virtual bool launch(const std::string& kernel, unsigned grid, unsigned block, void** args) = 0;
+  // Loads, verifies and compiles one kernel now (its first launch then compiles nothing); false with err() when its
+  // shader is missing or corrupt. Devices that prepare nothing ahead: true.
+  virtual bool prepare(const std::string& kernel) { (void)kernel; return true; }
   // The next launch may start before the previous one has finished (native D3D12: no UAV barrier between the two; the
   // kernels synchronize themselves). Devices that always order launches ignore it.
   virtual void unordered_next() {}
@@ -101,7 +104,33 @@ class Device {
     return false;
   }
   virtual bool has_wait_value32() const { return false; }
+  // The hybrid block form's arena tables (hyb_tables.h: GELU16 -> FP8, rsqrt, rcp): hyb_reserve() reserves their fixed
+  // arena range and fills it (native D3D12; called by the runtime's create for a Model L context on the hybrid route,
+  // before its first allocation); false with err() when the range is taken or tables are off. hyb_tables(): reserved
+  // and filled. Other models never call it, so their arena layout is unchanged.
+  virtual bool hyb_reserve() { err_ = "this device has no hybrid tables (native D3D12 only)"; return false; }
+  virtual bool hyb_tables() const { return false; }
   virtual bool write_value32(DevPtr ptr, uint32_t value) { (void)ptr, (void)value; return false; }
+  // Frame guard (native D3D12; the hybrid Model L bottleneck's bounded wait, hyb_bneck.hlsl). guard_begin(word): from
+  // here on, every launch and copy of this recording is skipped on the GPU while the 8 bytes at `word` (8-aligned) are
+  // nonzero, read as they are at this point of the stream (a copy into a predicate buffer; D3D12 predication). Called
+  // again, it reads the word again. guard_end(): the guard is lifted (nothing after it is skipped) and the 16 bytes at
+  // `word` are copied into host-visible memory; guard_read(w) gives the newest copy the GPU has written (zeros before
+  // the first), without waiting. Recording into a caller's list (native D3D12 begin_external), the predicate stays on
+  // after guard_end until end_external, so the caller's own pass after the network (e.g. a copy into the game's output)
+  // is skipped with the frame; the caller's commands after end_external never are. A device without the guard returns
+  // false (has_guard() false).
+  virtual bool has_guard() const { return false; }
+  virtual bool guard_begin(DevPtr word) {
+    (void)word;
+    err_ = "this device has no frame guard (native D3D12 only)";
+    return false;
+  }
+  virtual bool guard_end() { return true; }
+  virtual bool guard_read(uint32_t w[4]) {
+    w[0] = w[1] = w[2] = w[3] = 0;
+    return false;
+  }
   // Optional (HIP graphs; runtime option graph=1): the launches between begin_capture and end_capture_launch are
   // recorded into a graph (stream capture) and launched as one; the instantiated graph is kept and updated in place
   // when the next capture has the same topology (only kernel arguments differ), else instantiated again.

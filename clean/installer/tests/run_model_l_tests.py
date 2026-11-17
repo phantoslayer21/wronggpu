@@ -25,6 +25,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 os.environ["WRONGGPU_TESTING"] = "1"
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -63,6 +64,7 @@ class T:
         shutil.rmtree(self.lad, ignore_errors=True)
         os.makedirs(self.lad)
         self.env = dict(os.environ, LOCALAPPDATA=self.lad, ProgramData=os.path.join(work, "programdata"))
+        __import__("launcher_isolation").test_env(self.env, work)  # (#243) the store libraries: none of the PC's; every access logged
         for k in [k for k in self.env if k.upper().startswith("WG_") or k.upper() in ("HIP_PATH", "ROCM_PATH", "LLVM_PATH", "HIP_DEVICE_LIB_PATH")]:
             self.env.pop(k)
         self.j, self.stdout = {}, ""
@@ -81,6 +83,7 @@ class T:
             if os.path.exists(p):
                 os.remove(p)
         cmd = [self.exe] + list(args) + ["--noscan", "--log=" + self.log, "--out=" + self.out, "--data=" + os.path.join(self.work, "data")]
+        astart = __import__("launcher_isolation").access_size(self.work)
         p = subprocess.run(cmd, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600)
         self.stdout = p.stdout.decode("utf-8", "replace")
         try:
@@ -88,6 +91,7 @@ class T:
                 self.j = json.load(f)
         except (OSError, ValueError):
             self.j = {}
+        __import__("launcher_isolation").check_isolation(self.log, self.work, 0, args, astart)  # (#243) never the PC's own game folders
         return p.returncode
 
     def model(self, *rel):
@@ -215,6 +219,23 @@ def upscaler_index(text):
     return found.get("wronggpu", found.get("fsr"))
 
 
+def set_upscaler_index(text, value):
+    """OptiScaler.ini text with the UpscalerIndex WrongGPU manages ([WrongGPU] when there, else [FSR]) set to `value` (None: the
+    line removed): a player's change in the game. Other lines, and every line's own ending, stay."""
+    lines = text.splitlines(keepends=True)
+    target = "wronggpu" if any(s.strip().lower() == "[wronggpu]" for s in lines) else "fsr"
+    out, sec = [], None
+    for line in lines:
+        if line.strip().startswith("["):
+            sec = line.strip().strip("[]").lower()
+        if sec == target and line.strip().lower().startswith("upscalerindex") and "=" in line:
+            if value is None:
+                continue
+            line = "UpscalerIndex=" + value + line[len(line.rstrip("\r\n")):]
+        out.append(line)
+    return "".join(out)
+
+
 def recorded_hash(b, name):
     """The hash the install record holds for a recorded file (its copy entry: action existed orig inst rel)."""
     for line in read(os.path.join(b, "wronggpu-setup", "install.record")).decode("utf-8", "replace").replace("\r", "").split("\n"):
@@ -222,6 +243,22 @@ def recorded_hash(b, name):
         if len(f) == 5 and f[0] == "copy" and f[4].lower() == name.lower():
             return f[3].lower()
     return None
+
+
+def choice_record(b):
+    """The game's model choice record (wronggpu-setup\\model-choice.ini; clean/fsr/src/model_choice_record.h) as a dict, {} without one."""
+    p = os.path.join(b, "wronggpu-setup", "model-choice.ini")
+    if not os.path.exists(p):
+        return {}
+    r = {}
+    for line in read(p).decode("utf-8", "replace").splitlines():
+        if line and not line.startswith(";") and "=" in line:
+            k, v = line.split("=", 1)
+            r[k] = v
+    return r
+
+
+RECORD_TOOL = None  # --record-tool
 
 
 def test_choice(t):
@@ -252,26 +289,149 @@ def test_choice(t):
     rc = t.run("model", "convert", "--preset=L", "--model=" + lsrc)
     t.check("Model L's data converted (model convert --preset=L)", rc == 0, (rc, t.j))
     rc = t.run("set", exe, "model=L")
-    w = read(wini).decode("utf-8", "replace")
-    t.check("set model=L: exit 0; wronggpu.ini's last model item is model=L", rc == 0 and suite_options_model(w) == "L", (rc, t.j.get("message"), w))
+    t.check("set model=L: exit 0; wronggpu.ini byte for byte as the install wrote it (the model is the record's, never written there)",
+            rc == 0 and read(wini) == m_w, (rc, t.j.get("message"), read(wini)[-200:]))
     t.check("...OptiScaler's UpscalerIndex names Model L's entry (1: after Model M in a build without Preset K)",
             upscaler_index(read(oini).decode("utf-8", "replace")) == "1", read(oini).decode("utf-8", "replace"))
     t.check("...the record's hashes follow both files (the file-ownership rule: they are WrongGPU's writes)",
             recorded_hash(b, "wronggpu.ini") == hashlib.sha256(read(wini)).hexdigest() and recorded_hash(b, "OptiScaler.ini") == hashlib.sha256(read(oini)).hexdigest(),
             (recorded_hash(b, "wronggpu.ini"), recorded_hash(b, "OptiScaler.ini")))
     t.check("...profile.ini says model=l", b"model=l\r\n" in read(os.path.join(b, "wronggpu-setup", "profile.ini")))
+    r1 = choice_record(b)
+    t.check("...the model choice record: exactly model=L, seq, source=launcher", r1.get("model") == "L" and
+            r1.get("source") == "launcher" and r1.get("seq", "").isdigit() and sorted(r1) == ["model", "seq", "source"], r1)
+    rc = t.run("set", exe, "model=L")
+    r2 = choice_record(b)
+    t.check("set model=L again: the record's seq grows (the newest choice); wronggpu.ini and OptiScaler.ini unchanged",
+            rc == 0 and r2.get("model") == "L" and int(r2.get("seq", "0")) == int(r1.get("seq", "0")) + 1 and read(wini) == m_w, (r1, r2))
+    # an explicit model choice in the launcher (set model=..., or the launcher's Apply) wins over a NEWER choice made in the
+    # game even when the profile's model is unchanged; a launcher change of another setting does not touch the record
+    rec_path = os.path.join(b, "wronggpu-setup", "model-choice.ini")
+    newer = int(r2.get("seq", "0")) + 1
+    write(rec_path, ("model=M\r\nseq=%d\r\nsource=plugin\r\n" % newer).encode("ascii"))
+    o_before = read(oini)
+    rc = t.run("set", exe, "fps_overlay=on")
+    t.check("set fps_overlay=on: the plugin's newer choice (M) stays the record", rc == 0 and choice_record(b) == {"model": "M", "seq": str(newer), "source": "plugin"},
+            (rc, choice_record(b)))
+    rc = t.run("set", exe, "fps_overlay=keep")  # ("keep" leaves the key as it is: the file goes back by hand, and
+    write(oini, o_before)                       # the next model choice rewrites it and its hash)
+    rc = t.run("set", exe, "model=L")
+    r2b = choice_record(b)
+    t.check("set model=L (the profile already says L) after the plugin's newer M: L is recorded with the next seq",
+            rc == 0 and r2b.get("model") == "L" and r2b.get("source") == "launcher" and int(r2b.get("seq", "0")) == newer + 1, r2b)
+    # the launcher window's Apply (the request its button makes, GuiApplyRequest, run by `set ... --gui-apply`): the model
+    # shown is a choice even unchanged, so it wins over a newer choice made in the game
+    newer = int(r2b.get("seq", "0")) + 1
+    write(rec_path, ("model=M\r\nseq=%d\r\nsource=ffx\r\n" % newer).encode("ascii"))
+    rc = t.run("set", exe, "fps_overlay=keep", "--gui-apply")
+    r2c = choice_record(b)
+    t.check("the launcher's Apply with the unchanged model L after a newer choice in OptiScaler's list (M): L is recorded with the next seq",
+            rc == 0 and r2c.get("model") == "L" and r2c.get("source") == "launcher" and int(r2c.get("seq", "0")) == newer + 1 and read(wini) == m_w,
+            (rc, r2c))
+    r2 = r2c
+    # the menu plugin's file as the player made it, with comments, on AMD (selection=amd): an explicit model choice changes
+    # only its selection line (every other byte stays) and does not claim it (its ownership stays as recorded)
+    asi = os.path.join(b, "wronggpu-asi.ini")
+    had_asi, asi_owner = os.path.exists(asi), recorded_hash(b, "wronggpu-asi.ini")
+    asi_was = read(asi) if had_asi else None
+    write(asi, b"# mine: AMD for screenshots\r\n Selection = AMD \r\n; keep this\n")
+    rc = t.run("set", exe, "model=L")
+    t.check("set model=L over the player's wronggpu-asi.ini on AMD: only its selection line changes (to Model L), the player's "
+            "comments and line ends stay, its ownership in the install record unchanged",
+            rc == 0 and read(asi) == b"# mine: AMD for screenshots\r\nselection=wronggpu-l\r\n; keep this\n" and
+            recorded_hash(b, "wronggpu-asi.ini") == asi_owner, (rc, read(asi), asi_owner, recorded_hash(b, "wronggpu-asi.ini")))
+    if had_asi:
+        write(asi, asi_was)  # (as the install left it)
+    else:
+        os.remove(asi)  # (the player's file: the uninstall below would rightly keep it)
+    r2 = choice_record(b)
     rc = t.run("set", exe, "model=M")
     t.check("set model=M: wronggpu.ini and OptiScaler.ini back byte for byte as the install wrote them",
             rc == 0 and read(wini) == m_w and read(oini) == m_o, (rc, read(wini)[-200:], read(oini)[-200:]))
     t.check("...profile.ini has no model line again", b"model=" not in read(os.path.join(b, "wronggpu-setup", "profile.ini")))
+    r3 = choice_record(b)
+    t.check("...the record: model=M, source=launcher, the next seq", r3.get("model") == "M" and r3.get("source") == "launcher" and
+            int(r3.get("seq", "0")) == int(r2.get("seq", "0")) + 1, r3)
+    # the launcher's model choice ALWAYS sets OptiScaler's entry, after the record: from AMD's value (5), and the key created
+    # when it is missing
+    write(oini, set_upscaler_index(read(oini).decode("utf-8", "replace"), "5").encode("utf-8"))
+    rc = t.run("set", exe, "model=M")
+    r4 = choice_record(b)
+    t.check("set model=M over AMD's entry (5): OptiScaler's entry is Model M's again (0); the record's seq grows",
+            rc == 0 and upscaler_index(read(oini).decode("utf-8", "replace")) == "0" and r4.get("model") == "M" and
+            int(r4.get("seq", "0")) == int(r3.get("seq", "0")) + 1, (rc, r4, read(oini)[-300:]))
+    write(oini, set_upscaler_index(read(oini).decode("utf-8", "replace"), None).encode("utf-8"))
+    rc = t.run("set", exe, "model=L")
+    t.check("set model=L without an UpscalerIndex key: the key is created with Model L's entry (1)",
+            rc == 0 and upscaler_index(read(oini).decode("utf-8", "replace")) == "1" and choice_record(b).get("model") == "L",
+            (rc, read(oini)[-300:]))
+    # an apply interrupted between the record and OptiScaler.ini (a crash): the record has the choice, the entry is stale,
+    # which is harmless (the front end never takes the entry for a choice); the next apply sets the entry
+    write(oini, set_upscaler_index(read(oini).decode("utf-8", "replace"), "5").encode("utf-8"))
+    r5 = choice_record(b)
+    t.env["WRONGGPU_TEST_STOP_AFTER_CHOICE_RECORD"] = "1"
+    rc = t.run("set", exe, "model=L")
+    t.env.pop("WRONGGPU_TEST_STOP_AFTER_CHOICE_RECORD")
+    r6 = choice_record(b)
+    t.check("set model=L stopped after the record (exit 97): the record has L with the next seq, OptiScaler's entry is still 5",
+            rc == 97 and r6.get("model") == "L" and r6.get("source") == "launcher" and int(r6.get("seq", "0")) == int(r5.get("seq", "0")) + 1 and
+            upscaler_index(read(oini).decode("utf-8", "replace")) == "5", (rc, r5, r6))
+    rc = t.run("set", exe, "model=L")
+    t.check("...the next set model=L: OptiScaler's entry is Model L's (1) again, the record's seq grows",
+            rc == 0 and upscaler_index(read(oini).decode("utf-8", "replace")) == "1" and int(choice_record(b).get("seq", "0")) == int(r6.get("seq", "0")) + 1,
+            (rc, choice_record(b)))
+    rc = t.run("set", exe, "model=M")
+    t.check("...set model=M: wronggpu.ini back byte for byte as the install wrote it, OptiScaler's entry Model M's (0; the key the player"
+            " removed was created again, so OptiScaler.ini differs only in where that line is)",
+            rc == 0 and read(wini) == m_w and upscaler_index(read(oini).decode("utf-8", "replace")) == "0" and
+            sorted(read(oini).split(b"\r\n")) == sorted(m_o.split(b"\r\n")),
+            (rc, read(wini) == m_w, set(read(oini).split(b"\r\n")) ^ set(m_o.split(b"\r\n")), read(wini)[-200:]))
+    # OptiScaler.ini missing: the model choice is still saved, and the player is told OptiScaler's list could not be updated
+    os.replace(oini, oini + ".away")
+    r7 = choice_record(b)
+    rc = t.run("set", exe, "model=L")
+    msgs = " ".join(t.j.get("warnings", []) + t.j.get("notes", []))
+    t.check("set model=L without OptiScaler.ini: exit 0, the record has L with the next seq, and it says OptiScaler's list couldn't be updated",
+            rc == 0 and choice_record(b).get("model") == "L" and int(choice_record(b).get("seq", "0")) == int(r7.get("seq", "0")) + 1 and
+            "OptiScaler's list couldn't be updated; the model choice is saved" in msgs and not os.path.exists(oini), (rc, msgs[:400], choice_record(b)))
+    os.replace(oini + ".away", oini)
+    rc = t.run("set", exe, "model=M")
+    t.check("...set model=M with OptiScaler.ini back: its entry is Model M's (0)", rc == 0 and upscaler_index(read(oini).decode("utf-8", "replace")) == "0", rc)
+    # the front end's upgrade migration (no record yet) against a REAL launcher apply in another process: the launcher holds the
+    # game's state lock (test hook: it pauses after reading the record, before writing it); the migration, started then, waits
+    # for the lock and finds the launcher's record (L), so it writes nothing (without the lock it would have written M first)
+    if RECORD_TOOL:
+        os.remove(rec_path)
+        sig = os.path.join(t.work, "choice-lock.signal")
+        if os.path.exists(sig):
+            os.remove(sig)
+        if os.path.exists(t.out):
+            os.remove(t.out)
+        env = dict(t.env, WRONGGPU_TEST_PAUSE_IN_CHOICE_LOCK=sig + "|1500")
+        cmd = [t.exe, "set", exe, "model=L", "--noscan", "--log=" + t.log, "--out=" + t.out, "--data=" + os.path.join(t.work, "data")]
+        launcher = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        for _ in range(500):
+            if os.path.exists(sig):
+                break
+            time.sleep(0.01)
+        mig = subprocess.run([RECORD_TOOL, "migrate", b], env=t.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        lrc = launcher.wait(timeout=120)
+        out = mig.stdout.decode("utf-8", "replace").strip()
+        rr = choice_record(b)
+        t.check("migration against a real launcher apply holding the lock: the launcher records L (seq 1), the migration waits and writes nothing",
+                os.path.exists(sig) and lrc == 0 and mig.returncode == 0 and out == "migrate: ok model=L seq=1 migrated=0" and
+                rr == {"model": "L", "seq": "1", "source": "launcher"}, (lrc, mig.returncode, out, rr))
+    else:
+        print("  (the migration race against a real launcher apply: no --record-tool given, not run)")
     # a game saved on L whose data goes away: a repair keeps the player's choice, the files say Model M with a warning
     rc = t.run("set", exe, "model=L")
     os.remove(os.path.join(t.lad, "WrongGPU", "model", "L", "model.wgcm"))  # (t.model is the case here, not the path helper)
     rc = t.run("repair", exe, "--opti=" + opti, "--force")
     msgs = " ".join(t.j.get("warnings", []) + t.j.get("notes", []))
-    t.check("repair of a game set to L without Model L's data: exit 0, the files say Model M, the player is told how to convert it",
-            rc == 0 and suite_options_model(read(wini).decode("utf-8", "replace")) == "M" and "Model L's data on this PC is not ready" in msgs and
-            "model convert --preset=L" in msgs, (rc, t.j.get("message"), msgs[:600]))
+    t.check("repair of a game set to L without Model L's data: exit 0, the record says Model M (the launcher's own choice can't run),"
+            " the player is told how to convert it",
+            rc == 0 and choice_record(b).get("model") == "M" and choice_record(b).get("source") == "launcher" and
+            "Model L's data on this PC is not ready" in msgs and "model convert --preset=L" in msgs, (rc, t.j.get("message"), msgs[:600], choice_record(b)))
     t.check("...the choice stays in profile.ini (model=l)", b"model=l\r\n" in read(os.path.join(b, "wronggpu-setup", "profile.ini")))
     rc = t.run("uninstall", exe)
     t.check("uninstall: the game folder byte for byte as before the install", rc == 0 and suite.snapshot(root) == before, (rc, suite.diff(before, suite.snapshot(root))))
@@ -318,7 +478,11 @@ def main():
     ap.add_argument("--reference-launcher", help="WrongGPU.exe of the base branch (same payload and test map)")
     ap.add_argument("--launcher-choice", help="WrongGPU.exe built with -DWRONGGPU_MODEL_L=ON and the test map (the model choice)")
     ap.add_argument("--work", default=os.path.join(HERE, "..", "build-tests", "model-l"))
+    ap.add_argument("--record-tool", help="clean/fsr's test_model_choice_record.exe: the front end's upgrade migration in its own "
+                    "process, for the race against a real launcher apply (skipped without it)")
     a = ap.parse_args()
+    global RECORD_TOOL
+    RECORD_TOOL = os.path.abspath(a.record_tool) if a.record_tool else None
     if a.write_test_map:
         write(a.write_test_map, map_bytes(l_case()))
         print("test map: " + a.write_test_map)
@@ -326,6 +490,8 @@ def main():
     if not a.launcher and not a.launcher_synth and not a.launcher_choice:
         ap.error("--launcher, --launcher-synth or --launcher-choice is needed")
     work = os.path.abspath(a.work)
+    os.makedirs(work, exist_ok=True)
+    __import__("launcher_isolation").self_test(work)  # (#243) first: no launcher call with a broken guard
     passed, failures = 0, []
     for exe, part, fn in ((a.launcher, "shipped", test_shipped_map), (a.launcher_synth, "synth", lambda t: test_conversion(t, a.reference_launcher)),
                           (a.launcher_choice, "choice", test_choice), (a.launcher_synth, "no-choice", test_no_choice)):

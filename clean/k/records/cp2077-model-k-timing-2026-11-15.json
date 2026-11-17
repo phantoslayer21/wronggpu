@@ -1,0 +1,1470 @@
+{
+ "timer": "the runtime's D3D12 timestamps in the game's command list (timing_log=1, timing_stages=1): each sample is one 'timing, last 300 dispatches' line = the mean over 300 frames; network_total = the model's GPU time per frame, from the start of its first kernel -> after its last kernel; frame_span_t3_t0 = the frame's full D3D12 span",
+ "statistics": "over the 300-frame windows of each run: median, p95, min, max of the window means; worst_frame_network_ms = the largest single frame in any window; spread_pct = (max - min) / median of the window means",
+ "what": "Model K and Model M (control) in Cyberpunk 2077, one right after the other: the same settings, save and spot, one game start each",
+ "game": "Cyberpunk 2077 (Steam), Quality mode (the game sends 1280x720), output 1920x1080, borderless, ray tracing as the save had it, path tracing off, frame generation off, Ray Reconstruction off",
+ "scene": "gameplay, standing still: the street spot under the overpass (the same save and spot as cp2077-model-l-timing-2026-11-14.json in clean/l/records)",
+ "render": [
+  1280,
+  720
+ ],
+ "output": [
+  1920,
+  1080
+ ],
+ "mode": "1080p Quality",
+ "executor": "dx12 (native D3D12, the game device); the AMD HIP runtime not loaded in the game process",
+ "options": "model=<K|M>;executor=dx12;timing_log=1;timing_stages=1 (no other diagnostic option)",
+ "gpu": "AMD Radeon RX 9070 XT",
+ "build": "release candidate rc/065-k 32ab421 (Model K and Model M code as on main for these paths)",
+ "model_digests": {
+  "K": "a2236326b39d315d0e8e4cc78d6ef82a5071df5ce6dcab53ad13f5b682f05758 (converted on the PC by the launcher)",
+  "M": "bfbd9dad238721fb51ed60e85ceb9789ddb3468c3538efb651d09f8ca820c350 (this PC's converted Model M; the same file as in the 2026-11-14 record)"
+ },
+ "failed_dispatches": 0,
+ "runs": {
+  "K": {
+   "model": "K",
+   "windows": 52,
+   "frames": 15600,
+   "network_total": {
+    "median_ms": 1.031,
+    "p95_ms": 1.034,
+    "min_ms": 1.018,
+    "max_ms": 1.035
+   },
+   "frame_span_t3_t0": {
+    "median_ms": 1.038,
+    "p95_ms": 1.04,
+    "min_ms": 1.024,
+    "max_ms": 1.041
+   },
+   "parts_median_ms": {
+    "exposure": 0.009,
+    "input": 0.22,
+    "network": 0.443,
+    "output": 0.359
+   },
+   "worst_frame_network_ms": 1.079,
+   "spread_pct": 1.65,
+   "window_list": [
+    {
+     "end": "11:25:56",
+     "network_gpu": 1.03,
+     "worst_frame_network": 1.079,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.443,
+      "output": 0.359
+     },
+     "frames": 300,
+     "total_t3_t0": 1.037,
+     "worst_frame_total": 1.084
+    },
+    {
+     "end": "11:25:58",
+     "network_gpu": 1.03,
+     "worst_frame_network": 1.048,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.443,
+      "output": 0.359
+     },
+     "frames": 300,
+     "total_t3_t0": 1.037,
+     "worst_frame_total": 1.054
+    },
+    {
+     "end": "11:26:01",
+     "network_gpu": 1.032,
+     "worst_frame_network": 1.048,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.443,
+      "output": 0.359
+     },
+     "frames": 300,
+     "total_t3_t0": 1.038,
+     "worst_frame_total": 1.055
+    },
+    {
+     "end": "11:26:03",
+     "network_gpu": 1.032,
+     "worst_frame_network": 1.047,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.443,
+      "output": 0.359
+     },
+     "frames": 300,
+     "total_t3_t0": 1.038,
+     "worst_frame_total": 1.054
+    },
+    {
+     "end": "11:26:06",
+     "network_gpu": 1.031,
+     "worst_frame_network": 1.05,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.443,
+      "output": 0.359
+     },
+     "frames": 300,
+     "total_t3_t0": 1.038,
+     "worst_frame_total": 1.056
+    },
+    {
+     "end": "11:26:08",
+     "network_gpu": 1.03,
+     "worst_frame_network": 1.056,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.442,
+      "output": 0.358
+     },
+     "frames": 300,
+     "total_t3_t0": 1.036,
+     "worst_frame_total": 1.061
+    },
+    {
+     "end": "11:26:11",
+     "network_gpu": 1.019,
+     "worst_frame_network": 1.046,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.218,
+      "network": 0.437,
+      "output": 0.355
+     },
+     "frames": 300,
+     "total_t3_t0": 1.026,
+     "worst_frame_total": 1.052
+    },
+    {
+     "end": "11:26:14",
+     "network_gpu": 1.018,
+     "worst_frame_network": 1.041,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.218,
+      "network": 0.436,
+      "output": 0.355
+     },
+     "frames": 300,
+     "total_t3_t0": 1.024,
+     "worst_frame_total": 1.048
+    },
+    {
+     "end": "11:26:16",
+     "network_gpu": 1.027,
+     "worst_frame_network": 1.048,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.441,
+      "output": 0.357
+     },
+     "frames": 300,
+     "total_t3_t0": 1.033,
+     "worst_frame_total": 1.055
+    },
+    {
+     "end": "11:26:19",
+     "network_gpu": 1.025,
+     "worst_frame_network": 1.042,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.219,
+      "network": 0.44,
+      "output": 0.357
+     },
+     "frames": 300,
+     "total_t3_t0": 1.031,
+     "worst_frame_total": 1.048
+    },
+    {
+     "end": "11:26:21",
+     "network_gpu": 1.021,
+     "worst_frame_network": 1.056,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.219,
+      "network": 0.438,
+      "output": 0.356
+     },
+     "frames": 300,
+     "total_t3_t0": 1.027,
+     "worst_frame_total": 1.061
+    },
+    {
+     "end": "11:26:24",
+     "network_gpu": 1.027,
+     "worst_frame_network": 1.045,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.441,
+      "output": 0.358
+     },
+     "frames": 300,
+     "total_t3_t0": 1.033,
+     "worst_frame_total": 1.052
+    },
+    {
+     "end": "11:26:27",
+     "network_gpu": 1.029,
+     "worst_frame_network": 1.041,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.442,
+      "output": 0.358
+     },
+     "frames": 300,
+     "total_t3_t0": 1.035,
+     "worst_frame_total": 1.048
+    },
+    {
+     "end": "11:26:29",
+     "network_gpu": 1.029,
+     "worst_frame_network": 1.052,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.442,
+      "output": 0.358
+     },
+     "frames": 300,
+     "total_t3_t0": 1.036,
+     "worst_frame_total": 1.059
+    },
+    {
+     "end": "11:26:32",
+     "network_gpu": 1.027,
+     "worst_frame_network": 1.045,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.441,
+      "output": 0.358
+     },
+     "frames": 300,
+     "total_t3_t0": 1.034,
+     "worst_frame_total": 1.052
+    },
+    {
+     "end": "11:26:34",
+     "network_gpu": 1.029,
+     "worst_frame_network": 1.05,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.442,
+      "output": 0.358
+     },
+     "frames": 300,
+     "total_t3_t0": 1.036,
+     "worst_frame_total": 1.057
+    },
+    {
+     "end": "11:26:37",
+     "network_gpu": 1.031,
+     "worst_frame_network": 1.05,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.443,
+      "output": 0.359
+     },
+     "frames": 300,
+     "total_t3_t0": 1.038,
+     "worst_frame_total": 1.057
+    },
+    {
+     "end": "11:26:39",
+     "network_gpu": 1.03,
+     "worst_frame_network": 1.051,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.443,
+      "output": 0.358
+     },
+     "frames": 300,
+     "total_t3_t0": 1.037,
+     "worst_frame_total": 1.058
+    },
+    {
+     "end": "11:26:42",
+     "network_gpu": 1.03,
+     "worst_frame_network": 1.047,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.443,
+      "output": 0.359
+     },
+     "frames": 300,
+     "total_t3_t0": 1.036,
+     "worst_frame_total": 1.053
+    },
+    {
+     "end": "11:26:44",
+     "network_gpu": 1.034,
+     "worst_frame_network": 1.055,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.221,
+      "network": 0.445,
+      "output": 0.36
+     },
+     "frames": 300,
+     "total_t3_t0": 1.04,
+     "worst_frame_total": 1.062
+    },
+    {
+     "end": "11:26:47",
+     "network_gpu": 1.034,
+     "worst_frame_network": 1.054,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.221,
+      "network": 0.445,
+      "output": 0.36
+     },
+     "frames": 300,
+     "total_t3_t0": 1.04,
+     "worst_frame_total": 1.061
+    },
+    {
+     "end": "11:26:50",
+     "network_gpu": 1.035,
+     "worst_frame_network": 1.049,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.221,
+      "network": 0.445,
+      "output": 0.36
+     },
+     "frames": 300,
+     "total_t3_t0": 1.041,
+     "worst_frame_total": 1.055
+    },
+    {
+     "end": "11:26:52",
+     "network_gpu": 1.033,
+     "worst_frame_network": 1.054,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.221,
+      "network": 0.444,
+      "output": 0.359
+     },
+     "frames": 300,
+     "total_t3_t0": 1.04,
+     "worst_frame_total": 1.061
+    },
+    {
+     "end": "11:26:55",
+     "network_gpu": 1.033,
+     "worst_frame_network": 1.047,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.221,
+      "network": 0.444,
+      "output": 0.359
+     },
+     "frames": 300,
+     "total_t3_t0": 1.04,
+     "worst_frame_total": 1.053
+    },
+    {
+     "end": "11:26:58",
+     "network_gpu": 1.034,
+     "worst_frame_network": 1.049,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.221,
+      "network": 0.445,
+      "output": 0.36
+     },
+     "frames": 300,
+     "total_t3_t0": 1.041,
+     "worst_frame_total": 1.056
+    },
+    {
+     "end": "11:27:00",
+     "network_gpu": 1.031,
+     "worst_frame_network": 1.048,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.443,
+      "output": 0.359
+     },
+     "frames": 300,
+     "total_t3_t0": 1.038,
+     "worst_frame_total": 1.055
+    },
+    {
+     "end": "11:27:03",
+     "network_gpu": 1.034,
+     "worst_frame_network": 1.051,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.221,
+      "network": 0.444,
+      "output": 0.36
+     },
+     "frames": 300,
+     "total_t3_t0": 1.04,
+     "worst_frame_total": 1.058
+    },
+    {
+     "end": "11:27:05",
+     "network_gpu": 1.034,
+     "worst_frame_network": 1.051,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.221,
+      "network": 0.444,
+      "output": 0.36
+     },
+     "frames": 300,
+     "total_t3_t0": 1.04,
+     "worst_frame_total": 1.057
+    },
+    {
+     "end": "11:27:08",
+     "network_gpu": 1.033,
+     "worst_frame_network": 1.049,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.221,
+      "network": 0.444,
+      "output": 0.359
+     },
+     "frames": 300,
+     "total_t3_t0": 1.039,
+     "worst_frame_total": 1.055
+    },
+    {
+     "end": "11:27:11",
+     "network_gpu": 1.034,
+     "worst_frame_network": 1.051,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.221,
+      "network": 0.445,
+      "output": 0.36
+     },
+     "frames": 300,
+     "total_t3_t0": 1.041,
+     "worst_frame_total": 1.058
+    },
+    {
+     "end": "11:27:13",
+     "network_gpu": 1.031,
+     "worst_frame_network": 1.05,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.221,
+      "network": 0.443,
+      "output": 0.358
+     },
+     "frames": 300,
+     "total_t3_t0": 1.038,
+     "worst_frame_total": 1.055
+    },
+    {
+     "end": "11:27:16",
+     "network_gpu": 1.019,
+     "worst_frame_network": 1.045,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.219,
+      "network": 0.437,
+      "output": 0.354
+     },
+     "frames": 300,
+     "total_t3_t0": 1.025,
+     "worst_frame_total": 1.051
+    },
+    {
+     "end": "11:27:19",
+     "network_gpu": 1.028,
+     "worst_frame_network": 1.049,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.442,
+      "output": 0.358
+     },
+     "frames": 300,
+     "total_t3_t0": 1.035,
+     "worst_frame_total": 1.055
+    },
+    {
+     "end": "11:27:21",
+     "network_gpu": 1.03,
+     "worst_frame_network": 1.049,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.443,
+      "output": 0.359
+     },
+     "frames": 300,
+     "total_t3_t0": 1.037,
+     "worst_frame_total": 1.056
+    },
+    {
+     "end": "11:27:24",
+     "network_gpu": 1.031,
+     "worst_frame_network": 1.053,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.443,
+      "output": 0.359
+     },
+     "frames": 300,
+     "total_t3_t0": 1.038,
+     "worst_frame_total": 1.06
+    },
+    {
+     "end": "11:27:26",
+     "network_gpu": 1.03,
+     "worst_frame_network": 1.07,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.443,
+      "output": 0.359
+     },
+     "frames": 300,
+     "total_t3_t0": 1.036,
+     "worst_frame_total": 1.076
+    },
+    {
+     "end": "11:27:29",
+     "network_gpu": 1.031,
+     "worst_frame_network": 1.05,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.443,
+      "output": 0.359
+     },
+     "frames": 300,
+     "total_t3_t0": 1.038,
+     "worst_frame_total": 1.056
+    },
+    {
+     "end": "11:27:31",
+     "network_gpu": 1.032,
+     "worst_frame_network": 1.052,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.444,
+      "output": 0.359
+     },
+     "frames": 300,
+     "total_t3_t0": 1.038,
+     "worst_frame_total": 1.059
+    },
+    {
+     "end": "11:27:34",
+     "network_gpu": 1.031,
+     "worst_frame_network": 1.056,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.443,
+      "output": 0.359
+     },
+     "frames": 300,
+     "total_t3_t0": 1.038,
+     "worst_frame_total": 1.061
+    },
+    {
+     "end": "11:27:36",
+     "network_gpu": 1.032,
+     "worst_frame_network": 1.049,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.444,
+      "output": 0.359
+     },
+     "frames": 300,
+     "total_t3_t0": 1.038,
+     "worst_frame_total": 1.056
+    },
+    {
+     "end": "11:27:39",
+     "network_gpu": 1.032,
+     "worst_frame_network": 1.053,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.221,
+      "network": 0.444,
+      "output": 0.359
+     },
+     "frames": 300,
+     "total_t3_t0": 1.039,
+     "worst_frame_total": 1.06
+    },
+    {
+     "end": "11:27:41",
+     "network_gpu": 1.033,
+     "worst_frame_network": 1.054,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.221,
+      "network": 0.444,
+      "output": 0.359
+     },
+     "frames": 300,
+     "total_t3_t0": 1.04,
+     "worst_frame_total": 1.061
+    },
+    {
+     "end": "11:27:44",
+     "network_gpu": 1.031,
+     "worst_frame_network": 1.048,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.443,
+      "output": 0.359
+     },
+     "frames": 300,
+     "total_t3_t0": 1.038,
+     "worst_frame_total": 1.055
+    },
+    {
+     "end": "11:27:46",
+     "network_gpu": 1.03,
+     "worst_frame_network": 1.053,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.443,
+      "output": 0.359
+     },
+     "frames": 300,
+     "total_t3_t0": 1.036,
+     "worst_frame_total": 1.06
+    },
+    {
+     "end": "11:27:49",
+     "network_gpu": 1.029,
+     "worst_frame_network": 1.047,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.442,
+      "output": 0.358
+     },
+     "frames": 300,
+     "total_t3_t0": 1.036,
+     "worst_frame_total": 1.053
+    },
+    {
+     "end": "11:27:51",
+     "network_gpu": 1.029,
+     "worst_frame_network": 1.046,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.443,
+      "output": 0.358
+     },
+     "frames": 300,
+     "total_t3_t0": 1.036,
+     "worst_frame_total": 1.053
+    },
+    {
+     "end": "11:27:54",
+     "network_gpu": 1.032,
+     "worst_frame_network": 1.05,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.444,
+      "output": 0.359
+     },
+     "frames": 300,
+     "total_t3_t0": 1.039,
+     "worst_frame_total": 1.057
+    },
+    {
+     "end": "11:27:56",
+     "network_gpu": 1.033,
+     "worst_frame_network": 1.053,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.221,
+      "network": 0.444,
+      "output": 0.36
+     },
+     "frames": 300,
+     "total_t3_t0": 1.04,
+     "worst_frame_total": 1.06
+    },
+    {
+     "end": "11:27:59",
+     "network_gpu": 1.032,
+     "worst_frame_network": 1.05,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.221,
+      "network": 0.444,
+      "output": 0.359
+     },
+     "frames": 300,
+     "total_t3_t0": 1.039,
+     "worst_frame_total": 1.056
+    },
+    {
+     "end": "11:28:01",
+     "network_gpu": 1.029,
+     "worst_frame_network": 1.054,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.442,
+      "output": 0.358
+     },
+     "frames": 300,
+     "total_t3_t0": 1.035,
+     "worst_frame_total": 1.061
+    },
+    {
+     "end": "11:28:04",
+     "network_gpu": 1.031,
+     "worst_frame_network": 1.05,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.443,
+      "output": 0.359
+     },
+     "frames": 300,
+     "total_t3_t0": 1.037,
+     "worst_frame_total": 1.057
+    },
+    {
+     "end": "11:28:06",
+     "network_gpu": 1.032,
+     "worst_frame_network": 1.05,
+     "parts": {
+      "exposure": 0.009,
+      "input": 0.22,
+      "network": 0.444,
+      "output": 0.359
+     },
+     "frames": 300,
+     "total_t3_t0": 1.038,
+     "worst_frame_total": 1.057
+    }
+   ],
+   "proof": "runtime options model=K; network kernels model=K"
+  },
+  "M": {
+   "model": "M",
+   "windows": 47,
+   "frames": 14100,
+   "network_total": {
+    "median_ms": 1.174,
+    "p95_ms": 1.177,
+    "min_ms": 1.167,
+    "max_ms": 1.177
+   },
+   "frame_span_t3_t0": {
+    "median_ms": 1.181,
+    "p95_ms": 1.183,
+    "min_ms": 1.173,
+    "max_ms": 1.183
+   },
+   "parts_median_ms": {
+    "enc0": 0.111,
+    "Swin": 0.585,
+    "dec0": 0.189,
+    "post": 0.289
+   },
+   "worst_frame_network_ms": 1.212,
+   "spread_pct": 0.85,
+   "window_list": [
+    {
+     "end": "11:31:22",
+     "network_gpu": 1.173,
+     "worst_frame_network": 1.197,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.584,
+      "dec0": 0.189,
+      "post": 0.289
+     },
+     "frames": 300,
+     "total_t3_t0": 1.179,
+     "worst_frame_total": 1.204
+    },
+    {
+     "end": "11:31:24",
+     "network_gpu": 1.174,
+     "worst_frame_network": 1.199,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.585,
+      "dec0": 0.189,
+      "post": 0.289
+     },
+     "frames": 300,
+     "total_t3_t0": 1.18,
+     "worst_frame_total": 1.205
+    },
+    {
+     "end": "11:31:27",
+     "network_gpu": 1.176,
+     "worst_frame_network": 1.2,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.586,
+      "dec0": 0.189,
+      "post": 0.29
+     },
+     "frames": 300,
+     "total_t3_t0": 1.182,
+     "worst_frame_total": 1.207
+    },
+    {
+     "end": "11:31:30",
+     "network_gpu": 1.175,
+     "worst_frame_network": 1.204,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.586,
+      "dec0": 0.189,
+      "post": 0.29
+     },
+     "frames": 300,
+     "total_t3_t0": 1.181,
+     "worst_frame_total": 1.21
+    },
+    {
+     "end": "11:31:32",
+     "network_gpu": 1.175,
+     "worst_frame_network": 1.201,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.586,
+      "dec0": 0.189,
+      "post": 0.289
+     },
+     "frames": 300,
+     "total_t3_t0": 1.181,
+     "worst_frame_total": 1.207
+    },
+    {
+     "end": "11:31:35",
+     "network_gpu": 1.174,
+     "worst_frame_network": 1.203,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.585,
+      "dec0": 0.189,
+      "post": 0.289
+     },
+     "frames": 300,
+     "total_t3_t0": 1.18,
+     "worst_frame_total": 1.209
+    },
+    {
+     "end": "11:31:37",
+     "network_gpu": 1.175,
+     "worst_frame_network": 1.2,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.586,
+      "dec0": 0.189,
+      "post": 0.29
+     },
+     "frames": 300,
+     "total_t3_t0": 1.182,
+     "worst_frame_total": 1.207
+    },
+    {
+     "end": "11:31:40",
+     "network_gpu": 1.174,
+     "worst_frame_network": 1.212,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.585,
+      "dec0": 0.189,
+      "post": 0.29
+     },
+     "frames": 300,
+     "total_t3_t0": 1.18,
+     "worst_frame_total": 1.217
+    },
+    {
+     "end": "11:31:42",
+     "network_gpu": 1.167,
+     "worst_frame_network": 1.191,
+     "parts": {
+      "enc0": 0.11,
+      "Swin": 0.581,
+      "dec0": 0.188,
+      "post": 0.288
+     },
+     "frames": 300,
+     "total_t3_t0": 1.173,
+     "worst_frame_total": 1.198
+    },
+    {
+     "end": "11:31:45",
+     "network_gpu": 1.169,
+     "worst_frame_network": 1.195,
+     "parts": {
+      "enc0": 0.11,
+      "Swin": 0.582,
+      "dec0": 0.188,
+      "post": 0.288
+     },
+     "frames": 300,
+     "total_t3_t0": 1.175,
+     "worst_frame_total": 1.201
+    },
+    {
+     "end": "11:31:48",
+     "network_gpu": 1.172,
+     "worst_frame_network": 1.2,
+     "parts": {
+      "enc0": 0.11,
+      "Swin": 0.584,
+      "dec0": 0.189,
+      "post": 0.288
+     },
+     "frames": 300,
+     "total_t3_t0": 1.178,
+     "worst_frame_total": 1.206
+    },
+    {
+     "end": "11:31:50",
+     "network_gpu": 1.173,
+     "worst_frame_network": 1.202,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.585,
+      "dec0": 0.189,
+      "post": 0.289
+     },
+     "frames": 300,
+     "total_t3_t0": 1.18,
+     "worst_frame_total": 1.209
+    },
+    {
+     "end": "11:31:53",
+     "network_gpu": 1.173,
+     "worst_frame_network": 1.201,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.584,
+      "dec0": 0.189,
+      "post": 0.289
+     },
+     "frames": 300,
+     "total_t3_t0": 1.179,
+     "worst_frame_total": 1.207
+    },
+    {
+     "end": "11:31:55",
+     "network_gpu": 1.172,
+     "worst_frame_network": 1.2,
+     "parts": {
+      "enc0": 0.11,
+      "Swin": 0.584,
+      "dec0": 0.189,
+      "post": 0.289
+     },
+     "frames": 300,
+     "total_t3_t0": 1.178,
+     "worst_frame_total": 1.206
+    },
+    {
+     "end": "11:31:58",
+     "network_gpu": 1.173,
+     "worst_frame_network": 1.195,
+     "parts": {
+      "enc0": 0.11,
+      "Swin": 0.585,
+      "dec0": 0.189,
+      "post": 0.289
+     },
+     "frames": 300,
+     "total_t3_t0": 1.179,
+     "worst_frame_total": 1.202
+    },
+    {
+     "end": "11:32:01",
+     "network_gpu": 1.171,
+     "worst_frame_network": 1.198,
+     "parts": {
+      "enc0": 0.11,
+      "Swin": 0.585,
+      "dec0": 0.188,
+      "post": 0.288
+     },
+     "frames": 300,
+     "total_t3_t0": 1.178,
+     "worst_frame_total": 1.205
+    },
+    {
+     "end": "11:32:03",
+     "network_gpu": 1.174,
+     "worst_frame_network": 1.194,
+     "parts": {
+      "enc0": 0.11,
+      "Swin": 0.585,
+      "dec0": 0.189,
+      "post": 0.289
+     },
+     "frames": 300,
+     "total_t3_t0": 1.18,
+     "worst_frame_total": 1.201
+    },
+    {
+     "end": "11:32:06",
+     "network_gpu": 1.174,
+     "worst_frame_network": 1.199,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.585,
+      "dec0": 0.189,
+      "post": 0.29
+     },
+     "frames": 300,
+     "total_t3_t0": 1.18,
+     "worst_frame_total": 1.206
+    },
+    {
+     "end": "11:32:08",
+     "network_gpu": 1.174,
+     "worst_frame_network": 1.203,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.585,
+      "dec0": 0.189,
+      "post": 0.289
+     },
+     "frames": 300,
+     "total_t3_t0": 1.18,
+     "worst_frame_total": 1.209
+    },
+    {
+     "end": "11:32:11",
+     "network_gpu": 1.175,
+     "worst_frame_network": 1.2,
+     "parts": {
+      "enc0": 0.11,
+      "Swin": 0.586,
+      "dec0": 0.189,
+      "post": 0.29
+     },
+     "frames": 300,
+     "total_t3_t0": 1.181,
+     "worst_frame_total": 1.207
+    },
+    {
+     "end": "11:32:14",
+     "network_gpu": 1.175,
+     "worst_frame_network": 1.205,
+     "parts": {
+      "enc0": 0.11,
+      "Swin": 0.586,
+      "dec0": 0.189,
+      "post": 0.29
+     },
+     "frames": 300,
+     "total_t3_t0": 1.181,
+     "worst_frame_total": 1.209
+    },
+    {
+     "end": "11:32:16",
+     "network_gpu": 1.174,
+     "worst_frame_network": 1.2,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.586,
+      "dec0": 0.189,
+      "post": 0.289
+     },
+     "frames": 300,
+     "total_t3_t0": 1.181,
+     "worst_frame_total": 1.207
+    },
+    {
+     "end": "11:32:19",
+     "network_gpu": 1.175,
+     "worst_frame_network": 1.2,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.586,
+      "dec0": 0.189,
+      "post": 0.29
+     },
+     "frames": 300,
+     "total_t3_t0": 1.181,
+     "worst_frame_total": 1.207
+    },
+    {
+     "end": "11:32:21",
+     "network_gpu": 1.175,
+     "worst_frame_network": 1.204,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.585,
+      "dec0": 0.189,
+      "post": 0.29
+     },
+     "frames": 300,
+     "total_t3_t0": 1.181,
+     "worst_frame_total": 1.209
+    },
+    {
+     "end": "11:32:24",
+     "network_gpu": 1.174,
+     "worst_frame_network": 1.207,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.585,
+      "dec0": 0.189,
+      "post": 0.289
+     },
+     "frames": 300,
+     "total_t3_t0": 1.181,
+     "worst_frame_total": 1.214
+    },
+    {
+     "end": "11:32:27",
+     "network_gpu": 1.176,
+     "worst_frame_network": 1.21,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.586,
+      "dec0": 0.189,
+      "post": 0.29
+     },
+     "frames": 300,
+     "total_t3_t0": 1.182,
+     "worst_frame_total": 1.217
+    },
+    {
+     "end": "11:32:29",
+     "network_gpu": 1.176,
+     "worst_frame_network": 1.204,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.586,
+      "dec0": 0.189,
+      "post": 0.289
+     },
+     "frames": 300,
+     "total_t3_t0": 1.182,
+     "worst_frame_total": 1.21
+    },
+    {
+     "end": "11:32:32",
+     "network_gpu": 1.176,
+     "worst_frame_network": 1.198,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.586,
+      "dec0": 0.189,
+      "post": 0.29
+     },
+     "frames": 300,
+     "total_t3_t0": 1.182,
+     "worst_frame_total": 1.204
+    },
+    {
+     "end": "11:32:34",
+     "network_gpu": 1.176,
+     "worst_frame_network": 1.201,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.586,
+      "dec0": 0.189,
+      "post": 0.29
+     },
+     "frames": 300,
+     "total_t3_t0": 1.183,
+     "worst_frame_total": 1.207
+    },
+    {
+     "end": "11:32:37",
+     "network_gpu": 1.176,
+     "worst_frame_network": 1.206,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.586,
+      "dec0": 0.189,
+      "post": 0.29
+     },
+     "frames": 300,
+     "total_t3_t0": 1.183,
+     "worst_frame_total": 1.212
+    },
+    {
+     "end": "11:32:39",
+     "network_gpu": 1.177,
+     "worst_frame_network": 1.202,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.586,
+      "dec0": 0.189,
+      "post": 0.29
+     },
+     "frames": 300,
+     "total_t3_t0": 1.183,
+     "worst_frame_total": 1.208
+    },
+    {
+     "end": "11:32:42",
+     "network_gpu": 1.177,
+     "worst_frame_network": 1.201,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.587,
+      "dec0": 0.189,
+      "post": 0.29
+     },
+     "frames": 300,
+     "total_t3_t0": 1.183,
+     "worst_frame_total": 1.208
+    },
+    {
+     "end": "11:32:45",
+     "network_gpu": 1.17,
+     "worst_frame_network": 1.203,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.583,
+      "dec0": 0.188,
+      "post": 0.289
+     },
+     "frames": 300,
+     "total_t3_t0": 1.176,
+     "worst_frame_total": 1.209
+    },
+    {
+     "end": "11:32:47",
+     "network_gpu": 1.17,
+     "worst_frame_network": 1.197,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.582,
+      "dec0": 0.188,
+      "post": 0.289
+     },
+     "frames": 300,
+     "total_t3_t0": 1.176,
+     "worst_frame_total": 1.204
+    },
+    {
+     "end": "11:32:50",
+     "network_gpu": 1.173,
+     "worst_frame_network": 1.205,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.585,
+      "dec0": 0.189,
+      "post": 0.289
+     },
+     "frames": 300,
+     "total_t3_t0": 1.179,
+     "worst_frame_total": 1.212
+    },
+    {
+     "end": "11:32:53",
+     "network_gpu": 1.174,
+     "worst_frame_network": 1.203,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.585,
+      "dec0": 0.189,
+      "post": 0.29
+     },
+     "frames": 300,
+     "total_t3_t0": 1.18,
+     "worst_frame_total": 1.21
+    },
+    {
+     "end": "11:32:55",
+     "network_gpu": 1.173,
+     "worst_frame_network": 1.201,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.585,
+      "dec0": 0.189,
+      "post": 0.289
+     },
+     "frames": 300,
+     "total_t3_t0": 1.18,
+     "worst_frame_total": 1.214
+    },
+    {
+     "end": "11:32:58",
+     "network_gpu": 1.174,
+     "worst_frame_network": 1.205,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.585,
+      "dec0": 0.189,
+      "post": 0.289
+     },
+     "frames": 300,
+     "total_t3_t0": 1.18,
+     "worst_frame_total": 1.212
+    },
+    {
+     "end": "11:33:00",
+     "network_gpu": 1.175,
+     "worst_frame_network": 1.199,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.585,
+      "dec0": 0.189,
+      "post": 0.29
+     },
+     "frames": 300,
+     "total_t3_t0": 1.181,
+     "worst_frame_total": 1.205
+    },
+    {
+     "end": "11:33:03",
+     "network_gpu": 1.174,
+     "worst_frame_network": 1.198,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.585,
+      "dec0": 0.189,
+      "post": 0.289
+     },
+     "frames": 300,
+     "total_t3_t0": 1.18,
+     "worst_frame_total": 1.204
+    },
+    {
+     "end": "11:33:05",
+     "network_gpu": 1.175,
+     "worst_frame_network": 1.207,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.585,
+      "dec0": 0.189,
+      "post": 0.29
+     },
+     "frames": 300,
+     "total_t3_t0": 1.182,
+     "worst_frame_total": 1.212
+    },
+    {
+     "end": "11:33:08",
+     "network_gpu": 1.175,
+     "worst_frame_network": 1.201,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.585,
+      "dec0": 0.189,
+      "post": 0.29
+     },
+     "frames": 300,
+     "total_t3_t0": 1.181,
+     "worst_frame_total": 1.208
+    },
+    {
+     "end": "11:33:11",
+     "network_gpu": 1.174,
+     "worst_frame_network": 1.202,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.585,
+      "dec0": 0.189,
+      "post": 0.288
+     },
+     "frames": 300,
+     "total_t3_t0": 1.18,
+     "worst_frame_total": 1.208
+    },
+    {
+     "end": "11:33:13",
+     "network_gpu": 1.177,
+     "worst_frame_network": 1.201,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.586,
+      "dec0": 0.189,
+      "post": 0.29
+     },
+     "frames": 300,
+     "total_t3_t0": 1.183,
+     "worst_frame_total": 1.208
+    },
+    {
+     "end": "11:33:16",
+     "network_gpu": 1.176,
+     "worst_frame_network": 1.205,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.586,
+      "dec0": 0.189,
+      "post": 0.29
+     },
+     "frames": 300,
+     "total_t3_t0": 1.183,
+     "worst_frame_total": 1.212
+    },
+    {
+     "end": "11:33:18",
+     "network_gpu": 1.175,
+     "worst_frame_network": 1.209,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.586,
+      "dec0": 0.189,
+      "post": 0.29
+     },
+     "frames": 300,
+     "total_t3_t0": 1.182,
+     "worst_frame_total": 1.216
+    },
+    {
+     "end": "11:33:21",
+     "network_gpu": 1.177,
+     "worst_frame_network": 1.201,
+     "parts": {
+      "enc0": 0.111,
+      "Swin": 0.586,
+      "dec0": 0.189,
+      "post": 0.291
+     },
+     "frames": 300,
+     "total_t3_t0": 1.183,
+     "worst_frame_total": 1.208
+    }
+   ],
+   "proof": "post_last=post_tf_f32_p12_diet_vsit_direct (Model M's post)"
+  }
+ },
+ "note": "Model M here (1.174 ms) equals the Model M figure of the 2026-11-14 record (1.174 ms) in the same scene."
+}

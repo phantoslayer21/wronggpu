@@ -84,6 +84,8 @@ Hook& H() {
         p.logBytes = [] { return wronggpu::Log::Get().Bytes(); };
         p.resourceInfo = &D3D12ResourceInfo;
         p.deviceFromCommandList = &DeviceFromCommandList;
+        p.retainDevice = &RetainDevice;
+        p.releaseDevice = &ReleaseDevice;
         AddSplitServices(p, config);
         // How many upscaler dispatches WrongGPU's ffx_fsr3upscaler_x64.dll has seen on this thread (0 if not ours).
         p.upscalerSeenOnThread = [] {

@@ -284,6 +284,7 @@ Bundle CollectLogs(Context& ctx, const wstring& dirIn, const wstring& outZip, co
     take(RecordPath(dir), L"install\\install.record");
     take(Join(StateDir(dir), L"setup.log"), L"install\\setup.log");
     take(Join(dir, kRrSettings), L"ray-reconstruction\\wronggpu.ini");  // the RR plugin's settings file (rr.h)
+    take(Join(StateDir(dir), L"settings.ini"), L"install\\settings.ini");  // #219: the settings chosen since (over the defaults above)
     take(Join(RrDataDir(), L"model-source.txt"), L"ray-reconstruction\\model-source.txt");
     const bool reportK = WRONGGPU_PRESET_K && installed && IEq(FullPath(m.model), FullPath(Join(Join(ModelBaseDir(), L"K"), L"model.wgcm")));
     const wstring reportModelDir = reportK ? Join(ModelBaseDir(), L"K") : ModelBaseDir();

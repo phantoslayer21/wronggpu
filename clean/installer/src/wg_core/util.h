@@ -149,7 +149,27 @@ std::vector<wstring> RemoveOwned(const wstring& root, const std::function<bool(c
 void RemoveTree(const wstring& dir, const wstring& keepFile = L"");
 std::vector<wstring> ListFiles(const wstring& dir, const wchar_t* pattern);
 std::vector<wstring> ListDirs(const wstring& dir);
+// Walks root (asked of LibraryAccess first: a test build never walks a folder outside the test run's own).
 std::vector<wstring> FindFilesNamed(const wstring& root, const wchar_t* name, size_t budget = 60000, int maxDepth = 10);
+// Store access (#243): every read of a store's metadata (Steam's library list and app manifests, Epic's manifests, the GOG
+// registry, Steam's art cache) and every walk of a library game's folder asks here first.
+// - LibraryAccess(path): true = may be read. In a WRONGGPU_TESTING build with WRONGGPU_TEST_LIBRARIES set, only paths below
+//   the folder that holds it (the test run's own folder; \\?\ and UNC forms compared as such); anything else is refused.
+// - LibraryRegistryAccess(what): a store's registry keys; refused in such a test build (the PC's own stores).
+// - Such a test build checks what a path really is: its final form (GetFinalPathNameByHandle) must be its own long name (no
+//   junction or link above it), it must not be a reparse point, a file must have no second name (hard link), and the test
+//   folder itself must resolve to itself; anything else is refused.
+// - Test builds append "library access: <path>" or "library access refused: <path> (<why>)" to WRONGGPU_TEST_ACCESS_LOG
+//   before the read (the tests' guard parses it). A new log starts with "run <WRONGGPU_TEST_RUN_ID>". With the tests' list
+//   set, a read whose line cannot be written is refused (fail closed). Nothing of this in other builds.
+// - TestAccessStart(program): a test build with the tests' list writes "process <pid> <program> start" (every program run
+//   leaves a line, so the guard can tell a run that logged nothing). LibraryAccessCount counts the questions (every build).
+// - TestLibraries(folder): such a test build (WRONGGPU_TEST_LIBRARIES set, its value in folder); false in other builds.
+bool LibraryAccess(const wstring& path);
+bool LibraryRegistryAccess(const wchar_t* what);
+void TestAccessStart(const wchar_t* program);
+size_t LibraryAccessCount();
+bool TestLibraries(wstring* folder = nullptr);
 wstring HexW(const wgc::Digest& d);
 wstring Sha256Bytes(const void* data, size_t size);
 wstring Sha256File(const wstring& path);

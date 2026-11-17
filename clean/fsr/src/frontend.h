@@ -16,6 +16,7 @@
 #include "amd_compare.h"
 #include "async_create.h"
 #include "config.h"
+#include "model_choice_record.h"
 #include "status.h"
 #include "ffx_headers.h"
 #include "param_map.h"
@@ -87,11 +88,24 @@ struct Platform {
     std::function<bool(uint32_t ms, std::function<uint32_t()> fn)> timer;
     // The D3D12 device was removed (device lost): nothing of it is parked or taken over. May be empty.
     std::function<bool(void* device)> deviceLost;
+    // The create worker's hold on the game's D3D12 device (async_create.h): retainDevice (AddRef) runs on the game's thread
+    // before the worker starts, releaseDevice (Release) on the worker when its create is over, also after a timeout.
+    // Empty: no hold is taken (tests without a COM device).
+    std::function<void(void* device)> retainDevice;
+    std::function<void(void* device)> releaseDevice;
     // OptiScaler ASI plugin bridge (clean/fsr/asi): when WrongGPU.asi is loaded and has hooked OptiScaler's menu,
     // WrongGPU is its own entry in the host's MAIN upscaler list, not a version in the FFX sub-box. Returns true when
-    // hooked (then the version query lists AMD only and this plugin, not an FFX override, chooses the model) and sets
-    // *model to 0 (AMD FSR), 'M' or 'K'. Null or returns false: no plugin / unknown host build; hosted mode as before.
+    // hooked and sets *model to 0 (AMD FSR chosen there) or a WrongGPU model (then the model choice record decides which,
+    // choiceRecord below). Null or returns false: no plugin / unknown host build; hosted mode as before.
     std::function<bool(char* model)> asiPlugin;
+    // Tells the plugin which model the context runs (0 AMD, 'M', 'K', 'L'), so its menu marks that entry. May be empty.
+    std::function<void(char model)> asiShowModel;
+    // The game's model choice record (model_choice_record.h: wronggpu-setup\model-choice.ini next to wronggpu.ini), read
+    // and written with real files. Empty: no record (the launcher's model item decides, as before).
+    std::filesystem::path choiceRecord;
+    // wronggpu.ini's text as it is on disk now (the record's upgrade migration reads its model item while it holds the
+    // game's state lock). Empty: the model item of the configuration read at start.
+    std::function<std::string()> readWronggpuIni;
     // Registry options and the menu's choices (shared settings block). Empty members: defaults, nothing written.
     MenuSettings menu;
 };
@@ -156,6 +170,13 @@ public:
     size_t OwnContextCount();  // for tests
     bool HasParked();          // for tests
 
+    // The host tells the front end that the PLAYER selected the listed version `versionId` in its upscaler list (the
+    // WrongGPU edition of OptiScaler calls the exported WrongGpuHostSelectedV1, before it would recreate the upscaler).
+    // One of WrongGPU's SR model entries is a model choice: written to the model choice record (source=ffx). Returns
+    // WG_HOST_SELECTED_* (include/wronggpu_host_event.h): 1 this model runs from now on (recreate), 0 nothing changed,
+    // negative not saved (nothing changes, the host says "not saved, try again").
+    int32_t HostSelected(uint64_t versionId);
+
     struct UpscaleContext;
 
 private:
@@ -203,12 +224,25 @@ private:
     // The configured SR model (sr_model: block > environment > ini) for a context no entry chose; false: not set
     // anywhere (the model then comes from runtime_options / the runtime's default, as before the registry).
     bool ConfiguredModel(int32_t* model, std::string* described);
+    // The model the launcher's wronggpu.ini names (the last model item of runtime_options: 'M', 'K', 'L'), else 0.
+    char LauncherModel() const;
+    // The WrongGPU model a create runs: the model choice record's (model_choice_record.h; a game without one gets one from
+    // wronggpu.ini's model item, read under the game's state lock, else Model M: LoadOrMigrateRecord). When the record
+    // cannot be used (no state folder or one that cannot be checked, unreadable, corrupt, its lock not taken in time): the
+    // last record this session read or wrote (lastChoice_), else wronggpu.ini's model item, else Model M. NEVER the host's
+    // stored entry, NEVER the plugin's saved entry. *why: which choice decided, for the log.
+    char ChooseModel(const std::string& tag, std::string* why);
+    // wronggpu.ini's model item as it is on disk now (readWronggpuIni), else as read at start ('M', 'K', 'L' or 0).
+    char WronggpuIniModel() const;
+    // `line` logged once per session (after `tag`).
+    void LogOnce(const std::string& tag, const std::string& line);
     // AMD's DLL behind a forwarded context (the one that created it), else AMD's original.
     const OriginalApi* ApiOf(void* context);
     // `u` runs on AMD while its upscaler's create runs (u.pending): takes the upscaler over when the create has finished.
     void CheckPending(UpscaleContext& u, uint64_t call);
     // After a successful create of `u`'s upscaler: installs the D3D12 hooks its split service needs
     // (Platform::activateServices). False: they could not be installed (nothing of them is left patched).
+    ScopedRelease HoldDevice(void* device);  // async_create.h: the create worker's hold on the game's device (RAII)
     bool ActivateSplit(UpscaleContext& u, const WgUpscalerBackend* backend, const std::string& tag);
     // The model folder for `u`'s options (Platform::modelPlaces): appends ";model_dir=<dir>" when the model is found
     // in a place before the runtime's own default; nothing when runtime_options / WG_RUNTIME_OPTIONS name model_dir.
@@ -253,6 +287,7 @@ private:
     struct RememberedFailure {
         std::string reason;     // the first failure's reason (logged once in full)
         uint64_t repeats = 0;   // creates refused since, without a new attempt
+        bool hardIncompat = false;  // WG_ERROR_UNSUPPORTED (a hard incompatibility): a repeat hands over like the first create
     };
     std::map<std::string, RememberedFailure> failedCreates_;  // custom slot: FailureKey -> the failure (mutex_)
     // Custom slot, WG_ERROR_INPUT (0.6.0 follow-up, bug hunt A): remembered for the session only after kInputRefusedRun refusals
@@ -263,6 +298,9 @@ private:
     uint32_t inputRefusedRun_ = 0;                 // refusals in a row with that key (mutex_)
     std::atomic<bool> inputRefusedAny_{false};     // inputRefusedRun_ > 0 (the taken-frame path's cheap check)
     std::map<std::string, bool> modelLogged_;      // ApplyModelDir: each distinct choice logged once (mutex_)
+    std::mutex choiceMutex_;                       // ChooseModel / HostSelected: lastChoice_
+    char lastChoice_ = 0;                          // the model of the last record read or written this session
+    std::atomic<char> runningModel_{0};            // the model the last created context runs (0: none / AMD's upscaler)
     std::atomic<uint64_t> reentered_{0};           // calls refused because they re-entered this front end on one thread
     std::mutex parkMutex_;                           // guards the three below; held while a parked context is destroyed
     UpscaleContext* parked_ = nullptr;

@@ -12,6 +12,8 @@
 #include "rr.h"
 #include "settings.h"
 
+#include <algorithm>
+
 namespace wg {
 
 // The install routes (setup_route.h of the installer). Two routes. Hosted: the player's OptiScaler next to the game
@@ -401,19 +403,20 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     // 2. An older WrongGPU install with a record, then an earlier install of this version: back to the original files.
     if (!target.conflicts.legacyRecordDir.empty()) for (auto& w : LegacyRestore(ctx, target.conflicts.legacyRecordDir, ui)) warnings.push_back(w);
     RemoveEarlierDirect(ctx, target, ui, warnings);
-    // Once the earlier installation is removed, a failure leaves the game's original files and no install: what is
-    // left of its state folder (the uninstaller, which has no record any more) goes too. rc6 L4: never the player's settings
-    // there (profile.ini, previous\ for Roll back, rr-config\): an update or repair that fails keeps them for the next try,
-    // as does a failed install where they were before it (a profile the launcher saved first).
+    // Once the earlier installation is removed, a failure leaves the game's original files and no install. The state folder
+    // then loses only what THIS run made (the run journal: written down before each create); everything else there (the
+    // player's settings, profile.ini, previous\ for Roll back, rr-config\, a file the player keeps there, what an earlier
+    // uninstall kept and listed) stays and is listed. Never a removal of the whole folder.
     const bool keepSettings = StateHasSettings(dir) || IsFile(RecordPath(dir));
+    RunJournal journal;
     struct EarlierGone {
-        const wstring& dir; Ui& ui; bool armed = false;
+        Context& ctx; const wstring& dir; Ui& ui; RunJournal& journal; bool armed = false;
         ~EarlierGone() {
             if (!armed || IsFile(RecordPath(dir))) return;
-            RemoveStateKeepingSettings(dir);
+            if (!journal.done) RollbackCreated(ctx, StateDir(dir), journal);
             ui.log(L"The earlier installation was removed and the game's original files are back; the new version was not installed (your settings were kept).");
         }
-    } earlierGone{dir, ui};
+    } earlierGone{ctx, dir, ui, journal};
     std::map<wstring, wstring> keptByRestore;  // recorded files the restore left in place (changed since the install), with its warning
     string carriedIni;         // the earlier install's wronggpu.ini when it was WrongGPU's: the new one starts from it
     bool haveCarried = false;
@@ -458,7 +461,9 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
         return opti && IEq(f.rel, L"amd_fidelityfx_dx12.dll") ? wstring(slot ? kOptiSlotFrontEnd : kOptiFrontEnd) : opti && IEq(f.rel, kAsiPlugin) ? pluginRel : wstring(f.rel);
     };
     // OptiScaler's files (OptiScaler.dll as the proxy, OptiScaler.ini set up for WrongGPU from a temporary copy)
-    struct OptiFile { wstring rel, src; };
+    // seed: a file the install creates only where nothing is (the plugin's wronggpu-asi.ini, WrongGPU\wronggpu.ini): one that
+    // appears before it is written is the player's (kept as it is, not recorded); kept: so found, not written
+    struct OptiFile { wstring rel, src; bool seed = false, kept = false; };
     std::vector<OptiFile> optiFiles;
     wstring proxy, proxyReason;
     CoexistReport co;
@@ -475,8 +480,14 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     string selectedOptions, selectedSection;
     IniGetFrontEnd(selectedIni, "runtime_options", &selectedOptions, &selectedSection);
 #if WRONGGPU_PRESET_K
-    selectedOptions += selectedOptions.empty() ? "" : ";";
-    selectedOptions += ctx.presetK ? "model=K" : "model=M";
+    {  // #219: the earlier model items out first, so a repair or update writes the same wronggpu.ini again (the launcher no
+       // longer rewrites it after the install)
+        std::vector<std::pair<string, string>> kept;
+        for (auto& kv : SplitOptions(selectedOptions))
+            if (_stricmp(kv.first.c_str(), "model") != 0) kept.push_back(kv);
+        kept.push_back({"model", ctx.presetK ? "K" : "M"});
+        selectedOptions = JoinOptions(kept);
+    }
 #else
     if (target.presetK) {  // the launcher asked first (PresetKText); the command line says it in the log
         const wstring w = L"Preset K isn't in this version of WrongGPU: " + target.name + L" now starts on Model M.";
@@ -508,6 +519,21 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     const wstring selectedIniSrc = Join(OptiTempDir(ctx), L"WrongGPU.selected.ini");
     WriteFileAtomic(selectedIniSrc, selectedIni.data(), selectedIni.size());
     optiFiles.push_back({L"wronggpu.ini", selectedIniSrc});
+#if WRONGGPU_PRESET_K
+    if (opti && !slot) {  // the menu plugin's starting entry (optiscaler.h AsiSelectionText), one of the install's recorded files
+        // (#219: a wronggpu-asi.ini still there after the restore is not WrongGPU's, the plugin's menu or the player changed it:
+        // left as it is and not recorded, so an uninstall keeps it and lists it)
+        if (Exists(Join(dir, L"wronggpu-asi.ini"))) {
+            LogLine(ctx, L"OptiScaler plugin: wronggpu-asi.ini kept as it is (its entry last selected; not WrongGPU's file)");
+        } else {
+            const string asiText = AsiSelectionText(ctx.presetK);
+            const wstring asiSrc = Join(OptiTempDir(ctx), L"wronggpu-asi.ini");
+            WriteFileAtomic(asiSrc, asiText.data(), asiText.size());
+            optiFiles.push_back({L"wronggpu-asi.ini", asiSrc, true});
+            LogLine(ctx, wstring(L"OptiScaler plugin: starts on WrongGPU (Model ") + (ctx.presetK ? L"K" : L"M") + L") (wronggpu-asi.ini)");
+        }
+    }
+#endif
     // Where the game's Ray Reconstruction needs the host to restore the game's command-list state (plugin interface 5,
     // gamerules.h), OptiScaler must be WrongGPU's edition of OptiScaler (optiedition.h: the launcher downloads it; never
     // shipped with WrongGPU). With another OptiScaler (the player's own download, used when the edition couldn't be
@@ -666,12 +692,18 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
         const wstring rsrc = Join(tmp, kRrIni);
         WriteFileAtomic(rsrc, rini.data(), rini.size());
         optiFiles.push_back({kRrIni, rsrc});
-        Profile rp = DefaultProfile();
-        if (!LoadProfile(ProfilePath(dir), rp)) rp = DefaultProfile();
-        const string sini = RenderRrSettings(rp, rrData, "");
-        const wstring ssrc = Join(tmp, L"wronggpu.ini");
-        WriteFileAtomic(ssrc, sini.data(), sini.size());
-        optiFiles.push_back({kRrSettings, ssrc});
+        // #219: WrongGPU\wronggpu.ini holds the install's defaults (the player's choices are in the state folder, which decides
+        // over it), so a repair or update writes the same file again. One still there after the restore is not WrongGPU's
+        // (the player's edit, an older plugin's save: its mode was copied into the state folder, MigrateRrState): left as it is
+        // and not recorded, so an uninstall keeps it and lists it
+        if (Exists(Join(dir, kRrSettings))) {
+            LogLine(ctx, wstring(kRrSettings) + L" kept as it is (not WrongGPU's file; the saved settings decide over it)");
+        } else {
+            const string sini = RenderRrSettings(DefaultProfile(), rrData, "");
+            const wstring ssrc = Join(tmp, L"wronggpu.ini");
+            WriteFileAtomic(ssrc, sini.data(), sini.size());
+            optiFiles.push_back({kRrSettings, ssrc, true});
+        }
         LogLine(ctx, L"Ray Reconstruction: " + Join(Parent(pluginRel), kRrPluginName) + L", " + kRrRuntime + L" (the RR runtime is part of it), " + kRrIni + L" (data " + RrDataFile() +
                          (rrData ? L")" : L", not converted yet: RR off)") + L", " + kRrSettings);
     }
@@ -684,6 +716,9 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     // the earlier install moved aside or replaced with the player's OK (its disable entries, its copies over a file that
     // was there): those go aside again below on that OK.)
     Record m; m.version = ctx.data->version; m.game = dir; m.exe = target.exe;
+    // this install's id: the earlier install's (a repair or update keeps it, so WrongGPU's stamped state files stay its own), a
+    // new one otherwise
+    m.installId = target.installed && !target.record.installId.empty() ? target.record.installId : NewInstallId();
     m.status = target.validated ? L"validated" : L"experimental"; m.regkey = ctx.perGameEntry ? RegKeyFor(dir) : L""; m.model = ModelFile(ctx); m.modelM = modelM.outcome;
     LogLine(ctx, L"target " + target.exe + L" | install folder " + dir + L" | status " + m.status);
     // Folders the payload needs that do not exist yet (shallow first).
@@ -710,10 +745,18 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
         if (Exists(tp)) { e.existed = true; e.orig = Sha256File(tp); if (e.orig.empty()) Fail(L"Cannot read the existing file " + tp); }
         m.e.push_back(e);
     }
+    RestoreStep("seed-planned");  // (tests: a seed file appears here, after its check and before the record)
     for (auto& of : optiFiles) {
         Entry e; e.action = L"copy"; e.rel = of.rel; e.inst = Sha256File(of.src);
         if (e.inst.empty()) Fail(L"Cannot read OptiScaler's " + of.rel);
         wstring tp = Target(dir, e.rel);
+        if (of.seed && Exists(tp)) {  // appeared since the check: the player's; not recorded, never written
+            of.kept = true;
+            const wstring w = L"Left in place (appeared during the install, not WrongGPU's): " + of.rel;
+            LogLine(ctx, w);
+            warnings.push_back(w);
+            continue;
+        }
         if (Exists(tp)) { e.existed = true; e.orig = Sha256File(tp); if (e.orig.empty()) Fail(L"Cannot read the existing file " + tp); }
         m.e.push_back(e);
     }
@@ -801,19 +844,21 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     ui.step(done, total, L"Backing up existing files");
 
     const wstring state = StateDir(dir), rpath = RecordPath(dir);
+    JournalCreate(journal, state, true);
     EnsureDir(state);
     bool recorded = false;
     try {
         for (auto& e : m.e) {
             if (!e.existed) continue;
-            wstring b = BackupPath(dir, e.rel);
-            CopyChecked(Target(dir, e.rel), b);
-            if (Sha256File(b) != e.orig) Fail(L"Backup verification failed for " + e.rel);
+            // created only where nothing is: a file an earlier uninstall kept in backup\ stays, this backup takes a new name
+            CopyBackup(ctx, dir, e, Target(dir, e.rel), &journal, &warnings);
             ui.step(++done, total, L"Backed up " + e.rel);
             ui.log(L"backup " + e.rel);
         }
+        JournalCreate(journal, rpath, false);
         SaveRecord(rpath, m);  // written before any change so an interrupted install can still be undone
         recorded = true;
+        RestoreStep("seed-recorded");  // (tests: a seed file appears here, after the record and before it is written)
         for (auto& e : m.e) {
             const wstring tp = Target(dir, e.rel);
             if (e.action == L"dir") {
@@ -841,7 +886,8 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
             ui.step(++done, total, L"Installing " + rel);
             DWORD sz = 0; const void* d = PayloadData(f, sz);
             const wstring tp = Target(dir, rel);
-            WriteFileAtomic(tp, d, sz);
+            if (IsBinaryName(rel)) PutBinary(tp, d, sz);  // #219: renamed in complete, held by the operation's gate (record.h)
+            else WriteFileAtomic(tp, d, sz);
             if (Sha256File(tp) != f.sha256) Fail(L"Verification failed after writing " + rel);
             ui.log(L"installed " + rel);
         }
@@ -849,12 +895,32 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
             const bool ours = StartsWithI(BaseName(of.rel), L"wronggpu");  // the settings file and the Ray Reconstruction files
             ui.step(++done, total, (ours ? L"Installing " : L"Installing OptiScaler: ") + of.rel);
             const wstring tp = Target(dir, of.rel);
-            CopyChecked(of.src, tp);
+            if (of.kept) continue;
+            if (of.seed) {  // created only where nothing is (CopyFileW fail-if-exists): a file that appeared is never replaced
+                EnsureDir(Parent(tp));
+                DWORD err = 0;
+                if (!CopyNew(of.src, tp, &err)) {
+                    if (err != ERROR_FILE_EXISTS && err != ERROR_ALREADY_EXISTS) Fail(L"Cannot create " + tp + L": " + ErrText(err));
+                    // the player's file (it appeared after the record was written): kept as it is, out of the record
+                    m.e.erase(std::remove_if(m.e.begin(), m.e.end(), [&](const Entry& x) { return x.action == L"copy" && IEq(x.rel, of.rel); }), m.e.end());
+                    SaveRecord(rpath, m);
+                    const wstring w = L"Left in place (appeared during the install, not WrongGPU's): " + of.rel;
+                    LogLine(ctx, w);
+                    warnings.push_back(w);
+                    continue;
+                }
+                if (Sha256File(tp) != Sha256File(of.src)) Fail(L"Verification failed after writing " + of.rel);
+                ui.log(L"installed " + of.rel);
+                continue;
+            }
+            if (IsBinaryName(of.rel)) PutBinaryFrom(tp, of.src);  // #219 (record.h)
+            else CopyChecked(of.src, tp);
             ui.log((ours ? L"installed " : L"installed OptiScaler's ") + of.rel);
         }
         for (auto& mr : mirrors) {
             ui.step(++done, total, L"Installing " + mr.second);
-            CopyChecked(Target(dir, mr.first), Target(dir, mr.second));
+            if (IsBinaryName(mr.second)) PutBinaryFrom(Target(dir, mr.second), Target(dir, mr.first));  // #219 (record.h)
+            else CopyChecked(Target(dir, mr.first), Target(dir, mr.second));
             ui.log(L"installed " + mr.second + L" (REFramework's copy of " + mr.first + L")");
         }
         if (opti) ui.log(L"OptiScaler " + ctx.opti.version + L" is set up for WrongGPU (OptiScaler.dll as " + proxy +
@@ -864,20 +930,21 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
         // The uninstaller: the small restorer (WrongGPU-Restore.exe) the launcher embeds, else a copy of this program.
         if (ctx.restorer && ctx.restorerSize) {
             const wstring un = Join(state, L"uninstall.exe");
+            JournalCreate(journal, un, false);
             WriteFileAtomic(un, ctx.restorer, ctx.restorerSize);
             if (Sha256File(un) != Sha256Bytes(ctx.restorer, ctx.restorerSize)) Fail(L"Verification failed after writing the uninstaller");
         } else {
 #ifdef _WIN32
+            JournalCreate(journal, Join(state, L"uninstall.exe"), false);
             CopyChecked(SelfPath(), Join(state, L"uninstall.exe"));
 #endif
             // Linux: no restorer is embedded and a copy of this ELF program would not start in the game's Wine prefix; the
             // launcher's own uninstall removes the install (README-linux.md)
         }
         if (ctx.perGameEntry) RegisterUninstall(ctx, m, state, target.name);
+        JournalCreate(journal, Join(state, L"owned-files.json"), false);
         WriteOwnedFiles(dir, m);
-#if WRONGGPU_PRESET_K
-        if (opti && !slot) SeedAsiSelection(ctx, dir, ctx.presetK);
-#endif
+        RestoreStep("installed");  // (tests: a failure after everything was written: the rollback takes back what this run made)
         ui.log(L"WrongGPU installed in " + dir + L" (" + m.status + L"); model data: " + ModelFile(ctx));
         ui.step(total, total, L"Done");
     } catch (const SetupError& ex) {
@@ -885,8 +952,8 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
         try {
             // (rc6 L4: the settings that were there before this install stay: the failed install's record and backup go only)
             if (recorded) DoRestore(ctx, dir, ui, true, keepSettings);
-            else if (!keepSettings) RemoveTree(state);
-            if (keepSettings && !IsFile(rpath)) RemoveStateKeepingSettings(dir);  // (a backup DoRestore had to keep stays with its record)
+            // then what this run made and DoRestore left (the journal); anything else in the state folder stays and is listed
+            if (!IsFile(rpath)) RollbackCreated(ctx, state, journal);  // (a backup DoRestore had to keep stays with its record)
             ui.log(L"Rollback complete; the game folder is back to its previous state.");
         } catch (const SetupError& r) { ui.log(L"Rollback problem: " + r.msg); }
         throw;

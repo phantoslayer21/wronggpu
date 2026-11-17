@@ -4,6 +4,7 @@
 // entry the player selected in OptiScaler's menu. The front end finds the plugin by module (GetModuleHandle of the
 // plugin file name) and resolves this one export by name, so load order does not matter and neither DLL links the
 // other. Defined once, shared by the plugin (which exports it) and the front-end bridge (which calls it).
+#include <stddef.h>
 #include <stdint.h>
 
 #define WRONGGPU_ASI_MODULE  L"WrongGPU.asi"
@@ -12,8 +13,9 @@
 
 // Query result. `hooked` is 1 after the prepared menu call-patch transaction commits; it does not promise
 // complete menu adaptation. The FFX list still contains WrongGPU and AMD entries. Zero means inactive: the
-// front end then behaves as if no plugin were present. `model` is 0 (OptiScaler's own FSR 3.X / AMD), 'M' or 'K'.
-// Returns the ABI version (>= 1), or 0 on error. Signature: int WrongGpuAsiQuery(int* hooked, char* model).
+// front end then behaves as if no plugin were present. `model` is 0 (OptiScaler's own FSR 3.X / AMD), 'M' or 'K'
+// (a saved Model L reads as 'M' here, for an older front end; which WrongGPU model runs is the model choice
+// record's, src/model_choice_record.h). Returns the ABI version (>= 1), or 0 on error. Signature: int WrongGpuAsiQuery(int* hooked, char* model).
 typedef int (*PfnWrongGpuAsiQuery)(int* hooked, char* model);
 
 // Additive WrongGPU-owned diagnostic API; this is NOT a host plugin or RR frame ABI.
@@ -56,7 +58,7 @@ typedef int (*PfnWrongGpuAsiQuery)(int* hooked, char* model);
 // Before any host write, the plugin pins its own module until process termination. Pin failure
 // leaves host call sites untouched. Query-only loads do not pin. Neither query promises host
 // lifetime, executing-thread atomicity, or safe live unhook/unload.
-// Selection is 0 (AMD), 'M', or 'K'; it is NOT evidence of the effective rendering backend.
+// Selection is 0 (AMD), 'M', 'K' or 'L' (the saved choice); it is NOT evidence of the effective rendering backend.
 // Fields are independent observations during initialization/selection changes, not a transactional snapshot.
 // rr_ready is always zero in this implementation; rr_blockers is a bitmask of the reasons above.
 typedef struct WrongGpuAsiStatusV1 {
@@ -75,3 +77,14 @@ typedef struct WrongGpuAsiStatusV1 {
 } WrongGpuAsiStatusV1;
 
 typedef int (*PfnWrongGpuAsiQueryStatusV1)(WrongGpuAsiStatusV1* status, uint32_t caller_size);
+
+// The front end tells the plugin where the game's model choice record is (wronggpu-setup\model-choice.ini next to
+// its wronggpu.ini; src/model_choice_record.h). A click on one of the plugin's model entries is written there (seq + 1,
+// source=plugin). Without this call the plugin uses wronggpu-setup\model-choice.ini in its own data folder.
+#define WRONGGPU_ASI_SET_CHOICE_RECORD "WrongGpuAsiSetChoiceRecordV1"
+typedef void (*PfnWrongGpuAsiSetChoiceRecordV1)(const wchar_t* path);
+
+// The front end reports which model it runs (0 AMD, 'M', 'K', 'L'), so the plugin's menu marks that entry; 1 returns
+// to marking the saved choice. Display only: nothing is saved.
+#define WRONGGPU_ASI_SHOW_MODEL "WrongGpuAsiShowModelV1"
+typedef void (*PfnWrongGpuAsiShowModelV1)(char model);

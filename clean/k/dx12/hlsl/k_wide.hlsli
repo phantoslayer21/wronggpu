@@ -15,8 +15,9 @@
 //     RN16(v_rsq_f32(s)) (wg_f2h: RNE; the plain f32tof16 rounds toward zero on this driver);
 //   - softmax weights: w = v_exp_f32(g), FP32 sum in key order plus the lane ^ 16 half, inv = v_rcp_f32(sum), and
 //     A = f16(w inv) rounded ONCE from the exact product, as HIP's compiled form (v_fma_mixlo/hi_f16 w * inv + 0, seen in
-//     the k_block_wide.co ISA): the FP32 product rounded to odd with its exact residual (wg_round_odd), then the RNE
-//     conversion (FP32 has 13 more bits than FP16: no double rounding);
+//     the k_block_wide.co ISA): k_smx.hlsli, the FP32 product and its exact residual summed into the RNE conversion
+//     (folded into v_fma_mix*_f16 by the driver), or in the __rodd ports the product rounded to odd, then the conversion
+//     (FP32 has 13 more bits than FP16: no double rounding);
 //   - mirrored window members, ownership of the output tiles (a group without a last tile computes tile KT - 1 too and
 //     does not store it), merge / expand index maps: as HIP.
 // Deviations (no effect on any result): weights and LDS operands of each product group are loaded before its multiplies
@@ -25,8 +26,7 @@
 // k_block_wide.hlsl), each loaded through a per-lane base address plus a constant (the load's immediate offset);
 // independent accumulators are interleaved (the scores' four key tiles, z's two channel tiles, W1's MM hidden tiles,
 // the expand's tiles), each still summing in its own order; the LDS indices are masked to the array's power of two
-// (kw_lr / kw_lw); the residual x of the owned tiles is reloaded at step 3 for map inputs; the softmax round-to-odd uses
-// the positive-product form (kw_round_odd_pos, same bits); NG = 4 uses another LDS layout that fits D3D12's 32 KB (HIP: 56 KB): K / VT per group unpadded with an xor
+// (kw_lr / kw_lw); the residual x of the owned tiles is reloaded at step 3 for map inputs; NG = 4 uses another LDS layout that fits D3D12's 32 KB (HIP: 56 KB): K / VT per group unpadded with an xor
 // swizzle of the 16-byte chunks, and the round's Z, the MLP's A and its H buffers all start at 0, with extra barriers
 // where the phases now overlap (K / VT reads done before Z is written, Z reads done before A / the next round's K / VT,
 // A reads done before H, H reads done before the merge's x2). The arithmetic is the same in both layouts.
@@ -129,16 +129,6 @@ uint4 kw_softpoly8(uint4 s)
         r[i] = kw_u(u * o);
     }
     return r;
-}
-
-// wg_round_odd (wg_math.hlsli) for a product p = RN32(w inv) that is positive, finite and normal, with its exact residual
-// e: the softmax weights (w = v_exp_f32 of a clamped FP16 polynomial value in about [-14.4, 14.4], inv = v_rcp_f32 of a
-// sum of 64 such w, so p >= ~3e-11). There wg_round_odd's finite / nonzero test always holds and "one ulp toward x" is
-// +1 for e > 0 and -1 for e < 0 (p's sign bit is 0): the same bits in fewer instructions.
-uint kw_round_odd_pos(float p, float e)
-{
-    const uint ur = asuint(p);
-    return ur + ((e != 0.0f && (ur & 1u) == 0u) ? (uint)((asint(e) >> 31) | 1) : 0u);
 }
 
 v8f kw_widen8(uint4 a)

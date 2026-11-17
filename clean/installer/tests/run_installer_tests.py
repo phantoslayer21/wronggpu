@@ -22,6 +22,7 @@ import sys
 import time
 import zipfile
 
+sys.dont_write_bytecode = True  # before any local module: no __pycache__ in the source tree (also as the launcher suite's module)
 HERE = os.path.dirname(os.path.abspath(__file__))
 INSTALLER = os.path.dirname(HERE)
 CONVERTER_TESTS = os.path.join(INSTALLER, "..", "converter", "tests")
@@ -161,6 +162,19 @@ class Env:
             # Native Windows: never touch the tester's own WrongGPU data, store registry keys or libraries.
             self.env = dict(os.environ, LOCALAPPDATA=os.path.join(work, "localappdata"), ProgramData=os.path.join(work, "programdata"))
             os.makedirs(self.env["LOCALAPPDATA"], exist_ok=True)
+        # natively, a test build takes its store libraries from this folder only (empty: none) and never reads the PC's own
+        # stores (detect.h TestLibraries); under Wine the prefix is the program's own world and its store tests read the
+        # prefix's own registry and folders, so these are not set there
+        libs = os.path.join(work, "libraries")
+        os.makedirs(libs, exist_ok=True)
+        self.access = os.path.join(work, "library-access.log")  # every store access of the program, checked after each run (#243)
+        if self.native:
+            self.env["WRONGGPU_TEST_LIBRARIES"] = self.win(libs)
+            self.env["WRONGGPU_TEST_ACCESS_LOG"] = self.win(self.access)  # (written by the program itself, never created here)
+            if os.environ.get("WRONGGPU_TESTING") != "1":
+                raise SystemExit("native Windows runs need an installer built with WRONGGPU_TESTING (and WRONGGPU_TESTING=1 set): "
+                                 "only a test build keeps to the test libraries and logs every store access (#243)")
+            self.env["WRONGGPU_TEST_RUN_ID"] = __import__("launcher_isolation").new_run(work)
 
     def close(self):
         if not self.native:
@@ -172,7 +186,10 @@ class Env:
     def run(self, args, timeout=300, extra_env=None):
         cmd = list(args) if self.native else [self.wine] + list(args)
         env = dict(self.env, **(extra_env or {}))
+        astart = os.path.getsize(self.access) if os.path.isfile(self.access) else 0
         p = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+        if self.native:  # (#243) never the PC's own game folders (under Wine the prefix is the program's own world)
+            __import__("launcher_isolation").check_isolation(None, self.work, 0, list(args)[:2], astart)
         return p.returncode
 
     def localappdata(self):
@@ -301,13 +318,29 @@ FSR3UP = mockpe.make_dll(None, extra=b"game-built upscaler v1" * 10, exports=moc
 FSR3UP_V2 = mockpe.make_dll(None, extra=b"game-built upscaler v2 (game update)" * 10, exports=mockpe.FSR3UPSCALER_EXPORTS, dll_name=SLOTS[2])
 FOREIGN_FSR3 = mockpe.make_dll(None, extra=b"some other mod", exports=["ModInit", "ModHook"], dll_name=SLOTS[1])
 OLD_DLSS = mockpe.make_dll({"CompanyName": "Mock", "ProductName": "Mock DLSS"}, (310, 1, 0, 0), extra=random.Random(5).randbytes(200_000))
+# the release marker the payload gate looks for in a runtime (tools/make_payload.py)
+RELEASE_MARKER = b"\0wg-build dev-diagnostics=0\0"
+# the test payload's WrongGPU runtime as installed: a stand-in without kernels (it cannot prepare anything on a GPU), with
+# the marker (stand_in_runtime)
+STAND_IN_RUNTIME = mockpe.make_dll({"ProductName": "WrongGPU", "FileDescription": "WrongGPU runtime"}, (0, 3, 0, 0)) + RELEASE_MARKER
+
+
+def stand_in_runtime(folder, data, name="wronggpu_runtime.dll"):
+    """The test payload's WrongGPU runtime, a stand-in without kernels: its bytes carry the release marker
+    ("wg-build dev-diagnostics=0"), and its build manifest (<name>.build.json, as clean/runner/build.py writes one) is for these
+    exact bytes and says stand_in, so the payload gate (tools/make_payload.py) embeds it only in a WRONGGPU_TESTING build."""
+    data = data if data.endswith(RELEASE_MARKER) else data + RELEASE_MARKER
+    write(os.path.join(folder, name), data)
+    manifest = {"format": 1, "file": name, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data), "dev_diagnostics": False,
+                "dx12_kernels": None, "stand_in": True}
+    write(os.path.join(folder, os.path.splitext(name)[0] + ".build.json"), json.dumps(manifest, indent=1).encode())
 
 
 def payload(root):
     exports = {SLOTS[0]: mockpe.FFX_API_EXPORTS, SLOTS[1]: mockpe.FSR3_EXPORTS, SLOTS[2]: mockpe.FSR3UPSCALER_EXPORTS}
     for name in SLOTS:  # WrongGPU's three FSR DLLs (front end, spec 20)
         write(os.path.join(root, name), mockpe.make_dll(mockpe.FRONT_END, (0, 3, 0, 0), extra=("front end " + name).encode(), exports=exports[name], dll_name=name))
-    write(os.path.join(root, "wronggpu_runtime.dll"), mockpe.make_dll({"ProductName": "WrongGPU", "FileDescription": "WrongGPU runtime"}, (0, 3, 0, 0)))
+    stand_in_runtime(root, STAND_IN_RUNTIME)
     rng = random.Random(11)
     for k in ("enc", "swin", "dec"):
         write(os.path.join(root, "wronggpu", "kernels", k + ".hsaco"), rng.randbytes(3000))
@@ -1919,14 +1952,15 @@ def test_without_direct_route(t, payload_dir, direct_setup):
             all(not os.path.isfile(os.path.join(payload_dir, n)) or read(os.path.join(payload_dir, n)) not in read(t.setup) for n in COMPONENTS))
     full = os.path.join(t.work, "payload-with-fsr30")
     shutil.rmtree(full, ignore_errors=True)
-    for n in SLOTS + ["wronggpu_runtime.dll"]:
+    for n in SLOTS:
         write(os.path.join(full, n), mockpe.make_dll(mockpe.FRONT_END, (0, 4, 5, 0), extra=n.encode()))
+    stand_in_runtime(full, mockpe.make_dll(mockpe.FRONT_END, (0, 4, 5, 0), extra=b"wronggpu_runtime.dll"))
     tables = {}
     for flag in ("", "--hosted-only"):
         out = os.path.join(t.work, "payload-table" + flag)
         shutil.rmtree(out, ignore_errors=True)
         p = subprocess.run([sys.executable, os.path.join(INSTALLER, "tools", "make_payload.py"), "--payload", full, "--map", os.path.join(t.work, "prepared", "test-map.json"),
-                            "--version", "0.0.0", "--out", out] + ([flag] if flag else []), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                            "--version", "0.0.0", "--out", out, "--testing"] + ([flag] if flag else []), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         tables[flag] = (read(os.path.join(out, "payload_table.h")) + read(os.path.join(out, "resources.rc"))).decode() if p.returncode == 0 else ""
     t.check("make_payload.py --hosted-only (what this build passes): the FSR 3.0 DLLs of a payload folder are left out, the rest is built in",
             all(n in tables[""] for n in SLOTS) and SLOTS[0] in tables["--hosted-only"] and "wronggpu_runtime.dll" in tables["--hosted-only"] and
@@ -2231,6 +2265,9 @@ def main():
                                            "installs that the installer under test is then run over")
     a = ap.parse_args()
     work = os.path.abspath(a.work)
+    os.makedirs(work, exist_ok=True)
+    if os.name == "nt":
+        __import__("launcher_isolation").self_test(work)  # (#243) first: no installer run with a broken guard
     # The synthetic source and its map: version 4 with the optional source F (spec 08 draft 2), variant 1 in the file.
     model = cases.f_mini_case(present=0)
     prep = os.path.join(work, "prepared")
@@ -2245,6 +2282,7 @@ def main():
         out = os.path.join(work, "build")
         subprocess.run([os.path.join(INSTALLER, "build-mingw.sh"), os.path.join(prep, "payload"), os.path.join(prep, "test-map.json"), "0.3.0-test", out], check=True)
         setup = os.path.join(out, "WrongGPU.exe")  # the launcher; its /switches are the installer's
+        os.environ["WRONGGPU_TESTING"] = "1"  # (build-mingw.sh makes a WRONGGPU_TESTING build: its Apps & features root, its tests)
     env = Env(work)
     for d in ("games", "steam", "epic", "gog", "elsewhere"):
         shutil.rmtree(os.path.join(work, d), ignore_errors=True)

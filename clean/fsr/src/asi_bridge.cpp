@@ -24,4 +24,18 @@ bool QueryAsiPlugin(char* model) {
     return hooked != 0;
 }
 
+void ShowAsiModel(char model) {
+    HMODULE m = GetModuleHandleW(WRONGGPU_ASI_MODULE);
+    if (!m) return;
+    if (auto show = reinterpret_cast<PfnWrongGpuAsiShowModelV1>(reinterpret_cast<void*>(GetProcAddress(m, WRONGGPU_ASI_SHOW_MODEL))))
+        show(model);
+}
+
+void SetAsiChoiceRecord(const std::wstring& path) {
+    HMODULE m = GetModuleHandleW(WRONGGPU_ASI_MODULE);
+    if (!m) return;
+    if (auto set = reinterpret_cast<PfnWrongGpuAsiSetChoiceRecordV1>(reinterpret_cast<void*>(GetProcAddress(m, WRONGGPU_ASI_SET_CHOICE_RECORD))))
+        set(path.c_str());
+}
+
 }  // namespace wgwin
