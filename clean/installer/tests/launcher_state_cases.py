@@ -214,6 +214,9 @@ def asi_seed_cases(t, opti, m):
     if rc != 0 or not os.path.isfile(asi):
         t.check("install (hosted route)", rc == 0, (rc, t.j.get("message")))
         print("  skipped: the plugin's wronggpu-asi.ini (a build without Preset K writes none)")
+        if rc == 0:
+            t.run("uninstall", exe)
+        shutil.rmtree(root, ignore_errors=True)  # (as below: the later sections see only their own games)
         return
     seeded = read(asi)
     t.check("Preset K build: the plugin's wronggpu-asi.ini is one of the install's recorded files, with its hash",
