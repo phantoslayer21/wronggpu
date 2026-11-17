@@ -1,25 +1,26 @@
 # Game compatibility
 
-These notes apply to **WrongGPU 0.6.0**: Model M and Ray Reconstruction through the **WrongGPU edition of OptiScaler**,
-set up by the WrongGPU launcher. "Ray Reconstruction" means WrongGPU's own Ray Reconstruction ran in the game; Model M
-means super resolution only. This page grows with the community's reports: see [How to add your game](#how-to-add-your-game).
+These notes apply to **WrongGPU 0.6.5**: Model M (the default), Model L and Model K (both off by default) and Ray
+Reconstruction through the **WrongGPU edition of OptiScaler**, set up by the WrongGPU launcher. Each result is as last
+tested: Cyberpunk 2077 was re-tested with 0.6.5, and the other rows keep the version they were tested with. "Ray
+Reconstruction" means WrongGPU's own Ray Reconstruction ran in the game; Model M means super resolution only. This page grows with the community's reports: see [How to add your game](#how-to-add-your-game).
 
 ## Tested games
 
-Tested on a Radeon RX 9070 XT.
+Tested on a Radeon RX 9070 XT, with WrongGPU 0.6.0 unless a row says otherwise.
 
 | Game | Model M | Ray Reconstruction | Notes |
 | --- | --- | --- | --- |
-| **Cyberpunk 2077** | Yes | Yes | Our main test game. |
+| **Cyberpunk 2077** | Yes | Yes | Our main test game. Re-tested with 0.6.5 at 1080p: Model M at Quality and DLAA, Model L and Model K at Quality, and Ray Reconstruction with path tracing, with 0 failures logged. |
 | **Borderlands 4** | Yes (tested with 0.4.5) | Yes | Ray Reconstruction needs one Engine.ini setting, and the game removes it on every start. After the install the launcher asks: **Fix it for me** adds the setting and makes the file read-only (uninstalling WrongGPU undoes both); **Show me how** gives the steps. The game creates Ray Reconstruction itself, so it needs the WrongGPU edition of OptiScaler. About 1.6 ms a frame at 1080p output (from 642x361): 1.589 ms in `clean/installer/tests/logs/bl4-rr-only.log`. |
 | **RESIDENT EVIL requiem** | Yes | Yes, experimental | Needs **REFramework**, installed by you first: the game blocks OptiScaler without it. WrongGPU never installs, downloads or replaces REFramework; the launcher tells you when it is missing. Ray Reconstruction runs when the game's **Ray Tracing** setting is **Path Tracing** and its upscaler is **DLSS**. The game prepares Ray Reconstruction at its first start, not in the launcher. Very occasionally a single frame comes out far too bright or too dark at a scene change (see Known limits). |
 | **Hogwarts Legacy** | Yes | Not available | Since the game's November 2026 update its Ray Reconstruction option is greyed out and WrongGPU's Ray Reconstruction isn't available, so the launcher doesn't offer it there. Ray Reconstruction worked before that update. |
 | **Marvel's Spider-Man 2** | Yes (choose **FSR** as the game's upscaler: its menu doesn't offer DLSS) | Experimental opt-in, not recommended | With Ray Reconstruction the game often freezes the GPU or crashes. The release notes explain the opt-in for those who want to try it anyway. |
 | **LEGO Batman** | Yes | Not offered | The game's menu has no Ray Reconstruction option. |
-| **The Witcher 3 Remastered** | Earlier version (0.4.5) | — | Not retested with 0.6.0. |
-| **Control** | Earlier versions | — | Not retested with 0.6.0. This result does not cover Control Resonant. |
-| **Crimson Desert** | Earlier versions | — | Not retested with 0.6.0. |
-| **Ratchet & Clank: Rift Apart** | Earlier versions | — | Not retested with 0.6.0. |
+| **The Witcher 3 Remastered** | Earlier version (0.4.5) | — | Not retested with 0.6.0 or 0.6.5. |
+| **Control** | Earlier versions | — | Not retested with 0.6.0 or 0.6.5. This result does not cover Control Resonant. |
+| **Crimson Desert** | Earlier versions | — | Not retested with 0.6.0 or 0.6.5. |
+| **Ratchet & Clank: Rift Apart** | Earlier versions | — | Not retested with 0.6.0 or 0.6.5. |
 | **007 First Light** | Unsupported | Unsupported | Crashes at start under OptiScaler. |
 | **Other games** | Experimental / unverified | Experimental / unverified | OptiScaler support and the launcher accepting a game alone do not establish WrongGPU compatibility. [Send a report](https://github.com/phantoslayer21/wronggpu/issues/new?template=game-compatibility-report.yml). |
 
@@ -48,11 +49,13 @@ Older Radeon cards, DirectX 11 and Vulkan are unsupported in this release.
 
 ## Known limits
 
+- A rare crash at game start can happen; restarting the game fixes it.
 - Ray Reconstruction can still show occasional visual artifacts, such as ghosting on thin lines in reflections, or
   blotches in Cyberpunk 2077 with path tracing.
 - RESIDENT EVIL requiem: very occasionally a single frame comes out far too bright or too dark at a scene change (after
   loading a save, or during flashes of lightning). It lasts one frame.
-- Preset K is not included in 0.6.0.
+- Model L and Model K (new in 0.6.5, off by default) are still under test. Model L is tested for super resolution in
+  Cyberpunk 2077 and RESIDENT EVIL requiem, Model K in Cyberpunk 2077 (see the release notes).
 - Radeon RX 9060 XT / RX 9060: supported, not yet tested.
 - Without a DLSS Ray Reconstruction file of version 310.7 or newer on your PC, the game keeps its own denoiser and the
   launcher says so.
