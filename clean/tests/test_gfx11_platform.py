@@ -2,7 +2,8 @@
 """The gfx11 (RDNA 3) branch of kernels/wg_platform.h, compiled for gfx1100 (no GPU needed; needs a ROCm clang, from
 WG_ROCM, else ROCM_PATH): the family macro, the half-wave exchange as one v_permlanex16_b32, the matrix wrappers made
 of it and the F16 matrix instruction, clear errors for what gfx11 does not have, and the register gate of the Swin block
-kernels. The same sources must still compile for gfx1201 with the old ds_bpermute exchange and the FP8 matrix instruction.
+kernels. The same sources must still compile for gfx1201 with the old ds_bpermute exchange and the FP8 matrix instruction;
+the gfx11-only helpers (wg_xchg16_u) do not exist there.
 """
 import os
 import re
@@ -82,10 +83,16 @@ class Gfx11Platform(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertEqual(text.count("v_permlanex16_b32"), 2)
         self.assertNotIn("ds_bpermute", text)
-        rc, err, text = compile_source("gfx1201", body, asm=True)
+        # gfx12 keeps main's platform text: wg_xor16 is the ds_bpermute exchange, and the gfx11 exchange wg_xchg16_u
+        # does not exist there at all (it is gfx11 / emulator only, so the gfx12 source stays main's).
+        rc, err, text = compile_source("gfx1201", "d[i][0] = wg_xor16(d[i][0]);", asm=True)
         self.assertEqual(rc, 0, err)
-        self.assertEqual(text.count("ds_bpermute_b32"), 2)
+        self.assertEqual(text.count("ds_bpermute_b32"), 1)
         self.assertNotIn("permlane", text)
+        rc, err, _ = compile_source("gfx1201", "out[i] = wg_xchg16_u(out[i]);")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("wg_xchg16_u", err)
+        self.assertIn("undeclared identifier", err)
 
     def test_matrix_wrappers_are_the_f16_instruction_on_gfx11_and_unchanged_on_gfx12(self):
         fp8 = "d[i] = wg_wmma_fp8(v2i{(int)out[i], (int)out[i + 1]}, v2i{(int)out[i + 2], (int)out[i + 3]}, d[i]);"
