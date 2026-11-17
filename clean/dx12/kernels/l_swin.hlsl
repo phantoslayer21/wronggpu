@@ -14,7 +14,9 @@
 //   l_swin_block_c32_enc_nc  the encoder block: FP16 halo map [H + 4][W + 4][32] in (SW_SRC 1), FP8 out
 //                            with its workgroups in reverse order (WG_REV_ORDER, wg_platform.hlsli; the same bytes): it
 //                            reads first the rows of x2 the linears wrote last, and its last-written rows of x3 are the
-//                            ones l_project_gather reads first (more cache hits at both hand-offs)
+//                            ones l_project_gather reads first (more cache hits at both hand-offs). WG_REV_ORDER
+//                            reverses the group index of a 1-D dispatch only (a multi-dimensional launch must flatten
+//                            it first); every kernel declared with it here and in hyb_swin.hlsl / hyb_gemm.hlsl is 1-D
 //   l_swin_block_c32_dec_nc  the decoder block: FP8 map in with the token-grid mirror (SW_SRC 2), FP16 out (SW_OUT_F16)
 //   l_swin_block_c32_enc_lin_nc  D3D12 only: the encoder block with the two input linears as its prologue (SW_SRC 3;
 //                            byte for byte the pair l_linear_32_32_fused -> _enc_nc, which stays the fallback route):
@@ -43,7 +45,7 @@
 //                          form, enc0.Win1, enc0.Win2 as the last arguments) and _dec_hyb with l_coef_pack12 as its
 //                          epilogue (SW_OUT_COEF12, COEF_CVT_HW); the same bytes as the launches they replace
 // @wg-kernel l_swin_block_c32_enc_lin_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u,p,p defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=0,SW_SRC=3,SW_HYB=1,SW_ENTRY_OVERRIDE=l_swin_block_c32_enc_lin_hyb,WG_REV_ORDER=1
-// @wg-kernel l_swin_block_c32_dec_coef12_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u,p,p,p,p,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=0,SW_OUT_F16=1,SW_OUT_COEF12=1,COEF_CVT_HW=1,SW_HYB=1,SW_ENTRY_OVERRIDE=l_swin_block_c32_dec_coef12_hyb
+// @wg-kernel l_swin_block_c32_dec_coef12_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u,p,p,p,p,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=0,SW_OUT_F16=1,SW_OUT_COEF12=1,COEF_CVT_HW=1,SW_HYB=1,SW_ENTRY_OVERRIDE=l_swin_block_c32_dec_coef12_hyb,WG_REV_ORDER=1
 //   ..._enc_lin_hyb_dump / _dec_coef12_hyb_dump (+ _mutdump: SW_HYB_MUT_ORDER=4)  their stage dumps (probe=1, check only:
 //                          l_hyb_stage_check.py --set fused, the oracle per stage); _scanmut: the fused-square scan's
 //                          mutants (no contraction barrier, built beside every hybrid build, outside the manifest)
