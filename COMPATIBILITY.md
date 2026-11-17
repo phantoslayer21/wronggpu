@@ -36,7 +36,7 @@ version of that run are not recorded in the excerpt.
   information WrongGPU needs. Choose **DLSS** as the game's upscaler.
 - **Radeon RX 9070 or RX 9070 XT** (RX 9060 XT / RX 9060 supported, not yet tested) and a recent AMD Adrenalin driver.
   No AMD HIP runtime is needed.
-- A local DLSS super resolution file of version **310.5 or newer** for Model M and, for Ray Reconstruction, a **DLSS Ray
+- A local DLSS super resolution file of version **310.5 or newer** for Model M and Model L and, for Ray Reconstruction, a **DLSS Ray
   Reconstruction file 310.7 or newer**, each from any game or app on your PC (not necessarily the game you play). The
   launcher looks for them in your installed games.
 - For Ray Reconstruction, the game must use DLSS Ray Reconstruction through game interface version 2.7, 2.8 or 2.14, or
@@ -69,7 +69,7 @@ Older Radeon cards, DirectX 11 and Vulkan are unsupported in this release.
 Anyone can add a game to this page.
 
 1. Test it as [Testing WrongGPU in other games](docs/TESTING-OTHER-GAMES.md) describes: a game without anti-cheat, the
-   FPS overlay or the game page's **Last run** showing that WrongGPU's Model M (or Ray Reconstruction) really ran, at
+   FPS overlay or the game page's **Last run** showing that WrongGPU's Model M, Model L or Model K (or Ray Reconstruction) really ran, at
    least one longer play session, and the settings you used.
 2. Report it with the [game compatibility form](https://github.com/phantoslayer21/wronggpu/issues/new?template=game-compatibility-report.yml)
    (or in #bug-reports on the [WrongGPU Discord server](https://discord.gg/745z9MfKwm)), with the zip from **Collect
@@ -82,8 +82,9 @@ Anyone can add a game to this page.
 ## Testing and reports
 
 Follow [Testing WrongGPU in other games](docs/TESTING-OTHER-GAMES.md). AMD FSR frames and passed-through frames are not
-Model M or Ray Reconstruction results: check the FPS overlay ("DLSS → WrongGPU Model M" or "DLSS → WrongGPU RR") and
-the game page's **Last run**.
+Model M, Model L, Model K or Ray Reconstruction results: check the FPS overlay ("DLSS → WrongGPU Model M", the upscaler
+**WrongGPU Model L** or **WrongGPU Model K** when you chose one of those, or "DLSS → WrongGPU RR") and the game page's
+**Last run**.
 
 Identify the game build, GPU and driver, WrongGPU version, output resolution, input upscaler, quality mode and whether
 Ray Reconstruction was on (and its mode). Include the support zip from **Collect logs** on the game's page in the
