@@ -43,7 +43,7 @@ and builds and publishes the official releases.
 Borderlands 4 needs one Engine.ini setting for Ray Reconstruction (the launcher offers to add it); RESIDENT EVIL
 requiem needs REFramework, which you install yourself.
 
-### Games (tested on an RX 9070 XT; the table's results are from 0.6.0)
+### Games (tested on an RX 9070 XT; results as tested in 0.6.0 unless a row says otherwise)
 
 | Game | Model M | Ray Reconstruction |
 |---|---|---|
@@ -56,7 +56,7 @@ requiem needs REFramework, which you install yourself.
 | 007 First Light | not supported (crashes at start under OptiScaler) | |
 
 0.6.5 was re-tested in Cyberpunk 2077 at 1080p: Model M at Quality and at DLAA, Model L and Model K at Quality, and
-Ray Reconstruction with path tracing, with 0 failures.
+Ray Reconstruction with path tracing, with 0 failures logged.
 
 Other games are experimental; the full list, with requirements and how to add your game, is
 [COMPATIBILITY.md](COMPATIBILITY.md). Known issues in 0.6.5: A rare crash at game start can happen; restarting the game
