@@ -550,8 +550,16 @@ void GpuIdentity() {
     g = wg::GpuFromDrm(nvOnly);
     check(!g.amd && !g.rdna4 && g.name == L"NVIDIA graphics (code 10DE:2684)" && g.driver.empty(), "NVIDIA only: not AMD, no driver link: driver unknown");
     // DetectGpu on this machine follows Linux's own list: it must agree with GpuFromDrm() on /sys/class/drm
+    unsetenv("WRONGGPU_TEST_DRM_ROOT");
     const wg::GpuInfo here = wg::DetectGpu(), direct = wg::GpuFromDrm();
     check(here.name == direct.name && here.rdna4 == direct.rdna4 && here.amd == direct.amd, "DetectGpu natively is GpuFromDrm of /sys/class/drm");
+    // a test build can point DetectGpu at a made-up folder (the UI tests and the screenshots use it)
+    setenv("WRONGGPU_TEST_DRM_ROOT", "Z:\\nonexistent-drm-root", 1);
+    check(wg::DetectGpu().name.empty(), "WRONGGPU_TEST_DRM_ROOT: a folder with no cards is no GPU");
+    std::string r1 = posixTmp + "/gpu-drm/nv";
+    setenv("WRONGGPU_TEST_DRM_ROOT", r1.c_str(), 1);
+    check(wg::DetectGpu().name == L"NVIDIA graphics (code 10DE:2684)", "WRONGGPU_TEST_DRM_ROOT: DetectGpu reads that folder");
+    unsetenv("WRONGGPU_TEST_DRM_ROOT");
 }
 
 void Folders() {

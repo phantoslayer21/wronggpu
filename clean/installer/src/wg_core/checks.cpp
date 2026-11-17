@@ -126,10 +126,19 @@ GpuInfo GpuFromDrm(const wstring& drmRoot) {
     }
     return best;
 }
+// The device list a native launcher reads. A WRONGGPU_TESTING build takes WRONGGPU_TEST_DRM_ROOT instead (a made-up folder of cards,
+// so the tests and the screenshots do not depend on this machine's GPU); a release build never reads it.
+static wstring DrmRootForDetect() {
+#ifdef WRONGGPU_TESTING
+    const wstring env = EnvVar(L"WRONGGPU_TEST_DRM_ROOT");
+    if (!env.empty()) return env;
+#endif
+    return L"Z:\\sys\\class\\drm";
+}
 GpuInfo DetectGpu() {
     GpuInfo best;
     // a native Linux launcher has no DXGI: Linux's own device list names the card
-    const auto noDxgi = [&]() { return NativeLinux() ? GpuFromDrm() : best; };
+    const auto noDxgi = [&]() { return NativeLinux() ? GpuFromDrm(DrmRootForDetect()) : best; };
     HMODULE dxgi = LoadSystemDll(L"dxgi.dll");
     if (!dxgi) return noDxgi();
     using CreateFn = HRESULT(WINAPI*)(REFIID, void**);
