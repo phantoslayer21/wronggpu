@@ -207,7 +207,8 @@ if(WRONGGPU_TESTING)
   target_compile_definitions(wg_core PUBLIC WRONGGPU_TESTING)
 endif()
 if(WIN32)
-  target_link_libraries(wg_core PUBLIC wgc_core advapi32 user32 shell32 ole32 uuid winhttp)
+  # rstrtmgr: record.cpp's Restart Manager check; its #pragma comment(lib) is read by MSVC only, MinGW needs it named here
+  target_link_libraries(wg_core PUBLIC wgc_core advapi32 user32 shell32 ole32 uuid winhttp rstrtmgr)
 else()
   # Linux: <windows.h> and the other Windows headers the core includes resolve to src/platform/posix, which implements
   # the calls the core makes on POSIX. A Windows call it lacks fails the Linux build at that line.
