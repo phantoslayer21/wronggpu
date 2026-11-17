@@ -214,7 +214,7 @@ else()
   # the calls the core makes on POSIX. A Windows call it lacks fails the Linux build at that line.
   target_include_directories(wg_core BEFORE PUBLIC src/platform/posix)
   target_sources(wg_core PRIVATE src/platform/posix/win32_posix.cpp src/platform/posix/win32_posix_process.cpp
-                 src/platform/posix/win32_posix_registry.cpp)
+                 src/platform/posix/win32_posix_registry.cpp src/platform/posix/win32_posix_sync.cpp src/platform/posix/win32_posix_rm.cpp)
   target_link_libraries(wg_core PUBLIC wgc_core)
 endif()
 if(MSVC)

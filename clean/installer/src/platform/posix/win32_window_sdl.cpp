@@ -8,7 +8,6 @@
 
 #include <SDL3/SDL.h>
 #include <fcntl.h>
-#include <sys/file.h>
 
 #include <algorithm>
 #include <atomic>
@@ -1449,22 +1448,6 @@ BOOL GetMonitorInfoW(HMONITOR m, MONITORINFO* mi) {
 HRESULT DwmSetWindowAttribute(HWND, DWORD, LPCVOID, DWORD) { return E_NOTIMPL; }
 BOOL ShutdownBlockReasonCreate(HWND, LPCWSTR) { return TRUE; }
 BOOL ShutdownBlockReasonDestroy(HWND) { return TRUE; }
-
-HANDLE CreateMutexW(LPSECURITY_ATTRIBUTES, BOOL, LPCWSTR name) {
-    std::string dir;
-    if (const char* r = getenv("XDG_RUNTIME_DIR"); r && *r && access(r, W_OK) == 0) dir = r;
-    else dir = wgposix::XdgDataHome();
-    mkdir(dir.c_str(), 0700);
-    std::string n = wgposix::ToUtf8(name ? name : L"mutex");
-    for (auto& c : n) if (!isalnum((unsigned char)c) && c != '.') c = '_';
-    const std::string path = dir + "/" + n + ".lock";
-    const int fd = open(path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
-    if (fd < 0) { wgposix::SetErrorFromErrno(errno, path); return nullptr; }
-    SetLastError(flock(fd, LOCK_EX | LOCK_NB) == 0 ? 0 : ERROR_ALREADY_EXISTS);
-    wgposix::Handle* h = wgposix::NewHandle(wgposix::Kind::Mutex);
-    h->fd = fd;
-    return h;
-}
 
 void GetStartupInfoW(STARTUPINFOW* si) { if (si) { memset(si, 0, sizeof *si); si->cb = sizeof *si; } }
 

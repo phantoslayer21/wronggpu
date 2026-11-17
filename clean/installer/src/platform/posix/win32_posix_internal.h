@@ -13,12 +13,12 @@
 namespace wgposix {
 
 // One object type behind every HANDLE. Kind says which fields mean something.
-enum class Kind { File, Pipe, Map, Process, Thread, Find, Job, Snapshot, Token, Mutex };
+enum class Kind { File, Pipe, Map, Process, Thread, Find, Job, Snapshot, Token, Mutex, Event };
 struct Handle {
     Kind kind;
-    int fd = -1;                    // File, Pipe, Map (dup of the file)
+    int fd = -1;                    // File, Pipe, Map (dup of the file), Mutex (its lock file)
     std::string path;               // File: for FILE_FLAG_DELETE_ON_CLOSE
-    dev_t dev = 0; ino_t ino = 0;   // File: identity for the sharing table
+    dev_t dev = 0; ino_t ino = 0;   // File: identity for the sharing table; Mutex: the lock file's
     bool read = false, write = false, del = false;  // File: what it was opened for (sharing rules)
     DWORD share = 0;                // File: FILE_SHARE_* it allows others
     bool tracked = false;           // File: is in the sharing table
@@ -31,6 +31,7 @@ struct Handle {
     bool killOnClose = false;       // Job
     std::vector<WIN32_FIND_DATAW> found; size_t next = 0;  // Find
     std::vector<PROCESSENTRY32W> procs;                    // Snapshot
+    bool manualReset = false, signaled = false;            // Event (guarded by the sync file's lock)
     explicit Handle(Kind k) : kind(k) {}
 };
 Handle* NewHandle(Kind k);
@@ -67,6 +68,15 @@ struct ChildState { bool exited = false; int code = 0; int forcedCode = -1; int 
                   std::string image; /* the program a suspended start will exec, until it has */ };
 bool PollChild(int pid, ChildState& out);
 void KillChild(int pid, int code);
+
+// named mutexes and events (win32_posix_sync.cpp): WaitForSingleObject on them, CloseHandle of a mutex (before its fd closes)
+DWORD WaitMutex(Handle* h, DWORD ms);
+DWORD WaitEvent(Handle* h, DWORD ms);
+void CloseMutex(Handle* h);
+
+// the Restart Manager's look at one process (win32_posix_rm.cpp): 1 holds one of the files, 0 not, -1 this user's but unreadable,
+// -2 another user's or gone
+int RmScanProcess(int pid, const std::vector<std::pair<dev_t, ino_t>>& files);
 
 // CloseHandle of a job or a process handle
 void ReleaseJob(Handle* h);

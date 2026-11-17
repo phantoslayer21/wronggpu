@@ -377,7 +377,8 @@ BOOL CloseHandle(HANDLE hv) {
                 if (lstat(h->path.c_str(), &now) == 0 && now.st_dev == h->dev && now.st_ino == h->ino) unlink(h->path.c_str());
             }
             break;
-        case Kind::Pipe: case Kind::Map: case Kind::Mutex: if (h->fd >= 0 && !h->borrowed) close(h->fd); break;
+        case Kind::Mutex: CloseMutex(h); if (h->fd >= 0) close(h->fd); break;
+        case Kind::Pipe: case Kind::Map: if (h->fd >= 0 && !h->borrowed) close(h->fd); break;
         case Kind::Job: ReleaseJob(h); break;
         case Kind::Process: ReleaseProcess(h); break;
         default: break;
@@ -471,7 +472,54 @@ BOOL GetFileInformationByHandleEx(HANDLE hv, FILE_INFO_BY_HANDLE_CLASS cls, LPVO
     std::memcpy(fi->FileId.Identifier, &ino, sizeof(ino));
     return TRUE;
 }
-// Attributes and times through a handle (a time of 0 and attributes of 0 stay as they are), and the two ways to delete through one.
+// FileRenameInfo (win32_posix.h has what it guarantees). The handle's name now is the one /proc/self/fd gives (renames since
+// the open included), used only while it still names the handle's file.
+static BOOL RenameByHandle(Handle* h, const struct stat& st, const FILE_RENAME_INFO* ri, DWORD size) {
+    const size_t head = offsetof(FILE_RENAME_INFO, FileName);
+    if (size < head || ri->FileNameLength % sizeof(WCHAR) || size < head + ri->FileNameLength || !ri->FileNameLength) return Fail(ERROR_INVALID_PARAMETER);
+    if (ri->RootDirectory) return Fail(ERROR_INVALID_PARAMETER);   // a name relative to a folder handle: no caller needs it
+    if (!h->del) return Fail(ERROR_ACCESS_DENIED);                 // renaming needs DELETE access
+    std::wstring name(ri->FileName, ri->FileNameLength / sizeof(WCHAR));
+    if (name.rfind(L"\\??\\", 0) == 0) name.replace(0, 4, L"\\\\?\\");   // the NT form of a full path
+    std::string to, from = h->path;
+    if (!ToPosix(name.c_str(), to)) return FALSE;
+    char cur[4096];
+    const ssize_t n = readlink(("/proc/self/fd/" + std::to_string(h->fd)).c_str(), cur, sizeof(cur) - 1);
+    if (n > 0) from.assign(cur, (size_t)n);
+    struct stat now, dest;
+    if (from.empty() || lstat(from.c_str(), &now) != 0 || now.st_dev != st.st_dev || now.st_ino != st.st_ino) return Fail(ERROR_FILE_NOT_FOUND);
+    if (lstat(to.c_str(), &dest) == 0) {
+        if (dest.st_dev == st.st_dev && dest.st_ino == st.st_ino) { h->path = to; return TRUE; }   // it has that name already
+        if (!ri->ReplaceIfExists) return Fail(ERROR_ALREADY_EXISTS);
+        if (S_ISDIR(dest.st_mode) || (!S_ISLNK(dest.st_mode) && !(dest.st_mode & S_IWUSR))) return Fail(ERROR_ACCESS_DENIED);   // a folder, a read-only file
+        if (!ShareAllowsDelete(dest)) return Fail(ERROR_ACCESS_DENIED);   // a file open here without delete sharing (Windows: access denied)
+    }
+    int r;
+    if (ri->ReplaceIfExists) {
+        r = rename(from.c_str(), to.c_str());
+    } else {
+        r = renameat2(AT_FDCWD, from.c_str(), AT_FDCWD, to.c_str(), RENAME_NOREPLACE);
+        if (r != 0 && (errno == EINVAL || errno == ENOSYS)) {   // a file system without RENAME_NOREPLACE: a new link never replaces either
+            r = link(from.c_str(), to.c_str());
+            if (r == 0) {
+                unlink(from.c_str());
+            } else if (errno == EPERM || errno == EOPNOTSUPP) {   // nor hard links (FAT, exFAT, a folder): checked, then renamed
+                struct stat x;
+                if (lstat(to.c_str(), &x) == 0) { errno = EEXIST; r = -1; }
+                else r = rename(from.c_str(), to.c_str());
+            }
+        }
+    }
+    if (r != 0) {
+        const int e = errno;
+        if (e == EEXIST || e == ENOTEMPTY) return Fail(ERROR_ALREADY_EXISTS);
+        SetErrorFromErrno(e, to);
+        return FALSE;
+    }
+    h->path = to;   // a later delete through the handle, or its delete on close, goes to the new name
+    return TRUE;
+}
+// Attributes and times through a handle (a time of 0 and attributes of 0 stay as they are), a rename, and the two ways to delete through one.
 BOOL SetFileInformationByHandle(HANDLE hv, FILE_INFO_BY_HANDLE_CLASS cls, LPVOID info, DWORD size) {
     Handle* h = Lookup(hv, Kind::File);
     if (!h) return FALSE;
@@ -493,6 +541,7 @@ BOOL SetFileInformationByHandle(HANDLE hv, FILE_INFO_BY_HANDLE_CLASS cls, LPVOID
         if (times && futimens(h->fd, ts) != 0) { SetErrorFromErrno(errno, h->path); return FALSE; }
         return TRUE;
     }
+    if (cls == FileRenameInfo) return RenameByHandle(h, st, static_cast<const FILE_RENAME_INFO*>(info), size);
     if (cls != FileDispositionInfo && cls != FileDispositionInfoEx) return Fail(ERROR_INVALID_PARAMETER);
     if (size < (cls == FileDispositionInfo ? sizeof(FILE_DISPOSITION_INFO) : sizeof(FILE_DISPOSITION_INFO_EX))) return Fail(ERROR_BAD_LENGTH);
     bool del, posix = false, ignoreReadOnly = false;
@@ -862,6 +911,16 @@ BOOL FindClose(HANDLE hv) {
 
 // "C:\a\.\b\..\c" is "C:\a\c": "." and ".." fold, separators become backslashes, a relative path gets the current folder (Z:) in
 // front. A drive other than Z is only spelled, never looked at. Nothing needs to exist.
+DWORD GetLongPathNameW(LPCWSTR shortPath, LPWSTR out, DWORD size) {
+    std::string p;
+    struct stat st;
+    if (!ToPosix(shortPath, p)) return 0;
+    if (lstat(p.c_str(), &st) != 0) { SetErrorFromErrno(errno, p); return 0; }
+    const std::wstring w = (std::wstring(shortPath).rfind(L"\\\\?\\", 0) == 0 ? L"\\\\?\\" : L"") + WinPath(p);
+    if (!out || size < w.size() + 1) return (DWORD)w.size() + 1;
+    std::memcpy(out, w.c_str(), (w.size() + 1) * sizeof(wchar_t));
+    return (DWORD)w.size();
+}
 DWORD GetFullPathNameW(LPCWSTR name, DWORD size, LPWSTR out, LPWSTR* filePart) {
     if (!name || !*name) { SetLastError(ERROR_PATH_NOT_FOUND); return 0; }
     std::wstring raw = name, drive;
@@ -1095,6 +1154,11 @@ DWORD FormatMessageW(DWORD flags, LPCVOID, DWORD id, DWORD, LPWSTR buf, DWORD si
     return (DWORD)n + 2;
 }
 HLOCAL LocalFree(HLOCAL p) { std::free(p); return nullptr; }
+BOOL ConvertStringSecurityDescriptorToSecurityDescriptorW(LPCWSTR, DWORD, PSECURITY_DESCRIPTOR* sd, ULONG* size) {
+    if (sd) *sd = nullptr;
+    if (size) *size = 0;
+    return Fail(ERROR_NOT_SUPPORTED);
+}
 // One heap here: the C one. What Windows code frees with HeapFree(GetProcessHeap(), ...) came from malloc.
 HANDLE GetProcessHeap() { static char heap; return &heap; }
 BOOL HeapFree(HANDLE, DWORD, LPVOID p) { std::free(p); return TRUE; }

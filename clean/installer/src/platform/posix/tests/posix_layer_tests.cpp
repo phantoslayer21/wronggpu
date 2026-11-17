@@ -1,17 +1,24 @@
 // SPDX-License-Identifier: MIT
 // Tests of the Linux layer itself (src/platform/posix): the Windows calls it implements, checked against what Windows does.
 // The core's own tests exercise it only as far as the core goes; this covers the rest (sharing, processes, the registry file).
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <windows.h>
 
+#include <restartmanager.h>
+
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -759,7 +766,384 @@ void ReplaceFile() {
     check(!ReplaceFileW(L"Z:\\no\\such\\a", L"Z:\\no\\such\\b", nullptr, 0, nullptr, nullptr) && GetLastError() == ERROR_PATH_NOT_FOUND, "Z:\\ paths are read as everywhere else");
 }
 
-int main() {
+// ---- 0.6.5's calls: the named mutex (the per-game state lock), events, rename by handle, the long path, security
+// descriptors, the Restart Manager. The other processes are this program started again with a --child-* argument.
+std::string SelfExe() {
+    char b[4096];
+    const ssize_t n = readlink("/proc/self/exe", b, sizeof(b) - 1);
+    return n > 0 ? std::string(b, (size_t)n) : std::string();
+}
+std::string PosixOf(const std::wstring& w) {   // Tmp's Z:\ spelling as the POSIX path a child gets
+    std::string p(w.begin(), w.end());
+    if (p.rfind("Z:", 0) == 0) p.erase(0, 2);
+    for (auto& c : p) if (c == '\\') c = '/';
+    return p;
+}
+PROCESS_INFORMATION StartChild(const std::string& args) {
+    const std::string self = SelfExe();
+    std::wstring cmd = L"\"" + std::wstring(self.begin(), self.end()) + L"\" ";
+    cmd += std::wstring(args.begin(), args.end());
+    std::vector<wchar_t> b(cmd.begin(), cmd.end());
+    b.push_back(0);
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(nullptr, b.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) pi.hProcess = nullptr;
+    return pi;
+}
+bool WaitReady(const std::string& file, int ms = 10000) {
+    for (int i = 0; i < ms / 5; ++i) {
+        if (access(file.c_str(), F_OK) == 0) return true;
+        Sleep(5);
+    }
+    return false;
+}
+void EndChild(PROCESS_INFORMATION& pi) {
+    if (!pi.hProcess) return;
+    if (WaitForSingleObject(pi.hProcess, 0) == WAIT_TIMEOUT) TerminateProcess(pi.hProcess, 1);
+    WaitForSingleObject(pi.hProcess, 5000);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+}
+long long MsSince(std::chrono::steady_clock::time_point t) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t).count();
+}
+std::wstring Name(const char* base) { return L"Global\\wg-posix-test-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::wstring(base, base + std::strlen(base)); }
+std::string Narrow(const std::wstring& w) { return std::string(w.begin(), w.end()); }
+
+// the children
+int ChildMain(int argc, char** argv) {
+    const std::string mode = argv[1];
+    auto ready = [](const char* f) { const int fd = open(f, O_CREAT | O_WRONLY | O_CLOEXEC, 0600); if (fd >= 0) close(fd); };
+    if (mode == "--child-mutex" && argc == 6) {   // <name> <ms> <ready> release|die
+        const std::wstring name(argv[2], argv[2] + std::strlen(argv[2]));
+        HANDLE m = CreateMutexW(nullptr, FALSE, name.c_str());
+        if (!m || WaitForSingleObject(m, 10000) != WAIT_OBJECT_0) return 2;
+        ready(argv[4]);
+        Sleep((DWORD)std::atoi(argv[3]));
+        if (std::string(argv[5]) == "die") _exit(3);   // ends owning it
+        ReleaseMutex(m);
+        CloseHandle(m);
+        return 0;
+    }
+    if ((mode == "--child-open" || mode == "--child-map") && argc == 4) {   // <file> <ready>
+        const int fd = open(argv[2], O_RDONLY | O_CLOEXEC);
+        if (fd < 0) return 2;
+        if (mode == "--child-map") {   // only the mapping holds it, as a Wine process holds a DLL it loaded
+            struct stat st;
+            fstat(fd, &st);
+            if (mmap(nullptr, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0) == MAP_FAILED) return 3;
+            close(fd);
+        }
+        ready(argv[3]);
+        Sleep(30000);
+        return 0;
+    }
+    if (mode == "--child-nodump" && argc == 3) {   // its /proc fd and maps become closed to its own user
+        prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
+        ready(argv[2]);
+        Sleep(30000);
+        return 0;
+    }
+    return 9;
+}
+
+void NamedMutex() {
+    const std::wstring a = Name("a");
+    HANDLE m = CreateMutexW(nullptr, FALSE, a.c_str());
+    check(m && GetLastError() == 0, "mutex: a new name: created, not ERROR_ALREADY_EXISTS");
+    HANDLE m2 = CreateMutexW(nullptr, FALSE, a.c_str());
+    check(m2 && GetLastError() == ERROR_ALREADY_EXISTS, "mutex: the same name again while a handle is open: ERROR_ALREADY_EXISTS");
+    HANDLE o = OpenMutexW(SYNCHRONIZE | MUTEX_MODIFY_STATE, FALSE, a.c_str());
+    check(o != nullptr, "mutex: OpenMutexW of an open name");
+    check(!OpenMutexW(SYNCHRONIZE, FALSE, Name("never").c_str()) && GetLastError() == ERROR_FILE_NOT_FOUND, "mutex: OpenMutexW of a name nobody has open: ERROR_FILE_NOT_FOUND");
+    check(!CreateMutexW(nullptr, FALSE, nullptr) && GetLastError() == ERROR_NOT_SUPPORTED, "mutex: an unnamed mutex: ERROR_NOT_SUPPORTED");
+    check(!CreateMutexW(nullptr, FALSE, std::wstring(300, L'x').c_str()) && GetLastError() == ERROR_INVALID_NAME, "mutex: a name too long for a file: ERROR_INVALID_NAME");
+    check(!ReleaseMutex(m) && GetLastError() == ERROR_NOT_OWNER, "mutex: ReleaseMutex of a mutex nobody owns: ERROR_NOT_OWNER");
+    check(WaitForSingleObject(m, 0) == WAIT_OBJECT_0, "mutex: taken");
+    check(WaitForSingleObject(m2, 0) == WAIT_OBJECT_0, "mutex: taken again by its owner through another handle (recursive, per thread)");
+    std::atomic<DWORD> other{0}, otherRelease{0}, otherError{0};
+    long long waited = 0;
+    std::thread t([&] {
+        const auto t0 = std::chrono::steady_clock::now();
+        other = WaitForSingleObject(o, 150);
+        waited = MsSince(t0);
+        otherRelease = ReleaseMutex(o);
+        otherError = GetLastError();
+    });
+    t.join();
+    check(other == WAIT_TIMEOUT && waited >= 140 && waited < 2000, "mutex: another thread of this process waits its timeout, then WAIT_TIMEOUT");
+    check(!otherRelease && otherError == ERROR_NOT_OWNER, "mutex: another thread cannot release it (ERROR_NOT_OWNER)");
+    check(ReleaseMutex(m2) && ReleaseMutex(m), "mutex: released as often as taken");
+    check(!ReleaseMutex(m) && GetLastError() == ERROR_NOT_OWNER, "mutex: one release too many: ERROR_NOT_OWNER");
+    std::thread t2([&] { other = WaitForSingleObject(o, 1000); ReleaseMutex(o); });
+    t2.join();
+    check(other == WAIT_OBJECT_0, "mutex: once released, another thread takes it");
+    // a thread that waits while another holds it gets it when it is released, inside its wait
+    WaitForSingleObject(m, 0);
+    std::thread t3([&] { other = WaitForSingleObject(o, 3000); ReleaseMutex(o); });
+    Sleep(100);
+    ReleaseMutex(m);
+    t3.join();
+    check(other == WAIT_OBJECT_0, "mutex: a waiting thread gets it once the owner releases it");
+    CloseHandle(m2);
+    CloseHandle(m);
+    HANDLE again = CreateMutexW(nullptr, FALSE, a.c_str());
+    check(again && GetLastError() == ERROR_ALREADY_EXISTS, "mutex: kept by an opened handle: the creators' handles closed, it still exists");
+    CloseHandle(again);
+    CloseHandle(o);
+    again = CreateMutexW(nullptr, FALSE, a.c_str());
+    check(again && GetLastError() == 0, "mutex: every handle closed: the name is new again");
+    CloseHandle(again);
+
+    // between processes
+    const std::wstring b = Name("b");
+    const std::string readyB = PosixOf(In(L"ready-b"));
+    PROCESS_INFORMATION pi = StartChild("--child-mutex " + Narrow(b) + " 800 " + readyB + " release");
+    check(pi.hProcess && WaitReady(readyB), "mutex: (a child holds it)");
+    HANDLE mb = CreateMutexW(nullptr, FALSE, b.c_str());
+    check(mb && GetLastError() == ERROR_ALREADY_EXISTS, "mutex: another process's handle: ERROR_ALREADY_EXISTS here");
+    auto t0 = std::chrono::steady_clock::now();
+    const DWORD busy = WaitForSingleObject(mb, 200);
+    const long long ms = MsSince(t0);
+    check(busy == WAIT_TIMEOUT && ms >= 190 && ms < 2000, "mutex: held by another process: WAIT_TIMEOUT after the wait asked for");
+    check(WaitForSingleObject(mb, 10000) == WAIT_OBJECT_0, "mutex: the other process releases it: taken (not abandoned)");
+    ReleaseMutex(mb);
+    EndChild(pi);
+    CloseHandle(mb);
+
+    // an owner that ends without releasing it: abandoned for whoever kept the object alive; a fresh object for a new creator
+    const std::wstring c = Name("c");
+    const std::string readyC = PosixOf(In(L"ready-c"));
+    pi = StartChild("--child-mutex " + Narrow(c) + " 300 " + readyC + " die");
+    check(pi.hProcess && WaitReady(readyC), "mutex: (a child holds it and will end owning it)");
+    HANDLE keep = OpenMutexW(SYNCHRONIZE, FALSE, c.c_str());
+    WaitForSingleObject(pi.hProcess, 5000);
+    check(keep && WaitForSingleObject(keep, 2000) == WAIT_ABANDONED, "mutex: its owner died, a handle kept it: WAIT_ABANDONED, and it is ours");
+    check(ReleaseMutex(keep), "mutex: an abandoned mutex taken is released as usual");
+    check(WaitForSingleObject(keep, 0) == WAIT_OBJECT_0 && ReleaseMutex(keep), "mutex: after that release it is a normal mutex again");
+    CloseHandle(keep);
+    EndChild(pi);
+    const std::wstring d = Name("d");
+    const std::string readyD = PosixOf(In(L"ready-d"));
+    pi = StartChild("--child-mutex " + Narrow(d) + " 100 " + readyD + " die");
+    check(pi.hProcess && WaitReady(readyD), "mutex: (a child holds a second one and will end owning it)");
+    WaitForSingleObject(pi.hProcess, 5000);
+    HANDLE fresh = CreateMutexW(nullptr, FALSE, d.c_str());
+    check(fresh && GetLastError() == 0 && WaitForSingleObject(fresh, 0) == WAIT_OBJECT_0, "mutex: no handle kept it: a new mutex, not abandoned (as on Windows)");
+    ReleaseMutex(fresh);
+    CloseHandle(fresh);
+    EndChild(pi);
+
+    // a lock file this user may not open: access denied, not a timeout
+    const std::wstring e = Name("e");
+    HANDLE me = CreateMutexW(nullptr, FALSE, e.c_str());
+    const char* rt = getenv("XDG_RUNTIME_DIR");
+    const std::string lockFile = std::string(rt && *rt ? rt : "") + "/wronggpu-mutex-Global%5C" + Narrow(e).substr(7) + ".lock";
+    CloseHandle(me);
+    if (geteuid() == 0 || !rt || !*rt) {
+        std::printf("posix-layer: running as root or without XDG_RUNTIME_DIR: the lock-file permission check is skipped\n");
+    } else {
+        check(access(lockFile.c_str(), F_OK) == 0, "mutex: (its lock file is in XDG_RUNTIME_DIR)");
+        chmod(lockFile.c_str(), 0);
+        check(!CreateMutexW(nullptr, FALSE, e.c_str()) && GetLastError() == ERROR_ACCESS_DENIED, "mutex: a lock file this user may not open: CreateMutexW ERROR_ACCESS_DENIED");
+        check(!OpenMutexW(SYNCHRONIZE, FALSE, e.c_str()) && GetLastError() == ERROR_ACCESS_DENIED, "mutex: and OpenMutexW ERROR_ACCESS_DENIED");
+        chmod(lockFile.c_str(), 0600);
+    }
+    // this run's lock files (a product run keeps them: one per name in the runtime folder, which the session clears)
+    if (rt && *rt)
+        for (const char* n : {"a", "b", "c", "d", "e"}) unlink((std::string(rt) + "/wronggpu-mutex-Global%5C" + Narrow(Name(n)).substr(7) + ".lock").c_str());
+}
+
+void Events() {
+    HANDLE ev = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    check(ev && WaitForSingleObject(ev, 0) == WAIT_TIMEOUT, "event: manual reset, not set: WAIT_TIMEOUT");
+    std::thread t([&] { Sleep(50); SetEvent(ev); });
+    check(WaitForSingleObject(ev, 5000) == WAIT_OBJECT_0, "event: set by another thread inside the wait");
+    t.join();
+    check(WaitForSingleObject(ev, 0) == WAIT_OBJECT_0, "event: a manual-reset event stays set");
+    CloseHandle(ev);
+    HANDLE au = CreateEventW(nullptr, FALSE, TRUE, nullptr);
+    check(au && WaitForSingleObject(au, 0) == WAIT_OBJECT_0 && WaitForSingleObject(au, 0) == WAIT_TIMEOUT, "event: an auto-reset event lets one wait through");
+    CloseHandle(au);
+    check(!CreateEventW(nullptr, TRUE, FALSE, L"named") && GetLastError() == ERROR_NOT_SUPPORTED, "event: a named event: ERROR_NOT_SUPPORTED");
+    check(!SetEvent(nullptr) && GetLastError() == ERROR_INVALID_HANDLE, "event: SetEvent of no handle: ERROR_INVALID_HANDLE");
+    volatile LONG n = 0;
+    std::vector<std::thread> ts;
+    for (int i = 0; i < 4; ++i) ts.emplace_back([&] { for (int k = 0; k < 10000; ++k) InterlockedIncrement(&n); });
+    for (auto& x : ts) x.join();
+    check(n == 40000, "InterlockedIncrement: no increment lost between threads");
+}
+
+bool RenameTo(HANDLE h, const std::wstring& name, bool replace) {
+    std::vector<unsigned char> buf(sizeof(FILE_RENAME_INFO) + name.size() * sizeof(wchar_t), 0);
+    FILE_RENAME_INFO* ri = reinterpret_cast<FILE_RENAME_INFO*>(buf.data());
+    ri->ReplaceIfExists = replace ? TRUE : FALSE;
+    ri->FileNameLength = (DWORD)(name.size() * sizeof(wchar_t));
+    std::memcpy(ri->FileName, name.c_str(), name.size() * sizeof(wchar_t));
+    return SetFileInformationByHandle(h, FileRenameInfo, ri, (DWORD)buf.size()) != 0;
+}
+
+void RenameByHandle() {
+    const std::wstring a = In(L"rn-a.dll"), b = In(L"rn-b.dll"), c = In(L"rn-c.dll");
+    Put(a, "old");
+    HANDLE h = OpenFor(a, DELETE | GENERIC_READ | FILE_WRITE_DATA, FILE_SHARE_READ);   // as the operation guard holds a binary
+    check(RenameTo(h, L"\\\\?\\" + b, false) && !Exists(a) && Slurp(b) == "old", "rename by handle: to a free name (\\\\?\\ form)");
+    check(SetDisposition(h, FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS) && !Exists(b), "  a delete through the handle then deletes the new name");
+    CloseHandle(h);
+    Put(a, "old");
+    h = OpenFor(a, DELETE | GENERIC_READ, FILE_SHARE_READ);
+    check(RenameTo(h, L"\\??\\" + b, false) && Slurp(b) == "old", "rename by handle: a name in the NT form (\\??\\Z:\\...)");
+    Put(c, "taken");
+    check(!RenameTo(h, c, false) && GetLastError() == ERROR_ALREADY_EXISTS && Slurp(b) == "old" && Slurp(c) == "taken", "rename by handle: onto a file without replace: ERROR_ALREADY_EXISTS, both as they were");
+    HANDLE busy = OpenFor(c, GENERIC_READ, FILE_SHARE_READ);
+    check(!RenameTo(h, c, true) && GetLastError() == ERROR_ACCESS_DENIED && Slurp(c) == "taken" && Slurp(b) == "old", "rename by handle: replace over a file open without delete sharing: ERROR_ACCESS_DENIED, nothing moved");
+    CloseHandle(busy);
+    SetFileAttributesW(c.c_str(), FILE_ATTRIBUTE_READONLY);
+    check(!RenameTo(h, c, true) && GetLastError() == ERROR_ACCESS_DENIED && Slurp(c) == "taken", "rename by handle: replace over a read-only file: ERROR_ACCESS_DENIED");
+    SetFileAttributesW(c.c_str(), FILE_ATTRIBUTE_NORMAL);
+    check(RenameTo(h, c, true) && Slurp(c) == "old" && !Exists(b), "rename by handle: replace over a closed file: replaced");
+    // renamed by someone else meanwhile (by name; it shares delete): the handle's rename still moves its own file
+    CloseHandle(h);
+    h = OpenFor(c, DELETE | GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE);
+    check(MoveFileExW(c.c_str(), b.c_str(), 0) && RenameTo(h, a, false) && Slurp(a) == "old" && !Exists(b) && !Exists(c), "rename by handle: after another rename by name, the file's current name is used");
+    CloseHandle(h);
+    h = OpenFor(a, GENERIC_READ);
+    check(!RenameTo(h, b, false) && GetLastError() == ERROR_ACCESS_DENIED && Exists(a), "rename by handle: a handle without DELETE access: ERROR_ACCESS_DENIED");
+    CloseHandle(h);
+    h = OpenFor(a, DELETE | GENERIC_READ);
+    std::vector<unsigned char> buf(sizeof(FILE_RENAME_INFO) + 8, 0);
+    FILE_RENAME_INFO* ri = reinterpret_cast<FILE_RENAME_INFO*>(buf.data());
+    ri->RootDirectory = h;
+    ri->FileNameLength = sizeof(wchar_t);
+    ri->FileName[0] = L'x';
+    check(!SetFileInformationByHandle(h, FileRenameInfo, ri, (DWORD)buf.size()) && GetLastError() == ERROR_INVALID_PARAMETER, "rename by handle: a name relative to a folder handle: ERROR_INVALID_PARAMETER");
+    ri->RootDirectory = nullptr;
+    ri->FileNameLength = 400;
+    check(!SetFileInformationByHandle(h, FileRenameInfo, ri, (DWORD)buf.size()) && GetLastError() == ERROR_INVALID_PARAMETER, "rename by handle: a name longer than the buffer: ERROR_INVALID_PARAMETER");
+    // a folder this user may not write: access denied, the file where it was
+    const std::wstring ro = In(L"rn-ro");
+    CreateDirectoryW(ro.c_str(), nullptr);
+    if (geteuid() == 0) {
+        std::printf("posix-layer: running as root: the read-only folder rename check is skipped\n");
+    } else {
+        chmod(PosixOf(ro).c_str(), 0555);
+        check(!RenameTo(h, ro + L"\\x.dll", false) && GetLastError() == ERROR_ACCESS_DENIED && Exists(a), "rename by handle: into a folder this user may not write: ERROR_ACCESS_DENIED");
+        chmod(PosixOf(ro).c_str(), 0755);
+    }
+    check(!RenameTo(h, L"Z:\\no\\such\\folder\\x.dll", false) && GetLastError() == ERROR_PATH_NOT_FOUND && Exists(a), "rename by handle: into a folder that is not there: ERROR_PATH_NOT_FOUND");
+    CloseHandle(h);
+    DeleteFileW(a.c_str());
+}
+
+void LongPathAndSecurity() {
+    Put(In(L"LongName.Txt"), "x");
+    wchar_t out[MAX_PATH * 2];
+    DWORD n = GetLongPathNameW(In(L"longname.txt").c_str(), out, MAX_PATH * 2);
+    check(n && std::wstring(out, n) == In(L"LongName.Txt"), "GetLongPathNameW: the path, its names as they are on disk");
+    n = GetLongPathNameW((L"\\\\?\\" + In(L"LongName.Txt")).c_str(), out, MAX_PATH * 2);
+    check(n && std::wstring(out, n) == L"\\\\?\\" + In(L"LongName.Txt"), "GetLongPathNameW: a \\\\?\\ prefix stays");
+    const DWORD need = GetLongPathNameW(In(L"LongName.Txt").c_str(), out, 3);
+    check(need == In(L"LongName.Txt").size() + 1, "GetLongPathNameW: a short buffer: the size needed, with the NUL");
+    check(!GetLongPathNameW(In(L"none.txt").c_str(), out, MAX_PATH) && GetLastError() == ERROR_FILE_NOT_FOUND, "GetLongPathNameW: a missing file: ERROR_FILE_NOT_FOUND");
+    check(!GetLongPathNameW(In(L"none\\x.txt").c_str(), out, MAX_PATH) && GetLastError() == ERROR_PATH_NOT_FOUND, "GetLongPathNameW: a missing folder: ERROR_PATH_NOT_FOUND");
+    // through a symbolic link: the long form keeps the link's name, the final form is where it leads (what util.cpp compares)
+    CreateDirectoryW(In(L"lp-real").c_str(), nullptr);
+    Put(In(L"lp-real\\f.txt"), "x");
+    if (symlink(PosixOf(In(L"lp-real")).c_str(), PosixOf(In(L"lp-link")).c_str()) == 0) {
+        n = GetLongPathNameW(In(L"lp-link\\f.txt").c_str(), out, MAX_PATH * 2);
+        HANDLE h = OpenFor(In(L"lp-link\\f.txt"), GENERIC_READ);
+        wchar_t fin[MAX_PATH * 2];
+        const DWORD m = GetFinalPathNameByHandleW(h, fin, MAX_PATH * 2, 0);
+        CloseHandle(h);
+        check(n && std::wstring(out, n) == In(L"lp-link\\f.txt") && m && std::wstring(fin, m) == In(L"lp-real\\f.txt"),
+              "GetLongPathNameW: a link is not followed (its final path is the target's)");
+    }
+    PSECURITY_DESCRIPTOR sd = reinterpret_cast<PSECURITY_DESCRIPTOR>(1);
+    check(!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(A;;GA;;;WD)", SDDL_REVISION_1, &sd, nullptr) && GetLastError() == ERROR_NOT_SUPPORTED && sd == nullptr,
+          "security descriptors: not available (FALSE, ERROR_NOT_SUPPORTED, no descriptor)");
+}
+
+UINT HoldersOf(const std::wstring& file, RM_PROCESS_INFO* info, UINT cap, DWORD* reasons, DWORD* rc = nullptr, UINT* needed = nullptr) {
+    DWORD s = 0;
+    WCHAR key[CCH_RM_SESSION_KEY + 1] = {};
+    if (RmStartSession(&s, 0, key) != ERROR_SUCCESS) return 999;
+    LPCWSTR files[] = {file.c_str()};
+    RmRegisterResources(s, 1, files, 0, nullptr, 0, nullptr);
+    UINT need = 0, n = cap;
+    const DWORD r = RmGetList(s, &need, &n, info, reasons);
+    RmEndSession(s);
+    if (rc) *rc = r;
+    if (needed) *needed = need;
+    return r == ERROR_SUCCESS ? n : 999;
+}
+bool Lists(const RM_PROCESS_INFO* info, UINT n, DWORD pid) {
+    for (UINT i = 0; i < n; ++i) if (info[i].Process.dwProcessId == pid) return true;
+    return false;
+}
+
+void RestartManager() {
+    const std::wstring f = In(L"rm-held.dll"), g = In(L"rm-mapped.dll"), idle = In(L"rm-free.dll");
+    Put(f, "MZ held");
+    Put(g, "MZ mapped");
+    Put(idle, "MZ free");
+    RM_PROCESS_INFO info[16];
+    DWORD reasons = 0;
+    check(HoldersOf(idle, info, 16, &reasons) == 0, "Restart Manager: a file nobody holds: none listed");
+    HANDLE mine = OpenFor(f, GENERIC_READ);
+    UINT n = HoldersOf(f, info, 16, &reasons);
+    check(n != 999 && Lists(info, n, GetCurrentProcessId()), "Restart Manager: a file this process holds: this process listed");
+    CloseHandle(mine);
+    const std::string r1 = PosixOf(In(L"ready-rm1")), r2 = PosixOf(In(L"ready-rm2"));
+    PROCESS_INFORMATION po = StartChild("--child-open " + PosixOf(f) + " " + r1);
+    PROCESS_INFORMATION pm = StartChild("--child-map " + PosixOf(g) + " " + r2);
+    check(po.hProcess && pm.hProcess && WaitReady(r1) && WaitReady(r2), "Restart Manager: (two children hold the files)");
+    n = HoldersOf(f, info, 16, &reasons);
+    bool named = false;
+    for (UINT i = 0; i < n && n != 999; ++i)
+        if (info[i].Process.dwProcessId == po.dwProcessId) named = std::wstring(info[i].strAppName) == L"posix-layer-tests" && info[i].Process.ProcessStartTime.dwHighDateTime != 0;
+    check(n != 999 && Lists(info, n, po.dwProcessId) && !Lists(info, n, pm.dwProcessId), "Restart Manager: a file another process has open: that process listed (and not the other)");
+    check(named, "Restart Manager: the holder's program name and start time");
+    n = HoldersOf(g, info, 16, &reasons);
+    check(n != 999 && Lists(info, n, pm.dwProcessId), "Restart Manager: a file another process only has mapped (as Wine maps a DLL): listed");
+    struct stat fs, is;
+    stat(PosixOf(f).c_str(), &fs);
+    stat(PosixOf(idle).c_str(), &is);
+    check(wgposix::RmScanProcess((int)po.dwProcessId, {{fs.st_dev, fs.st_ino}}) == 1 && wgposix::RmScanProcess((int)po.dwProcessId, {{is.st_dev, is.st_ino}}) == 0,
+          "Restart Manager: one process looked at: it holds the file it has open (1), not another (0)");
+    DWORD rc = 0;
+    UINT needed = 0;
+    HoldersOf(f, info, 0, &reasons, &rc, &needed);
+    check(rc == ERROR_MORE_DATA && needed >= 1, "Restart Manager: no room in the list: ERROR_MORE_DATA and the count needed");
+    EndChild(po);
+    EndChild(pm);
+    n = HoldersOf(f, info, 16, &reasons);
+    check(n != 999 && !Lists(info, n, po.dwProcessId), "Restart Manager: the holder ended: no longer listed");
+    // a process of this user whose /proc entries are closed (not dumpable): unreadable (-1), and the reasons say not everything
+    // was seen (on most desktops other processes of the user, the compositor for one, are closed too, so the reason alone
+    // cannot single the child out: the scan of the child is checked first)
+    const std::string r3 = PosixOf(In(L"ready-rm3"));
+    PROCESS_INFORMATION pn = StartChild("--child-nodump " + r3);
+    check(pn.hProcess && WaitReady(r3), "Restart Manager: (a child that is not dumpable)");
+    check(wgposix::RmScanProcess((int)pn.dwProcessId, {{is.st_dev, is.st_ino}}) == -1, "Restart Manager: a process of this user that cannot be read: unreadable (-1), not 'holds nothing'");
+    reasons = 0;
+    n = HoldersOf(idle, info, 16, &reasons);
+    check(n == 0 && (reasons & RmRebootReasonPermissionDenied), "Restart Manager: ...and the list's reasons say RmRebootReasonPermissionDenied (none seen is not none)");
+    EndChild(pn);
+    check(wgposix::RmScanProcess((int)pn.dwProcessId, {{is.st_dev, is.st_ino}}) == -2, "Restart Manager: a process that ended: not looked at (-2)");
+    if (getuid() != 0) check(wgposix::RmScanProcess(1, {{is.st_dev, is.st_ino}}) == -2, "Restart Manager: another user's process (pid 1, root's): not looked at (-2)");
+    DWORD s = 0;
+    check(RmStartSession(&s, 0, nullptr) == ERROR_SUCCESS && RmEndSession(s) == ERROR_SUCCESS && RmEndSession(s) == ERROR_INVALID_HANDLE, "Restart Manager: a session ends once");
+    UINT z = 0, zn = 0;
+    check(RmGetList(s, &z, &zn, nullptr, &reasons) == ERROR_INVALID_HANDLE, "Restart Manager: an ended session: ERROR_INVALID_HANDLE");
+    RM_UNIQUE_PROCESS app{};
+    RmStartSession(&s, 0, nullptr);
+    check(RmRegisterResources(s, 0, nullptr, 1, &app, 0, nullptr) == ERROR_NOT_SUPPORTED, "Restart Manager: registering applications: ERROR_NOT_SUPPORTED");
+    RmEndSession(s);
+}
+
+int main(int argc, char** argv) {
+    if (argc >= 2 && std::strncmp(argv[1], "--child-", 8) == 0) return ChildMain(argc, argv);
     // a registry file of this run's own, and a folder of its own, both under TMPDIR
     wchar_t t[MAX_PATH]{};
     GetTempPathW(MAX_PATH, t);
@@ -789,6 +1173,11 @@ int main() {
     LinksAndReparse();
     ReplaceFile();
     ProcessEnd();
+    NamedMutex();
+    Events();
+    RenameByHandle();
+    LongPathAndSecurity();
+    RestartManager();
     std::remove(regFile.c_str());
     std::error_code ec;
     std::string posixTmp(Tmp.begin(), Tmp.end());

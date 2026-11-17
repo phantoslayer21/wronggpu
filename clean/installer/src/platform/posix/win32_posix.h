@@ -105,6 +105,7 @@ typedef const GUID& REFIID;
 typedef const GUID& REFCLSID;
 typedef const GUID& REFKNOWNFOLDERID;
 typedef struct _SECURITY_ATTRIBUTES { DWORD nLength; LPVOID lpSecurityDescriptor; BOOL bInheritHandle; } SECURITY_ATTRIBUTES, *LPSECURITY_ATTRIBUTES;
+typedef PVOID PSECURITY_DESCRIPTOR;
 typedef struct _OVERLAPPED OVERLAPPED;
 
 // ---- errors, HRESULTs --------------------------------------------------------------------------------------------------
@@ -256,12 +257,22 @@ constexpr DWORD FIND_FIRST_EX_LARGE_FETCH = 2;
 typedef enum _GET_FILEEX_INFO_LEVELS { GetFileExInfoStandard = 0 } GET_FILEEX_INFO_LEVELS;
 typedef enum _FINDEX_INFO_LEVELS { FindExInfoStandard = 0, FindExInfoBasic = 1 } FINDEX_INFO_LEVELS;
 typedef enum _FINDEX_SEARCH_OPS { FindExSearchNameMatch = 0 } FINDEX_SEARCH_OPS;
-typedef enum _FILE_INFO_BY_HANDLE_CLASS { FileBasicInfo = 0, FileDispositionInfo = 4, FileIdInfo = 18, FileDispositionInfoEx = 21 } FILE_INFO_BY_HANDLE_CLASS;
+typedef enum _FILE_INFO_BY_HANDLE_CLASS { FileBasicInfo = 0, FileRenameInfo = 3, FileDispositionInfo = 4, FileIdInfo = 18, FileDispositionInfoEx = 21 } FILE_INFO_BY_HANDLE_CLASS;
 typedef struct _FILE_BASIC_INFO {
     LARGE_INTEGER CreationTime, LastAccessTime, LastWriteTime, ChangeTime;
     DWORD FileAttributes;
 } FILE_BASIC_INFO;
 typedef struct _FILE_DISPOSITION_INFO { BOOLEAN DeleteFile; } FILE_DISPOSITION_INFO;
+// FileRenameInfo: the file of the handle (opened with DELETE access) takes the name FileName (FileNameLength bytes, no NUL; a
+// full path, also in the NT form \??\Z:\...). Linux: rename(2) of the name /proc/self/fd gives for the handle, so the file
+// renamed is the handle's own unless another process renames it in that instant; ReplaceIfExists off is renameat2's
+// RENAME_NOREPLACE (a file system without it: link and unlink, else a check before the rename). RootDirectory must be null.
+typedef struct _FILE_RENAME_INFO {
+    union { BOOLEAN ReplaceIfExists; DWORD Flags; };
+    HANDLE RootDirectory;
+    DWORD FileNameLength;
+    WCHAR FileName[1];
+} FILE_RENAME_INFO;
 typedef struct _FILE_DISPOSITION_INFO_EX { DWORD Flags; } FILE_DISPOSITION_INFO_EX;
 constexpr DWORD FILE_DISPOSITION_FLAG_DO_NOT_DELETE = 0x0;
 constexpr DWORD FILE_DISPOSITION_FLAG_DELETE = 0x1;
@@ -310,6 +321,8 @@ HANDLE FindFirstFileExW(LPCWSTR pattern, FINDEX_INFO_LEVELS info, LPVOID data, F
 BOOL FindNextFileW(HANDLE h, WIN32_FIND_DATAW* data);
 BOOL FindClose(HANDLE h);
 DWORD GetFullPathNameW(LPCWSTR name, DWORD size, LPWSTR out, LPWSTR* filePart);
+// no 8.3 names here: the path as it is, its names in their case on disk (no link followed); fails as Windows does when it is not there
+DWORD GetLongPathNameW(LPCWSTR shortPath, LPWSTR out, DWORD size);
 DWORD GetTempPathW(DWORD size, LPWSTR out);
 DWORD GetCurrentDirectoryW(DWORD size, LPWSTR out);
 BOOL SetCurrentDirectoryW(LPCWSTR dir);
@@ -364,6 +377,10 @@ constexpr DWORD FORMAT_MESSAGE_IGNORE_INSERTS = 0x200;
 constexpr DWORD FORMAT_MESSAGE_FROM_SYSTEM = 0x1000;
 DWORD FormatMessageW(DWORD flags, LPCVOID src, DWORD id, DWORD lang, LPWSTR buf, DWORD size, void* args);
 HLOCAL LocalFree(HLOCAL p);
+// Security descriptors do not exist here: always FALSE (ERROR_NOT_SUPPORTED), *sd null. Callers that go on without one get
+// the POSIX permissions instead (a named mutex: its lock file is the user's own, mode 0600).
+constexpr DWORD SDDL_REVISION_1 = 1;
+BOOL ConvertStringSecurityDescriptorToSecurityDescriptorW(LPCWSTR sddl, DWORD revision, PSECURITY_DESCRIPTOR* sd, ULONG* size);
 HANDLE GetProcessHeap();
 BOOL HeapFree(HANDLE heap, DWORD flags, LPVOID p);
 [[noreturn]] void ExitProcess(UINT code);
@@ -453,7 +470,26 @@ typedef struct _JOBOBJECT_BASIC_ACCOUNTING_INFORMATION {
 
 BOOL CreateProcessW(LPCWSTR app, LPWSTR cmdline, LPSECURITY_ATTRIBUTES pa, LPSECURITY_ATTRIBUTES ta, BOOL inherit, DWORD flags,
                     LPVOID env, LPCWSTR dir, STARTUPINFOW* si, PROCESS_INFORMATION* pi);
-DWORD WaitForSingleObject(HANDLE h, DWORD ms);
+DWORD WaitForSingleObject(HANDLE h, DWORD ms);   // a process, a mutex or an event
+
+// ---- synchronization -----------------------------------------------------------------------------------------------------
+// Named mutexes (win32_posix_sync.cpp): a lock file per name in this user's runtime folder ($XDG_RUNTIME_DIR, else the
+// XDG data folder), with Linux open file description locks (fcntl F_OFD_SETLK) on two bytes: byte 0 read-locked by every
+// handle (the object exists while one is open: ERROR_ALREADY_EXISTS, OpenMutexW), byte 1 write-locked by the owner. The kernel
+// drops both when a process ends, so a dead owner never keeps it: the next owner gets WAIT_ABANDONED (the file's first bytes
+// say "owned" until a ReleaseMutex). Owned by a thread and recursive for it, as on Windows; WaitForSingleObject's timeout is
+// kept by polling (1 to 20 ms). Global\ and Local\ are the same per-user folder: two Linux accounts do not see each other's
+// names, and a Windows program under Wine has its own (wineserver's) names. Unnamed mutexes are not supported. A thread that
+// ends while it owns one keeps it until its process ends or closes every handle of it (Windows abandons it at the thread's end).
+constexpr DWORD MUTEX_MODIFY_STATE = 0x0001;
+constexpr DWORD ERROR_NOT_OWNER = 288;
+HANDLE CreateMutexW(LPSECURITY_ATTRIBUTES sa, BOOL initialOwner, LPCWSTR name);
+HANDLE OpenMutexW(DWORD access, BOOL inherit, LPCWSTR name);   // ERROR_FILE_NOT_FOUND when no handle of that name is open
+BOOL ReleaseMutex(HANDLE h);                                  // ERROR_NOT_OWNER from a thread that does not own it
+// Events: unnamed only, within this process (a name: ERROR_NOT_SUPPORTED).
+HANDLE CreateEventW(LPSECURITY_ATTRIBUTES sa, BOOL manualReset, BOOL initialState, LPCWSTR name);
+BOOL SetEvent(HANDLE h);
+inline LONG InterlockedIncrement(volatile LONG* p) { return __atomic_add_fetch(p, 1, __ATOMIC_SEQ_CST); }
 BOOL GetExitCodeProcess(HANDLE h, LPDWORD code);
 BOOL TerminateProcess(HANDLE h, UINT code);
 DWORD ResumeThread(HANDLE h);

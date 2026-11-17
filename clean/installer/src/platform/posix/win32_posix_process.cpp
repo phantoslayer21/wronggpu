@@ -345,6 +345,8 @@ BOOL CreateProcessW(LPCWSTR app, LPWSTR cmdline, LPSECURITY_ATTRIBUTES, LPSECURI
     return TRUE;
 }
 DWORD WaitForSingleObject(HANDLE hv, DWORD ms) {
+    if (Handle* m = Lookup(hv, Kind::Mutex)) return WaitMutex(m, ms);
+    if (Handle* e = Lookup(hv, Kind::Event)) return WaitEvent(e, ms);
     Handle* h = Lookup(hv, Kind::Process);
     if (!h) return WAIT_FAILED;
     struct timespec start;

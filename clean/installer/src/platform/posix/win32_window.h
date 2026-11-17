@@ -241,7 +241,6 @@ BOOL GetMonitorInfoW(HMONITOR m, MONITORINFO* mi);
 HRESULT DwmSetWindowAttribute(HWND h, DWORD attr, LPCVOID value, DWORD size);   // no DWM: always fails
 BOOL ShutdownBlockReasonCreate(HWND h, LPCWSTR reason);   // no session manager hook: succeeds, does nothing
 BOOL ShutdownBlockReasonDestroy(HWND h);
-HANDLE CreateMutexW(LPSECURITY_ATTRIBUTES sa, BOOL owner, LPCWSTR name);   // a named lock between processes of this user
 void GetStartupInfoW(STARTUPINFOW* si);
 INT_PTR ShellExecuteW(HWND h, LPCWSTR verb, LPCWSTR file, LPCWSTR params, LPCWSTR dir, int show);   // xdg-open for documents and addresses
 
