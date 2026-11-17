@@ -1414,6 +1414,8 @@ HMODULE GetModuleHandleW(LPCWSTR name) {
 }
 FARPROC GetProcAddress(HMODULE m, LPCSTR name) {
     if (m == &g_ntdll && name && std::strcmp(name, "RtlGetVersion") == 0) return reinterpret_cast<FARPROC>(&RtlGetVersionStandIn);
+    // wg::NativeLinux(): the one name only this layer's ntdll exports (Windows' and Wine's ntdll never do)
+    if (m == &g_ntdll && name && std::strcmp(name, "wronggpu_native_posix") == 0) return reinterpret_cast<FARPROC>(&RtlGetVersionStandIn);
     SetLastError(ERROR_PROC_NOT_FOUND);
     return nullptr;
 }

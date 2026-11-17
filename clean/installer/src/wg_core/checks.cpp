@@ -69,14 +69,25 @@ static bool HexId(const string& text, unsigned long& id) {
     while (end && (*end == '\n' || *end == '\r' || *end == ' ')) ++end;
     return end && end != s && *end == '\0';
 }
+// The RDNA 4 PCI device ids and the card each is, from the RR runtime's list (rdna4_device_id) and the names its tests give
+// the boards (clean/runtime/interop/tests/test_executor_select.cpp). One list: the Wine fallback and the native path read it.
+struct Rdna4Card { unsigned long device; const wchar_t* name; };
+static const Rdna4Card kRdna4Cards[] = {
+    {0x7550, L"AMD Radeon RX 9070 XT"}, {0x7551, L"AMD Radeon RX 9070 GRE"}, {0x7590, L"AMD Radeon RX 9060 XT"}, {0x7591, L"AMD Radeon RX 9060"}};
+static const Rdna4Card* FindRdna4Card(unsigned long vendor, unsigned long device) {
+    if (vendor != 0x1002) return nullptr;
+    for (const auto& c : kRdna4Cards) if (c.device == device) return &c;
+    return nullptr;
+}
+static bool CardIds(const wstring& card, unsigned long& v, unsigned long& d) {
+    string vendor, device;
+    return ReadSysfs(Join(card, L"device\\vendor"), vendor) && ReadSysfs(Join(card, L"device\\device"), device) && HexId(vendor, v) && HexId(device, d);
+}
 wstring LinuxRdna4Name(const wstring& drmRoot) {
     for (const auto& card : DrmCards(drmRoot)) {
-        string vendor, device;
         unsigned long v = 0, d = 0;
-        if (!ReadSysfs(Join(card.second, L"device\\vendor"), vendor) || !ReadSysfs(Join(card.second, L"device\\device"), device) ||
-            !HexId(vendor, v) || !HexId(device, d))
-            continue;
-        if (v == 0x1002 && (d == 0x7550 || d == 0x7551 || d == 0x7590 || d == 0x7591)) {
+        if (!CardIds(card.second, v, d)) continue;
+        if (FindRdna4Card(v, d)) {
             wchar_t b[160];
             swprintf(b, 160, L"AMD Radeon RDNA 4 (PCI 1002:%04lX, found in Linux's device list; not confirmed as the adapter the game uses)", d);
             return b;
@@ -84,14 +95,47 @@ wstring LinuxRdna4Name(const wstring& drmRoot) {
     }
     return L"";
 }
+// What Linux's device list says about the graphics cards, with no Windows graphics layer: a native Linux launcher has no DXGI.
+// The name comes from the card's PCI ids (an RDNA 4 board by name, any other card as "<vendor> (code vvvv:dddd)"); the driver is the
+// name of the kernel driver bound to the card (the `driver` link). An AMD RDNA 4 card wins over any other; otherwise the first AMD
+// card, otherwise the first card. Connectors, unreadable cards and a missing folder count as no card. Only RDNA 4 sets `rdna4`
+// (an RX 7000-series card is AMD, not supported).
+GpuInfo GpuFromDrm(const wstring& drmRoot) {
+    GpuInfo best;
+    for (const auto& card : DrmCards(drmRoot)) {
+        unsigned long v = 0, d = 0;
+        if (!CardIds(card.second, v, d)) continue;
+        const Rdna4Card* known = FindRdna4Card(v, d);
+        const bool amd = v == 0x1002;
+        if (!best.name.empty() && !(amd && !best.amd) && !(known && !best.rdna4)) continue;
+        wchar_t b[96];
+        wstring name;
+        if (known) name = known->name;
+        else {
+            swprintf(b, 96, L"%ls (code %04lX:%04lX)", amd ? L"AMD Radeon" : v == 0x10de ? L"NVIDIA graphics" : v == 0x8086 ? L"Intel graphics" : L"Graphics card", v, d);
+            name = b;
+        }
+        wstring driver;
+        const HANDLE h = CreateFileW(Join(card.second, L"device\\driver").c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        if (h != INVALID_HANDLE_VALUE) {
+            wchar_t path[MAX_PATH];
+            if (const DWORD n = GetFinalPathNameByHandleW(h, path, MAX_PATH, 0); n && n < MAX_PATH) driver = BaseName(wstring(path, n));
+            CloseHandle(h);
+        }
+        best.name = name; best.driver = driver; best.amd = amd; best.rdna4 = known != nullptr;
+    }
+    return best;
+}
 GpuInfo DetectGpu() {
     GpuInfo best;
+    // a native Linux launcher has no DXGI: Linux's own device list names the card
+    const auto noDxgi = [&]() { return NativeLinux() ? GpuFromDrm() : best; };
     HMODULE dxgi = LoadSystemDll(L"dxgi.dll");
-    if (!dxgi) return best;
+    if (!dxgi) return noDxgi();
     using CreateFn = HRESULT(WINAPI*)(REFIID, void**);
     auto create = reinterpret_cast<CreateFn>(reinterpret_cast<void*>(GetProcAddress(dxgi, "CreateDXGIFactory1")));
     IDXGIFactory1* f = nullptr;
-    if (!create || FAILED(create(__uuidof(IDXGIFactory1), (void**)&f)) || !f) return best;
+    if (!create || FAILED(create(__uuidof(IDXGIFactory1), (void**)&f)) || !f) return noDxgi();
     IDXGIAdapter1* a = nullptr;
     for (UINT i = 0; f->EnumAdapters1(i, &a) != DXGI_ERROR_NOT_FOUND; ++i) {
         DXGI_ADAPTER_DESC1 d{};

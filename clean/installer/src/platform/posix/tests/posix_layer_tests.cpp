@@ -25,6 +25,7 @@
 #include <unistd.h>
 
 #include "win32_posix_internal.h"
+#include "wg_core/checks.h"
 #include "../../../../../wgshared/include/wg_state.h"
 
 namespace {
@@ -497,6 +498,60 @@ void NotAvailable() {
     check(WinHttpCrackUrl(L"https://example.org:8443/a/b?c=1", 0, 0, &uc) && uc.nScheme == INTERNET_SCHEME_HTTPS && uc.nPort == 8443 && std::wstring(host) == L"example.org" && std::wstring(path) == L"/a/b", "WinHttpCrackUrl: scheme, host, port, path");
     URL_COMPONENTS bad{}; bad.dwStructSize = sizeof(bad);
     check(!WinHttpCrackUrl(L"ftp://example.org/", 0, 0, &bad), "WinHttpCrackUrl: another scheme is refused");
+}
+
+// S1: the native launcher names its graphics card from Linux's device list (no DXGI here). A made-up /sys/class/drm with the
+// `driver` link a real card has; every card of the folder is looked at, the AMD RDNA 4 one wins.
+void GpuIdentity() {
+    check(wg::NativeLinux(), "NativeLinux: this layer's ntdll carries the marker");
+    std::string posixTmp(Tmp.begin(), Tmp.end());
+    posixTmp.erase(0, 2);
+    for (auto& c : posixTmp) if (c == '\\') c = '/';
+    const std::filesystem::path root = std::filesystem::path(posixTmp) / "gpu-drm";
+    std::filesystem::create_directories(root / "drivers" / "amdgpu");
+    std::filesystem::create_directories(root / "drivers" / "i915");
+    auto card = [&](const char* name, const char* vendor, const char* device, const char* driver) {
+        const auto d = root / "drm" / name / "device";
+        std::filesystem::create_directories(d);
+        std::FILE* f = std::fopen((d / "vendor").c_str(), "w"); std::fputs(vendor, f); std::fclose(f);
+        f = std::fopen((d / "device").c_str(), "w"); std::fputs(device, f); std::fclose(f);
+        if (driver) std::filesystem::create_directory_symlink(root / "drivers" / driver, d / "driver");
+    };
+    const std::wstring drm = Tmp + L"\\gpu-drm\\drm";
+    check(wg::GpuFromDrm(drm).name.empty() && !wg::GpuFromDrm(drm).amd, "no cards: no GPU");
+    card("card0", "0x8086\n", "0x46a6\n", "i915");                     // an Intel iGPU
+    wg::GpuInfo g = wg::GpuFromDrm(drm);
+    check(!g.amd && !g.rdna4 && g.name == L"Intel graphics (code 8086:46A6)" && g.driver == L"i915", "Intel only: named by code, driver i915, not AMD");
+    card("card1", "0x1002\n", "0x744c\n", "amdgpu");                    // an RX 7900 XTX (RDNA 3)
+    g = wg::GpuFromDrm(drm);
+    check(g.amd && !g.rdna4 && g.name == L"AMD Radeon (code 1002:744C)" && g.driver == L"amdgpu", "RDNA 3: AMD, not RDNA 4, by code, driver amdgpu");
+    card("card2", "0x1002\n", "0x7550\n", "amdgpu");                    // an RX 9070 XT
+    g = wg::GpuFromDrm(drm);
+    check(g.amd && g.rdna4 && g.name == L"AMD Radeon RX 9070 XT" && g.driver == L"amdgpu", "RDNA 4 after an earlier non-RDNA 4 card: it wins, named, driver amdgpu");
+    card("card3", "0x1002\n", "0x7590\n", nullptr);                      // a second RDNA 4 card without a driver link: the first stays
+    g = wg::GpuFromDrm(drm);
+    check(g.rdna4 && g.name == L"AMD Radeon RX 9070 XT", "two RDNA 4 cards: the lower number stays");
+    card("card4-DP-1", "0x1002\n", "0x7551\n", nullptr);                 // a connector, ignored
+    card("card5", "garbage", "0x7551\n", nullptr);                       // unreadable ids: skipped
+    check(wg::GpuFromDrm(drm).name == L"AMD Radeon RX 9070 XT", "connectors and unreadable cards are ignored");
+    card("card10", "0x10de\n", "0x2684\n", nullptr);                     // NVIDIA
+    check(wg::GpuFromDrm(drm).rdna4, "an NVIDIA card does not displace it");
+    std::filesystem::remove_all(root / "drm" / "card2");
+    std::filesystem::remove_all(root / "drm" / "card3");
+    g = wg::GpuFromDrm(drm);
+    check(g.amd && !g.rdna4 && g.name == L"AMD Radeon (code 1002:744C)", "without the RDNA 4 cards, the first AMD card is chosen over NVIDIA");
+    const std::wstring nvOnly = Tmp + L"\\gpu-drm\\nv";
+    {
+        const auto d = root / "nv" / "card0" / "device";
+        std::filesystem::create_directories(d);
+        std::FILE* f = std::fopen((d / "vendor").c_str(), "w"); std::fputs("0x10de\n", f); std::fclose(f);
+        f = std::fopen((d / "device").c_str(), "w"); std::fputs("0x2684\n", f); std::fclose(f);
+    }
+    g = wg::GpuFromDrm(nvOnly);
+    check(!g.amd && !g.rdna4 && g.name == L"NVIDIA graphics (code 10DE:2684)" && g.driver.empty(), "NVIDIA only: not AMD, no driver link: driver unknown");
+    // DetectGpu on this machine follows Linux's own list: it must agree with GpuFromDrm() on /sys/class/drm
+    const wg::GpuInfo here = wg::DetectGpu(), direct = wg::GpuFromDrm();
+    check(here.name == direct.name && here.rdna4 == direct.rdna4 && here.amd == direct.amd, "DetectGpu natively is GpuFromDrm of /sys/class/drm");
 }
 
 void Folders() {
@@ -1296,6 +1351,7 @@ int main(int argc, char** argv) {
     RegistryWrites();
     FinishedChildren();
     NotAvailable();
+    GpuIdentity();
     Folders();
     ErrorValues();
     BasicInfo();

@@ -178,6 +178,8 @@ wstring EnvVar(const wchar_t* name);
 HMODULE LoadSystemDll(const wchar_t* name);
 // The launcher under Wine (Linux): Wine's ntdll exports wine_get_version.
 bool UnderWine();
+// The launcher as a native Linux program (the POSIX layer's ntdll stand-in exports a marker; Windows' and Wine's ntdll do not).
+bool NativeLinux();
 // A path for a game in another Wine prefix (Proton gives every game its own): under Wine the Z: path of the same file
 // (Z: maps the Linux root in every prefix, C: does not), otherwise the path unchanged.
 wstring PathForGamePrefix(const wstring& path);

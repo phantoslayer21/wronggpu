@@ -253,6 +253,31 @@ int main() {
             card(L"card17", "0x1002\n", "0x7550 \n");    // two RDNA 4 cards: the lower number first
             require(Contains(LinuxRdna4Name(drm), L"7550"), "LinuxRdna4Name: cards in number order");
         }
+        // S1: GpuFromDrm on a made-up folder (any host): the AMD RDNA 4 card wins, the names are the built-in list, others by code
+        {
+            const wstring drm = Join(dir, L"drm-gpu");
+            auto card = [&](const wchar_t* name, const char* vendor, const char* device) {
+                EnsureDir(Join(drm, wstring(name) + L"\\device"));
+                WriteFileAtomic(Join(drm, wstring(name) + L"\\device\\vendor"), vendor, strlen(vendor));
+                WriteFileAtomic(Join(drm, wstring(name) + L"\\device\\device"), device, strlen(device));
+            };
+            require(GpuFromDrm(Join(dir, L"no-such-drm")).name.empty(), "GpuFromDrm: a missing device list is no card");
+            card(L"card0", "0x1002\n", "0x13c0\n");        // an integrated Radeon
+            GpuInfo g = GpuFromDrm(drm);
+            require(g.amd && !g.rdna4 && g.name == L"AMD Radeon (code 1002:13C0)", "GpuFromDrm: an AMD card not on the list is named by its code");
+            card(L"card1", "0x1002\n", "0x7550\n");
+            g = GpuFromDrm(drm);
+            require(g.amd && g.rdna4 && g.name == L"AMD Radeon RX 9070 XT", "GpuFromDrm: the RDNA 4 card wins over the iGPU");
+            for (const auto& [id, nm] : {std::pair<const char*, const wchar_t*>{"0x7551\n", L"AMD Radeon RX 9070 GRE"}, {"0x7590\n", L"AMD Radeon RX 9060 XT"}, {"0x7591\n", L"AMD Radeon RX 9060"}}) {
+                card(L"card1", "0x1002\n", id);
+                require(GpuFromDrm(drm).rdna4 && GpuFromDrm(drm).name == nm, "GpuFromDrm: each RDNA 4 id has its own name");
+            }
+            card(L"card1", "0x1002\n", "0x744c\n");        // RDNA 3: stays unsupported
+            g = GpuFromDrm(drm);
+            require(g.amd && !g.rdna4, "GpuFromDrm: an RX 7000-series card is AMD but not RDNA 4");
+            card(L"card1", "0x10de\n", "0x7550\n");        // another vendor with an RDNA 4 id
+            require(!GpuFromDrm(drm).rdna4, "GpuFromDrm: the vendor must be AMD");
+        }
         // under Wine an RDNA 4 card that Linux reports is found even when Wine's own DXGI names an old Radeon. Which cards
         // LinuxRdna4Name looks at is checked above on the made-up folder (card20 and card17 included); here DetectGpu must follow it.
         if (UnderWine()) {

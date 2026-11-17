@@ -678,6 +678,7 @@ wstring EnvVar(const wchar_t* name) {
 // System DLLs this exe uses only sometimes are loaded from System32 only, never from the download folder.
 HMODULE LoadSystemDll(const wchar_t* name) { return LoadLibraryExW(name, nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32); }
 bool UnderWine() { return GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") != nullptr; }
+bool NativeLinux() { return GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wronggpu_native_posix") != nullptr; }
 wstring PathForGamePrefix(const wstring& path) {
     if (path.empty() || !UnderWine()) return path;
     // Wine's kernel32: the Unix name of a DOS path, allocated on the process heap (UTF-8). It fails when more than the last

@@ -41,6 +41,10 @@ wstring GpuToolbarLine(const wstring& shortName, const GpuInfo& gpu);
 // when Linux reports no RDNA 4 card (or outside Wine, where Z:\sys does not exist). drmRoot: the folder holding card0,
 // card1, ... (Linux's /sys/class/drm; tests point it at a made-up folder). Every card is looked at, in number order.
 wstring LinuxRdna4Name(const wstring& drmRoot = L"Z:\\sys\\class\\drm");
+// A native Linux launcher (no DXGI): the card Linux's device list reports, named from its PCI ids; empty when there is none. Used by
+// DetectGpu there; drmRoot as for LinuxRdna4Name. An AMD RDNA 4 card wins over any other, so a laptop's integrated GPU or a second
+// card does not hide it. Only RDNA 4 sets `rdna4`.
+GpuInfo GpuFromDrm(const wstring& drmRoot = L"Z:\\sys\\class\\drm");
 GpuInfo DetectGpu();
 bool VersionLess(const wstring& a, const wstring& b);
 std::vector<wstring> HipCandidates();

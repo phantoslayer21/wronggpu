@@ -98,8 +98,10 @@ checksum together, taken from the project's own release page. Use exact release 
   update check) do not run on Linux.
 - **No restorer:** `WrongGPU-Restore.exe` is a Windows program. A Linux install does not embed or write it.
 - **UI Automation:** the stubs answer nothing; there is no screen-reader support yet (AT-SPI is the Linux equivalent).
-- **Parked:** the parts that need Direct3D 12 still go through Proton: the GPU checks (a Linux version would read
-  sysfs) and the Ray Reconstruction preparation (it must run in the game's Wine prefix).
+- **GPU check:** there is no DXGI here, so the launcher reads Linux's own device list (`/sys/class/drm`): the card's name
+  comes from a built-in list of the RDNA 4 PCI ids (`kRdna4Cards` in `checks.cpp`; any other card is named by its code), and
+  only an RDNA 4 card (RX 9000 series) counts as supported. It names the card the system has, not the one a game picks.
+- **Parked:** the Ray Reconstruction preparation (it must run in the game's Wine prefix).
 - **Not emulated:** NTFS junctions, `.lnk` shortcuts, Apps & features, UAC elevation, share-mode locks between processes.
   The launcher tests skip the checks that depend on them and print why.
 - **Game running:** the per-game state lock works between Linux processes (file locks), and uninstall, repair and update
