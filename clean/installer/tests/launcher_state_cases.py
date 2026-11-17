@@ -10,6 +10,7 @@ was WrongGPU's: menu_save); the plugin's own save is tested with the real plugin
 The install's seed files (wronggpu-asi.ini, WrongGPU\\wronggpu.ini) are created only where nothing is: a file that appears
 at either boundary (after the check, after the record: WRONGGPU_TEST_CREATE_AT) is the player's. Written for this project."""
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -31,6 +32,22 @@ else:  # the game has it loaded (mapped as an image; nothing of it runs)
 print("held" if ok else "failed %d" % ctypes.get_last_error(), flush=True)
 sys.stdin.read()
 """
+
+
+# Linux (--native-linux): the game under Wine, as the Linux launcher sees one: a process named like a Windows program (Wine
+# sets the command line so) with the file mapped. "load-unreadable": the same, made not dumpable, so its maps cannot be read.
+HOLD_LINUX = r"""
+import ctypes, mmap, sys
+path, how = sys.argv[1], sys.argv[2]
+f = open(path, "rb")
+m = mmap.mmap(f.fileno(), 0, prot=mmap.PROT_READ)
+f.close()  # only the mapping holds it, as a loaded DLL
+if how == "load-unreadable":
+    ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)  # PR_SET_DUMPABLE 0
+print("held", flush=True)
+sys.stdin.read()
+"""
+WINE_GAME = "C:\\Games\\State Game\\GameHelper.exe"  # (not the game's Game.exe: the guard decides, not the name check)
 
 
 STAMP = b"; wronggpu-written "
@@ -192,9 +209,14 @@ def failed_runs(t, m):
     shutil.rmtree(root, ignore_errors=True)
 
 
-def hold(path, how):
-    p = subprocess.Popen([sys.executable, "-c", HOLD, path, how], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                         creationflags=0x08000000)
+def hold(path, how, native=False):
+    if native:
+        import native_linux
+        p = subprocess.Popen([WINE_GAME, "-c", HOLD_LINUX, native_linux.host(path), how], executable=sys.executable,
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    else:
+        p = subprocess.Popen([sys.executable, "-c", HOLD, path, how], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             creationflags=0x08000000)
     return p, p.stdout.readline().decode().strip()
 
 
@@ -329,21 +351,25 @@ def run(t, opti, m):
 
     # 4. uninstall, repair and update refused while another program has a WrongGPU file open or the game has it loaded
     holds = (("plugins\\WrongGPU-RR.asi", "open"), ("wronggpu_runtime.dll", "load"))
-    if t.native:  # another process's hold is not seen by the Linux layer (native_linux.WINDOWS_ONLY "lock")
-        t.skip("lock", "[state] uninstall, repair and update refused while another program has a WrongGPU file open or the game has it loaded")
-        holds = ()
+    if t.native:  # Linux sees a game under Wine that has the file loaded (win32_posix.h CreateFileW), not another program's open
+        t.skip("lock", "[state] uninstall, repair and update refused while another program has a WrongGPU file open")
+        holds = (("wronggpu_runtime.dll", "load"), ("wronggpu_runtime.dll", "load-unreadable"))
+    said = {"open": "open in another program", "load": "loaded", "load-unreadable": "loaded by a game whose files cannot be read"}
     for rel, how in holds:
-        p, state = hold(os.path.join(b, rel), how)
+        p, state = hold(os.path.join(b, rel), how, t.native)
         try:
             if state != "held":
                 print("  skipped: %s %s (%s)" % (how, rel, state))
                 continue
             snap = snapshot(root)
+            words = "could not tell whether the game is using its files" if how == "load-unreadable" else "in use by the game or another program"
+            # cannot be ruled out for any binary (that process could have any loaded): the first one the guard tries is named
+            named = (lambda msg: re.search(r"\(\S+\.(dll|asi)\)", msg)) if how == "load-unreadable" else (lambda msg: os.path.basename(rel) in msg)
             for op in ("uninstall", "repair", "update"):
                 rc = t.run(op, exe, *(() if op == "uninstall" else inst))
                 msg = t.j.get("message", "") + t.j.get("error", "")
-                t.check("%s while %s is %s: refused (exit 2), nothing changed, the file named" % (op, rel, "open in another program" if how == "open" else "loaded"),
-                        rc == 2 and "in use by the game or another program" in msg and os.path.basename(rel) in msg and snapshot(root) == snap,
+                t.check("%s while %s is %s: refused (exit 2), nothing changed, the file named, the words say to close the game" % (op, rel, said[how]),
+                        rc == 2 and words in msg and "lose the game" in msg and named(msg) and snapshot(root) == snap,
                         (rc, msg, diff(snap, snapshot(root))))
         finally:
             release(p)
