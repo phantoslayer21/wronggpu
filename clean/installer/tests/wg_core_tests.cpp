@@ -163,10 +163,10 @@ int main() {
             rctx.logFile = Join(dir, L"rr-prep.log");
             const wstring game = Join(dir, L"No Rule Game\\NoRuleGame.exe");
             wstring why;
-            if (UnderWine()) {
+            if (UnderProton()) {
                 require(RrKernelsInGame(game) && RrPrepStateOf(rctx, dir, game, 1, &why) == RrPrepState::InGame && Contains(why, L"Proton"),
-                        "RR kernels under Wine: prepared by the game at its first start");
-                require(PrepareRr(rctx, dir, game, Join(dir, L"no-runtime.dll"), 1, nullptr, &why) == 4, "PrepareRr under Wine: no helper run (4)");
+                        "RR kernels under Proton (Wine or native Linux): prepared by the game at its first start");
+                require(PrepareRr(rctx, dir, game, Join(dir, L"no-runtime.dll"), 1, nullptr, &why) == 4, "PrepareRr under Proton: no helper run (4)");
             } else {
                 require(!RrKernelsInGame(game), "RR kernels on Windows: a game without a rule is prepared by the launcher");
             }

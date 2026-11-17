@@ -1665,7 +1665,7 @@ static float RrSection(Gfx& gx, float x, float y, float w) {
             // rrprep.h): no Prepare button, which would do nothing there
             if (RrKernelsInGame(e.exe))
                 yy += DotRow(gx, x, yy, w, false,
-                             UnderWine() ? L"Prepared by the game at its first start (under Proton its shader caches are its own)"
+                             UnderProton() ? L"Prepared by the game at its first start (under Proton its shader caches are its own)"
                                          : L"Prepared by the game at its first start (about a minute after a graphics driver update)",
                              pal.greyDot, pal.text);
             else if (!bg.empty())

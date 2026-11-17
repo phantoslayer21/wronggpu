@@ -25,6 +25,39 @@ def _helper_gone(run_dir):
     return not os.path.isdir(run_dir) or not os.listdir(run_dir)
 
 
+def _native(t, exe, b, prep_dir):
+    """The native Linux launcher: a game runs under Proton, whose shader caches are the game's own, so RR's kernels are prepared by
+    the game at its first start (rrprep.h): every verb answers "in-game" in plain words, no helper is copied or started (even with
+    a driver version and the test's permission), nothing fails and nothing is written to the game's folder. The Windows launcher's
+    cases (a helper, a driver, no card) do not apply."""
+    game_before = sorted(os.listdir(b))
+    rc = t.run("rr-prepare", exe, "--check")
+    rp = t.j.get("rr_prepare", {})
+    t.check("native rr-prepare --check: prepared by the game at its first start (state in-game, the Proton words, not an error)",
+            rc == 0 and rp.get("ready") is False and rp.get("state") == "in-game" and "Proton" in rp.get("not_ready_why", "") and
+            "no AMD graphics card" not in rp.get("not_ready_why", ""), t.j)
+    rc = t.run("rr-recheck", exe)
+    rq = t.j.get("rr_recheck", {})
+    t.check("native rr-recheck: not stale, state in-game, nothing run", rc == 0 and rq.get("stale") is False and rq.get("state_before") == "in-game" and
+            rq.get("result") == -1, t.j)
+    envlog = os.path.join(t.work, "rr-helper-env.log")
+    if os.path.exists(envlog):
+        os.remove(envlog)
+    t.env.update(WRONGGPU_TEST_RR_DRIVER="99.0.0.1", WRONGGPU_TEST_HELPER_ENV_LOG=envlog, WRONGGPU_TEST_ALLOW_RR_HELPER="1")
+    try:
+        rc = t.run("rr-prepare", exe, "--passes=1")
+    finally:
+        for k in ("WRONGGPU_TEST_RR_DRIVER", "WRONGGPU_TEST_HELPER_ENV_LOG", "WRONGGPU_TEST_ALLOW_RR_HELPER"):
+            t.env.pop(k, None)
+    rp = t.j.get("rr_prepare", {})
+    t.check("native rr-prepare with a driver and the test's permission: result 4 (the game prepares them), exit 0, said why, no helper "
+            "started, nothing prepared, nothing new in the game's folder",
+            rc == 0 and rp.get("result") == 4 and "Proton" in rp.get("why", "") and not os.path.exists(envlog) and
+            _helper_gone(os.path.join(prep_dir, "run")) and not os.path.isfile(os.path.join(prep_dir, "prepared.txt")) and
+            sorted(os.listdir(b)) == game_before, (rc, rp, os.listdir(b)))
+    print("  skipped: the Windows launcher's rr-prepare cases (a helper under a driver, no card): natively the game prepares RR's kernels")
+
+
 def run(t, exe, b, gpu_opt_in=False):
     """rr-prepare --check, rr-recheck, rr-prepare's no-card path, the helper with the stand-in runtime and, with the opt-in, a
     real runtime and an RDNA 4 card, the prepared state across a driver or runtime change. exe: the RR game's exe, b: its folder."""
@@ -32,6 +65,8 @@ def run(t, exe, b, gpu_opt_in=False):
     # under the game's program name, which loads the installed wronggpu_runtime.dll (the real runtime of this payload, RR
     # built in) and creates RR's pipelines on the GPU; the driver keeps them per program name, so the game finds them ready
     prep_dir = os.path.join(t.data, "rr-prepare")  # the launcher data folder (the suite runs with --data)
+    if t.native:
+        return _native(t, exe, b, prep_dir)
     rc = t.run("rr-prepare", exe, "--check")
     t.check("rr-prepare --check before: not prepared yet", rc == 0 and t.j.get("rr_prepare", {}).get("ready") is False and
             "not prepared yet" in t.j.get("rr_prepare", {}).get("not_ready_why", ""), t.j)
