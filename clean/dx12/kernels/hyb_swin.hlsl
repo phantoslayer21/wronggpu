@@ -11,9 +11,9 @@
 // (the table's shared_dec_border) and the skip map with the fine mirror; the member input is RN16(E + S).
 // HIP twins: the same names in swin_hyb.co (clean/kernels/swin_hyb.hip).
 //
-// @wg-kernel swin_block_c64_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=64,SW_HEADS=2,SW_MLP=256,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_ENTRY_OVERRIDE=swin_block_c64_hyb
+// @wg-kernel swin_block_c64_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=64,SW_HEADS=2,SW_MLP=256,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_ENTRY_OVERRIDE=swin_block_c64_hyb,WG_REV_ORDER=1
 // @wg-kernel swin_block_c64_add_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=64,SW_HEADS=2,SW_MLP=256,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_ENTRY_OVERRIDE=swin_block_c64_add_hyb
-// @wg-kernel swin_block_c96_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_ENTRY_OVERRIDE=swin_block_c96_hyb
+// @wg-kernel swin_block_c96_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_ENTRY_OVERRIDE=swin_block_c96_hyb,WG_REV_ORDER=1
 // @wg-kernel swin_block_c96_add_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_ENTRY_OVERRIDE=swin_block_c96_add_hyb
 // @wg-kernel swin_block_c128_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=128,SW_HEADS=4,SW_MLP=512,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_ENTRY_OVERRIDE=swin_block_c128_hyb
 //   swin_block_c64_hyb_scanmut / _c128_hyb_scanmut  the fused-square scan's mutants (probe=1, outside the manifest; see
