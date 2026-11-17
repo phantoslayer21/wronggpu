@@ -433,9 +433,17 @@ struct Scene {
     g.upload(depth, tw, th, 4, d.data(), depthState);
     std::vector<uint16_t> m((size_t)mw * mh * 4);
     motionF.assign((size_t)mw * mh * 2, 0.0f);
+    // WG_TEST_MOTION_PATTERN (input encoder E1b timing): ramp (default: the field below), zero (a static scene), pan (one
+    // constant vector), parallax (the ramp plus a depth term: every neighbour differs, and more so near the camera)
+    const char* mpat = std::getenv("WG_TEST_MOTION_PATTERN");
+    const int mp = !mpat ? 0 : !std::strcmp(mpat, "zero") ? 1 : !std::strcmp(mpat, "pan") ? 2 : !std::strcmp(mpat, "parallax") ? 3 : 0;
     for (UINT y = 0; y < mh; ++y)
       for (UINT x = 0; x < mw; ++x) {
-        const float a = q16(x / 128.0f - 0.25f), b = q16(0.5f - y / 64.0f);
+        const float dd = (x < tw && y < th) ? d[(size_t)y * tw + x] : 0.0f;
+        const float a = mp == 1 ? 0.0f : mp == 2 ? q16(0.75f) : mp == 3 ? q16(x / 128.0f - 0.25f + 48.0f * dd)
+                                                                         : q16(x / 128.0f - 0.25f);
+        const float b = mp == 1 ? 0.0f : mp == 2 ? q16(-0.375f) : mp == 3 ? q16(0.5f - y / 64.0f - 24.0f * dd)
+                                                                          : q16(0.5f - y / 64.0f);
         uint16_t* p = &m[4 * ((size_t)y * mw + x)];
         p[0] = to_half(a), p[1] = to_half(b), p[2] = to_half(7.0f), p[3] = 0;
         motionF[2 * ((size_t)y * mw + x)] = a;

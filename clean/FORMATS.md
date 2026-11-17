@@ -1312,6 +1312,14 @@ with FP16 arithmetic: each weight rounded to FP16 once, `a ← h(fma(ŵ_k, t_k, 
 FP16 rounding per step), then the clamp to the range of the five taps; the same in both passes. **analytic**: the
 Lanczos set of draft 3 with FP32 sums, the constants `kLz0 … kLz4` of `post.co` / `post_w64.co`, unchanged.
 
+Runtime option `e1b` (`runtime_options` / `WG_RUNTIME_OPTIONS`; model M on the native D3D12 executor; default `off`):
+`e1b=on` runs the input encoder forms `e1b/input_encoder[_direct]` (kernels/encoder.hlsl, `ENC_E1 == 2`). Each wave
+issues the loads of its four history taps first, then tests per tap whether every lane's near / far tap position equals
+its centre tap position. Where it does, that tap's values are copied from the centre tap instead of being computed
+again. The output is byte for byte the default encoder's. The gain depends on camera motion: still and evenly panning
+views save the most; strong parallax gains nothing and can be slightly slower. The log's kernel line shows `e1b=on`, or `e1b=off (...)` when the model,
+executor or manifest cannot run it (the default encoder then runs). `e1b=off` or no key: the default encoder.
+
 Runtime option `output_filter` (`runtime_options` / `WG_RUNTIME_OPTIONS`):
 
 | Value | Filter |

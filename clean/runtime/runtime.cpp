@@ -519,6 +519,11 @@ struct Runtime {
   // swin_resident=N (runtime option / WG_SWIN_RESIDENT): the plain C = 64 block launches (enc1; dec1 when not fused)
   // run the weight-resident persistent kernels swin_block_c64[_add]_r[_nc] with N workgroups of 512 lanes; 0 = off
   int swin_resident = 0;
+  // e1b=on (runtime option; default off; Model M on native D3D12): the input encoder's near / far history taps copied
+  // from the centre tap when the whole wave's tap positions match (e1b/input_encoder[_direct], kernels/encoder.hlsl
+  // ENC_E1 == 2): byte for byte the default encoder; faster when the camera is still or pans evenly. Without the two
+  // kernels in the manifest the default encoder runs (one log line).
+  bool e1b_opt = false, e1b_built = false;
   bool post_diet = true;     // option post_diet (default 1; 0 = the previous kernels): exposure_pair_diet + the _diet post kernels (kernels/post.hip); bit-identical
   // On top of post_diet, the true-fusion kernel post_tf_*_diet_<suffix> (kernels/post.hip WG_TF_KERNEL_DIET_X; all three
   // off = the plain post_tf_*_diet), each bit-identical and on by default:
@@ -1438,6 +1443,10 @@ struct Runtime {
       if (k == "dec_rdiv") dec_rdiv = !(v == "0" || v == "off" || v == "false");
       if (k == "dec_bdiv") dec_bdiv = !(v == "0" || v == "off" || v == "false");
       if (k == "swin_resident") swin_resident = std::max(0, std::atoi(v.c_str()));
+      if (k == "e1b") {
+        if (v != "on" && v != "off") return fail("e1b must be on or off");
+        e1b_opt = v == "on";
+      }
       if (k == "post_tf_cpairs") post_tf_cpairs = std::max(2, std::atoi(v.c_str()) & ~1);  // even
       if (k == "post_tf4") {
         if (v != "auto" && v != "force") return fail("post_tf4 must be auto or force");
@@ -1754,6 +1763,13 @@ struct Runtime {
     kernels_text += std::string(" dec_bdiv=") + (dec_div.find('b') == std::string::npos ? "1" : "0");
     kernels_text += std::string(" dec1_dec0=") + (dec1_dec0 ? "fused" : "separate");
     if (fz_pm || fz_xe || fz_mb || fz_rv || fz_xo || fz_xd || fz_lc || fz_ll || fz_le) kernels_text += " d3d12_fusion=" + fz_text;
+    if (e1b_opt) {  // e1b=on: Model M on native D3D12 with both kernels in the manifest, else the default encoder
+      const std::vector<std::string> have = manifest_kernels();
+      e1b_built = d3d12_native && !model_l &&
+                  std::find(have.begin(), have.end(), "e1b/input_encoder") != have.end() &&
+                  std::find(have.begin(), have.end(), "e1b/input_encoder_direct") != have.end();
+      kernels_text += std::string(" e1b=") + (e1b_built ? "on" : "off (needs Model M on native D3D12 and its kernels)");
+    }
     kernels_text += " swin_mid=" + (mid_variant.empty() ? std::string("none") : mid_variant);
     kernels_text += std::string(" post_pack=") + (p12 ? "p12" : "none");
     kernels_text += std::string(" pre_exposure=") + (pi_original ? "original" : "scale");
@@ -1947,6 +1963,22 @@ struct Runtime {
     return true;
   }
 
+  // The kernel names of <build_dir>/dx12/manifest.json (none if it is missing or unreadable).
+  std::vector<std::string> manifest_kernels() const {
+    std::string text, error;
+    wgc::Json manifest;
+    std::vector<std::string> have;
+    if (read_text(build_dir + "/dx12/manifest.json", &text) && wgc::parse_json(text, manifest, error)) {
+      const auto* kernels = manifest.find("kernels");
+      if (kernels && kernels->is_array())
+        for (const auto& k : kernels->items) {
+          const auto* name = k.find("name");
+          if (name && name->is_string()) have.push_back(name->text);
+        }
+    }
+    return have;
+  }
+
 #ifdef WG_MODEL_L
   // ---- Model L (clean/l/FORMATS.md: maps, blobs, kernels, launch order) ----
   // Window offsets (ox, oy) of Model L's two width-32 blocks for frame parity f: the default table's window_offsets
@@ -2089,21 +2121,6 @@ struct Runtime {
   // its encoder (the direct form on the direct-resource route), linears, clamp-free blocks (the only D3D12 forms),
   // projections and pack12 coefficient store, and dec1's own block with its expand (Model M runs dec1 inside its fused
   // decoder there; Model L's decoder reads dec1's map). Model M's other kernels are its native frame's.
-  // The kernel names of <build_dir>/dx12/manifest.json (none if it is missing or unreadable).
-  std::vector<std::string> manifest_kernels() const {
-    std::string text, error;
-    wgc::Json manifest;
-    std::vector<std::string> have;
-    if (read_text(build_dir + "/dx12/manifest.json", &text) && wgc::parse_json(text, manifest, error)) {
-      const auto* kernels = manifest.find("kernels");
-      if (kernels && kernels->is_array())
-        for (const auto& k : kernels->items) {
-          const auto* name = k.find("name");
-          if (name && name->is_string()) have.push_back(name->text);
-        }
-    }
-    return have;
-  }
 
   std::string l_native_missing() const {
     if (l_q7)  // the FP16-form blocks (clean/dx12/kernels/l_q7.hlsl, l_q7w.hlsl) in place of the l_swin / Model M blocks
@@ -2647,7 +2664,8 @@ struct Runtime {
                     {&cnet, &mhi, &reduced, &latent[cur], &mnear[cur], &feat0, &mnear[nxt], &mfar, &mcenter, &expo, &w,
                      &p, &emop}))
           return false;
-      } else if (!launch(native_direct_io ? "input_encoder_direct" : "input_encoder",
+      } else if (!launch(e1b_built ? (native_direct_io ? "e1b/input_encoder_direct" : "e1b/input_encoder")
+                                   : (native_direct_io ? "input_encoder_direct" : "input_encoder"),
                          cdiv(ntok, 128), 256,
                   {&cnet, &din, &min_, &reduced, &latent[cur], &mnear[cur], &feat0, &mnear[nxt], &mfar, &mcenter,
                    &expo, &w, &p}))
