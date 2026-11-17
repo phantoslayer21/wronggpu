@@ -102,5 +102,9 @@ checksum together, taken from the project's own release page. Use exact release 
   sysfs) and the Ray Reconstruction preparation (it must run in the game's Wine prefix).
 - **Not emulated:** NTFS junctions, `.lnk` shortcuts, Apps & features, UAC elevation, share-mode locks between processes.
   The launcher tests skip the checks that depend on them and print why.
+- **Game running:** the per-game state lock works between Linux processes (file locks), and uninstall, repair and update
+  refuse while one of your Wine processes has a WrongGPU DLL or program loaded, as Windows does (`/proc` mappings). If
+  one of your Wine processes cannot be read, the launcher refuses rather than guess. Not covered: other users' processes,
+  files a program only has open, and a game started after the check.
 - **Hidden attribute:** kept as the user extended attribute `user.wronggpu.hidden`, so it shows only on a file system that
   allows those. Read-only is the missing write bit, as before.
