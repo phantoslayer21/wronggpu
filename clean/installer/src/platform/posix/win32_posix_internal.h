@@ -82,6 +82,11 @@ int RmScanProcess(int pid, const std::vector<std::pair<dev_t, ino_t>>& files);
 // maps cannot be read (*who). Only this user's Wine processes are looked at.
 int ImageInUse(dev_t dev, ino_t ino, int* who = nullptr);
 
+// Test seams (posix_layer_tests only): the calls FileRenameInfo's no-replace path makes, to force a file system without
+// RENAME_NOREPLACE (EINVAL) or a failing unlink. Never changed outside the tests.
+extern int (*g_renameat2)(int, const char*, int, const char*, unsigned int);
+extern int (*g_unlink)(const char*);
+
 // CloseHandle of a job or a process handle
 void ReleaseJob(Handle* h);
 void ReleaseProcess(Handle* h);

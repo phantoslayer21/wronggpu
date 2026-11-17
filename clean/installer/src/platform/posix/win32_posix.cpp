@@ -485,6 +485,8 @@ BOOL GetFileInformationByHandleEx(HANDLE hv, FILE_INFO_BY_HANDLE_CLASS cls, LPVO
     std::memcpy(fi->FileId.Identifier, &ino, sizeof(ino));
     return TRUE;
 }
+int (*wgposix::g_renameat2)(int, const char*, int, const char*, unsigned int) = ::renameat2;
+int (*wgposix::g_unlink)(const char*) = ::unlink;
 // FileRenameInfo (win32_posix.h has what it guarantees). The handle's name now is the one /proc/self/fd gives (renames since
 // the open included), used only while it still names the handle's file.
 static BOOL RenameByHandle(Handle* h, const struct stat& st, const FILE_RENAME_INFO* ri, DWORD size) {
@@ -511,12 +513,15 @@ static BOOL RenameByHandle(Handle* h, const struct stat& st, const FILE_RENAME_I
     if (ri->ReplaceIfExists) {
         r = rename(from.c_str(), to.c_str());
     } else {
-        r = renameat2(AT_FDCWD, from.c_str(), AT_FDCWD, to.c_str(), RENAME_NOREPLACE);
+        r = g_renameat2(AT_FDCWD, from.c_str(), AT_FDCWD, to.c_str(), RENAME_NOREPLACE);
         if (r != 0 && (errno == EINVAL || errno == ENOSYS)) {   // a file system without RENAME_NOREPLACE: a new link never replaces either
             r = link(from.c_str(), to.c_str());
-            if (r == 0) {
-                unlink(from.c_str());
-            } else if (errno == EPERM || errno == EOPNOTSUPP) {   // nor hard links (FAT, exFAT, a folder): checked, then renamed
+            if (r == 0 && g_unlink(from.c_str()) != 0) {   // the old name cannot go: the new one goes again, the call fails
+                const int e = errno;
+                g_unlink(to.c_str());   // (if this fails too, both names are left; the failure is still the result)
+                errno = e;
+                r = -1;
+            } else if (r != 0 && (errno == EPERM || errno == EOPNOTSUPP)) {   // nor hard links (FAT, exFAT, a folder): checked, then renamed
                 struct stat x;
                 if (lstat(to.c_str(), &x) == 0) { errno = EEXIST; r = -1; }
                 else r = rename(from.c_str(), to.c_str());

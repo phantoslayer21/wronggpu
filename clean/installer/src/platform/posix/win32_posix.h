@@ -266,7 +266,8 @@ typedef struct _FILE_DISPOSITION_INFO { BOOLEAN DeleteFile; } FILE_DISPOSITION_I
 // FileRenameInfo: the file of the handle (opened with DELETE access) takes the name FileName (FileNameLength bytes, no NUL; a
 // full path, also in the NT form \??\Z:\...). Linux: rename(2) of the name /proc/self/fd gives for the handle, so the file
 // renamed is the handle's own unless another process renames it in that instant; ReplaceIfExists off is renameat2's
-// RENAME_NOREPLACE (a file system without it: link and unlink, else a check before the rename). RootDirectory must be null.
+// RENAME_NOREPLACE (a file system without it: link and unlink, the new link removed again and the call failed when the old
+// name cannot be unlinked; else a check before the rename). RootDirectory must be null.
 typedef struct _FILE_RENAME_INFO {
     union { BOOLEAN ReplaceIfExists; DWORD Flags; };
     HANDLE RootDirectory;

@@ -1230,6 +1230,50 @@ void GameImage() {
     StopNamed(closedNative);
 }
 
+// ---- FileRenameInfo without replace on a file system that lacks RENAME_NOREPLACE: link, then unlink of the old name. When
+// that unlink fails the new name goes again and the call fails, so the file keeps only its old name (review fix).
+void RenameFallback() {
+    const auto realRename = wgposix::g_renameat2;
+    const auto realUnlink = wgposix::g_unlink;
+    wgposix::g_renameat2 = [](int, const char*, int, const char*, unsigned int) { errno = EINVAL; return -1; };
+    const std::wstring src = In(L"fb-src"), dst = In(L"fb-dst");
+    CreateDirectoryW(src.c_str(), nullptr);
+    CreateDirectoryW(dst.c_str(), nullptr);
+    Put(src + L"\\a.dll", "MZ a");
+    Put(dst + L"\\taken.dll", "MZ taken");
+    HANDLE h = OpenFor(src + L"\\a.dll", DELETE | GENERIC_READ, FILE_SHARE_READ);
+    check(!RenameTo(h, dst + L"\\taken.dll", false) && GetLastError() == ERROR_ALREADY_EXISTS && Slurp(dst + L"\\taken.dll") == "MZ taken",
+          "rename fallback (no RENAME_NOREPLACE): onto a file: ERROR_ALREADY_EXISTS, nothing replaced");
+    check(RenameTo(h, dst + L"\\a.dll", false) && !Exists(src + L"\\a.dll") && Slurp(dst + L"\\a.dll") == "MZ a",
+          "rename fallback: link then unlink: the file has only its new name");
+    CloseHandle(h);
+    // the source folder refuses the unlink (read-only), the target folder allows the link
+    Put(src + L"\\c.dll", "MZ c");
+    h = OpenFor(src + L"\\c.dll", DELETE | GENERIC_READ, FILE_SHARE_READ);
+    if (geteuid() == 0) {
+        std::printf("posix-layer: running as root: the read-only source folder check is skipped\n");
+    } else {
+        chmod(PosixOf(src).c_str(), 0555);
+        const bool ok = RenameTo(h, dst + L"\\c.dll", false);
+        const DWORD e = GetLastError();
+        chmod(PosixOf(src).c_str(), 0755);
+        check(!ok && e == ERROR_ACCESS_DENIED && Exists(src + L"\\c.dll") && !Exists(dst + L"\\c.dll"),
+              "rename fallback: the old name cannot be removed: the call fails (access denied) and the file keeps only its old name");
+        check(SetDisposition(h, FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS) && !Exists(src + L"\\c.dll"),
+              "rename fallback: ...the handle still names the old name (a delete through it removes that one)");
+    }
+    CloseHandle(h);
+    // neither unlink works (the old name's nor the undo's): the call still fails; both names are left (said in win32_posix.h)
+    Put(src + L"\\d.dll", "MZ d");
+    h = OpenFor(src + L"\\d.dll", DELETE | GENERIC_READ, FILE_SHARE_READ);
+    wgposix::g_unlink = [](const char*) { errno = EIO; return -1; };
+    const bool ok = RenameTo(h, dst + L"\\d.dll", false);
+    wgposix::g_unlink = realUnlink;
+    check(!ok && Exists(src + L"\\d.dll") && Exists(dst + L"\\d.dll"), "rename fallback: the undo fails too: the call still fails, both names are left");
+    CloseHandle(h);
+    wgposix::g_renameat2 = realRename;
+}
+
 int main(int argc, char** argv) {
     if (argc >= 2 && std::strncmp(argv[1], "--child-", 8) == 0) return ChildMain(argc, argv);
     // a registry file of this run's own, and a folder of its own, both under TMPDIR
@@ -1267,6 +1311,7 @@ int main(int argc, char** argv) {
     LongPathAndSecurity();
     RestartManager();
     GameImage();
+    RenameFallback();
     std::remove(regFile.c_str());
     std::error_code ec;
     std::string posixTmp(Tmp.begin(), Tmp.end());
