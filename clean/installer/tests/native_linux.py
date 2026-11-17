@@ -228,9 +228,14 @@ class Registry:
 def setup(main_module, suite, tests_dir):
     """Called by run_launcher_tests.main for --native-linux: the checks see Windows spellings of paths (WinOs), as the program prints
     them; what the suite built at import time with the host's separator is made again."""
+    import launcher_build_facts
     import launcher_edition_cases
     import launcher_ignore_cases
-    windows_paths(main_module, suite, launcher_ignore_cases, launcher_edition_cases)
+    import launcher_isolation
+    import launcher_rr_prepare_cases
+    import launcher_state_cases
+    windows_paths(main_module, suite, launcher_ignore_cases, launcher_edition_cases, launcher_build_facts, launcher_isolation,
+                  launcher_rr_prepare_cases, launcher_state_cases)
     sys.path.insert(0, host(tests_dir + "/../tools"))  # the tests add it with a Windows separator, which sys.path cannot use
     main_module.RR_SETTINGS = main_module.os.path.join("WrongGPU", "wronggpu.ini")
     main_module.T = native_class(main_module.T, suite)
@@ -245,7 +250,10 @@ def native_class(T, suite):
         def __init__(self, exe, work, model, hip):
             super().__init__(exe, work, model, hip)
             self.skipped = []
+            guard = self.env
             self.env = environment(work, os.environ)
+            for k in ("WRONGGPU_TEST_LIBRARIES", "WRONGGPU_TEST_ACCESS_LOG", "WRONGGPU_TEST_RUN_ID"):  # the store-access guard's (#243)
+                self.env[k] = guard[k]
             if hip:
                 self.env["WRONGGPU_HIP_RUNTIME"] = hip
             for k in [k for k in self.env if k.upper().startswith("WG_") or k.upper() in ("HIP_PATH", "ROCM_PATH", "LLVM_PATH", "HIP_DEVICE_LIB_PATH")]:

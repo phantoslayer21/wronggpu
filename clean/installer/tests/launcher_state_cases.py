@@ -328,7 +328,11 @@ def run(t, opti, m):
             t.j.get("game"))
 
     # 4. uninstall, repair and update refused while another program has a WrongGPU file open or the game has it loaded
-    for rel, how in (("plugins\\WrongGPU-RR.asi", "open"), ("wronggpu_runtime.dll", "load")):
+    holds = (("plugins\\WrongGPU-RR.asi", "open"), ("wronggpu_runtime.dll", "load"))
+    if t.native:  # another process's hold is not seen by the Linux layer (native_linux.WINDOWS_ONLY "lock")
+        t.skip("lock", "[state] uninstall, repair and update refused while another program has a WrongGPU file open or the game has it loaded")
+        holds = ()
+    for rel, how in holds:
         p, state = hold(os.path.join(b, rel), how)
         try:
             if state != "held":

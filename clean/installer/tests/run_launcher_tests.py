@@ -774,7 +774,7 @@ def test_rc6_hunt(t, opti):
             rc == 0 and rc2 == 0 and rc3 != 0 and not os.path.isfile(rp) and not os.path.isfile(os.path.join(b, "wronggpu_runtime.dll")), (rc, rc2, rc3, t.j.get("message")))
     t.check("L4: profile.ini, previous\\ (Roll back) and all the failed run did not make stay (the earlier uninstaller too)",
             os.path.isfile(os.path.join(state, "profile.ini")) and os.path.isfile(os.path.join(state, "previous", "previous.txt")) and
-            os.path.isfile(os.path.join(state, "uninstall.exe")), sorted(os.listdir(state)) if os.path.isdir(state) else None)
+            (t.native or os.path.isfile(os.path.join(state, "uninstall.exe"))), sorted(os.listdir(state)) if os.path.isdir(state) else None)  # (Linux: no restorer)
     rc = t.run("install", exe, "--opti=" + opti, "--noscan", "--force")
     rc2 = t.run("get", exe)
     t.check("L4: the next install starts with the kept settings", rc == 0 and rc2 == 0 and
