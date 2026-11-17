@@ -59,6 +59,15 @@ scene, your settings) and a screenshot. Every report helps us fix it.
 - If you used Preset K with an older WrongGPU, the launcher no longer asks to switch that game to Model M when it
   updates it: the game stays on Model K.
 
+### Faster kernels, same output
+- **Model L:** its Swin stage takes 7.0 µs less per frame and its decoder stage 2.5 µs less at 1440p Quality (1707x960
+  upscaled to 2560x1440); at 1080p Quality (1280x720 upscaled to 1920x1080) they take 2.5 µs and 1.0 µs less. The
+  output does not change.
+- **Model M:** its final (post) stage takes 2.5 µs less per frame at 1440p Quality and 1.5 µs less at 1080p Quality.
+  The output does not change.
+- Measured on a Radeon RX 9070 XT in our offline benchmark, which runs frames back to back (five rounds, the median
+  difference per stage); in a game the saving per frame can differ.
+
 ### Fixed
 - **Ray Reconstruction: video memory no longer grows while Ray Reconstruction is available but switched off.** In
   0.6.0, a game that sends its Ray Reconstruction inputs every frame (Cyberpunk 2077 does, from its main menu on) made
@@ -151,6 +160,7 @@ For players coming from 0.4.5, in short (the 0.6.0 release page has the full lis
   WrongGPU leaves that game alone.
 
 ## Known issues
+- A rare crash at game start can happen; restarting the game fixes it.
 - RESIDENT EVIL requiem needs your own **REFramework**, installed by you first: the game blocks OptiScaler without it.
   WrongGPU never installs, downloads or replaces REFramework; the launcher tells you when it is missing.
 - RESIDENT EVIL requiem: very occasionally a single frame comes out far too bright or too dark at a scene change (after
