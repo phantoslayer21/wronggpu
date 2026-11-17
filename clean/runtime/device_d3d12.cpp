@@ -502,11 +502,15 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     return v;
   }
   bool external_markers() const override { return marker_map_ != nullptr; }
+  // Opt-in kernel forms (selected by a runtime option, e.g. e1b=on): never compiled with the default set. The runtime
+  // prepares the one form it selects at create (prepare()), and falls back to the default kernel if that fails, so a
+  // missing or failing optional shader cannot fail a default create.
+  static bool optional_kernel(const std::string& name) { return name.compare(0, 4, "e1b/") == 0; }
   bool warm_up(std::string* error) override {
     if (external_) return extension_result(fail("native D3D12 warm_up: recording into the caller's list"), error);
     for (auto& entry : kernels_) {
       NativeKernel& k = entry.second;
-      if (k.pso || !variant_matches(k) || (k.rs != "buffer" && k.rs != "direct")) continue;
+      if (k.pso || optional_kernel(k.name) || !variant_matches(k) || (k.rs != "buffer" && k.rs != "direct")) continue;
       if (!create_pso(k)) return extension_result(false, error);
     }
     return extension_result(true, error);

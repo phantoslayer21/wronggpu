@@ -23,6 +23,7 @@
 #include "m_q7_pack.h"
 #endif
 #include "device.h"
+#include "e1b_option.h"
 #include "embedded.h"
 #include "fpconv.h"
 #include "model.h"
@@ -519,11 +520,15 @@ struct Runtime {
   // swin_resident=N (runtime option / WG_SWIN_RESIDENT): the plain C = 64 block launches (enc1; dec1 when not fused)
   // run the weight-resident persistent kernels swin_block_c64[_add]_r[_nc] with N workgroups of 512 lanes; 0 = off
   int swin_resident = 0;
-  // e1b=on (runtime option; default off; Model M on native D3D12): the input encoder's near / far history taps copied
-  // from the centre tap when the whole wave's tap positions match (e1b/input_encoder[_direct], kernels/encoder.hlsl
-  // ENC_E1 == 2): byte for byte the default encoder; faster when the camera is still or pans evenly. Without the two
-  // kernels in the manifest the default encoder runs (one log line).
-  bool e1b_opt = false, e1b_built = false;
+  // e1b=on (runtime option, e1b_option.h; default off): Model M's input encoder forms e1b/input_encoder[_direct]
+  // (kernels/encoder.hlsl ENC_E1 == 2): the near / far history taps copied from the centre tap when the whole wave's tap
+  // positions match; byte for byte the default encoder on the validated driver; faster when the camera is still or pans
+  // evenly. Resolved once at create (e1b_resolve): e1b_on = the route's E1b kernel prepared, else e1b_reason says why
+  // the default encoder runs. Never fails create; kernels() only reports it.
+  bool e1b_opt = false, e1b_on = false;
+  std::string e1b_note;    // e1b with an unknown value: one line for the log at create
+  std::string e1b_reason;  // why e1b=on runs the default encoder (kernels() report)
+  std::string k_kernels_text;  // model K's kernel report with the e1b item
   bool post_diet = true;     // option post_diet (default 1; 0 = the previous kernels): exposure_pair_diet + the _diet post kernels (kernels/post.hip); bit-identical
   // On top of post_diet, the true-fusion kernel post_tf_*_diet_<suffix> (kernels/post.hip WG_TF_KERNEL_DIET_X; all three
   // off = the plain post_tf_*_diet), each bit-identical and on by default:
@@ -612,6 +617,10 @@ struct Runtime {
     d3d12_native = c.backend == 3;
     if (c.backend == 3 && external && !native_direct_io)
       return fail("native D3D12 external I/O requires the private direct-resource route");
+    {  // e1b (e1b_option.h): read before Model K's create returns, so every model validates and reports it
+      const char* env = std::getenv("WG_RUNTIME_OPTIONS");
+      e1b_scan(std::string(c.runtime_options ? c.runtime_options : "") + ";" + (env ? env : ""), &e1b_opt, &e1b_note);
+    }
 #ifndef WG_NO_MODEL_K
     if (model_id == ModelId::K) return create_k(c, std::move(given));
 #else
@@ -1160,6 +1169,7 @@ struct Runtime {
     // the fused dec1 + dec0 kernel takes dec1's block, so dec1's expand stays a separate launch
     if (dec1_dec0)
       fuse_stages.erase(std::remove(fuse_stages.begin(), fuse_stages.end(), std::string("dec1")), fuse_stages.end());
+    e1b_resolve();
     if (native_direct_io && !validate_native_direct_config()) return false;
     for (auto& kv : blobs) {
       if (kv.first == kFilterStage) continue;  // the output-filter weights are not read from device memory
@@ -1200,6 +1210,8 @@ struct Runtime {
       return fail(k->err());
     blobs = k->blobs();
     notes_text = k->notes();  // one line when the softmax stages take their round-to-odd ports (no silent switch)
+    if (!e1b_note.empty()) notes_text += std::string(notes_text.empty() ? "" : "\n") + e1b_note;
+    if (e1b_opt) e1b_reason = "Model K";  // E1b is a Model M encoder form
     model_source = "model.wgcm";
     return true;
   }
@@ -1415,6 +1427,31 @@ struct Runtime {
 
   // Runtime options: graph=1 (HIP graph per frame), stream_priority=high (highest stream priority). Keys of the
   // configuration string first, then WG_RUNTIME_OPTIONS (its keys win, as in the interop). Unknown keys are ignored.
+  // e1b, resolved once at create (after every option and the device exist). E1b runs only for Model M on the native
+  // D3D12 executor without motion at output resolution, and only when the route's own E1b kernel prepares (shader on
+  // disk or built in, digest, pipeline). Otherwise the default encoder runs and e1b_reason says why. Never fails
+  // create: an optional kernel that cannot be prepared is a fallback, not an error.
+  void e1b_resolve() {
+    e1b_on = false;
+    e1b_reason.clear();
+    if (!e1b_note.empty()) notes_text += std::string(notes_text.empty() ? "" : "\n") + e1b_note;
+    if (!e1b_opt) return;
+    const std::string k = native_direct_io ? "e1b/input_encoder_direct" : "e1b/input_encoder";
+    const std::vector<std::string> have = manifest_kernels();
+    if (model_l)
+      e1b_reason = "Model L";
+    else if (!d3d12_native)
+      e1b_reason = "not the native D3D12 executor";
+    else if (motion_outres == 1)
+      e1b_reason = "motion at output resolution runs its own encoder";
+    else if (std::find(have.begin(), have.end(), k) == have.end())
+      e1b_reason = k + " is not in the manifest";
+    else if (!dev->prepare(k))
+      e1b_reason = k + " could not be prepared: " + dev->err();
+    else
+      e1b_on = true;
+  }
+
   bool runtime_options(const WgRtConfig& c) {
     const char* env = std::getenv("WG_RUNTIME_OPTIONS");
     options_text = std::string(c.runtime_options ? c.runtime_options : "") + ";" + (env ? env : "");
@@ -1443,10 +1480,6 @@ struct Runtime {
       if (k == "dec_rdiv") dec_rdiv = !(v == "0" || v == "off" || v == "false");
       if (k == "dec_bdiv") dec_bdiv = !(v == "0" || v == "off" || v == "false");
       if (k == "swin_resident") swin_resident = std::max(0, std::atoi(v.c_str()));
-      if (k == "e1b") {
-        if (v != "on" && v != "off") return fail("e1b must be on or off");
-        e1b_opt = v == "on";
-      }
       if (k == "post_tf_cpairs") post_tf_cpairs = std::max(2, std::atoi(v.c_str()) & ~1);  // even
       if (k == "post_tf4") {
         if (v != "auto" && v != "force") return fail("post_tf4 must be auto or force");
@@ -1715,7 +1748,11 @@ struct Runtime {
 
   const char* kernels() {
 #ifndef WG_NO_MODEL_K
-    if (k) return k->kernels();
+    if (k) {  // model K: its own report, plus the e1b item when the option asked for E1b (never used by K)
+      if (!e1b_opt) return k->kernels();
+      k_kernels_text = std::string(k->kernels()) + e1b_report(false, e1b_reason);
+      return k_kernels_text.c_str();
+    }
 #endif
     kernels_text = "swin=" + swin_co + " enc0=" + enc0_co + " dec0=" + dec0_name + " exposure=" + exposure_variant +
                    " post=" + post_kernel + " filter=" + (post_fused ? std::string("fused") : filter_kernel) +
@@ -1763,13 +1800,7 @@ struct Runtime {
     kernels_text += std::string(" dec_bdiv=") + (dec_div.find('b') == std::string::npos ? "1" : "0");
     kernels_text += std::string(" dec1_dec0=") + (dec1_dec0 ? "fused" : "separate");
     if (fz_pm || fz_xe || fz_mb || fz_rv || fz_xo || fz_xd || fz_lc || fz_ll || fz_le) kernels_text += " d3d12_fusion=" + fz_text;
-    if (e1b_opt) {  // e1b=on: Model M on native D3D12 with both kernels in the manifest, else the default encoder
-      const std::vector<std::string> have = manifest_kernels();
-      e1b_built = d3d12_native && !model_l &&
-                  std::find(have.begin(), have.end(), "e1b/input_encoder") != have.end() &&
-                  std::find(have.begin(), have.end(), "e1b/input_encoder_direct") != have.end();
-      kernels_text += std::string(" e1b=") + (e1b_built ? "on" : "off (needs Model M on native D3D12 and its kernels)");
-    }
+    if (e1b_opt) kernels_text += e1b_report(e1b_on, e1b_reason);
     kernels_text += " swin_mid=" + (mid_variant.empty() ? std::string("none") : mid_variant);
     kernels_text += std::string(" post_pack=") + (p12 ? "p12" : "none");
     kernels_text += std::string(" pre_exposure=") + (pi_original ? "original" : "scale");
@@ -2664,7 +2695,7 @@ struct Runtime {
                     {&cnet, &mhi, &reduced, &latent[cur], &mnear[cur], &feat0, &mnear[nxt], &mfar, &mcenter, &expo, &w,
                      &p, &emop}))
           return false;
-      } else if (!launch(e1b_built ? (native_direct_io ? "e1b/input_encoder_direct" : "e1b/input_encoder")
+      } else if (!launch(e1b_on ? (native_direct_io ? "e1b/input_encoder_direct" : "e1b/input_encoder")
                                    : (native_direct_io ? "input_encoder_direct" : "input_encoder"),
                          cdiv(ntok, 128), 256,
                   {&cnet, &din, &min_, &reduced, &latent[cur], &mnear[cur], &feat0, &mnear[nxt], &mfar, &mcenter,

@@ -1316,9 +1316,18 @@ Runtime option `e1b` (`runtime_options` / `WG_RUNTIME_OPTIONS`; model M on the n
 `e1b=on` runs the input encoder forms `e1b/input_encoder[_direct]` (kernels/encoder.hlsl, `ENC_E1 == 2`). Each wave
 issues the loads of its four history taps first, then tests per tap whether every lane's near / far tap position equals
 its centre tap position. Where it does, that tap's values are copied from the centre tap instead of being computed
-again. The output is byte for byte the default encoder's. The gain depends on camera motion: still and evenly panning
-views save the most; strong parallax gains nothing and can be slightly slower. The log's kernel line shows `e1b=on`, or `e1b=off (...)` when the model,
-executor or manifest cannot run it (the default encoder then runs). `e1b=off` or no key: the default encoder.
+again. On the validated driver the output is byte for byte the default encoder's (the two forms compile to the same
+floating-point arithmetic instructions). The gain depends on camera motion: still and evenly panning views save the
+most; strong parallax gains nothing and can be slightly slower.
+
+The choice is made once at create (runtime.cpp `e1b_resolve`). E1b runs only for model M on the native D3D12 executor
+without motion at output resolution, and only when its form for the context's route (direct or buffer) prepares:
+shader file or built-in copy, digest, pipeline. The default warm-up never compiles the E1b forms (device_d3d12.cpp
+`optional_kernel`), so a missing or failing E1b shader cannot fail a create. The log's kernel line shows `e1b=on`, or
+`e1b=off (<reason>)`: Model L, Model K, not the native D3D12 executor, motion at output resolution, not in the manifest,
+or could not be prepared. The default encoder then runs. `e1b=off` or no key: the default encoder, and no `e1b` item.
+Any other value (a typo) does not fail create: E1b stays off and the log gets one line,
+`e1b: unknown value '<value>', using off` (clean/runtime/e1b_option.h).
 
 Runtime option `output_filter` (`runtime_options` / `WG_RUNTIME_OPTIONS`):
 

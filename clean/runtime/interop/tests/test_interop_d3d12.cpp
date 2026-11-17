@@ -2192,6 +2192,17 @@ bool case_soak_pipe(Gpu& g, const char* dll, const std::string& options, int fra
       f.jitter[0] = jitter[(t - 1) % 4][0];
       f.jitter[1] = jitter[(t - 1) % 4][1];
     }
+    // WG_TEST_RESET_AT=<frame>[,<frame>...] (this test program only): a history reset on those frames as well
+    // (mid-stream resets for the byte legs; the timing runs set none)
+    if (const char* ra = std::getenv("WG_TEST_RESET_AT")) {
+      for (const char* p = ra; *p;) {
+        char* e = nullptr;
+        const long v = std::strtol(p, &e, 10);
+        if (e == p) break;
+        if (v == t) f.reset = 1;
+        p = *e ? e + 1 : e;
+      }
+    }
     f.command_list = g.list;
     const WgResult rr = c.be.b->dispatch(c.u, &f);
     if (rr != WG_OK) { std::printf("  soak-pipe frame %d: dispatch %d%c", t, (int)rr, 10); CHECK(rr == WG_OK); return false; }
