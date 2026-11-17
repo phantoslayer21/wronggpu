@@ -275,6 +275,15 @@ DWORD GetLastError() { return g_lastError; }
 void SetLastError(DWORD e) { g_lastError = e; }
 
 // ---- files -------------------------------------------------------------------------------------------------------------
+// A Windows program or DLL: its first bytes are "MZ" (what a Windows program under Wine loads as an image).
+static bool IsWindowsImage(const std::string& p) {
+    const int fd = open(p.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    char mz[2] = {};
+    const bool image = pread(fd, mz, 2, 0) == 2 && mz[0] == 'M' && mz[1] == 'Z';
+    close(fd);
+    return image;
+}
 HANDLE CreateFileW(LPCWSTR name, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES, DWORD disposition, DWORD flags, HANDLE) {
     std::string p;
     if (!ToPosix(name, p)) return INVALID_HANDLE_VALUE;
@@ -299,6 +308,10 @@ HANDLE CreateFileW(LPCWSTR name, DWORD access, DWORD share, LPSECURITY_ATTRIBUTE
     }
     const bool truncate = disposition == CREATE_ALWAYS || disposition == TRUNCATE_EXISTING;
     if (target && !S_ISDIR(st.st_mode) && (wantW || truncate) && !(st.st_mode & S_IWUSR)) { SetLastError(ERROR_ACCESS_DENIED); return INVALID_HANDLE_VALUE; }
+    if (target && S_ISREG(st.st_mode) && (wantW || truncate) && IsWindowsImage(p)) {   // Windows' image check (win32_posix.h)
+        const int used = ImageInUse(st.st_dev, st.st_ino);
+        if (used) { SetLastError(used > 0 ? ERROR_SHARING_VIOLATION : ERROR_CANT_ACCESS_FILE); return INVALID_HANDLE_VALUE; }
+    }
     int oflags = O_CLOEXEC | (wantR && wantW ? O_RDWR : wantW ? O_WRONLY : O_RDONLY);
     if ((access & FILE_APPEND_DATA) && !(access & (GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_DATA))) oflags |= O_APPEND;   // append-only access
     if (disposition == CREATE_NEW) oflags |= O_CREAT | O_EXCL;
@@ -1128,6 +1141,7 @@ DWORD FormatMessageW(DWORD flags, LPCVOID, DWORD id, DWORD, LPWSTR buf, DWORD si
         {ERROR_FILE_NOT_FOUND, L"The system cannot find the file specified."}, {ERROR_PATH_NOT_FOUND, L"The system cannot find the path specified."},
         {ERROR_ACCESS_DENIED, L"Access is denied."}, {ERROR_INVALID_HANDLE, L"The handle is invalid."}, {ERROR_NOT_ENOUGH_MEMORY, L"Not enough memory resources are available to process this command."},
         {ERROR_SHARING_VIOLATION, L"The process cannot access the file because it is being used by another process."},
+        {ERROR_CANT_ACCESS_FILE, L"The file cannot be accessed by the system."},
         {ERROR_LOCK_VIOLATION, L"The process cannot access the file because another process has locked a portion of the file."},
         {ERROR_NOT_SUPPORTED, L"The request is not supported."}, {ERROR_FILE_EXISTS, L"The file exists."}, {ERROR_INVALID_PARAMETER, L"The parameter is incorrect."},
         {ERROR_BROKEN_PIPE, L"The pipe has been ended."}, {ERROR_DISK_FULL, L"There is not enough space on the disk."},

@@ -292,6 +292,13 @@ typedef struct _BY_HANDLE_FILE_INFORMATION {
 typedef struct _FILE_ID_128 { BYTE Identifier[16]; } FILE_ID_128;
 typedef struct _FILE_ID_INFO { ULONGLONG VolumeSerialNumber; FILE_ID_128 FileId; } FILE_ID_INFO;
 
+// Sharing rules between handles of this process as Windows has them. Between processes only Windows' image rule: an open that
+// would write (write or append data, or a truncating disposition) to a Windows program or DLL ("MZ") that a Windows program
+// under Wine has loaded fails with ERROR_SHARING_VIOLATION, as Windows refuses a write open of a loaded image (what the
+// operation guard relies on to see a running game). Looked at: this user's Wine processes (command line a Windows path, an
+// .exe, or wine*), their /proc/<pid>/maps. One of them whose maps cannot be read: ERROR_CANT_ACCESS_FILE ("could not tell").
+// Not seen: another user's processes; a file another program merely has open (its share mode is not known here); a game
+// that loads the file after the open succeeded (Windows refuses that load while the write handle is open; Linux cannot).
 HANDLE CreateFileW(LPCWSTR name, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES sa, DWORD disposition, DWORD flags, HANDLE templ);
 BOOL ReadFile(HANDLE h, LPVOID buf, DWORD n, LPDWORD got, OVERLAPPED* ov);
 BOOL WriteFile(HANDLE h, LPCVOID buf, DWORD n, LPDWORD wrote, OVERLAPPED* ov);

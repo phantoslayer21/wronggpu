@@ -77,6 +77,10 @@ void CloseMutex(Handle* h);
 // the Restart Manager's look at one process (win32_posix_rm.cpp): 1 holds one of the files, 0 not, -1 this user's but unreadable,
 // -2 another user's or gone
 int RmScanProcess(int pid, const std::vector<std::pair<dev_t, ino_t>>& files);
+// Is the file (a Windows image) loaded by a Windows program under Wine, as Windows' image check asks before a write open
+// (win32_posix.h CreateFileW)? 1 yes (*who: that process), 0 no, -1 cannot be ruled out: a Wine process of this user whose
+// maps cannot be read (*who). Only this user's Wine processes are looked at.
+int ImageInUse(dev_t dev, ino_t ino, int* who = nullptr);
 
 // CloseHandle of a job or a process handle
 void ReleaseJob(Handle* h);

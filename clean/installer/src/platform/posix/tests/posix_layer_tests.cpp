@@ -17,6 +17,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#include <spawn.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
@@ -24,6 +25,7 @@
 #include <unistd.h>
 
 #include "win32_posix_internal.h"
+#include "../../../../../wgshared/include/wg_state.h"
 
 namespace {
 int checks = 0, failures = 0;
@@ -1142,6 +1144,92 @@ void RestartManager() {
     RmEndSession(s);
 }
 
+// ---- a Windows program under Wine with a WrongGPU binary loaded: a write open is refused, as Windows refuses one of a
+// loaded image (the operation guard's game check). The "game" is this program started again under a Windows program's name.
+pid_t StartNamed(const char* argv0, const std::vector<std::string>& args) {
+    const std::string self = SelfExe();
+    std::vector<char*> argv{const_cast<char*>(argv0)};
+    for (auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+    argv.push_back(nullptr);
+    pid_t pid = 0;
+    return posix_spawn(&pid, self.c_str(), nullptr, nullptr, argv.data(), environ) == 0 ? pid : 0;
+}
+void StopNamed(pid_t pid) {
+    if (pid <= 0) return;
+    kill(pid, SIGKILL);
+    waitpid(pid, nullptr, 0);
+}
+DWORD WriteOpen(const std::wstring& p) {   // the guard's open: 0, or the error
+    HANDLE h = CreateFileW(p.c_str(), DELETE | GENERIC_READ | FILE_WRITE_DATA, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return GetLastError();
+    CloseHandle(h);
+    return 0;
+}
+const char* kGame = "C:\\Games\\Some Game\\Game.exe";   // as Wine spells a Windows program's command line
+
+void GameImage() {
+    const std::wstring dir = In(L"img-game"), dll = dir + L"\\wronggpu_runtime.dll", ini = dir + L"\\wronggpu.ini";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    Put(dll, "MZ stand-in runtime");
+    Put(ini, "[wronggpu]\r\n");
+    check(WriteOpen(dll) == 0, "game check: nobody has the DLL loaded: the guard's write open works");
+    // running: a Windows program under Wine has it mapped
+    const std::string ready = PosixOf(In(L"ready-img1"));
+    pid_t game = StartNamed(kGame, {"--child-map", PosixOf(dll), ready});
+    check(game && WaitReady(ready), "game check: (a Windows program under Wine has the DLL mapped)");
+    check(WriteOpen(dll) == ERROR_SHARING_VIOLATION, "game check: the game has it loaded: a write open fails with ERROR_SHARING_VIOLATION");
+    HANDLE t = CreateFileW(dll.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    check(t == INVALID_HANDLE_VALUE && GetLastError() == ERROR_SHARING_VIOLATION && Slurp(dll) == "MZ stand-in runtime", "game check: ...a truncating open too, whatever it shares; the file as it was");
+    if (t != INVALID_HANDLE_VALUE) CloseHandle(t);
+    HANDLE r = CreateFileW(dll.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    check(r != INVALID_HANDLE_VALUE, "game check: ...a read open still works (Windows lets a loaded image be read)");
+    if (r != INVALID_HANDLE_VALUE) CloseHandle(r);
+    {
+        wgstate::OperationGuard g(Tmp, {dll, ini}, 500);
+        check(g.result() == wgstate::GuardResult::GameRunning && g.which() == dll && std::string(g.words()).find("Close the game") != std::string::npos,
+              "game check: the operation guard: GameRunning, the DLL named, the words say to close the game");
+    }
+    StopNamed(game);
+    check(WriteOpen(dll) == 0, "game check: the game ended: the write open works again");
+    {
+        wgstate::OperationGuard g(Tmp, {dll, ini}, 500);
+        check(g.ok(), "game check: the operation guard: Ok once the game ended");
+    }
+    // not the game: a native program with the DLL mapped (a data mapping: Windows does not refuse that either), and a file that
+    // is not a Windows image mapped by the game
+    const std::string ready2 = PosixOf(In(L"ready-img2")), ready3 = PosixOf(In(L"ready-img3"));
+    pid_t native = StartNamed("/usr/bin/some-native-tool", {"--child-map", PosixOf(dll), ready2});
+    check(native && WaitReady(ready2) && WriteOpen(dll) == 0, "game check: a native (not Wine) program has the DLL mapped: not the game, the write open works");
+    StopNamed(native);
+    const std::string ready6 = PosixOf(In(L"ready-img6"));
+    pid_t loader = StartNamed("/opt/proton/files/bin/wine64-preloader", {"--child-map", PosixOf(dll), ready6});
+    check(loader && WaitReady(ready6) && WriteOpen(dll) == ERROR_SHARING_VIOLATION,
+          "game check: a Wine process named without a Windows path (wine*, or start.exe as Wine names it) with the DLL mapped: refused too");
+    StopNamed(loader);
+    game = StartNamed(kGame, {"--child-map", PosixOf(ini), ready3});
+    check(game && WaitReady(ready3) && WriteOpen(ini) == 0, "game check: the game has a file mapped that is not a Windows image: the write open works");
+    StopNamed(game);
+    // unreadable: a Wine process of this user whose maps cannot be read (not dumpable): it cannot be ruled out
+    const std::string ready4 = PosixOf(In(L"ready-img4")), ready5 = PosixOf(In(L"ready-img5"));
+    pid_t closed = StartNamed(kGame, {"--child-nodump", ready4});
+    check(closed && WaitReady(ready4), "game check: (a Wine process whose maps cannot be read)");
+    int who = 0;
+    struct stat st;
+    stat(PosixOf(dll).c_str(), &st);
+    check(wgposix::ImageInUse(st.st_dev, st.st_ino, &who) == -1 && who == closed, "game check: the scan says it cannot rule that process out (-1, its pid)");
+    check(WriteOpen(dll) == ERROR_CANT_ACCESS_FILE, "game check: ...the write open fails with ERROR_CANT_ACCESS_FILE (could not tell), not a sharing violation");
+    {
+        wgstate::OperationGuard g(Tmp, {dll, ini}, 500);
+        check(g.result() == wgstate::GuardResult::Unknown && std::string(g.words()).find("could not tell") != std::string::npos &&
+                  std::string(g.words()).find("close the game") != std::string::npos,
+              "game check: the operation guard: Unknown, the words say it could not tell and to close the game");
+    }
+    StopNamed(closed);
+    pid_t closedNative = StartNamed("/usr/bin/some-native-tool", {"--child-nodump", ready5});
+    check(closedNative && WaitReady(ready5) && WriteOpen(dll) == 0, "game check: an unreadable process that is not a Wine program: not counted, the write open works");
+    StopNamed(closedNative);
+}
+
 int main(int argc, char** argv) {
     if (argc >= 2 && std::strncmp(argv[1], "--child-", 8) == 0) return ChildMain(argc, argv);
     // a registry file of this run's own, and a folder of its own, both under TMPDIR
@@ -1178,6 +1266,7 @@ int main(int argc, char** argv) {
     RenameByHandle();
     LongPathAndSecurity();
     RestartManager();
+    GameImage();
     std::remove(regFile.c_str());
     std::error_code ec;
     std::string posixTmp(Tmp.begin(), Tmp.end());
