@@ -996,7 +996,7 @@ static bool OptInKey(const wstring& exe, const IniKeyChange& c) {
 // the next seq, written atomically; the caller holds the record's lock. A record that cannot be read is not written over;
 // every failure is said in the notes and warnings.
 bool WriteLauncherModelChoice(Context& ctx, const wstring& dir, char model, std::vector<wstring>& notes, std::vector<wstring>* warnings) {
-    const std::filesystem::path path = Join(StateDir(dir), wgchoice::kRecordFile);
+    const std::filesystem::path path = FsPath(Join(StateDir(dir), wgchoice::kRecordFile));
     wgchoice::Record after;
     std::string why;
     const wgchoice::Outcome o = wgchoice::RecordChoiceUnlocked(path, model, wgchoice::Source::Launcher, &after, &why);
@@ -1103,7 +1103,7 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
     // settings): the front end's upgrade migration, which reads wronggpu.ini's model item under the same lock, comes wholly
     // before or after this.
     // Not taken in time (the game is writing its state): nothing is applied.
-    const std::filesystem::path recordPath = Join(StateDir(dir), wgchoice::kRecordFile);
+    const std::filesystem::path recordPath = FsPath(Join(StateDir(dir), wgchoice::kRecordFile));
     wgchoice::Lock lock(recordPath);
     if (!lock.ok())
         Fail(L"Settings not applied: the game is saving WrongGPU's state right now (" + FromUtf8(wgchoice::OutcomeWords(wgchoice::Outcome::NoLock)) +
