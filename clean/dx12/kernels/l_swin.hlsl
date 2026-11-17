@@ -14,7 +14,9 @@
 //   l_swin_block_c32_enc_nc  the encoder block: FP16 halo map [H + 4][W + 4][32] in (SW_SRC 1), FP8 out
 //                            with its workgroups in reverse order (WG_REV_ORDER, wg_platform.hlsli; the same bytes): it
 //                            reads first the rows of x2 the linears wrote last, and its last-written rows of x3 are the
-//                            ones l_project_gather reads first (more cache hits at both hand-offs)
+//                            ones l_project_gather reads first (more cache hits at both hand-offs). WG_REV_ORDER
+//                            reverses the group index of a 1-D dispatch only (a multi-dimensional launch must flatten
+//                            it first); every kernel declared with it here and in hyb_swin.hlsl / hyb_gemm.hlsl is 1-D
 //   l_swin_block_c32_dec_nc  the decoder block: FP8 map in with the token-grid mirror (SW_SRC 2), FP16 out (SW_OUT_F16)
 //   l_swin_block_c32_enc_lin_nc  D3D12 only: the encoder block with the two input linears as its prologue (SW_SRC 3;
 //                            byte for byte the pair l_linear_32_32_fused -> _enc_nc, which stays the fallback route):

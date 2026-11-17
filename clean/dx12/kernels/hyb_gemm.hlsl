@@ -12,6 +12,8 @@
 // groups one group at a time, the expand those of one sub-pixel k at a time when SW_EX_SPLIT (expand_c128: the four
 // sub-pixels' 48 KB do not fit D3D12's 32 KB).
 // HIP twins: the same names in swin_hyb.co (clean/kernels/swin_hyb.hip: swin.hip's patch_merge / expand with HYB).
+// The expands run with their workgroups in reverse order (WG_REV_ORDER, 1-D dispatches; the same bytes), opposite to
+// the bottleneck / dec2 block before them, so each starts on the rows its producer wrote last (Model L's hybrid chain).
 //
 // @wg-kernel patch_merge_c64_hyb co=- block=256 wave=32 args=p,p,p,u,u defines=SW_PM_C=64,SW_PM_CO=96,SW_PM_SPLIT=1
 // @wg-kernel patch_merge_c96_hyb co=- block=256 wave=32 args=p,p,p,u,u defines=SW_PM_C=96,SW_PM_CO=128,SW_PM_SPLIT=4
