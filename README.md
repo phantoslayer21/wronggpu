@@ -4,11 +4,11 @@
 
 WrongGPU runs its own implementation of the neural networks behind DLSS super resolution (Model M) and DLSS Ray
 Reconstruction on Radeon RX 9000-series cards. The networks' weights come from your own DLSS files; the arithmetic is
-WrongGPU's, so the output is close to DLSS's but not identical to it. Its launcher sets up each of your games and gets
+WrongGPU's, so the output is close to DLSS's but not the same. Its launcher sets up each of your games and gets
 the WrongGPU edition of OptiScaler for them. From
 this source onward, WrongGPU's source code and its official builds are under the MIT licence (see [Licence](#licence)).
 
-**Download:** the [Releases page](https://github.com/phantoslayer21/wronggpu/releases) (latest: 0.6.0, a pre-release).
+**Download:** the [Releases page](https://github.com/phantoslayer21/wronggpu/releases) (latest: [0.6.5](https://github.com/phantoslayer21/wronggpu/releases/tag/v0.6.5), a pre-release).
 **Help and bug reports:** the [WrongGPU Discord server](https://discord.gg/745z9MfKwm) (channel #bug-reports) or
 [GitHub issues](https://github.com/phantoslayer21/wronggpu/issues).
 
@@ -43,7 +43,7 @@ and builds and publishes the official releases.
 Borderlands 4 needs one Engine.ini setting for Ray Reconstruction (the launcher offers to add it); RESIDENT EVIL
 requiem needs REFramework, which you install yourself.
 
-### Games (0.6.0, tested on an RX 9070 XT)
+### Games (tested on an RX 9070 XT; results as tested in 0.6.0 unless a row says otherwise)
 
 | Game | Model M | Ray Reconstruction |
 |---|---|---|
@@ -55,11 +55,15 @@ requiem needs REFramework, which you install yourself.
 | LEGO Batman | yes | the game offers none |
 | 007 First Light | not supported (crashes at start under OptiScaler) | |
 
+0.6.5 was re-tested in Cyberpunk 2077 at 1080p: Model M at Quality and at DLAA, Model L and Model K at Quality, and
+Ray Reconstruction with path tracing, with 0 failures logged.
+
 Other games are experimental; the full list, with requirements and how to add your game, is
-[COMPATIBILITY.md](COMPATIBILITY.md). Known issues in 0.6.0: Ray Reconstruction can still show occasional artifacts (ghosting
-on thin lines in reflections, blotches in Cyberpunk 2077 with path tracing); in RESIDENT EVIL requiem a single frame
-can very occasionally come out far too bright or dark at a scene change. Full details: the release notes
-([clean/installer/RELEASE-NOTES.md](clean/installer/RELEASE-NOTES.md)).
+[COMPATIBILITY.md](COMPATIBILITY.md). Known issues in 0.6.5: A rare crash at game start can happen; restarting the game
+fixes it. In some games or scenes you may still see visual bugs, such as artifacts or flicker; with Ray Reconstruction
+these include ghosting on thin lines in reflections and blotches in Cyberpunk 2077 with path tracing. In RESIDENT EVIL
+requiem a single frame very occasionally comes out far too bright or too dark at a scene change. Full details: the
+release notes ([clean/installer/RELEASE-NOTES.md](clean/installer/RELEASE-NOTES.md)).
 
 ### Model L and Model K (new in 0.6.5, off by default)
 
@@ -72,6 +76,12 @@ Model K and 1.17 ms with Model M
 ([clean/k/records/cp2077-model-k-timing-2026-11-15.json](clean/k/records/cp2077-model-k-timing-2026-11-15.json)),
 and 2.67 ms with Model L, measured the same way in a later sitting with Model M again at 1.17 ms
 ([clean/l/records/cp2077-model-l-timing-2026-11-16.json](clean/l/records/cp2077-model-l-timing-2026-11-16.json)).
+
+Faster kernels in 0.6.5, same output: Model L's Swin stage takes 7.0 µs less per frame and its decoder stage 2.5 µs
+less at 1440p Quality, and 2.5 µs and 1.0 µs less at 1080p Quality; Model M's final (post) stage takes 2.5 µs less at
+1440p Quality and 1.5 µs less at 1080p Quality. The output does not change. Measured on an RX 9070 XT in our offline
+benchmark, which runs frames back to back (five rounds, the median difference per stage); in a game the saving per
+frame can differ.
 
 ### Something broken?
 
@@ -92,7 +102,8 @@ adapted from WrongGPU 0.2.0 code). No NVIDIA DLSS file is included in this repos
 (`nvngx_dlss.dll` / `nvngx_dlssd.dll`, for DLSS super resolution and DLSS Ray Reconstruction): WrongGPU's converter
 reads it on the player's PC and writes WrongGPU's own model file there. Nothing from that file is ever redistributed.
 
-This repository is the source of WrongGPU 0.6.0, published as one snapshot. The documents under `clean/` are the
+This repository is the source of WrongGPU: it was first published as one snapshot of 0.6.0, and it now carries the
+source of 0.6.5 (tag `v0.6.5`). The documents under `clean/` are the
 implementation's own design and format notes (per-file provenance records are kept privately by the maintainer). They refer to the clean-room specification ("spec 02",
 "page 51", ...), to the clean team's questions (`QUESTIONS.md`, `ANSWERS.md`) and to internal results notes
 (`results/...`); those are not part of this repository.
