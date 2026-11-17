@@ -623,7 +623,11 @@ WG_FN void encoder_main(const Frame& f, u8* __restrict__ features, u32* __restri
   // The fence keeps the next pair's 16 A fragments from being loaded early (LLVM would otherwise load all 32 at the
   // start, 64 VGPRs).
   const float* bias = (const float*)(w + kOffBias) + hh * 8;
-  const u32 fo = (u32)(WG_ENC_STORE_UNGUARDED ? tk : tok) * kFeat + hh * (kFeat / 2);
+#if WG_ENC_STORE_UNGUARDED
+  const u32 fo = (u32)(1 ? tk : tok) * kFeat + hh * (kFeat / 2);
+#else
+  const u32 fo = (u32)tok * kFeat + hh * (kFeat / 2);
+#endif
 #pragma unroll
   for (int pr = 0; pr < kMT / 2; ++pr) {
     v8f acc[2];

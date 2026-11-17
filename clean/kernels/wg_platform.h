@@ -16,11 +16,13 @@ typedef decltype(sizeof(0)) size_t;
 typedef float v8f __attribute__((ext_vector_type(8)));
 typedef float v4f __attribute__((ext_vector_type(4)));
 typedef _Float16 v8h __attribute__((ext_vector_type(8)));
-typedef _Float16 v16h __attribute__((ext_vector_type(16)));
 typedef int v2i __attribute__((ext_vector_type(2)));
 typedef _Float16 v2h __attribute__((ext_vector_type(2)));
-typedef _Float16 v4h __attribute__((ext_vector_type(4)));
 typedef u32 v4u __attribute__((ext_vector_type(4)));
+#if defined(__gfx1100__) || defined(__gfx1101__) || defined(WG_EMU)
+typedef _Float16 v4h __attribute__((ext_vector_type(4)));
+typedef _Float16 v16h __attribute__((ext_vector_type(16)));
+#endif
 
 #define WG_WAVE 32    // gfx12 and gfx11 kernels run in wave32
 #define WG_BLOCK 128  // default workgroup size (4 waves); the Swin block kernels use 256
@@ -89,8 +91,6 @@ WG_FN float wg_xor16(float v) {
   return __builtin_bit_cast(float, __builtin_amdgcn_ds_bpermute((int)((wg_lane_id() ^ 16u) << 2),
                                                                  __builtin_bit_cast(int, v)));
 }
-// The same for a 32-bit word.
-WG_FN u32 wg_xchg16_u(u32 v) { return (u32)__builtin_amdgcn_ds_bpermute((int)((wg_lane_id() ^ 16u) << 2), (int)v); }
 #endif
 
 // Workgroup barrier with LDS visibility (release before, acquire after).
