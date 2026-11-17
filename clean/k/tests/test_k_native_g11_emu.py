@@ -59,9 +59,10 @@ def _device(form, extra=None):
                 lib, ent = H.build(PORTS, names, out, gfx=12, extra_defines=extra)
                 kernels.update({n: (lib, ent[n]) for n in names})
             else:
-                decl = [n.replace("__rodd", "") + ("__rodd" if "__rodd" in n else "") + "__g11" for n in names]
-                lib, ent = H.build(NATIVE, decl, out, gfx=11, extra_defines=extra)
-                kernels.update({n: (lib, ent[d]) for n, d in zip(names, decl)})
+                for n in names:   # one library each: the native declarations carry per-kernel knobs
+                    d = n.replace("__rodd", "") + ("__rodd" if "__rodd" in n else "") + "__g11"
+                    lib, ent = H.build(NATIVE, [d], out, gfx=11, extra_defines=extra)
+                    kernels[n] = (lib, ent[d])
         _DEVS[key] = H.HlslEmu(kernels)
     return _DEVS[key]
 
@@ -205,9 +206,12 @@ class TestNativeKnobsAndControls(Checks):
         return out
 
     def test_knobs_keep_the_bytes(self):
-        """Numeric knobs change registers and scheduling only: KN_NB_HOIST 0, KB_GRPLATE 1, KB_W2LATE 1, KB_X1LDS 1."""
+        """Numeric knobs change registers, loads and scheduling only (the declarations' own knobs switched off or others
+        added): the same bytes."""
         base = self._e2_d1(_device("native"))
-        for knob in ({"KN_NB_HOIST": 0}, {"KB_GRPLATE": 1}, {"KB_W2LATE": 1}, {"KB_X1LDS": 1}):
+        for knob in ({"KN_NB_HOIST": 0}, {"KB_GRPLATE": 1}, {"KB_W2LATE": 1}, {"KB_X1LDS": 1}, {"KN_A16": 0},
+                     {"KN_ZSTREAM": 0, "KB_GRPLATE": 0}, {"KN_XPIN": 1, "KN_HEAD_ROLL": 1}, {"KN_VSTREAM": 1, "KN_NB_HOIST": 2},
+                     {"KN_MERGE_ROLL": 1, "KN_MERGE_STEP": 2}, {"KN_AB": 1}, {"KN_AB": 2}):
             other = self._e2_d1(_device("native", knob))
             for name in base:
                 for k in base[name][0]:

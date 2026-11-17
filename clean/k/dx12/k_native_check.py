@@ -189,9 +189,9 @@ def emulate(cases, work):
     for g in groups:
         lib, ent = H.build(ports_src, g, work, gfx=12)
         kernels.update({n: (lib, ent[n]) for n in g})
-        nat = [native_name(n) for n in g]
-        lib, ent = H.build(native_src, nat, work, gfx=11)
-        kernels.update({n: (lib, ent[n]) for n in nat})
+        for n in (native_name(m) for m in g):   # one library each: the native declarations carry per-kernel knobs
+            lib, ent = H.build(native_src, [n], work, gfx=11)
+            kernels[n] = (lib, ent[n])
     dev = H.HlslEmu(kernels, arena_bytes=256 << 20)
     for form in ("shortcut", "native"):
         for ch in _parse_chains(os.path.join(cases, f"{form}.txt")):
