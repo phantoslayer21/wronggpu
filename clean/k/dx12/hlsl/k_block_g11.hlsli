@@ -43,7 +43,8 @@
 //  KN_AB 1: a's B form made at each hidden tile from the held a (one exchange per product); 2: a staged in the x slots
 //    in LDS (each lane its own token's slots) and read back as 16 contiguous channels per product (no exchange, nothing
 //    held). Needs the x staging (a merge or an input staging) and not KB_X1LDS.
-//  KN_MERGE_ROLL 1: the merge's K loop stays a loop (opaque trip count), KN_MERGE_STEP tiles per iteration.
+//  KN_MERGE_ROLL 1: the merge's K loop stays a loop (opaque trip count), KN_MERGE_STEP tiles per iteration: 1, 2 or 4
+//    only (the loop has no tail, the merge's K tile count is a multiple of 4, and the per-iteration arrays hold 4).
 #ifndef KN_VSTREAM
 #define KN_VSTREAM 0
 #endif
@@ -68,6 +69,9 @@
 #endif
 #ifndef KN_MERGE_STEP
 #define KN_MERGE_STEP 4
+#endif
+#if KN_MERGE_STEP != 1 && KN_MERGE_STEP != 2 && KN_MERGE_STEP != 4
+#error "KN_MERGE_STEP must be 1, 2 or 4 (k_block_g11.hlsli: the merge loop has no tail and its tile arrays hold 4)"
 #endif
 
 // 16-byte accesses of the arena. KN_A16 1: the address has its low 4 bits cleared, which tells the driver the access is

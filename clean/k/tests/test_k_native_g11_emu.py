@@ -218,6 +218,24 @@ class TestNativeKnobsAndControls(Checks):
                     np.testing.assert_array_equal(base[name][0][k].view(np.uint32), other[name][0][k].view(np.uint32),
                                                   f"{knob} {name} {k}")
 
+    def test_merge_step_is_1_2_or_4(self):
+        """KN_MERGE_STEP outside 1, 2, 4 is a compile error (0 never advances, 3 reads past the merge's K tiles, 8 past
+        the per-iteration arrays); 1, 2 and 4 compile."""
+        if not sys.platform.startswith("linux"):
+            self.skipTest("the lane emulator needs Linux (ucontext)")
+        try:
+            H.compiler()
+        except RuntimeError as e:
+            self.skipTest(str(e))
+        out = tempfile.mkdtemp(prefix="wg_k_mstep_", dir=os.environ.get("WG_TEST_TMP"))
+        for step in (0, 3, 8):
+            with self.assertRaises(Exception, msg=f"KN_MERGE_STEP={step} compiled") as cm:
+                H.build(NATIVE, ["k_stage2_e0__g11"], out, gfx=11,
+                        extra_defines={"KN_MERGE_ROLL": 1, "KN_MERGE_STEP": step})
+            self.assertIn("KN_MERGE_STEP must be 1, 2 or 4", str(cm.exception), step)
+        for step in (1, 2, 4):
+            H.build(NATIVE, ["k_stage2_e0__g11"], out, gfx=11, extra_defines={"KN_MERGE_ROLL": 1, "KN_MERGE_STEP": step})
+
     def test_negative_control_wrong_row_table(self):
         """A wrong row table (WG_A_ROW_MUT: rows 2 and 3 swapped) must put every stage far outside the limits."""
         bad = self._e2_d1(_device("native", {"WG_A_ROW_MUT": 1}))
