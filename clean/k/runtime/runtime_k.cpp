@@ -4,6 +4,7 @@
 #include "runtime_k.h"
 #include "k_input_uniforms.h"
 #include "k_mix_probe.h"
+#include "k_s_breakpoints.h"
 #include "k_smx_selfcheck.h"
 
 #include <algorithm>
@@ -590,6 +591,25 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
 #else
   if (!smx_test_.empty()) return fail("model K: k_smx_test is a test hook of developer builds only");
 #endif
+  const std::string s_test = option(c, "k_s_breakpoints_test");
+  bool force_s_mismatch = false;
+#ifdef WG_DEV_DIAGNOSTICS
+  if (!s_test.empty() && s_test != "mismatch") return fail("model K: k_s_breakpoints_test must be mismatch");
+  force_s_mismatch = s_test == "mismatch";
+#else
+  if (!s_test.empty()) return fail("model K: k_s_breakpoints_test is a test hook of developer builds only");
+#endif
+  const ki_s_breakpoints::Table* s_table = nullptr;
+  if ((c.backend == 2 || c.backend == 3) && tiled_input_ && in_exact_ && !approx_a1_) {
+    static const auto table = ki_s_breakpoints::make_table();
+    static const auto digest = ki_s_breakpoints::table_digest(table);
+    s_breakpoints_fallback_ = force_s_mismatch || digest != ki_s_breakpoints::kProvenDigest;
+    if (s_breakpoints_fallback_)
+      notes_ += (notes_.empty() ? "" : "\n") +
+                std::string("model K: S breakpoint digest mismatch; using the pre-breakpoint exact tiled S path");
+    else
+      s_table = &table;
+  }
   // The native D3D12 device (backend 3: the D3D12 executor, or k_bench.py's own-buffer timing) runs the exact default
   // path only, and only when every kernel this context can launch has a port in <build>/dx12/manifest.json; both are
   // checked here, before the model is loaded, so a refused context costs nothing more (for model K the context ends and
@@ -633,6 +653,9 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   // k_in_exact=1: the same input kernels with exact arithmetic, addressed as "kx/<name>"
   if (in_exact_ && !dev_->load_module_tagged(join(build_dir_, "k_io_exact.co"), "kx"))
     return fail("model K: " + dev_->err());
+  // The second tag selects the pre-breakpoint shader ports and resolves to the same exact kernels on HIP.
+  if (s_breakpoints_fallback_ && !dev_->load_module_tagged(join(build_dir_, "k_io_exact.co"), "kxs"))
+    return fail("model K: the pre-breakpoint exact tiled S path is unavailable: " + dev_->err());
   // buffers
   for (auto& kv : blobs_) {
     DevPtr p;
@@ -696,6 +719,11 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   std::vector<uint16_t> tab((size_t)8 * kFilterEntries * kFilterValues);
   for (int l = 0; l < 8; ++l) k_filter_table(l, 1, tab.data() + (size_t)l * kFilterEntries * kFilterValues);
   if (!dev_->upload(tables_, tab.data(), tab.size() * 2)) return dfail();
+  if (s_table) {
+    if (!alloc(&s_breakpoints_, sizeof *s_table) ||
+        !dev_->upload(s_breakpoints_, s_table->data(), sizeof *s_table))
+      return dfail();
+  }
   if (!dev_->sync()) return dfail();
   // the native device prepares (loads, verifies and compiles) every kernel this context can select now: a missing or
   // corrupt shader fails create here, not at the first frame
@@ -1320,7 +1348,8 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
   auto kname = [&](const char* n) -> const char* {
     const bool io_kernel = std::strncmp(n, "k_in_", 5) == 0 || std::strncmp(n, "k_out_", 6) == 0;
     if (in_exact_ && std::strncmp(n, "k_in_", 5) == 0) {  // input-stage kernels from k_io_exact.co
-      kname_buf = std::string("kx/") + n;
+      const bool fallback = s_breakpoints_fallback_ && std::strncmp(n, "k_in_tiled", 10) == 0;
+      kname_buf = std::string(fallback ? "kxs/" : "kx/") + n;
     } else if (fast_) {
       kname_buf = std::string(n) + "_f";
     } else {
@@ -1346,8 +1375,11 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
   const bool use_uniforms = use_tiled && !native_direct_ && input_uniforms_ && input_uniforms_safe(fin, &input_host);
   auto input_stage = [&]() {
     if (use_tiled) {
+      if (in_exact_ && !approx_a1_ && cfg_.backend >= 2 && !s_breakpoints_fallback_ && !s_breakpoints_)
+        return fail("model K: exact tiled input would get a null S breakpoint table (arena offset 0); the frame is refused");
       KInParams local = ip;
-      local.cpre = local.cpre2 = 0;
+      local.cpre = s_breakpoints_;
+      local.cpre2 = 0;
       if (use_tiled_color) {
         KInColorParams fused = {local, ctap_, ctapT_};
         if (use_uniforms) {
@@ -1506,11 +1538,11 @@ std::vector<std::string> KRuntime::d3d12_kernels() const {
   v.push_back("k_expo_scalars");
   if (native_direct_) v.push_back("k_expo_scalars_direct");  // exposure from the game's texture (mode 1)
   v.push_back("k_out_color" + d);
-  if (!native_direct_) v.push_back("kx/k_in_tiled_uniform");  // (no direct form: the direct frame uses k_in_tiled_direct)
-  v.push_back("kx/k_in_tiled" + d);  // input_uniforms_safe refusing the host uniforms
-  if (approx_a1_) {  // k_approx=a1 (opt-in)
-    if (!native_direct_) v.push_back("kx/k_in_tiled_uniform__a1");
-    v.push_back("kx/k_in_tiled" + d + "__a1");
+  if (tiled_input_) {
+    const std::string tag = s_breakpoints_fallback_ ? "kxs/" : "kx/";
+    const std::string suffix = approx_a1_ ? "__a1" : "";
+    if (!native_direct_ && input_uniforms_) v.push_back(tag + "k_in_tiled_uniform" + suffix);
+    v.push_back(tag + "k_in_tiled" + d + suffix);  // input_uniforms_safe refusing the host uniforms
   }
   if (approx_a2_) {  // k_approx=a2 (opt-in)
     v.push_back("k_out_color" + d + "__a2");
@@ -1568,7 +1600,7 @@ std::string KRuntime::d3d12_missing() const {
   for (const std::string& k : d3d12_kernels()) {
     auto it = co.find(k);
     // the code object the port stands for must be one this runtime loads (else the device refuses it at launch)
-    const bool tagged = k.rfind("kx/", 0) == 0;
+    const bool tagged = k.rfind("kx/", 0) == 0 || k.rfind("kxs/", 0) == 0;
     const bool co_ok = it != co.end() &&
                        (tagged ? it->second == "k_io_exact.co"
                                : (it->second == "k_block.co" || it->second == "k_block_wide.co" ||

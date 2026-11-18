@@ -56,6 +56,18 @@ float ki_S(float z)
     const float p = ki_exp2(ki_log2(zp) * kf_bits(0x3ED55555u));         // log2 and 2^x each rounded once
     return kf_fma(p, kf_bits(0x3F870A3Du), kf_bits(0xBD6147AEu));
 }
+#if defined(KI_TILED_PACKED_S)
+uint ki_tiled_S_bits(float z, uint table)
+{
+    const float zp = kf_min(kf_max(z, 0.0f), 1.0f);
+    if (!(zp > kf_bits(0x3B4D2E1Cu))) return kh_round_bits(kf_bits(0x414EB852u) * zp);
+    const uint u = asuint(zp);
+    // Every reachable 4,096-code bucket is flat or makes one +1 transition
+    // (clean.k.tests.prove_ki_s_breakpoints). The cut is 4,096 for flat buckets.
+    const uint e = wg_ld32(table, ((u - 0x3B4D2000u) >> 12u) * 4u);
+    return (e & 0xffffu) + ((u & 0xfffu) >= (e >> 16u) ? 1u : 0u);
+}
+#endif
 // z is often a product (lambda L) that HIP rounds before z + 1. No kf_opq: the gfx1201 ISA keeps the product apart
 // (G1's precaution link, dropped in speed round 1 after the ISA check: same v_mul / v_fma counts without it)
 float ki_T(float z)
@@ -132,3 +144,11 @@ void ki_store_x0(uint x0, int id, int k, float c0, float c1, float c2, float c3)
     wg_st64(x0, ((uint)id * 16u + 4u * (uint)k) * 2u,
             uint2(kh_round_bits(c0) | (kh_round_bits(c1) << 16), kh_round_bits(c2) | (kh_round_bits(c3) << 16)));
 }
+
+#if defined(KI_TILED_PACKED_S)
+void ki_store_tiled_x0(uint x0, int id, int k, uint c0, uint c1, float c2, float c3)
+{
+    wg_st64(x0, ((uint)id * 16u + 4u * (uint)k) * 2u,
+            uint2(c0 | (c1 << 16), kh_round_bits(c2) | (kh_round_bits(c3) << 16)));
+}
+#endif

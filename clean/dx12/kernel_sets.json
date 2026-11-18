@@ -639,6 +639,18 @@
   [
    "kx/k_in_tiled_uniform__a1",
    "k_io_exact.co"
+  ],
+  [
+   "kxs/k_in_tiled",
+   "k_io_exact.co"
+  ],
+  [
+   "kxs/k_in_tiled_direct",
+   "k_io_exact.co"
+  ],
+  [
+   "kxs/k_in_tiled_uniform",
+   "k_io_exact.co"
   ]
  ]
 }

@@ -147,6 +147,7 @@ class KRuntime {
   std::string f8why_;  // stages that keep their FP16 kernel, and why
   std::vector<std::string> f8stages_;  // runtime option fp8_stages (default e0, e1, d1, d0)
   bool tiled_input_ = false, tiled_last_ = false, tiled_color_last_ = false, input_uniforms_last_ = false;
+  bool s_breakpoints_fallback_ = false;
   uint64_t tiled_launches_ = 0, tiled_color_launches_ = 0, input_uniform_launches_ = 0;
   uint64_t legacy_color_launches_ = 0, legacy_base_launches_ = 0;
   bool input_uniforms_ = true;  // runtime option k_in_uniforms (0: always k_in_tiled, a port-check diagnostic)
@@ -167,6 +168,7 @@ class KRuntime {
   std::map<std::string, size_t> net_bytes_;
   DevPtr Hc_[2] = {0, 0}, L_[2] = {0, 0}, Hh_[2] = {0, 0};
   DevPtr color_ = 0, depth_ = 0, motion_ = 0, out_ = 0, cpre_ = 0, cpre2_ = 0, ctap_ = 0, ctapT_ = 0;
+  DevPtr s_breakpoints_ = 0;
   DevPtr exp2tab_ = 0, tables_ = 0, expo_ = 0, expo_partials_ = 0, expo_computed_ = 0, expo_sync_ = 0, xs_ = 0;
   DevPtr kexpo_ = 0;  // k_expo_scalars state: E_cur, E_prev, E_aux of the last frame, E_cur kept for the next
   // frame state
