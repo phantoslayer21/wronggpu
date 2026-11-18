@@ -1,52 +1,60 @@
 # Releasing WrongGPU
 
-How an official WrongGPU release is made. Contributors don't need to do any of this; it explains what happens between
-a merged pull request and a download on the [Releases page](https://github.com/phantoslayer21/wronggpu/releases).
+This page explains how the project owner makes an official WrongGPU release. Contributors do not perform these steps.
+The process covers the work between merging a pull request and publishing a download on the
+[Releases page](https://github.com/phantoslayer21/wronggpu/releases).
 
 ## Who releases
 
-Only the project owner builds, tests and publishes official releases. Pull requests are merged into `main` as usual;
-a release is a separate decision. Nobody else uploads release packages or creates release tags.
+Only the project owner builds, tests, and publishes official releases. Pull requests merge into `main` as usual, but
+the owner decides separately whether to make a release. Nobody else uploads release packages or creates release tags.
 
-## 1. The source of a release
+## 1. Identify the source
 
-- A release is built from **one commit on `main` of this repository**. That commit is public before the release is
-  published, so anyone can see exactly what was built.
-- The release tag (for example `v0.6.1`) points at that commit. Tags are never moved after publishing; a fix is a new
+- Build the release from **one commit on `main` in this repository**. Publish that commit before the release so anyone
+  can inspect exactly what was built.
+- Point the release tag, such as `v0.6.5`, at that commit. Never move a tag after publishing it. Release a fix as a new
   version.
-- The version number is set in the build options of BUILDING.md (`-DWG_BUILD_ID=...` for the front end;
-  `-DWRONGGPU_VERSION=...`, `-DWRONGGPU_BUILD_ID=...`, `-DWRONGGPU_PAYLOAD_NAME=...` for the launcher).
+- Set the version through the build options in [BUILDING.md](BUILDING.md). Use `-DWG_BUILD_ID=...` for the front end.
+  Use `-DWRONGGPU_VERSION=...`, `-DWRONGGPU_BUILD_ID=...`, and `-DWRONGGPU_PAYLOAD_NAME=...` for the launcher.
 
 ## 2. Build and test on real hardware
 
-- The owner builds the release on the owner's own PC from a fresh checkout of that commit, with the tools and steps of
-  [BUILDING.md](BUILDING.md): kernels, runtime library, FSR front end, Ray Reconstruction plugin, payload, launcher.
-- Before anything is uploaded:
-  - the CPU tests of BUILDING.md pass (the same set CI runs on every pull request);
-  - the GPU tests pass on a Radeon RX 9000-series card;
-  - the release is installed, used and uninstalled in real games with the launcher, including the games named in the
-    release notes;
-  - the package contains only WrongGPU's own files and their notices: no file of the original upscaler, no model data,
-    no OptiScaler file (the launcher downloads OptiScaler from its own release).
+The owner builds from a fresh checkout of the release commit on the owner's own PC. Follow [BUILDING.md](BUILDING.md)
+to build the kernels, runtime library, FSR front end, Ray Reconstruction plugin, payload, and launcher.
 
-## 3. The release notes
+Before uploading anything, complete all of these checks:
 
-- The notes live in the repository (`clean/installer/RELEASE-NOTES.md`) and go through a pull request like any other
-  change.
-- They point to the release page, which lists the **SHA-256 of the zip**, and to `SHA256SUMS.txt` inside the zip, which
-  lists the SHA-256 of every file in it, so a download can be checked.
-- **The number rule:** every figure in the release notes, the release page and the README (timings, quality figures,
-  version requirements, hardware lists) is traced to its measurement record: which game, resolution, mode, WrongGPU
-  build and log or result file. A figure without a record is left out. Before publishing, someone who did not write
-  the texts compares every figure across the README, the release page and the release notes, and against its record;
-  a mismatch or an untraced figure blocks the release until it is fixed or removed.
+- Pass the CPU tests in [BUILDING.md](BUILDING.md#6-tests-cpu). These are the same tests that CI runs on every pull
+  request.
+- Pass the GPU tests on a Radeon RX 9000-series card.
+- Use the launcher to install, run, and uninstall the release in real games, including every game named in the release
+  notes.
+- Check that the package contains only WrongGPU's own files and their notices. It must contain no file from the
+  original upscaler, no model data, and no OptiScaler file. The launcher downloads OptiScaler from its own release.
 
-## 4. Publishing
+## 3. Prepare and check the release notes
 
-- Uploaded to the Releases page only on the owner's order: the package (`WrongGPU-<version>.zip`), its SHA-256 file
-  and the release notes, attached to the tag of step 1.
-- Pre-releases are marked as such.
-- After publishing, the downloaded package is checked against the SHA-256 on the release page and in `SHA256SUMS.txt`.
+- Keep the notes in `clean/installer/RELEASE-NOTES.md` and review them through a pull request like any other change.
+- Link the notes to the release page, which lists the **SHA-256 of the zip**. Link them also to `SHA256SUMS.txt`
+  inside the zip, which lists the SHA-256 of every file in the package.
+- Trace every figure in the release notes, release page, and README to its measurement record. This includes timings,
+  quality figures, version requirements, and hardware lists. Record the game, resolution, mode, WrongGPU build, and
+  log or result file. Leave out any figure without a record.
+- Before publishing, have someone who did not write the texts compare every figure across the README, release page,
+  and release notes, and against its record. A mismatch or untraced figure blocks the release until someone fixes or
+  removes it.
+
+## 4. Publish the package
+
+Only the owner can order an upload to the Releases page. Attach these items to the tag selected in step 1:
+
+- `WrongGPU-<version>.zip`.
+- The package's SHA-256 file.
+- The release notes.
+
+Mark pre-releases as pre-releases. After publishing, download the package and check it against both the SHA-256 on the
+release page and the entries in `SHA256SUMS.txt`.
 
 ## Licence of releases
 
