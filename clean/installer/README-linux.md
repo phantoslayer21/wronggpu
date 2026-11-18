@@ -80,8 +80,10 @@ binary needs. The X11 libraries are left to the system on purpose: a second copy
 step fails the build if any file needs a glibc or libstdc++ newer than Ubuntu 22.04's, a library that is neither in the
 AppDir nor in `HOST_LIBS`, or the fonts are missing.
 
-The CI job `.github/workflows/linux-appimage.yml` does the `--test-payload` build on pull requests and keeps the AppImage for 3 days
-(`actions/upload-artifact`, pinned to a commit SHA) so a reviewer can run it; it carries the test payload and never ships.
+The CI job `.github/workflows/linux-appimage.yml` runs only when the maintainer starts it from the Actions tab (Linux AppImage,
+Run workflow); no pull request or push starts it. It builds the test stand-in payload (`--test-payload`) and keeps the AppImage for 3
+days (`actions/upload-artifact`, pinned to a commit SHA); it never ships. The release AppImage comes from
+`build-appimage-container.sh --payload <release payload folder>`.
 
 **Updating a pin.** The tool versions, their SHA-256 values and the container image digest are the first lines of
 `build-appimage.sh` (the digest is also in the workflow; a CI step fails if the two differ). Change a version and its

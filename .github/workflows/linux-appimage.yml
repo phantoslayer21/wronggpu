@@ -2,16 +2,11 @@
 # supports) with a test payload: the build proves the launcher's shared code still compiles and links on Linux and that the
 # AppImage still bundles what it needs. A release AppImage is built by the maintainer with the release payload
 # (clean/installer/README-linux.md); this job's file is a smoke build and never ships.
-# Its own workflow, so ci.yml and its required check stay as they are.
+# It runs only when started by hand (workflow_dispatch). Its own workflow, so ci.yml and its required check stay as they are.
 name: Linux AppImage
 
+# Only when the maintainer starts it by hand: Actions tab, Linux AppImage, Run workflow.
 on:
-  pull_request:
-    paths:
-      - "clean/installer/**"
-      - "clean/converter/**"
-      - "tools/ci/check_portable.py"
-      - ".github/workflows/linux-appimage.yml"
   workflow_dispatch:
 
 permissions:
@@ -19,7 +14,7 @@ permissions:
 
 concurrency:
   group: linux-appimage-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 jobs:
   appimage:
@@ -46,7 +41,7 @@ jobs:
         run: python3 tools/ci/check_portable.py --root clean/installer
       - name: Build the AppImage (test payload)
         run: bash clean/installer/build-appimage.sh --test-payload --out out
-      # The smoke build, so a reviewer can run it. It carries the test payload and never ships; it expires after 3 days.
+      # The smoke build, so the maintainer can run it. It carries the test payload and never ships; it expires after 3 days.
       # Pinned to the full commit SHA of the v4.6.2 tag, not the tag, which can be moved.
       - name: Keep the AppImage for review
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
