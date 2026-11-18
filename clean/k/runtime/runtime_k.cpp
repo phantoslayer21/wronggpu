@@ -561,6 +561,7 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   if (warm_line_ < 4 || warm_line_ > 4096 || (warm_line_ & (warm_line_ - 1)))
     return fail("model K: k_warm_line must be a power of two in 4..4096");
   if (warm_groups_ < 1 || warm_groups_ > 1024) return fail("model K: k_warm_groups must be 1..1024");
+  // SMX-SELFCHECK-SOURCE BEGIN (k_split: routes the self-check's m case; the digest covers it)
   // k_split (deep-split; the native D3D12 device, backend 3): "m" (the default) runs stage m as four phase launches
   // spread over many more workgroups (k_split_m_attn[__rodd], k_split_m_wo, k_split_m_w1, k_split_m_w2:
   // clean/k/dx12/kernels/k_block_split.hlsl), the same arithmetic and output bytes as the one k_stagew4_m launch; the
@@ -569,6 +570,7 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   const std::string ksplit = option(c, "k_split");
   if (!ksplit.empty() && ksplit != "m" && ksplit != "off") return fail("model K: k_split must be m or off");
   split_m_ = c.backend == 3 && ksplit != "off";
+  // SMX-SELFCHECK-SOURCE END
   // k_fill=<0..255> (test use, changes no value a frame writes): every buffer a frame writes and both history copies are
   // filled with this byte after allocation, before the first frame, so that a test with a different byte per backend
   // sees a write a frame did not make (first-frame and reset-only writes included) as a difference
@@ -969,9 +971,11 @@ std::string KRuntime::stage_kernel(const std::string& k, const char* stage) cons
 bool KRuntime::launch(const char* kernel, unsigned grid, unsigned block, void* a0, void* a1, void* a2, void* a3,
                       void* a4, void* a5, void* a6, void* a7) {
   if (grid == 0) return true;
+  // SMX-SELFCHECK-SOURCE BEGIN (k_split: stage m's kernel-name redirect; the digest covers it)
   // k_split: stage m (the frame's and the self-check's) as its phase launches
   if (split_m_ && std::strncmp(kernel, "k_stagew4_m", 11) == 0 && (!kernel[11] || std::strcmp(kernel + 11, "__rodd") == 0))
     return split_m(kernel[11] != 0, a0);
+  // SMX-SELFCHECK-SOURCE END
   void* args[8] = {a0, a1, a2, a3, a4, a5, a6, a7};
   if (pending_mark_ >= 0) {
     const int e = pending_mark_;
@@ -981,6 +985,7 @@ bool KRuntime::launch(const char* kernel, unsigned grid, unsigned block, void* a
   return dev_->launch(kernel, grid, block, args) || dfail();
 }
 
+// SMX-SELFCHECK-SOURCE BEGIN (k_split: the phase launches and scratch; the digest covers them)
 // k_split: stage m as four launches (clean/k/dx12/kernels/k_block_split.hlsl), joined by the dispatch boundaries:
 // attention per (window, head), Wo per (window, output tile), W1 per (window, two hidden tiles), W2 per (window, output
 // tile). Each phase reads the block parameters of k_stagew4_m's launch and the scratch the phase before wrote.
@@ -1019,6 +1024,7 @@ bool KRuntime::split_alloc() {
   return alloc(&split_z_, tok * st.heads * 32 * 2) && alloc(&split_x1_, tok * st.C * 2) &&
          alloc(&split_a_, tok * st.C * 2) && alloc(&split_h_, tok * 4 * st.C * 2);
 }
+// SMX-SELFCHECK-SOURCE END
 
 bool KRuntime::upload_inputs(int rw, int rh, const float* color, const float* dep, const float* mot, int channels) {
   if (rw <= 0 || rh <= 0 || rw > max_rw_ || rh > max_rh_) return fail("render size larger than the maximum");

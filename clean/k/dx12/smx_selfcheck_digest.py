@@ -3,7 +3,8 @@
 
 The reference hashes in k_smx_selfcheck.h are valid only for the shaders and the synthetic data they were generated from.
 The digest is a SHA-256 over:
-- the @wg-kernel definition lines of every self-check kernel (both forms: the names, code objects and defines);
+- the @wg-kernel definition lines of every self-check kernel (both forms: the names, code objects and defines), the
+  phase kernels of a split stage m included (SPLIT: the native device runs them for the self-check's m case);
 - the text of every source file those kernels compile from (their .hlsl file and its #include closure in
   clean/k/dx12/hlsl and clean/dx12/hlsl; an include generated into the build folder is covered by its generator,
   clean/k/dx12/gen_k_fp_tables.py);
@@ -28,7 +29,10 @@ RUNTIME_FILES = [os.path.join("clean", "k", "runtime", "runtime_k.cpp"), os.path
 # the softmax stage kernels the self-check runs (runtime_k.cpp kSmxCases), both forms
 BASE = ["k_stage_e2", "k_stagew2_e3", "k_stagew2_d3", "k_stage_d2", "k_stage2_d1", "k_stagew4_e4", "k_stagew4_d4",
         "k_stagew2_e4", "k_stagew2_d4", "k_stagew4_m"]
-KERNELS = sorted(BASE + [k + "__rodd" for k in BASE])
+# the phase kernels the native D3D12 device runs in place of k_stagew4_m[__rodd] (runtime option k_split, default on
+# backend 3; KRuntime::launch redirects stage m, so the self-check's m case runs them: kernels/k_block_split.hlsl)
+SPLIT = ["k_split_m_attn", "k_split_m_attn__rodd", "k_split_m_wo", "k_split_m_w1", "k_split_m_w2"]
+KERNELS = sorted(BASE + [k + "__rodd" for k in BASE] + SPLIT)
 DECL = re.compile(r"^//\s*@wg-kernel\s+(\S+)\s.*$", re.M)
 INCLUDE = re.compile(r'^\s*#\s*include\s+"([^"]+)"', re.M)
 REGION = re.compile(r"// SMX-SELFCHECK-SOURCE BEGIN.*?// SMX-SELFCHECK-SOURCE END", re.S)
