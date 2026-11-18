@@ -211,6 +211,12 @@ def test_appimage_settings(exe, work, home):
         check(bool(button) == with_image, f"{tag}: the Uninstall WrongGPU button is {'there' if with_image else 'not there'} ({button})")
         check("Install for this user" not in names and "Remove data\u2026" not in names and "Uninstall launcher\u2026" not in names, f"{tag}: no Windows install or uninstall button")
         said = " ".join(names)
+        # S6: no downloads on Linux, said on the page (OptiScaler row, release check row without its switch and address field)
+        opti = " ".join(n for n in names if n.startswith("OptiScaler:"))
+        check("Downloads are off on Linux" in opti and "Needs your download" in opti, f"{tag}: the OptiScaler row says downloads are off ({opti[:160]})")
+        rel = " ".join(n for n in names if n.startswith("Check for new releases"))
+        check("Off on Linux" in rel and "get the new AppImage" in rel, f"{tag}: the release check row says it is off on Linux ({rel[:160]})")
+        check(not any(n in ("Check now", "Release address (https)") for n in names), f"{tag}: no release address field or Check now")
         check(("Runs from an AppImage" in said and "Nothing else is deleted" in said) if with_image else "Not run from an AppImage" in said,
               f"{tag}: Settings says what goes, or why nothing can ({[n for n in names if 'AppImage' in n][:3]})")
 

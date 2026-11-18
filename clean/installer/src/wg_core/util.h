@@ -183,6 +183,9 @@ bool NativeLinux();
 // A game that runs under Proton: the launcher is itself under Wine, or it is the native Linux launcher (whose games are Windows
 // games under Proton). Ray Reconstruction's shader caches are the game's own there (rrprep.h).
 bool UnderProton();
+// The launcher can fetch from the internet (OptiScaler's edition, the release check). Off in the native Linux launcher for now: it
+// has no HTTP client (the POSIX layer answers WinHTTP as not available), so what needs one says so in words instead of failing.
+bool DownloadsAvailable();
 // A path for a game in another Wine prefix (Proton gives every game its own): under Wine the Z: path of the same file
 // (Z: maps the Linux root in every prefix, C: does not), otherwise the path unchanged.
 wstring PathForGamePrefix(const wstring& path);

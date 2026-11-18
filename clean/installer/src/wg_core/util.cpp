@@ -680,6 +680,7 @@ HMODULE LoadSystemDll(const wchar_t* name) { return LoadLibraryExW(name, nullptr
 bool UnderWine() { return GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") != nullptr; }
 bool NativeLinux() { return GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wronggpu_native_posix") != nullptr; }
 bool UnderProton() { return UnderWine() || NativeLinux(); }
+bool DownloadsAvailable() { return !NativeLinux(); }
 wstring PathForGamePrefix(const wstring& path) {
     if (path.empty() || !UnderWine()) return path;
     // Wine's kernel32: the Unix name of a DOS path, allocated on the process heap (UTF-8). It fails when more than the last

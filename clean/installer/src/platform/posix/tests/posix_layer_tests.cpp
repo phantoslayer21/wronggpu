@@ -27,6 +27,8 @@
 #include "win32_posix_internal.h"
 #include "wg_core/appimage.h"
 #include "wg_core/checks.h"
+#include "wg_core/launcher.h"
+#include "wg_core/optiedition.h"
 #include "../../../../../wgshared/include/wg_state.h"
 
 namespace {
@@ -615,6 +617,21 @@ void AppImageIdentity() {
     check(wg::OwnAppImage(file, &why) && std::string(file.begin(), file.end()) == "Z:" + [&] { std::string s = app; for (auto& c : s) if (c == '/') c = '\\'; return s; }(),
           "OwnAppImage: the file named by $APPIMAGE, a plain AppImage called WrongGPU...AppImage, this program inside its $APPDIR: yes");
     unsetenv("APPIMAGE"); unsetenv("APPDIR");
+}
+
+// S6: nothing is downloaded on Linux, and what needs a download says so in words (no WinHTTP error, no wait)
+void DownloadsOff() {
+    check(!wg::DownloadsAvailable(), "DownloadsAvailable: off in the native launcher");
+    wg::Context ctx;
+    ctx.logFile = Tmp + L"\\downloads.log";
+    const wg::EditionResult r = wg::GetEdition(ctx, Tmp + L"\\downloads-data", nullptr);
+    check(r.path.empty() && r.error.find(L"doesn't download anything on Linux") != std::wstring::npos && r.error.find(L"choose an OptiScaler file") != std::wstring::npos &&
+              r.detail == L"downloads are off on Linux", "GetEdition: no download on Linux, the player's own OptiScaler is asked for");
+    wg::GlobalSettings gs;
+    gs.updateCheck = true;
+    gs.updateUrl = L"https://example.org/releases/latest";
+    const wg::UpdateInfo u = wg::CheckForUpdate(gs, L"0.6.5");
+    check(!u.checked && !u.newer && u.message.find(L"on Linux") != std::wstring::npos && u.message.find(L"AppImage") != std::wstring::npos, "CheckForUpdate: no request on Linux, said in words");
 }
 
 void Folders() {
@@ -1416,6 +1433,7 @@ int main(int argc, char** argv) {
     NotAvailable();
     GpuIdentity();
     AppImageIdentity();
+    DownloadsOff();
     Folders();
     ErrorValues();
     BasicInfo();

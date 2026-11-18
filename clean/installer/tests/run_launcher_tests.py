@@ -2895,7 +2895,10 @@ def test_ui_dump(t, opti):
     t.check("game page: the FPS overlay saved on: step 3 says it is on, no button; without OptiScaler's overlay key: no claim, no button (UI review r2 #9)",
             "(it is on)" in fp.get("step3_saved", "") and fp.get("button_saved") is False and "FPS overlay shows" not in fp.get("step3_nokey", "x") and
             "no FPS overlay setting" in fp.get("step3_nokey", "") and fp.get("button_nokey") is False, fp)
-    t.check("settings page: update check off by default", any(c["text"] == "Check for new releases" and c.get("checked") is False for c in d.get("settings", {}).get("controls", [])))
+    ctl = d.get("settings", {}).get("controls", [])
+    t.check("settings page: update check off by default" + (" (Linux: no switch, the row says it is off)" if t.native else ""),
+            any(c["text"].startswith("Check for new releases") and "Off on Linux" in c["text"] for c in ctl) if t.native else
+            any(c["text"] == "Check for new releases" and c.get("checked") is False for c in ctl))
     bf = d.get("busy_focus", {})
     t.check("settings page: a button that goes busy keeps the focus, shown off with its busy name; Return does nothing, Tab goes on from it",
             bf.get("id", 0) > 0 and bf.get("kept") is True and bf.get("enabled") is False and "Converting" in bf.get("name", "") and

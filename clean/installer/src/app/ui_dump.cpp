@@ -929,6 +929,7 @@ int RunLauncherUiDump(const wstring& outFile, const wstring& shotDir, bool noSca
     v.page = P_SETTINGS;
     v.urlText = gl.global.updateUrl;
     dumpPage("settings", L"Settings", L"settings.png");
+    if (!shotDir.empty()) RenderFrame(kDefaultW, std::max(760.f, v.contentH[P_SETTINGS] + 20), 1, Join(shotDir, L"settings-tall.png"));  // the whole page in one picture
     {  // Settings' section index: one Tab stop (the section in view); Down goes to the next entry, Up comes back
         int stops = 0, stop = 0;
         RenderFrame(kDefaultW, 760, 1, L"");

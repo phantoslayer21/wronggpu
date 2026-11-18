@@ -2532,6 +2532,7 @@ UpdateInfo CheckForUpdate(const GlobalSettings& gs, const wstring& currentVersio
     if (!gs.updateCheck) { u.message = L"Check for new releases is off."; return u; }  // the switch's own name (Settings)
     if (gs.updateUrl.empty()) { u.message = L"Check for new releases is on, but there's no release address to check."; return u; }
     if (Lower(gs.updateUrl).rfind(L"https://", 0) != 0) { u.message = L"The release address must start with https://."; return u; }
+    if (!DownloadsAvailable()) { u.message = L"WrongGPU doesn't check for new releases on Linux yet. Get the new AppImage from the release page yourself."; return u; }
     URL_COMPONENTS uc{}; uc.dwStructSize = sizeof(uc);
     wchar_t host[256] = {}, path[2048] = {};
     uc.lpszHostName = host; uc.dwHostNameLength = 256; uc.lpszUrlPath = path; uc.dwUrlPathLength = 2048;

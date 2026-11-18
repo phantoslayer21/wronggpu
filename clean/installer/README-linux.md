@@ -94,8 +94,9 @@ checksum together, taken from the project's own release page. Use exact release 
   covers install and settings only; it does not make a game upscale.
 - **Art:** Cairo reads PNG and libjpeg-turbo reads JPEG (`src/app/jpeg_decode_linux.cpp`; Windows uses WIC), so Steam's
   art (hero, header, capsule) shows. Other formats give the page's plain plate, as for a game without art.
-- **No HTTP client:** WinHTTP is answered "not available", so the in-launcher downloads (OptiScaler's edition, the
-  update check) do not run on Linux.
+- **No downloads:** WinHTTP is answered "not available" and `DownloadsAvailable()` (`util.h`) is false natively, so the in-launcher
+  downloads (OptiScaler's edition, the release check) do not run on Linux. Settings says so (the OptiScaler row asks for the
+  player's own OptiScaler download, the release check has no switch), and a game's install without one says the same in words.
 - **Uninstall:** an AppImage has no installer entry, so Settings > Uninstall WrongGPU (`uninstall-appimage --confirm` on the command line)
   deletes the AppImage file named by `$APPIMAGE` and WrongGPU's data folder (`$XDG_DATA_HOME/WrongGPU`), after one confirmation that names
   both, and nothing else. It refuses unless `$APPIMAGE` is a plain file (not a link) called `WrongGPU...AppImage` with an AppImage's header, and

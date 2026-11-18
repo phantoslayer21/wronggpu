@@ -530,10 +530,15 @@ void PaintSettings(Gfx& gx, const Rc& area) {
             // from that project's release page (optiedition.h); the player's own download only when that download doesn't work
             const wstring use = L"Only when the WrongGPU edition can't be downloaded: " +
                                 (ver.empty() ? what : L"OptiScaler " + ver + L" from " + what) + L".";
+            // Linux: nothing is downloaded (DownloadsAvailable): the player's own OptiScaler download is the way in, said as it is
+            const bool off = !DownloadsAvailable() && !v.fixture;
             return SettingRow(gx, lx, ry, lw, b, ic::download, L"OptiScaler",
-                              chosen ? Status{0, L"WrongGPU edition", use} : Status{0, L"WrongGPU edition", L""},
-                              L"Installs use the WrongGPU edition of OptiScaler. OptiScaler is its own project (GPL); the launcher downloads it from "
-                              L"github.com/phantoslayer21/OptiScaler. If that download doesn't work, you can choose your own OptiScaler download.",
+                              off ? Status{chosen ? 0 : 2, chosen ? L"Your download" : L"Needs your download", chosen ? L"OptiScaler download in use: " + (ver.empty() ? what : L"OptiScaler " + ver + L" from " + what) + L"." : L""}
+                                  : chosen ? Status{0, L"WrongGPU edition", use} : Status{0, L"WrongGPU edition", L""},
+                              off ? L"Downloads are off on Linux for now, so WrongGPU can't fetch its edition of OptiScaler. Download OptiScaler yourself "
+                                    L"(github.com/phantoslayer21/OptiScaler) and choose the file or the folder it is in."
+                                  : wstring(L"Installs use the WrongGPU edition of OptiScaler. OptiScaler is its own project (GPL); the launcher downloads it from "
+                                            L"github.com/phantoslayer21/OptiScaler. If that download doesn't work, you can choose your own OptiScaler download."),
                               {{ID_S_OPTIFILE, L"Choose file\u2026"}, {ID_S_OPTIDIR, L"Choose folder\u2026"}}, 0, -1, {}, 0,
                               chosen ? ID_S_OPTITEXT : 0, chosen ? L"OptiScaler download: " + s.optiPackage : L"");
         },
@@ -620,6 +625,9 @@ void PaintSettings(Gfx& gx, const Rc& area) {
         },
         [&](float ry, bool b) { return AccentRow(gx, lx, ry, lw, b); },
         [&](float ry, bool b) {
+            if (!DownloadsAvailable() && !v.fixture)  // Linux: no switch, nothing to turn on (DownloadsAvailable)
+                return SettingRow(gx, lx, ry, lw, b, ic::sync, L"Check for new releases", Status{-1, L"Off on Linux", L""},
+                                  L"The launcher never uses the network on Linux for now. To update, get the new AppImage from the release page yourself.", {});
             float h = SettingRow(gx, lx, ry, lw, b, ic::sync, L"Check for new releases", Status{},
                                  s.updateCheck ? L"On: one request to the release address below when the launcher starts. Nothing else is sent."
                                                : L"Off: the launcher never uses the network.",
