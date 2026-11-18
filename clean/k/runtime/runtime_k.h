@@ -124,6 +124,12 @@ class KRuntime {
   std::string smx_case_name(int i, int ox, int oy, bool rodd) const;
   // the stage kernel network() launches: the __rodd form of a softmax stage after a failed probe
   std::string stage_kernel(const std::string& k, const char* stage) const;
+  // deep-split (runtime option k_split, native D3D12 device): stage m as its four phase launches (k_split_m_*,
+  // clean/k/dx12/kernels/k_block_split.hlsl) in place of one k_stagew4_m launch; launch() redirects k_stagew4_m[__rodd]
+  // here, so network() and the create-time self-check both run it. split_alloc (create): the phases' scratch, sized for
+  // the most windows stage m can have in a frame of this context or in the self-check's m case.
+  bool split_m(bool rodd, void* params);
+  bool split_alloc();
   int fill_ = -1;  // option k_fill (test hook): the byte every frame-written buffer and the histories start with
 
   WgRtConfig cfg_ = {};
@@ -184,6 +190,11 @@ class KRuntime {
     return std::string(" k_approx=") + (approx_a1_ ? "a1" : "") + (approx_a1_ && approx_a2_ ? "," : "") +
            (approx_a2_ ? "a2" : "");
   }
+  // runtime option k_split (backend 3 only; default "m"): stage m runs as its phase launches (split_m); "off": one
+  // k_stagew4_m launch. split_cap_: windows the scratch holds; split_z_ / x1_ / a_ / h_: the phases' FP16 scratch
+  bool split_m_ = false;
+  int split_cap_ = 0;
+  DevPtr split_z_ = 0, split_x1_ = 0, split_a_ = 0, split_h_ = 0;
   std::string smx_note_;
   std::string smx_test_;  // option k_smx_test (developer builds only)
   std::string notes_;  // notes of create for the caller's log (notes()), one per line, or empty

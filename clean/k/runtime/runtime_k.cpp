@@ -561,6 +561,14 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   if (warm_line_ < 4 || warm_line_ > 4096 || (warm_line_ & (warm_line_ - 1)))
     return fail("model K: k_warm_line must be a power of two in 4..4096");
   if (warm_groups_ < 1 || warm_groups_ > 1024) return fail("model K: k_warm_groups must be 1..1024");
+  // k_split (deep-split; the native D3D12 device, backend 3): "m" (the default) runs stage m as four phase launches
+  // spread over many more workgroups (k_split_m_attn[__rodd], k_split_m_wo, k_split_m_w1, k_split_m_w2:
+  // clean/k/dx12/kernels/k_block_split.hlsl), the same arithmetic and output bytes as the one k_stagew4_m launch; the
+  // create-time self-check runs that form for its m case (launch() redirects k_stagew4_m). "off": the one launch. Other
+  // devices always take the one launch (the phase kernels are D3D12 ports only).
+  const std::string ksplit = option(c, "k_split");
+  if (!ksplit.empty() && ksplit != "m" && ksplit != "off") return fail("model K: k_split must be m or off");
+  split_m_ = c.backend == 3 && ksplit != "off";
   // k_fill=<0..255> (test use, changes no value a frame writes): every buffer a frame writes and both history copies are
   // filled with this byte after allocation, before the first frame, so that a test with a different byte per backend
   // sees a write a frame did not make (first-frame and reset-only writes included) as a difference
@@ -683,6 +691,7 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   for (int l = 0; l < 8; ++l) k_filter_table(l, 1, tab.data() + (size_t)l * kFilterEntries * kFilterValues);
   if (!dev_->upload(tables_, tab.data(), tab.size() * 2)) return dfail();
   if (!dev_->sync()) return dfail();
+  if (split_m_ && !split_alloc()) return false;
   // the native device prepares (loads, verifies and compiles) every kernel this context can select now: a missing or
   // corrupt shader fails create here, not at the first frame
   if (c.backend == 3) {
@@ -960,6 +969,9 @@ std::string KRuntime::stage_kernel(const std::string& k, const char* stage) cons
 bool KRuntime::launch(const char* kernel, unsigned grid, unsigned block, void* a0, void* a1, void* a2, void* a3,
                       void* a4, void* a5, void* a6, void* a7) {
   if (grid == 0) return true;
+  // k_split: stage m (the frame's and the self-check's) as its phase launches
+  if (split_m_ && std::strncmp(kernel, "k_stagew4_m", 11) == 0 && (!kernel[11] || std::strcmp(kernel + 11, "__rodd") == 0))
+    return split_m(kernel[11] != 0, a0);
   void* args[8] = {a0, a1, a2, a3, a4, a5, a6, a7};
   if (pending_mark_ >= 0) {
     const int e = pending_mark_;
@@ -967,6 +979,45 @@ bool KRuntime::launch(const char* kernel, unsigned grid, unsigned block, void* a
     return dev_->launch_timed(kernel, grid, block, args, e, -1) || dfail();
   }
   return dev_->launch(kernel, grid, block, args) || dfail();
+}
+
+// k_split: stage m as four launches (clean/k/dx12/kernels/k_block_split.hlsl), joined by the dispatch boundaries:
+// attention per (window, head), Wo per (window, output tile), W1 per (window, two hidden tiles), W2 per (window, output
+// tile). Each phase reads the block parameters of k_stagew4_m's launch and the scratch the phase before wrote.
+bool KRuntime::split_m(bool rodd, void* params) {
+  const KBlkParams& p = *static_cast<const KBlkParams*>(params);
+  const KStageInfo& st = *k_stage("m");
+  const int nwin = p.nwx * p.nwy, kt = st.C / 16, ht = 4 * st.C / 16;
+  if (nwin > split_cap_)
+    return fail("model K: k_split: stage m has " + std::to_string(nwin) + " windows, the scratch holds " +
+                std::to_string(split_cap_));
+  return launch(rodd ? "k_split_m_attn__rodd" : "k_split_m_attn", (unsigned)(nwin * st.heads), 128, params, &split_z_,
+                &split_x1_, &split_a_, &split_h_) &&
+         launch("k_split_m_wo", (unsigned)(nwin * kt), 128, params, &split_z_, &split_x1_, &split_a_, &split_h_) &&
+         launch("k_split_m_w1", (unsigned)(nwin * (ht / 2)), 128, params, &split_z_, &split_x1_, &split_a_, &split_h_) &&
+         launch("k_split_m_w2", (unsigned)(nwin * kt), 128, params, &split_z_, &split_x1_, &split_a_, &split_h_);
+}
+
+// The phases' scratch (FP16): Z [windows][64][8 heads x 32], X1 and A [windows][64][C], H [windows][64][4 C], for the most
+// windows stage m has at any window offset (0 .. 7) in this context's frames or in the self-check's m case.
+bool KRuntime::split_alloc() {
+  const KStageInfo& st = *k_stage("m");
+  if (st.C != 160 || st.heads != 8)  // the phase kernels are compiled for stage m's C = 160, 8 heads
+    return fail("model K: k_split: stage m is not C = 160 with 8 heads");
+  int cap = 0;
+  auto grow = [&](int wb, int hb) {
+    int lw, lh;
+    k_level_size(wb, hb, st.level, &lw, &lh);
+    for (int oy = 0; oy < 8; ++oy)
+      for (int ox = 0; ox < 8; ++ox) cap = std::max(cap, k_window_count(lw, lh, ox, oy));
+  };
+  grow(Bw_, Bh_);
+  for (const SmxCase& sc : kSmxCases)
+    if (std::strcmp(sc.stage, "m") == 0) grow(sc.wb, sc.hb);
+  split_cap_ = cap;
+  const size_t tok = (size_t)cap * 64;
+  return alloc(&split_z_, tok * st.heads * 32 * 2) && alloc(&split_x1_, tok * st.C * 2) &&
+         alloc(&split_a_, tok * st.C * 2) && alloc(&split_h_, tok * 4 * st.C * 2);
 }
 
 bool KRuntime::upload_inputs(int rw, int rh, const float* color, const float* dep, const float* mot, int channels) {
@@ -1448,6 +1499,9 @@ std::vector<std::string> KRuntime::d3d12_kernels() const {
         v.push_back(k + "__rodd");
     }
   }
+  if (split_m_)  // k_split: stage m's phase kernels (k_stagew4_m[__rodd] stay listed above, unused while split)
+    for (const char* k : {"k_split_m_attn", "k_split_m_attn__rodd", "k_split_m_wo", "k_split_m_w1", "k_split_m_w2"})
+      v.push_back(k);
   v.push_back("k_mix_probe");
   v.push_back("k_mix_probe__rodd");
   v.push_back((compact_head_ ? "k_out_pixel_c" : "k_out_pixel") + d);
@@ -1515,7 +1569,7 @@ const char* KRuntime::kernels() {
                   " legacy_color_launches=" + std::to_string(legacy_color_launches_) +
                   " legacy_base_launches=" + std::to_string(legacy_base_launches_) +
                   (fast_ ? " k_fast=1" : "") + (expo_v051_ ? " k_expo_rule=v051" : "") +
-                  smx_note_ + approx_tag() + " hidden=fused_d0" + std::string(" head=") +
+                  smx_note_ + (split_m_ ? " split=m" : "") + approx_tag() + " hidden=fused_d0" + std::string(" head=") +
                   (compact_head_ ? "compact" : "full") +
                   " base=" + std::to_string(Bw_) + "x" + std::to_string(Bh_) +
                   " hdr=" + (hdr_ ? "1" : "0") + " mv=render" +

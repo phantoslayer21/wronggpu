@@ -113,6 +113,18 @@ identical.
 Known limit, shared with Model M's ports: D3D12 flushes FP32 denormals (inputs and results) to zero and HIP keeps them.
 `k_expo_scalars` only meets one with a pre-exposure above about 8.5e37, so the check's inputs keep clear of them.
 
+## Phase-split stage m (runtime option `k_split`, native D3D12 device)
+
+`kernels/k_block_split.hlsl` runs stage m (`k_stagew4_m`: 6 to 24 windows, one 512-lane workgroup each) as four launches
+spread over many more workgroups: `k_split_m_attn` (one per window and head: normalization, q / k / v, softmax, z;
+`__rodd` twin), `k_split_m_wo` (one per window and output tile: Wo, x1, a), `k_split_m_w1` (one per window and two hidden
+tiles: W1, activation) and `k_split_m_w2` (one per window and output tile: W2, x2, the block output), joined by the
+dispatch boundaries. Every accumulator is the same WMMA chain (operands, order, initial value) as in `k_stagew4_m` and every
+FP16 value handed between the launches is the one `k_stagew4_m` keeps at that point, so the output bytes are the same.
+Default on the native D3D12 device (`k_split=m`; `k_split=off`: the one launch; other devices: the one launch). The runtime
+redirects `k_stagew4_m[__rodd]` in `KRuntime::launch`, so the create-time self-check runs the split form for its m case
+against the unchanged HIP reference hashes (kernels line `split=m`).
+
 ## Close approximations (runtime option `k_approx`, opt-in)
 
 Every port above is exact, and nothing set is the exact path. `k_approx` selects close approximations of two stages on
