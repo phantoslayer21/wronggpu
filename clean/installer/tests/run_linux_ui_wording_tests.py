@@ -53,6 +53,10 @@ def test_first_run(exe, work, home):
             check(any(l.startswith("Graphics card detected: AMD Radeon") for l in lines), f"{tag}: the card line is unchanged ({lines[:3]})")
         pic = out / "first-run-details.png"
         check(pic.is_file() and base.png_size(pic) == (1180, 760), f"{tag}: the picture of the sheet with Show details open is there")
+        shown = (out / "first-run-details.png.texts").read_text(encoding="utf-8").replace("\u00a0", " ").splitlines()
+        want_lines = [l.replace("\u00a0", " ") for l in lines if want is None or l != want]
+        check(all(any(t.endswith(l) for t in shown) for l in want_lines + ([want.replace("\u00a0", " ")] if want else [])) and any(t.endswith("\tHide details") for t in shown),
+              f"{tag}: the picture really shows every detail line and 'Hide details'")
 
 
 def test_settings(exe, work, home):
@@ -98,8 +102,13 @@ def test_settings(exe, work, home):
 
 def test_windows_folder_card(exe, work, home):
     print("the Windows-folder card: a command the player can run, with Copy")
-    for tag, image, shown in (("plain", "/home/player/Apps/WrongGPU-0.6.5-x86_64.AppImage", "'/home/player/Apps/WrongGPU-0.6.5-x86_64.AppImage'"),
-                              ("quote", "/home/player/it's here/WrongGPU-0.6.5-x86_64.AppImage", "'/home/player/it'\\''s here/WrongGPU-0.6.5-x86_64.AppImage'")):
+    me = str(Path(exe).resolve())
+    why = ("Can't find the game's Windows folder. It isn't a Steam game, so WrongGPU can't tell where its Proton or Wine folder is. Find the game's Windows user "
+           "folder, the one that holds Documents and AppData (usually pfx/drive_c/users/<name> inside its Proton or Wine folder). Then run this once in a terminal, "
+           "with the folder in place of <that folder>. Keep the quotes around it, and write a ' inside the folder's name as '\\'':")
+    game = "M:\\SteamLibrary\\steamapps\\common\\Borderlands 4\\OakGame\\Binaries\\Win64\\Borderlands4.exe"  # the render's made-up game (no Linux disk)
+    # the variable names a file no process of this run holds: the command is headed by this program's own file, never by that name
+    for tag, image in (("plain", "/home/player/Apps/WrongGPU-0.6.5-x86_64.AppImage"), ("quote", "/home/player/it's here/WrongGPU-0.6.5-x86_64.AppImage")):
         env, _ = base.environment(work, home, "wf-" + tag)
         env["APPIMAGE"] = image
         out = work / ("wf-" + tag)
@@ -107,13 +116,9 @@ def test_windows_folder_card(exe, work, home):
                            "--frames=game-rrconfig-nofolder-other,game-rrconfig-nofolder-steam"], env, 600)
         check(r.returncode == 0, f"{tag}: ui-render exits 0 (got {r.returncode}: {r.stderr[-300:]})")
         texts = (out / "game-rrconfig-nofolder-other@100.png.texts").read_text(encoding="utf-8").splitlines()
-        joined = " ".join(texts)
-        check("It isn't a Steam game, so WrongGPU can't tell where its Proton or Wine folder is." in joined and "Then run this once in a terminal:" in joined,
-              f"{tag}: the card says why and what to do ({joined[:100]})")
-        check("Wine prefix" not in joined and "Run: WrongGPU windows-folder" not in joined, f"{tag}: no 'Wine prefix' and no bare WrongGPU command")
-        line = next((t.split("\t")[-1] for t in texts if "Point WrongGPU at the Windows folder" in t), "")
-        check(f"{shown} windows-folder '" in line and line.endswith("Borderlands4.exe' '<that folder>'"),
-              f"{tag}: the command starts with the AppImage path in quotes, then the verb, the game's exe and the folder ({line})")
+        check(any(t.split("\t")[-1] == why for t in texts), f"{tag}: the card says why and what to do, whole")
+        want = "Point WrongGPU at the Windows folder: '" + me + "' windows-folder '" + game + "' '<that folder>'"
+        check(any(t.split("\t")[-1] == want for t in texts), f"{tag}: the command is the program's own file, the verb, the game's exe and the folder (want {want})")
         check(any(t.split("\t")[2:] == ["Copy the windows-folder command"] for t in texts), f"{tag}: the card has a Copy button")
         steam = " ".join((out / "game-rrconfig-nofolder-steam@100.png.texts").read_text(encoding="utf-8").splitlines())
         check("Point WrongGPU at the Windows folder" not in steam and "Steam has not made this game's Proton folder yet" in steam, f"{tag}: a Steam game without its Proton folder gets no command card")

@@ -420,6 +420,9 @@ if(NOT WIN32)
     add_test(NAME linux-ui-wording COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_linux_ui_wording_tests.py
              --exe $<TARGET_FILE:WrongGPU> --work ${CMAKE_CURRENT_BINARY_DIR}/linux-ui-wording-tests)
     set_tests_properties(linux-ui-wording PROPERTIES TIMEOUT 600)
+    add_test(NAME linux-ui-codexfix COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_linux_ui_codexfix_tests.py
+             --exe $<TARGET_FILE:WrongGPU> --work ${CMAKE_CURRENT_BINARY_DIR}/linux-ui-codexfix-tests)
+    set_tests_properties(linux-ui-codexfix PROPERTIES TIMEOUT 900)
     if(MOCK_PAYLOAD_WORK AND NOT WRONGGPU_PRESET_K)
       # the launcher's verbs suite (tests/run_launcher_tests.py) against this binary: it needs the test map and stand-in payload
       # the build embeds only when it made them itself; its checks that only mean something on Windows say so and are skipped
