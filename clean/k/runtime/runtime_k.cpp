@@ -585,8 +585,8 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   smx_test_ = option(c, "k_smx_test");
 #ifdef WG_DEV_DIAGNOSTICS
   if (!smx_test_.empty() && smx_test_ != "mix_fail" && smx_test_ != "both_fail" && smx_test_ != "rodd_unchecked" &&
-      smx_test_ != "report")
-    return fail("model K: k_smx_test must be mix_fail, both_fail, rodd_unchecked or report");
+      smx_test_ != "split_fail" && smx_test_ != "report")
+    return fail("model K: k_smx_test must be mix_fail, both_fail, rodd_unchecked, split_fail or report");
 #else
   if (!smx_test_.empty()) return fail("model K: k_smx_test is a test hook of developer builds only");
 #endif
@@ -701,7 +701,28 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
       if (!dev_->prepare(k)) return dfail();
     prepared_ = true;
   }
-  if (!smx_select(c.backend, smx_test_)) return false;
+  // the create-time self-check. A split stage m (k_split=m) that fails it is not a refusal: stage m takes the one launch
+  // (k_split=off's path: the same bytes, the same reference hashes), the self-check runs again on that path, and create
+  // refuses only when that fails too (both reasons in the error)
+  const std::string notes_before = notes_;
+  if (!smx_select(c.backend, smx_test_)) {
+    if (!split_m_) return false;
+    std::string split_why = err_;
+    for (char& ch : split_why)
+      if (ch == '\n' || ch == '\r') ch = ' ';
+    notes_ = notes_before;
+    split_m_ = false;
+    if (!smx_select(c.backend, smx_test_)) {
+      std::string one_launch = err_;
+      for (char& ch : one_launch)
+        if (ch == '\n' || ch == '\r') ch = ' ';
+      return fail(one_launch + " (the split form of stage m failed first: " + split_why + ")");
+    }
+    notes_ += (notes_.empty() ? "" : "\n") +
+              std::string("model K: the create-time self-check failed on the split form of stage m (") + split_why +
+              "); stage m takes the one launch (k_stagew4_m), output unchanged";
+    err_.clear();
+  }
   if (!approx_note_.empty()) notes_ += (notes_.empty() ? "" : "\n") + approx_note_;
   return true;
 }
@@ -724,7 +745,9 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
 // prepared at create (KRuntime::create, Device::prepare): a missing or corrupt shader fails create.
 // Test hook (developer builds only, WG_DEV_DIAGNOSTICS): runtime option k_smx_test = mix_fail (the mix form counts as
 // failed), both_fail (both forms count as failed), rodd_unchecked (the round-to-odd ports without the check; for the
-// frame test's negative control), report (adds the computed hashes as a note; on any device, every possible offset).
+// frame test's negative control), split_fail (the split form of stage m counts as failed, so create takes the one
+// launch; with k_split=off it has no effect), report (adds the computed hashes as a note; on any device, every possible
+// offset).
 namespace {
 // SMX-SELFCHECK-SOURCE BEGIN (the cases, the synthetic data, the offsets and the check: k_smx_selfcheck.h's digest covers this text)
 struct SmxCase {
@@ -908,6 +931,8 @@ bool KRuntime::smx_select(int backend, const std::string& hook) {
     add_note(report("reference", h, -1));
     return true;
   }
+  if (hook == "split_fail" && split_m_)  // test hook: the split form of stage m counts as failed (create's fallback)
+    return fail("model K: test hook: the split self-check of stage m failed (k_smx_test=split_fail)");
   if (hook == "rodd_unchecked") {
     smx_rodd_ = true;
     smx_note_ = " smx=rodd(unchecked)";
