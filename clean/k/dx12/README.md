@@ -97,7 +97,7 @@ refuse a header whose digest differs; `WG_DX12_SMX_DIGEST=0` lets a negative-con
 `build.py` never embeds a test-only, bypassed, define-built, unprovenanced or stale entry, and the payload packager
 refuses a library whose build manifest does not record that check (`clean/tests/test_dev_diagnostics_off.py`).
 
-The test hook `k_smx_test` (`mix_fail`, `both_fail`, `rodd_unchecked`, `report`) exists only in runtime libraries built
+The test hook `k_smx_test` (`mix_fail`, `both_fail`, `rodd_unchecked`, `split_fail`, `report`) exists only in runtime libraries built
 with `build.py --dev-diagnostics`; a release build refuses it (`test_k_runtime_d3d12.py`:
 `test_native_softmax_switch_is_logged`, `test_native_softmax_refusals`, `test_native_fallback_frames_*`). Negative
 controls, never shipped: `K_SMX_MUT=1` (the mix form's residual dropped), `K_SMX_MUT4=1` (dropped only at window offset
@@ -112,6 +112,24 @@ identical.
 
 Known limit, shared with Model M's ports: D3D12 flushes FP32 denormals (inputs and results) to zero and HIP keeps them.
 `k_expo_scalars` only meets one with a pre-exposure above about 8.5e37, so the check's inputs keep clear of them.
+
+## Phase-split stage m (runtime option `k_split`, native D3D12 device)
+
+`kernels/k_block_split.hlsl` runs stage m (`k_stagew4_m`: 6 to 24 windows at 1080p/1440p output (more at 4K and in the self-check), one 512-lane workgroup each) as four launches
+spread over many more workgroups: `k_split_m_attn` (one per window and head: normalization, q / k / v, softmax, z;
+`__rodd` twin), `k_split_m_wo` (one per window and output tile: Wo, x1, a), `k_split_m_w1` (one per window and two hidden
+tiles: W1, activation) and `k_split_m_w2` (one per window and output tile: W2, x2, the block output), joined by the
+dispatch boundaries. Every accumulator is the same WMMA chain (operands, order, initial value) as in `k_stagew4_m` and every
+FP16 value handed between the launches is the one `k_stagew4_m` keeps at that point, so the output bytes are the same.
+Default on the native D3D12 device (`k_split=m`; `k_split=off`: the one launch; other devices: the one launch). The runtime
+redirects `k_stagew4_m[__rodd]` in `KRuntime::launch`, so the create-time self-check runs the split form for its m case
+against the unchanged HIP reference hashes (kernels line `split=m`). The self-check digest (`smx_selfcheck_digest.py`)
+covers the phase kernels and the runtime's `k_split` option, redirect and phase launches. `k_split` is parsed on every
+device: a value other than `m` or `off` fails create there too.
+
+If the create-time self-check fails on the split form of stage m, create does not refuse: stage m takes the one launch,
+the self-check runs again on that path, and one note of create says so (the output is the same). Create refuses only
+when the one-launch path fails the self-check too. The developer hook `k_smx_test=split_fail` forces the first failure.
 
 ## Close approximations (runtime option `k_approx`, opt-in)
 
