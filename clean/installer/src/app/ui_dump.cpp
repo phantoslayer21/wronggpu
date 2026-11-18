@@ -151,7 +151,7 @@ int RunLauncherUiDump(const wstring& outFile, const wstring& shotDir, bool noSca
     for (auto& l : v.first.lines) j.Str(l.second);
     j.End();
     j.B("first_run_install_offer", v.first.installOffer);
-    {  // the removal's words for a made-up AppImage, with and without the ignore list and a game that has WrongGPU (the tests read them)
+    if (NativeLinux()) {  // the removal's words for a made-up AppImage, with and without the ignore list and a game that has WrongGPU (the tests read them)
         const wstring file = L"/home/player/Apps/WrongGPU-0.6.5-x86_64.AppImage", data = L"/home/player/.local/share/WrongGPU";
         j.Key("appimage_words").Arr();
         for (int keeps = 0; keeps < 2; ++keeps)
@@ -161,7 +161,7 @@ int RunLauncherUiDump(const wstring& outFile, const wstring& shotDir, bool noSca
     }
     wstring firstFocus;  // what has the keyboard once the checks are done (Continue)
     for (auto& h : v.hits) if (h.id == v.focus) firstFocus = h.name;
-    if (!shotDir.empty()) {  // the sheet with Show details open (every check line), picture only
+    if (!shotDir.empty() && NativeLinux()) {  // the sheet with Show details open (every check line), picture only
         v.first.checksOpen = true; RenderFrame(kDefaultW, 760, 1, shot(L"first-run-details.png")); v.first.checksOpen = false;
     }
     v.first.open = false;  // as FinishFirstRun leaves it (without saving the settings or the release check)
@@ -548,6 +548,18 @@ int RunLauncherUiDump(const wstring& outFile, const wstring& shotDir, bool noSca
         j.End();
     }
     j.End();
+    if (NativeLinux() && !v.games.empty()) {  // the card's Copy button as a click runs it: the command it puts on the clipboard, and the toast
+        ShowEntry(v.games[0], false);
+        Activate(ID_G_WINFOLDER_COPY);
+        wstring clip;
+        if (OpenClipboard(nullptr)) {
+            if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) { if (const wchar_t* t = (const wchar_t*)GlobalLock(h)) { clip = t; GlobalUnlock(h); } }
+            CloseClipboard();
+        }
+        j.Key("windows_folder_copy").Obj().S("exe", v.cur.exe).S("clipboard", clip).S("toast", v.toast.text).End();
+        wstring question;  // the live uninstall dialog's text, built by the function the dialog calls (the ignore list is looked for in the real folder)
+        if (AppImageUninstallQuestion(question)) j.Key("appimage_question").Str(question);
+    }
     // the first game with WrongGPU, scrolled down with an unsaved change (all its OptiScaler settings shown), a frame
     // every 40 DIPs of the scroll range: the page's controls that take a click and its text fields that show (none under
     // the pinned plate or the unsaved bar); then Tab to a control hidden under the plate (it is scrolled out from under it)

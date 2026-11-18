@@ -317,7 +317,7 @@ void ActivateWidget(int id) {
         case ID_G_RRCFG_OPEN: case ID_G_RRCFG_COPY: case ID_G_RRCFG_CHECK: case ID_G_RRCFG_FIX: RrConfigAction(id); return;
 #ifndef _WIN32
         case ID_G_PROTONOPT_COPY: CopyLaunchOption(ProtonLaunchOption(v.opti.proxy)); return;
-        case ID_G_WINFOLDER_COPY: CopyTerminalCommand(WindowsFolderCommand(v.cur.exe)); return;
+        case ID_G_WINFOLDER_COPY: if (NativeLinux()) CopyTerminalCommand(WindowsFolderCommand(v.cur.exe)); return;
 #endif
         // "Turn it on in the game": OptiScaler's FPS overlay on (an unsaved change: the capsule's Apply writes it)
         case ID_G_GUIDEFPS: SetSetting(v.edit, "fps_overlay", "on", nullptr); Invalidate(); return;

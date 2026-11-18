@@ -379,7 +379,7 @@ void PaintSettings(Gfx& gx, const Rc& area) {
         const float ay = iy + 2 + 3 * 34 - 2 + 20;
         gx.Text(L"WrongGPU " + wstring(Ctx().data->version), Rc{x0 + 12, ay, 168, 18}, as);
         // natively in an AppImage there is nothing to install: "Not installed" is a Windows idea (Settings' Launcher row says the same)
-        const bool inImage = NativeLinux() && !v.fixture && RunsFromOwnAppImage(nullptr, nullptr);
+        const bool inImage = NativeLinux() && !v.fixture && RunsInsideAnAppImage();
         gx.Text(inImage ? L"AppImage" : installed ? L"Installed for this user" : portable ? L"Portable" : L"Not installed", Rc{x0 + 12, ay + 18, 168, 18}, as);
         AddText(Rc{x0 + 12, ay, 168, 36}, L"WrongGPU " + wstring(Ctx().data->version) + L", " + (inImage ? L"AppImage" : installed ? L"installed for this user" : portable ? L"portable" : L"not installed"));
     }
@@ -608,10 +608,10 @@ void PaintSettings(Gfx& gx, const Rc& area) {
     if (linuxApp) {
         wstring imageFile, imageWhy;
         const bool own = RunsFromOwnAppImage(&imageFile, &imageWhy);
-        bool gamesHaveIt = false;
-        for (auto& x : v.games) gamesHaveIt = gamesHaveIt || x.hasRecord;
-        inst = Status{-1, own ? L"Runs from an AppImage" : L"Not an AppImage", L""};
-        instDesc = AppImageSettingsWords(own, imageFile, gl.paths.dataDir, imageWhy, IgnoreListThere(gl.paths.dataDir), gamesHaveIt);
+        // the folder the uninstall deletes (AppDataPath, as UninstallAppImage and its question name it), not a --data override
+        const wstring target = AppDataPath();
+        inst = Status{-1, own || RunsInsideAnAppImage() ? L"Runs from an AppImage" : L"Not an AppImage", L""};
+        instDesc = AppImageSettingsWords(own, imageFile, target, imageWhy, IgnoreListThere(target), own && GamesBlockAppImageUninstall());
         instActs.clear();
         if (own) instActs.push_back({ID_S_SELFUNINSTALL, v.task == T_SELFUNINSTALL ? L"Uninstalling\u2026" : L"Uninstall WrongGPU\u2026", false, !v.busy});
     }
