@@ -768,15 +768,17 @@ void SetIcon(HWND hh, const uint8_t* bgra, int w, int h) {  // straight alpha, B
     SDL_DestroySurface(s);
 }
 
+// The text last set while SDL is not up (a headless run: the dump reads back what a Copy button put there)
+static std::wstring g_clipHeld;
 std::wstring ClipGet() {
-    static std::wstring held;
-    if (!g_sdlUp) return held;
+    if (!g_sdlUp) return g_clipHeld;
     char* t = SDL_GetClipboardText();
     std::wstring w = t ? wgposix::FromUtf8(t, strlen(t)) : L"";
     SDL_free(t);
     return w;
 }
 void ClipSet(const std::wstring& text) {
+    g_clipHeld = text;
     if (g_sdlUp) SDL_SetClipboardText(wgposix::ToUtf8(text).c_str());
 }
 

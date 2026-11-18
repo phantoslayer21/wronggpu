@@ -246,14 +246,18 @@ static wstring ShellQuote(const wstring& s) {
     for (wchar_t c : s) q += c == L'\'' ? wstring(L"'\\''") : wstring(1, c);
     return q + L"'";
 }
-// The command a player runs once for a game that is not a Steam game (Heroic, Lutris, Bottles): the AppImage they started this from
-// ($APPIMAGE; this program's own file when it is not in one), the game's exe, and their Windows folder to fill in.
+// A core path in the spelling a shell takes (Z:\home\x -> /home/x). The real Linux name is kept: no '\' of it is turned into a '/'.
+static wstring ShellSpelling(const wstring& p) { return NativeLinux() ? FromUtf8(FsPath(p).string()) : p; }
+// The command a player runs once for a game that is not a Steam game (Heroic, Lutris, Bottles): this launcher's own file (the
+// AppImage when the same proof the uninstall asks for says it is the one running, else the running program), the game's exe, and
+// their Windows folder to fill in (in single quotes: an apostrophe inside it is written as '\'' , the card says so).
 wstring WindowsFolderCommand(const wstring& gameExe) {
-    const wstring image = EnvVar(L"APPIMAGE");
-    return ShellQuote(ShownPath(image.empty() ? SelfPath() : image)) + L" windows-folder " + ShellQuote(ShownPath(gameExe)) + L" '<that folder>'";
+    wstring host;
+    const wstring image = lui::RunsFromOwnAppImage(nullptr, nullptr, &host) ? host : ShellSpelling(SelfPath());
+    return ShellQuote(image) + L" windows-folder " + ShellQuote(ShellSpelling(gameExe)) + L" '<that folder>'";
 }
 void CopyTerminalCommand(const wstring& line) {
-    ShowToast(CopyToClipboard(line) ? L"The command is on the clipboard. Paste it into a terminal, and put your folder where it says <that folder>."
+    ShowToast(CopyToClipboard(line) ? L"The command is on the clipboard. Paste it into a terminal, and put your folder where it says <that folder>, inside the quotes."
                                     : L"The command couldn't be put on the clipboard. Type it as the page shows it.", 0);
 }
 // The game page's "Engine.ini setting" steps: Open folder (never made here: the game makes it at its first start), Copy (the

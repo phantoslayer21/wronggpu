@@ -1454,7 +1454,7 @@ static bool AsksWindowsFolder() { return NativeLinux() && v.rrcfgWhy.find(L"not 
 static wstring RrFolderWords() {
     if (!AsksWindowsFolder()) return v.rrcfgWhy + L".";
     return L"It isn't a Steam game, so WrongGPU can't tell where its Proton or Wine folder is. Find the game's Windows user folder, the one that holds "
-           L"Documents and AppData (usually pfx/drive_c/users/<name> inside its Proton or Wine folder). Then run this once in a terminal:";
+           L"Documents and AppData (usually pfx/drive_c/users/<name> inside its Proton or Wine folder). Then run this once in a terminal, with the folder in place of <that folder>. Keep the quotes around it, and write a ' inside the folder's name as '\\'':";
 }
 static float WindowsFolderCard(Gfx& gx, float x, float y, float w) {
     const wstring title = L"Point WrongGPU at the Windows folder", code = win::WindowsFolderCommand(v.cur.exe);

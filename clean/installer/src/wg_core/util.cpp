@@ -673,7 +673,14 @@ wstring NowStamp(bool forFileName) {
 wstring EnvVar(const wchar_t* name) {
     wchar_t b[MAX_PATH * 2];
     DWORD n = GetEnvironmentVariableW(name, b, (DWORD)std::size(b));
-    return n && n < std::size(b) ? wstring(b, n) : wstring();
+    if (n && n < std::size(b)) return wstring(b, n);
+    if (n < std::size(b)) return wstring();
+    // longer than the stack buffer (n is the size it needs, with the end mark): a Linux path may be 4096 bytes
+    wstring big(n, L'\0');
+    const DWORD m = GetEnvironmentVariableW(name, big.data(), n);
+    if (!m || m >= n) return wstring();
+    big.resize(m);
+    return big;
 }
 // System DLLs this exe uses only sometimes are loaded from System32 only, never from the download folder.
 HMODULE LoadSystemDll(const wchar_t* name) { return LoadLibraryExW(name, nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32); }

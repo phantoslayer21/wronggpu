@@ -949,8 +949,9 @@ bool Confirm(const wstring& text, int icon = 0, const wstring& yes = L"Yes", con
 void Inform(const wstring& text, int icon = 2);
 // ui_appimage.cpp: Settings' row of the native Linux launcher's own removal (own: this copy can remove its AppImage; else why not)
 wstring AppImageSettingsWords(bool own, const wstring& file, const wstring& data, const wstring& why, bool keepsList, bool gamesHaveIt);
-bool RunsFromOwnAppImage(wstring* file, wstring* why);  // OwnAppImage, asked once
-bool IgnoreListThere(const wstring& dataDir);           // the data folder has the player's ignore-files.txt (an uninstall keeps it)
+bool RunsFromOwnAppImage(wstring* file, wstring* why, wstring* host = nullptr);  // OwnAppImage, asked once (host: the file as a shell spells it)
+bool IgnoreListThere(const wstring& dataDir);           // the data folder has the player's ignore-files.txt as a plain file (an uninstall keeps it)
+bool GamesBlockAppImageUninstall();                     // a game still has WrongGPU by the uninstall's own look (registered and managed games)
 // A note that arrives on its own (a worker's result): shown at once, or once the dialog or file dialog that is open closes, so
 // it never answers a question the player has open.
 void InformLater(const wstring& text, int icon = 2);

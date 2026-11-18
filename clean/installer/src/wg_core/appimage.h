@@ -15,7 +15,13 @@ namespace wg {
 // AppImage runtime mounts its own file that way, so $APPIMAGE and $APPDIR from the environment alone prove nothing. Where the
 // system gives no such proof (the process folder cannot be read, the AppImage was unpacked instead of mounted) the answer is no.
 // *file is the real path as the core spells it (Z:\...).
-bool OwnAppImage(wstring& file, wstring* why);
+// *host (when given): the same file in its Linux spelling (/home/x/WrongGPU.AppImage, links resolved), what a shell is given.
+bool OwnAppImage(wstring& file, wstring* why, wstring* host = nullptr);
+
+// Whether this program runs from an AppImage at all, a weaker question than OwnAppImage, for words only (never for a delete):
+// $APPIMAGE and $APPDIR are set and this running program is inside $APPDIR. True too for an AppImage that was extracted and run
+// (APPIMAGE_EXTRACT_AND_RUN), which has no FUSE mount to prove; false for the bare binary started with another AppImage's variables.
+bool RunsInsideAnAppImage();
 
 // Uninstall: the AppImage file (OwnAppImage) and WrongGPU's data folder (RemoveSharedData: the converted model data, the
 // games' list, the launcher's settings and logs; refused while a game still has WrongGPU, which reads that data). The file is

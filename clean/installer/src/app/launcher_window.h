@@ -86,6 +86,7 @@ bool FirstRunPortable();  // ui_words.cpp: the first run's "portable" choice (fa
 void HandOverToInstalled(HANDLE& one, const wstring& installedExe, const wchar_t* why);  // ui_words.cpp: a newer download, its question answered
 bool AnswerReplaceOffer(HANDLE& one, const wstring& installedExe, const wstring& have, const LauncherStartDecision& start);  // ui_words.cpp: "Update WrongGPU to X?"; true: Not now, this copy runs (rc5)
 void AppImageUninstallAsked();  // ui_appimage.cpp: the native Linux launcher's Settings > Uninstall WrongGPU (wg_core/appimage.h)
+bool AppImageUninstallQuestion(wstring& text);  // ui_appimage.cpp: the dialog's text for this running copy, as the dialog builds it
 wstring AppImageUninstallText(const wstring& file, const wstring& data, bool keepsList = false);  // keepsList: the data folder has an ignore-files.txt (it is put back)
 void RemoveDataAsked();  // ui_words.cpp: a portable copy's Settings > Remove data... (RemoveSharedData)
 void StartHealth(bool gpu);  // the model data, the RR data and the graphics card read again (the status line, Settings)

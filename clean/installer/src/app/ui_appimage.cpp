@@ -21,6 +21,15 @@ wstring AppImageUninstallText(const wstring& fileIn, const wstring& dataIn, bool
            L"Nothing else is deleted. Your games and their files are not touched.";
 }
 
+// The dialog's text for this running copy (false: it is not a proven AppImage). The folder named and looked into for the ignore list is
+// the one the uninstall deletes.
+bool AppImageUninstallQuestion(wstring& text) {
+    wstring file;
+    if (!OwnAppImage(file, nullptr)) return false;
+    text = AppImageUninstallText(file, AppDataPath(), lui::IgnoreListThere(AppDataPath()));
+    return true;
+}
+
 void AppImageUninstallAsked() {
     using namespace lui;
     if (!v.live || v.busy || !NativeLinux()) return;
@@ -31,7 +40,9 @@ void AppImageUninstallAsked() {
     auto look = std::make_shared<SharedDataLook>();
     if (!WaitForRead(L"", kLookVerb, T_NONE, [look] { *look = LookAtSharedData(g.ctx); })) return;
     if (look->anyGame) { Inform(L"Your games still use WrongGPU\n\nUninstall WrongGPU from each game first (its page, More, Uninstall), then uninstall WrongGPU here. Nothing was deleted.", 1); return; }
-    if (!Confirm(AppImageUninstallText(file, AppDataPath(), lui::IgnoreListThere(AppDataPath())), 0, L"Uninstall WrongGPU", L"Cancel", true)) return;
+    wstring question;
+    if (!AppImageUninstallQuestion(question)) return;
+    if (!Confirm(question, 0, L"Uninstall WrongGPU", L"Cancel", true)) return;
     auto kept = std::make_shared<wstring>();
     auto problem = std::make_shared<wstring>();
     auto ok = std::make_shared<bool>(false);
@@ -57,12 +68,26 @@ wstring AppImageSettingsWords(bool own, const wstring& file, const wstring& data
            (gamesHaveIt ? wstring(L" Uninstall WrongGPU from your games first.") : wstring());
 }
 // Whether this copy runs from its own proven AppImage (the file and the environment do not change while it runs)
-bool RunsFromOwnAppImage(wstring* file, wstring* why) {
-    static wstring imageFile, imageWhy;
-    static const bool own = OwnAppImage(imageFile, &imageWhy);
+bool RunsFromOwnAppImage(wstring* file, wstring* why, wstring* host) {
+    static wstring imageFile, imageWhy, imageHost;
+    static const bool own = OwnAppImage(imageFile, &imageWhy, &imageHost);
     if (file) *file = imageFile;
     if (why) *why = imageWhy;
+    if (host) *host = imageHost;
     return own;
 }
-bool IgnoreListThere(const wstring& dataDir) { return IsFile(Join(dataDir, wg::kIgnoreListName)); }
+// Only a plain file is promised: the uninstall keeps a link to the list, but the file the link points to goes with the folder
+bool IgnoreListThere(const wstring& dataDir) {
+    const DWORD a = GetFileAttributesW(Join(dataDir, wg::kIgnoreListName).c_str());
+    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY) && !(a & FILE_ATTRIBUTE_REPARSE_POINT);
+}
+// Whether a game still has WrongGPU, as the uninstall asks it (LookAtSharedData: the registered and the managed games), not by the
+// loaded Library. The look reads each place once; Settings repaints often, so the answer is kept for a few seconds.
+bool GamesBlockAppImageUninstall() {
+    static ULONGLONG at = 0;
+    static bool any = false;
+    const ULONGLONG now = GetTickCount64();
+    if (!at || now - at > 3000) { any = LookAtSharedData(Ctx()).anyGame; at = GetTickCount64(); }
+    return any;
+}
 }  // namespace wg::app::lui

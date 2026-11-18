@@ -149,7 +149,7 @@ static bool ServedFromFile(const wstring& procRoot, unsigned minor, const DiskId
 
 namespace {
 // The file that was proven to be this program's own AppImage, as it was when it was checked.
-struct Checked { wstring file; DiskIdent id; };
+struct Checked { wstring file; DiskIdent id; wstring host; };
 }
 
 static bool CheckOwn(Checked& out, wstring* why) {
@@ -194,6 +194,7 @@ static bool CheckOwn(Checked& out, wstring* why) {
         return no(notStarted + L" (No process started from the file serves the mount.)");
     out.file = p;
     out.id = id;
+    out.host = FromUtf8(imageHost);
     return true;
 }
 
@@ -210,11 +211,19 @@ static bool StillTheSame(const Checked& c, wstring* why) {
     return true;
 }
 
-bool OwnAppImage(wstring& file, wstring* why) {
+bool OwnAppImage(wstring& file, wstring* why, wstring* host) {
     Checked c;
     if (!CheckOwn(c, why)) return false;
     file = c.file;
+    if (host) *host = c.host;
     return true;
+}
+
+bool RunsInsideAnAppImage() {
+    string appdir, self;
+    if (EnvVar(L"APPIMAGE").empty() || EnvVar(L"APPDIR").empty() || !Canonical(ToUtf8(EnvVar(L"APPDIR")), appdir) || !Canonical(FsPath(SelfPath()).string(), self))
+        return false;
+    return self.compare(0, appdir.size() + 1, appdir + "/") == 0;
 }
 
 bool UninstallAppImage(Context& ctx, wstring* why, wstring* removedFile, wstring* kept) {
