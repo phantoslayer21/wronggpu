@@ -8,6 +8,9 @@
 #ifndef KI_HWMATH
 #define KI_HWMATH 0
 #endif
+#ifndef KI_SGPR
+#define KI_SGPR 0   // k_in.hlsl defines it for the exact direct tiled form
+#endif
 #if KI_HWMATH
 // CLOSE-APPROXIMATION variant (opt-in, never the default): the transcendental unit instead of the correctly rounded
 // sequences: v_log_f32 / v_exp_f32 (about 1 FP32 ulp), v_rcp_f32 and a product for the divisions. The results meet the
@@ -92,6 +95,10 @@ KiFine ki_fine(KInParams P, KiHost k, int fx, int fy)
     const bool dfold = (F.flags & KIO_M16) != 0;
     const float dmsx = F.rmsx, dmsy = F.rmsy, dmox = F.rmox, dmoy = F.rmoy;
 #endif
+#if KI_SGPR
+    // the exact tiled direct kernel: the same four values, computed once per wave in k_in.hlsl ki_host_sgpr (SGPRs)
+    const float spx = k.sp_x, spy = k.sp_y, ofx = k.of_x, ofy = k.of_y;
+#else
     float spx = k.sp_x, spy = k.sp_y, ofx = F.mox, ofy = F.moy;
     [branch] if (dfold) {
         const bool dmvlo = (F.flags & KIO_MVLO) != 0;
@@ -100,6 +107,7 @@ KiFine ki_fine(KInParams P, KiHost k, int fx, int fy)
         ofx = ki_dmo(F.mox, dmox, dmsx);
         ofy = ki_dmo(F.moy, dmoy, dmsy);
     }
+#endif
     const float mx = spx * (mvx + ofx), my = spy * (mvy + ofy);
     const float wx = px + mx, wy = py + my;
     KiFine r;
