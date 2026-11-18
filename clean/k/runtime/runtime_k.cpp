@@ -4,6 +4,7 @@
 #include "runtime_k.h"
 #include "k_input_uniforms.h"
 #include "k_mix_probe.h"
+#include "k_s_breakpoints.h"
 #include "k_smx_selfcheck.h"
 
 #include <algorithm>
@@ -696,6 +697,12 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   std::vector<uint16_t> tab((size_t)8 * kFilterEntries * kFilterValues);
   for (int l = 0; l < 8; ++l) k_filter_table(l, 1, tab.data() + (size_t)l * kFilterEntries * kFilterValues);
   if (!dev_->upload(tables_, tab.data(), tab.size() * 2)) return dfail();
+  if ((c.backend == 2 || c.backend == 3) && tiled_input_ && in_exact_ && !approx_a1_) {
+    static const auto breakpoints = ki_s_breakpoints::make_table();
+    if (!alloc(&s_breakpoints_, sizeof breakpoints) ||
+        !dev_->upload(s_breakpoints_, breakpoints.data(), sizeof breakpoints))
+      return dfail();
+  }
   if (!dev_->sync()) return dfail();
   // the native device prepares (loads, verifies and compiles) every kernel this context can select now: a missing or
   // corrupt shader fails create here, not at the first frame
@@ -1347,7 +1354,8 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
   auto input_stage = [&]() {
     if (use_tiled) {
       KInParams local = ip;
-      local.cpre = local.cpre2 = 0;
+      local.cpre = s_breakpoints_;
+      local.cpre2 = 0;
       if (use_tiled_color) {
         KInColorParams fused = {local, ctap_, ctapT_};
         if (use_uniforms) {

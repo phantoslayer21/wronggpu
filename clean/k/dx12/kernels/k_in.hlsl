@@ -27,7 +27,7 @@
 //                           motion from the game's textures t0 / t1 / t2, k_frame.hlsli kio_texel / kio_motion /
 //                           kio_depth; WG_DIRECT_TEXTURES); the uniform form has no direct form (the native executor has
 //                           no host frame values)
-// The KInParams pointers cpre / cpre2 are null in the tiled launches (runtime_k.cpp), as in HIP unused here.
+// The exact D3D12 tiled launches use KInParams.cpre for the packed S transfer table.
 // @wg-kernel kx/k_in_tiled_uniform co=k_io_exact.co block=256 wave=64 args=s248:p4.b128.p5.b48 defines=K_UNIFORM=1
 // @wg-kernel kx/k_in_tiled co=k_io_exact.co block=256 wave=64 args=s200:p4.b128.p5
 // @wg-kernel kx/k_in_tiled_direct co=k_io_exact.co entry=k_in_tiled block=256 wave=64 args=s200:p4.b128.p5 rs=direct defines=WG_DIRECT_TEXTURES=1
@@ -65,7 +65,20 @@ WG_ARGS_END
 
 float3 kf_opq3(float3 x) { return asfloat(asuint(x) ^ kf_opq_z_); }
 
+#if !KI_HWMATH
+#define KI_TILED_PACKED_S 1
+#endif
 #include "k_in_common.hlsli"
+
+#if KI_HWMATH
+#define KI_TILED_CHANNEL float
+#define KI_TILED_S(z, table) ki_S(z)
+#define KI_TILED_STORE ki_store_x0
+#else
+#define KI_TILED_CHANNEL uint
+#define KI_TILED_S(z, table) ki_tiled_S_bits(z, table)
+#define KI_TILED_STORE ki_store_tiled_x0
+#endif
 
 struct KiTiledTap {
     float4 cv;  // Y, Co, Cg, phi(Y)
@@ -83,12 +96,12 @@ KiTiledTap ki_tiled_tap_from_raw(KFrameIn F, float4 c)
     return r;
 }
 KiTiledTap ki_tiled_tap(KFrameIn F, int rx, int ry) { return ki_tiled_tap_from_raw(F, kio_color(F, rx, ry)); }
-float ki_tiled_ch0(KFrameIn F, int rx, int ry)
+KI_TILED_CHANNEL ki_tiled_ch0(KFrameIn F, int rx, int ry, uint table)
 {
     const float3 rgb = ki_rgb(F, kio_color(F, rx, ry));
     const bool hdr = (F.flags & KIO_HDR) != 0;
     const float Yc = kio_luma_fma(rgb.x, rgb.y, rgb.z);
-    return ki_S(ki_T(F.lam * ki_L(Yc, hdr)));
+    return KI_TILED_S(ki_T(F.lam * ki_L(Yc, hdr)), table);
 }
 // HIP ki_tiled_transpose: lane bit 0 / bit 1 swaps through ds_bpermute (wg_xor = WaveReadLaneAt(lane ^ d))
 float4 ki_tiled_transpose(float4 v, int lane)
@@ -162,7 +175,8 @@ WG_KERNEL(k_in_tiled)
     const int id = by * F.Bw + bx;
     const bool hdr = (F.flags & KIO_HDR) != 0;
     const float c1e4 = kf_bits(0x38D1B717u);
-    float ch0 = 0.0f, ch1 = 0.0f, ch3 = 0.0f;
+    KI_TILED_CHANNEL ch0 = 0, ch1 = 0;
+    float ch3 = 0.0f;
     float4 hid = 0.0f;
     if ((F.flags & KIO_RESET) != 0) {
         if (active) {
@@ -170,8 +184,8 @@ WG_KERNEL(k_in_tiled)
             const int ofx = 2 * u + 1 - (v & 1), ofy = 2 * v + (u & 1);
             const int rx = (int)kf_R(F.jx + kf_fma((float)ofx + 0.5f, hk.a_x, -0.5f));
             const int ry = (int)kf_R(F.jy + kf_fma((float)ofy + 0.5f, hk.a_y, -0.5f));
-            const float h = ki_tiled_ch0(F, rx, ry);
-            ki_store_x0(P.x0, id, k, h, h, 0.0f, 0.0f);
+            const KI_TILED_CHANNEL h = ki_tiled_ch0(F, rx, ry, P.cpre);
+            KI_TILED_STORE(P.x0, id, k, h, h, 0.0f, 0.0f);
         }
         return;
     }
@@ -247,11 +261,11 @@ WG_KERNEL(k_in_tiled)
         const int ofx = 2 * u + 1 - (v & 1), ofy = 2 * v + (u & 1);
         const int rx = (int)kf_R(F.jx + kf_fma((float)ofx + 0.5f, hk.a_x, -0.5f));
         const int ry = (int)kf_R(F.jy + kf_fma((float)ofy + 0.5f, hk.a_y, -0.5f));
-        ch0 = ki_tiled_ch0(F, rx, ry);
+        ch0 = ki_tiled_ch0(F, rx, ry, P.cpre);
         const float4 hs = kio_bilinear4(P.Hh, F.Bw, F.Bh, own_nx, own_ny);
         hid = valid ? hs : 0.0f;
         // channel 1 is channel 0's function of Yh, and Yh = Yc without a valid history: then it equals channel 0
-        ch1 = valid ? ki_S(ki_T(F.lam * ki_L(own_hx, hdr))) : ch0;
+        ch1 = valid ? KI_TILED_S(ki_T(F.lam * ki_L(own_hx, hdr)), P.cpre) : ch0;
         const float d3 = valid ? D : 0.0f;
         ch3 = kf_finite(d3) ? d3 : 0.0f;
     }
@@ -259,5 +273,5 @@ WG_KERNEL(k_in_tiled)
     if (!active) return;
     float hsum = (hs.x + hs.w) + (hs.y + hs.z);
     hsum = hsum * 0.25f;
-    ki_store_x0(P.x0, id, k, ch0, ch1, kf_finite(hsum) ? hsum : 0.0f, ch3);
+    KI_TILED_STORE(P.x0, id, k, ch0, ch1, kf_finite(hsum) ? hsum : 0.0f, ch3);
 }

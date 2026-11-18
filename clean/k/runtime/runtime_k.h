@@ -167,6 +167,7 @@ class KRuntime {
   std::map<std::string, size_t> net_bytes_;
   DevPtr Hc_[2] = {0, 0}, L_[2] = {0, 0}, Hh_[2] = {0, 0};
   DevPtr color_ = 0, depth_ = 0, motion_ = 0, out_ = 0, cpre_ = 0, cpre2_ = 0, ctap_ = 0, ctapT_ = 0;
+  DevPtr s_breakpoints_ = 0;
   DevPtr exp2tab_ = 0, tables_ = 0, expo_ = 0, expo_partials_ = 0, expo_computed_ = 0, expo_sync_ = 0, xs_ = 0;
   DevPtr kexpo_ = 0;  // k_expo_scalars state: E_cur, E_prev, E_aux of the last frame, E_cur kept for the next
   // frame state
