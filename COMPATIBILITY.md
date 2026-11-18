@@ -25,10 +25,13 @@ Tested on a Radeon RX 9070 XT, with WrongGPU 0.6.0 unless a row says otherwise.
 | **Other games** | Experimental / unverified | Experimental / unverified | OptiScaler support and the launcher accepting a game alone do not establish WrongGPU compatibility. [Send a report](https://github.com/phantoslayer21/wronggpu/issues/new?template=game-compatibility-report.yml). |
 
 A successful run does not cover every game build, graphics setting, quality mode or frame-generation configuration.
-Results from earlier WrongGPU versions are labelled as such. The Borderlands 4 figure is Ray Reconstruction's own GPU
-time per frame, from `clean/installer/tests/logs/bl4-rr-only.log`, a trimmed excerpt of WrongGPU's plugin log from a
-test run (about 1.59 ms per frame, render 642x361, output 1920x1080). The Ray Reconstruction mode and the WrongGPU
-version of that run are not recorded in the excerpt.
+Results from earlier WrongGPU versions are labelled as such. The Borderlands 4 figure is the GPU time per frame that
+WrongGPU's Ray Reconstruction runtime logged for its instance 1 (the `runtime: instance 1 timing` lines of
+`clean/installer/tests/logs/bl4-rr-only.log`, a trimmed excerpt of WrongGPU's plugin log from a test run): about 1.59 ms
+per frame in the logged timing windows, render 642x361, output 1920x1080. The instance was destroyed after 36044
+frames with 0 failed. The last line of that log, "RR instances created 0, RR evaluates 0", counts only the
+game-interface route. Borderlands 4 creates Ray Reconstruction itself through the direct route, so those zeros are
+expected and do not mean that Ray Reconstruction did not run. The Ray Reconstruction mode and the WrongGPU version of that run are not recorded in the excerpt.
 
 ## Requirements for another game
 
