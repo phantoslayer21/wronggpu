@@ -53,6 +53,12 @@ WG_ARGS_END
 #ifndef KS_HB
 #define KS_HB 2                                        // hidden tiles per workgroup (k_split_m_w1)
 #endif
+// The hidden tiles HT = 4 KW_C / 16 are split into the W2 batches (HT / KS_B2) and the W1 groups (HT / KS_HB). The
+// runtime's W1 launch (runtime_k.cpp, split_m) runs HT / 2 groups per window: that is this grid only for KS_HB = 2, so a
+// change of KS_HB must change that launch too.
+#if (4 * KW_C / 16) % KS_B2 != 0 || (4 * KW_C / 16) % KS_HB != 0
+#error "k_block_split.hlsl: KS_B2 and KS_HB must divide HT = 4 KW_C / 16 (the W2 batches and the W1 groups)"
+#endif
 
 // Operand fence: the D3D12 driver's scheduler moves each global load of a short, low-pressure chain down to its
 // product (one memory latency per product, measured in the RGA ISA of the first build). A phase therefore loads a
