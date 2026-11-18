@@ -4,6 +4,10 @@
 // answer deletes those two. Written for this project.
 #include "app/launcher_window.h"
 
+#include <atomic>
+#include <thread>
+
+#include "app/launcher_ui_state.h"
 #include "wg_core/appimage.h"
 #include "wg_core/convert_ignore.h"
 
@@ -82,12 +86,25 @@ bool IgnoreListThere(const wstring& dataDir) {
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY) && !(a & FILE_ATTRIBUTE_REPARSE_POINT);
 }
 // Whether a game still has WrongGPU, as the uninstall asks it (LookAtSharedData: the registered and the managed games), not by the
-// loaded Library. The look reads each place once; Settings repaints often, so the answer is kept for a few seconds.
+// loaded Library. In the live window the look runs on a worker (a game on an offline share holds each look, never the painting) and
+// the page is drawn again when it is done; Settings shows the last finished answer, refreshed every few seconds. The button looks
+// again itself before it asks anything. The dumps and offscreen frames look at once.
 bool GamesBlockAppImageUninstall() {
-    static ULONGLONG at = 0;
-    static bool any = false;
+    static std::atomic<int> answer{-1};  // -1 not looked yet, 0 no, 1 yes
+    static std::atomic<bool> looking{false};
+    static std::atomic<ULONGLONG> at{0};
+    if (!v.live || !v.hwnd) return LookAtSharedData(Ctx()).anyGame;
     const ULONGLONG now = GetTickCount64();
-    if (!at || now - at > 3000) { any = LookAtSharedData(Ctx()).anyGame; at = GetTickCount64(); }
-    return any;
+    if (!looking.load() && (answer.load() < 0 || now - at.load() > 3000)) {
+        looking = true;
+        const HWND w = v.hwnd;
+        std::thread([w] {
+            answer = LookAtSharedData(Ctx()).anyGame ? 1 : 0;
+            at = GetTickCount64();
+            looking = false;
+            PostMessageW(w, win::WM_APP_ART, 0, 0);  // drawn again (WM_APP_ART only repaints)
+        }).detach();
+    }
+    return answer.load() == 1;
 }
 }  // namespace wg::app::lui

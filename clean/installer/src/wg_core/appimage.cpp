@@ -70,6 +70,14 @@ static bool Canonical(const string& hostPath, string& host) {
     return !host.empty() && host[0] == '/';
 }
 
+std::string HostSelfPath() {
+    std::error_code ec;
+    const auto p = std::filesystem::read_symlink("/proc/self/exe", ec);
+    if (ec) return string();
+    const string s = p.string();
+    return !s.empty() && s[0] == '/' ? s : string();
+}
+
 // The device number the way a file's st_dev reaches the core (the layer keeps its low 32 bits): Linux's own packing.
 static DWORD DevNumber(unsigned major, unsigned minor) {
     return (DWORD)(((major & 0xfffu) << 8) | (minor & 0xffu) | ((minor & ~0xffu) << 12));
@@ -176,7 +184,7 @@ static bool CheckOwn(Checked& out, wstring* why) {
         return no(name + L" is not an AppImage file, so WrongGPU will not delete it.");
     const wstring notStarted = L"WrongGPU cannot prove that " + name + L" is the AppImage this program was started from, so it will not delete it.";
     string appdirHost, selfHost;
-    if (EnvVar(L"APPDIR").empty() || !Canonical(ToUtf8(EnvVar(L"APPDIR")), appdirHost) || !Canonical(FsPath(SelfPath()).string(), selfHost) ||
+    if (EnvVar(L"APPDIR").empty() || !Canonical(ToUtf8(EnvVar(L"APPDIR")), appdirHost) || !Canonical(HostSelfPath(), selfHost) ||
         selfHost.compare(0, appdirHost.size() + 1, appdirHost + "/") != 0)
         return no(L"This running program is not inside " + name + L", so WrongGPU cannot tell the file is the one it was started from and will not delete it.");
     // $APPDIR must be a FUSE mount that the system itself says is served from this very file
@@ -221,7 +229,7 @@ bool OwnAppImage(wstring& file, wstring* why, wstring* host) {
 
 bool RunsInsideAnAppImage() {
     string appdir, self;
-    if (EnvVar(L"APPIMAGE").empty() || EnvVar(L"APPDIR").empty() || !Canonical(ToUtf8(EnvVar(L"APPDIR")), appdir) || !Canonical(FsPath(SelfPath()).string(), self))
+    if (EnvVar(L"APPIMAGE").empty() || EnvVar(L"APPDIR").empty() || !Canonical(ToUtf8(EnvVar(L"APPDIR")), appdir) || !Canonical(HostSelfPath(), self))
         return false;
     return self.compare(0, appdir.size() + 1, appdir + "/") == 0;
 }

@@ -23,6 +23,10 @@ bool OwnAppImage(wstring& file, wstring* why, wstring* host = nullptr);
 // (APPIMAGE_EXTRACT_AND_RUN), which has no FUSE mount to prove; false for the bare binary started with another AppImage's variables.
 bool RunsInsideAnAppImage();
 
+// Native Linux: this program's own file as the system names it (/proc/self/exe), with no round trip through the core's Windows-style
+// spelling (which turns a backslash in a Linux name into a separator) and no length limit. Empty when it cannot be read.
+std::string HostSelfPath();
+
 // Uninstall: the AppImage file (OwnAppImage) and WrongGPU's data folder (RemoveSharedData: the converted model data, the
 // games' list, the launcher's settings and logs; refused while a game still has WrongGPU, which reads that data). The file is
 // proven first and its identity (device, inode, header) kept; a game still using the data is looked for next; then, just before the

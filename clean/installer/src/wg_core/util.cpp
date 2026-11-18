@@ -720,6 +720,14 @@ wstring ShownPath(const wstring& in) {
     for (auto& c : p) if (c == L'\\') c = L'/';
     return p;
 }
-wstring SelfPath() { wchar_t b[MAX_PATH * 2]; DWORD n = GetModuleFileNameW(nullptr, b, (DWORD)std::size(b)); return wstring(b, n); }
+// The buffer grows until the whole name fits: a truncated name (GetModuleFileNameW returns the buffer's size) names a file that is not there
+wstring SelfPath() {
+    for (DWORD size = MAX_PATH * 2; size <= 65536; size *= 2) {
+        std::vector<wchar_t> b(size);
+        const DWORD n = GetModuleFileNameW(nullptr, b.data(), size);
+        if (n < size) return wstring(b.data(), n);
+    }
+    return wstring();
+}
 
 }  // namespace wg

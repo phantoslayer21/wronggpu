@@ -23,6 +23,7 @@
 
 #include <set>
 
+#include "wg_core/appimage.h"
 #include "wg_core/rrconfig.h"
 
 namespace wg::app {
@@ -253,7 +254,8 @@ static wstring ShellSpelling(const wstring& p) { return NativeLinux() ? FromUtf8
 // their Windows folder to fill in (in single quotes: an apostrophe inside it is written as '\'' , the card says so).
 wstring WindowsFolderCommand(const wstring& gameExe) {
     wstring host;
-    const wstring image = lui::RunsFromOwnAppImage(nullptr, nullptr, &host) ? host : ShellSpelling(SelfPath());
+    const string self = NativeLinux() ? HostSelfPath() : string();
+    const wstring image = lui::RunsFromOwnAppImage(nullptr, nullptr, &host) ? host : !self.empty() ? FromUtf8(self) : ShellSpelling(SelfPath());
     return ShellQuote(image) + L" windows-folder " + ShellQuote(ShellSpelling(gameExe)) + L" '<that folder>'";
 }
 void CopyTerminalCommand(const wstring& line) {
