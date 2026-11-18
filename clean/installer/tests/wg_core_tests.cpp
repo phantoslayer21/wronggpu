@@ -211,8 +211,8 @@ int main() {
             require(NeedsRx9000Sentence() == L"WrongGPU's models need an RX 9000-series GPU; using AMD FSR", "NeedsRx9000Sentence: the runtime's sentence");
             GpuInfo rdna4;
             rdna4.amd = rdna4.rdna4 = true;
-            require(GpuToolbarLine(L"RX 9070 XT", rdna4) == L"RX 9070 XT (detected) \u00b7 Direct3D 12",
-                    "GpuToolbarLine: RDNA 4 is detected and runs on Direct3D 12");
+            require(GpuToolbarLine(L"RX 9070 XT", rdna4) == (NativeLinux() ? L"RX 9070 XT (detected) \u00b7 Direct3D 12 (through Proton)" : L"RX 9070 XT (detected) \u00b7 Direct3D 12"),
+                    "GpuToolbarLine: RDNA 4 is detected and runs on Direct3D 12 (through Proton on the native Linux launcher; Windows and Wine unchanged)");
             GpuInfo rdna3;
             rdna3.amd = true;
             const wstring l3 = GpuToolbarLine(L"RX 7900 XTX", rdna3);

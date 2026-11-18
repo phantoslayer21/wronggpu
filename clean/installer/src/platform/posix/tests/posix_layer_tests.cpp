@@ -566,6 +566,14 @@ void GpuIdentity() {
     setenv("WRONGGPU_TEST_DRM_ROOT", r1.c_str(), 1);
     check(wg::DetectGpu().name == L"NVIDIA graphics (code 10DE:2684)", "WRONGGPU_TEST_DRM_ROOT: DetectGpu reads that folder");
     unsetenv("WRONGGPU_TEST_DRM_ROOT");
+    // the toolbar names Direct3D 12 the way the first-run sheet does: through Proton, natively
+    wg::GpuInfo r4;
+    r4.amd = true; r4.rdna4 = true;
+    wg::GpuInfo r3;
+    r3.amd = true;
+    check(wg::GpuToolbarLine(L"RX 9070 XT", r4) == L"RX 9070 XT (detected) \u00b7 Direct3D 12 (through Proton)", "toolbar: an RDNA 4 card on Linux says Direct3D 12 (through Proton)");
+    check(wg::GpuToolbarLine(L"RX 7900 XT", r3) == L"RX 7900 XT (detected) \u00b7 " + wg::NeedsRx9000Sentence(), "toolbar: a card that is not RDNA 4 keeps the FSR sentence");
+    check(wg::GpuToolbarLine(L"", r4) == L"No graphics card detected \u00b7 " + wg::NeedsRx9000Sentence(), "toolbar: no card keeps its sentence");
 }
 
 // S5: which file the native launcher will delete as its own AppImage: every refusal, and the one yes. The system's process folder is

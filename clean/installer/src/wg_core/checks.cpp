@@ -60,7 +60,8 @@ WinInfo WindowsInfo() {
 wstring NeedsRx9000Sentence() { return L"WrongGPU's models need an RX 9000-series GPU; using AMD FSR"; }
 wstring GpuToolbarLine(const wstring& shortName, const GpuInfo& gpu) {
     if (shortName.empty()) return L"No graphics card detected \u00b7 " + NeedsRx9000Sentence();
-    return shortName + L" (detected) \u00b7 " + (gpu.rdna4 ? wstring(L"Direct3D 12") : NeedsRx9000Sentence());
+    // natively on Linux the games reach Direct3D 12 through Proton (the first-run sheet says the same)
+    return shortName + L" (detected) \u00b7 " + (gpu.rdna4 ? wstring(NativeLinux() ? L"Direct3D 12 (through Proton)" : L"Direct3D 12") : NeedsRx9000Sentence());
 }
 bool IsRdna4Name(const wstring& name) { return Contains(name, L"RX 90") || Contains(name, L"PRO R97") || Contains(name, L"PRO R96"); }
 // Under Wine, Wine's own DXGI can name an RDNA 4 card after an old Radeon ("ATI Radeon HD 5600 Series"); the PCI ids of
