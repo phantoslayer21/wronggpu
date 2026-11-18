@@ -58,7 +58,7 @@ void AppImageUninstallAsked() {
 namespace wg::app::lui {
 // What Settings says about the removal: where the program and its data are, or why this copy can't remove itself.
 wstring AppImageSettingsWords(bool own, const wstring& file, const wstring& data, const wstring& why) {
-    if (!own) return L"Not run from an AppImage. " + why;
+    if (!own) return L"Uninstall WrongGPU is not available here. " + why;
     return L"Runs from " + Shown(file) + L". Uninstall deletes that file and WrongGPU's data folder (" + Shown(data) + L"), after you confirm. Nothing else is deleted.";
 }
 }  // namespace wg::app::lui

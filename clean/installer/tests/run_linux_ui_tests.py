@@ -192,6 +192,19 @@ def test_first_run_words(exe, work, home):
               f"{tag}: no Install for this user choice")
 
 
+def fake_proc(root, appdir, image):
+    """A made-up process folder (WRONGGPU_TEST_PROC_ROOT) with what the AppImage runtime's mount leaves: a mount table line for $APPDIR,
+    a process started from the AppImage file and its /dev/fuse descriptor naming the mount (image None: no such process)."""
+    st = os.stat(appdir)
+    (root / "self").mkdir(parents=True)
+    (root / "self" / "mountinfo").write_text("1003 60 %d:%d / %s ro,nosuid,nodev - fuse.WrongGPU-test-x86_64.AppImage WrongGPU-test-x86_64.AppImage ro\n" %
+                                             (os.major(st.st_dev), os.minor(st.st_dev), str(appdir).replace(" ", "\\040")))
+    if image:
+        (root / "4242" / "fdinfo").mkdir(parents=True)
+        (root / "4242" / "exe").symlink_to(image)
+        (root / "4242" / "fdinfo" / "5").write_text("pos:\t0\nflags:\t02100002\nmnt_id:\t43\nino:\t136\nfuse_connection:\t%d\n" % os.minor(st.st_dev))
+
+
 def test_appimage_settings(exe, work, home):
     """S5: Settings on Linux: run from an AppImage it has Uninstall WrongGPU and says which file and folder go; run from anywhere else it
     says so and offers nothing (and never Install for this user, which cannot work here)."""
@@ -202,7 +215,9 @@ def test_appimage_settings(exe, work, home):
             image = run_dir / "Apps" / "WrongGPU-test-x86_64.AppImage"
             image.parent.mkdir(parents=True)
             image.write_bytes(b"\x7fELF\x02\x01\x01\x00AI\x02\x00\x00\x00\x00\x00fake")
-            env.update(APPIMAGE=str(image), APPDIR=str(Path(exe).resolve().parent))
+            appdir = Path(exe).resolve().parent
+            fake_proc(run_dir / "proc", appdir, image)
+            env.update(APPIMAGE=str(image), APPDIR=str(appdir), WRONGGPU_TEST_PROC_ROOT=str(run_dir / "proc"))
         out = work / ("uninstall-" + tag)
         r = run(exe, ["ui-dump", f"--dump={out / 'dump.json'}"], env, 300)
         check(r.returncode == 0, f"ui-dump ({tag}) exits 0 (got {r.returncode}: {r.stderr[-300:]})")
@@ -217,8 +232,27 @@ def test_appimage_settings(exe, work, home):
         rel = " ".join(n for n in names if n.startswith("Check for new releases"))
         check("Off on Linux" in rel and "get the new AppImage" in rel, f"{tag}: the release check row says it is off on Linux ({rel[:160]})")
         check(not any(n in ("Check now", "Release address (https)") for n in names), f"{tag}: no release address field or Check now")
-        check(("Runs from an AppImage" in said and "Nothing else is deleted" in said) if with_image else "Not run from an AppImage" in said,
+        check(("Runs from an AppImage" in said and "Nothing else is deleted" in said) if with_image else "not running from an AppImage" in said,
               f"{tag}: Settings says what goes, or why nothing can ({[n for n in names if 'AppImage' in n][:3]})")
+
+
+def test_appimage_unproven(exe, work, home):
+    """A WrongGPU AppImage that is not the one running (the mount has no server started from it): no Uninstall button, and Settings says
+    WrongGPU cannot prove the file is its own."""
+    print("Settings > Uninstall WrongGPU, the file is not the running AppImage (Linux)")
+    env, run_dir = environment(work, home, "uninstall-unproven")
+    image = run_dir / "Apps" / "WrongGPU-test-x86_64.AppImage"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"\x7fELF\x02\x01\x01\x00AI\x02\x00\x00\x00\x00\x00fake")
+    appdir = Path(exe).resolve().parent
+    fake_proc(run_dir / "proc", appdir, None)
+    env.update(APPIMAGE=str(image), APPDIR=str(appdir), WRONGGPU_TEST_PROC_ROOT=str(run_dir / "proc"))
+    out = work / "uninstall-unproven"
+    r = run(exe, ["ui-dump", f"--dump={out / 'dump.json'}"], env, 300)
+    check(r.returncode == 0, f"ui-dump (unproven) exits 0 (got {r.returncode}: {r.stderr[-300:]})")
+    names = [c["text"] for c in json.loads((out / "dump.json").read_text())["settings"]["controls"]]
+    check(not any(n.startswith("Uninstall WrongGPU") for n in names), "unproven: no Uninstall WrongGPU button")
+    check("cannot prove" in " ".join(names), f"unproven: Settings says WrongGPU cannot prove the file is its own ({[n for n in names if 'AppImage' in n][:3]})")
 
 
 def test_render(exe, work, home):
@@ -344,7 +378,7 @@ def main():
     real_data = Path.home() / ".local" / "share" / "WrongGPU"
     had = real_data.exists()
     home = make_home(work)
-    for name, fn in (("dump", test_dump), ("words", test_first_run_words), ("uninstall", test_appimage_settings), ("render", test_render), ("proton", test_proton_note), ("live", test_live)):
+    for name, fn in (("dump", test_dump), ("words", test_first_run_words), ("uninstall", test_appimage_settings), ("unproven", test_appimage_unproven), ("render", test_render), ("proton", test_proton_note), ("live", test_live)):
         if name in a.only.split(","):
             fn(Path(a.exe), work, home)
     if "jpeg" in a.only.split(",") and a.jpeg_tool:

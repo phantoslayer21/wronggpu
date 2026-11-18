@@ -101,8 +101,13 @@ checksum together, taken from the project's own release page. Use exact release 
   player's own OptiScaler download, the release check has no switch), and a game's install without one says the same in words.
 - **Uninstall:** an AppImage has no installer entry, so Settings > Uninstall WrongGPU (`uninstall-appimage --confirm` on the command line)
   deletes the AppImage file named by `$APPIMAGE` and WrongGPU's data folder (`$XDG_DATA_HOME/WrongGPU`), after one confirmation that names
-  both, and nothing else. It refuses unless `$APPIMAGE` is a plain file (not a link) called `WrongGPU...AppImage` with an AppImage's header, and
-  this program runs inside that AppImage's `$APPDIR`; it also refuses while a game still has WrongGPU (uninstall it from the game first).
+  both, and nothing else. It refuses unless `$APPIMAGE` is a plain file (not a link) called `WrongGPU...AppImage` with an AppImage's header,
+  and the system itself ties that file to this running program: `$APPDIR` (resolved case-sensitively) is a FUSE mount in `/proc/self/mountinfo`
+  that this program runs on, and a live process whose executable is that very file (same device and inode) holds the mount's `/dev/fuse`
+  connection (`fuse_connection` in its `fdinfo`; the AppImage runtime serves its own mount from its own file). An unpacked AppImage
+  (`APPIMAGE_EXTRACT_AND_RUN`) or an unreadable `/proc` gives no such proof, so it refuses. The file is checked again just before it
+  is deleted (same device and inode, still a plain AppImage) and goes first, then the data. It also refuses while a game still has
+  WrongGPU (uninstall it from the game first).
   The player's own ignore list (`ignore-files.txt`) stays, as in the Windows launcher's "Remove data". There is no "Install for this user"
   on Linux: the first-run sheet and Settings do not offer it.
 - **Engine.ini for Borderlands 4 and Hogwarts Legacy:** it goes into the game's Proton prefix (a Steam game:

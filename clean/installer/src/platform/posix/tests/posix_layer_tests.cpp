@@ -21,6 +21,7 @@
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -567,7 +568,9 @@ void GpuIdentity() {
     unsetenv("WRONGGPU_TEST_DRM_ROOT");
 }
 
-// S5: which file the native launcher will delete as its own AppImage: every refusal, and the one yes
+// S5: which file the native launcher will delete as its own AppImage: every refusal, and the one yes. The system's process folder is
+// a made-up tree (WRONGGPU_TEST_PROC_ROOT) with the entries the AppImage runtime's mount has for real: a mount table line for $APPDIR,
+// a process started from the AppImage file, and that process's /dev/fuse descriptor naming the mount's connection.
 void AppImageIdentity() {
     std::string posixTmp(Tmp.begin(), Tmp.end());
     posixTmp.erase(0, 2);
@@ -581,42 +584,193 @@ void AppImageIdentity() {
     };
     const char good[17] = "\x7f" "ELF\x02\x01\x01\x00" "AI\x02\x00\x00\x00\x00\x00";
     const char plainElf[17] = "\x7f" "ELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00";
-    const std::string app = make("WrongGPU-0.6.5-x86_64.AppImage", good);
+    const std::string app = std::filesystem::canonical(make("WrongGPU-0.6.5-x86_64.AppImage", good)).string();
     const std::wstring selfW = wg::SelfPath();  // "Z:\\home\\...\\posix-layer-tests"
     std::string selfHost(selfW.begin(), selfW.end());
     selfHost.erase(0, 2);
     for (auto& c : selfHost) if (c == '\\') c = '/';
-    const std::string selfDir = std::filesystem::path(selfHost).parent_path().string();
-    const std::string appdir = selfDir;  // this test program stands in for the program inside the AppImage's mount
+    const std::string appdir = std::filesystem::canonical(std::filesystem::path(selfHost).parent_path()).string();  // this test program stands in for the program inside the AppImage's mount
+    struct stat dst{};
+    stat(appdir.c_str(), &dst);
+    const unsigned devMajor = major(dst.st_dev), devMinor = minor(dst.st_dev);
+    const std::filesystem::path proc = dir / "proc";
+    auto put = [&](const std::filesystem::path& f, const std::string& text) {
+        std::filesystem::create_directories(f.parent_path());
+        std::FILE* o = std::fopen(f.c_str(), "wb"); std::fputs(text.c_str(), o); std::fclose(o);
+    };
+    // the mount table and the process list as the real ones read after the runtime mounted $APPDIR
+    auto system = [&](const std::string& point, const std::string& fstype, unsigned connection, const std::string& serverExe, bool server = true) {
+        std::filesystem::remove_all(proc);
+        std::string esc;
+        for (char c : point) esc += c == ' ' ? std::string("\\040") : std::string(1, c);
+        put(proc / "self" / "mountinfo", "22 1 0:5 / /sys rw - sysfs sysfs rw\n" + std::to_string(1003) + " 60 " + std::to_string(devMajor) + ":" + std::to_string(devMinor) +
+            " / " + esc + " ro,nosuid,nodev,relatime shared:1453 - " + fstype + " WrongGPU-0.6.5-x86_64.AppImage ro,user_id=1000,group_id=1000\n");
+        put(proc / "1" / "fdinfo" / "0", "pos:\t0\nflags:\t0100002\nmnt_id:\t43\nino:\t4\n");
+        std::filesystem::create_directories(proc / "1");
+        std::filesystem::create_symlink("/usr/bin/true", proc / "1" / "exe");
+        if (server) {
+            std::filesystem::create_directories(proc / "4242");
+            std::filesystem::create_symlink(serverExe, proc / "4242" / "exe");
+            put(proc / "4242" / "fdinfo" / "3", "pos:\t0\nflags:\t0100000\nmnt_id:\t60\nino:\t60675985\n");
+            put(proc / "4242" / "fdinfo" / "5", "pos:\t0\nflags:\t02100002\nmnt_id:\t43\nino:\t136\nfuse_connection:\t" + std::to_string(connection) + "\n");
+        }
+    };
+    setenv("WRONGGPU_TEST_PROC_ROOT", proc.c_str(), 1);
     std::wstring file, why;
     auto env = [&](const char* image, const char* appDir) {
         if (image) setenv("APPIMAGE", image, 1); else unsetenv("APPIMAGE");
         if (appDir) setenv("APPDIR", appDir, 1); else unsetenv("APPDIR");
     };
+    auto refused = [&](const wchar_t* words) { file.clear(); why.clear(); return !wg::OwnAppImage(file, &why) && file.empty() && why.find(words) != std::wstring::npos; };
+    system(appdir, "fuse.WrongGPU-0.6.5-x86_64.AppImage", devMinor, app);
     env(nullptr, appdir.c_str());
-    check(!wg::OwnAppImage(file, &why) && why.find(L"not running from an AppImage") != std::wstring::npos, "OwnAppImage: no $APPIMAGE is refused in words");
+    check(refused(L"not running from an AppImage"), "OwnAppImage: no $APPIMAGE is refused in words");
     env((dir / "missing.AppImage").c_str(), appdir.c_str());
-    check(!wg::OwnAppImage(file, &why) && why.find(L"not a plain file") != std::wstring::npos, "OwnAppImage: a file that is not there is refused");
+    check(refused(L"not a plain file"), "OwnAppImage: a file that is not there is refused");
     env(dir.c_str(), appdir.c_str());
-    check(!wg::OwnAppImage(file, &why) && why.find(L"not a plain file") != std::wstring::npos, "OwnAppImage: a folder is refused");
+    check(refused(L"not a plain file"), "OwnAppImage: a folder is refused");
     std::filesystem::create_symlink(app, dir / "WrongGPU-link.AppImage");
     env((dir / "WrongGPU-link.AppImage").c_str(), appdir.c_str());
-    check(!wg::OwnAppImage(file, &why) && why.find(L"not a plain file") != std::wstring::npos, "OwnAppImage: a link to the AppImage is refused (the link is not the file)");
+    check(refused(L"not a plain file"), "OwnAppImage: a link to the AppImage is refused (the link is not the file)");
     env(make("notes.AppImage", good).c_str(), appdir.c_str());
-    check(!wg::OwnAppImage(file, &why) && why.find(L"not WrongGPU") != std::wstring::npos, "OwnAppImage: another name is refused");
+    check(refused(L"not WrongGPU"), "OwnAppImage: another name is refused");
     env(make("WrongGPU.txt", good).c_str(), appdir.c_str());
-    check(!wg::OwnAppImage(file, &why) && why.find(L"not WrongGPU") != std::wstring::npos, "OwnAppImage: a name without .AppImage is refused");
+    check(refused(L"not WrongGPU"), "OwnAppImage: a name without .AppImage is refused");
     env(make("WrongGPU-plain.AppImage", plainElf).c_str(), appdir.c_str());
-    check(!wg::OwnAppImage(file, &why) && why.find(L"not an AppImage file") != std::wstring::npos, "OwnAppImage: an ELF file without the AppImage mark is refused");
+    check(refused(L"not an AppImage file"), "OwnAppImage: an ELF file without the AppImage mark is refused");
     env(app.c_str(), nullptr);
-    check(!wg::OwnAppImage(file, &why) && why.find(L"not inside") != std::wstring::npos, "OwnAppImage: no $APPDIR: this program is not inside it");
+    check(refused(L"not inside"), "OwnAppImage: no $APPDIR: this program is not inside it");
     env(app.c_str(), (dir / "elsewhere").c_str());
-    check(!wg::OwnAppImage(file, &why) && why.find(L"not inside") != std::wstring::npos, "OwnAppImage: this program is not under $APPDIR");
+    check(refused(L"not inside"), "OwnAppImage: this program is not under $APPDIR");
+    // the case of the folder is the disk's: a Linux disk tells "Appimage" from "appimage"
+    std::string upper = appdir;
+    for (auto& c : upper) c = (char)std::toupper((unsigned char)c);
+    env(app.c_str(), upper.c_str());
+    check(upper != appdir && refused(L"not inside"), "OwnAppImage: $APPDIR in another letter case is not the folder (no case-insensitive test)");
     env(app.c_str(), appdir.c_str());
     file.clear();
-    check(wg::OwnAppImage(file, &why) && std::string(file.begin(), file.end()) == "Z:" + [&] { std::string s = app; for (auto& c : s) if (c == '/') c = '\\'; return s; }(),
-          "OwnAppImage: the file named by $APPIMAGE, a plain AppImage called WrongGPU...AppImage, this program inside its $APPDIR: yes");
-    unsetenv("APPIMAGE"); unsetenv("APPDIR");
+    const std::string expected = "Z:" + [&] { std::string s = app; for (auto& c : s) if (c == '/') c = '\\'; return s; }();
+    check(wg::OwnAppImage(file, &why) && std::string(file.begin(), file.end()) == expected,
+          "OwnAppImage: the file named by $APPIMAGE, a plain AppImage called WrongGPU...AppImage, this program inside its $APPDIR, a mount served by a process started from that file: yes");
+    // $APPDIR given through a link is the same folder
+    std::filesystem::create_directory_symlink(appdir, dir / "appdir-link");
+    env(app.c_str(), (dir / "appdir-link").c_str());
+    check(wg::OwnAppImage(file, &why), "OwnAppImage: $APPDIR through a link is the folder the link leads to");
+    env(app.c_str(), appdir.c_str());
+    // a valid WrongGPU...AppImage elsewhere, with the real current $APPDIR: the mount is not served from that file
+    const std::string old = make("WrongGPU-old.AppImage", good);
+    env(old.c_str(), appdir.c_str());
+    check(refused(L"cannot prove"), "OwnAppImage: a valid WrongGPU AppImage that is not the running one (the real $APPDIR) is refused");
+    // the same bytes in another file are not the file either (the identity is the disk's, not the content)
+    std::filesystem::copy_file(app, dir / "WrongGPU-copy.AppImage", std::filesystem::copy_options::overwrite_existing);
+    env((dir / "WrongGPU-copy.AppImage").c_str(), appdir.c_str());
+    check(refused(L"cannot prove"), "OwnAppImage: an identical copy of the running AppImage is refused");
+    env(app.c_str(), appdir.c_str());
+    // each part of the proof, taken away
+    system(appdir, "fuse.WrongGPU-0.6.5-x86_64.AppImage", devMinor, app, false);
+    check(refused(L"No process started from the file serves the mount"), "OwnAppImage: no process serves the mount: refused");
+    system(appdir, "fuse.WrongGPU-0.6.5-x86_64.AppImage", devMinor + 1, app);
+    check(refused(L"No process started from the file serves the mount"), "OwnAppImage: a server for another mount (another connection number) is refused");
+    system(appdir, "fuse.WrongGPU-0.6.5-x86_64.AppImage", devMinor * 10, app);
+    check(refused(L"No process started from the file serves the mount"), "OwnAppImage: connection 10 times the number is not the number");
+    system(appdir, "ext4", devMinor, app);
+    check(refused(L"is not a mounted AppImage"), "OwnAppImage: $APPDIR that is not a FUSE mount is refused");
+    system(appdir + "/x", "fuse.WrongGPU-0.6.5-x86_64.AppImage", devMinor, app);
+    check(refused(L"is not a mounted AppImage"), "OwnAppImage: a mount at another place is refused");
+    system(appdir, "fuse.WrongGPU-0.6.5-x86_64.AppImage", devMinor, old);
+    check(refused(L"No process started from the file serves the mount"), "OwnAppImage: a server started from another file is refused");
+    std::filesystem::remove_all(proc);
+    check(refused(L"is not a mounted AppImage"), "OwnAppImage: no process folder to read: refused (fail closed)");
+    system(appdir, "fuse.WrongGPU-0.6.5-x86_64.AppImage", devMinor + 7, app);
+    std::filesystem::permissions(proc / "4242" / "fdinfo" / "5", std::filesystem::perms::none);
+    check(refused(L"No process started from the file serves the mount"), "OwnAppImage: an unreadable descriptor entry is a refusal, not a yes");
+    std::filesystem::permissions(proc / "4242" / "fdinfo" / "5", std::filesystem::perms::owner_all);
+    system(appdir, "fuse.WrongGPU-0.6.5-x86_64.AppImage", devMinor, app);
+    check(wg::OwnAppImage(file, &why), "OwnAppImage: the proof back in place: yes again");
+
+    // the removal itself: the file goes first, after a fresh look; then the data
+    const std::filesystem::path local = dir / "local", data = local / "WrongGPU";
+    setenv("LOCALAPPDATA", local.c_str(), 1);
+    wg::Context ctx;
+    ctx.logFile = Tmp + L"\\appimage-removal.log";
+    auto fresh = [&] {
+        std::filesystem::remove_all(local);
+        std::filesystem::remove(app);  // (a link left in its place by the last case is not written through)
+        make("WrongGPU-0.6.5-x86_64.AppImage", good);
+        system(appdir, "fuse.WrongGPU-0.6.5-x86_64.AppImage", devMinor, app);
+        put(data / "launcher.ini", "[settings]\r\n");
+        put(data / "model" / "M" / "model.wgcm", "converted data");
+    };
+    auto there = [&](const std::filesystem::path& f) { return std::filesystem::exists(f); };
+    env(app.c_str(), appdir.c_str());
+    {
+        fresh();
+        std::wstring gone, kept;
+        check(wg::UninstallAppImage(ctx, &why, &gone, &kept) && !there(app) && !there(data) && std::string(gone.begin(), gone.end()) == expected,
+              "UninstallAppImage: the proven file and the data folder go");
+    }
+    {   // a replacement renamed into the path between the check and the delete: it is another file now
+        fresh();
+        make("WrongGPU-replacement.AppImage", good);
+        wg::SetFaultHook([&](const char* s) {
+            if (std::string(s) == "appimage-before-delete") std::filesystem::rename(dir / "WrongGPU-replacement.AppImage", app);
+            return false;
+        });
+        std::wstring gone;
+        const bool ok = wg::UninstallAppImage(ctx, &why, &gone);
+        wg::SetFaultHook(nullptr);
+        check(!ok && gone.empty() && why.find(L"changed while WrongGPU was checking it") != std::wstring::npos && there(app) && there(data / "model" / "M" / "model.wgcm"),
+              "UninstallAppImage: a file renamed into the path after the check is refused; it and the data folder stay");
+    }
+    {   // a plain file with no AppImage header put there is refused too
+        fresh();
+        wg::SetFaultHook([&](const char* s) {
+            if (std::string(s) == "appimage-before-delete") { std::filesystem::remove(app); make("WrongGPU-0.6.5-x86_64.AppImage", plainElf); }
+            return false;
+        });
+        const bool ok = wg::UninstallAppImage(ctx, &why);
+        wg::SetFaultHook(nullptr);
+        check(!ok && there(app) && there(data / "launcher.ini"), "UninstallAppImage: the path emptied and another file put there is refused; nothing is deleted");
+    }
+    {   // a link put in the path is refused (it is not the file)
+        fresh();
+        make("WrongGPU-target.AppImage", good);
+        wg::SetFaultHook([&](const char* s) {
+            if (std::string(s) == "appimage-before-delete") { std::filesystem::remove(app); std::filesystem::create_symlink(dir / "WrongGPU-target.AppImage", app); }
+            return false;
+        });
+        const bool ok = wg::UninstallAppImage(ctx, &why);
+        wg::SetFaultHook(nullptr);
+        check(!ok && there(dir / "WrongGPU-target.AppImage") && there(data / "launcher.ini"), "UninstallAppImage: a link put in the path is refused; its target and the data stay");
+    }
+    {   // the proof fails: nothing goes
+        fresh();
+        env((dir / "WrongGPU-old.AppImage").c_str(), appdir.c_str());
+        check(!wg::UninstallAppImage(ctx, &why) && there(dir / "WrongGPU-old.AppImage") && there(app) && there(data / "launcher.ini"),
+              "UninstallAppImage: not the running AppImage: the other file, the running one and the data all stay");
+        env(app.c_str(), appdir.c_str());
+    }
+    {   // the data folder is a link: the link goes, what it leads to stays
+        fresh();
+        std::filesystem::remove_all(data);
+        std::filesystem::create_directories(dir / "outside-data");
+        put(dir / "outside-data" / "keep.txt", "keep");
+        put(dir / "outside-data" / "launcher.ini", "[settings]\r\n");
+        std::filesystem::create_directory_symlink(dir / "outside-data", data);
+        check(wg::UninstallAppImage(ctx, &why) && !there(app) && !std::filesystem::is_symlink(data) && !there(data) && there(dir / "outside-data" / "keep.txt") &&
+                  there(dir / "outside-data" / "launcher.ini"), "UninstallAppImage: a data folder that is a link: the link goes, its target and everything in it stay");
+    }
+    {   // links inside the data folder: unlinked, never followed
+        fresh();
+        std::filesystem::create_directories(dir / "outside-nested");
+        put(dir / "outside-nested" / "keep.txt", "keep");
+        put(dir / "outside-file.txt", "keep");
+        std::filesystem::create_directory_symlink(dir / "outside-nested", data / "model" / "linkdir");
+        std::filesystem::create_symlink(dir / "outside-file.txt", data / "linkfile");
+        check(wg::UninstallAppImage(ctx, &why) && !there(app) && !there(data) && there(dir / "outside-nested" / "keep.txt") && there(dir / "outside-file.txt"),
+              "UninstallAppImage: links inside the data folder are removed, their targets stay");
+    }
+    unsetenv("APPIMAGE"); unsetenv("APPDIR"); unsetenv("WRONGGPU_TEST_PROC_ROOT"); unsetenv("LOCALAPPDATA");
 }
 
 // S6: nothing is downloaded on Linux, and what needs a download says so in words (no WinHTTP error, no wait)
