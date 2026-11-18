@@ -123,7 +123,9 @@ dispatch boundaries. Every accumulator is the same WMMA chain (operands, order, 
 FP16 value handed between the launches is the one `k_stagew4_m` keeps at that point, so the output bytes are the same.
 Default on the native D3D12 device (`k_split=m`; `k_split=off`: the one launch; other devices: the one launch). The runtime
 redirects `k_stagew4_m[__rodd]` in `KRuntime::launch`, so the create-time self-check runs the split form for its m case
-against the unchanged HIP reference hashes (kernels line `split=m`).
+against the unchanged HIP reference hashes (kernels line `split=m`). The self-check digest (`smx_selfcheck_digest.py`)
+covers the phase kernels and the runtime's `k_split` option, redirect and phase launches. `k_split` is parsed on every
+device: a value other than `m` or `off` fails create there too.
 
 ## Close approximations (runtime option `k_approx`, opt-in)
 
