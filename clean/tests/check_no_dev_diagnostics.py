@@ -75,8 +75,14 @@ def dev_only_strings_in(data):
     return [t.decode("ascii") for t in DEV_ONLY_STRINGS if t in data]
 
 
+def _base(name):
+    """Last component of a payload path: the packager writes Windows paths (backslash), which os.path.basename
+    does not split on Linux."""
+    return name.replace("\\", "/").rsplit("/", 1)[-1]
+
+
 def is_runtime_name(name):
-    n = os.path.basename(name).lower()
+    n = _base(name).lower()
     return n.startswith("wronggpu_runtime") and n.endswith(".dll")
 
 
@@ -108,7 +114,7 @@ def check_runtime_with_manifest(name, data, manifest_bytes):
     if not ok:
         return False, text
     if manifest_bytes is None:
-        return False, "no build manifest (%s.build.json next to the library): build it with clean/runner/build.py" % os.path.splitext(os.path.basename(name))[0]
+        return False, "no build manifest (%s.build.json next to the library): build it with clean/runner/build.py" % os.path.splitext(_base(name))[0]
     try:
         m = json.loads(manifest_bytes.decode("utf-8"))
         assert isinstance(m, dict)
@@ -116,7 +122,7 @@ def check_runtime_with_manifest(name, data, manifest_bytes):
         return False, "the build manifest is not readable JSON"
     if m.get("format") != 1:
         return False, "the build manifest has an unknown format"
-    if str(m.get("file", "")).lower() != os.path.basename(name).lower():
+    if str(m.get("file", "")).lower() != _base(name).lower():
         return False, "the build manifest is for another file (%s)" % m.get("file")
     if str(m.get("sha256", "")).lower() != hashlib.sha256(data).hexdigest():
         return False, "the library does not match its build manifest (SHA-256): changed after its build, or another build's file"
@@ -135,7 +141,7 @@ def dx12_manifest_problem(name, data):
     """None, or why a file named manifest.json that is a D3D12 kernel manifest (clean/dx12/build_dx12.py: format, kernels)
     must not ship: test-only (or older than the flag), or an entry built past the softmax self-check reference, with
     extra defines, or without provenance."""
-    if os.path.basename(name).lower() != "manifest.json":
+    if _base(name).lower() != "manifest.json":
         return None
     try:
         doc = json.loads(data.decode("utf-8"))
@@ -160,7 +166,7 @@ def check_artifact(name, data):
     if is_runtime_name(name):
         ok, text = check_bytes(data)
         return ok, text, ok
-    if PAYLOAD_CHECK_NAMES.search(os.path.basename(name)):
+    if PAYLOAD_CHECK_NAMES.search(_base(name)):
         return False, "a check-only code object (mutant, probe or HIP twin) in a release payload", False
     why = dx12_manifest_problem(name, data)
     if why:
