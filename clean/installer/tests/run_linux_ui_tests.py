@@ -17,6 +17,7 @@ Needs a WRONGGPU_TESTING build of the Linux launcher.
 """
 import argparse
 import json
+import re
 import os
 import shutil
 import struct
@@ -226,6 +227,15 @@ def test_appimage_settings(exe, work, home):
         check(bool(button) == with_image, f"{tag}: the Uninstall WrongGPU button is {'there' if with_image else 'not there'} ({button})")
         check("Install for this user" not in names and "Remove data\u2026" not in names and "Uninstall launcher\u2026" not in names, f"{tag}: no Windows install or uninstall button")
         said = " ".join(names)
+        # review fix: Linux words on the changed screens (no Windows app mode, no Windows accent colour, the data folder as /path)
+        dump_text = (out / "dump.json").read_text()
+        appearance = " ".join(n for n in names if n.startswith("Appearance:") and n not in ("Appearance: System", "Appearance: Light", "Appearance: Dark"))
+        check("the desktop's light or dark setting" in appearance, f"{tag}: the Appearance row names the desktop's light or dark setting ({appearance[:160]})")
+        check("Windows" not in appearance, f"{tag}: the Appearance row has no Windows words ({appearance[:160]})")
+        swatches = [n for n in names if n.startswith("Accent color: ") and n[14:] in ("Green", "Blue", "Purple", "Pink", "Cyan", "Graphite", "Windows")]
+        check(len(swatches) == 6 and "Accent color: Windows" not in swatches, f"{tag}: six accent swatches, no Windows one ({swatches})")
+        data_line = re.findall(r"Settings and logs: ([^\"]*)", dump_text)
+        check(bool(data_line) and data_line[0].startswith("/") and "Z:" not in data_line[0] and "\\\\" not in data_line[0], f"{tag}: the data folder is shown as a /path ({data_line[:1]})")
         # S6: no downloads on Linux, said on the page (OptiScaler row, release check row without its switch and address field)
         opti = " ".join(n for n in names if n.startswith("OptiScaler:"))
         check("Downloads are off on Linux" in opti and "Needs your download" in opti, f"{tag}: the OptiScaler row says downloads are off ({opti[:160]})")
@@ -253,6 +263,27 @@ def test_appimage_unproven(exe, work, home):
     names = [c["text"] for c in json.loads((out / "dump.json").read_text())["settings"]["controls"]]
     check(not any(n.startswith("Uninstall WrongGPU") for n in names), "unproven: no Uninstall WrongGPU button")
     check("cannot prove" in " ".join(names), f"unproven: Settings says WrongGPU cannot prove the file is its own ({[n for n in names if 'AppImage' in n][:3]})")
+
+
+def test_rrconfig_myself(exe, work, home):
+    """Engine.ini "Myself" on a game's page, in Linux terms: file manager, text editor and file permissions (Notepad, File Explorer and
+    Properties are Windows'); the Steam launch option keeps Steam's own Properties words. The render's fixture is the game."""
+    print("Engine.ini Myself steps (Linux words)")
+    env, _ = environment(work, home, "myself")
+    out = work / "myself"
+    r = run(exe, ["ui-render", f"--out-dir={out}", f"--fixture={HERE / 'ui_fixture.ini'}", "--size=1180x1500", "--scales=1",
+                  "--frames=game-rrconfig-myself,game-rrconfig-myself-notro"], env, 600)
+    check(r.returncode == 0, f"ui-render (myself) exits 0 (got {r.returncode}: {r.stderr[-300:]})")
+    for frame in ("game-rrconfig-myself", "game-rrconfig-myself-notro"):
+        texts = (out / f"{frame}@100.png.texts").read_text(encoding="utf-8")
+        steps = [l.split("\t", 2)[-1] for l in texts.splitlines() if "\tStep " in l or l.split("\t", 2)[-1].startswith("Step ")]
+        joined = " ".join(steps)
+        check("Step 2: Create or open Engine.ini there with a text editor" in joined, f"{frame}: step 2 says a text editor ({steps[:2]})")
+        check("Step 6: Make Engine.ini read-only: in your file manager open its properties, then Permissions, and set it to read-only" in joined,
+              f"{frame}: step 6 makes the file read-only through the file manager's permissions ({steps[-1:]})")
+        check(not any(w in joined for w in ("Notepad", "File Explorer", "Right-click", "tick Read-only", "Properties")), f"{frame}: no Windows words in the steps")
+    notro = (out / "game-rrconfig-myself-notro@100.png.texts").read_text(encoding="utf-8")
+    check("Do step 6, then check again." in notro, "the not-read-only row still points at step 6")
 
 
 def test_render(exe, work, home):
@@ -368,7 +399,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--exe", required=True)
     ap.add_argument("--work", default=None)
-    ap.add_argument("--only", default="dump,words,uninstall,render,jpeg,proton,live")
+    ap.add_argument("--only", default="dump,words,uninstall,unproven,render,myself,jpeg,proton,live")
     ap.add_argument("--jpeg-tool", default=None, help="jpeg-linux-tests, which writes the synthetic JPEG art")
     a = ap.parse_args()
     work = Path(a.work or "linux-ui-tests").resolve()
@@ -378,7 +409,7 @@ def main():
     real_data = Path.home() / ".local" / "share" / "WrongGPU"
     had = real_data.exists()
     home = make_home(work)
-    for name, fn in (("dump", test_dump), ("words", test_first_run_words), ("uninstall", test_appimage_settings), ("unproven", test_appimage_unproven), ("render", test_render), ("proton", test_proton_note), ("live", test_live)):
+    for name, fn in (("dump", test_dump), ("words", test_first_run_words), ("uninstall", test_appimage_settings), ("unproven", test_appimage_unproven), ("render", test_render), ("myself", test_rrconfig_myself), ("proton", test_proton_note), ("live", test_live)):
         if name in a.only.split(","):
             fn(Path(a.exe), work, home)
     if "jpeg" in a.only.split(",") and a.jpeg_tool:

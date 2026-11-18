@@ -173,16 +173,22 @@ wstring RrConfigNotice(const RrConfigGame& g, bool protectedFolder, bool beforeF
 }
 
 wstring RrConfigSteps(const RrConfigGame& g, const wstring& file) {
-    const wstring folder = !file.empty() ? Parent(file)
+    const bool lin = NativeLinux();  // a native Linux player: file manager, text editor, file permissions (the game itself is Windows', under Proton)
+    const wstring folder = !file.empty() ? ShownPath(Parent(file))
+                           : lin ? (g.documents ? L"Documents/" : L"AppData/Local/") + wstring(g.folder) + L"/Windows, in the game's Windows user folder"
                            : g.documents ? L"Documents\\" + wstring(g.folder) + L"\\Windows" : L"%LOCALAPPDATA%\\" + wstring(g.folder) + L"\\Windows";
     wstring t = L"Ray Reconstruction in " + wstring(g.name) + L": the steps\n\n"
-                L"1. Open this folder in File Explorer (if it isn't there, start the game once: it makes it):\n" + folder + L"\n"
-                L"2. Open Engine.ini there with Notepad (create the file if it isn't there).\n"
+                + (lin ? L"1. Open this folder in your file manager (if it isn't there, start the game once: it makes it):\n"
+                         : L"1. Open this folder in File Explorer (if it isn't there, start the game once: it makes it):\n") + folder + L"\n"
+                + (lin ? L"2. Open Engine.ini there with a text editor (create the file if it isn't there).\n"
+                         : L"2. Open Engine.ini there with Notepad (create the file if it isn't there).\n") +
                 L"3. Find the line [" + FromUtf8(kSection) + L"]. If the file doesn't have it, add it at the end.\n"
                 L"4. Add this line under it (Copy the line puts it on the clipboard):\n" + RrConfigLineW() + L"\n";
     if (g.readOnly)
-        t += L"5. Save the file. Then right-click Engine.ini, choose Properties, tick Read-only and click OK: " + wstring(g.name) +
-             L" removes the file on every start otherwise.";
+        t += lin ? L"5. Save the file. Then make Engine.ini read-only: in your file manager open its properties, then Permissions, and set it to read-only "
+                     L"(or run chmod a-w Engine.ini in that folder). " + wstring(g.name) + L" removes the file on every start otherwise."
+                   : L"5. Save the file. Then right-click Engine.ini, choose Properties, tick Read-only and click OK: " + wstring(g.name) +
+                     L" removes the file on every start otherwise.";
     else
         t += L"5. Save the file.";
     return t;

@@ -295,7 +295,7 @@ void RrConfigAction(int id) {
         const bool click = waiting && (v.cur.rrConfigProtected || !v.cur.rrInstalled);
         ShowToast(state == 1 ? L"Engine.ini has the line. Ray Reconstruction can run in " + wstring(rg->name) + L"."
                   : state == 3 ? (v.saved.get("rr_config_fix") == "off"  // Myself: the player's own file, which the game may read fine (r4 #6)
-                                      ? L"WrongGPU's check couldn't read Engine.ini: " + why + L". Check it by hand in Notepad."
+                                      ? L"WrongGPU's check couldn't read Engine.ini: " + why + (NativeLinux() ? L". Check it by hand in a text editor." : L". Check it by hand in Notepad.")
                                       : L"Engine.ini couldn't be read: " + why + L".")  // r3 #8
                   : state == 2 ? L"Engine.ini has the line, but it isn't read-only yet."
                   : state == 0 ? (click ? L"The game's settings folder is there now. Click Fix it now to add the line."

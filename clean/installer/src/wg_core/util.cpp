@@ -706,6 +706,13 @@ wstring PathForGamePrefix(const wstring& path) {
         if (c == L'/') c = L'\\';
     return z;
 }
+wstring ShownPath(const wstring& in) {
+    if (!NativeLinux()) return in;
+    wstring p = in;
+    if (p.size() >= 3 && (p[0] == L'Z' || p[0] == L'z') && p[1] == L':' && (p[2] == L'\\' || p[2] == L'/')) p.erase(0, 2);
+    for (auto& c : p) if (c == L'\\') c = L'/';
+    return p;
+}
 wstring SelfPath() { wchar_t b[MAX_PATH * 2]; DWORD n = GetModuleFileNameW(nullptr, b, (DWORD)std::size(b)); return wstring(b, n); }
 
 }  // namespace wg

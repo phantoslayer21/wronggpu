@@ -299,3 +299,12 @@ def native_class(T, suite):
 
 def skip(name, reason):
     print("  SKIP ", name, "-", reason)
+
+
+def check_steps_words(t, steps, ini):
+    """A native Linux player's Engine.ini steps are in Linux terms (file manager, text editor, file permissions), never File Explorer,
+    Notepad or Properties, and the folder is a /path."""
+    t.check("native Linux: the steps say file manager, text editor and permissions, never File Explorer, Notepad or Properties, and the folder is a /path",
+            "file manager" in steps and "text editor" in steps and "Permissions" in steps and "set it to read-only" in steps and
+            not any(w in steps for w in ("File Explorer", "Notepad", "Properties", "right-click")) and "Z:\\" not in steps and
+            os.path.dirname(host(ini)) + "\n" in steps, steps)

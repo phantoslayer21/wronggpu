@@ -205,9 +205,14 @@ bool SavedPlacement(RECT& r, HMONITOR& mon, UINT& mdpi, bool& maxed);
 // the window that hangs off the screen's edge)
 int FrameY() { return GetSystemMetricsForDpi(SM_CYFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi); }
 int FrameX() { return GetSystemMetricsForDpi(SM_CXFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi); }
+// The accent the settings name. The Windows accent colour is not offered on the native Linux launcher: a saved "windows" shows green.
+static int AccentHere() {
+    const int a = AccentFromKey(gl.global.accent);
+    return a == A_WINDOWS && NativeLinux() ? (int)A_GREEN : a;
+}
 // The theme of the launcher's "appearance" setting (system: Windows' app mode), applied to the whole window.
 void ApplyTheme() {
-    SetAccent(AccentFromKey(gl.global.accent), WindowsAccentRgb());
+    SetAccent(AccentHere(), WindowsAccentRgb());
     SetTheme(ThemeIsDark(gl.global.appearance));
     if (editBrush) { DeleteObject(editBrush); editBrush = nullptr; }
     ThemeTitleBar();
@@ -3332,7 +3337,7 @@ HWND CreateLauncherWindow(bool live) {
     v.live = live;
     v.rrBuild = RrPayloadAvailable(g.ctx);  // this build has the RR files: the RR rows and sections can show (rr-notes.md)
     v.rrEdition = true;  // WrongGPU's edition of OptiScaler (some games' RR needs it): downloaded (optiedition.h)
-    SetAccent(AccentFromKey(gl.global.accent), WindowsAccentRgb());
+    SetAccent(AccentHere(), WindowsAccentRgb());
     SetTheme(ThemeIsDark(gl.global.appearance));
     gfx.Init();
     WNDCLASSEXW wc{}; wc.cbSize = sizeof(wc);

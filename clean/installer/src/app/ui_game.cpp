@@ -1455,12 +1455,12 @@ static wstring CantReadWhy(bool mine, const RrConfigGame& rg) {
     const bool utf16 = why.find(L"UTF-16") != wstring::npos, inUse = why.find(L"another program") != wstring::npos;
     if (mine)
         return L"WrongGPU's check couldn't read it: " + why + L". " + (inUse ? L"Close the program that has it open, then check again, or c" : L"C") +
-               L"heck it by hand: open Engine.ini in Notepad and look for the line under [SystemSettings]" +
-               (rg.readOnly ? L", and in its Properties that Read-only is ticked." : L".");
+               L"heck it by hand: open Engine.ini in " + (NativeLinux() ? L"a text editor" : L"Notepad") + L" and look for the line under [SystemSettings]" +
+               (rg.readOnly ? (NativeLinux() ? L", and in its properties that the file is read-only." : L", and in its Properties that Read-only is ticked.") : L".");
     return L"WrongGPU couldn't read it: " + why + L". " +
-           (utf16 ? L"Open it in Notepad, choose Save as, set Encoding to UTF-8, then check again."
+           (utf16 ? (NativeLinux() ? L"Open it in a text editor, save it as UTF-8, then check again." : L"Open it in Notepad, choose Save as, set Encoding to UTF-8, then check again.")
             : inUse ? L"Close the program that has it open, then check again."
-                    : L"Check that it opens in Notepad, then check again.");
+                    : NativeLinux() ? L"Check that it opens in a text editor, then check again." : L"Check that it opens in Notepad, then check again.");
 }
 
 // Borderlands 4 / Hogwarts Legacy (wg_core/rrconfig.h): the Engine.ini line their Ray Reconstruction needs, changeable at any
@@ -1538,19 +1538,22 @@ static float RrConfigRows(Gfx& gx, float x, float y, float w, const RrConfigGame
     // WindowsNoEditor): step 1 names the folder the game makes it in and says to start the game first; Open folder makes
     // nothing (RrConfigAction) (r2 #7)
     const bool noFolder = v.rrcfg == -1;
-    wstring folder = !v.rrcfgFile.empty() ? Parent(v.rrcfgFile)
+    const bool lin = NativeLinux();  // a native Linux player: file manager, text editor, file permissions (the game itself is Windows', under Proton)
+    wstring folder = !v.rrcfgFile.empty() ? ShownPath(Parent(v.rrcfgFile))
+                     : lin ? (rg.documents ? L"Documents/" : L"AppData/Local/") + wstring(rg.folder) + L"/Windows"
                      : (rg.documents ? L"Documents\\" : L"%LOCALAPPDATA%\\") + wstring(rg.folder) + L"\\Windows";
-    if (noFolder) folder = Parent(folder);
+    if (noFolder) folder = Parent(folder);  // (Parent splits at either slash)
     // every step spelled out (r2 #5): Borderlands 4 deletes Engine.ini at each start, so the file and its section are usually
     // not there; the same steps as the release notes and the CLI's (RrConfigSteps)
     yy += StepCodeRow(gx, x, yy, w, 1, noFolder ? L"Start the game once, then come back (it makes its settings folder here)" : L"Open the game's settings folder",
                       folder, ID_G_RRCFG_OPEN, L"Open folder", L"Open the settings folder of " + name, true);
-    yy += StepCodeRow(gx, x, yy, w, 2, L"Create or open Engine.ini there with Notepad", L"", 0, L"", L"", true);
+    yy += StepCodeRow(gx, x, yy, w, 2, lin ? L"Create or open Engine.ini there with a text editor" : L"Create or open Engine.ini there with Notepad", L"", 0, L"", L"", true);
     yy += StepCodeRow(gx, x, yy, w, 3, L"If the file has no [SystemSettings] line, add it at the end", L"", 0, L"", L"", true);
     yy += StepCodeRow(gx, x, yy, w, 4, L"Paste this line under [SystemSettings]", RrConfigLineW(), ID_G_RRCFG_COPY, L"Copy", L"Copy the line", true);
     yy += StepCodeRow(gx, x, yy, w, 5, L"Save the file", L"", 0, L"", L"", true);
     if (rg.readOnly)
-        yy += StepCodeRow(gx, x, yy, w, 6, L"Right-click Engine.ini, choose Properties, tick Read-only and click OK (without it, " + name +
+        yy += StepCodeRow(gx, x, yy, w, 6, (lin ? L"Make Engine.ini read-only: in your file manager open its properties, then Permissions, and set it to read-only (without it, "
+                                                    : L"Right-click Engine.ini, choose Properties, tick Read-only and click OK (without it, ") + name +
                                                L" deletes the file at its next start)", L"", 0, L"", L"", true);
     const int st = v.rrcfg;
     const wstring t = st == 1 ? L"Engine.ini has the line" : st == 3 ? L"Couldn't read Engine.ini" : st == 2 ? L"The line is there, but the file isn't read-only"

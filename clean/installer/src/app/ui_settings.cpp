@@ -254,7 +254,9 @@ wstring OptiNameVersion(const wstring& path) {
 constexpr float kSwatch = 22, kSwatchGap = 10;
 float AccentRow(Gfx& gx, float x, float y, float w, bool border) {
     const int sel = CurrentAccent();
-    const float sw = A_COUNT * kSwatch + (A_COUNT - 1) * kSwatchGap;
+    // the Windows accent colour has no meaning on the native Linux launcher: six swatches there (a render's fixture keeps all seven)
+    const int count = NativeLinux() && !v.fixture ? (int)A_WINDOWS : (int)A_COUNT;
+    const float sw = count * kSwatch + (count - 1) * kSwatchGap;
     const float h = SettingRow(gx, x, y, w, border, ic::palette, L"Accent color", Status{},
                                sel == A_WINDOWS ? L"Follows your Windows accent color."
                                                 : L"Play, switches and links. Green always means WrongGPU is working; red means something needs you.",
@@ -262,7 +264,7 @@ float AccentRow(Gfx& gx, float x, float y, float w, bool border) {
     const float cy = std::round(y + h / 2);
     float sx = x + w - kCellPad - sw;
     const unsigned win = WindowsAccentRgb();
-    for (int i = 0; i < A_COUNT; ++i, sx += kSwatch + kSwatchGap) {
+    for (int i = 0; i < count; ++i, sx += kSwatch + kSwatchGap) {
         const int id = ID_S_ACCENT0 + i;
         const Rc r{sx, cy - kSwatch / 2, kSwatch, kSwatch};
         const float hl = Down(id) ? -0.08f : Hot(id) ? 0.1f : 0.f;
@@ -613,9 +615,13 @@ void PaintSettings(Gfx& gx, const Rc& area) {
             // Windows' own app mode (not the launcher's palette: set to Light, the launcher is light while Windows may be dark);
             // a render's palette is its theme
             const bool winDark = v.fixture ? pal.dark : ThemeIsDark(L"system");
-            const wstring follows = L"Follows Windows' app mode (now " + wstring(winDark ? L"dark" : L"light") + L").";
+            // natively there is no Windows app mode: "System" is the desktop's light or dark setting, which the launcher cannot read on
+            // Linux yet, so it says what it uses instead (the layer's registry stand-in has no value: light)
+            const bool desktop = NativeLinux() && !v.fixture;
+            const wstring follows = desktop ? L"Follows the desktop's light or dark setting. The launcher can't read it on Linux yet, so it is " + wstring(winDark ? L"dark" : L"light") + L" for now."
+                                            : L"Follows Windows' app mode (now " + wstring(winDark ? L"dark" : L"light") + L").";
             const float h = SettingRow(gx, lx, ry, lw, b, kGlyphAppearance, L"Appearance", Status{},
-                                       sel == 0 ? follows : L"The launcher stays " + wstring(sel == 1 ? L"light" : L"dark") + L". System follows Windows' app mode.",
+                                       sel == 0 ? follows : L"The launcher stays " + wstring(sel == 1 ? L"light" : L"dark") + (desktop ? L". System follows the desktop's light or dark setting." : L". System follows Windows' app mode."),
                                        {}, ID_S_THEME0, -1, {L"System", L"Light", L"Dark"}, sel);
             // each option's help text says what that option does (the row's sentence says what the chosen one does)
             Describe(ID_S_THEME0, follows);
@@ -650,7 +656,7 @@ void PaintSettings(Gfx& gx, const Rc& area) {
         },
         [&](float ry, bool b) {
             const float h = SettingRow(gx, lx, ry, lw, b, ic::monitor, L"Launcher install", inst, instDesc, instActs, 0, -1, {}, 0,
-                                       ID_S_DATATEXT, L"Settings and logs: " + dataDir);
+                                       ID_S_DATATEXT, L"Settings and logs: " + ShownPath(dataDir));
             waits(instActs, busyWait, v.task == T_SELFINSTALL || v.task == T_SELFUNINSTALL || looking || removing);
             return h;
         },

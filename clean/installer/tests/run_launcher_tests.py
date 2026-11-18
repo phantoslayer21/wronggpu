@@ -1919,8 +1919,10 @@ def test_rr_config_fix(t, opti):
                 "WrongGPU can add the line" in text and "on the game's page at any time" in text and "uninstalling WrongGPU takes it out" in text,
                 (rc, t.j.get("message"), q))
         t.check("the question's steps have the line, the game's folder and read-only; the fix and myself commands name the setting",
-                line.decode() in q.get("steps", "") and os.path.dirname(bl4_ini) in q.get("steps", "") and "Read-only" in q.get("steps", "") and
+                line.decode() in q.get("steps", "") and (os.path.dirname(native_linux.host(bl4_ini)) if t.native else os.path.dirname(bl4_ini)) in q.get("steps", "") and
+                ("read-only" if t.native else "Read-only") in q.get("steps", "") and
                 q.get("fix", "").endswith("rr_config_fix=on") and q.get("myself", "").endswith("rr_config_fix=off"), q)
+        if t.native: native_linux.check_steps_words(t, q.get("steps", ""), bl4_ini)  # review fix: Linux terms
         bad = [p for p in check_wording.PHRASES if p in (text + q.get("steps", "")).lower()]
         # the line's own words (its key's parts) appear nowhere but in the line itself
         words = [w for w in line.split(b"=")[0].decode().split(".") if len(w) >= 3]
@@ -2322,10 +2324,11 @@ def test_rr_config_fix(t, opti):
                 any(k.startswith("Open the settings folder of") for k in p0) and "Check Engine.ini again" in p0 and
                 any(k.startswith("Step 4: Paste this line under [SystemSettings]") and line.decode() in k for k in p0) and
                 # every step spelled out, read-only last (UI review r2 #5)
-                any(k.startswith("Step 2: Create or open Engine.ini there with Notepad") for k in p0) and
+                any(k.startswith("Step 2: Create or open Engine.ini there with " + ("a text editor" if t.native else "Notepad")) for k in p0) and
                 any(k.startswith("Step 3: If the file has no [SystemSettings] line, add it at the end") for k in p0) and
                 any(k.startswith("Step 5: Save the file") for k in p0) and
-                any(k.startswith("Step 6: Right-click Engine.ini, choose Properties, tick Read-only and click OK") for k in p0) and
+                any(k.startswith("Step 6: Make Engine.ini read-only: in your file manager" if t.native
+                                 else "Step 6: Right-click Engine.ini, choose Properties, tick Read-only and click OK") for k in p0) and
                 any(k.startswith("The game's settings folder isn't there yet") for k in p0) and not os.listdir(docs), (rc2, [k for k in p0 if "ngine" in k or "Step" in k]))
         rg = [gp.get("rrconfig") for gp in d.get("games", []) if gp.get("rrconfig")]
         # the game never started (no settings folder): the check says so (-1), Open folder makes nothing and says to start the
@@ -2417,7 +2420,8 @@ def test_rr_config_fix(t, opti):
         t.check("window, Myself, an Engine.ini saved as UTF-16: WrongGPU's check couldn't read it, check it by hand in Notepad (the line, read-only); "
                 "no Save as / Encoding step; Check again; its toast says the same (r4 #6)",
                 rx == 0 and rcf.get("state") == 3 and cr and "WrongGPU's check couldn't read it: it is saved as UTF-16" in cr[0] and
-                "open Engine.ini in Notepad and look for the line under [SystemSettings]" in cr[0] and "Read-only is ticked" in cr[0] and
+                ("open Engine.ini in a text editor and look for the line under [SystemSettings]" if t.native else "open Engine.ini in Notepad and look for the line under [SystemSettings]") in cr[0] and
+                ("that the file is read-only" if t.native else "Read-only is ticked") in cr[0] and
                 "Save as" not in cr[0] and "Encoding" not in cr[0] and "Check Engine.ini again" in pg and
                 "WrongGPU's check couldn't read Engine.ini" in rcf.get("check_toast", "") and "by hand" in rcf.get("check_toast", ""), (rx, rcf, cr))
         os.remove(bl4_ini)  # the player's own file gone again, as before these checks (the game's settings folder stays)
@@ -2499,7 +2503,7 @@ def test_rr_config_fix(t, opti):
         q = t.j.get("rr_config_question", {})
         t.check("Hogwarts Legacy install: the question (the game named, its menu can't turn it on; no read-only step)",
                 rc == 0 and q.get("text", "").startswith("Hogwarts Legacy needs one more setting for Ray Reconstruction") and
-                "needs one line in Engine.ini, because the game's own menu can't turn it on" in q.get("text", "") and "read-only" not in q.get("text", "") and "Read-only" not in q.get("steps", ""),
+                "needs one line in Engine.ini, because the game's own menu can't turn it on" in q.get("text", "") and "read-only" not in q.get("text", "") and "Read-only" not in q.get("steps", "") and "read-only" not in q.get("steps", ""),
                 (rc, t.j.get("message"), q))
         hog_ini = os.path.join(hog, "WindowsNoEditor", "Engine.ini")
         # before the game's first start: no guessed Windows folder (the game uses WindowsNoEditor): nothing made, waits (r2b #1)

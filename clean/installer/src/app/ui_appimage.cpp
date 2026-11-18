@@ -6,23 +6,13 @@
 
 #include "wg_core/appimage.h"
 
-namespace {
-// A path as a Linux player writes it: the core's Z:\home\x\... is /home/x/...
-std::wstring Shown(std::wstring p) {
-    if (p.size() >= 3 && (p[0] == L'Z' || p[0] == L'z') && p[1] == L':' && (p[2] == L'\\' || p[2] == L'/')) p.erase(0, 2);
-    for (auto& c : p) if (c == L'\\') c = L'/';
-    return p;
-}
-
-}  // namespace
-
 namespace wg::app::win {
 
 extern bool dataRemoved;  // launcher_ui.cpp
 
 // The question, with what goes by its path (the player decides on what they can read). Nothing in the games is touched.
 wstring AppImageUninstallText(const wstring& fileIn, const wstring& dataIn) {
-    const wstring file = Shown(fileIn), data = Shown(dataIn);
+    const wstring file = ShownPath(fileIn), data = ShownPath(dataIn);
     return L"Uninstall WrongGPU?\n\nThis deletes two things and cannot be undone:\n\n"
            L"• The program file:\n  " + file + L"\n• WrongGPU's data folder (the converted Model M and Ray Reconstruction data, the games' list, "
            L"settings and logs):\n  " + data + L"\n\nNothing else is deleted. Your games and their files are not touched.";
@@ -59,6 +49,6 @@ namespace wg::app::lui {
 // What Settings says about the removal: where the program and its data are, or why this copy can't remove itself.
 wstring AppImageSettingsWords(bool own, const wstring& file, const wstring& data, const wstring& why) {
     if (!own) return L"Uninstall WrongGPU is not available here. " + why;
-    return L"Runs from " + Shown(file) + L". Uninstall deletes that file and WrongGPU's data folder (" + Shown(data) + L"), after you confirm. Nothing else is deleted.";
+    return L"Runs from " + ShownPath(file) + L". Uninstall deletes that file and WrongGPU's data folder (" + ShownPath(data) + L"), after you confirm. Nothing else is deleted.";
 }
 }  // namespace wg::app::lui

@@ -190,4 +190,7 @@ bool DownloadsAvailable();
 // (Z: maps the Linux root in every prefix, C: does not), otherwise the path unchanged.
 wstring PathForGamePrefix(const wstring& path);
 wstring SelfPath();
+// A path as the player reads it: on the native Linux launcher the core's Z:\home\x\... is /home/x/... (the core keeps its own
+// spelling for the files themselves); Windows and Wine show the path as it is.
+wstring ShownPath(const wstring& p);
 }  // namespace wg
