@@ -195,6 +195,7 @@ class KRuntime {
   bool split_m_ = false;
   int split_cap_ = 0;
   DevPtr split_z_ = 0, split_x1_ = 0, split_a_ = 0, split_h_ = 0;
+  size_t split_bytes_[4] = {0, 0, 0, 0};  // the bytes of split_z_, split_x1_, split_a_, split_h_ (split_alloc)
   std::string smx_note_;
   std::string smx_test_;  // option k_smx_test (developer builds only)
   std::string notes_;  // notes of create for the caller's log (notes()), one per line, or empty

@@ -677,6 +677,7 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
     return fail("model K: an input-stage buffer is not allocated (it would be packed as arena offset 0)");
   // the own output buffer (tests): dense RGB f32, dense RGBA f32 (FrameIo.out_rgba32f) or RGBA16F rows that fit
   if (!external_io_ && !alloc(&out_, (size_t)W_ * H_ * 16, true)) return false;
+  if (split_m_ && !split_alloc()) return false;  // k_split's scratch (filled with the rest by k_fill, below)
   if (fill_ >= 0) {  // k_fill (test hook): the sentinel in everything a frame writes, before the first frame
     auto fillb = [&](DevPtr p, size_t bytes) { return !p || dev_->memset(p, fill_, std::max<size_t>(bytes, 256)); };
     bool ok = true;
@@ -686,6 +687,9 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
     ok = ok && fillb(ctap_, R * 8) && fillb(ctapT_, R * 2) && fillb(cpre_, R * 16) && fillb(cpre2_, R * 8) &&
          fillb(xs_, 16) && fillb(kexpo_, 16) &&
          fillb(color_, R * 16) && fillb(depth_, R * 4) && fillb(motion_, R * 8);  // the own input copies (unused with caller buffers)
+    if (split_m_)  // k_split's scratch: written by the phases of stage m, so filled like the rest
+      ok = ok && fillb(split_z_, split_bytes_[0]) && fillb(split_x1_, split_bytes_[1]) &&
+           fillb(split_a_, split_bytes_[2]) && fillb(split_h_, split_bytes_[3]);
     if (!ok) return dfail();
   }
   // the filter-shape table (spec 43 section 7) of every level, computed once; a frame reads its level's set
@@ -693,7 +697,6 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   for (int l = 0; l < 8; ++l) k_filter_table(l, 1, tab.data() + (size_t)l * kFilterEntries * kFilterValues);
   if (!dev_->upload(tables_, tab.data(), tab.size() * 2)) return dfail();
   if (!dev_->sync()) return dfail();
-  if (split_m_ && !split_alloc()) return false;
   // the native device prepares (loads, verifies and compiles) every kernel this context can select now: a missing or
   // corrupt shader fails create here, not at the first frame
   if (c.backend == 3) {
@@ -1021,6 +1024,8 @@ bool KRuntime::split_m(bool rodd, void* params) {
   if (nwin > split_cap_)
     return fail("model K: k_split: stage m has " + std::to_string(nwin) + " windows, the scratch holds " +
                 std::to_string(split_cap_));
+  // k_split_m_w1 runs HT / 2 groups per window: one group per two hidden tiles (KS_HB = 2 in
+  // clean/k/dx12/kernels/k_block_split.hlsl). A change of KS_HB must change this grid too.
   return launch(rodd ? "k_split_m_attn__rodd" : "k_split_m_attn", (unsigned)(nwin * st.heads), 128, params, &split_z_,
                 &split_x1_, &split_a_, &split_h_) &&
          launch("k_split_m_wo", (unsigned)(nwin * kt), 128, params, &split_z_, &split_x1_, &split_a_, &split_h_) &&
@@ -1046,8 +1051,12 @@ bool KRuntime::split_alloc() {
     if (std::strcmp(sc.stage, "m") == 0) grow(sc.wb, sc.hb);
   split_cap_ = cap;
   const size_t tok = (size_t)cap * 64;
-  return alloc(&split_z_, tok * st.heads * 32 * 2) && alloc(&split_x1_, tok * st.C * 2) &&
-         alloc(&split_a_, tok * st.C * 2) && alloc(&split_h_, tok * 4 * st.C * 2);
+  split_bytes_[0] = tok * st.heads * 32 * 2;  // Z
+  split_bytes_[1] = tok * st.C * 2;           // X1
+  split_bytes_[2] = tok * st.C * 2;           // A
+  split_bytes_[3] = tok * 4 * st.C * 2;       // H
+  return alloc(&split_z_, split_bytes_[0]) && alloc(&split_x1_, split_bytes_[1]) &&
+         alloc(&split_a_, split_bytes_[2]) && alloc(&split_h_, split_bytes_[3]);
 }
 // SMX-SELFCHECK-SOURCE END
 
