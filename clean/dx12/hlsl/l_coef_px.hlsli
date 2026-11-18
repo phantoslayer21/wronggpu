@@ -40,6 +40,7 @@ float clamp20(float v) { return select(v >= 20.0f, 20.0f, select(v <= -20.0f, -2
 // buffers (pB unused with COEF_PACK12); i: the pixel's index in the render rectangle (y rw + x).
 void l_coef_px(uint4 lo, uint4 hi, float S, float T, uint pA, uint pB, uint pC, uint pL, uint i)
 {
+    // f16tof32 directly, not wg_h2f_lo: its mask costs a v_mov_b16 per FP16 pair (see hyb_h2f_lo in wg_hyb.hlsli)
     const float a0 = f16tof32(lo.x), a1 = wg_h2f_hi(lo.x), a2 = f16tof32(lo.w), a3 = wg_h2f_hi(lo.w);
     const float a4 = f16tof32(hi.x), a5 = wg_h2f_hi(hi.x), a6 = f16tof32(hi.y), a7 = wg_h2f_hi(hi.y);
     const float a8 = f16tof32(hi.z);
@@ -104,6 +105,7 @@ bool coef_mul_zero(float a, float b)
 
 LCoefVals l_coef_vals_hw(uint4 lo, uint4 hi, float S, float T)
 {
+    // f16tof32 directly, not wg_h2f_lo: its mask costs a v_mov_b16 per FP16 pair (see hyb_h2f_lo in wg_hyb.hlsli)
     const float a0 = f16tof32(lo.x), a1 = wg_h2f_hi(lo.x), a2 = f16tof32(lo.w), a3 = wg_h2f_hi(lo.w);
     const float a4 = f16tof32(hi.x), a5 = wg_h2f_hi(hi.x), a6 = f16tof32(hi.y), a7 = wg_h2f_hi(hi.y);
     const float a8 = f16tof32(hi.z);
@@ -116,6 +118,7 @@ LCoefVals l_coef_vals_hw(uint4 lo, uint4 hi, float S, float T)
     sg.v[5] = 0.0f; sg.v[6] = 0.0f; sg.v[7] = 0.0f;
     const uint4 hs = wg_to_f16_ags(sg);
     // A: unorm codes of RN16(sigma(a0..a2))
+    // f16tof32 directly, not wg_h2f_lo: its mask costs a v_mov_b16 per FP16 pair (see hyb_h2f_lo in wg_hyb.hlsli)
     o.cA = unorm8_code(f16tof32(hs.x)) | (unorm8_code(wg_h2f_hi(hs.x)) << 8) | (unorm8_code(f16tof32(hs.y)) << 16);
     // B: softmax of a3..a5
     const float m = max(max(a3, a4), a5);
@@ -124,6 +127,7 @@ LCoefVals l_coef_vals_hw(uint4 lo, uint4 hi, float S, float T)
     const float rs = wg_rcp(e2 + (e0 + e1));
     o.cB = unorm8_code(opq(e0 * rs)) | (unorm8_code(opq(e1 * rs)) << 8) | (unorm8_code(opq(e2 * rs)) << 16);
     // C: spreads and correlation; the three FP16 products in one conversion
+    // f16tof32 directly, not wg_h2f_lo: its mask costs a v_mov_b16 per FP16 pair (see hyb_h2f_lo in wg_hyb.hlsli)
     const float g0 = wg_h2f_hi(hs.y), g1 = f16tof32(hs.z);
     const float sx = S * g0, sy = S * g1;
     const float sxy = sx * sy;

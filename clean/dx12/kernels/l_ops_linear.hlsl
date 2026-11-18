@@ -73,6 +73,7 @@ WG_KERNEL(l_linear_32_32_f16)
         const uint4 h = wg_to_f16_ags(lin_acc(bias[m1], fr[m1], xf));
         v8f r;
         [unroll] for (uint j = 0; j < 4u; ++j) {
+            // f16tof32 directly, not wg_h2f_lo: its mask costs a v_mov_b16 per FP16 pair (see hyb_h2f_lo in wg_hyb.hlsli)
             r.v[2 * j] = wg_fmax(f16tof32(h[j]), 0.0f);
             r.v[2 * j + 1] = wg_fmax(wg_h2f_hi(h[j]), 0.0f);
         }
