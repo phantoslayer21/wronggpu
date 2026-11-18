@@ -7,12 +7,6 @@
 #include <array>
 #include <cmath>
 
-#if defined(_MSC_VER) && !defined(__clang__)
-#pragma fp_contract(off)
-#else
-#pragma STDC FP_CONTRACT OFF
-#endif
-
 namespace wgrt::ki_s_breakpoints {
 
 inline constexpr uint32_t kFirst = 0x3b4d2e1du, kLast = 0x3f800000u;
@@ -30,7 +24,18 @@ inline uint64_t table_digest(const Table& table) {
   return hash;
 }
 
+#if defined(_MSC_VER) && !defined(__clang__)
+#pragma float_control(precise, on, push)
+#pragma fp_contract(off)
+#elif defined(__GNUC__) && !defined(__clang__)
+#pragma GCC push_options
+#pragma GCC optimize ("fp-contract=off")
+#endif
+
 inline float log32(float x) {
+#if defined(__clang__)
+#pragma STDC FP_CONTRACT OFF
+#endif
   constexpr double kLn2 = 0.6931471805599453;
   int exponent;
   double m = std::frexp(static_cast<double>(x), &exponent);
@@ -46,6 +51,9 @@ inline float log32(float x) {
 }
 
 inline float exp32(float x) {
+#if defined(__clang__)
+#pragma STDC FP_CONTRACT OFF
+#endif
   constexpr double kLn2 = 0.6931471805599453;
   // The reduced exponent is integral. Either side of a tie is valid here.
   const int n = static_cast<int>(std::floor(static_cast<double>(x) + 0.5));
@@ -54,6 +62,12 @@ inline float exp32(float x) {
   for (int k = 14; k >= 1; --k) p = 1.0 + (t / k) * p;
   return static_cast<float>(std::ldexp(p, n));
 }
+
+#if defined(_MSC_VER) && !defined(__clang__)
+#pragma float_control(pop)
+#elif defined(__GNUC__) && !defined(__clang__)
+#pragma GCC pop_options
+#endif
 
 inline uint16_t half_code(uint32_t word) {
   const float y = log32(bits_f32(word)) * bits_f32(0x3ed55555u);
