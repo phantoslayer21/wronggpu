@@ -540,6 +540,23 @@ void GpuIdentity() {
     card("card4-DP-1", "0x1002\n", "0x7551\n", nullptr);                 // a connector, ignored
     card("card5", "garbage", "0x7551\n", nullptr);                       // unreadable ids: skipped
     check(wg::GpuFromDrm(drm).name == L"AMD Radeon RX 9070 XT", "connectors and unreadable cards are ignored");
+    // a file the system will not let this program open (a different failure from garbage text): that card is skipped, the search goes on
+    card("card6", "0x1002\n", "0x7550\n", nullptr);
+    std::filesystem::permissions(root / "drm" / "card6" / "device" / "vendor", std::filesystem::perms::none);
+    check(wg::GpuFromDrm(drm).name == L"AMD Radeon RX 9070 XT", "a card whose vendor file cannot be opened is skipped, not fatal");
+    const std::wstring lonely = Tmp + L"\\gpu-drm\\unreadable";
+    {
+        const auto d = root / "unreadable" / "card0" / "device";
+        std::filesystem::create_directories(d);
+        std::FILE* f = std::fopen((d / "vendor").c_str(), "w"); std::fputs("0x1002\n", f); std::fclose(f);
+        f = std::fopen((d / "device").c_str(), "w"); std::fputs("0x7550\n", f); std::fclose(f);
+        std::filesystem::permissions(d / "device", std::filesystem::perms::none);
+    }
+    check(wg::GpuFromDrm(lonely).name.empty() && !wg::GpuFromDrm(lonely).amd && !wg::GpuFromDrm(lonely).rdna4, "the only card has an unreadable device file: no GPU, no crash");
+    std::filesystem::permissions(root / "unreadable" / "card0" / "device" / "device", std::filesystem::perms::owner_all);
+    check(wg::GpuFromDrm(lonely).rdna4, "...and the same card with the file readable again is the RDNA 4 card (the probe can show the card)");
+    std::filesystem::permissions(root / "drm" / "card6" / "device" / "vendor", std::filesystem::perms::owner_all);
+    std::filesystem::remove_all(root / "drm" / "card6");
     card("card10", "0x10de\n", "0x2684\n", nullptr);                     // NVIDIA
     check(wg::GpuFromDrm(drm).rdna4, "an NVIDIA card does not displace it");
     std::filesystem::remove_all(root / "drm" / "card2");

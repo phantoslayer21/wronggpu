@@ -2463,6 +2463,21 @@ int main() {
             WriteFileAtomic(Join(Join(lib, L"steamapps"), L"libraryfolders.vdf"), vdf.data(), vdf.size());
             require(FindProtonPrefix(movedExe).state == ProtonPrefixState::Found && StartsWithI(FullPath(FindProtonPrefix(movedExe).userDir), FullPath(other)),
                     "Proton prefix: found in another Steam library the list names");
+            // a libraryfolders.vdf that is cut off or is not text: nothing found (no crash, no guess), and the good list works again after
+            for (const string& bad : {string("\"libraryfolders\"\n{\n\t\"0\"\n\t{\n\t\t\"path\"\t\t\""), string("\x00\x01\xff{{{\"path\" \"", 12), string("")}) {
+                WriteFileAtomic(Join(Join(lib, L"steamapps"), L"libraryfolders.vdf"), bad.data(), bad.size());
+                require(FindProtonPrefix(movedExe).state == ProtonPrefixState::NotStarted && FindProtonPrefix(movedExe).userDir.empty(),
+                        "Proton prefix: a malformed libraryfolders.vdf finds nothing and does not break the search");
+            }
+            WriteFileAtomic(Join(Join(lib, L"steamapps"), L"libraryfolders.vdf"), vdf.data(), vdf.size());
+            require(FindProtonPrefix(movedExe).state == ProtonPrefixState::Found, "Proton prefix: the good list finds it again");
+            // a pfx whose Windows user is not steamuser: not a prefix WrongGPU knows, nothing made in it
+            manifest(L"4444", L"Other User Game");
+            const wstring otherUserExe = Join(Join(common, L"Other User Game"), L"Game.exe");
+            EnsureDir(Parent(otherUserExe)); WriteFileAtomic(otherUserExe, "MZ", 2);
+            EnsureDir(Join(compat, L"4444\\pfx\\drive_c\\users\\someoneelse"));
+            require(FindProtonPrefix(otherUserExe).state == ProtonPrefixState::NotStarted && FindProtonPrefix(otherUserExe).userDir.empty() &&
+                        !IsDir(Join(compat, L"4444\\pfx\\drive_c\\users\\steamuser")), "Proton prefix: a pfx without drive_c\\users\\steamuser is not found, and none is made");
             // not a Steam game: no folder known until the player points at one once; it is remembered and checked each time
             const wstring plain = Join(dir, L"s3-epic\\Game\\Borderlands4.exe");
             EnsureDir(Parent(plain)); WriteFileAtomic(plain, "MZ", 2);
