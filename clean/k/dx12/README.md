@@ -115,7 +115,7 @@ Known limit, shared with Model M's ports: D3D12 flushes FP32 denormals (inputs a
 
 ## Phase-split stage m (runtime option `k_split`, native D3D12 device)
 
-`kernels/k_block_split.hlsl` runs stage m (`k_stagew4_m`: 6 to 24 windows, one 512-lane workgroup each) as four launches
+`kernels/k_block_split.hlsl` runs stage m (`k_stagew4_m`: 6 to 24 windows at 1080p/1440p output (more at 4K and in the self-check), one 512-lane workgroup each) as four launches
 spread over many more workgroups: `k_split_m_attn` (one per window and head: normalization, q / k / v, softmax, z;
 `__rodd` twin), `k_split_m_wo` (one per window and output tile: Wo, x1, a), `k_split_m_w1` (one per window and two hidden
 tiles: W1, activation) and `k_split_m_w2` (one per window and output tile: W2, x2, the block output), joined by the
