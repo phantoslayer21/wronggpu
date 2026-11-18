@@ -7,6 +7,7 @@ Same setup as run_linux_ui_tests.py (a home of its own, a fake Steam library, SD
 the AppImage proof). Needs a WRONGGPU_TESTING build of the Linux launcher. Written for this project."""
 import argparse
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -167,6 +168,74 @@ def test_command(exe, work, home):
     check(c["clipboard"].startswith(shell(me) + " windows-folder "), "an AppImage file the system does not tie to this process is not used")
 
 
+def placed(exe, where):
+    """This program's file at another place (a hard link, so /proc/self/exe names that place) with what it finds next to it."""
+    src = Path(exe).resolve()
+    where.mkdir(parents=True, exist_ok=True)
+    dst = where / src.name
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
+    for item in src.parent.iterdir():
+        if item.is_dir() and item.name in ("assets", "fonts", "payload", "data"):
+            (where / item.name).symlink_to(item)
+    return dst
+
+
+def test_own_file(exe, work, home):
+    print("blind review: this program's own file from a long path and from a folder with a backslash in its name")
+    for tag, where in (("o-long", work / "o-long" / "/".join(["e" * 200] * 3)), ("o-backslash", work / "o-backslash" / "literal\\name")):
+        me = placed(exe, where)
+        d, _, _ = dump(me, work, home, tag + "-run")
+        c = d["windows_folder_copy"]
+        game = c["exe"].replace("Z:", "", 1).replace("\\", "/")
+        check(c["clipboard"] == f"{shell(me)} windows-folder {shell(game)} '<that folder>'", f"{tag}: the command names this program's real file ({c['clipboard'][:160]})")
+        d, _, _ = dump(me, work, home, tag + "-label", image=True, proven=False, appdir=where, env_extra={"APPIMAGE_EXTRACT_AND_RUN": "1"})
+        check("WrongGPU 0.6.5, AppImage" in names(d), f"{tag}: inside its AppImage folder the side label says AppImage ({[n for n in names(d) if 'WrongGPU 0' in n]})")
+
+
+LIVE_SCRIPT = """wait 1500
+clickname Settings
+wait 800
+clickname Launcher
+wait 800
+clickname Uninstall WrongGPU
+wait 2500
+dump {o}/dialog.json
+clickname Cancel
+wait 500
+close
+"""
+
+
+def test_live_question(exe, work, home):
+    print("blind review: the question the live window really shows after a click on Uninstall")
+    env, run_dir = base.environment(work, home, "q-live")
+    image = run_dir / "Apps" / IMAGE
+    image.parent.mkdir(parents=True)
+    image.write_bytes(HEAD)
+    appdir = Path(exe).resolve().parent
+    env.update(APPIMAGE=str(image), APPDIR=str(appdir))
+    base.fake_proc(run_dir / "proc", appdir, image)
+    env["WRONGGPU_TEST_PROC_ROOT"] = str(run_dir / "proc")
+    data = run_dir / "data" / "WrongGPU"
+    put_list(data)
+    (data / "launcher.ini").write_bytes(b"first_run_done=1\r\n")
+    out = work / "q-live-out"
+    out.mkdir()
+    script = work / "q-live-script.txt"
+    script.write_text(LIVE_SCRIPT.format(o=out))
+    env["WRONGGPU_UI_SCRIPT"] = str(script)
+    r = base.run(exe, [], env, 180)
+    check(r.returncode == 0, f"the live window exits 0 ({r.returncode}: {r.stderr[-300:]})")
+    f = out / "dialog.json"
+    d = json.loads(f.read_text()) if f.is_file() else {}
+    shown = d.get("dialog_title", "") + "\n\n" + d.get("dialog_body", "")
+    check(d.get("dialog_open") is True and shown == question(image, data, True), f"the open dialog's words, whole ({shown[:200]!r})")
+    check(image.is_file() and (data / "ignore-files.txt").is_file(), "Cancel deleted nothing")
+
+
 def test_misc(exe, work, home):
     print("findings 7: the pictures and the Settings rows named in the review")
     d, _, run = dump(exe, work, home, "m-shots", image=True, args=(f"--shots={work / 'm-shots'}",))
@@ -197,7 +266,7 @@ def main():
         shutil.rmtree(work)
     work.mkdir(parents=True)
     home = base.make_home(work)
-    for fn in (test_uninstall_words, test_label, test_command, test_misc):
+    for fn in (test_uninstall_words, test_label, test_command, test_own_file, test_live_question, test_misc):
         fn(Path(a.exe), work, home)
     if base.failures:
         print(f"{len(base.failures)} check(s) failed")

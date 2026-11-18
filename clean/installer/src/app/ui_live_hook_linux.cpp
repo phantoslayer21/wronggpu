@@ -34,7 +34,7 @@ bool LiveHook(const std::string& line) {
     Json j;
     j.Obj().N("page", (long long)v.page).S("page_name", v.page == P_LIBRARY ? L"library" : v.page == P_GAME ? L"game" : L"settings")
         .N("scroll", (long long)std::lround(v.scroll[v.page])).N("content_h", (long long)std::lround(v.contentH[v.page]))
-        .S("search", v.search).S("url", v.urlText).N("focus", v.focus).B("dialog_open", v.dialog.open).B("menu_open", v.menu.open)
+        .S("search", v.search).S("url", v.urlText).N("focus", v.focus).B("dialog_open", v.dialog.open).S("dialog_title", v.dialog.title).S("dialog_body", v.dialog.body).B("menu_open", v.menu.open)
         .B("first_run_open", v.first.open).N("games", (long long)v.games.size()).N("w", (long long)std::lround(v.W)).N("h", (long long)std::lround(v.H));
     j.Key("controls");
     DumpHits(j);
