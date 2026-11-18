@@ -147,6 +147,7 @@ class KRuntime {
   std::string f8why_;  // stages that keep their FP16 kernel, and why
   std::vector<std::string> f8stages_;  // runtime option fp8_stages (default e0, e1, d1, d0)
   bool tiled_input_ = false, tiled_last_ = false, tiled_color_last_ = false, input_uniforms_last_ = false;
+  bool s_breakpoints_fallback_ = false;
   uint64_t tiled_launches_ = 0, tiled_color_launches_ = 0, input_uniform_launches_ = 0;
   uint64_t legacy_color_launches_ = 0, legacy_base_launches_ = 0;
   bool input_uniforms_ = true;  // runtime option k_in_uniforms (0: always k_in_tiled, a port-check diagnostic)

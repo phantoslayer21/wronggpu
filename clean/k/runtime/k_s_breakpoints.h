@@ -19,6 +19,17 @@ inline constexpr uint32_t kFirst = 0x3b4d2e1du, kLast = 0x3f800000u;
 inline constexpr uint32_t kBucket = 4096, kBase = kFirst & ~(kBucket - 1);
 using Table = std::array<uint32_t, (kLast - kBase) / kBucket + 1>;
 
+// FNV-1a of the little-endian table verified by prove_ki_s_breakpoints.py.
+inline constexpr uint64_t kProvenDigest = 0xfe032345814078feULL;
+
+inline uint64_t table_digest(const Table& table) {
+  uint64_t hash = 0xcbf29ce484222325ULL;
+  for (uint32_t entry : table)
+    for (unsigned shift = 0; shift < 32; shift += 8)
+      hash = (hash ^ ((entry >> shift) & 0xffu)) * 0x100000001b3ULL;
+  return hash;
+}
+
 inline float log32(float x) {
   constexpr double kLn2 = 0.6931471805599453;
   int exponent;
