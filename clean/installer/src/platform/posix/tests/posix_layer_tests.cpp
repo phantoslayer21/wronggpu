@@ -504,6 +504,8 @@ void NotAvailable() {
 // `driver` link a real card has; every card of the folder is looked at, the AMD RDNA 4 one wins.
 void GpuIdentity() {
     check(wg::NativeLinux(), "NativeLinux: this layer's ntdll carries the marker");
+    const wg::WinInfo sys = wg::WindowsInfo();
+    check(sys.label == L"Linux" && sys.ok && !sys.text.empty() && sys.text.find(L"Windows") == std::wstring::npos, "WindowsInfo natively: Linux, the distribution, never a Windows version");
     std::string posixTmp(Tmp.begin(), Tmp.end());
     posixTmp.erase(0, 2);
     for (auto& c : posixTmp) if (c == '\\') c = '/';

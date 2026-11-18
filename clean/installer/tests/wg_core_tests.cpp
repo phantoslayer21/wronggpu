@@ -253,6 +253,14 @@ int main() {
             card(L"card17", "0x1002\n", "0x7550 \n");    // two RDNA 4 cards: the lower number first
             require(Contains(LinuxRdna4Name(drm), L"7550"), "LinuxRdna4Name: cards in number order");
         }
+        // S4: the distribution's name from /etc/os-release (any host)
+        {
+            require(LinuxOsName("NAME=\"Fedora Linux\"\nVERSION=\"44 (Nobara)\"\nPRETTY_NAME=\"Nobara Linux 44 (GNOME Edition)\"\n") == L"Nobara Linux 44 (GNOME Edition)",
+                    "LinuxOsName: PRETTY_NAME first");
+            require(LinuxOsName("NAME='Arch Linux'\nVERSION=rolling\n") == L"Arch Linux rolling", "LinuxOsName: NAME and VERSION without a pretty name, single quotes");
+            require(LinuxOsName("NAME=Debian\r\n") == L"Debian", "LinuxOsName: a name without quotes, CRLF");
+            require(LinuxOsName("").empty() && LinuxOsName("ID=x\nnot a pair\n").empty(), "LinuxOsName: nothing to read, no name");
+        }
         // S1: GpuFromDrm on a made-up folder (any host): the AMD RDNA 4 card wins, the names are the built-in list, others by code
         {
             const wstring drm = Join(dir, L"drm-gpu");

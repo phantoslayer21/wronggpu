@@ -358,7 +358,7 @@ Bundle CollectLogs(Context& ctx, const wstring& dirIn, const wstring& outZip, co
         if (installed && !m.modelM.empty()) s += L"Model M file at the last install: " + m.modelM + L"\r\n";
     }
     s += L"The in-game provider can differ from the startup choice; the runtime session/context logs identify the actual model and fallback.\r\n";
-    s += L"Windows: " + sys.win.text + L"\r\n";
+    s += sys.win.label + L": " + sys.win.text + L"\r\n";
     s += L"GPU: " + (sys.gpu.name.empty() ? wstring(L"unknown") : sys.gpu.name) + L" (driver " + (sys.gpu.driver.empty() ? wstring(L"unknown") : sys.gpu.driver) + L")\r\n";
     auto hips = HipCandidates();
     s += L"AMD HIP runtime: " + (hips.empty() ? wstring(L"not found") : hips[0]) + L"\r\n";

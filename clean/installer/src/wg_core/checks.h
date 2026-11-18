@@ -7,7 +7,7 @@
 
 namespace wg {
 
-struct WinInfo { bool ok = false; wstring text; };
+struct WinInfo { bool ok = false; wstring text; wstring label = L"Windows"; };  // label: "Windows", or "Linux" for the native launcher
 struct GpuInfo { bool amd = false, rdna4 = false; wstring name, driver; };
 struct HipInfo { bool ran = false, ok = false; int code = -1; wstring dll, device, arch, text; };
 enum CheckState { CK_OK, CK_FAIL, CK_WARN, CK_NA };
@@ -27,6 +27,8 @@ struct Checks {
 struct SystemInfo { WinInfo win; GpuInfo gpu; HipInfo hip; };
 
 WinInfo WindowsInfo();
+// The distribution's name from the text of /etc/os-release (PRETTY_NAME, else NAME and VERSION); empty when it names none.
+wstring LinuxOsName(const string& osRelease);
 bool IsRdna4Name(const wstring& name);
 // The sentence the runtime logs when it hands a game to AMD FSR on a GPU that is not an RX 9000-series card, or on one it
 // cannot identify (clean/runtime/interop/executor_select.h needs_rx9000_line); the launcher says the same.

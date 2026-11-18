@@ -1704,11 +1704,17 @@ wstring ProtonLaunchOption(const wstring& proxy) {
     return L"WINEDLLOVERRIDES=\"" + name + L"=n,b\" %command%";
 }
 
-// After OptiScaler's list, on Linux: the launch option the game needs in Steam, in a box to read exactly, with Copy. WrongGPU
-// does not write Steam's config (it belongs to Steam and its client rewrites it); the player pastes the line once.
+// After OptiScaler's list, on Linux: the launch option the game needs in Steam, in a box to read exactly, with Copy, and the steps
+// to put it there. WrongGPU does not write Steam's config (it belongs to Steam and its client rewrites it); the player pastes the
+// line once.
 static float ProtonLaunchNote(Gfx& gx, float x, float y, float w, const wstring& proxy) {
     const wstring title = L"Steam launch option", line = ProtonLaunchOption(proxy);
-    const wstring body = L"Under Proton, Steam needs this line to load OptiScaler's " + proxy + L" instead of Wine's own. In Steam, open the game's Properties and paste it under Launch options.";
+    const wstring body = L"Under Proton, Steam needs this line to load OptiScaler's " + proxy + L" instead of Wine's own. WrongGPU can't add it for you: "
+                         L"Steam keeps its own settings. Add it once:";
+    const std::vector<wstring> steps{L"1. In Steam, right-click this game in your library and choose Properties.",
+                                     L"2. On the General tab, find the box called Launch Options.",
+                                     L"3. Click Copy here, then paste the line into that box (replace what is there; if it already has other options, put them before %command%).",
+                                     L"4. Close the window. Then start the game from Steam or from Play here."};
     return GroupList(gx, x, y, w, [&](float top) {
         const float bw = ButtonW(gx, L"Copy", 0, 30, B_SECONDARY), tx = x + kCellPad, cw = w - 2 * kCellPad;
         const TS hs = Ts(13.5f, 600, pal.text), bs = Wrap(12.5f, pal.text2, 18);
@@ -1723,7 +1729,15 @@ static float ProtonLaunchNote(Gfx& gx, float x, float y, float w, const wstring&
         gx.FillRound(Rc{tx, yy, cw, mh + 14}, 6, pal.fill);
         gx.Text(line, Rc{tx + 10, yy + 7, cw - 20, mh + 2}, ms);
         yy += mh + 14;
-        AddText(Rc{tx, top + 14, cw, yy - top - 14}, title + L". " + body + L" " + line);
+        wstring said = title + L". " + body + L" " + line;
+        for (auto& s : steps) {
+            yy += 8;
+            const float sh = gx.TextH(s, cw, bs);
+            gx.Text(s, Rc{tx, yy, cw, sh + 2}, bs);
+            yy += sh;
+            said += L" " + s;
+        }
+        AddText(Rc{tx, top + 14, cw, yy - top - 14}, said);
         return yy + 14 - top;
     });
 }

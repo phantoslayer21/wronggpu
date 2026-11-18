@@ -3466,7 +3466,7 @@ int RunLauncherWindow(bool uninstall) {
         LoadLibrarySnapshot();  // the last session's list at once (SHIP-BAR 3), while the scan reads the games again
         StartScan();
     } else {
-        v.first.installOffer = !LauncherInstalled() && !gl.paths.portable;
+        v.first.installOffer = !LauncherInstalled() && !gl.paths.portable && !NativeLinux();  // (Linux: the AppImage runs where it is; there is nothing to install)
         v.first.choice = v.first.installOffer ? 1 : 0;  // a radio choice has its default: install (Continue says so)
         StartFirstRun();
     }

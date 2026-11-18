@@ -31,7 +31,7 @@ void FirstRunChecks(HWND hwnd, const GlobalSettings& gs, const wstring& dll, boo
         }
     } postAnyway{hwnd, m};
     const WinInfo win = WindowsInfo();
-    m->lines.push_back({win.ok ? 0 : 2, L"Windows: " + win.text});
+    m->lines.push_back({win.ok ? 0 : 2, win.label + L": " + win.text});
     // started inside an app package (MSIX), said in words a player knows: what happens, then what to do
     if (RunningPackaged())
         m->lines.push_back({2, L"Opened from: Another app. Games may not see the files WrongGPU writes while it's opened this way. Open WrongGPU from File Explorer instead."});
@@ -47,8 +47,12 @@ void FirstRunChecks(HWND hwnd, const GlobalSettings& gs, const wstring& dll, boo
                                                            : L"")});
     // short words behind the sheet's Show details (how Model M runs is the game page's Runs on); without the card, only
     // what it means here (the card's line above says what to do)
-    m->lines.push_back({gpu.rdna4 ? 0 : 1, gpu.rdna4 ? L"Direct3D 12: Ready" : L"Direct3D 12: Not available on this card"});
-    if (dump) m->lines.push_back({1, L"HIP runtime: Not checked in this run"});
+    // natively on Linux the games reach Direct3D 12 through Proton, and no HIP runtime is looked for (nothing here uses one)
+    const bool native = NativeLinux();
+    m->lines.push_back({gpu.rdna4 ? 0 : 1, native ? (gpu.rdna4 ? L"Direct3D 12 (through Proton): Ready" : L"Direct3D 12 (through Proton): Not available on this card")
+                                                  : (gpu.rdna4 ? L"Direct3D 12: Ready" : L"Direct3D 12: Not available on this card")});
+    if (native) {}
+    else if (dump) m->lines.push_back({1, L"HIP runtime: Not checked in this run"});
     else {  // optional: a note, not a problem (the probe's own words go to setup.log)
         const HipInfo h = CheckHip(g.ctx);
         if (!h.ok) LogLine(g.ctx, L"first run: " + h.text);

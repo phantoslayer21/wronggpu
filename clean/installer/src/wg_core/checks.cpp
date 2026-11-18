@@ -11,7 +11,37 @@ namespace wg {
 // ------------------------------------------------------------------------------------------------
 // System requirements
 // ------------------------------------------------------------------------------------------------
+wstring LinuxOsName(const string& osRelease) {
+    string name, plain, version;
+    for (size_t at = 0; at < osRelease.size();) {
+        size_t nl = osRelease.find('\n', at);
+        if (nl == string::npos) nl = osRelease.size();
+        string line = osRelease.substr(at, nl - at);
+        at = nl + 1;
+        const size_t eq = line.find('=');
+        if (eq == string::npos) continue;
+        string val = line.substr(eq + 1);
+        while (!val.empty() && (val.back() == '\r' || val.back() == ' ')) val.pop_back();
+        if (val.size() >= 2 && (val.front() == '"' || val.front() == '\'') && val.back() == val.front()) val = val.substr(1, val.size() - 2);
+        const string key = line.substr(0, eq);
+        if (key == "PRETTY_NAME") name = val;
+        else if (key == "NAME") plain = val;
+        else if (key == "VERSION") version = val;
+    }
+    if (name.empty() && !plain.empty()) name = plain + (version.empty() ? string() : " " + version);
+    return FromUtf8(name.c_str());
+}
 WinInfo WindowsInfo() {
+    if (NativeLinux()) {  // a Linux program: the system is the distribution, which Proton's Windows 10 stand-in is not
+        WinInfo w;
+        string text;
+        w.label = L"Linux";
+        ReadAll(L"Z:\\etc\\os-release", text);
+        w.text = LinuxOsName(text);
+        if (w.text.empty()) w.text = L"unknown distribution";
+        w.ok = true;
+        return w;
+    }
     using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
     auto fn = reinterpret_cast<RtlGetVersionFn>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion")));
     OSVERSIONINFOW v{}; v.dwOSVersionInfoSize = sizeof(v);

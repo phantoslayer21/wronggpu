@@ -114,7 +114,21 @@ def environment(work, home, name):
     env.update(HOME=str(home), XDG_DATA_HOME=str(run / "data"), XDG_CONFIG_HOME=str(run / "config"), XDG_CACHE_HOME=str(run / "cache"),
                XDG_STATE_HOME=str(run / "state"), TMPDIR=str(run / "tmp"), WRONGGPU_REGISTRY_FILE=str(run / "registry.ini"),
                SDL_VIDEO_DRIVER="offscreen", SDL_AUDIODRIVER="dummy")
+    drm = fake_drm(run / "drm", "0x1002", "0x7550")  # an RX 9070 XT: the pages do not depend on this PC's GPU
+    env["WRONGGPU_TEST_DRM_ROOT"] = "Z:" + str(drm)
     return env, run
+
+
+def fake_drm(root, vendor, device):
+    """A made-up /sys/class/drm with one card (no card when vendor is None), for WRONGGPU_TEST_DRM_ROOT."""
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True)
+    if vendor:
+        d = root / "card0" / "device"
+        d.mkdir(parents=True)
+        (d / "vendor").write_text(vendor + "\n")
+        (d / "device").write_text(device + "\n")
+    return root
 
 
 def run(exe, args, env, timeout):
@@ -152,6 +166,29 @@ def test_dump(exe, work, home):
     for p in ("first-run", "list", "settings"):
         check(png_size(out / "shots" / f"{p}.png") == (1180, 760), f"{p}.png is 1180x760")
     return d
+
+
+def test_first_run_words(exe, work, home):
+    """S4: the first run's checks on Linux speak Linux: the distribution instead of a Windows line, Direct3D 12 through Proton, no
+    HIP runtime line, and no Install for this user choice (an AppImage runs where it is). Three made-up cards."""
+    print("first-run words (Linux)")
+    for tag, ids, gpu_line, d3d in (("rdna4", ("0x1002", "0x7550"), "AMD Radeon RX 9070 XT", "Direct3D 12 (through Proton): Ready"),
+                                    ("rdna3", ("0x1002", "0x744c"), "AMD Radeon (code 1002:744C)", "Direct3D 12 (through Proton): Not available on this card"),
+                                    ("none", (None, None), "none", "Direct3D 12 (through Proton): Not available on this card")):
+        env, run_dir = environment(work, home, "words-" + tag)
+        env["WRONGGPU_TEST_DRM_ROOT"] = "Z:" + str(fake_drm(run_dir / "drm", *ids))
+        out = work / ("words-" + tag)
+        r = run(exe, ["ui-dump", f"--dump={out / 'dump.json'}"], env, 300)
+        check(r.returncode == 0, f"ui-dump ({tag}) exits 0 (got {r.returncode}: {r.stderr[-300:]})")
+        d = json.loads((out / "dump.json").read_text())
+        lines = d["first_run_lines"]
+        check(any(l.startswith("Linux: ") and "Windows" not in l for l in lines), f"{tag}: the system line names Linux ({lines[:1]})")
+        check(not any(l.startswith("Windows:") for l in lines), f"{tag}: no Windows line")
+        check(d3d in lines, f"{tag}: '{d3d}' ({[l for l in lines if 'Direct3D' in l]})")
+        check(any(l.startswith("Graphics card detected: " + gpu_line) for l in lines), f"{tag}: the card line says '{gpu_line}'")
+        check(not any(l.startswith("HIP runtime") for l in lines), f"{tag}: no HIP runtime line")
+        check(d["first_run_install_offer"] is False and not any(c["text"] == "Install for this user" for c in d["first_run"]["controls"]),
+              f"{tag}: no Install for this user choice")
 
 
 def test_render(exe, work, home):
@@ -202,6 +239,9 @@ def test_proton_note(exe, work, home):
     line = 'WINEDLLOVERRIDES="dxgi=n,b" %command%'
     check(any(line in t and "Steam launch option" in t for t in game), "the installed game's page shows the dxgi launch option line")
     check(any(t.split("\t")[2:] == ["Copy the launch option"] for t in game), "the page has the Copy button of the launch option")
+    card = next((t for t in game if "Steam launch option" in t), "")
+    steps = ("1. In Steam, right-click this game", "Properties", "2. On the General tab", "Launch Options", "3. Click Copy here, then paste", "4. Close the window")
+    check(all(s in card for s in steps), f"the launch option card says where to paste it, step by step ({card[:200]})")
     check(not any("WINEDLLOVERRIDES" in t for t in (out / "library@100.png.texts").read_text(encoding="utf-8").splitlines()),
           "the Library does not show it")
 
@@ -264,7 +304,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--exe", required=True)
     ap.add_argument("--work", default=None)
-    ap.add_argument("--only", default="dump,render,jpeg,proton,live")
+    ap.add_argument("--only", default="dump,words,render,jpeg,proton,live")
     ap.add_argument("--jpeg-tool", default=None, help="jpeg-linux-tests, which writes the synthetic JPEG art")
     a = ap.parse_args()
     work = Path(a.work or "linux-ui-tests").resolve()
@@ -274,7 +314,7 @@ def main():
     real_data = Path.home() / ".local" / "share" / "WrongGPU"
     had = real_data.exists()
     home = make_home(work)
-    for name, fn in (("dump", test_dump), ("render", test_render), ("proton", test_proton_note), ("live", test_live)):
+    for name, fn in (("dump", test_dump), ("words", test_first_run_words), ("render", test_render), ("proton", test_proton_note), ("live", test_live)):
         if name in a.only.split(","):
             fn(Path(a.exe), work, home)
     if "jpeg" in a.only.split(",") and a.jpeg_tool:

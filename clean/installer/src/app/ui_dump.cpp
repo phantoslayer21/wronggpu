@@ -140,13 +140,17 @@ int RunLauncherUiDump(const wstring& outFile, const wstring& shotDir, bool noSca
         j.End();
     };
     // first run (synchronously: the worker thread's result is waited for with a message loop)
-    v.first.installOffer = !LauncherInstalled() && !gl.paths.portable;
+    v.first.installOffer = !LauncherInstalled() && !gl.paths.portable && !NativeLinux();
     v.first.choice = v.first.installOffer ? 1 : 0;
     StartFirstRun();
     MSG m;
     while (firstRunBusy && GetMessageW(&m, nullptr, 0, 0)) { TranslateMessage(&m); DispatchMessageW(&m); }
     ArtLoadNow([] { std::vector<wstring> ids; for (auto& e : v.games) ids.push_back(e.appid); return ids; }());
     dumpPage("first_run", L"Welcome to WrongGPU", L"first-run.png");
+    j.Key("first_run_lines").Arr();  // every check line the sheet has (behind Show details too)
+    for (auto& l : v.first.lines) j.Str(l.second);
+    j.End();
+    j.B("first_run_install_offer", v.first.installOffer);
     wstring firstFocus;  // what has the keyboard once the checks are done (Continue)
     for (auto& h : v.hits) if (h.id == v.focus) firstFocus = h.name;
     v.first.open = false;  // as FinishFirstRun leaves it (without saving the settings or the release check)
