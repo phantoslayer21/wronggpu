@@ -81,6 +81,12 @@ STAGES = ["k_stage2_e0", "k_stage2_e1", "k_stage_e2", "k_stagew2_e3", "k_stagew4
 ALWAYS = ["k_expo_scalars", "k_out_pixel_c"]
 TILED = ["kx/k_in_tiled", "kx/k_in_tiled_uniform"]
 LEGACY = ["kx/k_in_color", "kx/k_in_base"]   # (+ kx/k_in_reset on a reset frame)
+ALT_SENTINEL = 0xC3   # the second native runtime of a native-against-native comparison (the first is D3D12_SENTINEL)
+
+
+def opts(*parts):
+    """A runtime option string from the non-empty parts."""
+    return ";".join(p for p in parts if p)
 
 
 def trace_since(pos):
@@ -331,6 +337,11 @@ class TestKRuntimeD3D12(unittest.TestCase):
         self.assertFalse(both["ok"], both)
         self.assertIn("not exact on this driver", both["error"])
         self.assertNotIn("\n", both["error"].strip())
+        # with the split form on, the first refusal is the split form's and the one-launch path's is named too
+        self.assertIn("(the split form of stage m failed first:", both["error"])
+        both_off = self.leg("k_smx_test=both_fail;k_split=off")
+        self.assertFalse(both_off["ok"], both_off)
+        self.assertNotIn("split form", both_off["error"])
         # a copy of the build (its top-level files and dx12/) with one flipped byte in one stage shader: a softmax stage's
         # __rodd port and a fixed-weight stage (e0); create prepares every selectable kernel, so it refuses in one line
         for victim in ("k_stagew2_e3__rodd", "k_stage2_e0"):
@@ -386,6 +397,124 @@ class TestKRuntimeD3D12(unittest.TestCase):
         frames = [(1920, 1080, True, 1.0, 1.0), (1920, 1080, False, 1.0, 1.0)]
         self.check_fallback_frames(frames, True, out=(3840, 2160), max_render=(1920, 1080))
         self.check_fallback_frames(frames, True, split=False, out=(3840, 2160), max_render=(1920, 1080))
+
+    # ---- deep-split: stage m's phase launches (k_split) on the native device; native against native, no HIP run -----
+    def native_pair(self, left, right, frames, hdr=True, mode=0, half=True, out=OUT, max_render=MAX_RENDER):
+        """Two native runtimes of this build, options `left` and `right`, the same inputs for every frame. After every
+        frame the output and the written buffers, histories and exposure state are compared raw. Each side starts from
+        its own sentinel (0x5A and 0xC3, k_fill and before every frame), so a word neither side wrote fails."""
+        auto = mode == 2
+        a = self.make(3, hdr, auto, opts(left, f"k_fill={D3D12_SENTINEL}"), out, max_render)
+        b = self.make(3, hdr, auto, opts(right, f"k_fill={ALT_SENTINEL}"), out, max_render)
+        head = "k.N" if "k_head=full" in left + right else "k.Np"
+        try:
+            for i, fr in enumerate(frames):
+                rw, rh, reset, E, pi = fr[:5]
+                x = inputs(np.random.default_rng(i), rw, rh, hdr, reset, jitter=fr[5] if len(fr) > 5 else None)
+                x["pre_exposure"], x["E_cur"] = pi, float(np.float32(E))
+                if i == 2:
+                    x["mv_scale"], x["mv_offset"] = (0.75, 1.25), (0.125, -0.25)
+                for rt, byte in ((a, D3D12_SENTINEL), (b, ALT_SENTINEL)):
+                    poke(rt, rt.bufs["out"], rt.bufs_size["out"], byte)
+                    if i:
+                        for name in WRITTEN + [head]:
+                            p, n = rt.buffer_info(name)
+                            poke(rt, p, n, byte)
+                a.frame(x, mode, half=half)
+                b.frame(x, mode, half=half)
+                compare_raw(f"frame {i}: output", out_bytes(a, half), out_bytes(b, half),
+                            hip_sentinel=D3D12_SENTINEL, d3d12_sentinel=ALT_SENTINEL)
+                for name in WRITTEN + STATE + [head]:
+                    compare_raw(f"frame {i}: {name}", a.buffer(name, np.uint8), b.buffer(name, np.uint8),
+                                hip_sentinel=D3D12_SENTINEL, d3d12_sentinel=ALT_SENTINEL)
+        finally:
+            del a, b
+
+    def native_kernels(self, options, frames, out=OUT, max_render=MAX_RENDER):
+        """The kernels a native runtime launches for these frames (the launch trace); no reference run."""
+        rt = self.make(3, True, False, opts(options, f"k_fill={D3D12_SENTINEL}"), out, max_render)
+        pos = os.path.getsize(TRACE) if os.path.exists(TRACE) else 0
+        ran = {}
+        try:
+            for i, fr in enumerate(frames):
+                rw, rh, reset, E, pi = fr[:5]
+                x = inputs(np.random.default_rng(i), rw, rh, True, reset)
+                x["pre_exposure"], x["E_cur"] = pi, float(np.float32(E))
+                rt.frame(x, 0, half=True)
+                lines, pos = trace_since(pos)
+                for ln in lines:
+                    parts = ln.split()
+                    if parts and parts[-1] == "d3d12":
+                        ran[parts[0]] = ran.get(parts[0], 0) + 1
+        finally:
+            del rt
+        return ran
+
+    ODD = dict(out=(201, 121), max_render=(131, 79))
+    FRAMES_ODD = [(131, 79, True, 1.0, 1.0), (131, 79, False, 1.0, 1.0), (131, 79, False, 1.25, 0.5),
+                  (101, 61, False, 1.0, 1.0), (101, 61, True, 0.75, 1.0)]
+
+    def test_native_split_m_matches_one_launch(self):
+        """k_split=m (the default on the native device) against k_split=off: the same bytes of the output and of every
+        written buffer, history and exposure state, frame by frame, at the 200 x 120 output and at an odd output size
+        (201 x 121 from 131 x 79)."""
+        self.native_pair("", "k_split=off", self.FRAMES)
+        self.native_pair("", "k_split=off", self.FRAMES_ODD, **self.ODD)
+
+    def test_native_split_m_auto_exposure_dense(self):
+        """The same parity in the dense RGB output with auto-exposure (the exposure kernels' own path)."""
+        self.native_pair("", "k_split=off", self.FRAMES, hdr=True, mode=2, half=False)
+
+    def test_native_split_trace(self):
+        """Stage m's launches on the native device: the phase launches with k_split=m (the default), k_stagew4_m with
+        k_split=off; with the developer hook k_smx_test=mix_fail the rounding is the round-to-odd port in both."""
+        on = self.native_kernels("", self.FRAMES_Q, **self.QUALITY)
+        phases = ["k_split_m_attn", "k_split_m_wo", "k_split_m_w1", "k_split_m_w2"]
+        self.assertTrue(all(on.get(k) for k in phases), sorted(on))
+        self.assertFalse([k for k in on if k in ("k_stagew4_m", "k_stagew4_m__rodd")], sorted(on))
+        off = self.native_kernels("k_split=off", self.FRAMES_Q, **self.QUALITY)
+        self.assertTrue(off.get("k_stagew4_m"), sorted(off))
+        self.assertFalse([k for k in off if k.startswith("k_split_m_")], sorted(off))
+        self.need_dev_build()
+        self.expect_fallback_trace(self.native_kernels("k_smx_test=mix_fail", self.FRAMES_Q, **self.QUALITY), False, True)
+        self.expect_fallback_trace(self.native_kernels("k_smx_test=mix_fail;k_split=off", self.FRAMES_Q, **self.QUALITY),
+                                   False, False)
+
+    def test_native_k_split_refusals(self):
+        """A k_split value other than m or off fails create on the native device in one line."""
+        for value in ("maybe", "M", "on", "2"):
+            with self.subTest(value=value):
+                got = self.leg("k_split=" + value)
+                self.assertFalse(got["ok"], got)
+                self.assertIn("k_split must be m or off", got["error"])
+                self.assertNotIn("\n", got["error"].strip())
+
+    def test_native_split_kernels_line(self):
+        """The kernels line names the split form (split=m) only when stage m is split; the self-check form is unchanged."""
+        plain, off = self.leg(""), self.leg("k_split=off")
+        self.assertTrue(plain["ok"], plain)
+        self.assertTrue(off["ok"], off)
+        self.assertEqual((plain["split"], off["split"]), ("m", ""))
+        self.assertEqual((plain["smx"], plain["notes"]), (off["smx"], off["notes"]))
+        explicit = self.leg("k_split=m")
+        self.assertEqual(explicit["split"], "m", explicit)
+
+    def test_native_split_fallback(self):
+        """k_smx_test=split_fail (developer build): the split form of stage m fails the create-time self-check, so create
+        takes the one launch: create succeeds, the kernels line has no split=m, the rounding is the mix form, one note of
+        create names the split form and the one-launch path, and the frames are the same bytes as with k_split=off."""
+        self.need_dev_build()
+        fb = self.leg("k_smx_test=split_fail")
+        self.assertTrue(fb["ok"], fb)
+        self.assertEqual((fb["split"], fb["smx"]), ("", "mix"))
+        self.assertEqual(len(fb["notes"]), 1, fb)
+        note = fb["notes"][0]
+        self.assertIn("split form of stage m", note)
+        self.assertIn("one launch", note)
+        self.assertIn("test hook", note)
+        self.assertNotIn("\n", note)
+        self.native_pair("k_smx_test=split_fail", "k_split=off", self.FRAMES)
+        self.native_pair("k_smx_test=split_fail", "k_split=off", self.FRAMES_ODD, **self.ODD)
 
     # ---- k_approx: the opt-in close approximations (never the default) --------------------------------------------
     def test_k_approx_refusals(self):
@@ -595,16 +724,17 @@ def softmax_leg(mdir, map_path, options, build):
     try:
         rt = KRuntimeExt(build, mdir, map_path, OUT, MAX_RENDER, True, False, False, options, backend=3)
     except RuntimeError as e:
-        print(json.dumps({"ok": False, "smx": "", "notes": [], "k_approx": "", "error": str(e)}))
+        print(json.dumps({"ok": False, "smx": "", "notes": [], "k_approx": "", "split": "", "error": str(e)}))
         return
     rt.lib.wg_rt_notes.argtypes = [ctypes.c_void_p]
     rt.lib.wg_rt_notes.restype = ctypes.c_char_p
     kern = rt.lib.wg_rt_kernels(rt.rt).decode().split()
     smx = [kv.split("=", 1)[1] for kv in kern if kv.startswith("smx=")]
     approx = [kv.split("=", 1)[1] for kv in kern if kv.startswith("k_approx=")]
+    split = [kv.split("=", 1)[1] for kv in kern if kv.startswith("split=")]
     notes = [n for n in rt.lib.wg_rt_notes(rt.rt).decode().split("\n") if n]
     print(json.dumps({"ok": True, "smx": smx[0] if smx else "", "notes": notes, "k_approx": approx[0] if approx else "",
-                      "error": ""}))
+                      "split": split[0] if split else "", "error": ""}))
 
 
 if __name__ == "__main__":
