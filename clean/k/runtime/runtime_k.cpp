@@ -1375,6 +1375,8 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
   const bool use_uniforms = use_tiled && !native_direct_ && input_uniforms_ && input_uniforms_safe(fin, &input_host);
   auto input_stage = [&]() {
     if (use_tiled) {
+      if (in_exact_ && !approx_a1_ && cfg_.backend >= 2 && !s_breakpoints_fallback_ && !s_breakpoints_)
+        return fail("model K: exact tiled input would get a null S breakpoint table (arena offset 0); the frame is refused");
       KInParams local = ip;
       local.cpre = s_breakpoints_;
       local.cpre2 = 0;
