@@ -355,23 +355,37 @@ class TestKRuntimeD3D12(unittest.TestCase):
                 finally:
                     shutil.rmtree(tmp, ignore_errors=True)
 
-    def check_fallback_frames(self, frames, big, **size):
-        """Forced fallback: the frames match HIP (raw outputs and intermediates) and every softmax stage ran its __rodd
-        port on D3D12, none its mix form."""
-        self.need_dev_build()
-        on_dx, _ = self.sequence(3, True, 0, True, frames, "k_smx_test=mix_fail", **size)
+    def expect_fallback_trace(self, on_dx, big, split):
+        """The softmax stages of the forced fallback ran their __rodd ports on D3D12 and no mix form did. Stage m runs as
+        its phase launches with k_split=m (the default) and as k_stagew4_m[__rodd] with k_split=off. The phases
+        k_split_m_wo / w1 / w2 have no softmax: they are the same launches in both forms, so only the attention phase
+        has a mix form to forbid."""
         ng = "k_stagew2_" if big else "k_stagew4_"
-        want = ["k_stage_e2", "k_stagew2_e3", ng + "e4", "k_stagew4_m", ng + "d4", "k_stagew2_d3", "k_stage_d2",
-                "k_stage2_d1"]
-        self.assertEqual([k for k in want if not on_dx.get(k + "__rodd")], [], on_dx)
-        self.assertEqual([k for k in want if on_dx.get(k)], [], on_dx)
+        stages = ["k_stage_e2", "k_stagew2_e3", ng + "e4", ng + "d4", "k_stagew2_d3", "k_stage_d2", "k_stage2_d1"]
+        if split:
+            rodd, mix = ["k_split_m_attn__rodd", "k_split_m_wo", "k_split_m_w1", "k_split_m_w2"], ["k_split_m_attn"]
+        else:
+            rodd, mix = ["k_stagew4_m__rodd"], ["k_stagew4_m"]
+        self.assertEqual([k for k in stages if not on_dx.get(k + "__rodd")] + [k for k in rodd if not on_dx.get(k)], [],
+                         on_dx)
+        self.assertEqual([k for k in stages + mix if on_dx.get(k)], [], on_dx)
+
+    def check_fallback_frames(self, frames, big, split=True, **size):
+        """Forced fallback: the frames match HIP (raw outputs and intermediates) and every softmax stage ran its __rodd
+        port on D3D12, none its mix form (split: stage m's phase launches; else its one launch)."""
+        self.need_dev_build()
+        options = "k_smx_test=mix_fail" + ("" if split else ";k_split=off")
+        on_dx, _ = self.sequence(3, True, 0, True, frames, options, **size)
+        self.expect_fallback_trace(on_dx, big, split)
 
     def test_native_fallback_frames_1440p_quality(self):
         self.check_fallback_frames(self.FRAMES_Q, False, **self.QUALITY)
+        self.check_fallback_frames(self.FRAMES_Q, False, split=False, **self.QUALITY)
 
     def test_native_fallback_frames_4k_performance(self):
-        self.check_fallback_frames([(1920, 1080, True, 1.0, 1.0), (1920, 1080, False, 1.0, 1.0)], True,
-                                   out=(3840, 2160), max_render=(1920, 1080))
+        frames = [(1920, 1080, True, 1.0, 1.0), (1920, 1080, False, 1.0, 1.0)]
+        self.check_fallback_frames(frames, True, out=(3840, 2160), max_render=(1920, 1080))
+        self.check_fallback_frames(frames, True, split=False, out=(3840, 2160), max_render=(1920, 1080))
 
     # ---- k_approx: the opt-in close approximations (never the default) --------------------------------------------
     def test_k_approx_refusals(self):
