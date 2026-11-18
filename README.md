@@ -4,18 +4,13 @@
 
 WrongGPU runs its own implementation of the neural networks behind DLSS super resolution (Model M) and DLSS Ray
 Reconstruction on Radeon RX 9000-series cards. The networks' weights come from your own DLSS files; the arithmetic is
-WrongGPU's, so the output is close to DLSS's but not the same. Its launcher sets up each of your games and gets
-the WrongGPU edition of OptiScaler for them. From
-this source onward, WrongGPU's source code and its official builds are under the MIT licence (see [Licence](#licence)).
+WrongGPU's, so the output is close to DLSS's but not the same. Its launcher sets up each of your games and gets the
+WrongGPU edition of OptiScaler for them.
 
-**Download:** the [Releases page](https://github.com/phantoslayer21/wronggpu/releases) (latest: [0.6.5](https://github.com/phantoslayer21/wronggpu/releases/tag/v0.6.5), a pre-release).
+**Download:** the [Releases page](https://github.com/phantoslayer21/wronggpu/releases) (latest:
+[0.6.5](https://github.com/phantoslayer21/wronggpu/releases/tag/v0.6.5), a pre-release).
 **Help and bug reports:** the [WrongGPU Discord server](https://discord.gg/745z9MfKwm) (channel #bug-reports) or
 [GitHub issues](https://github.com/phantoslayer21/wronggpu/issues).
-
-**WrongGPU is a community project.** Anyone can report games, fix bugs, write tests or work on the
-[roadmap](ROADMAP.md) by pull request; see [Contributing](#contributing). Start with the
-[welcome discussion](https://github.com/phantoslayer21/wronggpu/discussions/1). The project owner reviews and merges,
-and builds and publishes the official releases.
 
 ## For players
 
@@ -23,27 +18,30 @@ and builds and publishes the official releases.
 
 - Windows 10 or 11 and a recent AMD Adrenalin driver.
 - A Radeon RX 9070 or RX 9070 XT. The RX 9060 / RX 9060 XT is supported but not yet tested; older Radeon cards are not
-  supported. No AMD HIP runtime is needed (only the optional sparkle guard uses it).
+  supported. No AMD HIP runtime is needed for upscaling or Ray Reconstruction; the optional sparkle guard and frame
+  capture use it.
 - A DirectX 12 game; games with anti-cheat are never supported.
-- An internet connection the first time (the launcher downloads the WrongGPU edition of OptiScaler).
+- An internet connection the first time, so the launcher can download the WrongGPU edition of OptiScaler.
 - DLSS files already on your PC, from any game or app: a DLSS super resolution file of version 310.5 or newer for
-  Model M, and a DLSS Ray Reconstruction file of version 310.7 or newer for Ray Reconstruction. WrongGPU converts them
-  on your PC; the download contains no files or model data of that vendor, and the converted model files are yours
-  alone (please don't share them).
+  Model M and Model L, and a DLSS Ray Reconstruction file of version 310.7 or newer for Ray Reconstruction. Model K is
+  also converted from a DLSS file from one of your games. WrongGPU converts them on your PC; the download contains no
+  files or model data of that vendor, and the converted model files are yours alone (please don't share them).
 
 ### Install in three steps
 
-1. Download `WrongGPU-<version>.zip` from the Releases page, extract it and run `WrongGPU-<version>.exe` (it is not
+1. Download `WrongGPU-<version>.zip` from the Releases page, extract it and run `WrongGPU-<version>.exe`. It is not
    code-signed: if Windows SmartScreen warns, choose **More info → Run anyway** after checking the file name and the
-   published SHA-256).
+   published SHA-256.
 2. Pick **Install for this user** or **Run portable**, open a game in the Library and click **Install**.
-3. In the game, choose DLSS as the upscaler (with DLSS Ray Reconstruction where the game offers it). The game's page in
-   the launcher shows what ran under **Last run**; **More → Uninstall WrongGPU** puts the game's own files back exactly.
+3. In the game, choose DLSS as the upscaler, with DLSS Ray Reconstruction where the game offers it. The game's page in
+   the launcher shows what ran under **Last run**. **More → Uninstall WrongGPU** puts the game's own files back exactly.
 
-Borderlands 4 needs one Engine.ini setting for Ray Reconstruction (the launcher offers to add it); RESIDENT EVIL
-requiem needs REFramework, which you install yourself.
+Borderlands 4 needs one Engine.ini setting for Ray Reconstruction; the launcher offers to add it. RESIDENT EVIL requiem
+needs REFramework, which you install yourself.
 
-### Games (tested on an RX 9070 XT; results as tested in 0.6.0 unless a row says otherwise)
+### Tested games
+
+Tested on an RX 9070 XT, with results from 0.6.0 unless a row says otherwise.
 
 | Game | Model M | Ray Reconstruction |
 |---|---|---|
@@ -58,37 +56,43 @@ requiem needs REFramework, which you install yourself.
 0.6.5 was re-tested in Cyberpunk 2077 at 1080p: Model M at Quality and at DLAA, Model L and Model K at Quality, and
 Ray Reconstruction with path tracing, with 0 failures logged.
 
-Other games are experimental; the full list, with requirements and how to add your game, is
-[COMPATIBILITY.md](COMPATIBILITY.md). Known issues in 0.6.5: A rare crash at game start can happen; restarting the game
-fixes it. In some games or scenes you may still see visual bugs, such as artifacts or flicker; with Ray Reconstruction
-these include ghosting on thin lines in reflections and blotches in Cyberpunk 2077 with path tracing. In RESIDENT EVIL
-requiem a single frame very occasionally comes out far too bright or too dark at a scene change. Full details: the
-release notes ([clean/installer/RELEASE-NOTES.md](clean/installer/RELEASE-NOTES.md)).
+Other games are experimental. See [COMPATIBILITY.md](COMPATIBILITY.md) for the full list, each game's requirements and
+how to add your game.
 
-### Model L and Model K (new in 0.6.5, off by default)
+### Model L and Model K
 
-Model L and Model K are two more super-resolution models you can choose per game; Model M stays the default. Each is
-converted once on your PC from a DLSS model file of one of your games (`WrongGPU.exe model convert --preset=L` or
-`--preset=K`) and chosen per game with `WrongGPU.exe set "<the game's .exe>" model=L` (or `model=K`), or in
-OptiScaler's menu. Both are still under test. Cyberpunk 2077 at 1080p Quality on an RX 9070 XT, standing still at the
-same spot, measured one right after the other: the model's GPU time per frame (all of its kernels) is 1.03 ms with
-Model K and 1.17 ms with Model M
-([clean/k/records/cp2077-model-k-timing-2026-11-15.json](clean/k/records/cp2077-model-k-timing-2026-11-15.json)),
-and 2.67 ms with Model L, measured the same way in a later sitting with Model M again at 1.17 ms
-([clean/l/records/cp2077-model-l-timing-2026-11-16.json](clean/l/records/cp2077-model-l-timing-2026-11-16.json)).
+Model L and Model K are two more super-resolution models, new in 0.6.5, off by default and still under test. Model M
+stays the default. Each is converted once on your PC from a DLSS model file of one of your games:
 
-Faster kernels in 0.6.5, same output: Model L's Swin stage takes 7.0 µs less per frame and its decoder stage 2.5 µs
-less at 1440p Quality, and 2.5 µs and 1.0 µs less at 1080p Quality; Model M's final (post) stage takes 2.5 µs less at
-1440p Quality and 1.5 µs less at 1080p Quality. The output does not change. Measured on an RX 9070 XT in our offline
-benchmark, which runs frames back to back (five rounds, the median difference per stage); in a game the saving per
-frame can differ.
+```bat
+WrongGPU.exe model convert --preset=L
+WrongGPU.exe model convert --preset=K
+```
 
-### Something broken?
+Choose one per game with `WrongGPU.exe set "<the game's .exe>" model=L` (or `model=K`), or in OptiScaler's menu.
 
-On the game's page in the launcher, click **Collect logs**. It makes a zip on your PC and uploads nothing; check it
-before you share it (it can contain your Windows user name and local paths). Post it in #bug-reports on the
-[Discord server](https://discord.gg/745z9MfKwm) or attach it to a [GitHub issue](https://github.com/phantoslayer21/wronggpu/issues),
-with the game, the scene and your settings.
+In Cyberpunk 2077 at 1080p Quality on an RX 9070 XT, standing still at the same spot and measured one right after the
+other, the model's GPU time per frame (all of its kernels) was 1.03 ms with Model K and 1.17 ms with Model M
+([measurement](clean/k/records/cp2077-model-k-timing-2026-11-15.json)). Model L took 2.67 ms, measured the same way in
+a later sitting with Model M again at 1.17 ms
+([measurement](clean/l/records/cp2077-model-l-timing-2026-11-16.json)).
+
+Faster kernels in 0.6.5 produce the same output. Model L's Swin stage takes 7.0 µs less per frame and its decoder stage
+2.5 µs less at 1440p Quality, and 2.5 µs and 1.0 µs less at 1080p Quality. Model M's final (post) stage takes 2.5 µs
+less at 1440p Quality and 1.5 µs less at 1080p Quality. These are median differences per stage over five rounds of an
+offline benchmark running frames back to back on an RX 9070 XT; in a game the saving per frame can differ.
+
+### Known issues and troubleshooting
+
+- A rare crash at game start can happen; restarting the game fixes it.
+- Some games or scenes can still show visual bugs, such as artifacts or flicker. With Ray Reconstruction these include
+  ghosting on thin lines in reflections and blotches in Cyberpunk 2077 with path tracing.
+- In RESIDENT EVIL requiem, a single frame very occasionally comes out far too bright or too dark at a scene change.
+
+Full details are in the [0.6.5 release notes](clean/installer/RELEASE-NOTES.md). For help, click **Collect logs** on the
+game's page in the launcher. It makes a zip on your PC and uploads nothing. Check the zip before sharing it: it can
+contain your Windows user name and local paths. Post it in #bug-reports on [Discord](https://discord.gg/745z9MfKwm) or
+attach it to a [GitHub issue](https://github.com/phantoslayer21/wronggpu/issues), with the game, scene and your settings.
 
 WrongGPU is free. If you want to support development, there is an optional tip jar on
 [Ko-fi](https://ko-fi.com/wronggpu); it is never required.
@@ -96,46 +100,33 @@ WrongGPU is free. If you want to support development, there is an optional tip j
 ## For developers
 
 WrongGPU is an independent, clean-room implementation: the clean team that wrote its code never saw DLSS source code,
-disassembly or another port's kernels (see [docs/CLEAN-ROOM.md](docs/CLEAN-ROOM.md), which also says who made what: the
-converter maps and test vectors in `data/` come from the separate spec team, and a few launcher / front-end helpers were
-adapted from WrongGPU 0.2.0 code). No NVIDIA DLSS file is included in this repository or in WrongGPU's packages. The network's weights come from the player's own DLSS file
-(`nvngx_dlss.dll` / `nvngx_dlssd.dll`, for DLSS super resolution and DLSS Ray Reconstruction): WrongGPU's converter
-reads it on the player's PC and writes WrongGPU's own model file there. Nothing from that file is ever redistributed.
+disassembly or another port's kernels. [docs/CLEAN-ROOM.md](docs/CLEAN-ROOM.md) describes the process and who made what:
+the converter maps and test vectors in `data/` come from the separate spec team, and a few launcher / front-end helpers
+were adapted from WrongGPU 0.2.0 code. No NVIDIA DLSS file is included in this repository or in WrongGPU's packages. The
+network's weights come from the player's own DLSS file (`nvngx_dlss.dll` / `nvngx_dlssd.dll`, for DLSS super resolution
+and DLSS Ray Reconstruction): WrongGPU's converter reads it on the player's PC and writes WrongGPU's own model file
+there. Nothing from that file is ever redistributed.
 
-This repository is the source of WrongGPU: it was first published as one snapshot of 0.6.0, and it now carries the
-source of 0.6.5 (tag `v0.6.5`). The documents under `clean/` are the
-implementation's own design and format notes (per-file provenance records are kept privately by the maintainer). They refer to the clean-room specification ("spec 02",
-"page 51", ...), to the clean team's questions (`QUESTIONS.md`, `ANSWERS.md`) and to internal results notes
-(`results/...`); those are not part of this repository.
+This repository was first published as one snapshot of 0.6.0 and now carries the source of 0.6.5 (tag `v0.6.5`). The
+documents under `clean/` are the implementation's design and format notes. They refer to the clean-room specification,
+internal questions and answers, and internal results notes that are not part of this repository. Per-file provenance
+records are kept privately by the maintainer.
 
 ### How it works
 
-```
- player's DLSS file ──> converter (clean/converter) ──> model.wgcm  (on the player's PC, never shipped)
-                                                            │
- game ──> OptiScaler / FSR interface ──>   FSR front end (clean/fsr) ──> runtime (clean/runtime, clean/rr_f/runtime)
-                                                                              │
-                                    Direct3D 12 kernels (clean/dx12, clean/rr_f/kernels) or HIP kernels (clean/kernels)
+```text
+player's DLSS file ──> converter (clean/converter) ──> model.wgcm (on the player's PC, never shipped)
+                                                           │
+game ──> OptiScaler / FSR interface ──> FSR front end (clean/fsr) ──> runtime (clean/runtime, clean/rr_f/runtime)
+                                                                         │
+                       Direct3D 12 kernels (clean/dx12, clean/rr_f/kernels) or HIP kernels (clean/kernels)
 ```
 
-- **Converter** (`clean/converter`): finds the network's tensors in the player's file using a map
-  (`data/preset-M.v1.map.json`, `data/preset-F.v1.map.json`: offsets, strides and digests, no weights) and writes
-  them as WrongGPU's model file.
-- **Runtime** (`clean/runtime`, Ray Reconstruction in `clean/rr_f`): runs the network once per frame on the game's
-  Direct3D 12 device: input encoder, Swin transformer blocks, coefficient decoder, output reconstruction and filter,
-  auto-exposure; for Ray Reconstruction its window blocks, head, output stage and resolve.
-- **Kernels**: Direct3D 12 compute shaders (`clean/dx12/kernels`, `clean/rr_f/kernels`, compiled with DXC) and HIP
-  kernels for gfx1201 / gfx1200 (`clean/kernels`, compiled with the AMD HIP SDK).
-- **FSR front end** (`clean/fsr`): a FidelityFX API provider (`amd_fidelityfx_dx12.dll`) that OptiScaler or the game
-  calls as its upscaler; it hands each frame to the runtime, or to AMD's FSR when WrongGPU cannot run.
-- **Ray Reconstruction plugin** (`clean/rr_f/proxy`): an ASI plugin that answers the game's Ray Reconstruction calls.
-- **Launcher** (`clean/installer`): finds the games, installs and uninstalls WrongGPU per game (byte-exact restore),
-  gets OptiScaler, runs the converter, and shows what ran.
-- **Reference and tests**: NumPy reference implementations (`clean/reference`, `clean/k/reference`,
-  `clean/rr_f/reference`), synthetic test vectors (`data/`, `clean/**/tests`), equivalence tools (`clean/equiv`).
-  No model data and no game frame captures are included. Test data is synthetic, except the launcher's log fixtures
-  (`clean/installer/tests/logs/`), some of which are trimmed excerpts of WrongGPU's own logs from game sessions, with
-  process ids, device pointers and paths replaced (see that folder's README.md and docs/CLEAN-ROOM.md).
+The converter finds tensors using maps (`data/preset-M.v1.map.json`, `data/preset-F.v1.map.json`) containing offsets,
+strides and digests, but no weights. The runtime runs the network once per frame on the game's Direct3D 12 device. The
+FSR front end hands each frame to the runtime, or to AMD's FSR when WrongGPU cannot run. The Ray Reconstruction plugin
+(`clean/rr_f/proxy`, an ASI plugin) answers the game's Ray Reconstruction calls. The launcher finds games, installs and
+uninstalls WrongGPU with byte-exact restore, gets OptiScaler, runs the converter and shows what ran.
 
 ### Repository layout
 
@@ -146,30 +137,41 @@ implementation's own design and format notes (per-file provenance records are ke
 | `clean/dx12` | Direct3D 12 kernels of Model M and their build (`build_dx12.py`) |
 | `clean/rr_f` | Ray Reconstruction: reference, kernels, runtime, plugin, tests |
 | `clean/k` | Model K (a per-game choice since 0.6.5, off by default) |
-| `clean/fsr` | FSR front end (FidelityFX API provider) |
+| `clean/fsr` | FSR front end (FidelityFX API provider, `amd_fidelityfx_dx12.dll`) |
 | `clean/installer` | the WrongGPU launcher |
 | `clean/wgshared` | settings registry shared by the front end, the plugin and the launcher |
 | `clean/reference`, `clean/equiv`, `clean/tests` | NumPy references, equivalence tools, unit tests |
 | `clean/third_party` | AMD FidelityFX SDK headers (MIT) |
 | `data` | converter maps and synthetic test vectors |
 
+Model M's runtime includes the input encoder, Swin transformer blocks, coefficient decoder, output reconstruction and
+filter, and auto-exposure. Ray Reconstruction adds its window blocks, head, output stage and resolve. Direct3D 12 compute
+shaders are compiled with DXC; HIP kernels for gfx1201 / gfx1200 are compiled with the AMD HIP SDK. Model K also has
+NumPy reference code in `clean/k/reference`, and Ray Reconstruction in `clean/rr_f/reference`.
+
+Tests use synthetic vectors in `data/` and `clean/**/tests`; no model data or game frame captures are included. The only
+non-synthetic test data is in `clean/installer/tests/logs/`: some fixtures are trimmed excerpts of WrongGPU's own game
+logs, with process ids, device pointers and paths replaced. See that folder's README.md and docs/CLEAN-ROOM.md.
+
 Building: [BUILDING.md](BUILDING.md). Security issues: [SECURITY.md](SECURITY.md). Code of conduct:
 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 ## Contributing
 
-WrongGPU is developed in the open by its community. Ways to help:
+WrongGPU is developed in the open by its community. Start with the
+[welcome discussion](https://github.com/phantoslayer21/wronggpu/discussions/1). The project owner reviews and merges
+changes, and builds and publishes the official releases.
 
-- **Players:** test games and report them ([COMPATIBILITY.md](COMPATIBILITY.md), "How to add your game"); report
-  bugs with the launcher's **Collect logs** zip.
-- **Developers:** pick an item from [ROADMAP.md](ROADMAP.md) or an open issue, and open a pull request. A good first
-  step: [build WrongGPU from a fresh clone](https://github.com/phantoslayer21/wronggpu/issues/2) and report where
+- **Players:** test games and report them using [COMPATIBILITY.md](COMPATIBILITY.md), or report bugs with the launcher's
+  **Collect logs** zip.
+- **Developers:** pick an item from [ROADMAP.md](ROADMAP.md) or an open issue and open a pull request. A good first step
+  is to [build WrongGPU from a fresh clone](https://github.com/phantoslayer21/wronggpu/issues/2) and report where
   BUILDING.md breaks.
 
-Every pull request: the clean-room statement and a `Signed-off-by` line on each commit ([CONTRIBUTING.md](CONTRIBUTING.md)),
-passing CI (licence, line endings, CPU builds and tests on Windows), then a maintainer's clean-room scan, review and,
-when the change touches kernels, the runtime, the front end or the Ray Reconstruction plugin, a test on a Radeon
-RX 9000-series card before the owner merges.
+Every pull request needs the clean-room statement and a `Signed-off-by` line on each commit, as
+[CONTRIBUTING.md](CONTRIBUTING.md) explains. CI checks licences, line endings, and CPU builds and tests on Windows. A
+maintainer then performs a clean-room scan and review. Changes to kernels, the runtime, the front end or the Ray
+Reconstruction plugin also need a test on a Radeon RX 9000-series card before the owner merges.
 
 ## Licence
 
