@@ -73,6 +73,7 @@ struct KInParams {
 };
 struct KiHost {  // spec 42 section 8
     float xi_x, xi_y, a_x, a_y, h_x, h_y, g_x, g_y, sp_x, sp_y, mp_x, mp_y;
+    float of_x, of_y;  // KI_SGPR only (k_in.hlsl ki_host_sgpr): the motion offset in raw units; not part of the host's KiHost
 };
 
 #define K_LOAD_FRAME_PTRS(F) F.color = F_color; F.motion = F_motion; F.depth = F_depth; F.xs = F_xs;

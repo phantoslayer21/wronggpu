@@ -46,6 +46,12 @@
 #if WG_DIRECT_TEXTURES
 #include "native_direct.hlsli"
 #endif
+#ifndef KI_HWMATH
+#define KI_HWMATH 0
+#endif
+// KI_SGPR (the exact direct form only): the frame's uniforms (KiHost and the direct motion factors) are computed once
+// and held in SGPRs (v_readfirstlane), not in VGPRs: kx/k_in_tiled_direct 83 -> <= 72 VGPR (5 workgroups per CU)
+#define KI_SGPR (WG_DIRECT_TEXTURES && !KI_HWMATH)
 #include "k_fp.hlsli"
 #include "k_frame.hlsli"
 
@@ -94,6 +100,36 @@ float4 ki_tiled_transpose(float4 v, int lane)
     return float4(b1 ? z : a.x, b1 ? w : a.y, b1 ? a.z : z, b1 ? a.w : w);
 }
 
+#if KI_SGPR
+// ki_host(F) with the direct form's motion factors (sp = ki_dsp, of = ki_dmo: the values ki_fine computed per fine
+// position) and every field forced to a scalar register: all are wave-uniform (root constants and b1 only). The
+// operations and their order are unchanged, so the values are bit-identical.
+KiHost ki_host_sgpr(KFrameIn F)
+{
+    KiHost k = ki_host(F);
+    const bool mvlo = (F.flags & KIO_MVLO) != 0;
+    k.sp_x = ki_dsp(F.sx, nd_msx, F.W, mvlo ? F.rw : F.W);
+    k.sp_y = ki_dsp(F.sy, nd_msy, F.H, mvlo ? F.rh : F.H);
+    k.of_x = ki_dmo(F.mox, nd_mox, nd_msx);
+    k.of_y = ki_dmo(F.moy, nd_moy, nd_msy);
+    k.xi_x = WaveReadLaneFirst(k.xi_x);
+    k.xi_y = WaveReadLaneFirst(k.xi_y);
+    k.a_x = WaveReadLaneFirst(k.a_x);
+    k.a_y = WaveReadLaneFirst(k.a_y);
+    k.h_x = WaveReadLaneFirst(k.h_x);
+    k.h_y = WaveReadLaneFirst(k.h_y);
+    k.g_x = WaveReadLaneFirst(k.g_x);
+    k.g_y = WaveReadLaneFirst(k.g_y);
+    k.sp_x = WaveReadLaneFirst(k.sp_x);
+    k.sp_y = WaveReadLaneFirst(k.sp_y);
+    k.mp_x = WaveReadLaneFirst(k.mp_x);
+    k.mp_y = WaveReadLaneFirst(k.mp_y);
+    k.of_x = WaveReadLaneFirst(k.of_x);
+    k.of_y = WaveReadLaneFirst(k.of_y);
+    return k;
+}
+#endif
+
 groupshared float4 tile_cv[24 * 24];
 groupshared float tile_om[24 * 24];
 
@@ -112,6 +148,8 @@ WG_KERNEL(k_in_tiled)
 #if K_UNIFORM
     KiHost hk;
     K_LOAD_HOST(hk)
+#elif KI_SGPR
+    const KiHost hk = ki_host_sgpr(F);
 #else
     const KiHost hk = ki_host(F);
 #endif
