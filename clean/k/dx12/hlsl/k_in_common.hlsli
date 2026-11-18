@@ -41,11 +41,16 @@ float ki_decode(float t)
     const float e = kf_opq((t + kf_bits(0x3C4FAE29u)) * 9.0f) * kf_bits(0x3FB8AA3Bu);
     return ki_div(ki_exp2(e) - 1.0f, 9.0f * t);
 }
+#if defined(KI_TILED_PHI_LOG2)
+#include "k_phi_log2.hlsli"
+#else
+float ki_phi_log2(float x) { return ki_log2(x); }
+#endif
 float ki_phi(float Y, bool hdr)
 {
     if (hdr) {
         const float Yp = kf_max(Y, 0.0f);
-        return ki_div(ki_log2(kf_fma(Yp, 12.0f, 1.0f)) * kf_bits(0x3F317218u), Yp + kf_bits(0x358637BDu));
+        return ki_div(ki_phi_log2(kf_fma(Yp, 12.0f, 1.0f)) * kf_bits(0x3F317218u), Yp + kf_bits(0x358637BDu));
     }
     return kf_fma(Y, 3.0f, 1.0f);
 }
