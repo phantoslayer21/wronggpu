@@ -431,6 +431,7 @@ enum : int {
     ID_G_TITLE, ID_G_DIRTEXT, ID_G_EXETEXT,  // text for UI Automation (not focusable): the game's whole name, its folder, its exe
     ID_G_COVER,  // the game page's cover: not a hit, the name of its upscale wipe (UpscaleWipe)
     ID_G_STATUS, ID_G_PROGRESS, ID_G_UNSAVED,  // text for UI Automation: the header's status (or step), its progress, the capsule's words
+    ID_G_WINFOLDER_COPY,  // Linux: a game that is not a Steam game's "windows-folder" command (Copy); must stay below ID_G_RRON
     // Ray Reconstruction (rr.h): its switch, the data's Convert, Repair (an install without the RR files); its quality's
     // segments + 0 Exact, 1 Accurate, 2 Fast (Exact is drawn only with Settings' Exact mode, or while the game is set to it)
     ID_G_RRON = 3086, ID_G_RRCONVERT, ID_G_RRREPAIR, ID_G_RRPREP, ID_G_RRMODE0 = 3090,  // ID_G_RRPREP: Prepare (rrprep.h)
@@ -465,6 +466,7 @@ enum : int {
     M_REMOVEGAME,  // a game added by hand taken out of the Library (its page's More)
     M_FILTER0 = 200, M_OPTI0 = 300,
 };
+static_assert(ID_G_WINFOLDER_COPY < ID_G_RRON, "the Windows-folder Copy id sits in the free number below the Ray Reconstruction ids");
 constexpr int kTileSpan = ID_TILEQA - ID_TILE;  // the Library draws at most this many games (ui_library.cpp)
 constexpr int kMaxFolderRows = 256;             // Settings lists at most this many added game folders, each with its Remove
 
@@ -946,7 +948,9 @@ void RevealId(int id);           // a widget or words brought into view without 
 bool Confirm(const wstring& text, int icon = 0, const wstring& yes = L"Yes", const wstring& no = L"No", bool danger = false);
 void Inform(const wstring& text, int icon = 2);
 // ui_appimage.cpp: Settings' row of the native Linux launcher's own removal (own: this copy can remove its AppImage; else why not)
-wstring AppImageSettingsWords(bool own, const wstring& file, const wstring& data, const wstring& why);
+wstring AppImageSettingsWords(bool own, const wstring& file, const wstring& data, const wstring& why, bool keepsList, bool gamesHaveIt);
+bool RunsFromOwnAppImage(wstring* file, wstring* why);  // OwnAppImage, asked once
+bool IgnoreListThere(const wstring& dataDir);           // the data folder has the player's ignore-files.txt (an uninstall keeps it)
 // A note that arrives on its own (a worker's result): shown at once, or once the dialog or file dialog that is open closes, so
 // it never answers a question the player has open.
 void InformLater(const wstring& text, int icon = 2);

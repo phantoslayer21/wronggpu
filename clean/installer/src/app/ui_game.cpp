@@ -14,6 +14,7 @@
 #include "wg_core/gamerules.h"
 #include "wg_core/rrconfig.h"
 
+namespace wg::app::win { wstring WindowsFolderCommand(const wstring& gameExe); }  // ui_rrconfig.cpp
 namespace wg::app::lui {
 
 // "2026-10-17 19:19" -> "Today at 19:19", "Yesterday at ...", "Oct 14 at 16:26"
@@ -1447,6 +1448,32 @@ static float StepCodeRow(Gfx& gx, float x, float y, float w, int n, const wstrin
     return yy + 14 - y;
 }
 
+// Linux, a game that is not a Steam game: its Windows folder is not known until the player points at it once (rrconfig.h), so the
+// card says how, and shows the command (this program's own path, the game's exe) in a box with Copy, as the Steam launch option is.
+static bool AsksWindowsFolder() { return NativeLinux() && v.rrcfgWhy.find(L"not a Steam game") != wstring::npos; }
+static wstring RrFolderWords() {
+    if (!AsksWindowsFolder()) return v.rrcfgWhy + L".";
+    return L"It isn't a Steam game, so WrongGPU can't tell where its Proton or Wine folder is. Find the game's Windows user folder, the one that holds "
+           L"Documents and AppData (usually pfx/drive_c/users/<name> inside its Proton or Wine folder). Then run this once in a terminal:";
+}
+static float WindowsFolderCard(Gfx& gx, float x, float y, float w) {
+    const wstring title = L"Point WrongGPU at the Windows folder", code = win::WindowsFolderCommand(v.cur.exe);
+    RowLine(gx, x, y, w, false);
+    const float bw = ButtonW(gx, L"Copy", 0, 30, B_SECONDARY), tx = x + kCellPad, cw = w - 2 * kCellPad;
+    TS ts = Ts(13.5f, 600, pal.text);
+    TS ms = Wrap(12.5f, pal.text, 18); ms.face = F_MONO;
+    const float mh = gx.TextH(code, cw - 20, ms);
+    float yy = y + 14;
+    gx.Text(title, Rc{tx, yy, cw - bw - 12, 22}, ts);
+    Button(gx, ID_G_WINFOLDER_COPY, x + w - kCellPad, yy - 5, L"Copy", B_SECONDARY, 0, true, 30, 0, true, L"Copy the windows-folder command");
+    yy += 30;
+    gx.FillRound(Rc{tx, yy, cw, mh + 14}, 6, pal.fill);
+    gx.Text(code, Rc{tx + 10, yy + 7, cw - 20, mh + 2}, ms);
+    yy += mh + 14;
+    AddText(Rc{tx, y + 14, cw, yy - y - 14}, title + L": " + code);
+    return yy + 14 - y;
+}
+
 // The file check's "Couldn't read Engine.ini" (RrConfigLineState 3, r3 #8): why, and what lets it be read again (not a fix:
 // adding the line would fail the same way). Myself (mine): the player's own file, which the game may read fine (UTF-16): only
 // WrongGPU's check can't read it, and how to check it by hand, never a request to save it another way (r4 #6)
@@ -1519,7 +1546,7 @@ static float RrConfigRows(Gfx& gx, float x, float y, float w, const RrConfigGame
                           : st == 0 ? L"Until it is back, the game doesn't use Ray Reconstruction. " + wstring(v.rrcfgFixed ? L"Fix it again" : L"Fix it now") + L" adds it."
                           : waits && click ? name + L" makes its settings folder at its first start. Then click Fix it now here to add the line." + askWhy
                           : waits ? name + L" makes its settings folder at its first start. WrongGPU adds the line the next time the launcher opens or you open this page."
-                          : !v.rrcfgWhy.empty() ? v.rrcfgWhy + L"."  // (Linux: the game's Windows folder is not known, and why)
+                          : !v.rrcfgWhy.empty() ? RrFolderWords()  // (Linux: the game's Windows folder is not known, and why)
                                     : wstring(L"Start the game once, then check again.");
         const bool fix = st == 0 || st == 2;
         // "again" only where WrongGPU added the line before (the record has it); the player's own line, or none added yet: now.
@@ -1531,6 +1558,7 @@ static float RrConfigRows(Gfx& gx, float x, float y, float w, const RrConfigGame
                       !fix ? L"Check again" : again ? L"Fix it again" : L"Fix it now", fix ? B_GO : B_PLAIN, fix ? en && !Locked() : true,
                       !fix ? L"Check Engine.ini again" : again ? L"Fix Engine.ini again" : L"Fix Engine.ini now");
         if (fix && Locked()) { v.tips[ID_G_RRCFG_FIX] = BusyWhy(v.cur); Describe(ID_G_RRCFG_FIX, BusyWhy(v.cur)); }
+        if (st == -1 && !waits && AsksWindowsFolder()) yy += WindowsFolderCard(gx, x, yy, w);
     }
     if (want != "off") return yy - y;
     // the steps (they stay on the page while the player works through them), then the file as it is now
@@ -1561,10 +1589,11 @@ static float RrConfigRows(Gfx& gx, float x, float y, float w, const RrConfigGame
                                                                                                                                    : L"Not in Engine.ini yet";
     const wstring d = st == 1 ? L"Ray Reconstruction can run in " + name + L"." : st == 3 ? CantReadWhy(true, rg)
                       : st == 2 ? name + L" deletes the file at its next start. Do step 6, then check again."
-                      : st == -1 ? (v.rrcfgWhy.empty() ? wstring(L"Start the game once, then come back and check again.") : v.rrcfgWhy + L".")
+                      : st == -1 ? (v.rrcfgWhy.empty() ? wstring(L"Start the game once, then come back and check again.") : RrFolderWords())
                                  : L"Until it is, the game doesn't use Ray Reconstruction.";
     yy += NeedRow(gx, x, yy, w, false, t, d, st == 1 ? pal.green : st == -1 ? pal.greyDot : pal.amber, pal.text, ID_G_RRCFG_CHECK, L"Check again", B_PLAIN, true,
                   L"Check Engine.ini again");
+    if (st == -1 && AsksWindowsFolder()) yy += WindowsFolderCard(gx, x, yy, w);
     return yy - y;
 }
 

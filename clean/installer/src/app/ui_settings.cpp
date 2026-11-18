@@ -378,8 +378,10 @@ void PaintSettings(Gfx& gx, const Rc& area) {
         TS as = Ts(12, 400, pal.text2); as.lineH = 18;
         const float ay = iy + 2 + 3 * 34 - 2 + 20;
         gx.Text(L"WrongGPU " + wstring(Ctx().data->version), Rc{x0 + 12, ay, 168, 18}, as);
-        gx.Text(installed ? L"Installed for this user" : portable ? L"Portable" : L"Not installed", Rc{x0 + 12, ay + 18, 168, 18}, as);
-        AddText(Rc{x0 + 12, ay, 168, 36}, L"WrongGPU " + wstring(Ctx().data->version) + L", " + (installed ? L"installed for this user" : portable ? L"portable" : L"not installed"));
+        // natively in an AppImage there is nothing to install: "Not installed" is a Windows idea (Settings' Launcher row says the same)
+        const bool inImage = NativeLinux() && !v.fixture && RunsFromOwnAppImage(nullptr, nullptr);
+        gx.Text(inImage ? L"AppImage" : installed ? L"Installed for this user" : portable ? L"Portable" : L"Not installed", Rc{x0 + 12, ay + 18, 168, 18}, as);
+        AddText(Rc{x0 + 12, ay, 168, 36}, L"WrongGPU " + wstring(Ctx().data->version) + L", " + (inImage ? L"AppImage" : installed ? L"installed for this user" : portable ? L"portable" : L"not installed"));
     }
 
     int sec = 0;
@@ -500,8 +502,9 @@ void PaintSettings(Gfx& gx, const Rc& area) {
         [&](float ry, bool b) {
             return SettingRow(gx, lx, ry, lw, b, ic::processor, L"HIP runtime",
                               hip.empty() ? Status{2, L"Not found", L""} : Status{0, L"Found", hipWords.empty() ? L"" : hipWords + L"."},
-                              hip.empty() ? L"Optional. Model M runs on Direct3D\u00a012 without it, and no game setting uses it."
-                                          : L"Not used in games: Model M runs on Direct3D\u00a012.",
+                              hip.empty() ? (NativeLinux() ? L"Optional. Model M runs through Proton's Direct3D\u00a012 without it, and no game setting uses it."
+                                                          : L"Optional. Model M runs on Direct3D\u00a012 without it, and no game setting uses it.")
+                                          : (NativeLinux() ? L"Not used in games: Model M runs through Proton's Direct3D\u00a012." : L"Not used in games: Model M runs on Direct3D\u00a012."),
                               {}, 0, -1, {}, 0, hipPath ? ID_S_HIPTEXT : 0, hipPath ? L"HIP runtime file: " + hip : L"");
         });
     section(modelRows);
@@ -603,10 +606,12 @@ void PaintSettings(Gfx& gx, const Rc& area) {
     // one way out is "Uninstall WrongGPU", which deletes the AppImage file and WrongGPU's data folder (ui_appimage.cpp)
     const bool linuxApp = NativeLinux() && !v.fixture;
     if (linuxApp) {
-        static wstring imageFile, imageWhy;
-        static const bool own = OwnAppImage(imageFile, &imageWhy);  // the file and the environment do not change while it runs
+        wstring imageFile, imageWhy;
+        const bool own = RunsFromOwnAppImage(&imageFile, &imageWhy);
+        bool gamesHaveIt = false;
+        for (auto& x : v.games) gamesHaveIt = gamesHaveIt || x.hasRecord;
         inst = Status{-1, own ? L"Runs from an AppImage" : L"Not an AppImage", L""};
-        instDesc = AppImageSettingsWords(own, imageFile, gl.paths.dataDir, imageWhy);
+        instDesc = AppImageSettingsWords(own, imageFile, gl.paths.dataDir, imageWhy, IgnoreListThere(gl.paths.dataDir), gamesHaveIt);
         instActs.clear();
         if (own) instActs.push_back({ID_S_SELFUNINSTALL, v.task == T_SELFUNINSTALL ? L"Uninstalling\u2026" : L"Uninstall WrongGPU\u2026", false, !v.busy});
     }
@@ -618,10 +623,10 @@ void PaintSettings(Gfx& gx, const Rc& area) {
             // natively there is no Windows app mode: "System" is the desktop's light or dark setting, which the launcher cannot read on
             // Linux yet, so it says what it uses instead (the layer's registry stand-in has no value: light)
             const bool desktop = NativeLinux() && !v.fixture;
-            const wstring follows = desktop ? L"Follows the desktop's light or dark setting. The launcher can't read it on Linux yet, so it is " + wstring(winDark ? L"dark" : L"light") + L" for now."
+            const wstring follows = desktop ? L"System should follow the desktop's light or dark setting, but WrongGPU can't read it on Linux yet, so it uses " + wstring(winDark ? L"dark" : L"light") + L" for now."
                                             : L"Follows Windows' app mode (now " + wstring(winDark ? L"dark" : L"light") + L").";
             const float h = SettingRow(gx, lx, ry, lw, b, kGlyphAppearance, L"Appearance", Status{},
-                                       sel == 0 ? follows : L"The launcher stays " + wstring(sel == 1 ? L"light" : L"dark") + (desktop ? L". System follows the desktop's light or dark setting." : L". System follows Windows' app mode."),
+                                       sel == 0 ? follows : L"The launcher stays " + wstring(sel == 1 ? L"light" : L"dark") + (desktop ? L". " + follows : L". System follows Windows' app mode."),
                                        {}, ID_S_THEME0, -1, {L"System", L"Light", L"Dark"}, sel);
             // each option's help text says what that option does (the row's sentence says what the chosen one does)
             Describe(ID_S_THEME0, follows);
@@ -725,6 +730,8 @@ void PaintFirstRun(Gfx& gx) {
     const bool installing = v.task == T_FIRSTRUN;  // Continue is installing the launcher (a worker thread): the choice waits
     const float labW = iw < 440 ? 92.f : 104.f;
     const TS vs = Wrap(12.5f, pal.text, 17.5f);
+    // natively a long label ("Graphics card detected") wraps in its column: its second line takes room, so the next row is not drawn over it
+    auto LabelH = [&](Gfx& g2, const wstring& lab) { return lab.empty() || !NativeLinux() ? 0.f : g2.TextH(lab, labW, vs); };
     // the foot that stays put under the part that scrolls: Continue (full width, naming what it will do) and a hint
     // (an installed launcher can be uninstalled in Settings, not made portable; a portable one can be installed there)
     wstring hint = !v.first.installOffer ? L"" : v.first.choice == 1 ? L"You can uninstall it later in Settings." : L"You can install it later in Settings.";
@@ -774,7 +781,7 @@ void PaintFirstRun(Gfx& gx) {
             wstring lab, val;
             SplitCheck(l.second, lab, val);
             TS mt = vs; mt.weight = l.first == 2 ? 600 : 400;
-            listH += std::max(17.5f, gx.TextH(val, iw - 50 - (lab.empty() ? 0 : labW + 10), mt)) + 4;
+            listH += std::max(17.5f, std::max(gx.TextH(val, iw - 50 - (lab.empty() ? 0 : labW + 10), mt), LabelH(gx, lab))) + 4;
         }
         const Rc well{ix, y, iw, std::round(listH)};
         gx.FillRound(well, 10, pal.bg);
@@ -799,7 +806,7 @@ void PaintFirstRun(Gfx& gx) {
             // the check in words, with what it means ("Problem: Graphics card: ..."): the glyph says it to the eye
             AddText(Rc{well.x + 36, ly, well.r() - 14 - well.x - 36, th + 2},
                     (l.first == 2 ? L"Problem: " : l.first == 1 ? L"Note: " : L"") + (lab.empty() ? val : lab + L": " + val));
-            ly += std::max(17.5f, th) + 4;
+            ly += std::max(17.5f, std::max(th, LabelH(gx, lab))) + 4;
         }
         // the fold: a link on the list's last line, its chevron in the glyphs' column, its words in the labels'; 2 DIPs under
         // the lines, so its keyboard focus ring (4 DIPs out) clears the line above it, and kLinkFoot over the list's foot, so

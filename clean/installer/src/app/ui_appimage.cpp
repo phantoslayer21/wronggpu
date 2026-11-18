@@ -5,17 +5,20 @@
 #include "app/launcher_window.h"
 
 #include "wg_core/appimage.h"
+#include "wg_core/convert_ignore.h"
 
 namespace wg::app::win {
 
 extern bool dataRemoved;  // launcher_ui.cpp
 
-// The question, with what goes by its path (the player decides on what they can read). Nothing in the games is touched.
-wstring AppImageUninstallText(const wstring& fileIn, const wstring& dataIn) {
+// The question, with what goes by its path (the player decides on what they can read). Nothing in the games is touched. The
+// player's ignore list is put back when the data folder goes (RemoveSharedData), so a folder that has one says so.
+wstring AppImageUninstallText(const wstring& fileIn, const wstring& dataIn, bool keepsList) {
     const wstring file = ShownPath(fileIn), data = ShownPath(dataIn);
     return L"Uninstall WrongGPU?\n\nThis deletes two things and cannot be undone:\n\n"
            L"• The program file:\n  " + file + L"\n• WrongGPU's data folder (the converted Model M and Ray Reconstruction data, the games' list, "
-           L"settings and logs):\n  " + data + L"\n\nNothing else is deleted. Your games and their files are not touched.";
+           L"settings and logs):\n  " + data + L"\n\n" + (keepsList ? wstring(L"Your ignore-files.txt list is kept. ") : wstring()) +
+           L"Nothing else is deleted. Your games and their files are not touched.";
 }
 
 void AppImageUninstallAsked() {
@@ -28,7 +31,7 @@ void AppImageUninstallAsked() {
     auto look = std::make_shared<SharedDataLook>();
     if (!WaitForRead(L"", kLookVerb, T_NONE, [look] { *look = LookAtSharedData(g.ctx); })) return;
     if (look->anyGame) { Inform(L"Your games still use WrongGPU\n\nUninstall WrongGPU from each game first (its page, More, Uninstall), then uninstall WrongGPU here. Nothing was deleted.", 1); return; }
-    if (!Confirm(AppImageUninstallText(file, AppDataPath()), 0, L"Uninstall WrongGPU", L"Cancel", true)) return;
+    if (!Confirm(AppImageUninstallText(file, AppDataPath(), lui::IgnoreListThere(AppDataPath())), 0, L"Uninstall WrongGPU", L"Cancel", true)) return;
     auto kept = std::make_shared<wstring>();
     auto problem = std::make_shared<wstring>();
     auto ok = std::make_shared<bool>(false);
@@ -47,8 +50,19 @@ void AppImageUninstallAsked() {
 
 namespace wg::app::lui {
 // What Settings says about the removal: where the program and its data are, or why this copy can't remove itself.
-wstring AppImageSettingsWords(bool own, const wstring& file, const wstring& data, const wstring& why) {
+wstring AppImageSettingsWords(bool own, const wstring& file, const wstring& data, const wstring& why, bool keepsList, bool gamesHaveIt) {
     if (!own) return L"Uninstall WrongGPU is not available here. " + why;
-    return L"Runs from " + ShownPath(file) + L". Uninstall deletes that file and WrongGPU's data folder (" + ShownPath(data) + L"), after you confirm. Nothing else is deleted.";
+    return L"The file: " + ShownPath(file) + L". Uninstall deletes that file and WrongGPU's data folder (" + ShownPath(data) + L") after you confirm. " +
+           (keepsList ? wstring(L"Your ignore-files.txt list is kept. ") : wstring()) + L"Nothing else is deleted." +
+           (gamesHaveIt ? wstring(L" Uninstall WrongGPU from your games first.") : wstring());
 }
+// Whether this copy runs from its own proven AppImage (the file and the environment do not change while it runs)
+bool RunsFromOwnAppImage(wstring* file, wstring* why) {
+    static wstring imageFile, imageWhy;
+    static const bool own = OwnAppImage(imageFile, &imageWhy);
+    if (file) *file = imageFile;
+    if (why) *why = imageWhy;
+    return own;
+}
+bool IgnoreListThere(const wstring& dataDir) { return IsFile(Join(dataDir, wg::kIgnoreListName)); }
 }  // namespace wg::app::lui

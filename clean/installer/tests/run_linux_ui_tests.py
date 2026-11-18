@@ -176,7 +176,7 @@ def test_first_run_words(exe, work, home):
     print("first-run words (Linux)")
     for tag, ids, gpu_line, d3d in (("rdna4", ("0x1002", "0x7550"), "AMD Radeon RX 9070 XT", "Direct3D 12 (through Proton): Ready"),
                                     ("rdna3", ("0x1002", "0x744c"), "AMD Radeon (code 1002:744C)", "Direct3D 12 (through Proton): Not available on this card"),
-                                    ("none", (None, None), "none", "Direct3D 12 (through Proton): Not available on this card")):
+                                    ("none", (None, None), None, "Direct3D 12 (through Proton): Not available on this card")):
         env, run_dir = environment(work, home, "words-" + tag)
         env["WRONGGPU_TEST_DRM_ROOT"] = "Z:" + str(fake_drm(run_dir / "drm", *ids))
         out = work / ("words-" + tag)
@@ -187,7 +187,8 @@ def test_first_run_words(exe, work, home):
         check(any(l.startswith("Linux: ") and "Windows" not in l for l in lines), f"{tag}: the system line names Linux ({lines[:1]})")
         check(not any(l.startswith("Windows:") for l in lines), f"{tag}: no Windows line")
         check(d3d in lines, f"{tag}: '{d3d}' ({[l for l in lines if 'Direct3D' in l]})")
-        check(any(l.startswith("Graphics card detected: " + gpu_line) for l in lines), f"{tag}: the card line says '{gpu_line}'")
+        check(any(l.startswith("Graphics card detected: " + gpu_line) for l in lines) if gpu_line else any(l.startswith("No graphics card found.") for l in lines),
+              f"{tag}: the card line says '{gpu_line}'")
         check(not any(l.startswith("HIP runtime") for l in lines), f"{tag}: no HIP runtime line")
         check(d["first_run_install_offer"] is False and not any(c["text"] == "Install for this user" for c in d["first_run"]["controls"]),
               f"{tag}: no Install for this user choice")

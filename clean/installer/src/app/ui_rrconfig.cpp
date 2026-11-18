@@ -240,6 +240,22 @@ void AskRrConfigLater(const wstring& dir, const wstring& exe, const Profile& sav
     SetTimer(v.hwnd, kAskTimer, 400, Tick);
 }
 
+// A word for a shell: in single quotes, a quote inside it as '\'' (nothing in a path is then read as a command)
+static wstring ShellQuote(const wstring& s) {
+    wstring q = L"'";
+    for (wchar_t c : s) q += c == L'\'' ? wstring(L"'\\''") : wstring(1, c);
+    return q + L"'";
+}
+// The command a player runs once for a game that is not a Steam game (Heroic, Lutris, Bottles): the AppImage they started this from
+// ($APPIMAGE; this program's own file when it is not in one), the game's exe, and their Windows folder to fill in.
+wstring WindowsFolderCommand(const wstring& gameExe) {
+    const wstring image = EnvVar(L"APPIMAGE");
+    return ShellQuote(ShownPath(image.empty() ? SelfPath() : image)) + L" windows-folder " + ShellQuote(ShownPath(gameExe)) + L" '<that folder>'";
+}
+void CopyTerminalCommand(const wstring& line) {
+    ShowToast(CopyToClipboard(line) ? L"The command is on the clipboard. Paste it into a terminal, and put your folder where it says <that folder>."
+                                    : L"The command couldn't be put on the clipboard. Type it as the page shows it.", 0);
+}
 // The game page's "Engine.ini setting" steps: Open folder (never made here: the game makes it at its first start), Copy (the
 // line on the clipboard), Check again (the file read again; a small file in the player's profile, read on a click).
 #ifndef _WIN32

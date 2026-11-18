@@ -151,8 +151,19 @@ int RunLauncherUiDump(const wstring& outFile, const wstring& shotDir, bool noSca
     for (auto& l : v.first.lines) j.Str(l.second);
     j.End();
     j.B("first_run_install_offer", v.first.installOffer);
+    {  // the removal's words for a made-up AppImage, with and without the ignore list and a game that has WrongGPU (the tests read them)
+        const wstring file = L"/home/player/Apps/WrongGPU-0.6.5-x86_64.AppImage", data = L"/home/player/.local/share/WrongGPU";
+        j.Key("appimage_words").Arr();
+        for (int keeps = 0; keeps < 2; ++keeps)
+            for (int games = 0; games < 2; ++games) j.Str(lui::AppImageSettingsWords(true, file, data, L"", keeps != 0, games != 0));
+        j.End();
+        j.Key("appimage_uninstall_text").Arr().Str(AppImageUninstallText(file, data, false)).Str(AppImageUninstallText(file, data, true)).End();
+    }
     wstring firstFocus;  // what has the keyboard once the checks are done (Continue)
     for (auto& h : v.hits) if (h.id == v.focus) firstFocus = h.name;
+    if (!shotDir.empty()) {  // the sheet with Show details open (every check line), picture only
+        v.first.checksOpen = true; RenderFrame(kDefaultW, 760, 1, shot(L"first-run-details.png")); v.first.checksOpen = false;
+    }
     v.first.open = false;  // as FinishFirstRun leaves it (without saving the settings or the release check)
     v.page = P_LIBRARY;
     v.focus = 0;

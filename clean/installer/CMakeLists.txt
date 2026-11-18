@@ -417,6 +417,9 @@ if(NOT WIN32)
              --exe $<TARGET_FILE:WrongGPU> --jpeg-tool $<TARGET_FILE:jpeg-linux-tests>
              --work ${CMAKE_CURRENT_BINARY_DIR}/linux-ui-tests)
     set_tests_properties(linux-ui PROPERTIES TIMEOUT 900)
+    add_test(NAME linux-ui-wording COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_linux_ui_wording_tests.py
+             --exe $<TARGET_FILE:WrongGPU> --work ${CMAKE_CURRENT_BINARY_DIR}/linux-ui-wording-tests)
+    set_tests_properties(linux-ui-wording PROPERTIES TIMEOUT 600)
     if(MOCK_PAYLOAD_WORK AND NOT WRONGGPU_PRESET_K)
       # the launcher's verbs suite (tests/run_launcher_tests.py) against this binary: it needs the test map and stand-in payload
       # the build embeds only when it made them itself; its checks that only mean something on Windows say so and are skipped
