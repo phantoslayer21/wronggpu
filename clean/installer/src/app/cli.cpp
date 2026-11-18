@@ -14,6 +14,8 @@
 //   set <game> key=value ...      per-game settings (written to the game at once); set --global key=value ...
 //                                 set <game> opti.<Section>.<Key>=value: an editable key of the game's OptiScaler.ini
 //   get <game> [key] | get --global
+//   uninstall-appimage [--confirm]   Linux, run from the AppImage: the AppImage file ($APPIMAGE) and WrongGPU's data folder removed,
+//                                 nothing else; without --confirm only says what would go (refused while a game has WrongGPU)
 //   windows-folder <game> [<folder> | --clear]   Linux, a game that is not a Steam game: the game's Windows user folder (inside its
 //                                 Wine prefix: drive_c/users/<name>) it keeps Engine.ini in, chosen once and remembered; no
 //                                 folder shows the one remembered
@@ -59,6 +61,7 @@
 #include "wg_core/payload.h"
 #include "wg_core/pe.h"
 #include "wg_core/rr.h"
+#include "wg_core/appimage.h"
 #include "wg_core/rrconfig.h"
 #include "wg_core/rrprep.h"
 
@@ -793,6 +796,22 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
         const OpResult res = runJob(a.get(L"job"), a.get(L"result"));
         ResultJson(o, res);
         return res.code;
+    }
+    if (verb == L"uninstall-appimage") {  // appimage.h: the AppImage and WrongGPU's data folder, after the player's confirmation
+        wstring file, why;
+        if (!OwnAppImage(file, &why)) { o.j.S("error", why); Print(why); return EXIT_REFUSED; }
+        const wstring data = AppDataPath();
+        o.j.Key("appimage").Obj().S("file", file).S("data", data);
+        if (!a.has(L"confirm")) {
+            o.j.B("removed", false).End();
+            Print(L"Would delete " + file + L" and WrongGPU's data folder " + data + L". Nothing was removed; add --confirm to do it.");
+            return EXIT_OK;
+        }
+        wstring kept, gone;
+        if (!UninstallAppImage(g.ctx, &why, &gone, &kept)) { o.j.B("removed", !gone.empty()).End(); o.j.S("error", why); Print(why); return EXIT_REFUSED; }
+        o.j.B("removed", true).S("kept", kept).End();
+        Print(L"WrongGPU is uninstalled: " + file + L" and " + data + L" are deleted." + (kept.empty() ? wstring() : L" " + kept));
+        return EXIT_OK;
     }
     if (verb == L"windows-folder") {  // rrconfig.h: where a non-Steam game's Windows profile is (asked once, remembered)
         wstring exe, dir, why;

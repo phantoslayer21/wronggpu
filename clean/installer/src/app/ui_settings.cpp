@@ -11,6 +11,7 @@
 // eases to a new one instead of jumping. Written for this project.
 #include "app/ui_shell.h"
 
+#include "wg_core/appimage.h"
 #include "wg_core/model.h"
 #include "wg_core/optiscaler.h"
 #include "wg_core/rr.h"
@@ -591,6 +592,17 @@ void PaintSettings(Gfx& gx, const Rc& area) {
     if (portable && !installed)
         instActs.insert(instActs.begin(), Act{ID_S_REMOVEDATA, looking ? L"Preparing\u2026" : removing ? L"Removing\u2026" : L"Remove data\u2026", false, !v.busy,
                                                    L"Remove WrongGPU's data from this PC"});
+    // the native Linux launcher (a render's fixture keeps the Windows rows): an AppImage has no install and no Installed apps entry; its
+    // one way out is "Uninstall WrongGPU", which deletes the AppImage file and WrongGPU's data folder (ui_appimage.cpp)
+    const bool linuxApp = NativeLinux() && !v.fixture;
+    if (linuxApp) {
+        static wstring imageFile, imageWhy;
+        static const bool own = OwnAppImage(imageFile, &imageWhy);  // the file and the environment do not change while it runs
+        inst = Status{-1, own ? L"Runs from an AppImage" : L"Not an AppImage", L""};
+        instDesc = AppImageSettingsWords(own, imageFile, gl.paths.dataDir, imageWhy);
+        instActs.clear();
+        if (own) instActs.push_back({ID_S_SELFUNINSTALL, v.task == T_SELFUNINSTALL ? L"Uninstalling\u2026" : L"Uninstall WrongGPU\u2026", false, !v.busy});
+    }
     section({
         [&](float ry, bool b) {
             // Windows' own app mode (not the launcher's palette: set to Light, the launcher is light while Windows may be dark);

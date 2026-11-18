@@ -2071,12 +2071,12 @@ static void DeleteLeftWhenFree(Context& ctx, const wstring& dir, const wstring& 
     }
 }
 
-bool RemoveSharedData(Context& ctx, wstring* why, wstring* kept) {
+bool RemoveSharedData(Context& ctx, wstring* why, wstring* kept, bool launcherOwnsIt) {
     if (kept) kept->clear();
     try {
         const SharedDataLook s = LookAtSharedData(ctx);
         if (!s.there) { LogLine(ctx, L"remove data: no shared data folder: nothing to remove"); return true; }
-        if (s.installed) { if (why) *why = L"WrongGPU is installed for this user: its own uninstall removes this data. Nothing was removed."; return false; }
+        if (s.installed && !launcherOwnsIt) { if (why) *why = L"WrongGPU is installed for this user: its own uninstall removes this data. Nothing was removed."; return false; }
         if (s.anyGame) { if (why) *why = L"a game still has WrongGPU and uses this data. Uninstall WrongGPU from it first. Nothing was removed."; return false; }
         const wstring shared = AppDataPath();
         const DWORD sharedAttrs = GetFileAttributesW(shared.c_str());

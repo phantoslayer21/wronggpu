@@ -184,7 +184,7 @@ add_custom_command(
 set(WRONGGPU_APP_SOURCES src/app/main.cpp src/app/cli.cpp src/app/launcher_ui.cpp src/app/ui_art.cpp src/app/ui_widgets.cpp
     src/app/ui_library.cpp src/app/ui_game.cpp src/app/ui_settings.cpp src/app/ui_uia.cpp src/app/ui_render.cpp src/app/ui_words.cpp
     src/app/ui_dump.cpp src/app/ui_frame.cpp src/app/ui_play.cpp src/app/ui_rrprep.cpp src/app/ui_rrconfig.cpp src/app/ui_activate.cpp
-    src/app/ui_checks.cpp src/app/payload_embed.cpp)
+    src/app/ui_checks.cpp src/app/ui_appimage.cpp src/app/payload_embed.cpp)
 # Windows only: the GDI+ wizard and the Direct2D/DirectWrite drawing (Linux draws through ui_gfx_cairo.cpp, in wg_gfx_cairo).
 set(WRONGGPU_APP_SOURCES_WINDOWS src/app/wizard.cpp src/app/ui_gfx.cpp)
 # Linux only: the live-frame hook for the SDL window layer, and the JPEG decoder (libjpeg-turbo; Windows decodes art with WIC).
@@ -198,7 +198,7 @@ add_library(wg_core STATIC
   src/wg_core/model.cpp src/wg_core/checks.cpp src/wg_core/install.cpp src/wg_core/logs.cpp
   src/wg_core/profile.cpp src/wg_core/logtail.cpp src/wg_core/launcher.cpp
   src/wg_core/fingerprint.cpp src/wg_core/optikeys.cpp src/wg_core/leftovers.cpp src/wg_core/rr.cpp src/wg_core/rrprep.cpp src/wg_core/gamerules.cpp
-  src/wg_core/rrconfig.cpp src/wg_core/convert_ignore.cpp)
+  src/wg_core/rrconfig.cpp src/wg_core/convert_ignore.cpp src/wg_core/appimage.cpp)
 target_include_directories(wg_core PUBLIC src)
 target_compile_definitions(wg_core PUBLIC ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION})
 # (private: model-choice-tests compiles profile.cpp with the Model L choice on, against this library)

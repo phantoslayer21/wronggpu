@@ -1852,6 +1852,7 @@ def changed_keys(before, after):
 def test_rr_config_proton(t, opti):
     if t.native:  # S3: Engine.ini in the game's Proton prefix (launcher_proton_cases.py)
         __import__("launcher_proton_cases").run(t, opti)
+        __import__("launcher_appimage_cases").run(t, opti)  # S5
 
 
 def test_rr_config_fix(t, opti):

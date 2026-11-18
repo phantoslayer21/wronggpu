@@ -25,6 +25,7 @@
 #include <unistd.h>
 
 #include "win32_posix_internal.h"
+#include "wg_core/appimage.h"
 #include "wg_core/checks.h"
 #include "../../../../../wgshared/include/wg_state.h"
 
@@ -562,6 +563,58 @@ void GpuIdentity() {
     setenv("WRONGGPU_TEST_DRM_ROOT", r1.c_str(), 1);
     check(wg::DetectGpu().name == L"NVIDIA graphics (code 10DE:2684)", "WRONGGPU_TEST_DRM_ROOT: DetectGpu reads that folder");
     unsetenv("WRONGGPU_TEST_DRM_ROOT");
+}
+
+// S5: which file the native launcher will delete as its own AppImage: every refusal, and the one yes
+void AppImageIdentity() {
+    std::string posixTmp(Tmp.begin(), Tmp.end());
+    posixTmp.erase(0, 2);
+    for (auto& c : posixTmp) if (c == '\\') c = '/';
+    const std::filesystem::path dir = std::filesystem::path(posixTmp) / "appimage";
+    std::filesystem::create_directories(dir);
+    auto make = [&](const char* name, const char* head16) {
+        std::FILE* f = std::fopen((dir / name).c_str(), "wb");
+        std::fwrite(head16, 1, 16, f); std::fputs("payload", f); std::fclose(f);
+        return (dir / name).string();
+    };
+    const char good[17] = "\x7f" "ELF\x02\x01\x01\x00" "AI\x02\x00\x00\x00\x00\x00";
+    const char plainElf[17] = "\x7f" "ELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+    const std::string app = make("WrongGPU-0.6.5-x86_64.AppImage", good);
+    const std::wstring selfW = wg::SelfPath();  // "Z:\\home\\...\\posix-layer-tests"
+    std::string selfHost(selfW.begin(), selfW.end());
+    selfHost.erase(0, 2);
+    for (auto& c : selfHost) if (c == '\\') c = '/';
+    const std::string selfDir = std::filesystem::path(selfHost).parent_path().string();
+    const std::string appdir = selfDir;  // this test program stands in for the program inside the AppImage's mount
+    std::wstring file, why;
+    auto env = [&](const char* image, const char* appDir) {
+        if (image) setenv("APPIMAGE", image, 1); else unsetenv("APPIMAGE");
+        if (appDir) setenv("APPDIR", appDir, 1); else unsetenv("APPDIR");
+    };
+    env(nullptr, appdir.c_str());
+    check(!wg::OwnAppImage(file, &why) && why.find(L"not running from an AppImage") != std::wstring::npos, "OwnAppImage: no $APPIMAGE is refused in words");
+    env((dir / "missing.AppImage").c_str(), appdir.c_str());
+    check(!wg::OwnAppImage(file, &why) && why.find(L"not a plain file") != std::wstring::npos, "OwnAppImage: a file that is not there is refused");
+    env(dir.c_str(), appdir.c_str());
+    check(!wg::OwnAppImage(file, &why) && why.find(L"not a plain file") != std::wstring::npos, "OwnAppImage: a folder is refused");
+    std::filesystem::create_symlink(app, dir / "WrongGPU-link.AppImage");
+    env((dir / "WrongGPU-link.AppImage").c_str(), appdir.c_str());
+    check(!wg::OwnAppImage(file, &why) && why.find(L"not a plain file") != std::wstring::npos, "OwnAppImage: a link to the AppImage is refused (the link is not the file)");
+    env(make("notes.AppImage", good).c_str(), appdir.c_str());
+    check(!wg::OwnAppImage(file, &why) && why.find(L"not WrongGPU") != std::wstring::npos, "OwnAppImage: another name is refused");
+    env(make("WrongGPU.txt", good).c_str(), appdir.c_str());
+    check(!wg::OwnAppImage(file, &why) && why.find(L"not WrongGPU") != std::wstring::npos, "OwnAppImage: a name without .AppImage is refused");
+    env(make("WrongGPU-plain.AppImage", plainElf).c_str(), appdir.c_str());
+    check(!wg::OwnAppImage(file, &why) && why.find(L"not an AppImage file") != std::wstring::npos, "OwnAppImage: an ELF file without the AppImage mark is refused");
+    env(app.c_str(), nullptr);
+    check(!wg::OwnAppImage(file, &why) && why.find(L"not inside") != std::wstring::npos, "OwnAppImage: no $APPDIR: this program is not inside it");
+    env(app.c_str(), (dir / "elsewhere").c_str());
+    check(!wg::OwnAppImage(file, &why) && why.find(L"not inside") != std::wstring::npos, "OwnAppImage: this program is not under $APPDIR");
+    env(app.c_str(), appdir.c_str());
+    file.clear();
+    check(wg::OwnAppImage(file, &why) && std::string(file.begin(), file.end()) == "Z:" + [&] { std::string s = app; for (auto& c : s) if (c == '/') c = '\\'; return s; }(),
+          "OwnAppImage: the file named by $APPIMAGE, a plain AppImage called WrongGPU...AppImage, this program inside its $APPDIR: yes");
+    unsetenv("APPIMAGE"); unsetenv("APPDIR");
 }
 
 void Folders() {
@@ -1362,6 +1415,7 @@ int main(int argc, char** argv) {
     FinishedChildren();
     NotAvailable();
     GpuIdentity();
+    AppImageIdentity();
     Folders();
     ErrorValues();
     BasicInfo();

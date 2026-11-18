@@ -945,6 +945,8 @@ void RevealId(int id);           // a widget or words brought into view without 
 // danger: the action destroys something (Uninstall, Clean up, Reset, Remove): its button is red and never the default
 bool Confirm(const wstring& text, int icon = 0, const wstring& yes = L"Yes", const wstring& no = L"No", bool danger = false);
 void Inform(const wstring& text, int icon = 2);
+// ui_appimage.cpp: Settings' row of the native Linux launcher's own removal (own: this copy can remove its AppImage; else why not)
+wstring AppImageSettingsWords(bool own, const wstring& file, const wstring& data, const wstring& why);
 // A note that arrives on its own (a worker's result): shown at once, or once the dialog or file dialog that is open closes, so
 // it never answers a question the player has open.
 void InformLater(const wstring& text, int icon = 2);

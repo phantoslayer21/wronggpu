@@ -1117,6 +1117,13 @@ int RunLauncherUiRender(const wstring& outDir, const wstring& fixtureFile, int w
             v.dialog.buttons = {{L"Cancel", 0, false, false}, {L"Remove data", 1, true, true}};  // as Confirm(..., danger) builds them
             v.focus = 0; v.focusVisible = false;
         });
+        frame(L"dialog-uninstall-appimage", [&] {  // the native Linux launcher's Settings > Uninstall WrongGPU: its file and its data folder
+            v.page = P_SETTINGS; v.scroll[P_SETTINGS] = v.target[P_SETTINGS] = 5000;
+            v.dialog.open = true; v.dialog.icon = 0;
+            SplitDialogText(AppImageUninstallText(L"/home/player/Applications/WrongGPU-0.6.5-x86_64.AppImage", L"/home/player/.local/share/WrongGPU"), v.dialog.title, v.dialog.body);
+            v.dialog.buttons = {{L"Cancel", 0, false, false}, {L"Uninstall WrongGPU", 1, true, true}};  // as Confirm(..., danger) builds them
+            v.focus = 0; v.focusVisible = false;
+        });
         frame(L"dialog-update", [&] {  // a newer release (the opt-in check): Not now, or its page in the browser
             v.page = P_LIBRARY;
             v.dialog.open = true; v.dialog.icon = 0;

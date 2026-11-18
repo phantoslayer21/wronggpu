@@ -450,6 +450,7 @@ void ActivateWidget(int id) {
             return;
         }
         case ID_S_SELFUNINSTALL: {
+            if (NativeLinux()) { AppImageUninstallAsked(); return; }  // an AppImage has no installer entry: its file and its data folder (ui_appimage.cpp)
             if (!v.live || v.busy) return;  // it can remove WrongGPU from the games: not while an operation works in one
             if (!LauncherInstalled()) { v.launcherInstalled = false; Invalidate(); return; }  // nothing installed to uninstall (removed meanwhile)
             // destructive: a question with the mark, as a game's Uninstall (POLISH-AUDIT 19), and no default (Return does not

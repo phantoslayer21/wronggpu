@@ -107,7 +107,8 @@ def make_home(work):
 
 
 def environment(work, home, name):
-    env = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "WRONGGPU_UI_SCRIPT")}
+    # (APPIMAGE and APPDIR: the program under test is never taken for the AppImage of whatever started this run)
+    env = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "WRONGGPU_UI_SCRIPT", "APPIMAGE", "APPDIR")}
     run = work / name
     for d in ("data", "config", "cache", "state", "tmp"):
         (run / d).mkdir(parents=True, exist_ok=True)
@@ -189,6 +190,29 @@ def test_first_run_words(exe, work, home):
         check(not any(l.startswith("HIP runtime") for l in lines), f"{tag}: no HIP runtime line")
         check(d["first_run_install_offer"] is False and not any(c["text"] == "Install for this user" for c in d["first_run"]["controls"]),
               f"{tag}: no Install for this user choice")
+
+
+def test_appimage_settings(exe, work, home):
+    """S5: Settings on Linux: run from an AppImage it has Uninstall WrongGPU and says which file and folder go; run from anywhere else it
+    says so and offers nothing (and never Install for this user, which cannot work here)."""
+    print("Settings > Uninstall WrongGPU (Linux)")
+    for tag, with_image in (("appimage", True), ("plain", False)):
+        env, run_dir = environment(work, home, "uninstall-" + tag)
+        if with_image:
+            image = run_dir / "Apps" / "WrongGPU-test-x86_64.AppImage"
+            image.parent.mkdir(parents=True)
+            image.write_bytes(b"\x7fELF\x02\x01\x01\x00AI\x02\x00\x00\x00\x00\x00fake")
+            env.update(APPIMAGE=str(image), APPDIR=str(Path(exe).resolve().parent))
+        out = work / ("uninstall-" + tag)
+        r = run(exe, ["ui-dump", f"--dump={out / 'dump.json'}"], env, 300)
+        check(r.returncode == 0, f"ui-dump ({tag}) exits 0 (got {r.returncode}: {r.stderr[-300:]})")
+        names = [c["text"] for c in json.loads((out / "dump.json").read_text())["settings"]["controls"]]
+        button = [n for n in names if n.startswith("Uninstall WrongGPU")]
+        check(bool(button) == with_image, f"{tag}: the Uninstall WrongGPU button is {'there' if with_image else 'not there'} ({button})")
+        check("Install for this user" not in names and "Remove data\u2026" not in names and "Uninstall launcher\u2026" not in names, f"{tag}: no Windows install or uninstall button")
+        said = " ".join(names)
+        check(("Runs from an AppImage" in said and "Nothing else is deleted" in said) if with_image else "Not run from an AppImage" in said,
+              f"{tag}: Settings says what goes, or why nothing can ({[n for n in names if 'AppImage' in n][:3]})")
 
 
 def test_render(exe, work, home):
@@ -304,7 +328,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--exe", required=True)
     ap.add_argument("--work", default=None)
-    ap.add_argument("--only", default="dump,words,render,jpeg,proton,live")
+    ap.add_argument("--only", default="dump,words,uninstall,render,jpeg,proton,live")
     ap.add_argument("--jpeg-tool", default=None, help="jpeg-linux-tests, which writes the synthetic JPEG art")
     a = ap.parse_args()
     work = Path(a.work or "linux-ui-tests").resolve()
@@ -314,7 +338,7 @@ def main():
     real_data = Path.home() / ".local" / "share" / "WrongGPU"
     had = real_data.exists()
     home = make_home(work)
-    for name, fn in (("dump", test_dump), ("words", test_first_run_words), ("render", test_render), ("proton", test_proton_note), ("live", test_live)):
+    for name, fn in (("dump", test_dump), ("words", test_first_run_words), ("uninstall", test_appimage_settings), ("render", test_render), ("proton", test_proton_note), ("live", test_live)):
         if name in a.only.split(","):
             fn(Path(a.exe), work, home)
     if "jpeg" in a.only.split(",") and a.jpeg_tool:

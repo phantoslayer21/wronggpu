@@ -96,6 +96,19 @@ checksum together, taken from the project's own release page. Use exact release 
   art (hero, header, capsule) shows. Other formats give the page's plain plate, as for a game without art.
 - **No HTTP client:** WinHTTP is answered "not available", so the in-launcher downloads (OptiScaler's edition, the
   update check) do not run on Linux.
+- **Uninstall:** an AppImage has no installer entry, so Settings > Uninstall WrongGPU (`uninstall-appimage --confirm` on the command line)
+  deletes the AppImage file named by `$APPIMAGE` and WrongGPU's data folder (`$XDG_DATA_HOME/WrongGPU`), after one confirmation that names
+  both, and nothing else. It refuses unless `$APPIMAGE` is a plain file (not a link) called `WrongGPU...AppImage` with an AppImage's header, and
+  this program runs inside that AppImage's `$APPDIR`; it also refuses while a game still has WrongGPU (uninstall it from the game first).
+  The player's own ignore list (`ignore-files.txt`) stays, as in the Windows launcher's "Remove data". There is no "Install for this user"
+  on Linux: the first-run sheet and Settings do not offer it.
+- **Engine.ini for Borderlands 4 and Hogwarts Legacy:** it goes into the game's Proton prefix (a Steam game:
+  `<library>/steamapps/compatdata/<appid>/pfx/drive_c/users/steamuser`). Until Steam has made that folder (the game was started once) the
+  launcher says so and writes nothing. A game that is not from Steam needs the Windows user folder of its Wine prefix once:
+  `WrongGPU windows-folder "<game exe>" "<folder>"`, remembered in `windows-folders.txt` in the data folder. There is no text field for it in
+  the window yet (no file picker either).
+- **Ray Reconstruction preparation:** the game prepares its kernels at its first start (its shader caches are Proton's), so the launcher
+  runs no helper and its Play never fails on it.
 - **No restorer:** `WrongGPU-Restore.exe` is a Windows program. A Linux install does not embed or write it.
 - **UI Automation:** the stubs answer nothing; there is no screen-reader support yet (AT-SPI is the Linux equivalent).
 - **GPU check:** there is no DXGI here, so the launcher reads Linux's own device list (`/sys/class/drm`): the card's name

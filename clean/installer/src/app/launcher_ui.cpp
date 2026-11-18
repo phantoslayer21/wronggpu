@@ -107,6 +107,7 @@ bool pollingRunning = false;
 bool rechecking = false;  // Check again (a game page's callout) is reading that game's folder on a worker
 bool rrSetupNext = false;  // the next Repair is the RR row's Set up: its verb is "Setting up..." (StartOp)
 bool openedToUninstall = false;  // the window opened by Installed apps' Uninstall, its question not answered yet (Cancel closes it)
+bool dataRemoved = false;  // Linux: the AppImage uninstall deleted WrongGPU's data: the closing window saves nothing into it (WM_DESTROY)
 bool replaceAsking = false;  // a newer download's window, only for "Update WrongGPU to X?": it saves no list or place (WM_DESTROY)
 // Update all: the games it left out (name; true: gone since the scan, false: its files couldn't be read, its note said so),
 // said at its end; and the results of the games an earlier game's elevated worker did with it (by folder, lower case)
@@ -2545,7 +2546,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_ENDSESSION:
             // ending: Windows ends the process without WM_DESTROY, so what a close saves is saved here (the window's place, the
             // Library's list for the next start)
-            if (wp) { if (v.live && !v.fixture && !replaceAsking) { SavePlacement(hwnd); SaveLibrarySnapshot(); } return 0; }
+            if (wp) { if (v.live && !v.fixture && !replaceAsking && !dataRemoved) { SavePlacement(hwnd); SaveLibrarySnapshot(); } return 0; }
             if (!WritesNow()) BlockShutdown(false);  // cancelled: the reason goes (an operation's stays while it writes)
             return 0;
         case WM_DPICHANGED: {
@@ -3314,7 +3315,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_DESTROY:
             StopRrBackground();  // the helper ends at once (what it compiled stays with the driver)
             if (editBrush) { DeleteObject(editBrush); editBrush = nullptr; }
-            if (v.live && !v.fixture && !replaceAsking) { SavePlacement(hwnd); SaveLibrarySnapshot(); }  // the list as this session leaves it
+            if (v.live && !v.fixture && !replaceAsking && !dataRemoved) { SavePlacement(hwnd); SaveLibrarySnapshot(); }  // the list as this session leaves it
             if (v.live) {
                 KillTimer(hwnd, 4);
                 ShutdownBlockReasonDestroy(hwnd);

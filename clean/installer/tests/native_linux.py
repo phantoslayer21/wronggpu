@@ -38,7 +38,7 @@ def environment(work, base):
     LOCALAPPDATA is a folder of its own, spelled as the program spells it (Z:\\...), and not XDG_DATA_HOME: the program takes XDG_DATA_HOME
     for the PC's real local application data folder and refuses to write a game's Engine.ini there (rrconfig.cpp), as on Windows.
     `work` may be either spelling."""
-    env = {k: v for k, v in base.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "WRONGGPU_UI_SCRIPT")}
+    env = {k: v for k, v in base.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "WRONGGPU_UI_SCRIPT", "APPIMAGE", "APPDIR")}
     work = host(work)
     run = os.path.join(work, "native")
     for d in ("home", "config", "cache", "state", "tmp", "xdg-data"):
@@ -232,11 +232,12 @@ def setup(main_module, suite, tests_dir):
     import launcher_edition_cases
     import launcher_ignore_cases
     import launcher_isolation
+    import launcher_appimage_cases
     import launcher_proton_cases
     import launcher_rr_prepare_cases
     import launcher_state_cases
     windows_paths(main_module, suite, launcher_ignore_cases, launcher_edition_cases, launcher_build_facts, launcher_isolation,
-                  launcher_proton_cases, launcher_rr_prepare_cases, launcher_state_cases)
+                  launcher_appimage_cases, launcher_proton_cases, launcher_rr_prepare_cases, launcher_state_cases)
     sys.path.insert(0, host(tests_dir + "/../tools"))  # the tests add it with a Windows separator, which sys.path cannot use
     main_module.RR_SETTINGS = main_module.os.path.join("WrongGPU", "wronggpu.ini")
     main_module.T = native_class(main_module.T, suite)
