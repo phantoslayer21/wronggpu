@@ -41,7 +41,11 @@ uint2 wg_gelu_lut_off2(float h0, float h1)
     // codes clamped to the slots that matter: positive w to WG_GELU_LUT_HP, negative w to -WG_GELU_LUT_HN (RTZ
     // conversion first, then the clamp in FP16: the same codes as clamping the 16-bit codes; inf / NaN land on the
     // clamp slots)
+#if WG_GFX == 11   // RADV rounds a (half) cast to nearest even and f32tof16 toward zero
+    half2 c = half2(asfloat16((uint16_t)f32tof16(w0)), asfloat16((uint16_t)f32tof16(w1)));
+#else
     half2 c = half2((half)w0, (half)w1);
+#endif
     c = max(min(c, half2(WG_GELU_LUT_HP, WG_GELU_LUT_HP)), half2(-WG_GELU_LUT_HN, -WG_GELU_LUT_HN));
     const uint d = ((uint)asuint16(c.x) | ((uint)asuint16(c.y) << 16)) & (0xffe0ffe0u | ((wg_bid_ >> 31) << 16));
 #else

@@ -23,7 +23,22 @@
 //   WG_SWIN_THREADS  default lanes per Swin block workgroup (128, 256 or 512); WG_THREADS_<kernel> overrides one
 //   WG_WPW_C64 / _C96 / _C128  windows per wave in the block kernel of that width
 //   WG_UNIT_BYTES    upper limit of a staged MLP weight unit
+//   WG_F16_A         gfx11 only (with WG_F16_W or alone): 1 makes each activation operand (the FP8 values of a 16-token
+//                    tile that feed matrix instructions) once, already exchanged with the other half of the wave and
+//                    widened to F16, instead of at every use: 8 registers per K group instead of 2. Bit-identical.
+//   WG_F16_Q         gfx11 only, with WG_F16_A: 1 makes the F16 operands straight from the FP32 values (E4M3 rounding in FP32,
+//                    then v_cvt_pk_rtz_f16_f32; wg_q8_to_f16) instead of through the code bytes. The code bytes are
+//                    then made only for the stores. Same values as the code form for finite inputs.
+//   WG_F16_W         gfx11 only (FP16 route, see wg_platform.h): 1 widens the weights to F16 once per workgroup, when the
+//                    unit is copied to LDS (a unit then holds half the code bytes, so the LDS stays the same); the plain
+//                    block kernels only (not the fused merge / expand, not the resident kernels). Bit-identical.
 //   WG_GEMM_THREADS  lanes per patch-merge / expand workgroup (128 or 256);  WG_NT  token groups of 16 per wave
+// 1 where the gfx11 forms below are built; the gfx12 source (clang -E) is the one of the kernels before the gfx11 port
+#if defined(WG_GFX11) || defined(WG_EMU_GFX11)
+#define WG_SWIN_G11 1
+#else
+#define WG_SWIN_G11 0
+#endif
 #ifndef WG_SWIN_THREADS
 #define WG_SWIN_THREADS 256
 #endif
@@ -79,6 +94,52 @@
 #endif
 #ifndef WG_UNIT_BYTES
 #define WG_UNIT_BYTES 16384
+#endif
+#ifndef WG_F16_W
+#define WG_F16_W 0
+#endif
+#ifndef WG_F16_A
+#define WG_F16_A 0
+#endif
+#ifndef WG_F16_Q
+#define WG_F16_Q 0
+#endif
+// The wider kernels on gfx11 (variants f16wk, f16wm; the knobs name the smallest C they apply to, 0 = none): WG_F16_AWIDE makes the
+// activation operands F16 operands (WG_F16_A) also in the kernels with C >= N, WG_F16_QWIDE makes them straight from the FP32
+// values there too (WG_F16_Q), WG_SCHED_FRAGS lets the machine scheduler move no instruction across a fragment step in the
+// kernels with C >= N (it otherwise issues the LDS reads of a whole loop up front, 8 registers a fragment: slower, and it spills
+// where the registers are short). WG_F16_M makes the operands of the MLP alone (the norm output and the hidden values) F16
+// operands in the kernels with C >= 96 that WG_F16_A leaves on codes (C = 96).
+#ifndef WG_F16_AWIDE
+#define WG_F16_AWIDE 0
+#endif
+#ifndef WG_F16_QWIDE
+#define WG_F16_QWIDE 0
+#endif
+#ifndef WG_F16_M
+#define WG_F16_M 0
+#endif
+#ifndef WG_SCHED_FRAGS
+#define WG_SCHED_FRAGS 0
+#endif
+// WG_MERGE_REUSE 1 (gfx11, variant mgx): patch_merge widens each token operand to F16 once for a group of output tiles (the
+// loops run K group outermost over MC tiles at a time, their accumulators stay in registers) and each weight fragment once
+// for all NT token groups, instead of both once per matrix instruction. Every accumulator still adds its K groups in the same
+// order, so the result is bit-identical.
+#ifndef WG_MERGE_REUSE
+#define WG_MERGE_REUSE 0
+#endif
+#if WG_MERGE_REUSE && !(defined(WG_GFX11) || defined(WG_EMU_GFX11))
+#error "WG_MERGE_REUSE is for the gfx11 matrix wrappers (wg_platform.h)"
+#endif
+#if (WG_F16_W || WG_F16_A || WG_F16_Q || WG_F16_AWIDE || WG_F16_QWIDE || WG_F16_M || WG_SCHED_FRAGS) && !(defined(WG_GFX11) || defined(WG_EMU_GFX11))
+#error "WG_F16_*, WG_SCHED_FRAGS are for the gfx11 matrix wrappers (wg_platform.h)"
+#endif
+#if WG_F16_Q && !(WG_F16_A || WG_F16_M)
+#error "WG_F16_Q makes the F16 operands that WG_F16_A or WG_F16_M keep: set one of them"
+#endif
+#if (WG_F16_AWIDE && !WG_F16_A) || (WG_F16_QWIDE && !WG_F16_Q)
+#error "WG_F16_AWIDE and WG_F16_QWIDE widen WG_F16_A and WG_F16_Q: set those too"
 #endif
 #ifndef WG_GEMM_THREADS
 #define WG_GEMM_THREADS 256
@@ -151,7 +212,12 @@ constexpr int largest_divisor_upto(int n, int limit) {
   return d;
 }
 
+#if WG_SWIN_G11
+// W16: the units are staged as F16 (Stager::commit16), twice the LDS per code byte, so an MLP unit holds half the tiles.
+template <int C, int HEADS, int MLP, bool W16 = false>
+#else
 template <int C, int HEADS, int MLP>
+#endif
 struct BlockLayout {
   static constexpr int KC = C / 16;          // 16-channel groups of the model width
   static constexpr int MT = MLP / 16;        // 16-unit groups of the MLP hidden layer
@@ -166,7 +232,11 @@ struct BlockLayout {
   static constexpr int STREAM = BIAS + 4 * HEADS * 256;
   static constexpr int QKV_FRAGS = 4 * KC;
   static constexpr int HEAD_BYTES = (QKV_FRAGS + 2 * KC) * FRAG;
+#if WG_SWIN_G11
+  static constexpr int HPU = largest_divisor_upto(MT, WG_UNIT_BYTES / ((W16 ? 2 : 1) * 2 * KC * FRAG));  // MLP hidden tiles per unit
+#else
   static constexpr int HPU = largest_divisor_upto(MT, WG_UNIT_BYTES / (2 * KC * FRAG));  // MLP hidden tiles per unit
+#endif
   static constexpr int MLP_BYTES = 2 * KC * HPU * FRAG;
   static constexpr int NMLP = MT / HPU;
   static constexpr int MAXU = HEAD_BYTES > MLP_BYTES ? HEAD_BYTES : MLP_BYTES;
@@ -211,10 +281,63 @@ struct Stager {
       if (CHUNKS % THREADS == 0 || i + 1 < PF || (int)idx < CHUNKS) ((v4u*)dst)[idx] = pre[i];
     }
   }
+#if WG_SWIN_G11
+#if WG_F16_W
+  // The same unit as F16 (twice the bytes): fragment f is two planes of 16 rows x 16 bytes, plane h the 8 values of K
+  // half h (the codes of lane 16 h + row), so lane l reads plane 0 and plane 1 of row l % 16 and holds its 16 K values
+  // in the order wg_k16_codes makes them. A chunk is the fragments of two lanes of one half: rows 2 c and 2 c + 1.
+  template <int BYTES>
+  WG_FN void commit16(u8* dst, u32 tid) {
+    constexpr int CHUNKS = BYTES / 16, PF = (CHUNKS + THREADS - 1) / THREADS;
+#pragma unroll
+    for (int i = 0; i < PF; ++i) {
+      const u32 idx = tid + (u32)(i * THREADS);
+      if (CHUNKS % THREADS == 0 || i + 1 < PF || (int)idx < CHUNKS) {
+        const u32 c = idx & 15u;
+        v4u* o = (v4u*)(dst + (idx >> 4) * 512 + (c >> 3) * 256 + (c & 7u) * 32);
+        v2i p0, p1;
+        p0[0] = (int)pre[i][0], p0[1] = (int)pre[i][1], p1[0] = (int)pre[i][2], p1[1] = (int)pre[i][3];
+        o[0] = __builtin_bit_cast(v4u, wg_widen_e4m3x8(p0));
+        o[1] = __builtin_bit_cast(v4u, wg_widen_e4m3x8(p1));
+      }
+    }
+  }
+  template <int BYTES, bool W16>
+  WG_FN void commit_w(u8* dst, u32 tid) {
+    if constexpr (W16) commit16<BYTES>(dst, tid);
+    else commit<BYTES>(dst, tid);
+  }
+#else
+  template <int BYTES, bool W16>
+  WG_FN void commit_w(u8* dst, u32 tid) { commit<BYTES>(dst, tid); }
+#endif
+#endif
 };
 
 // One staged WMMA fragment: lane l reads bytes [8l, 8l + 8) of fragment `index` of an LDS unit.
 WG_FN v2i lfrag(const u8* unit, int index, u32 lane) { return ((const v2i*)(unit + index * 256))[lane]; }
+#if WG_SWIN_G11
+#if WG_F16_W
+// The same fragment widened (Stager::commit16): both halves of the wave read the same 32 bytes.
+WG_FN v16h lfrag16(const u8* unit, int index, u32 lane) {
+  const v4u* q = (const v4u*)(unit + index * 512 + (lane & 15u) * 16);
+  return __builtin_bit_cast(v16h, __builtin_shufflevector(q[0], q[16], 0, 1, 2, 3, 4, 5, 6, 7));
+}
+#endif
+// A staged fragment of the weights: codes, or (W16, the plain block kernels with WG_F16_W) their F16 values.
+template <bool W16>
+struct WFrag {
+  typedef v2i type;
+  WG_FN static type load(const u8* unit, int index, u32 lane) { return lfrag(unit, index, lane); }
+};
+#if WG_F16_W
+template <>
+struct WFrag<true> {
+  typedef v16h type;
+  WG_FN static type load(const u8* unit, int index, u32 lane) { return lfrag16(unit, index, lane); }
+};
+#endif
+#endif
 #if defined(WG_ABLATE_BIAS) && WG_ABLATE_BIAS
 #define WG_BIAS8(p) wg_splat(0.0f)
 #else
@@ -328,6 +451,43 @@ WG_FN v2i pack_in(v8f d) {  // timing-only stand-in for wg_pack_q8_inner: 6 adds
 template <bool SAFE>
 WG_FN v2i pack_in(v8f d) { return SAFE ? wg_pack_q8_nc(d) : wg_pack_q8_inner(d); }
 #endif
+#if WG_SWIN_G11
+// An activation operand of the matrix instruction (the quantized values of a tile): the FP8 codes, or (A16, WG_F16_A) the 16
+// F16 values of a K group, ready for the instruction.
+template <bool A16>
+struct ActOp {
+  typedef v2i type;
+};
+#if WG_F16_A || WG_F16_M
+template <>
+struct ActOp<true> {
+  typedef v16h type;
+};
+#endif
+// F16: the operand made from the FP32 values directly (WG_F16_Q), not through the code bytes.
+template <bool SAFE, bool A16, bool F16 = WG_F16_Q != 0>
+WG_FN typename ActOp<A16>::type pack_act(v8f d) {
+#if WG_F16_A || WG_F16_M
+  if constexpr (A16) {
+#if WG_F16_Q
+    if constexpr (F16) return wg_k16_f16(SAFE ? wg_q8_to_f16_nc(d) : wg_q8_to_f16_inner(d));
+    else
+#endif
+    return wg_k16_codes(pack_in<SAFE>(d));
+  } else
+#endif
+  return pack_in<SAFE>(d);
+}
+// The F16 operand the matrix instruction takes for 8 F16 values per lane (the softmax probabilities).
+template <bool A16>
+WG_FN auto act_f16(v8h p) {
+#if WG_F16_A || WG_F16_M
+  if constexpr (A16) return wg_k16_f16(p);
+  else
+#endif
+  return p;
+}
+#endif
 #if defined(WG_ABLATE_LDS) && WG_ABLATE_LDS
 WG_FN v2i fake_frag(int index, u32 lane) {  // timing-only: a fragment made from registers, no LDS read
   v2i r;
@@ -337,7 +497,11 @@ WG_FN v2i fake_frag(int index, u32 lane) {  // timing-only: a fragment made from
 }
 #define WG_MLP_FRAG(U, idx, lane) fake_frag(idx, lane)
 #else
+#if WG_SWIN_G11
+#define WG_MLP_FRAG(U, idx, lane) WFrag<W16>::load(U, idx, lane)
+#else
 #define WG_MLP_FRAG(U, idx, lane) lfrag(U, idx, lane)
+#endif
 #endif
 
 // Fused expand (decoder blocks, WG_FUSE): the block input e = q8(We y + be) of a workgroup's 8 windows is computed here
@@ -466,24 +630,66 @@ template <int C, int HEADS, int MLP, int WPW, bool ADD, int GROUP, bool SAFE, in
 WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8* __restrict__ out,
                       const u8* __restrict__ w, int H, int W, int ox, int oy, u8* __restrict__ aux WG_PROF_ARG_DECL,
                       const void* epi = nullptr, int nwg = 0) {
+#if WG_SWIN_G11
+#if WG_F16_W
+  // weights as F16 in LDS (Stager::commit16); not the C = 128 kernel: the F16 fragments (8 registers each) put it over
+  // 256 registers and it spills 94
+  constexpr bool W16 = MCO == 0 && ECL == 0 && !RESIDENT && !EPI::kFused && C < 128;
+  static_assert(!W16 || WG_MLP_PF == 0, "WG_F16_W: no LDS prefetch of the MLP fragments");
+#else
+  constexpr bool W16 = false;
+#endif
+  typedef BlockLayout<C, HEADS, MLP, W16> L;
+#else
   typedef BlockLayout<C, HEADS, MLP> L;
+#endif
   constexpr int KC = L::KC, HALF = C / 2, MAXU = L::MAXU;
   // HYB: the hybrid block form (clean/kernels/wg_hyb.h; the twin of the D3D12 SW_HYB kernels, same bytes): float32 FP8
   // chains with one FP16 rounding at each chain's end, the original's norm / softmax / GELU and start values. Only the
   // plain block path has it.
   static_assert(!HYB || (MCO == 0 && ECL == 0 && !RESIDENT && !WG_AV8 && !WG_SMAX16), "HYB: plain block path only");
+#if WG_SWIN_G11
+  constexpr int UB = W16 ? 2 * MAXU : MAXU;  // bytes of a weight unit buffer in LDS
+#if WG_F16_A
+  // activations as F16 operands (pack_act): the C = 64 kernels; C = 96 would spill 12 registers, C = 128 none (WG_SCHED_FRAGS)
+  constexpr bool A16 = C < 96 || (WG_F16_AWIDE != 0 && C >= WG_F16_AWIDE);
+  static_assert(!WG_AV8 && WG_GELU_MODE < 3, "WG_F16_A: no FP8 A.V, no packed-FP16 GELU");
+#else
+  constexpr bool A16 = false;
+#endif
+  typedef typename ActOp<A16>::type AO;
+#if WG_F16_M
+  // the MLP's operands (norm2 output mf, hidden values hf) as F16 operands where the activations are codes (C = 96, 128)
+  constexpr bool M16 = !A16 && C >= 96 && MCO == 0 && ECL == 0 && !RESIDENT && !EPI::kFused;
+  static_assert(!M16 || (!WG_AV8 && WG_GELU_MODE < 3), "WG_F16_M: no FP8 A.V, no packed-FP16 GELU");
+#else
+  constexpr bool M16 = false;
+#endif
+  typedef typename ActOp<A16 || M16>::type MO;
+  static_assert(!HYB || (!W16 && !A16 && !M16), "HYB: FP8 weight and activation operands only (no gfx11 F16 operand variants)");
+  constexpr bool FQ = WG_F16_Q != 0 && (C < 96 || (WG_F16_QWIDE != 0 && C >= WG_F16_QWIDE));  // operands straight from FP32
+  constexpr bool SF = WG_SCHED_FRAGS != 0 && C >= WG_SCHED_FRAGS;  // no scheduler motion across a fragment step
+#endif
   // RESIDENT (kernels *_r): the block's whole weight stream (every head and MLP unit) stays in LDS for the whole
   // launch; each wave runs windows wave_id, wave_id + total waves, ... with no staging and no barrier after the first
   // copy. Same arithmetic per window as the staged kernel (bit-identical).
   constexpr int RES = L::SIZE - L::STREAM;
   static_assert(!RESIDENT || (MCO == 0 && ECL == 0 && !EPI::kFused && WPW == 1), "resident: plain block kernels only");
   static_assert(!SRC::kCustom || (MCO == 0 && ECL == 0 && !ADD), "custom gather source: plain block kernels only");
+#if WG_SWIN_G11
+  WG_LDS __attribute__((aligned(16))) u8 lds[RESIDENT ? (RES + 15) / 16 * 16 : 2 * UB];
+#else
   WG_LDS __attribute__((aligned(16))) u8 lds[RESIDENT ? (RES + 15) / 16 * 16 : 2 * MAXU];
+#endif
   Stager<MAXU, THREADS> stage;
   const u32 tid = wg_lane_id();
   const u32 lane = tid & 31u, t = lane & 15u, hh = lane >> 4;
   const int nwx = (W + ox + 3) >> 2, nwy = (H + oy + 3) >> 2, nwin = nwx * nwy;
+#if WG_SWIN_G11 || defined(WG_EMU)
+  const u32 wave_id = (WG_WAVE_SCALAR && ECL == 0) ? (u32)wg_uniform((int)(tid >> 5)) : (tid >> 5);
+#else
   const u32 wave_id = (WG_WAVE_SCALAR && ECL == 0) ? (u32)__builtin_amdgcn_readfirstlane((int)(tid >> 5)) : (tid >> 5);
+#endif
   int win0 = (int)(wg_block_id() * (THREADS / WG_WAVE) + wave_id) * WPW;
   static_assert(MCO == 0 && ECL == 0 || (THREADS == 256 && WPW == 1), "fused merge / expand: 8 windows per workgroup");
   static_assert(ECL == 0 || 128 * C <= MAXU, "fused expand: the 8 windows' expanded tokens must fit one weight buffer");
@@ -501,7 +707,9 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
   if constexpr (RESIDENT) { if (win0 >= nwin) break; }
   // re-read the header vectors (norm gains, biases) per window: otherwise they are hoisted out of the window loop and
   // held in registers (235 VGPRs instead of about 165, half the occupancy)
+#ifndef WG_EMU  // the "s" register constraint is AMDGCN only
   if constexpr (RESIDENT) __asm__ volatile("" : "+s"(w));
+#endif
 
   // Gather: token t of the window, mirrored at the borders.
   int dst[WPW];
@@ -548,7 +756,11 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
   }
 
   if constexpr (!RESIDENT) {
+#if WG_SWIN_G11
+    stage.template commit_w<L::HEAD_BYTES, W16>(lds, tid);
+#else
     stage.template commit<L::HEAD_BYTES>(lds, tid);
+#endif
     wg_barrier_lds();
   }
   if constexpr (ECL > 0) {  // the expanded tokens are in LDS now
@@ -573,7 +785,11 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
 #else
   // Steps 1-2: a = q8(RMSNorm(x; gamma1)). The accumulator for step 7, x1 = x + Wp q8(o) + bp, starts as x + bp;
   // each head adds its slice of Wp q8(o) as soon as its o is known (only one head's o is ever live).
+#if WG_SWIN_G11
+  AO af[WPW][KC];
+#else
   v2i af[WPW][KC];
+#endif
   v8f acc[WPW][KC];
   {
     const float* g1 = (const float*)(w + L::G1) + hh * HALF;
@@ -617,7 +833,11 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
 #endif
 #pragma unroll
       for (int k = 0; k < KC; ++k) {
+#if WG_SWIN_G11
+        af[i][k] = pack_act<SAFE, A16, FQ>(acc[i][k] * r * wg_load8f(g1 + 8 * k));
+#else
         af[i][k] = pack_in<SAFE>(acc[i][k] * r * wg_load8f(g1 + 8 * k));
+#endif
         acc[i][k] += WG_BIAS8(bp + k * 16);
       }
     }
@@ -633,9 +853,17 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
       WG_STAGING(if (last) stage.template fetch<L::MLP_BYTES>(w + L::mlp(0), tid);
                  else stage.template fetch<L::HEAD_BYTES>(w + L::head(hd + 1), tid);)
     }
+#if WG_SWIN_G11
+    const u8* U = RESIDENT ? lds + hd * L::HEAD_BYTES : lds + buf * UB;
+#else
     const u8* U = RESIDENT ? lds + hd * L::HEAD_BYTES : lds + buf * MAXU;
+#endif
     // u = q8(Wqk a): result rows are this head's 32 channels in two tiles, columns are tokens.
+#if WG_SWIN_G11
+    AO uf[WPW][2];
+#else
     v2i uf[WPW][2];
+#endif
     // V^T = a^T Wv^T: rows are tokens (key index s), columns are the 32 value channels in two tiles.
 #if WG_AV8
     v2i vt[WPW][2];
@@ -649,8 +877,13 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
       for (int i = 0; i < WPW; ++i) accq[i] = accv[i] = wg_splat(0.0f);
 #pragma unroll
       for (int kc = 0; kc < KC; ++kc) {
+#if WG_SWIN_G11
+        const typename WFrag<W16>::type fq = WFrag<W16>::load(U, (mt * KC + kc) * 2, lane);
+        const typename WFrag<W16>::type fv = WFrag<W16>::load(U, (mt * KC + kc) * 2 + 1, lane);
+#else
         const v2i fq = lfrag(U, (mt * KC + kc) * 2, lane);
         const v2i fv = lfrag(U, (mt * KC + kc) * 2 + 1, lane);
+#endif
 #pragma unroll
         for (int i = 0; i < WPW; ++i) {
 #if defined(WG_ABLATE_QKV) && WG_ABLATE_QKV
@@ -661,11 +894,18 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
           accv[i] = wg_wmma_fp8(af[i][kc], fv, accv[i]);
 #endif
         }
+#if WG_SWIN_G11
+        if constexpr (SF) WG_SCHED_FENCE();
+#endif
       }
 #pragma unroll
       for (int i = 0; i < WPW; ++i) {
         if constexpr (HYB) uf[i][mt] = hyb_q8_of_chain(accq[i]);
+#if WG_SWIN_G11
+        else uf[i][mt] = pack_act<SAFE, A16, FQ>(accq[i]);
+#else
         else uf[i][mt] = pack_in<SAFE>(accq[i]);
+#endif
 #if WG_AV8
         vt[i][mt] = pack_in<SAFE>(accv[i]);
 #else
@@ -675,14 +915,22 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
     }
     WG_PHASE(2, uf[0][1][0]);
 #if defined(WG_ABLATE_ATTN) && WG_ABLATE_ATTN
+#if WG_SWIN_G11
+    AO of[WPW][2];
+#else
     v2i of[WPW][2];
+#endif
 #pragma unroll
     for (int i = 0; i < WPW; ++i) { of[i][0] = uf[i][0]; of[i][1] = uf[i][1]; (void)vt[i][0]; (void)vt[i][1]; }
     (void)t;
 #else
     // Lane (t, h) holds logits S(t, s) for the 8 keys s = drow(h, v); bias is packed in the same order.
     const v8f bias = wg_load8f((const float*)(w + L::BIAS) + ((hd * 16 + (int)t) * 2 + (int)hh) * 8);
+#if WG_SWIN_G11
+    AO of[WPW][2];
+#else
     v2i of[WPW][2];
+#endif
 #pragma unroll
     for (int i = 0; i < WPW; ++i) {
       if constexpr (HYB) {   // s = one 32-term FP8 op started at B; the original's weights; o = FP8(RN16(P V))
@@ -760,10 +1008,15 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
 #endif
 #endif
       // o = A V: rows are value channels, columns are tokens; K = keys, paired by drow on both sides.
-#pragma unroll
 #if WG_AV8
+#pragma unroll
       for (int dt = 0; dt < 2; ++dt) of[i][dt] = pack_in<SAFE>(wg_wmma_fp8(vt[i][dt], p, wg_splat(0.0f)));
+#elif WG_SWIN_G11
+      const auto pw = act_f16<A16>(p);  // the exchange of the probabilities once for both value tiles
+#pragma unroll
+      for (int dt = 0; dt < 2; ++dt) of[i][dt] = pack_act<SAFE, A16, false>(wg_wmma_f16(vt[i][dt], pw, wg_splat(0.0f)));  // codes: 75 spills in the F16 form
 #else
+#pragma unroll
       for (int dt = 0; dt < 2; ++dt) of[i][dt] = pack_in<SAFE>(wg_wmma_f16(vt[i][dt], p, wg_splat(0.0f)));
 #endif
     }
@@ -774,7 +1027,11 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
     for (int mt = 0; mt < KC; ++mt) {
 #pragma unroll
       for (int dt = 0; dt < 2; ++dt) {
+#if WG_SWIN_G11
+        const typename WFrag<W16>::type f = WFrag<W16>::load(U, L::QKV_FRAGS + mt * 2 + dt, lane);
+#else
         const v2i f = lfrag(U, L::QKV_FRAGS + mt * 2 + dt, lane);
+#endif
 #pragma unroll
         for (int i = 0; i < WPW; ++i) {
 #if defined(WG_ABLATE_WP) && WG_ABLATE_WP
@@ -783,19 +1040,32 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
           acc[i][mt] = wg_wmma_fp8(f, of[i][dt], acc[i][mt]);
 #endif
         }
+#if WG_SWIN_G11
+        if constexpr (SF) WG_SCHED_FENCE();
+#endif
       }
     }
     WG_PHASE(4, acc[0][KC - 1]);
     if constexpr (!RESIDENT) {
+#if WG_SWIN_G11
+      WG_STAGING(if (last) stage.template commit_w<L::MLP_BYTES, W16>(lds + (buf ^ 1) * UB, tid);
+                 else stage.template commit_w<L::HEAD_BYTES, W16>(lds + (buf ^ 1) * UB, tid);
+                 wg_barrier_lds(); buf ^= 1;)
+#else
       WG_STAGING(if (last) stage.template commit<L::MLP_BYTES>(lds + (buf ^ 1) * MAXU, tid);
                  else stage.template commit<L::HEAD_BYTES>(lds + (buf ^ 1) * MAXU, tid);
                  wg_barrier_lds(); buf ^= 1;)
+#endif
     }
     WG_PHASE(5, 0);
   }
 
   // Step 8: m = q8(RMSNorm(x1; gamma2)). Then add b2 to the residual accumulator.
+#if WG_SWIN_G11
+  MO mf[WPW][KC];
+#else
   v2i mf[WPW][KC];
+#endif
   {
     const float* g2 = (const float*)(w + L::G2) + hh * HALF;
     const float* b2 = (const float*)(w + L::B2) + hh * 8;
@@ -824,7 +1094,11 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
 #endif
 #pragma unroll
       for (int k = 0; k < KC; ++k) {
+#if WG_SWIN_G11
+        mf[i][k] = pack_act<SAFE, A16 || M16, FQ>(acc[i][k] * r * wg_load8f(g2 + 8 * k));
+#else
         mf[i][k] = pack_in<SAFE>(acc[i][k] * r * wg_load8f(g2 + 8 * k));
+#endif
         acc[i][k] += WG_BIAS8(b2 + k * 16);
       }
     }
@@ -846,7 +1120,11 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
     if constexpr (!RESIDENT) {
       WG_STAGING(if (more) stage.template fetch<L::MLP_BYTES>(w + L::mlp(u + 1), tid);)
     }
+#if WG_SWIN_G11
+    const u8* U = RESIDENT ? lds + HEADS * L::HEAD_BYTES + u * L::MLP_BYTES : lds + buf * UB;
+#else
     const u8* U = RESIDENT ? lds + HEADS * L::HEAD_BYTES + u * L::MLP_BYTES : lds + buf * MAXU;
+#endif
 #if WG_MLP_PF >= 2
     v2i f1[GROUP][KC];  // W1 fragments of the next tile group (filled by the previous iteration, except for the first)
 #endif
@@ -876,11 +1154,18 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
 #if WG_MLP_PF >= 2
           const v2i f = f1[g][kc];
 #else
+#if WG_SWIN_G11
+          const typename WFrag<W16>::type f = WG_MLP_FRAG(U, (j0 + g) * 2 * KC + kc, lane);
+#else
           const v2i f = WG_MLP_FRAG(U, (j0 + g) * 2 * KC + kc, lane);
+#endif
 #endif
 #pragma unroll
           for (int i = 0; i < WPW; ++i) hacc[g][i] = wg_wmma_fp8(f, mf[i][kc], hacc[g][i]);
         }
+#if WG_SWIN_G11
+        if constexpr (SF) WG_SCHED_FENCE();
+#endif
       }
 #endif
       WG_PHASE(7, hacc[GROUP - 1][0]);
@@ -894,7 +1179,11 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
       WG_SCHED_FENCE();  // ... and no instruction at all (machine scheduler): the loads stay ahead of the GELU
 #endif
       // GELU + q8.
+#if WG_SWIN_G11
+      MO hf[GROUP][WPW];
+#else
       v2i hf[GROUP][WPW];
+#endif
 #pragma unroll
       for (int g = 0; g < GROUP; ++g)
 #pragma unroll
@@ -916,7 +1205,11 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
           r[1] = __builtin_bit_cast(int, (ge[4] + ge[5]) + (ge[6] + ge[7]));
           hf[g][i] = r;
 #else
+#if WG_SWIN_G11
+          hf[g][i] = pack_act<SAFE, A16 || M16, FQ>(ge);
+#else
           hf[g][i] = SAFE ? wg_pack_q8_nc(ge) : wg_pack_q8_inner(ge);
+#endif
 #endif
         }
       WG_PHASE(8, hf[GROUP - 1][0][0]);
@@ -944,17 +1237,28 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
 #if WG_MLP_PF >= 1
           const v2i f = f2[g][mt];
 #else
+#if WG_SWIN_G11
+          const typename WFrag<W16>::type f = WG_MLP_FRAG(U, (j0 + g) * 2 * KC + KC + mt, lane);
+#else
           const v2i f = WG_MLP_FRAG(U, (j0 + g) * 2 * KC + KC + mt, lane);
+#endif
 #endif
 #pragma unroll
           for (int i = 0; i < WPW; ++i) acc[i][mt] = wg_wmma_fp8(f, hf[g][i], acc[i][mt]);
         }
+#if WG_SWIN_G11
+        if constexpr (SF) WG_SCHED_FENCE();
+#endif
       }
 #endif
       WG_PHASE(9, acc[0][KC - 1]);
     }
     if constexpr (!RESIDENT) {
+#if WG_SWIN_G11
+      WG_STAGING(if (more) { stage.template commit_w<L::MLP_BYTES, W16>(lds + (buf ^ 1) * UB, tid); wg_barrier_lds(); buf ^= 1; })
+#else
       WG_STAGING(if (more) { stage.template commit<L::MLP_BYTES>(lds + (buf ^ 1) * MAXU, tid); wg_barrier_lds(); buf ^= 1; })
+#endif
     }
     WG_PHASE(10, 0);
   }
@@ -1007,6 +1311,17 @@ WG_FN void copy_to_lds(u8* dst, const u8* src, int bytes, u32 tid) {
   wg_barrier_lds();
 }
 
+// gfx11 (device and emulator): the matrix chain of a token tile runs in every lane. v_wmma needs EXEC all ones, and the
+// compiler moves a result's whole chain into the branch that stores it: with `if (token < ntok)` around the store, a
+// partly valid tile ran its v_wmma with only the valid lanes (NaN codes or wrong values for valid tokens, and 75 to 112
+// spilled registers). So the stores of patch_merge and expand have no branch there: a lane past the last token repeats the
+// work of the last token and stores the same bytes to the same place. Other targets keep the stores they have.
+#if defined(WG_GFX11) || defined(WG_EMU_GFX11)
+#define WG_TILE_STORES_UNGUARDED 1
+#else
+#define WG_TILE_STORES_UNGUARDED 0
+#endif
+
 constexpr int kGemmThreads = WG_GEMM_THREADS;  // patch merge / expand workgroup: waves share the weights staged in LDS
 
 // Patch merge (spec 02): merged(i, j) = q8(Wm concat(TL, TR, BL, BR) + bm) from the q8 block output s [H][W][C].
@@ -1033,6 +1348,39 @@ WG_FN void patch_merge(const u8* __restrict__ s, u8* __restrict__ out, const u8*
   }
   copy_to_lds<kGemmThreads>(lds, w + WM, WBYTES, tid);
   const float* bm = (const float*)(w + BM) + hh * 8;
+#if WG_MERGE_REUSE
+  constexpr int MC = MO <= 6 ? MO : MO / 2;  // output tiles per pass: their accumulators (MC * NT * 8 registers) stay live
+  static_assert(MO % MC == 0, "the output tiles must divide into equal passes");
+#pragma unroll 1
+  for (int m0 = 0; m0 < MO; m0 += MC) {
+    v8f acc[MC][NT];
+#pragma unroll
+    for (int j = 0; j < MC; ++j) {
+      const v8f b = wg_load8f(bm + (m0 + j) * 16);
+#pragma unroll
+      for (int i = 0; i < NT; ++i) acc[j][i] = b;
+    }
+#pragma unroll
+    for (int g = 0; g < KZ; ++g) {
+      v16h z[NT];
+#pragma unroll
+      for (int i = 0; i < NT; ++i) z[i] = wg_k16_codes(zf[i][g]);
+#pragma unroll
+      for (int j = 0; j < MC; ++j) {
+        const v16h f = wg_k16_codes(lfrag(lds, (m0 + j) * KZ + g, lane));
+#pragma unroll
+        for (int i = 0; i < NT; ++i) acc[j][i] = wg_wmma_fp8(f, z[i], acc[j][i]);
+      }
+    }
+#pragma unroll
+    for (int j = 0; j < MC; ++j)
+#pragma unroll
+      for (int i = 0; i < NT; ++i) {
+        const int d = tok[i] < ntok ? tok[i] : ntok - 1;
+        *(v2i*)(out + (size_t)d * CO + hh * (CO / 2) + 8 * (m0 + j)) = wg_pack_q8(acc[j][i]);
+      }
+  }
+#else
   // One output tile (8 channels per lane) at a time, stored right away: keeps register use low.
 #pragma unroll 1
   for (int mt = 0; mt < MO; ++mt) {
@@ -1047,10 +1395,18 @@ WG_FN void patch_merge(const u8* __restrict__ s, u8* __restrict__ out, const u8*
       for (int i = 0; i < NT; ++i) acc[i] = wg_wmma_fp8(f, zf[i][g], acc[i]);
     }
 #pragma unroll
+#if WG_TILE_STORES_UNGUARDED
+    for (int i = 0; i < NT; ++i) {
+      const int d = tok[i] < ntok ? tok[i] : ntok - 1;
+      *(v2i*)(out + (size_t)d * CO + hh * (CO / 2) + 8 * mt) = HYB ? hyb_merge_q8(acc[i]) : wg_pack_q8(acc[i]);
+    }
+#else
     for (int i = 0; i < NT; ++i)
       if (tok[i] < ntok)
         *(v2i*)(out + (size_t)tok[i] * CO + hh * (CO / 2) + 8 * mt) = HYB ? hyb_merge_q8(acc[i]) : wg_pack_q8(acc[i]);
+#endif
   }
+#endif
 }
 
 // Expand (spec 02): e = q8(We y + be) for each low-resolution token, written as an FP8 map e [2Hl][2Wl][C]
@@ -1096,8 +1452,13 @@ WG_FN void expand(const u8* __restrict__ y, u8* __restrict__ e, const u8* __rest
     }
 #pragma unroll
     for (int i = 0; i < NT; ++i) {
+#if WG_TILE_STORES_UNGUARDED
+      const int d = tok[i] < ntok ? tok[i] : ntok - 1;
+      const int r = d / Wl, c = d - r * Wl;
+#else
       if (tok[i] >= ntok) continue;
       const int r = tok[i] / Wl, c = tok[i] - r * Wl;
+#endif
       const size_t dst = (size_t)((2 * r + (k >> 1)) * (2 * Wl) + 2 * c + (k & 1)) * C + hh * (C / 2);
       store_frags<G>(e + dst, res[i]);
     }

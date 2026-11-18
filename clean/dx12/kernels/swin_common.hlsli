@@ -76,7 +76,11 @@ float sw_hmax8(v8f a)
 // v_cvt_pk_f32_fp8); 0: software (about 8 instructions per value). Same bits as HIP, NaN codes included (checked by the
 // whole-kernel differential test with random and full-range FP8 inputs; this direction is not in probe/arith3).
 #ifndef SW_UNPACK_AGS
+#if WG_GFX == 11   // the FP8 B conversion of the channel does not exist on RDNA 3
+#define SW_UNPACK_AGS 0
+#else
 #define SW_UNPACK_AGS 1
+#endif
 #endif
 v8f sw_unpack_fp8(uint2 q)
 {

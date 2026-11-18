@@ -358,6 +358,13 @@ DRow drow_gfx12() {
   return d;
 }
 
+DRow drow_gfx11() {
+  DRow d;
+  for (int h = 0; h < 2; ++h)
+    for (int v = 0; v < 8; ++v) d[h][v] = 2 * v + h;
+  return d;
+}
+
 size_t swin_tail_offset(const std::string& stage) {
   const SwinStageInfo& s = swin_table().at(stage);
   return align_up(block_layout(s.C, s.heads, s.mlp).size);

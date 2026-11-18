@@ -133,6 +133,34 @@ objects and the converter map into `build`; the FidelityFX front end loads it (c
 other than `gfx12`, set `WG_D_ROW` to the reported table (for example `set WG_D_ROW=[[0,2,4,...],[1,3,...]]`)
 before running.
 
+## Linux (gfx1100 and gfx1201)
+
+`--rocm` names an SDK in the layout of AMD's installer: `bin/clang`, the device library in `amdgcn/bitcode` and
+`libamdhip64.so` in `lib`. A distribution's ROCm that keeps these elsewhere is used through a folder of links in that
+layout.
+
+```
+python clean/runner/build.py --rocm <ROCm> --out build --no-runtime --no-model-k                 # gfx1201, all code objects
+python clean/runner/build.py --arch gfx1100 --rocm <ROCm> --out build-gfx1100                     # the gfx11 default sources
+python clean/runner/build.py --arch gfx1100 --rocm <ROCm> --out build-gfx1100 --sources post.hip frame.hip
+```
+
+Targets are matched by exact name (`runner/family.py`): gfx1200 and gfx1201 are gfx12, gfx1100 and gfx1101 are gfx11,
+anything else is refused. A gfx11 build compiles the Model M kernels of `FAMILY_SOURCES` in `build.py` (with `--variants`, the
+swin variants of the family) and no Model K or L kernels, post_w64 or motion variants or resource gate; `--sources` builds a
+chosen list for either family. Both write `target.json` next to the code objects, and `Runner` takes its default accumulator
+row table from it (`WG_D_ROW` and the `d_row` argument still win). Unless `--no-runtime` or `--sources` is given, a gfx11 build
+also makes `libwg_runtime.so` (nothing built in: it reads its code objects from the folder as `<arch>.<name>`, copies of the
+files that the build writes next to them, and the runtime takes the row table of its device's target; `--runtime-only` does
+this step alone). The runtime's HIP gate takes the same four targets (`runtime/target_family.h`).
+
+On a gfx11 card (headless, one GPU job at a time): `python clean/runner/selftest.py --build <build> --rocm <ROCm>` (the
+half-wave exchange and the software FP8 conversions; the matrix and hardware-conversion probes are gfx12 only),
+`WG_GPU_TEST=1 WG_BUILD=<build> WG_ROCM=<ROCm> python -m unittest clean.tests.test_gpu_stages clean.tests.test_gpu_q8` (the
+stages without matrix instructions, and the conversions on a set of input chunks) and
+`python clean/runner/q8_exhaustive.py --build <build> --rocm <ROCm>` (the conversions over all 2^32 FP32 patterns, about two
+minutes).
+
 ## Spec team: stages post and filter (spec 06)
 
 ```

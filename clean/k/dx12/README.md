@@ -97,7 +97,7 @@ refuse a header whose digest differs; `WG_DX12_SMX_DIGEST=0` lets a negative-con
 `build.py` never embeds a test-only, bypassed, define-built, unprovenanced or stale entry, and the payload packager
 refuses a library whose build manifest does not record that check (`clean/tests/test_dev_diagnostics_off.py`).
 
-The test hook `k_smx_test` (`mix_fail`, `both_fail`, `rodd_unchecked`, `report`) exists only in runtime libraries built
+The test hook `k_smx_test` (`mix_fail`, `both_fail`, `rodd_unchecked`, `mix_unchecked`, `report`) exists only in runtime libraries built
 with `build.py --dev-diagnostics`; a release build refuses it (`test_k_runtime_d3d12.py`:
 `test_native_softmax_switch_is_logged`, `test_native_softmax_refusals`, `test_native_fallback_frames_*`). Negative
 controls, never shipped: `K_SMX_MUT=1` (the mix form's residual dropped), `K_SMX_MUT4=1` (dropped only at window offset

@@ -23,6 +23,9 @@
 #include "k_pack.h"
 #include "model_k.h"
 #include "model_k_load.h"
+#if defined(WG_DEV_GFX11) || defined(WG_DEV_DIAGNOSTICS)
+#include "k_blk_align.h"
+#endif
 
 // The host-side FP32 values of k_io.py out_uniforms: each operation rounded on its own (no contraction).
 #if defined(_MSC_VER) && !defined(__clang__)
@@ -575,8 +578,8 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   smx_test_ = option(c, "k_smx_test");
 #ifdef WG_DEV_DIAGNOSTICS
   if (!smx_test_.empty() && smx_test_ != "mix_fail" && smx_test_ != "both_fail" && smx_test_ != "rodd_unchecked" &&
-      smx_test_ != "report")
-    return fail("model K: k_smx_test must be mix_fail, both_fail, rodd_unchecked or report");
+      smx_test_ != "mix_unchecked" && smx_test_ != "report")
+    return fail("model K: k_smx_test must be mix_fail, both_fail, rodd_unchecked, mix_unchecked or report");
 #else
   if (!smx_test_.empty()) return fail("model K: k_smx_test is a test hook of developer builds only");
 #endif
@@ -690,6 +693,23 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
       if (!dev_->prepare(k)) return dfail();
     prepared_ = true;
   }
+#if defined(WG_DEV_GFX11) || defined(WG_DEV_DIAGNOSTICS)
+  // developer builds: the native RDNA 3 K kernels' 16-byte premise (k_blk_align.h) on the parameters every stage of this
+  // context will get, built by block_params from the buffers and weight sections allocated above
+  {
+    const auto& table = k_stage_table();
+    for (size_t i = 0; i < table.size(); ++i) {
+      const KStageInfo& st = table[i];
+      const FusedIo& io = kFusedIo[i];
+      const KBlkParams p = block_params(st, wdev_[st.name], net_[io.in], io.block ? net_[io.block] : 0,
+                                        io.skip ? net_[io.skip] : 0, io.merged ? net_[io.merged] : 0,
+                                        io.head ? net_[io.head] : 0, 8, 8, 8, 8, 0, 0);
+      if (const char* bad = k_blk_misaligned(p))
+        return fail(std::string("model K: stage ") + st.name + " parameter " + bad +
+                    " is not 16-byte aligned (the native RDNA 3 kernels need every stage pointer 16-byte aligned)");
+    }
+  }
+#endif
   if (!smx_select(c.backend, smx_test_)) return false;
   if (!approx_note_.empty()) notes_ += (notes_.empty() ? "" : "\n") + approx_note_;
   return true;
@@ -903,6 +923,14 @@ bool KRuntime::smx_select(int backend, const std::string& hook) {
     add_note("model K: test hook: the round-to-odd softmax ports without the create-time check");
     return true;
   }
+#ifdef WG_DEV_DIAGNOSTICS
+  if (hook == "mix_unchecked") {  // the mix form without the check: a gfx11 board's hashes differ from the gfx12 HIP ones
+    smx_rodd_ = false;
+    smx_note_ = " smx=mix(unchecked)";
+    add_note("model K: test hook: the mix softmax ports without the create-time check");
+    return true;
+  }
+#endif
   int bad[2] = {0, 0};
   std::vector<std::pair<std::string, uint64_t>> h[2];
   const bool all = hook == "report";
@@ -960,6 +988,14 @@ std::string KRuntime::stage_kernel(const std::string& k, const char* stage) cons
 bool KRuntime::launch(const char* kernel, unsigned grid, unsigned block, void* a0, void* a1, void* a2, void* a3,
                       void* a4, void* a5, void* a6, void* a7) {
   if (grid == 0) return true;
+#if defined(WG_DEV_GFX11) || defined(WG_DEV_DIAGNOSTICS)
+  // developer builds: every k_stage* kernel takes KBlkParams first (network() and the softmax self-check); refuse a
+  // parameter block with a pointer the native RDNA 3 kernels would round down (k_blk_align.h)
+  if (a0 && std::strncmp(kernel, "k_stage", 7) == 0)
+    if (const char* bad = k_blk_misaligned(*static_cast<const KBlkParams*>(a0)))
+      return fail(std::string("model K: ") + kernel + " parameter " + bad +
+                  " is not 16-byte aligned (the native RDNA 3 kernels need every stage pointer 16-byte aligned)");
+#endif
   void* args[8] = {a0, a1, a2, a3, a4, a5, a6, a7};
   if (pending_mark_ >= 0) {
     const int e = pending_mark_;

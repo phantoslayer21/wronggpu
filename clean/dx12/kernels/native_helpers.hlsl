@@ -12,7 +12,7 @@
 // @wg-kernel color_divide co=frame.co block=256 wave=32 args=p,p,u,u defines=WG_NATIVE_COLOR=1
 // @wg-kernel scale_rgb co=frame.co block=256 wave=32 args=p,u,u defines=WG_NATIVE_SCALE=1
 // @wg-kernel timing_barrier co=frame.co block=32 wave=32 args=u defines=WG_NATIVE_TIMING=1
-// @wg-kernel native_fill co=- block=256 wave=32 args=p,u,u defines=WG_NATIVE_FILL=1
+// @wg-kernel native_fill co=- block=256 wave=32 args=p,u,u defines=WG_NATIVE_FILL=1 gfx=11,12
 #include "wg_platform.hlsli"
 
 #if defined(WG_NATIVE_COLOR)

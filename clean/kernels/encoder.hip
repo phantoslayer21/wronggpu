@@ -38,6 +38,15 @@
 // so every build variant and compiler schedule gives the same bits.
 #pragma clang fp contract(off)
 
+// gfx11 (device and emulator): the token tile's features are stored from every lane. v_wmma and v_permlanex16 need EXEC all
+// ones, and the compiler moves the projection (the lane exchange and the matrix chain) into the one branch that uses it, the
+// store behind `if (tok < ntok)`: a partly valid tile then ran them with only the valid lanes. A lane past the last token
+// repeats the work of the last token (its loads are clamped to it) and stores the same bytes to the same place.
+#if defined(WG_GFX11) || defined(WG_EMU_GFX11)
+#define WG_ENC_STORE_UNGUARDED 1
+#else
+#define WG_ENC_STORE_UNGUARDED 0
+#endif
 #ifndef WG_ENC_SEQ
 #define WG_ENC_SEQ 0  // 1: scheduling barrier between the two pixels of a lane (fewer registers, less overlap)
 #endif
@@ -614,7 +623,11 @@ WG_FN void encoder_main(const Frame& f, u8* __restrict__ features, u32* __restri
   // The fence keeps the next pair's 16 A fragments from being loaded early (LLVM would otherwise load all 32 at the
   // start, 64 VGPRs).
   const float* bias = (const float*)(w + kOffBias) + hh * 8;
+#if WG_ENC_STORE_UNGUARDED
+  const u32 fo = (u32)(1 ? tk : tok) * kFeat + hh * (kFeat / 2);
+#else
   const u32 fo = (u32)tok * kFeat + hh * (kFeat / 2);
+#endif
 #pragma unroll
   for (int pr = 0; pr < kMT / 2; ++pr) {
     v8f acc[2];
@@ -639,7 +652,11 @@ WG_FN void encoder_main(const Frame& f, u8* __restrict__ features, u32* __restri
       o[2 * j] = (u32)qo[0];
       o[2 * j + 1] = (u32)qo[1];
     }
+#if WG_ENC_STORE_UNGUARDED
+    wg_st128(features, fo + 16u * pr, (v4u){o[0], o[1], o[2], o[3]});
+#else
     if (tok < ntok) wg_st128(features, fo + 16u * pr, (v4u){o[0], o[1], o[2], o[3]});
+#endif
     wg_fence();
   }
 #endif

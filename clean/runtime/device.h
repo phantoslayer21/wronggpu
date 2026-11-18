@@ -28,6 +28,9 @@ class Device {
  public:
   virtual ~Device() = default;
   virtual std::string name() const = 0;
+  // The exact GPU target whose code objects this device loads ("gfx1201"); empty when it has none (emulator, D3D12; a D3D12
+// device on an RX 7900 series board of a WG_DEV_GFX11 build reports "gfx1100", rdna4.h).
+  virtual std::string arch() const { return std::string(); }
   // All calls return false and set err() on failure.
   virtual bool alloc(DevPtr* p, size_t bytes) = 0;
   virtual void free(DevPtr p) = 0;

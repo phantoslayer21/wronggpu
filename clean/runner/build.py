@@ -26,12 +26,22 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
+from clean.runner import family as F  # noqa: E402
 from clean.runner import perf_variants as PV  # noqa: E402
 from clean.runner import variants as V  # noqa: E402
 from clean.k.runner import k_build  # noqa: E402  (model K kernels, clean/k)
 KERNEL_DIR = os.path.join(os.path.dirname(HERE), "kernels")
 SOURCES = ["swin.hip", "probe.hip", "overlap.hip", "rates.hip", "mlpbench.hip", "encoder.hip", "decoder.hip", "exposure.hip",
            "post.hip", "frame.hip", "dec1_dec0.hip"]
+# Default sources of the families that do not build the whole gfx12 set: the kernels that are ported (gfx11: swin.hip
+# through the wrappers of wg_platform.h) or compile unchanged; no Model K / L kernels, no post_w64 variants
+FAMILY_SOURCES = {"gfx11": ["post.hip", "exposure.hip", "frame.hip", "probe.hip", "swin.hip", "encoder.hip", "decoder.hip",
+                            "dec1_dec0.hip"]}
+# -D macros of a family's code objects, by source. gfx11 swin.hip: the plain software FP32 -> E4M3 conversion
+# (wg_platform.h, -DWG_SLOW_Q8): with the faster one the C=128 block kernel spills 27 VGPRs and the others take 30 to 35
+# more (clang 20, --report); the faster form is for the speed slice, which budgets the registers
+# dec1_dec0.hip includes the same block and takes the same define (178 VGPRs against 214 with the faster conversion)
+FAMILY_DEFINES = {"gfx11": {"swin.hip": {"WG_SLOW_Q8": 1}, "dec1_dec0.hip": {"WG_SLOW_Q8": 1}}}
 RUNTIME_DIR = os.path.join(os.path.dirname(HERE), "runtime")
 RUNTIME_SOURCES = ["device.cpp", "embedded.cpp", "model.cpp", "runtime.cpp",
                    os.path.join("..", "converter", "src", "sha256.cpp"),   # shared with the converter (spec 08)
@@ -503,6 +513,15 @@ def write_build_manifest(out_dir, cmd, embedded, dx12=None):
     print(f"build manifest: {path} (dev_diagnostics={str(manifest['dev_diagnostics']).lower()}, sha256 {manifest['sha256'][:16]}...)", flush=True)
 
 
+def link_arch_objects(out_dir):
+    """<ARCH>.<name> next to every code object of out_dir: the runtime loads the code objects of the target it found
+    (clean/runtime/device.cpp: <arch>.<name>, never the unqualified file). A gfx12 build makes these copies as it embeds
+    the files (write_embedded)."""
+    for n in sorted(os.listdir(out_dir)):
+        if n.endswith(".co") and not n.startswith("gfx"):
+            shutil.copyfile(os.path.join(out_dir, n), os.path.join(out_dir, f"{ARCH}.{n}"))
+
+
 def run(cmd):
     print(" ".join(f'"{c}"' if " " in c else c for c in cmd), flush=True)
     r = subprocess.run(cmd)
@@ -589,9 +608,15 @@ def run_post_w64(cmd, out_dir, gate=True, report_name=POST_W64_REPORT, gates=Non
 
 
 def main(argv=None):
+    global ARCH
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--rocm", default=os.environ.get("ROCM_PATH", ""), help="ROCm / HIP SDK directory")
     ap.add_argument("--out", required=True, help="output directory for the code objects")
+    ap.add_argument("--arch", help=f"GPU target (default {ARCH}, or the environment variable WG_GPU_ARCH); gfx1100 and "
+                                   "gfx1101 build the default sources of FAMILY_SOURCES and a runtime library that reads them from the folder (no embedded table)")
+    ap.add_argument("--sources", nargs="+", metavar="FILE",
+                    help="build only these kernel sources (names in clean/kernels, e.g. post.hip) as <name>.co and "
+                         "write target.json; no models, variants, runtime or emulator")
     ap.add_argument("--clang", help="clang executable (default: from --rocm, then PATH)")
     ap.add_argument("--no-device-libs", action="store_true", help="add -nogpulib instead of the ROCm device libs")
     ap.add_argument("--report", action="store_true", help="print VGPR/spill/occupancy per kernel")
@@ -614,6 +639,9 @@ def main(argv=None):
                          "variants.json and perf_variants.json next to the runtime library)")
     ap.add_argument("--emu", action="store_true", help="also build the host emulator library (Linux)")
     ap.add_argument("--emu-only", action="store_true", help="only build the host emulator library")
+    ap.add_argument("--emu-gfx11", action="store_true",
+                    help="with --emu / --emu-only: also the emulator library of the gfx11 matrix wrappers "
+                         "(wg_emu__gfx11.so; Runner(..., backend='emu', arch='gfx11'))")
     ap.add_argument("--cxx", default=os.environ.get("CXX", "clang++"), help="host C++ compiler for --emu")
     ap.add_argument("--no-runtime", action="store_true", help="do not build the per-frame runtime library")
     ap.add_argument("--no-resource-gate", action="store_true",
@@ -653,9 +681,19 @@ def main(argv=None):
         args.perf_variants = True
 
     os.makedirs(args.out, exist_ok=True)
+    ARCH = args.arch or ARCH
     EXTRA_ARCHS[:] = [a for a in args.extra_archs.split(",") if a and a != ARCH]
-    if any(a not in ("gfx1200", "gfx1201") for a in [ARCH] + EXTRA_ARCHS):
-        raise SystemExit("supported release targets are gfx1200 and gfx1201 only")
+    try:
+        fam = F.family(ARCH)
+    except ValueError as e:
+        raise SystemExit(str(e))
+    if any(F.FAMILIES.get(a) != "gfx12" for a in EXTRA_ARCHS):
+        raise SystemExit("--extra-archs takes gfx12 targets only (gfx1200, gfx1201)")
+    if fam != "gfx12" and args.motion_outres_only:
+        raise SystemExit(f"{ARCH} has no motion-at-output-resolution code objects (gfx11 builds the default sources)")
+    for s_ in args.sources or []:
+        if not os.path.isfile(os.path.join(KERNEL_DIR, s_)):
+            raise SystemExit(f"--sources: {s_} is not a kernel source in {KERNEL_DIR}")
     if args.runtime_only:
         if MODEL_L and args.rocm:  # Model L's code objects next to the given ones (release builds reuse pinned ones)
             clang = args.clang or find_clang(args.rocm)
@@ -663,7 +701,9 @@ def main(argv=None):
             for arch in EXTRA_ARCHS:
                 build_device_l(clang, args.rocm, os.path.join(args.out, arch), device_libs=not args.no_device_libs,
                                arch=arch)
-        build_runtime(args.runtime_cxx or find_host_cxx(args.rocm), args.out, embed=not args.no_embed)
+        if fam == "gfx11":  # no embedded table: the runtime reads <arch>.<name> from the folder
+            link_arch_objects(args.out)
+        build_runtime(args.runtime_cxx or find_host_cxx(args.rocm), args.out, embed=not args.no_embed and fam == "gfx12")
         return
     if args.motion_outres_only:
         if not args.rocm and not args.no_device_libs:
@@ -688,6 +728,38 @@ def main(argv=None):
         if not args.rocm and not args.no_device_libs:
             raise SystemExit("--rocm is required (or --no-device-libs for a compile check)")
         clang = args.clang or find_clang(args.rocm)
+        if args.sources or fam in FAMILY_SOURCES:  # a chosen or per-family list: these code objects only
+            for src in args.sources or FAMILY_SOURCES[fam]:
+                run(device_command(clang, args.rocm, os.path.join(KERNEL_DIR, src),
+                                   os.path.join(args.out, os.path.splitext(src)[0] + ".co"),
+                                   device_libs=not args.no_device_libs, report=args.report, soft_fp8=args.soft_fp8,
+                                   defines={**FAMILY_DEFINES.get(fam, {}).get(src, {}),
+                                            **dict(d.split('=', 1) for d in args.define)}))
+            mega = [] if args.sources or fam not in V.FAMILY_MEGA else list(V.FAMILY_MEGA[fam])  # swin_v2.hip builds
+            if (args.variants or mega) and fam in V.FAMILY_VARIANTS:  # swin.hip variants of the family (variants.py)
+                names = [n for n in (V.FAMILY_VARIANTS[fam] if args.variants == "all" else (args.variants or "").split(","))
+                         if n and n != "base" and n not in mega]
+                manifest = {"base": {"file": V.code_object("base"), "defines": {}, "geometry": V.variant_geometry("base"),
+                                     "ablation": False, "source": "swin.hip", "profile": False}}
+                for name in names + mega:
+                    if name not in V.FAMILY_VARIANTS[fam] + V.FAMILY_MEGA.get(fam, ()):
+                        raise SystemExit(f"{name!r} is not a {fam} variant; known: {', '.join(V.FAMILY_VARIANTS[fam])}")
+                    run(device_command(clang, args.rocm, os.path.join(KERNEL_DIR, V.source(name)),
+                                       os.path.join(args.out, V.code_object(name)), device_libs=not args.no_device_libs,
+                                       report=args.report, soft_fp8=args.soft_fp8,
+                                       defines={**FAMILY_DEFINES[fam]["swin.hip"], **V.all_builds()[name],
+                                                **dict(d.split('=', 1) for d in args.define)}))
+                    manifest[name] = {"file": V.code_object(name), "defines": V.all_builds()[name],
+                                      "geometry": V.family_geometry(fam, name), "ablation": False,
+                                      "source": V.source(name), "profile": False}
+                with open(os.path.join(args.out, V.MANIFEST), "w") as f:
+                    json.dump(manifest, f, indent=1)
+            with open(os.path.join(args.out, F.TARGET_FILE), "w") as f:
+                json.dump({"arch": ARCH}, f)
+            if not args.no_runtime and not args.sources:  # the runtime library next to the code objects it loads
+                link_arch_objects(args.out)
+                build_runtime(args.runtime_cxx or find_host_cxx(args.rocm), args.out, embed=False)
+            return
         for src in SOURCES:
             out = os.path.join(args.out, os.path.splitext(src)[0] + ".co")
             run(device_command(clang, args.rocm, os.path.join(KERNEL_DIR, src), out,
@@ -804,9 +876,16 @@ def main(argv=None):
                 raise SystemExit(f"build for {arch} failed ({r.returncode})")
     if args.emu or args.emu_only:
         run(emu_command(args.cxx, os.path.join(args.out, "wg_emu.so")))
+        if args.emu_gfx11:
+            run(emu_command(args.cxx, os.path.join(args.out, "wg_emu__gfx11.so"), {"WG_EMU_GFX11": 1}))
         if args.variants:  # emulator libraries of the requested variants (Runner(..., backend="emu", variant=name))
-            names = [n for n in (V.VARIANTS if args.variants == "all" else args.variants.split(",")) if n != "base"]
+            names = [n for n in (V.FAMILY_VARIANTS["gfx11"] + V.FAMILY_MEGA["gfx11"] if args.emu_gfx11 and args.variants == "all" else
+                                 V.VARIANTS if args.variants == "all" else args.variants.split(",")) if n != "base"]
             for name in names:
+                if args.emu_gfx11:  # the gfx11 matrix wrappers (Runner(..., arch="gfx11", variant=name))
+                    run(emu_command(args.cxx, os.path.join(args.out, f"wg_emu__gfx11__{name}.so"),
+                                    {**V.all_builds()[name], "WG_EMU_GFX11": 1}, V.source(name)))
+                    continue
                 run(emu_command(args.cxx, os.path.join(args.out, f"wg_emu__{name}.so"), V.all_builds()[name],
                                 V.source(name)))
             if args.emu_only:  # the runner reads the variants' launch geometry from the manifest
