@@ -702,6 +702,17 @@ int RunLauncherUiRender(const wstring& outDir, const wstring& fixtureFile, int w
         }
         // Fix it for me before the game's first start (r2b #1): nothing written, the card says it waits for the game's settings
         // folder; the choice made on the page while it isn't there; the question's result toast
+        // Linux: the game's Windows folder is not known (rrconfig.h): Steam has made no Proton folder yet, or the game is not from
+        // Steam and the player has not pointed at its Windows folder; the card says which, in the core's words
+        frame(L"game-rrconfig-nofolder-steam", [&] {
+            bl4("on", -1); v.rrcfgFixed = false; v.rrcfgFile.clear();
+            v.rrcfgWhy = L"Steam has not made this game's Proton folder yet. Start the game once from Steam, then try again"; cardView();
+        });
+        frame(L"game-rrconfig-nofolder-other", [&] {
+            bl4("on", -1); v.rrcfgFixed = false; v.rrcfgFile.clear();
+            v.rrcfgWhy = L"WrongGPU cannot find this game's Windows folder, because it is not a Steam game. Point it at the game's Windows user folder once "
+                         L"(the folder with Documents and AppData in it, inside the game's Wine prefix). Run: WrongGPU windows-folder \"<the game's exe>\" \"<that folder>\""; cardView();
+        });
         frame(L"game-rrconfig-pending", [&] { bl4("on", -1); v.rrcfgFixed = false; cardView(); });
         frame(L"game-rrconfig-pending-choose", [&] { bl4("ask", -1); SetSetting(v.edit, "rr_config_fix", "on", nullptr); cardView(); });
         frame(L"game-rrconfig-pending-toast", [&] {

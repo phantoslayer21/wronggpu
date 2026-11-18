@@ -1849,6 +1849,11 @@ def changed_keys(before, after):
     return sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
 
 
+def test_rr_config_proton(t, opti):
+    if t.native:  # S3: Engine.ini in the game's Proton prefix (launcher_proton_cases.py)
+        __import__("launcher_proton_cases").run(t, opti)
+
+
 def test_rr_config_fix(t, opti):
     """Brief 16 (owner 2026-11-04): Borderlands 4 and Hogwarts Legacy need one line in the player's own Engine.ini for Ray
     Reconstruction, and Borderlands 4 deletes that file unless it is read-only. An install asks (the result's
@@ -2384,7 +2389,7 @@ def test_rr_config_fix(t, opti):
                 "UTF-16" in rcf.get("check_toast", ""), (rx, rcf, [k for k in pg if "ngine" in k]))
         rx, pg, rcf = on_states["unknown"]
         t.check("window, WrongGPU's choice: a folder it can't check says so (not Added by WrongGPU), with Check again (state -1)",
-                rx == 0 and row(pg, "Couldn't check. Start the game once, then check again") and "Check Engine.ini again" in pg and
+                rx == 0 and row(pg, "Can't find the game's Windows folder" if t.native else "Couldn't check. Start the game once, then check again") and "Check Engine.ini again" in pg and
                 not row(pg, "Added by WrongGPU") and rcf.get("state") == -1, (rx, rcf, [k for k in pg if "ngine" in k or "check" in k]))
         # Myself, the game's folder there: the file check in each state (UI review r2 #6, #7): no line (0), the line in a file that
         # isn't read-only (2), read-only (1); the folder made as the game makes it (GameUserSettings.ini in it)
@@ -3122,6 +3127,7 @@ def main():
     test_direct_rr(t, opti, a.synth_f)
     test_sm2_settings(t, opti)
     test_rr_config_fix(t, opti)
+    test_rr_config_proton(t, opti)
     t.skip("http", "[edition] the whole section") if t.native else test_edition_download(t, opti)
     test_players_optiscaler(t, opti)
     test_experimental_and_shared_model(t, opti)

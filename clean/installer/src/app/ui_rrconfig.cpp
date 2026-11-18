@@ -218,7 +218,7 @@ wstring RrConfigQuestionText(const wstring& dir, const wstring& exe) {
     bool first = false;
     if (prot) {
         if (IEq(v.cur.dir, dir) && v.rrcfg != -2) first = v.rrcfg == -1;
-        else if (!v.fixture) { bool known = true; try { RrConfigFile(g.ctx, *rg, nullptr, &known); } catch (...) {} first = !known; }
+        else if (!v.fixture) { bool known = true; try { RrConfigFile(g.ctx, *rg, exe, nullptr, &known); } catch (...) {} first = !known; }
     }
     return RrConfigNotice(*rg, prot, first);
 }
@@ -253,7 +253,7 @@ void RrConfigAction(int id) {
     const RrConfigGame* rg = RrConfigGameFor(v.cur.exe);
     if (!rg) return;
     wstring file = v.rrcfgFile;
-    if (file.empty()) { try { file = RrConfigFile(g.ctx, *rg, nullptr); } catch (...) {} }
+    if (file.empty()) { try { file = RrConfigFile(g.ctx, *rg, v.cur.exe, nullptr); } catch (...) {} }
     if (id == ID_G_RRCFG_OPEN) {
         // never made here: before the game's first start the sub-folder is a guess (Hogwarts Legacy uses WindowsNoEditor, the
         // guess is Windows), and a file made in the wrong one would be edited for nothing (UI review r2 #7)
@@ -285,7 +285,7 @@ void RrConfigAction(int id) {
     if (id == ID_G_RRCFG_CHECK) {
         int state = -1;
         wstring why;
-        try { state = RrConfigLineState(g.ctx, *rg, &file, &why); } catch (...) {}
+        try { state = RrConfigLineState(g.ctx, *rg, v.cur.exe, &file, &why); } catch (...) {}
         v.rrcfg = state;
         v.rrcfgFile = file;
         v.rrcfgWhy = why;

@@ -329,7 +329,7 @@ PageData ReadPageData(const GameEntry& e, const Profile& defaults) {
     ReadAll(Join(e.dir, L"OptiScaler.ini"), oini);
     d.outside = e.hasRecord ? OutsideEdits(d.saved, wini, oini) : std::vector<OutsideEdit>{};
     if (const RrConfigGame* rg = e.hasRecord ? RrConfigGameFor(e.exe) : nullptr) {
-        d.rrcfg = RrConfigLineState(g.ctx, *rg, &d.rrcfgFile, &d.rrcfgWhy);
+        d.rrcfg = RrConfigLineState(g.ctx, *rg, e.exe, &d.rrcfgFile, &d.rrcfgWhy);
         Record m;
         d.rrcfgFixed = LoadRecord(RecordPath(e.dir), m) && m.rrconfig.present;
     }

@@ -2405,6 +2405,94 @@ int main() {
             require(StartsOnPresetK(pk, &rk) && !StartsOnPresetK(pk, &rm), "Preset K: the record's model file in the K cache");
         }
 
+        // ---- S3: natively on Linux the game's profile is its Proton prefix, or the Windows folder the player pointed at ------------
+        if (NativeLinux()) {
+            Context pc;
+            pc.ownDataDir = Join(dir, L"s3-data");
+            const wstring savedDocs = EnvVar(L"WRONGGPU_TEST_DOCUMENTS"), savedLocal = EnvVar(L"LOCALAPPDATA");
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_DOCUMENTS", nullptr);  // no test root: the roots the game really reads
+            SetEnvironmentVariableW(L"LOCALAPPDATA", nullptr);
+            const RrConfigGame* bl4 = RrConfigGameFor(L"Borderlands4.exe");
+            const RrConfigGame* hl = RrConfigGameFor(L"HogwartsLegacy.exe");
+            const wstring lib = Join(dir, L"s3-steam");
+            const wstring common = Join(Join(lib, L"steamapps"), L"common");
+            auto manifest = [&](const wstring& id, const wstring& installdir) {
+                const string t = "\"AppState\"\n{\n\t\"appid\"\t\t\"" + ToUtf8(id) + "\"\n\t\"installdir\"\t\t\"" + ToUtf8(installdir) + "\"\n}\n";
+                EnsureDir(Join(lib, L"steamapps"));
+                WriteFileAtomic(Join(Join(lib, L"steamapps"), L"appmanifest_" + id + L".acf"), t.data(), t.size());
+            };
+            const wstring blExe = Join(Join(common, L"Borderlands 4"), L"OakGame\\Binaries\\Win64\\Borderlands4.exe");
+            const wstring hlExe = Join(Join(common, L"Hogwarts Legacy"), L"Phoenix\\Binaries\\Win64\\HogwartsLegacy.exe");
+            for (const wstring& e : {blExe, hlExe}) { EnsureDir(Parent(e)); WriteFileAtomic(e, "MZ", 2); }
+            manifest(L"4242", L"Borderlands 4");
+            manifest(L"5151", L"Hogwarts Legacy");
+            const wstring compat = Join(Join(lib, L"steamapps"), L"compatdata");
+            wstring f, why;
+            // a Steam game Steam has made no Proton folder for: refused in plain words, nothing written, nothing made
+            require(bl4 && hl && FindProtonPrefix(blExe).state == ProtonPrefixState::NotStarted && FindProtonPrefix(blExe).appid == L"4242",
+                    "Proton prefix: a Steam game with no compatdata is found as such");
+            require(RrConfigLineState(pc, *bl4, blExe, &f, &why) == -1 && f.empty() && Contains(why, L"Proton folder") && Contains(why, L"Start the game once"),
+                    "native Engine.ini: no Proton folder yet: unknown, with the plain sentence");
+            require(!IsDir(compat), "native Engine.ini: nothing was made in Steam's folder");
+            // the prefix exists: Documents (Borderlands 4) and AppData\Local (Hogwarts Legacy) below its steamuser
+            const wstring user = Join(compat, L"4242\\pfx\\drive_c\\users\\steamuser");
+            EnsureDir(Join(user, L"Documents"));
+            require(FindProtonPrefix(blExe).state == ProtonPrefixState::Found && IEq(FindProtonPrefix(blExe).userDir, user), "Proton prefix: found by app id");
+            const wstring cfgDir = Join(user, L"Documents\\My Games\\Borderlands 4\\Saved\\Config\\Windows");
+            EnsureDir(cfgDir);
+            { const string gus = "[ScalabilityGroups]\r\n"; WriteFileAtomic(Join(cfgDir, L"GameUserSettings.ini"), gus.data(), gus.size()); }
+            bool known = false;
+            why.clear();
+            require(IEq(RrConfigFile(pc, *bl4, blExe, &why, &known), Join(cfgDir, L"Engine.ini")) && known && RrConfigLineState(pc, *bl4, blExe, &f, &why) == 0,
+                    "native Engine.ini: Borderlands 4's file is in the prefix's Documents, its folder known");
+            // Hogwarts Legacy in the same library: its own app id's prefix, AppData\Local
+            const wstring hlUser = Join(compat, L"5151\\pfx\\drive_c\\users\\steamuser");
+            const wstring hlDir = Join(hlUser, L"AppData\\Local\\Hogwarts Legacy\\Saved\\Config\\WindowsNoEditor");
+            EnsureDir(hlDir);
+            { const string gus = "[x]\r\n"; WriteFileAtomic(Join(hlDir, L"GameUserSettings.ini"), gus.data(), gus.size()); }
+            require(IEq(RrConfigFile(pc, *hl, hlExe, &why, &known), Join(hlDir, L"Engine.ini")) && known, "native Engine.ini: Hogwarts Legacy's file is in its own prefix's AppData\\Local");
+            // the prefix is in another library the game's own library list names (a game moved to a drive that has none)
+            const wstring other = Join(dir, L"s3-other-lib");
+            EnsureDir(Join(Join(other, L"steamapps"), L"compatdata\\4343\\pfx\\drive_c\\users\\steamuser"));
+            manifest(L"4343", L"Moved Game");
+            const wstring movedExe = Join(Join(common, L"Moved Game"), L"Game.exe");
+            EnsureDir(Parent(movedExe)); WriteFileAtomic(movedExe, "MZ", 2);
+            // Steam's own spelling on Linux: "/home/..." (the vdf has no drive letter)
+            auto steamPath = [](const wstring& p) { string t = ToUtf8(p.size() > 2 && p[1] == L':' ? p.substr(2) : p); for (auto& c : t) if (c == '\\') c = '/'; return t; };
+            const string vdf = "\"libraryfolders\"\n{\n\t\"0\"\n\t{\n\t\t\"path\"\t\t\"" + steamPath(lib) + "\"\n\t}\n\t\"1\"\n\t{\n\t\t\"path\"\t\t\"" + steamPath(other) + "\"\n\t}\n}\n";
+            WriteFileAtomic(Join(Join(lib, L"steamapps"), L"libraryfolders.vdf"), vdf.data(), vdf.size());
+            require(FindProtonPrefix(movedExe).state == ProtonPrefixState::Found && StartsWithI(FullPath(FindProtonPrefix(movedExe).userDir), FullPath(other)),
+                    "Proton prefix: found in another Steam library the list names");
+            // not a Steam game: no folder known until the player points at one once; it is remembered and checked each time
+            const wstring plain = Join(dir, L"s3-epic\\Game\\Borderlands4.exe");
+            EnsureDir(Parent(plain)); WriteFileAtomic(plain, "MZ", 2);
+            require(FindProtonPrefix(plain).state == ProtonPrefixState::NotSteam && RrConfigFile(pc, *bl4, plain, &why).empty() && Contains(why, L"not a Steam game") &&
+                        Contains(why, L"once"), "native Engine.ini: a game that is not from Steam: no folder, asks for the Windows folder once");
+            const wstring win = Join(dir, L"s3-wine-user");
+            require(!RememberWindowsFolder(pc, plain, win, &why) && Contains(why, L"is not a folder"), "Windows folder: one that is not there is refused");
+            EnsureDir(win);
+            require(!RememberWindowsFolder(pc, plain, win, &why) && Contains(why, L"no Documents or AppData"), "Windows folder: one with neither Documents nor AppData is refused");
+            require(RememberedWindowsFolder(pc, plain).empty() && !IsFile(Join(pc.ownDataDir, L"windows-folders.txt")), "Windows folder: a refused choice remembers nothing");
+            EnsureDir(Join(win, L"Documents"));
+            require(RememberWindowsFolder(pc, plain, win, &why) && IEq(RememberedWindowsFolder(pc, plain), win), "Windows folder: remembered");
+            Context again;  // another run of the launcher: the same data folder
+            again.ownDataDir = pc.ownDataDir;
+            known = true;
+            const wstring chosenCfg = Join(win, L"Documents\\My Games\\Borderlands 4\\Saved\\Config\\Windows");
+            require(IEq(RrConfigFile(again, *bl4, plain, &why, &known), Join(chosenCfg, L"Engine.ini")) && !known, "native Engine.ini: the remembered folder is used again (its game folder not made yet)");
+            require(RrConfigFile(again, *bl4, plain + L"2", &why).empty(), "Windows folder: remembered for that game only");
+            RemoveDirectoryW(Join(win, L"Documents").c_str());
+            RemoveDirectoryW(win.c_str());
+            require(RrConfigFile(again, *bl4, plain, &why).empty() && Contains(why, L"is gone"), "native Engine.ini: a remembered folder that went away is said so");
+            require(RememberWindowsFolder(again, plain, L"", &why) && RememberedWindowsFolder(again, plain).empty(), "Windows folder: forgotten with an empty folder");
+            // a test root stays first, as before
+            Context rooted;
+            rooted.playerDocuments = Join(dir, L"s3-root-docs");
+            require(IEq(RrConfigFile(rooted, *bl4, blExe, &why).substr(0, rooted.playerDocuments.size()), rooted.playerDocuments), "native Engine.ini: the test's Documents root is still first");
+            if (!savedDocs.empty()) SetEnvironmentVariableW(L"WRONGGPU_TEST_DOCUMENTS", savedDocs.c_str());
+            if (!savedLocal.empty()) SetEnvironmentVariableW(L"LOCALAPPDATA", savedLocal.c_str());
+        }
+
         // ---- the Engine.ini file check: a file it can't read is "couldn't read", never "no line" (r3 #8) -------------------
         {
             Context rc;
@@ -2415,27 +2503,27 @@ int main() {
             { const string gus = "[ScalabilityGroups]\r\n"; WriteFileAtomic(Join(cfg, L"GameUserSettings.ini"), gus.data(), gus.size()); }
             const wstring ini = Join(cfg, L"Engine.ini");
             wstring f, rwhy;
-            require(bl4 && RrConfigLineState(rc, *bl4, &f, &rwhy) == 0 && IEq(f, ini), "Engine.ini check: no file is no line (0)");
+            require(bl4 && RrConfigLineState(rc, *bl4, Join(dir, L"Borderlands4.exe"), &f, &rwhy) == 0 && IEq(f, ini), "Engine.ini check: no file is no line (0)");
             const string utf16("\xFF\xFE[\0S\0", 6);
             WriteFileAtomic(ini, utf16.data(), utf16.size());
             rwhy.clear();
-            require(RrConfigLineState(rc, *bl4, &f, &rwhy) == 3 && rwhy.find(L"UTF-16") != wstring::npos, "Engine.ini check: UTF-16 is couldn't read (3), why says so");
+            require(RrConfigLineState(rc, *bl4, Join(dir, L"Borderlands4.exe"), &f, &rwhy) == 3 && rwhy.find(L"UTF-16") != wstring::npos, "Engine.ini check: UTF-16 is couldn't read (3), why says so");
             const string line = RrConfigNewFile();
             WriteFileAtomic(ini, line.data(), line.size());
             HANDLE held = CreateFileW(ini.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);  // another program has it, no sharing
             rwhy.clear();
-            const int st = RrConfigLineState(rc, *bl4, &f, &rwhy);
+            const int st = RrConfigLineState(rc, *bl4, Join(dir, L"Borderlands4.exe"), &f, &rwhy);
             if (held != INVALID_HANDLE_VALUE) CloseHandle(held);
             require(held != INVALID_HANDLE_VALUE && st == 3 && rwhy.find(L"another program") != wstring::npos, "Engine.ini check: a file held open is couldn't read (3)");
-            require(RrConfigLineState(rc, *bl4, &f, &rwhy) == 2, "Engine.ini check: readable again, the line there, not read-only (2)");
+            require(RrConfigLineState(rc, *bl4, Join(dir, L"Borderlands4.exe"), &f, &rwhy) == 2, "Engine.ini check: readable again, the line there, not read-only (2)");
             // r4 #5: saved as UTF-8 with a byte order mark (Notepad's "UTF-8 with BOM"): the section right after it is found
             const string bom = "\xEF\xBB\xBF";
             const string withLine = bom + line;
             WriteFileAtomic(ini, withLine.data(), withLine.size());
-            require(RrConfigLineState(rc, *bl4, &f, &rwhy) == 2, "Engine.ini check with a BOM: the line in its [SystemSettings] is there (2), not missing (r4 #5)");
+            require(RrConfigLineState(rc, *bl4, Join(dir, L"Borderlands4.exe"), &f, &rwhy) == 2, "Engine.ini check with a BOM: the line in its [SystemSettings] is there (2), not missing (r4 #5)");
             const string noLine = bom + "[SystemSettings]\r\nr.Other=1\r\n\r\n[Core.Log]\r\nLogNet=Log\r\n";
             WriteFileAtomic(ini, noLine.data(), noLine.size());
-            require(RrConfigLineState(rc, *bl4, &f, &rwhy) == 0, "Engine.ini check with a BOM, the section without the line: no line (0) (r4 #5)");
+            require(RrConfigLineState(rc, *bl4, Join(dir, L"Borderlands4.exe"), &f, &rwhy) == 0, "Engine.ini check with a BOM, the section without the line: no line (0) (r4 #5)");
             // adding: into that section (no second [SystemSettings]), the BOM kept; taking it out again: byte for byte as it was
             RrConfigFix fx;
             bool changed = false;

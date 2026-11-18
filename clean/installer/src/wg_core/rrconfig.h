@@ -40,7 +40,18 @@ wstring RrConfigGameExes();    // "Borderlands4.exe and HogwartsLegacy.exe" (a r
 
 // The game's Engine.ini (the folder chosen as above, nothing created); empty with *why when its root is not known. *known:
 // a sub-folder holds GameUserSettings.ini (else the path is the Windows guess, not to be written).
-wstring RrConfigFile(Context& ctx, const RrConfigGame& g, wstring* why, bool* known = nullptr);
+// exe: the game's exe. Natively on Linux a game runs under Proton and reads its profile from its own Wine prefix, so the root is
+// that prefix's Windows profile: a Steam game's <library>\steamapps\compatdata\<appid>\pfx\drive_c\users\steamuser (empty with
+// a plain sentence in *why until Steam has made it: the game was never started), a game that is not a Steam game the Windows
+// folder the player pointed at once (RememberWindowsFolder; empty with *why while there is none). A test root (ctx.playerDocuments,
+// WRONGGPU_TEST_DOCUMENTS, a LOCALAPPDATA test root) stays first. On Windows and under Wine the roots are as always.
+wstring RrConfigFile(Context& ctx, const RrConfigGame& g, const wstring& exe, wstring* why, bool* known = nullptr);
+// A game that is not a Steam game (Heroic, Lutris, Bottles): the player's Windows user folder for it (the folder that holds
+// Documents and AppData, inside the game's Wine prefix: ...\drive_c\users\<name>), kept in the launcher's data folder
+// (windows-folders.txt). Remember: false with *why when the folder is not there or has neither Documents nor AppData in it, or
+// the launcher has no data folder; an empty folder forgets the game's. Remembered: empty when there is none.
+bool RememberWindowsFolder(Context& ctx, const wstring& exe, const wstring& folder, wstring* why);
+wstring RememberedWindowsFolder(Context& ctx, const wstring& exe);
 // The player's Documents folder (ctx.playerDocuments, else the known folder; test builds: WRONGGPU_TEST_DOCUMENTS only).
 wstring PlayerDocumentsDir(Context& ctx);
 
@@ -58,7 +69,7 @@ wstring RrConfigLineW();
 // then: r2 #7, r2b #1), 0 no line (or no file), 1 the line in [SystemSettings], 2 the line there but the file not read-only in
 // a game that deletes it unless it is (Borderlands 4), 3 the file is there but couldn't be read (*why: another program has it
 // open, access denied, saved as UTF-16; r3 #8). Read-only: nothing is created or changed.
-int RrConfigLineState(Context& ctx, const RrConfigGame& g, wstring* file, wstring* why = nullptr);
+int RrConfigLineState(Context& ctx, const RrConfigGame& g, const wstring& exe, wstring* file, wstring* why = nullptr);
 
 // The text edits alone: `in` with the line added (fix says what was done; *changed: the text differs; first: the first
 // apply, whose key found in the section is the player's), and the fix's edits taken out again.

@@ -1510,7 +1510,8 @@ static float RrConfigRows(Gfx& gx, float x, float y, float w, const RrConfigGame
         // (a protected game waits for the player's click, not for itself: r3 #4)
         const wstring t = st == 1 ? L"Engine.ini has the line" : st == 2 ? L"Not read-only" : st == 3 ? L"Couldn't read Engine.ini" : ready ? L"Ready to add"
                           : st == 0 ? L"Not in Engine.ini now"
-                          : waits && click ? L"Waiting for the game's first start" : waits ? L"Will be added after you start the game once" : L"Couldn't check";
+                          : waits && click ? L"Waiting for the game's first start" : waits ? L"Will be added after you start the game once"
+                          : !v.rrcfgWhy.empty() ? L"Can't find the game's Windows folder" : L"Couldn't check";
         const wstring d = st == 1 ? (rg.readOnly ? L"The file is read-only, so " + name + L" keeps it." : L"Ray Reconstruction can run in " + name + L".")
                           : st == 3 ? CantReadWhy(false, rg)
                           : st == 2 ? name + L" will remove it at its next start. " + (v.rrcfgFixed ? L"Fix it again" : L"Fix it now") + L" makes the file read-only."
@@ -1518,6 +1519,7 @@ static float RrConfigRows(Gfx& gx, float x, float y, float w, const RrConfigGame
                           : st == 0 ? L"Until it is back, the game doesn't use Ray Reconstruction. " + wstring(v.rrcfgFixed ? L"Fix it again" : L"Fix it now") + L" adds it."
                           : waits && click ? name + L" makes its settings folder at its first start. Then click Fix it now here to add the line." + askWhy
                           : waits ? name + L" makes its settings folder at its first start. WrongGPU adds the line the next time the launcher opens or you open this page."
+                          : !v.rrcfgWhy.empty() ? v.rrcfgWhy + L"."  // (Linux: the game's Windows folder is not known, and why)
                                     : wstring(L"Start the game once, then check again.");
         const bool fix = st == 0 || st == 2;
         // "again" only where WrongGPU added the line before (the record has it); the player's own line, or none added yet: now.
@@ -1552,11 +1554,12 @@ static float RrConfigRows(Gfx& gx, float x, float y, float w, const RrConfigGame
                                                L" deletes the file at its next start)", L"", 0, L"", L"", true);
     const int st = v.rrcfg;
     const wstring t = st == 1 ? L"Engine.ini has the line" : st == 3 ? L"Couldn't read Engine.ini" : st == 2 ? L"The line is there, but the file isn't read-only"
-                      : st == -1 ? L"The game's settings folder isn't there yet"
+                      : st == -1 ? (v.rrcfgWhy.empty() ? L"The game's settings folder isn't there yet" : L"Can't find the game's Windows folder")
                                                                                                                                    : L"Not in Engine.ini yet";
     const wstring d = st == 1 ? L"Ray Reconstruction can run in " + name + L"." : st == 3 ? CantReadWhy(true, rg)
                       : st == 2 ? name + L" deletes the file at its next start. Do step 6, then check again."
-                      : st == -1 ? wstring(L"Start the game once, then come back and check again.") : L"Until it is, the game doesn't use Ray Reconstruction.";
+                      : st == -1 ? (v.rrcfgWhy.empty() ? wstring(L"Start the game once, then come back and check again.") : v.rrcfgWhy + L".")
+                                 : L"Until it is, the game doesn't use Ray Reconstruction.";
     yy += NeedRow(gx, x, yy, w, false, t, d, st == 1 ? pal.green : st == -1 ? pal.greyDot : pal.amber, pal.text, ID_G_RRCFG_CHECK, L"Check again", B_PLAIN, true,
                   L"Check Engine.ini again");
     return yy - y;

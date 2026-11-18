@@ -232,10 +232,11 @@ def setup(main_module, suite, tests_dir):
     import launcher_edition_cases
     import launcher_ignore_cases
     import launcher_isolation
+    import launcher_proton_cases
     import launcher_rr_prepare_cases
     import launcher_state_cases
     windows_paths(main_module, suite, launcher_ignore_cases, launcher_edition_cases, launcher_build_facts, launcher_isolation,
-                  launcher_rr_prepare_cases, launcher_state_cases)
+                  launcher_proton_cases, launcher_rr_prepare_cases, launcher_state_cases)
     sys.path.insert(0, host(tests_dir + "/../tools"))  # the tests add it with a Windows separator, which sys.path cannot use
     main_module.RR_SETTINGS = main_module.os.path.join("WrongGPU", "wronggpu.ini")
     main_module.T = native_class(main_module.T, suite)
