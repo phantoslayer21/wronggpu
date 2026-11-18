@@ -59,9 +59,6 @@ float ki_S(float z)
 #if defined(KI_TILED_PACKED_S)
 uint ki_tiled_S_bits(float z, uint table)
 {
-#if KI_HWMATH
-    return kh_round_bits(ki_S(z));
-#else
     const float zp = kf_min(kf_max(z, 0.0f), 1.0f);
     if (!(zp > kf_bits(0x3B4D2E1Cu))) return kh_round_bits(kf_bits(0x414EB852u) * zp);
     const uint u = asuint(zp);
@@ -69,7 +66,6 @@ uint ki_tiled_S_bits(float z, uint table)
     // (clean.k.tests.prove_ki_s_breakpoints). The cut is 4,096 for flat buckets.
     const uint e = wg_ld32(table, ((u - 0x3B4D2000u) >> 12u) * 4u);
     return (e & 0xffffu) + ((u & 0xfffu) >= (e >> 16u) ? 1u : 0u);
-#endif
 }
 #endif
 // z is often a product (lambda L) that HIP rounds before z + 1. No kf_opq: the gfx1201 ISA keeps the product apart
