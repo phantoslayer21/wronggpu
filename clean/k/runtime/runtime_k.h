@@ -164,6 +164,8 @@ class KRuntime {
   bool expo_v051_ = false;  // runtime option k_expo_rule=v051 (A/B only): the 0.5.1 exposure rule
   int offsets_table_[8][2] = {};
   std::map<std::string, std::vector<uint8_t>> blobs_;
+  std::map<std::string, DevPtr> narrow_bias_;  // FP32 bias planes for the D3D12 two-window narrow stages
+  DevPtr d0_compact_head_ = 0;                  // the compact head's two permuted tiles
   std::map<std::string, DevPtr> wdev_, net_;  // stage blobs; network maps (X0, S0..S4, A, B, OUT)
   std::map<std::string, size_t> net_bytes_;
   DevPtr Hc_[2] = {0, 0}, L_[2] = {0, 0}, Hh_[2] = {0, 0};
