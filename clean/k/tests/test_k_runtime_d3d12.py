@@ -43,6 +43,7 @@ import os
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -206,6 +207,12 @@ class TestKRuntimeD3D12(unittest.TestCase):
 
     def test_hybrid_ldr_rows(self):
         self.check_hybrid(False, 0, True)
+
+    def test_hybrid_refuses_missing_compact_head_port(self):
+        selected = ",".join(stage for stage in STAGES if stage != "k_stage2_d0_hp")
+        with patch.dict(os.environ, {"WG_DX12_KERNELS": selected}):
+            with self.assertRaisesRegex(RuntimeError, "required port unavailable for k_stage2_d0_hp"):
+                self.make(2, True, False, "", OUT, MAX_RENDER)
 
     def test_hybrid_head_full(self):
         self.check_hybrid(True, 0, True, "k_head=full")

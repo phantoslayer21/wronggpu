@@ -17,7 +17,8 @@
 // The FP16-accumulating forms (k_stageh_*) and the FP8 forms are not ported: the exact path only.
 // Basis: our HIP kernels (spec 41 block, spec 44 windows, spec 43 6.8 hidden history, spec 40 table); exactness and the
 // forms that differ (bit-identical) are listed in hlsl/k_block.hlsli and hlsl/k_common.hlsli. Arguments as HIP:
-// KBlkParams by value (token s184:p19.b32, 27 constants), the d0 stages also the hidden history pointer (",p").
+// KBlkParams by value (token s184:p19.b32, 27 constants), the d0 stages also take the hidden history pointer.
+// The narrow two-window ports take a FP32 bias plane, and d0_hp takes a separate compact head weight pointer.
 // Launch as HIP: 128 lanes (4 waves of 32) per workgroup, one workgroup per window (G = 1) or per two windows (G = 2).
 //
 // @wg-kernel k_stage_e2 co=k_block.co block=128 wave=32 args=s184:p19.b32
@@ -28,7 +29,7 @@
 // @wg-kernel k_stage_e0 co=k_block.co block=128 wave=32 args=s184:p19.b32 defines=KB_LDS_HALFS=6144
 // @wg-kernel k_stage_e1 co=k_block.co block=128 wave=32 args=s184:p19.b32 defines=KB_LDS_HALFS=4096
 // @wg-kernel k_stage_d1 co=k_block.co block=128 wave=32 args=s184:p19.b32
-// @wg-kernel k_stage2_d0_hp co=k_block.co block=128 wave=32 args=s184:p19.b32,p,p defines=KB_HIDDEN_ARG=1,KB_BIAS32=1,KB_BASE_FORM=1
+// @wg-kernel k_stage2_d0_hp co=k_block.co block=128 wave=32 args=s184:p19.b32,p,p,p defines=KB_HIDDEN_ARG=1,KB_COMPACT_HEAD_ARG=1,KB_BIAS32=1,KB_BASE_FORM=1
 // @wg-kernel k_stage2_d0_hidden co=k_block.co block=128 wave=32 args=s184:p19.b32,p defines=KB_HIDDEN_ARG=1
 // The __rodd forms: the same stages with the round-to-odd softmax weights (hlsl/k_smx.hlsli K_SMX 1), launched by the
 // native D3D12 runtime when the mix-form probe (kernels/k_mix_probe.hlsl) fails on the adapter's driver.
@@ -46,6 +47,9 @@ WG_ARGS_BEGIN
 #if KB_BIAS32
     uint P_b32;
 #endif
+#if KB_COMPACT_HEAD_ARG
+    uint P_compact_head;
+#endif
 WG_ARGS_END
 #include "k_block.hlsli"
 
@@ -53,17 +57,20 @@ WG_ARGS_END
 WG_KERNEL(k_stage2_d0_hp)
 {
     WG_SETUP();
-#if KB_BIAS32
-    k_block<32, 2, KMIX_FIXED, KIN_EXPAND, 64, 0, true, 2, true, true, false>(hidden_p, wg_block_id(), P_b32);
+#if KB_COMPACT_HEAD_ARG
+    k_block<32, 2, KMIX_FIXED, KIN_EXPAND, 64, 0, true, 2, true, true, false>(hidden_p, wg_block_id(), P_b32,
+                                                                           P_compact_head);
 #else
     k_block<32, 2, KMIX_FIXED, KIN_EXPAND, 64, 0, true, 2, true, true, false>(hidden_p, wg_block_id());
 #endif
 }
+#if !KB_COMPACT_HEAD_ARG
 WG_KERNEL(k_stage2_d0_hidden)
 {
     WG_SETUP();
     k_block<32, 2, KMIX_FIXED, KIN_EXPAND, 64, 0, true, 2, true, false, false>(hidden_p, wg_block_id());
 }
+#endif
 #else
 WG_KERNEL(k_stage_e2)
 {

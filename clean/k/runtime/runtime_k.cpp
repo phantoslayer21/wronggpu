@@ -138,6 +138,7 @@ StageSec stage_sections(const KStageInfo& s) {  // order: embed, expand, block, 
   return r;
 }
 
+// SMX-SELFCHECK-SOURCE BEGIN (the narrow d1 bias plane used by the self-check)
 // Bias widening for the FP32 planes. Preserve the binary16 NaN payload and quiet signaling NaNs.
 uint32_t k_bias32_bits(uint16_t h) {
   const uint32_t payload = h & 0x3ffu;
@@ -164,13 +165,11 @@ std::vector<uint32_t> k_narrow_bias32(const KStageInfo& s, const uint8_t* packed
   append(packed + stage.block + block.b1, 4 * s.C);
   append(packed + stage.block + block.b2, s.C);
   if (s.kind == 'e') append(packed + stage.merge + linear_bias(s.C_next, 4 * s.C), s.C_next);
-  if (s.head) {
-    append(compact_head + linear_bias(32, s.C), 32);
-    plane.resize(plane.size() + 16, 0);
-  }
+  if (s.head) append(compact_head + linear_bias(32, s.C), 32);
   if (!s.fixed) append(packed + stage.block + block.mix, (size_t)s.heads * 64 * 64);
   return plane;
 }
+// SMX-SELFCHECK-SOURCE END
 
 // ---- network=fused8: FP8 forms of the level-0/1 stages (clean/k/kernels/k_block8.h) --------------------------------
 static_assert(sizeof(KF8Params) == 104, "KF8Params of k_block8.h");
@@ -696,13 +695,17 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
     if (!alloc(&p, kv.second.size()) || !dev_->upload(p, kv.second.data(), kv.second.size())) return false;
     wdev_[kv.first] = p;
   }
-  if (c.backend == 2 || c.backend == 3) {
+  if (!f16_ && (c.backend == 2 || c.backend == 3)) {
     for (const char* name : {"e0", "e1", "d1", "d0"}) {
       const KStageInfo& st = *k_stage(name);
+      if (f8data_.count(name) || (st.head && !compact_head_)) continue;
+      const std::string kernel = std::string("k_stage2_") + name + (st.head ? "_hp" : "");
+      if (!dev_->require_d3d12_port(kernel, st.head ? "s184:p19.b32,p,p,p" : "s184:p19.b32,p")) return dfail();
+      if (c.backend == 3 && std::strcmp(name, "d1") == 0 &&
+          !dev_->require_d3d12_port(kernel + "__rodd", "s184:p19.b32,p")) return dfail();
       const auto& weight = blobs_.at(name);
       std::vector<uint8_t> compact;
       if (st.head) {
-        if (!compact_head_) continue;
         compact = k_pack_compact_head(weight.data() + stage_sections(st).head, st.C);
         if (!alloc(&d0_compact_head_, compact.size()) ||
             !dev_->upload(d0_compact_head_, compact.data(), compact.size())) return false;
@@ -1204,8 +1207,7 @@ bool KRuntime::network(int f, const std::function<bool(const char*)>& after) {
       const char* k0 = compact_head_ ? (f16_ ? "k_stage2h_d0_hp" : "k_stage2_d0_hp")
                                      : (f16_ ? "k_stage2h_d0_hidden" : "k_stage2_d0_hidden");
       if (compact_head_ && !f16_ && d0_compact_head_) {
-        p.wz = d0_compact_head_;
-        if (!launch(k0, grid, kThreads, &p, &hidden, &narrow_bias_.at(st.name))) return false;
+        if (!launch(k0, grid, kThreads, &p, &hidden, &narrow_bias_.at(st.name), &d0_compact_head_)) return false;
       } else if (!launch(k0, grid, kThreads, &p, &hidden)) {
         return false;
       }

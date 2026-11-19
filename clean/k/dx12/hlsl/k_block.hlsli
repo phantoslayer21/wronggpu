@@ -179,21 +179,12 @@ v8f kb_bias32(uint base, uint off_f)
     return r;
 }
 
-// Softmax starts with the bias row of this query, without the lane-half bias base.
-v8f kb_smx32(uint base, uint off_f)
-{
-    return kb_bias32(base, off_f);
-}
 #endif
 
 #if KB_BASE_FORM
 uint4 kb_weight128(uint base, uint off)
 {
-#if KB_BASE_FORM == 2
-    return wg_ld128(base + off, 0u);
-#else
     return wg_ld128(base, off);
-#endif
 }
 #endif
 
@@ -204,8 +195,12 @@ uint4 kb_weight128(uint base, uint off)
 // pixel head), XG (decoder: x = f16(e + S) through P.y instead of LDS). blk: the workgroup's window group (windows
 // G blk .. G blk + G - 1): wg_block_id().
 template <int C, int HEADS, int MIX, int IN, int CIN, int CNEXT, bool HEAD, int G, bool HIDDEN, bool PIX, bool XG>
-void k_block(uint hidden, uint blk, uint bias32 = 0u)
+void k_block(uint hidden, uint blk, uint bias32 = 0u, uint compact_head = 0u)
 {
+#if KB_BIAS32
+    // DXC lacks static_assert. A full head cannot use the compact row layout.
+    const int compact_bias_requires_pixel_head[!HEAD || PIX ? 1 : -1] = {0};
+#endif
     const int KT = C / 16;
     const int DT = HEADS * 2;
     const int HT = 4 * C / 16;
@@ -234,7 +229,7 @@ void k_block(uint hidden, uint blk, uint bias32 = 0u)
 #if KB_BIAS32
     const int OFF_BA = 0, OFF_BO = IN == KIN_EMBED ? C : (IN == KIN_EXPAND ? 4 * C : 0);
     const int OFF_B1 = OFF_BO + C, OFF_B2 = OFF_B1 + 4 * C, OFF_BZ = OFF_B2 + C;
-    const int OFF_SMX = OFF_BZ + (HEAD ? 48 : CNEXT);
+    const int OFF_SMX = OFF_BZ + CNEXT;
     const uint kb_b32base = (bias32 + (uint)hh * 32u) ^ wgk_zero();
 #endif
 #if KB_BASE_FORM
@@ -244,7 +239,7 @@ void k_block(uint hidden, uint blk, uint bias32 = 0u)
     const uint wb_wo = (P_wo + weight_lane) ^ wgk_zero();
     const uint wb_w1 = (P_w1 + weight_lane) ^ wgk_zero();
     const uint wb_w2 = (P_w2 + weight_lane) ^ wgk_zero();
-    const uint wb_wz = (P_wz + weight_lane) ^ wgk_zero();
+    const uint wb_wz = ((KB_BIAS32 && HEAD ? compact_head : P_wz) + weight_lane) ^ wgk_zero();
     const uint wb_mix = (P_mix + (uint)(t * 64 + 8 * hh) * 2u) ^ wgk_zero();
 #endif
     int wa[G], wb[G], gx[G], gy[G];
@@ -488,7 +483,7 @@ void k_block(uint hidden, uint blk, uint bias32 = 0u)
                 uint4 gg[4];
                 [unroll] for (int st = 0; st < 4; ++st) {
 #if KB_BIAS32
-                    v8f sc = kb_smx32(bias32, smx_row + (uint)(16 * st));
+                    v8f sc = kb_bias32(bias32, smx_row + (uint)(16 * st));
 #else
                     v8f sc = wgk_widen8(mx[st]);  // + B[h][t][s]
 #endif
@@ -711,7 +706,7 @@ void k_block(uint hidden, uint blk, uint bias32 = 0u)
                 whd[o6][k8] = kb_weight128(wb_wz, (uint)((o6 * KT + k8) * 512));
 #else
             [unroll] for (int k8 = 0; k8 < KT; ++k8)
-                whd[o6][k8] = wgk_ld8(P_wz, (uint)((o6 * KT + k8) * 256) + lane * 8u);
+                whd[o6][k8] = wgk_ld8(KB_BIAS32 ? compact_head : P_wz, (uint)((o6 * KT + k8) * 256) + lane * 8u);
 #endif
         }
         [unroll] for (int ot = 0; ot < NT; ++ot) {
