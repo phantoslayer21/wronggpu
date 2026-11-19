@@ -23,7 +23,7 @@ float ki_phi_log2(float x)
                                        0.4808983470f), -0.7213475204f);
         const float dt_scaled = kf_fma(dt, kf_fma(-t, KF2_INV_LN2_H, KF2_INV_LN2_H),
                                        kf_fma(t, KF2_INV_LN2_L, lead_tail));
-        const float corr = kf_fma(t * t, q, dt_scaled + asfloat(KF_LOG_L[j]));
+        const float corr = kf_fma(kf_opq(t * t), q, dt_scaled + asfloat(KF_LOG_L[j]));
         const kf2 v = kf2_fast_two_sum(asfloat(KF_LOG_H[j]), lead);
         const kf2 s = kf2_fast_two_sum(e, v.h);
         const kf2 r = kf2_fast_two_sum(s.h, (v.l + corr) + s.l);
