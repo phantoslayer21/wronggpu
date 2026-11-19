@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: MIT
 """Enumerate every finite FP32 log2 argument in [1, +inf) for tiled HDR phi.
 
-Pass the generated dx12/gen/k_fp_tables.hlsli as the only argument. Baseline
-FP32 operations mirror kf2_log2. The baseline binary64 branch is enclosed
-using the independent series below. Exceptional inputs use the same kf_log2.
+Pass the generated dx12/gen/k_fp_tables.hlsli and, optionally, the number of
+mantissas to check from zero (the default is 2^23). Baseline FP32 operations
+mirror kf2_log2. The independent series encloses the baseline binary64 branch.
+Exceptional inputs use the same kf_log2.
 """
 from fractions import Fraction
 from functools import lru_cache
