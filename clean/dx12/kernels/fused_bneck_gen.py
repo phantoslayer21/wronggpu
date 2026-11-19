@@ -84,7 +84,7 @@ GRID + '''
 // BL | BR), 24 K groups, as patch_merge_c96. Output tile mt (16 channels) gives this lane's bytes hh 64 + 8 mt of the
 // merged token.
 #ifndef MB_CH
-#define MB_CH 8u    // K groups per fragment batch (a divisor of 24): 2 tiles x MB_CH fragments loaded before their multiplies
+#define MB_CH 4u    // K groups per fragment batch (a divisor of 24): 2 tiles x MB_CH fragments loaded before their multiplies
 #endif
 void merge_tiles(uint p, uint2 zf[24], inout uint2 res[8], uint bm, uint lb)
 {
@@ -141,7 +141,6 @@ void merge_item(uint xo, int wf, int wl, Grid g, int H, int W, uint tid, uint wa
     merge_load(zo[0], zf);
     wg_barrier_lds();
     [unroll] for (uint i1 = 0; i1 < 6; ++i1) st_lds4(tid * 2u + i1 * 512u, sv[i1]);
-    [unroll] for (uint i2 = 0; i2 < 6; ++i2) sv[i2] = wg_ld128(fw, 24576u + (tid + i2 * 256u) * 16u);
     wg_barrier_lds();
     const uint bm = a_mw + hh * 32u;
     uint2 res[MB_WPW][8];
@@ -149,6 +148,10 @@ void merge_item(uint xo, int wf, int wl, Grid g, int H, int W, uint tid, uint wa
         if (j1 > 0u) merge_load(zo[j1], zf);
         merge_tiles(0u, zf, res[j1], bm, lb);
     }
+    // the second stripe's loads wait for pass 0's results through an address term that is 0 at run time: they are not
+    // hoisted over pass 0, where their 24 registers would be live under the fragment batches
+    const uint pin = res[0][0].x & (wg_grid_ >> 31);
+    [unroll] for (uint i2 = 0; i2 < 6; ++i2) sv[i2] = wg_ld128(fw, 24576u + pin + (tid + i2 * 256u) * 16u);
     wg_barrier_lds();
     [unroll] for (uint i3 = 0; i3 < 6; ++i3) st_lds4(tid * 2u + i3 * 512u, sv[i3]);
     wg_barrier_lds();
