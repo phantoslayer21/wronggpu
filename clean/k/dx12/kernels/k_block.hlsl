@@ -36,6 +36,7 @@
 // @wg-kernel k_stage_e2__rodd co=k_block.co entry=k_stage_e2 block=128 wave=32 args=s184:p19.b32 defines=K_SMX=1
 // @wg-kernel k_stage_d2__rodd co=k_block.co entry=k_stage_d2 block=128 wave=32 args=s184:p19.b32 defines=K_SMX=1
 // @wg-kernel k_stage2_d1__rodd co=k_block.co entry=k_stage2_d1 block=128 wave=32 args=s184:p19.b32,p defines=K_SMX=1,KB_BIAS32=1,KB_BASE_FORM=1
+#define KB_LD_A16 1   // 16-byte aligned loads (hlsl/k_common.hlsli)
 #include "wg_platform.hlsli"
 #include "k_blkparams.hlsli"
 

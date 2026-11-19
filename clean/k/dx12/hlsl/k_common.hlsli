@@ -51,7 +51,15 @@ uint wgk_pin(uint v) { return WaveActiveBitOr(v & wgk_zero()); }
 // ---- 16-byte fragments -----------------------------------------------------------------------------------------------
 // Global: base pointer (arena byte offset) + offset in halfs; 16-byte aligned. LDS: kb_lds (the kernel file declares
 // groupshared uint4 kb_lds[]) indexed in halfs (multiples of 8).
-uint4 wgk_ld8(uint base, uint off_h) { return wg_ld128(base, off_h * 2u); }
+// KB_LD_A16 (k_block.hlsl): the 16-byte loads of the narrow stage kernels with their alignment made visible to the driver
+// (Load4 is known 4-byte aligned only and compiles to four dword loads). Every base is a 256-byte aligned runtime
+// allocation (k_pack.cpp kAlign, the arena's own alignment) and every offset a multiple of 16 bytes, so clearing the
+// address's low 4 bits changes no address.
+#ifndef KB_LD_A16
+#define KB_LD_A16 0
+#endif
+uint4 wgk_ld128_a16(uint base, uint off) { return wg_mem.Load4((base + off) & (KB_LD_A16 ? ~15u : ~0u)); }
+uint4 wgk_ld8(uint base, uint off_h) { return wgk_ld128_a16(base, off_h * 2u); }
 void wgk_st8(uint base, uint off_h, uint4 v) { wg_st128(base, off_h * 2u, v); }
 uint4 wgk_zero8() { return uint4(0u, 0u, 0u, 0u); }
 v8f wgk_zero8f() { return wg_splat(0.0f); }
