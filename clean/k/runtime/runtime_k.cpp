@@ -138,6 +138,39 @@ StageSec stage_sections(const KStageInfo& s) {  // order: embed, expand, block, 
   return r;
 }
 
+// SMX-SELFCHECK-SOURCE BEGIN (the narrow d1 bias plane used by the self-check)
+// Bias widening for the FP32 planes. Preserve the binary16 NaN payload and quiet signaling NaNs.
+uint32_t k_bias32_bits(uint16_t h) {
+  const uint32_t payload = h & 0x3ffu;
+  if ((h & 0x7c00u) == 0x7c00u && payload)
+    return ((uint32_t)(h & 0x8000u) << 16) | 0x7fc00000u | (payload << 13);
+  return f32_bits(f16_to_f32(h));
+}
+
+std::vector<uint32_t> k_narrow_bias32(const KStageInfo& s, const uint8_t* packed,
+                                      const uint8_t* compact_head = nullptr) {
+  const auto stage = stage_sections(s);
+  const auto block = block_sections(s);
+  std::vector<uint32_t> plane;
+  const auto append = [&](const uint8_t* data, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+      uint16_t half;
+      std::memcpy(&half, data + i * sizeof(half), sizeof(half));
+      plane.push_back(k_bias32_bits(half));
+    }
+  };
+  if (s.embed) append(packed + stage.embed + linear_bias(s.C, 16), s.C);
+  if (s.kind == 'd') append(packed + stage.expand + linear_bias(4 * s.C, s.C_prev), 4 * s.C);
+  append(packed + stage.block + block.bo, s.C);
+  append(packed + stage.block + block.b1, 4 * s.C);
+  append(packed + stage.block + block.b2, s.C);
+  if (s.kind == 'e') append(packed + stage.merge + linear_bias(s.C_next, 4 * s.C), s.C_next);
+  if (s.head) append(compact_head + linear_bias(32, s.C), 32);
+  if (!s.fixed) append(packed + stage.block + block.mix, (size_t)s.heads * 64 * 64);
+  return plane;
+}
+// SMX-SELFCHECK-SOURCE END
+
 // ---- network=fused8: FP8 forms of the level-0/1 stages (clean/k/kernels/k_block8.h) --------------------------------
 static_assert(sizeof(KF8Params) == 104, "KF8Params of k_block8.h");
 float blob_h(const std::vector<uint8_t>& b, size_t off, size_t i) {
@@ -662,6 +695,27 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
     if (!alloc(&p, kv.second.size()) || !dev_->upload(p, kv.second.data(), kv.second.size())) return false;
     wdev_[kv.first] = p;
   }
+  if (!f16_ && (c.backend == 2 || c.backend == 3)) {
+    for (const char* name : {"e0", "e1", "d1", "d0"}) {
+      const KStageInfo& st = *k_stage(name);
+      if (f8data_.count(name) || (st.head && !compact_head_)) continue;
+      const std::string kernel = std::string("k_stage2_") + name + (st.head ? "_hp" : "");
+      if (!dev_->require_d3d12_port(kernel, st.head ? "s184:p19.b32,p,p,p" : "s184:p19.b32,p")) return dfail();
+      if (c.backend == 3 && std::strcmp(name, "d1") == 0 &&
+          !dev_->require_d3d12_port(kernel + "__rodd", "s184:p19.b32,p")) return dfail();
+      const auto& weight = blobs_.at(name);
+      std::vector<uint8_t> compact;
+      if (st.head) {
+        compact = k_pack_compact_head(weight.data() + stage_sections(st).head, st.C);
+        if (!alloc(&d0_compact_head_, compact.size()) ||
+            !dev_->upload(d0_compact_head_, compact.data(), compact.size())) return false;
+      }
+      const auto bias = k_narrow_bias32(st, weight.data(), compact.data());
+      const size_t bytes = bias.size() * sizeof(bias[0]);
+      DevPtr& plane = narrow_bias_[name];
+      if (!alloc(&plane, bytes) || !dev_->upload(plane, bias.data(), bytes)) return false;
+    }
+  }
   for (auto& kv : f8data_) {  // network=fused8: the FP8 weights and FP32 biases; device pointers into KF8Params
     DevPtr p;
     if (!alloc(&p, kv.second.bytes.size()) || !dev_->upload(p, kv.second.bytes.data(), kv.second.bytes.size()))
@@ -868,7 +922,7 @@ bool KRuntime::smx_check(bool rodd, bool all, std::vector<std::pair<std::string,
   }
   // inputs (the input map and a decoder's skip map read the same synthetic data) and one weight blob for every stage
   std::vector<uint16_t> in(in_bytes / 2), w(w_bytes / 2);
-  DevPtr din = 0, dw = 0, dy = 0, dm = 0;
+  DevPtr din = 0, dw = 0, dy = 0, dm = 0, db = 0;
   int loaded = -1;  // the data set in din / dw
   auto load = [&](int set) {
     if (set == loaded) return true;
@@ -881,6 +935,11 @@ bool KRuntime::smx_check(bool rodd, bool all, std::vector<std::pair<std::string,
   };
   bool ok = dev_->alloc(&din, in_bytes) && dev_->alloc(&dw, w_bytes) && dev_->alloc(&dy, y_bytes) &&
             dev_->alloc(&dm, std::max<size_t>(m_bytes, 256));
+  if (ok && narrow_bias_.count("d1")) {
+    const auto& d1 = *k_stage("d1");
+    const size_t words = 10u * d1.C + (size_t)d1.heads * 64 * 64;
+    ok = dev_->alloc(&db, words * sizeof(uint32_t));
+  }
   std::vector<uint8_t> buf;
   for (int i = 0; ok && i < kSmxCount; ++i) {
     const SmxCase& c = kSmxCases[i];
@@ -896,11 +955,17 @@ bool KRuntime::smx_check(bool rodd, bool all, std::vector<std::pair<std::string,
       int ng = 0;
       bool w2 = false;
       const std::string k = stage_kernel_base(st, false, true, p.nwx * p.nwy, &ng, &w2) + (rodd ? "__rodd" : "");
+      const bool use_bias = db && (k == "k_stage2_d1" || k == "k_stage2_d1__rodd");
       wgc::Sha256 sha;
       for (int set = 0; ok && set < c.sets; ++set) {
-        ok = load(set) && dev_->memset(dy, 0, y_bytes) && dev_->memset(dm, 0, std::max<size_t>(m_bytes, 256)) &&
+        ok = load(set);
+        if (ok && use_bias) {
+          const auto bias = k_narrow_bias32(st, reinterpret_cast<const uint8_t*>(w.data()));
+          ok = dev_->upload(db, bias.data(), bias.size() * sizeof(bias[0]));
+        }
+        ok = ok && dev_->memset(dy, 0, y_bytes) && dev_->memset(dm, 0, std::max<size_t>(m_bytes, 256)) &&
              launch(k.c_str(), (unsigned)(w2 ? cdiv(p.nwx * p.nwy, 2) : p.nwx * p.nwy),
-                    (unsigned)(kThreads * (ng ? ng : 1)), &p) &&
+                    (unsigned)(kThreads * (ng ? ng : 1)), &p, use_bias ? &db : nullptr) &&
              dev_->download(buf.data(), dy, yb) && (!mb || dev_->download(buf.data() + yb, dm, mb));
         if (ok) sha.update(buf.data(), buf.size());
       }
@@ -911,7 +976,7 @@ bool KRuntime::smx_check(bool rodd, bool all, std::vector<std::pair<std::string,
       out->emplace_back(smx_case_name(i, o.first, o.second, false), v);
     }
   }
-  for (DevPtr p : {din, dw, dy, dm})
+  for (DevPtr p : {din, dw, dy, dm, db})
     if (p) dev_->free(p);
   return ok || dfail();
 }
@@ -1141,8 +1206,18 @@ bool KRuntime::network(int f, const std::function<bool(const char*)>& after) {
       // k_head=compact: p.head (the OUT buffer) receives the compact pixel head [2 Bh][2 Bw][4] instead of the head map
       const char* k0 = compact_head_ ? (f16_ ? "k_stage2h_d0_hp" : "k_stage2_d0_hp")
                                      : (f16_ ? "k_stage2h_d0_hidden" : "k_stage2_d0_hidden");
-      if (!launch(k0, grid, kThreads, &p, &hidden)) return false;
-    } else if (!launch(stage_kernel(k, st.name).c_str(), grid, (unsigned)(kThreads * (ng ? ng : 1)), &p)) return false;
+      if (compact_head_ && !f16_ && d0_compact_head_) {
+        if (!launch(k0, grid, kThreads, &p, &hidden, &narrow_bias_.at(st.name), &d0_compact_head_)) return false;
+      } else if (!launch(k0, grid, kThreads, &p, &hidden)) {
+        return false;
+      }
+    } else {
+      const std::string kernel = stage_kernel(k, st.name);
+      const auto bias_plane = narrow_bias_.find(st.name);
+      const bool use_bias = k == "k_stage2_e0" || k == "k_stage2_e1" || k == "k_stage2_d1";
+      void* bias = use_bias && bias_plane != narrow_bias_.end() ? &bias_plane->second : nullptr;
+      if (!launch(kernel.c_str(), grid, (unsigned)(kThreads * (ng ? ng : 1)), &p, bias)) return false;
+    }
     if (after && !after(st.name)) return false;
     if (i < 10) {
       info_.offsets[i][0] = ox;  // WgRtFrameInfo has ten rows: e0 ... d1 (d0's offset is (4, 4))

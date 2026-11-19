@@ -153,6 +153,41 @@ void wgk_store_hidden(uint base, uint off_h, float h[4])
     wg_st64(base, off_h * 2u, uint2(wg_f2h(pr[0]) | (wg_f2h(pr[1]) << 16), wg_f2h(pr[2]) | (wg_f2h(pr[3]) << 16)));
 }
 
+#ifndef KB_BIAS32
+#define KB_BIAS32 0
+#endif
+
+#if KB_BIAS32
+static const int kb_head_row[40] = {
+#include "k_head_rows.inc"
+};
+
+// Rows 8*hh through 8*hh+7 of the FP32 bias tile.
+v8f kb_bias32(uint base, uint off_f)
+{
+    const uint4 lo = wg_ld128(base, off_f * 4u);
+    const uint4 hi = wg_ld128(base, off_f * 4u + 16u);
+    v8f r;
+    r.v[0] = asfloat(lo.x);
+    r.v[1] = asfloat(lo.y);
+    r.v[2] = asfloat(lo.z);
+    r.v[3] = asfloat(lo.w);
+    r.v[4] = asfloat(hi.x);
+    r.v[5] = asfloat(hi.y);
+    r.v[6] = asfloat(hi.z);
+    r.v[7] = asfloat(hi.w);
+    return r;
+}
+
+#endif
+
+#if KB_BASE_FORM
+uint4 kb_weight128(uint base, uint off)
+{
+    return wg_ld128(base, off);
+}
+#endif
+
 // ---- the block ----------------------------------------------------------------------------------------------------
 // Template parameters as k_block.hip (F16 = 0): C channels, HEADS, MIX (KMIX_*), IN (KIN_MAP / KIN_EMBED / KIN_EXPAND;
 // KIN_PADDED as well), CIN input channels of EMBED / EXPAND, CNEXT merge output channels (0: none), HEAD (32 -> 40 output
@@ -160,8 +195,12 @@ void wgk_store_hidden(uint base, uint off_h, float h[4])
 // pixel head), XG (decoder: x = f16(e + S) through P.y instead of LDS). blk: the workgroup's window group (windows
 // G blk .. G blk + G - 1): wg_block_id().
 template <int C, int HEADS, int MIX, int IN, int CIN, int CNEXT, bool HEAD, int G, bool HIDDEN, bool PIX, bool XG>
-void k_block(uint hidden, uint blk)
+void k_block(uint hidden, uint blk, uint bias32 = 0u, uint compact_head = 0u)
 {
+#if KB_BIAS32
+    // DXC lacks static_assert. A full head cannot use the compact row layout.
+    const int compact_bias_requires_pixel_head[!HEAD || PIX ? 1 : -1] = {0};
+#endif
     const int KT = C / 16;
     const int DT = HEADS * 2;
     const int HT = 4 * C / 16;
@@ -187,6 +226,22 @@ void k_block(uint hidden, uint blk)
     const int n16 = (int)(lane & 15u), hh = (int)(lane >> 4);
     const int nwin = P_nwx * P_nwy;
     const int t = 16 * (int)wave + n16;
+#if KB_BIAS32
+    const int OFF_BA = 0, OFF_BO = IN == KIN_EMBED ? C : (IN == KIN_EXPAND ? 4 * C : 0);
+    const int OFF_B1 = OFF_BO + C, OFF_B2 = OFF_B1 + 4 * C, OFF_BZ = OFF_B2 + C;
+    const int OFF_SMX = OFF_BZ + CNEXT;
+    const uint kb_b32base = (bias32 + (uint)hh * 32u) ^ wgk_zero();
+#endif
+#if KB_BASE_FORM
+    const uint weight_lane = lane * 16u;
+    const uint wb_wa = (P_wa + weight_lane) ^ wgk_zero();
+    const uint wb_wqkv = (P_wqkv + weight_lane) ^ wgk_zero();
+    const uint wb_wo = (P_wo + weight_lane) ^ wgk_zero();
+    const uint wb_w1 = (P_w1 + weight_lane) ^ wgk_zero();
+    const uint wb_w2 = (P_w2 + weight_lane) ^ wgk_zero();
+    const uint wb_wz = ((KB_BIAS32 && HEAD ? compact_head : P_wz) + weight_lane) ^ wgk_zero();
+    const uint wb_mix = (P_mix + (uint)(t * 64 + 8 * hh) * 2u) ^ wgk_zero();
+#endif
     int wa[G], wb[G], gx[G], gy[G];
     bool real[G];
     uint mtok[G], xt[G], xl[G], ytok[G];
@@ -212,14 +267,31 @@ void k_block(uint hidden, uint blk)
     // 1. the block input
     uint4 n[G][C / 16];
     if (IN == KIN_EMBED) {  // e(t) = max(f16(We in(t) + be), 0) of the mirrored member
-        uint4 inp[G], ea[C / 16], eb[C / 16];
+        uint4 inp[G], ea[C / 16];
+#if KB_BIAS32
+        v8f eb[C / 16];
+#else
+        uint4 eb[C / 16];
+#endif
         [unroll] for (int g = 0; g < G; ++g) inp[g] = wgk_ld8(P_x, mtok[g] * 16u + 8u * (uint)hh);
         [unroll] for (int o0 = 0; o0 < KT; ++o0) {
+#if KB_BASE_FORM
+            ea[o0] = kb_weight128(wb_wa, (uint)(o0 * 512));
+#else
             ea[o0] = wgk_ld8(P_wa, (uint)(o0 * 256) + lane * 8u);
+#endif
+#if KB_BIAS32
+            eb[o0] = kb_bias32(kb_b32base, OFF_BA + 16 * o0);
+#else
             eb[o0] = wgk_ld8(P_ba, (uint)(16 * o0 + 8 * hh));
+#endif
         }
         [unroll] for (int ot = 0; ot < KT; ++ot) {
+#if KB_BIAS32
+            const v8f b0 = eb[ot];
+#else
             const v8f b0 = wgk_widen8(eb[ot]);
+#endif
             [unroll] for (int g = 0; g < G; ++g) {
                 n[g][ot] = KB_MAXC8W(wgk_round8(wgk_mma(ea[ot], inp[g], b0)), 0u);
                 kb_stl(xl[g] + (uint)(16 * ot), n[g][ot]);
@@ -237,10 +309,20 @@ void k_block(uint hidden, uint blk)
         }
         [loop] for (int tt = (int)wave; tt < TOT; tt += 4) {  // output tile tt of 4C: sub-position s, channels c0 ..
             uint4 wt[CIN / 16];
+#if KB_BIAS32
+            const v8f b0 = kb_bias32(kb_b32base, OFF_BA + 16 * tt);
+#else
             const uint4 bb = wgk_ld8(P_ba, (uint)(16 * tt + 8 * hh));
+#endif
+#if KB_BASE_FORM
+            [unroll] for (int k1 = 0; k1 < KTI; ++k1) wt[k1] = kb_weight128(wb_wa, (uint)((tt * KTI + k1) * 512));
+#else
             [unroll] for (int k1 = 0; k1 < KTI; ++k1) wt[k1] = wgk_ld8(P_wa, (uint)((tt * KTI + k1) * 256) + lane * 8u);
+#endif
             v8f e[G];
+#if !KB_BIAS32
             const v8f b0 = wgk_widen8(bb);
+#endif
             [unroll] for (int g = 0; g < G; ++g) e[g] = b0;
             [unroll] for (int kt = 0; kt < KTI; ++kt)
                 [unroll] for (int g = 0; g < G; ++g) e[g] = wgk_mma(wt[kt], yb[g][kt], e[g]);
@@ -293,31 +375,51 @@ void k_block(uint hidden, uint blk)
     // 2. token mixing, head by head; y accumulates the output projection
     v8f yacc[G][C / 16];
     {
+#if !KB_BIAS32
         uint4 bo[C / 16];
         [unroll] for (int o1 = 0; o1 < KT; ++o1) bo[o1] = wgk_ld8(P_bo, (uint)(16 * o1 + 8 * hh));
+#endif
         [unroll] for (int ot = 0; ot < KT; ++ot) {
+#if KB_BIAS32
+            const v8f b0 = kb_bias32(kb_b32base, OFF_BO + 16 * ot);
+#else
             const v8f b0 = wgk_widen8(bo[ot]);
+#endif
             [unroll] for (int g = 0; g < G; ++g) yacc[g][ot] = b0;
         }
     }
 
+#if !KB_BASE_FORM
     const uint wl = lane * 8u;
     const uint pmix = KB_PREF ? P_mix + wgk_pin(pref) : P_mix;   // KB_PREF: the touched words arrive before the heads
+#endif
 #ifndef KB_GRPLATE
 #define KB_GRPLATE 0
 #endif
     // (the head and MLP loops are left to the driver, which unrolls them: an opaque trip count that keeps them rolled
     // measured slower here, d1 +7 us / e1 +10 us with the MLP rolled one tile per iteration, no gain with two)
     [loop] for (int hd = 0; hd < HEADS; ++hd) {
+#if KB_BASE_FORM
+        const uint wh = (uint)(hd * QKV * 2 * KT * 512);
+#else
         const uint wh = wl + (uint)(hd * QKV * 2 * KT * 256);
+#endif
         const uint kv = (uint)((NB == 2 ? (hd & 1) : 0) * (KH + VH)) + lane * 8u;   // this lane's slot, window 0
         uint4 q[G][2];
         [unroll] for (int ct = 0; ct < 2; ++ct) {
             if (MIX == KMIX_SOFTMAX) {
                 uint4 wq[C / 16], wk[C / 16];
                 [unroll] for (int k3 = 0; k3 < KT; ++k3) {
+#if KB_BASE_FORM
+                    wq[k3] = kb_weight128(wb_wqkv, wh + (uint)((0 * 2 * KT + ct * KT + k3) * 512));
+#else
                     wq[k3] = wgk_ld8(P_wqkv, wh + (uint)((0 * 2 * KT + ct * KT + k3) * 256));
+#endif
+#if KB_BASE_FORM
+                    wk[k3] = kb_weight128(wb_wqkv, wh + (uint)((1 * 2 * KT + ct * KT + k3) * 512));
+#else
                     wk[k3] = wgk_ld8(P_wqkv, wh + (uint)((1 * 2 * KT + ct * KT + k3) * 256));
+#endif
                 }
                 v8f aq[G], ak[G];
                 [unroll] for (int g = 0; g < G; ++g) { aq[g] = wgk_zero8f(); ak[g] = wgk_zero8f(); }
@@ -335,7 +437,11 @@ void k_block(uint hidden, uint blk)
             // v^T: rows = channels 16 ct + lane % 16 (B columns), elements = tokens 16 wave + 8 hh + 0..7
             uint4 wv[C / 16];
             [unroll] for (int k4 = 0; k4 < KT; ++k4)
+#if KB_BASE_FORM
+                wv[k4] = kb_weight128(wb_wqkv, wh + (uint)(((QKV - 1) * 2 * KT + ct * KT + k4) * 512));
+#else
                 wv[k4] = wgk_ld8(P_wqkv, wh + (uint)(((QKV - 1) * 2 * KT + ct * KT + k4) * 256));
+#endif
             v8f av[G];
             [unroll] for (int g = 0; g < G; ++g) av[g] = wgk_zero8f();
             [unroll] for (int kt = 0; kt < KT; ++kt)
@@ -346,9 +452,24 @@ void k_block(uint hidden, uint blk)
         }
         wg_barrier_lds();
 
+#if !KB_BASE_FORM
         const uint mrow = (uint)((hd * 64 + t) * 64 + 8 * hh);
+#endif
         uint4 mx[4];   // A^T = M[h][t][s] (fixed) or the bias B[h][t][s] (softmax): the same for every window
+#if KB_BIAS32
+        if (MIX == KMIX_FIXED) {
+#endif
+#if KB_BASE_FORM
+        const uint mix_base = KB_PREF ? wb_mix + wgk_pin(pref) : wb_mix;
+        [unroll] for (int s0 = 0; s0 < 4; ++s0)
+            mx[s0] = kb_weight128(mix_base, (uint)((hd * 64 * 64 + 16 * s0) * 2));
+#else
         [unroll] for (int s0 = 0; s0 < 4; ++s0) mx[s0] = wgk_ld8(pmix, mrow + (uint)(16 * s0));
+#endif
+#if KB_BIAS32
+        }
+        const uint smx_row = OFF_SMX + (uint)((hd * 64 + t) * 64 + 8 * hh);
+#endif
         uint4 z[G][2];
         [unroll] for (int g = 0; g < G; ++g) {
             const uint lk = kv + (uint)g * KVW;
@@ -361,7 +482,11 @@ void k_block(uint hidden, uint blk)
                 [unroll] for (int f0 = 0; f0 < 8; ++f0) kf[f0] = kb_ldl(lk + (uint)(f0 * KB_FRAG));
                 uint4 gg[4];
                 [unroll] for (int st = 0; st < 4; ++st) {
+#if KB_BIAS32
+                    v8f sc = kb_bias32(bias32, smx_row + (uint)(16 * st));
+#else
                     v8f sc = wgk_widen8(mx[st]);  // + B[h][t][s]
+#endif
                     [unroll] for (int ct = 0; ct < 2; ++ct) sc = wgk_mma(kf[2 * st + ct], q[g][ct], sc);
                     const uint4 u = KB_CLAMP8W(wgk_round8(sc), WGK_SOFTMAX_C | 0x8000u, WGK_SOFTMAX_C);
                     const uint4 u2 = wgk_mul8(u, u);
@@ -388,11 +513,19 @@ void k_block(uint hidden, uint blk)
         if (!KB_GRPLATE)
             [unroll] for (int c1 = 0; c1 < 2; ++c1)
                 [unroll] for (int o2 = 0; o2 < KT; ++o2)
+#if KB_BASE_FORM
+                    wo[c1][o2] = kb_weight128(wb_wo, (uint)((o2 * DT + 2 * hd + c1) * 512));
+#else
                     wo[c1][o2] = wgk_ld8(P_wo, (uint)((o2 * DT + 2 * hd + c1) * 256) + lane * 8u);
+#endif
         [unroll] for (int ct = 0; ct < 2; ++ct) {
             if (KB_GRPLATE)
                 [unroll] for (int o2 = 0; o2 < KT; ++o2)
+#if KB_BASE_FORM
+                    wo[ct][o2] = kb_weight128(wb_wo, (uint)((o2 * DT + 2 * hd + ct) * 512));
+#else
                     wo[ct][o2] = wgk_ld8(P_wo, (uint)((o2 * DT + 2 * hd + ct) * 256) + lane * 8u);
+#endif
             [unroll] for (int ot = 0; ot < KT; ++ot)
                 [unroll] for (int g = 0; g < G; ++g) yacc[g][ot] = wgk_mma(wo[ct][ot], z[g][ct], yacc[g][ot]);
         }
@@ -435,31 +568,55 @@ void k_block(uint hidden, uint blk)
     // 4. MLP: per hidden tile p = f16(W1 a + b1), h = act(p), acc += W2 h (FP32, started from b2)
     v8f acc[G][C / 16];
     {
+#if !KB_BIAS32
         uint4 b2v[C / 16];
         [unroll] for (int o3 = 0; o3 < KT; ++o3) b2v[o3] = wgk_ld8(P_b2, (uint)(16 * o3 + 8 * hh));
+#endif
         [unroll] for (int ot = 0; ot < KT; ++ot) {
+#if KB_BIAS32
+            const v8f b0 = kb_bias32(kb_b32base, OFF_B2 + 16 * ot);
+#else
             const v8f b0 = wgk_widen8(b2v[ot]);
+#endif
             [unroll] for (int g = 0; g < G; ++g) acc[g][ot] = b0;
         }
     }
     [loop] for (int ht = 0; ht < HT; ++ht) {
         uint4 w1t[C / 16], w2t[C / 16];
+#if KB_BIAS32
+        const v8f b0 = kb_bias32(kb_b32base, OFF_B1 + 16 * ht);
+#else
         const uint4 b1v = wgk_ld8(P_b1, (uint)(16 * ht + 8 * hh));
+#endif
+#if KB_BASE_FORM
+        [unroll] for (int k6 = 0; k6 < KT; ++k6) w1t[k6] = kb_weight128(wb_w1, (uint)((ht * KT + k6) * 512));
+#else
         [unroll] for (int k6 = 0; k6 < KT; ++k6) w1t[k6] = wgk_ld8(P_w1, (uint)((ht * KT + k6) * 256) + lane * 8u);
+#endif
 #ifndef KB_W2LATE
 #define KB_W2LATE 0
 #endif
         if (!KB_W2LATE)
+#if KB_BASE_FORM
+            [unroll] for (int o4 = 0; o4 < KT; ++o4) w2t[o4] = kb_weight128(wb_w2, (uint)((ht * KT + o4) * 512));
+#else
             [unroll] for (int o4 = 0; o4 < KT; ++o4) w2t[o4] = wgk_ld8(P_w2, (uint)((ht * KT + o4) * 256) + lane * 8u);
+#endif
         v8f p[G];
+#if !KB_BIAS32
         const v8f b0 = wgk_widen8(b1v);
+#endif
         [unroll] for (int g = 0; g < G; ++g) p[g] = b0;
         [unroll] for (int kt = 0; kt < KT; ++kt)
             [unroll] for (int g = 0; g < G; ++g) p[g] = wgk_mma(w1t[kt], a[g][kt], p[g]);
         uint4 hv[G];
         [unroll] for (int g = 0; g < G; ++g) hv[g] = KB_ACT8W(wgk_round8(p[g]));
         if (KB_W2LATE)   // W2's tiles just before their multiplies (fewer live registers across the first GEMM)
+#if KB_BASE_FORM
+            [unroll] for (int o4 = 0; o4 < KT; ++o4) w2t[o4] = kb_weight128(wb_w2, (uint)((ht * KT + o4) * 512));
+#else
             [unroll] for (int o4 = 0; o4 < KT; ++o4) w2t[o4] = wgk_ld8(P_w2, (uint)((ht * KT + o4) * 256) + lane * 8u);
+#endif
         [unroll] for (int ot = 0; ot < KT; ++ot)
             [unroll] for (int g = 0; g < G; ++g) acc[g][ot] = wgk_mma(w2t[ot], hv[g], acc[g][ot]);
     }
@@ -492,7 +649,11 @@ void k_block(uint hidden, uint blk)
         const int mw = (P_w + 1) / 2, mh = (P_h + 1) / 2;
         [loop] for (int tt = (int)wave; tt < NTM; tt += 4) {
             v8f m[G];
+#if KB_BIAS32
+            const v8f b0 = kb_bias32(kb_b32base, OFF_BZ + 16 * tt);
+#else
             const v8f b0 = wgk_widen8(wgk_ld8(P_bz, (uint)(16 * tt + 8 * hh)));
+#endif
             [unroll] for (int g = 0; g < G; ++g) m[g] = b0;
             [unroll] for (int k7 = 0; k7 < KTM; k7 += 4) {   // in groups of 4 input tiles (HIP: unroll 4)
                 uint4 wm[4], xm[G][4];
@@ -500,7 +661,11 @@ void k_block(uint hidden, uint blk)
                     const int kt = k7 + i;
                     const int s = (16 * kt) / C, c0 = 16 * kt - s * C;
                     const int ft = (2 * gr + (s >> 1)) * 8 + 2 * gc + (s & 1);
+#if KB_BASE_FORM
+                    wm[i] = kb_weight128(wb_wz, (uint)((tt * KTM + kt) * 512));
+#else
                     wm[i] = wgk_ld8(P_wz, (uint)((tt * KTM + kt) * 256) + lane * 8u);
+#endif
                     [unroll] for (int g = 0; g < G; ++g) xm[g][i] = kb_ldl(lds_x + (uint)(g * XH + ft * C + c0 + 8 * hh));
                 }
                 [unroll] for (int i2 = 0; i2 < 4; ++i2)
@@ -522,16 +687,35 @@ void k_block(uint hidden, uint blk)
         }
     }
 
-    if (HEAD) {  // out = f16(Wh x2 + bh), 40 of 48 padded rows
-        uint4 heads[G][3];
-        uint4 whd[3][C / 16], bhd[3];
-        [unroll] for (int o6 = 0; o6 < 3; ++o6) {
+    if (HEAD) {  // out = f16(Wh x2 + bh)
+        const int NT = KB_BIAS32 ? 2 : 3;
+        uint4 heads[G][NT], whd[NT][C / 16];
+#if KB_BIAS32
+        v8f bhd[NT];
+#else
+        uint4 bhd[NT];
+#endif
+        [unroll] for (int o6 = 0; o6 < NT; ++o6) {
+#if KB_BIAS32
+            bhd[o6] = kb_bias32(kb_b32base, OFF_BZ + 16 * o6);
+#else
             bhd[o6] = wgk_ld8(P_bz, (uint)(16 * o6 + 8 * hh));
-            [unroll] for (int k8 = 0; k8 < KT; ++k8) whd[o6][k8] = wgk_ld8(P_wz, (uint)((o6 * KT + k8) * 256) + lane * 8u);
+#endif
+#if KB_BASE_FORM
+            [unroll] for (int k8 = 0; k8 < KT; ++k8)
+                whd[o6][k8] = kb_weight128(wb_wz, (uint)((o6 * KT + k8) * 512));
+#else
+            [unroll] for (int k8 = 0; k8 < KT; ++k8)
+                whd[o6][k8] = wgk_ld8(KB_BIAS32 ? compact_head : P_wz, (uint)((o6 * KT + k8) * 256) + lane * 8u);
+#endif
         }
-        [unroll] for (int ot = 0; ot < 3; ++ot) {
+        [unroll] for (int ot = 0; ot < NT; ++ot) {
             v8f o[G];
+#if KB_BIAS32
+            const v8f b0 = bhd[ot];
+#else
             const v8f b0 = wgk_widen8(bhd[ot]);
+#endif
             [unroll] for (int g = 0; g < G; ++g) o[g] = b0;
             [unroll] for (int kt = 0; kt < KT; ++kt)
                 [unroll] for (int g = 0; g < G; ++g) o[g] = wgk_mma(whd[ot][kt], x1[g][kt], o[g]);
@@ -539,11 +723,11 @@ void k_block(uint hidden, uint blk)
         }
         uint pinh = 0u;
         [unroll] for (int g = 0; g < G; ++g)
-            [unroll] for (int o8 = 0; o8 < 3; ++o8) pinh ^= heads[g][o8].x;
+            [unroll] for (int o8 = 0; o8 < NT; ++o8) pinh ^= heads[g][o8].x;
         const uint phead = P_head + wgk_pin(pinh);   // the head products before the predicated stores
         if (!PIX) {
             [unroll] for (int g = 0; g < G; ++g)
-                [unroll] for (int o7 = 0; o7 < 3; ++o7)
+                [unroll] for (int o7 = 0; o7 < NT; ++o7)
                     if (real[g] && 16 * o7 + 8 * hh < 40)
                         wgk_st8(phead, ytok[g] * 40u + (uint)(16 * o7 + 8 * hh), heads[g][o7]);
         } else {
@@ -551,12 +735,20 @@ void k_block(uint hidden, uint blk)
             // 2 gy + (k >> 1), column 2 gx + (k & 1) holds (channel 10 k, 10 k + 1, 10 k + 9, 0). A lane of half hh has
             // channels 10 k, 10 k + 1 of slots k = hh and 2 + hh and gets the third value from its partner lane.
             [unroll] for (int g = 0; g < G; ++g) {
+#if KB_BIAS32
+                // Each half owns the three channels of both compact slots in the first packed tile.
+                const uint4 h0 = heads[g][0];
+                const uint a0 = wgk_el(h0, kb_head_row[0] % 8), a1 = wgk_el(h0, kb_head_row[1] % 8);
+                const uint c0 = wgk_el(h0, kb_head_row[20] % 8), c1 = wgk_el(h0, kb_head_row[21] % 8);
+                const uint rcv = wgk_el(h0, kb_head_row[9] % 8) | (wgk_el(h0, kb_head_row[29] % 8) << 16);
+#else
                 const uint4 h0 = heads[g][0], h1 = heads[g][1], h2 = heads[g][2];
                 const uint a0 = hh ? wgk_el(h0, 2u) : wgk_el(h0, 0u), a1 = hh ? wgk_el(h0, 3u) : wgk_el(h0, 1u);
                 const uint c0 = hh ? wgk_el(h1, 6u) : wgk_el(h1, 4u), c1 = hh ? wgk_el(h1, 7u) : wgk_el(h1, 5u);
                 // to the partner: channel 9 + 10 k of its slots (hh = 0 holds 19, 39; hh = 1 holds 9, 29)
                 const uint snd = (hh ? wgk_el(h0, 1u) : wgk_el(h1, 3u)) | ((hh ? wgk_el(h1, 5u) : wgk_el(h2, 7u)) << 16);
                 const uint rcv = wgk_xor16_u(snd);
+#endif
                 if (real[g]) {
                     const uint d = ((uint)(2 * gy[g]) * (uint)(2 * P_w) + (uint)(2 * gx[g] + hh)) * 4u;
                     wg_st64(phead, d * 2u, uint2(a0 | (a1 << 16), rcv & 0xffffu));
@@ -572,10 +764,15 @@ void k_block(uint hidden, uint blk)
                 float v[5];
                 [unroll] for (int j = 0; j < 5; ++j) {
                     const int c = 10 * k + 3 + j;
-                    const float own = hh == 0 ? wgk_elf(heads[0][c / 16], (uint)(c % 8)) : wgk_elf(heads[G - 1][c / 16], (uint)(c % 8));
-                    const float snd = hh == 0 ? wgk_elf(heads[G - 1][c / 16], (uint)(c % 8)) : wgk_elf(heads[0][c / 16], (uint)(c % 8));
+#if KB_BIAS32
+                    const int r = kb_head_row[c];
+#else
+                    const int r = c;
+#endif
+                    const float own = hh == 0 ? wgk_elf(heads[0][r / 16], (uint)(r % 8)) : wgk_elf(heads[G - 1][r / 16], (uint)(r % 8));
+                    const float snd = hh == 0 ? wgk_elf(heads[G - 1][r / 16], (uint)(r % 8)) : wgk_elf(heads[0][r / 16], (uint)(r % 8));
                     const float other = wgk_xor16(snd);
-                    v[j] = ((c % 16) / 8) == hh ? own : other;
+                    v[j] = ((r % 16) / 8) == hh ? own : other;
                 }
                 // opaque: (0.2 s) est must stay two products (the driver regroups multiplication chains)
                 hs[k] = asfloat(wgk_opq(asuint(0.2f * ((((v[0] + v[1]) + v[2]) + v[3]) + v[4]))));

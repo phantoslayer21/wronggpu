@@ -95,6 +95,7 @@ struct Arg {
 
 struct Kernel {
   std::string name, file, co;  // co: file name of the HIP code object this port reproduces
+  std::string signature;
   unsigned block = 0, wave = 32, dwords = 0;
   unsigned group = 0;  // lanes per D3D12 workgroup of a split port (manifest "group"; 0 = block)
   unsigned gscale = 1;  // D3D12 workgroups per launched workgroup (manifest "gscale", default block / group)
@@ -239,13 +240,27 @@ class Dx12Device : public Device {
   bool set_stream_priority(bool high) override { return fwd(hip_->set_stream_priority(high)); }
   void begin_teardown() override { hip_->begin_teardown(); }
 
+  bool require_d3d12_port(const std::string& name, const char* signature) override {
+    const Kernel* port = find_port(name);
+    if (!port || !arena_ || !variant_selected(*port))
+      return fail("hybrid D3D12: required port unavailable for " + name);
+    if (port->signature != signature)
+      return fail("hybrid D3D12: incompatible argument signature for " + name);
+    required_ports_.insert(name);
+    return true;
+  }
+
   // ---- launches ----------------------------------------------------------------------------------------------------
   bool launch(const std::string& kernel, unsigned grid, unsigned block, void** args) override {
     Kernel* port = find_port(kernel);
     uint32_t c[kRuntimeConstants + kMaxArgDwords];
-    if (!port || !arena_ || !variant_loaded(*port) || !pack_args(*port, args, c + kRuntimeConstants)) {
-      return to_hip() && fwd(hip_->launch(kernel, grid, block, args));
-    }
+    if (!port || !arena_ || !variant_loaded(*port))
+      return allow_hip_fallback(kernel) && to_hip() && fwd(hip_->launch(kernel, grid, block, args));
+    if (!args && !port->args.empty()) return fail("hybrid D3D12 kernel " + kernel + ": null argument array");
+    for (size_t i = 0; i < port->args.size(); ++i)
+      if (!args[i]) return fail("hybrid D3D12 kernel " + kernel + ": null argument value");
+    if (!pack_args(*port, args, c + kRuntimeConstants))
+      return allow_hip_fallback(kernel) && to_hip() && fwd(hip_->launch(kernel, grid, block, args));
     Kernel& k = *port;
     if (block != k.block)
       return fail("D3D12 kernel " + kernel + " is built for " + std::to_string(k.block) + " lanes, launched with " +
@@ -276,11 +291,16 @@ class Dx12Device : public Device {
                     int stop_event) override {
     Kernel* port = find_port(kernel);
     if (!port || !arena_ || !variant_loaded(*port))
-      return to_hip() && fwd(hip_->launch_timed(kernel, grid, block, args, start_event, stop_event));
+      return allow_hip_fallback(kernel) && to_hip() &&
+             fwd(hip_->launch_timed(kernel, grid, block, args, start_event, stop_event));
     return Device::launch_timed(kernel, grid, block, args, start_event, stop_event);
   }
 
  private:
+  bool allow_hip_fallback(const std::string& kernel) {
+    return !required_ports_.count(kernel) || fail("hybrid D3D12: required port cannot run " + kernel);
+  }
+
   bool fail(const std::string& m) {
     err_ = m;
     return false;
@@ -532,6 +552,7 @@ class Dx12Device : public Device {
         return fail("D3D12 manifest " + path + ": incomplete kernel entry");
       x.name = n->text;
       x.file = dir + fl->text;
+      x.signature = ar->text;
       if (co) x.co = co->text;  // missing (an old manifest): the port is never used
       x.block = (unsigned)block;
       if (const wgc::Json* gp = k.find("group")) {
@@ -784,6 +805,7 @@ class Dx12Device : public Device {
   uint64_t arena_bytes_ = 0, in_use_ = 0, fence_value_ = 0;
   std::map<uint64_t, uint64_t> free_, used_;  // offset -> bytes
   std::multimap<std::string, Kernel> kernels_;   // by name; several ports of one name differ in "co"
+  std::set<std::string> required_ports_;
   std::set<std::string> untagged_cos_;               // file names of the code objects loaded without a tag
   std::map<std::string, std::string> tagged_cos_;    // tag -> file name of the code object loaded under it
   unsigned module_gen_ = 0;
