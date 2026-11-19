@@ -71,6 +71,7 @@ float3 kf_opq3(float3 x) { return asfloat(asuint(x) ^ kf_opq_z_); }
 
 #if !KI_HWMATH && !defined(KI_EXACT_S)
 #define KI_TILED_PACKED_S 1
+#define KI_TILED_PHI_LOG2 1
 #endif
 #include "k_in_common.hlsli"
 
