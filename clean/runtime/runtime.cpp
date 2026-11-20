@@ -29,6 +29,9 @@
 #include "model_select.h"
 #include "runtime_core.h"
 #include "wg_runtime.h"
+#ifdef WG_DEV_DIAGNOSTICS
+#include "post_tf_align.h"
+#endif
 
 namespace wgrt {
 
@@ -2951,6 +2954,11 @@ struct Runtime {
         post_last = tf_mo4 ? "post_tf4_dl_f32_p12_mo" : hp > 0 ? "post_tf_p12_mo" : "post_tf_f32_p12_mo";
         if (native_direct_io) post_last += "_direct";  // typed colour input and output texture (dx12/kernels/post.hlsl)
         filter_last = "fused";
+#ifdef WG_DEV_DIAGNOSTICS
+        if (const char* bad = post_tf_misaligned(A, hist[cur]))
+          return fail(std::string("post_tf: the ") + bad +
+                      " pointer is not 8-byte aligned (the D3D12 port reads it with 8-byte loads, dx12/kernels/post.hlsl)");
+#endif
         if (!launch(("pmo/" + post_last).c_str(), cdiv(ow, 40) * nch, tf_mo4 ? 256 : 512,
                     with_taps({&cnet, &A, &B, &C, &hist[cur], &mnear[nxt], &mhi, &w, &hist[nxt], &reduced, &outp, &p,
                                &expo, &ow_i, &oh_i, &dec_scale, &p_h, &hpitch, &cp, &k1, &c2, &mop})))
@@ -2972,6 +2980,11 @@ struct Runtime {
         float dec_scale = (float)(0.01 / (fr.exposure == 0.0f ? 1.0 : (double)fr.exposure)), p_h = hp > 0 ? pi : 1.0f;
         post_last = tf_kernel;
         filter_last = "fused";
+#ifdef WG_DEV_DIAGNOSTICS
+        if (const char* bad = post_tf_misaligned(A, hist[cur]))
+          return fail(std::string("post_tf: the ") + bad +
+                      " pointer is not 8-byte aligned (the D3D12 port reads it with 8-byte loads, dx12/kernels/post.hlsl)");
+#endif
         if (!launch((post_pre + tf_kernel).c_str(), cdiv(ow, 40) * nch, tf_block,
                     with_taps({&cnet, &A, &B, &C, &hist[cur], &mnear[nxt], &mcenter, &mfar, &w, &hist[nxt], &reduced,
                                &outp, &p, &expo, &ow_i, &oh_i, &dec_scale, &p_h, &hpitch, &cp, &k1, &c2})))

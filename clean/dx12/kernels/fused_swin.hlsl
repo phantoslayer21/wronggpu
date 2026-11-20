@@ -27,8 +27,8 @@
 // 32 tokens per workgroup; ported to D3D12 they measured +41 / +0 / +8 us per frame: the per-workgroup weight traffic
 // and, for c64_mg, 134 VGPRs = one workgroup less per CU.)
 //
-// @wg-kernel swin_block_c96_pm_nc co=swin.co block=256 wave=32 args=p,p,p,p,u,u,u,u,p,p defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_PM=1
-// @wg-kernel swin_block_c96_pm_rev_nc co=swin.co entry=swin_block_c96_pm_nc block=256 wave=32 args=p,p,p,p,u,u,u,u,p,p defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_PM=1,FZ_REV=1
+// @wg-kernel swin_block_c96_pm_nc co=swin.co block=256 wave=32 args=p,p,p,p,u,u,u,u,p,p defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_PM=1,SW_GELU_LATE0=3
+// @wg-kernel swin_block_c96_pm_rev_nc co=swin.co entry=swin_block_c96_pm_nc block=256 wave=32 args=p,p,p,p,u,u,u,u,p,p defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_PM=1,FZ_REV=1,SW_GELU_LATE0=3
 // @wg-kernel swin_block_c96_add_xe_rev_nc co=swin.co entry=swin_block_c96_add_xe_nc block=256 wave=32 args=p,p,p,p,u,u,u,u,p,p,p defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=1,SW_SAFE=1,SW_ECL=128,SW_XE=1,FZ_REV=1,SW_HEAD_PAIRS=0
 // @wg-kernel swin_block_c96_add_xe_nc co=swin.co block=256 wave=32 args=p,p,p,p,u,u,u,u,p,p,p defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=1,SW_SAFE=1,SW_ECL=128,SW_XE=1,SW_HEAD_PAIRS=0
 // @wg-kernel swin_block_c96_add_xe_xo_nc co=swin.co entry=swin_block_c96_add_xe_nc block=256 wave=32 args=p,p,p,p,u,u,u,u,p,p,p,p,p,u,u,u defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=1,SW_SAFE=1,SW_ECL=128,SW_XE=1,FZ_XO=1,SW_HEAD_PAIRS=0
