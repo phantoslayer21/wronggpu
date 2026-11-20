@@ -211,15 +211,13 @@ void attention(uint U, uint sec, uint hd, uint2 af[KC], inout v8f acc[KC], uint 
     uint4 vt[2];
     [unroll] for (uint mt = 0; mt < 2; ++mt) {
         if (mt == 1u) stage_step_r(1u, 3u, nrows, ssrc, sdst, tid, sr);
-        uint2 fq[KC], fv[KC];
-        [unroll] for (uint kc = 0; kc < KC; ++kc) {
-            fq[kc] = frag(U, (mt * KC + kc) * 2u, lb);
-            fv[kc] = frag(U, (mt * KC + kc) * 2u + 1u, lb);
-        }
+        // each K group's two fragments are read right before their products (the two chains keep their order and
+        // operands): all 16 read ahead were the kernel's one 193-register peak, which put the unfused body at 256 VGPRs
         v8f aq = wg_splat(0.0f), av = wg_splat(0.0f);
         [unroll] for (uint kc2 = 0; kc2 < KC; ++kc2) {
-            aq = wg_wmma_fp8(fq[kc2], af[kc2], aq);
-            av = wg_wmma_fp8(af[kc2], fv[kc2], av);
+            const uint2 fq = frag(U, (mt * KC + kc2) * 2u, lb), fv = frag(U, (mt * KC + kc2) * 2u + 1u, lb);
+            aq = wg_wmma_fp8(fq, af[kc2], aq);
+            av = wg_wmma_fp8(af[kc2], fv, av);
         }
         uf[mt] = wg_pack_q8_nc_ags(aq);
         vt[mt] = wg_to_f16_ags(av);
