@@ -7,6 +7,7 @@
 // clean/k/reference/params.py normalize; byte-identical blobs (clean/k/tests/test_k_runtime_pack.py).
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -21,5 +22,8 @@ namespace wgrt {
 // Every value must be exactly representable in FP16 (infinities allowed, NaN refused). The blob has
 // k_stage_blob_bytes(*k_stage(stage)) bytes. On failure returns an empty vector with a message in *err.
 std::vector<uint8_t> k_pack_stage(const std::string& stage, const StageTensors& t, std::string* err);
+
+// Repack the 32 live rows of d0's head from the original gfx12 linear blob.
+std::vector<uint8_t> k_pack_compact_head(const uint8_t* original, size_t channels);
 
 }  // namespace wgrt

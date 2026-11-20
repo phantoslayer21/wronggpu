@@ -160,7 +160,7 @@ Grid grid_of(int H, int W, int ox, int oy)
 // BL | BR), 24 K groups, as patch_merge_c96. Output tile mt (16 channels) gives this lane's bytes hh 64 + 8 mt of the
 // merged token.
 #ifndef MB_CH
-#define MB_CH 8u    // K groups per fragment batch (a divisor of 24): 2 tiles x MB_CH fragments loaded before their multiplies
+#define MB_CH 4u    // K groups per fragment batch (a divisor of 24): 2 tiles x MB_CH fragments loaded before their multiplies
 #endif
 void merge_tiles(uint p, uint2 zf[24], inout uint2 res[8], uint bm, uint lb)
 {
@@ -217,7 +217,6 @@ void merge_item(uint xo, int wf, int wl, Grid g, int H, int W, uint tid, uint wa
     merge_load(zo[0], zf);
     wg_barrier_lds();
     [unroll] for (uint i1 = 0; i1 < 6; ++i1) st_lds4(tid * 2u + i1 * 512u, sv[i1]);
-    [unroll] for (uint i2 = 0; i2 < 6; ++i2) sv[i2] = wg_ld128(fw, 24576u + (tid + i2 * 256u) * 16u);
     wg_barrier_lds();
     const uint bm = a_mw + hh * 32u;
     uint2 res[MB_WPW][8];
@@ -225,6 +224,10 @@ void merge_item(uint xo, int wf, int wl, Grid g, int H, int W, uint tid, uint wa
         if (j1 > 0u) merge_load(zo[j1], zf);
         merge_tiles(0u, zf, res[j1], bm, lb);
     }
+    // the second stripe's loads wait for pass 0's results through an address term that is 0 at run time: they are not
+    // hoisted over pass 0, where their 24 registers would be live under the fragment batches
+    const uint pin = res[0][0].x & (wg_grid_ >> 31);
+    [unroll] for (uint i2 = 0; i2 < 6; ++i2) sv[i2] = wg_ld128(fw, 24576u + pin + (tid + i2 * 256u) * 16u);
     wg_barrier_lds();
     [unroll] for (uint i3 = 0; i3 < 6; ++i3) st_lds4(tid * 2u + i3 * 512u, sv[i3]);
     wg_barrier_lds();
@@ -298,15 +301,13 @@ void attention(uint U, uint sec, uint hd, uint2 af[KC], inout v8f acc[KC], uint 
     uint4 vt[2];
     [unroll] for (uint mt = 0; mt < 2; ++mt) {
         if (mt == 1u) stage_step_r(1u, 3u, nrows, ssrc, sdst, tid, sr);
-        uint2 fq[KC], fv[KC];
-        [unroll] for (uint kc = 0; kc < KC; ++kc) {
-            fq[kc] = frag(U, (mt * KC + kc) * 2u, lb);
-            fv[kc] = frag(U, (mt * KC + kc) * 2u + 1u, lb);
-        }
+        // each K group's two fragments are read right before their products (the two chains keep their order and
+        // operands): all 16 read ahead were the kernel's one 193-register peak, which put the unfused body at 256 VGPRs
         v8f aq = wg_splat(0.0f), av = wg_splat(0.0f);
         [unroll] for (uint kc2 = 0; kc2 < KC; ++kc2) {
-            aq = wg_wmma_fp8(fq[kc2], af[kc2], aq);
-            av = wg_wmma_fp8(af[kc2], fv[kc2], av);
+            const uint2 fq = frag(U, (mt * KC + kc2) * 2u, lb), fv = frag(U, (mt * KC + kc2) * 2u + 1u, lb);
+            aq = wg_wmma_fp8(fq, af[kc2], aq);
+            av = wg_wmma_fp8(af[kc2], fv, av);
         }
         uf[mt] = wg_pack_q8_nc_ags(aq);
         vt[mt] = wg_to_f16_ags(av);

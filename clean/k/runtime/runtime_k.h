@@ -124,6 +124,12 @@ class KRuntime {
   std::string smx_case_name(int i, int ox, int oy, bool rodd) const;
   // the stage kernel network() launches: the __rodd form of a softmax stage after a failed probe
   std::string stage_kernel(const std::string& k, const char* stage) const;
+  // deep-split (runtime option k_split, native D3D12 device): stage m as its four phase launches (k_split_m_*,
+  // clean/k/dx12/kernels/k_block_split.hlsl) in place of one k_stagew4_m launch; launch() redirects k_stagew4_m[__rodd]
+  // here, so network() and the create-time self-check both run it. split_alloc (create): the phases' scratch, sized for
+  // the most windows stage m can have in a frame of this context or in the self-check's m case.
+  bool split_m(bool rodd, void* params);
+  bool split_alloc();
   int fill_ = -1;  // option k_fill (test hook): the byte every frame-written buffer and the histories start with
 
   WgRtConfig cfg_ = {};
@@ -141,6 +147,7 @@ class KRuntime {
   std::string f8why_;  // stages that keep their FP16 kernel, and why
   std::vector<std::string> f8stages_;  // runtime option fp8_stages (default e0, e1, d1, d0)
   bool tiled_input_ = false, tiled_last_ = false, tiled_color_last_ = false, input_uniforms_last_ = false;
+  bool s_breakpoints_fallback_ = false;
   uint64_t tiled_launches_ = 0, tiled_color_launches_ = 0, input_uniform_launches_ = 0;
   uint64_t legacy_color_launches_ = 0, legacy_base_launches_ = 0;
   bool input_uniforms_ = true;  // runtime option k_in_uniforms (0: always k_in_tiled, a port-check diagnostic)
@@ -157,10 +164,13 @@ class KRuntime {
   bool expo_v051_ = false;  // runtime option k_expo_rule=v051 (A/B only): the 0.5.1 exposure rule
   int offsets_table_[8][2] = {};
   std::map<std::string, std::vector<uint8_t>> blobs_;
+  std::map<std::string, DevPtr> narrow_bias_;  // FP32 bias planes for the D3D12 two-window narrow stages
+  DevPtr d0_compact_head_ = 0;                  // the compact head's two permuted tiles
   std::map<std::string, DevPtr> wdev_, net_;  // stage blobs; network maps (X0, S0..S4, A, B, OUT)
   std::map<std::string, size_t> net_bytes_;
   DevPtr Hc_[2] = {0, 0}, L_[2] = {0, 0}, Hh_[2] = {0, 0};
   DevPtr color_ = 0, depth_ = 0, motion_ = 0, out_ = 0, cpre_ = 0, cpre2_ = 0, ctap_ = 0, ctapT_ = 0;
+  DevPtr s_breakpoints_ = 0;
   DevPtr exp2tab_ = 0, tables_ = 0, expo_ = 0, expo_partials_ = 0, expo_computed_ = 0, expo_sync_ = 0, xs_ = 0;
   DevPtr kexpo_ = 0;  // k_expo_scalars state: E_cur, E_prev, E_aux of the last frame, E_cur kept for the next
   // frame state
@@ -184,6 +194,12 @@ class KRuntime {
     return std::string(" k_approx=") + (approx_a1_ ? "a1" : "") + (approx_a1_ && approx_a2_ ? "," : "") +
            (approx_a2_ ? "a2" : "");
   }
+  // runtime option k_split (backend 3 only; default "m"): stage m runs as its phase launches (split_m); "off": one
+  // k_stagew4_m launch. split_cap_: windows the scratch holds; split_z_ / x1_ / a_ / h_: the phases' FP16 scratch
+  bool split_m_ = false;
+  int split_cap_ = 0;
+  DevPtr split_z_ = 0, split_x1_ = 0, split_a_ = 0, split_h_ = 0;
+  size_t split_bytes_[4] = {0, 0, 0, 0};  // the bytes of split_z_, split_x1_, split_a_, split_h_ (split_alloc)
   std::string smx_note_;
   std::string smx_test_;  // option k_smx_test (developer builds only)
   std::string notes_;  // notes of create for the caller's log (notes()), one per line, or empty

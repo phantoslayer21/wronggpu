@@ -49,6 +49,17 @@ class PlanBridge(unittest.TestCase):
                                  ["p", "p", "u", "u", "b4"], bufs, d, "case.l1")
             self.assertEqual(line, "step k 1 32 null @b_weights+8 4294967293 1065353216 B:case.l1.a4")
 
+    def test_compact_head_rows_cover_pixel_and_hidden_channels(self):
+        rows = PB.head_rows()
+        self.assertEqual(len(rows), 40)
+        used = {10 * slot + offset for slot in range(4) for offset in (0, 1, 3, 4, 5, 6, 7, 9)}
+        self.assertEqual(sorted(rows[ch] for ch in used), list(range(32)))
+        self.assertTrue(all(rows[ch] == -1 for ch in set(range(40)) - used))
+        for half in range(2):
+            slot = 10 * half
+            channels = (slot, slot + 1, slot + 9, slot + 20, slot + 21, slot + 29)
+            self.assertEqual([rows[ch] for ch in channels], list(range(8 * half, 8 * half + 6)))
+
     def test_argument_count_mismatch_is_refused(self):
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaises(ValueError):

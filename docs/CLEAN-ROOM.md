@@ -88,10 +88,10 @@ tensor shapes, offsets and strides, conversions, and a line naming the product a
 
 ## This repository
 
-This repository is a snapshot of the source of WrongGPU 0.6.0, prepared for publication (one commit, no private
-history). Left out: the
+This repository was first published as a snapshot of WrongGPU 0.6.0, prepared for publication with one commit and no
+private history. It now carries the source of WrongGPU 0.6.5. Not included: the
 specification, the clean team's questions and answers, the spec team's results notes, the team's own tools (for
-example `tools/gpu_lock.py`, `tools/nv_leak_scan.py`) and the team's own build-machine tooling, and scratch probes that
+example `tools/gpu_lock.py` and `tools/nv_leak_scan.py`), the team's build-machine tooling, and scratch probes that
 nothing builds.
 
 ## For contributors

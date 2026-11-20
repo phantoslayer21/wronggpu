@@ -61,6 +61,67 @@ class TestRawCompare(unittest.TestCase):
         with self.assertRaises(AssertionError):
             compare_raw("size", h.tobytes(), d[:-1].tobytes())
 
+    def odd_bytes(self, n, seed=7):
+        """Ordinary bytes of length n (no sentinel byte, so every byte is data)."""
+        rng = np.random.default_rng(seed)
+        b = rng.integers(0, 256, n, dtype=np.uint8)
+        b[(b == HIP_SENTINEL) | (b == D3D12_SENTINEL)] = 1
+        return b
+
+    def test_odd_length_equal_passes(self):
+        """A buffer whose size is not a multiple of 4 compares byte for byte: 2 x 131 x 79 = 20698 bytes (ctapT at the
+        odd render size) and the other trailing-byte lengths 1, 2 and 3 mod 4."""
+        for n in (1, 2, 3, 6, 4 * 5 + 1, 4 * 5 + 3, 2 * 131 * 79):
+            with self.subTest(n=n):
+                b = self.odd_bytes(n)
+                self.assertEqual(compare_raw("odd", b.tobytes(), b.copy().tobytes()), 0)
+
+    def test_odd_length_last_byte_differs_fails(self):
+        """A change in the last byte of an odd-length buffer (the trailing bytes are compared, not skipped)."""
+        for n in (4 * 5 + 1, 4 * 5 + 2, 4 * 5 + 3, 2 * 131 * 79):
+            with self.subTest(n=n):
+                h = self.odd_bytes(n)
+                d = h.copy()
+                d[-1] ^= 1
+                with self.assertRaisesRegex(AssertionError, f"differ; first at byte {n - 1}: HIP"):
+                    compare_raw("odd-last", h.tobytes(), d.tobytes())
+
+    def test_odd_length_first_trailing_byte_differs_fails(self):
+        """The first trailing byte (the first byte after the last whole word) is compared too."""
+        n = 2 * 131 * 79
+        h = self.odd_bytes(n)
+        d = h.copy()
+        d[(n // 4) * 4] ^= 0x80
+        with self.assertRaisesRegex(AssertionError, f"first at byte {(n // 4) * 4}"):
+            compare_raw("odd-tail0", h.tobytes(), d.tobytes())
+
+    def test_odd_length_untouched_trailing_byte_counted(self):
+        """A trailing byte neither side wrote (HIP's sentinel on one side, D3D12's on the other) is counted like a word;
+        a full buffer allows none."""
+        n = 2 * 131 * 79
+        h = self.odd_bytes(n)
+        d = h.copy()
+        h[-1], d[-1] = HIP_SENTINEL, D3D12_SENTINEL
+        self.assertEqual(compare_raw("odd-pad", h.tobytes(), d.tobytes(), allow_untouched=1), 1)
+        with self.assertRaisesRegex(AssertionError, "neither"):
+            compare_raw("odd-pad", h.tobytes(), d.tobytes())
+
+    def test_odd_length_write_only_on_d3d12_fails(self):
+        """A trailing byte D3D12 wrote where HIP left its sentinel fails (the sentinel pair is not the only way to pass)."""
+        n = 2 * 131 * 79
+        h = self.odd_bytes(n)
+        d = h.copy()
+        h[-2] = HIP_SENTINEL
+        d[-2] = 9
+        with self.assertRaisesRegex(AssertionError, "differ"):
+            compare_raw("odd-extra", h.tobytes(), d.tobytes())
+
+    def test_odd_length_size_mismatch_fails(self):
+        n = 2 * 131 * 79
+        h = self.odd_bytes(n)
+        with self.assertRaisesRegex(AssertionError, "sizes"):
+            compare_raw("odd-size", h.tobytes(), h[:-1].tobytes())
+
 
 if __name__ == "__main__":
     unittest.main()
