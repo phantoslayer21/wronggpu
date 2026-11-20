@@ -68,10 +68,16 @@ uint wg_ld8(uint base, uint off) { uint a = base + off; return (wg_mem.Load(a & 
 uint wg_ld16(uint base, uint off) { return (uint)wg_mem.Load<uint16_t>(base + off); }
 uint wg_ld32(uint base, uint off) { return wg_mem.Load(base + off); }
 uint2 wg_ld64(uint base, uint off) { return wg_mem.Load2(base + off); }
-uint4 wg_ld128(uint base, uint off) { return wg_mem.Load4(base + off); }
+// WG_LD_A16 (kernel's defines=): 16-byte loads with the alignment made visible to the driver. Load4 is known 4-byte aligned
+// only and compiles to four dword loads; a kernel that sets it guarantees that every base + offset of its wg_ld128 /
+// wg_ld4f is a multiple of 16 bytes (arena allocations are 256-byte aligned, the packed sections are 16-byte multiples).
+#ifndef WG_LD_A16
+#define WG_LD_A16 0
+#endif
+uint4 wg_ld128(uint base, uint off) { return wg_mem.Load4((base + off) & (WG_LD_A16 ? ~15u : ~0u)); }
 uint4 wg_ld128_a16(uint base, uint off) { return wg_mem.Load4(base + off); }
 float wg_ldf(uint base, uint off) { return asfloat(wg_mem.Load(base + off)); }
-float4 wg_ld4f(uint base, uint off) { return asfloat(wg_mem.Load4(base + off)); }
+float4 wg_ld4f(uint base, uint off) { return asfloat(wg_mem.Load4((base + off) & (WG_LD_A16 ? ~15u : ~0u))); }
 void wg_st16(uint base, uint off, uint v) { wg_mem.Store<uint16_t>(base + off, (uint16_t)v); }
 void wg_st32(uint base, uint off, uint v) { wg_mem.Store(base + off, v); }
 void wg_st64(uint base, uint off, uint2 v) { wg_mem.Store2(base + off, v); }
