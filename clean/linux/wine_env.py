@@ -48,15 +48,42 @@ def proton_dlls(proton_dir):
     return found
 
 
-def prepare(proton_dir, prefix_dir, vkd3d_dir=None, log=print):
-    """Create (once) the prefix with Proton's wine, copy the DLLs into its system32 (every call, so a changed vkd3d_dir
-    takes effect) and return the environment: WINEPREFIX, WINEDLLOVERRIDES, WINEDEBUG, PATH with Proton's bin first,
-    and WG_WINE (Proton's wine executable)."""
+def resolve_wine(wine):
+    """Absolute path of a wine executable given as a path or a name on PATH (children run from other folders)."""
+    found = shutil.which(str(wine))
+    if not found:
+        raise SystemExit(f"--wine {wine}: not an executable")
+    return Path(os.path.abspath(found))
+
+
+def find_wineserver(wine):
+    """The wineserver that goes with `wine`: beside what it links to (the real install), else beside the link, else the
+    one on PATH. A system Wine can be a link in a user bin folder whose neighbour is some other wineserver."""
+    for folder in (Path(os.path.realpath(wine)).parent, wine.parent):
+        cand = folder / "wineserver"
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return cand
+    found = shutil.which("wineserver")
+    if found:
+        return Path(os.path.abspath(found))
+    raise SystemExit(f"no wineserver found beside {wine} or on PATH; a wine needs its wineserver")
+
+
+def prepare(proton_dir, prefix_dir, vkd3d_dir=None, log=print, wine=None):
+    """Create (once) the prefix with the selected wine, copy the Proton install's DLLs into its system32 (every call, so
+    a changed vkd3d_dir takes effect) and return the environment: WINEPREFIX, WINEDLLOVERRIDES, WINEDEBUG, PATH with the
+    selected wine's folder first, WG_WINE (its absolute path) and WG_WINESERVER (its wineserver, also given to wine as
+    WINESERVER; the runner's clean-up of a hung run uses it).
+
+    wine: the wine executable (a system Wine, say) to create and run the prefix with. Default: Proton's own
+    (<proton_dir>/files/bin/wine). Proton's own wine can hang headless (see run_wine_tests.py's probe)."""
     proton_dir = Path(proton_dir).resolve()
     prefix_dir = Path(prefix_dir).resolve()
-    wine = proton_dir / "files" / "bin" / "wine"
+    own = wine is None
+    wine = proton_dir / "files" / "bin" / "wine" if own else resolve_wine(wine)
     if not wine.is_file():
-        raise SystemExit(f"{proton_dir}: no files/bin/wine; is this a Proton install?")
+        raise SystemExit(f"{wine}: no wine here; is {proton_dir} a Proton install?")
+    wineserver = find_wineserver(wine)
     dlls = proton_dlls(proton_dir)
     if vkd3d_dir:
         for name in ("d3d12.dll", "d3d12core.dll"):
@@ -66,13 +93,14 @@ def prepare(proton_dir, prefix_dir, vkd3d_dir=None, log=print):
             dlls[name] = p
     env = dict(os.environ)
     env.update(WINEPREFIX=str(prefix_dir), WINEDLLOVERRIDES=DLL_OVERRIDES, WINEDEBUG="-all",
-               PATH=f"{wine.parent}{os.pathsep}{env.get('PATH', '')}", WG_WINE=str(wine))
+               PATH=f"{wine.parent}{os.pathsep}{env.get('PATH', '')}", WG_WINE=str(wine),
+               WG_WINESERVER=str(wineserver), WINESERVER=str(wineserver))
     if not (prefix_dir / "system.reg").is_file():
-        log(f"creating Wine prefix {prefix_dir} with {proton_dir.name}")
+        log(f"creating Wine prefix {prefix_dir} with {proton_dir.name if own else wine}")
         prefix_dir.mkdir(parents=True, exist_ok=True)
         subprocess.run([str(wine), "wineboot", "-i"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                        check=True)
-        subprocess.run([str(wine.parent / "wineserver"), "-w"], env=env, check=True)
+        subprocess.run([str(wineserver), "-w"], env=env, check=True)
     system32 = prefix_dir / "drive_c" / "windows" / "system32"
     for name, src in dlls.items():
         shutil.copyfile(src, system32 / name)

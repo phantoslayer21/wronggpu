@@ -165,8 +165,8 @@ static const int kb_head_row[40] = {
 // Rows 8*hh through 8*hh+7 of the FP32 bias tile.
 v8f kb_bias32(uint base, uint off_f)
 {
-    const uint4 lo = wg_ld128(base, off_f * 4u);
-    const uint4 hi = wg_ld128(base, off_f * 4u + 16u);
+    const uint4 lo = wgk_ld128_a16(base, off_f * 4u);
+    const uint4 hi = wgk_ld128_a16(base, off_f * 4u + 16u);
     v8f r;
     r.v[0] = asfloat(lo.x);
     r.v[1] = asfloat(lo.y);
@@ -184,7 +184,7 @@ v8f kb_bias32(uint base, uint off_f)
 #if KB_BASE_FORM
 uint4 kb_weight128(uint base, uint off)
 {
-    return wg_ld128(base, off);
+    return wgk_ld128_a16(base, off);
 }
 #endif
 
