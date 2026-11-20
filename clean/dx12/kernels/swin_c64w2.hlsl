@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // swin_block_c64_nc (enc1's Swin block) with TWO windows per wave in 128-lane workgroups (tracks lev3-swin, r3-c64w2).
 //
-// @wg-kernel swin_block_c64_nc co=swin.co block=256 group=128 gscale=1 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=64,SW_HEADS=2,SW_MLP=256,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_W2=1
+// @wg-kernel swin_block_c64_nc co=swin.co block=256 group=128 gscale=1 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=64,SW_HEADS=2,SW_MLP=256,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_W2=1,WG_LD_A16=1
 // Model L's dec1 block swin_block_c64_add_ex_nc (swin_c64ex.hlsl) runs this kernel too (SW_W2_NAME), with the block
 // input x + xadd (SW_ADD) and the fused expand (SW_ECL: swin_block.hlsl's fused_expand with the 4 waves; each wave then
 // reads its two windows' records).
