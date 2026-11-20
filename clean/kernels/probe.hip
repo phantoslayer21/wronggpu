@@ -4,7 +4,8 @@
 // conversions versus the software ones in wg_platform.h, and the FP8 pack/unpack functions the kernels use).
 #include "wg_platform.h"
 
-// One WMMA per wave on raw per-lane registers: d[i] = WMMA(a[i], b[i], 0), i = global lane index.
+// One WMMA per wave on raw per-lane registers: d[i] = WMMA(a[i], b[i], 0), i = global lane index. On gfx11 these are the
+// wrappers of wg_platform.h (the lane's 8 codes or halves, the other half's fetched, widened, one F16 matrix instruction).
 WG_KERNEL(probe_wmma_fp8)(const v2i* a, const v2i* b, v8f* d) {
   const u32 i = wg_block_id() * WG_BLOCK + wg_lane_id();
   v8f z = {};
@@ -17,6 +18,53 @@ WG_KERNEL(probe_wmma_f16)(const v8h* a, const v8h* b, v8f* d) {
   d[i] = wg_wmma_f16(a[i], b[i], z);
 }
 
+// The gfx11 F16 matrix instruction itself, on raw per-lane registers of 16 halves: d[i] = WMMA(a[i], b[i], 0). With a and
+// b of lanes 16-31 different from those of lanes 0-15 it shows which lanes the instruction reads.
+#if defined(WG_GFX11) || defined(WG_EMU_GFX11)
+WG_KERNEL(probe_wmma16)(const v16h* a, const v16h* b, v8f* d) {
+  const u32 i = wg_block_id() * WG_BLOCK + wg_lane_id();
+  v8f z = {};
+  d[i] = wg_wmma16_f16(a[i], b[i], z);
+}
+#endif
+
+// The half-wave exchange: word[i] = wg_xchg16_u(x[i]), flt[i] = wg_xor16 of the same bits as a float. Both must give the
+// value x of lane (i ^ 16), i = global lane index (the workgroup size is a multiple of the wave size). Only where the
+// exchange is new (gfx11, the emulator): the gfx12 probe code object stays byte for byte what it was.
+#if defined(WG_GFX11) || defined(WG_EMU)
+WG_KERNEL(probe_xchg16)(const u32* x, u32* word, u32* flt) {
+  const u32 i = wg_block_id() * WG_BLOCK + wg_lane_id();
+  const u32 v = x[i];
+  word[i] = wg_xchg16_u(v);
+  flt[i] = __builtin_bit_cast(u32, wg_xor16(__builtin_bit_cast(float, v)));
+}
+#endif
+
+// The exchange in divergent code: only the lanes the condition selects execute wg_xchg16_u, the others keep 0xdeadbeef.
+// mode 0: lanes 0-15 of each wave (their partners are inactive); 1: odd lanes; 2: lanes 16-31; 3: every fourth lane;
+// 4: lanes whose value is even (a data-dependent condition). Where a lane executes it must get x of lane (i ^ 16).
+// (Not in the emulator: its exchange is collective, every lane of the wave takes part.)
+#if defined(WG_GFX11)
+WG_KERNEL(probe_xchg16_div)(const u32* x, u32* out, int mode) {
+  const u32 i = wg_block_id() * WG_BLOCK + wg_lane_id();
+  const u32 l = wg_lane_id() & 31u;
+  const u32 v = x[i];
+  u32 r = 0xdeadbeefu;
+  if (mode == 0) {
+    if (l < 16u) r = wg_xchg16_u(v);
+  } else if (mode == 1) {
+    if (l & 1u) r = wg_xchg16_u(v);
+  } else if (mode == 2) {
+    if (l >= 16u) r = wg_xchg16_u(v);
+  } else if (mode == 3) {
+    if ((l & 3u) == 0u) r = wg_xchg16_u(v);
+  } else {
+    if ((v & 1u) == 0u) r = wg_xchg16_u(v);
+  }
+  out[i] = r;
+}
+#endif
+
 // Software FP8 conversions of wg_platform.h: enc[i] = code of x[i]; dec[c] = value of code c (c < 256).
 WG_KERNEL(probe_fp8_sw)(const float* x, u32* enc, float* dec, int n) {
   const u32 i = wg_block_id() * WG_BLOCK + wg_lane_id();
@@ -24,11 +72,11 @@ WG_KERNEL(probe_fp8_sw)(const float* x, u32* enc, float* dec, int n) {
   if (i < 256u) dec[i] = wg_e4m3_to_f32(i);
 }
 
-// Hardware conversions (v_cvt_pk_fp8_f32, v_cvt_f32_fp8): enc[i] = raw hardware code of x[i];
+// Hardware conversions (v_cvt_pk_fp8_f32, v_cvt_f32_fp8; gfx12 only): enc[i] = raw hardware code of x[i];
 // enc_sat[i] = hardware code of x[i] clamped to [-448, 448] first; dec[c] = hardware value of code c.
 WG_KERNEL(probe_fp8_hw)(const float* x, u32* enc, u32* enc_sat, float* dec, int n) {
   const u32 i = wg_block_id() * WG_BLOCK + wg_lane_id();
-#if defined(__AMDGCN__)
+#if defined(__AMDGCN__) && !defined(WG_GFX11)
   if ((int)i < n) {
     const float v = x[i];
     enc[i] = (u32)__builtin_amdgcn_cvt_pk_fp8_f32(v, 0.0f, 0, false) & 0xffu;
@@ -37,7 +85,7 @@ WG_KERNEL(probe_fp8_hw)(const float* x, u32* enc, u32* enc_sat, float* dec, int 
   }
   if (i < 256u) dec[i] = __builtin_amdgcn_cvt_f32_fp8((int)i, 0);
 #else
-  if ((int)i < n) enc[i] = enc_sat[i] = 0xffffffffu;  // not available in the emulator
+  if ((int)i < n) enc[i] = enc_sat[i] = 0xffffffffu;  // not available in the emulator or on gfx11
   if (i < 256u) dec[i] = 0.0f;
 #endif
 }
@@ -54,6 +102,32 @@ WG_KERNEL(probe_fp8_pack)(const v8f* x, const v2i* codes, v2i* packed, v8f* unpa
   }
 }
 
+// Sweep of the gfx11 FP32 -> E4M3 conversions (runner/q8_exhaustive.py): lane g converts the 8 bit patterns base + 8 g ...
+// base + 8 g + 7. The outputs are, per lane: the code bytes of wg_f32_to_e4m3 (8 bytes), wg_pack_q8, wg_pack_q8_inner,
+// wg_pack_q8_nc (8 bytes each), and the F16 bits of wg_q8_to_f16, wg_q8_to_f16_inner, wg_q8_to_f16_nc (16 bytes each).
+#if defined(WG_GFX11) && defined(WG_FAST_Q8)
+WG_KERNEL_N(probe_q8_sweep, 256)(u32 base, v2i* scalar, v2i* pack, v2i* inner, v2i* nc, v4u* half, v4u* half_inner,
+                                  v4u* half_nc) {
+  const u32 g = wg_block_id() * 256 + wg_lane_id();
+  v8f d;
+  u32 code[8];
+  for (int j = 0; j < 8; ++j) {
+    d[j] = __builtin_bit_cast(float, base + 8 * g + j);
+    code[j] = wg_f32_to_e4m3(d[j]);
+  }
+  v2i s;
+  s[0] = (int)(code[0] | (code[1] << 8) | (code[2] << 16) | (code[3] << 24));
+  s[1] = (int)(code[4] | (code[5] << 8) | (code[6] << 16) | (code[7] << 24));
+  scalar[g] = s;
+  pack[g] = wg_pack_q8(d);
+  inner[g] = wg_pack_q8_inner(d);
+  nc[g] = wg_pack_q8_nc(d);
+  half[g] = __builtin_bit_cast(v4u, wg_q8_to_f16(d));
+  half_inner[g] = __builtin_bit_cast(v4u, wg_q8_to_f16_inner(d));
+  half_nc[g] = __builtin_bit_cast(v4u, wg_q8_to_f16_nc(d));
+}
+#endif
+
 // The GELU the kernels use, on n floats: y[i] = wg_gelu(x[i]).
 WG_KERNEL(probe_gelu)(const float* x, float* y, int n) {
   const u32 i = wg_block_id() * WG_BLOCK + wg_lane_id();
@@ -63,6 +137,10 @@ WG_KERNEL(probe_gelu)(const float* x, float* y, int n) {
 #if defined(WG_EMU)
 WG_EMU_REGISTER(probe_wmma_fp8)
 WG_EMU_REGISTER(probe_wmma_f16)
+WG_EMU_REGISTER(probe_xchg16)
+#if defined(WG_EMU_GFX11)
+WG_EMU_REGISTER(probe_wmma16)
+#endif
 WG_EMU_REGISTER(probe_fp8_sw)
 WG_EMU_REGISTER(probe_fp8_hw)
 WG_EMU_REGISTER(probe_fp8_pack)

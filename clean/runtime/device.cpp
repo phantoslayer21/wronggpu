@@ -4,6 +4,7 @@
 #include "device.h"
 #include "embedded.h"
 #include "library_handle.h"
+#include "target_family.h"
 
 #include <cstdio>
 #include <chrono>
@@ -395,7 +396,7 @@ class HipDevice : public Device {
         arch.assign(props.data() + i, j - i);
         break;
       }
-      if (arch != "gfx1200" && arch != "gfx1201") continue;
+      if (target_family(arch).empty()) continue;
       device = d;
       // hipDeviceProp_tR0600: char name[256], hipUUID uuid (16 bytes), char luid[8] (ROCm 7.2 hip_runtime_api.h)
       if (props_r0600_) std::memcpy(luid_, props.data() + 272, 8), has_luid_ = true;
@@ -403,7 +404,7 @@ class HipDevice : public Device {
       note_ += (note_.empty() ? "" : "; ") + std::string("device and code objects: ") + arch;
       break;
     }
-    if (device < 0) return fail("no matching HIP device with packaged gfx1200/gfx1201 kernels: " + device_name);
+    if (device < 0) return fail("no matching HIP device with packaged gfx1200/gfx1201/gfx1100/gfx1101 kernels: " + device_name);
     if (!check(api_.SetDevice(device), "hipSetDevice")) return false;
     device_index_ = device;
     char nm[256] = {0};
@@ -422,6 +423,7 @@ class HipDevice : public Device {
   }
 
   std::string name() const override { return name_; }
+  std::string arch() const override { return alt_arch_; }
   std::string note() const override { return note_; }
   bool adapter_luid(uint8_t luid[8]) const override {
     if (has_luid_) std::memcpy(luid, luid_, 8);

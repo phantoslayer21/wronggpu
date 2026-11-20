@@ -107,22 +107,32 @@ def pack_block_py(t, C, heads, mlp):
 
 
 class StageBlobs(unittest.TestCase):
-    def test_model_m_stages(self):
+    def check_stages(self, rows, *extra):
         for seed in (1, 2):
             t = SM.synthetic_tensors(seed)
             d = tempfile.mkdtemp(prefix="wg_mp_")
             SM.write_raw(d, t)
             out = os.path.join(d, "out")
             os.makedirs(out)
-            self.assertEqual(dump("stages", d, out), "OK 12")
+            self.assertEqual(dump("stages", d, out, *extra), "OK 12")
             lt = logical_tensors(t)  # the converter's raw shapes -> the Python packers' shapes (as the pipeline)
-            want = {"enc0": E0.pack(lt["enc0"]), "dec0": D0.pack(lt["dec0"])}
-            want.update({s: P.pack_stage(s, lt[s]) for s in Sw.STAGES})
+            want = {"enc0": E0.pack(lt["enc0"], rows), "dec0": D0.pack(lt["dec0"], rows)}
+            want.update({s: P.pack_stage(s, lt[s], rows) for s in Sw.STAGES})
             for s, w in want.items():
                 with open(os.path.join(out, s + ".bin"), "rb") as f:
                     got = f.read()
                 if got != w:
                     self.fail("seed %d, %s: %s" % (seed, s, first_diff(got, w)))
+
+    def test_model_m_stages(self):
+        self.check_stages("gfx12")
+
+    def test_model_m_stages_with_the_gfx11_accumulator_rows(self):
+        """drow_gfx11 (what the runtime packs with on a gfx11 device) is packing.D_ROW_LAYOUTS["gfx11"]; and the two tables
+        pack differently, so the test above cannot pass for the wrong one."""
+        self.check_stages("gfx11", "gfx11")
+        self.assertNotEqual(P.pack_stage("enc1", logical_tensors(SM.synthetic_tensors(1))["enc1"], "gfx11"),
+                            P.pack_stage("enc1", logical_tensors(SM.synthetic_tensors(1))["enc1"], "gfx12"))
 
 
 class SwinBlockBuildingBlock(unittest.TestCase):

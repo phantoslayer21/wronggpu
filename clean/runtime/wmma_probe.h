@@ -129,5 +129,126 @@ inline int first_mismatch(const float* results) {
   return -1;
 }
 
+// RDNA 3 (gfx1100), through the D3D12 driver channel's raw fragments (clean/dx12/hlsl/wg_platform.hlsli, WG_GFX 11): the
+// F16 instruction only (no FP8 matrix instruction exists), and a K = 16 step is two chained instructions, so the probe's
+// buffer holds two fragments of A and of B. Same matrices, same operands, the same expected numbers (up to the hardware's
+// last-bit accumulation, see kTolerance). Layout, lane l = 16 h + r:
+//   A: fragment f (the f-th instruction, K 8 f .. 8 f + 7): element j of lane l holds A[r][8 f + j] (both halves alike)
+//   B: fragment f: element j of lane l holds B[8 f + j][r]                                           (both halves alike)
+//   C, D: element v of lane l holds [2 v + h][r]                                                     (D_ROW "gfx11")
+// (The instruction takes row m of A from lane 16 (m & 1) + m and column n of B from the lane itself; with both halves
+// alike that is lane m % 16, so the table above is what a lane holds.)
+namespace gfx11 {
+constexpr uint32_t kOutF16 = 0, kInC = 2048, kInAF16 = 3072, kInBF16 = 3584, kInAF16K2 = 4096, kInBF16K2 = 4608,
+                   kBytes = 5120;
+constexpr unsigned kResults = 256;  // floats read back from offset 0
+
+inline void a_entry(unsigned lane, unsigned f, unsigned j, unsigned& m, unsigned& k) { m = lane % 16; k = 8 * f + j; }
+inline void b_entry(unsigned lane, unsigned f, unsigned j, unsigned& k, unsigned& n) { n = lane % 16; k = 8 * f + j; }
+inline void d_entry(unsigned lane, unsigned v, unsigned& m, unsigned& n) { m = 2 * v + lane / 16; n = lane % 16; }
+
+inline void fill(uint8_t* buffer) {
+  std::memset(buffer, 0, kBytes);
+  for (unsigned l = 0; l < kLanes; ++l)
+    for (unsigned j = 0; j < kElements; ++j) {
+      for (unsigned f = 0; f < 2; ++f) {
+        unsigned m, n, k;
+        a_entry(l, f, j, m, k);
+        const uint16_t a16 = f16_bits(kA[m][k]);
+        std::memcpy(buffer + (f ? kInAF16K2 : kInAF16) + 16 * l + 2 * j, &a16, 2);
+        b_entry(l, f, j, k, n);
+        const uint16_t b16 = f16_bits(kB[k][n]);
+        std::memcpy(buffer + (f ? kInBF16K2 : kInBF16) + 16 * l + 2 * j, &b16, 2);
+      }
+      const float c = c_value(l, j);
+      std::memcpy(buffer + kInC + 4 * (32 * j + l), &c, 4);
+    }
+}
+
+inline float expected(unsigned i) {
+  const unsigned lane = i % 32, v = (i % 256) / 32;
+  unsigned m, n;
+  d_entry(lane, v, m, n);
+  int sum = 0;
+  for (unsigned k = 0; k < 16; ++k) sum += kA[m][k] * kB[k][n];
+  return static_cast<float>(sum) + c_value(lane, v);
+}
+
+// The accumulation of gfx1100's instruction is not exact (measured on the card: with mixed-sign operands up to 57 of the 256
+// results differ from the exact FP32 sum in the last bit, the same bits as HIP's instruction), so unlike gfx12 the results
+// are compared with a tolerance. It is far below the gap between two different layouts' results (tests/test_wmma_probe.cpp
+// checks the smallest gap between distinct expected values and every wrong layout).
+constexpr float kTolerance = 1.0f / 4096.0f;
+inline int first_mismatch(const float* results) {
+  for (unsigned i = 0; i < kResults; ++i) {
+    const float d = results[i] - expected(i);
+    if (!(d <= kTolerance && d >= -kTolerance)) return static_cast<int>(i);   // a NaN fails too
+  }
+  return -1;
+}
+}  // namespace gfx11
+
+// The same probe on an RDNA 3 board that runs the UNCHANGED gfx12 kernels through the emulation of the matrix FP8 operations
+// in dxil-spirv (the developer-only shortcut mode of WG_DEV_GFX11, device_d3d12.cpp). The emulation keeps gfx12's fragment
+// layouts (so fill() and the expected numbers above stand), but it multiplies in the FP16 instruction, whose accumulation
+// is not exact on gfx1100 (see gfx11::kTolerance), so the results are compared within the same tolerance.
+inline int first_mismatch_within(const float* results, float tolerance) {
+  for (unsigned i = 0; i < kResults; ++i) {
+    const float d = results[i] - expected(i);
+    if (!(d <= tolerance && d >= -tolerance)) return static_cast<int>(i);   // a NaN fails too
+  }
+  return -1;
+}
+
+// Correctness of the shortcut depends on the F32 -> F16 -> F32 pair that the encoder (and other kernels) write on purpose
+// to round to FP16: the driver's compiler may fold such a pair into nothing (found with RADV, SHORTCUT-PROBE), and the
+// features then differ by one FP8 step. native_round_probe (clean/dx12/kernels/native_game_helpers.hlsl) runs the pair
+// on 256 values at create; every input has nonzero bits below FP16's precision, so a folded pair returns the input and
+// differs from every expected result. Buffer: the results (floats, element i of lane l = float 32 i + l) at byte 0, the
+// inputs at kIn.
+namespace round16 {
+constexpr uint32_t kIn = 1024, kBytes = 2048;
+constexpr unsigned kResults = 256;
+
+inline float input(unsigned i) {
+  // exponent -14..14 (FP16 normal range with room to round up), 13 low bits 1..8190 (never 0, so rounding always moves the value),
+  // alternating sign; every 16th value is an exact tie (low bits 4096), with an odd kept mantissa (rounds up) when i % 16 == 5 and
+  // an even one (stays) when i % 16 == 8, since the kept bits' lowest bit is the parity of i
+  uint32_t low = 1u + (i * 37u) % 8190u;
+  if (i % 16 == 5 || i % 16 == 8) low = 4096u;
+  const uint32_t exponent = 127u - 14u + (i * 7u) % 29u, high = (i * 389u) & 0x3ffu;
+  const uint32_t bits = ((i & 1u) << 31) | (exponent << 23) | (high << 13) | low;
+  float f;
+  std::memcpy(&f, &bits, 4);
+  return f;
+}
+// (float)(_Float16) x, round to nearest even, for the normal range input() uses
+inline float rounded(float x) {
+  uint32_t bits;
+  std::memcpy(&bits, &x, 4);
+  const uint32_t low = bits & 0x1fffu;
+  uint32_t kept = bits & ~0x1fffu;
+  if (low > 0x1000u || (low == 0x1000u && (bits & 0x2000u))) kept += 0x2000u;   // a carry into the exponent is the right result
+  float f;
+  std::memcpy(&f, &kept, 4);
+  return f;
+}
+inline void fill(uint8_t* buffer) {
+  std::memset(buffer, 0, kBytes);
+  for (unsigned i = 0; i < kResults; ++i) {
+    const float f = input(i);
+    std::memcpy(buffer + kIn + 4 * i, &f, 4);
+  }
+}
+// First result whose bits differ from the correctly rounded input, or -1.
+inline int first_mismatch(const float* results) {
+  for (unsigned i = 0; i < kResults; ++i) {
+    const float e = rounded(input(i));
+    if (std::memcmp(&results[i], &e, 4) != 0) return static_cast<int>(i);
+  }
+  return -1;
+}
+}  // namespace round16
+
 }  // namespace wmma_probe
 }  // namespace wgrt

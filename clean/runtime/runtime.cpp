@@ -27,7 +27,9 @@
 #include "fpconv.h"
 #include "model.h"
 #include "model_select.h"
+#include "rdna4.h"
 #include "runtime_core.h"
+#include "target_family.h"
 #include "wg_runtime.h"
 
 namespace wgrt {
@@ -546,6 +548,10 @@ struct Runtime {
   std::vector<size_t> owned_size;  // bytes of each allocation in owned (wg_rt_fill)
   uint64_t owned_bytes = 0;
   bool external_io = false;    // inputs and output always come from FrameIo (interop): no own buffers for them
+  // WG_DEV_GFX11 (rdna4.h): the D3D12 device's target ("gfx1100" on a board of the developer opening), which picks the
+  // kernel folder; empty, and the folder dx12, in every other build.
+  std::string dx12_arch;
+  std::string dx12_manifest() const { return build_dir + "/" + wgrt::dx12_folder(dx12_arch) + "/manifest.json"; }
   bool native_direct_io = false;  // typed resources bound by the private native caller; no dense I/O conversion buffers
   bool recon_output = false;   // experimental: D = O, output filter = identity (post_copy)
 
@@ -607,6 +613,15 @@ struct Runtime {
     d3d12_native = c.backend == 3;
     if (c.backend == 3 && external && !native_direct_io)
       return fail("native D3D12 external I/O requires the private direct-resource route");
+    // WG_DEV_GFX11 (rdna4.h): the kernel folder depends on the adapter's family, so that build has the native device before
+    // it reads a manifest (a device it could not make is reported where it always is, below). Every other build skips this.
+    std::string dev_err;
+    if (wgrt::kDevGfx11 && c.backend == 3) {
+#if defined(_WIN32)
+      if (!given) given = make_d3d12_device(build_dir, &dev_err);
+#endif
+      if (given) dx12_arch = given->arch();
+    }
 #ifndef WG_NO_MODEL_K
     if (model_id == ModelId::K) return create_k(c, std::move(given));
 #else
@@ -779,12 +794,37 @@ struct Runtime {
     if (model_l && !p12 && c.backend == 3)
       return fail("Model L on native D3D12 needs the pack12 post path (post_pack=p12; Model M's decoder__pack12.co "
                   "selects it)");
+    // The device first: the accumulator row table of the weights depends on its target. A failure to make it is
+    // reported where it always was, after the model has loaded.
+    if (given) {
+      dev = std::move(given);
+    } else if (c.backend == 1) {
+      const std::string lib = c.emu_library ? c.emu_library : build_dir + "/wg_emu.so";
+      dev = make_emu_device(lib, &dev_err);
+    } else if (c.backend == 2) {  // hybrid D3D12: the D3D12 ports of <build_dir>/dx12 + HIP (device_dx12.cpp)
+      dev = make_dx12_device(c.rocm_dir ? c.rocm_dir : "", build_dir, &dev_err);
+    } else if (c.backend == 3) {
+#if defined(_WIN32)
+      if (dev_err.empty()) dev = make_d3d12_device(build_dir, &dev_err);  // (WG_DEV_GFX11: tried above already)
+#else
+      dev_err = "native D3D12 requires Windows";
+#endif
+    } else {
+      dev = make_hip_device(c.rocm_dir ? c.rocm_dir : "", &dev_err);
+    }
+    // WMMA accumulator layout: the config's table when it has one, else the one of the device's target family (the
+    // gfx11 matrix instruction returns row 2 v + h, the gfx12 one v + 8 h), else gfx12's
     bool any = false;
     for (int i = 0; i < 16; ++i) any |= c.d_row[i] != 0;
     drow = drow_gfx12();
     if (any)
       for (int i = 0; i < 16; ++i) drow[i / 8][i % 8] = c.d_row[i];
-    if (native_direct_io && drow != drow_gfx12())
+    else if (dev && target_family(dev->arch()) == "gfx11")
+      drow = drow_gfx11();
+    // the ported kernels' layout: gfx12's, or the gfx11 table on a board of the WG_DEV_GFX11 opening (its kernels are the
+    // dx12-gfx11 set); a device without the opening reports no target, so nothing else changes
+    const bool native_gfx11 = wgrt::kDevGfx11 && dev && target_family(dev->arch()) == "gfx11";
+    if (native_direct_io && drow != (native_gfx11 ? drow_gfx11() : drow_gfx12()))
       return fail("native direct resources require the ported gfx12 WMMA accumulator layout");
 
     // model data (section 7): load, check, pack once
@@ -870,24 +910,8 @@ struct Runtime {
       std::memcpy(blobs[kFilterStage].data(), output_taps, sizeof(output_taps));
     }
 
-    // device and code objects
-    if (given) {
-      dev = std::move(given);
-    } else if (c.backend == 1) {
-      const std::string lib = c.emu_library ? c.emu_library : build_dir + "/wg_emu.so";
-      dev = make_emu_device(lib, &e);
-    } else if (c.backend == 2) {  // hybrid D3D12: the D3D12 ports of <build_dir>/dx12 + HIP (device_dx12.cpp)
-      dev = make_dx12_device(c.rocm_dir ? c.rocm_dir : "", build_dir, &e);
-    } else if (c.backend == 3) {
-#if defined(_WIN32)
-      dev = make_d3d12_device(build_dir, &e);
-#else
-      return fail("native D3D12 requires Windows");
-#endif
-    } else {
-      dev = make_hip_device(c.rocm_dir ? c.rocm_dir : "", &e);
-    }
-    if (!dev) return fail(e);
+    // code objects (the device is made above, before the weights are packed)
+    if (!dev) return fail(dev_err);
     for (const std::string& co : {swin_co, enc0_co, dec0_co, exposure_co, std::string("post.co"),
                                   std::string("frame.co")}) {
       if (model_l && (co == enc0_co || co == dec0_co)) continue;  // Model L's encoder and decoder: below
@@ -1219,7 +1243,7 @@ struct Runtime {
     if (co == "decoder__pack12.co") co = "dec1_dec0__pack12.co";
     std::string text, error;
     wgc::Json manifest;
-    if (!read_text(build_dir + "/dx12/manifest.json", &text) || !wgc::parse_json(text, manifest, error)) return false;
+    if (!read_text(dx12_manifest(), &text) || !wgc::parse_json(text, manifest, error)) return false;
     const auto* kernels = manifest.find("kernels");
     if (!kernels || !kernels->is_array()) return false;
     for (const auto& k : kernels->items) {
@@ -2094,7 +2118,7 @@ struct Runtime {
     std::string text, error;
     wgc::Json manifest;
     std::vector<std::string> have;
-    if (read_text(build_dir + "/dx12/manifest.json", &text) && wgc::parse_json(text, manifest, error)) {
+    if (read_text(dx12_manifest(), &text) && wgc::parse_json(text, manifest, error)) {
       const auto* kernels = manifest.find("kernels");
       if (kernels && kernels->is_array())
         for (const auto& k : kernels->items) {

@@ -990,7 +990,14 @@ WG_FN void block_resident(const u8* __restrict__ x, const u8* __restrict__ xadd,
   WG_V2_PROF_START();
   const u32 tid = wg_lane_id(), lane = tid & 31u, t = lane & 15u, hh = lane >> 4;
   const int nwx = (W + ox + 3) >> 2, nwin = nwx * ((H + oy + 3) >> 2);
+#if WG_TILE_STORES_UNGUARDED
+  // gfx11: the wave's first window is a scalar. As a vector value the compiler cannot see that `win0 + i >= nwin` is the same
+  // for the whole wave, so it ran the window loop (every v_wmma and v_permlanex16 of the block) under a lane mask; both need
+  // every lane executing.
+  const int win0 = wg_uniform((int)(wg_block_id() * (THREADS / WG_WAVE) + (tid >> 5)) * WPW);
+#else
   const int win0 = (int)(wg_block_id() * (THREADS / WG_WAVE) + (tid >> 5)) * WPW;
+#endif
 
   Raw<C, ADD> raw;
   gather<C, ADD>(raw, x, xadd, win0 < nwin ? win0 : nwin - 1, win0 < nwin, nwx, H, W, ox, oy, t, hh);

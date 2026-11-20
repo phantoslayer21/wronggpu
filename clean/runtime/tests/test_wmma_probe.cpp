@@ -143,6 +143,55 @@ Layout transposed(const std::string& name, char which) {
   return x;
 }
 
+// ---- RDNA 3 (wmma_probe.h, namespace gfx11): the instruction pair of gfx1100 ---------------------------------------------
+namespace G = P::gfx11;
+// What the hardware does with the buffer. The true one (below, the default): D row r = 2 v + h of lane l takes A from lane
+// 16 (r & 1) + r, B from lane l, C from the same lane and element, the first instruction takes fragment 0 and the second
+// fragment 1, and element v of lane l is row 2 v + h. Wrong variants of each part are what the probe must catch.
+struct Hw11 {
+  std::string name;
+  std::function<unsigned(unsigned, unsigned)> a_lane = [](unsigned r, unsigned) { return 16 * (r & 1) + r; };  // (row, l)
+  std::function<unsigned(unsigned)> b_lane = [](unsigned l) { return l; };
+  Map d = G::d_entry;
+  unsigned a_frag_xor = 0;                  // fragment of A taken by instruction f: f ^ a_frag_xor
+  bool swap_ab = false;
+  bool half_split = false;                  // gfx12 behaviour: lane half = K block, fragment 0 only
+};
+
+void run11(const uint8_t* buffer, const Hw11& hw, float* results) {
+  auto half = [&](uint32_t at, unsigned l, unsigned j) {
+    uint16_t h;
+    std::memcpy(&h, buffer + at + 16 * l + 2 * j, 2);
+    return f16_value(h);
+  };
+  const uint32_t a0 = hw.swap_ab ? G::kInBF16 : G::kInAF16, a1 = hw.swap_ab ? G::kInBF16K2 : G::kInAF16K2;
+  const uint32_t b0 = hw.swap_ab ? G::kInAF16 : G::kInBF16, b1 = hw.swap_ab ? G::kInAF16K2 : G::kInBF16K2;
+  for (unsigned l = 0; l < 32; ++l)
+    for (unsigned v = 0; v < 8; ++v) {
+      unsigned m, n;
+      hw.d(l, v, m, n);
+      float c;
+      std::memcpy(&c, buffer + G::kInC + 4 * (32 * v + l), 4);
+      double sum = c;
+      for (unsigned f = 0; f < (hw.half_split ? 1u : 2u); ++f)
+        for (unsigned j = 0; j < 8; ++j) {
+          const unsigned la = hw.a_lane(m, l), lb = hw.b_lane(n + 16 * (l / 16));
+          const unsigned fa = f ^ hw.a_frag_xor;
+          if (hw.half_split) {   // K = 8 (lane / 16) + j from the lane's own half, fragment 0
+            sum += static_cast<double>(half(a0, m + 16 * (l / 16), j)) * half(b0, n + 16 * (l / 16), j);
+          } else {
+            sum += static_cast<double>(half(fa ? a1 : a0, la, j)) * half(f ? b1 : b0, lb, j);
+          }
+        }
+      results[32 * v + l] = static_cast<float>(sum);
+    }
+}
+int probe11(const uint8_t* buffer, const Hw11& hw) {
+  float r[G::kResults];
+  run11(buffer, hw, r);
+  return G::first_mismatch(r);
+}
+
 }  // namespace
 
 int main() {
@@ -260,6 +309,116 @@ int main() {
     x.a = [](unsigned l, unsigned j, unsigned& m, unsigned& k) { P::a_entry(l ^ 16, j, m, k); m = l % 16; };
     x.b = [](unsigned l, unsigned j, unsigned& k, unsigned& n) { P::b_entry(l ^ 16, j, k, n); n = l % 16; };
     expect(x.name + " (no product changes): new probe passes", probe(x).new_bad < 0);
+  }
+
+  // ---- RDNA 3: the F16-only probe with two K fragments (wmma_probe.h, namespace gfx11) ---------------------------------
+  {
+    uint8_t buffer[G::kBytes];
+    G::fill(buffer);
+    Hw11 true_hw;
+    true_hw.name = "gfx11 hardware";
+    expect("gfx11 layout: the probe passes", probe11(buffer, true_hw) < 0);
+    {
+      float r[G::kResults];
+      run11(buffer, true_hw, r);
+      r[7] = -1.0f;
+      expect("gfx11: a corrupted float 7 is reported at float 7", G::first_mismatch(r) == 7);
+    }
+    std::set<float> distinct;
+    for (unsigned i = 0; i < G::kResults; ++i) distinct.insert(G::expected(i));
+    expect("gfx11: all 256 expected results are distinct", distinct.size() == 256);
+    bool same_numbers = true;   // the same matrices and C as the gfx12 probe, only placed in other rows
+    for (unsigned i = 0; i < 256; ++i) {
+      unsigned m, n, m12, n12;
+      G::d_entry(i % 32, i / 32, m, n);
+      long s = 0;
+      for (unsigned k = 0; k < 16; ++k) s += P::kA[m][k] * P::kB[k][n];
+      same_numbers = same_numbers && G::expected(i) == static_cast<float>(s) + P::c_value(i % 32, i / 32);
+      (void)m12; (void)n12;
+    }
+    expect("gfx11: expected = A x B at the row table 2 v + h, plus C", same_numbers);
+    {
+      std::vector<float> e;
+      for (unsigned i = 0; i < G::kResults; ++i) e.push_back(G::expected(i));
+      std::sort(e.begin(), e.end());
+      float gap = 1e30f;
+      for (size_t i = 1; i < e.size(); ++i) gap = std::min(gap, e[i] - e[i - 1]);
+      expect("gfx11: the smallest gap between expected results (" + std::to_string(gap) + ") is above 8 x the tolerance",
+             gap > 8 * G::kTolerance);
+      float r[G::kResults];
+      run11(buffer, true_hw, r);
+      for (unsigned i = 0; i < G::kResults; i += 3) r[i] += 3.0e-5f;   // last-bit differences of the hardware are accepted
+      expect("gfx11: last-bit differences (3e-5) pass", G::first_mismatch(r) < 0);
+      r[100] += 2.0e-3f;
+      expect("gfx11: a difference of 2e-3 in float 100 is reported at 100", G::first_mismatch(r) == 100);
+      r[3] = std::nanf("");
+      expect("gfx11: a NaN is reported", G::first_mismatch(r) == 3);
+    }
+
+    std::vector<Hw11> wrong;
+    {
+      Hw11 x; x.name = "hardware with the gfx12 accumulator rows v + 8 h"; x.d = P::d_entry; wrong.push_back(x);
+      Hw11 y; y.name = "A and B swapped"; y.swap_ab = true; wrong.push_back(y);
+      Hw11 z; z.name = "the second instruction takes the first fragment of A"; z.a_frag_xor = 1; wrong.push_back(z);
+      Hw11 u; u.name = "hardware that splits K by lane half (gfx12), one fragment"; u.half_split = true; wrong.push_back(u);
+      Hw11 t; t.name = "A row m read from lane m ^ 1 (the wrong lane of a pair)";
+      t.a_lane = [](unsigned r, unsigned) { return (16 * (r & 1) + r) ^ 1; }; wrong.push_back(t);
+      Hw11 q; q.name = "B column read from the neighbouring lane";
+      q.b_lane = [](unsigned l) { return l ^ 1; }; wrong.push_back(q);
+    }
+    for (const Hw11& x : wrong) {
+      const int bad = probe11(buffer, x);
+      expect("gfx11: " + x.name + ": probe fails" + (bad >= 0 ? " (float " + std::to_string(bad) + ")" : ""), bad >= 0);
+    }
+    {   // the replicated halves make some changes invisible, and they need not be seen
+      Hw11 x; x.name = "A row read from lane m (not 16 (m & 1) + m): the halves hold the same rows"; x.a_lane = [](unsigned r, unsigned) { return r; };
+      Hw11 y; y.name = "B read from lane l ^ 16: the halves hold the same columns"; y.b_lane = [](unsigned l) { return l ^ 16; };
+      expect("gfx11: " + x.name + ": probe passes", probe11(buffer, x) < 0);
+      expect("gfx11: " + y.name + ": probe passes", probe11(buffer, y) < 0);
+    }
+    // exhaustive: two lanes' data exchanged in the buffer (A: both fragments, B, or the C slots); the true hardware reads
+    // A of row r from lane 16 (r & 1) + r only, so an A swap is seen exactly when it moves a read lane's data to another row
+    for (int which = 0; which < 3; ++which) {
+      int caught = 0, expect_caught = 0, total = 0;
+      for (unsigned l1 = 0; l1 < 32; ++l1)
+        for (unsigned l2 = l1 + 1; l2 < 32; ++l2) {
+          uint8_t x[G::kBytes];
+          std::memcpy(x, buffer, sizeof x);
+          auto swap_block = [&](uint32_t at, unsigned bytes) {
+            for (unsigned i = 0; i < bytes; ++i) std::swap(x[at + bytes * l1 + i], x[at + bytes * l2 + i]);
+          };
+          if (which == 0) { swap_block(G::kInAF16, 16); swap_block(G::kInAF16K2, 16); }
+          if (which == 1) { swap_block(G::kInBF16, 16); swap_block(G::kInBF16K2, 16); }
+          if (which == 2)
+            for (unsigned j = 0; j < 8; ++j)
+              for (unsigned i = 0; i < 4; ++i) std::swap(x[G::kInC + 4 * (32 * j + l1) + i], x[G::kInC + 4 * (32 * j + l2) + i]);
+          ++total;
+          caught += probe11(x, true_hw) >= 0;
+          const bool read1 = (l1 % 2 == 0) == (l1 < 16), read2 = (l2 % 2 == 0) == (l2 < 16);   // lane 16 (r & 1) + r is read
+          if (which == 0) expect_caught += (read1 || read2) && l1 % 16 != l2 % 16;
+          if (which == 1) expect_caught += l1 % 16 != l2 % 16;
+          if (which == 2) expect_caught += 1;
+        }
+      const std::string op = which == 0 ? "A" : which == 1 ? "B" : "C";
+      expect("gfx11 " + op + ": " + std::to_string(caught) + " of " + std::to_string(total) + " lane-pair swaps fail, exactly the " +
+                 std::to_string(expect_caught) + " that change what the instruction reads",
+             caught == expect_caught);
+    }
+    for (int which = 0; which < 2; ++which) {   // element slots j1, j2 exchanged in A only (or in B only), both fragments
+      int caught = 0, total = 0;
+      for (unsigned j1 = 0; j1 < 8; ++j1)
+        for (unsigned j2 = j1 + 1; j2 < 8; ++j2) {
+          uint8_t x[G::kBytes];
+          std::memcpy(x, buffer, sizeof x);
+          for (unsigned l = 0; l < 32; ++l)
+            for (uint32_t at : {which ? G::kInBF16 : G::kInAF16, which ? G::kInBF16K2 : G::kInAF16K2})
+              for (unsigned i = 0; i < 2; ++i) std::swap(x[at + 16 * l + 2 * j1 + i], x[at + 16 * l + 2 * j2 + i]);
+          ++total;
+          caught += probe11(x, true_hw) >= 0;
+        }
+      expect(std::string("gfx11 ") + (which ? "B" : "A") + ": all " + std::to_string(total) + " element-pair swaps fail (" +
+                 std::to_string(caught) + ")", caught == total);
+    }
   }
 
   std::printf("%s\n", failures ? "TESTS FAILED" : "ALL TESTS PASSED");

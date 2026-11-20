@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 // The runtime's C++ packers (clean/runtime/model.cpp) on the CPU, for clean/tests/test_model_pack_cpp.py:
 //
-//   model_pack_dump stages <model dir> <out dir>
-//       loads the converter's raw tensors (load_raw_model) and writes <out dir>/<stage>.bin = pack_stage_blob for
+//   model_pack_dump stages <model dir> <out dir> [gfx11]
+//       (accumulator rows of the gfx12 matrix instruction, or with gfx11 those of the gfx11 one: drow_gfx11) loads the converter's raw tensors (load_raw_model) and writes <out dir>/<stage>.bin = pack_stage_blob for
 //       every stage with a blob (enc0, enc1 ... dec1, dec0); prints "OK <n>" or "ERR <message>"
 //   model_pack_dump block <tensor dir> <prefix> <C> <heads> <mlp> <out file>
 //       reads <tensor dir>/<name>.bin (float32, the file name is the tensor name, e.g. "blk.W1.bin"), packs one Swin
@@ -38,9 +38,9 @@ bool read_f32(const std::string& path, std::vector<float>* out) {
 
 int main(int argc, char** argv) {
   const std::string mode = argc > 1 ? argv[1] : "";
-  const wgrt::DRow d = wgrt::drow_gfx12();
+  const wgrt::DRow d = mode == "stages" && argc == 5 && std::string(argv[4]) == "gfx11" ? wgrt::drow_gfx11() : wgrt::drow_gfx12();
   std::string err;
-  if (mode == "stages" && argc == 4) {
+  if (mode == "stages" && (argc == 4 || (argc == 5 && std::string(argv[4]) == "gfx11"))) {
     std::map<std::string, wgrt::StageTensors> model;
     if (!wgrt::load_raw_model(argv[2], &model, &err)) return std::printf("ERR %s\n", err.c_str()), 0;
     int n = 0;

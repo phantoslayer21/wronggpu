@@ -1,0 +1,282 @@
+# SPDX-License-Identifier: MIT
+"""clean/runner/exec_scan.py: v_wmma and v_permlanex16 under a lane-divergent exec mask.
+
+Part 1 runs the pass over small hand-written functions (every instruction 4 bytes, branches resolved from labels), so each
+rule of the pass is tested on a case that has to be flagged and a look-alike that must not be.
+
+Part 2 scans the gfx11 code objects of a build (WG_BUILD, objdump from WG_ROCM): the kernels the runner launches on the card
+must have no matrix or exchange instruction under a lane mask. Skipped without a gfx11 build:
+
+    python clean/runner/build.py --arch gfx1100 --rocm <ROCm> --out <build> --no-runtime
+    WG_BUILD=<build> WG_ROCM=<ROCm> python -m unittest clean.tests.test_exec_scan
+"""
+import os
+import tempfile
+import unittest
+
+from clean.runner import exec_scan as E
+from clean.runner import family
+
+
+def asm(*items, name="k"):
+    """Disassembly text of one function. Items: "label:" lines, or "mnemonic operands" (a branch names its label last)."""
+    pcs, labels, pc = [], {}, 0
+    for it in items:
+        if it.endswith(":"):
+            labels[it[:-1]] = pc
+        else:
+            pcs.append((pc, it))
+            pc += 4
+    lines = [f"{0:016x} <{name}>:"]
+    for pc, it in pcs:
+        mn, _, ops = it.partition(" ")
+        dword = 0xBF800000
+        if mn.startswith(("s_branch", "s_cbranch")):
+            target = labels[ops.strip()]
+            ops = "0"
+            dword = 0xBFA00000 | (((target - pc - 4) // 4) & 0xFFFF)
+        lines.append(f"\t{mn} {ops}".rstrip() + f"   // {pc:012X}: {dword:08X}")
+    return "\n".join(lines) + "\n"
+
+
+def flagged(*items):
+    found, _ = E.scan_text(asm(*items))
+    return [(mn, origin) for _addr, mn, origin in found.get("k", [])]
+
+
+WMMA = "v_wmma_f32_16x16x16_f16 v[16:23], v[0:7], v[8:15], v[16:23]"
+PERM = "v_permlanex16_b32 v1, v0, s2, s3 op_sel:[1,0]"
+
+
+class TestExecScanRules(unittest.TestCase):
+    def test_plain_code_is_clean(self):
+        self.assertEqual(flagged(WMMA, PERM, "s_endpgm"), [])
+
+    def test_matrix_in_a_branch_under_saveexec_is_flagged(self):
+        self.assertEqual(flagged("v_cmp_gt_i32 vcc_lo, s0, v1", "s_and_saveexec_b32 s1, vcc_lo", "s_cbranch_execz out",
+                                 WMMA, "out:", "s_or_b32 exec_lo, exec_lo, s1", "s_endpgm"), [(WMMA.split()[0], 4)])
+
+    def test_exchange_in_a_branch_under_saveexec_is_flagged(self):
+        self.assertEqual([m for m, _ in flagged("s_and_saveexec_b32 s1, vcc_lo", PERM, "s_or_b32 exec_lo, exec_lo, s1",
+                                                 "s_endpgm")], ["v_permlanex16_b32"])
+
+    def test_matrix_after_the_mask_is_restored_is_clean(self):
+        self.assertEqual(flagged("s_and_saveexec_b32 s1, vcc_lo", "s_cbranch_execz out", "v_add_f32 v0, v0, v1", "out:",
+                                 "s_or_b32 exec_lo, exec_lo, s1", WMMA, "s_endpgm"), [])
+
+    def test_restore_with_mov_from_the_saved_register(self):
+        self.assertEqual(flagged("s_mov_b32 s5, exec_lo", "s_and_b32 exec_lo, exec_lo, vcc_lo", "v_add_f32 v0, v0, v1",
+                                 "s_mov_b32 exec_lo, s5", WMMA, "s_endpgm"), [])
+        self.assertEqual(len(flagged("s_mov_b32 s5, exec_lo", "s_and_b32 exec_lo, exec_lo, vcc_lo", WMMA,
+                                     "s_mov_b32 exec_lo, s5", "s_endpgm")), 1)
+
+    def test_else_branch_of_if_else_is_flagged_and_the_join_is_clean(self):
+        items = ["s_and_saveexec_b32 s1, vcc_lo", "s_xor_b32 s1, exec_lo, s1", "s_cbranch_execz else", "v_add_f32 v0, v0, v1",
+                 "else:", "s_and_not1_saveexec_b32 s1, s1", "s_cbranch_execz join", WMMA, "join:",
+                 "s_or_b32 exec_lo, exec_lo, s1", PERM, "s_endpgm"]
+        self.assertEqual([m for m, _ in flagged(*items)], [WMMA.split()[0]])
+
+    def test_uniform_branches_do_not_change_the_mask(self):
+        self.assertEqual(flagged("s_cmp_lt_i32 s0, s1", "s_cbranch_scc1 out", WMMA, "out:", PERM, "s_endpgm"), [])
+        self.assertEqual(flagged("s_cbranch_vccz out", WMMA, "out:", "s_endpgm"), [])
+
+    def test_matrix_inside_a_divergent_loop_is_flagged(self):
+        self.assertEqual(len(flagged("s_mov_b32 s1, 0", "top:", "v_cmp_lt_u32 s0, v8, v9", "s_or_b32 s1, s0, s1", WMMA,
+                                     "s_and_not1_b32 exec_lo, exec_lo, s1", "s_cbranch_execnz top",
+                                     "s_or_b32 exec_lo, exec_lo, s1", "s_endpgm")), 1)
+
+    def test_matrix_after_a_divergent_loop_is_clean(self):
+        self.assertEqual(flagged("s_mov_b32 s1, 0", "top:", "v_cmp_lt_u32 s0, v8, v9", "s_or_b32 s1, s0, s1",
+                                 "v_add_f32 v0, v0, v1", "s_and_not1_b32 exec_lo, exec_lo, s1", "s_cbranch_execnz top",
+                                 "s_or_b32 exec_lo, exec_lo, s1", WMMA, PERM, "s_endpgm"), [])
+
+    def test_loop_entered_under_a_mask_stays_partial_after_it(self):
+        self.assertEqual(len(flagged("s_and_saveexec_b32 s9, vcc_lo", "s_mov_b32 s1, 0", "top:", "s_or_b32 s1, s0, s1",
+                                     "s_and_not1_b32 exec_lo, exec_lo, s1", "s_cbranch_execnz top",
+                                     "s_or_b32 exec_lo, exec_lo, s1", WMMA, "s_endpgm")), 1)
+
+    def test_v_cmpx_makes_the_mask_partial(self):
+        self.assertEqual(len(flagged("v_cmpx_gt_i32 exec_lo, 0, v1", WMMA, "s_endpgm")), 1)
+
+    def test_mask_set_back_to_all_ones(self):
+        self.assertEqual(flagged("s_and_b32 exec_lo, exec_lo, vcc_lo", "s_mov_b32 exec_lo, -1", WMMA, "s_endpgm"), [])
+
+    def test_a_partial_path_joining_a_full_one_is_partial(self):
+        self.assertEqual(len(flagged("s_cbranch_scc1 skip", "s_and_saveexec_b32 s1, vcc_lo", "skip:", WMMA, "s_endpgm")), 1)
+
+    def test_a_full_path_joining_a_partial_one_is_partial(self):
+        self.assertEqual(len(flagged("s_and_saveexec_b32 s1, vcc_lo", "s_cbranch_scc1 skip", "s_or_b32 exec_lo, exec_lo, s1",
+                                     "skip:", WMMA, "s_endpgm")), 1)
+
+    def test_if_else_through_v_cmpx_and_the_else_saveexec_joins_back_to_the_mask_before_the_if(self):
+        """The shape the compiler gives `if (c) {...} else {...}` over a per-lane test: the join restores the mask the if was
+        entered with, not the one the else side saved."""
+        items = ["s_mov_b32 s1, exec_lo", "v_cmpx_ne_u32 exec_lo, 0, v20", "s_xor_b32 s1, exec_lo, s1", "s_cbranch_execz else",
+                 "v_add_f32 v0, v0, v1", "else:", "s_and_not1_saveexec_b32 s0, s1", "s_cbranch_execz join",
+                 "v_add_f32 v0, v0, v2", "join:", "s_or_b32 exec_lo, exec_lo, s0"]
+        self.assertEqual(flagged(*items, WMMA, PERM, "s_endpgm"), [])
+        self.assertEqual(len(flagged(*items[:6], "s_and_not1_saveexec_b32 s0, s1", WMMA, "s_endpgm")), 1)
+
+    def test_the_origin_is_the_instruction_that_narrowed_the_mask(self):
+        found, _ = E.scan_text(asm("v_add_f32 v0, v0, v1", "s_and_saveexec_b32 s1, vcc_lo", WMMA, "s_endpgm"))
+        self.assertEqual([(a, o) for a, _m, o in found["k"]], [(8, 4)])
+
+
+class TestFindObjdump(unittest.TestCase):
+    """A ROCm link folder made for build.py (ROCM_PATH in the test runs) has the compiler but no llvm/bin/llvm-objdump: the lookup
+    goes on to the next candidate instead of giving up (the build tests of this file used to skip for that reason)."""
+
+    def tool(self, root):
+        path = os.path.join(root, "llvm", "bin", "llvm-objdump")
+        os.makedirs(os.path.dirname(path))
+        open(path, "w").close()
+        return path
+
+    def find(self, **env):
+        keep = {k: os.environ.pop(k, None) for k in ("WG_ROCM", "ROCM_PATH")}
+        os.environ.update(env)
+        try:
+            return E.find_objdump()
+        finally:
+            for k in keep:
+                os.environ.pop(k, None)
+            os.environ.update({k: v for k, v in keep.items() if v is not None})
+
+    def test_first_candidate_with_the_tool_wins(self):
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b, tempfile.TemporaryDirectory() as empty:
+            ta, tb = self.tool(a), self.tool(b)
+            self.assertEqual(self.find(WG_ROCM=a, ROCM_PATH=b), ta)
+            self.assertEqual(self.find(WG_ROCM=empty, ROCM_PATH=b), tb)
+            self.assertEqual(self.find(ROCM_PATH=b), tb)
+            self.assertEqual(self.find(WG_ROCM=empty, ROCM_PATH=empty) not in (ta, tb), True)
+
+
+# the kernels the runner launches on the card (stage_runner.py BLOCK_KERNELS and the others), by code object
+RUN_ON_THE_CARD = {
+    "swin.co": ("swin_block_c64", "swin_block_c64_nc", "swin_block_c64_add", "swin_block_c64_add_nc", "swin_block_c64_r",
+                "swin_block_c64_r_nc", "swin_block_c64_add_r", "swin_block_c64_add_r_nc", "swin_block_c96", "swin_block_c96_nc",
+                "swin_block_c96_add", "swin_block_c96_add_nc", "swin_block_c128", "swin_block_c128_nc", "patch_merge_c64",
+                "patch_merge_c96", "expand_c96", "expand_c128"),
+    "swin__bmegahg.co": ("patch_merge_c64", "patch_merge_c96", "expand_c96", "expand_c128", "swin_block_c64",
+                         "swin_block_c64_nc", "swin_block_c64_add", "swin_block_c64_add_nc", "swin_block_c96",
+                         "swin_block_c96_nc", "swin_block_c96_add", "swin_block_c96_add_nc", "swin_block_c128",
+                         "swin_block_c128_nc", "swin_bneck6", "swin_bneck6_nc"),
+    "encoder.co": ("input_encoder",),
+    "decoder.co": ("coef_decoder",),
+    "dec1_dec0.co": ("swin_block_c64_add_dec0", "swin_block_c64_add_dec0_nc"),
+}
+
+
+# post.co: the reduced-history step of the reconstruction kernels takes the partner column from the other half of the wave
+# (`nb[c] = wg_xor16(hsum[c])`, three v_permlanex16 per kernel) and the compiler puts it inside the store's branch
+# `if (active && has1 && wl < 16 && x + 1 < dw)`. A KNOWN, EXPLAINED EXCEPTION, not a defect: the lanes that run it are 0-15 of
+# each half-wave pair and the partners it reads are lanes 16-31, which are off there, but v_permlanex16 reads the register of a
+# lane whose EXEC bit is off all the same (selftest probe_xchg16_div: a lane that takes part gets the value of lane l ^ 16 when
+# that lane does not; test_gpu_probes), and hsum was summed by every lane before the branch. The scan cannot
+# see this: it would need the reaching definitions of the source register. test_gpu_post runs every kernel below on the card
+# (partial tiles, odd D, one D row or column) bit for bit against post_recon, which has no exchange.
+POST_EXCHANGE_KERNELS = frozenset((
+    "post_fused", "post_fused3_fast_h4_o16", "post_fused3_fast_h6_o16", "post_fused3_h4_o16", "post_fused3_h6",
+    "post_fused3_h6_o16", "post_fused_h8", "post_fused_h8_o16", "post_fused_o16", "post_recon2", "post_recon2_ns",
+    "post_recon2_r", "post_recon2_r_band", "post_recon2_r_band_p12", "post_recon2_r_h6", "post_recon2_r_hp",
+    "post_recon2_r_hp_band", "post_recon2_r_hp_band_p12", "post_recon2_r_hp_p12", "post_recon2_r_ns", "post_recon2_r_out",
+    "post_recon2_r_out_diet", "post_recon2_r_p12", "post_recon3", "post_recon3_h", "post_recon4_bil", "post_recon4_crbil",
+    "post_recon4_f16", "post_recon4_f16x", "post_recon4_fast", "post_recon4_fastest", "post_recon4_skip16",
+    "post_recon4_skip4", "post_recon5", "post_recon5_bil", "post_recon6", "post_recon6_bil", "post_recon6_eb",
+    "post_recon6_eb_bil"))
+
+
+# swin.co and its variants: the fused merge and expand (the `_mg` / `_ex` block kernels and the two functions fused_merge<C, MCO>
+# they call; not swin_mid of swin__bmegahg.co, which is parked with its own result). A KNOWN, EXPLAINED EXCEPTION: every site
+# of these functions sits under ONE mask, made by the entry test of the loop over the output tiles, `for (mt = wave; mt < tiles;
+# mt += 8)` (fused_expand: tiles = 4 C / 16, fused_merge: tiles = MCO / 16). `wave` = tid >> 5 is a vector value to the compiler,
+# so it tests `tid < 32 * tiles` per lane (v_cmpx with an immediate that is a multiple of 32: 0x1ff, 0x2ff, 0xc0, 0x100 against
+# the thread index). A wave32 holds 32 consecutive thread indices from a multiple of 32, so every lane of a wave is on one side of
+# the bound: the mask is all or nothing, and an empty one skips the loop (s_cbranch_execz). The kernels are launched with 256
+# threads (8 waves). test_gpu_swin_fused runs them on the card with windows sticking out of the grid and a window count that
+# is not a multiple of 8, bit for bit against the separate kernels. Making `wave` scalar (wg_uniform) gets rid of the mask but
+# adds 10 to 25 spilled registers to the `_nc` kernels, so it is left as it is. The counts are pinned: a new site fails here.
+FUSED_GUARDED = {
+    "swin.co": {"swin_block_c64_add_ex": 216, "swin_block_c64_add_ex_nc": 216, "swin_block_c96_add_ex": 300,
+                "swin_block_c96_add_ex_nc": 300, "fused_merge<64, 96>": 32, "fused_merge<96, 128>": 32},
+    "swin__mgx.co": {"swin_block_c64_add_ex": 216, "swin_block_c64_add_ex_nc": 216, "swin_block_c96_add_ex": 300,
+                     "swin_block_c96_add_ex_nc": 300, "fused_merge<64, 96>": 32, "fused_merge<96, 128>": 32},
+    "swin__f16wm.co": {"swin_block_c64_add_ex": 240, "swin_block_c64_add_ex_nc": 240, "swin_block_c96_add_ex": 300,
+                       "swin_block_c96_add_ex_nc": 300, "fused_merge<64, 96>": 32, "fused_merge<96, 128>": 32},
+}
+MANGLED = {"fused_merge<64, 96>": "fused_mergeILi64ELi96E", "fused_merge<96, 128>": "fused_mergeILi96ELi128E"}
+
+
+class TestExecScanBuild(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.build = os.environ.get("WG_BUILD")
+        if not cls.build or family.build_family(cls.build) != "gfx11":
+            raise unittest.SkipTest("no gfx11 build in WG_BUILD")
+        cls.objdump = E.find_objdump()
+        if not cls.objdump:
+            raise unittest.SkipTest("no llvm-objdump")
+
+    def test_no_matrix_or_exchange_instruction_under_a_lane_mask_in_the_kernels_the_card_runs(self):
+        for co, kernels in RUN_ON_THE_CARD.items():
+            path = os.path.join(self.build, co)
+            if not os.path.exists(path):
+                continue
+            found, counts = E.scan_object(path, self.objdump)
+            for k in kernels:
+                with self.subTest(code_object=co, kernel=k):
+                    self.assertGreater(counts.get(k, 0), 0, "the kernel has no matrix instruction: is the name right?")
+                    self.assertEqual([(hex(a), m, hex(o)) for a, m, o in found.get(k, [])][:3], [])
+
+    def test_post_co_has_only_the_known_reduced_history_exchange_under_a_lane_mask(self):
+        """The exception above, pinned: exactly these kernels, three v_permlanex16 each and no v_wmma. A new site, or a matrix
+        instruction in a post kernel, fails here."""
+        path = os.path.join(self.build, "post.co")
+        if not os.path.exists(path):
+            self.skipTest("no post.co")
+        found, counts = E.scan_object(path, self.objdump)
+        self.assertEqual(sorted(set(found) - POST_EXCHANGE_KERNELS), [])
+        self.assertEqual(sorted(POST_EXCHANGE_KERNELS - set(found)), [])
+        for name, items in found.items():
+            with self.subTest(kernel=name):
+                self.assertEqual([m for _a, m, _o in items], ["v_permlanex16_b32"] * 3)
+                self.assertEqual(counts[name], 3)
+        self.assertEqual({n for n, c in counts.items() if c and n not in found}, set())
+
+    def test_fused_merge_and_expand_hold_only_the_wave_aligned_loop_guard(self):
+        """The exception above, pinned: exactly these functions with exactly these counts, all under one mask whose origin is a
+        v_cmpx with an immediate that is a multiple of 32; swin_mid of swin__bmegahg.co is left out (parked)."""
+        for co, expected in FUSED_GUARDED.items():
+            path = os.path.join(self.build, co)
+            if not os.path.exists(path):
+                continue
+            text = E.disassemble(path, self.objdump)
+            found, _ = E.scan_text(text)
+            funcs = E.parse(text)
+            names = {k: next((n for n in found if (MANGLED.get(k, k) in n if k in MANGLED else n == k)), None)
+                     for k in expected}
+            with self.subTest(code_object=co, which="the flagged functions"):
+                self.assertEqual(sorted(n for n in names.values() if n), sorted(found))
+            for k, count in expected.items():
+                with self.subTest(code_object=co, kernel=k):
+                    self.assertIsNotNone(names[k], "not flagged any more: drop it from FUSED_GUARDED")
+                    items = found[names[k]]
+                    self.assertEqual(len(items), count)
+                    origins = {o for _a, _m, o in items}
+                    self.assertEqual(len(origins), 1)
+                    (_a, mn, ops, _dw), = [ins for ins in funcs[names[k]] if ins[0] in origins]
+                    self.assertTrue(mn.startswith("v_cmpx_"), mn)
+                    imm = [int(o, 16) for o in ops if o.startswith("0x")]
+                    self.assertEqual(len(imm), 1)
+                    self.assertEqual((imm[0] + 1) % 32 if mn.startswith("v_cmpx_lt") else imm[0] % 32, 0, (mn, ops))
+
+    def test_the_scan_sees_the_deliberately_divergent_probe(self):
+        path = os.path.join(self.build, "probe.co")
+        if not os.path.exists(path):
+            self.skipTest("no probe.co")
+        found, _ = E.scan_object(path, self.objdump)
+        self.assertIn("probe_xchg16_div", found)
+
+
+if __name__ == "__main__":
+    unittest.main()

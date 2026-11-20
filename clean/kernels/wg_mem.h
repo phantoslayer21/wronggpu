@@ -53,7 +53,11 @@ WG_FN int wg_f2i(float x) { return (int)x; }
 WG_FN float wg_log2(float x) { return __builtin_amdgcn_logf(x); }  // v_log_f32
 WG_FN float wg_sqrt(float x) { return __builtin_amdgcn_sqrtf(x); }  // v_sqrt_f32
 WG_FN u32 wg_xor16_u(u32 v) {
+#if defined(WG_GFX11)
+  return wg_xchg16_u(v);
+#else
   return (u32)__builtin_amdgcn_ds_bpermute((int)((wg_lane_id() ^ 16u) << 2), (int)v);
+#endif
 }
 #else
 WG_FN float wg_med3f(float x, float lo, float hi) { return std::fmin(std::fmax(x, lo), hi); }
