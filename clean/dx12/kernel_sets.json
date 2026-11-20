@@ -187,6 +187,14 @@
   [
    "w64/post_tf_p12_diet_vsit_tex",
    "post_w64__orig.co"
+  ],
+  [
+   "e1b/input_encoder",
+   "-"
+  ],
+  [
+   "e1b/input_encoder_direct",
+   "-"
   ]
  ],
  "model_l": [

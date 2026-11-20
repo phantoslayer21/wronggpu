@@ -17,6 +17,12 @@
 // and only the store is conditional: the same bytes.
 // @wg-kernel input_encoder co=encoder.co block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116
 // @wg-kernel input_encoder_direct co=encoder.co entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 rs=direct defines=WG_DIRECT_TEXTURES=1
+// E1b (runtime option e1b=on, opt-in, default off): the near / far history taps copied from the centre tap when the
+// whole wave's tap positions match (pixel_values, ENC_E1 == 2: all four taps' loads issued first, then one wave-wide
+// test per tap); byte for byte the default encoder. ENC_E1 == 1 is the same test without the early loads (kept as the
+// reference form; not declared). D3D12-only forms.
+// @wg-kernel e1b/input_encoder co=- entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 defines=ENC_E1=2
+// @wg-kernel e1b/input_encoder_direct co=- entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 rs=direct defines=WG_DIRECT_TEXTURES=1,ENC_E1=2
 //
 // Motion at output resolution (WG_ENC_MO; HIP: input_encoder_mo of kernels/encoder_mo.hip, code object encoder_mo.co
 // under the tag "emo"; encoder_motion_outres.h): no depth neighbourhood; per pixel (x, y) one point read of the raw motion
@@ -45,6 +51,9 @@
 // @wg-kernel lev/input_encoder_q20 co=- entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 defines=WG_ENC_VALUES_OUT=1,WG_ENC_Q20=1
 // @wg-kernel lev/input_encoder_direct_q20 co=- entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 rs=direct defines=WG_DIRECT_TEXTURES=1,WG_ENC_VALUES_OUT=1,WG_ENC_Q20=1
 #include "wg_platform.hlsli"
+#ifndef ENC_E1
+#define ENC_E1 0
+#endif
 #ifndef WG_ENC_VALUES_OUT
 #define WG_ENC_VALUES_OUT 0
 #endif
@@ -163,6 +172,52 @@ float3 hist_values(int mode, Uni U, float px, float py, bool valid, float3 gc)
     return o;
 }
 
+#if ENC_E1 == 2
+// E1b: hist_values split into its fetch (footprint + the two history loads) and its arithmetic, text for text, so that
+// all four taps' loads are issued before the wave-uniform skip decisions (today's code overlaps them across taps).
+struct HTap { uint2 t0, t1; float fx, fy; };
+HTap hist_fetch(Uni U, float px, float py)
+{
+    Foot ft = enc_footprint(px * U.shx - 0.5f, py * U.shy - 0.5f, P_hw, P_hh, 4u);
+    HTap h;
+    h.t0 = wg_ld64(hist, ft.off0);
+    h.t1 = wg_ld64(hist, ft.off1);
+    h.fx = ft.fx;
+    h.fy = ft.fy;
+    return h;
+}
+float3 hist_math(int mode, Uni U, HTap h, bool valid, float3 gc)
+{
+    uint2 t0 = h.t0, t1 = h.t1;
+    float kS = mode == kHistSame ? kS_SAME : kS_GEN;
+    float wy1 = h.fy * kS, wy0 = kS - wy1;
+    float ifx = 1.0f - h.fx;
+    float w00 = ifx * wy0, w10 = h.fx * wy0, w01 = ifx * wy1, w11 = h.fx * wy1;
+    float3 o;
+    [unroll] for (uint c = 0; c < 3; ++c) {
+        float a0 = (float)((t0.x >> (10u * c)) & 1023u), b0 = (float)((t0.y >> (10u * c)) & 1023u);
+        float a1 = (float)((t1.x >> (10u * c)) & 1023u), b1 = (float)((t1.y >> (10u * c)) & 1023u);
+        float x = mad(w00, a0, mad(w10, b0, 0.0f));
+        x = mad(w01, a1, mad(w11, b1, x));
+        float g;
+        if (mode == kHistSame) {
+            g = wg_med3f(x, k1em4, 3.0f);
+        } else {
+            float a;
+            if (mode == kHistGeneral) {
+                float pm1 = wg_exp2(wg_med3f(x, kL2_1em4, kL2_3)) - 1.0f;
+                a = mad(U.rr, pm1, 1.0f);
+            } else {
+                a = mad(x, U.ce, 1.0f);
+            }
+            g = kG * wg_log2(wg_fmax(a, k1em4));
+        }
+        o[c] = valid ? g : gc[c];
+    }
+    return o;
+}
+#endif
+
 // The 20 values of the pixel at render column x, row y (pixel_values of encoder.hip).
 void pixel_values(int mode, Uni U, int x, int y, float4 c, float2 mn, float2 mf, float2 mc, out float v[20]
 #if defined(WG_DIRECT_TEXTURES)
@@ -204,10 +259,46 @@ void pixel_values(int mode, Uni U, int x, int y, float4 c, float2 mn, float2 mf,
         [unroll] for (uint i2 = 15; i2 < 20; ++i2) v[i2] = 0.0f;
         return;
     }
+#if ENC_E1 == 2
+    // E1b (runtime option e1b=on): as E1, with all four taps' loads issued first (hist_fetch), then the skip decisions, then the
+    // arithmetic of the taps that are not copies (hist_math). Same operations per tap, same bytes.
+    {
+        const HTap f0 = hist_fetch(U, qx[0], qy[0]), f1 = hist_fetch(U, qx[1], qy[1]);
+        const HTap f2 = hist_fetch(U, qx[2], qy[2]), f3 = hist_fetch(U, qx[3], qy[3]);
+        const bool s0 = WaveActiveAllTrue(qx[0] == qx[1] && qy[0] == qy[1]);
+        const bool s2 = WaveActiveAllTrue(qx[2] == qx[1] && qy[2] == qy[1]);
+        const float3 h1 = hist_math(mode, U, f1, valid[1], gc);
+        float3 h0 = h1, h2 = h1;
+        if (!s0) h0 = hist_math(mode, U, f0, valid[0], gc);
+        if (!s2) h2 = hist_math(mode, U, f2, valid[2], gc);
+        const float3 h3 = hist_math(mode, U, f3, valid[3], gc);
+        v[3] = h0.x; v[4] = h0.y; v[5] = h0.z;
+        v[6] = h1.x; v[7] = h1.y; v[8] = h1.z;
+        v[9] = h2.x; v[10] = h2.y; v[11] = h2.z;
+        v[12] = h3.x; v[13] = h3.y; v[14] = h3.z;
+    }
+#elif ENC_E1
+    // E1 (reference form, not declared): the near (0) / far (2) tap is the centre tap (1) whenever its position is the centre's: same
+    // qx, qy -> same footprint, same valid flag, same values. When that holds for every lane of the wave (a ballot),
+    // the copy replaces the evaluation; otherwise the tap is computed as in the default. NaN positions compare unequal
+    // and are computed; +0 / -0 positions compare equal and give the same footprint. Same bytes in every case.
+    {
+        const float3 h1 = hist_values(mode, U, qx[1], qy[1], valid[1], gc);
+        float3 h0 = h1, h2 = h1;
+        if (!WaveActiveAllTrue(qx[0] == qx[1] && qy[0] == qy[1])) h0 = hist_values(mode, U, qx[0], qy[0], valid[0], gc);
+        if (!WaveActiveAllTrue(qx[2] == qx[1] && qy[2] == qy[1])) h2 = hist_values(mode, U, qx[2], qy[2], valid[2], gc);
+        const float3 h3 = hist_values(mode, U, qx[3], qy[3], valid[3], gc);
+        v[3] = h0.x; v[4] = h0.y; v[5] = h0.z;
+        v[6] = h1.x; v[7] = h1.y; v[8] = h1.z;
+        v[9] = h2.x; v[10] = h2.y; v[11] = h2.z;
+        v[12] = h3.x; v[13] = h3.y; v[14] = h3.z;
+    }
+#else
     [unroll] for (uint k2 = 0; k2 < 4; ++k2) {
         float3 h = hist_values(mode, U, qx[k2], qy[k2], valid[k2], gc);
         v[3 + 3 * k2] = h.x; v[4 + 3 * k2] = h.y; v[5 + 3 * k2] = h.z;
     }
+#endif
 
     // Motion disagreement (value 15)
     {

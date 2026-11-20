@@ -40,5 +40,7 @@
  "bneck/swin_bneck6_mb_nc": 192,
  "bneck/swin_bneck6_mbo_nc": 192,
  "d1p12/swin_block_c64_add_dec0_nc": 192,
- "d1p12/swin_block_c64_add_dec0_xd_nc": 192
+ "d1p12/swin_block_c64_add_dec0_xd_nc": 192,
+ "e1b/input_encoder": 128,
+ "e1b/input_encoder_direct": 128
 }
