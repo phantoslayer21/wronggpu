@@ -20,6 +20,7 @@
 // @wg-kernel k_stagew4_d4__rodd co=k_block_wide.co block=512 wave=32 args=s184:p19.b32 entry=kw_stage defines=K_SMX=1,KW_C=128,KW_HEADS=4,KW_IN=1,KW_CIN=160,KW_CNEXT=0,KW_NG=4,KW_RD=12
 // @wg-kernel k_stagew2_d4__rodd co=k_block_wide.co block=256 wave=32 args=s184:p19.b32 entry=kw_stage defines=K_SMX=1,KW_C=128,KW_HEADS=4,KW_IN=1,KW_CIN=160,KW_CNEXT=0,KW_NG=2
 // @wg-kernel k_stagew2_d3__rodd co=k_block_wide.co block=256 wave=32 args=s184:p19.b32 entry=kw_stage defines=K_SMX=1,KW_C=96,KW_HEADS=4,KW_IN=1,KW_CIN=128,KW_CNEXT=0,KW_NG=2,KW_RD=4
+#define KW_LD_A16 1   // 16-byte aligned loads (hlsl/k_wide.hlsli)
 #include "wg_platform.hlsli"
 
 WG_ARGS_BEGIN
@@ -76,29 +77,29 @@ uint4 kw_wld(int s)
 {
     if (s < B_R) {                                           // expand: product s = kt NK + k (tile wave + k NW)
         const int kt = s / max(NK, 1), k = s % max(NK, 1);
-        return wg_ld128(kwA_wa, (uint)((k * NW * KTI + kt) * 512));
+        return kw_ld128(kwA_wa, (uint)((k * NW * KTI + kt) * 512));
     }
     if (s < B_C) {
         const int r = (s - B_R) / RLEN, f = (s - B_R) % RLEN;
         if (f < SQ)                                          // f = (ct KT + kt) 3 + {q, k, v}; head r NG + grp
-            return wg_ld128(kwA_qkv, (uint)((r * NG * 3 * 2 * KT + (f % 3) * 2 * KT + f / 3) * 512));
+            return kw_ld128(kwA_qkv, (uint)((r * NG * 3 * 2 * KT + (f % 3) * 2 * KT + f / 3) * 512));
         const int f2 = f - SQ;                               // f2 = j NOWN + i: z tile 2 r NG + j, owned tile i
         if ((KT % NG) == 0)                                  // every owned tile present: grp + NG i, one address
-            return wg_ld128(kwA_wo[0], (uint)(((f2 % NOWN) * NG * DT + 2 * r * NG + f2 / NOWN) * 512));
-        return wg_ld128(kwA_wo[f2 % NOWN], (uint)((2 * r * NG + f2 / NOWN) * 512));
+            return kw_ld128(kwA_wo[0], (uint)(((f2 % NOWN) * NG * DT + 2 * r * NG + f2 / NOWN) * 512));
+        return kw_ld128(kwA_wo[f2 % NOWN], (uint)((2 * r * NG + f2 / NOWN) * 512));
     }
     if (s < B_M) {
         const int c = (s - B_C) / CLEN, f = (s - B_C) % CLEN;
         if (f < S1) {                                        // hidden tile c CH + grp MM + m
             const int m = KW_ILV ? f % MM : f / KT, kt = KW_ILV ? f / MM : f % KT;
-            return wg_ld128(kwA_w1, (uint)(((c * CH + m) * KT + kt) * 512));
+            return kw_ld128(kwA_w1, (uint)(((c * CH + m) * KT + kt) * 512));
         }
         const int f2 = f - S1;                               // f2 = j NOWN + i: hidden tile c CH + j, owned tile i
         if ((KT % NG) == 0)
-            return wg_ld128(kwA_w2[0], (uint)(((c * CH + f2 / NOWN) * KT + (f2 % NOWN) * NG) * 512));
-        return wg_ld128(kwA_w2[f2 % NOWN], (uint)((c * CH + f2 / NOWN) * KT * 512));
+            return kw_ld128(kwA_w2[0], (uint)(((c * CH + f2 / NOWN) * KT + (f2 % NOWN) * NG) * 512));
+        return kw_ld128(kwA_w2[f2 % NOWN], (uint)((c * CH + f2 / NOWN) * KT * 512));
     }
-    return wg_ld128(kwA_wz, (uint)((s - B_M) * 512));       // merge: tile min(wave, NTM - 1), kt = s - B_M
+    return kw_ld128(kwA_wz, (uint)((s - B_M) * 512));       // merge: tile min(wave, NTM - 1), kt = s - B_M
 }
 
 // product s of the stream: its fragment, and the refill of its ring slot with product s + KW_RD
