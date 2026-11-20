@@ -149,6 +149,10 @@ target_compile_definitions(wg_core PUBLIC ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_
 target_compile_definitions(wg_core PRIVATE ${MODEL_L_DEFINITION} ${MODEL_K_DEFINITION})
 if(WRONGGPU_TESTING)
   target_compile_definitions(wg_core PUBLIC WRONGGPU_TESTING)
+  if(NOT MSVC)
+    # record.cpp's #pragma comment(lib, "rstrtmgr.lib") is MSVC-only; clang and gcc for MinGW need the library named
+    target_link_libraries(wg_core PUBLIC rstrtmgr)
+  endif()
 endif()
 target_link_libraries(wg_core PUBLIC wgc_core advapi32 user32 shell32 ole32 uuid winhttp)
 if(MSVC)
