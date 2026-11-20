@@ -8,7 +8,7 @@
 
 namespace k_smx_selfcheck {
 
-constexpr char kSourceDigest[] = "97b3541f3d19948aad3b6e7adcfc9e757d39dcb6228892fdb2ebdbe11c046ded";
+constexpr char kSourceDigest[] = "f6ae0495ebdb3b688048890318dce0dd25231dca07406b8247532eab10e81fb1";
 constexpr int kCount = 133;
 constexpr const char* kNames[kCount] = {
     "k_stage_e2@512x384/o4,4",

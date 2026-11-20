@@ -2,7 +2,7 @@
 """WrongGPU's D3D12 tests on Linux, under Wine with the D3D12 stack of a Proton install (vkd3d-proton, DXVK's dxgi,
 vkd3d-shader), the stack a game runs on in Steam.
 
-    python3 clean/linux/run_wine_tests.py --proton <Proton dir> [--vkd3d <dir>] [--runtime <wronggpu_runtime.dll>]
+    python3 clean/linux/run_wine_tests.py --proton <Proton dir> [--wine <wine>] [--vkd3d <dir>] [--runtime <wronggpu_runtime.dll>]
                                           [--tests interop,rr-leak,ags-layout,launcher] [--work <dir>]
 
 Tests (all run by default; each prints PASS, FAIL or SKIP with the reason; the exit status is 1 when one fails):
@@ -26,11 +26,14 @@ dxc binary of the DXC release, default `dxc` on PATH). Python with NumPy. Needs 
 launcher test also needs CMake, Ninja and the MinGW-w64 windres beside MINGW_CXX.
 """
 import argparse
+import contextlib
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -61,17 +64,148 @@ def build_exe(cxx, sources, out, includes=(), libs=()):
         raise RuntimeError(f"building {out.name} failed:\n{r.stderr[-3000:]}")
 
 
-def run_wine(env, args, cwd, timeout):
-    r = subprocess.run([env["WG_WINE"], *args], cwd=cwd, env=env, capture_output=True, text=True, errors="replace",
-                       timeout=timeout)
-    return r.returncode, r.stdout.replace("\r", "") + r.stderr.replace("\r", "")
+def skip_reason(name, a):
+    """Why a test would SKIP before it runs (None when it would run); the adapter probe is run only when some D3D12
+    test is eligible, so a test that skips still skips without the probe or its test program (the prefix is set up
+    before, as on main)."""
+    if name in ("interop", "rr-leak", "ags-layout", "launcher") and not mingw_cxx():
+        return "no MinGW-w64 C++ compiler (MINGW_CXX)"
+    if name == "rr-leak" and not a.runtime:
+        return "needs --runtime <wronggpu_runtime.dll> with the RR runtime linked in"
+    if name == "ags-layout" and not shutil.which(os.environ.get("WG_DXC", "dxc")):
+        return "no dxc (WG_DXC: the DXC release's Linux dxc)"
+    return None
+
+
+def wine_cmd(env, display=True):
+    """The command that starts a Windows program: wine, under xvfb-run when `display` is wanted, there is no display
+    and xvfb-run is installed (what clean/runtime/interop/tests/run-tests.sh does for the interop test). The launcher
+    unit tests need no display and run with Wine directly, as before, so a broken xvfb-run cannot stop them."""
+    cmd = [env["WG_WINE"]]
+    xvfb = None if env.get("DISPLAY") or not display else shutil.which("xvfb-run", path=env.get("PATH"))
+    return [xvfb, "-a", *cmd] if xvfb else cmd
+
+
+KILL_TIMEOUT = 60   # seconds each step of stopping a stuck wine client (and `wineserver -k`) gets
+
+
+class ProbeFailed(RuntimeError):
+    """The adapter probe (or the wrapper around it) exited with an error: not a hang, and not a completed probe."""
+
+
+def _group_members(pgid):
+    """Pids of the process group `pgid` (from /proc; a stuck wine's helpers stay in the group of the command)."""
+    members = []
+    for d in Path("/proc").iterdir():
+        if d.name.isdigit():
+            try:
+                fields = (d / "stat").read_text().rsplit(")", 1)[1].split()
+            except (OSError, IndexError):
+                continue
+            if int(fields[2]) == pgid:
+                members.append(int(d.name))
+    return members
+
+
+def _signal(pid, sig):
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.kill(pid, sig)
+
+
+def launch(env, args, cwd, timeout, notes, display=True):
+    """Run `wine args` (under xvfb-run when wine_cmd says so) with its output in a file in `cwd` and return
+    (exit status, output text), or (None, text) after `timeout` seconds, with the stuck client stopped in this order:
+    the Wine client gets SIGTERM, a wrapper such as xvfb-run is left to exit and clean up by itself (waited for, then
+    SIGTERM, then SIGKILL, each step bounded by KILL_TIMEOUT), anything left in the group is killed, and then
+    `wineserver -k` (env["WG_WINESERVER"], WINEPREFIX of env) stops the prefix's wine processes. A step that fails or
+    hangs is added to `notes`, not raised. Output goes to a file, not a pipe: the wine processes a hung run leaves
+    behind keep a pipe open and would block the read for good."""
+    cmd = wine_cmd(env, display)
+    wrapped = len(cmd) > 1
+    fd, name = tempfile.mkstemp(prefix=".wg-wine-", suffix=".log", dir=cwd)
+    try:
+        with os.fdopen(fd, "w") as out:
+            p = subprocess.Popen([*cmd, *args], cwd=cwd, env=env, stdout=out, stderr=subprocess.STDOUT,
+                                 start_new_session=True)
+            try:
+                rc = p.wait(timeout)
+            except subprocess.TimeoutExpired:
+                rc = None
+        if rc is None:
+            # the wine client first; a wrapper (xvfb-run) then ends by itself and removes what it made
+            for pid in ([m for m in _group_members(p.pid) if m != p.pid] if wrapped else [p.pid]):
+                _signal(pid, signal.SIGTERM)
+            for sig in ((signal.SIGTERM, signal.SIGKILL) if wrapped else (signal.SIGKILL,)):
+                try:
+                    p.wait(KILL_TIMEOUT)
+                    break
+                except subprocess.TimeoutExpired:
+                    notes.append(f"{Path(cmd[0]).name} (pid {p.pid}) did not exit; sent {sig.name}")
+                    _signal(p.pid, sig)
+            else:
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    p.wait(KILL_TIMEOUT)
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(p.pid, signal.SIGKILL)   # what the wrapper left behind, after its clean-up
+            server = env.get("WG_WINESERVER")
+            if not server:
+                notes.append("no wineserver known, the prefix's wine processes were not stopped")
+            else:
+                try:
+                    r = subprocess.run([server, "-k"], env=env, capture_output=True, text=True, errors="replace",
+                                       timeout=KILL_TIMEOUT)
+                    if r.returncode != 0:
+                        notes.append(f"`{server} -k` exited {r.returncode}: {(r.stdout + r.stderr).strip()[-300:]}")
+                except subprocess.TimeoutExpired:
+                    notes.append(f"`{server} -k` did not return within {KILL_TIMEOUT} s")
+                except OSError as e:
+                    notes.append(f"`{server} -k` could not start: {e}")
+        text = Path(name).read_text(errors="replace").replace("\r", "")
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(name)
+    return rc, text
+
+
+def run_wine(env, args, cwd, timeout, display=True):
+    notes = []
+    rc, text = launch(env, args, cwd, timeout, notes, display)
+    if rc is None:
+        raise RuntimeError(f"{Path(args[0]).name} timed out after {timeout} s and was stopped"
+                           + ("; " + "; ".join(notes) if notes else ""))
+    return rc, text
+
+
+PROBE_SRC = HERE / "dxgi_probe.cpp"
+HANG_NEEDS = ("interop", "rr-leak", "ags-layout")   # the tests that start a D3D12 / Vulkan program in the prefix
+
+
+def probe_hang(env, exe, cwd, timeout, notes=None):
+    """True when the probe program (it lists the DXGI adapters, where a stuck Wine waits) does not finish in
+    `timeout` seconds (stopped as launch() describes; clean-up problems go to `notes`), False when it finishes with
+    status 0. A probe or wrapper (xvfb-run) that exits with an error raises ProbeFailed with its output."""
+    notes = [] if notes is None else notes
+    rc, text = launch(env, [str(exe)], cwd, timeout, notes)
+    if rc is None:
+        return True
+    if rc != 0:
+        raise ProbeFailed(f"the probe exited {rc}: {text.strip()[-600:]}")
+    return False
+
+
+def hang_message(env, timeout, notes=()):
+    msg = (f"{env['WG_WINE']} did not list the GPU adapters within {timeout} s (a Wine program that starts Vulkan or "
+           "D3D12 waits forever; observed with GE-Proton 11-11's own wine (11.0) when no display is available); "
+           "pass a system Wine with --wine <wine> (it runs the same prefix with the Proton install's DLLs), or run "
+           "in a desktop session")
+    return msg + ("; clean-up problems: " + "; ".join(notes) if notes else "")
 
 
 # ---- interop --------------------------------------------------------------------------------------------------------
 def test_interop(a, env, work):
+    if skip_reason("interop", a):
+        return "SKIP", skip_reason("interop", a)
     cxx = mingw_cxx()
-    if not cxx:
-        return "SKIP", "no MinGW-w64 C++ compiler (MINGW_CXX)"
     out = work / "interop"
     e = dict(env, MINGW_CXX=cxx, WG_TEST_DIR=str(out))
     # run-tests.sh makes its own prefix under WG_TEST_DIR unless WINEPREFIX is set: use the prepared one
@@ -90,11 +224,9 @@ def test_interop(a, env, work):
 
 # ---- rr-leak --------------------------------------------------------------------------------------------------------
 def test_rr_leak(a, env, work):
-    if not a.runtime:
-        return "SKIP", "needs --runtime <wronggpu_runtime.dll> with the RR runtime linked in"
+    if skip_reason("rr-leak", a):
+        return "SKIP", skip_reason("rr-leak", a)
     cxx = mingw_cxx()
-    if not cxx:
-        return "SKIP", "no MinGW-w64 C++ compiler (MINGW_CXX)"
     out = work / "rr-leak"
     stage, run = out / "stage", out / "run"
     for d in (stage, run):
@@ -230,12 +362,10 @@ def ags_compare(got, exp):
 
 
 def test_ags_layout(a, env, work):
+    if skip_reason("ags-layout", a):
+        return "SKIP", skip_reason("ags-layout", a)
     cxx = mingw_cxx()
-    if not cxx:
-        return "SKIP", "no MinGW-w64 C++ compiler (MINGW_CXX)"
     dxc = shutil.which(os.environ.get("WG_DXC", "dxc"))
-    if not dxc:
-        return "SKIP", "no dxc (WG_DXC: the DXC release's Linux dxc)"
     out = work / "ags-layout"
     out.mkdir(parents=True, exist_ok=True)
     for entry in ("main32", "main64"):
@@ -294,7 +424,7 @@ def test_launcher(a, env, work):
         raise RuntimeError("building the launcher's unit tests and the WrongGPU program failed:\n" + (r.stdout + r.stderr)[-3000:])
     passed, failed = [], []
     for t in LAUNCHER_TESTS:
-        rc, text = run_wine(env, [str(build / (t + ".exe"))], build, 600)
+        rc, text = run_wine(env, [str(build / (t + ".exe"))], build, 600, display=False)
         # the test's own summary line (Wine's messages are mixed into the output)
         last = [line.strip() for line in text.splitlines() if "checks passed" in line or "FAILED" in line][-1:] or ["(no summary line)"]
         log(f"  {t}: exit {rc}, {last[0]}")
@@ -310,6 +440,10 @@ TESTS = {"interop": test_interop, "rr-leak": test_rr_leak, "ags-layout": test_ag
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--proton", default=os.environ.get("WG_PROTON"), help="Proton install (env WG_PROTON)")
+    ap.add_argument("--wine", default=os.environ.get("WG_WINE_BIN"),
+                    help="wine executable to run the tests with instead of the Proton install's own (env WG_WINE_BIN)")
+    ap.add_argument("--probe-timeout", type=int, default=90,
+                    help="seconds the adapter probe may take before the D3D12 tests fail as 'Wine hangs' (default 90)")
     ap.add_argument("--vkd3d", help="folder with a self-built vkd3d-proton d3d12.dll + d3d12core.dll")
     ap.add_argument("--runtime", help="wronggpu_runtime.dll with the RR runtime (test rr-leak)")
     ap.add_argument("--tests", default=",".join(TESTS), help="comma list of: " + ", ".join(TESTS))
@@ -325,10 +459,25 @@ def main(argv=None):
     if " " in str(work):
         ap.error("--work must not contain spaces (the RR test host's job file is split on spaces)")
     work.mkdir(parents=True, exist_ok=True)
-    env = wine_env.prepare(a.proton, work / "prefix", a.vkd3d, log=log)
+    env = wine_env.prepare(a.proton, work / "prefix", a.vkd3d, log=log, wine=a.wine)
+    hung = None
+    if any(n in HANG_NEEDS and not skip_reason(n, a) for n in names):
+        try:
+            cxx = mingw_cxx()
+            probe = work / "dxgi_probe.exe"
+            build_exe(cxx, [str(PROBE_SRC)], probe, libs=["-ldxgi"])
+            notes = []
+            if probe_hang(env, probe, work, a.probe_timeout, notes):
+                hung = hang_message(env, a.probe_timeout, notes)
+        except Exception as e:  # the probe's own failure fails the tests that need it, not the whole run
+            hung = f"the adapter probe could not run: {type(e).__name__}: {e}"
     results = {}
     for name in names:
         log(f"== {name}")
+        if hung and name in HANG_NEEDS and not skip_reason(name, a):
+            results[name] = ("FAIL", hung)
+            log(f"FAIL {name}: {hung}")
+            continue
         try:
             results[name] = TESTS[name](a, env, work)
         except Exception as e:  # a build or tool failure is this test's failure, not the run's
