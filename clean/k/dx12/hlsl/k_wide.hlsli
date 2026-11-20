@@ -154,7 +154,14 @@ uint4 kw_pin(uint4 v)
 }
 
 // global fragments: pointer (arena byte offset) + element (half) offset
-uint4 kw_ldg(uint p, uint e) { return wg_ld128(p, e * 2u); }
+// KW_LD_A16 (set by the wide-stage kernel files): 16-byte loads with the alignment made visible to the driver. Load4 is known
+// 4-byte aligned only and compiles to four dword loads; every base is a 256-byte aligned runtime allocation (k_pack.cpp kAlign) and
+// every offset a multiple of 16 bytes (HIP's own uint4 loads), so clearing the low 4 address bits changes no address.
+#ifndef KW_LD_A16
+#define KW_LD_A16 0
+#endif
+uint4 kw_ld128(uint base, uint off) { return wg_mem.Load4((base + off) & (KW_LD_A16 ? ~15u : ~0u)); }
+uint4 kw_ldg(uint p, uint e) { return kw_ld128(p, e * 2u); }
 void kw_stg(uint p, uint e, uint4 v) { wg_st128(p, e * 2u, v); }
 
 // Mirror about the edge token, edge not repeated (spec 41; k_common.h wgk_mirror), branch free.

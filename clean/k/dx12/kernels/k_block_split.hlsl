@@ -28,6 +28,7 @@
 // @wg-kernel k_split_m_wo co=k_block_wide.co block=128 wave=32 args=s184:p19.b32,p,p,p,p entry=ks_wo defines=KS_PHASE=2,KW_C=160,KW_HEADS=8,KW_IN=0,KW_CIN=160,KW_CNEXT=0,KW_NG=4
 // @wg-kernel k_split_m_w1 co=k_block_wide.co block=128 wave=32 args=s184:p19.b32,p,p,p,p entry=ks_w1 defines=KS_PHASE=3,KW_C=160,KW_HEADS=8,KW_IN=0,KW_CIN=160,KW_CNEXT=0,KW_NG=4
 // @wg-kernel k_split_m_w2 co=k_block_wide.co block=128 wave=32 args=s184:p19.b32,p,p,p,p entry=ks_w2 defines=KS_PHASE=4,KW_C=160,KW_HEADS=8,KW_IN=0,KW_CIN=160,KW_CNEXT=0,KW_NG=4
+#define KW_LD_A16 1   // 16-byte aligned loads (hlsl/k_wide.hlsli)
 #include "wg_platform.hlsli"
 
 WG_ARGS_BEGIN
@@ -111,7 +112,7 @@ uint ks_vidx(int row, int c) { return (uint)(256 + row * 8 + (c ^ (row & 7))) & 
 
 static uint ksA_qkv;
 // product s = (ct KT + kt) 3 + {q, k, v} of the head's q / k / v chains (k_block_wide.hlsl's stream order of a round)
-uint4 ks_wq(int s) { return wg_ld128(ksA_qkv, (uint)(((s % 3) * 2 * KT + s / 3) * 512)); }
+uint4 ks_wq(int s) { return kw_ld128(ksA_qkv, (uint)(((s % 3) * 2 * KT + s / 3) * 512)); }
 #define KS_TAKE(s) rg[(s) % KS_RD]
 #define KS_NEXT(s) { if ((s) + KS_RD < SA) rg[(s) % KS_RD] = ks_wq((s) + KS_RD); }
 
@@ -236,7 +237,7 @@ WG_KERNEL(ks_wo)
     const uint zr = ks_zrow(win, L.t, hh);
     uint4 wf[DT], zf[DT];
     [unroll] for (int d0 = 0; d0 < DT; ++d0) {
-        wf[d0] = wg_ld128(wo, (uint)(d0 * 512));
+        wf[d0] = kw_ld128(wo, (uint)(d0 * 512));
         zf[d0] = kw_ldg(P_sz, zr + 16u * d0);
     }
     const uint4 xr = kw_ldg(P_x, L.mtok * KW_C + 8u * hh + 16u * ot);
@@ -268,7 +269,7 @@ WG_KERNEL(ks_w1)
     uint4 a[KT];
     uint4 wf[KS_HB][KT];
     [unroll] for (int kt0 = 0; kt0 < KT; ++kt0) {
-        [unroll] for (int m0 = 0; m0 < KS_HB; ++m0) wf[m0][kt0] = wg_ld128(w1, (uint)((m0 * KT + kt0) * 512));
+        [unroll] for (int m0 = 0; m0 < KS_HB; ++m0) wf[m0][kt0] = kw_ld128(w1, (uint)((m0 * KT + kt0) * 512));
         a[kt0] = kw_ldg(P_sa, cr + 16u * kt0);
     }
     uint4 b1v[KS_HB];
@@ -312,8 +313,8 @@ WG_KERNEL(ks_w2)
     [unroll] for (int b = 0; b < NB2; ++b) {                          // the hidden tiles 0 .. HT - 1, in order
         uint4 rw[KS_B2], rh[KS_B2];
         [unroll] for (int j0 = 0; j0 < KS_B2; ++j0) {
-            rw[j0] = wg_ld128(w2, (uint)((b * KS_B2 + j0) * KT * 512));
-            rh[j0] = wg_ld128(hb, (uint)((b * KS_B2 + j0) * 32));
+            rw[j0] = kw_ld128(w2, (uint)((b * KS_B2 + j0) * KT * 512));
+            rh[j0] = kw_ld128(hb, (uint)((b * KS_B2 + j0) * 32));
         }
         uint f = b == 0 ? b2v.x ^ x1.x : 0u;
         [unroll] for (int j1 = 0; j1 < KS_B2; ++j1) f ^= rw[j1].x ^ rh[j1].x;
