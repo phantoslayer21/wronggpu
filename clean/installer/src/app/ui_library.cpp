@@ -989,11 +989,9 @@ static void ScanGlyph(Gfx& gx, float cx, float cy) {
     if (!turns) { gx.Icon(ic::refresh, cx, cy, 13, pal.text3); return; }
     libMoving = true;
     const float deg = (float)(NowMs() % 1000) * 0.36f;
-    D2D1_MATRIX_3X2_F old;
-    gx.rt->GetTransform(&old);
-    gx.rt->SetTransform(D2D1::Matrix3x2F::Rotation(deg, D2D1::Point2F(cx, cy)) * old);
+    gx.PushRotate(cx, cy, deg);
     gx.Icon(ic::refresh, cx, cy, 13, pal.text2);
-    gx.rt->SetTransform(old);
+    gx.PopRotate();
 }
 
 // The mark over a search with nothing in it: the search glyph on a round fill. Not the blank shelf: blank lockups where

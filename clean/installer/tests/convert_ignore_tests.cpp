@@ -106,8 +106,8 @@ int main() {
             IgnoreLists lf = Parse("\xEF\xBB\xBF" + U8(a) + "\n" + U8(b) + "\n");
             require(lf.warnings.empty() && lf.entries.size() == 2 && lf.entries[0].path == a, "UTF-8 with a BOM, LF line ends");
             const wstring w16 = L"\xFEFF" + a + L"\r\n" + b + L"  sha256=" + shaB + L"\r\n";
-            string bytes(w16.size() * 2, '\0');
-            std::memcpy(&bytes[0], w16.data(), bytes.size());
+            string bytes;  // UTF-16 LE written out unit by unit (wchar_t is not 2 bytes everywhere: src/platform/posix)
+            for (wchar_t ch : w16) bytes += string{char(ch & 0xFF), char((ch >> 8) & 0xFF)};
             IgnoreLists lw = Parse(string("\xFF\xFE", 2) + bytes.substr(2));
             require(lw.warnings.empty() && lw.entries.size() == 2 && lw.entries[0].path == a && lw.entries[1].path == b && lw.entries[1].sha256 == shaB, "UTF-16 LE with its BOM");
             IgnoreLists ln = Parse("wronggpu-ignore-files 7\n" + U8(a) + "\n");

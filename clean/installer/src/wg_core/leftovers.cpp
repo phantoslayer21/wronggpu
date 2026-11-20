@@ -243,7 +243,9 @@ std::vector<wstring> AdoptLeftovers(Context& ctx, const wstring& exe, const wstr
     EnsureDir(state);
     SaveRecord(RecordPath(dir), m);
     if (ctx.restorer && ctx.restorerSize) WriteFileAtomic(Join(state, L"uninstall.exe"), ctx.restorer, ctx.restorerSize);
+#ifdef _WIN32
     else CopyChecked(SelfPath(), Join(state, L"uninstall.exe"));
+#endif  // Linux: no restorer (install.cpp: the same reason)
     if (ctx.perGameEntry) RegisterUninstall(ctx, m, state, GameDisplayName(exe));
     WriteOwnedFiles(dir, m);
     AddManagedGame(dir);

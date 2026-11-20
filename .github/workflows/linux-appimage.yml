@@ -1,0 +1,52 @@
+# Builds the Linux AppImage of the launcher in the pinned Ubuntu 22.04 container (glibc 2.35, the oldest system the AppImage
+# supports) with a test payload: the build proves the launcher's shared code still compiles and links on Linux and that the
+# AppImage still bundles what it needs. A release AppImage is built by the maintainer with the release payload
+# (clean/installer/README-linux.md); this job's file is a smoke build and never ships.
+# It runs only when started by hand (workflow_dispatch). Its own workflow, so ci.yml and its required check stay as they are.
+name: Linux AppImage
+
+# Only when the maintainer starts it by hand: Actions tab, Linux AppImage, Run workflow.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-appimage-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  appimage:
+    name: "AppImage (Ubuntu 22.04, glibc 2.35)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # The same digest as CONTAINER_IMAGE in clean/installer/build-appimage.sh (the step below fails if they differ).
+    container: docker.io/library/ubuntu:22.04@sha256:74b12b11ffa550fba1929ad4d8d16533c34f6612728469671afba1b03b66881c
+    steps:
+      # checkout wants git, and the portability check wants python3; the build script installs the rest itself
+      - name: Packages for checkout and the check
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends ca-certificates git python3
+      - uses: actions/checkout@v4.2.2
+      - name: Container digest matches the build script
+        run: |
+          # the whole image reference, digest included, must match: a container line without a digest fails here
+          workflow="$(sed -n 's/^    container: *//p' .github/workflows/linux-appimage.yml)"
+          script="$(sed -n 's/^CONTAINER_IMAGE="\(.*\)"$/\1/p' clean/installer/build-appimage.sh)"
+          case "$workflow" in *@sha256:????????????????????????????????????????????????????????????????) ;; *) echo "workflow container has no sha256 digest: '$workflow'" >&2; exit 1 ;; esac
+          [ -n "$script" ] && [ "$workflow" = "$script" ] || { echo "workflow '$workflow' differs from build-appimage.sh '$script'" >&2; exit 1; }
+      - name: Portability check
+        run: python3 tools/ci/check_portable.py --root clean/installer
+      - name: Build the AppImage (test payload)
+        run: bash clean/installer/build-appimage.sh --test-payload --out out
+      # The smoke build, so the maintainer can run it. It carries the test payload and never ships; it expires after 3 days.
+      # Pinned to the full commit SHA of the v4.6.2 tag, not the tag, which can be moved.
+      - name: Keep the AppImage for review
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: WrongGPU-appimage-testpayload
+          path: out/*.AppImage
+          if-no-files-found: error
+          retention-days: 3

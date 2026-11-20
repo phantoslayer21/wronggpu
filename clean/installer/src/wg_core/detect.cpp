@@ -367,7 +367,7 @@ wstring SignatureInfo(const wstring& path) {
                 }
             }
         }
-    } else if ((unsigned long)r == 0x800B0100u) out = L"no Authenticode signature";
+    } else if ((uint32_t)r == 0x800B0100u) out = L"no Authenticode signature";
     else out = L"Authenticode check failed (" + Hex32((DWORD)r) + L")";
     td.stateAction = 2;  // WTD_STATEACTION_CLOSE
     verify(reinterpret_cast<HWND>(INVALID_HANDLE_VALUE), &action, &td);
@@ -447,6 +447,49 @@ wstring SteamAppId(const wstring& exe) {
         return id;
     }
     return L"";
+}
+// Every library folder a libraryfolders.vdf lists ("path" lines).
+static void VdfLibraries(const wstring& vdf, std::vector<wstring>& libs) {
+    string raw;
+    if (!LibraryAccess(vdf) || !ReadAll(vdf, raw)) return;
+    const wstring t = FromUtf8(raw);
+    for (size_t pos = 0; pos < t.size();) {
+        const size_t nl = t.find(L'\n', pos);
+        const wstring line = t.substr(pos, nl == wstring::npos ? wstring::npos : nl - pos);
+        pos = nl == wstring::npos ? t.size() : nl + 1;
+        if (Lower(QuotedAt(line, 0)) != L"path") continue;
+        const wstring lib = UnescapeJsonLike(QuotedAt(line, 1));
+        if (lib.empty()) continue;
+        bool dup = false;
+        for (auto& l : libs) dup |= IEq(FullPath(l), FullPath(lib));
+        if (!dup) libs.push_back(lib);
+    }
+}
+ProtonPrefix FindProtonPrefix(const wstring& exe) {
+    ProtonPrefix out;
+    out.appid = SteamAppId(exe);
+    if (out.appid.empty()) return out;
+    out.state = ProtonPrefixState::NotStarted;
+    wstring root = Parent(exe);
+    while (!root.empty() && !(IEq(BaseName(Parent(root)), L"common") && IEq(BaseName(Parent(Parent(root))), L"steamapps"))) root = Parent(root);
+    const wstring ownLib = Parent(Parent(Parent(root)));  // the library folder: <library>\steamapps\common\<game>
+    std::vector<wstring> libs{ownLib};
+    VdfLibraries(Join(Join(ownLib, L"steamapps"), L"libraryfolders.vdf"), libs);
+    if (LibraryRegistryAccess(L"Steam SteamPath")) {
+        wstring steam = RegString(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", L"SteamPath");
+        for (auto& c : steam) if (c == L'/') c = L'\\';
+        if (!steam.empty()) {
+            bool dup = false;
+            for (auto& l : libs) dup |= IEq(FullPath(l), FullPath(steam));
+            if (!dup) libs.push_back(steam);
+            VdfLibraries(Join(Join(steam, L"steamapps"), L"libraryfolders.vdf"), libs);
+        }
+    }
+    for (auto& lib : libs) {
+        const wstring user = Join(Join(Join(Join(Join(Join(lib, L"steamapps"), L"compatdata"), out.appid), L"pfx"), L"drive_c"), L"users\\steamuser");
+        if (LibraryAccess(user) && IsDir(user)) { out.state = ProtonPrefixState::Found; out.userDir = user; return out; }
+    }
+    return out;
 }
 // The folder with the FidelityFX DLLs the game loads: the exe folder if it has one of them, else the first folder below
 // the game root that has the FFX API DLL, else the first that has an FSR 3.0 component DLL.

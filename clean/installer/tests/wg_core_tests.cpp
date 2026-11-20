@@ -163,10 +163,10 @@ int main() {
             rctx.logFile = Join(dir, L"rr-prep.log");
             const wstring game = Join(dir, L"No Rule Game\\NoRuleGame.exe");
             wstring why;
-            if (UnderWine()) {
+            if (UnderProton()) {
                 require(RrKernelsInGame(game) && RrPrepStateOf(rctx, dir, game, 1, &why) == RrPrepState::InGame && Contains(why, L"Proton"),
-                        "RR kernels under Wine: prepared by the game at its first start");
-                require(PrepareRr(rctx, dir, game, Join(dir, L"no-runtime.dll"), 1, nullptr, &why) == 4, "PrepareRr under Wine: no helper run (4)");
+                        "RR kernels under Proton (Wine or native Linux): prepared by the game at its first start");
+                require(PrepareRr(rctx, dir, game, Join(dir, L"no-runtime.dll"), 1, nullptr, &why) == 4, "PrepareRr under Proton: no helper run (4)");
             } else {
                 require(!RrKernelsInGame(game), "RR kernels on Windows: a game without a rule is prepared by the launcher");
             }
@@ -211,8 +211,8 @@ int main() {
             require(NeedsRx9000Sentence() == L"WrongGPU's models need an RX 9000-series GPU; using AMD FSR", "NeedsRx9000Sentence: the runtime's sentence");
             GpuInfo rdna4;
             rdna4.amd = rdna4.rdna4 = true;
-            require(GpuToolbarLine(L"RX 9070 XT", rdna4) == L"RX 9070 XT (detected) \u00b7 Direct3D 12",
-                    "GpuToolbarLine: RDNA 4 is detected and runs on Direct3D 12");
+            require(GpuToolbarLine(L"RX 9070 XT", rdna4) == (NativeLinux() ? L"RX 9070 XT (detected) \u00b7 Direct3D 12 (through Proton)" : L"RX 9070 XT (detected) \u00b7 Direct3D 12"),
+                    "GpuToolbarLine: RDNA 4 is detected and runs on Direct3D 12 (through Proton on the native Linux launcher; Windows and Wine unchanged)");
             GpuInfo rdna3;
             rdna3.amd = true;
             const wstring l3 = GpuToolbarLine(L"RX 7900 XTX", rdna3);
@@ -252,6 +252,39 @@ int main() {
             require(Contains(past16, L"7590") && Contains(past16, L"not confirmed"), "LinuxRdna4Name: a card numbered 20, reported as not confirmed");
             card(L"card17", "0x1002\n", "0x7550 \n");    // two RDNA 4 cards: the lower number first
             require(Contains(LinuxRdna4Name(drm), L"7550"), "LinuxRdna4Name: cards in number order");
+        }
+        // S4: the distribution's name from /etc/os-release (any host)
+        {
+            require(LinuxOsName("NAME=\"Fedora Linux\"\nVERSION=\"44 (Nobara)\"\nPRETTY_NAME=\"Nobara Linux 44 (GNOME Edition)\"\n") == L"Nobara Linux 44 (GNOME Edition)",
+                    "LinuxOsName: PRETTY_NAME first");
+            require(LinuxOsName("NAME='Arch Linux'\nVERSION=rolling\n") == L"Arch Linux rolling", "LinuxOsName: NAME and VERSION without a pretty name, single quotes");
+            require(LinuxOsName("NAME=Debian\r\n") == L"Debian", "LinuxOsName: a name without quotes, CRLF");
+            require(LinuxOsName("").empty() && LinuxOsName("ID=x\nnot a pair\n").empty(), "LinuxOsName: nothing to read, no name");
+        }
+        // S1: GpuFromDrm on a made-up folder (any host): the AMD RDNA 4 card wins, the names are the built-in list, others by code
+        {
+            const wstring drm = Join(dir, L"drm-gpu");
+            auto card = [&](const wchar_t* name, const char* vendor, const char* device) {
+                EnsureDir(Join(drm, wstring(name) + L"\\device"));
+                WriteFileAtomic(Join(drm, wstring(name) + L"\\device\\vendor"), vendor, strlen(vendor));
+                WriteFileAtomic(Join(drm, wstring(name) + L"\\device\\device"), device, strlen(device));
+            };
+            require(GpuFromDrm(Join(dir, L"no-such-drm")).name.empty(), "GpuFromDrm: a missing device list is no card");
+            card(L"card0", "0x1002\n", "0x13c0\n");        // an integrated Radeon
+            GpuInfo g = GpuFromDrm(drm);
+            require(g.amd && !g.rdna4 && g.name == L"AMD Radeon (code 1002:13C0)", "GpuFromDrm: an AMD card not on the list is named by its code");
+            card(L"card1", "0x1002\n", "0x7550\n");
+            g = GpuFromDrm(drm);
+            require(g.amd && g.rdna4 && g.name == L"AMD Radeon RX 9070 XT", "GpuFromDrm: the RDNA 4 card wins over the iGPU");
+            for (const auto& [id, nm] : {std::pair<const char*, const wchar_t*>{"0x7551\n", L"AMD Radeon RX 9070 GRE"}, {"0x7590\n", L"AMD Radeon RX 9060 XT"}, {"0x7591\n", L"AMD Radeon RX 9060"}}) {
+                card(L"card1", "0x1002\n", id);
+                require(GpuFromDrm(drm).rdna4 && GpuFromDrm(drm).name == nm, "GpuFromDrm: each RDNA 4 id has its own name");
+            }
+            card(L"card1", "0x1002\n", "0x744c\n");        // RDNA 3: stays unsupported
+            g = GpuFromDrm(drm);
+            require(g.amd && !g.rdna4, "GpuFromDrm: an RX 7000-series card is AMD but not RDNA 4");
+            card(L"card1", "0x10de\n", "0x7550\n");        // another vendor with an RDNA 4 id
+            require(!GpuFromDrm(drm).rdna4, "GpuFromDrm: the vendor must be AMD");
         }
         // under Wine an RDNA 4 card that Linux reports is found even when Wine's own DXGI names an old Radeon. Which cards
         // LinuxRdna4Name looks at is checked above on the made-up folder (card20 and card17 included); here DetectGpu must follow it.

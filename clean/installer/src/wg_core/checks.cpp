@@ -11,7 +11,37 @@ namespace wg {
 // ------------------------------------------------------------------------------------------------
 // System requirements
 // ------------------------------------------------------------------------------------------------
+wstring LinuxOsName(const string& osRelease) {
+    string name, plain, version;
+    for (size_t at = 0; at < osRelease.size();) {
+        size_t nl = osRelease.find('\n', at);
+        if (nl == string::npos) nl = osRelease.size();
+        string line = osRelease.substr(at, nl - at);
+        at = nl + 1;
+        const size_t eq = line.find('=');
+        if (eq == string::npos) continue;
+        string val = line.substr(eq + 1);
+        while (!val.empty() && (val.back() == '\r' || val.back() == ' ')) val.pop_back();
+        if (val.size() >= 2 && (val.front() == '"' || val.front() == '\'') && val.back() == val.front()) val = val.substr(1, val.size() - 2);
+        const string key = line.substr(0, eq);
+        if (key == "PRETTY_NAME") name = val;
+        else if (key == "NAME") plain = val;
+        else if (key == "VERSION") version = val;
+    }
+    if (name.empty() && !plain.empty()) name = plain + (version.empty() ? string() : " " + version);
+    return FromUtf8(name.c_str());
+}
 WinInfo WindowsInfo() {
+    if (NativeLinux()) {  // a Linux program: the system is the distribution, which Proton's Windows 10 stand-in is not
+        WinInfo w;
+        string text;
+        w.label = L"Linux";
+        ReadAll(L"Z:\\etc\\os-release", text);
+        w.text = LinuxOsName(text);
+        if (w.text.empty()) w.text = L"unknown distribution";
+        w.ok = true;
+        return w;
+    }
     using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
     auto fn = reinterpret_cast<RtlGetVersionFn>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion")));
     OSVERSIONINFOW v{}; v.dwOSVersionInfoSize = sizeof(v);
@@ -30,7 +60,8 @@ WinInfo WindowsInfo() {
 wstring NeedsRx9000Sentence() { return L"WrongGPU's models need an RX 9000-series GPU; using AMD FSR"; }
 wstring GpuToolbarLine(const wstring& shortName, const GpuInfo& gpu) {
     if (shortName.empty()) return L"No graphics card detected \u00b7 " + NeedsRx9000Sentence();
-    return shortName + L" (detected) \u00b7 " + (gpu.rdna4 ? wstring(L"Direct3D 12") : NeedsRx9000Sentence());
+    // natively on Linux the games reach Direct3D 12 through Proton (the first-run sheet says the same)
+    return shortName + L" (detected) \u00b7 " + (gpu.rdna4 ? wstring(NativeLinux() ? L"Direct3D 12 (through Proton)" : L"Direct3D 12") : NeedsRx9000Sentence());
 }
 bool IsRdna4Name(const wstring& name) { return Contains(name, L"RX 90") || Contains(name, L"PRO R97") || Contains(name, L"PRO R96"); }
 // Under Wine, Wine's own DXGI can name an RDNA 4 card after an old Radeon ("ATI Radeon HD 5600 Series"); the PCI ids of
@@ -69,14 +100,25 @@ static bool HexId(const string& text, unsigned long& id) {
     while (end && (*end == '\n' || *end == '\r' || *end == ' ')) ++end;
     return end && end != s && *end == '\0';
 }
+// The RDNA 4 PCI device ids and the card each is, from the RR runtime's list (rdna4_device_id) and the names its tests give
+// the boards (clean/runtime/interop/tests/test_executor_select.cpp). One list: the Wine fallback and the native path read it.
+struct Rdna4Card { unsigned long device; const wchar_t* name; };
+static const Rdna4Card kRdna4Cards[] = {
+    {0x7550, L"AMD Radeon RX 9070 XT"}, {0x7551, L"AMD Radeon RX 9070 GRE"}, {0x7590, L"AMD Radeon RX 9060 XT"}, {0x7591, L"AMD Radeon RX 9060"}};
+static const Rdna4Card* FindRdna4Card(unsigned long vendor, unsigned long device) {
+    if (vendor != 0x1002) return nullptr;
+    for (const auto& c : kRdna4Cards) if (c.device == device) return &c;
+    return nullptr;
+}
+static bool CardIds(const wstring& card, unsigned long& v, unsigned long& d) {
+    string vendor, device;
+    return ReadSysfs(Join(card, L"device\\vendor"), vendor) && ReadSysfs(Join(card, L"device\\device"), device) && HexId(vendor, v) && HexId(device, d);
+}
 wstring LinuxRdna4Name(const wstring& drmRoot) {
     for (const auto& card : DrmCards(drmRoot)) {
-        string vendor, device;
         unsigned long v = 0, d = 0;
-        if (!ReadSysfs(Join(card.second, L"device\\vendor"), vendor) || !ReadSysfs(Join(card.second, L"device\\device"), device) ||
-            !HexId(vendor, v) || !HexId(device, d))
-            continue;
-        if (v == 0x1002 && (d == 0x7550 || d == 0x7551 || d == 0x7590 || d == 0x7591)) {
+        if (!CardIds(card.second, v, d)) continue;
+        if (FindRdna4Card(v, d)) {
             wchar_t b[160];
             swprintf(b, 160, L"AMD Radeon RDNA 4 (PCI 1002:%04lX, found in Linux's device list; not confirmed as the adapter the game uses)", d);
             return b;
@@ -84,14 +126,56 @@ wstring LinuxRdna4Name(const wstring& drmRoot) {
     }
     return L"";
 }
+// What Linux's device list says about the graphics cards, with no Windows graphics layer: a native Linux launcher has no DXGI.
+// The name comes from the card's PCI ids (an RDNA 4 board by name, any other card as "<vendor> (code vvvv:dddd)"); the driver is the
+// name of the kernel driver bound to the card (the `driver` link). An AMD RDNA 4 card wins over any other; otherwise the first AMD
+// card, otherwise the first card. Connectors, unreadable cards and a missing folder count as no card. Only RDNA 4 sets `rdna4`
+// (an RX 7000-series card is AMD, not supported).
+GpuInfo GpuFromDrm(const wstring& drmRoot) {
+    GpuInfo best;
+    for (const auto& card : DrmCards(drmRoot)) {
+        unsigned long v = 0, d = 0;
+        if (!CardIds(card.second, v, d)) continue;
+        const Rdna4Card* known = FindRdna4Card(v, d);
+        const bool amd = v == 0x1002;
+        if (!best.name.empty() && !(amd && !best.amd) && !(known && !best.rdna4)) continue;
+        wchar_t b[96];
+        wstring name;
+        if (known) name = known->name;
+        else {
+            swprintf(b, 96, L"%ls (code %04lX:%04lX)", amd ? L"AMD Radeon" : v == 0x10de ? L"NVIDIA graphics" : v == 0x8086 ? L"Intel graphics" : L"Graphics card", v, d);
+            name = b;
+        }
+        wstring driver;
+        const HANDLE h = CreateFileW(Join(card.second, L"device\\driver").c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        if (h != INVALID_HANDLE_VALUE) {
+            wchar_t path[MAX_PATH];
+            if (const DWORD n = GetFinalPathNameByHandleW(h, path, MAX_PATH, 0); n && n < MAX_PATH) driver = BaseName(wstring(path, n));
+            CloseHandle(h);
+        }
+        best.name = name; best.driver = driver; best.amd = amd; best.rdna4 = known != nullptr;
+    }
+    return best;
+}
+// The device list a native launcher reads. A WRONGGPU_TESTING build takes WRONGGPU_TEST_DRM_ROOT instead (a made-up folder of cards,
+// so the tests and the screenshots do not depend on this machine's GPU); a release build never reads it.
+static wstring DrmRootForDetect() {
+#ifdef WRONGGPU_TESTING
+    const wstring env = EnvVar(L"WRONGGPU_TEST_DRM_ROOT");
+    if (!env.empty()) return env;
+#endif
+    return L"Z:\\sys\\class\\drm";
+}
 GpuInfo DetectGpu() {
     GpuInfo best;
+    // a native Linux launcher has no DXGI: Linux's own device list names the card
+    const auto noDxgi = [&]() { return NativeLinux() ? GpuFromDrm(DrmRootForDetect()) : best; };
     HMODULE dxgi = LoadSystemDll(L"dxgi.dll");
-    if (!dxgi) return best;
+    if (!dxgi) return noDxgi();
     using CreateFn = HRESULT(WINAPI*)(REFIID, void**);
     auto create = reinterpret_cast<CreateFn>(reinterpret_cast<void*>(GetProcAddress(dxgi, "CreateDXGIFactory1")));
     IDXGIFactory1* f = nullptr;
-    if (!create || FAILED(create(__uuidof(IDXGIFactory1), (void**)&f)) || !f) return best;
+    if (!create || FAILED(create(__uuidof(IDXGIFactory1), (void**)&f)) || !f) return noDxgi();
     IDXGIAdapter1* a = nullptr;
     for (UINT i = 0; f->EnumAdapters1(i, &a) != DXGI_ERROR_NOT_FOUND; ++i) {
         DXGI_ADAPTER_DESC1 d{};

@@ -258,6 +258,20 @@ bool Gfx::SavePng(const wstring& path) {
 ID2D1SolidColorBrush* Gfx::B(Col c) { brush_->SetColor(DC(c)); return brush_; }
 
 void Gfx::SetOffset(float dx, float dy) { ox_ = dx; oy_ = dy; rt->SetTransform(D2D1::Matrix3x2F::Translation(dx, dy)); }
+// A turn round (cx, cy) on top of the transform now (the scroll offset): what the Library's busy glyph needs
+void Gfx::PushRotate(float cx, float cy, float degrees) {
+    D2D1_MATRIX_3X2_F old = D2D1::Matrix3x2F::Identity();
+    if (rt) {
+        rt->GetTransform(&old);
+        rt->SetTransform(D2D1::Matrix3x2F::Rotation(degrees, D2D1::Point2F(cx, cy)) * old);
+    }
+    rotations_.push_back(old);
+}
+void Gfx::PopRotate() {
+    if (rotations_.empty()) return;
+    if (rt) rt->SetTransform(rotations_.back());
+    rotations_.pop_back();
+}
 void Gfx::Clear(Col c) { if (!dry) rt->Clear(DC(c)); }
 void Gfx::Fill(const Rc& r, Col c) { if (!dry) rt->FillRectangle(DR(r), B(c)); }
 void Gfx::FillRound(const Rc& r, float rad, Col c) {

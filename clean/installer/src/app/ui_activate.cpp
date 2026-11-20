@@ -26,6 +26,9 @@ void StartOp(OpRequest r);
 using namespace win;
 
 namespace lui {
+#ifndef _WIN32
+wstring ProtonLaunchOption(const wstring& proxy);  // ui_game.cpp
+#endif
 void ActivateWidget(int id) {
     if (id >= ID_DIALOG && id < ID_DIALOG + 100) {
         const size_t i = (size_t)(id - ID_DIALOG);
@@ -312,6 +315,10 @@ void ActivateWidget(int id) {
         case ID_G_RRCFG0: case ID_G_RRCFG0 + 1:
             SetSetting(v.edit, "rr_config_fix", id == ID_G_RRCFG0 ? "on" : "off", nullptr); Invalidate(); return;
         case ID_G_RRCFG_OPEN: case ID_G_RRCFG_COPY: case ID_G_RRCFG_CHECK: case ID_G_RRCFG_FIX: RrConfigAction(id); return;
+#ifndef _WIN32
+        case ID_G_PROTONOPT_COPY: CopyLaunchOption(ProtonLaunchOption(v.opti.proxy)); return;
+        case ID_G_WINFOLDER_COPY: if (NativeLinux()) CopyTerminalCommand(WindowsFolderCommand(v.cur.exe)); return;
+#endif
         // "Turn it on in the game": OptiScaler's FPS overlay on (an unsaved change: the capsule's Apply writes it)
         case ID_G_GUIDEFPS: SetSetting(v.edit, "fps_overlay", "on", nullptr); Invalidate(); return;
         case ID_G_LOG: MenuCommand(0, M_OPEN_LOG); return;
@@ -444,6 +451,7 @@ void ActivateWidget(int id) {
             return;
         }
         case ID_S_SELFUNINSTALL: {
+            if (NativeLinux()) { AppImageUninstallAsked(); return; }  // an AppImage has no installer entry: its file and its data folder (ui_appimage.cpp)
             if (!v.live || v.busy) return;  // it can remove WrongGPU from the games: not while an operation works in one
             if (!LauncherInstalled()) { v.launcherInstalled = false; Invalidate(); return; }  // nothing installed to uninstall (removed meanwhile)
             // destructive: a question with the mark, as a game's Uninstall (POLISH-AUDIT 19), and no default (Return does not

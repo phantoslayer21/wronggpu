@@ -67,7 +67,9 @@
 #include "wg_core/payload.h"
 #include "wg_core/record.h"
 #include "wg_core/rrprep.h"
-#include "wg_ui/kit.h"
+#ifdef _WIN32
+#include "wg_ui/kit.h"  // the wizard's GDI+ widgets: the Linux build has no wizard
+#endif
 
 #ifdef _MSC_VER
 #pragma comment(lib, "user32.lib")
@@ -219,7 +221,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
     g.ctx.data = &EmbeddedPayload();
     g.hinst = hInst;
+#ifdef _WIN32
     g.kit.hinst = hInst;
+#endif
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     int argc = 0; LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     // The launcher (build/launcher-design.md): no arguments opens its window, a verb runs the command line; the
@@ -303,3 +307,20 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
 
     return RunWizard();
 }
+
+#ifndef _WIN32
+// Linux: the same entry as Windows' wWinMain, with the process's arguments as the command line it reads. The old wizard
+// (GDI+) is not built here: its route says so.
+namespace wg::app {
+bool NeedsConsent() { return false; }
+int RunWizard() {
+    LogLine(g.ctx, L"The setup wizard is not available on Linux; use the launcher window or a command-line verb.");
+    return EXIT_USAGE;
+}
+}  // namespace wg::app
+
+int main(int argc, char** argv) {
+    WgSetCommandLine(argc, argv);
+    return wWinMain(nullptr, nullptr, nullptr, 0);
+}
+#endif

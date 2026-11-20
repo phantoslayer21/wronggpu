@@ -978,6 +978,10 @@ Windows (the Wine run was not repeated for them):
   the result warns, `status` says `rr_available: false` with `rr_unavailable_why`, and the RR card says RR is unavailable
   with the plain reason; a repair with the edition makes it available (`optiscaler_edition`, read from the install
   record's hash of OptiScaler's DLL). Cyberpunk 2077 and RE Requiem always count as game-interface RR games.
+  `--native-linux <WrongGPU>` runs the same suite against the Linux binary (`tests/native_linux.py`: its XDG folders, registry file
+  and SDL offscreen driver under `--work`, paths in the Windows spelling the program prints; the checks that only mean something
+  on Windows are skipped with their reasons printed). A Linux `-DWRONGGPU_TESTING=ON` build without `WRONGGPU_PAYLOAD_DIR` makes
+  the stand-in payload and test map itself and runs the suite as the ctest `launcher-native`.
 - `tests/coexist_tests.cpp` (ctest `coexist-core`, every build): the marker scan and fingerprints on synthetic bytes,
   tool and decision names, overlays, the proxy picker on a generated folder, byte-exact OptiScaler.ini value edits,
   the OptiScaler tab's rules (locked, editable only when present, value checks), the inikey journal (revert byte for

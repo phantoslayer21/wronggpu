@@ -132,6 +132,12 @@ static bool Download(const EditionInfo& e, const wstring& dest, const std::funct
 EditionResult GetEdition(Context& ctx, const wstring& dataDir, const std::function<bool(unsigned long long, unsigned long long)>& progress) {
     EditionResult r;
     try {
+        if (!DownloadsAvailable()) {  // Linux: nothing is downloaded (no HTTP client yet), whatever the build pins
+            r.detail = L"downloads are off on Linux";
+            r.error = L"WrongGPU doesn't download anything on Linux yet. In Settings, under OptiScaler, choose an OptiScaler file or folder of your own, then try again.";
+            LogLine(ctx, L"OptiScaler: " + r.detail + L"; the player's own OptiScaler download is needed");
+            return r;
+        }
         const EditionInfo e = PinnedEdition();
         if (e.url.empty() || dataDir.empty()) {
             r.error = L"WrongGPU couldn't download its OptiScaler edition.";

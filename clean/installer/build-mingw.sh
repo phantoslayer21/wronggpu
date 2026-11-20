@@ -23,7 +23,7 @@ python3 tools/make_payload.py --payload "$PAYLOAD" --map "$MAP" --version "$VERS
 CONV=../converter/src
 CONV_SRC="$CONV/sha256.cpp $CONV/json.cpp $CONV/numeric.cpp $CONV/map.cpp $CONV/locate.cpp $CONV/lz4block.cpp $CONV/convert.cpp $CONV/output.cpp $CONV/pe_version.cpp $CONV/api.cpp"
 FLAGS="-std=c++17 -O2 -Wall -Wextra -ffp-contract=off -municode -mwindows -static -I$GEN -I$CONV -Isrc $TESTING_DEFINE"
-LIBS="-lcomctl32 -lshell32 -lole32 -luuid -ladvapi32 -luser32 -lgdi32 -lgdiplus -ldwmapi -luxtheme -lwinhttp"
+LIBS="-lcomctl32 -lshell32 -lole32 -luuid -ladvapi32 -luser32 -lgdi32 -lgdiplus -ldwmapi -luxtheme -lwinhttp -lrstrtmgr"
 # the restorer: wg_core without payload or UI
 printf '1 ICON "app.ico"\n' > "$GEN/restore_app.rc"
 "$WINDRES" -O coff -I"$GEN" -i "$GEN/restore_app.rc" -o "$GEN/restore_app.o"

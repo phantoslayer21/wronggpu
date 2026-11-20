@@ -7,7 +7,9 @@
 
 #include "wg_core/install.h"
 #include "wg_core/logs.h"
-#include "wg_ui/kit.h"
+#ifdef _WIN32
+#include "wg_ui/kit.h"  // the wizard's GDI+ widgets: not on Linux
+#endif
 #include "wizard_policy.h"
 
 namespace wg::app {
@@ -17,7 +19,9 @@ enum PageId { PG_WELCOME, PG_GAME, PG_REVIEW, PG_PROGRESS, PG_FINISH, PG_UCONFIR
 struct App {
     Context ctx;  // the engine's state (wg_core): log file, converter map, OptiScaler package, embedded payload
     HINSTANCE hinst{}; HWND hwnd{};
+#ifdef _WIN32
     ui::Kit kit;  // the widget kit (wg_ui): DPI scale, fonts, brushes, control backgrounds, hover, wordmark
+#endif
     bool hipCheck = false;
     bool uninstall = false, collect = false, list = false, fsr4 = false, noScan = false, force = false, silent = false, go = false, elevatedRelaunch = false;
     bool experimentalOk = false, moveMods = false, removeOld = false;

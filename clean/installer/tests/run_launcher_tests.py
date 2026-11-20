@@ -25,6 +25,7 @@ os.environ["WRONGGPU_TESTING"] = "1"
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import mockpe  # noqa: E402  (synthetic PE files with a version resource)
+import native_linux  # noqa: E402  (--native-linux)
 import launcher_build_facts as facts  # noqa: E402  (what the launcher under test was built with)
 import run_installer_tests as suite  # noqa: E402  (mock content, snapshots, the synthetic model case)
 from run_installer_tests import read, sha, snapshot, diff, write, kept_runtime, unrecorded_wronggpu_files  # noqa: E402
@@ -35,6 +36,8 @@ OPTI_INI = ("[Upscalers]\nDx12Upscaler=auto\n[Libraries]\nFfxDx12SRPath=auto\n[F
 
 
 class T:
+    native, skipped = False, ()
+
     def __init__(self, exe, work, model, hip):
         self.exe, self.work, self.model = exe, work, model
         self.passed, self.failures = 0, []
@@ -77,6 +80,12 @@ class T:
         else:
             self.failures.append(name + (": " + str(detail)[:1500] if detail else ""))
             print("  FAIL ", name, str(detail)[:1500])
+
+    def reg_add(self, path, name, value):
+        subprocess.run(["reg", "add", path, "/v", name, "/t", "REG_SZ", "/d", value, "/f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def reg_delete(self, path):
+        subprocess.run(["reg", "delete", path, "/f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def run(self, *args, exe=None, data=True, timeout=600, cwd=None):
         """WrongGPU.exe <args> --data --log --out; the JSON result in self.j; returns the exit code. cwd: its current directory."""
@@ -365,7 +374,8 @@ def test_install_settings_uninstall(t, opti):
     t.check("owned-files.json: valid JSON, every recorded file with its owner", owned.get("format") == "wronggpu-owned-files/1" and
             any(f["path"] == "wronggpu_runtime.dll" and f["owner"] == "wg" for f in owned.get("files", [])), owned)
     un = os.path.join(b, "wronggpu-setup", "uninstall.exe")
-    t.check("uninstall.exe is the restorer (the build's WrongGPU-Restore.exe), not the launcher", facts.restorer_ok(un, t.exe),
+    t.check("uninstall.exe is the restorer (the build's WrongGPU-Restore.exe), not the launcher" + (" (Linux: none written)" if t.native else ""),
+            not os.path.exists(un) if t.native else facts.restorer_ok(un, t.exe),
             (os.path.getsize(un) if os.path.isfile(un) else None, os.path.getsize(t.exe)))
     t.check("profile.ini written", os.path.isfile(os.path.join(b, "wronggpu-setup", "profile.ini")))
     t.check("the game is on the managed list", b.lower() in managed_list(t), managed_list(t))
@@ -454,7 +464,7 @@ def test_install_settings_uninstall(t, opti):
     t.check("an older record: an older version, not \"another build\" (other_build false, no such words)",
             t.j.get("game", {}).get("other_build") is False and "another build" not in t.j.get("game", {}).get("status_text", ""), t.j.get("game", {}))
     # a build without Preset K: an older install set up to start on Preset K (the plugin's choice) moves to Model M, said in the log
-    no_k = "Preset K isn't in this version".encode("utf-16-le") in read(t.exe)
+    no_k = any("Preset K isn't in this version".encode(e) in read(t.exe) for e in ("utf-16-le", "utf-32-le"))  # (wchar_t: 4 bytes on Linux)
     if no_k:
         write(os.path.join(b, "wronggpu-asi.ini"), "; WrongGPU OptiScaler plugin\r\nselection=wronggpu-k\r\n")
     rc = t.run("update", exe, "--opti=" + opti, "--noscan", "--force")
@@ -544,10 +554,10 @@ def test_install_settings_uninstall(t, opti):
             and not t.entries_for(b))
     # again, uninstalled by the restorer in the game folder
     rc = t.run("install", exe, "--opti=" + opti, "--noscan", "--force")
-    rc2 = t.raw([os.path.join(b, "wronggpu-setup", "uninstall.exe"), "/S", "/LOG=" + t.log])
+    rc2 = t.run("uninstall", exe) if t.native else t.raw([os.path.join(b, "wronggpu-setup", "uninstall.exe"), "/S", "/LOG=" + t.log])
     wait_gone(os.path.join(b, "wronggpu-setup"))
     after = snapshot(root)
-    t.check("the restorer (uninstall.exe /S): exit 0, as before except the unrecorded wronggpu-* files (left in place)", rc == 0 and rc2 == 0 and after == left, (rc, rc2, diff(left, after)))
+    t.check(("the launcher's uninstall (Linux)" if t.native else "the restorer (uninstall.exe /S)") + ": exit 0, as before except the unrecorded wronggpu-* files (left in place)", rc == 0 and rc2 == 0 and after == left, (rc, rc2, diff(left, after)))
     shutil.rmtree(root, ignore_errors=True)
 
 
@@ -682,10 +692,9 @@ def test_experimental_and_shared_model(t, opti):
     t.check("first uninstalled: the model stays (the other game is on the managed list)", rc == 0 and os.path.isfile(model) and snapshot(r1) == s1, diff(s1, snapshot(r1)))
     # a stale Apps & features entry (its game folder deleted by hand, so no record) is no game that still uses the data
     stale = t.uninstall + "\\WrongGPU-00000000"
-    subprocess.run(["reg", "add", stale, "/v", "InstallLocation", "/t", "REG_SZ", "/d", os.path.join(t.work, "games", "Deleted Game", "bin", "x64"), "/f"],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    t.reg_add(stale, "InstallLocation", os.path.join(t.work, "games", "Deleted Game", "bin", "x64"))
     rc = t.run("uninstall", e2)
-    subprocess.run(["reg", "delete", stale, "/f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    t.reg_delete(stale)
     t.check("last uninstalled (a stale entry of a deleted game left): byte for byte; the shared model data goes", rc == 0 and snapshot(r2) == s2 and not os.path.isfile(model),
             (rc, diff(s2, snapshot(r2))))
     shutil.rmtree(r1, ignore_errors=True)
@@ -765,7 +774,7 @@ def test_rc6_hunt(t, opti):
             rc == 0 and rc2 == 0 and rc3 != 0 and not os.path.isfile(rp) and not os.path.isfile(os.path.join(b, "wronggpu_runtime.dll")), (rc, rc2, rc3, t.j.get("message")))
     t.check("L4: profile.ini, previous\\ (Roll back) and all the failed run did not make stay (the earlier uninstaller too)",
             os.path.isfile(os.path.join(state, "profile.ini")) and os.path.isfile(os.path.join(state, "previous", "previous.txt")) and
-            os.path.isfile(os.path.join(state, "uninstall.exe")), sorted(os.listdir(state)) if os.path.isdir(state) else None)
+            (t.native or os.path.isfile(os.path.join(state, "uninstall.exe"))), sorted(os.listdir(state)) if os.path.isdir(state) else None)  # (Linux: no restorer)
     rc = t.run("install", exe, "--opti=" + opti, "--noscan", "--force")
     rc2 = t.run("get", exe)
     t.check("L4: the next install starts with the kept settings", rc == 0 and rc2 == 0 and
@@ -1013,7 +1022,7 @@ def test_launcher_uninstall(t, opti):
         t.check("...while it is on the list, the last reachable game's own uninstall keeps the shared model data (the game byte for byte)",
                 had and rc2 == 0 and snapshot(root) == before and os.path.isdir(model_dir), (had, rc2, diff(before, snapshot(root)), t.logtail()))
         for k in own:
-            subprocess.run(["reg", "delete", t.uninstall + "\\" + k, "/f"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            t.reg_delete(t.uninstall + "\\" + k)
         wait_removed(t)
         shutil.rmtree(shared, ignore_errors=True)
     else:
@@ -1840,6 +1849,12 @@ def changed_keys(before, after):
     return sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
 
 
+def test_rr_config_proton(t, opti):
+    if t.native:  # S3: Engine.ini in the game's Proton prefix (launcher_proton_cases.py)
+        __import__("launcher_proton_cases").run(t, opti)
+        __import__("launcher_appimage_cases").run(t, opti)  # S5
+
+
 def test_rr_config_fix(t, opti):
     """Brief 16 (owner 2026-11-04): Borderlands 4 and Hogwarts Legacy need one line in the player's own Engine.ini for Ray
     Reconstruction, and Borderlands 4 deletes that file unless it is read-only. An install asks (the result's
@@ -1904,8 +1919,10 @@ def test_rr_config_fix(t, opti):
                 "WrongGPU can add the line" in text and "on the game's page at any time" in text and "uninstalling WrongGPU takes it out" in text,
                 (rc, t.j.get("message"), q))
         t.check("the question's steps have the line, the game's folder and read-only; the fix and myself commands name the setting",
-                line.decode() in q.get("steps", "") and os.path.dirname(bl4_ini) in q.get("steps", "") and "Read-only" in q.get("steps", "") and
+                line.decode() in q.get("steps", "") and (os.path.dirname(native_linux.host(bl4_ini)) if t.native else os.path.dirname(bl4_ini)) in q.get("steps", "") and
+                ("read-only" if t.native else "Read-only") in q.get("steps", "") and
                 q.get("fix", "").endswith("rr_config_fix=on") and q.get("myself", "").endswith("rr_config_fix=off"), q)
+        if t.native: native_linux.check_steps_words(t, q.get("steps", ""), bl4_ini)  # review fix: Linux terms
         bad = [p for p in check_wording.PHRASES if p in (text + q.get("steps", "")).lower()]
         # the line's own words (its key's parts) appear nowhere but in the line itself
         words = [w for w in line.split(b"=")[0].decode().split(".") if len(w) >= 3]
@@ -2307,10 +2324,11 @@ def test_rr_config_fix(t, opti):
                 any(k.startswith("Open the settings folder of") for k in p0) and "Check Engine.ini again" in p0 and
                 any(k.startswith("Step 4: Paste this line under [SystemSettings]") and line.decode() in k for k in p0) and
                 # every step spelled out, read-only last (UI review r2 #5)
-                any(k.startswith("Step 2: Create or open Engine.ini there with Notepad") for k in p0) and
+                any(k.startswith("Step 2: Create or open Engine.ini there with " + ("a text editor" if t.native else "Notepad")) for k in p0) and
                 any(k.startswith("Step 3: If the file has no [SystemSettings] line, add it at the end") for k in p0) and
                 any(k.startswith("Step 5: Save the file") for k in p0) and
-                any(k.startswith("Step 6: Right-click Engine.ini, choose Properties, tick Read-only and click OK") for k in p0) and
+                any(k.startswith("Step 6: Make Engine.ini read-only: in your file manager" if t.native
+                                 else "Step 6: Right-click Engine.ini, choose Properties, tick Read-only and click OK") for k in p0) and
                 any(k.startswith("The game's settings folder isn't there yet") for k in p0) and not os.listdir(docs), (rc2, [k for k in p0 if "ngine" in k or "Step" in k]))
         rg = [gp.get("rrconfig") for gp in d.get("games", []) if gp.get("rrconfig")]
         # the game never started (no settings folder): the check says so (-1), Open folder makes nothing and says to start the
@@ -2375,7 +2393,7 @@ def test_rr_config_fix(t, opti):
                 "UTF-16" in rcf.get("check_toast", ""), (rx, rcf, [k for k in pg if "ngine" in k]))
         rx, pg, rcf = on_states["unknown"]
         t.check("window, WrongGPU's choice: a folder it can't check says so (not Added by WrongGPU), with Check again (state -1)",
-                rx == 0 and row(pg, "Couldn't check. Start the game once, then check again") and "Check Engine.ini again" in pg and
+                rx == 0 and row(pg, "Can't find the game's Windows folder" if t.native else "Couldn't check. Start the game once, then check again") and "Check Engine.ini again" in pg and
                 not row(pg, "Added by WrongGPU") and rcf.get("state") == -1, (rx, rcf, [k for k in pg if "ngine" in k or "check" in k]))
         # Myself, the game's folder there: the file check in each state (UI review r2 #6, #7): no line (0), the line in a file that
         # isn't read-only (2), read-only (1); the folder made as the game makes it (GameUserSettings.ini in it)
@@ -2402,7 +2420,8 @@ def test_rr_config_fix(t, opti):
         t.check("window, Myself, an Engine.ini saved as UTF-16: WrongGPU's check couldn't read it, check it by hand in Notepad (the line, read-only); "
                 "no Save as / Encoding step; Check again; its toast says the same (r4 #6)",
                 rx == 0 and rcf.get("state") == 3 and cr and "WrongGPU's check couldn't read it: it is saved as UTF-16" in cr[0] and
-                "open Engine.ini in Notepad and look for the line under [SystemSettings]" in cr[0] and "Read-only is ticked" in cr[0] and
+                ("open Engine.ini in a text editor and look for the line under [SystemSettings]" if t.native else "open Engine.ini in Notepad and look for the line under [SystemSettings]") in cr[0] and
+                ("that the file is read-only" if t.native else "Read-only is ticked") in cr[0] and
                 "Save as" not in cr[0] and "Encoding" not in cr[0] and "Check Engine.ini again" in pg and
                 "WrongGPU's check couldn't read Engine.ini" in rcf.get("check_toast", "") and "by hand" in rcf.get("check_toast", ""), (rx, rcf, cr))
         os.remove(bl4_ini)  # the player's own file gone again, as before these checks (the game's settings folder stays)
@@ -2484,7 +2503,7 @@ def test_rr_config_fix(t, opti):
         q = t.j.get("rr_config_question", {})
         t.check("Hogwarts Legacy install: the question (the game named, its menu can't turn it on; no read-only step)",
                 rc == 0 and q.get("text", "").startswith("Hogwarts Legacy needs one more setting for Ray Reconstruction") and
-                "needs one line in Engine.ini, because the game's own menu can't turn it on" in q.get("text", "") and "read-only" not in q.get("text", "") and "Read-only" not in q.get("steps", ""),
+                "needs one line in Engine.ini, because the game's own menu can't turn it on" in q.get("text", "") and "read-only" not in q.get("text", "") and "Read-only" not in q.get("steps", "") and "read-only" not in q.get("steps", ""),
                 (rc, t.j.get("message"), q))
         hog_ini = os.path.join(hog, "WindowsNoEditor", "Engine.ini")
         # before the game's first start: no guessed Windows folder (the game uses WindowsNoEditor): nothing made, waits (r2b #1)
@@ -2880,7 +2899,10 @@ def test_ui_dump(t, opti):
     t.check("game page: the FPS overlay saved on: step 3 says it is on, no button; without OptiScaler's overlay key: no claim, no button (UI review r2 #9)",
             "(it is on)" in fp.get("step3_saved", "") and fp.get("button_saved") is False and "FPS overlay shows" not in fp.get("step3_nokey", "x") and
             "no FPS overlay setting" in fp.get("step3_nokey", "") and fp.get("button_nokey") is False, fp)
-    t.check("settings page: update check off by default", any(c["text"] == "Check for new releases" and c.get("checked") is False for c in d.get("settings", {}).get("controls", [])))
+    ctl = d.get("settings", {}).get("controls", [])
+    t.check("settings page: update check off by default" + (" (Linux: no switch, the row says it is off)" if t.native else ""),
+            any(c["text"].startswith("Check for new releases") and "Off on Linux" in c["text"] for c in ctl) if t.native else
+            any(c["text"] == "Check for new releases" and c.get("checked") is False for c in ctl))
     bf = d.get("busy_focus", {})
     t.check("settings page: a button that goes busy keeps the focus, shown off with its busy name; Return does nothing, Tab goes on from it",
             bf.get("id", 0) > 0 and bf.get("kept") is True and bf.get("enabled") is False and "Converting" in bf.get("name", "") and
@@ -3042,7 +3064,8 @@ def test_data_root_junctions(parent):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--launcher", required=True)
+    ap.add_argument("--launcher")
+    ap.add_argument("--native-linux", metavar="WrongGPU", help="the Linux binary instead of --launcher (see native_linux.py)")
     ap.add_argument("--work", required=True)
     ap.add_argument("--baseline", help="the 0.5.1 installer (WRONGGPU_TESTING build, same test map) for the adoption cases")
     ap.add_argument("--hip", help="mock amdhip64_7.dll (WRONGGPU_HIP_RUNTIME)")
@@ -3059,10 +3082,14 @@ def main():
     ap.add_argument("--synth-f", default=os.environ.get("WGC_SYNTH_BINS", ""),
                     help="folder with the spec team's synthetic preset-F file synth-common-v0.bin (the test build's F map is synth-r0)")
     a = ap.parse_args()
+    if not (a.launcher or a.native_linux):
+        ap.error("--launcher or --native-linux is required")
+    if a.native_linux:
+        native_linux.setup(sys.modules[__name__], suite, HERE)
     global RUN_OLD_BASELINE, NO_DIRECT, RR_PREPARE_GPU
     RUN_OLD_BASELINE, RR_PREPARE_GPU = a.run_old_baseline, a.rr_prepare_gpu
     NO_DIRECT = os.path.abspath(a.no_direct_launcher) if a.no_direct_launcher else None
-    for what, p in (("--launcher", a.launcher), ("--no-direct-launcher", NO_DIRECT)):  # before anything runs
+    for what, p in (("--launcher", a.launcher), ("--native-linux", a.native_linux), ("--no-direct-launcher", NO_DIRECT)):  # before anything runs
         if p:
             facts.require_test_hooks(p, what)
     if a.hip is not None:  # the mock HIP runtime: an existing plain file (an empty --hip= too is refused), named first
@@ -3077,11 +3104,11 @@ def main():
     work = facts.new_run_folder(os.path.abspath(a.work))
     iso.self_test(work)  # (#243) first: no launcher call with a broken guard
     model = suite.cases.f_mini_case(present=0)  # the synthetic source of the test map the launcher was built with
-    t = T(os.path.abspath(a.launcher), work, model, a.hip)
+    t = T(os.path.abspath(a.native_linux or a.launcher), work, model, a.hip)
     # registry entries of an earlier run (test root only)
     for k, v in t.reg_keys().items():
         if (k.startswith("WrongGPU-") and v.get("InstallLocation", "").lower().startswith(work.lower())) or (k == "WrongGPU" and work.lower() in v.get("InstallLocation", "").lower()):
-            subprocess.run(["reg", "delete", t.uninstall + "\\" + k, "/f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            t.reg_delete(t.uninstall + "\\" + k)
     if a.startup_only:  # the start of a run and the HIP check only
         rc = t.run("hipcheck")
         print("startup-only: run folder %s; hipcheck exit %d" % (work, rc))
@@ -3094,7 +3121,7 @@ def main():
         for name in a.only:
             fn = globals()["test_" + name]
             fn(*(t, opti, a.baseline if "baseline" in fn.__code__.co_varnames[:3] else a.synth_f)[:fn.__code__.co_argcount])
-        print("\n%d checks passed, %d failed (%.0f s)" % (t.passed, len(t.failures), time.time() - t0))
+        print("\n%d checks passed, %d failed, %d skipped (%.0f s)" % (t.passed, len(t.failures), len(t.skipped), time.time() - t0))
         for f in t.failures:
             print("  FAILED:", f)
         return 1 if t.failures else 0
@@ -3108,17 +3135,18 @@ def main():
     test_direct_rr(t, opti, a.synth_f)
     test_sm2_settings(t, opti)
     test_rr_config_fix(t, opti)
-    test_edition_download(t, opti)
+    test_rr_config_proton(t, opti)
+    t.skip("http", "[edition] the whole section") if t.native else test_edition_download(t, opti)
     test_players_optiscaler(t, opti)
     test_experimental_and_shared_model(t, opti)
     test_orphan(t, opti)
     test_rc6_hunt(t, opti)
     __import__("launcher_ignore_cases").run(T, t, opti, game)
     test_adopt_and_self_install(t, opti, a.baseline)
-    test_launcher_uninstall(t, opti)
-    test_data_root_junctions(t)
+    t.skip("shortcut", "[launcher] self-install / self-uninstall") if t.native else test_launcher_uninstall(t, opti)
+    t.skip("junction", "[junctions] the whole section") if t.native else test_data_root_junctions(t)
     test_ui_dump(t, opti)
-    print("\n%d checks passed, %d failed (%.0f s)" % (t.passed, len(t.failures), time.time() - t0))
+    print("\n%d checks passed, %d failed, %d skipped (%.0f s)" % (t.passed, len(t.failures), len(t.skipped), time.time() - t0))
     for f in t.failures:
         print("  FAILED:", f)
     return 1 if t.failures else 0

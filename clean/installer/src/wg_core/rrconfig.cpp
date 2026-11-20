@@ -5,6 +5,7 @@
 
 #include <shlobj.h>
 
+#include "detect.h"
 #include "rrconfig_line.h"
 #include "rr.h"
 
@@ -58,11 +59,79 @@ static wstring LocalAppDataDir() {
     return l;
 }
 
-wstring RrConfigFile(Context& ctx, const RrConfigGame& g, wstring* why, bool* known) {
+static const wchar_t kWindowsFoldersFile[] = L"windows-folders.txt";
+wstring RememberedWindowsFolder(Context& ctx, const wstring& exe) {
+    string text;
+    if (ctx.ownDataDir.empty() || !ReadAll(Join(ctx.ownDataDir, kWindowsFoldersFile), text)) return L"";
+    for (size_t at = 0; at < text.size();) {
+        size_t nl = text.find('\n', at);
+        if (nl == string::npos) nl = text.size();
+        string line = text.substr(at, nl - at);
+        at = nl + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const size_t tab = line.find('\t');
+        if (tab != string::npos && IEq(FromUtf8(line.substr(0, tab).c_str()), exe)) return FromUtf8(line.substr(tab + 1).c_str());
+    }
+    return L"";
+}
+bool RememberWindowsFolder(Context& ctx, const wstring& exe, const wstring& folder, wstring* why) {
+    if (ctx.ownDataDir.empty()) { if (why) *why = L"the launcher has no data folder to keep it in"; return false; }
+    if (!folder.empty()) {
+        if (!IsDir(folder)) { if (why) *why = folder + L" is not a folder"; return false; }
+        if (!IsDir(Join(folder, L"Documents")) && !IsDir(Join(folder, L"AppData"))) {
+            if (why) *why = folder + L" has no Documents or AppData folder in it. Choose the Windows user folder inside the game's Wine prefix (drive_c/users/<name>)";
+            return false;
+        }
+    }
+    string text, out;
+    ReadAll(Join(ctx.ownDataDir, kWindowsFoldersFile), text);
+    for (size_t at = 0; at < text.size();) {
+        size_t nl = text.find('\n', at);
+        if (nl == string::npos) nl = text.size();
+        string line = text.substr(at, nl - at);
+        at = nl + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const size_t tab = line.find('\t');
+        if (line.empty() || (tab != string::npos && IEq(FromUtf8(line.substr(0, tab).c_str()), exe))) continue;
+        out += line + "\n";
+    }
+    if (!folder.empty()) out += ToUtf8(exe) + "\t" + ToUtf8(folder) + "\n";
+    EnsureDir(ctx.ownDataDir);
+    try { WriteFileAtomic(Join(ctx.ownDataDir, kWindowsFoldersFile), out.data(), out.size()); }
+    catch (const SetupError& e) { if (why) *why = L"the choice could not be saved (" + e.msg + L")"; return false; }
+    return true;
+}
+
+// Natively on Linux: the game's Windows profile folder (its Proton prefix's, or the one the player pointed at). false: not native
+// Linux, or a test root is in effect (the roots as always). true with an empty root and *why: not known.
+static bool NativeProfileRoot(Context& ctx, const RrConfigGame& g, const wstring& exe, wstring& root, wstring* why) {
+    if (!NativeLinux()) return false;
+#ifdef WRONGGPU_TESTING
+    if (g.documents ? !PlayerDocumentsDir(ctx).empty() : !LocalAppDataDir().empty()) return false;
+#else
+    if (g.documents && !ctx.playerDocuments.empty()) return false;
+#endif
+    wstring user;
+    const ProtonPrefix pp = FindProtonPrefix(exe);
+    if (pp.state == ProtonPrefixState::Found) user = pp.userDir;
+    else if (pp.state == ProtonPrefixState::NotStarted) {
+        if (why) *why = L"Steam has not made this game's Proton folder yet. Start the game once from Steam, then try again";
+    } else {
+        const wstring chosen = RememberedWindowsFolder(ctx, exe);
+        if (chosen.empty()) { if (why) *why = L"WrongGPU cannot find this game's Windows folder, because it is not a Steam game. Point it at the game's Windows user folder once (the folder with Documents and AppData in it, inside the game's Wine prefix). Run: WrongGPU windows-folder \"<the game's exe>\" \"<that folder>\""; }
+        else if (!IsDir(chosen)) { if (why) *why = L"the Windows folder chosen for this game is gone (" + chosen + L"). Choose it again"; }
+        else user = chosen;
+    }
+    root = user.empty() ? wstring() : Join(user, g.documents ? L"Documents" : L"AppData\\Local");
+    return true;
+}
+
+wstring RrConfigFile(Context& ctx, const RrConfigGame& g, const wstring& exe, wstring* why, bool* known) {
     if (known) *known = false;
-    const wstring root = g.documents ? PlayerDocumentsDir(ctx) : LocalAppDataDir();
+    wstring root;
+    if (!NativeProfileRoot(ctx, g, exe, root, why)) root = g.documents ? PlayerDocumentsDir(ctx) : LocalAppDataDir();
     if (root.empty()) {
-        if (why) *why = g.documents ? L"the Documents folder could not be found" : L"the local application data folder could not be found";
+        if (why && why->empty()) *why = g.documents ? L"the Documents folder could not be found" : L"the local application data folder could not be found";
         return L"";
     }
     const wstring config = Join(root, g.folder);
@@ -104,16 +173,22 @@ wstring RrConfigNotice(const RrConfigGame& g, bool protectedFolder, bool beforeF
 }
 
 wstring RrConfigSteps(const RrConfigGame& g, const wstring& file) {
-    const wstring folder = !file.empty() ? Parent(file)
+    const bool lin = NativeLinux();  // a native Linux player: file manager, text editor, file permissions (the game itself is Windows', under Proton)
+    const wstring folder = !file.empty() ? ShownPath(Parent(file))
+                           : lin ? (g.documents ? L"Documents/" : L"AppData/Local/") + wstring(g.folder) + L"/Windows, in the game's Windows user folder"
                            : g.documents ? L"Documents\\" + wstring(g.folder) + L"\\Windows" : L"%LOCALAPPDATA%\\" + wstring(g.folder) + L"\\Windows";
     wstring t = L"Ray Reconstruction in " + wstring(g.name) + L": the steps\n\n"
-                L"1. Open this folder in File Explorer (if it isn't there, start the game once: it makes it):\n" + folder + L"\n"
-                L"2. Open Engine.ini there with Notepad (create the file if it isn't there).\n"
+                + (lin ? L"1. Open this folder in your file manager (if it isn't there, start the game once: it makes it):\n"
+                         : L"1. Open this folder in File Explorer (if it isn't there, start the game once: it makes it):\n") + folder + L"\n"
+                + (lin ? L"2. Open Engine.ini there with a text editor (create the file if it isn't there).\n"
+                         : L"2. Open Engine.ini there with Notepad (create the file if it isn't there).\n") +
                 L"3. Find the line [" + FromUtf8(kSection) + L"]. If the file doesn't have it, add it at the end.\n"
                 L"4. Add this line under it (Copy the line puts it on the clipboard):\n" + RrConfigLineW() + L"\n";
     if (g.readOnly)
-        t += L"5. Save the file. Then right-click Engine.ini, choose Properties, tick Read-only and click OK: " + wstring(g.name) +
-             L" removes the file on every start otherwise.";
+        t += lin ? L"5. Save the file. Then make Engine.ini read-only: in your file manager open its properties, then Permissions, and set it to read-only "
+                     L"(or run chmod a-w Engine.ini in that folder). " + wstring(g.name) + L" removes the file on every start otherwise."
+                   : L"5. Save the file. Then right-click Engine.ini, choose Properties, tick Read-only and click OK: " + wstring(g.name) +
+                     L" removes the file on every start otherwise.";
     else
         t += L"5. Save the file.";
     return t;
@@ -260,7 +335,7 @@ int RrConfigWaiting(Context& ctx, const Record& m, const string& fixSetting) {
     const RrConfigGame* g = RrConfigGameFor(m.exe);
     if (!g || fixSetting != "on" || m.rrconfig.present) return 0;
     bool known = false;
-    if (RrConfigFile(ctx, *g, nullptr, &known).empty()) return 0;
+    if (RrConfigFile(ctx, *g, m.exe, nullptr, &known).empty()) return 0;
     return known ? 1 : -1;
 }
 
@@ -277,7 +352,7 @@ bool ApplyRrConfig(Context& ctx, const wstring& dir, Record& m, std::vector<wstr
     RrConfigFix& fix = m.rrconfig;
     bool known = false;
     wstring why;
-    const wstring found = RrConfigFile(ctx, *g, &why, &known);
+    const wstring found = RrConfigFile(ctx, *g, m.exe, &why, &known);
     // added before the game made its settings folder, in a guessed sub-folder that isn't the game's (an earlier build: Hogwarts
     // Legacy uses WindowsNoEditor, the guess was Windows): taken out there, then added in the game's own (r2b #1)
     bool moved = false;
@@ -626,12 +701,12 @@ void RevertRrConfig(Context& ctx, const wstring& dir, Record& m, std::vector<wst
     m.rrconfig = RrConfigFix();
 }
 
-int RrConfigLineState(Context& ctx, const RrConfigGame& g, wstring* file, wstring* readWhy) {
+int RrConfigLineState(Context& ctx, const RrConfigGame& g, const wstring& exe, wstring* file, wstring* readWhy) {
     wstring why;
     bool known = false;
-    const wstring f = RrConfigFile(ctx, g, &why, &known);
+    const wstring f = RrConfigFile(ctx, g, exe, &why, &known);
     if (file) *file = f;
-    if (f.empty()) return -1;
+    if (f.empty()) { if (readWhy && NativeLinux()) *readWhy = why; return -1; }  // (the Windows card keeps its words: "Couldn't check")
     // the game makes its settings folder at its first start; before that the sub-folder is only a guess (Hogwarts Legacy uses
     // WindowsNoEditor, the guess is Windows): not known yet, so a file made there by hand never counts (UI review r2 #7); known
     // once a sub-folder holds the game's GameUserSettings.ini, as for "Fix it for me" (r2b #1)

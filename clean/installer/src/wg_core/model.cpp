@@ -19,7 +19,7 @@ bool ExistingModelValid(Context& ctx, wstring* why, wgc::ModelFileInfo* info) {
     if (info) *info = wgc::ModelFileInfo();
     if (!LoadEmbeddedMap(ctx) || !IsFile(ModelFile(ctx))) { if (why) *why = L"no converted model on this PC"; return false; }
     string w;
-    const bool ok = wgc::verify_model_file(*ctx.map.map, std::filesystem::path(ModelFile(ctx)), w, info);
+    const bool ok = wgc::verify_model_file(*ctx.map.map, FsPath(ModelFile(ctx)), w, info);
     if (why) *why = FromUtf8(w);
     return ok;
 }
@@ -138,7 +138,7 @@ ModelState FindModel(Context& ctx, const GameTarget* t, const wstring& userDll, 
     ModelCandidate chosenCand, withoutCand;
     for (auto& cand : cands) {
         auto conv = std::make_shared<wgc::Converted>();
-        const wgc::Result r = wgc::convert_file(*ctx.map.map, std::filesystem::path(cand.path), opt, *conv,
+        const wgc::Result r = wgc::convert_file(*ctx.map.map, FsPath(cand.path), opt, *conv,
                                                 [&ctx](const string& s) { LogLine(ctx, L"converter: " + FromUtf8(s)); });
         if (r.code == wgc::kOk) {
             if (wgc::has_every_group(*ctx.map.map, *conv)) { chosen = conv; chosenCand = cand; break; }
@@ -249,7 +249,7 @@ bool ReplaceModel(Context& ctx, const ModelState& m, wstring& problem) {
     const wstring previous = ModelFile(ctx) + L".previous";
     auto cleanup = [&] { if (IsDir(side)) RemoveTree(side); DeleteFileW(previous.c_str()); };
     cleanup();  // what an interrupted earlier run left behind
-    const wgc::Result r = wgc::write_converted(*ctx.map.map, *m.converted, std::filesystem::path(side), false,
+    const wgc::Result r = wgc::write_converted(*ctx.map.map, *m.converted, FsPath(side), false,
                                                [&ctx](const string& s) { LogLine(ctx, L"converter: " + FromUtf8(s)); });
     if (r.code != wgc::kOk) { problem = L"it could not be saved next to the model data in use"; cleanup(); return false; }
 #ifdef WRONGGPU_TESTING
@@ -260,7 +260,7 @@ bool ReplaceModel(Context& ctx, const ModelState& m, wstring& problem) {
 #endif
     string w;
     wgc::ModelFileInfo info;
-    if (!wgc::verify_model_file(*ctx.map.map, std::filesystem::path(sideFile), w, &info) || (needGroups && !info.absent_groups.empty()) || !info.same_map) {
+    if (!wgc::verify_model_file(*ctx.map.map, FsPath(sideFile), w, &info) || (needGroups && !info.absent_groups.empty()) || !info.same_map) {
         problem = L"the new file failed its check" + (w.empty() ? wstring() : L" (" + FromUtf8(w) + L")");
         cleanup(); return false;
     }
@@ -308,7 +308,7 @@ ModelResult WriteModel(Context& ctx, const ModelState& m, Ui& ui) {
             return res;
         }
     } else {
-        const wgc::Result r = wgc::write_converted(*ctx.map.map, *m.converted, std::filesystem::path(ModelDir(ctx)), false,
+        const wgc::Result r = wgc::write_converted(*ctx.map.map, *m.converted, FsPath(ModelDir(ctx)), false,
                                                    [&ctx](const string& s) { LogLine(ctx, L"converter: " + FromUtf8(s)); });
         if (r.code != wgc::kOk) Fail(FromUtf8(r.message));
         wstring why;

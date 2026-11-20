@@ -71,15 +71,18 @@ def run(T, base, opti, game):
     src = read(src_txt).decode("utf-8", "replace") if os.path.isfile(src_txt) else ""
     t.check("convert-ignore: a second game's install converts again from its own (allowed) file; the listed conversion is replaced, the new SHA-256 recorded",
             rc == 0 and ("source\t" + dll_b).lower() in src.lower() and ("sha256\t" + hashlib.sha256(read(dll_b)).hexdigest()) in src, (rc, said(), src))
-    let_go = _hold(lst)
-    try:
-        t0 = time.time()
-        rc = t.run("repair", exe_b, *flags)
-        took = time.time() - t0
-    finally:
-        let_go()
-    t.check("convert-ignore: the well-known list held open: the repair exits 10 after the retries, the file and the reason named",
-            rc == 10 and lst.lower() in said().lower() and "another program holds it open" in said() and took >= 0.75, (rc, round(took, 2), said()))
+    if base.native:
+        base.skip("lock", "convert-ignore: the well-known list held open: the repair exits 10 after the retries, the file and the reason named")
+    else:
+        let_go = _hold(lst)
+        try:
+            t0 = time.time()
+            rc = t.run("repair", exe_b, *flags)
+            took = time.time() - t0
+        finally:
+            let_go()
+        t.check("convert-ignore: the well-known list held open: the repair exits 10 after the retries, the file and the reason named",
+                rc == 10 and lst.lower() in said().lower() and "another program holds it open" in said() and took >= 0.75, (rc, round(took, 2), said()))
     list_bytes = read(lst)
     rc_a = t.run("uninstall", exe_a)
     rc_b = t.run("uninstall", exe_b)

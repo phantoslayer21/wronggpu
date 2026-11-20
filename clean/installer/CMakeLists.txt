@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
-# WrongGPU installer (spec 30). Windows only: MSVC or MinGW-w64.
+# WrongGPU installer (spec 30). Windows: MSVC or MinGW-w64. Linux: the core (wg_core) and its tests, on a POSIX
+# implementation of the Windows calls the core makes (src/platform/posix, README-linux.md).
 #   cmake -S . -B build -DWRONGGPU_PAYLOAD_DIR=<release payload folder> [-DWRONGGPU_MAP=<map.json>] [-DWRONGGPU_VERSION=x.y.z]
 #   cmake --build build --config Release
 # -DWRONGGPU_PRESET_K=OFF builds an installer for a release that ships Model M only: no Preset K choice or wording,
@@ -10,7 +11,12 @@
 # (exit 2), an earlier direct install is removed before the hosted one is made, the FSR 3.0 component DLLs of the
 # payload folder are not built in (src/setup_route.h).
 cmake_minimum_required(VERSION 3.16)
-project(wronggpu_installer LANGUAGES CXX RC)
+project(wronggpu_installer LANGUAGES CXX)
+if(WIN32)
+  enable_language(RC)
+else()
+  enable_language(ASM)  # resources.S: the embedded payload (tools/make_payload.py)
+endif()
 # MinGW's headers set _WIN32_WINNT to Windows 7 as soon as a standard header comes first (context.h includes
 # <functional> before base.h), which hides the Windows 8+ declarations the core uses (FILE_ID_INFO in convert_ignore.cpp):
 # the whole build gets base.h's Windows 10 instead. MSVC's headers leave it unset.
@@ -88,9 +94,6 @@ else()
   set(DIRECT_ROUTE_PAYLOAD_ARGS --hosted-only)
   set(DIRECT_ROUTE_DEFINITION WRONGGPU_DIRECT_ROUTE=0)
 endif()
-if(NOT WRONGGPU_PAYLOAD_DIR)
-  message(FATAL_ERROR "Set WRONGGPU_PAYLOAD_DIR to the release payload folder (see README.md).")
-endif()
 
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../converter converter)
 
@@ -104,6 +107,21 @@ if(NOT SOURCE_SIZE_RESULT EQUAL 0)
   message(FATAL_ERROR "A source file is at or over 256 KB (tools/check_source_size.py): split it.")
 endif()
 option(WRONGGPU_TESTING "Isolate registry and enable mock-only HIP candidate selection (never ship)" OFF)
+if(NOT WRONGGPU_PAYLOAD_DIR AND WRONGGPU_TESTING AND NOT WIN32)
+  # a Linux test build makes the stand-in payload and test map the Windows test build is given by hand: the harness's own
+  # (tests/run_installer_tests.py --prepare-only), the model case tests/run_launcher_tests.py expects
+  set(MOCK_PAYLOAD_WORK ${CMAKE_CURRENT_BINARY_DIR}/mock-payload)
+  execute_process(COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_installer_tests.py --work ${MOCK_PAYLOAD_WORK} --prepare-only
+                  RESULT_VARIABLE MOCK_PAYLOAD_RESULT OUTPUT_QUIET)
+  if(NOT MOCK_PAYLOAD_RESULT EQUAL 0)
+    message(FATAL_ERROR "tests/run_installer_tests.py --prepare-only failed")
+  endif()
+  set(WRONGGPU_PAYLOAD_DIR ${MOCK_PAYLOAD_WORK}/prepared/payload)
+  set(WRONGGPU_MAP ${MOCK_PAYLOAD_WORK}/prepared/test-map.json)
+endif()
+if(NOT WRONGGPU_PAYLOAD_DIR)
+  message(FATAL_ERROR "Set WRONGGPU_PAYLOAD_DIR to the release payload folder (see README.md).")
+endif()
 set(RR_PAYLOAD_DIR "${WRONGGPU_RR_DIR}")
 if(NOT RR_PAYLOAD_DIR AND WRONGGPU_TESTING)
   set(RR_PAYLOAD_DIR ${CMAKE_CURRENT_BINARY_DIR}/mock-rr)
@@ -134,41 +152,6 @@ else()
   set(MAP_F_FILE)
 endif()
 
-# wg_core: the installer's engine, split into modules (src/wg_core; build/launcher-design.md section 2). No globals:
-# a wg::Context is passed in. The wizard (and later the launcher) is built on top of it.
-add_library(wg_core STATIC
-  src/wg_core/util.cpp src/wg_core/pe.cpp src/wg_core/context.cpp src/wg_core/payload.cpp src/wg_core/record.cpp
-  src/wg_core/coexist.cpp src/wg_core/detect.cpp src/wg_core/settings.cpp src/wg_core/optiscaler.cpp src/wg_core/optiedition.cpp
-  src/wg_core/model.cpp src/wg_core/checks.cpp src/wg_core/install.cpp src/wg_core/logs.cpp
-  src/wg_core/profile.cpp src/wg_core/logtail.cpp src/wg_core/launcher.cpp
-  src/wg_core/fingerprint.cpp src/wg_core/optikeys.cpp src/wg_core/leftovers.cpp src/wg_core/rr.cpp src/wg_core/rrprep.cpp src/wg_core/gamerules.cpp
-  src/wg_core/rrconfig.cpp src/wg_core/convert_ignore.cpp)
-target_include_directories(wg_core PUBLIC src)
-target_compile_definitions(wg_core PUBLIC ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION})
-# (private: model-choice-tests compiles profile.cpp with the Model L choice on, against this library)
-target_compile_definitions(wg_core PRIVATE ${MODEL_L_DEFINITION} ${MODEL_K_DEFINITION})
-if(WRONGGPU_TESTING)
-  target_compile_definitions(wg_core PUBLIC WRONGGPU_TESTING)
-  if(NOT MSVC)
-    # record.cpp's #pragma comment(lib, "rstrtmgr.lib") is MSVC-only; clang and gcc for MinGW need the library named
-    target_link_libraries(wg_core PUBLIC rstrtmgr)
-  endif()
-endif()
-target_link_libraries(wg_core PUBLIC wgc_core advapi32 user32 shell32 ole32 uuid winhttp)
-if(MSVC)
-  target_compile_options(wg_core PRIVATE /Zi)
-  target_compile_definitions(wg_core PRIVATE NDEBUG)
-endif()
-
-# wg_ui: the widget kit (owner-drawn buttons, check boxes, progress bar, cards, palette, fonts) of the wizard and the
-# launcher (src/wg_ui). Windows' own GDI, GDI+, DWM and comctl32 only.
-add_library(wg_ui STATIC src/wg_ui/kit.cpp)
-target_link_libraries(wg_ui PUBLIC wg_core comctl32 gdi32 gdiplus dwmapi uxtheme user32 ole32)
-if(MSVC)
-  target_compile_options(wg_ui PRIVATE /Zi)
-  target_compile_definitions(wg_ui PRIVATE NDEBUG)
-endif()
-
 file(GLOB_RECURSE WRONGGPU_PAYLOAD_FILES CONFIGURE_DEPENDS "${WRONGGPU_PAYLOAD_DIR}/*")
 set(GEN ${CMAKE_CURRENT_BINARY_DIR}/gen)
 set(MANIFEST ${CMAKE_CURRENT_SOURCE_DIR}/src/setup.manifest)
@@ -189,13 +172,65 @@ else()
   set(TESTING_PAYLOAD_ARGS)
 endif()
 add_custom_command(
-  OUTPUT ${GEN}/payload_table.h ${GEN}/resources.rc ${GEN}/app.ico
+  OUTPUT ${GEN}/payload_table.h ${GEN}/resources.rc ${GEN}/resources.S ${GEN}/app.ico
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/make_payload.py
           --payload ${WRONGGPU_PAYLOAD_DIR} --map ${WRONGGPU_MAP} ${PRESET_K_MAP_ARGS} --version ${WRONGGPU_VERSION}
           --build-id=${WRONGGPU_BUILD_ID} --payload-name=${WRONGGPU_PAYLOAD_NAME}
           ${DIRECT_ROUTE_PAYLOAD_ARGS} ${RR_PAYLOAD_ARGS} ${MAP_F_ARGS} ${MAP_L_ARGS} ${MANIFEST_ARGS} ${TESTING_PAYLOAD_ARGS} --out ${GEN}
   DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/make_payload.py ${MANIFEST} ${WRONGGPU_MAP} ${PRESET_K_MAP_FILE} ${MAP_F_FILE} ${MAP_L_FILE} ${WRONGGPU_PAYLOAD_FILES} ${WRONGGPU_RR_FILES}
   COMMENT "Embedding the payload and the converter map")
+
+# The launcher's sources, for both targets: a new shared file goes in WRONGGPU_APP_SOURCES only, never in the two lists below it.
+set(WRONGGPU_APP_SOURCES src/app/main.cpp src/app/cli.cpp src/app/launcher_ui.cpp src/app/ui_art.cpp src/app/ui_widgets.cpp
+    src/app/ui_library.cpp src/app/ui_game.cpp src/app/ui_settings.cpp src/app/ui_uia.cpp src/app/ui_render.cpp src/app/ui_words.cpp
+    src/app/ui_dump.cpp src/app/ui_frame.cpp src/app/ui_play.cpp src/app/ui_rrprep.cpp src/app/ui_rrconfig.cpp src/app/ui_activate.cpp
+    src/app/ui_checks.cpp src/app/ui_appimage.cpp src/app/payload_embed.cpp)
+# Windows only: the GDI+ wizard and the Direct2D/DirectWrite drawing (Linux draws through ui_gfx_cairo.cpp, in wg_gfx_cairo).
+set(WRONGGPU_APP_SOURCES_WINDOWS src/app/wizard.cpp src/app/ui_gfx.cpp)
+# Linux only: the live-frame hook for the SDL window layer, and the JPEG decoder (libjpeg-turbo; Windows decodes art with WIC).
+set(WRONGGPU_APP_SOURCES_LINUX src/app/ui_live_hook_linux.cpp src/app/jpeg_decode_linux.cpp)
+
+# wg_core: the installer's engine, split into modules (src/wg_core; build/launcher-design.md section 2). No globals:
+# a wg::Context is passed in. The wizard (and later the launcher) is built on top of it.
+add_library(wg_core STATIC
+  src/wg_core/util.cpp src/wg_core/pe.cpp src/wg_core/context.cpp src/wg_core/payload.cpp src/wg_core/record.cpp
+  src/wg_core/coexist.cpp src/wg_core/detect.cpp src/wg_core/settings.cpp src/wg_core/optiscaler.cpp src/wg_core/optiedition.cpp
+  src/wg_core/model.cpp src/wg_core/checks.cpp src/wg_core/install.cpp src/wg_core/logs.cpp
+  src/wg_core/profile.cpp src/wg_core/logtail.cpp src/wg_core/launcher.cpp
+  src/wg_core/fingerprint.cpp src/wg_core/optikeys.cpp src/wg_core/leftovers.cpp src/wg_core/rr.cpp src/wg_core/rrprep.cpp src/wg_core/gamerules.cpp
+  src/wg_core/rrconfig.cpp src/wg_core/convert_ignore.cpp src/wg_core/appimage.cpp)
+target_include_directories(wg_core PUBLIC src)
+target_compile_definitions(wg_core PUBLIC ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION})
+# (private: model-choice-tests compiles profile.cpp with the Model L choice on, against this library)
+target_compile_definitions(wg_core PRIVATE ${MODEL_L_DEFINITION} ${MODEL_K_DEFINITION})
+if(WRONGGPU_TESTING)
+  target_compile_definitions(wg_core PUBLIC WRONGGPU_TESTING)
+endif()
+if(WIN32)
+  # rstrtmgr: record.cpp's Restart Manager check; its #pragma comment(lib) is read by MSVC only, MinGW needs it named here
+  target_link_libraries(wg_core PUBLIC wgc_core advapi32 user32 shell32 ole32 uuid winhttp rstrtmgr)
+else()
+  # Linux: <windows.h> and the other Windows headers the core includes resolve to src/platform/posix, which implements
+  # the calls the core makes on POSIX. A Windows call it lacks fails the Linux build at that line.
+  target_include_directories(wg_core BEFORE PUBLIC src/platform/posix)
+  target_sources(wg_core PRIVATE src/platform/posix/win32_posix.cpp src/platform/posix/win32_posix_process.cpp
+                 src/platform/posix/win32_posix_registry.cpp src/platform/posix/win32_posix_sync.cpp src/platform/posix/win32_posix_rm.cpp)
+  target_link_libraries(wg_core PUBLIC wgc_core)
+endif()
+if(MSVC)
+  target_compile_options(wg_core PRIVATE /Zi)
+  target_compile_definitions(wg_core PRIVATE NDEBUG)
+endif()
+
+if(WIN32)
+# wg_ui: the widget kit (owner-drawn buttons, check boxes, progress bar, cards, palette, fonts) of the wizard and the
+# launcher (src/wg_ui). Windows' own GDI, GDI+, DWM and comctl32 only.
+add_library(wg_ui STATIC src/wg_ui/kit.cpp)
+target_link_libraries(wg_ui PUBLIC wg_core comctl32 gdi32 gdiplus dwmapi uxtheme user32 ole32)
+if(MSVC)
+  target_compile_options(wg_ui PRIVATE /Zi)
+  target_compile_definitions(wg_ui PRIVATE NDEBUG)
+endif()
 
 # WrongGPU-Restore.exe: the per-game restorer (uninstall.exe in each game's wronggpu-setup folder): wg_core without the
 # payload, the converter data or the UI. WrongGPU.exe embeds it (resource 960) and writes it into every game it installs.
@@ -227,8 +262,7 @@ file(GENERATE OUTPUT ${GEN}/restore.rc CONTENT "960 RCDATA \"${GEN}/restorer.bin
 set_source_files_properties(${GEN}/restore.rc PROPERTIES OBJECT_DEPENDS ${GEN}/restorer.bin)
 
 # WrongGPU.exe: the launcher (window, command line, elevated worker) with the installer's /switches as aliases.
-add_executable(WrongGPU WIN32 src/app/main.cpp src/app/wizard.cpp src/app/cli.cpp src/app/launcher_ui.cpp src/app/ui_gfx.cpp src/app/ui_art.cpp
-               src/app/ui_widgets.cpp src/app/ui_library.cpp src/app/ui_game.cpp src/app/ui_settings.cpp src/app/ui_uia.cpp src/app/ui_render.cpp src/app/ui_words.cpp src/app/ui_dump.cpp src/app/ui_frame.cpp src/app/ui_play.cpp src/app/ui_rrprep.cpp src/app/ui_rrconfig.cpp src/app/ui_activate.cpp src/app/ui_checks.cpp src/app/payload_embed.cpp
+add_executable(WrongGPU WIN32 ${WRONGGPU_APP_SOURCES} ${WRONGGPU_APP_SOURCES_WINDOWS}
                ${GEN}/resources.rc ${GEN}/restore.rc ${GEN}/restorer.bin ${GEN}/payload_table.h ${MANIFEST_SOURCE})
 add_dependencies(WrongGPU WrongGPU-Restore)
 if(WRONGGPU_TESTING)
@@ -255,6 +289,9 @@ if(WRONGGPU_TESTING)
             -DF4=$<TARGET_FILE:wg-test-canary-dll>
             -DOUT=$<TARGET_FILE_DIR:WrongGPU>/wg-test-build.sha256 -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/sha256_list.cmake
     VERBATIM)
+endif()
+endif()
+if(WRONGGPU_TESTING)
   add_executable(wizard-policy-tests tests/wizard_policy_tests.cpp)
   target_compile_definitions(wizard-policy-tests PRIVATE ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION} ${MODEL_L_DEFINITION} ${MODEL_K_DEFINITION})
 endif()
@@ -302,9 +339,127 @@ add_test(NAME model-choice-k COMMAND model-choice-k-tests)
 add_test(NAME model-choice-k-only COMMAND model-choice-k-only-tests)
 add_test(NAME coexist-core COMMAND coexist-core-tests)
 add_test(NAME convert-ignore COMMAND convert-ignore-tests)
+if(NOT WIN32)
+  # the Linux layer's own checks: sharing, processes and the registry file go further than the core's tests do
+  add_executable(posix-layer-tests src/platform/posix/tests/posix_layer_tests.cpp)
+  target_link_libraries(posix-layer-tests PRIVATE wg_core)
+  add_test(NAME posix-layer COMMAND posix-layer-tests)
+  # keeps Linux from breaking silently: no wstring-built std::filesystem::path, no Direct2D/WIC/DWM/UIA in the shared UI
+  # (tools/ci/check_portable.py); the second test proves each rule fails on a planted violation
+  set(PORTABLE_CHECK ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/ci/check_portable.py)
+  if(EXISTS ${PORTABLE_CHECK})
+    add_test(NAME portable COMMAND ${Python3_EXECUTABLE} -I ${PORTABLE_CHECK} --root ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME portable-selftest COMMAND ${Python3_EXECUTABLE} -I ${PORTABLE_CHECK} --self-test)
+  endif()
+  # The launcher's drawing on Linux (Gfx on Cairo and Pango, fonts through fontconfig) and its smoke test (offscreen PNGs)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(WG_CAIRO REQUIRED IMPORTED_TARGET cairo pangocairo fontconfig)
+  # Steam's art is JPEG: libjpeg-turbo's libjpeg API (Ubuntu libjpeg-turbo8-dev), shared, bundled into the AppImage
+  pkg_check_modules(WG_JPEG REQUIRED IMPORTED_TARGET libjpeg)
+  # The window layer: the Win32 window calls the launcher's window makes, on SDL3 (static; -DCMAKE_PREFIX_PATH=<its install> or
+  # -DSDL3_DIR=<its lib/cmake/SDL3>). Only the drawing's live frame and the text fields reach into it; ui-dump and ui-render
+  # (a message-only window) never start SDL.
+  find_package(SDL3 CONFIG REQUIRED)
+  if(TARGET SDL3::SDL3-static)
+    set(WG_SDL3_TARGET SDL3::SDL3-static)
+  else()
+    set(WG_SDL3_TARGET SDL3::SDL3)
+  endif()
+  add_library(wg_window STATIC src/platform/posix/win32_window_sdl.cpp src/platform/posix/win32_window_edit.cpp
+              src/platform/posix/win32_window_misc.cpp)
+  target_link_libraries(wg_window PUBLIC wg_core ${WG_SDL3_TARGET})
+  add_library(wg_gfx_cairo STATIC src/app/ui_gfx_cairo.cpp)
+  target_link_libraries(wg_gfx_cairo PUBLIC wg_core wg_window PkgConfig::WG_CAIRO)
+  target_compile_definitions(wg_gfx_cairo PRIVATE WRONGGPU_FONT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts")
+  # the JPEG decoder: a synthetic JPEG made at test time (size, colours, damaged and missing files)
+  add_executable(jpeg-linux-tests tests/jpeg_linux_tests.cpp src/app/jpeg_decode_linux.cpp)
+  target_include_directories(jpeg-linux-tests PRIVATE src)
+  target_link_libraries(jpeg-linux-tests PRIVATE PkgConfig::WG_JPEG)
+  add_test(NAME jpeg-linux COMMAND jpeg-linux-tests)
+  add_executable(gfx-linux-smoke tests/gfx_linux_smoke.cpp)
+  target_link_libraries(gfx-linux-smoke PRIVATE wg_gfx_cairo)
+  add_test(NAME gfx-linux-smoke COMMAND gfx-linux-smoke ${CMAKE_CURRENT_BINARY_DIR}/gfx-smoke)
+  # The launcher itself on Linux: the same window code as Windows (src/app, the Win32 calls answered by src/platform/posix), without
+  # the old GDI+ wizard (wizard.cpp, wg_ui), the DWM title bar, tooltips and UI Automation, which Windows alone has.
+  add_executable(WrongGPU ${WRONGGPU_APP_SOURCES} ${WRONGGPU_APP_SOURCES_LINUX} ${GEN}/resources.S ${GEN}/payload_table.h)
+  target_include_directories(WrongGPU PRIVATE ${GEN})
+  # the assembler reads the payload through .incbin, which CMake's dependency scan does not see
+  set_source_files_properties(${GEN}/resources.S PROPERTIES OBJECT_DEPENDS "${GEN}/payload_table.h;${WRONGGPU_PAYLOAD_FILES};${WRONGGPU_RR_FILES}")
+  target_compile_definitions(WrongGPU PRIVATE ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION} UNICODE _UNICODE
+                             WRONGGPU_VERSION_TEXT="${WRONGGPU_VERSION}" WRONGGPU_BUILD_ID_TEXT="${WRONGGPU_BUILD_ID}"
+                             WRONGGPU_FONT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts")
+  target_link_libraries(WrongGPU PRIVATE wg_gfx_cairo wg_window wg_core PkgConfig::WG_JPEG)
+  # an installed launcher finds its fonts at ../share/wronggpu/assets/fonts from its binary (ui_gfx_cairo.cpp FontDir)
+  if(WRONGGPU_TESTING)
+    # A WRONGGPU_TESTING build's identity on Linux, which the launcher suite checks before it runs a program
+    # (tests/launcher_build_facts.py), as the resource and PE checksum on Windows: the section .wg_testing_id and the file's
+    # SHA-256 written into it after the link (tools/elf_testing_identity.py). The suite's negative controls: programs that are
+    # not testing builds (no identity), one with the hook strings, and a load marker; then the build list of their SHA-256 and
+    # this launcher's, written last.
+    target_sources(WrongGPU PRIVATE src/platform/posix/testing_identity_linux.cpp)
+    add_executable(wg-test-canary tests/canary.cpp)
+    add_executable(wg-test-canary-strings tests/canary.cpp)
+    target_compile_definitions(wg-test-canary-strings PRIVATE WG_CANARY_HOOK_STRINGS)
+    target_link_libraries(wg-test-canary PRIVATE wg_core)
+    target_link_libraries(wg-test-canary-strings PRIVATE wg_core)
+    add_library(wg-test-canary-dll SHARED tests/canary_dll_linux.cpp)
+    set_target_properties(wg-test-canary-dll PROPERTIES PREFIX "" SUFFIX ".dll")
+    add_dependencies(WrongGPU wg-test-canary wg-test-canary-strings wg-test-canary-dll)
+    add_custom_command(TARGET WrongGPU POST_BUILD
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/elf_testing_identity.py $<TARGET_FILE:WrongGPU>
+      COMMAND ${CMAKE_COMMAND} -DF1=$<TARGET_FILE:WrongGPU> -DF2=$<TARGET_FILE:wg-test-canary> -DF3=$<TARGET_FILE:wg-test-canary-strings>
+              -DF4=$<TARGET_FILE:wg-test-canary-dll>
+              -DOUT=$<TARGET_FILE_DIR:WrongGPU>/wg-test-build.sha256 -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/sha256_list.cmake
+      VERBATIM)
+    # the window's pages (ui-dump, ui-render) and the live window under SDL's offscreen driver with scripted events (a click, a
+    # scroll, typing, WM_CLOSE): each on a home, XDG folders and registry file of its own
+    add_test(NAME linux-ui COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_linux_ui_tests.py
+             --exe $<TARGET_FILE:WrongGPU> --jpeg-tool $<TARGET_FILE:jpeg-linux-tests>
+             --work ${CMAKE_CURRENT_BINARY_DIR}/linux-ui-tests)
+    set_tests_properties(linux-ui PROPERTIES TIMEOUT 900)
+    add_test(NAME linux-ui-wording COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_linux_ui_wording_tests.py
+             --exe $<TARGET_FILE:WrongGPU> --work ${CMAKE_CURRENT_BINARY_DIR}/linux-ui-wording-tests)
+    set_tests_properties(linux-ui-wording PROPERTIES TIMEOUT 600)
+    add_test(NAME linux-ui-codexfix COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_linux_ui_codexfix_tests.py
+             --exe $<TARGET_FILE:WrongGPU> --work ${CMAKE_CURRENT_BINARY_DIR}/linux-ui-codexfix-tests)
+    set_tests_properties(linux-ui-codexfix PROPERTIES TIMEOUT 900)
+    if(MOCK_PAYLOAD_WORK AND NOT WRONGGPU_PRESET_K)
+      # the launcher's verbs suite (tests/run_launcher_tests.py) against this binary: it needs the test map and stand-in payload
+      # the build embeds only when it made them itself; its checks that only mean something on Windows say so and are skipped
+      add_test(NAME launcher-native COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_launcher_tests.py
+               --native-linux $<TARGET_FILE:WrongGPU> --work ${CMAKE_CURRENT_BINARY_DIR}/launcher-native-tests)
+      set_tests_properties(launcher-native PROPERTIES TIMEOUT 1800)
+    elseif(MOCK_PAYLOAD_WORK)
+      # the suite's checks are written for a Model M only build (CI's launcher build): with Preset K, every OptiScaler install
+      # leaves the plugin's wronggpu-asi.ini after an uninstall (install.cpp SeedAsiSelection), which they do not expect
+      message(STATUS "launcher-native: not added (the launcher suite needs -DWRONGGPU_PRESET_K=OFF)")
+    endif()
+    # the window layer's message handling with SDL events pushed by the test (display scale change, a batch of keys, text in an edit,
+    # WM_QUIT order, posts from a thread, capture, PeekMessageW's filters); SDL's offscreen driver, no window opens
+    add_executable(window-linux-tests tests/window_linux_tests.cpp)
+    target_link_libraries(window-linux-tests PRIVATE wg_window)
+    add_test(NAME window-linux COMMAND window-linux-tests)
+    set_tests_properties(window-linux PROPERTIES TIMEOUT 120 ENVIRONMENT "SDL_VIDEO_DRIVER=offscreen;SDL_AUDIODRIVER=dummy")
+  endif()
+  install(TARGETS WrongGPU RUNTIME DESTINATION bin)
+  install(DIRECTORY assets/fonts DESTINATION share/wronggpu/assets)
+  # the notices the bundled libraries' licences ask the AppImage to carry (libjpeg-turbo: THIRD-PARTY-NOTICES section 4)
+  install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../../THIRD-PARTY-NOTICES DESTINATION share/doc/wronggpu)
+  # the AppImage (build-appimage.sh) takes everything it ships from these install rules: the menu entry and the app's own icon
+  # (the biggest frame of assets/wronggpu.ico)
+  file(MAKE_DIRECTORY ${GEN})
+  execute_process(COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/ico_to_png.py ${CMAKE_CURRENT_SOURCE_DIR}/assets/wronggpu.ico
+                  ${GEN}/wronggpu.png RESULT_VARIABLE ICON_PNG_RESULT OUTPUT_QUIET)
+  if(NOT ICON_PNG_RESULT EQUAL 0)
+    message(FATAL_ERROR "tools/ico_to_png.py failed")
+  endif()
+  install(FILES assets/wronggpu.desktop DESTINATION share/applications)
+  install(FILES ${GEN}/wronggpu.png DESTINATION share/icons/hicolor/256x256/apps)
+endif()
 if(WRONGGPU_TESTING)
   add_test(NAME wizard-policy COMMAND wizard-policy-tests)
 endif()
+if(WIN32)
 target_include_directories(WrongGPU PRIVATE ${GEN})
 target_compile_definitions(WrongGPU PRIVATE ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION} ${MODEL_L_DEFINITION} ${MODEL_K_DEFINITION})
 target_link_libraries(WrongGPU PRIVATE wg_ui wg_core wgc_core comctl32 shell32 ole32 oleaut32 uuid advapi32 user32 gdi32 gdiplus dwmapi uxtheme d2d1 d3d11 dxgi dwrite windowscodecs uiautomationcore)
@@ -315,4 +470,5 @@ if(MSVC)
   target_link_options(WrongGPU PRIVATE /INCREMENTAL:NO /MANIFESTUAC:NO /DEBUG:FULL)
 else()
   target_link_options(WrongGPU PRIVATE -municode -static)
+endif()
 endif()

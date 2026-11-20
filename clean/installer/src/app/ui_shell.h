@@ -12,11 +12,13 @@
 #pragma once
 #include "app/launcher_app.h"
 
+#ifdef _WIN32
 #include <d2d1_1.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <dwrite_1.h>
 #include <wincodec.h>
+#endif
 
 #include <functional>
 #include <memory>
@@ -124,6 +126,9 @@ struct TS {  // text style
     bool underline = false;
     bool trim = false;     // wrapped text: an ellipsis on the last line that fits the box
 };
+#ifndef _WIN32
+struct GfxCairo;  // the Linux drawing state (ui_gfx_cairo.cpp)
+#endif
 class Gfx {
 public:
     ~Gfx();
@@ -189,7 +194,11 @@ public:
     // material. A dry pass returns true and draws nothing.
     bool Backdrop(const Rc& r, float rad, float blur, float opacity = 1);
     void SetOffset(float dx, float dy);  // content scroll: everything drawn after this is moved
+    // Everything drawn until PopRotate is turned by `degrees` (clockwise) round (cx, cy): the Library's busy glyph.
+    void PushRotate(float cx, float cy, float degrees);
+    void PopRotate();
     float OffsetY() const { return oy_; }  // the vertical offset SetOffset set (the Library's scroll anchoring moves it)
+#ifdef _WIN32
     ID2D1RenderTarget* rt = nullptr;
     IDWriteFactory* dw = nullptr;
     IWICImagingFactory* wic = nullptr;
@@ -254,9 +263,64 @@ private:
     ID2D1PathGeometry* RoundPath(const Rc& r, float tl, float tr, float br, float bl);
     std::vector<ID2D1Layer*> layers_;
     int clips_ = 0;  // axis-aligned clips open (PushClip)
+    std::vector<D2D1_MATRIX_3X2_F> rotations_;  // the transforms PushRotate replaced
     float ox_ = 0, oy_ = 0;
     void PushMask(const Rc& r, float rad, float opacity);  // a rounded mask layer at `opacity` (popped with PopRoundClip)
+#else
+    // Cairo and Pango (ui_gfx_cairo.cpp); the state lives behind one pointer so this header needs neither library
+    bool iconFont = true;
+    bool rt = false;  // a drawing target exists (the Windows member of this name is Direct2D's render target: the window tests it)
+
+private:
+    GfxCairo* im_ = nullptr;
+    float ox_ = 0, oy_ = 0;
+    int rotationsOpen_ = 0;  // PushRotate's not yet popped
+    void Trim();
+#endif
 };
+
+// Icons (Segoe Fluent Icons / Segoe MDL2 Assets code points)
+namespace ic {  // one per line
+const wchar_t grid = 0xF0E2;
+const wchar_t gear = 0xE713;
+const wchar_t refresh = 0xE72C;
+const wchar_t add = 0xE710;
+const wchar_t download = 0xE896;
+const wchar_t search = 0xE721;
+const wchar_t back = 0xE76B;
+const wchar_t play = 0xF5B0;
+const wchar_t more = 0xE712;
+const wchar_t warn = 0xE7BA;
+const wchar_t folder = 0xE8B7;
+const wchar_t cube = 0xE7B8;
+const wchar_t panel = 0xEA86;
+const wchar_t monitor = 0xE7F4;
+const wchar_t down = 0xE70D;
+const wchar_t check = 0xE73E;
+const wchar_t close = 0xE711;
+const wchar_t info = 0xE946;
+const wchar_t doc = 0xE8A5;
+const wchar_t zip = 0xF012;
+const wchar_t wrench = 0xE90F;
+const wchar_t undo = 0xE7A7;
+const wchar_t trash = 0xE74D;
+const wchar_t broom = 0xEA99;
+const wchar_t upload = 0xE898;
+const wchar_t link = 0xE71B;
+const wchar_t minus = 0xE738;
+const wchar_t shield = 0xEA18;
+const wchar_t question = 0xE897;
+const wchar_t chip = 0xE964;
+const wchar_t sync = 0xE895;
+const wchar_t key = 0xE8D7;
+const wchar_t playLine = 0xE768;
+const wchar_t up = 0xE70E;
+const wchar_t arrowUp = 0xE74A;  // an update ready (UpdateMark)
+const wchar_t palette = 0xE790;
+const wchar_t chevron = 0xE76C;
+const wchar_t external = 0xE8A7;
+const wchar_t processor = 0xE950;
+}
 
 // ---- art (ui_art.cpp) ----------------------------------------------------------------------------------------------------
 // hero: the wide library_hero.jpg at a tile's size and logo: the game's logo.png (alpha) at the banner's (the Library's tiles
@@ -367,12 +431,14 @@ enum : int {
     ID_G_TITLE, ID_G_DIRTEXT, ID_G_EXETEXT,  // text for UI Automation (not focusable): the game's whole name, its folder, its exe
     ID_G_COVER,  // the game page's cover: not a hit, the name of its upscale wipe (UpscaleWipe)
     ID_G_STATUS, ID_G_PROGRESS, ID_G_UNSAVED,  // text for UI Automation: the header's status (or step), its progress, the capsule's words
+    ID_G_WINFOLDER_COPY,  // Linux: a game that is not a Steam game's "windows-folder" command (Copy); must stay below ID_G_RRON
     // Ray Reconstruction (rr.h): its switch, the data's Convert, Repair (an install without the RR files); its quality's
     // segments + 0 Exact, 1 Accurate, 2 Fast (Exact is drawn only with Settings' Exact mode, or while the game is set to it)
     ID_G_RRON = 3086, ID_G_RRCONVERT, ID_G_RRREPAIR, ID_G_RRPREP, ID_G_RRMODE0 = 3090,  // ID_G_RRPREP: Prepare (rrprep.h)
     // Borderlands 4 / Hogwarts Legacy's Engine.ini setting (UI review #2): its segments (+ 0 WrongGPU, 1 Myself) and the steps'
     // Open folder, Copy and Check again; Fix it again (WrongGPU's line gone or the file no longer read-only: r2 #6)
     ID_G_RRCFG0 = 3093, ID_G_RRCFG_OPEN = 3095, ID_G_RRCFG_COPY, ID_G_RRCFG_CHECK, ID_G_RRCFG_FIX,
+    ID_G_PROTONOPT_COPY,  // Linux: OptiScaler section's Steam launch option (Copy)
     ID_G_OPTI0 = 3100,  // + editable OptiScaler row (x10: + option)
     ID_G_OPTI_END = ID_G_OPTI0 + 10 * 64,  // room for 64 rows; the Settings ids start above it
     ID_S_MODELFILE = 4000, ID_S_RECONVERT, ID_S_OPTIFILE, ID_S_OPTIDIR, ID_S_ADDFOLDER, ID_S_CLEARFOLDERS, ID_S_PLAY, ID_S_UPDATE,
@@ -400,6 +466,7 @@ enum : int {
     M_REMOVEGAME,  // a game added by hand taken out of the Library (its page's More)
     M_FILTER0 = 200, M_OPTI0 = 300,
 };
+static_assert(ID_G_WINFOLDER_COPY < ID_G_RRON, "the Windows-folder Copy id sits in the free number below the Ray Reconstruction ids");
 constexpr int kTileSpan = ID_TILEQA - ID_TILE;  // the Library draws at most this many games (ui_library.cpp)
 constexpr int kMaxFolderRows = 256;             // Settings lists at most this many added game folders, each with its Remove
 
@@ -810,48 +877,6 @@ bool PageEntering();   // the page is making its entrance (the native text field
 bool PageUnderSheet();
 constexpr float kPageMs = 180, kMenuMs = 140, kDialogMs = 180, kToastMs = 220, kToastOutMs = 260, kFirstMs = 240;
 constexpr float kThumbHoldMs = 900, kThumbFadeMs = 300;  // the overlay scroll thumb: shown this long after the page last moved, then fades
-// Icons (Segoe Fluent Icons / Segoe MDL2 Assets code points)
-namespace ic {  // one per line
-const wchar_t grid = 0xF0E2;
-const wchar_t gear = 0xE713;
-const wchar_t refresh = 0xE72C;
-const wchar_t add = 0xE710;
-const wchar_t download = 0xE896;
-const wchar_t search = 0xE721;
-const wchar_t back = 0xE76B;
-const wchar_t play = 0xF5B0;
-const wchar_t more = 0xE712;
-const wchar_t warn = 0xE7BA;
-const wchar_t folder = 0xE8B7;
-const wchar_t cube = 0xE7B8;
-const wchar_t panel = 0xEA86;
-const wchar_t monitor = 0xE7F4;
-const wchar_t down = 0xE70D;
-const wchar_t check = 0xE73E;
-const wchar_t close = 0xE711;
-const wchar_t info = 0xE946;
-const wchar_t doc = 0xE8A5;
-const wchar_t zip = 0xF012;
-const wchar_t wrench = 0xE90F;
-const wchar_t undo = 0xE7A7;
-const wchar_t trash = 0xE74D;
-const wchar_t broom = 0xEA99;
-const wchar_t upload = 0xE898;
-const wchar_t link = 0xE71B;
-const wchar_t minus = 0xE738;
-const wchar_t shield = 0xEA18;
-const wchar_t question = 0xE897;
-const wchar_t chip = 0xE964;
-const wchar_t sync = 0xE895;
-const wchar_t key = 0xE8D7;
-const wchar_t playLine = 0xE768;
-const wchar_t up = 0xE70E;
-const wchar_t arrowUp = 0xE74A;  // an update ready (UpdateMark)
-const wchar_t palette = 0xE790;
-const wchar_t chevron = 0xE76C;
-const wchar_t external = 0xE8A7;
-const wchar_t processor = 0xE950;
-}
 
 // ---- pages (ui_library.cpp, ui_game.cpp, ui_settings.cpp) ---------------------------------------------------------------
 void PaintLibrary(Gfx& gx, const Rc& area);
@@ -922,6 +947,11 @@ void RevealId(int id);           // a widget or words brought into view without 
 // danger: the action destroys something (Uninstall, Clean up, Reset, Remove): its button is red and never the default
 bool Confirm(const wstring& text, int icon = 0, const wstring& yes = L"Yes", const wstring& no = L"No", bool danger = false);
 void Inform(const wstring& text, int icon = 2);
+// ui_appimage.cpp: Settings' row of the native Linux launcher's own removal (own: this copy can remove its AppImage; else why not)
+wstring AppImageSettingsWords(bool own, const wstring& file, const wstring& data, const wstring& why, bool keepsList, bool gamesHaveIt);
+bool RunsFromOwnAppImage(wstring* file, wstring* why, wstring* host = nullptr);  // OwnAppImage, asked once (host: the file as a shell spells it)
+bool IgnoreListThere(const wstring& dataDir);           // the data folder has the player's ignore-files.txt as a plain file (an uninstall keeps it)
+bool GamesBlockAppImageUninstall();                     // a game still has WrongGPU by the uninstall's own look (registered and managed games)
 // A note that arrives on its own (a worker's result): shown at once, or once the dialog or file dialog that is open closes, so
 // it never answers a question the player has open.
 void InformLater(const wstring& text, int icon = 2);

@@ -140,15 +140,30 @@ int RunLauncherUiDump(const wstring& outFile, const wstring& shotDir, bool noSca
         j.End();
     };
     // first run (synchronously: the worker thread's result is waited for with a message loop)
-    v.first.installOffer = !LauncherInstalled() && !gl.paths.portable;
+    v.first.installOffer = !LauncherInstalled() && !gl.paths.portable && !NativeLinux();
     v.first.choice = v.first.installOffer ? 1 : 0;
     StartFirstRun();
     MSG m;
     while (firstRunBusy && GetMessageW(&m, nullptr, 0, 0)) { TranslateMessage(&m); DispatchMessageW(&m); }
     ArtLoadNow([] { std::vector<wstring> ids; for (auto& e : v.games) ids.push_back(e.appid); return ids; }());
     dumpPage("first_run", L"Welcome to WrongGPU", L"first-run.png");
+    j.Key("first_run_lines").Arr();  // every check line the sheet has (behind Show details too)
+    for (auto& l : v.first.lines) j.Str(l.second);
+    j.End();
+    j.B("first_run_install_offer", v.first.installOffer);
+    if (NativeLinux()) {  // the removal's words for a made-up AppImage, with and without the ignore list and a game that has WrongGPU (the tests read them)
+        const wstring file = L"/home/player/Apps/WrongGPU-0.6.5-x86_64.AppImage", data = L"/home/player/.local/share/WrongGPU";
+        j.Key("appimage_words").Arr();
+        for (int keeps = 0; keeps < 2; ++keeps)
+            for (int games = 0; games < 2; ++games) j.Str(lui::AppImageSettingsWords(true, file, data, L"", keeps != 0, games != 0));
+        j.End();
+        j.Key("appimage_uninstall_text").Arr().Str(AppImageUninstallText(file, data, false)).Str(AppImageUninstallText(file, data, true)).End();
+    }
     wstring firstFocus;  // what has the keyboard once the checks are done (Continue)
     for (auto& h : v.hits) if (h.id == v.focus) firstFocus = h.name;
+    if (!shotDir.empty() && NativeLinux()) {  // the sheet with Show details open (every check line), picture only
+        v.first.checksOpen = true; RenderFrame(kDefaultW, 760, 1, shot(L"first-run-details.png")); v.first.checksOpen = false;
+    }
     v.first.open = false;  // as FinishFirstRun leaves it (without saving the settings or the release check)
     v.page = P_LIBRARY;
     v.focus = 0;
@@ -533,6 +548,18 @@ int RunLauncherUiDump(const wstring& outFile, const wstring& shotDir, bool noSca
         j.End();
     }
     j.End();
+    if (NativeLinux() && !v.games.empty()) {  // the card's Copy button as a click runs it: the command it puts on the clipboard, and the toast
+        ShowEntry(v.games[0], false);
+        Activate(ID_G_WINFOLDER_COPY);
+        wstring clip;
+        if (OpenClipboard(nullptr)) {
+            if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) { if (const wchar_t* t = (const wchar_t*)GlobalLock(h)) { clip = t; GlobalUnlock(h); } }
+            CloseClipboard();
+        }
+        j.Key("windows_folder_copy").Obj().S("exe", v.cur.exe).S("clipboard", clip).S("toast", v.toast.text).End();
+        wstring question;  // the live uninstall dialog's text, built by the function the dialog calls (the ignore list is looked for in the real folder)
+        if (AppImageUninstallQuestion(question)) j.Key("appimage_question").Str(question);
+    }
     // the first game with WrongGPU, scrolled down with an unsaved change (all its OptiScaler settings shown), a frame
     // every 40 DIPs of the scroll range: the page's controls that take a click and its text fields that show (none under
     // the pinned plate or the unsaved bar); then Tab to a control hidden under the plate (it is scrolled out from under it)
@@ -925,6 +952,7 @@ int RunLauncherUiDump(const wstring& outFile, const wstring& shotDir, bool noSca
     v.page = P_SETTINGS;
     v.urlText = gl.global.updateUrl;
     dumpPage("settings", L"Settings", L"settings.png");
+    if (!shotDir.empty()) RenderFrame(kDefaultW, std::max(760.f, v.contentH[P_SETTINGS] + 20), 1, Join(shotDir, L"settings-tall.png"));  // the whole page in one picture
     {  // Settings' section index: one Tab stop (the section in view); Down goes to the next entry, Up comes back
         int stops = 0, stop = 0;
         RenderFrame(kDefaultW, 760, 1, L"");

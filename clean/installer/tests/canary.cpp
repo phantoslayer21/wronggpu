@@ -24,3 +24,7 @@ int wmain() {
     return 0;
 #endif
 }
+
+#ifndef _WIN32
+int main() { return wmain(); }  // Linux: wmain through the POSIX layer, as the launcher's own main (src/app/main.cpp)
+#endif

@@ -19,6 +19,7 @@ extern RECT normalRect;     // its last normal place (screen pixels)
 extern HICON bigIcon, smallIcon;
 extern Gfx gfx;
 
+#ifdef _WIN32
 static COLORREF TitleRgb(Col c) { return RGB((int)std::lround(c.r * 255), (int)std::lround(c.g * 255), (int)std::lround(c.b * 255)); }
 // The title bar in the theme's colours (Windows 11: caption, border and text colours; Windows 10: light or dark).
 void ThemeTitleBar() {
@@ -119,6 +120,28 @@ bool SavedPlacement(RECT& r, HMONITOR& mon, UINT& mdpi, bool& maxed) {
     maxed = mx != 0;
     return true;
 }
+#else
+// Linux: no DWM title bar (the toolbar is the title bar), the icon is the mark drawn at 64 px, and the window's place between runs
+// is not kept: the window opens centred at its default size (a Wayland compositor decides where a window goes anyway).
+void ThemeTitleBar() {}
+void SetWindowIcons() {
+    if (!v.hwnd || !v.live) return;
+    Gfx g2;
+    std::vector<uint8_t> bgra;
+    UINT w = 0, h = 0;
+    if (!g2.Init() || !g2.BeginOffscreen(24, 24, 64 / 24.f)) return;
+    g2.Clear(Col{0, 0, 0, 0});
+    AppMark(g2, Rc{0, 0, 24, 24});
+    g2.EndFrame();
+    if (!g2.Pixels(bgra, w, h)) return;
+    for (size_t i = 0; i + 3 < bgra.size(); i += 4)  // icons take straight alpha
+        if (const uint8_t a = bgra[i + 3]; a && a < 255)
+            for (int c = 0; c < 3; ++c) bgra[i + c] = (uint8_t)std::min(255, bgra[i + c] * 255 / a);
+    wgwin::SetIcon(v.hwnd, bgra.data(), (int)w, (int)h);
+}
+void SavePlacement(HWND) {}
+bool SavedPlacement(RECT&, HMONITOR&, UINT&, bool&) { return false; }
+#endif
 
 // ---- offscreen frames (ui-dump, ui-render) ------------------------------------------------------------------------------------
 bool RenderFrame(float w, float h, float scale, const wstring& png) {
@@ -141,6 +164,17 @@ bool RenderFrame(float w, float h, float scale, const wstring& png) {
     if (!gfx.BeginOffscreen((int)w, (int)h, scale)) return false;
     PaintAll(gfx);
     gfx.EndFrame();
+#ifndef _WIN32
+    // Linux tests read what the frame says and offers, a line per control (id, role, name), next to its PNG
+    if (FILE* f = fopen((FsPath(png).string() + ".texts").c_str(), "w")) {
+        for (const Hit& hit : v.hits) {
+            wstring name = hit.name;
+            for (wchar_t& c : name) if (c == L'\n' || c == L'\r') c = L' ';
+            fprintf(f, "%d\t%d\t%s\n", hit.id, (int)hit.role, ToUtf8(name).c_str());
+        }
+        fclose(f);
+    }
+#endif
     return gfx.SavePng(png);
 }
 
@@ -148,6 +182,7 @@ bool RenderFrame(float w, float h, float scale, const wstring& png) {
 // fill, as FieldBox draws it offscreen, during a page's entrance and under the toolbar's edge), in the field's own font
 // where its typed text starts. The EDIT's cue banner (EM_SETCUEBANNER) ignores WM_CTLCOLOREDIT and draws in a fixed system
 // grey: 2.2:1 on the dark fill, and the placeholder changed colour each time the native field took over from the painted one.
+#ifdef _WIN32
 COLORREF Ref(Col c);  // launcher_ui.cpp
 LRESULT EditCueProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     const wstring* cue = nullptr;
@@ -179,8 +214,22 @@ LRESULT EditCueProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     if (edits && wasEmpty != (GetWindowTextLengthW(h) == 0)) InvalidateRect(h, nullptr, TRUE);
     return r;
 }
+#else
+// Linux: the text field is painted with the page (ui_gfx_cairo.cpp), which takes its placeholder from the field: set here, in the
+// field's own paint message, as the Windows version paints it there.
+LRESULT EditCueProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+    if (m == WM_PAINT && !wp) {
+        const wstring* cue = nullptr;
+        for (auto* e : {&v.edSearch, &v.edUrl}) if (e->h == h) cue = &e->cue;
+        for (auto& e : v.edOpti) if (e.h == h) cue = &e.cue;
+        SendMessageW(h, EM_SETCUEBANNER, FALSE, (LPARAM)(cue ? cue->c_str() : L""));
+    }
+    return DefSubclassProc(h, m, wp, lp);
+}
+#endif
 
 int Px(float dip);  // DIPs to the window's pixels (launcher_ui.cpp)
+#ifdef _WIN32
 // Hover tooltips (v.tips: an icon-only button, a name cut off with an ellipsis): one comctl32 tooltip whose tool is the hit
 // under the pointer; nothing while a menu, a dialog or the first run is open.
 HWND tipWnd = nullptr;
@@ -286,6 +335,11 @@ void UpdateHoverTip() {
     SendMessageW(tipWnd, TTM_UPDATETIPTEXTW, 0, (LPARAM)&ti);
     SendMessageW(tipWnd, TTM_ACTIVATE, want ? TRUE : FALSE, 0);
 }
+#else
+// Linux: no tooltips yet (the Hit's words are in v.tips for them).
+HWND tipWnd = nullptr;
+void UpdateTip() {}
+#endif
 
 // ---- the frames while something moves, and the smooth scroll (launcher_ui.cpp draws them: WM_PAINT) ------------------------
 // The overlay scroll thumb is fading out (it is drawn on every frame until it is gone)
@@ -371,6 +425,7 @@ void ScrollNow(float dy) {
 extern int modalDepth;  // launcher_ui.cpp: the nested modal loops open (a note waits for them)
 void ModalClosed();
 void UninstallIfWaiting();
+#ifdef _WIN32
 // The file and folder pickers (split from launcher_ui.cpp: source size)
 bool Browse(int mode, wstring& out) {  // 0 exe, 1 folder, 2 model dll, 3 OptiScaler archive, 4 OptiScaler folder, 5 RR model dll
     if (!v.live) return false;
@@ -411,6 +466,10 @@ bool Browse(int mode, wstring& out) {  // 0 exe, 1 folder, 2 model dll, 3 OptiSc
     d->Release();
     return ok;
 }
+#else
+// Linux: no file picker yet (a desktop portal's is a later step): nothing is chosen.
+bool Browse(int, wstring&) { return false; }
+#endif
 
 }  // namespace win
 }  // namespace wg::app
