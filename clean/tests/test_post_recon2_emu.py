@@ -102,5 +102,5 @@ class TestRecon2Emu(EmuTest):
                 plan["decoders"]["out"] = lambda raw, shape: np.frombuffer(raw, np.float16).reshape(
                     shape[0], shape[1], 4).astype(np.float32)
                 got = PS.run_plan(self.runner, plan)["out"]
-                np.testing.assert_array_equal(got[..., :3], base.astype(np.float16).astype(np.float32))
+                np.testing.assert_array_equal(got[..., :3], np.clip(base, -65504.0, 65504.0).astype(np.float16).astype(np.float32))
                 np.testing.assert_array_equal(got[..., 3], 1.0)

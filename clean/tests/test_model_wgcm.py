@@ -24,8 +24,8 @@ from clean.tests.test_runtime import runtime_dir
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CONV = os.path.join(ROOT, "clean", "converter")
-CONV_SOURCES = ["sha256.cpp", "json.cpp", "numeric.cpp", "map.cpp", "locate.cpp", "convert.cpp", "output.cpp",
-                "pe_version.cpp", "main.cpp"]
+CONV_SOURCES = ["sha256.cpp", "json.cpp", "numeric.cpp", "map.cpp", "locate.cpp", "lz4block.cpp", "convert.cpp",
+                "convert5.cpp", "ops5.cpp", "output.cpp", "pe_version.cpp", "api.cpp", "main.cpp"]
 _CASE = None
 
 

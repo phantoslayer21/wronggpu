@@ -52,7 +52,7 @@ class TestOutEmu(EmuTest):
         e = 1.7
         got = PS.run_plan(self.runner, PS.prepare_decode(self.runner.dev, {"display": disp, "exposure": e}))["out"]
         q = np.clip(disp.astype(np.float64), 1e-4, 3.0)
-        want = ((10.0 ** (q / 0.36) - 1.0) / 100.0 / e).astype(np.float16)
+        want = np.clip((10.0 ** (q / 0.36) - 1.0) / 100.0 / e, -65504.0, 65504.0).astype(np.float16)
         self.assertLessEqual(int(PE.f16_steps(got, want.astype(np.float32)).max()), 1)
 
     def test_against_reference(self):

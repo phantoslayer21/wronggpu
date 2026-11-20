@@ -292,7 +292,7 @@ class RuntimeFusedPostTest(EmuTest):
     def test_fused_post_whole_frame(self):
         """post_fused3_h6 (one launch for reconstruction + filter, 6-byte history) gives exactly the frames of the
         default post_recon2_r + post_filter_c1_s4 path (output, history values, reduced history), also with pre-exposure
-        != 1; post_fused3_h6_o16 gives the same output rounded to FP16; the 4-byte history variant runs; RGBA16F output
+        != 1; post_fused3_h6_o16 gives the same output in saturating FP16 storage; the 4-byte history variant runs; RGBA16F output
         is refused with pre-exposure != 1."""
         mdir = model_dir(14)
         size = dict(max_size=(20, 18), out_size=(30, 27))
@@ -314,7 +314,7 @@ class RuntimeFusedPostTest(EmuTest):
         o16 = make_pipeline(mdir, kernels={"post": "post_fused3_h6_o16"}, **size)
         self.assertEqual(o16.kernels()["out"], "rgba16f")
         for f, w in zip(frs1, want1):
-            np.testing.assert_array_equal(o16.frame(f)["out"], w.astype(np.float16).astype(np.float32))
+            np.testing.assert_array_equal(o16.frame(f)["out"], np.clip(w, -65504.0, 65504.0).astype(np.float16).astype(np.float32))
         # two-kernel path with fewer bytes (clean/post 6834679): 6-byte history (exact), RGBA16F filter output
         r6 = make_pipeline(mdir, kernels={"post": "post_recon2_r_h6"}, **size)
         self.assertEqual((r6.kernels()["history_bytes"], r6.kernels()["post_wave"]), ("6", "32"))  # emulator: wave32
@@ -325,7 +325,7 @@ class RuntimeFusedPostTest(EmuTest):
         f16 = make_pipeline(mdir, kernels={"filter": "post_filter_c1_s4_o16"}, **size)
         self.assertEqual(f16.kernels()["out"], "rgba16f")
         for f, w in zip(frs1, want1):
-            np.testing.assert_array_equal(f16.frame(f)["out"], w.astype(np.float16).astype(np.float32))
+            np.testing.assert_array_equal(f16.frame(f)["out"], np.clip(w, -65504.0, 65504.0).astype(np.float16).astype(np.float32))
         h4 = make_pipeline(mdir, kernels={"post": "post_fused3_h4_o16"}, **size)
         self.assertEqual(h4.kernels()["history_bytes"], "4")
         h4.frame(frs1[0])   # runs (an approximation: its values are not checked here)
@@ -694,7 +694,7 @@ class ReconOutputTest(RuntimeTest):
     def test_direct_fp16_output(self):
         """D = O with pi = 1 and the runtime's own output buffer: post_recon2_r_out writes the output (RGBA16F) in one
         launch; equal to the post_recon2 + post_copy path (3 x f32, used with pi != 1 or a 3 x f32 caller buffer)
-        rounded to FP16, and the full history is the same."""
+        in saturating FP16 storage (finite values beyond +-65504 clamp, no infinity), and the full history is the same."""
         rng = np.random.default_rng(13)
         frs = [dict(frame_inputs(rng, 20, 18), pre_exposure=1.0) for _ in range(3)]
         p16 = make_pipeline(self.mdir, out_size=(30, 27), flags={"depth_inverted": False, "auto_exposure": True,
@@ -707,7 +707,8 @@ class ReconOutputTest(RuntimeTest):
             b = pf.frame(f, debug=True)   # not post_recon2_r: the post_copy path
             self.assertEqual(pf.kernels()["out"], "f32")
             np.testing.assert_array_equal(a["post"]["history"], b["post"]["history"], err_msg=f"frame {i}")
-            np.testing.assert_allclose(a["out"], b["out"].astype(np.float16).astype(np.float32), rtol=1e-3, atol=1e-6,
+            np.testing.assert_allclose(a["out"], np.clip(b["out"], -65504.0, 65504.0).astype(np.float16).astype(np.float32),
+                                       rtol=1e-3, atol=1e-6,
                                        err_msg=f"frame {i}")
 
     def test_default_is_spec(self):

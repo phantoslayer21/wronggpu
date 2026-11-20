@@ -187,8 +187,8 @@ class CopyLayoutTest(EmuTest):
 
     def check_half_output(self, flags, out_size, kernels=None, dense=False, pi=None, filter_last=None, bdir=None,
                           post_last=None):
-        """Byte identity of the output copy: the RGBA16F rows equal the FP16 rounding (to nearest even) of the f32
-        output of the default path, which the output pass writes into the game's RGBA16F texture."""
+        """Byte identity of the output copy: the RGBA16F rows equal the saturating FP16 storage (round to nearest even,
+        finite values beyond +-65504 clamp) of the f32 output of the default path, which the output pass writes into the game's RGBA16F texture."""
         def mk(kern):
             if bdir is None:
                 return External(make_pipeline(self.mdir, out_size=out_size, flags=flags, check_packing=False,
@@ -216,7 +216,7 @@ class CopyLayoutTest(EmuTest):
                            exposure_mode=2, out_half_pitch=op)
             self.frame_io(b, x, io)
             rows = self.download(b, half, op * oh // 2, np.float16).reshape(oh, op // 2)[:, :4 * ow].reshape(oh, ow, 4)
-            np.testing.assert_array_equal(rows[..., :3].view(np.uint16), want.astype(np.float16).view(np.uint16),
+            np.testing.assert_array_equal(rows[..., :3].view(np.uint16), np.clip(want, -65504.0, 65504.0).astype(np.float16).view(np.uint16),
                                           err_msg=f"frame {t}")
             self.assertTrue(np.all(rows[..., 3] == 1))
             k = dict(kv.split("=", 1) for kv in b.lib.wg_rt_kernels(b.rt).decode().split())

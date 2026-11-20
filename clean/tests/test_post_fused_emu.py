@@ -43,7 +43,7 @@ class TestFusedEmu(EmuTest):
                     g = PS.run_fused(self.runner, w, x, k)
                     np.testing.assert_array_equal(g["history"], a["history"])
                     np.testing.assert_array_equal(g["reduced"], a["reduced"])
-                    np.testing.assert_array_equal(g["out"], out.astype(np.float16).astype(np.float32) if o16 else out)
+                    np.testing.assert_array_equal(g["out"], np.clip(out, -65504.0, 65504.0).astype(np.float16).astype(np.float32) if o16 else out)
                     checked += 1
         self.assertGreaterEqual(checked, 4 * 9)
 
