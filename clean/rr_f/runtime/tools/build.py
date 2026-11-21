@@ -3,8 +3,8 @@
 model-independent tables, the runtime library wronggpu_rr_runtime.dll, the D3D12 test host rr_test_host.exe;
 optionally a stage folder with the runtime and a model file (the proxy's directory layout).
 
-    python -m clean.rr_f.runtime.tools.build [--out DIR] [--stage DIR (--model-seed N | --model-admission |
-                                                                       --model-wgcm FILE)]
+    python -m clean.rr_f.runtime.tools.build [--out DIR] [-j N] [--shader-timeout S] [--max-wall S]
+                                             [--stage DIR (--model-seed N | --model-admission | --model-wgcm FILE)]
 
 Default output: <WG_BUILD_ROOT>\\rr-f-rt-int\\out (WG_BUILD_ROOT defaults to <repo>\\build; WG_RR_BUILD is set to <out>\\kbuild for the kernel
 cache of clean/rr_f/gpu/build.py). CPU only (no GPU use).
@@ -35,6 +35,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RT = os.path.dirname(HERE)
@@ -359,8 +360,89 @@ def cl(cmd, what):
     return r.stdout
 
 
-def build(out):
+def _bd():
+    """clean/dx12/build_dx12.py as the kernel builders import it (top-level module "build_dx12")."""
+    os.environ.setdefault("WG_RR_BUILD", os.path.join(DEFAULT_OUT, "kbuild"))
+    if ROOT not in sys.path:
+        sys.path.insert(0, ROOT)
+    from clean.rr_f.gpu import build as gb
+    return gb.build_dx12
+
+
+def prebuild(out, jobs, max_wall=0):
+    """-j N: compile every kernel of kernels(out) with N dxc processes at once, before the list is assembled. A dry pass
+    of kernels() records each build_dx12.compile_hlsl call instead of running it (every kernel builder computes its
+    DXIL path, the cache key, before it compiles, and calls compile_hlsl only for a path not yet cached); the recorded
+    calls are then run by N workers, so the real kernels() pass that follows finds every DXIL cached. The DXIL bytes
+    are the serial build's (same compile_hlsl calls, same paths). If the dry pass meets a step that reads a compiled
+    file, it stops there and the rest compiles serially as before. max_wall > 0: no new compile starts after that many
+    seconds; the build then stops and the same command continues from the cache (bounded compile-slot sessions)."""
+    import concurrent.futures as cf
+    os.environ["WG_RR_BUILD"] = os.path.join(out, "kbuild")
+    bd = _bd()
+    bd.build_asm_tool(os.environ["WG_RR_BUILD"])   # before the workers (concurrent first builds of the helper race)
+    real, calls = bd.compile_hlsl, {}
+
+    def dry(src, entry, out_dxil, *a, **k):
+        calls.setdefault(os.path.normcase(os.path.abspath(out_dxil)), (src, entry, out_dxil, a, k))
+
+    bd.compile_hlsl = dry
+    try:
+        kernels(out)
+    except Exception as e:  # noqa: BLE001 (a step that reads a compiled DXIL: serial from there)
+        print(f"prebuild: dry pass stopped early ({type(e).__name__}: {e}); {len(calls)} kernels recorded", flush=True)
+    finally:
+        bd.compile_hlsl = real
+    slow, left, t0 = [], [], time.monotonic()
+
+    def one(c):
+        src, entry, out_dxil, a, k = c
+        name = f"{os.path.basename(out_dxil)} ({os.path.basename(src)} {entry})"
+        if max_wall and time.monotonic() - t0 > max_wall:
+            left.append(name)
+            return
+        t = time.monotonic()
+        try:
+            real(src, entry, out_dxil, *a, **k)
+            print(f"prebuild: {time.monotonic() - t:6.0f} s {name}", flush=True)
+        except subprocess.TimeoutExpired:
+            slow.append(name)
+            print(f"prebuild: TIMEOUT {name}: dxc stopped", flush=True)
+
+    with cf.ThreadPoolExecutor(jobs) as ex:
+        list(ex.map(one, calls.values()))
+    print(f"prebuild: {len(calls)} kernels with {jobs} parallel dxc processes in {time.monotonic() - t0:.0f} s",
+          flush=True)
+    if left:
+        raise SystemExit(f"prebuild: --max-wall {max_wall:.0f} s reached, {len(left)} kernel(s) not started (the "
+                         f"finished ones are cached: run the same command again to continue)")
+    if slow:
+        raise SystemExit("prebuild: %d kernel(s) over the per-shader timeout (every other kernel is cached): %s"
+                         % (len(slow), "; ".join(slow)))
+
+
+class _ShaderTimeout:
+    """subprocess for clean/dx12/build_dx12.py during the build: every run() without its own timeout gets `seconds`
+    (subprocess.run stops the process when it expires and raises TimeoutExpired)."""
+
+    def __init__(self, seconds):
+        self.seconds = seconds
+
+    def __getattr__(self, name):
+        return getattr(subprocess, name)
+
+    def run(self, *a, **k):
+        k.setdefault("timeout", self.seconds)
+        return subprocess.run(*a, **k)
+
+
+def build(out, jobs=1, shader_timeout=0, max_wall=0):
     os.makedirs(out, exist_ok=True)
+    if shader_timeout > 0:
+        os.environ["WG_RR_BUILD"] = os.path.join(out, "kbuild")
+        _bd().subprocess = _ShaderTimeout(shader_timeout)
+    if jobs > 1 or max_wall > 0:
+        prebuild(out, jobs, max_wall)
     ks = kernels(out)
     from clean.rr_f.gpu import stage
     gen = os.path.join(out, "gen")
@@ -416,8 +498,19 @@ def main(argv=None):
     ap.add_argument("--model-seed", type=int, default=5100)
     ap.add_argument("--model-admission", action="store_true")
     ap.add_argument("--model-wgcm")
+    ap.add_argument("-j", "--jobs", type=int, default=int(os.environ.get("WG_RR_JOBS", "4")),
+                    help="dxc processes at once (default WG_RR_JOBS or 4; each needs about 300 MB): every kernel is "
+                         "compiled in parallel first; 1 = the serial build")
+    ap.add_argument("--shader-timeout", type=float, default=float(os.environ.get("WG_RR_SHADER_TIMEOUT", "1200")),
+                    help="seconds one dxc call may take before it is stopped and the kernel named (default "
+                         "WG_RR_SHADER_TIMEOUT or 1200: the largest exact stage kernels take over 300 s with 4 compiles "
+                         "at once; 0 = no limit)")
+    ap.add_argument("--max-wall", type=float, default=float(os.environ.get("WG_RR_MAX_WALL", "0")),
+                    help="seconds after which no new kernel compile starts; the build then stops, and the same command "
+                         "continues from the cache (0 = no limit)")
     a = ap.parse_args(argv)
-    dll, host = build(a.out)
+    os.environ["WG_RR_JOBS"] = str(max(1, a.jobs))   # also the stage precompile pools (gpu/stage.py)
+    dll, host = build(a.out, max(1, a.jobs), a.shader_timeout, a.max_wall)
     print("runtime", dll, hashlib.sha256(open(dll, "rb").read()).hexdigest())
     print("host", host)
     if a.stage:
