@@ -172,39 +172,39 @@ FgIngestResult FgHistory::Accept(const FgFramePacket& p, uint64_t completed) {
     if (r == FgRefusal::None && have_token_ && p.frame_token <= last_token_) r = FgRefusal::TokenNotMonotonic;
     if (r == FgRefusal::None) r = CheckInputs(p);
     if (r != FgRefusal::None) {  // nothing changes; the skipped token re-primes the next frame
-        res.status = FgStatus::Refused;
+        res.status = FgFrameStatus::Refused;
         res.refusal = r;
         return res;
     }
     Retire(completed);
     // what breaks continuity, in order
-    FgRealOnlyReason why = FgRealOnlyReason::None;
+    FgFrameRealOnly why = FgFrameRealOnly::None;
     const FgHistoryBank* cur = current_ >= 0 ? &banks_[current_] : nullptr;
-    if (p.flags & kFgFlagMenu) why = FgRealOnlyReason::Menu;
-    else if (!cur) why = FgRealOnlyReason::Prime;
-    else if (p.flags & kFgFlagReset) why = FgRealOnlyReason::Reset;
-    else if (p.frame_token != last_token_ + 1) why = FgRealOnlyReason::Gap;
+    if (p.flags & kFgFlagMenu) why = FgFrameRealOnly::Menu;
+    else if (!cur) why = FgFrameRealOnly::Prime;
+    else if (p.flags & kFgFlagReset) why = FgFrameRealOnly::Reset;
+    else if (p.frame_token != last_token_ + 1) why = FgFrameRealOnly::Gap;
     else if (cur->color_format != p.color.format || cur->output_width != p.output_rect.width ||
              cur->output_height != p.output_rect.height || cur->render_rect.width != p.render_rect.width ||
              cur->render_rect.height != p.render_rect.height)
-        why = FgRealOnlyReason::Resize;
+        why = FgFrameRealOnly::Resize;
     last_token_ = p.frame_token;
     have_token_ = true;
     ++base_presents_;
-    if (why != FgRealOnlyReason::None && why != FgRealOnlyReason::Prime) Invalidate();
+    if (why != FgFrameRealOnly::None && why != FgFrameRealOnly::Prime) Invalidate();
     res.epoch = epoch_;
-    if (why == FgRealOnlyReason::Menu) {  // shown real-only, not stored: the next valid frame primes
-        res.status = FgStatus::RealOnly;
+    if (why == FgFrameRealOnly::Menu) {  // shown real-only, not stored: the next valid frame primes
+        res.status = FgFrameStatus::RealOnly;
         res.real_only = why;
         return res;
     }
-    const bool rotate = why == FgRealOnlyReason::None;
+    const bool rotate = why == FgFrameRealOnly::None;
     const int nb = FreeBank(completed, rotate ? current_ : -1);
     if (nb < 0) {  // every candidate bank is still read by compute: never overwrite it
         if (primed()) Invalidate();
         res.epoch = epoch_;
-        res.status = FgStatus::RealOnly;
-        res.real_only = FgRealOnlyReason::HistoryBusy;
+        res.status = FgFrameStatus::RealOnly;
+        res.real_only = FgFrameRealOnly::HistoryBusy;
         return res;
     }
     if (rotate) {  // the previous frame leaves history (its bank may be the one reused)
@@ -227,7 +227,7 @@ FgIngestResult FgHistory::Accept(const FgFramePacket& p, uint64_t completed) {
         ++rotations_;
         interval_n_ = p.generated_count;
         interval_preset_ = p.preset;
-        res.status = FgStatus::Generated;
+        res.status = FgFrameStatus::Generated;
         res.previous_bank = previous_;
         res.current_bank = current_;
         res.generated_count = interval_n_;
@@ -237,7 +237,7 @@ FgIngestResult FgHistory::Accept(const FgFramePacket& p, uint64_t completed) {
     current_ = nb;
     ++primes_;
     interval_n_ = 0;
-    res.status = FgStatus::RealOnly;
+    res.status = FgFrameStatus::RealOnly;
     res.real_only = why;
     res.current_bank = current_;
     return res;
@@ -247,7 +247,7 @@ FgIngestResult FgHistory::Evaluate(const FgFramePacket& p) const {
     FgIngestResult res;
     res.epoch = epoch_;
     res.preset = p.preset;
-    res.status = FgStatus::Refused;
+    res.status = FgFrameStatus::Refused;
     FgRefusal r = FgValidatePacketShape(session_, p);
     if (r == FgRefusal::None && p.generated_index == 0) r = FgRefusal::BadGeneratedIndex;
     if (r == FgRefusal::None) r = CheckIdentity(p);
@@ -261,7 +261,7 @@ FgIngestResult FgHistory::Evaluate(const FgFramePacket& p) const {
         res.refusal = r;
         return res;
     }
-    res.status = FgStatus::Generated;
+    res.status = FgFrameStatus::Generated;
     res.previous_bank = previous_;
     res.current_bank = current_;
     res.generated_count = interval_n_;

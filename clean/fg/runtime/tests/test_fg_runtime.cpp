@@ -898,14 +898,14 @@ TEST(history_primes_then_generates_and_never_rotates_on_an_index) {
     FgHistory h(good_create(), 2);
     CHECK(!h.primed() && invariants(h));
     FgIngestResult r = h.Accept(frame(100), 0);
-    CHECK(r.status == FgStatus::RealOnly && r.real_only == FgRealOnlyReason::Prime && r.current_bank >= 0);
+    CHECK(r.status == FgFrameStatus::RealOnly && r.real_only == FgFrameRealOnly::Prime && r.current_bank >= 0);
     CHECK(h.primed() && !h.interval_open() && h.primes() == 1 && invariants(h));
     // an evaluation before an interval exists
     FgFramePacket ev = frame(100);
     ev.generated_index = 1;
     CHECK(h.Evaluate(ev).refusal == FgRefusal::HistoryNotPrimed);
     r = h.Accept(frame(101), 0);
-    CHECK(r.status == FgStatus::Generated && r.generated_count == 3 && r.previous_bank != r.current_bank);
+    CHECK(r.status == FgFrameStatus::Generated && r.generated_count == 3 && r.previous_bank != r.current_bank);
     CHECK(h.bank(static_cast<uint32_t>(r.previous_bank)).frame_token == 100);
     CHECK(h.bank(static_cast<uint32_t>(r.current_bank)).frame_token == 101);
     CHECK(h.rotations() == 1 && invariants(h));
@@ -914,7 +914,7 @@ TEST(history_primes_then_generates_and_never_rotates_on_an_index) {
         FgFramePacket e = frame(101);
         e.generated_index = i;
         const FgIngestResult x = h.Evaluate(e);
-        CHECK(x.status == FgStatus::Generated && x.generated_index == i && x.previous_bank == r.previous_bank &&
+        CHECK(x.status == FgFrameStatus::Generated && x.generated_index == i && x.previous_bank == r.previous_bank &&
               x.current_bank == r.current_bank);
         CHECK(float_bits(x.t) == float_bits(FgIndexTime(i, 3)));
     }
@@ -946,7 +946,7 @@ TEST(history_primes_then_generates_and_never_rotates_on_an_index) {
     CHECK(h.Evaluate(e).refusal == FgRefusal::ViewportMismatch);
     // the next game frame rotates once more
     r = h.Accept(frame(102), 0);
-    CHECK(r.status == FgStatus::Generated && h.rotations() == 2 && h.bank(static_cast<uint32_t>(r.previous_bank)).frame_token == 101);
+    CHECK(r.status == FgFrameStatus::Generated && h.rotations() == 2 && h.bank(static_cast<uint32_t>(r.previous_bank)).frame_token == 101);
     CHECK(invariants(h));
 }
 
@@ -996,7 +996,7 @@ TEST(history_identity_and_input_refusals_change_nothing) {
         FgFramePacket p = frame(12);
         m.f(p);
         const FgIngestResult r = h.Accept(p, 0);
-        CHECK(r.status == FgStatus::Refused && r.refusal == m.want);
+        CHECK(r.status == FgFrameStatus::Refused && r.refusal == m.want);
         if (r.refusal != m.want) std::printf("   want %s got %s\n", FgRefusalName(m.want), FgRefusalName(r.refusal));
         const FgHistorySnapshot now = h.Snapshot();
         CHECK(now.previous == before.previous && now.current == before.current && now.epoch == before.epoch);
@@ -1005,33 +1005,33 @@ TEST(history_identity_and_input_refusals_change_nothing) {
     CHECK(h.rotations() == 1 && h.base_presents() == 2);
     // frame 12 never got through, so 13 is a gap: re-prime
     const FgIngestResult r = h.Accept(frame(13), 0);
-    CHECK(r.status == FgStatus::RealOnly && r.real_only == FgRealOnlyReason::Gap && r.epoch == before.epoch + 1);
+    CHECK(r.status == FgFrameStatus::RealOnly && r.real_only == FgFrameRealOnly::Gap && r.epoch == before.epoch + 1);
     CHECK(invariants(h));
 }
 
 TEST(history_epochs_reset_menu_resize_rebind) {
     FgHistory h(good_create(), 2);
     h.Accept(frame(1), 0);
-    CHECK(h.Accept(frame(2), 0).status == FgStatus::Generated);
+    CHECK(h.Accept(frame(2), 0).status == FgFrameStatus::Generated);
     const uint64_t e0 = h.epoch();
     // reset / camera cut: this frame primes a new epoch
     FgFramePacket p = frame(3);
     p.flags |= kFgFlagReset;
     FgIngestResult r = h.Accept(p, 0);
-    CHECK(r.status == FgStatus::RealOnly && r.real_only == FgRealOnlyReason::Reset && r.epoch == e0 + 1);
+    CHECK(r.status == FgFrameStatus::RealOnly && r.real_only == FgFrameRealOnly::Reset && r.epoch == e0 + 1);
     CHECK(h.primed() && !h.interval_open() && invariants(h));
-    CHECK(h.Accept(frame(4), 0).status == FgStatus::Generated);
+    CHECK(h.Accept(frame(4), 0).status == FgFrameStatus::Generated);
     // menu: real-only and not stored; the next frame primes
     p = frame(5);
     p.flags |= kFgFlagMenu;
     r = h.Accept(p, 0);
-    CHECK(r.status == FgStatus::RealOnly && r.real_only == FgRealOnlyReason::Menu && !h.primed() && invariants(h));
+    CHECK(r.status == FgFrameStatus::RealOnly && r.real_only == FgFrameRealOnly::Menu && !h.primed() && invariants(h));
     p = frame(6);
     p.flags |= kFgFlagMenu;
-    CHECK(h.Accept(p, 0).real_only == FgRealOnlyReason::Menu && !h.primed());
+    CHECK(h.Accept(p, 0).real_only == FgFrameRealOnly::Menu && !h.primed());
     r = h.Accept(frame(7), 0);
-    CHECK(r.real_only == FgRealOnlyReason::Prime && h.primed());
-    CHECK(h.Accept(frame(8), 0).status == FgStatus::Generated);
+    CHECK(r.real_only == FgFrameRealOnly::Prime && h.primed());
+    CHECK(h.Accept(frame(8), 0).status == FgFrameStatus::Generated);
     // a render-size change (dynamic resolution) re-primes until its compatibility rule is qualified
     auto resized = [](uint64_t token) {
         FgFramePacket q = frame(token);
@@ -1041,8 +1041,8 @@ TEST(history_epochs_reset_menu_resize_rebind) {
         return q;
     };
     r = h.Accept(resized(9), 0);
-    CHECK(r.status == FgStatus::RealOnly && r.real_only == FgRealOnlyReason::Resize && invariants(h));
-    CHECK(h.Accept(resized(10), 0).status == FgStatus::Generated);
+    CHECK(r.status == FgFrameStatus::RealOnly && r.real_only == FgFrameRealOnly::Resize && invariants(h));
+    CHECK(h.Accept(resized(10), 0).status == FgFrameStatus::Generated);
     // the chain is replaced: frames of the old epochs are refused, the first one of the new chain primes
     const uint64_t e1 = h.epoch();
     h.Rebind(4, 10);
@@ -1052,11 +1052,11 @@ TEST(history_epochs_reset_menu_resize_rebind) {
     p.queue_epoch = 4;
     p.swapchain_epoch = 10;
     r = h.Accept(p, 0);
-    CHECK(r.status == FgStatus::RealOnly && r.real_only == FgRealOnlyReason::Prime);
+    CHECK(r.status == FgFrameStatus::RealOnly && r.real_only == FgFrameRealOnly::Prime);
     p = frame(2);
     p.queue_epoch = 4;
     p.swapchain_epoch = 10;
-    CHECK(h.Accept(p, 0).status == FgStatus::Generated && invariants(h));
+    CHECK(h.Accept(p, 0).status == FgFrameStatus::Generated && invariants(h));
     h.Invalidate();
     CHECK(!h.primed() && invariants(h));
 }
@@ -1070,15 +1070,15 @@ TEST(history_never_overwrites_a_bank_compute_still_reads) {
         CHECK(h.MarkRead(10));  // interval (1, 2) is read by compute until fence 10
         const uint32_t w0 = h.bank(0).writes, w1 = h.bank(1).writes;
         r = h.Accept(frame(3), 5);  // the bank frame 3 needs is still read: no rotation, no write
-        CHECK(r.status == FgStatus::RealOnly && r.real_only == FgRealOnlyReason::HistoryBusy);
+        CHECK(r.status == FgFrameStatus::RealOnly && r.real_only == FgFrameRealOnly::HistoryBusy);
         CHECK(h.bank(0).writes == w0 && h.bank(1).writes == w1 && !h.primed() && invariants(h));
         CHECK(h.bank(static_cast<uint32_t>(prev)).role == FgBankRole::Retired &&
               h.bank(static_cast<uint32_t>(cur)).role == FgBankRole::Retired);
         r = h.Accept(frame(4), 9);  // still not complete
-        CHECK(r.real_only == FgRealOnlyReason::HistoryBusy && h.bank(0).writes == w0 && h.bank(1).writes == w1);
+        CHECK(r.real_only == FgFrameRealOnly::HistoryBusy && h.bank(0).writes == w0 && h.bank(1).writes == w1);
         r = h.Accept(frame(5), 10);  // complete: the banks come back, frame 5 primes
-        CHECK(r.status == FgStatus::RealOnly && r.real_only == FgRealOnlyReason::Prime && invariants(h));
-        CHECK(h.Accept(frame(6), 10).status == FgStatus::Generated);
+        CHECK(r.status == FgFrameStatus::RealOnly && r.real_only == FgFrameRealOnly::Prime && invariants(h));
+        CHECK(h.Accept(frame(6), 10).status == FgFrameStatus::Generated);
         CHECK(!h.MarkRead(0));
     }
     {
@@ -1089,14 +1089,14 @@ TEST(history_never_overwrites_a_bank_compute_still_reads) {
         const int prev = r.previous_bank;
         h.MarkRead(10);
         r = h.Accept(frame(3), 5);
-        CHECK(r.status == FgStatus::Generated && r.previous_bank != prev && r.current_bank != prev);
+        CHECK(r.status == FgFrameStatus::Generated && r.previous_bank != prev && r.current_bank != prev);
         CHECK(h.bank(static_cast<uint32_t>(prev)).role == FgBankRole::Retired && invariants(h));
         // the previous (frame 2) is still read too: frame 4 finds no bank
         r = h.Accept(frame(4), 5);
-        CHECK(r.real_only == FgRealOnlyReason::HistoryBusy && invariants(h));
+        CHECK(r.real_only == FgFrameRealOnly::HistoryBusy && invariants(h));
         h.Retire(10);
         for (uint32_t b = 0; b < 3; ++b) CHECK(h.bank(b).role == FgBankRole::Free && h.bank(b).read_fence == 0);
-        CHECK(h.Accept(frame(5), 10).real_only == FgRealOnlyReason::Prime);
+        CHECK(h.Accept(frame(5), 10).real_only == FgFrameRealOnly::Prime);
     }
     {
         // bank counts are clamped to 2..4

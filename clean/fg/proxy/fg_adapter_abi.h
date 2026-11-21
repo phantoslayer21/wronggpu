@@ -115,7 +115,7 @@ enum WgFgReason {
   WG_FG_REASON_NULL_ARGUMENT = 103
 };
 
-/* Why a frame is shown real-only (same numbers as the runtime contract's FgRealOnlyReason). */
+/* Why a frame is shown real-only (same numbers as the runtime contract's FgFrameRealOnly). */
 enum WgFgRealOnly {
   WG_FG_REAL_ONLY_NONE = 0, WG_FG_REAL_ONLY_PRIME = 1, WG_FG_REAL_ONLY_RESET = 2, WG_FG_REAL_ONLY_MENU = 3,
   WG_FG_REAL_ONLY_RESIZE = 4, WG_FG_REAL_ONLY_GAP = 5, WG_FG_REAL_ONLY_EPOCH_CHANGE = 6,

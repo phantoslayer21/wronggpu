@@ -53,9 +53,9 @@ WG_FG_SAME_REASON(ModelNotValidated, WG_FG_REASON_MODEL_NOT_VALIDATED);
 WG_FG_SAME_REASON(PresenterNotQualified, WG_FG_REASON_PRESENTER_NOT_QUALIFIED);
 WG_FG_SAME_REASON(RouteNotQualified, WG_FG_REASON_ROUTE_NOT_QUALIFIED);
 #undef WG_FG_SAME_REASON
-static_assert(static_cast<uint32_t>(wgfg::FgRealOnlyReason::Menu) == WG_FG_REAL_ONLY_MENU &&
-              static_cast<uint32_t>(wgfg::FgRealOnlyReason::EpochChange) == WG_FG_REAL_ONLY_EPOCH_CHANGE &&
-              static_cast<uint32_t>(wgfg::FgRealOnlyReason::Disabled) == WG_FG_REAL_ONLY_DISABLED, "real-only reasons");
+static_assert(static_cast<uint32_t>(wgfg::FgFrameRealOnly::Menu) == WG_FG_REAL_ONLY_MENU &&
+              static_cast<uint32_t>(wgfg::FgFrameRealOnly::EpochChange) == WG_FG_REAL_ONLY_EPOCH_CHANGE &&
+              static_cast<uint32_t>(wgfg::FgFrameRealOnly::Disabled) == WG_FG_REAL_ONLY_DISABLED, "real-only reasons");
 
 inline wgfg::FgRect ToRuntime(const WgFgRect& r) {
     wgfg::FgRect o;

@@ -9,10 +9,11 @@
 // D3D12 side interprets, and their formats are DXGI_FORMAT values carried as integers.
 #include <cstdint>
 
+#include "../fg_limits.h"  // kFgMaxGenerated: N = 1..5 generated images per base interval (2x .. 6x)
+
 namespace wgfg {
 
 inline constexpr uint32_t kFgAbiVersion = 1;
-inline constexpr uint32_t kFgMaxGenerated = 5;  // N = 1..5 generated images per base interval (2x .. 6x)
 
 // The release gate: no FG mode is advertised until the end-to-end oracle gate (F5) and a qualified presenter pass.
 // FgAdvertisedMaxGenerated() reports 0 while this is false.
@@ -199,10 +200,10 @@ struct FgFramePacket {
     uint32_t generated_index = 0;     // 0: the game frame (present-driven); 1..N: an explicit evaluator's index i
 };
 
-enum class FgStatus : uint32_t { Generated = 0, RealOnly = 1, Refused = 2 };
+enum class FgFrameStatus : uint32_t { Generated = 0, RealOnly = 1, Refused = 2 };
 
 // Why a frame was shown real-only (observably distinct states).
-enum class FgRealOnlyReason : uint32_t {
+enum class FgFrameRealOnly : uint32_t {
     None = 0,
     Prime = 1,          // first valid frame of a history epoch
     Reset = 2,          // reset / camera cut
@@ -217,9 +218,9 @@ enum class FgRealOnlyReason : uint32_t {
 struct FgFrameResult {
     uint32_t struct_size = sizeof(FgFrameResult);
     uint32_t abi_version = kFgAbiVersion;
-    FgStatus status = FgStatus::Refused;
+    FgFrameStatus status = FgFrameStatus::Refused;
     FgRefusal refusal = FgRefusal::None;
-    FgRealOnlyReason real_only = FgRealOnlyReason::None;
+    FgFrameRealOnly real_only = FgFrameRealOnly::None;
     FgPreset requested_preset = FgPreset::A, effective_preset = FgPreset::A;
     uint32_t requested_count = 0, effective_count = 0;
     uint64_t history_epoch = 0;

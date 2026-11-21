@@ -77,7 +77,7 @@ jobs:
           cmake -S clean/fg/presenter -B out/fg-presenter -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
           cmake --build out/fg-presenter
           ctest --test-dir out/fg-presenter --output-on-failure
-      - name: Frame generation runtime
+      - name: Frame generation runtime and session
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           cmake -S clean/fg/runtime -B out/fg-runtime -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded

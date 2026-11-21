@@ -68,9 +68,9 @@ struct FgHistoryBank {
 };
 
 struct FgIngestResult {
-    FgStatus status = FgStatus::Refused;
+    FgFrameStatus status = FgFrameStatus::Refused;
     FgRefusal refusal = FgRefusal::None;
-    FgRealOnlyReason real_only = FgRealOnlyReason::None;
+    FgFrameRealOnly real_only = FgFrameRealOnly::None;
     int previous_bank = -1, current_bank = -1;
     uint64_t epoch = 0;
     uint32_t generated_count = 0;  // N of the interval (0 unless Generated)

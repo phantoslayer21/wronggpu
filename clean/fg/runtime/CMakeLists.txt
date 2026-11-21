@@ -27,7 +27,52 @@ target_link_libraries(wg_fg_runtime PUBLIC Threads::Threads)
 add_executable(test_fg_runtime ${WG_FG_RUNTIME_DIR}/tests/test_fg_runtime.cpp)
 target_link_libraries(test_fg_runtime PRIVATE wg_fg_runtime)
 
-foreach(t wg_fg_runtime test_fg_runtime)
+# F7a: the FG session (fg_session.h) joins the runtime with the presenter boundary (clean/fg/presenter) and the game
+# adapter core (clean/fg/proxy). Their sources are compiled into a dependency library here, so this folder still builds
+# on its own; their own suites stay in their folders. On Windows the session also gets the presenter source over the
+# back-end factory (fg_session_win.h).
+set(WG_FG_PRESENTER_DIR ${WG_FG_RUNTIME_DIR}/../presenter)
+set(WG_FG_PROXY_DIR ${WG_FG_RUNTIME_DIR}/../proxy)
+add_library(wg_fg_session_deps STATIC
+  ${WG_FG_PRESENTER_DIR}/fg_presenter.cpp
+  ${WG_FG_PRESENTER_DIR}/fg_target_scheduler.cpp
+  ${WG_FG_PRESENTER_DIR}/fg_fake_presenter.cpp
+  ${WG_FG_PRESENTER_DIR}/fg_present_engine.cpp
+  ${WG_FG_PROXY_DIR}/fg_proxy_core.cpp
+  ${WG_FG_PROXY_DIR}/fg_settings.cpp)
+target_include_directories(wg_fg_session_deps PUBLIC ${WG_FG_RUNTIME_DIR} ${WG_FG_PRESENTER_DIR} ${WG_FG_PROXY_DIR})
+target_link_libraries(wg_fg_session_deps PUBLIC wg_fg_runtime)
+set(WG_FG_SESSION_SOURCES ${WG_FG_RUNTIME_DIR}/fg_session.cpp)
+if(WIN32)
+  target_sources(wg_fg_session_deps PRIVATE
+    ${WG_FG_PRESENTER_DIR}/fg_win_common.cpp
+    ${WG_FG_PRESENTER_DIR}/fg_win_comp_presenter.cpp
+    ${WG_FG_PRESENTER_DIR}/fg_dxgi_presenter.cpp
+    ${WG_FG_PRESENTER_DIR}/fg_presenter_factory.cpp)
+  target_link_libraries(wg_fg_session_deps PUBLIC
+    d3d11.lib d3d12.lib dxgi.lib dcomp.lib gdi32.lib user32.lib mincore.lib)
+  target_compile_definitions(wg_fg_session_deps PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN WG_FG_SESSION_WIN=1)
+  list(APPEND WG_FG_SESSION_SOURCES ${WG_FG_RUNTIME_DIR}/fg_session_win.cpp)
+endif()
+add_library(wg_fg_session STATIC ${WG_FG_SESSION_SOURCES})
+target_link_libraries(wg_fg_session PUBLIC wg_fg_session_deps)
+
+add_executable(test_fg_session ${WG_FG_RUNTIME_DIR}/tests/test_fg_session.cpp)
+target_link_libraries(test_fg_session PRIVATE wg_fg_session)
+set(WG_FG_SESSION_TARGETS wg_fg_session_deps wg_fg_session test_fg_session)
+
+# Mutants: each breaks one session rule (fg_session.cpp, WG_FG_SESSION_MUTANT); the suite must catch every one.
+#  1 shared work per index   2 menu latch dropped   3 wrong intermediate time   4 silent continuation after a refusal
+#  5 history advanced per index   6 a count change resets history
+set(WG_FG_SESSION_MUTANTS 1 2 3 4 5 6)
+foreach(m ${WG_FG_SESSION_MUTANTS})
+  add_executable(test_fg_session_mutant_${m} ${WG_FG_RUNTIME_DIR}/tests/test_fg_session.cpp ${WG_FG_SESSION_SOURCES})
+  target_link_libraries(test_fg_session_mutant_${m} PRIVATE wg_fg_session_deps)
+  target_compile_definitions(test_fg_session_mutant_${m} PRIVATE WG_FG_SESSION_MUTANT=${m})
+  list(APPEND WG_FG_SESSION_TARGETS test_fg_session_mutant_${m})
+endforeach()
+
+foreach(t wg_fg_runtime test_fg_runtime ${WG_FG_SESSION_TARGETS})
   if(MSVC)
     set_target_properties(${t} PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     # CI's flags; /permissive- turns on /Zc:lambda, which the worker's failure-path tests depend on
@@ -38,3 +83,8 @@ foreach(t wg_fg_runtime test_fg_runtime)
 endforeach()
 
 add_test(NAME fg_runtime COMMAND test_fg_runtime)
+add_test(NAME fg_session COMMAND test_fg_session)
+foreach(m ${WG_FG_SESSION_MUTANTS})
+  add_test(NAME fg_session_mutant_${m} COMMAND test_fg_session_mutant_${m})
+  set_tests_properties(fg_session_mutant_${m} PROPERTIES WILL_FAIL TRUE)
+endforeach()

@@ -21,12 +21,13 @@
 // and the deterministic fake (fg_fake_presenter.h) implement the same interface.
 #include <cstdint>
 
+#include "../fg_limits.h"  // kFgMaxGenerated: N = 1..5, 2x..6x
+
 namespace wgfg {
 
 // Interrupt-time ticks of 100 ns (the unit of the Windows interrupt-time clock).
 using FgTicks = std::int64_t;
 
-constexpr std::uint32_t kFgMaxGenerated = 5;                  // N = 1..5: 2x..6x
 constexpr std::uint32_t kFgMaxTargets = kFgMaxGenerated + 1;  // generated images plus the real endpoint
 
 // Result of every presenter / scheduler call. Only Ok means the call did what it says.
