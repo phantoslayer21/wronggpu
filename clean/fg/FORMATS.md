@@ -189,6 +189,21 @@ the clean side's own where the delivery leaves them open or names a GPU approxim
   value; the hudless detector reads the hudless bilinearly when its base offset differs from the colour's.
 - **Not modelled**: the full path (presets A / B) and the distortion field (both refused), the copy of the colour into
   the application's second output, and the on-screen indicator.
+## Full path stages (`reference/stages_full.py`)
+
+- Storage: colour, UI, both candidates, the distortion pair and the output pyramid levels 4 x float16; blend weights,
+  quality image, the previous -> current field and the distorted fields 2 x float16; the hole flag image and the fine
+  flag image one float16 (0 / 1: only "> 0" is ever read); processed motion 2 x float32; packed depths 32-bit words;
+  MA / MB 64-bit words (key high, h(vx) in bits 31..16, h(vy) in bits 15..0, empty = 0x7FFFFFFF7FFFFFFF). net2's
+  inputs Ib, Ic 4 x float16 and Ia 1 x float16 per element of the padded grid, row-major.
+- Arithmetic choices of the clean side (the original's approximate operations have no defined bits): division, the
+  reciprocal and 2^x correctly rounded (the kernels use the IEEE division and a 65,536-entry table of the logistic of
+  net2's weight channel); bilinear and nearest reads computed by hand (no sampler); block sums as a pairwise tree, x
+  before y at every scale, the same at k = 8 and 16; float16 writes round to nearest even.
+- Output pyramid: levels from the frame's halving chain; pull writes levels 1..4, the middle pull 5..8 when the chain
+  has more than 9 levels; push fills from the coarsest written level down, each filled level in its own buffer; the
+  original's tile-local fallback for an empty coarsest element is not reproduced.
+- The application's distortion field is read as 4 x float32.
 
 ## OPEN (waiting for the spec side)
 
