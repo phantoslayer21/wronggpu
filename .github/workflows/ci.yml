@@ -65,7 +65,7 @@ jobs:
           cmake -S clean/wgshared -B out/wgshared -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
           cmake --build out/wgshared
           ctest --test-dir out/wgshared --output-on-failure
-      - name: Frame generation presenter and target scheduler (CPU tests)
+      - name: Frame generation presenter, scheduler and Windows back ends (CPU tests)
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           cmake -S clean/fg/presenter -B out/fg-presenter -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded

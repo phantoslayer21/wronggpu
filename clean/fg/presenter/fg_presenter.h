@@ -17,8 +17,8 @@
 //  - A refusal is an error status with a reason. Nothing returns a successful present, resize or interval that did
 //    not happen, and no call falls back to another route on its own.
 //
-// Plain C++17, no Windows or vendor headers: the Windows composition back end (later) and the deterministic fake
-// (fg_fake_presenter.h) implement the same interface.
+// Plain C++17, no Windows or vendor headers: the Windows back ends (fg_win_comp_presenter.h, fg_dxgi_presenter.h)
+// and the deterministic fake (fg_fake_presenter.h) implement the same interface.
 #include <cstdint>
 
 namespace wgfg {
@@ -49,6 +49,7 @@ enum class FgPresenterBackend : std::uint8_t {
     WindowsComposition,  // presentation manager with per-image target times
     AmdSwapChain,        // vendor swap-chain wrapper (owns cadence itself)
     Fake,                // deterministic test presenter
+    DxgiFlip,            // DXGI flip-discard swap chain paced by the presenter's own timer (fg_dxgi_presenter.h)
 };
 
 // Who records the generated output work for an interval.
@@ -185,6 +186,8 @@ struct FgPresentStats {
     std::uint64_t epochs = 0;                // epochs attached
     std::uint64_t real_only_intervals[kFgRealOnlyReasonCount] = {};  // per FgRealOnlyReason
     FgTicks max_slip = 0;                    // largest (actual - target) of a displayed image
+    std::uint64_t display_skipped = 0;       // queued presents the display path itself skipped (a newer one was ready)
+    std::uint64_t display_collisions = 0;    // displayed less than half a refresh after the previous displayed image
 };
 
 // The presentation boundary. Calls come from the game's present thread; a back end's own worker (or, in the fake,

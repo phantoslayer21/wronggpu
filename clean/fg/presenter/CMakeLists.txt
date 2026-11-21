@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: MIT
-# Frame generation presentation boundary (clean/fg/presenter): IFgPresenter, the target-time scheduler and the
-# deterministic fake presenter, with their CPU tests. No GPU, no window, no platform SDK.
+# Frame generation presentation boundary (clean/fg/presenter): IFgPresenter, the target-time scheduler, the
+# deterministic fake presenter and the shared display-slot engine, with their CPU tests (no GPU, no window, no platform
+# SDK). On Windows also the production back ends (composition / hardware flip queue and DXGI flip-discard), the
+# back-end selector and their tests: CPU checks by default; `test_fg_win_presenters --gpu` adds headless GPU checks
+# (no window is shown) and runs only on request.
 # Stand-alone:   cmake -S clean/fg/presenter -B build/fg-presenter && cmake --build build/fg-presenter --config Release
 #                ctest --test-dir build/fg-presenter -C Release --output-on-failure
 cmake_minimum_required(VERSION 3.16)
@@ -14,14 +17,33 @@ endif()
 add_library(wg_fg_presenter STATIC
   ${CMAKE_CURRENT_LIST_DIR}/fg_presenter.cpp
   ${CMAKE_CURRENT_LIST_DIR}/fg_target_scheduler.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/fg_fake_presenter.cpp)
+  ${CMAKE_CURRENT_LIST_DIR}/fg_fake_presenter.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/fg_present_engine.cpp)
 target_include_directories(wg_fg_presenter PUBLIC ${CMAKE_CURRENT_LIST_DIR})
 target_compile_features(wg_fg_presenter PUBLIC cxx_std_17)
 
 add_executable(test_fg_presenter ${CMAKE_CURRENT_LIST_DIR}/tests/test_fg_presenter.cpp)
 target_link_libraries(test_fg_presenter PRIVATE wg_fg_presenter)
 
-foreach(t wg_fg_presenter test_fg_presenter)
+set(WG_FG_PRESENTER_TARGETS wg_fg_presenter test_fg_presenter)
+
+if(WIN32)
+  add_library(wg_fg_win_presenter STATIC
+    ${CMAKE_CURRENT_LIST_DIR}/fg_win_common.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/fg_win_comp_presenter.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/fg_dxgi_presenter.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/fg_presenter_factory.cpp)
+  target_link_libraries(wg_fg_win_presenter PUBLIC wg_fg_presenter
+    d3d11.lib d3d12.lib dxgi.lib dcomp.lib gdi32.lib user32.lib mincore.lib)
+  target_compile_definitions(wg_fg_win_presenter PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
+
+  add_executable(test_fg_win_presenters ${CMAKE_CURRENT_LIST_DIR}/tests/test_fg_win_presenters.cpp)
+  target_link_libraries(test_fg_win_presenters PRIVATE wg_fg_win_presenter)
+
+  list(APPEND WG_FG_PRESENTER_TARGETS wg_fg_win_presenter test_fg_win_presenters)
+endif()
+
+foreach(t ${WG_FG_PRESENTER_TARGETS})
   set_target_properties(${t} PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
   if(MSVC)
     # the CI flags: /permissive- (with /Zc:lambda) is what game code is built with
@@ -32,3 +54,6 @@ foreach(t wg_fg_presenter test_fg_presenter)
 endforeach()
 
 add_test(NAME fg_presenter COMMAND test_fg_presenter)
+if(WIN32)
+  add_test(NAME fg_win_presenters COMMAND test_fg_win_presenters)
+endif()
