@@ -18,6 +18,7 @@ add_library(wg_fg_runtime STATIC
   ${WG_FG_RUNTIME_DIR}/fg_contract.cpp
   ${WG_FG_RUNTIME_DIR}/fg_model.cpp
   ${WG_FG_RUNTIME_DIR}/fg_net1_plan.cpp
+  ${WG_FG_RUNTIME_DIR}/fg_exec_plan.cpp
   ${WG_FG_RUNTIME_DIR}/fg_history.cpp
   ${WG_FG_RUNTIME_DIR}/fg_worker.cpp
   ${WG_FG_RUNTIME_DIR}/../../converter/src/sha256.cpp)
@@ -57,6 +58,16 @@ endif()
 add_library(wg_fg_session STATIC ${WG_FG_SESSION_SOURCES})
 target_link_libraries(wg_fg_session PUBLIC wg_fg_session_deps)
 
+# F7b: the D3D12 executor (fg_d3d12_executor.h) and its end-to-end test. ctest runs the CPU checks;
+# `test_fg_d3d12_e2e --gpu --dxil <build>/dx12` adds the headless GPU leg (kernels from clean/dx12/build_dx12.py --only).
+if(WIN32)
+  add_library(wg_fg_d3d12 STATIC ${WG_FG_RUNTIME_DIR}/fg_d3d12_executor.cpp)
+  target_link_libraries(wg_fg_d3d12 PUBLIC wg_fg_session)
+  add_executable(test_fg_d3d12_e2e ${WG_FG_RUNTIME_DIR}/tests/test_fg_d3d12_e2e.cpp)
+  target_link_libraries(test_fg_d3d12_e2e PRIVATE wg_fg_d3d12)
+  list(APPEND WG_FG_D3D12_TARGETS wg_fg_d3d12 test_fg_d3d12_e2e)
+endif()
+
 add_executable(test_fg_session ${WG_FG_RUNTIME_DIR}/tests/test_fg_session.cpp)
 target_link_libraries(test_fg_session PRIVATE wg_fg_session)
 set(WG_FG_SESSION_TARGETS wg_fg_session_deps wg_fg_session test_fg_session)
@@ -72,7 +83,7 @@ foreach(m ${WG_FG_SESSION_MUTANTS})
   list(APPEND WG_FG_SESSION_TARGETS test_fg_session_mutant_${m})
 endforeach()
 
-foreach(t wg_fg_runtime test_fg_runtime ${WG_FG_SESSION_TARGETS})
+foreach(t wg_fg_runtime test_fg_runtime ${WG_FG_SESSION_TARGETS} ${WG_FG_D3D12_TARGETS})
   if(MSVC)
     set_target_properties(${t} PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     # CI's flags; /permissive- turns on /Zc:lambda, which the worker's failure-path tests depend on
@@ -84,6 +95,9 @@ endforeach()
 
 add_test(NAME fg_runtime COMMAND test_fg_runtime)
 add_test(NAME fg_session COMMAND test_fg_session)
+if(WIN32)
+  add_test(NAME fg_d3d12_e2e COMMAND test_fg_d3d12_e2e WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+endif()
 foreach(m ${WG_FG_SESSION_MUTANTS})
   add_test(NAME fg_session_mutant_${m} COMMAND test_fg_session_mutant_${m})
   set_tests_properties(fg_session_mutant_${m} PROPERTIES WILL_FAIL TRUE)

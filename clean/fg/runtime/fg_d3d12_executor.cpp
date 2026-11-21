@@ -1,0 +1,1734 @@
+// SPDX-License-Identifier: MIT
+// Frame generation (issue #96, F7b): the production D3D12 executor. See fg_d3d12_executor.h.
+#include "fg_d3d12_executor.h"
+
+#include <d3d12.h>
+#include <dxgi1_6.h>
+#include <windows.h>
+#include <wrl/client.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <fstream>
+#include <iterator>
+
+#include "../presenter/fg_dxgi_presenter.h"
+#include "../presenter/fg_win_comp_presenter.h"
+
+using Microsoft::WRL::ComPtr;
+
+namespace wgfg {
+
+namespace {
+
+// ---- kernels -----------------------------------------------------------------------------------------------------
+
+enum Kernel : uint32_t {
+    kFill16, kCopy4, kDetect, kMenuOutput, kDown2, kDown4, kMvec, kScatter, kUnpack, kInpaint, kPull, kPush, kFine,
+    kHoleMask, kQualityInit, kNet1Input, kNet1Output, kInterm, kWeights, kLiteBlend,
+    kCapture, kPack,
+    kMConv1, kMConv2, kMConv4, kMPairB, kMPairD4, kMPairD3, kMPairD2, kMPairD1, kMPairD0,
+    kFullBlend, kOutPull, kOutPullMid, kOutPush, kOutPushFine,
+    kNet2Conv, kNet2Up2, kNet2Merge, kNet2Warp,
+    kKernelCount,
+};
+constexpr uint32_t kFirstFull = kFullBlend;
+
+const char* const kKernelNames[kKernelCount] = {
+    "fg_lite_fill16", "fg_lite_copy4", "fg_lite_detect", "fg_lite_menu_output", "fg_lite_downsample2",
+    "fg_lite_downsample4", "fg_lite_mvec", "fg_lite_p2c_scatter", "fg_lite_p2c_unpack", "fg_lite_p2c_inpaint",
+    "fg_lite_p2c_pull", "fg_lite_p2c_push", "fg_lite_p2c_fine", "fg_lite_hole_mask", "fg_lite_quality_init",
+    "fg_lite_net1_input", "fg_lite_net1_output", "fg_lite_interm", "fg_lite_weights", "fg_lite_blend",
+    "fg_exec_capture", "fg_exec_pack",
+    "fg_mconv1", "fg_mconv2", "fg_mconv4", "fg_mpair_b", "fg_mpair_d4", "fg_mpair_d3", "fg_mpair_d2", "fg_mpair_d1",
+    "fg_mpair_d0",
+    "fg_full_blend", "fg_out_pull", "fg_out_pull_mid", "fg_out_push", "fg_out_push_fine",
+    "fg_net2_conv", "fg_net2_up2", "fg_net2_merge", "fg_net2_warp",
+};
+
+constexpr uint32_t kRootConstants = 59;  // 2 runtime constants + up to 57 argument DWORDs
+constexpr uint32_t kMaxArgs = kRootConstants - 2;
+constexpr uint32_t kChannelSpace = 0x7FFF0ADE;
+constexpr uint32_t kPairs = 8;           // descriptor pairs (channel UAV, texture view) per allocator
+constexpr uint32_t kNoClamp = 1u << 20;
+constexpr uint32_t kHalfOne = 0x3C00, kHalfTwo = 0x4000;
+
+uint64_t align(uint64_t v, uint64_t a) { return (v + a - 1) / a * a; }
+uint32_t cdiv(uint64_t a, uint64_t b) { return static_cast<uint32_t>((a + b - 1) / b); }
+uint32_t groups_for(uint64_t threads, uint32_t per_lane = 1) {
+    const uint32_t g = cdiv(threads, 256ull * per_lane);
+    return g ? g : 1;
+}
+uint32_t fb(float f) { return FgExecFloatBits(f); }
+
+bool read_file(const std::string& path, std::vector<char>* out) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
+    out->assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    return true;
+}
+
+bool dir_exists(const std::string& p) {
+    const DWORD a = GetFileAttributesA(p.c_str());
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+// The view format of a game texture for the capture's Load (depth and typeless formats as their readable view).
+DXGI_FORMAT view_format(DXGI_FORMAT f, uint32_t* channels) {
+    *channels = 4;
+    switch (f) {
+        case DXGI_FORMAT_R16G16B16A16_TYPELESS: return DXGI_FORMAT_R16G16B16A16_FLOAT;
+        case DXGI_FORMAT_R16G16B16A16_FLOAT: case DXGI_FORMAT_R16G16B16A16_UNORM: case DXGI_FORMAT_R32G32B32A32_FLOAT:
+        case DXGI_FORMAT_R8G8B8A8_UNORM: case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: case DXGI_FORMAT_B8G8R8A8_UNORM:
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: case DXGI_FORMAT_R10G10B10A2_UNORM: case DXGI_FORMAT_R11G11B10_FLOAT:
+            return f;
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS: return DXGI_FORMAT_R8G8B8A8_UNORM;
+        case DXGI_FORMAT_B8G8R8A8_TYPELESS: return DXGI_FORMAT_B8G8R8A8_UNORM;
+        case DXGI_FORMAT_R10G10B10A2_TYPELESS: return DXGI_FORMAT_R10G10B10A2_UNORM;
+        case DXGI_FORMAT_R16G16_FLOAT: case DXGI_FORMAT_R32G32_FLOAT: case DXGI_FORMAT_R16G16_SNORM:
+        case DXGI_FORMAT_R16G16_UNORM:
+            *channels = 2;
+            return f;
+        case DXGI_FORMAT_R16G16_TYPELESS: *channels = 2; return DXGI_FORMAT_R16G16_FLOAT;
+        case DXGI_FORMAT_R32G32_TYPELESS: *channels = 2; return DXGI_FORMAT_R32G32_FLOAT;
+        case DXGI_FORMAT_R32_FLOAT: case DXGI_FORMAT_R16_FLOAT: case DXGI_FORMAT_R16_UNORM: case DXGI_FORMAT_R8_UNORM:
+            *channels = 1;
+            return f;
+        case DXGI_FORMAT_R32_TYPELESS: case DXGI_FORMAT_D32_FLOAT: *channels = 1; return DXGI_FORMAT_R32_FLOAT;
+        case DXGI_FORMAT_R16_TYPELESS: case DXGI_FORMAT_D16_UNORM: *channels = 1; return DXGI_FORMAT_R16_UNORM;
+        case DXGI_FORMAT_R24G8_TYPELESS: case DXGI_FORMAT_D24_UNORM_S8_UINT:
+            *channels = 1;
+            return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+        case DXGI_FORMAT_R32G8X24_TYPELESS: case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+            *channels = 1;
+            return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+        default: break;
+    }
+    *channels = 0;
+    return DXGI_FORMAT_UNKNOWN;
+}
+
+// fg_exec_pack's format code of a slot format, -1 when unsupported.
+int pack_code(DXGI_FORMAT f, uint32_t* bpp) {
+    switch (f) {
+        case DXGI_FORMAT_R16G16B16A16_FLOAT: *bpp = 8; return 0;
+        case DXGI_FORMAT_R8G8B8A8_UNORM: case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: *bpp = 4; return 1;
+        case DXGI_FORMAT_B8G8R8A8_UNORM: case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: *bpp = 4; return 2;
+        case DXGI_FORMAT_R10G10B10A2_UNORM: *bpp = 4; return 3;
+        default: break;
+    }
+    *bpp = 0;
+    return -1;
+}
+
+// ---- weights -----------------------------------------------------------------------------------------------------
+
+struct Rng {
+    uint64_t s;
+    uint64_t next() {
+        uint64_t z = (s += 0x9E3779B97F4A7C15ull);
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        return z ^ (z >> 31);
+    }
+    float uniform(float lo, float hi) {
+        const double u = static_cast<double>(next() >> 11) * (1.0 / 9007199254740992.0);
+        return static_cast<float>(lo + (hi - lo) * u);
+    }
+};
+
+void put16(std::vector<uint8_t>* v, size_t i, uint16_t h) {
+    (*v)[2 * i] = static_cast<uint8_t>(h & 0xFF);
+    (*v)[2 * i + 1] = static_cast<uint8_t>(h >> 8);
+}
+
+float ftz(float x) { return std::fabs(x) < 1.17549435e-38f ? std::copysign(0.0f, x) : x; }
+
+}  // namespace
+
+const char* FgExecRefusalName(FgExecRefusal r) {
+    switch (r) {
+        case FgExecRefusal::None: return "none";
+        case FgExecRefusal::NullDevice: return "null device";
+        case FgExecRefusal::NullQueue: return "null queue";
+        case FgExecRefusal::DxilDirMissing: return "kernel folder missing";
+        case FgExecRefusal::DxilMissing: return "kernel file missing";
+        case FgExecRefusal::DxilInvalid: return "kernel file invalid";
+        case FgExecRefusal::RootSignature: return "root signature";
+        case FgExecRefusal::PipelineFailed: return "pipeline creation failed";
+        case FgExecRefusal::WeightsMissing: return "weights missing";
+        case FgExecRefusal::WeightsInvalid: return "weights invalid";
+        case FgExecRefusal::SizeUnsupported: return "frame size unsupported";
+        case FgExecRefusal::AllocationFailed: return "allocation failed";
+        case FgExecRefusal::FenceFailed: return "fence";
+        case FgExecRefusal::NotConfigured: return "not configured";
+        case FgExecRefusal::SlotTargetMissing: return "no presenter slot target";
+        case FgExecRefusal::SlotMissing: return "slot missing";
+        case FgExecRefusal::SlotFormat: return "slot format or size";
+        case FgExecRefusal::InputMissing: return "required input missing";
+        case FgExecRefusal::InputFormat: return "input format";
+        case FgExecRefusal::InputExtent: return "input extent";
+        case FgExecRefusal::PresetUnsupported: return "preset unsupported";
+        case FgExecRefusal::DistortionUnsupported: return "distortion field not modelled";
+        case FgExecRefusal::CommandFailed: return "command recording failed";
+        case FgExecRefusal::WaitTimeout: return "wait timeout";
+        case FgExecRefusal::DeviceLost: return "device lost";
+        case FgExecRefusal::BadArgument: return "bad argument";
+        case FgExecRefusal::Net1Refused: return "net1 recorder refused";
+    }
+    return "?";
+}
+
+bool FgExecWeightsFromModel(const uint8_t* bytes, size_t size, const FgModelReport& report, FgExecWeights* out,
+                            std::string* why) {
+    if (!bytes || !out || report.refusal != FgRefusal::None || report.stages.size() != 17 + kFgNet2Layers) {
+        if (why) *why = "model report not validated or wrong stage count";
+        return false;
+    }
+    FgExecWeights w;
+    for (uint32_t i = 0; i < 17; ++i) {
+        if (!FgPackNet1Layer(bytes, size, report.stages[i], FgNet1Layers()[i], &w.net1_fragments[i],
+                             &w.net1_bias[i])) {
+            if (why) *why = "net1 stage " + report.stages[i].name + " does not fit";
+            return false;
+        }
+    }
+    for (uint32_t i = 0; i < kFgNet2Layers; ++i) {
+        const FgModelStage& st = report.stages[17 + i];
+        const FgNet2Layer& l = FgNet2Layers()[i];
+        const uint32_t used = st.w.shape[1];
+        if (st.w.rank != 4 || st.w.shape[0] != l.cout || used != l.cin_used || st.w.shape[2] != 3 ||
+            st.w.shape[3] != 3 || st.b.rank != 1 || st.b.shape[0] != l.cout ||
+            st.w.bytes != 4ull * l.cout * used * 9 || st.b.bytes != 4ull * l.cout || st.w.offset > size ||
+            st.w.bytes > size - st.w.offset || st.b.offset > size || st.b.bytes > size - st.b.offset) {
+            if (why) *why = "net2 stage " + st.name + " does not fit";
+            return false;
+        }
+        w.net2_weights[i].assign(2ull * l.cout * 9 * l.cin, 0);
+        for (uint32_t o = 0; o < l.cout; ++o)
+            for (uint32_t c = 0; c < used; ++c)
+                for (uint32_t t = 0; t < 9; ++t) {
+                    float f;
+                    std::memcpy(&f, bytes + st.w.offset + 4ull * ((static_cast<uint64_t>(o) * used + c) * 9 + t), 4);
+                    uint16_t h = 0;
+                    if (!FgFloatToHalfExact(f, &h)) {
+                        if (why) *why = "net2 stage " + st.name + " value not exact in float16";
+                        return false;
+                    }
+                    put16(&w.net2_weights[i], (static_cast<size_t>(o) * 9 + t) * l.cin + c, h);
+                }
+        w.net2_bias[i].assign(2ull * l.cout, 0);
+        for (uint32_t o = 0; o < l.cout; ++o) {
+            float f;
+            std::memcpy(&f, bytes + st.b.offset + 4ull * o, 4);
+            uint16_t h = 0;
+            if (!FgFloatToHalfExact(f, &h)) {
+                if (why) *why = "net2 stage " + st.name + " bias not exact in float16";
+                return false;
+            }
+            put16(&w.net2_bias[i], o, h);
+        }
+    }
+    w.has_net2 = true;
+    *out = std::move(w);
+    return true;
+}
+
+void FgExecSyntheticWeights(uint32_t seed, FgExecWeights* out) {
+    Rng rng{0x5EEDull * 1000003ull + seed};
+    FgExecWeights w;
+    for (uint32_t i = 0; i < 17; ++i) {
+        const FgNet1Layer& l = FgNet1Layers()[i];
+        const size_t n = static_cast<size_t>(l.cout) * l.k * l.k * l.cin;
+        const float s = 1.5f / std::sqrt(static_cast<float>(l.cin * l.k * l.k));
+        std::vector<uint16_t> canon(n);
+        for (size_t j = 0; j < n; ++j) canon[j] = FgExecHalfBits(rng.uniform(-s, s));
+        FgSwizzleNet1(canon.data(), l.cout, l.k, l.cin, l.order, &w.net1_fragments[i]);
+        w.net1_bias[i].assign(2ull * l.cout, 0);
+        for (uint32_t o = 0; o < l.cout; ++o) put16(&w.net1_bias[i], o, FgExecHalfBits(rng.uniform(-0.1f, 0.1f)));
+    }
+    for (uint32_t i = 0; i < kFgNet2Layers; ++i) {
+        const FgNet2Layer& l = FgNet2Layers()[i];
+        const float s = 2.5f / std::sqrt(9.0f * static_cast<float>(l.cin_used));
+        w.net2_weights[i].assign(2ull * l.cout * 9 * l.cin, 0);
+        for (uint32_t o = 0; o < l.cout; ++o)
+            for (uint32_t t = 0; t < 9; ++t)
+                for (uint32_t c = 0; c < l.cin; ++c)
+                    put16(&w.net2_weights[i], (static_cast<size_t>(o) * 9 + t) * l.cin + c,
+                          c < l.cin_used ? FgExecHalfBits(rng.uniform(-s, s)) : 0);
+        w.net2_bias[i].assign(2ull * l.cout, 0);
+        for (uint32_t o = 0; o < l.cout; ++o) put16(&w.net2_bias[i], o, FgExecHalfBits(rng.uniform(-1.0f, 1.0f)));
+    }
+    w.has_net2 = true;
+    *out = std::move(w);
+}
+
+void FgExecSigTable(std::vector<float>* out) {
+    out->resize(65536);
+    float neg_log2e;
+    const uint32_t nb = 0xBFB8AA3Bu;
+    std::memcpy(&neg_log2e, &nb, 4);
+    for (uint32_t b = 0; b < 65536; ++b) {
+        const float z = FgExecHalfToFloat(static_cast<uint16_t>(b));
+        const volatile float m = ftz(ftz(z) * neg_log2e);
+        const float e = ftz(static_cast<float>(std::exp2(static_cast<double>(m))));
+        const volatile float s = ftz(e + 1.0f);
+        (*out)[b] = ftz(static_cast<float>(1.0 / static_cast<double>(s)));
+    }
+}
+
+// ---- the executor ------------------------------------------------------------------------------------------------
+
+namespace {
+
+struct Entry {
+    ComPtr<ID3D12CommandAllocator> alloc;
+    ComPtr<ID3D12GraphicsCommandList> list;
+    uint64_t fence = 0;
+    uint32_t desc_base = 0;
+};
+
+struct InputTex {
+    ID3D12Resource* res = nullptr;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    DXGI_FORMAT view = DXGI_FORMAT_UNKNOWN;
+    uint32_t channels = 0;
+    uint32_t w = 0, h = 0;
+    D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
+    FgExecRegion region;
+};
+
+// The per-game-frame values the per-index stages read.
+struct FrameCtx {
+    bool valid = false;
+    uint64_t token = 0;
+    FgPreset preset = FgPreset::C;
+    bool lite = true;
+    bool hud = false, ui4 = false, ui1 = false;
+    InputTex colour, depth, motion, hudless, alpha;
+    uint32_t alpha_kind = 4, alpha_channel = 3;
+    bool inverted = false;
+    float scx = 0, scy = 0;
+    float clip_to_prev[16] = {}, prev_to_clip[16] = {};
+    uint32_t disable = 0;
+};
+
+struct Rec {
+    Entry* e = nullptr;
+    ID3D12GraphicsCommandList* cl = nullptr;
+    uint32_t pair = 0;
+    D3D12_RESOURCE_STATES arena = D3D12_RESOURCE_STATE_COMMON;
+    bool dirty = false;  // a dispatch or copy wrote since the last UAV barrier
+};
+
+struct Net2Buf {
+    uint32_t off = 0, h = 0, w = 0, c = 0;
+};
+
+}  // namespace
+
+struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
+    FgD3d12ExecutorDesc desc;
+    FgExecWeights weights;
+    bool have_weights = false;
+    FgExecRefusal refusal = FgExecRefusal::None;
+    std::string why;
+    FgExecCounters counters;
+
+    ComPtr<ID3D12Device> device;
+    ComPtr<ID3D12CommandQueue> queue;
+    D3D12_COMMAND_LIST_TYPE list_type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    ComPtr<ID3D12RootSignature> root;
+    ComPtr<ID3D12PipelineState> pso[kKernelCount];
+    std::vector<char> code[kKernelCount];
+    bool pipelines_built = false;
+    ComPtr<ID3D12Fence> fence;
+    HANDLE event = nullptr;
+    uint64_t next_value = 0;
+    std::vector<Entry> entries;
+    ComPtr<ID3D12DescriptorHeap> heap;
+    uint32_t desc_inc = 0;
+    ComPtr<ID3D12Resource> channel;
+    ComPtr<ID3D12Resource> arena;
+    uint64_t arena_bytes = 0;
+    ComPtr<ID3D12Resource> menu_rb;
+
+    IFgSlotTarget* target = nullptr;
+    uint32_t fence_id = 0;
+    bool configured = false;
+
+    FgCreateDesc create;
+    FgExecGeometry g;
+    FgExecHost host;
+    FrameCtx frame;
+    uint32_t cap_w = 0, cap_h = 0;
+
+    // arena layout
+    uint64_t bump = 0;
+    uint32_t role_off[kRoleCount] = {};
+    uint32_t ps_off[12] = {};
+    uint32_t detres_off = 0, dis_off = 0;
+    uint32_t cap_colour = 0, cap_hud = 0, cap_ui4 = 0, cap_ui1 = 0, cap_depth = 0, cap_motion = 0;
+    uint32_t out_off = 0, out_stride = 0;       // generated image (float16 x 4), stride in texels
+    uint32_t pack_off = 0, pack_pitch = 0;      // packed slot rows
+    FgNet1Plan n1plan;
+    FgArenaBinding n1arena;
+    uint32_t n1_cells = 0, n1_out = 0;
+    // Full path
+    uint32_t x0 = 0, x1 = 0, xw = 0, ib = 0, ic = 0, ia = 0, fine = 0, sig = 0, lv[9] = {}, fd[8] = {};
+    uint32_t n2w[kFgNet2Layers] = {}, n2b[kFgNet2Layers] = {};
+    Net2Buf nb_x, nb_a1, nb_a2, nb_r0, nb_t[4], nb_r[4], nb_r4u, nb_g, nb_gu, nb_hA4, nb_hA1, nb_hA3, nb_U4, nb_U1,
+        nb_U3, nb_y, nb_b1, nb_s0, nb_tb[4], nb_s[4], nb_s4u, nb_e, nb_eu, nb_out;
+    std::vector<uint8_t> weight_image;  // host copy of the weights region
+    uint32_t weight_base = 0;
+
+    std::vector<FgExecOutputRecord> outputs;
+    struct PendingRb {
+        FgExecOutputRecord rec;
+        ComPtr<ID3D12Resource> image, colour, slot;
+    };
+    std::vector<PendingRb> pending;
+
+    // current recording
+    Rec* cur = nullptr;
+
+    ~Impl() override {
+        if (event) CloseHandle(event);
+    }
+
+    FgExecResult Fail(FgExecRefusal r, const std::string& w) {
+        refusal = r;
+        why = w;
+        return r == FgExecRefusal::DeviceLost ? FgExecResult::DeviceLost : FgExecResult::Refused;
+    }
+
+    bool DeviceRemoved() const { return device && device->GetDeviceRemovedReason() != S_OK; }
+
+    // ---- setup -----------------------------------------------------------------------------------------------
+    FgExecResult LoadKernels() {
+        if (desc.dxil_dir.empty() || !dir_exists(desc.dxil_dir))
+            return Fail(FgExecRefusal::DxilDirMissing, "kernel folder '" + desc.dxil_dir + "' missing");
+        const uint32_t count = desc.enable_full ? kKernelCount : kFirstFull;
+        for (uint32_t k = 0; k < count; ++k) {
+            const std::string path = desc.dxil_dir + "\\" + kKernelNames[k] + ".dxil";
+            std::vector<char> c;
+            if (!read_file(path, &c)) return Fail(FgExecRefusal::DxilMissing, std::string(kKernelNames[k]) + ".dxil");
+            if (c.size() < 32 || c.size() > 64u * 1024u * 1024u || std::memcmp(c.data(), "DXBC", 4) != 0)
+                return Fail(FgExecRefusal::DxilInvalid, std::string(kKernelNames[k]) + ".dxil is not a DXIL container");
+            code[k] = std::move(c);
+        }
+        return FgExecResult::Ok;
+    }
+
+    FgExecResult BuildPipelines() {
+        D3D12_DESCRIPTOR_RANGE ranges[2] = {};
+        ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        ranges[0].NumDescriptors = 1;
+        ranges[0].RegisterSpace = kChannelSpace;
+        ranges[0].OffsetInDescriptorsFromTableStart = 0;
+        ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        ranges[1].NumDescriptors = 1;
+        ranges[1].OffsetInDescriptorsFromTableStart = 1;
+        D3D12_ROOT_PARAMETER p[4] = {};
+        p[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        p[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        p[1].Descriptor.ShaderRegister = 1;
+        p[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        p[2].Constants.Num32BitValues = kRootConstants;
+        p[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        p[3].DescriptorTable.NumDescriptorRanges = 2;
+        p[3].DescriptorTable.pDescriptorRanges = ranges;
+        D3D12_ROOT_SIGNATURE_DESC rs = {};
+        rs.NumParameters = 4;
+        rs.pParameters = p;
+        ComPtr<ID3DBlob> blob, err;
+        if (FAILED(D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &err)) ||
+            FAILED(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
+                                               IID_PPV_ARGS(&root))))
+            return Fail(FgExecRefusal::RootSignature, "root signature creation failed");
+        const uint32_t count = desc.enable_full ? kKernelCount : kFirstFull;
+        for (uint32_t k = 0; k < count; ++k) {
+            D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {};
+            pd.pRootSignature = root.Get();
+            pd.CS.pShaderBytecode = code[k].data();
+            pd.CS.BytecodeLength = code[k].size();
+            if (FAILED(device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&pso[k]))))
+                return Fail(FgExecRefusal::PipelineFailed, std::string("pipeline ") + kKernelNames[k]);
+        }
+        pipelines_built = true;
+        return FgExecResult::Ok;
+    }
+
+    uint32_t Alloc(uint64_t bytes, uint64_t alignment = 256) {
+        bump = align(bump, alignment);
+        const uint64_t at = bump;
+        bump += align(bytes ? bytes : 4, 4);
+        return static_cast<uint32_t>(at);
+    }
+    Net2Buf N2(uint32_t div, uint32_t c) {
+        Net2Buf b;
+        b.h = g.H2 / div;
+        b.w = g.W2 / div;
+        b.c = c;
+        b.off = Alloc(2ull * b.h * b.w * c);
+        return b;
+    }
+
+    FgExecResult Layout() {
+        bump = 256;  // offset 0 is the null pointer
+        for (uint32_t r = 0; r < kRoleCount; ++r) {
+            const uint64_t n = FgRoleBytes(g, r);
+            role_off[r] = n ? Alloc(n) : 0;
+        }
+        for (uint32_t l = 1; l <= g.top; ++l) ps_off[l] = Alloc(12ull * g.lw[l] * g.lh[l]);
+        detres_off = Alloc(32);
+        dis_off = detres_off + 16;
+        const uint64_t cap = static_cast<uint64_t>(cap_w) * cap_h;
+        cap_colour = Alloc(cap * 8);
+        cap_hud = Alloc(cap * 8);
+        cap_ui4 = Alloc(cap * 8);
+        cap_ui1 = Alloc(cap * 2);
+        cap_depth = Alloc(cap * 4);
+        cap_motion = Alloc(cap * 8);
+        out_stride = static_cast<uint32_t>(align(g.wo, 32));
+        out_off = Alloc(8ull * out_stride * g.ho, 512);
+        pack_pitch = static_cast<uint32_t>(align(4ull * g.wo, 256));
+        pack_off = Alloc(static_cast<uint64_t>(pack_pitch) * g.ho, 512);
+        // net1: input, weights and scratch regions
+        const FgRefusal pr = FgBuildNet1Plan(g.H0, g.W0, &n1plan);
+        if (pr != FgRefusal::None) return Fail(FgExecRefusal::SizeUnsupported, std::string("net1 plan: ") + FgRefusalName(pr));
+        n1arena = FgArenaBinding();
+        n1arena.region_base[0] = Alloc(n1plan.region_bytes[0]);
+        n1arena.region_base[2] = Alloc(n1plan.region_bytes[2]);
+        n1_cells = static_cast<uint32_t>(n1arena.region_base[0] + n1plan.buffers[n1plan.Find("cells")].offset);
+        n1_out = static_cast<uint32_t>(n1arena.region_base[2] + n1plan.buffers[n1plan.Find("out")].offset);
+        if (desc.enable_full) {
+            const uint64_t fr = static_cast<uint64_t>(g.wo) * g.ho, n2 = static_cast<uint64_t>(g.W2) * g.H2;
+            x0 = Alloc(fr * 8);
+            x1 = Alloc(fr * 8);
+            xw = Alloc(fr * 2);
+            ib = Alloc(n2 * 8);
+            ic = Alloc(n2 * 8);
+            ia = Alloc(n2 * 2);
+            fine = Alloc(fr * 2);
+            for (uint32_t l = 1; l <= 8; ++l) {
+                uint32_t w, h;
+                FgExecOutLevelSize(g, l, &w, &h);
+                lv[l] = Alloc(8ull * w * h);
+                if (l < 8) fd[l] = Alloc(8ull * w * h);
+            }
+            nb_x = N2(1, 10);
+            nb_a1 = N2(2, 32);
+            nb_a2 = N2(4, 32);
+            nb_r0 = N2(8, 64);
+            for (int u = 0; u < 4; ++u) {
+                nb_t[u] = N2(8, 64);
+                nb_r[u] = N2(8, 64);
+            }
+            nb_r4u = N2(4, 64);
+            nb_g = N2(4, 96);
+            nb_gu = N2(2, 96);
+            nb_hA4 = N2(2, 4);
+            nb_hA1 = N2(2, 1);
+            nb_hA3 = N2(2, 3);
+            nb_U4 = N2(1, 4);
+            nb_U1 = N2(1, 1);
+            nb_U3 = N2(1, 3);
+            nb_y = N2(1, 18);
+            nb_b1 = N2(2, 16);
+            nb_s0 = N2(4, 32);
+            for (int u = 0; u < 4; ++u) {
+                nb_tb[u] = N2(4, 32);
+                nb_s[u] = N2(4, 32);
+            }
+            nb_s4u = N2(2, 32);
+            nb_e = N2(2, 48);
+            nb_eu = N2(1, 48);
+            nb_out = N2(1, 8);
+        }
+        // the weights region last: net1's weights region, net2's weights, the logistic table
+        weight_base = Alloc(0, 256);
+        bump = weight_base;
+        n1arena.region_base[1] = Alloc(n1plan.region_bytes[1]);
+        if (desc.enable_full) {
+            for (uint32_t i = 0; i < kFgNet2Layers; ++i) {
+                const FgNet2Layer& l = FgNet2Layers()[i];
+                n2w[i] = Alloc(2ull * l.cout * 9 * l.cin);
+                n2b[i] = Alloc(2ull * l.cout);
+            }
+            sig = Alloc(65536ull * 4);
+        }
+        bump = align(bump, 65536);
+        if (bump > 0xFFFF0000ull) return Fail(FgExecRefusal::SizeUnsupported, "arena above 32-bit offsets");
+        arena_bytes = bump;
+        n1arena.bound = true;
+        n1arena.arena_bytes = arena_bytes;
+        return FgExecResult::Ok;
+    }
+
+    FgExecResult FillWeightImage() {
+        weight_image.assign(arena_bytes - weight_base, 0);
+        auto put = [this](uint64_t off, const std::vector<uint8_t>& v, uint64_t expect) -> bool {
+            if (v.size() != expect || off < weight_base || off + v.size() > arena_bytes) return false;
+            std::memcpy(weight_image.data() + (off - weight_base), v.data(), v.size());
+            return true;
+        };
+        for (uint32_t i = 0; i < 17; ++i) {
+            const FgNet1Layer& l = FgNet1Layers()[i];
+            const int wfi = n1plan.Find(std::string("wf_") + l.name), bi = n1plan.Find(std::string("b_") + l.name);
+            if (wfi < 0 || bi < 0) return Fail(FgExecRefusal::WeightsInvalid, "net1 plan has no weight buffer");
+            const FgBufferSpec& wf = n1plan.buffers[static_cast<size_t>(wfi)];
+            const FgBufferSpec& b = n1plan.buffers[static_cast<size_t>(bi)];
+            if (!put(n1arena.region_base[1] + wf.offset, weights.net1_fragments[i], wf.bytes) ||
+                !put(n1arena.region_base[1] + b.offset, weights.net1_bias[i], b.bytes))
+                return Fail(FgExecRefusal::WeightsInvalid, std::string("net1 layer ") + l.name + " size");
+        }
+        if (desc.enable_full) {
+            for (uint32_t i = 0; i < kFgNet2Layers; ++i) {
+                const FgNet2Layer& l = FgNet2Layers()[i];
+                if (!put(n2w[i], weights.net2_weights[i], 2ull * l.cout * 9 * l.cin) ||
+                    !put(n2b[i], weights.net2_bias[i], 2ull * l.cout))
+                    return Fail(FgExecRefusal::WeightsInvalid, "net2 layer " + std::to_string(i + 1) + " size");
+            }
+            std::vector<float> table;
+            FgExecSigTable(&table);
+            std::memcpy(weight_image.data() + (sig - weight_base), table.data(), table.size() * 4);
+        }
+        return FgExecResult::Ok;
+    }
+
+    ComPtr<ID3D12Resource> Buffer(uint64_t bytes, D3D12_HEAP_TYPE type, D3D12_RESOURCE_FLAGS flags,
+                                  D3D12_RESOURCE_STATES state) {
+        D3D12_HEAP_PROPERTIES hp = {};
+        hp.Type = type;
+        D3D12_RESOURCE_DESC rd = {};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = bytes;
+        rd.Height = 1;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels = 1;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        rd.Flags = flags;
+        ComPtr<ID3D12Resource> r;
+        if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, state, nullptr, IID_PPV_ARGS(&r))))
+            r.Reset();
+        return r;
+    }
+
+    FgExecResult CreateObjects() {
+        if (!fence) {
+            if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&fence))))
+                return Fail(FgExecRefusal::FenceFailed, "shared fence creation failed");
+            event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            if (!event) return Fail(FgExecRefusal::FenceFailed, "event creation failed");
+        }
+        if (entries.empty()) {
+            const uint32_t n = std::max<uint32_t>(4, desc.allocators);
+            D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+            hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+            hd.NumDescriptors = n * kPairs * 2;
+            hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+            if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&heap))))
+                return Fail(FgExecRefusal::AllocationFailed, "descriptor heap");
+            desc_inc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            channel = Buffer(256, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                             D3D12_RESOURCE_STATE_COMMON);
+            menu_rb = Buffer(256, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+            if (!channel || !menu_rb) return Fail(FgExecRefusal::AllocationFailed, "channel / readback buffer");
+            for (uint32_t d = 0; d < hd.NumDescriptors; ++d) {
+                D3D12_CPU_DESCRIPTOR_HANDLE h = heap->GetCPUDescriptorHandleForHeapStart();
+                h.ptr += static_cast<SIZE_T>(d) * desc_inc;
+                if (d % 2 == 0) {
+                    D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
+                    uav.Format = DXGI_FORMAT_R32_TYPELESS;
+                    uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+                    uav.Buffer.NumElements = 64;
+                    uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+                    device->CreateUnorderedAccessView(channel.Get(), nullptr, &uav, h);
+                } else {
+                    D3D12_SHADER_RESOURCE_VIEW_DESC sv = {};
+                    sv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                    sv.Texture2D.MipLevels = 1;
+                    device->CreateShaderResourceView(nullptr, &sv, h);
+                }
+            }
+            entries.resize(n);
+            for (uint32_t i = 0; i < n; ++i) {
+                if (FAILED(device->CreateCommandAllocator(list_type, IID_PPV_ARGS(&entries[i].alloc))) ||
+                    FAILED(device->CreateCommandList(0, list_type, entries[i].alloc.Get(), nullptr,
+                                                     IID_PPV_ARGS(&entries[i].list))) ||
+                    FAILED(entries[i].list->Close()))
+                    return Fail(FgExecRefusal::AllocationFailed, "command allocator / list");
+                entries[i].desc_base = i * kPairs * 2;
+            }
+        }
+        return FgExecResult::Ok;
+    }
+
+    bool WaitValue(uint64_t v, uint32_t ms) {
+        if (fence->GetCompletedValue() >= v) return true;
+        if (FAILED(fence->SetEventOnCompletion(v, event))) return false;
+        return WaitForSingleObject(event, ms) == WAIT_OBJECT_0 || fence->GetCompletedValue() >= v;
+    }
+
+    FgExecResult Upload() {
+        ComPtr<ID3D12Resource> up = Buffer(weight_image.size(), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE,
+                                           D3D12_RESOURCE_STATE_GENERIC_READ);
+        if (!up) return Fail(FgExecRefusal::AllocationFailed, "upload buffer");
+        void* p = nullptr;
+        D3D12_RANGE none = {0, 0};
+        if (FAILED(up->Map(0, &none, &p))) return Fail(FgExecRefusal::AllocationFailed, "upload map");
+        std::memcpy(p, weight_image.data(), weight_image.size());
+        up->Unmap(0, nullptr);
+        Rec r;
+        FgExecResult b = Begin(&r);
+        if (b != FgExecResult::Ok) return b;
+        ArenaTo(r, D3D12_RESOURCE_STATE_COPY_DEST);
+        r.cl->CopyBufferRegion(arena.Get(), weight_base, up.Get(), 0, weight_image.size());
+        uint64_t v = 0;
+        b = Submit(&r, &v);
+        if (b != FgExecResult::Ok) return b;
+        if (!WaitValue(v, desc.wait_ms * 4)) return Fail(FgExecRefusal::WaitTimeout, "weight upload");
+        return FgExecResult::Ok;
+    }
+
+    // ---- recording -------------------------------------------------------------------------------------------
+    FgExecResult Begin(Rec* r) {
+        Entry* e = nullptr;
+        const uint64_t done = fence->GetCompletedValue();
+        for (Entry& x : entries)
+            if (x.fence <= done) {
+                e = &x;
+                break;
+            }
+        if (!e) {
+            Entry* oldest = &entries[0];
+            for (Entry& x : entries)
+                if (x.fence < oldest->fence) oldest = &x;
+            if (!WaitValue(oldest->fence, desc.wait_ms)) {
+                if (DeviceRemoved()) return Fail(FgExecRefusal::DeviceLost, "device removed");
+                return Fail(FgExecRefusal::WaitTimeout, "no free command allocator");
+            }
+            e = oldest;
+        }
+        if (FAILED(e->alloc->Reset()) || FAILED(e->list->Reset(e->alloc.Get(), nullptr)))
+            return Fail(FgExecRefusal::CommandFailed, "command list reset");
+        r->e = e;
+        r->cl = e->list.Get();
+        r->pair = 0;
+        r->dirty = false;
+        ID3D12DescriptorHeap* heaps[] = {heap.Get()};
+        r->cl->SetDescriptorHeaps(1, heaps);
+        r->cl->SetComputeRootSignature(root.Get());
+        r->cl->SetComputeRootUnorderedAccessView(0, arena->GetGPUVirtualAddress());
+        r->cl->SetComputeRootUnorderedAccessView(1, arena->GetGPUVirtualAddress());
+        SetTable(*r, 0);
+        r->arena = D3D12_RESOURCE_STATE_COMMON;
+        ArenaTo(*r, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cur = r;
+        return FgExecResult::Ok;
+    }
+
+    void SetTable(Rec& r, uint32_t pair) {
+        D3D12_GPU_DESCRIPTOR_HANDLE h = heap->GetGPUDescriptorHandleForHeapStart();
+        h.ptr += static_cast<UINT64>(r.e->desc_base + 2 * pair) * desc_inc;
+        r.cl->SetComputeRootDescriptorTable(3, h);
+    }
+
+    void ArenaTo(Rec& r, D3D12_RESOURCE_STATES s) {
+        if (r.arena == s) return;
+        D3D12_RESOURCE_BARRIER b = {};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = arena.Get();
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = r.arena;
+        b.Transition.StateAfter = s;
+        r.cl->ResourceBarrier(1, &b);
+        r.arena = s;
+        r.dirty = false;
+    }
+
+    void Transition(Rec& r, ID3D12Resource* res, D3D12_RESOURCE_STATES a, D3D12_RESOURCE_STATES b) {
+        if (a == b) return;
+        D3D12_RESOURCE_BARRIER x = {};
+        x.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        x.Transition.pResource = res;
+        x.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        x.Transition.StateBefore = a;
+        x.Transition.StateAfter = b;
+        r.cl->ResourceBarrier(1, &x);
+    }
+
+    void Barrier(Rec& r) {
+        if (!r.dirty) return;
+        D3D12_RESOURCE_BARRIER b = {};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        b.UAV.pResource = nullptr;
+        r.cl->ResourceBarrier(1, &b);
+        r.dirty = false;
+    }
+
+    void Dispatch(Rec& r, uint32_t k, uint32_t groups, const uint32_t* args, uint32_t n) {
+        ArenaTo(r, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        Barrier(r);
+        r.cl->SetPipelineState(pso[k].Get());
+        uint32_t c[kRootConstants] = {};
+        c[1] = groups;
+        std::memcpy(c + 2, args, 4ull * std::min(n, kMaxArgs));
+        for (uint32_t base = 0; base < groups; base += 65535) {
+            c[0] = base;
+            r.cl->SetComputeRoot32BitConstants(2, 2 + n, c, 0);
+            r.cl->Dispatch(std::min<uint32_t>(groups - base, 65535), 1, 1);
+        }
+        r.dirty = true;
+        ++counters.dispatches;
+    }
+    void D(Rec& r, uint32_t k, uint32_t groups, std::initializer_list<uint32_t> a) {
+        uint32_t v[kMaxArgs] = {};
+        uint32_t n = 0;
+        for (uint32_t x : a)
+            if (n < kMaxArgs) v[n++] = x;
+        Dispatch(r, k, groups, v, n);
+    }
+
+    FgExecResult Submit(Rec* r, uint64_t* value) {
+        cur = nullptr;
+        if (FAILED(r->cl->Close())) return Fail(FgExecRefusal::CommandFailed, "command list close");
+        ID3D12CommandList* l[] = {r->cl};
+        queue->ExecuteCommandLists(1, l);
+        const uint64_t v = ++next_value;
+        if (FAILED(queue->Signal(fence.Get(), v))) {
+            if (DeviceRemoved()) return Fail(FgExecRefusal::DeviceLost, "device removed");
+            return Fail(FgExecRefusal::CommandFailed, "queue signal");
+        }
+        r->e->fence = v;
+        ++counters.submissions;
+        *value = v;
+        if (DeviceRemoved()) return Fail(FgExecRefusal::DeviceLost, "device removed");
+        return FgExecResult::Ok;
+    }
+
+    // IFgComputeRecorder (net1)
+    void BindArena() override {}
+    void UavBarrier() override {
+        if (cur) {
+            cur->dirty = true;
+            Barrier(*cur);
+        }
+    }
+    void SetPipeline(FgNet1Kernel k) override {
+        if (cur) cur->cl->SetPipelineState(pso[kMConv1 + static_cast<uint32_t>(k)].Get());
+    }
+    void SetConstants(const uint32_t* dwords, uint32_t count) override {
+        if (cur) cur->cl->SetComputeRoot32BitConstants(2, count, dwords, 0);
+    }
+    void Dispatch(uint32_t groups_x) override {
+        if (cur) {
+            cur->cl->Dispatch(groups_x, 1, 1);
+            cur->dirty = true;
+            ++counters.dispatches;
+        }
+    }
+
+    // ---- stages ----------------------------------------------------------------------------------------------
+    uint32_t R(uint32_t role) const { return role_off[role]; }
+
+    void Fill16(Rec& r, uint32_t off, uint64_t bytes, const uint32_t* p, uint32_t period) {
+        const uint32_t n16 = static_cast<uint32_t>(bytes / 2);
+        D(r, kFill16, groups_for(n16, 8), {off, n16, p[0], p[1], p[2], p[3], period});
+    }
+
+    void RegArgs(const InputTex& t, bool present, uint32_t* out10) const {
+        if (present) {
+            t.region.Args(out10);
+        } else {
+            for (int i = 0; i < 10; ++i) out10[i] = 0;
+        }
+    }
+
+    // One schedule operation. Returns false when a step cannot be recorded (net1 refusal).
+    bool RecordOp(Rec& r, const FgExecOp& op) {
+        const FrameCtx& f = frame;
+        const uint32_t col = cap_colour, ctw = f.colour.w;
+        const InputTex& cr = f.colour;
+        const uint32_t hud = f.hud ? cap_hud : 0, hw = f.hud ? f.hudless.w : 0, hh = f.hud ? f.hudless.h : 0;
+        const bool alpha = f.ui1 || f.ui4;
+        const uint32_t aid = f.ui1 ? cap_ui1 : (f.ui4 ? cap_ui4 : 0);
+        const uint32_t aw = alpha ? f.alpha.w : 0, ah = alpha ? f.alpha.h : 0;
+        uint32_t hreg[10], areg[10];
+        RegArgs(f.hudless, f.hud, hreg);
+        RegArgs(f.alpha, alpha, areg);
+        const uint32_t nsc = g.w1 * g.h1;
+        float t1 = 0, t2 = 0;
+        FgExecThresholds(g.ho, &t1, &t2);
+        const volatile float one = 1.0f;
+        const float step_x = one / static_cast<float>(f.depth.region.ew), step_y = one / static_cast<float>(f.depth.region.eh);
+        const FgExecSettings& st = desc.settings;
+        const uint32_t inv = f.inverted ? 1u : 0u;
+        switch (op.op) {
+            case FgOp::Clear:
+                Fill16(r, R(op.role), FgRoleBytes(g, op.role), op.value, op.period);
+                return true;
+            case FgOp::Fill64:
+                Fill16(r, R(op.role), FgRoleBytes(g, op.role), op.value, op.period);
+                return true;
+            case FgOp::SetDisable: {
+                const uint32_t p[4] = {op.base & 0xFFFFu, op.base >> 16, 0, 0};
+                Fill16(r, dis_off, 4, p, 2);
+                frame.disable = op.base;
+                return true;
+            }
+            case FgOp::Detect: {
+                uint32_t a[29] = {};
+                if (op.detect_kind == 0) {
+                    const uint32_t v[15] = {0, aid, aw, f.alpha_kind, f.alpha_channel, f.alpha.region.bx,
+                                            f.alpha.region.by, f.alpha.region.ew, f.alpha.region.eh,
+                                            fb(st.alpha_threshold), fb(st.fraction), 0, 0, 0, 0};
+                    std::memcpy(a, v, sizeof(v));
+                } else {
+                    const uint32_t same = (f.hudless.region.bx == cr.region.bx && f.hudless.region.by == cr.region.by);
+                    const uint32_t v[15] = {1, col, ctw, 4, 0, cr.region.bx, cr.region.by, cr.region.ew, cr.region.eh,
+                                            0, 0, hud, hw, hh, same};
+                    std::memcpy(a, v, sizeof(v));
+                    std::memcpy(a + 15, hreg, sizeof(hreg));
+                }
+                a[25] = detres_off;
+                a[26] = dis_off;
+                a[27] = op.base;
+                a[28] = op.hysteresis_off ? 1u : 0u;
+                Dispatch(r, kDetect, 1, a, 29);
+                return true;
+            }
+            case FgOp::Downsample: {
+                uint32_t a[44];
+                uint32_t n = 0;
+                const uint32_t h1[7] = {col, ctw, cr.region.bx, cr.region.by, hud, hw, hh};
+                for (uint32_t x : h1) a[n++] = x;
+                for (uint32_t x : hreg) a[n++] = x;
+                const uint32_t h2[5] = {aid, aw, ah, f.alpha_kind, f.alpha_channel};
+                for (uint32_t x : h2) a[n++] = x;
+                for (uint32_t x : areg) a[n++] = x;
+                const uint32_t h3[12] = {R(kRoleCp), R(kRoleCc), R(kRoleUc), R(kRoleLc), R(kRoleDc), R(kRoleLd),
+                                         R(kRoleUm), g.wo, g.ho, g.wd, g.hd, host.Frame().r3_bits};
+                for (uint32_t x : h3) a[n++] = x;
+                const uint64_t nb = static_cast<uint64_t>(cdiv(g.wo, g.d)) * cdiv(g.ho, g.d);
+                Dispatch(r, g.d == 4 ? kDown4 : kDown2, groups_for(nb), a, n);
+                return true;
+            }
+            case FgOp::Mvec: {
+                uint32_t a[34];
+                uint32_t n = 0;
+                uint32_t dreg[10], mreg[10];
+                f.depth.region.Args(dreg);
+                f.motion.region.Args(mreg);
+                a[n++] = cap_depth;
+                a[n++] = f.depth.w;
+                a[n++] = f.depth.h;
+                for (uint32_t x : dreg) a[n++] = x;
+                a[n++] = cap_motion;
+                a[n++] = f.motion.w;
+                a[n++] = f.motion.h;
+                for (uint32_t x : mreg) a[n++] = x;
+                const uint32_t t[8] = {R(kRoleZc), R(kRoleMv), g.w1, g.h1, inv, fb(st.s_k), fb(f.scx), fb(f.scy)};
+                for (uint32_t x : t) a[n++] = x;
+                Dispatch(r, kMvec, groups_for(nsc), a, n);
+                return true;
+            }
+            case FgOp::P2cScatter: {
+                uint32_t a[28];
+                uint32_t n = 0;
+                const uint32_t h[6] = {R(kRoleZc), R(kRoleMv), R(kRoleS), R(kRoleKc), g.w1, g.h1};
+                for (uint32_t x : h) a[n++] = x;
+                for (float m : f.clip_to_prev) a[n++] = fb(m);
+                const uint32_t t[6] = {fb(t1), fb(t2), fb(st.s_k), inv, fb(step_x), fb(step_y)};
+                for (uint32_t x : t) a[n++] = x;
+                Dispatch(r, kScatter, groups_for(nsc), a, n);
+                return true;
+            }
+            case FgOp::P2cUnpack: {
+                uint32_t a[32];
+                uint32_t n = 0;
+                const uint32_t h[10] = {R(kRoleS), R(kRoleZp), R(kRoleKp), R(kRoleMv), R(kRoleF),
+                                        R(kRoleE), R(kRoleFl), R(kRoleVf), g.w1, g.h1};
+                for (uint32_t x : h) a[n++] = x;
+                for (float m : f.prev_to_clip) a[n++] = fb(m);
+                const uint32_t t[6] = {fb(st.s_k), inv, fb(step_x), fb(step_y), fb(st.kmax), fb(st.tau)};
+                for (uint32_t x : t) a[n++] = x;
+                Dispatch(r, kUnpack, groups_for(nsc), a, n);
+                return true;
+            }
+            case FgOp::P2cInpaint:
+                D(r, kInpaint, groups_for(nsc), {R(kRoleFl), R(kRoleG), g.w1, g.h1});
+                return true;
+            case FgOp::P2cPull:
+                for (uint32_t l = 1; l <= g.top; ++l) {
+                    const uint32_t wl = g.lw[l], hl = g.lh[l], ws = g.lw[l - 1], hs = g.lh[l - 1];
+                    uint32_t mode, sa, sb = 0;
+                    float n = 4.0f;
+                    if (l == 1) {
+                        mode = 0;
+                        sa = R(kRoleG);
+                        sb = R(kRoleVf);
+                    } else if (l == 5) {
+                        mode = 2;
+                        sa = R(kRoleP1 + 3);
+                    } else {
+                        mode = 1;
+                        sa = ps_off[l - 1];
+                        const uint32_t e = l <= 4 ? l : l - 4;
+                        n = static_cast<float>(1u << (2 * e));
+                    }
+                    D(r, kPull, groups_for(static_cast<uint64_t>(wl) * hl),
+                      {mode, sa, sb, ps_off[l], R(kRoleP1 + l - 1), ws, hs, wl, hl, fb(n)});
+                }
+                return true;
+            case FgOp::P2cPush:
+                for (uint32_t l = g.top - 1; l >= 1; --l) {
+                    D(r, kPush, groups_for(static_cast<uint64_t>(g.lw[l]) * g.lh[l]),
+                      {R(kRoleP1 + l), g.lw[l + 1], g.lh[l + 1], R(kRoleP1 + l - 1), g.lw[l], g.lh[l]});
+                    if (l == 1) break;
+                }
+                D(r, kFine, groups_for(nsc), {R(kRoleP1), g.lw[1], g.lh[1], R(kRoleG), R(kRoleF), g.w1, g.h1});
+                return true;
+            case FgOp::HoleMask: {
+                const uint32_t p[4] = {0x3C00u, 0, 0, 0};
+                Fill16(r, R(kRoleHc), FgRoleBytes(g, kRoleHc), p, 1);
+                D(r, kHoleMask, groups_for(static_cast<uint64_t>(g.wd) * g.hd),
+                  {R(kRoleF), g.w1, g.h1, R(kRoleHc), g.wd, g.hd});
+                return true;
+            }
+            case FgOp::QualityInit:
+                D(r, kQualityInit, groups_for(static_cast<uint64_t>(g.wd) * g.hd), {R(kRoleDc), R(kRoleQc), g.wd * g.hd});
+                return true;
+            case FgOp::Net1Input:
+                D(r, kNet1Input, groups_for(4ull * g.W0 * g.H0),
+                  {R(kRoleLd), R(kRoleDc), R(kRoleDp), R(kRoleF), R(kRoleMv), R(kRoleE), R(kRoleHc), R(kRoleHp),
+                   R(kRoleQp), R(kRoleM), n1_cells, R(kRoleQc), R(kRoleOm), g.wd, g.hd, g.w1, g.h1, g.W0, g.H0,
+                   g.pad_l, g.pad_t, 1u, 48u});
+                return true;
+            case FgOp::Net1: {
+                FgPipelineSet ps;
+                for (uint32_t k = 0; k < kFgNet1KernelCount; ++k) ps.ready[k] = pso[kMConv1 + k] != nullptr;
+                ArenaTo(r, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                r.dirty = true;
+                std::string w;
+                const FgRefusal rr = FgRecordNet1(n1plan, ps, n1arena, *this, &w);
+                if (rr != FgRefusal::None) {
+                    Fail(FgExecRefusal::Net1Refused, std::string(FgRefusalName(rr)) + ": " + w);
+                    return false;
+                }
+                r.cl->SetPipelineState(pso[kFill16].Get());  // nothing reads it; keeps the state defined
+                r.dirty = true;
+                return true;
+            }
+            case FgOp::Net1Output:
+                D(r, kNet1Output, groups_for(static_cast<uint64_t>(g.wd) * g.hd),
+                  {n1_out, R(kRoleOm), R(kRoleUm), R(kRoleUmp), R(kRoleNA), R(kRoleNB), R(kRoleM), g.wd, g.hd,
+                   g.pad_l, g.pad_t, g.W0, g.H0, 1u, 16u, op.ui_forcing ? 1u : 0u});
+                return true;
+            case FgOp::Interm:
+                D(r, kInterm, groups_for(nsc),
+                  {0u, R(kRoleMv), R(kRoleZc), R(kRoleMA), g.w1, g.h1, fb(op.t), fb(st.s_k), inv, fb(t2), fb(st.tau)});
+                D(r, kInterm, groups_for(nsc),
+                  {1u, R(kRoleF), R(kRoleZp), R(kRoleMB), g.w1, g.h1, fb(op.t), fb(st.s_k), inv, fb(t2), fb(st.tau)});
+                return true;
+            case FgOp::Weights:
+                D(r, kWeights, groups_for(nsc),
+                  {R(kRoleMA), R(kRoleMB), R(kRoleNA), R(kRoleNB), R(kRoleW), g.w1, g.h1, g.wd, g.hd});
+                return true;
+            case FgOp::Prefill:
+                D(r, kCopy4, groups_for(static_cast<uint64_t>(g.wo) * g.ho),
+                  {out_off, out_stride, 0, 0, col, ctw, 0, 0, g.wo, g.ho});
+                return true;
+            case FgOp::LiteBlend: {
+                FgExecRegion fr;
+                FgExecMakeRegion(g.wo, g.ho, 0, 0, g.wo, g.ho, &fr);
+                uint32_t rg[10];
+                fr.Args(rg);
+                uint32_t a[30];
+                uint32_t n = 0;
+                const uint32_t h[20] = {R(kRoleCp), R(kRoleCc), R(kRoleMA), R(kRoleMB), R(kRoleW), R(kRoleUp),
+                                        R(kRoleUc), R(kRoleLp), R(kRoleLc), out_off, out_stride, 0, 0, g.wo, g.ho,
+                                        g.w1, g.h1, fb(op.t), op.flag1 ? 1u : 0u, op.flag2 ? 1u : 0u};
+                for (uint32_t x : h) a[n++] = x;
+                for (uint32_t x : rg) a[n++] = x;
+                Dispatch(r, kLiteBlend, groups_for(static_cast<uint64_t>(g.wo) * g.ho), a, n);
+                return true;
+            }
+            case FgOp::FullBlend:
+                D(r, kFullBlend, (g.Wp / 16) * (g.Hp / 16),
+                  {R(kRoleCp), R(kRoleCc), R(kRoleW), R(kRoleQc), R(kRoleMA), R(kRoleMB), op.ui ? R(kRoleUp) : 0u,
+                   op.ui ? R(kRoleUc) : 0u, x0, x1, xw, ib, ic, ia, g.wo, g.ho, g.w1, g.h1, g.wd, g.hd, g.k,
+                   g.Wp / 16, op.ui ? 1u : 0u});
+                return true;
+            case FgOp::Net2:
+                RecordNet2(r, op.t);
+                return true;
+            case FgOp::OutPyramid:
+                RecordOutPyramid(r);
+                return true;
+            case FgOp::MenuOutput: {
+                uint32_t a[39];
+                uint32_t n = 0;
+                const uint32_t h[14] = {detres_off, col, ctw, cr.region.bx, cr.region.by, out_off, out_stride, 0, 0,
+                                        g.wo, g.ho, hud, hw, hh};
+                for (uint32_t x : h) a[n++] = x;
+                for (uint32_t x : hreg) a[n++] = x;
+                const uint32_t h2[5] = {aid, aw, ah, f.alpha_kind, f.alpha_channel};
+                for (uint32_t x : h2) a[n++] = x;
+                for (uint32_t x : areg) a[n++] = x;
+                Dispatch(r, kMenuOutput, groups_for(static_cast<uint64_t>(g.wo) * g.ho), a, n);
+                return true;
+            }
+            case FgOp::FinalCopy:
+                D(r, kCopy4, groups_for(static_cast<uint64_t>(g.wo) * g.ho),
+                  {out_off, out_stride, 0, 0, col, ctw, cr.region.bx, cr.region.by, g.wo, g.ho});
+                return true;
+        }
+        return true;
+    }
+
+    void Conv(Rec& r, uint32_t layer, const Net2Buf& x, const Net2Buf& y, uint32_t in_cs, uint32_t in_co,
+              uint32_t cin, uint32_t co_lo, uint32_t co_n, uint32_t out_cs, uint32_t out_co, uint32_t H, uint32_t W,
+              uint32_t pool, uint32_t leaky, uint32_t clamp_from, uint32_t res, uint32_t res_mul, uint32_t skip,
+              uint32_t skip_cs) {
+        const FgNet2Layer& l = FgNet2Layers()[layer - 1];
+        const uint64_t threads = static_cast<uint64_t>(pool ? H / 2 : H) * (pool ? W / 2 : W) * co_n;
+        D(r, kNet2Conv, groups_for(threads),
+          {x.off, n2w[layer - 1], n2b[layer - 1], y.off, skip, in_cs, in_co, cin, l.cin, co_lo, co_n, out_cs, out_co,
+           H, W, pool, leaky, clamp_from, res, res_mul, skip_cs, 0u});
+    }
+    // conv(n, src, dst, cin, ...) of the reference chain: the layer's full output, input channels from 0
+    void ConvL(Rec& r, uint32_t layer, const Net2Buf& src, const Net2Buf& dst, uint32_t cin, uint32_t pool,
+               uint32_t clamp_from, uint32_t res, const Net2Buf* skip) {
+        const FgNet2Layer& l = FgNet2Layers()[layer - 1];
+        Conv(r, layer, src, dst, src.c, 0, cin, 0, l.cout, l.cout, 0, src.h, src.w, pool, 1, clamp_from, res, kHalfOne,
+             skip ? skip->off : 0u, skip ? cin : 0u);
+    }
+    void Up2(Rec& r, const Net2Buf& x, const Net2Buf& y) {
+        D(r, kNet2Up2, groups_for(4ull * x.h * x.w * x.c), {x.off, y.off, x.c, x.h, x.w});
+    }
+
+    void RecordNet2(Rec& r, float f) {
+        const uint32_t npx = g.W2 * g.H2;
+        D(r, kNet2Merge, groups_for(10ull * npx), {ib, ic, ia, nb_x.off, npx, fb(f)});
+        ConvL(r, 1, nb_x, nb_a1, 10, 1, 0, 0, nullptr);
+        ConvL(r, 2, nb_a1, nb_a2, 32, 1, 0, 0, nullptr);
+        ConvL(r, 3, nb_a2, nb_r0, 32, 1, 0, 0, nullptr);
+        const Net2Buf* src = &nb_r0;
+        for (uint32_t u = 0; u < 4; ++u) {
+            ConvL(r, 4 + 2 * u, *src, nb_t[u], 64, 0, 0, 1, nullptr);
+            ConvL(r, 5 + 2 * u, nb_t[u], nb_r[u], 64, 0, 0, 2, src);
+            src = &nb_r[u];
+        }
+        Up2(r, nb_r[3], nb_r4u);
+        ConvL(r, 12, nb_r4u, nb_g, 64, 0, 32, 0, nullptr);
+        Up2(r, nb_g, nb_gu);
+        const Net2Buf* heads[3] = {&nb_hA4, &nb_hA1, &nb_hA3};
+        const uint32_t lo[3] = {0, 4, 5}, cnt[3] = {4, 1, 3}, cf[3] = {kNoClamp, 0, 0};
+        for (uint32_t j = 0; j < 3; ++j)
+            Conv(r, 13, nb_gu, *heads[j], 96, 32 * j, 32, lo[j], cnt[j], cnt[j], 0, nb_gu.h, nb_gu.w, 0, 0, cf[j], 0,
+                 kHalfOne, 0, 0);
+        Up2(r, nb_hA4, nb_U4);
+        Up2(r, nb_hA1, nb_U1);
+        Up2(r, nb_hA3, nb_U3);
+        D(r, kNet2Warp, groups_for(18ull * npx), {ib, ic, ia, nb_U4.off, nb_U1.off, nb_U3.off, nb_y.off, g.W2, g.H2, fb(f)});
+        ConvL(r, 14, nb_y, nb_b1, 18, 1, 0, 0, nullptr);
+        ConvL(r, 15, nb_b1, nb_s0, 16, 1, 0, 0, nullptr);
+        src = &nb_s0;
+        for (uint32_t u = 0; u < 4; ++u) {
+            ConvL(r, 16 + 2 * u, *src, nb_tb[u], 32, 0, 0, 1, nullptr);
+            ConvL(r, 17 + 2 * u, nb_tb[u], nb_s[u], 32, 0, 0, 2, src);
+            src = &nb_s[u];
+        }
+        Up2(r, nb_s[3], nb_s4u);
+        ConvL(r, 24, nb_s4u, nb_e, 32, 0, kNoClamp, 0, nullptr);
+        Up2(r, nb_e, nb_eu);
+        const Net2Buf* us[3] = {&nb_U4, &nb_U1, &nb_U3};
+        const uint32_t rm[3] = {kHalfTwo, kHalfOne, kHalfOne};
+        for (uint32_t j = 0; j < 3; ++j)
+            Conv(r, 25, nb_eu, nb_out, 48, 16 * j, 16, lo[j], cnt[j], 8, lo[j], g.H2, g.W2, 0, 0, cf[j], 2, rm[j],
+                 us[j]->off, cnt[j]);
+    }
+
+    void RecordOutPyramid(Rec& r) {
+        const uint32_t tx = cdiv(g.wo, 16), ty = cdiv(g.ho, 16);
+        const volatile float kf = static_cast<float>(g.k);
+        const float rk = 1.0f / kf;
+        D(r, kOutPull, tx * ty,
+          {x0, x1, xw, nb_out.off, sig, out_off, fine, lv[1], lv[2], lv[3], lv[4], g.wo, g.ho, g.W2, g.H2, g.k, tx,
+           out_stride, 0u, 0u, fb(rk)});
+        const uint32_t lc = g.out_coarsest;
+        if (lc == 8) {
+            uint32_t w4, h4;
+            FgExecOutLevelSize(g, 4, &w4, &h4);
+            D(r, kOutPullMid, cdiv(w4, 16) * cdiv(h4, 16), {lv[4], lv[5], lv[6], lv[7], lv[8], w4, h4, cdiv(w4, 16), g.wo, g.ho});
+        }
+        for (uint32_t l = lc - 1; l >= 1; --l) {
+            uint32_t wf, hf, wc, hc;
+            FgExecOutLevelSize(g, l, &wf, &hf);
+            FgExecOutLevelSize(g, l + 1, &wc, &hc);
+            D(r, kOutPush, groups_for(static_cast<uint64_t>(wf) * hf),
+              {lv[l], l == lc - 1 ? lv[lc] : fd[l + 1], fd[l], wf, hf, wc, hc});
+            if (l == 1) break;
+        }
+        uint32_t w1o, h1o;
+        FgExecOutLevelSize(g, 1, &w1o, &h1o);
+        D(r, kOutPushFine, groups_for(static_cast<uint64_t>(g.wo) * g.ho),
+          {fine, fd[1], out_off, g.wo, g.ho, w1o, h1o, out_stride, 0u, 0u});
+    }
+
+    // ---- inputs ----------------------------------------------------------------------------------------------
+    FgExecRefusal TakeInput(const FgTextureRef& t, InputTex* out, std::string* w, const char* name) {
+        if (!t.resource) {
+            *w = std::string(name) + " missing";
+            return FgExecRefusal::InputMissing;
+        }
+        ID3D12Resource* res = static_cast<ID3D12Resource*>(t.resource);
+        const D3D12_RESOURCE_DESC d = res->GetDesc();
+        if (d.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || d.SampleDesc.Count != 1 || d.DepthOrArraySize != 1 ||
+            t.subresource != 0 || (d.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE)) {
+            *w = std::string(name) + ": not a single-sample 2D texture readable by shaders";
+            return FgExecRefusal::InputFormat;
+        }
+        InputTex x;
+        x.res = res;
+        x.format = d.Format;
+        x.view = view_format(d.Format, &x.channels);
+        if (x.view == DXGI_FORMAT_UNKNOWN) {
+            *w = std::string(name) + ": format " + std::to_string(static_cast<uint32_t>(d.Format)) + " unsupported";
+            return FgExecRefusal::InputFormat;
+        }
+        x.w = static_cast<uint32_t>(d.Width);
+        x.h = d.Height;
+        x.state = static_cast<D3D12_RESOURCE_STATES>(t.state);
+        if (x.w > cap_w || x.h > cap_h) {
+            *w = std::string(name) + ": texture larger than the capture area";
+            return FgExecRefusal::InputExtent;
+        }
+        const uint32_t rw = t.rect.width ? t.rect.width : x.w - t.rect.x;
+        const uint32_t rh = t.rect.height ? t.rect.height : x.h - t.rect.y;
+        if (!FgExecMakeRegion(x.w, x.h, t.rect.x, t.rect.y, rw, rh, &x.region)) {
+            *w = std::string(name) + ": region outside its texture";
+            return FgExecRefusal::InputExtent;
+        }
+        *out = x;
+        return FgExecRefusal::None;
+    }
+
+    void Capture(Rec& r, const InputTex& t, uint32_t dst, uint32_t kind) {
+        const uint32_t pair = r.pair + 1 < kPairs ? ++r.pair : r.pair;
+        D3D12_CPU_DESCRIPTOR_HANDLE h = heap->GetCPUDescriptorHandleForHeapStart();
+        h.ptr += static_cast<SIZE_T>(r.e->desc_base + 2 * pair + 1) * desc_inc;
+        D3D12_SHADER_RESOURCE_VIEW_DESC sv = {};
+        sv.Format = t.view;
+        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sv.Texture2D.MipLevels = 1;
+        device->CreateShaderResourceView(t.res, &sv, h);
+        SetTable(r, pair);
+        D(r, kCapture, groups_for(static_cast<uint64_t>(t.w) * t.h), {dst, t.w, t.h, kind});
+        ++counters.captures;
+    }
+
+    static bool NeedsTransition(D3D12_RESOURCE_STATES s) {
+        return s != D3D12_RESOURCE_STATE_COMMON && !(s & D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
+
+    // ---- slot output -----------------------------------------------------------------------------------------
+    FgExecResult WriteSlot(Rec& r, uint32_t slot, char kind, uint64_t token, uint32_t index) {
+        if (!target) return Fail(FgExecRefusal::SlotTargetMissing, "no presenter bound to the executor");
+        ID3D12Resource* res = target->SlotResource(slot);
+        if (!res) return Fail(FgExecRefusal::SlotMissing, "slot " + std::to_string(slot) + " has no texture");
+        const D3D12_RESOURCE_DESC d = res->GetDesc();
+        uint32_t bpp = 0;
+        const int code_ = pack_code(d.Format, &bpp);
+        if (d.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || d.Width != g.wo || d.Height != g.ho || code_ < 0)
+            return Fail(FgExecRefusal::SlotFormat, "slot texture " + std::to_string(d.Width) + " x " +
+                                                       std::to_string(d.Height) + " format " +
+                                                       std::to_string(static_cast<uint32_t>(d.Format)));
+        uint64_t src_off = out_off;
+        uint32_t pitch = out_stride * 8;
+        if (code_ != 0) {
+            D(r, kPack, groups_for(static_cast<uint64_t>(g.wo) * g.ho),
+              {out_off, out_stride, pack_off, pack_pitch, g.wo, g.ho, static_cast<uint32_t>(code_)});
+            src_off = pack_off;
+            pitch = pack_pitch;
+        }
+        ArenaTo(r, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        Transition(r, res, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+        D3D12_TEXTURE_COPY_LOCATION dst = {};
+        dst.pResource = res;
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst.SubresourceIndex = 0;
+        D3D12_TEXTURE_COPY_LOCATION src = {};
+        src.pResource = arena.Get();
+        src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint.Offset = src_off;
+        src.PlacedFootprint.Footprint.Format = d.Format;
+        src.PlacedFootprint.Footprint.Width = g.wo;
+        src.PlacedFootprint.Footprint.Height = g.ho;
+        src.PlacedFootprint.Footprint.Depth = 1;
+        src.PlacedFootprint.Footprint.RowPitch = pitch;
+        r.cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        if (desc.keep_outputs) {
+            PendingRb p;
+            p.rec.kind = kind;
+            p.rec.frame_token = token;
+            p.rec.index = index;
+            p.rec.width = g.wo;
+            p.rec.height = g.ho;
+            p.rec.slot_format = static_cast<uint32_t>(d.Format);
+            p.rec.slot_pitch = static_cast<uint32_t>(align(static_cast<uint64_t>(bpp) * g.wo, 256));
+            p.rec.colour_width = frame.colour.w;
+            p.rec.colour_height = frame.colour.h;
+            p.rec.menu_disable = frame.disable;
+            const uint64_t img = 8ull * out_stride * g.ho, colb = 8ull * frame.colour.w * frame.colour.h,
+                           slotb = static_cast<uint64_t>(p.rec.slot_pitch) * g.ho;
+            p.image = Buffer(img, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+            p.colour = Buffer(colb, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+            p.slot = Buffer(slotb, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+            if (p.image && p.colour && p.slot) {
+                r.cl->CopyBufferRegion(p.image.Get(), 0, arena.Get(), out_off, img);
+                r.cl->CopyBufferRegion(p.colour.Get(), 0, arena.Get(), cap_colour, colb);
+                Transition(r, res, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                D3D12_TEXTURE_COPY_LOCATION s2 = {};
+                s2.pResource = res;
+                s2.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                D3D12_TEXTURE_COPY_LOCATION d2 = {};
+                d2.pResource = p.slot.Get();
+                d2.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                d2.PlacedFootprint.Footprint = src.PlacedFootprint.Footprint;
+                d2.PlacedFootprint.Footprint.RowPitch = p.rec.slot_pitch;
+                r.cl->CopyTextureRegion(&d2, 0, 0, 0, &s2, nullptr);
+                Transition(r, res, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+                pending.push_back(std::move(p));
+            }
+        }
+        Transition(r, res, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+        return FgExecResult::Ok;
+    }
+
+    FgExecResult Finish(Rec& r, FgReadyFence* ready) {
+        uint64_t v = 0;
+        const FgExecResult s = Submit(&r, &v);
+        if (s != FgExecResult::Ok) return s;
+        if (desc.keep_outputs)
+            for (PendingRb& p : pending)
+                if (p.rec.fence_value == 0) p.rec.fence_value = v;
+        if (ready) {
+            ready->fence = fence_id;
+            ready->value = v;
+        }
+        return FgExecResult::Ok;
+    }
+};
+
+// ---- public ------------------------------------------------------------------------------------------------------
+
+FgD3d12Executor::FgD3d12Executor(const FgD3d12ExecutorDesc& desc) : impl_(new Impl()) {
+    impl_->desc = desc;
+    if (desc.weights) {
+        impl_->weights = *desc.weights;
+        impl_->have_weights = true;
+    }
+    impl_->desc.weights = nullptr;
+}
+
+FgD3d12Executor::~FgD3d12Executor() {
+    if (impl_ && impl_->fence) impl_->WaitValue(impl_->next_value, impl_->desc.wait_ms);
+}
+
+FgExecRefusal FgD3d12Executor::LastRefusal() const { return impl_->refusal; }
+const std::string& FgD3d12Executor::LastWhy() const { return impl_->why; }
+const FgExecCounters& FgD3d12Executor::Counters() const { return impl_->counters; }
+const FgExecGeometry& FgD3d12Executor::Geometry() const { return impl_->g; }
+uint64_t FgD3d12Executor::ArenaBytes() const { return impl_->arena_bytes; }
+
+FgExecResult FgD3d12Executor::Configure(const FgCreateDesc& cd, uint32_t /*history_banks*/) {
+    Impl& m = *impl_;
+    m.configured = false;
+    m.frame = FrameCtx();
+    // Checks that need no device come first: size, weights, then the device and queue, then the kernel files.
+    FgExecGeometry g;
+    std::string w;
+    if (!FgExecMakeGeometry(cd.output_width, cd.output_height, &g, &w))
+        return m.Fail(FgExecRefusal::SizeUnsupported, w);
+    if (!m.have_weights) return m.Fail(FgExecRefusal::WeightsMissing, "no weights given");
+    for (uint32_t i = 0; i < 17; ++i)
+        if (m.weights.net1_fragments[i].empty() || m.weights.net1_bias[i].empty())
+            return m.Fail(FgExecRefusal::WeightsInvalid, "net1 layer " + std::to_string(i + 1) + " empty");
+    if (m.desc.enable_full && !m.weights.has_net2)
+        return m.Fail(FgExecRefusal::WeightsMissing, "the Full path needs net2's weights");
+    if (cd.optional[kFgOptDistortion] == FgOptionalDecl::Always && !m.desc.settings.ignore_distortion)
+        return m.Fail(FgExecRefusal::DistortionUnsupported, "the session declares the distortion field always");
+    if (!cd.device) return m.Fail(FgExecRefusal::NullDevice, "no device");
+    if (!cd.queue) return m.Fail(FgExecRefusal::NullQueue, "no queue");
+    if (!m.pipelines_built) {
+        const FgExecResult k = m.LoadKernels();
+        if (k != FgExecResult::Ok) return k;
+    }
+    ID3D12Device* dev = static_cast<ID3D12Device*>(cd.device);
+    ID3D12CommandQueue* q = static_cast<ID3D12CommandQueue*>(cd.queue);
+    if (m.device && m.device.Get() != dev) return m.Fail(FgExecRefusal::BadArgument, "another device than before");
+    m.device = dev;
+    m.queue = q;
+    m.list_type = q->GetDesc().Type;
+    if (m.list_type != D3D12_COMMAND_LIST_TYPE_DIRECT && m.list_type != D3D12_COMMAND_LIST_TYPE_COMPUTE)
+        return m.Fail(FgExecRefusal::NullQueue, "the queue is neither a direct nor a compute queue");
+    if (m.fence) m.WaitValue(m.next_value, m.desc.wait_ms);
+    if (!m.pipelines_built) {
+        const FgExecResult p = m.BuildPipelines();
+        if (p != FgExecResult::Ok) return p;
+    }
+    FgExecResult s = m.CreateObjects();
+    if (s != FgExecResult::Ok) return s;
+    m.create = cd;
+    m.g = g;
+    m.cap_w = std::max(cd.output_width, cd.render_max_width);
+    m.cap_h = std::max(cd.output_height, cd.render_max_height);
+    s = m.Layout();
+    if (s != FgExecResult::Ok) return s;
+    s = m.FillWeightImage();
+    if (s != FgExecResult::Ok) return s;
+    m.arena = m.Buffer(m.arena_bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                       D3D12_RESOURCE_STATE_COMMON);
+    if (!m.arena) return m.Fail(FgExecRefusal::AllocationFailed, "arena of " + std::to_string(m.arena_bytes) + " bytes");
+    s = m.Upload();
+    if (s != FgExecResult::Ok) return s;
+    m.host.Configure(m.desc.settings, g);
+    m.configured = true;
+    m.refusal = FgExecRefusal::None;
+    m.why.clear();
+    ++m.counters.configures;
+    return FgExecResult::Ok;
+}
+
+bool FgD3d12Executor::BindSlotTarget(IFgSlotTarget* target) {
+    Impl& m = *impl_;
+    if (!target || !m.fence) {
+        m.Fail(FgExecRefusal::SlotTargetMissing, "no slot target or no fence");
+        return false;
+    }
+    std::string w;
+    const uint32_t id = target->RegisterFence(m.fence.Get(), &w);
+    if (!id) {
+        m.Fail(FgExecRefusal::FenceFailed, "the presenter refused the producer fence: " + w);
+        return false;
+    }
+    m.target = target;
+    m.fence_id = id;
+    return true;
+}
+
+FgExecResult FgD3d12Executor::RecordSharedGameFrame(const FgSharedDispatchDesc& d, FgSharedResult* out) {
+    Impl& m = *impl_;
+    if (!m.configured) return m.Fail(FgExecRefusal::NotConfigured, "Configure has not succeeded");
+    if (!d.packet || !out) return m.Fail(FgExecRefusal::BadArgument, "null packet / result");
+    if (m.DeviceRemoved()) return m.Fail(FgExecRefusal::DeviceLost, "device removed");
+    const FgFramePacket& p = *d.packet;
+    FrameCtx f;
+    f.token = d.frame_token;
+    f.preset = d.preset;
+    f.lite = d.preset == FgPreset::C;
+    if (d.preset != FgPreset::A && d.preset != FgPreset::B && d.preset != FgPreset::C)
+        return m.Fail(FgExecRefusal::PresetUnsupported, "preset outside A / B / C");
+    if (!f.lite && !m.desc.enable_full) return m.Fail(FgExecRefusal::PresetUnsupported, "the Full path is disabled");
+    if ((p.optional_present & FgOptBit(kFgOptDistortion)) && p.optional[kFgOptDistortion].resource &&
+        !m.desc.settings.ignore_distortion)
+        return m.Fail(FgExecRefusal::DistortionUnsupported, "the frame carries a distortion field");
+    std::string w;
+    FgExecRefusal rr = m.TakeInput(p.color, &f.colour, &w, "colour");
+    if (rr == FgExecRefusal::None) rr = m.TakeInput(p.depth, &f.depth, &w, "depth");
+    if (rr == FgExecRefusal::None) rr = m.TakeInput(p.motion, &f.motion, &w, "motion");
+    if (rr == FgExecRefusal::None && (p.optional_present & FgOptBit(kFgOptHudless)) &&
+        p.optional[kFgOptHudless].resource) {
+        rr = m.TakeInput(p.optional[kFgOptHudless], &f.hudless, &w, "hudless colour");
+        f.hud = rr == FgExecRefusal::None;
+    }
+    if (rr == FgExecRefusal::None && (p.optional_present & FgOptBit(kFgOptUiAlpha)) &&
+        p.optional[kFgOptUiAlpha].resource) {
+        rr = m.TakeInput(p.optional[kFgOptUiAlpha], &f.alpha, &w, "UI alpha");
+        if (rr == FgExecRefusal::None) {
+            f.ui1 = f.alpha.channels == 1;
+            f.ui4 = f.alpha.channels == 4;
+            if (!f.ui1 && !f.ui4) {
+                rr = FgExecRefusal::InputFormat;
+                w = "UI alpha: one or four channels";
+            }
+            f.alpha_kind = f.ui1 ? 1u : 4u;
+            f.alpha_channel = f.ui1 ? 0u : 3u;
+        }
+    }
+    if (rr == FgExecRefusal::None && f.colour.channels != 4) {
+        rr = FgExecRefusal::InputFormat;
+        w = "colour: four channels";
+    }
+    if (rr == FgExecRefusal::None && f.hud && f.hudless.channels != 4) {
+        rr = FgExecRefusal::InputFormat;
+        w = "hudless colour: four channels";
+    }
+    if (rr == FgExecRefusal::None && f.motion.channels != 2) {
+        rr = FgExecRefusal::InputFormat;
+        w = "motion: two channels";
+    }
+    if (rr == FgExecRefusal::None && (f.colour.region.ew != m.g.wo || f.colour.region.eh != m.g.ho)) {
+        rr = FgExecRefusal::InputExtent;
+        w = "the colour region's extent must be the output size";
+    }
+    if (rr != FgExecRefusal::None) return m.Fail(rr, w);
+    f.inverted = (p.flags & kFgFlagDepthReversed) != 0;
+    {
+        const volatile float ew = static_cast<float>(f.motion.region.ew), eh = static_cast<float>(f.motion.region.eh);
+        f.scx = p.motion_scale_x / ew;
+        f.scy = p.motion_scale_y / eh;
+    }
+    std::memcpy(f.clip_to_prev, p.camera_current, sizeof(f.clip_to_prev));
+    std::memcpy(f.prev_to_clip, p.camera_previous, sizeof(f.prev_to_clip));
+    f.valid = true;
+
+    // the previous game frame's last-index part, then this frame's schedule
+    std::vector<uint32_t> pairs;
+    m.host.EndFrame(&pairs);
+    for (size_t i = 0; i + 1 < pairs.size(); i += 2) std::swap(m.role_off[pairs[i]], m.role_off[pairs[i + 1]]);
+    std::vector<FgExecOp> ops;
+    const bool reset = !d.has_previous || (p.flags & kFgFlagReset) != 0;
+    m.host.BeginFrame(f.lite, d.preset == FgPreset::B, f.hud, f.ui4, f.ui1, reset, &ops);
+    m.frame = f;
+    if (f.lite)
+        ++m.counters.lite_frames;
+    else
+        ++m.counters.full_frames;
+
+    // submission 1: capture, clears and the menu decision
+    Rec r;
+    FgExecResult s = m.Begin(&r);
+    if (s != FgExecResult::Ok) return s;
+    InputTex* ins[5] = {&m.frame.colour, &m.frame.depth, &m.frame.motion, f.hud ? &m.frame.hudless : nullptr,
+                        (f.ui1 || f.ui4) ? &m.frame.alpha : nullptr};
+    const uint32_t dst[5] = {m.cap_colour, m.cap_depth, m.cap_motion, m.cap_hud, f.ui1 ? m.cap_ui1 : m.cap_ui4};
+    const uint32_t kind[5] = {4, 6, 5, 4, f.ui1 ? 1u : 4u};
+    for (InputTex* t : ins)
+        if (t && Impl::NeedsTransition(t->state))
+            m.Transition(r, t->res, t->state, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    for (int i = 0; i < 5; ++i)
+        if (ins[i]) m.Capture(r, *ins[i], dst[i], kind[i]);
+    for (InputTex* t : ins)
+        if (t && Impl::NeedsTransition(t->state))
+            m.Transition(r, t->res, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, t->state);
+    size_t i = 0;
+    bool detected = false;
+    for (; i < ops.size(); ++i) {
+        if (!m.RecordOp(r, ops[i])) return FgExecResult::Refused;
+        if (ops[i].op == FgOp::Detect || ops[i].op == FgOp::SetDisable) {
+            detected = ops[i].op == FgOp::Detect;
+            ++i;
+            break;
+        }
+    }
+    if (detected) {
+        m.ArenaTo(r, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        r.cl->CopyBufferRegion(m.menu_rb.Get(), 0, m.arena.Get(), m.detres_off, 32);
+    }
+    uint64_t v1 = 0;
+    s = m.Submit(&r, &v1);
+    if (s != FgExecResult::Ok) return s;
+    // submission 2: the rest of the once-per-game-frame stages
+    Rec r2;
+    s = m.Begin(&r2);
+    if (s != FgExecResult::Ok) return s;
+    for (; i < ops.size(); ++i)
+        if (!m.RecordOp(r2, ops[i])) return FgExecResult::Refused;
+    uint64_t v2 = 0;
+    s = m.Submit(&r2, &v2);
+    if (s != FgExecResult::Ok) return s;
+    out->menu.frame_token = d.frame_token;
+    out->menu.detected = false;
+    if (detected) {
+        ++m.counters.menu_waits;
+        if (!m.WaitValue(v1, m.desc.wait_ms)) {
+            if (m.DeviceRemoved()) return m.Fail(FgExecRefusal::DeviceLost, "device removed");
+            return m.Fail(FgExecRefusal::WaitTimeout, "menu decision");
+        }
+        void* ptr = nullptr;
+        D3D12_RANGE rg = {0, 32};
+        if (FAILED(m.menu_rb->Map(0, &rg, &ptr))) return m.Fail(FgExecRefusal::CommandFailed, "readback map");
+        uint32_t words[8];
+        std::memcpy(words, ptr, sizeof(words));
+        D3D12_RANGE none = {0, 0};
+        m.menu_rb->Unmap(0, &none);
+        out->menu.detected = words[1] != 0;   // this frame's detection (the session latches it)
+        m.frame.disable = words[4];
+    }
+    ++m.counters.shared;
+    return FgExecResult::Ok;
+}
+
+FgExecResult FgD3d12Executor::RecordGeneratedIndex(const FgIndexDispatchDesc& d, FgReadyFence* ready) {
+    Impl& m = *impl_;
+    if (!m.configured) return m.Fail(FgExecRefusal::NotConfigured, "Configure has not succeeded");
+    if (!ready) return m.Fail(FgExecRefusal::BadArgument, "null ready fence");
+    if (!m.frame.valid || m.frame.token != d.frame_token || !m.host.InFrame())
+        return m.Fail(FgExecRefusal::BadArgument, "no shared work recorded for this game frame");
+    if (d.preset != m.frame.preset) return m.Fail(FgExecRefusal::BadArgument, "preset differs from the game frame's");
+    if (!m.target) return m.Fail(FgExecRefusal::SlotTargetMissing, "no presenter bound to the executor");
+    std::vector<FgExecOp> ops;
+    m.host.IndexOps(d.t, m.frame.hud, m.frame.ui4, false, &ops);
+    Rec r;
+    FgExecResult s = m.Begin(&r);
+    if (s != FgExecResult::Ok) return s;
+    for (const FgExecOp& op : ops)
+        if (!m.RecordOp(r, op)) return FgExecResult::Refused;
+    s = m.WriteSlot(r, d.slot.slot, 'g', d.frame_token, d.index);
+    if (s != FgExecResult::Ok) return s;
+    s = m.Finish(r, ready);
+    if (s == FgExecResult::Ok) ++m.counters.indices;
+    return s;
+}
+
+FgExecResult FgD3d12Executor::RecordMenuCopy(const FgCopyDispatchDesc& d, FgReadyFence* ready) {
+    Impl& m = *impl_;
+    if (!m.configured) return m.Fail(FgExecRefusal::NotConfigured, "Configure has not succeeded");
+    if (!ready) return m.Fail(FgExecRefusal::BadArgument, "null ready fence");
+    if (!m.frame.valid || m.frame.token != d.frame_token)
+        return m.Fail(FgExecRefusal::BadArgument, "no captured game frame for this token");
+    Rec r;
+    FgExecResult s = m.Begin(&r);
+    if (s != FgExecResult::Ok) return s;
+    FgExecOp op;
+    op.op = FgOp::FinalCopy;
+    m.RecordOp(r, op);
+    s = m.WriteSlot(r, d.slot.slot, 'm', d.frame_token, d.index);
+    if (s != FgExecResult::Ok) return s;
+    s = m.Finish(r, ready);
+    if (s == FgExecResult::Ok) ++m.counters.copies;
+    return s;
+}
+
+FgExecResult FgD3d12Executor::RecordRealEndpoint(const FgRealDispatchDesc& d, FgReadyFence* ready) {
+    Impl& m = *impl_;
+    if (!m.configured) return m.Fail(FgExecRefusal::NotConfigured, "Configure has not succeeded");
+    if (!ready) return m.Fail(FgExecRefusal::BadArgument, "null ready fence");
+    uint32_t slot = d.slot.slot;
+    bool write = !d.real_only && d.slot.reserved;
+    if (d.real_only && m.target && m.frame.valid && m.frame.token == d.frame_token) {
+        // a real-only present shows a slot image: reserve one and copy the game frame into it (no slot free: the
+        // presenter answers the present itself)
+        write = m.target->ReserveRealSlot(&slot);
+    }
+    if (write) {
+        if (!m.frame.valid || m.frame.token != d.frame_token)
+            return m.Fail(FgExecRefusal::BadArgument, "no captured game frame for this token");
+        Rec r;
+        FgExecResult s = m.Begin(&r);
+        if (s != FgExecResult::Ok) return s;
+        FgExecOp op;
+        op.op = FgOp::FinalCopy;
+        m.RecordOp(r, op);
+        s = m.WriteSlot(r, slot, 'r', d.frame_token, 0);
+        if (s != FgExecResult::Ok) return s;
+        s = m.Finish(r, ready);
+        if (s == FgExecResult::Ok) ++m.counters.real_endpoints;
+        return s;
+    }
+    const uint64_t v = ++m.next_value;
+    if (FAILED(m.queue->Signal(m.fence.Get(), v))) return m.Fail(FgExecRefusal::CommandFailed, "queue signal");
+    ready->fence = m.fence_id;
+    ready->value = v;
+    ++m.counters.real_endpoints;
+    return FgExecResult::Ok;
+}
+
+uint64_t FgD3d12Executor::LastComputeValue() const { return impl_->next_value; }
+uint64_t FgD3d12Executor::CompletedComputeValue() const {
+    return impl_->fence ? impl_->fence->GetCompletedValue() : 0;
+}
+
+bool FgD3d12Executor::WaitIdle(uint32_t timeout_ms) {
+    return !impl_->fence || impl_->WaitValue(impl_->next_value, timeout_ms);
+}
+
+bool FgD3d12Executor::TakeOutputs(std::vector<FgExecOutputRecord>* out) {
+    Impl& m = *impl_;
+    if (!out || !WaitIdle(m.desc.wait_ms * 4)) return false;
+    for (Impl::PendingRb& p : m.pending) {
+        void* ptr = nullptr;
+        if (SUCCEEDED(p.image->Map(0, nullptr, &ptr))) {
+            p.rec.image.resize(4ull * p.rec.width * p.rec.height);
+            const uint8_t* src = static_cast<const uint8_t*>(ptr);
+            for (uint32_t y = 0; y < p.rec.height; ++y)
+                std::memcpy(p.rec.image.data() + 4ull * p.rec.width * y, src + 8ull * m.out_stride * y,
+                            8ull * p.rec.width);
+            p.image->Unmap(0, nullptr);
+        }
+        if (SUCCEEDED(p.colour->Map(0, nullptr, &ptr))) {
+            p.rec.colour.resize(4ull * p.rec.colour_width * p.rec.colour_height);
+            std::memcpy(p.rec.colour.data(), ptr, p.rec.colour.size() * 2);
+            p.colour->Unmap(0, nullptr);
+        }
+        if (SUCCEEDED(p.slot->Map(0, nullptr, &ptr))) {
+            p.rec.slot.resize(static_cast<size_t>(p.rec.slot_pitch) * p.rec.height);
+            std::memcpy(p.rec.slot.data(), ptr, p.rec.slot.size());
+            p.slot->Unmap(0, nullptr);
+        }
+        out->push_back(std::move(p.rec));
+    }
+    m.pending.clear();
+    return true;
+}
+
+// ---- presenter binding ---------------------------------------------------------------------------------------------
+
+namespace {
+
+template <class P>
+class SlotTargetOf final : public IFgSlotTarget {
+public:
+    explicit SlotTargetOf(P* p) : p_(p) {}
+    ID3D12Resource* SlotResource(uint32_t slot) const override { return p_->SlotResource(slot); }
+    uint32_t RegisterFence(ID3D12Fence* fence, std::string* why) override {
+        FgWinResult r;
+        const uint32_t id = p_->RegisterFence(fence, &r);
+        if (!id && why) *why = FgWinRefusalName(r.refusal);
+        return id;
+    }
+    bool ReserveRealSlot(uint32_t* slot) override { return p_->ReserveRealSlot(slot) == FgStatus::Ok; }
+
+private:
+    P* p_;
+};
+
+}  // namespace
+
+FgExecutorPresenterSource::~FgExecutorPresenterSource() = default;
+
+FgStatus FgExecutorPresenterSource::CreatePresenter(const FgCreateDesc& desc, std::unique_ptr<IFgPresenter>* out,
+                                                    std::string* why) {
+    if (!out || !inner_ || !executor_) return FgStatus::InvalidArgument;
+    out->reset();
+    std::unique_ptr<IFgPresenter> p;
+    const FgStatus s = inner_->CreatePresenter(desc, &p, why);
+    if (s != FgStatus::Ok || !p) return s == FgStatus::Ok ? FgStatus::Unsupported : s;
+    std::unique_ptr<IFgSlotTarget> t;
+    if (FgWinCompPresenter* c = dynamic_cast<FgWinCompPresenter*>(p.get())) {
+        t.reset(new SlotTargetOf<FgWinCompPresenter>(c));
+    } else if (FgDxgiPresenter* x = dynamic_cast<FgDxgiPresenter*>(p.get())) {
+        t.reset(new SlotTargetOf<FgDxgiPresenter>(x));
+    } else {
+        if (why) *why = "the presenter has no D3D12 slots for the executor";
+        return FgStatus::Unsupported;
+    }
+    if (!executor_->BindSlotTarget(t.get())) {
+        if (why) *why = std::string("executor binding: ") + executor_->LastWhy();
+        return FgStatus::Unsupported;
+    }
+    target_ = std::move(t);
+    *out = std::move(p);
+    return FgStatus::Ok;
+}
+
+}  // namespace wgfg
