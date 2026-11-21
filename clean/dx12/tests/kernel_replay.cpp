@@ -42,6 +42,10 @@
 //   time <runs>                                after the run (and the saves), the steps run <runs> more times; the mean
 //                                              wall time per run (submission to completion, synchronised after each
 //                                              run) is printed as "chain <name>: time <ms> ms per run (<runs> runs)"
+//   time <runs> <first> <last> <label>         (zero or more, after the saves) one warm-up run, then <runs> runs of
+//                                              steps <first>..<last> only (step indices from 0, inclusive), each run
+//                                              synchronised; printed as "chain <name>: range <label> steps <first>..
+//                                              <last> time <ms> ms per run (<runs> runs)"
 #include "../../runtime/device.h"
 #include "../../runtime/device_d3d12.h"
 
@@ -418,6 +422,12 @@ struct ChainStep {
   std::vector<std::string> args;   // "@id" or a decimal value
 };
 
+struct TimeRange {   // "time <runs> <first> <last> <label>": steps first..last (inclusive) only
+  int runs = 0;
+  size_t first = 0, last = 0;
+  std::string label;
+};
+
 struct Chain {
   std::string name;
   std::vector<std::pair<std::string, std::string>> modules;
@@ -425,6 +435,7 @@ struct Chain {
   std::vector<ChainStep> steps;
   std::vector<std::pair<std::string, std::string>> saves;   // (id, file)
   int time_runs = 0;
+  std::vector<TimeRange> ranges;
   Case dcase;   // direct textures bound around the steps (rs=direct kernels): direct / direct_params / direct_out lines
 };
 
@@ -525,8 +536,8 @@ int run_chain(Device* d, Chain& c, const std::string& base) {
       }
     }
   }
-  auto run_steps = [&]() -> bool {
-    for (size_t i = 0; i < c.steps.size(); ++i) {
+  auto run_steps = [&](size_t first = 0, size_t last = (size_t)-1) -> bool {
+    for (size_t i = first; i < c.steps.size() && i <= last; ++i) {
       if (!d->launch(c.steps[i].kernel, c.steps[i].grid, c.steps[i].block, argv[i].data())) {
         std::printf("%s: step %zu launch %s: %s\n", c.name.c_str(), i, c.steps[i].kernel.c_str(), d->err().c_str());
         return false;
@@ -576,6 +587,22 @@ int run_chain(Device* d, Chain& c, const std::string& base) {
       if (!run_steps()) rc = 1;
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     if (rc == 0) std::printf("chain %s: time %.3f ms per run (%d runs)\n", c.name.c_str(), ms / c.time_runs, c.time_runs);
+  }
+  for (size_t k = 0; rc == 0 && k < c.ranges.size(); ++k) {
+    const TimeRange& tr = c.ranges[k];
+    if (tr.runs <= 0 || tr.first > tr.last || tr.last >= c.steps.size()) {
+      std::printf("%s: bad time range %s\n", c.name.c_str(), tr.label.c_str());
+      rc = 1;
+      break;
+    }
+    if (!run_steps(tr.first, tr.last)) { rc = 1; break; }   // warm-up
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int r = 0; rc == 0 && r < tr.runs; ++r)
+      if (!run_steps(tr.first, tr.last)) rc = 1;
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (rc == 0)
+      std::printf("chain %s: range %s steps %zu..%zu time %.4f ms per run (%d runs)\n", c.name.c_str(),
+                  tr.label.c_str(), tr.first, tr.last, ms / tr.runs, tr.runs);
   }
   for (auto& b : c.bufs)
     if (b.ptr) d->free(b.ptr);
@@ -627,7 +654,15 @@ int main(int argc, char** argv) {
         s >> id >> file;
         ch.saves.emplace_back(id, file);
       } else if (w == "time") {
-        s >> ch.time_runs;
+        int runs = 0;
+        s >> runs;
+        TimeRange tr;
+        if (s >> tr.first >> tr.last >> tr.label) {
+          tr.runs = runs;
+          ch.ranges.push_back(tr);
+        } else {
+          ch.time_runs = runs;
+        }
       } else if (w == "direct" || w == "direct_params" || w == "direct_out") {
         bool bad = false;
         parse_direct_line(w, s, ch.dcase, &bad);

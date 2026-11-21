@@ -164,6 +164,32 @@ delivered by the spec side; the code never guesses it (it raises, or takes the c
 - Required arguments where the behaviour is OPEN: the cap on N (`n_max`), the further mode that also accepts
   i = N + 1 (`extra_index`), the maximum that "last index" compares with (`maximum`).
 
+## Light path, preset C (`reference/stages_common.py`, `lite.py`, `pipeline.py`; D3D12 `fg_lite_*.hlsl`)
+
+The shared non-network stages and the light blend, delivered by the spec side as behaviour; the choices below are
+the clean side's own where the delivery leaves them open or names a GPU approximation.
+
+- **Storage** (internal images are arena buffers, row-major, channels interleaved): colour, reference and UI images
+  float16 x 4; net1-grid colour float16 x 4; luma change, sigmoid map and all masks float16; quality, logit pairs,
+  weights and the resolved previous-to-current field float16 x 2; processed motion float32 x 2; packed depth and flag
+  images uint32; the three 64-bit scatter buffers int64; pyramid levels float16 x 3 (plus float32 x 3 partial sums,
+  device only); net1's cells as `fg_net1_mma.py`'s HWC float16 (fused path) or CHW (exact path).
+- **Arithmetic**: single precision, one rounding per operation in the written order, fma where fused. The
+  approximate division is `a * rcp(b)` with `rcp` the correctly rounded reciprocal (`wg_div(1, b)` on the device);
+  `ex2` is our own deterministic 2^y (floor, a degree-6 polynomial in fma form, an exact power-of-two scale, flush below
+  2^-126); clamps follow minNum / maxNum; float-to-integer conversions truncate and saturate (NaN -> 0). Single-precision
+  denormals are flushed on the device; the test data stays away from them.
+- **Textures**: nearest = texel `clamp(floor(X * W))`; bilinear = the four clamped texels around `X * W - 0.5`, blended
+  with fma along x, then y. Application inputs are read through their region with the clamp to its texel centres;
+  the clamp bounds are rounded up / down on the host. Reads at a pixel's own centre on its own grid are integer reads
+  (equal by the size bound).
+- **Choices**: the scatter grid is the frame divided by 2 (by 4 above 2880 lines); the pull pyramid's coarsest level
+  keeps its own values (no tile fill); the intermediate-time footprint measures the warped 3 x 3 positions from each
+  neighbour's own position; pixels of an odd-width net1 image outside the 2 x 2-fold grid write no quality / occlusion
+  value; the hudless detector reads the hudless bilinearly when its base offset differs from the colour's.
+- **Not modelled**: the full path (presets A / B) and the distortion field (both refused), the copy of the colour into
+  the application's second output, and the on-screen indicator.
+
 ## OPEN (waiting for the spec side)
 
 1. (closed: map v1.1, natural order, is `data/fg.v1.map.json`.)
