@@ -4,6 +4,7 @@
 // writes wronggpu.ini (front-end keys and runtime_options) and OptiScaler.ini from it, validating every value first
 // (a bad runtime value makes the runtime's create fail and AMD's FSR takes over). Written for this project.
 #pragma once
+#include "fg.h"
 #include "settings.h"
 #include "../../../wgshared/include/wg_model_entries.h"
 
@@ -14,7 +15,8 @@ namespace wg {
 // Model: the model the game starts with (WRONGGPU_MODEL_L / WRONGGPU_MODEL_K builds only): wronggpu.ini's runtime_options
 // model item and the OptiScaler entry OptiScaler starts with (UpscalerIndex); with M nothing is changed in either file
 // (except that Model K's or Model L's own item and entry go back to Model M's when the profile leaves them).
-enum class Layer { Fe, Rt, Opti, Rr, Model };
+// Fg: frame generation (fg.h; WRONGGPU_FG builds only): the game's state folder, settings.ini, once the player opts in.
+enum class Layer { Fe, Rt, Opti, Rr, Model, Fg };
 enum class Tier { Basic, Advanced, Diagnostics };
 
 // One setting of the profile. Values are the profile's own words ("on", "off", ...); Render maps them to the file.

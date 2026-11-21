@@ -50,6 +50,24 @@ else()
   set(MAP_L_ARGS)
   set(MAP_L_FILE)
 endif()
+# Frame generation (#96, src/wg_core/fg.h): strictly off by default. ON (a build whose payload runs WrongGPU's frame generation):
+# the per-game settings fg, fg_preset, fg_multiplier and fg_presenter (`set <game> fg=on`, off by default) and preset FG's
+# converter map embedded for "model convert --preset=FG" (the model's folder: <model>\FG). OFF: none of it; the keys are refused
+# by name and nothing about frame generation is written into any game.
+option(WRONGGPU_FG "Frame generation's per-game settings and converter map (preset FG) in the launcher; OFF = none" OFF)
+set(WRONGGPU_MAP_FG "${CMAKE_CURRENT_SOURCE_DIR}/../../data/fg.v1.map.json" CACHE FILEPATH "Frame generation converter map (preset FG; read only with WRONGGPU_FG)")
+if(WRONGGPU_FG AND WRONGGPU_MAP_FG AND EXISTS "${WRONGGPU_MAP_FG}")
+  set(MAP_FG_ARGS --map-fg ${WRONGGPU_MAP_FG})
+  set(MAP_FG_FILE ${WRONGGPU_MAP_FG})
+else()
+  set(MAP_FG_ARGS)
+  set(MAP_FG_FILE)
+endif()
+if(WRONGGPU_FG)
+  set(FG_DEFINITION WRONGGPU_FG=1)
+else()
+  set(FG_DEFINITION WRONGGPU_FG=0)
+endif()
 option(WRONGGPU_PRESET_K "Preset K in the installer (second model choice, /PRESET=K, its converter map); OFF = Model M only" ON)
 if(WRONGGPU_PRESET_K)
   set(PRESET_K_MAP_ARGS --map-k ${WRONGGPU_MAP_K})
@@ -142,11 +160,11 @@ add_library(wg_core STATIC
   src/wg_core/model.cpp src/wg_core/checks.cpp src/wg_core/install.cpp src/wg_core/logs.cpp
   src/wg_core/profile.cpp src/wg_core/logtail.cpp src/wg_core/launcher.cpp
   src/wg_core/fingerprint.cpp src/wg_core/optikeys.cpp src/wg_core/leftovers.cpp src/wg_core/rr.cpp src/wg_core/rrprep.cpp src/wg_core/gamerules.cpp
-  src/wg_core/rrconfig.cpp src/wg_core/convert_ignore.cpp)
+  src/wg_core/rrconfig.cpp src/wg_core/convert_ignore.cpp src/wg_core/fg.cpp)
 target_include_directories(wg_core PUBLIC src)
 target_compile_definitions(wg_core PUBLIC ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION})
 # (private: model-choice-tests compiles profile.cpp with the Model L choice on, against this library)
-target_compile_definitions(wg_core PRIVATE ${MODEL_L_DEFINITION} ${MODEL_K_DEFINITION})
+target_compile_definitions(wg_core PRIVATE ${MODEL_L_DEFINITION} ${MODEL_K_DEFINITION} ${FG_DEFINITION})
 if(WRONGGPU_TESTING)
   target_compile_definitions(wg_core PUBLIC WRONGGPU_TESTING)
   if(NOT MSVC)
@@ -193,8 +211,8 @@ add_custom_command(
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/make_payload.py
           --payload ${WRONGGPU_PAYLOAD_DIR} --map ${WRONGGPU_MAP} ${PRESET_K_MAP_ARGS} --version ${WRONGGPU_VERSION}
           --build-id=${WRONGGPU_BUILD_ID} --payload-name=${WRONGGPU_PAYLOAD_NAME}
-          ${DIRECT_ROUTE_PAYLOAD_ARGS} ${RR_PAYLOAD_ARGS} ${MAP_F_ARGS} ${MAP_L_ARGS} ${MANIFEST_ARGS} ${TESTING_PAYLOAD_ARGS} --out ${GEN}
-  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/make_payload.py ${MANIFEST} ${WRONGGPU_MAP} ${PRESET_K_MAP_FILE} ${MAP_F_FILE} ${MAP_L_FILE} ${WRONGGPU_PAYLOAD_FILES} ${WRONGGPU_RR_FILES}
+          ${DIRECT_ROUTE_PAYLOAD_ARGS} ${RR_PAYLOAD_ARGS} ${MAP_F_ARGS} ${MAP_L_ARGS} ${MAP_FG_ARGS} ${MANIFEST_ARGS} ${TESTING_PAYLOAD_ARGS} --out ${GEN}
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/make_payload.py ${MANIFEST} ${WRONGGPU_MAP} ${PRESET_K_MAP_FILE} ${MAP_F_FILE} ${MAP_L_FILE} ${MAP_FG_FILE} ${WRONGGPU_PAYLOAD_FILES} ${WRONGGPU_RR_FILES}
   COMMENT "Embedding the payload and the converter map")
 
 # WrongGPU-Restore.exe: the per-game restorer (uninstall.exe in each game's wronggpu-setup folder): wg_core without the
@@ -265,7 +283,7 @@ target_link_libraries(wg-core-tests PRIVATE wg_core)
 # job files, the update reply, the game environment; no game, payload or GPU).
 add_executable(launcher-core-tests tests/launcher_core_tests.cpp)
 target_link_libraries(launcher-core-tests PRIVATE wg_core)
-target_compile_definitions(launcher-core-tests PRIVATE ${MODEL_L_DEFINITION} ${MODEL_K_DEFINITION})
+target_compile_definitions(launcher-core-tests PRIVATE ${MODEL_L_DEFINITION} ${MODEL_K_DEFINITION} ${FG_DEFINITION})
 # The coexistence tests (M2): fingerprints on synthetic bytes, the proxy picker, byte-exact OptiScaler.ini edits and the
 # inikey journal, the OptiScaler tab's key rules, the record's inikey and coexist lines, the log warnings.
 add_executable(coexist-core-tests tests/coexist_tests.cpp)
@@ -300,13 +318,20 @@ add_test(NAME launcher-core COMMAND launcher-core-tests)
 add_test(NAME model-choice COMMAND model-choice-tests)
 add_test(NAME model-choice-k COMMAND model-choice-k-tests)
 add_test(NAME model-choice-k-only COMMAND model-choice-k-only-tests)
+# The frame generation choice (profile.cpp with WRONGGPU_FG on, whatever this build's switch, so that CI, which keeps it off,
+# runs it): the four settings in their exact spellings, profile.ini and settings.ini round trips beside the other keys, the
+# opt-in rule (nothing written for a game never opted in), fg kept off in the game while its data is not ready.
+add_executable(fg-choice-tests tests/fg_choice_tests.cpp src/wg_core/profile.cpp)
+target_compile_definitions(fg-choice-tests PRIVATE WRONGGPU_FG=1)
+target_link_libraries(fg-choice-tests PRIVATE wg_core)
+add_test(NAME fg-choice COMMAND fg-choice-tests)
 add_test(NAME coexist-core COMMAND coexist-core-tests)
 add_test(NAME convert-ignore COMMAND convert-ignore-tests)
 if(WRONGGPU_TESTING)
   add_test(NAME wizard-policy COMMAND wizard-policy-tests)
 endif()
 target_include_directories(WrongGPU PRIVATE ${GEN})
-target_compile_definitions(WrongGPU PRIVATE ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION} ${MODEL_L_DEFINITION} ${MODEL_K_DEFINITION})
+target_compile_definitions(WrongGPU PRIVATE ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION} ${MODEL_L_DEFINITION} ${MODEL_K_DEFINITION} ${FG_DEFINITION})
 target_link_libraries(WrongGPU PRIVATE wg_ui wg_core wgc_core comctl32 shell32 ole32 oleaut32 uuid advapi32 user32 gdi32 gdiplus dwmapi uxtheme d2d1 d3d11 dxgi dwrite windowscodecs uiautomationcore)
 if(MSVC)
   target_compile_options(WrongGPU PRIVATE /Zi)

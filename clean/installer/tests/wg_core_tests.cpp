@@ -9,8 +9,10 @@
 
 #include "wg_core/checks.h"
 #include "wg_core/context.h"
+#include "wg_core/fg.h"
 #include "wg_core/gamerules.h"
 #include "wg_core/model.h"
+#include "wg_core/profile.h"
 #include "wg_core/record.h"
 #include "wg_core/rrprep.h"
 #include "wg_core/settings.h"
@@ -428,6 +430,130 @@ int main() {
                 if (!left) break;
                 Sleep(100);
             }
+        }
+
+        // ---- frame generation (fg.h): the four keys in their exact spellings, settings.ini's view, the opt-in rule ---------
+        {
+            require(IsFgKey("fg") && IsFgKey("fg_preset") && IsFgKey("fg_multiplier") && IsFgKey("fg_presenter") && !IsFgKey("FG") &&
+                        !IsFgKey("fg_mode") && !IsFgKey("rr_mode") && !IsFgKey("model") && !IsFgKey(""),
+                    "fg: the four keys, by their exact names only");
+            require(string(FgDefault("fg")) == "off" && string(FgDefault("fg_preset")) == "A" && string(FgDefault("fg_multiplier")) == "2" &&
+                        string(FgDefault("fg_presenter")) == "auto" && !FgDefault("rr_mode") && !FgValues("executor"),
+                    "fg: the defaults off, A, 2, auto");
+            string n;
+            wstring why;
+            for (const char* v : {"off", "on"}) require(ValidateFgValue("fg", v, &n, &why) && n == v, "fg: off and on");
+            for (const char* v : {"A", "B", "C"}) require(ValidateFgValue("fg_preset", v, &n, &why) && n == v, "fg_preset: A, B, C");
+            for (const char* v : {"2", "3", "4", "5", "6"}) require(ValidateFgValue("fg_multiplier", v, &n, &why) && n == v, "fg_multiplier: 2 to 6");
+            for (const char* v : {"auto", "hwfq", "dxgi_tearing", "dxgi_vsync"})
+                require(ValidateFgValue("fg_presenter", v, &n, &why) && n == v, "fg_presenter: auto, hwfq, dxgi_tearing, dxgi_vsync");
+            require(ValidateFgValue("fg", "  on\t", &n, &why) && n == "on", "fg: spaces around a value are dropped (as on every line)");
+            // strict: no case folding, no other spellings of the same thing
+            for (const char* v : {"On", "ON", "1", "true", "yes", "", "o n"}) require(!ValidateFgValue("fg", v, &n, &why), "fg: only off / on, as written");
+            for (const char* v : {"a", "b", "D", "AB", "0"}) require(!ValidateFgValue("fg_preset", v, &n, &why), "fg_preset: only A, B, C (upper case)");
+            for (const char* v : {"1", "7", "02", "+2", "2.0", "2x", "-3", " 3x"}) require(!ValidateFgValue("fg_multiplier", v, &n, &why), "fg_multiplier: only 2..6, plain digits");
+            for (const char* v : {"Auto", "HWFQ", "dxgi", "vsync", "dxgi-tearing"}) require(!ValidateFgValue("fg_presenter", v, &n, &why), "fg_presenter: only its four spellings");
+            require(!ValidateFgValue("fg_preset", "b", &n, &why) && why == L"\"b\" is not a value of fg_preset (allowed, exactly as written: A, B, C)",
+                    "fg: a refusal names the value, the key and the allowed spellings");
+            require(!ValidateFgValue("rr_mode", "fast", &n, &why), "fg: not an FG key: refused");
+
+            // settings.ini's view: defaults for missing keys, an invalid value keeps the default and is reported, a key's first line counts
+            FgState s = FgStateOf({{"upscaler", "network"}, {"rr_mode", "fast"}});
+            require(!s.present && s.issues.empty() && s.v.size() == 4 && s.v["fg"] == "off" && s.v["fg_preset"] == "A" && s.v["fg_multiplier"] == "2" &&
+                        s.v["fg_presenter"] == "auto",
+                    "fg state: a file without FG keys gives the defaults (and says it has none)");
+            s = FgStateOf({{"fg", "on"}, {"fg_preset", "C"}, {"fg_multiplier", "4"}, {"fg_presenter", "dxgi_vsync"}, {"rr_mode", "exact"}});
+            require(s.present && s.issues.empty() && s.v["fg"] == "on" && s.v["fg_preset"] == "C" && s.v["fg_multiplier"] == "4" && s.v["fg_presenter"] == "dxgi_vsync",
+                    "fg state: the four keys read");
+            s = FgStateOf({{"fg", "ON"}, {"fg_preset", "b"}, {"fg_multiplier", "9"}, {"fg_presenter", "hwfq"}});
+            require(s.present && s.issues.size() == 3 && s.v["fg"] == "off" && s.v["fg_preset"] == "A" && s.v["fg_multiplier"] == "2" && s.v["fg_presenter"] == "hwfq" &&
+                        s.issues[0].find(L"\"ON\" is not a value of fg") != wstring::npos && s.issues[0].find(L"the default (off) is used") != wstring::npos,
+                    "fg state: invalid values keep their defaults, each reported; a valid one is taken");
+            s = FgStateOf({{"fg", "on"}, {"fg", "off"}});
+            require(s.v["fg"] == "on", "fg state: a key's first line counts (wg_state.h)");
+
+            // the opt-in rule: nothing for a profile at its defaults and a file without FG keys; else all four, fg off while the data is not ready
+            Profile fp;  // (the four keys set by hand: this build may not have the frame generation choice)
+            require(FgStateKeys(fp, {}, true).empty() && FgStateKeys(fp, {{"upscaler", "amd"}}, false).empty() && !FgOptedIn(fp),
+                    "fg keys: never opted in: nothing written");
+            fp.v = {{"fg", "on"}, {"fg_preset", "B"}, {"fg_multiplier", "3"}, {"fg_presenter", "hwfq"}};
+            std::vector<std::pair<string, string>> k = FgStateKeys(fp, {}, true);
+            require(FgOptedIn(fp) && k == std::vector<std::pair<string, string>>{{"fg", "on"}, {"fg_preset", "B"}, {"fg_multiplier", "3"}, {"fg_presenter", "hwfq"}},
+                    "fg keys: opted in, data ready: the four keys in their order and spelling");
+            k = FgStateKeys(fp, {}, false);
+            require(k.size() == 4 && k[0] == std::make_pair(string("fg"), string("off")) && k[1].second == "B", "fg keys: the data not ready: fg written as off, the rest kept");
+            fp.v = {{"fg", "off"}, {"fg_preset", "A"}, {"fg_multiplier", "2"}, {"fg_presenter", "auto"}};
+            k = FgStateKeys(fp, {{"fg", "on"}, {"rr_mode", "fast"}}, true);
+            require(!FgOptedIn(fp) && k.size() == 4 && k[0].second == "off", "fg keys: back to the defaults while the file says on: off is written down");
+            fp.v = {{"fg_multiplier", "5"}};
+            k = FgStateKeys(fp, {}, true);
+            require(FgOptedIn(fp) && k.size() == 4 && k[0].second == "off" && k[2].second == "5", "fg keys: one key away from its default is an opt-in too (fg stays off)");
+
+            // the library's version: 310.1 or newer (an empty or unparsable version is left to the converter)
+            require(FgVersionSupported(L"310.1.0.0") && FgVersionSupported(L"310.4.2.0") && FgVersionSupported(L"311.0.0.0") && FgVersionSupported(L"400") &&
+                        FgVersionSupported(L"") && FgVersionSupported(L"x.y"),
+                    "fg library: 310.1 and newer pass (no version: the converter decides)");
+            require(!FgVersionSupported(L"310.0.9.0", &why) && !FgVersionSupported(L"3.7.10.0", &why) &&
+                        why == L"version 3.7.10.0 has no frame-generation model (version 310.1 or newer is needed)" &&
+                        !FgVersionSupported(L"3.7.0", &why) && why.find(L"3.7.0") != wstring::npos && !FgVersionSupported(L"1.10.0.0", &why),
+                    "fg library: older versions (3.7.x, 310.0) are refused by version, in words");
+            const wstring fgDir = Join(dir, L"fg-lib");
+            EnsureDir(fgDir);
+            require(CheckFgLibrary(Join(fgDir, L"nvngx_dlssg.dll")).verdict == FgLibrary::MISSING && GameFgLibraries(fgDir).empty() &&
+                        GameFgLibraries(Join(fgDir, L"none")).empty(),
+                    "fg library: none in a folder (or no folder): nothing found");
+            const string notPe = "synthetic bytes, not a PE image";
+            WriteFileAtomic(Join(fgDir, L"nvngx_dlssg.dll"), notPe.data(), notPe.size());
+            const FgLibrary nl = CheckFgLibrary(Join(fgDir, L"nvngx_dlssg.dll"));
+            require(nl.verdict == FgLibrary::CANDIDATE && nl.version.empty() && GameFgLibraries(fgDir).size() == 1,
+                    "fg library: a file without a version is a candidate (the converter decides from its bytes)");
+            wstring lib;
+            require(CheckFgEnable(fgDir, false, &lib, &why) == FgEnable::CONVERT && IEq(lib, Join(fgDir, L"nvngx_dlssg.dll")) &&
+                        CheckFgEnable(fgDir, true, &lib, &why) == FgEnable::READY,
+                    "fg enable: the game's library converts when the data is not ready; ready otherwise");
+            require(CheckFgEnable(Join(dir, L"no-such-game"), true, &lib, &why) == FgEnable::NO_LIBRARY && lib.empty() &&
+                        why.find(L"no frame generation library (nvngx_dlssg.dll)") != wstring::npos && why.find(L"stays off") != wstring::npos,
+                    "fg enable: a game without a frame generation library is refused in words, even with the data ready");
+
+            // the converter's preset FG by name: only in a build with its map; its own folder and file name
+            static const EmbeddedData withFg{nullptr, 0, 900, L"00", 0, L"", 0, L"0.7.0", L"0.7.0", L"0.7.0", nullptr, 0, 0, L"", L"", 903, L"00", 904, L"00"};
+            static const EmbeddedData noFg{nullptr, 0, 900, L"00", 0, L"", 0, L"0.7.0", L"0.7.0", L"0.7.0", nullptr, 0, 0, L"", L"", 903, L"00"};
+            Context fc, nc;
+            fc.data = &withFg;
+            nc.data = &noFg;
+            wstring err;
+            require(!SelectPreset(nc, L"FG", err) && err == L"This build of WrongGPU has no converter data for frame generation." && !nc.presetFG &&
+                        SelectedPreset(nc) == L'M' && ModelDir(nc) == ModelBaseDir() && wstring(ModelSourceName(nc)) == L"nvngx_dlss.dll",
+                    "preset FG: refused by a build without its map; nothing changes");
+            require(!SelectPreset(nc, L"Q", err) && err.find(L"FG") == wstring::npos, "preset FG: not named among the models of a build without it");
+            fc.mapError = L"an earlier load";
+            require(SelectPreset(fc, L"fg", err) && fc.presetFG && SelectedPreset(fc) == L'G' && PresetName(SelectedPreset(fc)) == L"FG" &&
+                        ModelDir(fc) == Join(ModelBaseDir(), L"FG") && ModelFile(fc) == Join(Join(ModelBaseDir(), L"FG"), L"model.wgcm") &&
+                        wstring(ModelSourceName(fc)) == L"nvngx_dlssg.dll" && fc.mapError.empty(),
+                    "preset FG: by name (either case), its folder <model>\\FG, its source file nvngx_dlssg.dll; the earlier map state dropped");
+            require(SelectPreset(fc, L"FG", err) && fc.presetFG, "preset FG again: nothing changes");
+            require(SelectPreset(fc, L"L", err) && !fc.presetFG && fc.presetL && SelectedPreset(fc) == L'L', "preset FG -> L: frame generation no longer selected");
+            require(SelectPreset(fc, L"FG", err) && !fc.presetL && SelectPreset(fc, L"M", err) && !fc.presetFG && SelectedPreset(fc) == L'M' && ModelDir(fc) == ModelBaseDir(),
+                    "preset FG -> M: back to the model folder itself");
+            require(!SelectPreset(fc, L"Q", err) && err.find(L"FG: frame generation") != wstring::npos && !SelectPreset(fc, L"FGX", err) && !SelectPreset(fc, L"F", err),
+                    "preset FG: named among the models of a build with it; other names refused");
+            require(PresetName(L'M') == L"M" && PresetName(L'L') == L"L" && PresetName(L'K') == L"K", "the other models' names stay one letter");
+            // the converter's search for preset FG: frame generation libraries only (nvngx_dlss.dll is the upscaler's)
+            const wstring g1 = Join(dir, L"fg-game"), g2 = Join(dir, L"fg-other");
+            EnsureDir(Join(g1, L"bin"));
+            EnsureDir(g2);
+            for (const wstring& f : {Join(g1, L"bin\\nvngx_dlssg.dll"), Join(g1, L"nvngx_dlss.dll"), Join(g2, L"nvngx_dlssg.dll")})
+                WriteFileAtomic(f, notPe.data(), notPe.size());
+            GameTarget gt;
+            gt.root = g1;
+            const std::vector<StoreGame> libsList{StoreGame{L"Other", g2}};
+            require(SelectPreset(fc, L"FG", err), "preset FG selected for the search");
+            std::vector<ModelCandidate> cands = ModelCandidates(&gt, L"", libsList, ModelSourceName(fc));
+            require(cands.size() == 2 && IEq(BaseName(cands[0].path), L"nvngx_dlssg.dll") && cands[0].origin == L"this game" &&
+                        IEq(BaseName(cands[1].path), L"nvngx_dlssg.dll") && cands[1].origin.find(L"another game") == 0,
+                    "preset FG's search: the game's and the library games' nvngx_dlssg.dll, never nvngx_dlss.dll");
+            cands = ModelCandidates(&gt, L"", {});
+            require(cands.size() == 1 && IEq(BaseName(cands[0].path), L"nvngx_dlss.dll"), "the default search is unchanged: nvngx_dlss.dll");
         }
 
         RemoveTree(dir);

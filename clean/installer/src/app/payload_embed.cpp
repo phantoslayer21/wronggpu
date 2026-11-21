@@ -15,6 +15,7 @@ const wg::EmbeddedData& EmbeddedPayload() {
 #endif
                                        kLogoResourceId, SETUP_VERSION, SETUP_BUILD_ID, SETUP_PAYLOAD_NAME,
                                        kRrPayload, kRrPayloadCount, kFMapResourceId, kFMapSha256,  // Ray Reconstruction (rr.h)
-                                       kRrInterfaceFile, kLMapResourceId, kLMapSha256};  // Model L's converter map
+                                       kRrInterfaceFile, kLMapResourceId, kLMapSha256,  // Model L's converter map
+                                       kFgMapResourceId, kFgMapSha256};                 // frame generation's converter map (fg.h)
     return data;
 }

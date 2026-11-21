@@ -67,9 +67,10 @@ string VNode(const wstring& key, const string& value, bool text, std::vector<str
     Le(out, body.size(), 2); Le(out, text ? value.size() / 2 : value.size(), 2);
     return out + body.substr(4);
 }
-string MockDll(const std::vector<std::pair<wstring, wstring>>& strings, const string& extra) {
+// verMs / verLs: the fixed file version (major << 16 | minor, build << 16 | revision); 1.0.0.0 by default.
+string MockDll(const std::vector<std::pair<wstring, wstring>>& strings, const string& extra, uint32_t verMs = 0x00010000u, uint32_t verLs = 0u) {
     string fixed;
-    for (uint32_t v : {0xFEEF04BDu, 0x00010000u, 0x00010000u, 0u, 0x00010000u, 0u, 0x3Fu, 0u, 0x40004u, 2u, 0u, 0u, 0u}) Le(fixed, v, 4);
+    for (uint32_t v : {0xFEEF04BDu, 0x00010000u, verMs, verLs, 0x00010000u, 0u, 0x3Fu, 0u, 0x40004u, 2u, 0u, 0u, 0u}) Le(fixed, v, 4);
     std::vector<string> entries;
     for (auto& s : strings) entries.push_back(VNode(s.first, U16z(s.second), true));
     string tr; Le(tr, 0x409, 2); Le(tr, 1200, 2);
@@ -174,6 +175,96 @@ int main() {
             require(lout == slotIni, "no Model L choice: OptiScaler's UpscalerIndex is left as it is");
         }
 #endif
+#if !WRONGGPU_FG
+        // ---- a build without the frame generation choice (the default): no FG setting anywhere; the keys refused by name -------
+        {
+            Profile fp = DefaultProfile();
+            const string before = ProfileText(fp);
+            wstring fwhy;
+            for (const char* k : kFgKeys) require(!FindSetting(k), "no frame generation choice: no FG setting in the schema");
+            require(!SetSetting(fp, "fg", "on", &fwhy) && fwhy == kNoFgChoice && !SetSetting(fp, "fg_preset", "B", &fwhy) && fwhy == kNoFgChoice &&
+                        !SetSetting(fp, "fg_multiplier", "3", &fwhy) && fwhy == kNoFgChoice && !SetSetting(fp, "fg_presenter", "hwfq", &fwhy) && fwhy == kNoFgChoice,
+                    "no frame generation choice: set fg / fg_preset / fg_multiplier / fg_presenter refused by name");
+            require(ProfileText(fp) == before && before.find("fg") == string::npos && fp.v.count("fg") == 0, "no frame generation choice: profile.ini unchanged, no fg line");
+            for (auto& kv : FrontEndStateKeys(fp)) require(!IsFgKey(kv.first), "no frame generation choice: the state keys hold no FG key");
+            static const EmbeddedData noFgMap{nullptr, 0, 900, L"00", 0, L"", 0, L"0.7.0"};
+            Context nfc;
+            nfc.data = &noFgMap;
+            require(!SelectPreset(nfc, L"FG", fwhy) && !nfc.presetFG, "no frame generation choice: its converter data is not in the build (model convert --preset=FG refused)");
+        }
+#endif
+        // ---- frame generation (fg.h): the library by its version (synthetic PE files), settings.ini beside the other keys ----
+        {
+            const wstring fgRoot = TempFolder() + L"-fg";
+            RemoveTree(fgRoot);
+            EnsureDir(fgRoot);
+            const wstring oldGame = Join(fgRoot, L"OldGame"), newGame = Join(fgRoot, L"NewGame"), mixed = Join(fgRoot, L"Mixed"), none = Join(fgRoot, L"NoFg");
+            for (const wstring& d : {oldGame, newGame, Join(mixed, L"a"), Join(mixed, L"b"), none}) EnsureDir(d);
+            auto putDll = [](const wstring& path, uint32_t ms, uint32_t ls) {
+                const string b = MockDll({{L"ProductName", L"Synthetic FG test library"}, {L"FileVersion", L"synthetic"}}, string(64, 'x'), ms, ls);
+                WriteFileAtomic(path, b.data(), b.size());
+            };
+            putDll(Join(oldGame, L"nvngx_dlssg.dll"), (3u << 16) | 7u, (10u << 16) | 0u);        // 3.7.10.0
+            putDll(Join(newGame, L"nvngx_dlssg.dll"), (310u << 16) | 2u, (1u << 16) | 0u);       // 310.2.1.0
+            putDll(Join(mixed, L"a\\nvngx_dlssg.dll"), (3u << 16) | 7u, 0u);                    // 3.7.0.0
+            putDll(Join(mixed, L"b\\nvngx_dlssg.dll"), (310u << 16) | 1u, 0u);                  // 310.1.0.0
+            putDll(Join(none, L"nvngx_dlss.dll"), (310u << 16) | 5u, 0u);                       // the upscaler's file, not frame generation's
+            const FgLibrary ol = CheckFgLibrary(Join(oldGame, L"nvngx_dlssg.dll"));
+            require(ol.verdict == FgLibrary::TOO_OLD && ol.version == L"3.7.10.0" && ol.why == L"version 3.7.10.0 has no frame-generation model (version 310.1 or newer is needed)",
+                    "fg library: a 3.7 library is refused by its version (read from its version resource)");
+            const FgLibrary nl = CheckFgLibrary(Join(newGame, L"nvngx_dlssg.dll"));
+            require(nl.usable() && nl.version == L"310.2.1.0", "fg library: a 310.2 library is a candidate");
+            wstring lib, why;
+            require(CheckFgEnable(oldGame, false, &lib, &why) == FgEnable::TOO_OLD && lib.empty() && why.find(L"is version 3.7.10.0") != wstring::npos &&
+                        why.find(L"310.1 or newer") != wstring::npos && why.find(L"stays off") != wstring::npos && why.find(L"--preset=FG") != wstring::npos,
+                    "fg enable: only a 3.7 library and no data: refused, the version and the way out named");
+            require(CheckFgEnable(oldGame, true, &lib, &why) == FgEnable::READY, "fg enable: the data ready (from another game): a game with a library may turn it on");
+            require(CheckFgEnable(newGame, false, &lib, &why) == FgEnable::CONVERT && IEq(lib, Join(newGame, L"nvngx_dlssg.dll")), "fg enable: a 310.2 library converts");
+            const std::vector<FgLibrary> ml = GameFgLibraries(mixed);
+            require(ml.size() == 2 && ml[0].usable() && ml[0].version == L"310.1.0.0" && ml[1].verdict == FgLibrary::TOO_OLD &&
+                        CheckFgEnable(mixed, false, &lib, &why) == FgEnable::CONVERT && IEq(lib, Join(mixed, L"b\\nvngx_dlssg.dll")),
+                    "fg enable: a game with an old and a new library converts from the new one");
+            require(CheckFgEnable(none, false, &lib, &why) == FgEnable::NO_LIBRARY && CheckFgEnable(none, true, &lib, &why) == FgEnable::NO_LIBRARY,
+                    "fg enable: nvngx_dlss.dll alone is no frame generation library");
+
+            // settings.ini: the FG keys written beside the front end's and RR's keys, read back; the others untouched
+            const wstring sg = Join(fgRoot, L"Installed");
+            EnsureDir(Join(sg, wgstate::kStateFolder));
+            Context sctx;
+            require(WriteStateKeys(sctx, sg, {{"upscaler", "network"}, {"pre_exposure", "original"}, {"rr_mode", "accurate"}, {"rr_enabled", "1"}}) == 1,
+                    "fg settings.ini: the other keys written first");
+            Profile fp;
+            fp.v = {{"fg", "on"}, {"fg_preset", "C"}, {"fg_multiplier", "6"}, {"fg_presenter", "dxgi_tearing"}};
+            require(WriteStateKeys(sctx, sg, FgStateKeys(fp, wgstate::ReadSettings(sg).kv, true)) == 1, "fg settings.ini: the four keys written");
+            wgstate::Settings st = wgstate::ReadSettings(sg);
+            FgState fs = FgStateOf(st.kv);
+            require(fs.present && fs.issues.empty() && fs.v["fg"] == "on" && fs.v["fg_preset"] == "C" && fs.v["fg_multiplier"] == "6" && fs.v["fg_presenter"] == "dxgi_tearing",
+                    "fg settings.ini: round trip of the four keys");
+            require(*wgstate::Get(st, "upscaler") == "network" && *wgstate::Get(st, "pre_exposure") == "original" && *wgstate::Get(st, "rr_mode") == "accurate" &&
+                        *wgstate::Get(st, "rr_enabled") == "1" && ReadRrSettings(sg).mode == "accurate",
+                    "fg settings.ini: the upscaler and RR keys stay as they were");
+            require(WriteStateKeys(sctx, sg, FgStateKeys(fp, st.kv, true)) == 0, "fg settings.ini: the same values again: nothing written");
+            fp.v = {{"fg", "off"}};
+            require(WriteStateKeys(sctx, sg, FgStateKeys(fp, wgstate::ReadSettings(sg).kv, true)) == 1 && FgStateOf(wgstate::ReadSettings(sg).kv).v["fg"] == "off" &&
+                        FgStateOf(wgstate::ReadSettings(sg).kv).v["fg_preset"] == "A",
+                    "fg settings.ini: turned off again: off (and the defaults) written down");
+            // the effective wronggpu.ini (get, status, a profile's import) never takes an FG key for a runtime option
+            const string eff = WithFrontEndState("[fsr]\r\nruntime_options = timing_log=1\r\n", wgstate::ReadSettings(sg).kv);
+            require(eff.find("fg") == string::npos && OptionsOf(eff).find("pre_exposure=original") != string::npos,
+                    "fg settings.ini: the FG keys stay out of the effective runtime_options; the runtime keys go in");
+            // a game never opted in: nothing about frame generation is written
+            const wstring plain = Join(fgRoot, L"Plain");
+            EnsureDir(Join(plain, wgstate::kStateFolder));
+            require(WriteStateKeys(sctx, plain, {{"upscaler", "network"}}) == 1, "fg: a plain game's state");
+            string plainBefore, plainAfter;
+            ReadAll(wgstate::SettingsPathOf(plain), plainBefore);
+            const Profile dp = DefaultProfile();
+            const std::vector<std::pair<string, string>> none2 = FgStateKeys(dp, wgstate::ReadSettings(plain).kv, true);
+            require(none2.empty() && WriteStateKeys(sctx, plain, {{"upscaler", "network"}}) == 0, "fg: a game never opted in: no FG key to write");
+            ReadAll(wgstate::SettingsPathOf(plain), plainAfter);
+            require(plainAfter == plainBefore && plainAfter.find("fg") == string::npos, "fg: a game never opted in: settings.ini byte for byte as before");
+            RemoveTree(fgRoot);
+        }
         // ---- validation -----------------------------------------------------------------------------------------
         string n; wstring why;
         const SettingDef* exec = FindSetting("executor");

@@ -4,6 +4,7 @@
 #pragma once
 #include "convert_ignore.h"
 #include "detect.h"
+#include "fg.h"
 
 namespace wg {
 
@@ -60,7 +61,12 @@ inline wchar_t ChosenPreset(const std::string& model) { return model == "l" ? L'
 inline wstring ModelNotReady(wchar_t preset, const wstring& why) { return preset == L'K' ? ModelKNotReady(why) : ModelLNotReady(why); }
 bool MapHasOptionalGroup(const wgc::Map& map);
 wstring FilterText(Context& ctx, bool present);
-std::vector<ModelCandidate> ModelCandidates(const GameTarget* t, const wstring& userDll, const std::vector<StoreGame>& libraries);
+// fileName: the file searched for in the game folders (nvngx_dlss.dll; frame generation's library, nvngx_dlssg.dll, for preset FG:
+// ModelSourceName).
+std::vector<ModelCandidate> ModelCandidates(const GameTarget* t, const wstring& userDll, const std::vector<StoreGame>& libraries,
+                                            const wchar_t* fileName = L"nvngx_dlss.dll");
+// The file the selected model is converted from: nvngx_dlssg.dll for frame generation (ctx.presetFG, fg.h), else nvngx_dlss.dll.
+inline const wchar_t* ModelSourceName(const Context& ctx) { return ctx.presetFG ? kFgLibraryName : L"nvngx_dlss.dll"; }
 // The candidates FindModel tries: ModelCandidates minus the files the ignore lists leave out (convert_ignore.h). The files left
 // out, with the reason, go to m.ignored; the player's line for a chosen file that is left out to m.chosenSkipped. Needs no map.
 std::vector<ModelCandidate> AllowedModelCandidates(Context& ctx, const IgnoreLists& ign, const GameTarget* t, const wstring& userDll,

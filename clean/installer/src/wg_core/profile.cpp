@@ -56,6 +56,18 @@ const SettingDef kSettings[] = {
      L"M: Model M (default). L: Model L, converted from a DLSS file of version 310.5 or newer that has it."},
 #endif
 #endif
+#if WRONGGPU_FG
+    // Frame generation (#96, fg.h; only in a build with its choice, CMake WRONGGPU_FG): strictly off by default. `set` only,
+    // not on the settings page. The values in exactly the spellings of the frame generation proxy's reader (no case folding).
+    {kFgKeyEnable, Layer::Fg, Tier::Advanced, "off", "off|on", L"Frame generation",
+     L"Off (default): the game's frame generation is not WrongGPU's. On: WrongGPU generates frames, with data converted on this PC "
+     L"from the frame generation library of one of your games (version 310.1 or newer)."},
+    {kFgKeyPreset, Layer::Fg, Tier::Advanced, "A", "A|B|C", L"Frame generation preset", L"A (default), B or C."},
+    {kFgKeyMultiplier, Layer::Fg, Tier::Advanced, "2", "2|3|4|5|6", L"Frame generation multiplier",
+     L"2 (default): one generated frame per game frame; up to 6."},
+    {kFgKeyPresenter, Layer::Fg, Tier::Advanced, "auto", "auto|hwfq|dxgi_tearing|dxgi_vsync", L"Frame generation presenter",
+     L"Auto (default), hwfq, dxgi_tearing or dxgi_vsync."},
+#endif
 };
 const size_t kSettingCount = sizeof(kSettings) / sizeof(kSettings[0]);
 
@@ -83,6 +95,7 @@ bool NeedsHipRuntime(const string& key, const string& value) {
 const wchar_t* NotOnDx12Text() { return L"Not available on the DX12 runtime yet"; }
 
 bool ValidateSetting(const SettingDef& d, const string& valueIn, string* normal, wstring* why) {
+    if (d.layer == Layer::Fg) return ValidateFgValue(d.key, valueIn, normal, why);  // exact spellings (fg.h): no case folding
     string v = LowerA(TrimA(valueIn));
     if (!strcmp(d.key, "executor") && (v == "d3d12" || v.empty())) v = v.empty() ? "auto" : "dx12";
     if (!strcmp(d.key, "wronggpu")) {
@@ -182,6 +195,7 @@ string ProfileText(const Profile& p) {
                "[profile]\r\nformat=1\r\n";
     for (auto& d : kSettings) {
         if (d.layer == Layer::Model && p.isDefault(d.key)) continue;  // Model M: profile.ini as before the model choice
+        if (d.layer == Layer::Fg && p.isDefault(d.key)) continue;     // frame generation never chosen: profile.ini as before it
         t += string(d.key) + "=" + p.get(d.key) + "\r\n";
     }
     for (auto& kv : p.v) if (!FindSetting(kv.first)) t += kv.first + "=" + kv.second + "\r\n";
@@ -197,6 +211,7 @@ bool SetSetting(Profile& p, const string& keyIn, const string& value, wstring* w
     const string key = LowerA(TrimA(keyIn));
     const SettingDef* d = FindSetting(key);
     if (!d && key == "model") { if (why) *why = kNoModelChoice; return false; }  // a build without the Model L choice
+    if (!d && IsFgKey(key)) { if (why) *why = kNoFgChoice; return false; }       // a build without the frame generation choice
     if (!d) { if (why) *why = L"unknown setting \"" + FromUtf8(keyIn) + L"\""; return false; }
     string n;
     if (!ValidateSetting(*d, value, &n, why)) return false;

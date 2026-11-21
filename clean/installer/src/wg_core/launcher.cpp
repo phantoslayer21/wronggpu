@@ -1037,7 +1037,7 @@ string WithFrontEndState(const string& wronggpuIni, const std::vector<std::pair<
         if (kv.first == "upscaler") {
             string cur, sec;
             t = IniGetFrontEnd(t, "upscaler", &cur, &sec) ? IniSet(t, sec, "upscaler", kv.second) : IniSet(t, "fsr", "upscaler", kv.second);
-        } else if (kv.first.rfind("rr_", 0) != 0 && kv.first != "model") {
+        } else if (kv.first.rfind("rr_", 0) != 0 && kv.first != "model" && !IsFgKey(kv.first)) {  // (frame generation's keys: fg.h)
             items.push_back(kv);
         }
     }
@@ -1152,7 +1152,23 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
         string unused;
         wstring why;
         if (!RenderWronggpuIni(q, "", unused, &why)) Fail(L"Settings not applied: " + why, EXIT_USAGE);  // (validates every setting)
-        const int w = WriteStateKeys(ctx, dir, FrontEndStateKeys(q), &why);
+        std::vector<std::pair<string, string>> keys = FrontEndStateKeys(q);
+        // Frame generation (fg.h; a build with its choice): its four keys, in the same write, only once the player opted in
+        // (or the file holds one of them already); fg stays off in the game while its data on this PC is not ready
+        if (FindSetting(kFgKeyEnable)) {
+            bool fgReady = false;
+            if (q.get(kFgKeyEnable) == "on") {
+                wstring fgWhy;
+                fgReady = ModelFileReady(ctx, L'G', &fgWhy);
+                if (!fgReady) {
+                    const wstring w = FgNotReady(fgWhy) + L" Until then frame generation stays off.";
+                    notes.push_back(w);
+                    if (warnings) warnings->push_back(w);
+                }
+            }
+            for (auto& kv : FgStateKeys(q, wgstate::ReadSettings(dir).kv, fgReady)) keys.push_back(kv);
+        }
+        const int w = WriteStateKeys(ctx, dir, keys, &why);
         if (w < 0) Fail(L"Settings not applied: " + why, EXIT_REFUSED);
         if (w > 0) {
             notes.push_back(Join(wgstate::kStateFolder, wgstate::kSettingsFile) + L" written");
