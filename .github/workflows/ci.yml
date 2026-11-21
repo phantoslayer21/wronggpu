@@ -59,6 +59,12 @@ jobs:
           cmake -S clean/converter -B out/converter -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
           cmake --build out/converter
           ctest --test-dir out/converter --output-on-failure
+      - name: Frame generation game adapter
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          cmake -S clean/fg/proxy -B out/fg-proxy -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          cmake --build out/fg-proxy
+          ctest --test-dir out/fg-proxy --output-on-failure
       - name: Shared settings
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
