@@ -28,8 +28,8 @@ message(STATUS "fg proxy: runtime contract bridge test ${WG_FG_HAVE_CONTRACT}")
 function(wg_fg_flags t)
   if(MSVC)
     set_target_properties(${t} PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-    # CI's flags; /permissive- turns on /Zc:lambda
-    target_compile_options(${t} PRIVATE /W4 /WX /permissive- /utf-8 /EHsc)
+    # CI's flags; /permissive- turns on /Zc:lambda (C++ sources only: a resource script takes none of them)
+    target_compile_options(${t} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4 /WX /permissive- /utf-8 /EHsc>)
   else()
     target_compile_options(${t} PRIVATE -Wall -Wextra -Werror)
   endif()
@@ -72,3 +72,75 @@ foreach(m 1 2 3 4 5 6 7 8)
   add_test(NAME fg_proxy_mutant_${m} COMMAND test_fg_proxy_mutant_${m})
   set_tests_properties(fg_proxy_mutant_${m} PROPERTIES WILL_FAIL TRUE)
 endforeach()
+
+# F8b: the Win32 hook transport (WrongGPU-FG.asi, the RR plugin's hook-mode delivery: IAT / delay-load redirects, the
+# genuine interface file untouched) and the DXGI swap-chain hook seam. Windows only. Tests run against a stand-in
+# interface DLL (synthetic export names and version), two stand-in game modules that import it by name (static and
+# delay-load import tables), an exe that delay-loads it, and fake swap-chain / factory COM objects.
+if(WIN32)
+  if(MSVC)
+    enable_language(RC)
+  endif()
+  set(WG_RR_PROXY_SRC_DIR "${WG_FG_PROXY_DIR}/../../rr_f/proxy/src")
+  # the bounded PE view, safe reads and scan budget are the RR guard's own (rr_guard.cpp), reused unchanged
+  add_library(wg_fg_win32 STATIC ${WG_FG_PROXY_DIR}/win32/fg_asi_transport.cpp ${WG_FG_PROXY_DIR}/win32/fg_swapchain_hook.cpp
+                                 ${WG_RR_PROXY_SRC_DIR}/rr_guard.cpp)
+  target_link_libraries(wg_fg_win32 PUBLIC wg_fg_proxy version)
+  wg_fg_flags(wg_fg_win32)
+
+  add_library(wg_fg_asi SHARED ${WG_FG_PROXY_DIR}/win32/fg_asi_entry.cpp)
+  target_link_libraries(wg_fg_asi PRIVATE wg_fg_win32)
+  target_include_directories(wg_fg_asi PRIVATE ${WG_FG_PROXY_DIR}/../../wgshared/include)
+  set_target_properties(wg_fg_asi PROPERTIES OUTPUT_NAME "WrongGPU-FG" PREFIX "" SUFFIX ".asi")
+  wg_fg_flags(wg_fg_asi)
+
+  add_library(fg_mock_interposer SHARED ${WG_FG_PROXY_DIR}/tests/fg_mock_interposer.cpp
+                                        ${WG_FG_PROXY_DIR}/tests/fg_mock_interposer.rc)
+  wg_fg_flags(fg_mock_interposer)
+  add_library(fg_mock_game SHARED ${WG_FG_PROXY_DIR}/tests/fg_mock_game.cpp)
+  target_link_libraries(fg_mock_game PRIVATE fg_mock_interposer)
+  wg_fg_flags(fg_mock_game)
+  add_library(fg_mock_game_delay SHARED ${WG_FG_PROXY_DIR}/tests/fg_mock_game.cpp)
+  target_link_libraries(fg_mock_game_delay PRIVATE fg_mock_interposer delayimp)
+  target_link_options(fg_mock_game_delay PRIVATE /DELAYLOAD:fg_mock_interposer.dll)
+  wg_fg_flags(fg_mock_game_delay)
+
+  add_executable(test_fg_win32_transport ${WG_FG_PROXY_DIR}/tests/test_fg_win32_transport.cpp)
+  target_link_libraries(test_fg_win32_transport PRIVATE wg_fg_win32 fg_mock_interposer)
+  add_dependencies(test_fg_win32_transport fg_mock_game fg_mock_game_delay wg_fg_asi)
+  wg_fg_flags(test_fg_win32_transport)
+  add_executable(test_fg_win32_delay_exe ${WG_FG_PROXY_DIR}/tests/test_fg_win32_transport.cpp)
+  target_compile_definitions(test_fg_win32_delay_exe PRIVATE FG_TEST_DELAY_EXE=1)
+  target_link_libraries(test_fg_win32_delay_exe PRIVATE wg_fg_win32 fg_mock_interposer delayimp)
+  target_link_options(test_fg_win32_delay_exe PRIVATE /DELAYLOAD:fg_mock_interposer.dll)
+  wg_fg_flags(test_fg_win32_delay_exe)
+
+  add_test(NAME fg_win32_transport COMMAND test_fg_win32_transport)
+  add_test(NAME fg_win32_delay_exe COMMAND test_fg_win32_delay_exe)
+  # the shipped plugin, one process per settings case (the settings are read once, at InitializeASI)
+  set(WG_FG_ASI_CASES "${CMAKE_CURRENT_BINARY_DIR}/fg-asi-cases")
+  file(WRITE "${WG_FG_ASI_CASES}/off/wronggpu-setup/settings.ini" "fg=off\nfg_multiplier=4\n")
+  file(WRITE "${WG_FG_ASI_CASES}/on/wronggpu-setup/settings.ini" "fg=on\nfg_preset=B\nfg_multiplier=6\n")
+  file(WRITE "${WG_FG_ASI_CASES}/invalid/wronggpu-setup/settings.ini" "fg=On\n")
+  file(MAKE_DIRECTORY "${WG_FG_ASI_CASES}/default")
+  foreach(leg off on invalid default)
+    add_test(NAME fg_win32_asi_${leg} COMMAND test_fg_win32_transport --asi ${leg})
+    set_tests_properties(fg_win32_asi_${leg} PROPERTIES ENVIRONMENT "WG_STATE_GAME_DIR=${WG_FG_ASI_CASES}/${leg}")
+  endforeach()
+
+  # Mutants of the transport and the seam: each breaks one rule; the in-process suite must catch every one.
+  #  1 install-off gate ignored        2 a forwarded call loses an argument  3 scan budget ignored
+  #  4 a retry begins a new interval   5 a test present reaches the callback 6 the present owner is not claimed
+  #  7 restore leaves slots redirected 8 a failing callback stays attached
+  foreach(m 1 2 3 4 5 6 7 8)
+    add_executable(test_fg_win32_mutant_${m} ${WG_FG_PROXY_DIR}/tests/test_fg_win32_transport.cpp
+                   ${WG_FG_PROXY_DIR}/win32/fg_asi_transport.cpp ${WG_FG_PROXY_DIR}/win32/fg_swapchain_hook.cpp
+                   ${WG_RR_PROXY_SRC_DIR}/rr_guard.cpp)
+    target_compile_definitions(test_fg_win32_mutant_${m} PRIVATE WG_FG_WIN32_MUTANT=${m})
+    target_link_libraries(test_fg_win32_mutant_${m} PRIVATE wg_fg_proxy version fg_mock_interposer)
+    add_dependencies(test_fg_win32_mutant_${m} fg_mock_game fg_mock_game_delay)
+    wg_fg_flags(test_fg_win32_mutant_${m})
+    add_test(NAME fg_win32_mutant_${m} COMMAND test_fg_win32_mutant_${m})
+    set_tests_properties(fg_win32_mutant_${m} PROPERTIES WILL_FAIL TRUE TIMEOUT 60)
+  endforeach()
+endif()
