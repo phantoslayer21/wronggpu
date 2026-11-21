@@ -39,6 +39,7 @@ float fg_sq(float x, float y) { return mad(x, x, fg_mul(y, y)); }
 // u = sat((i + 0.5) / n), approximate division
 float fg_centre(uint i, uint n) { return fg_sat(fg_mul((float)i + 0.5f, fg_rcp((float)n))); }
 
+// 2^y: the coefficients are stages_common.EX2_COEFFS (this project's least-squares fit of 2^f on [0, 1])
 float fg_ex2(float y)
 {
     float n = floor(y);

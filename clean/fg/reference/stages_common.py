@@ -51,7 +51,10 @@ SENTINEL_CAM = F32(10000.0)
 EMPTY64 = np.int64(0x7FFFFFFF7FFFFFFF)
 CLEAR32 = 0x7FFFFFFF
 KMAX_DEFAULT, TAU_DEFAULT = F32(600.0), F32(40.0)
-# 2^f on [0, 1): coefficients from the highest power down (float32 bit patterns), evaluated in fma (Horner) form
+# 2^f on [0, 1): coefficients from the highest power down (float32 bit patterns), evaluated in fma (Horner) form.
+# Made for this project: a degree-6 least-squares fit of 2^f at 400 Chebyshev nodes of [0, 1], each coefficient rounded
+# to float32 and the constant term set to 1 (largest relative error about 6e-8 on [0, 1]; test_fg_common_stages checks
+# it against exp2).
 EX2_COEFFS = [fbits(b) for b in (0x396566FB, 0x3AA25EA2, 0x3C1EAC13, 0x3D633F72, 0x3E75FEFC, 0x3F317214, 0x3F800000)]
 
 
