@@ -49,9 +49,18 @@ front end or the launcher yet. Status, open items and formats: [FORMATS.md](FORM
 | `presenter/fg_presenter_factory.h`, `.cpp` | back-end choice (`Auto`, `WindowsCompositionHwfq`, `DxgiFlipTearing`, `DxgiFlipVsync`), the capability probe and creation that refuses with a reason and never tries another back end |
 | `presenter/tests/test_fg_win_presenters.cpp` | CPU tests of the engine (ownership, late drops, cancellation, lifecycle, 2x..6x cadences), the pacing arithmetic, selection and creation refusals, the worker thread and timer, the read-only probe; `--gpu` adds headless checks (no window): probe with a device, zero-copy composition slots and shared fences on an unbound surface, the DXGI back end on a composition swap chain including resize |
 | `presenter/tests/test_fg_presenter.cpp` | CPU tests: spacing and order for 2x..6x at 45 / 50 / 60 / 90 / 120 fps on a 48-360 Hz panel, the estimator, count changes, menu / reset / late revoke, late drops, the reserved real path, window exit / re-entry, resize / epoch / device loss, refusal without fallback, and broken plans that must be refused. Build: `cmake -S clean/fg/presenter -B out/fg-presenter`, then `ctest` (MSVC flags `/W4 /WX /permissive-`) |
+| `runtime/fg_contract.h` | the versioned session / frame / result contract of the C++ FG runtime: create description, frame packet (required color, motion, depth; optional HUD-less, UI alpha, distortion, no-warp with presence bits and always / may / never declarations), result with distinct real-only reasons; presets A / B / C, N = 1..5, the intermediate time; every refusal an explicit reason, no fallback route; no FG mode advertised until the modes are qualified |
+| `runtime/fg_grid.h` | both networks' grid sizes from the frame size (the create-time size table) |
+| `runtime/fg_model.h`, `runtime/fg_map_table.h` | the check of a local model file against `data/fg.v1.map.json` (whole-file checksum, map hash, the 42 stages in order with names, types and shapes, every stage digest recomputed, values exact in float16); the table is generated |
+| `runtime/fg_net1_plan.h` | net1's fused 11-launch plan (a port of `runner/fg_net1_mma.py`'s `plan_fused`) with its buffers in three arena regions (input, weights, scratch), an independent plan check, the recorder (root constants, arena binding, dispatch splitting) that refuses before recording anything, and the weight fragments (`swizzle`) from a model file |
+| `runtime/fg_history.h` | title-neutral tag-to-frame assembly and the history banks: exact identity (token, viewport, adapter, queue and swap-chain epoch), previous / current over 2..4 banks rotated only on an accepted game frame, never over a bank compute still reads, re-primed on startup, reset, menu, gaps, size changes and chain replacement |
+| `runtime/fg_worker.h` | the create-time work on a worker thread with a bounded wait (named callables, no throwing lambda captures) |
+| `runtime/tests/test_fg_runtime.cpp` | CPU tests of all of the above (ctest `fg_runtime`): the size table rows, every refusal, constructed model files and their defects, the plan and its recording through a fake recorder against `tests/net1_plan_golden.h`, plan and history mutants, the worker's failure paths |
+| `tools/gen_fg_runtime_tables.py`, `tests/test_fg_runtime_tables.py` | writes / checks the two generated headers (the map table; the fused plan and the weight fragments of constructed float16 patterns from `runner/fg_net1_mma.py`) |
 
 ```
 python -m unittest discover -s clean/fg/tests -t .
+cmake -S clean/fg/runtime -B build/fg-runtime && cmake --build build/fg-runtime && ctest --test-dir build/fg-runtime
 ```
 
 Test data is synthetic. Model data and file bytes never go into this repository.
