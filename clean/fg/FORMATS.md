@@ -153,7 +153,7 @@ delivered by the spec side; the code never guesses it (it raises, or takes the c
 - D3D12 rounds float16 with the driver channel's conversion (`wg_to_f16_ags`, the bits of HIP's `(_Float16)`), a whole
   fragment at a time (clean/dx12/README.md "Driver exceptions").
 
-## net2 (`reference/net2.py`; D3D12 `clean/dx12/kernels/fg_net2_*.hlsl`)
+## net2 (`reference/net2.py`; D3D12 `clean/dx12/kernels/fg_net2_*.hlsl`, fast path `fg_net2_mconv.hlsl`, `fg_net2_upwarp.hlsl`)
 
 - Grid: `grid(Wo, Ho)` from the frame size (4..8192 x 4..7680): k the smallest power of two with floor(Ho / k) <= 480,
   W2 = 16 ceil(Wo / 16k), H2 likewise; `padding` (right, bottom); `extents` of every buffer.
@@ -173,6 +173,18 @@ delivered by the spec side; the code never guesses it (it raises, or takes the c
   L25 run one launch per head. Exact (bit-identical to the CPU reference), not tuned for speed.
 - Check: `runner/fg_net2_d3d12_check.py` (each kernel, an adversarial multiply-add probe, the whole network at small
   grids and at 480 x 272 / 640 x 368, negative controls and mutants; `--timing` only after a passing record).
+- Fast path (tier B, D3D12, code object `fg_net2_mma.co`; the exact kernels above stay the validation mode):
+  `fg_net2_mconv_<variant>` (one `v_wmma_f32_16x16x16_f16` per spec chunk in the tap-major order, the float16
+  accumulator from the bias as C, rounded to float16 after every chunk; the post-ops, pool, clamp rule and residual
+  exact in the epilogue; variants by output tiles per wave, 16-channel blocks per tap, workgroup size and upsample
+  staging), with the 2x upsample of L12, L13, L24 and L25 computed exactly into the workgroup's LDS tile and the three
+  heads of L13 / L25 in one launch; `fg_net2_upwarp` (the head upsample and the warp-merge in one launch, exact); 8-value
+  float16 helpers with the bits of `fg_net2.hlsli` in `clean/dx12/hlsl/fg_net2_fast.hlsli`. The network is 27 launches.
+  Only the chunk sums differ from the CPU reference.
+- Check: `runner/fg_net2_mma.py` (byte gates on exactly summable values for every variant and on adversarial probes of
+  every rewritten rounding with their mutants, determinism over two sentinel fills at every grid, negative controls,
+  chain mutants, the exact chain alongside; differences from the CPU reference reported; `--timing` only after a passing
+  record, wall and GPU time).
 
 ## Configuration (`reference/config.py`)
 

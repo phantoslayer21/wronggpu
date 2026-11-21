@@ -147,8 +147,8 @@ def _sprinkle(rng, a, frac, values):
 
 
 def conv_case(name, rng, H, W, cin, cw, cout, *, in_cs=None, in_co=0, co_lo=0, co_n=None, pool=0, leaky=1,
-              clamp_from=0, res=0, res_mul=F16_ONE, amp=8.0, wamp=None, specials=False):
-    c = Case(name, "fg_net2_conv")
+              clamp_from=0, res=0, res_mul=F16_ONE, amp=8.0, wamp=None, specials=False, cls=None):
+    c = (cls or Case)(name, "fg_net2_conv")
     in_cs = in_cs or cin
     co_n = co_n or cout
     x = _rand(rng, (H, W, in_cs), amp)
@@ -173,10 +173,11 @@ def conv_case(name, rng, H, W, cin, cw, cout, *, in_cs=None, in_co=0, co_lo=0, c
     return c
 
 
-def heads_case(name, rng, H, W, cin_each, cw, *, residual, specials=False):
+def heads_case(name, rng, H, W, cin_each, cw, *, residual, specials=False, cls=None):
     """L13 / L25 as launched: three heads on one weight tensor, each on its own channel group of the input; with
-    residual, the three write one 8-channel output and add fma(2, U4) / U1 / U3."""
-    c = Case(name, "fg_net2_conv")
+    residual, the three write one 8-channel output and add fma(2, U4) / U1 / U3. cls: the case class (default Case;
+    the fast path's runner passes its own, whose conv() emits its kernel)."""
+    c = (cls or Case)(name, "fg_net2_conv")
     x = _rand(rng, (H, W, 3 * cin_each), 8.0)
     w = _rand(rng, (8, 3, 3, cw), 3.0 / np.sqrt(9 * cin_each))
     b = _rand(rng, 8, 8.0)
@@ -206,25 +207,26 @@ def heads_case(name, rng, H, W, cin_each, cw, *, residual, specials=False):
     return c
 
 
-def conv_cases(rng):
-    cs = [conv_case("L1 16x24 pool", rng, 16, 24, 10, 16, 32, pool=1),
-          conv_case("L2 8x12 pool", rng, 8, 12, 32, 32, 32, pool=1),
-          conv_case("L3 6x10 pool", rng, 6, 10, 32, 32, 64, pool=1),
-          conv_case("L4 flag0 6x7", rng, 6, 7, 64, 64, 64, res=1),
-          conv_case("L5 flag1 6x7", rng, 6, 7, 64, 64, 64, res=2),
-          conv_case("L12 split 10x14", rng, 10, 14, 64, 64, 96, clamp_from=32, amp=12.0),
-          conv_case("L14 18ch 12x16 pool", rng, 12, 16, 18, 18, 16, pool=1),
-          conv_case("L15 8x18 pool", rng, 8, 18, 16, 16, 32, pool=1),
-          conv_case("L16 flag0 6x12", rng, 6, 12, 32, 32, 32, res=1),
-          conv_case("L17 flag1 6x12", rng, 6, 12, 32, 32, 32, res=2),
-          conv_case("L24 no clamp 10x14", rng, 10, 14, 32, 32, 48, clamp_from=NO_CLAMP, amp=12.0),
-          conv_case("group read 9x5", rng, 9, 5, 32, 32, 8, in_cs=96, in_co=64, co_lo=3, co_n=4),
-          heads_case("L13 heads 10x14", rng, 10, 14, 32, 32, residual=False),
-          heads_case("L25 heads 10x14", rng, 10, 14, 16, 16, residual=True),
-          conv_case("specials 6x8 pool", rng, 6, 8, 32, 32, 8, pool=1, specials=True),
-          conv_case("specials 6x9 flag1", rng, 6, 9, 16, 16, 8, res=2, specials=True),
-          conv_case("specials overflow 5x6", rng, 5, 6, 16, 16, 8, wamp=255.0, amp=255.0, clamp_from=4),
-          heads_case("specials L25 heads 6x6", rng, 6, 6, 16, 16, residual=True, specials=True)]
+def conv_cases(rng, cls=None):
+    k = {"cls": cls}
+    cs = [conv_case("L1 16x24 pool", rng, 16, 24, 10, 16, 32, pool=1, **k),
+          conv_case("L2 8x12 pool", rng, 8, 12, 32, 32, 32, pool=1, **k),
+          conv_case("L3 6x10 pool", rng, 6, 10, 32, 32, 64, pool=1, **k),
+          conv_case("L4 flag0 6x7", rng, 6, 7, 64, 64, 64, res=1, **k),
+          conv_case("L5 flag1 6x7", rng, 6, 7, 64, 64, 64, res=2, **k),
+          conv_case("L12 split 10x14", rng, 10, 14, 64, 64, 96, clamp_from=32, amp=12.0, **k),
+          conv_case("L14 18ch 12x16 pool", rng, 12, 16, 18, 18, 16, pool=1, **k),
+          conv_case("L15 8x18 pool", rng, 8, 18, 16, 16, 32, pool=1, **k),
+          conv_case("L16 flag0 6x12", rng, 6, 12, 32, 32, 32, res=1, **k),
+          conv_case("L17 flag1 6x12", rng, 6, 12, 32, 32, 32, res=2, **k),
+          conv_case("L24 no clamp 10x14", rng, 10, 14, 32, 32, 48, clamp_from=NO_CLAMP, amp=12.0, **k),
+          conv_case("group read 9x5", rng, 9, 5, 32, 32, 8, in_cs=96, in_co=64, co_lo=3, co_n=4, **k),
+          heads_case("L13 heads 10x14", rng, 10, 14, 32, 32, residual=False, **k),
+          heads_case("L25 heads 10x14", rng, 10, 14, 16, 16, residual=True, **k),
+          conv_case("specials 6x8 pool", rng, 6, 8, 32, 32, 8, pool=1, specials=True, **k),
+          conv_case("specials 6x9 flag1", rng, 6, 9, 16, 16, 8, res=2, specials=True, **k),
+          conv_case("specials overflow 5x6", rng, 5, 6, 16, 16, 8, wamp=255.0, amp=255.0, clamp_from=4, **k),
+          heads_case("specials L25 heads 6x6", rng, 6, 6, 16, 16, residual=True, specials=True, **k)]
     return cs
 
 
@@ -234,13 +236,13 @@ PROBE_C = [0.0, 1.0, -1.0, 3.0, 1.0009765625, 0.99951171875, 2.0 ** -24, -2.0 **
            np.inf, -np.inf, np.nan, 0.125, 6.0, -6.0, 1e-3, -1e-3, 4094.0, -4096.0]
 
 
-def probe_case(rng):
+def probe_case(rng, cls=None):
     """Adversarial probe of the float16 fused multiply-add (and through a = 1 the add) inside fg_net2_conv: zero weights
     make the conv value its bias c (one per channel), the residual is fma(a, b, c) with a per launch and b per pixel:
     products at float16 midpoints with tiny addends either way, ties, exact cancellation, zeros of both signs,
     subnormal results, overflow at 65520, inf and NaN. The alternative with two roundings, h(h(a b) + c), is saved too:
     the probe must tell it apart (a mutant it catches)."""
-    c = Case("probe fma a x b + c", "fg_net2_conv")
+    c = (cls or Case)("probe fma a x b + c", "fg_net2_conv")
     b = [683.0, -683.0, 1365.0, 2048.0, -2048.0, 2047.0, 4095.0 / 2.0, 1.0, -1.0, 0.0, -0.0, 2.0 ** -24, -2.0 ** -24,
          (1023.0 / 1024.0) * 2.0 ** -14, 65504.0, -65504.0, 32752.0, 32768.0, -32768.0, 0.5, 1.5, 2.0 ** -11,
          1.0 + 2.0 ** -10, 1.0 - 2.0 ** -11, 3.0, -3.0, 6.0, -6.0, np.inf, -np.inf, np.nan, 1024.5]
@@ -313,10 +315,10 @@ def warp_cases(rng):
 
 # ---- the network chain --------------------------------------------------------------------------------------------
 
-def chain_case(name, W2, H2, params, ib, ic, ia, f, *, mutant=None):
+def chain_case(name, W2, H2, params, ib, ic, ia, f, *, mutant=None, cls=None):
     """net2 as 38 launches. mutant: None, "half_last" (the last launch on half of its workgroups), "clamp_l12" (L12's
-    group 0 clamped too), "clamp_l24" (L24 clamped)."""
-    c = Case(name, "chain")
+    group 0 clamped too), "clamp_l24" (L24 clamped). cls: the case class (default Case)."""
+    c = (cls or Case)(name, "chain")
     ref = N.run(ib, ic, ia, f, params)
     exp = {k: v for k, v in ref.items() if isinstance(v, np.ndarray) and k not in ("Ib", "Ic", "Ia")}
     for k in ("g0", "g1", "g2", "e0", "e1", "e2"):
