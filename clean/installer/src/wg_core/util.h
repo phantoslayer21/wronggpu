@@ -2,12 +2,21 @@
 // WrongGPU launcher core: small helpers (strings, paths, files, SHA-256), moved unchanged from setup.cpp. Written for
 // this project.
 #pragma once
+#include <filesystem>
 #include <functional>
 
 #include "constants.h"
 #include "sha256.h"
 
 namespace wg {
+
+// A std::filesystem::path for a Windows-style path, for the converter, which takes host paths: on Linux "Z:\..." and '\' become
+// the host's spelling (win32_posix.cpp), on Windows it is the path as it is.
+#ifdef _WIN32
+inline std::filesystem::path FsPath(const wstring& p) { return std::filesystem::path(p); }
+#else
+std::filesystem::path FsPath(const wstring& p);
+#endif
 
 struct SetupError { wstring msg; int code = EXIT_FAILED; };
 // Read-only view of a whole file (large files are scanned without copying them).
@@ -169,8 +178,19 @@ wstring EnvVar(const wchar_t* name);
 HMODULE LoadSystemDll(const wchar_t* name);
 // The launcher under Wine (Linux): Wine's ntdll exports wine_get_version.
 bool UnderWine();
+// The launcher as a native Linux program (the POSIX layer's ntdll stand-in exports a marker; Windows' and Wine's ntdll do not).
+bool NativeLinux();
+// A game that runs under Proton: the launcher is itself under Wine, or it is the native Linux launcher (whose games are Windows
+// games under Proton). Ray Reconstruction's shader caches are the game's own there (rrprep.h).
+bool UnderProton();
+// The launcher can fetch from the internet (OptiScaler's edition, the release check). Off in the native Linux launcher for now: it
+// has no HTTP client (the POSIX layer answers WinHTTP as not available), so what needs one says so in words instead of failing.
+bool DownloadsAvailable();
 // A path for a game in another Wine prefix (Proton gives every game its own): under Wine the Z: path of the same file
 // (Z: maps the Linux root in every prefix, C: does not), otherwise the path unchanged.
 wstring PathForGamePrefix(const wstring& path);
 wstring SelfPath();
+// A path as the player reads it: on the native Linux launcher the core's Z:\home\x\... is /home/x/... (the core keeps its own
+// spelling for the files themselves); Windows and Wine show the path as it is.
+wstring ShownPath(const wstring& p);
 }  // namespace wg

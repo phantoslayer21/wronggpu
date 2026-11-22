@@ -14,6 +14,7 @@
 #include "wg_core/gamerules.h"
 #include "wg_core/rrconfig.h"
 
+namespace wg::app::win { wstring WindowsFolderCommand(const wstring& gameExe); }  // ui_rrconfig.cpp
 namespace wg::app::lui {
 
 // "2026-10-17 19:19" -> "Today at 19:19", "Yesterday at ...", "Oct 14 at 16:26"
@@ -1447,6 +1448,32 @@ static float StepCodeRow(Gfx& gx, float x, float y, float w, int n, const wstrin
     return yy + 14 - y;
 }
 
+// Linux, a game that is not a Steam game: its Windows folder is not known until the player points at it once (rrconfig.h), so the
+// card says how, and shows the command (this program's own path, the game's exe) in a box with Copy, as the Steam launch option is.
+static bool AsksWindowsFolder() { return NativeLinux() && v.rrcfgWhy.find(L"not a Steam game") != wstring::npos; }
+static wstring RrFolderWords() {
+    if (!AsksWindowsFolder()) return v.rrcfgWhy + L".";
+    return L"It isn't a Steam game, so WrongGPU can't tell where its Proton or Wine folder is. Find the game's Windows user folder, the one that holds "
+           L"Documents and AppData (usually pfx/drive_c/users/<name> inside its Proton or Wine folder). Then run this once in a terminal, with the folder in place of <that folder>. Keep the quotes around it, and write a ' inside the folder's name as '\\'':";
+}
+static float WindowsFolderCard(Gfx& gx, float x, float y, float w) {
+    const wstring title = L"Point WrongGPU at the Windows folder", code = win::WindowsFolderCommand(v.cur.exe);
+    RowLine(gx, x, y, w, false);
+    const float bw = ButtonW(gx, L"Copy", 0, 30, B_SECONDARY), tx = x + kCellPad, cw = w - 2 * kCellPad;
+    TS ts = Ts(13.5f, 600, pal.text);
+    TS ms = Wrap(12.5f, pal.text, 18); ms.face = F_MONO;
+    const float mh = gx.TextH(code, cw - 20, ms);
+    float yy = y + 14;
+    gx.Text(title, Rc{tx, yy, cw - bw - 12, 22}, ts);
+    Button(gx, ID_G_WINFOLDER_COPY, x + w - kCellPad, yy - 5, L"Copy", B_SECONDARY, 0, true, 30, 0, true, L"Copy the windows-folder command");
+    yy += 30;
+    gx.FillRound(Rc{tx, yy, cw, mh + 14}, 6, pal.fill);
+    gx.Text(code, Rc{tx + 10, yy + 7, cw - 20, mh + 2}, ms);
+    yy += mh + 14;
+    AddText(Rc{tx, y + 14, cw, yy - y - 14}, title + L": " + code);
+    return yy + 14 - y;
+}
+
 // The file check's "Couldn't read Engine.ini" (RrConfigLineState 3, r3 #8): why, and what lets it be read again (not a fix:
 // adding the line would fail the same way). Myself (mine): the player's own file, which the game may read fine (UTF-16): only
 // WrongGPU's check can't read it, and how to check it by hand, never a request to save it another way (r4 #6)
@@ -1455,12 +1482,12 @@ static wstring CantReadWhy(bool mine, const RrConfigGame& rg) {
     const bool utf16 = why.find(L"UTF-16") != wstring::npos, inUse = why.find(L"another program") != wstring::npos;
     if (mine)
         return L"WrongGPU's check couldn't read it: " + why + L". " + (inUse ? L"Close the program that has it open, then check again, or c" : L"C") +
-               L"heck it by hand: open Engine.ini in Notepad and look for the line under [SystemSettings]" +
-               (rg.readOnly ? L", and in its Properties that Read-only is ticked." : L".");
+               L"heck it by hand: open Engine.ini in " + (NativeLinux() ? L"a text editor" : L"Notepad") + L" and look for the line under [SystemSettings]" +
+               (rg.readOnly ? (NativeLinux() ? L", and in its properties that the file is read-only." : L", and in its Properties that Read-only is ticked.") : L".");
     return L"WrongGPU couldn't read it: " + why + L". " +
-           (utf16 ? L"Open it in Notepad, choose Save as, set Encoding to UTF-8, then check again."
+           (utf16 ? (NativeLinux() ? L"Open it in a text editor, save it as UTF-8, then check again." : L"Open it in Notepad, choose Save as, set Encoding to UTF-8, then check again.")
             : inUse ? L"Close the program that has it open, then check again."
-                    : L"Check that it opens in Notepad, then check again.");
+                    : NativeLinux() ? L"Check that it opens in a text editor, then check again." : L"Check that it opens in Notepad, then check again.");
 }
 
 // Borderlands 4 / Hogwarts Legacy (wg_core/rrconfig.h): the Engine.ini line their Ray Reconstruction needs, changeable at any
@@ -1510,7 +1537,8 @@ static float RrConfigRows(Gfx& gx, float x, float y, float w, const RrConfigGame
         // (a protected game waits for the player's click, not for itself: r3 #4)
         const wstring t = st == 1 ? L"Engine.ini has the line" : st == 2 ? L"Not read-only" : st == 3 ? L"Couldn't read Engine.ini" : ready ? L"Ready to add"
                           : st == 0 ? L"Not in Engine.ini now"
-                          : waits && click ? L"Waiting for the game's first start" : waits ? L"Will be added after you start the game once" : L"Couldn't check";
+                          : waits && click ? L"Waiting for the game's first start" : waits ? L"Will be added after you start the game once"
+                          : !v.rrcfgWhy.empty() ? L"Can't find the game's Windows folder" : L"Couldn't check";
         const wstring d = st == 1 ? (rg.readOnly ? L"The file is read-only, so " + name + L" keeps it." : L"Ray Reconstruction can run in " + name + L".")
                           : st == 3 ? CantReadWhy(false, rg)
                           : st == 2 ? name + L" will remove it at its next start. " + (v.rrcfgFixed ? L"Fix it again" : L"Fix it now") + L" makes the file read-only."
@@ -1518,6 +1546,7 @@ static float RrConfigRows(Gfx& gx, float x, float y, float w, const RrConfigGame
                           : st == 0 ? L"Until it is back, the game doesn't use Ray Reconstruction. " + wstring(v.rrcfgFixed ? L"Fix it again" : L"Fix it now") + L" adds it."
                           : waits && click ? name + L" makes its settings folder at its first start. Then click Fix it now here to add the line." + askWhy
                           : waits ? name + L" makes its settings folder at its first start. WrongGPU adds the line the next time the launcher opens or you open this page."
+                          : !v.rrcfgWhy.empty() ? RrFolderWords()  // (Linux: the game's Windows folder is not known, and why)
                                     : wstring(L"Start the game once, then check again.");
         const bool fix = st == 0 || st == 2;
         // "again" only where WrongGPU added the line before (the record has it); the player's own line, or none added yet: now.
@@ -1529,6 +1558,7 @@ static float RrConfigRows(Gfx& gx, float x, float y, float w, const RrConfigGame
                       !fix ? L"Check again" : again ? L"Fix it again" : L"Fix it now", fix ? B_GO : B_PLAIN, fix ? en && !Locked() : true,
                       !fix ? L"Check Engine.ini again" : again ? L"Fix Engine.ini again" : L"Fix Engine.ini now");
         if (fix && Locked()) { v.tips[ID_G_RRCFG_FIX] = BusyWhy(v.cur); Describe(ID_G_RRCFG_FIX, BusyWhy(v.cur)); }
+        if (st == -1 && !waits && AsksWindowsFolder()) yy += WindowsFolderCard(gx, x, yy, w);
     }
     if (want != "off") return yy - y;
     // the steps (they stay on the page while the player works through them), then the file as it is now
@@ -1536,29 +1566,34 @@ static float RrConfigRows(Gfx& gx, float x, float y, float w, const RrConfigGame
     // WindowsNoEditor): step 1 names the folder the game makes it in and says to start the game first; Open folder makes
     // nothing (RrConfigAction) (r2 #7)
     const bool noFolder = v.rrcfg == -1;
-    wstring folder = !v.rrcfgFile.empty() ? Parent(v.rrcfgFile)
+    const bool lin = NativeLinux();  // a native Linux player: file manager, text editor, file permissions (the game itself is Windows', under Proton)
+    wstring folder = !v.rrcfgFile.empty() ? ShownPath(Parent(v.rrcfgFile))
+                     : lin ? (rg.documents ? L"Documents/" : L"AppData/Local/") + wstring(rg.folder) + L"/Windows"
                      : (rg.documents ? L"Documents\\" : L"%LOCALAPPDATA%\\") + wstring(rg.folder) + L"\\Windows";
-    if (noFolder) folder = Parent(folder);
+    if (noFolder) folder = Parent(folder);  // (Parent splits at either slash)
     // every step spelled out (r2 #5): Borderlands 4 deletes Engine.ini at each start, so the file and its section are usually
     // not there; the same steps as the release notes and the CLI's (RrConfigSteps)
     yy += StepCodeRow(gx, x, yy, w, 1, noFolder ? L"Start the game once, then come back (it makes its settings folder here)" : L"Open the game's settings folder",
                       folder, ID_G_RRCFG_OPEN, L"Open folder", L"Open the settings folder of " + name, true);
-    yy += StepCodeRow(gx, x, yy, w, 2, L"Create or open Engine.ini there with Notepad", L"", 0, L"", L"", true);
+    yy += StepCodeRow(gx, x, yy, w, 2, lin ? L"Create or open Engine.ini there with a text editor" : L"Create or open Engine.ini there with Notepad", L"", 0, L"", L"", true);
     yy += StepCodeRow(gx, x, yy, w, 3, L"If the file has no [SystemSettings] line, add it at the end", L"", 0, L"", L"", true);
     yy += StepCodeRow(gx, x, yy, w, 4, L"Paste this line under [SystemSettings]", RrConfigLineW(), ID_G_RRCFG_COPY, L"Copy", L"Copy the line", true);
     yy += StepCodeRow(gx, x, yy, w, 5, L"Save the file", L"", 0, L"", L"", true);
     if (rg.readOnly)
-        yy += StepCodeRow(gx, x, yy, w, 6, L"Right-click Engine.ini, choose Properties, tick Read-only and click OK (without it, " + name +
+        yy += StepCodeRow(gx, x, yy, w, 6, (lin ? L"Make Engine.ini read-only: in your file manager open its properties, then Permissions, and set it to read-only (without it, "
+                                                    : L"Right-click Engine.ini, choose Properties, tick Read-only and click OK (without it, ") + name +
                                                L" deletes the file at its next start)", L"", 0, L"", L"", true);
     const int st = v.rrcfg;
     const wstring t = st == 1 ? L"Engine.ini has the line" : st == 3 ? L"Couldn't read Engine.ini" : st == 2 ? L"The line is there, but the file isn't read-only"
-                      : st == -1 ? L"The game's settings folder isn't there yet"
+                      : st == -1 ? (v.rrcfgWhy.empty() ? L"The game's settings folder isn't there yet" : L"Can't find the game's Windows folder")
                                                                                                                                    : L"Not in Engine.ini yet";
     const wstring d = st == 1 ? L"Ray Reconstruction can run in " + name + L"." : st == 3 ? CantReadWhy(true, rg)
                       : st == 2 ? name + L" deletes the file at its next start. Do step 6, then check again."
-                      : st == -1 ? wstring(L"Start the game once, then come back and check again.") : L"Until it is, the game doesn't use Ray Reconstruction.";
+                      : st == -1 ? (v.rrcfgWhy.empty() ? wstring(L"Start the game once, then come back and check again.") : RrFolderWords())
+                                 : L"Until it is, the game doesn't use Ray Reconstruction.";
     yy += NeedRow(gx, x, yy, w, false, t, d, st == 1 ? pal.green : st == -1 ? pal.greyDot : pal.amber, pal.text, ID_G_RRCFG_CHECK, L"Check again", B_PLAIN, true,
                   L"Check Engine.ini again");
+    if (st == -1 && AsksWindowsFolder()) yy += WindowsFolderCard(gx, x, yy, w);
     return yy - y;
 }
 
@@ -1665,7 +1700,7 @@ static float RrSection(Gfx& gx, float x, float y, float w) {
             // rrprep.h): no Prepare button, which would do nothing there
             if (RrKernelsInGame(e.exe))
                 yy += DotRow(gx, x, yy, w, false,
-                             UnderWine() ? L"Prepared by the game at its first start (under Proton its shader caches are its own)"
+                             UnderProton() ? L"Prepared by the game at its first start (under Proton its shader caches are its own)"
                                          : L"Prepared by the game at its first start (about a minute after a graphics driver update)",
                              pal.greyDot, pal.text);
             else if (!bg.empty())
@@ -1692,6 +1727,54 @@ static float RrSection(Gfx& gx, float x, float y, float w) {
 // OptiScaler with WrongGPU's setup: what it is (version, the name it loads as), what can be set (the FPS overlay, the
 // editable keys this build has: the menu key first, the rest behind "More OptiScaler settings"), the keys WrongGPU manages
 // under the list.
+#ifndef _WIN32
+// The line Steam's launch options need under Proton for OptiScaler's proxy DLL to load: Wine uses its own dxgi.dll (or winmm.dll,
+// version.dll...) unless the override says native first ("n"), then its own ("b").
+wstring ProtonLaunchOption(const wstring& proxy) {
+    wstring name = Lower(proxy);
+    if (name.size() > 4 && name.compare(name.size() - 4, 4, L".dll") == 0) name.resize(name.size() - 4);
+    return L"WINEDLLOVERRIDES=\"" + name + L"=n,b\" %command%";
+}
+
+// After OptiScaler's list, on Linux: the launch option the game needs in Steam, in a box to read exactly, with Copy, and the steps
+// to put it there. WrongGPU does not write Steam's config (it belongs to Steam and its client rewrites it); the player pastes the
+// line once.
+static float ProtonLaunchNote(Gfx& gx, float x, float y, float w, const wstring& proxy) {
+    const wstring title = L"Steam launch option", line = ProtonLaunchOption(proxy);
+    const wstring body = L"Under Proton, Steam needs this line to load OptiScaler's " + proxy + L" instead of Wine's own. WrongGPU can't add it for you: "
+                         L"Steam keeps its own settings. Add it once:";
+    const std::vector<wstring> steps{L"1. In Steam, right-click this game in your library and choose Properties.",
+                                     L"2. On the General tab, find the box called Launch Options.",
+                                     L"3. Click Copy here, then paste the line into that box (replace what is there; if it already has other options, put them before %command%).",
+                                     L"4. Close the window. Then start the game from Steam or from Play here."};
+    return GroupList(gx, x, y, w, [&](float top) {
+        const float bw = ButtonW(gx, L"Copy", 0, 30, B_SECONDARY), tx = x + kCellPad, cw = w - 2 * kCellPad;
+        const TS hs = Ts(13.5f, 600, pal.text), bs = Wrap(12.5f, pal.text2, 18);
+        TS ms = Wrap(12.5f, pal.text, 18); ms.face = F_MONO;
+        float yy = top + 14;
+        gx.Text(title, Rc{tx, yy, cw - bw - 12, 22}, hs);
+        Button(gx, ID_G_PROTONOPT_COPY, x + w - kCellPad, yy - 5, L"Copy", B_SECONDARY, 0, true, 30, 0, true, L"Copy the launch option");
+        yy += 28;
+        const float bh = gx.TextH(body, cw, bs), mh = gx.TextH(line, cw - 20, ms);
+        gx.Text(body, Rc{tx, yy, cw, bh + 2}, bs);
+        yy += bh + 10;
+        gx.FillRound(Rc{tx, yy, cw, mh + 14}, 6, pal.fill);
+        gx.Text(line, Rc{tx + 10, yy + 7, cw - 20, mh + 2}, ms);
+        yy += mh + 14;
+        wstring said = title + L". " + body + L" " + line;
+        for (auto& s : steps) {
+            yy += 8;
+            const float sh = gx.TextH(s, cw, bs);
+            gx.Text(s, Rc{tx, yy, cw, sh + 2}, bs);
+            yy += sh;
+            said += L" " + s;
+        }
+        AddText(Rc{tx, top + 14, cw, yy - top - 14}, said);
+        return yy + 14 - top;
+    });
+}
+#endif
+
 static float OptiSection(Gfx& gx, float x, float y, float w) {
     const GameEntry& e = v.cur;
     const OptiView& o = v.opti;
@@ -1746,6 +1829,9 @@ static float OptiSection(Gfx& gx, float x, float y, float w) {
         }
         return yy - top;
     });
+#ifndef _WIN32
+    if (o.have && !o.proxy.empty()) y += 12 + ProtonLaunchNote(gx, x, y + 12, w, o.proxy);
+#endif
     // values OptiScaler's menu (or a hand edit) saved over ours
     if (!o.outside.empty()) {
         // in the page's words: "Menu key F1 (WrongGPU's: Insert)"

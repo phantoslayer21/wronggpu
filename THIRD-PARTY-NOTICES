@@ -28,6 +28,35 @@ repository. The model weights are read on the player's own PC from that upscaler
     Licence:  MIT (text below; clean/third_party/fidelityfx-sdk-fsr3-v3.0.4/LICENSE.txt)
     Used by:  clean/fsr/src/fsr30_layout_check.cpp only (a compile-time layout check of WrongGPU's own mirror types)
 
+1.3 Selawik 1.01: text font of the Linux launcher
+    Files:    clean/installer/assets/fonts/selawik/ (selawk.ttf, selawkl.ttf, selawksl.ttf, selawksb.ttf, selawkb.ttf),
+              unmodified; OFL.txt beside them
+    Source:   https://github.com/microsoft/Selawik, release 1.01 (Selawik_Release.zip)
+    Licence:  SIL Open Font License 1.1, (c) 2015 Microsoft Corporation, Reserved Font Name "Selawik"
+              (clean/installer/assets/fonts/selawik/OFL.txt)
+    Used by:  the Linux launcher's Cairo/Pango drawing (clean/installer/src/app/ui_gfx_cairo.cpp) in place of
+              Segoe UI Variable; registered with fontconfig at start-up, never renamed or sold on its own
+
+1.4 Noto Sans Math v3.000: symbol fallback font of the Linux launcher
+    Files:    clean/installer/assets/fonts/notosansmath/NotoSansMath-Regular.ttf (the release's unhinted TTF, whole and
+              unmodified, 657 KB, sha256 b127e84699212b6b2ef50aff58e0ebebeec04ffe6db1b9eb9e209c8c3d97b4aa); OFL.txt beside it
+    Source:   https://github.com/notofonts/math, release NotoSansMath-v3.000 (tag commit
+              480fb49a4a43189ad0f8f27415e76fd1317ecab9; NotoSansMath-v3.000.zip, sha256
+              ac351837b41f8a897f020b97fb0f075ad574c1e9669fb5839ada1f92fd748356)
+    Licence:  SIL Open Font License 1.1, Copyright 2022 The Noto Project Authors (https://github.com/notofonts/math), no
+              Reserved Font Name (clean/installer/assets/fonts/notosansmath/OFL.txt)
+    Used by:  the Linux launcher's Cairo/Pango drawing (clean/installer/src/app/ui_gfx_cairo.cpp), listed after Selawik so
+              it draws the symbols Selawik lacks (the arrow in "0.4.5 → 0.6.0", the no-break and en spaces); never
+              renamed or sold on its own
+
+1.5 Fluent System Icons: icon font of the Linux launcher
+    Files:    clean/installer/assets/fonts/fluent/FluentSystemIcons-Regular.ttf, unmodified; LICENSE beside it
+    Source:   https://github.com/microsoft/fluentui-system-icons,
+              commit 67e6dec1ee956af3ab4c746a2b3bb6a2e5520a44
+    Licence:  MIT, (c) 2020 Microsoft Corporation (clean/installer/assets/fonts/fluent/LICENSE)
+    Used by:  the Linux launcher's Cairo/Pango drawing in place of Segoe Fluent Icons (the codepoint table is in
+              ui_gfx_cairo.cpp)
+
 
 2. Not included; used at build or test time (installed by the developer)
 -------------------------------------------------------------------------
@@ -54,6 +83,21 @@ repository. The model weights are read on the player's own PC from that upscaler
     own file of the original upscaler (read by the converter on the player's PC, never redistributed); OptiScaler (its own
     project, GPL-3.0; the launcher downloads the WrongGPU edition from its own release page, it is not part of
     this repository or of WrongGPU's packages).
+
+
+4. Not included; bundled into the Linux AppImage when it is built
+------------------------------------------------------------------
+
+4.1 libjpeg-turbo 2.1.2 (Ubuntu 22.04's libjpeg-turbo8): JPEG decoding in the Linux launcher
+    Files:    none in this repository; build-appimage.sh installs libjpeg-turbo8-dev from the Ubuntu 22.04 archive and
+              linuxdeploy copies libjpeg.so.8 into the AppImage, unmodified. The AppImage carries this file in
+              share/doc/wronggpu/THIRD-PARTY-NOTICES.
+    Source:   https://github.com/libjpeg-turbo/libjpeg-turbo, tag 2.1.2 (the source of Ubuntu's package)
+    Licence:  the IJG (Independent JPEG Group) licence for the libjpeg API library, which the launcher uses, and the
+              Modified (3-clause) BSD licence (D. R. Commander and others) for the rest of the project; texts below
+    Notice:   This software is based in part on the work of the Independent JPEG Group.
+    Used by:  clean/installer/src/app/jpeg_decode_linux.cpp, which reads Steam's JPEG art (hero, header, capsule); the
+              Windows launcher decodes art with WIC and does not carry it
 
 
 Licence texts
@@ -105,3 +149,73 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+
+
+libjpeg-turbo 2.1.2, the IJG licence (README.ijg of the libjpeg-turbo source, its LEGAL ISSUES section):
+
+This software is based in part on the work of the Independent JPEG Group.
+
+The authors make NO WARRANTY or representation, either express or implied,
+with respect to this software, its quality, accuracy, merchantability, or
+fitness for a particular purpose.  This software is provided "AS IS", and you,
+its user, assume the entire risk as to its quality and accuracy.
+
+This software is copyright (C) 1991-2020, Thomas G. Lane, Guido Vollbeding.
+All Rights Reserved except as specified below.
+
+Permission is hereby granted to use, copy, modify, and distribute this
+software (or portions thereof) for any purpose, without fee, subject to these
+conditions:
+(1) If any part of the source code for this software is distributed, then this
+README file must be included, with this copyright and no-warranty notice
+unaltered; and any additions, deletions, or changes to the original files
+must be clearly indicated in accompanying documentation.
+(2) If only executable code is distributed, then the accompanying
+documentation must state that "this software is based in part on the work of
+the Independent JPEG Group".
+(3) Permission for use of this software is granted only if the user accepts
+full responsibility for any undesirable consequences; the authors accept
+NO LIABILITY for damages of any kind.
+
+These conditions apply to any software derived from or based on the IJG code,
+not just to the unmodified library.  If you use our work, you ought to
+acknowledge us.
+
+Permission is NOT granted for the use of any IJG author's name or company name
+in advertising or publicity relating to this software or products derived from
+it.  This software may be referred to only as "the Independent JPEG Group's
+software".
+
+We specifically permit and encourage the use of this software as the basis of
+commercial products, provided that all warranty or liability claims are
+assumed by the product vendor.
+
+
+libjpeg-turbo 2.1.2, the Modified (3-clause) BSD licence (LICENSE.md of the libjpeg-turbo source):
+
+Copyright (C)2009-2021 D. R. Commander.  All Rights Reserved.
+Copyright (C)2015 Viktor Szathmáry.  All Rights Reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+- Redistributions of source code must retain the above copyright notice,
+  this list of conditions and the following disclaimer.
+- Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+- Neither the name of the libjpeg-turbo Project nor the names of its
+  contributors may be used to endorse or promote products derived from this
+  software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS",
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS BE
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.

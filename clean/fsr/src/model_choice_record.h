@@ -156,7 +156,7 @@ enum class ReadResult { Missing, Ok, Corrupt, Unreadable };
 // Reads the record (call it under the record's Lock).
 inline ReadResult ReadRecordFile(const std::filesystem::path& path, Record* out, std::string* why) {
     std::string text;
-    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+    HANDLE h = CreateFileW(path.wstring().c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
         const DWORD e = GetLastError();

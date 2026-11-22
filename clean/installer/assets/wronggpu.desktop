@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=WrongGPU
+Comment=Install and manage WrongGPU for your games
+Exec=WrongGPU
+Icon=wronggpu
+Terminal=false
+Categories=Utility;

@@ -85,6 +85,9 @@ void CollectLogsBeforeUninstall();
 bool FirstRunPortable();  // ui_words.cpp: the first run's "portable" choice (false: refused, a note said why)
 void HandOverToInstalled(HANDLE& one, const wstring& installedExe, const wchar_t* why);  // ui_words.cpp: a newer download, its question answered
 bool AnswerReplaceOffer(HANDLE& one, const wstring& installedExe, const wstring& have, const LauncherStartDecision& start);  // ui_words.cpp: "Update WrongGPU to X?"; true: Not now, this copy runs (rc5)
+void AppImageUninstallAsked();  // ui_appimage.cpp: the native Linux launcher's Settings > Uninstall WrongGPU (wg_core/appimage.h)
+bool AppImageUninstallQuestion(wstring& text);  // ui_appimage.cpp: the dialog's text for this running copy, as the dialog builds it
+wstring AppImageUninstallText(const wstring& file, const wstring& data, bool keepsList = false);  // keepsList: the data folder has an ignore-files.txt (it is put back)
 void RemoveDataAsked();  // ui_words.cpp: a portable copy's Settings > Remove data... (RemoveSharedData)
 void StartHealth(bool gpu);  // the model data, the RR data and the graphics card read again (the status line, Settings)
 // Clean up / Adopt's question; otherSetup (0.6.1): the files are used by another mod's setup (said, Cancel the default)
@@ -162,6 +165,11 @@ bool ApplyRrConfigDueNow(const wstring& dir, const wstring& exe);
 void RrConfigNeedsClick(const wstring& dir);
 void ForgetRrConfigDue(const wstring& dir);
 void RrConfigAction(int id);                  // the Engine.ini steps' Open folder, Copy, Check again
+#ifndef _WIN32
+wstring WindowsFolderCommand(const wstring& gameExe);  // Linux: this program's `windows-folder` command for a game that is not a Steam game
+void CopyTerminalCommand(const wstring& line);        // Linux: a command for the terminal on the clipboard, and the toast that says so
+void CopyLaunchOption(const wstring& line);  // Linux: the Steam launch option for Proton on the clipboard, and the toast that says so
+#endif
 void ShowRrConfigSteps(const wstring& dir);  // "Show me how": the game's page at its Engine.ini steps, the keyboard on Open folder
 // r3 #5: the toast the launcher shows once when a protected game's Engine.ini line is ready to add (RrConfigReadyToAdd);
 // empty without one

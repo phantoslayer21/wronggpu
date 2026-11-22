@@ -2,11 +2,19 @@
 """What the launcher under test was built with, for run_launcher_tests.py: checks that follow the build instead of assuming
 a release build (a fresh clone's suite build differs from a release in its version, its payload and its direct route).
 Kept out of run_launcher_tests.py, which stays below the 256 KB source limit. Written for this project."""
+import importlib.util
 import os
 import re
 import shutil
 
 from run_installer_tests import read, write, STAND_IN_RUNTIME
+
+# the Linux testing build's identity sum (tools/elf_testing_identity.py: what the PE checksum is on Windows); loaded by its
+# path now, before native_linux gives this module Windows-spelled paths
+_spec = importlib.util.spec_from_file_location(
+    "elf_testing_identity", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools", "elf_testing_identity.py"))
+elf_identity = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(elf_identity)
 
 
 def restorer_ok(un, exe):
@@ -68,11 +76,37 @@ def pe_checksum(data, at):
     return (s + len(data)) & 0xFFFFFFFF
 
 
+def elf_testing_identity(data):
+    """testing_identity for a Linux program (ELF): the identity section with the identity text, its SHA-256 sum matching the
+    file (nothing changed or appended after its link; tools/elf_testing_identity.py), and the test hooks' strings (wide
+    strings are UTF-32 on Linux) inside its sections."""
+    import struct
+    try:
+        sections = elf_identity.sections(data)
+        end = max((off + size for _, off, size, kind in sections if kind != elf_identity.SHT_NOBITS), default=0)
+        if [m for m in TEST_HOOKS if m.encode("utf-32-le") not in data[:end]]:
+            return "the test hooks' strings are not in its sections"
+        try:
+            _, body = elf_identity.identity_section(data)
+        except ValueError:
+            return "no %s section (not a WRONGGPU_TESTING build)" % elf_identity.SECTION.decode()
+        if not body.startswith(IDENTITY_TEXT + b"\0"):
+            return "its %s section does not hold the identity text" % elf_identity.SECTION.decode()
+        slot = elf_identity.sum_slot(data)
+        if data[slot:slot + 32] != elf_identity.expected_sum(data, slot):
+            return "its identity sum is missing or does not match (changed after its link, or not a testing build)"
+        return ""
+    except (struct.error, ValueError, IndexError) as e:
+        return "not a readable ELF file (%s)" % e
+
+
 def testing_identity(data):
     """Why data is not a WRONGGPU_TESTING build's program, read from its structure ('' when it is one): a valid PE whose
     checksum matches (nothing changed or appended after its link), the identity resource in its resource directory, and the
-    test hooks' strings inside its sections (not in data appended to it)."""
+    test hooks' strings inside its sections (not in data appended to it). A Linux program: elf_testing_identity."""
     import struct
+    if data[:4] == b"\x7fELF":
+        return elf_testing_identity(data)
     try:
         if data[:2] != b"MZ":
             return "not a program (no MZ header)"
@@ -214,8 +248,15 @@ def new_run_folder(root, prefix="run"):
 
 
 CANARIES = ("wg-test-canary.exe", "wg-test-canary-strings.exe")
-LOAD_MARKER = "wg-test-canary-dll.dll"  # writes <dll>.loaded when loaded (tests/canary_dll.cpp)
+LOAD_MARKER = "wg-test-canary-dll.dll"  # writes <dll>.loaded when loaded (tests/canary_dll.cpp; Linux: canary_dll_linux.cpp)
 BUILD_LIST = "wg-test-build.sha256"  # written by the build next to the launcher: SHA-256 of WrongGPU.exe and the canaries
+
+
+def build_names(exe):
+    """The launcher's and the canaries' names in the build list for the launcher's platform: Linux programs have no .exe."""
+    if read(exe)[:4] == b"\x7fELF":
+        return "WrongGPU", tuple(n[:-len(".exe")] for n in CANARIES)
+    return "WrongGPU.exe", CANARIES
 
 
 def verified_canaries(exe):
@@ -229,10 +270,11 @@ def verified_canaries(exe):
     except (OSError, UnicodeDecodeError) as e:
         return {}, "no build list %s (%s)" % (BUILD_LIST, e)
     listed = dict(zip(lines[1::2], lines[0::2]))
-    if listed.get("WrongGPU.exe") != hashlib.sha256(read(exe)).hexdigest():
+    launcher, canaries = build_names(exe)
+    if listed.get(launcher) != hashlib.sha256(read(exe)).hexdigest():
         return {}, "the build list is not this launcher's (another build)"
     out = {}
-    for name in CANARIES + (LOAD_MARKER,):
+    for name in canaries + (LOAD_MARKER,):
         p = os.path.join(d, name)
         data = read(p) if os.path.isfile(p) else b""
         if not data or listed.get(name) != hashlib.sha256(data).hexdigest():
@@ -276,7 +318,25 @@ def self_checks(t):
     d = os.path.join(t.work, "self-checks")
     shutil.rmtree(d, ignore_errors=True)
     os.makedirs(d)
-    t.check("preflight: the launcher under test is a WRONGGPU_TESTING build (its identity resource, a matching PE checksum, the hooks)",
+    # Linux (--native-linux): the same guards on the Linux build (an identity section and its sum for the PE resource and
+    # checksum, canaries without .exe, a symbolic link for a junction); paths given to a program or a child suite are host paths
+    native = t.native
+    if native:
+        import ctypes
+        import native_linux
+        hp, entry_flag = native_linux.host, "--native-linux"
+
+        def link_folder(link, target):
+            os.symlink(target, link)
+            return True
+    else:
+        hp, entry_flag = (lambda p: p), "--launcher"
+
+        def link_folder(link, target):
+            return subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", link, target], stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode == 0
+    remove_link = os.remove if native else os.rmdir  # (the link or junction only, never its target)
+    t.check("preflight: the launcher under test is a WRONGGPU_TESTING build " +
+            ("(its identity section, a matching identity sum, the hooks)" if native else "(its identity resource, a matching PE checksum, the hooks)"),
             not missing_test_hooks(t.exe), missing_test_hooks(t.exe))
     # programs that are not testing builds, each leaving <program>.started when it starts (tests/canary.cpp; built with the
     # launcher in a testing build): one plain, one carrying the hooks' strings. Only the canaries THIS build made are ever
@@ -287,15 +347,18 @@ def self_checks(t):
     canaries, why_not = verified_canaries(t.exe)
     t.check("negative controls: the canaries are this build's (wg-test-build.sha256 next to the launcher names this launcher "
             "and the canaries' bytes)", bool(canaries), why_not)
-    for name in [n for n in CANARIES if n in canaries]:
+    canary_names = build_names(t.exe)[1]
+    for name in [n for n in canary_names if n in canaries]:
         data = canaries[name]
         canary = os.path.join(d, name)
         write(canary, data)
+        if native:
+            os.chmod(canary, 0o755)  # (a program on Linux)
         started = canary + ".started"
         if hashlib.sha256(read(canary)).digest() != hashlib.sha256(data).digest():
             t.check("negative control %s: the copy is the verified file" % name, False)
             continue
-        subprocess.run([canary], env=t.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        subprocess.run([hp(canary)], env=t.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
         runs = os.path.isfile(started)
         if runs:
             os.remove(started)
@@ -314,13 +377,13 @@ def self_checks(t):
             rwhy = str(e)
         entry = []
         suite = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run_launcher_tests.py")
-        for args in (["--launcher", canary], ["--launcher", t.exe, "--no-direct-launcher", canary]):  # the suite's entry points
-            p = subprocess.run([sys.executable, suite] + args + ["--work", os.path.join(d, "entry")], env=dict(os.environ),
+        for args in ([entry_flag, hp(canary)], [entry_flag, hp(t.exe), "--no-direct-launcher", hp(canary)]):  # the suite's entry points
+            p = subprocess.run([sys.executable, hp(suite)] + args + ["--work", hp(os.path.join(d, "entry"))], env=dict(os.environ),
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
             entry.append(p.returncode != 0 and b"not a WRONGGPU_TESTING build" in p.stderr + p.stdout)
         t.check("negative control %s: it starts when run directly (its start marker); the suite never starts it (a launcher call, "
-                "the junction test's call, a program run as it is, --launcher, --no-direct-launcher): refused before it runs, no start "
-                "marker, nothing logged" % name,
+                "the junction test's call, a program run as it is, %s, --no-direct-launcher): refused before it runs, no start "
+                "marker, nothing logged" % (name, entry_flag),
                 runs and all("not a WRONGGPU_TESTING build" in w for w in (why, jwhy, rwhy)) and entry == [True, True] and
                 not os.path.exists(started) and size() == before, (runs, why, jwhy, rwhy, entry))
     # the real launcher changed after its link: one byte, or data appended (the hooks' strings and the identity text)
@@ -328,6 +391,8 @@ def self_checks(t):
     mid = len(data) // 2
     mixed = {"one byte changed": data[:mid] + bytes([data[mid] ^ 0xFF]) + data[mid + 1:],
              "data appended": data + b"".join(m.encode("utf-16-le") for m in TEST_HOOKS) + IDENTITY_TEXT}
+    if native and "wg-test-canary-strings" in canaries:  # the hooks' strings (Linux: no sum without an identity section)
+        mixed["the hooks' strings, no identity section"] = canaries["wg-test-canary-strings"]
     if "wg-test-canary-strings.exe" in canaries:  # the hooks' strings and a valid checksum, but no identity resource
         import struct
         c = bytearray(canaries["wg-test-canary-strings.exe"])
@@ -336,8 +401,8 @@ def self_checks(t):
         mixed["the hooks' strings and a valid checksum, no identity resource"] = bytes(c)
     refused = {k: bool(testing_identity(v)) for k, v in mixed.items()}
     t.check("preflight: a launcher changed after its link (a byte, or the hooks' strings and the identity appended), or a program "
-            "with the strings and a valid checksum but no identity resource, is refused",
-            all(refused.values()), refused)
+            "with the strings " + ("but no identity section" if native else "and a valid checksum but no identity resource") + ", is refused",
+            all(refused.values()) and len(refused) == 3, refused)
     # the HIP check: only the --hip mock, or in a default run a file that is not there, is ever tried (never the system's,
     # PATH's or ROCm's runtime), and an inherited WRONGGPU_HIP_RUNTIME / WRONGGPU_TEST_HIP_CANDIDATES is never tried: a safe
     # stand-in file at those paths (the --hip mock's copy, else not a library), and the probe's own log line per candidate
@@ -361,15 +426,15 @@ def self_checks(t):
     # --work: a junction (to another folder) is refused before the isolation self-test writes or removes anything in it
     target, jroot = os.path.join(d, "work-target"), os.path.join(d, "work-junction")
     write(os.path.join(target, "library-access.log"), b"keep")
-    jlinked = subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", jroot, target], stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode == 0
+    jlinked = link_folder(jroot, target)
     suite = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run_launcher_tests.py")
-    p = subprocess.run([sys.executable, suite, "--launcher", t.exe, "--work", jroot], env=dict(os.environ),
+    p = subprocess.run([sys.executable, hp(suite), entry_flag, hp(t.exe), "--work", hp(jroot)], env=dict(os.environ),
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
     t.check("--work: a junction is refused before the isolation self-test or any create or delete in it (its target untouched)",
             jlinked and p.returncode != 0 and b"junction or link" in p.stderr + p.stdout and sorted(os.listdir(target)) == ["library-access.log"] and
             read(os.path.join(target, "library-access.log")) == b"keep", (jlinked, p.returncode, (p.stderr + p.stdout)[-300:], os.listdir(target)))
     if os.path.lexists(jroot):
-        os.rmdir(jroot)  # (the junction only)
+        remove_link(jroot)  # (the junction only)
     # --work holding ';', and an explicit empty --hip=: refused before anything is made, anywhere (the work path stays absent,
     # and nothing in the tests folder changes: no bytecode either)
     here = os.path.dirname(os.path.abspath(__file__))
@@ -387,7 +452,7 @@ def self_checks(t):
     child.pop("PYTHONDONTWRITEBYTECODE", None)  # (the suite itself must keep its source tree clean)
     for name, args, folder in (("--work with ';'", ["--work", os.path.join(d, "semi;colon")], os.path.join(d, "semi;colon")),
                                ("--hip=", ["--work", os.path.join(d, "hip-empty"), "--hip="], os.path.join(d, "hip-empty"))):
-        p = subprocess.run([sys.executable, suite, "--launcher", t.exe] + args, env=child,
+        p = subprocess.run([sys.executable, hp(suite), entry_flag, hp(t.exe)] + [hp(a) if os.sep in a or "/" in a else a for a in args], env=child,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
         entry[name] = p.returncode != 0 and b"not run" in p.stderr + p.stdout and not os.path.exists(folder)
     changed = sorted(k for k in set(before_tree) | set(tree(here)) if before_tree.get(k) != tree(here).get(k))
@@ -412,13 +477,17 @@ def self_checks(t):
     if marker_dll:
         probe = os.path.join(d, "marker-probe", "amdhip64_7.dll")  # the marker works: loaded here, it writes <dll>.loaded
         write(probe, marker_dll)
-        import ctypes
-        h = ctypes.WinDLL(probe)
-        ctypes.windll.kernel32.FreeLibrary(ctypes.c_void_p(h._handle))
+        if native:
+            h = ctypes.CDLL(hp(probe))
+            ctypes.CDLL(None).dlclose(ctypes.c_void_p(h._handle))
+        else:
+            import ctypes
+            h = ctypes.WinDLL(probe)
+            ctypes.windll.kernel32.FreeLibrary(ctypes.c_void_p(h._handle))
         loads = os.path.isfile(probe + ".loaded")
         write(stand_in, marker_dll)
     planted = sorted(os.listdir(sim))
-    p = subprocess.run([sys.executable, suite, "--launcher", t.exe, "--work", sim, "--startup-only"], env=child,
+    p = subprocess.run([sys.executable, hp(suite), entry_flag, hp(t.exe), "--work", hp(sim), "--startup-only"], env=child,
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600)
     after = sorted(os.listdir(sim))
     runs = [n for n in after if n not in planted]
@@ -434,8 +503,7 @@ def self_checks(t):
     jw = os.path.join(d, "junction-work")
     os.makedirs(os.path.join(d, "elsewhere"))
     os.makedirs(jw)
-    linked = subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", os.path.join(jw, "tmp"), os.path.join(d, "elsewhere")],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode == 0
+    linked = link_folder(os.path.join(jw, "tmp"), os.path.join(d, "elsewhere"))
     jwhy = ""
     try:
         fresh_temp(jw)
@@ -444,7 +512,7 @@ def self_checks(t):
     t.check("the suite's temporary folder: a junction in its place (or above it) is refused, never followed or emptied",
             linked and "junction or link" in jwhy and os.path.isdir(os.path.join(d, "elsewhere")), (linked, jwhy))
     if os.path.lexists(os.path.join(jw, "tmp")):
-        os.rmdir(os.path.join(jw, "tmp"))  # (removes the junction only)
+        remove_link(os.path.join(jw, "tmp"))  # (removes the junction only)
     b = os.path.join(d, "Game", "bin")
     write(os.path.join(b, "wronggpu", "kernels", "enc.hsaco"), b"kernel")
     ok_kernels = rr_free(b, "file wronggpu\\kernels\\enc.hsaco")

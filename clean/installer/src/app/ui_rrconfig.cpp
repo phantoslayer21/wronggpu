@@ -23,6 +23,7 @@
 
 #include <set>
 
+#include "wg_core/appimage.h"
 #include "wg_core/rrconfig.h"
 
 namespace wg::app {
@@ -218,7 +219,7 @@ wstring RrConfigQuestionText(const wstring& dir, const wstring& exe) {
     bool first = false;
     if (prot) {
         if (IEq(v.cur.dir, dir) && v.rrcfg != -2) first = v.rrcfg == -1;
-        else if (!v.fixture) { bool known = true; try { RrConfigFile(g.ctx, *rg, nullptr, &known); } catch (...) {} first = !known; }
+        else if (!v.fixture) { bool known = true; try { RrConfigFile(g.ctx, *rg, exe, nullptr, &known); } catch (...) {} first = !known; }
     }
     return RrConfigNotice(*rg, prot, first);
 }
@@ -240,13 +241,41 @@ void AskRrConfigLater(const wstring& dir, const wstring& exe, const Profile& sav
     SetTimer(v.hwnd, kAskTimer, 400, Tick);
 }
 
+// A word for a shell: in single quotes, a quote inside it as '\'' (nothing in a path is then read as a command)
+static wstring ShellQuote(const wstring& s) {
+    wstring q = L"'";
+    for (wchar_t c : s) q += c == L'\'' ? wstring(L"'\\''") : wstring(1, c);
+    return q + L"'";
+}
+// A core path in the spelling a shell takes (Z:\home\x -> /home/x). The real Linux name is kept: no '\' of it is turned into a '/'.
+static wstring ShellSpelling(const wstring& p) { return NativeLinux() ? FromUtf8(FsPath(p).string()) : p; }
+// The command a player runs once for a game that is not a Steam game (Heroic, Lutris, Bottles): this launcher's own file (the
+// AppImage when the same proof the uninstall asks for says it is the one running, else the running program), the game's exe, and
+// their Windows folder to fill in (in single quotes: an apostrophe inside it is written as '\'' , the card says so).
+wstring WindowsFolderCommand(const wstring& gameExe) {
+    wstring host;
+    const string self = NativeLinux() ? HostSelfPath() : string();
+    const wstring image = lui::RunsFromOwnAppImage(nullptr, nullptr, &host) ? host : !self.empty() ? FromUtf8(self) : ShellSpelling(SelfPath());
+    return ShellQuote(image) + L" windows-folder " + ShellQuote(ShellSpelling(gameExe)) + L" '<that folder>'";
+}
+void CopyTerminalCommand(const wstring& line) {
+    ShowToast(CopyToClipboard(line) ? L"The command is on the clipboard. Paste it into a terminal, and put your folder where it says <that folder>, inside the quotes."
+                                    : L"The command couldn't be put on the clipboard. Type it as the page shows it.", 0);
+}
 // The game page's "Engine.ini setting" steps: Open folder (never made here: the game makes it at its first start), Copy (the
 // line on the clipboard), Check again (the file read again; a small file in the player's profile, read on a click).
+#ifndef _WIN32
+void CopyLaunchOption(const wstring& line) {
+    ShowToast(CopyToClipboard(line) ? L"The launch option is on the clipboard. In Steam, paste it under the game's Properties, Launch options."
+                                    : L"The launch option couldn't be put on the clipboard. Type it as the page shows it.", 0);
+}
+#endif
+
 void RrConfigAction(int id) {
     const RrConfigGame* rg = RrConfigGameFor(v.cur.exe);
     if (!rg) return;
     wstring file = v.rrcfgFile;
-    if (file.empty()) { try { file = RrConfigFile(g.ctx, *rg, nullptr); } catch (...) {} }
+    if (file.empty()) { try { file = RrConfigFile(g.ctx, *rg, v.cur.exe, nullptr); } catch (...) {} }
     if (id == ID_G_RRCFG_OPEN) {
         // never made here: before the game's first start the sub-folder is a guess (Hogwarts Legacy uses WindowsNoEditor, the
         // guess is Windows), and a file made in the wrong one would be edited for nothing (UI review r2 #7)
@@ -278,7 +307,7 @@ void RrConfigAction(int id) {
     if (id == ID_G_RRCFG_CHECK) {
         int state = -1;
         wstring why;
-        try { state = RrConfigLineState(g.ctx, *rg, &file, &why); } catch (...) {}
+        try { state = RrConfigLineState(g.ctx, *rg, v.cur.exe, &file, &why); } catch (...) {}
         v.rrcfg = state;
         v.rrcfgFile = file;
         v.rrcfgWhy = why;
@@ -288,7 +317,7 @@ void RrConfigAction(int id) {
         const bool click = waiting && (v.cur.rrConfigProtected || !v.cur.rrInstalled);
         ShowToast(state == 1 ? L"Engine.ini has the line. Ray Reconstruction can run in " + wstring(rg->name) + L"."
                   : state == 3 ? (v.saved.get("rr_config_fix") == "off"  // Myself: the player's own file, which the game may read fine (r4 #6)
-                                      ? L"WrongGPU's check couldn't read Engine.ini: " + why + L". Check it by hand in Notepad."
+                                      ? L"WrongGPU's check couldn't read Engine.ini: " + why + (NativeLinux() ? L". Check it by hand in a text editor." : L". Check it by hand in Notepad.")
                                       : L"Engine.ini couldn't be read: " + why + L".")  // r3 #8
                   : state == 2 ? L"Engine.ini has the line, but it isn't read-only yet."
                   : state == 0 ? (click ? L"The game's settings folder is there now. Click Fix it now to add the line."

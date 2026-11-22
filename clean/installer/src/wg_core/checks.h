@@ -7,7 +7,7 @@
 
 namespace wg {
 
-struct WinInfo { bool ok = false; wstring text; };
+struct WinInfo { bool ok = false; wstring text; wstring label = L"Windows"; };  // label: "Windows", or "Linux" for the native launcher
 struct GpuInfo { bool amd = false, rdna4 = false; wstring name, driver; };
 struct HipInfo { bool ran = false, ok = false; int code = -1; wstring dll, device, arch, text; };
 enum CheckState { CK_OK, CK_FAIL, CK_WARN, CK_NA };
@@ -27,6 +27,8 @@ struct Checks {
 struct SystemInfo { WinInfo win; GpuInfo gpu; HipInfo hip; };
 
 WinInfo WindowsInfo();
+// The distribution's name from the text of /etc/os-release (PRETTY_NAME, else NAME and VERSION); empty when it names none.
+wstring LinuxOsName(const string& osRelease);
 bool IsRdna4Name(const wstring& name);
 // The sentence the runtime logs when it hands a game to AMD FSR on a GPU that is not an RX 9000-series card, or on one it
 // cannot identify (clean/runtime/interop/executor_select.h needs_rx9000_line); the launcher says the same.
@@ -41,6 +43,10 @@ wstring GpuToolbarLine(const wstring& shortName, const GpuInfo& gpu);
 // when Linux reports no RDNA 4 card (or outside Wine, where Z:\sys does not exist). drmRoot: the folder holding card0,
 // card1, ... (Linux's /sys/class/drm; tests point it at a made-up folder). Every card is looked at, in number order.
 wstring LinuxRdna4Name(const wstring& drmRoot = L"Z:\\sys\\class\\drm");
+// A native Linux launcher (no DXGI): the card Linux's device list reports, named from its PCI ids; empty when there is none. Used by
+// DetectGpu there; drmRoot as for LinuxRdna4Name. An AMD RDNA 4 card wins over any other, so a laptop's integrated GPU or a second
+// card does not hide it. Only RDNA 4 sets `rdna4`.
+GpuInfo GpuFromDrm(const wstring& drmRoot = L"Z:\\sys\\class\\drm");
 GpuInfo DetectGpu();
 bool VersionLess(const wstring& a, const wstring& b);
 std::vector<wstring> HipCandidates();

@@ -19,7 +19,13 @@
 
 #include "wg_core/detect.h"
 
-#ifdef __MINGW32__
+#ifndef _WIN32
+#include <cairo.h>
+
+#include "app/jpeg_decode_linux.h"
+#endif
+
+#if defined(_WIN32) && defined(__MINGW32__)
 // llvm-mingw's wincodec.h stops at Fant; the Windows SDK's value of HighQualityCubic (Windows 10 1809 and later)
 #define WICBitmapInterpolationModeHighQualityCubic ((WICBitmapInterpolationMode)4)
 #endif
@@ -78,6 +84,13 @@ wstring FindArt(const wstring& dir, const wchar_t* name) {
     return best;
 }
 
+#ifdef _WIN32
+IWICImagingFactory* MakeWic() {
+    IWICImagingFactory* wic = nullptr;
+    CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic));
+    return wic;
+}
+
 // Decodes a JPEG / PNG to premultiplied BGRA, scaled down to at most maxW pixels wide (high-quality scaler).
 ImageP Decode(IWICImagingFactory* wic, const wstring& path, UINT maxW) {
     if (path.empty() || !wic) return nullptr;
@@ -106,6 +119,52 @@ ImageP Decode(IWICImagingFactory* wic, const wstring& path, UINT maxW) {
     if (dec) dec->Release();
     return out;
 }
+#else
+// Linux: Cairo reads PNG and libjpeg-turbo reads JPEG (Steam's hero, header and capsule art); anything else gives no image and
+// the page's own plate shows, as for a game without art.
+struct IWICImagingFactory { void Release() {} };
+IWICImagingFactory* MakeWic() { static IWICImagingFactory none; return &none; }
+
+// Decodes a PNG or JPEG to premultiplied BGRA (Cairo's ARGB32), scaled down to at most maxW pixels wide.
+ImageP Decode(IWICImagingFactory* wic, const wstring& path, UINT maxW) {
+    if (path.empty() || !wic) return nullptr;
+    const std::string file = FsPath(path).string();  // a Windows-style path spelled for this host
+    std::vector<uint8_t> jpegPx;  // the JPEG's pixels: the surface below reads them in place
+    cairo_surface_t* src;
+    int jw = 0, jh = 0;
+    if (LooksLikeJpeg(file.c_str())) {
+        src = DecodeJpegFile(file.c_str(), maxW, jw, jh, jpegPx)
+                  ? cairo_image_surface_create_for_data(jpegPx.data(), CAIRO_FORMAT_ARGB32, jw, jh, jw * 4)
+                  : cairo_image_surface_create(CAIRO_FORMAT_INVALID, 0, 0);
+    } else {
+        src = cairo_image_surface_create_from_png(file.c_str());
+    }
+    if (cairo_surface_status(src) != CAIRO_STATUS_SUCCESS) { cairo_surface_destroy(src); return nullptr; }
+    const int sw = cairo_image_surface_get_width(src), sh = cairo_image_surface_get_height(src);
+    ImageP out;
+    if (sw > 0 && sh > 0 && sw <= 8192 && sh <= 8192) {
+        const int w = (UINT)sw > maxW ? (int)maxW : sw, h = (UINT)sw > maxW ? std::max(1, (int)((double)sh * maxW / sw)) : sh;
+        cairo_surface_t* dst = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+        cairo_t* cr = cairo_create(dst);
+        if (w != sw) cairo_scale(cr, (double)w / sw, (double)h / sh);
+        cairo_set_source_surface(cr, src, 0, 0);
+        cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BEST);
+        cairo_paint(cr);
+        cairo_destroy(cr);
+        cairo_surface_flush(dst);
+        auto img = std::make_shared<Image>();
+        img->w = w; img->h = h;
+        img->px.resize((size_t)w * h * 4);
+        const int stride = cairo_image_surface_get_stride(dst);
+        const uint8_t* p = cairo_image_surface_get_data(dst);
+        for (int y = 0; y < h; ++y) memcpy(&img->px[(size_t)y * w * 4], p + (size_t)y * stride, (size_t)w * 4);
+        out = img;
+        cairo_surface_destroy(dst);
+    }
+    cairo_surface_destroy(src);
+    return out;
+}
+#endif
 
 // Keeps the newest `keep` of a map by their last use (a quarter dropped at a time); they are decoded again when drawn again
 template <class M> void Trim(M& m, std::map<wstring, unsigned long long>& used, size_t keep) {
@@ -173,8 +232,7 @@ void Load(IWICImagingFactory* wic, const wstring& job, bool trim = true) {
 
 void Worker() {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    IWICImagingFactory* wic = nullptr;
-    CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic));
+    IWICImagingFactory* wic = MakeWic();
     for (;;) {
         wstring job;
         {
@@ -397,8 +455,7 @@ void ArtLoadNow(const std::vector<wstring>& appids) {
         std::lock_guard<std::mutex> l(st.m);
         if (st.cache.empty()) st.cache = LibraryCache();
     }
-    IWICImagingFactory* wic = nullptr;
-    CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic));
+    IWICImagingFactory* wic = MakeWic();
     // every game's art and banner-sized hero, none dropped (a frame's banner is never the tile's art stretched)
     for (auto& id : appids) if (ValidAppId(id)) { Load(wic, id, false); Load(wic, L"big:" + id, false); }
     std::lock_guard<std::mutex> l(st.m);

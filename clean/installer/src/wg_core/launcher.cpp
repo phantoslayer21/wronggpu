@@ -996,7 +996,7 @@ static bool OptInKey(const wstring& exe, const IniKeyChange& c) {
 // the next seq, written atomically; the caller holds the record's lock. A record that cannot be read is not written over;
 // every failure is said in the notes and warnings.
 bool WriteLauncherModelChoice(Context& ctx, const wstring& dir, char model, std::vector<wstring>& notes, std::vector<wstring>* warnings) {
-    const std::filesystem::path path = Join(StateDir(dir), wgchoice::kRecordFile);
+    const std::filesystem::path path = FsPath(Join(StateDir(dir), wgchoice::kRecordFile));
     wgchoice::Record after;
     std::string why;
     const wgchoice::Outcome o = wgchoice::RecordChoiceUnlocked(path, model, wgchoice::Source::Launcher, &after, &why);
@@ -1103,7 +1103,7 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
     // settings): the front end's upgrade migration, which reads wronggpu.ini's model item under the same lock, comes wholly
     // before or after this.
     // Not taken in time (the game is writing its state): nothing is applied.
-    const std::filesystem::path recordPath = Join(StateDir(dir), wgchoice::kRecordFile);
+    const std::filesystem::path recordPath = FsPath(Join(StateDir(dir), wgchoice::kRecordFile));
     wgchoice::Lock lock(recordPath);
     if (!lock.ok())
         Fail(L"Settings not applied: the game is saving WrongGPU's state right now (" + FromUtf8(wgchoice::OutcomeWords(wgchoice::Outcome::NoLock)) +
@@ -1580,7 +1580,11 @@ OpResult RunOp(Context& ctx, const OpRequest& r, Ui& ui) {
                 if (r.dir.empty() || !LoadRecord(RecordPath(r.dir), m) || m.legacy) Fail(L"No WrongGPU installation record was found in " + r.dir + L".", EXIT_NOT_INSTALLED);
                 if (m.regkey.empty()) { m.regkey = RegKeyFor(r.dir); SaveRecord(RecordPath(r.dir), m); }
                 RegisterUninstall(ctx, m, StateDir(r.dir), GameDisplayName(m.exe));
+#ifdef _WIN32
                 res.message = L"WrongGPU stays in " + r.dir + L" with its own uninstaller";
+#else  // no uninstaller is written into a game folder on Linux: the launcher is what removes it
+                res.message = L"WrongGPU stays in " + r.dir + L"; open the WrongGPU launcher and use Uninstall on the game's page to remove it";
+#endif
                 break;
             }
             case Op::Rollback: Rollback(ctx, r.dir, ui, res); break;
@@ -2067,12 +2071,12 @@ static void DeleteLeftWhenFree(Context& ctx, const wstring& dir, const wstring& 
     }
 }
 
-bool RemoveSharedData(Context& ctx, wstring* why, wstring* kept) {
+bool RemoveSharedData(Context& ctx, wstring* why, wstring* kept, bool launcherOwnsIt) {
     if (kept) kept->clear();
     try {
         const SharedDataLook s = LookAtSharedData(ctx);
         if (!s.there) { LogLine(ctx, L"remove data: no shared data folder: nothing to remove"); return true; }
-        if (s.installed) { if (why) *why = L"WrongGPU is installed for this user: its own uninstall removes this data. Nothing was removed."; return false; }
+        if (s.installed && !launcherOwnsIt) { if (why) *why = L"WrongGPU is installed for this user: its own uninstall removes this data. Nothing was removed."; return false; }
         if (s.anyGame) { if (why) *why = L"a game still has WrongGPU and uses this data. Uninstall WrongGPU from it first. Nothing was removed."; return false; }
         const wstring shared = AppDataPath();
         const DWORD sharedAttrs = GetFileAttributesW(shared.c_str());
@@ -2528,6 +2532,7 @@ UpdateInfo CheckForUpdate(const GlobalSettings& gs, const wstring& currentVersio
     if (!gs.updateCheck) { u.message = L"Check for new releases is off."; return u; }  // the switch's own name (Settings)
     if (gs.updateUrl.empty()) { u.message = L"Check for new releases is on, but there's no release address to check."; return u; }
     if (Lower(gs.updateUrl).rfind(L"https://", 0) != 0) { u.message = L"The release address must start with https://."; return u; }
+    if (!DownloadsAvailable()) { u.message = L"WrongGPU doesn't check for new releases on Linux yet. Get the new AppImage from the release page yourself."; return u; }
     URL_COMPONENTS uc{}; uc.dwStructSize = sizeof(uc);
     wchar_t host[256] = {}, path[2048] = {};
     uc.lpszHostName = host; uc.dwHostNameLength = 256; uc.lpszUrlPath = path; uc.dwUrlPathLength = 2048;

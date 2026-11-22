@@ -64,6 +64,14 @@ bool StartsOnPresetK(const wstring& dir, const Record* rec);
 // The Steam app id of a game in a Steam library (its appmanifest_<id>.acf in the steamapps folder that holds the game's
 // folder, matched by installdir; any depth of the exe below steamapps\common\<installdir>); empty elsewhere.
 wstring SteamAppId(const wstring& exe);
+// A Steam game's Proton prefix (Linux, Steam on Proton): <library>\steamapps\compatdata\<appid>\pfx. NotSteam: the exe is in no Steam
+// library. NotStarted: a Steam game, but Steam has made no Proton folder for it yet (the game was never started under Proton).
+// Found: userDir is the prefix's Windows profile, ...\pfx\drive_c\users\steamuser (Documents and AppData\Local are below it).
+// The game's own library is searched first, then every library its libraryfolders.vdf and the Steam folder's list name; a test
+// build reads only what its library scope allows (LibraryAccess). Read-only.
+enum class ProtonPrefixState { NotSteam, NotStarted, Found };
+struct ProtonPrefix { ProtonPrefixState state = ProtonPrefixState::NotSteam; wstring appid, userDir; };
+ProtonPrefix FindProtonPrefix(const wstring& exe);
 wstring FindInstallDir(const wstring& exe);
 GameTarget InspectGame(Context& ctx, const wstring& exe, const wstring& displayName = L"");
 }  // namespace wg

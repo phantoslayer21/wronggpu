@@ -107,6 +107,7 @@ bool pollingRunning = false;
 bool rechecking = false;  // Check again (a game page's callout) is reading that game's folder on a worker
 bool rrSetupNext = false;  // the next Repair is the RR row's Set up: its verb is "Setting up..." (StartOp)
 bool openedToUninstall = false;  // the window opened by Installed apps' Uninstall, its question not answered yet (Cancel closes it)
+bool dataRemoved = false;  // Linux: the AppImage uninstall deleted WrongGPU's data: the closing window saves nothing into it (WM_DESTROY)
 bool replaceAsking = false;  // a newer download's window, only for "Update WrongGPU to X?": it saves no list or place (WM_DESTROY)
 // Update all: the games it left out (name; true: gone since the scan, false: its files couldn't be read, its note said so),
 // said at its end; and the results of the games an earlier game's elevated worker did with it (by folder, lower case)
@@ -204,9 +205,14 @@ bool SavedPlacement(RECT& r, HMONITOR& mon, UINT& mdpi, bool& maxed);
 // the window that hangs off the screen's edge)
 int FrameY() { return GetSystemMetricsForDpi(SM_CYFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi); }
 int FrameX() { return GetSystemMetricsForDpi(SM_CXFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi); }
+// The accent the settings name. The Windows accent colour is not offered on the native Linux launcher: a saved "windows" shows green.
+static int AccentHere() {
+    const int a = AccentFromKey(gl.global.accent);
+    return a == A_WINDOWS && NativeLinux() ? (int)A_GREEN : a;
+}
 // The theme of the launcher's "appearance" setting (system: Windows' app mode), applied to the whole window.
 void ApplyTheme() {
-    SetAccent(AccentFromKey(gl.global.accent), WindowsAccentRgb());
+    SetAccent(AccentHere(), WindowsAccentRgb());
     SetTheme(ThemeIsDark(gl.global.appearance));
     if (editBrush) { DeleteObject(editBrush); editBrush = nullptr; }
     ThemeTitleBar();
@@ -329,7 +335,7 @@ PageData ReadPageData(const GameEntry& e, const Profile& defaults) {
     ReadAll(Join(e.dir, L"OptiScaler.ini"), oini);
     d.outside = e.hasRecord ? OutsideEdits(d.saved, wini, oini) : std::vector<OutsideEdit>{};
     if (const RrConfigGame* rg = e.hasRecord ? RrConfigGameFor(e.exe) : nullptr) {
-        d.rrcfg = RrConfigLineState(g.ctx, *rg, &d.rrcfgFile, &d.rrcfgWhy);
+        d.rrcfg = RrConfigLineState(g.ctx, *rg, e.exe, &d.rrcfgFile, &d.rrcfgWhy);
         Record m;
         d.rrcfgFixed = LoadRecord(RecordPath(e.dir), m) && m.rrconfig.present;
     }
@@ -2545,7 +2551,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_ENDSESSION:
             // ending: Windows ends the process without WM_DESTROY, so what a close saves is saved here (the window's place, the
             // Library's list for the next start)
-            if (wp) { if (v.live && !v.fixture && !replaceAsking) { SavePlacement(hwnd); SaveLibrarySnapshot(); } return 0; }
+            if (wp) { if (v.live && !v.fixture && !replaceAsking && !dataRemoved) { SavePlacement(hwnd); SaveLibrarySnapshot(); } return 0; }
             if (!WritesNow()) BlockShutdown(false);  // cancelled: the reason goes (an operation's stays while it writes)
             return 0;
         case WM_DPICHANGED: {
@@ -3314,7 +3320,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_DESTROY:
             StopRrBackground();  // the helper ends at once (what it compiled stays with the driver)
             if (editBrush) { DeleteObject(editBrush); editBrush = nullptr; }
-            if (v.live && !v.fixture && !replaceAsking) { SavePlacement(hwnd); SaveLibrarySnapshot(); }  // the list as this session leaves it
+            if (v.live && !v.fixture && !replaceAsking && !dataRemoved) { SavePlacement(hwnd); SaveLibrarySnapshot(); }  // the list as this session leaves it
             if (v.live) {
                 KillTimer(hwnd, 4);
                 ShutdownBlockReasonDestroy(hwnd);
@@ -3331,7 +3337,7 @@ HWND CreateLauncherWindow(bool live) {
     v.live = live;
     v.rrBuild = RrPayloadAvailable(g.ctx);  // this build has the RR files: the RR rows and sections can show (rr-notes.md)
     v.rrEdition = true;  // WrongGPU's edition of OptiScaler (some games' RR needs it): downloaded (optiedition.h)
-    SetAccent(AccentFromKey(gl.global.accent), WindowsAccentRgb());
+    SetAccent(AccentHere(), WindowsAccentRgb());
     SetTheme(ThemeIsDark(gl.global.appearance));
     gfx.Init();
     WNDCLASSEXW wc{}; wc.cbSize = sizeof(wc);
@@ -3466,7 +3472,7 @@ int RunLauncherWindow(bool uninstall) {
         LoadLibrarySnapshot();  // the last session's list at once (SHIP-BAR 3), while the scan reads the games again
         StartScan();
     } else {
-        v.first.installOffer = !LauncherInstalled() && !gl.paths.portable;
+        v.first.installOffer = !LauncherInstalled() && !gl.paths.portable && !NativeLinux();  // (Linux: the AppImage runs where it is; there is nothing to install)
         v.first.choice = v.first.installOffer ? 1 : 0;  // a radio choice has its default: install (Continue says so)
         StartFirstRun();
     }

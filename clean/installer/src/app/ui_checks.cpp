@@ -31,7 +31,7 @@ void FirstRunChecks(HWND hwnd, const GlobalSettings& gs, const wstring& dll, boo
         }
     } postAnyway{hwnd, m};
     const WinInfo win = WindowsInfo();
-    m->lines.push_back({win.ok ? 0 : 2, L"Windows: " + win.text});
+    m->lines.push_back({win.ok ? 0 : 2, win.label + L": " + win.text});
     // started inside an app package (MSIX), said in words a player knows: what happens, then what to do
     if (RunningPackaged())
         m->lines.push_back({2, L"Opened from: Another app. Games may not see the files WrongGPU writes while it's opened this way. Open WrongGPU from File Explorer instead."});
@@ -41,14 +41,21 @@ void FirstRunChecks(HWND hwnd, const GlobalSettings& gs, const wstring& dll, boo
     // release 0.6.0 (owner 2026-11-02): the RX 9060 series is supported but not yet tested on hardware; RR takes about twice
     // the RX 9070 XT's time there (an estimate), and its 8 GB cards are untested
     const bool rx9060 = gpu.rdna4 && gpu.name.find(L"9060") != wstring::npos;
+    if (NativeLinux() && gpu.name.empty()) {  // no card: a plain sentence, not "detected: none"
+        m->lines.push_back({2, L"No graphics card found. WrongGPU's models need an RX\u00a09000-series GPU; games use AMD FSR."});
+    } else
     m->lines.push_back({gpu.rdna4 ? 0 : 2, L"Graphics card detected: " + (gpu.name.empty() ? wstring(L"none") : gpu.name) +
                                                (!gpu.rdna4 ? L". WrongGPU's models need an RX\u00a09000-series GPU; games use AMD FSR."
                                                 : rx9060   ? L". Supported, not yet tested on this card. Ray Reconstruction takes about twice as long as on an RX\u00a09070\u00a0XT."
                                                            : L"")});
     // short words behind the sheet's Show details (how Model M runs is the game page's Runs on); without the card, only
     // what it means here (the card's line above says what to do)
-    m->lines.push_back({gpu.rdna4 ? 0 : 1, gpu.rdna4 ? L"Direct3D 12: Ready" : L"Direct3D 12: Not available on this card"});
-    if (dump) m->lines.push_back({1, L"HIP runtime: Not checked in this run"});
+    // natively on Linux the games reach Direct3D 12 through Proton, and no HIP runtime is looked for (nothing here uses one)
+    const bool native = NativeLinux();
+    m->lines.push_back({gpu.rdna4 ? 0 : 1, native ? (gpu.rdna4 ? L"Direct3D 12 (through Proton): Ready" : L"Direct3D 12 (through Proton): Not available on this card")
+                                                  : (gpu.rdna4 ? L"Direct3D 12: Ready" : L"Direct3D 12: Not available on this card")});
+    if (native) {}
+    else if (dump) m->lines.push_back({1, L"HIP runtime: Not checked in this run"});
     else {  // optional: a note, not a problem (the probe's own words go to setup.log)
         const HipInfo h = CheckHip(g.ctx);
         if (!h.ok) LogLine(g.ctx, L"first run: " + h.text);

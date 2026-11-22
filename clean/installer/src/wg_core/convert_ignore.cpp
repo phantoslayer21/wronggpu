@@ -144,8 +144,20 @@ static bool DecodeListBytes(const string& bytes, wstring& text, wstring& why) {
     if (bytes.size() >= 2 && u(0) == 0xFF && u(1) == 0xFE) {  // UTF-16 LE with its BOM
         if ((bytes.size() - 2) % 2 != 0) { why = L"it is UTF-16 with a byte missing"; return false; }
         if (bytes.size() >= 4 && u(2) == 0 && u(3) == 0) { why = L"it is UTF-32 (save it as UTF-8, or UTF-16 LE with its BOM)"; return false; }
-        text.resize((bytes.size() - 2) / 2);
-        if (!text.empty()) std::memcpy(&text[0], bytes.data() + 2, text.size() * 2);
+        // unit by unit, not a memcpy: wchar_t is UTF-32 on Linux (src/platform/posix), where a surrogate pair is one character
+        text.clear();
+        for (size_t i = 2; i + 1 < bytes.size(); i += 2) {
+            const unsigned unit = u(i) | (u(i + 1) << 8);
+            if (sizeof(wchar_t) > 2 && unit >= 0xD800 && unit < 0xDC00 && i + 3 < bytes.size()) {
+                const unsigned low = u(i + 2) | (u(i + 3) << 8);
+                if (low >= 0xDC00 && low < 0xE000) {
+                    text += wchar_t(0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00));
+                    i += 2;
+                    continue;
+                }
+            }
+            text += wchar_t(unit);
+        }
         return true;
     }
     if (bytes.size() >= 2 && u(0) == 0xFE && u(1) == 0xFF) { why = L"it is UTF-16 big-endian (save it as UTF-8, or UTF-16 LE with its BOM)"; return false; }

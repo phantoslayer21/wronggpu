@@ -14,6 +14,11 @@
 //   set <game> key=value ...      per-game settings (written to the game at once); set --global key=value ...
 //                                 set <game> opti.<Section>.<Key>=value: an editable key of the game's OptiScaler.ini
 //   get <game> [key] | get --global
+//   uninstall-appimage [--confirm]   Linux, run from the AppImage: the AppImage file ($APPIMAGE) and WrongGPU's data folder removed,
+//                                 nothing else; without --confirm only says what would go (refused while a game has WrongGPU)
+//   windows-folder <game> [<folder> | --clear]   Linux, a game that is not a Steam game: the game's Windows user folder (inside its
+//                                 Wine prefix: drive_c/users/<name>) it keeps Engine.ini in, chosen once and remembered; no
+//                                 folder shows the one remembered
 //   opti <game> [--reset] [--keep]   the OptiScaler tab: locked and editable keys, outside edits; --reset puts the
 //                                 editable keys back byte for byte, --keep accepts values OptiScaler saved over ours
 //   coexist <game>                the rules table for one game: every tool found, its fingerprint and decision, the
@@ -56,6 +61,7 @@
 #include "wg_core/payload.h"
 #include "wg_core/pe.h"
 #include "wg_core/rr.h"
+#include "wg_core/appimage.h"
 #include "wg_core/rrconfig.h"
 #include "wg_core/rrprep.h"
 
@@ -494,7 +500,7 @@ static void RrConfigAfterInstall(const Args& a, const wstring& dir, OpResult& re
         return;
     }
     if (p.get("rr_config_fix") != "ask") return;
-    const wstring steps = RrConfigSteps(*rg, RrConfigFile(g.ctx, *rg, nullptr));
+    const wstring steps = RrConfigSteps(*rg, RrConfigFile(g.ctx, *rg, m.exe, nullptr));
     const wstring set = L"WrongGPU.exe set \"" + m.exe + L"\" rr_config_fix=on";
     o.j.Key("rr_config_question").Obj().S("game", rg->name).S("text", RrConfigNotice(*rg)).S("steps", steps).S("fix", set)
         .S("myself", L"WrongGPU.exe set \"" + m.exe + L"\" rr_config_fix=off").End();
@@ -791,6 +797,33 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
         ResultJson(o, res);
         return res.code;
     }
+    if (verb == L"uninstall-appimage") {  // appimage.h: the AppImage and WrongGPU's data folder, after the player's confirmation
+        wstring file, why;
+        if (!OwnAppImage(file, &why)) { o.j.S("error", why); Print(why); return EXIT_REFUSED; }
+        const wstring data = AppDataPath();
+        o.j.Key("appimage").Obj().S("file", file).S("data", data);
+        if (!a.has(L"confirm")) {
+            o.j.B("removed", false).End();
+            Print(L"Would delete " + file + L" and WrongGPU's data folder " + data + L". Nothing was removed; add --confirm to do it.");
+            return EXIT_OK;
+        }
+        wstring kept, gone;
+        if (!UninstallAppImage(g.ctx, &why, &gone, &kept)) { o.j.B("removed", !gone.empty()).End(); o.j.S("error", why); Print(why); return EXIT_REFUSED; }
+        o.j.B("removed", true).S("kept", kept).End();
+        Print(L"WrongGPU is uninstalled: " + file + L" and " + data + L" are deleted." + (kept.empty() ? wstring() : L" " + kept));
+        return EXIT_OK;
+    }
+    if (verb == L"windows-folder") {  // rrconfig.h: where a non-Steam game's Windows profile is (asked once, remembered)
+        wstring exe, dir, why;
+        if (!Game(a, o, exe, dir)) return o.code;
+        if (a.pos.size() > 1 || a.has(L"clear")) {
+            if (!RememberWindowsFolder(g.ctx, exe, a.has(L"clear") ? wstring() : a.pos[1], &why)) { o.j.S("error", why); Print(why); return EXIT_REFUSED; }
+        }
+        const wstring chosen = RememberedWindowsFolder(g.ctx, exe);
+        o.j.Key("windows_folder").Obj().S("exe", exe).S("folder", chosen).End();
+        Print(chosen.empty() ? L"No Windows folder is remembered for " + BaseName(exe) + L"." : L"Windows folder for " + BaseName(exe) + L": " + chosen);
+        return EXIT_OK;
+    }
     if (verb == L"set" || verb == L"get") {
         if (a.has(L"global")) {
             if (verb == L"set") {
@@ -868,8 +901,12 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
         if (const RrConfigGame* rg = RrConfigGameFor(m.exe))
             // waiting: chosen before the game made its settings folder (-1: added after its first start, 1: the folder is there
             // now and the next Apply adds it; r2b #1)
+        {
+            wstring fileWhy;
+            const wstring cfgFile = m.rrconfig.present ? m.rrconfig.path : RrConfigFile(g.ctx, *rg, m.exe, &fileWhy);
             o.j.Key("rr_config").Obj().S("game", rg->name).B("fixed", m.rrconfig.present).N("waiting", RrConfigWaiting(g.ctx, m, p.get("rr_config_fix")))
-                .S("file", m.rrconfig.present ? m.rrconfig.path : RrConfigFile(g.ctx, *rg, nullptr)).End();
+                .S("file", cfgFile).S("file_why", cfgFile.empty() ? fileWhy : wstring()).End();
+        }
         o.j.Key("settings").Obj();
         for (size_t i = 0; i < kSettingCount; ++i) {
             const SettingDef& d = kSettings[i];

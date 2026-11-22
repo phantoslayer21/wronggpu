@@ -673,11 +673,21 @@ wstring NowStamp(bool forFileName) {
 wstring EnvVar(const wchar_t* name) {
     wchar_t b[MAX_PATH * 2];
     DWORD n = GetEnvironmentVariableW(name, b, (DWORD)std::size(b));
-    return n && n < std::size(b) ? wstring(b, n) : wstring();
+    if (n && n < std::size(b)) return wstring(b, n);
+    if (n < std::size(b)) return wstring();
+    // longer than the stack buffer (n is the size it needs, with the end mark): a Linux path may be 4096 bytes
+    wstring big(n, L'\0');
+    const DWORD m = GetEnvironmentVariableW(name, big.data(), n);
+    if (!m || m >= n) return wstring();
+    big.resize(m);
+    return big;
 }
 // System DLLs this exe uses only sometimes are loaded from System32 only, never from the download folder.
 HMODULE LoadSystemDll(const wchar_t* name) { return LoadLibraryExW(name, nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32); }
 bool UnderWine() { return GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") != nullptr; }
+bool NativeLinux() { return GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wronggpu_native_posix") != nullptr; }
+bool UnderProton() { return UnderWine() || NativeLinux(); }
+bool DownloadsAvailable() { return !NativeLinux(); }
 wstring PathForGamePrefix(const wstring& path) {
     if (path.empty() || !UnderWine()) return path;
     // Wine's kernel32: the Unix name of a DOS path, allocated on the process heap (UTF-8). It fails when more than the last
@@ -703,6 +713,21 @@ wstring PathForGamePrefix(const wstring& path) {
         if (c == L'/') c = L'\\';
     return z;
 }
-wstring SelfPath() { wchar_t b[MAX_PATH * 2]; DWORD n = GetModuleFileNameW(nullptr, b, (DWORD)std::size(b)); return wstring(b, n); }
+wstring ShownPath(const wstring& in) {
+    if (!NativeLinux()) return in;
+    wstring p = in;
+    if (p.size() >= 3 && (p[0] == L'Z' || p[0] == L'z') && p[1] == L':' && (p[2] == L'\\' || p[2] == L'/')) p.erase(0, 2);
+    for (auto& c : p) if (c == L'\\') c = L'/';
+    return p;
+}
+// The buffer grows until the whole name fits: a truncated name (GetModuleFileNameW returns the buffer's size) names a file that is not there
+wstring SelfPath() {
+    for (DWORD size = MAX_PATH * 2; size <= 65536; size *= 2) {
+        std::vector<wchar_t> b(size);
+        const DWORD n = GetModuleFileNameW(nullptr, b.data(), size);
+        if (n < size) return wstring(b.data(), n);
+    }
+    return wstring();
+}
 
 }  // namespace wg
