@@ -9,6 +9,7 @@
 namespace {
 
 FgMockRecord g_rec = {};
+IUnknown* g_factory = nullptr;
 
 int32_t Note(uint32_t fn, uint32_t feature, const void* a, const void* b, const void* c, const void* d, uint32_t n) {
     ++g_rec.calls[fn];
@@ -20,8 +21,8 @@ int32_t Note(uint32_t fn, uint32_t feature, const void* a, const void* b, const 
 WgResultCode MockFgOptions(const WgViewport* vp, const void* native) {
     return Note(kMockFgOptions, 0, vp, native, nullptr, nullptr, 0);
 }
-WgResultCode MockFgState(const WgViewport* vp, void* native) {
-    return Note(kMockFgState, 0, vp, native, nullptr, nullptr, 0);
+WgResultCode MockFgState(const WgViewport* vp, void* native, const void* options) {
+    return Note(kMockFgState, 0, vp, native, options, nullptr, 0);
 }
 WgResultCode MockSrOptions(const WgViewport* vp, const void* native) {
     return Note(kMockSrOptions, 0, vp, native, nullptr, nullptr, 0);
@@ -76,4 +77,14 @@ FG_MOCK_API WgResultCode fgmock_free(uint32_t feature, const WgViewport* vp) {
 }
 FG_MOCK_API WgResultCode fgmock_init(uint64_t value) {
     return Note(kMockInit, static_cast<uint32_t>(value), nullptr, nullptr, nullptr, nullptr, 0);
+}
+FG_MOCK_API void fgmock_set_factory(IUnknown* factory) { g_factory = factory; }
+FG_MOCK_API HRESULT WINAPI fgmock_create_factory2(UINT flags, REFIID riid, void** out) {
+    ++g_rec.calls[kMockCreateFactory2];
+    HRESULT hr = E_FAIL;
+    if (!out) hr = E_POINTER;
+    else if (g_factory) hr = g_factory->QueryInterface(riid, out);
+    else *out = nullptr;
+    g_rec.last[kMockCreateFactory2] = FgMockCall{flags, &riid, out, nullptr, nullptr, 0, static_cast<int32_t>(hr)};
+    return hr;
 }

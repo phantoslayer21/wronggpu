@@ -8,6 +8,7 @@
 #endif
 #include <psapi.h>
 #include <string.h>
+#include <d3d12.h>
 
 #include <exception>
 
@@ -15,6 +16,11 @@
 //  1 install-off gate ignored  2 a forwarded call loses an argument  3 scan budget ignored  7 restore leaves slots
 #ifndef WG_FG_WIN32_MUTANT
 #define WG_FG_WIN32_MUTANT 0
+#endif
+// Test-only mutants of the title-binding suite (fg_sl214_codec.cpp has the others): 6 the factory's swap-chain hook is
+// never installed  7 the present bridge never hands the interval to the core
+#ifndef WG_FG_CP2077_MUTANT
+#define WG_FG_CP2077_MUTANT 0
 #endif
 
 namespace wgfgp {
@@ -29,6 +35,11 @@ struct FgAsiTransport::Impl {
     IFgNativeCodec* codec = nullptr;
     uint32_t fg_feature = WG_FEAT_FRAME_GENERATION;
     std::string fn_options, fn_state;
+    IFgPresentCallback* presenter = nullptr;  // behind the present bridge (null: the bridge presents itself)
+    FgPresentOwners* owners = nullptr;
+    FgLogFn log = nullptr;
+    void* log_ctx = nullptr;
+    std::atomic<bool> hooked_factory{false};  // this transport installed the swap-chain creation hook
 };
 
 namespace {
@@ -39,7 +50,8 @@ constexpr uint32_t kMaxDecodedTags = 4096;
 
 std::atomic<FgAsiTransport*> g_owner{nullptr};       // the active transport (one per process)
 std::atomic<FgAsiTransport::Impl*> g_route{nullptr};  // null: every handler forwards to the genuine export
-std::atomic<void*> g_genuine[kFgRoleCount] = {};      // kept after restore: a handler entered late still forwards
+// the roles, then kFgSlotCreateFactory2; kept after restore: a handler entered late still forwards
+std::atomic<void*> g_genuine[kFgRoleCount + 1] = {};
 std::atomic<void*> g_genuine_options{nullptr}, g_genuine_state{nullptr};  // resolved lazily through get-function
 std::atomic<uint32_t> g_fg_feature{WG_FEAT_FRAME_GENERATION};
 std::atomic<long> g_in_flight{0};
@@ -50,6 +62,32 @@ struct Counters {
     std::atomic<uint64_t> fg_answered{0}, option_calls{0}, state_calls{0}, codec_failures{0}, scan_entries{0};
 };
 Counters g_ctr;
+
+// the present bridge's view (FgPresentBridgeStats)
+struct BridgeCounters {
+    std::atomic<uint64_t> factories{0}, factory_hooked{0}, chains_created{0}, chains_attached{0}, submits{0},
+        generate{0}, real_only{0}, forwarded{0}, refused{0}, failures{0};
+    std::mutex mu;
+    WgFgPresentResult last = {};
+    WgFgPresentDesc last_desc = {};
+};
+BridgeCounters g_bridge_ctr;
+
+void ResetBridgeCounters() {
+    g_bridge_ctr.factories = 0;
+    g_bridge_ctr.factory_hooked = 0;
+    g_bridge_ctr.chains_created = 0;
+    g_bridge_ctr.chains_attached = 0;
+    g_bridge_ctr.submits = 0;
+    g_bridge_ctr.generate = 0;
+    g_bridge_ctr.real_only = 0;
+    g_bridge_ctr.forwarded = 0;
+    g_bridge_ctr.refused = 0;
+    g_bridge_ctr.failures = 0;
+    std::lock_guard<std::mutex> lock(g_bridge_ctr.mu);
+    g_bridge_ctr.last = WgFgPresentResult{};
+    g_bridge_ctr.last_desc = WgFgPresentDesc{};
+}
 
 void ResetCounters() {
     for (uint32_t i = 0; i < kFgRoleCount; ++i) {
@@ -69,6 +107,7 @@ struct CallFrame {
     const WgViewport* vp = nullptr;
     const WgFrameToken* token = nullptr;
     void* cmd = nullptr;
+    const void* aux = nullptr;   // the state call's options argument
     bool forwarded = false;      // a trampoline called the genuine export
     WgResultCode fwd_result = WG_OK;
 };
@@ -184,9 +223,9 @@ WgResultCode FwdOptions(const WgViewport* v, const void* o, const std::string& n
     }
     return r;
 }
-WgResultCode FwdState(const WgViewport* v, void* s, const std::string& name) {
+WgResultCode FwdState(const WgViewport* v, void* s, const void* o, const std::string& name) {
     auto fn = reinterpret_cast<FgStateFn>(GenuineFeatureFunction(g_genuine_state, name));
-    const WgResultCode r = fn ? fn(v, s) : WG_E_FEATURE_MISSING;
+    const WgResultCode r = fn ? fn(v, s, o) : WG_E_FEATURE_MISSING;
     if (t_frame) {
         t_frame->forwarded = true;
         t_frame->fwd_result = r;
@@ -208,7 +247,8 @@ int32_t ChainSetOptions(void*, uint32_t, uint32_t, const void* native_options) {
 }
 int32_t ChainGetState(void*, uint32_t, uint32_t, void* native_state) {
     FgAsiTransport::Impl* r = g_route.load();
-    return FwdState(t_frame ? t_frame->vp : nullptr, native_state, r ? r->fn_state : g_last_fn_state);
+    return FwdState(t_frame ? t_frame->vp : nullptr, native_state, t_frame ? t_frame->aux : nullptr,
+                    r ? r->fn_state : g_last_fn_state);
 }
 int32_t ChainTag(void*, const void* native_tags, uint32_t count) {
     const WgTag* t = static_cast<const WgTag*>(native_tags);
@@ -419,6 +459,14 @@ WgResultCode H_FgOptions(const WgViewport* v, const void* native) {
     f.vp = v;
     FrameScope s(&f);
     try {
+        if (r->core->owns_feature(r->fg_feature)) {
+            // the interface's own checks, in its order, before anything is decoded (FG is ours: one owner)
+            const WgResultCode chk = r->codec->check_options(v, native, r->core->advertised_max_generated());
+            if (chk != WG_OK) {
+                g_ctr.fg_answered.fetch_add(1);
+                return chk;
+            }
+        }
         WgFgOptions d = {};
         const WgFgOptions* dp = nullptr;
         if (native) {
@@ -434,14 +482,15 @@ WgResultCode H_FgOptions(const WgViewport* v, const void* native) {
     }
 }
 
-WgResultCode H_FgState(const WgViewport* v, void* native) {
+WgResultCode H_FgState(const WgViewport* v, void* native, const void* native_options) {
     InFlight in;
     g_ctr.state_calls.fetch_add(1);
     FgAsiTransport::Impl* r = g_route.load();
-    if (!r) return FwdState(v, native, g_last_fn_state);
+    if (!r) return FwdState(v, native, native_options, g_last_fn_state);
     CallFrame f;
     f.role = kFgRoleGetFunction;
     f.vp = v;
+    f.aux = native_options;
     FrameScope s(&f);
     try {
         WgFgState st = {};
@@ -450,7 +499,7 @@ WgResultCode H_FgState(const WgViewport* v, void* native) {
         const WgResultCode res = r->core->get_state(r->fg_feature, ViewportId(v), &st, native);
         if (f.forwarded || res != WG_OK) return res;
         if (!native) return WG_E_MISSING_INPUT_PARAMETER;
-        if (!r->codec->write_state(st, native)) {
+        if (!r->codec->write_state_for(st, native_options, native)) {
             g_ctr.codec_failures.fetch_add(1);
             return WG_E_INVALID_PARAMETER;
         }
@@ -459,6 +508,172 @@ WgResultCode H_FgState(const WgViewport* v, void* native) {
         g_ctr.codec_failures.fetch_add(1);
         return f.forwarded ? f.fwd_result : WG_E_INVALID_PARAMETER;
     }
+}
+
+// ---- swap chain: the present bridge, the creation sink and the factory handler --------------------------------------
+// Process-lifetime objects (a chain or a creation call that outlives the transport never sees a freed object); every
+// entry reads the active route and does nothing of its own while there is none.
+
+// The callback a claimed chain presents through: the game interval goes to the core first (the backbuffer as colour
+// input, the codec's frame token), then the presenter (or, without one, the game image straight to the real chain).
+class PresentBridge final : public IFgPresentCallback {
+public:
+    void BeginInterval(const FgPresentCall& call) override {
+        InFlight in;
+        FgAsiTransport::Impl* r = g_route.load();
+        if (r && r->presenter) r->presenter->BeginInterval(call);
+    }
+    HRESULT PresentInterval(const FgPresentCall& call, IFgInnerPresenter& inner) override {
+        InFlight in;
+        FgAsiTransport::Impl* r = g_route.load();
+        // once per interval: a retry never submits again
+        if (r && !call.retry && WG_FG_CP2077_MUTANT != 7) Submit(*r, call, inner);
+        if (r && r->presenter) return r->presenter->PresentInterval(call, inner);
+        return call.present1 ? inner.Present1(call.sync_interval, call.flags, call.params)
+                             : inner.Present(call.sync_interval, call.flags);
+    }
+    void BeforeResize() override {
+        FgAsiTransport::Impl* r = g_route.load();
+        if (r && r->presenter) r->presenter->BeforeResize();
+    }
+    void AfterResize(HRESULT hr) override {
+        FgAsiTransport::Impl* r = g_route.load();
+        if (r && r->presenter) r->presenter->AfterResize(hr);
+    }
+    void BeforeFullscreen(BOOL fs) override {
+        FgAsiTransport::Impl* r = g_route.load();
+        if (r && r->presenter) r->presenter->BeforeFullscreen(fs);
+    }
+    void AfterFullscreen(BOOL fs, HRESULT hr) override {
+        FgAsiTransport::Impl* r = g_route.load();
+        if (r && r->presenter) r->presenter->AfterFullscreen(fs, hr);
+    }
+    void ColorSpaceChanged(DXGI_COLOR_SPACE_TYPE cs) override {
+        FgAsiTransport::Impl* r = g_route.load();
+        if (r && r->presenter) r->presenter->ColorSpaceChanged(cs);
+    }
+    bool GetBuffer(UINT b, REFIID riid, void** out, HRESULT* hr) override {
+        FgAsiTransport::Impl* r = g_route.load();
+        return r && r->presenter && r->presenter->GetBuffer(b, riid, out, hr);
+    }
+    bool CurrentBackBufferIndex(UINT* i) override {
+        FgAsiTransport::Impl* r = g_route.load();
+        return r && r->presenter && r->presenter->CurrentBackBufferIndex(i);
+    }
+    bool FrameLatencyWaitableObject(HANDLE* h) override {
+        FgAsiTransport::Impl* r = g_route.load();
+        return r && r->presenter && r->presenter->FrameLatencyWaitableObject(h);
+    }
+    void Detached() override {
+        FgAsiTransport::Impl* r = g_route.load();
+        if (r && r->presenter) r->presenter->Detached();
+    }
+
+private:
+    static void Submit(FgAsiTransport::Impl& r, const FgPresentCall& call, IFgInnerPresenter& inner) {
+        g_bridge_ctr.submits.fetch_add(1);
+        try {
+            WgFgPresentDesc d = {};
+            d.struct_size = sizeof(d);
+            d.abi_version = WG_FG_ADAPTER_ABI_VERSION;
+            d.owner = WG_FG_OWNER_SWAPCHAIN_WRAPPER;
+            uint32_t vp = 0;
+            if (r.core->session_viewport(&vp)) d.viewport_id = vp;
+            d.frame_token = r.codec->frame_for_present();
+            d.swapchain_id = call.swapchain_id;
+            d.swapchain_epoch = call.swapchain_epoch;
+            d.queue_epoch = 0;
+            d.luid = r.core->capability().adapter.luid;
+            IDXGISwapChain4* sc = inner.Inner();
+            if (sc) {
+                HWND hwnd = nullptr;
+                if (SUCCEEDED(sc->GetHwnd(&hwnd))) d.window_id = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(hwnd));
+                DXGI_SWAP_CHAIN_DESC1 sd = {};
+                if (SUCCEEDED(sc->GetDesc1(&sd))) {
+                    d.backbuffer.format = static_cast<uint32_t>(sd.Format);
+                    d.backbuffer.width = sd.Width;
+                    d.backbuffer.height = sd.Height;
+                    d.backbuffer.rect = WgFgRect{0, 0, sd.Width, sd.Height};
+                }
+                // the buffer being presented (the chain keeps its own reference; the core only reads the pointer)
+                void* buf = nullptr;
+                if (SUCCEEDED(sc->GetBuffer(sc->GetCurrentBackBufferIndex(), __uuidof(ID3D12Resource), &buf)) && buf) {
+                    d.backbuffer.resource = buf;
+                    static_cast<IUnknown*>(buf)->Release();
+                }
+            }
+            d.backbuffer.state = 0;  // D3D12_RESOURCE_STATE_PRESENT
+            d.backbuffer.frame_token = d.frame_token;
+            d.backbuffer.viewport_id = d.viewport_id;
+            WgFgPresentResult res = {};
+            res.struct_size = sizeof(res);
+            res.abi_version = WG_FG_ADAPTER_ABI_VERSION;
+            r.core->present(&d, &res);
+            r.codec->note_present();
+            switch (res.status) {
+                case WG_FG_PRESENT_GENERATE: g_bridge_ctr.generate.fetch_add(1); break;
+                case WG_FG_PRESENT_REAL_ONLY: g_bridge_ctr.real_only.fetch_add(1); break;
+                case WG_FG_PRESENT_FORWARDED: g_bridge_ctr.forwarded.fetch_add(1); break;
+                default: g_bridge_ctr.refused.fetch_add(1); break;
+            }
+            std::lock_guard<std::mutex> lock(g_bridge_ctr.mu);
+            g_bridge_ctr.last = res;
+            g_bridge_ctr.last_desc = d;
+        } catch (...) {
+            g_bridge_ctr.failures.fetch_add(1);  // the interval is still presented below
+        }
+    }
+};
+
+PresentBridge g_present_bridge;
+
+// Each chain created through the hooked factory: claimed for the bridge while FG is taken, else a pass-through.
+class ChainSink final : public IFgSwapChainSink {
+public:
+    void Created(FgSwapChain* chain, HWND, const DXGI_SWAP_CHAIN_DESC1*) override {
+        InFlight in;
+        g_bridge_ctr.chains_created.fetch_add(1);
+        FgAsiTransport::Impl* r = g_route.load();
+        if (!r || !chain) return;
+        if (chain->Attach(&g_present_bridge, r->core, r->owners, WG_FG_OWNER_SWAPCHAIN_WRAPPER) == WG_FG_REASON_NONE)
+            g_bridge_ctr.chains_attached.fetch_add(1);
+    }
+};
+
+ChainSink g_chain_sink;
+
+// The factory's swap-chain creation hook, once per process (another one already installed: left alone).
+void HookFactory(FgAsiTransport::Impl& r, IUnknown* unknown) {
+#if WG_FG_CP2077_MUTANT == 6
+    (void)r;
+    (void)unknown;
+    return;
+#else
+    if (FgSwapChainHook::Installed()) return;
+    IDXGIFactory2* f2 = nullptr;
+    if (FAILED(unknown->QueryInterface(__uuidof(IDXGIFactory2), reinterpret_cast<void**>(&f2))) || !f2) return;
+    if (FgSwapChainHook::Install(f2, &g_chain_sink, r.log, r.log_ctx)) {
+        r.hooked_factory.store(true);
+        g_bridge_ctr.factory_hooked = 1;
+    }
+    f2->Release();
+#endif
+}
+
+// The game's factory creation through the interface module: the genuine export first, its result unchanged.
+HRESULT WINAPI H_CreateFactory2(UINT flags, REFIID riid, void** out) {
+    InFlight in;
+    g_bridge_ctr.factories.fetch_add(1);
+    auto fn = reinterpret_cast<FgCreateFactory2Fn>(g_genuine[kFgSlotCreateFactory2].load());
+    const HRESULT hr = fn ? fn(flags, riid, out) : E_NOINTERFACE;
+    FgAsiTransport::Impl* r = g_route.load();
+    if (FAILED(hr) || !r || !out || !*out) return hr;
+    try {
+        HookFactory(*r, static_cast<IUnknown*>(*out));
+    } catch (...) {
+        g_ctr.codec_failures.fetch_add(1);
+    }
+    return hr;
 }
 
 // ---- patching -------------------------------------------------------------------------------------------------------
@@ -549,6 +764,7 @@ HMODULE LoadNextToExe(const std::string& leaf) {
 const char* FgRoleWord(uint32_t role) {
     static const char* const kWords[kFgRoleCount] = {"is-supported", "requirements", "get-function", "tag",
                                                      "tag-for-frame", "constants", "evaluate", "free"};
+    if (role == kFgSlotCreateFactory2) return "create-factory";
     return role < kFgRoleCount ? kWords[role] : "?";
 }
 
@@ -637,13 +853,36 @@ void* FgAsiTransport::handler_for(uint32_t role) {
         case kFgRoleConstants: return reinterpret_cast<void*>(&H_Constants);
         case kFgRoleEvaluate: return reinterpret_cast<void*>(&H_Evaluate);
         case kFgRoleFree: return reinterpret_cast<void*>(&H_Free);
+        case kFgSlotCreateFactory2: return reinterpret_cast<void*>(&H_CreateFactory2);
         default: return nullptr;
     }
+}
+IFgSwapChainSink* FgAsiTransport::swapchain_sink() { return &g_chain_sink; }
+IFgPresentCallback* FgAsiTransport::present_bridge() { return &g_present_bridge; }
+
+FgPresentBridgeStats FgAsiTransport::present_stats() const {
+    FgPresentBridgeStats s;
+    s.factories = g_bridge_ctr.factories.load();
+    s.factory_hooked = g_bridge_ctr.factory_hooked.load();
+    s.chains_created = g_bridge_ctr.chains_created.load();
+    s.chains_attached = g_bridge_ctr.chains_attached.load();
+    s.submits = g_bridge_ctr.submits.load();
+    s.generate = g_bridge_ctr.generate.load();
+    s.real_only = g_bridge_ctr.real_only.load();
+    s.forwarded = g_bridge_ctr.forwarded.load();
+    s.refused = g_bridge_ctr.refused.load();
+    s.failures = g_bridge_ctr.failures.load();
+    std::lock_guard<std::mutex> lock(g_bridge_ctr.mu);
+    s.last = g_bridge_ctr.last;
+    s.last_desc = g_bridge_ctr.last_desc;
+    return s;
 }
 void* FgAsiTransport::options_handler() { return reinterpret_cast<void*>(&H_FgOptions); }
 void* FgAsiTransport::state_handler() { return reinterpret_cast<void*>(&H_FgState); }
 
-void* FgAsiTransport::genuine(uint32_t role) const { return role < kFgRoleCount ? g_genuine[role].load() : nullptr; }
+void* FgAsiTransport::genuine(uint32_t role) const {
+    return role <= kFgSlotCreateFactory2 ? g_genuine[role].load() : nullptr;
+}
 
 FgTransportStats FgAsiTransport::stats() const {
     FgTransportStats s;
@@ -714,6 +953,10 @@ uint32_t FgAsiTransport::install(const FgAsiConfig& cfg) {
             const std::string& nm = cfg.imports.role_names[i];
             g_genuine[i].store(nm.empty() ? nullptr : reinterpret_cast<void*>(GetProcAddress(iface, nm.c_str())));
         }
+        const std::string& fac = cfg.imports.factory2_name;
+        g_genuine[kFgSlotCreateFactory2].store(fac.empty() ? nullptr
+                                                           : reinterpret_cast<void*>(GetProcAddress(iface, fac.c_str())));
+        ResetBridgeCounters();
         g_genuine_options.store(nullptr);
         g_genuine_state.store(nullptr);
         g_fg_feature.store(cfg.core.ids.fg);
@@ -747,6 +990,7 @@ uint32_t FgAsiTransport::install(const FgAsiConfig& cfg) {
         std::vector<std::string> names;
         for (uint32_t i = 0; i < kFgRoleCount; ++i)
             names.push_back(g_genuine[i].load() ? cfg.imports.role_names[i] : std::string());
+        names.push_back(g_genuine[kFgSlotCreateFactory2].load() ? fac : std::string());  // index kFgSlotCreateFactory2
         HMODULE mods[kMaxModules];
         DWORD needed = 0;
         if (!K32EnumProcessModules(GetCurrentProcess(), mods, sizeof mods, &needed)) needed = 0;
@@ -791,6 +1035,10 @@ uint32_t FgAsiTransport::install(const FgAsiConfig& cfg) {
         impl_->fg_feature = cfg.core.ids.fg;
         impl_->fn_options = cfg.imports.fn_options;
         impl_->fn_state = cfg.imports.fn_state;
+        impl_->presenter = cfg.presenter;
+        impl_->owners = cfg.owners;
+        impl_->log = cfg.log;
+        impl_->log_ctx = cfg.log_ctx;
         core_ = std::move(core);
         g_route.store(impl_.get());
         for (const Found& f : found) {
@@ -817,6 +1065,12 @@ uint32_t FgAsiTransport::install(const FgAsiConfig& cfg) {
 }
 
 void FgAsiTransport::restore() {
+    if (impl_) {
+        // the creation hook this transport installed comes off; chains claimed for the bridge give their present owner
+        // back (they stay wrapped as pass-throughs; the presenter hears Detached while the route still names it)
+        if (impl_->hooked_factory.load()) FgSwapChainHook::Uninstall();
+        FgSwapChain::DetachCallback(&g_present_bridge);
+    }
     if (g_route.load() == impl_.get() && impl_) g_route.store(nullptr);
     for (auto it = patches_.rbegin(); it != patches_.rend(); ++it) {
         void* now = nullptr;
@@ -826,6 +1080,8 @@ void FgAsiTransport::restore() {
     patches_.clear();
     // calls already inside a handler finish before the core goes (bounded wait)
     for (int i = 0; i < 2000 && g_in_flight.load() > 0; ++i) Sleep(1);
+    // a chain a creation call attached meanwhile (its sink call has finished: in-flight is 0, the route is gone)
+    if (impl_) FgSwapChain::DetachCallback(&g_present_bridge);
     if (core_) core_->detach();
     core_.reset();
     impl_.reset();

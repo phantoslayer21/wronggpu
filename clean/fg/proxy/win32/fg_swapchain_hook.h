@@ -115,6 +115,10 @@ public:
     // The wrapper behind a game-facing pointer, or null when `p` is not one (no reference added).
     static FgSwapChain* FromInterface(IUnknown* p);
     static long LiveCount();  // wrappers alive in the process (tests)
+    // Detaches `callback` from every live wrapper it is attached to (the present owner released, Detached() called);
+    // the number detached. A wrapper being destroyed meanwhile is skipped (no reference is taken on one whose count
+    // already reached 0). No lock is held while a wrapper detaches.
+    static size_t DetachCallback(IFgPresentCallback* callback);
 
     // Claims the chain for `owner` and routes intervals to `callback` (not owned). core null: the registry `owners`
     // (null: the process registry). WG_FG_REASON_NONE, or the refusal (the wrapper then stays pass-through).

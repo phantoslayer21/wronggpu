@@ -25,6 +25,13 @@
 //    ids, and FG itself while not taken) reaches the genuine export with the game's own arguments and its result is
 //    returned unchanged. Forwarding calls the genuine export resolved by name, the same address the slot held, so a
 //    host's inline patch on the export stays in the chain.
+//  - SWAP CHAIN. When the binding names the DXGI factory creation the game imports from the interface module
+//    (FgImportBinding::factory2_name; Cyberpunk 2077 creates its factory that way), that import slot is redirected too:
+//    the genuine creation runs first and its result is returned unchanged; the swap-chain creation hook
+//    (fg_swapchain_hook.h) then goes on the returned factory, so the chain the game itself holds is wrapped. A chain
+//    created while FG is taken is claimed for the swap-chain wrapper owner and its game presents run through the
+//    present bridge: the core gets the interval (the backbuffer as colour input, the binding's frame token) before the
+//    presenter (FgAsiConfig::presenter) presents. Not taken: the wrapper stays a pass-through.
 //  - No exception crosses a handler: a codec or core failure forwards the call unchanged. No lambda captures a copy
 //    that can throw (MSVC /Zc:lambda under /permissive-).
 // Written for this project.
@@ -47,6 +54,7 @@
 #include "../fg_adapter_abi.h"
 #include "../fg_proxy_core.h"
 #include "../fg_settings.h"
+#include "fg_swapchain_hook.h"
 
 namespace wgfgp {
 namespace win32 {
@@ -76,11 +84,16 @@ using FgConstantsFn = WgResultCode (*)(const WgConstants* c, const WgFrameToken*
 using FgEvaluateFn = WgResultCode (*)(uint32_t feature, const WgFrameToken* token, const WgHeader* const* inputs,
                                       uint32_t count, void* cmd);
 using FgFreeFn = WgResultCode (*)(uint32_t feature, const WgViewport* vp);
-// The FG feature functions the game fetches through get-function: options in, state out (layouts: the codec's).
+// The FG feature functions the game fetches through get-function: options in, state out (layouts: the codec's). The
+// state call also takes the game's options (may be null).
 using FgOptionsFn = WgResultCode (*)(const WgViewport* vp, const void* native_options);
-using FgStateFn = WgResultCode (*)(const WgViewport* vp, void* native_state);
+using FgStateFn = WgResultCode (*)(const WgViewport* vp, void* native_state, const void* native_options);
+// The DXGI factory creation the game imports from the interface module (CreateDXGIFactory2's shape).
+using FgCreateFactory2Fn = HRESULT(WINAPI*)(UINT flags, REFIID riid, void** factory);
+// The import slot index of that factory creation in FgPatch::role / the scan (not a game-interface role).
+inline constexpr uint32_t kFgSlotCreateFactory2 = kFgRoleCount;
 
-// One title binding of the interface file: what call-shape evidence established. Data; nothing is qualified yet.
+// One title binding of the interface file: what call-shape evidence established. Data (fg_title_bindings.h).
 struct FgImportBinding {
     bool qualified = false;
     std::string interposer_leaf;        // the interface file name (as the importers name it)
@@ -90,6 +103,9 @@ struct FgImportBinding {
     std::string fn_options;             // the FG options feature-function name
     std::string fn_state;               // the FG state feature-function name
     uint32_t abi_max_generated = 0;     // the interface ABI's highest generated count (0..5)
+    // The DXGI factory creation export of the interface module the game imports (empty: not redirected). The swap-chain
+    // creation hook (fg_swapchain_hook.h) goes on the factory it returns, so the chain the game holds is wrapped.
+    std::string factory2_name;
 };
 
 // Decodes the binding's native FG structs into fg_adapter_abi.h structs (and writes the core's answers back). Supplied
@@ -107,6 +123,15 @@ public:
     virtual bool constants(const WgConstants* native, const WgFrameToken* token, const WgViewport* vp,
                            WgFgConstants* out) = 0;
     virtual bool write_requirements(const WgFgCapability& cap, WgRequirements* native) = 0;
+    // The interface's own set-options checks, made while FG is taken before anything is decoded (result codes of
+    // rr_proxy_abi.h); WG_OK: decode and hand to the core. max_generated: what the state reports. Default: none.
+    virtual WgResultCode check_options(const WgViewport*, const void*, uint32_t) { return WG_OK; }
+    // get-state with the game's options argument (may be null). Default: write_state.
+    virtual bool write_state_for(const WgFgState& state, const void*, void* native) { return write_state(state, native); }
+    // Present-driven titles whose tag call carries no frame token: the frame token of the interval a game present
+    // closes, and the step after that present (fg_sl214_codec.h, frame clock). Default: 0 / nothing.
+    virtual uint64_t frame_for_present() { return 0; }
+    virtual void note_present() {}
 };
 
 // Why install() did what it did. Stable numbers (log text and the status export).
@@ -139,6 +164,23 @@ struct FgAsiConfig {
     unsigned scan_max_entries = 200000;      // the load scan's budget (rr_guard.h kScanMaxEntries / kScanMaxMs)
     unsigned scan_max_ms = 100;
     bool load_delay_linked = true;      // the exe delay-loads the interface: load the game's own file next to the exe
+    // The presenter behind the present bridge (not owned; null: the bridge presents the game image itself). Chains
+    // created through the hooked factory are claimed for WG_FG_OWNER_SWAPCHAIN_WRAPPER while FG is taken; every game
+    // present then reaches the core (FgProxy::present, the backbuffer as colour input) before this presenter.
+    IFgPresentCallback* presenter = nullptr;
+};
+
+// What the present bridge saw (the transport's swap-chain sink and present callback; the process's one transport).
+struct FgPresentBridgeStats {
+    uint64_t factories = 0;          // factory creations through the redirected slot
+    uint64_t factory_hooked = 0;     // 1: the swap-chain creation hook went on a returned factory
+    uint64_t chains_created = 0;     // chains created through the hooked factory
+    uint64_t chains_attached = 0;    // ... claimed for the bridge (FG taken at creation)
+    uint64_t submits = 0;            // game intervals handed to the core
+    uint64_t generate = 0, real_only = 0, forwarded = 0, refused = 0;  // the core's present status, per interval
+    uint64_t failures = 0;           // a submit that threw (the interval is still presented)
+    WgFgPresentResult last = {};     // the core's last present result
+    WgFgPresentDesc last_desc = {};  // the last present descriptor (backbuffer included)
 };
 
 struct FgPatch {
@@ -181,10 +223,15 @@ public:
     HMODULE interface_module() const { return iface_; }
     bool interface_loaded_by_us() const { return loaded_by_us_; }
     FgTransportStats stats() const;
-    // the genuine export of a role (null when the binding has no name for it or the interface does not export it)
+    FgPresentBridgeStats present_stats() const;
+    // the genuine export of a role or of kFgSlotCreateFactory2 (null when the binding has no name for it or the
+    // interface does not export it)
     void* genuine(uint32_t role) const;
-    // the handler written into the slots of a role (fixed addresses in this module)
+    // the handler written into the slots of a role or of kFgSlotCreateFactory2 (fixed addresses in this module)
     static void* handler_for(uint32_t role);
+    // the swap-chain sink and present callback the factory hook uses (process lifetime; inert while no route is active)
+    static IFgSwapChainSink* swapchain_sink();
+    static IFgPresentCallback* present_bridge();
     static void* options_handler();
     static void* state_handler();
 

@@ -7,13 +7,17 @@
 //
 // InitializeASI reads the per-game FG settings (<game folder>\wronggpu-setup\settings.ini, fg_settings.h; the game
 // folder is WG_STATE_GAME_DIR when set, else the exe's folder). fg=off (the default) returns at once: no transport is
-// created and nothing is patched. With fg=on the transport installs only for a qualified title binding; this build
-// carries none yet (bindings are qualified per title build from call-shape evidence), so it logs why and patches
-// nothing. A second InitializeASI call does nothing. WrongGPU_FgShutdown puts every redirected slot back;
+// created and nothing is patched. With fg=on the transport installs only for a qualified title binding, selected by the
+// exe's file name (fg_title_bindings.h: Cyberpunk 2077 on interface build 2.14.1); any other exe logs that this build
+// carries no binding for it and patches nothing. A second InitializeASI call does nothing. WrongGPU_FgShutdown puts
+// every redirected slot back;
 // WrongGPU_FgQuery reports what happened (the launcher and the tests read it).
 // Log: wronggpu-fg.log in the game folder, one append per line.
 // Written for this project.
 #include "fg_asi_transport.h"
+#include "fg_title_bindings.h"
+
+#include <new>
 
 #include "wg_state.h"
 
@@ -63,8 +67,16 @@ void LogLine(void*, const char* line) {
     CloseHandle(h);
 }
 
-// The title bindings this build carries: none is qualified yet.
-FgImportBinding ShippedImportBinding() { return FgImportBinding{}; }
+std::wstring ExeLeaf() {
+    wchar_t buf[MAX_PATH * 2];
+    const DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH * 2);
+    if (!n || n >= MAX_PATH * 2) return L"";
+    std::wstring w(buf, n);
+    const size_t slash = w.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? w : w.substr(slash + 1);
+}
+
+FgSl214Codec* g_codec = nullptr;  // the selected binding's codec; never freed while the plugin is loaded
 
 void Initialize() {
     const std::wstring dir = StateGameDir();
@@ -83,7 +95,16 @@ void Initialize() {
     }
     FgAsiConfig cfg;
     cfg.settings = settings;
-    cfg.imports = ShippedImportBinding();
+    // the qualified title binding for this exe, if this build carries one (else the transport patches nothing)
+    FgTitleBinding binding;
+    if (FgSelectShippedBinding(ExeLeaf(), &binding)) {
+        FgApplyBinding(binding, &cfg);
+        g_codec = new (std::nothrow) FgSl214Codec(binding.layout);
+        cfg.codec = g_codec;
+        LogLine(nullptr, ("fg: title binding " + binding.id + " (" + binding.title + ")").c_str());
+    } else {
+        LogLine(nullptr, "fg: this build carries no title binding for this game");
+    }
     cfg.core.settings = settings;
     cfg.log = &LogLine;
     g_transport = new (std::nothrow) FgAsiTransport();

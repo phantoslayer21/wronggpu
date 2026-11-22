@@ -5,6 +5,7 @@
 
 #include <map>
 #include <new>
+#include <vector>
 
 // Test-only mutants (CMakeLists.txt; fg_asi_transport.cpp has 1, 2, 3, 7):
 //  4 a retry begins a new interval  5 a test present reaches the callback  6 the present owner is not claimed
@@ -132,6 +133,33 @@ FgSwapChain* FgSwapChain::FromInterface(IUnknown* p) {
 long FgSwapChain::LiveCount() {
     std::lock_guard<std::mutex> lock(RegistryMutex());
     return static_cast<long>(Registry().size());
+}
+
+size_t FgSwapChain::DetachCallback(IFgPresentCallback* callback) {
+    if (!callback) return 0;
+    std::vector<FgSwapChain*> held;
+    {
+        std::lock_guard<std::mutex> lock(RegistryMutex());
+        for (auto& e : Registry()) {
+            FgSwapChain* w = e.second;
+            long n = w->refs_.load();
+            while (n > 0 && !w->refs_.compare_exchange_weak(n, n + 1)) {
+            }
+            if (n > 0) held.push_back(w);  // a reference of our own: it stays alive until the Release below
+        }
+    }
+    size_t detached = 0;
+    for (FgSwapChain* w : held) {
+        {
+            std::lock_guard<std::mutex> lock(w->mu_);
+            if (w->callback_ == callback) {
+                w->DetachLocked(true);
+                ++detached;
+            }
+        }
+        w->Release();
+    }
+    return detached;
 }
 
 void FgSwapChain::Log(const std::string& line) const {

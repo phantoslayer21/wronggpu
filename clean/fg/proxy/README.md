@@ -16,6 +16,10 @@ the end-to-end gate and a qualified presenter pass.
 | `win32/fg_swapchain_hook.h/.cpp` | (F8b) the DXGI swap-chain seam: a COM-identity-preserving `IDXGISwapChain4` wrapper installed at `CreateSwapChainForHwnd`, one present owner per chain, `IFgPresentCallback` for the presenter |
 | `win32/fg_asi_entry.cpp` | (F8b) `WrongGPU-FG.asi`: `InitializeASI`, `WrongGPU_FgShutdown`, `WrongGPU_FgQuery` |
 | `tests/test_fg_win32_transport.cpp`, `tests/fg_mock_*` | (F8b) CPU tests against a stand-in interface DLL, stand-in game modules (static and delay-load imports), an exe that delay-loads the interface, and fake swap-chain / factory objects; synthetic values only |
+| `bindings/cp2077-2.14.1.json`, `bindings/fg-functions.json`, `bindings/fg_binding_gen.cmake` | (F8b) the Cyberpunk 2077 title binding on interface build 2.14.1, the two FG feature-function names (each alone on its line), and the configure step that turns them into a header in the build tree |
+| `win32/fg_title_bindings.h/.cpp` | (F8b) the bindings this build carries, as transport structs; selection by exe name |
+| `win32/fg_sl214_codec.h/.cpp` | (F8b) the 2.14 native codec: FG options (v5, 120 B) and state (v4, 88 B) layouts, chain walk by GUID, the options checks, tags and constants into the contract's structs, the present-interval frame clock |
+| `tests/test_fg_cp2077_binding.cpp`, `tests/fg_cp2077_asi_host.cpp` | (F8b) the binding data, the codec from raw bytes, a whole game session through the stand-in interface with the binding's own GUIDs and names, the factory hook and the present bridge; the shipped plugin in a process with the game's exe name |
 
 ## Same split as the RR plugin
 
@@ -38,7 +42,8 @@ and scan budget (`../../rr_f/proxy/src/rr_guard.h`) unchanged:
   from the process: no transport, no module lookups, no patches. A second `InitializeASI` call changes nothing.
 - **Qualified binding only.** The transport also needs an `FgImportBinding` (interface file name and version, the export
   name of each redirected role, the FG options / state feature-function names) and an `IFgNativeCodec` (decodes that
-  build's native FG structs). This build carries no qualified binding, so with `fg=on` it logs why and patches nothing.
+  build's native FG structs). The plugin selects the binding by the exe's file name (below: Cyberpunk 2077); for any
+  other game it logs that it carries no binding and patches nothing, even with `fg=on`.
 - **Find, gate, redirect.** The interface module already loaded, or the game's own file next to the exe when the exe
   delay-loads it; its version resource against the binding; then the by-name import and delay-load slots of every other
   loaded module, for the redirected roles only (is-supported, requirements, get-function, tag, tag-for-frame, constants,
@@ -64,6 +69,41 @@ presents; `DXGI_ERROR_WAS_STILL_DRAWING` keeps the interval open, so the game's 
 from inside the presenter go straight through. Resize, fullscreen and color-space changes are reported around the real
 call (the epoch moves on success); `GetBuffer`, `GetCurrentBackBufferIndex` and `GetFrameLatencyWaitableObject` can be
 served by a facade presenter. A presenter that throws is detached, and the interval it was serving is presented once.
+
+## Title binding: Cyberpunk 2077, interface build 2.14.1
+
+`bindings/cp2077-2.14.1.json` is data only. It takes the interface's export names (roles), its file name and the shared
+structure GUIDs (viewport, tag, resource, constants, requirements) from the RR binding for 2.14
+(`../../rr_f/proxy/binding/`), and adds the FG part: feature 1000, the two FG feature-function names
+(`bindings/fg-functions.json`), the options (version 5, 120 B) and state (version 4, 88 B) GUIDs, the FG input buffer
+types (depth 0, motion vectors 1, HUD-less colour 2; UI alpha 69, distortion 50, no-warp 54 if ever tagged), the UI range
+(up to 5 generated images) and the DXGI factory creation the game imports from the interface. The configure step writes
+it into a header in the build tree, so no interface name appears in the code.
+
+- **Load.** The game imports the interface by name in its static import table: the import-table transport above
+  applies unchanged. The transport also redirects the game's factory-creation import; the genuine creation runs and its
+  result is returned unchanged, and the swap-chain creation hook goes on that factory, so the chain the game holds is the
+  wrapped one. A chain created while FG is taken is claimed for the swap-chain wrapper owner.
+- **Options.** The original's checks, in its order: the options or the viewport not found in the structure chain -> 20,
+  a generated count of 0 (even with the mode off) -> 25, a count above the reported maximum -> 38. Modes 0 off, 1 on,
+  2 auto; 3 dynamic is refused (25) because the state reports no dynamic support. The UI-recomposition byte exactly 1
+  asks for preset B; otherwise the player's preset applies. Repeated calls are accepted.
+- **State.** Written only up to the version the game passed: the minimum size (100), the highest generated count (+52),
+  the presented count, the status bits WrongGPU can know (resolution below the minimum, a common constant left unset),
+  no VRAM estimate, no fence, no dynamic support.
+- **Inputs.** Tags count only when the tag, its resource and the viewport carry the binding's GUIDs, the resource is a
+  2D texture and the tag stays valid until present (the lifetime the game uses; a tag valid only during the call would
+  need a copy, which this stage does not make). The game's tag call carries no frame token: every tag and the constants
+  between two game presents belong to one interval, and the present bridge presents that interval's token.
+- **Present.** Each game present on a claimed chain hands the interval to the core first, with the buffer being presented
+  as colour input, then the presenter (`FgAsiConfig::presenter`) presents; a retry after `DXGI_ERROR_WAS_STILL_DRAWING`
+  submits nothing again.
+- **Everything else forwards.** Super resolution, ray reconstruction, NIS, the latency features and unknown ids keep the
+  genuine path with the game's own arguments; feature 1000 is never evaluated by the game, and an FG evaluate is
+  acknowledged without reaching the genuine feature while FG is taken.
+- **Not settled here.** A chain created before FG is taken stays a pass-through (it is claimed at creation only); the
+  per-frame match through the latency markers is not decoded (the present-interval clock assumes a frame's inputs arrive
+  before its present); which optional inputs the game sends once 1000 reports supported needs a probe run.
 
 ## Rules the core enforces
 
@@ -128,3 +168,14 @@ loaded; `fg_win32_asi_off` / `_default` / `_invalid` / `_on` run the shipped plu
 file. `fg_win32_mutant_1` .. `_8` build that suite against a transport or seam with one rule broken (install-off gate
 ignored, a forwarded argument lost, the scan budget ignored, a retry starting a new interval, a test present reaching
 the presenter, the owner not claimed, restore leaving slots, a failing presenter kept); each must fail.
+
+`fg_cp2077_binding` runs the title-binding suite: the binding data and its selection by exe name, GUID text, the chain
+walk (any order, unknown structures skipped, cycles and over-long chains bounded), the options checks and decoding and
+the state per version, all read from raw bytes at the layout's offsets, tags and constants, and a whole game session
+through the stand-in interface with the binding's own GUIDs, buffer types and FG function names: support and lookups
+for 1000 answered while 0, 1001, 2, 3, 4 and an unknown id forward unchanged, the factory hook, the claimed chain, five
+frames (generation, a frame without motion vectors, inputs valid only during the tag call, a still-drawing retry), the
+presenter after the core, restore; plus `fg=off` and FG not taken. `fg_cp2077_asi_off` / `_on` run the shipped plugin in
+a process with the game's exe name. `fg_cp2077_mutant_1` .. `_8` break one rule each (a count of 0 accepted, a count
+above the maximum accepted, state written past its version, the chain walk ignoring the GUID, the lifetime gate ignored,
+no factory hook, no submit from the bridge, a frame clock that never advances); each must fail.

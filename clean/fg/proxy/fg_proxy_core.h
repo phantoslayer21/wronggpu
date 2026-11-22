@@ -54,7 +54,8 @@ struct FgFeatureIds {
     uint32_t pc_latency = WG_FEAT_PC_LATENCY;
 };
 
-// One title binding: what call-shape evidence established for a game build. Data (no title is qualified yet).
+// One title binding: what call-shape evidence established for a game build. Data (win32/fg_title_bindings.h fills it
+// from bindings/<title>.json).
 struct FgBinding {
     bool qualified = false;            // false: the core forwards everything
     uint32_t version_major = 0;        // the interface file version the binding was qualified on (interposer entry)
@@ -159,6 +160,7 @@ public:
     // ---- views for the status word, tests and diagnostics ----
     WgFgState state() const;
     bool session_desc(WgFgSessionDesc* out) const;  // false until options and a present latched the session
+    bool session_viewport(uint32_t* out) const;     // the viewport accepted options named; false before any
     uint32_t log_count(const std::string& needle) const;
     size_t frames_kept() const;
 

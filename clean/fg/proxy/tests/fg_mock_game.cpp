@@ -22,6 +22,9 @@ FG_GAME_API WgResultCode game_evaluate(uint32_t f, const WgFrameToken* k, const 
 }
 FG_GAME_API WgResultCode game_free(uint32_t f, const WgViewport* v) { return fgmock_free(f, v); }
 FG_GAME_API WgResultCode game_init(uint64_t v) { return fgmock_init(v); }
+FG_GAME_API HRESULT game_create_factory2(UINT flags, REFIID riid, void** out) {
+    return fgmock_create_factory2(flags, riid, out);
+}
 
 // What each import slot holds now (the address of a dllimport function is read from its slot at run time).
 FG_GAME_API void game_slot_values(void** out) {
@@ -34,4 +37,5 @@ FG_GAME_API void game_slot_values(void** out) {
     out[6] = reinterpret_cast<void*>(&fgmock_evaluate);
     out[7] = reinterpret_cast<void*>(&fgmock_free);
     out[8] = reinterpret_cast<void*>(&fgmock_init);
+    out[9] = reinterpret_cast<void*>(&fgmock_create_factory2);
 }

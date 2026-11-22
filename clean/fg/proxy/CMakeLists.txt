@@ -82,9 +82,20 @@ if(WIN32)
     enable_language(RC)
   endif()
   set(WG_RR_PROXY_SRC_DIR "${WG_FG_PROXY_DIR}/../../rr_f/proxy/src")
+  # The qualified title bindings (bindings/*.json) become headers of macros in the build tree, so the interface's names
+  # stay in the binding data (bindings/fg_binding_gen.cmake; string(JSON) needs CMake 3.19).
+  if(CMAKE_VERSION VERSION_LESS 3.19)
+    message(FATAL_ERROR "fg proxy: the FG title bindings need CMake 3.19 or newer")
+  endif()
+  include(${WG_FG_PROXY_DIR}/bindings/fg_binding_gen.cmake)
+  set(WG_FG_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+  wg_fg_generate_binding("${WG_FG_PROXY_DIR}/bindings/cp2077-2.14.1.json" "${WG_FG_GEN_DIR}/fg_binding_cp2077.h" CP2077)
   # the bounded PE view, safe reads and scan budget are the RR guard's own (rr_guard.cpp), reused unchanged
-  add_library(wg_fg_win32 STATIC ${WG_FG_PROXY_DIR}/win32/fg_asi_transport.cpp ${WG_FG_PROXY_DIR}/win32/fg_swapchain_hook.cpp
-                                 ${WG_RR_PROXY_SRC_DIR}/rr_guard.cpp)
+  set(WG_FG_WIN32_SOURCES ${WG_FG_PROXY_DIR}/win32/fg_asi_transport.cpp ${WG_FG_PROXY_DIR}/win32/fg_swapchain_hook.cpp
+                          ${WG_FG_PROXY_DIR}/win32/fg_sl214_codec.cpp ${WG_FG_PROXY_DIR}/win32/fg_title_bindings.cpp
+                          ${WG_RR_PROXY_SRC_DIR}/rr_guard.cpp)
+  add_library(wg_fg_win32 STATIC ${WG_FG_WIN32_SOURCES})
+  target_include_directories(wg_fg_win32 PUBLIC ${WG_FG_GEN_DIR})
   target_link_libraries(wg_fg_win32 PUBLIC wg_fg_proxy version)
   wg_fg_flags(wg_fg_win32)
 
@@ -142,5 +153,45 @@ if(WIN32)
     wg_fg_flags(test_fg_win32_mutant_${m})
     add_test(NAME fg_win32_mutant_${m} COMMAND test_fg_win32_mutant_${m})
     set_tests_properties(fg_win32_mutant_${m} PROPERTIES WILL_FAIL TRUE TIMEOUT 60)
+  endforeach()
+
+  # The Cyberpunk 2077 title binding (interface build 2.14.1) and the 2.14 native codec: binding data, layouts, chain
+  # walk, options / state / tags / constants, and a whole game session through the stand-in interface (the binding's
+  # own GUIDs, buffer types and feature-function names; the stand-in's export names), the factory hook and the present
+  # bridge to the core and an executor. Synthetic values only.
+  add_executable(test_fg_cp2077_binding ${WG_FG_PROXY_DIR}/tests/test_fg_cp2077_binding.cpp)
+  target_link_libraries(test_fg_cp2077_binding PRIVATE wg_fg_win32 fg_mock_interposer)
+  add_dependencies(test_fg_cp2077_binding fg_mock_game fg_mock_game_delay)
+  wg_fg_flags(test_fg_cp2077_binding)
+  add_test(NAME fg_cp2077_binding COMMAND test_fg_cp2077_binding)
+
+  # the shipped plugin in a process with the game's exe name: the binding is selected; no interface module is loaded
+  # there, so nothing is patched (fg=on), or nothing is read at all (fg=off)
+  add_executable(fg_cp2077_asi_host ${WG_FG_PROXY_DIR}/tests/fg_cp2077_asi_host.cpp)
+  set_target_properties(fg_cp2077_asi_host PROPERTIES OUTPUT_NAME "Cyberpunk2077"
+                        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/cp2077-host")
+  target_link_libraries(fg_cp2077_asi_host PRIVATE wg_fg_win32)  # result words only
+  add_dependencies(fg_cp2077_asi_host wg_fg_asi)
+  wg_fg_flags(fg_cp2077_asi_host)
+  file(WRITE "${WG_FG_ASI_CASES}/cp2077-off/wronggpu-setup/settings.ini" "fg=off\n")
+  file(WRITE "${WG_FG_ASI_CASES}/cp2077-on/wronggpu-setup/settings.ini" "fg=on\nfg_multiplier=4\n")
+  foreach(leg off on)
+    add_test(NAME fg_cp2077_asi_${leg} COMMAND fg_cp2077_asi_host $<TARGET_FILE:wg_fg_asi> ${leg})
+    set_tests_properties(fg_cp2077_asi_${leg} PROPERTIES ENVIRONMENT "WG_STATE_GAME_DIR=${WG_FG_ASI_CASES}/cp2077-${leg}")
+  endforeach()
+
+  # Mutants of the codec and the present path: each breaks one rule; the suite must catch every one.
+  #  1 a generated count of 0 accepted        2 a count above the maximum accepted   3 state written past its version
+  #  4 the chain walk ignores the GUID        5 the tag lifetime gate ignored        6 the factory hook never installed
+  #  7 the present bridge never submits       8 the frame clock never advances
+  foreach(m 1 2 3 4 5 6 7 8)
+    add_executable(test_fg_cp2077_mutant_${m} ${WG_FG_PROXY_DIR}/tests/test_fg_cp2077_binding.cpp ${WG_FG_WIN32_SOURCES})
+    target_compile_definitions(test_fg_cp2077_mutant_${m} PRIVATE WG_FG_CP2077_MUTANT=${m})
+    target_include_directories(test_fg_cp2077_mutant_${m} PRIVATE ${WG_FG_GEN_DIR})
+    target_link_libraries(test_fg_cp2077_mutant_${m} PRIVATE wg_fg_proxy version fg_mock_interposer)
+    add_dependencies(test_fg_cp2077_mutant_${m} fg_mock_game fg_mock_game_delay)
+    wg_fg_flags(test_fg_cp2077_mutant_${m})
+    add_test(NAME fg_cp2077_mutant_${m} COMMAND test_fg_cp2077_mutant_${m})
+    set_tests_properties(fg_cp2077_mutant_${m} PROPERTIES WILL_FAIL TRUE TIMEOUT 60)
   endforeach()
 endif()

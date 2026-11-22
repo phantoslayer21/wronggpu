@@ -617,7 +617,7 @@ void TestRoutingAndCoexistence(const GameModule& game, const GameModule& delay) 
     WgFgState st = t.core()->state();
     CHECK(st.enabled == 1 && st.effective_preset == WG_FG_PRESET_B && st.effective_count == 3);
     MockState ms = {};
-    CHECK(state_fn(&vp, &ms) == WG_OK);
+    CHECK(state_fn(&vp, &ms, &mo) == WG_OK);
     CHECK(ms.taken == 1 && ms.enabled == 1 && ms.preset == WG_FG_PRESET_B && ms.count == 3 && ms.max_generated == 5);
     CHECK(r->calls[kMockFgState] == 0);
     mo.count = 9;  // outside 1..5: clamped by the core to the cap
@@ -625,7 +625,7 @@ void TestRoutingAndCoexistence(const GameModule& game, const GameModule& delay) 
     mo.preset = 7;  // not a preset: refused by the core
     CHECK(options_fn(&vp, &mo) == WG_E_INVALID_PARAMETER);
     CHECK(options_fn(&vp, nullptr) == WG_E_MISSING_INPUT_PARAMETER);
-    CHECK(state_fn(&vp, nullptr) == WG_E_MISSING_INPUT_PARAMETER);
+    CHECK(state_fn(&vp, nullptr, nullptr) == WG_E_MISSING_INPUT_PARAMETER);
 
     // requirements: FG answered by the codec from the core's capability, the latency feature unchanged
     WgRequirements rq = {};
@@ -728,7 +728,7 @@ void TestThrowingCodecAndNulls(const GameModule& game) {
     codec.throw_in = MockCodec::kOptions;
     CHECK(options_fn(&vp, &mo) == WG_E_INVALID_PARAMETER && r->calls[kMockFgOptions] == 0);
     codec.throw_in = MockCodec::kState;
-    CHECK(state_fn(&vp, &ms) == WG_E_INVALID_PARAMETER && r->calls[kMockFgState] == 0);
+    CHECK(state_fn(&vp, &ms, nullptr) == WG_E_INVALID_PARAMETER && r->calls[kMockFgState] == 0);
     codec.throw_in = MockCodec::kRequirements;
     WgRequirements rq = {};
     CHECK(game.requirements(kFeatFg, &rq) == WG_E_INVALID_PARAMETER && r->calls[kMockRequirements] == 0);

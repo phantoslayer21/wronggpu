@@ -713,6 +713,13 @@ int32_t FgProxy::present(const WgFgPresentDesc* desc, WgFgPresentResult* out) {
     return WG_OK;
 }
 
+bool FgProxy::session_viewport(uint32_t* out) const {
+    std::lock_guard<std::recursive_mutex> lock(mu_);
+    if (!out || !has_vp_) return false;
+    *out = session_vp_;
+    return true;
+}
+
 bool FgProxy::session_desc(WgFgSessionDesc* out) const {
     std::lock_guard<std::recursive_mutex> lock(mu_);
     if (!out || !has_options_ || !latched_) return false;

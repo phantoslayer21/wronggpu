@@ -4,6 +4,13 @@
 // call's arguments and the result it returned, so a forwarded call can be compared argument by argument.
 // Written for this project.
 #pragma once
+#define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <unknwn.h>
+
 #include <stdint.h>
 
 #include "../../../rr_f/proxy/include/rr_proxy_abi.h"
@@ -16,7 +23,8 @@
 
 enum FgMockFn : uint32_t {
     kMockIsSupported = 0, kMockRequirements, kMockGetFunction, kMockTag, kMockTagForFrame, kMockConstants,
-    kMockEvaluate, kMockFree, kMockInit, kMockFgOptions, kMockFgState, kMockSrOptions, kMockFnCount
+    kMockEvaluate, kMockFree, kMockInit, kMockFgOptions, kMockFgState, kMockSrOptions, kMockCreateFactory2,
+    kMockFnCount
 };
 
 struct FgMockCall {
@@ -55,6 +63,10 @@ FG_MOCK_API WgResultCode fgmock_evaluate(uint32_t feature, const WgFrameToken* t
                                          uint32_t count, void* cmd);
 FG_MOCK_API WgResultCode fgmock_free(uint32_t feature, const WgViewport* vp);
 FG_MOCK_API WgResultCode fgmock_init(uint64_t value);  // never redirected (not a hooked role)
+// The stand-in's DXGI factory creation (the factory-creation export's shape): returns `factory` (set by the test)
+// through QueryInterface(riid); none set: E_FAIL. The record keeps flags (feature), &riid (a) and out (b).
+FG_MOCK_API void fgmock_set_factory(IUnknown* factory);
+FG_MOCK_API HRESULT WINAPI fgmock_create_factory2(UINT flags, REFIID riid, void** out);
 
 // The stand-in game module (fg_mock_game.dll / fg_mock_game_delay.dll) calls the interface through its import slots.
-#define FG_MOCK_GAME_SLOTS 9  // the eight roles in FgRole order, then fgmock_init
+#define FG_MOCK_GAME_SLOTS 10  // the eight roles in FgRole order, then fgmock_init, then fgmock_create_factory2
