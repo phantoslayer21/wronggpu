@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
-"""The native Linux launcher's Codex review fixes (launcher step 4): each finding as a real UI state, with the complete string.
+"""The native Linux launcher's review fixes (launcher step 4): each finding as a real UI state, with the complete string.
 
-    run_linux_ui_codexfix_tests.py --exe <WrongGPU> [--work <dir>]
+    run_linux_ui_review_fixes_tests.py --exe <WrongGPU> [--work <dir>]
 
 Same setup as run_linux_ui_tests.py (a home of its own, a fake Steam library, SDL's offscreen driver, a made-up process folder for
 the AppImage proof). Needs a WRONGGPU_TESTING build of the Linux launcher. Written for this project."""
@@ -261,7 +261,7 @@ def main():
     ap.add_argument("--exe", required=True)
     ap.add_argument("--work", default=None)
     a = ap.parse_args()
-    work = Path(a.work or "linux-ui-codexfix-tests").resolve()
+    work = Path(a.work or "linux-ui-review-fixes-tests").resolve()
     if work.exists():
         shutil.rmtree(work)
     work.mkdir(parents=True)
@@ -271,7 +271,7 @@ def main():
     if base.failures:
         print(f"{len(base.failures)} check(s) failed")
         return 1
-    print("linux ui codex-fix tests: all checks passed")
+    print("linux ui review-fixes tests: all checks passed")
     return 0
 
 
