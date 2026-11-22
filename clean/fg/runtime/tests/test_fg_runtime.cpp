@@ -4,9 +4,11 @@
 // Synthetic values only: constructed float16 patterns, constructed model files, fake resources and a fake recorder.
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <new>
 #include <stdexcept>
 #include <string>
@@ -17,6 +19,7 @@
 
 #include "../../../converter/src/sha256.h"
 #include "fg_contract.h"
+#include "fg_frame_dump.h"
 #include "fg_grid.h"
 #include "fg_history.h"
 #include "fg_model.h"
@@ -1262,6 +1265,43 @@ TEST(worker_bounded_wait_and_abandon) {
     CleanupLog log3;
     FgPendingInit::Abandon(nullptr, cleanup_fn, &log3);
     CHECK(log3.calls.load() == 1 && log3.last.load() == static_cast<int>(FgRefusal::WorkerStartFailed));
+}
+
+// The developer frame dumps' CPU side (fg_frame_dump.h): slot bytes of each slot format -> RGB8, and the PPM file.
+// Synthetic pixels.
+TEST(frame_dump_rgb8_and_ppm) {
+    std::vector<uint8_t> rgb;
+    uint8_t rgba[2 * 16] = {10, 20, 30, 255, 40, 50, 60, 0};  // 2 x 2, row pitch 16 (8 bytes used per row)
+    const uint8_t row1[8] = {70, 80, 90, 1, 100, 110, 120, 2};
+    std::memcpy(rgba + 16, row1, sizeof row1);
+    CHECK(FgDumpToRgb8(rgba, 16, 2, 2, kFgDumpRgba8, &rgb) && rgb.size() == 12);
+    CHECK(rgb[0] == 10 && rgb[1] == 20 && rgb[2] == 30 && rgb[3] == 40 && rgb[6] == 70 && rgb[11] == 120);
+    CHECK(FgDumpToRgb8(rgba, 16, 2, 2, kFgDumpBgra8Srgb, &rgb) && rgb[0] == 30 && rgb[1] == 20 && rgb[2] == 10);
+    const uint32_t px = (1023u << 20) | (512u << 10) | 4u;  // R 4, G 512, B 1023 (10 bits each)
+    uint8_t pxb[4];
+    std::memcpy(pxb, &px, 4);
+    CHECK(FgDumpToRgb8(pxb, 4, 1, 1, kFgDumpRgb10A2, &rgb) && rgb[0] == 1 && rgb[1] == 128 && rgb[2] == 255);
+    const uint16_t half[4] = {0x3C00, 0x3800, 0xBC00, 0x3C00};  // 1.0, 0.5, -1.0, alpha
+    uint8_t hb[8];
+    std::memcpy(hb, half, 8);
+    CHECK(FgDumpToRgb8(hb, 8, 1, 1, kFgDumpRgba16Float, &rgb) && rgb[0] == 255 && rgb[1] == 128 && rgb[2] == 0);
+    CHECK(FgDumpHalfToFloat(0x0001) == std::ldexp(1.0f, -24) && FgDumpHalfToFloat(0x7BFF) == 65504.0f);
+    CHECK(FgDumpHalfToFloat(0x8000) == 0.0f && FgDumpUnit8(FgDumpHalfToFloat(0x7E00)) == 0);  // NaN -> 0
+    CHECK(FgDumpUnit8(FgDumpHalfToFloat(0x4000)) == 255);                                     // 2.0 clamped
+    // refusals: a pitch too small for a row, an unknown format, a zero size, no source
+    CHECK(!FgDumpToRgb8(rgba, 7, 2, 2, kFgDumpRgba8, &rgb));
+    CHECK(!FgDumpToRgb8(rgba, 16, 2, 2, 2u, &rgb) && FgDumpBytesPerPixel(2u) == 0);
+    CHECK(!FgDumpToRgb8(rgba, 16, 0, 2, kFgDumpRgba8, &rgb) && !FgDumpToRgb8(nullptr, 16, 2, 2, kFgDumpRgba8, &rgb));
+    // the file: the P6 header, then the pixels
+    CHECK(FgDumpPpmHeader(2, 3) == "P6\n2 3\n255\n");
+    CHECK(FgDumpToRgb8(rgba, 16, 2, 2, kFgDumpRgba8, &rgb));
+    const std::string path = "fg_frame_dump_test.ppm";
+    CHECK(FgDumpWritePpm(path, 2, 2, rgb));
+    std::ifstream f(path, std::ios::binary);
+    const std::string bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    CHECK(bytes.size() == 11 + 12 && bytes.compare(0, 11, "P6\n2 2\n255\n") == 0 &&
+          static_cast<uint8_t>(bytes[11]) == 10 && static_cast<uint8_t>(bytes[22]) == 120);
+    CHECK(!FgDumpWritePpm(path, 3, 2, rgb));  // size does not match the pixels
 }
 
 }  // namespace

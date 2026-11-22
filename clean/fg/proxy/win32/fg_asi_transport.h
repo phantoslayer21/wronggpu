@@ -132,6 +132,10 @@ public:
     // closes, and the step after that present (fg_sl214_codec.h, frame clock). Default: 0 / nothing.
     virtual uint64_t frame_for_present() { return 0; }
     virtual void note_present() {}
+    // Diagnostics (the transport's FG call lines, logged when they change, never per frame): the game's FG options /
+    // state structure at `native` in words. Default: nothing known (empty).
+    virtual std::string describe_options(const void*) { return std::string(); }
+    virtual std::string describe_state(const void*) { return std::string(); }
 };
 
 // Why install() did what it did. Stable numbers (log text and the status export).
@@ -158,6 +162,10 @@ using FgPresentRouteFn = int32_t (*)(void* ctx, FgProxy* core, const WgFgPresent
 // F9: told of every factory the game creates through the redirected slot (after the creation hook), so the route's
 // adapter facts can be read from it before the game asks whether frame generation is supported.
 using FgFactoryNoteFn = void (*)(void* ctx, FgProxy* core, IUnknown* factory);
+// F9: called once install() has its core attached and the scan found slots to redirect, BEFORE the first slot is
+// written: route facts known at start-up (the adapter, the model) reach the core before any game call can (the core
+// may be told again later; it must not be kept: install() owns it).
+using FgCoreReadyFn = void (*)(void* ctx, FgProxy* core);
 
 struct FgAsiConfig {
     FgSettings settings;                // the player's per-game FG settings (fg_settings.h)
@@ -181,6 +189,8 @@ struct FgAsiConfig {
     void* present_route_ctx = nullptr;
     FgFactoryNoteFn factory_note = nullptr;
     void* factory_note_ctx = nullptr;
+    FgCoreReadyFn core_ready = nullptr;
+    void* core_ready_ctx = nullptr;
 };
 
 // What the present bridge saw (the transport's swap-chain sink and present callback; the process's one transport).

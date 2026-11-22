@@ -80,6 +80,9 @@ struct FgProxyConfig {
 
 using FgLogFn = void (*)(void* ctx, const char* line);
 
+// A route / refusal reason (WgFgReason) in words, as the core's log lines name it.
+const char* FgReasonName(uint32_t reason);
+
 // The single present owner per swap chain. One registry per process (FgProcessPresentOwners) is shared by every
 // adapter; tests make their own.
 class FgPresentOwners {

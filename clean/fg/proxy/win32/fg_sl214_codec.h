@@ -171,6 +171,9 @@ public:
     bool write_requirements(const WgFgCapability& cap, WgRequirements* native) override;
     uint64_t frame_for_present() override;
     void note_present() override;
+    // "mode 1 (on), frames 1, flags 0x8, ui recomposition 0" / "frames max 1, status 0x0, state v4"
+    std::string describe_options(const void* native) override;
+    std::string describe_state(const void* native) override;
 
     const FgSl214Layout& layout() const { return l_; }
     uint64_t presents() const { return interval_.load(); }

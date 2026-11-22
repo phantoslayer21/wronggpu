@@ -156,6 +156,15 @@ struct FgD3d12ExecutorDesc {
     uint32_t wait_ms = 2000;                // bounded waits (menu decision, allocator reuse, idle)
     uint32_t allocators = 24;               // command allocators in the ring
     bool keep_outputs = false;              // tests: keep a host copy of every image written into a slot
+    // Developer frame dumps (off while dump_dir is empty; the ASI sets it only in a developer build): of the game
+    // frames that generate, every dump_every-th one (at most dump_max), the game frame's slot image (game_<n>.ppm) and
+    // each generated slot image (gen_<n>_<i>.ppm) are copied to a readback buffer after the slot write, and written as
+    // 8-bit binary PPM files (fg_frame_dump.h) into dump_dir once their fence passed (checked at the next recording,
+    // never waited for on the present path). Each file written, or not written, is one dump_log line.
+    std::string dump_dir;
+    uint32_t dump_every = 30, dump_max = 6;
+    void (*dump_log)(void* ctx, const char* line) = nullptr;
+    void* dump_log_ctx = nullptr;
 };
 
 // A host copy of one image the executor wrote (keep_outputs).

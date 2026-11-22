@@ -5,6 +5,8 @@
 
 #include <string.h>
 
+#include <cstdio>
+
 // Test-only mutants (CMakeLists.txt builds test_fg_cp2077_binding against each; every one must fail; fg_asi_transport.cpp
 // has 6 and 7): 1 a generated count of 0 accepted  2 a count above the maximum accepted  3 state members written past
 // the passed version  4 the chain walk ignores the GUID  5 the tag lifetime gate ignored  8 the frame clock never advances
@@ -163,6 +165,31 @@ bool FgSl214Codec::options(const WgViewport*, const void* native, WgFgOptions* o
     out->render_max_width = o->mvdepth_width;
     out->render_max_height = o->mvdepth_height;
     return true;
+}
+
+std::string FgSl214Codec::describe_options(const void* native) {
+    const WgNatFgOptions* o = find_options(native);
+    if (!o) return "options not in the chain";
+    static const char* const kModes[] = {"off", "on", "auto", "dynamic"};
+    char buf[160];
+    std::snprintf(buf, sizeof buf, "mode %u (%s), frames %u, flags 0x%x, ui recomposition %u", o->mode,
+                  o->mode < 4 ? kModes[o->mode] : "unknown", o->frames, o->flags,
+                  static_cast<unsigned>(o->ui_recomposition));
+    return buf;
+}
+
+std::string FgSl214Codec::describe_state(const void* native) {
+    const WgHeader* found = FgFindInChain(native, l_.state_guid);
+    if (!found || found->version < 1) return "state not in the chain";
+    const WgNatFgState* s = reinterpret_cast<const WgNatFgState*>(found);
+    char buf[160];
+    if (s->h.version >= kFgNatStateV2)
+        std::snprintf(buf, sizeof buf, "frames max %u, status 0x%x, state v%u", s->frames_max, s->status,
+                      static_cast<unsigned>(s->h.version));
+    else
+        std::snprintf(buf, sizeof buf, "status 0x%x, state v%u (no frames max)", s->status,
+                      static_cast<unsigned>(s->h.version));
+    return buf;
 }
 
 bool FgSl214Codec::write_state(const WgFgState& state, void* native) { return write_state_for(state, nullptr, native); }

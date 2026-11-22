@@ -16,7 +16,10 @@
 // (%LOCALAPPDATA%\WrongGPU\model\FG\model.wgcm) and the kernel folder (wronggpu-setup\fg-dxil next to this plugin)
 // before anything is patched; either failing: nothing is installed (kFgRuntimeMissing). Passing: the host is the
 // transport's presenter and present route (session, D3D12 executor, Windows presenter). fg_net2=exact (developer key,
-// not an FG settings key) selects net2's exact path for validation; the fast path is the default.
+// not an FG settings key) selects net2's exact path for validation; the fast path is the default. The host probes the
+// RDNA 4 adapter before the transport writes its first slot (FgAsiConfig::core_ready), so the game's first FG support
+// query already sees the route; the transport logs each FG call kind (support query, function lookup, options, state)
+// when its result changes. Developer builds: WRONGGPU_FG_DUMP_DIR turns on the frame dumps (fg_asi_session.h).
 // Log: wronggpu-fg.log in the game folder, one append per line.
 // Written for this project.
 #include "fg_asi_transport.h"
@@ -175,6 +178,8 @@ void Initialize() {
         cfg.present_route_ctx = g_host;
         cfg.factory_note = &FgAsiSessionHost::FactoryNote;
         cfg.factory_note_ctx = g_host;
+        cfg.core_ready = &FgAsiSessionHost::CoreReady;  // route facts and the adapter probe before any slot is live
+        cfg.core_ready_ctx = g_host;
 #if defined(WRONGGPU_FG_DEV_QUALIFIED) && WRONGGPU_FG_DEV_QUALIFIED
         LogLine(nullptr, "fg: developer build: frame generation modes are taken without the release gate");
 #endif

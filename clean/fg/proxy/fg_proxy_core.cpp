@@ -104,6 +104,8 @@ uint32_t Shape(const T* p) {
 
 }  // namespace
 
+const char* FgReasonName(uint32_t reason) { return ReasonName(reason); }
+
 // ---- present owners -------------------------------------------------------------------------------------------------
 
 uint32_t FgPresentOwners::claim(uint64_t swapchain_id, uint32_t owner) {

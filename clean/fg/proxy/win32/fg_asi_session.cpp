@@ -94,7 +94,10 @@ struct FgAsiSessionHost::Impl {
     mutable std::recursive_mutex mu;
     FgProxy* core = nullptr;
     bool adapter_set = false;
+    bool adapter_confirmed = false;  // the game's factory was checked against the start-up adapter
+    WgFgAdapterIdentity adapter_id = {};
     bool tearing_supported = false;  // DXGI_FEATURE_PRESENT_ALLOW_TEARING on the game's factory
+    std::string dump_dir;            // developer frame dumps (empty: off)
 
     // the attached chain
     IDXGISwapChain4* inner = nullptr;  // no reference: the wrapper holds the chain while we are attached
@@ -130,6 +133,71 @@ struct FgAsiSessionHost::Impl {
 
     void Log(const std::string& line) const {
         if (cfg.log) cfg.log(cfg.log_ctx, line.c_str());
+    }
+
+    // The first RDNA 4 hardware adapter of `factory`; false when it lists none.
+    static bool FirstRdna4(IUnknown* factory, DXGI_ADAPTER_DESC1* out) {
+        ComPtr<IDXGIFactory1> f1;
+        if (!factory || FAILED(factory->QueryInterface(IID_PPV_ARGS(&f1)))) return false;
+        for (UINT i = 0; i < 16; ++i) {
+            ComPtr<IDXGIAdapter1> a;
+            if (f1->EnumAdapters1(i, &a) == DXGI_ERROR_NOT_FOUND) break;
+            DXGI_ADAPTER_DESC1 d = {};
+            if (!a || FAILED(a->GetDesc1(&d)) || (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) continue;
+            if (!FgIsRdna4(d.VendorId, d.DeviceId)) continue;
+            *out = d;
+            return true;
+        }
+        return false;
+    }
+
+    // A DXGI factory's facts: the tearing support, and the adapter (from the start-up probe, or from the game's
+    // factory when the probe found none); the game's factory confirms a start-up adapter once.
+    void NoteFactory(FgProxy* c, IUnknown* factory, bool game_factory) {
+        {
+            ComPtr<IDXGIFactory5> f5;
+            BOOL tearing = FALSE;
+            if (SUCCEEDED(factory->QueryInterface(IID_PPV_ARGS(&f5))))
+                tearing_supported =
+                    SUCCEEDED(f5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &tearing, sizeof(tearing))) &&
+                    tearing;
+        }
+        DXGI_ADAPTER_DESC1 d = {};
+        const bool found = FirstRdna4(factory, &d);
+        if (adapter_set) {
+            if (game_factory && !adapter_confirmed) {
+                adapter_confirmed = true;
+                const bool same = found && d.AdapterLuid.LowPart == adapter_id.luid.low &&
+                                  d.AdapterLuid.HighPart == adapter_id.luid.high;
+                Log(same ? "fg host: the game's factory confirms the start-up adapter"
+                         : "fg host: the game's factory does not list the start-up adapter first; the start-up adapter "
+                           "stays");
+            }
+            return;
+        }
+        if (!found) {
+            Log(game_factory ? "fg host: no RDNA 4 adapter on the game's factory; frame generation is not taken"
+                             : "fg host: start-up probe: no RDNA 4 adapter; the game's factory is checked when the "
+                               "game creates it");
+            return;
+        }
+        WgFgAdapterIdentity id = {};
+        id.struct_size = sizeof(id);
+        id.abi_version = WG_FG_ADAPTER_ABI_VERSION;
+        id.vendor_id = d.VendorId;
+        id.device_id = d.DeviceId;
+        id.luid.low = d.AdapterLuid.LowPart;
+        id.luid.high = d.AdapterLuid.HighPart;
+        id.rdna4 = 1;
+        id.probes_passed = 1;  // the precheck found every kernel of the executor
+        adapter_id = id;
+        adapter_set = true;
+        adapter_confirmed = game_factory;
+        char line[128];
+        wsprintfA(line, "fg host: adapter vendor 0x%04x device 0x%04x (RDNA 4, %s)", d.VendorId, d.DeviceId,
+                  game_factory ? "the game's factory" : "start-up probe");
+        Log(line);
+        c->set_adapter(id);
     }
 
     void ReleaseFacade() {
@@ -272,6 +340,9 @@ struct FgAsiSessionHost::Impl {
             ed.weights = weights.get();
             ed.net2 = cfg.net2_exact ? wgfg::FgNet2Path::Exact : wgfg::FgNet2Path::Fast;
             ed.settings.menu_detection = true;
+            ed.dump_dir = dump_dir;  // empty (off) unless a developer build found WRONGGPU_FG_DUMP_DIR
+            ed.dump_log = cfg.log;
+            ed.dump_log_ctx = cfg.log_ctx;
             exec.reset(new (std::nothrow) wgfg::FgD3d12Executor(ed));
             if (!exec) return;
         }
@@ -323,6 +394,22 @@ FgAsiSessionHost::FgAsiSessionHost(const FgAsiSessionConfig& cfg, std::unique_pt
     : impl_(new Impl()) {
     impl_->cfg = cfg;
     impl_->weights = std::move(weights);
+#if defined(WRONGGPU_FG_DEV_QUALIFIED) && WRONGGPU_FG_DEV_QUALIFIED
+    // developer frame dumps: only with WRONGGPU_FG_DUMP_DIR naming an existing folder
+    char buf[MAX_PATH * 2];
+    const DWORD n = GetEnvironmentVariableA("WRONGGPU_FG_DUMP_DIR", buf, static_cast<DWORD>(sizeof buf));
+    if (n > 0 && n < sizeof buf) {
+        std::string dir(buf, n);
+        while (dir.size() > 3 && (dir.back() == '\\' || dir.back() == '/')) dir.pop_back();
+        const DWORD a = GetFileAttributesA(dir.c_str());
+        if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY)) {
+            impl_->dump_dir = dir;
+            impl_->Log("fg host: developer frame dumps on: every 30th generating game frame, at most 6, into " + dir);
+        } else {
+            impl_->Log("fg host: WRONGGPU_FG_DUMP_DIR is not an existing folder; no frame dumps");
+        }
+    }
+#endif
 }
 
 FgAsiSessionHost::~FgAsiSessionHost() {
@@ -363,40 +450,31 @@ void FgAsiSessionHost::FactoryNote(void* ctx, FgProxy* core, IUnknown* factory) 
     if (!self || !core || !factory) return;
     Impl& m = *self->impl_;
     std::lock_guard<std::recursive_mutex> lock(m.mu);
-    if (m.adapter_set) return;
-    {
-        ComPtr<IDXGIFactory5> f5;
-        BOOL tearing = FALSE;
-        m.tearing_supported =
-            SUCCEEDED(factory->QueryInterface(IID_PPV_ARGS(&f5))) &&
-            SUCCEEDED(f5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &tearing, sizeof(tearing))) &&
-            tearing;
+    m.NoteFactory(core, factory, true);
+}
+
+void FgAsiSessionHost::CoreReady(void* ctx, FgProxy* core) {
+    FgAsiSessionHost* self = static_cast<FgAsiSessionHost*>(ctx);
+    if (!self || !core) return;
+    Impl& m = *self->impl_;
+    std::lock_guard<std::recursive_mutex> lock(m.mu);
+    try {
+        // the precheck passed: the model validated; the presenter is decided at session creation
+        core->set_runtime_facts(true, true);
+        if (m.adapter_set) {
+            core->set_adapter(m.adapter_id);  // a later install: the adapter found before
+            return;
+        }
+        // read-only: a factory and its adapter list, no device
+        ComPtr<IDXGIFactory1> f;
+        if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&f))) || !f) {
+            m.Log("fg host: start-up probe: no DXGI factory; the game's factory is checked when the game creates it");
+            return;
+        }
+        m.NoteFactory(core, f.Get(), false);
+    } catch (...) {
+        // the game's factory is still checked when the game creates it
     }
-    ComPtr<IDXGIFactory1> f1;
-    if (FAILED(factory->QueryInterface(IID_PPV_ARGS(&f1)))) return;
-    for (UINT i = 0; i < 16; ++i) {
-        ComPtr<IDXGIAdapter1> a;
-        if (f1->EnumAdapters1(i, &a) == DXGI_ERROR_NOT_FOUND) break;
-        DXGI_ADAPTER_DESC1 d = {};
-        if (!a || FAILED(a->GetDesc1(&d)) || (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) continue;
-        if (!FgIsRdna4(d.VendorId, d.DeviceId)) continue;
-        WgFgAdapterIdentity id = {};
-        id.struct_size = sizeof(id);
-        id.abi_version = WG_FG_ADAPTER_ABI_VERSION;
-        id.vendor_id = d.VendorId;
-        id.device_id = d.DeviceId;
-        id.luid.low = d.AdapterLuid.LowPart;
-        id.luid.high = d.AdapterLuid.HighPart;
-        id.rdna4 = 1;
-        id.probes_passed = 1;  // the precheck found every kernel of the executor
-        core->set_adapter(id);
-        m.adapter_set = true;
-        char line[96];
-        wsprintfA(line, "fg host: adapter vendor 0x%04x device 0x%04x (RDNA 4)", d.VendorId, d.DeviceId);
-        m.Log(line);
-        return;
-    }
-    m.Log("fg host: no RDNA 4 adapter on the game's factory; frame generation is not taken");
 }
 
 int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc* desc, WgFgPresentResult* out) {

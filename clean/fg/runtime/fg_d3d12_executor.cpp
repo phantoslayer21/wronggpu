@@ -9,9 +9,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <fstream>
 #include <iterator>
+
+#include "fg_frame_dump.h"
 
 #include "../presenter/fg_dxgi_presenter.h"
 #include "../presenter/fg_win_comp_presenter.h"
@@ -531,6 +534,99 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         ComPtr<ID3D12Resource> image, colour, slot;
     };
     std::vector<PendingRb> pending;
+
+    // developer frame dumps (FgD3d12ExecutorDesc::dump_dir)
+    struct DumpRb {
+        ComPtr<ID3D12Resource> buf;
+        uint64_t fence_value = 0;  // 0 until the recording that copies it is submitted
+        uint32_t w = 0, h = 0, pitch = 0, format = 0;
+        std::string name;
+    };
+    std::vector<DumpRb> dumps;
+    uint64_t dump_seen_token = 0, dump_token = 0, dump_generating = 0;
+    bool dump_seen = false, dump_armed = false;
+    uint32_t dump_frames = 0;
+
+    void DumpLog(const std::string& line) const {
+        if (desc.dump_log) desc.dump_log(desc.dump_log_ctx, line.c_str());
+    }
+
+    // Once per game frame: is this one dumped?
+    void ArmDump(uint64_t token, bool generates) {
+        if (desc.dump_dir.empty() || (dump_seen && token == dump_seen_token)) return;
+        dump_seen = true;
+        dump_seen_token = token;
+        dump_armed = false;
+        if (!generates || dump_frames >= desc.dump_max || desc.dump_every == 0) return;
+        if (++dump_generating % desc.dump_every != 0) return;
+        dump_armed = true;
+        dump_token = token;
+        ++dump_frames;
+    }
+
+    // After the slot write (the slot in COPY_DEST): a copy of the slot into a readback buffer, back to COPY_DEST.
+    void RecordDump(Rec& r, ID3D12Resource* res, const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& fp, uint32_t bpp,
+                    char kind, uint64_t token, uint32_t index) {
+        if (!dump_armed || token != dump_token || (kind != 'g' && kind != 'r')) return;
+        DumpRb d;
+        d.w = fp.Footprint.Width;
+        d.h = fp.Footprint.Height;
+        d.format = static_cast<uint32_t>(fp.Footprint.Format);
+        d.pitch = static_cast<uint32_t>(align(static_cast<uint64_t>(bpp) * d.w, 256));
+        d.name = kind == 'r' ? "game_" + std::to_string(dump_frames) + ".ppm"
+                             : "gen_" + std::to_string(dump_frames) + "_" + std::to_string(index) + ".ppm";
+        d.buf = Buffer(static_cast<uint64_t>(d.pitch) * d.h, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE,
+                       D3D12_RESOURCE_STATE_COPY_DEST);
+        if (!d.buf) {
+            DumpLog("fg dump: " + d.name + " not written (no readback buffer)");
+            return;
+        }
+        Transition(r, res, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        D3D12_TEXTURE_COPY_LOCATION s = {};
+        s.pResource = res;
+        s.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        D3D12_TEXTURE_COPY_LOCATION t = {};
+        t.pResource = d.buf.Get();
+        t.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        t.PlacedFootprint.Footprint = fp.Footprint;
+        t.PlacedFootprint.Footprint.RowPitch = d.pitch;
+        r.cl->CopyTextureRegion(&t, 0, 0, 0, &s, nullptr);
+        Transition(r, res, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+        dumps.push_back(std::move(d));
+    }
+
+    // Writes every dump whose fence passed (wait: a bounded wait for each first). Never throws.
+    void FlushDumps(bool wait) {
+        if (dumps.empty() || !fence) return;
+        try {
+            for (size_t i = 0; i < dumps.size();) {
+                DumpRb& d = dumps[i];
+                if (d.fence_value == 0 || (fence->GetCompletedValue() < d.fence_value &&
+                                           !(wait && WaitValue(d.fence_value, desc.wait_ms)))) {
+                    ++i;
+                    continue;
+                }
+                const std::string path = desc.dump_dir + "\\" + d.name;
+                void* p = nullptr;
+                const D3D12_RANGE all = {0, static_cast<SIZE_T>(d.pitch) * d.h};
+                std::vector<uint8_t> rgb;
+                bool ok = false;
+                if (SUCCEEDED(d.buf->Map(0, &all, &p)) && p) {
+                    ok = FgDumpToRgb8(static_cast<const uint8_t*>(p), d.pitch, d.w, d.h, d.format, &rgb);
+                    const D3D12_RANGE none = {0, 0};
+                    d.buf->Unmap(0, &none);
+                }
+                ok = ok && FgDumpWritePpm(path, d.w, d.h, rgb);
+                DumpLog(ok ? "fg dump: wrote " + path + " (" + std::to_string(d.w) + " x " + std::to_string(d.h) +
+                                 ", slot format " + std::to_string(d.format) + ")"
+                           : "fg dump: " + path + " not written (map, format " + std::to_string(d.format) +
+                                 " or file)");
+                dumps.erase(dumps.begin() + static_cast<std::ptrdiff_t>(i));
+            }
+        } catch (...) {
+            dumps.clear();
+        }
+    }
 
     // current recording
     Rec* cur = nullptr;
@@ -1571,6 +1667,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                 pending.push_back(std::move(p));
             }
         }
+        RecordDump(r, res, src.PlacedFootprint, bpp, kind, token, index);
         Transition(r, res, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
         return FgExecResult::Ok;
     }
@@ -1578,7 +1675,14 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     FgExecResult Finish(Rec& r, FgReadyFence* ready) {
         uint64_t v = 0;
         const FgExecResult s = Submit(&r, &v);
-        if (s != FgExecResult::Ok) return s;
+        if (s != FgExecResult::Ok) {
+            // the recording was not submitted: its dump copies never run
+            dumps.erase(std::remove_if(dumps.begin(), dumps.end(), [](const DumpRb& d) { return d.fence_value == 0; }),
+                        dumps.end());
+            return s;
+        }
+        for (DumpRb& d : dumps)
+            if (d.fence_value == 0) d.fence_value = v;
         if (desc.keep_outputs)
             for (PendingRb& p : pending)
                 if (p.rec.fence_value == 0) p.rec.fence_value = v;
@@ -1602,7 +1706,10 @@ FgD3d12Executor::FgD3d12Executor(const FgD3d12ExecutorDesc& desc) : impl_(new Im
 }
 
 FgD3d12Executor::~FgD3d12Executor() {
-    if (impl_ && impl_->fence) impl_->WaitValue(impl_->next_value, impl_->desc.wait_ms);
+    if (impl_ && impl_->fence) {
+        impl_->WaitValue(impl_->next_value, impl_->desc.wait_ms);
+        impl_->FlushDumps(true);
+    }
 }
 
 FgExecRefusal FgD3d12Executor::LastRefusal() const { return impl_->refusal; }
@@ -1703,6 +1810,8 @@ FgExecResult FgD3d12Executor::RecordSharedGameFrame(const FgSharedDispatchDesc& 
     if (!m.configured) return m.Fail(FgExecRefusal::NotConfigured, "Configure has not succeeded");
     if (!d.packet || !out) return m.Fail(FgExecRefusal::BadArgument, "null packet / result");
     if (m.DeviceRemoved()) return m.Fail(FgExecRefusal::DeviceLost, "device removed");
+    m.FlushDumps(false);
+    m.ArmDump(d.frame_token, d.generates);
     const FgFramePacket& p = *d.packet;
     FrameCtx f;
     f.token = d.frame_token;
@@ -1849,6 +1958,7 @@ FgExecResult FgD3d12Executor::RecordGeneratedIndex(const FgIndexDispatchDesc& d,
         return m.Fail(FgExecRefusal::BadArgument, "no shared work recorded for this game frame");
     if (d.preset != m.frame.preset) return m.Fail(FgExecRefusal::BadArgument, "preset differs from the game frame's");
     if (!m.target) return m.Fail(FgExecRefusal::SlotTargetMissing, "no presenter bound to the executor");
+    m.FlushDumps(false);
     std::vector<FgExecOp> ops;
     m.host.IndexOps(d.t, m.frame.hud, m.frame.ui4, false, &ops);
     Rec r;
@@ -1886,6 +1996,7 @@ FgExecResult FgD3d12Executor::RecordRealEndpoint(const FgRealDispatchDesc& d, Fg
     Impl& m = *impl_;
     if (!m.configured) return m.Fail(FgExecRefusal::NotConfigured, "Configure has not succeeded");
     if (!ready) return m.Fail(FgExecRefusal::BadArgument, "null ready fence");
+    m.FlushDumps(false);
     uint32_t slot = d.slot.slot;
     bool write = !d.real_only && d.slot.reserved;
     const bool have_frame = m.frame.valid && m.frame.token == d.frame_token;
@@ -2057,7 +2168,10 @@ uint64_t FgD3d12Executor::CompletedComputeValue() const {
 }
 
 bool FgD3d12Executor::WaitIdle(uint32_t timeout_ms) {
-    return !impl_->fence || impl_->WaitValue(impl_->next_value, timeout_ms);
+    if (!impl_->fence) return true;
+    const bool idle = impl_->WaitValue(impl_->next_value, timeout_ms);
+    if (idle) impl_->FlushDumps(false);
+    return idle;
 }
 
 bool FgD3d12Executor::TakeOutputs(std::vector<FgExecOutputRecord>* out) {

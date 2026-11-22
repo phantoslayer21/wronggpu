@@ -6,9 +6,15 @@
 //  - PRECHECK (InitializeASI, no D3D work): the local FG model validates against the shipped map (fg_model.h) and the
 //    kernel folder holds every DXIL file the executor loads for the chosen net2 path. Either missing: the ASI installs
 //    nothing (no transport, nothing patched), it logs why.
-//  - ROUTE FACTS. The model and the presenter facts go to the adapter core once the transport is installed; the
-//    adapter (vendor, device, LUID) is read from the first RDNA 4 adapter of the game's DXGI factory when the game
-//    creates it (FgAsiConfig::factory_note); the device and queue when the game's swap chain is attached.
+//  - ROUTE FACTS. The model and the presenter facts, and the adapter (vendor, device, LUID of the first RDNA 4
+//    hardware adapter), go to the adapter core before the transport writes its first import slot
+//    (FgAsiConfig::core_ready): the adapter from a start-up probe (CreateDXGIFactory1 and the adapter list only, no
+//    device), so the game's first "is frame generation supported" call already sees the route. The game's own DXGI
+//    factory (FgAsiConfig::factory_note) confirms it, or supplies it when the probe found none. The device and queue
+//    come when the game's swap chain is attached.
+//  - DEVELOPER FRAME DUMPS (developer builds only, WRONGGPU_FG_DEV_QUALIFIED): with WRONGGPU_FG_DUMP_DIR naming a
+//    folder, the executor writes the game frame and each generated frame of every 30th generating game frame (at most
+//    6) as PPM files there (FgD3d12ExecutorDesc::dump_dir); off otherwise.
 //  - FACADE. A claimed chain gets game-facing buffers of its own (the chain's size, format family and count, served
 //    through the swap-chain hook's facade seam: GetBuffer, GetCurrentBackBufferIndex, GetFrameLatencyWaitableObject),
 //    so the presenter's copies and presents into the real chain never race the game's rendering. The facade buffer
@@ -95,6 +101,8 @@ public:
     // FgAsiConfig hooks (ctx = this host).
     static int32_t Route(void* ctx, FgProxy* core, const WgFgPresentDesc* desc, WgFgPresentResult* out);
     static void FactoryNote(void* ctx, FgProxy* core, IUnknown* factory);
+    // FgAsiConfig::core_ready (ctx = this host): the model / presenter facts and the start-up adapter probe.
+    static void CoreReady(void* ctx, FgProxy* core);
 
     FgAsiSessionStats Stats() const;
 

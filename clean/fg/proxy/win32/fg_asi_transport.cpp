@@ -11,6 +11,8 @@
 #include <d3d12.h>
 
 #include <exception>
+#include <map>
+#include <mutex>
 
 // Test-only mutants (CMakeLists.txt builds the Win32 suite against each; every one must fail):
 //  1 install-off gate ignored  2 a forwarded call loses an argument  3 scan budget ignored  7 restore leaves slots
@@ -275,6 +277,42 @@ bool DecodeLuid(const WgAdapterInfo* a, WgFgLuid* out) {
 
 uint32_t ViewportId(const WgViewport* v) { return v ? v->id : 0u; }
 
+// ---- FG call diagnostics: one line per FG call kind when what it returned changes (never per frame) ------------------
+// The first call of each kind is always logged; then only a change of the result / the decoded values. At most
+// kCallLines lines per transport install, so a value that flips every frame cannot fill the log.
+constexpr uint32_t kCallLines = 64;
+struct CallLog {
+    std::mutex mu;
+    std::map<std::string, std::string> last;  // call (with its name argument) -> what it last returned
+    uint32_t lines = 0;
+};
+CallLog g_calls;
+
+void ResetCallLog() {
+    std::lock_guard<std::mutex> lock(g_calls.mu);
+    g_calls.last.clear();
+    g_calls.lines = 0;
+}
+
+void NoteCall(const FgAsiTransport::Impl& r, const std::string& call, const std::string& what) {
+    if (!r.log) return;
+    std::lock_guard<std::mutex> lock(g_calls.mu);
+    auto it = g_calls.last.find(call);
+    if ((it != g_calls.last.end() && it->second == what) || g_calls.lines >= kCallLines) return;
+    g_calls.last[call] = what;
+    std::string line = "fg call: " + call + " -> " + what;
+    if (++g_calls.lines == kCallLines) line += " (the last FG call line of this run)";
+    r.log(r.log_ctx, line.c_str());
+}
+
+const char* Answered(const CallFrame& f) { return f.forwarded ? "forwarded to the genuine feature" : "answered here"; }
+
+std::string Result(WgResultCode r) { return "result " + std::to_string(static_cast<int32_t>(r)); }
+
+std::string Joined(const std::string& a, const std::string& b) {
+    return a.empty() ? b : (b.empty() ? a : a + "; " + b);
+}
+
 // ---- handlers (the game's signatures; written into the import slots) ------------------------------------------------
 // Each: count, route (or forward when no route is active), and on any exception forward unchanged unless the genuine
 // export was already reached for this call (then its result stands: a call is never forwarded twice).
@@ -292,6 +330,9 @@ WgResultCode H_IsSupported(uint32_t feature, const WgAdapterInfo* a) {
         const bool have = DecodeLuid(a, &luid);
         const WgResultCode res = r->core->is_supported(feature, have ? &luid : nullptr, a);
         if (!f.forwarded) g_ctr.fg_answered.fetch_add(1);
+        if (feature == r->fg_feature)
+            NoteCall(*r, "is-supported(FG)", Result(res) + ", " + Answered(f) + " (route: " +
+                                                 FgReasonName(r->core->route_reason()) + ")");
         return res;
     } catch (...) {
         g_ctr.codec_failures.fetch_add(1);
@@ -334,6 +375,15 @@ WgResultCode H_GetFunction(uint32_t feature, const char* name, void** out) {
     try {
         const WgResultCode res = r->core->get_function(feature, name, out);
         if (!f.forwarded) g_ctr.fg_answered.fetch_add(1);
+        if (feature == r->fg_feature) {
+            void* got = res == WG_OK && out ? *out : nullptr;
+            const char* what = !got                                    ? "no function"
+                               : got == FgAsiTransport::options_handler() ? "our set-options"
+                               : got == FgAsiTransport::state_handler()   ? "our get-state"
+                                                                          : "the genuine function";
+            NoteCall(*r, std::string("get-function(FG, '") + (name ? name : "(null)") + "')",
+                     Result(res) + ", " + what + ", " + Answered(f));
+        }
         return res;
     } catch (...) {
         g_ctr.codec_failures.fetch_add(1);
@@ -468,6 +518,8 @@ WgResultCode H_FgOptions(const WgViewport* v, const void* native) {
             const WgResultCode chk = r->codec->check_options(v, native, r->core->advertised_max_generated());
             if (chk != WG_OK) {
                 g_ctr.fg_answered.fetch_add(1);
+                NoteCall(*r, "set-options", Joined(r->codec->describe_options(native),
+                                                    Result(chk) + ", refused by the interface's checks"));
                 return chk;
             }
         }
@@ -479,7 +531,9 @@ WgResultCode H_FgOptions(const WgViewport* v, const void* native) {
             if (r->codec->options(v, native, &d)) dp = &d;
             else g_ctr.codec_failures.fetch_add(1);
         }
-        return r->core->set_options(r->fg_feature, ViewportId(v), dp, native);
+        const WgResultCode res = r->core->set_options(r->fg_feature, ViewportId(v), dp, native);
+        NoteCall(*r, "set-options", Joined(r->codec->describe_options(native), Result(res) + ", " + Answered(f)));
+        return res;
     } catch (...) {
         g_ctr.codec_failures.fetch_add(1);
         return f.forwarded ? f.fwd_result : WG_E_INVALID_PARAMETER;
@@ -500,14 +554,18 @@ WgResultCode H_FgState(const WgViewport* v, void* native, const void* native_opt
         WgFgState st = {};
         st.struct_size = sizeof(st);
         st.abi_version = WG_FG_ADAPTER_ABI_VERSION;
-        const WgResultCode res = r->core->get_state(r->fg_feature, ViewportId(v), &st, native);
-        if (f.forwarded || res != WG_OK) return res;
-        if (!native) return WG_E_MISSING_INPUT_PARAMETER;
-        if (!r->codec->write_state_for(st, native_options, native)) {
-            g_ctr.codec_failures.fetch_add(1);
-            return WG_E_INVALID_PARAMETER;
+        WgResultCode res = r->core->get_state(r->fg_feature, ViewportId(v), &st, native);
+        if (!f.forwarded && res == WG_OK) {
+            if (!native) {
+                res = WG_E_MISSING_INPUT_PARAMETER;
+            } else if (!r->codec->write_state_for(st, native_options, native)) {
+                g_ctr.codec_failures.fetch_add(1);
+                res = WG_E_INVALID_PARAMETER;
+            }
         }
-        return WG_OK;
+        NoteCall(*r, "get-state", Joined(Result(res) + ", " + Answered(f),
+                                         native && res == WG_OK ? r->codec->describe_state(native) : std::string()));
+        return res;
     } catch (...) {
         g_ctr.codec_failures.fetch_add(1);
         return f.forwarded ? f.fwd_result : WG_E_INVALID_PARAMETER;
@@ -989,6 +1047,7 @@ uint32_t FgAsiTransport::install(const FgAsiConfig& cfg) {
         g_last_fn_options = cfg.imports.fn_options;
         g_last_fn_state = cfg.imports.fn_state;
         ResetCounters();
+        ResetCallLog();
 
         // the core, attached to the genuine interface through the trampolines
         FgProxyConfig pc = cfg.core;
@@ -1054,7 +1113,9 @@ uint32_t FgAsiTransport::install(const FgAsiConfig& cfg) {
                                                  std::to_string(static_cast<unsigned>(budget.elapsed_ms())) + " ms");
         if (found.empty()) return finish(kFgNothingToPatch, "");
 
-        // route first, then redirect: a slot is live the moment it is written
+        // start-up route facts first (no slot is live yet), then route, then redirect: a slot is live the moment it is
+        // written
+        if (cfg.core_ready) cfg.core_ready(cfg.core_ready_ctx, core.get());
         impl_.reset(new Impl());
         impl_->core = core.get();
         impl_->codec = cfg.codec;

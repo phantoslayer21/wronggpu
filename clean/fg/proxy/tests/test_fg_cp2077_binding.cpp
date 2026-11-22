@@ -776,6 +776,31 @@ void TestStateCodec() {
     CHECK(!codec.write_state(st, nullptr));
 }
 
+// The FG call lines' words for the options and state structures (synthetic structures; read only, never written).
+void TestDescribeCodec() {
+    const FgSl214Layout l = FgCp2077Binding().layout;
+    FgSl214Codec codec(l);
+    WgViewport vp = MakeViewport(l, 7);
+    Raw120 o;
+    MakeOptions(o, l, kFgNatModeOn, 3, &vp);
+    Put<uint8_t>(&o, 112, 1);
+    CHECK(codec.describe_options(&o) == "mode 1 (on), frames 3, flags 0x8, ui recomposition 1");
+    MakeOptions(o, l, 9, 1, nullptr);
+    CHECK(codec.describe_options(&o) == "mode 9 (unknown), frames 1, flags 0x8, ui recomposition 0");
+    CHECK(codec.describe_options(&vp) == "options not in the chain");
+    CHECK(codec.describe_options(nullptr) == "options not in the chain");
+    Raw88 s;
+    MakeState(s, l, 4);
+    Put<uint32_t>(&s, 40, 0x8u);
+    Put<uint32_t>(&s, 52, 2u);
+    CHECK(codec.describe_state(&s) == "frames max 2, status 0x8, state v4");
+    MakeState(s, l, 1);
+    Put<uint32_t>(&s, 40, 0u);
+    CHECK(codec.describe_state(&s) == "status 0x0, state v1 (no frames max)");
+    CHECK(Get<uint32_t>(&s, 52) == 0xcdcdcdcdu);  // describing writes nothing
+    CHECK(codec.describe_state(nullptr) == "state not in the chain");
+}
+
 void TestTagsAndConstantsCodec() {
     const FgSl214Layout l = FgCp2077Binding().layout;
     FgSl214Codec codec(l);
@@ -1250,6 +1275,7 @@ int main() {
     TestChainWalk();
     TestOptionsCodec();
     TestStateCodec();
+    TestDescribeCodec();
     TestTagsAndConstantsCodec();
     GameModule game;
     CHECK(game.load(L"fg_mock_game.dll"));

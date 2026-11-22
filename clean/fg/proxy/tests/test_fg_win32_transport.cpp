@@ -705,6 +705,87 @@ void TestRoutingAndCoexistence(const GameModule& game, const GameModule& delay) 
     CHECK(SlotsAreGenuine(game));
 }
 
+// The start-up facts reach the core before any slot is live (core_ready), so the game's first FG support query is
+// answered with the route; each FG call kind is logged on its first call and when its result changes, never per call.
+struct ReadyProbe {
+    const GameModule* game = nullptr;
+    FgProxy* core = nullptr;
+    bool slots_genuine = false;
+    int calls = 0;
+};
+ReadyProbe g_ready;
+
+void OnCoreReady(void*, FgProxy* core) {
+    ++g_ready.calls;
+    g_ready.core = core;
+    g_ready.slots_genuine = g_ready.game && SlotsAreGenuine(*g_ready.game);
+    MakeTaken(core);
+}
+
+void TestCoreReadyAndCallLines(const GameModule& game) {
+    fgmock_reset();
+    SetMockResults();
+    MockCodec codec;
+    FgPresentOwners owners;
+    FgAsiTransport t;
+    g_log.clear();
+    g_ready = ReadyProbe{};
+    g_ready.game = &game;
+    FgAsiConfig cfg = MakeConfig(&codec, &owners, true);
+    cfg.core_ready = &OnCoreReady;
+    CHECK(t.install(cfg) == kFgInstalled);
+    CHECK(g_ready.calls == 1 && g_ready.core == t.core() && g_ready.slots_genuine);
+    CHECK(SlotsAreOurs(game) && t.core()->fg_taken());
+
+    // the very first FG support query: answered with the route, the genuine feature never asked
+    FgMockRecord* r = fgmock_record();
+    const uint32_t calls_is = r->calls[kMockIsSupported];
+    CHECK(game.is_supported(kFeatFg, nullptr) == WG_OK && r->calls[kMockIsSupported] == calls_is);
+    CHECK(game.is_supported(kFeatFg, nullptr) == WG_OK);
+    CHECK(LogCount("fg call: is-supported(FG) -> result 0, answered here (route: none)") == 1);
+    CHECK(game.is_supported(kFeatSr, nullptr) == r->result[kMockIsSupported]);  // not FG: no FG call line
+    CHECK(LogCount("fg call: is-supported") == 1);
+
+    // get-function: one line per name, naming what was handed out
+    void* fn = nullptr;
+    void* fn_state = nullptr;
+    CHECK(game.get_function(kFeatFg, FG_MOCK_FN_FG_OPTIONS, &fn) == WG_OK);
+    CHECK(game.get_function(kFeatFg, FG_MOCK_FN_FG_OPTIONS, &fn) == WG_OK);
+    CHECK(game.get_function(kFeatFg, FG_MOCK_FN_FG_STATE, &fn_state) == WG_OK);
+    CHECK(LogCount("our set-options") == 1 && LogCount("our get-state") == 1);
+
+    // options and state: a line on the first call and on a changed result only
+    const auto options_fn = reinterpret_cast<FgOptionsFn>(fn);
+    const auto state_fn = reinterpret_cast<FgStateFn>(fn_state);
+    WgViewport vp = {};
+    vp.id = 4;
+    MockOptions mo = {1, WG_FG_PRESET_B, 2};
+    for (int i = 0; i < 3; ++i) CHECK(options_fn(&vp, &mo) == WG_OK);
+    CHECK(LogCount("fg call: set-options -> result 0, answered here") == 1);
+    mo.preset = 7;  // not a preset: refused by the core
+    CHECK(options_fn(&vp, &mo) == WG_E_INVALID_PARAMETER);
+    CHECK(LogCount("fg call: set-options -> ") == 2);
+    MockState ms = {};
+    for (int i = 0; i < 3; ++i) CHECK(state_fn(&vp, &ms, nullptr) == WG_OK);
+    CHECK(LogCount("fg call: get-state -> result 0, answered here") == 1);
+
+    // the route goes away: the next support query is forwarded, and that change is logged
+    t.core()->set_runtime_facts(false, true);
+    CHECK(game.is_supported(kFeatFg, nullptr) == r->result[kMockIsSupported]);
+    CHECK(LogCount("fg call: is-supported(FG)") == 2);
+    CHECK(LogCount("forwarded to the genuine feature (route: model not validated)") == 1);
+    t.restore();
+    CHECK(SlotsAreGenuine(game));
+
+    // a refused install (nothing to patch) never calls core_ready
+    g_ready = ReadyProbe{};
+    FgAsiConfig none = MakeConfig(&codec, &owners, true);
+    none.core_ready = &OnCoreReady;
+    for (uint32_t i = 0; i < kFgRoleCount; ++i) none.imports.role_names[i] = "fgmock_not_exported";
+    FgAsiTransport t2;
+    CHECK(t2.install(none) != kFgInstalled && g_ready.calls == 0);
+}
+
 void TestThrowingCodecAndNulls(const GameModule& game) {
     fgmock_reset();
     SetMockResults();
@@ -1421,6 +1502,7 @@ int main(int argc, char** argv) {
         TestInstallOff(game, delay);
         TestGatesPatchNothing(game);
         TestRoutingAndCoexistence(game, delay);
+        TestCoreReadyAndCallLines(game);
         TestThrowingCodecAndNulls(game);
     }
     TestSwapChainIdentityAndRefcount();
