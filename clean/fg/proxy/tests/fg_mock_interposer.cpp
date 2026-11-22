@@ -10,6 +10,7 @@ namespace {
 
 FgMockRecord g_rec = {};
 IUnknown* g_factory = nullptr;
+bool g_loaded = false;  // what fgmock_set_loaded stored (fgmock_is_loaded returns it)
 
 int32_t Note(uint32_t fn, uint32_t feature, const void* a, const void* b, const void* c, const void* d, uint32_t n) {
     ++g_rec.calls[fn];
@@ -31,7 +32,10 @@ WgResultCode MockSrOptions(const WgViewport* vp, const void* native) {
 }  // namespace
 
 FG_MOCK_API FgMockRecord* fgmock_record(void) { return &g_rec; }
-FG_MOCK_API void fgmock_reset(void) { memset(&g_rec, 0, sizeof g_rec); }
+FG_MOCK_API void fgmock_reset(void) {
+    memset(&g_rec, 0, sizeof g_rec);
+    g_loaded = false;
+}
 FG_MOCK_API void* fgmock_feature_fn(uint32_t which) {
     switch (which) {
         case kMockFgOptions: return reinterpret_cast<void*>(&MockFgOptions);
@@ -74,6 +78,15 @@ FG_MOCK_API WgResultCode fgmock_evaluate(uint32_t feature, const WgFrameToken* t
 }
 FG_MOCK_API WgResultCode fgmock_free(uint32_t feature, const WgViewport* vp) {
     return Note(kMockFree, feature, vp, nullptr, nullptr, nullptr, 0);
+}
+FG_MOCK_API WgResultCode fgmock_is_loaded(uint32_t feature, bool* loaded) {
+    const int32_t r = Note(kMockIsLoaded, feature, loaded, nullptr, nullptr, nullptr, 0);
+    if (loaded) *loaded = g_loaded;
+    return r;
+}
+FG_MOCK_API WgResultCode fgmock_set_loaded(uint32_t feature, bool loaded) {
+    g_loaded = loaded;
+    return Note(kMockSetLoaded, feature, nullptr, nullptr, nullptr, nullptr, loaded ? 1u : 0u);
 }
 FG_MOCK_API WgResultCode fgmock_init(uint64_t value) {
     return Note(kMockInit, static_cast<uint32_t>(value), nullptr, nullptr, nullptr, nullptr, 0);

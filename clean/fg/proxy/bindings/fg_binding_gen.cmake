@@ -6,8 +6,8 @@
 #   wg_fg_generate_binding(<json> <out_header> <PREFIX>)
 # Needs CMake 3.19 (string(JSON)). Every missing or malformed value stops the configure step.
 
-set(WG_FG_ROLE_WORDS is-supported requirements get-function tag tag-for-frame constants evaluate free)
-set(WG_FG_ROLE_MACROS IS_SUPPORTED REQUIREMENTS GET_FUNCTION TAG TAG_FOR_FRAME CONSTANTS EVALUATE FREE)
+set(WG_FG_ROLE_WORDS is-supported requirements get-function tag tag-for-frame constants evaluate free is-loaded set-loaded)
+set(WG_FG_ROLE_MACROS IS_SUPPORTED REQUIREMENTS GET_FUNCTION TAG TAG_FOR_FRAME CONSTANTS EVALUATE FREE IS_LOADED SET_LOADED)
 set(WG_FG_INPUT_ROLES backbuffer motion depth hudless ui_alpha distortion no_warp)
 set(WG_FG_OPTIONAL_ROLES hudless ui_alpha distortion no_warp)
 

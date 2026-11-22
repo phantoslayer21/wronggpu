@@ -41,7 +41,7 @@
   "distortion": "may",
   "no_warp": "may"
  },
- "tag_lifetimes": [1],
+ "tag_lifetimes": [0, 1],
  "min_size": 100,
  "dynamic_supported": false
 }

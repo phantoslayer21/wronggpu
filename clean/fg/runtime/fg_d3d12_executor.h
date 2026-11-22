@@ -69,6 +69,9 @@ public:
         (void)slot;
         return false;
     }
+    virtual FgStatus ReserveRealSlotStatus(uint32_t* slot) {
+        return ReserveRealSlot(slot) ? FgStatus::Ok : FgStatus::WrongState;
+    }
 };
 
 enum class FgExecRefusal : uint32_t {
@@ -146,6 +149,11 @@ bool FgNet2SwizzleFast(const std::vector<uint8_t>& canonical, const std::vector<
 
 // The DXIL files (without ".dxil") an executor with these choices loads from FgD3d12ExecutorDesc::dxil_dir.
 std::vector<std::string> FgD3d12ExecutorKernelNames(bool enable_full, FgNet2Path net2);
+
+// Whether a game texture of this DXGI format is accepted as the motion-vector input: it must be readable as a colour
+// view with at least two channels (x and y are read from the first two; a four-channel format is fine). A single
+// channel, a depth format or an unknown format is not.
+bool FgD3d12MotionFormatAccepted(uint32_t dxgi_format);
 
 struct FgD3d12ExecutorDesc {
     std::string dxil_dir;                   // the folder holding <kernel>.dxil

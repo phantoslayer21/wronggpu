@@ -69,7 +69,9 @@ enum FgRole : uint32_t {
     kFgRoleConstants = 5,
     kFgRoleEvaluate = 6,
     kFgRoleFree = 7,
-    kFgRoleCount = 8
+    kFgRoleIsLoaded = 8,
+    kFgRoleSetLoaded = 9,
+    kFgRoleCount = 10
 };
 const char* FgRoleWord(uint32_t role);  // "is-supported", "requirements", ... (log text)
 
@@ -84,6 +86,8 @@ using FgConstantsFn = WgResultCode (*)(const WgConstants* c, const WgFrameToken*
 using FgEvaluateFn = WgResultCode (*)(uint32_t feature, const WgFrameToken* token, const WgHeader* const* inputs,
                                       uint32_t count, void* cmd);
 using FgFreeFn = WgResultCode (*)(uint32_t feature, const WgViewport* vp);
+using FgIsLoadedFn = WgResultCode (*)(uint32_t feature, bool* loaded);
+using FgSetLoadedFn = WgResultCode (*)(uint32_t feature, bool loaded);
 // The FG feature functions the game fetches through get-function: options in, state out (layouts: the codec's). The
 // state call also takes the game's options (may be null).
 using FgOptionsFn = WgResultCode (*)(const WgViewport* vp, const void* native_options);
@@ -166,6 +170,14 @@ using FgFactoryNoteFn = void (*)(void* ctx, FgProxy* core, IUnknown* factory);
 // written: route facts known at start-up (the adapter, the model) reach the core before any game call can (the core
 // may be told again later; it must not be kept: install() owns it).
 using FgCoreReadyFn = void (*)(void* ctx, FgProxy* core);
+// F9: called for every decoded tag whose texture is bound (never in unit tests that tag synthetic pointers: the
+// transport itself never dereferences a tag's resource or the command-list argument). `transient` is a tag whose
+// resource is valid only while the tagging call runs (WG_LIFE_ONLY_DURING_TAG); `cmd` is the call's command list
+// (may be null). The hook may replace tex->resource / state with a copy kept until the interval is presented and fill a
+// zero width / height / format from the resource. Returns false: the tag is dropped (treated as not given). *copied
+// says a copy was made. Must not throw. Null (the default): tags are used as decoded.
+using FgTagRetainFn = bool (*)(void* ctx, uint32_t buffer_type, bool transient, void* cmd, WgFgTexture* tex,
+                               bool* copied);
 
 struct FgAsiConfig {
     FgSettings settings;                // the player's per-game FG settings (fg_settings.h)
@@ -191,6 +203,8 @@ struct FgAsiConfig {
     void* factory_note_ctx = nullptr;
     FgCoreReadyFn core_ready = nullptr;
     void* core_ready_ctx = nullptr;
+    FgTagRetainFn tag_retain = nullptr;  // F9: the session host's D3D12 tag copy (null in synthetic unit tests)
+    void* tag_retain_ctx = nullptr;
 };
 
 // What the present bridge saw (the transport's swap-chain sink and present callback; the process's one transport).

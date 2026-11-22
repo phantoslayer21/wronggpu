@@ -94,8 +94,11 @@ it into a header in the build tree, so no interface name appears in the code.
   the presented count, the status bits WrongGPU can know (resolution below the minimum, a common constant left unset),
   no VRAM estimate, no fence, no dynamic support.
 - **Inputs.** Tags count only when the tag, its resource and the viewport carry the binding's GUIDs, the resource is a
-  2D texture and the tag stays valid until present (the lifetime the game uses; a tag valid only during the call would
-  need a copy, which this stage does not make). The game's tag call carries no frame token: every tag and the constants
+  2D texture and the tag stays valid until present or only during the call. A tag valid only during the call is kept
+  through the session host's tag hook (`FgAsiConfig::tag_retain`): it copies the texture on the tagging command list
+  into a texture the host holds and fills a zero size or format from the resource; without that hook (the unit tests'
+  synthetic pointers are never dereferenced) such a tag is not kept. A tag valid until evaluate is never admitted. The
+  game's tag call carries no frame token: every tag and the constants
   between two game presents belong to one interval, and the present bridge presents that interval's token.
 - **Present.** Each game present on a claimed chain hands the interval to the core first, with the buffer being presented
   as colour input, then the presenter (`FgAsiConfig::presenter`) presents; a retry after `DXGI_ERROR_WAS_STILL_DRAWING`
@@ -176,7 +179,8 @@ walk (any order, unknown structures skipped, cycles and over-long chains bounded
 the state per version, all read from raw bytes at the layout's offsets, tags and constants, and a whole game session
 through the stand-in interface with the binding's own GUIDs, buffer types and FG function names: support and lookups
 for 1000 answered while 0, 1001, 2, 3, 4 and an unknown id forward unchanged, the factory hook, the claimed chain, five
-frames (generation, a frame without motion vectors, inputs valid only during the tag call, a still-drawing retry), the
+frames (generation, a frame without motion vectors, inputs valid only during the tag call refused and then kept by the
+tag hook, a still-drawing retry), the
 presenter after the core, restore; plus `fg=off` and FG not taken. `fg_cp2077_asi_off` / `_on` run the shipped plugin in
 a process with the game's exe name. `fg_cp2077_mutant_1` .. `_8` break one rule each (a count of 0 accepted, a count
 above the maximum accepted, state written past its version, the chain walk ignoring the GUID, the lifetime gate ignored,

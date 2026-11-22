@@ -1284,6 +1284,23 @@ void TestBrokenKernels(Gpu& gpu, const std::string& dxil, const FgExecWeights& w
 
 }  // namespace
 
+// The motion input: x and y come from the first two channels, so a two-channel and a four-channel format are accepted;
+// one channel, a depth format and an unknown format are not.
+void TestMotionFormats() {
+    g_case = "motion-formats";
+    CHECK(FgD3d12MotionFormatAccepted(DXGI_FORMAT_R16G16_FLOAT));
+    CHECK(FgD3d12MotionFormatAccepted(DXGI_FORMAT_R16G16_TYPELESS));
+    CHECK(FgD3d12MotionFormatAccepted(DXGI_FORMAT_R32G32_FLOAT));
+    CHECK(FgD3d12MotionFormatAccepted(DXGI_FORMAT_R16G16B16A16_FLOAT));
+    CHECK(FgD3d12MotionFormatAccepted(DXGI_FORMAT_R16G16B16A16_TYPELESS));
+    CHECK(FgD3d12MotionFormatAccepted(DXGI_FORMAT_R32G32B32A32_FLOAT));
+    CHECK(!FgD3d12MotionFormatAccepted(DXGI_FORMAT_R16_FLOAT));
+    CHECK(!FgD3d12MotionFormatAccepted(DXGI_FORMAT_R32_FLOAT));
+    CHECK(!FgD3d12MotionFormatAccepted(DXGI_FORMAT_D32_FLOAT));
+    CHECK(!FgD3d12MotionFormatAccepted(DXGI_FORMAT_UNKNOWN));
+    CHECK(!FgD3d12MotionFormatAccepted(DXGI_FORMAT_BC1_UNORM));
+}
+
 int main(int argc, char** argv) {
     bool gpu = false;
     std::string dxil, scratch = ".", only;
@@ -1303,6 +1320,7 @@ int main(int argc, char** argv) {
     TestSchedule();
     TestNet2FastPlan();
     TestRefusals(weights);
+    TestMotionFormats();
     std::printf("cpu: %d checks, %d failed\n", g_checks, g_failed);
     if (gpu) {
         Gpu g;

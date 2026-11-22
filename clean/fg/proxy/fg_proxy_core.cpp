@@ -624,6 +624,10 @@ uint32_t FgProxy::assemble_locked(const WgFgPresentDesc& d, WgFgPacket* p, uint3
     p->swapchain_epoch = d.swapchain_epoch;
     p->render_rect = c.render_rect;
     p->output_rect = c.output_rect;
+    // a title that leaves the constants' rects at zero: the output is the colour input's rect, the render area the
+    // depth input's
+    if (p->output_rect.width == 0 || p->output_rect.height == 0) p->output_rect = p->color.rect;
+    if (p->render_rect.width == 0 || p->render_rect.height == 0) p->render_rect = p->depth.rect;
     p->jitter_x = c.jitter_x;
     p->jitter_y = c.jitter_y;
     p->motion_scale_x = c.motion_scale_x;
@@ -631,6 +635,10 @@ uint32_t FgProxy::assemble_locked(const WgFgPresentDesc& d, WgFgPacket* p, uint3
     std::memcpy(p->camera_current, c.camera_current, sizeof(p->camera_current));
     std::memcpy(p->camera_previous, c.camera_previous, sizeof(p->camera_previous));
     p->flags = c.flags & WG_FG_FLAGS_KNOWN;
+    // motion smaller than the output (a known, non-empty rect): render-resolution motion, whether or not the title said so
+    if (p->motion.rect.width != 0 && p->motion.rect.height != 0 &&
+        (p->motion.rect.width < p->output_rect.width || p->motion.rect.height < p->output_rect.height))
+        p->flags |= WG_FG_FLAG_MOTION_RENDER_RES;
     if (c.color_space != WG_FG_CS_SDR || options_.color_space != WG_FG_CS_SDR) p->flags |= WG_FG_FLAG_HDR;
     p->preset = effective_preset_;
     p->generated_count = effective_count_;

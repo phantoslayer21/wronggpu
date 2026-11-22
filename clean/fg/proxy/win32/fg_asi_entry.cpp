@@ -180,6 +180,8 @@ void Initialize() {
         cfg.factory_note_ctx = g_host;
         cfg.core_ready = &FgAsiSessionHost::CoreReady;  // route facts and the adapter probe before any slot is live
         cfg.core_ready_ctx = g_host;
+        cfg.tag_retain = &FgAsiSessionHost::RetainTag;  // transient D3D12 tags are copied by the host
+        cfg.tag_retain_ctx = g_host;
 #if defined(WRONGGPU_FG_DEV_QUALIFIED) && WRONGGPU_FG_DEV_QUALIFIED
         LogLine(nullptr, "fg: developer build: frame generation modes are taken without the release gate");
 #endif

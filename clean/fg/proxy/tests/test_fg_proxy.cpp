@@ -828,6 +828,49 @@ void TestMultiFrameAndPresets() {
 
 // ---- tag-to-packet assembly ------------------------------------------------------------------------------------------
 
+// A title that leaves the constants' rects at zero, and motion at render or output size.
+void TestPacketRectDefaults() {
+    struct Case {
+        bool zero_rects;
+        uint32_t motion_w, motion_h;
+        bool expect_flag;
+    };
+    const Case cases[] = {
+        {true, 800, 450, true},    // zero rects default from the colour / depth inputs; render-sized motion flagged
+        {true, 1600, 900, false},  // output-sized motion: no flag
+        {false, 1600, 900, false},
+        {true, 0, 0, false},       // motion of unknown size: nothing inferred
+    };
+    uint64_t token = 20;
+    for (const Case& cs : cases) {
+        FgProxyConfig cfg = QualifiedConfig();
+        Rig rig(cfg);
+        static int device = 0, queue = 0;
+        rig.proxy.set_device(&device, &queue);
+        WgFgOptions o = Options(4, WG_FG_PRESET_B);
+        CHECK(rig.proxy.set_options(kFeatFg, 1, &o, nullptr) == WG_OK);
+        CHECK(rig.proxy.claim_present(kChain, WG_FG_OWNER_NATIVE_ADAPTER) == WG_FG_REASON_NONE);
+        ++token;
+        WgFgTag tags[2] = {Tag(kNtMotion, Res(1), token), Tag(kNtDepth, Res(2), token)};
+        tags[0].texture.width = cs.motion_w;
+        tags[0].texture.height = cs.motion_h;
+        tags[0].texture.rect = {0, 0, cs.motion_w, cs.motion_h};
+        rig.proxy.tag(tags, 2, tags);
+        WgFgConstants c = Consts(token);
+        if (cs.zero_rects) {
+            c.render_rect = {0, 0, 0, 0};
+            c.output_rect = {0, 0, 0, 0};
+        }
+        rig.proxy.constants(&c, &c);
+        const WgFgPresentResult r = rig.present(token);
+        CHECK(r.status == WG_FG_PRESENT_GENERATE && rig.exec.submits == 1);
+        const WgFgPacket& p = rig.exec.last;
+        CHECK(p.output_rect.width == 1600 && p.output_rect.height == 900);  // the backbuffer's rect when zero
+        CHECK(p.render_rect.width == 800 && p.render_rect.height == 450);   // the depth input's rect when zero
+        CHECK(((p.flags & WG_FG_FLAG_MOTION_RENDER_RES) != 0) == cs.expect_flag);
+    }
+}
+
 void TestPacketAssembly() {
     FgProxyConfig cfg = QualifiedConfig();
     cfg.settings.presenter = FgPresenterChoice::Hwfq;
@@ -853,7 +896,8 @@ void TestPacketAssembly() {
     CHECK(p.render_rect.width == 800 && p.output_rect.width == 1600);
     CHECK(p.jitter_x == 0.125f && p.jitter_y == -0.375f && p.motion_scale_x == 2.0f && p.motion_scale_y == -3.0f);
     CHECK(p.camera_current[5] == 1.25f && p.camera_previous[3] == -1.5f);
-    CHECK(p.flags == (WG_FG_FLAG_RESET | WG_FG_FLAG_DEPTH_REVERSED | WG_FG_FLAG_HDR));
+    // the motion input here is render-sized (800 x 450 against the 1600 x 900 output): the flag is derived
+    CHECK(p.flags == (WG_FG_FLAG_RESET | WG_FG_FLAG_DEPTH_REVERSED | WG_FG_FLAG_HDR | WG_FG_FLAG_MOTION_RENDER_RES));
     CHECK(p.preset == WG_FG_PRESET_B && p.generated_count == 4 && p.generated_index == 0);
     const WgFgSessionDesc& s = rig.exec.session;
     CHECK(s.device == &device && s.queue == &queue && s.swapchain_id == kChain && s.window_id == 0x77);
@@ -1220,6 +1264,7 @@ int main() {
     TestSinglePresentOwner();
     TestMultiFrameAndPresets();
     TestPacketAssembly();
+    TestPacketRectDefaults();
     TestAssemblyFailures();
     TestEntries();
 #if defined(WG_FG_HAVE_RUNTIME_CONTRACT)

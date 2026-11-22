@@ -1245,9 +1245,11 @@ void TestFrameRefusedStillShown() {
     CHECK(rig.Shutdown());
 }
 
-// History cannot rotate while compute still reads its banks (HistoryBusy): the frame's generated slots get exact
-// game-frame copies (Priming), the next frame primes (shared work without a previous frame, copies again), and the
-// one after generates; every game frame is shown and the bank invariants hold throughout.
+// History cannot rotate while compute still reads its banks (HistoryBusy): no bank holds the frame, so there is
+// nothing to generate from and the frame is shown as the game frame alone (generation is not enabled for it: no shared
+// work, no generated slots, no copies); the next frame primes (shared work without a previous frame, again shown as
+// the game frame alone), and the one after generates. Every game frame is shown and the bank invariants hold
+// throughout.
 void TestHistoryBusyPrimingCopies() {
     Rig rig(3, WG_FG_PRESET_A);
     rig.desc.history_banks = 2;
@@ -1262,22 +1264,17 @@ void TestHistoryBusyPrimingCopies() {
     rig.Frames(3);
     const uint64_t b = busy.token;
     CHECK(rig.exec.count('S', b) == 0);  // nothing accepted into a bank: no shared work
-    const std::vector<ExecEvent> c0 = IndexEvents(rig.exec, b, 'C');
-    CHECK(c0.size() == 3 && rig.exec.count('G', b) == 0);
-    bool priming = true;
-    for (const ExecEvent& e : c0) priming = priming && e.reason == FgCopyReason::Priming;
-    CHECK(priming);
+    CHECK(rig.exec.count('C', b) == 0 && rig.exec.count('G', b) == 0 && rig.GeneratedShown(b) == 0);
     CHECK(rig.frames[b].session.history_real_only == FgFrameRealOnly::Prime);
     const std::vector<ExecEvent> s1 = IndexEvents(rig.exec, b + 1, 'S');
     CHECK(s1.size() == 1 && !s1.front().has_previous);
-    CHECK(rig.exec.count('C', b + 1) == 3 && rig.exec.count('G', b + 1) == 0);
-    CHECK(rig.exec.count('G', b + 2) == 3);
+    CHECK(rig.exec.count('C', b + 1) == 0 && rig.exec.count('G', b + 1) == 0 && rig.GeneratedShown(b + 1) == 0);
+    CHECK(rig.exec.count('G', b + 2) == 3 && rig.GeneratedShown(b + 2) == 3);
     const std::vector<ExecEvent> s2 = IndexEvents(rig.exec, b + 2, 'S');
     CHECK(s2.size() == 1 && s2.front().has_previous);
     bool shown = true;
     for (const FrameRecord& f : rig.frames) shown = shown && rig.RealShown(f.token) == 1;
     CHECK(shown);
-    CHECK(rig.GeneratedShown(b) == 3 && rig.GeneratedShown(b + 1) == 3);  // pacing kept with copies
     CHECK(rig.session.History()->primes() == 2);
     CHECK(rig.HistoryOk());
     CHECK(rig.Shutdown());

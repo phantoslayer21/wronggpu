@@ -159,6 +159,9 @@ DXGI_FORMAT view_format(DXGI_FORMAT f, uint32_t* channels) {
     return DXGI_FORMAT_UNKNOWN;
 }
 
+// The motion input reads x and y from the first two channels.
+constexpr uint32_t kMotionMinChannels = 2;
+
 // fg_exec_pack's format code of a slot format, -1 when unsupported.
 int pack_code(DXGI_FORMAT f, uint32_t* bpp) {
     switch (f) {
@@ -336,6 +339,12 @@ const char* FgNet2PathName(FgNet2Path p) {
         case FgNet2Path::Exact: return "exact";
     }
     return "?";
+}
+
+bool FgD3d12MotionFormatAccepted(uint32_t dxgi_format) {
+    uint32_t channels = 0;
+    view_format(static_cast<DXGI_FORMAT>(dxgi_format), &channels);
+    return channels >= kMotionMinChannels;
 }
 
 std::vector<std::string> FgD3d12ExecutorKernelNames(bool enable_full, FgNet2Path net2) {
@@ -551,13 +560,19 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         if (desc.dump_log) desc.dump_log(desc.dump_log_ctx, line.c_str());
     }
 
-    // Once per game frame: is this one dumped?
+    // Once per game frame: clear any previous dump arming; actual arming happens in RecordGeneratedIndex
+    // when a real generated frame is recorded so every dump is a matched (gen_N_i, game_N) pair.
     void ArmDump(uint64_t token, bool generates) {
         if (desc.dump_dir.empty() || (dump_seen && token == dump_seen_token)) return;
         dump_seen = true;
         dump_seen_token = token;
         dump_armed = false;
-        if (!generates || dump_frames >= desc.dump_max || desc.dump_every == 0) return;
+        (void)generates;
+    }
+
+    void ArmDumpOnGenerated(uint64_t token) {
+        if (desc.dump_dir.empty() || (dump_armed && dump_token == token)) return;
+        if (dump_frames >= desc.dump_max || desc.dump_every == 0) return;
         if (++dump_generating % desc.dump_every != 0) return;
         dump_armed = true;
         dump_token = token;
@@ -567,13 +582,14 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     // After the slot write (the slot in COPY_DEST): a copy of the slot into a readback buffer, back to COPY_DEST.
     void RecordDump(Rec& r, ID3D12Resource* res, const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& fp, uint32_t bpp,
                     char kind, uint64_t token, uint32_t index) {
-        if (!dump_armed || token != dump_token || (kind != 'g' && kind != 'r')) return;
+        if (!dump_armed || token != dump_token || (kind != 'g' && kind != 'r' && kind != 'm')) return;
         DumpRb d;
         d.w = fp.Footprint.Width;
         d.h = fp.Footprint.Height;
         d.format = static_cast<uint32_t>(fp.Footprint.Format);
         d.pitch = static_cast<uint32_t>(align(static_cast<uint64_t>(bpp) * d.w, 256));
         d.name = kind == 'r' ? "game_" + std::to_string(dump_frames) + ".ppm"
+               : kind == 'm' ? "menu_" + std::to_string(dump_frames) + "_" + std::to_string(index) + ".ppm"
                              : "gen_" + std::to_string(dump_frames) + "_" + std::to_string(index) + ".ppm";
         d.buf = Buffer(static_cast<uint64_t>(d.pitch) * d.h, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE,
                        D3D12_RESOURCE_STATE_COPY_DEST);
@@ -638,6 +654,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     FgExecResult Fail(FgExecRefusal r, const std::string& w) {
         refusal = r;
         why = w;
+        if (!desc.dump_dir.empty()) DumpLog(std::string("fg exec fail: ") + FgExecRefusalName(r) + ": " + w);
         return r == FgExecRefusal::DeviceLost ? FgExecResult::DeviceLost : FgExecResult::Refused;
     }
 
@@ -1854,9 +1871,9 @@ FgExecResult FgD3d12Executor::RecordSharedGameFrame(const FgSharedDispatchDesc& 
         rr = FgExecRefusal::InputFormat;
         w = "hudless colour: four channels";
     }
-    if (rr == FgExecRefusal::None && f.motion.channels != 2) {
+    if (rr == FgExecRefusal::None && f.motion.channels < kMotionMinChannels) {
         rr = FgExecRefusal::InputFormat;
-        w = "motion: two channels";
+        w = "motion: at least two channels";
     }
     if (rr == FgExecRefusal::None && (f.colour.region.ew != m.g.wo || f.colour.region.eh != m.g.ho)) {
         rr = FgExecRefusal::InputExtent;
@@ -1959,6 +1976,7 @@ FgExecResult FgD3d12Executor::RecordGeneratedIndex(const FgIndexDispatchDesc& d,
     if (d.preset != m.frame.preset) return m.Fail(FgExecRefusal::BadArgument, "preset differs from the game frame's");
     if (!m.target) return m.Fail(FgExecRefusal::SlotTargetMissing, "no presenter bound to the executor");
     m.FlushDumps(false);
+    m.ArmDumpOnGenerated(d.frame_token);
     std::vector<FgExecOp> ops;
     m.host.IndexOps(d.t, m.frame.hud, m.frame.ui4, false, &ops);
     Rec r;
@@ -2004,15 +2022,28 @@ FgExecResult FgD3d12Executor::RecordRealEndpoint(const FgRealDispatchDesc& d, Fg
     // output size the executor can read
     InputTex bb;
     bool from_bb = false;
-    if (d.real_only && m.target && !have_frame && d.game_colour.resource) {
-        std::string w;
-        from_bb = m.TakeInput(d.game_colour, &bb, &w, "game colour") == FgExecRefusal::None && bb.channels == 4 &&
+    std::string bb_w;
+    if (m.target && !have_frame && d.game_colour.resource) {
+        from_bb = m.TakeInput(d.game_colour, &bb, &bb_w, "game colour") == FgExecRefusal::None && bb.channels == 4 &&
                   bb.region.ew == m.g.wo && bb.region.eh == m.g.ho;
     }
     if (d.real_only && m.target && (have_frame || from_bb)) {
         // a real-only present shows a slot image: reserve one and copy the game frame into it (no slot free: the
         // presenter answers the present itself)
-        write = m.target->ReserveRealSlot(&slot);
+        FgStatus rs = m.target->ReserveRealSlotStatus(&slot);
+        if (rs == FgStatus::NoSlot) {
+            const ULONGLONG until = GetTickCount64() + 100;
+            while (rs == FgStatus::NoSlot && GetTickCount64() < until) {
+                Sleep(1);
+                rs = m.target->ReserveRealSlotStatus(&slot);
+            }
+        }
+        write = rs == FgStatus::Ok;
+        if (!write) m.why = std::string("ReserveRealSlot failed: ") + FgStatusName(rs);
+    } else if (d.real_only && m.target && !write) {
+        m.why = std::string("real-only skip: have_frame=") + (have_frame ? "1" : "0") +
+                " res=" + (d.game_colour.resource ? "1" : "0") +
+                " from_bb=" + (from_bb ? "1" : "0") + " (" + bb_w + ")";
     }
     if (write) {
         if (!have_frame && !from_bb)
@@ -2219,6 +2250,7 @@ public:
         return id;
     }
     bool ReserveRealSlot(uint32_t* slot) override { return p_->ReserveRealSlot(slot) == FgStatus::Ok; }
+    FgStatus ReserveRealSlotStatus(uint32_t* slot) override { return p_->ReserveRealSlot(slot); }
 
 private:
     P* p_;

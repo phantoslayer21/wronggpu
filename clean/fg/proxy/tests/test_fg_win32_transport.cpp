@@ -131,7 +131,8 @@ private:
 
 const char* const kRoleNames[kFgRoleCount] = {"fgmock_is_supported", "fgmock_requirements", "fgmock_get_function",
                                               "fgmock_tag",          "fgmock_tag_for_frame", "fgmock_constants",
-                                              "fgmock_evaluate",     "fgmock_free"};
+                                              "fgmock_evaluate",     "fgmock_free",
+                                              "fgmock_is_loaded",    "fgmock_set_loaded"};
 
 FgAsiConfig MakeConfig(MockCodec* codec, FgPresentOwners* owners, bool enabled) {
     FgAsiConfig c;
@@ -369,6 +370,8 @@ struct GameModule {
     WgResultCode (*constants)(const WgConstants*, const WgFrameToken*, const WgViewport*) = nullptr;
     WgResultCode (*evaluate)(uint32_t, const WgFrameToken*, const WgHeader* const*, uint32_t, void*) = nullptr;
     WgResultCode (*free_)(uint32_t, const WgViewport*) = nullptr;
+    WgResultCode (*is_loaded)(uint32_t, bool*) = nullptr;
+    WgResultCode (*set_loaded)(uint32_t, bool) = nullptr;
     WgResultCode (*init)(uint64_t) = nullptr;
     void (*slot_values)(void**) = nullptr;
 
@@ -387,10 +390,12 @@ struct GameModule {
         bind(constants, "game_constants");
         bind(evaluate, "game_evaluate");
         bind(free_, "game_free");
+        bind(is_loaded, "game_is_loaded");
+        bind(set_loaded, "game_set_loaded");
         bind(init, "game_init");
         bind(slot_values, "game_slot_values");
         return is_supported && requirements && get_function && tag && tag_for_frame && constants && evaluate && free_ &&
-               init && slot_values;
+               is_loaded && set_loaded && init && slot_values;
     }
     std::vector<void*> slots() const {
         std::vector<void*> v(FG_MOCK_GAME_SLOTS, nullptr);
@@ -431,8 +436,8 @@ void CheckEveryCallPassesThrough(const GameModule& g, uint32_t feature) {
     void* cmd = &rq;
     const WgHeader* inputs[1] = {&vp.h};
     void* out = nullptr;
-    const uint32_t before[kMockFnCount] = {r->calls[0], r->calls[1], r->calls[2], r->calls[3], r->calls[4], r->calls[5],
-                                           r->calls[6], r->calls[7], r->calls[8], r->calls[9], r->calls[10], r->calls[11]};
+    uint32_t before[kMockFnCount] = {};
+    for (uint32_t i = 0; i < kMockFnCount; ++i) before[i] = r->calls[i];
 
     CHECK(g.is_supported(feature, &adapter_info) == r->result[kMockIsSupported]);
     CHECK(r->last[kMockIsSupported].feature == feature && r->last[kMockIsSupported].a == &adapter_info);
@@ -453,6 +458,11 @@ void CheckEveryCallPassesThrough(const GameModule& g, uint32_t feature) {
           r->last[kMockEvaluate].b == inputs && r->last[kMockEvaluate].c == cmd && r->last[kMockEvaluate].count == 1);
     CHECK(g.free_(feature, &vp) == r->result[kMockFree]);
     CHECK(r->last[kMockFree].feature == feature && r->last[kMockFree].a == &vp);
+    bool loaded = false;
+    CHECK(g.set_loaded(feature, true) == r->result[kMockSetLoaded]);
+    CHECK(r->last[kMockSetLoaded].feature == feature && r->last[kMockSetLoaded].count == 1);
+    CHECK(g.is_loaded(feature, &loaded) == r->result[kMockIsLoaded] && loaded);
+    CHECK(r->last[kMockIsLoaded].feature == feature && r->last[kMockIsLoaded].a == &loaded);
     for (uint32_t i = 0; i < kFgRoleCount; ++i) CHECK(r->calls[i] == before[i] + 1);
 }
 
@@ -552,7 +562,7 @@ void TestRoutingAndCoexistence(const GameModule& game, const GameModule& delay) 
     FgAsiConfig cfg = MakeConfig(&codec, &owners, true);
     CHECK(t.install(cfg) == kFgInstalled);
     CHECK(t.active() && t.core() != nullptr && !t.interface_loaded_by_us());
-    // exactly the eight role slots of each importer: the static game's import table and the delay game's delay table
+    // exactly the role slots of each importer: the static game's import table and the delay game's delay table
     size_t in_game = 0, in_delay = 0, other = 0;
     for (const FgPatch& p : t.patches()) {
         if (p.module == game.h && !p.delay_load) ++in_game;
@@ -563,7 +573,7 @@ void TestRoutingAndCoexistence(const GameModule& game, const GameModule& delay) 
     CHECK(in_game == kFgRoleCount && in_delay == kFgRoleCount && other == 0);
     CHECK(SlotsAreOurs(game) && SlotsAreOurs(delay));
     const auto gv = game.slots();
-    CHECK(gv[8] == GenuineExport("fgmock_init"));  // not a hooked role: never redirected
+    CHECK(gv[kFgRoleCount] == GenuineExport("fgmock_init"));  // not a hooked role: never redirected
     for (uint32_t i = 0; i < kFgRoleCount; ++i) CHECK(t.genuine(i) == GenuineExport(kRoleNames[i]));
     // the delay game's slots held its own delay thunks before (not yet bound)
     for (uint32_t i = 0; i < kFgRoleCount; ++i) CHECK(delay_before[i] != GenuineExport(kRoleNames[i]));
@@ -643,6 +653,8 @@ void TestRoutingAndCoexistence(const GameModule& game, const GameModule& delay) 
     tags[1].resource = reinterpret_cast<WgResource*>(&tags[1]);
     tags[2].buffer_type = WG_BT_NORMALS;  // an RR input: not FG's
     tags[2].resource = reinterpret_cast<WgResource*>(&tags[2]);
+    // lasting tags: without the session host's hook (null here) a tag valid only during the call is not kept
+    for (WgTag& tg : tags) tg.lifetime = WG_LIFE_UNTIL_PRESENT;
     void* cmd = &rq;
     codec.token_value = 5;
     const uint32_t calls_tag = r->calls[kMockTag];
@@ -711,6 +723,7 @@ struct ReadyProbe {
     const GameModule* game = nullptr;
     FgProxy* core = nullptr;
     bool slots_genuine = false;
+    bool take = true;  // false: the hook finds nothing (a route that went away)
     int calls = 0;
 };
 ReadyProbe g_ready;
@@ -719,7 +732,7 @@ void OnCoreReady(void*, FgProxy* core) {
     ++g_ready.calls;
     g_ready.core = core;
     g_ready.slots_genuine = g_ready.game && SlotsAreGenuine(*g_ready.game);
-    MakeTaken(core);
+    if (g_ready.take) MakeTaken(core);
 }
 
 void TestCoreReadyAndCallLines(const GameModule& game) {
@@ -771,7 +784,9 @@ void TestCoreReadyAndCallLines(const GameModule& game) {
 
     // the route goes away: the next support query is forwarded, and that change is logged
     t.core()->set_runtime_facts(false, true);
+    g_ready.take = false;
     CHECK(game.is_supported(kFeatFg, nullptr) == r->result[kMockIsSupported]);
+    CHECK(g_ready.calls == 2);  // not taken: the support query asked the hook again
     CHECK(LogCount("fg call: is-supported(FG)") == 2);
     CHECK(LogCount("forwarded to the genuine feature (route: model not validated)") == 1);
     t.restore();
@@ -784,6 +799,214 @@ void TestCoreReadyAndCallLines(const GameModule& game) {
     for (uint32_t i = 0; i < kFgRoleCount; ++i) none.imports.role_names[i] = "fgmock_not_exported";
     FgAsiTransport t2;
     CHECK(t2.install(none) != kFgInstalled && g_ready.calls == 0);
+}
+
+// is-loaded / set-loaded: for the FG feature while FG is taken the transport answers (the default is loaded; the last
+// set value is kept for the install); every other feature, and FG while not taken, reaches the genuine interface.
+void TestIsLoadedSetLoaded(const GameModule& game) {
+    fgmock_reset();
+    SetMockResults();
+    MockCodec codec;
+    FgPresentOwners owners;
+    FgAsiTransport t;
+    CHECK(t.install(MakeConfig(&codec, &owners, true)) == kFgInstalled);
+    FgMockRecord* r = fgmock_record();
+    bool loaded = true;
+    // not taken: both calls reach the stand-in with the game's arguments
+    CHECK(game.set_loaded(kFeatFg, false) == r->result[kMockSetLoaded] && r->calls[kMockSetLoaded] == 1);
+    CHECK(r->last[kMockSetLoaded].feature == kFeatFg && r->last[kMockSetLoaded].count == 0);
+    CHECK(game.is_loaded(kFeatFg, &loaded) == r->result[kMockIsLoaded] && r->calls[kMockIsLoaded] == 1 && !loaded);
+    CHECK(r->last[kMockIsLoaded].feature == kFeatFg && r->last[kMockIsLoaded].a == &loaded);
+    CHECK(t.stats().calls[kFgRoleIsLoaded] == 1 && t.stats().calls[kFgRoleSetLoaded] == 1 &&
+          t.stats().forwarded[kFgRoleIsLoaded] == 1 && t.stats().forwarded[kFgRoleSetLoaded] == 1);
+
+    // taken: FG is answered here, the stand-in is not called
+    MakeTaken(t.core());
+    const uint64_t answered = t.stats().fg_answered;
+    loaded = false;
+    CHECK(game.is_loaded(kFeatFg, &loaded) == WG_OK && loaded);  // nothing set through this install: loaded
+    CHECK(game.set_loaded(kFeatFg, false) == WG_OK);
+    CHECK(game.is_loaded(kFeatFg, &loaded) == WG_OK && !loaded);
+    CHECK(game.set_loaded(kFeatFg, true) == WG_OK);
+    CHECK(game.is_loaded(kFeatFg, &loaded) == WG_OK && loaded);
+    CHECK(game.is_loaded(kFeatFg, nullptr) == WG_E_MISSING_INPUT_PARAMETER);
+    CHECK(r->calls[kMockIsLoaded] == 1 && r->calls[kMockSetLoaded] == 1);
+    CHECK(t.stats().fg_answered == answered + 6);
+
+    // another feature while FG is taken: unchanged
+    CHECK(game.set_loaded(kFeatSr, true) == r->result[kMockSetLoaded] && r->calls[kMockSetLoaded] == 2);
+    CHECK(r->last[kMockSetLoaded].feature == kFeatSr && r->last[kMockSetLoaded].count == 1);
+    loaded = false;
+    CHECK(game.is_loaded(kFeatSr, &loaded) == r->result[kMockIsLoaded] && r->calls[kMockIsLoaded] == 2 && loaded);
+    CHECK(r->last[kMockIsLoaded].feature == kFeatSr);
+
+    // after restore the late handlers forward again
+    t.restore();
+    CHECK(SlotsAreGenuine(game));
+    const auto late = reinterpret_cast<FgIsLoadedFn>(FgAsiTransport::handler_for(kFgRoleIsLoaded));
+    CHECK(late(kFeatFg, &loaded) == r->result[kMockIsLoaded] && r->calls[kMockIsLoaded] == 3);
+}
+
+// The start-up probe can fail inside the loader lock (the factory cannot be created yet): the transport asks the core's
+// ready hook again at the first FG call of each kind (support, is-loaded, set-loaded) until FG is taken, and never for
+// another feature.
+struct LazyProbe {
+    int calls = 0;
+    int take_on = 2;  // the call (1-based) that finds the adapter
+};
+LazyProbe g_lazy;
+
+void OnLazyReady(void*, FgProxy* core) {
+    ++g_lazy.calls;
+    if (g_lazy.calls >= g_lazy.take_on) MakeTaken(core);
+}
+
+void TestLazyCoreReady(const GameModule& game) {
+    enum Kind { kSupport, kIsLoaded, kSetLoaded };
+    for (Kind kind : {kSupport, kIsLoaded, kSetLoaded}) {
+        fgmock_reset();
+        SetMockResults();
+        MockCodec codec;
+        FgPresentOwners owners;
+        FgAsiTransport t;
+        g_lazy = LazyProbe{};
+        FgAsiConfig cfg = MakeConfig(&codec, &owners, true);
+        cfg.core_ready = &OnLazyReady;
+        CHECK(t.install(cfg) == kFgInstalled);
+        CHECK(g_lazy.calls == 1 && !t.core()->fg_taken());  // the install-time probe found nothing
+        FgMockRecord* r = fgmock_record();
+        bool loaded = false;
+        // not FG: never asks the hook
+        CHECK(game.is_supported(kFeatSr, nullptr) == r->result[kMockIsSupported]);
+        CHECK(game.is_loaded(kFeatSr, &loaded) == r->result[kMockIsLoaded]);
+        CHECK(game.set_loaded(kFeatSr, true) == r->result[kMockSetLoaded]);
+        CHECK(g_lazy.calls == 1 && !t.core()->fg_taken());
+        // the first FG call of this kind finds the adapter and is answered here
+        if (kind == kSupport) CHECK(game.is_supported(kFeatFg, nullptr) == WG_OK);
+        else if (kind == kIsLoaded) CHECK(game.is_loaded(kFeatFg, &loaded) == WG_OK && loaded);
+        else CHECK(game.set_loaded(kFeatFg, true) == WG_OK);
+        CHECK(g_lazy.calls == 2 && t.core()->fg_taken());
+        CHECK(r->calls[kMockIsSupported] == 1 && r->calls[kMockIsLoaded] == 1 && r->calls[kMockSetLoaded] == 1);
+        // taken: the hook is not asked again
+        CHECK(game.is_supported(kFeatFg, nullptr) == WG_OK && game.is_loaded(kFeatFg, &loaded) == WG_OK);
+        CHECK(game.set_loaded(kFeatFg, true) == WG_OK && g_lazy.calls == 2);
+        t.restore();
+    }
+    {  // an adapter that never turns up: every FG call asks once and is forwarded
+        fgmock_reset();
+        SetMockResults();
+        MockCodec codec;
+        FgPresentOwners owners;
+        FgAsiTransport t;
+        g_lazy = LazyProbe{};
+        g_lazy.take_on = 1000;
+        FgAsiConfig cfg = MakeConfig(&codec, &owners, true);
+        cfg.core_ready = &OnLazyReady;
+        CHECK(t.install(cfg) == kFgInstalled);
+        FgMockRecord* r = fgmock_record();
+        bool loaded = false;
+        CHECK(game.is_supported(kFeatFg, nullptr) == r->result[kMockIsSupported] && g_lazy.calls == 2);
+        CHECK(game.is_loaded(kFeatFg, &loaded) == r->result[kMockIsLoaded] && g_lazy.calls == 3);
+        CHECK(game.set_loaded(kFeatFg, true) == r->result[kMockSetLoaded] && g_lazy.calls == 4);
+        CHECK(!t.core()->fg_taken() && r->calls[kMockIsSupported] == 1 && r->calls[kMockIsLoaded] == 1 &&
+              r->calls[kMockSetLoaded] == 1);
+        t.restore();
+    }
+}
+
+// Another plugin already patched the same import slot: the transport chains to it (calls it for everything it does
+// not answer) instead of bypassing it, and restore puts that earlier patch back.
+void** FindImportSlot(HMODULE m, const char* import_name) {
+    const BYTE* base = reinterpret_cast<const BYTE*>(m);
+    const IMAGE_DOS_HEADER* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    const IMAGE_NT_HEADERS* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    const IMAGE_DATA_DIRECTORY& dd = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!dd.VirtualAddress) return nullptr;
+    for (const IMAGE_IMPORT_DESCRIPTOR* d = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(base + dd.VirtualAddress);
+         d->Name; ++d) {
+        if (_stricmp(reinterpret_cast<const char*>(base + d->Name), kLeaf) != 0) continue;
+        const IMAGE_THUNK_DATA* names = reinterpret_cast<const IMAGE_THUNK_DATA*>(
+            base + (d->OriginalFirstThunk ? d->OriginalFirstThunk : d->FirstThunk));
+        IMAGE_THUNK_DATA* slots = reinterpret_cast<IMAGE_THUNK_DATA*>(const_cast<BYTE*>(base) + d->FirstThunk);
+        for (; names->u1.AddressOfData; ++names, ++slots) {
+            if (IMAGE_SNAP_BY_ORDINAL(names->u1.Ordinal)) continue;
+            const IMAGE_IMPORT_BY_NAME* ibn =
+                reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(base + names->u1.AddressOfData);
+            if (std::strcmp(reinterpret_cast<const char*>(ibn->Name), import_name) == 0)
+                return reinterpret_cast<void**>(&slots->u1.Function);
+        }
+    }
+    return nullptr;
+}
+
+bool WriteSlot(void** slot, void* value) {
+    DWORD old = 0;
+    if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) return false;
+    *slot = value;
+    DWORD ignored = 0;
+    VirtualProtect(slot, sizeof(void*), old, &ignored);
+    return true;
+}
+
+int g_chain_support_calls = 0, g_chain_loaded_calls = 0;
+uint32_t g_chain_feature = 0;
+WgResultCode ChainIsSupported(uint32_t f, const WgAdapterInfo*) {
+    ++g_chain_support_calls;
+    g_chain_feature = f;
+    return 777;
+}
+WgResultCode ChainIsLoaded(uint32_t f, bool* loaded) {
+    ++g_chain_loaded_calls;
+    g_chain_feature = f;
+    if (loaded) *loaded = true;
+    return 778;
+}
+
+void TestIatChaining(const GameModule& game) {
+    fgmock_reset();
+    SetMockResults();
+    g_chain_support_calls = 0;
+    g_chain_loaded_calls = 0;
+    void** slot_support = FindImportSlot(game.h, "fgmock_is_supported");
+    void** slot_loaded = FindImportSlot(game.h, "fgmock_is_loaded");
+    CHECK(slot_support && slot_loaded);
+    if (!slot_support || !slot_loaded) return;
+    void* const genuine_support = *slot_support;
+    void* const genuine_loaded = *slot_loaded;
+    void* const plugin_support = reinterpret_cast<void*>(&ChainIsSupported);
+    void* const plugin_loaded = reinterpret_cast<void*>(&ChainIsLoaded);
+    CHECK(WriteSlot(slot_support, plugin_support) && WriteSlot(slot_loaded, plugin_loaded));
+
+    MockCodec codec;
+    FgPresentOwners owners;
+    FgAsiTransport t;
+    CHECK(t.install(MakeConfig(&codec, &owners, true)) == kFgInstalled);
+    FgMockRecord* r = fgmock_record();
+    // the two slots chain to the earlier patch; every other role to the genuine export
+    CHECK(*slot_support == FgAsiTransport::handler_for(kFgRoleIsSupported) &&
+          *slot_loaded == FgAsiTransport::handler_for(kFgRoleIsLoaded));
+    CHECK(t.genuine(kFgRoleIsSupported) == plugin_support && t.genuine(kFgRoleIsLoaded) == plugin_loaded);
+    for (uint32_t i = 0; i < kFgRoleCount; ++i)
+        if (i != kFgRoleIsSupported && i != kFgRoleIsLoaded) CHECK(t.genuine(i) == GenuineExport(kRoleNames[i]));
+
+    // not taken: the earlier plugin's functions answer; the stand-in's own are never reached for those roles
+    bool loaded = false;
+    CHECK(game.is_supported(kFeatSr, nullptr) == 777 && g_chain_support_calls == 1 && g_chain_feature == kFeatSr);
+    CHECK(game.is_supported(kFeatFg, nullptr) == 777 && g_chain_support_calls == 2);
+    CHECK(game.is_loaded(kFeatRr, &loaded) == 778 && loaded && g_chain_loaded_calls == 1 && g_chain_feature == kFeatRr);
+    CHECK(r->calls[kMockIsSupported] == 0 && r->calls[kMockIsLoaded] == 0);
+    CHECK(game.free_(kFeatSr, nullptr) == r->result[kMockFree] && r->calls[kMockFree] == 1);  // an unchained role
+    // taken: FG is answered by the core without the plugin; another feature still chains
+    MakeTaken(t.core());
+    CHECK(game.is_supported(kFeatFg, nullptr) == WG_OK && g_chain_support_calls == 2);
+    CHECK(game.is_loaded(kFeatFg, &loaded) == WG_OK && g_chain_loaded_calls == 1);
+    CHECK(game.is_supported(kFeatSr, nullptr) == 777 && g_chain_support_calls == 3);
+
+    // restore: the slots hold the earlier plugin's functions again, not the stand-in's exports
+    t.restore();
+    CHECK(*slot_support == plugin_support && *slot_loaded == plugin_loaded);
+    CHECK(WriteSlot(slot_support, genuine_support) && WriteSlot(slot_loaded, genuine_loaded));
+    CHECK(SlotsAreGenuine(game));
 }
 
 void TestThrowingCodecAndNulls(const GameModule& game) {
@@ -1478,6 +1701,11 @@ int RunDelayExe() {
     CHECK(fgmock_tag(&vp, nullptr, 0, nullptr) == r->result[kMockTag]);
     CHECK(fgmock_tag_for_frame(nullptr, &vp, nullptr, 0, nullptr) == r->result[kMockTagForFrame]);
     CHECK(fgmock_constants(nullptr, nullptr, &vp) == r->result[kMockConstants]);
+    bool loaded = false;
+    CHECK(fgmock_is_loaded(kFeatFg, &loaded) == WG_OK && loaded && r->calls[kMockIsLoaded] == 0);
+    CHECK(fgmock_set_loaded(kFeatFg, false) == WG_OK && fgmock_is_loaded(kFeatFg, &loaded) == WG_OK && !loaded);
+    CHECK(fgmock_set_loaded(kFeatSr, true) == r->result[kMockSetLoaded] && r->calls[kMockSetLoaded] == 1);
+    CHECK(fgmock_is_loaded(kFeatSr, &loaded) == r->result[kMockIsLoaded] && r->calls[kMockIsLoaded] == 1);
     t.restore();
     CHECK(fgmock_is_supported(kFeatFg, nullptr) == r->result[kMockIsSupported]);  // the delay helper binds it now
     std::printf("%d checks, %d failed\n", g_checks, g_failed);
@@ -1503,6 +1731,9 @@ int main(int argc, char** argv) {
         TestGatesPatchNothing(game);
         TestRoutingAndCoexistence(game, delay);
         TestCoreReadyAndCallLines(game);
+        TestIsLoadedSetLoaded(game);
+        TestLazyCoreReady(game);
+        TestIatChaining(game);
         TestThrowingCodecAndNulls(game);
     }
     TestSwapChainIdentityAndRefcount();

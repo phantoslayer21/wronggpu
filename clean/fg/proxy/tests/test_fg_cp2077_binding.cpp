@@ -53,7 +53,8 @@ constexpr uint32_t kAmdPciVendor = 4098;
 const char* const kLeaf = "fg_mock_interposer.dll";
 const char* const kMockRoleNames[kFgRoleCount] = {"fgmock_is_supported", "fgmock_requirements", "fgmock_get_function",
                                                   "fgmock_tag",          "fgmock_tag_for_frame", "fgmock_constants",
-                                                  "fgmock_evaluate",     "fgmock_free"};
+                                                  "fgmock_evaluate",     "fgmock_free",
+                                                  "fgmock_is_loaded",    "fgmock_set_loaded"};
 const char* const kMockFactory = "fgmock_create_factory2";
 
 std::vector<std::string> g_log;
@@ -407,6 +408,8 @@ struct GameModule {
     WgResultCode (*tag)(const WgViewport*, const WgTag*, uint32_t, void*) = nullptr;
     WgResultCode (*constants)(const WgConstants*, const WgFrameToken*, const WgViewport*) = nullptr;
     WgResultCode (*evaluate)(uint32_t, const WgFrameToken*, const WgHeader* const*, uint32_t, void*) = nullptr;
+    WgResultCode (*is_loaded)(uint32_t, bool*) = nullptr;
+    WgResultCode (*set_loaded)(uint32_t, bool) = nullptr;
     HRESULT (*create_factory2)(UINT, REFIID, void**) = nullptr;
     void (*slot_values)(void**) = nullptr;
 
@@ -423,10 +426,12 @@ struct GameModule {
         bind(tag, "game_tag");
         bind(constants, "game_constants");
         bind(evaluate, "game_evaluate");
+        bind(is_loaded, "game_is_loaded");
+        bind(set_loaded, "game_set_loaded");
         bind(create_factory2, "game_create_factory2");
         bind(slot_values, "game_slot_values");
-        return is_supported && requirements && get_function && tag && constants && evaluate && create_factory2 &&
-               slot_values;
+        return is_supported && requirements && get_function && tag && constants && evaluate && is_loaded && set_loaded &&
+               create_factory2 && slot_values;
     }
     std::vector<void*> slots() const {
         std::vector<void*> v(FG_MOCK_GAME_SLOTS, nullptr);
@@ -441,7 +446,7 @@ bool SlotsAreGenuine(const GameModule& g) {
     const auto v = g.slots();
     for (uint32_t i = 0; i < kFgRoleCount; ++i)
         if (v[i] != GenuineExport(kMockRoleNames[i])) return false;
-    return v[9] == GenuineExport(kMockFactory);
+    return v[FG_MOCK_GAME_SLOTS - 1] == GenuineExport(kMockFactory);
 }
 
 void SetMockResults() {
@@ -462,9 +467,32 @@ void MakeTaken(FgProxy* core) {
     core->set_runtime_facts(true, true);
 }
 
+// A stand-in for the session host's tag hook: it never touches the resource pointers (they are synthetic, not COM
+// objects). A transient tag is kept (replaced by a marker standing for the host's copy) or refused, as set.
+struct RetainFake {
+    bool keep = false;
+    int calls = 0, transient_calls = 0, kept = 0;
+    void* last_cmd = nullptr;
+    int copy[2] = {};  // the "copies" of buffer types 0 (depth) and 1 (motion)
+};
+bool FakeRetain(void* ctx, uint32_t buffer_type, bool transient, void* cmd, WgFgTexture* tex, bool* copied) {
+    RetainFake* f = static_cast<RetainFake*>(ctx);
+    ++f->calls;
+    if (copied) *copied = false;
+    if (!transient) return true;  // a lasting texture is used as decoded
+    ++f->transient_calls;
+    f->last_cmd = cmd;
+    if (!f->keep || buffer_type > 1) return false;
+    tex->resource = &f->copy[buffer_type];
+    ++f->kept;
+    if (copied) *copied = true;
+    return true;
+}
+
 // The Cyberpunk 2077 binding with the stand-in's file name, version and export names standing in for the game's
 // interface module; everything else (feature id, function names, GUIDs, buffer types, UI range) is the binding's.
-FgAsiConfig MakeCpConfig(FgSl214Codec* codec, FgPresentOwners* owners, bool enabled, IFgPresentCallback* presenter) {
+FgAsiConfig MakeCpConfig(FgSl214Codec* codec, FgPresentOwners* owners, bool enabled, IFgPresentCallback* presenter,
+                         FgTagRetainFn retain = nullptr, void* retain_ctx = nullptr) {
     const FgTitleBinding b = FgCp2077Binding();
     FgAsiConfig c;
     c.settings.enabled = enabled;
@@ -482,6 +510,8 @@ FgAsiConfig MakeCpConfig(FgSl214Codec* codec, FgPresentOwners* owners, bool enab
     c.owners = owners;
     c.log = &CollectLog;
     c.presenter = presenter;
+    c.tag_retain = retain;
+    c.tag_retain_ctx = retain_ctx;
     return c;
 }
 
@@ -513,7 +543,10 @@ void TestBindingData() {
     CHECK(l.options_version == 5 && l.options_size == 120 && sizeof(WgNatFgOptions) == 120);
     CHECK(l.state_version == 4 && l.state_size == 88 && sizeof(WgNatFgState) == 88);
     CHECK(l.min_size == 100 && !l.dynamic_supported && l.constants_min_version == 1);
-    CHECK(l.tag_lifetime_mask == (1u << WG_LIFE_UNTIL_PRESENT));
+    // lifetimes admitted: valid only during the tag call (the host copies those) and until present; never "until
+    // evaluate" (FG is never evaluated)
+    CHECK(l.tag_lifetime_mask == ((1u << WG_LIFE_ONLY_DURING_TAG) | (1u << WG_LIFE_UNTIL_PRESENT)));
+    CHECK(!(l.tag_lifetime_mask & (1u << WG_LIFE_UNTIL_EVALUATE)));
     for (uint32_t i = 0; i < WG_FG_OPTIONAL_COUNT; ++i) CHECK(l.optional_decl[i] == WG_FG_DECL_MAY);
     for (uint32_t r = 0; r < WG_FG_ROLE_COUNT; ++r) CHECK(l.native_type[r] == b.core.native_type[r]);
     CHECK(!FgGuidZero(l.requirements_guid));
@@ -833,7 +866,8 @@ void TestTagsAndConstantsCodec() {
     CHECK(out[2].native_type == 2 && out[2].texture.resource == &hud && out[2].texture.rect.x == 8 &&
           out[2].texture.rect.y == 4 && out[2].texture.rect.width == 96 && out[2].texture.rect.height == 48);
     CHECK(out[3].native_type == WG_FG_NATIVE_TYPE_UNBOUND);  // a super resolution input: not FG's
-    CHECK(out[4].native_type == WG_FG_NATIVE_TYPE_UNBOUND);  // valid only during the call: would need a copy
+    CHECK(out[4].native_type == 0 && out[4].texture.resource == &depth);  // valid only during the call: decoded; the
+                                                                          // host's hook copies it (the transport)
     CHECK(out[5].native_type == WG_FG_NATIVE_TYPE_UNBOUND);  // valid until evaluate: FG is never evaluated
     CHECK(out[6].native_type == WG_FG_NATIVE_TYPE_UNBOUND);  // not a 2D texture
     CHECK(out[7].native_type == WG_FG_NATIVE_TYPE_UNBOUND);  // the resource's GUID is not the binding's
@@ -841,7 +875,7 @@ void TestTagsAndConstantsCodec() {
     for (int i = 0; i < 9; ++i) CHECK(out[i].struct_size == sizeof(WgFgTag));
     CHECK(codec.tags(nullptr, &vp, &wrong_tag, 1, out) && out[0].native_type == WG_FG_NATIVE_TYPE_UNBOUND);
     const FgSl214Counters k = codec.counters();
-    CHECK(k.tags_seen == 10 && k.tags_bound == 3 && k.tags_lifetime_refused == 2 && k.tags_not_texture == 1 &&
+    CHECK(k.tags_seen == 10 && k.tags_bound == 4 && k.tags_lifetime_refused == 1 && k.tags_not_texture == 1 &&
           k.tags_wrong_guid == 2);
     WgViewport wrong_vp = vp;
     wrong_vp.h.type = SyntheticGuid(8);
@@ -944,7 +978,8 @@ void TestCp2077Session(const GameModule& game) {
     FgMockRecord* r = fgmock_record();
     FgAsiTransport t;
     presenter.transport = &t;
-    CHECK(t.install(MakeCpConfig(&codec, &owners, true, &presenter)) == kFgInstalled);
+    RetainFake retain;
+    CHECK(t.install(MakeCpConfig(&codec, &owners, true, &presenter, &FakeRetain, &retain)) == kFgInstalled);
     size_t factory_slots = 0;
     for (const FgPatch& p : t.patches())
         if (p.role == kFgSlotCreateFactory2 && p.module == game.h) {
@@ -952,7 +987,7 @@ void TestCp2077Session(const GameModule& game) {
             CHECK(p.handler == FgAsiTransport::handler_for(kFgSlotCreateFactory2) && !p.delay_load);
         }
     CHECK(factory_slots == 1);
-    CHECK(game.slots()[9] == FgAsiTransport::handler_for(kFgSlotCreateFactory2));
+    CHECK(game.slots()[FG_MOCK_GAME_SLOTS - 1] == FgAsiTransport::handler_for(kFgSlotCreateFactory2));
     CHECK(t.genuine(kFgSlotCreateFactory2) == GenuineExport(kMockFactory));
     CHECK(FgRoleWord(kFgSlotCreateFactory2) == std::string("create-factory"));
 
@@ -981,6 +1016,15 @@ void TestCp2077Session(const GameModule& game) {
         CHECK(r->last[kMockIsSupported].feature == f && r->last[kMockIsSupported].a == &adapter);
     }
     CHECK(r->calls[kMockIsSupported] == calls + 6);
+    // is-loaded / set-loaded: 1000 answered here (loaded unless the game said otherwise), every other feature genuine
+    bool loaded = false;
+    calls = r->calls[kMockIsLoaded];
+    CHECK(game.is_loaded(kFeatFg, &loaded) == WG_OK && loaded && r->calls[kMockIsLoaded] == calls);
+    CHECK(game.set_loaded(kFeatFg, false) == WG_OK && game.is_loaded(kFeatFg, &loaded) == WG_OK && !loaded);
+    CHECK(game.set_loaded(kFeatFg, true) == WG_OK && game.is_loaded(kFeatFg, &loaded) == WG_OK && loaded);
+    CHECK(r->calls[kMockIsLoaded] == calls && r->calls[kMockSetLoaded] == 0);
+    CHECK(game.is_loaded(kFeatSr, &loaded) == r->result[kMockIsLoaded] && r->calls[kMockIsLoaded] == calls + 1);
+    CHECK(game.set_loaded(kFeatRr, true) == r->result[kMockSetLoaded] && r->calls[kMockSetLoaded] == 1);
     // functions: the binding's two FG names give WrongGPU's; every other feature's lookup is the genuine one
     void* fn_opt = nullptr;
     void* fn_st = nullptr;
@@ -1090,7 +1134,7 @@ void TestCp2077Session(const GameModule& game) {
     CHECK((ex.last.optional_present & 1u) && ex.last.optional[0].resource == &f1r.hud);
     CHECK(ex.last.frame_token == 1 && ex.last.viewport_id == 7 && ex.last.generated_count == 3 && ex.last.generated_index == 0);
     CHECK(ex.last.jitter_x == c1.jitter[0] && ex.last.motion_scale_y == -0.5f);
-    CHECK(ex.last.flags == (WG_FG_FLAG_RESET | WG_FG_FLAG_DEPTH_REVERSED));
+    CHECK(ex.last.flags == (WG_FG_FLAG_RESET | WG_FG_FLAG_DEPTH_REVERSED | WG_FG_FLAG_MOTION_RENDER_RES));
     CHECK(ex.last.adapter_luid.low == 77 && ex.session.viewport_id == 7 && ex.session.swapchain_id == w->Id());
     ps = t.present_stats();
     CHECK(ps.submits == 1 && ps.generate == 1 && ps.last.status == WG_FG_PRESENT_GENERATE);
@@ -1115,7 +1159,7 @@ void TestCp2077Session(const GameModule& game) {
     CHECK(ex.submits == 2 && ex.last.frame_token == 2 && ex.last.color.resource == static_cast<IUnknown*>(&inner->buffers[2]));
     CHECK(ex.last.motion.resource == &f2r.motion && ex.last.depth.resource == &f2r.depth);
     CHECK(ex.last.camera_current[5] == c2.view_to_clip[5] && ex.last.camera_previous[5] == c1.view_to_clip[5]);
-    CHECK(ex.last.flags == WG_FG_FLAG_DEPTH_REVERSED);
+    CHECK(ex.last.flags == (WG_FG_FLAG_DEPTH_REVERSED | WG_FG_FLAG_MOTION_RENDER_RES));
     CHECK(inner->presents == 1 + 4 && presenter.presents == 2);
     presenter.generated = 0;
 
@@ -1138,7 +1182,8 @@ void TestCp2077Session(const GameModule& game) {
     WgConstants c4 = MakeConstants(l, 4.0f, WG_TRI_FALSE);
     SendConstants(game, &c4, &vp);
     CHECK(sc->Present(1, 0) == S_OK);
-    CHECK(ex.submits == 2 && t.present_stats().real_only == 2 && codec.counters().tags_lifetime_refused == 2);
+    CHECK(ex.submits == 2 && t.present_stats().real_only == 2 && codec.counters().tags_lifetime_refused == 0);
+    CHECK(retain.transient_calls == 2 && retain.kept == 0 && retain.last_cmd == cmd);  // the hook refused both
 
     // frame 5: a present that is still drawing keeps the interval open; the retry does not submit again
     Frame f5r;
@@ -1155,6 +1200,21 @@ void TestCp2077Session(const GameModule& game) {
     // a test present: never an interval
     const uint64_t submits = t.present_stats().submits;
     CHECK(sc->Present(0, DXGI_PRESENT_TEST) == S_OK && t.present_stats().submits == submits && inner->tests == 1);
+
+    // frame 6: depth and motion valid only during the tag call, kept by the host's hook (a copy): generation again,
+    // from the copies
+    retain.keep = true;
+    Frame f6r;
+    f6r.make(l, WG_LIFE_ONLY_DURING_TAG);
+    TagOne(game, &vp, &f6r.td, cmd);
+    TagOne(game, &vp, &f6r.tm, cmd);
+    TagOne(game, &vp, &f6r.th, cmd);
+    WgConstants c6 = MakeConstants(l, 6.0f, WG_TRI_FALSE);
+    SendConstants(game, &c6, &vp);
+    const uint32_t submits_6 = ex.submits;
+    CHECK(sc->Present(1, 0) == S_OK && ex.submits == submits_6 + 1);
+    CHECK(ex.last.depth.resource == &retain.copy[0] && ex.last.motion.resource == &retain.copy[1]);
+    CHECK(retain.transient_calls == 4 && retain.kept == 2 && retain.last_cmd == cmd);
 
     // evaluate: super resolution and ray reconstruction keep their genuine path; 1000 never reaches it
     const WgHeader* inputs[1] = {&vp.h};
@@ -1176,7 +1236,7 @@ void TestCp2077Session(const GameModule& game) {
     CHECK(owners.owner_of(w->Id()) == WG_FG_OWNER_NONE);
     CHECK(SlotsAreGenuine(game));
     const uint32_t inner_before = inner->presents;
-    CHECK(sc->Present(0, 0) == S_OK && inner->presents == inner_before + 1 && ex.submits == 3);
+    CHECK(sc->Present(0, 0) == S_OK && inner->presents == inner_before + 1 && ex.submits == submits_6 + 1);
     CHECK(sc->Release() == 0 && inner->refs == 0);
     IDXGISwapChain1* raw = nullptr;  // a chain created after restore is not wrapped
     CHECK(CreateThroughTable(f2, &raw) == S_OK && raw == factory.made.back() && FgSwapChain::FromInterface(raw) == nullptr);

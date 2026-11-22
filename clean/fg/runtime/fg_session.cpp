@@ -388,6 +388,12 @@ FgSessionResult FgSession::RunInterval(const FgFramePacket& packet, const FgInge
     r.scheduled = n;
     FgIntervalReservation res;
     r.presenter = presenter_->BeginInterval(plan, &res);
+    if (r.presenter == FgStatus::NoSlot) {
+        const FgTicks until = Now() + 1000000;  // 100 ms in 100 ns ticks
+        while (r.presenter == FgStatus::NoSlot && Now() < until) {
+            r.presenter = presenter_->BeginInterval(plan, &res);
+        }
+    }
     if (r.presenter == FgStatus::DeviceLost) {
         r.error = FgSessionError::DeviceLost;
         return Lose(r);
@@ -525,6 +531,7 @@ FgSessionResult FgSession::RunInterval(const FgFramePacket& packet, const FgInge
     rd.real_only = false;
     rd.slot = res.slots[n];
     rd.target = plan.targets[n];
+    rd.game_colour = packet.color;
     const FgExecResult real = desc_.executor->RecordRealEndpoint(rd, &sub.ready[n]);
     if (real == FgExecResult::DeviceLost) {
         r.executor = real;
@@ -597,7 +604,7 @@ FgSessionResult FgSession::OnPresent(const FgFramePacket& packet) {
         gf.frame_id = packet.frame_token;
         gf.arrival = now;
         gf.requested_count = packet.generated_count;
-        gf.generation_enabled = ingest.status != FgFrameStatus::Refused;
+        gf.generation_enabled = ingest.status != FgFrameStatus::Refused && ingest.current_bank >= 0;
         gf.reset = (packet.flags & kFgFlagReset) != 0;
         if (ingest.status == FgFrameStatus::Refused) {
             ++counters_.frame_refusals;
@@ -644,7 +651,7 @@ FgSessionResult FgSession::OnPresent(const FgFramePacket& packet) {
                 r.error = FgSessionError::ExecutorRefused;
                 if (plan.generated_count == 0) {
                     // nothing reserved: show the game frame if the executor can still record it, then refuse
-                    FgSessionResult shown = PresentRealOnlyPlan(plan, r);
+                    FgSessionResult shown = PresentRealOnlyPlan(plan, r, packet.color.resource ? &packet.color : nullptr);
                     if (state_ != FgSessionState::Active) return shown;
                     return Refuse(shown);
                 }
@@ -671,7 +678,7 @@ FgSessionResult FgSession::OnPresent(const FgFramePacket& packet) {
         if (plan.generated_count == 0) {
             if (accepted && ingest.status == FgFrameStatus::Generated)
                 history_->MarkRead(desc_.executor->LastComputeValue());
-            return PresentRealOnlyPlan(plan, r);
+            return PresentRealOnlyPlan(plan, r, packet.color.resource ? &packet.color : nullptr);
         }
         return RunInterval(packet, ingest, plan, copy_output, copy_reason, r, false);
     } catch (...) {

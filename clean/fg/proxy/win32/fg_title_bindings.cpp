@@ -36,6 +36,8 @@ FgTitleBinding FgCp2077Binding() {
     im.role_names[kFgRoleConstants] = WG_FG_TB_CP2077_ROLE_CONSTANTS;
     im.role_names[kFgRoleEvaluate] = WG_FG_TB_CP2077_ROLE_EVALUATE;
     im.role_names[kFgRoleFree] = WG_FG_TB_CP2077_ROLE_FREE;
+    im.role_names[kFgRoleIsLoaded] = WG_FG_TB_CP2077_ROLE_IS_LOADED;
+    im.role_names[kFgRoleSetLoaded] = WG_FG_TB_CP2077_ROLE_SET_LOADED;
     im.fn_options = WG_FG_TB_CP2077_FN_OPTIONS;
     im.fn_state = WG_FG_TB_CP2077_FN_STATE;
     im.abi_max_generated = WG_FG_TB_CP2077_ABI_MAX_GENERATED;

@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <map>
 #include <new>
 
 #include "../../presenter/fg_dxgi_presenter.h"
@@ -130,6 +131,18 @@ struct FgAsiSessionHost::Impl {
     bool handled = false;  // the current interval was presented by the session
     uint64_t last_values[3] = {};  // the executor's fence after the last intervals (queue-depth bound)
     FgAsiSessionStats stats;
+
+    // retained copies of transient tagged textures, one per buffer type (RetainTag); own lock: tagging runs on the
+    // game's threads and must not wait behind a present
+    struct TagCopy {
+        ComPtr<ID3D12Resource> res;
+        ComPtr<ID3D12Device> dev;
+        UINT64 w = 0;
+        UINT h = 0;
+        DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
+    };
+    std::mutex tag_mu;
+    std::map<uint32_t, TagCopy> tag_copies;
 
     void Log(const std::string& line) const {
         if (cfg.log) cfg.log(cfg.log_ctx, line.c_str());
@@ -315,6 +328,24 @@ struct FgAsiSessionHost::Impl {
             win_source.reset();
             return;
         }
+        const wgfg::FgSessionCounters sc = session->Counters();
+        if (exec) {
+            const wgfg::FgExecCounters& ec = exec->Counters();
+            char buf[256];
+            std::snprintf(buf, sizeof buf,
+                          "fg host: run stats: gen_intervals=%llu shared=%llu indices=%llu copies=%llu net2_fast=%llu "
+                          "menu_det=%llu menu_copy=%llu stale_cancel=%llu refusals=%llu",
+                          static_cast<unsigned long long>(sc.generated_intervals),
+                          static_cast<unsigned long long>(ec.shared),
+                          static_cast<unsigned long long>(ec.indices),
+                          static_cast<unsigned long long>(ec.copies),
+                          static_cast<unsigned long long>(ec.net2_fast),
+                          static_cast<unsigned long long>(sc.menu_detections),
+                          static_cast<unsigned long long>(sc.menu_copy_frames),
+                          static_cast<unsigned long long>(sc.stale_cancelled),
+                          static_cast<unsigned long long>(sc.frame_refusals));
+            Log(buf);
+        }
         wgfg::FgSessionResult r = session->Destroy();
         const ULONGLONG until = GetTickCount64() + kDestroyWaitMs;
         while (r.error == wgfg::FgSessionError::PresenterBusy && GetTickCount64() < until) {
@@ -334,12 +365,29 @@ struct FgAsiSessionHost::Impl {
         if (session || stats.gave_up || !c || !c->fg_taken() || !inner || !device || !queue) return;
         WgFgSessionDesc sd = {};
         if (!c->session_desc(&sd)) return;  // options and a latched present first
+        // Titles commonly leave options sizes/format at 0 (taken from the swap chain).
+        if (sd.output_width == 0 || sd.output_height == 0) {
+            sd.output_width = width;
+            sd.output_height = height;
+        }
+        if (sd.output_format == 0) sd.output_format = static_cast<uint32_t>(chain_format);
+        if (sd.render_max_width == 0 || sd.render_max_height == 0) {
+            sd.dynamic_resolution = 1;
+            sd.render_min_width = 100u;
+            sd.render_min_height = 100u;
+            sd.render_max_width = sd.output_width;
+            sd.render_max_height = sd.output_height;
+        }
+        if (sd.render_min_width == 0 || sd.render_min_height == 0) {
+            sd.render_min_width = sd.dynamic_resolution ? 100u : sd.render_max_width;
+            sd.render_min_height = sd.dynamic_resolution ? 100u : sd.render_max_height;
+        }
         if (!exec) {
             wgfg::FgD3d12ExecutorDesc ed;
             ed.dxil_dir = cfg.dxil_dir;
             ed.weights = weights.get();
             ed.net2 = cfg.net2_exact ? wgfg::FgNet2Path::Exact : wgfg::FgNet2Path::Fast;
-            ed.settings.menu_detection = true;
+            ed.settings.menu_detection = false;
             ed.dump_dir = dump_dir;  // empty (off) unless a developer build found WRONGGPU_FG_DUMP_DIR
             ed.dump_log = cfg.log;
             ed.dump_log_ctx = cfg.log_ctx;
@@ -361,6 +409,7 @@ struct FgAsiSessionHost::Impl {
         }
         wgfg::FgSessionDesc d;
         d.create = ToRuntime(sd);
+        d.scheduler.first_image_budget = 40000;  // 4 ms headroom for async GPU compute + submit
         d.executor = exec.get();
         d.presenter_source = exec_source.get();
         d.clock = &HostClock;
@@ -369,8 +418,9 @@ struct FgAsiSessionHost::Impl {
         const wgfg::FgSessionResult r = session->Create(d);
         if (r.error != wgfg::FgSessionError::None) {
             ++stats.session_failures;
-            Log(std::string("fg host: session not created: ") + wgfg::FgSessionErrorName(r.error) + " (executor " +
-                wgfg::FgExecRefusalName(exec->LastRefusal()) + ": " + exec->LastWhy() + ")");
+            Log(std::string("fg host: session not created: ") + wgfg::FgSessionErrorName(r.error) + " (refusal " +
+                wgfg::FgRefusalName(r.refusal) + ", executor " + wgfg::FgExecRefusalName(exec->LastRefusal()) + ": " +
+                exec->LastWhy() + ")");
             session.reset();
             exec_source.reset();
             win_source.reset();
@@ -418,6 +468,10 @@ FgAsiSessionHost::~FgAsiSessionHost() {
     if (impl_->exec) impl_->exec->WaitIdle(kDestroyWaitMs);
     impl_->WaitCopy(impl_->copy_value, kDestroyWaitMs);
     impl_->ReleaseFacade();
+    {
+        std::lock_guard<std::mutex> tag_lock(impl_->tag_mu);
+        impl_->tag_copies.clear();
+    }
     if (impl_->latency) CloseHandle(impl_->latency);
     if (impl_->copy_event) CloseHandle(impl_->copy_event);
 }
@@ -477,6 +531,98 @@ void FgAsiSessionHost::CoreReady(void* ctx, FgProxy* core) {
     }
 }
 
+bool FgAsiSessionHost::RetainTag(void* ctx, uint32_t buffer_type, bool transient, void* cmd, WgFgTexture* tex,
+                                 bool* copied_out) {
+    if (copied_out) *copied_out = false;
+    FgAsiSessionHost* self = static_cast<FgAsiSessionHost*>(ctx);
+    if (!tex || !tex->resource) return false;
+    const bool need_desc = tex->width == 0 || tex->height == 0 || tex->format == 0;
+    if (!transient && !need_desc) return true;
+    if (!self) return !transient;
+    try {
+        ComPtr<ID3D12Resource> src;
+        if (FAILED(static_cast<IUnknown*>(tex->resource)->QueryInterface(IID_PPV_ARGS(&src))) || !src)
+            return !transient;
+        const D3D12_RESOURCE_DESC sd = src->GetDesc();
+        if (sd.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || sd.SampleDesc.Count != 1) return false;
+        tex->width = static_cast<uint32_t>(sd.Width);
+        tex->height = sd.Height;
+        tex->format = static_cast<uint32_t>(sd.Format);
+        if (tex->rect.width == 0 || tex->rect.height == 0) tex->rect = WgFgRect{0, 0, tex->width, tex->height};
+        if (!transient || !cmd) return true;
+
+        ComPtr<ID3D12GraphicsCommandList> cl;
+        if (FAILED(static_cast<IUnknown*>(cmd)->QueryInterface(IID_PPV_ARGS(&cl))) || !cl) return false;
+        ComPtr<ID3D12Device> dev;
+        if (FAILED(src->GetDevice(IID_PPV_ARGS(&dev))) || !dev) return false;
+
+        ComPtr<ID3D12Resource> dst;
+        {
+            Impl& m = *self->impl_;
+            std::lock_guard<std::mutex> lock(m.tag_mu);
+            Impl::TagCopy& e = m.tag_copies[buffer_type];
+            if (!e.res || e.dev.Get() != dev.Get() || e.w != sd.Width || e.h != sd.Height || e.fmt != sd.Format) {
+                e = Impl::TagCopy();
+                D3D12_HEAP_PROPERTIES hp = {};
+                hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+                D3D12_RESOURCE_DESC cd = sd;
+                cd.Flags = D3D12_RESOURCE_FLAG_NONE;
+                cd.MipLevels = 1;
+                cd.DepthOrArraySize = 1;
+                ComPtr<ID3D12Resource> made;
+                if (SUCCEEDED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &cd,
+                                                           D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                           IID_PPV_ARGS(&made))) && made) {
+                    e.res = made;
+                    e.dev = dev;
+                    e.w = sd.Width;
+                    e.h = sd.Height;
+                    e.fmt = sd.Format;
+                }
+            }
+            dst = e.res;
+        }
+        if (!dst) return false;
+
+        const bool have_state = tex->state != WG_STATE_NOT_GIVEN;
+        const D3D12_RESOURCE_STATES src_state = static_cast<D3D12_RESOURCE_STATES>(tex->state);
+        const bool trans_src = have_state && src_state != D3D12_RESOURCE_STATE_COPY_SOURCE;
+        D3D12_RESOURCE_BARRIER pre[2] = {};
+        UINT npre = 0;
+        if (trans_src) {
+            pre[npre].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            pre[npre].Transition = {src.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, src_state,
+                                    D3D12_RESOURCE_STATE_COPY_SOURCE};
+            ++npre;
+        }
+        pre[npre].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        pre[npre].Transition = {dst.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_COMMON,
+                                D3D12_RESOURCE_STATE_COPY_DEST};
+        ++npre;
+        cl->ResourceBarrier(npre, pre);
+        if (sd.MipLevels == 1 && sd.DepthOrArraySize == 1) {
+            cl->CopyResource(dst.Get(), src.Get());
+        } else {
+            D3D12_TEXTURE_COPY_LOCATION dloc = {}, sloc = {};
+            dloc.pResource = dst.Get();
+            dloc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            dloc.SubresourceIndex = 0;
+            sloc.pResource = src.Get();
+            sloc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            sloc.SubresourceIndex = 0;
+            cl->CopyTextureRegion(&dloc, 0, 0, 0, &sloc, nullptr);
+        }
+        for (UINT k = 0; k < npre; ++k) std::swap(pre[k].Transition.StateBefore, pre[k].Transition.StateAfter);
+        cl->ResourceBarrier(npre, pre);
+        tex->resource = dst.Get();  // the host's cache keeps the reference
+        tex->state = D3D12_RESOURCE_STATE_COMMON;
+        if (copied_out) *copied_out = true;
+        return true;
+    } catch (...) {
+        return !transient;
+    }
+}
+
 int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc* desc, WgFgPresentResult* out) {
     FgAsiSessionHost* self = static_cast<FgAsiSessionHost*>(ctx);
     if (!core) return -1;
@@ -495,7 +641,10 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
                         (sr.error == wgfg::FgSessionError::None || sr.error == wgfg::FgSessionError::FrameRefused);
             if (took && !m.handled) {
                 m.Log(std::string("fg host: the session did not present a game frame: ") +
-                      wgfg::FgSessionErrorName(sr.error));
+                      wgfg::FgSessionErrorName(sr.error) + " (presenter " + wgfg::FgStatusName(sr.presenter) +
+                      ", refusal " + wgfg::FgRefusalName(sr.refusal) + ", exec " +
+                      (m.exec ? wgfg::FgExecRefusalName(m.exec->LastRefusal()) : "null") + ": " +
+                      (m.exec ? m.exec->LastWhy() : std::string()) + ")");
                 if (m.session->State() != wgfg::FgSessionState::Active) {
                     m.DestroySession("refused");
                     if (++m.stats.session_failures >= kMaxSessionFailures) m.stats.gave_up = true;

@@ -29,7 +29,8 @@ FgWinResult FgDxgiPresenter::Create(const FgDxgiPresenterDesc& d, std::unique_pt
         return FgWinFail(FgStatus::InvalidArgument, FgWinRefusal::UnknownChoice);
     if (d.max_generated < 1 || d.max_generated > kFgMaxGenerated)
         return FgWinFail(FgStatus::InvalidArgument, FgWinRefusal::BadCount);
-    const std::uint32_t slots = d.slot_count ? d.slot_count : FgMinSlotsFor(d.max_generated);
+    const std::uint32_t default_slots = FgMinSlotsFor(d.max_generated) < 8 ? 8u : FgMinSlotsFor(d.max_generated);
+    const std::uint32_t slots = d.slot_count ? d.slot_count : default_slots;
     if (slots < FgMinSlotsFor(d.max_generated) || slots > kMaxSlots)
         return FgWinFail(FgStatus::InvalidArgument, FgWinRefusal::SlotCount);
     if (d.refresh_period < 0 || d.late_tolerance < 0 || d.timer_lead < 0)
@@ -557,6 +558,10 @@ bool FgDxgiPresenter::RecordCopyAndPresentLocked(const Planned& pl) {
     ++ring_;
     const bool tearing = desc_.pacing == FgDxgiPacing::Tearing;
     hr = swap_->Present(tearing ? 0 : 1, tearing ? DXGI_PRESENT_ALLOW_TEARING : 0);
+    if (tearing && hr == DXGI_ERROR_INVALID_CALL) {
+        // DXGI_PRESENT_ALLOW_TEARING is invalid in exclusive fullscreen; retry without the tearing flag.
+        hr = swap_->Present(0, 0);
+    }
     if (FAILED(hr)) {
         if (FgIsDeviceLostHr(hr)) {
             LoseLocked();

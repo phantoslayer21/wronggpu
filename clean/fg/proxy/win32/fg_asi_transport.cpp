@@ -42,10 +42,16 @@ struct FgAsiTransport::Impl {
     void* present_route_ctx = nullptr;
     FgFactoryNoteFn factory_note = nullptr;
     void* factory_note_ctx = nullptr;
+    FgCoreReadyFn core_ready = nullptr;
+    void* core_ready_ctx = nullptr;
+    FgTagRetainFn tag_retain = nullptr;
+    void* tag_retain_ctx = nullptr;
     FgPresentOwners* owners = nullptr;
     FgLogFn log = nullptr;
     void* log_ctx = nullptr;
     std::atomic<bool> hooked_factory{false};  // this transport installed the swap-chain creation hook
+    std::atomic<bool> loaded_given{false};
+    std::atomic<bool> loaded_value{true};
 };
 
 namespace {
@@ -204,6 +210,18 @@ WgResultCode FwdFree(uint32_t f, const WgViewport* v) {
     NoteForward(kFgRoleFree, r);
     return r;
 }
+WgResultCode FwdIsLoaded(uint32_t f, bool* loaded) {
+    auto fn = Genuine<FgIsLoadedFn>(kFgRoleIsLoaded);
+    const WgResultCode r = fn ? fn(f, loaded) : WG_E_MISSING_OR_INVALID_API;
+    NoteForward(kFgRoleIsLoaded, r);
+    return r;
+}
+WgResultCode FwdSetLoaded(uint32_t f, bool loaded) {
+    auto fn = Genuine<FgSetLoadedFn>(kFgRoleSetLoaded);
+    const WgResultCode r = fn ? fn(f, loaded) : WG_E_MISSING_OR_INVALID_API;
+    NoteForward(kFgRoleSetLoaded, r);
+    return r;
+}
 
 // The genuine FG feature function `name`, fetched once through the genuine get-function (never through ours).
 void* GenuineFeatureFunction(std::atomic<void*>& cache, const std::string& name) {
@@ -326,6 +344,8 @@ WgResultCode H_IsSupported(uint32_t feature, const WgAdapterInfo* a) {
     f.role = kFgRoleIsSupported;
     FrameScope s(&f);
     try {
+        if (feature == r->fg_feature && !r->core->fg_taken() && r->core_ready)
+            r->core_ready(r->core_ready_ctx, r->core);
         WgFgLuid luid = {};
         const bool have = DecodeLuid(a, &luid);
         const WgResultCode res = r->core->is_supported(feature, have ? &luid : nullptr, a);
@@ -401,8 +421,40 @@ WgResultCode RouteTags(FgAsiTransport::Impl* r, CallFrame& f, const WgTag* t, ui
             d.struct_size = sizeof(WgFgTag);
             d.native_type = WG_FG_NATIVE_TYPE_UNBOUND;
         }
-        if (r->codec->tags(f.token, f.vp, t, n, decoded.data())) dp = decoded.data();
-        else g_ctr.codec_failures.fetch_add(1);
+        if (r->codec->tags(f.token, f.vp, t, n, decoded.data())) {
+            dp = decoded.data();
+            for (uint32_t i = 0; i < n; ++i) {
+                bool copied = false;
+                // The session host (when configured) keeps a transient texture alive and fills a missing size or
+                // format. Without one a transient texture could not outlive the tagging call, so it is not kept; a
+                // lasting texture is used as decoded. The resource pointers are never dereferenced here.
+                if (decoded[i].native_type != WG_FG_NATIVE_TYPE_UNBOUND) {
+                    const bool transient = t[i].lifetime == WG_LIFE_ONLY_DURING_TAG;
+                    const bool kept = r->tag_retain ? r->tag_retain(r->tag_retain_ctx, t[i].buffer_type, transient,
+                                                                    f.cmd, &decoded[i].texture, &copied)
+                                                    : !transient;
+                    if (!kept) decoded[i].native_type = WG_FG_NATIVE_TYPE_UNBOUND;
+                }
+                const uint32_t bt = t[i].buffer_type;
+                if (bt == 0 || bt == 1 || bt == 2) {
+                    const WgResource* res = t[i].resource;
+                    const bool bound = decoded[i].native_type != WG_FG_NATIVE_TYPE_UNBOUND;
+                    char buf[224];
+                    std::snprintf(buf, sizeof buf,
+                                  "vp=%u life=%u %ux%u fmt=%u state=0x%x cmd=%s copied=%s bound=%s",
+                                  f.vp ? f.vp->id : 0u, t[i].lifetime,
+                                  decoded[i].texture.width, decoded[i].texture.height,
+                                  decoded[i].texture.format,
+                                  res ? res->state : 0u,
+                                  f.cmd ? "ok" : "null",
+                                  copied ? "yes" : "no",
+                                  bound ? "yes" : "no");
+                    NoteCall(*r, "tag(bt=" + std::to_string(bt) + ")", buf);
+                }
+            }
+        } else {
+            g_ctr.codec_failures.fetch_add(1);
+        }
     }
     return r->core->tag(dp, n, t);
 }
@@ -500,6 +552,48 @@ WgResultCode H_Free(uint32_t feature, const WgViewport* v) {
         g_ctr.codec_failures.fetch_add(1);
     }
     return FwdFree(feature, v);
+}
+
+WgResultCode H_IsLoaded(uint32_t feature, bool* loaded) {
+    InFlight in;
+    g_ctr.calls[kFgRoleIsLoaded].fetch_add(1);
+    FgAsiTransport::Impl* r = g_route.load();
+    try {
+        if (r && feature == r->fg_feature && !r->core->fg_taken() && r->core_ready)
+            r->core_ready(r->core_ready_ctx, r->core);
+        if (r && r->core->owns_feature(feature)) {
+            g_ctr.fg_answered.fetch_add(1);
+            if (!loaded) return WG_E_MISSING_INPUT_PARAMETER;
+            *loaded = r->loaded_given.load() ? r->loaded_value.load() : true;
+            NoteCall(*r, "is-loaded(FG)",
+                     Result(WG_OK) + ", loaded=" + (*loaded ? "true" : "false") + ", answered here");
+            return WG_OK;
+        }
+    } catch (...) {
+        g_ctr.codec_failures.fetch_add(1);
+    }
+    return FwdIsLoaded(feature, loaded);
+}
+
+WgResultCode H_SetLoaded(uint32_t feature, bool loaded) {
+    InFlight in;
+    g_ctr.calls[kFgRoleSetLoaded].fetch_add(1);
+    FgAsiTransport::Impl* r = g_route.load();
+    try {
+        if (r && feature == r->fg_feature && !r->core->fg_taken() && r->core_ready)
+            r->core_ready(r->core_ready_ctx, r->core);
+        if (r && r->core->owns_feature(feature)) {
+            g_ctr.fg_answered.fetch_add(1);
+            r->loaded_value.store(loaded);
+            r->loaded_given.store(true);
+            NoteCall(*r, "set-loaded(FG)",
+                     Result(WG_OK) + ", loaded=" + (loaded ? "true" : "false") + ", answered here");
+            return WG_OK;
+        }
+    } catch (...) {
+        g_ctr.codec_failures.fetch_add(1);
+    }
+    return FwdSetLoaded(feature, loaded);
 }
 
 // The FG feature functions handed out by the core's get-function while FG is taken.
@@ -846,7 +940,8 @@ HMODULE LoadNextToExe(const std::string& leaf) {
 
 const char* FgRoleWord(uint32_t role) {
     static const char* const kWords[kFgRoleCount] = {"is-supported", "requirements", "get-function", "tag",
-                                                     "tag-for-frame", "constants", "evaluate", "free"};
+                                                     "tag-for-frame", "constants", "evaluate", "free",
+                                                     "is-loaded", "set-loaded"};
     if (role == kFgSlotCreateFactory2) return "create-factory";
     return role < kFgRoleCount ? kWords[role] : "?";
 }
@@ -937,6 +1032,8 @@ void* FgAsiTransport::handler_for(uint32_t role) {
         case kFgRoleConstants: return reinterpret_cast<void*>(&H_Constants);
         case kFgRoleEvaluate: return reinterpret_cast<void*>(&H_Evaluate);
         case kFgRoleFree: return reinterpret_cast<void*>(&H_Free);
+        case kFgRoleIsLoaded: return reinterpret_cast<void*>(&H_IsLoaded);
+        case kFgRoleSetLoaded: return reinterpret_cast<void*>(&H_SetLoaded);
         case kFgSlotCreateFactory2: return reinterpret_cast<void*>(&H_CreateFactory2);
         default: return nullptr;
     }
@@ -1127,6 +1224,10 @@ uint32_t FgAsiTransport::install(const FgAsiConfig& cfg) {
         impl_->present_route_ctx = cfg.present_route_ctx;
         impl_->factory_note = cfg.factory_note;
         impl_->factory_note_ctx = cfg.factory_note_ctx;
+        impl_->core_ready = cfg.core_ready;
+        impl_->core_ready_ctx = cfg.core_ready_ctx;
+        impl_->tag_retain = cfg.tag_retain;
+        impl_->tag_retain_ctx = cfg.tag_retain_ctx;
         impl_->owners = cfg.owners;
         impl_->log = cfg.log;
         impl_->log_ctx = cfg.log_ctx;
@@ -1136,6 +1237,8 @@ uint32_t FgAsiTransport::install(const FgAsiConfig& cfg) {
             void* h = handler_for(f.slot.name_index);
             void* original = nullptr;
             if (!g::safe_get(f.slot.slot, &original) || original == h) continue;
+            // Chain to an earlier IAT patch (e.g. another plugin on the same slot) instead of bypassing it.
+            if (!f.slot.delay_load && original) g_genuine[f.slot.name_index].store(original);
             if (PatchSlot(f.slot.slot, h)) {
                 patches_.push_back({f.slot.slot, original, h, f.slot.name_index, f.slot.delay_load, f.module});
                 log(std::string("fg transport: patched ") + (f.slot.delay_load ? "delay-load" : "import") + " slot " +

@@ -103,6 +103,11 @@ public:
     static void FactoryNote(void* ctx, FgProxy* core, IUnknown* factory);
     // FgAsiConfig::core_ready (ctx = this host): the model / presenter facts and the start-up adapter probe.
     static void CoreReady(void* ctx, FgProxy* core);
+    // FgAsiConfig::tag_retain (ctx = this host; FgTagRetainFn, fg_asi_transport.h): treats tex->resource as a D3D12
+    // resource and cmd as a graphics command list. A transient tag (valid only while the tagging call runs) is copied
+    // on cmd into a texture the host keeps (one per buffer type) and tex points at the copy (state COMMON); a zero
+    // width / height / format / rect is filled from the resource. Only the session host (pointers owned by the game) calls this.
+    static bool RetainTag(void* ctx, uint32_t buffer_type, bool transient, void* cmd, WgFgTexture* tex, bool* copied);
 
     FgAsiSessionStats Stats() const;
 

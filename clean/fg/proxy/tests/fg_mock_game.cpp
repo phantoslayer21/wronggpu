@@ -21,6 +21,8 @@ FG_GAME_API WgResultCode game_evaluate(uint32_t f, const WgFrameToken* k, const 
     return fgmock_evaluate(f, k, in, n, c);
 }
 FG_GAME_API WgResultCode game_free(uint32_t f, const WgViewport* v) { return fgmock_free(f, v); }
+FG_GAME_API WgResultCode game_is_loaded(uint32_t f, bool* l) { return fgmock_is_loaded(f, l); }
+FG_GAME_API WgResultCode game_set_loaded(uint32_t f, bool l) { return fgmock_set_loaded(f, l); }
 FG_GAME_API WgResultCode game_init(uint64_t v) { return fgmock_init(v); }
 FG_GAME_API HRESULT game_create_factory2(UINT flags, REFIID riid, void** out) {
     return fgmock_create_factory2(flags, riid, out);
@@ -36,6 +38,8 @@ FG_GAME_API void game_slot_values(void** out) {
     out[5] = reinterpret_cast<void*>(&fgmock_constants);
     out[6] = reinterpret_cast<void*>(&fgmock_evaluate);
     out[7] = reinterpret_cast<void*>(&fgmock_free);
-    out[8] = reinterpret_cast<void*>(&fgmock_init);
-    out[9] = reinterpret_cast<void*>(&fgmock_create_factory2);
+    out[8] = reinterpret_cast<void*>(&fgmock_is_loaded);
+    out[9] = reinterpret_cast<void*>(&fgmock_set_loaded);
+    out[10] = reinterpret_cast<void*>(&fgmock_init);
+    out[11] = reinterpret_cast<void*>(&fgmock_create_factory2);
 }
