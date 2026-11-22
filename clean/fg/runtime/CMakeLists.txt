@@ -12,6 +12,12 @@ if(NOT DEFINED PROJECT_NAME)
   enable_testing()
 endif()
 find_package(Threads REQUIRED)
+# F9: developer test builds only (see clean/fg/fg_limits.h); public and CI builds keep it OFF.
+option(WRONGGPU_FG_DEV_QUALIFIED "Developer test builds only: FG modes taken without the release gate" OFF)
+if(WRONGGPU_FG_DEV_QUALIFIED)
+  add_compile_definitions(WRONGGPU_FG_DEV_QUALIFIED=1)
+  message(WARNING "fg runtime: WRONGGPU_FG_DEV_QUALIFIED is ON (developer test build; never publish this build)")
+endif()
 
 set(WG_FG_RUNTIME_DIR ${CMAKE_CURRENT_LIST_DIR})
 add_library(wg_fg_runtime STATIC

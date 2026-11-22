@@ -340,12 +340,14 @@ FgSessionResult FgSession::Destroy() {
 
 // ---- per frame ---------------------------------------------------------------------------------------------------
 
-FgSessionResult FgSession::PresentRealOnlyPlan(const FgIntervalPlan& plan, FgSessionResult r) {
+FgSessionResult FgSession::PresentRealOnlyPlan(const FgIntervalPlan& plan, FgSessionResult r,
+                                               const FgTextureRef* game_colour) {
     FgRealDispatchDesc rd;
     rd.frame_token = plan.real_frame_id;
     rd.interval_id = plan.interval_id;
     rd.real_only = true;
     rd.target = plan.targets[0];
+    if (game_colour) rd.game_colour = *game_colour;
     FgReadyFence ready;
     r.executor = desc_.executor->RecordRealEndpoint(rd, &ready);
     if (r.executor == FgExecResult::DeviceLost) {
@@ -679,7 +681,7 @@ FgSessionResult FgSession::OnPresent(const FgFramePacket& packet) {
 }
 
 FgSessionResult FgSession::OnGameFrameOnly(uint64_t frame_token, uint32_t adapter_real_only,
-                                           uint32_t adapter_reason) {
+                                           uint32_t adapter_reason, const FgTextureRef* game_colour) {
     FgSessionResult r = Gate();
     r.frame_token = frame_token;
     if (r.error != FgSessionError::None) return Finish(r);
@@ -709,7 +711,7 @@ FgSessionResult FgSession::OnGameFrameOnly(uint64_t frame_token, uint32_t adapte
     r.frame = FgFrameStatus::RealOnly;
     r.history_real_only =
         static_cast<FgFrameRealOnly>(adapter_real_only <= WG_FG_REAL_ONLY_DISABLED ? adapter_real_only : 0u);
-    return PresentRealOnlyPlan(plan, r);
+    return PresentRealOnlyPlan(plan, r, game_colour);
 }
 
 // ---- adapter hand-off --------------------------------------------------------------------------------------------
@@ -752,7 +754,10 @@ int32_t FgSessionPresent(wgfgp::FgProxy* proxy, FgSession* session, const WgFgPr
         // the session handled this frame itself (and, on a failure, already did what it could with the game frame)
         if (session_out) *session_out = session->LastResult();
     } else if (res->status == WG_FG_PRESENT_REAL_ONLY) {
-        const FgSessionResult r = session->OnGameFrameOnly(desc->frame_token, res->real_only, res->reason);
+        // the game's back buffer goes along: a presenter that shows slot images needs the game frame copied into one
+        const FgTextureRef bb = wgfgp::ToRuntime(desc->backbuffer);
+        const FgSessionResult r =
+            session->OnGameFrameOnly(desc->frame_token, res->real_only, res->reason, bb.resource ? &bb : nullptr);
         if (session_out) *session_out = r;
     }
     return rc;

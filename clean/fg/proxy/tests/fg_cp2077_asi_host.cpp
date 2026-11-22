@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 // WrongGPU frame generation (issue #96, F8b): a test host built under the Cyberpunk 2077 exe's file name, so the
 // shipped plugin (WrongGPU-FG.asi) selects that title's binding. No game interface module is loaded in this process:
-//   fg_cp2077_asi_host <path of WrongGPU-FG.asi> on    fg=on: the binding is selected and logged, the interface is not
-//                                                       found, nothing is patched
+//   fg_cp2077_asi_host <path of WrongGPU-FG.asi> on    fg=on: the binding is selected and logged; no FG model or
+//                                                       kernel folder: nothing is installed or patched
 //   fg_cp2077_asi_host <path of WrongGPU-FG.asi> off   fg=off: nothing is read, no transport
 // The settings file comes from WG_STATE_GAME_DIR (set by ctest before the process starts); the host empties the
 // plugin's log file there first (a file of this test's own case folder).
@@ -75,10 +75,13 @@ int wmain(int argc, wchar_t** argv) {
     CHECK(st.patched_slots == 0 && st.init_calls == 1);
     const std::string text = ReadAll(log);
     if (leg == L"on") {
-        CHECK(st.settings_enabled == 1 && st.transport_created == 1);
-        CHECK(st.result == kFgInterfaceNotFound);  // the binding was taken; this process has no interface module
+        // the binding was taken; the case folder (LOCALAPPDATA redirected by ctest) has no FG model and the plugin's
+        // folder no kernel folder, so the session host's precheck refuses before any transport exists
+        CHECK(st.settings_enabled == 1 && st.transport_created == 0);
+        CHECK(st.result == kFgRuntimeMissing);
         CHECK(text.find("title binding cp2077-2.14.1 (Cyberpunk 2077)") != std::string::npos);
         CHECK(text.find("no title binding") == std::string::npos);
+        CHECK(text.find("no hooks installed") != std::string::npos);
     } else if (leg == L"off") {
         CHECK(st.result == kFgInstallOff && st.settings_enabled == 0 && st.transport_created == 0);
         CHECK(text.find("title binding") == std::string::npos);  // nothing was even selected

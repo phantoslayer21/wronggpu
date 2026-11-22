@@ -13,6 +13,13 @@ if(NOT DEFINED PROJECT_NAME)
 endif()
 
 set(WG_FG_PROXY_DIR ${CMAKE_CURRENT_LIST_DIR})
+# F9: developer test builds only. ON takes the FG modes without the release gate (kFgModesQualified, fg_limits.h);
+# public and CI builds keep it OFF, so nothing advertises a mode that has not passed the gate.
+option(WRONGGPU_FG_DEV_QUALIFIED "Developer test builds only: FG modes taken without the release gate" OFF)
+if(WRONGGPU_FG_DEV_QUALIFIED)
+  add_compile_definitions(WRONGGPU_FG_DEV_QUALIFIED=1)
+  message(WARNING "fg proxy: WRONGGPU_FG_DEV_QUALIFIED is ON (developer test build; never publish this build)")
+endif()
 # The FG runtime contract (clean/fg/runtime/fg_contract.h): when it is in the tree, the test also checks the adapter's
 # packets and sessions through fg_contract_bridge.h with the runtime's own validation.
 set(WG_FG_CONTRACT_DIR "${WG_FG_PROXY_DIR}/../runtime" CACHE PATH "Folder of fg_contract.h / fg_contract.cpp")
@@ -99,11 +106,40 @@ if(WIN32)
   target_link_libraries(wg_fg_win32 PUBLIC wg_fg_proxy version)
   wg_fg_flags(wg_fg_win32)
 
+  # F9: the FG runtime the plugin carries (clean/fg/runtime: contract, model check, history, session, the D3D12
+  # executor; clean/fg/presenter: the Windows back ends) and the session host joining it to the transport. The adapter
+  # core and the settings come from wg_fg_proxy (not compiled twice).
+  set(WG_FG_RT_DIR "${WG_FG_PROXY_DIR}/../runtime")
+  set(WG_FG_PR_DIR "${WG_FG_PROXY_DIR}/../presenter")
+  add_library(wg_fg_asi_runtime STATIC
+    ${WG_FG_RT_DIR}/fg_contract.cpp ${WG_FG_RT_DIR}/fg_model.cpp ${WG_FG_RT_DIR}/fg_net1_plan.cpp
+    ${WG_FG_RT_DIR}/fg_exec_plan.cpp ${WG_FG_RT_DIR}/fg_history.cpp ${WG_FG_RT_DIR}/fg_worker.cpp
+    ${WG_FG_RT_DIR}/fg_session.cpp ${WG_FG_RT_DIR}/fg_session_win.cpp ${WG_FG_RT_DIR}/fg_d3d12_executor.cpp
+    ${WG_FG_RT_DIR}/../../converter/src/sha256.cpp
+    ${WG_FG_PR_DIR}/fg_presenter.cpp ${WG_FG_PR_DIR}/fg_target_scheduler.cpp ${WG_FG_PR_DIR}/fg_present_engine.cpp
+    ${WG_FG_PR_DIR}/fg_win_common.cpp ${WG_FG_PR_DIR}/fg_win_comp_presenter.cpp ${WG_FG_PR_DIR}/fg_dxgi_presenter.cpp
+    ${WG_FG_PR_DIR}/fg_presenter_factory.cpp
+    ${WG_FG_PROXY_DIR}/win32/fg_asi_session.cpp)
+  target_include_directories(wg_fg_asi_runtime PUBLIC ${WG_FG_RT_DIR} ${WG_FG_PR_DIR})
+  # (the win32 headers define WIN32_LEAN_AND_MEAN themselves)
+  target_compile_definitions(wg_fg_asi_runtime PUBLIC NOMINMAX WG_FG_SESSION_WIN=1)
+  target_link_libraries(wg_fg_asi_runtime PUBLIC wg_fg_win32 d3d11.lib d3d12.lib dxgi.lib dcomp.lib gdi32.lib
+                        user32.lib mincore.lib)
+  wg_fg_flags(wg_fg_asi_runtime)
+
   add_library(wg_fg_asi SHARED ${WG_FG_PROXY_DIR}/win32/fg_asi_entry.cpp)
-  target_link_libraries(wg_fg_asi PRIVATE wg_fg_win32)
+  target_link_libraries(wg_fg_asi PRIVATE wg_fg_asi_runtime wg_fg_win32)
   target_include_directories(wg_fg_asi PRIVATE ${WG_FG_PROXY_DIR}/../../wgshared/include)
   set_target_properties(wg_fg_asi PROPERTIES OUTPUT_NAME "WrongGPU-FG" PREFIX "" SUFFIX ".asi")
   wg_fg_flags(wg_fg_asi)
+
+  # F9: the session host. ctest runs the CPU checks; `test_fg_asi_session --gpu --dxil <build>/dx12` adds the headless
+  # GPU leg (a wrapped composition swap chain, the adapter core on a stand-in chain, synthetic weights).
+  add_executable(test_fg_asi_session ${WG_FG_PROXY_DIR}/tests/test_fg_asi_session.cpp)
+  target_link_libraries(test_fg_asi_session PRIVATE wg_fg_asi_runtime)
+  wg_fg_flags(test_fg_asi_session)
+  add_test(NAME fg_asi_session COMMAND test_fg_asi_session --scratch ${CMAKE_CURRENT_BINARY_DIR}/asi-session-scratch)
+  file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/asi-session-scratch")
 
   add_library(fg_mock_interposer SHARED ${WG_FG_PROXY_DIR}/tests/fg_mock_interposer.cpp
                                         ${WG_FG_PROXY_DIR}/tests/fg_mock_interposer.rc)
@@ -136,7 +172,8 @@ if(WIN32)
   file(MAKE_DIRECTORY "${WG_FG_ASI_CASES}/default")
   foreach(leg off on invalid default)
     add_test(NAME fg_win32_asi_${leg} COMMAND test_fg_win32_transport --asi ${leg})
-    set_tests_properties(fg_win32_asi_${leg} PROPERTIES ENVIRONMENT "WG_STATE_GAME_DIR=${WG_FG_ASI_CASES}/${leg}")
+    set_tests_properties(fg_win32_asi_${leg} PROPERTIES ENVIRONMENT
+                         "WG_STATE_GAME_DIR=${WG_FG_ASI_CASES}/${leg};LOCALAPPDATA=${WG_FG_ASI_CASES}/${leg}/localappdata")
   endforeach()
 
   # Mutants of the transport and the seam: each breaks one rule; the in-process suite must catch every one.
@@ -177,7 +214,8 @@ if(WIN32)
   file(WRITE "${WG_FG_ASI_CASES}/cp2077-on/wronggpu-setup/settings.ini" "fg=on\nfg_multiplier=4\n")
   foreach(leg off on)
     add_test(NAME fg_cp2077_asi_${leg} COMMAND fg_cp2077_asi_host $<TARGET_FILE:wg_fg_asi> ${leg})
-    set_tests_properties(fg_cp2077_asi_${leg} PROPERTIES ENVIRONMENT "WG_STATE_GAME_DIR=${WG_FG_ASI_CASES}/cp2077-${leg}")
+    set_tests_properties(fg_cp2077_asi_${leg} PROPERTIES ENVIRONMENT
+                         "WG_STATE_GAME_DIR=${WG_FG_ASI_CASES}/cp2077-${leg};LOCALAPPDATA=${WG_FG_ASI_CASES}/cp2077-${leg}/localappdata")
   endforeach()
 
   # Mutants of the codec and the present path: each breaks one rule; the suite must catch every one.

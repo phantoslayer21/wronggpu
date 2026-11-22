@@ -124,6 +124,10 @@ struct FgRealDispatchDesc {
     bool real_only = false;  // true: no slot; the fence says when the game frame itself is ready to present
     FgPresentSlot slot;      // !real_only: the real endpoint's reserved slot (the game frame is copied into it)
     FgFrameTarget target;
+    // real_only without shared work for this frame (an adapter-side real-only interval): the game frame itself (the
+    // back buffer the game presents), so an executor whose presenter shows slot images can copy it into a reserved
+    // slot. resource is null when the caller has none.
+    FgTextureRef game_colour;
 };
 
 // The GPU side of one session. Every Record* call records work on the executor's queue and, where it produces an
@@ -274,8 +278,11 @@ public:
     // presenter (generated interval or real-only).
     FgSessionResult OnPresent(const FgFramePacket& packet);
     // A game frame the adapter core shows without generation (its real-only reasons: menu flag, FG off, missing or
-    // mismatched inputs, epoch change, executor refused). The session presents it real-only on its presenter.
-    FgSessionResult OnGameFrameOnly(uint64_t frame_token, uint32_t adapter_real_only, uint32_t adapter_reason);
+    // mismatched inputs, epoch change, executor refused). The session presents it real-only on its presenter;
+    // game_colour (optional) is the game's back buffer, which the executor copies into a reserved slot for presenters
+    // that show slot images (FgRealDispatchDesc::game_colour).
+    FgSessionResult OnGameFrameOnly(uint64_t frame_token, uint32_t adapter_real_only, uint32_t adapter_reason,
+                                    const FgTextureRef* game_colour = nullptr);
 
     // Resize in two steps: BeginResize stops admission (pending presents are cancelled, leases stay held);
     // CompleteResize passes the forwarded swap-chain resize result through. PresenterBusy while old work is in flight
@@ -312,7 +319,8 @@ private:
     FgSessionResult Lose(FgSessionResult r);
     void Log(const std::string& line);
     FgTicks Now() const;
-    FgSessionResult PresentRealOnlyPlan(const FgIntervalPlan& plan, FgSessionResult r);
+    FgSessionResult PresentRealOnlyPlan(const FgIntervalPlan& plan, FgSessionResult r,
+                                        const FgTextureRef* game_colour = nullptr);
     FgSessionResult RunInterval(const FgFramePacket& packet, const FgIngestResult& ingest, const FgIntervalPlan& plan,
                                 bool copy_output, FgCopyReason copy_reason, FgSessionResult r, bool pre_failed);
     bool NeedsRebind(const FgFramePacket& packet) const;

@@ -38,7 +38,9 @@
 //  - The colour region's extent is the output size; the generated image is the output size at offset (0, 0).
 //  - net2's scalar input f is the index's intermediate time t.
 //  - A real-only interval shows the game frame from a slot the executor reserves (ReserveRealSlot) and fills with an
-//    exact copy, when the session recorded that frame's shared work; otherwise only the fence is signalled.
+//    exact copy, when the session recorded that frame's shared work, or, for an adapter-side real-only frame (FG off,
+//    menu flag, missing inputs), from the game's back buffer (FgRealDispatchDesc::game_colour: captured, then copied
+//    exactly) when it is a four-channel image of the output size; otherwise only the fence is signalled.
 //  - A frame that carries the distortion field is refused (not modelled) unless the setting ignores it.
 #include <cstdint>
 #include <memory>
@@ -118,11 +120,39 @@ void FgExecSyntheticWeights(uint32_t seed, FgExecWeights* out);
 // (clean/fg/reference/stages_full.py sig_table: single precision, subnormals flushed).
 void FgExecSigTable(std::vector<float>* out);
 
+// net2's path inside the Full presets (A / B).
+//  - Fast (default): 27 launches on the matrix unit, tier B (clean/dx12/kernels/fg_net2_mconv.hlsl: one matrix
+//    instruction per chunk in net2's chunk order, the accumulator rounded to float16 after every chunk; the 2x
+//    upsample of L12 / L13 / L24 / L25 staged inside the convolution, each head layer as one launch) and
+//    fg_net2_upwarp.hlsl (head upsample + warp-merge, exact). Only the chunk sums differ from the CPU reference.
+//  - Exact: the 38-launch chain of fg_net2_conv / _up2 / _merge / _warp, bit-exact to the CPU reference (validation).
+enum class FgNet2Path : uint32_t { Fast = 0, Exact = 1 };
+const char* FgNet2PathName(FgNet2Path p);
+
+// One launch of the fast net2 plan for a net2 grid (CPU side, tested on its own): the kernel variant chosen for the
+// layer (clean/fg/runner/fg_net2_mma.py variant()), its workgroup count and the conv grid.
+struct FgNet2FastLaunch {
+    uint32_t layer = 0;       // 1..25, 0: the input merge, 26: the upwarp
+    const char* kernel = "";  // DXIL name
+    uint32_t groups = 0;      // workgroups
+    uint32_t H = 0, W = 0;    // conv grid
+};
+// The 27 launches for a W2 x H2 net2 grid (multiples of 16); false when a layer has no fast variant.
+bool FgNet2FastPlan(uint32_t W2, uint32_t H2, std::vector<FgNet2FastLaunch>* out);
+// net2's canonical float16 weights [cout][9][cw] -> the matrix unit's A fragments [cout / 16][9][cw / 16][32][8]
+// (zero-padded to whole 16-output tiles and 16-channel blocks); the bias padded to whole tiles.
+bool FgNet2SwizzleFast(const std::vector<uint8_t>& canonical, const std::vector<uint8_t>& bias, uint32_t cout,
+                       uint32_t cw, std::vector<uint8_t>* fragments, std::vector<uint8_t>* bias_padded);
+
+// The DXIL files (without ".dxil") an executor with these choices loads from FgD3d12ExecutorDesc::dxil_dir.
+std::vector<std::string> FgD3d12ExecutorKernelNames(bool enable_full, FgNet2Path net2);
+
 struct FgD3d12ExecutorDesc {
     std::string dxil_dir;                   // the folder holding <kernel>.dxil
     FgExecSettings settings;
     const FgExecWeights* weights = nullptr; // copied into the arena at Configure (may be released afterwards)
     bool enable_full = true;                // presets A / B: needs the Full / net2 kernels and net2's weights
+    FgNet2Path net2 = FgNet2Path::Fast;     // net2's path in presets A / B (only that path's kernels are loaded)
     uint32_t wait_ms = 2000;                // bounded waits (menu decision, allocator reuse, idle)
     uint32_t allocators = 24;               // command allocators in the ring
     bool keep_outputs = false;              // tests: keep a host copy of every image written into a slot
@@ -148,6 +178,8 @@ struct FgExecCounters {
     uint64_t configures = 0, shared = 0, indices = 0, copies = 0, real_endpoints = 0;
     uint64_t dispatches = 0, submissions = 0, menu_waits = 0, captures = 0;
     uint64_t lite_frames = 0, full_frames = 0;
+    uint64_t game_colour_copies = 0;   // real-only frames copied from the game's back buffer (no shared work)
+    uint64_t net2_fast = 0, net2_exact = 0;  // net2 recordings per path
 };
 
 class FgD3d12Executor final : public IFgKernelExecutor {
@@ -176,6 +208,14 @@ public:
     bool WaitIdle(uint32_t timeout_ms);
     // keep_outputs: waits idle and moves the host copies out (oldest first).
     bool TakeOutputs(std::vector<FgExecOutputRecord>* out);
+
+    // Diagnostics (configured executor with the Full path, off the present path): net2 alone on synthetic smooth
+    // inputs from `seed` with scalar input t, on the configured path; its output (net2 grid x 8 float16, the output
+    // buffer filled with 0x5A5A first) and, with runs > 0, the mean GPU time of `runs` timed recordings after one
+    // warm-up (device timestamps around net2's launches; -1 when the queue has none). half_last: the last launch on
+    // half of its workgroups (negative control). Waits idle; Refused with a reason otherwise.
+    FgExecResult Net2SelfTest(uint32_t seed, float t, uint32_t runs, bool half_last, std::vector<uint16_t>* out,
+                              double* gpu_ms);
 
     struct Impl;
 

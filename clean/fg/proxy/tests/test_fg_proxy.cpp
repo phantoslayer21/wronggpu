@@ -527,8 +527,13 @@ void TestDefaultOffForwardsEverything() {
 
 void TestReleaseGateForwardsEverything() {
     FgProxyConfig cfg = QualifiedConfig();
-    cfg.modes_qualified = kFgModesQualified;  // the shipped gate
+    // the shipped gate is closed (a developer build with WRONGGPU_FG_DEV_QUALIFIED opens it; the closed gate's
+    // behaviour is still checked there)
+    CHECK(kFgModesQualified == (WG_FG_MODES_QUALIFIED != 0));
+#if !WG_FG_MODES_QUALIFIED
     CHECK(!kFgModesQualified);
+#endif
+    cfg.modes_qualified = false;
     Rig rig(cfg);
     CHECK(rig.proxy.route_reason() == WG_FG_REASON_ROUTE_NOT_QUALIFIED);
     for (int i = 0; i < 5; ++i) CHECK(DriveFeature(rig, kFeatFg) == 4);
@@ -1196,7 +1201,10 @@ void TestRuntimeContractBridge() {
     CHECK(packet.generated_count == 5 && packet.preset == wgfg::FgPreset::C && packet.optional_present == 0x5);
     CHECK(packet.motion.resource == Res(1) && packet.optional[2].resource == Res(5));
     CHECK(create.max_generated == 5 && create.presenter_mode == 0);
-    CHECK(!wgfg::kFgModesQualified && kFgModesQualified == wgfg::kFgModesQualified);
+    CHECK(kFgModesQualified == wgfg::kFgModesQualified);
+#if !WG_FG_MODES_QUALIFIED
+    CHECK(!wgfg::kFgModesQualified);
+#endif
 }
 #endif
 

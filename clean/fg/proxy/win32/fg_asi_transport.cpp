@@ -36,6 +36,10 @@ struct FgAsiTransport::Impl {
     uint32_t fg_feature = WG_FEAT_FRAME_GENERATION;
     std::string fn_options, fn_state;
     IFgPresentCallback* presenter = nullptr;  // behind the present bridge (null: the bridge presents itself)
+    FgPresentRouteFn present_route = nullptr;
+    void* present_route_ctx = nullptr;
+    FgFactoryNoteFn factory_note = nullptr;
+    void* factory_note_ctx = nullptr;
     FgPresentOwners* owners = nullptr;
     FgLogFn log = nullptr;
     void* log_ctx = nullptr;
@@ -595,9 +599,17 @@ private:
                     d.backbuffer.height = sd.Height;
                     d.backbuffer.rect = WgFgRect{0, 0, sd.Width, sd.Height};
                 }
-                // the buffer being presented (the chain keeps its own reference; the core only reads the pointer)
+                // the buffer being presented (the chain keeps its own reference; the core only reads the pointer); a
+                // presenter that serves the game-facing buffers (a facade) names the one the game rendered
                 void* buf = nullptr;
-                if (SUCCEEDED(sc->GetBuffer(sc->GetCurrentBackBufferIndex(), __uuidof(ID3D12Resource), &buf)) && buf) {
+                UINT fi = 0;
+                HRESULT fhr = E_FAIL;
+                if (r.presenter && r.presenter->CurrentBackBufferIndex(&fi) &&
+                    r.presenter->GetBuffer(fi, __uuidof(ID3D12Resource), &buf, &fhr) && SUCCEEDED(fhr) && buf) {
+                    d.backbuffer.resource = buf;
+                    static_cast<IUnknown*>(buf)->Release();
+                } else if (SUCCEEDED(sc->GetBuffer(sc->GetCurrentBackBufferIndex(), __uuidof(ID3D12Resource), &buf)) &&
+                           buf) {
                     d.backbuffer.resource = buf;
                     static_cast<IUnknown*>(buf)->Release();
                 }
@@ -608,7 +620,10 @@ private:
             WgFgPresentResult res = {};
             res.struct_size = sizeof(res);
             res.abi_version = WG_FG_ADAPTER_ABI_VERSION;
-            r.core->present(&d, &res);
+            if (r.present_route)
+                r.present_route(r.present_route_ctx, r.core, &d, &res);
+            else
+                r.core->present(&d, &res);
             r.codec->note_present();
             switch (res.status) {
                 case WG_FG_PRESENT_GENERATE: g_bridge_ctr.generate.fetch_add(1); break;
@@ -635,8 +650,17 @@ public:
         g_bridge_ctr.chains_created.fetch_add(1);
         FgAsiTransport::Impl* r = g_route.load();
         if (!r || !chain) return;
-        if (chain->Attach(&g_present_bridge, r->core, r->owners, WG_FG_OWNER_SWAPCHAIN_WRAPPER) == WG_FG_REASON_NONE)
+        if (chain->Attach(&g_present_bridge, r->core, r->owners, WG_FG_OWNER_SWAPCHAIN_WRAPPER) == WG_FG_REASON_NONE) {
             g_bridge_ctr.chains_attached.fetch_add(1);
+            if (r->presenter) r->presenter->Attached(chain->Inner(), chain->Queue());
+        }
+    }
+    UINT ExtraCreateFlags(HWND, const DXGI_SWAP_CHAIN_DESC1& desc) override {
+        InFlight in;
+        FgAsiTransport::Impl* r = g_route.load();
+        // only while the chain would be claimed (FG taken): a pass-through chain is created exactly as the game asked
+        if (!r || !r->presenter || !r->core || !r->core->fg_taken()) return 0;
+        return r->presenter->ExtraSwapChainFlags(desc);
     }
 };
 
@@ -670,6 +694,7 @@ HRESULT WINAPI H_CreateFactory2(UINT flags, REFIID riid, void** out) {
     if (FAILED(hr) || !r || !out || !*out) return hr;
     try {
         HookFactory(*r, static_cast<IUnknown*>(*out));
+        if (r->factory_note) r->factory_note(r->factory_note_ctx, r->core, static_cast<IUnknown*>(*out));
     } catch (...) {
         g_ctr.codec_failures.fetch_add(1);
     }
@@ -781,6 +806,7 @@ const char* FgInstallResultWord(uint32_t r) {
         case kFgNothingToPatch: return "no importer names a hooked role (nothing patched)";
         case kFgAlreadyActive: return "another transport is active (nothing changed)";
         case kFgNullArgument: return "null argument";
+        case kFgRuntimeMissing: return "the FG model or kernels are missing or invalid (nothing patched)";
         default: return "?";
     }
 }
@@ -1036,6 +1062,10 @@ uint32_t FgAsiTransport::install(const FgAsiConfig& cfg) {
         impl_->fn_options = cfg.imports.fn_options;
         impl_->fn_state = cfg.imports.fn_state;
         impl_->presenter = cfg.presenter;
+        impl_->present_route = cfg.present_route;
+        impl_->present_route_ctx = cfg.present_route_ctx;
+        impl_->factory_note = cfg.factory_note;
+        impl_->factory_note_ctx = cfg.factory_note_ctx;
         impl_->owners = cfg.owners;
         impl_->log = cfg.log;
         impl_->log_ctx = cfg.log_ctx;

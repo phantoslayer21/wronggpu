@@ -16,8 +16,8 @@ namespace wgfg {
 inline constexpr uint32_t kFgAbiVersion = 1;
 
 // The release gate: no FG mode is advertised until the end-to-end oracle gate (F5) and a qualified presenter pass.
-// FgAdvertisedMaxGenerated() reports 0 while this is false.
-inline constexpr bool kFgModesQualified = false;
+// FgAdvertisedMaxGenerated() reports 0 while this is false. Only a developer test build opens it (fg_limits.h).
+inline constexpr bool kFgModesQualified = WG_FG_MODES_QUALIFIED != 0;
 
 enum class FgPreset : uint32_t {
     A = 0,  // full blend, UI recomposition off

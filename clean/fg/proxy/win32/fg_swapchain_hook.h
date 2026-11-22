@@ -93,6 +93,11 @@ public:
     virtual bool FrameLatencyWaitableObject(HANDLE*) { return false; }
     // the callback will not be called again (detach, a fault, or the chain's last release)
     virtual void Detached() {}
+    // F9: a chain was just attached to this callback (the real chain, its creation queue; no references added)
+    virtual void Attached(IDXGISwapChain4*, IUnknown*) {}
+    // F9: swap-chain flags the callback needs on a chain created while it would attach (for example the frame-latency
+    // waitable object of a DXGI flip presenter); the hook ORs them into the creation and every resize. Default none.
+    virtual UINT ExtraSwapChainFlags(const DXGI_SWAP_CHAIN_DESC1&) { return 0; }
 };
 
 struct FgSwapChainStats {
@@ -131,6 +136,10 @@ public:
     FgSwapChainStats Stats() const;
     IDXGISwapChain4* Inner() const { return inner_; }  // no reference added
     IUnknown* Queue() const { return queue_; }
+    // Flags the creation added to the game's (FgSwapChainHook, IFgSwapChainSink::ExtraCreateFlags): ORed into every
+    // ResizeBuffers / ResizeBuffers1 so the chain keeps them.
+    void SetExtraFlags(UINT flags) { extra_flags_.store(flags); }
+    UINT ExtraFlags() const { return extra_flags_.load(); }
     ULONG RefCount() const { return static_cast<ULONG>(refs_.load()); }
 
     // ---- IUnknown ----
@@ -205,6 +214,7 @@ private:
     FgLogFn log_;
     void* log_ctx_;
     std::atomic<long> refs_{1};
+    std::atomic<UINT> extra_flags_{0};
 
     mutable std::mutex mu_;
     IFgPresentCallback* callback_ = nullptr;
@@ -224,6 +234,9 @@ class IFgSwapChainSink {
 public:
     virtual ~IFgSwapChainSink() = default;
     virtual void Created(FgSwapChain* chain, HWND hwnd, const DXGI_SWAP_CHAIN_DESC1* desc) = 0;
+    // F9: flags to add to the creation (0: the game's description unchanged). A creation that fails with them is
+    // retried once with the game's own description (the chain then carries no extra flags).
+    virtual UINT ExtraCreateFlags(HWND, const DXGI_SWAP_CHAIN_DESC1&) { return 0; }
 };
 
 using FgCreateForHwndFn = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory2* self, IUnknown* device, HWND hwnd,

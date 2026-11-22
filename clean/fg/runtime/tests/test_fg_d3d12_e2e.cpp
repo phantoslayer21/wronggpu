@@ -10,13 +10,18 @@
 //   test_fg_d3d12_e2e --gpu --dxil <dir>    adds the headless GPU leg (no window): a synthetic game drives the game
 //                                           adapter core, the FG session and this executor on the D3D12 device with
 //                                           the composition back end (unbound surface) and the DXGI back end
-//                                           (composition swap chain): preset C 2x and 6x, preset A 2x, a menu frame,
-//                                           and a broken kernel folder that must be refused
+//                                           (composition swap chain): preset C 2x and 6x, presets A / B 2x, a menu
+//                                           frame, net2's exact path, generation switched off for some frames
+//                                           (real-only from the back buffer), the swap chain released right after
+//                                           teardown, net2's fast path against the exact one (tolerance, determinism,
+//                                           a negative control, GPU time at 1080p / 1440p), and a broken kernel folder
+//                                           that must be refused
 #include <windows.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -246,6 +251,83 @@ FgCreateDesc CpuCreate(uint32_t w, uint32_t h) {
     c.max_generated = 5;
     for (uint32_t i = 0; i < kFgOptCount; ++i) c.optional[i] = FgOptionalDecl::May;
     return c;
+}
+
+// net2's fast path: the 27-launch plan (variants as clean/fg/runner/fg_net2_mma.py variant() picks them for the same
+// grids), the kernel lists per path, and the A-fragment swizzle on constructed weights.
+void TestNet2FastPlan() {
+    g_case = "net2-fast-plan";
+    std::vector<FgNet2FastLaunch> p;
+    CHECK(FgNet2FastPlan(480, 272, &p) && p.size() == 27);
+    const char* const want480[27] = {
+        "fg_net2_merge",       "fg_net2_mconv_m2b1",  "fg_net2_mconv_m2b2",  "fg_net2_mconv_m1b2s", "fg_net2_mconv_m1b4s",
+        "fg_net2_mconv_m1b4s", "fg_net2_mconv_m1b4s", "fg_net2_mconv_m1b4s", "fg_net2_mconv_m1b4s", "fg_net2_mconv_m1b4s",
+        "fg_net2_mconv_m1b4s", "fg_net2_mconv_m1b4s", "fg_net2_mconv_m3b4u", "fg_net2_mconv_m1b2u", "fg_net2_upwarp",
+        "fg_net2_mconv_m1b2",  "fg_net2_mconv_m2b1",  "fg_net2_mconv_m1b2s", "fg_net2_mconv_m1b2s", "fg_net2_mconv_m1b2s",
+        "fg_net2_mconv_m1b2s", "fg_net2_mconv_m1b2s", "fg_net2_mconv_m1b2s", "fg_net2_mconv_m1b2s", "fg_net2_mconv_m1b2s",
+        "fg_net2_mconv_m3b2u", "fg_net2_mconv_m1b1u"};
+    bool names = p.size() == 27;
+    for (size_t i = 0; names && i < 27; ++i) names = std::strcmp(p[i].kernel, want480[i]) == 0;
+    CHECK(names);
+    if (p.size() == 27) {
+        CHECK(p[0].groups == 5100 && p[1].groups == 30 * 17 && p[13].layer == 13 && p[13].groups == 15 * 9 * 3);
+        CHECK(p[14].layer == 26 && p[14].groups == 510 && p[26].layer == 25 && p[26].groups == 30 * 17 * 3);
+        CHECK(p[12].H == 68 && p[12].W == 120 && p[25].H == 136 && p[25].W == 240);
+    }
+    // a small grid takes the 128-lane one-tile variants where the layer has one (L2, L14)
+    CHECK(FgNet2FastPlan(48, 32, &p) && p.size() == 27);
+    if (p.size() == 27) {
+        CHECK(std::strcmp(p[2].kernel, "fg_net2_mconv_m1b2s") == 0 && std::strcmp(p[15].kernel, "fg_net2_mconv_m1b2s") == 0);
+        CHECK(std::strcmp(p[1].kernel, "fg_net2_mconv_m2b1") == 0 && std::strcmp(p[26].kernel, "fg_net2_mconv_m1b1u") == 0);
+    }
+    CHECK(!FgNet2FastPlan(470, 272, &p) && !FgNet2FastPlan(480, 0, &p));
+    // the kernel lists: only the chosen path's net2 kernels (the input merge is in both)
+    const std::vector<std::string> fast = FgD3d12ExecutorKernelNames(true, FgNet2Path::Fast);
+    const std::vector<std::string> exact = FgD3d12ExecutorKernelNames(true, FgNet2Path::Exact);
+    const std::vector<std::string> lite = FgD3d12ExecutorKernelNames(false, FgNet2Path::Fast);
+    auto has = [](const std::vector<std::string>& v, const char* n) {
+        for (const std::string& s : v)
+            if (s == n) return true;
+        return false;
+    };
+    CHECK(has(fast, "fg_net2_mconv_m3b4u") && has(fast, "fg_net2_upwarp") && has(fast, "fg_net2_merge") &&
+          !has(fast, "fg_net2_conv") && !has(fast, "fg_net2_warp"));
+    CHECK(has(exact, "fg_net2_conv") && has(exact, "fg_net2_up2") && has(exact, "fg_net2_merge") &&
+          !has(exact, "fg_net2_mconv_m1b1") && !has(exact, "fg_net2_upwarp"));
+    CHECK(fast.size() == 36 + 13 + 1 && exact.size() == 36 + 4 && lite.size() == 31);
+    CHECK(!has(lite, "fg_full_blend") && !has(lite, "fg_net2_merge") && has(lite, "fg_mpair_d0"));
+    // swizzle: 20 outputs (2 tiles, zero-padded to 32) x 18 channels (2 blocks, padded to 32); w[o][t][c] = o*1000 +
+    // t*32 + c as float16 bits (distinct constructed values)
+    const uint32_t cout = 20, cw = 18;
+    std::vector<uint8_t> w(2ull * cout * 9 * cw), b(2ull * cout), frag, bp;
+    for (uint32_t o = 0; o < cout; ++o)
+        for (uint32_t t = 0; t < 9; ++t)
+            for (uint32_t c = 0; c < cw; ++c) {
+                const uint16_t v = static_cast<uint16_t>(o * 1000 + t * 32 + c + 1);
+                const size_t i = (static_cast<size_t>(o) * 9 + t) * cw + c;
+                w[2 * i] = static_cast<uint8_t>(v & 0xFF);
+                w[2 * i + 1] = static_cast<uint8_t>(v >> 8);
+            }
+    for (uint32_t o = 0; o < cout; ++o) b[2 * o] = static_cast<uint8_t>(o + 1);
+    CHECK(FgNet2SwizzleFast(w, b, cout, cw, &frag, &bp));
+    CHECK(frag.size() == 2ull * 2 * 9 * 2 * 2 * 16 * 8 && bp.size() == 64);
+    bool sw = frag.size() == 2ull * 2 * 9 * 2 * 2 * 16 * 8;
+    for (uint32_t mt = 0; sw && mt < 2; ++mt)
+        for (uint32_t t = 0; t < 9; ++t)
+            for (uint32_t cb = 0; cb < 2; ++cb)
+                for (uint32_t hh = 0; hh < 2; ++hh)
+                    for (uint32_t m = 0; m < 16; ++m)
+                        for (uint32_t j = 0; j < 8; ++j) {
+                            const size_t at = ((((static_cast<size_t>(mt) * 9 + t) * 2 + cb) * 2 + hh) * 16 + m) * 8 + j;
+                            const uint32_t o = 16 * mt + m, c = 16 * cb + 8 * hh + j;
+                            const uint16_t got = static_cast<uint16_t>(frag[2 * at] | (frag[2 * at + 1] << 8));
+                            const uint16_t want = (o < cout && c < cw) ? static_cast<uint16_t>(o * 1000 + t * 32 + c + 1)
+                                                                       : uint16_t(0);
+                            if (got != want) sw = false;
+                        }
+    CHECK(sw);
+    CHECK(bp[0] == 1 && bp[38] == 20 && bp[40] == 0 && bp[62] == 0);
+    CHECK(!FgNet2SwizzleFast(w, b, cout, 40, &frag, &bp));  // 3 blocks: no variant
 }
 
 void WriteFile(const std::string& path, const char* data, size_t n) {
@@ -730,12 +812,17 @@ struct RunResult {
 };
 
 // One configuration end to end. Returns what happened; every check is inside.
+// off_from .. off_to - 1: game frames with frame generation switched off in the game's options (the adapter core
+// answers real-only, reason disabled): the session presents them real-only through OnGameFrameOnly, and the executor
+// copies the game's back buffer into a reserved slot.
 RunResult RunPipeline(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights, FgPreset preset, uint32_t n,
-                      bool dxgi, DXGI_FORMAT slot_format, int frames, int menu_frame) {
+                      bool dxgi, DXGI_FORMAT slot_format, int frames, int menu_frame, FgNet2Path net2 = FgNet2Path::Fast,
+                      int off_from = -1, int off_to = -1) {
     RunResult rr;
     FgD3d12ExecutorDesc ed;
     ed.dxil_dir = dxil;
     ed.weights = &weights;
+    ed.net2 = net2;
     ed.settings.menu_detection = true;
     ed.keep_outputs = true;
     FgD3d12Executor exec(ed);
@@ -826,9 +913,15 @@ RunResult RunPipeline(Gpu& gpu, const std::string& dxil, const FgExecWeights& we
     const FgTicks period = 333333;  // 30 game frames per second
     int errors = 0;
     bool menu_seen = false;
+    int off_frames = 0;
     for (int f = 0; f < frames; ++f) {
         const uint64_t tok = static_cast<uint64_t>(f) + 1;
         const bool menu = f == menu_frame;
+        if (f == off_from || f == off_to) {
+            o.enable = f == off_from ? 0u : 1u;
+            proxy->set_options(WG_FEAT_FRAME_GENERATION, 1, &o, &o);
+        }
+        if (f >= off_from && f < off_to) ++off_frames;
         CHECK(game.Upload(static_cast<uint32_t>(f), menu, f == 0));
         WgFgTag tags[4] = {};
         ID3D12Resource* res[4] = {game.motion.Get(), game.depth.Get(), game.hudless.Get(), game.ui.Get()};
@@ -922,7 +1015,15 @@ RunResult RunPipeline(Gpu& gpu, const std::string& dxil, const FgExecWeights& we
                 static_cast<unsigned long long>(st.displayed_real), static_cast<unsigned long long>(st.displayed_generated),
                 static_cast<unsigned long long>(st.dropped_late), static_cast<unsigned long long>(st.dropped_pressure),
                 static_cast<unsigned long long>(st.cancelled), static_cast<unsigned long long>(st.refused_calls));
-    CHECK(sc.shared_records == static_cast<uint64_t>(frames) && ec.shared == static_cast<uint64_t>(frames));
+    std::printf("    real-only from the back buffer: %llu (frames with generation off: %d), net2 fast %llu exact %llu\n",
+                static_cast<unsigned long long>(ec.game_colour_copies), off_frames,
+                static_cast<unsigned long long>(ec.net2_fast), static_cast<unsigned long long>(ec.net2_exact));
+    // every game frame with generation on had its shared work; each one with it off was copied from the back buffer
+    const uint64_t on_frames = static_cast<uint64_t>(frames - off_frames);
+    CHECK(sc.shared_records == on_frames && ec.shared == on_frames);
+    CHECK(ec.game_colour_copies == static_cast<uint64_t>(off_frames));
+    if (preset != FgPreset::C) CHECK((net2 == FgNet2Path::Fast ? ec.net2_fast : ec.net2_exact) > 0);
+    CHECK((net2 == FgNet2Path::Fast ? ec.net2_exact : ec.net2_fast) == 0);
     CHECK(sc.index_records > 0 && ec.indices == sc.index_records);
     CHECK(exec.CompletedComputeValue() == exec.LastComputeValue());
     // every generated / copied image reached the display path or was dropped late by the presenter (explicitly)
@@ -1010,9 +1111,15 @@ RunResult RunPipeline(Gpu& gpu, const std::string& dxil, const FgExecWeights& we
     std::printf("    destroyed: %s\n", FgSessionErrorName(dr.error));
     std::fflush(stdout);
     proxy.reset();
-    // the queue's last presents and copies finish before the swap chain goes away
-    CHECK(gpu.Wait());
+    // the DXGI back end drained the queue past its last copy and present when it was destroyed (FgDxgiPresenter's
+    // destructor), so the swap chain goes away at once, without a wait here (under the debug layer this used to crash)
     headless.chain.Reset();
+    CHECK(gpu.Wait());
+    const int64_t dbg2 = gpu.DebugErrors();
+    if (dbg2 >= 0) {
+        std::printf("    debug layer errors after teardown: %lld\n", static_cast<long long>(dbg2));
+        CHECK(dbg2 == 0);
+    }
     return rr;
 }
 
@@ -1034,6 +1141,115 @@ bool CopyDir(const std::string& from, const std::string& to, const char* broken,
     } while (FindNextFileA(h, &fd));
     FindClose(h);
     return true;
+}
+
+// net2 alone inside a configured executor (FgD3d12Executor::Net2SelfTest) on synthetic smooth inputs: one run, a
+// second run (deterministic: same bytes), and optionally `runs` timed recordings.
+struct Net2Run {
+    bool ok = false;
+    std::vector<uint16_t> out;
+    bool deterministic = false;
+    double gpu_ms = -1;
+};
+Net2Run RunNet2(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights, FgNet2Path path, uint32_t w,
+                uint32_t h, uint32_t runs, bool half_last) {
+    Net2Run r;
+    FgD3d12ExecutorDesc ed;
+    ed.dxil_dir = dxil;
+    ed.weights = &weights;
+    ed.net2 = path;
+    FgD3d12Executor exec(ed);
+    FgCreateDesc c = CpuCreate(w, h);
+    c.device = gpu.device.Get();
+    c.queue = gpu.queue.Get();
+    c.adapter_luid.low = gpu.luid.LowPart;
+    c.adapter_luid.high = gpu.luid.HighPart;
+    c.output_format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    c.preset = FgPreset::A;
+    if (exec.Configure(c, 3) != FgExecResult::Ok) {
+        std::printf("    configure: %s (%s)\n", FgExecRefusalName(exec.LastRefusal()), exec.LastWhy().c_str());
+        return r;
+    }
+    std::vector<uint16_t> again;
+    double ms = -1;
+    if (exec.Net2SelfTest(7, 0.4375f, 0, half_last, &r.out, nullptr) != FgExecResult::Ok ||
+        exec.Net2SelfTest(7, 0.4375f, runs, false, &again, &ms) != FgExecResult::Ok) {
+        std::printf("    self-test: %s (%s)\n", FgExecRefusalName(exec.LastRefusal()), exec.LastWhy().c_str());
+        return r;
+    }
+    r.deterministic = half_last || again == r.out;
+    r.gpu_ms = ms;
+    r.ok = true;
+    return r;
+}
+
+struct Net2Diff {
+    size_t values = 0, nonfinite = 0, unwritten = 0, over_step = 0;
+    double max_abs = 0, max_ref = 0, rel = 0;
+};
+// fast against exact: the largest absolute difference over the exact output's largest magnitude, values more than one
+// float16 step apart, values the fast run left at the 0x5A5A fill, non-finite values
+Net2Diff CompareNet2(const std::vector<uint16_t>& fast, const std::vector<uint16_t>& exact) {
+    Net2Diff d;
+    d.values = std::min(fast.size(), exact.size());
+    for (size_t i = 0; i < d.values; ++i) {
+        const float a = FgExecHalfToFloat(fast[i]), b = FgExecHalfToFloat(exact[i]);
+        if (fast[i] == 0x5A5A && exact[i] != 0x5A5A) ++d.unwritten;
+        if (!std::isfinite(a) || !std::isfinite(b)) {
+            ++d.nonfinite;
+            continue;
+        }
+        d.max_abs = std::max(d.max_abs, static_cast<double>(std::fabs(a - b)));
+        d.max_ref = std::max(d.max_ref, static_cast<double>(std::fabs(b)));
+        const int sa = (fast[i] & 0x8000) ? -(fast[i] & 0x7FFF) : (fast[i] & 0x7FFF);
+        const int sb = (exact[i] & 0x8000) ? -(exact[i] & 0x7FFF) : (exact[i] & 0x7FFF);
+        if (std::abs(sa - sb) > 1) ++d.over_step;
+    }
+    d.rel = d.max_ref > 0 ? d.max_abs / d.max_ref : 0;
+    return d;
+}
+
+// The fast (tier B, matrix unit) and the exact net2 paths inside the executor: same synthetic inputs and weights, the
+// fast output within tolerance of the exact one (tier B differs only in the chunk sums), both deterministic, every
+// value written; a fast run whose last launch covers half its workgroups must be caught; GPU time of both paths at the
+// 1080p and 1440p net2 grids (information; device timestamps around net2's launches after one warm-up).
+void TestNet2Paths(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights) {
+    struct Size {
+        const char* label;
+        uint32_t w, h, fast_runs, exact_runs;
+    };
+    const Size sizes[] = {{"320x180", 320, 180, 0, 0}, {"1080p", 1920, 1080, 20, 3}, {"1440p", 2560, 1440, 20, 3}};
+    const double kTolerance = 3e-2;  // largest |fast - exact| over the exact output's largest magnitude
+    for (const Size& s : sizes) {
+        const std::string case_name = std::string("gpu-net2-") + s.label;
+        g_case = case_name.c_str();
+        std::printf("  net2 fast vs exact, %s output\n", s.label);
+        const Net2Run fast = RunNet2(gpu, dxil, weights, FgNet2Path::Fast, s.w, s.h, s.fast_runs, false);
+        const Net2Run exact = RunNet2(gpu, dxil, weights, FgNet2Path::Exact, s.w, s.h, s.exact_runs, false);
+        CHECK(fast.ok && exact.ok);
+        if (!fast.ok || !exact.ok) continue;
+        CHECK(fast.deterministic && exact.deterministic);
+        const Net2Diff d = CompareNet2(fast.out, exact.out);
+        std::printf("    values %zu: max |fast - exact| %.5g, max |exact| %.5g, rel %.3g; > 1 float16 step %zu (%.3f %%); "
+                    "unwritten %zu, non-finite %zu; deterministic fast %d exact %d\n",
+                    d.values, d.max_abs, d.max_ref, d.rel, d.over_step,
+                    d.values ? 100.0 * static_cast<double>(d.over_step) / static_cast<double>(d.values) : 0.0,
+                    d.unwritten, d.nonfinite, fast.deterministic ? 1 : 0, exact.deterministic ? 1 : 0);
+        CHECK(d.values > 0 && d.unwritten == 0 && d.nonfinite == 0 && d.max_ref > 0 && d.rel <= kTolerance);
+        if (s.fast_runs || s.exact_runs)
+            std::printf("    GPU time (UNCHECKED timing, information only): fast %.3f ms (%u runs), exact %.3f ms "
+                        "(%u runs)\n",
+                        fast.gpu_ms, s.fast_runs, exact.gpu_ms, s.exact_runs);
+        if (s.fast_runs == 0) {
+            // negative control: the fast chain's last launch on half of its workgroups must be caught
+            const Net2Run bad = RunNet2(gpu, dxil, weights, FgNet2Path::Fast, s.w, s.h, 0, true);
+            CHECK(bad.ok);
+            const Net2Diff b = CompareNet2(bad.out, exact.out);
+            std::printf("    control (last launch on half its workgroups): unwritten %zu, rel %.3g -> %s\n", b.unwritten,
+                        b.rel, (b.unwritten > 0 || b.rel > kTolerance) ? "caught" : "MISSED");
+            CHECK(b.unwritten > 0 || b.rel > kTolerance);
+        }
+    }
 }
 
 void TestBrokenKernels(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights, const std::string& scratch) {
@@ -1085,6 +1301,7 @@ int main(int argc, char** argv) {
     TestHalf();
     TestSigTable();
     TestSchedule();
+    TestNet2FastPlan();
     TestRefusals(weights);
     std::printf("cpu: %d checks, %d failed\n", g_checks, g_failed);
     if (gpu) {
@@ -1103,26 +1320,41 @@ int main(int argc, char** argv) {
                 DXGI_FORMAT fmt;
                 int menu;
                 int frames;
+                FgNet2Path net2;
+                int off_from, off_to;
             };
+            const FgNet2Path kF = FgNet2Path::Fast, kE = FgNet2Path::Exact;
             const Cfg cfgs[] = {
-                {"gpu-lite-2x-composition", FgPreset::C, 1, false, DXGI_FORMAT_B8G8R8A8_UNORM, 8, 14},
-                {"gpu-lite-6x-composition", FgPreset::C, 5, false, DXGI_FORMAT_B8G8R8A8_UNORM, 6, 8},
-                {"gpu-full-a-2x-composition", FgPreset::A, 1, false, DXGI_FORMAT_B8G8R8A8_UNORM, -1, 14},
-                {"gpu-lite-2x-dxgi", FgPreset::C, 1, true, DXGI_FORMAT_R16G16B16A16_FLOAT, 8, 14},
-                {"gpu-lite-6x-dxgi", FgPreset::C, 5, true, DXGI_FORMAT_R16G16B16A16_FLOAT, 8, 14},
-                {"gpu-full-a-2x-dxgi", FgPreset::A, 1, true, DXGI_FORMAT_R16G16B16A16_FLOAT, -1, 14},
+                {"gpu-lite-2x-composition", FgPreset::C, 1, false, DXGI_FORMAT_B8G8R8A8_UNORM, 8, 14, kF, -1, -1},
+                {"gpu-lite-6x-composition", FgPreset::C, 5, false, DXGI_FORMAT_B8G8R8A8_UNORM, 6, 8, kF, -1, -1},
+                {"gpu-full-a-2x-composition", FgPreset::A, 1, false, DXGI_FORMAT_B8G8R8A8_UNORM, -1, 14, kF, -1, -1},
+                {"gpu-lite-2x-real-only-composition", FgPreset::C, 1, false, DXGI_FORMAT_B8G8R8A8_UNORM, -1, 12, kF, 4,
+                 7},
+                {"gpu-lite-2x-dxgi", FgPreset::C, 1, true, DXGI_FORMAT_R16G16B16A16_FLOAT, 8, 14, kF, -1, -1},
+                {"gpu-lite-6x-dxgi", FgPreset::C, 5, true, DXGI_FORMAT_R16G16B16A16_FLOAT, 8, 14, kF, -1, -1},
+                {"gpu-full-a-2x-dxgi", FgPreset::A, 1, true, DXGI_FORMAT_R16G16B16A16_FLOAT, -1, 14, kF, -1, -1},
+                {"gpu-full-b-2x-dxgi", FgPreset::B, 1, true, DXGI_FORMAT_R16G16B16A16_FLOAT, -1, 14, kF, -1, -1},
+                {"gpu-full-a-2x-exact-dxgi", FgPreset::A, 1, true, DXGI_FORMAT_R16G16B16A16_FLOAT, -1, 10, kE, -1, -1},
+                {"gpu-lite-6x-real-only-dxgi", FgPreset::C, 5, true, DXGI_FORMAT_R16G16B16A16_FLOAT, -1, 16, kF, 5,
+                 9},
+                {"gpu-full-a-2x-real-only-dxgi", FgPreset::A, 1, true, DXGI_FORMAT_R16G16B16A16_FLOAT, -1, 16, kF, 0,
+                 4},
             };
-            int ran_comp = 0, ran_dxgi = 0;
+            int ran_comp = 0, ran_dxgi = 0, want_comp = 0, want_dxgi = 0;
             for (const Cfg& c : cfgs) {
+                (c.dxgi ? want_dxgi : want_comp)++;
                 if (!only.empty() && std::string(c.name).find(only) == std::string::npos) continue;
                 g_case = c.name;
-                std::printf("  %s\n", c.name);
-                const RunResult r = RunPipeline(g, dxil, weights, c.preset, c.n, c.dxgi, c.fmt, c.frames, c.menu);
+                std::printf("  %s (net2 %s)\n", c.name, FgNet2PathName(c.net2));
+                const RunResult r = RunPipeline(g, dxil, weights, c.preset, c.n, c.dxgi, c.fmt, c.frames, c.menu,
+                                                c.net2, c.off_from, c.off_to);
                 if (r.ran) (c.dxgi ? ran_dxgi : ran_comp)++;
             }
             g_case = "gpu-backends";
-            std::printf("  configurations run: composition %d / 3, dxgi %d / 3\n", ran_comp, ran_dxgi);
-            if (only.empty()) CHECK(ran_comp == 3 && ran_dxgi == 3);  // both back ends ran every configuration
+            std::printf("  configurations run: composition %d / %d, dxgi %d / %d\n", ran_comp, want_comp, ran_dxgi,
+                        want_dxgi);
+            if (only.empty()) CHECK(ran_comp == want_comp && ran_dxgi == want_dxgi);  // every configuration ran
+            if (only.empty() || only.find("net2") != std::string::npos) TestNet2Paths(g, dxil, weights);
             if (only.empty()) TestBrokenKernels(g, dxil, weights, scratch);
         }
     }

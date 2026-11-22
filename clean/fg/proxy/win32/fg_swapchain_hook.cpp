@@ -367,6 +367,7 @@ HRESULT STDMETHODCALLTYPE FgSwapChain::Present1(UINT sync_interval, UINT flags, 
 // ---- resize, fullscreen, color space -------------------------------------------------------------------------------
 
 HRESULT STDMETHODCALLTYPE FgSwapChain::ResizeBuffers(UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags) {
+    flags |= extra_flags_.load();  // the creation's extra flags stay on the chain
     if (t_callback_depth > 0) return inner_->ResizeBuffers(count, width, height, format, flags);
     std::lock_guard<std::mutex> lock(mu_);
     pending_ = false;
@@ -388,6 +389,7 @@ HRESULT STDMETHODCALLTYPE FgSwapChain::ResizeBuffers(UINT count, UINT width, UIN
 
 HRESULT STDMETHODCALLTYPE FgSwapChain::ResizeBuffers1(UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags,
                                                       const UINT* node_masks, IUnknown* const* queues) {
+    flags |= extra_flags_.load();  // the creation's extra flags stay on the chain
     if (t_callback_depth > 0) return inner_->ResizeBuffers1(count, width, height, format, flags, node_masks, queues);
     std::lock_guard<std::mutex> lock(mu_);
     pending_ = false;
@@ -617,17 +619,37 @@ HRESULT STDMETHODCALLTYPE FgSwapChainHook::CreateForHwnd(IDXGIFactory2* self, IU
     if (!orig) return DXGI_ERROR_INVALID_CALL;
     if (t_creating > 0) return orig(self, device, hwnd, desc, fullscreen, restrict_to, out);
     HRESULT hr;
+    IFgSwapChainSink* sink = g_sink.load();
+    UINT extra = 0;
+    if (sink && desc) {
+        try {
+            extra = sink->ExtraCreateFlags(hwnd, *desc) & ~desc->Flags;
+        } catch (...) {
+            extra = 0;
+        }
+    }
     {
         CreatingScope creating;
-        hr = orig(self, device, hwnd, desc, fullscreen, restrict_to, out);
+        if (extra) {
+            DXGI_SWAP_CHAIN_DESC1 d = *desc;
+            d.Flags |= extra;
+            hr = orig(self, device, hwnd, &d, fullscreen, restrict_to, out);
+            if (FAILED(hr)) {
+                HookLog("fg swap chain: creation with the presenter's flags failed; created as the game asked");
+                extra = 0;
+                hr = orig(self, device, hwnd, desc, fullscreen, restrict_to, out);
+            }
+        } else {
+            hr = orig(self, device, hwnd, desc, fullscreen, restrict_to, out);
+        }
     }
     if (FAILED(hr) || !out || !*out) return hr;
     FgSwapChain* w = nullptr;
     if (FAILED(FgSwapChain::Create(*out, device, g_hook_log.load(), g_hook_log_ctx.load(), &w)) || !w)
         return hr;  // not an IDXGISwapChain4: the game keeps the real chain
+    w->SetExtraFlags(extra);
     *out = static_cast<IDXGISwapChain1*>(w);
     g_wrapped.fetch_add(1);
-    IFgSwapChainSink* sink = g_sink.load();
     if (sink) {
         try {
             sink->Created(w, hwnd, desc);

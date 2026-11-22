@@ -12,13 +12,21 @@
 // carries no binding for it and patches nothing. A second InitializeASI call does nothing. WrongGPU_FgShutdown puts
 // every redirected slot back;
 // WrongGPU_FgQuery reports what happened (the launcher and the tests read it).
+// F9: with a binding selected, the FG session host (fg_asi_session.h) checks the local FG model
+// (%LOCALAPPDATA%\WrongGPU\model\FG\model.wgcm) and the kernel folder (wronggpu-setup\fg-dxil next to this plugin)
+// before anything is patched; either failing: nothing is installed (kFgRuntimeMissing). Passing: the host is the
+// transport's presenter and present route (session, D3D12 executor, Windows presenter). fg_net2=exact (developer key,
+// not an FG settings key) selects net2's exact path for validation; the fast path is the default.
 // Log: wronggpu-fg.log in the game folder, one append per line.
 // Written for this project.
 #include "fg_asi_transport.h"
+#include "fg_asi_session.h"
 #include "fg_title_bindings.h"
 
+#include <memory>
 #include <new>
 
+#include "../../runtime/fg_d3d12_executor.h"
 #include "wg_state.h"
 
 namespace {
@@ -77,6 +85,41 @@ std::wstring ExeLeaf() {
 }
 
 FgSl214Codec* g_codec = nullptr;  // the selected binding's codec; never freed while the plugin is loaded
+FgAsiSessionHost* g_host = nullptr;  // the FG session host; never freed while the plugin is loaded
+
+std::string Utf8(const std::wstring& w) {
+    if (w.empty()) return std::string();
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+    std::string s(n > 0 ? static_cast<size_t>(n) : 0, '\0');
+    if (n > 0) WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), &s[0], n, nullptr, nullptr);
+    return s;
+}
+
+// This plugin's own folder (the kernel folder is next to it).
+std::wstring ModuleDir() {
+    HMODULE self = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(&ModuleDir), &self))
+        return ExeDir();
+    wchar_t buf[MAX_PATH * 2];
+    const DWORD n = GetModuleFileNameW(self, buf, MAX_PATH * 2);
+    if (!n || n >= MAX_PATH * 2) return ExeDir();
+    std::wstring w(buf, n);
+    const size_t slash = w.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? L"." : w.substr(0, slash);
+}
+
+std::wstring LocalAppData() {
+    wchar_t buf[MAX_PATH * 2];
+    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH * 2);
+    return (n > 0 && n < MAX_PATH * 2) ? std::wstring(buf, n) : std::wstring();
+}
+
+std::string RawValue(const wgstate::Settings& st, const char* key) {
+    for (const auto& kv : st.kv)
+        if (kv.first == key) return kv.second;
+    return std::string();
+}
 
 void Initialize() {
     const std::wstring dir = StateGameDir();
@@ -98,10 +141,43 @@ void Initialize() {
     // the qualified title binding for this exe, if this build carries one (else the transport patches nothing)
     FgTitleBinding binding;
     if (FgSelectShippedBinding(ExeLeaf(), &binding)) {
+        LogLine(nullptr, ("fg: title binding " + binding.id + " (" + binding.title + ")").c_str());
+        // the runtime the session needs, checked before anything is patched
+        FgAsiSessionConfig hc;
+        hc.settings = settings;
+        const std::wstring lad = LocalAppData();
+        hc.model_path = lad.empty() ? std::string() : Utf8(lad) + "\\WrongGPU\\model\\FG\\model.wgcm";
+        hc.dxil_dir = Utf8(ModuleDir()) + "\\wronggpu-setup\\fg-dxil";
+        const std::string net2 = RawValue(st, "fg_net2");
+        hc.net2_exact = net2 == "exact";
+        if (!net2.empty() && net2 != "exact" && net2 != "fast")
+            LogLine(nullptr, ("fg: fg_net2=" + net2 + " not used (fast or exact); the fast path stays").c_str());
+        hc.log = &LogLine;
+        std::unique_ptr<wgfg::FgExecWeights> weights(new (std::nothrow) wgfg::FgExecWeights());
+        std::string why;
+        if (!weights || !FgAsiSessionPrecheck(hc, weights.get(), &why)) {
+            g_result.store(kFgRuntimeMissing);
+            LogLine(nullptr, ("fg: " + why + "; no hooks installed").c_str());
+            return;
+        }
+        LogLine(nullptr, (std::string("fg: model and kernels checked (net2 ") + (hc.net2_exact ? "exact" : "fast") +
+                          ")").c_str());
+        g_host = new (std::nothrow) FgAsiSessionHost(hc, std::move(weights));
+        if (!g_host) {
+            g_result.store(kFgNullArgument);
+            return;
+        }
         FgApplyBinding(binding, &cfg);
         g_codec = new (std::nothrow) FgSl214Codec(binding.layout);
         cfg.codec = g_codec;
-        LogLine(nullptr, ("fg: title binding " + binding.id + " (" + binding.title + ")").c_str());
+        cfg.presenter = g_host;
+        cfg.present_route = &FgAsiSessionHost::Route;
+        cfg.present_route_ctx = g_host;
+        cfg.factory_note = &FgAsiSessionHost::FactoryNote;
+        cfg.factory_note_ctx = g_host;
+#if defined(WRONGGPU_FG_DEV_QUALIFIED) && WRONGGPU_FG_DEV_QUALIFIED
+        LogLine(nullptr, "fg: developer build: frame generation modes are taken without the release gate");
+#endif
     } else {
         LogLine(nullptr, "fg: this build carries no title binding for this game");
     }
@@ -112,7 +188,9 @@ void Initialize() {
         g_result.store(kFgNullArgument);
         return;
     }
-    g_result.store(g_transport->install(cfg));
+    const uint32_t r = g_transport->install(cfg);
+    g_result.store(r);
+    if (r == kFgInstalled && g_host) g_host->OnInstalled(g_transport->core());
 }
 
 }  // namespace

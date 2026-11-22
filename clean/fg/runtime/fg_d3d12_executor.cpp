@@ -31,9 +31,53 @@ enum Kernel : uint32_t {
     kMConv1, kMConv2, kMConv4, kMPairB, kMPairD4, kMPairD3, kMPairD2, kMPairD1, kMPairD0,
     kFullBlend, kOutPull, kOutPullMid, kOutPush, kOutPushFine,
     kNet2Conv, kNet2Up2, kNet2Merge, kNet2Warp,
+    kN2m1b1, kN2m1b2, kN2m2b1, kN2m2b2, kN2m2b4, kN2m1b4s, kN2m1b2s, kN2m1b1u, kN2m1b2u, kN2m2b4u, kN2m3b2u,
+    kN2m3b4u, kNet2Upwarp,
     kKernelCount,
 };
 constexpr uint32_t kFirstFull = kFullBlend;
+
+// The fast net2 convolution variants (clean/dx12/kernels/fg_net2_mconv.hlsl declarations, in the order
+// clean/fg/runner/fg_net2_mma.py VARIANTS lists them): output tiles per wave, 16-channel blocks per tap, upsample
+// staging, lanes per workgroup.
+struct MconvVariant {
+    uint32_t kernel, mt, nb, up, lanes;
+};
+constexpr MconvVariant kMconv[] = {
+    {kN2m1b1, 1, 1, 0, 256}, {kN2m1b2, 1, 2, 0, 256}, {kN2m2b1, 2, 1, 0, 256}, {kN2m2b2, 2, 2, 0, 256},
+    {kN2m2b4, 2, 4, 0, 256}, {kN2m1b4s, 1, 4, 0, 128}, {kN2m1b2s, 1, 2, 0, 128}, {kN2m1b1u, 1, 1, 1, 256},
+    {kN2m1b2u, 1, 2, 1, 256}, {kN2m2b4u, 2, 4, 1, 128}, {kN2m3b2u, 3, 2, 1, 256}, {kN2m3b4u, 3, 4, 1, 128},
+};
+constexpr uint32_t kSmallGrid = 16384;  // conv grids of at most this many pixels take a 128-lane one-tile variant
+constexpr uint32_t kMTile = 16;
+
+bool KernelNeeded(uint32_t k, bool full, FgNet2Path path) {
+    if (k < kFirstFull) return true;
+    if (!full) return false;
+    if (k == kNet2Conv || k == kNet2Up2 || k == kNet2Warp) return path == FgNet2Path::Exact;
+    if (k >= kN2m1b1 && k <= kNet2Upwarp) return path == FgNet2Path::Fast;
+    return true;
+}
+
+// fg_net2_mma.py variant(): (variant, weight tile groups, conv rows per workgroup); false when none fits.
+bool ChooseMconv(uint32_t cout, uint32_t cw, uint32_t up, uint64_t pixels, MconvVariant* v, uint32_t* groups,
+                 uint32_t* rows) {
+    const uint32_t nb = (cw + 15) / 16, tiles = (cout + 15) / 16;
+    if (nb != 1 && nb != 2 && nb != 4) return false;
+    const MconvVariant* narrow = nullptr;
+    const MconvVariant* big = nullptr;
+    for (const MconvVariant& c : kMconv) {
+        if (c.nb != nb || c.up != up || tiles % c.mt != 0) continue;
+        if (c.lanes == 128 && c.mt == 1 && !narrow) narrow = &c;
+        if ((up || c.lanes == 256) && (!big || c.mt > big->mt)) big = &c;  // first of the largest mt (stable)
+    }
+    const MconvVariant* pick = (!up && pixels <= kSmallGrid && narrow) ? narrow : big;
+    if (!pick) return false;
+    *v = *pick;
+    *groups = tiles / pick->mt;
+    *rows = 2 * pick->lanes / 32;
+    return true;
+}
 
 const char* const kKernelNames[kKernelCount] = {
     "fg_lite_fill16", "fg_lite_copy4", "fg_lite_detect", "fg_lite_menu_output", "fg_lite_downsample2",
@@ -45,6 +89,9 @@ const char* const kKernelNames[kKernelCount] = {
     "fg_mpair_d0",
     "fg_full_blend", "fg_out_pull", "fg_out_pull_mid", "fg_out_push", "fg_out_push_fine",
     "fg_net2_conv", "fg_net2_up2", "fg_net2_merge", "fg_net2_warp",
+    "fg_net2_mconv_m1b1", "fg_net2_mconv_m1b2", "fg_net2_mconv_m2b1", "fg_net2_mconv_m2b2", "fg_net2_mconv_m2b4",
+    "fg_net2_mconv_m1b4s", "fg_net2_mconv_m1b2s", "fg_net2_mconv_m1b1u", "fg_net2_mconv_m1b2u", "fg_net2_mconv_m2b4u",
+    "fg_net2_mconv_m3b2u", "fg_net2_mconv_m3b4u", "fg_net2_upwarp",
 };
 
 constexpr uint32_t kRootConstants = 59;  // 2 runtime constants + up to 57 argument DWORDs
@@ -278,6 +325,98 @@ void FgExecSigTable(std::vector<float>* out) {
     }
 }
 
+// ---- net2, fast path: plan and weights ---------------------------------------------------------------------------
+
+const char* FgNet2PathName(FgNet2Path p) {
+    switch (p) {
+        case FgNet2Path::Fast: return "fast";
+        case FgNet2Path::Exact: return "exact";
+    }
+    return "?";
+}
+
+std::vector<std::string> FgD3d12ExecutorKernelNames(bool enable_full, FgNet2Path net2) {
+    std::vector<std::string> names;
+    for (uint32_t k = 0; k < kKernelCount; ++k)
+        if (KernelNeeded(k, enable_full, net2)) names.emplace_back(kKernelNames[k]);
+    return names;
+}
+
+bool FgNet2FastPlan(uint32_t W2, uint32_t H2, std::vector<FgNet2FastLaunch>* out) {
+    if (!out || W2 == 0 || H2 == 0 || W2 % 16 || H2 % 16) return false;
+    out->clear();
+    const FgNet2Layer* L = FgNet2Layers();
+    struct Step {
+        uint32_t n, div, up, heads;  // conv grid = net2 grid / div
+    };
+    // fg_net2_mma.py fast_chain_case: conv grids (pooling layers: the input grid; upsampling layers: the output grid)
+    const Step steps[] = {{1, 1, 0, 0},  {2, 2, 0, 0},  {3, 4, 0, 0},  {4, 8, 0, 0},  {5, 8, 0, 0},  {6, 8, 0, 0},
+                          {7, 8, 0, 0},  {8, 8, 0, 0},  {9, 8, 0, 0},  {10, 8, 0, 0}, {11, 8, 0, 0}, {12, 4, 1, 0},
+                          {13, 2, 1, 1}, {14, 1, 0, 0}, {15, 2, 0, 0}, {16, 4, 0, 0}, {17, 4, 0, 0}, {18, 4, 0, 0},
+                          {19, 4, 0, 0}, {20, 4, 0, 0}, {21, 4, 0, 0}, {22, 4, 0, 0}, {23, 4, 0, 0}, {24, 2, 1, 0},
+                          {25, 1, 1, 1}};
+    FgNet2FastLaunch m;
+    m.layer = 0;
+    m.kernel = kKernelNames[kNet2Merge];
+    m.groups = groups_for(10ull * W2 * H2);
+    m.H = H2;
+    m.W = W2;
+    out->push_back(m);
+    for (const Step& s : steps) {
+        const FgNet2Layer& l = L[s.n - 1];
+        FgNet2FastLaunch x;
+        x.layer = s.n;
+        x.H = H2 / s.div;
+        x.W = W2 / s.div;
+        MconvVariant v{};
+        uint32_t groups = 0, rows = 0;
+        if (!ChooseMconv(l.cout, l.cin, s.up, static_cast<uint64_t>(x.H) * x.W, &v, &groups, &rows)) return false;
+        if (s.heads) groups = 3;
+        x.kernel = kKernelNames[v.kernel];
+        x.groups = cdiv(x.W, kMTile) * cdiv(x.H, rows) * groups;
+        out->push_back(x);
+        if (s.n == 13) {
+            FgNet2FastLaunch u;
+            u.layer = 26;
+            u.kernel = kKernelNames[kNet2Upwarp];
+            u.groups = std::max<uint32_t>(1, cdiv(static_cast<uint64_t>(W2) * H2, 256));
+            u.H = H2;
+            u.W = W2;
+            out->push_back(u);
+        }
+    }
+    return true;
+}
+
+bool FgNet2SwizzleFast(const std::vector<uint8_t>& canonical, const std::vector<uint8_t>& bias, uint32_t cout,
+                       uint32_t cw, std::vector<uint8_t>* fragments, std::vector<uint8_t>* bias_padded) {
+    if (!fragments || !bias_padded || cout == 0 || cw == 0) return false;
+    const uint32_t nb = (cw + 15) / 16, tiles = (cout + 15) / 16;
+    if ((nb != 1 && nb != 2 && nb != 4) || canonical.size() != 2ull * cout * 9 * cw || bias.size() != 2ull * cout)
+        return false;
+    auto get = [&canonical](size_t i) -> uint16_t {
+        return static_cast<uint16_t>(canonical[2 * i] | (canonical[2 * i + 1] << 8));
+    };
+    fragments->assign(2ull * tiles * 9 * nb * 2 * 16 * 8, 0);
+    // [mt][t][cb][h][m][j] = w[16 mt + m][t][16 cb + 8 h + j]
+    size_t at = 0;
+    for (uint32_t mt = 0; mt < tiles; ++mt)
+        for (uint32_t t = 0; t < 9; ++t)
+            for (uint32_t cb = 0; cb < nb; ++cb)
+                for (uint32_t h = 0; h < 2; ++h)
+                    for (uint32_t mm = 0; mm < 16; ++mm)
+                        for (uint32_t j = 0; j < 8; ++j, ++at) {
+                            const uint32_t o = 16 * mt + mm, c = 16 * cb + 8 * h + j;
+                            if (o >= cout || c >= cw) continue;
+                            const uint16_t v = get((static_cast<size_t>(o) * 9 + t) * cw + c);
+                            (*fragments)[2 * at] = static_cast<uint8_t>(v & 0xFF);
+                            (*fragments)[2 * at + 1] = static_cast<uint8_t>(v >> 8);
+                        }
+    bias_padded->assign(2ull * 16 * tiles, 0);
+    std::memcpy(bias_padded->data(), bias.data(), bias.size());
+    return true;
+}
+
 // ---- the executor ------------------------------------------------------------------------------------------------
 
 namespace {
@@ -378,6 +517,9 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     // Full path
     uint32_t x0 = 0, x1 = 0, xw = 0, ib = 0, ic = 0, ia = 0, fine = 0, sig = 0, lv[9] = {}, fd[8] = {};
     uint32_t n2w[kFgNet2Layers] = {}, n2b[kFgNet2Layers] = {};
+    uint32_t n2fw[kFgNet2Layers] = {}, n2fb[kFgNet2Layers] = {};   // fast path: A fragments, padded biases
+    std::vector<uint8_t> n2frag[kFgNet2Layers], n2fbias[kFgNet2Layers];
+    bool fast() const { return desc.enable_full && desc.net2 == FgNet2Path::Fast; }
     Net2Buf nb_x, nb_a1, nb_a2, nb_r0, nb_t[4], nb_r[4], nb_r4u, nb_g, nb_gu, nb_hA4, nb_hA1, nb_hA3, nb_U4, nb_U1,
         nb_U3, nb_y, nb_b1, nb_s0, nb_tb[4], nb_s[4], nb_s4u, nb_e, nb_eu, nb_out;
     std::vector<uint8_t> weight_image;  // host copy of the weights region
@@ -409,8 +551,8 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     FgExecResult LoadKernels() {
         if (desc.dxil_dir.empty() || !dir_exists(desc.dxil_dir))
             return Fail(FgExecRefusal::DxilDirMissing, "kernel folder '" + desc.dxil_dir + "' missing");
-        const uint32_t count = desc.enable_full ? kKernelCount : kFirstFull;
-        for (uint32_t k = 0; k < count; ++k) {
+        for (uint32_t k = 0; k < kKernelCount; ++k) {
+            if (!KernelNeeded(k, desc.enable_full, desc.net2)) continue;
             const std::string path = desc.dxil_dir + "\\" + kKernelNames[k] + ".dxil";
             std::vector<char> c;
             if (!read_file(path, &c)) return Fail(FgExecRefusal::DxilMissing, std::string(kKernelNames[k]) + ".dxil");
@@ -447,8 +589,8 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
             FAILED(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
                                                IID_PPV_ARGS(&root))))
             return Fail(FgExecRefusal::RootSignature, "root signature creation failed");
-        const uint32_t count = desc.enable_full ? kKernelCount : kFirstFull;
-        for (uint32_t k = 0; k < count; ++k) {
+        for (uint32_t k = 0; k < kKernelCount; ++k) {
+            if (!KernelNeeded(k, desc.enable_full, desc.net2)) continue;
             D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {};
             pd.pRootSignature = root.Get();
             pd.CS.pShaderBytecode = code[k].data();
@@ -526,9 +668,9 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                 nb_t[u] = N2(8, 64);
                 nb_r[u] = N2(8, 64);
             }
-            nb_r4u = N2(4, 64);
+            if (!fast()) nb_r4u = N2(4, 64);   // the fast path stages the upsamples inside the convolutions
             nb_g = N2(4, 96);
-            nb_gu = N2(2, 96);
+            if (!fast()) nb_gu = N2(2, 96);
             nb_hA4 = N2(2, 4);
             nb_hA1 = N2(2, 1);
             nb_hA3 = N2(2, 3);
@@ -542,9 +684,9 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                 nb_tb[u] = N2(4, 32);
                 nb_s[u] = N2(4, 32);
             }
-            nb_s4u = N2(2, 32);
+            if (!fast()) nb_s4u = N2(2, 32);
             nb_e = N2(2, 48);
-            nb_eu = N2(1, 48);
+            if (!fast()) nb_eu = N2(1, 48);
             nb_out = N2(1, 8);
         }
         // the weights region last: net1's weights region, net2's weights, the logistic table
@@ -554,8 +696,13 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         if (desc.enable_full) {
             for (uint32_t i = 0; i < kFgNet2Layers; ++i) {
                 const FgNet2Layer& l = FgNet2Layers()[i];
-                n2w[i] = Alloc(2ull * l.cout * 9 * l.cin);
-                n2b[i] = Alloc(2ull * l.cout);
+                if (fast()) {
+                    n2fw[i] = Alloc(n2frag[i].size());
+                    n2fb[i] = Alloc(n2fbias[i].size());
+                } else {
+                    n2w[i] = Alloc(2ull * l.cout * 9 * l.cin);
+                    n2b[i] = Alloc(2ull * l.cout);
+                }
             }
             sig = Alloc(65536ull * 4);
         }
@@ -587,9 +734,11 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         if (desc.enable_full) {
             for (uint32_t i = 0; i < kFgNet2Layers; ++i) {
                 const FgNet2Layer& l = FgNet2Layers()[i];
-                if (!put(n2w[i], weights.net2_weights[i], 2ull * l.cout * 9 * l.cin) ||
-                    !put(n2b[i], weights.net2_bias[i], 2ull * l.cout))
-                    return Fail(FgExecRefusal::WeightsInvalid, "net2 layer " + std::to_string(i + 1) + " size");
+                const bool ok = fast() ? put(n2fw[i], n2frag[i], n2frag[i].size()) &&
+                                             put(n2fb[i], n2fbias[i], n2fbias[i].size())
+                                       : put(n2w[i], weights.net2_weights[i], 2ull * l.cout * 9 * l.cin) &&
+                                             put(n2b[i], weights.net2_bias[i], 2ull * l.cout);
+                if (!ok) return Fail(FgExecRefusal::WeightsInvalid, "net2 layer " + std::to_string(i + 1) + " size");
             }
             std::vector<float> table;
             FgExecSigTable(&table);
@@ -1066,7 +1215,10 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                    g.Wp / 16, op.ui ? 1u : 0u});
                 return true;
             case FgOp::Net2:
-                RecordNet2(r, op.t);
+                if (fast())
+                    RecordNet2Fast(r, op.t, false);
+                else
+                    RecordNet2(r, op.t);
                 return true;
             case FgOp::OutPyramid:
                 RecordOutPyramid(r);
@@ -1153,6 +1305,116 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         for (uint32_t j = 0; j < 3; ++j)
             Conv(r, 25, nb_eu, nb_out, 48, 16 * j, 16, lo[j], cnt[j], 8, lo[j], g.H2, g.W2, 0, 0, cf[j], 2, rm[j],
                  us[j]->off, cnt[j]);
+        ++counters.net2_exact;
+    }
+
+    // ---- net2, fast path (fg_net2_mma.py fast_chain_case) ------------------------------------------------------
+    struct MOpt {
+        uint32_t pool = 0, leaky = 1, clamp_from = 0, res = 0, res_mul = kHalfOne, up = 0, heads = 0;
+        uint32_t co_n = 0;          // 0: the layer's outputs
+        int32_t out_cs = -1;        // -1: co_n
+        const Net2Buf* skip = nullptr;
+        uint32_t skip_cs = 0;
+        const Net2Buf* y1 = nullptr;
+        const Net2Buf* y2 = nullptr;
+        const Net2Buf* skip1 = nullptr;
+        const Net2Buf* skip2 = nullptr;
+    };
+    uint32_t mconv_half_last = 0;  // Net2SelfTest negative control: the next MConv on half its workgroups
+    // One fg_net2_mconv launch: layer n from x into y, cin input channels, conv grid H x W.
+    void MConv(Rec& r, uint32_t n, const Net2Buf& x, const Net2Buf& y, uint32_t cin, uint32_t H, uint32_t W,
+               const MOpt& o) {
+        const FgNet2Layer& l = FgNet2Layers()[n - 1];
+        MconvVariant v{};
+        uint32_t groups = 0, rows = 0;
+        // Configure checked every layer's variant (FgNet2FastPlan)
+        if (!ChooseMconv(l.cout, l.cin, o.up, static_cast<uint64_t>(H) * W, &v, &groups, &rows)) return;
+        if (o.heads) groups = 3;
+        const uint32_t co_n = o.co_n ? o.co_n : l.cout;
+        const uint32_t out_cs = o.out_cs < 0 ? co_n : static_cast<uint32_t>(o.out_cs);
+        const uint32_t tx = cdiv(W, kMTile), ty = cdiv(H, rows);
+        uint32_t wg = tx * ty * groups;
+        if (mconv_half_last) {
+            wg = std::max<uint32_t>(1, wg / 2);
+            mconv_half_last = 0;
+        }
+        auto off = [](const Net2Buf* b) { return b ? b->off : 0u; };
+        D(r, v.kernel, wg,
+          {x.off, n2fw[n - 1], n2fb[n - 1], y.off, off(o.skip), off(o.y1), off(o.y2), off(o.skip1), off(o.skip2), x.c,
+           0u, cin, H, W, 0u, co_n, out_cs, 0u, o.pool, o.leaky, o.clamp_from, o.res, o.res_mul, o.skip_cs, 0u, tx, ty,
+           o.heads});
+    }
+
+    void RecordNet2Fast(Rec& r, float f, bool half_last) {
+        const uint32_t npx = g.W2 * g.H2;
+        D(r, kNet2Merge, groups_for(10ull * npx), {ib, ic, ia, nb_x.off, npx, fb(f)});
+        MOpt pool;
+        pool.pool = 1;
+        MConv(r, 1, nb_x, nb_a1, 10, g.H2, g.W2, pool);
+        MConv(r, 2, nb_a1, nb_a2, 32, nb_a1.h, nb_a1.w, pool);
+        MConv(r, 3, nb_a2, nb_r0, 32, nb_a2.h, nb_a2.w, pool);
+        const Net2Buf* src = &nb_r0;
+        for (uint32_t u = 0; u < 4; ++u) {
+            MOpt a;
+            a.res = 1;
+            MConv(r, 4 + 2 * u, *src, nb_t[u], 64, src->h, src->w, a);
+            MOpt b;
+            b.res = 2;
+            b.skip = src;
+            b.skip_cs = 64;
+            MConv(r, 5 + 2 * u, nb_t[u], nb_r[u], 64, src->h, src->w, b);
+            src = &nb_r[u];
+        }
+        MOpt l12;
+        l12.up = 1;
+        l12.clamp_from = 32;
+        MConv(r, 12, nb_r[3], nb_g, 64, nb_g.h, nb_g.w, l12);
+        MOpt l13;
+        l13.up = 1;
+        l13.heads = 1;
+        l13.co_n = 8;
+        l13.out_cs = 0;
+        l13.leaky = 0;
+        l13.clamp_from = 4;
+        l13.y1 = &nb_hA1;
+        l13.y2 = &nb_hA3;
+        MConv(r, 13, nb_g, nb_hA4, 32, nb_hA4.h, nb_hA4.w, l13);
+        D(r, kNet2Upwarp, std::max<uint32_t>(1, cdiv(npx, 256)),
+          {ib, ic, ia, nb_hA4.off, nb_hA1.off, nb_hA3.off, nb_U4.off, nb_U1.off, nb_U3.off, nb_y.off, g.W2, g.H2,
+           fb(f)});
+        MConv(r, 14, nb_y, nb_b1, 18, g.H2, g.W2, pool);
+        MConv(r, 15, nb_b1, nb_s0, 16, nb_b1.h, nb_b1.w, pool);
+        src = &nb_s0;
+        for (uint32_t u = 0; u < 4; ++u) {
+            MOpt a;
+            a.res = 1;
+            MConv(r, 16 + 2 * u, *src, nb_tb[u], 32, src->h, src->w, a);
+            MOpt b;
+            b.res = 2;
+            b.skip = src;
+            b.skip_cs = 32;
+            MConv(r, 17 + 2 * u, nb_tb[u], nb_s[u], 32, src->h, src->w, b);
+            src = &nb_s[u];
+        }
+        MOpt l24;
+        l24.up = 1;
+        l24.clamp_from = kNoClamp;
+        MConv(r, 24, nb_s[3], nb_e, 32, nb_e.h, nb_e.w, l24);
+        MOpt l25;
+        l25.up = 1;
+        l25.heads = 1;
+        l25.co_n = 8;
+        l25.out_cs = 8;
+        l25.leaky = 0;
+        l25.clamp_from = 4;
+        l25.res = 2;
+        l25.res_mul = kHalfTwo;
+        l25.skip = &nb_U4;
+        l25.skip1 = &nb_U1;
+        l25.skip2 = &nb_U3;
+        if (half_last) mconv_half_last = 1;
+        MConv(r, 25, nb_e, nb_out, 16, g.H2, g.W2, l25);
+        ++counters.net2_fast;
     }
 
     void RecordOutPyramid(Rec& r) {
@@ -1364,6 +1626,17 @@ FgExecResult FgD3d12Executor::Configure(const FgCreateDesc& cd, uint32_t /*histo
             return m.Fail(FgExecRefusal::WeightsInvalid, "net1 layer " + std::to_string(i + 1) + " empty");
     if (m.desc.enable_full && !m.weights.has_net2)
         return m.Fail(FgExecRefusal::WeightsMissing, "the Full path needs net2's weights");
+    if (m.fast()) {
+        std::vector<FgNet2FastLaunch> plan;
+        if (!FgNet2FastPlan(g.W2, g.H2, &plan))
+            return m.Fail(FgExecRefusal::SizeUnsupported, "no fast net2 plan for this grid");
+        for (uint32_t i = 0; i < kFgNet2Layers; ++i) {
+            const FgNet2Layer& l = FgNet2Layers()[i];
+            if (!FgNet2SwizzleFast(m.weights.net2_weights[i], m.weights.net2_bias[i], l.cout, l.cin, &m.n2frag[i],
+                                   &m.n2fbias[i]))
+                return m.Fail(FgExecRefusal::WeightsInvalid, "net2 layer " + std::to_string(i + 1) + " fragments");
+        }
+    }
     if (cd.optional[kFgOptDistortion] == FgOptionalDecl::Always && !m.desc.settings.ignore_distortion)
         return m.Fail(FgExecRefusal::DistortionUnsupported, "the session declares the distortion field always");
     if (!cd.device) return m.Fail(FgExecRefusal::NullDevice, "no device");
@@ -1615,17 +1888,42 @@ FgExecResult FgD3d12Executor::RecordRealEndpoint(const FgRealDispatchDesc& d, Fg
     if (!ready) return m.Fail(FgExecRefusal::BadArgument, "null ready fence");
     uint32_t slot = d.slot.slot;
     bool write = !d.real_only && d.slot.reserved;
-    if (d.real_only && m.target && m.frame.valid && m.frame.token == d.frame_token) {
+    const bool have_frame = m.frame.valid && m.frame.token == d.frame_token;
+    // an adapter-side real-only frame (no shared work): the game's back buffer, when it is a colour image of the
+    // output size the executor can read
+    InputTex bb;
+    bool from_bb = false;
+    if (d.real_only && m.target && !have_frame && d.game_colour.resource) {
+        std::string w;
+        from_bb = m.TakeInput(d.game_colour, &bb, &w, "game colour") == FgExecRefusal::None && bb.channels == 4 &&
+                  bb.region.ew == m.g.wo && bb.region.eh == m.g.ho;
+    }
+    if (d.real_only && m.target && (have_frame || from_bb)) {
         // a real-only present shows a slot image: reserve one and copy the game frame into it (no slot free: the
         // presenter answers the present itself)
         write = m.target->ReserveRealSlot(&slot);
     }
     if (write) {
-        if (!m.frame.valid || m.frame.token != d.frame_token)
+        if (!have_frame && !from_bb)
             return m.Fail(FgExecRefusal::BadArgument, "no captured game frame for this token");
         Rec r;
         FgExecResult s = m.Begin(&r);
         if (s != FgExecResult::Ok) return s;
+        if (from_bb) {
+            // capture the back buffer as this token's colour; the previous game frame's indices are all recorded
+            // before this (single caller, queue order), and the next game frame captures its own inputs
+            FrameCtx f;
+            f.token = d.frame_token;
+            f.colour = bb;
+            f.valid = true;
+            m.frame = f;
+            if (Impl::NeedsTransition(bb.state))
+                m.Transition(r, bb.res, bb.state, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            m.Capture(r, m.frame.colour, m.cap_colour, 4);
+            if (Impl::NeedsTransition(bb.state))
+                m.Transition(r, bb.res, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, bb.state);
+            ++m.counters.game_colour_copies;
+        }
         FgExecOp op;
         op.op = FgOp::FinalCopy;
         m.RecordOp(r, op);
@@ -1640,6 +1938,116 @@ FgExecResult FgD3d12Executor::RecordRealEndpoint(const FgRealDispatchDesc& d, Fg
     ready->fence = m.fence_id;
     ready->value = v;
     ++m.counters.real_endpoints;
+    return FgExecResult::Ok;
+}
+
+FgExecResult FgD3d12Executor::Net2SelfTest(uint32_t seed, float t, uint32_t runs, bool half_last,
+                                           std::vector<uint16_t>* out, double* gpu_ms) {
+    Impl& m = *impl_;
+    if (!m.configured) return m.Fail(FgExecRefusal::NotConfigured, "Configure has not succeeded");
+    if (!m.desc.enable_full) return m.Fail(FgExecRefusal::PresetUnsupported, "the Full path is disabled");
+    if (!out) return m.Fail(FgExecRefusal::BadArgument, "null output");
+    if (half_last && !m.fast()) return m.Fail(FgExecRefusal::BadArgument, "the control is a fast-path launch");
+    if (gpu_ms) *gpu_ms = -1.0;
+    const uint64_t n2 = static_cast<uint64_t>(m.g.W2) * m.g.H2;
+    // synthetic smooth inputs: per channel four sinusoids of 1 to 4 cycles across the grid, peak about 8
+    std::vector<uint16_t> in(n2 * 9);
+    uint32_t s = seed * 2654435761u + 0x9E3779B9u;
+    auto rnd = [&s]() {
+        s = s * 1664525u + 1013904223u;
+        return static_cast<double>(s >> 8) / 16777216.0;
+    };
+    const uint32_t chans[3] = {4, 4, 1};
+    size_t at = 0;
+    for (uint32_t b = 0; b < 3; ++b) {
+        std::vector<double> img(n2 * chans[b], 0.0);
+        for (uint32_t c = 0; c < chans[b]; ++c)
+            for (int k = 0; k < 4; ++k) {
+                const double fy = 1 + 3 * rnd(), fx = 1 + 3 * rnd(), ph = 6.283185307179586 * rnd();
+                for (uint32_t y = 0; y < m.g.H2; ++y)
+                    for (uint32_t x = 0; x < m.g.W2; ++x)
+                        img[(static_cast<size_t>(y) * m.g.W2 + x) * chans[b] + c] +=
+                            2.0 * std::sin(6.283185307179586 * (fy * y / m.g.H2 + fx * x / m.g.W2) + ph);
+            }
+        for (double v : img) in[at++] = FgExecHalfBits(static_cast<float>(v));
+    }
+    ComPtr<ID3D12Resource> up = m.Buffer(in.size() * 2, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE,
+                                         D3D12_RESOURCE_STATE_GENERIC_READ);
+    const uint64_t out_bytes = 2ull * n2 * 8;
+    ComPtr<ID3D12Resource> rb = m.Buffer(out_bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE,
+                                         D3D12_RESOURCE_STATE_COPY_DEST);
+    if (!up || !rb) return m.Fail(FgExecRefusal::AllocationFailed, "self-test buffers");
+    void* p = nullptr;
+    D3D12_RANGE none = {0, 0};
+    if (FAILED(up->Map(0, &none, &p))) return m.Fail(FgExecRefusal::AllocationFailed, "self-test map");
+    std::memcpy(p, in.data(), in.size() * 2);
+    up->Unmap(0, nullptr);
+
+    Rec r;
+    FgExecResult st = m.Begin(&r);
+    if (st != FgExecResult::Ok) return st;
+    m.ArenaTo(r, D3D12_RESOURCE_STATE_COPY_DEST);
+    r.cl->CopyBufferRegion(m.arena.Get(), m.ib, up.Get(), 0, n2 * 8);
+    r.cl->CopyBufferRegion(m.arena.Get(), m.ic, up.Get(), n2 * 8, n2 * 8);
+    r.cl->CopyBufferRegion(m.arena.Get(), m.ia, up.Get(), n2 * 16, n2 * 2);
+    const uint32_t sentinel[4] = {0x5A5A, 0x5A5A, 0x5A5A, 0x5A5A};
+    m.Fill16(r, m.nb_out.off, out_bytes, sentinel, 1);
+    if (m.fast())
+        m.RecordNet2Fast(r, t, half_last);
+    else
+        m.RecordNet2(r, t);
+    m.ArenaTo(r, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    r.cl->CopyBufferRegion(rb.Get(), 0, m.arena.Get(), m.nb_out.off, out_bytes);
+    uint64_t v = 0;
+    st = m.Submit(&r, &v);
+    if (st != FgExecResult::Ok) return st;
+    if (!m.WaitValue(v, m.desc.wait_ms * 8)) return m.Fail(FgExecRefusal::WaitTimeout, "self-test run");
+    if (FAILED(rb->Map(0, nullptr, &p))) return m.Fail(FgExecRefusal::CommandFailed, "self-test readback");
+    out->resize(n2 * 8);
+    std::memcpy(out->data(), p, out_bytes);
+    rb->Unmap(0, &none);
+
+    if (runs == 0 || !gpu_ms) return FgExecResult::Ok;
+    UINT64 freq = 0;
+    if (FAILED(m.queue->GetTimestampFrequency(&freq)) || freq == 0) return FgExecResult::Ok;
+    D3D12_QUERY_HEAP_DESC qd = {};
+    qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    qd.Count = 2;
+    ComPtr<ID3D12QueryHeap> qh;
+    ComPtr<ID3D12Resource> qrb = m.Buffer(16, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE,
+                                          D3D12_RESOURCE_STATE_COPY_DEST);
+    if (FAILED(m.device->CreateQueryHeap(&qd, IID_PPV_ARGS(&qh))) || !qrb) return FgExecResult::Ok;
+    double total = 0;
+    // recordings that only warm the clocks up (back to back in one list; the exact path's are long: two)
+    const uint32_t warm = m.fast() ? 8u : 2u;
+    for (uint32_t i = 0; i <= runs; ++i) {  // i = 0: the warm-up list
+        Rec rt;
+        st = m.Begin(&rt);
+        if (st != FgExecResult::Ok) return st;
+        m.ArenaTo(rt, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        for (uint32_t k = 0; i == 0 && k < warm; ++k) {
+            if (m.fast())
+                m.RecordNet2Fast(rt, t, false);
+            else
+                m.RecordNet2(rt, t);
+        }
+        rt.cl->EndQuery(qh.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+        if (m.fast())
+            m.RecordNet2Fast(rt, t, false);
+        else
+            m.RecordNet2(rt, t);
+        rt.cl->EndQuery(qh.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
+        rt.cl->ResolveQueryData(qh.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, qrb.Get(), 0);
+        st = m.Submit(&rt, &v);
+        if (st != FgExecResult::Ok) return st;
+        if (!m.WaitValue(v, m.desc.wait_ms * 8)) return m.Fail(FgExecRefusal::WaitTimeout, "self-test timing");
+        uint64_t ts[2] = {};
+        if (FAILED(qrb->Map(0, nullptr, &p))) return m.Fail(FgExecRefusal::CommandFailed, "timestamp readback");
+        std::memcpy(ts, p, sizeof(ts));
+        qrb->Unmap(0, &none);
+        if (i > 0) total += static_cast<double>(ts[1] - ts[0]) * 1000.0 / static_cast<double>(freq);
+    }
+    *gpu_ms = total / runs;
     return FgExecResult::Ok;
 }
 

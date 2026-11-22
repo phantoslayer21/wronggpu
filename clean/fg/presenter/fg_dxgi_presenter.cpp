@@ -76,7 +76,9 @@ FgWinResult FgDxgiPresenter::Initialize() {
     if (!timer_.Valid()) return FgWinFail(FgStatus::Unsupported, FgWinRefusal::TimerUnavailable);
     copy_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     fence_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (!copy_event_ || !fence_event_) return FgWinFail(FgStatus::Unsupported, FgWinRefusal::ResourceCreation);
+    drain_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!copy_event_ || !fence_event_ || !drain_event_)
+        return FgWinFail(FgStatus::Unsupported, FgWinRefusal::ResourceCreation);
     latency_ = swap_->GetFrameLatencyWaitableObject();
     if (!latency_) return FgWinFail(FgStatus::Unsupported, FgWinRefusal::SwapChainNoWaitable);
     HRESULT hr = device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&copy_fence_));
@@ -157,16 +159,16 @@ FgWinResult FgDxgiPresenter::CreateSlots() {
 FgDxgiPresenter::~FgDxgiPresenter() {
     worker_.Stop();
     std::lock_guard<std::mutex> lock(mutex_);
-    // nothing may be destroyed while the GPU still copies from a slot into a back buffer
-    if (copy_fence_ && copy_fence_->GetCompletedValue() < copy_value_ && copy_event_ &&
-        SUCCEEDED(copy_fence_->SetEventOnCompletion(copy_value_, copy_event_)))
-        WaitForSingleObject(copy_event_, 1000);
+    // nothing may be destroyed while the GPU still copies from a slot into a back buffer or a queued present still
+    // uses one: drain the queue past the last copy and present
+    DrainQueueLocked(1000);
     if (claimed_) FgChainRegistry::Process().Release(chain_, this);
     claimed_ = false;
     back_buffers_.clear();
     if (latency_) CloseHandle(latency_);
     if (copy_event_) CloseHandle(copy_event_);
     if (fence_event_) CloseHandle(fence_event_);
+    if (drain_event_) CloseHandle(drain_event_);
 }
 
 std::uint32_t FgDxgiPresenter::RegisterFence(ID3D12Fence* fence, FgWinResult* why) {
@@ -347,6 +349,9 @@ FgStatus FgDxgiPresenter::Detach() {
     const FgStatus s = engine_.Detach(FgInterruptNow(), &from);
     CancelLocalLocked(from);
     if (s == FgStatus::Ok) {
+        // the presents already on the game's queue finish before the chain is let go (the game may release the swap
+        // chain right after Detach)
+        DrainQueueLocked(1000);
         if (claimed_) FgChainRegistry::Process().Release(chain_, this);
         claimed_ = false;
         local_.clear();
@@ -376,6 +381,17 @@ bool FgDxgiPresenter::WaitIdle(DWORD timeout_ms) {
 
 bool FgDxgiPresenter::CopiesIdleLocked() const {
     return !copy_fence_ || copy_fence_->GetCompletedValue() >= copy_value_;
+}
+
+bool FgDxgiPresenter::DrainQueueLocked(DWORD timeout_ms) {
+    if (!copy_fence_ || !queue_ || !drain_event_) return true;
+    if (device_ && device_->GetDeviceRemovedReason() != S_OK) return false;  // nothing completes any more
+    const std::uint64_t v = ++copy_value_;
+    if (FAILED(queue_->Signal(copy_fence_.Get(), v))) return false;
+    if (copy_fence_->GetCompletedValue() >= v) return true;
+    if (FAILED(copy_fence_->SetEventOnCompletion(v, drain_event_))) return false;
+    WaitForSingleObject(drain_event_, timeout_ms);
+    return copy_fence_->GetCompletedValue() >= v;
 }
 
 void FgDxgiPresenter::LoseLocked() {

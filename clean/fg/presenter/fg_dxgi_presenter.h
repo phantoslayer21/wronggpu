@@ -19,7 +19,9 @@
 //    needs. Device removal turns the presenter Lost; any other failed Present turns it Failed.
 //
 // The swap chain's buffers are referenced only while attached; Quiesce lets the worker drop them once its copies
-// finished (WaitIdle), so the game's ResizeBuffers can succeed. CompleteResize takes the new buffers.
+// finished (WaitIdle), so the game's ResizeBuffers can succeed. CompleteResize takes the new buffers. Detach and the
+// destructor drain the queue first (a fence signalled after the last copy and present), so the swap chain can be
+// released right afterwards.
 #include <d3d12.h>
 #include <dxgi1_6.h>
 
@@ -115,6 +117,9 @@ private:
     void CancelLocalLocked(std::uint64_t engine_from);
     void LoseLocked();
     bool CopiesIdleLocked() const;
+    // Signals the copy fence on the game's queue after everything this presenter put there (copies and presents) and
+    // waits for it (bounded), so no queued present still uses a back buffer or a slot when they are let go.
+    bool DrainQueueLocked(DWORD timeout_ms);
 
     FgDxgiPresenterDesc desc_;
     FgDxgiPresenterInfo info_;
@@ -133,6 +138,7 @@ private:
     HANDLE latency_ = nullptr;
     HANDLE copy_event_ = nullptr;
     HANDLE fence_event_ = nullptr;
+    HANDLE drain_event_ = nullptr;  // DrainQueueLocked only (the worker owns copy_event_)
     FgD3D12FenceTable fences_;
     FgClockMap clock_map_;
     FgHighResTimer timer_;

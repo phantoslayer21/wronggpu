@@ -35,14 +35,16 @@
 #include <vector>
 
 #include "../../rr_f/proxy/include/rr_proxy_abi.h"
+#include "../fg_limits.h"
 #include "fg_adapter_abi.h"
 #include "fg_settings.h"
 
 namespace wgfgp {
 
 // The release gate (the runtime contract's wgfg::kFgModesQualified): no FG mode is advertised or taken until the
-// end-to-end oracle gate (F5) and a qualified presenter pass. Tests override FgProxyConfig::modes_qualified.
-inline constexpr bool kFgModesQualified = false;
+// end-to-end oracle gate (F5) and a qualified presenter pass. Tests override FgProxyConfig::modes_qualified. Only a
+// developer test build (WRONGGPU_FG_DEV_QUALIFIED, ../fg_limits.h) opens it.
+inline constexpr bool kFgModesQualified = WG_FG_MODES_QUALIFIED != 0;
 inline constexpr uint32_t kFgMaxFramesKept = 8;  // per-frame tag / constants sets kept (frames in flight)
 
 // The game interface's feature ids (clean/rr_f/proxy/include/rr_proxy_abi.h); data, so a binding can name others.

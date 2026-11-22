@@ -146,11 +146,18 @@ enum FgInstallResult : uint32_t {
     kFgScanOverBudget = 7,        // the bounded scan ran out of its budget: nothing patched
     kFgNothingToPatch = 8,        // no importer slot names a hooked role
     kFgAlreadyActive = 9,         // another transport is active in this process (double init)
-    kFgNullArgument = 10
+    kFgNullArgument = 10,
+    kFgRuntimeMissing = 11        // F9 (WrongGPU-FG.asi): the FG model or kernel folder failed the precheck
 };
 const char* FgInstallResultWord(uint32_t r);
 
 using FgVersionReader = bool (*)(HMODULE module, uint32_t* major, uint32_t* minor);
+// F9: the present bridge's call into the core (FgAsiConfig::present_route; null: FgProxy::present). Returns what
+// FgProxy::present returns; *out is the core's result.
+using FgPresentRouteFn = int32_t (*)(void* ctx, FgProxy* core, const WgFgPresentDesc* desc, WgFgPresentResult* out);
+// F9: told of every factory the game creates through the redirected slot (after the creation hook), so the route's
+// adapter facts can be read from it before the game asks whether frame generation is supported.
+using FgFactoryNoteFn = void (*)(void* ctx, FgProxy* core, IUnknown* factory);
 
 struct FgAsiConfig {
     FgSettings settings;                // the player's per-game FG settings (fg_settings.h)
@@ -168,6 +175,12 @@ struct FgAsiConfig {
     // created through the hooked factory are claimed for WG_FG_OWNER_SWAPCHAIN_WRAPPER while FG is taken; every game
     // present then reaches the core (FgProxy::present, the backbuffer as colour input) before this presenter.
     IFgPresentCallback* presenter = nullptr;
+    // F9 (the FG session host, fg_asi_session.h): the bridge's present call into the core and the factory note; when
+    // the presenter serves the facade (GetBuffer / CurrentBackBufferIndex), the colour input is the facade's buffer.
+    FgPresentRouteFn present_route = nullptr;
+    void* present_route_ctx = nullptr;
+    FgFactoryNoteFn factory_note = nullptr;
+    void* factory_note_ctx = nullptr;
 };
 
 // What the present bridge saw (the transport's swap-chain sink and present callback; the process's one transport).
