@@ -34,10 +34,11 @@ HEADER_DIRS = [os.path.join(DX12, "hlsl"), os.path.join(CLEAN, "k", "dx12", "hls
 EMU_DIR = os.path.join(CLEAN, "kernels", "emu")
 ATTR = re.compile(r"\[\s*(unroll|loop|branch|flatten|fastopt|allow_uav_condition)\s*(\(\s*\d*\s*\))?\s*\]")
 OUTP = re.compile(r"\b(out|inout)\s+(\w+)\s+(\w+)(\s*\[)?")
+CONST_TABLE = re.compile(r"\bstatic const (int|uint|float)(\s+\w+\s*\[)")   # a table in a class body needs constexpr in C++
 
 
 def _cxx_text(text):
-    text = ATTR.sub("", text)
+    text = CONST_TABLE.sub(r"static constexpr \1\2", ATTR.sub("", text))
     return OUTP.sub(lambda m: f"{m.group(2)} {m.group(3)}{m.group(4)}" if m.group(4) else f"{m.group(2)}& {m.group(3)}",
                     text)
 
@@ -48,7 +49,7 @@ def _stage(src, out_dir):
     os.makedirs(out_dir)
     for d in HEADER_DIRS:
         for fn in os.listdir(d):
-            if fn.endswith(".hlsli"):
+            if fn.endswith((".hlsli", ".inc")):   # .inc: the head row table of k_block.hlsli (main's #288)
                 with open(os.path.join(d, fn)) as f:
                     txt = f.read()
                 with open(os.path.join(out_dir, fn), "w") as f:

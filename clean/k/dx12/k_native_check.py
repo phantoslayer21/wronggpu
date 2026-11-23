@@ -50,9 +50,44 @@ OFFSETS = [(0, 0), (2, 2), (4, 0), (0, 6), (6, 4)]
 TIMING_SIZES = {0: (640, 384), 1: (320, 192), 2: (160, 96)}          # the 1440p Quality frame's levels
 
 
+# the ports (and native forms) that take main's #288 extra operands: the FP32 bias plane (and d0_hp's compact head), launched as
+# <KBlkParams>[, hidden], bias32[, compact head] (k_port_check.NARROW_BIAS32; manifest tokens s184:p19.b32,p / ,p,p,p)
+NARROW_BIAS32 = {"k_stage2_e0", "k_stage2_e1", "k_stage2_d1", "k_stage2_d1__rodd", "k_stage2_d0_hp"}
+
+
 def native_name(port):
     base, rodd = (port[:-6], "__rodd") if port.endswith("__rodd") else (port, "")
     return base + rodd + "__g11"
+
+
+def arg_tokens(kernel):
+    """The manifest argument tokens of a stage kernel (port and native form alike)."""
+    if kernel == "k_stage2_d0_hp":
+        return [TOKEN, "p", "p", "p"]
+    if kernel == "k_stage2_d0_hidden":
+        return [TOKEN, "p"]
+    return [TOKEN] + (["p"] if kernel in NARROW_BIAS32 else [])
+
+
+def with_narrow_operands(plan, dev, st, blob, kernel):
+    """The plan's launch of `kernel` with main's #288 operands appended (bias plane, compact head), uploaded to `dev`
+    through the plan bridge exactly as k_port_check does; other kernels unchanged."""
+    if kernel not in NARROW_BIAS32:
+        return plan
+    from clean.k.dx12 import k_plan_bridge as PB
+    k0, grid, block, args = plan["launches"][0]
+    return dict(plan, launches=[(k0, grid, block, args + PB.narrow_d3d12_args(plan, dev, st, blob))])
+
+
+def groups_by_defines(src, names):
+    """`names` split into the sets build_dx12 / the emulator can compile as one library (same group, wave and defines)."""
+    from emu import hlsl_emu as H
+    decls = {d["name"]: d for d in H.B.kernel_decls(src)}
+    groups = {}
+    for n in names:
+        d = decls[n]
+        groups.setdefault((d["group"], d["wave"], tuple(sorted(d["defines"].items()))), []).append(n)
+    return list(groups.values())
 
 
 class MemDev:
@@ -78,7 +113,8 @@ class MemDev:
         pass
 
 
-def _plan(stage, suffix, d0, blob, x, offset, skip):
+def _plan(stage, suffix, d0, blob, x, offset, skip, kernel=None):
+    from clean.k.reference.layout import STAGE
     from clean.k.runner import k_stages
     dev = MemDev()
     plan = k_stages.prepare(dev, stage + suffix, blob, x, offset, skip)
@@ -94,6 +130,8 @@ def _plan(stage, suffix, d0, blob, x, offset, skip):
         plan["outputs"] = [("hidden", (H, W, 4))] + ([("head", (2 * H, 2 * W, 4))] if d0 == "hp" else
                                                     [("head", (H, W, 40))]) + [o for o in plan["outputs"]
                                                                                if o[0] == "block"]
+    if kernel:
+        plan = with_narrow_operands(plan, dev, STAGE[stage], blob, kernel)
     return dev, plan
 
 
@@ -118,14 +156,14 @@ def prepare(cases, seeds, timing=False, time_runs=0):
                 name = f"s{si}_{kernel}_{ci}"
                 blob = k_stages.pack(stage, params[stage])
                 x, skip = narrow_inputs(stage, size, rng, special)
-                dev, plan = _plan(stage, suffix, d0, blob, x, offset, skip)
+                dev, plan = _plan(stage, suffix, d0, blob, x, offset, skip, kernel)
                 outputs = [n for n, _ in plan["outputs"]]
                 for n, p in plan["bufs"].items():
                     if p in dev.inputs:
                         with open(os.path.join(cases, f"{name}.{n}.in"), "wb") as f:
                             f.write(dev.data[p])
                 k0, grid, block, args = plan["launches"][0]
-                tokens = [TOKEN] + (["p"] if d0 else [])
+                tokens = arg_tokens(kernel)
                 extra_time = [f"time {time_runs}"] if time_runs else []
                 for form, kname in (("shortcut", kernel), ("native", native_name(kernel))):
                     one = dict(plan, launches=[(kname, grid, block, args)])
@@ -182,11 +220,11 @@ def emulate(cases, work):
     from emu import hlsl_emu as H
     ports_src = os.path.join(ROOT, "clean", "k", "dx12", "kernels", "k_block.hlsl")
     native_src = os.path.join(ROOT, "clean", "k", "dx12", "kernels", "k_block_g11.hlsl")
-    groups = [["k_stage_e2", "k_stage2_e0", "k_stage2_e1", "k_stage_d2", "k_stage2_d1", "k_stage_d1"],
-              ["k_stage_e0"], ["k_stage_e1"], ["k_stage2_d0_hp", "k_stage2_d0_hidden"],
-              ["k_stage_e2__rodd", "k_stage_d2__rodd", "k_stage2_d1__rodd"]]
+    names = ["k_stage_e2", "k_stage2_e0", "k_stage2_e1", "k_stage_d2", "k_stage2_d1", "k_stage_d1", "k_stage_e0",
+             "k_stage_e1", "k_stage2_d0_hp", "k_stage2_d0_hidden", "k_stage_e2__rodd", "k_stage_d2__rodd",
+             "k_stage2_d1__rodd"]
     kernels = {}
-    for g in groups:
+    for g in groups_by_defines(ports_src, names):   # main's #288 ports differ in their defines (KB_BIAS32 ...)
         lib, ent = H.build(ports_src, g, work, gfx=12)
         kernels.update({n: (lib, ent[n]) for n in g})
         for n in (native_name(m) for m in g):   # one library each: the native declarations carry per-kernel knobs

@@ -21,6 +21,7 @@ import unittest
 
 import numpy as np
 
+from clean.k.dx12 import k_native_check as KC
 from clean.k.reference import network as N
 from clean.k.reference.f16 import f16
 from clean.k.reference.layout import STAGE, cdiv
@@ -33,10 +34,10 @@ from emu import hlsl_emu as H  # noqa: E402
 
 PORTS = os.path.join(ROOT, "clean", "k", "dx12", "kernels", "k_block.hlsl")
 NATIVE = os.path.join(ROOT, "clean", "k", "dx12", "kernels", "k_block_g11.hlsl")
-# launch name (the HIP / RDNA 4 port name) -> the declarations of one library (same defines)
-GROUPS = [["k_stage_e2", "k_stage2_e0", "k_stage2_e1", "k_stage_d2", "k_stage2_d1", "k_stage_d1"],
-          ["k_stage_e0"], ["k_stage_e1"], ["k_stage2_d0_hp", "k_stage2_d0_hidden"],
-          ["k_stage_e2__rodd", "k_stage_d2__rodd", "k_stage2_d1__rodd"]]
+# launch names (the HIP / RDNA 4 port names); the ports are compiled as one library per set of defines (main's #288 ports
+# differ in KB_BIAS32 / KB_BASE_FORM / KB_COMPACT_HEAD_ARG), the native kernels one library each
+NAMES = ["k_stage_e2", "k_stage2_e0", "k_stage2_e1", "k_stage_d2", "k_stage2_d1", "k_stage_d1", "k_stage_e0", "k_stage_e1",
+         "k_stage2_d0_hp", "k_stage2_d0_hidden", "k_stage_e2__rodd", "k_stage_d2__rodd", "k_stage2_d1__rodd"]
 LIMITS = dict(mean=2.5e-3, max=3e-2)
 _DEVS = {}
 
@@ -54,15 +55,15 @@ def _device(form, extra=None):
             raise unittest.SkipTest(str(e))
         out = tempfile.mkdtemp(prefix="wg_k_native_", dir=os.environ.get("WG_TEST_TMP"))
         kernels = {}
-        for names in GROUPS:
-            if form == "ports":
+        if form == "ports":
+            for names in KC.groups_by_defines(PORTS, NAMES):
                 lib, ent = H.build(PORTS, names, out, gfx=12, extra_defines=extra)
                 kernels.update({n: (lib, ent[n]) for n in names})
-            else:
-                for n in names:   # one library each: the native declarations carry per-kernel knobs
-                    d = n.replace("__rodd", "") + ("__rodd" if "__rodd" in n else "") + "__g11"
-                    lib, ent = H.build(NATIVE, [d], out, gfx=11, extra_defines=extra)
-                    kernels[n] = (lib, ent[d])
+        else:
+            for n in NAMES:   # one library each: the native declarations carry per-kernel knobs
+                d = KC.native_name(n)
+                lib, ent = H.build(NATIVE, [d], out, gfx=11, extra_defines=extra)
+                kernels[n] = (lib, ent[d])
         _DEVS[key] = H.HlslEmu(kernels)
     return _DEVS[key]
 
@@ -84,9 +85,15 @@ def stage_inputs(st, lv, rng):
 
 
 def run_stage(dev, name, suffix, p, x, off, skip):
+    """One narrow stage on the emulated device. The kernels main's #288 gave an FP32 bias plane (and d0 a compact head) get
+    those operands appended to their launch, built by the plan bridge from the same weight blob (k_port_check does the same)."""
     dev.reset()
     r = _runner(dev)
-    return r.run(name + suffix, r.pack_weights(name, p), x, off, skip=skip)
+    blob = r.pack_weights(name, p)
+    plan = r._prepare(name + suffix, blob, x, off, skip)
+    kern, grid, threads, args = plan["launches"][0]
+    plan = KC.with_narrow_operands(plan, dev, STAGE[name], blob, kern)
+    return r._run_plan(plan)
 
 
 def run_d0(dev, kernel, p, x, off, skip):
@@ -105,7 +112,10 @@ def run_d0(dev, kernel, p, x, off, skip):
     prm.head = head
     for b, nb in ((plan["bufs"]["block"], plan["sizes"]["block"]), (head, max(n * 40, 16 * n) * 2), (hidden, n * 8)):
         dev.memset(b, 0x7F, nb)
-    dev.launch(kernel, grid, threads, [prm, ctypes.c_void_p(hidden)])
+    launch = (kernel, grid, threads, [prm, ctypes.c_void_p(hidden)])
+    plan = KC.with_narrow_operands(dict(plan, launches=[launch]), dev, STAGE["d0"], r.pack_weights("d0", p), kernel)
+    kern, grid, threads, args = plan["launches"][0]
+    dev.launch(kern, grid, threads, args)
     return {"block": dev.download(plan["bufs"]["block"], plan["sizes"]["block"]),
             "head": dev.download(head, max(n * 40, 16 * n) * 2), "hidden": dev.download(hidden, n * 8)}
 
