@@ -8,6 +8,7 @@ import unittest
 
 import numpy as np
 
+from clean.reference import output_quality as OQ
 from clean.reference import post as P
 from clean.runner import post
 from clean.tests.test_kernels_emu import EmuTest
@@ -145,7 +146,8 @@ class TestFilterEmu(EmuTest):
     KERNELS = tuple(post.FILTER_VARIANTS)
 
     def check(self, disp, e, O, stage="filter"):
-        ref = P.output_filter(disp, e, O)
+        # quality9 is the separate Lanczos-3 profile (clean/reference/output_quality.py), not the default filter
+        ref = OQ.output_filter(disp, e, O) if stage.endswith("quality9") else P.output_filter(disp, e, O)
         got = self.runner.run(stage, b"", {"display": disp, "exposure": e, "output_size": O})["out"]
         self.assertEqual(got.shape, ref.shape)
         self.assertTrue(np.all(np.isfinite(got)))
@@ -165,7 +167,8 @@ class TestFilterEmu(EmuTest):
                     outs[k] = self.check(disp, e, O, stage="filter" if k == post.KERNEL_FILTER else f"filter:{k}")
             with self.subTest(O=O, variants="identical"):
                 for k, v in outs.items():
-                    np.testing.assert_array_equal(v, outs[post.KERNEL_FILTER], err_msg=k)
+                    if not k.endswith("quality9"):
+                        np.testing.assert_array_equal(v, outs[post.KERNEL_FILTER], err_msg=k)
 
     def test_impulse_and_edges(self):
         O = (40, 34)

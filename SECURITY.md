@@ -1,16 +1,16 @@
 # Security policy
 
-WrongGPU's launcher installs files into game folders, can run elevated for that, and downloads OptiScaler from a
-pinned release (URL, size and SHA-256 are fixed in `clean/installer/src/wg_core/optiedition.h`). The front end and the
-plugin run inside games. Please report security problems in any of these privately.
+WrongGPU's launcher installs files into game folders, can run elevated to do so, and downloads OptiScaler from a pinned
+release. The URL, size, and SHA-256 are fixed in `clean/installer/src/wg_core/optiedition.h`. The FSR front end and the
+Ray Reconstruction plugin run inside games. Report security problems in any of these components privately.
 
-## Reporting a vulnerability
+## Report a vulnerability
 
-Use GitHub's private vulnerability reporting: on this repository's **Security** tab, choose **Report a
-vulnerability**. Please do not open a public issue for a security problem.
+Use GitHub's private vulnerability reporting. Open this repository's **Security** tab and choose **Report a
+vulnerability**. Do not open a public issue for a security problem.
 
-Include what you found, the version (or commit), and how to reproduce it. We will acknowledge the report, keep you
-informed, and credit you in the release notes of the fix unless you prefer otherwise.
+Include what you found, the affected version or commit, and reproduction steps. We will acknowledge the report and keep
+you informed. We will credit you in the release notes for the fix unless you prefer otherwise.
 
 ## Supported versions
 
@@ -18,6 +18,16 @@ Only the latest release receives security fixes.
 
 ## Scope
 
-In scope: the launcher (`clean/installer`), the FSR front end (`clean/fsr`), the Ray Reconstruction plugin
-(`clean/rr_f/proxy`), the runtime libraries and the converter. Out of scope: OptiScaler itself (report to its project),
-the games, AMD's drivers and runtimes, and the original upscaler's files.
+In scope:
+
+- The launcher in `clean/installer`.
+- The FSR front end in `clean/fsr`.
+- The Ray Reconstruction plugin in `clean/rr_f/proxy`.
+- The runtime libraries and the converter.
+
+Out of scope:
+
+- OptiScaler itself. Report its security problems to the OptiScaler project.
+- Games.
+- AMD's drivers and runtimes.
+- The original upscaler's files.

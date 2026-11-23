@@ -53,7 +53,7 @@ SLACK = 64
 CONTROL = "scale_rgb"   # Model M, frame.co
 # family -> (HIP code objects, D3D12 kernels)
 NARROW_KERNELS = ["k_stage_e2", "k_stage_e0", "k_stage_e1", "k_stage_d2", "k_stage_d1", "k_stage2_e0", "k_stage2_e1",
-                  "k_stage2_d1", "k_stage2_d0_hp", "k_stage2_d0_hidden"]
+                  "k_stage2_d1", "k_stage2_d1__rodd", "k_stage2_d0_hp", "k_stage2_d0_hidden"]
 FAMILY_KERNELS = {"expo": (["k_io.co"], ["k_expo_scalars"]), "warm": ([], ["k_warm"]),
                   "mixprobe": ([], ["k_mix_probe", "k_mix_probe__rodd"]),
                   "narrow": (["k_block.co"], NARROW_KERNELS),
@@ -359,7 +359,9 @@ def check_mixprobe(items, read):
 NARROW = {"k_stage_e2": ("e2", "", None), "k_stage_e0": ("e0", "", None), "k_stage_e1": ("e1", "", None),
           "k_stage_d2": ("d2", "", None), "k_stage_d1": ("d1", "", None), "k_stage2_e0": ("e0", "@w2", None),
           "k_stage2_e1": ("e1", "@w2", None), "k_stage2_d1": ("d1", "@w2", None),
+          "k_stage2_d1__rodd": ("d1", "@w2", None),
           "k_stage2_d0_hp": ("d0", "@w2", "hp"), "k_stage2_d0_hidden": ("d0", "@w2", "hidden")}
+NARROW_BIAS32 = {"k_stage2_e0", "k_stage2_e1", "k_stage2_d1", "k_stage2_d1__rodd", "k_stage2_d0_hp"}
 # block-level sizes (W, H) and window offsets (spec 44: even): grids with fewer than a workgroup's windows among them
 NARROW_SIZES = [(8, 8), (24, 16), (17, 13), (40, 24), (9, 33), (12, 20)]
 NARROW_OFFSETS = [(0, 0), (2, 2), (4, 0), (0, 6), (6, 4)]
@@ -433,6 +435,12 @@ def run_stages(table, co_name, tag, build, rocm, seeds, cdir, hip, grid_list=Non
                         plan["launches"] = [(kernel, grid, block, args + [ctypes.c_void_p(hid)])]
                         plan["outputs"] = [("hidden", (H, W, 4))] + (
                             [("head", (2 * H, 2 * W, 4))] if d0 == "hp" else [("head", (H, W, 40))])
+                    k, grid, block, hip_args = plan["launches"][0]
+                    assert k == kernel.removesuffix("__rodd"), (k, kernel)
+                    dx_args = hip_args
+                    if kernel in NARROW_BIAS32:
+                        dx_args = hip_args + PB.narrow_d3d12_args(plan, pdev, st, blob)
+                    dx_plan = dict(plan, launches=[(kernel, grid, block, dx_args)])
                     outputs = [n for n, _ in plan["outputs"]]
                     for n, p in plan["bufs"].items():
                         if p in pdev.inputs:
@@ -444,11 +452,11 @@ def run_stages(table, co_name, tag, build, rocm, seeds, cdir, hip, grid_list=Non
                     sizes = {n: pdev.sizes[plan["bufs"][n]] for n in outputs}
                     got = {n: bytes(hip.h.download(plan["bufs"][n], sizes[n] + SLACK)) for n in outputs}
                     defined = {n: min(int(np.prod(sh)) * itemsize(n), sizes[n]) for n, sh in plan["outputs"]}
-                    lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k], cdir, [co_name],
+                    lines += PB.chain_lines(name, dx_plan, pdev, lambda k: tokens[k], cdir, [co_name],
                                             outputs)
-                    if neg is None and plan["launches"][0][1] >= 4:   # the dropped windows hold output pixels
+                    if neg is None and grid >= 4:   # the dropped windows hold output pixels
                         neg = name
-                        lines += PB.chain_lines(name, plan, pdev, lambda k: tokens[k], cdir,
+                        lines += PB.chain_lines(name, dx_plan, pdev, lambda k: tokens[k], cdir,
                                                 [co_name], outputs, prefix="negative_", grid_div=2)
                     items.append({"case": name, "kernel": kernel, "stage": stage, "size": list(size),
                                   "offset": list(offset), "specials": special, "outputs": outputs, "hip": got,

@@ -186,4 +186,26 @@ std::vector<uint8_t> k_pack_stage(const std::string& stage, const StageTensors& 
   return blob;
 }
 
+std::vector<uint8_t> k_pack_compact_head(const uint8_t* original, size_t channels) {
+  constexpr int row[40] = {
+#include "../dx12/hlsl/k_head_rows.inc"
+  };
+  const size_t kt_count = channels / 16;
+  const size_t old_bias = (48 * channels * 2 + kAlign - 1) / kAlign * kAlign;
+  const size_t new_bias = (32 * channels * 2 + kAlign - 1) / kAlign * kAlign;
+  std::vector<uint8_t> out(new_bias + kAlign, 0);
+  for (size_t logical = 0; logical < 40; ++logical) {
+    if (row[logical] < 0) continue;
+    const size_t physical = (size_t)row[logical];
+    for (size_t kt = 0; kt < kt_count; ++kt)
+      for (size_t half = 0; half < 2; ++half) {
+        const size_t from = (logical / 16 * kt_count + kt) * 512 + (16 * half + logical % 16) * 16;
+        const size_t to = (physical / 16 * kt_count + kt) * 512 + (16 * half + physical % 16) * 16;
+        std::memcpy(out.data() + to, original + from, 16);
+      }
+    std::memcpy(out.data() + new_bias + physical * 2, original + old_bias + logical * 2, 2);
+  }
+  return out;
+}
+
 }  // namespace wgrt

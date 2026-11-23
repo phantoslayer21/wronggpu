@@ -54,7 +54,10 @@ class TestSmxSelfcheckDigest(unittest.TestCase):
                  (os.path.join("clean", "dx12", "hlsl", "wg_math.hlsli"), "float"),
                  (os.path.join("clean", "k", "dx12", "kernels", "k_block_wide.hlsl"), "KW_RD=12"),
                  (os.path.join("clean", "k", "runtime", "runtime_k.cpp"), "kSmxSeed = 0x6b5eu"),
-                 (os.path.join("clean", "k", "runtime", "model_k.cpp"), "(2 * oxm - 4)")]
+                 (os.path.join("clean", "k", "runtime", "model_k.cpp"), "(2 * oxm - 4)"),
+                 (os.path.join("clean", "k", "dx12", "kernels", "k_block_split.hlsl"), "#define KS_RD 20"),
+                 (os.path.join("clean", "k", "runtime", "runtime_k.cpp"), "return split_m(kernel[11] != 0, a0);"),
+                 (os.path.join("clean", "k", "runtime", "runtime_k.cpp"), "split_m_ = c.backend == 3")]
         for rel, needle in cases:
             with self.subTest(file=rel):
                 tmp = tempfile.mkdtemp(prefix="smx_digest_")

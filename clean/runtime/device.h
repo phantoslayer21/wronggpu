@@ -52,6 +52,12 @@ class Device {
   }
   // args: pointers to the argument values (hipModuleLaunchKernel convention).
   virtual bool launch(const std::string& kernel, unsigned grid, unsigned block, void** args) = 0;
+  // Require a D3D12 port with this argument ABI for the lifetime of the context.
+  virtual bool require_d3d12_port(const std::string& kernel, const char* signature) {
+    (void)signature;
+    err_ = "D3D12 port required for " + kernel;
+    return false;
+  }
   // Loads, verifies and compiles one kernel now (its first launch then compiles nothing); false with err() when its
   // shader is missing or corrupt. Devices that prepare nothing ahead: true.
   virtual bool prepare(const std::string& kernel) { (void)kernel; return true; }

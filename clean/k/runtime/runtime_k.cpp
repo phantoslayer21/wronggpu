@@ -4,6 +4,7 @@
 #include "runtime_k.h"
 #include "k_input_uniforms.h"
 #include "k_mix_probe.h"
+#include "k_s_breakpoints.h"
 #include "k_smx_selfcheck.h"
 
 #include <algorithm>
@@ -139,6 +140,39 @@ StageSec stage_sections(const KStageInfo& s) {  // order: embed, expand, block, 
   if (s.head) r.head = o;
   return r;
 }
+
+// SMX-SELFCHECK-SOURCE BEGIN (the narrow d1 bias plane used by the self-check)
+// Bias widening for the FP32 planes. Preserve the binary16 NaN payload and quiet signaling NaNs.
+uint32_t k_bias32_bits(uint16_t h) {
+  const uint32_t payload = h & 0x3ffu;
+  if ((h & 0x7c00u) == 0x7c00u && payload)
+    return ((uint32_t)(h & 0x8000u) << 16) | 0x7fc00000u | (payload << 13);
+  return f32_bits(f16_to_f32(h));
+}
+
+std::vector<uint32_t> k_narrow_bias32(const KStageInfo& s, const uint8_t* packed,
+                                      const uint8_t* compact_head = nullptr) {
+  const auto stage = stage_sections(s);
+  const auto block = block_sections(s);
+  std::vector<uint32_t> plane;
+  const auto append = [&](const uint8_t* data, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+      uint16_t half;
+      std::memcpy(&half, data + i * sizeof(half), sizeof(half));
+      plane.push_back(k_bias32_bits(half));
+    }
+  };
+  if (s.embed) append(packed + stage.embed + linear_bias(s.C, 16), s.C);
+  if (s.kind == 'd') append(packed + stage.expand + linear_bias(4 * s.C, s.C_prev), 4 * s.C);
+  append(packed + stage.block + block.bo, s.C);
+  append(packed + stage.block + block.b1, 4 * s.C);
+  append(packed + stage.block + block.b2, s.C);
+  if (s.kind == 'e') append(packed + stage.merge + linear_bias(s.C_next, 4 * s.C), s.C_next);
+  if (s.head) append(compact_head + linear_bias(32, s.C), 32);
+  if (!s.fixed) append(packed + stage.block + block.mix, (size_t)s.heads * 64 * 64);
+  return plane;
+}
+// SMX-SELFCHECK-SOURCE END
 
 // ---- network=fused8: FP8 forms of the level-0/1 stages (clean/k/kernels/k_block8.h) --------------------------------
 static_assert(sizeof(KF8Params) == 104, "KF8Params of k_block8.h");
@@ -564,6 +598,16 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   if (warm_line_ < 4 || warm_line_ > 4096 || (warm_line_ & (warm_line_ - 1)))
     return fail("model K: k_warm_line must be a power of two in 4..4096");
   if (warm_groups_ < 1 || warm_groups_ > 1024) return fail("model K: k_warm_groups must be 1..1024");
+  // SMX-SELFCHECK-SOURCE BEGIN (k_split: routes the self-check's m case; the digest covers it)
+  // k_split (deep-split; the native D3D12 device, backend 3): "m" (the default) runs stage m as four phase launches
+  // spread over many more workgroups (k_split_m_attn[__rodd], k_split_m_wo, k_split_m_w1, k_split_m_w2:
+  // clean/k/dx12/kernels/k_block_split.hlsl), the same arithmetic and output bytes as the one k_stagew4_m launch; the
+  // create-time self-check runs that form for its m case (launch() redirects k_stagew4_m). "off": the one launch. Other
+  // devices always take the one launch (the phase kernels are D3D12 ports only).
+  const std::string ksplit = option(c, "k_split");
+  if (!ksplit.empty() && ksplit != "m" && ksplit != "off") return fail("model K: k_split must be m or off");
+  split_m_ = c.backend == 3 && ksplit != "off";
+  // SMX-SELFCHECK-SOURCE END
   // k_fill=<0..255> (test use, changes no value a frame writes): every buffer a frame writes and both history copies are
   // filled with this byte after allocation, before the first frame, so that a test with a different byte per backend
   // sees a write a frame did not make (first-frame and reset-only writes included) as a difference
@@ -578,11 +622,30 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   smx_test_ = option(c, "k_smx_test");
 #ifdef WG_DEV_DIAGNOSTICS
   if (!smx_test_.empty() && smx_test_ != "mix_fail" && smx_test_ != "both_fail" && smx_test_ != "rodd_unchecked" &&
-      smx_test_ != "mix_unchecked" && smx_test_ != "report")
-    return fail("model K: k_smx_test must be mix_fail, both_fail, rodd_unchecked, mix_unchecked or report");
+      smx_test_ != "split_fail" && smx_test_ != "mix_unchecked" && smx_test_ != "report")
+    return fail("model K: k_smx_test must be mix_fail, both_fail, rodd_unchecked, mix_unchecked, split_fail or report");
 #else
   if (!smx_test_.empty()) return fail("model K: k_smx_test is a test hook of developer builds only");
 #endif
+  const std::string s_test = option(c, "k_s_breakpoints_test");
+  bool force_s_mismatch = false;
+#ifdef WG_DEV_DIAGNOSTICS
+  if (!s_test.empty() && s_test != "mismatch") return fail("model K: k_s_breakpoints_test must be mismatch");
+  force_s_mismatch = s_test == "mismatch";
+#else
+  if (!s_test.empty()) return fail("model K: k_s_breakpoints_test is a test hook of developer builds only");
+#endif
+  const ki_s_breakpoints::Table* s_table = nullptr;
+  if ((c.backend == 2 || c.backend == 3) && tiled_input_ && in_exact_ && !approx_a1_) {
+    static const auto table = ki_s_breakpoints::make_table();
+    static const auto digest = ki_s_breakpoints::table_digest(table);
+    s_breakpoints_fallback_ = force_s_mismatch || digest != ki_s_breakpoints::kProvenDigest;
+    if (s_breakpoints_fallback_)
+      notes_ += (notes_.empty() ? "" : "\n") +
+                std::string("model K: S breakpoint digest mismatch; using the pre-breakpoint exact tiled S path");
+    else
+      s_table = &table;
+  }
   // The native D3D12 device (backend 3: the D3D12 executor, or k_bench.py's own-buffer timing) runs the exact default
   // path only, and only when every kernel this context can launch has a port in <build>/dx12/manifest.json; both are
   // checked here, before the model is loaded, so a refused context costs nothing more (for model K the context ends and
@@ -626,11 +689,35 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   // k_in_exact=1: the same input kernels with exact arithmetic, addressed as "kx/<name>"
   if (in_exact_ && !dev_->load_module_tagged(join(build_dir_, "k_io_exact.co"), "kx"))
     return fail("model K: " + dev_->err());
+  // The second tag selects the pre-breakpoint shader ports and resolves to the same exact kernels on HIP.
+  if (s_breakpoints_fallback_ && !dev_->load_module_tagged(join(build_dir_, "k_io_exact.co"), "kxs"))
+    return fail("model K: the pre-breakpoint exact tiled S path is unavailable: " + dev_->err());
   // buffers
   for (auto& kv : blobs_) {
     DevPtr p;
     if (!alloc(&p, kv.second.size()) || !dev_->upload(p, kv.second.data(), kv.second.size())) return false;
     wdev_[kv.first] = p;
+  }
+  if (!f16_ && (c.backend == 2 || c.backend == 3)) {
+    for (const char* name : {"e0", "e1", "d1", "d0"}) {
+      const KStageInfo& st = *k_stage(name);
+      if (f8data_.count(name) || (st.head && !compact_head_)) continue;
+      const std::string kernel = std::string("k_stage2_") + name + (st.head ? "_hp" : "");
+      if (!dev_->require_d3d12_port(kernel, st.head ? "s184:p19.b32,p,p,p" : "s184:p19.b32,p")) return dfail();
+      if (c.backend == 3 && std::strcmp(name, "d1") == 0 &&
+          !dev_->require_d3d12_port(kernel + "__rodd", "s184:p19.b32,p")) return dfail();
+      const auto& weight = blobs_.at(name);
+      std::vector<uint8_t> compact;
+      if (st.head) {
+        compact = k_pack_compact_head(weight.data() + stage_sections(st).head, st.C);
+        if (!alloc(&d0_compact_head_, compact.size()) ||
+            !dev_->upload(d0_compact_head_, compact.data(), compact.size())) return false;
+      }
+      const auto bias = k_narrow_bias32(st, weight.data(), compact.data());
+      const size_t bytes = bias.size() * sizeof(bias[0]);
+      DevPtr& plane = narrow_bias_[name];
+      if (!alloc(&plane, bytes) || !dev_->upload(plane, bias.data(), bytes)) return false;
+    }
   }
   for (auto& kv : f8data_) {  // network=fused8: the FP8 weights and FP32 biases; device pointers into KF8Params
     DevPtr p;
@@ -670,6 +757,7 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
     return fail("model K: an input-stage buffer is not allocated (it would be packed as arena offset 0)");
   // the own output buffer (tests): dense RGB f32, dense RGBA f32 (FrameIo.out_rgba32f) or RGBA16F rows that fit
   if (!external_io_ && !alloc(&out_, (size_t)W_ * H_ * 16, true)) return false;
+  if (split_m_ && !split_alloc()) return false;  // k_split's scratch (filled with the rest by k_fill, below)
   if (fill_ >= 0) {  // k_fill (test hook): the sentinel in everything a frame writes, before the first frame
     auto fillb = [&](DevPtr p, size_t bytes) { return !p || dev_->memset(p, fill_, std::max<size_t>(bytes, 256)); };
     bool ok = true;
@@ -679,12 +767,20 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
     ok = ok && fillb(ctap_, R * 8) && fillb(ctapT_, R * 2) && fillb(cpre_, R * 16) && fillb(cpre2_, R * 8) &&
          fillb(xs_, 16) && fillb(kexpo_, 16) &&
          fillb(color_, R * 16) && fillb(depth_, R * 4) && fillb(motion_, R * 8);  // the own input copies (unused with caller buffers)
+    if (split_m_)  // k_split's scratch: written by the phases of stage m, so filled like the rest
+      ok = ok && fillb(split_z_, split_bytes_[0]) && fillb(split_x1_, split_bytes_[1]) &&
+           fillb(split_a_, split_bytes_[2]) && fillb(split_h_, split_bytes_[3]);
     if (!ok) return dfail();
   }
   // the filter-shape table (spec 43 section 7) of every level, computed once; a frame reads its level's set
   std::vector<uint16_t> tab((size_t)8 * kFilterEntries * kFilterValues);
   for (int l = 0; l < 8; ++l) k_filter_table(l, 1, tab.data() + (size_t)l * kFilterEntries * kFilterValues);
   if (!dev_->upload(tables_, tab.data(), tab.size() * 2)) return dfail();
+  if (s_table) {
+    if (!alloc(&s_breakpoints_, sizeof *s_table) ||
+        !dev_->upload(s_breakpoints_, s_table->data(), sizeof *s_table))
+      return dfail();
+  }
   if (!dev_->sync()) return dfail();
   // the native device prepares (loads, verifies and compiles) every kernel this context can select now: a missing or
   // corrupt shader fails create here, not at the first frame
@@ -710,7 +806,28 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
     }
   }
 #endif
-  if (!smx_select(c.backend, smx_test_)) return false;
+  // the create-time self-check. A split stage m (k_split=m) that fails it is not a refusal: stage m takes the one launch
+  // (k_split=off's path: the same bytes, the same reference hashes), the self-check runs again on that path, and create
+  // refuses only when that fails too (both reasons in the error)
+  const std::string notes_before = notes_;
+  if (!smx_select(c.backend, smx_test_)) {
+    if (!split_m_) return false;
+    std::string split_why = err_;
+    for (char& ch : split_why)
+      if (ch == '\n' || ch == '\r') ch = ' ';
+    notes_ = notes_before;
+    split_m_ = false;
+    if (!smx_select(c.backend, smx_test_)) {
+      std::string one_launch = err_;
+      for (char& ch : one_launch)
+        if (ch == '\n' || ch == '\r') ch = ' ';
+      return fail(one_launch + " (the split form of stage m failed first: " + split_why + ")");
+    }
+    notes_ += (notes_.empty() ? "" : "\n") +
+              std::string("model K: the create-time self-check failed on the split form of stage m (") + split_why +
+              "); stage m takes the one launch (k_stagew4_m), output unchanged";
+    err_.clear();
+  }
   if (!approx_note_.empty()) notes_ += (notes_.empty() ? "" : "\n") + approx_note_;
   return true;
 }
@@ -733,7 +850,9 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
 // prepared at create (KRuntime::create, Device::prepare): a missing or corrupt shader fails create.
 // Test hook (developer builds only, WG_DEV_DIAGNOSTICS): runtime option k_smx_test = mix_fail (the mix form counts as
 // failed), both_fail (both forms count as failed), rodd_unchecked (the round-to-odd ports without the check; for the
-// frame test's negative control), report (adds the computed hashes as a note; on any device, every possible offset).
+// frame test's negative control), split_fail (the split form of stage m counts as failed, so create takes the one
+// launch; with k_split=off it has no effect), report (adds the computed hashes as a note; on any device, every possible
+// offset).
 namespace {
 // SMX-SELFCHECK-SOURCE BEGIN (the cases, the synthetic data, the offsets and the check: k_smx_selfcheck.h's digest covers this text)
 struct SmxCase {
@@ -823,7 +942,7 @@ bool KRuntime::smx_check(bool rodd, bool all, std::vector<std::pair<std::string,
   }
   // inputs (the input map and a decoder's skip map read the same synthetic data) and one weight blob for every stage
   std::vector<uint16_t> in(in_bytes / 2), w(w_bytes / 2);
-  DevPtr din = 0, dw = 0, dy = 0, dm = 0;
+  DevPtr din = 0, dw = 0, dy = 0, dm = 0, db = 0;
   int loaded = -1;  // the data set in din / dw
   auto load = [&](int set) {
     if (set == loaded) return true;
@@ -836,6 +955,11 @@ bool KRuntime::smx_check(bool rodd, bool all, std::vector<std::pair<std::string,
   };
   bool ok = dev_->alloc(&din, in_bytes) && dev_->alloc(&dw, w_bytes) && dev_->alloc(&dy, y_bytes) &&
             dev_->alloc(&dm, std::max<size_t>(m_bytes, 256));
+  if (ok && narrow_bias_.count("d1")) {
+    const auto& d1 = *k_stage("d1");
+    const size_t words = 10u * d1.C + (size_t)d1.heads * 64 * 64;
+    ok = dev_->alloc(&db, words * sizeof(uint32_t));
+  }
   std::vector<uint8_t> buf;
   for (int i = 0; ok && i < kSmxCount; ++i) {
     const SmxCase& c = kSmxCases[i];
@@ -851,11 +975,17 @@ bool KRuntime::smx_check(bool rodd, bool all, std::vector<std::pair<std::string,
       int ng = 0;
       bool w2 = false;
       const std::string k = stage_kernel_base(st, false, true, p.nwx * p.nwy, &ng, &w2) + (rodd ? "__rodd" : "");
+      const bool use_bias = db && (k == "k_stage2_d1" || k == "k_stage2_d1__rodd");
       wgc::Sha256 sha;
       for (int set = 0; ok && set < c.sets; ++set) {
-        ok = load(set) && dev_->memset(dy, 0, y_bytes) && dev_->memset(dm, 0, std::max<size_t>(m_bytes, 256)) &&
+        ok = load(set);
+        if (ok && use_bias) {
+          const auto bias = k_narrow_bias32(st, reinterpret_cast<const uint8_t*>(w.data()));
+          ok = dev_->upload(db, bias.data(), bias.size() * sizeof(bias[0]));
+        }
+        ok = ok && dev_->memset(dy, 0, y_bytes) && dev_->memset(dm, 0, std::max<size_t>(m_bytes, 256)) &&
              launch(k.c_str(), (unsigned)(w2 ? cdiv(p.nwx * p.nwy, 2) : p.nwx * p.nwy),
-                    (unsigned)(kThreads * (ng ? ng : 1)), &p) &&
+                    (unsigned)(kThreads * (ng ? ng : 1)), &p, use_bias ? &db : nullptr) &&
              dev_->download(buf.data(), dy, yb) && (!mb || dev_->download(buf.data() + yb, dm, mb));
         if (ok) sha.update(buf.data(), buf.size());
       }
@@ -866,7 +996,7 @@ bool KRuntime::smx_check(bool rodd, bool all, std::vector<std::pair<std::string,
       out->emplace_back(smx_case_name(i, o.first, o.second, false), v);
     }
   }
-  for (DevPtr p : {din, dw, dy, dm})
+  for (DevPtr p : {din, dw, dy, dm, db})
     if (p) dev_->free(p);
   return ok || dfail();
 }
@@ -917,6 +1047,8 @@ bool KRuntime::smx_select(int backend, const std::string& hook) {
     add_note(report("reference", h, -1));
     return true;
   }
+  if (hook == "split_fail" && split_m_)  // test hook: the split form of stage m counts as failed (create's fallback)
+    return fail("model K: test hook: the split self-check of stage m failed (k_smx_test=split_fail)");
   if (hook == "rodd_unchecked") {
     smx_rodd_ = true;
     smx_note_ = " smx=rodd(unchecked)";
@@ -996,6 +1128,11 @@ bool KRuntime::launch(const char* kernel, unsigned grid, unsigned block, void* a
       return fail(std::string("model K: ") + kernel + " parameter " + bad +
                   " is not 16-byte aligned (the native RDNA 3 kernels need every stage pointer 16-byte aligned)");
 #endif
+  // SMX-SELFCHECK-SOURCE BEGIN (k_split: stage m's kernel-name redirect; the digest covers it)
+  // k_split: stage m (the frame's and the self-check's) as its phase launches
+  if (split_m_ && std::strncmp(kernel, "k_stagew4_m", 11) == 0 && (!kernel[11] || std::strcmp(kernel + 11, "__rodd") == 0))
+    return split_m(kernel[11] != 0, a0);
+  // SMX-SELFCHECK-SOURCE END
   void* args[8] = {a0, a1, a2, a3, a4, a5, a6, a7};
   if (pending_mark_ >= 0) {
     const int e = pending_mark_;
@@ -1004,6 +1141,53 @@ bool KRuntime::launch(const char* kernel, unsigned grid, unsigned block, void* a
   }
   return dev_->launch(kernel, grid, block, args) || dfail();
 }
+
+// SMX-SELFCHECK-SOURCE BEGIN (k_split: the phase launches and scratch; the digest covers them)
+// k_split: stage m as four launches (clean/k/dx12/kernels/k_block_split.hlsl), joined by the dispatch boundaries:
+// attention per (window, head), Wo per (window, output tile), W1 per (window, two hidden tiles), W2 per (window, output
+// tile). Each phase reads the block parameters of k_stagew4_m's launch and the scratch the phase before wrote.
+bool KRuntime::split_m(bool rodd, void* params) {
+  const KBlkParams& p = *static_cast<const KBlkParams*>(params);
+  const KStageInfo& st = *k_stage("m");
+  const int nwin = p.nwx * p.nwy, kt = st.C / 16, ht = 4 * st.C / 16;
+  if (nwin > split_cap_)
+    return fail("model K: k_split: stage m has " + std::to_string(nwin) + " windows, the scratch holds " +
+                std::to_string(split_cap_));
+  // k_split_m_w1 runs HT / 2 groups per window: one group per two hidden tiles (KS_HB = 2 in
+  // clean/k/dx12/kernels/k_block_split.hlsl). A change of KS_HB must change this grid too.
+  return launch(rodd ? "k_split_m_attn__rodd" : "k_split_m_attn", (unsigned)(nwin * st.heads), 128, params, &split_z_,
+                &split_x1_, &split_a_, &split_h_) &&
+         launch("k_split_m_wo", (unsigned)(nwin * kt), 128, params, &split_z_, &split_x1_, &split_a_, &split_h_) &&
+         launch("k_split_m_w1", (unsigned)(nwin * (ht / 2)), 128, params, &split_z_, &split_x1_, &split_a_, &split_h_) &&
+         launch("k_split_m_w2", (unsigned)(nwin * kt), 128, params, &split_z_, &split_x1_, &split_a_, &split_h_);
+}
+
+// The phases' scratch (FP16): Z [windows][64][8 heads x 32], X1 and A [windows][64][C], H [windows][64][4 C], for the most
+// windows stage m has at any window offset (0 .. 7) in this context's frames or in the self-check's m case.
+bool KRuntime::split_alloc() {
+  const KStageInfo& st = *k_stage("m");
+  if (st.C != 160 || st.heads != 8)  // the phase kernels are compiled for stage m's C = 160, 8 heads
+    return fail("model K: k_split: stage m is not C = 160 with 8 heads");
+  int cap = 0;
+  auto grow = [&](int wb, int hb) {
+    int lw, lh;
+    k_level_size(wb, hb, st.level, &lw, &lh);
+    for (int oy = 0; oy < 8; ++oy)
+      for (int ox = 0; ox < 8; ++ox) cap = std::max(cap, k_window_count(lw, lh, ox, oy));
+  };
+  grow(Bw_, Bh_);
+  for (const SmxCase& sc : kSmxCases)
+    if (std::strcmp(sc.stage, "m") == 0) grow(sc.wb, sc.hb);
+  split_cap_ = cap;
+  const size_t tok = (size_t)cap * 64;
+  split_bytes_[0] = tok * st.heads * 32 * 2;  // Z
+  split_bytes_[1] = tok * st.C * 2;           // X1
+  split_bytes_[2] = tok * st.C * 2;           // A
+  split_bytes_[3] = tok * 4 * st.C * 2;       // H
+  return alloc(&split_z_, split_bytes_[0]) && alloc(&split_x1_, split_bytes_[1]) &&
+         alloc(&split_a_, split_bytes_[2]) && alloc(&split_h_, split_bytes_[3]);
+}
+// SMX-SELFCHECK-SOURCE END
 
 bool KRuntime::upload_inputs(int rw, int rh, const float* color, const float* dep, const float* mot, int channels) {
   if (rw <= 0 || rh <= 0 || rw > max_rw_ || rh > max_rh_) return fail("render size larger than the maximum");
@@ -1058,8 +1242,18 @@ bool KRuntime::network(int f, const std::function<bool(const char*)>& after) {
       // k_head=compact: p.head (the OUT buffer) receives the compact pixel head [2 Bh][2 Bw][4] instead of the head map
       const char* k0 = compact_head_ ? (f16_ ? "k_stage2h_d0_hp" : "k_stage2_d0_hp")
                                      : (f16_ ? "k_stage2h_d0_hidden" : "k_stage2_d0_hidden");
-      if (!launch(k0, grid, kThreads, &p, &hidden)) return false;
-    } else if (!launch(stage_kernel(k, st.name).c_str(), grid, (unsigned)(kThreads * (ng ? ng : 1)), &p)) return false;
+      if (compact_head_ && !f16_ && d0_compact_head_) {
+        if (!launch(k0, grid, kThreads, &p, &hidden, &narrow_bias_.at(st.name), &d0_compact_head_)) return false;
+      } else if (!launch(k0, grid, kThreads, &p, &hidden)) {
+        return false;
+      }
+    } else {
+      const std::string kernel = stage_kernel(k, st.name);
+      const auto bias_plane = narrow_bias_.find(st.name);
+      const bool use_bias = k == "k_stage2_e0" || k == "k_stage2_e1" || k == "k_stage2_d1";
+      void* bias = use_bias && bias_plane != narrow_bias_.end() ? &bias_plane->second : nullptr;
+      if (!launch(kernel.c_str(), grid, (unsigned)(kThreads * (ng ? ng : 1)), &p, bias)) return false;
+    }
     if (after && !after(st.name)) return false;
     if (i < 10) {
       info_.offsets[i][0] = ox;  // WgRtFrameInfo has ten rows: e0 ... d1 (d0's offset is (4, 4))
@@ -1265,7 +1459,8 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
   auto kname = [&](const char* n) -> const char* {
     const bool io_kernel = std::strncmp(n, "k_in_", 5) == 0 || std::strncmp(n, "k_out_", 6) == 0;
     if (in_exact_ && std::strncmp(n, "k_in_", 5) == 0) {  // input-stage kernels from k_io_exact.co
-      kname_buf = std::string("kx/") + n;
+      const bool fallback = s_breakpoints_fallback_ && std::strncmp(n, "k_in_tiled", 10) == 0;
+      kname_buf = std::string(fallback ? "kxs/" : "kx/") + n;
     } else if (fast_) {
       kname_buf = std::string(n) + "_f";
     } else {
@@ -1291,8 +1486,11 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
   const bool use_uniforms = use_tiled && !native_direct_ && input_uniforms_ && input_uniforms_safe(fin, &input_host);
   auto input_stage = [&]() {
     if (use_tiled) {
+      if (in_exact_ && !approx_a1_ && cfg_.backend >= 2 && !s_breakpoints_fallback_ && !s_breakpoints_)
+        return fail("model K: exact tiled input would get a null S breakpoint table (arena offset 0); the frame is refused");
       KInParams local = ip;
-      local.cpre = local.cpre2 = 0;
+      local.cpre = s_breakpoints_;
+      local.cpre2 = 0;
       if (use_tiled_color) {
         KInColorParams fused = {local, ctap_, ctapT_};
         if (use_uniforms) {
@@ -1451,11 +1649,11 @@ std::vector<std::string> KRuntime::d3d12_kernels() const {
   v.push_back("k_expo_scalars");
   if (native_direct_) v.push_back("k_expo_scalars_direct");  // exposure from the game's texture (mode 1)
   v.push_back("k_out_color" + d);
-  if (!native_direct_) v.push_back("kx/k_in_tiled_uniform");  // (no direct form: the direct frame uses k_in_tiled_direct)
-  v.push_back("kx/k_in_tiled" + d);  // input_uniforms_safe refusing the host uniforms
-  if (approx_a1_) {  // k_approx=a1 (opt-in)
-    if (!native_direct_) v.push_back("kx/k_in_tiled_uniform__a1");
-    v.push_back("kx/k_in_tiled" + d + "__a1");
+  if (tiled_input_) {
+    const std::string tag = s_breakpoints_fallback_ ? "kxs/" : "kx/";
+    const std::string suffix = approx_a1_ ? "__a1" : "";
+    if (!native_direct_ && input_uniforms_) v.push_back(tag + "k_in_tiled_uniform" + suffix);
+    v.push_back(tag + "k_in_tiled" + d + suffix);  // input_uniforms_safe refusing the host uniforms
   }
   if (approx_a2_) {  // k_approx=a2 (opt-in)
     v.push_back("k_out_color" + d + "__a2");
@@ -1484,6 +1682,9 @@ std::vector<std::string> KRuntime::d3d12_kernels() const {
         v.push_back(k + "__rodd");
     }
   }
+  if (split_m_)  // k_split: stage m's phase kernels (k_stagew4_m[__rodd] stay listed above, unused while split)
+    for (const char* k : {"k_split_m_attn", "k_split_m_attn__rodd", "k_split_m_wo", "k_split_m_w1", "k_split_m_w2"})
+      v.push_back(k);
   v.push_back("k_mix_probe");
   v.push_back("k_mix_probe__rodd");
   v.push_back((compact_head_ ? "k_out_pixel_c" : "k_out_pixel") + d);
@@ -1510,7 +1711,7 @@ std::string KRuntime::d3d12_missing() const {
   for (const std::string& k : d3d12_kernels()) {
     auto it = co.find(k);
     // the code object the port stands for must be one this runtime loads (else the device refuses it at launch)
-    const bool tagged = k.rfind("kx/", 0) == 0;
+    const bool tagged = k.rfind("kx/", 0) == 0 || k.rfind("kxs/", 0) == 0;
     const bool co_ok = it != co.end() &&
                        (tagged ? it->second == "k_io_exact.co"
                                : (it->second == "k_block.co" || it->second == "k_block_wide.co" ||
@@ -1551,7 +1752,7 @@ const char* KRuntime::kernels() {
                   " legacy_color_launches=" + std::to_string(legacy_color_launches_) +
                   " legacy_base_launches=" + std::to_string(legacy_base_launches_) +
                   (fast_ ? " k_fast=1" : "") + (expo_v051_ ? " k_expo_rule=v051" : "") +
-                  smx_note_ + approx_tag() + " hidden=fused_d0" + std::string(" head=") +
+                  smx_note_ + (split_m_ ? " split=m" : "") + approx_tag() + " hidden=fused_d0" + std::string(" head=") +
                   (compact_head_ ? "compact" : "full") +
                   " base=" + std::to_string(Bw_) + "x" + std::to_string(Bh_) +
                   " hdr=" + (hdr_ ? "1" : "0") + " mv=render" +

@@ -37,7 +37,8 @@ v8f pj_rn16(v8f a)
 {
     const uint4 h = wg_to_f16_ags(a);
     v8f r;
-    [unroll] for (uint j = 0; j < 4u; ++j) { r.v[2 * j] = wg_h2f_lo(h[j]); r.v[2 * j + 1] = wg_h2f_hi(h[j]); }
+    // f16tof32 directly, not wg_h2f_lo: its mask costs a v_mov_b16 per FP16 pair (see hyb_h2f_lo in wg_hyb.hlsli)
+    [unroll] for (uint j = 0; j < 4u; ++j) { r.v[2 * j] = f16tof32(h[j]); r.v[2 * j + 1] = wg_h2f_hi(h[j]); }
     return r;
 }
 

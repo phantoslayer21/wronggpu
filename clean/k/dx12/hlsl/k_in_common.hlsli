@@ -8,6 +8,9 @@
 #ifndef KI_HWMATH
 #define KI_HWMATH 0
 #endif
+#ifndef KI_SGPR
+#define KI_SGPR 0   // k_in.hlsl defines it for the exact direct tiled form
+#endif
 #if KI_HWMATH
 // CLOSE-APPROXIMATION variant (opt-in, never the default): the transcendental unit instead of the correctly rounded
 // sequences: v_log_f32 / v_exp_f32 (about 1 FP32 ulp), v_rcp_f32 and a product for the divisions. The results meet the
@@ -38,11 +41,16 @@ float ki_decode(float t)
     const float e = kf_opq((t + kf_bits(0x3C4FAE29u)) * 9.0f) * kf_bits(0x3FB8AA3Bu);
     return ki_div(ki_exp2(e) - 1.0f, 9.0f * t);
 }
+#if defined(KI_TILED_PHI_LOG2)
+#include "k_phi_log2.hlsli"
+#else
+float ki_phi_log2(float x) { return ki_log2(x); }
+#endif
 float ki_phi(float Y, bool hdr)
 {
     if (hdr) {
         const float Yp = kf_max(Y, 0.0f);
-        return ki_div(ki_log2(kf_fma(Yp, 12.0f, 1.0f)) * kf_bits(0x3F317218u), Yp + kf_bits(0x358637BDu));
+        return ki_div(ki_phi_log2(kf_fma(Yp, 12.0f, 1.0f)) * kf_bits(0x3F317218u), Yp + kf_bits(0x358637BDu));
     }
     return kf_fma(Y, 3.0f, 1.0f);
 }
@@ -53,6 +61,18 @@ float ki_S(float z)
     const float p = ki_exp2(ki_log2(zp) * kf_bits(0x3ED55555u));         // log2 and 2^x each rounded once
     return kf_fma(p, kf_bits(0x3F870A3Du), kf_bits(0xBD6147AEu));
 }
+#if defined(KI_TILED_PACKED_S)
+uint ki_tiled_S_bits(float z, uint table)
+{
+    const float zp = kf_min(kf_max(z, 0.0f), 1.0f);
+    if (!(zp > kf_bits(0x3B4D2E1Cu))) return kh_round_bits(kf_bits(0x414EB852u) * zp);
+    const uint u = asuint(zp);
+    // Every reachable 4,096-code bucket is flat or makes one +1 transition
+    // (clean.k.tests.prove_ki_s_breakpoints). The cut is 4,096 for flat buckets.
+    const uint e = wg_ld32(table, ((u - 0x3B4D2000u) >> 12u) * 4u);
+    return (e & 0xffffu) + ((u & 0xfffu) >= (e >> 16u) ? 1u : 0u);
+}
+#endif
 // z is often a product (lambda L) that HIP rounds before z + 1. No kf_opq: the gfx1201 ISA keeps the product apart
 // (G1's precaution link, dropped in speed round 1 after the ISA check: same v_mul / v_fma counts without it)
 float ki_T(float z)
@@ -92,6 +112,10 @@ KiFine ki_fine(KInParams P, KiHost k, int fx, int fy)
     const bool dfold = (F.flags & KIO_M16) != 0;
     const float dmsx = F.rmsx, dmsy = F.rmsy, dmox = F.rmox, dmoy = F.rmoy;
 #endif
+#if KI_SGPR
+    // the exact tiled direct kernel: the same four values, computed once per wave in k_in.hlsl ki_host_sgpr (SGPRs)
+    const float spx = k.sp_x, spy = k.sp_y, ofx = k.of_x, ofy = k.of_y;
+#else
     float spx = k.sp_x, spy = k.sp_y, ofx = F.mox, ofy = F.moy;
     [branch] if (dfold) {
         const bool dmvlo = (F.flags & KIO_MVLO) != 0;
@@ -100,6 +124,7 @@ KiFine ki_fine(KInParams P, KiHost k, int fx, int fy)
         ofx = ki_dmo(F.mox, dmox, dmsx);
         ofy = ki_dmo(F.moy, dmoy, dmsy);
     }
+#endif
     const float mx = spx * (mvx + ofx), my = spy * (mvy + ofy);
     const float wx = px + mx, wy = py + my;
     KiFine r;
@@ -124,3 +149,11 @@ void ki_store_x0(uint x0, int id, int k, float c0, float c1, float c2, float c3)
     wg_st64(x0, ((uint)id * 16u + 4u * (uint)k) * 2u,
             uint2(kh_round_bits(c0) | (kh_round_bits(c1) << 16), kh_round_bits(c2) | (kh_round_bits(c3) << 16)));
 }
+
+#if defined(KI_TILED_PACKED_S)
+void ki_store_tiled_x0(uint x0, int id, int k, uint c0, uint c1, float c2, float c3)
+{
+    wg_st64(x0, ((uint)id * 16u + 4u * (uint)k) * 2u,
+            uint2(c0 | (c1 << 16), kh_round_bits(c2) | (kh_round_bits(c3) << 16)));
+}
+#endif

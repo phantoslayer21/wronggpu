@@ -71,7 +71,7 @@ constexpr unsigned kProfileQueries = 4096;
 
 struct NativeArg { char kind; unsigned bytes; std::vector<StructField> fields = {}; };  // 's': struct_args.h
 struct NativeKernel {
-  std::string name, file, co, rs = "buffer";
+  std::string name, file, co, signature, rs = "buffer";
   unsigned block = 0, wave = 0, dwords = 0;
   // group: lanes per D3D12 workgroup when the port splits each launched workgroup of `block` lanes into block / group
   // workgroups (manifest "group", build_dx12.py group=; 0 = block). The launch keeps the HIP geometry (grid x block).
@@ -786,6 +786,12 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
       if (variant_matches(i->second)) return &i->second;
     return range.first == range.second ? nullptr : &range.first->second;
   }
+  bool require_d3d12_port(const std::string& name, const char* signature) override {
+    const NativeKernel* port = find_port(name);
+    if (!port || !variant_matches(*port))
+      return fail("native D3D12: required port unavailable for " + name);
+    return port->signature == signature || fail("native D3D12: incompatible argument signature for " + name);
+  }
 #ifdef WG_DEV_GFX11
   // WG_DEV_GFX11_NATIVE_K (rdna4.h): the kernel that runs for a requested name, its __g11 form when the manifest has it
   std::string native_kernel_name(const std::string& name) const {
@@ -1495,6 +1501,7 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
           !wgc::parse_digest_hex(hash, k.digest) || k.block == 0 || k.block > 1024 ||
           (k.wave != 32 && k.wave != 64) || k.block % k.wave || k.dwords > kNativeArgs)
         return fail("native D3D12 manifest: invalid kernel metadata for " + k.name);
+      k.signature = arguments;
       unsigned words = 0;
       for (size_t start = 0; start < arguments.size();) {
         const size_t end = arguments.find(',', start);

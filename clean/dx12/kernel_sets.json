@@ -465,6 +465,26 @@
    "k_io.co"
   ],
   [
+   "k_split_m_attn",
+   "k_block_wide.co"
+  ],
+  [
+   "k_split_m_attn__rodd",
+   "k_block_wide.co"
+  ],
+  [
+   "k_split_m_w1",
+   "k_block_wide.co"
+  ],
+  [
+   "k_split_m_w2",
+   "k_block_wide.co"
+  ],
+  [
+   "k_split_m_wo",
+   "k_block_wide.co"
+  ],
+  [
    "k_stage2_d0_hidden",
    "k_block.co"
   ],
@@ -618,6 +638,18 @@
   ],
   [
    "kx/k_in_tiled_uniform__a1",
+   "k_io_exact.co"
+  ],
+  [
+   "kxs/k_in_tiled",
+   "k_io_exact.co"
+  ],
+  [
+   "kxs/k_in_tiled_direct",
+   "k_io_exact.co"
+  ],
+  [
+   "kxs/k_in_tiled_uniform",
    "k_io_exact.co"
   ]
  ]

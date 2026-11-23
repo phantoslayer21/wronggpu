@@ -685,11 +685,7 @@ WG_FN void swin_block(const u8* __restrict__ x, const u8* __restrict__ xadd, u8*
   const u32 tid = wg_lane_id();
   const u32 lane = tid & 31u, t = lane & 15u, hh = lane >> 4;
   const int nwx = (W + ox + 3) >> 2, nwy = (H + oy + 3) >> 2, nwin = nwx * nwy;
-#if WG_SWIN_G11 || defined(WG_EMU)
   const u32 wave_id = (WG_WAVE_SCALAR && ECL == 0) ? (u32)wg_uniform((int)(tid >> 5)) : (tid >> 5);
-#else
-  const u32 wave_id = (WG_WAVE_SCALAR && ECL == 0) ? (u32)__builtin_amdgcn_readfirstlane((int)(tid >> 5)) : (tid >> 5);
-#endif
   int win0 = (int)(wg_block_id() * (THREADS / WG_WAVE) + wave_id) * WPW;
   static_assert(MCO == 0 && ECL == 0 || (THREADS == 256 && WPW == 1), "fused merge / expand: 8 windows per workgroup");
   static_assert(ECL == 0 || 128 * C <= MAXU, "fused expand: the 8 windows' expanded tokens must fit one weight buffer");

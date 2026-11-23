@@ -6,7 +6,7 @@ RADV, `d3dcompiler_47.dll` is Wine's own (vkd3d-shader), and the driver channel 
 WrongGPU's D3D12 code on that stack. They don't make Linux a supported platform.
 
 ```sh
-python3 clean/linux/run_wine_tests.py --proton <Proton install> [--vkd3d <dir>] [--runtime <wronggpu_runtime.dll>]
+python3 clean/linux/run_wine_tests.py --proton <Proton install> [--wine <wine>] [--vkd3d <dir>] [--runtime <wronggpu_runtime.dll>]
 ```
 
 The tests use WrongGPU's own synthetic data only: no model converted from a DLSS file, no game files.
@@ -29,6 +29,14 @@ programs only, never shipped (the release rule in `clean/fsr/build-mingw.sh`).
 - Linux with an AMD RDNA 4 GPU (RX 9070 or RX 9060 family) and Mesa's RADV driver.
 - A Proton install: `--proton`, or the environment variable `WG_PROTON`. For example, a GE-Proton folder in
   `~/.local/share/Steam/compatibilitytools.d/`, or Steam's `steamapps/common/Proton - Experimental`.
+- Without a display (a console or SSH session), a Wine that can start Vulkan programs. Proton's own wine (seen with
+  GE-Proton 11-11, wine 11.0) can wait forever there, while a system Wine (11.21 tried) runs the same prefix. The runner
+  first lists the GPU adapters with a small probe (`dxgi_probe.cpp`, `--probe-timeout`, default 90 s); if that hangs, the tests that would
+  start a D3D12 program (`interop`, `ags-layout`, and `rr-leak` only with `--runtime`) fail at once with a message, and the
+  stuck Wine is stopped (the probe and test programs run under `xvfb-run` when it is installed). A probe or `xvfb-run` that
+  exits with an error fails them too, with its output. A test that would skip (`rr-leak` without `--runtime`, `ags-layout`
+  without `dxc`) skips as before, without the probe or the test program (the prefix is still set up). `--wine <wine>` (or `WG_WINE_BIN`) runs the tests with another wine
+  executable while the DLLs still come from `--proton`. In a desktop session Proton's wine is used as before.
 - A MinGW-w64 C++ compiler: `MINGW_CXX`, otherwise `x86_64-w64-mingw32-g++-posix` or `x86_64-w64-mingw32-g++`
   on `PATH`. llvm-mingw works too. The tests add `-fms-extensions` for clang.
 - For `ags-layout`: the Linux `dxc` from the DXC release named in BUILDING.md, in `WG_DXC` or on `PATH`.

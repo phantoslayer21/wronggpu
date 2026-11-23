@@ -13,7 +13,10 @@ bytes are pointers (clean/runtime/struct_args.h).
 import ctypes
 import json
 import os
+from pathlib import Path
 import struct
+
+from clean.k.runner.k_pack import block_sections, linear_sections, stage_sections
 
 HIP_SENTINEL, D3D12_SENTINEL, SLACK = 0xA5, 0x5A, 64
 
@@ -41,6 +44,76 @@ class PlanDev:
 
     def __getattr__(self, name):
         return getattr(self.hip, name)
+
+
+def head_rows():
+    """Physical rows for the 40 logical channels, shared with the C++ packer and shader."""
+    path = Path(__file__).with_name("hlsl") / "k_head_rows.inc"
+    values = " ".join(line.split("//", 1)[0] for line in path.read_text(encoding="utf-8").splitlines())
+    return tuple(int(value) for value in values.split(","))
+
+
+def _bias32(half):
+    """Widen FP16 bits as k_bias32_bits does, including NaN sign and payload."""
+    payload = half & 0x3FF
+    if half & 0x7C00 == 0x7C00 and payload:
+        return (half & 0x8000) << 16 | 0x7FC00000 | payload << 13
+    return struct.unpack("<I", struct.pack("<f", struct.unpack("<e", struct.pack("<H", half))[0]))[0]
+
+
+def narrow_d3d12_inputs(st, blob):
+    """Return the FP32 bias plane and optional compact d0 weights for the two-window ports."""
+    C, heads, mix = st["C"], st["heads"], st["mix"]
+    stage = stage_sections(st)
+    block = block_sections(C, heads, mix)
+    bias = bytearray()
+
+    def append(data, offset, count):
+        for (half,) in struct.iter_unpack("<H", data[offset:offset + count * 2]):
+            bias.extend(struct.pack("<I", _bias32(half)))
+
+    if "embed" in stage:
+        append(blob, stage["embed"] + linear_sections(C, 16)["b"], C)
+    if "expand" in stage:
+        append(blob, stage["expand"] + linear_sections(4 * C, st["C_prev"])["b"], 4 * C)
+    for name, count in (("bo", C), ("b1", 4 * C), ("b2", C)):
+        append(blob, stage["block"] + block[name], count)
+    if "merge" in stage:
+        append(blob, stage["merge"] + linear_sections(st["C_next"], 4 * C)["b"], st["C_next"])
+    compact = None
+    if "head" in stage:
+        original = blob[stage["head"]:]
+        old_bias = linear_sections(40, C)["b"]
+        compact = bytearray(linear_sections(32, C)["b"])
+        head_bias = bytearray(32 * 2)
+        tiles = C // 16
+        for logical, physical in enumerate(head_rows()):
+            if physical < 0:
+                continue
+            for tile in range(tiles):
+                for half_tile in (0, 16):
+                    src = 512 * (logical // 16 * tiles + tile) + 16 * (half_tile + logical % 16)
+                    dst = 512 * (physical // 16 * tiles + tile) + 16 * (half_tile + physical % 16)
+                    compact[dst:dst + 16] = original[src:src + 16]
+            head_bias[physical * 2:physical * 2 + 2] = original[old_bias + logical * 2:old_bias + logical * 2 + 2]
+        append(head_bias, 0, 32)
+    if mix == "softmax":
+        append(blob, stage["block"] + block["mix"], heads * 64 * 64)
+    return bytes(bias), None if compact is None else bytes(compact)
+
+
+def narrow_d3d12_args(plan, pdev, st, blob):
+    """Allocate the D3D12-only inputs and return their arguments in manifest order."""
+    bias, compact = narrow_d3d12_inputs(st, blob)
+    args = []
+    for name, data in (("bias32", bias), ("compact_head", compact)):
+        if data is None:
+            continue
+        pointer = pdev.malloc(len(data))
+        plan["bufs"][name] = pointer
+        pdev.upload(pointer, data)
+        args.append(ctypes.c_void_p(pointer))
+    return args
 
 
 def manifest_args(build):
