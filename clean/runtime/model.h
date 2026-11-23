@@ -89,6 +89,7 @@ struct SwinStageInfo {
 const SwinStageInfo* swin_stage_info(const std::string& stage);
 
 DRow drow_gfx12();
+DRow drow_gfx11();  // row 2 v + h (packing.py D_ROW_LAYOUTS["gfx11"])
 
 // Building blocks of the packers above, for the packers of other models of the same family (Model L,
 // clean/l/runtime; #89): the same code that packs Model M's blobs (ports of clean/runner/packing.py).

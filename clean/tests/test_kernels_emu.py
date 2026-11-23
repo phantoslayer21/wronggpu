@@ -402,6 +402,15 @@ class TestSelftestEmu(unittest.TestCase):
         self.assertTrue(report["pass"], report)
         self.assertEqual(report["wmma_fp8"]["d_row_name"], "gfx12")
 
+    def test_half_wave_exchange_in_emulator(self):
+        """probe_xchg16: wg_xchg16_u and wg_xor16 give lane l the value of lane l ^ 16 (bit for bit, NaN payloads too)."""
+        from clean.runner import selftest
+        res = selftest.probe_xchg16(selftest._Dev("emu", build_dir(), ""))
+        self.assertTrue(res["pass"], res)
+        self.assertEqual(res["table_word"], list(range(16, 32)) + list(range(16)))
+        self.assertEqual(res["table_float"], res["table_word"])
+        self.assertEqual(res["lanes_that_kept_their_own_value"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

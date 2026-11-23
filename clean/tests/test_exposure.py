@@ -58,27 +58,34 @@ class ExposureReferenceTest(unittest.TestCase):
             self.assertEqual(fp16_steps(X.exposure(c, pi, al), slow_exposure(c, pi, al)), 0)
 
 
+# (render size, pre-exposure, alpha, kind) of the kernel tests: the host emulator here, the card in test_gpu_stages.py
+KERNEL_CASES = [((40, 24), 1.0, 0.18, "hdr"), ((601, 523), 1.0, 0.18, "hdr"), ((1030, 517), 2.5, 0.3, "hdr"),
+                ((7, 5), 1.0, 0.18, "hdr"), ((1, 1), 1.0, 0.18, "hdr"), ((64, 48), 1.0, 0.18, "black"),
+                ((64, 48), 1.0, 0.18, "nan"), ((64, 48), 0.5, 0.18, "uniform"), ((64, 48), 1.0, 0.18, "dark"),
+                ((64, 48), 1.0, 0.18, "nearly_black")]
+
+
+def kernel_color(rng, rw, rh, kind):
+    if kind == "hdr":
+        return X.random_color(rng, rw, rh)
+    if kind == "black":
+        return np.zeros((rh, rw, 3), np.float32)
+    if kind == "nan":
+        return np.full((rh, rw, 3), np.nan, np.float32)
+    if kind == "uniform":
+        return np.full((rh, rw, 3), 0.25, np.float32)
+    if kind == "dark":
+        return np.full((rh, rw, 3), 1e-3, np.float32)
+    # m = ln(2e-8 + 1e-6) < -13.7: K exp(-m) > 65504 -> saturated
+    return np.full((rh, rw, 3), 2e-8, np.float32)
+
+
 class ExposureEmuTest(EmuTest):
     def test_matches_reference(self):
         rng = np.random.default_rng(8)
-        cases = [((40, 24), 1.0, 0.18, "hdr"), ((601, 523), 1.0, 0.18, "hdr"), ((1030, 517), 2.5, 0.3, "hdr"),
-                 ((7, 5), 1.0, 0.18, "hdr"), ((1, 1), 1.0, 0.18, "hdr"), ((64, 48), 1.0, 0.18, "black"),
-                 ((64, 48), 1.0, 0.18, "nan"), ((64, 48), 0.5, 0.18, "uniform"), ((64, 48), 1.0, 0.18, "dark"),
-                 ((64, 48), 1.0, 0.18, "nearly_black")]
-        for (rw, rh), pi, al, kind in cases:
+        for (rw, rh), pi, al, kind in KERNEL_CASES:
             with self.subTest(size=(rw, rh), pi=pi, alpha=al, kind=kind):
-                if kind == "hdr":
-                    c = X.random_color(rng, rw, rh)
-                elif kind == "black":
-                    c = np.zeros((rh, rw, 3), np.float32)
-                elif kind == "nan":
-                    c = np.full((rh, rw, 3), np.nan, np.float32)
-                elif kind == "uniform":
-                    c = np.full((rh, rw, 3), 0.25, np.float32)
-                elif kind == "dark":
-                    c = np.full((rh, rw, 3), 1e-3, np.float32)
-                else:  # m = ln(2e-8 + 1e-6) < -13.7: K exp(-m) > 65504 -> saturated
-                    c = np.full((rh, rw, 3), 2e-8, np.float32)
+                c = kernel_color(rng, rw, rh, kind)
                 x = {"color": c, "pre_exposure": pi, "alpha": al}
                 got = self.runner.run("exposure", b"", x)
                 self.assertEqual(set(got), {"e"})

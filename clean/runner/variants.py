@@ -17,7 +17,8 @@ SWIN_KERNELS = {  # block kernel -> (threads macro, windows-per-wave macro)
 }
 DEFAULTS = {"WG_WPW_C64": 1, "WG_WPW_C96": 1, "WG_WPW_C128": 1, "WG_GEMM_THREADS": 256, "WG_NT": 2,
             "WG_THREADS_C64": 256, "WG_THREADS_C64ADD": 256, "WG_THREADS_C96": 256, "WG_THREADS_C96ADD": 256,
-            "WG_THREADS_C128": 256, "WG_MINW_C64": 1, "WG_MINW_C96": 5, "WG_MINW_C128": 1, "WG_MLP_GROUP": 2, "WG_FORCE_CLAMP": 0, "WG_FUSE": 0, "WG_NORM_DOT4": 0, "WG_PROFILE": 0, "WG_AV8": 0, "WG_SMAX16": 0, "WG_GELU_MODE": 2, "WG_GELU_MIX": 1, "WG_MLP_PF": 0, "WG_UNIT_BYTES": 16384, "WG_SAT_MINMAX": 1, "WG_NUMV_C96": 0}
+            "WG_THREADS_C128": 256, "WG_MINW_C64": 1, "WG_MINW_C96": 5, "WG_MINW_C128": 1, "WG_MLP_GROUP": 2, "WG_FORCE_CLAMP": 0, "WG_FUSE": 0, "WG_NORM_DOT4": 0, "WG_PROFILE": 0, "WG_AV8": 0, "WG_SMAX16": 0, "WG_GELU_MODE": 2, "WG_GELU_MIX": 1, "WG_MLP_PF": 0, "WG_UNIT_BYTES": 16384, "WG_SAT_MINMAX": 1, "WG_NUMV_C96": 0, "WG_F16_W": 0, "WG_F16_A": 0, "WG_F16_Q": 0,
+            "WG_F16_AWIDE": 0, "WG_F16_QWIDE": 0, "WG_F16_M": 0, "WG_SCHED_FRAGS": 0, "WG_MERGE_REUSE": 0}
 
 
 def all_threads(n):
@@ -78,7 +79,44 @@ VARIANTS = {
     "pf2": {"WG_MLP_PF": 2},
     "vec16": {"WG_GELU_MODE": 3, "WG_SMAX16": 1},          # all packed-FP16 vector paths together (GELU polynomial + softmax)
     "gelu725": {"WG_GELU_MODE": 1},                        # A&S 7.1.25 erfc: 0.05-0.14 % FP8 flips, none > 1 step
+    # gfx11 (RDNA 3, the FP16 route; build.py --arch gfx1100 --variants): bit-identical to base, they differ in speed only.
+    # The weights widened to F16 once per workgroup, when a unit is copied to LDS (twice the LDS per code byte: the units
+    # of the plain block kernels hold half the code bytes, the LDS footprint stays; the C = 128 kernel keeps its codes: it
+    # spills with F16 fragments). The C = 64 kernels get the occupancy floor of 8 waves: without it they take 256 registers
+    # and spill 27.
+    "f16w": {"WG_F16_W": 1, "WG_MINW_C64": 8},
+    # And every activation operand made once, exchanged and widened, where it is quantized (8 registers per K group
+    # instead of 2; the C = 64 kernels only: C = 96 would spill 30). Occupancy floor 7 waves (8: 8 spills).
+    "f16wa": {"WG_F16_W": 1, "WG_F16_A": 1, "WG_MINW_C64": 7},
+    # And the operands made straight from the FP32 values (E4M3 rounding as FP32 arithmetic, v_cvt_pk_rtz_f16_f32), the code
+    # bytes only for the stores: the exact conversion of runner/q8_exhaustive.py, without the code bytes in between (not for
+    # the attention output o: with that one the C = 64 kernels spill 75).
+    "f16wq": {"WG_F16_W": 1, "WG_F16_A": 1, "WG_F16_Q": 1, "WG_MINW_C64": 7},
+    # The C = 128 block kernel with an occupancy floor of 7 waves per SIMD (default build: 250 registers, 5 waves; here 206, no
+    # spills; a floor of 8 gives 192 registers and no spills too, with the F16 operands of f16wk both spill). Nothing else changes.
+    "c128w7": {"WG_MINW_C128": 7},
+    # f16wq, and the C = 128 kernel's activation operands made the same way (F16 operands straight from the FP32 values, 64
+    # registers a tile instead of 16), with the machine scheduler kept from hoisting the fragment reads of a loop (they take 8
+    # registers each): 238 registers, 6 waves, no spill, where F16 weights for C = 128 spill 94 and the operands without the
+    # fences spill. The C = 64 and C = 96 kernels are f16wq's.
+    "f16wk": {"WG_F16_W": 1, "WG_F16_A": 1, "WG_F16_Q": 1, "WG_MINW_C64": 7, "WG_F16_AWIDE": 128, "WG_F16_QWIDE": 128,
+              "WG_SCHED_FRAGS": 128},
+    # And the C = 96 kernels' MLP operands (the norm output and the hidden values, the larger half of their matrix work) made
+    # the same way from codes, with the barriers there too: 252 registers, 5 waves, no spill. The C = 96 attention keeps codes
+    # (F16 operands there spill 12), and the operands are not made straight from FP32 (that spills 133).
+    "f16wm": {"WG_F16_W": 1, "WG_F16_A": 1, "WG_F16_Q": 1, "WG_MINW_C64": 7, "WG_F16_AWIDE": 128, "WG_F16_QWIDE": 128,
+              "WG_F16_M": 1, "WG_SCHED_FRAGS": 96},
+    # The patch merge kernels (the rest of the build is the default's): each operand widened to F16 once for a group of output
+    # tiles (6 for C = 64, 4 for C = 96) and each weight fragment once for both token groups: loops with the K group outermost.
+    # No spill. Bit-identical.
+    "mgx": {"WG_MERGE_REUSE": 1},
 }
+# The variants of each GPU family's build of swin.hip (gfx11: the gfx11 matrix wrappers); `--variants` alone builds these.
+FAMILY_VARIANTS = {"gfx11": ("f16w", "f16wa", "f16wq", "c128w7", "f16wk", "f16wm", "mgx")}
+# The persistent-kernel build of the family (kernels/swin_v2.hip with swin.hip's arithmetic: swin_bneck6, swin_mid; the
+# runtime's default for b0..b5). Built with the family's default code objects; not part of FAMILY_VARIANTS (it is another
+# source, not a way to make the operands), and Runner(..., arch="gfx11", variant=<name>) takes it too.
+FAMILY_MEGA = {"gfx11": ("bmegahg",)}
 
 # Variants whose output differs from base (a different GELU than the default). The sweep reports their mismatches but
 # does not treat them as an error.
@@ -241,6 +279,22 @@ def geometry(defs, src="swin.hip"):
 
 def variant_geometry(name):
     return geometry(all_builds()[name], source(name))
+
+
+# Workgroups of the persistent kernels (swin_bneck6, swin_mid) that fit a card of the family at once (any grid is correct;
+# the geometry above counts the 64 CUs of the RX 9070 XT). gfx11, RX 7900 XT (42 WGPs): swin_bneck6 takes 239 registers (6 waves per
+# SIMD, 3 groups of 8 waves per WGP): 126 groups; swin_mid 256 (5 waves, 2 groups): 84. Measured at 1706x960: bneck 12.0 / 6.2 / 4.5 ms
+# with 42 / 84 / 126 groups and 4.5 ms beyond; mid 18.3 / 10.2 / 10.1 ms with 42 / 84 / 126 groups and 10.1 ms beyond.
+FAMILY_MEGA_GROUPS = {"gfx11": {"mega": 126, "mid": 84}}
+
+
+def family_geometry(fam, name):
+    """variant_geometry of a build of a GPU family: the persistent kernels' default grids are the family's."""
+    geo = variant_geometry(name)
+    for key, groups in FAMILY_MEGA_GROUPS.get(fam, {}).items():
+        if key in geo:
+            geo[key] = {**geo[key], "groups": groups}
+    return geo
 
 
 def is_exact(name):

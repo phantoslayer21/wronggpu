@@ -8,6 +8,8 @@
 //     ../../runtime/{device,device_dx12,device_d3d12,embedded,model,no_model_k,runtime}.cpp
 //     ../../runtime/interop/{convert,native_candidate}.cpp ../../converter/src/{json,sha256}.cpp -o native_probe_test.exe
 // With WG_TEST_DRIVER_PROBE_FAIL=1 the create must fail with "probe mismatch at float 7". Exit status 0 on PASS.
+// Built with -DWG_DEV_GFX11 it takes an RX 7900 series board too (runtime/rdna4.h) and the build dir then holds
+// dx12-gfx11\manifest.json with native_driver_probe_f16 (build_dx12.py --gfx 11).
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -46,7 +48,8 @@ int main(int argc, char** argv) {
     DXGI_ADAPTER_DESC1 desc{};
     char n[256] = {};
     if (SUCCEEDED(a->GetDesc1(&desc))) WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, n, sizeof n - 1, nullptr, nullptr);
-    if (wgrt::rdna4_identity(wgrt::read_adapter_identity(desc.AdapterLuid))) {  // the driver's ids (rdna4_win.h)
+    const wgrt::AdapterIdentity identity = wgrt::read_adapter_identity(desc.AdapterLuid);  // the driver's ids (rdna4_win.h)
+    if (wgrt::rdna4_identity(identity) || wgrt::dev_gfx11_identity(identity)) {  // (the second: WG_DEV_GFX11 builds only)
       adapter = a;
       name = n;
       break;

@@ -29,7 +29,7 @@ import numpy as np  # noqa: E402
 
 from clean.reference.fp8 import fp8_decode, fp8_encode  # noqa: E402
 from clean.reference.swin import MODEL_STAGES, STAGES, stage_table, window_offset  # noqa: E402,F401
-from clean.runner import dec0, dec1dec0, enc0, exposure, post  # noqa: E402
+from clean.runner import dec0, dec1dec0, enc0, exposure, family, post  # noqa: E402
 from clean.runner import perf_variants as PV  # noqa: E402
 from clean.runner import variants as V  # noqa: E402
 from clean.runner.packing import (MID_STAGES, pack_bneck, pack_mid, pack_stage, split_bneck, split_mid,  # noqa: E402
@@ -76,6 +76,7 @@ KERNEL_CODE_OBJECTS.update(k_stages.KERNEL_CODE_OBJECTS)
 # Models: the ones with a reference stage table (clean/reference/swin.py MODEL_STAGES: "M") and model K (clean/k)
 MODELS = tuple(MODEL_STAGES) + ("K",)
 EMU_LIBRARY = "wg_emu.so"
+EMU_LIBRARY_GFX11 = "wg_emu__gfx11.so"  # build.py --emu-gfx11: the same kernels with the gfx11 matrix wrappers
 
 
 def _cdiv(a, b):
@@ -84,7 +85,7 @@ def _cdiv(a, b):
 
 class Runner:
     def __init__(self, build_dir: str, rocm_dir: str, backend: str = "hip", d_row=None, variant: str = "base",
-                 model: str = "M"):
+                 model: str = "M", arch: str = None):
         self.model = str(model).upper()
         if self.model not in MODELS:
             raise ValueError(f"unknown model {model!r}; known: {', '.join(MODELS)}")
@@ -92,10 +93,17 @@ class Runner:
         self.variant = variant
         self.backend = backend
         self._extra_modules = {}
-        self.d_row = d_row if d_row is not None else os.environ.get("WG_D_ROW", "gfx12")
+        if arch not in (None, "gfx11") or (arch and backend != "emu"):
+            raise ValueError(f"arch {arch!r}: only the emulator takes one, and only 'gfx11' (the build's target.json "
+                             "names the target of a GPU build)")
+        self.d_row = d_row if d_row is not None else os.environ.get("WG_D_ROW") or arch or family.build_family(build_dir)
         self.geo, code_object = V.DEFAULT_GEOMETRY, V.code_object(variant)
         manifest = os.path.join(build_dir, V.MANIFEST)
-        if os.path.exists(manifest):
+        if arch and variant != "base":  # the gfx11 variants (build.py --emu-gfx11 --variants) keep the base geometry
+            if variant not in V.FAMILY_VARIANTS[arch] + V.FAMILY_MEGA[arch]:
+                raise ValueError(f"variant {variant!r} is not a {arch} variant ({', '.join(V.FAMILY_VARIANTS[arch])})")
+            self.geo = V.family_geometry(arch, variant)
+        elif os.path.exists(manifest):
             with open(manifest) as f:
                 entry = json.load(f).get(variant)
             if entry is None:
@@ -106,17 +114,24 @@ class Runner:
         if backend == "hip":
             from clean.runner.hip import Hip
             self.dev = Hip(rocm_dir)
-            with open(os.path.join(build_dir, code_object), "rb") as f:
-                self.module = self.dev.load_module(f.read())
+            swin = os.path.join(build_dir, code_object)
+            self.module = None  # a build without the Swin kernels (gfx11 so far) runs the stages of other code objects
+            if os.path.exists(swin) or family.build_family(build_dir) == "gfx12":
+                with open(swin, "rb") as f:
+                    self.module = self.dev.load_module(f.read())
         elif backend == "emu":
             from clean.runner.emu import Emu
-            self.dev = Emu(os.path.join(build_dir, EMU_LIBRARY if variant == "base" else f"wg_emu__{variant}.so"))
+            self.dev = Emu(os.path.join(build_dir, (EMU_LIBRARY_GFX11 if variant == "base" else
+                                                    f"wg_emu__gfx11__{variant}.so") if arch else
+                                        EMU_LIBRARY if variant == "base" else f"wg_emu__{variant}.so"))
             self.module = None
         else:
             raise ValueError(f"unknown backend {backend!r}")
         self._funcs = {}
         self.mega_groups = None  # megakernel grid (None: the variant's default, variants.py geometry["mega"])
         self.mid_groups = None   # swin_mid grid (None: the variant's default, variants.py geometry["mid"])
+        self.resident = 0        # N > 0: the plain C = 64 block launches (enc1, dec1) run the weight-resident kernels
+                                 # swin_block_c64[_add]_r with at most N workgroups of 512 lanes (the runtime's swin_resident)
 
     # ---- public API (spec 90) --------------------------------------------------------------------------------------
 
@@ -422,6 +437,8 @@ class Runner:
     def _module(self, code_object):
         """code_object None: the Swin code object of the selected variant (self.module)."""
         if code_object is None or self.backend != "hip":
+            if self.module is None and self.backend == "hip":
+                raise FileNotFoundError(f"the Swin code object of this build ({self.build_dir}) does not exist")
             return self.module
         if code_object not in self._extra_modules:
             with open(os.path.join(self.build_dir, code_object), "rb") as f:
@@ -509,6 +526,10 @@ class Runner:
             launch_name = kname + ("_nc" if safe else "")
             profile = int(geo.get("profile", 0))
             prof_args = []
+            nwg_res = min(int(self.resident), _cdiv(nwin, 16)) if C == 64 and not fused and not profile else 0
+            if nwg_res:  # a persistent grid; the kernels take the workgroup count where the profile build has its buffer
+                launch_name = kname + "_r" + ("_nc" if safe else "")
+                block_grid, swin_block, prof_args = nwg_res, 512, [ctypes.c_int(nwg_res)]
             if profile:
                 waves = block_grid * (swin_block // 32)
                 alloc("prof", waves * V.PROF_WORDS * 4)

@@ -32,6 +32,11 @@ calls keep the driver's default (non-precise) lowering, above all mad() = one fu
 and rcp() (fdiv 1.0, x) is the hardware v_rcp_f32; it is reassembled (dxil_asm.cpp, DXC's IDxcAssembler) and signed by
 dxv. Any other float division ('/', which would be an IEEE division) or float remainder is refused: use wg_div.
 
+GPU family (--gfx 12, the default, or 11 for RDNA 3): a gfx11 build defines WG_GFX=11 for every kernel, writes <out>/dx12-gfx11/
+and a "gfx": 11 key in its manifest, and builds only the kernels whose declaration says gfx=11 (a comma list, default
+gfx=12: every existing declaration is a gfx12 kernel, so a build without --gfx is the same set as before). RGA is not used
+for gfx11 (no VGPR check, no --isa).
+
 VGPR check: every Swin / bottleneck kernel built (a name with a swin_ or l_swin_ part) is run through RGA (gfx1201) and its
 USED_VGPRs compared with its bound in clean/dx12/vgpr_limits.json (the count that keeps its present workgroups per CU);
 over the bound, or no bound listed, fails the build. WG_DX12_VGPR_CHECK=0 skips it.
@@ -210,6 +215,9 @@ def kernel_decls(path):
                 raise SystemExit(f"{path}: {name}: gscale {d['gscale']}")
             # probe=1: a measurement probe, built only when --only names it (never part of a model's kernel set)
             d["probe"] = kv.get("probe", "0") == "1"
+            d["gfx"] = {int(x) for x in kv.get("gfx", "12").split(",")}
+            if not d["gfx"] <= {11, 12}:
+                raise SystemExit(f"{path}: {name}: gfx={kv.get('gfx')} (11, 12 or 11,12)")
             d["file"] = kv.get("file", "")   # DXIL file stem of a second port of the same name (module doc)
             if d["file"] and not re.fullmatch(r"[A-Za-z0-9_]+", d["file"]):
                 raise SystemExit(f"{path}: {name}: file={d['file']} (letters, digits and _ only)")
@@ -258,14 +266,15 @@ def source_files(model_k=False, only_k=False):
     return out
 
 
-def kernel_set(model_l=False, model_k=False):
+def kernel_set(model_l=False, model_k=False, gfx=12):
     """(name, code object) of every kernel a full build compiles (no --only), sorted: Model M's set, plus Model L's
     with model_l, plus Model K's with model_k. From the sources' declarations alone (nothing is compiled). Frame
-    generation's kernels and measurement probes (probe=1) are never in it (is_frame_gen)."""
+    generation's kernels and measurement probes (probe=1) are never in it (is_frame_gen). gfx: the GPU family whose
+    kernels are listed."""
     keys = set()
     for path, k_source in source_files(model_k):
         for d in kernel_decls(path):
-            if is_frame_gen(d) or d["probe"]:
+            if is_frame_gen(d) or d["probe"] or gfx not in d["gfx"]:
                 continue
             if k_source or is_model_k(d):
                 if model_k:
@@ -431,7 +440,10 @@ def source_digest(src, decl, defines, gen_dir=None, _cache=None):
     def label(path):
         if gen_dir and os.path.normcase(os.path.abspath(path)).startswith(os.path.normcase(os.path.abspath(gen_dir))):
             return "gen/" + os.path.relpath(path, gen_dir).replace(os.sep, "/")
-        return os.path.relpath(path, root).replace(os.sep, "/")
+        try:
+            return os.path.relpath(path, root).replace(os.sep, "/")
+        except ValueError:   # another drive (Windows): no relative path exists; a source outside the repo is named by its file
+            return "ext/" + os.path.basename(path)
 
     seen, order, missing = set(), [], set()
 
@@ -452,7 +464,8 @@ def source_digest(src, decl, defines, gen_dir=None, _cache=None):
 
     walk(src)
     h = hashlib.sha256()
-    h.update(b"decl\n" + json.dumps(decl, sort_keys=True).encode() + b"\n")
+    # the gfx set (a set, not JSON) is left out: a build's family is in its defines, and a gfx12 digest stays what it was
+    h.update(b"decl\n" + json.dumps({k: v for k, v in decl.items() if k != "gfx"}, sort_keys=True).encode() + b"\n")
     for path in sorted(order, key=label):
         h.update(b"file " + label(path).encode() + b"\n" + text(path) + b"\n")
     h.update(b"missing " + ",".join(sorted(missing)).encode() + b"\n")
@@ -575,6 +588,9 @@ def main(argv=None):
     ap.add_argument("--model-k", action="store_true",
                     help="also build Model K's kernels (clean/k/dx12/kernels; off by default: Model M's and Model L's "
                          "kernel sets unchanged)")
+    ap.add_argument("--gfx", type=int, choices=(11, 12), default=12,
+                    help="GPU family of the build: 12 = RDNA 4 (default, <out>/dx12), 11 = RDNA 3 (WG_GFX=11, "
+                         "<out>/dx12-gfx11, only kernels declared gfx=11, no RGA)")
     ap.add_argument("--define", action="append", default=[], metavar="NAME=VALUE",
                     help="an extra preprocessor define for every kernel built (test variants: negative-control mutants, "
                          "test counters; never for a shipped build)")
@@ -586,7 +602,7 @@ def main(argv=None):
                          "the cheap check before a build (kernel_sets.json, tests/test_kernel_sets.py)")
     a = ap.parse_args(argv)
     if a.list:
-        print(json.dumps([list(k) for k in kernel_set(a.model_l, a.model_k)], indent=1))
+        print(json.dumps([list(k) for k in kernel_set(a.model_l, a.model_k, a.gfx)], indent=1))
         return 0
     if not a.out:
         ap.error("--out is required")
@@ -595,7 +611,9 @@ def main(argv=None):
         if not re.fullmatch(r"[A-Z][A-Z0-9_]*=-?[0-9A-Za-z_]+", kv):
             ap.error(f"--define {kv!r} (NAME=VALUE)")
         extra_defs[kv.split("=", 1)[0]] = kv.split("=", 1)[1]
-    dst = os.path.join(a.out, "dx12")
+    if a.gfx == 11 and a.isa:
+        ap.error("--isa needs RGA, which a gfx11 build does not use")
+    dst = os.path.join(a.out, "dx12" if a.gfx == 12 else "dx12-gfx11")
     os.makedirs(dst, exist_ok=True)
     asm = build_asm_tool(a.out)
     only = set(a.only.split(",")) if a.only else None
@@ -623,6 +641,8 @@ def main(argv=None):
     jobs = []  # (source, declaration, output path) in declaration order (sorted file name, then line)
     for src, k_source in source_files(a.model_k or bool(only)):
         for d in kernel_decls(src):
+            if a.gfx not in d["gfx"]:
+                continue
             if only and d["name"] not in only:
                 continue
             if not only and (k_source or is_model_k(d)) and not a.model_k:
@@ -656,7 +676,8 @@ def main(argv=None):
 
     def build_one(job):
         src, d, out, k_source = job
-        defs = {"WG_BLOCK": d["group"], "WG_WAVE": d["wave"], **d["defines"], **extra_defs}
+        defs = {"WG_BLOCK": d["group"], "WG_WAVE": d["wave"], **({"WG_GFX": a.gfx} if a.gfx != 12 else {}),
+                **d["defines"], **extra_defs}
         if d["group"] != d["block"]:
             defs["WG_LAUNCH_BLOCK"] = d["block"]
         info = {}
@@ -707,14 +728,19 @@ def main(argv=None):
     if only and not (only <= names):
         raise SystemExit(f"not declared in clean/dx12/kernels or clean/k/dx12/kernels: {sorted(only - names)}")
     try:
-        vgpr_check(built, {d["name"] for _, d, _, _ in jobs if hyb_scanned(d["name"]) and not d["probe"]})
-        isa_check(built)
+        if a.gfx == 12:
+            vgpr_check(built, {d["name"] for _, d, _, _ in jobs if hyb_scanned(d["name"]) and not d["probe"]})
+            isa_check(built)
     finally:
         if scan_dir:
             shutil.rmtree(scan_dir, ignore_errors=True)
+    manifest = {"format": FORMAT, "dxc": os.path.basename(os.path.dirname(os.path.dirname(DXC_DIR)))}
+    if a.gfx != 12:
+        manifest["gfx"] = a.gfx   # absent = 12
+    manifest["test_only"] = test_only
+    manifest["kernels"] = [kernels[k] for k in sorted(kernels)]
     with open(man_path, "w") as f:
-        json.dump({"format": FORMAT, "dxc": os.path.basename(os.path.dirname(os.path.dirname(DXC_DIR))),
-                   "test_only": test_only, "kernels": [kernels[k] for k in sorted(kernels)]}, f, indent=1)
+        json.dump(manifest, f, indent=1)
     print(f"{len(kernels)} kernel(s) in {man_path}" + (" (TEST-ONLY: never embedded or packaged)" if test_only else ""))
     return 0
 

@@ -1,0 +1,780 @@
+{
+ "target": "gfx1100",
+ "clang": "20.0.0.rocm",
+ "gates": {
+  "base": {
+   "swin_block_c64": {
+    "vgprs": 175,
+    "waves": 8,
+    "lds": 32768
+   },
+   "swin_block_c64_nc": {
+    "vgprs": 175,
+    "waves": 8,
+    "lds": 32768
+   },
+   "swin_block_c64_add": {
+    "vgprs": 175,
+    "waves": 8,
+    "lds": 32768
+   },
+   "swin_block_c64_add_nc": {
+    "vgprs": 175,
+    "waves": 8,
+    "lds": 32768
+   },
+   "swin_block_c64_r": {
+    "vgprs": 168,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_r_nc": {
+    "vgprs": 168,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_add_r": {
+    "vgprs": 168,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_add_r_nc": {
+    "vgprs": 168,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c96": {
+    "vgprs": 206,
+    "waves": 7,
+    "lds": 24576
+   },
+   "swin_block_c96_nc": {
+    "vgprs": 206,
+    "waves": 7,
+    "lds": 24576
+   },
+   "swin_block_c96_add": {
+    "vgprs": 206,
+    "waves": 7,
+    "lds": 24576
+   },
+   "swin_block_c96_add_nc": {
+    "vgprs": 206,
+    "waves": 7,
+    "lds": 24576
+   },
+   "swin_block_c128": {
+    "vgprs": 250,
+    "waves": 5,
+    "lds": 32768
+   },
+   "swin_block_c128_nc": {
+    "vgprs": 250,
+    "waves": 5,
+    "lds": 32768
+   },
+   "patch_merge_c64": {
+    "vgprs": 185,
+    "waves": 8,
+    "lds": 24576
+   },
+   "patch_merge_c96": {
+    "vgprs": 251,
+    "waves": 4,
+    "lds": 49152
+   },
+   "expand_c96": {
+    "vgprs": 199,
+    "waves": 7,
+    "lds": 24576
+   },
+   "expand_c128": {
+    "vgprs": 248,
+    "waves": 4,
+    "lds": 49152
+   }
+  },
+  "f16w": {
+   "swin_block_c64": {
+    "vgprs": 181,
+    "waves": 8,
+    "lds": 32768
+   },
+   "swin_block_c64_nc": {
+    "vgprs": 181,
+    "waves": 8,
+    "lds": 32768
+   },
+   "swin_block_c64_add": {
+    "vgprs": 181,
+    "waves": 8,
+    "lds": 32768
+   },
+   "swin_block_c64_add_nc": {
+    "vgprs": 181,
+    "waves": 8,
+    "lds": 32768
+   },
+   "swin_block_c64_r": {
+    "vgprs": 168,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_r_nc": {
+    "vgprs": 168,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_add_r": {
+    "vgprs": 168,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_add_r_nc": {
+    "vgprs": 168,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c96": {
+    "vgprs": 248,
+    "waves": 5,
+    "lds": 36864
+   },
+   "swin_block_c96_nc": {
+    "vgprs": 248,
+    "waves": 5,
+    "lds": 36864
+   },
+   "swin_block_c96_add": {
+    "vgprs": 248,
+    "waves": 5,
+    "lds": 36864
+   },
+   "swin_block_c96_add_nc": {
+    "vgprs": 248,
+    "waves": 5,
+    "lds": 36864
+   },
+   "swin_block_c128": {
+    "vgprs": 250,
+    "waves": 5,
+    "lds": 32768
+   },
+   "swin_block_c128_nc": {
+    "vgprs": 250,
+    "waves": 5,
+    "lds": 32768
+   },
+   "patch_merge_c64": {
+    "vgprs": 185,
+    "waves": 8,
+    "lds": 24576
+   },
+   "patch_merge_c96": {
+    "vgprs": 251,
+    "waves": 4,
+    "lds": 49152
+   },
+   "expand_c96": {
+    "vgprs": 199,
+    "waves": 7,
+    "lds": 24576
+   },
+   "expand_c128": {
+    "vgprs": 248,
+    "waves": 4,
+    "lds": 49152
+   }
+  },
+  "f16wa": {
+   "swin_block_c64": {
+    "vgprs": 213,
+    "waves": 7,
+    "lds": 32768
+   },
+   "swin_block_c64_nc": {
+    "vgprs": 213,
+    "waves": 7,
+    "lds": 32768
+   },
+   "swin_block_c64_add": {
+    "vgprs": 213,
+    "waves": 7,
+    "lds": 32768
+   },
+   "swin_block_c64_add_nc": {
+    "vgprs": 213,
+    "waves": 7,
+    "lds": 32768
+   },
+   "swin_block_c64_r": {
+    "vgprs": 161,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_r_nc": {
+    "vgprs": 161,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_add_r": {
+    "vgprs": 167,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_add_r_nc": {
+    "vgprs": 167,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c96": {
+    "vgprs": 248,
+    "waves": 5,
+    "lds": 36864
+   },
+   "swin_block_c96_nc": {
+    "vgprs": 248,
+    "waves": 5,
+    "lds": 36864
+   },
+   "swin_block_c96_add": {
+    "vgprs": 248,
+    "waves": 5,
+    "lds": 36864
+   },
+   "swin_block_c96_add_nc": {
+    "vgprs": 248,
+    "waves": 5,
+    "lds": 36864
+   },
+   "swin_block_c128": {
+    "vgprs": 250,
+    "waves": 5,
+    "lds": 32768
+   },
+   "swin_block_c128_nc": {
+    "vgprs": 250,
+    "waves": 5,
+    "lds": 32768
+   },
+   "patch_merge_c64": {
+    "vgprs": 185,
+    "waves": 8,
+    "lds": 24576
+   },
+   "patch_merge_c96": {
+    "vgprs": 251,
+    "waves": 4,
+    "lds": 49152
+   },
+   "expand_c96": {
+    "vgprs": 199,
+    "waves": 7,
+    "lds": 24576
+   },
+   "expand_c128": {
+    "vgprs": 248,
+    "waves": 4,
+    "lds": 49152
+   }
+  },
+  "f16wq": {
+   "swin_block_c64": {
+    "vgprs": 212,
+    "waves": 7,
+    "lds": 32768
+   },
+   "swin_block_c64_nc": {
+    "vgprs": 212,
+    "waves": 7,
+    "lds": 32768
+   },
+   "swin_block_c64_add": {
+    "vgprs": 212,
+    "waves": 7,
+    "lds": 32768
+   },
+   "swin_block_c64_add_nc": {
+    "vgprs": 212,
+    "waves": 7,
+    "lds": 32768
+   },
+   "swin_block_c64_r": {
+    "vgprs": 184,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_r_nc": {
+    "vgprs": 144,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_add_r": {
+    "vgprs": 167,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_add_r_nc": {
+    "vgprs": 166,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c96": {
+    "vgprs": 248,
+    "waves": 5,
+    "lds": 36864
+   },
+   "swin_block_c96_nc": {
+    "vgprs": 248,
+    "waves": 5,
+    "lds": 36864
+   },
+   "swin_block_c96_add": {
+    "vgprs": 248,
+    "waves": 5,
+    "lds": 36864
+   },
+   "swin_block_c96_add_nc": {
+    "vgprs": 248,
+    "waves": 5,
+    "lds": 36864
+   },
+   "swin_block_c128": {
+    "vgprs": 250,
+    "waves": 5,
+    "lds": 32768
+   },
+   "swin_block_c128_nc": {
+    "vgprs": 250,
+    "waves": 5,
+    "lds": 32768
+   },
+   "patch_merge_c64": {
+    "vgprs": 185,
+    "waves": 8,
+    "lds": 24576
+   },
+   "patch_merge_c96": {
+    "vgprs": 251,
+    "waves": 4,
+    "lds": 49152
+   },
+   "expand_c96": {
+    "vgprs": 199,
+    "waves": 7,
+    "lds": 24576
+   },
+   "expand_c128": {
+    "vgprs": 248,
+    "waves": 4,
+    "lds": 49152
+   }
+  },
+  "c128w7": {
+   "swin_block_c64": {
+    "vgprs": 175,
+    "waves": 8,
+    "lds": 32768
+   },
+   "swin_block_c64_nc": {
+    "vgprs": 175,
+    "waves": 8,
+    "lds": 32768
+   },
+   "swin_block_c64_add": {
+    "vgprs": 175,
+    "waves": 8,
+    "lds": 32768
+   },
+   "swin_block_c64_add_nc": {
+    "vgprs": 175,
+    "waves": 8,
+    "lds": 32768
+   },
+   "swin_block_c64_r": {
+    "vgprs": 168,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_r_nc": {
+    "vgprs": 168,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_add_r": {
+    "vgprs": 168,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_add_r_nc": {
+    "vgprs": 168,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c96": {
+    "vgprs": 206,
+    "waves": 7,
+    "lds": 24576
+   },
+   "swin_block_c96_nc": {
+    "vgprs": 206,
+    "waves": 7,
+    "lds": 24576
+   },
+   "swin_block_c96_add": {
+    "vgprs": 206,
+    "waves": 7,
+    "lds": 24576
+   },
+   "swin_block_c96_add_nc": {
+    "vgprs": 206,
+    "waves": 7,
+    "lds": 24576
+   },
+   "swin_block_c128": {
+    "vgprs": 206,
+    "waves": 7,
+    "lds": 32768
+   },
+   "swin_block_c128_nc": {
+    "vgprs": 206,
+    "waves": 7,
+    "lds": 32768
+   },
+   "patch_merge_c64": {
+    "vgprs": 185,
+    "waves": 8,
+    "lds": 24576
+   },
+   "patch_merge_c96": {
+    "vgprs": 251,
+    "waves": 4,
+    "lds": 49152
+   },
+   "expand_c96": {
+    "vgprs": 199,
+    "waves": 7,
+    "lds": 24576
+   },
+   "expand_c128": {
+    "vgprs": 248,
+    "waves": 4,
+    "lds": 49152
+   }
+  },
+  "f16wk": {
+   "swin_block_c64": {
+    "vgprs": 212,
+    "waves": 7,
+    "lds": 32768
+   },
+   "swin_block_c64_nc": {
+    "vgprs": 212,
+    "waves": 7,
+    "lds": 32768
+   },
+   "swin_block_c64_add": {
+    "vgprs": 212,
+    "waves": 7,
+    "lds": 32768
+   },
+   "swin_block_c64_add_nc": {
+    "vgprs": 212,
+    "waves": 7,
+    "lds": 32768
+   },
+   "swin_block_c64_r": {
+    "vgprs": 184,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_r_nc": {
+    "vgprs": 144,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_add_r": {
+    "vgprs": 167,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_add_r_nc": {
+    "vgprs": 166,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c96": {
+    "vgprs": 248,
+    "waves": 5,
+    "lds": 36864
+   },
+   "swin_block_c96_nc": {
+    "vgprs": 248,
+    "waves": 5,
+    "lds": 36864
+   },
+   "swin_block_c96_add": {
+    "vgprs": 248,
+    "waves": 5,
+    "lds": 36864
+   },
+   "swin_block_c96_add_nc": {
+    "vgprs": 248,
+    "waves": 5,
+    "lds": 36864
+   },
+   "swin_block_c128": {
+    "vgprs": 238,
+    "waves": 6,
+    "lds": 32768
+   },
+   "swin_block_c128_nc": {
+    "vgprs": 238,
+    "waves": 6,
+    "lds": 32768
+   },
+   "patch_merge_c64": {
+    "vgprs": 185,
+    "waves": 8,
+    "lds": 24576
+   },
+   "patch_merge_c96": {
+    "vgprs": 251,
+    "waves": 4,
+    "lds": 49152
+   },
+   "expand_c96": {
+    "vgprs": 199,
+    "waves": 7,
+    "lds": 24576
+   },
+   "expand_c128": {
+    "vgprs": 248,
+    "waves": 4,
+    "lds": 49152
+   }
+  },
+  "f16wm": {
+   "swin_block_c64": {
+    "vgprs": 212,
+    "waves": 7,
+    "lds": 32768
+   },
+   "swin_block_c64_nc": {
+    "vgprs": 212,
+    "waves": 7,
+    "lds": 32768
+   },
+   "swin_block_c64_add": {
+    "vgprs": 212,
+    "waves": 7,
+    "lds": 32768
+   },
+   "swin_block_c64_add_nc": {
+    "vgprs": 212,
+    "waves": 7,
+    "lds": 32768
+   },
+   "swin_block_c64_r": {
+    "vgprs": 184,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_r_nc": {
+    "vgprs": 144,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_add_r": {
+    "vgprs": 167,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_add_r_nc": {
+    "vgprs": 166,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c96": {
+    "vgprs": 252,
+    "waves": 5,
+    "lds": 36864
+   },
+   "swin_block_c96_nc": {
+    "vgprs": 252,
+    "waves": 5,
+    "lds": 36864
+   },
+   "swin_block_c96_add": {
+    "vgprs": 252,
+    "waves": 5,
+    "lds": 36864
+   },
+   "swin_block_c96_add_nc": {
+    "vgprs": 252,
+    "waves": 5,
+    "lds": 36864
+   },
+   "swin_block_c128": {
+    "vgprs": 238,
+    "waves": 6,
+    "lds": 32768
+   },
+   "swin_block_c128_nc": {
+    "vgprs": 238,
+    "waves": 6,
+    "lds": 32768
+   },
+   "patch_merge_c64": {
+    "vgprs": 185,
+    "waves": 8,
+    "lds": 24576
+   },
+   "patch_merge_c96": {
+    "vgprs": 251,
+    "waves": 4,
+    "lds": 49152
+   },
+   "expand_c96": {
+    "vgprs": 199,
+    "waves": 7,
+    "lds": 24576
+   },
+   "expand_c128": {
+    "vgprs": 248,
+    "waves": 4,
+    "lds": 49152
+   }
+  },
+  "mgx": {
+   "swin_block_c64": {
+    "vgprs": 175,
+    "waves": 8,
+    "lds": 32768
+   },
+   "swin_block_c64_nc": {
+    "vgprs": 175,
+    "waves": 8,
+    "lds": 32768
+   },
+   "swin_block_c64_add": {
+    "vgprs": 175,
+    "waves": 8,
+    "lds": 32768
+   },
+   "swin_block_c64_add_nc": {
+    "vgprs": 175,
+    "waves": 8,
+    "lds": 32768
+   },
+   "swin_block_c64_r": {
+    "vgprs": 168,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_r_nc": {
+    "vgprs": 168,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_add_r": {
+    "vgprs": 168,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c64_add_r_nc": {
+    "vgprs": 168,
+    "waves": 8,
+    "lds": 45056
+   },
+   "swin_block_c96": {
+    "vgprs": 206,
+    "waves": 7,
+    "lds": 24576
+   },
+   "swin_block_c96_nc": {
+    "vgprs": 206,
+    "waves": 7,
+    "lds": 24576
+   },
+   "swin_block_c96_add": {
+    "vgprs": 206,
+    "waves": 7,
+    "lds": 24576
+   },
+   "swin_block_c96_add_nc": {
+    "vgprs": 206,
+    "waves": 7,
+    "lds": 24576
+   },
+   "swin_block_c128": {
+    "vgprs": 250,
+    "waves": 5,
+    "lds": 32768
+   },
+   "swin_block_c128_nc": {
+    "vgprs": 250,
+    "waves": 5,
+    "lds": 32768
+   },
+   "patch_merge_c64": {
+    "vgprs": 250,
+    "waves": 5,
+    "lds": 24576
+   },
+   "patch_merge_c96": {
+    "vgprs": 143,
+    "waves": 4,
+    "lds": 49152
+   },
+   "expand_c96": {
+    "vgprs": 199,
+    "waves": 7,
+    "lds": 24576
+   },
+   "expand_c128": {
+    "vgprs": 248,
+    "waves": 4,
+    "lds": 49152
+   }
+  },
+  "bmegahg": {
+   "swin_bneck6": {
+    "vgprs": 239,
+    "waves": 6,
+    "lds": 32784
+   },
+   "swin_bneck6_nc": {
+    "vgprs": 239,
+    "waves": 6,
+    "lds": 32784
+   }
+  },
+  "enc0": {
+   "input_encoder": {
+    "vgprs": 142,
+    "waves": 10,
+    "lds": 0
+   }
+  },
+  "dec0": {
+   "coef_decoder": {
+    "vgprs": 103,
+    "waves": 12,
+    "lds": 10240
+   }
+  },
+  "dec1dec0": {
+   "swin_block_c64_add_dec0": {
+    "vgprs": 178,
+    "waves": 8,
+    "lds": 32768
+   },
+   "swin_block_c64_add_dec0_nc": {
+    "vgprs": 178,
+    "waves": 8,
+    "lds": 32768
+   }
+  }
+ }
+}

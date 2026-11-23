@@ -19,9 +19,33 @@ typedef _Float16 v8h __attribute__((ext_vector_type(8)));
 typedef int v2i __attribute__((ext_vector_type(2)));
 typedef _Float16 v2h __attribute__((ext_vector_type(2)));
 typedef u32 v4u __attribute__((ext_vector_type(4)));
+#if defined(__gfx1100__) || defined(__gfx1101__) || defined(WG_EMU)
+typedef _Float16 v4h __attribute__((ext_vector_type(4)));
+typedef _Float16 v16h __attribute__((ext_vector_type(16)));
+#endif
 
-#define WG_WAVE 32    // gfx12 kernels run in wave32
+#define WG_WAVE 32    // gfx12 and gfx11 kernels run in wave32
 #define WG_BLOCK 128  // default workgroup size (4 waves); the Swin block kernels use 256
+
+// gfx11 (RDNA 3): exact target names only. LLVM files gfx1170-1172 under gfx11, but they have the gfx12 matrix design.
+// There is no FP8 conversion or matrix instruction (software conversions), the F16 matrix instruction takes 16 K values
+// per lane with both halves of the wave alike, and the other half of the wave is read with v_permlanex16.
+#if defined(__gfx1100__) || defined(__gfx1101__)
+#define WG_GFX11 1
+#ifndef WG_SOFT_FP8
+#define WG_SOFT_FP8 1
+#endif
+// The faster exact software conversion (below). -DWG_SLOW_Q8 (or -DWG_SLOW_Q8=1) selects the plain form again (timing
+// comparisons); -DWG_SLOW_Q8=0 the faster one.
+#if !defined(WG_SLOW_Q8) || !WG_SLOW_Q8
+#ifndef WG_FAST_Q8
+#define WG_FAST_Q8 1
+#endif
+#endif
+#endif
+#if defined(WG_FAST_Q8) && (defined(__FAST_MATH__) || (defined(__FINITE_MATH_ONLY__) && __FINITE_MATH_ONLY__))
+#error "the gfx11 FP32 -> E4M3 conversion needs IEEE arithmetic (it adds and subtracts a constant, and tests for NaN): no -ffast-math or -ffinite-math-only"
+#endif
 
 #if defined(__AMDGCN__)
 
@@ -44,6 +68,19 @@ typedef u32 v4u __attribute__((ext_vector_type(4)));
 WG_FN u32 wg_lane_id() { return __builtin_amdgcn_workitem_id_x(); }
 WG_FN u32 wg_block_id() { return __builtin_amdgcn_workgroup_id_x(); }
 
+#if defined(WG_GFX11)
+// gfx11 has no FP8 matrix instruction, and its F16 one takes 16 K values per lane (both halves of the wave alike) where
+// the gfx12 one takes 8: wg_wmma_fp8 and wg_wmma_f16 are made from this instruction below (the code is shared with the
+// emulator). D = A x B + C, 16x16x16, FP16 inputs, FP32 accumulate (v_wmma_f32_16x16x16_f16): lane l holds row (A) or
+// column (B) l % 16 with K indices 0..15 in order; element v of D in lane l is row 2 v + l / 16, column l % 16.
+WG_FN v8f wg_wmma16_f16(v16h a, v16h b, v8f c) { return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c); }
+
+// The 32-bit value of the same variable in lane (lane ^ 16), i.e. the other half of the wave: one v_permlanex16_b32,
+// which reads the other 16-lane row of the same 32 lanes; selectors 0x76543210 / 0xfedcba98 take its lane i for lane i.
+// fi: a lane of the other half that is not executing is read as well, as ds_bpermute does.
+WG_FN u32 wg_xchg16_u(u32 v) { return __builtin_amdgcn_permlanex16(v, v, 0x76543210u, 0xfedcba98u, true, false); }
+WG_FN float wg_xor16(float v) { return __builtin_bit_cast(float, wg_xchg16_u(__builtin_bit_cast(u32, v))); }
+#else
 // D = A x B + C, 16x16x16, FP8 E4M3 inputs, FP32 accumulate (v_wmma_f32_16x16x16_fp8_fp8).
 WG_FN v8f wg_wmma_fp8(v2i a, v2i b, v8f c) { return __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a, b, c); }
 // D = A x B + C, 16x16x16, FP16 inputs, FP32 accumulate (v_wmma_f32_16x16x16_f16).
@@ -54,6 +91,7 @@ WG_FN float wg_xor16(float v) {
   return __builtin_bit_cast(float, __builtin_amdgcn_ds_bpermute((int)((wg_lane_id() ^ 16u) << 2),
                                                                  __builtin_bit_cast(int, v)));
 }
+#endif
 
 // Workgroup barrier with LDS visibility (release before, acquire after).
 WG_FN void wg_barrier() {
@@ -100,9 +138,179 @@ WG_FN float wg_fmin(float a, float b) { return __builtin_fminf(a, b); }
 #endif
 
 // ---------------------------------------------------------------------------------------------------------------
+// The matrix wrappers of gfx11 (and of its emulator build, -DWG_EMU_GFX11). Operands keep the gfx12 shape (a lane holds
+// 8 K values of its half of the wave), so kernels and weight packing stay as they are: the lane fetches the 8 values of
+// the other half (one half-wave exchange per dword), widens the 16 to F16 and calls the F16 matrix instruction. K slot
+// (h, j) is index 8 h + j: a lane of half 1 puts the fetched values first, so both halves hold the 16 values in the same
+// order. (The instruction reads the operands of the odd D rows from lanes 16-31 and those of the even rows from lanes
+// 0-15, so the sum would be the same without the select; its rounding is not: K order is part of the arithmetic.)
+#if defined(WG_GFX11) || defined(WG_EMU_GFX11)
+typedef u32 v8u __attribute__((ext_vector_type(8)));
+
+// Two E4M3 codes (bytes 0 and 1 of c) as F16 bits scaled by 2^-8: the 7 magnitude bits under the F16 exponent (bias 15,
+// E4M3 has bias 7) read as value / 2^8, and E4M3 subnormals become F16 subnormals of the same scale. The NaN code 0x7f
+// (magnitude bits all ones, 0x3f80) gets bit 14 as well, 0x7f80: an F16 NaN, which the multiply by 256 keeps. (A compare
+// and select per code costs enough registers to make the Swin block kernels spill; this form costs about 3.)
+WG_FN u32 wg_e4m3x2_scaled(u32 c) {
+  const u32 b0 = c & 0xffu, b1 = (c >> 8) & 0xffu;
+  const u32 m0 = b0 & 0x7fu, m1 = b1 & 0x7fu;
+  const u32 h0 = (m0 << 7) | ((b0 & 0x80u) << 8) | (((m0 + 1u) & 0x80u) << 7);
+  const u32 h1 = (m1 << 7) | ((b1 & 0x80u) << 8) | (((m1 + 1u) & 0x80u) << 7);
+  return h0 | (h1 << 16);
+}
+// 4 E4M3 codes (a dword) as 4 F16 values, exactly (all 256 codes are exact in F16): the multiply by 256 is exact.
+WG_FN v4h wg_widen_e4m3x4(u32 w) {
+  const v2h k = {(_Float16)256.0f, (_Float16)256.0f};
+  const v2h lo = __builtin_bit_cast(v2h, wg_e4m3x2_scaled(w)) * k;
+  const v2h hi = __builtin_bit_cast(v2h, wg_e4m3x2_scaled(w >> 16)) * k;
+  v4h r = {lo[0], lo[1], hi[0], hi[1]};
+  return r;
+}
+WG_FN bool wg_in_upper_half() { return (wg_lane_id() & 16u) != 0; }
+
+WG_FN v16h wg_k16_codes(v2i p) {
+  const u32 x0 = (u32)p[0], x1 = (u32)p[1];
+  const u32 y0 = wg_xchg16_u(x0), y1 = wg_xchg16_u(x1);
+  const bool hi = wg_in_upper_half();
+  const u32 f0 = hi ? y0 : x0, f1 = hi ? y1 : x1;  // indices 0..7
+  const u32 s0 = hi ? x0 : y0, s1 = hi ? x1 : y1;  // indices 8..15
+  const v4h a = wg_widen_e4m3x4(f0), b = wg_widen_e4m3x4(f1), c = wg_widen_e4m3x4(s0), d = wg_widen_e4m3x4(s1);
+  v16h r = {a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3], c[0], c[1], c[2], c[3], d[0], d[1], d[2], d[3]};
+  return r;
+}
+WG_FN v16h wg_k16_f16(v8h p) {
+  const v4u x = __builtin_bit_cast(v4u, p);
+  v4u y;
+#pragma unroll
+  for (int i = 0; i < 4; ++i) y[i] = wg_xchg16_u(x[i]);
+  const bool hi = wg_in_upper_half();
+  v8u r;
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    r[i] = hi ? y[i] : x[i];
+    r[4 + i] = hi ? x[i] : y[i];
+  }
+  return __builtin_bit_cast(v16h, r);
+}
+// D = A x B + C, 16x16x16, FP8 E4M3 inputs (8 codes per lane), FP32 accumulate. The accumulator rows come out as
+// 2 v + h (packing.py: d_row "gfx11").
+WG_FN v8f wg_wmma_fp8(v2i a, v2i b, v8f c) { return wg_wmma16_f16(wg_k16_codes(a), wg_k16_codes(b), c); }
+// The same for FP16 inputs (8 halves per lane).
+WG_FN v8f wg_wmma_f16(v8h a, v8h b, v8f c) { return wg_wmma16_f16(wg_k16_f16(a), wg_k16_f16(b), c); }
+// One operand already holds its 16 F16 values in K order (swin.hip WG_F16_W: the weights, widened once per workgroup);
+// the other is made as above.
+WG_FN v8f wg_wmma_fp8(v16h a, v2i b, v8f c) { return wg_wmma16_f16(a, wg_k16_codes(b), c); }
+WG_FN v8f wg_wmma_fp8(v2i a, v16h b, v8f c) { return wg_wmma16_f16(wg_k16_codes(a), b, c); }
+// Both operands already hold their 16 F16 values in K order (swin.hip WG_F16_A: an activation made once and used many times).
+WG_FN v8f wg_wmma_fp8(v16h a, v16h b, v8f c) { return wg_wmma16_f16(a, b, c); }
+WG_FN v8f wg_wmma_f16(v8h a, v16h b, v8f c) { return wg_wmma16_f16(wg_k16_f16(a), b, c); }
+// 8 E4M3 codes (one lane's fragment) as 8 F16 values: the half of a K group that one lane of a half-wave contributes.
+WG_FN v8h wg_widen_e4m3x8(v2i p) {
+  const v4h a = wg_widen_e4m3x4((u32)p[0]), b = wg_widen_e4m3x4((u32)p[1]);
+  v8h r = {a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]};
+  return r;
+}
+
+// ---- E4M3 rounding of FP32 values as FP32 arithmetic (the method is explained with wg_f32_to_e4m3_t, below), delivered as
+// F16 operands without code bytes (swin.hip WG_F16_Q); also what the faster code conversion (WG_FAST_Q8) is made from ----
+// v_med3_f32 clamps, because fminf / fmaxf get a canonicalising v_max in front of them on gfx11.
+WG_FN float wg_q8m_clamp(float x, float lo, float hi) {
+#if defined(__AMDGCN__)
+  return __builtin_amdgcn_fmed3f(x, lo, hi);
+#else
+  return x < lo ? lo : (x > hi ? hi : x);
+#endif
+}
+WG_FN u32 wg_q8m_bits(float f) { return __builtin_bit_cast(u32, f); }
+WG_FN float wg_q8m_flt(u32 u) { return __builtin_bit_cast(float, u); }
+
+// C = 1.5 * 2^(E + 20) for |x| (E clamped to [-6, 8]), as FP32 bits.
+WG_FN u32 wg_q8m_magic(float ax) {
+  return (wg_q8m_bits(wg_q8m_clamp(ax, 0.015625f, 448.0f)) & 0x7f800000u) + 0x0a400000u;
+}
+
+
+// Two floats as two F16 (v_cvt_pk_rtz_f16_f32); exact for the values here (at most 4 significant bits).
+WG_FN u32 wg_cvt_pk_f16(float a, float b) {
+#if defined(__AMDGCN__)
+  return __builtin_bit_cast(u32, __builtin_amdgcn_cvt_pkrtz(a, b));
+#else
+  const v2h r = {(_Float16)a, (_Float16)b};
+  return __builtin_bit_cast(u32, r);
+#endif
+}
+// The E4M3-rounded value as F16 bits (every E4M3 value is exact in F16), the next operand of the F16 matrix instruction.
+// CL: saturate at +-448 (also infinity); NANFIX: a NaN gives an F16 NaN. v_cvt_pk_rtz_f16_f32 is exact here: the value has
+// at most 4 significant bits. The sign of a zero result is the input's.
+template <bool NANFIX, bool CL>
+WG_FN float wg_q8m_round(float f) {
+  const float ax = __builtin_fabsf(f);
+  const float c = wg_q8m_flt(wg_q8m_magic(ax));
+  float r = (ax + c) - c;
+  if (CL) r = wg_q8m_clamp(r, 0.0f, 448.0f);
+  u32 rb = wg_q8m_bits(r);
+  if (NANFIX) rb = (f != f) ? 0x7fc00000u : rb;
+  return wg_q8m_flt(rb | (wg_q8m_bits(f) & 0x80000000u));
+}
+template <bool NANFIX, bool CL>
+WG_FN v8h wg_q8_to_f16_t(v8f d) {
+  u32 w[4];
+#pragma unroll
+  for (int i = 0; i < 4; ++i)
+    w[i] = wg_cvt_pk_f16(wg_q8m_round<NANFIX, CL>(d[2 * i]), wg_q8m_round<NANFIX, CL>(d[2 * i + 1]));
+  return __builtin_bit_cast(v8h, w);
+}
+WG_FN v8h wg_q8_to_f16(v8f d) { return wg_q8_to_f16_t<true, true>(d); }         // a NaN gives an F16 NaN
+WG_FN v8h wg_q8_to_f16_inner(v8f d) { return wg_q8_to_f16_t<false, true>(d); }  // a NaN gives +-0
+WG_FN v8h wg_q8_to_f16_nc(v8f d) { return wg_q8_to_f16_t<false, false>(d); }    // |x| <= 464, not NaN
+#endif
+
+// ---------------------------------------------------------------------------------------------------------------
 // FP8 E4M3FN conversion in software (round to nearest even, saturating at +-448, NaN -> NaN).
 // Written from the format definition: bias 7, 3 mantissa bits, max finite 0x7E = 448, NaN 0x7F, no infinities.
 
+#if defined(WG_FAST_Q8)
+// gfx11: the same conversion (round to nearest even, saturating at +-448, NaN -> sign|0x7f, FP32 denormals -> a signed
+// zero) with fewer instructions than the plain form below (-DWG_SLOW_Q8), and the same rounding delivered as F16 bits for
+// the next F16 matrix operand. Checked against the definition over all 2^32 FP32 patterns (runner/q8_exhaustive.py).
+// With z = |x| clamped to [2^-6, 448] and C = 1.5 * 2^(E + 20), E the exponent of z, the FP32 sum |x| + C rounds |x| to a
+// multiple of 2^(E - 3) (ties to even: the mantissa of C is even) and the difference sum - C is exact; the floor 2^-6 gives
+// the E4M3 subnormal step 2^-9. The compiler must keep (|x| + C) - C (no reassociation: no fast-math, see above).
+// E4M3 code bytes. The code comes straight from the rounded sum: bits(sum) - bits(C) is the index on the grid and
+// code = 8 (E + 6) + index = (bits(C) >> 20) - 1132 + index; min(., 0x7e) saturates (also +-inf). NANFIX: a NaN gives
+// sign|0x7f, else it gives sign|0x7e.
+template <bool NANFIX>
+WG_FN u32 wg_f32_to_e4m3_t(float f) {
+  const u32 b = wg_q8m_bits(f);
+  const float ax = __builtin_fabsf(f);
+  const u32 cb = wg_q8m_magic(ax);
+  u32 c = (wg_q8m_bits(ax + wg_q8m_flt(cb)) - cb) + (cb >> 20) - 1132u;
+  c = c < 0x7eu ? c : 0x7eu;
+  if (NANFIX) c = (f != f) ? 0x7fu : c;
+  return c | ((b >> 24) & 0x80u);
+}
+WG_FN u32 wg_f32_to_e4m3(float f) { return wg_f32_to_e4m3_t<true>(f); }
+
+template <bool NANFIX>
+WG_FN v2i wg_pack_q8_t(v8f d) {
+  u32 w[2];
+#pragma unroll
+  for (int h = 0; h < 2; ++h)
+    w[h] = wg_f32_to_e4m3_t<NANFIX>(d[4 * h]) | (wg_f32_to_e4m3_t<NANFIX>(d[4 * h + 1]) << 8) |
+           (wg_f32_to_e4m3_t<NANFIX>(d[4 * h + 2]) << 16) | (wg_f32_to_e4m3_t<NANFIX>(d[4 * h + 3]) << 24);
+  v2i r;
+  r[0] = (int)w[0];
+  r[1] = (int)w[1];
+  return r;
+}
+// Quantize 8 floats to FP8 and pack them into 8 bytes (element i -> byte i, little-endian).
+WG_FN v2i wg_pack_q8(v8f d) { return wg_pack_q8_t<true>(d); }
+// For values that stay inside the kernel: a NaN becomes +-448, as in the gfx12 form.
+WG_FN v2i wg_pack_q8_inner(v8f d) { return wg_pack_q8_t<false>(d); }
+// For inputs proven within +-464 and not NaN: the bytes of wg_pack_q8.
+WG_FN v2i wg_pack_q8_nc(v8f d) { return wg_pack_q8_t<false>(d); }
+
+#else
 WG_FN u32 wg_f32_to_e4m3(float f) {
   // Branch-free: every path is computed and the result picked with selects (no divergent control flow).
   const u32 b = __builtin_bit_cast(u32, f);
@@ -117,6 +325,7 @@ WG_FN u32 wg_f32_to_e4m3(float f) {
   code = a > 0x7f800000u ? 0x7fu : code;   // NaN
   return s | code;
 }
+#endif
 
 WG_FN float wg_e4m3_to_f32(u32 c) {
   const u32 em = c & 0x7fu;
@@ -199,6 +408,7 @@ WG_FN v8f wg_unpack_fp8(v2i p) {
 #else
 // Software conversions (host emulator, or -DWG_SOFT_FP8).
 
+#if !defined(WG_FAST_Q8)
 // Quantize 8 floats to FP8 and pack them into 8 bytes (element i -> byte i, little-endian).
 WG_FN v2i wg_pack_q8(v8f d) {
   u32 lo = wg_f32_to_e4m3(d[0]) | (wg_f32_to_e4m3(d[1]) << 8) | (wg_f32_to_e4m3(d[2]) << 16) |
@@ -213,6 +423,7 @@ WG_FN v2i wg_pack_q8(v8f d) {
 
 WG_FN v2i wg_pack_q8_inner(v8f d) { return wg_pack_q8(d); }
 WG_FN v2i wg_pack_q8_nc(v8f d) { return wg_pack_q8(d); }
+#endif
 
 WG_FN v8f wg_unpack_fp8(v2i p) {
   v8f r;
@@ -252,7 +463,20 @@ WG_FN v8f wg_load8f(const float* p) {
 // The global 100 MHz realtime clock (one tick = 10 ns), the hardware id of the SIMD a wave runs on, a drain of all
 // outstanding loads / LDS operations / stores, and a use of a vector value in a scalar register (forces the producer,
 // e.g. a WMMA, to be complete). s_memtime and the shader-cycles register do not exist on gfx12 in this toolchain.
-#if defined(__AMDGCN__)
+#if defined(__AMDGCN__) && defined(WG_GFX11)
+// The counters of an instrumented (WG_PROFILE) build use gfx12 instructions (s_wait_kmcnt, hwreg 29, ...).
+#define WG_NO_GFX11_PROFILE(name) \
+  __attribute__((device)) name __attribute__((error("WG_PROFILE timing counters are gfx12 only (not gfx11 / RDNA 3)")))
+WG_NO_GFX11_PROFILE(u64 wg_realtime());
+WG_NO_GFX11_PROFILE(u32 wg_cycles());
+WG_NO_GFX11_PROFILE(u32 wg_hwid());
+WG_NO_GFX11_PROFILE(void wg_drain());
+WG_FN int wg_uniform(int v) { return __builtin_amdgcn_readfirstlane(v); }
+WG_FN void wg_sync_i(int v) {
+  const int s = __builtin_amdgcn_readfirstlane(v);
+  __asm__ volatile("" : : "s"(s) : "memory");
+}
+#elif defined(__AMDGCN__)
 WG_FN u64 wg_realtime() {
   u64 t;
   __asm__ volatile("s_sendmsg_rtn_b64 %0, sendmsg(MSG_RTN_GET_REALTIME)\n\ts_wait_kmcnt 0x0" : "=s"(t) : : "memory");
@@ -288,7 +512,10 @@ WG_FN void wg_sync(int v) { wg_sync_i(v); }
 WG_FN void wg_sync(v8f v) { wg_sync(v[0]); }
 
 // ---- FP8 dot product on the vector ALU (WG_NORM_DOT4): c + sum of 4 products of FP8 bytes, accumulated in FP32 ----
-#if defined(__AMDGCN__)
+#if defined(__AMDGCN__) && defined(WG_GFX11)
+__attribute__((device)) float wg_dot4_fp8(int a, int b, float c)
+    __attribute__((error("WG_NORM_DOT4 needs v_dot4_f32_fp8_fp8, which gfx11 (RDNA 3) does not have")));
+#elif defined(__AMDGCN__)
 WG_FN float wg_dot4_fp8(int a, int b, float c) {
   float r;
   __asm__("v_dot4_f32_fp8_fp8 %0, %1, %2, %3" : "=v"(r) : "v"(a), "v"(b), "v"(c));

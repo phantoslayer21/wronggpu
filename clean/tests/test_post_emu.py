@@ -143,6 +143,7 @@ class TestPostEmu(EmuTest):
 class TestFilterEmu(EmuTest):
     # odd and even O, O not a multiple of 4 (partial column groups), several workgroups and strips, odd D
     SIZES = [(8, 6), (7, 5), (1, 1), (2, 3), (130, 37), (260, 70), (515, 33)]
+    KERNELS = tuple(post.FILTER_VARIANTS)
 
     def check(self, disp, e, O, stage="filter"):
         # quality9 is the separate Lanczos-3 profile (clean/reference/output_quality.py), not the default filter
@@ -161,7 +162,7 @@ class TestFilterEmu(EmuTest):
             disp = P.f16(rng.uniform(-0.2, 3.2, (P.recon_size_for(O[1]), P.recon_size_for(O[0]), 3)))
             e = float(rng.uniform(0.3, 3.0))
             outs = {}
-            for k in post.FILTER_VARIANTS:
+            for k in self.KERNELS:
                 with self.subTest(O=O, kernel=k):
                     outs[k] = self.check(disp, e, O, stage="filter" if k == post.KERNEL_FILTER else f"filter:{k}")
             with self.subTest(O=O, variants="identical"):
