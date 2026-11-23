@@ -98,7 +98,7 @@ class SourcePins(unittest.TestCase):
         dev = read("clean", "runtime", "device_d3d12.cpp")
         self.assertIn("const std::string name = native_kernel_name(requested);", dev)
         self.assertEqual(dev.count("native_kernel_name("), 2)  # definition and find_port, which prepare and launch both use
-        self.assertEqual(dev.count("find_port("), 3)           # definition, prepare, launch
+        self.assertEqual(dev.count("find_port("), 4)           # definition, require_d3d12_port, prepare, launch
         self.assertIn("g11_only_ = true;", dev)
         self.assertIn("native_k_ = wgrt::dev_gfx11_native_k_value();", dev)  # the list form: the device keeps the whole value
         self.assertIn("needs WG_DEV_GFX11_SHORTCUT=1", dev)
