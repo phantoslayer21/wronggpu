@@ -417,6 +417,30 @@ FgSessionResult FgSession::RunInterval(const FgFramePacket& packet, const FgInge
     sub.count = res.count;
     bool failed = pre_failed;  // the shared work already failed: only the game frame is submitted
     bool stale = false;
+    // An executor that records several indices more cheaply together (BatchesGenerated) gets the consecutive
+    // generated indices of the interval in one call; every other path records them one by one as always. The
+    // checks of each index (plan, history, slot, deadline) still run in order before it is queued; the queue is
+    // recorded before anything that is not a generated index, before the history advance and at the end.
+#if WG_FG_SESSION_MUTANT == 0
+    const bool batching = !failed && desc_.executor->BatchesGenerated();
+#else
+    const bool batching = false;
+#endif
+    FgIndexDispatchDesc pending[kFgMaxGenerated];
+    uint32_t pending_n = 0;
+    const auto flush = [&]() {
+        if (pending_n == 0) return true;
+        uint32_t done = 0;
+        const uint32_t first = pending[0].index;
+        r.executor = desc_.executor->RecordGeneratedBatch(pending, pending_n, &sub.ready[first - 1], &done);
+        for (uint32_t k = 0; k < done; ++k) {
+            sub.produced[first - 1 + k] = true;
+            ++r.generated_recorded;
+            ++counters_.index_records;
+        }
+        pending_n = 0;
+        return r.executor == FgExecResult::Ok;
+    };
     for (uint32_t i = 1; i <= n && !failed; ++i) {
         const FgFrameTarget& tg = plan.targets[i - 1];
         const FgPresentSlot& slot = res.slots[i - 1];
@@ -440,12 +464,24 @@ FgSessionResult FgSession::RunInterval(const FgFramePacket& packet, const FgInge
             }
         }
         if (!slot.reserved) {
+            if (!flush()) {
+                failed = true;
+                break;
+            }
             ++r.not_reserved;
         } else if (stale || Now() > tg.deadline) {
             // too late to be shown: this index and every later one of the interval are cancelled
+            if (!flush()) {
+                failed = true;
+                break;
+            }
             stale = true;
             ++r.stale_cancelled;
         } else if (copy_output || !generated_history) {
+            if (!flush()) {
+                failed = true;
+                break;
+            }
             FgCopyDispatchDesc cd;
             cd.frame_token = packet.frame_token;
             cd.interval_id = plan.interval_id;
@@ -491,20 +527,24 @@ FgSessionResult FgSession::RunInterval(const FgFramePacket& packet, const FgInge
             id.current_bank = ingest.current_bank;
             id.slot = slot;
             id.target = tg;
-            r.executor = desc_.executor->RecordGeneratedIndex(id, &sub.ready[i - 1]);
+            if (batching) {
+                pending[pending_n++] = id;
+            } else {
+                r.executor = desc_.executor->RecordGeneratedIndex(id, &sub.ready[i - 1]);
 #if WG_FG_SESSION_MUTANT == 4
-            if (r.executor == FgExecResult::Refused) {
-                r.executor = FgExecResult::Ok;
-                continue;
-            }
+                if (r.executor == FgExecResult::Refused) {
+                    r.executor = FgExecResult::Ok;
+                    continue;
+                }
 #endif
-            if (r.executor != FgExecResult::Ok) {
-                failed = true;
-                break;
+                if (r.executor != FgExecResult::Ok) {
+                    failed = true;
+                    break;
+                }
+                sub.produced[i - 1] = true;
+                ++r.generated_recorded;
+                ++counters_.index_records;
             }
-            sub.produced[i - 1] = true;
-            ++r.generated_recorded;
-            ++counters_.index_records;
         }
 #if WG_FG_SESSION_MUTANT == 5
         if (generated_history) {
@@ -512,11 +552,16 @@ FgSessionResult FgSession::RunInterval(const FgFramePacket& packet, const FgInge
         if (last && generated_history) {
 #endif
             // the interval's last index is handled: history reads are fenced and the history advance is counted
+            if (!flush()) {
+                failed = true;
+                break;
+            }
             history_->MarkRead(desc_.executor->LastComputeValue());
             r.history_advanced = true;
             ++counters_.history_advances;
         }
     }
+    if (pending_n != 0 && !flush()) failed = true;  // a break above (plan mismatch) left indices queued
     if (failed && r.executor == FgExecResult::DeviceLost) {
         r.error = FgSessionError::ExecutorDeviceLost;
         return Lose(r);

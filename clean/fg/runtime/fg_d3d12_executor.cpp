@@ -13,6 +13,7 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <unordered_map>
 
 #include "fg_frame_dump.h"
@@ -462,6 +463,12 @@ bool FgNet2SwizzleFast(const std::vector<uint8_t>& canonical, const std::vector<
 
 namespace {
 
+// One launch of the per-launch profile: the kernel, its workgroups and its ordinal among that kernel's launches of the
+// recording.
+struct ProfTag {
+    uint32_t kernel = 0, groups = 0, ordinal = 0;
+};
+
 struct Entry {
     ComPtr<ID3D12CommandAllocator> alloc;
     ComPtr<ID3D12GraphicsCommandList> list;
@@ -469,13 +476,19 @@ struct Entry {
     uint32_t desc_base = 0;
     uint32_t query_base = 0, stage_count = 0;
     FgExecStage stages[static_cast<uint32_t>(FgExecStage::Count)] = {};
+    uint32_t prof_base = 0;       // first per-launch timestamp of this entry (kernel_profile)
+    std::vector<ProfTag> prof;    // one tag per timestamp written
 };
 
 constexpr uint32_t kTimingQueries = static_cast<uint32_t>(FgExecStage::Count) + 1;
+constexpr uint32_t kProfQueries = 1024;  // per-launch timestamps per recording (one closing timestamp included)
 
 struct TimingQueries {
     ComPtr<ID3D12QueryHeap> heap;
     ComPtr<ID3D12Resource> readback;
+    ComPtr<ID3D12QueryHeap> prof_heap;
+    ComPtr<ID3D12Resource> prof_readback;
+    ID3D12CommandQueue* source = nullptr;  // for the clock calibration (owned by the executor)
     uint64_t hz = 0;
 };
 
@@ -505,6 +518,17 @@ struct FrameCtx {
     uint32_t disable = 0;
 };
 
+// A recorded launch kept back so that the layers of several generated indices can be emitted interleaved
+// (RecordGeneratedBatch). The arguments are the ones the launch would have been recorded with.
+struct Deferred {
+    uint32_t kernel = 0, groups = 0, n = 0;
+    bool barrier = true;
+    FgExecStage stage = FgExecStage::GenPreNet2;
+    uint32_t args[57] = {};
+};
+
+constexpr uint32_t kMaxWrittenSlots = 8;
+
 struct Rec {
     Entry* e = nullptr;
     ID3D12GraphicsCommandList* cl = nullptr;
@@ -512,8 +536,20 @@ struct Rec {
     D3D12_RESOURCE_STATES arena = D3D12_RESOURCE_STATE_COMMON;
     bool dirty = false;  // a dispatch or copy wrote since the last UAV barrier
     bool open = false, direct = false, uses_arena = true;
-    ID3D12Resource* written_slot = nullptr;
+    bool aux = false;    // recorded for the second compute queue
+    ID3D12Resource* written_slots[kMaxWrittenSlots] = {};
+    uint32_t written_count = 0;
+    // Submit: the game queue handoff value this recording waits for (0: the latest), the producer fence value an
+    // auxiliary recording waits for
+    uint64_t wait_handoff = 0, wait_producer = 0;
+    std::vector<Deferred>* defer = nullptr;  // set: Dispatch keeps the launch here instead of recording it
+    FgExecStage defer_stage = FgExecStage::GenPreNet2;
 
+    void NoteSlot(ID3D12Resource* res) {
+        for (uint32_t i = 0; i < written_count; ++i)
+            if (written_slots[i] == res) return;
+        if (written_count < kMaxWrittenSlots) written_slots[written_count++] = res;
+    }
     ~Rec() {
         if (open) cl->Close();
     }
@@ -555,9 +591,36 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     ComPtr<ID3D12Resource> arena;
     uint64_t arena_bytes = 0;
     ComPtr<ID3D12Resource> menu_rb;
-    TimingQueries producer_queries, direct_queries;
+    TimingQueries producer_queries, direct_queries, aux_queries;
     FgExecTimings timings;
     bool timing_failed = false;
+    std::vector<std::pair<double, double>> intervals;  // every collected recording [start, end] in ms of one clock
+    struct ProfRow {
+        uint32_t kernel = 0, ordinal = 0;
+        uint64_t calls = 0, groups = 0;
+        double ms = 0.0;
+    };
+    std::vector<ProfRow> prof_rows;
+    std::map<std::pair<uint32_t, uint32_t>, size_t> prof_index;
+
+    // Turbo v2 levers (fg_d3d12_executor.h FgD3d12ExecutorDesc): wanted at construction, active after Configure.
+    bool want_batch = true, want_hoist = true, want_dualq = true;
+    bool batch_on = false, hoist_on = false, dualq_on = false;
+    ComPtr<ID3D12CommandQueue> aux_queue;   // the second compute queue (hoisted MA / MB work)
+    ComPtr<ID3D12Fence> aux_fence;
+    uint64_t aux_value = 0, aux_joined = 0;
+    std::vector<Entry> aux_entries;
+    // Scratch banks: the per-index images (MA, MB, W, the generated image and its packed rows, the Full path's
+    // blend images, net2's tensors and the output pyramid) live in one block that is repeated sc_banks times at
+    // sc_stride bytes; SelectBank(b) moves every per-index offset to bank b.
+    uint32_t sc_banks = 1, sc_bank = 0;
+    uint64_t sc_base = 0, sc_stride = 0;
+    // The game frame's hoisted per-index work (fills and intermediate-time scatters of every index, recorded on the
+    // second queue beside net1): valid for this frame token, indices 1..hoist_n and these intermediate times.
+    bool hoist_valid = false;
+    uint64_t hoist_token = 0;
+    uint32_t hoist_n = 0;
+    float hoist_t[kFgMaxGenerated] = {};
 
     IFgSlotTarget* target = nullptr;
     uint32_t fence_id = 0;
@@ -792,12 +855,47 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         return b;
     }
 
-    FgExecResult Layout() {
+    // Every per-index offset, for SelectBank (zero: not allocated on this path).
+    template <class F>
+    void ForEachScratchOffset(F&& f) {
+        uint32_t* single[] = {&role_off[kRoleMA], &role_off[kRoleMB], &role_off[kRoleW], &out_off, &pack_off, &x0, &x1,
+                              &xw, &ib, &ic, &ia, &fine};
+        for (uint32_t* p : single) f(*p);
+        for (uint32_t l = 1; l <= 8; ++l) f(lv[l]);
+        Net2Buf* bufs[] = {&nb_x, &nb_a1, &nb_a2, &nb_r0, &nb_r4u, &nb_g, &nb_gu, &nb_hA4, &nb_hA1, &nb_hA3, &nb_U4,
+                           &nb_U1, &nb_U3, &nb_y, &nb_b1, &nb_s0, &nb_s4u, &nb_e, &nb_eu, &nb_out};
+        for (Net2Buf* b : bufs) f(b->off);
+        for (int u = 0; u < 4; ++u) {
+            f(nb_t[u].off);
+            f(nb_r[u].off);
+            f(nb_tb[u].off);
+            f(nb_s[u].off);
+        }
+    }
+    // Moves every per-index offset to scratch bank b (a bank beyond the allocated ones is bank 0).
+    void SelectBank(uint32_t b) {
+        if (b >= sc_banks) b = 0;
+        if (b == sc_bank) return;
+        const int64_t delta = (static_cast<int64_t>(b) - static_cast<int64_t>(sc_bank)) * static_cast<int64_t>(sc_stride);
+        ForEachScratchOffset([delta](uint32_t& off) {
+            if (off) off = static_cast<uint32_t>(static_cast<int64_t>(off) + delta);
+        });
+        sc_bank = b;
+    }
+    // The bank an index records into: its own when the levers need one per index, else the shared bank 0.
+    uint32_t BankFor(uint32_t index) const {
+        return (batch_on || hoist_on) && index >= 1 && index <= sc_banks ? index - 1 : 0;
+    }
+
+    FgExecResult Layout(uint32_t banks) {
         bump = 256;  // offset 0 is the null pointer
+        sc_bank = 0;
         for (uint32_t r = 0; r < kRoleCount; ++r) {
+            if (r == kRoleMA || r == kRoleMB || r == kRoleW) continue;  // per-index: the scratch block below
             const uint64_t n = FgRoleBytes(g, r);
             role_off[r] = n ? Alloc(n) : 0;
         }
+        role_off[kRoleMA] = role_off[kRoleMB] = role_off[kRoleW] = 0;
         for (uint32_t l = 1; l <= g.top; ++l) ps_off[l] = Alloc(12ull * g.lw[l] * g.lh[l]);
         detres_off = Alloc(32);
         dis_off = detres_off + 16;
@@ -809,9 +907,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         cap_depth = Alloc(cap * 4);
         cap_motion = Alloc(cap * 8);
         out_stride = static_cast<uint32_t>(align(g.wo, 32));
-        out_off = Alloc(8ull * out_stride * g.ho, 512);
         pack_pitch = static_cast<uint32_t>(align(4ull * g.wo, 256));
-        pack_off = Alloc(static_cast<uint64_t>(pack_pitch) * g.ho, 512);
         // net1: input, weights and scratch regions
         const FgRefusal pr = FgBuildNet1Plan(g.H0, g.W0, &n1plan);
         if (pr != FgRefusal::None) return Fail(FgExecRefusal::SizeUnsupported, std::string("net1 plan: ") + FgRefusalName(pr));
@@ -829,6 +925,14 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
             const uint64_t d4_bytes = split_d4 ? n1plan.buffers[n1plan.Find("a4")].bytes : 0;
             n1_pair_scratch = Alloc(std::max(b_bytes, d4_bytes));
         }
+        // The scratch block: everything one generated index writes (and nothing else), repeated once per bank.
+        bump = align(bump, 4096);
+        sc_base = bump;
+        role_off[kRoleMA] = Alloc(FgRoleBytes(g, kRoleMA));
+        role_off[kRoleMB] = Alloc(FgRoleBytes(g, kRoleMB));
+        role_off[kRoleW] = Alloc(FgRoleBytes(g, kRoleW));
+        out_off = Alloc(8ull * out_stride * g.ho, 512);
+        pack_off = Alloc(static_cast<uint64_t>(pack_pitch) * g.ho, 512);
         if (desc.enable_full) {
             const uint64_t fr = static_cast<uint64_t>(g.wo) * g.ho, n2 = static_cast<uint64_t>(g.W2) * g.H2;
             x0 = Alloc(fr * 8);
@@ -872,6 +976,9 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
             if (!fast()) nb_eu = N2(1, 48);
             nb_out = N2(1, 8);
         }
+        sc_stride = align(bump - sc_base, 4096);
+        sc_banks = banks;
+        bump = sc_base + sc_stride * banks;
         // the weights region last: net1's weights region, net2's weights, the logistic table
         weight_base = Alloc(0, 256);
         bump = weight_base;
@@ -960,7 +1067,8 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         }
         if (!heap) {
             const uint32_t n = std::max<uint32_t>(4, desc.allocators);
-            const uint32_t count = compute_queue ? 2 * n : n;
+            const uint32_t first_aux = compute_queue ? 2 * n : n;
+            const uint32_t count = aux_queue ? first_aux + n : first_aux;
             D3D12_DESCRIPTOR_HEAP_DESC hd = {};
             hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
             hd.NumDescriptors = count * kTables * kTableSize;
@@ -992,11 +1100,13 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                 }
             }
             if (!CreateEntries(entries, n, 0, ProducerQueue()) ||
-                (compute_queue && !CreateEntries(direct_entries, n, n, queue.Get())))
+                (compute_queue && !CreateEntries(direct_entries, n, n, queue.Get())) ||
+                (aux_queue && !CreateEntries(aux_entries, n, first_aux, aux_queue.Get())))
                 return Fail(FgExecRefusal::AllocationFailed, "command allocator / list");
             if (desc.timing) {
                 CreateTimingQueries(producer_queries, n, ProducerQueue());
                 if (compute_queue) CreateTimingQueries(direct_queries, n, queue.Get());
+                if (aux_queue) CreateTimingQueries(aux_queries, n, aux_queue.Get());
             }
         }
         return FgExecResult::Ok;
@@ -1015,11 +1125,13 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                 return false;
             e.desc_base = (first + i) * kTables * kTableSize;
             e.query_base = i * kTimingQueries;
+            e.prof_base = i * kProfQueries;
         }
         return true;
     }
 
     void CreateTimingQueries(TimingQueries& q, uint32_t count, ID3D12CommandQueue* source) {
+        q.source = source;
         if (FAILED(source->GetTimestampFrequency(&q.hz)) || !q.hz) return;
         D3D12_QUERY_HEAP_DESC qd = {};
         qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
@@ -1027,41 +1139,119 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         if (SUCCEEDED(device->CreateQueryHeap(&qd, IID_PPV_ARGS(&q.heap))))
             q.readback = Buffer(qd.Count * sizeof(uint64_t), D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE,
                                 D3D12_RESOURCE_STATE_COPY_DEST);
+        if (desc.kernel_profile) {
+            qd.Count = count * kProfQueries;
+            if (SUCCEEDED(device->CreateQueryHeap(&qd, IID_PPV_ARGS(&q.prof_heap))))
+                q.prof_readback = Buffer(qd.Count * sizeof(uint64_t), D3D12_HEAP_TYPE_READBACK,
+                                         D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+        }
+    }
+
+    TimingQueries& QueriesOf(const Rec& r) {
+        return r.aux ? aux_queries : r.direct ? direct_queries : producer_queries;
     }
 
     void TimeStage(Rec& r, FgExecStage stage) {
-        const auto& q = r.direct ? direct_queries : producer_queries;
+        if (r.defer) return;  // the launches are only being kept: EmitDeferred marks the stages
+        const auto& q = QueriesOf(r);
         if (!q.readback) return;
         Entry& e = *r.e;
         if (e.stage_count && e.stages[e.stage_count - 1] == stage) return;
+        if (e.stage_count >= static_cast<uint32_t>(FgExecStage::Count)) return;
         r.cl->EndQuery(q.heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, e.query_base + e.stage_count);
         e.stages[e.stage_count++] = stage;
     }
 
+    // The per-launch profile: one timestamp before the launch (after its barrier), tagged with the kernel and its
+    // workgroup count. Launch i takes the time to the next timestamp (the next launch's, or the recording's end).
+    void ProfMark(Rec& r, uint32_t kernel, uint32_t groups) {
+        const auto& q = QueriesOf(r);
+        if (!q.prof_readback) return;
+        Entry& e = *r.e;
+        if (e.prof.size() + 1 >= kProfQueries) return;
+        ProfTag t;
+        t.kernel = kernel;
+        t.groups = groups;
+        for (const ProfTag& x : e.prof) t.ordinal += x.kernel == kernel;
+        r.cl->EndQuery(q.prof_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                       e.prof_base + static_cast<uint32_t>(e.prof.size()));
+        e.prof.push_back(t);
+    }
+
     void ResolveTimings(Rec& r) {
         const Entry& e = *r.e;
-        if (!e.stage_count) return;
-        const auto& q = r.direct ? direct_queries : producer_queries;
-        r.cl->EndQuery(q.heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, e.query_base + e.stage_count);
-        r.cl->ResolveQueryData(q.heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, e.query_base, e.stage_count + 1,
-                              q.readback.Get(), e.query_base * sizeof(uint64_t));
+        const auto& q = QueriesOf(r);
+        if (e.stage_count && q.readback) {
+            r.cl->EndQuery(q.heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, e.query_base + e.stage_count);
+            r.cl->ResolveQueryData(q.heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, e.query_base, e.stage_count + 1,
+                                  q.readback.Get(), e.query_base * sizeof(uint64_t));
+        }
+        if (!e.prof.empty() && q.prof_readback) {
+            const uint32_t n = static_cast<uint32_t>(e.prof.size());
+            r.cl->EndQuery(q.prof_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, e.prof_base + n);
+            r.cl->ResolveQueryData(q.prof_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, e.prof_base, n + 1,
+                                  q.prof_readback.Get(), e.prof_base * sizeof(uint64_t));
+        }
+    }
+
+    // A GPU timestamp of a queue on the CPU clock, in milliseconds (calibrated at the call).
+    static double ClockMs(const TimingQueries& q, uint64_t ts, uint64_t cal_gpu, uint64_t cal_cpu, uint64_t qpc_hz) {
+        const double cpu_s = static_cast<double>(cal_cpu) / static_cast<double>(qpc_hz) +
+                             static_cast<double>(static_cast<int64_t>(ts - cal_gpu)) / static_cast<double>(q.hz);
+        return cpu_s * 1000.0;
     }
 
     void CollectTimings(Entry& e, const TimingQueries& q) {
-        if (!e.stage_count || !e.fence) return;
-        const D3D12_RANGE range = {e.query_base * sizeof(uint64_t),
-                                   (e.query_base + e.stage_count + 1) * sizeof(uint64_t)};
-        void* p = nullptr;
-        if (SUCCEEDED(q.readback->Map(0, &range, &p))) {
-            const auto* ts = static_cast<const uint64_t*>(p) + e.query_base;
-            for (uint32_t i = 0; i < e.stage_count; ++i)
-                timings.ms[static_cast<size_t>(e.stages[i])] += (ts[i + 1] - ts[i]) * 1000.0 / q.hz;
-            const D3D12_RANGE none = {0, 0};
-            q.readback->Unmap(0, &none);
-        } else {
-            timing_failed = true;
+        if (!e.fence) return;
+        if (e.stage_count && q.readback) {
+            const D3D12_RANGE range = {e.query_base * sizeof(uint64_t),
+                                       (e.query_base + e.stage_count + 1) * sizeof(uint64_t)};
+            void* p = nullptr;
+            if (SUCCEEDED(q.readback->Map(0, &range, &p))) {
+                const auto* ts = static_cast<const uint64_t*>(p) + e.query_base;
+                for (uint32_t i = 0; i < e.stage_count; ++i)
+                    timings.ms[static_cast<size_t>(e.stages[i])] += (ts[i + 1] - ts[i]) * 1000.0 / q.hz;
+                UINT64 cal_gpu = 0, cal_cpu = 0;
+                LARGE_INTEGER qpc;
+                if (q.source && QueryPerformanceFrequency(&qpc) && qpc.QuadPart > 0 &&
+                    SUCCEEDED(q.source->GetClockCalibration(&cal_gpu, &cal_cpu))) {
+                    const uint64_t hz = static_cast<uint64_t>(qpc.QuadPart);
+                    intervals.emplace_back(ClockMs(q, ts[0], cal_gpu, cal_cpu, hz),
+                                           ClockMs(q, ts[e.stage_count], cal_gpu, cal_cpu, hz));
+                }
+                const D3D12_RANGE none = {0, 0};
+                q.readback->Unmap(0, &none);
+            } else {
+                timing_failed = true;
+            }
         }
         e.stage_count = 0;
+        if (!e.prof.empty() && q.prof_readback) {
+            const uint32_t n = static_cast<uint32_t>(e.prof.size());
+            const D3D12_RANGE range = {e.prof_base * sizeof(uint64_t), (e.prof_base + n + 1) * sizeof(uint64_t)};
+            void* p = nullptr;
+            if (SUCCEEDED(q.prof_readback->Map(0, &range, &p))) {
+                const auto* ts = static_cast<const uint64_t*>(p) + e.prof_base;
+                for (uint32_t i = 0; i < n; ++i) {
+                    const auto key = std::make_pair(e.prof[i].kernel, e.prof[i].ordinal);
+                    auto it = prof_index.find(key);
+                    if (it == prof_index.end()) {
+                        it = prof_index.emplace(key, prof_rows.size()).first;
+                        ProfRow row;
+                        row.kernel = key.first;
+                        row.ordinal = key.second;
+                        prof_rows.push_back(row);
+                    }
+                    ProfRow& row = prof_rows[it->second];
+                    ++row.calls;
+                    row.groups += e.prof[i].groups;
+                    row.ms += (ts[i + 1] - ts[i]) * 1000.0 / q.hz;
+                }
+                const D3D12_RANGE none = {0, 0};
+                q.prof_readback->Unmap(0, &none);
+            }
+        }
+        e.prof.clear();
     }
 
     bool WaitFence(ID3D12Fence* f, uint64_t v, uint32_t ms) {
@@ -1081,9 +1271,13 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
 
     bool WaitIdle(uint32_t ms) {
         const ULONGLONG until = GetTickCount64() + ms;
+        const auto left = [until]() {
+            const ULONGLONG now = GetTickCount64();
+            return now < until ? static_cast<uint32_t>(until - now) : 0u;
+        };
         if (!WaitValue(next_value, ms)) return false;
-        const ULONGLONG now = GetTickCount64();
-        return WaitFence(handoff_fence.Get(), handoff_value, now < until ? static_cast<uint32_t>(until - now) : 0);
+        if (!WaitFence(handoff_fence.Get(), handoff_value, left())) return false;
+        return !aux_fence || WaitFence(aux_fence.Get(), aux_value, left());
     }
 
     FgExecResult Upload() {
@@ -1108,11 +1302,12 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     }
 
     // ---- recording -------------------------------------------------------------------------------------------
-    FgExecResult Begin(Rec* r, bool on_game_queue = false, bool uses_arena = true) {
-        r->direct = compute_queue && on_game_queue;
+    FgExecResult Begin(Rec* r, bool on_game_queue = false, bool uses_arena = true, bool aux = false) {
+        r->aux = aux && aux_queue;
+        r->direct = !r->aux && compute_queue && on_game_queue;
         r->uses_arena = uses_arena;
-        auto& ring = r->direct ? direct_entries : entries;
-        ID3D12Fence* reuse_fence = r->direct ? handoff_fence.Get() : fence.Get();
+        auto& ring = r->aux ? aux_entries : r->direct ? direct_entries : entries;
+        ID3D12Fence* reuse_fence = r->aux ? aux_fence.Get() : r->direct ? handoff_fence.Get() : fence.Get();
         Entry* e = nullptr;
         const uint64_t done = reuse_fence->GetCompletedValue();
         for (Entry& x : ring)
@@ -1130,9 +1325,10 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
             }
             e = oldest;
         }
-        CollectTimings(*e, r->direct ? direct_queries : producer_queries);
+        CollectTimings(*e, QueriesOf(*r));
         e->fence = 0;
         e->stage_count = 0;
+        e->prof.clear();
         if (FAILED(e->alloc->Reset()) || FAILED(e->list->Reset(e->alloc.Get(), nullptr)))
             return Fail(FgExecRefusal::CommandFailed, "command list reset");
         r->e = e;
@@ -1140,6 +1336,9 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         r->open = true;
         r->table = 0;
         r->dirty = false;
+        r->written_count = 0;
+        r->wait_handoff = r->wait_producer = 0;
+        r->defer = nullptr;
         if (!uses_arena) return FgExecResult::Ok;
         ID3D12DescriptorHeap* heaps[] = {heap.Get()};
         r->cl->SetDescriptorHeaps(1, heaps);
@@ -1193,8 +1392,23 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     }
 
     void Dispatch(Rec& r, uint32_t k, uint32_t groups, const uint32_t* args, uint32_t n, bool barrier = true) {
+        if (r.defer) {
+            Deferred d;
+            d.kernel = k;
+            d.groups = groups;
+            d.n = std::min(n, kMaxArgs);
+            d.barrier = barrier;
+            d.stage = r.defer_stage;
+            std::memcpy(d.args, args, 4ull * d.n);
+            r.defer->push_back(d);
+            return;
+        }
+        EmitDispatch(r, k, groups, args, n, barrier);
+    }
+    void EmitDispatch(Rec& r, uint32_t k, uint32_t groups, const uint32_t* args, uint32_t n, bool barrier) {
         ArenaTo(r, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         if (barrier) Barrier(r);
+        if (desc.kernel_profile) ProfMark(r, k, groups);
         r.cl->SetPipelineState(pso[k].Get());
         uint32_t c[kRootConstants] = {};
         c[1] = groups;
@@ -1222,22 +1436,30 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         ResolveTimings(*r);
         r->open = false;
         if (FAILED(r->cl->Close())) return Fail(FgExecRefusal::CommandFailed, "command list close");
-        ID3D12CommandQueue* q = r->direct ? queue.Get() : ProducerQueue();
-        if (r->direct) {
+        ID3D12CommandQueue* q = r->aux ? aux_queue.Get() : r->direct ? queue.Get() : ProducerQueue();
+        if (r->aux) {
+            // the second queue starts when the producer queue reached the value it was forked at
+            if (r->wait_producer && FAILED(q->Wait(fence.Get(), r->wait_producer)))
+                return QueueFailure("wait for the producer fork");
+        } else if (r->direct) {
             uint64_t dependency = r->uses_arena ? arena_value : 0;
-            const auto slot = compute_slot_values.find(r->written_slot);
-            if (slot != compute_slot_values.end()) dependency = std::max(dependency, slot->second);
+            for (uint32_t i = 0; i < r->written_count; ++i) {
+                const auto slot = compute_slot_values.find(r->written_slots[i]);
+                if (slot != compute_slot_values.end()) dependency = std::max(dependency, slot->second);
+            }
             if (dependency > fence->GetCompletedValue() && FAILED(q->Wait(fence.Get(), dependency)))
                 return QueueFailure("wait for compute writes");
         }
-        if (!r->direct && !JoinGameQueue()) return QueueFailure("wait for game queue handoff");
+        if (!r->direct && !r->aux && !JoinGameQueue(r->wait_handoff))
+            return QueueFailure("wait for game queue handoff");
         ID3D12CommandList* l[] = {r->cl};
         q->ExecuteCommandLists(1, l);
         uint64_t v = 0;
-        if (!(r->direct ? SignalHandoff(&v) : SignalProducer(&v))) return QueueFailure("queue signal");
-        if (compute_queue && !r->direct) {
+        if (!(r->aux ? SignalAux(&v) : r->direct ? SignalHandoff(&v) : SignalProducer(&v)))
+            return QueueFailure("queue signal");
+        if (compute_queue && !r->direct && !r->aux) {
             if (r->uses_arena) arena_value = v;
-            if (r->written_slot) compute_slot_values[r->written_slot] = v;
+            for (uint32_t i = 0; i < r->written_count; ++i) compute_slot_values[r->written_slots[i]] = v;
         }
         r->e->fence = v;
         ++counters.submissions;
@@ -1257,10 +1479,30 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         return true;
     }
 
-    bool JoinGameQueue() {
-        if (!compute_queue || joined_handoff == handoff_value) return true;
-        if (FAILED(compute_queue->Wait(handoff_fence.Get(), handoff_value))) return false;
-        joined_handoff = handoff_value;
+    // The producer queue waits for the game queue's handoff value (0: the latest signalled one).
+    bool JoinGameQueue(uint64_t value = 0) {
+        const uint64_t v = value ? value : handoff_value;
+        if (!compute_queue || joined_handoff >= v) return true;
+        if (FAILED(compute_queue->Wait(handoff_fence.Get(), v))) return false;
+        joined_handoff = v;
+        return true;
+    }
+
+    bool SignalAux(uint64_t* value) {
+        if (FAILED(aux_queue->Signal(aux_fence.Get(), aux_value + 1))) return false;
+        *value = ++aux_value;
+        return true;
+    }
+
+    // The producer timeline waits for everything the second queue was given and publishes a value after it: the
+    // game frame's last list runs after the hoisted work and the next frame's work sees both finished.
+    bool JoinAux() {
+        if (!aux_queue || aux_joined >= aux_value) return true;
+        if (FAILED(ProducerQueue()->Wait(aux_fence.Get(), aux_value))) return false;
+        aux_joined = aux_value;
+        uint64_t v = 0;
+        if (!SignalProducer(&v)) return false;
+        if (compute_queue) arena_value = v;
         return true;
     }
 
@@ -1346,6 +1588,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                 return;
             }
         }
+        if (desc.kernel_profile) ProfMark(*cur, kMConv1 + static_cast<uint32_t>(kernel), groups_x);
         cur->cl->SetPipelineState(pso[kMConv1 + static_cast<uint32_t>(kernel)].Get());
         cur->cl->SetComputeRoot32BitConstants(2, static_cast<uint32_t>(c.size()), c.data(), 0);
         cur->cl->Dispatch(groups_x, 1, 1);
@@ -2013,7 +2256,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         Transition(r, src.res, src.state, D3D12_RESOURCE_STATE_COPY_SOURCE);
         Transition(r, dst, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
         r.cl->CopyResource(dst, src.res);
-        r.written_slot = dst;
+        r.NoteSlot(dst);
         Transition(r, src.res, D3D12_RESOURCE_STATE_COPY_SOURCE, src.state);
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = {};
         fp.Footprint = {linear_copy_format(out.Format), g.wo, g.ho, 1, 0};
@@ -2085,7 +2328,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         src.PlacedFootprint.Footprint.Depth = 1;
         src.PlacedFootprint.Footprint.RowPitch = pitch;
         r.cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-        r.written_slot = res;
+        r.NoteSlot(res);
         if (desc.keep_outputs) {
             PendingRb p;
             p.rec.kind = kind;
@@ -2181,6 +2424,97 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         if (s == FgExecResult::Ok && capture) frame.colour_captured = true;
         return s;
     }
+
+    // ---- Turbo v2: scratch banks, interleaved recording, hoisted work ------------------------------------------
+    // Moves the per-index offsets to a bank for the scope.
+    struct BankScope {
+        Impl& m;
+        uint32_t prev;
+        BankScope(Impl& impl, uint32_t b) : m(impl), prev(impl.sc_bank) { m.SelectBank(b); }
+        ~BankScope() { m.SelectBank(prev); }
+    };
+
+    // Records one deferred launch (Dispatch with r.defer set keeps them).
+    void EmitDeferred(Rec& r, const Deferred& d, bool barrier, bool mark_stage) {
+        if (mark_stage) TimeStage(r, d.stage);
+        EmitDispatch(r, d.kernel, d.groups, d.args, d.n, barrier);
+    }
+
+    // Records the deferred launches of several frames (one list per frame). When every frame runs the same plan
+    // (same kernels and barrier needs at every position) the frames are interleaved: launch j of every frame back to
+    // back, the barrier only before the first of them. The frames write disjoint banks and read only the game
+    // frame's shared state, so the one barrier before launch j of frame 0 (which waits for every earlier launch of
+    // every frame) is all the dependencies of launch j need. Otherwise the frames are recorded one after the other
+    // with their own barriers.
+    void EmitFrames(Rec& r, const std::vector<std::vector<Deferred>>& lists) {
+        if (lists.empty()) return;
+        bool same = true;
+        for (size_t f = 1; f < lists.size() && same; ++f) {
+            same = lists[f].size() == lists[0].size();
+            for (size_t j = 0; same && j < lists[0].size(); ++j)
+                same = lists[f][j].kernel == lists[0][j].kernel && lists[f][j].barrier == lists[0][j].barrier;
+        }
+        if (!same) {
+            for (const auto& list : lists)
+                for (const Deferred& d : list) EmitDeferred(r, d, d.barrier, true);
+            return;
+        }
+        for (size_t j = 0; j < lists[0].size(); ++j)
+            for (size_t f = 0; f < lists.size(); ++f) EmitDeferred(r, lists[f][j], f == 0 && lists[0][j].barrier, f == 0);
+    }
+
+    static bool SameBits(float a, float b) { return FgExecFloatBits(a) == FgExecFloatBits(b); }
+
+    // The per-index ops that only need the game frame's p2c results: the MA / MB fills and the intermediate-time
+    // scatters (the first three ops of an index with history).
+    static bool IsHoistable(const std::vector<FgExecOp>& ops) {
+        return ops.size() >= 3 && ops[0].op == FgOp::Fill64 && ops[0].role == kRoleMA && ops[1].op == FgOp::Fill64 &&
+               ops[1].role == kRoleMB && ops[2].op == FgOp::Interm;
+    }
+
+    // Whether the shared recording already ran this index's fills and intermediate-time scatters.
+    bool HoistedFor(const FgIndexDispatchDesc& d, const std::vector<FgExecOp>& ops) const {
+        return hoist_valid && hoist_token == d.frame_token && d.index >= 1 && d.index <= hoist_n &&
+               SameBits(d.t, hoist_t[d.index - 1]) && IsHoistable(ops) && BankFor(d.index) == d.index - 1;
+    }
+
+    // Records the hoisted work of every index of this game frame (fills and intermediate-time scatters, each into its
+    // index's bank, launch by launch across the indices) into `aux` (not submitted).
+    bool RecordHoist(Rec& aux, const std::vector<float>& ts) {
+        std::vector<std::vector<Deferred>> lists(ts.size());
+        for (size_t i = 0; i < ts.size(); ++i) {
+            std::vector<FgExecOp> ops;
+            host.IndexOps(ts[i], frame.hud, frame.ui4, false, &ops);
+            if (!IsHoistable(ops)) return false;
+            BankScope bank(*this, BankFor(static_cast<uint32_t>(i) + 1));
+            aux.defer = &lists[i];
+            aux.defer_stage = FgExecStage::GenPreNet2;
+            for (size_t k = 0; k < 3; ++k) {
+                if (!RecordOp(aux, ops[k])) {
+                    aux.defer = nullptr;
+                    return false;
+                }
+            }
+            aux.defer = nullptr;
+        }
+        EmitFrames(aux, lists);
+        return true;
+    }
+
+    // Launches recorded for one index, the shared part of RecordGeneratedIndex and RecordGeneratedBatch.
+    bool RecordIndexOps(Rec& r, const std::vector<FgExecOp>& ops, bool skip_hoisted) {
+        FgExecStage stage = FgExecStage::GenPreNet2;
+        size_t k = 0;
+        for (const FgExecOp& op : ops) {
+            if (skip_hoisted && k++ < 3) continue;
+            if (op.op == FgOp::Net2) stage = FgExecStage::Net2;
+            if (op.op == FgOp::OutPyramid) stage = FgExecStage::OutPyramid;
+            r.defer_stage = stage;
+            TimeStage(r, stage);   // a no-op while the launches are only being kept
+            if (!RecordOp(r, op)) return false;
+        }
+        return true;
+    }
 };
 
 // ---- public ------------------------------------------------------------------------------------------------------
@@ -2189,6 +2523,19 @@ FgD3d12Executor::FgD3d12Executor(const FgD3d12ExecutorDesc& desc) : impl_(new Im
     impl_->desc = desc;
     char timing[2] = {};
     impl_->desc.timing |= GetEnvironmentVariableA("WRONGGPU_FG_TIMING", timing, sizeof(timing)) == 1 && timing[0] == '1';
+    char kprof[2] = {};
+    impl_->desc.kernel_profile |=
+        GetEnvironmentVariableA("WRONGGPU_FG_KPROF", kprof, sizeof(kprof)) == 1 && kprof[0] == '1';
+    impl_->desc.timing |= impl_->desc.kernel_profile;
+    // a lever is on unless the description or WG_FG_<name>=0 turns it off
+    const auto lever = [](int forced, const char* env) {
+        if (forced >= 0) return forced != 0;
+        char v[2] = {};
+        return !(GetEnvironmentVariableA(env, v, sizeof(v)) == 1 && v[0] == '0');
+    };
+    impl_->want_batch = lever(desc.batch, "WG_FG_BATCH");
+    impl_->want_hoist = lever(desc.hoist, "WG_FG_HOIST");
+    impl_->want_dualq = lever(desc.dualq, "WG_FG_DUALQ");
     if (desc.weights) {
         impl_->weights = *desc.weights;
         impl_->have_weights = true;
@@ -2265,6 +2612,15 @@ FgExecResult FgD3d12Executor::Configure(const FgCreateDesc& cd, uint32_t /*histo
     m.handoff_fence.Reset();
     m.handoff_value = m.joined_handoff = m.arena_value = 0;
     m.compute_slot_values.clear();
+    m.aux_queue.Reset();
+    m.aux_fence.Reset();
+    m.aux_entries.clear();
+    m.aux_queries = {};
+    m.aux_value = m.aux_joined = 0;
+    m.hoist_valid = false;
+    m.intervals.clear();
+    m.prof_rows.clear();
+    m.prof_index.clear();
     char async_compute[2] = {};
     const bool async_off = GetEnvironmentVariableA("WRONGGPU_FG_ASYNC_COMPUTE", async_compute, sizeof(async_compute)) ==
                                1 && async_compute[0] == '0';
@@ -2281,19 +2637,45 @@ FgExecResult FgD3d12Executor::Configure(const FgCreateDesc& cd, uint32_t /*histo
         const FgExecResult p = m.BuildPipelines();
         if (p != FgExecResult::Ok) return p;
     }
+    // The second compute queue (the hoisted per-index work) is optional: without it the lever is simply off.
+    if (m.want_hoist) {
+        D3D12_COMMAND_QUEUE_DESC aux_desc = {};
+        aux_desc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+        aux_desc.NodeMask = queue_desc.NodeMask;
+        if (FAILED(dev->CreateCommandQueue(&aux_desc, IID_PPV_ARGS(&m.aux_queue))) ||
+            FAILED(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m.aux_fence)))) {
+            m.aux_queue.Reset();
+            m.aux_fence.Reset();
+        }
+    }
+    m.hoist_on = m.want_hoist && m.aux_queue;
+    m.dualq_on = m.want_dualq && m.compute_queue;  // a direct game queue with the compute queue beside it
     FgExecResult s = m.CreateObjects();
     if (s != FgExecResult::Ok) return s;
     m.create = cd;
     m.g = g;
     m.cap_w = std::max(cd.output_width, cd.render_max_width);
     m.cap_h = std::max(cd.output_height, cd.render_max_height);
-    s = m.Layout();
+    // One scratch bank per generated index when a lever needs them; fewer when the arena would not fit.
+    uint32_t banks = (m.want_batch || m.hoist_on) ? std::min(std::max(cd.max_generated, 1u), kFgMaxGenerated) : 1u;
+    for (;;) {
+        s = m.Layout(banks);
+        if (s == FgExecResult::Ok) s = m.FillWeightImage();
+        if (s == FgExecResult::Ok) {
+            m.arena = m.Buffer(m.arena_bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                               D3D12_RESOURCE_STATE_COMMON);
+            if (!m.arena)
+                s = m.Fail(FgExecRefusal::AllocationFailed,
+                           "arena of " + std::to_string(m.arena_bytes) + " bytes");
+        }
+        if (s != FgExecResult::Ok && banks > 1) {
+            banks = 1;
+            continue;
+        }
+        break;
+    }
     if (s != FgExecResult::Ok) return s;
-    s = m.FillWeightImage();
-    if (s != FgExecResult::Ok) return s;
-    m.arena = m.Buffer(m.arena_bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-                       D3D12_RESOURCE_STATE_COMMON);
-    if (!m.arena) return m.Fail(FgExecRefusal::AllocationFailed, "arena of " + std::to_string(m.arena_bytes) + " bytes");
+    m.batch_on = m.want_batch && m.sc_banks >= 2;
     s = m.Upload();
     if (s != FgExecResult::Ok) return s;
     m.host.Configure(m.desc.settings, g);
@@ -2419,6 +2801,21 @@ FgExecResult FgD3d12Executor::RecordSharedGameFrame(const FgSharedDispatchDesc& 
     // Menu detection and the corresponding generated MenuOutput both consume the captured inputs.
     const bool input_srvs = !m.host.Frame().detect_ran && !m.desc.keep_outputs &&
                             m.pso[m.g.d == 4 ? kDown4Srv : kDown2Srv] && m.pso[kMvecSrv];
+    const bool fg_gen = d.generates && d.generated_count >= 1;
+    // Split the game queue's work in two recordings, the motion preparation then the downsample: the producer
+    // queue's p2c chain starts after the first and runs beside the downsample (it waits for the second before net1's
+    // input). The inputs the two recordings transition must be different resources.
+    bool alias = false;
+    for (int a : {1, 2})
+        for (int b : {0, 3, 4})
+            if (ins[a] && ins[b] && ins[a]->res == ins[b]->res) alias = true;
+    // The per-index fills and intermediate-time scatters of every index run on the second queue beside net1.
+    std::vector<float> hoist_ts;
+    m.hoist_valid = false;
+    if (m.hoist_on && fg_gen && m.host.Frame().history && !m.host.Frame().detect_ran &&
+        d.generated_count <= m.sc_banks)
+        for (uint32_t i = 1; i <= d.generated_count; ++i) hoist_ts.push_back(FgIndexTime(i, d.generated_count));
+
     Rec inputs;
     FgExecResult s = m.Begin(&inputs, true);
     if (s != FgExecResult::Ok) return s;
@@ -2430,32 +2827,63 @@ FgExecResult FgD3d12Executor::RecordSharedGameFrame(const FgSharedDispatchDesc& 
             if (!m.RecordOp(inputs, ops[next_op++])) return FgExecResult::Refused;
         }
     }
-    for (int i = 0; i < 5; ++i)
-        if (transition[i])
-            m.Transition(inputs, ins[i]->res, ins[i]->state, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    if (input_srvs) {
-        if (!m.RecordOp(inputs, ops[next_op++], true) || !m.RecordOp(inputs, ops[next_op++], true))
-            return FgExecResult::Refused;
+    const bool split = m.dualq_on && input_srvs && fg_gen && !alias && next_op + 1 < ops.size() &&
+                       ops[next_op + 1].op == FgOp::Mvec;
+    Rec downsample_list;
+    uint64_t v = 0, menu_value = 0, h_mvec = 0, h_down = 0;
+    const auto transitions = [&](Rec& rec, std::initializer_list<int> which, bool to_srv) {
+        for (int i : which) {
+            if (!transition[i]) continue;
+            if (to_srv)
+                m.Transition(rec, ins[i]->res, ins[i]->state, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            else
+                m.Transition(rec, ins[i]->res, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, ins[i]->state);
+        }
+    };
+    if (split) {
+        transitions(inputs, {1, 2}, true);
+        if (!m.RecordOp(inputs, ops[next_op + 1], true)) return FgExecResult::Refused;  // Mvec
+        transitions(inputs, {1, 2}, false);
+        s = m.Submit(&inputs, &h_mvec);
+        if (s != FgExecResult::Ok) return s;
+        s = m.Begin(&downsample_list, true);
+        if (s != FgExecResult::Ok) return s;
+        m.TimeStage(downsample_list, FgExecStage::SharedPreNet1);
+        transitions(downsample_list, {0, 3, 4}, true);
+        if (!m.RecordOp(downsample_list, ops[next_op], true)) return FgExecResult::Refused;  // Downsample
+        transitions(downsample_list, {0, 3, 4}, false);
+        s = m.Submit(&downsample_list, &h_down);
+        if (s != FgExecResult::Ok) return s;
+        next_op += 2;
     } else {
-        const uint32_t dst[5] = {m.cap_colour, m.cap_depth, m.cap_motion, m.cap_hud, f.ui1 ? m.cap_ui1 : m.cap_ui4};
-        const uint32_t kind[5] = {4, 6, 5, 4, f.ui1 ? 1u : 4u};
-        for (int i = 0; i < 5; ++i)
-            if (ins[i]) m.Capture(inputs, *ins[i], dst[i], kind[i]);
-        m.SetTable(inputs, 0);
+        transitions(inputs, {0, 1, 2, 3, 4}, true);
+        if (input_srvs) {
+            if (!m.RecordOp(inputs, ops[next_op++], true) || !m.RecordOp(inputs, ops[next_op++], true))
+                return FgExecResult::Refused;
+        } else {
+            const uint32_t dst[5] = {m.cap_colour, m.cap_depth, m.cap_motion, m.cap_hud,
+                                     f.ui1 ? m.cap_ui1 : m.cap_ui4};
+            const uint32_t kind[5] = {4, 6, 5, 4, f.ui1 ? 1u : 4u};
+            for (int i = 0; i < 5; ++i)
+                if (ins[i]) m.Capture(inputs, *ins[i], dst[i], kind[i]);
+            m.SetTable(inputs, 0);
+        }
+        transitions(inputs, {0, 1, 2, 3, 4}, false);
     }
-    for (int i = 0; i < 5; ++i)
-        if (transition[i])
-            m.Transition(inputs, ins[i]->res, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, ins[i]->state);
     Rec compute;
     Rec post_detect;
+    Rec post_fork;
     Rec* r = &inputs;
-    uint64_t v = 0, menu_value = 0;
+    bool forked = false;
     if (m.compute_queue) {
-        s = m.Submit(&inputs, &v);
-        if (s != FgExecResult::Ok) return s;
+        if (!split) {
+            s = m.Submit(&inputs, &v);
+            if (s != FgExecResult::Ok) return s;
+        }
         r = &compute;
         s = m.Begin(r);
         if (s != FgExecResult::Ok) return s;
+        if (split) r->wait_handoff = h_mvec;
     } else if (!input_srvs) {
         m.Barrier(inputs);
     }
@@ -2473,9 +2901,38 @@ FgExecResult FgD3d12Executor::RecordSharedGameFrame(const FgSharedDispatchDesc& 
             s = m.Begin(r);
             if (s != FgExecResult::Ok) return s;
         }
+        if (op.op == FgOp::P2cPush && (split || !hoist_ts.empty())) {
+            // The fork: the producer list ends with the p2c chain (the intermediate-time scatters read its results),
+            // the second queue runs the per-index fills and scatters, the producer queue goes on with net1.
+            uint64_t fork = 0;
+            s = m.Submit(r, &fork);
+            if (s != FgExecResult::Ok) return s;
+            if (!hoist_ts.empty()) {
+                Rec aux;
+                s = m.Begin(&aux, false, true, true);
+                if (s != FgExecResult::Ok) return s;
+                aux.wait_producer = fork;
+                m.TimeStage(aux, FgExecStage::GenPreNet2);
+                if (!m.RecordHoist(aux, hoist_ts)) return FgExecResult::Refused;
+                uint64_t aux_done = 0;
+                s = m.Submit(&aux, &aux_done);
+                if (s != FgExecResult::Ok) return s;
+                m.hoist_valid = true;
+                m.hoist_token = d.frame_token;
+                m.hoist_n = d.generated_count;
+                for (size_t i = 0; i < hoist_ts.size(); ++i) m.hoist_t[i] = hoist_ts[i];
+            }
+            r = &post_fork;
+            s = m.Begin(r);
+            if (s != FgExecResult::Ok) return s;
+            if (split) r->wait_handoff = h_down;
+            forked = true;
+        }
     }
+    if (split && !forked) r->wait_handoff = h_down;  // every split frame has a P2cPush; kept for safety
     s = m.Submit(r, &v);
     if (s != FgExecResult::Ok) return s;
+    if (!m.JoinAux()) return m.QueueFailure("join the second queue");
     out->menu.frame_token = d.frame_token;
     out->menu.detected = false;
     if (menu_value) {
@@ -2527,20 +2984,18 @@ FgExecResult FgD3d12Executor::RecordGeneratedIndex(const FgIndexDispatchDesc& d,
         if (s != FgExecResult::Ok) return s;
         m.frame.colour_captured = true;
     }
+    // the index's scratch bank (its own when a lever needs one per index) and whether the shared recording already
+    // ran its fills and intermediate-time scatters
+    Impl::BankScope bank(m, m.BankFor(d.index));
+    const bool hoisted = m.HoistedFor(d, ops);
     Rec r;
     FgExecResult s = m.Begin(&r);
     if (s != FgExecResult::Ok) return s;
-    FgExecStage stage = FgExecStage::GenPreNet2;
     if (capture && !m.frame.colour_captured) {
-        m.TimeStage(r, stage);
+        m.TimeStage(r, FgExecStage::GenPreNet2);
         m.CaptureColour(r);
     }
-    for (const FgExecOp& op : ops) {
-        if (op.op == FgOp::Net2) stage = FgExecStage::Net2;
-        if (op.op == FgOp::OutPyramid) stage = FgExecStage::OutPyramid;
-        m.TimeStage(r, stage);
-        if (!m.RecordOp(r, op)) return FgExecResult::Refused;
-    }
+    if (!m.RecordIndexOps(r, ops, hoisted)) return FgExecResult::Refused;
     m.TimeStage(r, FgExecStage::PackCopy);
     s = m.WriteSlot(r, d.slot.slot, 'g', d.frame_token, d.index);
     if (s != FgExecResult::Ok) return s;
@@ -2550,6 +3005,80 @@ FgExecResult FgD3d12Executor::RecordGeneratedIndex(const FgIndexDispatchDesc& d,
         ++m.counters.indices;
     }
     return s;
+}
+
+bool FgD3d12Executor::BatchesGenerated() const { return impl_->batch_on; }
+bool FgD3d12Executor::BatchActive() const { return impl_->batch_on; }
+bool FgD3d12Executor::HoistActive() const { return impl_->hoist_on; }
+bool FgD3d12Executor::DualQueueActive() const { return impl_->dualq_on; }
+uint32_t FgD3d12Executor::ScratchBanks() const { return impl_->sc_banks; }
+
+FgExecResult FgD3d12Executor::RecordGeneratedBatch(const FgIndexDispatchDesc* descs, uint32_t n, FgReadyFence* ready,
+                                                   uint32_t* done) {
+    Impl& m = *impl_;
+    if (done) *done = 0;
+    if (!descs || !ready || n == 0) return m.Fail(FgExecRefusal::BadArgument, "empty generated batch");
+    const auto one_by_one = [&]() {
+        FgExecResult r = FgExecResult::Ok;
+        uint32_t i = 0;
+        for (; i < n && r == FgExecResult::Ok; ++i) r = RecordGeneratedIndex(descs[i], &ready[i]);
+        if (done) *done = r == FgExecResult::Ok ? i : i - 1;
+        return r;
+    };
+    // Anything that is not the plain case goes one index at a time (which also reports every refusal).
+    bool plain = m.batch_on && m.configured && n >= 2 && n <= m.sc_banks && n <= kMaxWrittenSlots && m.target &&
+                 m.frame.valid && m.host.InFrame() && m.host.Frame().history;
+    for (uint32_t k = 0; plain && k < n; ++k)
+        plain = descs[k].frame_token == m.frame.token && descs[k].preset == m.frame.preset &&
+                descs[k].index == descs[0].index + k && m.BankFor(descs[k].index) == descs[k].index - 1;
+    std::vector<std::vector<FgExecOp>> ops(n);
+    for (uint32_t k = 0; plain && k < n; ++k) {
+        m.host.IndexOps(descs[k].t, m.frame.hud, m.frame.ui4, false, &ops[k]);
+        plain = ops[k].size() == ops[0].size();
+        for (size_t j = 0; plain && j < ops[k].size(); ++j) {
+            plain = ops[k][j].op == ops[0][j].op;
+            if (ops[k][j].op == FgOp::FinalCopy || ops[k][j].op == FgOp::Prefill || ops[k][j].op == FgOp::MenuOutput)
+                plain = false;
+        }
+    }
+    if (!plain) return one_by_one();
+
+    m.FlushDumps(false);
+    for (uint32_t k = 0; k < n; ++k) m.ArmDumpOnGenerated(descs[k].frame_token);
+    std::vector<uint32_t> fuse(n);
+    for (uint32_t k = 0; k < n; ++k) fuse[k] = m.PackFusion(ops[k], descs[k].slot.slot);
+    Rec r;
+    FgExecResult s = m.Begin(&r);
+    if (s != FgExecResult::Ok) return s;
+    // Keep every index's launches, then record them layer by layer across the indices.
+    std::vector<std::vector<Deferred>> lists(n);
+    for (uint32_t k = 0; k < n; ++k) {
+        Impl::BankScope bank(m, m.BankFor(descs[k].index));
+        m.fuse_pack = fuse[k];
+        const bool hoisted = m.HoistedFor(descs[k], ops[k]);
+        r.defer = &lists[k];
+        const bool recorded = m.RecordIndexOps(r, ops[k], hoisted);
+        r.defer = nullptr;
+        if (!recorded) {
+            m.fuse_pack = 0;
+            return FgExecResult::Refused;
+        }
+    }
+    m.fuse_pack = 0;
+    m.EmitFrames(r, lists);
+    for (uint32_t k = 0; k < n; ++k) {
+        Impl::BankScope bank(m, m.BankFor(descs[k].index));
+        m.fuse_pack = fuse[k];
+        m.TimeStage(r, FgExecStage::PackCopy);
+        s = m.WriteSlot(r, descs[k].slot.slot, 'g', descs[k].frame_token, descs[k].index);
+        if (s != FgExecResult::Ok) return s;
+    }
+    s = m.Finish(r, &ready[0]);
+    if (s != FgExecResult::Ok) return s;
+    for (uint32_t k = 1; k < n; ++k) ready[k] = ready[0];  // one submission: every image is complete at its value
+    m.counters.indices += n;
+    if (done) *done = n;
+    return FgExecResult::Ok;
 }
 
 FgExecResult FgD3d12Executor::RecordMenuCopy(const FgCopyDispatchDesc& d, FgReadyFence* ready) {
@@ -2754,13 +3283,58 @@ bool FgD3d12Executor::WaitIdle(uint32_t timeout_ms) {
 bool FgD3d12Executor::TakeTimings(FgExecTimings* out, uint32_t timeout_ms) {
     Impl& m = *impl_;
     if (!out || !m.producer_queries.readback || (m.compute_queue && !m.direct_queries.readback) ||
+        (m.aux_queue && !m.aux_queries.readback) || !WaitIdle(timeout_ms))
+        return false;
+    for (Entry& e : m.entries) m.CollectTimings(e, m.producer_queries);
+    for (Entry& e : m.direct_entries) m.CollectTimings(e, m.direct_queries);
+    for (Entry& e : m.aux_entries) m.CollectTimings(e, m.aux_queries);
+    if (m.timing_failed) return false;
+    *out = m.timings;
+    // the recordings of every queue on one clock: wall-clock span and the time something ran (overlap counted once)
+    std::sort(m.intervals.begin(), m.intervals.end());
+    out->recordings = static_cast<uint32_t>(m.intervals.size());
+    out->span_ms = out->busy_ms = 0.0;
+    if (!m.intervals.empty()) {
+        double end = m.intervals[0].second, run_start = m.intervals[0].first, last_end = end;
+        for (const auto& iv : m.intervals) {
+            if (iv.first > end) {  // a gap: close the busy run
+                out->busy_ms += end - run_start;
+                run_start = iv.first;
+                end = iv.second;
+            } else {
+                end = std::max(end, iv.second);
+            }
+            last_end = std::max(last_end, iv.second);
+        }
+        out->busy_ms += end - run_start;
+        out->span_ms = last_end - m.intervals[0].first;
+    }
+    m.intervals.clear();
+    m.timings = {};
+    return true;
+}
+
+bool FgD3d12Executor::TakeKernelProfile(std::vector<FgExecKernelProfileRow>* out, uint32_t timeout_ms) {
+    Impl& m = *impl_;
+    if (!out || !m.desc.kernel_profile || !m.producer_queries.prof_readback ||
+        (m.compute_queue && !m.direct_queries.prof_readback) || (m.aux_queue && !m.aux_queries.prof_readback) ||
         !WaitIdle(timeout_ms))
         return false;
     for (Entry& e : m.entries) m.CollectTimings(e, m.producer_queries);
     for (Entry& e : m.direct_entries) m.CollectTimings(e, m.direct_queries);
-    if (m.timing_failed) return false;
-    *out = m.timings;
-    m.timings = {};
+    for (Entry& e : m.aux_entries) m.CollectTimings(e, m.aux_queries);
+    out->clear();
+    for (const Impl::ProfRow& row : m.prof_rows) {
+        FgExecKernelProfileRow x;
+        x.name = kKernelNames[row.kernel];
+        x.ordinal = row.ordinal;
+        x.calls = row.calls;
+        x.groups = row.groups;
+        x.ms = row.ms;
+        out->push_back(std::move(x));
+    }
+    m.prof_rows.clear();
+    m.prof_index.clear();
     return true;
 }
 

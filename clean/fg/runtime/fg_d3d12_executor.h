@@ -164,6 +164,17 @@ struct FgD3d12ExecutorDesc {
     uint32_t allocators = 24;               // command allocators in the ring
     bool keep_outputs = false;              // tests: keep a host copy of every image written into a slot
     bool timing = false;                    // also enabled by WRONGGPU_FG_TIMING=1
+    // Per-launch profile (TakeKernelProfile): one timestamp before every dispatch of every recording. It serialises
+    // the queue a little, so it is a profile, not a frame time; also enabled by WRONGGPU_FG_KPROF=1 (implies timing).
+    bool kernel_profile = false;
+    // Turbo v2 levers (all exact: every one only changes where and when independent work runs). -1 takes the
+    // environment (default on); 0 / 1 force it (tests, paired A / B runs).
+    //  - batch (WG_FG_BATCH=0 off): RecordGeneratedBatch records layer k of every index back to back, so the barriers
+    //    sit only between dependent layers (needs one scratch bank per index: max_generated banks).
+    //  - hoist (WG_FG_HOIST=0 off): the per-index MA / MB fills and the intermediate-time scatters run on the second
+    //    compute queue while the game frame's net1 runs (needs the second queue and banks).
+    //  - dualq (WG_FG_DUALQ=0 off): the second compute queue; the downsample runs beside the motion / p2c chain.
+    int batch = -1, hoist = -1, dualq = -1;
     // Developer frame dumps (off while dump_dir is empty; the ASI sets it only in a developer build): of the game
     // frames that generate, every dump_every-th one (at most dump_max), the game frame's slot image (game_<n>.ppm) and
     // each generated slot image (gen_<n>_<i>.ppm) are copied to a readback buffer after the slot write, and written as
@@ -206,6 +217,22 @@ enum class FgExecStage : uint32_t {
 struct FgExecTimings {
     // Sum of GPU timestamp intervals for each stage since the previous collection, in milliseconds.
     std::array<double, static_cast<size_t>(FgExecStage::Count)> ms = {};
+    // The honest multi-queue numbers over the same window (every queue's recordings on one clock): the wall-clock
+    // span from the first recording's start to the last one's end (idle gaps included), the time at least one
+    // recording ran (the union of the recordings' intervals: overlap between queues counted once), and the number
+    // of recordings. The per-stage sums above double count work that two queues overlap.
+    double span_ms = 0.0, busy_ms = 0.0;
+    uint32_t recordings = 0;
+};
+
+// One row of the per-launch profile (kernel_profile), summed over the window since the previous collection. Rows of
+// one kernel are told apart by the ordinal of the launch inside its recording.
+struct FgExecKernelProfileRow {
+    std::string name;
+    uint32_t ordinal = 0;   // n-th launch of this kernel in a recording (net1's repeated kernels: its layers in order)
+    uint64_t calls = 0;     // launches summed
+    uint64_t groups = 0;    // workgroups summed over the calls (groups / calls: the launch's workgroup count)
+    double ms = 0.0;        // summed time from this launch's timestamp to the next one's
 };
 
 class FgD3d12Executor final : public IFgKernelExecutor {
@@ -218,6 +245,9 @@ public:
     FgExecResult Configure(const FgCreateDesc& desc, uint32_t history_banks) override;
     FgExecResult RecordSharedGameFrame(const FgSharedDispatchDesc& desc, FgSharedResult* out) override;
     FgExecResult RecordGeneratedIndex(const FgIndexDispatchDesc& desc, FgReadyFence* ready) override;
+    FgExecResult RecordGeneratedBatch(const FgIndexDispatchDesc* descs, uint32_t n, FgReadyFence* ready,
+                                      uint32_t* done) override;
+    bool BatchesGenerated() const override;
     FgExecResult RecordMenuCopy(const FgCopyDispatchDesc& desc, FgReadyFence* ready) override;
     FgExecResult RecordRealEndpoint(const FgRealDispatchDesc& desc, FgReadyFence* ready) override;
     uint64_t LastComputeValue() const override;
@@ -236,6 +266,14 @@ public:
     bool WaitIdle(uint32_t timeout_ms);
     // Collect and clear the timings through the latest submission. Returns false when profiling is unavailable.
     bool TakeTimings(FgExecTimings* out, uint32_t timeout_ms);
+    // kernel_profile: waits idle, collects and clears the per-launch profile (rows in first-seen order). Returns
+    // false when it is off or unavailable.
+    bool TakeKernelProfile(std::vector<FgExecKernelProfileRow>* out, uint32_t timeout_ms);
+    // The levers that are active after Configure (a lever the device or the arena cannot take stays off).
+    bool BatchActive() const;
+    bool HoistActive() const;
+    bool DualQueueActive() const;
+    uint32_t ScratchBanks() const;
     // keep_outputs: waits idle and moves the host copies out (oldest first).
     bool TakeOutputs(std::vector<FgExecOutputRecord>* out);
 

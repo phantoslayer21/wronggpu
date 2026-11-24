@@ -9,6 +9,13 @@
 //                                           executor refuses (no presenter is created, nothing falls back)
 //   test_fg_d3d12_e2e --gpu --dxil <dir>    adds the headless GPU leg (no window): a synthetic game drives the game
 //   test_fg_d3d12_e2e --bench --dxil <dir>  reports steady-state 1440p GPU stage timings for presets A and C
+//       [--gen N]       N = 1..5 generated images per game frame (2x .. 6x), really recorded (default 1)
+//       [--preset AC]   which presets (default AC)       [--timed N] [--warmup N]
+//       [--kprof]       per-launch profile: kernel, workgroups, time per call (serialises the queue a little)
+//       [--batch 0|1] [--hoist 0|1] [--dualq 0|1]   Turbo v2 levers for paired A / B runs (default: on, or the
+//                       environment WG_FG_BATCH / WG_FG_HOIST / WG_FG_DUALQ = 0)
+//       The report has the per-stage sums and the honest multi-queue numbers: the wall-clock GPU span and the busy
+//       time per game frame over the timed window (overlap between queues is counted once there, twice in the sums).
 //   --reference-dxil <dir>  compare direct-SRV output bytes against the captured path built with these kernels
 //                                           adapter core, the FG session and this executor on the D3D12 device with
 //                                           the composition back end (unbound surface) and the DXGI back end
@@ -1358,9 +1365,9 @@ void TestMotionFormats() {
 }
 
 struct ExecutorSlots final : IFgSlotTarget {
-    ComPtr<ID3D12Resource> textures[2];
+    ComPtr<ID3D12Resource> textures[8];  // the generated indices' slots and the real endpoint's (benchmarks use up to 6)
     ID3D12Resource* SlotResource(uint32_t slot) const override {
-        return slot < 2 ? textures[slot].Get() : nullptr;
+        return slot < 8 ? textures[slot].Get() : nullptr;
     }
     uint32_t RegisterFence(ID3D12Fence*, std::string*) override { return 1; }
     bool ReserveRealSlot(uint32_t* slot) override {
@@ -1795,17 +1802,26 @@ void TestInputSrvPaths(Gpu& gpu, const std::string& dxil, const std::string& ref
     if (errors >= 0) CHECK(errors == 0);
 }
 
-bool RunBench(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights, FgPreset preset) {
-    constexpr uint32_t width = 2560, height = 1440, warmup = 8, timed = 30;
+struct BenchOptions {
+    uint32_t gen = 1, warmup = 8, timed = 30;
+    std::string presets = "AC";
+    bool kprof = false;
+    int batch = -1, hoist = -1, dualq = -1;  // -1: the environment (default on)
+};
+
+bool RunBench(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights, FgPreset preset,
+              const BenchOptions& bo) {
+    constexpr uint32_t width = 2560, height = 1440;
     constexpr uint32_t timeout = 30000;
+    const uint32_t gen_count = bo.gen, warmup = bo.warmup, timed = bo.timed;
     const char label = preset == FgPreset::A ? 'A' : 'C';
     Game game;
     const DXGI_FORMAT format = DXGI_FORMAT_B8G8R8A8_UNORM;
     if (!game.Init(&gpu, format, width, height) || !game.Upload(0, false, true)) return false;
     ExecutorSlots slots;
-    for (auto& tex : slots.textures) {
-        tex = game.Tex(format);
-        if (!tex) return false;
+    for (uint32_t i = 0; i <= gen_count; ++i) {  // slot i - 1 holds index i, slot gen_count the real endpoint
+        slots.textures[i] = game.Tex(format);
+        if (!slots.textures[i]) return false;
     }
 
     FgD3d12ExecutorDesc ed;
@@ -1813,6 +1829,10 @@ bool RunBench(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights, F
     ed.weights = &weights;
     ed.enable_full = preset == FgPreset::A;
     ed.timing = true;
+    ed.kernel_profile = bo.kprof;
+    ed.batch = bo.batch;
+    ed.hoist = bo.hoist;
+    ed.dualq = bo.dualq;
     FgD3d12Executor exec(ed);
     const auto ok = [&](FgExecResult s) {
         if (s == FgExecResult::Ok) return true;
@@ -1823,40 +1843,57 @@ bool RunBench(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights, F
     create.device = gpu.device.Get();
     create.queue = gpu.queue.Get();
     create.preset = preset;
+    create.max_generated = gen_count;
     if (!ok(exec.Configure(create, 3)) || !exec.BindSlotTarget(&slots)) return false;
 
     FgFramePacket packet = game.Packet();
 
     FgExecTimings timing;
+    std::vector<FgExecKernelProfileRow> profile;
     for (uint32_t i = 0; i < warmup + timed; ++i) {
         packet.frame_token = i + 1;
         FgSharedDispatchDesc shared;
         shared.frame_token = packet.frame_token;
         shared.preset = preset;
         shared.has_previous = i != 0;
-        shared.generated_count = 1;
+        shared.generated_count = gen_count;
         shared.generates = true;
         shared.packet = &packet;
         FgSharedResult result;
         if (!ok(exec.RecordSharedGameFrame(shared, &result))) return false;
-        FgIndexDispatchDesc gen;
-        gen.frame_token = packet.frame_token;
-        gen.index = gen.generated_count = 1;
-        gen.is_last_index = true;
-        gen.preset = preset;
-        gen.t = 0.5f;
-        gen.slot.slot = 0;
-        gen.slot.reserved = true;
-        FgReadyFence ready;
-        if (!ok(exec.RecordGeneratedIndex(gen, &ready))) return false;
+        FgIndexDispatchDesc gens[kFgMaxGenerated];
+        FgReadyFence ready[kFgMaxGenerated + 1];
+        for (uint32_t k = 0; k < gen_count; ++k) {
+            FgIndexDispatchDesc& gen = gens[k];
+            gen.frame_token = packet.frame_token;
+            gen.index = k + 1;
+            gen.generated_count = gen_count;
+            gen.is_last_index = k + 1 == gen_count;
+            gen.preset = preset;
+            gen.t = FgIndexTime(k + 1, gen_count);
+            gen.slot.slot = k;
+            gen.slot.reserved = true;
+        }
+        if (gen_count > 1) {  // the executor falls back to one index at a time when batching is off
+            uint32_t done = 0;
+            if (!ok(exec.RecordGeneratedBatch(gens, gen_count, ready, &done)) || done != gen_count) return false;
+        } else if (!ok(exec.RecordGeneratedIndex(gens[0], &ready[0]))) {
+            return false;
+        }
         FgRealDispatchDesc real;
         real.frame_token = packet.frame_token;
-        real.slot.slot = 1;
+        real.slot.slot = gen_count;
         real.slot.reserved = true;
-        if (!ok(exec.RecordRealEndpoint(real, &ready))) return false;
-        if (i + 1 == warmup && !exec.TakeTimings(&timing, timeout)) {
-            std::printf("bench %c: warmup timestamps unavailable\n", label);
-            return false;
+        if (!ok(exec.RecordRealEndpoint(real, &ready[gen_count]))) return false;
+        if (i + 1 == warmup) {
+            if (!exec.TakeTimings(&timing, timeout)) {
+                std::printf("bench %c: warmup timestamps unavailable\n", label);
+                return false;
+            }
+            if (bo.kprof && !exec.TakeKernelProfile(&profile, timeout)) {
+                std::printf("bench %c: warmup kernel profile unavailable\n", label);
+                return false;
+            }
         }
     }
     if (!exec.TakeTimings(&timing, timeout)) {
@@ -1866,7 +1903,10 @@ bool RunBench(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights, F
     const char* stages[] = {"capture", "shared_pre_net1", "net1", "shared_post_net1", "gen_pre_net2",
                             "net2", "out_pyramid", "pack_copy", "real_endpoint"};
     static_assert(sizeof(stages) / sizeof(*stages) == static_cast<size_t>(FgExecStage::Count));
-    std::printf("bench preset %c 2x %ux%u (%u warmup, %u timed, mean GPU ms)\n", label, width, height, warmup, timed);
+    std::printf("bench preset %c %ux (gen %u) %ux%u (%u warmup, %u timed, mean GPU ms per game frame)\n", label,
+                gen_count + 1, gen_count, width, height, warmup, timed);
+    std::printf("  levers: batch %s, hoist %s, dualq %s, scratch banks %u\n", exec.BatchActive() ? "on" : "off",
+                exec.HoistActive() ? "on" : "off", exec.DualQueueActive() ? "on" : "off", exec.ScratchBanks());
     double shared = 0.0, gen = 0.0;
     for (size_t i = 0; i < timing.ms.size(); ++i) {
         const double mean = timing.ms[i] / timed;
@@ -1874,18 +1914,51 @@ bool RunBench(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights, F
         if (i <= static_cast<size_t>(FgExecStage::SharedPostNet1)) shared += mean;
         else if (i <= static_cast<size_t>(FgExecStage::PackCopy)) gen += mean;
     }
-    // Totals sum GPU execution intervals. Queue waits and overlap are not wall-clock frame time.
+    // The stage totals sum GPU execution intervals: work that two queues overlap is counted twice and queue waits
+    // are not counted. The span and busy lines are measured on one clock over the whole timed window.
     std::printf("  %-18s %.6f\n  %-18s %.6f\n  %-18s %.6f\n", "total_shared", shared, "total_gen", gen,
-                "total_2x_frame", shared + gen + timing.ms[static_cast<size_t>(FgExecStage::RealEndpoint)] / timed);
+                "sum_of_stages", shared + gen + timing.ms[static_cast<size_t>(FgExecStage::RealEndpoint)] / timed);
+    std::printf("  %-18s %.6f   (first start to last end of the window / frames, idle gaps included)\n",
+                "gpu_span_per_frame", timing.span_ms / timed);
+    std::printf("  %-18s %.6f   (time at least one queue ran / frames; %u recordings)\n", "gpu_busy_per_frame",
+                timing.busy_ms / timed, timing.recordings);
+    if (bo.kprof) {
+        if (!exec.TakeKernelProfile(&profile, timeout)) {
+            std::printf("bench %c: kernel profile unavailable\n", label);
+            return false;
+        }
+        std::printf("  per-launch profile (kernel#ordinal, workgroups per call, calls and mean us per game frame):\n");
+        double total = 0.0;
+        for (const FgExecKernelProfileRow& row : profile) {
+            const double calls = static_cast<double>(row.calls) / timed;
+            const double wg = row.calls ? static_cast<double>(row.groups) / static_cast<double>(row.calls) : 0.0;
+            const double per_call = row.calls ? row.ms * 1000.0 / static_cast<double>(row.calls) : 0.0;
+            std::printf("    %-34s #%-2u wg %8.0f  x%-5.2f %9.2f us/call %9.2f us/frame\n", row.name.c_str(),
+                        row.ordinal, wg, calls, per_call, row.ms * 1000.0 / timed);
+            total += row.ms * 1000.0 / timed;
+        }
+        std::printf("    %-34s %55.2f us/frame\n", "(sum of launches)", total);
+    }
     return gpu.DebugErrors() <= 0;
 }
 
 int main(int argc, char** argv) {
     bool gpu = false, bench = false;
     std::string dxil, reference_dxil, scratch = ".", only;
+    BenchOptions bo;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--gpu") == 0) gpu = true;
         if (std::strcmp(argv[i], "--bench") == 0) bench = true;
+        // --gen N: N generated images per game frame (1..5: 2x .. 6x), really recorded and timed
+        if (std::strcmp(argv[i], "--gen") == 0 && i + 1 < argc) bo.gen = static_cast<uint32_t>(std::atoi(argv[++i]));
+        if (std::strcmp(argv[i], "--timed") == 0 && i + 1 < argc) bo.timed = static_cast<uint32_t>(std::atoi(argv[++i]));
+        if (std::strcmp(argv[i], "--warmup") == 0 && i + 1 < argc) bo.warmup = static_cast<uint32_t>(std::atoi(argv[++i]));
+        if (std::strcmp(argv[i], "--preset") == 0 && i + 1 < argc) bo.presets = argv[++i];
+        if (std::strcmp(argv[i], "--kprof") == 0) bo.kprof = true;
+        // paired A / B levers inside one process (default: the environment, WG_FG_BATCH / _HOIST / _DUALQ = 0 off)
+        if (std::strcmp(argv[i], "--batch") == 0 && i + 1 < argc) bo.batch = std::atoi(argv[++i]);
+        if (std::strcmp(argv[i], "--hoist") == 0 && i + 1 < argc) bo.hoist = std::atoi(argv[++i]);
+        if (std::strcmp(argv[i], "--dualq") == 0 && i + 1 < argc) bo.dualq = std::atoi(argv[++i]);
         if (std::strcmp(argv[i], "--dxil") == 0 && i + 1 < argc) dxil = argv[++i];
         if (std::strcmp(argv[i], "--reference-dxil") == 0 && i + 1 < argc) reference_dxil = argv[++i];
         if (std::strcmp(argv[i], "--scratch") == 0 && i + 1 < argc) scratch = argv[++i];
@@ -1901,7 +1974,14 @@ int main(int argc, char** argv) {
             return 1;
         }
         std::printf("gpu: %s\n", g.name.c_str());
-        if (!RunBench(g, dxil, weights, FgPreset::A) || !RunBench(g, dxil, weights, FgPreset::C)) return 1;
+        if (bo.gen < 1 || bo.gen > 5) {
+            std::printf("--gen takes 1..5\n");
+            return 1;
+        }
+        for (char c : bo.presets) {
+            if ((c == 'A' || c == 'a') && !RunBench(g, dxil, weights, FgPreset::A, bo)) return 1;
+            if ((c == 'C' || c == 'c') && !RunBench(g, dxil, weights, FgPreset::C, bo)) return 1;
+        }
         if (!gpu) return 0;
     }
     TestGeometry();
