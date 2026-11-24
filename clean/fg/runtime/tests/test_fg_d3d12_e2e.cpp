@@ -12,8 +12,8 @@
 //       [--gen N]       N = 1..5 generated images per game frame (2x .. 6x), really recorded (default 1)
 //       [--preset AC]   which presets (default AC)       [--timed N] [--warmup N]
 //       [--kprof]       per-launch profile: kernel, workgroups, time per call (serialises the queue a little)
-//       [--batch 0|1] [--hoist 0|1] [--dualq 0|1]   Turbo v2 levers for paired A / B runs (default: on, or the
-//                       environment WG_FG_BATCH / WG_FG_HOIST / WG_FG_DUALQ = 0)
+//       [--batch 0|1] [--hoist 0|1] [--dualq 0|1] [--fuse 0|1]   Turbo v2 levers for paired A / B runs (default: on,
+//                       or the environment WG_FG_BATCH / _HOIST / _DUALQ / _FUSE = 0)
 //       The report has the per-stage sums and the honest multi-queue numbers: the wall-clock GPU span and the busy
 //       time per game frame over the timed window (overlap between queues is counted once there, twice in the sums).
 //   --reference-dxil <dir>  compare direct-SRV output bytes against the captured path built with these kernels
@@ -2008,7 +2008,7 @@ struct BenchOptions {
     uint32_t gen = 1, warmup = 8, timed = 30;
     std::string presets = "AC";
     bool kprof = false;
-    int batch = -1, hoist = -1, dualq = -1;  // -1: the environment (default on)
+    int batch = -1, hoist = -1, dualq = -1, fuse = -1;  // -1: the environment (default on)
 };
 
 bool RunBench(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights, FgPreset preset,
@@ -2035,6 +2035,7 @@ bool RunBench(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights, F
     ed.batch = bo.batch;
     ed.hoist = bo.hoist;
     ed.dualq = bo.dualq;
+    ed.fuse = bo.fuse;
     FgD3d12Executor exec(ed);
     const auto ok = [&](FgExecResult s) {
         if (s == FgExecResult::Ok) return true;
@@ -2161,6 +2162,7 @@ int main(int argc, char** argv) {
         if (std::strcmp(argv[i], "--batch") == 0 && i + 1 < argc) bo.batch = std::atoi(argv[++i]);
         if (std::strcmp(argv[i], "--hoist") == 0 && i + 1 < argc) bo.hoist = std::atoi(argv[++i]);
         if (std::strcmp(argv[i], "--dualq") == 0 && i + 1 < argc) bo.dualq = std::atoi(argv[++i]);
+        if (std::strcmp(argv[i], "--fuse") == 0 && i + 1 < argc) bo.fuse = std::atoi(argv[++i]);
         if (std::strcmp(argv[i], "--dxil") == 0 && i + 1 < argc) dxil = argv[++i];
         if (std::strcmp(argv[i], "--reference-dxil") == 0 && i + 1 < argc) reference_dxil = argv[++i];
         if (std::strcmp(argv[i], "--scratch") == 0 && i + 1 < argc) scratch = argv[++i];
