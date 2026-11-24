@@ -296,6 +296,9 @@ enum Kid {
   // clean/rr-f-a14-frame E24: read-only cache warm-up (rr_touch.hlsl)
   K_TOUCH = K_DXSTAGE0 + 15,
   K_BLKCOPY,   // E25 step 2: argument block upload ring -> arena (root SRV 6)
+  // clean/rr-f-300 R2: the fast resolve specialised for the plain configuration (RF_SPEC 3: no layer / opacity / alpha
+  // upscaling; same bits as resolve.fast), hardware elementary functions (Fast) and correctly rounded (.x)
+  K_RES_FAST3, K_RES_FAST3_X,
   K_COUNT
 };
 const char* const kKernelNames[] = {
@@ -321,7 +324,7 @@ const char* const kKernelNames[] = {
     "staged.D3-F", "staged.D3-R", "staged.D2-F", "staged.D2-R", "staged.D1-F", "staged.D1-R", "staged.D0-F",
     "stagedx.IN0", "stagedx.E1", "stagedx.E2", "stagedx.E3", "stagedx.E4", "stagedx.E5", "stagedx.D4-F", "stagedx.D4-R",
     "stagedx.D3-F", "stagedx.D3-R", "stagedx.D2-F", "stagedx.D2-R", "stagedx.D1-F", "stagedx.D1-R", "stagedx.D0-F",
-    "rt.touch", "rt.blkcopy"};
+    "rt.touch", "rt.blkcopy", "resolve.fast3", "resolve.fast3.x"};
 static_assert(sizeof(kKernelNames) / sizeof(kKernelNames[0]) == K_COUNT, "kKernelNames and Kid disagree");
 // clean/rr-f-flow: kernels only the opt-in variants dispatch (exact / strict / debug head, body steps X and Z,
 // WG_RR_PATHS=verified); the default frame (head fast, body E, fast paths) never uses them
@@ -354,8 +357,8 @@ int variant_group(int k, bool* alt) {
   if (k >= K_DXSTAGE0 && k < K_DXSTAGE0 + 15) { *alt = true; return VG_BODY; }   // clean/rr-f-s13x-x-flow: the exact body's
   if (k == K_OUT_PREP || k == K_OUT_FAST || k == K_OUT_FALLBACK || k == K_OUT_PREPU) return VG_OUT;
   if (k >= K_OUT_PREP_F && k <= K_OUT_PREPU_F) { *alt = true; return VG_OUT; }
-  if (k == K_RES_FAST || k == K_RES_FAST2) return VG_RES;
-  if (k == K_RES_FAST_X || k == K_RES_FAST2_X) { *alt = true; return VG_RES; }
+  if (k == K_RES_FAST || k == K_RES_FAST2 || k == K_RES_FAST3) return VG_RES;
+  if (k == K_RES_FAST_X || k == K_RES_FAST2_X || k == K_RES_FAST3_X) { *alt = true; return VG_RES; }
   return -1;
 }
 // kernel k belongs to the default frame of the variant set vbits (no opt-in kernel, and its variant is the one in use)
@@ -1659,6 +1662,13 @@ struct Instance {
   bool fuse_store = true;          // clean/rr-f-s10-tail (WG_RR_FUSESTORE=0 at creation: rt.store as before): with the
                                    // RF_SPEC 2 resolve and a binary16 main output, resolve.fast2 / resolve.fixup store
                                    // it into the game's texture themselves (rt.store's conversion, same bits)
+  bool res3 = true;                // clean/rr-f-300 R2 (WG_RR_RES3=0 at creation: the plain configuration on resolve.fast as
+                                   // before): the plain resolve (no layer / opacity / alpha upscaling, binary16 x4 output)
+                                   // takes resolve.fast3 (RF_SPEC 3, same bits) and, like the RF_SPEC 2 resolve, stores the
+                                   // main output into the game's texture itself (no rt.store)
+  bool res_skip_arena = true;      // clean/rr-f-300 R1b (WG_RR_RESARENA=1 at creation: the old behaviour): with the store fused
+                                   // the fast resolve does not also write the main output's arena texels (nothing reads them
+                                   // but the WG_RR_ALIAS=0 test runs, which keep the write)
   int ringest = 4;                 // clean/rr-f-s13x-x-flow: the body stage the resolve's ingest joins (kRIngestStage /
                                    // kRIngestStageFast by mode, apply_dflow; WG_RR_RINGEST=<0..15>, A/B)
   bool host_sched = true;          // clean/rr-f-s9-host (WG_RR_HOSTSCHED=0 at creation: the base recording order):
@@ -2197,6 +2207,8 @@ uint32_t create_locked(const WgRrCreate* d, void** out) {
     if (GetEnvironmentVariableA("WG_RR_RINGEST", hsv, sizeof hsv)) in->ringest = std::max(0, std::min(15, atoi(hsv)));
     char fsv[8] = {};
     in->fuse_store = !(GetEnvironmentVariableA("WG_RR_FUSESTORE", fsv, sizeof fsv) && strcmp(fsv, "0") == 0);
+    in->res3 = !(GetEnvironmentVariableA("WG_RR_RES3", fsv, sizeof fsv) && strcmp(fsv, "0") == 0);
+    in->res_skip_arena = !(GetEnvironmentVariableA("WG_RR_RESARENA", fsv, sizeof fsv) && strcmp(fsv, "1") == 0);
     char pv[16] = {};
     in->fast_paths = !(GetEnvironmentVariableA("WG_RR_PATHS", pv, sizeof pv) && strcmp(pv, "verified") == 0);
     char bv[8] = {};
@@ -2834,6 +2846,7 @@ uint32_t evaluate_locked(Instance* in, const WgRrFrame* f, WgRrFrameResult* res)
   const bool th_created = th_new || oh_new;   // 54b.6: a history created this frame (zero-filled; reset for 54b.3)
   uint32_t rflags = 0;
   bool res_spec2 = false;   // the frame's resolve matches RF_SPEC 2 (resolve.fast2; its own check repeats this)
+  bool res_spec3 = false;   // ... or RF_SPEC 3, the plain resolve (resolve.fast3; its own check repeats this)
   bool fuse_store = false;  // the main output's store is done by resolve.fast2 / resolve.fixup (no rt.store for it)
   {
     // resolve parameters (kernels/rr_resolve.hlsl; gpu/resolve.py params) and the PH2 pool's
@@ -2865,13 +2878,16 @@ uint32_t evaluate_locked(Instance* in, const WgRrFrame* f, WgRrFrameResult* res)
              ((reset || in->ah_created) ? 64u : 0u) | ((f->settings & WG_RR_SET_BOUNDED_STORES) ? 128u : 0u) | 256u;
     p[8] = rflags;
     res_spec2 = (rflags & 15u) == 3u && sl.fmt == 1u && oi[0].fmt == 1u && lay.th_on;
+    // R2: plain (no layer, opacity or alpha upscaling: rflags & 15 == 0); the kernel's screens (Q, output formats) send every
+    // other dispatch to resolve.fixup, which is the verified pixel code resolve.fast's plain path also falls back to
+    res_spec3 = in->res3 && (rflags & 15u) == 0u && oi[0].fmt == 1u;
     {   // clean/rr-f-s10-tail: rt.store's texels (We x He, bounded: Wo x Ho inside it) at the output origin
       const WgRrImage& t = img[WG_ROLE_OUTPUT];
       const bool bnd = (f->settings & WG_RR_SET_BOUNDED_STORES) != 0;
-      fuse_store = in->fuse_store && in->fast_paths && res_spec2 && oi[0].on && oi[0].fmt == 1u && oi[0].ch == 4u &&
+      fuse_store = in->fuse_store && in->fast_paths && (res_spec2 || res_spec3) && oi[0].on && oi[0].fmt == 1u && oi[0].ch == 4u &&
                    !oi[0].srgb && (!bnd || (in->Wo <= in->We && in->Ho <= in->He)) && t.origin_x < 65536u &&
                    t.origin_y < 65536u;
-      p[16] = fuse_store ? 1u : 0u;
+      p[16] = fuse_store ? (in->res_skip_arena && in->alias ? 2u : 1u) : 0u;   // 2: the texture only (R1b)
       p[39] = fuse_store ? ((uint32_t)t.origin_x | ((uint32_t)t.origin_y << 16)) : 0u;
     }
     p[11] = fb(f->jitter[0]);
@@ -3492,7 +3508,7 @@ uint32_t evaluate_locked(Instance* in, const WgRrFrame* f, WgRrFrameResult* res)
     const uint32_t tiles = ((in->We + kResTile - 1) / kResTile) * ((in->He + kResTile - 1) / kResTile);
     const bool rx = (in->vbits >> VG_RES) & 1;
     if (fuse_store) l->SetComputeRootDescriptorTable(4, gpu(store_pair[0]));   // u2: the main output (rf_gout)
-    dispatch(l, res_spec2 ? (rx ? K_RES_FAST2_X : K_RES_FAST2) : (rx ? K_RES_FAST_X : K_RES_FAST), std::min(tiles, in->res_groups), {(uint32_t)(blk + kBlkResolve), 0u, 0u});
+    dispatch(l, res_spec2 ? (rx ? K_RES_FAST2_X : K_RES_FAST2) : res_spec3 ? (rx ? K_RES_FAST3_X : K_RES_FAST3) : (rx ? K_RES_FAST_X : K_RES_FAST), std::min(tiles, in->res_groups), {(uint32_t)(blk + kBlkResolve), 0u, 0u});
     if (tail_rec) {   // the next frame's history prep: PH1 -> PH2 pool, PH1 / HID decodes (PH1, HID final here)
       dispatch(l, K_POOL_MAIN, (w2 * h2 + kPoolLanes - 1) / kPoolLanes, {(uint32_t)(blk + kBlkPool), (uint32_t)lay.ptab, 0u, 0u});
       decode1(0);

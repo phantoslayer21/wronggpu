@@ -228,6 +228,10 @@ def kernels(out):
     # clean/rr-f-s10-modes: mode exact's resolve (correctly rounded exp2 / reciprocal: WG_RR_RF_DEFINES={})
     res.append(("resolve.fast.x", GRF.NARGS, GRF.fast_kernel(spec=0, extra={})))
     res.append(("resolve.fast2.x", GRF.NARGS, GRF.fast_kernel(spec=2, extra={})))
+    # clean/rr-f-300 R2: the plain configuration (RF_SPEC 3: not extended, no layer / opacity / alpha upscaling; same bits as
+    # resolve.fast / resolve.fast.x for those dispatches), hardware exp2 / reciprocal for Fast (rfd), correctly rounded for the .x
+    res.append(("resolve.fast3", GRF.NARGS, GRF.fast_kernel(spec=3, extra=rfd)))
+    res.append(("resolve.fast3.x", GRF.NARGS, GRF.fast_kernel(spec=3, extra={})))
     for n, (dxil, nargs) in GP.kernels(exact=True).items():       # pool-tables, pool-main (exact tables)
         res.append((n.replace("-", "."), nargs, dxil))
 

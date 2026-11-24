@@ -108,6 +108,10 @@ original.
 - tail (clean/rr-f-s10-tail): the resolve reads the exp2 table from the arena instead of copying it into LDS; 24-bit multiplies for
   addressing in the output stage; the main output's store is folded into resolve.fast2 / resolve.fixup (`WG_RR_FUSESTORE=0` at creation
   brings the separate store pass back). Also used by the exact-resolve (`_X`) kernels of mode exact.
+- tail (clean/rr-f-300, same bits): the plain resolve (no layer, opacity or alpha upscaling) takes `resolve.fast3` / `resolve.fast3.x`
+  (`RF_SPEC 3`: no render-size reads, no format switches; 43 / 55 VGPRs instead of resolve.fast's 162 / 191) and folds its store like
+  resolve.fast2 (`WG_RR_RES3=0` at creation: resolve.fast / rt.store as before); with the store folded the fast resolve no longer also
+  writes the main output's arena texels (kept for `WG_RR_ALIAS=0` test runs; `WG_RR_RESARENA=1` brings it back).
 
 ## Round 11, tail (clean/rr-f-s11-tail)
 

@@ -42,6 +42,12 @@
                                       // upscaling (any reset / bounded / exposure-link flags), no opacity; L, MV, TH,
                                       // OUT binary16 x4. As 1 without the alpha work: the render tile holds only the
                                       // layer (no P / G / alpha source loads), no alpha taps / history / stores.
+                                      // 3: the PLAIN configuration (exact, same bits as RF_SPEC 0 for those dispatches):
+                                      // neither extended nor layer nor opacity nor alpha upscaling (flags & 15 == 0; the
+                                      // reset / bounded / exposure-link bits are free), OUT binary16 x4. As 2 without
+                                      // any render-size work: no layer / history / alpha reads, no render tile, no
+                                      // format switches; the colour is the Q passes + decode, alpha 1 (rf_uniforms checks
+                                      // it; otherwise every pixel goes to the fixup kernel).
 #endif
 #ifndef RF_HOIST                      // round 13 (RF_SPEC, RF_EARLY; the same addresses and words, issued earlier): 1 the
 #define RF_HOIST 0                    // motion-vector and layer reads at the tile start, the history reads after the Q pass
@@ -67,7 +73,7 @@ groupshared uint2 rf_g[RF_NR];                // phase 2: G halves (g0 | g1 << 1
 groupshared uint2 rf_q[RF_QN * RF_QN];
 #define RF_QW(e, v) rf_q[e] = (v).xy
 #define RF_QR(i) rf_q[i]
-#elif RFX_NB == 3 && RF_SPEC == 2     // 3 (RF_SPEC 2 only): the Q tile (b64 texels) and the layer tile (2 x b64 per texel)
+#elif RFX_NB == 3 && RF_SPEC >= 2     // 3 (RF_SPEC 2 and 3): the Q tile (b64 texels) and the layer tile (2 x b64 per texel)
 // ---- clean/rr-mp1-resolve (same bits): tile bookkeeping by layout (mpeak probe P6) ----------------------------------
 #ifndef RFX_TB        // default 23 (wave64, 256 lanes: the runtime's resolve.fast2 / resolve.fast2.x); 0 = the old code
 #if WG_BLOCK == 256 && WG_WAVE == 64
@@ -92,7 +98,9 @@ groupshared uint2 rf_q[RF_QN * RF_QN];
 #else
 #define RF_QO (RF_QN * RF_QN)
 #endif
-#if RFX_LR && (RFX_TB & 1)
+#if RF_SPEC == 3
+groupshared uint2 rf_w2[RF_QO];                // RF_SPEC 3: the Q tile only (no layer / render tile)
+#elif RFX_LR && (RFX_TB & 1)
 groupshared uint2 rf_w2[RF_QO + RF_NR];        // RFX_LR: the Q tile and the raw layer tile (one b64 per texel)
 #else
 groupshared uint2 rf_w2[RF_QO + 2u * RF_NR];   // side by side in one b64 array (LDS 20.1 -> 16.8 KB), no end barrier
@@ -115,8 +123,8 @@ groupshared uint2 rf_w2[RF_QO + 2u * RF_NR];   // side by side in one b64 array 
 #ifndef RFX_RP
 #define RFX_RP 20
 #endif
-#if RFX_TB && !(RFX_NB == 3 && RF_SPEC == 2)
-#error RFX_TB needs RF_SPEC 2 and RFX_NB 3
+#if RFX_TB && !(RFX_NB == 3 && RF_SPEC >= 2)
+#error RFX_TB needs RF_SPEC 2 or 3 and RFX_NB 3
 #endif
 #if !(RF_SPEC == 2 && (RFX_TB & 1))
 #undef RFX_LR
@@ -411,6 +419,16 @@ RfU rf_uniforms()
         f = and(f, and(U.We <= 32768u, U.He <= 32768u));
 #endif
 #endif
+#elif RF_SPEC == 3
+        bool f = (flags & 15u) == 0u;                   // plain: not extended, no layer / opacity / alpha upscaling
+        f = and(f, and(O.fmt == 1u, O.ch == 4u));
+#if RFX_TB & 1
+        f = and(f, and(and(q.w >= U.Wh, q.h >= U.Hh), and(q.ch == 3u, q.pitch < (1u << 21))));
+        f = and(f, and(and(U.We <= (1u << 20), U.He <= (1u << 20)), and(U.Wh < 65536u, U.Hh < 65536u)));
+#if RFX_TB & 16
+        f = and(f, and(U.We <= 32768u, U.He <= 32768u));
+#endif
+#endif
 #else
         bool f = (flags & 11u) == 11u;
         f = and(f, and(and(P.fmt == 1u, P.ch == 4u), and(L.fmt == 1u, L.ch == 4u)));
@@ -516,7 +534,11 @@ RfG rf_gunpack(RfU U, uint4 t, uint k)            // k wave-uniform: 4 v_readlan
 uint2 rf_gpack2(RfU U, uint tile, uint ntiles, bool need_r)
 {
     RfG g = rf_geom(U, min(tile, ntiles - 1u), need_r, false);
+#if RF_SPEC == 3
+    const uint nrx = g.fits ? 1u : 0u, nry = g.fits ? 1u : 0u;   // RF_SPEC 3: no render footprint (need_r false): a 1 x 1 placeholder marks "fits"
+#else
     const uint nrx = g.fits ? g.nrx : 0u, nry = g.fits ? g.nry : 0u;
+#endif
     const uint rx0 = g.fits ? (uint)g.rx0 : 0u, ry0 = g.fits ? (uint)g.ry0 : 0u;
     return uint2(rx0 | (ry0 << 16), (g.tx0 >> 4) | ((g.ty0 >> 4) << 11) | (nrx << 22) | (nry << 27));
 }
@@ -605,6 +627,9 @@ RfPf rf_prefetch(RfG g, uint lane, Res Q, Res Pr, Res Ar, Res Gr, Res L, int lbx
         uint al = select(ok, L.off + (rf_m24((uint)clamp(ty + lby, 0, (int)L.h - 1), L.pitch) + (uint)clamp(tx + lbx, 0, (int)L.w - 1)) * 8u, 0u);
 #if RF_SPEC == 2
         uint2 pw = uint2(0u, 0u), lw = wg_ld64(al, 0u);   // the layer only (no alpha upscaling)
+        uint aw = 0u, gw = 0u;
+#elif RF_SPEC == 3
+        uint2 pw = uint2(0u, 0u), lw = uint2(0u, 0u);     // plain: no render-size reads
         uint aw = 0u, gw = 0u;
 #else
         uint2 pw = wg_ld64(ap, 0u), lw = wg_ld64(al, 0u);
@@ -730,10 +755,10 @@ WG_KERNEL(rr_resolve_fast)
     rf_load_table(PU(38));
     RfU U = rf_uniforms();
     const uint lane = wg_lane_id(), flags = U.flags;
-    const bool ext = RF_SPEC || (flags & 1u) != 0u;
-    const bool lay = RF_SPEC || (flags & 3u) == 3u, alp = RF_SPEC == 1 || (RF_SPEC == 0 && (flags & 9u) == 9u);
+    const bool ext = RF_SPEC == 3 ? false : (RF_SPEC || (flags & 1u) != 0u);       // RF_SPEC 3: plain, no render-size work
+    const bool lay = RF_SPEC == 3 ? false : (RF_SPEC || (flags & 3u) == 3u), alp = RF_SPEC == 1 || (RF_SPEC == 0 && (flags & 9u) == 9u);
     const bool lay3 = lay && (flags & 32u) == 0u, alp3 = alp && (flags & 64u) == 0u;
-    const bool lay3c = RF_SPEC || lay3, alp3c = RF_SPEC == 1 || alp3;    // computed (RF_SPEC: always, selected below)
+    const bool lay3c = RF_SPEC == 3 ? false : (RF_SPEC || lay3), alp3c = RF_SPEC == 1 || alp3;    // computed (RF_SPEC: always, selected below)
     const uint ntiles = U.ntx * ((U.He + RF_T - 1u) / RF_T);
     half we[5];
     [unroll] for (uint k = 0; k < 5u; ++k) we[k] = asfloat16((uint16_t)(PU(17u + k) & 0xffffu));
@@ -751,8 +776,9 @@ WG_KERNEL(rr_resolve_fast)
     Res mvr = res(88u), TH = res(112u), AH = res(144u);
     const Res THW = res(120u), AHW = res(152u), OUTR = res(48u), AOR = res(56u);   // read once, not per tile
     const int Wo = (int)PU(6), Ho = (int)PU(7);
-#if RF_SPEC == 2
-    const bool gst = PU(16) == 1u;
+#if RF_SPEC >= 2
+    const bool gst = PU(16) != 0u;                      // 1: the texel also in the arena (WG_RR_ALIAS=0 test runs), 2: the game's texture only
+    const bool gonly = PU(16) == 2u;                    // (the fixup kernel always writes the arena texel it recomputes)
     const uint2 gorg = uint2(PU(39) & 0xffffu, PU(39) >> 16);
 #endif
     const uint bmap = PU(37);
@@ -761,7 +787,9 @@ WG_KERNEL(rr_resolve_fast)
     const bool need_r = ext && (alp || lay3c);      // render tile used
 
 #if RF_SPEC
-#if RF_SPEC == 2
+#if RF_SPEC == 3
+    const bool allin = true;                            // (no render tile)
+#elif RF_SPEC == 2
     const bool allin = and(and(lbx >= 0, lby >= 0), and(lbx + U.Wr <= (int)L.w, lby + U.Hr <= (int)L.h));
 #else
     const bool allin = and(and(and(Pr.w >= (uint)U.Wr, Pr.h >= (uint)U.Hr), and(Ar.ox >= 0, Ar.oy >= 0)),
@@ -1339,17 +1367,21 @@ WG_KERNEL(rr_resolve_fast)
                     int ox = x + o.ox, oy = y + o.oy;
                     if (o.off != 0u && ox >= 0 && oy >= 0 && ox < (int)o.w && oy < (int)o.h) {
                         const uint2 ow = uint2(rf_f2h(lin.x) | (rf_f2h(lin.y) << 16), rf_f2h(lin.z) | (rf_f2h(lin.w) << 16));
-                        wg_st64(o.off, (rf_m24((uint)oy, o.pitch) + (uint)ox) * 8u, ow);
-#if RF_SPEC == 2
+#if RF_SPEC >= 2
+                        if (!gonly) wg_st64(o.off, (rf_m24((uint)oy, o.pitch) + (uint)ox) * 8u, ow);   // gonly: the texture only (nothing reads the arena texel)
                         if (gst) rf_gstore(gorg, ox, oy, ow);
+#else
+                        wg_st64(o.off, (rf_m24((uint)oy, o.pitch) + (uint)ox) * 8u, ow);
 #endif
                     }
+#if RF_SPEC != 3
                     if ((flags & 25u) == 25u) {
                         const Res ao = AOR;
                         int ax = x + ao.ox, ay = y + ao.oy;
                         if (ao.off != 0u && ax >= 0 && ay >= 0 && ax < (int)ao.w && ay < (int)ao.h)
                             wg_st32(ao.off, (rf_m24((uint)ay, ao.pitch) + (uint)ax) * 4u, asuint(oaSep));
                     }
+#endif
 #else
                     rf_store(o, x + o.ox, y + o.oy, lin);
                     if ((flags & 25u) == 25u) { const Res ao = AOR; rf_store(ao, x + ao.ox, y + ao.oy, float4(oaSep, 0.0f, 0.0f, 0.0f)); }
@@ -1357,7 +1389,7 @@ WG_KERNEL(rr_resolve_fast)
                 }
             }
         }
-#if !(RFX_NB == 1 || RFX_NB == 2 || (RFX_NB == 3 && RF_SPEC == 2))
+#if !(RFX_NB == 1 || RFX_NB == 2 || (RFX_NB == 3 && RF_SPEC >= 2))
         GroupMemoryBarrierWithGroupSync();
 #endif
         RF_TICK(7);
@@ -1377,7 +1409,7 @@ void rf_fix_px(uint pix, uint We)
 {
     const int x = (int)(pix % We), y = (int)(pix / We);
     rr_resolve_px(x, y);
-    if (PU(16) == 1u) {
+    if (PU(16) != 0u) {                                  // 1 (also in the arena) or 2 (the texture only)
         const Res o = res(48u);
         const bool inside = (PU(8) & 128u) == 0u || (x < (int)PU(6) && y < (int)PU(7));
         if (inside && o.off != 0u && x < (int)o.w && y < (int)o.h)
