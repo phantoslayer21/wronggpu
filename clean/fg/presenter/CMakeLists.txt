@@ -34,7 +34,7 @@ if(WIN32)
     ${CMAKE_CURRENT_LIST_DIR}/fg_dxgi_presenter.cpp
     ${CMAKE_CURRENT_LIST_DIR}/fg_presenter_factory.cpp)
   target_link_libraries(wg_fg_win_presenter PUBLIC wg_fg_presenter
-    d3d11.lib d3d12.lib dxgi.lib dcomp.lib gdi32.lib user32.lib mincore.lib)
+    d3d11.lib d3d12.lib dxgi.lib gdi32.lib user32.lib mincore.lib)
   target_compile_definitions(wg_fg_win_presenter PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
 
   add_executable(test_fg_win_presenters ${CMAKE_CURRENT_LIST_DIR}/tests/test_fg_win_presenters.cpp)

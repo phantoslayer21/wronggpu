@@ -77,14 +77,82 @@ FgTicks FgClockMap::FromQpc(std::int64_t qpc) const {
     return it0_ + secs * 10000000 + (rem * 10000000) / freq_;
 }
 
+namespace {
+
+struct FgDCompApi {
+    decltype(&::DCompositionGetFrameId) get_frame_id = nullptr;
+    decltype(&::DCompositionGetStatistics) get_statistics = nullptr;
+    decltype(&::DCompositionGetTargetStatistics) get_target_statistics = nullptr;
+    decltype(&::DCompositionCreateSurfaceHandle) create_surface_handle = nullptr;
+    decltype(&::DCompositionCreateDevice3) create_device3 = nullptr;
+    decltype(&::CreatePresentationFactory) create_presentation_factory = nullptr;
+
+    FgDCompApi() {
+        const HMODULE m = LoadLibraryExW(L"dcomp.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (!m) return;
+        Resolve(m, "DCompositionGetFrameId", &get_frame_id);
+        Resolve(m, "DCompositionGetStatistics", &get_statistics);
+        Resolve(m, "DCompositionGetTargetStatistics", &get_target_statistics);
+        Resolve(m, "DCompositionCreateSurfaceHandle", &create_surface_handle);
+        Resolve(m, "DCompositionCreateDevice3", &create_device3);
+        Resolve(m, "CreatePresentationFactory", &create_presentation_factory);
+    }
+
+    template <class F>
+    static void Resolve(HMODULE m, const char* name, F* out) {
+        *out = reinterpret_cast<F>(reinterpret_cast<void*>(GetProcAddress(m, name)));
+    }
+};
+
+const FgDCompApi& DCompApi() {
+    static const FgDCompApi api;   // thread-safe first use; dcomp.dll stays loaded for the process
+    return api;
+}
+
+constexpr HRESULT kDCompAbsent = HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND);
+
+}  // namespace
+
+HRESULT FgDCompGetFrameId(COMPOSITION_FRAME_ID_TYPE type, COMPOSITION_FRAME_ID* id) {
+    const auto f = DCompApi().get_frame_id;
+    return f ? f(type, id) : kDCompAbsent;
+}
+
+HRESULT FgDCompGetStatistics(COMPOSITION_FRAME_ID id, COMPOSITION_FRAME_STATS* stats, UINT target_count,
+                             COMPOSITION_TARGET_ID* targets, UINT* actual_count) {
+    const auto f = DCompApi().get_statistics;
+    return f ? f(id, stats, target_count, targets, actual_count) : kDCompAbsent;
+}
+
+HRESULT FgDCompGetTargetStatistics(COMPOSITION_FRAME_ID id, const COMPOSITION_TARGET_ID* target,
+                                   COMPOSITION_TARGET_STATS* stats) {
+    const auto f = DCompApi().get_target_statistics;
+    return f ? f(id, target, stats) : kDCompAbsent;
+}
+
+HRESULT FgDCompCreateSurfaceHandle(DWORD access, SECURITY_ATTRIBUTES* attributes, HANDLE* handle) {
+    const auto f = DCompApi().create_surface_handle;
+    return f ? f(access, attributes, handle) : kDCompAbsent;
+}
+
+HRESULT FgDCompCreatePresentationFactory(IUnknown* d3d_device, REFIID iid, void** factory) {
+    const auto f = DCompApi().create_presentation_factory;
+    return f ? f(d3d_device, iid, factory) : kDCompAbsent;
+}
+
+HRESULT FgDCompCreateDevice3(IUnknown* rendering_device, REFIID iid, void** device) {
+    const auto f = DCompApi().create_device3;
+    return f ? f(rendering_device, iid, device) : kDCompAbsent;
+}
+
 bool FgReadCompositorGrid(const FgClockMap& map, FgTicks period_override, FgRefreshGrid* out) {
     if (!out) return false;
     COMPOSITION_FRAME_ID id = 0;
-    if (FAILED(DCompositionGetFrameId(COMPOSITION_FRAME_ID_COMPLETED, &id))) return false;
+    if (FAILED(FgDCompGetFrameId(COMPOSITION_FRAME_ID_COMPLETED, &id))) return false;
     COMPOSITION_FRAME_STATS st = {};
     COMPOSITION_TARGET_ID targets[4] = {};
     UINT count = 0;
-    if (FAILED(DCompositionGetStatistics(id, &st, 4, targets, &count)) || st.targetTime == 0) return false;
+    if (FAILED(FgDCompGetStatistics(id, &st, 4, targets, &count)) || st.targetTime == 0) return false;
     LARGE_INTEGER f = {};
     QueryPerformanceFrequency(&f);
     if (f.QuadPart <= 0) return false;

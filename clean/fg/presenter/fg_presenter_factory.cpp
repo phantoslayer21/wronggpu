@@ -94,7 +94,7 @@ FgWinResult FgProbePresenterCapabilities(ID3D12Device* device, FgPresenterCapabi
     if (FAILED(hr)) return FgWinFail(FgStatus::Unsupported, FgWinRefusal::D3D11DeviceFailed, hr);
     caps->presentation_probed = true;
     ComPtr<IPresentationFactory> pf;
-    hr = CreatePresentationFactory(dev.Get(), IID_PPV_ARGS(&pf));
+    hr = FgDCompCreatePresentationFactory(dev.Get(), IID_PPV_ARGS(&pf));
     if (SUCCEEDED(hr)) {
         caps->presentation_supported = pf->IsPresentationSupported() != 0;
         caps->independent_flip_supported = pf->IsPresentationSupportedWithIndependentFlip() != 0;

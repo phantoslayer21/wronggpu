@@ -104,7 +104,12 @@ WG_KERNEL(fg_full_blend)
     {
         v8f pv;
         [unroll] for (uint c = 0; c < 8u; ++c) pv.v[c] = fgf_opq(v[c]);
-        const uint4 h = wg_to_f16_ags(pv);
+        uint4 h = wg_to_f16_ags(pv);
+        // The driver's packed conversion does not quiet a NaN as fg_f2h does: a lane holding one converts the old way.
+        uint mag = 0u;
+        [unroll] for (uint c = 0; c < 8u; ++c) mag = max(mag, asuint(v[c]) & 0x7fffffffu);
+        [branch] if (mag > 0x7f800000u)
+            h = uint4(fg_pack_h2(v[0], v[1]), fg_pack_h2(v[2], v[3]), fg_pack_h2(v[4], v[5]), fg_pack_h2(v[6], v[7]));
         if (in_bounds) {
             const uint pi8 = (uint)(py * Wo + px) * 8u;
             wg_st64(x0, pi8, h.xy);
