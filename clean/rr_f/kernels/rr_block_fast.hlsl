@@ -41,7 +41,11 @@ WG_ARGS_END
 // Defaults with the relaxed body (RR_B32: modes accurate and fast; the exact body's kernels keep their DXIL):
 // L01_MRGU 4, L01_UNRALL 28, L01_MDPF 28, L01_FPF 8 (cap8 + cap48 byte-identical in accurate and fast; game_bench
 // 1440p Q accurate -0.059 / fast -0.056 ms, 6 interleaved rounds); L01_HPF and L01_MLPDEF stay opt-in (no gain).
-#if defined(RR_B32) && RR_B32
+// clean/rr-mp2-level1 round 3 (exact body, same levers): the exact step-E body (RR_Z 2, RR_STEP 0: stageex.* / stagedx.*)
+// takes the same loop-shape / issue-order defaults. They are structural (the same operations in the same order, so the
+// output bits cannot change) and E1 / D1-F / D1-R sit at 112-120 VGPRs, far from the 192 bound. L01_MDPF is a no-op
+// there (it needs RR_WIL, which is relaxed-body only). The step X / Z / XF kernels keep their DXIL.
+#if (defined(RR_B32) && RR_B32) || (RR_Z == 2 && RR_STEP == 0)
 #define RR_L1R2 1
 #else
 #define RR_L1R2 0
@@ -845,7 +849,7 @@ WG_KERNEL(rr_block)
         st_sync();
     }
 #ifndef L01_UNR2MASK
-#if defined(RR_B32) && RR_B32   // a14 default (relaxed body): 2x MLP chunk loop on E1, D1-F, D1-R
+#if RR_L1R2   // a14 default (relaxed body, and since round 3 the exact step-E body): 2x MLP chunk loop on E1, D1-F, D1-R
 #define L01_UNR2MASK 28
 #else
 #define L01_UNR2MASK 0
