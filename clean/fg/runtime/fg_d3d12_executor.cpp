@@ -41,7 +41,7 @@ enum Kernel : uint32_t {
     kMPairD3Narrow, kMPairD2Narrow,
     kDown2Srv, kDown4Srv, kMvecSrv, kIntermTiled, kPackPairs, kPullTiled, kPushTail, kDown2HudTile,
     kMConv2Mid, kN2h3b1u, kNet2MergePixels, kOutPullPack, kOutPushFinePack,
-    kLiteBlendPack,
+    kLiteBlendPack, kFullBlendMerge,
     kKernelCount,
 };
 constexpr uint32_t kFirstFull = kFullBlend;
@@ -62,6 +62,7 @@ constexpr uint32_t kSmallGrid = 16384;  // conv grids of at most this many pixel
 constexpr uint32_t kMTile = 16;
 
 bool KernelNeeded(uint32_t k, bool full, FgNet2Path path) {
+    if (k == kOutPullPack || k == kOutPushFinePack || k == kFullBlendMerge) return full;  // Full path only
     if (k < kFirstFull || k >= kFirstOptional) return true;
     if (!full) return false;
     if (k == kNet2Conv || k == kNet2Up2 || k == kNet2Warp) return path == FgNet2Path::Exact;
@@ -108,6 +109,7 @@ const char* const kKernelNames[kKernelCount] = {
     "fg_lite_p2c_pull_tiled", "fg_lite_p2c_push_tail", "fg_lite_downsample2_srv_hud_tile",
     "fg_mconv2_mid", "fg_net2_mconv_h3b1u", "fg_net2_merge_pixels",
     "fg_out_pull_pack", "fg_out_push_fine_pack", "fg_lite_blend_pack",
+    "fg_full_blend_merge",
 };
 
 constexpr uint32_t kRootConstants = 59;  // 2 runtime constants + up to 57 argument DWORDs
@@ -575,6 +577,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     uint32_t cap_colour = 0, cap_hud = 0, cap_ui4 = 0, cap_ui1 = 0, cap_depth = 0, cap_motion = 0;
     uint32_t out_off = 0, out_stride = 0;       // generated image (float16 x 4), stride in texels
     uint32_t pack_off = 0, pack_pitch = 0;      // packed slot rows
+    bool net2_input_merged = false;  // the Full blend wrote net2's merged input: the next merge is skipped
     uint32_t fuse_pack = 0;  // slot format code (1..3) the output pyramid packs directly; 0: fg_exec_pack runs
     FgNet1Plan n1plan;
     FgArenaBinding n1arena;
@@ -1625,12 +1628,17 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                 Dispatch(r, packed ? kLiteBlendPack : kLiteBlend, groups_for(static_cast<uint64_t>(g.wo) * g.ho), a, n);
                 return true;
             }
-            case FgOp::FullBlend:
-                D(r, kFullBlend, (g.Wp / 16) * (g.Hp / 16),
-                  {R(kRoleCp), R(kRoleCc), R(kRoleW), R(kRoleQc), R(kRoleMA), R(kRoleMB), op.ui ? R(kRoleUp) : 0u,
-                   op.ui ? R(kRoleUc) : 0u, x0, x1, xw, ib, ic, ia, g.wo, g.ho, g.w1, g.h1, g.wd, g.hd, g.k,
-                   g.Wp / 16, op.ui ? 1u : 0u});
+            case FgOp::FullBlend: {
+                // the merged variant also builds net2's input (the next op), so the merge dispatch is dropped
+                const bool merged = pso[kFullBlendMerge] != nullptr && !desc.keep_outputs;
+                const uint32_t a[25] = {R(kRoleCp), R(kRoleCc), R(kRoleW), R(kRoleQc), R(kRoleMA), R(kRoleMB),
+                                        op.ui ? R(kRoleUp) : 0u, op.ui ? R(kRoleUc) : 0u, x0, x1, xw, ib, ic, ia,
+                                        g.wo, g.ho, g.w1, g.h1, g.wd, g.hd, g.k, g.Wp / 16, op.ui ? 1u : 0u,
+                                        nb_x.off, fb(op.t)};
+                Dispatch(r, merged ? kFullBlendMerge : kFullBlend, (g.Wp / 16) * (g.Hp / 16), a, merged ? 25u : 23u);
+                net2_input_merged = merged;
                 return true;
+            }
             case FgOp::Net2:
                 if (fast())
                     RecordNet2Fast(r, op.t, false);
@@ -1683,6 +1691,10 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     }
 
     void MergeNet2Inputs(Rec& r, uint32_t npx, float f) {
+        if (net2_input_merged) {
+            net2_input_merged = false;
+            return;
+        }
         if (pso[kNet2MergePixels]) {
             D(r, kNet2MergePixels, groups_for(npx), {ib, ic, ia, nb_x.off, npx, fb(f)});
         } else {

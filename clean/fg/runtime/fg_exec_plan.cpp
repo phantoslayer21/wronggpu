@@ -383,6 +383,7 @@ void FgExecHost::IndexOps(float t, bool hudless_now, bool ui4_now, bool out_subr
             FgExecOp b;
             b.op = FgOp::FullBlend;
             b.ui = f.ui_recomp;
+            b.t = t;
             ops->push_back(b);
             FgExecOp n;
             n.op = FgOp::Net2;

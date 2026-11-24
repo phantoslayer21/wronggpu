@@ -8,15 +8,26 @@
 // Ib, Ic (4 x float16, the means), Ia (float16, 1 if any hole). Only cross-wave sums use shared memory.
 // Inputs: Cp, Cc, Up, Uc (frame, 4 x float16), W (scatter grid W1 x H1, 2 x float16), Qc (Wd x Hd, 2 x float16), MA, MB
 // (scatter grid, 64-bit words). ui != 0: preset B (UI recomposition with Up / Uc), else preset A (Up / Uc not read).
+// fg_full_blend_merge (FGB_MERGE) also writes net2's merged input x [W2 x H2][10] float16 = Ib [4], Ic [4], Ia, then the
+// scalar f (bits fbits) rounded to float16, as fg_net2_merge_pixels builds it from the three means (the same bits),
+// so that dispatch is not needed (extra arguments nx = x's offset, fbits).
 //
 // @wg-kernel fg_full_blend co=fg_full.co block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u
+// @wg-kernel fg_full_blend_merge co=- entry=fg_full_blend block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,p,u defines=FGB_MERGE=1
 #include "wg_platform.hlsli"
 #include "fg_full.hlsli"
+
+#ifndef FGB_MERGE
+#define FGB_MERGE 0
+#endif
 
 WG_ARGS_BEGIN
     uint cp, cc, wimg, qc, ma, mb, up, uc;  // inputs (arena byte offsets)
     uint x0, x1, xw, ib, ic, ia;            // outputs
     int Wo, Ho, W1, H1, Wd, Hd, k, tiles_x, ui;
+#if FGB_MERGE
+    uint nx, fbits;
+#endif
 WG_ARGS_END
 
 groupshared float fgb_s[9 * 8];
@@ -138,8 +149,21 @@ WG_KERNEL(fg_full_blend)
         const int bx = origin.x + (int)fgf_mx(leader_lane);
         const int by = origin.y + (int)fgf_my(leader_lane);
         const int e = (by >> shift) * ((tiles_x * 16) >> shift) + (bx >> shift);
+#if FGB_MERGE
+        const float4 mb4 = fgb_mean(float4(v[0], v[1], v[2], v[3]), shift);
+        const float4 mc4 = fgb_mean(float4(v[4], v[5], v[6], v[7]), shift);
+        const uint flag = v[8] > 0.0f ? 0x3c00u : 0u;
+        const uint2 pb = uint2(fg_pack_h2(mb4.x, mb4.y), fg_pack_h2(mb4.z, mb4.w));
+        const uint2 pc = uint2(fg_pack_h2(mc4.x, mc4.y), fg_pack_h2(mc4.z, mc4.w));
+        wg_st64(ib, (uint)e * 8u, pb);
+        wg_st64(ic, (uint)e * 8u, pc);
+        wg_st16(ia, (uint)e * 2u, flag);
+        wg_st128(nx, (uint)e * 20u, uint4(pb.x, pb.y, pc.x, pc.y));
+        wg_st32(nx, (uint)e * 20u + 16u, flag | (wg_f2h(asfloat(fbits)) << 16));
+#else
         fgf_st4h(ib, e, fgb_mean(float4(v[0], v[1], v[2], v[3]), shift));
         fgf_st4h(ic, e, fgb_mean(float4(v[4], v[5], v[6], v[7]), shift));
         wg_st16(ia, (uint)e * 2u, v[8] > 0.0f ? 0x3c00u : 0u);
+#endif
     }
 }
