@@ -155,7 +155,7 @@ WG_KERNEL(ks_attn)
         const uint r16 = (s16 & 0x7fffu) == 0u ? 0u : wg_f2h(rsqrt(f16tof32(s16)));
         const uint4 rv = kw_splat8(r16);
         [unroll] for (int kt = 0; kt < KT; ++kt)
-            n[kt] = kw_mul8(n[kt], kw_opq4(kw_mul8(rv, g1v[kt])));
+            n[kt] = kw_mul8(n[kt], kw_mulo8(rv, g1v[kt]));
     }
 
     // q, k, v^T of head hd (k_block_wide.hlsl step 2, one round's group)

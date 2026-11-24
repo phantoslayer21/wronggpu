@@ -625,6 +625,18 @@
    "k_io_exact.co"
   ],
   [
+   "kx/k_in_tiled_color",
+   "k_io_exact.co"
+  ],
+  [
+   "kx/k_in_tiled_color_direct",
+   "k_io_exact.co"
+  ],
+  [
+   "kx/k_in_tiled_color_uniform",
+   "k_io_exact.co"
+  ],
+  [
    "kx/k_in_tiled_direct",
    "k_io_exact.co"
   ],

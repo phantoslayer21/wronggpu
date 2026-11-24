@@ -76,8 +76,12 @@ half kp_lo(uint u) { return asfloat16((uint16_t)(u & 0xffffu)); }
 half kp_hi(uint u) { return asfloat16((uint16_t)(u >> 16)); }
 uint kp_add(uint a, uint b) { return kh2_u(kh2_h(a) + kh2_h(b)); }
 uint kp_sub(uint a, uint b) { return kh2_u(kh2_h(a) - kh2_h(b)); }
-// product rounded to FP16 as its own instruction (the opaque on the packed word: no fusion into a following add)
-uint kp_mul(uint a, uint b) { return kh2_u(kh2_h(a) * kh2_h(b)) ^ (ko_z * 0x10001u); }
+// product rounded to FP16 as its own instruction, as fma(a, b, -0.0 ^ opaque zero): the addend is -0.0 in both halves at
+// run time (the same bits as the multiply: one rounding of the exact product, a zero product keeps its sign, NaN /
+// infinities / denormals as the multiply), unknown to the compiler: no fusion into a following add and no regrouping,
+// without the xor of the packed word (k_common.hlsli wgk_fm). Never directly into an FP16 -> FP32 conversion (kp_opq).
+half2 kp_nz2() { return kh2_h(0x80008000u ^ (ko_z * 0x10001u)); }
+uint kp_mul(uint a, uint b) { return kh2_u(mad(kh2_h(a), kh2_h(b), kp_nz2())); }
 // product without the opaque, for products that feed only a multiply or a multiplicand (no add can absorb them; each use
 // checked in the ISA: the same v_mul_f16 / v_fma_f16 counts, no v_fma_mix*)
 uint kp_mul_n(uint a, uint b) { return kh2_u(kh2_h(a) * kh2_h(b)); }
@@ -90,7 +94,7 @@ uint kp_opq(uint a) { return a ^ (ko_z * 0x10001u); }
 // the same with one operand a scalar FP16 value used in both halves (no splatted register)
 uint kp_rsub_s(half s, uint a) { return kh2_u((half2)s - kh2_h(a)); }
 uint kp_add_s(uint a, half s) { return kh2_u(kh2_h(a) + (half2)s); }
-uint kp_mul_s(uint a, half s) { return kh2_u(kh2_h(a) * (half2)s) ^ (ko_z * 0x10001u); }
+uint kp_mul_s(uint a, half s) { return kh2_u(mad(kh2_h(a), (half2)s, kp_nz2())); }   // (fma form: see kp_mul)
 uint kp_mul_s_n(uint a, half s) { return kh2_u(kh2_h(a) * (half2)s); }   // (no opaque: see kp_mul_n)
 uint kp_fma_s(uint a, half s, uint c) { return kh2_u(mad(kh2_h(a), (half2)s, kh2_h(c))); }
 uint kp_fma_ss(uint a, half s, half c) { return kh2_u(mad(kh2_h(a), (half2)s, (half2)c)); }

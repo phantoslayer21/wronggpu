@@ -611,14 +611,24 @@ void k_block(uint hidden, uint blk, uint bias32 = 0u, uint compact_head = 0u)
             [unroll] for (int g = 0; g < G; ++g) p[g] = wgk_mma(w1t[kt], a[g][kt], p[g]);
         uint4 hv[G];
         [unroll] for (int g = 0; g < G; ++g) hv[g] = KB_ACT8W(wgk_round8(p[g]));
-        if (KB_W2LATE)   // W2's tiles just before their multiplies (fewer live registers across the first GEMM)
+#ifndef KB_W2SEQ
+#define KB_W2SEQ 0   // with KB_W2LATE: one W2 tile at a time, loaded just before its own products (not all KT before the first)
+#endif
+        if (KB_W2LATE && !KB_W2SEQ)   // W2's tiles just before their multiplies (fewer live registers across the first GEMM)
 #if KB_BASE_FORM
             [unroll] for (int o4 = 0; o4 < KT; ++o4) w2t[o4] = kb_weight128(wb_w2, (uint)((ht * KT + o4) * 512));
 #else
             [unroll] for (int o4 = 0; o4 < KT; ++o4) w2t[o4] = wgk_ld8(P_w2, (uint)((ht * KT + o4) * 256) + lane * 8u);
 #endif
-        [unroll] for (int ot = 0; ot < KT; ++ot)
+        [unroll] for (int ot = 0; ot < KT; ++ot) {
+            if (KB_W2LATE && KB_W2SEQ)
+#if KB_BASE_FORM
+                w2t[ot] = kb_weight128(wb_w2, (uint)((ht * KT + ot) * 512));
+#else
+                w2t[ot] = wgk_ld8(P_w2, (uint)((ht * KT + ot) * 256) + lane * 8u);
+#endif
             [unroll] for (int g = 0; g < G; ++g) acc[g][ot] = wgk_mma(w2t[ot], hv[g], acc[g][ot]);
+        }
     }
 
     // 5. x2, stored for the real positions (the stores' base pinned to every x2 fragment: products before the branch)

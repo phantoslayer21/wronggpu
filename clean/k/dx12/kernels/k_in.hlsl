@@ -31,6 +31,12 @@
 // @wg-kernel kx/k_in_tiled_uniform co=k_io_exact.co block=256 wave=64 args=s248:p4.b128.p5.b48 defines=K_UNIFORM=1
 // @wg-kernel kx/k_in_tiled co=k_io_exact.co block=256 wave=64 args=s200:p4.b128.p5
 // @wg-kernel kx/k_in_tiled_direct co=k_io_exact.co entry=k_in_tiled block=256 wave=64 args=s200:p4.b128.p5 rs=direct defines=WG_DIRECT_TEXTURES=1
+// The _color forms (HIP k_in_tiled_color[_uniform]) also write the output colour taps (stored tap and filter-tap value T of
+// spec 43 4.2 / 5.3: k_out_color's results) for the render pixels the workgroup owns, from the colour texels the tile
+// stage loads anyway: the runtime then skips the separate k_out_color launch. K_COLOR; same bits as k_out_color (below).
+// @wg-kernel kx/k_in_tiled_color_uniform co=k_io_exact.co entry=k_in_tiled_uniform block=256 wave=64 args=s264:p4.b128.p7.b48 defines=K_UNIFORM=1,K_COLOR=1
+// @wg-kernel kx/k_in_tiled_color co=k_io_exact.co entry=k_in_tiled block=256 wave=64 args=s216:p4.b128.p7 defines=K_COLOR=1
+// @wg-kernel kx/k_in_tiled_color_direct co=k_io_exact.co entry=k_in_tiled block=256 wave=64 args=s216:p4.b128.p7 rs=direct defines=WG_DIRECT_TEXTURES=1,K_COLOR=1
 // The kxs tag is the pre-breakpoint exact S fallback. Its HIP forms are identical to those under kx.
 // @wg-kernel kxs/k_in_tiled_uniform co=k_io_exact.co block=256 wave=64 args=s248:p4.b128.p5.b48 defines=K_UNIFORM=1,KI_EXACT_S=1
 // @wg-kernel kxs/k_in_tiled co=k_io_exact.co block=256 wave=64 args=s200:p4.b128.p5 defines=KI_EXACT_S=1
@@ -47,6 +53,9 @@
 #ifndef WG_DIRECT_TEXTURES
 #define WG_DIRECT_TEXTURES 0
 #endif
+#ifndef K_COLOR
+#define K_COLOR 0
+#endif
 #if WG_DIRECT_TEXTURES
 #include "native_direct.hlsli"
 #endif
@@ -62,6 +71,9 @@
 WG_ARGS_BEGIN
     K_ARGS_FRAME_IN
     K_ARGS_IN_PTRS
+#if K_COLOR
+    uint P_ctap, P_ctapT;   // KInColorParams: the output colour taps (stored tap [rh][rw] x 8 bytes, T [rh][rw] x 2 bytes)
+#endif
 #if K_UNIFORM
     K_ARGS_HOST
 #endif
@@ -101,6 +113,47 @@ KiTiledTap ki_tiled_tap_from_raw(KFrameIn F, float4 c)
     return r;
 }
 KiTiledTap ki_tiled_tap(KFrameIn F, int rx, int ry) { return ki_tiled_tap_from_raw(F, kio_color(F, rx, ry)); }
+#if K_COLOR
+// The colour texel of the tile stage with its alpha: the buffer forms' kio_color already holds it; the direct form's
+// kio_texel returns alpha 0 (the input stage reads RGB only), the output colour taps need the texel's own alpha
+// (k_out.hlsl: k_out_color_direct's Load, a missing alpha channel reads 1). Same texel as kio_color (rx, ry: render coordinates).
+float4 ki_color_texel(KFrameIn F, int rx, int ry)
+{
+#if WG_DIRECT_TEXTURES
+    return native_direct_color_tex.Load(int3((int)nd_rx + kio_tap(rx, 0, F.cbx, F.rw), (int)nd_ry + kio_tap(ry, 0, F.cby, F.rh), 0));
+#else
+    return kio_color(F, rx, ry);
+#endif
+}
+// k_out.hlsli ko_color_tap (k_out_color) on a raw colour texel, operation for operation: the stored tap (Y, Co, Cg, A) as
+// 2 x 2 FP16 bits and the filter-tap value T. The FP32 products by the uniform kappa and the encode factor e keep their
+// opaque barriers (kf_opq: so the shared factors are not regrouped), every FP32 -> FP16 step is the hardware conversion
+// (ki_f2h, nearest even; k_out.hlsli ko_f2h): outside every divergent branch, as the driver channel requires. This runs
+// for every lane of the tile loop (a wave either runs the loop or not: uniform), the store alone is predicated.
+void ki_color_tap(KFrameIn F, float4 c, out uint2 tap, out uint tT)
+{
+    const bool hdr = (F.flags & KIO_HDR) != 0;
+    float Y, Co, Cg;
+    kio_ycocg(max(c.x, 0.0f), max(c.y, 0.0f), max(c.z, 0.0f), Y, Co, Cg);
+    const float kY = kf_opq(F.kappa * Y), kCo = kf_opq(F.kappa * Co), kCg = kf_opq(F.kappa * Cg);
+    uint hY, hCo, hCg;
+    [branch] if (hdr) {
+        const float e = kio_encode(kY);
+        hY = ki_f2h(kY * e);
+        hCo = ki_f2h(kCo * e);
+        hCg = ki_f2h(kCg * e);
+    } else {
+        hY = ki_f2h(kY);
+        hCo = ki_f2h(kCo);
+        hCg = ki_f2h(kCg);
+    }
+    tap = uint2(hY | (hCo << 16), hCg | (ki_f2h(c.w) << 16));
+    const float kL = kf_opq(F.kappa * kio_luma_fma(max(c.x, 0.0f), max(c.y, 0.0f), max(c.z, 0.0f)));
+    float vT = kL;
+    [branch] if (hdr) vT = kL * kio_encode(kL);
+    tT = ki_f2h(vT);
+}
+#endif
 KI_TILED_CHANNEL ki_tiled_ch0(KFrameIn F, int rx, int ry, uint table)
 {
     const float3 rgb = ki_rgb(F, kio_color(F, rx, ry));
@@ -213,10 +266,30 @@ WG_KERNEL(k_in_tiled)
     }
     const int tx0 = WaveReadLaneFirst(ki_max(ki_min((int)kf_R(F.jx + kf_fma((float)(4 * bx0 + 1), hk.a_x, -0.5f)) - 1, F.rw - 1), 0));
     const int ty0 = WaveReadLaneFirst(ki_max(ki_min((int)kf_R(F.jy + kf_fma((float)(4 * by0 + 1), hk.a_y, -0.5f)) - 1, F.rh - 1), 0));
+#if K_COLOR
+    // HIP ki_tiled_body<true>: the render pixels this workgroup owns are those below the next workgroup's tile origin
+    // (consecutive origins partition the render image); the raw producer coordinates are tested, so the replicated clamp
+    // loads never store twice
+    const int own_x1 = WaveReadLaneFirst(bx0 + 8 < F.Bw ? ki_max(ki_min((int)kf_R(F.jx + kf_fma((float)(4 * (bx0 + 8) + 1), hk.a_x, -0.5f)) - 1, F.rw - 1), 0) : F.rw);
+    const int own_y1 = WaveReadLaneFirst(by0 + 8 < F.Bh ? ki_max(ki_min((int)kf_R(F.jy + kf_fma((float)(4 * (by0 + 8) + 1), hk.a_y, -0.5f)) - 1, F.rh - 1), 0) : F.rh);
+#endif
     [loop] for (int q = lane; q < 24 * 24 + (int)kf_opq_z_; q += 256) {
         const int raw_x = tx0 + q % 24, raw_y = ty0 + q / 24;
         const int rx = ki_min(raw_x, F.rw - 1), ry = ki_min(raw_y, F.rh - 1);
+#if K_COLOR
+        const float4 craw = ki_color_texel(F, rx, ry);
+        const KiTiledTap value = ki_tiled_tap_from_raw(F, craw);
+        uint2 ctap;
+        uint ctT;
+        ki_color_tap(F, craw, ctap, ctT);
+        if (raw_x < own_x1 && raw_y < own_y1) {
+            const uint cid = (uint)(raw_y * F.rw + raw_x);
+            wg_st64(P_ctap, cid * 8u, ctap);
+            wg_st16(P_ctapT, cid * 2u, ctT);
+        }
+#else
         const KiTiledTap value = ki_tiled_tap_from_raw(F, kio_color(F, rx, ry));
+#endif
         tile_cv[q] = value.cv;
         tile_om[q] = value.om;
     }
