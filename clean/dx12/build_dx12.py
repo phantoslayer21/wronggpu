@@ -358,7 +358,8 @@ def hyb_scanned(name):
 
 
 # Model hybrid kernels with no norm tree (no square to fuse): their mutants must fail rule 2 only.
-HYB_NO_NORM = {"patch_merge_c64_hyb", "patch_merge_c96_hyb", "expand_c96_hyb", "expand_c128_hyb"}
+HYB_NO_NORM = {"patch_merge_c64_hyb", "patch_merge_c96_hyb", "expand_c96_hyb", "expand_c128_hyb",
+               "patch_merge_c64_q7c_hyb", "patch_merge_c96_q7c_hyb", "expand_c96_q7c_hyb", "expand_c128_q7c_hyb"}
 
 
 def scan_mutant(name):

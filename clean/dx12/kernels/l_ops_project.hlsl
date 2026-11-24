@@ -13,8 +13,8 @@
 // this kernel has no branch): RN16 = v_cvt_f16_f32 then the exact widening, the FP8 pack v_cvt_pk_fp8_f32 after the
 // clamp. The software forms were most of the kernels' instructions.
 //
-// @wg-kernel l_project_gather co=l_ops.co block=256 wave=32 args=p,p,p,u,u defines=PJ_DEC=0
-// @wg-kernel l_dec_project co=l_ops.co block=256 wave=32 args=p,p,p,u,u defines=PJ_DEC=1
+// @wg-kernel l_project_gather co=l_ops.co block=256 wave=32 args=p,p,p,u,u defines=PJ_DEC=0,WG_LD_A16=1
+// @wg-kernel l_dec_project co=l_ops.co block=256 wave=32 args=p,p,p,u,u defines=PJ_DEC=1,WG_LD_A16=1
 #include "wg_platform.hlsli"
 
 WG_ARGS_BEGIN
@@ -56,32 +56,46 @@ WG_KERNEL(l_project_gather)
     const int r = tk / tw, c = tk - r * tw;
     uint2 zf[KB];
 #if PJ_DEC
-    [unroll] for (uint kb = 0; kb < KB; ++kb)
-        zf[kb] = wg_ld64(src, (uint)tk * 64u + 32u * (kb >> 1) + 16u * hh + 8u * (kb & 1u));
+    [unroll] for (uint g0 = 0; g0 < KB / 2; ++g0) {
+        const uint4 v = wg_ld128(src, (uint)tk * 64u + 32u * g0 + 16u * hh);
+        zf[2u * g0] = v.xy;
+        zf[2u * g0 + 1u] = v.zw;
+    }
 #else
-    [unroll] for (uint kb = 0; kb < KB; ++kb) {
-        const int p = (int)(kb >> 1);
-        const int pix = (2 * r + (p >> 1)) * (2 * tw) + 2 * c + (p & 1);
-        zf[kb] = wg_ld64(src, (uint)pix * 32u + 16u * hh + 8u * (kb & 1u));
+    [unroll] for (uint p = 0; p < 4u; ++p) {
+        const int pix = (2 * r + (int)(p >> 1)) * (2 * tw) + 2 * c + (int)(p & 1u);
+        const uint4 v = wg_ld128(src, (uint)pix * 32u + 16u * hh);
+        zf[2u * p] = v.xy;
+        zf[2u * p + 1u] = v.zw;
     }
 #endif
-    [unroll] for (uint mt = 0; mt < MT; ++mt) {
-        // the loads of this tile's multiplies before its first matrix instruction
-        v8f acc = wg_load8f(w, (hh * 8u + mt * 16u) * 4u);
-        uint2 fr[KB];
-        [unroll] for (uint k = 0; k < KB; ++k) fr[k] = wg_ld64(w, FRAG0 + (mt * KB + k) * 256u + lane * 8u);
+    [unroll] for (uint mt = 0; mt < MT; mt += 2u) {
+        // Pair two adjacent output tiles: overlaps weight loads, WMMAs, and RN16 conversions, and coalesces stores to 128-bit.
+        v8f acc0 = wg_load8f(w, (hh * 8u + mt * 16u) * 4u);
+        v8f acc1 = wg_load8f(w, (hh * 8u + (mt + 1u) * 16u) * 4u);
+        uint2 fr0[KB], fr1[KB];
+        [unroll] for (uint k = 0; k < KB; ++k) {
+            fr0[k] = wg_ld64(w, FRAG0 + (mt * KB + k) * 256u + lane * 8u);
+            fr1[k] = wg_ld64(w, FRAG0 + ((mt + 1u) * KB + k) * 256u + lane * 8u);
+        }
         [unroll] for (uint g = 0; g < KB / 2; ++g) {
-            acc = wg_wmma_fp8(fr[2u * g], zf[2u * g], acc);
-            acc = wg_wmma_fp8(fr[2u * g + 1u], zf[2u * g + 1u], acc);
-            acc = pj_rn16(acc);
+            acc0 = wg_wmma_fp8(fr0[2u * g], zf[2u * g], acc0);
+            acc1 = wg_wmma_fp8(fr1[2u * g], zf[2u * g], acc1);
+            acc0 = wg_wmma_fp8(fr0[2u * g + 1u], zf[2u * g + 1u], acc0);
+            acc1 = wg_wmma_fp8(fr1[2u * g + 1u], zf[2u * g + 1u], acc1);
+            acc0 = pj_rn16(acc0);
+            acc1 = pj_rn16(acc1);
         }
 #if PJ_DEC
-        const int s = (int)(mt >> 1), gg = (int)(mt & 1u);
+        const int s = (int)(mt >> 1);
         const int pix = (2 * r + (s >> 1)) * (2 * tw) + 2 * c + (s & 1);
-        wg_st64(dst, (uint)pix * 32u + 16u * hh + 8u * (uint)gg, wg_pack_q8_ags(acc));
+        wg_st128(dst, (uint)pix * 32u + 16u * hh, uint4(wg_pack_q8_ags(acc0), wg_pack_q8_ags(acc1)));
 #else
-        [unroll] for (uint j = 0; j < 8u; ++j) acc.v[j] = wg_fmin(wg_fmax(acc.v[j], -6.28125f), 6.28125f);
-        wg_st64(dst, (uint)tk * 64u + hh * 32u + 8u * mt, wg_pack_q8_ags(acc));
+        [unroll] for (uint j = 0; j < 8u; ++j) {
+            acc0.v[j] = wg_fmin(wg_fmax(acc0.v[j], -6.28125f), 6.28125f);
+            acc1.v[j] = wg_fmin(wg_fmax(acc1.v[j], -6.28125f), 6.28125f);
+        }
+        wg_st128(dst, (uint)tk * 64u + hh * 32u + 8u * mt, uint4(wg_pack_q8_ags(acc0), wg_pack_q8_ags(acc1)));
 #endif
     }
 }

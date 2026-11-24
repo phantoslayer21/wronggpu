@@ -221,8 +221,9 @@ def check_case(hip, mod, x, kind, s=S, ldr=False, table=None):
                                 "over_1": int((st[ill] > 1).sum())}
         m["well_conditioned"] = {"max_steps": int(st[~ill].max(initial=0)), "over_1": int((st[~ill] > 1).sum()),
                                  "values": int(st[~ill].size)}
-    if kind == "offset_0.1":   # total weight 0 everywhere (Q1): history -1.4404296875 (HDR) or NaN (LDR), code 0
-        hist_ok = np.isnan(got["history"]).all() if ldr else (got["history"] == np.float32(-1.4404296875)).all()
+    if kind == "offset_0.1":   # total weight 0 everywhere (Q1): history E(NaN) (-1.4404296875 RNE, -1.439453125 RTZ) or NaN (LDR), code 0
+        e_nan = np.float32(-1.439453125) if (table is not None and table["recon"].get("history_round") == "rtz") else np.float32(-1.4404296875)
+        hist_ok = np.isnan(got["history"]).all() if ldr else (got["history"] == e_nan).all()
         known = (hist_ok and (got["display"] == 0).all() and (got["reduced_codes"] == 0).all()
                  and m["weight_zero_pixels"] == W.size)
         m["known_answer"] = bool(known)

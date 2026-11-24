@@ -149,6 +149,10 @@
    "post_w64.co"
   ],
   [
+   "w64/post_filter_c1_s4",
+   "post_w64__orig.co"
+  ],
+  [
    "w64/post_tf4_dl_f32_p12_diet_vsit",
    "post_w64.co"
   ],
@@ -195,7 +199,15 @@
    "-"
   ],
   [
+   "expand_c128_q7c_hyb",
+   "-"
+  ],
+  [
    "expand_c96_hyb",
+   "-"
+  ],
+  [
+   "expand_c96_q7c_hyb",
    "-"
   ],
   [
@@ -232,6 +244,10 @@
   ],
   [
    "l_post_filter_direct_ldr",
+   "-"
+  ],
+  [
+   "l_post_filter_direct_orig",
    "-"
   ],
   [
@@ -371,7 +387,19 @@
    "-"
   ],
   [
+   "morig/l_post_recon",
+   "l_post__morig.co"
+  ],
+  [
+   "morig/l_post_recon_p12",
+   "l_post__morig.co"
+  ],
+  [
    "patch_merge_c64_hyb",
+   "-"
+  ],
+  [
+   "patch_merge_c64_q7c_hyb",
    "-"
   ],
   [
@@ -379,7 +407,15 @@
    "-"
   ],
   [
+   "patch_merge_c96_q7c_hyb",
+   "-"
+  ],
+  [
    "swin_block_c128_hyb",
+   "-"
+  ],
+  [
+   "swin_block_c128_q7c_hyb",
    "-"
   ],
   [
@@ -391,7 +427,15 @@
    "-"
   ],
   [
+   "swin_block_c64_add_q7c_hyb",
+   "-"
+  ],
+  [
    "swin_block_c64_hyb",
+   "-"
+  ],
+  [
+   "swin_block_c64_q7c_hyb",
    "-"
   ],
   [
@@ -399,11 +443,23 @@
    "-"
   ],
   [
+   "swin_block_c96_add_q7c_hyb",
+   "-"
+  ],
+  [
    "swin_block_c96_hyb",
    "-"
   ],
   [
+   "swin_block_c96_q7c_hyb",
+   "-"
+  ],
+  [
    "swin_bneck6_hyb",
+   "-"
+  ],
+  [
+   "swin_bneck6_q7c_hyb",
    "-"
   ]
  ],

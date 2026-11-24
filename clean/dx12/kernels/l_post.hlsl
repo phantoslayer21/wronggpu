@@ -44,6 +44,11 @@
 // @wg-kernel lc12/l_post_recon_p12 co=l_post__lc12.co entry=l_post_recon_p12 block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1,LP_C12=1
 // @wg-kernel lc12/l_post_recon_ldr co=l_post__lc12.co entry=l_post_recon_ldr block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_LDR=1,LP_C12=1
 // @wg-kernel lc12/l_post_recon_p12_ldr co=l_post__lc12.co entry=l_post_recon_p12_ldr block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1,LP_LDR=1,LP_C12=1
+//
+// LP_MORIG = 1 (WG_M_POST=orig on native D3D12: Model M's original reconstruction, 3 x 3 gather + encoded-domain
+// history candidates, with C1/C2 machine-code forms; port of l_post__morig.co = l_post.hip with WG_LP_M, WG_LP_C1, WG_CR_C2).
+// @wg-kernel morig/l_post_recon co=l_post__morig.co entry=l_post_recon block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_C12=1,LP_MORIG=1
+// @wg-kernel morig/l_post_recon_p12 co=l_post__morig.co entry=l_post_recon_p12 block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1,LP_C12=1,LP_MORIG=1
 #include "wg_platform.hlsli"
 #ifndef LP_P12
 #define LP_P12 0
@@ -53,6 +58,9 @@
 #endif
 #ifndef LP_LDR
 #define LP_LDR 0
+#endif
+#ifndef LP_MORIG
+#define LP_MORIG 0
 #endif
 
 WG_ARGS_BEGIN
@@ -66,7 +74,8 @@ WG_ARGS_END
 #define kTileX 32
 #define kTilePairs 8
 #define kStageCap 512
-#define kLWin 4
+#define kLWin (LP_MORIG ? 3 : 4)
+#define kTexWave 32
 #define kTexDw 6   // staged texel: f0 f1 | f2 f3 | f4 f5 | f6 f7 | f8 kA | kB kC (FP16 bits)
 
 static const float kEncK = asfloat(0x3dddf184u);        // 0.36f * 0.30102999566398120f
@@ -186,6 +195,11 @@ bool mul_zero(float a, float b)
 {
     return ((asuint(a) & 0x7fffffffu) == 0u || (asuint(b) & 0x7fffffffu) == 0u) && !isnan(a * b);
 }
+// mul_zero(a, c) for a nonzero finite constant c: a is +-0 (the product is then +-0, never NaN); a NaN or infinity a is not
+bool mul_zero_k(float a)
+{
+    return (asuint(a) & 0x7fffffffu) == 0u;
+}
 
 // render pixel idx's raw inputs: colour, codes a (A0 A1 A2), b (B0 B1 B2), kernel shape k (C0 | C1 << 16, C2)
 void texel_inputs(int idx, out float4 c, out uint a, out uint b, out uint2 k)
@@ -242,8 +256,8 @@ void load_texel_hw(int idx, out uint t[kTexDw])
     cv.v[6] = 0.0f;
     cv.v[7] = 0.0f;
     const uint4 h = wg_to_f16_ags(cv);
-    const uint kA = mul_zero(k0, kShapeAB) ? 0u : (h.y >> 16), kB = mul_zero(k1, kShapeAB) ? 0u : (h.z & 0xffffu);
-    const uint kC = mul_zero(k2, kShapeC) ? 0u : (h.z >> 16);
+    const uint kA = mul_zero_k(k0) ? 0u : (h.y >> 16), kB = mul_zero_k(k1) ? 0u : (h.z & 0xffffu);
+    const uint kC = mul_zero_k(k2) ? 0u : (h.z >> 16);
     pack_texel(h.x & 0xffffu, h.x >> 16, h.y & 0xffffu, a, b, kA, kB, kC, t);
 }
 
@@ -414,7 +428,7 @@ void l_post_core(LGather g, int x, int y, int fx, int fy, float mx[3], float my[
 #endif
             if (valid) {
                 const float3 h = history_cr(qx, qy);
-#if LP_LDR
+#if LP_LDR || LP_MORIG
                 const float3 lq = h;
 #else
                 const float3 lq = float3(l_dec(h.x), l_dec(h.y), l_dec(h.z)) * g_rp;
@@ -424,7 +438,13 @@ void l_post_core(LGather g, int x, int y, int fx, int fy, float mx[3], float my[
                 L[n][2] = lq.z;
             } else {
                 const float4 c = wg_ld4f(color, (uint)(fy * P_rw + fx) * 16u);
+#if LP_MORIG && !LP_LDR
+                L[n][0] = enc_e(mul_nz(g_ep, c.x));
+                L[n][1] = enc_e(mul_nz(g_ep, c.y));
+                L[n][2] = enc_e(mul_nz(g_ep, c.z));
+#else
                 L[n][0] = c.x; L[n][1] = c.y; L[n][2] = c.z;
+#endif
             }
         }
     }
@@ -434,6 +454,8 @@ void l_post_core(LGather g, int x, int y, int fx, int fy, float mx[3], float my[
         const float comb = ncand == 2 ? mad(w1, L[0][i], w2 * L[1][i]) : w1 * L[0][i];
 #if LP_LDR
         Hl[i] = opq(comb);
+#elif LP_MORIG
+        Hl[i] = mul_nz(mul_nz(l_dec(comb), g_rp), g_e);
 #else
         Hl[i] = mul_nz(comb, g_e);
 #endif
@@ -460,34 +482,119 @@ void l_post_core(LGather g, int x, int y, int fx, int fy, float mx[3], float my[
     }
 }
 
-// l_finish_pixel without its stores: motions, steps 3 to 5; H^ in hh, O^ in oh (the kernel converts and stores them)
-void finish_pixel(LGather g, int x, int y, float px, float py, float s, out float hh[3], out float oh[3])
+// the render-resolution motion words of one pixel row: m_near / m_far at the nearest texel (fx, fy), m_center's four
+// bilinear neighbours (clamped texel coordinates) of (px, py); loaded ahead of the gather (they do not depend on it)
+struct MotRaw { uint mn, mf, ma, mb, mc, md; int fx, fy; float wx, wy; };
+
+MotRaw motion_load(float px, float py)
 {
-    const int fx = clampi(floor_i(px), 0, P_rw - 1), fy = clampi(floor_i(py), 0, P_rh - 1);
-    float mx[3], my[3];
-    const uint mn = wg_ld32(m_near, (uint)(fy * P_rw + fx) * 4u), mf = wg_ld32(m_far, (uint)(fy * P_rw + fx) * 4u);
-    mx[0] = f16tof32(mn); my[0] = f16tof32(mn >> 16);
-    mx[2] = f16tof32(mf); my[2] = f16tof32(mf >> 16);
-    {   // motion_bilinear of m_center at (px, py), clamped texel coordinates
-        const float tx = px - 0.5f, ty = py - 0.5f;
-        const float x0f = floor(tx), y0f = floor(ty);
-        const float wx = tx - x0f, wy = ty - y0f;
-        const int c0 = (int)x0f, r0 = (int)y0f;
-        const int ca = clampi(c0, 0, P_rw - 1), cb = clampi(c0 + 1, 0, P_rw - 1);
-        const int ra = clampi(r0, 0, P_rh - 1), rb = clampi(r0 + 1, 0, P_rh - 1);
-        const uint ma = wg_ld32(m_center, (uint)(ra * P_rw + ca) * 4u), mb = wg_ld32(m_center, (uint)(ra * P_rw + cb) * 4u);
-        const uint mc = wg_ld32(m_center, (uint)(rb * P_rw + ca) * 4u), md = wg_ld32(m_center, (uint)(rb * P_rw + cb) * 4u);
-        const float owx = 1.0f - wx, owy = 1.0f - wy;
-        const float topx = f16tof32(ma) * owx + f16tof32(mb) * wx, topy = f16tof32(ma >> 16) * owx + f16tof32(mb >> 16) * wx;
-        const float botx = f16tof32(mc) * owx + f16tof32(md) * wx, boty = f16tof32(mc >> 16) * owx + f16tof32(md >> 16) * wx;
-        mx[1] = topx * owy + botx * wy;
-        my[1] = topy * owy + boty * wy;
+    MotRaw m;
+    m.fx = clampi(floor_i(px), 0, P_rw - 1);
+    m.fy = clampi(floor_i(py), 0, P_rh - 1);
+    m.mn = wg_ld32(m_near, (uint)(m.fy * P_rw + m.fx) * 4u);
+    m.mf = wg_ld32(m_far, (uint)(m.fy * P_rw + m.fx) * 4u);
+    // motion_bilinear of m_center at (px, py)
+    const float tx = px - 0.5f, ty = py - 0.5f;
+    const float x0f = floor(tx), y0f = floor(ty);
+    m.wx = tx - x0f;
+    m.wy = ty - y0f;
+    const int c0 = (int)x0f, r0 = (int)y0f;
+    const int ca = clampi(c0, 0, P_rw - 1), cb = clampi(c0 + 1, 0, P_rw - 1);
+    const int ra = clampi(r0, 0, P_rh - 1), rb = clampi(r0 + 1, 0, P_rh - 1);
+    if (ca + 1 == cb) {
+        const uint2 top = wg_ld64(m_center, (uint)(ra * P_rw + ca) * 4u);
+        const uint2 bot = wg_ld64(m_center, (uint)(rb * P_rw + ca) * 4u);
+        m.ma = top.x; m.mb = top.y;
+        m.mc = bot.x; m.md = bot.y;
+    } else {
+        m.ma = wg_ld32(m_center, (uint)(ra * P_rw + ca) * 4u);
+        m.mb = wg_ld32(m_center, (uint)(ra * P_rw + cb) * 4u);
+        m.mc = wg_ld32(m_center, (uint)(rb * P_rw + ca) * 4u);
+        m.md = wg_ld32(m_center, (uint)(rb * P_rw + cb) * 4u);
     }
-    l_post_core(g, x, y, fx, fy, mx, my, s, hh, oh);
+    return m;
+}
+
+// l_finish_pixel without its stores: motions, steps 3 to 5; H^ in hh, O^ in oh (the kernel converts and stores them)
+void finish_pixel(LGather g, int x, int y, MotRaw m, float s, out float hh[3], out float oh[3])
+{
+    float mx[3], my[3];
+    mx[0] = f16tof32(m.mn); my[0] = f16tof32(m.mn >> 16);
+    mx[2] = f16tof32(m.mf); my[2] = f16tof32(m.mf >> 16);
+    {   // motion_bilinear of m_center, clamped texel coordinates
+        const float owx = 1.0f - m.wx, owy = 1.0f - m.wy;
+        const float topx = f16tof32(m.ma) * owx + f16tof32(m.mb) * m.wx, topy = f16tof32(m.ma >> 16) * owx + f16tof32(m.mb >> 16) * m.wx;
+        const float botx = f16tof32(m.mc) * owx + f16tof32(m.md) * m.wx, boty = f16tof32(m.mc >> 16) * owx + f16tof32(m.md >> 16) * m.wx;
+        mx[1] = topx * owy + botx * m.wy;
+        my[1] = topy * owy + boty * m.wy;
+    }
+    l_post_core(g, x, y, m.fx, m.fy, mx, my, s, hh, oh);
 }
 
 float lpx(int xx) { return mad(opq((float)xx + 0.5f), P_rx, P_jx); }   // fused(x + 1/2, rx, jx)
 float lpy(int yy) { return mad(P_ry, opq((float)yy + 0.5f), P_jy); }   // fused(ry, y + 1/2, jy)
+
+// one column i of the 4 x 4 gather (taps j = -1 ... 2 for both rows of the pair), from the staged texels (STAGED) or loaded
+// per tap; the eight weights of the column are rounded to FP16 by one driver conversion
+template<bool STAGED>
+void gather_col(int i, half dx, int tb0, int rstride, int b, int ax, half v0[kLWin], half v1[kLWin], half vv0[kLWin],
+                half vv1[kLWin], inout LGather g0, inout LGather g1)
+{
+    const half u = dx + (half)(float)i;
+    const half uu = mulh(u, u);
+    v8f wv;
+#if LP_MORIG
+    wv.v[6] = 0.0f;
+    wv.v[7] = 0.0f;
+#endif
+    if (STAGED) {
+        // Read only kA/kB/kC (dwords 4..5) from LDS during weight evaluation so 24 texel VGPRs aren't live across exp2/cvt.
+        const int col_base = tb0 + (i + 1) * kTexDw;
+        [unroll] for (int j = -1; j <= kLWin - 2; ++j) {
+            const int base = col_base + (j + 1) * rstride
+#if LP_MUT == 2
+                             + (j == 2 && i == 2 ? kTexDw : 0)   // mutant 2: one tap reads the wrong texel
+#endif
+                             ;
+            uint tk[kTexDw];
+            tk[0] = 0u; tk[1] = 0u; tk[2] = 0u; tk[3] = 0u;
+            tk[4] = sh_tex[base + 4];
+            tk[5] = sh_tex[base + 5];
+            wv.v[2 * (j + 1)] = tap_weight(tk, uu, vv0[j + 1], mulh(u, v0[j + 1]));
+            wv.v[2 * (j + 1) + 1] = tap_weight(tk, uu, vv1[j + 1], mulh(u, v1[j + 1]));
+        }
+        const uint4 hw = wg_to_f16_ags(wv);
+        [unroll] for (int jj = 0; jj < kLWin; ++jj) {
+            const int base = col_base + jj * rstride
+#if LP_MUT == 2
+                             + (jj == 3 && i == 2 ? kTexDw : 0)
+#endif
+                             ;
+            uint tf[kTexDw];
+            [unroll] for (int d = 0; d < 5; ++d) tf[d] = sh_tex[base + d];
+            tf[5] = 0u;
+            const uint hp = jj == 0 ? hw.x : (jj == 1 ? hw.y : (jj == 2 ? hw.z : hw.w));
+            gather_acc(g0, tf, wv.v[2 * jj], hp & 0xffffu);
+            gather_acc(g1, tf, wv.v[2 * jj + 1], hp >> 16);
+        }
+    } else {
+        // Rare unstaged fallback (footprint > kStageCap): avoid keeping uint t[4][6] (24 VGPRs) live across the kernel!
+        [unroll] for (int j = -1; j <= kLWin - 2; ++j) {
+            uint tk[kTexDw];
+            load_texel_hw(clampi(b + j, 0, P_rh - 1) * P_rw + clampi(ax + i, 0, P_rw - 1), tk);
+            wv.v[2 * (j + 1)] = tap_weight(tk, uu, vv0[j + 1], mulh(u, v0[j + 1]));
+            wv.v[2 * (j + 1) + 1] = tap_weight(tk, uu, vv1[j + 1], mulh(u, v1[j + 1]));
+        }
+        const uint4 hw = wg_to_f16_ags(wv);
+        [unroll] for (int jj = 0; jj < kLWin; ++jj) {
+            uint tf[kTexDw];
+            load_texel_hw(clampi(b + jj - 1, 0, P_rh - 1) * P_rw + clampi(ax + i, 0, P_rw - 1), tf);
+            const uint hp = jj == 0 ? hw.x : (jj == 1 ? hw.y : (jj == 2 ? hw.z : hw.w));
+            gather_acc(g0, tf, wv.v[2 * jj], hp & 0xffffu);
+            gather_acc(g1, tf, wv.v[2 * jj + 1], hp >> 16);
+        }
+    }
+}
 
 #if LP_P12 && LP_LDR
 WG_KERNEL(l_post_recon_p12_ldr)
@@ -534,7 +641,9 @@ WG_KERNEL(l_post_recon)
     const bool staged = ncol > 0 && nrow > 0 && ncol <= kStageCap && nrow <= kStageCap && ncol * nrow <= kStageCap;
     if (staged) {   // wave-uniform rounds (the driver's conversion in load_texel_hw); lanes past the end repeat the last
         const int ntex = ncol * nrow;
+        const int wl = wg_uniform(lane & ~(kTexWave - 1));   // this wave's first lane (uniform)
         [loop] for (int base = 0; base < ntex; base += kThreads) {
+          [branch] if (base + wl < ntex) {   // a wave wholly past the end has nothing to store
             const int i = base + lane, ii = mini(i, ntex - 1);
             const int r = ii / ncol, c = ii - r * ncol;
             const int idx = clampi(r0 + r, 0, P_rh - 1) * P_rw + clampi(c0 + c, 0, P_rw - 1);
@@ -543,6 +652,7 @@ WG_KERNEL(l_post_recon)
             if (i < ntex) {
                 [unroll] for (int d = 0; d < kTexDw; ++d) sh_tex[i * kTexDw + d] = t[d];
             }
+          }
         }
     }
     GroupMemoryBarrierWithGroupSync();
@@ -579,31 +689,13 @@ WG_KERNEL(l_post_recon)
     // the staged texel's LDS index without per-tap multiplies: one base per lane, the row stride and the column
     // step wave-uniform (integer identity: ((b + j - r0) ncol + (ax + i - c0)) kTexDw)
     const int tb0 = ((b - 1 - r0) * ncol + (ax - 1 - c0)) * kTexDw, rstride = ncol * kTexDw;
-    [loop] for (int i = -1; i <= kLWin - 2; ++i) {
-        const half u = dx + (half)(float)i;
-        const half uu = mulh(u, u);
-        uint t[kLWin][kTexDw];
-        v8f wv;
-        [unroll] for (int j = -1; j <= kLWin - 2; ++j) {
-            if (staged) {
-                const int base = tb0 + (j + 1) * rstride + (i + 1) * kTexDw
-#if LP_MUT == 2
-                                 + (j == 2 && i == 2 ? kTexDw : 0)   // mutant 2: one tap reads the wrong texel
-#endif
-                                 ;
-                [unroll] for (int d = 0; d < kTexDw; ++d) t[j + 1][d] = sh_tex[base + d];
-            } else {
-                load_texel_hw(clampi(b + j, 0, P_rh - 1) * P_rw + clampi(ax + i, 0, P_rw - 1), t[j + 1]);
-            }
-            wv.v[2 * (j + 1)] = tap_weight(t[j + 1], uu, vv0[j + 1], mulh(u, v0[j + 1]));
-            wv.v[2 * (j + 1) + 1] = tap_weight(t[j + 1], uu, vv1[j + 1], mulh(u, v1[j + 1]));
-        }
-        const uint4 hw = wg_to_f16_ags(wv);
-        [unroll] for (int jj = 0; jj < kLWin; ++jj) {
-            const uint hp = jj == 0 ? hw.x : (jj == 1 ? hw.y : (jj == 2 ? hw.z : hw.w));
-            gather_acc(g0, t[jj], wv.v[2 * jj], hp & 0xffffu);
-            gather_acc(g1, t[jj], wv.v[2 * jj + 1], hp >> 16);
-        }
+    // the hot loop reads the staged texels; the unstaged fallback (a tile whose render footprint does not fit) is its own loop
+    [branch] if (staged) {
+        [loop] for (int i = -1; i <= (kLWin - 2); ++i)
+            gather_col<true>(i, dx, tb0, rstride, b, ax, v0, v1, vv0, vv1, g0, g1);
+    } else {
+        [loop] for (int i = -1; i <= kLWin - 2; ++i)
+            gather_col<false>(i, dx, tb0, rstride, b, ax, v0, v1, vv0, vv1, g0, g1);
     }
 
     // the two rows of the pair (wave-uniform: every lane runs both; a missing second row is not stored and adds +0 as
@@ -615,8 +707,12 @@ WG_KERNEL(l_post_recon)
         LGather g = g0;
         if (second) g = g1;
         float hh[3], oo[3];
-        finish_pixel(g, x, y0 + row, px, second ? py1 : py0, s, hh, oo);
+        const MotRaw mot = motion_load(px, second ? py1 : py0);
+        finish_pixel(g, x, y0 + row, mot, s, hh, oo);
         v8f cv;
+#if !LP_LDR && !LP_MORIG
+        float el[3];
+#endif
         [unroll] for (int ci = 0; ci < 3; ++ci) {
 #if LP_LDR
             // h(H^); the display code floor(clamp(fused(O^ N + 1/2), 0, N)), then h(code RN32(1 / N)) (one rounding or
@@ -625,8 +721,14 @@ WG_KERNEL(l_post_recon)
             const float k = asfloat(ci == 2 ? 0x3a802008u : 0x3a001002u);
             cv.v[ci] = opq(hh[ci]);
             cv.v[3 + ci] = opq(floor(clampf(mad(oo[ci], n, 0.5f), 0.0f, n)) * k);
+#elif LP_MORIG
+            // Spec 06 draft 6: full-history store rounds FP32 -> FP16 toward zero (RTZ; f32tof16 -> v_cvt_pkrtz_f16_f32,
+            // matching HIP WG_LP_M wg_h2). Display channels stay RNE via wg_to_f16_ags.
+            cv.v[ci] = 0.0f;
+            cv.v[3 + ci] = opq(clampf(enc_e(oo[ci]), 0.0f, kDisplayMax));
 #else
-            cv.v[ci] = mul_odd(kEncK, enc_log(hh[ci]));
+            el[ci] = enc_log(hh[ci]);
+            cv.v[ci] = mul_odd(kEncK, el[ci]);
             cv.v[3 + ci] = opq(clampf(enc_e(oo[ci]), 0.0f, kDisplayMax));
 #endif
         }
@@ -637,12 +739,17 @@ WG_KERNEL(l_post_recon)
         if (and(active, or(!second, has1))) {
 #if LP_LDR
             const uint q0 = hc.x & 0xffffu, q1 = hc.x >> 16, q2 = hc.y & 0xffffu;
-#else
-            const uint q0 = mul_zero(kEncK, enc_log(hh[0])) ? 0u : (hc.x & 0xffffu);
-            const uint q1 = mul_zero(kEncK, enc_log(hh[1])) ? 0u : (hc.x >> 16);
-            const uint q2 = mul_zero(kEncK, enc_log(hh[2])) ? 0u : (hc.y & 0xffffu);
-#endif
             wg_st64(hist_out, (uint)(y * P_dw + x) * 8u, uint2(q0 | (q1 << 16), q2));
+#elif LP_MORIG
+            const uint q01 = wg_h2(opq(enc_e(hh[0])), opq(enc_e(hh[1])));
+            const uint q2 = f32tof16(opq(enc_e(hh[2])));
+            wg_st64(hist_out, (uint)(y * P_dw + x) * 8u, uint2(q01, q2));
+#else
+            const uint q0 = mul_zero_k(el[0]) ? 0u : (hc.x & 0xffffu);
+            const uint q1 = mul_zero_k(el[1]) ? 0u : (hc.x >> 16);
+            const uint q2 = mul_zero_k(el[2]) ? 0u : (hc.y & 0xffffu);
+            wg_st64(hist_out, (uint)(y * P_dw + x) * 8u, uint2(q0 | (q1 << 16), q2));
+#endif
             const int di = y * pitch + x;
             wg_st16(display, (uint)di * 2u, hc.y >> 16);
             wg_st16(display, (uint)(plane + di) * 2u, hc.z & 0xffffu);
