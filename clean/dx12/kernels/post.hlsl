@@ -286,10 +286,8 @@ TexF tex_features(uint dw)   // r2_features of the texel at dword dw
     return f;
 }
 
-// 8-byte arena loads with their alignment made visible to the driver: RWByteAddressBuffer.Load2 / Load4 at a computed
-// offset is known to be 4-byte aligned only, so each became two / four global_load_b32. The history (hist_prev) and the
-// A8 features are the runtime's own allocations (256-byte aligned) and every offset formed on them here is a multiple of
-// 8 bytes, so clearing the address's low 3 bits changes no address; the driver then issues global_load_b64.
+// 8-byte arena loads: mask the 256-byte-aligned base pointers once at the scalar level (keeping 8-byte alignment
+// provable for RADV/ACO without emitting per-load v_and_b32 or blocking immediate offset folding on AMD DX12).
 uint2 ld64_a8(uint a) { return wg_mem.Load2(a & ~7u); }
 uint4 ld128_a8(uint a) { return wg_mem.Load4(a & ~7u); }
 
@@ -307,7 +305,7 @@ TfRaw tf_fetch(int idx, int col, int row PD_P)
 #else
     t.c = wg_ld4f(color, ui * 16u);
 #endif
-    uint2 d = ld64_a8(A8 + ui * 8u);
+    uint2 d = wg_mem.Load2((A8 & ~7u) + ui * 8u);
     t.d0 = d.x;
     t.d1 = d.y;
     t.c01 = wg_ld32(C4, ui * 4u);
@@ -467,26 +465,27 @@ float3 history_cr_span(float qx, float qy)
         // lshl_add + one mad_u24 (iy in [1, P_dh - 3] and pitch = 8 P_dw < 2^24, so the 24-bit product is the full one)
         // (the constant opaque, g_z: the driver would otherwise split it again into its parts, one add each)
 #if WG_POST_CUTS
-        uint b0 = mul24((uint)iy, pitch) + ((uint)ix * 8u + ((hist_prev - 8u - pitch) ^ g_z));
+        uint b0 = (mul24((uint)iy, pitch) + ((uint)ix * 8u + (((hist_prev & ~7u) - 8u - pitch) ^ g_z))) & ~7u;
 #else
-        uint b0 = hist_prev + (uint)(ix - 1) * 8u + mul24((uint)(iy - 1), pitch);
+        uint b0 = (hist_prev & ~7u) + (uint)(ix - 1) * 8u + mul24((uint)(iy - 1), pitch);
 #endif
 #if defined(OP_POST_MUTANT) && OP_POST_MUTANT == 4   // test-only mutant (byte check must catch it): history base +8
         b0 += 8u;
 #endif
         const uint b1 = b0 + pitch, b2 = b0 + 2u * pitch, b3 = b0 + 3u * pitch;
-        const uint4 a0 = ld128_a8(b0 + 8u), a10 = ld128_a8(b1), a11 = ld128_a8(b1 + 16u);
-        const uint4 a20 = ld128_a8(b2), a21 = ld128_a8(b2 + 16u), a3 = ld128_a8(b3 + 8u);
+        const uint4 a0 = wg_mem.Load4(b0 + 8u), a10 = wg_mem.Load4(b1), a11 = wg_mem.Load4(b1 + 16u);
+        const uint4 a20 = wg_mem.Load4(b2), a21 = wg_mem.Load4(b2 + 16u), a3 = wg_mem.Load4(b3 + 8u);
         return cr_sum(a0.xy, a0.zw, a10.xy, a10.zw, a11.xy, a11.zw, a20.xy, a20.zw, a21.xy, a21.zw, a3.xy, a3.zw,
                       cr_weights(tx - fx0), cr_weights(ty - fy0));
     }
+    const uint hp8 = hist_prev & ~7u;
     const uint ro0 = mul24((uint)clampi(iy - 1, 0, P_dh - 1), pitch), ro1 = mul24((uint)clampi(iy, 0, P_dh - 1), pitch);
     const uint ro2 = mul24((uint)clampi(iy + 1, 0, P_dh - 1), pitch), ro3 = mul24((uint)clampi(iy + 2, 0, P_dh - 1), pitch);
-    const uint c0 = hist_prev + (uint)clampi(ix - 1, 0, P_dw - 1) * 8u, c1 = hist_prev + (uint)clampi(ix, 0, P_dw - 1) * 8u;
-    const uint c2 = hist_prev + (uint)clampi(ix + 1, 0, P_dw - 1) * 8u, c3 = hist_prev + (uint)clampi(ix + 2, 0, P_dw - 1) * 8u;
-    return cr_sum(ld64_a8(ro0 + c1), ld64_a8(ro0 + c2), ld64_a8(ro1 + c0), ld64_a8(ro1 + c1),
-                  ld64_a8(ro1 + c2), ld64_a8(ro1 + c3), ld64_a8(ro2 + c0), ld64_a8(ro2 + c1),
-                  ld64_a8(ro2 + c2), ld64_a8(ro2 + c3), ld64_a8(ro3 + c1), ld64_a8(ro3 + c2),
+    const uint c0 = hp8 + (uint)clampi(ix - 1, 0, P_dw - 1) * 8u, c1 = hp8 + (uint)clampi(ix, 0, P_dw - 1) * 8u;
+    const uint c2 = hp8 + (uint)clampi(ix + 1, 0, P_dw - 1) * 8u, c3 = hp8 + (uint)clampi(ix + 2, 0, P_dw - 1) * 8u;
+    return cr_sum(wg_mem.Load2(ro0 + c1), wg_mem.Load2(ro0 + c2), wg_mem.Load2(ro1 + c0), wg_mem.Load2(ro1 + c1),
+                  wg_mem.Load2(ro1 + c2), wg_mem.Load2(ro1 + c3), wg_mem.Load2(ro2 + c0), wg_mem.Load2(ro2 + c1),
+                  wg_mem.Load2(ro2 + c2), wg_mem.Load2(ro2 + c3), wg_mem.Load2(ro3 + c1), wg_mem.Load2(ro3 + c2),
                   cr_weights(tx - fx0), cr_weights(ty - fy0));
 }
 
